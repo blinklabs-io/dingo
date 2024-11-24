@@ -162,9 +162,16 @@ func (ls *LedgerState) processBlockEvents() error {
 		txn := ls.db.Transaction(true)
 		err := txn.Do(func(txn *database.Txn) error {
 			for _, evt := range ls.chainsyncBlockEvents[batchOffset : batchOffset+batchSize] {
+				//tmpStart := time.Now()
 				if err := ls.processBlockEvent(txn, evt); err != nil {
 					return err
 				}
+				/*
+					tmpDiff := time.Since(tmpStart)
+					if tmpDiff >= 10*time.Millisecond {
+						fmt.Printf("block %x took %s to process\n", evt.Point.Hash, tmpDiff)
+					}
+				*/
 			}
 			return nil
 		})
@@ -287,13 +294,20 @@ func (ls *LedgerState) processBlockEvent(
 	}
 	// Process transactions
 	for _, tx := range e.Block.Transactions() {
+		//tmpStart := time.Now()
 		// Process consumed UTxOs
-		for _, consumed := range tx.Consumed() {
-			if err := ls.consumeUtxo(txn, consumed, e.Point.Slot); err != nil {
-				return fmt.Errorf("remove consumed UTxO: %w", err)
-			}
+		if err := models.UtxosConsumeByRefTxn(txn, tx.Consumed(), e.Point.Slot); err != nil {
+			return err
 		}
+		/*
+			for _, consumed := range tx.Consumed() {
+				if err := ls.consumeUtxo(txn, consumed, e.Point.Slot); err != nil {
+					return fmt.Errorf("remove consumed UTxO: %w", err)
+				}
+			}
+		*/
 		// Process produced UTxOs
+		var producedUtxos []models.Utxo
 		for _, produced := range tx.Produced() {
 			outAddr := produced.Output.Address()
 			tmpUtxo := models.Utxo{
@@ -304,9 +318,18 @@ func (ls *LedgerState) processBlockEvent(
 				StakingKey: outAddr.StakeKeyHash().Bytes(),
 				Cbor:       produced.Output.Cbor(),
 			}
-			if err := ls.addUtxo(txn, tmpUtxo); err != nil {
-				return fmt.Errorf("add produced UTxO: %w", err)
-			}
+			producedUtxos = append(
+				producedUtxos,
+				tmpUtxo,
+			)
+			/*
+				if err := ls.addUtxo(txn, tmpUtxo); err != nil {
+					return fmt.Errorf("add produced UTxO: %w", err)
+				}
+			*/
+		}
+		if err := models.UtxosCreate(txn, producedUtxos); err != nil {
+			return err
 		}
 		// XXX: generate event for each TX/UTxO?
 		// Protocol parameter updates
@@ -327,6 +350,12 @@ func (ls *LedgerState) processBlockEvent(
 		if err := ls.processTransactionCertificates(txn, e.Point, tx); err != nil {
 			return err
 		}
+		/*
+			tmpDiff := time.Since(tmpStart)
+			if tmpDiff > 1*time.Millisecond {
+				fmt.Printf("TX %s took %s\n", tx.Hash(), tmpDiff)
+			}
+		*/
 	}
 	// Generate event
 	ls.config.EventBus.Publish(

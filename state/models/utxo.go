@@ -59,6 +59,47 @@ func (u *Utxo) loadCbor(txn *database.Txn) error {
 	return nil
 }
 
+func UtxoCreate(
+	txn *database.Txn,
+	utxo Utxo,
+) error {
+	return UtxosCreate(
+		txn,
+		[]Utxo{
+			utxo,
+		},
+	)
+}
+
+func UtxosCreate(
+	txn *database.Txn,
+	utxos []Utxo,
+) error {
+	if len(utxos) == 0 {
+		return nil
+	}
+	// Add UTxOs to blob DB
+	for _, utxo := range utxos {
+		key := UtxoBlobKey(utxo.TxId, utxo.OutputIdx)
+		err := txn.Blob().Set(key, utxo.Cbor)
+		if err != nil {
+			return err
+		}
+	}
+	// Add to metadata DB
+	//tmpStart := time.Now()
+	if result := txn.Metadata().Debug().Create(&utxos); result.Error != nil {
+		return result.Error
+	}
+	/*
+		tmpDiff := time.Since(tmpStart)
+		if tmpDiff > 1*time.Millisecond {
+			fmt.Printf("UTxO (metadata) added in %s\n", tmpDiff)
+		}
+	*/
+	return nil
+}
+
 func UtxoByRef(
 	db database.Database,
 	txId []byte,
@@ -89,6 +130,40 @@ func UtxoByRefTxn(
 		return tmpUtxo, err
 	}
 	return tmpUtxo, nil
+}
+
+func UtxosConsumeByRefTxn(
+	txn *database.Txn,
+	utxoRefs []ledger.TransactionInput,
+	slot uint64,
+) error {
+	var tmpRefs [][]any
+	for _, utxoRef := range utxoRefs {
+		tmpRefs = append(
+			tmpRefs,
+			[]any{
+				utxoRef.Id().Bytes(),
+				utxoRef.Index(),
+			},
+		)
+	}
+	result := txn.Metadata().Model(&Utxo{}).
+		Where(
+			"(tx_id, output_idx) IN ?",
+			tmpRefs,
+		).Update("deleted_slot", slot)
+	if result.Error != nil {
+		return result.Error
+	}
+	/*
+		for _, utxoRef := range utxoRefs {
+			query = query.Where(
+				"(tx_id, output_idx) IN ?",
+				utxoRefs,
+			)
+		}
+	*/
+	return nil
 }
 
 func UtxosByAddress(db database.Database, addr ledger.Address) ([]Utxo, error) {
