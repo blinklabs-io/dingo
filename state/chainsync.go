@@ -16,11 +16,16 @@ package state
 
 import (
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/state/models"
+
+	"github.com/blinklabs-io/gouroboros/ledger"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
 const (
@@ -32,9 +37,23 @@ const (
 	blockfetchBusyTimeout = 5 * time.Second
 )
 
+type chainsyncState struct {
+	sync.Mutex
+	headerPoints       []ocommon.Point
+	blockEvents        []BlockfetchEvent
+	blockfetchBusy     bool
+	blockfetchBusyTime time.Time
+	blockfetchWaiting  bool
+	// Temporary holding space for block batch objects
+	tmpBlocks        []models.Block
+	tmpProducedUtxos []models.Utxo
+	tmpConsumedUtxos []ledger.TransactionInput
+	tmpBlobKeys      map[string][]byte
+}
+
 func (ls *LedgerState) handleEventChainsync(evt event.Event) {
-	ls.chainsyncMutex.Lock()
-	defer ls.chainsyncMutex.Unlock()
+	ls.chainsyncState.Lock()
+	defer ls.chainsyncState.Unlock()
 	e := evt.Data.(ChainsyncEvent)
 	if e.Rollback {
 		if err := ls.handleEventChainsyncRollback(e); err != nil {
@@ -58,8 +77,8 @@ func (ls *LedgerState) handleEventChainsync(evt event.Event) {
 }
 
 func (ls *LedgerState) handleEventBlockfetch(evt event.Event) {
-	ls.chainsyncMutex.Lock()
-	defer ls.chainsyncMutex.Unlock()
+	ls.chainsyncState.Lock()
+	defer ls.chainsyncState.Unlock()
 	e := evt.Data.(BlockfetchEvent)
 	if e.BatchDone {
 		if err := ls.handleEventBlockfetchBatchDone(e); err != nil {
@@ -89,23 +108,23 @@ func (ls *LedgerState) handleEventChainsyncRollback(e ChainsyncEvent) error {
 
 func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 	// Add to cached header points
-	ls.chainsyncHeaderPoints = append(
-		ls.chainsyncHeaderPoints,
+	ls.chainsyncState.headerPoints = append(
+		ls.chainsyncState.headerPoints,
 		e.Point,
 	)
 	// Wait for additional block headers before fetching block bodies if we're
 	// far enough out from tip
 	if e.Point.Slot < e.Tip.Point.Slot &&
 		(e.Tip.Point.Slot-e.Point.Slot > blockfetchBatchSlotThreshold) &&
-		len(ls.chainsyncHeaderPoints) < blockfetchBatchSize {
+		len(ls.chainsyncState.headerPoints) < blockfetchBatchSize {
 		return nil
 	}
 	// Don't start fetch if there's already one in progress
-	if ls.chainsyncBlockfetchBusy {
+	if ls.chainsyncState.blockfetchBusy {
 		// Clear busy flag on timeout
-		if time.Since(ls.chainsyncBlockfetchBusyTime) > blockfetchBusyTimeout {
-			ls.chainsyncBlockfetchBusy = false
-			ls.chainsyncBlockfetchWaiting = false
+		if time.Since(ls.chainsyncState.blockfetchBusyTime) > blockfetchBusyTimeout {
+			ls.chainsyncState.blockfetchBusy = false
+			ls.chainsyncState.blockfetchWaiting = false
 			ls.config.Logger.Warn(
 				fmt.Sprintf(
 					"blockfetch operation timed out after %s",
@@ -116,32 +135,32 @@ func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 			)
 			return nil
 		}
-		ls.chainsyncBlockfetchWaiting = true
+		ls.chainsyncState.blockfetchWaiting = true
 		return nil
 	}
 	// Request current bulk range
 	err := ls.config.BlockfetchRequestRangeFunc(
 		e.ConnectionId,
-		ls.chainsyncHeaderPoints[0],
-		ls.chainsyncHeaderPoints[len(ls.chainsyncHeaderPoints)-1],
+		ls.chainsyncState.headerPoints[0],
+		ls.chainsyncState.headerPoints[len(ls.chainsyncState.headerPoints)-1],
 	)
 	if err != nil {
 		return err
 	}
-	ls.chainsyncBlockfetchBusy = true
-	ls.chainsyncBlockfetchBusyTime = time.Now()
+	ls.chainsyncState.blockfetchBusy = true
+	ls.chainsyncState.blockfetchBusyTime = time.Now()
 	// Reset cached header points
-	ls.chainsyncHeaderPoints = nil
+	ls.chainsyncState.headerPoints = nil
 	return nil
 }
 
 func (ls *LedgerState) handleEventBlockfetchBlock(e BlockfetchEvent) error {
-	ls.chainsyncBlockEvents = append(
-		ls.chainsyncBlockEvents,
+	ls.chainsyncState.blockEvents = append(
+		ls.chainsyncState.blockEvents,
 		e,
 	)
 	// Update busy time in order to detect fetch timeout
-	ls.chainsyncBlockfetchBusyTime = time.Now()
+	ls.chainsyncState.blockfetchBusyTime = time.Now()
 	return nil
 }
 
@@ -149,11 +168,12 @@ func (ls *LedgerState) processBlockEvents() error {
 	// XXX: move this into the loop?
 	ls.Lock()
 	defer ls.Unlock()
+	// TODO: remove batching here
 	batchOffset := 0
 	for {
 		batchSize := min(
 			10, // Chosen to stay well under badger transaction size limit
-			len(ls.chainsyncBlockEvents)-batchOffset,
+			len(ls.chainsyncState.blockEvents)-batchOffset,
 		)
 		if batchSize <= 0 {
 			break
@@ -161,10 +181,17 @@ func (ls *LedgerState) processBlockEvents() error {
 		// Start a transaction
 		txn := ls.db.Transaction(true)
 		err := txn.Do(func(txn *database.Txn) error {
-			for _, evt := range ls.chainsyncBlockEvents[batchOffset : batchOffset+batchSize] {
+			for _, evt := range ls.chainsyncState.blockEvents[batchOffset : batchOffset+batchSize] {
+				//tmpStart := time.Now()
 				if err := ls.processBlockEvent(txn, evt); err != nil {
 					return err
 				}
+				/*
+					tmpDiff := time.Since(tmpStart)
+					if tmpDiff >= 10*time.Millisecond {
+						fmt.Printf("block %x took %s to process\n", evt.Point.Hash, tmpDiff)
+					}
+				*/
 			}
 			return nil
 		})
@@ -173,7 +200,11 @@ func (ls *LedgerState) processBlockEvents() error {
 		}
 		batchOffset += batchSize
 	}
-	ls.chainsyncBlockEvents = nil
+	// Write batched data to DBs
+	if err := ls.flushBlockData(); err != nil {
+		return err
+	}
+	ls.chainsyncState.blockEvents = nil
 	ls.config.Logger.Info(
 		fmt.Sprintf(
 			"chain extended, new tip: %x at slot %d",
@@ -183,6 +214,68 @@ func (ls *LedgerState) processBlockEvents() error {
 		"component",
 		"ledger",
 	)
+	return nil
+}
+
+func (ls *LedgerState) flushBlockData() error {
+	lastBlock := ls.chainsyncState.tmpBlocks[len(ls.chainsyncState.tmpBlocks)-1]
+	// Write blob keys
+	// This has to be done separately from metadata entries due to transaction
+	// size limits
+	wb := ls.db.Blob().NewWriteBatch()
+	for k, v := range ls.chainsyncState.tmpBlobKeys {
+		if err := wb.Set([]byte(k), v); err != nil {
+			return err
+		}
+	}
+	if err := wb.Flush(); err != nil {
+		return err
+	}
+	// Write blocks, produced UTxOs, and consumed inputs
+	txn := ls.db.Transaction(true)
+	err := txn.Do(func(txn *database.Txn) error {
+		// Blocks
+		if len(ls.chainsyncState.tmpBlocks) > 0 {
+			if result := txn.Metadata().Create(&ls.chainsyncState.tmpBlocks); result.Error != nil {
+				return result.Error
+			}
+		}
+		// Produced UTxOs
+		if len(ls.chainsyncState.tmpProducedUtxos) > 0 {
+			if result := txn.Metadata().Create(&ls.chainsyncState.tmpProducedUtxos); result.Error != nil {
+				return result.Error
+			}
+		}
+		// Consumed UTxOs
+		if len(ls.chainsyncState.tmpConsumedUtxos) > 0 {
+			err := models.UtxosConsumeByRefTxn(
+				txn,
+				ls.chainsyncState.tmpConsumedUtxos,
+				// Use slot from last block in batch
+				ls.chainsyncState.tmpBlocks[len(ls.chainsyncState.tmpBlocks)-1].Slot,
+			)
+			if err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	// Update tip
+	ls.currentTip = ochainsync.Tip{
+		Point:       ocommon.NewPoint(lastBlock.Slot, lastBlock.Hash),
+		BlockNumber: lastBlock.Number,
+	}
+	// Update metrics
+	ls.metrics.blockNum.Set(float64(lastBlock.Number))
+	ls.metrics.slotNum.Set(float64(lastBlock.Slot))
+	ls.metrics.slotInEpoch.Set(float64(lastBlock.Slot - ls.currentEpoch.StartSlot))
+	// Reset buffers
+	ls.chainsyncState.tmpBlocks = nil
+	ls.chainsyncState.tmpProducedUtxos = nil
+	ls.chainsyncState.tmpConsumedUtxos = nil
 	return nil
 }
 
@@ -281,18 +374,41 @@ func (ls *LedgerState) processBlockEvent(
 			}
 		}
 	}
-	// Add block to database
-	if err := ls.addBlock(txn, tmpBlock); err != nil {
-		return fmt.Errorf("add block: %w", err)
+	// Add block to batch
+	ls.chainsyncState.tmpBlocks = append(
+		ls.chainsyncState.tmpBlocks,
+		tmpBlock,
+	)
+	blobKeyBlock := models.BlockBlobKey(e.Point.Slot, e.Point.Hash)
+	if ls.chainsyncState.tmpBlobKeys == nil {
+		ls.chainsyncState.tmpBlobKeys = make(map[string][]byte)
 	}
+	ls.chainsyncState.tmpBlobKeys[string(blobKeyBlock)] = tmpBlock.Cbor
+	/*
+		if err := ls.addBlock(txn, tmpBlock); err != nil {
+			return fmt.Errorf("add block: %w", err)
+		}
+	*/
 	// Process transactions
 	for _, tx := range e.Block.Transactions() {
+		//tmpStart := time.Now()
 		// Process consumed UTxOs
-		for _, consumed := range tx.Consumed() {
-			if err := ls.consumeUtxo(txn, consumed, e.Point.Slot); err != nil {
-				return fmt.Errorf("remove consumed UTxO: %w", err)
+		ls.chainsyncState.tmpConsumedUtxos = append(
+			ls.chainsyncState.tmpConsumedUtxos,
+			tx.Consumed()...,
+		)
+		/*
+			if err := models.UtxosConsumeByRefTxn(txn, tx.Consumed(), e.Point.Slot); err != nil {
+				return err
 			}
-		}
+		*/
+		/*
+			for _, consumed := range tx.Consumed() {
+				if err := ls.consumeUtxo(txn, consumed, e.Point.Slot); err != nil {
+					return fmt.Errorf("remove consumed UTxO: %w", err)
+				}
+			}
+		*/
 		// Process produced UTxOs
 		for _, produced := range tx.Produced() {
 			outAddr := produced.Output.Address()
@@ -304,10 +420,23 @@ func (ls *LedgerState) processBlockEvent(
 				StakingKey: outAddr.StakeKeyHash().Bytes(),
 				Cbor:       produced.Output.Cbor(),
 			}
-			if err := ls.addUtxo(txn, tmpUtxo); err != nil {
-				return fmt.Errorf("add produced UTxO: %w", err)
-			}
+			ls.chainsyncState.tmpProducedUtxos = append(
+				ls.chainsyncState.tmpProducedUtxos,
+				tmpUtxo,
+			)
+			blobKeyUtxo := models.UtxoBlobKey(produced.Id.Id().Bytes(), produced.Id.Index())
+			ls.chainsyncState.tmpBlobKeys[string(blobKeyUtxo)] = tmpUtxo.Cbor
+			/*
+				if err := ls.addUtxo(txn, tmpUtxo); err != nil {
+					return fmt.Errorf("add produced UTxO: %w", err)
+				}
+			*/
 		}
+		/*
+			if err := models.UtxosCreate(txn, producedUtxos); err != nil {
+				return err
+			}
+		*/
 		// XXX: generate event for each TX/UTxO?
 		// Protocol parameter updates
 		if updateEpoch, paramUpdates := tx.ProtocolParameterUpdates(); updateEpoch > 0 {
@@ -327,6 +456,12 @@ func (ls *LedgerState) processBlockEvent(
 		if err := ls.processTransactionCertificates(txn, e.Point, tx); err != nil {
 			return err
 		}
+		/*
+			tmpDiff := time.Since(tmpStart)
+			if tmpDiff > 1*time.Millisecond {
+				fmt.Printf("TX %s took %s\n", tx.Hash(), tmpDiff)
+			}
+		*/
 	}
 	// Generate event
 	ls.config.EventBus.Publish(
@@ -348,24 +483,24 @@ func (ls *LedgerState) handleEventBlockfetchBatchDone(e BlockfetchEvent) error {
 		return err
 	}
 	// Check for pending block range request
-	if !ls.chainsyncBlockfetchWaiting ||
-		len(ls.chainsyncHeaderPoints) == 0 {
-		ls.chainsyncBlockfetchBusy = false
-		ls.chainsyncBlockfetchWaiting = false
+	if !ls.chainsyncState.blockfetchWaiting ||
+		len(ls.chainsyncState.headerPoints) == 0 {
+		ls.chainsyncState.blockfetchBusy = false
+		ls.chainsyncState.blockfetchWaiting = false
 		return nil
 	}
 	// Request waiting bulk range
 	err := ls.config.BlockfetchRequestRangeFunc(
 		e.ConnectionId,
-		ls.chainsyncHeaderPoints[0],
-		ls.chainsyncHeaderPoints[len(ls.chainsyncHeaderPoints)-1],
+		ls.chainsyncState.headerPoints[0],
+		ls.chainsyncState.headerPoints[len(ls.chainsyncState.headerPoints)-1],
 	)
 	if err != nil {
 		return err
 	}
-	ls.chainsyncBlockfetchBusyTime = time.Now()
-	ls.chainsyncBlockfetchWaiting = false
+	ls.chainsyncState.blockfetchBusyTime = time.Now()
+	ls.chainsyncState.blockfetchWaiting = false
 	// Reset cached header points
-	ls.chainsyncHeaderPoints = nil
+	ls.chainsyncState.headerPoints = nil
 	return nil
 }

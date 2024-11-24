@@ -133,7 +133,8 @@ func NewInMemory(logger *slog.Logger) (*InMemoryDatabase, error) {
 	metadataDb, err := gorm.Open(
 		sqlite.Open("file::memory:?cache=shared"),
 		&gorm.Config{
-			Logger: gormlogger.Discard,
+			Logger:          gormlogger.Discard,
+			CreateBatchSize: 1000,
 		},
 	)
 	if err != nil {
@@ -198,7 +199,8 @@ func NewPersistent(
 			fmt.Sprintf("file:%s?%s", metadataDbPath, metadataConnOpts),
 		),
 		&gorm.Config{
-			Logger: gormlogger.Discard,
+			Logger:          gormlogger.Discard,
+			CreateBatchSize: 1000,
 		},
 	)
 	if err != nil {
