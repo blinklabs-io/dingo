@@ -58,20 +58,15 @@ type BlockfetchRequestRangeFunc func(ouroboros.ConnectionId, ocommon.Point, ocom
 
 type LedgerState struct {
 	sync.RWMutex
-	chainsyncMutex              sync.Mutex
-	config                      LedgerStateConfig
-	db                          database.Database
-	timerCleanupConsumedUtxos   *time.Timer
-	currentPParams              any
-	currentEpoch                models.Epoch
-	currentEra                  eras.EraDesc
-	currentTip                  ochainsync.Tip
-	metrics                     stateMetrics
-	chainsyncHeaderPoints       []ocommon.Point
-	chainsyncBlockEvents        []BlockfetchEvent
-	chainsyncBlockfetchBusy     bool
-	chainsyncBlockfetchBusyTime time.Time
-	chainsyncBlockfetchWaiting  bool
+	config                    LedgerStateConfig
+	db                        database.Database
+	timerCleanupConsumedUtxos *time.Timer
+	currentPParams            any
+	currentEpoch              models.Epoch
+	currentEra                eras.EraDesc
+	currentTip                ochainsync.Tip
+	metrics                   stateMetrics
+	chainsyncState            chainsyncState
 }
 
 func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
@@ -441,6 +436,7 @@ func (ls *LedgerState) applyPParamUpdates(
 	return nil
 }
 
+/*
 func (ls *LedgerState) addUtxo(txn *database.Txn, utxo models.Utxo) error {
 	// Add UTxO to blob DB
 	key := models.UtxoBlobKey(utxo.TxId, utxo.OutputIdx)
@@ -478,6 +474,7 @@ func (ls *LedgerState) consumeUtxo(
 	}
 	return nil
 }
+*/
 
 func (ls *LedgerState) addBlock(txn *database.Txn, block models.Block) error {
 	// Add block to blob DB
