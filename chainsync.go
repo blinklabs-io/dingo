@@ -52,7 +52,6 @@ func (n *Node) chainsyncClientStart(connId ouroboros.ConnectionId) error {
 	if conn == nil {
 		return fmt.Errorf("failed to lookup connection ID: %s", connId.String())
 	}
-	oConn := conn.Conn
 	intersectPoints, err := n.ledgerState.RecentChainPoints(
 		chainsyncIntersectPointCount,
 	)
@@ -63,7 +62,7 @@ func (n *Node) chainsyncClientStart(connId ouroboros.ConnectionId) error {
 	if len(intersectPoints) == 0 {
 		if n.config.intersectTip {
 			// Start initial chainsync from current chain tip
-			tip, err := oConn.ChainSync().Client.GetCurrentTip()
+			tip, err := conn.ChainSync().Client.GetCurrentTip()
 			if err != nil {
 				return err
 			}
@@ -71,7 +70,7 @@ func (n *Node) chainsyncClientStart(connId ouroboros.ConnectionId) error {
 				intersectPoints,
 				tip.Point,
 			)
-			return oConn.ChainSync().Client.Sync(intersectPoints)
+			return conn.ChainSync().Client.Sync(intersectPoints)
 		} else if len(n.config.intersectPoints) > 0 {
 			// Start initial chainsync at specific point(s)
 			intersectPoints = append(
@@ -80,7 +79,7 @@ func (n *Node) chainsyncClientStart(connId ouroboros.ConnectionId) error {
 			)
 		}
 	}
-	return oConn.ChainSync().Client.Sync(intersectPoints)
+	return conn.ChainSync().Client.Sync(intersectPoints)
 }
 
 func (n *Node) chainsyncServerFindIntersect(

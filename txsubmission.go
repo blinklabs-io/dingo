@@ -52,8 +52,7 @@ func (n *Node) txsubmissionClientStart(connId ouroboros.ConnectionId) error {
 	if conn == nil {
 		return fmt.Errorf("failed to lookup connection ID: %s", connId.String())
 	}
-	oConn := conn.Conn
-	oConn.TxSubmission().Client.Init()
+	conn.TxSubmission().Client.Init()
 	return nil
 }
 

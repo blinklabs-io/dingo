@@ -24,6 +24,7 @@ import (
 	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/mempool"
+	"github.com/blinklabs-io/dingo/peergov"
 	"github.com/blinklabs-io/dingo/state"
 
 	ouroboros "github.com/blinklabs-io/gouroboros"
@@ -36,6 +37,7 @@ import (
 type Node struct {
 	config             Config
 	connManager        *connmanager.ConnectionManager
+	peerGov            *peergov.PeerGovernor
 	chainsyncState     *chainsync.State
 	eventBus           *event.EventBus
 	outboundConns      map[ouroboros.ConnectionId]outboundPeer
@@ -97,10 +99,18 @@ func (n *Node) Run() error {
 	if err := n.configureConnManager(); err != nil {
 		return err
 	}
-	// Start outbound connections
-	if n.config.topologyConfig != nil {
-		n.connManager.AddHostsFromTopology(n.config.topologyConfig)
+	// Configure peer governor
+	n.peerGov = peergov.NewPeerGovernor(
+		peergov.PeerGovernorConfig{
+			Logger:      n.config.logger,
+			EventBus:    n.eventBus,
+			ConnManager: n.connManager,
+		},
+	)
+	if err := n.peerGov.Start(); err != nil {
+		return err
 	}
+	// Start outbound connections
 	n.startOutboundConnections()
 
 	// Wait forever

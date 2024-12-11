@@ -98,8 +98,7 @@ func (n *Node) blockfetchClientRequestRange(
 	if conn == nil {
 		return fmt.Errorf("failed to lookup connection ID: %s", connId.String())
 	}
-	oConn := conn.Conn
-	if err := oConn.BlockFetch().Client.GetBlockRange(start, end); err != nil {
+	if err := conn.BlockFetch().Client.GetBlockRange(start, end); err != nil {
 		return err
 	}
 	return nil

@@ -15,13 +15,11 @@
 package connmanager
 
 import (
-	"fmt"
 	"io"
 	"log/slog"
 	"sync"
 
 	"github.com/blinklabs-io/dingo/event"
-	"github.com/blinklabs-io/dingo/topology"
 
 	ouroboros "github.com/blinklabs-io/gouroboros"
 )
@@ -29,45 +27,9 @@ import (
 // ConnectionManagerConnClosedFunc is a function that takes a connection ID and an optional error
 type ConnectionManagerConnClosedFunc func(ouroboros.ConnectionId, error)
 
-// ConnectionManagerTag represents the various tags that can be associated with a host or connection
-type ConnectionManagerTag uint16
-
-const (
-	ConnectionManagerTagNone ConnectionManagerTag = iota
-
-	ConnectionManagerTagHostLocalRoot
-	ConnectionManagerTagHostPublicRoot
-	ConnectionManagerTagHostBootstrapPeer
-	ConnectionManagerTagHostP2PLedger
-	ConnectionManagerTagHostP2PGossip
-
-	ConnectionManagerTagRoleInitiator
-	ConnectionManagerTagRoleResponder
-	// TODO: add more tags
-)
-
-func (c ConnectionManagerTag) String() string {
-	tmp := map[ConnectionManagerTag]string{
-		ConnectionManagerTagHostLocalRoot:     "HostLocalRoot",
-		ConnectionManagerTagHostPublicRoot:    "HostPublicRoot",
-		ConnectionManagerTagHostBootstrapPeer: "HostBootstrapPeer",
-		ConnectionManagerTagHostP2PLedger:     "HostP2PLedger",
-		ConnectionManagerTagHostP2PGossip:     "HostP2PGossip",
-		ConnectionManagerTagRoleInitiator:     "RoleInitiator",
-		ConnectionManagerTagRoleResponder:     "RoleResponder",
-		// TODO: add more tags to match those added above
-	}
-	ret, ok := tmp[c]
-	if !ok {
-		return "Unknown"
-	}
-	return ret
-}
-
 type ConnectionManager struct {
 	config           ConnectionManagerConfig
-	hosts            []ConnectionManagerHost
-	connections      map[ouroboros.ConnectionId]*ConnectionManagerConnection
+	connections      map[ouroboros.ConnectionId]*ouroboros.Connection
 	connectionsMutex sync.Mutex
 }
 
@@ -78,12 +40,6 @@ type ConnectionManagerConfig struct {
 	Listeners      []ListenerConfig
 }
 
-type ConnectionManagerHost struct {
-	Address string
-	Port    uint
-	Tags    map[ConnectionManagerTag]bool
-}
-
 func NewConnectionManager(cfg ConnectionManagerConfig) *ConnectionManager {
 	if cfg.Logger == nil {
 		cfg.Logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
@@ -92,7 +48,7 @@ func NewConnectionManager(cfg ConnectionManagerConfig) *ConnectionManager {
 	return &ConnectionManager{
 		config: cfg,
 		connections: make(
-			map[ouroboros.ConnectionId]*ConnectionManagerConnection,
+			map[ouroboros.ConnectionId]*ouroboros.Connection,
 		),
 	}
 }
@@ -104,70 +60,10 @@ func (c *ConnectionManager) Start() error {
 	return nil
 }
 
-func (c *ConnectionManager) AddHost(
-	address string,
-	port uint,
-	tags ...ConnectionManagerTag,
-) {
-	tmpTags := map[ConnectionManagerTag]bool{}
-	for _, tag := range tags {
-		tmpTags[tag] = true
-	}
-	cmHost := ConnectionManagerHost{
-		Address: address,
-		Port:    port,
-		Tags:    tmpTags,
-	}
-
-	c.config.Logger.Debug(
-		fmt.Sprintf(
-			"connmanager: adding host: %+v",
-			cmHost,
-		),
-	)
-
-	c.hosts = append(
-		c.hosts,
-		cmHost,
-	)
-}
-
-func (c *ConnectionManager) AddHostsFromTopology(
-	topologyConfig *topology.TopologyConfig,
-) {
-	for _, bootstrapPeer := range topologyConfig.BootstrapPeers {
-		c.AddHost(
-			bootstrapPeer.Address,
-			bootstrapPeer.Port,
-			ConnectionManagerTagHostBootstrapPeer,
-		)
-	}
-	for _, localRoot := range topologyConfig.LocalRoots {
-		for _, host := range localRoot.AccessPoints {
-			c.AddHost(
-				host.Address,
-				host.Port,
-				ConnectionManagerTagHostLocalRoot,
-			)
-		}
-	}
-	for _, publicRoot := range topologyConfig.PublicRoots {
-		for _, host := range publicRoot.AccessPoints {
-			c.AddHost(
-				host.Address,
-				host.Port,
-				ConnectionManagerTagHostPublicRoot,
-			)
-		}
-	}
-}
-
 func (c *ConnectionManager) AddConnection(conn *ouroboros.Connection) {
 	connId := conn.Id()
 	c.connectionsMutex.Lock()
-	c.connections[connId] = &ConnectionManagerConnection{
-		Conn: conn,
-	}
+	c.connections[connId] = conn
 	c.connectionsMutex.Unlock()
 	go func() {
 		err := <-conn.ErrorChan()
@@ -184,46 +80,8 @@ func (c *ConnectionManager) RemoveConnection(connId ouroboros.ConnectionId) {
 
 func (c *ConnectionManager) GetConnectionById(
 	connId ouroboros.ConnectionId,
-) *ConnectionManagerConnection {
+) *ouroboros.Connection {
 	c.connectionsMutex.Lock()
 	defer c.connectionsMutex.Unlock()
 	return c.connections[connId]
-}
-
-func (c *ConnectionManager) GetConnectionsByTags(
-	tags ...ConnectionManagerTag,
-) []*ConnectionManagerConnection {
-	var ret []*ConnectionManagerConnection
-	c.connectionsMutex.Lock()
-	for _, conn := range c.connections {
-		skipConn := false
-		for _, tag := range tags {
-			if _, ok := conn.Tags[tag]; !ok {
-				skipConn = true
-				break
-			}
-		}
-		if !skipConn {
-			ret = append(ret, conn)
-		}
-	}
-	c.connectionsMutex.Unlock()
-	return ret
-}
-
-type ConnectionManagerConnection struct {
-	Conn *ouroboros.Connection
-	Tags map[ConnectionManagerTag]bool
-}
-
-func (c *ConnectionManagerConnection) AddTags(tags ...ConnectionManagerTag) {
-	for _, tag := range tags {
-		c.Tags[tag] = true
-	}
-}
-
-func (c *ConnectionManagerConnection) RemoveTags(tags ...ConnectionManagerTag) {
-	for _, tag := range tags {
-		delete(c.Tags, tag)
-	}
 }
