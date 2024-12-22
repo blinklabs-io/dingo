@@ -104,7 +104,10 @@ func (n *Node) Run() error {
 			ConnManager: n.connManager,
 		},
 	)
-	n.eventBus.SubscribeFunc(peergov.OutboundConnectionEventType, n.handleOutboundConnEvent)
+	n.eventBus.SubscribeFunc(
+		peergov.OutboundConnectionEventType,
+		n.handleOutboundConnEvent,
+	)
 	if n.config.topologyConfig != nil {
 		n.peerGov.LoadTopologyConfig(n.config.topologyConfig)
 	}
@@ -231,7 +234,10 @@ func (n *Node) configureConnManager() error {
 		},
 	)
 	// Subscribe to connection closed events
-	n.eventBus.SubscribeFunc(connmanager.ConnectionClosedEventType, n.handleConnClosedEvent)
+	n.eventBus.SubscribeFunc(
+		connmanager.ConnectionClosedEventType,
+		n.handleConnClosedEvent,
+	)
 	// Start listeners
 	if err := n.connManager.Start(); err != nil {
 		return err
@@ -260,7 +266,11 @@ func (n *Node) handleOutboundConnEvent(evt event.Event) {
 	chainsyncClientConnId := n.chainsyncState.GetClientConnId()
 	if chainsyncClientConnId == nil {
 		if err := n.chainsyncClientStart(connId); err != nil {
-			n.config.logger.Error("failed to start chainsync client", "error", err)
+			n.config.logger.Error(
+				"failed to start chainsync client",
+				"error",
+				err,
+			)
 			return
 		}
 		n.chainsyncState.SetClientConnId(connId)

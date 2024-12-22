@@ -58,8 +58,14 @@ func NewPeerGovernor(cfg PeerGovernorConfig) *PeerGovernor {
 
 func (p *PeerGovernor) Start() error {
 	// Setup connmanager event listeners
-	p.config.EventBus.SubscribeFunc(connmanager.InboundConnectionEventType, p.handleInboundConnectionEvent)
-	p.config.EventBus.SubscribeFunc(connmanager.ConnectionClosedEventType, p.handleConnectionClosedEvent)
+	p.config.EventBus.SubscribeFunc(
+		connmanager.InboundConnectionEventType,
+		p.handleInboundConnectionEvent,
+	)
+	p.config.EventBus.SubscribeFunc(
+		connmanager.ConnectionClosedEventType,
+		p.handleConnectionClosedEvent,
+	)
 	// Start outbound connections
 	p.startOutboundConnections()
 	return nil

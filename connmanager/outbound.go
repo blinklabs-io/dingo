@@ -25,7 +25,9 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 )
 
-func (c *ConnectionManager) CreateOutboundConn(address string) (*ouroboros.Connection, error) {
+func (c *ConnectionManager) CreateOutboundConn(
+	address string,
+) (*ouroboros.Connection, error) {
 	t := otel.Tracer("")
 	if t != nil {
 		_, span := t.Start(context.TODO(), "create outbound connection")
