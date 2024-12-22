@@ -618,6 +618,7 @@ func (ls *LedgerState) GetIntersectPoint(
 ) (*ocommon.Point, error) {
 	tip := ls.Tip()
 	var ret ocommon.Point
+	foundOrigin := false
 	txn := ls.db.Transaction(false)
 	err := txn.Do(func(txn *database.Txn) error {
 		for _, point := range points {
@@ -627,6 +628,11 @@ func (ls *LedgerState) GetIntersectPoint(
 			}
 			// Ignore points with a slot earlier than an existing match
 			if point.Slot < ret.Slot {
+				continue
+			}
+			// Check for special origin point
+			if point.Slot == 0 && len(point.Hash) == 0 {
+				foundOrigin = true
 				continue
 			}
 			// Lookup block in metadata DB
@@ -646,7 +652,7 @@ func (ls *LedgerState) GetIntersectPoint(
 	if err != nil {
 		return nil, err
 	}
-	if ret.Slot > 0 {
+	if ret.Slot > 0 || foundOrigin {
 		return &ret, nil
 	}
 	return nil, nil
