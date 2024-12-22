@@ -143,6 +143,11 @@ func (n *Node) configureConnManager() error {
 			l.ConnectionOpts = append(
 				l.ConnectionOpts,
 				ouroboros.WithNetworkMagic(n.config.networkMagic),
+				ouroboros.WithChainSyncConfig(
+					ochainsync.NewConfig(
+						n.chainsyncServerConnOpts()...,
+					),
+				),
 				// TODO: add localtxsubmission
 				// TODO: add localstatequery
 				// TODO: add localtxmonitor
