@@ -40,22 +40,24 @@ func newChainIterator(
 	startPoint ocommon.Point,
 	inclusive bool,
 ) (*ChainIterator, error) {
-	// Lookup start block in metadata DB
-	tmpBlock, err := models.BlockByPoint(ls.db, startPoint)
-	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, ErrBlockNotFound
-		}
-		return nil, err
-	}
 	ci := &ChainIterator{
-		ls:          ls,
-		startPoint:  startPoint,
-		blockNumber: tmpBlock.Number,
+		ls:         ls,
+		startPoint: startPoint,
 	}
-	// Increment next block number is non-inclusive
-	if !inclusive {
-		ci.blockNumber++
+	// Lookup start block in metadata DB if not origin
+	if startPoint.Slot > 0 || len(startPoint.Hash) > 0 {
+		tmpBlock, err := models.BlockByPoint(ls.db, startPoint)
+		if err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil, ErrBlockNotFound
+			}
+			return nil, err
+		}
+		ci.blockNumber = tmpBlock.Number
+		// Increment next block number if non-inclusive
+		if !inclusive {
+			ci.blockNumber++
+		}
 	}
 	return ci, nil
 }
