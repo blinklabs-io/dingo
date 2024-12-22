@@ -196,7 +196,6 @@ func (p *PeerGovernor) createOutboundConnection(peer *Peer) {
 				peer.Address,
 				err,
 			),
-			"component", "network",
 		)
 		if peer.ReconnectDelay == 0 {
 			peer.ReconnectDelay = initialReconnectDelay
@@ -211,7 +210,6 @@ func (p *PeerGovernor) createOutboundConnection(peer *Peer) {
 				peer.ReconnectCount,
 				peer.Address,
 			),
-			"component", "network",
 		)
 		time.Sleep(peer.ReconnectDelay)
 	}
@@ -250,18 +248,18 @@ func (p *PeerGovernor) handleConnectionClosedEvent(evt event.Event) {
 				"unexpected connection failure: %s",
 				e.Error,
 			),
-			"component", "network",
 			"connection_id", e.ConnectionId.String(),
 		)
 	} else {
 		p.config.Logger.Info("connection closed",
-			"component", "network",
 			"connection_id", e.ConnectionId.String(),
 		)
 	}
 	peerIdx := p.peerIndexByConnId(e.ConnectionId)
 	if peerIdx != -1 {
 		p.peers[peerIdx].ConnectionId = nil
+		if p.peers[peerIdx].Source != PeerSourceInboundConn {
+			go p.createOutboundConnection(p.peers[peerIdx])
+		}
 	}
-	go p.createOutboundConnection(p.peers[peerIdx])
 }
