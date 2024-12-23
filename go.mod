@@ -1,9 +1,9 @@
 module github.com/blinklabs-io/dingo
 
-go 1.22.8
+go 1.22.9
 
 require (
-	github.com/blinklabs-io/gouroboros v0.105.1
+	github.com/blinklabs-io/gouroboros v0.105.2
 	github.com/blinklabs-io/ouroboros-mock v0.3.5
 	github.com/dgraph-io/badger/v4 v4.5.0
 	github.com/glebarez/sqlite v1.11.0
