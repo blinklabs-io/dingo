@@ -255,6 +255,16 @@ func (m *Mempool) GetTransaction(txHash string) (MempoolTransaction, bool) {
 	return *ret, true
 }
 
+func (m *Mempool) Transactions() []MempoolTransaction {
+	m.Lock()
+	defer m.Unlock()
+	ret := make([]MempoolTransaction, len(m.transactions))
+	for i := 0; i < len(m.transactions); i++ {
+		ret[i] = *m.transactions[i]
+	}
+	return ret
+}
+
 func (m *Mempool) getTransaction(txHash string) *MempoolTransaction {
 	for _, tx := range m.transactions {
 		if tx.Hash == txHash {
