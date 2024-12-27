@@ -78,6 +78,7 @@ func Run(logger *slog.Logger) error {
 				},
 			),
 			dingo.WithOutboundSourcePort(cfg.Port),
+			dingo.WithUtxorpcPort(cfg.UtxorpcPort),
 			// Enable metrics with default prometheus registry
 			dingo.WithPrometheusRegistry(prometheus.DefaultRegisterer),
 			// TODO: make this configurable

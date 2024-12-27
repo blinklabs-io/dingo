@@ -40,6 +40,7 @@ type Config struct {
 	network            string
 	networkMagic       uint32
 	outboundSourcePort uint
+	utxorpcPort        uint
 	peerSharing        bool
 	promRegistry       prometheus.Registerer
 	topologyConfig     *topology.TopologyConfig
@@ -179,6 +180,13 @@ func WithNetworkMagic(networkMagic uint32) ConfigOptionFunc {
 func WithOutboundSourcePort(port uint) ConfigOptionFunc {
 	return func(c *Config) {
 		c.outboundSourcePort = port
+	}
+}
+
+// WithUtxorpcPort specifies the port to use for the gRPC API listener. This defaults to port 9090
+func WithUtxorpcPort(port uint) ConfigOptionFunc {
+	return func(c *Config) {
+		c.utxorpcPort = port
 	}
 }
 
