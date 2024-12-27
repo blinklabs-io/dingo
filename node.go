@@ -26,6 +26,7 @@ import (
 	"github.com/blinklabs-io/dingo/mempool"
 	"github.com/blinklabs-io/dingo/peergov"
 	"github.com/blinklabs-io/dingo/state"
+	"github.com/blinklabs-io/dingo/utxorpc"
 
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	oblockfetch "github.com/blinklabs-io/gouroboros/protocol/blockfetch"
@@ -42,6 +43,7 @@ type Node struct {
 	eventBus       *event.EventBus
 	mempool        *mempool.Mempool
 	ledgerState    *state.LedgerState
+	utxorpc        *utxorpc.Utxorpc
 	shutdownFuncs  []func(context.Context) error
 }
 
@@ -112,6 +114,18 @@ func (n *Node) Run() error {
 		n.peerGov.LoadTopologyConfig(n.config.topologyConfig)
 	}
 	if err := n.peerGov.Start(); err != nil {
+		return err
+	}
+	// Configure UTxO RPC
+	n.utxorpc = utxorpc.NewUtxorpc(
+		utxorpc.UtxorpcConfig{
+			Logger:      n.config.logger,
+			EventBus:    n.eventBus,
+			LedgerState: n.ledgerState,
+			Mempool:     n.mempool,
+		},
+	)
+	if err := n.utxorpc.Start(); err != nil {
 		return err
 	}
 

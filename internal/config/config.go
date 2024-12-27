@@ -32,6 +32,7 @@ type Config struct {
 	Network       string
 	MetricsPort   uint `split_words:"true"`
 	Port          uint
+	UtxorpcPort   uint `split_words:"true"`
 	Topology      string
 }
 
@@ -44,6 +45,7 @@ var globalConfig = &Config{
 	Network:       "preview",
 	MetricsPort:   12798,
 	Port:          3001,
+	UtxorpcPort:   9090,
 	Topology:      "",
 }
 
