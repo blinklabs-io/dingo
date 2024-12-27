@@ -32,16 +32,15 @@ func (n *Node) localtxsubmissionServerConnOpts() []olocaltxsubmission.LocalTxSub
 
 func (n *Node) localtxsubmissionServerSubmitTx(
 	ctx olocaltxsubmission.CallbackContext,
-	tx any,
+	tx olocaltxsubmission.MsgSubmitTxTransaction,
 ) error {
-	tmpTx := tx.(olocaltxsubmission.MsgSubmitTxTransaction)
-	txBytes := tmpTx.Raw.Content.([]byte)
+	txBytes := tx.Raw.Content.([]byte)
 	txHash := lcommon.Blake2b256Hash(txBytes)
 	// Add transaction to mempool
 	err := n.mempool.AddTransaction(
 		mempool.MempoolTransaction{
 			Hash:     txHash.String(),
-			Type:     uint(tmpTx.EraId),
+			Type:     uint(tx.EraId),
 			Cbor:     txBytes,
 			LastSeen: time.Now(),
 		},
