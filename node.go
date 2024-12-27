@@ -31,6 +31,7 @@ import (
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	oblockfetch "github.com/blinklabs-io/gouroboros/protocol/blockfetch"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
+	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
 	olocaltxmonitor "github.com/blinklabs-io/gouroboros/protocol/localtxmonitor"
 	olocaltxsubmission "github.com/blinklabs-io/gouroboros/protocol/localtxsubmission"
 	opeersharing "github.com/blinklabs-io/gouroboros/protocol/peersharing"
@@ -167,6 +168,11 @@ func (n *Node) configureConnManager() error {
 						n.chainsyncServerConnOpts()...,
 					),
 				),
+				ouroboros.WithLocalStateQueryConfig(
+					olocalstatequery.NewConfig(
+						n.localstatequeryServerConnOpts()...,
+					),
+				),
 				ouroboros.WithLocalTxMonitorConfig(
 					olocaltxmonitor.NewConfig(
 						n.localtxmonitorServerConnOpts()...,
@@ -177,7 +183,6 @@ func (n *Node) configureConnManager() error {
 						n.localtxsubmissionServerConnOpts()...,
 					),
 				),
-				// TODO: add localstatequery
 			)
 		} else {
 			// Node-to-node config
