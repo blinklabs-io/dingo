@@ -18,9 +18,19 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
+
+	"connectrpc.com/connect"
+	"connectrpc.com/grpchealth"
+	"connectrpc.com/grpcreflect"
+	"github.com/utxorpc/go-codegen/utxorpc/v1alpha/query/queryconnect"
+	"github.com/utxorpc/go-codegen/utxorpc/v1alpha/submit/submitconnect"
+	"github.com/utxorpc/go-codegen/utxorpc/v1alpha/sync/syncconnect"
+	"github.com/utxorpc/go-codegen/utxorpc/v1alpha/watch/watchconnect"
+	"golang.org/x/net/http2"
+	"golang.org/x/net/http2/h2c"
 
 	"github.com/blinklabs-io/dingo/event"
-	"github.com/blinklabs-io/dingo/internal/utxorpc"
 	"github.com/blinklabs-io/dingo/mempool"
 	"github.com/blinklabs-io/dingo/state"
 )
@@ -55,12 +65,73 @@ func NewUtxorpc(cfg UtxorpcConfig) *Utxorpc {
 }
 
 func (u *Utxorpc) Start() error {
-	return utxorpc.Start(
+	u.config.Logger.Info(
 		fmt.Sprintf(
-			"%s:%d",
+			"starting gRPC listener on %s:%d",
 			u.config.Host,
 			u.config.Port,
 		),
-		u.config.Logger,
 	)
+	mux := http.NewServeMux()
+	compress1KB := connect.WithCompressMinBytes(1024)
+	queryPath, queryHandler := queryconnect.NewQueryServiceHandler(
+		&queryServiceServer{utxorpc: u},
+		compress1KB,
+	)
+	submitPath, submitHandler := submitconnect.NewSubmitServiceHandler(
+		&submitServiceServer{utxorpc: u},
+		compress1KB,
+	)
+	syncPath, syncHandler := syncconnect.NewSyncServiceHandler(
+		&syncServiceServer{utxorpc: u},
+		compress1KB,
+	)
+	watchPath, watchHandler := watchconnect.NewWatchServiceHandler(
+		&watchServiceServer{utxorpc: u},
+		compress1KB,
+	)
+	mux.Handle(queryPath, queryHandler)
+	mux.Handle(submitPath, submitHandler)
+	mux.Handle(syncPath, syncHandler)
+	mux.Handle(watchPath, watchHandler)
+	mux.Handle(
+		grpchealth.NewHandler(
+			grpchealth.NewStaticChecker(
+				queryconnect.QueryServiceName,
+				submitconnect.SubmitServiceName,
+				syncconnect.SyncServiceName,
+				watchconnect.WatchServiceName,
+			),
+			compress1KB,
+		),
+	)
+	mux.Handle(
+		grpcreflect.NewHandlerV1(
+			grpcreflect.NewStaticReflector(
+				queryconnect.QueryServiceName,
+				submitconnect.SubmitServiceName,
+				syncconnect.SyncServiceName,
+				watchconnect.WatchServiceName,
+			),
+			compress1KB,
+		),
+	)
+	mux.Handle(
+		grpcreflect.NewHandlerV1Alpha(
+			grpcreflect.NewStaticReflector(
+				queryconnect.QueryServiceName,
+				submitconnect.SubmitServiceName,
+				syncconnect.SyncServiceName,
+				watchconnect.WatchServiceName,
+			),
+			compress1KB,
+		),
+	)
+	// TODO: tls
+	err := http.ListenAndServe(
+		fmt.Sprintf("%s:%d", u.config.Host, u.config.Port),
+		// Use h2c so we can serve HTTP/2 without TLS
+		h2c.NewHandler(mux, &http2.Server{}),
+	)
+	return err
 }

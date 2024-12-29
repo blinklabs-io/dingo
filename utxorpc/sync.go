@@ -26,6 +26,7 @@ import (
 // syncServiceServer implements the SyncService API
 type syncServiceServer struct {
 	syncconnect.UnimplementedSyncServiceHandler
+	utxorpc *Utxorpc
 }
 
 // FetchBlock

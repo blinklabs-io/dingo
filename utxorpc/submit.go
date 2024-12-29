@@ -26,6 +26,7 @@ import (
 // submitServiceServer implements the SubmitService API
 type submitServiceServer struct {
 	submitconnect.UnimplementedSubmitServiceHandler
+	utxorpc *Utxorpc
 }
 
 // SubmitTx
