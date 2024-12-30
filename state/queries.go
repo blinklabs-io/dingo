@@ -24,12 +24,12 @@ func (ls *LedgerState) Query(query any) (any, error) {
 	switch q := query.(type) {
 	case *olocalstatequery.BlockQuery:
 		return ls.queryBlock(q)
-	// TODO
-	/*
-		case *olocalstatequery.SystemStartQuery:
-		case *olocalstatequery.ChainBlockNoQuery:
-		case *olocalstatequery.ChainPointQuery:
-	*/
+	case *olocalstatequery.SystemStartQuery:
+		return ls.querySystemStart()
+	case *olocalstatequery.ChainBlockNoQuery:
+		return ls.queryChainBlockNo()
+	case *olocalstatequery.ChainPointQuery:
+		return ls.queryChainPoint()
 	default:
 		return nil, fmt.Errorf("unsupported query type: %T", q)
 	}
@@ -46,6 +46,31 @@ func (ls *LedgerState) queryBlock(query *olocalstatequery.BlockQuery) (any, erro
 	}
 }
 
+func (ls *LedgerState) querySystemStart() (any, error) {
+	shelleyGenesis, err := ls.config.CardanoNodeConfig.ShelleyGenesis()
+	if err != nil {
+		return nil, err
+	}
+	ret := olocalstatequery.SystemStartResult{
+		Year:        shelleyGenesis.SystemStart.Year(),
+		Day:         shelleyGenesis.SystemStart.YearDay(),
+		Picoseconds: uint64(shelleyGenesis.SystemStart.Nanosecond() * 1000),
+	}
+	return ret, nil
+}
+
+func (ls *LedgerState) queryChainBlockNo() (any, error) {
+	ret := []any{
+		1, // TODO: figure out what this value is
+		ls.currentTip.BlockNumber,
+	}
+	return ret, nil
+}
+
+func (ls *LedgerState) queryChainPoint() (any, error) {
+	return ls.currentTip.Point, nil
+}
+
 func (ls *LedgerState) queryHardFork(query *olocalstatequery.HardForkQuery) (any, error) {
 	switch q := query.Query.(type) {
 	case *olocalstatequery.HardForkCurrentEraQuery:
@@ -60,6 +85,8 @@ func (ls *LedgerState) queryHardFork(query *olocalstatequery.HardForkQuery) (any
 func (ls *LedgerState) queryShelley(query *olocalstatequery.ShelleyQuery) (any, error) {
 	// TODO: make these era-specific
 	switch q := query.Query.(type) {
+	case *olocalstatequery.ShelleyEpochNoQuery:
+		return []any{ls.currentEpoch.EpochId}, nil
 	case *olocalstatequery.ShelleyCurrentProtocolParamsQuery:
 		return []any{ls.currentPParams}, nil
 	// TODO
