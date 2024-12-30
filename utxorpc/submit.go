@@ -16,11 +16,19 @@ package utxorpc
 
 import (
 	"context"
-	"log"
+	"encoding/hex"
+	"fmt"
+	"time"
 
 	"connectrpc.com/connect"
+	"github.com/blinklabs-io/gouroboros/ledger"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	submit "github.com/utxorpc/go-codegen/utxorpc/v1alpha/submit"
 	"github.com/utxorpc/go-codegen/utxorpc/v1alpha/submit/submitconnect"
+
+	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/mempool"
+	"github.com/blinklabs-io/dingo/state"
 )
 
 // submitServiceServer implements the SubmitService API
@@ -36,12 +44,73 @@ func (s *submitServiceServer) SubmitTx(
 ) (*connect.Response[submit.SubmitTxResponse], error) {
 	txRawList := req.Msg.GetTx() // []*AnyChainTx
 
-	log.Printf("Got a SubmitTx request with %d transactions", len(txRawList))
+	s.utxorpc.config.Logger.Info(
+		fmt.Sprintf(
+			"Got a SubmitTx request with %d transactions",
+			len(txRawList),
+		),
+	)
 	resp := &submit.SubmitTxResponse{}
+
+	// Loop through the transactions and add each to the mempool
+	errorList := make([]error, len(txRawList))
+	hasError := false
+	for i, txi := range txRawList {
+		txRawBytes := txi.GetRaw() // raw bytes
+		txHash := lcommon.Blake2b256Hash(txRawBytes)
+		txType, err := ledger.DetermineTransactionType(txRawBytes)
+		placeholderRef := []byte{}
+		if err != nil {
+			resp.Ref = append(resp.Ref, placeholderRef)
+			errorList[i] = err
+			s.utxorpc.config.Logger.Error(
+				fmt.Sprintf(
+					"failed decoding tx %d: %v",
+					i,
+					err,
+				),
+			)
+			hasError = true
+			continue
+		}
+		tx := mempool.MempoolTransaction{
+			Hash:     txHash.String(),
+			Type:     uint(txType),
+			Cbor:     txRawBytes,
+			LastSeen: time.Now(),
+		}
+		// Add transaction to mempool
+		err = s.utxorpc.config.Mempool.AddTransaction(tx)
+		if err != nil {
+			resp.Ref = append(resp.Ref, placeholderRef)
+			errorList[i] = fmt.Errorf("%s", err.Error())
+			s.utxorpc.config.Logger.Error(
+				fmt.Sprintf(
+					"failed to add tx %s to mempool: %s",
+					txHash.String(),
+					err,
+				),
+			)
+			hasError = true
+			continue
+		}
+		txHexBytes, err := hex.DecodeString(tx.Hash)
+		if err != nil {
+			resp.Ref = append(resp.Ref, placeholderRef)
+			errorList[i] = err
+			hasError = true
+			continue
+		}
+		resp.Ref = append(resp.Ref, txHexBytes)
+	}
+	if hasError {
+		return connect.NewResponse(resp), fmt.Errorf("%v", errorList)
+	}
 
 	return connect.NewResponse(resp), nil
 }
 
+// WaitForTx
 func (s *submitServiceServer) WaitForTx(
 	ctx context.Context,
 	req *connect.Request[submit.WaitForTxRequest],
@@ -49,7 +118,51 @@ func (s *submitServiceServer) WaitForTx(
 ) error {
 	ref := req.Msg.GetRef() // [][]byte
 
-	log.Printf("Received WaitForTx request with %d transactions", len(ref))
+	s.utxorpc.config.Logger.Info(
+		fmt.Sprintf(
+			"Received WaitForTx request with %d transactions",
+			len(ref),
+		),
+	)
+	s.utxorpc.config.EventBus.SubscribeFunc(
+		state.BlockfetchEventType,
+		func(evt event.Event) {
+			e := evt.Data.(state.BlockfetchEvent)
+			for _, tx := range e.Block.Transactions() {
+				for _, r := range ref {
+					refHash := hex.EncodeToString(r)
+					// Compare our hashes
+					if refHash == tx.Hash() {
+						// Send confirmation response
+						err := stream.Send(&submit.WaitForTxResponse{
+							Ref:   r,
+							Stage: submit.Stage_STAGE_CONFIRMED,
+						})
+						if err != nil {
+							if ctx.Err() != nil {
+								s.utxorpc.config.Logger.Warn(
+									"Client disconnected while sending response",
+									"error", ctx.Err(),
+								)
+								return
+							}
+							s.utxorpc.config.Logger.Error(
+								"Error sending response to client",
+								"transaction_hash", tx.Hash(),
+								"error", err,
+							)
+							return
+						}
+						s.utxorpc.config.Logger.Debug(
+							"Confirmation response sent",
+							"transaction_hash", tx.Hash(),
+						)
+						return // Stop processing after confirming the transaction
+					}
+				}
+			}
+		},
+	)
 	return nil
 }
 
@@ -59,8 +172,18 @@ func (s *submitServiceServer) ReadMempool(
 	req *connect.Request[submit.ReadMempoolRequest],
 ) (*connect.Response[submit.ReadMempoolResponse], error) {
 
-	log.Printf("Got a ReadMempool request")
+	s.utxorpc.config.Logger.Info("Got a ReadMempool request")
 	resp := &submit.ReadMempoolResponse{}
+
+	mempool := []*submit.TxInMempool{}
+	for _, tx := range s.utxorpc.config.Mempool.Transactions() {
+		record := &submit.TxInMempool{
+			NativeBytes: tx.Cbor,
+			Stage:       submit.Stage_STAGE_MEMPOOL,
+		}
+		mempool = append(mempool, record)
+	}
+	resp.Items = mempool
 
 	return connect.NewResponse(resp), nil
 }
@@ -75,10 +198,48 @@ func (s *submitServiceServer) WatchMempool(
 	predicate := req.Msg.GetPredicate() // Predicate
 	fieldMask := req.Msg.GetFieldMask()
 
-	log.Printf(
-		"Got a WatchMempool request with predicate %v and fieldMask %v",
-		predicate,
-		fieldMask,
+	s.utxorpc.config.Logger.Info(
+		fmt.Sprintf(
+			"Got a WatchMempool request with predicate %v and fieldMask %v",
+			predicate,
+			fieldMask,
+		),
 	)
-	return nil
+
+	// Start our forever loop
+	for {
+		// Match against mempool transactions
+		for _, memTx := range s.utxorpc.config.Mempool.Transactions() {
+			txRawBytes := memTx.Cbor
+			txType, err := ledger.DetermineTransactionType(txRawBytes)
+			if err != nil {
+				return err
+			}
+			tx, err := ledger.NewTransactionFromCbor(txType, txRawBytes)
+			if err != nil {
+				return err
+			}
+			cTx := tx.Utxorpc() // *cardano.Tx
+			resp := &submit.WatchMempoolResponse{}
+			record := &submit.TxInMempool{
+				NativeBytes: txRawBytes,
+				Stage:       submit.Stage_STAGE_MEMPOOL,
+			}
+			resp.Tx = record
+			if string(record.NativeBytes) == cTx.String() {
+				if predicate == nil {
+					err := stream.Send(resp)
+					if err != nil {
+						return err
+					}
+				} else {
+					// TODO: filter from all Predicate types
+					err := stream.Send(resp)
+					if err != nil {
+						return err
+					}
+				}
+			}
+		}
+	}
 }
