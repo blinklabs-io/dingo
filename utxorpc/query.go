@@ -26,6 +26,7 @@ import (
 // queryServiceServer implements the QueryService API
 type queryServiceServer struct {
 	queryconnect.UnimplementedQueryServiceHandler
+	utxorpc *Utxorpc
 }
 
 // ReadParams

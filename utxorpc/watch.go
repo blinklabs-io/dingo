@@ -26,6 +26,7 @@ import (
 // watchServiceServer implements the WatchService API
 type watchServiceServer struct {
 	watchconnect.UnimplementedWatchServiceHandler
+	utxorpc *Utxorpc
 }
 
 // WatchTx
