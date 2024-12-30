@@ -38,7 +38,7 @@ type Config struct {
 
 var globalConfig = &Config{
 	BindAddr:      "0.0.0.0",
-	CardanoConfig: "./configs/cardano/preview/config.json",
+	CardanoConfig: "./config/cardano/preview/config.json",
 	DatabasePath:  ".dingo",
 	SocketPath:    "dingo.socket",
 	IntersectTip:  false,
