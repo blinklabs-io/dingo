@@ -31,6 +31,7 @@ import (
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/prometheus/client_golang/prometheus"
@@ -670,6 +671,11 @@ func (ls *LedgerState) GetChainFromPoint(
 // Tip returns the current chain tip
 func (ls *LedgerState) Tip() ochainsync.Tip {
 	return ls.currentTip
+}
+
+// GetCurrentPParams returns the currentPParams value
+func (ls *LedgerState) GetCurrentPParams() lcommon.ProtocolParameters {
+	return ls.currentPParams.(lcommon.ProtocolParameters)
 }
 
 // UtxoByRef returns a single UTxO by reference
