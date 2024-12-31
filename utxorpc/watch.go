@@ -16,9 +16,11 @@ package utxorpc
 
 import (
 	"context"
-	"log"
+	"fmt"
 
 	"connectrpc.com/connect"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	"github.com/blinklabs-io/gouroboros/ledger"
 	watch "github.com/utxorpc/go-codegen/utxorpc/v1alpha/watch"
 	"github.com/utxorpc/go-codegen/utxorpc/v1alpha/watch/watchconnect"
 )
@@ -37,11 +39,107 @@ func (s *watchServiceServer) WatchTx(
 ) error {
 	predicate := req.Msg.GetPredicate() // Predicate
 	fieldMask := req.Msg.GetFieldMask()
+	intersect := req.Msg.GetIntersect() // []*BlockRef
 
-	log.Printf(
-		"Got a WatchTx request with predicate %v and fieldMask %v",
-		predicate,
-		fieldMask,
+	s.utxorpc.config.Logger.Info(
+		fmt.Sprintf(
+			"Got a WatchTx request with predicate %v and fieldMask %v and intersect %v",
+			predicate,
+			fieldMask,
+			intersect,
+		),
 	)
-	return nil
+
+	// Get our points
+	var points []ocommon.Point
+	if len(intersect) > 0 {
+		for _, blockRef := range intersect {
+			blockIdx := blockRef.GetIndex()
+			blockHash := blockRef.GetHash()
+			slot := uint64(blockIdx)
+			point := ocommon.NewPoint(slot, blockHash)
+			points = append(points, point)
+		}
+	} else {
+		point := s.utxorpc.config.LedgerState.Tip().Point
+		points = append(points, point)
+	}
+
+	// Get our starting point matching our chain
+	point, err := s.utxorpc.config.LedgerState.GetIntersectPoint(points)
+	if err != nil {
+		s.utxorpc.config.Logger.Error(
+			"failed to get points",
+			"error", err,
+		)
+		return err
+	}
+
+	// Create our chain iterator
+	chainIter, err := s.utxorpc.config.LedgerState.GetChainFromPoint(*point, false)
+	if err != nil {
+		s.utxorpc.config.Logger.Error(
+			"failed to get chain iterator",
+			"error", err,
+		)
+		return err
+	}
+
+	for {
+		// Check for available block
+		next, err := chainIter.Next(false)
+		if err != nil {
+			s.utxorpc.config.Logger.Error(
+				"failed to iterate chain",
+				"error", err,
+			)
+			return err
+		}
+		if next != nil {
+			// Get ledger.Block from bytes
+			blockBytes := next.Block.Cbor[:]
+			blockType, err := ledger.DetermineBlockType(blockBytes)
+			if err != nil {
+				s.utxorpc.config.Logger.Error(
+					"failed to get block type",
+					"error", err,
+				)
+				return err
+			}
+			block, err := ledger.NewBlockFromCbor(blockType, blockBytes)
+			if err != nil {
+				s.utxorpc.config.Logger.Error(
+					"failed to get block",
+					"error", err,
+				)
+				return err
+			}
+
+			// Loop through transactions
+			for _, tx := range block.Transactions() {
+				var act watch.AnyChainTx
+				actc := watch.AnyChainTx_Cardano{
+					Cardano: tx.Utxorpc(),
+				}
+				act.Chain = &actc
+				resp := &watch.WatchTxResponse{
+					Action: &watch.WatchTxResponse_Apply{
+						Apply: &act,
+					},
+				}
+				if predicate == nil {
+					err := stream.Send(resp)
+					if err != nil {
+						return err
+					}
+				} else {
+					// TODO: filter from all Predicate types
+					err := stream.Send(resp)
+					if err != nil {
+						return err
+					}
+				}
+			}
+		}
+	}
 }
