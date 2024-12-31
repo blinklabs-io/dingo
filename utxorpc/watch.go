@@ -87,7 +87,7 @@ func (s *watchServiceServer) WatchTx(
 
 	for {
 		// Check for available block
-		next, err := chainIter.Next(false)
+		next, err := chainIter.Next(true)
 		if err != nil {
 			s.utxorpc.config.Logger.Error(
 				"failed to iterate chain",
