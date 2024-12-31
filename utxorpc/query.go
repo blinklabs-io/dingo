@@ -15,10 +15,12 @@
 package utxorpc
 
 import (
+	"bytes"
 	"context"
-	"log"
+	"fmt"
 
 	"connectrpc.com/connect"
+	"github.com/blinklabs-io/gouroboros/ledger"
 	query "github.com/utxorpc/go-codegen/utxorpc/v1alpha/query"
 	"github.com/utxorpc/go-codegen/utxorpc/v1alpha/query/queryconnect"
 )
@@ -36,9 +38,30 @@ func (s *queryServiceServer) ReadParams(
 ) (*connect.Response[query.ReadParamsResponse], error) {
 	fieldMask := req.Msg.GetFieldMask()
 
-	log.Printf("Got a ReadParams request with fieldMask %v", fieldMask)
+	s.utxorpc.config.Logger.Info(
+		fmt.Sprintf(
+			"Got a ReadParams request with fieldMask %v",
+			fieldMask,
+		),
+	)
 	resp := &query.ReadParamsResponse{}
 
+	protoParams := s.utxorpc.config.LedgerState.GetCurrentPParams()
+
+	// Get chain point (slot and hash)
+	point := s.utxorpc.config.LedgerState.Tip().Point
+
+	// Set up response parameters
+	acpc := &query.AnyChainParams_Cardano{
+		Cardano: protoParams.Utxorpc(),
+	}
+	resp.LedgerTip = &query.ChainPoint{
+		Slot: point.Slot,
+		Hash: point.Hash,
+	}
+	resp.Values = &query.AnyChainParams{
+		Params: acpc,
+	}
 	return connect.NewResponse(resp), nil
 }
 
@@ -49,8 +72,57 @@ func (s *queryServiceServer) ReadUtxos(
 ) (*connect.Response[query.ReadUtxosResponse], error) {
 	keys := req.Msg.GetKeys() // []*TxoRef
 
-	log.Printf("Got a ReadUtxos request with keys %v", keys)
+	s.utxorpc.config.Logger.Info(
+		fmt.Sprintf("Got a ReadUtxos request with keys %v", keys),
+	)
 	resp := &query.ReadUtxosResponse{}
+
+	// Get UTxOs from ledger
+	for _, txo := range keys {
+		utxo, err := s.utxorpc.config.LedgerState.UtxoByRef(
+			txo.GetHash(),
+			txo.GetIndex(),
+		)
+		if err != nil {
+			return nil, err
+		}
+		var aud query.AnyUtxoData
+		ret, err := utxo.Decode()
+		if err != nil {
+			return nil, err
+		}
+		audc := query.AnyUtxoData_Cardano{
+			Cardano: ret.Utxorpc(),
+		}
+		aud.NativeBytes = utxo.Cbor
+		aud.TxoRef = txo
+
+		if audc.Cardano.Datum != nil {
+			// Check if Datum.Hash is all zeroes
+			isAllZeroes := true
+			for _, b := range audc.Cardano.Datum.Hash {
+				if b != 0 {
+					isAllZeroes = false
+					break
+				}
+			}
+			if isAllZeroes {
+				// No actual datum; set Datum to nil to omit it
+				audc.Cardano.Datum = nil
+			}
+		}
+		aud.ParsedState = &audc
+		resp.Items = append(resp.Items, &aud)
+	}
+
+	// Get chain point (slot and hash)
+	point := s.utxorpc.config.LedgerState.Tip().Point
+
+	// Set up response utxos
+	resp.LedgerTip = &query.ChainPoint{
+		Slot: point.Slot,
+		Hash: point.Hash,
+	}
 
 	return connect.NewResponse(resp), nil
 }
@@ -60,12 +132,162 @@ func (s *queryServiceServer) SearchUtxos(
 	ctx context.Context,
 	req *connect.Request[query.SearchUtxosRequest],
 ) (*connect.Response[query.SearchUtxosResponse], error) {
-	predicate := req.Msg.GetPredicate() // UtxoPredicate
+	predicate := req.Msg.GetPredicate() // *UtxoPredicate
+	startToken := req.Msg.GetStartToken() // string
+	maxItems := req.Msg.GetMaxItems() // int32
+	fieldMask := req.Msg.GetFieldMask()
 
-	log.Printf("Got a SearchUtxos request with predicate %v", predicate)
+	s.utxorpc.config.Logger.Info(
+		fmt.Sprintf(
+			"Got a SearchUtxos request with predicate %v, startToken %s, maxItems %d, and fieldMask %v",
+			predicate,
+			startToken,
+			maxItems,
+			fieldMask,
+		),
+	)
 	resp := &query.SearchUtxosResponse{}
 
+	// TODO: make this optional and create separate code paths
+	if predicate == nil {
+		return nil, fmt.Errorf("empty predicate: %v", predicate)
+	}
+
+	addressPattern := predicate.GetMatch().GetCardano().GetAddress()
+	assetPattern := predicate.GetMatch().GetCardano().GetAsset()
+
+	var addresses []ledger.Address
+	if addressPattern != nil {
+		// Handle Exact Address
+		exactAddressBytes := addressPattern.GetExactAddress()
+		if exactAddressBytes != nil {
+			var addr ledger.Address
+			err := addr.UnmarshalCBOR(exactAddressBytes)
+			if err != nil {
+				return nil, fmt.Errorf(
+					"failed to decode exact address: %w",
+					err,
+				)
+			}
+			addresses = append(addresses, addr)
+		}
+
+		// Handle Payment Part
+		paymentPart := addressPattern.GetPaymentPart()
+		if paymentPart != nil {
+			s.utxorpc.config.Logger.Info("PaymentPart is present, decoding...")
+			var paymentAddr ledger.Address
+			err := paymentAddr.UnmarshalCBOR(paymentPart)
+			if err != nil {
+				return nil, fmt.Errorf("failed to decode payment part: %w", err)
+			}
+			addresses = append(addresses, paymentAddr)
+		}
+
+		// Handle Delegation Part
+		delegationPart := addressPattern.GetDelegationPart()
+		if delegationPart != nil {
+			s.utxorpc.config.Logger.Info("DelegationPart is present, decoding...")
+			var delegationAddr ledger.Address
+			err := delegationAddr.UnmarshalCBOR(delegationPart)
+			if err != nil {
+				return nil, fmt.Errorf(
+					"failed to decode delegation part: %w",
+					err,
+				)
+			}
+			addresses = append(addresses, delegationAddr)
+		}
+	}
+
+	// Get UTxOs from ledger
+	for _, address := range addresses {
+		utxos, err := s.utxorpc.config.LedgerState.UtxosByAddress(address)
+		if err != nil {
+			return nil, err
+		}
+		for _, utxo := range utxos {
+			var aud query.AnyUtxoData
+			ret, err := utxo.Decode()
+			if err != nil {
+				return nil, err
+			}
+			audc := query.AnyUtxoData_Cardano{
+				Cardano: ret.Utxorpc(),
+			}
+			aud.NativeBytes = utxo.Cbor
+			aud.TxoRef = &query.TxoRef{
+				Hash:  utxo.TxId,
+				Index: utxo.OutputIdx,
+			}
+			if audc.Cardano.Datum != nil {
+				// Check if Datum.Hash is all zeroes
+				isAllZeroes := true
+				for _, b := range audc.Cardano.Datum.Hash {
+					if b != 0 {
+						isAllZeroes = false
+						break
+					}
+				}
+				if isAllZeroes {
+					// No actual datum; set Datum to nil to omit it
+					audc.Cardano.Datum = nil
+				}
+			}
+			aud.ParsedState = &audc
+
+			// If AssetPattern is specified, filter based on it
+			if assetPattern != nil {
+				assetFound := false
+				for _, multiasset := range audc.Cardano.Assets {
+					if bytes.Equal(multiasset.PolicyId, assetPattern.PolicyId) {
+						for _, asset := range multiasset.Assets {
+							if bytes.Equal(asset.Name, assetPattern.AssetName) {
+								assetFound = true
+								break
+							}
+						}
+					}
+					if assetFound {
+						break
+					}
+				}
+
+				// Asset not found; skip this UTxO
+				if !assetFound {
+					continue
+				}
+			}
+			resp.Items = append(resp.Items, &aud)
+		}
+	}
+	// Get chain point (slot and hash)
+	point := s.utxorpc.config.LedgerState.Tip().Point
+
+	resp.LedgerTip = &query.ChainPoint{
+		Slot: point.Slot,
+		Hash: point.Hash,
+	}
 	return connect.NewResponse(resp), nil
 }
 
-// StreamUtxos
+// ReadData
+func (s *queryServiceServer) ReadData(
+	ctx context.Context,
+	req *connect.Request[query.ReadDataRequest],
+) (*connect.Response[query.ReadDataResponse], error) {
+	keys := req.Msg.GetKeys() // [][]byte
+	fieldMask := req.Msg.GetFieldMask()
+
+	s.utxorpc.config.Logger.Info(
+		fmt.Sprintf(
+			"Got a ReadData request with keys %v and fieldMask %v",
+			keys,
+			fieldMask,
+		),
+	)
+	resp := &query.ReadDataResponse{}
+
+	// TODO: do the thing once #317 is resolved
+	return connect.NewResponse(resp), nil
+}
