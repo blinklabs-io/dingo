@@ -16,9 +16,11 @@ package utxorpc
 
 import (
 	"context"
-	"log"
+	"fmt"
 
 	"connectrpc.com/connect"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	"github.com/blinklabs-io/gouroboros/ledger"
 	sync "github.com/utxorpc/go-codegen/utxorpc/v1alpha/sync"
 	"github.com/utxorpc/go-codegen/utxorpc/v1alpha/sync/syncconnect"
 )
@@ -34,32 +36,49 @@ func (s *syncServiceServer) FetchBlock(
 	ctx context.Context,
 	req *connect.Request[sync.FetchBlockRequest],
 ) (*connect.Response[sync.FetchBlockResponse], error) {
-	ref := req.Msg.GetRef() // BlockRef
+	ref := req.Msg.GetRef() // []*BlockRef
 	fieldMask := req.Msg.GetFieldMask()
 
-	log.Printf(
-		"Got a FetchBlock request with ref %v and fieldMask %v",
-		ref,
-		fieldMask,
+	s.utxorpc.config.Logger.Info(
+		fmt.Sprintf(
+			"Got a FetchBlock request with ref %v and fieldMask %v",
+			ref,
+			fieldMask,
+		),
 	)
-
 	resp := &sync.FetchBlockResponse{}
-	// TODO: replace with something that works NtC
-	// for _, point := range points {
-	// 	log.Printf("Point Slot: %d, Hash: %x\n", point.Slot, point.Hash)
-	// 	block, err := oConn.BlockFetch().Client.GetBlock(
-	// 		ocommon.NewPoint(point.Slot, point.Hash),
-	// 	)
-	// 	if err != nil {
-	// 		return nil, err
-	// 	}
-	// 	var acb sync.AnyChainBlock
-	// 	var acbc sync.AnyChainBlock_Cardano
-	// 	ret := NewBlockFromBlock(block)
-	// 	acbc.Cardano = &ret
-	// 	acb.Chain = &acbc
-	// 	resp.Block = append(resp.Block, &acb)
-	// }
+
+	// Get our points
+	var points []ocommon.Point
+	if len(ref) > 0 {
+		for _, blockRef := range ref {
+			blockIdx := blockRef.GetIndex()
+			blockHash := blockRef.GetHash()
+			slot := uint64(blockIdx)
+			point := ocommon.NewPoint(slot, blockHash)
+			points = append(points, point)
+		}
+	} else {
+		point := s.utxorpc.config.LedgerState.Tip().Point
+		points = append(points, point)
+	}
+
+	for _, point := range points {
+		block, err := s.utxorpc.config.LedgerState.GetBlock(point)
+		if err != nil {
+			return nil, err
+		}
+		var acb sync.AnyChainBlock
+		ret, err := block.Decode()
+		if err != nil {
+			return nil, err
+		}
+		acbc := sync.AnyChainBlock_Cardano{
+			Cardano: ret.Utxorpc(),
+		}
+		acb.Chain = &acbc
+		resp.Block = append(resp.Block, &acb)
+	}
 
 	return connect.NewResponse(resp), nil
 }
@@ -69,19 +88,57 @@ func (s *syncServiceServer) DumpHistory(
 	ctx context.Context,
 	req *connect.Request[sync.DumpHistoryRequest],
 ) (*connect.Response[sync.DumpHistoryResponse], error) {
-	startToken := req.Msg.GetStartToken() // BlockRef
-	maxItems := req.Msg.GetMaxItems()
+	startToken := req.Msg.GetStartToken() // *BlockRef
+	maxItems := req.Msg.GetMaxItems() // uint32
 	fieldMask := req.Msg.GetFieldMask()
 
-	log.Printf(
-		"Got a DumpHistory request with token %v and maxItems %d and fieldMask %v",
-		startToken,
-		maxItems,
-		fieldMask,
+	s.utxorpc.config.Logger.Info(
+		fmt.Sprintf(
+			"Got a DumpHistory request with token %v and maxItems %d and fieldMask %v",
+			startToken,
+			maxItems,
+			fieldMask,
+		),
 	)
-
 	resp := &sync.DumpHistoryResponse{}
-	// TODO: the thing
+
+	// Get our points
+	var points []ocommon.Point
+	if maxItems > 0 {
+		tmpPoints, err := s.utxorpc.config.LedgerState.RecentChainPoints(int(maxItems))
+		if err != nil {
+			return nil, err
+		}
+		points = tmpPoints
+	} else {
+		point := s.utxorpc.config.LedgerState.Tip().Point
+		points = append(points, point)
+	}
+	// TODO: make this work
+	// if startToken != nil {
+	// 	blockIdx := startToken.GetIndex()
+	// 	blockHash := startToken.GetHash()
+	// 	slot := uint64(blockIdx)
+	// 	point = ocommon.NewPoint(slot, blockHash)
+	// }
+
+	for _, point := range points {
+		block, err := s.utxorpc.config.LedgerState.GetBlock(point)
+		if err != nil {
+			return nil, err
+		}
+		var acb sync.AnyChainBlock
+		ret, err := block.Decode()
+		if err != nil {
+			return nil, err
+		}
+		acbc := sync.AnyChainBlock_Cardano{
+			Cardano: ret.Utxorpc(),
+		}
+		acb.Chain = &acbc
+		resp.Block = append(resp.Block, &acb)
+	}
+
 	return connect.NewResponse(resp), nil
 }
 
@@ -93,8 +150,110 @@ func (s *syncServiceServer) FollowTip(
 ) error {
 	intersect := req.Msg.GetIntersect() // []*BlockRef
 
-	log.Printf("Got a FollowTip request with intersect %v", intersect)
+	s.utxorpc.config.Logger.Info(
+		fmt.Sprintf(
+			"Got a FollowTip request with intersect %v",
+			intersect,
+		),
+	)
 
-	// TODO: the thing
-	return nil
+	// Get our points
+	var points []ocommon.Point
+	if len(intersect) > 0 {
+		for _, blockRef := range intersect {
+			blockIdx := blockRef.GetIndex()
+			blockHash := blockRef.GetHash()
+			slot := uint64(blockIdx)
+			point := ocommon.NewPoint(slot, blockHash)
+			points = append(points, point)
+		}
+	} else {
+		point := s.utxorpc.config.LedgerState.Tip().Point
+		points = append(points, point)
+	}
+
+	// Get our starting point matching our chain
+	point, err := s.utxorpc.config.LedgerState.GetIntersectPoint(points)
+	if err != nil {
+		s.utxorpc.config.Logger.Error(
+			"failed to get points",
+			"error", err,
+		)
+		return err
+	}
+
+	// Create our chain iterator
+	chainIter, err := s.utxorpc.config.LedgerState.GetChainFromPoint(*point, false)
+	if err != nil {
+		s.utxorpc.config.Logger.Error(
+			"failed to get chain iterator",
+			"error", err,
+		)
+		return err
+	}
+
+	for {
+		// Check for available block
+		next, err := chainIter.Next(false)
+		if err != nil {
+			s.utxorpc.config.Logger.Error(
+				"failed to iterate chain",
+				"error", err,
+			)
+			return err
+		}
+		if next != nil {
+			// Send block response
+			blockBytes := next.Block.Cbor[:]
+			blockType, err := ledger.DetermineBlockType(blockBytes)
+			if err != nil {
+				s.utxorpc.config.Logger.Error(
+					"failed to get block type",
+					"error", err,
+				)
+				return err
+			}
+			block, err := ledger.NewBlockFromCbor(blockType, blockBytes)
+			if err != nil {
+				s.utxorpc.config.Logger.Error(
+					"failed to get block",
+					"error", err,
+				)
+				return err
+			}
+			var acb sync.AnyChainBlock
+			acbc := sync.AnyChainBlock_Cardano{
+				Cardano: block.Utxorpc(),
+			}
+			acb.Chain = &acbc
+			resp := &sync.FollowTipResponse{
+				Action: &sync.FollowTipResponse_Apply{
+					Apply: &acb,
+				},
+			}
+			err = stream.Send(resp)
+			if err != nil {
+				s.utxorpc.config.Logger.Error(
+					"failed to send message to client",
+					"error", err,
+				)
+				return err
+			}
+		}
+	}
+}
+
+// ReadTip
+func (s *syncServiceServer) ReadTip(
+	ctx context.Context,
+	req *connect.Request[sync.ReadTipRequest],
+) (*connect.Response[sync.ReadTipResponse], error) {
+
+	s.utxorpc.config.Logger.Info("Got a ReadTip request")
+	resp := &sync.ReadTipResponse{}
+
+	point := s.utxorpc.config.LedgerState.Tip().Point
+	resp.Tip = &sync.BlockRef{Index: point.Slot, Hash: point.Hash}
+
+	return connect.NewResponse(resp), nil
 }
