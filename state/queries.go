@@ -92,6 +92,8 @@ func (ls *LedgerState) queryShelley(query *olocalstatequery.ShelleyQuery) (any, 
 		return []any{ls.currentEpoch.EpochId}, nil
 	case *olocalstatequery.ShelleyCurrentProtocolParamsQuery:
 		return []any{ls.currentPParams}, nil
+	case *olocalstatequery.ShelleyGenesisConfigQuery:
+		return ls.queryShelleyGenesisConfig()
 	case *olocalstatequery.ShelleyUtxoByAddressQuery:
 		return ls.queryShelleyUtxoByAddress(q.Addrs)
 	case *olocalstatequery.ShelleyUtxoByTxinQuery:
@@ -124,6 +126,14 @@ func (ls *LedgerState) queryShelley(query *olocalstatequery.ShelleyQuery) (any, 
 	default:
 		return nil, fmt.Errorf("unsupported query type: %T", q)
 	}
+}
+
+func (ls *LedgerState) queryShelleyGenesisConfig() (any, error) {
+	shelleyGenesis, err := ls.config.CardanoNodeConfig.ShelleyGenesis()
+	if err != nil {
+		return nil, err
+	}
+	return []any{shelleyGenesis}, nil
 }
 
 func (ls *LedgerState) queryShelleyUtxoByAddress(addrs []ledger.Address) (any, error) {
