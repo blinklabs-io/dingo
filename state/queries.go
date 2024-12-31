@@ -17,6 +17,9 @@ package state
 import (
 	"fmt"
 
+	"github.com/blinklabs-io/dingo/state/models"
+
+	"github.com/blinklabs-io/gouroboros/ledger"
 	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
 )
 
@@ -89,6 +92,10 @@ func (ls *LedgerState) queryShelley(query *olocalstatequery.ShelleyQuery) (any, 
 		return []any{ls.currentEpoch.EpochId}, nil
 	case *olocalstatequery.ShelleyCurrentProtocolParamsQuery:
 		return []any{ls.currentPParams}, nil
+	case *olocalstatequery.ShelleyUtxoByAddressQuery:
+		return ls.queryShelleyUtxoByAddress(q.Addrs)
+	case *olocalstatequery.ShelleyUtxoByTxinQuery:
+		return ls.queryShelleyUtxoByTxIn(q.TxIns)
 	// TODO
 	/*
 		case *olocalstatequery.ShelleyLedgerTipQuery:
@@ -117,4 +124,44 @@ func (ls *LedgerState) queryShelley(query *olocalstatequery.ShelleyQuery) (any, 
 	default:
 		return nil, fmt.Errorf("unsupported query type: %T", q)
 	}
+}
+
+func (ls *LedgerState) queryShelleyUtxoByAddress(addrs []ledger.Address) (any, error) {
+	ret := make(map[olocalstatequery.UtxoId]ledger.TransactionOutput)
+	// TODO: support multiple addresses
+	utxos, err := models.UtxosByAddress(ls.db, addrs[0])
+	if err != nil {
+		return nil, err
+	}
+	for _, utxo := range utxos {
+		txOut, err := utxo.Decode()
+		if err != nil {
+			return nil, err
+		}
+		utxoId := olocalstatequery.UtxoId{
+			Hash: ledger.NewBlake2b256(utxo.TxId),
+			Idx:  int(utxo.OutputIdx),
+		}
+		ret[utxoId] = txOut
+	}
+	return []any{ret}, nil
+}
+
+func (ls *LedgerState) queryShelleyUtxoByTxIn(txIns []ledger.ShelleyTransactionInput) (any, error) {
+	ret := make(map[olocalstatequery.UtxoId]ledger.TransactionOutput)
+	// TODO: support multiple TxIns
+	utxo, err := models.UtxoByRef(ls.db, txIns[0].Id().Bytes(), txIns[0].Index())
+	if err != nil {
+		return nil, err
+	}
+	txOut, err := utxo.Decode()
+	if err != nil {
+		return nil, err
+	}
+	utxoId := olocalstatequery.UtxoId{
+		Hash: ledger.NewBlake2b256(utxo.TxId),
+		Idx:  int(utxo.OutputIdx),
+	}
+	ret[utxoId] = txOut
+	return []any{ret}, nil
 }
