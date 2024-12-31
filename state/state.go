@@ -231,7 +231,7 @@ func (ls *LedgerState) scheduleCleanupConsumedUtxos() {
 					// Get UTxOs that are marked as deleted and older than our slot window
 					var tmpUtxos []models.Utxo
 					result := txn.Metadata().
-						Where("deleted_slot <= ?", tip.Point.Slot-cleanupConsumedUtxosSlotWindow).
+						Where("deleted_slot > 0 AND deleted_slot <= ?", tip.Point.Slot-cleanupConsumedUtxosSlotWindow).
 						Order("id DESC").Limit(1000).
 						Find(&tmpUtxos)
 					if result.Error != nil {
