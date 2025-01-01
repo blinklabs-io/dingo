@@ -17,8 +17,10 @@ package state
 import (
 	"fmt"
 
+	"github.com/blinklabs-io/dingo/state/eras"
 	"github.com/blinklabs-io/dingo/state/models"
 
+	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
 )
@@ -78,11 +80,27 @@ func (ls *LedgerState) queryHardFork(query *olocalstatequery.HardForkQuery) (any
 	switch q := query.Query.(type) {
 	case *olocalstatequery.HardForkCurrentEraQuery:
 		return ls.currentEra.Id, nil
-	// TODO
-	//case *olocalstatequery.HardForkEraHistoryQuery:
+	case *olocalstatequery.HardForkEraHistoryQuery:
+		return ls.queryHardForkEraHistory()
 	default:
 		return nil, fmt.Errorf("unsupported query type: %T", q)
 	}
+}
+
+func (ls *LedgerState) queryHardForkEraHistory() (any, error) {
+	var ret cbor.IndefLengthList
+	var epochs []models.Epoch
+	for _, era := range eras.Eras {
+		tmpEra := []any{}
+		result := ls.db.Where("epoch_id = ?", era.EraId).
+			Find(&epochs)
+		if result.Error != nil {
+			return nil, result.Error
+		}
+		// TODO: populate start/end/params
+	}
+	// TODO
+	return nil, nil
 }
 
 func (ls *LedgerState) queryShelley(query *olocalstatequery.ShelleyQuery) (any, error) {
