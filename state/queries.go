@@ -17,9 +17,12 @@ package state
 import (
 	"errors"
 	"fmt"
+	"math/big"
 
+	"github.com/blinklabs-io/dingo/state/eras"
 	"github.com/blinklabs-io/dingo/state/models"
 
+	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
 )
@@ -87,11 +90,74 @@ func (ls *LedgerState) queryHardFork(
 	switch q := query.Query.(type) {
 	case *olocalstatequery.HardForkCurrentEraQuery:
 		return ls.currentEra.Id, nil
-	// TODO (#321)
-	//case *olocalstatequery.HardForkEraHistoryQuery:
+	case *olocalstatequery.HardForkEraHistoryQuery:
+		return ls.queryHardForkEraHistory()
 	default:
 		return nil, fmt.Errorf("unsupported query type: %T", q)
 	}
+}
+
+func (ls *LedgerState) queryHardForkEraHistory() (any, error) {
+	retData := []any{}
+	var epochs []models.Epoch
+	timespan := big.NewInt(0)
+	for _, era := range eras.Eras {
+		epochSlotLength, epochLength, err := era.EpochLengthFunc(
+			ls.config.CardanoNodeConfig,
+		)
+		if err != nil {
+			return nil, err
+		}
+		result := ls.db.Metadata().Where("era_id = ?", era.Id).Order("epoch_id").
+			Find(&epochs)
+		if result.Error != nil {
+			return nil, result.Error
+		}
+		tmpStart := []any{0, 0, 0}
+		tmpEnd := tmpStart
+		tmpParams := []any{
+			epochLength,
+			epochSlotLength,
+			[]any{
+				0,
+				0,
+				[]any{0},
+			},
+			0,
+		}
+		for idx, tmpEpoch := range epochs {
+			// Update era start
+			if idx == 0 {
+				tmpStart = []any{
+					new(big.Int).Set(timespan),
+					tmpEpoch.StartSlot,
+					tmpEpoch.EpochId,
+				}
+			}
+			// Add epoch length in picoseconds to timespan
+			timespan.Add(
+				timespan,
+				new(big.Int).SetUint64(
+					uint64(tmpEpoch.SlotLength*tmpEpoch.LengthInSlots*1_000_000_000),
+				),
+			)
+			// Update era end
+			if idx == len(epochs)-1 {
+				tmpEnd = []any{
+					new(big.Int).Set(timespan),
+					tmpEpoch.StartSlot + uint64(tmpEpoch.LengthInSlots),
+					tmpEpoch.EpochId + 1,
+				}
+			}
+		}
+		tmpEra := []any{
+			tmpStart,
+			tmpEnd,
+			tmpParams,
+		}
+		retData = append(retData, tmpEra)
+	}
+	return cbor.IndefLengthList(retData), nil
 }
 
 func (ls *LedgerState) queryShelley(
