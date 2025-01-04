@@ -18,6 +18,7 @@ import (
 	"time"
 
 	ouroboros "github.com/blinklabs-io/gouroboros"
+	oprotocol "github.com/blinklabs-io/gouroboros/protocol"
 )
 
 type PeerSource uint16
@@ -35,8 +36,31 @@ const (
 type Peer struct {
 	Address        string
 	Source         PeerSource
-	ConnectionId   *ouroboros.ConnectionId
+	Connection     *PeerConnection
 	Sharable       bool
 	ReconnectCount int
 	ReconnectDelay time.Duration
+}
+
+func (p *Peer) setConnection(conn *ouroboros.Connection, outbound bool) {
+	connId := conn.Id()
+	protoVersion, versionData := conn.ProtocolVersion()
+	p.Connection = &PeerConnection{
+		Id:              connId,
+		ProtocolVersion: uint(protoVersion),
+		VersionData:     versionData,
+	}
+	// Determine whether connection can be used as a client
+	// This should be true for any outbound connections and any inbound
+	// connections in full-duplex mode
+	if outbound || versionData.DiffusionMode() == oprotocol.DiffusionModeInitiatorAndResponder {
+		p.Connection.IsClient = true
+	}
+}
+
+type PeerConnection struct {
+	Id              ouroboros.ConnectionId
+	ProtocolVersion uint
+	VersionData     oprotocol.VersionData
+	IsClient        bool
 }

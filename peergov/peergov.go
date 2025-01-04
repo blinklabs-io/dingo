@@ -155,10 +155,10 @@ func (p *PeerGovernor) peerIndexByAddress(address string) int {
 
 func (p *PeerGovernor) peerIndexByConnId(connId ouroboros.ConnectionId) int {
 	for idx, tmpPeer := range p.peers {
-		if tmpPeer.ConnectionId == nil {
+		if tmpPeer.Connection == nil {
 			continue
 		}
-		if *tmpPeer.ConnectionId == connId {
+		if tmpPeer.Connection.Id == connId {
 			return idx
 		}
 	}
@@ -180,8 +180,8 @@ func (p *PeerGovernor) createOutboundConnection(peer *Peer) {
 		conn, err := p.config.ConnManager.CreateOutboundConn(peer.Address)
 		if err == nil {
 			connId := conn.Id()
-			peer.ConnectionId = &connId
 			peer.ReconnectCount = 0
+			peer.setConnection(conn, true)
 			// Generate event
 			if p.config.EventBus != nil {
 				p.config.EventBus.Publish(
@@ -225,23 +225,24 @@ func (p *PeerGovernor) handleInboundConnectionEvent(evt event.Event) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	e := evt.Data.(connmanager.InboundConnectionEvent)
+	var tmpPeer *Peer
 	peerIdx := p.peerIndexByAddress(e.RemoteAddr.String())
 	if peerIdx == -1 {
+		tmpPeer = &Peer{
+			Address: e.RemoteAddr.String(),
+			Source:  PeerSourceInboundConn,
+		}
 		// Add inbound peer
 		p.peers = append(
 			p.peers,
-			&Peer{
-				Address: e.RemoteAddr.String(),
-				Source:  PeerSourceInboundConn,
-				// TODO: use handshake params to figure out if we should share
-				Sharable:     true,
-				ConnectionId: &e.ConnectionId,
-			},
+			tmpPeer,
 		)
 	} else {
-		// Set connection on existing peer
-		p.peers[peerIdx].ConnectionId = &e.ConnectionId
+		tmpPeer = p.peers[peerIdx]
 	}
+	conn := p.config.ConnManager.GetConnectionById(e.ConnectionId)
+	tmpPeer.setConnection(conn, false)
+	tmpPeer.Sharable = tmpPeer.Connection.VersionData.PeerSharing()
 }
 
 func (p *PeerGovernor) handleConnectionClosedEvent(evt event.Event) {
@@ -263,7 +264,7 @@ func (p *PeerGovernor) handleConnectionClosedEvent(evt event.Event) {
 	}
 	peerIdx := p.peerIndexByConnId(e.ConnectionId)
 	if peerIdx != -1 {
-		p.peers[peerIdx].ConnectionId = nil
+		p.peers[peerIdx].Connection = nil
 		if p.peers[peerIdx].Source != PeerSourceInboundConn {
 			go p.createOutboundConnection(p.peers[peerIdx])
 		}
