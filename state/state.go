@@ -496,6 +496,9 @@ func (ls *LedgerState) addBlock(txn *database.Txn, block models.Block) error {
 		Point:       ocommon.NewPoint(block.Slot, block.Hash),
 		BlockNumber: block.Number,
 	}
+	if err := models.TipUpdateTxn(txn, ls.currentTip); err != nil {
+		return err
+	}
 	// Update metrics
 	ls.metrics.blockNum.Set(float64(block.Number))
 	ls.metrics.slotNum.Set(float64(block.Slot))
@@ -521,6 +524,9 @@ func (ls *LedgerState) removeBlock(
 	ls.currentTip = ochainsync.Tip{
 		Point:       ocommon.NewPoint(block.Slot, block.Hash),
 		BlockNumber: block.Number,
+	}
+	if err := models.TipUpdateTxn(txn, ls.currentTip); err != nil {
+		return err
 	}
 	return nil
 }
@@ -559,22 +565,11 @@ func (ls *LedgerState) loadEpoch() error {
 }
 
 func (ls *LedgerState) loadTip() error {
-	var tmpBlock models.Block
-	result := ls.db.Metadata().Order("number DESC").First(&tmpBlock)
-	if result.Error != nil {
-		if errors.Is(result.Error, gorm.ErrRecordNotFound) {
-			// Return origin when we have no blocks
-			ls.currentTip = ochainsync.Tip{
-				Point: ocommon.NewPointOrigin(),
-			}
-			return nil
-		}
-		return result.Error
+	tmpTip, err := models.TipGet(ls.db)
+	if err != nil {
+		return err
 	}
-	ls.currentTip = ochainsync.Tip{
-		Point:       ocommon.NewPoint(tmpBlock.Slot, tmpBlock.Hash),
-		BlockNumber: tmpBlock.Number,
-	}
+	ls.currentTip = tmpTip
 	// Update metrics
 	ls.metrics.blockNum.Set(float64(ls.currentTip.BlockNumber))
 	ls.metrics.slotNum.Set(float64(ls.currentTip.Point.Slot))
