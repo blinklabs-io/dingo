@@ -27,5 +27,6 @@ var MigrateModels = []any{
 	&StakeDelegation{},
 	&PParams{},
 	&PParamUpdate{},
+	&Tip{},
 	&Utxo{},
 }
