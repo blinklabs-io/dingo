@@ -68,6 +68,9 @@ func (s *syncServiceServer) FetchBlock(
 		if err != nil {
 			return nil, err
 		}
+		if block == nil {
+			return nil, fmt.Errorf("block returned nil")
+		}
 		var acb sync.AnyChainBlock
 		ret, err := block.Decode()
 		if err != nil {
@@ -126,6 +129,9 @@ func (s *syncServiceServer) DumpHistory(
 		block, err := s.utxorpc.config.LedgerState.GetBlock(point)
 		if err != nil {
 			return nil, err
+		}
+		if block == nil {
+			return nil, fmt.Errorf("block returned nil")
 		}
 		var acb sync.AnyChainBlock
 		ret, err := block.Decode()
