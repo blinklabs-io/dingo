@@ -242,7 +242,9 @@ func (p *PeerGovernor) handleInboundConnectionEvent(evt event.Event) {
 	}
 	conn := p.config.ConnManager.GetConnectionById(e.ConnectionId)
 	tmpPeer.setConnection(conn, false)
-	tmpPeer.Sharable = tmpPeer.Connection.VersionData.PeerSharing()
+	if tmpPeer.Connection != nil {
+		tmpPeer.Sharable = tmpPeer.Connection.VersionData.PeerSharing()
+	}
 }
 
 func (p *PeerGovernor) handleConnectionClosedEvent(evt event.Event) {
