@@ -257,6 +257,29 @@ func (ls *LedgerState) processGenesisBlock(
 			"epoch", fmt.Sprintf("%+v", newEpoch),
 			"component", "ledger",
 		)
+		// Record genesis UTxOs
+		byronGenesis, err := ls.config.CardanoNodeConfig.ByronGenesis()
+		if err != nil {
+			return err
+		}
+		genesisUtxos, err := byronGenesis.GenesisUtxos()
+		if err != nil {
+			return err
+		}
+		for _, utxo := range genesisUtxos {
+			outAddr := utxo.Output.Address()
+			tmpUtxo := models.Utxo{
+				TxId:       utxo.Id.Id().Bytes(),
+				OutputIdx:  utxo.Id.Index(),
+				AddedSlot:  0,
+				PaymentKey: outAddr.PaymentKeyHash().Bytes(),
+				StakingKey: outAddr.StakeKeyHash().Bytes(),
+				Cbor:       utxo.Output.Cbor(),
+			}
+			if err := ls.addUtxo(txn, tmpUtxo); err != nil {
+				return fmt.Errorf("add genesis UTxO: %w", err)
+			}
+		}
 	}
 	return nil
 }
