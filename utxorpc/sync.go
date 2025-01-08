@@ -181,6 +181,12 @@ func (s *syncServiceServer) FollowTip(
 		)
 		return err
 	}
+	if point == nil {
+		s.utxorpc.config.Logger.Error(
+			"nil point returned",
+		)
+		return fmt.Errorf("nil point returned")
+	}
 
 	// Create our chain iterator
 	chainIter, err := s.utxorpc.config.LedgerState.GetChainFromPoint(*point, false)
