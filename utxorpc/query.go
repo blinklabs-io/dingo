@@ -91,6 +91,9 @@ func (s *queryServiceServer) ReadUtxos(
 		if err != nil {
 			return nil, err
 		}
+		if ret == nil {
+			return nil, fmt.Errorf("decode returned empty utxo")
+		}
 		audc := query.AnyUtxoData_Cardano{
 			Cardano: ret.Utxorpc(),
 		}
@@ -211,6 +214,9 @@ func (s *queryServiceServer) SearchUtxos(
 			ret, err := utxo.Decode()
 			if err != nil {
 				return nil, err
+			}
+			if ret == nil {
+				return nil, fmt.Errorf("decode returned empty utxo")
 			}
 			audc := query.AnyUtxoData_Cardano{
 				Cardano: ret.Utxorpc(),
