@@ -150,65 +150,67 @@ func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 }
 
 func (ls *LedgerState) handleEventBlockfetchBlock(e BlockfetchEvent) error {
-	// Check for out-of-order block events
-	// This is a stop-gap to handle disconnects during sync until we get chain selection working
-	if eventsLen := len(ls.chainsyncBlockEvents); eventsLen > 0 && e.Point.Slot < ls.chainsyncBlockEvents[eventsLen-1].Point.Slot {
-		tmpBlockEvents := make([]BlockfetchEvent, 0, eventsLen)
-		for _, tmpEvent := range ls.chainsyncBlockEvents {
-			if tmpEvent.Point.Slot >= e.Point.Slot {
-				break
+	// TODO: move this logic somewhere else, since we can't easily inspect the block events channel
+	/*
+		// Check for out-of-order block events
+		// This is a stop-gap to handle disconnects during sync until we get chain selection working
+		if eventsLen := len(ls.chainsyncBlockEvents); eventsLen > 0 && e.Point.Slot < ls.chainsyncBlockEvents[eventsLen-1].Point.Slot {
+			tmpBlockEvents := make([]BlockfetchEvent, 0, eventsLen)
+			for _, tmpEvent := range ls.chainsyncBlockEvents {
+				if tmpEvent.Point.Slot >= e.Point.Slot {
+					break
+				}
+				tmpBlockEvents = append(tmpBlockEvents, tmpEvent)
 			}
-			tmpBlockEvents = append(tmpBlockEvents, tmpEvent)
+			ls.chainsyncBlockEvents = tmpBlockEvents
 		}
-		ls.chainsyncBlockEvents = tmpBlockEvents
-	}
-	ls.chainsyncBlockEvents = append(
-		ls.chainsyncBlockEvents,
-		e,
-	)
+	*/
+	/*
+		ls.chainsyncBlockEvents = append(
+			ls.chainsyncBlockEvents,
+			e,
+		)
+	*/
+	ls.chainsyncBlockEvents <- e
 	// Update busy time in order to detect fetch timeout
 	ls.chainsyncBlockfetchBusyTime = time.Now()
 	return nil
 }
 
 func (ls *LedgerState) processBlockEvents() error {
-	// XXX: move this into the loop?
-	ls.Lock()
-	defer ls.Unlock()
-	batchOffset := 0
+	maxBatchSize := 10 // chosen to stay well under BadgerDB's transaction size limit
+	tmpBatch := make([]BlockfetchEvent, 0, maxBatchSize)
 	for {
-		batchSize := min(
-			10, // Chosen to stay well under badger transaction size limit
-			len(ls.chainsyncBlockEvents)-batchOffset,
-		)
-		if batchSize <= 0 {
-			break
+		e := <-ls.chainsyncBlockEvents
+		tmpBatch = append(tmpBatch, e)
+		if len(ls.chainsyncBlockEvents) > 0 && len(tmpBatch) < maxBatchSize {
+			continue
 		}
-		// Start a transaction
+		ls.Lock()
 		txn := ls.db.Transaction(true)
 		err := txn.Do(func(txn *database.Txn) error {
-			for _, evt := range ls.chainsyncBlockEvents[batchOffset : batchOffset+batchSize] {
+			for _, evt := range tmpBatch {
 				if err := ls.processBlockEvent(txn, evt); err != nil {
 					return err
 				}
 			}
 			return nil
 		})
+		ls.Unlock()
 		if err != nil {
 			return err
 		}
-		batchOffset += batchSize
+		tmpBatch = tmpBatch[:0]
+		ls.config.Logger.Info(
+			fmt.Sprintf(
+				"chain extended, new tip: %x at slot %d",
+				ls.currentTip.Point.Hash,
+				ls.currentTip.Point.Slot,
+			),
+			"component",
+			"ledger",
+		)
 	}
-	ls.chainsyncBlockEvents = nil
-	ls.config.Logger.Info(
-		fmt.Sprintf(
-			"chain extended, new tip: %x at slot %d",
-			ls.currentTip.Point.Hash,
-			ls.currentTip.Point.Slot,
-		),
-		"component",
-		"ledger",
-	)
 	return nil
 }
 
@@ -456,10 +458,12 @@ func (ls *LedgerState) processBlockEvent(
 }
 
 func (ls *LedgerState) handleEventBlockfetchBatchDone(e BlockfetchEvent) error {
-	// Process pending block events
-	if err := ls.processBlockEvents(); err != nil {
-		return err
-	}
+	/*
+		// Process pending block events
+		if err := ls.processBlockEvents(); err != nil {
+			return err
+		}
+	*/
 	// Check for pending block range request
 	if !ls.chainsyncBlockfetchWaiting ||
 		len(ls.chainsyncHeaderPoints) == 0 {

@@ -69,7 +69,7 @@ type LedgerState struct {
 	currentTip                  ochainsync.Tip
 	metrics                     stateMetrics
 	chainsyncHeaderPoints       []ocommon.Point
-	chainsyncBlockEvents        []BlockfetchEvent
+	chainsyncBlockEvents        chan BlockfetchEvent //[]BlockfetchEvent
 	chainsyncBlockfetchBusy     bool
 	chainsyncBlockfetchBusyTime time.Time
 	chainsyncBlockfetchWaiting  bool
@@ -77,7 +77,8 @@ type LedgerState struct {
 
 func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 	ls := &LedgerState{
-		config: cfg,
+		config:               cfg,
+		chainsyncBlockEvents: make(chan BlockfetchEvent, 1000),
 	}
 	if cfg.Logger == nil {
 		// Create logger to throw away logs
@@ -175,6 +176,8 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 	if err := ls.loadTip(); err != nil {
 		return nil, err
 	}
+	// Start goroutine to process blocks
+	go ls.processBlockEvents()
 	return ls, nil
 }
 

@@ -225,7 +225,7 @@ func (n *Node) configureConnManager() error {
 				ouroboros.WithNetworkMagic(n.config.networkMagic),
 				ouroboros.WithNodeToNode(true),
 				ouroboros.WithKeepAlive(true),
-				ouroboros.WithFullDuplex(true),
+				//ouroboros.WithFullDuplex(true),
 				ouroboros.WithPeerSharing(n.config.peerSharing),
 				ouroboros.WithPeerSharingConfig(
 					opeersharing.NewConfig(
