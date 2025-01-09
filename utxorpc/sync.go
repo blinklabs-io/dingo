@@ -19,8 +19,8 @@ import (
 	"fmt"
 
 	"connectrpc.com/connect"
-	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/blinklabs-io/gouroboros/ledger"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	sync "github.com/utxorpc/go-codegen/utxorpc/v1alpha/sync"
 	"github.com/utxorpc/go-codegen/utxorpc/v1alpha/sync/syncconnect"
 )
@@ -92,7 +92,7 @@ func (s *syncServiceServer) DumpHistory(
 	req *connect.Request[sync.DumpHistoryRequest],
 ) (*connect.Response[sync.DumpHistoryResponse], error) {
 	startToken := req.Msg.GetStartToken() // *BlockRef
-	maxItems := req.Msg.GetMaxItems() // uint32
+	maxItems := req.Msg.GetMaxItems()     // uint32
 	fieldMask := req.Msg.GetFieldMask()
 
 	s.utxorpc.config.Logger.Info(
@@ -108,7 +108,9 @@ func (s *syncServiceServer) DumpHistory(
 	// Get our points
 	var points []ocommon.Point
 	if maxItems > 0 {
-		tmpPoints, err := s.utxorpc.config.LedgerState.RecentChainPoints(int(maxItems))
+		tmpPoints, err := s.utxorpc.config.LedgerState.RecentChainPoints(
+			int(maxItems),
+		)
 		if err != nil {
 			return nil, err
 		}
@@ -195,7 +197,10 @@ func (s *syncServiceServer) FollowTip(
 	}
 
 	// Create our chain iterator
-	chainIter, err := s.utxorpc.config.LedgerState.GetChainFromPoint(*point, false)
+	chainIter, err := s.utxorpc.config.LedgerState.GetChainFromPoint(
+		*point,
+		false,
+	)
 	if err != nil {
 		s.utxorpc.config.Logger.Error(
 			"failed to get chain iterator",

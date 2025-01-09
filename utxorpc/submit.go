@@ -142,7 +142,8 @@ func (s *submitServiceServer) WaitForTx(
 							if ctx.Err() != nil {
 								s.utxorpc.config.Logger.Warn(
 									"Client disconnected while sending response",
-									"error", ctx.Err(),
+									"error",
+									ctx.Err(),
 								)
 								return
 							}

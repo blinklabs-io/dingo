@@ -135,9 +135,9 @@ func (s *queryServiceServer) SearchUtxos(
 	ctx context.Context,
 	req *connect.Request[query.SearchUtxosRequest],
 ) (*connect.Response[query.SearchUtxosResponse], error) {
-	predicate := req.Msg.GetPredicate() // *UtxoPredicate
+	predicate := req.Msg.GetPredicate()   // *UtxoPredicate
 	startToken := req.Msg.GetStartToken() // string
-	maxItems := req.Msg.GetMaxItems() // int32
+	maxItems := req.Msg.GetMaxItems()     // int32
 	fieldMask := req.Msg.GetFieldMask()
 
 	s.utxorpc.config.Logger.Info(
@@ -190,7 +190,9 @@ func (s *queryServiceServer) SearchUtxos(
 		// Handle Delegation Part
 		delegationPart := addressPattern.GetDelegationPart()
 		if delegationPart != nil {
-			s.utxorpc.config.Logger.Info("DelegationPart is present, decoding...")
+			s.utxorpc.config.Logger.Info(
+				"DelegationPart is present, decoding...",
+			)
 			var delegationAddr ledger.Address
 			err := delegationAddr.UnmarshalCBOR(delegationPart)
 			if err != nil {

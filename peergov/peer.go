@@ -53,7 +53,8 @@ func (p *Peer) setConnection(conn *ouroboros.Connection, outbound bool) {
 	// Determine whether connection can be used as a client
 	// This should be true for any outbound connections and any inbound
 	// connections in full-duplex mode
-	if outbound || versionData.DiffusionMode() == oprotocol.DiffusionModeInitiatorAndResponder {
+	if outbound ||
+		versionData.DiffusionMode() == oprotocol.DiffusionModeInitiatorAndResponder {
 		p.Connection.IsClient = true
 	}
 }
