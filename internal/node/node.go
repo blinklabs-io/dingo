@@ -68,8 +68,12 @@ func Run(logger *slog.Logger) error {
 			dingo.WithListeners(
 				dingo.ListenerConfig{
 					ListenNetwork: "tcp",
-					ListenAddress: fmt.Sprintf("%s:%d", cfg.BindAddr, cfg.RelayPort),
-					ReuseAddress:  true,
+					ListenAddress: fmt.Sprintf(
+						"%s:%d",
+						cfg.BindAddr,
+						cfg.RelayPort,
+					),
+					ReuseAddress: true,
 				},
 				dingo.ListenerConfig{
 					ListenNetwork: "unix",
@@ -79,6 +83,8 @@ func Run(logger *slog.Logger) error {
 			),
 			dingo.WithOutboundSourcePort(cfg.RelayPort),
 			dingo.WithUtxorpcPort(cfg.UtxorpcPort),
+			dingo.WithUtxorpcTlsCertFilePath(cfg.TlsCertFilePath),
+			dingo.WithUtxorpcTlsKeyFilePath(cfg.TlsKeyFilePath),
 			// Enable metrics with default prometheus registry
 			dingo.WithPrometheusRegistry(prometheus.DefaultRegisterer),
 			// TODO: make this configurable

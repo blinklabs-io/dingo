@@ -41,6 +41,8 @@ type Config struct {
 	networkMagic       uint32
 	outboundSourcePort uint
 	utxorpcPort        uint
+	tlsCertFilePath    string
+	tlsKeyFilePath     string
 	peerSharing        bool
 	promRegistry       prometheus.Registerer
 	topologyConfig     *topology.TopologyConfig
@@ -180,6 +182,20 @@ func WithNetworkMagic(networkMagic uint32) ConfigOptionFunc {
 func WithOutboundSourcePort(port uint) ConfigOptionFunc {
 	return func(c *Config) {
 		c.outboundSourcePort = port
+	}
+}
+
+// WithUtxorpcTlsCertFilePath specifies the path to the TLS certificate for the gRPC API listener. This defaults to empty
+func WithUtxorpcTlsCertFilePath(path string) ConfigOptionFunc {
+	return func(c *Config) {
+		c.tlsCertFilePath = path
+	}
+}
+
+// WithUtxorpcTlsKeyFilePath specifies the path to the TLS key for the gRPC API listener. This defaults to empty
+func WithUtxorpcTlsKeyFilePath(path string) ConfigOptionFunc {
+	return func(c *Config) {
+		c.tlsKeyFilePath = path
 	}
 }
 
