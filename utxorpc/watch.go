@@ -19,8 +19,8 @@ import (
 	"fmt"
 
 	"connectrpc.com/connect"
-	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/blinklabs-io/gouroboros/ledger"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	watch "github.com/utxorpc/go-codegen/utxorpc/v1alpha/watch"
 	"github.com/utxorpc/go-codegen/utxorpc/v1alpha/watch/watchconnect"
 )
@@ -82,7 +82,10 @@ func (s *watchServiceServer) WatchTx(
 	}
 
 	// Create our chain iterator
-	chainIter, err := s.utxorpc.config.LedgerState.GetChainFromPoint(*point, false)
+	chainIter, err := s.utxorpc.config.LedgerState.GetChainFromPoint(
+		*point,
+		false,
+	)
 	if err != nil {
 		s.utxorpc.config.Logger.Error(
 			"failed to get chain iterator",

@@ -38,7 +38,9 @@ func (ls *LedgerState) Query(query any) (any, error) {
 	}
 }
 
-func (ls *LedgerState) queryBlock(query *olocalstatequery.BlockQuery) (any, error) {
+func (ls *LedgerState) queryBlock(
+	query *olocalstatequery.BlockQuery,
+) (any, error) {
 	switch q := query.Query.(type) {
 	case *olocalstatequery.HardForkQuery:
 		return ls.queryHardFork(q)
@@ -74,7 +76,9 @@ func (ls *LedgerState) queryChainPoint() (any, error) {
 	return ls.currentTip.Point, nil
 }
 
-func (ls *LedgerState) queryHardFork(query *olocalstatequery.HardForkQuery) (any, error) {
+func (ls *LedgerState) queryHardFork(
+	query *olocalstatequery.HardForkQuery,
+) (any, error) {
 	switch q := query.Query.(type) {
 	case *olocalstatequery.HardForkCurrentEraQuery:
 		return ls.currentEra.Id, nil
@@ -85,7 +89,9 @@ func (ls *LedgerState) queryHardFork(query *olocalstatequery.HardForkQuery) (any
 	}
 }
 
-func (ls *LedgerState) queryShelley(query *olocalstatequery.ShelleyQuery) (any, error) {
+func (ls *LedgerState) queryShelley(
+	query *olocalstatequery.ShelleyQuery,
+) (any, error) {
 	// TODO: make these era-specific
 	switch q := query.Query.(type) {
 	case *olocalstatequery.ShelleyEpochNoQuery:
@@ -136,7 +142,9 @@ func (ls *LedgerState) queryShelleyGenesisConfig() (any, error) {
 	return []any{shelleyGenesis}, nil
 }
 
-func (ls *LedgerState) queryShelleyUtxoByAddress(addrs []ledger.Address) (any, error) {
+func (ls *LedgerState) queryShelleyUtxoByAddress(
+	addrs []ledger.Address,
+) (any, error) {
 	ret := make(map[olocalstatequery.UtxoId]ledger.TransactionOutput)
 	// TODO: support multiple addresses
 	utxos, err := models.UtxosByAddress(ls.db, addrs[0])
@@ -157,10 +165,16 @@ func (ls *LedgerState) queryShelleyUtxoByAddress(addrs []ledger.Address) (any, e
 	return []any{ret}, nil
 }
 
-func (ls *LedgerState) queryShelleyUtxoByTxIn(txIns []ledger.ShelleyTransactionInput) (any, error) {
+func (ls *LedgerState) queryShelleyUtxoByTxIn(
+	txIns []ledger.ShelleyTransactionInput,
+) (any, error) {
 	ret := make(map[olocalstatequery.UtxoId]ledger.TransactionOutput)
 	// TODO: support multiple TxIns
-	utxo, err := models.UtxoByRef(ls.db, txIns[0].Id().Bytes(), txIns[0].Index())
+	utxo, err := models.UtxoByRef(
+		ls.db,
+		txIns[0].Id().Bytes(),
+		txIns[0].Index(),
+	)
 	if err != nil {
 		return nil, err
 	}
