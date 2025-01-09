@@ -24,29 +24,33 @@ import (
 )
 
 type Config struct {
-	BindAddr      string `split_words:"true"`
-	CardanoConfig string `                   envconfig:"config"`
-	DatabasePath  string `split_words:"true"`
-	SocketPath    string `split_words:"true"`
-	IntersectTip  bool   `split_words:"true"`
-	Network       string
-	MetricsPort   uint `split_words:"true"`
-	RelayPort     uint `envconfig:"port"`
-	UtxorpcPort   uint `split_words:"true"`
-	Topology      string
+	BindAddr        string `split_words:"true"`
+	CardanoConfig   string `                   envconfig:"config"`
+	DatabasePath    string `split_words:"true"`
+	SocketPath      string `split_words:"true"`
+	Network         string
+	TlsCertFilePath string `envconfig:"TLS_CERT_FILE_PATH"`
+	TlsKeyFilePath  string `envconfig:"TLS_KEY_FILE_PATH"`
+	Topology        string
+	MetricsPort     uint `split_words:"true"`
+	RelayPort       uint `envconfig:"port"`
+	UtxorpcPort     uint `split_words:"true"`
+	IntersectTip    bool `split_words:"true"`
 }
 
 var globalConfig = &Config{
-	BindAddr:      "0.0.0.0",
-	CardanoConfig: "./config/cardano/preview/config.json",
-	DatabasePath:  ".dingo",
-	SocketPath:    "dingo.socket",
-	IntersectTip:  false,
-	Network:       "preview",
-	MetricsPort:   12798,
-	RelayPort:     3001,
-	UtxorpcPort:   9090,
-	Topology:      "",
+	BindAddr:        "0.0.0.0",
+	CardanoConfig:   "./config/cardano/preview/config.json",
+	DatabasePath:    ".dingo",
+	SocketPath:      "dingo.socket",
+	IntersectTip:    false,
+	Network:         "preview",
+	MetricsPort:     12798,
+	RelayPort:       3001,
+	UtxorpcPort:     9090,
+	Topology:        "",
+	TlsCertFilePath: "",
+	TlsKeyFilePath:  "",
 }
 
 func LoadConfig() (*Config, error) {

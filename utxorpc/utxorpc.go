@@ -40,12 +40,14 @@ type Utxorpc struct {
 }
 
 type UtxorpcConfig struct {
-	Logger      *slog.Logger
-	EventBus    *event.EventBus
-	LedgerState *state.LedgerState
-	Mempool     *mempool.Mempool
-	Host        string
-	Port        uint
+	Logger          *slog.Logger
+	EventBus        *event.EventBus
+	LedgerState     *state.LedgerState
+	Mempool         *mempool.Mempool
+	Host            string
+	Port            uint
+	TlsCertFilePath string
+	TlsKeyFilePath  string
 }
 
 func NewUtxorpc(cfg UtxorpcConfig) *Utxorpc {
@@ -65,13 +67,6 @@ func NewUtxorpc(cfg UtxorpcConfig) *Utxorpc {
 }
 
 func (u *Utxorpc) Start() error {
-	u.config.Logger.Info(
-		fmt.Sprintf(
-			"starting gRPC listener on %s:%d",
-			u.config.Host,
-			u.config.Port,
-		),
-	)
 	mux := http.NewServeMux()
 	compress1KB := connect.WithCompressMinBytes(1024)
 	queryPath, queryHandler := queryconnect.NewQueryServiceHandler(
@@ -127,11 +122,38 @@ func (u *Utxorpc) Start() error {
 			compress1KB,
 		),
 	)
-	// TODO: tls
-	err := http.ListenAndServe(
-		fmt.Sprintf("%s:%d", u.config.Host, u.config.Port),
-		// Use h2c so we can serve HTTP/2 without TLS
-		h2c.NewHandler(mux, &http2.Server{}),
-	)
-	return err
+	if u.config.TlsCertFilePath != "" && u.config.TlsKeyFilePath != "" {
+		u.config.Logger.Info(
+			fmt.Sprintf(
+				"starting gRPC TLS listener on %s:%d",
+				u.config.Host,
+				u.config.Port,
+			),
+		)
+		err := http.ListenAndServeTLS(
+			fmt.Sprintf(
+				"%s:%d",
+				u.config.Host,
+				u.config.Port,
+			),
+			u.config.TlsCertFilePath,
+			u.config.TlsKeyFilePath,
+			mux,
+		)
+		return err
+	} else {
+		u.config.Logger.Info(
+			fmt.Sprintf(
+				"starting gRPC listener on %s:%d",
+				u.config.Host,
+				u.config.Port,
+			),
+		)
+		err := http.ListenAndServe(
+			fmt.Sprintf("%s:%d", u.config.Host, u.config.Port),
+			// Use h2c so we can serve HTTP/2 without TLS
+			h2c.NewHandler(mux, &http2.Server{}),
+		)
+		return err
+	}
 }
