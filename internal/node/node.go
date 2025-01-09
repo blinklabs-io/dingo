@@ -68,7 +68,7 @@ func Run(logger *slog.Logger) error {
 			dingo.WithListeners(
 				dingo.ListenerConfig{
 					ListenNetwork: "tcp",
-					ListenAddress: fmt.Sprintf("%s:%d", cfg.BindAddr, cfg.Port),
+					ListenAddress: fmt.Sprintf("%s:%d", cfg.BindAddr, cfg.RelayPort),
 					ReuseAddress:  true,
 				},
 				dingo.ListenerConfig{
@@ -77,7 +77,7 @@ func Run(logger *slog.Logger) error {
 					UseNtC:        true,
 				},
 			),
-			dingo.WithOutboundSourcePort(cfg.Port),
+			dingo.WithOutboundSourcePort(cfg.RelayPort),
 			dingo.WithUtxorpcPort(cfg.UtxorpcPort),
 			// Enable metrics with default prometheus registry
 			dingo.WithPrometheusRegistry(prometheus.DefaultRegisterer),

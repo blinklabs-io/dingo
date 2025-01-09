@@ -31,7 +31,7 @@ type Config struct {
 	IntersectTip  bool   `split_words:"true"`
 	Network       string
 	MetricsPort   uint `split_words:"true"`
-	Port          uint
+	RelayPort     uint `envconfig:"port"`
 	UtxorpcPort   uint `split_words:"true"`
 	Topology      string
 }
@@ -44,7 +44,7 @@ var globalConfig = &Config{
 	IntersectTip:  false,
 	Network:       "preview",
 	MetricsPort:   12798,
-	Port:          3001,
+	RelayPort:     3001,
 	UtxorpcPort:   9090,
 	Topology:      "",
 }
