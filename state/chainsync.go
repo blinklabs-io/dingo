@@ -150,6 +150,18 @@ func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 }
 
 func (ls *LedgerState) handleEventBlockfetchBlock(e BlockfetchEvent) error {
+	// Check for out-of-order block events
+	// This is a stop-gap to handle disconnects during sync until we get chain selection working
+	if eventsLen := len(ls.chainsyncBlockEvents); eventsLen > 0 && e.Point.Slot < ls.chainsyncBlockEvents[eventsLen-1].Point.Slot {
+		tmpBlockEvents := make([]BlockfetchEvent, 0, eventsLen)
+		for _, tmpEvent := range ls.chainsyncBlockEvents {
+			if tmpEvent.Point.Slot >= e.Point.Slot {
+				break
+			}
+			tmpBlockEvents = append(tmpBlockEvents, tmpEvent)
+		}
+		ls.chainsyncBlockEvents = tmpBlockEvents
+	}
 	ls.chainsyncBlockEvents = append(
 		ls.chainsyncBlockEvents,
 		e,
