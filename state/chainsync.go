@@ -22,6 +22,7 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/state/models"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
 const (
@@ -89,6 +90,18 @@ func (ls *LedgerState) handleEventChainsyncRollback(e ChainsyncEvent) error {
 }
 
 func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
+	// Check for out-of-order block headers
+	// This is a stop-gap to handle disconnects during sync until we get chain selection working
+	if pointsLen := len(ls.chainsyncHeaderPoints); pointsLen > 0 && e.Point.Slot < ls.chainsyncHeaderPoints[pointsLen-1].Slot {
+		tmpHeaderPoints := make([]ocommon.Point, 0, pointsLen)
+		for _, point := range ls.chainsyncHeaderPoints {
+			if point.Slot >= e.Point.Slot {
+				break
+			}
+			tmpHeaderPoints = append(tmpHeaderPoints, point)
+		}
+		ls.chainsyncHeaderPoints = tmpHeaderPoints
+	}
 	// Add to cached header points
 	ls.chainsyncHeaderPoints = append(
 		ls.chainsyncHeaderPoints,
