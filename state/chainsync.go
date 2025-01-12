@@ -92,15 +92,18 @@ func (ls *LedgerState) handleEventChainsyncRollback(e ChainsyncEvent) error {
 func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 	// Check for out-of-order block headers
 	// This is a stop-gap to handle disconnects during sync until we get chain selection working
-	if pointsLen := len(ls.chainsyncHeaderPoints); pointsLen > 0 && e.Point.Slot < ls.chainsyncHeaderPoints[pointsLen-1].Slot {
-		tmpHeaderPoints := make([]ocommon.Point, 0, pointsLen)
-		for _, point := range ls.chainsyncHeaderPoints {
-			if point.Slot >= e.Point.Slot {
-				break
+	if ls.chainsyncHeaderPoints != nil {
+		if pointsLen := len(ls.chainsyncHeaderPoints); pointsLen > 0 &&
+			e.Point.Slot < ls.chainsyncHeaderPoints[pointsLen-1].Slot {
+			tmpHeaderPoints := make([]ocommon.Point, 0, pointsLen)
+			for _, point := range ls.chainsyncHeaderPoints {
+				if point.Slot >= e.Point.Slot {
+					break
+				}
+				tmpHeaderPoints = append(tmpHeaderPoints, point)
 			}
-			tmpHeaderPoints = append(tmpHeaderPoints, point)
+			ls.chainsyncHeaderPoints = tmpHeaderPoints
 		}
-		ls.chainsyncHeaderPoints = tmpHeaderPoints
 	}
 	// Add to cached header points
 	ls.chainsyncHeaderPoints = append(
@@ -152,15 +155,18 @@ func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 func (ls *LedgerState) handleEventBlockfetchBlock(e BlockfetchEvent) error {
 	// Check for out-of-order block events
 	// This is a stop-gap to handle disconnects during sync until we get chain selection working
-	if eventsLen := len(ls.chainsyncBlockEvents); eventsLen > 0 && e.Point.Slot < ls.chainsyncBlockEvents[eventsLen-1].Point.Slot {
-		tmpBlockEvents := make([]BlockfetchEvent, 0, eventsLen)
-		for _, tmpEvent := range ls.chainsyncBlockEvents {
-			if tmpEvent.Point.Slot >= e.Point.Slot {
-				break
+	if ls.chainsyncBlockEvents != nil {
+		if eventsLen := len(ls.chainsyncBlockEvents); eventsLen > 0 &&
+			e.Point.Slot < ls.chainsyncBlockEvents[eventsLen-1].Point.Slot {
+			tmpBlockEvents := make([]BlockfetchEvent, 0, eventsLen)
+			for _, tmpEvent := range ls.chainsyncBlockEvents {
+				if tmpEvent.Point.Slot >= e.Point.Slot {
+					break
+				}
+				tmpBlockEvents = append(tmpBlockEvents, tmpEvent)
 			}
-			tmpBlockEvents = append(tmpBlockEvents, tmpEvent)
+			ls.chainsyncBlockEvents = tmpBlockEvents
 		}
-		ls.chainsyncBlockEvents = tmpBlockEvents
 	}
 	ls.chainsyncBlockEvents = append(
 		ls.chainsyncBlockEvents,
