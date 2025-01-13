@@ -3,7 +3,7 @@ module github.com/blinklabs-io/dingo
 go 1.22.9
 
 require (
-	connectrpc.com/connect v1.17.0
+	connectrpc.com/connect v1.18.1
 	connectrpc.com/grpchealth v1.3.0
 	connectrpc.com/grpcreflect v1.2.0
 	github.com/blinklabs-io/gouroboros v0.107.1
