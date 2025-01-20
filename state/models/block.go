@@ -31,6 +31,7 @@ type Block struct {
 	Number uint64 `gorm:"index"`
 	Hash   []byte `gorm:"index:slot_hash"`
 	Type   uint
+	Nonce  []byte
 	Cbor   []byte `gorm:"-"` // This is here for convenience but not represented in the metadata DB
 }
 

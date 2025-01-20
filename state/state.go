@@ -67,6 +67,7 @@ type LedgerState struct {
 	currentEpoch                models.Epoch
 	currentEra                  eras.EraDesc
 	currentTip                  ochainsync.Tip
+	currentTipBlockNonce        []byte
 	metrics                     stateMetrics
 	chainsyncHeaderPoints       []ocommon.Point
 	chainsyncBlockEvents        []BlockfetchEvent
@@ -319,6 +320,10 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 	if err != nil {
 		return err
 	}
+	// Reload tip
+	if err := ls.loadTip(); err != nil {
+		return err
+	}
 	// Generate event
 	ls.config.EventBus.Publish(
 		ChainRollbackEventType,
@@ -499,6 +504,8 @@ func (ls *LedgerState) addBlock(txn *database.Txn, block models.Block) error {
 	if err := models.TipUpdateTxn(txn, ls.currentTip); err != nil {
 		return err
 	}
+	// Update tip block nonce
+	ls.currentTipBlockNonce = block.Nonce
 	// Update metrics
 	ls.metrics.blockNum.Set(float64(block.Number))
 	ls.metrics.slotNum.Set(float64(block.Slot))
@@ -518,14 +525,6 @@ func (ls *LedgerState) removeBlock(
 	key := models.BlockBlobKey(block.Slot, block.Hash)
 	err := txn.Blob().Delete(key)
 	if err != nil {
-		return err
-	}
-	// Update tip
-	ls.currentTip = ochainsync.Tip{
-		Point:       ocommon.NewPoint(block.Slot, block.Hash),
-		BlockNumber: block.Number,
-	}
-	if err := models.TipUpdateTxn(txn, ls.currentTip); err != nil {
 		return err
 	}
 	return nil
@@ -570,6 +569,14 @@ func (ls *LedgerState) loadTip() error {
 		return err
 	}
 	ls.currentTip = tmpTip
+	// Load tip block and set cached block nonce
+	if ls.currentTip.Point.Slot > 0 {
+		tipBlock, err := models.BlockByPoint(ls.db, ls.currentTip.Point)
+		if err != nil {
+			return err
+		}
+		ls.currentTipBlockNonce = tipBlock.Nonce
+	}
 	// Update metrics
 	ls.metrics.blockNum.Set(float64(ls.currentTip.BlockNumber))
 	ls.metrics.slotNum.Set(float64(ls.currentTip.Point.Slot))
