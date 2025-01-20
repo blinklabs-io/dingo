@@ -15,11 +15,14 @@
 package eras
 
 import (
+	"encoding/hex"
 	"fmt"
 
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/gouroboros/cbor"
+	"github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 )
 
@@ -31,6 +34,7 @@ var ConwayEraDesc = EraDesc{
 	PParamsUpdateFunc:       PParamsUpdateConway,
 	HardForkFunc:            HardForkConway,
 	EpochLengthFunc:         EpochLengthShelley,
+	CalculateEtaVFunc:       CalculateEtaVConway,
 }
 
 func DecodePParamsConway(data []byte) (any, error) {
@@ -86,4 +90,30 @@ func HardForkConway(
 	}
 	ret.UpdateFromGenesis(conwayGenesis)
 	return ret, nil
+}
+
+func CalculateEtaVConway(
+	nodeConfig *cardano.CardanoNodeConfig,
+	prevBlockNonce []byte,
+	block ledger.Block,
+) ([]byte, error) {
+	if len(prevBlockNonce) == 0 {
+		tmpNonce, err := hex.DecodeString(nodeConfig.ShelleyGenesisHash)
+		if err != nil {
+			return nil, err
+		}
+		prevBlockNonce = tmpNonce
+	}
+	h, ok := block.Header().(*conway.ConwayBlockHeader)
+	if !ok {
+		return nil, fmt.Errorf("unexpected block type")
+	}
+	tmpNonce, err := lcommon.CalculateRollingNonce(
+		prevBlockNonce,
+		h.Body.VrfResult.Output,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return tmpNonce.Bytes(), nil
 }

@@ -15,12 +15,15 @@
 package eras
 
 import (
+	"encoding/hex"
 	"fmt"
 
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/gouroboros/cbor"
+	"github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
 
 var BabbageEraDesc = EraDesc{
@@ -31,6 +34,7 @@ var BabbageEraDesc = EraDesc{
 	PParamsUpdateFunc:       PParamsUpdateBabbage,
 	HardForkFunc:            HardForkBabbage,
 	EpochLengthFunc:         EpochLengthShelley,
+	CalculateEtaVFunc:       CalculateEtaVBabbage,
 }
 
 func DecodePParamsBabbage(data []byte) (any, error) {
@@ -81,4 +85,30 @@ func HardForkBabbage(
 	}
 	ret := babbage.UpgradePParams(alonzoPParams)
 	return ret, nil
+}
+
+func CalculateEtaVBabbage(
+	nodeConfig *cardano.CardanoNodeConfig,
+	prevBlockNonce []byte,
+	block ledger.Block,
+) ([]byte, error) {
+	if len(prevBlockNonce) == 0 {
+		tmpNonce, err := hex.DecodeString(nodeConfig.ShelleyGenesisHash)
+		if err != nil {
+			return nil, err
+		}
+		prevBlockNonce = tmpNonce
+	}
+	h, ok := block.Header().(*babbage.BabbageBlockHeader)
+	if !ok {
+		return nil, fmt.Errorf("unexpected block type")
+	}
+	tmpNonce, err := lcommon.CalculateRollingNonce(
+		prevBlockNonce,
+		h.Body.VrfResult.Output,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return tmpNonce.Bytes(), nil
 }

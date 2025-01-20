@@ -391,6 +391,19 @@ func (ls *LedgerState) processBlockEvent(
 			}
 		}
 	}
+	// Calculate block rolling nonce
+	var blockNonce []byte
+	if ls.currentEra.CalculateEtaVFunc != nil {
+		tmpNonce, err := ls.currentEra.CalculateEtaVFunc(
+			ls.config.CardanoNodeConfig,
+			ls.currentTipBlockNonce,
+			e.Block,
+		)
+		if err != nil {
+			return err
+		}
+		blockNonce = tmpNonce
+	}
 	// Add block to database
 	tmpBlock := models.Block{
 		Slot: e.Point.Slot,
@@ -399,6 +412,7 @@ func (ls *LedgerState) processBlockEvent(
 		// block number isn't stored in the block itself
 		Number: e.Block.BlockNumber(),
 		Type:   e.Type,
+		Nonce:  blockNonce,
 		Cbor:   e.Block.Cbor(),
 	}
 	if err := ls.addBlock(txn, tmpBlock); err != nil {

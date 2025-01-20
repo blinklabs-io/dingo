@@ -14,7 +14,11 @@
 
 package eras
 
-import "github.com/blinklabs-io/dingo/config/cardano"
+import (
+	"github.com/blinklabs-io/dingo/config/cardano"
+
+	"github.com/blinklabs-io/gouroboros/ledger"
+)
 
 type EraDesc struct {
 	Id                      uint
@@ -24,6 +28,7 @@ type EraDesc struct {
 	PParamsUpdateFunc       func(any, any) (any, error)
 	HardForkFunc            func(*cardano.CardanoNodeConfig, any) (any, error)
 	EpochLengthFunc         func(*cardano.CardanoNodeConfig) (uint, uint, error)
+	CalculateEtaVFunc       func(*cardano.CardanoNodeConfig, []byte, ledger.Block) ([]byte, error)
 }
 
 var Eras = []EraDesc{

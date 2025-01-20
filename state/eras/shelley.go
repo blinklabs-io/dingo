@@ -15,10 +15,14 @@
 package eras
 
 import (
+	"encoding/hex"
 	"fmt"
 
 	"github.com/blinklabs-io/dingo/config/cardano"
+
 	"github.com/blinklabs-io/gouroboros/cbor"
+	"github.com/blinklabs-io/gouroboros/ledger"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 )
 
@@ -30,6 +34,7 @@ var ShelleyEraDesc = EraDesc{
 	PParamsUpdateFunc:       PParamsUpdateShelley,
 	HardForkFunc:            HardForkShelley,
 	EpochLengthFunc:         EpochLengthShelley,
+	CalculateEtaVFunc:       CalculateEtaVShelley,
 }
 
 func DecodePParamsShelley(data []byte) (any, error) {
@@ -92,4 +97,30 @@ func EpochLengthShelley(
 	return uint(shelleyGenesis.SlotLength * 1000),
 		uint(shelleyGenesis.EpochLength),
 		nil
+}
+
+func CalculateEtaVShelley(
+	nodeConfig *cardano.CardanoNodeConfig,
+	prevBlockNonce []byte,
+	block ledger.Block,
+) ([]byte, error) {
+	if len(prevBlockNonce) == 0 {
+		tmpNonce, err := hex.DecodeString(nodeConfig.ShelleyGenesisHash)
+		if err != nil {
+			return nil, err
+		}
+		prevBlockNonce = tmpNonce
+	}
+	h, ok := block.Header().(*shelley.ShelleyBlockHeader)
+	if !ok {
+		return nil, fmt.Errorf("unexpected block type")
+	}
+	tmpNonce, err := lcommon.CalculateRollingNonce(
+		prevBlockNonce,
+		h.Body.NonceVrf.Output,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return tmpNonce.Bytes(), nil
 }
