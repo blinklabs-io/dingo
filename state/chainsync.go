@@ -20,6 +20,8 @@ import (
 	"math/big"
 	"time"
 
+	"github.com/blinklabs-io/gouroboros/ledger"
+
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/state/models"
@@ -250,6 +252,70 @@ func (ls *LedgerState) validateBlock(e BlockfetchEvent) error {
 			)
 		}
 	}
+	// TODO: actually validate here
+	tmpBlock := models.Block{
+		Slot: e.Point.Slot,
+		Hash: e.Point.Hash,
+		// TODO: figure out something for Byron. this won't work, since the
+		// block number isn't stored in the block itself
+		Number: e.Block.BlockNumber(),
+		Type:   e.Type,
+		Cbor:   e.Block.Cbor(),
+	}
+	if e.Block.Era().Id >= 5 { // Babbage
+		ls.config.Logger.Debug(
+			"attempting block validation...",
+			"block_number", tmpBlock.Number,
+			"slot_number", tmpBlock.Slot,
+		)
+		// Validate block
+		headerCbor := e.Block.Header().Cbor()
+		header, err := ledger.NewBabbageBlockHeaderFromCbor(
+			headerCbor,
+		)
+		if err != nil {
+			ls.config.Logger.Debug("error getting block header")
+			return fmt.Errorf("error getting block header")
+		}
+		vrfResult := header.Body.VrfResult.([]interface{})
+		// TODO: figure out derivation here
+		vrfOutputBytes := vrfResult[0].([]byte)
+		verifyError, isValid, vrfHex, blockNo, slotNo := ledger.VerifyBlock(ledger.BlockHexCbor{
+			HeaderCbor:    hex.EncodeToString(headerCbor),
+			Eta0:          hex.EncodeToString(vrfOutputBytes),
+			Spk:           int(129600), // TODO: get from protocol params
+			BlockBodyCbor: hex.EncodeToString(tmpBlock.Cbor),
+		})
+		if verifyError != nil {
+			ls.config.Logger.Debug(
+				fmt.Sprintf(
+					"failed block validation: %+v, isValid: %+v, vrfHex: %s",
+					verifyError, isValid, vrfHex,
+				),
+				"block_number", fmt.Sprintf("%d", tmpBlock.Number),
+				"slot_number", fmt.Sprintf("%d", tmpBlock.Slot),
+				"block_hash", fmt.Sprintf("%x", tmpBlock.Hash),
+			)
+			// TODO: return verifyError
+		} else if !isValid {
+			ls.config.Logger.Debug(
+				"invalid block found",
+				"block_number", fmt.Sprintf("%d", blockNo),
+				"slot_number", fmt.Sprintf("%d", slotNo),
+				"block_hash", fmt.Sprintf("%x", tmpBlock.Hash),
+				"vrf_hash", vrfHex,
+			)
+		} else {
+			ls.config.Logger.Debug(
+				"validated block",
+				"block_number", fmt.Sprintf("%d", blockNo),
+				"slot_number", fmt.Sprintf("%d", slotNo),
+				"block_hash", fmt.Sprintf("%x", tmpBlock.Hash),
+				"vrf_hash", vrfHex,
+			)
+		}
+	}
+
 	return nil
 }
 
@@ -431,6 +497,7 @@ func (ls *LedgerState) processBlockEvent(
 	if err := ls.processEpochRollover(txn, e); err != nil {
 		return err
 	}
+
 	// TODO: track this using protocol params and hard forks
 	// Check for era change
 	if uint(e.Block.Era().Id) != ls.currentEra.Id {
