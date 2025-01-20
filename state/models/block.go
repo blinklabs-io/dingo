@@ -18,8 +18,11 @@ import (
 	"encoding/hex"
 	"errors"
 	"math/big"
+	"slices"
 
 	"github.com/blinklabs-io/dingo/database"
+
+	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/dgraph-io/badger/v4"
@@ -116,10 +119,20 @@ func BlockBlobKey(slot uint64, hash []byte) []byte {
 	return key
 }
 
+func BlockBlobMetadataKey(baseKey []byte) []byte {
+	return slices.Concat(baseKey, []byte("_metadata"))
+}
+
 func BlockBlobKeyHashHex(slot uint64, hashHex string) ([]byte, error) {
 	hashBytes, err := hex.DecodeString(hashHex)
 	if err != nil {
 		return nil, err
 	}
 	return BlockBlobKey(slot, hashBytes), nil
+}
+
+type BlockBlobMetadata struct {
+	cbor.StructAsArray
+	Type   uint
+	Height uint64
 }

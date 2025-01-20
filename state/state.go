@@ -492,6 +492,19 @@ func (ls *LedgerState) addBlock(txn *database.Txn, block models.Block) error {
 	if err != nil {
 		return err
 	}
+	metadataKey := models.BlockBlobMetadataKey(key)
+	tmpMetadata := models.BlockBlobMetadata{
+		Type:   block.Type,
+		Height: block.Number,
+	}
+	tmpMetadataBytes, err := cbor.Encode(tmpMetadata)
+	if err != nil {
+		return err
+	}
+	err = txn.Blob().Set(metadataKey, tmpMetadataBytes)
+	if err != nil {
+		return err
+	}
 	// Add to metadata DB
 	if result := txn.Metadata().Create(&block); result.Error != nil {
 		return result.Error
@@ -524,6 +537,11 @@ func (ls *LedgerState) removeBlock(
 	// Remove from blob DB
 	key := models.BlockBlobKey(block.Slot, block.Hash)
 	err := txn.Blob().Delete(key)
+	if err != nil {
+		return err
+	}
+	metadataKey := models.BlockBlobMetadataKey(key)
+	err = txn.Blob().Delete(metadataKey)
 	if err != nil {
 		return err
 	}
