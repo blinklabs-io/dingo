@@ -1,6 +1,6 @@
 module github.com/blinklabs-io/dingo
 
-go 1.22.9
+go 1.22.11
 
 require (
 	connectrpc.com/connect v1.18.1
