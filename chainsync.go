@@ -43,7 +43,7 @@ func (n *Node) chainsyncClientConnOpts() []ochainsync.ChainSyncOptionFunc {
 		ochainsync.WithRollForwardFunc(n.chainsyncClientRollForward),
 		ochainsync.WithRollBackwardFunc(n.chainsyncClientRollBackward),
 		// Enable pipelining of RequestNext messages to speed up chainsync
-		ochainsync.WithPipelineLimit(10),
+		ochainsync.WithPipelineLimit(50),
 	}
 }
 
