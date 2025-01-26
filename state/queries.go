@@ -52,10 +52,7 @@ func (ls *LedgerState) queryBlock(
 }
 
 func (ls *LedgerState) querySystemStart() (any, error) {
-	shelleyGenesis, err := ls.config.CardanoNodeConfig.ShelleyGenesis()
-	if err != nil {
-		return nil, err
-	}
+	shelleyGenesis := ls.config.CardanoNodeConfig.ShelleyGenesis()
 	ret := olocalstatequery.SystemStartResult{
 		Year:        shelleyGenesis.SystemStart.Year(),
 		Day:         shelleyGenesis.SystemStart.YearDay(),
@@ -135,10 +132,7 @@ func (ls *LedgerState) queryShelley(
 }
 
 func (ls *LedgerState) queryShelleyGenesisConfig() (any, error) {
-	shelleyGenesis, err := ls.config.CardanoNodeConfig.ShelleyGenesis()
-	if err != nil {
-		return nil, err
-	}
+	shelleyGenesis := ls.config.CardanoNodeConfig.ShelleyGenesis()
 	return []any{shelleyGenesis}, nil
 }
 

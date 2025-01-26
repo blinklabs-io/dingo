@@ -84,10 +84,7 @@ func HardForkAlonzo(
 		)
 	}
 	ret := alonzo.UpgradePParams(maryPParams)
-	alonzoGenesis, err := nodeConfig.AlonzoGenesis()
-	if err != nil {
-		return nil, err
-	}
+	alonzoGenesis := nodeConfig.AlonzoGenesis()
 	ret.UpdateFromGenesis(alonzoGenesis)
 	return ret, nil
 }

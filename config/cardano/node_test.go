@@ -45,45 +45,39 @@ func TestCardanoNodeConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %s", err)
 	}
-	if !reflect.DeepEqual(cfg, expectedCardanoNodeConfig) {
+	// Create temp config without parsed genesis files to make comparison easier
+	tmpCfg := *cfg
+	tmpCfg.byronGenesis = nil
+	tmpCfg.shelleyGenesis = nil
+	tmpCfg.alonzoGenesis = nil
+	tmpCfg.conwayGenesis = nil
+	if !reflect.DeepEqual(&tmpCfg, expectedCardanoNodeConfig) {
 		t.Fatalf(
 			"did not get expected object\n     got: %#v\n  wanted: %#v\n",
-			cfg,
+			tmpCfg,
 			expectedCardanoNodeConfig,
 		)
 	}
 	t.Run("Byron genesis", func(t *testing.T) {
-		g, err := cfg.ByronGenesis()
-		if err != nil {
-			t.Fatalf("unexpected error: %s", err)
-		}
+		g := cfg.ByronGenesis()
 		if g == nil {
 			t.Fatalf("got nil instead of ByronGenesis")
 		}
 	})
 	t.Run("Shelley genesis", func(t *testing.T) {
-		g, err := cfg.ShelleyGenesis()
-		if err != nil {
-			t.Fatalf("unexpected error: %s", err)
-		}
+		g := cfg.ShelleyGenesis()
 		if g == nil {
 			t.Fatalf("got nil instead of ShelleyGenesis")
 		}
 	})
 	t.Run("Alonzo genesis", func(t *testing.T) {
-		g, err := cfg.AlonzoGenesis()
-		if err != nil {
-			t.Fatalf("unexpected error: %s", err)
-		}
+		g := cfg.AlonzoGenesis()
 		if g == nil {
 			t.Fatalf("got nil instead of AlonzoGenesis")
 		}
 	})
 	t.Run("Conway genesis", func(t *testing.T) {
-		g, err := cfg.ConwayGenesis()
-		if err != nil {
-			t.Fatalf("unexpected error: %s", err)
-		}
+		g := cfg.ConwayGenesis()
 		if g == nil {
 			t.Fatalf("got nil instead of ConwayGenesis")
 		}
