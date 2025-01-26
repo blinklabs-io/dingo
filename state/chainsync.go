@@ -17,12 +17,16 @@ package state
 import (
 	"encoding/hex"
 	"fmt"
+	"math/big"
 	"time"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/state/models"
+
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	"gorm.io/gorm"
 )
 
 const (
@@ -272,12 +276,19 @@ func (ls *LedgerState) processGenesisBlock(
 		if err != nil {
 			return err
 		}
+		// Use Shelley genesis hash for initial epoch nonce for post-Byron eras
+		var tmpNonce []byte
+		if ls.currentEra.Id > 0 { // Byron
+			genesisHashBytes, _ := hex.DecodeString(ls.config.CardanoNodeConfig.ShelleyGenesisHash)
+			tmpNonce = genesisHashBytes
+		}
 		newEpoch := models.Epoch{
 			EpochId:       0,
 			EraId:         ls.currentEra.Id,
 			StartSlot:     0,
 			SlotLength:    epochSlotLength,
 			LengthInSlots: epochLength,
+			Nonce:         tmpNonce,
 		}
 		if result := txn.Metadata().Create(&newEpoch); result.Error != nil {
 			return result.Error
@@ -312,6 +323,50 @@ func (ls *LedgerState) processGenesisBlock(
 	return nil
 }
 
+func (ls *LedgerState) calculateEpochNonce(
+	txn *database.Txn,
+	epochStartSlot uint64,
+) ([]byte, error) {
+	// Use Shelley genesis hash for initial epoch nonce
+	if len(ls.currentEpoch.Nonce) == 0 && ls.currentEra.Id > 0 { // Byron
+		genesisHashBytes, err := hex.DecodeString(ls.config.CardanoNodeConfig.ShelleyGenesisHash)
+		return genesisHashBytes, err
+	}
+	// Calculate stability window
+	byronGenesis := ls.config.CardanoNodeConfig.ByronGenesis()
+	shelleyGenesis := ls.config.CardanoNodeConfig.ShelleyGenesis()
+	stabilityWindow := new(big.Rat).Quo(
+		big.NewRat(
+			int64(3*byronGenesis.ProtocolConsts.K),
+			1,
+		),
+		shelleyGenesis.ActiveSlotsCoeff.Rat,
+	).Num().Uint64()
+	stabilityWindowStartSlot := epochStartSlot - stabilityWindow
+	// Get last block before stability window
+	blockBeforeStabilityWindow, err := models.BlockBeforeSlotTxn(txn, stabilityWindowStartSlot)
+	if err != nil {
+		return nil, err
+	}
+	// Get hash for block *second* from last in previous epoch
+	// We don't track the prev_hash (yet), so we have to get the last block and then get
+	// the previous block by number
+	blockBeforePrevEpoch, err := models.BlockBeforeSlotTxn(txn, ls.currentEpoch.StartSlot)
+	if err != nil {
+		if err == gorm.ErrRecordNotFound {
+			return blockBeforeStabilityWindow.Nonce, nil
+		}
+		return nil, err
+	}
+	blockBeforeBlock, err := models.BlockByNumberTxn(txn, blockBeforePrevEpoch.Number-1)
+	if err != nil {
+		return nil, err
+	}
+	// Calculate nonce from inputs
+	ret, err := lcommon.CalculateEpochNonce(blockBeforeStabilityWindow.Nonce, blockBeforeBlock.Hash, nil)
+	return ret.Bytes(), err
+}
+
 func (ls *LedgerState) processEpochRollover(
 	txn *database.Txn,
 	e BlockfetchEvent,
@@ -331,14 +386,20 @@ func (ls *LedgerState) processEpochRollover(
 		if err != nil {
 			return err
 		}
+		epochStartSlot := ls.currentEpoch.StartSlot + uint64(
+			ls.currentEpoch.LengthInSlots,
+		)
+		tmpNonce, err := ls.calculateEpochNonce(txn, epochStartSlot)
+		if err != nil {
+			return err
+		}
 		newEpoch := models.Epoch{
 			EpochId:       ls.currentEpoch.EpochId + 1,
 			EraId:         uint(e.Block.Era().Id),
 			SlotLength:    epochSlotLength,
 			LengthInSlots: epochLength,
-			StartSlot: ls.currentEpoch.StartSlot + uint64(
-				ls.currentEpoch.LengthInSlots,
-			),
+			StartSlot:     epochStartSlot,
+			Nonce:         tmpNonce,
 		}
 		if result := txn.Metadata().Create(&newEpoch); result.Error != nil {
 			return result.Error

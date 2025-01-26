@@ -25,6 +25,7 @@ type Epoch struct {
 	StartSlot     uint64
 	SlotLength    uint
 	LengthInSlots uint
+	Nonce         []byte
 }
 
 func (Epoch) TableName() string {
