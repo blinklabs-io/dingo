@@ -109,6 +109,29 @@ func BlockByNumberTxn(txn *database.Txn, blockNumber uint64) (Block, error) {
 	return tmpBlock, nil
 }
 
+func BlockBeforeSlot(db database.Database, slotNumber uint64) (Block, error) {
+	var ret Block
+	txn := db.Transaction(false)
+	err := txn.Do(func(txn *database.Txn) error {
+		var err error
+		ret, err = BlockBeforeSlotTxn(txn, slotNumber)
+		return err
+	})
+	return ret, err
+}
+
+func BlockBeforeSlotTxn(txn *database.Txn, slotNumber uint64) (Block, error) {
+	var tmpBlock Block
+	result := txn.Metadata().Order("id DESC").Where("slot < ?", slotNumber).First(&tmpBlock)
+	if result.Error != nil {
+		return tmpBlock, result.Error
+	}
+	if err := tmpBlock.loadCbor(txn); err != nil {
+		return tmpBlock, err
+	}
+	return tmpBlock, nil
+}
+
 func BlockBlobKey(slot uint64, hash []byte) []byte {
 	key := []byte("b")
 	// Convert slot to bytes
