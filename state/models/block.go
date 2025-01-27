@@ -39,36 +39,17 @@ const (
 var ErrBlockNotFound = fmt.Errorf("block not found")
 
 type Block struct {
-	Slot   uint64
-	Number uint64
-	Hash   []byte
-	Type   uint
-	Nonce  []byte
-	Cbor   []byte
-}
-
-func (Block) TableName() string {
-	return "block"
+	Slot     uint64
+	Number   uint64
+	Hash     []byte
+	Type     uint
+	PrevHash []byte
+	Nonce    []byte
+	Cbor     []byte
 }
 
 func (b Block) Decode() (ledger.Block, error) {
 	return ledger.NewBlockFromCbor(b.Type, b.Cbor)
-}
-
-func (b *Block) loadCbor(txn *database.Txn) error {
-	key := BlockBlobKey(b.Slot, b.Hash)
-	item, err := txn.Blob().Get(key)
-	if err != nil {
-		return err
-	}
-	b.Cbor, err = item.ValueCopy(nil)
-	if err != nil {
-		if errors.Is(err, badger.ErrKeyNotFound) {
-			return nil
-		}
-		return err
-	}
-	return nil
 }
 
 func BlockCreateTxn(txn *database.Txn, block Block) error {
@@ -85,9 +66,10 @@ func BlockCreateTxn(txn *database.Txn, block Block) error {
 	// Block metadata by point
 	metadataKey := BlockBlobMetadataKey(key)
 	tmpMetadata := BlockBlobMetadata{
-		Type:   block.Type,
-		Height: block.Number,
-		Nonce:  block.Nonce,
+		Type:     block.Type,
+		Height:   block.Number,
+		PrevHash: block.PrevHash,
+		Nonce:    block.Nonce,
 	}
 	tmpMetadataBytes, err := cbor.Encode(tmpMetadata)
 	if err != nil {
@@ -159,6 +141,7 @@ func blockByKey(txn *database.Txn, blockKey []byte) (Block, error) {
 	}
 	ret.Type = tmpMetadata.Type
 	ret.Number = tmpMetadata.Height
+	ret.PrevHash = tmpMetadata.PrevHash
 	ret.Nonce = tmpMetadata.Nonce
 	return ret, nil
 }
@@ -351,7 +334,8 @@ func BlockBlobKeyHashHex(slot uint64, hashHex string) ([]byte, error) {
 
 type BlockBlobMetadata struct {
 	cbor.StructAsArray
-	Type   uint
-	Height uint64
-	Nonce  []byte
+	Type     uint
+	Height   uint64
+	PrevHash []byte
+	Nonce    []byte
 }

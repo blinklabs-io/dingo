@@ -347,22 +347,16 @@ func (ls *LedgerState) calculateEpochNonce(
 	if err != nil {
 		return nil, err
 	}
-	// Get hash for block *second* from last in previous epoch
-	// We don't track the prev_hash (yet), so we have to get the last block and then get
-	// the previous block by number
-	blockBeforePrevEpoch, err := models.BlockBeforeSlotTxn(txn, ls.currentEpoch.StartSlot)
+	// Get last block in previous epoch
+	blockLastPrevEpoch, err := models.BlockBeforeSlotTxn(txn, ls.currentEpoch.StartSlot)
 	if err != nil {
 		if err == models.ErrBlockNotFound {
 			return blockBeforeStabilityWindow.Nonce, nil
 		}
 		return nil, err
 	}
-	blockBeforeBlock, err := models.BlockByNumberTxn(txn, blockBeforePrevEpoch.Number-1)
-	if err != nil {
-		return nil, err
-	}
 	// Calculate nonce from inputs
-	ret, err := lcommon.CalculateEpochNonce(blockBeforeStabilityWindow.Nonce, blockBeforeBlock.Hash, nil)
+	ret, err := lcommon.CalculateEpochNonce(blockBeforeStabilityWindow.Nonce, blockLastPrevEpoch.PrevHash, nil)
 	return ret.Bytes(), err
 }
 
@@ -462,15 +456,20 @@ func (ls *LedgerState) processBlockEvent(
 		blockNonce = tmpNonce
 	}
 	// Add block to database
+	prevHashBytes, err := hex.DecodeString(e.Block.PrevHash())
+	if err != nil {
+		return err
+	}
 	tmpBlock := models.Block{
 		Slot: e.Point.Slot,
 		Hash: e.Point.Hash,
 		// TODO: figure out something for Byron. this won't work, since the
 		// block number isn't stored in the block itself
-		Number: e.Block.BlockNumber(),
-		Type:   e.Type,
-		Nonce:  blockNonce,
-		Cbor:   e.Block.Cbor(),
+		Number:   e.Block.BlockNumber(),
+		Type:     e.Type,
+		PrevHash: prevHashBytes,
+		Nonce:    blockNonce,
+		Cbor:     e.Block.Cbor(),
 	}
 	if err := ls.addBlock(txn, tmpBlock); err != nil {
 		return fmt.Errorf("add block: %w", err)
