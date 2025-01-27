@@ -289,10 +289,7 @@ func (ls *LedgerState) processGenesisBlock(
 			"component", "ledger",
 		)
 		// Record genesis UTxOs
-		byronGenesis, err := ls.config.CardanoNodeConfig.ByronGenesis()
-		if err != nil {
-			return err
-		}
+		byronGenesis := ls.config.CardanoNodeConfig.ByronGenesis()
 		genesisUtxos, err := byronGenesis.GenesisUtxos()
 		if err != nil {
 			return err

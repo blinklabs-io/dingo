@@ -79,10 +79,7 @@ func HardForkShelley(
 	// There's no Byron protocol parameters to upgrade from, so this is mostly
 	// a dummy call for consistency
 	ret := shelley.UpgradePParams(nil)
-	shelleyGenesis, err := nodeConfig.ShelleyGenesis()
-	if err != nil {
-		return nil, err
-	}
+	shelleyGenesis := nodeConfig.ShelleyGenesis()
 	ret.UpdateFromGenesis(shelleyGenesis)
 	return ret, nil
 }
@@ -90,10 +87,7 @@ func HardForkShelley(
 func EpochLengthShelley(
 	nodeConfig *cardano.CardanoNodeConfig,
 ) (uint, uint, error) {
-	shelleyGenesis, err := nodeConfig.ShelleyGenesis()
-	if err != nil {
-		return 0, 0, err
-	}
+	shelleyGenesis := nodeConfig.ShelleyGenesis()
 	return uint(shelleyGenesis.SlotLength * 1000),
 		uint(shelleyGenesis.EpochLength),
 		nil
