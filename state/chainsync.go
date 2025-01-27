@@ -252,6 +252,10 @@ func (ls *LedgerState) validateBlock(e BlockfetchEvent) error {
 			)
 		}
 	}
+	return nil
+}
+
+func (ls *LedgerState) verifyBlock(e BlockfetchEvent) error {
 	// TODO: actually validate here
 	tmpBlock := models.Block{
 		Slot: e.Point.Slot,
@@ -265,27 +269,23 @@ func (ls *LedgerState) validateBlock(e BlockfetchEvent) error {
 	if e.Block.Era().Id >= 5 { // Babbage
 		ls.config.Logger.Debug(
 			"attempting block validation...",
+			"block_hash", fmt.Sprintf("%x", tmpBlock.Hash),
 			"block_number", tmpBlock.Number,
+			"epoch_nonce", fmt.Sprintf("%x", ls.currentEpoch.Nonce),
 			"slot_number", tmpBlock.Slot,
 		)
 		// Validate block
 		headerCbor := e.Block.Header().Cbor()
-		header, err := ledger.NewBabbageBlockHeaderFromCbor(
-			headerCbor,
-		)
-		if err != nil {
-			ls.config.Logger.Debug("error getting block header")
-			return fmt.Errorf("error getting block header")
-		}
-		vrfResult := header.Body.VrfResult.([]interface{})
-		// TODO: figure out derivation here
-		vrfOutputBytes := vrfResult[0].([]byte)
-		verifyError, isValid, vrfHex, blockNo, slotNo := ledger.VerifyBlock(ledger.BlockHexCbor{
+		blockHexCbor := ledger.BlockHexCbor{
 			HeaderCbor:    hex.EncodeToString(headerCbor),
-			Eta0:          hex.EncodeToString(vrfOutputBytes),
+			Eta0:          fmt.Sprintf("%x", ls.currentEpoch.Nonce),
 			Spk:           int(129600), // TODO: get from protocol params
 			BlockBodyCbor: hex.EncodeToString(tmpBlock.Cbor),
-		})
+		}
+		ls.config.Logger.Debug(
+			fmt.Sprintf("blockHexCbor: %+v", blockHexCbor),
+		)
+		verifyError, isValid, vrfHex, blockNo, slotNo := ledger.VerifyBlock(blockHexCbor)
 		if verifyError != nil {
 			ls.config.Logger.Debug(
 				fmt.Sprintf(
@@ -296,6 +296,7 @@ func (ls *LedgerState) validateBlock(e BlockfetchEvent) error {
 				"slot_number", fmt.Sprintf("%d", tmpBlock.Slot),
 				"block_hash", fmt.Sprintf("%x", tmpBlock.Hash),
 			)
+			panic(verifyError)
 			// TODO: return verifyError
 		} else if !isValid {
 			ls.config.Logger.Debug(
@@ -305,6 +306,7 @@ func (ls *LedgerState) validateBlock(e BlockfetchEvent) error {
 				"block_hash", fmt.Sprintf("%x", tmpBlock.Hash),
 				"vrf_hash", vrfHex,
 			)
+			return fmt.Errorf("invalid block found")
 		} else {
 			ls.config.Logger.Debug(
 				"validated block",
@@ -314,6 +316,14 @@ func (ls *LedgerState) validateBlock(e BlockfetchEvent) error {
 				"vrf_hash", vrfHex,
 			)
 		}
+	} else {
+		ls.config.Logger.Debug(
+			"skipping block validation...",
+			"block_number", fmt.Sprintf("%d", tmpBlock.Number),
+			"slot_number", fmt.Sprintf("%d", tmpBlock.Slot),
+			"epoch_nonce", fmt.Sprintf("%x", ls.currentEpoch.Nonce),
+			"era_id", fmt.Sprintf("%d", e.Block.Era().Id),
+		)
 	}
 
 	return nil
@@ -508,6 +518,10 @@ func (ls *LedgerState) processBlockEvent(
 				return err
 			}
 		}
+	}
+	// Check that the block fits on our current chain
+	if err := ls.verifyBlock(e); err != nil {
+		return err
 	}
 	// Calculate block rolling nonce
 	var blockNonce []byte
