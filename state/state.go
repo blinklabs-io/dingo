@@ -15,7 +15,6 @@
 package state
 
 import (
-	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -85,6 +84,9 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 		// We do this so we don't have to add guards around every log operation
 		cfg.Logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
 	}
+	// Init metrics
+	ls.metrics.init(ls.config.PromRegistry)
+	// Load database
 	if cfg.DataDir == "" {
 		db, err := database.NewInMemory(ls.config.Logger)
 		if db == nil {
@@ -159,8 +161,6 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 		BlockfetchEventType,
 		ls.handleEventBlockfetch,
 	)
-	// Init metrics
-	ls.metrics.init(ls.config.PromRegistry)
 	// Schedule periodic process to purge consumed UTxOs outside of the rollback window
 	ls.scheduleCleanupConsumedUtxos()
 	// TODO: schedule process to scan/clean blob DB for keys that don't have a corresponding metadata DB entry
@@ -180,19 +180,27 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 }
 
 func (ls *LedgerState) recoverCommitTimestampConflict() error {
-	// Try to load last n blocks and rollback to the last one we can load
-	var tmpBlocks []models.Block
-	result := ls.db.Metadata().Order("id DESC").Limit(100).Find(&tmpBlocks)
-	if result.Error != nil {
-		return result.Error
+	// Load current tip
+	tmpTip, err := models.TipGet(ls.db)
+	if err != nil {
+		return err
 	}
-	for _, tmpBlock := range tmpBlocks {
+	// Try to load last n blocks and rollback to the last one we can load
+	recentBlocks, err := models.BlocksRecent(ls.db, 100)
+	if err != nil {
+		return err
+	}
+	for _, tmpBlock := range recentBlocks {
 		blockPoint := ocommon.NewPoint(
 			tmpBlock.Slot,
 			tmpBlock.Hash,
 		)
-		// Load individual block to also (attempt to) load CBOR
-		if _, err := models.BlockByPoint(ls.db, blockPoint); err == nil {
+		// Nothing to do if current tip is earlier than our latest block
+		if tmpTip.Point.Slot <= tmpBlock.Slot {
+			break
+		}
+		// Rollback block if current tip is ahead
+		if tmpTip.Point.Slot > tmpBlock.Slot {
 			if err2 := ls.rollback(blockPoint); err2 != nil {
 				return fmt.Errorf(
 					"failed to rollback: %s",
@@ -277,13 +285,9 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 	txn := ls.db.Transaction(true)
 	err := txn.Do(func(txn *database.Txn) error {
 		// Remove rolled-back blocks in reverse order
-		var tmpBlocks []models.Block
-		result := txn.Metadata().
-			Where("slot > ?", point.Slot).
-			Order("slot DESC").
-			Find(&tmpBlocks)
-		if result.Error != nil {
-			return fmt.Errorf("query blocks: %w", result.Error)
+		tmpBlocks, err := models.BlocksAfterSlotTxn(txn, point.Slot)
+		if err != nil {
+			return fmt.Errorf("query blocks: %w", err)
 		}
 		for _, tmpBlock := range tmpBlocks {
 			if err := ls.removeBlock(txn, tmpBlock); err != nil {
@@ -292,7 +296,7 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 		}
 		// Delete rolled-back UTxOs
 		var tmpUtxos []models.Utxo
-		result = txn.Metadata().
+		result := txn.Metadata().
 			Where("added_slot > ?", point.Slot).
 			Order("id DESC").
 			Find(&tmpUtxos)
@@ -314,6 +318,20 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 				"restore spent UTxOs after rollback: %w",
 				result.Error,
 			)
+		}
+		// Update tip
+		recentBlocks, err := models.BlocksRecentTxn(txn, 1)
+		if err != nil {
+			return err
+		}
+		if len(recentBlocks) > 0 {
+			ls.currentTip = ochainsync.Tip{
+				Point:       ocommon.NewPoint(recentBlocks[0].Slot, recentBlocks[0].Hash),
+				BlockNumber: recentBlocks[0].Number,
+			}
+			if err := models.TipUpdateTxn(txn, ls.currentTip); err != nil {
+				return err
+			}
 		}
 		return nil
 	})
@@ -486,28 +504,9 @@ func (ls *LedgerState) consumeUtxo(
 }
 
 func (ls *LedgerState) addBlock(txn *database.Txn, block models.Block) error {
-	// Add block to blob DB
-	key := models.BlockBlobKey(block.Slot, block.Hash)
-	err := txn.Blob().Set(key, block.Cbor)
-	if err != nil {
+	// Add block to database
+	if err := models.BlockCreateTxn(txn, block); err != nil {
 		return err
-	}
-	metadataKey := models.BlockBlobMetadataKey(key)
-	tmpMetadata := models.BlockBlobMetadata{
-		Type:   block.Type,
-		Height: block.Number,
-	}
-	tmpMetadataBytes, err := cbor.Encode(tmpMetadata)
-	if err != nil {
-		return err
-	}
-	err = txn.Blob().Set(metadataKey, tmpMetadataBytes)
-	if err != nil {
-		return err
-	}
-	// Add to metadata DB
-	if result := txn.Metadata().Create(&block); result.Error != nil {
-		return result.Error
 	}
 	// Update tip
 	ls.currentTip = ochainsync.Tip{
@@ -530,19 +529,7 @@ func (ls *LedgerState) removeBlock(
 	txn *database.Txn,
 	block models.Block,
 ) error {
-	// Remove from metadata DB
-	if result := txn.Metadata().Delete(&block); result.Error != nil {
-		return result.Error
-	}
-	// Remove from blob DB
-	key := models.BlockBlobKey(block.Slot, block.Hash)
-	err := txn.Blob().Delete(key)
-	if err != nil {
-		return err
-	}
-	metadataKey := models.BlockBlobMetadataKey(key)
-	err = txn.Blob().Delete(metadataKey)
-	if err != nil {
+	if err := models.BlockDeleteTxn(txn, block); err != nil {
 		return err
 	}
 	return nil
@@ -615,13 +602,9 @@ func (ls *LedgerState) GetBlock(point ocommon.Point) (*models.Block, error) {
 // RecentChainPoints returns the requested count of recent chain points in descending order. This is used mostly
 // for building a set of intersect points when acting as a chainsync client
 func (ls *LedgerState) RecentChainPoints(count int) ([]ocommon.Point, error) {
-	var tmpBlocks []models.Block
-	result := ls.db.Metadata().
-		Order("number DESC").
-		Limit(count).
-		Find(&tmpBlocks)
-	if result.Error != nil {
-		return nil, result.Error
+	tmpBlocks, err := models.BlocksRecent(ls.db, count)
+	if err != nil {
+		return nil, err
 	}
 	var ret []ocommon.Point
 	for _, tmpBlock := range tmpBlocks {
@@ -659,7 +642,7 @@ func (ls *LedgerState) GetIntersectPoint(
 			// Lookup block in metadata DB
 			tmpBlock, err := models.BlockByPoint(ls.db, point)
 			if err != nil {
-				if errors.Is(err, gorm.ErrRecordNotFound) {
+				if err == models.ErrBlockNotFound {
 					continue
 				}
 				return err
