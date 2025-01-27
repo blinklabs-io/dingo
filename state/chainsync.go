@@ -26,7 +26,6 @@ import (
 
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
-	"gorm.io/gorm"
 )
 
 const (
@@ -353,7 +352,7 @@ func (ls *LedgerState) calculateEpochNonce(
 	// the previous block by number
 	blockBeforePrevEpoch, err := models.BlockBeforeSlotTxn(txn, ls.currentEpoch.StartSlot)
 	if err != nil {
-		if err == gorm.ErrRecordNotFound {
+		if err == models.ErrBlockNotFound {
 			return blockBeforeStabilityWindow.Nonce, nil
 		}
 		return nil, err
