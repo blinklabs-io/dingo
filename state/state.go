@@ -326,7 +326,10 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 		}
 		if len(recentBlocks) > 0 {
 			ls.currentTip = ochainsync.Tip{
-				Point:       ocommon.NewPoint(recentBlocks[0].Slot, recentBlocks[0].Hash),
+				Point: ocommon.NewPoint(
+					recentBlocks[0].Slot,
+					recentBlocks[0].Hash,
+				),
 				BlockNumber: recentBlocks[0].Number,
 			}
 			if err := models.TipUpdateTxn(txn, ls.currentTip); err != nil {

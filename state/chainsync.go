@@ -278,7 +278,9 @@ func (ls *LedgerState) processGenesisBlock(
 		// Use Shelley genesis hash for initial epoch nonce for post-Byron eras
 		var tmpNonce []byte
 		if ls.currentEra.Id > 0 { // Byron
-			genesisHashBytes, _ := hex.DecodeString(ls.config.CardanoNodeConfig.ShelleyGenesisHash)
+			genesisHashBytes, _ := hex.DecodeString(
+				ls.config.CardanoNodeConfig.ShelleyGenesisHash,
+			)
 			tmpNonce = genesisHashBytes
 		}
 		newEpoch := models.Epoch{
@@ -328,7 +330,9 @@ func (ls *LedgerState) calculateEpochNonce(
 ) ([]byte, error) {
 	// Use Shelley genesis hash for initial epoch nonce
 	if len(ls.currentEpoch.Nonce) == 0 && ls.currentEra.Id > 0 { // Byron
-		genesisHashBytes, err := hex.DecodeString(ls.config.CardanoNodeConfig.ShelleyGenesisHash)
+		genesisHashBytes, err := hex.DecodeString(
+			ls.config.CardanoNodeConfig.ShelleyGenesisHash,
+		)
 		return genesisHashBytes, err
 	}
 	// Calculate stability window
@@ -343,12 +347,18 @@ func (ls *LedgerState) calculateEpochNonce(
 	).Num().Uint64()
 	stabilityWindowStartSlot := epochStartSlot - stabilityWindow
 	// Get last block before stability window
-	blockBeforeStabilityWindow, err := models.BlockBeforeSlotTxn(txn, stabilityWindowStartSlot)
+	blockBeforeStabilityWindow, err := models.BlockBeforeSlotTxn(
+		txn,
+		stabilityWindowStartSlot,
+	)
 	if err != nil {
 		return nil, err
 	}
 	// Get last block in previous epoch
-	blockLastPrevEpoch, err := models.BlockBeforeSlotTxn(txn, ls.currentEpoch.StartSlot)
+	blockLastPrevEpoch, err := models.BlockBeforeSlotTxn(
+		txn,
+		ls.currentEpoch.StartSlot,
+	)
 	if err != nil {
 		if err == models.ErrBlockNotFound {
 			return blockBeforeStabilityWindow.Nonce, nil
@@ -356,7 +366,11 @@ func (ls *LedgerState) calculateEpochNonce(
 		return nil, err
 	}
 	// Calculate nonce from inputs
-	ret, err := lcommon.CalculateEpochNonce(blockBeforeStabilityWindow.Nonce, blockLastPrevEpoch.PrevHash, nil)
+	ret, err := lcommon.CalculateEpochNonce(
+		blockBeforeStabilityWindow.Nonce,
+		blockLastPrevEpoch.PrevHash,
+		nil,
+	)
 	return ret.Bytes(), err
 }
 
