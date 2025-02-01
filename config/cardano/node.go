@@ -84,7 +84,9 @@ func (c *CardanoNodeConfig) loadGenesisConfigs() error {
 	if c.ShelleyGenesisFile != "" {
 		shelleyGenesisPath := path.Join(c.path, c.ShelleyGenesisFile)
 		// TODO: check genesis file hash
-		shelleyGenesis, err := shelley.NewShelleyGenesisFromFile(shelleyGenesisPath)
+		shelleyGenesis, err := shelley.NewShelleyGenesisFromFile(
+			shelleyGenesisPath,
+		)
 		if err != nil {
 			return err
 		}
