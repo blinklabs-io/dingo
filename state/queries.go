@@ -53,6 +53,9 @@ func (ls *LedgerState) queryBlock(
 
 func (ls *LedgerState) querySystemStart() (any, error) {
 	shelleyGenesis := ls.config.CardanoNodeConfig.ShelleyGenesis()
+	if shelleyGenesis == nil {
+		return nil, fmt.Errorf("unable to get shelley era genesis for system start")
+	}
 	ret := olocalstatequery.SystemStartResult{
 		Year:        shelleyGenesis.SystemStart.Year(),
 		Day:         shelleyGenesis.SystemStart.YearDay(),

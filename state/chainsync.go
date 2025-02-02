@@ -338,6 +338,9 @@ func (ls *LedgerState) calculateEpochNonce(
 	// Calculate stability window
 	byronGenesis := ls.config.CardanoNodeConfig.ByronGenesis()
 	shelleyGenesis := ls.config.CardanoNodeConfig.ShelleyGenesis()
+	if byronGenesis == nil || shelleyGenesis == nil {
+		return nil, fmt.Errorf("could not get genesis config")
+	}
 	stabilityWindow := new(big.Rat).Quo(
 		big.NewRat(
 			int64(3*byronGenesis.ProtocolConsts.K),
