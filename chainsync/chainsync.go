@@ -36,7 +36,7 @@ type State struct {
 	eventBus     *event.EventBus
 	ledgerState  *state.LedgerState
 	clients      map[ouroboros.ConnectionId]*ChainsyncClientState
-	clientConnId *ouroboros.ConnectionId // TODO: replace with handling of multiple chainsync clients
+	clientConnId *ouroboros.ConnectionId // TODO: replace with handling of multiple chainsync clients (#385)
 }
 
 func NewState(
@@ -79,17 +79,17 @@ func (s *State) RemoveClient(connId connection.ConnectionId) {
 	delete(s.clients, connId)
 }
 
-// TODO: replace with handling of multiple chainsync clients
+// TODO: replace with handling of multiple chainsync clients (#385)
 func (s *State) GetClientConnId() *ouroboros.ConnectionId {
 	return s.clientConnId
 }
 
-// TODO: replace with handling of multiple chainsync clients
+// TODO: replace with handling of multiple chainsync clients (#385)
 func (s *State) SetClientConnId(connId ouroboros.ConnectionId) {
 	s.clientConnId = &connId
 }
 
-// TODO: replace with handling of multiple chainsync clients
+// TODO: replace with handling of multiple chainsync clients (#385)
 func (s *State) RemoveClientConnId(connId ouroboros.ConnectionId) {
 	if s.clientConnId != nil && *s.clientConnId == connId {
 		s.clientConnId = nil

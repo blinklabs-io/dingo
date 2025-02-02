@@ -107,7 +107,6 @@ func NewConfig(opts ...ConfigOptionFunc) Config {
 		// Default logger will throw away logs
 		// We do this so we don't have to add guards around every log operation
 		logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		// TODO: add defaults
 	}
 	// Apply options
 	for _, opt := range opts {

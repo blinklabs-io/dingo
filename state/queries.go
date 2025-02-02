@@ -63,7 +63,7 @@ func (ls *LedgerState) querySystemStart() (any, error) {
 
 func (ls *LedgerState) queryChainBlockNo() (any, error) {
 	ret := []any{
-		1, // TODO: figure out what this value is
+		1, // TODO: figure out what this value is (#393)
 		ls.currentTip.BlockNumber,
 	}
 	return ret, nil
@@ -79,7 +79,7 @@ func (ls *LedgerState) queryHardFork(
 	switch q := query.Query.(type) {
 	case *olocalstatequery.HardForkCurrentEraQuery:
 		return ls.currentEra.Id, nil
-	// TODO
+	// TODO (#321)
 	//case *olocalstatequery.HardForkEraHistoryQuery:
 	default:
 		return nil, fmt.Errorf("unsupported query type: %T", q)
@@ -89,7 +89,6 @@ func (ls *LedgerState) queryHardFork(
 func (ls *LedgerState) queryShelley(
 	query *olocalstatequery.ShelleyQuery,
 ) (any, error) {
-	// TODO: make these era-specific
 	switch q := query.Query.(type) {
 	case *olocalstatequery.ShelleyEpochNoQuery:
 		return []any{ls.currentEpoch.EpochId}, nil
@@ -101,24 +100,19 @@ func (ls *LedgerState) queryShelley(
 		return ls.queryShelleyUtxoByAddress(q.Addrs)
 	case *olocalstatequery.ShelleyUtxoByTxinQuery:
 		return ls.queryShelleyUtxoByTxIn(q.TxIns)
-	// TODO
+	// TODO (#394)
 	/*
 		case *olocalstatequery.ShelleyLedgerTipQuery:
-		case *olocalstatequery.ShelleyEpochNoQuery:
 		case *olocalstatequery.ShelleyNonMyopicMemberRewardsQuery:
-		case *olocalstatequery.ShelleyCurrentProtocolParamsQuery:
 		case *olocalstatequery.ShelleyProposedProtocolParamsUpdatesQuery:
 		case *olocalstatequery.ShelleyStakeDistributionQuery:
-		case *olocalstatequery.ShelleyUtxoByAddressQuery:
 		case *olocalstatequery.ShelleyUtxoWholeQuery:
 		case *olocalstatequery.ShelleyDebugEpochStateQuery:
 		case *olocalstatequery.ShelleyCborQuery:
 		case *olocalstatequery.ShelleyFilteredDelegationAndRewardAccountsQuery:
-		case *olocalstatequery.ShelleyGenesisConfigQuery:
 		case *olocalstatequery.ShelleyDebugNewEpochStateQuery:
 		case *olocalstatequery.ShelleyDebugChainDepStateQuery:
 		case *olocalstatequery.ShelleyRewardProvenanceQuery:
-		case *olocalstatequery.ShelleyUtxoByTxinQuery:
 		case *olocalstatequery.ShelleyStakePoolsQuery:
 		case *olocalstatequery.ShelleyStakePoolParamsQuery:
 		case *olocalstatequery.ShelleyRewardInfoPoolsQuery:
@@ -140,7 +134,7 @@ func (ls *LedgerState) queryShelleyUtxoByAddress(
 	addrs []ledger.Address,
 ) (any, error) {
 	ret := make(map[olocalstatequery.UtxoId]ledger.TransactionOutput)
-	// TODO: support multiple addresses
+	// TODO: support multiple addresses (#391)
 	utxos, err := models.UtxosByAddress(ls.db, addrs[0])
 	if err != nil {
 		return nil, err
@@ -163,7 +157,7 @@ func (ls *LedgerState) queryShelleyUtxoByTxIn(
 	txIns []ledger.ShelleyTransactionInput,
 ) (any, error) {
 	ret := make(map[olocalstatequery.UtxoId]ledger.TransactionOutput)
-	// TODO: support multiple TxIns
+	// TODO: support multiple TxIns (#392)
 	utxo, err := models.UtxoByRef(
 		ls.db,
 		txIns[0].Id().Bytes(),

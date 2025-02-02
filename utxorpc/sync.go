@@ -119,7 +119,7 @@ func (s *syncServiceServer) DumpHistory(
 		point := s.utxorpc.config.LedgerState.Tip().Point
 		points = append(points, point)
 	}
-	// TODO: make this work
+	// TODO: make this work (#401)
 	// if startToken != nil {
 	// 	blockIdx := startToken.GetIndex()
 	// 	blockHash := startToken.GetHash()

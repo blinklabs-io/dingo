@@ -33,7 +33,7 @@ func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
 		Name: "cardano_node_metrics_blockNum_int",
 		Help: "current block number",
 	})
-	// TODO: figure out how to calculate this
+	// TODO: figure out how to calculate this (#390)
 	m.density = promautoFactory.NewGauge(prometheus.GaugeOpts{
 		Name: "cardano_node_metrics_density_real",
 		Help: "chain density",

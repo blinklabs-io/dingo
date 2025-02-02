@@ -137,7 +137,7 @@ func (n *Node) Run() error {
 }
 
 func (n *Node) Stop() error {
-	// TODO: use a cancelable context and wait for it above to call shutdown
+	// TODO: use a cancelable context and wait for it above to call shutdown (#72)
 	return n.shutdown()
 }
 
@@ -288,7 +288,7 @@ func (n *Node) handleConnClosedEvent(evt event.Event) {
 func (n *Node) handleOutboundConnEvent(evt event.Event) {
 	e := evt.Data.(peergov.OutboundConnectionEvent)
 	connId := e.ConnectionId
-	// TODO: replace this with handling for multiple chainsync clients
+	// TODO: replace this with handling for multiple chainsync clients (#385)
 	// Start chainsync client if we don't have another
 	n.chainsyncState.Lock()
 	defer n.chainsyncState.Unlock()
