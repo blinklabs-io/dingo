@@ -1,4 +1,4 @@
-// Copyright 2024 Blink Labs Software
+// Copyright 2025 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -88,6 +88,9 @@ func EpochLengthShelley(
 	nodeConfig *cardano.CardanoNodeConfig,
 ) (uint, uint, error) {
 	shelleyGenesis := nodeConfig.ShelleyGenesis()
+	if shelleyGenesis == nil {
+		return 0, 0, fmt.Errorf("unable to get shelley genesis")
+	}
 	return uint(shelleyGenesis.SlotLength * 1000),
 		uint(shelleyGenesis.EpochLength),
 		nil
