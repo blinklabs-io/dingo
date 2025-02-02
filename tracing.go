@@ -42,7 +42,7 @@ func (n *Node) setupTracing() error {
 			stdouttrace.WithPrettyPrint(),
 		)
 	} else {
-		// TODO: make options configurable
+		// TODO: make options configurable (#387)
 		traceExporter, err = otlptracehttp.New(context.TODO())
 	}
 	if err != nil {

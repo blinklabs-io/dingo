@@ -19,7 +19,7 @@ import (
 )
 
 const (
-	localtxmonitorMempoolCapacity = 10 * 1024 * 1024 // TODO: replace with configurable value
+	localtxmonitorMempoolCapacity = 10 * 1024 * 1024 // TODO: replace with configurable value (#400)
 )
 
 func (n *Node) localtxmonitorServerConnOpts() []olocaltxmonitor.LocalTxMonitorOptionFunc {

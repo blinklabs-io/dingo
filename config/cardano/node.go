@@ -41,7 +41,6 @@ type CardanoNodeConfig struct {
 	shelleyGenesis     *shelley.ShelleyGenesis
 	ShelleyGenesisFile string `yaml:"ShelleyGenesisFile"`
 	ShelleyGenesisHash string `yaml:"ShelleyGenesisHash"`
-	// TODO: add more fields from cardano-node config as we need them
 }
 
 func NewCardanoNodeConfigFromReader(r io.Reader) (*CardanoNodeConfig, error) {
@@ -73,7 +72,7 @@ func (c *CardanoNodeConfig) loadGenesisConfigs() error {
 	// Load Byron genesis
 	if c.ByronGenesisFile != "" {
 		byronGenesisPath := path.Join(c.path, c.ByronGenesisFile)
-		// TODO: check genesis file hash
+		// TODO: check genesis file hash (#399)
 		byronGenesis, err := byron.NewByronGenesisFromFile(byronGenesisPath)
 		if err != nil {
 			return err
@@ -83,7 +82,7 @@ func (c *CardanoNodeConfig) loadGenesisConfigs() error {
 	// Load Shelley genesis
 	if c.ShelleyGenesisFile != "" {
 		shelleyGenesisPath := path.Join(c.path, c.ShelleyGenesisFile)
-		// TODO: check genesis file hash
+		// TODO: check genesis file hash (#399)
 		shelleyGenesis, err := shelley.NewShelleyGenesisFromFile(
 			shelleyGenesisPath,
 		)
@@ -95,7 +94,7 @@ func (c *CardanoNodeConfig) loadGenesisConfigs() error {
 	// Load Alonzo genesis
 	if c.AlonzoGenesisFile != "" {
 		alonzoGenesisPath := path.Join(c.path, c.AlonzoGenesisFile)
-		// TODO: check genesis file hash
+		// TODO: check genesis file hash (#399)
 		alonzoGenesis, err := alonzo.NewAlonzoGenesisFromFile(alonzoGenesisPath)
 		if err != nil {
 			return err
@@ -105,7 +104,7 @@ func (c *CardanoNodeConfig) loadGenesisConfigs() error {
 	// Load Conway genesis
 	if c.ConwayGenesisFile != "" {
 		conwayGenesisPath := path.Join(c.path, c.ConwayGenesisFile)
-		// TODO: check genesis file hash
+		// TODO: check genesis file hash (#399)
 		conwayGenesis, err := conway.NewConwayGenesisFromFile(conwayGenesisPath)
 		if err != nil {
 			return err
