@@ -87,6 +87,9 @@ func (n *Node) configValidate() error {
 	}
 	if n.config.cardanoNodeConfig != nil {
 		shelleyGenesis := n.config.cardanoNodeConfig.ShelleyGenesis()
+		if shelleyGenesis == nil {
+			return fmt.Errorf("unable to get Shelley genesis information")
+		}
 		if n.config.networkMagic != shelleyGenesis.NetworkMagic {
 			return fmt.Errorf(
 				"network magic (%d) doesn't match value from Shelley genesis (%d)",
