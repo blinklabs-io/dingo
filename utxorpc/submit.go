@@ -367,8 +367,13 @@ func (s *submitServiceServer) WatchMempool(
 											policyId.Bytes(),
 											assetPattern.PolicyId,
 										) {
-											for _, asset := range utxo.Assets().Assets(policyId) {
-												if bytes.Equal(asset, assetPattern.AssetName) {
+											for _, asset := range utxo.Assets().Assets(
+												policyId,
+											) {
+												if bytes.Equal(
+													asset,
+													assetPattern.AssetName,
+												) {
 													found = true
 													assetFound = true
 													break
