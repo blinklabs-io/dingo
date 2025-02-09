@@ -31,7 +31,7 @@ func (n *Node) localstatequeryServerAcquire(
 	acquireTarget olocalstatequery.AcquireTarget,
 	reAcquire bool,
 ) error {
-	// TODO: create "view" from ledger state
+	// TODO: create "view" from ledger state (#382)
 	return nil
 }
 
@@ -45,6 +45,6 @@ func (n *Node) localstatequeryServerQuery(
 func (n *Node) localstatequeryServerRelease(
 	ctx olocalstatequery.CallbackContext,
 ) error {
-	// TODO: release "view" from ledger state
+	// TODO: release "view" from ledger state (#382)
 	return nil
 }

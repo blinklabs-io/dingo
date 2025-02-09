@@ -105,7 +105,7 @@ func (ci *ChainIterator) Next(blocking bool) (*ChainIteratorResult, error) {
 	select {
 	case blockEvt, ok := <-blockChan:
 		if !ok {
-			// TODO
+			// TODO: return an actual error (#389)
 			return nil, nil
 		}
 		blockData := blockEvt.Data.(ChainBlockEvent)
@@ -114,7 +114,7 @@ func (ci *ChainIterator) Next(blocking bool) (*ChainIteratorResult, error) {
 		ci.blockNumber++
 	case rollbackEvt, ok := <-rollbackChan:
 		if !ok {
-			// TODO
+			// TODO: return an actual error (#389)
 			return nil, nil
 		}
 		rollbackData := rollbackEvt.Data.(ChainRollbackEvent)

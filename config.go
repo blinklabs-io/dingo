@@ -87,6 +87,9 @@ func (n *Node) configValidate() error {
 	}
 	if n.config.cardanoNodeConfig != nil {
 		shelleyGenesis := n.config.cardanoNodeConfig.ShelleyGenesis()
+		if shelleyGenesis == nil {
+			return fmt.Errorf("unable to get Shelley genesis information")
+		}
 		if n.config.networkMagic != shelleyGenesis.NetworkMagic {
 			return fmt.Errorf(
 				"network magic (%d) doesn't match value from Shelley genesis (%d)",
@@ -107,7 +110,6 @@ func NewConfig(opts ...ConfigOptionFunc) Config {
 		// Default logger will throw away logs
 		// We do this so we don't have to add guards around every log operation
 		logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		// TODO: add defaults
 	}
 	// Apply options
 	for _, opt := range opts {

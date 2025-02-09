@@ -1,4 +1,4 @@
-// Copyright 2024 Blink Labs Software
+// Copyright 2025 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,6 +15,8 @@
 package eras
 
 import (
+	"fmt"
+
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/gouroboros/ledger/byron"
 )
@@ -29,6 +31,9 @@ func EpochLengthByron(
 	nodeConfig *cardano.CardanoNodeConfig,
 ) (uint, uint, error) {
 	byronGenesis := nodeConfig.ByronGenesis()
+	if byronGenesis == nil {
+		return 0, 0, fmt.Errorf("unable to get byron genesis")
+	}
 	return uint(byronGenesis.BlockVersionData.SlotDuration),
 		uint(byronGenesis.ProtocolConsts.K * 10),
 		nil

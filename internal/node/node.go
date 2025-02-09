@@ -39,7 +39,7 @@ func Run(logger *slog.Logger) error {
 		fmt.Sprintf("topology: %+v", config.GetTopologyConfig()),
 		"component", "node",
 	)
-	// TODO: make this safer, check PID, create parent, etc.
+	// TODO: make this safer, check PID, create parent, etc. (#276)
 	if _, err := os.Stat(cfg.SocketPath); err == nil {
 		os.Remove(cfg.SocketPath)
 	}
@@ -87,7 +87,7 @@ func Run(logger *slog.Logger) error {
 			dingo.WithUtxorpcTlsKeyFilePath(cfg.TlsKeyFilePath),
 			// Enable metrics with default prometheus registry
 			dingo.WithPrometheusRegistry(prometheus.DefaultRegisterer),
-			// TODO: make this configurable
+			// TODO: make this configurable (#387)
 			//dingo.WithTracing(true),
 			dingo.WithTopologyConfig(config.GetTopologyConfig()),
 		),

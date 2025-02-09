@@ -39,7 +39,7 @@ import (
 
 const (
 	cleanupConsumedUtxosInterval   = 15 * time.Minute
-	cleanupConsumedUtxosSlotWindow = 50000 // TODO: calculate this from params
+	cleanupConsumedUtxosSlotWindow = 50000 // TODO: calculate this from params (#395)
 )
 
 type LedgerStateConfig struct {
@@ -163,7 +163,6 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 	)
 	// Schedule periodic process to purge consumed UTxOs outside of the rollback window
 	ls.scheduleCleanupConsumedUtxos()
-	// TODO: schedule process to scan/clean blob DB for keys that don't have a corresponding metadata DB entry
 	// Load current epoch from DB
 	if err := ls.loadEpoch(); err != nil {
 		return nil, err
@@ -326,7 +325,10 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 		}
 		if len(recentBlocks) > 0 {
 			ls.currentTip = ochainsync.Tip{
-				Point:       ocommon.NewPoint(recentBlocks[0].Slot, recentBlocks[0].Hash),
+				Point: ocommon.NewPoint(
+					recentBlocks[0].Slot,
+					recentBlocks[0].Hash,
+				),
 				BlockNumber: recentBlocks[0].Number,
 			}
 			if err := models.TipUpdateTxn(txn, ls.currentTip); err != nil {
@@ -489,7 +491,7 @@ func (ls *LedgerState) consumeUtxo(
 	// Find UTxO
 	utxo, err := models.UtxoByRefTxn(txn, utxoId.Id().Bytes(), utxoId.Index())
 	if err != nil {
-		// TODO: make this configurable?
+		// TODO: make this configurable? (#396)
 		if err == gorm.ErrRecordNotFound {
 			return nil
 		}

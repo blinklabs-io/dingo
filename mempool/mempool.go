@@ -87,7 +87,7 @@ func NewMempool(
 	} else {
 		m.logger = logger
 	}
-	// TODO: replace this with purging based on on-chain TXs
+	// TODO: replace this with purging based on on-chain TXs (#388)
 	// Schedule initial mempool expired cleanup
 	m.scheduleRemoveExpired()
 	// Init metrics
@@ -165,7 +165,7 @@ func (m *Mempool) Consumer(connId ouroboros.ConnectionId) *MempoolConsumer {
 	return m.consumers[connId]
 }
 
-// TODO: replace this with purging based on on-chain TXs
+// TODO: replace this with purging based on on-chain TXs (#388)
 func (m *Mempool) removeExpired() {
 	m.Lock()
 	defer m.Unlock()
