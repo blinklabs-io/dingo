@@ -13,9 +13,8 @@ jobs:
     name: go-test
     strategy:
       matrix:
-        go-version: [1.22.x, 1.23.x]
-        # TODO: re-enable macos-latest when the repo is public
-        platform: [ubuntu-latest] #, macos-latest]
+        go-version: [1.22.x, 1.23.x, 1.24.x]
+        platform: [ubuntu-latest]
     runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v4
