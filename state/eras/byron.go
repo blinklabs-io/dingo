@@ -34,6 +34,8 @@ func EpochLengthByron(
 	if byronGenesis == nil {
 		return 0, 0, fmt.Errorf("unable to get byron genesis")
 	}
+	// These are known to be within uint range
+	// #nosec G115
 	return uint(byronGenesis.BlockVersionData.SlotDuration),
 		uint(byronGenesis.ProtocolConsts.K * 10),
 		nil

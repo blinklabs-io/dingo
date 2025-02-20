@@ -91,6 +91,8 @@ func EpochLengthShelley(
 	if shelleyGenesis == nil {
 		return 0, 0, fmt.Errorf("unable to get shelley genesis")
 	}
+	// These are known to be within uint range
+	// #nosec G115
 	return uint(shelleyGenesis.SlotLength * 1000),
 		uint(shelleyGenesis.EpochLength),
 		nil
