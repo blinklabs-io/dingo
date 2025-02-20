@@ -1,4 +1,4 @@
-// Copyright 2024 Blink Labs Software
+// Copyright 2025 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -19,6 +19,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"connectrpc.com/connect"
 	"connectrpc.com/grpchealth"
@@ -130,17 +131,19 @@ func (u *Utxorpc) Start() error {
 				u.config.Port,
 			),
 		)
-		err := http.ListenAndServeTLS(
-			fmt.Sprintf(
+		utxorpc := &http.Server{
+			Addr: fmt.Sprintf(
 				"%s:%d",
 				u.config.Host,
 				u.config.Port,
 			),
+			Handler:           mux,
+			ReadHeaderTimeout: 60 * time.Second,
+		}
+		return utxorpc.ListenAndServeTLS(
 			u.config.TlsCertFilePath,
 			u.config.TlsKeyFilePath,
-			mux,
 		)
-		return err
 	} else {
 		u.config.Logger.Info(
 			fmt.Sprintf(
@@ -149,11 +152,16 @@ func (u *Utxorpc) Start() error {
 				u.config.Port,
 			),
 		)
-		err := http.ListenAndServe(
-			fmt.Sprintf("%s:%d", u.config.Host, u.config.Port),
+		utxorpc := &http.Server{
+			Addr: fmt.Sprintf(
+				"%s:%d",
+				u.config.Host,
+				u.config.Port,
+			),
 			// Use h2c so we can serve HTTP/2 without TLS
-			h2c.NewHandler(mux, &http2.Server{}),
-		)
-		return err
+			Handler:           h2c.NewHandler(mux, &http2.Server{}),
+			ReadHeaderTimeout: 60 * time.Second,
+		}
+		return utxorpc.ListenAndServe()
 	}
 }

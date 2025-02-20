@@ -1,4 +1,4 @@
-// Copyright 2024 Blink Labs Software
+// Copyright 2025 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -18,8 +18,11 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	_ "net/http/pprof"
 	"os"
+	"time"
+
+	// #nosec G108
+	_ "net/http/pprof"
 
 	"github.com/blinklabs-io/dingo"
 	"github.com/blinklabs-io/dingo/config/cardano"
@@ -105,7 +108,15 @@ func Run(logger *slog.Logger) error {
 		"component", "node",
 	)
 	go func() {
-		if err := http.ListenAndServe(fmt.Sprintf("%s:%d", cfg.BindAddr, cfg.MetricsPort), nil); err != nil {
+		debugger := &http.Server{
+			Addr: fmt.Sprintf(
+				"%s:%d",
+				cfg.BindAddr,
+				cfg.MetricsPort,
+			),
+			ReadHeaderTimeout: 60 * time.Second,
+		}
+		if err := debugger.ListenAndServe(); err != nil {
 			logger.Error(
 				fmt.Sprintf("failed to start metrics listener: %s", err),
 				"component", "node",
