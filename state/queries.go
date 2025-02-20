@@ -1,4 +1,4 @@
-// Copyright 2024 Blink Labs Software
+// Copyright 2025 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -54,8 +54,12 @@ func (ls *LedgerState) queryBlock(
 func (ls *LedgerState) querySystemStart() (any, error) {
 	shelleyGenesis := ls.config.CardanoNodeConfig.ShelleyGenesis()
 	if shelleyGenesis == nil {
-		return nil, fmt.Errorf("unable to get shelley era genesis for system start")
+		return nil, fmt.Errorf(
+			"unable to get shelley era genesis for system start",
+		)
 	}
+	// Nanosecond is always within uint64 range
+	// #nosec G115
 	ret := olocalstatequery.SystemStartResult{
 		Year:        shelleyGenesis.SystemStart.Year(),
 		Day:         shelleyGenesis.SystemStart.YearDay(),
