@@ -1,4 +1,4 @@
-// Copyright 2024 Blink Labs Software
+// Copyright 2025 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -16,6 +16,7 @@ package immutable
 
 import (
 	"fmt"
+	"math"
 	"os"
 
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -74,12 +75,19 @@ func (c *chunk) Next() (*Block, error) {
 		return nil, nil
 	}
 	if c.nextEntry == nil {
+		if c.currentEntry.BlockOffset > math.MaxInt64 {
+			return nil, fmt.Errorf("current block offset integer overflow")
+		}
+		// This triggers even though we check it above
+		// #nosec G115
+		currOffset := int64(c.currentEntry.BlockOffset)
+
 		// We've reached the last entry in the chunk, so we calculate
 		// block size based on the size of the file
-		blockSize := c.fileSize - int64(c.currentEntry.BlockOffset)
+		blockSize := c.fileSize - currOffset
 		blockData := make([]byte, blockSize)
 		// Seek to offset
-		if _, err := c.file.Seek(int64(c.currentEntry.BlockOffset), 0); err != nil {
+		if _, err := c.file.Seek(currOffset, 0); err != nil {
 			return nil, err
 		}
 		n, err := c.file.Read(blockData)
@@ -109,18 +117,36 @@ func (c *chunk) Next() (*Block, error) {
 		return ret, nil
 	} else {
 		// Calculate block size based on the offsets for the current and next entries
-		blockSize := c.nextEntry.BlockOffset - c.currentEntry.BlockOffset
+		if c.currentEntry.BlockOffset > math.MaxInt64 {
+			return nil, fmt.Errorf("current block offset integer overflow")
+		}
+		// This triggers even though we check it above
+		// #nosec G115
+		currOffset := int64(c.currentEntry.BlockOffset)
+
+		if c.nextEntry.BlockOffset > math.MaxInt64 {
+			return nil, fmt.Errorf("next block offset integer overflow")
+		}
+		// This triggers even though we check it above
+		// #nosec G115
+		nextOffset := int64(c.nextEntry.BlockOffset)
+
+		blockSize := nextOffset - currOffset
 		blockData := make([]byte, blockSize)
 		// Seek to offset
-		if _, err := c.file.Seek(int64(c.currentEntry.BlockOffset), 0); err != nil {
+		if _, err := c.file.Seek(currOffset, 0); err != nil {
 			return nil, err
 		}
 		n, err := c.file.Read(blockData)
 		if err != nil {
 			return nil, err
 		}
-		if uint64(n) < blockSize {
-			return nil, fmt.Errorf("did not read expected amount of block data: expected %d, got %d", blockSize, n)
+		if int64(n) < blockSize {
+			return nil, fmt.Errorf(
+				"did not read expected amount of block data: expected %d, got %d",
+				blockSize,
+				n,
+			)
 		}
 		blkType, blkBytes, err := c.unwrapBlock(blockData)
 		if err != nil {
