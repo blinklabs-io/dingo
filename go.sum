@@ -11,8 +11,8 @@ github.com/BurntSushi/toml v0.3.1/go.mod h1:xHWCNGjB5oqiDr8zfno3MHue2Ht5sIBksp03
 github.com/aead/siphash v1.0.1/go.mod h1:Nywa3cDsYNNK3gaciGTWPwHt0wlpNV15vwmswBAUSII=
 github.com/beorn7/perks v1.0.1 h1:VlbKKnNfV8bJzeqoa4cOKqO6bYr3WgKZxO8Z16+hsOM=
 github.com/beorn7/perks v1.0.1/go.mod h1:G2ZrVWU2WbWT9wwq4/hrbKbnv/1ERSJQ0ibhJ6rlkpw=
-github.com/blinklabs-io/gouroboros v0.109.0 h1:N8o5EObDfqJM2PQjAbNmkVqS7dtV/gwRnv7z7rkBWQA=
-github.com/blinklabs-io/gouroboros v0.109.0/go.mod h1:VlfiHqXeVvnaeK97U8MyohQFT1PyB2SiBnSYeF+ZLNo=
+github.com/blinklabs-io/gouroboros v0.110.0 h1:VWqaTKEC0ituUylT7/KxRwaibM5ZFgqjSsfPmmvgc1Q=
+github.com/blinklabs-io/gouroboros v0.110.0/go.mod h1:VlfiHqXeVvnaeK97U8MyohQFT1PyB2SiBnSYeF+ZLNo=
 github.com/blinklabs-io/ouroboros-mock v0.3.6 h1:m/iK4l1EJbiz9kU0u5uzWNEwlskazWuwbJHysr2hhP4=
 github.com/blinklabs-io/ouroboros-mock v0.3.6/go.mod h1:S++j/dBxNYG3AlcRaeZvok4X2ih7GrK+VWV1s0SLN3M=
 github.com/btcsuite/btcd v0.20.1-beta/go.mod h1:wVuoA8VJLEcwgqHBwHmzLRazpKxTv13Px/pDuV7OomQ=
