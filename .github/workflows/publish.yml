@@ -11,6 +11,8 @@ concurrency: ${{ github.ref }}
 jobs:
   create-draft-release:
     runs-on: ubuntu-latest
+    permissions:
+      context: write
     outputs:
       RELEASE_ID: ${{ steps.create-release.outputs.result }}
     steps:
@@ -60,7 +62,7 @@ jobs:
           fetch-depth: '0'
       - uses: actions/setup-go@v5
         with:
-          go-version: 1.22.x
+          go-version: 1.23.x
       - name: Build binary
         run: GOOS=${{ matrix.os }} GOARCH=${{ matrix.arch }} make build
       - name: Upload release asset
@@ -154,6 +156,8 @@ jobs:
 
   finalize-release:
     runs-on: ubuntu-latest
+    permissions:
+      context: write
     needs: [create-draft-release, build-binaries, build-images]
     steps:
       - uses: actions/github-script@v7
