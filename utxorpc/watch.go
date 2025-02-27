@@ -273,10 +273,10 @@ func (s *watchServiceServer) WatchTx(
 										}
 										if bytes.Equal(
 											policyId.Bytes(),
-											assetPattern.PolicyId,
+											assetPattern.GetPolicyId(),
 										) {
 											for _, asset := range utxo.Assets().Assets(policyId) {
-												if bytes.Equal(asset, assetPattern.AssetName) {
+												if bytes.Equal(asset, assetPattern.GetAssetName()) {
 													found = true
 													assetFound = true
 													break
