@@ -190,7 +190,7 @@ func (n *Node) txsubmissionClientRequestTxIds(
 		}
 	}
 	for _, tmpTx := range tmpTxs {
-		tmpTx := tmpTx
+
 		// Add to return value
 		txHashBytes, err := hex.DecodeString(tmpTx.Hash)
 		if err != nil {
