@@ -100,10 +100,10 @@ func (s *queryServiceServer) ReadUtxos(
 		aud.NativeBytes = utxo.Cbor
 		aud.TxoRef = txo
 
-		if audc.Cardano.Datum != nil {
+		if audc.Cardano.GetDatum() != nil {
 			// Check if Datum.Hash is all zeroes
 			isAllZeroes := true
-			for _, b := range audc.Cardano.Datum.Hash {
+			for _, b := range audc.Cardano.GetDatum().GetHash() {
 				if b != 0 {
 					isAllZeroes = false
 					break
@@ -228,10 +228,10 @@ func (s *queryServiceServer) SearchUtxos(
 				Hash:  utxo.TxId,
 				Index: utxo.OutputIdx,
 			}
-			if audc.Cardano.Datum != nil {
+			if audc.Cardano.GetDatum() != nil {
 				// Check if Datum.Hash is all zeroes
 				isAllZeroes := true
-				for _, b := range audc.Cardano.Datum.Hash {
+				for _, b := range audc.Cardano.GetDatum().GetHash() {
 					if b != 0 {
 						isAllZeroes = false
 						break
@@ -247,10 +247,10 @@ func (s *queryServiceServer) SearchUtxos(
 			// If AssetPattern is specified, filter based on it
 			if assetPattern != nil {
 				assetFound := false
-				for _, multiasset := range audc.Cardano.Assets {
-					if bytes.Equal(multiasset.PolicyId, assetPattern.PolicyId) {
-						for _, asset := range multiasset.Assets {
-							if bytes.Equal(asset.Name, assetPattern.AssetName) {
+				for _, multiasset := range audc.Cardano.GetAssets() {
+					if bytes.Equal(multiasset.GetPolicyId(), assetPattern.GetPolicyId()) {
+						for _, asset := range multiasset.GetAssets() {
+							if bytes.Equal(asset.GetName(), assetPattern.GetAssetName()) {
 								assetFound = true
 								break
 							}

@@ -229,7 +229,7 @@ func (s *submitServiceServer) WatchMempool(
 				Stage:       submit.Stage_STAGE_MEMPOOL,
 			}
 			resp.Tx = record
-			if string(record.NativeBytes) == cTx.String() {
+			if string(record.GetNativeBytes()) == cTx.String() {
 				if predicate == nil {
 					err := stream.Send(resp)
 					if err != nil {
@@ -365,14 +365,14 @@ func (s *submitServiceServer) WatchMempool(
 										}
 										if bytes.Equal(
 											policyId.Bytes(),
-											assetPattern.PolicyId,
+											assetPattern.GetPolicyId(),
 										) {
 											for _, asset := range utxo.Assets().Assets(
 												policyId,
 											) {
 												if bytes.Equal(
 													asset,
-													assetPattern.AssetName,
+													assetPattern.GetAssetName(),
 												) {
 													found = true
 													assetFound = true
