@@ -58,7 +58,7 @@ func (s *watchServiceServer) WatchTx(
 		for _, blockRef := range intersect {
 			blockIdx := blockRef.GetIndex()
 			blockHash := blockRef.GetHash()
-			slot := uint64(blockIdx)
+			slot := blockIdx
 			point := ocommon.NewPoint(slot, blockHash)
 			points = append(points, point)
 		}

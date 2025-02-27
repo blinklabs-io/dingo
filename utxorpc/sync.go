@@ -54,7 +54,7 @@ func (s *syncServiceServer) FetchBlock(
 		for _, blockRef := range ref {
 			blockIdx := blockRef.GetIndex()
 			blockHash := blockRef.GetHash()
-			slot := uint64(blockIdx)
+			slot := blockIdx
 			point := ocommon.NewPoint(slot, blockHash)
 			points = append(points, point)
 		}
@@ -171,7 +171,7 @@ func (s *syncServiceServer) FollowTip(
 		for _, blockRef := range intersect {
 			blockIdx := blockRef.GetIndex()
 			blockHash := blockRef.GetHash()
-			slot := uint64(blockIdx)
+			slot := blockIdx
 			point := ocommon.NewPoint(slot, blockHash)
 			points = append(points, point)
 		}

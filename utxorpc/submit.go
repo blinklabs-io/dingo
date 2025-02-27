@@ -77,7 +77,7 @@ func (s *submitServiceServer) SubmitTx(
 		}
 		tx := mempool.MempoolTransaction{
 			Hash:     txHash.String(),
-			Type:     uint(txType),
+			Type:     txType,
 			Cbor:     txRawBytes,
 			LastSeen: time.Now(),
 		}
