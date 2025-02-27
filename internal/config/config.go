@@ -56,11 +56,11 @@ var globalConfig = &Config{
 func LoadConfig() (*Config, error) {
 	err := envconfig.Process("cardano", globalConfig)
 	if err != nil {
-		return nil, fmt.Errorf("error processing environment: %+v", err)
+		return nil, fmt.Errorf("error processing environment: %+w", err)
 	}
 	_, err = LoadTopologyConfig()
 	if err != nil {
-		return nil, fmt.Errorf("error loading topology: %+v", err)
+		return nil, fmt.Errorf("error loading topology: %+w", err)
 	}
 	return globalConfig, nil
 }
@@ -97,7 +97,7 @@ func LoadTopologyConfig() (*topology.TopologyConfig, error) {
 	}
 	tc, err := topology.NewTopologyConfigFromFile(globalConfig.Topology)
 	if err != nil {
-		return nil, fmt.Errorf("failed to load topology file: %+v", err)
+		return nil, fmt.Errorf("failed to load topology file: %+w", err)
 	}
 	// update globalTopologyConfig
 	globalTopologyConfig = tc

@@ -62,10 +62,10 @@ func New(cfg Config) (*Node, error) {
 		),
 	}
 	if err := n.configPopulateNetworkMagic(); err != nil {
-		return nil, fmt.Errorf("invalid configuration: %s", err)
+		return nil, fmt.Errorf("invalid configuration: %w", err)
 	}
 	if err := n.configValidate(); err != nil {
-		return nil, fmt.Errorf("invalid configuration: %s", err)
+		return nil, fmt.Errorf("invalid configuration: %w", err)
 	}
 	return n, nil
 }

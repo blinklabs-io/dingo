@@ -202,7 +202,7 @@ func (ls *LedgerState) recoverCommitTimestampConflict() error {
 		if tmpTip.Point.Slot > tmpBlock.Slot {
 			if err2 := ls.rollback(blockPoint); err2 != nil {
 				return fmt.Errorf(
-					"failed to rollback: %s",
+					"failed to rollback: %w",
 					err2,
 				)
 			}
