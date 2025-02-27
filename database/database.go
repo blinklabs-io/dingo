@@ -1,4 +1,4 @@
-// Copyright 2024 Blink Labs Software
+// Copyright 2025 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -18,17 +18,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"log/slog"
-	"os"
 	"path/filepath"
 	"time"
 
 	badger "github.com/dgraph-io/badger/v4"
-	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
-	gormlogger "gorm.io/gorm/logger"
-	"gorm.io/plugin/opentelemetry/tracing"
+
+	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
 )
 
 type Database interface {
@@ -85,10 +82,6 @@ func (b *BaseDatabase) init() error {
 		// We do this so we don't have to add guards around every log operation
 		b.logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
 	}
-	// Configure tracing for GORM
-	if err := b.metadata.Use(tracing.NewPlugin(tracing.WithoutMetrics())); err != nil {
-		return err
-	}
 	// Configure metrics for Badger DB
 	b.registerBadgerMetrics()
 	// Run GC periodically for Badger DB
@@ -129,13 +122,8 @@ type InMemoryDatabase struct {
 
 // NewInMemory creates a new in-memory database
 func NewInMemory(logger *slog.Logger) (*InMemoryDatabase, error) {
-	// Open sqlite DB
-	metadataDb, err := gorm.Open(
-		sqlite.Open("file::memory:?cache=shared"),
-		&gorm.Config{
-			Logger: gormlogger.Discard,
-		},
-	)
+	// Use sqlite plugin
+	metadataDb, err := sqlite.New("", logger)
 	if err != nil {
 		return nil, err
 	}
@@ -152,7 +140,7 @@ func NewInMemory(logger *slog.Logger) (*InMemoryDatabase, error) {
 	db := &InMemoryDatabase{
 		BaseDatabase: &BaseDatabase{
 			logger:   logger,
-			metadata: metadataDb,
+			metadata: metadataDb.DB(),
 			blob:     blobDb,
 			// We disable badger GC when using an in-memory DB, since it will only throw errors
 			blobGcEnabled: false,
@@ -176,31 +164,7 @@ func NewPersistent(
 	dataDir string,
 	logger *slog.Logger,
 ) (*PersistentDatabase, error) {
-	// Make sure that we can read data dir, and create if it doesn't exist
-	if _, err := os.Stat(dataDir); err != nil {
-		if !errors.Is(err, fs.ErrNotExist) {
-			return nil, fmt.Errorf("failed to read data dir: %w", err)
-		}
-		// Create data directory
-		if err := os.MkdirAll(dataDir, fs.ModePerm); err != nil {
-			return nil, fmt.Errorf("failed to create data dir: %w", err)
-		}
-	}
-	// Open sqlite DB
-	metadataDbPath := filepath.Join(
-		dataDir,
-		"metadata.sqlite",
-	)
-	// WAL journal mode, disable sync on write, increase cache size to 50MB (from 2MB)
-	metadataConnOpts := "_pragma=journal_mode(WAL)&_pragma=sync(OFF)&_pragma=cache_size(-50000)"
-	metadataDb, err := gorm.Open(
-		sqlite.Open(
-			fmt.Sprintf("file:%s?%s", metadataDbPath, metadataConnOpts),
-		),
-		&gorm.Config{
-			Logger: gormlogger.Discard,
-		},
-	)
+	metadataDb, err := sqlite.New(dataDir, logger)
 	if err != nil {
 		return nil, err
 	}
@@ -220,7 +184,7 @@ func NewPersistent(
 	db := &PersistentDatabase{
 		BaseDatabase: &BaseDatabase{
 			logger:        logger,
-			metadata:      metadataDb,
+			metadata:      metadataDb.DB(),
 			blob:          blobDb,
 			blobGcEnabled: true,
 		},
