@@ -55,7 +55,7 @@ func (c *ConnectionManager) startListener(l ListenerConfig) error {
 			l.ListenAddress,
 		)
 		if err != nil {
-			return fmt.Errorf("failed to open listening socket: %s", err)
+			return fmt.Errorf("failed to open listening socket: %w", err)
 		}
 		l.Listener = listener
 		if l.UseNtC {
