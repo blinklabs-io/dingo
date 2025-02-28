@@ -1,4 +1,4 @@
-// Copyright 2024 Blink Labs Software
+// Copyright 2025 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -16,6 +16,7 @@ package state
 
 import (
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"math/big"
 	"time"
@@ -339,7 +340,7 @@ func (ls *LedgerState) calculateEpochNonce(
 	byronGenesis := ls.config.CardanoNodeConfig.ByronGenesis()
 	shelleyGenesis := ls.config.CardanoNodeConfig.ShelleyGenesis()
 	if byronGenesis == nil || shelleyGenesis == nil {
-		return nil, fmt.Errorf("could not get genesis config")
+		return nil, errors.New("could not get genesis config")
 	}
 	stabilityWindow := new(big.Rat).Quo(
 		big.NewRat(

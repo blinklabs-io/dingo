@@ -15,6 +15,7 @@
 package immutable
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"os"
@@ -76,7 +77,7 @@ func (c *chunk) Next() (*Block, error) {
 	}
 	if c.nextEntry == nil {
 		if c.currentEntry.BlockOffset > math.MaxInt64 {
-			return nil, fmt.Errorf("current block offset integer overflow")
+			return nil, errors.New("current block offset integer overflow")
 		}
 		// This triggers even though we check it above
 		// #nosec G115
@@ -118,14 +119,14 @@ func (c *chunk) Next() (*Block, error) {
 	} else {
 		// Calculate block size based on the offsets for the current and next entries
 		if c.currentEntry.BlockOffset > math.MaxInt64 {
-			return nil, fmt.Errorf("current block offset integer overflow")
+			return nil, errors.New("current block offset integer overflow")
 		}
 		// This triggers even though we check it above
 		// #nosec G115
 		currOffset := int64(c.currentEntry.BlockOffset)
 
 		if c.nextEntry.BlockOffset > math.MaxInt64 {
-			return nil, fmt.Errorf("next block offset integer overflow")
+			return nil, errors.New("next block offset integer overflow")
 		}
 		// This triggers even though we check it above
 		// #nosec G115

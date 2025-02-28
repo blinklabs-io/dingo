@@ -15,6 +15,7 @@
 package state
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -97,7 +98,7 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 				"component",
 				"ledger",
 			)
-			return nil, fmt.Errorf("empty database returned")
+			return nil, errors.New("empty database returned")
 		}
 		ls.db = db
 		if err != nil {
@@ -126,7 +127,7 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 				"component",
 				"ledger",
 			)
-			return nil, fmt.Errorf("empty database returned")
+			return nil, errors.New("empty database returned")
 		}
 		ls.db = db
 		if err != nil {
@@ -209,7 +210,7 @@ func (ls *LedgerState) recoverCommitTimestampConflict() error {
 			return nil
 		}
 	}
-	return fmt.Errorf("failed to recover database")
+	return errors.New("failed to recover database")
 }
 
 func (ls *LedgerState) Close() error {

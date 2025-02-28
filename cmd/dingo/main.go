@@ -72,10 +72,7 @@ func main() {
 			}
 			// Run node
 			logger.Info(
-				fmt.Sprintf(
-					"version: %s",
-					version.GetVersionString(),
-				),
+				"version: "+version.GetVersionString(),
 				"component", programName,
 			)
 			if err := node.Run(logger); err != nil {

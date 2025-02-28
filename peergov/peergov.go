@@ -1,4 +1,4 @@
-// Copyright 2024 Blink Labs Software
+// Copyright 2025 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -19,6 +19,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"strconv"
 	"sync"
 	"time"
 
@@ -94,7 +95,7 @@ func (p *PeerGovernor) LoadTopologyConfig(
 			&Peer{
 				Address: net.JoinHostPort(
 					bootstrapPeer.Address,
-					fmt.Sprintf("%d", bootstrapPeer.Port),
+					strconv.FormatUint(uint64(bootstrapPeer.Port), 10),
 				),
 				Source: PeerSourceTopologyBootstrapPeer,
 			},
@@ -108,7 +109,7 @@ func (p *PeerGovernor) LoadTopologyConfig(
 				&Peer{
 					Address: net.JoinHostPort(
 						ap.Address,
-						fmt.Sprintf("%d", ap.Port),
+						strconv.FormatUint(uint64(ap.Port), 10),
 					),
 					Source:   PeerSourceTopologyLocalRoot,
 					Sharable: localRoot.Advertise,
@@ -124,7 +125,7 @@ func (p *PeerGovernor) LoadTopologyConfig(
 				&Peer{
 					Address: net.JoinHostPort(
 						ap.Address,
-						fmt.Sprintf("%d", ap.Port),
+						strconv.FormatUint(uint64(ap.Port), 10),
 					),
 					Source:   PeerSourceTopologyPublicRoot,
 					Sharable: publicRoot.Advertise,

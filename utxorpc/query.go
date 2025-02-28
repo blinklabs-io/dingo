@@ -1,4 +1,4 @@
-// Copyright 2024 Blink Labs Software
+// Copyright 2025 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -17,6 +17,7 @@ package utxorpc
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 
 	"connectrpc.com/connect"
@@ -92,7 +93,7 @@ func (s *queryServiceServer) ReadUtxos(
 			return nil, err
 		}
 		if ret == nil {
-			return nil, fmt.Errorf("decode returned empty utxo")
+			return nil, errors.New("decode returned empty utxo")
 		}
 		audc := query.AnyUtxoData_Cardano{
 			Cardano: ret.Utxorpc(),
@@ -218,7 +219,7 @@ func (s *queryServiceServer) SearchUtxos(
 				return nil, err
 			}
 			if ret == nil {
-				return nil, fmt.Errorf("decode returned empty utxo")
+				return nil, errors.New("decode returned empty utxo")
 			}
 			audc := query.AnyUtxoData_Cardano{
 				Cardano: ret.Utxorpc(),

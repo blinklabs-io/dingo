@@ -16,6 +16,7 @@ package dingo
 
 import (
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"math"
 	"time"
@@ -198,7 +199,7 @@ func (n *Node) txsubmissionClientRequestTxIds(
 		}
 		txSize := len(tmpTx.Cbor)
 		if txSize > math.MaxUint32 {
-			return nil, fmt.Errorf("tx impossibly large")
+			return nil, errors.New("tx impossibly large")
 		}
 		ret = append(
 			ret,
