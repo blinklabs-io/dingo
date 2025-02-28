@@ -9,7 +9,7 @@ env:
   GHCR_IMAGE_NAME: ghcr.io/blinklabs-io/dingo
 
 permissions:
-  content: read
+  contents: read
 
 jobs:
   docker:
