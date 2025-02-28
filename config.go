@@ -1,4 +1,4 @@
-// Copyright 2024 Blink Labs Software
+// Copyright 2025 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,6 +15,7 @@
 package dingo
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -72,7 +73,7 @@ func (n *Node) configValidate() error {
 		)
 	}
 	if len(n.config.listeners) == 0 {
-		return fmt.Errorf("no listeners defined")
+		return errors.New("no listeners defined")
 	}
 	for _, listener := range n.config.listeners {
 		if listener.Listener != nil {
@@ -81,14 +82,12 @@ func (n *Node) configValidate() error {
 		if listener.ListenNetwork != "" && listener.ListenAddress != "" {
 			continue
 		}
-		return fmt.Errorf(
-			"listener must provide net.Listener or listen network/address values",
-		)
+		return errors.New("listener must provide net.Listener or listen network/address values")
 	}
 	if n.config.cardanoNodeConfig != nil {
 		shelleyGenesis := n.config.cardanoNodeConfig.ShelleyGenesis()
 		if shelleyGenesis == nil {
-			return fmt.Errorf("unable to get Shelley genesis information")
+			return errors.New("unable to get Shelley genesis information")
 		}
 		if n.config.networkMagic != shelleyGenesis.NetworkMagic {
 			return fmt.Errorf(

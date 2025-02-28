@@ -15,7 +15,7 @@
 package eras
 
 import (
-	"fmt"
+	"errors"
 
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/gouroboros/ledger/byron"
@@ -32,7 +32,7 @@ func EpochLengthByron(
 ) (uint, uint, error) {
 	byronGenesis := nodeConfig.ByronGenesis()
 	if byronGenesis == nil {
-		return 0, 0, fmt.Errorf("unable to get byron genesis")
+		return 0, 0, errors.New("unable to get byron genesis")
 	}
 	// These are known to be within uint range
 	// #nosec G115

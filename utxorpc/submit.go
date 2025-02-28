@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"time"
 
@@ -320,7 +321,7 @@ func (s *submitServiceServer) WatchMempool(
 							return err
 						}
 						if ret == nil {
-							return fmt.Errorf("decode returned empty utxo")
+							return errors.New("decode returned empty utxo")
 						}
 						utxos = append(utxos, ret)
 					}

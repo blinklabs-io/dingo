@@ -17,6 +17,7 @@ package utxorpc
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 
 	"connectrpc.com/connect"
@@ -80,7 +81,7 @@ func (s *watchServiceServer) WatchTx(
 		s.utxorpc.config.Logger.Error(
 			"nil point returned",
 		)
-		return fmt.Errorf("nil point returned")
+		return errors.New("nil point returned")
 	}
 
 	// Create our chain iterator
@@ -228,7 +229,7 @@ func (s *watchServiceServer) WatchTx(
 							return err
 						}
 						if ret == nil {
-							return fmt.Errorf("decode returned empty utxo")
+							return errors.New("decode returned empty utxo")
 						}
 						utxos = append(utxos, ret)
 					}

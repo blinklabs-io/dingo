@@ -16,6 +16,7 @@ package eras
 
 import (
 	"encoding/hex"
+	"errors"
 	"fmt"
 
 	"github.com/blinklabs-io/dingo/config/cardano"
@@ -89,7 +90,7 @@ func EpochLengthShelley(
 ) (uint, uint, error) {
 	shelleyGenesis := nodeConfig.ShelleyGenesis()
 	if shelleyGenesis == nil {
-		return 0, 0, fmt.Errorf("unable to get shelley genesis")
+		return 0, 0, errors.New("unable to get shelley genesis")
 	}
 	// These are known to be within uint range
 	// #nosec G115
@@ -112,7 +113,7 @@ func CalculateEtaVShelley(
 	}
 	h, ok := block.Header().(*shelley.ShelleyBlockHeader)
 	if !ok {
-		return nil, fmt.Errorf("unexpected block type")
+		return nil, errors.New("unexpected block type")
 	}
 	tmpNonce, err := lcommon.CalculateRollingNonce(
 		prevBlockNonce,

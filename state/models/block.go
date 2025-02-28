@@ -1,4 +1,4 @@
-// Copyright 2024 Blink Labs Software
+// Copyright 2025 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -17,7 +17,6 @@ package models
 import (
 	"encoding/hex"
 	"errors"
-	"fmt"
 	"math/big"
 	"slices"
 	"strings"
@@ -36,7 +35,7 @@ const (
 	blockBlobMetadataKeySuffix = "_metadata"
 )
 
-var ErrBlockNotFound = fmt.Errorf("block not found")
+var ErrBlockNotFound = errors.New("block not found")
 
 type Block struct {
 	Slot     uint64

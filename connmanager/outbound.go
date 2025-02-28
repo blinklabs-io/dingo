@@ -52,10 +52,7 @@ func (c *ConnectionManager) CreateOutboundConn(
 		dialer.Control = socketControl
 	}
 	c.config.Logger.Debug(
-		fmt.Sprintf(
-			"establishing TCP connection to: %s",
-			address,
-		),
+		"establishing TCP connection to: "+address,
 		"role", "client",
 	)
 	tmpConn, err := dialer.Dial("tcp", address)
@@ -73,10 +70,7 @@ func (c *ConnectionManager) CreateOutboundConn(
 	)
 	// Setup Ouroboros connection
 	c.config.Logger.Debug(
-		fmt.Sprintf(
-			"establishing ouroboros protocol to %s",
-			address,
-		),
+		"establishing ouroboros protocol to "+address,
 		"role", "client",
 	)
 	oConn, err := ouroboros.NewConnection(
@@ -86,11 +80,11 @@ func (c *ConnectionManager) CreateOutboundConn(
 		return nil, err
 	}
 	c.config.Logger.Info(
-		fmt.Sprintf("connected ouroboros to %s", address),
+		"connected ouroboros to "+address,
 		"role", "client",
 	)
 	c.config.Logger.Debug(
-		fmt.Sprintf("peer address mapping: address: %s", address),
+		"peer address mapping: address: "+address,
 		"role", "client",
 		"connection_id", oConn.Id().String(),
 	)

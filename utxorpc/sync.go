@@ -1,4 +1,4 @@
-// Copyright 2024 Blink Labs Software
+// Copyright 2025 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -16,6 +16,7 @@ package utxorpc
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"connectrpc.com/connect"
@@ -69,7 +70,7 @@ func (s *syncServiceServer) FetchBlock(
 			return nil, err
 		}
 		if block == nil {
-			return nil, fmt.Errorf("block returned nil")
+			return nil, errors.New("block returned nil")
 		}
 		var acb sync.AnyChainBlock
 		ret, err := block.Decode()
@@ -133,7 +134,7 @@ func (s *syncServiceServer) DumpHistory(
 			return nil, err
 		}
 		if block == nil {
-			return nil, fmt.Errorf("block returned nil")
+			return nil, errors.New("block returned nil")
 		}
 		var acb sync.AnyChainBlock
 		ret, err := block.Decode()
@@ -193,7 +194,7 @@ func (s *syncServiceServer) FollowTip(
 		s.utxorpc.config.Logger.Error(
 			"nil point returned",
 		)
-		return fmt.Errorf("nil point returned")
+		return errors.New("nil point returned")
 	}
 
 	// Create our chain iterator
