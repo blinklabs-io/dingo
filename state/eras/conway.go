@@ -36,6 +36,7 @@ var ConwayEraDesc = EraDesc{
 	HardForkFunc:            HardForkConway,
 	EpochLengthFunc:         EpochLengthShelley,
 	CalculateEtaVFunc:       CalculateEtaVConway,
+	ValidateTxFunc:          ValidateTxConway,
 	CertDepositFunc:         CertDepositConway,
 }
 
@@ -115,6 +116,22 @@ func CalculateEtaVConway(
 		return nil, err
 	}
 	return tmpNonce.Bytes(), nil
+}
+
+func ValidateTxConway(
+	tx lcommon.Transaction,
+	slot uint64,
+	ls lcommon.LedgerState,
+	pp lcommon.ProtocolParameters,
+) error {
+	errs := []error{}
+	for _, validationFunc := range conway.UtxoValidationRules {
+		errs = append(
+			errs,
+			validationFunc(tx, slot, ls, pp),
+		)
+	}
+	return errors.Join(errs...)
 }
 
 func CertDepositConway(cert lcommon.Certificate, pp lcommon.ProtocolParameters) (uint64, error) {

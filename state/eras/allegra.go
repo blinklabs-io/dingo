@@ -36,6 +36,7 @@ var AllegraEraDesc = EraDesc{
 	HardForkFunc:            HardForkAllegra,
 	EpochLengthFunc:         EpochLengthShelley,
 	CalculateEtaVFunc:       CalculateEtaVAllegra,
+	ValidateTxFunc:          ValidateTxAllegra,
 	CertDepositFunc:         CertDepositAllegra,
 }
 
@@ -113,6 +114,22 @@ func CalculateEtaVAllegra(
 		return nil, err
 	}
 	return tmpNonce.Bytes(), nil
+}
+
+func ValidateTxAllegra(
+	tx lcommon.Transaction,
+	slot uint64,
+	ls lcommon.LedgerState,
+	pp lcommon.ProtocolParameters,
+) error {
+	errs := []error{}
+	for _, validationFunc := range allegra.UtxoValidationRules {
+		errs = append(
+			errs,
+			validationFunc(tx, slot, ls, pp),
+		)
+	}
+	return errors.Join(errs...)
 }
 
 func CertDepositAllegra(cert lcommon.Certificate, pp lcommon.ProtocolParameters) (uint64, error) {

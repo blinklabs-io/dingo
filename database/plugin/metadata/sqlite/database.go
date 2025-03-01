@@ -88,9 +88,11 @@ func New(
 			sqlite.Open(
 				fmt.Sprintf("file:%s?%s", metadataDbPath, metadataConnOpts),
 			),
-			&gorm.Config{
-				Logger: gormlogger.Discard,
-			},
+			/*
+				&gorm.Config{
+					Logger: gormlogger.Discard,
+				},
+			*/
 		)
 		if err != nil {
 			return nil, err

@@ -30,6 +30,7 @@ type EraDesc struct {
 	HardForkFunc            func(*cardano.CardanoNodeConfig, lcommon.ProtocolParameters) (lcommon.ProtocolParameters, error)
 	EpochLengthFunc         func(*cardano.CardanoNodeConfig) (uint, uint, error)
 	CalculateEtaVFunc       func(*cardano.CardanoNodeConfig, []byte, ledger.Block) ([]byte, error)
+	ValidateTxFunc          func(lcommon.Transaction, uint64, lcommon.LedgerState, lcommon.ProtocolParameters) error
 	CertDepositFunc         func(lcommon.Certificate, lcommon.ProtocolParameters) (uint64, error)
 }
 

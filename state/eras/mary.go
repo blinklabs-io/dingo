@@ -36,6 +36,7 @@ var MaryEraDesc = EraDesc{
 	HardForkFunc:            HardForkMary,
 	EpochLengthFunc:         EpochLengthShelley,
 	CalculateEtaVFunc:       CalculateEtaVMary,
+	ValidateTxFunc:          ValidateTxMary,
 	CertDepositFunc:         CertDepositMary,
 }
 
@@ -113,6 +114,22 @@ func CalculateEtaVMary(
 		return nil, err
 	}
 	return tmpNonce.Bytes(), nil
+}
+
+func ValidateTxMary(
+	tx lcommon.Transaction,
+	slot uint64,
+	ls lcommon.LedgerState,
+	pp lcommon.ProtocolParameters,
+) error {
+	errs := []error{}
+	for _, validationFunc := range mary.UtxoValidationRules {
+		errs = append(
+			errs,
+			validationFunc(tx, slot, ls, pp),
+		)
+	}
+	return errors.Join(errs...)
 }
 
 func CertDepositMary(cert lcommon.Certificate, pp lcommon.ProtocolParameters) (uint64, error) {
