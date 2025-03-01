@@ -37,6 +37,7 @@ var AlonzoEraDesc = EraDesc{
 	EpochLengthFunc:         EpochLengthShelley,
 	CalculateEtaVFunc:       CalculateEtaVAlonzo,
 	CertDepositFunc:         CertDepositAlonzo,
+	ValidateTxFunc:          ValidateTxAlonzo,
 }
 
 func DecodePParamsAlonzo(data []byte) (lcommon.ProtocolParameters, error) {
@@ -136,4 +137,20 @@ func CertDepositAlonzo(
 	default:
 		return 0, nil
 	}
+}
+
+func ValidateTxAlonzo(
+	tx lcommon.Transaction,
+	slot uint64,
+	ls lcommon.LedgerState,
+	pp lcommon.ProtocolParameters,
+) error {
+	errs := []error{}
+	for _, validationFunc := range alonzo.UtxoValidationRules {
+		errs = append(
+			errs,
+			validationFunc(tx, slot, ls, pp),
+		)
+	}
+	return errors.Join(errs...)
 }
