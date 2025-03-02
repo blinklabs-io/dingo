@@ -25,7 +25,6 @@ import (
 type PluginOptionType int
 
 const (
-	PluginOptionTypeNone   PluginOptionType = 0
 	PluginOptionTypeString PluginOptionType = 1
 	PluginOptionTypeBool   PluginOptionType = 2
 	PluginOptionTypeInt    PluginOptionType = 3
