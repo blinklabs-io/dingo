@@ -1,4 +1,4 @@
-// Copyright 2024 Blink Labs Software
+// Copyright 2025 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -35,11 +35,11 @@ type Utxo struct {
 	Cbor        []byte `gorm:"-"` // This is here for convenience but not represented in the metadata DB
 }
 
-func (Utxo) TableName() string {
+func (u *Utxo) TableName() string {
 	return "utxo"
 }
 
-func (u Utxo) Decode() (ledger.TransactionOutput, error) {
+func (u *Utxo) Decode() (ledger.TransactionOutput, error) {
 	return ledger.NewTransactionOutputFromCbor(u.Cbor)
 }
 
