@@ -25,7 +25,7 @@ type Rat struct {
 	*big.Rat
 }
 
-func (r Rat) Value() (driver.Value, error) {
+func (r *Rat) Value() (driver.Value, error) {
 	if r.Rat == nil {
 		return "", nil
 	}
@@ -51,8 +51,8 @@ func (r *Rat) Scan(val any) error {
 
 type Uint64 uint64
 
-func (u Uint64) Value() (driver.Value, error) {
-	return strconv.FormatUint(uint64(u), 10), nil
+func (u *Uint64) Value() (driver.Value, error) {
+	return strconv.FormatUint(uint64(*u), 10), nil
 }
 
 func (u *Uint64) Scan(val any) error {
