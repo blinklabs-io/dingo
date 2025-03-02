@@ -493,7 +493,7 @@ func (ls *LedgerState) consumeUtxo(
 	utxo, err := models.UtxoByRefTxn(txn, utxoId.Id().Bytes(), utxoId.Index())
 	if err != nil {
 		// TODO: make this configurable? (#396)
-		if err == gorm.ErrRecordNotFound {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil
 		}
 		return err
@@ -542,7 +542,7 @@ func (ls *LedgerState) loadPParams() error {
 	var tmpPParams models.PParams
 	result := ls.db.Metadata().Order("id DESC").First(&tmpPParams)
 	if result.Error != nil {
-		if result.Error == gorm.ErrRecordNotFound {
+		if errors.Is(result.Error, gorm.ErrRecordNotFound) {
 			return nil
 		}
 		return result.Error
@@ -560,7 +560,7 @@ func (ls *LedgerState) loadPParams() error {
 func (ls *LedgerState) loadEpoch() error {
 	tmpEpoch, err := models.EpochLatest(ls.db)
 	if err != nil {
-		if err != gorm.ErrRecordNotFound {
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
 			return err
 		}
 	}
@@ -645,7 +645,7 @@ func (ls *LedgerState) GetIntersectPoint(
 			// Lookup block in metadata DB
 			tmpBlock, err := models.BlockByPoint(ls.db, point)
 			if err != nil {
-				if err == models.ErrBlockNotFound {
+				if errors.Is(err, models.ErrBlockNotFound) {
 					continue
 				}
 				return err

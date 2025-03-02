@@ -1,4 +1,4 @@
-// Copyright 2024 Blink Labs Software
+// Copyright 2025 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,6 +15,7 @@
 package connmanager_test
 
 import (
+	"errors"
 	"io"
 	"testing"
 	"time"
@@ -66,7 +67,7 @@ func TestConnectionManagerConnError(t *testing.T) {
 							expectedConnId,
 						)
 					}
-					if err != expectedErr {
+					if !errors.Is(err, expectedErr) {
 						t.Fatalf(
 							"did not receive expected error: got: %s, expected: %s",
 							err,
