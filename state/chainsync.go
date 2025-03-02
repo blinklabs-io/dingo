@@ -364,7 +364,7 @@ func (ls *LedgerState) calculateEpochNonce(
 		ls.currentEpoch.StartSlot,
 	)
 	if err != nil {
-		if err == models.ErrBlockNotFound {
+		if errors.Is(err, models.ErrBlockNotFound) {
 			return blockBeforeStabilityWindow.Nonce, nil
 		}
 		return nil, err
