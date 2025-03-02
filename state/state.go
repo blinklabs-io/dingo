@@ -102,7 +102,8 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 		}
 		ls.db = db
 		if err != nil {
-			if _, ok := err.(database.CommitTimestampError); !ok {
+			var dbErr *database.CommitTimestampError
+			if !errors.As(err, &dbErr) {
 				return nil, err
 			}
 			ls.config.Logger.Warn(
@@ -131,7 +132,8 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 		}
 		ls.db = db
 		if err != nil {
-			if _, ok := err.(database.CommitTimestampError); !ok {
+			var dbErr *database.CommitTimestampError
+			if !errors.As(err, &dbErr) {
 				return nil, err
 			}
 			ls.config.Logger.Warn(
