@@ -15,9 +15,10 @@
 package models
 
 type StakeRegistration struct {
-	ID         uint   `gorm:"primarykey"`
-	StakingKey []byte `gorm:"index"`
-	AddedSlot  uint64
+	ID            uint   `gorm:"primarykey"`
+	StakingKey    []byte `gorm:"index"`
+	AddedSlot     uint64
+	DepositAmount uint64
 }
 
 func (StakeRegistration) TableName() string {

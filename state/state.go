@@ -683,7 +683,7 @@ func (ls *LedgerState) Tip() ochainsync.Tip {
 
 // GetCurrentPParams returns the currentPParams value
 func (ls *LedgerState) GetCurrentPParams() lcommon.ProtocolParameters {
-	return ls.currentPParams.(lcommon.ProtocolParameters)
+	return ls.currentPParams
 }
 
 // UtxoByRef returns a single UTxO by reference
