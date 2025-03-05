@@ -63,7 +63,7 @@ type LedgerState struct {
 	config                      LedgerStateConfig
 	db                          database.Database
 	timerCleanupConsumedUtxos   *time.Timer
-	currentPParams              any
+	currentPParams              lcommon.ProtocolParameters
 	currentEpoch                models.Epoch
 	currentEra                  eras.EraDesc
 	currentTip                  ochainsync.Tip

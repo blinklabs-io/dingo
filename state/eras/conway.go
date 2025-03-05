@@ -38,12 +38,12 @@ var ConwayEraDesc = EraDesc{
 	CalculateEtaVFunc:       CalculateEtaVConway,
 }
 
-func DecodePParamsConway(data []byte) (any, error) {
+func DecodePParamsConway(data []byte) (lcommon.ProtocolParameters, error) {
 	var ret conway.ConwayProtocolParameters
 	if _, err := cbor.Decode(data, &ret); err != nil {
 		return nil, err
 	}
-	return ret, nil
+	return &ret, nil
 }
 
 func DecodePParamsUpdateConway(data []byte) (any, error) {
@@ -54,8 +54,8 @@ func DecodePParamsUpdateConway(data []byte) (any, error) {
 	return ret, nil
 }
 
-func PParamsUpdateConway(currentPParams any, pparamsUpdate any) (any, error) {
-	conwayPParams, ok := currentPParams.(conway.ConwayProtocolParameters)
+func PParamsUpdateConway(currentPParams lcommon.ProtocolParameters, pparamsUpdate any) (lcommon.ProtocolParameters, error) {
+	conwayPParams, ok := currentPParams.(*conway.ConwayProtocolParameters)
 	if !ok {
 		return nil, fmt.Errorf(
 			"current PParams (%T) is not expected type",
@@ -75,19 +75,19 @@ func PParamsUpdateConway(currentPParams any, pparamsUpdate any) (any, error) {
 
 func HardForkConway(
 	nodeConfig *cardano.CardanoNodeConfig,
-	prevPParams any,
-) (any, error) {
-	babbagePParams, ok := prevPParams.(babbage.BabbageProtocolParameters)
+	prevPParams lcommon.ProtocolParameters,
+) (lcommon.ProtocolParameters, error) {
+	babbagePParams, ok := prevPParams.(*babbage.BabbageProtocolParameters)
 	if !ok {
 		return nil, fmt.Errorf(
 			"previous PParams (%T) are not expected type",
 			prevPParams,
 		)
 	}
-	ret := conway.UpgradePParams(babbagePParams)
+	ret := conway.UpgradePParams(*babbagePParams)
 	conwayGenesis := nodeConfig.ConwayGenesis()
 	ret.UpdateFromGenesis(conwayGenesis)
-	return ret, nil
+	return &ret, nil
 }
 
 func CalculateEtaVConway(

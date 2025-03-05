@@ -38,12 +38,12 @@ var ShelleyEraDesc = EraDesc{
 	CalculateEtaVFunc:       CalculateEtaVShelley,
 }
 
-func DecodePParamsShelley(data []byte) (any, error) {
+func DecodePParamsShelley(data []byte) (lcommon.ProtocolParameters, error) {
 	var ret shelley.ShelleyProtocolParameters
 	if _, err := cbor.Decode(data, &ret); err != nil {
 		return nil, err
 	}
-	return ret, nil
+	return &ret, nil
 }
 
 func DecodePParamsUpdateShelley(data []byte) (any, error) {
@@ -54,8 +54,8 @@ func DecodePParamsUpdateShelley(data []byte) (any, error) {
 	return ret, nil
 }
 
-func PParamsUpdateShelley(currentPParams any, pparamsUpdate any) (any, error) {
-	shelleyPParams, ok := currentPParams.(shelley.ShelleyProtocolParameters)
+func PParamsUpdateShelley(currentPParams lcommon.ProtocolParameters, pparamsUpdate any) (lcommon.ProtocolParameters, error) {
+	shelleyPParams, ok := currentPParams.(*shelley.ShelleyProtocolParameters)
 	if !ok {
 		return nil, fmt.Errorf(
 			"current PParams (%T) is not expected type",
@@ -75,14 +75,14 @@ func PParamsUpdateShelley(currentPParams any, pparamsUpdate any) (any, error) {
 
 func HardForkShelley(
 	nodeConfig *cardano.CardanoNodeConfig,
-	prevPParams any,
-) (any, error) {
+	prevPParams lcommon.ProtocolParameters,
+) (lcommon.ProtocolParameters, error) {
 	// There's no Byron protocol parameters to upgrade from, so this is mostly
 	// a dummy call for consistency
 	ret := shelley.UpgradePParams(nil)
 	shelleyGenesis := nodeConfig.ShelleyGenesis()
 	ret.UpdateFromGenesis(shelleyGenesis)
-	return ret, nil
+	return &ret, nil
 }
 
 func EpochLengthShelley(
