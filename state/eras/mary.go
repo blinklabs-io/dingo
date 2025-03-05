@@ -36,6 +36,7 @@ var MaryEraDesc = EraDesc{
 	HardForkFunc:            HardForkMary,
 	EpochLengthFunc:         EpochLengthShelley,
 	CalculateEtaVFunc:       CalculateEtaVMary,
+	CertDepositFunc:         CertDepositMary,
 }
 
 func DecodePParamsMary(data []byte) (lcommon.ProtocolParameters, error) {
@@ -112,4 +113,19 @@ func CalculateEtaVMary(
 		return nil, err
 	}
 	return tmpNonce.Bytes(), nil
+}
+
+func CertDepositMary(cert lcommon.Certificate, pp lcommon.ProtocolParameters) (uint64, error) {
+	tmpPparams, ok := pp.(*mary.MaryProtocolParameters)
+	if !ok {
+		return 0, errors.New("pparams are not expected type")
+	}
+	switch cert.(type) {
+	case *lcommon.PoolRegistrationCertificate:
+		return uint64(tmpPparams.PoolDeposit), nil
+	case *lcommon.StakeRegistrationCertificate:
+		return uint64(tmpPparams.KeyDeposit), nil
+	default:
+		return 0, nil
+	}
 }

@@ -36,6 +36,7 @@ var AllegraEraDesc = EraDesc{
 	HardForkFunc:            HardForkAllegra,
 	EpochLengthFunc:         EpochLengthShelley,
 	CalculateEtaVFunc:       CalculateEtaVAllegra,
+	CertDepositFunc:         CertDepositAllegra,
 }
 
 func DecodePParamsAllegra(data []byte) (lcommon.ProtocolParameters, error) {
@@ -112,4 +113,19 @@ func CalculateEtaVAllegra(
 		return nil, err
 	}
 	return tmpNonce.Bytes(), nil
+}
+
+func CertDepositAllegra(cert lcommon.Certificate, pp lcommon.ProtocolParameters) (uint64, error) {
+	tmpPparams, ok := pp.(*allegra.AllegraProtocolParameters)
+	if !ok {
+		return 0, errors.New("pparams are not expected type")
+	}
+	switch cert.(type) {
+	case *lcommon.PoolRegistrationCertificate:
+		return uint64(tmpPparams.PoolDeposit), nil
+	case *lcommon.StakeRegistrationCertificate:
+		return uint64(tmpPparams.KeyDeposit), nil
+	default:
+		return 0, nil
+	}
 }

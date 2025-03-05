@@ -21,17 +21,18 @@ import (
 )
 
 type PoolRegistration struct {
-	ID           uint   `gorm:"primarykey"`
-	PoolKeyHash  []byte `gorm:"index"`
-	VrfKeyHash   []byte
-	Pledge       database.Uint64
-	Cost         database.Uint64
-	Margin       *database.Rat
-	Owners       []PoolRegistrationOwner
-	Relays       []PoolRegistrationRelay
-	MetadataUrl  string
-	MetadataHash []byte
-	AddedSlot    uint64
+	ID            uint   `gorm:"primarykey"`
+	PoolKeyHash   []byte `gorm:"index"`
+	VrfKeyHash    []byte
+	Pledge        database.Uint64
+	Cost          database.Uint64
+	Margin        *database.Rat
+	Owners        []PoolRegistrationOwner
+	Relays        []PoolRegistrationRelay
+	MetadataUrl   string
+	MetadataHash  []byte
+	AddedSlot     uint64
+	DepositAmount uint64
 }
 
 func (PoolRegistration) TableName() string {

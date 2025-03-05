@@ -36,6 +36,7 @@ var ShelleyEraDesc = EraDesc{
 	HardForkFunc:            HardForkShelley,
 	EpochLengthFunc:         EpochLengthShelley,
 	CalculateEtaVFunc:       CalculateEtaVShelley,
+	CertDepositFunc:         CertDepositShelley,
 }
 
 func DecodePParamsShelley(data []byte) (lcommon.ProtocolParameters, error) {
@@ -123,4 +124,19 @@ func CalculateEtaVShelley(
 		return nil, err
 	}
 	return tmpNonce.Bytes(), nil
+}
+
+func CertDepositShelley(cert lcommon.Certificate, pp lcommon.ProtocolParameters) (uint64, error) {
+	tmpPparams, ok := pp.(*shelley.ShelleyProtocolParameters)
+	if !ok {
+		return 0, errors.New("pparams are not expected type")
+	}
+	switch cert.(type) {
+	case *lcommon.PoolRegistrationCertificate:
+		return uint64(tmpPparams.PoolDeposit), nil
+	case *lcommon.StakeRegistrationCertificate:
+		return uint64(tmpPparams.KeyDeposit), nil
+	default:
+		return 0, nil
+	}
 }

@@ -36,6 +36,7 @@ var ConwayEraDesc = EraDesc{
 	HardForkFunc:            HardForkConway,
 	EpochLengthFunc:         EpochLengthShelley,
 	CalculateEtaVFunc:       CalculateEtaVConway,
+	CertDepositFunc:         CertDepositConway,
 }
 
 func DecodePParamsConway(data []byte) (lcommon.ProtocolParameters, error) {
@@ -114,4 +115,19 @@ func CalculateEtaVConway(
 		return nil, err
 	}
 	return tmpNonce.Bytes(), nil
+}
+
+func CertDepositConway(cert lcommon.Certificate, pp lcommon.ProtocolParameters) (uint64, error) {
+	tmpPparams, ok := pp.(*conway.ConwayProtocolParameters)
+	if !ok {
+		return 0, errors.New("pparams are not expected type")
+	}
+	switch cert.(type) {
+	case *lcommon.PoolRegistrationCertificate:
+		return uint64(tmpPparams.PoolDeposit), nil
+	case *lcommon.StakeRegistrationCertificate:
+		return uint64(tmpPparams.KeyDeposit), nil
+	default:
+		return 0, nil
+	}
 }

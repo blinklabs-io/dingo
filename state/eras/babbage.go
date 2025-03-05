@@ -36,6 +36,7 @@ var BabbageEraDesc = EraDesc{
 	HardForkFunc:            HardForkBabbage,
 	EpochLengthFunc:         EpochLengthShelley,
 	CalculateEtaVFunc:       CalculateEtaVBabbage,
+	CertDepositFunc:         CertDepositBabbage,
 }
 
 func DecodePParamsBabbage(data []byte) (lcommon.ProtocolParameters, error) {
@@ -112,4 +113,19 @@ func CalculateEtaVBabbage(
 		return nil, err
 	}
 	return tmpNonce.Bytes(), nil
+}
+
+func CertDepositBabbage(cert lcommon.Certificate, pp lcommon.ProtocolParameters) (uint64, error) {
+	tmpPparams, ok := pp.(*babbage.BabbageProtocolParameters)
+	if !ok {
+		return 0, errors.New("pparams are not expected type")
+	}
+	switch cert.(type) {
+	case *lcommon.PoolRegistrationCertificate:
+		return uint64(tmpPparams.PoolDeposit), nil
+	case *lcommon.StakeRegistrationCertificate:
+		return uint64(tmpPparams.KeyDeposit), nil
+	default:
+		return 0, nil
+	}
 }

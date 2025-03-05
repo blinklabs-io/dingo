@@ -30,15 +30,20 @@ func (ls *LedgerState) processTransactionCertificates(
 	tx lcommon.Transaction,
 ) error {
 	for _, tmpCert := range tx.Certificates() {
+		certDeposit, err := ls.currentEra.CertDepositFunc(tmpCert, ls.currentPParams)
+		if err != nil {
+			return err
+		}
 		switch cert := tmpCert.(type) {
 		case *lcommon.PoolRegistrationCertificate:
 			tmpItem := models.PoolRegistration{
-				PoolKeyHash: cert.Operator[:],
-				VrfKeyHash:  cert.VrfKeyHash[:],
-				Pledge:      database.Uint64(cert.Pledge),
-				Cost:        database.Uint64(cert.Cost),
-				Margin:      &database.Rat{Rat: cert.Margin.Rat},
-				AddedSlot:   blockPoint.Slot,
+				PoolKeyHash:   cert.Operator[:],
+				VrfKeyHash:    cert.VrfKeyHash[:],
+				Pledge:        database.Uint64(cert.Pledge),
+				Cost:          database.Uint64(cert.Cost),
+				Margin:        &database.Rat{Rat: cert.Margin.Rat},
+				AddedSlot:     blockPoint.Slot,
+				DepositAmount: certDeposit,
 			}
 			if cert.PoolMetadata != nil {
 				tmpItem.MetadataUrl = cert.PoolMetadata.Url
@@ -82,8 +87,9 @@ func (ls *LedgerState) processTransactionCertificates(
 			}
 		case *lcommon.StakeRegistrationCertificate:
 			tmpItem := models.StakeRegistration{
-				StakingKey: cert.StakeRegistration.Credential,
-				AddedSlot:  blockPoint.Slot,
+				StakingKey:    cert.StakeRegistration.Credential,
+				AddedSlot:     blockPoint.Slot,
+				DepositAmount: certDeposit,
 			}
 			if result := txn.Metadata().Create(&tmpItem); result.Error != nil {
 				return result.Error
