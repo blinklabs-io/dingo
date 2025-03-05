@@ -38,12 +38,12 @@ var AlonzoEraDesc = EraDesc{
 	CalculateEtaVFunc:       CalculateEtaVAlonzo,
 }
 
-func DecodePParamsAlonzo(data []byte) (any, error) {
+func DecodePParamsAlonzo(data []byte) (lcommon.ProtocolParameters, error) {
 	var ret alonzo.AlonzoProtocolParameters
 	if _, err := cbor.Decode(data, &ret); err != nil {
 		return nil, err
 	}
-	return ret, nil
+	return &ret, nil
 }
 
 func DecodePParamsUpdateAlonzo(data []byte) (any, error) {
@@ -54,8 +54,8 @@ func DecodePParamsUpdateAlonzo(data []byte) (any, error) {
 	return ret, nil
 }
 
-func PParamsUpdateAlonzo(currentPParams any, pparamsUpdate any) (any, error) {
-	alonzoPParams, ok := currentPParams.(alonzo.AlonzoProtocolParameters)
+func PParamsUpdateAlonzo(currentPParams lcommon.ProtocolParameters, pparamsUpdate any) (lcommon.ProtocolParameters, error) {
+	alonzoPParams, ok := currentPParams.(*alonzo.AlonzoProtocolParameters)
 	if !ok {
 		return nil, fmt.Errorf(
 			"current PParams (%T) is not expected type",
@@ -75,19 +75,19 @@ func PParamsUpdateAlonzo(currentPParams any, pparamsUpdate any) (any, error) {
 
 func HardForkAlonzo(
 	nodeConfig *cardano.CardanoNodeConfig,
-	prevPParams any,
-) (any, error) {
-	maryPParams, ok := prevPParams.(mary.MaryProtocolParameters)
+	prevPParams lcommon.ProtocolParameters,
+) (lcommon.ProtocolParameters, error) {
+	maryPParams, ok := prevPParams.(*mary.MaryProtocolParameters)
 	if !ok {
 		return nil, fmt.Errorf(
 			"previous PParams (%T) are not expected type",
 			prevPParams,
 		)
 	}
-	ret := alonzo.UpgradePParams(maryPParams)
+	ret := alonzo.UpgradePParams(*maryPParams)
 	alonzoGenesis := nodeConfig.AlonzoGenesis()
 	ret.UpdateFromGenesis(alonzoGenesis)
-	return ret, nil
+	return &ret, nil
 }
 
 func CalculateEtaVAlonzo(

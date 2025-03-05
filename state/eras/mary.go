@@ -38,12 +38,12 @@ var MaryEraDesc = EraDesc{
 	CalculateEtaVFunc:       CalculateEtaVMary,
 }
 
-func DecodePParamsMary(data []byte) (any, error) {
+func DecodePParamsMary(data []byte) (lcommon.ProtocolParameters, error) {
 	var ret mary.MaryProtocolParameters
 	if _, err := cbor.Decode(data, &ret); err != nil {
 		return nil, err
 	}
-	return ret, nil
+	return &ret, nil
 }
 
 func DecodePParamsUpdateMary(data []byte) (any, error) {
@@ -54,8 +54,8 @@ func DecodePParamsUpdateMary(data []byte) (any, error) {
 	return ret, nil
 }
 
-func PParamsUpdateMary(currentPParams any, pparamsUpdate any) (any, error) {
-	maryPParams, ok := currentPParams.(mary.MaryProtocolParameters)
+func PParamsUpdateMary(currentPParams lcommon.ProtocolParameters, pparamsUpdate any) (lcommon.ProtocolParameters, error) {
+	maryPParams, ok := currentPParams.(*mary.MaryProtocolParameters)
 	if !ok {
 		return nil, fmt.Errorf(
 			"current PParams (%T) is not expected type",
@@ -75,17 +75,17 @@ func PParamsUpdateMary(currentPParams any, pparamsUpdate any) (any, error) {
 
 func HardForkMary(
 	nodeConfig *cardano.CardanoNodeConfig,
-	prevPParams any,
-) (any, error) {
-	allegraPParams, ok := prevPParams.(allegra.AllegraProtocolParameters)
+	prevPParams lcommon.ProtocolParameters,
+) (lcommon.ProtocolParameters, error) {
+	allegraPParams, ok := prevPParams.(*allegra.AllegraProtocolParameters)
 	if !ok {
 		return nil, fmt.Errorf(
 			"previous PParams (%T) are not expected type",
 			prevPParams,
 		)
 	}
-	ret := mary.UpgradePParams(allegraPParams)
-	return ret, nil
+	ret := mary.UpgradePParams(*allegraPParams)
+	return &ret, nil
 }
 
 func CalculateEtaVMary(

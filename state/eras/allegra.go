@@ -38,12 +38,12 @@ var AllegraEraDesc = EraDesc{
 	CalculateEtaVFunc:       CalculateEtaVAllegra,
 }
 
-func DecodePParamsAllegra(data []byte) (any, error) {
+func DecodePParamsAllegra(data []byte) (lcommon.ProtocolParameters, error) {
 	var ret allegra.AllegraProtocolParameters
 	if _, err := cbor.Decode(data, &ret); err != nil {
 		return nil, err
 	}
-	return ret, nil
+	return &ret, nil
 }
 
 func DecodePParamsUpdateAllegra(data []byte) (any, error) {
@@ -54,8 +54,8 @@ func DecodePParamsUpdateAllegra(data []byte) (any, error) {
 	return ret, nil
 }
 
-func PParamsUpdateAllegra(currentPParams any, pparamsUpdate any) (any, error) {
-	allegraPParams, ok := currentPParams.(allegra.AllegraProtocolParameters)
+func PParamsUpdateAllegra(currentPParams lcommon.ProtocolParameters, pparamsUpdate any) (lcommon.ProtocolParameters, error) {
+	allegraPParams, ok := currentPParams.(*allegra.AllegraProtocolParameters)
 	if !ok {
 		return nil, fmt.Errorf(
 			"current PParams (%T) is not expected type",
@@ -75,17 +75,17 @@ func PParamsUpdateAllegra(currentPParams any, pparamsUpdate any) (any, error) {
 
 func HardForkAllegra(
 	nodeConfig *cardano.CardanoNodeConfig,
-	prevPParams any,
-) (any, error) {
-	shelleyPParams, ok := prevPParams.(shelley.ShelleyProtocolParameters)
+	prevPParams lcommon.ProtocolParameters,
+) (lcommon.ProtocolParameters, error) {
+	shelleyPParams, ok := prevPParams.(*shelley.ShelleyProtocolParameters)
 	if !ok {
 		return nil, fmt.Errorf(
 			"previous PParams (%T) are not expected type",
 			prevPParams,
 		)
 	}
-	ret := allegra.UpgradePParams(shelleyPParams)
-	return ret, nil
+	ret := allegra.UpgradePParams(*shelleyPParams)
+	return &ret, nil
 }
 
 func CalculateEtaVAllegra(

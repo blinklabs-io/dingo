@@ -38,12 +38,12 @@ var BabbageEraDesc = EraDesc{
 	CalculateEtaVFunc:       CalculateEtaVBabbage,
 }
 
-func DecodePParamsBabbage(data []byte) (any, error) {
+func DecodePParamsBabbage(data []byte) (lcommon.ProtocolParameters, error) {
 	var ret babbage.BabbageProtocolParameters
 	if _, err := cbor.Decode(data, &ret); err != nil {
 		return nil, err
 	}
-	return ret, nil
+	return &ret, nil
 }
 
 func DecodePParamsUpdateBabbage(data []byte) (any, error) {
@@ -54,8 +54,8 @@ func DecodePParamsUpdateBabbage(data []byte) (any, error) {
 	return ret, nil
 }
 
-func PParamsUpdateBabbage(currentPParams any, pparamsUpdate any) (any, error) {
-	babbagePParams, ok := currentPParams.(babbage.BabbageProtocolParameters)
+func PParamsUpdateBabbage(currentPParams lcommon.ProtocolParameters, pparamsUpdate any) (lcommon.ProtocolParameters, error) {
+	babbagePParams, ok := currentPParams.(*babbage.BabbageProtocolParameters)
 	if !ok {
 		return nil, fmt.Errorf(
 			"current PParams (%T) is not expected type",
@@ -75,17 +75,17 @@ func PParamsUpdateBabbage(currentPParams any, pparamsUpdate any) (any, error) {
 
 func HardForkBabbage(
 	nodeConfig *cardano.CardanoNodeConfig,
-	prevPParams any,
-) (any, error) {
-	alonzoPParams, ok := prevPParams.(alonzo.AlonzoProtocolParameters)
+	prevPParams lcommon.ProtocolParameters,
+) (lcommon.ProtocolParameters, error) {
+	alonzoPParams, ok := prevPParams.(*alonzo.AlonzoProtocolParameters)
 	if !ok {
 		return nil, fmt.Errorf(
 			"previous PParams (%T) are not expected type",
 			prevPParams,
 		)
 	}
-	ret := babbage.UpgradePParams(alonzoPParams)
-	return ret, nil
+	ret := babbage.UpgradePParams(*alonzoPParams)
+	return &ret, nil
 }
 
 func CalculateEtaVBabbage(
