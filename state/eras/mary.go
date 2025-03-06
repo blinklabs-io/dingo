@@ -55,7 +55,10 @@ func DecodePParamsUpdateMary(data []byte) (any, error) {
 	return ret, nil
 }
 
-func PParamsUpdateMary(currentPParams lcommon.ProtocolParameters, pparamsUpdate any) (lcommon.ProtocolParameters, error) {
+func PParamsUpdateMary(
+	currentPParams lcommon.ProtocolParameters,
+	pparamsUpdate any,
+) (lcommon.ProtocolParameters, error) {
 	maryPParams, ok := currentPParams.(*mary.MaryProtocolParameters)
 	if !ok {
 		return nil, fmt.Errorf(
@@ -115,7 +118,10 @@ func CalculateEtaVMary(
 	return tmpNonce.Bytes(), nil
 }
 
-func CertDepositMary(cert lcommon.Certificate, pp lcommon.ProtocolParameters) (uint64, error) {
+func CertDepositMary(
+	cert lcommon.Certificate,
+	pp lcommon.ProtocolParameters,
+) (uint64, error) {
 	tmpPparams, ok := pp.(*mary.MaryProtocolParameters)
 	if !ok {
 		return 0, errors.New("pparams are not expected type")

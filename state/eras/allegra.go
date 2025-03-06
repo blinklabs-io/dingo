@@ -55,7 +55,10 @@ func DecodePParamsUpdateAllegra(data []byte) (any, error) {
 	return ret, nil
 }
 
-func PParamsUpdateAllegra(currentPParams lcommon.ProtocolParameters, pparamsUpdate any) (lcommon.ProtocolParameters, error) {
+func PParamsUpdateAllegra(
+	currentPParams lcommon.ProtocolParameters,
+	pparamsUpdate any,
+) (lcommon.ProtocolParameters, error) {
 	allegraPParams, ok := currentPParams.(*allegra.AllegraProtocolParameters)
 	if !ok {
 		return nil, fmt.Errorf(
@@ -115,7 +118,10 @@ func CalculateEtaVAllegra(
 	return tmpNonce.Bytes(), nil
 }
 
-func CertDepositAllegra(cert lcommon.Certificate, pp lcommon.ProtocolParameters) (uint64, error) {
+func CertDepositAllegra(
+	cert lcommon.Certificate,
+	pp lcommon.ProtocolParameters,
+) (uint64, error) {
 	tmpPparams, ok := pp.(*allegra.AllegraProtocolParameters)
 	if !ok {
 		return 0, errors.New("pparams are not expected type")

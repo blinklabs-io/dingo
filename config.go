@@ -82,7 +82,9 @@ func (n *Node) configValidate() error {
 		if listener.ListenNetwork != "" && listener.ListenAddress != "" {
 			continue
 		}
-		return errors.New("listener must provide net.Listener or listen network/address values")
+		return errors.New(
+			"listener must provide net.Listener or listen network/address values",
+		)
 	}
 	if n.config.cardanoNodeConfig != nil {
 		shelleyGenesis := n.config.cardanoNodeConfig.ShelleyGenesis()

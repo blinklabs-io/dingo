@@ -249,9 +249,15 @@ func (s *queryServiceServer) SearchUtxos(
 			if assetPattern != nil {
 				assetFound := false
 				for _, multiasset := range audc.Cardano.GetAssets() {
-					if bytes.Equal(multiasset.GetPolicyId(), assetPattern.GetPolicyId()) {
+					if bytes.Equal(
+						multiasset.GetPolicyId(),
+						assetPattern.GetPolicyId(),
+					) {
 						for _, asset := range multiasset.GetAssets() {
-							if bytes.Equal(asset.GetName(), assetPattern.GetAssetName()) {
+							if bytes.Equal(
+								asset.GetName(),
+								assetPattern.GetAssetName(),
+							) {
 								assetFound = true
 								break
 							}

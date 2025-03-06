@@ -55,7 +55,10 @@ func DecodePParamsUpdateBabbage(data []byte) (any, error) {
 	return ret, nil
 }
 
-func PParamsUpdateBabbage(currentPParams lcommon.ProtocolParameters, pparamsUpdate any) (lcommon.ProtocolParameters, error) {
+func PParamsUpdateBabbage(
+	currentPParams lcommon.ProtocolParameters,
+	pparamsUpdate any,
+) (lcommon.ProtocolParameters, error) {
 	babbagePParams, ok := currentPParams.(*babbage.BabbageProtocolParameters)
 	if !ok {
 		return nil, fmt.Errorf(
@@ -115,7 +118,10 @@ func CalculateEtaVBabbage(
 	return tmpNonce.Bytes(), nil
 }
 
-func CertDepositBabbage(cert lcommon.Certificate, pp lcommon.ProtocolParameters) (uint64, error) {
+func CertDepositBabbage(
+	cert lcommon.Certificate,
+	pp lcommon.ProtocolParameters,
+) (uint64, error) {
 	tmpPparams, ok := pp.(*babbage.BabbageProtocolParameters)
 	if !ok {
 		return 0, errors.New("pparams are not expected type")
