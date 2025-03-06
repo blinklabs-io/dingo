@@ -55,7 +55,10 @@ func DecodePParamsUpdateShelley(data []byte) (any, error) {
 	return ret, nil
 }
 
-func PParamsUpdateShelley(currentPParams lcommon.ProtocolParameters, pparamsUpdate any) (lcommon.ProtocolParameters, error) {
+func PParamsUpdateShelley(
+	currentPParams lcommon.ProtocolParameters,
+	pparamsUpdate any,
+) (lcommon.ProtocolParameters, error) {
 	shelleyPParams, ok := currentPParams.(*shelley.ShelleyProtocolParameters)
 	if !ok {
 		return nil, fmt.Errorf(
@@ -126,7 +129,10 @@ func CalculateEtaVShelley(
 	return tmpNonce.Bytes(), nil
 }
 
-func CertDepositShelley(cert lcommon.Certificate, pp lcommon.ProtocolParameters) (uint64, error) {
+func CertDepositShelley(
+	cert lcommon.Certificate,
+	pp lcommon.ProtocolParameters,
+) (uint64, error) {
 	tmpPparams, ok := pp.(*shelley.ShelleyProtocolParameters)
 	if !ok {
 		return 0, errors.New("pparams are not expected type")

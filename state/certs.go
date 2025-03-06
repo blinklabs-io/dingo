@@ -30,7 +30,10 @@ func (ls *LedgerState) processTransactionCertificates(
 	tx lcommon.Transaction,
 ) error {
 	for _, tmpCert := range tx.Certificates() {
-		certDeposit, err := ls.currentEra.CertDepositFunc(tmpCert, ls.currentPParams)
+		certDeposit, err := ls.currentEra.CertDepositFunc(
+			tmpCert,
+			ls.currentPParams,
+		)
 		if err != nil {
 			return err
 		}

@@ -101,8 +101,13 @@ func Run(logger *slog.Logger) error {
 	// Metrics and debug listener
 	http.Handle("/metrics", promhttp.Handler())
 	logger.Info(
-		"serving prometheus metrics on "+fmt.Sprintf("%s:%d", cfg.BindAddr, cfg.MetricsPort),
-		"component", "node",
+		"serving prometheus metrics on "+fmt.Sprintf(
+			"%s:%d",
+			cfg.BindAddr,
+			cfg.MetricsPort,
+		),
+		"component",
+		"node",
 	)
 	go func() {
 		debugger := &http.Server{

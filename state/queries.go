@@ -55,7 +55,9 @@ func (ls *LedgerState) queryBlock(
 func (ls *LedgerState) querySystemStart() (any, error) {
 	shelleyGenesis := ls.config.CardanoNodeConfig.ShelleyGenesis()
 	if shelleyGenesis == nil {
-		return nil, errors.New("unable to get shelley era genesis for system start")
+		return nil, errors.New(
+			"unable to get shelley era genesis for system start",
+		)
 	}
 	// Nanosecond is always within uint64 range
 	// #nosec G115

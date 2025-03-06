@@ -55,7 +55,10 @@ func DecodePParamsUpdateConway(data []byte) (any, error) {
 	return ret, nil
 }
 
-func PParamsUpdateConway(currentPParams lcommon.ProtocolParameters, pparamsUpdate any) (lcommon.ProtocolParameters, error) {
+func PParamsUpdateConway(
+	currentPParams lcommon.ProtocolParameters,
+	pparamsUpdate any,
+) (lcommon.ProtocolParameters, error) {
 	conwayPParams, ok := currentPParams.(*conway.ConwayProtocolParameters)
 	if !ok {
 		return nil, fmt.Errorf(
@@ -117,7 +120,10 @@ func CalculateEtaVConway(
 	return tmpNonce.Bytes(), nil
 }
 
-func CertDepositConway(cert lcommon.Certificate, pp lcommon.ProtocolParameters) (uint64, error) {
+func CertDepositConway(
+	cert lcommon.Certificate,
+	pp lcommon.ProtocolParameters,
+) (uint64, error) {
 	tmpPparams, ok := pp.(*conway.ConwayProtocolParameters)
 	if !ok {
 		return 0, errors.New("pparams are not expected type")

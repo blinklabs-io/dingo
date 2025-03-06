@@ -55,7 +55,10 @@ func DecodePParamsUpdateAlonzo(data []byte) (any, error) {
 	return ret, nil
 }
 
-func PParamsUpdateAlonzo(currentPParams lcommon.ProtocolParameters, pparamsUpdate any) (lcommon.ProtocolParameters, error) {
+func PParamsUpdateAlonzo(
+	currentPParams lcommon.ProtocolParameters,
+	pparamsUpdate any,
+) (lcommon.ProtocolParameters, error) {
 	alonzoPParams, ok := currentPParams.(*alonzo.AlonzoProtocolParameters)
 	if !ok {
 		return nil, fmt.Errorf(
@@ -117,7 +120,10 @@ func CalculateEtaVAlonzo(
 	return tmpNonce.Bytes(), nil
 }
 
-func CertDepositAlonzo(cert lcommon.Certificate, pp lcommon.ProtocolParameters) (uint64, error) {
+func CertDepositAlonzo(
+	cert lcommon.Certificate,
+	pp lcommon.ProtocolParameters,
+) (uint64, error) {
 	tmpPparams, ok := pp.(*alonzo.AlonzoProtocolParameters)
 	if !ok {
 		return 0, errors.New("pparams are not expected type")
