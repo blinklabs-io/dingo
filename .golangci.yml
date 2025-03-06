@@ -15,6 +15,7 @@ linters:
   presets:
     - bugs
     - performance
+    - sql
 #linters-settings:
 #  errcheck:
 #    check-type-assertions: true
