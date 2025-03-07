@@ -37,6 +37,7 @@ var ShelleyEraDesc = EraDesc{
 	EpochLengthFunc:         EpochLengthShelley,
 	CalculateEtaVFunc:       CalculateEtaVShelley,
 	CertDepositFunc:         CertDepositShelley,
+	ValidateTxFunc:          ValidateTxShelley,
 }
 
 func DecodePParamsShelley(data []byte) (lcommon.ProtocolParameters, error) {
@@ -145,4 +146,20 @@ func CertDepositShelley(
 	default:
 		return 0, nil
 	}
+}
+
+func ValidateTxShelley(
+	tx lcommon.Transaction,
+	slot uint64,
+	ls lcommon.LedgerState,
+	pp lcommon.ProtocolParameters,
+) error {
+	errs := []error{}
+	for _, validationFunc := range shelley.UtxoValidationRules {
+		errs = append(
+			errs,
+			validationFunc(tx, slot, ls, pp),
+		)
+	}
+	return errors.Join(errs...)
 }

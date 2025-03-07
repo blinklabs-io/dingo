@@ -25,6 +25,7 @@ import (
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/state/models"
 
+	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
@@ -309,13 +310,17 @@ func (ls *LedgerState) processGenesisBlock(
 		}
 		for _, utxo := range genesisUtxos {
 			outAddr := utxo.Output.Address()
+			outputCbor, err := cbor.Encode(utxo.Output)
+			if err != nil {
+				return err
+			}
 			tmpUtxo := models.Utxo{
 				TxId:       utxo.Id.Id().Bytes(),
 				OutputIdx:  utxo.Id.Index(),
 				AddedSlot:  0,
 				PaymentKey: outAddr.PaymentKeyHash().Bytes(),
 				StakingKey: outAddr.StakeKeyHash().Bytes(),
-				Cbor:       utxo.Output.Cbor(),
+				Cbor:       outputCbor,
 			}
 			if err := ls.addUtxo(txn, tmpUtxo); err != nil {
 				return fmt.Errorf("add genesis UTxO: %w", err)
@@ -494,6 +499,25 @@ func (ls *LedgerState) processBlockEvent(
 	}
 	// Process transactions
 	for _, tx := range e.Block.Transactions() {
+		// Validate transaction
+		if ls.currentEra.ValidateTxFunc != nil {
+			lv := &LedgerView{
+				txn: txn,
+				ls:  ls,
+			}
+			err := ls.currentEra.ValidateTxFunc(
+				tx,
+				e.Point.Slot,
+				lv,
+				ls.currentPParams,
+			)
+			if err != nil {
+				ls.config.Logger.Warn(
+					"TX " + tx.Hash() + " failed validation: " + err.Error(),
+				)
+				//return fmt.Errorf("TX validation failure: %w", err)
+			}
+		}
 		// Process consumed UTxOs
 		for _, consumed := range tx.Consumed() {
 			if err := ls.consumeUtxo(txn, consumed, e.Point.Slot); err != nil {

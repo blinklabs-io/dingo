@@ -37,6 +37,7 @@ var BabbageEraDesc = EraDesc{
 	EpochLengthFunc:         EpochLengthShelley,
 	CalculateEtaVFunc:       CalculateEtaVBabbage,
 	CertDepositFunc:         CertDepositBabbage,
+	ValidateTxFunc:          ValidateTxBabbage,
 }
 
 func DecodePParamsBabbage(data []byte) (lcommon.ProtocolParameters, error) {
@@ -134,4 +135,20 @@ func CertDepositBabbage(
 	default:
 		return 0, nil
 	}
+}
+
+func ValidateTxBabbage(
+	tx lcommon.Transaction,
+	slot uint64,
+	ls lcommon.LedgerState,
+	pp lcommon.ProtocolParameters,
+) error {
+	errs := []error{}
+	for _, validationFunc := range babbage.UtxoValidationRules {
+		errs = append(
+			errs,
+			validationFunc(tx, slot, ls, pp),
+		)
+	}
+	return errors.Join(errs...)
 }

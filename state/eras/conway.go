@@ -37,6 +37,7 @@ var ConwayEraDesc = EraDesc{
 	EpochLengthFunc:         EpochLengthShelley,
 	CalculateEtaVFunc:       CalculateEtaVConway,
 	CertDepositFunc:         CertDepositConway,
+	ValidateTxFunc:          ValidateTxConway,
 }
 
 func DecodePParamsConway(data []byte) (lcommon.ProtocolParameters, error) {
@@ -136,4 +137,20 @@ func CertDepositConway(
 	default:
 		return 0, nil
 	}
+}
+
+func ValidateTxConway(
+	tx lcommon.Transaction,
+	slot uint64,
+	ls lcommon.LedgerState,
+	pp lcommon.ProtocolParameters,
+) error {
+	errs := []error{}
+	for _, validationFunc := range conway.UtxoValidationRules {
+		errs = append(
+			errs,
+			validationFunc(tx, slot, ls, pp),
+		)
+	}
+	return errors.Join(errs...)
 }

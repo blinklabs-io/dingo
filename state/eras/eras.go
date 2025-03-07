@@ -31,6 +31,7 @@ type EraDesc struct {
 	EpochLengthFunc         func(*cardano.CardanoNodeConfig) (uint, uint, error)
 	CalculateEtaVFunc       func(*cardano.CardanoNodeConfig, []byte, ledger.Block) ([]byte, error)
 	CertDepositFunc         func(lcommon.Certificate, lcommon.ProtocolParameters) (uint64, error)
+	ValidateTxFunc          func(lcommon.Transaction, uint64, lcommon.LedgerState, lcommon.ProtocolParameters) error
 }
 
 var Eras = []EraDesc{

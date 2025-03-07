@@ -37,6 +37,7 @@ var MaryEraDesc = EraDesc{
 	EpochLengthFunc:         EpochLengthShelley,
 	CalculateEtaVFunc:       CalculateEtaVMary,
 	CertDepositFunc:         CertDepositMary,
+	ValidateTxFunc:          ValidateTxMary,
 }
 
 func DecodePParamsMary(data []byte) (lcommon.ProtocolParameters, error) {
@@ -134,4 +135,20 @@ func CertDepositMary(
 	default:
 		return 0, nil
 	}
+}
+
+func ValidateTxMary(
+	tx lcommon.Transaction,
+	slot uint64,
+	ls lcommon.LedgerState,
+	pp lcommon.ProtocolParameters,
+) error {
+	errs := []error{}
+	for _, validationFunc := range mary.UtxoValidationRules {
+		errs = append(
+			errs,
+			validationFunc(tx, slot, ls, pp),
+		)
+	}
+	return errors.Join(errs...)
 }
