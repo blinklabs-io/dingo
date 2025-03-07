@@ -61,6 +61,48 @@ func Run(logger *slog.Logger) error {
 			"component", "node",
 		)
 	}
+	listeners := []dingo.ListenerConfig{}
+	if cfg.RelayPort > 0 {
+		// Public "relay" port (node-to-node)
+		listeners = append(
+			listeners,
+			dingo.ListenerConfig{
+				ListenNetwork: "tcp",
+				ListenAddress: fmt.Sprintf(
+					"%s:%d",
+					cfg.BindAddr,
+					cfg.RelayPort,
+				),
+				ReuseAddress: true,
+			},
+		)
+	}
+	if cfg.PrivatePort > 0 {
+		// Private TCP port (node-to-client)
+		listeners = append(
+			listeners,
+			dingo.ListenerConfig{
+				ListenNetwork: "tcp",
+				ListenAddress: fmt.Sprintf(
+					"%s:%d",
+					cfg.PrivateBindAddr,
+					cfg.PrivatePort,
+				),
+				UseNtC: true,
+			},
+		)
+	}
+	if cfg.SocketPath != "" {
+		// Private UNIX socket (node-to-client)
+		listeners = append(
+			listeners,
+			dingo.ListenerConfig{
+				ListenNetwork: "unix",
+				ListenAddress: cfg.SocketPath,
+				UseNtC:        true,
+			},
+		)
+	}
 	d, err := dingo.New(
 		dingo.NewConfig(
 			dingo.WithIntersectTip(cfg.IntersectTip),
@@ -68,22 +110,7 @@ func Run(logger *slog.Logger) error {
 			dingo.WithDatabasePath(cfg.DatabasePath),
 			dingo.WithNetwork(cfg.Network),
 			dingo.WithCardanoNodeConfig(nodeCfg),
-			dingo.WithListeners(
-				dingo.ListenerConfig{
-					ListenNetwork: "tcp",
-					ListenAddress: fmt.Sprintf(
-						"%s:%d",
-						cfg.BindAddr,
-						cfg.RelayPort,
-					),
-					ReuseAddress: true,
-				},
-				dingo.ListenerConfig{
-					ListenNetwork: "unix",
-					ListenAddress: cfg.SocketPath,
-					UseNtC:        true,
-				},
-			),
+			dingo.WithListeners(listeners...),
 			dingo.WithOutboundSourcePort(cfg.RelayPort),
 			dingo.WithUtxorpcPort(cfg.UtxorpcPort),
 			dingo.WithUtxorpcTlsCertFilePath(cfg.TlsCertFilePath),
