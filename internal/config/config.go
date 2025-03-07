@@ -32,10 +32,12 @@ type Config struct {
 	TlsCertFilePath string `envconfig:"TLS_CERT_FILE_PATH"`
 	TlsKeyFilePath  string `envconfig:"TLS_KEY_FILE_PATH"`
 	Topology        string
-	MetricsPort     uint `split_words:"true"`
-	RelayPort       uint `envconfig:"port"`
-	UtxorpcPort     uint `split_words:"true"`
-	IntersectTip    bool `split_words:"true"`
+	MetricsPort     uint   `split_words:"true"`
+	PrivateBindAddr string `split_words:"true"`
+	PrivatePort     uint   `split_words:"true"`
+	RelayPort       uint   `envconfig:"port"`
+	UtxorpcPort     uint   `split_words:"true"`
+	IntersectTip    bool   `split_words:"true"`
 }
 
 var globalConfig = &Config{
@@ -46,6 +48,8 @@ var globalConfig = &Config{
 	IntersectTip:    false,
 	Network:         "preview",
 	MetricsPort:     12798,
+	PrivateBindAddr: "127.0.0.1",
+	PrivatePort:     3002,
 	RelayPort:       3001,
 	UtxorpcPort:     9090,
 	Topology:        "",
