@@ -60,11 +60,11 @@ func (c *ConnectionManager) startListener(l ListenerConfig) error {
 		l.Listener = listener
 		if l.UseNtC {
 			c.config.Logger.Info(
-				"listening for ouroboros node-to-node connections on " + l.ListenAddress,
+				"listening for ouroboros node-to-client connections on " + l.ListenAddress,
 			)
 		} else {
 			c.config.Logger.Info(
-				"listening for ouroboros node-to-client connections on " + l.ListenAddress,
+				"listening for ouroboros node-to-node connections on " + l.ListenAddress,
 			)
 		}
 	}
