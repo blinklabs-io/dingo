@@ -28,7 +28,12 @@ type LedgerView struct {
 }
 
 func (lv *LedgerView) NetworkId() uint {
-	networkName := lv.ls.config.CardanoNodeConfig.ShelleyGenesis().NetworkId
+	genesis := lv.ls.config.CardanoNodeConfig.ShelleyGenesis()
+	if genesis == nil {
+		// no config, definitely not mainnet
+		return 0
+	}
+	networkName := genesis.NetworkId
 	if networkName == "Mainnet" {
 		return 1
 	}
