@@ -48,6 +48,9 @@ func (s *queryServiceServer) ReadParams(
 	resp := &query.ReadParamsResponse{}
 
 	protoParams := s.utxorpc.config.LedgerState.GetCurrentPParams()
+	if protoParams == nil {
+		return nil, errors.New("current protocol parameters empty")
+	}
 
 	// Get chain point (slot and hash)
 	point := s.utxorpc.config.LedgerState.Tip().Point
