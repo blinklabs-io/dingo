@@ -179,4 +179,4 @@ jobs:
       # This updates the documentation on pkg.go.dev and the latest version available via the Go module proxy
       - name: Pull new module version
         if: startsWith(github.ref, 'refs/tags/')
-        uses: andrewslotin/go-proxy-pull-action@v1.2.0
+        uses: andrewslotin/go-proxy-pull-action@v1.3.0
