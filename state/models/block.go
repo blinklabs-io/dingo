@@ -193,11 +193,12 @@ func BlocksRecentTxn(txn *database.Txn, count int) ([]Block, error) {
 	it := txn.Blob().NewIterator(iterOpts)
 	defer it.Close()
 	var foundCount int
-	for it.Rewind(); it.Valid(); it.Next() {
-		// Skip until we find the first block key
-		if !it.ValidForPrefix([]byte(blockBlobKeyPrefix)) {
-			continue
-		}
+	// Generate our seek key
+	// We use our block key prefix and append 0xFF to get a key that should be after
+	// any legitimate block key. This should leave our most recent block as the next
+	// item when doing reverse iteration
+	tmpPrefix := append([]byte(blockBlobKeyPrefix), 0xff)
+	for it.Seek(tmpPrefix); it.Valid(); it.Next() {
 		item := it.Item()
 		k := item.Key()
 		// Skip the metadata key
