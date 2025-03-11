@@ -20,7 +20,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/mempool"
 
-	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger"
 	olocaltxsubmission "github.com/blinklabs-io/gouroboros/protocol/localtxsubmission"
 )
 
@@ -35,11 +35,15 @@ func (n *Node) localtxsubmissionServerSubmitTx(
 	tx olocaltxsubmission.MsgSubmitTxTransaction,
 ) error {
 	txBytes := tx.Raw.Content.([]byte)
-	txHash := lcommon.Blake2b256Hash(txBytes)
+	tmpTx, err := ledger.NewTransactionFromCbor(uint(tx.EraId), txBytes)
+	if err != nil {
+		return err
+	}
+	txHash := tmpTx.Hash()
 	// Add transaction to mempool
-	err := n.mempool.AddTransaction(
+	err = n.mempool.AddTransaction(
 		mempool.MempoolTransaction{
-			Hash:     txHash.String(),
+			Hash:     txHash,
 			Type:     uint(tx.EraId),
 			Cbor:     txBytes,
 			LastSeen: time.Now(),
@@ -49,7 +53,7 @@ func (n *Node) localtxsubmissionServerSubmitTx(
 		n.config.logger.Error(
 			fmt.Sprintf(
 				"failed to add tx %x to mempool: %s",
-				txHash.String(),
+				txHash,
 				err,
 			),
 			"component", "network",
