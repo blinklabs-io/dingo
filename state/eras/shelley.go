@@ -16,6 +16,7 @@ package eras
 
 import (
 	"encoding/hex"
+	"errors"
 	"fmt"
 
 	"github.com/blinklabs-io/dingo/config/cardano"
@@ -35,14 +36,16 @@ var ShelleyEraDesc = EraDesc{
 	HardForkFunc:            HardForkShelley,
 	EpochLengthFunc:         EpochLengthShelley,
 	CalculateEtaVFunc:       CalculateEtaVShelley,
+	CertDepositFunc:         CertDepositShelley,
+	ValidateTxFunc:          ValidateTxShelley,
 }
 
-func DecodePParamsShelley(data []byte) (any, error) {
+func DecodePParamsShelley(data []byte) (lcommon.ProtocolParameters, error) {
 	var ret shelley.ShelleyProtocolParameters
 	if _, err := cbor.Decode(data, &ret); err != nil {
 		return nil, err
 	}
-	return ret, nil
+	return &ret, nil
 }
 
 func DecodePParamsUpdateShelley(data []byte) (any, error) {
@@ -53,8 +56,11 @@ func DecodePParamsUpdateShelley(data []byte) (any, error) {
 	return ret, nil
 }
 
-func PParamsUpdateShelley(currentPParams any, pparamsUpdate any) (any, error) {
-	shelleyPParams, ok := currentPParams.(shelley.ShelleyProtocolParameters)
+func PParamsUpdateShelley(
+	currentPParams lcommon.ProtocolParameters,
+	pparamsUpdate any,
+) (lcommon.ProtocolParameters, error) {
+	shelleyPParams, ok := currentPParams.(*shelley.ShelleyProtocolParameters)
 	if !ok {
 		return nil, fmt.Errorf(
 			"current PParams (%T) is not expected type",
@@ -74,14 +80,14 @@ func PParamsUpdateShelley(currentPParams any, pparamsUpdate any) (any, error) {
 
 func HardForkShelley(
 	nodeConfig *cardano.CardanoNodeConfig,
-	prevPParams any,
-) (any, error) {
+	prevPParams lcommon.ProtocolParameters,
+) (lcommon.ProtocolParameters, error) {
 	// There's no Byron protocol parameters to upgrade from, so this is mostly
 	// a dummy call for consistency
 	ret := shelley.UpgradePParams(nil)
 	shelleyGenesis := nodeConfig.ShelleyGenesis()
 	ret.UpdateFromGenesis(shelleyGenesis)
-	return ret, nil
+	return &ret, nil
 }
 
 func EpochLengthShelley(
@@ -89,8 +95,10 @@ func EpochLengthShelley(
 ) (uint, uint, error) {
 	shelleyGenesis := nodeConfig.ShelleyGenesis()
 	if shelleyGenesis == nil {
-		return 0, 0, fmt.Errorf("unable to get shelley genesis")
+		return 0, 0, errors.New("unable to get shelley genesis")
 	}
+	// These are known to be within uint range
+	// #nosec G115
 	return uint(shelleyGenesis.SlotLength * 1000),
 		uint(shelleyGenesis.EpochLength),
 		nil
@@ -110,7 +118,7 @@ func CalculateEtaVShelley(
 	}
 	h, ok := block.Header().(*shelley.ShelleyBlockHeader)
 	if !ok {
-		return nil, fmt.Errorf("unexpected block type")
+		return nil, errors.New("unexpected block type")
 	}
 	tmpNonce, err := lcommon.CalculateRollingNonce(
 		prevBlockNonce,
@@ -120,4 +128,38 @@ func CalculateEtaVShelley(
 		return nil, err
 	}
 	return tmpNonce.Bytes(), nil
+}
+
+func CertDepositShelley(
+	cert lcommon.Certificate,
+	pp lcommon.ProtocolParameters,
+) (uint64, error) {
+	tmpPparams, ok := pp.(*shelley.ShelleyProtocolParameters)
+	if !ok {
+		return 0, errors.New("pparams are not expected type")
+	}
+	switch cert.(type) {
+	case *lcommon.PoolRegistrationCertificate:
+		return uint64(tmpPparams.PoolDeposit), nil
+	case *lcommon.StakeRegistrationCertificate:
+		return uint64(tmpPparams.KeyDeposit), nil
+	default:
+		return 0, nil
+	}
+}
+
+func ValidateTxShelley(
+	tx lcommon.Transaction,
+	slot uint64,
+	ls lcommon.LedgerState,
+	pp lcommon.ProtocolParameters,
+) error {
+	errs := []error{}
+	for _, validationFunc := range shelley.UtxoValidationRules {
+		errs = append(
+			errs,
+			validationFunc(tx, slot, ls, pp),
+		)
+	}
+	return errors.Join(errs...)
 }

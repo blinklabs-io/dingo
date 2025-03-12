@@ -1,4 +1,4 @@
-// Copyright 2024 Blink Labs Software
+// Copyright 2025 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -16,6 +16,7 @@ package eras
 
 import (
 	"encoding/hex"
+	"errors"
 	"fmt"
 
 	"github.com/blinklabs-io/dingo/config/cardano"
@@ -35,14 +36,16 @@ var AllegraEraDesc = EraDesc{
 	HardForkFunc:            HardForkAllegra,
 	EpochLengthFunc:         EpochLengthShelley,
 	CalculateEtaVFunc:       CalculateEtaVAllegra,
+	CertDepositFunc:         CertDepositAllegra,
+	ValidateTxFunc:          ValidateTxAllegra,
 }
 
-func DecodePParamsAllegra(data []byte) (any, error) {
+func DecodePParamsAllegra(data []byte) (lcommon.ProtocolParameters, error) {
 	var ret allegra.AllegraProtocolParameters
 	if _, err := cbor.Decode(data, &ret); err != nil {
 		return nil, err
 	}
-	return ret, nil
+	return &ret, nil
 }
 
 func DecodePParamsUpdateAllegra(data []byte) (any, error) {
@@ -53,8 +56,11 @@ func DecodePParamsUpdateAllegra(data []byte) (any, error) {
 	return ret, nil
 }
 
-func PParamsUpdateAllegra(currentPParams any, pparamsUpdate any) (any, error) {
-	allegraPParams, ok := currentPParams.(allegra.AllegraProtocolParameters)
+func PParamsUpdateAllegra(
+	currentPParams lcommon.ProtocolParameters,
+	pparamsUpdate any,
+) (lcommon.ProtocolParameters, error) {
+	allegraPParams, ok := currentPParams.(*allegra.AllegraProtocolParameters)
 	if !ok {
 		return nil, fmt.Errorf(
 			"current PParams (%T) is not expected type",
@@ -74,17 +80,17 @@ func PParamsUpdateAllegra(currentPParams any, pparamsUpdate any) (any, error) {
 
 func HardForkAllegra(
 	nodeConfig *cardano.CardanoNodeConfig,
-	prevPParams any,
-) (any, error) {
-	shelleyPParams, ok := prevPParams.(shelley.ShelleyProtocolParameters)
+	prevPParams lcommon.ProtocolParameters,
+) (lcommon.ProtocolParameters, error) {
+	shelleyPParams, ok := prevPParams.(*shelley.ShelleyProtocolParameters)
 	if !ok {
 		return nil, fmt.Errorf(
 			"previous PParams (%T) are not expected type",
 			prevPParams,
 		)
 	}
-	ret := allegra.UpgradePParams(shelleyPParams)
-	return ret, nil
+	ret := allegra.UpgradePParams(*shelleyPParams)
+	return &ret, nil
 }
 
 func CalculateEtaVAllegra(
@@ -101,7 +107,7 @@ func CalculateEtaVAllegra(
 	}
 	h, ok := block.Header().(*allegra.AllegraBlockHeader)
 	if !ok {
-		return nil, fmt.Errorf("unexpected block type")
+		return nil, errors.New("unexpected block type")
 	}
 	tmpNonce, err := lcommon.CalculateRollingNonce(
 		prevBlockNonce,
@@ -111,4 +117,38 @@ func CalculateEtaVAllegra(
 		return nil, err
 	}
 	return tmpNonce.Bytes(), nil
+}
+
+func CertDepositAllegra(
+	cert lcommon.Certificate,
+	pp lcommon.ProtocolParameters,
+) (uint64, error) {
+	tmpPparams, ok := pp.(*allegra.AllegraProtocolParameters)
+	if !ok {
+		return 0, errors.New("pparams are not expected type")
+	}
+	switch cert.(type) {
+	case *lcommon.PoolRegistrationCertificate:
+		return uint64(tmpPparams.PoolDeposit), nil
+	case *lcommon.StakeRegistrationCertificate:
+		return uint64(tmpPparams.KeyDeposit), nil
+	default:
+		return 0, nil
+	}
+}
+
+func ValidateTxAllegra(
+	tx lcommon.Transaction,
+	slot uint64,
+	ls lcommon.LedgerState,
+	pp lcommon.ProtocolParameters,
+) error {
+	errs := []error{}
+	for _, validationFunc := range allegra.UtxoValidationRules {
+		errs = append(
+			errs,
+			validationFunc(tx, slot, ls, pp),
+		)
+	}
+	return errors.Join(errs...)
 }

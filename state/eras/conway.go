@@ -1,4 +1,4 @@
-// Copyright 2024 Blink Labs Software
+// Copyright 2025 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -16,6 +16,7 @@ package eras
 
 import (
 	"encoding/hex"
+	"errors"
 	"fmt"
 
 	"github.com/blinklabs-io/dingo/config/cardano"
@@ -35,14 +36,16 @@ var ConwayEraDesc = EraDesc{
 	HardForkFunc:            HardForkConway,
 	EpochLengthFunc:         EpochLengthShelley,
 	CalculateEtaVFunc:       CalculateEtaVConway,
+	CertDepositFunc:         CertDepositConway,
+	ValidateTxFunc:          ValidateTxConway,
 }
 
-func DecodePParamsConway(data []byte) (any, error) {
+func DecodePParamsConway(data []byte) (lcommon.ProtocolParameters, error) {
 	var ret conway.ConwayProtocolParameters
 	if _, err := cbor.Decode(data, &ret); err != nil {
 		return nil, err
 	}
-	return ret, nil
+	return &ret, nil
 }
 
 func DecodePParamsUpdateConway(data []byte) (any, error) {
@@ -53,8 +56,11 @@ func DecodePParamsUpdateConway(data []byte) (any, error) {
 	return ret, nil
 }
 
-func PParamsUpdateConway(currentPParams any, pparamsUpdate any) (any, error) {
-	conwayPParams, ok := currentPParams.(conway.ConwayProtocolParameters)
+func PParamsUpdateConway(
+	currentPParams lcommon.ProtocolParameters,
+	pparamsUpdate any,
+) (lcommon.ProtocolParameters, error) {
+	conwayPParams, ok := currentPParams.(*conway.ConwayProtocolParameters)
 	if !ok {
 		return nil, fmt.Errorf(
 			"current PParams (%T) is not expected type",
@@ -74,19 +80,19 @@ func PParamsUpdateConway(currentPParams any, pparamsUpdate any) (any, error) {
 
 func HardForkConway(
 	nodeConfig *cardano.CardanoNodeConfig,
-	prevPParams any,
-) (any, error) {
-	babbagePParams, ok := prevPParams.(babbage.BabbageProtocolParameters)
+	prevPParams lcommon.ProtocolParameters,
+) (lcommon.ProtocolParameters, error) {
+	babbagePParams, ok := prevPParams.(*babbage.BabbageProtocolParameters)
 	if !ok {
 		return nil, fmt.Errorf(
 			"previous PParams (%T) are not expected type",
 			prevPParams,
 		)
 	}
-	ret := conway.UpgradePParams(babbagePParams)
+	ret := conway.UpgradePParams(*babbagePParams)
 	conwayGenesis := nodeConfig.ConwayGenesis()
 	ret.UpdateFromGenesis(conwayGenesis)
-	return ret, nil
+	return &ret, nil
 }
 
 func CalculateEtaVConway(
@@ -103,7 +109,7 @@ func CalculateEtaVConway(
 	}
 	h, ok := block.Header().(*conway.ConwayBlockHeader)
 	if !ok {
-		return nil, fmt.Errorf("unexpected block type")
+		return nil, errors.New("unexpected block type")
 	}
 	tmpNonce, err := lcommon.CalculateRollingNonce(
 		prevBlockNonce,
@@ -113,4 +119,38 @@ func CalculateEtaVConway(
 		return nil, err
 	}
 	return tmpNonce.Bytes(), nil
+}
+
+func CertDepositConway(
+	cert lcommon.Certificate,
+	pp lcommon.ProtocolParameters,
+) (uint64, error) {
+	tmpPparams, ok := pp.(*conway.ConwayProtocolParameters)
+	if !ok {
+		return 0, errors.New("pparams are not expected type")
+	}
+	switch cert.(type) {
+	case *lcommon.PoolRegistrationCertificate:
+		return uint64(tmpPparams.PoolDeposit), nil
+	case *lcommon.StakeRegistrationCertificate:
+		return uint64(tmpPparams.KeyDeposit), nil
+	default:
+		return 0, nil
+	}
+}
+
+func ValidateTxConway(
+	tx lcommon.Transaction,
+	slot uint64,
+	ls lcommon.LedgerState,
+	pp lcommon.ProtocolParameters,
+) error {
+	errs := []error{}
+	for _, validationFunc := range conway.UtxoValidationRules {
+		errs = append(
+			errs,
+			validationFunc(tx, slot, ls, pp),
+		)
+	}
+	return errors.Join(errs...)
 }

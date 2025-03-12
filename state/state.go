@@ -1,4 +1,4 @@
-// Copyright 2024 Blink Labs Software
+// Copyright 2025 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,9 +15,11 @@
 package state
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"slices"
 	"sync"
 	"time"
 
@@ -38,7 +40,7 @@ import (
 )
 
 const (
-	cleanupConsumedUtxosInterval   = 15 * time.Minute
+	cleanupConsumedUtxosInterval   = 5 * time.Minute
 	cleanupConsumedUtxosSlotWindow = 50000 // TODO: calculate this from params (#395)
 )
 
@@ -62,7 +64,7 @@ type LedgerState struct {
 	config                      LedgerStateConfig
 	db                          database.Database
 	timerCleanupConsumedUtxos   *time.Timer
-	currentPParams              any
+	currentPParams              lcommon.ProtocolParameters
 	currentEpoch                models.Epoch
 	currentEra                  eras.EraDesc
 	currentTip                  ochainsync.Tip
@@ -97,11 +99,12 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 				"component",
 				"ledger",
 			)
-			return nil, fmt.Errorf("empty database returned")
+			return nil, errors.New("empty database returned")
 		}
 		ls.db = db
 		if err != nil {
-			if _, ok := err.(database.CommitTimestampError); !ok {
+			var dbErr *database.CommitTimestampError
+			if !errors.As(err, &dbErr) {
 				return nil, err
 			}
 			ls.config.Logger.Warn(
@@ -126,11 +129,12 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 				"component",
 				"ledger",
 			)
-			return nil, fmt.Errorf("empty database returned")
+			return nil, errors.New("empty database returned")
 		}
 		ls.db = db
 		if err != nil {
-			if _, ok := err.(database.CommitTimestampError); !ok {
+			var dbErr *database.CommitTimestampError
+			if !errors.As(err, &dbErr) {
 				return nil, err
 			}
 			ls.config.Logger.Warn(
@@ -202,14 +206,14 @@ func (ls *LedgerState) recoverCommitTimestampConflict() error {
 		if tmpTip.Point.Slot > tmpBlock.Slot {
 			if err2 := ls.rollback(blockPoint); err2 != nil {
 				return fmt.Errorf(
-					"failed to rollback: %s",
+					"failed to rollback: %w",
 					err2,
 				)
 			}
 			return nil
 		}
 	}
-	return fmt.Errorf("failed to recover database")
+	return errors.New("failed to recover database")
 }
 
 func (ls *LedgerState) Close() error {
@@ -231,35 +235,40 @@ func (ls *LedgerState) scheduleCleanupConsumedUtxos() {
 			}()
 			// Get the current tip, since we're querying by slot
 			tip := ls.Tip()
+			// Get UTxOs that are marked as deleted and older than our slot window
+			var tmpUtxos []models.Utxo
+			result := ls.db.Metadata().
+				Where("deleted_slot > 0 AND deleted_slot <= ?", tip.Point.Slot-cleanupConsumedUtxosSlotWindow).
+				Order("id DESC").
+				Find(&tmpUtxos)
+			if result.Error != nil {
+				ls.config.Logger.Error(
+					"failed to query consumed UTxOs",
+					"error",
+					result.Error,
+				)
+				return
+			}
 			for {
 				ls.Lock()
 				// Perform updates in a transaction
 				batchDone := false
 				txn := ls.db.Transaction(true)
 				err := txn.Do(func(txn *database.Txn) error {
-					// Get UTxOs that are marked as deleted and older than our slot window
-					var tmpUtxos []models.Utxo
-					result := txn.Metadata().
-						Where("deleted_slot > 0 AND deleted_slot <= ?", tip.Point.Slot-cleanupConsumedUtxosSlotWindow).
-						Order("id DESC").Limit(1000).
-						Find(&tmpUtxos)
-					if result.Error != nil {
-						return fmt.Errorf(
-							"failed to query consumed UTxOs: %w",
-							result.Error,
-						)
-					}
-					if len(tmpUtxos) == 0 {
+					batchSize := min(1000, len(tmpUtxos))
+					if batchSize == 0 {
 						batchDone = true
 						return nil
 					}
 					// Delete the UTxOs
-					if err := models.UtxosDeleteTxn(txn, tmpUtxos); err != nil {
+					if err := models.UtxosDeleteTxn(txn, tmpUtxos[0:batchSize]); err != nil {
 						return fmt.Errorf(
 							"failed to remove consumed UTxO: %w",
 							err,
 						)
 					}
+					// Remove batch
+					tmpUtxos = slices.Delete(tmpUtxos, 0, batchSize)
 					return nil
 				})
 				ls.Unlock()
@@ -492,7 +501,7 @@ func (ls *LedgerState) consumeUtxo(
 	utxo, err := models.UtxoByRefTxn(txn, utxoId.Id().Bytes(), utxoId.Index())
 	if err != nil {
 		// TODO: make this configurable? (#396)
-		if err == gorm.ErrRecordNotFound {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil
 		}
 		return err
@@ -541,7 +550,7 @@ func (ls *LedgerState) loadPParams() error {
 	var tmpPParams models.PParams
 	result := ls.db.Metadata().Order("id DESC").First(&tmpPParams)
 	if result.Error != nil {
-		if result.Error == gorm.ErrRecordNotFound {
+		if errors.Is(result.Error, gorm.ErrRecordNotFound) {
 			return nil
 		}
 		return result.Error
@@ -559,7 +568,7 @@ func (ls *LedgerState) loadPParams() error {
 func (ls *LedgerState) loadEpoch() error {
 	tmpEpoch, err := models.EpochLatest(ls.db)
 	if err != nil {
-		if err != gorm.ErrRecordNotFound {
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
 			return err
 		}
 	}
@@ -608,7 +617,7 @@ func (ls *LedgerState) RecentChainPoints(count int) ([]ocommon.Point, error) {
 	if err != nil {
 		return nil, err
 	}
-	var ret []ocommon.Point
+	ret := []ocommon.Point{}
 	for _, tmpBlock := range tmpBlocks {
 		ret = append(
 			ret,
@@ -644,7 +653,7 @@ func (ls *LedgerState) GetIntersectPoint(
 			// Lookup block in metadata DB
 			tmpBlock, err := models.BlockByPoint(ls.db, point)
 			if err != nil {
-				if err == models.ErrBlockNotFound {
+				if errors.Is(err, models.ErrBlockNotFound) {
 					continue
 				}
 				return err
@@ -680,7 +689,7 @@ func (ls *LedgerState) Tip() ochainsync.Tip {
 
 // GetCurrentPParams returns the currentPParams value
 func (ls *LedgerState) GetCurrentPParams() lcommon.ProtocolParameters {
-	return ls.currentPParams.(lcommon.ProtocolParameters)
+	return ls.currentPParams
 }
 
 // UtxoByRef returns a single UTxO by reference

@@ -1,4 +1,4 @@
-// Copyright 2024 Blink Labs Software
+// Copyright 2025 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -17,6 +17,7 @@ package utxorpc
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 
 	"connectrpc.com/connect"
@@ -47,6 +48,9 @@ func (s *queryServiceServer) ReadParams(
 	resp := &query.ReadParamsResponse{}
 
 	protoParams := s.utxorpc.config.LedgerState.GetCurrentPParams()
+	if protoParams == nil {
+		return nil, errors.New("current protocol parameters empty")
+	}
 
 	// Get chain point (slot and hash)
 	point := s.utxorpc.config.LedgerState.Tip().Point
@@ -92,7 +96,7 @@ func (s *queryServiceServer) ReadUtxos(
 			return nil, err
 		}
 		if ret == nil {
-			return nil, fmt.Errorf("decode returned empty utxo")
+			return nil, errors.New("decode returned empty utxo")
 		}
 		audc := query.AnyUtxoData_Cardano{
 			Cardano: ret.Utxorpc(),
@@ -100,10 +104,10 @@ func (s *queryServiceServer) ReadUtxos(
 		aud.NativeBytes = utxo.Cbor
 		aud.TxoRef = txo
 
-		if audc.Cardano.Datum != nil {
+		if audc.Cardano.GetDatum() != nil {
 			// Check if Datum.Hash is all zeroes
 			isAllZeroes := true
-			for _, b := range audc.Cardano.Datum.Hash {
+			for _, b := range audc.Cardano.GetDatum().GetHash() {
 				if b != 0 {
 					isAllZeroes = false
 					break
@@ -218,7 +222,7 @@ func (s *queryServiceServer) SearchUtxos(
 				return nil, err
 			}
 			if ret == nil {
-				return nil, fmt.Errorf("decode returned empty utxo")
+				return nil, errors.New("decode returned empty utxo")
 			}
 			audc := query.AnyUtxoData_Cardano{
 				Cardano: ret.Utxorpc(),
@@ -228,10 +232,10 @@ func (s *queryServiceServer) SearchUtxos(
 				Hash:  utxo.TxId,
 				Index: utxo.OutputIdx,
 			}
-			if audc.Cardano.Datum != nil {
+			if audc.Cardano.GetDatum() != nil {
 				// Check if Datum.Hash is all zeroes
 				isAllZeroes := true
-				for _, b := range audc.Cardano.Datum.Hash {
+				for _, b := range audc.Cardano.GetDatum().GetHash() {
 					if b != 0 {
 						isAllZeroes = false
 						break
@@ -247,10 +251,16 @@ func (s *queryServiceServer) SearchUtxos(
 			// If AssetPattern is specified, filter based on it
 			if assetPattern != nil {
 				assetFound := false
-				for _, multiasset := range audc.Cardano.Assets {
-					if bytes.Equal(multiasset.PolicyId, assetPattern.PolicyId) {
-						for _, asset := range multiasset.Assets {
-							if bytes.Equal(asset.Name, assetPattern.AssetName) {
+				for _, multiasset := range audc.Cardano.GetAssets() {
+					if bytes.Equal(
+						multiasset.GetPolicyId(),
+						assetPattern.GetPolicyId(),
+					) {
+						for _, asset := range multiasset.GetAssets() {
+							if bytes.Equal(
+								asset.GetName(),
+								assetPattern.GetAssetName(),
+							) {
 								assetFound = true
 								break
 							}

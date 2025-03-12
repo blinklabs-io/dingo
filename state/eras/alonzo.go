@@ -1,4 +1,4 @@
-// Copyright 2024 Blink Labs Software
+// Copyright 2025 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -16,6 +16,7 @@ package eras
 
 import (
 	"encoding/hex"
+	"errors"
 	"fmt"
 
 	"github.com/blinklabs-io/dingo/config/cardano"
@@ -35,14 +36,16 @@ var AlonzoEraDesc = EraDesc{
 	HardForkFunc:            HardForkAlonzo,
 	EpochLengthFunc:         EpochLengthShelley,
 	CalculateEtaVFunc:       CalculateEtaVAlonzo,
+	CertDepositFunc:         CertDepositAlonzo,
+	ValidateTxFunc:          ValidateTxAlonzo,
 }
 
-func DecodePParamsAlonzo(data []byte) (any, error) {
+func DecodePParamsAlonzo(data []byte) (lcommon.ProtocolParameters, error) {
 	var ret alonzo.AlonzoProtocolParameters
 	if _, err := cbor.Decode(data, &ret); err != nil {
 		return nil, err
 	}
-	return ret, nil
+	return &ret, nil
 }
 
 func DecodePParamsUpdateAlonzo(data []byte) (any, error) {
@@ -53,8 +56,11 @@ func DecodePParamsUpdateAlonzo(data []byte) (any, error) {
 	return ret, nil
 }
 
-func PParamsUpdateAlonzo(currentPParams any, pparamsUpdate any) (any, error) {
-	alonzoPParams, ok := currentPParams.(alonzo.AlonzoProtocolParameters)
+func PParamsUpdateAlonzo(
+	currentPParams lcommon.ProtocolParameters,
+	pparamsUpdate any,
+) (lcommon.ProtocolParameters, error) {
+	alonzoPParams, ok := currentPParams.(*alonzo.AlonzoProtocolParameters)
 	if !ok {
 		return nil, fmt.Errorf(
 			"current PParams (%T) is not expected type",
@@ -74,19 +80,19 @@ func PParamsUpdateAlonzo(currentPParams any, pparamsUpdate any) (any, error) {
 
 func HardForkAlonzo(
 	nodeConfig *cardano.CardanoNodeConfig,
-	prevPParams any,
-) (any, error) {
-	maryPParams, ok := prevPParams.(mary.MaryProtocolParameters)
+	prevPParams lcommon.ProtocolParameters,
+) (lcommon.ProtocolParameters, error) {
+	maryPParams, ok := prevPParams.(*mary.MaryProtocolParameters)
 	if !ok {
 		return nil, fmt.Errorf(
 			"previous PParams (%T) are not expected type",
 			prevPParams,
 		)
 	}
-	ret := alonzo.UpgradePParams(maryPParams)
+	ret := alonzo.UpgradePParams(*maryPParams)
 	alonzoGenesis := nodeConfig.AlonzoGenesis()
 	ret.UpdateFromGenesis(alonzoGenesis)
-	return ret, nil
+	return &ret, nil
 }
 
 func CalculateEtaVAlonzo(
@@ -103,7 +109,7 @@ func CalculateEtaVAlonzo(
 	}
 	h, ok := block.Header().(*alonzo.AlonzoBlockHeader)
 	if !ok {
-		return nil, fmt.Errorf("unexpected block type")
+		return nil, errors.New("unexpected block type")
 	}
 	tmpNonce, err := lcommon.CalculateRollingNonce(
 		prevBlockNonce,
@@ -113,4 +119,38 @@ func CalculateEtaVAlonzo(
 		return nil, err
 	}
 	return tmpNonce.Bytes(), nil
+}
+
+func CertDepositAlonzo(
+	cert lcommon.Certificate,
+	pp lcommon.ProtocolParameters,
+) (uint64, error) {
+	tmpPparams, ok := pp.(*alonzo.AlonzoProtocolParameters)
+	if !ok {
+		return 0, errors.New("pparams are not expected type")
+	}
+	switch cert.(type) {
+	case *lcommon.PoolRegistrationCertificate:
+		return uint64(tmpPparams.PoolDeposit), nil
+	case *lcommon.StakeRegistrationCertificate:
+		return uint64(tmpPparams.KeyDeposit), nil
+	default:
+		return 0, nil
+	}
+}
+
+func ValidateTxAlonzo(
+	tx lcommon.Transaction,
+	slot uint64,
+	ls lcommon.LedgerState,
+	pp lcommon.ProtocolParameters,
+) error {
+	errs := []error{}
+	for _, validationFunc := range alonzo.UtxoValidationRules {
+		errs = append(
+			errs,
+			validationFunc(tx, slot, ls, pp),
+		)
+	}
+	return errors.Join(errs...)
 }

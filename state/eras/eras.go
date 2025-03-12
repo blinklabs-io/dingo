@@ -18,17 +18,20 @@ import (
 	"github.com/blinklabs-io/dingo/config/cardano"
 
 	"github.com/blinklabs-io/gouroboros/ledger"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
 
 type EraDesc struct {
 	Id                      uint
 	Name                    string
-	DecodePParamsFunc       func([]byte) (any, error)
+	DecodePParamsFunc       func([]byte) (lcommon.ProtocolParameters, error)
 	DecodePParamsUpdateFunc func([]byte) (any, error)
-	PParamsUpdateFunc       func(any, any) (any, error)
-	HardForkFunc            func(*cardano.CardanoNodeConfig, any) (any, error)
+	PParamsUpdateFunc       func(lcommon.ProtocolParameters, any) (lcommon.ProtocolParameters, error)
+	HardForkFunc            func(*cardano.CardanoNodeConfig, lcommon.ProtocolParameters) (lcommon.ProtocolParameters, error)
 	EpochLengthFunc         func(*cardano.CardanoNodeConfig) (uint, uint, error)
 	CalculateEtaVFunc       func(*cardano.CardanoNodeConfig, []byte, ledger.Block) ([]byte, error)
+	CertDepositFunc         func(lcommon.Certificate, lcommon.ProtocolParameters) (uint64, error)
+	ValidateTxFunc          func(lcommon.Transaction, uint64, lcommon.LedgerState, lcommon.ProtocolParameters) error
 }
 
 var Eras = []EraDesc{

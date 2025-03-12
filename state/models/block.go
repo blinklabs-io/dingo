@@ -1,4 +1,4 @@
-// Copyright 2024 Blink Labs Software
+// Copyright 2025 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -17,7 +17,6 @@ package models
 import (
 	"encoding/hex"
 	"errors"
-	"fmt"
 	"math/big"
 	"slices"
 	"strings"
@@ -36,7 +35,7 @@ const (
 	blockBlobMetadataKeySuffix = "_metadata"
 )
 
-var ErrBlockNotFound = fmt.Errorf("block not found")
+var ErrBlockNotFound = errors.New("block not found")
 
 type Block struct {
 	Slot     uint64
@@ -194,11 +193,12 @@ func BlocksRecentTxn(txn *database.Txn, count int) ([]Block, error) {
 	it := txn.Blob().NewIterator(iterOpts)
 	defer it.Close()
 	var foundCount int
-	for it.Rewind(); it.Valid(); it.Next() {
-		// Skip until we find the first block key
-		if !it.ValidForPrefix([]byte(blockBlobKeyPrefix)) {
-			continue
-		}
+	// Generate our seek key
+	// We use our block key prefix and append 0xFF to get a key that should be after
+	// any legitimate block key. This should leave our most recent block as the next
+	// item when doing reverse iteration
+	tmpPrefix := append([]byte(blockBlobKeyPrefix), 0xff)
+	for it.Seek(tmpPrefix); it.Valid(); it.Next() {
 		item := it.Item()
 		k := item.Key()
 		// Skip the metadata key

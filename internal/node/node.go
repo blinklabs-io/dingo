@@ -1,4 +1,4 @@
-// Copyright 2024 Blink Labs Software
+// Copyright 2025 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -18,8 +18,11 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	_ "net/http/pprof"
 	"os"
+	"time"
+
+	// #nosec G108
+	_ "net/http/pprof"
 
 	"github.com/blinklabs-io/dingo"
 	"github.com/blinklabs-io/dingo/config/cardano"
@@ -58,6 +61,48 @@ func Run(logger *slog.Logger) error {
 			"component", "node",
 		)
 	}
+	listeners := []dingo.ListenerConfig{}
+	if cfg.RelayPort > 0 {
+		// Public "relay" port (node-to-node)
+		listeners = append(
+			listeners,
+			dingo.ListenerConfig{
+				ListenNetwork: "tcp",
+				ListenAddress: fmt.Sprintf(
+					"%s:%d",
+					cfg.BindAddr,
+					cfg.RelayPort,
+				),
+				ReuseAddress: true,
+			},
+		)
+	}
+	if cfg.PrivatePort > 0 {
+		// Private TCP port (node-to-client)
+		listeners = append(
+			listeners,
+			dingo.ListenerConfig{
+				ListenNetwork: "tcp",
+				ListenAddress: fmt.Sprintf(
+					"%s:%d",
+					cfg.PrivateBindAddr,
+					cfg.PrivatePort,
+				),
+				UseNtC: true,
+			},
+		)
+	}
+	if cfg.SocketPath != "" {
+		// Private UNIX socket (node-to-client)
+		listeners = append(
+			listeners,
+			dingo.ListenerConfig{
+				ListenNetwork: "unix",
+				ListenAddress: cfg.SocketPath,
+				UseNtC:        true,
+			},
+		)
+	}
 	d, err := dingo.New(
 		dingo.NewConfig(
 			dingo.WithIntersectTip(cfg.IntersectTip),
@@ -65,22 +110,7 @@ func Run(logger *slog.Logger) error {
 			dingo.WithDatabasePath(cfg.DatabasePath),
 			dingo.WithNetwork(cfg.Network),
 			dingo.WithCardanoNodeConfig(nodeCfg),
-			dingo.WithListeners(
-				dingo.ListenerConfig{
-					ListenNetwork: "tcp",
-					ListenAddress: fmt.Sprintf(
-						"%s:%d",
-						cfg.BindAddr,
-						cfg.RelayPort,
-					),
-					ReuseAddress: true,
-				},
-				dingo.ListenerConfig{
-					ListenNetwork: "unix",
-					ListenAddress: cfg.SocketPath,
-					UseNtC:        true,
-				},
-			),
+			dingo.WithListeners(listeners...),
 			dingo.WithOutboundSourcePort(cfg.RelayPort),
 			dingo.WithUtxorpcPort(cfg.UtxorpcPort),
 			dingo.WithUtxorpcTlsCertFilePath(cfg.TlsCertFilePath),
@@ -98,14 +128,24 @@ func Run(logger *slog.Logger) error {
 	// Metrics and debug listener
 	http.Handle("/metrics", promhttp.Handler())
 	logger.Info(
-		fmt.Sprintf(
-			"serving prometheus metrics on %s",
-			fmt.Sprintf("%s:%d", cfg.BindAddr, cfg.MetricsPort),
+		"serving prometheus metrics on "+fmt.Sprintf(
+			"%s:%d",
+			cfg.BindAddr,
+			cfg.MetricsPort,
 		),
-		"component", "node",
+		"component",
+		"node",
 	)
 	go func() {
-		if err := http.ListenAndServe(fmt.Sprintf("%s:%d", cfg.BindAddr, cfg.MetricsPort), nil); err != nil {
+		debugger := &http.Server{
+			Addr: fmt.Sprintf(
+				"%s:%d",
+				cfg.BindAddr,
+				cfg.MetricsPort,
+			),
+			ReadHeaderTimeout: 60 * time.Second,
+		}
+		if err := debugger.ListenAndServe(); err != nil {
 			logger.Error(
 				fmt.Sprintf("failed to start metrics listener: %s", err),
 				"component", "node",

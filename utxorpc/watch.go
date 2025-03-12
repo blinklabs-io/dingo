@@ -17,6 +17,7 @@ package utxorpc
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 
 	"connectrpc.com/connect"
@@ -58,7 +59,7 @@ func (s *watchServiceServer) WatchTx(
 		for _, blockRef := range intersect {
 			blockIdx := blockRef.GetIndex()
 			blockHash := blockRef.GetHash()
-			slot := uint64(blockIdx)
+			slot := blockIdx
 			point := ocommon.NewPoint(slot, blockHash)
 			points = append(points, point)
 		}
@@ -80,7 +81,7 @@ func (s *watchServiceServer) WatchTx(
 		s.utxorpc.config.Logger.Error(
 			"nil point returned",
 		)
-		return fmt.Errorf("nil point returned")
+		return errors.New("nil point returned")
 	}
 
 	// Create our chain iterator
@@ -228,7 +229,7 @@ func (s *watchServiceServer) WatchTx(
 							return err
 						}
 						if ret == nil {
-							return fmt.Errorf("decode returned empty utxo")
+							return errors.New("decode returned empty utxo")
 						}
 						utxos = append(utxos, ret)
 					}
@@ -273,10 +274,10 @@ func (s *watchServiceServer) WatchTx(
 										}
 										if bytes.Equal(
 											policyId.Bytes(),
-											assetPattern.PolicyId,
+											assetPattern.GetPolicyId(),
 										) {
 											for _, asset := range utxo.Assets().Assets(policyId) {
-												if bytes.Equal(asset, assetPattern.AssetName) {
+												if bytes.Equal(asset, assetPattern.GetAssetName()) {
 													found = true
 													assetFound = true
 													break

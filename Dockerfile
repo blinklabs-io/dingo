@@ -1,4 +1,4 @@
-FROM ghcr.io/blinklabs-io/go:1.23.5-1 AS build
+FROM ghcr.io/blinklabs-io/go:1.24.1-1 AS build
 
 WORKDIR /code
 COPY go.* .
@@ -6,7 +6,7 @@ RUN go mod download
 COPY . .
 RUN make build
 
-FROM ghcr.io/blinklabs-io/cardano-configs:20241028-1 AS cardano-configs
+FROM ghcr.io/blinklabs-io/cardano-configs:20250213-1 AS cardano-configs
 FROM ghcr.io/blinklabs-io/txtop:0.12.2 AS txtop
 
 FROM debian:bookworm-slim AS dingo

@@ -1,4 +1,4 @@
-// Copyright 2024 Blink Labs Software
+// Copyright 2025 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -19,15 +19,16 @@ import (
 )
 
 type MempoolConsumer struct {
-	txChan     chan *MempoolTransaction
+	mempool    *Mempool
+	nextTxIdx  int
 	cache      map[string]*MempoolTransaction
 	cacheMutex sync.Mutex
 }
 
-func newConsumer() *MempoolConsumer {
+func newConsumer(mempool *Mempool) *MempoolConsumer {
 	return &MempoolConsumer{
-		txChan: make(chan *MempoolTransaction),
-		cache:  make(map[string]*MempoolTransaction),
+		mempool: mempool,
+		cache:   make(map[string]*MempoolTransaction),
 	}
 }
 
@@ -35,30 +36,31 @@ func (m *MempoolConsumer) NextTx(blocking bool) *MempoolTransaction {
 	if m == nil {
 		return nil
 	}
-	var ret *MempoolTransaction
-	if blocking {
-		// Wait until a transaction is available
-		tmpTx, ok := <-m.txChan
-		if ok {
-			ret = tmpTx
+	m.mempool.RLock()
+	defer m.mempool.RUnlock()
+	if m.nextTxIdx >= len(m.mempool.transactions) {
+		if !blocking {
+			return nil
 		}
-	} else {
-		select {
-		case tmpTx, ok := <-m.txChan:
-			if ok {
-				ret = tmpTx
-			}
-		default:
-			// No transaction available
-		}
+		// Wait for TX to be added to mempool
+		addTxSubId, addTxChan := m.mempool.eventBus.Subscribe(
+			AddTransactionEventType,
+		)
+		m.mempool.RUnlock()
+		<-addTxChan
+		m.mempool.eventBus.Unsubscribe(AddTransactionEventType, addTxSubId)
+		m.mempool.RLock()
 	}
-	if ret != nil {
+	nextTx := m.mempool.transactions[m.nextTxIdx]
+	if nextTx != nil {
+		// Increment next TX index
+		m.nextTxIdx++
 		// Add transaction to cache
 		m.cacheMutex.Lock()
-		m.cache[ret.Hash] = ret
+		m.cache[nextTx.Hash] = nextTx
 		m.cacheMutex.Unlock()
 	}
-	return ret
+	return nextTx
 }
 
 func (m *MempoolConsumer) GetTxFromCache(hash string) *MempoolTransaction {
@@ -84,30 +86,5 @@ func (m *MempoolConsumer) RemoveTxFromCache(hash string) {
 		m.cacheMutex.Lock()
 		defer m.cacheMutex.Unlock()
 		delete(m.cache, hash)
-	}
-}
-
-func (m *MempoolConsumer) stop() {
-	if m != nil {
-		close(m.txChan)
-	}
-}
-
-func (m *MempoolConsumer) pushTx(tx *MempoolTransaction, wait bool) bool {
-	if m == nil {
-		return false
-	}
-	if wait {
-		// Block on write to channel
-		m.txChan <- tx
-		return true
-	} else {
-		// Return immediately if we can't write to channel
-		select {
-		case m.txChan <- tx:
-			return true
-		default:
-			return false
-		}
 	}
 }

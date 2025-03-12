@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"time"
 
@@ -77,7 +78,7 @@ func (s *submitServiceServer) SubmitTx(
 		}
 		tx := mempool.MempoolTransaction{
 			Hash:     txHash.String(),
-			Type:     uint(txType),
+			Type:     txType,
 			Cbor:     txRawBytes,
 			LastSeen: time.Now(),
 		}
@@ -229,7 +230,7 @@ func (s *submitServiceServer) WatchMempool(
 				Stage:       submit.Stage_STAGE_MEMPOOL,
 			}
 			resp.Tx = record
-			if string(record.NativeBytes) == cTx.String() {
+			if string(record.GetNativeBytes()) == cTx.String() {
 				if predicate == nil {
 					err := stream.Send(resp)
 					if err != nil {
@@ -320,7 +321,7 @@ func (s *submitServiceServer) WatchMempool(
 							return err
 						}
 						if ret == nil {
-							return fmt.Errorf("decode returned empty utxo")
+							return errors.New("decode returned empty utxo")
 						}
 						utxos = append(utxos, ret)
 					}
@@ -365,10 +366,15 @@ func (s *submitServiceServer) WatchMempool(
 										}
 										if bytes.Equal(
 											policyId.Bytes(),
-											assetPattern.PolicyId,
+											assetPattern.GetPolicyId(),
 										) {
-											for _, asset := range utxo.Assets().Assets(policyId) {
-												if bytes.Equal(asset, assetPattern.AssetName) {
+											for _, asset := range utxo.Assets().Assets(
+												policyId,
+											) {
+												if bytes.Equal(
+													asset,
+													assetPattern.GetAssetName(),
+												) {
 													found = true
 													assetFound = true
 													break

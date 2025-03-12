@@ -1,4 +1,4 @@
-// Copyright 2024 Blink Labs Software
+// Copyright 2025 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,6 +15,7 @@
 package database
 
 import (
+	"errors"
 	"fmt"
 	"math/big"
 
@@ -61,7 +62,7 @@ func (b *BaseDatabase) checkCommitTimestamp() error {
 	result := b.Metadata().First(&tmpCommitTimestamp)
 	if result.Error != nil {
 		// No metadata yet, so nothing to check
-		if result.Error == gorm.ErrRecordNotFound {
+		if errors.Is(result.Error, gorm.ErrRecordNotFound) {
 			return nil
 		}
 		return result.Error

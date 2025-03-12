@@ -1,4 +1,4 @@
-// Copyright 2024 Blink Labs Software
+// Copyright 2025 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,15 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package models
+package plugin
 
-type StakeRegistration struct {
-	ID            uint   `gorm:"primarykey"`
-	StakingKey    []byte `gorm:"index"`
-	AddedSlot     uint64
-	DepositAmount uint64
-}
+// Logger provides a logging interface for plugins.
+type Logger interface {
+	Info(string, ...any)
+	Warn(string, ...any)
+	Debug(string, ...any)
+	Error(string, ...any)
 
-func (StakeRegistration) TableName() string {
-	return "stake_registration"
+	// Deprecated
+	// Fatal(string, ...any) in favor of Error
+	// With slog Fatal is replaced with Error and os.Exit(1)
 }

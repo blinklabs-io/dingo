@@ -1,4 +1,4 @@
-// Copyright 2024 Blink Labs Software
+// Copyright 2025 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,7 +15,6 @@
 package dingo
 
 import (
-	"fmt"
 	"net"
 	"strconv"
 
@@ -58,7 +57,7 @@ func (n *Node) peersharingShareRequest(
 				continue
 			}
 			n.config.logger.Debug(
-				fmt.Sprintf("adding peer for sharing: %s", peer.Address),
+				"adding peer for sharing: " + peer.Address,
 			)
 			peers = append(peers, opeersharing.PeerAddress{
 				IP:   net.ParseIP(host),

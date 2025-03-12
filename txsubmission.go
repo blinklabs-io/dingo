@@ -1,4 +1,4 @@
-// Copyright 2024 Blink Labs Software
+// Copyright 2025 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -16,7 +16,9 @@ package dingo
 
 import (
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"math"
 	"time"
 
 	"github.com/blinklabs-io/dingo/mempool"
@@ -189,20 +191,23 @@ func (n *Node) txsubmissionClientRequestTxIds(
 		}
 	}
 	for _, tmpTx := range tmpTxs {
-		tmpTx := tmpTx
 		// Add to return value
 		txHashBytes, err := hex.DecodeString(tmpTx.Hash)
 		if err != nil {
 			return nil, err
 		}
+		txSize := len(tmpTx.Cbor)
+		if txSize > math.MaxUint32 {
+			return nil, errors.New("tx impossibly large")
+		}
 		ret = append(
 			ret,
 			txsubmission.TxIdAndSize{
 				TxId: txsubmission.TxId{
-					EraId: uint16(tmpTx.Type),
+					EraId: uint16(tmpTx.Type), // #nosec G115
 					TxId:  [32]byte(txHashBytes),
 				},
-				Size: uint32(len(tmpTx.Cbor)),
+				Size: uint32(txSize),
 			},
 		)
 	}
@@ -223,7 +228,7 @@ func (n *Node) txsubmissionClientRequestTxs(
 			ret = append(
 				ret,
 				txsubmission.TxBody{
-					EraId:  uint16(tx.Type),
+					EraId:  uint16(tx.Type), // #nosec G115
 					TxBody: tx.Cbor,
 				},
 			)

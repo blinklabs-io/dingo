@@ -1,4 +1,4 @@
-// Copyright 2024 Blink Labs Software
+// Copyright 2025 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -16,6 +16,7 @@ package eras
 
 import (
 	"encoding/hex"
+	"errors"
 	"fmt"
 
 	"github.com/blinklabs-io/dingo/config/cardano"
@@ -35,14 +36,16 @@ var BabbageEraDesc = EraDesc{
 	HardForkFunc:            HardForkBabbage,
 	EpochLengthFunc:         EpochLengthShelley,
 	CalculateEtaVFunc:       CalculateEtaVBabbage,
+	CertDepositFunc:         CertDepositBabbage,
+	ValidateTxFunc:          ValidateTxBabbage,
 }
 
-func DecodePParamsBabbage(data []byte) (any, error) {
+func DecodePParamsBabbage(data []byte) (lcommon.ProtocolParameters, error) {
 	var ret babbage.BabbageProtocolParameters
 	if _, err := cbor.Decode(data, &ret); err != nil {
 		return nil, err
 	}
-	return ret, nil
+	return &ret, nil
 }
 
 func DecodePParamsUpdateBabbage(data []byte) (any, error) {
@@ -53,8 +56,11 @@ func DecodePParamsUpdateBabbage(data []byte) (any, error) {
 	return ret, nil
 }
 
-func PParamsUpdateBabbage(currentPParams any, pparamsUpdate any) (any, error) {
-	babbagePParams, ok := currentPParams.(babbage.BabbageProtocolParameters)
+func PParamsUpdateBabbage(
+	currentPParams lcommon.ProtocolParameters,
+	pparamsUpdate any,
+) (lcommon.ProtocolParameters, error) {
+	babbagePParams, ok := currentPParams.(*babbage.BabbageProtocolParameters)
 	if !ok {
 		return nil, fmt.Errorf(
 			"current PParams (%T) is not expected type",
@@ -74,17 +80,17 @@ func PParamsUpdateBabbage(currentPParams any, pparamsUpdate any) (any, error) {
 
 func HardForkBabbage(
 	nodeConfig *cardano.CardanoNodeConfig,
-	prevPParams any,
-) (any, error) {
-	alonzoPParams, ok := prevPParams.(alonzo.AlonzoProtocolParameters)
+	prevPParams lcommon.ProtocolParameters,
+) (lcommon.ProtocolParameters, error) {
+	alonzoPParams, ok := prevPParams.(*alonzo.AlonzoProtocolParameters)
 	if !ok {
 		return nil, fmt.Errorf(
 			"previous PParams (%T) are not expected type",
 			prevPParams,
 		)
 	}
-	ret := babbage.UpgradePParams(alonzoPParams)
-	return ret, nil
+	ret := babbage.UpgradePParams(*alonzoPParams)
+	return &ret, nil
 }
 
 func CalculateEtaVBabbage(
@@ -101,7 +107,7 @@ func CalculateEtaVBabbage(
 	}
 	h, ok := block.Header().(*babbage.BabbageBlockHeader)
 	if !ok {
-		return nil, fmt.Errorf("unexpected block type")
+		return nil, errors.New("unexpected block type")
 	}
 	tmpNonce, err := lcommon.CalculateRollingNonce(
 		prevBlockNonce,
@@ -111,4 +117,38 @@ func CalculateEtaVBabbage(
 		return nil, err
 	}
 	return tmpNonce.Bytes(), nil
+}
+
+func CertDepositBabbage(
+	cert lcommon.Certificate,
+	pp lcommon.ProtocolParameters,
+) (uint64, error) {
+	tmpPparams, ok := pp.(*babbage.BabbageProtocolParameters)
+	if !ok {
+		return 0, errors.New("pparams are not expected type")
+	}
+	switch cert.(type) {
+	case *lcommon.PoolRegistrationCertificate:
+		return uint64(tmpPparams.PoolDeposit), nil
+	case *lcommon.StakeRegistrationCertificate:
+		return uint64(tmpPparams.KeyDeposit), nil
+	default:
+		return 0, nil
+	}
+}
+
+func ValidateTxBabbage(
+	tx lcommon.Transaction,
+	slot uint64,
+	ls lcommon.LedgerState,
+	pp lcommon.ProtocolParameters,
+) error {
+	errs := []error{}
+	for _, validationFunc := range babbage.UtxoValidationRules {
+		errs = append(
+			errs,
+			validationFunc(tx, slot, ls, pp),
+		)
+	}
+	return errors.Join(errs...)
 }
