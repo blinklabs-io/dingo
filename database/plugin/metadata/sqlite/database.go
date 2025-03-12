@@ -15,6 +15,7 @@
 package sqlite
 
 import (
+	"database/sql"
 	"errors"
 	"fmt"
 	"io"
@@ -41,8 +42,8 @@ func init() {
 	)
 }
 
-// Database stores all data in sqlite. Data may not be persisted
-type Database struct {
+// MetadataStoreSqlite stores all data in sqlite. Data may not be persisted
+type MetadataStoreSqlite struct {
 	dataDir string
 	db      *gorm.DB
 	logger  *slog.Logger
@@ -52,7 +53,7 @@ type Database struct {
 func New(
 	dataDir string,
 	logger *slog.Logger,
-) (*Database, error) {
+) (*MetadataStoreSqlite, error) {
 	var metadataDb *gorm.DB
 	var err error
 	if dataDir == "" {
@@ -96,19 +97,19 @@ func New(
 			return nil, err
 		}
 	}
-	db := &Database{
+	db := &MetadataStoreSqlite{
 		db:      metadataDb,
 		dataDir: dataDir,
 		logger:  logger,
 	}
 	if err := db.init(); err != nil {
-		// Database is available for recovery, so return it with error
+		// MetadataStoreSqlite is available for recovery, so return it with error
 		return db, err
 	}
 	return db, nil
 }
 
-func (d *Database) init() error {
+func (d *MetadataStoreSqlite) init() error {
 	if d.logger == nil {
 		// Create logger to throw away logs
 		// We do this so we don't have to add guards around every log operation
@@ -121,6 +122,55 @@ func (d *Database) init() error {
 	return nil
 }
 
-func (d *Database) DB() *gorm.DB {
+// AutoMigrate wraps the gorm AutoMigrate
+func (d *MetadataStoreSqlite) AutoMigrate(dst ...interface{}) error {
+	return d.DB().AutoMigrate(dst...)
+}
+
+// Begin creates a gorm transaction
+func (d *MetadataStoreSqlite) Begin(opts ...*sql.TxOptions) *gorm.DB {
+	return d.DB().Begin(opts...)
+}
+
+// Close gets the database handle from our MetadataStore and closes it
+func (d *MetadataStoreSqlite) Close() error {
+	// get DB handle from gorm.DB
+	db, err := d.DB().DB()
+	if err != nil {
+		return err
+	}
+	return db.Close()
+}
+
+// Create creates a table
+func (d *MetadataStoreSqlite) Create(value interface{}) *gorm.DB {
+	return d.DB().Create(value)
+}
+
+// DB returns the database handle
+func (d *MetadataStoreSqlite) DB() *gorm.DB {
 	return d.db
+}
+
+// First returns the first DB entry
+func (d *MetadataStoreSqlite) First(args interface{}) *gorm.DB {
+	return d.DB().First(args)
+}
+
+// Order orders a DB query
+func (d *MetadataStoreSqlite) Order(args interface{}) *gorm.DB {
+	return d.DB().Order(args)
+}
+
+// Transaction creates a gorm transaction
+func (d *MetadataStoreSqlite) Transaction() *gorm.DB {
+	return d.DB().Begin()
+}
+
+// Where constrains a DB query
+func (d *MetadataStoreSqlite) Where(
+	query interface{},
+	args ...interface{},
+) *gorm.DB {
+	return d.DB().Where(query, args...)
 }

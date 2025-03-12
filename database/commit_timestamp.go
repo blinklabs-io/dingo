@@ -20,24 +20,11 @@ import (
 	"math/big"
 
 	badger "github.com/dgraph-io/badger/v4"
-	"gorm.io/gorm"
-	"gorm.io/gorm/clause"
 )
 
 const (
 	commitTimestampBlobKey = "metadata_commit_timestamp"
-	commitTimestampRowId   = 1
 )
-
-// CommitTimestamp represents the sqlite table used to track the current commit timestamp
-type CommitTimestamp struct {
-	ID        uint `gorm:"primarykey"`
-	Timestamp int64
-}
-
-func (CommitTimestamp) TableName() string {
-	return "commit_timestamp"
-}
 
 type CommitTimestampError struct {
 	MetadataTimestamp int64
@@ -53,19 +40,14 @@ func (e CommitTimestampError) Error() string {
 }
 
 func (b *BaseDatabase) checkCommitTimestamp() error {
-	// Create table if it doesn't exist
-	if err := b.Metadata().AutoMigrate(&CommitTimestamp{}); err != nil {
-		return err
-	}
 	// Get value from sqlite
-	var tmpCommitTimestamp CommitTimestamp
-	result := b.Metadata().First(&tmpCommitTimestamp)
-	if result.Error != nil {
-		// No metadata yet, so nothing to check
-		if errors.Is(result.Error, gorm.ErrRecordNotFound) {
-			return nil
-		}
-		return result.Error
+	metadataTimestamp, metadataErr := b.Metadata().GetCommitTimestamp()
+	if metadataErr != nil {
+		return errors.New("failed to get metadata timestamp from plugin")
+	}
+	// No timestamp in the database
+	if metadataTimestamp <= 0 {
+		return nil
 	}
 	// Get value from badger
 	err := b.Blob().View(func(txn *badger.Txn) error {
@@ -79,9 +61,9 @@ func (b *BaseDatabase) checkCommitTimestamp() error {
 		}
 		tmpTimestamp := new(big.Int).SetBytes(val).Int64()
 		// Compare values
-		if tmpTimestamp != tmpCommitTimestamp.Timestamp {
+		if tmpTimestamp != metadataTimestamp {
 			return CommitTimestampError{
-				MetadataTimestamp: tmpCommitTimestamp.Timestamp,
+				MetadataTimestamp: metadataTimestamp,
 				BlobTimestamp:     tmpTimestamp,
 			}
 		}
@@ -95,16 +77,8 @@ func (b *BaseDatabase) checkCommitTimestamp() error {
 
 func (b *BaseDatabase) updateCommitTimestamp(txn *Txn, timestamp int64) error {
 	// Update sqlite
-	tmpCommitTimestamp := CommitTimestamp{
-		ID:        commitTimestampRowId,
-		Timestamp: timestamp,
-	}
-	result := txn.Metadata().Clauses(clause.OnConflict{
-		Columns:   []clause.Column{{Name: "id"}},
-		DoUpdates: clause.AssignmentColumns([]string{"timestamp"}),
-	}).Create(&tmpCommitTimestamp)
-	if result.Error != nil {
-		return result.Error
+	if err := b.Metadata().SetCommitTimestamp(txn.Metadata(), timestamp); err != nil {
+		return err
 	}
 	// Update badger
 	tmpTimestamp := new(big.Int).SetInt64(timestamp)
