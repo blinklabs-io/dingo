@@ -23,14 +23,13 @@ import (
 	"time"
 
 	badger "github.com/dgraph-io/badger/v4"
-	"gorm.io/gorm"
 
-	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 )
 
 type Database interface {
 	Close() error
-	Metadata() *gorm.DB
+	Metadata() metadata.MetadataStore
 	Blob() *badger.DB
 	Transaction(bool) *Txn
 	updateCommitTimestamp(*Txn, int64) error
@@ -38,14 +37,14 @@ type Database interface {
 
 type BaseDatabase struct {
 	logger        *slog.Logger
-	metadata      *gorm.DB
+	metadata      metadata.MetadataStore
 	blob          *badger.DB
 	blobGcEnabled bool
 	blobGcTimer   *time.Ticker
 }
 
-// Metadata returns the underlying metadata DB instance
-func (b *BaseDatabase) Metadata() *gorm.DB {
+// Metadata returns the underlying metadata store instance
+func (b *BaseDatabase) Metadata() metadata.MetadataStore {
 	return b.metadata
 }
 
@@ -63,13 +62,8 @@ func (b *BaseDatabase) Transaction(readWrite bool) *Txn {
 func (b *BaseDatabase) Close() error {
 	var err error
 	// Close metadata
-	sqlDB, sqlDBerr := b.metadata.DB()
-	if sqlDBerr != nil {
-		err = errors.Join(err, sqlDBerr)
-	} else {
-		metadataErr := sqlDB.Close()
-		err = errors.Join(err, metadataErr)
-	}
+	metadataErr := b.Metadata().Close()
+	err = errors.Join(err, metadataErr)
 	// Close blob
 	blobErr := b.blob.Close()
 	err = errors.Join(err, blobErr)
@@ -123,7 +117,7 @@ type InMemoryDatabase struct {
 // NewInMemory creates a new in-memory database
 func NewInMemory(logger *slog.Logger) (*InMemoryDatabase, error) {
 	// Use sqlite plugin
-	metadataDb, err := sqlite.New("", logger)
+	metadataDb, err := metadata.New("sqlite", "", logger)
 	if err != nil {
 		return nil, err
 	}
@@ -140,7 +134,7 @@ func NewInMemory(logger *slog.Logger) (*InMemoryDatabase, error) {
 	db := &InMemoryDatabase{
 		BaseDatabase: &BaseDatabase{
 			logger:   logger,
-			metadata: metadataDb.DB(),
+			metadata: metadataDb,
 			blob:     blobDb,
 			// We disable badger GC when using an in-memory DB, since it will only throw errors
 			blobGcEnabled: false,
@@ -164,7 +158,7 @@ func NewPersistent(
 	dataDir string,
 	logger *slog.Logger,
 ) (*PersistentDatabase, error) {
-	metadataDb, err := sqlite.New(dataDir, logger)
+	metadataDb, err := metadata.New("sqlite", dataDir, logger)
 	if err != nil {
 		return nil, err
 	}
@@ -184,7 +178,7 @@ func NewPersistent(
 	db := &PersistentDatabase{
 		BaseDatabase: &BaseDatabase{
 			logger:        logger,
-			metadata:      metadataDb.DB(),
+			metadata:      metadataDb,
 			blob:          blobDb,
 			blobGcEnabled: true,
 		},

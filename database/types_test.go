@@ -54,17 +54,27 @@ func TestTypesScanValue(t *testing.T) {
 			t.Fatalf("unexpected error: %s", err)
 		}
 		if !reflect.DeepEqual(valueOut, testDef.expectedValue) {
-			t.Fatalf("did not get expected value from Value(): got %#v, expected %#v", valueOut, testDef.expectedValue)
+			t.Fatalf(
+				"did not get expected value from Value(): got %#v, expected %#v",
+				valueOut,
+				testDef.expectedValue,
+			)
 		}
 		tmpScanner, ok := testDef.origValue.(sql.Scanner)
 		if !ok {
-			t.Fatalf("test original value does not implement sql.Scanner (it must be a pointer)")
+			t.Fatalf(
+				"test original value does not implement sql.Scanner (it must be a pointer)",
+			)
 		}
 		if err := tmpScanner.Scan(valueOut); err != nil {
 			t.Fatalf("unexpected error: %s", err)
 		}
 		if !reflect.DeepEqual(tmpScanner, testDef.origValue) {
-			t.Fatalf("did not get expected value after Scan(): got %#v, expected %#v", tmpScanner, testDef.origValue)
+			t.Fatalf(
+				"did not get expected value after Scan(): got %#v, expected %#v",
+				tmpScanner,
+				testDef.origValue,
+			)
 		}
 	}
 }
