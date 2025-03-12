@@ -20,7 +20,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"time"
 
 	"connectrpc.com/connect"
 	"github.com/blinklabs-io/gouroboros/ledger"
@@ -30,7 +29,6 @@ import (
 	"github.com/utxorpc/go-codegen/utxorpc/v1alpha/submit/submitconnect"
 
 	"github.com/blinklabs-io/dingo/event"
-	"github.com/blinklabs-io/dingo/mempool"
 	"github.com/blinklabs-io/dingo/state"
 )
 
@@ -76,14 +74,8 @@ func (s *submitServiceServer) SubmitTx(
 			hasError = true
 			continue
 		}
-		tx := mempool.MempoolTransaction{
-			Hash:     txHash.String(),
-			Type:     txType,
-			Cbor:     txRawBytes,
-			LastSeen: time.Now(),
-		}
 		// Add transaction to mempool
-		err = s.utxorpc.config.Mempool.AddTransaction(tx)
+		err = s.utxorpc.config.Mempool.AddTransaction(txType, txRawBytes)
 		if err != nil {
 			resp.Ref = append(resp.Ref, placeholderRef)
 			errorList[i] = fmt.Errorf("%s", err.Error())
@@ -97,14 +89,13 @@ func (s *submitServiceServer) SubmitTx(
 			hasError = true
 			continue
 		}
-		txHexBytes, err := hex.DecodeString(tx.Hash)
 		if err != nil {
 			resp.Ref = append(resp.Ref, placeholderRef)
 			errorList[i] = err
 			hasError = true
 			continue
 		}
-		resp.Ref = append(resp.Ref, txHexBytes)
+		resp.Ref = append(resp.Ref, txHash.Bytes())
 	}
 	if hasError {
 		return connect.NewResponse(resp), fmt.Errorf("%v", errorList)

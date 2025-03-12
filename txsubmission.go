@@ -19,7 +19,6 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"time"
 
 	"github.com/blinklabs-io/dingo/mempool"
 	ouroboros "github.com/blinklabs-io/gouroboros"
@@ -130,12 +129,8 @@ func (n *Node) txsubmissionServerInit(ctx otxsubmission.CallbackContext) error {
 					)
 					// Add transaction to mempool
 					err = n.mempool.AddTransaction(
-						mempool.MempoolTransaction{
-							Hash:     tx.Hash(),
-							Type:     uint(txBody.EraId),
-							Cbor:     txBody.TxBody,
-							LastSeen: time.Now(),
-						},
+						uint(txBody.EraId),
+						txBody.TxBody,
 					)
 					if err != nil {
 						n.config.logger.Error(
