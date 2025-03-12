@@ -1,4 +1,4 @@
-// Copyright 2024 Blink Labs Software
+// Copyright 2025 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -56,15 +56,13 @@ type MempoolTransaction struct {
 }
 
 type Mempool struct {
-	sync.Mutex
-	logger             *slog.Logger
-	eventBus           *event.EventBus
-	consumers          map[ouroboros.ConnectionId]*MempoolConsumer
-	consumersMutex     sync.Mutex
-	consumerIndex      map[ouroboros.ConnectionId]int
-	consumerIndexMutex sync.Mutex
-	transactions       []*MempoolTransaction
-	metrics            struct {
+	sync.RWMutex
+	logger         *slog.Logger
+	eventBus       *event.EventBus
+	consumers      map[ouroboros.ConnectionId]*MempoolConsumer
+	consumersMutex sync.Mutex
+	transactions   []*MempoolTransaction
+	metrics        struct {
 		txsProcessedNum prometheus.Counter
 		txsInMempool    prometheus.Gauge
 		mempoolBytes    prometheus.Gauge
@@ -113,50 +111,15 @@ func (m *Mempool) AddConsumer(connId ouroboros.ConnectionId) *MempoolConsumer {
 	// Create consumer
 	m.consumersMutex.Lock()
 	defer m.consumersMutex.Unlock()
-	consumer := newConsumer()
+	consumer := newConsumer(m)
 	m.consumers[connId] = consumer
-	// Start goroutine to send existing TXs to consumer
-	go func(consumer *MempoolConsumer) {
-		for {
-			m.Lock()
-			m.consumerIndexMutex.Lock()
-			nextTxIdx, ok := m.consumerIndex[connId]
-			if !ok {
-				// Our consumer has disappeared
-				m.consumerIndexMutex.Unlock()
-				m.Unlock()
-				return
-			}
-			if nextTxIdx >= len(m.transactions) {
-				// We've reached the current end of the mempool
-				m.consumerIndexMutex.Unlock()
-				m.Unlock()
-				return
-			}
-			nextTx := m.transactions[nextTxIdx]
-			if consumer.pushTx(nextTx, true) {
-				nextTxIdx++
-				m.consumerIndex[connId] = nextTxIdx
-			}
-			m.consumerIndexMutex.Unlock()
-			m.Unlock()
-		}
-	}(consumer)
 	return consumer
 }
 
 func (m *Mempool) RemoveConsumer(connId ouroboros.ConnectionId) {
 	m.consumersMutex.Lock()
-	m.consumerIndexMutex.Lock()
-	defer func() {
-		m.consumerIndexMutex.Unlock()
-		m.consumersMutex.Unlock()
-	}()
-	if consumer, ok := m.consumers[connId]; ok {
-		consumer.stop()
-		delete(m.consumers, connId)
-		delete(m.consumerIndex, connId)
-	}
+	delete(m.consumers, connId)
+	m.consumersMutex.Unlock()
 }
 
 func (m *Mempool) Consumer(connId ouroboros.ConnectionId) *MempoolConsumer {
@@ -192,9 +155,7 @@ func (m *Mempool) scheduleRemoveExpired() {
 func (m *Mempool) AddTransaction(tx MempoolTransaction) error {
 	m.Lock()
 	m.consumersMutex.Lock()
-	m.consumerIndexMutex.Lock()
 	defer func() {
-		m.consumerIndexMutex.Unlock()
 		m.consumersMutex.Unlock()
 		m.Unlock()
 	}()
@@ -219,17 +180,6 @@ func (m *Mempool) AddTransaction(tx MempoolTransaction) error {
 	m.metrics.txsProcessedNum.Inc()
 	m.metrics.txsInMempool.Inc()
 	m.metrics.mempoolBytes.Add(float64(len(tx.Cbor)))
-	// Send new TX to consumers that are ready for it
-	newTxIdx := len(m.transactions) - 1
-	for connId, consumerIdx := range m.consumerIndex {
-		if consumerIdx == newTxIdx {
-			consumer := m.consumers[connId]
-			if consumer.pushTx(&tx, false) {
-				consumerIdx++
-				m.consumerIndex[connId] = consumerIdx
-			}
-		}
-	}
 	// Generate event
 	m.eventBus.Publish(
 		AddTransactionEventType,
@@ -289,7 +239,6 @@ func (m *Mempool) RemoveTransaction(txHash string) {
 func (m *Mempool) removeTransaction(txHash string) bool {
 	for txIdx, tx := range m.transactions {
 		if tx.Hash == txHash {
-			m.consumerIndexMutex.Lock()
 			m.transactions = slices.Delete(
 				m.transactions,
 				txIdx,
@@ -298,14 +247,12 @@ func (m *Mempool) removeTransaction(txHash string) bool {
 			m.metrics.txsInMempool.Dec()
 			m.metrics.mempoolBytes.Sub(float64(len(tx.Cbor)))
 			// Update consumer indexes to reflect removed TX
-			for connId, consumerIdx := range m.consumerIndex {
+			for _, consumer := range m.consumers {
 				// Decrement consumer index if the consumer has reached the removed TX
-				if consumerIdx >= txIdx {
-					consumerIdx--
+				if consumer.nextTxIdx >= txIdx {
+					consumer.nextTxIdx--
 				}
-				m.consumerIndex[connId] = consumerIdx
 			}
-			m.consumerIndexMutex.Unlock()
 			// Generate event
 			m.eventBus.Publish(
 				RemoveTransactionEventType,
