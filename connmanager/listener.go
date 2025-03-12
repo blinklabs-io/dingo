@@ -1,4 +1,4 @@
-// Copyright 2024 Blink Labs Software
+// Copyright 2025 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -87,6 +87,18 @@ func (c *ConnectionManager) startListener(l ListenerConfig) error {
 					fmt.Sprintf("listener: accept failed: %s", err),
 				)
 				continue
+			}
+			// Wrap UNIX connections
+			if uConn, ok := conn.(*net.UnixConn); ok {
+				tmpConn, err := NewUnixConn(uConn)
+				if err != nil {
+					c.config.Logger.Error(
+						fmt.Sprintf("listener: accept failed: %s", err),
+					)
+					_ = conn.Close()
+					continue
+				}
+				conn = tmpConn
 			}
 			c.config.Logger.Info(
 				fmt.Sprintf(
