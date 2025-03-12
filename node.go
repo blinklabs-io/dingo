@@ -55,11 +55,6 @@ func New(cfg Config) (*Node, error) {
 	n := &Node{
 		config:   cfg,
 		eventBus: eventBus,
-		mempool: mempool.NewMempool(
-			cfg.logger,
-			eventBus,
-			cfg.promRegistry,
-		),
 	}
 	if err := n.configPopulateNetworkMagic(); err != nil {
 		return nil, fmt.Errorf("invalid configuration: %w", err)
@@ -92,6 +87,13 @@ func (n *Node) Run() error {
 		return fmt.Errorf("failed to load state database: %w", err)
 	}
 	n.ledgerState = state
+	// Initialize mempool
+	n.mempool = mempool.NewMempool(
+		n.config.logger,
+		n.eventBus,
+		n.config.promRegistry,
+		n.ledgerState,
+	)
 	// Initialize chainsync state
 	n.chainsyncState = chainsync.NewState(
 		n.eventBus,

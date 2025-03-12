@@ -22,6 +22,8 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/state"
+	"github.com/blinklabs-io/gouroboros/ledger"
 
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/prometheus/client_golang/prometheus"
@@ -59,6 +61,7 @@ type Mempool struct {
 	sync.RWMutex
 	logger         *slog.Logger
 	eventBus       *event.EventBus
+	ledgerState    *state.LedgerState
 	consumers      map[ouroboros.ConnectionId]*MempoolConsumer
 	consumersMutex sync.Mutex
 	transactions   []*MempoolTransaction
@@ -73,10 +76,12 @@ func NewMempool(
 	logger *slog.Logger,
 	eventBus *event.EventBus,
 	promRegistry prometheus.Registerer,
+	ledgerState *state.LedgerState,
 ) *Mempool {
 	m := &Mempool{
-		eventBus:  eventBus,
-		consumers: make(map[ouroboros.ConnectionId]*MempoolConsumer),
+		eventBus:    eventBus,
+		consumers:   make(map[ouroboros.ConnectionId]*MempoolConsumer),
+		ledgerState: ledgerState,
 	}
 	if logger == nil {
 		// Create logger to throw away logs
@@ -152,7 +157,24 @@ func (m *Mempool) scheduleRemoveExpired() {
 	_ = time.AfterFunc(txSubmissionMempoolExpirationPeriod, m.removeExpired)
 }
 
-func (m *Mempool) AddTransaction(tx MempoolTransaction) error {
+func (m *Mempool) AddTransaction(txType uint, txBytes []byte) error {
+	// Decode transaction
+	tmpTx, err := ledger.NewTransactionFromCbor(txType, txBytes)
+	if err != nil {
+		return err
+	}
+	// Validate transaction
+	if err := m.ledgerState.ValidateTx(tmpTx); err != nil {
+		return err
+	}
+	// Build mempool entry
+	txHash := tmpTx.Hash()
+	tx := MempoolTransaction{
+		Hash:     txHash,
+		Type:     txType,
+		Cbor:     txBytes,
+		LastSeen: time.Now(),
+	}
 	m.Lock()
 	m.consumersMutex.Lock()
 	defer func() {

@@ -16,11 +16,7 @@ package dingo
 
 import (
 	"fmt"
-	"time"
 
-	"github.com/blinklabs-io/dingo/mempool"
-
-	"github.com/blinklabs-io/gouroboros/ledger"
 	olocaltxsubmission "github.com/blinklabs-io/gouroboros/protocol/localtxsubmission"
 )
 
@@ -34,26 +30,15 @@ func (n *Node) localtxsubmissionServerSubmitTx(
 	ctx olocaltxsubmission.CallbackContext,
 	tx olocaltxsubmission.MsgSubmitTxTransaction,
 ) error {
-	txBytes := tx.Raw.Content.([]byte)
-	tmpTx, err := ledger.NewTransactionFromCbor(uint(tx.EraId), txBytes)
-	if err != nil {
-		return err
-	}
-	txHash := tmpTx.Hash()
 	// Add transaction to mempool
-	err = n.mempool.AddTransaction(
-		mempool.MempoolTransaction{
-			Hash:     txHash,
-			Type:     uint(tx.EraId),
-			Cbor:     txBytes,
-			LastSeen: time.Now(),
-		},
+	err := n.mempool.AddTransaction(
+		uint(tx.EraId),
+		tx.Raw.Content.([]byte),
 	)
 	if err != nil {
 		n.config.logger.Error(
 			fmt.Sprintf(
-				"failed to add tx %x to mempool: %s",
-				txHash,
+				"failed to add transaction to mempool: %s",
 				err,
 			),
 			"component", "network",

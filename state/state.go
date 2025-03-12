@@ -706,3 +706,29 @@ func (ls *LedgerState) UtxosByAddress(
 ) ([]models.Utxo, error) {
 	return models.UtxosByAddress(ls.db, addr)
 }
+
+// ValidateTx runs ledger validation on the provided transaction
+func (ls *LedgerState) ValidateTx(
+	tx lcommon.Transaction,
+) error {
+	if ls.currentEra.ValidateTxFunc != nil {
+		txn := ls.db.Transaction(false)
+		err := txn.Do(func(txn *database.Txn) error {
+			lv := &LedgerView{
+				txn: txn,
+				ls:  ls,
+			}
+			err := ls.currentEra.ValidateTxFunc(
+				tx,
+				ls.currentTip.Point.Slot,
+				lv,
+				ls.currentPParams,
+			)
+			return err
+		})
+		if err != nil {
+			return fmt.Errorf("TX %s failed validation: %w", tx.Hash(), err)
+		}
+	}
+	return nil
+}

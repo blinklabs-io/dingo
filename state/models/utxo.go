@@ -80,7 +80,7 @@ func UtxoByRefTxn(
 	outputIdx uint32,
 ) (Utxo, error) {
 	var tmpUtxo Utxo
-	result := txn.Metadata().
+	result := txn.Metadata().Where("deleted_slot = 0").
 		First(&tmpUtxo, "tx_id = ? AND output_idx = ?", txId, outputIdx)
 	if result.Error != nil {
 		return tmpUtxo, result.Error
