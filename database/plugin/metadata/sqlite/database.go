@@ -142,7 +142,7 @@ func (d *MetadataStoreSqlite) Close() error {
 	return db.Close()
 }
 
-// Create creates a table
+// Create creates a record
 func (d *MetadataStoreSqlite) Create(value interface{}) *gorm.DB {
 	return d.DB().Create(value)
 }
