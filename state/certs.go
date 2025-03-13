@@ -19,7 +19,6 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/state/models"
-
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	pcommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )

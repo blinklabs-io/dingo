@@ -266,7 +266,6 @@ func (s *syncServiceServer) ReadTip(
 	ctx context.Context,
 	req *connect.Request[sync.ReadTipRequest],
 ) (*connect.Response[sync.ReadTipResponse], error) {
-
 	s.utxorpc.config.Logger.Info("Got a ReadTip request")
 	resp := &sync.ReadTipResponse{}
 

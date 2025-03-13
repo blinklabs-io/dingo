@@ -24,7 +24,6 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/state/models"
-
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -157,6 +156,7 @@ func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 	return nil
 }
 
+//nolint:unparam
 func (ls *LedgerState) handleEventBlockfetchBlock(e BlockfetchEvent) error {
 	// Check for out-of-order block events
 	// This is a stop-gap to handle disconnects during sync until we get chain selection working
@@ -515,7 +515,7 @@ func (ls *LedgerState) processBlockEvent(
 				ls.config.Logger.Warn(
 					"TX " + tx.Hash() + " failed validation: " + err.Error(),
 				)
-				//return fmt.Errorf("TX validation failure: %w", err)
+				// return fmt.Errorf("TX validation failure: %w", err)
 			}
 		}
 		// Process consumed UTxOs

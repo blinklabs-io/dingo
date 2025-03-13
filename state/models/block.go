@@ -22,7 +22,6 @@ import (
 	"strings"
 
 	"github.com/blinklabs-io/dingo/database"
-
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"

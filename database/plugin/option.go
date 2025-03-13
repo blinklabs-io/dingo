@@ -184,7 +184,6 @@ func (p *PluginOption) ProcessConfig(
 				p.Type,
 				p.Name,
 			)
-
 		}
 	}
 	return nil

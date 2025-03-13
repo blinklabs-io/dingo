@@ -17,7 +17,6 @@ package state
 import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/state/models"
-
 	"github.com/blinklabs-io/gouroboros/ledger/common"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )

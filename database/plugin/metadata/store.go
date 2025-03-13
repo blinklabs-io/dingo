@@ -18,9 +18,8 @@ import (
 	"database/sql"
 	"log/slog"
 
-	"gorm.io/gorm"
-
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
+	"gorm.io/gorm"
 )
 
 type MetadataStore interface {

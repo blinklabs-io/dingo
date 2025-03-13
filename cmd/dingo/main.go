@@ -21,7 +21,6 @@ import (
 
 	"github.com/blinklabs-io/dingo/internal/node"
 	"github.com/blinklabs-io/dingo/internal/version"
-
 	"github.com/spf13/cobra"
 	"go.uber.org/automaxprocs/maxprocs"
 )

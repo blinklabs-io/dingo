@@ -18,16 +18,14 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"os"
-	"time"
-
 	// #nosec G108
 	_ "net/http/pprof"
+	"os"
+	"time"
 
 	"github.com/blinklabs-io/dingo"
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/internal/config"
-
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
@@ -118,7 +116,7 @@ func Run(logger *slog.Logger) error {
 			// Enable metrics with default prometheus registry
 			dingo.WithPrometheusRegistry(prometheus.DefaultRegisterer),
 			// TODO: make this configurable (#387)
-			//dingo.WithTracing(true),
+			// dingo.WithTracing(true),
 			dingo.WithTopologyConfig(config.GetTopologyConfig()),
 		),
 	)

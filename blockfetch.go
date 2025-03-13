@@ -21,7 +21,6 @@ import (
 
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/state"
-
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/protocol/blockfetch"

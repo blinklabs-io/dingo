@@ -20,7 +20,6 @@ import (
 	"fmt"
 
 	"github.com/blinklabs-io/dingo/config/cardano"
-
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"

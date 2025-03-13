@@ -20,7 +20,6 @@ import (
 
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/state"
-
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"

@@ -21,7 +21,6 @@ import (
 
 	"github.com/blinklabs-io/dingo/state/eras"
 	"github.com/blinklabs-io/dingo/state/models"
-
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
@@ -108,7 +107,9 @@ func (ls *LedgerState) queryHardForkEraHistory() (any, error) {
 		if err != nil {
 			return nil, err
 		}
-		result := ls.db.Metadata().Where("era_id = ?", era.Id).Order("epoch_id").
+		result := ls.db.Metadata().
+			Where("era_id = ?", era.Id).
+			Order("epoch_id").
 			Find(&epochs)
 		if result.Error != nil {
 			return nil, result.Error
@@ -138,7 +139,9 @@ func (ls *LedgerState) queryHardForkEraHistory() (any, error) {
 			timespan.Add(
 				timespan,
 				new(big.Int).SetUint64(
-					uint64(tmpEpoch.SlotLength*tmpEpoch.LengthInSlots*1_000_000_000),
+					uint64(
+						tmpEpoch.SlotLength*tmpEpoch.LengthInSlots*1_000_000_000,
+					),
 				),
 			)
 			// Update era end

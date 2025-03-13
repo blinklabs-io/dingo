@@ -22,9 +22,8 @@ import (
 	"path/filepath"
 	"time"
 
-	badger "github.com/dgraph-io/badger/v4"
-
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
+	badger "github.com/dgraph-io/badger/v4"
 )
 
 type Database interface {
