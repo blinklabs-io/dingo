@@ -1,4 +1,4 @@
-// Copyright 2024 Blink Labs Software
+// Copyright 2025 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -16,6 +16,7 @@ package cardano
 
 import (
 	"io"
+	"io/fs"
 	"os"
 	"path"
 
@@ -58,6 +59,22 @@ func NewCardanoNodeConfigFromFile(file string) (*CardanoNodeConfig, error) {
 		return nil, err
 	}
 	c, err := NewCardanoNodeConfigFromReader(f)
+	if err != nil {
+		return nil, err
+	}
+	c.path = path.Dir(file)
+	if err := c.loadGenesisConfigs(); err != nil {
+		return nil, err
+	}
+	return c, nil
+}
+
+func NewCardanoNodeConfigFromFS(f fs.FS) (*CardanoNodeConfig, error) {
+	file, err := f.Open(f, "config.json")
+	if err != nil {
+		return nil, err
+	}
+	c, err := NewCardanoNodeConfigFromReader(file)
 	if err != nil {
 		return nil, err
 	}
