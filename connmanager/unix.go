@@ -18,8 +18,6 @@ import (
 	"errors"
 	"fmt"
 	"net"
-
-	"golang.org/x/sys/unix"
 )
 
 // UnixConn is a wrapper around net.UnixConn that provides a unique remote address
@@ -34,38 +32,27 @@ func NewUnixConn(conn net.Conn) (*UnixConn, error) {
 		return nil, errors.New("connection is not net.UnixConn")
 	}
 	// Construct address string
-	var ucred *unix.Ucred
 	var fdNum int
 	// Get raw connection
 	rawConn, err := uConn.SyscallConn()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get raw connection: %w", err)
 	}
-	// Retrieve peer creds
-	err2 := rawConn.Control(
+	// Retrieve socket file descriptor
+	err = rawConn.Control(
 		func(fd uintptr) {
 			fdNum = int(fd)
-			// The Control() function doesn't allow returning errors, so we assign to existing
-			ucred, err = unix.GetsockoptUcred(
-				fdNum,
-				unix.SOL_SOCKET,
-				unix.SO_PEERCRED,
-			)
 		},
 	)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get peer credentials: %w", err)
-	}
-	if err2 != nil {
-		return nil, fmt.Errorf("failed to get peer credentials: %w", err2)
+		return nil, fmt.Errorf("failed to get socket file descriptor: %w", err)
 	}
 	return &UnixConn{
 		UnixConn: uConn,
 		remoteAddr: UnixConnAddr{
 			addr: fmt.Sprintf(
-				"unix:%d@%d",
+				"unix@%d",
 				fdNum,
-				ucred.Pid,
 			),
 		},
 	}, nil
