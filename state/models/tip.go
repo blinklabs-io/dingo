@@ -18,11 +18,10 @@ import (
 	"errors"
 
 	"github.com/blinklabs-io/dingo/database"
-	"gorm.io/gorm"
-	"gorm.io/gorm/clause"
-
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 const (

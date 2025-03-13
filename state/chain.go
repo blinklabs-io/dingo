@@ -18,9 +18,8 @@ import (
 	"errors"
 
 	"github.com/blinklabs-io/dingo/state/models"
-	"gorm.io/gorm"
-
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	"gorm.io/gorm"
 )
 
 type ChainIterator struct {

@@ -24,12 +24,11 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/blinklabs-io/dingo/database/plugin"
 	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
 	gormlogger "gorm.io/gorm/logger"
 	"gorm.io/plugin/opentelemetry/tracing"
-
-	"github.com/blinklabs-io/dingo/database/plugin"
 )
 
 // Register plugin

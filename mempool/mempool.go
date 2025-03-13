@@ -23,9 +23,8 @@ import (
 
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/state"
-	"github.com/blinklabs-io/gouroboros/ledger"
-
 	ouroboros "github.com/blinklabs-io/gouroboros"
+	"github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 )
@@ -128,8 +127,12 @@ func (m *Mempool) Consumer(connId ouroboros.ConnectionId) *MempoolConsumer {
 }
 
 func (m *Mempool) processChainEvents() {
-	chainBlockSubId, chainBlockChan := m.eventBus.Subscribe(state.ChainBlockEventType)
-	chainRollbackSubId, chainRollbackChan := m.eventBus.Subscribe(state.ChainRollbackEventType)
+	chainBlockSubId, chainBlockChan := m.eventBus.Subscribe(
+		state.ChainBlockEventType,
+	)
+	chainRollbackSubId, chainRollbackChan := m.eventBus.Subscribe(
+		state.ChainRollbackEventType,
+	)
 	defer func() {
 		m.eventBus.Unsubscribe(state.ChainBlockEventType, chainBlockSubId)
 		m.eventBus.Unsubscribe(state.ChainRollbackEventType, chainRollbackSubId)
@@ -149,7 +152,8 @@ func (m *Mempool) processChainEvents() {
 			}
 		}
 		// Only purge once every 30 seconds when there are more blocks available
-		if time.Since(lastValidationTime) < 30*time.Second && len(chainBlockChan) > 0 {
+		if time.Since(lastValidationTime) < 30*time.Second &&
+			len(chainBlockChan) > 0 {
 			continue
 		}
 		m.Lock()

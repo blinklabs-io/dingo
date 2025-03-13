@@ -20,7 +20,6 @@ import (
 	"net"
 
 	"github.com/blinklabs-io/dingo/event"
-
 	ouroboros "github.com/blinklabs-io/gouroboros"
 )
 
