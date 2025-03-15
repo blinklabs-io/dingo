@@ -37,7 +37,11 @@ This is a work in progress and is currently under heavy development
       - [ ] Ledger peers
     - [x] Connection manager
       - [x] Inbound connections
+        - [x] Node-to-client over TCP
+        - [x] Node-to-client over UNIX socket
+        - [x] Node-to-node over TCP
       - [x] Outbound connections
+        - [x] Node-to-node over TCP
 - [ ] Ledger
   - [x] Blocks
     - [x] Block storage
@@ -48,6 +52,13 @@ This is a work in progress and is currently under heavy development
     - [x] Pool registration
     - [x] Stake registration/delegation
     - [ ] Governance
+  - [x] Transaction validation
+- [x] Mempool
+  - [x] Accept transactions from local clients
+  - [x] Distribute transactions to other nodes
+  - [x] Validation of transaction on add
+  - [x] Consumer tracking
+  - [x] Transaction purging on chain update
 
 Additional planned features can be found in our issue tracker and project boards.
 
