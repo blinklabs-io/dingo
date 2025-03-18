@@ -23,7 +23,7 @@ const (
 	badgerMetricNamePrefix = "database_blob_"
 )
 
-func (d *Database) registerBlobMetrics() {
+func (d *BlobStoreBadger) registerBlobMetrics() {
 	// Badger exposes metrics via expvar, so we need to set up some translation
 	collector := collectors.NewExpvarCollector(
 		map[string]*prometheus.Desc{

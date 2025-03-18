@@ -19,15 +19,14 @@ import (
 	"io"
 	"log/slog"
 
-	badgerPlugin "github.com/blinklabs-io/dingo/database/plugin/blob/badger"
+	"github.com/blinklabs-io/dingo/database/plugin/blob"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
-	badger "github.com/dgraph-io/badger/v4"
 )
 
 type Database interface {
 	Close() error
 	Metadata() metadata.MetadataStore
-	Blob() *badger.DB
+	Blob() blob.BlobStore
 	Transaction(bool) *Txn
 	updateCommitTimestamp(*Txn, int64) error
 }
@@ -35,7 +34,7 @@ type Database interface {
 type BaseDatabase struct {
 	logger   *slog.Logger
 	metadata metadata.MetadataStore
-	blob     *badger.DB
+	blob     blob.BlobStore
 }
 
 // Metadata returns the underlying metadata store instance
@@ -43,8 +42,8 @@ func (b *BaseDatabase) Metadata() metadata.MetadataStore {
 	return b.metadata
 }
 
-// Blob returns the underling blob DB instance
-func (b *BaseDatabase) Blob() *badger.DB {
+// Blob returns the underling blob store instance
+func (b *BaseDatabase) Blob() blob.BlobStore {
 	return b.blob
 }
 
@@ -60,7 +59,7 @@ func (b *BaseDatabase) Close() error {
 	metadataErr := b.Metadata().Close()
 	err = errors.Join(err, metadataErr)
 	// Close blob
-	blobErr := b.blob.Close()
+	blobErr := b.Blob().Close()
 	err = errors.Join(err, blobErr)
 	return err
 }
@@ -91,7 +90,7 @@ func NewInMemory(logger *slog.Logger) (*InMemoryDatabase, error) {
 		return nil, err
 	}
 	// Use badger plugin
-	blobDb, err := badgerPlugin.New("", logger)
+	blobDb, err := blob.New("badger", "", logger)
 	if err != nil {
 		return nil, err
 	}
@@ -99,7 +98,7 @@ func NewInMemory(logger *slog.Logger) (*InMemoryDatabase, error) {
 		BaseDatabase: &BaseDatabase{
 			logger:   logger,
 			metadata: metadataDb,
-			blob:     blobDb.DB(),
+			blob:     blobDb,
 		},
 	}
 	if err := db.init(); err != nil {
@@ -124,7 +123,7 @@ func NewPersistent(
 	if err != nil {
 		return nil, err
 	}
-	blobDb, err := badgerPlugin.New(dataDir, logger)
+	blobDb, err := blob.New("badger", dataDir, logger)
 	if err != nil {
 		return nil, err
 	}
@@ -132,7 +131,7 @@ func NewPersistent(
 		BaseDatabase: &BaseDatabase{
 			logger:   logger,
 			metadata: metadataDb,
-			blob:     blobDb.DB(),
+			blob:     blobDb,
 		},
 		dataDir: dataDir,
 	}
