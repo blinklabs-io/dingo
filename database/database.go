@@ -16,12 +16,10 @@ package database
 
 import (
 	"errors"
-	"fmt"
 	"io"
 	"log/slog"
-	"path/filepath"
-	"time"
 
+	badgerPlugin "github.com/blinklabs-io/dingo/database/plugin/blob/badger"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	badger "github.com/dgraph-io/badger/v4"
 )
@@ -35,11 +33,9 @@ type Database interface {
 }
 
 type BaseDatabase struct {
-	logger        *slog.Logger
-	metadata      metadata.MetadataStore
-	blob          *badger.DB
-	blobGcEnabled bool
-	blobGcTimer   *time.Ticker
+	logger   *slog.Logger
+	metadata metadata.MetadataStore
+	blob     *badger.DB
 }
 
 // Metadata returns the underlying metadata store instance
@@ -75,37 +71,11 @@ func (b *BaseDatabase) init() error {
 		// We do this so we don't have to add guards around every log operation
 		b.logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
 	}
-	// Configure metrics for Badger DB
-	b.registerBadgerMetrics()
-	// Run GC periodically for Badger DB
-	if b.blobGcEnabled {
-		b.blobGcTimer = time.NewTicker(5 * time.Minute)
-		go b.blobGc()
-	}
 	// Check commit timestamp
 	if err := b.checkCommitTimestamp(); err != nil {
 		return err
 	}
 	return nil
-}
-
-func (b *BaseDatabase) blobGc() {
-	for range b.blobGcTimer.C {
-	again:
-		err := b.blob.RunValueLogGC(0.5)
-		if err != nil {
-			// Log any actual errors
-			if !errors.Is(err, badger.ErrNoRewrite) {
-				b.logger.Warn(
-					fmt.Sprintf("blob DB: GC failure: %s", err),
-					"component", "database",
-				)
-			}
-		} else {
-			// Run it again if it just ran successfully
-			goto again
-		}
-	}
 }
 
 // InMemoryDatabase stores all data in memory. Data will not be persisted
@@ -120,13 +90,8 @@ func NewInMemory(logger *slog.Logger) (*InMemoryDatabase, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Open Badger DB
-	badgerOpts := badger.DefaultOptions("").
-		WithLogger(NewBadgerLogger(logger)).
-		// The default INFO logging is a bit verbose
-		WithLoggingLevel(badger.WARNING).
-		WithInMemory(true)
-	blobDb, err := badger.Open(badgerOpts)
+	// Use badger plugin
+	blobDb, err := badgerPlugin.New("", logger)
 	if err != nil {
 		return nil, err
 	}
@@ -134,9 +99,7 @@ func NewInMemory(logger *slog.Logger) (*InMemoryDatabase, error) {
 		BaseDatabase: &BaseDatabase{
 			logger:   logger,
 			metadata: metadataDb,
-			blob:     blobDb,
-			// We disable badger GC when using an in-memory DB, since it will only throw errors
-			blobGcEnabled: false,
+			blob:     blobDb.DB(),
 		},
 	}
 	if err := db.init(); err != nil {
@@ -161,25 +124,15 @@ func NewPersistent(
 	if err != nil {
 		return nil, err
 	}
-	// Open Badger DB
-	blobDir := filepath.Join(
-		dataDir,
-		"blob",
-	)
-	badgerOpts := badger.DefaultOptions(blobDir).
-		WithLogger(NewBadgerLogger(logger)).
-		// The default INFO logging is a bit verbose
-		WithLoggingLevel(badger.WARNING)
-	blobDb, err := badger.Open(badgerOpts)
+	blobDb, err := badgerPlugin.New(dataDir, logger)
 	if err != nil {
 		return nil, err
 	}
 	db := &PersistentDatabase{
 		BaseDatabase: &BaseDatabase{
-			logger:        logger,
-			metadata:      metadataDb,
-			blob:          blobDb,
-			blobGcEnabled: true,
+			logger:   logger,
+			metadata: metadataDb,
+			blob:     blobDb.DB(),
 		},
 		dataDir: dataDir,
 	}
