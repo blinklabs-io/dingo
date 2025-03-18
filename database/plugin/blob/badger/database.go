@@ -38,8 +38,8 @@ func init() {
 	)
 }
 
-// Database stores all data in badger. Data may not be persisted
-type Database struct {
+// BlobStoreBadger stores all data in badger. Data may not be persisted
+type BlobStoreBadger struct {
 	dataDir   string
 	db        *badger.DB
 	logger    *slog.Logger
@@ -50,10 +50,10 @@ type Database struct {
 func New(
 	dataDir string,
 	logger *slog.Logger,
-) (*Database, error) {
+) (*BlobStoreBadger, error) {
 	var blobDb *badger.DB
 	var err error
-	db := &Database{
+	db := &BlobStoreBadger{
 		dataDir: dataDir,
 		logger:  logger,
 	}
@@ -101,7 +101,7 @@ func New(
 	return db, nil
 }
 
-func (d *Database) init() error {
+func (d *BlobStoreBadger) init() error {
 	if d.logger == nil {
 		// Create logger to throw away logs
 		// We do this so we don't have to add guards around every log operation
@@ -116,7 +116,7 @@ func (d *Database) init() error {
 	return nil
 }
 
-func (d *Database) blobGc(t *time.Ticker) {
+func (d *BlobStoreBadger) blobGc(t *time.Ticker) {
 	for range t.C {
 	again:
 		err := d.DB().RunValueLogGC(0.5)
@@ -135,6 +135,18 @@ func (d *Database) blobGc(t *time.Ticker) {
 	}
 }
 
-func (d *Database) DB() *badger.DB {
+// Close gets the database handle from our BlobStore and closes it
+func (d *BlobStoreBadger) Close() error {
+	db := d.DB()
+	return db.Close()
+}
+
+// DB returns the database handle
+func (d *BlobStoreBadger) DB() *badger.DB {
 	return d.db
+}
+
+// NewTransaction creates a new badger transaction
+func (d *BlobStoreBadger) NewTransaction(update bool) *badger.Txn {
+	return d.DB().NewTransaction(update)
 }
