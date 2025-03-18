@@ -15,7 +15,6 @@
 package sqlite
 
 import (
-	"database/sql"
 	"errors"
 	"fmt"
 	"io"
@@ -124,11 +123,6 @@ func (d *MetadataStoreSqlite) init() error {
 // AutoMigrate wraps the gorm AutoMigrate
 func (d *MetadataStoreSqlite) AutoMigrate(dst ...interface{}) error {
 	return d.DB().AutoMigrate(dst...)
-}
-
-// Begin creates a gorm transaction
-func (d *MetadataStoreSqlite) Begin(opts ...*sql.TxOptions) *gorm.DB {
-	return d.DB().Begin(opts...)
 }
 
 // Close gets the database handle from our MetadataStore and closes it

@@ -32,7 +32,7 @@ type TestTable struct {
 func TestInMemorySqliteMultipleTransaction(t *testing.T) {
 	var db database.Database
 	doQuery := func(sleep time.Duration) error {
-		txn := db.Metadata().Begin()
+		txn := db.Metadata().Transaction()
 		if result := txn.First(&TestTable{}); result.Error != nil {
 			return result.Error
 		}

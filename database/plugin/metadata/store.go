@@ -15,7 +15,6 @@
 package metadata
 
 import (
-	"database/sql"
 	"log/slog"
 
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
@@ -25,7 +24,6 @@ import (
 type MetadataStore interface {
 	// matches gorm.DB
 	AutoMigrate(...interface{}) error
-	Begin(...*sql.TxOptions) *gorm.DB
 	Create(interface{}) *gorm.DB
 	DB() *gorm.DB
 	First(interface{}) *gorm.DB

@@ -38,7 +38,7 @@ func NewTxn(db Database, readWrite bool) *Txn {
 		db:          db,
 		readWrite:   readWrite,
 		blobTxn:     db.Blob().NewTransaction(readWrite),
-		metadataTxn: db.Metadata().Begin(),
+		metadataTxn: db.Metadata().Transaction(),
 	}
 }
 
