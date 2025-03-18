@@ -13,7 +13,7 @@ require (
 	github.com/dgraph-io/badger/v4 v4.6.0
 	github.com/glebarez/sqlite v1.11.0
 	github.com/kelseyhightower/envconfig v1.4.0
-	github.com/prometheus/client_golang v1.21.0
+	github.com/prometheus/client_golang v1.21.1
 	github.com/spf13/cobra v1.9.1
 	github.com/utxorpc/go-codegen v0.16.0
 	go.opentelemetry.io/otel v1.35.0
