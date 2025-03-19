@@ -1,4 +1,4 @@
-// Copyright 2024 Blink Labs Software
+// Copyright 2025 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -14,14 +14,13 @@
 
 package models
 
-type PParams struct {
-	ID        uint `gorm:"primarykey"`
-	AddedSlot uint64
-	Epoch     uint
-	EraId     uint
-	Cbor      []byte
+type StakeDelegation struct {
+	ID          uint   `gorm:"primarykey"`
+	StakingKey  []byte `gorm:"index"`
+	PoolKeyHash []byte `gorm:"index"`
+	AddedSlot   uint64
 }
 
-func (PParams) TableName() string {
-	return "pparams"
+func (StakeDelegation) TableName() string {
+	return "stake_delegation"
 }

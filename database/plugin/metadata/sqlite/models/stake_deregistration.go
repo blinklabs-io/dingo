@@ -1,4 +1,4 @@
-// Copyright 2024 Blink Labs Software
+// Copyright 2025 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -14,13 +14,12 @@
 
 package models
 
-type PoolRetirement struct {
-	ID          uint   `gorm:"primarykey"`
-	PoolKeyHash []byte `gorm:"index"`
-	Epoch       uint
-	AddedSlot   uint64
+type StakeDeregistration struct {
+	ID         uint   `gorm:"primarykey"`
+	StakingKey []byte `gorm:"index"`
+	AddedSlot  uint64
 }
 
-func (PoolRetirement) TableName() string {
-	return "pool_retirement"
+func (StakeDeregistration) TableName() string {
+	return "stake_deregistration"
 }

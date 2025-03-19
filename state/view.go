@@ -64,12 +64,11 @@ func (lv *LedgerView) StakeRegistration(
 	stakingKey []byte,
 ) ([]lcommon.StakeRegistrationCertificate, error) {
 	ret := []lcommon.StakeRegistrationCertificate{}
-	certs := []models.StakeRegistration{}
-	result := lv.txn.Metadata().
-		Where("staking_key = ?", stakingKey).
-		Find(&certs)
-	if result.Error != nil {
-		return ret, result.Error
+	certs, err := lv.txn.DB().
+		Metadata().
+		GetStakeRegistrations(stakingKey, lv.txn.Metadata())
+	if err != nil {
+		return ret, err
 	}
 	for _, cert := range certs {
 		ret = append(

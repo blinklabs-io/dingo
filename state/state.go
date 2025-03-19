@@ -25,6 +25,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
+	dbmodels "github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite/models"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/state/eras"
 	"github.com/blinklabs-io/dingo/state/models"
@@ -64,7 +65,7 @@ type LedgerState struct {
 	db                          database.Database
 	timerCleanupConsumedUtxos   *time.Timer
 	currentPParams              lcommon.ProtocolParameters
-	currentEpoch                models.Epoch
+	currentEpoch                dbmodels.Epoch
 	currentEra                  eras.EraDesc
 	currentTip                  ochainsync.Tip
 	currentTipBlockNonce        []byte
@@ -377,7 +378,7 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 func (ls *LedgerState) transitionToEra(
 	txn *database.Txn,
 	nextEraId uint,
-	startEpoch uint,
+	startEpoch uint64,
 	addedSlot uint64,
 ) error {
 	nextEra := eras.Eras[nextEraId]
@@ -402,14 +403,15 @@ func (ls *LedgerState) transitionToEra(
 		if err != nil {
 			return err
 		}
-		tmpPParams := models.PParams{
-			AddedSlot: addedSlot,
-			Epoch:     startEpoch,
-			EraId:     nextEraId,
-			Cbor:      pparamsCbor,
-		}
-		if result := txn.Metadata().Create(&tmpPParams); result.Error != nil {
-			return result.Error
+		err = txn.DB().Metadata().SetPParams(
+			pparamsCbor,
+			addedSlot,
+			startEpoch,
+			nextEraId,
+			txn.Metadata(),
+		)
+		if err != nil {
+			return err
 		}
 	}
 	ls.currentEra = nextEra
@@ -418,17 +420,15 @@ func (ls *LedgerState) transitionToEra(
 
 func (ls *LedgerState) applyPParamUpdates(
 	txn *database.Txn,
-	currentEpoch uint,
+	currentEpoch uint64,
 	addedSlot uint64,
 ) error {
 	// Check for pparam updates that apply at the end of the epoch
-	var pparamUpdates []models.PParamUpdate
-	result := txn.Metadata().
-		Where("epoch = ?", currentEpoch).
-		Order("id DESC").
-		Find(&pparamUpdates)
-	if result.Error != nil {
-		return result.Error
+	pparamUpdates, err := txn.DB().
+		Metadata().
+		GetPParamUpdates(currentEpoch, txn.Metadata())
+	if err != nil {
+		return err
 	}
 	if len(pparamUpdates) > 0 {
 		// We only want the latest for the epoch
@@ -455,19 +455,20 @@ func (ls *LedgerState) applyPParamUpdates(
 					"pparams",
 					fmt.Sprintf("%#v", ls.currentPParams),
 				)
-				// Write pparams update to DB
 				pparamsCbor, err := cbor.Encode(&ls.currentPParams)
 				if err != nil {
 					return err
 				}
-				tmpPParams := models.PParams{
-					AddedSlot: addedSlot,
-					Epoch:     currentEpoch + 1,
-					EraId:     ls.currentEra.Id,
-					Cbor:      pparamsCbor,
-				}
-				if result := txn.Metadata().Create(&tmpPParams); result.Error != nil {
-					return result.Error
+				// Write pparams update to DB
+				err = txn.DB().Metadata().SetPParams(
+					pparamsCbor,
+					addedSlot,
+					uint64(currentEpoch + 1),
+					ls.currentEra.Id,
+					txn.Metadata(),
+				)
+				if err != nil {
+					return err
 				}
 			}
 		}
@@ -546,14 +547,15 @@ func (ls *LedgerState) removeBlock(
 }
 
 func (ls *LedgerState) loadPParams() error {
-	var tmpPParams models.PParams
-	result := ls.db.Metadata().Order("id DESC").First(&tmpPParams)
-	if result.Error != nil {
-		if errors.Is(result.Error, gorm.ErrRecordNotFound) {
-			return nil
-		}
-		return result.Error
+	pparams, err := ls.db.Metadata().GetPParams(ls.currentEpoch.EpochId, nil)
+	if err != nil {
+		return err
 	}
+	if len(pparams) == 0 {
+		return nil
+	}
+	// pparams is ordered, so grab the first
+	tmpPParams := pparams[0]
 	currentPParams, err := ls.currentEra.DecodePParamsFunc(
 		tmpPParams.Cbor,
 	)
@@ -565,11 +567,9 @@ func (ls *LedgerState) loadPParams() error {
 }
 
 func (ls *LedgerState) loadEpoch() error {
-	tmpEpoch, err := models.EpochLatest(ls.db)
+	tmpEpoch, err := ls.db.Metadata().GetEpochLatest(nil)
 	if err != nil {
-		if !errors.Is(err, gorm.ErrRecordNotFound) {
-			return err
-		}
+		return err
 	}
 	ls.currentEpoch = tmpEpoch
 	ls.currentEra = eras.Eras[tmpEpoch.EraId]

@@ -18,12 +18,15 @@ import (
 	"log/slog"
 
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite/models"
 	"gorm.io/gorm"
 )
 
 type MetadataStore interface {
 	// matches gorm.DB
 	AutoMigrate(...interface{}) error
+	// Really gorm.DB.DB() but close enough
+	Close() error
 	Create(interface{}) *gorm.DB
 	DB() *gorm.DB
 	First(interface{}) *gorm.DB
@@ -31,9 +34,28 @@ type MetadataStore interface {
 	Where(interface{}, ...interface{}) *gorm.DB
 
 	// Our specific functions
-	Close() error
 	GetCommitTimestamp() (int64, error)
 	SetCommitTimestamp(*gorm.DB, int64) error
+	// Ledger state
+	// GetEpoch(uint64, *gorm.DB)
+	// GetEpochs(*gorm.DB) ([]models.Epoch, error)
+	GetEpochLatest(*gorm.DB) (models.Epoch, error)
+	GetPParams(uint64, *gorm.DB) ([]models.PParams, error)
+	GetPParamUpdates(uint64, *gorm.DB) ([]models.PParamUpdate, error)
+	GetStakeRegistrations([]byte, *gorm.DB) ([]models.StakeRegistration, error)
+	SetEpoch(uint64, uint64, []byte, uint, uint, uint, *gorm.DB) error
+	SetPoolRetirement([]byte, uint64, uint64, *gorm.DB) error
+	SetPParams([]byte, uint64, uint64, uint, *gorm.DB) error
+	SetPParamUpdate([]byte, []byte, uint64, uint64, *gorm.DB) error
+	SetStakeDelegation([]byte, []byte, uint64, *gorm.DB) error
+	SetStakeDeregistration([]byte, uint64, *gorm.DB) error
+	SetStakeRegistration([]byte, uint64, uint64, *gorm.DB) error
+	// GetTip() models.Tip
+	// SetEpoch(models.Epoch) error
+	// SetPoolRegistration(models.PoolRegistration) error
+	// SetPoolRetirement(models.PoolRetirement) error
+	// SetProtocolParameterUpdate(models.PParamUpdate) error
+	// SetTip(models.Tip) error
 	Transaction() *gorm.DB
 }
 

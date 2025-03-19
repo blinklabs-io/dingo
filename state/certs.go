@@ -79,39 +79,43 @@ func (ls *LedgerState) processTransactionCertificates(
 				return result.Error
 			}
 		case *lcommon.PoolRetirementCertificate:
-			tmpItem := models.PoolRetirement{
-				PoolKeyHash: cert.PoolKeyHash[:],
-				Epoch:       uint(cert.Epoch),
-				AddedSlot:   blockPoint.Slot,
-			}
-			if result := txn.Metadata().Create(&tmpItem); result.Error != nil {
-				return result.Error
+			err := txn.DB().Metadata().SetPoolRetirement(
+				cert.PoolKeyHash[:],
+				blockPoint.Slot,
+				cert.Epoch,
+				txn.Metadata(),
+			)
+			if err != nil {
+				return err
 			}
 		case *lcommon.StakeRegistrationCertificate:
-			tmpItem := models.StakeRegistration{
-				StakingKey:    cert.StakeRegistration.Credential,
-				AddedSlot:     blockPoint.Slot,
-				DepositAmount: certDeposit,
-			}
-			if result := txn.Metadata().Create(&tmpItem); result.Error != nil {
-				return result.Error
+			err := txn.DB().Metadata().SetStakeRegistration(
+				cert.StakeRegistration.Credential,
+				blockPoint.Slot,
+				certDeposit,
+				txn.Metadata(),
+			)
+			if err != nil {
+				return err
 			}
 		case *lcommon.StakeDeregistrationCertificate:
-			tmpItem := models.StakeDeregistration{
-				StakingKey: cert.StakeDeregistration.Credential,
-				AddedSlot:  blockPoint.Slot,
-			}
-			if result := txn.Metadata().Create(&tmpItem); result.Error != nil {
-				return result.Error
+			err := txn.DB().Metadata().SetStakeDeregistration(
+				cert.StakeDeregistration.Credential,
+				blockPoint.Slot,
+				txn.Metadata(),
+			)
+			if err != nil {
+				return err
 			}
 		case *lcommon.StakeDelegationCertificate:
-			tmpItem := models.StakeDelegation{
-				StakingKey:  cert.StakeCredential.Credential,
-				PoolKeyHash: cert.PoolKeyHash[:],
-				AddedSlot:   blockPoint.Slot,
-			}
-			if result := txn.Metadata().Create(&tmpItem); result.Error != nil {
-				return result.Error
+			err := txn.DB().Metadata().SetStakeDelegation(
+				cert.StakeCredential.Credential,
+				cert.PoolKeyHash[:],
+				blockPoint.Slot,
+				txn.Metadata(),
+			)
+			if err != nil {
+				return err
 			}
 		default:
 			ls.config.Logger.Warn(

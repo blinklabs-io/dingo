@@ -42,6 +42,10 @@ func NewTxn(db Database, readWrite bool) *Txn {
 	}
 }
 
+func (t *Txn) DB() Database {
+	return t.db
+}
+
 func (t *Txn) Metadata() *gorm.DB {
 	return t.metadataTxn
 }

@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"math/big"
 
+	dbmodels "github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite/models"
 	"github.com/blinklabs-io/dingo/state/eras"
 	"github.com/blinklabs-io/dingo/state/models"
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -98,7 +99,7 @@ func (ls *LedgerState) queryHardFork(
 
 func (ls *LedgerState) queryHardForkEraHistory() (any, error) {
 	retData := []any{}
-	var epochs []models.Epoch
+	var epochs []dbmodels.Epoch
 	timespan := big.NewInt(0)
 	for _, era := range eras.Eras {
 		epochSlotLength, epochLength, err := era.EpochLengthFunc(
