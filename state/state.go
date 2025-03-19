@@ -102,7 +102,7 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 		}
 		ls.db = db
 		if err != nil {
-			var dbErr *database.CommitTimestampError
+			var dbErr database.CommitTimestampError
 			if !errors.As(err, &dbErr) {
 				return nil, err
 			}
@@ -132,7 +132,7 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 		}
 		ls.db = db
 		if err != nil {
-			var dbErr *database.CommitTimestampError
+			var dbErr database.CommitTimestampError
 			if !errors.As(err, &dbErr) {
 				return nil, err
 			}
