@@ -73,7 +73,9 @@ type LedgerState struct {
 	chainsyncBlockEvents        []BlockfetchEvent
 	chainsyncBlockfetchBusy     bool
 	chainsyncBlockfetchBusyTime time.Time
+	chainsyncBlockfetchMutex    sync.Mutex
 	chainsyncBlockfetchWaiting  bool
+	chainsyncHeaderMutex        sync.Mutex
 }
 
 func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
