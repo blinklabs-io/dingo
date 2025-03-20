@@ -79,10 +79,10 @@ func (d *MetadataStoreSqlite) SetPParams(
 		return err
 	}
 	tmpItem := models.PParams{
-		Cbor:        params,
-		AddedSlot:   slot,
-		Epoch:       epoch,
-		EraId:       eraId,
+		Cbor:      params,
+		AddedSlot: slot,
+		Epoch:     epoch,
+		EraId:     eraId,
 	}
 	if txn != nil {
 		if result := txn.Create(&tmpItem); result.Error != nil {

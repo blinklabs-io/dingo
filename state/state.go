@@ -463,7 +463,7 @@ func (ls *LedgerState) applyPParamUpdates(
 				err = txn.DB().Metadata().SetPParams(
 					pparamsCbor,
 					addedSlot,
-					uint64(currentEpoch + 1),
+					uint64(currentEpoch+1),
 					ls.currentEra.Id,
 					txn.Metadata(),
 				)

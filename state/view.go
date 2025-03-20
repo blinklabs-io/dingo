@@ -87,12 +87,11 @@ func (lv *LedgerView) PoolRegistration(
 	poolKeyHash []byte,
 ) ([]lcommon.PoolRegistrationCertificate, error) {
 	ret := []lcommon.PoolRegistrationCertificate{}
-	certs := []models.PoolRegistration{}
-	result := lv.txn.Metadata().
-		Where("pool_key_hash = ?", poolKeyHash).
-		Find(&certs)
-	if result.Error != nil {
-		return ret, result.Error
+	certs, err := lv.txn.DB().
+		Metadata().
+		GetPoolRegistrations(poolKeyHash, lv.txn.Metadata())
+	if err != nil {
+		return ret, err
 	}
 	for _, cert := range certs {
 		ret = append(

@@ -416,7 +416,7 @@ func (ls *LedgerState) processEpochRollover(
 		}
 		err = txn.DB().Metadata().SetEpoch(
 			epochStartSlot,
-			ls.currentEpoch.EpochId + 1,
+			ls.currentEpoch.EpochId+1,
 			tmpNonce,
 			uint(e.Block.Era().Id),
 			epochSlotLength,

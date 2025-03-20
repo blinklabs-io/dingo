@@ -18,7 +18,6 @@ import (
 	"fmt"
 
 	"github.com/blinklabs-io/dingo/database"
-	"github.com/blinklabs-io/dingo/state/models"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	pcommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
@@ -38,45 +37,21 @@ func (ls *LedgerState) processTransactionCertificates(
 		}
 		switch cert := tmpCert.(type) {
 		case *lcommon.PoolRegistrationCertificate:
-			tmpItem := models.PoolRegistration{
-				PoolKeyHash:   cert.Operator[:],
-				VrfKeyHash:    cert.VrfKeyHash[:],
-				Pledge:        database.Uint64(cert.Pledge),
-				Cost:          database.Uint64(cert.Cost),
-				Margin:        &database.Rat{Rat: cert.Margin.Rat},
-				AddedSlot:     blockPoint.Slot,
-				DepositAmount: certDeposit,
-			}
-			if cert.PoolMetadata != nil {
-				tmpItem.MetadataUrl = cert.PoolMetadata.Url
-				tmpItem.MetadataHash = cert.PoolMetadata.Hash[:]
-			}
-			for _, owner := range cert.PoolOwners {
-				tmpItem.Owners = append(
-					tmpItem.Owners,
-					models.PoolRegistrationOwner{
-						KeyHash: owner[:],
-					},
-				)
-			}
-			for _, relay := range cert.Relays {
-				tmpRelay := models.PoolRegistrationRelay{
-					Ipv4: relay.Ipv4,
-					Ipv6: relay.Ipv6,
-				}
-				if relay.Port != nil {
-					tmpRelay.Port = uint(*relay.Port)
-				}
-				if relay.Hostname != nil {
-					tmpRelay.Hostname = *relay.Hostname
-				}
-				tmpItem.Relays = append(
-					tmpItem.Relays,
-					tmpRelay,
-				)
-			}
-			if result := txn.Metadata().Create(&tmpItem); result.Error != nil {
-				return result.Error
+			err := txn.DB().Metadata().SetPoolRegistration(
+				cert.Operator[:],
+				cert.VrfKeyHash[:],
+				cert.Pledge,
+				cert.Cost,
+				blockPoint.Slot,
+				certDeposit,
+				cert.Margin.Rat,
+				cert.PoolOwners,
+				cert.Relays,
+				cert.PoolMetadata,
+				txn.Metadata(),
+			)
+			if err != nil {
+				return nil
 			}
 		case *lcommon.PoolRetirementCertificate:
 			err := txn.DB().Metadata().SetPoolRetirement(

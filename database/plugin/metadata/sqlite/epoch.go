@@ -54,11 +54,11 @@ func (d *MetadataStoreSqlite) SetEpoch(
 		return err
 	}
 	tmpItem := models.Epoch{
-		EpochId: epoch,
-		StartSlot: slot,
-		Nonce: nonce,
-		EraId: era,
-		SlotLength: slotLength,
+		EpochId:       epoch,
+		StartSlot:     slot,
+		Nonce:         nonce,
+		EraId:         era,
+		SlotLength:    slotLength,
 		LengthInSlots: lengthInSlots,
 	}
 	if txn != nil {
