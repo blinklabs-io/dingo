@@ -96,6 +96,7 @@ func (ls *LedgerState) handleEventChainsyncRollback(e ChainsyncEvent) error {
 func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 	// Check for out-of-order block headers
 	// This is a stop-gap to handle disconnects during sync until we get chain selection working
+	ls.chainsyncHeaderPointsMutex.Lock()
 	if ls.chainsyncHeaderPoints != nil {
 		if pointsLen := len(ls.chainsyncHeaderPoints); pointsLen > 0 &&
 			e.Point.Slot < ls.chainsyncHeaderPoints[pointsLen-1].Slot {
@@ -109,6 +110,7 @@ func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 			ls.chainsyncHeaderPoints = tmpHeaderPoints
 		}
 	}
+	ls.chainsyncHeaderPointsMutex.Unlock()
 	// Wait for current blockfetch to finish if we've already got another batch worth queued up
 	// This prevents us exceeding the configured recv queue size in the block-fetch protocol
 	if len(ls.chainsyncHeaderPoints) >= blockfetchBatchSize {
@@ -120,6 +122,8 @@ func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 		ls.chainsyncHeaderMutex.Unlock()
 	}
 	// Add to cached header points
+	ls.chainsyncHeaderPointsMutex.Lock()
+	defer ls.chainsyncHeaderPointsMutex.Unlock()
 	ls.chainsyncHeaderPoints = append(
 		ls.chainsyncHeaderPoints,
 		e.Point,
@@ -592,8 +596,13 @@ func (ls *LedgerState) processBlockEvent(
 func (ls *LedgerState) handleEventBlockfetchBatchDone(e BlockfetchEvent) error {
 	// Process pending block events
 	if err := ls.processBlockEvents(); err != nil {
+		ls.chainsyncBlockfetchBusy = false
+		ls.chainsyncBlockfetchWaiting = false
+		ls.chainsyncHeaderMutex.Unlock()
 		return err
 	}
+	ls.chainsyncHeaderPointsMutex.Lock()
+	defer ls.chainsyncHeaderPointsMutex.Unlock()
 	// Check for pending block range request
 	if !ls.chainsyncBlockfetchWaiting ||
 		len(ls.chainsyncHeaderPoints) == 0 {
@@ -610,6 +619,9 @@ func (ls *LedgerState) handleEventBlockfetchBatchDone(e BlockfetchEvent) error {
 		ls.chainsyncHeaderPoints[len(ls.chainsyncHeaderPoints)-1],
 	)
 	if err != nil {
+		ls.chainsyncBlockfetchBusy = false
+		ls.chainsyncBlockfetchWaiting = false
+		ls.chainsyncHeaderMutex.Unlock()
 		return err
 	}
 	ls.chainsyncBlockfetchBusyTime = time.Now()
