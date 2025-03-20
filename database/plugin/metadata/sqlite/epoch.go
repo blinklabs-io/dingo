@@ -15,6 +15,7 @@
 package sqlite
 
 import (
+	"errors"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite/models"
 	"gorm.io/gorm"
 )
@@ -31,12 +32,16 @@ func (d *MetadataStoreSqlite) GetEpochLatest(
 	if txn != nil {
 		result := txn.Order("epoch_id DESC").First(&ret)
 		if result.Error != nil {
-			return ret, result.Error
+			if !errors.Is(result.Error, gorm.ErrRecordNotFound) {
+				return ret, result.Error
+			}
 		}
 	} else {
 		result := d.DB().Order("epoch_id DESC").First(&ret)
 		if result.Error != nil {
-			return ret, result.Error
+			if !errors.Is(result.Error, gorm.ErrRecordNotFound) {
+				return ret, result.Error
+			}
 		}
 	}
 	return ret, nil
