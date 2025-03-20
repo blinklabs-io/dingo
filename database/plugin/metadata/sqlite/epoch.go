@@ -16,6 +16,7 @@ package sqlite
 
 import (
 	"errors"
+
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite/models"
 	"gorm.io/gorm"
 )
