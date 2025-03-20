@@ -592,6 +592,7 @@ func (ls *LedgerState) processBlockEvent(
 func (ls *LedgerState) handleEventBlockfetchBatchDone(e BlockfetchEvent) error {
 	// Process pending block events
 	if err := ls.processBlockEvents(); err != nil {
+		ls.chainsyncHeaderMutex.Unlock()
 		return err
 	}
 	// Check for pending block range request
@@ -610,6 +611,7 @@ func (ls *LedgerState) handleEventBlockfetchBatchDone(e BlockfetchEvent) error {
 		ls.chainsyncHeaderPoints[len(ls.chainsyncHeaderPoints)-1],
 	)
 	if err != nil {
+		ls.chainsyncHeaderMutex.Unlock()
 		return err
 	}
 	ls.chainsyncBlockfetchBusyTime = time.Now()
