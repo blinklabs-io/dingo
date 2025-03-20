@@ -354,8 +354,12 @@ func (ls *LedgerState) calculateEpochNonce(
 	txn *database.Txn,
 	epochStartSlot uint64,
 ) ([]byte, error) {
+	// No epoch nonce in Byron
+	if ls.currentEra.Id == 0 {
+		return nil, nil
+	}
 	// Use Shelley genesis hash for initial epoch nonce
-	if len(ls.currentEpoch.Nonce) == 0 && ls.currentEra.Id > 0 { // Byron
+	if len(ls.currentEpoch.Nonce) == 0 {
 		genesisHashBytes, err := hex.DecodeString(
 			ls.config.CardanoNodeConfig.ShelleyGenesisHash,
 		)
