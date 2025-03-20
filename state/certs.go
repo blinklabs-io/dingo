@@ -51,7 +51,7 @@ func (ls *LedgerState) processTransactionCertificates(
 				txn.Metadata(),
 			)
 			if err != nil {
-				return nil
+				return err
 			}
 		case *lcommon.PoolRetirementCertificate:
 			err := txn.DB().Metadata().SetPoolRetirement(

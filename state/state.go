@@ -259,29 +259,25 @@ func (ls *LedgerState) scheduleCleanupConsumedUtxos() {
 			for {
 				ls.Lock()
 				// Perform updates in a transaction
-				batchDone := false
 				txn := ls.db.Transaction(true)
 				batchSize := min(1000, len(utxos))
 				if batchSize == 0 {
-					batchDone = true
-					return
+					ls.Unlock()
+					break
 				}
 				// Delete the UTxOs
 				if err := ls.db.(*database.BaseDatabase).UtxosDelete(utxos[0:batchSize], txn); err != nil {
 					ls.config.Logger.Error(
 						"failed to remove consumed UTxO",
-						"failed to update utxos",
 						"component", "ledger",
 						"error", err,
 					)
-					return
+					ls.Unlock()
+					break
 				}
 				// Remove batch
 				utxos = slices.Delete(utxos, 0, batchSize)
 				ls.Unlock()
-				if batchDone {
-					break
-				}
 			}
 		},
 	)

@@ -424,6 +424,9 @@ func (ls *LedgerState) processEpochRollover(
 			epochLength,
 			txn.Metadata(),
 		)
+		if err != nil {
+			return err
+		}
 		newEpoch, err := txn.DB().Metadata().GetEpochLatest(txn.Metadata())
 		if err != nil {
 			return err
