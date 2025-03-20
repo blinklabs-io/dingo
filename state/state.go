@@ -27,7 +27,6 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite/models"
 	"github.com/blinklabs-io/dingo/event"
-	"github.com/blinklabs-io/dingo/state/blocks"
 	"github.com/blinklabs-io/dingo/state/eras"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -183,7 +182,7 @@ func (ls *LedgerState) recoverCommitTimestampConflict() error {
 		return err
 	}
 	// Try to load last n blocks and rollback to the last one we can load
-	recentBlocks, err := blocks.BlocksRecent(ls.db, 100)
+	recentBlocks, err := database.BlocksRecent(ls.db, 100)
 	if err != nil {
 		return err
 	}
@@ -231,7 +230,7 @@ func (ls *LedgerState) scheduleCleanupConsumedUtxos() {
 			tip := ls.Tip()
 			// Get UTxOs that are marked as deleted and older than our slot window
 			var tmpUtxos []models.Utxo
-			result := ls.db.Metadata().
+			result := ls.db.Metadata().DB().
 				Where("deleted_slot > 0 AND deleted_slot <= ?", tip.Point.Slot-cleanupConsumedUtxosSlotWindow).
 				Order("id DESC").
 				Find(&tmpUtxos)
@@ -288,7 +287,7 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 	txn := ls.db.Transaction(true)
 	err := txn.Do(func(txn *database.Txn) error {
 		// Remove rolled-back blocks in reverse order
-		tmpBlocks, err := blocks.BlocksAfterSlotTxn(txn, point.Slot)
+		tmpBlocks, err := database.BlocksAfterSlotTxn(txn, point.Slot)
 		if err != nil {
 			return fmt.Errorf("query blocks: %w", err)
 		}
@@ -336,7 +335,7 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 			)
 		}
 		// Update tip
-		recentBlocks, err := blocks.BlocksRecentTxn(txn, 1)
+		recentBlocks, err := database.BlocksRecentTxn(txn, 1)
 		if err != nil {
 			return err
 		}
@@ -526,9 +525,9 @@ func (ls *LedgerState) consumeUtxo(
 	return nil
 }
 
-func (ls *LedgerState) addBlock(txn *database.Txn, block blocks.Block) error {
+func (ls *LedgerState) addBlock(txn *database.Txn, block database.Block) error {
 	// Add block to database
-	if err := blocks.BlockCreateTxn(txn, block); err != nil {
+	if err := database.BlockCreateTxn(txn, block); err != nil {
 		return err
 	}
 	// Update tip
@@ -550,9 +549,9 @@ func (ls *LedgerState) addBlock(txn *database.Txn, block blocks.Block) error {
 
 func (ls *LedgerState) removeBlock(
 	txn *database.Txn,
-	block blocks.Block,
+	block database.Block,
 ) error {
-	if err := blocks.BlockDeleteTxn(txn, block); err != nil {
+	if err := database.BlockDeleteTxn(txn, block); err != nil {
 		return err
 	}
 	return nil
@@ -598,7 +597,7 @@ func (ls *LedgerState) loadTip() error {
 	ls.currentTip = tmpTip
 	// Load tip block and set cached block nonce
 	if ls.currentTip.Point.Slot > 0 {
-		tipBlock, err := blocks.BlockByPoint(ls.db, ls.currentTip.Point)
+		tipBlock, err := database.BlockByPoint(ls.db, ls.currentTip.Point)
 		if err != nil {
 			return err
 		}
@@ -613,8 +612,8 @@ func (ls *LedgerState) loadTip() error {
 	return nil
 }
 
-func (ls *LedgerState) GetBlock(point ocommon.Point) (*blocks.Block, error) {
-	ret, err := blocks.BlockByPoint(ls.db, point)
+func (ls *LedgerState) GetBlock(point ocommon.Point) (*database.Block, error) {
+	ret, err := database.BlockByPoint(ls.db, point)
 	if err != nil {
 		return nil, err
 	}
@@ -624,7 +623,7 @@ func (ls *LedgerState) GetBlock(point ocommon.Point) (*blocks.Block, error) {
 // RecentChainPoints returns the requested count of recent chain points in descending order. This is used mostly
 // for building a set of intersect points when acting as a chainsync client
 func (ls *LedgerState) RecentChainPoints(count int) ([]ocommon.Point, error) {
-	tmpBlocks, err := blocks.BlocksRecent(ls.db, count)
+	tmpBlocks, err := database.BlocksRecent(ls.db, count)
 	if err != nil {
 		return nil, err
 	}
@@ -662,9 +661,9 @@ func (ls *LedgerState) GetIntersectPoint(
 				continue
 			}
 			// Lookup block in metadata DB
-			tmpBlock, err := blocks.BlockByPoint(ls.db, point)
+			tmpBlock, err := database.BlockByPoint(ls.db, point)
 			if err != nil {
-				if errors.Is(err, blocks.ErrBlockNotFound) {
+				if errors.Is(err, database.ErrBlockNotFound) {
 					continue
 				}
 				return err

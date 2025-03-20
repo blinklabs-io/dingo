@@ -108,7 +108,7 @@ func (ls *LedgerState) queryHardForkEraHistory() (any, error) {
 		if err != nil {
 			return nil, err
 		}
-		result := ls.db.Metadata().
+		result := ls.db.Metadata().DB().
 			Where("era_id = ?", era.Id).
 			Order("epoch_id").
 			Find(&epochs)

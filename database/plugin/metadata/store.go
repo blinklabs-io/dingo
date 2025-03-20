@@ -27,19 +27,9 @@ import (
 )
 
 type MetadataStore interface {
-	// matches gorm.DB
-	AutoMigrate(...interface{}) error
-	// Really gorm.DB.DB() but close enough
-	Close() error
-	Create(interface{}) *gorm.DB
-	DB() *gorm.DB
-	First(interface{}) *gorm.DB
-	Order(interface{}) *gorm.DB
-	Where(interface{}, ...interface{}) *gorm.DB
-
-	// Our functions
-
 	// Database
+	Close() error
+	DB() *gorm.DB
 	GetCommitTimestamp() (int64, error)
 	SetCommitTimestamp(*gorm.DB, int64) error
 	Transaction() *gorm.DB
