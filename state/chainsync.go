@@ -64,8 +64,8 @@ func (ls *LedgerState) handleEventChainsync(evt event.Event) {
 }
 
 func (ls *LedgerState) handleEventBlockfetch(evt event.Event) {
-	ls.chainsyncMutex.Lock()
-	defer ls.chainsyncMutex.Unlock()
+	ls.chainsyncBlockfetchMutex.Lock()
+	defer ls.chainsyncBlockfetchMutex.Unlock()
 	e := evt.Data.(BlockfetchEvent)
 	if e.BatchDone {
 		if err := ls.handleEventBlockfetchBatchDone(e); err != nil {
@@ -96,6 +96,7 @@ func (ls *LedgerState) handleEventChainsyncRollback(e ChainsyncEvent) error {
 func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 	// Check for out-of-order block headers
 	// This is a stop-gap to handle disconnects during sync until we get chain selection working
+	ls.chainsyncHeaderPointsMutex.Lock()
 	if ls.chainsyncHeaderPoints != nil {
 		if pointsLen := len(ls.chainsyncHeaderPoints); pointsLen > 0 &&
 			e.Point.Slot < ls.chainsyncHeaderPoints[pointsLen-1].Slot {
@@ -109,7 +110,20 @@ func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 			ls.chainsyncHeaderPoints = tmpHeaderPoints
 		}
 	}
+	ls.chainsyncHeaderPointsMutex.Unlock()
+	// Wait for current blockfetch to finish if we've already got another batch worth queued up
+	// This prevents us exceeding the configured recv queue size in the block-fetch protocol
+	if len(ls.chainsyncHeaderPoints) >= blockfetchBatchSize {
+		// Lock and immediately unlock to pause for current blockfetch process without blocking
+		// anything else. This is clunky, but the alternative is a waiting on a channel, which
+		// adds unnecessary complexity
+		ls.chainsyncHeaderMutex.Lock()
+		//nolint:staticcheck
+		ls.chainsyncHeaderMutex.Unlock()
+	}
 	// Add to cached header points
+	ls.chainsyncHeaderPointsMutex.Lock()
+	defer ls.chainsyncHeaderPointsMutex.Unlock()
 	ls.chainsyncHeaderPoints = append(
 		ls.chainsyncHeaderPoints,
 		e.Point,
@@ -135,11 +149,15 @@ func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 				"component",
 				"ledger",
 			)
+			// Unblock new chainsync block headers
+			ls.chainsyncHeaderMutex.Unlock()
 			return nil
 		}
 		ls.chainsyncBlockfetchWaiting = true
 		return nil
 	}
+	// Block new chainsync block headers until we fetch pending block bodies
+	ls.chainsyncHeaderMutex.Lock()
 	// Request current bulk range
 	err := ls.config.BlockfetchRequestRangeFunc(
 		e.ConnectionId,
@@ -147,6 +165,8 @@ func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 		ls.chainsyncHeaderPoints[len(ls.chainsyncHeaderPoints)-1],
 	)
 	if err != nil {
+		// Unblock chainsync block headers
+		ls.chainsyncHeaderMutex.Unlock()
 		return err
 	}
 	ls.chainsyncBlockfetchBusy = true
@@ -587,13 +607,20 @@ func (ls *LedgerState) processBlockEvent(
 func (ls *LedgerState) handleEventBlockfetchBatchDone(e BlockfetchEvent) error {
 	// Process pending block events
 	if err := ls.processBlockEvents(); err != nil {
+		ls.chainsyncBlockfetchBusy = false
+		ls.chainsyncBlockfetchWaiting = false
+		ls.chainsyncHeaderMutex.Unlock()
 		return err
 	}
+	ls.chainsyncHeaderPointsMutex.Lock()
+	defer ls.chainsyncHeaderPointsMutex.Unlock()
 	// Check for pending block range request
 	if !ls.chainsyncBlockfetchWaiting ||
 		len(ls.chainsyncHeaderPoints) == 0 {
 		ls.chainsyncBlockfetchBusy = false
 		ls.chainsyncBlockfetchWaiting = false
+		// Allow collection of more block headers via chainsync
+		ls.chainsyncHeaderMutex.Unlock()
 		return nil
 	}
 	// Request waiting bulk range
@@ -603,6 +630,9 @@ func (ls *LedgerState) handleEventBlockfetchBatchDone(e BlockfetchEvent) error {
 		ls.chainsyncHeaderPoints[len(ls.chainsyncHeaderPoints)-1],
 	)
 	if err != nil {
+		ls.chainsyncBlockfetchBusy = false
+		ls.chainsyncBlockfetchWaiting = false
+		ls.chainsyncHeaderMutex.Unlock()
 		return err
 	}
 	ls.chainsyncBlockfetchBusyTime = time.Now()

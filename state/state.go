@@ -70,10 +70,13 @@ type LedgerState struct {
 	currentTipBlockNonce        []byte
 	metrics                     stateMetrics
 	chainsyncHeaderPoints       []ocommon.Point
+	chainsyncHeaderPointsMutex  sync.Mutex
 	chainsyncBlockEvents        []BlockfetchEvent
 	chainsyncBlockfetchBusy     bool
 	chainsyncBlockfetchBusyTime time.Time
+	chainsyncBlockfetchMutex    sync.Mutex
 	chainsyncBlockfetchWaiting  bool
+	chainsyncHeaderMutex        sync.Mutex
 }
 
 func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
@@ -102,7 +105,7 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 		}
 		ls.db = db
 		if err != nil {
-			var dbErr *database.CommitTimestampError
+			var dbErr database.CommitTimestampError
 			if !errors.As(err, &dbErr) {
 				return nil, err
 			}
@@ -132,7 +135,7 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 		}
 		ls.db = db
 		if err != nil {
-			var dbErr *database.CommitTimestampError
+			var dbErr database.CommitTimestampError
 			if !errors.As(err, &dbErr) {
 				return nil, err
 			}

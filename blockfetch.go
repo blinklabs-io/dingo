@@ -40,6 +40,8 @@ func (n *Node) blockfetchClientConnOpts() []oblockfetch.BlockFetchOptionFunc {
 		oblockfetch.WithBatchDoneFunc(n.blockfetchClientBatchDone),
 		oblockfetch.WithBatchStartTimeout(2 * time.Second),
 		oblockfetch.WithBlockTimeout(2 * time.Second),
+		// Set the recv queue size to 2x our block batch size
+		oblockfetch.WithRecvQueueSize(1000),
 	}
 }
 
