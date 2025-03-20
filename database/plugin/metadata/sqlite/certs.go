@@ -83,7 +83,11 @@ func (d *MetadataStoreSqlite) SetPoolRegistration(
 	metadata *lcommon.PoolMetadata,
 	txn *gorm.DB,
 ) error {
-	tables := []any{&models.PoolRegistration{}, &models.PoolRegistrationOwner{}, &models.PoolRegistrationRelay{}}
+	tables := []any{
+		&models.PoolRegistration{},
+		&models.PoolRegistrationOwner{},
+		&models.PoolRegistrationRelay{},
+	}
 	for _, table := range tables {
 		// Create table if it doesn't exist
 		if err := d.DB().AutoMigrate(table); err != nil {
@@ -91,12 +95,12 @@ func (d *MetadataStoreSqlite) SetPoolRegistration(
 		}
 	}
 	tmpItem := models.PoolRegistration{
-		PoolKeyHash: pkh,
-		VrfKeyHash:  vrf,
-		Pledge:      models.Uint64(pledge),
-		Cost:        models.Uint64(cost),
-		Margin:      &models.Rat{Rat: margin},
-		AddedSlot:   slot,
+		PoolKeyHash:   pkh,
+		VrfKeyHash:    vrf,
+		Pledge:        models.Uint64(pledge),
+		Cost:          models.Uint64(cost),
+		Margin:        &models.Rat{Rat: margin},
+		AddedSlot:     slot,
 		DepositAmount: deposit,
 	}
 	if metadata != nil {
@@ -104,7 +108,10 @@ func (d *MetadataStoreSqlite) SetPoolRegistration(
 		tmpItem.MetadataHash = metadata.Hash[:]
 	}
 	for _, owner := range owners {
-		tmpItem.Owners = append(tmpItem.Owners, models.PoolRegistrationOwner{KeyHash: owner[:]})
+		tmpItem.Owners = append(
+			tmpItem.Owners,
+			models.PoolRegistrationOwner{KeyHash: owner[:]},
+		)
 	}
 	for _, relay := range relays {
 		tmpRelay := models.PoolRegistrationRelay{

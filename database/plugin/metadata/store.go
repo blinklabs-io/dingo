@@ -21,6 +21,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite/models"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	"gorm.io/gorm"
 )
 
@@ -35,9 +36,13 @@ type MetadataStore interface {
 	Order(interface{}) *gorm.DB
 	Where(interface{}, ...interface{}) *gorm.DB
 
-	// Our specific functions
+	// Our functions
+
+	// Database
 	GetCommitTimestamp() (int64, error)
 	SetCommitTimestamp(*gorm.DB, int64) error
+	Transaction() *gorm.DB
+
 	// Ledger state
 	// GetEpoch(uint64, *gorm.DB)
 	// GetEpochs(*gorm.DB) ([]models.Epoch, error)
@@ -57,6 +62,8 @@ type MetadataStore interface {
 		[]byte, // stakeKey
 		*gorm.DB,
 	) ([]models.StakeRegistration, error)
+	GetTip(*gorm.DB) (ochainsync.Tip, error)
+
 	SetEpoch(
 		uint64, // epoch
 		uint64, // slot
@@ -80,57 +87,49 @@ type MetadataStore interface {
 		*gorm.DB,
 	) error
 	SetPoolRetirement(
-		[]byte,
-		uint64,
-		uint64,
+		[]byte, // pkh
+		uint64, // slot
+		uint64, // epoch
 		*gorm.DB,
-	) error // pkh, slot, epoch
+	) error
 	SetPParams(
-		[]byte,
-		uint64,
-		uint64,
-		uint,
+		[]byte, // pparams
+		uint64, // slot
+		uint64, // epoch
+		uint, // era
 		*gorm.DB,
-	) error // params, slot, epoch
+	) error
 	SetPParamUpdate(
-		[]byte,
-		[]byte,
-		uint64,
-		uint64,
+		[]byte, // genesis
+		[]byte, // update
+		uint64, // slot
+		uint64, // epoch
 		*gorm.DB,
-	) error // genesis, update, slot, epoch
+	) error
 	SetStakeDelegation(
-		[]byte,
-		[]byte,
-		uint64,
+		[]byte, // stakeKey
+		[]byte, // pkh
+		uint64, // slot
 		*gorm.DB,
-	) error // stakeKey, pkh, slot
+	) error
 	SetStakeDeregistration(
-		[]byte,
-		uint64,
+		[]byte, // stakeKey
+		uint64, // slot
 		*gorm.DB,
-	) error // stakeKey, slot
+	) error
 	SetStakeRegistration(
-		[]byte,
-		uint64,
-		uint64,
+		[]byte, // stakeKey
+		uint64, // slot
+		uint64, // deposit
 		*gorm.DB,
-	) error // stakeKey, slot, deposit
-	// GetTip() models.Tip
-	// SetTip(models.Tip) error
-	Transaction() *gorm.DB
+	) error
+	SetTip(
+		ochainsync.Tip,
+		*gorm.DB,
+	) error
+
 	// Helpers
 	GetEpochLatest(*gorm.DB) (models.Epoch, error)
-	SetPoolOwners(
-		[]byte,
-		[][]byte,
-		*gorm.DB,
-	) error // pkh, owners
-	SetPoolRelays(
-		[]byte,
-		[]models.PoolRegistrationRelay,
-		*gorm.DB,
-	) error // pkh, relays
 }
 
 // For now, this always returns a sqlite plugin

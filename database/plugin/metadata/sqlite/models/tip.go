@@ -1,4 +1,4 @@
-// Copyright 2024 Blink Labs Software
+// Copyright 2025 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -14,8 +14,13 @@
 
 package models
 
-// MigrateModels contains a list of model objects that should have DB migrations applied
-var MigrateModels = []any{
-	//&Block{},
-	&Utxo{},
+type Tip struct {
+	ID          uint `gorm:"primarykey"`
+	Slot        uint64
+	Hash        []byte
+	BlockNumber uint64
+}
+
+func (Tip) TableName() string {
+	return "tip"
 }

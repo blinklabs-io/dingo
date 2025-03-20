@@ -184,7 +184,7 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 
 func (ls *LedgerState) recoverCommitTimestampConflict() error {
 	// Load current tip
-	tmpTip, err := models.TipGet(ls.db)
+	tmpTip, err := ls.db.Metadata().GetTip(nil)
 	if err != nil {
 		return err
 	}
@@ -340,7 +340,7 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 				),
 				BlockNumber: recentBlocks[0].Number,
 			}
-			if err := models.TipUpdateTxn(txn, ls.currentTip); err != nil {
+			if err := ls.db.Metadata().SetTip(ls.currentTip, txn.Metadata()); err != nil {
 				return err
 			}
 		}
@@ -524,7 +524,7 @@ func (ls *LedgerState) addBlock(txn *database.Txn, block models.Block) error {
 		Point:       ocommon.NewPoint(block.Slot, block.Hash),
 		BlockNumber: block.Number,
 	}
-	if err := models.TipUpdateTxn(txn, ls.currentTip); err != nil {
+	if err := ls.db.Metadata().SetTip(ls.currentTip, txn.Metadata()); err != nil {
 		return err
 	}
 	// Update tip block nonce
@@ -579,7 +579,7 @@ func (ls *LedgerState) loadEpoch() error {
 }
 
 func (ls *LedgerState) loadTip() error {
-	tmpTip, err := models.TipGet(ls.db)
+	tmpTip, err := ls.db.Metadata().GetTip(nil)
 	if err != nil {
 		return err
 	}
