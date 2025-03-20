@@ -16,8 +16,6 @@ package state
 
 import (
 	"github.com/blinklabs-io/dingo/database"
-	"github.com/blinklabs-io/dingo/state/models"
-	"github.com/blinklabs-io/gouroboros/ledger/common"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
 
@@ -42,10 +40,10 @@ func (lv *LedgerView) NetworkId() uint {
 func (lv *LedgerView) UtxoById(
 	utxoId lcommon.TransactionInput,
 ) (lcommon.Utxo, error) {
-	utxo, err := models.UtxoByRefTxn(
-		lv.txn,
+	utxo, err := lv.ls.db.(*database.BaseDatabase).UtxoByRef(
 		utxoId.Id().Bytes(),
 		utxoId.Index(),
+		lv.txn,
 	)
 	if err != nil {
 		return lcommon.Utxo{}, err
@@ -73,8 +71,8 @@ func (lv *LedgerView) StakeRegistration(
 	for _, cert := range certs {
 		ret = append(
 			ret,
-			common.StakeRegistrationCertificate{
-				StakeRegistration: common.StakeCredential{
+			lcommon.StakeRegistrationCertificate{
+				StakeRegistration: lcommon.StakeCredential{
 					Credential: cert.StakingKey,
 				},
 			},
@@ -96,9 +94,9 @@ func (lv *LedgerView) PoolRegistration(
 	for _, cert := range certs {
 		ret = append(
 			ret,
-			common.PoolRegistrationCertificate{
-				Operator: common.PoolKeyHash(
-					common.NewBlake2b224(cert.PoolKeyHash),
+			lcommon.PoolRegistrationCertificate{
+				Operator: lcommon.PoolKeyHash(
+					lcommon.NewBlake2b224(cert.PoolKeyHash),
 				),
 			},
 		)

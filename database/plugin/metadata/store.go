@@ -20,6 +20,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite/models"
+	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	"gorm.io/gorm"
@@ -63,6 +64,11 @@ type MetadataStore interface {
 		*gorm.DB,
 	) ([]models.StakeRegistration, error)
 	GetTip(*gorm.DB) (ochainsync.Tip, error)
+	GetUtxo(
+		[]byte, // txId
+		uint32, // idx
+		*gorm.DB,
+	) (models.Utxo, error)
 
 	SetEpoch(
 		uint64, // epoch
@@ -130,6 +136,9 @@ type MetadataStore interface {
 
 	// Helpers
 	GetEpochLatest(*gorm.DB) (models.Epoch, error)
+	GetUtxosByAddress(ledger.Address, *gorm.DB) ([]models.Utxo, error)
+	DeleteUtxo(any, *gorm.DB) error
+	DeleteUtxos([]any, *gorm.DB) error
 }
 
 // For now, this always returns a sqlite plugin

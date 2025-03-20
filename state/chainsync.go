@@ -22,8 +22,9 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite/models"
 	"github.com/blinklabs-io/dingo/event"
-	"github.com/blinklabs-io/dingo/state/models"
+	"github.com/blinklabs-io/dingo/state/blocks"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -361,7 +362,7 @@ func (ls *LedgerState) calculateEpochNonce(
 	).Num().Uint64()
 	stabilityWindowStartSlot := epochStartSlot - stabilityWindow
 	// Get last block before stability window
-	blockBeforeStabilityWindow, err := models.BlockBeforeSlotTxn(
+	blockBeforeStabilityWindow, err := blocks.BlockBeforeSlotTxn(
 		txn,
 		stabilityWindowStartSlot,
 	)
@@ -369,12 +370,12 @@ func (ls *LedgerState) calculateEpochNonce(
 		return nil, err
 	}
 	// Get last block in previous epoch
-	blockLastPrevEpoch, err := models.BlockBeforeSlotTxn(
+	blockLastPrevEpoch, err := blocks.BlockBeforeSlotTxn(
 		txn,
 		ls.currentEpoch.StartSlot,
 	)
 	if err != nil {
-		if errors.Is(err, models.ErrBlockNotFound) {
+		if errors.Is(err, blocks.ErrBlockNotFound) {
 			return blockBeforeStabilityWindow.Nonce, nil
 		}
 		return nil, err
@@ -490,7 +491,7 @@ func (ls *LedgerState) processBlockEvent(
 	if err != nil {
 		return err
 	}
-	tmpBlock := models.Block{
+	tmpBlock := blocks.Block{
 		Slot: e.Point.Slot,
 		Hash: e.Point.Hash,
 		// TODO: figure out something for Byron. this won't work, since the

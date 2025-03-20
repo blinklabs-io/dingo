@@ -19,9 +19,9 @@ import (
 	"fmt"
 	"math/big"
 
-	dbmodels "github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite/models"
+	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite/models"
 	"github.com/blinklabs-io/dingo/state/eras"
-	"github.com/blinklabs-io/dingo/state/models"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
@@ -99,7 +99,7 @@ func (ls *LedgerState) queryHardFork(
 
 func (ls *LedgerState) queryHardForkEraHistory() (any, error) {
 	retData := []any{}
-	var epochs []dbmodels.Epoch
+	var epochs []models.Epoch
 	timespan := big.NewInt(0)
 	for _, era := range eras.Eras {
 		epochSlotLength, epochLength, err := era.EpochLengthFunc(
@@ -213,7 +213,7 @@ func (ls *LedgerState) queryShelleyUtxoByAddress(
 ) (any, error) {
 	ret := make(map[olocalstatequery.UtxoId]ledger.TransactionOutput)
 	// TODO: support multiple addresses (#391)
-	utxos, err := models.UtxosByAddress(ls.db, addrs[0])
+	utxos, err := database.UtxosByAddress(ls.db, addrs[0])
 	if err != nil {
 		return nil, err
 	}
@@ -236,7 +236,7 @@ func (ls *LedgerState) queryShelleyUtxoByTxIn(
 ) (any, error) {
 	ret := make(map[olocalstatequery.UtxoId]ledger.TransactionOutput)
 	// TODO: support multiple TxIns (#392)
-	utxo, err := models.UtxoByRef(
+	utxo, err := database.UtxoByRef(
 		ls.db,
 		txIns[0].Id().Bytes(),
 		txIns[0].Index(),

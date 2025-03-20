@@ -16,7 +16,7 @@ package state
 
 import (
 	"github.com/blinklabs-io/dingo/event"
-	"github.com/blinklabs-io/dingo/state/models"
+	"github.com/blinklabs-io/dingo/state/blocks"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
@@ -30,7 +30,7 @@ const (
 
 type ChainBlockEvent struct {
 	Point ocommon.Point
-	Block models.Block
+	Block blocks.Block
 }
 
 type ChainRollbackEvent struct {

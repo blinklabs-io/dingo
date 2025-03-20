@@ -1,4 +1,4 @@
-// Copyright 2024 Blink Labs Software
+// Copyright 2025 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -17,7 +17,7 @@ package state
 import (
 	"errors"
 
-	"github.com/blinklabs-io/dingo/state/models"
+	"github.com/blinklabs-io/dingo/state/blocks"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"gorm.io/gorm"
 )
@@ -30,7 +30,7 @@ type ChainIterator struct {
 
 type ChainIteratorResult struct {
 	Point    ocommon.Point
-	Block    models.Block
+	Block    blocks.Block
 	Rollback bool
 }
 
@@ -45,7 +45,7 @@ func newChainIterator(
 	}
 	// Lookup start block in metadata DB if not origin
 	if startPoint.Slot > 0 || len(startPoint.Hash) > 0 {
-		tmpBlock, err := models.BlockByPoint(ls.db, startPoint)
+		tmpBlock, err := blocks.BlockByPoint(ls.db, startPoint)
 		if err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				return nil, ErrBlockNotFound
@@ -65,7 +65,7 @@ func (ci *ChainIterator) Next(blocking bool) (*ChainIteratorResult, error) {
 	ci.ls.RLock()
 	ret := &ChainIteratorResult{}
 	// Lookup next block in metadata DB
-	tmpBlock, err := models.BlockByNumber(ci.ls.db, ci.blockNumber)
+	tmpBlock, err := blocks.BlockByNumber(ci.ls.db, ci.blockNumber)
 	// Return immedidately if a block is found
 	if err == nil {
 		ret.Point = ocommon.NewPoint(tmpBlock.Slot, tmpBlock.Hash)
