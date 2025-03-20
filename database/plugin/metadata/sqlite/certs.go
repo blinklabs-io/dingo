@@ -15,7 +15,6 @@
 package sqlite
 
 import (
-	"errors"
 	"math/big"
 
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite/models"
@@ -239,104 +238,6 @@ func (d *MetadataStoreSqlite) SetStakeRegistration(
 		}
 	} else {
 		if result := d.DB().Create(&tmpItem); result.Error != nil {
-			return result.Error
-		}
-	}
-	return nil
-}
-
-// SetPoolRegistration stores a pool registration
-// func (d *MetadataStoreSqlite) SetPoolRegistration(item models.PoolRegistration) error {
-// 	if result := d.DB().Create(&item); result.Error != nil {
-// 		return result.Error
-// 	}
-// 	return nil
-// }
-
-// SetPoolOwners updates the pool owners on a pool registration
-func (d *MetadataStoreSqlite) SetPoolOwners(
-	pkh []byte,
-	owners [][]byte,
-	txn *gorm.DB,
-) error {
-	// Create table if it doesn't exist
-	if err := d.DB().AutoMigrate(&models.PoolRegistrationOwner{}); err != nil {
-		return err
-	}
-	poolRegistrations, err := d.GetPoolRegistrations(pkh, txn)
-	if err != nil {
-		return err
-	}
-	if len(poolRegistrations) == 0 {
-		return errors.New("pool not found")
-	}
-	// TODO: check if we have a deregistration and act accordingly
-	pool := poolRegistrations[0]
-	poolOwners := []models.PoolRegistrationOwner{}
-	for _, owner := range owners {
-		poolOwners = append(
-			poolOwners,
-			models.PoolRegistrationOwner{KeyHash: owner[:]},
-		)
-	}
-	pool.Owners = poolOwners
-	if txn != nil {
-		txn.Where(&models.PoolRegistrationOwner{PoolRegistrationID: pool.ID}).
-			Delete(&models.PoolRegistrationOwner{})
-		if result := txn.Save(&pool); result.Error != nil {
-			return result.Error
-		}
-	} else {
-		d.DB().Where(&models.PoolRegistrationOwner{PoolRegistrationID: pool.ID}).Delete(&models.PoolRegistrationOwner{})
-		if result := d.DB().Save(&pool); result.Error != nil {
-			return result.Error
-		}
-	}
-	return nil
-}
-
-// SetPoolRelays updates the pool relays on a pool registration
-func (d *MetadataStoreSqlite) SetPoolRelays(
-	pkh []byte,
-	relays []models.PoolRegistrationRelay,
-	txn *gorm.DB,
-) error {
-	// Create table if it doesn't exist
-	if err := d.DB().AutoMigrate(&models.PoolRegistrationRelay{}); err != nil {
-		return err
-	}
-	poolRegistrations, err := d.GetPoolRegistrations(pkh, txn)
-	if err != nil {
-		return err
-	}
-	if len(poolRegistrations) == 0 {
-		return errors.New("pool not found")
-	}
-	// TODO: check if we have a deregistration and act accordingly
-	pool := poolRegistrations[0]
-	poolRelays := []models.PoolRegistrationRelay{}
-	for _, relay := range relays {
-		tmpRelay := models.PoolRegistrationRelay{
-			Ipv4:     relay.Ipv4,
-			Ipv6:     relay.Ipv6,
-			Port:     relay.Port,
-			Hostname: relay.Hostname,
-		}
-		poolRelays = append(
-			poolRelays,
-			tmpRelay,
-		)
-	}
-	pool.Relays = poolRelays
-	if txn != nil {
-		txn.Where(&models.PoolRegistrationRelay{PoolRegistrationID: pool.ID}).
-			Delete(&models.PoolRegistrationRelay{})
-		if result := txn.Save(&pool); result.Error != nil {
-			return result.Error
-		}
-	} else {
-		d.DB().Where(&models.PoolRegistrationRelay{PoolRegistrationID: pool.ID}).Delete(&models.PoolRegistrationRelay{})
-		if result := d.DB().Save(&pool); result.Error != nil {
 			return result.Error
 		}
 	}
