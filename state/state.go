@@ -301,6 +301,9 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 		}
 		// Delete rolled-back UTxOs
 		var tmpUtxos []models.Utxo
+		if err := txn.Metadata().AutoMigrate(&models.Utxo{}); err != nil {
+			return err
+		}
 		result := txn.Metadata().
 			Where("added_slot > ?", point.Slot).
 			Order("id DESC").
@@ -508,11 +511,28 @@ func (ls *LedgerState) consumeUtxo(
 	slot uint64,
 ) error {
 	// Find UTxO
-	utxo, err := txn.DB().(*database.BaseDatabase).UtxoByRef(
-		utxoId.Id().Bytes(),
-		utxoId.Index(),
-		txn,
-	)
+	var utxo database.Utxo
+	var err error
+	switch txn.DB().(type) {
+	case *database.BaseDatabase:
+		utxo, err = txn.DB().(*database.BaseDatabase).UtxoByRef(
+			utxoId.Id().Bytes(),
+			utxoId.Index(),
+			txn,
+		)
+	case *database.InMemoryDatabase:
+		utxo, err = txn.DB().(*database.InMemoryDatabase).UtxoByRef(
+			utxoId.Id().Bytes(),
+			utxoId.Index(),
+			txn,
+		)
+	case *database.PersistentDatabase:
+		utxo, err = txn.DB().(*database.PersistentDatabase).UtxoByRef(
+			utxoId.Id().Bytes(),
+			utxoId.Index(),
+			txn,
+		)
+	}
 	if err != nil {
 		// TODO: make this configurable? (#396)
 		if errors.Is(err, gorm.ErrRecordNotFound) {
