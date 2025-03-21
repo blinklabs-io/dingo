@@ -18,6 +18,7 @@ import (
 	"errors"
 
 	"github.com/blinklabs-io/dingo/database"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
@@ -60,6 +61,22 @@ func newChainIterator(
 	return ci, nil
 }
 
+func (ci *ChainIterator) Tip() (ochainsync.Tip, error) {
+	tmpBlocks, err := database.BlocksRecent(ci.ls.db, 1)
+	if err != nil {
+		return ochainsync.Tip{}, err
+	}
+	var tmpBlock database.Block
+	if len(tmpBlocks) > 0 {
+		tmpBlock = tmpBlocks[0]
+	}
+	tip := ochainsync.Tip{
+		Point:       ocommon.NewPoint(tmpBlock.Slot, tmpBlock.Hash),
+		BlockNumber: tmpBlock.Number,
+	}
+	return tip, nil
+}
+
 func (ci *ChainIterator) Next(blocking bool) (*ChainIteratorResult, error) {
 	ci.ls.RLock()
 	ret := &ChainIteratorResult{}
@@ -79,8 +96,11 @@ func (ci *ChainIterator) Next(blocking bool) (*ChainIteratorResult, error) {
 		return ret, err
 	}
 	// Check against current tip to see if it was rolled back
-	tip := ci.ls.Tip()
-	if ci.blockNumber-1 > tip.BlockNumber {
+	tip, err := ci.Tip()
+	if err != nil {
+		return nil, err
+	}
+	if ci.blockNumber > 0 && ci.blockNumber-1 > tip.BlockNumber {
 		ret.Point = tip.Point
 		ret.Rollback = true
 		ci.ls.RUnlock()

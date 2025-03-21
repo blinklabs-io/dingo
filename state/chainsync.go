@@ -24,7 +24,9 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite/models"
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/state/eras"
 	"github.com/blinklabs-io/gouroboros/cbor"
+	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
@@ -88,9 +90,20 @@ func (ls *LedgerState) handleEventBlockfetch(evt event.Event) {
 }
 
 func (ls *LedgerState) handleEventChainsyncRollback(e ChainsyncEvent) error {
-	ls.Lock()
-	defer ls.Unlock()
-	return ls.rollback(e.Point)
+	//ls.Lock()
+	//defer ls.Unlock()
+	// Generate event
+	ls.config.EventBus.Publish(
+		ChainRollbackEventType,
+		event.NewEvent(
+			ChainRollbackEventType,
+			ChainRollbackEvent{
+				Point: e.Point,
+			},
+		),
+	)
+	//return ls.rollback(e.Point)
+	return nil
 }
 
 func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
@@ -231,15 +244,6 @@ func (ls *LedgerState) processBlockEvents() error {
 		batchOffset += batchSize
 	}
 	ls.chainsyncBlockEvents = nil
-	ls.config.Logger.Info(
-		fmt.Sprintf(
-			"chain extended, new tip: %x at slot %d",
-			ls.currentTip.Point.Hash,
-			ls.currentTip.Point.Slot,
-		),
-		"component",
-		"ledger",
-	)
 	return nil
 }
 
@@ -277,15 +281,16 @@ func (ls *LedgerState) validateBlock(e BlockfetchEvent) error {
 
 func (ls *LedgerState) processGenesisBlock(
 	txn *database.Txn,
-	e BlockfetchEvent,
+	point ocommon.Point,
+	block ledger.Block,
 ) error {
 	if ls.currentEpoch.ID == 0 {
 		// Check for era change
-		if uint(e.Block.Era().Id) != ls.currentEra.Id {
-			targetEraId := uint(e.Block.Era().Id)
+		if uint(block.Era().Id) != ls.currentEra.Id {
+			targetEraId := uint(block.Era().Id)
 			// Transition through every era between the current and the target era
 			for nextEraId := ls.currentEra.Id + 1; nextEraId <= targetEraId; nextEraId++ {
-				if err := ls.transitionToEra(txn, nextEraId, ls.currentEpoch.EpochId, e.Point.Slot); err != nil {
+				if err := ls.transitionToEra(txn, nextEraId, ls.currentEpoch.EpochId, point.Slot); err != nil {
 					return err
 				}
 			}
@@ -414,14 +419,15 @@ func (ls *LedgerState) calculateEpochNonce(
 
 func (ls *LedgerState) processEpochRollover(
 	txn *database.Txn,
-	e BlockfetchEvent,
+	point ocommon.Point,
+	block ledger.Block,
 ) error {
 	// Check for epoch rollover
-	if e.Point.Slot > ls.currentEpoch.StartSlot+uint64(
+	if point.Slot > ls.currentEpoch.StartSlot+uint64(
 		ls.currentEpoch.LengthInSlots,
 	) {
 		// Apply pending pparam updates
-		if err := ls.applyPParamUpdates(txn, ls.currentEpoch.EpochId, e.Point.Slot); err != nil {
+		if err := ls.applyPParamUpdates(txn, ls.currentEpoch.EpochId, point.Slot); err != nil {
 			return err
 		}
 		// Create next epoch record
@@ -442,7 +448,7 @@ func (ls *LedgerState) processEpochRollover(
 			epochStartSlot,
 			ls.currentEpoch.EpochId+1,
 			tmpNonce,
-			uint(e.Block.Era().Id),
+			uint(block.Era().Id),
 			epochSlotLength,
 			epochLength,
 			txn.Metadata(),
@@ -476,33 +482,17 @@ func (ls *LedgerState) processBlockEvent(
 	txn *database.Txn,
 	e BlockfetchEvent,
 ) error {
-	// Check that the block fits on our current chain
-	if err := ls.validateBlock(e); err != nil {
-		return err
-	}
-	// Special handling for genesis block
-	if err := ls.processGenesisBlock(txn, e); err != nil {
-		return err
-	}
-	// Check for epoch rollover
-	if err := ls.processEpochRollover(txn, e); err != nil {
-		return err
-	}
-	// TODO: track this using protocol params and hard forks
-	// Check for era change
-	if uint(e.Block.Era().Id) != ls.currentEra.Id {
-		targetEraId := uint(e.Block.Era().Id)
-		// Transition through every era between the current and the target era
-		for nextEraId := ls.currentEra.Id + 1; nextEraId <= targetEraId; nextEraId++ {
-			if err := ls.transitionToEra(txn, nextEraId, ls.currentEpoch.EpochId, e.Point.Slot); err != nil {
-				return err
-			}
+	/*
+		// Check that the block fits on our current chain
+		if err := ls.validateBlock(e); err != nil {
+			return err
 		}
-	}
+	*/
 	// Calculate block rolling nonce
 	var blockNonce []byte
 	if ls.currentEra.CalculateEtaVFunc != nil {
-		tmpNonce, err := ls.currentEra.CalculateEtaVFunc(
+		tmpEra := eras.Eras[e.Block.Era().Id]
+		tmpNonce, err := tmpEra.CalculateEtaVFunc(
 			ls.config.CardanoNodeConfig,
 			ls.currentTipBlockNonce,
 			e.Block,
@@ -528,71 +518,9 @@ func (ls *LedgerState) processBlockEvent(
 		Nonce:    blockNonce,
 		Cbor:     e.Block.Cbor(),
 	}
-	if err := ls.addBlock(txn, tmpBlock); err != nil {
-		return fmt.Errorf("add block: %w", err)
-	}
-	// Process transactions
-	for _, tx := range e.Block.Transactions() {
-		// Validate transaction
-		if ls.currentEra.ValidateTxFunc != nil {
-			lv := &LedgerView{
-				txn: txn,
-				ls:  ls,
-			}
-			err := ls.currentEra.ValidateTxFunc(
-				tx,
-				e.Point.Slot,
-				lv,
-				ls.currentPParams,
-			)
-			if err != nil {
-				ls.config.Logger.Warn(
-					"TX " + tx.Hash() + " failed validation: " + err.Error(),
-				)
-				// return fmt.Errorf("TX validation failure: %w", err)
-			}
-		}
-		// Process consumed UTxOs
-		for _, consumed := range tx.Consumed() {
-			if err := ls.consumeUtxo(txn, consumed, e.Point.Slot); err != nil {
-				return fmt.Errorf("remove consumed UTxO: %w", err)
-			}
-		}
-		// Process produced UTxOs
-		for _, produced := range tx.Produced() {
-			outAddr := produced.Output.Address()
-			tmpUtxo := models.Utxo{
-				TxId:       produced.Id.Id().Bytes(),
-				OutputIdx:  produced.Id.Index(),
-				AddedSlot:  e.Point.Slot,
-				PaymentKey: outAddr.PaymentKeyHash().Bytes(),
-				StakingKey: outAddr.StakeKeyHash().Bytes(),
-				Cbor:       produced.Output.Cbor(),
-			}
-			if err := ls.addUtxo(txn, tmpUtxo); err != nil {
-				return fmt.Errorf("add produced UTxO: %w", err)
-			}
-		}
-		// XXX: generate event for each TX/UTxO?
-		// Protocol parameter updates
-		if updateEpoch, paramUpdates := tx.ProtocolParameterUpdates(); updateEpoch > 0 {
-			for genesisHash, update := range paramUpdates {
-				err := txn.DB().Metadata().SetPParamUpdate(
-					genesisHash.Bytes(),
-					update.Cbor(),
-					e.Point.Slot,
-					updateEpoch,
-					txn.Metadata(),
-				)
-				if err != nil {
-					return err
-				}
-			}
-		}
-		// Certificates
-		if err := ls.processTransactionCertificates(txn, e.Point, tx); err != nil {
-			return err
-		}
+	// Add block to database
+	if err := database.BlockCreateTxn(txn, tmpBlock); err != nil {
+		return err
 	}
 	// Generate event
 	ls.config.EventBus.Publish(

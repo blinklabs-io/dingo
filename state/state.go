@@ -175,6 +175,8 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 	if err := ls.loadTip(); err != nil {
 		return nil, err
 	}
+	// Start goroutine to process new blocks
+	go ls.ledgerProcessBlocks()
 	return ls, nil
 }
 
@@ -365,16 +367,6 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 	if err := ls.loadTip(); err != nil {
 		return err
 	}
-	// Generate event
-	ls.config.EventBus.Publish(
-		ChainRollbackEventType,
-		event.NewEvent(
-			ChainRollbackEventType,
-			ChainRollbackEvent{
-				Point: point,
-			},
-		),
-	)
 	ls.config.Logger.Info(
 		fmt.Sprintf(
 			"chain rolled back, new tip: %x at slot %d",
@@ -445,6 +437,7 @@ func (ls *LedgerState) applyPParamUpdates(
 	if len(pparamUpdates) > 0 {
 		// We only want the latest for the epoch
 		pparamUpdate := pparamUpdates[0]
+		fmt.Printf("applyPParamUpdates(): ls.currentEra = %#v\n", ls.currentEra)
 		if ls.currentEra.DecodePParamsUpdateFunc != nil {
 			tmpPParamUpdate, err := ls.currentEra.DecodePParamsUpdateFunc(
 				pparamUpdate.Cbor,
@@ -509,6 +502,7 @@ func (ls *LedgerState) consumeUtxo(
 	utxoId ledger.TransactionInput,
 	slot uint64,
 ) error {
+	fmt.Printf("consumeUtxo(): utxoId = %s, slot = %d\n", utxoId.String(), slot)
 	// Find UTxO
 	var utxo database.Utxo
 	var err error
@@ -547,25 +541,166 @@ func (ls *LedgerState) consumeUtxo(
 	return nil
 }
 
-func (ls *LedgerState) addBlock(txn *database.Txn, block database.Block) error {
-	// Add block to database
-	if err := database.BlockCreateTxn(txn, block); err != nil {
+func (ls *LedgerState) ledgerProcessBlocks() {
+	iter, err := newChainIterator(ls, ls.currentTip.Point, false)
+	if err != nil {
+		ls.config.Logger.Error(
+			"failed to create chain iterator: " + err.Error(),
+		)
+		return
+	}
+	for {
+		next, err := iter.Next(true)
+		if err != nil {
+			ls.config.Logger.Error(
+				"failed to get next block from chain iterator: " + err.Error(),
+			)
+			return
+		}
+		if next == nil {
+			ls.config.Logger.Error("next block from chain iterator is nil")
+			return
+		}
+		if next.Rollback {
+			ls.Lock()
+			err = ls.rollback(next.Point)
+			ls.Unlock()
+			if err != nil {
+				ls.config.Logger.Error(
+					"failed to process rollback: " + err.Error(),
+				)
+				return
+			}
+			continue
+		}
+		// Process block
+		txn := ls.db.Transaction(true)
+		err = txn.Do(func(txn *database.Txn) error {
+			tmpBlock, err := next.Block.Decode()
+			if err != nil {
+				return err
+			}
+			if err := ls.ledgerProcessBlock(txn, next.Point, tmpBlock, next.Block.Nonce); err != nil {
+				return err
+			}
+			return nil
+		})
+		if err != nil {
+			ls.config.Logger.Error(
+				"failed to process block: " + err.Error(),
+			)
+			return
+		}
+	}
+}
+
+func (ls *LedgerState) ledgerProcessBlock(txn *database.Txn, point ocommon.Point, block ledger.Block, nonce []byte) error {
+	// Special handling for genesis block
+	if err := ls.processGenesisBlock(txn, point, block); err != nil {
 		return err
+	}
+	// Check for epoch rollover
+	if err := ls.processEpochRollover(txn, point, block); err != nil {
+		return err
+	}
+	// TODO: track this using protocol params and hard forks
+	// Check for era change
+	if uint(block.Era().Id) != ls.currentEra.Id {
+		targetEraId := uint(block.Era().Id)
+		// Transition through every era between the current and the target era
+		for nextEraId := ls.currentEra.Id + 1; nextEraId <= targetEraId; nextEraId++ {
+			if err := ls.transitionToEra(txn, nextEraId, ls.currentEpoch.EpochId, point.Slot); err != nil {
+				return err
+			}
+		}
+	}
+
+	// Process transactions
+	for _, tx := range block.Transactions() {
+		// Validate transaction
+		if ls.currentEra.ValidateTxFunc != nil {
+			lv := &LedgerView{
+				txn: txn,
+				ls:  ls,
+			}
+			err := ls.currentEra.ValidateTxFunc(
+				tx,
+				point.Slot,
+				lv,
+				ls.currentPParams,
+			)
+			if err != nil {
+				ls.config.Logger.Warn(
+					"TX " + tx.Hash() + " failed validation: " + err.Error(),
+				)
+				// return fmt.Errorf("TX validation failure: %w", err)
+			}
+		}
+		// Process consumed UTxOs
+		for _, consumed := range tx.Consumed() {
+			if err := ls.consumeUtxo(txn, consumed, point.Slot); err != nil {
+				return fmt.Errorf("remove consumed UTxO: %w", err)
+			}
+		}
+		// Process produced UTxOs
+		for _, produced := range tx.Produced() {
+			outAddr := produced.Output.Address()
+			tmpUtxo := models.Utxo{
+				TxId:       produced.Id.Id().Bytes(),
+				OutputIdx:  produced.Id.Index(),
+				AddedSlot:  point.Slot,
+				PaymentKey: outAddr.PaymentKeyHash().Bytes(),
+				StakingKey: outAddr.StakeKeyHash().Bytes(),
+				Cbor:       produced.Output.Cbor(),
+			}
+			if err := ls.addUtxo(txn, tmpUtxo); err != nil {
+				return fmt.Errorf("add produced UTxO: %w", err)
+			}
+		}
+		// XXX: generate event for each TX/UTxO?
+		// Protocol parameter updates
+		if updateEpoch, paramUpdates := tx.ProtocolParameterUpdates(); updateEpoch > 0 {
+			for genesisHash, update := range paramUpdates {
+				err := txn.DB().Metadata().SetPParamUpdate(
+					genesisHash.Bytes(),
+					update.Cbor(),
+					point.Slot,
+					updateEpoch,
+					txn.Metadata(),
+				)
+				if err != nil {
+					return err
+				}
+			}
+		}
+		// Certificates
+		if err := ls.processTransactionCertificates(txn, point, tx); err != nil {
+			return err
+		}
 	}
 	// Update tip
 	ls.currentTip = ochainsync.Tip{
-		Point:       ocommon.NewPoint(block.Slot, block.Hash),
-		BlockNumber: block.Number,
+		Point:       point,
+		BlockNumber: ls.currentTip.BlockNumber + 1,
 	}
 	if err := ls.db.Metadata().SetTip(ls.currentTip, txn.Metadata()); err != nil {
 		return err
 	}
 	// Update tip block nonce
-	ls.currentTipBlockNonce = block.Nonce
+	ls.currentTipBlockNonce = nonce
 	// Update metrics
-	ls.metrics.blockNum.Set(float64(block.Number))
-	ls.metrics.slotNum.Set(float64(block.Slot))
-	ls.metrics.slotInEpoch.Set(float64(block.Slot - ls.currentEpoch.StartSlot))
+	ls.metrics.blockNum.Set(float64(ls.currentTip.BlockNumber))
+	ls.metrics.slotNum.Set(float64(point.Slot))
+	ls.metrics.slotInEpoch.Set(float64(point.Slot - ls.currentEpoch.StartSlot))
+	ls.config.Logger.Info(
+		fmt.Sprintf(
+			"chain extended, new tip: %x at slot %d",
+			ls.currentTip.Point.Hash,
+			ls.currentTip.Point.Slot,
+		),
+		"component",
+		"ledger",
+	)
 	return nil
 }
 
