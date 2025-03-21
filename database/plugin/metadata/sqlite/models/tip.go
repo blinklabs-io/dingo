@@ -1,4 +1,4 @@
-// Copyright 2024 Blink Labs Software
+// Copyright 2025 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -14,14 +14,13 @@
 
 package models
 
-type PParamUpdate struct {
+type Tip struct {
 	ID          uint `gorm:"primarykey"`
-	AddedSlot   uint64
-	Epoch       uint64
-	GenesisHash []byte
-	Cbor        []byte
+	Slot        uint64
+	Hash        []byte
+	BlockNumber uint64
 }
 
-func (PParamUpdate) TableName() string {
-	return "pparam_update"
+func (Tip) TableName() string {
+	return "tip"
 }

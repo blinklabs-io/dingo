@@ -16,8 +16,6 @@ package state
 
 import (
 	"github.com/blinklabs-io/dingo/database"
-	"github.com/blinklabs-io/dingo/state/models"
-	"github.com/blinklabs-io/gouroboros/ledger/common"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
 
@@ -42,11 +40,28 @@ func (lv *LedgerView) NetworkId() uint {
 func (lv *LedgerView) UtxoById(
 	utxoId lcommon.TransactionInput,
 ) (lcommon.Utxo, error) {
-	utxo, err := models.UtxoByRefTxn(
-		lv.txn,
-		utxoId.Id().Bytes(),
-		utxoId.Index(),
-	)
+	var utxo database.Utxo
+	var err error
+	switch lv.ls.db.(type) {
+	case *database.BaseDatabase:
+		utxo, err = lv.ls.db.(*database.BaseDatabase).UtxoByRef(
+			utxoId.Id().Bytes(),
+			utxoId.Index(),
+			lv.txn,
+		)
+	case *database.InMemoryDatabase:
+		utxo, err = lv.ls.db.(*database.InMemoryDatabase).UtxoByRef(
+			utxoId.Id().Bytes(),
+			utxoId.Index(),
+			lv.txn,
+		)
+	case *database.PersistentDatabase:
+		utxo, err = lv.ls.db.(*database.PersistentDatabase).UtxoByRef(
+			utxoId.Id().Bytes(),
+			utxoId.Index(),
+			lv.txn,
+		)
+	}
 	if err != nil {
 		return lcommon.Utxo{}, err
 	}
@@ -64,18 +79,17 @@ func (lv *LedgerView) StakeRegistration(
 	stakingKey []byte,
 ) ([]lcommon.StakeRegistrationCertificate, error) {
 	ret := []lcommon.StakeRegistrationCertificate{}
-	certs := []models.StakeRegistration{}
-	result := lv.txn.Metadata().
-		Where("staking_key = ?", stakingKey).
-		Find(&certs)
-	if result.Error != nil {
-		return ret, result.Error
+	certs, err := lv.txn.DB().
+		Metadata().
+		GetStakeRegistrations(stakingKey, lv.txn.Metadata())
+	if err != nil {
+		return ret, err
 	}
 	for _, cert := range certs {
 		ret = append(
 			ret,
-			common.StakeRegistrationCertificate{
-				StakeRegistration: common.StakeCredential{
+			lcommon.StakeRegistrationCertificate{
+				StakeRegistration: lcommon.StakeCredential{
 					Credential: cert.StakingKey,
 				},
 			},
@@ -88,19 +102,18 @@ func (lv *LedgerView) PoolRegistration(
 	poolKeyHash []byte,
 ) ([]lcommon.PoolRegistrationCertificate, error) {
 	ret := []lcommon.PoolRegistrationCertificate{}
-	certs := []models.PoolRegistration{}
-	result := lv.txn.Metadata().
-		Where("pool_key_hash = ?", poolKeyHash).
-		Find(&certs)
-	if result.Error != nil {
-		return ret, result.Error
+	certs, err := lv.txn.DB().
+		Metadata().
+		GetPoolRegistrations(poolKeyHash, lv.txn.Metadata())
+	if err != nil {
+		return ret, err
 	}
 	for _, cert := range certs {
 		ret = append(
 			ret,
-			common.PoolRegistrationCertificate{
-				Operator: common.PoolKeyHash(
-					common.NewBlake2b224(cert.PoolKeyHash),
+			lcommon.PoolRegistrationCertificate{
+				Operator: lcommon.PoolKeyHash(
+					lcommon.NewBlake2b224(cert.PoolKeyHash),
 				),
 			},
 		)

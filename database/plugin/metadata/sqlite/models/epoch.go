@@ -1,4 +1,4 @@
-// Copyright 2024 Blink Labs Software
+// Copyright 2025 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -14,13 +14,18 @@
 
 package models
 
-type StakeDelegation struct {
-	ID          uint   `gorm:"primarykey"`
-	StakingKey  []byte `gorm:"index"`
-	PoolKeyHash []byte `gorm:"index"`
-	AddedSlot   uint64
+type Epoch struct {
+	ID uint `gorm:"primarykey"`
+	// NOTE: we would normally use this as the primary key, but GORM doesn't
+	// like a primary key value of 0
+	EpochId       uint64 `gorm:"uniqueIndex"`
+	StartSlot     uint64
+	Nonce         []byte
+	EraId         uint
+	SlotLength    uint
+	LengthInSlots uint
 }
 
-func (StakeDelegation) TableName() string {
-	return "stake_delegation"
+func (Epoch) TableName() string {
+	return "epoch"
 }

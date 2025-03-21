@@ -46,10 +46,10 @@ func TestInMemorySqliteMultipleTransaction(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %s", err)
 	}
-	if err := db.Metadata().AutoMigrate(&TestTable{}); err != nil {
+	if err := db.Metadata().DB().AutoMigrate(&TestTable{}); err != nil {
 		t.Fatalf("unexpected error: %s", err)
 	}
-	if result := db.Metadata().Create(&TestTable{}); result.Error != nil {
+	if result := db.Metadata().DB().Create(&TestTable{}); result.Error != nil {
 		t.Fatalf("unexpected error: %s", result.Error)
 	}
 	// The linter calls us on the lack of error checking, but it's a goroutine...

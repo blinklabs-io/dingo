@@ -22,8 +22,8 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite/models"
 	"github.com/blinklabs-io/dingo/event"
-	"github.com/blinklabs-io/dingo/state/models"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -305,16 +305,21 @@ func (ls *LedgerState) processGenesisBlock(
 			)
 			tmpNonce = genesisHashBytes
 		}
-		newEpoch := models.Epoch{
-			EpochId:       0,
-			EraId:         ls.currentEra.Id,
-			StartSlot:     0,
-			SlotLength:    epochSlotLength,
-			LengthInSlots: epochLength,
-			Nonce:         tmpNonce,
+		err = txn.DB().Metadata().SetEpoch(
+			0,
+			0,
+			tmpNonce,
+			ls.currentEra.Id,
+			epochSlotLength,
+			epochLength,
+			txn.Metadata(),
+		)
+		if err != nil {
+			return err
 		}
-		if result := txn.Metadata().Create(&newEpoch); result.Error != nil {
-			return result.Error
+		newEpoch, err := txn.DB().Metadata().GetEpochLatest(txn.Metadata())
+		if err != nil {
+			return err
 		}
 		ls.currentEpoch = newEpoch
 		ls.config.Logger.Debug(
@@ -380,7 +385,7 @@ func (ls *LedgerState) calculateEpochNonce(
 	).Num().Uint64()
 	stabilityWindowStartSlot := epochStartSlot - stabilityWindow
 	// Get last block before stability window
-	blockBeforeStabilityWindow, err := models.BlockBeforeSlotTxn(
+	blockBeforeStabilityWindow, err := database.BlockBeforeSlotTxn(
 		txn,
 		stabilityWindowStartSlot,
 	)
@@ -388,12 +393,12 @@ func (ls *LedgerState) calculateEpochNonce(
 		return nil, err
 	}
 	// Get last block in previous epoch
-	blockLastPrevEpoch, err := models.BlockBeforeSlotTxn(
+	blockLastPrevEpoch, err := database.BlockBeforeSlotTxn(
 		txn,
 		ls.currentEpoch.StartSlot,
 	)
 	if err != nil {
-		if errors.Is(err, models.ErrBlockNotFound) {
+		if errors.Is(err, database.ErrBlockNotFound) {
 			return blockBeforeStabilityWindow.Nonce, nil
 		}
 		return nil, err
@@ -433,16 +438,21 @@ func (ls *LedgerState) processEpochRollover(
 		if err != nil {
 			return err
 		}
-		newEpoch := models.Epoch{
-			EpochId:       ls.currentEpoch.EpochId + 1,
-			EraId:         uint(e.Block.Era().Id),
-			SlotLength:    epochSlotLength,
-			LengthInSlots: epochLength,
-			StartSlot:     epochStartSlot,
-			Nonce:         tmpNonce,
+		err = txn.DB().Metadata().SetEpoch(
+			epochStartSlot,
+			ls.currentEpoch.EpochId+1,
+			tmpNonce,
+			uint(e.Block.Era().Id),
+			epochSlotLength,
+			epochLength,
+			txn.Metadata(),
+		)
+		if err != nil {
+			return err
 		}
-		if result := txn.Metadata().Create(&newEpoch); result.Error != nil {
-			return result.Error
+		newEpoch, err := txn.DB().Metadata().GetEpochLatest(txn.Metadata())
+		if err != nil {
+			return err
 		}
 		ls.currentEpoch = newEpoch
 		ls.metrics.epochNum.Set(float64(newEpoch.EpochId))
@@ -507,7 +517,7 @@ func (ls *LedgerState) processBlockEvent(
 	if err != nil {
 		return err
 	}
-	tmpBlock := models.Block{
+	tmpBlock := database.Block{
 		Slot: e.Point.Slot,
 		Hash: e.Point.Hash,
 		// TODO: figure out something for Byron. this won't work, since the
@@ -567,14 +577,15 @@ func (ls *LedgerState) processBlockEvent(
 		// Protocol parameter updates
 		if updateEpoch, paramUpdates := tx.ProtocolParameterUpdates(); updateEpoch > 0 {
 			for genesisHash, update := range paramUpdates {
-				tmpUpdate := models.PParamUpdate{
-					AddedSlot:   e.Point.Slot,
-					Epoch:       updateEpoch,
-					GenesisHash: genesisHash.Bytes(),
-					Cbor:        update.Cbor(),
-				}
-				if result := txn.Metadata().Create(&tmpUpdate); result.Error != nil {
-					return result.Error
+				err := txn.DB().Metadata().SetPParamUpdate(
+					genesisHash.Bytes(),
+					update.Cbor(),
+					e.Point.Slot,
+					updateEpoch,
+					txn.Metadata(),
+				)
+				if err != nil {
+					return err
 				}
 			}
 		}

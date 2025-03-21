@@ -35,7 +35,10 @@ func (b *BaseDatabase) checkCommitTimestamp() error {
 	// Get value from metadata
 	metadataTimestamp, metadataErr := b.Metadata().GetCommitTimestamp()
 	if metadataErr != nil {
-		return fmt.Errorf("failed to get metadata timestamp from plugin: %w", metadataErr)
+		return fmt.Errorf(
+			"failed to get metadata timestamp from plugin: %w",
+			metadataErr,
+		)
 	}
 	// No timestamp in the database
 	if metadataTimestamp <= 0 {
@@ -44,7 +47,10 @@ func (b *BaseDatabase) checkCommitTimestamp() error {
 	// Get value from blob
 	blobTimestamp, blobErr := b.Blob().GetCommitTimestamp()
 	if blobErr != nil {
-		return fmt.Errorf("failed to get blob timestamp from plugin: %w", blobErr)
+		return fmt.Errorf(
+			"failed to get blob timestamp from plugin: %w",
+			blobErr,
+		)
 	}
 	// Compare values
 	if blobTimestamp != metadataTimestamp {

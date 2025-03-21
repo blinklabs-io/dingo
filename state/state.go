@@ -25,9 +25,9 @@ import (
 
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite/models"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/state/eras"
-	"github.com/blinklabs-io/dingo/state/models"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
@@ -152,12 +152,6 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 			}
 		}
 	}
-	// Create the table schemas
-	for _, model := range models.MigrateModels {
-		if err := ls.db.Metadata().AutoMigrate(model); err != nil {
-			return nil, err
-		}
-	}
 	// Setup event handlers
 	ls.config.EventBus.SubscribeFunc(
 		ChainsyncEventType,
@@ -186,12 +180,12 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 
 func (ls *LedgerState) recoverCommitTimestampConflict() error {
 	// Load current tip
-	tmpTip, err := models.TipGet(ls.db)
+	tmpTip, err := ls.db.Metadata().GetTip(nil)
 	if err != nil {
 		return err
 	}
 	// Try to load last n blocks and rollback to the last one we can load
-	recentBlocks, err := models.BlocksRecent(ls.db, 100)
+	recentBlocks, err := database.BlocksRecent(ls.db, 100)
 	if err != nil {
 		return err
 	}
@@ -239,7 +233,7 @@ func (ls *LedgerState) scheduleCleanupConsumedUtxos() {
 			tip := ls.Tip()
 			// Get UTxOs that are marked as deleted and older than our slot window
 			var tmpUtxos []models.Utxo
-			result := ls.db.Metadata().
+			result := ls.db.Metadata().DB().
 				Where("deleted_slot > 0 AND deleted_slot <= ?", tip.Point.Slot-cleanupConsumedUtxosSlotWindow).
 				Order("id DESC").
 				Find(&tmpUtxos)
@@ -251,40 +245,41 @@ func (ls *LedgerState) scheduleCleanupConsumedUtxos() {
 				)
 				return
 			}
+			utxos := []database.Utxo{}
+			for _, utxo := range utxos {
+				tmpUtxo := database.Utxo{
+					TxId:        utxo.TxId,
+					OutputIdx:   utxo.OutputIdx,
+					AddedSlot:   utxo.AddedSlot,
+					DeletedSlot: utxo.DeletedSlot,
+					PaymentKey:  utxo.PaymentKey,
+					StakingKey:  utxo.StakingKey,
+					Cbor:        utxo.Cbor,
+				}
+				utxos = append(utxos, tmpUtxo)
+			}
 			for {
 				ls.Lock()
 				// Perform updates in a transaction
-				batchDone := false
 				txn := ls.db.Transaction(true)
-				err := txn.Do(func(txn *database.Txn) error {
-					batchSize := min(1000, len(tmpUtxos))
-					if batchSize == 0 {
-						batchDone = true
-						return nil
-					}
-					// Delete the UTxOs
-					if err := models.UtxosDeleteTxn(txn, tmpUtxos[0:batchSize]); err != nil {
-						return fmt.Errorf(
-							"failed to remove consumed UTxO: %w",
-							err,
-						)
-					}
-					// Remove batch
-					tmpUtxos = slices.Delete(tmpUtxos, 0, batchSize)
-					return nil
-				})
-				ls.Unlock()
-				if err != nil {
+				batchSize := min(1000, len(utxos))
+				if batchSize == 0 {
+					ls.Unlock()
+					break
+				}
+				// Delete the UTxOs
+				if err := ls.db.(*database.BaseDatabase).UtxosDelete(utxos[0:batchSize], txn); err != nil {
 					ls.config.Logger.Error(
-						"failed to update utxos",
+						"failed to remove consumed UTxO",
 						"component", "ledger",
 						"error", err,
 					)
-					return
-				}
-				if batchDone {
+					ls.Unlock()
 					break
 				}
+				// Remove batch
+				utxos = slices.Delete(utxos, 0, batchSize)
+				ls.Unlock()
 			}
 		},
 	)
@@ -295,7 +290,7 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 	txn := ls.db.Transaction(true)
 	err := txn.Do(func(txn *database.Txn) error {
 		// Remove rolled-back blocks in reverse order
-		tmpBlocks, err := models.BlocksAfterSlotTxn(txn, point.Slot)
+		tmpBlocks, err := database.BlocksAfterSlotTxn(txn, point.Slot)
 		if err != nil {
 			return fmt.Errorf("query blocks: %w", err)
 		}
@@ -306,6 +301,9 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 		}
 		// Delete rolled-back UTxOs
 		var tmpUtxos []models.Utxo
+		if err := txn.Metadata().AutoMigrate(&models.Utxo{}); err != nil {
+			return err
+		}
 		result := txn.Metadata().
 			Where("added_slot > ?", point.Slot).
 			Order("id DESC").
@@ -314,7 +312,20 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 			return fmt.Errorf("remove rolled-back UTxOs: %w", result.Error)
 		}
 		if len(tmpUtxos) > 0 {
-			if err := models.UtxosDeleteTxn(txn, tmpUtxos); err != nil {
+			utxos := []database.Utxo{}
+			for _, utxo := range tmpUtxos {
+				tmpUtxo := database.Utxo{
+					TxId:        utxo.TxId,
+					OutputIdx:   utxo.OutputIdx,
+					AddedSlot:   utxo.AddedSlot,
+					DeletedSlot: utxo.DeletedSlot,
+					PaymentKey:  utxo.PaymentKey,
+					StakingKey:  utxo.StakingKey,
+					Cbor:        utxo.Cbor,
+				}
+				utxos = append(utxos, tmpUtxo)
+			}
+			if err := ls.db.(*database.BaseDatabase).UtxosDelete(utxos, txn); err != nil {
 				return fmt.Errorf("remove rolled-back UTxOs: %w", err)
 			}
 		}
@@ -330,7 +341,7 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 			)
 		}
 		// Update tip
-		recentBlocks, err := models.BlocksRecentTxn(txn, 1)
+		recentBlocks, err := database.BlocksRecentTxn(txn, 1)
 		if err != nil {
 			return err
 		}
@@ -342,7 +353,7 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 				),
 				BlockNumber: recentBlocks[0].Number,
 			}
-			if err := models.TipUpdateTxn(txn, ls.currentTip); err != nil {
+			if err := ls.db.Metadata().SetTip(ls.currentTip, txn.Metadata()); err != nil {
 				return err
 			}
 		}
@@ -380,7 +391,7 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 func (ls *LedgerState) transitionToEra(
 	txn *database.Txn,
 	nextEraId uint,
-	startEpoch uint,
+	startEpoch uint64,
 	addedSlot uint64,
 ) error {
 	nextEra := eras.Eras[nextEraId]
@@ -405,14 +416,15 @@ func (ls *LedgerState) transitionToEra(
 		if err != nil {
 			return err
 		}
-		tmpPParams := models.PParams{
-			AddedSlot: addedSlot,
-			Epoch:     startEpoch,
-			EraId:     nextEraId,
-			Cbor:      pparamsCbor,
-		}
-		if result := txn.Metadata().Create(&tmpPParams); result.Error != nil {
-			return result.Error
+		err = txn.DB().Metadata().SetPParams(
+			pparamsCbor,
+			addedSlot,
+			startEpoch,
+			nextEraId,
+			txn.Metadata(),
+		)
+		if err != nil {
+			return err
 		}
 	}
 	ls.currentEra = nextEra
@@ -421,17 +433,15 @@ func (ls *LedgerState) transitionToEra(
 
 func (ls *LedgerState) applyPParamUpdates(
 	txn *database.Txn,
-	currentEpoch uint,
+	currentEpoch uint64,
 	addedSlot uint64,
 ) error {
 	// Check for pparam updates that apply at the end of the epoch
-	var pparamUpdates []models.PParamUpdate
-	result := txn.Metadata().
-		Where("epoch = ?", currentEpoch).
-		Order("id DESC").
-		Find(&pparamUpdates)
-	if result.Error != nil {
-		return result.Error
+	pparamUpdates, err := txn.DB().
+		Metadata().
+		GetPParamUpdates(currentEpoch, txn.Metadata())
+	if err != nil {
+		return err
 	}
 	if len(pparamUpdates) > 0 {
 		// We only want the latest for the epoch
@@ -458,19 +468,20 @@ func (ls *LedgerState) applyPParamUpdates(
 					"pparams",
 					fmt.Sprintf("%#v", ls.currentPParams),
 				)
-				// Write pparams update to DB
 				pparamsCbor, err := cbor.Encode(&ls.currentPParams)
 				if err != nil {
 					return err
 				}
-				tmpPParams := models.PParams{
-					AddedSlot: addedSlot,
-					Epoch:     currentEpoch + 1,
-					EraId:     ls.currentEra.Id,
-					Cbor:      pparamsCbor,
-				}
-				if result := txn.Metadata().Create(&tmpPParams); result.Error != nil {
-					return result.Error
+				// Write pparams update to DB
+				err = txn.DB().Metadata().SetPParams(
+					pparamsCbor,
+					addedSlot,
+					uint64(currentEpoch+1),
+					ls.currentEra.Id,
+					txn.Metadata(),
+				)
+				if err != nil {
+					return err
 				}
 			}
 		}
@@ -480,7 +491,7 @@ func (ls *LedgerState) applyPParamUpdates(
 
 func (ls *LedgerState) addUtxo(txn *database.Txn, utxo models.Utxo) error {
 	// Add UTxO to blob DB
-	key := models.UtxoBlobKey(utxo.TxId, utxo.OutputIdx)
+	key := database.UtxoBlobKey(utxo.TxId, utxo.OutputIdx)
 	err := txn.Blob().Set(key, utxo.Cbor)
 	if err != nil {
 		return err
@@ -500,7 +511,28 @@ func (ls *LedgerState) consumeUtxo(
 	slot uint64,
 ) error {
 	// Find UTxO
-	utxo, err := models.UtxoByRefTxn(txn, utxoId.Id().Bytes(), utxoId.Index())
+	var utxo database.Utxo
+	var err error
+	switch txn.DB().(type) {
+	case *database.BaseDatabase:
+		utxo, err = txn.DB().(*database.BaseDatabase).UtxoByRef(
+			utxoId.Id().Bytes(),
+			utxoId.Index(),
+			txn,
+		)
+	case *database.InMemoryDatabase:
+		utxo, err = txn.DB().(*database.InMemoryDatabase).UtxoByRef(
+			utxoId.Id().Bytes(),
+			utxoId.Index(),
+			txn,
+		)
+	case *database.PersistentDatabase:
+		utxo, err = txn.DB().(*database.PersistentDatabase).UtxoByRef(
+			utxoId.Id().Bytes(),
+			utxoId.Index(),
+			txn,
+		)
+	}
 	if err != nil {
 		// TODO: make this configurable? (#396)
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -516,9 +548,9 @@ func (ls *LedgerState) consumeUtxo(
 	return nil
 }
 
-func (ls *LedgerState) addBlock(txn *database.Txn, block models.Block) error {
+func (ls *LedgerState) addBlock(txn *database.Txn, block database.Block) error {
 	// Add block to database
-	if err := models.BlockCreateTxn(txn, block); err != nil {
+	if err := database.BlockCreateTxn(txn, block); err != nil {
 		return err
 	}
 	// Update tip
@@ -526,7 +558,7 @@ func (ls *LedgerState) addBlock(txn *database.Txn, block models.Block) error {
 		Point:       ocommon.NewPoint(block.Slot, block.Hash),
 		BlockNumber: block.Number,
 	}
-	if err := models.TipUpdateTxn(txn, ls.currentTip); err != nil {
+	if err := ls.db.Metadata().SetTip(ls.currentTip, txn.Metadata()); err != nil {
 		return err
 	}
 	// Update tip block nonce
@@ -540,23 +572,24 @@ func (ls *LedgerState) addBlock(txn *database.Txn, block models.Block) error {
 
 func (ls *LedgerState) removeBlock(
 	txn *database.Txn,
-	block models.Block,
+	block database.Block,
 ) error {
-	if err := models.BlockDeleteTxn(txn, block); err != nil {
+	if err := database.BlockDeleteTxn(txn, block); err != nil {
 		return err
 	}
 	return nil
 }
 
 func (ls *LedgerState) loadPParams() error {
-	var tmpPParams models.PParams
-	result := ls.db.Metadata().Order("id DESC").First(&tmpPParams)
-	if result.Error != nil {
-		if errors.Is(result.Error, gorm.ErrRecordNotFound) {
-			return nil
-		}
-		return result.Error
+	pparams, err := ls.db.Metadata().GetPParams(ls.currentEpoch.EpochId, nil)
+	if err != nil {
+		return err
 	}
+	if len(pparams) == 0 {
+		return nil
+	}
+	// pparams is ordered, so grab the first
+	tmpPParams := pparams[0]
 	currentPParams, err := ls.currentEra.DecodePParamsFunc(
 		tmpPParams.Cbor,
 	)
@@ -568,11 +601,9 @@ func (ls *LedgerState) loadPParams() error {
 }
 
 func (ls *LedgerState) loadEpoch() error {
-	tmpEpoch, err := models.EpochLatest(ls.db)
+	tmpEpoch, err := ls.db.Metadata().GetEpochLatest(nil)
 	if err != nil {
-		if !errors.Is(err, gorm.ErrRecordNotFound) {
-			return err
-		}
+		return err
 	}
 	ls.currentEpoch = tmpEpoch
 	ls.currentEra = eras.Eras[tmpEpoch.EraId]
@@ -582,14 +613,14 @@ func (ls *LedgerState) loadEpoch() error {
 }
 
 func (ls *LedgerState) loadTip() error {
-	tmpTip, err := models.TipGet(ls.db)
+	tmpTip, err := ls.db.Metadata().GetTip(nil)
 	if err != nil {
 		return err
 	}
 	ls.currentTip = tmpTip
 	// Load tip block and set cached block nonce
 	if ls.currentTip.Point.Slot > 0 {
-		tipBlock, err := models.BlockByPoint(ls.db, ls.currentTip.Point)
+		tipBlock, err := database.BlockByPoint(ls.db, ls.currentTip.Point)
 		if err != nil {
 			return err
 		}
@@ -604,8 +635,8 @@ func (ls *LedgerState) loadTip() error {
 	return nil
 }
 
-func (ls *LedgerState) GetBlock(point ocommon.Point) (*models.Block, error) {
-	ret, err := models.BlockByPoint(ls.db, point)
+func (ls *LedgerState) GetBlock(point ocommon.Point) (*database.Block, error) {
+	ret, err := database.BlockByPoint(ls.db, point)
 	if err != nil {
 		return nil, err
 	}
@@ -615,7 +646,7 @@ func (ls *LedgerState) GetBlock(point ocommon.Point) (*models.Block, error) {
 // RecentChainPoints returns the requested count of recent chain points in descending order. This is used mostly
 // for building a set of intersect points when acting as a chainsync client
 func (ls *LedgerState) RecentChainPoints(count int) ([]ocommon.Point, error) {
-	tmpBlocks, err := models.BlocksRecent(ls.db, count)
+	tmpBlocks, err := database.BlocksRecent(ls.db, count)
 	if err != nil {
 		return nil, err
 	}
@@ -653,9 +684,9 @@ func (ls *LedgerState) GetIntersectPoint(
 				continue
 			}
 			// Lookup block in metadata DB
-			tmpBlock, err := models.BlockByPoint(ls.db, point)
+			tmpBlock, err := database.BlockByPoint(ls.db, point)
 			if err != nil {
-				if errors.Is(err, models.ErrBlockNotFound) {
+				if errors.Is(err, database.ErrBlockNotFound) {
 					continue
 				}
 				return err
@@ -698,15 +729,32 @@ func (ls *LedgerState) GetCurrentPParams() lcommon.ProtocolParameters {
 func (ls *LedgerState) UtxoByRef(
 	txId []byte,
 	outputIdx uint32,
-) (models.Utxo, error) {
-	return models.UtxoByRef(ls.db, txId, outputIdx)
+) (database.Utxo, error) {
+	return database.UtxoByRef(ls.db, txId, outputIdx)
 }
 
 // UtxosByAddress returns all UTxOs that belong to the specified address
 func (ls *LedgerState) UtxosByAddress(
 	addr ledger.Address,
-) ([]models.Utxo, error) {
-	return models.UtxosByAddress(ls.db, addr)
+) ([]database.Utxo, error) {
+	ret := []database.Utxo{}
+	utxos, err := database.UtxosByAddress(ls.db, addr)
+	if err != nil {
+		return ret, err
+	}
+	for _, utxo := range utxos {
+		tmpUtxo := database.Utxo{
+			TxId:        utxo.TxId,
+			OutputIdx:   utxo.OutputIdx,
+			AddedSlot:   utxo.AddedSlot,
+			DeletedSlot: utxo.DeletedSlot,
+			PaymentKey:  utxo.PaymentKey,
+			StakingKey:  utxo.StakingKey,
+			Cbor:        utxo.Cbor,
+		}
+		ret = append(ret, tmpUtxo)
+	}
+	return ret, nil
 }
 
 // ValidateTx runs ledger validation on the provided transaction
