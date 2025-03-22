@@ -23,6 +23,7 @@ import (
 )
 
 type Utxo struct {
+	ID          uint
 	TxId        []byte
 	OutputIdx   uint32
 	AddedSlot   uint64
@@ -73,6 +74,7 @@ func (d *BaseDatabase) UtxoByRef(
 	if err != nil {
 		return tmpUtxo, err
 	}
+	tmpUtxo.ID = utxo.ID
 	tmpUtxo.TxId = utxo.TxId
 	tmpUtxo.OutputIdx = utxo.OutputIdx
 	tmpUtxo.AddedSlot = utxo.AddedSlot
@@ -106,6 +108,7 @@ func (d *BaseDatabase) UtxosByAddress(
 	}
 	for _, utxo := range utxos {
 		tmpUtxo := Utxo{
+			ID:          utxo.ID,
 			TxId:        utxo.TxId,
 			OutputIdx:   utxo.OutputIdx,
 			AddedSlot:   utxo.AddedSlot,

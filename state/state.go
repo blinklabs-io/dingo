@@ -248,6 +248,7 @@ func (ls *LedgerState) scheduleCleanupConsumedUtxos() {
 			utxos := []database.Utxo{}
 			for _, utxo := range utxos {
 				tmpUtxo := database.Utxo{
+					ID:          utxo.ID,
 					TxId:        utxo.TxId,
 					OutputIdx:   utxo.OutputIdx,
 					AddedSlot:   utxo.AddedSlot,
@@ -315,6 +316,7 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 			utxos := []database.Utxo{}
 			for _, utxo := range tmpUtxos {
 				tmpUtxo := database.Utxo{
+					ID:          utxo.ID,
 					TxId:        utxo.TxId,
 					OutputIdx:   utxo.OutputIdx,
 					AddedSlot:   utxo.AddedSlot,
@@ -744,6 +746,7 @@ func (ls *LedgerState) UtxosByAddress(
 	}
 	for _, utxo := range utxos {
 		tmpUtxo := database.Utxo{
+			ID:          utxo.ID,
 			TxId:        utxo.TxId,
 			OutputIdx:   utxo.OutputIdx,
 			AddedSlot:   utxo.AddedSlot,
