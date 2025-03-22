@@ -30,10 +30,6 @@ func (d *MetadataStoreSqlite) GetUtxo(
 ) (models.Utxo, error) {
 	ret := models.Utxo{}
 	tmpUtxo := models.Utxo{}
-	// Create table if it doesn't exist
-	if err := d.DB().AutoMigrate(&models.Utxo{}); err != nil {
-		return ret, err
-	}
 	if txn != nil {
 		result := txn.Where("deleted_slot = 0").
 			First(&tmpUtxo, "tx_id = ? AND output_idx = ?", txId, idx)

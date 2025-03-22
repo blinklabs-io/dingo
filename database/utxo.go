@@ -23,14 +23,18 @@ import (
 )
 
 type Utxo struct {
-	ID          uint
-	TxId        []byte
-	OutputIdx   uint32
-	AddedSlot   uint64
-	DeletedSlot uint64
-	PaymentKey  []byte
-	StakingKey  []byte
-	Cbor        []byte
+	ID          uint   `gorm:"primarykey"`
+	TxId        []byte `gorm:"index:tx_id_output_idx"`
+	OutputIdx   uint32 `gorm:"index:tx_id_output_idx"`
+	AddedSlot   uint64 `gorm:"index"`
+	DeletedSlot uint64 `gorm:"index"`
+	PaymentKey  []byte `gorm:"index"`
+	StakingKey  []byte `gorm:"index"`
+	Cbor        []byte `gorm:"-"` // This is not represented in the metadata DB
+}
+
+func (u *Utxo) TableName() string {
+	return "utxo"
 }
 
 func (u *Utxo) Decode() (ledger.TransactionOutput, error) {

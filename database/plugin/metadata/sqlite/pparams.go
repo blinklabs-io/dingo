@@ -25,17 +25,13 @@ func (d *MetadataStoreSqlite) GetPParams(
 	txn *gorm.DB,
 ) ([]models.PParams, error) {
 	ret := []models.PParams{}
-	// Create table if it doesn't exist
-	if err := d.DB().AutoMigrate(&models.PParams{}); err != nil {
-		return ret, err
-	}
 	if txn != nil {
-		result := txn.Where("epoch= ?", epoch).Order("id DESC").Find(&ret)
+		result := txn.Where("epoch = ?", epoch).Order("id DESC").Find(&ret)
 		if result.Error != nil {
 			return ret, result.Error
 		}
 	} else {
-		result := d.DB().Where("epoch= ?", epoch).Order("id DESC").Find(&ret)
+		result := d.DB().Where("epoch = ?", epoch).Order("id DESC").Find(&ret)
 		if result.Error != nil {
 			return ret, result.Error
 		}
@@ -49,17 +45,13 @@ func (d *MetadataStoreSqlite) GetPParamUpdates(
 	txn *gorm.DB,
 ) ([]models.PParamUpdate, error) {
 	ret := []models.PParamUpdate{}
-	// Create table if it doesn't exist
-	if err := d.DB().AutoMigrate(&models.PParamUpdate{}); err != nil {
-		return ret, err
-	}
 	if txn != nil {
-		result := txn.Where("epoch= ?", epoch).Order("id DESC").Find(&ret)
+		result := txn.Where("epoch = ?", epoch).Order("id DESC").Find(&ret)
 		if result.Error != nil {
 			return ret, result.Error
 		}
 	} else {
-		result := d.DB().Where("epoch= ?", epoch).Order("id DESC").Find(&ret)
+		result := d.DB().Where("epoch = ?", epoch).Order("id DESC").Find(&ret)
 		if result.Error != nil {
 			return ret, result.Error
 		}
@@ -74,10 +66,6 @@ func (d *MetadataStoreSqlite) SetPParams(
 	eraId uint,
 	txn *gorm.DB,
 ) error {
-	// Create table if it doesn't exist
-	if err := d.DB().AutoMigrate(&models.PParams{}); err != nil {
-		return err
-	}
 	tmpItem := models.PParams{
 		Cbor:      params,
 		AddedSlot: slot,
@@ -102,10 +90,6 @@ func (d *MetadataStoreSqlite) SetPParamUpdate(
 	slot, epoch uint64,
 	txn *gorm.DB,
 ) error {
-	// Create table if it doesn't exist
-	if err := d.DB().AutoMigrate(&models.PParamUpdate{}); err != nil {
-		return err
-	}
 	tmpItem := models.PParamUpdate{
 		GenesisHash: genesis,
 		Cbor:        update,

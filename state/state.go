@@ -302,9 +302,6 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 		}
 		// Delete rolled-back UTxOs
 		var tmpUtxos []models.Utxo
-		if err := txn.Metadata().AutoMigrate(&models.Utxo{}); err != nil {
-			return err
-		}
 		result := txn.Metadata().
 			Where("added_slot > ?", point.Slot).
 			Order("id DESC").
