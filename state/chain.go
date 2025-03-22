@@ -19,7 +19,6 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
-	"gorm.io/gorm"
 )
 
 type ChainIterator struct {
@@ -47,7 +46,7 @@ func newChainIterator(
 	if startPoint.Slot > 0 || len(startPoint.Hash) > 0 {
 		tmpBlock, err := database.BlockByPoint(ls.db, startPoint)
 		if err != nil {
-			if errors.Is(err, gorm.ErrRecordNotFound) {
+			if errors.Is(err, database.ErrBlockNotFound) {
 				return nil, ErrBlockNotFound
 			}
 			return nil, err
@@ -75,7 +74,7 @@ func (ci *ChainIterator) Next(blocking bool) (*ChainIteratorResult, error) {
 		return ret, nil
 	}
 	// Return any actual error
-	if !errors.Is(err, gorm.ErrRecordNotFound) {
+	if !errors.Is(err, database.ErrBlockNotFound) {
 		ci.ls.RUnlock()
 		return ret, err
 	}
