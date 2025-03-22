@@ -127,6 +127,7 @@ func (n *Node) Run() error {
 			EventBus:    n.eventBus,
 			LedgerState: n.ledgerState,
 			Mempool:     n.mempool,
+			Port:        n.config.utxorpcPort,
 		},
 	)
 	if err := n.utxorpc.Start(); err != nil {
