@@ -39,6 +39,9 @@ func NewUnixConn(conn net.Conn) (*UnixConn, error) {
 		return nil, fmt.Errorf("failed to get raw connection: %w", err)
 	}
 	// Retrieve socket file descriptor
+	if rawConn == nil {
+		return nil, errors.New("raw connection returned empty")
+	}
 	err = rawConn.Control(
 		func(fd uintptr) {
 			fdNum = int(fd)
