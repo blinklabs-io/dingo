@@ -154,6 +154,9 @@ func BlockByNumber(db Database, blockNumber uint64) (Block, error) {
 	err := txn.Do(func(txn *Txn) error {
 		var err error
 		ret, err = BlockByNumberTxn(txn, blockNumber)
+		if errors.Is(err, badger.ErrKeyNotFound) {
+			return ErrBlockNotFound
+		}
 		return err
 	})
 	return ret, err
