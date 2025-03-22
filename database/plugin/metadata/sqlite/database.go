@@ -24,6 +24,7 @@ import (
 	"path/filepath"
 
 	"github.com/blinklabs-io/dingo/database/plugin"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite/models"
 	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
 	gormlogger "gorm.io/gorm/logger"
@@ -47,7 +48,7 @@ type MetadataStoreSqlite struct {
 	logger  *slog.Logger
 }
 
-// New creates a new in-memory database
+// New creates a new database
 func New(
 	dataDir string,
 	logger *slog.Logger,
@@ -103,6 +104,13 @@ func New(
 	if err := db.init(); err != nil {
 		// MetadataStoreSqlite is available for recovery, so return it with error
 		return db, err
+	}
+	// Create table schemas
+	for _, model := range models.MigrateModels {
+		db.logger.Debug(fmt.Sprintf("creating table: %#v", model))
+		if err := db.db.AutoMigrate(model); err != nil {
+			return db, err
+		}
 	}
 	return db, nil
 }

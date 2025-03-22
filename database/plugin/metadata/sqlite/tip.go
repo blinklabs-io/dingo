@@ -34,10 +34,6 @@ func (d *MetadataStoreSqlite) GetTip(
 ) (ocommon.Tip, error) {
 	ret := ocommon.Tip{}
 	tmpTip := models.Tip{}
-	// Create table if it doesn't exist
-	if err := d.DB().AutoMigrate(&models.Tip{}); err != nil {
-		return ret, err
-	}
 	if txn != nil {
 		result := txn.Where("id = ?", tipEntryId).First(&tmpTip)
 		if result.Error != nil {
@@ -68,10 +64,6 @@ func (d *MetadataStoreSqlite) SetTip(
 	tip ochainsync.Tip,
 	txn *gorm.DB,
 ) error {
-	// Create table if it doesn't exist
-	if err := d.DB().AutoMigrate(&models.Tip{}); err != nil {
-		return err
-	}
 	tmpItem := models.Tip{
 		ID:          tipEntryId,
 		Slot:        tip.Point.Slot,

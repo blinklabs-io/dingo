@@ -28,10 +28,6 @@ func (d *MetadataStoreSqlite) GetPoolRegistrations(
 	txn *gorm.DB,
 ) ([]models.PoolRegistration, error) {
 	ret := []models.PoolRegistration{}
-	// Create table if it doesn't exist
-	if err := d.DB().AutoMigrate(&models.PoolRegistration{}); err != nil {
-		return ret, err
-	}
 	if txn != nil {
 		result := txn.Where("pool_key_hash = ?", pkh).
 			Order("id DESC").
@@ -54,10 +50,6 @@ func (d *MetadataStoreSqlite) GetStakeRegistrations(
 	txn *gorm.DB,
 ) ([]models.StakeRegistration, error) {
 	ret := []models.StakeRegistration{}
-	// Create table if it doesn't exist
-	if err := d.DB().AutoMigrate(&models.StakeRegistration{}); err != nil {
-		return ret, err
-	}
 	if txn != nil {
 		result := txn.Where("staking_key= ?", cred).Find(&ret)
 		if result.Error != nil {
@@ -82,17 +74,6 @@ func (d *MetadataStoreSqlite) SetPoolRegistration(
 	metadata *lcommon.PoolMetadata,
 	txn *gorm.DB,
 ) error {
-	tables := []any{
-		&models.PoolRegistration{},
-		&models.PoolRegistrationOwner{},
-		&models.PoolRegistrationRelay{},
-	}
-	for _, table := range tables {
-		// Create table if it doesn't exist
-		if err := d.DB().AutoMigrate(table); err != nil {
-			return err
-		}
-	}
 	tmpItem := models.PoolRegistration{
 		PoolKeyHash:   pkh,
 		VrfKeyHash:    vrf,
@@ -143,10 +124,6 @@ func (d *MetadataStoreSqlite) SetPoolRetirement(
 	slot, epoch uint64,
 	txn *gorm.DB,
 ) error {
-	// Create table if it doesn't exist
-	if err := d.DB().AutoMigrate(&models.PoolRetirement{}); err != nil {
-		return err
-	}
 	tmpItem := models.PoolRetirement{
 		PoolKeyHash: pkh,
 		Epoch:       epoch,
@@ -170,10 +147,6 @@ func (d *MetadataStoreSqlite) SetStakeDelegation(
 	slot uint64,
 	txn *gorm.DB,
 ) error {
-	// Create table if it doesn't exist
-	if err := d.DB().AutoMigrate(&models.StakeDelegation{}); err != nil {
-		return err
-	}
 	tmpItem := models.StakeDelegation{
 		StakingKey:  cred,
 		PoolKeyHash: pkh,
@@ -197,10 +170,6 @@ func (d *MetadataStoreSqlite) SetStakeDeregistration(
 	slot uint64,
 	txn *gorm.DB,
 ) error {
-	// Create table if it doesn't exist
-	if err := d.DB().AutoMigrate(&models.StakeDeregistration{}); err != nil {
-		return err
-	}
 	tmpItem := models.StakeDeregistration{
 		StakingKey: cred,
 		AddedSlot:  slot,
@@ -223,10 +192,6 @@ func (d *MetadataStoreSqlite) SetStakeRegistration(
 	slot, deposit uint64,
 	txn *gorm.DB,
 ) error {
-	// Create table if it doesn't exist
-	if err := d.DB().AutoMigrate(&models.StakeRegistration{}); err != nil {
-		return err
-	}
 	tmpItem := models.StakeRegistration{
 		StakingKey:    cred,
 		AddedSlot:     slot,

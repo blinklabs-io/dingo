@@ -26,10 +26,6 @@ func (d *MetadataStoreSqlite) GetEpochLatest(
 	txn *gorm.DB,
 ) (models.Epoch, error) {
 	ret := models.Epoch{}
-	// Create table if it doesn't exist
-	if err := d.DB().AutoMigrate(&models.Epoch{}); err != nil {
-		return ret, err
-	}
 	if txn != nil {
 		result := txn.Order("epoch_id DESC").First(&ret)
 		if result.Error != nil {
@@ -55,10 +51,6 @@ func (d *MetadataStoreSqlite) SetEpoch(
 	era, slotLength, lengthInSlots uint,
 	txn *gorm.DB,
 ) error {
-	// Create table if it doesn't exist
-	if err := d.DB().AutoMigrate(&models.Epoch{}); err != nil {
-		return err
-	}
 	tmpItem := models.Epoch{
 		EpochId:       epoch,
 		StartSlot:     slot,
