@@ -38,6 +38,12 @@ type MetadataStore interface {
 		lcommon.PoolKeyHash,
 		*gorm.DB,
 	) ([]lcommon.PoolRegistrationCertificate, error)
+	GetStakeRegistrations(
+		[]byte, // stakeKey
+		*gorm.DB,
+	) ([]lcommon.StakeRegistrationCertificate, error)
+	GetTip(*gorm.DB) (ochainsync.Tip, error)
+
 	GetPParams(
 		uint64, // epoch
 		*gorm.DB,
@@ -46,11 +52,6 @@ type MetadataStore interface {
 		uint64, // epoch
 		*gorm.DB,
 	) ([]models.PParamUpdate, error)
-	GetStakeRegistrations(
-		[]byte, // stakeKey
-		*gorm.DB,
-	) ([]lcommon.StakeRegistrationCertificate, error)
-	GetTip(*gorm.DB) (ochainsync.Tip, error)
 	GetUtxo(
 		[]byte, // txId
 		uint32, // idx
@@ -114,6 +115,7 @@ type MetadataStore interface {
 
 	// Helpers
 	GetEpochLatest(*gorm.DB) (models.Epoch, error)
+	GetEpochsByEra(uint, *gorm.DB) ([]models.Epoch, error)
 	GetUtxosByAddress(ledger.Address, *gorm.DB) ([]models.Utxo, error)
 	DeleteUtxo(any, *gorm.DB) error
 	DeleteUtxos([]any, *gorm.DB) error
