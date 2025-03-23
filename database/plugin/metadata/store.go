@@ -16,7 +16,6 @@ package metadata
 
 import (
 	"log/slog"
-	"math/big"
 
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite/models"
@@ -70,22 +69,14 @@ type MetadataStore interface {
 		*gorm.DB,
 	) error
 	SetPoolRegistration(
-		[]byte, // pkh
-		[]byte, // vrf
-		uint64, // pledge
-		uint64, // cost
+		*lcommon.PoolRegistrationCertificate,
 		uint64, // slot
 		uint64, // deposit
-		*big.Rat, // margin
-		[]lcommon.AddrKeyHash, // owners
-		[]lcommon.PoolRelay, // relays
-		*lcommon.PoolMetadata, // metadata
 		*gorm.DB,
 	) error
 	SetPoolRetirement(
-		[]byte, // pkh
+		*lcommon.PoolRetirementCertificate,
 		uint64, // slot
-		uint64, // epoch
 		*gorm.DB,
 	) error
 	SetPParams(
@@ -103,18 +94,17 @@ type MetadataStore interface {
 		*gorm.DB,
 	) error
 	SetStakeDelegation(
-		[]byte, // stakeKey
-		[]byte, // pkh
+		*lcommon.StakeDelegationCertificate,
 		uint64, // slot
 		*gorm.DB,
 	) error
 	SetStakeDeregistration(
-		[]byte, // stakeKey
+		*lcommon.StakeDeregistrationCertificate,
 		uint64, // slot
 		*gorm.DB,
 	) error
 	SetStakeRegistration(
-		[]byte, // stakeKey
+		*lcommon.StakeRegistrationCertificate,
 		uint64, // slot
 		uint64, // deposit
 		*gorm.DB,

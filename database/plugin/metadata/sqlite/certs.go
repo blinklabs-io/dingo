@@ -15,8 +15,6 @@
 package sqlite
 
 import (
-	"math/big"
-
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite/models"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"gorm.io/gorm"
@@ -66,34 +64,30 @@ func (d *MetadataStoreSqlite) GetStakeRegistrations(
 
 // SetPoolRegistration saves a pool registration certificate
 func (d *MetadataStoreSqlite) SetPoolRegistration(
-	pkh, vrf []byte,
-	pledge, cost, slot, deposit uint64,
-	margin *big.Rat,
-	owners []lcommon.AddrKeyHash,
-	relays []lcommon.PoolRelay,
-	metadata *lcommon.PoolMetadata,
+	cert *lcommon.PoolRegistrationCertificate,
+	slot, deposit uint64,
 	txn *gorm.DB,
 ) error {
 	tmpItem := models.PoolRegistration{
-		PoolKeyHash:   pkh,
-		VrfKeyHash:    vrf,
-		Pledge:        models.Uint64(pledge),
-		Cost:          models.Uint64(cost),
-		Margin:        &models.Rat{Rat: margin},
+		PoolKeyHash:   cert.Operator[:],
+		VrfKeyHash:    cert.VrfKeyHash[:],
+		Pledge:        models.Uint64(cert.Pledge),
+		Cost:          models.Uint64(cert.Cost),
+		Margin:        &models.Rat{Rat: cert.Margin.Rat},
 		AddedSlot:     slot,
 		DepositAmount: deposit,
 	}
-	if metadata != nil {
-		tmpItem.MetadataUrl = metadata.Url
-		tmpItem.MetadataHash = metadata.Hash[:]
+	if cert.PoolMetadata != nil {
+		tmpItem.MetadataUrl = cert.PoolMetadata.Url
+		tmpItem.MetadataHash = cert.PoolMetadata.Hash[:]
 	}
-	for _, owner := range owners {
+	for _, owner := range cert.PoolOwners {
 		tmpItem.Owners = append(
 			tmpItem.Owners,
 			models.PoolRegistrationOwner{KeyHash: owner[:]},
 		)
 	}
-	for _, relay := range relays {
+	for _, relay := range cert.Relays {
 		tmpRelay := models.PoolRegistrationRelay{
 			Ipv4: relay.Ipv4,
 			Ipv6: relay.Ipv6,
@@ -120,13 +114,13 @@ func (d *MetadataStoreSqlite) SetPoolRegistration(
 
 // SetPoolRetirement saves a pool retirement certificate
 func (d *MetadataStoreSqlite) SetPoolRetirement(
-	pkh []byte,
-	slot, epoch uint64,
+	cert *lcommon.PoolRetirementCertificate,
+	slot uint64,
 	txn *gorm.DB,
 ) error {
 	tmpItem := models.PoolRetirement{
-		PoolKeyHash: pkh,
-		Epoch:       epoch,
+		PoolKeyHash: cert.PoolKeyHash[:],
+		Epoch:       cert.Epoch,
 		AddedSlot:   slot,
 	}
 	if txn != nil {
@@ -143,13 +137,13 @@ func (d *MetadataStoreSqlite) SetPoolRetirement(
 
 // SetStakeDelegation saves a stake delegation certificate
 func (d *MetadataStoreSqlite) SetStakeDelegation(
-	cred, pkh []byte,
+	cert *lcommon.StakeDelegationCertificate,
 	slot uint64,
 	txn *gorm.DB,
 ) error {
 	tmpItem := models.StakeDelegation{
-		StakingKey:  cred,
-		PoolKeyHash: pkh,
+		StakingKey:  cert.StakeCredential.Credential,
+		PoolKeyHash: cert.PoolKeyHash[:],
 		AddedSlot:   slot,
 	}
 	if txn != nil {
@@ -166,12 +160,12 @@ func (d *MetadataStoreSqlite) SetStakeDelegation(
 
 // SetStakeDeregistration saves a stake deregistration certificate
 func (d *MetadataStoreSqlite) SetStakeDeregistration(
-	cred []byte,
+	cert *lcommon.StakeDeregistrationCertificate,
 	slot uint64,
 	txn *gorm.DB,
 ) error {
 	tmpItem := models.StakeDeregistration{
-		StakingKey: cred,
+		StakingKey: cert.StakeDeregistration.Credential,
 		AddedSlot:  slot,
 	}
 	if txn != nil {
@@ -188,12 +182,12 @@ func (d *MetadataStoreSqlite) SetStakeDeregistration(
 
 // SetStakeRegistration saves a stake registration certificate
 func (d *MetadataStoreSqlite) SetStakeRegistration(
-	cred []byte,
+	cert *lcommon.StakeRegistrationCertificate,
 	slot, deposit uint64,
 	txn *gorm.DB,
 ) error {
 	tmpItem := models.StakeRegistration{
-		StakingKey:    cred,
+		StakingKey:    cert.StakeRegistration.Credential,
 		AddedSlot:     slot,
 		DepositAmount: deposit,
 	}
