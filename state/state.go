@@ -148,7 +148,7 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 
 func (ls *LedgerState) recoverCommitTimestampConflict() error {
 	// Load current tip
-	tmpTip, err := ls.db.Metadata().GetTip(nil)
+	tmpTip, err := ls.db.GetTip(nil)
 	if err != nil {
 		return err
 	}
@@ -563,7 +563,7 @@ func (ls *LedgerState) loadEpoch() error {
 }
 
 func (ls *LedgerState) loadTip() error {
-	tmpTip, err := ls.db.Metadata().GetTip(nil)
+	tmpTip, err := ls.db.GetTip(nil)
 	if err != nil {
 		return err
 	}
