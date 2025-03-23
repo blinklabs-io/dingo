@@ -20,7 +20,6 @@ import (
 	"math/big"
 
 	"github.com/blinklabs-io/dingo/database"
-	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite/models"
 	"github.com/blinklabs-io/dingo/state/eras"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
@@ -99,7 +98,6 @@ func (ls *LedgerState) queryHardFork(
 
 func (ls *LedgerState) queryHardForkEraHistory() (any, error) {
 	retData := []any{}
-	var epochs []models.Epoch
 	timespan := big.NewInt(0)
 	for _, era := range eras.Eras {
 		epochSlotLength, epochLength, err := era.EpochLengthFunc(
@@ -108,12 +106,9 @@ func (ls *LedgerState) queryHardForkEraHistory() (any, error) {
 		if err != nil {
 			return nil, err
 		}
-		result := ls.db.Metadata().DB().
-			Where("era_id = ?", era.Id).
-			Order("epoch_id").
-			Find(&epochs)
-		if result.Error != nil {
-			return nil, result.Error
+		epochs, err := ls.db.GetEpochsByEra(era.Id, nil)
+		if err != nil {
+			return nil, err
 		}
 		tmpStart := []any{0, 0, 0}
 		tmpEnd := tmpStart

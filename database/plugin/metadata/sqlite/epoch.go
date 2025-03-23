@@ -44,6 +44,26 @@ func (d *MetadataStoreSqlite) GetEpochLatest(
 	return ret, nil
 }
 
+// GetEpochsByEra returns the list of epochs by era
+func (d *MetadataStoreSqlite) GetEpochsByEra(
+	eraId uint,
+	txn *gorm.DB,
+) ([]models.Epoch, error) {
+	ret := []models.Epoch{}
+	if txn != nil {
+		result := txn.Where("era_id = ?", eraId).Order("epoch_id").Find(&ret)
+		if result.Error != nil {
+			return ret, result.Error
+		}
+	} else {
+		result := d.DB().Where("era_id = ?", eraId).Order("epoch_id DESC").Find(&ret)
+		if result.Error != nil {
+			return ret, result.Error
+		}
+	}
+	return ret, nil
+}
+
 // SetEpoch saves an epoch
 func (d *MetadataStoreSqlite) SetEpoch(
 	slot, epoch uint64,
