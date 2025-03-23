@@ -55,6 +55,16 @@ func (d *Database) Transaction(readWrite bool) *Txn {
 	return NewTxn(d, readWrite)
 }
 
+// BlobTxn starts a new blob-only database transaction and returns a handle to it
+func (d *Database) BlobTxn(readWrite bool) *Txn {
+	return NewBlobOnlyTxn(d, readWrite)
+}
+
+// MetadataTxn starts a new metadata-only database transaction and returns a handle to it
+func (d *Database) MetadataTxn(readWrite bool) *Txn {
+	return NewMetadataOnlyTxn(d, readWrite)
+}
+
 // Close cleans up the database connections
 func (d *Database) Close() error {
 	var err error
