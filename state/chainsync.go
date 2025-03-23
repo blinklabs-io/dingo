@@ -317,7 +317,7 @@ func (ls *LedgerState) processGenesisBlock(
 		if err != nil {
 			return err
 		}
-		newEpoch, err := txn.DB().Metadata().GetEpochLatest(txn.Metadata())
+		newEpoch, err := txn.DB().GetEpochLatest(txn)
 		if err != nil {
 			return err
 		}
@@ -450,7 +450,7 @@ func (ls *LedgerState) processEpochRollover(
 		if err != nil {
 			return err
 		}
-		newEpoch, err := txn.DB().Metadata().GetEpochLatest(txn.Metadata())
+		newEpoch, err := txn.DB().GetEpochLatest(txn)
 		if err != nil {
 			return err
 		}

@@ -64,7 +64,7 @@ type LedgerState struct {
 	db                          *database.Database
 	timerCleanupConsumedUtxos   *time.Timer
 	currentPParams              lcommon.ProtocolParameters
-	currentEpoch                models.Epoch
+	currentEpoch                database.Epoch
 	currentEra                  eras.EraDesc
 	currentTip                  ochainsync.Tip
 	currentTipBlockNonce        []byte
@@ -551,7 +551,7 @@ func (ls *LedgerState) loadPParams() error {
 }
 
 func (ls *LedgerState) loadEpoch() error {
-	tmpEpoch, err := ls.db.Metadata().GetEpochLatest(nil)
+	tmpEpoch, err := ls.db.GetEpochLatest(nil)
 	if err != nil {
 		return err
 	}
