@@ -16,6 +16,7 @@ package sqlite
 
 import (
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite/models"
+	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"gorm.io/gorm"
 )
@@ -43,6 +44,7 @@ func (d *MetadataStoreSqlite) GetPoolRegistrations(
 		}
 	}
 	for _, cert := range certs {
+		tmpMargin := cbor.Rat{Rat: cert.Margin.Rat}
 		tmpCert := lcommon.PoolRegistrationCertificate{
 			CertType: lcommon.CertificateTypePoolRegistration,
 			Operator: lcommon.PoolKeyHash(
@@ -53,8 +55,7 @@ func (d *MetadataStoreSqlite) GetPoolRegistrations(
 			),
 			Pledge: uint64(cert.Pledge),
 			Cost:   uint64(cert.Cost),
-			// TODO: convert this to the necessary cbor.Rat
-			// Margin: cert.Margin.Rat,
+			Margin: tmpMargin,
 			// TODO: we do not store this anywhere
 			// RewardAccount: lcommon.AddrKeyHash(lcommon.NewBlake2b256(cert.PoolOwners[0]))
 		}
