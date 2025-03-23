@@ -37,57 +37,48 @@ func (ls *LedgerState) processTransactionCertificates(
 		}
 		switch cert := tmpCert.(type) {
 		case *lcommon.PoolRegistrationCertificate:
-			err := txn.DB().Metadata().SetPoolRegistration(
-				cert.Operator[:],
-				cert.VrfKeyHash[:],
-				cert.Pledge,
-				cert.Cost,
+			err := txn.DB().SetPoolRegistration(
+				cert,
 				blockPoint.Slot,
 				certDeposit,
-				cert.Margin.Rat,
-				cert.PoolOwners,
-				cert.Relays,
-				cert.PoolMetadata,
-				txn.Metadata(),
+				txn,
 			)
 			if err != nil {
 				return err
 			}
 		case *lcommon.PoolRetirementCertificate:
-			err := txn.DB().Metadata().SetPoolRetirement(
-				cert.PoolKeyHash[:],
+			err := txn.DB().SetPoolRetirement(
+				cert,
 				blockPoint.Slot,
-				cert.Epoch,
-				txn.Metadata(),
-			)
-			if err != nil {
-				return err
-			}
-		case *lcommon.StakeRegistrationCertificate:
-			err := txn.DB().Metadata().SetStakeRegistration(
-				cert.StakeRegistration.Credential,
-				blockPoint.Slot,
-				certDeposit,
-				txn.Metadata(),
-			)
-			if err != nil {
-				return err
-			}
-		case *lcommon.StakeDeregistrationCertificate:
-			err := txn.DB().Metadata().SetStakeDeregistration(
-				cert.StakeDeregistration.Credential,
-				blockPoint.Slot,
-				txn.Metadata(),
+				txn,
 			)
 			if err != nil {
 				return err
 			}
 		case *lcommon.StakeDelegationCertificate:
-			err := txn.DB().Metadata().SetStakeDelegation(
-				cert.StakeCredential.Credential,
-				cert.PoolKeyHash[:],
+			err := txn.DB().SetStakeDelegation(
+				cert,
 				blockPoint.Slot,
-				txn.Metadata(),
+				txn,
+			)
+			if err != nil {
+				return err
+			}
+		case *lcommon.StakeDeregistrationCertificate:
+			err := txn.DB().SetStakeDeregistration(
+				cert,
+				blockPoint.Slot,
+				txn,
+			)
+			if err != nil {
+				return err
+			}
+		case *lcommon.StakeRegistrationCertificate:
+			err := txn.DB().SetStakeRegistration(
+				cert,
+				blockPoint.Slot,
+				certDeposit,
+				txn,
 			)
 			if err != nil {
 				return err
