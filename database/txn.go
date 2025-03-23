@@ -27,13 +27,13 @@ import (
 type Txn struct {
 	lock        sync.Mutex
 	finished    bool
-	db          Database
+	db          *Database
 	readWrite   bool
 	blobTxn     *badger.Txn
 	metadataTxn *gorm.DB
 }
 
-func NewTxn(db Database, readWrite bool) *Txn {
+func NewTxn(db *Database, readWrite bool) *Txn {
 	return &Txn{
 		db:          db,
 		readWrite:   readWrite,
@@ -42,7 +42,7 @@ func NewTxn(db Database, readWrite bool) *Txn {
 	}
 }
 
-func (t *Txn) DB() Database {
+func (t *Txn) DB() *Database {
 	return t.db
 }
 

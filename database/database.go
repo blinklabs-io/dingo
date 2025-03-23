@@ -23,102 +23,68 @@ import (
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 )
 
-type Database interface {
-	Close() error
-	Metadata() metadata.MetadataStore
-	Blob() blob.BlobStore
-	Transaction(bool) *Txn
-	updateCommitTimestamp(*Txn, int64) error
-}
-
-type BaseDatabase struct {
+type Database struct {
 	logger   *slog.Logger
-	metadata metadata.MetadataStore
 	blob     blob.BlobStore
-}
-
-// Metadata returns the underlying metadata store instance
-func (b *BaseDatabase) Metadata() metadata.MetadataStore {
-	return b.metadata
+	metadata metadata.MetadataStore
+	dataDir  string
 }
 
 // Blob returns the underling blob store instance
-func (b *BaseDatabase) Blob() blob.BlobStore {
-	return b.blob
+func (d *Database) Blob() blob.BlobStore {
+	return d.blob
+}
+
+// DataDir returns the path to the data directory used for storage
+func (d *Database) DataDir() string {
+	return d.dataDir
+}
+
+// Logger returns the logger instance
+func (d *Database) Logger() *slog.Logger {
+	return d.logger
+}
+
+// Metadata returns the underlying metadata store instance
+func (d *Database) Metadata() metadata.MetadataStore {
+	return d.metadata
 }
 
 // Transaction starts a new database transaction and returns a handle to it
-func (b *BaseDatabase) Transaction(readWrite bool) *Txn {
-	return NewTxn(b, readWrite)
+func (d *Database) Transaction(readWrite bool) *Txn {
+	return NewTxn(d, readWrite)
 }
 
 // Close cleans up the database connections
-func (b *BaseDatabase) Close() error {
+func (d *Database) Close() error {
 	var err error
 	// Close metadata
-	metadataErr := b.Metadata().Close()
+	metadataErr := d.Metadata().Close()
 	err = errors.Join(err, metadataErr)
 	// Close blob
-	blobErr := b.Blob().Close()
+	blobErr := d.Blob().Close()
 	err = errors.Join(err, blobErr)
 	return err
 }
 
-func (b *BaseDatabase) init() error {
-	if b.logger == nil {
+func (d *Database) init() error {
+	if d.logger == nil {
 		// Create logger to throw away logs
 		// We do this so we don't have to add guards around every log operation
-		b.logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
+		d.logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
 	}
 	// Check commit timestamp
-	if err := b.checkCommitTimestamp(); err != nil {
+	if err := d.checkCommitTimestamp(); err != nil {
 		return err
 	}
 	return nil
 }
 
-// InMemoryDatabase stores all data in memory. Data will not be persisted
-type InMemoryDatabase struct {
-	*BaseDatabase
-}
-
-// NewInMemory creates a new in-memory database
-func NewInMemory(logger *slog.Logger) (*InMemoryDatabase, error) {
-	// Use sqlite plugin
-	metadataDb, err := metadata.New("sqlite", "", logger)
-	if err != nil {
-		return nil, err
-	}
-	// Use badger plugin
-	blobDb, err := blob.New("badger", "", logger)
-	if err != nil {
-		return nil, err
-	}
-	db := &InMemoryDatabase{
-		BaseDatabase: &BaseDatabase{
-			logger:   logger,
-			metadata: metadataDb,
-			blob:     blobDb,
-		},
-	}
-	if err := db.init(); err != nil {
-		// Database is available for recovery, so return it with error
-		return db, err
-	}
-	return db, nil
-}
-
-// PersistentDatabase stores its data on disk, providing persistence across restarts
-type PersistentDatabase struct {
-	*BaseDatabase
-	dataDir string
-}
-
-// NewPersistent creates a new persistent database instance using the provided data directory
-func NewPersistent(
-	dataDir string,
+// New creates a new database instance with optional persistence using the provided data directory
+func New(
 	logger *slog.Logger,
-) (*PersistentDatabase, error) {
+	dataDir string,
+) (*Database, error) {
 	metadataDb, err := metadata.New("sqlite", dataDir, logger)
 	if err != nil {
 		return nil, err
@@ -127,13 +93,11 @@ func NewPersistent(
 	if err != nil {
 		return nil, err
 	}
-	db := &PersistentDatabase{
-		BaseDatabase: &BaseDatabase{
-			logger:   logger,
-			metadata: metadataDb,
-			blob:     blobDb,
-		},
-		dataDir: dataDir,
+	db := &Database{
+		logger:   logger,
+		blob:     blobDb,
+		metadata: metadataDb,
+		dataDir:  dataDir,
 	}
 	if err := db.init(); err != nil {
 		// Database is available for recovery, so return it with error

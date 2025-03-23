@@ -40,28 +40,11 @@ func (lv *LedgerView) NetworkId() uint {
 func (lv *LedgerView) UtxoById(
 	utxoId lcommon.TransactionInput,
 ) (lcommon.Utxo, error) {
-	var utxo database.Utxo
-	var err error
-	switch lv.ls.db.(type) {
-	case *database.BaseDatabase:
-		utxo, err = lv.ls.db.(*database.BaseDatabase).UtxoByRef(
-			utxoId.Id().Bytes(),
-			utxoId.Index(),
-			lv.txn,
-		)
-	case *database.InMemoryDatabase:
-		utxo, err = lv.ls.db.(*database.InMemoryDatabase).UtxoByRef(
-			utxoId.Id().Bytes(),
-			utxoId.Index(),
-			lv.txn,
-		)
-	case *database.PersistentDatabase:
-		utxo, err = lv.ls.db.(*database.PersistentDatabase).UtxoByRef(
-			utxoId.Id().Bytes(),
-			utxoId.Index(),
-			lv.txn,
-		)
-	}
+	utxo, err := lv.ls.db.UtxoByRef(
+		utxoId.Id().Bytes(),
+		utxoId.Index(),
+		lv.txn,
+	)
 	if err != nil {
 		return lcommon.Utxo{}, err
 	}

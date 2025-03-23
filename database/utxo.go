@@ -58,14 +58,14 @@ func (u *Utxo) loadCbor(txn *Txn) error {
 }
 
 func UtxoByRef(
-	db Database,
+	db *Database,
 	txId []byte,
 	outputIdx uint32,
 ) (Utxo, error) {
-	return db.(*BaseDatabase).UtxoByRef(txId, outputIdx, nil)
+	return db.UtxoByRef(txId, outputIdx, nil)
 }
 
-func (d *BaseDatabase) UtxoByRef(
+func (d *Database) UtxoByRef(
 	txId []byte,
 	outputIdx uint32,
 	txn *Txn,
@@ -92,13 +92,13 @@ func (d *BaseDatabase) UtxoByRef(
 }
 
 func UtxosByAddress(
-	db Database,
+	db *Database,
 	addr ledger.Address,
 ) ([]Utxo, error) {
-	return db.(*BaseDatabase).UtxosByAddress(addr, nil)
+	return db.UtxosByAddress(addr, nil)
 }
 
-func (d *BaseDatabase) UtxosByAddress(
+func (d *Database) UtxosByAddress(
 	addr ledger.Address,
 	txn *Txn,
 ) ([]Utxo, error) {
@@ -129,13 +129,13 @@ func (d *BaseDatabase) UtxosByAddress(
 }
 
 func UtxoDelete(
-	db Database,
+	db *Database,
 	utxo Utxo,
 ) error {
-	return db.(*BaseDatabase).UtxoDelete(utxo, nil)
+	return db.UtxoDelete(utxo, nil)
 }
 
-func (d *BaseDatabase) UtxoDelete(
+func (d *Database) UtxoDelete(
 	utxo Utxo,
 	txn *Txn,
 ) error {
@@ -157,13 +157,13 @@ func (d *BaseDatabase) UtxoDelete(
 }
 
 func UtxosDelete(
-	db Database,
+	db *Database,
 	utxos []Utxo,
 ) error {
-	return db.(*BaseDatabase).UtxosDelete(utxos, nil)
+	return db.UtxosDelete(utxos, nil)
 }
 
-func (d *BaseDatabase) UtxosDelete(
+func (d *Database) UtxosDelete(
 	utxos []Utxo,
 	txn *Txn,
 ) error {

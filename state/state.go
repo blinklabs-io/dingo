@@ -61,7 +61,7 @@ type LedgerState struct {
 	sync.RWMutex
 	chainsyncMutex              sync.Mutex
 	config                      LedgerStateConfig
-	db                          database.Database
+	db                          *database.Database
 	timerCleanupConsumedUtxos   *time.Timer
 	currentPParams              lcommon.ProtocolParameters
 	currentEpoch                models.Epoch
@@ -91,65 +91,33 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 	// Init metrics
 	ls.metrics.init(ls.config.PromRegistry)
 	// Load database
-	if cfg.DataDir == "" {
-		db, err := database.NewInMemory(ls.config.Logger)
-		if db == nil {
-			ls.config.Logger.Error(
-				"failed to create database",
-				"error",
-				"empty database returned",
-				"component",
-				"ledger",
-			)
-			return nil, errors.New("empty database returned")
+	db, err := database.New(cfg.Logger, cfg.DataDir)
+	if db == nil {
+		ls.config.Logger.Error(
+			"failed to create database",
+			"error",
+			"empty database returned",
+			"component",
+			"ledger",
+		)
+		return nil, errors.New("empty database returned")
+	}
+	ls.db = db
+	if err != nil {
+		var dbErr database.CommitTimestampError
+		if !errors.As(err, &dbErr) {
+			return nil, err
 		}
-		ls.db = db
-		if err != nil {
-			var dbErr database.CommitTimestampError
-			if !errors.As(err, &dbErr) {
-				return nil, err
-			}
-			ls.config.Logger.Warn(
-				"database initialization error",
-				"error",
-				err,
-				"component",
-				"ledger",
-			)
-			// Run recovery
-			if err := ls.recoverCommitTimestampConflict(); err != nil {
-				return nil, err
-			}
-		}
-	} else {
-		db, err := database.NewPersistent(cfg.DataDir, cfg.Logger)
-		if db == nil {
-			ls.config.Logger.Error(
-				"failed to create database",
-				"error",
-				"empty database returned",
-				"component",
-				"ledger",
-			)
-			return nil, errors.New("empty database returned")
-		}
-		ls.db = db
-		if err != nil {
-			var dbErr database.CommitTimestampError
-			if !errors.As(err, &dbErr) {
-				return nil, err
-			}
-			ls.config.Logger.Warn(
-				"database initialization error",
-				"error",
-				err,
-				"component",
-				"ledger",
-			)
-			// Run recovery
-			if err := ls.recoverCommitTimestampConflict(); err != nil {
-				return nil, err
-			}
+		ls.config.Logger.Warn(
+			"database initialization error",
+			"error",
+			err,
+			"component",
+			"ledger",
+		)
+		// Run recovery
+		if err := ls.recoverCommitTimestampConflict(); err != nil {
+			return nil, err
 		}
 	}
 	// Setup event handlers
@@ -269,7 +237,7 @@ func (ls *LedgerState) scheduleCleanupConsumedUtxos() {
 					break
 				}
 				// Delete the UTxOs
-				if err := ls.db.(*database.BaseDatabase).UtxosDelete(utxos[0:batchSize], txn); err != nil {
+				if err := ls.db.UtxosDelete(utxos[0:batchSize], txn); err != nil {
 					ls.config.Logger.Error(
 						"failed to remove consumed UTxO",
 						"component", "ledger",
@@ -324,7 +292,7 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 				}
 				utxos = append(utxos, tmpUtxo)
 			}
-			if err := ls.db.(*database.BaseDatabase).UtxosDelete(utxos, txn); err != nil {
+			if err := ls.db.UtxosDelete(utxos, txn); err != nil {
 				return fmt.Errorf("remove rolled-back UTxOs: %w", err)
 			}
 		}
@@ -510,28 +478,11 @@ func (ls *LedgerState) consumeUtxo(
 	slot uint64,
 ) error {
 	// Find UTxO
-	var utxo database.Utxo
-	var err error
-	switch txn.DB().(type) {
-	case *database.BaseDatabase:
-		utxo, err = txn.DB().(*database.BaseDatabase).UtxoByRef(
-			utxoId.Id().Bytes(),
-			utxoId.Index(),
-			txn,
-		)
-	case *database.InMemoryDatabase:
-		utxo, err = txn.DB().(*database.InMemoryDatabase).UtxoByRef(
-			utxoId.Id().Bytes(),
-			utxoId.Index(),
-			txn,
-		)
-	case *database.PersistentDatabase:
-		utxo, err = txn.DB().(*database.PersistentDatabase).UtxoByRef(
-			utxoId.Id().Bytes(),
-			utxoId.Index(),
-			txn,
-		)
-	}
+	utxo, err := txn.DB().UtxoByRef(
+		utxoId.Id().Bytes(),
+		utxoId.Index(),
+		txn,
+	)
 	if err != nil {
 		// TODO: make this configurable? (#396)
 		if errors.Is(err, gorm.ErrRecordNotFound) {
