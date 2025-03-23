@@ -36,10 +36,6 @@ func (CommitTimestamp) TableName() string {
 }
 
 func (d *MetadataStoreSqlite) GetCommitTimestamp() (int64, error) {
-	// Create table if it doesn't exist
-	if err := d.AutoMigrate(&CommitTimestamp{}); err != nil {
-		return -1, err
-	}
 	// Get value from sqlite
 	var tmpCommitTimestamp CommitTimestamp
 	result := d.DB().First(&tmpCommitTimestamp)
@@ -57,10 +53,6 @@ func (d *MetadataStoreSqlite) SetCommitTimestamp(
 	txn *gorm.DB,
 	timestamp int64,
 ) error {
-	// Create table if it doesn't exist
-	if err := d.AutoMigrate(&CommitTimestamp{}); err != nil {
-		return err
-	}
 	tmpCommitTimestamp := CommitTimestamp{
 		ID:        commitTimestampRowId,
 		Timestamp: timestamp,
