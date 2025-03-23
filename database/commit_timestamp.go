@@ -31,7 +31,7 @@ func (e CommitTimestampError) Error() string {
 	)
 }
 
-func (b *BaseDatabase) checkCommitTimestamp() error {
+func (b *Database) checkCommitTimestamp() error {
 	// Get value from metadata
 	metadataTimestamp, metadataErr := b.Metadata().GetCommitTimestamp()
 	if metadataErr != nil {
@@ -62,7 +62,7 @@ func (b *BaseDatabase) checkCommitTimestamp() error {
 	return nil
 }
 
-func (b *BaseDatabase) updateCommitTimestamp(txn *Txn, timestamp int64) error {
+func (b *Database) updateCommitTimestamp(txn *Txn, timestamp int64) error {
 	// Update metadata
 	if err := b.Metadata().SetCommitTimestamp(txn.Metadata(), timestamp); err != nil {
 		return err

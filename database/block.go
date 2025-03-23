@@ -95,7 +95,7 @@ func BlockDeleteTxn(txn *Txn, block Block) error {
 	return nil
 }
 
-func BlockByPoint(db Database, point ocommon.Point) (Block, error) {
+func BlockByPoint(db *Database, point ocommon.Point) (Block, error) {
 	var ret Block
 	txn := db.Transaction(false)
 	err := txn.Do(func(txn *Txn) error {
@@ -148,7 +148,7 @@ func BlockByPointTxn(txn *Txn, point ocommon.Point) (Block, error) {
 	return blockByKey(txn, key)
 }
 
-func BlockByNumber(db Database, blockNumber uint64) (Block, error) {
+func BlockByNumber(db *Database, blockNumber uint64) (Block, error) {
 	var ret Block
 	txn := db.Transaction(false)
 	err := txn.Do(func(txn *Txn) error {
@@ -175,7 +175,7 @@ func BlockByNumberTxn(txn *Txn, blockNumber uint64) (Block, error) {
 	return blockByKey(txn, blockKey)
 }
 
-func BlocksRecent(db Database, count int) ([]Block, error) {
+func BlocksRecent(db *Database, count int) ([]Block, error) {
 	var ret []Block
 	txn := db.Transaction(false)
 	err := txn.Do(func(txn *Txn) error {
@@ -219,7 +219,7 @@ func BlocksRecentTxn(txn *Txn, count int) ([]Block, error) {
 	return ret, nil
 }
 
-func BlockBeforeSlot(db Database, slotNumber uint64) (Block, error) {
+func BlockBeforeSlot(db *Database, slotNumber uint64) (Block, error) {
 	var ret Block
 	txn := db.Transaction(false)
 	err := txn.Do(func(txn *Txn) error {
