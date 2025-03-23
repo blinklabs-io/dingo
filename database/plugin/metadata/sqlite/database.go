@@ -106,6 +106,10 @@ func New(
 		return db, err
 	}
 	// Create table schemas
+	db.logger.Debug(fmt.Sprintf("creating table: %#v", &CommitTimestamp{}))
+	if err := db.db.AutoMigrate(&CommitTimestamp{}); err != nil {
+		return db, err
+	}
 	for _, model := range models.MigrateModels {
 		db.logger.Debug(fmt.Sprintf("creating table: %#v", model))
 		if err := db.db.AutoMigrate(model); err != nil {
