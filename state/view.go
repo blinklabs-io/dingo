@@ -58,48 +58,16 @@ func (lv *LedgerView) UtxoById(
 	}, nil
 }
 
+func (lv *LedgerView) PoolRegistration(
+	pkh []byte,
+) ([]lcommon.PoolRegistrationCertificate, error) {
+	poolKeyHash := lcommon.PoolKeyHash(lcommon.NewBlake2b224(pkh))
+	return lv.txn.DB().GetPoolRegistrations(poolKeyHash, lv.txn)
+}
+
 func (lv *LedgerView) StakeRegistration(
 	stakingKey []byte,
 ) ([]lcommon.StakeRegistrationCertificate, error) {
-	ret := []lcommon.StakeRegistrationCertificate{}
-	certs, err := lv.txn.DB().
-		Metadata().
-		GetStakeRegistrations(stakingKey, lv.txn.Metadata())
-	if err != nil {
-		return ret, err
-	}
-	for _, cert := range certs {
-		ret = append(
-			ret,
-			lcommon.StakeRegistrationCertificate{
-				StakeRegistration: lcommon.StakeCredential{
-					Credential: cert.StakingKey,
-				},
-			},
-		)
-	}
-	return ret, nil
-}
-
-func (lv *LedgerView) PoolRegistration(
-	poolKeyHash []byte,
-) ([]lcommon.PoolRegistrationCertificate, error) {
-	ret := []lcommon.PoolRegistrationCertificate{}
-	certs, err := lv.txn.DB().
-		Metadata().
-		GetPoolRegistrations(poolKeyHash, lv.txn.Metadata())
-	if err != nil {
-		return ret, err
-	}
-	for _, cert := range certs {
-		ret = append(
-			ret,
-			lcommon.PoolRegistrationCertificate{
-				Operator: lcommon.PoolKeyHash(
-					lcommon.NewBlake2b224(cert.PoolKeyHash),
-				),
-			},
-		)
-	}
-	return ret, nil
+	// stakingKey = lcommon.NewBlake2b224(stakingKey)
+	return lv.txn.DB().GetStakeRegistrations(stakingKey, lv.txn)
 }

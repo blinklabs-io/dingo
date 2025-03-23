@@ -34,12 +34,10 @@ type MetadataStore interface {
 	Transaction() *gorm.DB
 
 	// Ledger state
-	// GetEpoch(uint64, *gorm.DB)
-	// GetEpochs(*gorm.DB) ([]models.Epoch, error)
 	GetPoolRegistrations(
-		[]byte, // pkh
+		lcommon.PoolKeyHash,
 		*gorm.DB,
-	) ([]models.PoolRegistration, error)
+	) ([]lcommon.PoolRegistrationCertificate, error)
 	GetPParams(
 		uint64, // epoch
 		*gorm.DB,
@@ -51,7 +49,7 @@ type MetadataStore interface {
 	GetStakeRegistrations(
 		[]byte, // stakeKey
 		*gorm.DB,
-	) ([]models.StakeRegistration, error)
+	) ([]lcommon.StakeRegistrationCertificate, error)
 	GetTip(*gorm.DB) (ochainsync.Tip, error)
 	GetUtxo(
 		[]byte, // txId
