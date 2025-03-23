@@ -18,6 +18,22 @@ import (
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
 
+// GetPoolRegistrations returns a list of pool registration certificates
+func (d *Database) GetPoolRegistrations(
+	poolKeyHash lcommon.PoolKeyHash,
+	txn *Txn,
+) ([]lcommon.PoolRegistrationCertificate, error) {
+	return d.metadata.GetPoolRegistrations(poolKeyHash, txn.Metadata())
+}
+
+// GetStakeRegistrations returns a list of stake registration certificates
+func (d *Database) GetStakeRegistrations(
+	stakingKey []byte,
+	txn *Txn,
+) ([]lcommon.StakeRegistrationCertificate, error) {
+	return d.metadata.GetStakeRegistrations(stakingKey, txn.Metadata())
+}
+
 // SetPoolRegistration saves a pool registration certificate
 func (d *Database) SetPoolRegistration(
 	cert *lcommon.PoolRegistrationCertificate,

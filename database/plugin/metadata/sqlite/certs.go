@@ -22,42 +22,116 @@ import (
 
 // GetPoolRegistrations returns pool registration certificates
 func (d *MetadataStoreSqlite) GetPoolRegistrations(
-	pkh []byte,
+	pkh lcommon.PoolKeyHash,
 	txn *gorm.DB,
-) ([]models.PoolRegistration, error) {
-	ret := []models.PoolRegistration{}
+) ([]lcommon.PoolRegistrationCertificate, error) {
+	ret := []lcommon.PoolRegistrationCertificate{}
+	certs := []models.PoolRegistration{}
 	if txn != nil {
-		result := txn.Where("pool_key_hash = ?", pkh).
+		result := txn.Where("pool_key_hash = ?", lcommon.Blake2b224(pkh).Bytes()).
 			Order("id DESC").
-			Find(&ret)
+			Find(&certs)
 		if result.Error != nil {
 			return ret, result.Error
 		}
 	} else {
-		result := d.DB().Where("pool_key_hash = ?", pkh).Order("id DESC").Find(&ret)
+		result := d.DB().Where("pool_key_hash = ?", lcommon.Blake2b224(pkh).Bytes()).
+			Order("id DESC").
+			Find(&certs)
 		if result.Error != nil {
 			return ret, result.Error
 		}
+	}
+	for _, cert := range certs {
+		tmpCert := lcommon.PoolRegistrationCertificate{
+			CertType: lcommon.CertificateTypePoolRegistration,
+			Operator: lcommon.PoolKeyHash(
+				lcommon.NewBlake2b224(cert.PoolKeyHash),
+			),
+			VrfKeyHash: lcommon.VrfKeyHash(
+				lcommon.NewBlake2b256(cert.VrfKeyHash),
+			),
+			Pledge: uint64(cert.Pledge),
+			Cost:   uint64(cert.Cost),
+			// TODO: convert this to the necessary cbor.Rat
+			// Margin: cert.Margin.Rat,
+			// TODO: we do not store this anywhere
+			// RewardAccount: lcommon.AddrKeyHash(lcommon.NewBlake2b256(cert.PoolOwners[0]))
+		}
+		for _, owner := range cert.Owners {
+			addrKeyHash := lcommon.AddrKeyHash(
+				lcommon.NewBlake2b224(owner.KeyHash),
+			)
+			tmpCert.PoolOwners = append(tmpCert.PoolOwners, addrKeyHash)
+		}
+		for _, relay := range cert.Relays {
+			tmpRelay := lcommon.PoolRelay{}
+			// Determine type
+			if relay.Port != 0 {
+				port := uint32(relay.Port) // #nosec G115
+				tmpRelay.Port = &port
+				if relay.Hostname != "" {
+					hostname := relay.Hostname
+					tmpRelay.Type = lcommon.PoolRelayTypeSingleHostName
+					tmpRelay.Hostname = &hostname
+				} else {
+					tmpRelay.Type = lcommon.PoolRelayTypeSingleHostAddress
+					tmpRelay.Ipv4 = relay.Ipv4
+					tmpRelay.Ipv6 = relay.Ipv6
+				}
+			} else {
+				hostname := relay.Hostname
+				tmpRelay.Type = lcommon.PoolRelayTypeMultiHostName
+				tmpRelay.Hostname = &hostname
+			}
+			tmpCert.Relays = append(tmpCert.Relays, tmpRelay)
+		}
+		if cert.MetadataUrl != "" {
+			poolMetadata := &lcommon.PoolMetadata{
+				Url: cert.MetadataUrl,
+				Hash: lcommon.PoolMetadataHash(
+					lcommon.NewBlake2b256(cert.MetadataHash),
+				),
+			}
+			tmpCert.PoolMetadata = poolMetadata
+		}
+		ret = append(ret, tmpCert)
 	}
 	return ret, nil
 }
 
 // GetStakeRegistrations returns stake registration certificates
 func (d *MetadataStoreSqlite) GetStakeRegistrations(
-	cred []byte,
+	stakingKey []byte,
 	txn *gorm.DB,
-) ([]models.StakeRegistration, error) {
-	ret := []models.StakeRegistration{}
+) ([]lcommon.StakeRegistrationCertificate, error) {
+	ret := []lcommon.StakeRegistrationCertificate{}
+	certs := []models.StakeRegistration{}
 	if txn != nil {
-		result := txn.Where("staking_key= ?", cred).Find(&ret)
+		result := txn.Where("staking_key = ?", stakingKey).
+			Order("id DESC").
+			Find(&certs)
 		if result.Error != nil {
 			return ret, result.Error
 		}
 	} else {
-		result := d.DB().Where("staking_key= ?", cred).Find(&ret)
+		result := d.DB().Where("staking_key = ?", stakingKey).
+			Order("id DESC").
+			Find(&certs)
 		if result.Error != nil {
 			return ret, result.Error
 		}
+	}
+	for _, cert := range certs {
+		tmpCert := lcommon.StakeRegistrationCertificate{
+			CertType: lcommon.CertificateTypeStakeRegistration,
+			StakeRegistration: lcommon.StakeCredential{
+				// TODO: determine correct type
+				// CredType: lcommon.StakeCredentialTypeAddrKeyHash,
+				Credential: cert.StakingKey,
+			},
+		}
+		ret = append(ret, tmpCert)
 	}
 	return ret, nil
 }
