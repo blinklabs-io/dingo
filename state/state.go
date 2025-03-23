@@ -320,7 +320,7 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 				),
 				BlockNumber: recentBlocks[0].Number,
 			}
-			if err := ls.db.Metadata().SetTip(ls.currentTip, txn.Metadata()); err != nil {
+			if err := ls.db.SetTip(ls.currentTip, txn); err != nil {
 				return err
 			}
 		}
@@ -508,7 +508,7 @@ func (ls *LedgerState) addBlock(txn *database.Txn, block database.Block) error {
 		Point:       ocommon.NewPoint(block.Slot, block.Hash),
 		BlockNumber: block.Number,
 	}
-	if err := ls.db.Metadata().SetTip(ls.currentTip, txn.Metadata()); err != nil {
+	if err := ls.db.SetTip(ls.currentTip, txn); err != nil {
 		return err
 	}
 	// Update tip block nonce

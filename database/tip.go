@@ -32,3 +32,15 @@ func (d *Database) GetTip(txn *Txn) (ochainsync.Tip, error) {
 	tmpTip = tip
 	return tmpTip, nil
 }
+
+// SetTip saves the current tip
+func SetTip(db *Database, tip ochainsync.Tip) error {
+	return db.SetTip(tip, nil)
+}
+
+func (d *Database) SetTip(tip ochainsync.Tip, txn *Txn) error {
+	if txn == nil {
+		txn = d.Transaction(true)
+	}
+	return txn.DB().Metadata().SetTip(tip, txn.Metadata())
+}
