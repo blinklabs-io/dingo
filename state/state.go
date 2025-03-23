@@ -15,6 +15,7 @@
 package state
 
 import (
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -343,10 +344,16 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 			},
 		),
 	)
+	var hash string
+	if point.Slot == 0 {
+		hash = "<genesis>"
+	} else {
+		hash = hex.EncodeToString(point.Hash)
+	}
 	ls.config.Logger.Info(
 		fmt.Sprintf(
-			"chain rolled back, new tip: %x at slot %d",
-			point.Hash,
+			"chain rolled back, new tip: %s at slot %d",
+			hash,
 			point.Slot,
 		),
 		"component",
