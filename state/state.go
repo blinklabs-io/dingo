@@ -201,32 +201,14 @@ func (ls *LedgerState) scheduleCleanupConsumedUtxos() {
 			// Get the current tip, since we're querying by slot
 			tip := ls.Tip()
 			// Get UTxOs that are marked as deleted and older than our slot window
-			var tmpUtxos []models.Utxo
-			result := ls.db.Metadata().DB().
-				Where("deleted_slot > 0 AND deleted_slot <= ?", tip.Point.Slot-cleanupConsumedUtxosSlotWindow).
-				Order("id DESC").
-				Find(&tmpUtxos)
-			if result.Error != nil {
+			utxos, err := database.UtxosDeleted(ls.db, tip.Point.Slot-cleanupConsumedUtxosSlotWindow)
+			if err != nil {
 				ls.config.Logger.Error(
 					"failed to query consumed UTxOs",
-					"error",
-					result.Error,
+					"component", "ledger",
+					"error", err,
 				)
 				return
-			}
-			utxos := []database.Utxo{}
-			for _, utxo := range utxos {
-				tmpUtxo := database.Utxo{
-					ID:          utxo.ID,
-					TxId:        utxo.TxId,
-					OutputIdx:   utxo.OutputIdx,
-					AddedSlot:   utxo.AddedSlot,
-					DeletedSlot: utxo.DeletedSlot,
-					PaymentKey:  utxo.PaymentKey,
-					StakingKey:  utxo.StakingKey,
-					Cbor:        utxo.Cbor,
-				}
-				utxos = append(utxos, tmpUtxo)
 			}
 			for {
 				ls.Lock()

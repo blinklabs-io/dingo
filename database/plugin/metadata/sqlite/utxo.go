@@ -46,6 +46,30 @@ func (d *MetadataStoreSqlite) GetUtxo(
 	return ret, nil
 }
 
+// GetUtxosDeletedBeforeSlot returns a list of Utxos marked as deleted before a given slot
+func (d *MetadataStoreSqlite) GetUtxosDeletedBeforeSlot(
+	slot uint64,
+	txn *gorm.DB,
+) ([]models.Utxo, error) {
+	var ret []models.Utxo
+	if txn != nil {
+		result := txn.Where("deleted_slot > 0 AND deleted_slot <= ?", slot).
+			Order("id DESC").
+			Find(&ret)
+		if result.Error != nil {
+			return ret, result.Error
+		}
+	} else {
+		result := d.DB().Where("deleted_slot > 0 AND deleted_slot <= ?", slot).
+			Order("id DESC").
+			Find(&ret)
+		if result.Error != nil {
+			return ret, result.Error
+		}
+	}
+	return ret, nil
+}
+
 // GetUtxosByAddress returns a list of Utxos
 func (d *MetadataStoreSqlite) GetUtxosByAddress(
 	addr ledger.Address,
