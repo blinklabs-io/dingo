@@ -18,7 +18,7 @@ import (
 	"io"
 	"os"
 	"path"
-	"strings"
+	"path/filepath"
 
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
 	"github.com/blinklabs-io/gouroboros/ledger/byron"
@@ -70,11 +70,10 @@ func NewCardanoNodeConfigFromFile(file string) (*CardanoNodeConfig, error) {
 }
 
 func (c *CardanoNodeConfig) loadGenesisConfigs() error {
-	prefix := "/"
 	// Load Byron genesis
 	if c.ByronGenesisFile != "" {
 		byronGenesisPath := c.ByronGenesisFile
-		if !strings.HasPrefix(byronGenesisPath, prefix) {
+		if !filepath.IsAbs(byronGenesisPath) {
 			byronGenesisPath = path.Join(c.path, byronGenesisPath)
 		}
 		// TODO: check genesis file hash (#399)
@@ -87,7 +86,7 @@ func (c *CardanoNodeConfig) loadGenesisConfigs() error {
 	// Load Shelley genesis
 	if c.ShelleyGenesisFile != "" {
 		shelleyGenesisPath := c.ShelleyGenesisFile
-		if !strings.HasPrefix(shelleyGenesisPath, prefix) {
+		if !filepath.IsAbs(shelleyGenesisPath) {
 			shelleyGenesisPath = path.Join(c.path, shelleyGenesisPath)
 		}
 		// TODO: check genesis file hash (#399)
@@ -102,7 +101,7 @@ func (c *CardanoNodeConfig) loadGenesisConfigs() error {
 	// Load Alonzo genesis
 	if c.AlonzoGenesisFile != "" {
 		alonzoGenesisPath := c.AlonzoGenesisFile
-		if !strings.HasPrefix(alonzoGenesisPath, prefix) {
+		if !filepath.IsAbs(alonzoGenesisPath) {
 			alonzoGenesisPath = path.Join(c.path, alonzoGenesisPath)
 		}
 		// TODO: check genesis file hash (#399)
@@ -115,7 +114,7 @@ func (c *CardanoNodeConfig) loadGenesisConfigs() error {
 	// Load Conway genesis
 	if c.ConwayGenesisFile != "" {
 		conwayGenesisPath := c.ConwayGenesisFile
-		if !strings.HasPrefix(conwayGenesisPath, prefix) {
+		if !filepath.IsAbs(conwayGenesisPath) {
 			conwayGenesisPath = path.Join(c.path, conwayGenesisPath)
 		}
 		// TODO: check genesis file hash (#399)
