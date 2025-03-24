@@ -19,19 +19,20 @@ import (
 	"gorm.io/gorm"
 )
 
-// GetPParams returns a list of protocol parameters for a given epoch
+// GetPParams returns a list of protocol parameters for a given epoch. If there are no pparams
+// for the specified epoch, it will return the most recent pparams before the specified epoch
 func (d *MetadataStoreSqlite) GetPParams(
 	epoch uint64,
 	txn *gorm.DB,
 ) ([]models.PParams, error) {
 	ret := []models.PParams{}
 	if txn != nil {
-		result := txn.Where("epoch = ?", epoch).Order("id DESC").Find(&ret)
+		result := txn.Where("epoch <= ?", epoch).Order("id DESC").Find(&ret)
 		if result.Error != nil {
 			return ret, result.Error
 		}
 	} else {
-		result := d.DB().Where("epoch = ?", epoch).Order("id DESC").Find(&ret)
+		result := d.DB().Where("epoch <= ?", epoch).Order("id DESC").Find(&ret)
 		if result.Error != nil {
 			return ret, result.Error
 		}
