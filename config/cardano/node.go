@@ -1,4 +1,4 @@
-// Copyright 2024 Blink Labs Software
+// Copyright 2025 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -18,6 +18,7 @@ import (
 	"io"
 	"os"
 	"path"
+	"path/filepath"
 
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
 	"github.com/blinklabs-io/gouroboros/ledger/byron"
@@ -71,7 +72,10 @@ func NewCardanoNodeConfigFromFile(file string) (*CardanoNodeConfig, error) {
 func (c *CardanoNodeConfig) loadGenesisConfigs() error {
 	// Load Byron genesis
 	if c.ByronGenesisFile != "" {
-		byronGenesisPath := path.Join(c.path, c.ByronGenesisFile)
+		byronGenesisPath := c.ByronGenesisFile
+		if !filepath.IsAbs(byronGenesisPath) {
+			byronGenesisPath = path.Join(c.path, byronGenesisPath)
+		}
 		// TODO: check genesis file hash (#399)
 		byronGenesis, err := byron.NewByronGenesisFromFile(byronGenesisPath)
 		if err != nil {
@@ -81,7 +85,10 @@ func (c *CardanoNodeConfig) loadGenesisConfigs() error {
 	}
 	// Load Shelley genesis
 	if c.ShelleyGenesisFile != "" {
-		shelleyGenesisPath := path.Join(c.path, c.ShelleyGenesisFile)
+		shelleyGenesisPath := c.ShelleyGenesisFile
+		if !filepath.IsAbs(shelleyGenesisPath) {
+			shelleyGenesisPath = path.Join(c.path, shelleyGenesisPath)
+		}
 		// TODO: check genesis file hash (#399)
 		shelleyGenesis, err := shelley.NewShelleyGenesisFromFile(
 			shelleyGenesisPath,
@@ -93,7 +100,10 @@ func (c *CardanoNodeConfig) loadGenesisConfigs() error {
 	}
 	// Load Alonzo genesis
 	if c.AlonzoGenesisFile != "" {
-		alonzoGenesisPath := path.Join(c.path, c.AlonzoGenesisFile)
+		alonzoGenesisPath := c.AlonzoGenesisFile
+		if !filepath.IsAbs(alonzoGenesisPath) {
+			alonzoGenesisPath = path.Join(c.path, alonzoGenesisPath)
+		}
 		// TODO: check genesis file hash (#399)
 		alonzoGenesis, err := alonzo.NewAlonzoGenesisFromFile(alonzoGenesisPath)
 		if err != nil {
@@ -103,7 +113,10 @@ func (c *CardanoNodeConfig) loadGenesisConfigs() error {
 	}
 	// Load Conway genesis
 	if c.ConwayGenesisFile != "" {
-		conwayGenesisPath := path.Join(c.path, c.ConwayGenesisFile)
+		conwayGenesisPath := c.ConwayGenesisFile
+		if !filepath.IsAbs(conwayGenesisPath) {
+			conwayGenesisPath = path.Join(c.path, conwayGenesisPath)
+		}
 		// TODO: check genesis file hash (#399)
 		conwayGenesis, err := conway.NewConwayGenesisFromFile(conwayGenesisPath)
 		if err != nil {
