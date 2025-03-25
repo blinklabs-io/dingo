@@ -252,42 +252,21 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 			}
 		}
 		// Delete rolled-back UTxOs
-		var tmpUtxos []models.Utxo
-		result := txn.Metadata().
-			Where("added_slot > ?", point.Slot).
-			Order("id DESC").
-			Find(&tmpUtxos)
-		if result.Error != nil {
-			return fmt.Errorf("remove rolled-back UTxOs: %w", result.Error)
+		utxos, err := ls.db.UtxosRolledback(point.Slot, txn)
+		if err != nil {
+			return fmt.Errorf("get rolled-back UTxOs: %w", err)
 		}
-		if len(tmpUtxos) > 0 {
-			utxos := []database.Utxo{}
-			for _, utxo := range tmpUtxos {
-				tmpUtxo := database.Utxo{
-					ID:          utxo.ID,
-					TxId:        utxo.TxId,
-					OutputIdx:   utxo.OutputIdx,
-					AddedSlot:   utxo.AddedSlot,
-					DeletedSlot: utxo.DeletedSlot,
-					PaymentKey:  utxo.PaymentKey,
-					StakingKey:  utxo.StakingKey,
-					Cbor:        utxo.Cbor,
-				}
-				utxos = append(utxos, tmpUtxo)
-			}
+		if len(utxos) > 0 {
 			if err := ls.db.UtxosDelete(utxos, txn); err != nil {
 				return fmt.Errorf("remove rolled-back UTxOs: %w", err)
 			}
 		}
 		// Restore spent UTxOs
-		result = txn.Metadata().
-			Model(models.Utxo{}).
-			Where("deleted_slot > ?", point.Slot).
-			Update("deleted_slot", 0)
-		if result.Error != nil {
+		err = ls.db.UtxosUnspend(point.Slot, txn)
+		if err != nil {
 			return fmt.Errorf(
 				"restore spent UTxOs after rollback: %w",
-				result.Error,
+				err,
 			)
 		}
 		// Update tip

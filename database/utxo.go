@@ -201,6 +201,52 @@ func (d *Database) UtxosDeleted(
 	return ret, nil
 }
 
+func UtxosRolledback(
+	db *Database,
+	slot uint64,
+) ([]Utxo, error) {
+	return db.UtxosRolledback(slot, nil)
+}
+
+func (d *Database) UtxosRolledback(
+	slot uint64,
+	txn *Txn,
+) ([]Utxo, error) {
+	ret := []Utxo{}
+	if txn == nil {
+		txn = d.Transaction(false)
+	}
+	utxos, err := d.metadata.GetUtxosAddedAfterSlot(slot, txn.Metadata())
+	if err != nil {
+		return ret, err
+	}
+	for _, utxo := range utxos {
+		tmpUtxo := Utxo(utxo)
+		if err := tmpUtxo.loadCbor(txn); err != nil {
+			return ret, err
+		}
+		ret = append(ret, tmpUtxo)
+	}
+	return ret, nil
+}
+
+func UtxosUnspend(
+	db *Database,
+	slot uint64,
+) error {
+	return db.UtxosUnspend(slot, nil)
+}
+
+func (d *Database) UtxosUnspend(
+	slot uint64,
+	txn *Txn,
+) error {
+	if txn == nil {
+		txn = d.Transaction(false)
+	}
+	return d.metadata.SetUtxosNotDeletedAfterSlot(slot, txn.Metadata())
+}
+
 func UtxoBlobKey(txId []byte, outputIdx uint32) []byte {
 	key := []byte("u")
 	key = append(key, txId...)

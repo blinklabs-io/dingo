@@ -114,12 +114,14 @@ type MetadataStore interface {
 	) error
 
 	// Helpers
-	GetEpochLatest(*gorm.DB) (models.Epoch, error)
-	GetEpochsByEra(uint, *gorm.DB) ([]models.Epoch, error)
-	GetUtxosByAddress(ledger.Address, *gorm.DB) ([]models.Utxo, error)
-	GetUtxosDeletedBeforeSlot(uint64, *gorm.DB) ([]models.Utxo, error)
 	DeleteUtxo(any, *gorm.DB) error
 	DeleteUtxos([]any, *gorm.DB) error
+	GetEpochLatest(*gorm.DB) (models.Epoch, error)
+	GetEpochsByEra(uint, *gorm.DB) ([]models.Epoch, error)
+	GetUtxosAddedAfterSlot(uint64, *gorm.DB) ([]models.Utxo, error)
+	GetUtxosByAddress(ledger.Address, *gorm.DB) ([]models.Utxo, error)
+	GetUtxosDeletedBeforeSlot(uint64, *gorm.DB) ([]models.Utxo, error)
+	SetUtxosNotDeletedAfterSlot(uint64, *gorm.DB) error
 }
 
 // For now, this always returns a sqlite plugin
