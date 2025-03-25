@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package database_test
+package types_test
 
 import (
 	"database/sql"
@@ -21,7 +21,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/types"
 )
 
 func TestTypesScanValue(t *testing.T) {
@@ -30,14 +30,14 @@ func TestTypesScanValue(t *testing.T) {
 		expectedValue any
 	}{
 		{
-			origValue: func(v database.Uint64) *database.Uint64 { return &v }(
-				database.Uint64(123),
+			origValue: func(v types.Uint64) *types.Uint64 { return &v }(
+				types.Uint64(123),
 			),
 			expectedValue: "123",
 		},
 		{
-			origValue: func(v database.Rat) *database.Rat { return &v }(
-				database.Rat{
+			origValue: func(v types.Rat) *types.Rat { return &v }(
+				types.Rat{
 					Rat: big.NewRat(3, 5),
 				},
 			),
@@ -54,17 +54,27 @@ func TestTypesScanValue(t *testing.T) {
 			t.Fatalf("unexpected error: %s", err)
 		}
 		if !reflect.DeepEqual(valueOut, testDef.expectedValue) {
-			t.Fatalf("did not get expected value from Value(): got %#v, expected %#v", valueOut, testDef.expectedValue)
+			t.Fatalf(
+				"did not get expected value from Value(): got %#v, expected %#v",
+				valueOut,
+				testDef.expectedValue,
+			)
 		}
 		tmpScanner, ok := testDef.origValue.(sql.Scanner)
 		if !ok {
-			t.Fatalf("test original value does not implement sql.Scanner (it must be a pointer)")
+			t.Fatalf(
+				"test original value does not implement sql.Scanner (it must be a pointer)",
+			)
 		}
 		if err := tmpScanner.Scan(valueOut); err != nil {
 			t.Fatalf("unexpected error: %s", err)
 		}
 		if !reflect.DeepEqual(tmpScanner, testDef.origValue) {
-			t.Fatalf("did not get expected value after Scan(): got %#v, expected %#v", tmpScanner, testDef.origValue)
+			t.Fatalf(
+				"did not get expected value after Scan(): got %#v, expected %#v",
+				tmpScanner,
+				testDef.origValue,
+			)
 		}
 	}
 }

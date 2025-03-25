@@ -20,7 +20,6 @@ import (
 
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/state"
-
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
@@ -44,6 +43,8 @@ func (n *Node) chainsyncClientConnOpts() []ochainsync.ChainSyncOptionFunc {
 		ochainsync.WithRollBackwardFunc(n.chainsyncClientRollBackward),
 		// Enable pipelining of RequestNext messages to speed up chainsync
 		ochainsync.WithPipelineLimit(50),
+		// Set the recv queue size to 2x our pipeline limit
+		ochainsync.WithRecvQueueSize(100),
 	}
 }
 

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package models
+package database
 
 import (
 	"encoding/hex"
@@ -20,8 +20,6 @@ import (
 	"math/big"
 	"slices"
 	"strings"
-
-	"github.com/blinklabs-io/dingo/database"
 
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
@@ -51,7 +49,7 @@ func (b Block) Decode() (ledger.Block, error) {
 	return ledger.NewBlockFromCbor(b.Type, b.Cbor)
 }
 
-func BlockCreateTxn(txn *database.Txn, block Block) error {
+func BlockCreateTxn(txn *Txn, block Block) error {
 	// Block content by point
 	key := BlockBlobKey(block.Slot, block.Hash)
 	if err := txn.Blob().Set(key, block.Cbor); err != nil {
@@ -80,7 +78,7 @@ func BlockCreateTxn(txn *database.Txn, block Block) error {
 	return nil
 }
 
-func BlockDeleteTxn(txn *database.Txn, block Block) error {
+func BlockDeleteTxn(txn *Txn, block Block) error {
 	// Remove from blob store
 	key := BlockBlobKey(block.Slot, block.Hash)
 	if err := txn.Blob().Delete(key); err != nil {
@@ -97,10 +95,10 @@ func BlockDeleteTxn(txn *database.Txn, block Block) error {
 	return nil
 }
 
-func BlockByPoint(db database.Database, point ocommon.Point) (Block, error) {
+func BlockByPoint(db *Database, point ocommon.Point) (Block, error) {
 	var ret Block
 	txn := db.Transaction(false)
-	err := txn.Do(func(txn *database.Txn) error {
+	err := txn.Do(func(txn *Txn) error {
 		var err error
 		ret, err = BlockByPointTxn(txn, point)
 		return err
@@ -108,7 +106,7 @@ func BlockByPoint(db database.Database, point ocommon.Point) (Block, error) {
 	return ret, err
 }
 
-func blockByKey(txn *database.Txn, blockKey []byte) (Block, error) {
+func blockByKey(txn *Txn, blockKey []byte) (Block, error) {
 	point := blockBlobKeyToPoint(blockKey)
 	ret := Block{
 		Slot: point.Slot,
@@ -145,23 +143,26 @@ func blockByKey(txn *database.Txn, blockKey []byte) (Block, error) {
 	return ret, nil
 }
 
-func BlockByPointTxn(txn *database.Txn, point ocommon.Point) (Block, error) {
+func BlockByPointTxn(txn *Txn, point ocommon.Point) (Block, error) {
 	key := BlockBlobKey(point.Slot, point.Hash)
 	return blockByKey(txn, key)
 }
 
-func BlockByNumber(db database.Database, blockNumber uint64) (Block, error) {
+func BlockByNumber(db *Database, blockNumber uint64) (Block, error) {
 	var ret Block
 	txn := db.Transaction(false)
-	err := txn.Do(func(txn *database.Txn) error {
+	err := txn.Do(func(txn *Txn) error {
 		var err error
 		ret, err = BlockByNumberTxn(txn, blockNumber)
+		if errors.Is(err, badger.ErrKeyNotFound) {
+			return ErrBlockNotFound
+		}
 		return err
 	})
 	return ret, err
 }
 
-func BlockByNumberTxn(txn *database.Txn, blockNumber uint64) (Block, error) {
+func BlockByNumberTxn(txn *Txn, blockNumber uint64) (Block, error) {
 	heightKey := BlockBlobHeightKey(blockNumber)
 	item, err := txn.Blob().Get(heightKey)
 	if err != nil {
@@ -174,10 +175,10 @@ func BlockByNumberTxn(txn *database.Txn, blockNumber uint64) (Block, error) {
 	return blockByKey(txn, blockKey)
 }
 
-func BlocksRecent(db database.Database, count int) ([]Block, error) {
+func BlocksRecent(db *Database, count int) ([]Block, error) {
 	var ret []Block
 	txn := db.Transaction(false)
-	err := txn.Do(func(txn *database.Txn) error {
+	err := txn.Do(func(txn *Txn) error {
 		var err error
 		ret, err = BlocksRecentTxn(txn, count)
 		return err
@@ -185,7 +186,7 @@ func BlocksRecent(db database.Database, count int) ([]Block, error) {
 	return ret, err
 }
 
-func BlocksRecentTxn(txn *database.Txn, count int) ([]Block, error) {
+func BlocksRecentTxn(txn *Txn, count int) ([]Block, error) {
 	ret := make([]Block, 0, count)
 	iterOpts := badger.IteratorOptions{
 		Reverse: true,
@@ -218,10 +219,10 @@ func BlocksRecentTxn(txn *database.Txn, count int) ([]Block, error) {
 	return ret, nil
 }
 
-func BlockBeforeSlot(db database.Database, slotNumber uint64) (Block, error) {
+func BlockBeforeSlot(db *Database, slotNumber uint64) (Block, error) {
 	var ret Block
 	txn := db.Transaction(false)
-	err := txn.Do(func(txn *database.Txn) error {
+	err := txn.Do(func(txn *Txn) error {
 		var err error
 		ret, err = BlockBeforeSlotTxn(txn, slotNumber)
 		return err
@@ -229,7 +230,7 @@ func BlockBeforeSlot(db database.Database, slotNumber uint64) (Block, error) {
 	return ret, err
 }
 
-func BlockBeforeSlotTxn(txn *database.Txn, slotNumber uint64) (Block, error) {
+func BlockBeforeSlotTxn(txn *Txn, slotNumber uint64) (Block, error) {
 	iterOpts := badger.IteratorOptions{
 		Reverse: true,
 	}
@@ -259,7 +260,7 @@ func BlockBeforeSlotTxn(txn *database.Txn, slotNumber uint64) (Block, error) {
 	return Block{}, ErrBlockNotFound
 }
 
-func BlocksAfterSlotTxn(txn *database.Txn, slotNumber uint64) ([]Block, error) {
+func BlocksAfterSlotTxn(txn *Txn, slotNumber uint64) ([]Block, error) {
 	var ret []Block
 	iterOpts := badger.IteratorOptions{}
 	it := txn.Blob().NewIterator(iterOpts)

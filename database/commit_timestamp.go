@@ -15,29 +15,8 @@
 package database
 
 import (
-	"errors"
 	"fmt"
-	"math/big"
-
-	badger "github.com/dgraph-io/badger/v4"
-	"gorm.io/gorm"
-	"gorm.io/gorm/clause"
 )
-
-const (
-	commitTimestampBlobKey = "metadata_commit_timestamp"
-	commitTimestampRowId   = 1
-)
-
-// CommitTimestamp represents the sqlite table used to track the current commit timestamp
-type CommitTimestamp struct {
-	ID        uint `gorm:"primarykey"`
-	Timestamp int64
-}
-
-func (CommitTimestamp) TableName() string {
-	return "commit_timestamp"
-}
 
 type CommitTimestampError struct {
 	MetadataTimestamp int64
@@ -52,63 +31,44 @@ func (e CommitTimestampError) Error() string {
 	)
 }
 
-func (b *BaseDatabase) checkCommitTimestamp() error {
-	// Create table if it doesn't exist
-	if err := b.Metadata().AutoMigrate(&CommitTimestamp{}); err != nil {
-		return err
+func (b *Database) checkCommitTimestamp() error {
+	// Get value from metadata
+	metadataTimestamp, metadataErr := b.Metadata().GetCommitTimestamp()
+	if metadataErr != nil {
+		return fmt.Errorf(
+			"failed to get metadata timestamp from plugin: %w",
+			metadataErr,
+		)
 	}
-	// Get value from sqlite
-	var tmpCommitTimestamp CommitTimestamp
-	result := b.Metadata().First(&tmpCommitTimestamp)
-	if result.Error != nil {
-		// No metadata yet, so nothing to check
-		if errors.Is(result.Error, gorm.ErrRecordNotFound) {
-			return nil
-		}
-		return result.Error
-	}
-	// Get value from badger
-	err := b.Blob().View(func(txn *badger.Txn) error {
-		item, err := txn.Get([]byte(commitTimestampBlobKey))
-		if err != nil {
-			return err
-		}
-		val, err := item.ValueCopy(nil)
-		if err != nil {
-			return err
-		}
-		tmpTimestamp := new(big.Int).SetBytes(val).Int64()
-		// Compare values
-		if tmpTimestamp != tmpCommitTimestamp.Timestamp {
-			return CommitTimestampError{
-				MetadataTimestamp: tmpCommitTimestamp.Timestamp,
-				BlobTimestamp:     tmpTimestamp,
-			}
-		}
+	// No timestamp in the database
+	if metadataTimestamp <= 0 {
 		return nil
-	})
-	if err != nil {
-		return err
+	}
+	// Get value from blob
+	blobTimestamp, blobErr := b.Blob().GetCommitTimestamp()
+	if blobErr != nil {
+		return fmt.Errorf(
+			"failed to get blob timestamp from plugin: %w",
+			blobErr,
+		)
+	}
+	// Compare values
+	if blobTimestamp != metadataTimestamp {
+		return CommitTimestampError{
+			MetadataTimestamp: metadataTimestamp,
+			BlobTimestamp:     blobTimestamp,
+		}
 	}
 	return nil
 }
 
-func (b *BaseDatabase) updateCommitTimestamp(txn *Txn, timestamp int64) error {
-	// Update sqlite
-	tmpCommitTimestamp := CommitTimestamp{
-		ID:        commitTimestampRowId,
-		Timestamp: timestamp,
+func (b *Database) updateCommitTimestamp(txn *Txn, timestamp int64) error {
+	// Update metadata
+	if err := b.Metadata().SetCommitTimestamp(txn.Metadata(), timestamp); err != nil {
+		return err
 	}
-	result := txn.Metadata().Clauses(clause.OnConflict{
-		Columns:   []clause.Column{{Name: "id"}},
-		DoUpdates: clause.AssignmentColumns([]string{"timestamp"}),
-	}).Create(&tmpCommitTimestamp)
-	if result.Error != nil {
-		return result.Error
-	}
-	// Update badger
-	tmpTimestamp := new(big.Int).SetInt64(timestamp)
-	if err := txn.Blob().Set([]byte(commitTimestampBlobKey), tmpTimestamp.Bytes()); err != nil {
+	// Update blob
+	if err := b.Blob().SetCommitTimestamp(txn.Blob(), timestamp); err != nil {
 		return err
 	}
 	return nil

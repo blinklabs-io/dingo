@@ -1,4 +1,4 @@
-// Copyright 2024 Blink Labs Software
+// Copyright 2025 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,22 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package version
+package blob
 
 import (
-	"fmt"
+	_ "github.com/blinklabs-io/dingo/database/plugin/blob/badger"
 )
-
-// These are populated at build time
-var (
-	Version    string
-	CommitHash string
-)
-
-func GetVersionString() string {
-	if Version != "" {
-		return fmt.Sprintf("%s (commit %s)", Version, CommitHash)
-	} else {
-		return fmt.Sprintf("devel (commit %s)", CommitHash)
-	}
-}

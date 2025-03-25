@@ -27,7 +27,6 @@ import (
 	"github.com/blinklabs-io/dingo/peergov"
 	"github.com/blinklabs-io/dingo/state"
 	"github.com/blinklabs-io/dingo/utxorpc"
-
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	oblockfetch "github.com/blinklabs-io/gouroboros/protocol/blockfetch"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
@@ -55,11 +54,6 @@ func New(cfg Config) (*Node, error) {
 	n := &Node{
 		config:   cfg,
 		eventBus: eventBus,
-		mempool: mempool.NewMempool(
-			cfg.logger,
-			eventBus,
-			cfg.promRegistry,
-		),
 	}
 	if err := n.configPopulateNetworkMagic(); err != nil {
 		return nil, fmt.Errorf("invalid configuration: %w", err)
@@ -92,6 +86,13 @@ func (n *Node) Run() error {
 		return fmt.Errorf("failed to load state database: %w", err)
 	}
 	n.ledgerState = state
+	// Initialize mempool
+	n.mempool = mempool.NewMempool(
+		n.config.logger,
+		n.eventBus,
+		n.config.promRegistry,
+		n.ledgerState,
+	)
 	// Initialize chainsync state
 	n.chainsyncState = chainsync.NewState(
 		n.eventBus,
@@ -126,6 +127,7 @@ func (n *Node) Run() error {
 			EventBus:    n.eventBus,
 			LedgerState: n.ledgerState,
 			Mempool:     n.mempool,
+			Port:        n.config.utxorpcPort,
 		},
 	)
 	if err := n.utxorpc.Start(); err != nil {

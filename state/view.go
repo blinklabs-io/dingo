@@ -16,9 +16,6 @@ package state
 
 import (
 	"github.com/blinklabs-io/dingo/database"
-	"github.com/blinklabs-io/dingo/state/models"
-
-	"github.com/blinklabs-io/gouroboros/ledger/common"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
 
@@ -43,10 +40,10 @@ func (lv *LedgerView) NetworkId() uint {
 func (lv *LedgerView) UtxoById(
 	utxoId lcommon.TransactionInput,
 ) (lcommon.Utxo, error) {
-	utxo, err := models.UtxoByRefTxn(
-		lv.txn,
+	utxo, err := lv.ls.db.UtxoByRef(
 		utxoId.Id().Bytes(),
 		utxoId.Index(),
+		lv.txn,
 	)
 	if err != nil {
 		return lcommon.Utxo{}, err
@@ -61,50 +58,16 @@ func (lv *LedgerView) UtxoById(
 	}, nil
 }
 
+func (lv *LedgerView) PoolRegistration(
+	pkh []byte,
+) ([]lcommon.PoolRegistrationCertificate, error) {
+	poolKeyHash := lcommon.PoolKeyHash(lcommon.NewBlake2b224(pkh))
+	return lv.txn.DB().GetPoolRegistrations(poolKeyHash, lv.txn)
+}
+
 func (lv *LedgerView) StakeRegistration(
 	stakingKey []byte,
 ) ([]lcommon.StakeRegistrationCertificate, error) {
-	ret := []lcommon.StakeRegistrationCertificate{}
-	certs := []models.StakeRegistration{}
-	result := lv.txn.Metadata().
-		Where("staking_key = ?", stakingKey).
-		Find(&certs)
-	if result.Error != nil {
-		return ret, result.Error
-	}
-	for _, cert := range certs {
-		ret = append(
-			ret,
-			common.StakeRegistrationCertificate{
-				StakeRegistration: common.StakeCredential{
-					Credential: cert.StakingKey,
-				},
-			},
-		)
-	}
-	return ret, nil
-}
-
-func (lv *LedgerView) PoolRegistration(
-	poolKeyHash []byte,
-) ([]lcommon.PoolRegistrationCertificate, error) {
-	ret := []lcommon.PoolRegistrationCertificate{}
-	certs := []models.PoolRegistration{}
-	result := lv.txn.Metadata().
-		Where("pool_key_hash = ?", poolKeyHash).
-		Find(&certs)
-	if result.Error != nil {
-		return ret, result.Error
-	}
-	for _, cert := range certs {
-		ret = append(
-			ret,
-			common.PoolRegistrationCertificate{
-				Operator: common.PoolKeyHash(
-					common.NewBlake2b224(cert.PoolKeyHash),
-				),
-			},
-		)
-	}
-	return ret, nil
+	// stakingKey = lcommon.NewBlake2b224(stakingKey)
+	return lv.txn.DB().GetStakeRegistrations(stakingKey, lv.txn)
 }

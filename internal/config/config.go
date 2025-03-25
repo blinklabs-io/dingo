@@ -18,7 +18,6 @@ import (
 	"fmt"
 
 	"github.com/blinklabs-io/dingo/topology"
-
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/kelseyhightower/envconfig"
 )

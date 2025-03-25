@@ -1,4 +1,4 @@
-// Copyright 2024 Blink Labs Software
+// Copyright 2025 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -16,17 +16,16 @@ package models
 
 // MigrateModels contains a list of model objects that should have DB migrations applied
 var MigrateModels = []any{
-	//&Block{},
 	&Epoch{},
 	&PoolRegistration{},
 	&PoolRegistrationOwner{},
 	&PoolRegistrationRelay{},
 	&PoolRetirement{},
-	&StakeRegistration{},
-	&StakeDeregistration{},
-	&StakeDelegation{},
 	&PParams{},
 	&PParamUpdate{},
+	&StakeDelegation{},
+	&StakeDeregistration{},
+	&StakeRegistration{},
 	&Tip{},
 	&Utxo{},
 }

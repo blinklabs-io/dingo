@@ -24,10 +24,10 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite/models"
 	"github.com/blinklabs-io/dingo/event"
-	"github.com/blinklabs-io/dingo/state/models"
-
 	"github.com/blinklabs-io/gouroboros/cbor"
+	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
@@ -67,8 +67,8 @@ func (ls *LedgerState) handleEventChainsync(evt event.Event) {
 }
 
 func (ls *LedgerState) handleEventBlockfetch(evt event.Event) {
-	ls.chainsyncMutex.Lock()
-	defer ls.chainsyncMutex.Unlock()
+	ls.chainsyncBlockfetchMutex.Lock()
+	defer ls.chainsyncBlockfetchMutex.Unlock()
 	e := evt.Data.(BlockfetchEvent)
 	if e.BatchDone {
 		if err := ls.handleEventBlockfetchBatchDone(e); err != nil {
@@ -99,6 +99,7 @@ func (ls *LedgerState) handleEventChainsyncRollback(e ChainsyncEvent) error {
 func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 	// Check for out-of-order block headers
 	// This is a stop-gap to handle disconnects during sync until we get chain selection working
+	ls.chainsyncHeaderPointsMutex.Lock()
 	if ls.chainsyncHeaderPoints != nil {
 		if pointsLen := len(ls.chainsyncHeaderPoints); pointsLen > 0 &&
 			e.Point.Slot < ls.chainsyncHeaderPoints[pointsLen-1].Slot {
@@ -112,7 +113,20 @@ func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 			ls.chainsyncHeaderPoints = tmpHeaderPoints
 		}
 	}
+	ls.chainsyncHeaderPointsMutex.Unlock()
+	// Wait for current blockfetch to finish if we've already got another batch worth queued up
+	// This prevents us exceeding the configured recv queue size in the block-fetch protocol
+	if len(ls.chainsyncHeaderPoints) >= blockfetchBatchSize {
+		// Lock and immediately unlock to pause for current blockfetch process without blocking
+		// anything else. This is clunky, but the alternative is a waiting on a channel, which
+		// adds unnecessary complexity
+		ls.chainsyncHeaderMutex.Lock()
+		//nolint:staticcheck
+		ls.chainsyncHeaderMutex.Unlock()
+	}
 	// Add to cached header points
+	ls.chainsyncHeaderPointsMutex.Lock()
+	defer ls.chainsyncHeaderPointsMutex.Unlock()
 	ls.chainsyncHeaderPoints = append(
 		ls.chainsyncHeaderPoints,
 		e.Point,
@@ -138,11 +152,15 @@ func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 				"component",
 				"ledger",
 			)
+			// Unblock new chainsync block headers
+			ls.chainsyncHeaderMutex.Unlock()
 			return nil
 		}
 		ls.chainsyncBlockfetchWaiting = true
 		return nil
 	}
+	// Block new chainsync block headers until we fetch pending block bodies
+	ls.chainsyncHeaderMutex.Lock()
 	// Request current bulk range
 	err := ls.config.BlockfetchRequestRangeFunc(
 		e.ConnectionId,
@@ -150,6 +168,8 @@ func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 		ls.chainsyncHeaderPoints[len(ls.chainsyncHeaderPoints)-1],
 	)
 	if err != nil {
+		// Unblock chainsync block headers
+		ls.chainsyncHeaderMutex.Unlock()
 		return err
 	}
 	ls.chainsyncBlockfetchBusy = true
@@ -159,6 +179,7 @@ func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 	return nil
 }
 
+//nolint:unparam
 func (ls *LedgerState) handleEventBlockfetchBlock(e BlockfetchEvent) error {
 	// Check for out-of-order block events
 	// This is a stop-gap to handle disconnects during sync until we get chain selection working
@@ -333,15 +354,16 @@ func (ls *LedgerState) verifyBlock(e BlockfetchEvent) error {
 
 func (ls *LedgerState) processGenesisBlock(
 	txn *database.Txn,
-	e BlockfetchEvent,
+	point ocommon.Point,
+	block ledger.Block,
 ) error {
 	if ls.currentEpoch.ID == 0 {
 		// Check for era change
-		if uint(e.Block.Era().Id) != ls.currentEra.Id {
-			targetEraId := uint(e.Block.Era().Id)
+		if uint(block.Era().Id) != ls.currentEra.Id {
+			targetEraId := uint(block.Era().Id)
 			// Transition through every era between the current and the target era
 			for nextEraId := ls.currentEra.Id + 1; nextEraId <= targetEraId; nextEraId++ {
-				if err := ls.transitionToEra(txn, nextEraId, ls.currentEpoch.EpochId, e.Point.Slot); err != nil {
+				if err := ls.transitionToEra(txn, nextEraId, ls.currentEpoch.EpochId, point.Slot); err != nil {
 					return err
 				}
 			}
@@ -361,16 +383,21 @@ func (ls *LedgerState) processGenesisBlock(
 			)
 			tmpNonce = genesisHashBytes
 		}
-		newEpoch := models.Epoch{
-			EpochId:       0,
-			EraId:         ls.currentEra.Id,
-			StartSlot:     0,
-			SlotLength:    epochSlotLength,
-			LengthInSlots: epochLength,
-			Nonce:         tmpNonce,
+		err = txn.DB().SetEpoch(
+			0,
+			0,
+			tmpNonce,
+			ls.currentEra.Id,
+			epochSlotLength,
+			epochLength,
+			txn,
+		)
+		if err != nil {
+			return err
 		}
-		if result := txn.Metadata().Create(&newEpoch); result.Error != nil {
-			return result.Error
+		newEpoch, err := txn.DB().GetEpochLatest(txn)
+		if err != nil {
+			return err
 		}
 		ls.currentEpoch = newEpoch
 		ls.config.Logger.Debug(
@@ -410,8 +437,12 @@ func (ls *LedgerState) calculateEpochNonce(
 	txn *database.Txn,
 	epochStartSlot uint64,
 ) ([]byte, error) {
+	// No epoch nonce in Byron
+	if ls.currentEra.Id == 0 {
+		return nil, nil
+	}
 	// Use Shelley genesis hash for initial epoch nonce
-	if len(ls.currentEpoch.Nonce) == 0 && ls.currentEra.Id > 0 { // Byron
+	if len(ls.currentEpoch.Nonce) == 0 {
 		genesisHashBytes, err := hex.DecodeString(
 			ls.config.CardanoNodeConfig.ShelleyGenesisHash,
 		)
@@ -432,7 +463,7 @@ func (ls *LedgerState) calculateEpochNonce(
 	).Num().Uint64()
 	stabilityWindowStartSlot := epochStartSlot - stabilityWindow
 	// Get last block before stability window
-	blockBeforeStabilityWindow, err := models.BlockBeforeSlotTxn(
+	blockBeforeStabilityWindow, err := database.BlockBeforeSlotTxn(
 		txn,
 		stabilityWindowStartSlot,
 	)
@@ -440,12 +471,12 @@ func (ls *LedgerState) calculateEpochNonce(
 		return nil, err
 	}
 	// Get last block in previous epoch
-	blockLastPrevEpoch, err := models.BlockBeforeSlotTxn(
+	blockLastPrevEpoch, err := database.BlockBeforeSlotTxn(
 		txn,
 		ls.currentEpoch.StartSlot,
 	)
 	if err != nil {
-		if errors.Is(err, models.ErrBlockNotFound) {
+		if errors.Is(err, database.ErrBlockNotFound) {
 			return blockBeforeStabilityWindow.Nonce, nil
 		}
 		return nil, err
@@ -461,14 +492,15 @@ func (ls *LedgerState) calculateEpochNonce(
 
 func (ls *LedgerState) processEpochRollover(
 	txn *database.Txn,
-	e BlockfetchEvent,
+	point ocommon.Point,
+	block ledger.Block,
 ) error {
 	// Check for epoch rollover
-	if e.Point.Slot > ls.currentEpoch.StartSlot+uint64(
+	if point.Slot > ls.currentEpoch.StartSlot+uint64(
 		ls.currentEpoch.LengthInSlots,
 	) {
 		// Apply pending pparam updates
-		if err := ls.applyPParamUpdates(txn, ls.currentEpoch.EpochId, e.Point.Slot); err != nil {
+		if err := ls.applyPParamUpdates(txn, ls.currentEpoch.EpochId, point.Slot); err != nil {
 			return err
 		}
 		// Create next epoch record
@@ -485,16 +517,21 @@ func (ls *LedgerState) processEpochRollover(
 		if err != nil {
 			return err
 		}
-		newEpoch := models.Epoch{
-			EpochId:       ls.currentEpoch.EpochId + 1,
-			EraId:         uint(e.Block.Era().Id),
-			SlotLength:    epochSlotLength,
-			LengthInSlots: epochLength,
-			StartSlot:     epochStartSlot,
-			Nonce:         tmpNonce,
+		err = txn.DB().SetEpoch(
+			epochStartSlot,
+			ls.currentEpoch.EpochId+1,
+			tmpNonce,
+			uint(block.Era().Id),
+			epochSlotLength,
+			epochLength,
+			txn,
+		)
+		if err != nil {
+			return err
 		}
-		if result := txn.Metadata().Create(&newEpoch); result.Error != nil {
-			return result.Error
+		newEpoch, err := txn.DB().GetEpochLatest(txn)
+		if err != nil {
+			return err
 		}
 		ls.currentEpoch = newEpoch
 		ls.metrics.epochNum.Set(float64(newEpoch.EpochId))
@@ -523,11 +560,11 @@ func (ls *LedgerState) processBlockEvent(
 		return err
 	}
 	// Special handling for genesis block
-	if err := ls.processGenesisBlock(txn, e); err != nil {
+	if err := ls.processGenesisBlock(txn, e.Point, e.Block); err != nil {
 		return err
 	}
 	// Check for epoch rollover
-	if err := ls.processEpochRollover(txn, e); err != nil {
+	if err := ls.processEpochRollover(txn, e.Point, e.Block); err != nil {
 		return err
 	}
 
@@ -564,7 +601,7 @@ func (ls *LedgerState) processBlockEvent(
 	if err != nil {
 		return err
 	}
-	tmpBlock := models.Block{
+	tmpBlock := database.Block{
 		Slot: e.Point.Slot,
 		Hash: e.Point.Hash,
 		// TODO: figure out something for Byron. this won't work, since the
@@ -580,63 +617,7 @@ func (ls *LedgerState) processBlockEvent(
 	}
 	// Process transactions
 	for _, tx := range e.Block.Transactions() {
-		// Validate transaction
-		if ls.currentEra.ValidateTxFunc != nil {
-			lv := &LedgerView{
-				txn: txn,
-				ls:  ls,
-			}
-			err := ls.currentEra.ValidateTxFunc(
-				tx,
-				e.Point.Slot,
-				lv,
-				ls.currentPParams,
-			)
-			if err != nil {
-				ls.config.Logger.Warn(
-					"TX " + tx.Hash() + " failed validation: " + err.Error(),
-				)
-				//return fmt.Errorf("TX validation failure: %w", err)
-			}
-		}
-		// Process consumed UTxOs
-		for _, consumed := range tx.Consumed() {
-			if err := ls.consumeUtxo(txn, consumed, e.Point.Slot); err != nil {
-				return fmt.Errorf("remove consumed UTxO: %w", err)
-			}
-		}
-		// Process produced UTxOs
-		for _, produced := range tx.Produced() {
-			outAddr := produced.Output.Address()
-			tmpUtxo := models.Utxo{
-				TxId:       produced.Id.Id().Bytes(),
-				OutputIdx:  produced.Id.Index(),
-				AddedSlot:  e.Point.Slot,
-				PaymentKey: outAddr.PaymentKeyHash().Bytes(),
-				StakingKey: outAddr.StakeKeyHash().Bytes(),
-				Cbor:       produced.Output.Cbor(),
-			}
-			if err := ls.addUtxo(txn, tmpUtxo); err != nil {
-				return fmt.Errorf("add produced UTxO: %w", err)
-			}
-		}
-		// XXX: generate event for each TX/UTxO?
-		// Protocol parameter updates
-		if updateEpoch, paramUpdates := tx.ProtocolParameterUpdates(); updateEpoch > 0 {
-			for genesisHash, update := range paramUpdates {
-				tmpUpdate := models.PParamUpdate{
-					AddedSlot:   e.Point.Slot,
-					Epoch:       updateEpoch,
-					GenesisHash: genesisHash.Bytes(),
-					Cbor:        update.Cbor(),
-				}
-				if result := txn.Metadata().Create(&tmpUpdate); result.Error != nil {
-					return result.Error
-				}
-			}
-		}
-		// Certificates
-		if err := ls.processTransactionCertificates(txn, e.Point, tx); err != nil {
+		if err := ls.processTransaction(txn, tx, e.Point); err != nil {
 			return err
 		}
 	}
@@ -654,16 +635,91 @@ func (ls *LedgerState) processBlockEvent(
 	return nil
 }
 
+func (ls *LedgerState) processTransaction(
+	txn *database.Txn,
+	tx ledger.Transaction,
+	point ocommon.Point,
+) error {
+	// Validate transaction
+	if ls.currentEra.ValidateTxFunc != nil {
+		lv := &LedgerView{
+			txn: txn,
+			ls:  ls,
+		}
+		err := ls.currentEra.ValidateTxFunc(
+			tx,
+			point.Slot,
+			lv,
+			ls.currentPParams,
+		)
+		if err != nil {
+			ls.config.Logger.Warn(
+				"TX " + tx.Hash() + " failed validation: " + err.Error(),
+			)
+			// return fmt.Errorf("TX validation failure: %w", err)
+		}
+	}
+	// Process consumed UTxOs
+	for _, consumed := range tx.Consumed() {
+		if err := ls.consumeUtxo(txn, consumed, point.Slot); err != nil {
+			return fmt.Errorf("remove consumed UTxO: %w", err)
+		}
+	}
+	// Process produced UTxOs
+	for _, produced := range tx.Produced() {
+		outAddr := produced.Output.Address()
+		tmpUtxo := models.Utxo{
+			TxId:       produced.Id.Id().Bytes(),
+			OutputIdx:  produced.Id.Index(),
+			AddedSlot:  point.Slot,
+			PaymentKey: outAddr.PaymentKeyHash().Bytes(),
+			StakingKey: outAddr.StakeKeyHash().Bytes(),
+			Cbor:       produced.Output.Cbor(),
+		}
+		if err := ls.addUtxo(txn, tmpUtxo); err != nil {
+			return fmt.Errorf("add produced UTxO: %w", err)
+		}
+	}
+	// XXX: generate event for each TX/UTxO?
+	// Protocol parameter updates
+	if updateEpoch, paramUpdates := tx.ProtocolParameterUpdates(); updateEpoch > 0 {
+		for genesisHash, update := range paramUpdates {
+			err := txn.DB().Metadata().SetPParamUpdate(
+				genesisHash.Bytes(),
+				update.Cbor(),
+				point.Slot,
+				updateEpoch,
+				txn.Metadata(),
+			)
+			if err != nil {
+				return err
+			}
+		}
+	}
+	// Certificates
+	if err := ls.processTransactionCertificates(txn, point, tx); err != nil {
+		return err
+	}
+	return nil
+}
+
 func (ls *LedgerState) handleEventBlockfetchBatchDone(e BlockfetchEvent) error {
 	// Process pending block events
 	if err := ls.processBlockEvents(); err != nil {
+		ls.chainsyncBlockfetchBusy = false
+		ls.chainsyncBlockfetchWaiting = false
+		ls.chainsyncHeaderMutex.Unlock()
 		return err
 	}
+	ls.chainsyncHeaderPointsMutex.Lock()
+	defer ls.chainsyncHeaderPointsMutex.Unlock()
 	// Check for pending block range request
 	if !ls.chainsyncBlockfetchWaiting ||
 		len(ls.chainsyncHeaderPoints) == 0 {
 		ls.chainsyncBlockfetchBusy = false
 		ls.chainsyncBlockfetchWaiting = false
+		// Allow collection of more block headers via chainsync
+		ls.chainsyncHeaderMutex.Unlock()
 		return nil
 	}
 	// Request waiting bulk range
@@ -673,6 +729,9 @@ func (ls *LedgerState) handleEventBlockfetchBatchDone(e BlockfetchEvent) error {
 		ls.chainsyncHeaderPoints[len(ls.chainsyncHeaderPoints)-1],
 	)
 	if err != nil {
+		ls.chainsyncBlockfetchBusy = false
+		ls.chainsyncBlockfetchWaiting = false
+		ls.chainsyncHeaderMutex.Unlock()
 		return err
 	}
 	ls.chainsyncBlockfetchBusyTime = time.Now()

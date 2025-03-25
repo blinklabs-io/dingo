@@ -1,4 +1,4 @@
-// Copyright 2024 Blink Labs Software
+// Copyright 2025 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,22 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package version
+package models
 
-import (
-	"fmt"
-)
+type PoolRetirement struct {
+	ID          uint   `gorm:"primarykey"`
+	PoolKeyHash []byte `gorm:"index"`
+	Epoch       uint64
+	AddedSlot   uint64
+}
 
-// These are populated at build time
-var (
-	Version    string
-	CommitHash string
-)
-
-func GetVersionString() string {
-	if Version != "" {
-		return fmt.Sprintf("%s (commit %s)", Version, CommitHash)
-	} else {
-		return fmt.Sprintf("devel (commit %s)", CommitHash)
-	}
+func (PoolRetirement) TableName() string {
+	return "pool_retirement"
 }

@@ -1,4 +1,4 @@
-// Copyright 2024 Blink Labs Software
+// Copyright 2025 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -17,11 +17,12 @@ package state
 import (
 	"errors"
 
-	"github.com/blinklabs-io/dingo/state/models"
-	"gorm.io/gorm"
-
+	"github.com/blinklabs-io/dingo/database"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
+
+var ErrIteratorChainTip = errors.New("chain iterator is at chain tip")
 
 type ChainIterator struct {
 	ls          *LedgerState
@@ -31,7 +32,7 @@ type ChainIterator struct {
 
 type ChainIteratorResult struct {
 	Point    ocommon.Point
-	Block    models.Block
+	Block    database.Block
 	Rollback bool
 }
 
@@ -46,9 +47,9 @@ func newChainIterator(
 	}
 	// Lookup start block in metadata DB if not origin
 	if startPoint.Slot > 0 || len(startPoint.Hash) > 0 {
-		tmpBlock, err := models.BlockByPoint(ls.db, startPoint)
+		tmpBlock, err := database.BlockByPoint(ls.db, startPoint)
 		if err != nil {
-			if errors.Is(err, gorm.ErrRecordNotFound) {
+			if errors.Is(err, database.ErrBlockNotFound) {
 				return nil, ErrBlockNotFound
 			}
 			return nil, err
@@ -62,11 +63,27 @@ func newChainIterator(
 	return ci, nil
 }
 
+func (ci *ChainIterator) Tip() (ochainsync.Tip, error) {
+	tmpBlocks, err := database.BlocksRecent(ci.ls.db, 1)
+	if err != nil {
+		return ochainsync.Tip{}, err
+	}
+	var tmpBlock database.Block
+	if len(tmpBlocks) > 0 {
+		tmpBlock = tmpBlocks[0]
+	}
+	tip := ochainsync.Tip{
+		Point:       ocommon.NewPoint(tmpBlock.Slot, tmpBlock.Hash),
+		BlockNumber: tmpBlock.Number,
+	}
+	return tip, nil
+}
+
 func (ci *ChainIterator) Next(blocking bool) (*ChainIteratorResult, error) {
 	ci.ls.RLock()
 	ret := &ChainIteratorResult{}
 	// Lookup next block in metadata DB
-	tmpBlock, err := models.BlockByNumber(ci.ls.db, ci.blockNumber)
+	tmpBlock, err := database.BlockByNumber(ci.ls.db, ci.blockNumber)
 	// Return immedidately if a block is found
 	if err == nil {
 		ret.Point = ocommon.NewPoint(tmpBlock.Slot, tmpBlock.Hash)
@@ -76,13 +93,16 @@ func (ci *ChainIterator) Next(blocking bool) (*ChainIteratorResult, error) {
 		return ret, nil
 	}
 	// Return any actual error
-	if !errors.Is(err, gorm.ErrRecordNotFound) {
+	if !errors.Is(err, database.ErrBlockNotFound) {
 		ci.ls.RUnlock()
 		return ret, err
 	}
 	// Check against current tip to see if it was rolled back
-	tip := ci.ls.Tip()
-	if ci.blockNumber-1 > tip.BlockNumber {
+	tip, err := ci.Tip()
+	if err != nil {
+		return nil, err
+	}
+	if ci.blockNumber > 0 && ci.blockNumber-1 > tip.BlockNumber {
 		ret.Point = tip.Point
 		ret.Rollback = true
 		ci.ls.RUnlock()
@@ -91,7 +111,7 @@ func (ci *ChainIterator) Next(blocking bool) (*ChainIteratorResult, error) {
 	// Return immediately if we're not blocking
 	if !blocking {
 		ci.ls.RUnlock()
-		return nil, nil
+		return nil, ErrIteratorChainTip
 	}
 	// Wait for new block or a rollback
 	blockSubId, blockChan := ci.ls.config.EventBus.Subscribe(

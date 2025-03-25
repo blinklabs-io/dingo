@@ -1,4 +1,4 @@
-// Copyright 2024 Blink Labs Software
+// Copyright 2025 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -14,13 +14,17 @@
 
 package models
 
-type PoolRetirement struct {
+type Utxo struct {
 	ID          uint   `gorm:"primarykey"`
-	PoolKeyHash []byte `gorm:"index"`
-	Epoch       uint
-	AddedSlot   uint64
+	TxId        []byte `gorm:"index:tx_id_output_idx"`
+	OutputIdx   uint32 `gorm:"index:tx_id_output_idx"`
+	AddedSlot   uint64 `gorm:"index"`
+	DeletedSlot uint64 `gorm:"index"`
+	PaymentKey  []byte `gorm:"index"`
+	StakingKey  []byte `gorm:"index"`
+	Cbor        []byte `gorm:"-"` // This is here for convenience but not represented in the metadata DB
 }
 
-func (PoolRetirement) TableName() string {
-	return "pool_retirement"
+func (u *Utxo) TableName() string {
+	return "utxo"
 }

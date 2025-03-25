@@ -1,4 +1,4 @@
-// Copyright 2024 Blink Labs Software
+// Copyright 2025 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -17,16 +17,16 @@ package models
 import (
 	"net"
 
-	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/types"
 )
 
 type PoolRegistration struct {
 	ID            uint   `gorm:"primarykey"`
 	PoolKeyHash   []byte `gorm:"index"`
 	VrfKeyHash    []byte
-	Pledge        database.Uint64
-	Cost          database.Uint64
-	Margin        *database.Rat
+	Pledge        types.Uint64
+	Cost          types.Uint64
+	Margin        *types.Rat
 	Owners        []PoolRegistrationOwner
 	Relays        []PoolRegistrationRelay
 	MetadataUrl   string

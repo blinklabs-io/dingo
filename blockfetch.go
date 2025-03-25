@@ -21,7 +21,6 @@ import (
 
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/state"
-
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/protocol/blockfetch"
@@ -41,6 +40,8 @@ func (n *Node) blockfetchClientConnOpts() []oblockfetch.BlockFetchOptionFunc {
 		oblockfetch.WithBatchDoneFunc(n.blockfetchClientBatchDone),
 		oblockfetch.WithBatchStartTimeout(2 * time.Second),
 		oblockfetch.WithBlockTimeout(2 * time.Second),
+		// Set the recv queue size to 2x our block batch size
+		oblockfetch.WithRecvQueueSize(1000),
 	}
 }
 

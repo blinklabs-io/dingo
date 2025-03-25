@@ -1,4 +1,4 @@
-// Copyright 2024 Blink Labs Software
+// Copyright 2025 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,22 +12,29 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package version
+package blob
 
 import (
-	"fmt"
+	"log/slog"
+
+	badgerPlugin "github.com/blinklabs-io/dingo/database/plugin/blob/badger"
+	badger "github.com/dgraph-io/badger/v4"
 )
 
-// These are populated at build time
-var (
-	Version    string
-	CommitHash string
-)
+type BlobStore interface {
+	// matches badger.DB
+	Close() error
+	NewTransaction(bool) *badger.Txn
 
-func GetVersionString() string {
-	if Version != "" {
-		return fmt.Sprintf("%s (commit %s)", Version, CommitHash)
-	} else {
-		return fmt.Sprintf("devel (commit %s)", CommitHash)
-	}
+	// Our specific functions
+	GetCommitTimestamp() (int64, error)
+	SetCommitTimestamp(*badger.Txn, int64) error
+}
+
+// For now, this always returns a badger plugin
+func New(
+	pluginName, dataDir string,
+	logger *slog.Logger,
+) (BlobStore, error) {
+	return badgerPlugin.New(dataDir, logger)
 }

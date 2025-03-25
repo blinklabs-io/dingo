@@ -112,16 +112,22 @@ func (e *EventBus) Unsubscribe(eventType EventType, subId EventSubscriberId) {
 
 // Publish allows a producer to send an event of a particular type to all subscribers
 func (e *EventBus) Publish(eventType EventType, evt Event) {
+	// Build list of channels inside read lock to avoid map race condition
 	e.mu.RLock()
 	subs, ok := e.subscribers[eventType]
-	e.mu.RUnlock()
+	subChans := make([]chan Event, 0, len(subs))
 	if ok {
 		for _, subCh := range subs {
-			// NOTE: this is purposely a blocking operation to prevent dropping data
-			// XXX: do we maybe want to detect a blocked channel and temporarily set it aside
-			// to get the event sent to the other subscribers?
-			subCh <- evt
+			subChans = append(subChans, subCh)
 		}
+	}
+	e.mu.RUnlock()
+	// Send event on gathered channels
+	for _, subCh := range subChans {
+		// NOTE: this is purposely a blocking operation to prevent dropping data
+		// XXX: do we maybe want to detect a blocked channel and temporarily set it aside
+		// to get the event sent to the other subscribers?
+		subCh <- evt
 	}
 	e.metrics.eventsTotal.WithLabelValues(string(eventType)).Inc()
 }

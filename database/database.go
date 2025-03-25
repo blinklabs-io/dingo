@@ -16,179 +16,98 @@ package database
 
 import (
 	"errors"
-	"fmt"
 	"io"
 	"log/slog"
-	"path/filepath"
-	"time"
 
-	badger "github.com/dgraph-io/badger/v4"
-	"gorm.io/gorm"
-
-	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
+	"github.com/blinklabs-io/dingo/database/plugin/blob"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 )
 
-type Database interface {
-	Close() error
-	Metadata() *gorm.DB
-	Blob() *badger.DB
-	Transaction(bool) *Txn
-	updateCommitTimestamp(*Txn, int64) error
+type Database struct {
+	logger   *slog.Logger
+	blob     blob.BlobStore
+	metadata metadata.MetadataStore
+	dataDir  string
 }
 
-type BaseDatabase struct {
-	logger        *slog.Logger
-	metadata      *gorm.DB
-	blob          *badger.DB
-	blobGcEnabled bool
-	blobGcTimer   *time.Ticker
+// Blob returns the underling blob store instance
+func (d *Database) Blob() blob.BlobStore {
+	return d.blob
 }
 
-// Metadata returns the underlying metadata DB instance
-func (b *BaseDatabase) Metadata() *gorm.DB {
-	return b.metadata
+// DataDir returns the path to the data directory used for storage
+func (d *Database) DataDir() string {
+	return d.dataDir
 }
 
-// Blob returns the underling blob DB instance
-func (b *BaseDatabase) Blob() *badger.DB {
-	return b.blob
+// Logger returns the logger instance
+func (d *Database) Logger() *slog.Logger {
+	return d.logger
+}
+
+// Metadata returns the underlying metadata store instance
+func (d *Database) Metadata() metadata.MetadataStore {
+	return d.metadata
 }
 
 // Transaction starts a new database transaction and returns a handle to it
-func (b *BaseDatabase) Transaction(readWrite bool) *Txn {
-	return NewTxn(b, readWrite)
+func (d *Database) Transaction(readWrite bool) *Txn {
+	return NewTxn(d, readWrite)
+}
+
+// BlobTxn starts a new blob-only database transaction and returns a handle to it
+func (d *Database) BlobTxn(readWrite bool) *Txn {
+	return NewBlobOnlyTxn(d, readWrite)
+}
+
+// MetadataTxn starts a new metadata-only database transaction and returns a handle to it
+func (d *Database) MetadataTxn(readWrite bool) *Txn {
+	return NewMetadataOnlyTxn(d, readWrite)
 }
 
 // Close cleans up the database connections
-func (b *BaseDatabase) Close() error {
+func (d *Database) Close() error {
 	var err error
 	// Close metadata
-	sqlDB, sqlDBerr := b.metadata.DB()
-	if sqlDBerr != nil {
-		err = errors.Join(err, sqlDBerr)
-	} else {
-		metadataErr := sqlDB.Close()
-		err = errors.Join(err, metadataErr)
-	}
+	metadataErr := d.Metadata().Close()
+	err = errors.Join(err, metadataErr)
 	// Close blob
-	blobErr := b.blob.Close()
+	blobErr := d.Blob().Close()
 	err = errors.Join(err, blobErr)
 	return err
 }
 
-func (b *BaseDatabase) init() error {
-	if b.logger == nil {
+func (d *Database) init() error {
+	if d.logger == nil {
 		// Create logger to throw away logs
 		// We do this so we don't have to add guards around every log operation
-		b.logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
-	}
-	// Configure metrics for Badger DB
-	b.registerBadgerMetrics()
-	// Run GC periodically for Badger DB
-	if b.blobGcEnabled {
-		b.blobGcTimer = time.NewTicker(5 * time.Minute)
-		go b.blobGc()
+		d.logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
 	}
 	// Check commit timestamp
-	if err := b.checkCommitTimestamp(); err != nil {
+	if err := d.checkCommitTimestamp(); err != nil {
 		return err
 	}
 	return nil
 }
 
-func (b *BaseDatabase) blobGc() {
-	for range b.blobGcTimer.C {
-	again:
-		err := b.blob.RunValueLogGC(0.5)
-		if err != nil {
-			// Log any actual errors
-			if !errors.Is(err, badger.ErrNoRewrite) {
-				b.logger.Warn(
-					fmt.Sprintf("blob DB: GC failure: %s", err),
-					"component", "database",
-				)
-			}
-		} else {
-			// Run it again if it just ran successfully
-			goto again
-		}
-	}
-}
-
-// InMemoryDatabase stores all data in memory. Data will not be persisted
-type InMemoryDatabase struct {
-	*BaseDatabase
-}
-
-// NewInMemory creates a new in-memory database
-func NewInMemory(logger *slog.Logger) (*InMemoryDatabase, error) {
-	// Use sqlite plugin
-	metadataDb, err := sqlite.New("", logger)
-	if err != nil {
-		return nil, err
-	}
-	// Open Badger DB
-	badgerOpts := badger.DefaultOptions("").
-		WithLogger(NewBadgerLogger(logger)).
-		// The default INFO logging is a bit verbose
-		WithLoggingLevel(badger.WARNING).
-		WithInMemory(true)
-	blobDb, err := badger.Open(badgerOpts)
-	if err != nil {
-		return nil, err
-	}
-	db := &InMemoryDatabase{
-		BaseDatabase: &BaseDatabase{
-			logger:   logger,
-			metadata: metadataDb.DB(),
-			blob:     blobDb,
-			// We disable badger GC when using an in-memory DB, since it will only throw errors
-			blobGcEnabled: false,
-		},
-	}
-	if err := db.init(); err != nil {
-		// Database is available for recovery, so return it with error
-		return db, err
-	}
-	return db, nil
-}
-
-// PersistentDatabase stores its data on disk, providing persistence across restarts
-type PersistentDatabase struct {
-	*BaseDatabase
-	dataDir string
-}
-
-// NewPersistent creates a new persistent database instance using the provided data directory
-func NewPersistent(
-	dataDir string,
+// New creates a new database instance with optional persistence using the provided data directory
+func New(
 	logger *slog.Logger,
-) (*PersistentDatabase, error) {
-	metadataDb, err := sqlite.New(dataDir, logger)
+	dataDir string,
+) (*Database, error) {
+	metadataDb, err := metadata.New("sqlite", dataDir, logger)
 	if err != nil {
 		return nil, err
 	}
-	// Open Badger DB
-	blobDir := filepath.Join(
-		dataDir,
-		"blob",
-	)
-	badgerOpts := badger.DefaultOptions(blobDir).
-		WithLogger(NewBadgerLogger(logger)).
-		// The default INFO logging is a bit verbose
-		WithLoggingLevel(badger.WARNING)
-	blobDb, err := badger.Open(badgerOpts)
+	blobDb, err := blob.New("badger", dataDir, logger)
 	if err != nil {
 		return nil, err
 	}
-	db := &PersistentDatabase{
-		BaseDatabase: &BaseDatabase{
-			logger:        logger,
-			metadata:      metadataDb.DB(),
-			blob:          blobDb,
-			blobGcEnabled: true,
-		},
-		dataDir: dataDir,
+	db := &Database{
+		logger:   logger,
+		blob:     blobDb,
+		metadata: metadataDb,
+		dataDir:  dataDir,
 	}
 	if err := db.init(); err != nil {
 		// Database is available for recovery, so return it with error

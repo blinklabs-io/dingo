@@ -1,4 +1,4 @@
-// Copyright 2024 Blink Labs Software
+// Copyright 2025 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -14,12 +14,14 @@
 
 package models
 
-type StakeDeregistration struct {
-	ID         uint   `gorm:"primarykey"`
-	StakingKey []byte `gorm:"index"`
-	AddedSlot  uint64
+type PParamUpdate struct {
+	ID          uint `gorm:"primarykey"`
+	GenesisHash []byte
+	Cbor        []byte
+	AddedSlot   uint64
+	Epoch       uint64
 }
 
-func (StakeDeregistration) TableName() string {
-	return "stake_deregistration"
+func (PParamUpdate) TableName() string {
+	return "pparam_update"
 }

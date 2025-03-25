@@ -19,7 +19,6 @@ import (
 
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/state"
-
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/connection"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"

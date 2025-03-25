@@ -1,4 +1,4 @@
-// Copyright 2024 Blink Labs Software
+// Copyright 2025 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -30,9 +30,9 @@ type TestTable struct {
 // concurrent transactions when using in-memory mode. This requires special URI flags, and
 // this is mostly making sure that we don't lose them
 func TestInMemorySqliteMultipleTransaction(t *testing.T) {
-	var db database.Database
+	var db *database.Database
 	doQuery := func(sleep time.Duration) error {
-		txn := db.Metadata().Begin()
+		txn := db.Metadata().Transaction()
 		if result := txn.First(&TestTable{}); result.Error != nil {
 			return result.Error
 		}
@@ -42,14 +42,14 @@ func TestInMemorySqliteMultipleTransaction(t *testing.T) {
 		}
 		return nil
 	}
-	db, err := database.NewInMemory(nil)
+	db, err := database.New(nil, "") // in-memory
 	if err != nil {
 		t.Fatalf("unexpected error: %s", err)
 	}
-	if err := db.Metadata().AutoMigrate(&TestTable{}); err != nil {
+	if err := db.Metadata().DB().AutoMigrate(&TestTable{}); err != nil {
 		t.Fatalf("unexpected error: %s", err)
 	}
-	if result := db.Metadata().Create(&TestTable{}); result.Error != nil {
+	if result := db.Metadata().DB().Create(&TestTable{}); result.Error != nil {
 		t.Fatalf("unexpected error: %s", result.Error)
 	}
 	// The linter calls us on the lack of error checking, but it's a goroutine...

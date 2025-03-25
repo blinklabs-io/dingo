@@ -24,16 +24,15 @@ import (
 	"connectrpc.com/connect"
 	"connectrpc.com/grpchealth"
 	"connectrpc.com/grpcreflect"
+	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/mempool"
+	"github.com/blinklabs-io/dingo/state"
 	"github.com/utxorpc/go-codegen/utxorpc/v1alpha/query/queryconnect"
 	"github.com/utxorpc/go-codegen/utxorpc/v1alpha/submit/submitconnect"
 	"github.com/utxorpc/go-codegen/utxorpc/v1alpha/sync/syncconnect"
 	"github.com/utxorpc/go-codegen/utxorpc/v1alpha/watch/watchconnect"
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/h2c"
-
-	"github.com/blinklabs-io/dingo/event"
-	"github.com/blinklabs-io/dingo/mempool"
-	"github.com/blinklabs-io/dingo/state"
 )
 
 type Utxorpc struct {

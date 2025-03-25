@@ -90,47 +90,62 @@ func (p *PeerGovernor) LoadTopologyConfig(
 	p.peers = tmpPeers
 	// Add topology bootstrap peers
 	for _, bootstrapPeer := range topologyConfig.BootstrapPeers {
+		tmpAddress := net.JoinHostPort(
+			bootstrapPeer.Address,
+			strconv.FormatUint(uint64(bootstrapPeer.Port), 10),
+		)
 		p.peers = append(
 			p.peers,
 			&Peer{
-				Address: net.JoinHostPort(
-					bootstrapPeer.Address,
-					strconv.FormatUint(uint64(bootstrapPeer.Port), 10),
-				),
-				Source: PeerSourceTopologyBootstrapPeer,
+				Address: tmpAddress,
+				Source:  PeerSourceTopologyBootstrapPeer,
 			},
 		)
 	}
 	// Add topology local roots
 	for _, localRoot := range topologyConfig.LocalRoots {
 		for _, ap := range localRoot.AccessPoints {
-			p.peers = append(
-				p.peers,
-				&Peer{
-					Address: net.JoinHostPort(
-						ap.Address,
-						strconv.FormatUint(uint64(ap.Port), 10),
-					),
-					Source:   PeerSourceTopologyLocalRoot,
-					Sharable: localRoot.Advertise,
-				},
+			tmpAddress := net.JoinHostPort(
+				ap.Address,
+				strconv.FormatUint(uint64(ap.Port), 10),
 			)
+			tmpPeer := &Peer{
+				Address:  tmpAddress,
+				Source:   PeerSourceTopologyLocalRoot,
+				Sharable: localRoot.Advertise,
+			}
+			for i, peer := range p.peers {
+				// This peer already appears, remove it
+				if peer.Address == tmpAddress {
+					copy(p.peers[i:], p.peers[i+1:])   // shift left
+					p.peers[len(p.peers)-1] = nil      // clear last
+					p.peers = p.peers[:len(p.peers)-1] // truncate
+				}
+			}
+			p.peers = append(p.peers, tmpPeer)
 		}
 	}
 	// Add topology public roots
 	for _, publicRoot := range topologyConfig.PublicRoots {
 		for _, ap := range publicRoot.AccessPoints {
-			p.peers = append(
-				p.peers,
-				&Peer{
-					Address: net.JoinHostPort(
-						ap.Address,
-						strconv.FormatUint(uint64(ap.Port), 10),
-					),
-					Source:   PeerSourceTopologyPublicRoot,
-					Sharable: publicRoot.Advertise,
-				},
+			tmpAddress := net.JoinHostPort(
+				ap.Address,
+				strconv.FormatUint(uint64(ap.Port), 10),
 			)
+			tmpPeer := &Peer{
+				Address:  tmpAddress,
+				Source:   PeerSourceTopologyPublicRoot,
+				Sharable: publicRoot.Advertise,
+			}
+			for i, peer := range p.peers {
+				// This peer already appears, remove it
+				if peer.Address == tmpAddress {
+					copy(p.peers[i:], p.peers[i+1:])   // shift left
+					p.peers[len(p.peers)-1] = nil      // clear last
+					p.peers = p.peers[:len(p.peers)-1] // truncate
+				}
+			}
+			p.peers = append(p.peers, tmpPeer)
 		}
 	}
 }

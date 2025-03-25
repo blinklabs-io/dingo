@@ -18,8 +18,6 @@ import (
 	"fmt"
 
 	"github.com/blinklabs-io/dingo/database"
-	"github.com/blinklabs-io/dingo/state/models"
-
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	pcommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
@@ -39,80 +37,51 @@ func (ls *LedgerState) processTransactionCertificates(
 		}
 		switch cert := tmpCert.(type) {
 		case *lcommon.PoolRegistrationCertificate:
-			tmpItem := models.PoolRegistration{
-				PoolKeyHash:   cert.Operator[:],
-				VrfKeyHash:    cert.VrfKeyHash[:],
-				Pledge:        database.Uint64(cert.Pledge),
-				Cost:          database.Uint64(cert.Cost),
-				Margin:        &database.Rat{Rat: cert.Margin.Rat},
-				AddedSlot:     blockPoint.Slot,
-				DepositAmount: certDeposit,
-			}
-			if cert.PoolMetadata != nil {
-				tmpItem.MetadataUrl = cert.PoolMetadata.Url
-				tmpItem.MetadataHash = cert.PoolMetadata.Hash[:]
-			}
-			for _, owner := range cert.PoolOwners {
-				tmpItem.Owners = append(
-					tmpItem.Owners,
-					models.PoolRegistrationOwner{
-						KeyHash: owner[:],
-					},
-				)
-			}
-			for _, relay := range cert.Relays {
-				tmpRelay := models.PoolRegistrationRelay{
-					Ipv4: relay.Ipv4,
-					Ipv6: relay.Ipv6,
-				}
-				if relay.Port != nil {
-					tmpRelay.Port = uint(*relay.Port)
-				}
-				if relay.Hostname != nil {
-					tmpRelay.Hostname = *relay.Hostname
-				}
-				tmpItem.Relays = append(
-					tmpItem.Relays,
-					tmpRelay,
-				)
-			}
-			if result := txn.Metadata().Create(&tmpItem); result.Error != nil {
-				return result.Error
+			err := txn.DB().SetPoolRegistration(
+				cert,
+				blockPoint.Slot,
+				certDeposit,
+				txn,
+			)
+			if err != nil {
+				return err
 			}
 		case *lcommon.PoolRetirementCertificate:
-			tmpItem := models.PoolRetirement{
-				PoolKeyHash: cert.PoolKeyHash[:],
-				Epoch:       uint(cert.Epoch),
-				AddedSlot:   blockPoint.Slot,
-			}
-			if result := txn.Metadata().Create(&tmpItem); result.Error != nil {
-				return result.Error
-			}
-		case *lcommon.StakeRegistrationCertificate:
-			tmpItem := models.StakeRegistration{
-				StakingKey:    cert.StakeRegistration.Credential,
-				AddedSlot:     blockPoint.Slot,
-				DepositAmount: certDeposit,
-			}
-			if result := txn.Metadata().Create(&tmpItem); result.Error != nil {
-				return result.Error
-			}
-		case *lcommon.StakeDeregistrationCertificate:
-			tmpItem := models.StakeDeregistration{
-				StakingKey: cert.StakeDeregistration.Credential,
-				AddedSlot:  blockPoint.Slot,
-			}
-			if result := txn.Metadata().Create(&tmpItem); result.Error != nil {
-				return result.Error
+			err := txn.DB().SetPoolRetirement(
+				cert,
+				blockPoint.Slot,
+				txn,
+			)
+			if err != nil {
+				return err
 			}
 		case *lcommon.StakeDelegationCertificate:
-			tmpItem := models.StakeDelegation{
-				StakingKey:  cert.StakeCredential.Credential,
-				PoolKeyHash: cert.PoolKeyHash[:],
-				AddedSlot:   blockPoint.Slot,
+			err := txn.DB().SetStakeDelegation(
+				cert,
+				blockPoint.Slot,
+				txn,
+			)
+			if err != nil {
+				return err
 			}
-			if result := txn.Metadata().Create(&tmpItem); result.Error != nil {
-				return result.Error
+		case *lcommon.StakeDeregistrationCertificate:
+			err := txn.DB().SetStakeDeregistration(
+				cert,
+				blockPoint.Slot,
+				txn,
+			)
+			if err != nil {
+				return err
+			}
+		case *lcommon.StakeRegistrationCertificate:
+			err := txn.DB().SetStakeRegistration(
+				cert,
+				blockPoint.Slot,
+				certDeposit,
+				txn,
+			)
+			if err != nil {
+				return err
 			}
 		default:
 			ls.config.Logger.Warn(

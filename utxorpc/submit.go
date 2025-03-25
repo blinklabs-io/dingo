@@ -20,18 +20,15 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"time"
 
 	"connectrpc.com/connect"
+	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/state"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	cardano "github.com/utxorpc/go-codegen/utxorpc/v1alpha/cardano"
 	submit "github.com/utxorpc/go-codegen/utxorpc/v1alpha/submit"
 	"github.com/utxorpc/go-codegen/utxorpc/v1alpha/submit/submitconnect"
-
-	"github.com/blinklabs-io/dingo/event"
-	"github.com/blinklabs-io/dingo/mempool"
-	"github.com/blinklabs-io/dingo/state"
 )
 
 // submitServiceServer implements the SubmitService API
@@ -76,14 +73,8 @@ func (s *submitServiceServer) SubmitTx(
 			hasError = true
 			continue
 		}
-		tx := mempool.MempoolTransaction{
-			Hash:     txHash.String(),
-			Type:     txType,
-			Cbor:     txRawBytes,
-			LastSeen: time.Now(),
-		}
 		// Add transaction to mempool
-		err = s.utxorpc.config.Mempool.AddTransaction(tx)
+		err = s.utxorpc.config.Mempool.AddTransaction(txType, txRawBytes)
 		if err != nil {
 			resp.Ref = append(resp.Ref, placeholderRef)
 			errorList[i] = fmt.Errorf("%s", err.Error())
@@ -97,14 +88,13 @@ func (s *submitServiceServer) SubmitTx(
 			hasError = true
 			continue
 		}
-		txHexBytes, err := hex.DecodeString(tx.Hash)
 		if err != nil {
 			resp.Ref = append(resp.Ref, placeholderRef)
 			errorList[i] = err
 			hasError = true
 			continue
 		}
-		resp.Ref = append(resp.Ref, txHexBytes)
+		resp.Ref = append(resp.Ref, txHash.Bytes())
 	}
 	if hasError {
 		return connect.NewResponse(resp), fmt.Errorf("%v", errorList)
@@ -175,7 +165,6 @@ func (s *submitServiceServer) ReadMempool(
 	ctx context.Context,
 	req *connect.Request[submit.ReadMempoolRequest],
 ) (*connect.Response[submit.ReadMempoolResponse], error) {
-
 	s.utxorpc.config.Logger.Info("Got a ReadMempool request")
 	resp := &submit.ReadMempoolResponse{}
 
@@ -198,7 +187,6 @@ func (s *submitServiceServer) WatchMempool(
 	req *connect.Request[submit.WatchMempoolRequest],
 	stream *connect.ServerStream[submit.WatchMempoolResponse],
 ) error {
-
 	predicate := req.Msg.GetPredicate() // Predicate
 	fieldMask := req.Msg.GetFieldMask()
 

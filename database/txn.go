@@ -1,4 +1,4 @@
-// Copyright 2024 Blink Labs Software
+// Copyright 2025 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -27,19 +27,39 @@ import (
 type Txn struct {
 	lock        sync.Mutex
 	finished    bool
-	db          Database
+	db          *Database
 	readWrite   bool
 	blobTxn     *badger.Txn
 	metadataTxn *gorm.DB
 }
 
-func NewTxn(db Database, readWrite bool) *Txn {
+func NewTxn(db *Database, readWrite bool) *Txn {
 	return &Txn{
 		db:          db,
 		readWrite:   readWrite,
 		blobTxn:     db.Blob().NewTransaction(readWrite),
-		metadataTxn: db.Metadata().Begin(),
+		metadataTxn: db.Metadata().Transaction(),
 	}
+}
+
+func NewBlobOnlyTxn(db *Database, readWrite bool) *Txn {
+	return &Txn{
+		db:        db,
+		readWrite: readWrite,
+		blobTxn:   db.Blob().NewTransaction(readWrite),
+	}
+}
+
+func NewMetadataOnlyTxn(db *Database, readWrite bool) *Txn {
+	return &Txn{
+		db:          db,
+		readWrite:   readWrite,
+		metadataTxn: db.Metadata().Transaction(),
+	}
+}
+
+func (t *Txn) DB() *Database {
+	return t.db
 }
 
 func (t *Txn) Metadata() *gorm.DB {
@@ -79,20 +99,26 @@ func (t *Txn) Commit() error {
 	if !t.readWrite {
 		return t.rollback()
 	}
-	// Update the commit timestamp for both DBs
-	commitTimestamp := time.Now().UnixMilli()
-	if err := t.db.updateCommitTimestamp(t, commitTimestamp); err != nil {
-		return err
+	// Update the commit timestamp in both DBs if using both
+	if t.blobTxn != nil && t.metadataTxn != nil {
+		commitTimestamp := time.Now().UnixMilli()
+		if err := t.db.updateCommitTimestamp(t, commitTimestamp); err != nil {
+			return err
+		}
 	}
 	// Commit sqlite transaction
-	if result := t.metadataTxn.Commit(); result.Error != nil {
-		// Failed to commit metadata DB, so discard blob txn
-		t.blobTxn.Discard()
-		return result.Error
+	if t.metadataTxn != nil {
+		if result := t.metadataTxn.Commit(); result.Error != nil {
+			// Failed to commit metadata DB, so discard blob txn
+			t.blobTxn.Discard()
+			return result.Error
+		}
 	}
 	// Commit badger transaction
-	if err := t.blobTxn.Commit(); err != nil {
-		return err
+	if t.blobTxn != nil {
+		if err := t.blobTxn.Commit(); err != nil {
+			return err
+		}
 	}
 	t.finished = true
 	return nil

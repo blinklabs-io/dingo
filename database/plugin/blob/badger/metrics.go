@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package database
+package badger
 
 import (
 	"github.com/prometheus/client_golang/prometheus"
@@ -23,7 +23,7 @@ const (
 	badgerMetricNamePrefix = "database_blob_"
 )
 
-func (d *BaseDatabase) registerBadgerMetrics() {
+func (d *BlobStoreBadger) registerBlobMetrics() {
 	// Badger exposes metrics via expvar, so we need to set up some translation
 	collector := collectors.NewExpvarCollector(
 		map[string]*prometheus.Desc{
