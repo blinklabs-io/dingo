@@ -9,8 +9,8 @@ filippo.io/edwards25519 v1.1.0/go.mod h1:BxyFTGdWcka3PhytdK4V28tE5sGfRvvvRV7EaN4
 github.com/aead/siphash v1.0.1/go.mod h1:Nywa3cDsYNNK3gaciGTWPwHt0wlpNV15vwmswBAUSII=
 github.com/beorn7/perks v1.0.1 h1:VlbKKnNfV8bJzeqoa4cOKqO6bYr3WgKZxO8Z16+hsOM=
 github.com/beorn7/perks v1.0.1/go.mod h1:G2ZrVWU2WbWT9wwq4/hrbKbnv/1ERSJQ0ibhJ6rlkpw=
-github.com/blinklabs-io/gouroboros v0.115.0 h1:xNOkfvYj9/8JnBLeYHAY1XPIQcVMCtIO1ZvI9riVh44=
-github.com/blinklabs-io/gouroboros v0.115.0/go.mod h1:E43ihaCCqNYMsTtdGbTv6Un0QVYcSXb3E/SbADJNBIM=
+github.com/blinklabs-io/gouroboros v0.115.1 h1:kVBsOBEevSnhNcmuxqAHId21aRGMGgudQDpuenU0wmM=
+github.com/blinklabs-io/gouroboros v0.115.1/go.mod h1:E43ihaCCqNYMsTtdGbTv6Un0QVYcSXb3E/SbADJNBIM=
 github.com/blinklabs-io/ouroboros-mock v0.3.7 h1:86FvD591XhdGk2BqQweRKfwc6Y6ll5Lunmo/RUehJ6o=
 github.com/blinklabs-io/ouroboros-mock v0.3.7/go.mod h1:611xZgdWCxZsSaS5tjgxqjmWIkSpsM9eKuQAKozw+sk=
 github.com/btcsuite/btcd v0.20.1-beta/go.mod h1:wVuoA8VJLEcwgqHBwHmzLRazpKxTv13Px/pDuV7OomQ=
