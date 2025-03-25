@@ -201,7 +201,7 @@ func (ls *LedgerState) scheduleCleanupConsumedUtxos() {
 			// Get the current tip, since we're querying by slot
 			tip := ls.Tip()
 			// Get UTxOs that are marked as deleted and older than our slot window
-			utxos, err := database.UtxosDeleted(ls.db, tip.Point.Slot-cleanupConsumedUtxosSlotWindow)
+			utxos, err := ls.db.UtxosDeleted(tip.Point.Slot-cleanupConsumedUtxosSlotWindow, nil)
 			if err != nil {
 				ls.config.Logger.Error(
 					"failed to query consumed UTxOs",
@@ -254,14 +254,9 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 			}
 		}
 		// Delete rolled-back UTxOs
-		utxos, err := ls.db.UtxosRolledback(point.Slot, txn)
+		err = ls.db.UtxosDeleteRolledback(point.Slot, txn)
 		if err != nil {
-			return fmt.Errorf("get rolled-back UTxOs: %w", err)
-		}
-		if len(utxos) > 0 {
-			if err := ls.db.UtxosDelete(utxos, txn); err != nil {
-				return fmt.Errorf("remove rolled-back UTxOs: %w", err)
-			}
+			return fmt.Errorf("remove rolled-back UTxOs: %w", err)
 		}
 		// Restore spent UTxOs
 		err = ls.db.UtxosUnspend(point.Slot, txn)

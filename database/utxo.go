@@ -161,7 +161,11 @@ func (d *Database) UtxosDelete(
 		defer txn.Commit() //nolint:errcheck
 	}
 	// Remove from metadata DB
-	err := d.metadata.DeleteUtxos([]any{utxos}, txn.Metadata())
+	tmpUtxos := []any{}
+	for _, utxo := range utxos {
+		tmpUtxos = append(tmpUtxos, utxo)
+	}
+	err := d.metadata.DeleteUtxos(tmpUtxos, txn.Metadata())
 	if err != nil {
 		return err
 	}
@@ -206,34 +210,37 @@ func (d *Database) UtxosDeleted(
 	return ret, nil
 }
 
-func UtxosRolledback(
-	db *Database,
-	slot uint64,
-) ([]Utxo, error) {
-	return db.UtxosRolledback(slot, nil)
-}
-
-func (d *Database) UtxosRolledback(
+func (d *Database) UtxosDeleteRolledback(
 	slot uint64,
 	txn *Txn,
-) ([]Utxo, error) {
-	ret := []Utxo{}
+) error {
 	if txn == nil {
 		txn = d.Transaction(false)
 		defer txn.Commit() //nolint:errcheck
 	}
-	utxos, err := d.metadata.GetUtxosAddedAfterSlot(slot, txn.Metadata())
+	utxos, err := d.metadata.GetUtxosDeletedBeforeSlot(slot, txn.Metadata())
 	if err != nil {
-		return ret, err
+		return err
 	}
+	tmpUtxos := []any{}
 	for _, utxo := range utxos {
-		tmpUtxo := Utxo(utxo)
-		if err := tmpUtxo.loadCbor(txn); err != nil {
-			return ret, err
-		}
-		ret = append(ret, tmpUtxo)
+		tmpUtxos = append(tmpUtxos, utxo)
 	}
-	return ret, nil
+	if len(tmpUtxos) > 0 {
+		err = d.metadata.DeleteUtxos(tmpUtxos, txn.Metadata())
+		if err != nil {
+			return err
+		}
+		// Remove from blob DB
+		for _, utxo := range utxos {
+			key := UtxoBlobKey(utxo.TxId, utxo.OutputIdx)
+			err := txn.Blob().Delete(key)
+			if err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func UtxosUnspend(

@@ -15,7 +15,7 @@
 package sqlite
 
 import (
-	"errors"
+	"fmt"
 
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite/models"
 	"github.com/blinklabs-io/gouroboros/ledger"
@@ -131,7 +131,7 @@ func (d *MetadataStoreSqlite) DeleteUtxo(
 ) error {
 	tmpUtxo, ok := utxo.(models.Utxo)
 	if !ok {
-		return errors.New("failed to convert utxo")
+		return fmt.Errorf("failed to convert utxo from %T", utxo)
 	}
 	if txn != nil {
 		result := txn.Delete(&tmpUtxo)
@@ -155,7 +155,7 @@ func (d *MetadataStoreSqlite) DeleteUtxos(
 	for _, utxo := range utxos {
 		tmpUtxo, ok := utxo.(models.Utxo)
 		if !ok {
-			return errors.New("failed to convert utxo")
+			return fmt.Errorf("failed to convert utxo from %T", utxo)
 		}
 		tmpUtxos = append(tmpUtxos, tmpUtxo)
 	}
