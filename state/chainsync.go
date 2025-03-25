@@ -19,9 +19,8 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"strconv"
 	"time"
-
-	"github.com/blinklabs-io/gouroboros/ledger"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite/models"
@@ -290,18 +289,19 @@ func (ls *LedgerState) verifyBlock(e BlockfetchEvent) error {
 		Cbor:   e.Block.Cbor(),
 	}
 	if e.Block.Era().Id >= 5 { // Babbage
+		nonceStr := hex.EncodeToString(ls.currentEpoch.Nonce)
 		ls.config.Logger.Debug(
 			"attempting block validation...",
-			"block_hash", fmt.Sprintf("%x", tmpBlock.Hash),
+			"block_hash", hex.EncodeToString(tmpBlock.Hash),
 			"block_number", tmpBlock.Number,
-			"epoch_nonce", fmt.Sprintf("%x", ls.currentEpoch.Nonce),
+			"epoch_nonce", nonceStr,
 			"slot_number", tmpBlock.Slot,
 		)
 		// Validate block
 		headerCbor := e.Block.Header().Cbor()
 		blockHexCbor := ledger.BlockHexCbor{
 			HeaderCbor:    hex.EncodeToString(headerCbor),
-			Eta0:          fmt.Sprintf("%x", ls.currentEpoch.Nonce),
+			Eta0:          nonceStr,
 			Spk:           int(129600), // TODO: get from protocol params
 			BlockBodyCbor: hex.EncodeToString(tmpBlock.Cbor),
 		}
@@ -315,37 +315,37 @@ func (ls *LedgerState) verifyBlock(e BlockfetchEvent) error {
 					"failed block validation: %+v, isValid: %+v, vrfHex: %s",
 					verifyError, isValid, vrfHex,
 				),
-				"block_number", fmt.Sprintf("%d", tmpBlock.Number),
-				"slot_number", fmt.Sprintf("%d", tmpBlock.Slot),
-				"block_hash", fmt.Sprintf("%x", tmpBlock.Hash),
+				"block_number", strconv.FormatUint(tmpBlock.Number, 10),
+				"slot_number", strconv.FormatUint(tmpBlock.Slot, 10),
+				"block_hash", hex.EncodeToString(tmpBlock.Hash),
 			)
 			panic(verifyError)
 			// TODO: return verifyError
 		} else if !isValid {
 			ls.config.Logger.Debug(
 				"invalid block found",
-				"block_number", fmt.Sprintf("%d", blockNo),
-				"slot_number", fmt.Sprintf("%d", slotNo),
-				"block_hash", fmt.Sprintf("%x", tmpBlock.Hash),
+				"block_number", strconv.FormatUint(blockNo, 10),
+				"slot_number", strconv.FormatUint(slotNo, 10),
+				"block_hash", hex.EncodeToString(tmpBlock.Hash),
 				"vrf_hash", vrfHex,
 			)
-			return fmt.Errorf("invalid block found")
+			return errors.New("invalid block found")
 		} else {
 			ls.config.Logger.Debug(
 				"validated block",
-				"block_number", fmt.Sprintf("%d", blockNo),
-				"slot_number", fmt.Sprintf("%d", slotNo),
-				"block_hash", fmt.Sprintf("%x", tmpBlock.Hash),
+				"block_number", strconv.FormatUint(blockNo, 10),
+				"slot_number", strconv.FormatUint(slotNo, 10),
+				"block_hash", hex.EncodeToString(tmpBlock.Hash),
 				"vrf_hash", vrfHex,
 			)
 		}
 	} else {
 		ls.config.Logger.Debug(
 			"skipping block validation...",
-			"block_number", fmt.Sprintf("%d", tmpBlock.Number),
-			"slot_number", fmt.Sprintf("%d", tmpBlock.Slot),
-			"epoch_nonce", fmt.Sprintf("%x", ls.currentEpoch.Nonce),
-			"era_id", fmt.Sprintf("%d", e.Block.Era().Id),
+			"block_number", strconv.FormatUint(tmpBlock.Number, 10),
+			"slot_number", strconv.FormatUint(tmpBlock.Slot, 10),
+			"epoch_nonce", hex.EncodeToString(ls.currentEpoch.Nonce),
+			"era_id", strconv.FormatUint(uint64(e.Block.Era().Id), 10),
 		)
 	}
 
