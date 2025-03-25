@@ -280,7 +280,7 @@ func (ls *LedgerState) validateBlock(e BlockfetchEvent) error {
 
 func (ls *LedgerState) verifyBlock(e BlockfetchEvent) error {
 	// TODO: actually validate here
-	tmpBlock := models.Block{
+	tmpBlock := database.Block{
 		Slot: e.Point.Slot,
 		Hash: e.Point.Hash,
 		// TODO: figure out something for Byron. this won't work, since the
