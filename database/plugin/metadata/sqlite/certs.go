@@ -127,10 +127,10 @@ func (d *MetadataStoreSqlite) GetStakeRegistrations(
 	for _, cert := range certs {
 		tmpCert := lcommon.StakeRegistrationCertificate{
 			CertType: lcommon.CertificateTypeStakeRegistration,
-			StakeRegistration: lcommon.StakeCredential{
+			StakeRegistration: lcommon.Credential{
 				// TODO: determine correct type
-				// CredType: lcommon.StakeCredentialTypeAddrKeyHash,
-				Credential: cert.StakingKey,
+				// CredType: lcommon.CredentialTypeAddrKeyHash,
+				Credential: lcommon.CredentialHash(cert.StakingKey),
 			},
 		}
 		ret = append(ret, tmpCert)
@@ -218,7 +218,7 @@ func (d *MetadataStoreSqlite) SetStakeDelegation(
 	txn *gorm.DB,
 ) error {
 	tmpItem := models.StakeDelegation{
-		StakingKey:  cert.StakeCredential.Credential,
+		StakingKey:  cert.StakeCredential.Credential.Bytes(),
 		PoolKeyHash: cert.PoolKeyHash[:],
 		AddedSlot:   slot,
 	}
@@ -241,7 +241,7 @@ func (d *MetadataStoreSqlite) SetStakeDeregistration(
 	txn *gorm.DB,
 ) error {
 	tmpItem := models.StakeDeregistration{
-		StakingKey: cert.StakeDeregistration.Credential,
+		StakingKey: cert.StakeDeregistration.Credential.Bytes(),
 		AddedSlot:  slot,
 	}
 	if txn != nil {
@@ -263,7 +263,7 @@ func (d *MetadataStoreSqlite) SetStakeRegistration(
 	txn *gorm.DB,
 ) error {
 	tmpItem := models.StakeRegistration{
-		StakingKey:    cert.StakeRegistration.Credential,
+		StakingKey:    cert.StakeRegistration.Credential.Bytes(),
 		AddedSlot:     slot,
 		DepositAmount: deposit,
 	}
