@@ -79,3 +79,23 @@ func (d *Database) GetEpochsByEra(eraId uint, txn *Txn) ([]Epoch, error) {
 	}
 	return tmpEpochs, nil
 }
+
+func (d *Database) SetEpoch(
+	slot, epoch uint64,
+	nonce []byte,
+	era, slotLength, lengthInSlots uint,
+	txn *Txn,
+) error {
+	if txn == nil {
+		err := d.metadata.SetEpoch(slot, epoch, nonce, era, slotLength, lengthInSlots, nil)
+		if err != nil {
+			return err
+		}
+	} else {
+		err := d.metadata.SetEpoch(slot, epoch, nonce, era, slotLength, lengthInSlots, txn.Metadata())
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
