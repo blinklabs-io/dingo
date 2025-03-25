@@ -16,6 +16,7 @@ package sqlite
 
 import (
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite/models"
+	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"gorm.io/gorm"
@@ -146,9 +147,9 @@ func (d *MetadataStoreSqlite) SetPoolRegistration(
 	tmpItem := models.PoolRegistration{
 		PoolKeyHash:   cert.Operator[:],
 		VrfKeyHash:    cert.VrfKeyHash[:],
-		Pledge:        models.Uint64(cert.Pledge),
-		Cost:          models.Uint64(cert.Cost),
-		Margin:        &models.Rat{Rat: cert.Margin.Rat},
+		Pledge:        types.Uint64(cert.Pledge),
+		Cost:          types.Uint64(cert.Cost),
+		Margin:        &types.Rat{Rat: cert.Margin.Rat},
 		AddedSlot:     slot,
 		DepositAmount: deposit,
 	}

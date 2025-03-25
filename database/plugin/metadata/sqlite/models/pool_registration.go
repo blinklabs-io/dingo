@@ -15,20 +15,18 @@
 package models
 
 import (
-	"database/sql/driver"
-	"fmt"
-	"math/big"
 	"net"
-	"strconv"
+
+	"github.com/blinklabs-io/dingo/database/types"
 )
 
 type PoolRegistration struct {
 	ID            uint   `gorm:"primarykey"`
 	PoolKeyHash   []byte `gorm:"index"`
 	VrfKeyHash    []byte
-	Pledge        Uint64
-	Cost          Uint64
-	Margin        *Rat
+	Pledge        types.Uint64
+	Cost          types.Uint64
+	Margin        *types.Rat
 	Owners        []PoolRegistrationOwner
 	Relays        []PoolRegistrationRelay
 	MetadataUrl   string
@@ -62,56 +60,4 @@ type PoolRegistrationRelay struct {
 
 func (PoolRegistrationRelay) TableName() string {
 	return "pool_registration_relay"
-}
-
-//nolint:recvcheck
-type Rat struct {
-	*big.Rat
-}
-
-func (r Rat) Value() (driver.Value, error) {
-	if r.Rat == nil {
-		return "", nil
-	}
-	return r.Rat.String(), nil
-}
-
-func (r *Rat) Scan(val any) error {
-	if r.Rat == nil {
-		r.Rat = new(big.Rat)
-	}
-	v, ok := val.(string)
-	if !ok {
-		return fmt.Errorf(
-			"value was not expected type, wanted string, got %T",
-			val,
-		)
-	}
-	if _, ok := r.SetString(v); !ok {
-		return fmt.Errorf("failed to set big.Rat value from string: %s", v)
-	}
-	return nil
-}
-
-//nolint:recvcheck
-type Uint64 uint64
-
-func (u Uint64) Value() (driver.Value, error) {
-	return strconv.FormatUint(uint64(u), 10), nil
-}
-
-func (u *Uint64) Scan(val any) error {
-	v, ok := val.(string)
-	if !ok {
-		return fmt.Errorf(
-			"value was not expected type, wanted string, got %T",
-			val,
-		)
-	}
-	tmpUint, err := strconv.ParseUint(v, 10, 64)
-	if err != nil {
-		return err
-	}
-	*u = Uint64(tmpUint)
-	return nil
 }
