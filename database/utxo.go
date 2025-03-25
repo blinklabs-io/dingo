@@ -74,17 +74,11 @@ func (d *Database) UtxoByRef(
 	if txn == nil {
 		txn = d.Transaction(false)
 	}
-	utxo, err := txn.DB().Metadata().GetUtxo(txId, outputIdx, txn.Metadata())
+	utxo, err := d.metadata.GetUtxo(txId, outputIdx, txn.Metadata())
 	if err != nil {
 		return tmpUtxo, err
 	}
-	tmpUtxo.ID = utxo.ID
-	tmpUtxo.TxId = utxo.TxId
-	tmpUtxo.OutputIdx = utxo.OutputIdx
-	tmpUtxo.AddedSlot = utxo.AddedSlot
-	tmpUtxo.DeletedSlot = utxo.DeletedSlot
-	tmpUtxo.PaymentKey = utxo.PaymentKey
-	tmpUtxo.StakingKey = utxo.StakingKey
+	tmpUtxo = Utxo(utxo)
 	if err := tmpUtxo.loadCbor(txn); err != nil {
 		return tmpUtxo, err
 	}
@@ -106,20 +100,12 @@ func (d *Database) UtxosByAddress(
 	if txn == nil {
 		txn = d.Transaction(false)
 	}
-	utxos, err := txn.DB().Metadata().GetUtxosByAddress(addr, txn.Metadata())
+	utxos, err := d.metadata.GetUtxosByAddress(addr, txn.Metadata())
 	if err != nil {
 		return ret, err
 	}
 	for _, utxo := range utxos {
-		tmpUtxo := Utxo{
-			ID:          utxo.ID,
-			TxId:        utxo.TxId,
-			OutputIdx:   utxo.OutputIdx,
-			AddedSlot:   utxo.AddedSlot,
-			DeletedSlot: utxo.DeletedSlot,
-			PaymentKey:  utxo.PaymentKey,
-			StakingKey:  utxo.StakingKey,
-		}
+		tmpUtxo := Utxo(utxo)
 		if err := tmpUtxo.loadCbor(txn); err != nil {
 			return ret, err
 		}
@@ -143,7 +129,7 @@ func (d *Database) UtxoDelete(
 		txn = d.Transaction(false)
 	}
 	// Remove from metadata DB
-	err := txn.DB().Metadata().DeleteUtxo(utxo, txn.Metadata())
+	err := d.metadata.DeleteUtxo(utxo, txn.Metadata())
 	if err != nil {
 		return err
 	}
@@ -171,7 +157,7 @@ func (d *Database) UtxosDelete(
 		txn = d.Transaction(false)
 	}
 	// Remove from metadata DB
-	err := txn.DB().Metadata().DeleteUtxos([]any{utxos}, txn.Metadata())
+	err := d.metadata.DeleteUtxos([]any{utxos}, txn.Metadata())
 	if err != nil {
 		return err
 	}
@@ -201,20 +187,12 @@ func (d *Database) UtxosDeleted(
 	if txn == nil {
 		txn = d.Transaction(false)
 	}
-	utxos, err := txn.DB().Metadata().GetUtxosDeletedBeforeSlot(slot, txn.Metadata())
+	utxos, err := d.metadata.GetUtxosDeletedBeforeSlot(slot, txn.Metadata())
 	if err != nil {
 		return ret, err
 	}
 	for _, utxo := range utxos {
-		tmpUtxo := Utxo{
-			ID:          utxo.ID,
-			TxId:        utxo.TxId,
-			OutputIdx:   utxo.OutputIdx,
-			AddedSlot:   utxo.AddedSlot,
-			DeletedSlot: utxo.DeletedSlot,
-			PaymentKey:  utxo.PaymentKey,
-			StakingKey:  utxo.StakingKey,
-		}
+		tmpUtxo := Utxo(utxo)
 		if err := tmpUtxo.loadCbor(txn); err != nil {
 			return ret, err
 		}
