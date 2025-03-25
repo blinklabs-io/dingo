@@ -37,19 +37,18 @@ func GetEpochLatest(db *Database) (Epoch, error) {
 func (d *Database) GetEpochLatest(txn *Txn) (Epoch, error) {
 	tmpEpoch := Epoch{}
 	if txn == nil {
-		txn = d.Transaction(false)
+		latestEpoch, err := d.metadata.GetEpochLatest(nil)
+		if err != nil {
+			return tmpEpoch, err
+		}
+		tmpEpoch = Epoch(latestEpoch)
+	} else {
+		latestEpoch, err := d.metadata.GetEpochLatest(txn.Metadata())
+		if err != nil {
+			return tmpEpoch, err
+		}
+		tmpEpoch = Epoch(latestEpoch)
 	}
-	epoch, err := txn.DB().Metadata().GetEpochLatest(txn.Metadata())
-	if err != nil {
-		return tmpEpoch, err
-	}
-	tmpEpoch.ID = epoch.ID
-	tmpEpoch.EpochId = epoch.EpochId
-	tmpEpoch.StartSlot = epoch.StartSlot
-	tmpEpoch.Nonce = epoch.Nonce
-	tmpEpoch.EraId = epoch.EraId
-	tmpEpoch.SlotLength = epoch.SlotLength
-	tmpEpoch.LengthInSlots = epoch.LengthInSlots
 	return tmpEpoch, nil
 }
 
@@ -60,22 +59,21 @@ func GetEpochsByEra(db *Database, eraId uint) ([]Epoch, error) {
 func (d *Database) GetEpochsByEra(eraId uint, txn *Txn) ([]Epoch, error) {
 	tmpEpochs := []Epoch{}
 	if txn == nil {
-		txn = d.Transaction(false)
-	}
-	epochs, err := txn.DB().Metadata().GetEpochsByEra(eraId, txn.Metadata())
-	if err != nil {
-		return tmpEpochs, err
-	}
-	for _, epoch := range epochs {
-		tmpEpoch := Epoch{
-			ID:            epoch.ID,
-			EpochId:       epoch.EpochId,
-			StartSlot:     epoch.StartSlot,
-			Nonce:         epoch.Nonce,
-			EraId:         epoch.EraId,
-			LengthInSlots: epoch.LengthInSlots,
+		epochs, err := d.metadata.GetEpochsByEra(eraId, nil)
+		if err != nil {
+			return tmpEpochs, err
 		}
-		tmpEpochs = append(tmpEpochs, tmpEpoch)
+		for _, epoch := range epochs {
+			tmpEpochs = append(tmpEpochs, Epoch(epoch))
+		}
+	} else {
+		epochs, err := txn.DB().metadata.GetEpochsByEra(eraId, txn.Metadata())
+		if err != nil {
+			return tmpEpochs, err
+		}
+		for _, epoch := range epochs {
+			tmpEpochs = append(tmpEpochs, Epoch(epoch))
+		}
 	}
 	return tmpEpochs, nil
 }
