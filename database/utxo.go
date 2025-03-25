@@ -73,6 +73,7 @@ func (d *Database) UtxoByRef(
 	tmpUtxo := Utxo{}
 	if txn == nil {
 		txn = d.Transaction(false)
+		defer txn.Commit() //nolint:errcheck
 	}
 	utxo, err := d.metadata.GetUtxo(txId, outputIdx, txn.Metadata())
 	if err != nil {
@@ -99,6 +100,7 @@ func (d *Database) UtxosByAddress(
 	ret := []Utxo{}
 	if txn == nil {
 		txn = d.Transaction(false)
+		defer txn.Commit() //nolint:errcheck
 	}
 	utxos, err := d.metadata.GetUtxosByAddress(addr, txn.Metadata())
 	if err != nil {
@@ -126,7 +128,8 @@ func (d *Database) UtxoDelete(
 	txn *Txn,
 ) error {
 	if txn == nil {
-		txn = d.Transaction(false)
+		txn = d.Transaction(true)
+		defer txn.Commit() //nolint:errcheck
 	}
 	// Remove from metadata DB
 	err := d.metadata.DeleteUtxo(utxo, txn.Metadata())
@@ -154,7 +157,8 @@ func (d *Database) UtxosDelete(
 	txn *Txn,
 ) error {
 	if txn == nil {
-		txn = d.Transaction(false)
+		txn = d.Transaction(true)
+		defer txn.Commit() //nolint:errcheck
 	}
 	// Remove from metadata DB
 	err := d.metadata.DeleteUtxos([]any{utxos}, txn.Metadata())
@@ -186,6 +190,7 @@ func (d *Database) UtxosDeleted(
 	ret := []Utxo{}
 	if txn == nil {
 		txn = d.Transaction(false)
+		defer txn.Commit() //nolint:errcheck
 	}
 	utxos, err := d.metadata.GetUtxosDeletedBeforeSlot(slot, txn.Metadata())
 	if err != nil {
@@ -215,6 +220,7 @@ func (d *Database) UtxosRolledback(
 	ret := []Utxo{}
 	if txn == nil {
 		txn = d.Transaction(false)
+		defer txn.Commit() //nolint:errcheck
 	}
 	utxos, err := d.metadata.GetUtxosAddedAfterSlot(slot, txn.Metadata())
 	if err != nil {
@@ -242,7 +248,8 @@ func (d *Database) UtxosUnspend(
 	txn *Txn,
 ) error {
 	if txn == nil {
-		txn = d.Transaction(false)
+		txn = d.Transaction(true)
+		defer txn.Commit() //nolint:errcheck
 	}
 	return d.metadata.SetUtxosNotDeletedAfterSlot(slot, txn.Metadata())
 }
