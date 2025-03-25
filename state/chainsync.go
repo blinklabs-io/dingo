@@ -307,14 +307,14 @@ func (ls *LedgerState) processGenesisBlock(
 			)
 			tmpNonce = genesisHashBytes
 		}
-		err = txn.DB().Metadata().SetEpoch(
+		err = txn.DB().SetEpoch(
 			0,
 			0,
 			tmpNonce,
 			ls.currentEra.Id,
 			epochSlotLength,
 			epochLength,
-			txn.Metadata(),
+			txn,
 		)
 		if err != nil {
 			return err
@@ -441,14 +441,14 @@ func (ls *LedgerState) processEpochRollover(
 		if err != nil {
 			return err
 		}
-		err = txn.DB().Metadata().SetEpoch(
+		err = txn.DB().SetEpoch(
 			epochStartSlot,
 			ls.currentEpoch.EpochId+1,
 			tmpNonce,
 			uint(block.Era().Id),
 			epochSlotLength,
 			epochLength,
-			txn.Metadata(),
+			txn,
 		)
 		if err != nil {
 			return err

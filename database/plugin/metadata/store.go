@@ -59,8 +59,8 @@ type MetadataStore interface {
 	) (models.Utxo, error)
 
 	SetEpoch(
-		uint64, // epoch
 		uint64, // slot
+		uint64, // epoch
 		[]byte, // nonce
 		uint, // era
 		uint, // slotLength
