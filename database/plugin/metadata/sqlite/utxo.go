@@ -46,6 +46,30 @@ func (d *MetadataStoreSqlite) GetUtxo(
 	return ret, nil
 }
 
+// GetUtxosAddedAfterSlot returns a list of Utxos added after a given slot
+func (d *MetadataStoreSqlite) GetUtxosAddedAfterSlot(
+	slot uint64,
+	txn *gorm.DB,
+) ([]models.Utxo, error) {
+	var ret []models.Utxo
+	if txn != nil {
+		result := txn.Where("added_slot > 0", slot).
+			Order("id DESC").
+			Find(&ret)
+		if result.Error != nil {
+			return ret, result.Error
+		}
+	} else {
+		result := d.DB().Where("added_slot > 0", slot).
+			Order("id DESC").
+			Find(&ret)
+		if result.Error != nil {
+			return ret, result.Error
+		}
+	}
+	return ret, nil
+}
+
 // GetUtxosDeletedBeforeSlot returns a list of Utxos marked as deleted before a given slot
 func (d *MetadataStoreSqlite) GetUtxosDeletedBeforeSlot(
 	slot uint64,
@@ -142,6 +166,29 @@ func (d *MetadataStoreSqlite) DeleteUtxos(
 		}
 	} else {
 		result := d.DB().Delete(&tmpUtxos)
+		if result.Error != nil {
+			return result.Error
+		}
+	}
+	return nil
+}
+
+// SetUtxosNotDeletedAfterSlot marks a list of Utxos as not deleted after a given slot
+func (d *MetadataStoreSqlite) SetUtxosNotDeletedAfterSlot(
+	slot uint64,
+	txn *gorm.DB,
+) error {
+	if txn != nil {
+		result := txn.Model(models.Utxo{}).
+			Where("deleted_slot > ?", slot).
+			Update("deleted_slot", 0)
+		if result.Error != nil {
+			return result.Error
+		}
+	} else {
+		result := d.DB().Model(models.Utxo{}).
+			Where("deleted_slot > ?", slot).
+			Update("deleted_slot", 0)
 		if result.Error != nil {
 			return result.Error
 		}
