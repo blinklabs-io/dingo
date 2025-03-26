@@ -30,10 +30,6 @@ func (Epoch) TableName() string {
 	return "epoch"
 }
 
-func GetEpochLatest(db *Database) (Epoch, error) {
-	return db.GetEpochLatest(nil)
-}
-
 func (d *Database) GetEpochLatest(txn *Txn) (Epoch, error) {
 	tmpEpoch := Epoch{}
 	if txn == nil {
@@ -52,10 +48,6 @@ func (d *Database) GetEpochLatest(txn *Txn) (Epoch, error) {
 	return tmpEpoch, nil
 }
 
-func GetEpochsByEra(db *Database, eraId uint) ([]Epoch, error) {
-	return db.GetEpochsByEra(eraId, nil)
-}
-
 func (d *Database) GetEpochsByEra(eraId uint, txn *Txn) ([]Epoch, error) {
 	tmpEpochs := []Epoch{}
 	if txn == nil {
@@ -67,7 +59,7 @@ func (d *Database) GetEpochsByEra(eraId uint, txn *Txn) ([]Epoch, error) {
 			tmpEpochs = append(tmpEpochs, Epoch(epoch))
 		}
 	} else {
-		epochs, err := txn.DB().metadata.GetEpochsByEra(eraId, txn.Metadata())
+		epochs, err := txn.db.metadata.GetEpochsByEra(eraId, txn.Metadata())
 		if err != nil {
 			return tmpEpochs, err
 		}

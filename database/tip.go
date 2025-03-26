@@ -16,10 +16,7 @@ package database
 
 import ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 
-func GetTip(db *Database) (ochainsync.Tip, error) {
-	return db.GetTip(nil)
-}
-
+// GetTip returns the current tip as represented by the protocol
 func (d *Database) GetTip(txn *Txn) (ochainsync.Tip, error) {
 	tmpTip := ochainsync.Tip{}
 	if txn == nil {
@@ -39,10 +36,6 @@ func (d *Database) GetTip(txn *Txn) (ochainsync.Tip, error) {
 }
 
 // SetTip saves the current tip
-func SetTip(db *Database, tip ochainsync.Tip) error {
-	return db.SetTip(tip, nil)
-}
-
 func (d *Database) SetTip(tip ochainsync.Tip, txn *Txn) error {
 	if txn == nil {
 		return d.metadata.SetTip(tip, nil)

@@ -58,14 +58,6 @@ func (u *Utxo) loadCbor(txn *Txn) error {
 	return nil
 }
 
-func UtxoByRef(
-	db *Database,
-	txId []byte,
-	outputIdx uint32,
-) (Utxo, error) {
-	return db.UtxoByRef(txId, outputIdx, nil)
-}
-
 func (d *Database) UtxoByRef(
 	txId []byte,
 	outputIdx uint32,
@@ -85,13 +77,6 @@ func (d *Database) UtxoByRef(
 		return tmpUtxo, err
 	}
 	return tmpUtxo, nil
-}
-
-func UtxosByAddress(
-	db *Database,
-	addr ledger.Address,
-) ([]Utxo, error) {
-	return db.UtxosByAddress(addr, nil)
 }
 
 func (d *Database) UtxosByAddress(
@@ -115,13 +100,6 @@ func (d *Database) UtxosByAddress(
 		ret = append(ret, tmpUtxo)
 	}
 	return ret, nil
-}
-
-func UtxosCleanup(
-	db *Database,
-	slot uint64,
-) error {
-	return db.UtxosCleanup(slot, nil)
 }
 
 func (d *Database) UtxosCleanup(
@@ -235,19 +213,12 @@ func (d *Database) UtxosDeleteRolledback(
 	return ret
 }
 
-func UtxosUnspend(
-	db *Database,
-	slot uint64,
-) error {
-	return db.UtxosUnspend(slot, nil)
-}
-
 func (d *Database) UtxosUnspend(
 	slot uint64,
 	txn *Txn,
 ) error {
 	if txn == nil {
-		txn = d.Transaction(true)
+		txn = NewMetadataOnlyTxn(d, false)
 		defer txn.Commit() //nolint:errcheck
 	}
 	return d.metadata.SetUtxosNotDeletedAfterSlot(slot, txn.Metadata())

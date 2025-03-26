@@ -19,7 +19,6 @@ import (
 	"fmt"
 	"math/big"
 
-	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/state/eras"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
@@ -208,7 +207,7 @@ func (ls *LedgerState) queryShelleyUtxoByAddress(
 ) (any, error) {
 	ret := make(map[olocalstatequery.UtxoId]ledger.TransactionOutput)
 	// TODO: support multiple addresses (#391)
-	utxos, err := database.UtxosByAddress(ls.db, addrs[0])
+	utxos, err := ls.db.UtxosByAddress(addrs[0], nil)
 	if err != nil {
 		return nil, err
 	}
@@ -231,10 +230,10 @@ func (ls *LedgerState) queryShelleyUtxoByTxIn(
 ) (any, error) {
 	ret := make(map[olocalstatequery.UtxoId]ledger.TransactionOutput)
 	// TODO: support multiple TxIns (#392)
-	utxo, err := database.UtxoByRef(
-		ls.db,
+	utxo, err := ls.db.UtxoByRef(
 		txIns[0].Id().Bytes(),
 		txIns[0].Index(),
+		nil,
 	)
 	if err != nil {
 		return nil, err
