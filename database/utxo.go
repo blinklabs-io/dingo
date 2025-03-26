@@ -17,6 +17,7 @@ package database
 import (
 	"errors"
 	"math/big"
+	"slices"
 
 	"github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/dgraph-io/badger/v4"
@@ -116,104 +117,71 @@ func (d *Database) UtxosByAddress(
 	return ret, nil
 }
 
-func UtxoDelete(
-	db *Database,
-	utxo Utxo,
-) error {
-	return db.UtxoDelete(utxo, nil)
-}
-
-func (d *Database) UtxoDelete(
-	utxo Utxo,
-	txn *Txn,
-) error {
-	if txn == nil {
-		txn = d.Transaction(true)
-		defer txn.Commit() //nolint:errcheck
-	}
-	// Remove from metadata DB
-	err := d.metadata.DeleteUtxo(utxo, txn.Metadata())
-	if err != nil {
-		return err
-	}
-	// Remove from blob DB
-	key := UtxoBlobKey(utxo.TxId, utxo.OutputIdx)
-	err = txn.Blob().Delete(key)
-	if err != nil {
-		return err
-	}
-	return nil
-}
-
-func UtxosDelete(
-	db *Database,
-	utxos []Utxo,
-) error {
-	return db.UtxosDelete(utxos, nil)
-}
-
-func (d *Database) UtxosDelete(
-	utxos []Utxo,
-	txn *Txn,
-) error {
-	if txn == nil {
-		txn = d.Transaction(true)
-		defer txn.Commit() //nolint:errcheck
-	}
-	// Remove from metadata DB
-	tmpUtxos := []any{}
-	for _, utxo := range utxos {
-		tmpUtxos = append(tmpUtxos, utxo)
-	}
-	err := d.metadata.DeleteUtxos(tmpUtxos, txn.Metadata())
-	if err != nil {
-		return err
-	}
-	// Remove from blob DB
-	for _, utxo := range utxos {
-		key := UtxoBlobKey(utxo.TxId, utxo.OutputIdx)
-		err := txn.Blob().Delete(key)
-		if err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func UtxosDeleted(
+func UtxosCleanup(
 	db *Database,
 	slot uint64,
-) ([]Utxo, error) {
-	return db.UtxosDeleted(slot, nil)
+) error {
+	return db.UtxosCleanup(slot, nil)
 }
 
-func (d *Database) UtxosDeleted(
+func (d *Database) UtxosCleanup(
 	slot uint64,
 	txn *Txn,
-) ([]Utxo, error) {
-	ret := []Utxo{}
+) error {
+	var ret error
 	if txn == nil {
 		txn = d.Transaction(false)
 		defer txn.Commit() //nolint:errcheck
 	}
+	// Get UTxOs that are marked as deleted and older than our slot window
 	utxos, err := d.metadata.GetUtxosDeletedBeforeSlot(slot, txn.Metadata())
 	if err != nil {
-		return ret, err
+		return errors.New("failed to query consumed UTxOs during cleanup")
 	}
-	for _, utxo := range utxos {
-		tmpUtxo := Utxo(utxo)
-		if err := tmpUtxo.loadCbor(txn); err != nil {
-			return ret, err
+
+	// Loop through UTxOs and delete, with a new transaction each loop
+	for {
+		// short-circuit loop
+		if ret != nil {
+			break
 		}
-		ret = append(ret, tmpUtxo)
+		batchSize := min(1000, len(utxos))
+		if batchSize == 0 {
+			break
+		}
+		// Delete the UTxOs
+		loopTxn := d.Transaction(true)
+		// Remove from metadata DB
+		tmpUtxos := []any{}
+		for _, utxo := range utxos[0:batchSize] {
+			tmpUtxos = append(tmpUtxos, utxo)
+		}
+		err := d.metadata.DeleteUtxos(tmpUtxos, loopTxn.Metadata())
+		if err != nil {
+			ret = err
+			break
+		}
+		// Remove from blob DB
+		for _, utxo := range utxos[0:batchSize] {
+			key := UtxoBlobKey(utxo.TxId, utxo.OutputIdx)
+			err := loopTxn.Blob().Delete(key)
+			if err != nil {
+				ret = err
+				break
+			}
+		}
+		loopTxn.Commit()
+		// Remove batch
+		utxos = slices.Delete(utxos, 0, batchSize)
 	}
-	return ret, nil
+	return ret
 }
 
 func (d *Database) UtxosDeleteRolledback(
 	slot uint64,
 	txn *Txn,
 ) error {
+	var ret error
 	if txn == nil {
 		txn = d.Transaction(false)
 		defer txn.Commit() //nolint:errcheck
@@ -222,25 +190,43 @@ func (d *Database) UtxosDeleteRolledback(
 	if err != nil {
 		return err
 	}
-	tmpUtxos := []any{}
-	for _, utxo := range utxos {
-		tmpUtxos = append(tmpUtxos, utxo)
-	}
-	if len(tmpUtxos) > 0 {
-		err = d.metadata.DeleteUtxos(tmpUtxos, txn.Metadata())
+
+	// Loop through UTxOs and delete, with a new transaction each loop
+	for {
+		// short-circuit loop
+		if ret != nil {
+			break
+		}
+		batchSize := min(1000, len(utxos))
+		if batchSize == 0 {
+			break
+		}
+		// Delete the UTxOs
+		loopTxn := d.Transaction(true)
+		// Remove from metadata DB
+		tmpUtxos := []any{}
+		for _, utxo := range utxos[0:batchSize] {
+			tmpUtxos = append(tmpUtxos, utxo)
+		}
+		err := d.metadata.DeleteUtxos(tmpUtxos, loopTxn.Metadata())
 		if err != nil {
-			return err
+			ret = err
+			break
 		}
 		// Remove from blob DB
-		for _, utxo := range utxos {
+		for _, utxo := range utxos[0:batchSize] {
 			key := UtxoBlobKey(utxo.TxId, utxo.OutputIdx)
-			err := txn.Blob().Delete(key)
+			err := loopTxn.Blob().Delete(key)
 			if err != nil {
-				return err
+				ret = err
+				break
 			}
 		}
+		loopTxn.Commit()
+		// Remove batch
+		utxos = slices.Delete(utxos, 0, batchSize)
 	}
-	return nil
+	return ret
 }
 
 func UtxosUnspend(
