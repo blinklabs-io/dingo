@@ -20,7 +20,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"slices"
 	"sync"
 	"time"
 
@@ -200,40 +199,22 @@ func (ls *LedgerState) scheduleCleanupConsumedUtxos() {
 			}()
 			// Get the current tip, since we're querying by slot
 			tip := ls.Tip()
-			// Get UTxOs that are marked as deleted and older than our slot window
-			utxos, err := ls.db.UtxosDeleted(tip.Point.Slot-cleanupConsumedUtxosSlotWindow, nil)
+			// Delete UTxOs that are marked as deleted and older than our slot window
+			ls.config.Logger.Debug(
+				"cleaning up consumed UTxOs",
+				"component", "ledger",
+			)
+			err := ls.db.UtxosCleanup(
+				tip.Point.Slot-cleanupConsumedUtxosSlotWindow,
+				nil,
+			)
 			if err != nil {
 				ls.config.Logger.Error(
-					"failed to query consumed UTxOs",
+					"failed to cleanup consumed UTxOs",
 					"component", "ledger",
 					"error", err,
 				)
 				return
-			}
-			for {
-				ls.Lock()
-				batchSize := min(1000, len(utxos))
-				if batchSize == 0 {
-					ls.Unlock()
-					break
-				}
-				// Delete the UTxOs
-				txn := ls.db.Transaction(true)
-				err := txn.Do(func(txn *database.Txn) error {
-					return ls.db.UtxosDelete(utxos[0:batchSize], txn)
-				})
-				if err != nil {
-					ls.config.Logger.Error(
-						"failed to remove consumed UTxO",
-						"component", "ledger",
-						"error", err,
-					)
-					ls.Unlock()
-					break
-				}
-				// Remove batch
-				utxos = slices.Delete(utxos, 0, batchSize)
-				ls.Unlock()
 			}
 		},
 	)
