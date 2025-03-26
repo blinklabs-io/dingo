@@ -151,26 +151,31 @@ func (d *Database) UtxosCleanup(
 		}
 		// Delete the UTxOs
 		loopTxn := d.Transaction(true)
-		// Remove from metadata DB
-		tmpUtxos := []any{}
-		for _, utxo := range utxos[0:batchSize] {
-			tmpUtxos = append(tmpUtxos, utxo)
-		}
-		err := d.metadata.DeleteUtxos(tmpUtxos, loopTxn.Metadata())
+		err := loopTxn.Do(func(txn *Txn) error {
+			// Remove from metadata DB
+			tmpUtxos := []any{}
+			for _, utxo := range utxos[0:batchSize] {
+				tmpUtxos = append(tmpUtxos, utxo)
+			}
+			err := d.metadata.DeleteUtxos(tmpUtxos, txn.Metadata())
+			if err != nil {
+				return err
+			}
+			// Remove from blob DB
+			for _, utxo := range utxos[0:batchSize] {
+				key := UtxoBlobKey(utxo.TxId, utxo.OutputIdx)
+				err := txn.Blob().Delete(key)
+				if err != nil {
+					ret = err
+					break
+				}
+			}
+			return nil
+		})
 		if err != nil {
 			ret = err
 			break
 		}
-		// Remove from blob DB
-		for _, utxo := range utxos[0:batchSize] {
-			key := UtxoBlobKey(utxo.TxId, utxo.OutputIdx)
-			err := loopTxn.Blob().Delete(key)
-			if err != nil {
-				ret = err
-				break
-			}
-		}
-		loopTxn.Commit()
 		// Remove batch
 		utxos = slices.Delete(utxos, 0, batchSize)
 	}
@@ -203,26 +208,31 @@ func (d *Database) UtxosDeleteRolledback(
 		}
 		// Delete the UTxOs
 		loopTxn := d.Transaction(true)
-		// Remove from metadata DB
-		tmpUtxos := []any{}
-		for _, utxo := range utxos[0:batchSize] {
-			tmpUtxos = append(tmpUtxos, utxo)
-		}
-		err := d.metadata.DeleteUtxos(tmpUtxos, loopTxn.Metadata())
+		err := loopTxn.Do(func(txn *Txn) error {
+			// Remove from metadata DB
+			tmpUtxos := []any{}
+			for _, utxo := range utxos[0:batchSize] {
+				tmpUtxos = append(tmpUtxos, utxo)
+			}
+			err := d.metadata.DeleteUtxos(tmpUtxos, txn.Metadata())
+			if err != nil {
+				return err
+			}
+			// Remove from blob DB
+			for _, utxo := range utxos[0:batchSize] {
+				key := UtxoBlobKey(utxo.TxId, utxo.OutputIdx)
+				err := txn.Blob().Delete(key)
+				if err != nil {
+					ret = err
+					break
+				}
+			}
+			return nil
+		})
 		if err != nil {
 			ret = err
 			break
 		}
-		// Remove from blob DB
-		for _, utxo := range utxos[0:batchSize] {
-			key := UtxoBlobKey(utxo.TxId, utxo.OutputIdx)
-			err := loopTxn.Blob().Delete(key)
-			if err != nil {
-				ret = err
-				break
-			}
-		}
-		loopTxn.Commit()
 		// Remove batch
 		utxos = slices.Delete(utxos, 0, batchSize)
 	}
