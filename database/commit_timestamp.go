@@ -18,11 +18,13 @@ import (
 	"fmt"
 )
 
+// CommitTimestampError contains the timestamps of the metadata and blob stores
 type CommitTimestampError struct {
 	MetadataTimestamp int64
 	BlobTimestamp     int64
 }
 
+// Error returns the stringified error
 func (e CommitTimestampError) Error() string {
 	return fmt.Sprintf(
 		"commit timestamp mismatch: %d (metadata) != %d (blob)",
