@@ -196,7 +196,7 @@ func (d *Database) UtxosDeleteRolledback(
 		return err
 	}
 
-	// Loop through UTxOs and delete, with a new transaction each loop
+	// Loop through UTxOs and delete, reusing our transaction
 	for {
 		// short-circuit loop
 		if ret != nil {
@@ -206,29 +206,25 @@ func (d *Database) UtxosDeleteRolledback(
 		if batchSize == 0 {
 			break
 		}
-		// Delete the UTxOs
-		loopTxn := d.Transaction(true)
-		err := loopTxn.Do(func(txn *Txn) error {
-			// Remove from metadata DB
-			tmpUtxos := []any{}
-			for _, utxo := range utxos[0:batchSize] {
-				tmpUtxos = append(tmpUtxos, utxo)
-			}
-			err := d.metadata.DeleteUtxos(tmpUtxos, txn.Metadata())
+		// Remove from metadata DB
+		tmpUtxos := []any{}
+		for _, utxo := range utxos[0:batchSize] {
+			tmpUtxos = append(tmpUtxos, utxo)
+		}
+		err := d.metadata.DeleteUtxos(tmpUtxos, txn.Metadata())
+		if err != nil {
+			ret = err
+			break
+		}
+		// Remove from blob DB
+		for _, utxo := range utxos[0:batchSize] {
+			key := UtxoBlobKey(utxo.TxId, utxo.OutputIdx)
+			err := txn.Blob().Delete(key)
 			if err != nil {
-				return err
+				ret = err
+				break
 			}
-			// Remove from blob DB
-			for _, utxo := range utxos[0:batchSize] {
-				key := UtxoBlobKey(utxo.TxId, utxo.OutputIdx)
-				err := txn.Blob().Delete(key)
-				if err != nil {
-					ret = err
-					break
-				}
-			}
-			return nil
-		})
+		}
 		if err != nil {
 			ret = err
 			break
