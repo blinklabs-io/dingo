@@ -626,7 +626,7 @@ func (ls *LedgerState) UtxoByRef(
 	txId []byte,
 	outputIdx uint32,
 ) (database.Utxo, error) {
-	return database.UtxoByRef(ls.db, txId, outputIdx)
+	return ls.db.UtxoByRef(txId, outputIdx, nil)
 }
 
 // UtxosByAddress returns all UTxOs that belong to the specified address
@@ -634,21 +634,12 @@ func (ls *LedgerState) UtxosByAddress(
 	addr ledger.Address,
 ) ([]database.Utxo, error) {
 	ret := []database.Utxo{}
-	utxos, err := database.UtxosByAddress(ls.db, addr)
+	utxos, err := ls.db.UtxosByAddress(addr, nil)
 	if err != nil {
 		return ret, err
 	}
 	for _, utxo := range utxos {
-		tmpUtxo := database.Utxo{
-			ID:          utxo.ID,
-			TxId:        utxo.TxId,
-			OutputIdx:   utxo.OutputIdx,
-			AddedSlot:   utxo.AddedSlot,
-			DeletedSlot: utxo.DeletedSlot,
-			PaymentKey:  utxo.PaymentKey,
-			StakingKey:  utxo.StakingKey,
-			Cbor:        utxo.Cbor,
-		}
+		tmpUtxo := database.Utxo(utxo)
 		ret = append(ret, tmpUtxo)
 	}
 	return ret, nil
