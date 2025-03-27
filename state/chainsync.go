@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"slices"
 	"time"
 
 	"github.com/blinklabs-io/dingo/database"
@@ -140,8 +141,11 @@ func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 	if ls.chainsyncBlockfetchBusy {
 		// Clear busy flag on timeout
 		if time.Since(ls.chainsyncBlockfetchBusyTime) > blockfetchBusyTimeout {
+			// Clear flags
 			ls.chainsyncBlockfetchBusy = false
 			ls.chainsyncBlockfetchWaiting = false
+			// Reset buffer
+			ls.chainsyncBlockEvents = slices.Delete(ls.chainsyncBlockEvents, 0, len(ls.chainsyncBlockEvents))
 			ls.config.Logger.Warn(
 				fmt.Sprintf(
 					"blockfetch operation timed out after %s",
@@ -151,7 +155,11 @@ func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 				"ledger",
 			)
 			// Unblock new chainsync block headers
-			ls.chainsyncHeaderMutex.Unlock()
+			// We're being extra careful about unlocking the mutex since we're not
+			// entirely sure of the state
+			if !ls.chainsyncHeaderMutex.TryLock() {
+				ls.chainsyncHeaderMutex.Unlock()
+			}
 			return nil
 		}
 		ls.chainsyncBlockfetchWaiting = true
@@ -166,6 +174,9 @@ func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 		ls.chainsyncHeaderPoints[len(ls.chainsyncHeaderPoints)-1],
 	)
 	if err != nil {
+		// Clear flags
+		ls.chainsyncBlockfetchBusy = false
+		ls.chainsyncBlockfetchWaiting = false
 		// Unblock chainsync block headers
 		ls.chainsyncHeaderMutex.Unlock()
 		return err
