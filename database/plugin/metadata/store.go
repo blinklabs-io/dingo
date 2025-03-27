@@ -122,6 +122,7 @@ type MetadataStore interface {
 	GetUtxosAddedAfterSlot(uint64, *gorm.DB) ([]models.Utxo, error)
 	GetUtxosByAddress(ledger.Address, *gorm.DB) ([]models.Utxo, error)
 	GetUtxosDeletedBeforeSlot(uint64, *gorm.DB) ([]models.Utxo, error)
+	SetUtxoDeletedAtSlot(ledger.TransactionInput, uint64, *gorm.DB) error
 	SetUtxosNotDeletedAfterSlot(uint64, *gorm.DB) error
 }
 

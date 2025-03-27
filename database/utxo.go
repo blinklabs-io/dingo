@@ -79,6 +79,18 @@ func (d *Database) UtxoByRef(
 	return tmpUtxo, nil
 }
 
+func (d *Database) UtxoConsume(
+	utxoId ledger.TransactionInput,
+	slot uint64,
+	txn *Txn,
+) error {
+	if txn == nil {
+		txn = NewMetadataOnlyTxn(d, true)
+		defer txn.Commit() //nolint:errcheck
+	}
+	return d.metadata.SetUtxoDeletedAtSlot(utxoId, slot, txn.Metadata())
+}
+
 func (d *Database) UtxosByAddress(
 	addr ledger.Address,
 	txn *Txn,
