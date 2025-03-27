@@ -35,7 +35,6 @@ import (
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/prometheus/client_golang/prometheus"
-	"gorm.io/gorm"
 )
 
 const (
@@ -423,25 +422,11 @@ func (ls *LedgerState) consumeUtxo(
 	utxoId ledger.TransactionInput,
 	slot uint64,
 ) error {
-	// Find UTxO
-	utxo, err := txn.DB().UtxoByRef(
-		utxoId.Id().Bytes(),
-		utxoId.Index(),
+	return txn.DB().UtxoConsume(
+		utxoId,
+		slot,
 		txn,
 	)
-	if err != nil {
-		// TODO: make this configurable? (#396)
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil
-		}
-		return err
-	}
-	// Mark as deleted in specified slot
-	utxo.DeletedSlot = slot
-	if result := txn.Metadata().Save(&utxo); result.Error != nil {
-		return result.Error
-	}
-	return nil
 }
 
 func (ls *LedgerState) addBlock(txn *database.Txn, block database.Block) error {
