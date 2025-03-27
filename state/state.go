@@ -327,12 +327,12 @@ func (ls *LedgerState) transitionToEra(
 		if err != nil {
 			return err
 		}
-		err = txn.DB().Metadata().SetPParams(
+		err = txn.DB().SetPParams(
 			pparamsCbor,
 			addedSlot,
 			startEpoch,
 			nextEraId,
-			txn.Metadata(),
+			txn,
 		)
 		if err != nil {
 			return err
@@ -379,17 +379,17 @@ func (ls *LedgerState) applyPParamUpdates(
 					"pparams",
 					fmt.Sprintf("%#v", ls.currentPParams),
 				)
+				// Write pparams update to DB
 				pparamsCbor, err := cbor.Encode(&ls.currentPParams)
 				if err != nil {
 					return err
 				}
-				// Write pparams update to DB
-				err = txn.DB().Metadata().SetPParams(
+				err = txn.DB().SetPParams(
 					pparamsCbor,
 					addedSlot,
 					uint64(currentEpoch+1),
 					ls.currentEra.Id,
-					txn.Metadata(),
+					txn,
 				)
 				if err != nil {
 					return err
@@ -447,22 +447,15 @@ func (ls *LedgerState) removeBlock(
 }
 
 func (ls *LedgerState) loadPParams() error {
-	pparams, err := ls.db.Metadata().GetPParams(ls.currentEpoch.EpochId, nil)
-	if err != nil {
-		return err
-	}
-	if len(pparams) == 0 {
-		return nil
-	}
-	// pparams is ordered, so grab the first
-	tmpPParams := pparams[0]
-	currentPParams, err := ls.currentEra.DecodePParamsFunc(
-		tmpPParams.Cbor,
+	pparams, err := ls.db.GetPParams(
+		ls.currentEpoch.EpochId,
+		ls.currentEra.DecodePParamsFunc,
+		nil,
 	)
 	if err != nil {
 		return err
 	}
-	ls.currentPParams = currentPParams
+	ls.currentPParams = pparams
 	return nil
 }
 

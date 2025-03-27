@@ -144,7 +144,11 @@ func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 			ls.chainsyncBlockfetchBusy = false
 			ls.chainsyncBlockfetchWaiting = false
 			// Reset buffer
-			ls.chainsyncBlockEvents = slices.Delete(ls.chainsyncBlockEvents, 0, len(ls.chainsyncBlockEvents))
+			ls.chainsyncBlockEvents = slices.Delete(
+				ls.chainsyncBlockEvents,
+				0,
+				len(ls.chainsyncBlockEvents),
+			)
 			ls.config.Logger.Warn(
 				fmt.Sprintf(
 					"blockfetch operation timed out after %s",
