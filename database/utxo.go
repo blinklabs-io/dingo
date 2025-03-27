@@ -147,7 +147,7 @@ func (d *Database) UtxosDeleteConsumed(
 ) error {
 	var ret error
 	if txn == nil {
-		txn = d.Transaction(false)
+		txn = d.Transaction(true)
 		defer txn.Commit() //nolint:errcheck
 	}
 	// Get UTxOs that are marked as deleted and older than our slot window
@@ -191,7 +191,7 @@ func (d *Database) UtxosDeleteRolledback(
 ) error {
 	var ret error
 	if txn == nil {
-		txn = d.Transaction(false)
+		txn = d.Transaction(true)
 		defer txn.Commit() //nolint:errcheck
 	}
 	utxos, err := d.metadata.GetUtxosDeletedBeforeSlot(slot, txn.Metadata())
@@ -233,7 +233,7 @@ func (d *Database) UtxosUnspend(
 	txn *Txn,
 ) error {
 	if txn == nil {
-		txn = NewMetadataOnlyTxn(d, false)
+		txn = NewMetadataOnlyTxn(d, true)
 		defer txn.Commit() //nolint:errcheck
 	}
 	return d.metadata.SetUtxosNotDeletedAfterSlot(slot, txn.Metadata())
