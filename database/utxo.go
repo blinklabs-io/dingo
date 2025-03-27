@@ -134,7 +134,7 @@ func (d *Database) UtxosByAddress(
 	return ret, nil
 }
 
-func (d *Database) UtxosCleanup(
+func (d *Database) UtxosDeleteConsumed(
 	slot uint64,
 	txn *Txn,
 ) error {
@@ -148,6 +148,10 @@ func (d *Database) UtxosCleanup(
 	if err != nil {
 		return errors.New("failed to query consumed UTxOs during cleanup")
 	}
+	err = d.metadata.DeleteUtxosBeforeSlot(slot, txn.Metadata())
+	if err != nil {
+		return err
+	}
 
 	// Loop through UTxOs and delete, with a new transaction each loop
 	for {
@@ -159,32 +163,14 @@ func (d *Database) UtxosCleanup(
 		if batchSize == 0 {
 			break
 		}
-		// Delete the UTxOs
-		loopTxn := d.Transaction(true)
-		err := loopTxn.Do(func(txn *Txn) error {
-			// Remove from metadata DB
-			tmpUtxos := []any{}
-			for _, utxo := range utxos[0:batchSize] {
-				tmpUtxos = append(tmpUtxos, utxo)
-			}
-			err := d.metadata.DeleteUtxos(tmpUtxos, txn.Metadata())
+		// Remove from blob DB
+		for _, utxo := range utxos[0:batchSize] {
+			key := UtxoBlobKey(utxo.TxId, utxo.OutputIdx)
+			err := txn.Blob().Delete(key)
 			if err != nil {
-				return err
+				ret = err
+				break
 			}
-			// Remove from blob DB
-			for _, utxo := range utxos[0:batchSize] {
-				key := UtxoBlobKey(utxo.TxId, utxo.OutputIdx)
-				err := txn.Blob().Delete(key)
-				if err != nil {
-					ret = err
-					break
-				}
-			}
-			return nil
-		})
-		if err != nil {
-			ret = err
-			break
 		}
 		// Remove batch
 		utxos = slices.Delete(utxos, 0, batchSize)
