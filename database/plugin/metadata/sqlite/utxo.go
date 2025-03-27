@@ -199,13 +199,13 @@ func (d *MetadataStoreSqlite) DeleteUtxosBeforeSlot(
 	txn *gorm.DB,
 ) error {
 	if txn != nil {
-		result := txn.Where("deleted_slot < ?", slot).
+		result := txn.Where("deleted_slot > 0 AND deleted_slot < ?", slot).
 			Delete(&models.Utxo{})
 		if result.Error != nil {
 			return result.Error
 		}
 	} else {
-		result := d.DB().Where("deleted_slot < ?", slot).
+		result := d.DB().Where("deleted_slot >0 AND deleted_slot < ?", slot).
 			Delete(&models.Utxo{})
 		if result.Error != nil {
 			return result.Error
