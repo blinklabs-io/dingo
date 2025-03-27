@@ -329,7 +329,7 @@ func (ls *LedgerState) transitionToEra(
 		if err != nil {
 			return err
 		}
-		err = txn.DB().SetPParams(
+		err = ls.db.SetPParams(
 			pparamsCbor,
 			addedSlot,
 			startEpoch,
@@ -350,7 +350,7 @@ func (ls *LedgerState) applyPParamUpdates(
 	addedSlot uint64,
 ) error {
 	// Check for pparam updates that apply at the end of the epoch
-	pparamUpdates, err := txn.DB().
+	pparamUpdates, err := ls.db.
 		Metadata().
 		GetPParamUpdates(currentEpoch, txn.Metadata())
 	if err != nil {
@@ -386,7 +386,7 @@ func (ls *LedgerState) applyPParamUpdates(
 				if err != nil {
 					return err
 				}
-				err = txn.DB().SetPParams(
+				err = ls.db.SetPParams(
 					pparamsCbor,
 					addedSlot,
 					uint64(currentEpoch+1),
@@ -409,7 +409,7 @@ func (ls *LedgerState) consumeUtxo(
 	utxoId ledger.TransactionInput,
 	slot uint64,
 ) error {
-	return txn.DB().UtxoConsume(
+	return ls.db.UtxoConsume(
 		utxoId,
 		slot,
 		txn,

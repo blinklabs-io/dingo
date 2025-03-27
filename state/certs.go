@@ -37,7 +37,7 @@ func (ls *LedgerState) processTransactionCertificates(
 		}
 		switch cert := tmpCert.(type) {
 		case *lcommon.PoolRegistrationCertificate:
-			err := txn.DB().SetPoolRegistration(
+			err := ls.db.SetPoolRegistration(
 				cert,
 				blockPoint.Slot,
 				certDeposit,
@@ -47,7 +47,7 @@ func (ls *LedgerState) processTransactionCertificates(
 				return err
 			}
 		case *lcommon.PoolRetirementCertificate:
-			err := txn.DB().SetPoolRetirement(
+			err := ls.db.SetPoolRetirement(
 				cert,
 				blockPoint.Slot,
 				txn,
@@ -56,7 +56,7 @@ func (ls *LedgerState) processTransactionCertificates(
 				return err
 			}
 		case *lcommon.StakeDelegationCertificate:
-			err := txn.DB().SetStakeDelegation(
+			err := ls.db.SetStakeDelegation(
 				cert,
 				blockPoint.Slot,
 				txn,
@@ -65,7 +65,7 @@ func (ls *LedgerState) processTransactionCertificates(
 				return err
 			}
 		case *lcommon.StakeDeregistrationCertificate:
-			err := txn.DB().SetStakeDeregistration(
+			err := ls.db.SetStakeDeregistration(
 				cert,
 				blockPoint.Slot,
 				txn,
@@ -74,7 +74,7 @@ func (ls *LedgerState) processTransactionCertificates(
 				return err
 			}
 		case *lcommon.StakeRegistrationCertificate:
-			err := txn.DB().SetStakeRegistration(
+			err := ls.db.SetStakeRegistration(
 				cert,
 				blockPoint.Slot,
 				certDeposit,

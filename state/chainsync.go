@@ -321,7 +321,7 @@ func (ls *LedgerState) processGenesisBlock(
 			)
 			tmpNonce = genesisHashBytes
 		}
-		err = txn.DB().SetEpoch(
+		err = ls.db.SetEpoch(
 			0,
 			0,
 			tmpNonce,
@@ -333,7 +333,7 @@ func (ls *LedgerState) processGenesisBlock(
 		if err != nil {
 			return err
 		}
-		newEpoch, err := txn.DB().GetEpochLatest(txn)
+		newEpoch, err := ls.db.GetEpochLatest(txn)
 		if err != nil {
 			return err
 		}
@@ -355,7 +355,7 @@ func (ls *LedgerState) processGenesisBlock(
 			if err != nil {
 				return err
 			}
-			err = txn.DB().NewUtxo(
+			err = ls.db.NewUtxo(
 				utxo.Id.Id().Bytes(),
 				utxo.Id.Index(),
 				0,
@@ -456,7 +456,7 @@ func (ls *LedgerState) processEpochRollover(
 		if err != nil {
 			return err
 		}
-		err = txn.DB().SetEpoch(
+		err = ls.db.SetEpoch(
 			epochStartSlot,
 			ls.currentEpoch.EpochId+1,
 			tmpNonce,
@@ -468,7 +468,7 @@ func (ls *LedgerState) processEpochRollover(
 		if err != nil {
 			return err
 		}
-		newEpoch, err := txn.DB().GetEpochLatest(txn)
+		newEpoch, err := ls.db.GetEpochLatest(txn)
 		if err != nil {
 			return err
 		}
@@ -602,7 +602,7 @@ func (ls *LedgerState) processTransaction(
 	// Process produced UTxOs
 	for _, produced := range tx.Produced() {
 		outAddr := produced.Output.Address()
-		err := txn.DB().NewUtxo(
+		err := ls.db.NewUtxo(
 			produced.Id.Id().Bytes(),
 			produced.Id.Index(),
 			point.Slot,
@@ -619,7 +619,7 @@ func (ls *LedgerState) processTransaction(
 	// Protocol parameter updates
 	if updateEpoch, paramUpdates := tx.ProtocolParameterUpdates(); updateEpoch > 0 {
 		for genesisHash, update := range paramUpdates {
-			err := txn.DB().Metadata().SetPParamUpdate(
+			err := ls.db.Metadata().SetPParamUpdate(
 				genesisHash.Bytes(),
 				update.Cbor(),
 				point.Slot,

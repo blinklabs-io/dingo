@@ -62,12 +62,12 @@ func (lv *LedgerView) PoolRegistration(
 	pkh []byte,
 ) ([]lcommon.PoolRegistrationCertificate, error) {
 	poolKeyHash := lcommon.PoolKeyHash(lcommon.NewBlake2b224(pkh))
-	return lv.txn.DB().GetPoolRegistrations(poolKeyHash, lv.txn)
+	return lv.ls.db.GetPoolRegistrations(poolKeyHash, lv.txn)
 }
 
 func (lv *LedgerView) StakeRegistration(
 	stakingKey []byte,
 ) ([]lcommon.StakeRegistrationCertificate, error) {
 	// stakingKey = lcommon.NewBlake2b224(stakingKey)
-	return lv.txn.DB().GetStakeRegistrations(stakingKey, lv.txn)
+	return lv.ls.db.GetStakeRegistrations(stakingKey, lv.txn)
 }
