@@ -202,10 +202,12 @@ func (ls *LedgerState) scheduleCleanupConsumedUtxos() {
 				"cleaning up consumed UTxOs",
 				"component", "ledger",
 			)
+			ls.Lock()
 			err := ls.db.UtxosDeleteConsumed(
 				tip.Point.Slot-cleanupConsumedUtxosSlotWindow,
 				nil,
 			)
+			ls.Unlock()
 			if err != nil {
 				ls.config.Logger.Error(
 					"failed to cleanup consumed UTxOs",
