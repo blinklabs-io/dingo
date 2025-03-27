@@ -75,7 +75,14 @@ func (d *Database) NewUtxo(
 	if err != nil {
 		return err
 	}
-	return d.metadata.SetUtxo(txId, outputIdx, slot, paymentKey, stakeKey, txn.Metadata())
+	return d.metadata.SetUtxo(
+		txId,
+		outputIdx,
+		slot,
+		paymentKey,
+		stakeKey,
+		txn.Metadata(),
+	)
 }
 
 func (d *Database) UtxoByRef(

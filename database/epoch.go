@@ -77,7 +77,15 @@ func (d *Database) SetEpoch(
 	txn *Txn,
 ) error {
 	if txn == nil {
-		err := d.metadata.SetEpoch(slot, epoch, nonce, era, slotLength, lengthInSlots, nil)
+		err := d.metadata.SetEpoch(
+			slot,
+			epoch,
+			nonce,
+			era,
+			slotLength,
+			lengthInSlots,
+			nil,
+		)
 		if err != nil {
 			return err
 		}
