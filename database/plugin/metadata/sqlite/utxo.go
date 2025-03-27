@@ -193,6 +193,27 @@ func (d *MetadataStoreSqlite) DeleteUtxosAfterSlot(
 	return nil
 }
 
+// DeleteUtxosBeforeSlot deletes Utxos marked as deleted before a given slot
+func (d *MetadataStoreSqlite) DeleteUtxosBeforeSlot(
+	slot uint64,
+	txn *gorm.DB,
+) error {
+	if txn != nil {
+		result := txn.Where("deleted_slot < ?", slot).
+			Delete(&models.Utxo{})
+		if result.Error != nil {
+			return result.Error
+		}
+	} else {
+		result := d.DB().Where("deleted_slot < ?", slot).
+			Delete(&models.Utxo{})
+		if result.Error != nil {
+			return result.Error
+		}
+	}
+	return nil
+}
+
 // SetUtxo saves a UTxO
 func (d *MetadataStoreSqlite) SetUtxo(
 	txId []byte, // hash

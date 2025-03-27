@@ -202,7 +202,7 @@ func (ls *LedgerState) scheduleCleanupConsumedUtxos() {
 				"cleaning up consumed UTxOs",
 				"component", "ledger",
 			)
-			err := ls.db.UtxosCleanup(
+			err := ls.db.UtxosDeleteConsumed(
 				tip.Point.Slot-cleanupConsumedUtxosSlotWindow,
 				nil,
 			)
