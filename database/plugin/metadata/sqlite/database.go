@@ -60,7 +60,8 @@ func New(
 		metadataDb, err = gorm.Open(
 			sqlite.Open("file::memory:?cache=shared"),
 			&gorm.Config{
-				Logger: gormlogger.Discard,
+				Logger:                 gormlogger.Discard,
+				SkipDefaultTransaction: true,
 			},
 		)
 		if err != nil {
@@ -89,7 +90,8 @@ func New(
 				fmt.Sprintf("file:%s?%s", metadataDbPath, metadataConnOpts),
 			),
 			&gorm.Config{
-				Logger: gormlogger.Discard,
+				Logger:                 gormlogger.Discard,
+				SkipDefaultTransaction: true,
 			},
 		)
 		if err != nil {
