@@ -25,7 +25,6 @@ import (
 
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
-	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite/models"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/state/eras"
 	ouroboros "github.com/blinklabs-io/gouroboros"
@@ -397,20 +396,6 @@ func (ls *LedgerState) applyPParamUpdates(
 				}
 			}
 		}
-	}
-	return nil
-}
-
-func (ls *LedgerState) addUtxo(txn *database.Txn, utxo models.Utxo) error {
-	// Add UTxO to blob DB
-	key := database.UtxoBlobKey(utxo.TxId, utxo.OutputIdx)
-	err := txn.Blob().Set(key, utxo.Cbor)
-	if err != nil {
-		return err
-	}
-	// Add to metadata DB
-	if result := txn.Metadata().Create(&utxo); result.Error != nil {
-		return result.Error
 	}
 	return nil
 }

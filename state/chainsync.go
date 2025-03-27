@@ -23,7 +23,6 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/database"
-	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite/models"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
@@ -352,15 +351,16 @@ func (ls *LedgerState) processGenesisBlock(
 			if err != nil {
 				return err
 			}
-			tmpUtxo := models.Utxo{
-				TxId:       utxo.Id.Id().Bytes(),
-				OutputIdx:  utxo.Id.Index(),
-				AddedSlot:  0,
-				PaymentKey: outAddr.PaymentKeyHash().Bytes(),
-				StakingKey: outAddr.StakeKeyHash().Bytes(),
-				Cbor:       outputCbor,
-			}
-			if err := ls.addUtxo(txn, tmpUtxo); err != nil {
+			err = txn.DB().NewUtxo(
+				utxo.Id.Id().Bytes(),
+				utxo.Id.Index(),
+				0,
+				outAddr.PaymentKeyHash().Bytes(),
+				outAddr.StakeKeyHash().Bytes(),
+				outputCbor,
+				txn,
+			)
+			if err != nil {
 				return fmt.Errorf("add genesis UTxO: %w", err)
 			}
 		}
@@ -598,15 +598,16 @@ func (ls *LedgerState) processTransaction(
 	// Process produced UTxOs
 	for _, produced := range tx.Produced() {
 		outAddr := produced.Output.Address()
-		tmpUtxo := models.Utxo{
-			TxId:       produced.Id.Id().Bytes(),
-			OutputIdx:  produced.Id.Index(),
-			AddedSlot:  point.Slot,
-			PaymentKey: outAddr.PaymentKeyHash().Bytes(),
-			StakingKey: outAddr.StakeKeyHash().Bytes(),
-			Cbor:       produced.Output.Cbor(),
-		}
-		if err := ls.addUtxo(txn, tmpUtxo); err != nil {
+		err := txn.DB().NewUtxo(
+			produced.Id.Id().Bytes(),
+			produced.Id.Index(),
+			point.Slot,
+			outAddr.PaymentKeyHash().Bytes(),
+			outAddr.StakeKeyHash().Bytes(),
+			produced.Output.Cbor(),
+			txn,
+		)
+		if err != nil {
 			return fmt.Errorf("add produced UTxO: %w", err)
 		}
 	}

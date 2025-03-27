@@ -112,6 +112,14 @@ type MetadataStore interface {
 		ochainsync.Tip,
 		*gorm.DB,
 	) error
+	SetUtxo(
+		[]byte, // hash
+		uint32, // idx
+		uint64, // slot
+		[]byte, // payment
+		[]byte, // stake
+		*gorm.DB,
+	) error
 
 	// Helpers
 	DeleteUtxo(any, *gorm.DB) error
