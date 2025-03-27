@@ -58,6 +58,26 @@ func (u *Utxo) loadCbor(txn *Txn) error {
 	return nil
 }
 
+func (d *Database) NewUtxo(
+	txId []byte,
+	outputIdx uint32,
+	slot uint64,
+	paymentKey, stakeKey, cbor []byte,
+	txn *Txn,
+) error {
+	if txn == nil {
+		txn = d.Transaction(false)
+		defer txn.Commit() //nolint:errcheck
+	}
+	// Add UTxO to blob DB
+	key := UtxoBlobKey(txId, outputIdx)
+	err := txn.Blob().Set(key, cbor)
+	if err != nil {
+		return err
+	}
+	return d.metadata.SetUtxo(txId, outputIdx, slot, paymentKey, stakeKey, txn.Metadata())
+}
+
 func (d *Database) UtxoByRef(
 	txId []byte,
 	outputIdx uint32,

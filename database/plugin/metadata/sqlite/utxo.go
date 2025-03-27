@@ -193,6 +193,36 @@ func (d *MetadataStoreSqlite) DeleteUtxosAfterSlot(
 	return nil
 }
 
+// SetUtxo saves a UTxO
+func (d *MetadataStoreSqlite) SetUtxo(
+	txId []byte, // hash
+	idx uint32, // idx
+	slot uint64, // slot
+	payment []byte, // payment
+	stake []byte, // stake
+	txn *gorm.DB,
+) error {
+	tmpUtxo := models.Utxo{
+		TxId:       txId,
+		OutputIdx:  idx,
+		AddedSlot:  slot,
+		PaymentKey: payment,
+		StakingKey: stake,
+	}
+	if txn != nil {
+		result := txn.Create(&tmpUtxo)
+		if result.Error != nil {
+			return result.Error
+		}
+	} else {
+		result := d.DB().Create(&tmpUtxo)
+		if result.Error != nil {
+			return result.Error
+		}
+	}
+	return nil
+}
+
 // SetUtxoDeletedAtSlot marks a UTxO as deleted at a given slot
 func (d *MetadataStoreSqlite) SetUtxoDeletedAtSlot(
 	utxoId ledger.TransactionInput,
