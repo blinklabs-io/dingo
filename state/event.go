@@ -24,8 +24,7 @@ import (
 )
 
 const (
-	ChainBlockEventType    = "ledger.chain-block"
-	ChainRollbackEventType = "ledger.chain-rollback"
+	ChainUpdateEventType = "chain.update"
 )
 
 type ChainBlockEvent struct {

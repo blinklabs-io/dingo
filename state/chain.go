@@ -16,6 +16,7 @@ package state
 
 import (
 	"errors"
+	"fmt"
 
 	"github.com/blinklabs-io/dingo/database"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
@@ -102,42 +103,35 @@ func (ci *ChainIterator) Next(blocking bool) (*ChainIteratorResult, error) {
 		return nil, ErrIteratorChainTip
 	}
 	// Wait for new block or a rollback
-	blockSubId, blockChan := ci.ls.config.EventBus.Subscribe(
-		ChainBlockEventType,
-	)
-	rollbackSubId, rollbackChan := ci.ls.config.EventBus.Subscribe(
-		ChainRollbackEventType,
+	chainUpdateSubId, chainUpdateChan := ci.ls.config.EventBus.Subscribe(
+		ChainUpdateEventType,
 	)
 	// Release read lock while we wait for new event
 	ci.ls.RUnlock()
-	select {
-	case blockEvt, ok := <-blockChan:
-		if !ok {
-			// TODO: return an actual error (#389)
-			return nil, nil
-		}
-		blockData := blockEvt.Data.(ChainBlockEvent)
-		ret.Point = blockData.Point
-		ret.Block = blockData.Block
+	evt, ok := <-chainUpdateChan
+	if !ok {
+		// TODO: return an actual error (#389)
+		return nil, nil
+	}
+	switch e := evt.Data.(type) {
+	case ChainBlockEvent:
+		ret.Point = e.Point
+		ret.Block = e.Block
 		ci.blockNumber++
-	case rollbackEvt, ok := <-rollbackChan:
-		if !ok {
-			// TODO: return an actual error (#389)
-			return nil, nil
-		}
-		rollbackData := rollbackEvt.Data.(ChainRollbackEvent)
-		ret.Point = rollbackData.Point
+	case ChainRollbackEvent:
+		ret.Point = e.Point
 		ret.Rollback = true
-		if rollbackData.Point.Slot > 0 {
+		if e.Point.Slot > 0 {
 			// Lookup block number for rollback point
-			tmpBlock, err := database.BlockByPoint(ci.ls.db, rollbackData.Point)
+			tmpBlock, err := database.BlockByPoint(ci.ls.db, e.Point)
 			if err != nil {
 				return nil, err
 			}
 			ci.blockNumber = tmpBlock.Number + 1
 		}
+	default:
+		return nil, fmt.Errorf("unexpected event type %T", e)
 	}
-	ci.ls.config.EventBus.Unsubscribe(ChainBlockEventType, blockSubId)
-	ci.ls.config.EventBus.Unsubscribe(ChainRollbackEventType, rollbackSubId)
+	ci.ls.config.EventBus.Unsubscribe(ChainUpdateEventType, chainUpdateSubId)
 	return ret, nil
 }
