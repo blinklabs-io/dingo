@@ -64,19 +64,7 @@ func newChainIterator(
 }
 
 func (ci *ChainIterator) Tip() (ochainsync.Tip, error) {
-	tmpBlocks, err := database.BlocksRecent(ci.ls.db, 1)
-	if err != nil {
-		return ochainsync.Tip{}, err
-	}
-	var tmpBlock database.Block
-	if len(tmpBlocks) > 0 {
-		tmpBlock = tmpBlocks[0]
-	}
-	tip := ochainsync.Tip{
-		Point:       ocommon.NewPoint(tmpBlock.Slot, tmpBlock.Hash),
-		BlockNumber: tmpBlock.Number,
-	}
-	return tip, nil
+	return ci.ls.chainTip(nil)
 }
 
 func (ci *ChainIterator) Next(blocking bool) (*ChainIteratorResult, error) {

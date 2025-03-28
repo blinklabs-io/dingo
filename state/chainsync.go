@@ -24,6 +24,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/state/eras"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -89,9 +90,17 @@ func (ls *LedgerState) handleEventBlockfetch(evt event.Event) {
 }
 
 func (ls *LedgerState) handleEventChainsyncRollback(e ChainsyncEvent) error {
-	ls.Lock()
-	defer ls.Unlock()
-	return ls.rollback(e.Point)
+	// Generate event
+	ls.config.EventBus.Publish(
+		ChainRollbackEventType,
+		event.NewEvent(
+			ChainRollbackEventType,
+			ChainRollbackEvent{
+				Point: e.Point,
+			},
+		),
+	)
+	return nil
 }
 
 func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
@@ -218,9 +227,6 @@ func (ls *LedgerState) handleEventBlockfetchBlock(e BlockfetchEvent) error {
 }
 
 func (ls *LedgerState) processBlockEvents() error {
-	// XXX: move this into the loop?
-	ls.Lock()
-	defer ls.Unlock()
 	batchOffset := 0
 	for {
 		batchSize := min(
@@ -230,8 +236,9 @@ func (ls *LedgerState) processBlockEvents() error {
 		if batchSize <= 0 {
 			break
 		}
+		ls.Lock()
 		// Start a transaction
-		txn := ls.db.Transaction(true)
+		txn := ls.db.BlobTxn(true)
 		err := txn.Do(func(txn *database.Txn) error {
 			for _, evt := range ls.chainsyncBlockEvents[batchOffset : batchOffset+batchSize] {
 				if err := ls.processBlockEvent(txn, evt); err != nil {
@@ -240,21 +247,13 @@ func (ls *LedgerState) processBlockEvents() error {
 			}
 			return nil
 		})
+		ls.Unlock()
 		if err != nil {
 			return err
 		}
 		batchOffset += batchSize
 	}
 	ls.chainsyncBlockEvents = nil
-	ls.config.Logger.Info(
-		fmt.Sprintf(
-			"chain extended, new tip: %x at slot %d",
-			ls.currentTip.Point.Hash,
-			ls.currentTip.Point.Slot,
-		),
-		"component",
-		"ledger",
-	)
 	return nil
 }
 
@@ -272,18 +271,22 @@ func (ls *LedgerState) vacuumMetadata() error {
 	return nil
 }
 
-func (ls *LedgerState) validateBlock(e BlockfetchEvent) error {
-	if ls.currentTip.BlockNumber > 0 {
-		prevHashBytes, err := hex.DecodeString(e.Block.PrevHash())
+func (ls *LedgerState) validateBlock(txn *database.Txn, point ocommon.Point, block ledger.Block) error {
+	tip, err := ls.chainTip(txn)
+	if err != nil {
+		return err
+	}
+	if tip.BlockNumber > 0 {
+		prevHashBytes, err := hex.DecodeString(block.PrevHash())
 		if err != nil {
 			return err
 		}
-		if string(prevHashBytes) != string(ls.currentTip.Point.Hash) {
+		if string(prevHashBytes) != string(tip.Point.Hash) {
 			return fmt.Errorf(
 				"block %x (with prev hash %x) does not fit on current chain tip (%x)",
-				e.Point.Hash,
+				point.Hash,
 				prevHashBytes,
-				ls.currentTip.Point.Hash,
+				tip.Point.Hash,
 			)
 		}
 	}
@@ -495,32 +498,15 @@ func (ls *LedgerState) processBlockEvent(
 	e BlockfetchEvent,
 ) error {
 	// Check that the block fits on our current chain
-	if err := ls.validateBlock(e); err != nil {
+	if err := ls.validateBlock(txn, e.Point, e.Block); err != nil {
 		return err
 	}
-	// Special handling for genesis block
-	if err := ls.processGenesisBlock(txn, e.Point, e.Block); err != nil {
-		return err
-	}
-	// Check for epoch rollover
-	if err := ls.processEpochRollover(txn, e.Point, e.Block); err != nil {
-		return err
-	}
-	// TODO: track this using protocol params and hard forks
-	// Check for era change
-	if uint(e.Block.Era().Id) != ls.currentEra.Id {
-		targetEraId := uint(e.Block.Era().Id)
-		// Transition through every era between the current and the target era
-		for nextEraId := ls.currentEra.Id + 1; nextEraId <= targetEraId; nextEraId++ {
-			if err := ls.transitionToEra(txn, nextEraId, ls.currentEpoch.EpochId, e.Point.Slot); err != nil {
-				return err
-			}
-		}
-	}
+	// TODO: move this to ledger block processing
 	// Calculate block rolling nonce
 	var blockNonce []byte
 	if ls.currentEra.CalculateEtaVFunc != nil {
-		tmpNonce, err := ls.currentEra.CalculateEtaVFunc(
+		tmpEra := eras.Eras[e.Block.Era().Id]
+		tmpNonce, err := tmpEra.CalculateEtaVFunc(
 			ls.config.CardanoNodeConfig,
 			ls.currentTipBlockNonce,
 			e.Block,
@@ -546,14 +532,9 @@ func (ls *LedgerState) processBlockEvent(
 		Nonce:    blockNonce,
 		Cbor:     e.Block.Cbor(),
 	}
-	if err := ls.addBlock(txn, tmpBlock); err != nil {
-		return fmt.Errorf("add block: %w", err)
-	}
-	// Process transactions
-	for _, tx := range e.Block.Transactions() {
-		if err := ls.processTransaction(txn, tx, e.Point); err != nil {
-			return err
-		}
+	// Add block to database
+	if err := database.BlockCreateTxn(txn, tmpBlock); err != nil {
+		return err
 	}
 	// Generate event
 	ls.config.EventBus.Publish(

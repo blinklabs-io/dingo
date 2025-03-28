@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"slices"
 	"sync"
 	"time"
 
@@ -141,6 +142,8 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 	if err := ls.loadTip(); err != nil {
 		return nil, err
 	}
+	// Start goroutine to process new blocks
+	go ls.ledgerProcessBlocks()
 	return ls, nil
 }
 
@@ -273,16 +276,6 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 	if err := ls.loadTip(); err != nil {
 		return err
 	}
-	// Generate event
-	ls.config.EventBus.Publish(
-		ChainRollbackEventType,
-		event.NewEvent(
-			ChainRollbackEventType,
-			ChainRollbackEvent{
-				Point: point,
-			},
-		),
-	)
 	var hash string
 	if point.Slot == 0 {
 		hash = "<genesis>"
@@ -416,25 +409,173 @@ func (ls *LedgerState) consumeUtxo(
 	)
 }
 
-func (ls *LedgerState) addBlock(txn *database.Txn, block database.Block) error {
-	// Add block to database
-	if err := database.BlockCreateTxn(txn, block); err != nil {
+func (ls *LedgerState) ledgerProcessBlocks() {
+	iter, err := newChainIterator(ls, ls.currentTip.Point, false)
+	if err != nil {
+		ls.config.Logger.Error(
+			"failed to create chain iterator: " + err.Error(),
+		)
+		return
+	}
+	shouldBlock := false
+	// We chose 500 as an arbitrary max batch size. A "chain extended" message will be logged after each batch
+	nextBatch := make([]*ChainIteratorResult, 0, 500)
+	for {
+		// Gather up next batch of blocks
+		for {
+			next, err := iter.Next(shouldBlock)
+			shouldBlock = false
+			if err != nil {
+				if !errors.Is(err, ErrIteratorChainTip) {
+					ls.config.Logger.Error(
+						"failed to get next block from chain iterator: " + err.Error(),
+					)
+					return
+				}
+				shouldBlock = true
+				// Break out of inner loop to flush DB transaction and log
+				break
+			}
+			if next == nil {
+				ls.config.Logger.Error("next block from chain iterator is nil")
+				return
+			}
+			nextBatch = append(nextBatch, next)
+			// End batch if there's a rollback, since we need special processing
+			if next.Rollback {
+				break
+			}
+			// Don't exceed our pre-allocated capacity
+			if len(nextBatch) == cap(nextBatch) {
+				break
+			}
+		}
+		// Process batch in groups of 50 to stay under DB txn limits
+		needsRollback := false
+		for i := 0; i < len(nextBatch); i += 50 {
+			ls.Lock()
+			end := min(
+				len(nextBatch),
+				i+50,
+			)
+			txn := ls.db.Transaction(true)
+			err := txn.Do(func(txn *database.Txn) error {
+				for _, next := range nextBatch[i:end] {
+					// Rollbacks need to be handled outside of the batch DB transaction
+					// A rollback should only occur at the end of a batch
+					if next.Rollback {
+						needsRollback = true
+						return nil
+					}
+					// Process block
+					tmpBlock, err := next.Block.Decode()
+					if err != nil {
+						return err
+					}
+					if err := ls.ledgerProcessBlock(txn, next.Point, tmpBlock, next.Block.Nonce); err != nil {
+						return err
+					}
+				}
+				return nil
+			})
+			if err != nil {
+				ls.Unlock()
+				ls.config.Logger.Error(
+					"failed to process block: " + err.Error(),
+				)
+				return
+			}
+			ls.Unlock()
+		}
+		// Process rollback from end of batch
+		if needsRollback {
+			needsRollback = false
+			// The rollback should be at the end of the batch
+			nextRollback := nextBatch[len(nextBatch)-1]
+			ls.Lock()
+			if err := ls.rollback(nextRollback.Point); err != nil {
+				ls.Unlock()
+				ls.config.Logger.Error(
+					"failed to process rollback: " + err.Error(),
+				)
+				return
+			}
+			ls.Unlock()
+			// Skip "chain extended" logging below if batch only contains a rollback
+			if len(nextBatch) == 1 {
+				// Clear out batch buffer
+				nextBatch = slices.Delete(nextBatch, 0, len(nextBatch))
+				continue
+			}
+		}
+		if len(nextBatch) > 0 {
+			// Clear out batch buffer
+			nextBatch = slices.Delete(nextBatch, 0, len(nextBatch))
+			ls.config.Logger.Info(
+				fmt.Sprintf(
+					"chain extended, new tip: %x at slot %d",
+					ls.currentTip.Point.Hash,
+					ls.currentTip.Point.Slot,
+				),
+				"component",
+				"ledger",
+			)
+		}
+	}
+}
+
+func (ls *LedgerState) ledgerProcessBlock(txn *database.Txn, point ocommon.Point, block ledger.Block, nonce []byte) error {
+	// Check that we're processing things in order
+	nextBlockNumber := ls.currentTip.BlockNumber + 1
+	if point.Slot == 0 {
+		nextBlockNumber = 0
+	}
+	if block.BlockNumber() > 0 && block.BlockNumber() != nextBlockNumber {
+		return fmt.Errorf(
+			"out of order block detected: got %d, expected %d",
+			block.BlockNumber(),
+			nextBlockNumber,
+		)
+	}
+	// Special handling for genesis block
+	if err := ls.processGenesisBlock(txn, point, block); err != nil {
 		return err
+	}
+	// Check for epoch rollover
+	if err := ls.processEpochRollover(txn, point, block); err != nil {
+		return err
+	}
+	// TODO: track this using protocol params and hard forks
+	// Check for era change
+	if uint(block.Era().Id) != ls.currentEra.Id {
+		targetEraId := uint(block.Era().Id)
+		// Transition through every era between the current and the target era
+		for nextEraId := ls.currentEra.Id + 1; nextEraId <= targetEraId; nextEraId++ {
+			if err := ls.transitionToEra(txn, nextEraId, ls.currentEpoch.EpochId, point.Slot); err != nil {
+				return err
+			}
+		}
+	}
+	// Process transactions
+	for _, tx := range block.Transactions() {
+		if err := ls.processTransaction(txn, tx, point); err != nil {
+			return err
+		}
 	}
 	// Update tip
 	ls.currentTip = ochainsync.Tip{
-		Point:       ocommon.NewPoint(block.Slot, block.Hash),
-		BlockNumber: block.Number,
+		Point:       point,
+		BlockNumber: nextBlockNumber,
 	}
 	if err := ls.db.SetTip(ls.currentTip, txn); err != nil {
 		return err
 	}
 	// Update tip block nonce
-	ls.currentTipBlockNonce = block.Nonce
+	ls.currentTipBlockNonce = nonce
 	// Update metrics
-	ls.metrics.blockNum.Set(float64(block.Number))
-	ls.metrics.slotNum.Set(float64(block.Slot))
-	ls.metrics.slotInEpoch.Set(float64(block.Slot - ls.currentEpoch.StartSlot))
+	ls.metrics.blockNum.Set(float64(ls.currentTip.BlockNumber))
+	ls.metrics.slotNum.Set(float64(point.Slot))
+	ls.metrics.slotInEpoch.Set(float64(point.Slot - ls.currentEpoch.StartSlot))
 	return nil
 }
 
@@ -634,4 +775,27 @@ func (ls *LedgerState) ValidateTx(
 		}
 	}
 	return nil
+}
+
+// chainTip returns the raw chain tip by fetching the latest block
+func (ls *LedgerState) chainTip(txn *database.Txn) (ochainsync.Tip, error) {
+	var tmpBlocks []database.Block
+	var err error
+	if txn == nil {
+		tmpBlocks, err = database.BlocksRecent(ls.db, 1)
+	} else {
+		tmpBlocks, err = database.BlocksRecentTxn(txn, 1)
+	}
+	if err != nil {
+		return ochainsync.Tip{}, err
+	}
+	var tmpBlock database.Block
+	if len(tmpBlocks) > 0 {
+		tmpBlock = tmpBlocks[0]
+	}
+	tip := ochainsync.Tip{
+		Point:       ocommon.NewPoint(tmpBlock.Slot, tmpBlock.Hash),
+		BlockNumber: tmpBlock.Number,
+	}
+	return tip, nil
 }
