@@ -127,33 +127,23 @@ func (m *Mempool) Consumer(connId ouroboros.ConnectionId) *MempoolConsumer {
 }
 
 func (m *Mempool) processChainEvents() {
-	chainBlockSubId, chainBlockChan := m.eventBus.Subscribe(
-		state.ChainBlockEventType,
-	)
-	chainRollbackSubId, chainRollbackChan := m.eventBus.Subscribe(
-		state.ChainRollbackEventType,
+	chainUpdateSubId, chainUpdateChan := m.eventBus.Subscribe(
+		state.ChainUpdateEventType,
 	)
 	defer func() {
-		m.eventBus.Unsubscribe(state.ChainBlockEventType, chainBlockSubId)
-		m.eventBus.Unsubscribe(state.ChainRollbackEventType, chainRollbackSubId)
+		m.eventBus.Unsubscribe(state.ChainUpdateEventType, chainUpdateSubId)
 	}()
 	lastValidationTime := time.Now()
 	var ok bool
 	for {
 		// Wait for chain event
-		select {
-		case _, ok = <-chainBlockChan:
-			if !ok {
-				return
-			}
-		case _, ok = <-chainRollbackChan:
-			if !ok {
-				return
-			}
+		_, ok = <-chainUpdateChan
+		if !ok {
+			return
 		}
 		// Only purge once every 30 seconds when there are more blocks available
 		if time.Since(lastValidationTime) < 30*time.Second &&
-			len(chainBlockChan) > 0 {
+			len(chainUpdateChan) > 0 {
 			continue
 		}
 		m.Lock()

@@ -93,9 +93,9 @@ func (ls *LedgerState) handleEventBlockfetch(evt event.Event) {
 func (ls *LedgerState) handleEventChainsyncRollback(e ChainsyncEvent) error {
 	// Generate event
 	ls.config.EventBus.Publish(
-		ChainRollbackEventType,
+		ChainUpdateEventType,
 		event.NewEvent(
-			ChainRollbackEventType,
+			ChainUpdateEventType,
 			ChainRollbackEvent{
 				Point: e.Point,
 			},
@@ -548,9 +548,9 @@ func (ls *LedgerState) processBlockEvent(
 	}
 	// Generate event
 	ls.config.EventBus.Publish(
-		ChainBlockEventType,
+		ChainUpdateEventType,
 		event.NewEvent(
-			ChainBlockEventType,
+			ChainUpdateEventType,
 			ChainBlockEvent{
 				Point: e.Point,
 				Block: tmpBlock,
