@@ -442,7 +442,16 @@ func (ls *LedgerState) processEpochRollover(
 		ls.currentEpoch.LengthInSlots,
 	) {
 		// Apply pending pparam updates
-		if err := ls.applyPParamUpdates(txn, ls.currentEpoch.EpochId, point.Slot); err != nil {
+		err := ls.db.ApplyPParamUpdates(
+			point.Slot,
+			ls.currentEpoch.EpochId,
+			ls.currentEra.Id,
+			&ls.currentPParams,
+			ls.currentEra.DecodePParamsUpdateFunc,
+			ls.currentEra.PParamsUpdateFunc,
+			txn,
+		)
+		if err != nil {
 			return err
 		}
 		// Create next epoch record
@@ -600,12 +609,12 @@ func (ls *LedgerState) processTransaction(
 	// Protocol parameter updates
 	if updateEpoch, paramUpdates := tx.ProtocolParameterUpdates(); updateEpoch > 0 {
 		for genesisHash, update := range paramUpdates {
-			err := ls.db.Metadata().SetPParamUpdate(
+			err := ls.db.SetPParamUpdate(
 				genesisHash.Bytes(),
 				update.Cbor(),
 				point.Slot,
 				updateEpoch,
-				txn.Metadata(),
+				txn,
 			)
 			if err != nil {
 				return err
