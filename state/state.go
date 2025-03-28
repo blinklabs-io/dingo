@@ -337,64 +337,6 @@ func (ls *LedgerState) transitionToEra(
 	return nil
 }
 
-func (ls *LedgerState) applyPParamUpdates(
-	txn *database.Txn,
-	currentEpoch uint64,
-	addedSlot uint64,
-) error {
-	// Check for pparam updates that apply at the end of the epoch
-	pparamUpdates, err := ls.db.
-		Metadata().
-		GetPParamUpdates(currentEpoch, txn.Metadata())
-	if err != nil {
-		return err
-	}
-	if len(pparamUpdates) > 0 {
-		// We only want the latest for the epoch
-		pparamUpdate := pparamUpdates[0]
-		if ls.currentEra.DecodePParamsUpdateFunc != nil {
-			tmpPParamUpdate, err := ls.currentEra.DecodePParamsUpdateFunc(
-				pparamUpdate.Cbor,
-			)
-			if err != nil {
-				return err
-			}
-			if ls.currentEra.PParamsUpdateFunc != nil {
-				// Update current pparams
-				newPParams, err := ls.currentEra.PParamsUpdateFunc(
-					ls.currentPParams,
-					tmpPParamUpdate,
-				)
-				if err != nil {
-					return err
-				}
-				ls.currentPParams = newPParams
-				ls.config.Logger.Debug(
-					"updated protocol params",
-					"pparams",
-					fmt.Sprintf("%#v", ls.currentPParams),
-				)
-				// Write pparams update to DB
-				pparamsCbor, err := cbor.Encode(&ls.currentPParams)
-				if err != nil {
-					return err
-				}
-				err = ls.db.SetPParams(
-					pparamsCbor,
-					addedSlot,
-					uint64(currentEpoch+1),
-					ls.currentEra.Id,
-					txn,
-				)
-				if err != nil {
-					return err
-				}
-			}
-		}
-	}
-	return nil
-}
-
 // consumeUtxo marks a UTxO as "deleted" without actually deleting it. This allows for a UTxO
 // to be easily on rollback
 func (ls *LedgerState) consumeUtxo(
