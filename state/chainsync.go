@@ -89,6 +89,7 @@ func (ls *LedgerState) handleEventBlockfetch(evt event.Event) {
 	}
 }
 
+//nolint:unparam
 func (ls *LedgerState) handleEventChainsyncRollback(e ChainsyncEvent) error {
 	// Generate event
 	ls.config.EventBus.Publish(
