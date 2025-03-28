@@ -128,6 +128,14 @@ func (ci *ChainIterator) Next(blocking bool) (*ChainIteratorResult, error) {
 		rollbackData := rollbackEvt.Data.(ChainRollbackEvent)
 		ret.Point = rollbackData.Point
 		ret.Rollback = true
+		if rollbackData.Point.Slot > 0 {
+			// Lookup block number for rollback point
+			tmpBlock, err := database.BlockByPoint(ci.ls.db, rollbackData.Point)
+			if err != nil {
+				return nil, err
+			}
+			ci.blockNumber = tmpBlock.Number + 1
+		}
 	}
 	ci.ls.config.EventBus.Unsubscribe(ChainBlockEventType, blockSubId)
 	ci.ls.config.EventBus.Unsubscribe(ChainRollbackEventType, rollbackSubId)
