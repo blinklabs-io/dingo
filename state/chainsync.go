@@ -89,8 +89,33 @@ func (ls *LedgerState) handleEventBlockfetch(evt event.Event) {
 	}
 }
 
-//nolint:unparam
 func (ls *LedgerState) handleEventChainsyncRollback(e ChainsyncEvent) error {
+	tip, err := ls.chainTip(nil)
+	if err != nil {
+		return err
+	}
+	// Lookup block number for rollback point
+	tmpBlock, err := database.BlockByPoint(ls.db, e.Point)
+	if err != nil {
+		return err
+	}
+	// Delete any rolled-back blocks
+	for i := tip.BlockNumber; i > tmpBlock.Number; i-- {
+		txn := ls.db.BlobTxn(true)
+		err := txn.Do(func(txn *database.Txn) error {
+			tmpBlock, err := database.BlockByNumberTxn(txn, i)
+			if err != nil {
+				return err
+			}
+			if err := database.BlockDeleteTxn(txn, tmpBlock); err != nil {
+				return err
+			}
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+	}
 	// Generate event
 	ls.config.EventBus.Publish(
 		ChainUpdateEventType,
