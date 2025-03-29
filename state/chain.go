@@ -94,6 +94,7 @@ func (ci *ChainIterator) Next(blocking bool) (*ChainIteratorResult, error) {
 	if ci.blockNumber > 0 && ci.blockNumber-1 > tip.BlockNumber {
 		ret.Point = tip.Point
 		ret.Rollback = true
+		ci.blockNumber = tip.BlockNumber + 1
 		ci.ls.RUnlock()
 		return ret, nil
 	}
