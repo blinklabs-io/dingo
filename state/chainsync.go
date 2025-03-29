@@ -95,12 +95,16 @@ func (ls *LedgerState) handleEventChainsyncRollback(e ChainsyncEvent) error {
 		return err
 	}
 	// Lookup block number for rollback point
-	tmpBlock, err := database.BlockByPoint(ls.db, e.Point)
-	if err != nil {
-		return err
+	var rollbackBlockNumber uint64
+	if e.Point.Slot > 0 {
+		tmpBlock, err := database.BlockByPoint(ls.db, e.Point)
+		if err != nil {
+			return err
+		}
+		rollbackBlockNumber = tmpBlock.Number
 	}
 	// Delete any rolled-back blocks
-	for i := tip.BlockNumber; i > tmpBlock.Number; i-- {
+	for i := tip.BlockNumber; i > rollbackBlockNumber; i-- {
 		txn := ls.db.BlobTxn(true)
 		err := txn.Do(func(txn *database.Txn) error {
 			tmpBlock, err := database.BlockByNumberTxn(txn, i)
