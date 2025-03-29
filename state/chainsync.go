@@ -561,10 +561,8 @@ func (ls *LedgerState) processBlockEvent(
 		return err
 	}
 	tmpBlock := database.Block{
-		Slot: e.Point.Slot,
-		Hash: e.Point.Hash,
-		// TODO: figure out something for Byron. this won't work, since the
-		// block number isn't stored in the block itself
+		Slot:     e.Point.Slot,
+		Hash:     e.Point.Hash,
 		Number:   e.Block.BlockNumber(),
 		Type:     e.Type,
 		PrevHash: prevHashBytes,
