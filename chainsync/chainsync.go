@@ -17,6 +17,7 @@ package chainsync
 import (
 	"sync"
 
+	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/state"
 	ouroboros "github.com/blinklabs-io/gouroboros"
@@ -26,7 +27,7 @@ import (
 
 type ChainsyncClientState struct {
 	Cursor               ocommon.Point
-	ChainIter            *state.ChainIterator
+	ChainIter            *chain.ChainIterator
 	NeedsInitialRollback bool
 }
 

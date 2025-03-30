@@ -12,16 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package state
+package chain
 
 import (
 	"errors"
-	"fmt"
 	"sync"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/event"
-	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
@@ -29,7 +27,7 @@ var ErrIteratorChainTip = errors.New("chain iterator is at chain tip")
 
 type ChainIterator struct {
 	mutex            sync.Mutex
-	ls               *LedgerState
+	chain            *Chain
 	startPoint       ocommon.Point
 	nextBlockIndex   uint64
 	lastPoint        ocommon.Point
@@ -47,16 +45,18 @@ type ChainIteratorResult struct {
 }
 
 func newChainIterator(
-	ls *LedgerState,
+	chain *Chain,
 	startPoint ocommon.Point,
 	inclusive bool,
 ) (*ChainIterator, error) {
+	chain.mutex.RLock()
+	defer chain.mutex.RUnlock()
 	// Subscribe to chain updates
-	chainUpdateSubId, chainUpdateChan := ls.config.EventBus.Subscribe(
+	chainUpdateSubId, chainUpdateChan := chain.eventBus.Subscribe(
 		ChainUpdateEventType,
 	)
 	ci := &ChainIterator{
-		ls:               ls,
+		chain:            chain,
 		startPoint:       startPoint,
 		chainUpdateSubId: chainUpdateSubId,
 		chainUpdateChan:  chainUpdateChan,
@@ -64,7 +64,7 @@ func newChainIterator(
 	}
 	// Lookup start block in metadata DB if not origin
 	if startPoint.Slot > 0 || len(startPoint.Hash) > 0 {
-		tmpBlock, err := database.BlockByPoint(ls.db, startPoint)
+		tmpBlock, err := database.BlockByPoint(chain.db, startPoint)
 		if err != nil {
 			if errors.Is(err, database.ErrBlockNotFound) {
 				return nil, ErrBlockNotFound
@@ -114,11 +114,9 @@ func (ci *ChainIterator) handleChainUpdateEvents() {
 	}
 }
 
-func (ci *ChainIterator) Tip() (ochainsync.Tip, error) {
-	return ci.ls.chainTip(nil)
-}
-
 func (ci *ChainIterator) Next(blocking bool) (*ChainIteratorResult, error) {
+	// We lock the chain first to prevent a deadlock
+	ci.chain.mutex.RLock()
 	ci.mutex.Lock()
 	// Check for pending rollback
 	if ci.needsRollback {
@@ -129,19 +127,21 @@ func (ci *ChainIterator) Next(blocking bool) (*ChainIteratorResult, error) {
 		ci.needsRollback = false
 		if ci.rollbackPoint.Slot > 0 {
 			// Lookup block index for rollback point
-			tmpBlock, err := database.BlockByPoint(ci.ls.db, ci.rollbackPoint)
+			tmpBlock, err := database.BlockByPoint(ci.chain.db, ci.rollbackPoint)
 			if err != nil {
 				ci.mutex.Unlock()
+				ci.chain.mutex.RUnlock()
 				return nil, err
 			}
 			ci.nextBlockIndex = tmpBlock.ID + 1
 		}
 		ci.mutex.Unlock()
+		ci.chain.mutex.RUnlock()
 		return ret, nil
 	}
 	ret := &ChainIteratorResult{}
 	// Lookup next block in metadata DB
-	tmpBlock, err := ci.ls.db.BlockByIndex(ci.nextBlockIndex, nil)
+	tmpBlock, err := ci.chain.db.BlockByIndex(ci.nextBlockIndex, nil)
 	// Return immedidately if a block is found
 	if err == nil {
 		ret.Point = ocommon.NewPoint(tmpBlock.Slot, tmpBlock.Hash)
@@ -149,51 +149,30 @@ func (ci *ChainIterator) Next(blocking bool) (*ChainIteratorResult, error) {
 		ci.nextBlockIndex++
 		ci.lastPoint = ret.Point
 		ci.mutex.Unlock()
+		ci.chain.mutex.RUnlock()
 		return ret, nil
 	}
 	// Return any actual error
 	if !errors.Is(err, database.ErrBlockNotFound) {
 		ci.mutex.Unlock()
+		ci.chain.mutex.RUnlock()
 		return ret, err
 	}
 	// Return immediately if we're not blocking
 	if !blocking {
 		ci.mutex.Unlock()
+		ci.chain.mutex.RUnlock()
 		return nil, ErrIteratorChainTip
 	}
+	ci.chain.mutex.RUnlock()
 	// Wait for chain update
 	ci.waitingChan = make(chan event.Event, 1)
 	// Release read lock while we wait for new event
 	ci.mutex.Unlock()
-	evt, ok := <-ci.waitingChan
+	_, ok := <-ci.waitingChan
 	if !ok {
-		// TODO: return an actual error (#389)
-		return nil, nil
+		return nil, ErrBlockNotFound
 	}
-	ci.mutex.Lock()
-	defer ci.mutex.Unlock()
-	ci.waitingChan = nil
-	switch e := evt.Data.(type) {
-	case ChainBlockEvent:
-		ret.Point = e.Point
-		ret.Block = e.Block
-		ci.nextBlockIndex++
-		ci.lastPoint = e.Point
-	case ChainRollbackEvent:
-		ret.Point = e.Point
-		ret.Rollback = true
-		ci.needsRollback = false
-		ci.lastPoint = e.Point
-		if e.Point.Slot > 0 {
-			// Lookup block number for rollback point
-			tmpBlock, err := database.BlockByPoint(ci.ls.db, e.Point)
-			if err != nil {
-				return nil, err
-			}
-			ci.nextBlockIndex = tmpBlock.ID + 1
-		}
-	default:
-		return nil, fmt.Errorf("unexpected event type %T", e)
-	}
-	return ret, nil
+	// Call ourselves again now that we should have new data
+	return ci.Next(blocking)
 }

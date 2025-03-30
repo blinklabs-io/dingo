@@ -90,51 +90,9 @@ func (ls *LedgerState) handleEventBlockfetch(evt event.Event) {
 }
 
 func (ls *LedgerState) handleEventChainsyncRollback(e ChainsyncEvent) error {
-	// Lookup block number for rollback point
-	var rollbackBlockIndex uint64
-	if e.Point.Slot > 0 {
-		tmpBlock, err := database.BlockByPoint(ls.db, e.Point)
-		if err != nil {
-			return err
-		}
-		rollbackBlockIndex = tmpBlock.ID
-	}
-	// Lookup tip block index
-	var tipBlockIndex uint64
-	recentBlocks, err := database.BlocksRecent(ls.db, 1)
-	if err != nil {
+	if err := ls.chain.Rollback(e.Point); err != nil {
 		return err
 	}
-	if len(recentBlocks) > 0 {
-		tipBlockIndex = recentBlocks[0].ID
-	}
-	// Delete any rolled-back blocks
-	for i := tipBlockIndex; i > rollbackBlockIndex; i-- {
-		txn := ls.db.BlobTxn(true)
-		err := txn.Do(func(txn *database.Txn) error {
-			tmpBlock, err := ls.db.BlockByIndex(i, txn)
-			if err != nil {
-				return err
-			}
-			if err := database.BlockDeleteTxn(txn, tmpBlock); err != nil {
-				return err
-			}
-			return nil
-		})
-		if err != nil {
-			return err
-		}
-	}
-	// Generate event
-	ls.config.EventBus.Publish(
-		ChainUpdateEventType,
-		event.NewEvent(
-			ChainUpdateEventType,
-			ChainRollbackEvent{
-				Point: e.Point,
-			},
-		),
-	)
 	return nil
 }
 
@@ -302,28 +260,6 @@ func (ls *LedgerState) vacuumMetadata() error {
 	txn := ls.db.Transaction(true)
 	if result := txn.Metadata().Raw("VACUUM"); result.Error != nil {
 		return result.Error
-	}
-	return nil
-}
-
-func (ls *LedgerState) validateBlock(txn *database.Txn, point ocommon.Point, block ledger.Block) error {
-	tip, err := ls.chainTip(txn)
-	if err != nil {
-		return err
-	}
-	if tip.BlockNumber > 0 {
-		prevHashBytes, err := hex.DecodeString(block.PrevHash())
-		if err != nil {
-			return err
-		}
-		if string(prevHashBytes) != string(tip.Point.Hash) {
-			return fmt.Errorf(
-				"block %x (with prev hash %x) does not fit on current chain tip (%x)",
-				point.Hash,
-				prevHashBytes,
-				tip.Point.Hash,
-			)
-		}
 	}
 	return nil
 }
@@ -541,10 +477,6 @@ func (ls *LedgerState) processBlockEvent(
 	txn *database.Txn,
 	e BlockfetchEvent,
 ) error {
-	// Check that the block fits on our current chain
-	if err := ls.validateBlock(txn, e.Point, e.Block); err != nil {
-		return err
-	}
 	// TODO: move this to ledger block processing
 	// Calculate block rolling nonce
 	var blockNonce []byte
@@ -560,35 +492,10 @@ func (ls *LedgerState) processBlockEvent(
 		}
 		blockNonce = tmpNonce
 	}
-	// Add block to database
-	prevHashBytes, err := hex.DecodeString(e.Block.PrevHash())
-	if err != nil {
+	// Add block to chain
+	if err := ls.chain.AddBlock(e.Block, blockNonce, txn); err != nil {
 		return err
 	}
-	tmpBlock := database.Block{
-		Slot:     e.Point.Slot,
-		Hash:     e.Point.Hash,
-		Number:   e.Block.BlockNumber(),
-		Type:     e.Type,
-		PrevHash: prevHashBytes,
-		Nonce:    blockNonce,
-		Cbor:     e.Block.Cbor(),
-	}
-	// Add block to database
-	if err := ls.db.BlockCreate(tmpBlock, txn); err != nil {
-		return err
-	}
-	// Generate event
-	ls.config.EventBus.Publish(
-		ChainUpdateEventType,
-		event.NewEvent(
-			ChainUpdateEventType,
-			ChainBlockEvent{
-				Point: e.Point,
-				Block: tmpBlock,
-			},
-		),
-	)
 	return nil
 }
 

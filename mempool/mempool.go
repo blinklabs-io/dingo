@@ -21,6 +21,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/state"
 	ouroboros "github.com/blinklabs-io/gouroboros"
@@ -128,10 +129,10 @@ func (m *Mempool) Consumer(connId ouroboros.ConnectionId) *MempoolConsumer {
 
 func (m *Mempool) processChainEvents() {
 	chainUpdateSubId, chainUpdateChan := m.eventBus.Subscribe(
-		state.ChainUpdateEventType,
+		chain.ChainUpdateEventType,
 	)
 	defer func() {
-		m.eventBus.Unsubscribe(state.ChainUpdateEventType, chainUpdateSubId)
+		m.eventBus.Unsubscribe(chain.ChainUpdateEventType, chainUpdateSubId)
 	}()
 	lastValidationTime := time.Now()
 	var ok bool
