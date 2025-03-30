@@ -31,7 +31,8 @@ type ChainIterator struct {
 	mutex            sync.Mutex
 	ls               *LedgerState
 	startPoint       ocommon.Point
-	blockNumber      uint64
+	nextBlockIndex   uint64
+	lastPoint        ocommon.Point
 	chainUpdateSubId event.EventSubscriberId
 	chainUpdateChan  <-chan event.Event
 	needsRollback    bool
@@ -59,6 +60,7 @@ func newChainIterator(
 		startPoint:       startPoint,
 		chainUpdateSubId: chainUpdateSubId,
 		chainUpdateChan:  chainUpdateChan,
+		nextBlockIndex:   database.BlockInitialIndex,
 	}
 	// Lookup start block in metadata DB if not origin
 	if startPoint.Slot > 0 || len(startPoint.Hash) > 0 {
@@ -69,10 +71,10 @@ func newChainIterator(
 			}
 			return nil, err
 		}
-		ci.blockNumber = tmpBlock.Number
+		ci.nextBlockIndex = tmpBlock.ID
 		// Increment next block number if non-inclusive
 		if !inclusive {
-			ci.blockNumber++
+			ci.nextBlockIndex++
 		}
 	}
 	go ci.handleChainUpdateEvents()
@@ -96,7 +98,7 @@ func (ci *ChainIterator) handleChainUpdateEvents() {
 				}
 			}
 		case ChainRollbackEvent:
-			if ci.blockNumber > 0 {
+			if ci.lastPoint.Slot > e.Point.Slot {
 				ci.rollbackPoint = e.Point
 				ci.needsRollback = true
 			}
@@ -123,27 +125,29 @@ func (ci *ChainIterator) Next(blocking bool) (*ChainIteratorResult, error) {
 		ret := &ChainIteratorResult{}
 		ret.Point = ci.rollbackPoint
 		ret.Rollback = true
+		ci.lastPoint = ci.rollbackPoint
 		ci.needsRollback = false
 		if ci.rollbackPoint.Slot > 0 {
-			// Lookup block number for rollback point
+			// Lookup block index for rollback point
 			tmpBlock, err := database.BlockByPoint(ci.ls.db, ci.rollbackPoint)
 			if err != nil {
 				ci.mutex.Unlock()
 				return nil, err
 			}
-			ci.blockNumber = tmpBlock.Number + 1
+			ci.nextBlockIndex = tmpBlock.ID + 1
 		}
 		ci.mutex.Unlock()
 		return ret, nil
 	}
 	ret := &ChainIteratorResult{}
 	// Lookup next block in metadata DB
-	tmpBlock, err := database.BlockByNumber(ci.ls.db, ci.blockNumber)
+	tmpBlock, err := ci.ls.db.BlockByIndex(ci.nextBlockIndex, nil)
 	// Return immedidately if a block is found
 	if err == nil {
 		ret.Point = ocommon.NewPoint(tmpBlock.Slot, tmpBlock.Hash)
 		ret.Block = tmpBlock
-		ci.blockNumber++
+		ci.nextBlockIndex++
+		ci.lastPoint = ret.Point
 		ci.mutex.Unlock()
 		return ret, nil
 	}
@@ -173,18 +177,20 @@ func (ci *ChainIterator) Next(blocking bool) (*ChainIteratorResult, error) {
 	case ChainBlockEvent:
 		ret.Point = e.Point
 		ret.Block = e.Block
-		ci.blockNumber++
+		ci.nextBlockIndex++
+		ci.lastPoint = e.Point
 	case ChainRollbackEvent:
 		ret.Point = e.Point
 		ret.Rollback = true
 		ci.needsRollback = false
+		ci.lastPoint = e.Point
 		if e.Point.Slot > 0 {
 			// Lookup block number for rollback point
 			tmpBlock, err := database.BlockByPoint(ci.ls.db, e.Point)
 			if err != nil {
 				return nil, err
 			}
-			ci.blockNumber = tmpBlock.Number + 1
+			ci.nextBlockIndex = tmpBlock.ID + 1
 		}
 	default:
 		return nil, fmt.Errorf("unexpected event type %T", e)

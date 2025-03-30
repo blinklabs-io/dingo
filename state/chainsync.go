@@ -90,24 +90,29 @@ func (ls *LedgerState) handleEventBlockfetch(evt event.Event) {
 }
 
 func (ls *LedgerState) handleEventChainsyncRollback(e ChainsyncEvent) error {
-	tip, err := ls.chainTip(nil)
-	if err != nil {
-		return err
-	}
 	// Lookup block number for rollback point
-	var rollbackBlockNumber uint64
+	var rollbackBlockIndex uint64
 	if e.Point.Slot > 0 {
 		tmpBlock, err := database.BlockByPoint(ls.db, e.Point)
 		if err != nil {
 			return err
 		}
-		rollbackBlockNumber = tmpBlock.Number
+		rollbackBlockIndex = tmpBlock.ID
+	}
+	// Lookup tip block index
+	var tipBlockIndex uint64
+	recentBlocks, err := database.BlocksRecent(ls.db, 1)
+	if err != nil {
+		return err
+	}
+	if len(recentBlocks) > 0 {
+		tipBlockIndex = recentBlocks[0].ID
 	}
 	// Delete any rolled-back blocks
-	for i := tip.BlockNumber; i > rollbackBlockNumber; i-- {
+	for i := tipBlockIndex; i > rollbackBlockIndex; i-- {
 		txn := ls.db.BlobTxn(true)
 		err := txn.Do(func(txn *database.Txn) error {
-			tmpBlock, err := database.BlockByNumberTxn(txn, i)
+			tmpBlock, err := ls.db.BlockByIndex(i, txn)
 			if err != nil {
 				return err
 			}
@@ -570,7 +575,7 @@ func (ls *LedgerState) processBlockEvent(
 		Cbor:     e.Block.Cbor(),
 	}
 	// Add block to database
-	if err := database.BlockCreateTxn(txn, tmpBlock); err != nil {
+	if err := ls.db.BlockCreate(tmpBlock, txn); err != nil {
 		return err
 	}
 	// Generate event

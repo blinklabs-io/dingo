@@ -468,16 +468,19 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 
 func (ls *LedgerState) ledgerProcessBlock(txn *database.Txn, point ocommon.Point, block ledger.Block, nonce []byte) error {
 	// Check that we're processing things in order
-	nextBlockNumber := ls.currentTip.BlockNumber + 1
-	if point.Slot == 0 {
-		nextBlockNumber = 0
-	}
-	if block.BlockNumber() > 0 && block.BlockNumber() != nextBlockNumber {
-		return fmt.Errorf(
-			"out of order block detected: got %d, expected %d",
-			block.BlockNumber(),
-			nextBlockNumber,
-		)
+	if len(ls.currentTip.Point.Hash) > 0 {
+		prevHashBytes, err := hex.DecodeString(block.PrevHash())
+		if err != nil {
+			return err
+		}
+		if string(prevHashBytes) != string(ls.currentTip.Point.Hash) {
+			return fmt.Errorf(
+				"block %s (with prev hash %x) does not fit on current chain tip (%x)",
+				block.Hash(),
+				prevHashBytes,
+				ls.currentTip.Point.Hash,
+			)
+		}
 	}
 	// Special handling for genesis block
 	if err := ls.processGenesisBlock(txn, point, block); err != nil {
@@ -507,7 +510,7 @@ func (ls *LedgerState) ledgerProcessBlock(txn *database.Txn, point ocommon.Point
 	// Update tip
 	ls.currentTip = ochainsync.Tip{
 		Point:       point,
-		BlockNumber: nextBlockNumber,
+		BlockNumber: block.BlockNumber(),
 	}
 	if err := ls.db.SetTip(ls.currentTip, txn); err != nil {
 		return err
