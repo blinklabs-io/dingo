@@ -1,0 +1,138 @@
+# yaml-language-server: $schema=https://goreleaser.com/static/schema.json
+# vim: set ts=2 sw=2 tw=0 fo=cnqoj
+
+version: 2
+
+before:
+  hooks:
+    # You may remove this if you don't use go modules.
+    - go mod tidy
+
+builds:
+  - id: dingo
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    main: ./cmd/dingo
+    mod_timestamp: "{{ .CommitTimestamp }}"
+    binary: dingo
+    flags:
+      # This removes host paths from the build
+      - -trimpath
+    ldflags:
+      - -s -w -X github.com/blinklabs-io/dingo/internal/version.Version={{.Version}} -X github.com/blinklabs-io/dingo/internal/version.CommitHash={{.Commit}}
+
+# proxies from the go mod proxy before building
+# https://goreleaser.com/customization/gomod
+gomod:
+  proxy: true
+
+# config the checksum filename
+# https://goreleaser.com/customization/checksum
+checksum:
+  name_template: "checksums.txt"
+
+# create a source tarball
+# https://goreleaser.com/customization/source/
+source:
+  enabled: true
+
+# creates SBOMs of all archives and the source tarball using syft
+# https://goreleaser.com/customization/sbom
+sboms:
+  - artifacts: archive
+  - id: source
+    artifacts: source
+  - id: package
+    artifacts: package
+
+archives:
+  - formats: [tar.gz]
+    # this name template makes the OS and Arch compatible with the results of `uname`.
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_
+      {{- if eq .Os "Darwin" }}darwin_
+      {{- else if eq .Os "Windows" }}windows_
+      {{- else }}{{ .Os }}_{{ end }}
+      {{- if eq .Arch "amd64" }}x86_64
+      {{- else if eq .Arch "386" }}i386
+      {{- else }}{{ .Arch }}{{ end }}
+      {{- if .Arm }}v{{ .Arm }}{{ end }}
+    # use zip for windows archives
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+
+brews:
+  - homepage: "{{.GitURL}}"
+    description: "Dingo is a Cardano data node written in Go"
+    repository:
+      owner: blinklabs-io
+      name: homebrew-cardano
+      # token: GH personal auth token <---
+      pull_request:
+        enabled: true
+
+changelog:
+  use: github-native
+
+dockers:
+  - id: amd64
+    goarch: amd64
+    use: buildx
+    image_templates:
+      - ghcr.io/blinklabs-io/dingo:{{ .Version }}-amd64
+      - blinklabs/dingo:{{ .Version }}-amd64
+    dockerfile: Dockerfile
+    build_flag_templates:
+      - "--pull"
+      - "--label=org.opencontainers.image.created={{.Date}}"
+      - "--label=org.opencontainers.image.name={{.ProjectName}}"
+      - "--label=org.opencontainers.image.revision={{.FullCommit}}"
+      - "--label=org.opencontainers.image.version={{.Version}}"
+      - "--label=org.opencontainers.image.source={{.GitURL}}"
+      - "--platform=linux/amd64"
+  - id: arm64
+    goarch: arm64
+    use: buildx
+    image_templates:
+      - ghcr.io/blinklabs-io/dingo:{{ .Version }}-arm64v8
+      - blinklabs/dingo:{{ .Version }}-arm64
+    dockerfile: Dockerfile
+    build_flag_templates:
+      - "--pull"
+      - "--label=org.opencontainers.image.created={{.Date}}"
+      - "--label=org.opencontainers.image.name={{.ProjectName}}"
+      - "--label=org.opencontainers.image.revision={{.FullCommit}}"
+      - "--label=org.opencontainers.image.version={{.Version}}"
+      - "--label=org.opencontainers.image.source={{.GitURL}}"
+      - "--platform=linux/arm64/v8"
+
+docker_manifests:
+  - name_template: ghcr.io/blinklabs-io/dingo:{{ .Version }}
+    image_templates:
+      - ghcr.io/blinklabs-io/dingo:{{ .Version }}-amd64
+      - ghcr.io/blinklabs-io/dingo:{{ .Version }}-arm64v8
+  - name_template: blinklabs/dingo:{{ .Version }}
+    image_templates:
+      - blinklabs-io/dingo:{{ .Version }}-amd64
+      - blinklabs-io/dingo:{{ .Version }}-arm64v8
+
+nfpms:
+  - formats: [apk, deb, rpm]
+    maintainer: Blink Labs Software <support@blinklabs.io>
+
+#npm:
+#  - name: "@blinklabs/dingo"
+
+release:
+  footer: >-
+
+    ---
+
+    Released by [GoReleaser](https://github.com/goreleaser/goreleaser).

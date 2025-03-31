@@ -25,3 +25,5 @@ go.work
 
 # Local data directory
 /.dingo
+# Added by goreleaser init:
+dist/
