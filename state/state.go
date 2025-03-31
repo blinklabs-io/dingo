@@ -24,6 +24,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/event"
@@ -76,6 +77,7 @@ type LedgerState struct {
 	chainsyncBlockfetchMutex    sync.Mutex
 	chainsyncBlockfetchWaiting  bool
 	chainsyncHeaderMutex        sync.Mutex
+	chain                       *chain.Chain
 }
 
 func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
@@ -119,6 +121,15 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 			return nil, err
 		}
 	}
+	// Load chain
+	chain, err := chain.NewChain(
+		ls.db,
+		ls.config.EventBus,
+	)
+	if err != nil {
+		return nil, err
+	}
+	ls.chain = chain
 	// Setup event handlers
 	ls.config.EventBus.SubscribeFunc(
 		ChainsyncEventType,
@@ -352,7 +363,7 @@ func (ls *LedgerState) consumeUtxo(
 }
 
 func (ls *LedgerState) ledgerProcessBlocks() {
-	iter, err := newChainIterator(ls, ls.currentTip.Point, false)
+	iter, err := ls.chain.FromPoint(ls.currentTip.Point, false)
 	if err != nil {
 		ls.config.Logger.Error(
 			"failed to create chain iterator: " + err.Error(),
@@ -361,14 +372,14 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 	}
 	shouldBlock := false
 	// We chose 500 as an arbitrary max batch size. A "chain extended" message will be logged after each batch
-	nextBatch := make([]*ChainIteratorResult, 0, 500)
+	nextBatch := make([]*chain.ChainIteratorResult, 0, 500)
 	for {
 		// Gather up next batch of blocks
 		for {
 			next, err := iter.Next(shouldBlock)
 			shouldBlock = false
 			if err != nil {
-				if !errors.Is(err, ErrIteratorChainTip) {
+				if !errors.Is(err, chain.ErrIteratorChainTip) {
 					ls.config.Logger.Error(
 						"failed to get next block from chain iterator: " + err.Error(),
 					)
@@ -658,8 +669,8 @@ func (ls *LedgerState) GetIntersectPoint(
 func (ls *LedgerState) GetChainFromPoint(
 	point ocommon.Point,
 	inclusive bool,
-) (*ChainIterator, error) {
-	return newChainIterator(ls, point, inclusive)
+) (*chain.ChainIterator, error) {
+	return ls.chain.FromPoint(point, inclusive)
 }
 
 // Tip returns the current chain tip
@@ -720,27 +731,4 @@ func (ls *LedgerState) ValidateTx(
 		}
 	}
 	return nil
-}
-
-// chainTip returns the raw chain tip by fetching the latest block
-func (ls *LedgerState) chainTip(txn *database.Txn) (ochainsync.Tip, error) {
-	var tmpBlocks []database.Block
-	var err error
-	if txn == nil {
-		tmpBlocks, err = database.BlocksRecent(ls.db, 1)
-	} else {
-		tmpBlocks, err = database.BlocksRecentTxn(txn, 1)
-	}
-	if err != nil {
-		return ochainsync.Tip{}, err
-	}
-	var tmpBlock database.Block
-	if len(tmpBlocks) > 0 {
-		tmpBlock = tmpBlocks[0]
-	}
-	tip := ochainsync.Tip{
-		Point:       ocommon.NewPoint(tmpBlock.Slot, tmpBlock.Hash),
-		BlockNumber: tmpBlock.Number,
-	}
-	return tip, nil
 }
