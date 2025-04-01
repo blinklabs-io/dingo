@@ -481,15 +481,11 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 func (ls *LedgerState) ledgerProcessBlock(txn *database.Txn, point ocommon.Point, block ledger.Block, nonce []byte) error {
 	// Check that we're processing things in order
 	if len(ls.currentTip.Point.Hash) > 0 {
-		prevHashBytes, err := hex.DecodeString(block.PrevHash())
-		if err != nil {
-			return err
-		}
-		if string(prevHashBytes) != string(ls.currentTip.Point.Hash) {
+		if string(block.PrevHash().Bytes()) != string(ls.currentTip.Point.Hash) {
 			return fmt.Errorf(
-				"block %s (with prev hash %x) does not fit on current chain tip (%x)",
-				block.Hash(),
-				prevHashBytes,
+				"block %s (with prev hash %s) does not fit on current chain tip (%x)",
+				block.Hash().String(),
+				block.PrevHash().String(),
 				ls.currentTip.Point.Hash,
 			)
 		}

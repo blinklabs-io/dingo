@@ -15,7 +15,6 @@
 package chain
 
 import (
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"slices"
@@ -98,22 +97,13 @@ func (c *Chain) Tip() ochainsync.Tip {
 func (c *Chain) AddBlock(block ledger.Block, blockNonce []byte, txn *database.Txn) error {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
-	// Get block hash and previous hash
-	hashBytes, err := hex.DecodeString(block.Hash())
-	if err != nil {
-		return err
-	}
-	prevHashBytes, err := hex.DecodeString(block.PrevHash())
-	if err != nil {
-		return err
-	}
 	// Check that this block fits on the current chain tip
 	if c.tipBlockIndex >= initialBlockIndex {
-		if string(prevHashBytes) != string(c.currentTip.Point.Hash) {
+		if string(block.PrevHash().Bytes()) != string(c.currentTip.Point.Hash) {
 			return fmt.Errorf(
-				"block %s (with prev hash %x) does not fit on current chain tip (%x)",
-				block.Hash(),
-				prevHashBytes,
+				"block %s (with prev hash %s) does not fit on current chain tip (%x)",
+				block.Hash().String(),
+				block.PrevHash().String(),
 				c.currentTip.Point.Hash,
 			)
 		}
@@ -121,7 +111,7 @@ func (c *Chain) AddBlock(block ledger.Block, blockNonce []byte, txn *database.Tx
 	// Build new block record
 	tmpPoint := ocommon.NewPoint(
 		block.SlotNumber(),
-		hashBytes,
+		block.Hash().Bytes(),
 	)
 	newBlockIndex := c.tipBlockIndex + 1
 	tmpBlock := database.Block{
@@ -130,7 +120,7 @@ func (c *Chain) AddBlock(block ledger.Block, blockNonce []byte, txn *database.Tx
 		Hash:     tmpPoint.Hash,
 		Number:   block.BlockNumber(),
 		Type:     uint(block.Type()), //nolint:gosec
-		PrevHash: prevHashBytes,
+		PrevHash: block.PrevHash().Bytes(),
 		Nonce:    blockNonce,
 		Cbor:     block.Cbor(),
 	}

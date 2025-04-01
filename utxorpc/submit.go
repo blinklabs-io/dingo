@@ -125,7 +125,7 @@ func (s *submitServiceServer) WaitForTx(
 				for _, r := range ref {
 					refHash := hex.EncodeToString(r)
 					// Compare our hashes
-					if refHash == tx.Hash() {
+					if refHash == tx.Hash().String() {
 						// Send confirmation response
 						err := stream.Send(&submit.WaitForTxResponse{
 							Ref:   r,

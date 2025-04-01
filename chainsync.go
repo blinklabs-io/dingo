@@ -15,7 +15,6 @@
 package dingo
 
 import (
-	"encoding/hex"
 	"fmt"
 
 	"github.com/blinklabs-io/dingo/event"
@@ -203,7 +202,7 @@ func (n *Node) chainsyncClientRollForward(
 	switch v := blockData.(type) {
 	case ledger.BlockHeader:
 		blockSlot := v.SlotNumber()
-		blockHash, _ := hex.DecodeString(v.Hash())
+		blockHash := v.Hash().Bytes()
 		n.eventBus.Publish(
 			state.ChainsyncEventType,
 			event.NewEvent(

@@ -22,6 +22,7 @@ import (
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/gouroboros/ledger"
+	"github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
@@ -33,12 +34,20 @@ type MockBlock struct {
 	MockPrevHash    string
 }
 
-func (b *MockBlock) Hash() string {
-	return b.MockHash
+func (b *MockBlock) Hash() common.Blake2b256 {
+	hashBytes, err := hex.DecodeString(b.MockHash)
+	if err != nil {
+		panic("failed decoding hex: " + err.Error())
+	}
+	return common.NewBlake2b256(hashBytes)
 }
 
-func (b *MockBlock) PrevHash() string {
-	return b.MockPrevHash
+func (b *MockBlock) PrevHash() common.Blake2b256 {
+	prevHashBytes, err := hex.DecodeString(b.MockPrevHash)
+	if err != nil {
+		panic("failed decoding hex: " + err.Error())
+	}
+	return common.NewBlake2b256(prevHashBytes)
 }
 
 func (b *MockBlock) SlotNumber() uint64 {
@@ -50,7 +59,7 @@ func (b *MockBlock) BlockNumber() uint64 {
 }
 
 func TestChainBasic(t *testing.T) {
-	testHashPrefix := "47442c8830c700ecb099064ee1b038ed6fd254133f582e906a4bc3fd"
+	testHashPrefix := "000047442c8830c700ecb099064ee1b038ed6fd254133f582e906a4bc3fd"
 	testNonce := []byte{0xab, 0xcd, 0xef, 0x01}
 	testBlocks := []*MockBlock{
 		{
@@ -122,9 +131,11 @@ func TestChainBasic(t *testing.T) {
 		if nextHashHex != testBlock.MockHash {
 			t.Fatalf("did not get expected block from iterator: got hash %s, expected %s", nextHashHex, testBlock.MockHash)
 		}
-		nextPrevHashHex := hex.EncodeToString(nextBlock.PrevHash)
-		if nextPrevHashHex != testBlock.MockPrevHash {
-			t.Fatalf("did not get expected block from iterator: got prev hash %s, expected %s", nextPrevHashHex, testBlock.MockPrevHash)
+		if testBlock.MockPrevHash != "" {
+			nextPrevHashHex := hex.EncodeToString(nextBlock.PrevHash)
+			if nextPrevHashHex != testBlock.MockPrevHash {
+				t.Fatalf("did not get expected block from iterator: got prev hash %s, expected %s", nextPrevHashHex, testBlock.MockPrevHash)
+			}
 		}
 		if nextBlock.Slot != testBlock.MockSlot {
 			t.Fatalf("did not get expected block from iterator: got slot %d, expected %d", nextBlock.Slot, testBlock.MockSlot)
