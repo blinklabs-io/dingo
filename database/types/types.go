@@ -30,7 +30,7 @@ func (r Rat) Value() (driver.Value, error) {
 	if r.Rat == nil {
 		return "", nil
 	}
-	return r.Rat.String(), nil
+	return r.String(), nil
 }
 
 func (r *Rat) Scan(val any) error {

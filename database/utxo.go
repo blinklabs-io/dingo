@@ -161,11 +161,9 @@ func (d *Database) UtxosDeleteConsumed(
 	}
 
 	// Loop through UTxOs and delete, with a new transaction each loop
-	for {
+	for ret == nil {
 		// short-circuit loop
-		if ret != nil {
-			break
-		}
+
 		batchSize := min(1000, len(utxos))
 		if batchSize == 0 {
 			break
@@ -212,11 +210,9 @@ func (d *Database) UtxosDeleteRolledback(
 	}
 
 	// Loop through UTxOs and delete, reusing our transaction
-	for {
+	for ret == nil {
 		// short-circuit loop
-		if ret != nil {
-			break
-		}
+
 		batchSize := min(1000, len(utxos))
 		if batchSize == 0 {
 			break
