@@ -125,6 +125,7 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 	chain, err := chain.NewChain(
 		ls.db,
 		ls.config.EventBus,
+		true, // persistent
 	)
 	if err != nil {
 		return nil, err

@@ -60,15 +60,12 @@ func newChainIterator(
 		startPoint:       startPoint,
 		chainUpdateSubId: chainUpdateSubId,
 		chainUpdateChan:  chainUpdateChan,
-		nextBlockIndex:   database.BlockInitialIndex,
+		nextBlockIndex:   initialBlockIndex,
 	}
 	// Lookup start block in metadata DB if not origin
 	if startPoint.Slot > 0 || len(startPoint.Hash) > 0 {
-		tmpBlock, err := database.BlockByPoint(chain.db, startPoint)
+		tmpBlock, err := chain.BlockByPoint(startPoint, nil)
 		if err != nil {
-			if errors.Is(err, database.ErrBlockNotFound) {
-				return nil, ErrBlockNotFound
-			}
 			return nil, err
 		}
 		ci.nextBlockIndex = tmpBlock.ID
@@ -127,7 +124,7 @@ func (ci *ChainIterator) Next(blocking bool) (*ChainIteratorResult, error) {
 		ci.needsRollback = false
 		if ci.rollbackPoint.Slot > 0 {
 			// Lookup block index for rollback point
-			tmpBlock, err := database.BlockByPoint(ci.chain.db, ci.rollbackPoint)
+			tmpBlock, err := ci.chain.BlockByPoint(ci.rollbackPoint, nil)
 			if err != nil {
 				ci.mutex.Unlock()
 				ci.chain.mutex.RUnlock()
@@ -141,7 +138,7 @@ func (ci *ChainIterator) Next(blocking bool) (*ChainIteratorResult, error) {
 	}
 	ret := &ChainIteratorResult{}
 	// Lookup next block in metadata DB
-	tmpBlock, err := ci.chain.db.BlockByIndex(ci.nextBlockIndex, nil)
+	tmpBlock, err := ci.chain.blockByIndex(ci.nextBlockIndex, nil)
 	// Return immedidately if a block is found
 	if err == nil {
 		ret.Point = ocommon.NewPoint(tmpBlock.Slot, tmpBlock.Hash)
@@ -153,7 +150,7 @@ func (ci *ChainIterator) Next(blocking bool) (*ChainIteratorResult, error) {
 		return ret, nil
 	}
 	// Return any actual error
-	if !errors.Is(err, database.ErrBlockNotFound) {
+	if !errors.Is(err, ErrBlockNotFound) {
 		ci.mutex.Unlock()
 		ci.chain.mutex.RUnlock()
 		return ret, err

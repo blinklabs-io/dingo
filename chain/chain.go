@@ -18,6 +18,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"slices"
 	"sync"
 
 	"github.com/blinklabs-io/dingo/database"
@@ -31,28 +32,43 @@ const (
 	initialBlockIndex uint64 = 1
 )
 
-var ErrBlockNotFound = errors.New("block not found")
+var (
+	ErrBlockNotFound                = errors.New("block not found")
+	ErrRollbackBeyondEphemeralChain = errors.New("cannot rollback ephemeral chain beyond memory buffer")
+)
 
 type Chain struct {
-	mutex         sync.RWMutex
-	db            *database.Database
-	eventBus      *event.EventBus
-	currentTip    ochainsync.Tip
-	tipBlockIndex uint64
+	mutex            sync.RWMutex
+	db               *database.Database
+	eventBus         *event.EventBus
+	currentTip       ochainsync.Tip
+	tipBlockIndex    uint64
+	persistent       bool
+	lastDbSlot       uint64
+	lastDbBlockIndex uint64
+	blocks           []database.Block
 }
 
 func NewChain(
 	db *database.Database,
 	eventBus *event.EventBus,
+	persistent bool,
 ) (*Chain, error) {
 	c := &Chain{
-		db:       db,
-		eventBus: eventBus,
+		db:         db,
+		eventBus:   eventBus,
+		persistent: persistent,
+	}
+	if persistent && db == nil {
+		return nil, errors.New("persistence enabled but no database provided")
 	}
 	if db != nil {
 		if err := c.load(); err != nil {
 			return nil, fmt.Errorf("failed to load chain: %w", err)
 		}
+		// Set last block index and slot from database
+		c.lastDbBlockIndex = c.tipBlockIndex
+		c.lastDbSlot = c.currentTip.Point.Slot
 	}
 	return c, nil
 }
@@ -102,7 +118,7 @@ func (c *Chain) AddBlock(block ledger.Block, blockNonce []byte, txn *database.Tx
 			)
 		}
 	}
-	// Add block to database
+	// Build new block record
 	tmpPoint := ocommon.NewPoint(
 		block.SlotNumber(),
 		hashBytes,
@@ -118,9 +134,19 @@ func (c *Chain) AddBlock(block ledger.Block, blockNonce []byte, txn *database.Tx
 		Nonce:    blockNonce,
 		Cbor:     block.Cbor(),
 	}
-	// Add block to database
-	if err := c.db.BlockCreate(tmpBlock, txn); err != nil {
-		return err
+	if c.persistent {
+		// Add block to database
+		if err := c.db.BlockCreate(tmpBlock, txn); err != nil {
+			return err
+		}
+		c.lastDbBlockIndex = newBlockIndex
+		c.lastDbSlot = tmpPoint.Slot
+	} else {
+		// Add block to memory buffer
+		c.blocks = append(
+			c.blocks,
+			tmpBlock,
+		)
 	}
 	// Update tip
 	c.currentTip = ochainsync.Tip{
@@ -150,7 +176,7 @@ func (c *Chain) Rollback(point ocommon.Point) error {
 	var tmpBlock database.Block
 	if point.Slot > 0 {
 		var err error
-		tmpBlock, err = database.BlockByPoint(c.db, point)
+		tmpBlock, err = c.BlockByPoint(point, nil)
 		if err != nil {
 			return err
 		}
@@ -158,19 +184,34 @@ func (c *Chain) Rollback(point ocommon.Point) error {
 	}
 	// Delete any rolled-back blocks
 	for i := c.tipBlockIndex; i > rollbackBlockIndex; i-- {
-		txn := c.db.BlobTxn(true)
-		err := txn.Do(func(txn *database.Txn) error {
-			tmpBlock, err := c.db.BlockByIndex(i, txn)
+		if c.persistent {
+			// Remove from database
+			txn := c.db.BlobTxn(true)
+			err := txn.Do(func(txn *database.Txn) error {
+				tmpBlock, err := c.db.BlockByIndex(i, txn)
+				if err != nil {
+					return err
+				}
+				if err := database.BlockDeleteTxn(txn, tmpBlock); err != nil {
+					return err
+				}
+				return nil
+			})
 			if err != nil {
 				return err
 			}
-			if err := database.BlockDeleteTxn(txn, tmpBlock); err != nil {
-				return err
+		} else {
+			// Return an error if we try to rollback beyond memory buffer
+			if i <= c.lastDbBlockIndex {
+				return ErrRollbackBeyondEphemeralChain
 			}
-			return nil
-		})
-		if err != nil {
-			return err
+			// Remove from memory buffer
+			memBlockIndex := int(i - c.lastDbBlockIndex - initialBlockIndex) //nolint:gosec
+			c.blocks = slices.Delete(
+				c.blocks,
+				memBlockIndex,
+				memBlockIndex+1,
+			)
 		}
 	}
 	// Update tip
@@ -200,4 +241,49 @@ func (c *Chain) FromPoint(point ocommon.Point, inclusive bool) (*ChainIterator, 
 		point,
 		inclusive,
 	)
+}
+
+func (c *Chain) BlockByPoint(point ocommon.Point, txn *database.Txn) (database.Block, error) {
+	if point.Slot <= c.lastDbSlot {
+		// Query database
+		tmpBlock, err := database.BlockByPoint(c.db, point)
+		if err != nil {
+			if errors.Is(err, database.ErrBlockNotFound) {
+				return database.Block{}, ErrBlockNotFound
+			}
+			return database.Block{}, err
+		}
+		return tmpBlock, nil
+	}
+	// Search memory buffer
+	for _, block := range c.blocks {
+		if point.Slot != block.Slot {
+			continue
+		}
+		if string(point.Hash) != string(block.Hash) {
+			continue
+		}
+		return block, nil
+	}
+	return database.Block{}, ErrBlockNotFound
+}
+
+func (c *Chain) blockByIndex(blockIndex uint64, txn *database.Txn) (database.Block, error) {
+	if blockIndex <= c.lastDbBlockIndex {
+		// Query database
+		tmpBlock, err := c.db.BlockByIndex(blockIndex, txn)
+		if err != nil {
+			if errors.Is(err, database.ErrBlockNotFound) {
+				return database.Block{}, ErrBlockNotFound
+			}
+			return database.Block{}, err
+		}
+		return tmpBlock, nil
+	}
+	// Get from memory buffer
+	memBlockIndex := int(blockIndex - c.lastDbBlockIndex - initialBlockIndex) //nolint:gosec
+	if memBlockIndex < 0 || len(c.blocks) < memBlockIndex+1 {
+		return database.Block{}, ErrBlockNotFound
+	}
+	return c.blocks[memBlockIndex], nil
 }

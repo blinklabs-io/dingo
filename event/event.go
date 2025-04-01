@@ -49,7 +49,7 @@ type EventBus struct {
 	mu          sync.RWMutex
 	subscribers map[EventType]map[EventSubscriberId]chan Event
 	lastSubId   EventSubscriberId
-	metrics     eventMetrics
+	metrics     *eventMetrics
 }
 
 // NewEventBus creates a new EventBus
@@ -57,7 +57,9 @@ func NewEventBus(promRegistry prometheus.Registerer) *EventBus {
 	e := &EventBus{
 		subscribers: make(map[EventType]map[EventSubscriberId]chan Event),
 	}
-	e.initMetrics(promRegistry)
+	if promRegistry != nil {
+		e.initMetrics(promRegistry)
+	}
 	return e
 }
 
@@ -78,7 +80,9 @@ func (e *EventBus) Subscribe(
 	}
 	evtTypeSubs := e.subscribers[eventType]
 	evtTypeSubs[subId] = evtCh
-	e.metrics.subscribers.WithLabelValues(string(eventType)).Inc()
+	if e.metrics != nil {
+		e.metrics.subscribers.WithLabelValues(string(eventType)).Inc()
+	}
 	return subId, evtCh
 }
 
@@ -107,7 +111,9 @@ func (e *EventBus) Unsubscribe(eventType EventType, subId EventSubscriberId) {
 	if evtTypeSubs, ok := e.subscribers[eventType]; ok {
 		delete(evtTypeSubs, subId)
 	}
-	e.metrics.subscribers.WithLabelValues(string(eventType)).Dec()
+	if e.metrics != nil {
+		e.metrics.subscribers.WithLabelValues(string(eventType)).Dec()
+	}
 }
 
 // Publish allows a producer to send an event of a particular type to all subscribers
@@ -129,5 +135,7 @@ func (e *EventBus) Publish(eventType EventType, evt Event) {
 		// to get the event sent to the other subscribers?
 		subCh <- evt
 	}
-	e.metrics.eventsTotal.WithLabelValues(string(eventType)).Inc()
+	if e.metrics != nil {
+		e.metrics.eventsTotal.WithLabelValues(string(eventType)).Inc()
+	}
 }
