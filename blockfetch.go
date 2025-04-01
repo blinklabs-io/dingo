@@ -24,29 +24,28 @@ import (
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/protocol/blockfetch"
-	oblockfetch "github.com/blinklabs-io/gouroboros/protocol/blockfetch"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
-func (n *Node) blockfetchServerConnOpts() []oblockfetch.BlockFetchOptionFunc {
-	return []oblockfetch.BlockFetchOptionFunc{
-		oblockfetch.WithRequestRangeFunc(n.blockfetchServerRequestRange),
+func (n *Node) blockfetchServerConnOpts() []blockfetch.BlockFetchOptionFunc {
+	return []blockfetch.BlockFetchOptionFunc{
+		blockfetch.WithRequestRangeFunc(n.blockfetchServerRequestRange),
 	}
 }
 
-func (n *Node) blockfetchClientConnOpts() []oblockfetch.BlockFetchOptionFunc {
-	return []oblockfetch.BlockFetchOptionFunc{
-		oblockfetch.WithBlockFunc(n.blockfetchClientBlock),
-		oblockfetch.WithBatchDoneFunc(n.blockfetchClientBatchDone),
-		oblockfetch.WithBatchStartTimeout(2 * time.Second),
-		oblockfetch.WithBlockTimeout(2 * time.Second),
+func (n *Node) blockfetchClientConnOpts() []blockfetch.BlockFetchOptionFunc {
+	return []blockfetch.BlockFetchOptionFunc{
+		blockfetch.WithBlockFunc(n.blockfetchClientBlock),
+		blockfetch.WithBatchDoneFunc(n.blockfetchClientBatchDone),
+		blockfetch.WithBatchStartTimeout(2 * time.Second),
+		blockfetch.WithBlockTimeout(2 * time.Second),
 		// Set the recv queue size to 2x our block batch size
-		oblockfetch.WithRecvQueueSize(1000),
+		blockfetch.WithRecvQueueSize(1000),
 	}
 }
 
 func (n *Node) blockfetchServerRequestRange(
-	ctx oblockfetch.CallbackContext,
+	ctx blockfetch.CallbackContext,
 	start ocommon.Point,
 	end ocommon.Point,
 ) error {
