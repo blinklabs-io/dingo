@@ -23,8 +23,6 @@ import (
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
-var ErrIteratorChainTip = errors.New("chain iterator is at chain tip")
-
 type ChainIterator struct {
 	mutex            sync.Mutex
 	chain            *Chain

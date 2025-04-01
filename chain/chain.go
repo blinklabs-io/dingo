@@ -15,6 +15,7 @@
 package chain
 
 import (
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"slices"
@@ -31,11 +32,6 @@ const (
 	initialBlockIndex uint64 = 1
 )
 
-var (
-	ErrBlockNotFound                = errors.New("block not found")
-	ErrRollbackBeyondEphemeralChain = errors.New("cannot rollback ephemeral chain beyond memory buffer")
-)
-
 type Chain struct {
 	mutex            sync.RWMutex
 	db               *database.Database
@@ -46,6 +42,7 @@ type Chain struct {
 	lastDbSlot       uint64
 	lastDbBlockIndex uint64
 	blocks           []database.Block
+	headers          []ledger.BlockHeader
 }
 
 func NewChain(
@@ -91,20 +88,68 @@ func (c *Chain) load() error {
 }
 
 func (c *Chain) Tip() ochainsync.Tip {
+	c.mutex.RLock()
+	defer c.mutex.RUnlock()
 	return c.currentTip
+}
+
+func (c *Chain) HeaderTip() ochainsync.Tip {
+	c.mutex.RLock()
+	defer c.mutex.RUnlock()
+	return c.headerTip()
+}
+
+func (c *Chain) headerTip() ochainsync.Tip {
+	if len(c.headers) == 0 {
+		return c.currentTip
+	}
+	lastHeader := c.headers[len(c.headers)-1]
+	return ochainsync.Tip{
+		Point: ocommon.Point{
+			Slot: lastHeader.SlotNumber(),
+			Hash: lastHeader.Hash().Bytes(),
+		},
+		BlockNumber: lastHeader.BlockNumber(),
+	}
+}
+
+func (c *Chain) AddBlockHeader(header ledger.BlockHeader) error {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	headerTip := c.headerTip()
+	// Make sure header fits on chain tip
+	if string(header.PrevHash().Bytes()) != string(headerTip.Point.Hash) {
+		return NewBlockNotFitChainTipError(
+			header.Hash().String(),
+			header.PrevHash().String(),
+			hex.EncodeToString(headerTip.Point.Hash),
+		)
+	}
+	// Add header
+	c.headers = append(c.headers, header)
+	return nil
 }
 
 func (c *Chain) AddBlock(block ledger.Block, blockNonce []byte, txn *database.Txn) error {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
+	// Check that the new block matches our first header, if any
+	if len(c.headers) > 0 {
+		firstHeader := c.headers[0]
+		if block.Hash().String() != firstHeader.Hash().String() {
+			return NewBlockNotMatchHeaderError(
+				block.Hash().String(),
+				firstHeader.Hash().String(),
+			)
+		}
+	}
 	// Check that this block fits on the current chain tip
 	if c.tipBlockIndex >= initialBlockIndex {
 		if string(block.PrevHash().Bytes()) != string(c.currentTip.Point.Hash) {
-			return fmt.Errorf(
-				"block %s (with prev hash %s) does not fit on current chain tip (%x)",
+			return NewBlockNotFitChainTipError(
 				block.Hash().String(),
 				block.PrevHash().String(),
-				c.currentTip.Point.Hash,
+				hex.EncodeToString(c.currentTip.Point.Hash),
 			)
 		}
 	}
@@ -138,6 +183,10 @@ func (c *Chain) AddBlock(block ledger.Block, blockNonce []byte, txn *database.Tx
 			tmpBlock,
 		)
 	}
+	// Remove matching header entry, if any
+	if len(c.headers) > 0 {
+		c.headers = slices.Delete(c.headers, 0, 1)
+	}
 	// Update tip
 	c.currentTip = ochainsync.Tip{
 		Point:       tmpPoint,
@@ -161,6 +210,19 @@ func (c *Chain) AddBlock(block ledger.Block, blockNonce []byte, txn *database.Tx
 func (c *Chain) Rollback(point ocommon.Point) error {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
+	// Check headers for rollback point
+	if len(c.headers) > 0 {
+		for idx, header := range c.headers {
+			if header.SlotNumber() == point.Slot &&
+				string(header.Hash().Bytes()) == string(point.Hash) {
+				// Remove headers after rollback point
+				if idx < len(c.headers)-1 {
+					c.headers = slices.Delete(c.headers, idx+1, len(c.headers))
+				}
+				return nil
+			}
+		}
+	}
 	// Lookup block for rollback point
 	var rollbackBlockIndex uint64
 	var tmpBlock database.Block
@@ -204,6 +266,8 @@ func (c *Chain) Rollback(point ocommon.Point) error {
 			)
 		}
 	}
+	// Clear out any headers
+	c.headers = slices.Delete(c.headers, 0, len(c.headers))
 	// Update tip
 	c.currentTip = ochainsync.Tip{
 		Point:       point,
@@ -221,6 +285,25 @@ func (c *Chain) Rollback(point ocommon.Point) error {
 		),
 	)
 	return nil
+}
+
+func (c *Chain) HeaderRange() (ocommon.Point, ocommon.Point) {
+	c.mutex.RLock()
+	defer c.mutex.RUnlock()
+	var startPoint, endPoint ocommon.Point
+	if len(c.headers) > 0 {
+		firstHeader := c.headers[0]
+		startPoint = ocommon.Point{
+			Slot: firstHeader.SlotNumber(),
+			Hash: firstHeader.Hash().Bytes(),
+		}
+		lastHeader := c.headers[len(c.headers)-1]
+		endPoint = ocommon.Point{
+			Slot: lastHeader.SlotNumber(),
+			Hash: lastHeader.Hash().Bytes(),
+		}
+	}
+	return startPoint, endPoint
 }
 
 // FromPoint returns a ChainIterator starting at the specified point. If inclusive is true, the iterator
