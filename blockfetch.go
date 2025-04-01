@@ -15,7 +15,6 @@
 package dingo
 
 import (
-	"encoding/hex"
 	"fmt"
 	"time"
 
@@ -110,16 +109,12 @@ func (n *Node) blockfetchClientBlock(
 	block ledger.Block,
 ) error {
 	// Generate event
-	blkHash, err := hex.DecodeString(block.Hash())
-	if err != nil {
-		return fmt.Errorf("decode block hash: %w", err)
-	}
 	n.eventBus.Publish(
 		state.BlockfetchEventType,
 		event.NewEvent(
 			state.BlockfetchEventType,
 			state.BlockfetchEvent{
-				Point: ocommon.NewPoint(block.SlotNumber(), blkHash),
+				Point: ocommon.NewPoint(block.SlotNumber(), block.Hash().Bytes()),
 				Type:  blockType,
 				Block: block,
 			},

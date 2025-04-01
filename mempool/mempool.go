@@ -190,7 +190,7 @@ func (m *Mempool) AddTransaction(txType uint, txBytes []byte) error {
 		return err
 	}
 	// Build mempool entry
-	txHash := tmpTx.Hash()
+	txHash := tmpTx.Hash().String()
 	tx := MempoolTransaction{
 		Hash:     txHash,
 		Type:     txType,
