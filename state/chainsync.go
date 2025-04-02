@@ -26,6 +26,7 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/state/eras"
+	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -106,13 +107,14 @@ func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 	// Allow us to build up a few blockfetch batches worth of headers
 	allowedHeaderCount := blockfetchBatchSize * 4
 	headerCount := ls.chain.HeaderCount()
+	// Wait for current blockfetch batch to finish before we collect more block headers
 	if headerCount >= allowedHeaderCount {
-		// Lock and immediately unlock to pause for current blockfetch process without blocking
-		// anything else. This is clunky, but the alternative is a waiting on a channel, which
-		// adds unnecessary complexity
-		ls.chainsyncHeaderMutex.Lock()
-		//nolint:staticcheck
-		ls.chainsyncHeaderMutex.Unlock()
+		// We assign the channel to a temp var to protect against trying to read from a nil channel
+		// without a race condition
+		tmpDoneChan := ls.chainsyncBlockfetchDoneChan
+		if tmpDoneChan != nil {
+			<-tmpDoneChan
+		}
 	}
 	// Add header to chain
 	if err := ls.chain.AddBlockHeader(e.BlockHeader); err != nil {
@@ -134,19 +136,15 @@ func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 		(headerCount+1) < allowedHeaderCount {
 		return nil
 	}
+	// We use the blockfetch lock to ensure we aren't starting a batch at the same
+	// time as blockfetch starts a new one to avoid deadlocks
+	ls.chainsyncBlockfetchMutex.Lock()
+	defer ls.chainsyncBlockfetchMutex.Unlock()
 	// Don't start fetch if there's already one in progress
-	if ls.chainsyncBlockfetchBusy {
-		// Clear busy flag on timeout
+	if ls.chainsyncBlockfetchDoneChan != nil {
+		// Clear blockfetch busy flag on timeout
 		if time.Since(ls.chainsyncBlockfetchBusyTime) > blockfetchBusyTimeout {
-			// Clear flags
-			ls.chainsyncBlockfetchBusy = false
-			ls.chainsyncBlockfetchWaiting = false
-			// Reset buffer
-			ls.chainsyncBlockEvents = slices.Delete(
-				ls.chainsyncBlockEvents,
-				0,
-				len(ls.chainsyncBlockEvents),
-			)
+			ls.blockfetchRequestRangeCleanup(true)
 			ls.config.Logger.Warn(
 				fmt.Sprintf(
 					"blockfetch operation timed out after %s",
@@ -155,35 +153,22 @@ func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 				"component",
 				"ledger",
 			)
-			// Unblock new chainsync block headers
-			// We're being extra careful about unlocking the mutex since we're not
-			// entirely sure of the state
-			if !ls.chainsyncHeaderMutex.TryLock() {
-				ls.chainsyncHeaderMutex.Unlock()
-			}
 			return nil
 		}
 		ls.chainsyncBlockfetchWaiting = true
 		return nil
 	}
-	// Block new chainsync block headers until we fetch pending block bodies
-	ls.chainsyncHeaderMutex.Lock()
 	// Request next bulk range
 	headerStart, headerEnd := ls.chain.HeaderRange(blockfetchBatchSize)
-	err := ls.config.BlockfetchRequestRangeFunc(
+	err := ls.blockfetchRequestRangeStart(
 		e.ConnectionId,
 		headerStart,
 		headerEnd,
 	)
 	if err != nil {
-		// Clear flags
-		ls.chainsyncBlockfetchBusy = false
-		ls.chainsyncBlockfetchWaiting = false
-		// Unblock chainsync block headers
-		ls.chainsyncHeaderMutex.Unlock()
+		ls.blockfetchRequestRangeCleanup(true)
 		return err
 	}
-	ls.chainsyncBlockfetchBusy = true
 	ls.chainsyncBlockfetchBusyTime = time.Now()
 	return nil
 }
@@ -474,7 +459,9 @@ func (ls *LedgerState) processBlockEvent(
 	}
 	// Add block to chain
 	if err := ls.chain.AddBlock(e.Block, blockNonce, txn); err != nil {
-		if !errors.As(err, &chain.BlockNotFitChainTipError{}) {
+		// Ignore and log errors about block not fitting on chain or matching first header
+		if !errors.As(err, &chain.BlockNotFitChainTipError{}) &&
+			!errors.As(err, &chain.BlockNotMatchHeaderError{}) {
 			return err
 		}
 		ls.config.Logger.Warn(
@@ -556,34 +543,66 @@ func (ls *LedgerState) processTransaction(
 	return nil
 }
 
+func (ls *LedgerState) blockfetchRequestRangeStart(
+	connId ouroboros.ConnectionId,
+	start ocommon.Point,
+	end ocommon.Point,
+) error {
+	err := ls.config.BlockfetchRequestRangeFunc(
+		connId,
+		start,
+		end,
+	)
+	if err != nil {
+		return err
+	}
+	// Create our blockfetch done signal channel
+	ls.chainsyncBlockfetchDoneChan = make(chan struct{})
+	return nil
+}
+
+func (ls *LedgerState) blockfetchRequestRangeCleanup(resetFlags bool) {
+	// Reset buffer
+	ls.chainsyncBlockEvents = slices.Delete(
+		ls.chainsyncBlockEvents,
+		0,
+		len(ls.chainsyncBlockEvents),
+	)
+	// Close our blockfetch done signal channel
+	if ls.chainsyncBlockfetchDoneChan != nil {
+		close(ls.chainsyncBlockfetchDoneChan)
+		ls.chainsyncBlockfetchDoneChan = nil
+	}
+	// Reset flags
+	if resetFlags {
+		ls.chainsyncBlockfetchWaiting = false
+	}
+}
+
 func (ls *LedgerState) handleEventBlockfetchBatchDone(e BlockfetchEvent) error {
 	// Process pending block events
 	if err := ls.processBlockEvents(); err != nil {
-		ls.chainsyncBlockfetchBusy = false
-		ls.chainsyncBlockfetchWaiting = false
-		ls.chainsyncHeaderMutex.Unlock()
+		ls.blockfetchRequestRangeCleanup(true)
 		return err
 	}
 	// Check for pending block range request
 	if !ls.chainsyncBlockfetchWaiting ||
 		ls.chain.HeaderCount() == 0 {
-		ls.chainsyncBlockfetchBusy = false
-		ls.chainsyncBlockfetchWaiting = false
 		// Allow collection of more block headers via chainsync
-		ls.chainsyncHeaderMutex.Unlock()
+		ls.blockfetchRequestRangeCleanup(true)
 		return nil
 	}
+	// Clean up from blockfetch batch
+	ls.blockfetchRequestRangeCleanup(false)
 	// Request next waiting bulk range
 	headerStart, headerEnd := ls.chain.HeaderRange(blockfetchBatchSize)
-	err := ls.config.BlockfetchRequestRangeFunc(
+	err := ls.blockfetchRequestRangeStart(
 		e.ConnectionId,
 		headerStart,
 		headerEnd,
 	)
 	if err != nil {
-		ls.chainsyncBlockfetchBusy = false
-		ls.chainsyncBlockfetchWaiting = false
-		ls.chainsyncHeaderMutex.Unlock()
+		ls.blockfetchRequestRangeCleanup(true)
 		return err
 	}
 	ls.chainsyncBlockfetchBusyTime = time.Now()

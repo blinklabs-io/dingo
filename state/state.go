@@ -70,11 +70,10 @@ type LedgerState struct {
 	currentTipBlockNonce        []byte
 	metrics                     stateMetrics
 	chainsyncBlockEvents        []BlockfetchEvent
-	chainsyncBlockfetchBusy     bool
 	chainsyncBlockfetchBusyTime time.Time
+	chainsyncBlockfetchDoneChan chan struct{}
 	chainsyncBlockfetchMutex    sync.Mutex
 	chainsyncBlockfetchWaiting  bool
-	chainsyncHeaderMutex        sync.Mutex
 	chain                       *chain.Chain
 }
 
