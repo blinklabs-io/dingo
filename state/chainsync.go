@@ -22,6 +22,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/state/eras"
@@ -32,8 +33,13 @@ import (
 )
 
 const (
-	blockfetchBatchSize          = 500
-	blockfetchBatchSlotThreshold = 2500 * 20 // TODO: calculate from protocol params
+	// Max number of blocks to fetch in a single blockfetch call
+	// This prevents us exceeding the configured recv queue size in the block-fetch protocol
+	blockfetchBatchSize = 500
+
+	// TODO: calculate from protocol params
+	// Number of slots from upstream tip to stop doing blockfetch batches
+	blockfetchBatchSlotThreshold = 2500 * 20
 
 	// Timeout for updates on a blockfetch operation. This is based on a 2s BatchStart
 	// and a 2s Block timeout for blockfetch
@@ -97,26 +103,10 @@ func (ls *LedgerState) handleEventChainsyncRollback(e ChainsyncEvent) error {
 }
 
 func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
-	// Check for out-of-order block headers
-	// This is a stop-gap to handle disconnects during sync until we get chain selection working
-	ls.chainsyncHeaderPointsMutex.Lock()
-	if ls.chainsyncHeaderPoints != nil {
-		if pointsLen := len(ls.chainsyncHeaderPoints); pointsLen > 0 &&
-			e.Point.Slot < ls.chainsyncHeaderPoints[pointsLen-1].Slot {
-			tmpHeaderPoints := make([]ocommon.Point, 0, pointsLen)
-			for _, point := range ls.chainsyncHeaderPoints {
-				if point.Slot >= e.Point.Slot {
-					break
-				}
-				tmpHeaderPoints = append(tmpHeaderPoints, point)
-			}
-			ls.chainsyncHeaderPoints = tmpHeaderPoints
-		}
-	}
-	ls.chainsyncHeaderPointsMutex.Unlock()
-	// Wait for current blockfetch to finish if we've already got another batch worth queued up
-	// This prevents us exceeding the configured recv queue size in the block-fetch protocol
-	if len(ls.chainsyncHeaderPoints) >= blockfetchBatchSize {
+	// Allow us to build up a few blockfetch batches worth of headers
+	allowedHeaderCount := blockfetchBatchSize * 4
+	headerCount := ls.chain.HeaderCount()
+	if headerCount >= allowedHeaderCount {
 		// Lock and immediately unlock to pause for current blockfetch process without blocking
 		// anything else. This is clunky, but the alternative is a waiting on a channel, which
 		// adds unnecessary complexity
@@ -124,18 +114,24 @@ func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 		//nolint:staticcheck
 		ls.chainsyncHeaderMutex.Unlock()
 	}
-	// Add to cached header points
-	ls.chainsyncHeaderPointsMutex.Lock()
-	defer ls.chainsyncHeaderPointsMutex.Unlock()
-	ls.chainsyncHeaderPoints = append(
-		ls.chainsyncHeaderPoints,
-		e.Point,
-	)
+	// Add header to chain
+	if err := ls.chain.AddBlockHeader(e.BlockHeader); err != nil {
+		if !errors.As(err, &chain.BlockNotFitChainTipError{}) {
+			return err
+		}
+		ls.config.Logger.Warn(
+			fmt.Sprintf(
+				"ignoring chainsync block header: %s",
+				err,
+			),
+		)
+		return nil
+	}
 	// Wait for additional block headers before fetching block bodies if we're
-	// far enough out from tip
+	// far enough out from upstream tip
 	if e.Point.Slot < e.Tip.Point.Slot &&
 		(e.Tip.Point.Slot-e.Point.Slot > blockfetchBatchSlotThreshold) &&
-		len(ls.chainsyncHeaderPoints) < blockfetchBatchSize {
+		(headerCount+1) < allowedHeaderCount {
 		return nil
 	}
 	// Don't start fetch if there's already one in progress
@@ -172,11 +168,12 @@ func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 	}
 	// Block new chainsync block headers until we fetch pending block bodies
 	ls.chainsyncHeaderMutex.Lock()
-	// Request current bulk range
+	// Request next bulk range
+	headerStart, headerEnd := ls.chain.HeaderRange(blockfetchBatchSize)
 	err := ls.config.BlockfetchRequestRangeFunc(
 		e.ConnectionId,
-		ls.chainsyncHeaderPoints[0],
-		ls.chainsyncHeaderPoints[len(ls.chainsyncHeaderPoints)-1],
+		headerStart,
+		headerEnd,
 	)
 	if err != nil {
 		// Clear flags
@@ -188,28 +185,11 @@ func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 	}
 	ls.chainsyncBlockfetchBusy = true
 	ls.chainsyncBlockfetchBusyTime = time.Now()
-	// Reset cached header points
-	ls.chainsyncHeaderPoints = nil
 	return nil
 }
 
 //nolint:unparam
 func (ls *LedgerState) handleEventBlockfetchBlock(e BlockfetchEvent) error {
-	// Check for out-of-order block events
-	// This is a stop-gap to handle disconnects during sync until we get chain selection working
-	if ls.chainsyncBlockEvents != nil {
-		if eventsLen := len(ls.chainsyncBlockEvents); eventsLen > 0 &&
-			e.Point.Slot < ls.chainsyncBlockEvents[eventsLen-1].Point.Slot {
-			tmpBlockEvents := make([]BlockfetchEvent, 0, eventsLen)
-			for _, tmpEvent := range ls.chainsyncBlockEvents {
-				if tmpEvent.Point.Slot >= e.Point.Slot {
-					break
-				}
-				tmpBlockEvents = append(tmpBlockEvents, tmpEvent)
-			}
-			ls.chainsyncBlockEvents = tmpBlockEvents
-		}
-	}
 	ls.chainsyncBlockEvents = append(
 		ls.chainsyncBlockEvents,
 		e,
@@ -494,7 +474,15 @@ func (ls *LedgerState) processBlockEvent(
 	}
 	// Add block to chain
 	if err := ls.chain.AddBlock(e.Block, blockNonce, txn); err != nil {
-		return err
+		if !errors.As(err, &chain.BlockNotFitChainTipError{}) {
+			return err
+		}
+		ls.config.Logger.Warn(
+			fmt.Sprintf(
+				"ignoring blockfetch block: %s",
+				err,
+			),
+		)
 	}
 	return nil
 }
@@ -576,22 +564,21 @@ func (ls *LedgerState) handleEventBlockfetchBatchDone(e BlockfetchEvent) error {
 		ls.chainsyncHeaderMutex.Unlock()
 		return err
 	}
-	ls.chainsyncHeaderPointsMutex.Lock()
-	defer ls.chainsyncHeaderPointsMutex.Unlock()
 	// Check for pending block range request
 	if !ls.chainsyncBlockfetchWaiting ||
-		len(ls.chainsyncHeaderPoints) == 0 {
+		ls.chain.HeaderCount() == 0 {
 		ls.chainsyncBlockfetchBusy = false
 		ls.chainsyncBlockfetchWaiting = false
 		// Allow collection of more block headers via chainsync
 		ls.chainsyncHeaderMutex.Unlock()
 		return nil
 	}
-	// Request waiting bulk range
+	// Request next waiting bulk range
+	headerStart, headerEnd := ls.chain.HeaderRange(blockfetchBatchSize)
 	err := ls.config.BlockfetchRequestRangeFunc(
 		e.ConnectionId,
-		ls.chainsyncHeaderPoints[0],
-		ls.chainsyncHeaderPoints[len(ls.chainsyncHeaderPoints)-1],
+		headerStart,
+		headerEnd,
 	)
 	if err != nil {
 		ls.chainsyncBlockfetchBusy = false
@@ -601,7 +588,5 @@ func (ls *LedgerState) handleEventBlockfetchBatchDone(e BlockfetchEvent) error {
 	}
 	ls.chainsyncBlockfetchBusyTime = time.Now()
 	ls.chainsyncBlockfetchWaiting = false
-	// Reset cached header points
-	ls.chainsyncHeaderPoints = nil
 	return nil
 }
