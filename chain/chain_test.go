@@ -289,7 +289,7 @@ func TestChainHeaderRange(t *testing.T) {
 		}
 	}
 	// Compare header range
-	start, end := c.HeaderRange()
+	start, end := c.HeaderRange(1000)
 	testStartBlock := testBlocks[testBlockCount]
 	if start.Slot != testStartBlock.SlotNumber() ||
 		string(start.Hash) != string(testStartBlock.Hash().Bytes()) {

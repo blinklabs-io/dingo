@@ -24,6 +24,7 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/gouroboros/ledger"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
@@ -118,12 +119,23 @@ func (c *Chain) AddBlockHeader(header ledger.BlockHeader) error {
 	defer c.mutex.Unlock()
 	headerTip := c.headerTip()
 	// Make sure header fits on chain tip
-	if string(header.PrevHash().Bytes()) != string(headerTip.Point.Hash) {
-		return NewBlockNotFitChainTipError(
-			header.Hash().String(),
-			header.PrevHash().String(),
-			hex.EncodeToString(headerTip.Point.Hash),
-		)
+	if header.PrevHash() == lcommon.NewBlake2b256(nil) {
+		// Make sure we're at chain origin if the block header has an empty prev hash
+		if len(headerTip.Point.Hash) != 0 {
+			return NewBlockNotFitChainTipError(
+				header.Hash().String(),
+				header.PrevHash().String(),
+				hex.EncodeToString(headerTip.Point.Hash),
+			)
+		}
+	} else {
+		if string(header.PrevHash().Bytes()) != string(headerTip.Point.Hash) {
+			return NewBlockNotFitChainTipError(
+				header.Hash().String(),
+				header.PrevHash().String(),
+				hex.EncodeToString(headerTip.Point.Hash),
+			)
+		}
 	}
 	// Add header
 	c.headers = append(c.headers, header)
@@ -287,7 +299,13 @@ func (c *Chain) Rollback(point ocommon.Point) error {
 	return nil
 }
 
-func (c *Chain) HeaderRange() (ocommon.Point, ocommon.Point) {
+func (c *Chain) HeaderCount() int {
+	c.mutex.RLock()
+	defer c.mutex.RUnlock()
+	return len(c.headers)
+}
+
+func (c *Chain) HeaderRange(count int) (ocommon.Point, ocommon.Point) {
 	c.mutex.RLock()
 	defer c.mutex.RUnlock()
 	var startPoint, endPoint ocommon.Point
@@ -297,7 +315,8 @@ func (c *Chain) HeaderRange() (ocommon.Point, ocommon.Point) {
 			Slot: firstHeader.SlotNumber(),
 			Hash: firstHeader.Hash().Bytes(),
 		}
-		lastHeader := c.headers[len(c.headers)-1]
+		lastHeaderIdx := min(count, len(c.headers)) - 1
+		lastHeader := c.headers[lastHeaderIdx]
 		endPoint = ocommon.Point{
 			Slot: lastHeader.SlotNumber(),
 			Hash: lastHeader.Hash().Bytes(),
