@@ -44,9 +44,13 @@ func (d *MetadataStoreSqlite) GetPoolRegistrations(
 			return ret, result.Error
 		}
 	}
+	var addrKeyHash lcommon.AddrKeyHash
+	var tmpCert lcommon.PoolRegistrationCertificate
+	var tmpMargin cbor.Rat
+	var tmpRelay lcommon.PoolRelay
 	for _, cert := range certs {
-		tmpMargin := cbor.Rat{Rat: cert.Margin.Rat}
-		tmpCert := lcommon.PoolRegistrationCertificate{
+		tmpMargin = cbor.Rat{Rat: cert.Margin.Rat}
+		tmpCert = lcommon.PoolRegistrationCertificate{
 			CertType: lcommon.CertificateTypePoolRegistration,
 			Operator: lcommon.PoolKeyHash(
 				lcommon.NewBlake2b224(cert.PoolKeyHash),
@@ -61,13 +65,13 @@ func (d *MetadataStoreSqlite) GetPoolRegistrations(
 			// RewardAccount: lcommon.AddrKeyHash(lcommon.NewBlake2b256(cert.PoolOwners[0]))
 		}
 		for _, owner := range cert.Owners {
-			addrKeyHash := lcommon.AddrKeyHash(
+			addrKeyHash = lcommon.AddrKeyHash(
 				lcommon.NewBlake2b224(owner.KeyHash),
 			)
 			tmpCert.PoolOwners = append(tmpCert.PoolOwners, addrKeyHash)
 		}
 		for _, relay := range cert.Relays {
-			tmpRelay := lcommon.PoolRelay{}
+			tmpRelay = lcommon.PoolRelay{}
 			// Determine type
 			if relay.Port != 0 {
 				port := uint32(relay.Port) // #nosec G115
@@ -124,8 +128,9 @@ func (d *MetadataStoreSqlite) GetStakeRegistrations(
 			return ret, result.Error
 		}
 	}
+	var tmpCert lcommon.StakeRegistrationCertificate
 	for _, cert := range certs {
-		tmpCert := lcommon.StakeRegistrationCertificate{
+		tmpCert = lcommon.StakeRegistrationCertificate{
 			CertType: lcommon.CertificateTypeStakeRegistration,
 			StakeRegistration: lcommon.Credential{
 				// TODO: determine correct type
@@ -163,8 +168,9 @@ func (d *MetadataStoreSqlite) SetPoolRegistration(
 			models.PoolRegistrationOwner{KeyHash: owner[:]},
 		)
 	}
+	var tmpRelay models.PoolRegistrationRelay
 	for _, relay := range cert.Relays {
-		tmpRelay := models.PoolRegistrationRelay{
+		tmpRelay = models.PoolRegistrationRelay{
 			Ipv4: relay.Ipv4,
 			Ipv6: relay.Ipv6,
 		}

@@ -131,8 +131,9 @@ func (d *Database) UtxosByAddress(
 	if err != nil {
 		return ret, err
 	}
+	var tmpUtxo Utxo
 	for _, utxo := range utxos {
-		tmpUtxo := Utxo(utxo)
+		tmpUtxo = Utxo(utxo)
 		if err := tmpUtxo.loadCbor(txn); err != nil {
 			return ret, err
 		}

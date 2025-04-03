@@ -213,13 +213,16 @@ func BlocksRecentTxn(txn *Txn, count int) ([]Block, error) {
 	// after any legitimate key. This should leave our most recent block as the next
 	// item when doing reverse iteration
 	tmpPrefix := append([]byte(blockBlobIndexKeyPrefix), 0xff)
+	var blockKey []byte
+	var err error
+	var tmpBlock Block
 	for it.Seek(tmpPrefix); it.ValidForPrefix([]byte(blockBlobIndexKeyPrefix)); it.Next() {
 		item := it.Item()
-		blockKey, err := item.ValueCopy(nil)
+		blockKey, err = item.ValueCopy(nil)
 		if err != nil {
 			return ret, err
 		}
-		tmpBlock, err := blockByKey(txn, blockKey)
+		tmpBlock, err = blockByKey(txn, blockKey)
 		if err != nil {
 			return ret, err
 		}
@@ -282,18 +285,21 @@ func BlocksAfterSlotTxn(txn *Txn, slotNumber uint64) ([]Block, error) {
 		[]byte(blockBlobKeyPrefix),
 		blockBlobKeyUint64ToBytes(slotNumber),
 	)
+	var err error
+	var k []byte
+	var tmpBlock Block
 	for it.Seek(keyPrefix); it.ValidForPrefix([]byte(blockBlobKeyPrefix)); it.Next() {
 		// Skip the start slot
 		if it.ValidForPrefix(keyPrefix) {
 			continue
 		}
 		item := it.Item()
-		k := item.Key()
+		k = item.Key()
 		// Skip the metadata key
 		if strings.HasSuffix(string(k), blockBlobMetadataKeySuffix) {
 			continue
 		}
-		tmpBlock, err := blockByKey(txn, k)
+		tmpBlock, err = blockByKey(txn, k)
 		if err != nil {
 			return []Block{}, err
 		}
