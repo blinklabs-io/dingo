@@ -44,8 +44,11 @@ func TestTypesScanValue(t *testing.T) {
 			expectedValue: "3/5",
 		},
 	}
+	var ok bool
+	var tmpScanner sql.Scanner
+	var tmpValuer driver.Valuer
 	for _, testDef := range testDefs {
-		tmpValuer, ok := testDef.origValue.(driver.Valuer)
+		tmpValuer, ok = testDef.origValue.(driver.Valuer)
 		if !ok {
 			t.Fatalf("test original value does not implement driver.Valuer")
 		}
@@ -60,7 +63,7 @@ func TestTypesScanValue(t *testing.T) {
 				testDef.expectedValue,
 			)
 		}
-		tmpScanner, ok := testDef.origValue.(sql.Scanner)
+		tmpScanner, ok = testDef.origValue.(sql.Scanner)
 		if !ok {
 			t.Fatalf(
 				"test original value does not implement sql.Scanner (it must be a pointer)",
