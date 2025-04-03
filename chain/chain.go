@@ -24,7 +24,6 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/gouroboros/ledger"
-	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
@@ -117,18 +116,10 @@ func (c *Chain) headerTip() ochainsync.Tip {
 func (c *Chain) AddBlockHeader(header ledger.BlockHeader) error {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
-	headerTip := c.headerTip()
 	// Make sure header fits on chain tip
-	if header.PrevHash() == lcommon.NewBlake2b256(nil) {
-		// Make sure we're at chain origin if the block header has an empty prev hash
-		if len(headerTip.Point.Hash) != 0 {
-			return NewBlockNotFitChainTipError(
-				header.Hash().String(),
-				header.PrevHash().String(),
-				hex.EncodeToString(headerTip.Point.Hash),
-			)
-		}
-	} else {
+	if c.tipBlockIndex >= initialBlockIndex ||
+		len(c.headers) > 0 {
+		headerTip := c.headerTip()
 		if string(header.PrevHash().Bytes()) != string(headerTip.Point.Hash) {
 			return NewBlockNotFitChainTipError(
 				header.Hash().String(),
