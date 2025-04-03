@@ -27,7 +27,8 @@ func (ls *LedgerState) processTransactionCertificates(
 	blockPoint pcommon.Point,
 	tx lcommon.Transaction,
 ) error {
-	for _, tmpCert := range tx.Certificates() {
+	var tmpCert lcommon.Certificate
+	for _, tmpCert = range tx.Certificates() {
 		certDeposit, err := ls.currentEra.CertDepositFunc(
 			tmpCert,
 			ls.currentPParams,
