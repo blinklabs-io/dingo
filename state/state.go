@@ -167,7 +167,8 @@ func (ls *LedgerState) recoverCommitTimestampConflict() error {
 	if err != nil {
 		return err
 	}
-	for _, tmpBlock := range recentBlocks {
+	var tmpBlock database.Block
+	for _, tmpBlock = range recentBlocks {
 		blockPoint := ocommon.NewPoint(
 			tmpBlock.Slot,
 			tmpBlock.Hash,
@@ -241,8 +242,9 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 		if err != nil {
 			return fmt.Errorf("query blocks: %w", err)
 		}
-		for _, tmpBlock := range tmpBlocks {
-			if err := ls.removeBlock(txn, tmpBlock); err != nil {
+		var tmpBlock database.Block
+		for _, tmpBlock = range tmpBlocks {
+			if err = ls.removeBlock(txn, tmpBlock); err != nil {
 				return fmt.Errorf("remove block: %w", err)
 			}
 		}
@@ -260,7 +262,8 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 			)
 		}
 		// Update tip
-		recentBlocks, err := database.BlocksRecentTxn(txn, 1)
+		var recentBlocks []database.Block
+		recentBlocks, err = database.BlocksRecentTxn(txn, 1)
 		if err != nil {
 			return err
 		}
@@ -272,7 +275,7 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 				),
 				BlockNumber: recentBlocks[0].Number,
 			}
-			if err := ls.db.SetTip(ls.currentTip, txn); err != nil {
+			if err = ls.db.SetTip(ls.currentTip, txn); err != nil {
 				return err
 			}
 		}
@@ -371,10 +374,15 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 	shouldBlock := false
 	// We chose 500 as an arbitrary max batch size. A "chain extended" message will be logged after each batch
 	nextBatch := make([]*chain.ChainIteratorResult, 0, 500)
+	var next, nextRollback *chain.ChainIteratorResult
+	var tmpBlock ledger.Block
+	var needsRollback bool
+	var end, i int
+	var txn *database.Txn
 	for {
 		// Gather up next batch of blocks
 		for {
-			next, err := iter.Next(shouldBlock)
+			next, err = iter.Next(shouldBlock)
 			shouldBlock = false
 			if err != nil {
 				if !errors.Is(err, chain.ErrIteratorChainTip) {
@@ -402,15 +410,15 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 			}
 		}
 		// Process batch in groups of 50 to stay under DB txn limits
-		needsRollback := false
-		for i := 0; i < len(nextBatch); i += 50 {
+		needsRollback = false
+		for i = 0; i < len(nextBatch); i += 50 {
 			ls.Lock()
-			end := min(
+			end = min(
 				len(nextBatch),
 				i+50,
 			)
-			txn := ls.db.Transaction(true)
-			err := txn.Do(func(txn *database.Txn) error {
+			txn = ls.db.Transaction(true)
+			err = txn.Do(func(txn *database.Txn) error {
 				for _, next := range nextBatch[i:end] {
 					// Rollbacks need to be handled outside of the batch DB transaction
 					// A rollback should only occur at the end of a batch
@@ -419,11 +427,11 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 						return nil
 					}
 					// Process block
-					tmpBlock, err := next.Block.Decode()
+					tmpBlock, err = next.Block.Decode()
 					if err != nil {
 						return err
 					}
-					if err := ls.ledgerProcessBlock(txn, next.Point, tmpBlock, next.Block.Nonce); err != nil {
+					if err = ls.ledgerProcessBlock(txn, next.Point, tmpBlock, next.Block.Nonce); err != nil {
 						return err
 					}
 				}
@@ -442,9 +450,9 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 		if needsRollback {
 			needsRollback = false
 			// The rollback should be at the end of the batch
-			nextRollback := nextBatch[len(nextBatch)-1]
+			nextRollback = nextBatch[len(nextBatch)-1]
 			ls.Lock()
-			if err := ls.rollback(nextRollback.Point); err != nil {
+			if err = ls.rollback(nextRollback.Point); err != nil {
 				ls.Unlock()
 				ls.config.Logger.Error(
 					"failed to process rollback: " + err.Error(),
@@ -603,7 +611,8 @@ func (ls *LedgerState) RecentChainPoints(count int) ([]ocommon.Point, error) {
 		return nil, err
 	}
 	ret := []ocommon.Point{}
-	for _, tmpBlock := range tmpBlocks {
+	var tmpBlock database.Block
+	for _, tmpBlock = range tmpBlocks {
 		ret = append(
 			ret,
 			ocommon.NewPoint(tmpBlock.Slot, tmpBlock.Hash),
@@ -618,9 +627,11 @@ func (ls *LedgerState) GetIntersectPoint(
 ) (*ocommon.Point, error) {
 	tip := ls.Tip()
 	var ret ocommon.Point
+	var tmpBlock database.Block
+	var err error
 	foundOrigin := false
 	txn := ls.db.Transaction(false)
-	err := txn.Do(func(txn *database.Txn) error {
+	err = txn.Do(func(txn *database.Txn) error {
 		for _, point := range points {
 			// Ignore points with a slot later than our current tip
 			if point.Slot > tip.Point.Slot {
@@ -636,7 +647,7 @@ func (ls *LedgerState) GetIntersectPoint(
 				continue
 			}
 			// Lookup block in metadata DB
-			tmpBlock, err := database.BlockByPoint(ls.db, point)
+			tmpBlock, err = database.BlockByPoint(ls.db, point)
 			if err != nil {
 				if errors.Is(err, database.ErrBlockNotFound) {
 					continue
@@ -694,8 +705,9 @@ func (ls *LedgerState) UtxosByAddress(
 	if err != nil {
 		return ret, err
 	}
+	var tmpUtxo database.Utxo
 	for _, utxo := range utxos {
-		tmpUtxo := database.Utxo(utxo)
+		tmpUtxo = database.Utxo(utxo)
 		ret = append(ret, tmpUtxo)
 	}
 	return ret, nil
