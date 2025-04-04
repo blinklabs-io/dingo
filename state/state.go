@@ -237,19 +237,8 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 	// Start a transaction
 	txn := ls.db.Transaction(true)
 	err := txn.Do(func(txn *database.Txn) error {
-		// Remove rolled-back blocks in reverse order
-		tmpBlocks, err := database.BlocksAfterSlotTxn(txn, point.Slot)
-		if err != nil {
-			return fmt.Errorf("query blocks: %w", err)
-		}
-		var tmpBlock database.Block
-		for _, tmpBlock = range tmpBlocks {
-			if err = ls.removeBlock(txn, tmpBlock); err != nil {
-				return fmt.Errorf("remove block: %w", err)
-			}
-		}
 		// Delete rolled-back UTxOs
-		err = ls.db.UtxosDeleteRolledback(point.Slot, txn)
+		err := ls.db.UtxosDeleteRolledback(point.Slot, txn)
 		if err != nil {
 			return fmt.Errorf("remove rolled-back UTxOs: %w", err)
 		}
@@ -534,16 +523,6 @@ func (ls *LedgerState) ledgerProcessBlock(txn *database.Txn, point ocommon.Point
 	ls.metrics.blockNum.Set(float64(ls.currentTip.BlockNumber))
 	ls.metrics.slotNum.Set(float64(point.Slot))
 	ls.metrics.slotInEpoch.Set(float64(point.Slot - ls.currentEpoch.StartSlot))
-	return nil
-}
-
-func (ls *LedgerState) removeBlock(
-	txn *database.Txn,
-	block database.Block,
-) error {
-	if err := database.BlockDeleteTxn(txn, block); err != nil {
-		return err
-	}
 	return nil
 }
 
