@@ -304,7 +304,7 @@ func (m *Mempool) removeTransactionByIndex(txIdx int) bool {
 	// Update consumer indexes to reflect removed TX
 	for _, consumer := range m.consumers {
 		// Decrement consumer index if the consumer has reached the removed TX
-		if consumer.nextTxIdx >= txIdx {
+		if consumer.nextTxIdx > txIdx {
 			consumer.nextTxIdx--
 		}
 	}
