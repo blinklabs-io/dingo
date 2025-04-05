@@ -18,10 +18,8 @@ import (
 	"encoding/hex"
 	"errors"
 	"testing"
-	"time"
 
 	"github.com/blinklabs-io/dingo/chain"
-	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -105,10 +103,9 @@ var (
 )
 
 func TestChainBasic(t *testing.T) {
-	eventBus := event.NewEventBus(nil)
 	c, err := chain.NewChain(
-		nil, // db
-		eventBus,
+		nil,   // db
+		nil,   // eventBus,
 		false, // persistent
 	)
 	if err != nil {
@@ -176,10 +173,9 @@ func TestChainBasic(t *testing.T) {
 }
 
 func TestChainRollback(t *testing.T) {
-	eventBus := event.NewEventBus(nil)
 	c, err := chain.NewChain(
-		nil, // db
-		eventBus,
+		nil,   // db
+		nil,   // eventBus,
 		false, // persistent
 	)
 	if err != nil {
@@ -194,7 +190,7 @@ func TestChainRollback(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error creating chain iterator: %s", err)
 	}
-	// Iterate until hitting chain tip, and make sure we get blocks in the correct order with
+	// Iterate until hitting chain tip, and make sure we get blocks in the correct order
 	testBlockIdx := 0
 	for {
 		next, err := iter.Next(false)
@@ -243,8 +239,6 @@ func TestChainRollback(t *testing.T) {
 			testRollbackPoint.Hash,
 		)
 	}
-	// XXX: how fast does this propagate to iterators?
-	time.Sleep(1000 * time.Millisecond)
 	// The chain iterator should give us a rollback
 	next, err := iter.Next(false)
 	if err != nil {
@@ -267,10 +261,9 @@ func TestChainRollback(t *testing.T) {
 
 func TestChainHeaderRange(t *testing.T) {
 	testBlockCount := 3
-	eventBus := event.NewEventBus(nil)
 	c, err := chain.NewChain(
-		nil, // db
-		eventBus,
+		nil,   // db
+		nil,   // eventBus,
 		false, // persistent
 	)
 	if err != nil {
@@ -316,10 +309,9 @@ func TestChainHeaderRange(t *testing.T) {
 
 func TestChainHeaderBlock(t *testing.T) {
 	testBlockCount := 3
-	eventBus := event.NewEventBus(nil)
 	c, err := chain.NewChain(
-		nil, // db
-		eventBus,
+		nil,   // db
+		nil,   // eventBus,
 		false, // persistent
 	)
 	if err != nil {
@@ -347,10 +339,9 @@ func TestChainHeaderBlock(t *testing.T) {
 
 func TestChainHeaderWrongBlock(t *testing.T) {
 	testBlockCount := 3
-	eventBus := event.NewEventBus(nil)
 	c, err := chain.NewChain(
-		nil, // db
-		eventBus,
+		nil,   // db
+		nil,   // eventBus,
 		false, // persistent
 	)
 	if err != nil {
@@ -386,10 +377,9 @@ func TestChainHeaderWrongBlock(t *testing.T) {
 
 func TestChainHeaderRollback(t *testing.T) {
 	testBlockCount := 3
-	eventBus := event.NewEventBus(nil)
 	c, err := chain.NewChain(
-		nil, // db
-		eventBus,
+		nil,   // db
+		nil,   // eventBus,
 		false, // persistent
 	)
 	if err != nil {

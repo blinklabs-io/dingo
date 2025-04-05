@@ -43,6 +43,9 @@ type Chain struct {
 	lastDbBlockIndex uint64
 	blocks           []database.Block
 	headers          []ledger.BlockHeader
+	waitingChan      chan struct{}
+	waitingChanMutex sync.Mutex
+	iterators        []*ChainIterator
 }
 
 func NewChain(
@@ -196,17 +199,24 @@ func (c *Chain) AddBlock(block ledger.Block, blockNonce []byte, txn *database.Tx
 		BlockNumber: block.BlockNumber(),
 	}
 	c.tipBlockIndex = newBlockIndex
+	// Notify waiting iterators
+	if c.waitingChan != nil {
+		close(c.waitingChan)
+		c.waitingChan = nil
+	}
 	// Generate event
-	c.eventBus.Publish(
-		ChainUpdateEventType,
-		event.NewEvent(
+	if c.eventBus != nil {
+		c.eventBus.Publish(
 			ChainUpdateEventType,
-			ChainBlockEvent{
-				Point: tmpPoint,
-				Block: tmpBlock,
-			},
-		),
-	)
+			event.NewEvent(
+				ChainUpdateEventType,
+				ChainBlockEvent{
+					Point: tmpPoint,
+					Block: tmpBlock,
+				},
+			),
+		)
+	}
 	return nil
 }
 
@@ -277,16 +287,29 @@ func (c *Chain) Rollback(point ocommon.Point) error {
 		BlockNumber: tmpBlock.Number,
 	}
 	c.tipBlockIndex = rollbackBlockIndex
+	// Update iterators for rollback
+	for _, iter := range c.iterators {
+		if iter.lastPoint.Slot > point.Slot {
+			// Don't update rollback point if the iterator already has an older one pending
+			if iter.needsRollback && point.Slot > iter.rollbackPoint.Slot {
+				continue
+			}
+			iter.rollbackPoint = point
+			iter.needsRollback = true
+		}
+	}
 	// Generate event
-	c.eventBus.Publish(
-		ChainUpdateEventType,
-		event.NewEvent(
+	if c.eventBus != nil {
+		c.eventBus.Publish(
 			ChainUpdateEventType,
-			ChainRollbackEvent{
-				Point: point,
-			},
-		),
-	)
+			event.NewEvent(
+				ChainUpdateEventType,
+				ChainRollbackEvent{
+					Point: point,
+				},
+			),
+		)
+	}
 	return nil
 }
 
@@ -319,11 +342,18 @@ func (c *Chain) HeaderRange(count int) (ocommon.Point, ocommon.Point) {
 // FromPoint returns a ChainIterator starting at the specified point. If inclusive is true, the iterator
 // will start at the specified point. Otherwise it will start at the point following the specified point
 func (c *Chain) FromPoint(point ocommon.Point, inclusive bool) (*ChainIterator, error) {
-	return newChainIterator(
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	iter, err := newChainIterator(
 		c,
 		point,
 		inclusive,
 	)
+	if err != nil {
+		return nil, err
+	}
+	c.iterators = append(c.iterators, iter)
+	return iter, nil
 }
 
 func (c *Chain) BlockByPoint(point ocommon.Point, txn *database.Txn) (database.Block, error) {
@@ -369,4 +399,59 @@ func (c *Chain) blockByIndex(blockIndex uint64, txn *database.Txn) (database.Blo
 		return database.Block{}, ErrBlockNotFound
 	}
 	return c.blocks[memBlockIndex], nil
+}
+
+func (c *Chain) iterNext(iter *ChainIterator, blocking bool) (*ChainIteratorResult, error) {
+	c.mutex.RLock()
+	// Check for pending rollback
+	if iter.needsRollback {
+		ret := &ChainIteratorResult{}
+		ret.Point = iter.rollbackPoint
+		ret.Rollback = true
+		iter.lastPoint = iter.rollbackPoint
+		iter.needsRollback = false
+		if iter.rollbackPoint.Slot > 0 {
+			// Lookup block index for rollback point
+			tmpBlock, err := c.BlockByPoint(iter.rollbackPoint, nil)
+			if err != nil {
+				c.mutex.RUnlock()
+				return nil, err
+			}
+			iter.nextBlockIndex = tmpBlock.ID + 1
+		}
+		c.mutex.RUnlock()
+		return ret, nil
+	}
+	ret := &ChainIteratorResult{}
+	// Lookup next block in metadata DB
+	tmpBlock, err := c.blockByIndex(iter.nextBlockIndex, nil)
+	// Return immedidately if a block is found
+	if err == nil {
+		ret.Point = ocommon.NewPoint(tmpBlock.Slot, tmpBlock.Hash)
+		ret.Block = tmpBlock
+		iter.nextBlockIndex++
+		iter.lastPoint = ret.Point
+		c.mutex.RUnlock()
+		return ret, nil
+	}
+	// Return any actual error
+	if !errors.Is(err, ErrBlockNotFound) {
+		c.mutex.RUnlock()
+		return ret, err
+	}
+	// Return immediately if we're not blocking
+	if !blocking {
+		c.mutex.RUnlock()
+		return nil, ErrIteratorChainTip
+	}
+	c.mutex.RUnlock()
+	// Wait for chain update
+	c.waitingChanMutex.Lock()
+	if c.waitingChan == nil {
+		c.waitingChan = make(chan struct{})
+	}
+	c.waitingChanMutex.Unlock()
+	<-c.waitingChan
+	// Call ourselves again now that we should have new data
+	return c.iterNext(iter, blocking)
 }
