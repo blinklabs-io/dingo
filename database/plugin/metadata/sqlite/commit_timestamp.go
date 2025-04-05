@@ -44,7 +44,7 @@ func (d *MetadataStoreSqlite) GetCommitTimestamp() (int64, error) {
 		if errors.Is(result.Error, gorm.ErrRecordNotFound) {
 			return 0, nil
 		}
-		return -1, result.Error
+		return 0, result.Error
 	}
 	return tmpCommitTimestamp.Timestamp, nil
 }
