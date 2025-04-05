@@ -105,10 +105,9 @@ var (
 )
 
 func TestChainBasic(t *testing.T) {
-	eventBus := event.NewEventBus(nil)
 	c, err := chain.NewChain(
-		nil, // db
-		eventBus,
+		nil,   // db
+		nil,   // eventBus,
 		false, // persistent
 	)
 	if err != nil {
@@ -176,10 +175,9 @@ func TestChainBasic(t *testing.T) {
 }
 
 func TestChainRollback(t *testing.T) {
-	eventBus := event.NewEventBus(nil)
 	c, err := chain.NewChain(
-		nil, // db
-		eventBus,
+		nil,   // db
+		nil,   // eventBus,
 		false, // persistent
 	)
 	if err != nil {
@@ -267,10 +265,9 @@ func TestChainRollback(t *testing.T) {
 
 func TestChainHeaderRange(t *testing.T) {
 	testBlockCount := 3
-	eventBus := event.NewEventBus(nil)
 	c, err := chain.NewChain(
-		nil, // db
-		eventBus,
+		nil,   // db
+		nil,   // eventBus,
 		false, // persistent
 	)
 	if err != nil {
@@ -318,8 +315,8 @@ func TestChainHeaderBlock(t *testing.T) {
 	testBlockCount := 3
 	eventBus := event.NewEventBus(nil)
 	c, err := chain.NewChain(
-		nil, // db
-		eventBus,
+		nil,   // db
+		nil,   // eventBus,
 		false, // persistent
 	)
 	if err != nil {
@@ -347,10 +344,9 @@ func TestChainHeaderBlock(t *testing.T) {
 
 func TestChainHeaderWrongBlock(t *testing.T) {
 	testBlockCount := 3
-	eventBus := event.NewEventBus(nil)
 	c, err := chain.NewChain(
-		nil, // db
-		eventBus,
+		nil,   // db
+		nil,   // eventBus,
 		false, // persistent
 	)
 	if err != nil {
@@ -386,10 +382,9 @@ func TestChainHeaderWrongBlock(t *testing.T) {
 
 func TestChainHeaderRollback(t *testing.T) {
 	testBlockCount := 3
-	eventBus := event.NewEventBus(nil)
 	c, err := chain.NewChain(
-		nil, // db
-		eventBus,
+		nil,   // db
+		nil,   // eventBus,
 		false, // persistent
 	)
 	if err != nil {

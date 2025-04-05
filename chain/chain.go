@@ -43,6 +43,8 @@ type Chain struct {
 	lastDbBlockIndex uint64
 	blocks           []database.Block
 	headers          []ledger.BlockHeader
+	waitingChan      chan struct{}
+	waitingChanMutex sync.Mutex
 }
 
 func NewChain(
@@ -369,4 +371,63 @@ func (c *Chain) blockByIndex(blockIndex uint64, txn *database.Txn) (database.Blo
 		return database.Block{}, ErrBlockNotFound
 	}
 	return c.blocks[memBlockIndex], nil
+}
+
+func (c *Chain) iterNext(iter *ChainIterator, blocking bool) (*ChainIteratorResult, error) {
+	c.mutex.RLock()
+	// Check for pending rollback
+	if ci.needsRollback {
+		ret := &ChainIteratorResult{}
+		ret.Point = ci.rollbackPoint
+		ret.Rollback = true
+		ci.lastPoint = ci.rollbackPoint
+		ci.needsRollback = false
+		if ci.rollbackPoint.Slot > 0 {
+			// Lookup block index for rollback point
+			tmpBlock, err := ci.chain.BlockByPoint(ci.rollbackPoint, nil)
+			if err != nil {
+				ci.mutex.Unlock()
+				ci.chain.mutex.RUnlock()
+				return nil, err
+			}
+			ci.nextBlockIndex = tmpBlock.ID + 1
+		}
+		c.mutex.RUnlock()
+		return ret, nil
+	}
+	ret := &ChainIteratorResult{}
+	// Lookup next block in metadata DB
+	tmpBlock, err := ci.chain.blockByIndex(ci.nextBlockIndex, nil)
+	// Return immedidately if a block is found
+	if err == nil {
+		ret.Point = ocommon.NewPoint(tmpBlock.Slot, tmpBlock.Hash)
+		ret.Block = tmpBlock
+		ci.nextBlockIndex++
+		ci.lastPoint = ret.Point
+		c.mutex.RUnlock()
+		return ret, nil
+	}
+	// Return any actual error
+	if !errors.Is(err, ErrBlockNotFound) {
+		c.mutex.RUnlock()
+		return ret, err
+	}
+	// Return immediately if we're not blocking
+	if !blocking {
+		c.mutex.RUnlock()
+		return nil, ErrIteratorChainTip
+	}
+	c.mutex.RUnlock()
+	// Wait for chain update
+	c.waitingChanMutex.Lock()
+	if c.waitingChan == nil {
+		c.waitingChan = make(chan struct{})
+	}
+	c.waitingChanMutex.Unlock()
+	_, ok := <-ci.waitingChan
+	if !ok {
+		return nil, ErrBlockNotFound
+	}
+	// Call ourselves again now that we should have new data
+	return c.iterNext(iter, blocking)
 }
