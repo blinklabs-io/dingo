@@ -22,6 +22,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/blinklabs-io/dingo/database/plugin"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite/models"
@@ -43,9 +44,10 @@ func init() {
 
 // MetadataStoreSqlite stores all data in sqlite. Data may not be persisted
 type MetadataStoreSqlite struct {
-	dataDir string
-	db      *gorm.DB
-	logger  *slog.Logger
+	dataDir     string
+	db          *gorm.DB
+	logger      *slog.Logger
+	timerVacuum *time.Timer
 }
 
 // New creates a new database
@@ -131,7 +133,54 @@ func (d *MetadataStoreSqlite) init() error {
 	if err := d.db.Use(tracing.NewPlugin(tracing.WithoutMetrics())); err != nil {
 		return err
 	}
+	// Schedule daily database vacuum to free unused space
+	d.scheduleDailyVacuum()
 	return nil
+}
+
+func (d *MetadataStoreSqlite) runVacuum() error {
+	if d.dataDir == "" {
+		return nil
+	}
+	// Open a new connection to the DB only for vacuum
+	metadataDbPath := filepath.Join(
+		d.dataDir,
+		"metadata.sqlite",
+	)
+	db, err := gorm.Open(sqlite.Open("file:" + metadataDbPath))
+	if err != nil {
+		return err
+	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		return err
+	}
+	defer sqlDB.Close()
+	if result := db.Exec("VACUUM"); result.Error != nil {
+		return result.Error
+	}
+	return nil
+}
+
+func (d *MetadataStoreSqlite) scheduleDailyVacuum() {
+	if d.timerVacuum != nil {
+		d.timerVacuum.Stop()
+	}
+	daily := time.Duration(24) * time.Hour
+	f := func() {
+		d.logger.Debug(
+			"running vacuum on sqlite metadata database",
+		)
+		// schedule next run
+		defer d.scheduleDailyVacuum()
+		if err := d.runVacuum(); err != nil {
+			d.logger.Error(
+				"failed to free unused space in metadata store",
+				"component", "database",
+			)
+		}
+	}
+	d.timerVacuum = time.AfterFunc(daily, f)
 }
 
 // AutoMigrate wraps the gorm AutoMigrate
