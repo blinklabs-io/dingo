@@ -251,22 +251,18 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 			)
 		}
 		// Update tip
-		var recentBlocks []database.Block
-		recentBlocks, err = database.BlocksRecentTxn(txn, 1)
-		if err != nil {
-			return err
+		ls.currentTip = ochainsync.Tip{
+			Point: point,
 		}
-		if len(recentBlocks) > 0 {
-			ls.currentTip = ochainsync.Tip{
-				Point: ocommon.NewPoint(
-					recentBlocks[0].Slot,
-					recentBlocks[0].Hash,
-				),
-				BlockNumber: recentBlocks[0].Number,
-			}
-			if err = ls.db.SetTip(ls.currentTip, txn); err != nil {
+		if point.Slot > 0 {
+			rollbackBlock, err := ls.chain.BlockByPoint(point, txn)
+			if err != nil {
 				return err
 			}
+			ls.currentTip.BlockNumber = rollbackBlock.Number
+		}
+		if err = ls.db.SetTip(ls.currentTip, txn); err != nil {
+			return err
 		}
 		return nil
 	})
