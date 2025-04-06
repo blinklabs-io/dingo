@@ -142,21 +142,7 @@ func (d *MetadataStoreSqlite) runVacuum() error {
 	if d.dataDir == "" {
 		return nil
 	}
-	// Open a new connection to the DB only for vacuum
-	metadataDbPath := filepath.Join(
-		d.dataDir,
-		"metadata.sqlite",
-	)
-	db, err := gorm.Open(sqlite.Open("file:" + metadataDbPath))
-	if err != nil {
-		return err
-	}
-	sqlDB, err := db.DB()
-	if err != nil {
-		return err
-	}
-	defer sqlDB.Close()
-	if result := db.Exec("VACUUM"); result.Error != nil {
+	if result := d.DB().Raw("VACUUM"); result.Error != nil {
 		return result.Error
 	}
 	return nil
