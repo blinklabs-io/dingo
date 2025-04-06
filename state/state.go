@@ -555,7 +555,7 @@ func (ls *LedgerState) loadTip() error {
 	ls.currentTip = tmpTip
 	// Load tip block and set cached block nonce
 	if ls.currentTip.Point.Slot > 0 {
-		tipBlock, err := database.BlockByPoint(ls.db, ls.currentTip.Point)
+		tipBlock, err := ls.chain.BlockByPoint(ls.currentTip.Point, nil)
 		if err != nil {
 			return err
 		}
@@ -571,7 +571,7 @@ func (ls *LedgerState) loadTip() error {
 }
 
 func (ls *LedgerState) GetBlock(point ocommon.Point) (*database.Block, error) {
-	ret, err := database.BlockByPoint(ls.db, point)
+	ret, err := ls.chain.BlockByPoint(point, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -622,9 +622,9 @@ func (ls *LedgerState) GetIntersectPoint(
 				continue
 			}
 			// Lookup block in metadata DB
-			tmpBlock, err = database.BlockByPoint(ls.db, point)
+			tmpBlock, err = ls.chain.BlockByPoint(point, txn)
 			if err != nil {
-				if errors.Is(err, database.ErrBlockNotFound) {
+				if errors.Is(err, chain.ErrBlockNotFound) {
 					continue
 				}
 				return err
