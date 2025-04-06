@@ -215,20 +215,6 @@ func (ls *LedgerState) processBlockEvents() error {
 	return nil
 }
 
-func (ls *LedgerState) vacuumMetadata() error {
-	ls.config.Logger.Debug(
-		"vacuuming metadata database",
-		"epoch", fmt.Sprintf("%+v", ls.currentEpoch),
-		"component", "ledger",
-	)
-	// Start a transaction
-	txn := ls.db.Transaction(true)
-	if result := txn.Metadata().Raw("VACUUM"); result.Error != nil {
-		return result.Error
-	}
-	return nil
-}
-
 func (ls *LedgerState) processGenesisBlock(
 	txn *database.Txn,
 	point ocommon.Point,
@@ -427,13 +413,6 @@ func (ls *LedgerState) processEpochRollover(
 			"epoch", fmt.Sprintf("%+v", newEpoch),
 			"component", "ledger",
 		)
-		if err := ls.vacuumMetadata(); err != nil {
-			ls.config.Logger.Error(
-				"failed to vacuum database",
-				"epoch", fmt.Sprintf("%+v", newEpoch),
-				"component", "ledger",
-			)
-		}
 	}
 	return nil
 }

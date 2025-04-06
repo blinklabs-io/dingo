@@ -16,6 +16,7 @@ package sqlite
 
 import (
 	"errors"
+	"strconv"
 
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite/models"
 	"gorm.io/gorm"
@@ -87,6 +88,14 @@ func (d *MetadataStoreSqlite) SetEpoch(
 		if result := d.DB().Create(&tmpItem); result.Error != nil {
 			return result.Error
 		}
+	}
+	// Run a vacuum, on error only log
+	if err := d.runVacuum(); err != nil {
+		d.logger.Error(
+			"failed to free space in metdata store",
+			"epoch", strconv.FormatUint(epoch, 10),
+			"error", err,
+		)
 	}
 	return nil
 }
