@@ -89,6 +89,7 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 	// Init metrics
 	ls.metrics.init(ls.config.PromRegistry)
 	// Load database
+	needsRecovery := false
 	db, err := database.New(cfg.Logger, cfg.DataDir)
 	if db == nil {
 		ls.config.Logger.Error(
@@ -107,16 +108,13 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 			return nil, err
 		}
 		ls.config.Logger.Warn(
-			"database initialization error",
+			"database initialization error, needs recovery",
 			"error",
 			err,
 			"component",
 			"ledger",
 		)
-		// Run recovery
-		if err := ls.recoverCommitTimestampConflict(); err != nil {
-			return nil, err
-		}
+		needsRecovery = true
 	}
 	// Load chain
 	chain, err := chain.NewChain(
@@ -128,6 +126,12 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 		return nil, err
 	}
 	ls.chain = chain
+	// Run recovery if needed
+	if needsRecovery {
+		if err := ls.recoverCommitTimestampConflict(); err != nil {
+			return nil, fmt.Errorf("failed to recover database: %w", err)
+		}
+	}
 	// Setup event handlers
 	ls.config.EventBus.SubscribeFunc(
 		ChainsyncEventType,
@@ -157,38 +161,24 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 }
 
 func (ls *LedgerState) recoverCommitTimestampConflict() error {
-	// Load current tip
+	// Load current ledger tip
 	tmpTip, err := ls.db.GetTip(nil)
 	if err != nil {
 		return err
 	}
-	// Try to load last n blocks and rollback to the last one we can load
-	recentBlocks, err := database.BlocksRecent(ls.db, 100)
+	// Check if we can lookup tip block in chain
+	_, err = ls.chain.BlockByPoint(tmpTip.Point, nil)
 	if err != nil {
-		return err
-	}
-	var tmpBlock database.Block
-	for _, tmpBlock = range recentBlocks {
-		blockPoint := ocommon.NewPoint(
-			tmpBlock.Slot,
-			tmpBlock.Hash,
-		)
-		// Nothing to do if current tip is earlier than our latest block
-		if tmpTip.Point.Slot <= tmpBlock.Slot {
-			break
-		}
-		// Rollback block if current tip is ahead
-		if tmpTip.Point.Slot > tmpBlock.Slot {
-			if err2 := ls.rollback(blockPoint); err2 != nil {
-				return fmt.Errorf(
-					"failed to rollback: %w",
-					err2,
-				)
-			}
-			return nil
+		// Rollback to raw chain tip on error
+		chainTip := ls.chain.Tip()
+		if err = ls.rollback(chainTip.Point); err != nil {
+			return fmt.Errorf(
+				"failed to rollback ledger: %w",
+				err,
+			)
 		}
 	}
-	return errors.New("failed to recover database")
+	return nil
 }
 
 func (ls *LedgerState) Close() error {
