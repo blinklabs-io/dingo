@@ -85,6 +85,13 @@ func (n *Node) Run() error {
 	if err != nil {
 		return fmt.Errorf("failed to load state database: %w", err)
 	}
+	// Add shutdown cleanup for ledger/database
+	n.shutdownFuncs = append(
+		n.shutdownFuncs,
+		func(_ context.Context) error {
+			return state.Close()
+		},
+	)
 	n.ledgerState = state
 	// Initialize mempool
 	n.mempool = mempool.NewMempool(
@@ -139,7 +146,6 @@ func (n *Node) Run() error {
 }
 
 func (n *Node) Stop() error {
-	// TODO: use a cancelable context and wait for it above to call shutdown (#72)
 	return n.shutdown()
 }
 
