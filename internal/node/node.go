@@ -15,11 +15,14 @@
 package node
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"net/http"
 	_ "net/http/pprof" // #nosec G108
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/blinklabs-io/dingo"
@@ -150,6 +153,22 @@ func Run(logger *slog.Logger) error {
 			os.Exit(1)
 		}
 	}()
+	// Wait for interrupt/termination signal
+	signalCtx, signalCtxStop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer signalCtxStop()
+	go func() {
+		<-signalCtx.Done()
+		logger.Info("signal received, shutting down")
+		if err := d.Stop(); err != nil { // nolint:contextcheck
+			logger.Error(
+				"failure(s) while shutting down",
+				"error",
+				err,
+			)
+		}
+		os.Exit(0)
+	}()
+	// Run node
 	if err := d.Run(); err != nil {
 		return err
 	}
