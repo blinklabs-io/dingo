@@ -220,6 +220,34 @@ func (c *Chain) AddBlock(block ledger.Block, blockNonce []byte, txn *database.Tx
 	return nil
 }
 
+func (c *Chain) AddBlocks(blocks []ledger.Block) error {
+	batchOffset := 0
+	batchSize := 0
+	for {
+		batchSize = min(
+			50,
+			len(blocks)-batchOffset,
+		)
+		if batchSize == 0 {
+			break
+		}
+		txn := c.db.BlobTxn(true)
+		err := txn.Do(func(txn *database.Txn) error {
+			for _, tmpBlock := range blocks[batchOffset : batchOffset+batchSize] {
+				if err := c.AddBlock(tmpBlock, nil, txn); err != nil {
+					return err
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+		batchOffset += batchSize
+	}
+	return nil
+}
+
 func (c *Chain) Rollback(point ocommon.Point) error {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
