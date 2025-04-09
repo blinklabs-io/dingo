@@ -181,6 +181,10 @@ func (ls *LedgerState) recoverCommitTimestampConflict() error {
 	return nil
 }
 
+func (ls *LedgerState) Chain() *chain.Chain {
+	return ls.chain
+}
+
 func (ls *LedgerState) Close() error {
 	return ls.db.Close()
 }
