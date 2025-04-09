@@ -18,14 +18,15 @@ import (
 	"log/slog"
 	"os"
 
+	"github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/internal/node"
 	"github.com/spf13/cobra"
 )
 
-func serveRun(_ *cobra.Command, _ []string) {
+func serveRun(_ *cobra.Command, _ []string, cfg *config.Config) {
 	logger := commonRun()
 	// Run node
-	if err := node.Run(logger); err != nil {
+	if err := node.Run(cfg, logger); err != nil {
 		slog.Error(err.Error())
 		os.Exit(1)
 	}
@@ -36,7 +37,12 @@ func serveCommand() *cobra.Command {
 		Use:   "serve",
 		Short: "Run as a node",
 		Run: func(cmd *cobra.Command, args []string) {
-			serveRun(cmd, args)
+			cfg := config.FromContext(cmd.Context())
+			if cfg == nil {
+				slog.Error("no config found in context")
+				os.Exit(1)
+			}
+			serveRun(cmd, args, cfg)
 		},
 	}
 	return cmd
