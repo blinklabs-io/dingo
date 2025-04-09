@@ -19,6 +19,7 @@ import (
 	"log/slog"
 	"os"
 
+	"github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/internal/node"
 	"github.com/blinklabs-io/dingo/internal/version"
 	"github.com/spf13/cobra"
@@ -41,9 +42,17 @@ func main() {
 		debug   bool
 	}{}
 
+	var configFile string
+
 	rootCmd := &cobra.Command{
 		Use: programName,
 		Run: func(cmd *cobra.Command, args []string) {
+			cfg, err1 := config.LoadConfig(configFile)
+			if err1 != nil {
+				fmt.Errorf("failed to load config", "error", err1)
+				os.Exit(1)
+			}
+
 			if globalFlags.version {
 				fmt.Printf("%s %s\n", programName, version.GetVersionString())
 				os.Exit(0)
@@ -74,7 +83,7 @@ func main() {
 				"version: "+version.GetVersionString(),
 				"component", programName,
 			)
-			if err := node.Run(logger); err != nil {
+			if err := node.Run(cfg, logger); err != nil {
 				slog.Error(err.Error())
 				os.Exit(1)
 			}
@@ -86,6 +95,8 @@ func main() {
 		BoolVarP(&globalFlags.debug, "debug", "D", false, "enable debug logging")
 	rootCmd.PersistentFlags().
 		BoolVarP(&globalFlags.version, "version", "", false, "show version and exit")
+	rootCmd.PersistentFlags().
+		StringVar(&configFile, "config", "", "path to config file")
 
 	// Execute cobra command
 	if err := rootCmd.Execute(); err != nil {
