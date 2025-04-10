@@ -109,8 +109,15 @@ testing, so success/failure reports are very welcome and encouraged!
     - [x] Stake registration/delegation
     - [ ] Governance
   - [ ] Transaction validation
-    - [x] UTxO rules
-    - [ ] Smart contracts
+    - [ ] Phase 1 validation
+      - [x] UTxO rules
+      - [ ] Witnesses
+      - [ ] Block body
+      - [ ] Certificates
+      - [ ] Delegation/pools
+      - [ ] Governance
+    - [ ] Phase 2 validation
+      - [ ] Smart contracts
 - [x] Mempool
   - [x] Accept transactions from local clients
   - [x] Distribute transactions to other nodes
