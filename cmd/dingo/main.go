@@ -19,6 +19,7 @@ import (
 	"log/slog"
 	"os"
 
+	"github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/internal/version"
 	"github.com/spf13/cobra"
 	"go.uber.org/automaxprocs/maxprocs"
@@ -34,10 +35,13 @@ func slogPrintf(format string, v ...any) {
 	)
 }
 
-var globalFlags struct {
-	version bool
-	debug   bool
-}
+var (
+	globalFlags = struct {
+		version bool
+		debug   bool
+	}{}
+	configFile string
+)
 
 func commonRun() *slog.Logger {
 	if globalFlags.version {
@@ -76,7 +80,12 @@ func main() {
 	rootCmd := &cobra.Command{
 		Use: programName,
 		Run: func(cmd *cobra.Command, args []string) {
-			serveRun(cmd, args)
+			cfg := config.FromContext(cmd.Context())
+			if cfg == nil {
+				slog.Error("no config found in context")
+				os.Exit(1)
+			}
+			serveRun(cmd, args, cfg)
 		},
 	}
 
@@ -85,6 +94,17 @@ func main() {
 		BoolVarP(&globalFlags.debug, "debug", "D", false, "enable debug logging")
 	rootCmd.PersistentFlags().
 		BoolVarP(&globalFlags.version, "version", "", false, "show version and exit")
+	rootCmd.PersistentFlags().
+		StringVar(&configFile, "config", "", "path to config file")
+
+	rootCmd.PersistentPreRunE = func(cmd *cobra.Command, args []string) error {
+		cfg, err := config.LoadConfig(configFile)
+		if err != nil {
+			return fmt.Errorf("failed to load config: %w", err)
+		}
+		cmd.SetContext(config.WithContext(cmd.Context(), cfg))
+		return nil
+	}
 
 	// Subcommands
 	rootCmd.AddCommand(serveCommand())
