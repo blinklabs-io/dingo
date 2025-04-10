@@ -109,7 +109,6 @@ func main() {
 	// Execute cobra command
 	if err := rootCmd.Execute(); err != nil {
 		// NOTE: we purposely don't display the error, since cobra will have already displayed it
-		fmt.Println(config.GetConfig())
 		os.Exit(1)
 	}
 
