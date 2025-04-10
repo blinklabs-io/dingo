@@ -81,6 +81,10 @@ func main() {
 		Use: programName,
 		Run: func(cmd *cobra.Command, args []string) {
 			cfg := config.FromContext(cmd.Context())
+			if cfg == nil {
+				slog.Error("no config found in context")
+				os.Exit(1)
+			}
 			serveRun(cmd, args, cfg)
 		},
 	}
