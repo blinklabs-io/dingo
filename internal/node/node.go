@@ -32,11 +32,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
-func Run(logger *slog.Logger) error {
-	cfg, err := config.LoadConfig()
-	if err != nil {
-		return err
-	}
+func Run(cfg *config.Config, logger *slog.Logger) error {
 	logger.Debug(fmt.Sprintf("config: %+v", cfg), "component", "node")
 	logger.Debug(
 		fmt.Sprintf("topology: %+v", config.GetTopologyConfig()),

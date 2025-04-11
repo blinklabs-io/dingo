@@ -15,28 +15,47 @@
 package config
 
 import (
+	"context"
 	"fmt"
+	"os"
 
 	"github.com/blinklabs-io/dingo/topology"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/kelseyhightower/envconfig"
+	"gopkg.in/yaml.v3"
 )
 
+type ctxKey string
+
+const configContextKey ctxKey = "dingo.config"
+
+func WithContext(ctx context.Context, cfg *Config) context.Context {
+	return context.WithValue(ctx, configContextKey, cfg)
+}
+
+func FromContext(ctx context.Context) *Config {
+	cfg, ok := ctx.Value(configContextKey).(*Config)
+	if !ok {
+		return nil
+	}
+	return cfg
+}
+
 type Config struct {
-	BindAddr        string `split_words:"true"`
-	CardanoConfig   string `                   envconfig:"config"`
-	DatabasePath    string `split_words:"true"`
-	SocketPath      string `split_words:"true"`
-	Network         string
-	TlsCertFilePath string `envconfig:"TLS_CERT_FILE_PATH"`
-	TlsKeyFilePath  string `envconfig:"TLS_KEY_FILE_PATH"`
-	Topology        string
-	MetricsPort     uint   `split_words:"true"`
-	PrivateBindAddr string `split_words:"true"`
-	PrivatePort     uint   `split_words:"true"`
-	RelayPort       uint   `envconfig:"port"`
-	UtxorpcPort     uint   `split_words:"true"`
-	IntersectTip    bool   `split_words:"true"`
+	BindAddr        string `yaml:"bindAddr" split_words:"true"`
+	CardanoConfig   string `yaml:"cardanoConfig" envconfig:"config"`
+	DatabasePath    string `yaml:"databasePath" split_words:"true"`
+	SocketPath      string `yaml:"socketPath" split_words:"true"`
+	Network         string `yaml:"network"`
+	TlsCertFilePath string `yaml:"tlsCertFilePath" envconfig:"TLS_CERT_FILE_PATH"`
+	TlsKeyFilePath  string `yaml:"tlsKeyFilePath" envconfig:"TLS_KEY_FILE_PATH"`
+	Topology        string `yaml:"topology"`
+	MetricsPort     uint   `yaml:"metricsPort" split_words:"true"`
+	PrivateBindAddr string `yaml:"privateBindAddr" split_words:"true"`
+	PrivatePort     uint   `yaml:"privatePort" split_words:"true"`
+	RelayPort       uint   `yaml:"relayPort" envconfig:"port"`
+	UtxorpcPort     uint   `yaml:"utxorpcPort" split_words:"true"`
+	IntersectTip    bool   `yaml:"intersectTip" split_words:"true"`
 }
 
 var globalConfig = &Config{
@@ -56,7 +75,21 @@ var globalConfig = &Config{
 	TlsKeyFilePath:  "",
 }
 
-func LoadConfig() (*Config, error) {
+func LoadConfig(configFile string) (*Config, error) {
+	// Load config file as YAML if provided
+	fmt.Println(configFile)
+	if configFile != "" {
+		fmt.Printf("Reading from config file %s\n", configFile)
+		buf, err := os.ReadFile(configFile)
+		if err != nil {
+			return nil, fmt.Errorf("error reading config file: %w", err)
+		}
+		err = yaml.Unmarshal(buf, globalConfig)
+		if err != nil {
+			return nil, fmt.Errorf("error parsing config file: %w", err)
+		}
+		fmt.Printf("Successfully loaded the config file %s\n", configFile)
+	}
 	err := envconfig.Process("cardano", globalConfig)
 	if err != nil {
 		return nil, fmt.Errorf("error processing environment: %+w", err)

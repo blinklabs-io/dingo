@@ -18,17 +18,18 @@ import (
 	"log/slog"
 	"os"
 
+	"github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/internal/node"
 	"github.com/spf13/cobra"
 )
 
-func loadRun(_ *cobra.Command, args []string) {
+func loadRun(_ *cobra.Command, args []string, cfg *config.Config) {
 	if len(args) != 1 {
 		slog.Error("you must provide the path to an ImmutableDB")
 		os.Exit(1)
 	}
 	logger := commonRun()
-	if err := node.Load(logger, args[0]); err != nil {
+	if err := node.Load(cfg, logger, args[0]); err != nil {
 		slog.Error(err.Error())
 		os.Exit(1)
 	}
@@ -39,7 +40,12 @@ func loadCommand() *cobra.Command {
 		Use:   "load db-path",
 		Short: "Load blocks from ImmutableDB",
 		Run: func(cmd *cobra.Command, args []string) {
-			loadRun(cmd, args)
+			cfg := config.FromContext(cmd.Context())
+			if cfg == nil {
+				slog.Error("no config found in context")
+				os.Exit(1)
+			}
+			loadRun(cmd, args, cfg)
 		},
 	}
 	return cmd

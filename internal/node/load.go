@@ -28,11 +28,7 @@ import (
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 )
 
-func Load(logger *slog.Logger, immutableDir string) error {
-	cfg, err := config.LoadConfig()
-	if err != nil {
-		return err
-	}
+func Load(cfg *config.Config, logger *slog.Logger, immutableDir string) error {
 	var nodeCfg *cardano.CardanoNodeConfig
 	if cfg.CardanoConfig != "" {
 		tmpCfg, err := cardano.NewCardanoNodeConfigFromFile(cfg.CardanoConfig)
