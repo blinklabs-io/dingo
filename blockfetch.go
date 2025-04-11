@@ -19,9 +19,9 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/event"
-	"github.com/blinklabs-io/dingo/state"
+	"github.com/blinklabs-io/dingo/ledger"
 	ouroboros "github.com/blinklabs-io/gouroboros"
-	"github.com/blinklabs-io/gouroboros/ledger"
+	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/protocol/blockfetch"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
@@ -106,14 +106,14 @@ func (n *Node) blockfetchClientRequestRange(
 func (n *Node) blockfetchClientBlock(
 	ctx blockfetch.CallbackContext,
 	blockType uint,
-	block ledger.Block,
+	block gledger.Block,
 ) error {
 	// Generate event
 	n.eventBus.Publish(
-		state.BlockfetchEventType,
+		ledger.BlockfetchEventType,
 		event.NewEvent(
-			state.BlockfetchEventType,
-			state.BlockfetchEvent{
+			ledger.BlockfetchEventType,
+			ledger.BlockfetchEvent{
 				Point: ocommon.NewPoint(block.SlotNumber(), block.Hash().Bytes()),
 				Type:  blockType,
 				Block: block,
@@ -128,10 +128,10 @@ func (n *Node) blockfetchClientBatchDone(
 ) error {
 	// Generate event
 	n.eventBus.Publish(
-		state.BlockfetchEventType,
+		ledger.BlockfetchEventType,
 		event.NewEvent(
-			state.BlockfetchEventType,
-			state.BlockfetchEvent{
+			ledger.BlockfetchEventType,
+			ledger.BlockfetchEvent{
 				ConnectionId: ctx.ConnectionId,
 				BatchDone:    true,
 			},

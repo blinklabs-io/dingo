@@ -23,9 +23,9 @@ import (
 	"github.com/blinklabs-io/dingo/chainsync"
 	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/mempool"
 	"github.com/blinklabs-io/dingo/peergov"
-	"github.com/blinklabs-io/dingo/state"
 	"github.com/blinklabs-io/dingo/utxorpc"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	oblockfetch "github.com/blinklabs-io/gouroboros/protocol/blockfetch"
@@ -44,7 +44,7 @@ type Node struct {
 	chainsyncState *chainsync.State
 	eventBus       *event.EventBus
 	mempool        *mempool.Mempool
-	ledgerState    *state.LedgerState
+	ledgerState    *ledger.LedgerState
 	utxorpc        *utxorpc.Utxorpc
 	shutdownFuncs  []func(context.Context) error
 }
@@ -72,8 +72,8 @@ func (n *Node) Run() error {
 		}
 	}
 	// Load state
-	state, err := state.NewLedgerState(
-		state.LedgerStateConfig{
+	state, err := ledger.NewLedgerState(
+		ledger.LedgerStateConfig{
 			DataDir:                    n.config.dataDir,
 			EventBus:                   n.eventBus,
 			Logger:                     n.config.logger,

@@ -24,8 +24,8 @@ import (
 	"github.com/blinklabs-io/dingo/database/immutable"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/config"
-	"github.com/blinklabs-io/dingo/state"
-	"github.com/blinklabs-io/gouroboros/ledger"
+	"github.com/blinklabs-io/dingo/ledger"
+	gledger "github.com/blinklabs-io/gouroboros/ledger"
 )
 
 func Load(logger *slog.Logger, immutableDir string) error {
@@ -50,8 +50,8 @@ func Load(logger *slog.Logger, immutableDir string) error {
 	}
 	// Load state
 	eventBus := event.NewEventBus(nil)
-	ls, err := state.NewLedgerState(
-		state.LedgerStateConfig{
+	ls, err := ledger.NewLedgerState(
+		ledger.LedgerStateConfig{
 			DataDir:           cfg.DatabasePath,
 			Logger:            logger,
 			CardanoNodeConfig: nodeCfg,
@@ -80,7 +80,7 @@ func Load(logger *slog.Logger, immutableDir string) error {
 		return fmt.Errorf("failed to get immutable DB iterator: %w", err)
 	}
 	var blocksCopied int
-	blockBatch := make([]ledger.Block, 0, 500)
+	blockBatch := make([]gledger.Block, 0, 500)
 	for {
 		for {
 			next, err := iter.Next()
@@ -91,7 +91,7 @@ func Load(logger *slog.Logger, immutableDir string) error {
 			if next == nil {
 				break
 			}
-			tmpBlock, err := ledger.NewBlockFromCbor(next.Type, next.Cbor)
+			tmpBlock, err := gledger.NewBlockFromCbor(next.Type, next.Cbor)
 			if err != nil {
 				return err
 			}

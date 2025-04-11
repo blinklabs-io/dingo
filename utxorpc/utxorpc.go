@@ -25,8 +25,8 @@ import (
 	"connectrpc.com/grpchealth"
 	"connectrpc.com/grpcreflect"
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/mempool"
-	"github.com/blinklabs-io/dingo/state"
 	"github.com/utxorpc/go-codegen/utxorpc/v1alpha/query/queryconnect"
 	"github.com/utxorpc/go-codegen/utxorpc/v1alpha/submit/submitconnect"
 	"github.com/utxorpc/go-codegen/utxorpc/v1alpha/sync/syncconnect"
@@ -42,7 +42,7 @@ type Utxorpc struct {
 type UtxorpcConfig struct {
 	Logger          *slog.Logger
 	EventBus        *event.EventBus
-	LedgerState     *state.LedgerState
+	LedgerState     *ledger.LedgerState
 	Mempool         *mempool.Mempool
 	Host            string
 	Port            uint
