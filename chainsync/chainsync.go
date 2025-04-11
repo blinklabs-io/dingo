@@ -19,7 +19,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/event"
-	"github.com/blinklabs-io/dingo/state"
+	"github.com/blinklabs-io/dingo/ledger"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/connection"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -34,14 +34,14 @@ type ChainsyncClientState struct {
 type State struct {
 	sync.Mutex
 	eventBus     *event.EventBus
-	ledgerState  *state.LedgerState
+	ledgerState  *ledger.LedgerState
 	clients      map[ouroboros.ConnectionId]*ChainsyncClientState
 	clientConnId *ouroboros.ConnectionId // TODO: replace with handling of multiple chainsync clients (#385)
 }
 
 func NewState(
 	eventBus *event.EventBus,
-	ledgerState *state.LedgerState,
+	ledgerState *ledger.LedgerState,
 ) *State {
 	s := &State{
 		eventBus:    eventBus,

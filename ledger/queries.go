@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package state
+package ledger
 
 import (
 	"errors"
@@ -20,7 +20,7 @@ import (
 	"math/big"
 
 	"github.com/blinklabs-io/dingo/database"
-	"github.com/blinklabs-io/dingo/state/eras"
+	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
