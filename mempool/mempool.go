@@ -23,9 +23,9 @@ import (
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/event"
-	"github.com/blinklabs-io/dingo/state"
+	"github.com/blinklabs-io/dingo/ledger"
 	ouroboros "github.com/blinklabs-io/gouroboros"
-	"github.com/blinklabs-io/gouroboros/ledger"
+	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 )
@@ -56,7 +56,7 @@ type Mempool struct {
 	sync.RWMutex
 	logger         *slog.Logger
 	eventBus       *event.EventBus
-	ledgerState    *state.LedgerState
+	ledgerState    *ledger.LedgerState
 	consumers      map[ouroboros.ConnectionId]*MempoolConsumer
 	consumersMutex sync.Mutex
 	transactions   []*MempoolTransaction
@@ -71,7 +71,7 @@ func NewMempool(
 	logger *slog.Logger,
 	eventBus *event.EventBus,
 	promRegistry prometheus.Registerer,
-	ledgerState *state.LedgerState,
+	ledgerState *ledger.LedgerState,
 ) *Mempool {
 	m := &Mempool{
 		eventBus:    eventBus,
@@ -153,7 +153,7 @@ func (m *Mempool) processChainEvents() {
 		for i := len(m.transactions) - 1; i >= 0; i-- {
 			tx := m.transactions[i]
 			// Decode transaction
-			tmpTx, err := ledger.NewTransactionFromCbor(tx.Type, tx.Cbor)
+			tmpTx, err := gledger.NewTransactionFromCbor(tx.Type, tx.Cbor)
 			if err != nil {
 				m.removeTransactionByIndex(i)
 				m.logger.Error(
@@ -181,7 +181,7 @@ func (m *Mempool) processChainEvents() {
 
 func (m *Mempool) AddTransaction(txType uint, txBytes []byte) error {
 	// Decode transaction
-	tmpTx, err := ledger.NewTransactionFromCbor(txType, txBytes)
+	tmpTx, err := gledger.NewTransactionFromCbor(txType, txBytes)
 	if err != nil {
 		return err
 	}
