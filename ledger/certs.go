@@ -35,7 +35,7 @@ func (ls *LedgerState) processTransactionCertificates(
 			ls.currentPParams,
 		)
 		if err != nil {
-			return err
+			return fmt.Errorf("get certificate deposit: %w", err)
 		}
 		switch cert := tmpCert.(type) {
 		case *lcommon.DeregistrationCertificate:

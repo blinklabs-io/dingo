@@ -19,6 +19,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite/models"
+	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
@@ -34,6 +35,10 @@ type MetadataStore interface {
 	Transaction() *gorm.DB
 
 	// Ledger state
+	AddUtxos(
+		[]types.UtxoSlot,
+		*gorm.DB,
+	) error
 	GetPoolRegistrations(
 		lcommon.PoolKeyHash,
 		*gorm.DB,

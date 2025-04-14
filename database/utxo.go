@@ -19,6 +19,7 @@ import (
 	"math/big"
 	"slices"
 
+	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/dgraph-io/badger/v4"
 )
@@ -81,6 +82,28 @@ func (d *Database) NewUtxo(
 		slot,
 		paymentKey,
 		stakeKey,
+		txn.Metadata(),
+	)
+}
+
+func (d *Database) AddUtxos(
+	utxos []types.UtxoSlot,
+	txn *Txn,
+) error {
+	if txn == nil {
+		txn = d.Transaction(false)
+		defer txn.Commit() //nolint:errcheck
+	}
+	for _, utxoSlot := range utxos {
+		// Add UTxO to blob DB
+		key := UtxoBlobKey(utxoSlot.Utxo.Id.Id().Bytes(), utxoSlot.Utxo.Id.Index())
+		err := txn.Blob().Set(key, utxoSlot.Utxo.Output.Cbor())
+		if err != nil {
+			return err
+		}
+	}
+	return d.metadata.AddUtxos(
+		utxos,
 		txn.Metadata(),
 	)
 }
