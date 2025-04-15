@@ -295,3 +295,37 @@ func (d *MetadataStoreSqlite) SetStakeRegistration(
 	}
 	return nil
 }
+
+// SetRegistration saves a registration certificate
+func (d *MetadataStoreSqlite) SetRegistration(
+	cert *lcommon.RegistrationCertificate,
+	slot, deposit uint64,
+	txn *gorm.DB,
+) error {
+	tmpAccount := models.Account{
+		StakingKey:    cert.StakeCredential.Credential.Bytes(),
+		AddedSlot:     slot,
+		DepositAmount: deposit,
+	}
+	tmpItem := models.Registration{
+		StakingKey:    cert.StakeCredential.Credential.Bytes(),
+		AddedSlot:     slot,
+		DepositAmount: deposit,
+	}
+	if txn != nil {
+		if accountResult := txn.Create(&tmpAccount); accountResult.Error != nil {
+			return accountResult.Error
+		}
+		if result := txn.Create(&tmpItem); result.Error != nil {
+			return result.Error
+		}
+	} else {
+		if accountResult := d.DB().Create(&tmpAccount); accountResult.Error != nil {
+			return accountResult.Error
+		}
+		if result := d.DB().Create(&tmpItem); result.Error != nil {
+			return result.Error
+		}
+	}
+	return nil
+}
