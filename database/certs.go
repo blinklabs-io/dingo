@@ -52,6 +52,15 @@ func (d *Database) SetPoolRetirement(
 	return d.metadata.SetPoolRetirement(cert, slot, txn.Metadata())
 }
 
+// SetRegistration saves a registration certificate
+func (d *Database) SetRegistration(
+	cert *lcommon.RegistrationCertificate,
+	slot, deposit uint64,
+	txn *Txn,
+) error {
+	return d.metadata.SetRegistration(cert, slot, deposit, txn.Metadata())
+}
+
 // SetStakeDelegation saves a stake delegation certificate
 func (d *Database) SetStakeDelegation(
 	cert *lcommon.StakeDelegationCertificate,

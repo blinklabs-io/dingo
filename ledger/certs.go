@@ -1,4 +1,4 @@
-// Copyright 2024 Blink Labs Software
+// Copyright 2025 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -51,6 +51,16 @@ func (ls *LedgerState) processTransactionCertificates(
 			err := ls.db.SetPoolRetirement(
 				cert,
 				blockPoint.Slot,
+				txn,
+			)
+			if err != nil {
+				return err
+			}
+		case *lcommon.RegistrationCertificate:
+			err := ls.db.SetRegistration(
+				cert,
+				blockPoint.Slot,
+				certDeposit,
 				txn,
 			)
 			if err != nil {

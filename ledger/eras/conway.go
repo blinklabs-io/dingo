@@ -132,6 +132,8 @@ func CertDepositConway(
 	switch cert.(type) {
 	case *lcommon.PoolRegistrationCertificate:
 		return uint64(tmpPparams.PoolDeposit), nil
+	case *lcommon.RegistrationCertificate:
+		return uint64(tmpPparams.KeyDeposit), nil
 	case *lcommon.StakeRegistrationCertificate:
 		return uint64(tmpPparams.KeyDeposit), nil
 	default:
