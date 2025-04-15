@@ -100,7 +100,7 @@ func (n *Node) chainsyncServerFindIntersect(
 	retTip = n.ledgerState.Tip()
 
 	if intersectPoint == nil {
-		return retPoint, retTip, ochainsync.IntersectNotFoundError
+		return retPoint, retTip, ochainsync.ErrIntersectNotFound
 	}
 
 	// Add our client to the chainsync state
