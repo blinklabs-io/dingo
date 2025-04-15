@@ -268,16 +268,27 @@ func (d *MetadataStoreSqlite) SetStakeRegistration(
 	slot, deposit uint64,
 	txn *gorm.DB,
 ) error {
+	tmpAccount := models.Account{
+		StakingKey:    cert.StakeRegistration.Credential.Bytes(),
+		AddedSlot:     slot,
+		DepositAmount: deposit,
+	}
 	tmpItem := models.StakeRegistration{
 		StakingKey:    cert.StakeRegistration.Credential.Bytes(),
 		AddedSlot:     slot,
 		DepositAmount: deposit,
 	}
 	if txn != nil {
+		if accountResult := txn.Create(&tmpAccount); accountResult.Error != nil {
+			return accountResult.Error
+		}
 		if result := txn.Create(&tmpItem); result.Error != nil {
 			return result.Error
 		}
 	} else {
+		if accountResult := d.DB().Create(&tmpAccount); accountResult.Error != nil {
+			return accountResult.Error
+		}
 		if result := d.DB().Create(&tmpItem); result.Error != nil {
 			return result.Error
 		}
