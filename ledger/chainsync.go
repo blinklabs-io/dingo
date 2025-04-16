@@ -215,59 +215,12 @@ func (ls *LedgerState) processBlockEvents() error {
 	return nil
 }
 
-func (ls *LedgerState) processGenesisBlock(
-	txn *database.Txn,
-	point ocommon.Point,
-	block ledger.Block,
-) error {
-	if ls.currentEpoch.ID == 0 {
-		// Check for era change
-		if uint(block.Era().Id) != ls.currentEra.Id {
-			targetEraId := uint(block.Era().Id)
-			// Transition through every era between the current and the target era
-			for nextEraId := ls.currentEra.Id + 1; nextEraId <= targetEraId; nextEraId++ {
-				if err := ls.transitionToEra(txn, nextEraId, ls.currentEpoch.EpochId, point.Slot); err != nil {
-					return err
-				}
-			}
-		}
-		// Create initial epoch record
-		epochSlotLength, epochLength, err := ls.currentEra.EpochLengthFunc(
-			ls.config.CardanoNodeConfig,
-		)
-		if err != nil {
-			return err
-		}
-		// Use Shelley genesis hash for initial epoch nonce for post-Byron eras
-		var tmpNonce []byte
-		if ls.currentEra.Id > 0 { // Byron
-			genesisHashBytes, _ := hex.DecodeString(
-				ls.config.CardanoNodeConfig.ShelleyGenesisHash,
-			)
-			tmpNonce = genesisHashBytes
-		}
-		err = ls.db.SetEpoch(
-			0,
-			0,
-			tmpNonce,
-			ls.currentEra.Id,
-			epochSlotLength,
-			epochLength,
-			txn,
-		)
-		if err != nil {
-			return err
-		}
-		newEpoch, err := ls.db.GetEpochLatest(txn)
-		if err != nil {
-			return err
-		}
-		ls.currentEpoch = newEpoch
-		ls.config.Logger.Debug(
-			"added initial epoch to DB",
-			"epoch", fmt.Sprintf("%+v", newEpoch),
-			"component", "ledger",
-		)
+func (ls *LedgerState) createGenesisBlock() error {
+	if ls.currentEpoch.SlotLength > 0 {
+		return nil
+	}
+	txn := ls.db.Transaction(true)
+	err := txn.Do(func(txn *database.Txn) error {
 		// Record genesis UTxOs
 		byronGenesis := ls.config.CardanoNodeConfig.ByronGenesis()
 		genesisUtxos, err := byronGenesis.GenesisUtxos()
@@ -293,8 +246,9 @@ func (ls *LedgerState) processGenesisBlock(
 				return fmt.Errorf("add genesis UTxO: %w", err)
 			}
 		}
-	}
-	return nil
+		return nil
+	})
+	return err
 }
 
 func (ls *LedgerState) calculateEpochNonce(
@@ -357,8 +311,44 @@ func (ls *LedgerState) calculateEpochNonce(
 func (ls *LedgerState) processEpochRollover(
 	txn *database.Txn,
 	point ocommon.Point,
-	block ledger.Block,
 ) error {
+	// Create initial epoch
+	if ls.currentEpoch.SlotLength == 0 {
+		// Create initial epoch record
+		epochSlotLength, epochLength, err := ls.currentEra.EpochLengthFunc(
+			ls.config.CardanoNodeConfig,
+		)
+		if err != nil {
+			return err
+		}
+		tmpNonce, err := ls.calculateEpochNonce(txn, 0)
+		if err != nil {
+			return err
+		}
+		err = ls.db.SetEpoch(
+			0, // start slot
+			0, // epoch
+			tmpNonce,
+			ls.currentEra.Id,
+			epochSlotLength,
+			epochLength,
+			txn,
+		)
+		if err != nil {
+			return err
+		}
+		newEpoch, err := ls.db.GetEpochLatest(txn)
+		if err != nil {
+			return err
+		}
+		ls.currentEpoch = newEpoch
+		ls.metrics.epochNum.Set(float64(newEpoch.EpochId))
+		ls.config.Logger.Debug(
+			"added initial epoch to DB",
+			"epoch", fmt.Sprintf("%+v", newEpoch),
+			"component", "ledger",
+		)
+	}
 	// Check for epoch rollover
 	if point.Slot > ls.currentEpoch.StartSlot+uint64(
 		ls.currentEpoch.LengthInSlots,
@@ -394,7 +384,7 @@ func (ls *LedgerState) processEpochRollover(
 			epochStartSlot,
 			ls.currentEpoch.EpochId+1,
 			tmpNonce,
-			uint(block.Era().Id),
+			ls.currentEra.Id,
 			epochSlotLength,
 			epochLength,
 			txn,
