@@ -155,6 +155,10 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 	if err := ls.loadTip(); err != nil {
 		return nil, err
 	}
+	// Create genesis block
+	if err := ls.createGenesisBlock(); err != nil {
+		return nil, err
+	}
 	// Start goroutine to process new blocks
 	go ls.ledgerProcessBlocks()
 	return ls, nil
@@ -474,14 +478,6 @@ func (ls *LedgerState) ledgerProcessBlock(txn *database.Txn, point ocommon.Point
 			)
 		}
 	}
-	// Special handling for genesis block
-	if err := ls.processGenesisBlock(txn, point, block); err != nil {
-		return err
-	}
-	// Check for epoch rollover
-	if err := ls.processEpochRollover(txn, point, block); err != nil {
-		return err
-	}
 	// TODO: track this using protocol params and hard forks
 	// Check for era change
 	if uint(block.Era().Id) != ls.currentEra.Id {
@@ -492,6 +488,10 @@ func (ls *LedgerState) ledgerProcessBlock(txn *database.Txn, point ocommon.Point
 				return err
 			}
 		}
+	}
+	// Check for epoch rollover
+	if err := ls.processEpochRollover(txn, point); err != nil {
+		return err
 	}
 	// Process transactions
 	for _, tx := range block.Transactions() {
