@@ -26,6 +26,7 @@ type eventMetrics struct {
 
 func (e *EventBus) initMetrics(promRegistry prometheus.Registerer) {
 	promautoFactory := promauto.With(promRegistry)
+	e.metrics = &eventMetrics{}
 	e.metrics.eventsTotal = promautoFactory.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "event_total",

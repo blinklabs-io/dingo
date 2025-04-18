@@ -50,6 +50,14 @@ func (m *MempoolConsumer) NextTx(blocking bool) *MempoolTransaction {
 		<-addTxChan
 		m.mempool.eventBus.Unsubscribe(AddTransactionEventType, addTxSubId)
 		m.mempool.RLock()
+		// Make sure our next TX index isn't beyond the bounds of the mempool
+		// This shouldn't be necessary, but we probably have a bug elsewhere around
+		// mananging the consumer nextTxId values on add/remove TX in mempool.
+		// This is also potentially lossy in the case of multiple TXs being added to
+		// the mempool in short succession
+		if m.nextTxIdx >= len(m.mempool.transactions) {
+			m.nextTxIdx = len(m.mempool.transactions) - 1
+		}
 	}
 	nextTx := m.mempool.transactions[m.nextTxIdx]
 	if nextTx != nil {

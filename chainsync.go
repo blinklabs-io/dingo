@@ -15,13 +15,12 @@
 package dingo
 
 import (
-	"encoding/hex"
 	"fmt"
 
 	"github.com/blinklabs-io/dingo/event"
-	"github.com/blinklabs-io/dingo/state"
+	"github.com/blinklabs-io/dingo/ledger"
 	ouroboros "github.com/blinklabs-io/gouroboros"
-	"github.com/blinklabs-io/gouroboros/ledger"
+	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
@@ -101,7 +100,7 @@ func (n *Node) chainsyncServerFindIntersect(
 	retTip = n.ledgerState.Tip()
 
 	if intersectPoint == nil {
-		return retPoint, retTip, ochainsync.IntersectNotFoundError
+		return retPoint, retTip, ochainsync.ErrIntersectNotFound
 	}
 
 	// Add our client to the chainsync state
@@ -181,10 +180,10 @@ func (n *Node) chainsyncClientRollBackward(
 ) error {
 	// Generate event
 	n.eventBus.Publish(
-		state.ChainsyncEventType,
+		ledger.ChainsyncEventType,
 		event.NewEvent(
-			state.ChainsyncEventType,
-			state.ChainsyncEvent{
+			ledger.ChainsyncEventType,
+			ledger.ChainsyncEvent{
 				Rollback: true,
 				Point:    point,
 				Tip:      tip,
@@ -201,14 +200,14 @@ func (n *Node) chainsyncClientRollForward(
 	tip ochainsync.Tip,
 ) error {
 	switch v := blockData.(type) {
-	case ledger.BlockHeader:
+	case gledger.BlockHeader:
 		blockSlot := v.SlotNumber()
-		blockHash, _ := hex.DecodeString(v.Hash())
+		blockHash := v.Hash().Bytes()
 		n.eventBus.Publish(
-			state.ChainsyncEventType,
+			ledger.ChainsyncEventType,
 			event.NewEvent(
-				state.ChainsyncEventType,
-				state.ChainsyncEvent{
+				ledger.ChainsyncEventType,
+				ledger.ChainsyncEvent{
 					ConnectionId: ctx.ConnectionId,
 					Point:        ocommon.NewPoint(blockSlot, blockHash),
 					Type:         blockType,

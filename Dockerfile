@@ -1,4 +1,4 @@
-FROM ghcr.io/blinklabs-io/go:1.24.1-1 AS build
+FROM ghcr.io/blinklabs-io/go:1.24.2-1 AS build
 
 WORKDIR /code
 COPY go.* .

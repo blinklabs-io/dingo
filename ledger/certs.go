@@ -1,4 +1,4 @@
-// Copyright 2024 Blink Labs Software
+// Copyright 2025 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package state
+package ledger
 
 import (
 	"fmt"
@@ -27,7 +27,8 @@ func (ls *LedgerState) processTransactionCertificates(
 	blockPoint pcommon.Point,
 	tx lcommon.Transaction,
 ) error {
-	for _, tmpCert := range tx.Certificates() {
+	var tmpCert lcommon.Certificate
+	for _, tmpCert = range tx.Certificates() {
 		certDeposit, err := ls.currentEra.CertDepositFunc(
 			tmpCert,
 			ls.currentPParams,
@@ -37,7 +38,7 @@ func (ls *LedgerState) processTransactionCertificates(
 		}
 		switch cert := tmpCert.(type) {
 		case *lcommon.PoolRegistrationCertificate:
-			err := txn.DB().SetPoolRegistration(
+			err := ls.db.SetPoolRegistration(
 				cert,
 				blockPoint.Slot,
 				certDeposit,
@@ -47,7 +48,7 @@ func (ls *LedgerState) processTransactionCertificates(
 				return err
 			}
 		case *lcommon.PoolRetirementCertificate:
-			err := txn.DB().SetPoolRetirement(
+			err := ls.db.SetPoolRetirement(
 				cert,
 				blockPoint.Slot,
 				txn,
@@ -55,8 +56,18 @@ func (ls *LedgerState) processTransactionCertificates(
 			if err != nil {
 				return err
 			}
+		case *lcommon.RegistrationCertificate:
+			err := ls.db.SetRegistration(
+				cert,
+				blockPoint.Slot,
+				certDeposit,
+				txn,
+			)
+			if err != nil {
+				return err
+			}
 		case *lcommon.StakeDelegationCertificate:
-			err := txn.DB().SetStakeDelegation(
+			err := ls.db.SetStakeDelegation(
 				cert,
 				blockPoint.Slot,
 				txn,
@@ -65,7 +76,7 @@ func (ls *LedgerState) processTransactionCertificates(
 				return err
 			}
 		case *lcommon.StakeDeregistrationCertificate:
-			err := txn.DB().SetStakeDeregistration(
+			err := ls.db.SetStakeDeregistration(
 				cert,
 				blockPoint.Slot,
 				txn,
@@ -74,7 +85,7 @@ func (ls *LedgerState) processTransactionCertificates(
 				return err
 			}
 		case *lcommon.StakeRegistrationCertificate:
-			err := txn.DB().SetStakeRegistration(
+			err := ls.db.SetStakeRegistration(
 				cert,
 				blockPoint.Slot,
 				certDeposit,

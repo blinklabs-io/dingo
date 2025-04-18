@@ -23,6 +23,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 )
 
+// Database represents our data storage services
 type Database struct {
 	logger   *slog.Logger
 	blob     blob.BlobStore

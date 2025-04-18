@@ -92,6 +92,12 @@ type MetadataStore interface {
 		uint64, // epoch
 		*gorm.DB,
 	) error
+	SetRegistration(
+		*lcommon.RegistrationCertificate,
+		uint64, // slot
+		uint64, // deposit
+		*gorm.DB,
+	) error
 	SetStakeDelegation(
 		*lcommon.StakeDelegationCertificate,
 		uint64, // slot
@@ -112,15 +118,26 @@ type MetadataStore interface {
 		ochainsync.Tip,
 		*gorm.DB,
 	) error
+	SetUtxo(
+		[]byte, // hash
+		uint32, // idx
+		uint64, // slot
+		[]byte, // payment
+		[]byte, // stake
+		*gorm.DB,
+	) error
 
 	// Helpers
 	DeleteUtxo(any, *gorm.DB) error
 	DeleteUtxos([]any, *gorm.DB) error
+	DeleteUtxosAfterSlot(uint64, *gorm.DB) error
+	DeleteUtxosBeforeSlot(uint64, *gorm.DB) error
 	GetEpochLatest(*gorm.DB) (models.Epoch, error)
 	GetEpochsByEra(uint, *gorm.DB) ([]models.Epoch, error)
 	GetUtxosAddedAfterSlot(uint64, *gorm.DB) ([]models.Utxo, error)
 	GetUtxosByAddress(ledger.Address, *gorm.DB) ([]models.Utxo, error)
 	GetUtxosDeletedBeforeSlot(uint64, *gorm.DB) ([]models.Utxo, error)
+	SetUtxoDeletedAtSlot(ledger.TransactionInput, uint64, *gorm.DB) error
 	SetUtxosNotDeletedAfterSlot(uint64, *gorm.DB) error
 }
 

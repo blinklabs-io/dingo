@@ -28,14 +28,17 @@ import (
 )
 
 const (
+	BlockInitialIndex uint64 = 1
+
 	blockBlobKeyPrefix         = "bp"
-	blockBlobHeightKeyPrefix   = "bh"
+	blockBlobIndexKeyPrefix    = "bi"
 	blockBlobMetadataKeySuffix = "_metadata"
 )
 
 var ErrBlockNotFound = errors.New("block not found")
 
 type Block struct {
+	ID       uint64
 	Slot     uint64
 	Number   uint64
 	Hash     []byte
@@ -49,20 +52,37 @@ func (b Block) Decode() (ledger.Block, error) {
 	return ledger.NewBlockFromCbor(b.Type, b.Cbor)
 }
 
-func BlockCreateTxn(txn *Txn, block Block) error {
+func (d *Database) BlockCreate(block Block, txn *Txn) error {
+	if txn == nil {
+		txn = d.BlobTxn(true)
+		defer txn.Commit() //nolint:errcheck
+	}
 	// Block content by point
 	key := BlockBlobKey(block.Slot, block.Hash)
 	if err := txn.Blob().Set(key, block.Cbor); err != nil {
 		return err
 	}
-	// Block height to point key
-	heightKey := BlockBlobHeightKey(block.Number)
-	if err := txn.Blob().Set(heightKey, key); err != nil {
+	// Set index if not provided
+	if block.ID == 0 {
+		recentBlocks, err := BlocksRecentTxn(txn, 1)
+		if err != nil {
+			return err
+		}
+		if len(recentBlocks) > 0 {
+			block.ID = recentBlocks[0].ID + 1
+		} else {
+			block.ID = BlockInitialIndex
+		}
+	}
+	// Block index to point key
+	indexKey := BlockBlobIndexKey(block.ID)
+	if err := txn.Blob().Set(indexKey, key); err != nil {
 		return err
 	}
 	// Block metadata by point
 	metadataKey := BlockBlobMetadataKey(key)
 	tmpMetadata := BlockBlobMetadata{
+		ID:       block.ID,
 		Type:     block.Type,
 		Height:   block.Number,
 		PrevHash: block.PrevHash,
@@ -84,8 +104,8 @@ func BlockDeleteTxn(txn *Txn, block Block) error {
 	if err := txn.Blob().Delete(key); err != nil {
 		return err
 	}
-	heightKey := BlockBlobHeightKey(block.Number)
-	if err := txn.Blob().Delete(heightKey); err != nil {
+	indexKey := BlockBlobIndexKey(block.ID)
+	if err := txn.Blob().Delete(indexKey); err != nil {
 		return err
 	}
 	metadataKey := BlockBlobMetadataKey(key)
@@ -136,6 +156,7 @@ func blockByKey(txn *Txn, blockKey []byte) (Block, error) {
 	if _, err := cbor.Decode(metadataBytes, &tmpMetadata); err != nil {
 		return ret, err
 	}
+	ret.ID = tmpMetadata.ID
 	ret.Type = tmpMetadata.Type
 	ret.Number = tmpMetadata.Height
 	ret.PrevHash = tmpMetadata.PrevHash
@@ -148,24 +169,17 @@ func BlockByPointTxn(txn *Txn, point ocommon.Point) (Block, error) {
 	return blockByKey(txn, key)
 }
 
-func BlockByNumber(db *Database, blockNumber uint64) (Block, error) {
-	var ret Block
-	txn := db.Transaction(false)
-	err := txn.Do(func(txn *Txn) error {
-		var err error
-		ret, err = BlockByNumberTxn(txn, blockNumber)
-		if errors.Is(err, badger.ErrKeyNotFound) {
-			return ErrBlockNotFound
-		}
-		return err
-	})
-	return ret, err
-}
-
-func BlockByNumberTxn(txn *Txn, blockNumber uint64) (Block, error) {
-	heightKey := BlockBlobHeightKey(blockNumber)
-	item, err := txn.Blob().Get(heightKey)
+func (d *Database) BlockByIndex(blockIndex uint64, txn *Txn) (Block, error) {
+	if txn == nil {
+		txn = d.BlobTxn(false)
+		defer txn.Commit() //nolint:errcheck
+	}
+	indexKey := BlockBlobIndexKey(blockIndex)
+	item, err := txn.Blob().Get(indexKey)
 	if err != nil {
+		if errors.Is(err, badger.ErrKeyNotFound) {
+			return Block{}, ErrBlockNotFound
+		}
 		return Block{}, err
 	}
 	blockKey, err := item.ValueCopy(nil)
@@ -195,18 +209,20 @@ func BlocksRecentTxn(txn *Txn, count int) ([]Block, error) {
 	defer it.Close()
 	var foundCount int
 	// Generate our seek key
-	// We use our block key prefix and append 0xFF to get a key that should be after
-	// any legitimate block key. This should leave our most recent block as the next
+	// We use our block index key prefix and append 0xFF to get a key that should be
+	// after any legitimate key. This should leave our most recent block as the next
 	// item when doing reverse iteration
-	tmpPrefix := append([]byte(blockBlobKeyPrefix), 0xff)
-	for it.Seek(tmpPrefix); it.Valid(); it.Next() {
+	tmpPrefix := append([]byte(blockBlobIndexKeyPrefix), 0xff)
+	var blockKey []byte
+	var err error
+	var tmpBlock Block
+	for it.Seek(tmpPrefix); it.ValidForPrefix([]byte(blockBlobIndexKeyPrefix)); it.Next() {
 		item := it.Item()
-		k := item.Key()
-		// Skip the metadata key
-		if strings.HasSuffix(string(k), blockBlobMetadataKeySuffix) {
-			continue
+		blockKey, err = item.ValueCopy(nil)
+		if err != nil {
+			return ret, err
 		}
-		tmpBlock, err := blockByKey(txn, k)
+		tmpBlock, err = blockByKey(txn, blockKey)
 		if err != nil {
 			return ret, err
 		}
@@ -269,18 +285,21 @@ func BlocksAfterSlotTxn(txn *Txn, slotNumber uint64) ([]Block, error) {
 		[]byte(blockBlobKeyPrefix),
 		blockBlobKeyUint64ToBytes(slotNumber),
 	)
+	var err error
+	var k []byte
+	var tmpBlock Block
 	for it.Seek(keyPrefix); it.ValidForPrefix([]byte(blockBlobKeyPrefix)); it.Next() {
 		// Skip the start slot
 		if it.ValidForPrefix(keyPrefix) {
 			continue
 		}
 		item := it.Item()
-		k := item.Key()
+		k = item.Key()
 		// Skip the metadata key
 		if strings.HasSuffix(string(k), blockBlobMetadataKeySuffix) {
 			continue
 		}
-		tmpBlock, err := blockByKey(txn, k)
+		tmpBlock, err = blockByKey(txn, k)
 		if err != nil {
 			return []Block{}, err
 		}
@@ -313,8 +332,8 @@ func BlockBlobKey(slot uint64, hash []byte) []byte {
 	return key
 }
 
-func BlockBlobHeightKey(blockNumber uint64) []byte {
-	key := []byte(blockBlobHeightKeyPrefix)
+func BlockBlobIndexKey(blockNumber uint64) []byte {
+	key := []byte(blockBlobIndexKeyPrefix)
 	// Convert block number to bytes
 	blockNumberBytes := blockBlobKeyUint64ToBytes(blockNumber)
 	key = append(key, blockNumberBytes...)
@@ -335,6 +354,7 @@ func BlockBlobKeyHashHex(slot uint64, hashHex string) ([]byte, error) {
 
 type BlockBlobMetadata struct {
 	cbor.StructAsArray
+	ID       uint64
 	Type     uint
 	Height   uint64
 	PrevHash []byte

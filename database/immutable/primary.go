@@ -26,10 +26,11 @@ const (
 )
 
 type primaryIndex struct {
-	file       *os.File
-	slot       int
-	lastOffset uint32
-	version    uint8
+	file            *os.File
+	slot            int
+	lastOffset      uint32
+	version         uint8
+	seenFirstOffset bool
 }
 
 type primaryIndexEntry struct {
@@ -73,7 +74,7 @@ func (p *primaryIndex) Next() (*primaryIndexEntry, error) {
 		return nil, err
 	}
 	empty := true
-	if tmpOffset > p.lastOffset {
+	if tmpOffset > p.lastOffset || !p.seenFirstOffset {
 		empty = false
 		p.lastOffset = tmpOffset
 	}
@@ -83,6 +84,7 @@ func (p *primaryIndex) Next() (*primaryIndexEntry, error) {
 		empty:           empty,
 	}
 	p.slot++
+	p.seenFirstOffset = true
 	return &tmpEntry, nil
 }
 

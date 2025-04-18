@@ -134,9 +134,13 @@ func (t *Txn) rollback() error {
 	if t.finished {
 		return nil
 	}
-	t.blobTxn.Discard()
-	if result := t.metadataTxn.Rollback(); result.Error != nil {
-		return result.Error
+	if t.blobTxn != nil {
+		t.blobTxn.Discard()
+	}
+	if t.metadataTxn != nil {
+		if result := t.metadataTxn.Rollback(); result.Error != nil {
+			return result.Error
+		}
 	}
 	t.finished = true
 	return nil

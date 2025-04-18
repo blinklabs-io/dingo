@@ -15,7 +15,7 @@
 package sqlite
 
 import (
-	"errors"
+	"fmt"
 
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite/models"
 	"github.com/blinklabs-io/gouroboros/ledger"
@@ -131,7 +131,7 @@ func (d *MetadataStoreSqlite) DeleteUtxo(
 ) error {
 	tmpUtxo, ok := utxo.(models.Utxo)
 	if !ok {
-		return errors.New("failed to convert utxo")
+		return fmt.Errorf("failed to convert utxo from %T", utxo)
 	}
 	if txn != nil {
 		result := txn.Delete(&tmpUtxo)
@@ -155,7 +155,7 @@ func (d *MetadataStoreSqlite) DeleteUtxos(
 	for _, utxo := range utxos {
 		tmpUtxo, ok := utxo.(models.Utxo)
 		if !ok {
-			return errors.New("failed to convert utxo")
+			return fmt.Errorf("failed to convert utxo from %T", utxo)
 		}
 		tmpUtxos = append(tmpUtxos, tmpUtxo)
 	}
@@ -166,6 +166,101 @@ func (d *MetadataStoreSqlite) DeleteUtxos(
 		}
 	} else {
 		result := d.DB().Delete(&tmpUtxos)
+		if result.Error != nil {
+			return result.Error
+		}
+	}
+	return nil
+}
+
+func (d *MetadataStoreSqlite) DeleteUtxosAfterSlot(
+	slot uint64,
+	txn *gorm.DB,
+) error {
+	if txn != nil {
+		result := txn.Where("deleted_slot > ?", slot).
+			Delete(&models.Utxo{})
+		if result.Error != nil {
+			return result.Error
+		}
+	} else {
+		result := d.DB().Where("deleted_slot > ?", slot).
+			Delete(&models.Utxo{})
+		if result.Error != nil {
+			return result.Error
+		}
+	}
+	return nil
+}
+
+// DeleteUtxosBeforeSlot deletes Utxos marked as deleted before a given slot
+func (d *MetadataStoreSqlite) DeleteUtxosBeforeSlot(
+	slot uint64,
+	txn *gorm.DB,
+) error {
+	if txn != nil {
+		result := txn.Where("deleted_slot > 0 AND deleted_slot < ?", slot).
+			Delete(&models.Utxo{})
+		if result.Error != nil {
+			return result.Error
+		}
+	} else {
+		result := d.DB().Where("deleted_slot >0 AND deleted_slot < ?", slot).
+			Delete(&models.Utxo{})
+		if result.Error != nil {
+			return result.Error
+		}
+	}
+	return nil
+}
+
+// SetUtxo saves a UTxO
+func (d *MetadataStoreSqlite) SetUtxo(
+	txId []byte, // hash
+	idx uint32, // idx
+	slot uint64, // slot
+	payment []byte, // payment
+	stake []byte, // stake
+	txn *gorm.DB,
+) error {
+	tmpUtxo := models.Utxo{
+		TxId:       txId,
+		OutputIdx:  idx,
+		AddedSlot:  slot,
+		PaymentKey: payment,
+		StakingKey: stake,
+	}
+	if txn != nil {
+		result := txn.Create(&tmpUtxo)
+		if result.Error != nil {
+			return result.Error
+		}
+	} else {
+		result := d.DB().Create(&tmpUtxo)
+		if result.Error != nil {
+			return result.Error
+		}
+	}
+	return nil
+}
+
+// SetUtxoDeletedAtSlot marks a UTxO as deleted at a given slot
+func (d *MetadataStoreSqlite) SetUtxoDeletedAtSlot(
+	utxoId ledger.TransactionInput,
+	slot uint64,
+	txn *gorm.DB,
+) error {
+	if txn != nil {
+		result := txn.Model(models.Utxo{}).
+			Where("tx_id = ? AND output_idx = ?", utxoId.Id().Bytes(), utxoId.Index()).
+			Update("deleted_slot", slot)
+		if result.Error != nil {
+			return result.Error
+		}
+	} else {
+		result := d.DB().Model(models.Utxo{}).
+			Where("tx_id = ? AND output_idx = ?", utxoId.Id().Bytes(), utxoId.Index()).
+			Update("deleted_slot", slot)
 		if result.Error != nil {
 			return result.Error
 		}

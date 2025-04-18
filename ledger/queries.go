@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package state
+package ledger
 
 import (
 	"errors"
@@ -20,7 +20,7 @@ import (
 	"math/big"
 
 	"github.com/blinklabs-io/dingo/database"
-	"github.com/blinklabs-io/dingo/state/eras"
+	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
@@ -99,20 +99,28 @@ func (ls *LedgerState) queryHardFork(
 func (ls *LedgerState) queryHardForkEraHistory() (any, error) {
 	retData := []any{}
 	timespan := big.NewInt(0)
-	for _, era := range eras.Eras {
-		epochSlotLength, epochLength, err := era.EpochLengthFunc(
+	var epochs []database.Epoch
+	var era eras.EraDesc
+	var err error
+	var tmpStart, tmpEnd []any
+	var tmpEpoch database.Epoch
+	var tmpEra, tmpParams []any
+	var epochSlotLength, epochLength uint
+	var idx int
+	for _, era = range eras.Eras {
+		epochSlotLength, epochLength, err = era.EpochLengthFunc(
 			ls.config.CardanoNodeConfig,
 		)
 		if err != nil {
 			return nil, err
 		}
-		epochs, err := ls.db.GetEpochsByEra(era.Id, nil)
+		epochs, err = ls.db.GetEpochsByEra(era.Id, nil)
 		if err != nil {
 			return nil, err
 		}
-		tmpStart := []any{0, 0, 0}
-		tmpEnd := tmpStart
-		tmpParams := []any{
+		tmpStart = []any{0, 0, 0}
+		tmpEnd = tmpStart
+		tmpParams = []any{
 			epochLength,
 			epochSlotLength,
 			[]any{
@@ -122,7 +130,7 @@ func (ls *LedgerState) queryHardForkEraHistory() (any, error) {
 			},
 			0,
 		}
-		for idx, tmpEpoch := range epochs {
+		for idx, tmpEpoch = range epochs {
 			// Update era start
 			if idx == 0 {
 				tmpStart = []any{
@@ -149,7 +157,7 @@ func (ls *LedgerState) queryHardForkEraHistory() (any, error) {
 				}
 			}
 		}
-		tmpEra := []any{
+		tmpEra = []any{
 			tmpStart,
 			tmpEnd,
 			tmpParams,
@@ -208,7 +216,7 @@ func (ls *LedgerState) queryShelleyUtxoByAddress(
 ) (any, error) {
 	ret := make(map[olocalstatequery.UtxoId]ledger.TransactionOutput)
 	// TODO: support multiple addresses (#391)
-	utxos, err := database.UtxosByAddress(ls.db, addrs[0])
+	utxos, err := ls.db.UtxosByAddress(addrs[0], nil)
 	if err != nil {
 		return nil, err
 	}
@@ -231,10 +239,10 @@ func (ls *LedgerState) queryShelleyUtxoByTxIn(
 ) (any, error) {
 	ret := make(map[olocalstatequery.UtxoId]ledger.TransactionOutput)
 	// TODO: support multiple TxIns (#392)
-	utxo, err := database.UtxoByRef(
-		ls.db,
+	utxo, err := ls.db.UtxoByRef(
 		txIns[0].Id().Bytes(),
 		txIns[0].Index(),
+		nil,
 	)
 	if err != nil {
 		return nil, err

@@ -197,6 +197,7 @@ func (i *ImmutableDb) GetTip() (*ocommon.Point, error) {
 	if err != nil {
 		return nil, err
 	}
+	var tmpPoint ocommon.Point
 	for {
 		next, err := secondary.Next()
 		if err != nil {
@@ -205,7 +206,7 @@ func (i *ImmutableDb) GetTip() (*ocommon.Point, error) {
 		if next == nil {
 			break
 		}
-		tmpPoint := ocommon.NewPoint(
+		tmpPoint = ocommon.NewPoint(
 			next.BlockOrEbb,
 			next.HeaderHash[:],
 		)
@@ -215,6 +216,7 @@ func (i *ImmutableDb) GetTip() (*ocommon.Point, error) {
 }
 
 func (i *ImmutableDb) GetBlock(point ocommon.Point) (*Block, error) {
+	var err error
 	chunkNames, err := i.getChunkNamesFromPoint(point)
 	if err != nil {
 		return nil, err
@@ -223,8 +225,9 @@ func (i *ImmutableDb) GetBlock(point ocommon.Point) (*Block, error) {
 	if err != nil {
 		return nil, err
 	}
+	var tmpBlock *Block
 	for {
-		tmpBlock, err := chunk.Next()
+		tmpBlock, err = chunk.Next()
 		if err != nil {
 			return nil, err
 		}
@@ -290,10 +293,12 @@ type BlockIterator struct {
 }
 
 func (b *BlockIterator) Next() (*Block, error) {
+	var err error
+	var tmpChunk *chunk
 	if b.chunk == nil {
 		if b.chunkIdx == 0 && len(b.chunkNames) > 0 {
 			// Open initial chunk
-			tmpChunk, err := b.db.getChunk(b.chunkNames[b.chunkIdx])
+			tmpChunk, err = b.db.getChunk(b.chunkNames[b.chunkIdx])
 			if err != nil {
 				return nil, err
 			}
@@ -302,8 +307,9 @@ func (b *BlockIterator) Next() (*Block, error) {
 			return nil, nil
 		}
 	}
+	var tmpBlock *Block
 	for {
-		tmpBlock, err := b.chunk.Next()
+		tmpBlock, err = b.chunk.Next()
 		if err != nil {
 			return nil, err
 		}
@@ -317,7 +323,7 @@ func (b *BlockIterator) Next() (*Block, error) {
 			if b.chunkIdx >= len(b.chunkNames) {
 				return nil, nil
 			}
-			tmpChunk, err := b.db.getChunk(b.chunkNames[b.chunkIdx])
+			tmpChunk, err = b.db.getChunk(b.chunkNames[b.chunkIdx])
 			if err != nil {
 				return nil, err
 			}

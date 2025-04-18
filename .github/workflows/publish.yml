@@ -8,6 +8,9 @@ on:
 
 concurrency: ${{ github.ref }}
 
+env:
+  APPLICATION_NAME: 'dingo'
+
 jobs:
   create-draft-release:
     runs-on: ubuntu-latest
@@ -43,9 +46,23 @@ jobs:
   build-binaries:
     strategy:
       matrix:
-        os: [linux, darwin]
-        arch: [amd64, arm64]
-    runs-on: ubuntu-latest
+        include:
+          - runner: macos-latest
+            os: darwin
+            arch: arm64
+          - runner: ubuntu-latest
+            os: freebsd
+            arch: amd64
+          - runner: ubuntu-latest
+            os: freebsd
+            arch: arm64
+          - runner: ubuntu-latest
+            os: linux
+            arch: amd64
+          - runner: ubuntu-latest
+            os: linux
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
     needs: [create-draft-release]
     permissions:
       actions: write
@@ -56,7 +73,8 @@ jobs:
       packages: write
       statuses: write
     steps:
-      - run: "echo \"RELEASE_TAG=${GITHUB_REF#refs/tags/}\" >> $GITHUB_ENV"
+      - name: Set RELEASE_TAG
+        run: "echo \"RELEASE_TAG=${GITHUB_REF#refs/tags/}\" >> $GITHUB_ENV"
       - uses: actions/checkout@v4
         with:
           fetch-depth: '0'
@@ -68,17 +86,24 @@ jobs:
       - name: Upload release asset
         if: startsWith(github.ref, 'refs/tags/')
         run: |
-          _filename=dingo-${{ env.RELEASE_TAG }}-${{ matrix.os }}-${{ matrix.arch }}
-          cp dingo ${_filename}
+          _filename=${{ env.APPLICATION_NAME }}-${{ env.RELEASE_TAG }}-${{ matrix.os }}-${{ matrix.arch }}.tar.gz
+          if [[ "${{ matrix.os }}" != "darwin" ]]; then
+            tar czf ${_filename} ${{ env.APPLICATION_NAME }}
+          fi
+          if [[ "${{ matrix.os }}" == "darwin" ]]; then
+            _filename=${{ env.APPLICATION_NAME }}-${{ env.RELEASE_TAG }}-${{ matrix.os }}-${{ matrix.arch }}.zip
+            zip -r ${_filename} ${{ env.APPLICATION_NAME }}
+          fi
           curl \
             -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
             -H "Content-Type: application/octet-stream" \
             --data-binary @${_filename} \
-            https://uploads.github.com/repos/${{ github.repository_owner }}/dingo/releases/${{ needs.create-draft-release.outputs.RELEASE_ID }}/assets?name=${_filename}
+            https://uploads.github.com/repos/${{ github.repository_owner }}/${{ env.APPLICATION_NAME }}/releases/${{ needs.create-draft-release.outputs.RELEASE_ID }}/assets?name=${_filename}
       - name: Attest binary
+        if: startsWith(github.ref, 'refs/tags/')
         uses: actions/attest-build-provenance@v2
         with:
-          subject-path: 'dingo'
+          subject-path: '${{ env.APPLICATION_NAME }}'
 
   build-images:
     runs-on: ubuntu-latest
@@ -150,7 +175,7 @@ jobs:
         with:
           username: blinklabs
           password: ${{ secrets.DOCKER_PASSWORD }}
-          repository: blinklabs/dingo
+          repository: blinklabs/${{ env.APPLICATION_NAME }}
           readme-filepath: ./README.md
           short-description: "Dingo is a Cardano blockchain data node"
 

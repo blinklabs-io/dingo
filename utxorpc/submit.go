@@ -23,8 +23,8 @@ import (
 
 	"connectrpc.com/connect"
 	"github.com/blinklabs-io/dingo/event"
-	"github.com/blinklabs-io/dingo/state"
-	"github.com/blinklabs-io/gouroboros/ledger"
+	"github.com/blinklabs-io/dingo/ledger"
+	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	cardano "github.com/utxorpc/go-codegen/utxorpc/v1alpha/cardano"
 	submit "github.com/utxorpc/go-codegen/utxorpc/v1alpha/submit"
@@ -58,7 +58,7 @@ func (s *submitServiceServer) SubmitTx(
 	for i, txi := range txRawList {
 		txRawBytes := txi.GetRaw() // raw bytes
 		txHash := lcommon.Blake2b256Hash(txRawBytes)
-		txType, err := ledger.DetermineTransactionType(txRawBytes)
+		txType, err := gledger.DetermineTransactionType(txRawBytes)
 		placeholderRef := []byte{}
 		if err != nil {
 			resp.Ref = append(resp.Ref, placeholderRef)
@@ -118,14 +118,14 @@ func (s *submitServiceServer) WaitForTx(
 		),
 	)
 	s.utxorpc.config.EventBus.SubscribeFunc(
-		state.BlockfetchEventType,
+		ledger.BlockfetchEventType,
 		func(evt event.Event) {
-			e := evt.Data.(state.BlockfetchEvent)
+			e := evt.Data.(ledger.BlockfetchEvent)
 			for _, tx := range e.Block.Transactions() {
 				for _, r := range ref {
 					refHash := hex.EncodeToString(r)
 					// Compare our hashes
-					if refHash == tx.Hash() {
+					if refHash == tx.Hash().String() {
 						// Send confirmation response
 						err := stream.Send(&submit.WaitForTxResponse{
 							Ref:   r,
@@ -203,11 +203,11 @@ func (s *submitServiceServer) WatchMempool(
 		// Match against mempool transactions
 		for _, memTx := range s.utxorpc.config.Mempool.Transactions() {
 			txRawBytes := memTx.Cbor
-			txType, err := ledger.DetermineTransactionType(txRawBytes)
+			txType, err := gledger.DetermineTransactionType(txRawBytes)
 			if err != nil {
 				return err
 			}
-			tx, err := ledger.NewTransactionFromCbor(txType, txRawBytes)
+			tx, err := gledger.NewTransactionFromCbor(txType, txRawBytes)
 			if err != nil {
 				return err
 			}
@@ -233,12 +233,12 @@ func (s *submitServiceServer) WatchMempool(
 					mintAssetPattern := predicate.GetMatch().GetCardano().GetMintsAsset()
 					moveAssetPattern := predicate.GetMatch().GetCardano().GetMovesAsset()
 
-					var addresses []ledger.Address
+					var addresses []gledger.Address
 					if addressPattern != nil {
 						// Handle Exact Address
 						exactAddressBytes := addressPattern.GetExactAddress()
 						if exactAddressBytes != nil {
-							var addr ledger.Address
+							var addr lcommon.Address
 							err := addr.UnmarshalCBOR(exactAddressBytes)
 							if err != nil {
 								return fmt.Errorf(
@@ -253,7 +253,7 @@ func (s *submitServiceServer) WatchMempool(
 						paymentPart := addressPattern.GetPaymentPart()
 						if paymentPart != nil {
 							s.utxorpc.config.Logger.Info("PaymentPart is present, decoding...")
-							var paymentAddr ledger.Address
+							var paymentAddr lcommon.Address
 							err := paymentAddr.UnmarshalCBOR(paymentPart)
 							if err != nil {
 								return fmt.Errorf("failed to decode payment part: %w", err)
@@ -267,7 +267,7 @@ func (s *submitServiceServer) WatchMempool(
 							s.utxorpc.config.Logger.Info(
 								"DelegationPart is present, decoding...",
 							)
-							var delegationAddr ledger.Address
+							var delegationAddr lcommon.Address
 							err := delegationAddr.UnmarshalCBOR(delegationPart)
 							if err != nil {
 								return fmt.Errorf(
@@ -287,10 +287,10 @@ func (s *submitServiceServer) WatchMempool(
 						assetPatterns = append(assetPatterns, moveAssetPattern)
 					}
 
-					// Convert everything to utxos (ledger.TransactionOutput) for matching
-					var utxos []ledger.TransactionOutput
+					// Convert everything to utxos (gledger.TransactionOutput) for matching
+					var utxos []gledger.TransactionOutput
 					utxos = append(tx.Outputs(), tx.CollateralReturn())
-					var inputs []ledger.TransactionInput
+					var inputs []gledger.TransactionInput
 					inputs = append(tx.Inputs(), tx.ReferenceInputs()...)
 					inputs = append(inputs, tx.Collateral()...)
 					for _, input := range inputs {
@@ -304,7 +304,7 @@ func (s *submitServiceServer) WatchMempool(
 								err,
 							)
 						}
-						ret, err := utxo.Decode() // ledger.TransactionOutput
+						ret, err := utxo.Decode() // gledger.TransactionOutput
 						if err != nil {
 							return err
 						}

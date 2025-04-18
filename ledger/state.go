@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package state
+package ledger
 
 import (
 	"encoding/hex"
@@ -24,11 +24,11 @@ import (
 	"sync"
 	"time"
 
+	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
-	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite/models"
 	"github.com/blinklabs-io/dingo/event"
-	"github.com/blinklabs-io/dingo/state/eras"
+	"github.com/blinklabs-io/dingo/ledger/eras"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
@@ -36,7 +36,6 @@ import (
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/prometheus/client_golang/prometheus"
-	"gorm.io/gorm"
 )
 
 const (
@@ -70,14 +69,12 @@ type LedgerState struct {
 	currentTip                  ochainsync.Tip
 	currentTipBlockNonce        []byte
 	metrics                     stateMetrics
-	chainsyncHeaderPoints       []ocommon.Point
-	chainsyncHeaderPointsMutex  sync.Mutex
 	chainsyncBlockEvents        []BlockfetchEvent
-	chainsyncBlockfetchBusy     bool
 	chainsyncBlockfetchBusyTime time.Time
+	chainsyncBlockfetchDoneChan chan struct{}
 	chainsyncBlockfetchMutex    sync.Mutex
 	chainsyncBlockfetchWaiting  bool
-	chainsyncHeaderMutex        sync.Mutex
+	chain                       *chain.Chain
 }
 
 func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
@@ -92,6 +89,7 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 	// Init metrics
 	ls.metrics.init(ls.config.PromRegistry)
 	// Load database
+	needsRecovery := false
 	db, err := database.New(cfg.Logger, cfg.DataDir)
 	if db == nil {
 		ls.config.Logger.Error(
@@ -110,15 +108,28 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 			return nil, err
 		}
 		ls.config.Logger.Warn(
-			"database initialization error",
+			"database initialization error, needs recovery",
 			"error",
 			err,
 			"component",
 			"ledger",
 		)
-		// Run recovery
+		needsRecovery = true
+	}
+	// Load chain
+	chain, err := chain.NewChain(
+		ls.db,
+		ls.config.EventBus,
+		true, // persistent
+	)
+	if err != nil {
+		return nil, err
+	}
+	ls.chain = chain
+	// Run recovery if needed
+	if needsRecovery {
 		if err := ls.recoverCommitTimestampConflict(); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("failed to recover database: %w", err)
 		}
 	}
 	// Setup event handlers
@@ -144,41 +155,38 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 	if err := ls.loadTip(); err != nil {
 		return nil, err
 	}
+	// Create genesis block
+	if err := ls.createGenesisBlock(); err != nil {
+		return nil, err
+	}
+	// Start goroutine to process new blocks
+	go ls.ledgerProcessBlocks()
 	return ls, nil
 }
 
 func (ls *LedgerState) recoverCommitTimestampConflict() error {
-	// Load current tip
+	// Load current ledger tip
 	tmpTip, err := ls.db.GetTip(nil)
 	if err != nil {
 		return err
 	}
-	// Try to load last n blocks and rollback to the last one we can load
-	recentBlocks, err := database.BlocksRecent(ls.db, 100)
+	// Check if we can lookup tip block in chain
+	_, err = ls.chain.BlockByPoint(tmpTip.Point, nil)
 	if err != nil {
-		return err
-	}
-	for _, tmpBlock := range recentBlocks {
-		blockPoint := ocommon.NewPoint(
-			tmpBlock.Slot,
-			tmpBlock.Hash,
-		)
-		// Nothing to do if current tip is earlier than our latest block
-		if tmpTip.Point.Slot <= tmpBlock.Slot {
-			break
-		}
-		// Rollback block if current tip is ahead
-		if tmpTip.Point.Slot > tmpBlock.Slot {
-			if err2 := ls.rollback(blockPoint); err2 != nil {
-				return fmt.Errorf(
-					"failed to rollback: %w",
-					err2,
-				)
-			}
-			return nil
+		// Rollback to raw chain tip on error
+		chainTip := ls.chain.Tip()
+		if err = ls.rollback(chainTip.Point); err != nil {
+			return fmt.Errorf(
+				"failed to rollback ledger: %w",
+				err,
+			)
 		}
 	}
-	return errors.New("failed to recover database")
+	return nil
+}
+
+func (ls *LedgerState) Chain() *chain.Chain {
+	return ls.chain
 }
 
 func (ls *LedgerState) Close() error {
@@ -200,40 +208,24 @@ func (ls *LedgerState) scheduleCleanupConsumedUtxos() {
 			}()
 			// Get the current tip, since we're querying by slot
 			tip := ls.Tip()
-			// Get UTxOs that are marked as deleted and older than our slot window
-			utxos, err := database.UtxosDeleted(ls.db, tip.Point.Slot-cleanupConsumedUtxosSlotWindow)
+			// Delete UTxOs that are marked as deleted and older than our slot window
+			ls.config.Logger.Debug(
+				"cleaning up consumed UTxOs",
+				"component", "ledger",
+			)
+			ls.Lock()
+			err := ls.db.UtxosDeleteConsumed(
+				tip.Point.Slot-cleanupConsumedUtxosSlotWindow,
+				nil,
+			)
+			ls.Unlock()
 			if err != nil {
 				ls.config.Logger.Error(
-					"failed to query consumed UTxOs",
+					"failed to cleanup consumed UTxOs",
 					"component", "ledger",
 					"error", err,
 				)
 				return
-			}
-			for {
-				ls.Lock()
-				batchSize := min(1000, len(utxos))
-				if batchSize == 0 {
-					ls.Unlock()
-					break
-				}
-				// Delete the UTxOs
-				txn := ls.db.Transaction(true)
-				err := txn.Do(func(txn *database.Txn) error {
-					return ls.db.UtxosDelete(utxos[0:batchSize], txn)
-				})
-				if err != nil {
-					ls.config.Logger.Error(
-						"failed to remove consumed UTxO",
-						"component", "ledger",
-						"error", err,
-					)
-					ls.Unlock()
-					break
-				}
-				// Remove batch
-				utxos = slices.Delete(utxos, 0, batchSize)
-				ls.Unlock()
 			}
 		},
 	)
@@ -243,25 +235,10 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 	// Start a transaction
 	txn := ls.db.Transaction(true)
 	err := txn.Do(func(txn *database.Txn) error {
-		// Remove rolled-back blocks in reverse order
-		tmpBlocks, err := database.BlocksAfterSlotTxn(txn, point.Slot)
-		if err != nil {
-			return fmt.Errorf("query blocks: %w", err)
-		}
-		for _, tmpBlock := range tmpBlocks {
-			if err := ls.removeBlock(txn, tmpBlock); err != nil {
-				return fmt.Errorf("remove block: %w", err)
-			}
-		}
 		// Delete rolled-back UTxOs
-		utxos, err := ls.db.UtxosRolledback(point.Slot, txn)
+		err := ls.db.UtxosDeleteRolledback(point.Slot, txn)
 		if err != nil {
-			return fmt.Errorf("get rolled-back UTxOs: %w", err)
-		}
-		if len(utxos) > 0 {
-			if err := ls.db.UtxosDelete(utxos, txn); err != nil {
-				return fmt.Errorf("remove rolled-back UTxOs: %w", err)
-			}
+			return fmt.Errorf("remove rolled-back UTxOs: %w", err)
 		}
 		// Restore spent UTxOs
 		err = ls.db.UtxosUnspend(point.Slot, txn)
@@ -272,21 +249,18 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 			)
 		}
 		// Update tip
-		recentBlocks, err := database.BlocksRecentTxn(txn, 1)
-		if err != nil {
-			return err
+		ls.currentTip = ochainsync.Tip{
+			Point: point,
 		}
-		if len(recentBlocks) > 0 {
-			ls.currentTip = ochainsync.Tip{
-				Point: ocommon.NewPoint(
-					recentBlocks[0].Slot,
-					recentBlocks[0].Hash,
-				),
-				BlockNumber: recentBlocks[0].Number,
-			}
-			if err := ls.db.SetTip(ls.currentTip, txn); err != nil {
+		if point.Slot > 0 {
+			rollbackBlock, err := ls.chain.BlockByPoint(point, txn)
+			if err != nil {
 				return err
 			}
+			ls.currentTip.BlockNumber = rollbackBlock.Number
+		}
+		if err = ls.db.SetTip(ls.currentTip, txn); err != nil {
+			return err
 		}
 		return nil
 	})
@@ -297,16 +271,6 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 	if err := ls.loadTip(); err != nil {
 		return err
 	}
-	// Generate event
-	ls.config.EventBus.Publish(
-		ChainRollbackEventType,
-		event.NewEvent(
-			ChainRollbackEventType,
-			ChainRollbackEvent{
-				Point: point,
-			},
-		),
-	)
 	var hash string
 	if point.Slot == 0 {
 		hash = "<genesis>"
@@ -353,90 +317,18 @@ func (ls *LedgerState) transitionToEra(
 		if err != nil {
 			return err
 		}
-		err = txn.DB().Metadata().SetPParams(
+		err = ls.db.SetPParams(
 			pparamsCbor,
 			addedSlot,
 			startEpoch,
 			nextEraId,
-			txn.Metadata(),
+			txn,
 		)
 		if err != nil {
 			return err
 		}
 	}
 	ls.currentEra = nextEra
-	return nil
-}
-
-func (ls *LedgerState) applyPParamUpdates(
-	txn *database.Txn,
-	currentEpoch uint64,
-	addedSlot uint64,
-) error {
-	// Check for pparam updates that apply at the end of the epoch
-	pparamUpdates, err := txn.DB().
-		Metadata().
-		GetPParamUpdates(currentEpoch, txn.Metadata())
-	if err != nil {
-		return err
-	}
-	if len(pparamUpdates) > 0 {
-		// We only want the latest for the epoch
-		pparamUpdate := pparamUpdates[0]
-		if ls.currentEra.DecodePParamsUpdateFunc != nil {
-			tmpPParamUpdate, err := ls.currentEra.DecodePParamsUpdateFunc(
-				pparamUpdate.Cbor,
-			)
-			if err != nil {
-				return err
-			}
-			if ls.currentEra.PParamsUpdateFunc != nil {
-				// Update current pparams
-				newPParams, err := ls.currentEra.PParamsUpdateFunc(
-					ls.currentPParams,
-					tmpPParamUpdate,
-				)
-				if err != nil {
-					return err
-				}
-				ls.currentPParams = newPParams
-				ls.config.Logger.Debug(
-					"updated protocol params",
-					"pparams",
-					fmt.Sprintf("%#v", ls.currentPParams),
-				)
-				pparamsCbor, err := cbor.Encode(&ls.currentPParams)
-				if err != nil {
-					return err
-				}
-				// Write pparams update to DB
-				err = txn.DB().Metadata().SetPParams(
-					pparamsCbor,
-					addedSlot,
-					uint64(currentEpoch+1),
-					ls.currentEra.Id,
-					txn.Metadata(),
-				)
-				if err != nil {
-					return err
-				}
-			}
-		}
-	}
-	return nil
-}
-
-func (ls *LedgerState) addUtxo(txn *database.Txn, utxo models.Utxo) error {
-	// Add UTxO to blob DB
-	key := database.UtxoBlobKey(utxo.TxId, utxo.OutputIdx)
-	err := txn.Blob().Set(key, utxo.Cbor)
-	if err != nil {
-		return err
-	}
-	// Add to metadata DB
-	if result := txn.Metadata().Create(&utxo); result.Error != nil {
-		return result.Error
-	}
 	return nil
 }
 
@@ -447,76 +339,193 @@ func (ls *LedgerState) consumeUtxo(
 	utxoId ledger.TransactionInput,
 	slot uint64,
 ) error {
-	// Find UTxO
-	utxo, err := txn.DB().UtxoByRef(
-		utxoId.Id().Bytes(),
-		utxoId.Index(),
+	return ls.db.UtxoConsume(
+		utxoId,
+		slot,
 		txn,
 	)
-	if err != nil {
-		// TODO: make this configurable? (#396)
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil
-		}
-		return err
-	}
-	// Mark as deleted in specified slot
-	utxo.DeletedSlot = slot
-	if result := txn.Metadata().Save(&utxo); result.Error != nil {
-		return result.Error
-	}
-	return nil
 }
 
-func (ls *LedgerState) addBlock(txn *database.Txn, block database.Block) error {
-	// Add block to database
-	if err := database.BlockCreateTxn(txn, block); err != nil {
+func (ls *LedgerState) ledgerProcessBlocks() {
+	iter, err := ls.chain.FromPoint(ls.currentTip.Point, false)
+	if err != nil {
+		ls.config.Logger.Error(
+			"failed to create chain iterator: " + err.Error(),
+		)
+		return
+	}
+	shouldBlock := false
+	// We chose 500 as an arbitrary max batch size. A "chain extended" message will be logged after each batch
+	nextBatch := make([]*chain.ChainIteratorResult, 0, 500)
+	var next, nextRollback *chain.ChainIteratorResult
+	var tmpBlock ledger.Block
+	var needsRollback bool
+	var end, i int
+	var txn *database.Txn
+	for {
+		// Gather up next batch of blocks
+		for {
+			next, err = iter.Next(shouldBlock)
+			shouldBlock = false
+			if err != nil {
+				if !errors.Is(err, chain.ErrIteratorChainTip) {
+					ls.config.Logger.Error(
+						"failed to get next block from chain iterator: " + err.Error(),
+					)
+					return
+				}
+				shouldBlock = true
+				// Break out of inner loop to flush DB transaction and log
+				break
+			}
+			if next == nil {
+				ls.config.Logger.Error("next block from chain iterator is nil")
+				return
+			}
+			nextBatch = append(nextBatch, next)
+			// End batch if there's a rollback, since we need special processing
+			if next.Rollback {
+				break
+			}
+			// Don't exceed our pre-allocated capacity
+			if len(nextBatch) == cap(nextBatch) {
+				break
+			}
+		}
+		// Process batch in groups of 50 to stay under DB txn limits
+		needsRollback = false
+		for i = 0; i < len(nextBatch); i += 50 {
+			ls.Lock()
+			end = min(
+				len(nextBatch),
+				i+50,
+			)
+			txn = ls.db.Transaction(true)
+			err = txn.Do(func(txn *database.Txn) error {
+				for _, next := range nextBatch[i:end] {
+					// Rollbacks need to be handled outside of the batch DB transaction
+					// A rollback should only occur at the end of a batch
+					if next.Rollback {
+						needsRollback = true
+						return nil
+					}
+					// Process block
+					tmpBlock, err = next.Block.Decode()
+					if err != nil {
+						return err
+					}
+					if err = ls.ledgerProcessBlock(txn, next.Point, tmpBlock, next.Block.Nonce); err != nil {
+						return err
+					}
+				}
+				return nil
+			})
+			if err != nil {
+				ls.Unlock()
+				ls.config.Logger.Error(
+					"failed to process block: " + err.Error(),
+				)
+				return
+			}
+			ls.Unlock()
+		}
+		// Process rollback from end of batch
+		if needsRollback {
+			needsRollback = false
+			// The rollback should be at the end of the batch
+			nextRollback = nextBatch[len(nextBatch)-1]
+			ls.Lock()
+			if err = ls.rollback(nextRollback.Point); err != nil {
+				ls.Unlock()
+				ls.config.Logger.Error(
+					"failed to process rollback: " + err.Error(),
+				)
+				return
+			}
+			ls.Unlock()
+			// Skip "chain extended" logging below if batch only contains a rollback
+			if len(nextBatch) == 1 {
+				// Clear out batch buffer
+				nextBatch = slices.Delete(nextBatch, 0, len(nextBatch))
+				continue
+			}
+		}
+		if len(nextBatch) > 0 {
+			// Clear out batch buffer
+			nextBatch = slices.Delete(nextBatch, 0, len(nextBatch))
+			ls.config.Logger.Info(
+				fmt.Sprintf(
+					"chain extended, new tip: %x at slot %d",
+					ls.currentTip.Point.Hash,
+					ls.currentTip.Point.Slot,
+				),
+				"component",
+				"ledger",
+			)
+		}
+	}
+}
+
+func (ls *LedgerState) ledgerProcessBlock(txn *database.Txn, point ocommon.Point, block ledger.Block, nonce []byte) error {
+	// Check that we're processing things in order
+	if len(ls.currentTip.Point.Hash) > 0 {
+		if string(block.PrevHash().Bytes()) != string(ls.currentTip.Point.Hash) {
+			return fmt.Errorf(
+				"block %s (with prev hash %s) does not fit on current chain tip (%x)",
+				block.Hash().String(),
+				block.PrevHash().String(),
+				ls.currentTip.Point.Hash,
+			)
+		}
+	}
+	// TODO: track this using protocol params and hard forks
+	// Check for era change
+	if uint(block.Era().Id) != ls.currentEra.Id {
+		targetEraId := uint(block.Era().Id)
+		// Transition through every era between the current and the target era
+		for nextEraId := ls.currentEra.Id + 1; nextEraId <= targetEraId; nextEraId++ {
+			if err := ls.transitionToEra(txn, nextEraId, ls.currentEpoch.EpochId, point.Slot); err != nil {
+				return err
+			}
+		}
+	}
+	// Check for epoch rollover
+	if err := ls.processEpochRollover(txn, point); err != nil {
 		return err
+	}
+	// Process transactions
+	for _, tx := range block.Transactions() {
+		if err := ls.processTransaction(txn, tx, point); err != nil {
+			return err
+		}
 	}
 	// Update tip
 	ls.currentTip = ochainsync.Tip{
-		Point:       ocommon.NewPoint(block.Slot, block.Hash),
-		BlockNumber: block.Number,
+		Point:       point,
+		BlockNumber: block.BlockNumber(),
 	}
 	if err := ls.db.SetTip(ls.currentTip, txn); err != nil {
 		return err
 	}
 	// Update tip block nonce
-	ls.currentTipBlockNonce = block.Nonce
+	ls.currentTipBlockNonce = nonce
 	// Update metrics
-	ls.metrics.blockNum.Set(float64(block.Number))
-	ls.metrics.slotNum.Set(float64(block.Slot))
-	ls.metrics.slotInEpoch.Set(float64(block.Slot - ls.currentEpoch.StartSlot))
-	return nil
-}
-
-func (ls *LedgerState) removeBlock(
-	txn *database.Txn,
-	block database.Block,
-) error {
-	if err := database.BlockDeleteTxn(txn, block); err != nil {
-		return err
-	}
+	ls.metrics.blockNum.Set(float64(ls.currentTip.BlockNumber))
+	ls.metrics.slotNum.Set(float64(point.Slot))
+	ls.metrics.slotInEpoch.Set(float64(point.Slot - ls.currentEpoch.StartSlot))
 	return nil
 }
 
 func (ls *LedgerState) loadPParams() error {
-	pparams, err := ls.db.Metadata().GetPParams(ls.currentEpoch.EpochId, nil)
-	if err != nil {
-		return err
-	}
-	if len(pparams) == 0 {
-		return nil
-	}
-	// pparams is ordered, so grab the first
-	tmpPParams := pparams[0]
-	currentPParams, err := ls.currentEra.DecodePParamsFunc(
-		tmpPParams.Cbor,
+	pparams, err := ls.db.GetPParams(
+		ls.currentEpoch.EpochId,
+		ls.currentEra.DecodePParamsFunc,
+		nil,
 	)
 	if err != nil {
 		return err
 	}
-	ls.currentPParams = currentPParams
+	ls.currentPParams = pparams
 	return nil
 }
 
@@ -540,7 +549,7 @@ func (ls *LedgerState) loadTip() error {
 	ls.currentTip = tmpTip
 	// Load tip block and set cached block nonce
 	if ls.currentTip.Point.Slot > 0 {
-		tipBlock, err := database.BlockByPoint(ls.db, ls.currentTip.Point)
+		tipBlock, err := ls.chain.BlockByPoint(ls.currentTip.Point, nil)
 		if err != nil {
 			return err
 		}
@@ -556,7 +565,7 @@ func (ls *LedgerState) loadTip() error {
 }
 
 func (ls *LedgerState) GetBlock(point ocommon.Point) (*database.Block, error) {
-	ret, err := database.BlockByPoint(ls.db, point)
+	ret, err := ls.chain.BlockByPoint(point, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -571,7 +580,8 @@ func (ls *LedgerState) RecentChainPoints(count int) ([]ocommon.Point, error) {
 		return nil, err
 	}
 	ret := []ocommon.Point{}
-	for _, tmpBlock := range tmpBlocks {
+	var tmpBlock database.Block
+	for _, tmpBlock = range tmpBlocks {
 		ret = append(
 			ret,
 			ocommon.NewPoint(tmpBlock.Slot, tmpBlock.Hash),
@@ -586,9 +596,11 @@ func (ls *LedgerState) GetIntersectPoint(
 ) (*ocommon.Point, error) {
 	tip := ls.Tip()
 	var ret ocommon.Point
+	var tmpBlock database.Block
+	var err error
 	foundOrigin := false
 	txn := ls.db.Transaction(false)
-	err := txn.Do(func(txn *database.Txn) error {
+	err = txn.Do(func(txn *database.Txn) error {
 		for _, point := range points {
 			// Ignore points with a slot later than our current tip
 			if point.Slot > tip.Point.Slot {
@@ -604,9 +616,9 @@ func (ls *LedgerState) GetIntersectPoint(
 				continue
 			}
 			// Lookup block in metadata DB
-			tmpBlock, err := database.BlockByPoint(ls.db, point)
+			tmpBlock, err = ls.chain.BlockByPoint(point, txn)
 			if err != nil {
-				if errors.Is(err, database.ErrBlockNotFound) {
+				if errors.Is(err, chain.ErrBlockNotFound) {
 					continue
 				}
 				return err
@@ -631,8 +643,8 @@ func (ls *LedgerState) GetIntersectPoint(
 func (ls *LedgerState) GetChainFromPoint(
 	point ocommon.Point,
 	inclusive bool,
-) (*ChainIterator, error) {
-	return newChainIterator(ls, point, inclusive)
+) (*chain.ChainIterator, error) {
+	return ls.chain.FromPoint(point, inclusive)
 }
 
 // Tip returns the current chain tip
@@ -650,7 +662,7 @@ func (ls *LedgerState) UtxoByRef(
 	txId []byte,
 	outputIdx uint32,
 ) (database.Utxo, error) {
-	return database.UtxoByRef(ls.db, txId, outputIdx)
+	return ls.db.UtxoByRef(txId, outputIdx, nil)
 }
 
 // UtxosByAddress returns all UTxOs that belong to the specified address
@@ -658,21 +670,13 @@ func (ls *LedgerState) UtxosByAddress(
 	addr ledger.Address,
 ) ([]database.Utxo, error) {
 	ret := []database.Utxo{}
-	utxos, err := database.UtxosByAddress(ls.db, addr)
+	utxos, err := ls.db.UtxosByAddress(addr, nil)
 	if err != nil {
 		return ret, err
 	}
+	var tmpUtxo database.Utxo
 	for _, utxo := range utxos {
-		tmpUtxo := database.Utxo{
-			ID:          utxo.ID,
-			TxId:        utxo.TxId,
-			OutputIdx:   utxo.OutputIdx,
-			AddedSlot:   utxo.AddedSlot,
-			DeletedSlot: utxo.DeletedSlot,
-			PaymentKey:  utxo.PaymentKey,
-			StakingKey:  utxo.StakingKey,
-			Cbor:        utxo.Cbor,
-		}
+		tmpUtxo = database.Utxo(utxo)
 		ret = append(ret, tmpUtxo)
 	}
 	return ret, nil

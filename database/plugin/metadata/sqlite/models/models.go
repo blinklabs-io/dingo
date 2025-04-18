@@ -16,6 +16,10 @@ package models
 
 // MigrateModels contains a list of model objects that should have DB migrations applied
 var MigrateModels = []any{
+	&Account{},
+	&AuthCommitteeHot{},
+	&Deregistration{},
+	&Drep{},
 	&Epoch{},
 	&PoolRegistration{},
 	&PoolRegistrationOwner{},
@@ -23,9 +27,18 @@ var MigrateModels = []any{
 	&PoolRetirement{},
 	&PParams{},
 	&PParamUpdate{},
+	&Registration{},
+	&RegistrationDrep{},
+	&ResignCommitteeCold{},
 	&StakeDelegation{},
 	&StakeDeregistration{},
 	&StakeRegistration{},
+	&StakeRegistrationDelegation{},
+	&StakeVoteDelegation{},
+	&StakeVoteRegistrationDelegation{},
 	&Tip{},
+	&UpdateDrep{},
 	&Utxo{},
+	&VoteDelegation{},
+	&VoteRegistrationDelegation{},
 }

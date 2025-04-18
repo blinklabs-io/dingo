@@ -12,30 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package state
+package ledger
 
 import (
-	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/event"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
-
-const (
-	ChainBlockEventType    = "ledger.chain-block"
-	ChainRollbackEventType = "ledger.chain-rollback"
-)
-
-type ChainBlockEvent struct {
-	Point ocommon.Point
-	Block database.Block
-}
-
-type ChainRollbackEvent struct {
-	Point ocommon.Point
-}
 
 const (
 	BlockfetchEventType event.EventType = "blockfetch.event"
