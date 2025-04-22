@@ -262,6 +262,7 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 		if err = ls.db.SetTip(ls.currentTip, txn); err != nil {
 			return err
 		}
+		ls.updateTipMetrics()
 		return nil
 	})
 	if err != nil {
@@ -414,10 +415,22 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 					if err != nil {
 						return err
 					}
-					if err = ls.ledgerProcessBlock(txn, next.Point, tmpBlock, next.Block.Nonce); err != nil {
+					if err = ls.ledgerProcessBlock(txn, next.Point, tmpBlock); err != nil {
 						return err
 					}
+					// Update tip
+					ls.currentTip = ochainsync.Tip{
+						Point:       next.Point,
+						BlockNumber: next.Block.Number,
+					}
+					// Update tip block nonce
+					ls.currentTipBlockNonce = next.Block.Nonce
 				}
+				// Update tip in database
+				if err := ls.db.SetTip(ls.currentTip, txn); err != nil {
+					return err
+				}
+				ls.updateTipMetrics()
 				return nil
 			})
 			if err != nil {
@@ -466,7 +479,7 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 	}
 }
 
-func (ls *LedgerState) ledgerProcessBlock(txn *database.Txn, point ocommon.Point, block ledger.Block, nonce []byte) error {
+func (ls *LedgerState) ledgerProcessBlock(txn *database.Txn, point ocommon.Point, block ledger.Block) error {
 	// Check that we're processing things in order
 	if len(ls.currentTip.Point.Hash) > 0 {
 		if string(block.PrevHash().Bytes()) != string(ls.currentTip.Point.Hash) {
@@ -499,21 +512,14 @@ func (ls *LedgerState) ledgerProcessBlock(txn *database.Txn, point ocommon.Point
 			return err
 		}
 	}
-	// Update tip
-	ls.currentTip = ochainsync.Tip{
-		Point:       point,
-		BlockNumber: block.BlockNumber(),
-	}
-	if err := ls.db.SetTip(ls.currentTip, txn); err != nil {
-		return err
-	}
-	// Update tip block nonce
-	ls.currentTipBlockNonce = nonce
+	return nil
+}
+
+func (ls *LedgerState) updateTipMetrics() {
 	// Update metrics
 	ls.metrics.blockNum.Set(float64(ls.currentTip.BlockNumber))
-	ls.metrics.slotNum.Set(float64(point.Slot))
-	ls.metrics.slotInEpoch.Set(float64(point.Slot - ls.currentEpoch.StartSlot))
-	return nil
+	ls.metrics.slotNum.Set(float64(ls.currentTip.Point.Slot))
+	ls.metrics.slotInEpoch.Set(float64(ls.currentTip.Point.Slot - ls.currentEpoch.StartSlot))
 }
 
 func (ls *LedgerState) loadPParams() error {
@@ -555,12 +561,7 @@ func (ls *LedgerState) loadTip() error {
 		}
 		ls.currentTipBlockNonce = tipBlock.Nonce
 	}
-	// Update metrics
-	ls.metrics.blockNum.Set(float64(ls.currentTip.BlockNumber))
-	ls.metrics.slotNum.Set(float64(ls.currentTip.Point.Slot))
-	ls.metrics.slotInEpoch.Set(
-		float64(ls.currentTip.Point.Slot - ls.currentEpoch.StartSlot),
-	)
+	ls.updateTipMetrics()
 	return nil
 }
 
