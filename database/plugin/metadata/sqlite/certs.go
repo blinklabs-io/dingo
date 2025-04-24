@@ -61,8 +61,9 @@ func (d *MetadataStoreSqlite) GetPoolRegistrations(
 			Pledge: uint64(cert.Pledge),
 			Cost:   uint64(cert.Cost),
 			Margin: tmpMargin,
-			// TODO: we do not store this anywhere
-			// RewardAccount: lcommon.AddrKeyHash(lcommon.NewBlake2b256(cert.PoolOwners[0]))
+			RewardAccount: lcommon.AddrKeyHash(
+				lcommon.NewBlake2b224(cert.RewardAccount),
+			),
 		}
 		for _, owner := range cert.Owners {
 			addrKeyHash = lcommon.AddrKeyHash(
