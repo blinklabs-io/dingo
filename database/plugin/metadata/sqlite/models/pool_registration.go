@@ -27,6 +27,7 @@ type PoolRegistration struct {
 	Pledge        types.Uint64
 	Cost          types.Uint64
 	Margin        *types.Rat
+	RewardAccount []byte
 	Owners        []PoolRegistrationOwner
 	Relays        []PoolRegistrationRelay
 	MetadataUrl   string
