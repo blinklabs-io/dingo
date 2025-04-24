@@ -44,6 +44,10 @@ type MetadataStore interface {
 	) ([]lcommon.StakeRegistrationCertificate, error)
 	GetTip(*gorm.DB) (ochainsync.Tip, error)
 
+	GetAccount(
+		[]byte, // stakeKey
+		*gorm.DB,
+	) (models.Account, error)
 	GetPParams(
 		uint64, // epoch
 		*gorm.DB,
@@ -58,6 +62,14 @@ type MetadataStore interface {
 		*gorm.DB,
 	) (models.Utxo, error)
 
+	SetAccount(
+		[]byte, // stakeKey
+		[]byte, // pkh
+		[]byte, // drep
+		uint64, // slot
+		uint64, // amount
+		*gorm.DB,
+	) error
 	SetEpoch(
 		uint64, // slot
 		uint64, // epoch

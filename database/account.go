@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package models
+package database
 
 type Account struct {
 	ID            uint   `gorm:"primarykey"`
@@ -21,9 +21,45 @@ type Account struct {
 	Drep          []byte `gorm:"index"`
 	DepositAmount uint64
 	AddedSlot     uint64
-	Active        bool `gorm:"default:true"`
+	Active        bool
 }
 
 func (a *Account) TableName() string {
 	return "account"
+}
+
+func (d *Database) GetAccount(
+	stakeKey []byte,
+	txn *Txn,
+) (Account, error) {
+	tmpAccount := Account{}
+	if txn == nil {
+		txn = d.Transaction(false)
+		defer txn.Commit() //nolint:errcheck
+	}
+	account, err := d.metadata.GetAccount(stakeKey, txn.Metadata())
+	if err != nil {
+		return tmpAccount, err
+	}
+	tmpAccount = Account(account)
+	return tmpAccount, nil
+}
+
+func (d *Database) SetAccount(
+	stakeKey, pkh, drep []byte,
+	slot, amount uint64,
+	txn *Txn,
+) error {
+	if txn == nil {
+		txn = d.Transaction(false)
+		defer txn.Commit() //nolint:errcheck
+	}
+	return d.metadata.SetAccount(
+		stakeKey,
+		pkh,
+		drep,
+		slot,
+		amount,
+		txn.Metadata(),
+	)
 }
