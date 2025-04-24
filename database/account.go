@@ -14,6 +14,10 @@
 
 package database
 
+import (
+	"github.com/btcsuite/btcd/btcutil/bech32"
+)
+
 type Account struct {
 	ID            uint   `gorm:"primarykey"`
 	StakingKey    []byte `gorm:"index,unique"`
@@ -26,6 +30,19 @@ type Account struct {
 
 func (a *Account) TableName() string {
 	return "account"
+}
+
+func (a *Account) String() string {
+	// Convert data to base32 and encode as bech32
+	convData, err := bech32.ConvertBits(a.StakingKey[:], 8, 5, true)
+	if err != nil {
+		return ""
+	}
+	encoded, err := bech32.Encode("stake", convData)
+	if err != nil {
+		return ""
+	}
+	return encoded
 }
 
 func (d *Database) GetAccount(
