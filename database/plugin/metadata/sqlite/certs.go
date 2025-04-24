@@ -268,27 +268,20 @@ func (d *MetadataStoreSqlite) SetStakeRegistration(
 	slot, deposit uint64,
 	txn *gorm.DB,
 ) error {
-	tmpAccount := models.Account{
-		StakingKey:    cert.StakeRegistration.Credential.Bytes(),
+	stakeKey := cert.StakeRegistration.Credential.Bytes()
+	tmpItem := models.StakeRegistration{
+		StakingKey:    stakeKey,
 		AddedSlot:     slot,
 		DepositAmount: deposit,
 	}
-	tmpItem := models.StakeRegistration{
-		StakingKey:    cert.StakeRegistration.Credential.Bytes(),
-		AddedSlot:     slot,
-		DepositAmount: deposit,
+	if err := d.SetAccount(stakeKey, nil, nil, slot, deposit, txn); err != nil {
+		return err
 	}
 	if txn != nil {
-		if accountResult := txn.Create(&tmpAccount); accountResult.Error != nil {
-			return accountResult.Error
-		}
 		if result := txn.Create(&tmpItem); result.Error != nil {
 			return result.Error
 		}
 	} else {
-		if accountResult := d.DB().Create(&tmpAccount); accountResult.Error != nil {
-			return accountResult.Error
-		}
 		if result := d.DB().Create(&tmpItem); result.Error != nil {
 			return result.Error
 		}
@@ -302,27 +295,20 @@ func (d *MetadataStoreSqlite) SetRegistration(
 	slot, deposit uint64,
 	txn *gorm.DB,
 ) error {
-	tmpAccount := models.Account{
-		StakingKey:    cert.StakeCredential.Credential.Bytes(),
+	stakeKey := cert.StakeCredential.Credential.Bytes()
+	tmpItem := models.Registration{
+		StakingKey:    stakeKey,
 		AddedSlot:     slot,
 		DepositAmount: deposit,
 	}
-	tmpItem := models.Registration{
-		StakingKey:    cert.StakeCredential.Credential.Bytes(),
-		AddedSlot:     slot,
-		DepositAmount: deposit,
+	if err := d.SetAccount(stakeKey, nil, nil, slot, deposit, txn); err != nil {
+		return err
 	}
 	if txn != nil {
-		if accountResult := txn.Create(&tmpAccount); accountResult.Error != nil {
-			return accountResult.Error
-		}
 		if result := txn.Create(&tmpItem); result.Error != nil {
 			return result.Error
 		}
 	} else {
-		if accountResult := d.DB().Create(&tmpAccount); accountResult.Error != nil {
-			return accountResult.Error
-		}
 		if result := d.DB().Create(&tmpItem); result.Error != nil {
 			return result.Error
 		}
