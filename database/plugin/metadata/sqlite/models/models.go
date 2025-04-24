@@ -21,6 +21,7 @@ var MigrateModels = []any{
 	&Deregistration{},
 	&Drep{},
 	&Epoch{},
+	&Pool{},
 	&PoolRegistration{},
 	&PoolRegistrationOwner{},
 	&PoolRegistrationRelay{},

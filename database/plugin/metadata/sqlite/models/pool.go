@@ -20,8 +20,27 @@ import (
 	"github.com/blinklabs-io/dingo/database/types"
 )
 
-type PoolRegistration struct {
+type Pool struct {
 	ID            uint   `gorm:"primarykey"`
+	PoolKeyHash   []byte `gorm:"index"`
+	VrfKeyHash    []byte
+	Pledge        types.Uint64
+	Cost          types.Uint64
+	Margin        *types.Rat
+	RewardAccount []byte
+	Owners        []PoolRegistrationOwner
+	Relays        []PoolRegistrationRelay
+	Registration  []PoolRegistration
+	Retirement    []PoolRetirement
+}
+
+func (p *Pool) TableName() string {
+	return "pool"
+}
+
+type PoolRegistration struct {
+	ID            uint `gorm:"primarykey"`
+	PoolID        uint
 	PoolKeyHash   []byte `gorm:"index"`
 	VrfKeyHash    []byte
 	Pledge        types.Uint64
@@ -43,6 +62,7 @@ func (PoolRegistration) TableName() string {
 type PoolRegistrationOwner struct {
 	ID                 uint `gorm:"primarykey"`
 	PoolRegistrationID uint
+	PoolID             uint
 	KeyHash            []byte
 }
 
@@ -53,6 +73,7 @@ func (PoolRegistrationOwner) TableName() string {
 type PoolRegistrationRelay struct {
 	ID                 uint `gorm:"primarykey"`
 	PoolRegistrationID uint
+	PoolID             uint
 	Port               uint
 	Ipv4               *net.IP
 	Ipv6               *net.IP
@@ -61,4 +82,16 @@ type PoolRegistrationRelay struct {
 
 func (PoolRegistrationRelay) TableName() string {
 	return "pool_registration_relay"
+}
+
+type PoolRetirement struct {
+	ID          uint `gorm:"primarykey"`
+	PoolID      uint
+	PoolKeyHash []byte `gorm:"index"`
+	Epoch       uint64
+	AddedSlot   uint64
+}
+
+func (PoolRetirement) TableName() string {
+	return "pool_retirement"
 }
