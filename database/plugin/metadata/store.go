@@ -67,7 +67,7 @@ type MetadataStore interface {
 		[]byte, // pkh
 		[]byte, // drep
 		uint64, // slot
-		uint64, // amount
+		bool, // active
 		*gorm.DB,
 	) error
 	SetEpoch(

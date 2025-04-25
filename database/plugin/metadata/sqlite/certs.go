@@ -57,29 +57,6 @@ func (d *MetadataStoreSqlite) GetStakeRegistrations(
 	return ret, nil
 }
 
-// SetStakeDelegation saves a stake delegation certificate
-func (d *MetadataStoreSqlite) SetStakeDelegation(
-	cert *lcommon.StakeDelegationCertificate,
-	slot uint64,
-	txn *gorm.DB,
-) error {
-	tmpItem := models.StakeDelegation{
-		StakingKey:  cert.StakeCredential.Credential.Bytes(),
-		PoolKeyHash: cert.PoolKeyHash[:],
-		AddedSlot:   slot,
-	}
-	if txn != nil {
-		if result := txn.Create(&tmpItem); result.Error != nil {
-			return result.Error
-		}
-	} else {
-		if result := d.DB().Create(&tmpItem); result.Error != nil {
-			return result.Error
-		}
-	}
-	return nil
-}
-
 // SetStakeDeregistration saves a stake deregistration certificate
 func (d *MetadataStoreSqlite) SetStakeDeregistration(
 	cert *lcommon.StakeDeregistrationCertificate,

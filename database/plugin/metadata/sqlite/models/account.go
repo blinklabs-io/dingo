@@ -15,15 +15,67 @@
 package models
 
 type Account struct {
-	ID            uint   `gorm:"primarykey"`
-	StakingKey    []byte `gorm:"index,unique"`
-	Pool          []byte `gorm:"index"`
-	Drep          []byte `gorm:"index"`
-	DepositAmount uint64
-	AddedSlot     uint64
-	Active        bool `gorm:"default:true"`
+	ID         uint   `gorm:"primarykey"`
+	StakingKey []byte `gorm:"index,unique"`
+	Pool       []byte `gorm:"index"`
+	Drep       []byte `gorm:"index"`
+	AddedSlot  uint64
+	Active     bool `gorm:"default:true"`
 }
 
 func (a *Account) TableName() string {
 	return "account"
+}
+
+type Deregistration struct {
+	ID         uint   `gorm:"primarykey"`
+	StakingKey []byte `gorm:"index"`
+	AddedSlot  uint64
+}
+
+func (Deregistration) TableName() string {
+	return "deregistration"
+}
+
+type Registration struct {
+	ID            uint   `gorm:"primarykey"`
+	StakingKey    []byte `gorm:"index"`
+	AddedSlot     uint64
+	DepositAmount uint64
+}
+
+func (Registration) TableName() string {
+	return "registration"
+}
+
+type StakeDelegation struct {
+	ID          uint   `gorm:"primarykey"`
+	StakingKey  []byte `gorm:"index"`
+	PoolKeyHash []byte `gorm:"index"`
+	AddedSlot   uint64
+}
+
+func (StakeDelegation) TableName() string {
+	return "stake_delegation"
+}
+
+type StakeDeregistration struct {
+	ID         uint   `gorm:"primarykey"`
+	StakingKey []byte `gorm:"index"`
+	AddedSlot  uint64
+}
+
+func (StakeDeregistration) TableName() string {
+	return "stake_deregistration"
+}
+
+type StakeRegistration struct {
+	ID            uint   `gorm:"primarykey"`
+	StakingKey    []byte `gorm:"index"`
+	AddedSlot     uint64
+	DepositAmount uint64
+}
+
+func (StakeRegistration) TableName() string {
+	return "stake_registration"
 }
