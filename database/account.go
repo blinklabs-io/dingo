@@ -97,6 +97,19 @@ func (d *Database) SetStakeDelegation(
 	)
 }
 
+// SetStakeDeregistration saves a stake deregistration certificate
+func (d *Database) SetStakeDeregistration(
+	cert *lcommon.StakeDeregistrationCertificate,
+	slot uint64,
+	txn *Txn,
+) error {
+	return d.metadata.SetStakeDeregistration(
+		cert,
+		slot,
+		txn.Metadata(),
+	)
+}
+
 // SetStakeRegistration saves a stake registration certificate
 func (d *Database) SetStakeRegistration(
 	cert *lcommon.StakeRegistrationCertificate,

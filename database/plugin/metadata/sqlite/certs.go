@@ -56,25 +56,3 @@ func (d *MetadataStoreSqlite) GetStakeRegistrations(
 	}
 	return ret, nil
 }
-
-// SetStakeDeregistration saves a stake deregistration certificate
-func (d *MetadataStoreSqlite) SetStakeDeregistration(
-	cert *lcommon.StakeDeregistrationCertificate,
-	slot uint64,
-	txn *gorm.DB,
-) error {
-	tmpItem := models.StakeDeregistration{
-		StakingKey: cert.StakeDeregistration.Credential.Bytes(),
-		AddedSlot:  slot,
-	}
-	if txn != nil {
-		if result := txn.Create(&tmpItem); result.Error != nil {
-			return result.Error
-		}
-	} else {
-		if result := d.DB().Create(&tmpItem); result.Error != nil {
-			return result.Error
-		}
-	}
-	return nil
-}

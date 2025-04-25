@@ -51,12 +51,3 @@ func (d *Database) SetPoolRetirement(
 ) error {
 	return d.metadata.SetPoolRetirement(cert, slot, txn.Metadata())
 }
-
-// SetStakeDeregistration saves a stake deregistration certificate
-func (d *Database) SetStakeDeregistration(
-	cert *lcommon.StakeDeregistrationCertificate,
-	slot uint64,
-	txn *Txn,
-) error {
-	return d.metadata.SetStakeDeregistration(cert, slot, txn.Metadata())
-}
