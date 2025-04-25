@@ -14,20 +14,24 @@
 
 package database
 
+import (
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+)
+
 type Account struct {
-	ID            uint   `gorm:"primarykey"`
-	StakingKey    []byte `gorm:"index,unique"`
-	Pool          []byte `gorm:"index"`
-	Drep          []byte `gorm:"index"`
-	DepositAmount uint64
-	AddedSlot     uint64
-	Active        bool
+	ID         uint   `gorm:"primarykey"`
+	StakingKey []byte `gorm:"index,unique"`
+	Pool       []byte `gorm:"index"`
+	Drep       []byte `gorm:"index"`
+	AddedSlot  uint64
+	Active     bool
 }
 
 func (a *Account) TableName() string {
 	return "account"
 }
 
+// GetAccount returns an account by staking key
 func (d *Database) GetAccount(
 	stakeKey []byte,
 	txn *Txn,
@@ -45,9 +49,11 @@ func (d *Database) GetAccount(
 	return tmpAccount, nil
 }
 
+// SetAccount saves an account
 func (d *Database) SetAccount(
 	stakeKey, pkh, drep []byte,
-	slot, amount uint64,
+	slot uint64,
+	active bool,
 	txn *Txn,
 ) error {
 	if txn == nil {
@@ -59,7 +65,48 @@ func (d *Database) SetAccount(
 		pkh,
 		drep,
 		slot,
-		amount,
+		active,
+		txn.Metadata(),
+	)
+}
+
+// SetRegistration saves a registration certificate
+func (d *Database) SetRegistration(
+	cert *lcommon.RegistrationCertificate,
+	slot, deposit uint64,
+	txn *Txn,
+) error {
+	return d.metadata.SetRegistration(
+		cert,
+		slot,
+		deposit,
+		txn.Metadata(),
+	)
+}
+
+// SetStakeDelegation saves a stake delegation certificate
+func (d *Database) SetStakeDelegation(
+	cert *lcommon.StakeDelegationCertificate,
+	slot uint64,
+	txn *Txn,
+) error {
+	return d.metadata.SetStakeDelegation(
+		cert,
+		slot,
+		txn.Metadata(),
+	)
+}
+
+// SetStakeRegistration saves a stake registration certificate
+func (d *Database) SetStakeRegistration(
+	cert *lcommon.StakeRegistrationCertificate,
+	slot, deposit uint64,
+	txn *Txn,
+) error {
+	return d.metadata.SetStakeRegistration(
+		cert,
+		slot,
+		deposit,
 		txn.Metadata(),
 	)
 }

@@ -44,13 +44,15 @@ func (d *MetadataStoreSqlite) GetAccount(
 // SetAccount saves an account
 func (d *MetadataStoreSqlite) SetAccount(
 	stakeKey, pkh, drep []byte,
-	slot, deposit uint64,
+	slot uint64,
+	active bool,
 	txn *gorm.DB,
 ) error {
 	tmpItem := models.Account{
-		StakingKey:    stakeKey,
-		AddedSlot:     slot,
-		DepositAmount: deposit,
+		StakingKey: stakeKey,
+		AddedSlot:  slot,
+		Pool:       pkh,
+		Drep:       drep,
 	}
 	if txn != nil {
 		if result := txn.Clauses(clause.OnConflict{UpdateAll: true}).Create(&tmpItem); result.Error != nil {
@@ -76,7 +78,7 @@ func (d *MetadataStoreSqlite) SetStakeRegistration(
 		AddedSlot:     slot,
 		DepositAmount: deposit,
 	}
-	if err := d.SetAccount(stakeKey, nil, nil, slot, deposit, txn); err != nil {
+	if err := d.SetAccount(stakeKey, nil, nil, slot, true, txn); err != nil {
 		return err
 	}
 	if txn != nil {
@@ -103,7 +105,7 @@ func (d *MetadataStoreSqlite) SetRegistration(
 		AddedSlot:     slot,
 		DepositAmount: deposit,
 	}
-	if err := d.SetAccount(stakeKey, nil, nil, slot, deposit, txn); err != nil {
+	if err := d.SetAccount(stakeKey, nil, nil, slot, true, txn); err != nil {
 		return err
 	}
 	if txn != nil {
@@ -111,6 +113,41 @@ func (d *MetadataStoreSqlite) SetRegistration(
 			return result.Error
 		}
 	} else {
+		if result := d.DB().Create(&tmpItem); result.Error != nil {
+			return result.Error
+		}
+	}
+	return nil
+}
+
+// SetStakeDelegation saves a stake delegation certificate
+func (d *MetadataStoreSqlite) SetStakeDelegation(
+	cert *lcommon.StakeDelegationCertificate,
+	slot uint64,
+	txn *gorm.DB,
+) error {
+	stakeKey := cert.StakeCredential.Credential.Bytes()
+	tmpAccount, err := d.GetAccount(stakeKey, txn)
+	if err != nil {
+		return err
+	}
+	tmpItem := models.StakeDelegation{
+		StakingKey:  stakeKey,
+		PoolKeyHash: cert.PoolKeyHash[:],
+		AddedSlot:   slot,
+	}
+	tmpAccount.Pool = tmpItem.PoolKeyHash
+	if txn != nil {
+		if accountErr := txn.Save(&tmpAccount); accountErr.Error != nil {
+			return accountErr.Error
+		}
+		if result := txn.Create(&tmpItem); result.Error != nil {
+			return result.Error
+		}
+	} else {
+		if accountErr := d.DB().Save(&tmpAccount); accountErr.Error != nil {
+			return accountErr.Error
+		}
 		if result := d.DB().Create(&tmpItem); result.Error != nil {
 			return result.Error
 		}
