@@ -16,6 +16,7 @@ package sqlite
 
 import (
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite/models"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
@@ -57,6 +58,60 @@ func (d *MetadataStoreSqlite) SetAccount(
 		}
 	} else {
 		if result := d.DB().Clauses(clause.OnConflict{UpdateAll: true}).Create(&tmpItem); result.Error != nil {
+			return result.Error
+		}
+	}
+	return nil
+}
+
+// SetStakeRegistration saves a stake registration certificate and account
+func (d *MetadataStoreSqlite) SetStakeRegistration(
+	cert *lcommon.StakeRegistrationCertificate,
+	slot, deposit uint64,
+	txn *gorm.DB,
+) error {
+	stakeKey := cert.StakeRegistration.Credential.Bytes()
+	tmpItem := models.StakeRegistration{
+		StakingKey:    stakeKey,
+		AddedSlot:     slot,
+		DepositAmount: deposit,
+	}
+	if err := d.SetAccount(stakeKey, nil, nil, slot, deposit, txn); err != nil {
+		return err
+	}
+	if txn != nil {
+		if result := txn.Create(&tmpItem); result.Error != nil {
+			return result.Error
+		}
+	} else {
+		if result := d.DB().Create(&tmpItem); result.Error != nil {
+			return result.Error
+		}
+	}
+	return nil
+}
+
+// SetRegistration saves a registration certificate and account
+func (d *MetadataStoreSqlite) SetRegistration(
+	cert *lcommon.RegistrationCertificate,
+	slot, deposit uint64,
+	txn *gorm.DB,
+) error {
+	stakeKey := cert.StakeCredential.Credential.Bytes()
+	tmpItem := models.Registration{
+		StakingKey:    stakeKey,
+		AddedSlot:     slot,
+		DepositAmount: deposit,
+	}
+	if err := d.SetAccount(stakeKey, nil, nil, slot, deposit, txn); err != nil {
+		return err
+	}
+	if txn != nil {
+		if result := txn.Create(&tmpItem); result.Error != nil {
+			return result.Error
+		}
+	} else {
+		if result := d.DB().Create(&tmpItem); result.Error != nil {
 			return result.Error
 		}
 	}
