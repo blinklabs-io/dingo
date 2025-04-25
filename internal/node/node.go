@@ -150,7 +150,11 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 		}
 	}()
 	// Wait for interrupt/termination signal
-	signalCtx, signalCtxStop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	signalCtx, signalCtxStop := signal.NotifyContext(
+		context.Background(),
+		syscall.SIGINT,
+		syscall.SIGTERM,
+	)
 	defer signalCtxStop()
 	go func() {
 		<-signalCtx.Done()

@@ -21,8 +21,12 @@ import (
 
 var (
 	ErrBlockNotFound                = errors.New("block not found")
-	ErrRollbackBeyondEphemeralChain = errors.New("cannot rollback ephemeral chain beyond memory buffer")
-	ErrIteratorChainTip             = errors.New("chain iterator is at chain tip")
+	ErrRollbackBeyondEphemeralChain = errors.New(
+		"cannot rollback ephemeral chain beyond memory buffer",
+	)
+	ErrIteratorChainTip = errors.New(
+		"chain iterator is at chain tip",
+	)
 )
 
 type BlockNotFitChainTipError struct {

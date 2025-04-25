@@ -462,7 +462,9 @@ func (ls *LedgerState) processTransaction(
 		)
 		if err != nil {
 			ls.config.Logger.Warn(
-				"TX " + tx.Hash().String() + " failed validation: " + err.Error(),
+				"TX " + tx.Hash().
+					String() +
+					" failed validation: " + err.Error(),
 			)
 			// return fmt.Errorf("TX validation failure: %w", err)
 		}

@@ -132,7 +132,10 @@ func TestChainBasic(t *testing.T) {
 				}
 				break
 			}
-			t.Fatalf("unexpected error getting next block from chain iterator: %s", err)
+			t.Fatalf(
+				"unexpected error getting next block from chain iterator: %s",
+				err,
+			)
 		}
 		if testBlockIdx >= len(testBlocks) {
 			t.Fatal("ran out of test blocks before reaching chain tip")
@@ -143,30 +146,58 @@ func TestChainBasic(t *testing.T) {
 		}
 		nextBlock := next.Block
 		if nextBlock.ID != uint64(testBlockIdx+1) {
-			t.Fatalf("did not get expected block from iterator: got index %d, expected %d", nextBlock.ID, testBlockIdx+1)
+			t.Fatalf(
+				"did not get expected block from iterator: got index %d, expected %d",
+				nextBlock.ID,
+				testBlockIdx+1,
+			)
 		}
 		nextHashHex := hex.EncodeToString(nextBlock.Hash)
 		if nextHashHex != testBlock.MockHash {
-			t.Fatalf("did not get expected block from iterator: got hash %s, expected %s", nextHashHex, testBlock.MockHash)
+			t.Fatalf(
+				"did not get expected block from iterator: got hash %s, expected %s",
+				nextHashHex,
+				testBlock.MockHash,
+			)
 		}
 		if testBlock.MockPrevHash != "" {
 			nextPrevHashHex := hex.EncodeToString(nextBlock.PrevHash)
 			if nextPrevHashHex != testBlock.MockPrevHash {
-				t.Fatalf("did not get expected block from iterator: got prev hash %s, expected %s", nextPrevHashHex, testBlock.MockPrevHash)
+				t.Fatalf(
+					"did not get expected block from iterator: got prev hash %s, expected %s",
+					nextPrevHashHex,
+					testBlock.MockPrevHash,
+				)
 			}
 		}
 		if nextBlock.Slot != testBlock.MockSlot {
-			t.Fatalf("did not get expected block from iterator: got slot %d, expected %d", nextBlock.Slot, testBlock.MockSlot)
+			t.Fatalf(
+				"did not get expected block from iterator: got slot %d, expected %d",
+				nextBlock.Slot,
+				testBlock.MockSlot,
+			)
 		}
 		if nextBlock.Number != testBlock.MockBlockNumber {
-			t.Fatalf("did not get expected block from iterator: got block number %d, expected %d", nextBlock.Number, testBlock.MockBlockNumber)
+			t.Fatalf(
+				"did not get expected block from iterator: got block number %d, expected %d",
+				nextBlock.Number,
+				testBlock.MockBlockNumber,
+			)
 		}
 		nextPoint := next.Point
 		if nextPoint.Slot != nextBlock.Slot {
-			t.Fatalf("did not get expected point from iterator: got slot %d, expected %d", nextPoint.Slot, nextBlock.Slot)
+			t.Fatalf(
+				"did not get expected point from iterator: got slot %d, expected %d",
+				nextPoint.Slot,
+				nextBlock.Slot,
+			)
 		}
 		if string(nextPoint.Hash) != string(nextBlock.Hash) {
-			t.Fatalf("did not get expected point from iterator: got hash %x, expected %x", nextPoint.Hash, nextBlock.Hash)
+			t.Fatalf(
+				"did not get expected point from iterator: got hash %x, expected %x",
+				nextPoint.Hash,
+				nextBlock.Hash,
+			)
 		}
 		testBlockIdx++
 	}
@@ -201,7 +232,10 @@ func TestChainRollback(t *testing.T) {
 				}
 				break
 			}
-			t.Fatalf("unexpected error getting next block from chain iterator: %s", err)
+			t.Fatalf(
+				"unexpected error getting next block from chain iterator: %s",
+				err,
+			)
 		}
 		if testBlockIdx >= len(testBlocks) {
 			t.Fatal("ran out of test blocks before reaching chain tip")
@@ -213,7 +247,11 @@ func TestChainRollback(t *testing.T) {
 		nextBlock := next.Block
 		nextHashHex := hex.EncodeToString(nextBlock.Hash)
 		if nextHashHex != testBlock.MockHash {
-			t.Fatalf("did not get expected block from iterator: got hash %s, expected %s", nextHashHex, testBlock.MockHash)
+			t.Fatalf(
+				"did not get expected block from iterator: got hash %s, expected %s",
+				nextHashHex,
+				testBlock.MockHash,
+			)
 		}
 		testBlockIdx++
 	}
@@ -245,7 +283,10 @@ func TestChainRollback(t *testing.T) {
 		t.Fatalf("unexpected error calling chain iterator next: %s", err)
 	}
 	if !next.Rollback {
-		t.Fatalf("did not get expected rollback from chain iterator: got %#v", next)
+		t.Fatalf(
+			"did not get expected rollback from chain iterator: got %#v",
+			next,
+		)
 	}
 	if next.Point.Slot != testRollbackPoint.Slot ||
 		string(next.Point.Hash) != string(testRollbackPoint.Hash) {
@@ -368,10 +409,16 @@ func TestChainHeaderWrongBlock(t *testing.T) {
 	)
 	err = c.AddBlock(testWrongBlock, testNonce, nil)
 	if err == nil {
-		t.Fatalf("AddBlock should fail when adding block that doesn't match first header")
+		t.Fatalf(
+			"AddBlock should fail when adding block that doesn't match first header",
+		)
 	}
 	if !errors.Is(err, testExpectedErr) {
-		t.Fatalf("did not get expected error: got %#v but wanted %#v", err, testExpectedErr)
+		t.Fatalf(
+			"did not get expected error: got %#v but wanted %#v",
+			err,
+			testExpectedErr,
+		)
 	}
 }
 
