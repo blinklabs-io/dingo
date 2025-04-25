@@ -479,10 +479,18 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 	}
 }
 
-func (ls *LedgerState) ledgerProcessBlock(txn *database.Txn, point ocommon.Point, block ledger.Block) error {
+func (ls *LedgerState) ledgerProcessBlock(
+	txn *database.Txn,
+	point ocommon.Point,
+	block ledger.Block,
+) error {
 	// Check that we're processing things in order
 	if len(ls.currentTip.Point.Hash) > 0 {
-		if string(block.PrevHash().Bytes()) != string(ls.currentTip.Point.Hash) {
+		if string(
+			block.PrevHash().Bytes(),
+		) != string(
+			ls.currentTip.Point.Hash,
+		) {
 			return fmt.Errorf(
 				"block %s (with prev hash %s) does not fit on current chain tip (%x)",
 				block.Hash().String(),
@@ -519,7 +527,9 @@ func (ls *LedgerState) updateTipMetrics() {
 	// Update metrics
 	ls.metrics.blockNum.Set(float64(ls.currentTip.BlockNumber))
 	ls.metrics.slotNum.Set(float64(ls.currentTip.Point.Slot))
-	ls.metrics.slotInEpoch.Set(float64(ls.currentTip.Point.Slot - ls.currentEpoch.StartSlot))
+	ls.metrics.slotInEpoch.Set(
+		float64(ls.currentTip.Point.Slot - ls.currentEpoch.StartSlot),
+	)
 }
 
 func (ls *LedgerState) loadPParams() error {

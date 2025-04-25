@@ -114,7 +114,10 @@ func (n *Node) blockfetchClientBlock(
 		event.NewEvent(
 			ledger.BlockfetchEventType,
 			ledger.BlockfetchEvent{
-				Point: ocommon.NewPoint(block.SlotNumber(), block.Hash().Bytes()),
+				Point: ocommon.NewPoint(
+					block.SlotNumber(),
+					block.Hash().Bytes(),
+				),
 				Type:  blockType,
 				Block: block,
 			},

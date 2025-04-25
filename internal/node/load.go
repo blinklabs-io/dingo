@@ -92,7 +92,8 @@ func Load(cfg *config.Config, logger *slog.Logger, immutableDir string) error {
 				return err
 			}
 			// Skip first block when continuing a load operation
-			if blocksCopied == 0 && tmpBlock.SlotNumber() == chainTip.Point.Slot {
+			if blocksCopied == 0 &&
+				tmpBlock.SlotNumber() == chainTip.Point.Slot {
 				continue
 			}
 			blockBatch = append(blockBatch, tmpBlock)
@@ -117,7 +118,10 @@ func Load(cfg *config.Config, logger *slog.Logger, immutableDir string) error {
 		blockBatch = slices.Delete(blockBatch, 0, len(blockBatch))
 		if blocksCopied > 0 && blocksCopied%10000 == 0 {
 			logger.Info(
-				fmt.Sprintf("copying blocks from immutable DB (%d blocks copied)", blocksCopied),
+				fmt.Sprintf(
+					"copying blocks from immutable DB (%d blocks copied)",
+					blocksCopied,
+				),
 			)
 		}
 	}

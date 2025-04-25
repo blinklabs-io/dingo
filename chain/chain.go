@@ -136,7 +136,11 @@ func (c *Chain) AddBlockHeader(header ledger.BlockHeader) error {
 	return nil
 }
 
-func (c *Chain) AddBlock(block ledger.Block, blockNonce []byte, txn *database.Txn) error {
+func (c *Chain) AddBlock(
+	block ledger.Block,
+	blockNonce []byte,
+	txn *database.Txn,
+) error {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 	// Check that the new block matches our first header, if any
@@ -369,7 +373,10 @@ func (c *Chain) HeaderRange(count int) (ocommon.Point, ocommon.Point) {
 
 // FromPoint returns a ChainIterator starting at the specified point. If inclusive is true, the iterator
 // will start at the specified point. Otherwise it will start at the point following the specified point
-func (c *Chain) FromPoint(point ocommon.Point, inclusive bool) (*ChainIterator, error) {
+func (c *Chain) FromPoint(
+	point ocommon.Point,
+	inclusive bool,
+) (*ChainIterator, error) {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 	iter, err := newChainIterator(
@@ -384,7 +391,10 @@ func (c *Chain) FromPoint(point ocommon.Point, inclusive bool) (*ChainIterator, 
 	return iter, nil
 }
 
-func (c *Chain) BlockByPoint(point ocommon.Point, txn *database.Txn) (database.Block, error) {
+func (c *Chain) BlockByPoint(
+	point ocommon.Point,
+	txn *database.Txn,
+) (database.Block, error) {
 	if point.Slot <= c.lastDbSlot {
 		// Query database
 		tmpBlock, err := database.BlockByPoint(c.db, point)
@@ -409,7 +419,10 @@ func (c *Chain) BlockByPoint(point ocommon.Point, txn *database.Txn) (database.B
 	return database.Block{}, ErrBlockNotFound
 }
 
-func (c *Chain) blockByIndex(blockIndex uint64, txn *database.Txn) (database.Block, error) {
+func (c *Chain) blockByIndex(
+	blockIndex uint64,
+	txn *database.Txn,
+) (database.Block, error) {
 	if blockIndex <= c.lastDbBlockIndex {
 		// Query database
 		tmpBlock, err := c.db.BlockByIndex(blockIndex, txn)
@@ -422,14 +435,20 @@ func (c *Chain) blockByIndex(blockIndex uint64, txn *database.Txn) (database.Blo
 		return tmpBlock, nil
 	}
 	// Get from memory buffer
-	memBlockIndex := int(blockIndex - c.lastDbBlockIndex - initialBlockIndex) //nolint:gosec
+	//nolint:gosec
+	memBlockIndex := int(
+		blockIndex - c.lastDbBlockIndex - initialBlockIndex,
+	)
 	if memBlockIndex < 0 || len(c.blocks) < memBlockIndex+1 {
 		return database.Block{}, ErrBlockNotFound
 	}
 	return c.blocks[memBlockIndex], nil
 }
 
-func (c *Chain) iterNext(iter *ChainIterator, blocking bool) (*ChainIteratorResult, error) {
+func (c *Chain) iterNext(
+	iter *ChainIterator,
+	blocking bool,
+) (*ChainIteratorResult, error) {
 	c.mutex.RLock()
 	// Check for pending rollback
 	if iter.needsRollback {

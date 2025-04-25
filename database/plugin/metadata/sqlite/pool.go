@@ -34,7 +34,11 @@ func (d *MetadataStoreSqlite) GetPool(
 	ret := models.Pool{}
 	tmpPool := models.Pool{}
 	if txn != nil {
-		result := txn.First(&tmpPool, "pool_key_hash = ?", lcommon.Blake2b224(pkh).Bytes())
+		result := txn.First(
+			&tmpPool,
+			"pool_key_hash = ?",
+			lcommon.Blake2b224(pkh).Bytes(),
+		)
 		if result.Error != nil {
 			return ret, result.Error
 		}

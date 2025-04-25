@@ -74,7 +74,11 @@ tlsKeyFilePath: "key1.pem"
 	}
 
 	if !reflect.DeepEqual(actual, expected) {
-		t.Errorf("Loaded config does not match expected.\nActual: %+v\nExpected: %+v", actual, expected)
+		t.Errorf(
+			"Loaded config does not match expected.\nActual: %+v\nExpected: %+v",
+			actual,
+			expected,
+		)
 	}
 }
 func TestLoad_WithoutConfigFile_UsesDefaults(t *testing.T) {
@@ -105,6 +109,10 @@ func TestLoad_WithoutConfigFile_UsesDefaults(t *testing.T) {
 	}
 
 	if !reflect.DeepEqual(cfg, expected) {
-		t.Errorf("config mismatch without file:\nExpected: %+v\nGot:      %+v", expected, cfg)
+		t.Errorf(
+			"config mismatch without file:\nExpected: %+v\nGot:      %+v",
+			expected,
+			cfg,
+		)
 	}
 }
