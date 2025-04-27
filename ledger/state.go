@@ -65,6 +65,7 @@ type LedgerState struct {
 	timerCleanupConsumedUtxos   *time.Timer
 	currentPParams              lcommon.ProtocolParameters
 	currentEpoch                database.Epoch
+	epochCache                  []database.Epoch
 	currentEra                  eras.EraDesc
 	currentTip                  ochainsync.Tip
 	currentTipBlockNonce        []byte
@@ -143,8 +144,8 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 	)
 	// Schedule periodic process to purge consumed UTxOs outside of the rollback window
 	ls.scheduleCleanupConsumedUtxos()
-	// Load current epoch from DB
-	if err := ls.loadEpoch(); err != nil {
+	// Load epoch info from DB
+	if err := ls.loadEpochs(nil); err != nil {
 		return nil, err
 	}
 	// Load current protocol parameters from DB
@@ -545,13 +546,18 @@ func (ls *LedgerState) loadPParams() error {
 	return nil
 }
 
-func (ls *LedgerState) loadEpoch() error {
-	tmpEpoch, err := ls.db.GetEpochLatest(nil)
+func (ls *LedgerState) loadEpochs(txn *database.Txn) error {
+	// Load and cache all epochs
+	epochs, err := ls.db.GetEpochs(txn)
 	if err != nil {
 		return err
 	}
-	ls.currentEpoch = tmpEpoch
-	ls.currentEra = eras.Eras[tmpEpoch.EraId]
+	ls.epochCache = epochs
+	// Set current epoch
+	if len(epochs) > 0 {
+		ls.currentEpoch = epochs[len(epochs)-1]
+		ls.currentEra = eras.Eras[ls.currentEpoch.EraId]
+	}
 	// Update metrics
 	ls.metrics.epochNum.Set(float64(ls.currentEpoch.EpochId))
 	return nil

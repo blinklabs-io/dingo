@@ -132,9 +132,31 @@ func (c *CardanoNodeConfig) ByronGenesis() *byron.ByronGenesis {
 	return c.byronGenesis
 }
 
+// LoadByronGenesisFromReader loads a Byron genesis config from an io.Reader
+// This is useful mostly for tests
+func (c *CardanoNodeConfig) LoadByronGenesisFromReader(r io.Reader) error {
+	byronGenesis, err := byron.NewByronGenesisFromReader(r)
+	if err != nil {
+		return err
+	}
+	c.byronGenesis = &byronGenesis
+	return nil
+}
+
 // ShelleyGenesis returns the Shelley genesis config specified in the cardano-node config
 func (c *CardanoNodeConfig) ShelleyGenesis() *shelley.ShelleyGenesis {
 	return c.shelleyGenesis
+}
+
+// LoadShelleyGenesisFromReader loads a Shelley genesis config from an io.Reader
+// This is useful mostly for tests
+func (c *CardanoNodeConfig) LoadShelleyGenesisFromReader(r io.Reader) error {
+	shelleyGenesis, err := shelley.NewShelleyGenesisFromReader(r)
+	if err != nil {
+		return err
+	}
+	c.shelleyGenesis = &shelleyGenesis
+	return nil
 }
 
 // AlonzoGenesis returns the Alonzo genesis config specified in the cardano-node config
@@ -142,7 +164,29 @@ func (c *CardanoNodeConfig) AlonzoGenesis() *alonzo.AlonzoGenesis {
 	return c.alonzoGenesis
 }
 
+// LoadAlonzoGenesisFromReader loads a Alonzo genesis config from an io.Reader
+// This is useful mostly for tests
+func (c *CardanoNodeConfig) LoadAlonzoGenesisFromReader(r io.Reader) error {
+	alonzoGenesis, err := alonzo.NewAlonzoGenesisFromReader(r)
+	if err != nil {
+		return err
+	}
+	c.alonzoGenesis = &alonzoGenesis
+	return nil
+}
+
 // ConwayGenesis returns the Conway genesis config specified in the cardano-node config
 func (c *CardanoNodeConfig) ConwayGenesis() *conway.ConwayGenesis {
 	return c.conwayGenesis
+}
+
+// LoadConwayGenesisFromReader loads a Conway genesis config from an io.Reader
+// This is useful mostly for tests
+func (c *CardanoNodeConfig) LoadConwayGenesisFromReader(r io.Reader) error {
+	conwayGenesis, err := conway.NewConwayGenesisFromReader(r)
+	if err != nil {
+		return err
+	}
+	c.conwayGenesis = &conwayGenesis
+	return nil
 }
