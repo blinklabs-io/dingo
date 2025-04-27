@@ -70,6 +70,28 @@ func (d *Database) GetEpochsByEra(eraId uint, txn *Txn) ([]Epoch, error) {
 	return tmpEpochs, nil
 }
 
+func (d *Database) GetEpochs(txn *Txn) ([]Epoch, error) {
+	tmpEpochs := []Epoch{}
+	if txn == nil {
+		epochs, err := d.metadata.GetEpochs(nil)
+		if err != nil {
+			return tmpEpochs, err
+		}
+		for _, epoch := range epochs {
+			tmpEpochs = append(tmpEpochs, Epoch(epoch))
+		}
+	} else {
+		epochs, err := txn.db.metadata.GetEpochs(txn.Metadata())
+		if err != nil {
+			return tmpEpochs, err
+		}
+		for _, epoch := range epochs {
+			tmpEpochs = append(tmpEpochs, Epoch(epoch))
+		}
+	}
+	return tmpEpochs, nil
+}
+
 func (d *Database) SetEpoch(
 	slot, epoch uint64,
 	nonce []byte,

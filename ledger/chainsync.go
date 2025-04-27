@@ -337,15 +337,13 @@ func (ls *LedgerState) processEpochRollover(
 		if err != nil {
 			return err
 		}
-		newEpoch, err := ls.db.GetEpochLatest(txn)
-		if err != nil {
+		// Reload epoch info
+		if err := ls.loadEpochs(txn); err != nil {
 			return err
 		}
-		ls.currentEpoch = newEpoch
-		ls.metrics.epochNum.Set(float64(newEpoch.EpochId))
 		ls.config.Logger.Debug(
 			"added initial epoch to DB",
-			"epoch", fmt.Sprintf("%+v", newEpoch),
+			"epoch", fmt.Sprintf("%+v", ls.currentEpoch),
 			"component", "ledger",
 		)
 	}
@@ -392,15 +390,13 @@ func (ls *LedgerState) processEpochRollover(
 		if err != nil {
 			return err
 		}
-		newEpoch, err := ls.db.GetEpochLatest(txn)
-		if err != nil {
+		// Reload epoch info
+		if err := ls.loadEpochs(txn); err != nil {
 			return err
 		}
-		ls.currentEpoch = newEpoch
-		ls.metrics.epochNum.Set(float64(newEpoch.EpochId))
 		ls.config.Logger.Debug(
 			"added next epoch to DB",
-			"epoch", fmt.Sprintf("%+v", newEpoch),
+			"epoch", fmt.Sprintf("%+v", ls.currentEpoch),
 			"component", "ledger",
 		)
 	}
