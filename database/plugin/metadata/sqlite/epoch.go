@@ -57,7 +57,7 @@ func (d *MetadataStoreSqlite) GetEpochsByEra(
 			return ret, result.Error
 		}
 	} else {
-		result := d.DB().Where("era_id = ?", eraId).Order("epoch_id DESC").Find(&ret)
+		result := d.DB().Where("era_id = ?", eraId).Order("epoch_id").Find(&ret)
 		if result.Error != nil {
 			return ret, result.Error
 		}
