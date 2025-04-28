@@ -82,9 +82,18 @@ func TestSlotCalc(t *testing.T) {
 			epoch:    0,
 		},
 		{
-			slot:     86399,
-			slotTime: time.Date(2022, time.October, 25, 23, 59, 59, 0, time.UTC),
-			epoch:    0,
+			slot: 86399,
+			slotTime: time.Date(
+				2022,
+				time.October,
+				25,
+				23,
+				59,
+				59,
+				0,
+				time.UTC,
+			),
+			epoch: 0,
 		},
 		{
 			slot:     86400,
@@ -104,7 +113,11 @@ func TestSlotCalc(t *testing.T) {
 			t.Errorf("unexpected error converting slot to time: %s", err)
 		}
 		if !tmpSlotToTime.Equal(testDef.slotTime) {
-			t.Errorf("did not get expected time from slot: got %s, wanted %s", tmpSlotToTime, testDef.slotTime)
+			t.Errorf(
+				"did not get expected time from slot: got %s, wanted %s",
+				tmpSlotToTime,
+				testDef.slotTime,
+			)
 		}
 		// Time to slot
 		tmpTimeToSlot, err := testLedgerState.TimeToSlot(testDef.slotTime)
@@ -112,7 +125,11 @@ func TestSlotCalc(t *testing.T) {
 			t.Errorf("unexpected error converting time to slot: %s", err)
 		}
 		if tmpTimeToSlot != testDef.slot {
-			t.Errorf("did not get expected slot from time: got %d, wanted %d", tmpTimeToSlot, testDef.slot)
+			t.Errorf(
+				"did not get expected slot from time: got %d, wanted %d",
+				tmpTimeToSlot,
+				testDef.slot,
+			)
 		}
 		// Slot to epoch
 		tmpSlotToEpoch, err := testLedgerState.SlotToEpoch(testDef.slot)
@@ -120,7 +137,11 @@ func TestSlotCalc(t *testing.T) {
 			t.Errorf("unexpected error getting epoch from slot: %s", err)
 		}
 		if tmpSlotToEpoch.EpochId != testDef.epoch {
-			t.Errorf("did not get expected epoch from slot: got %d, wanted %d", tmpSlotToEpoch.EpochId, testDef.epoch)
+			t.Errorf(
+				"did not get expected epoch from slot: got %d, wanted %d",
+				tmpSlotToEpoch.EpochId,
+				testDef.epoch,
+			)
 		}
 	}
 }

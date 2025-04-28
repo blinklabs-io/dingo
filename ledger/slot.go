@@ -41,17 +41,23 @@ func (ls *LedgerState) SlotToTime(slot uint64) (time.Time, error) {
 		if epoch.StartSlot > math.MaxInt64 ||
 			epoch.LengthInSlots > math.MaxInt64 ||
 			epoch.SlotLength > math.MaxInt64 {
-			return time.Time{}, errors.New("epoch slot values are larger than time.Duration")
+			return time.Time{}, errors.New(
+				"epoch slot values are larger than time.Duration",
+			)
 		}
 		if slot < epoch.StartSlot+uint64(epoch.LengthInSlots) {
 			slotTime = slotTime.Add(
-				time.Duration(int64(slot)-int64(epoch.StartSlot)) * (time.Duration(epoch.SlotLength) * time.Millisecond),
+				time.Duration(
+					int64(slot)-int64(epoch.StartSlot),
+				) * (time.Duration(epoch.SlotLength) * time.Millisecond),
 			)
 			foundSlot = true
 			break
 		}
 		slotTime = slotTime.Add(
-			time.Duration(epoch.LengthInSlots) * (time.Duration(epoch.SlotLength) * time.Millisecond),
+			time.Duration(
+				epoch.LengthInSlots,
+			) * (time.Duration(epoch.SlotLength) * time.Millisecond),
 		)
 	}
 	if !foundSlot {
@@ -76,7 +82,9 @@ func (ls *LedgerState) TimeToSlot(t time.Time) (uint64, error) {
 	for _, epoch := range ls.epochCache {
 		if epoch.LengthInSlots > math.MaxInt64 ||
 			epoch.SlotLength > math.MaxInt64 {
-			return 0, errors.New("epoch slot values are larger than time.Duration")
+			return 0, errors.New(
+				"epoch slot values are larger than time.Duration",
+			)
 		}
 		slotDuration := time.Duration(epoch.SlotLength) * time.Millisecond
 		if slotDuration < 0 {
@@ -85,7 +93,8 @@ func (ls *LedgerState) TimeToSlot(t time.Time) (uint64, error) {
 		epochEndTime := epochStartTime.Add(
 			time.Duration(epoch.LengthInSlots) * slotDuration,
 		)
-		if (t.Equal(epochStartTime) || t.After(epochStartTime)) && t.Before(epochEndTime) {
+		if (t.Equal(epochStartTime) || t.After(epochStartTime)) &&
+			t.Before(epochEndTime) {
 			// Figure out how far into the epoch the specified time is
 			timeDiff := t.Sub(epochStartTime)
 			// nolint:gosec
