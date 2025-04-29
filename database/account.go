@@ -70,6 +70,19 @@ func (d *Database) SetAccount(
 	)
 }
 
+// SetDeregistration saves a deregistration certificate
+func (d *Database) SetDeregistration(
+	cert *lcommon.DeregistrationCertificate,
+	slot uint64,
+	txn *Txn,
+) error {
+	return d.metadata.SetDeregistration(
+		cert,
+		slot,
+		txn.Metadata(),
+	)
+}
+
 // SetRegistration saves a registration certificate
 func (d *Database) SetRegistration(
 	cert *lcommon.RegistrationCertificate,

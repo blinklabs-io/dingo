@@ -66,6 +66,40 @@ func (d *MetadataStoreSqlite) SetAccount(
 	return nil
 }
 
+// SetDeregistration saves a deregistration certificate
+func (d *MetadataStoreSqlite) SetDeregistration(
+	cert *lcommon.DeregistrationCertificate,
+	slot uint64,
+	txn *gorm.DB,
+) error {
+	stakeKey := cert.StakeCredential.Credential.Bytes()
+	tmpAccount, err := d.GetAccount(stakeKey, txn)
+	if err != nil {
+		return err
+	}
+	tmpItem := models.Deregistration{
+		StakingKey: stakeKey,
+		AddedSlot:  slot,
+	}
+	tmpAccount.Active = false
+	if txn != nil {
+		if accountErr := txn.Save(&tmpAccount); accountErr.Error != nil {
+			return accountErr.Error
+		}
+		if result := txn.Create(&tmpItem); result.Error != nil {
+			return result.Error
+		}
+	} else {
+		if accountErr := d.DB().Save(&tmpAccount); accountErr.Error != nil {
+			return accountErr.Error
+		}
+		if result := d.DB().Create(&tmpItem); result.Error != nil {
+			return result.Error
+		}
+	}
+	return nil
+}
+
 // SetStakeRegistration saves a stake registration certificate and account
 func (d *MetadataStoreSqlite) SetStakeRegistration(
 	cert *lcommon.StakeRegistrationCertificate,
