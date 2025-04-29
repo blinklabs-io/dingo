@@ -70,6 +70,11 @@ type MetadataStore interface {
 		bool, // active
 		*gorm.DB,
 	) error
+	SetDeregistration(
+		*lcommon.DeregistrationCertificate,
+		uint64, // slot
+		*gorm.DB,
+	) error
 	SetEpoch(
 		uint64, // slot
 		uint64, // epoch
