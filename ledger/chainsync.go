@@ -443,26 +443,29 @@ func (ls *LedgerState) processTransaction(
 	txn *database.Txn,
 	tx ledger.Transaction,
 	point ocommon.Point,
+	shouldValidate bool,
 ) error {
 	// Validate transaction
-	if ls.currentEra.ValidateTxFunc != nil {
-		lv := &LedgerView{
-			txn: txn,
-			ls:  ls,
-		}
-		err := ls.currentEra.ValidateTxFunc(
-			tx,
-			point.Slot,
-			lv,
-			ls.currentPParams,
-		)
-		if err != nil {
-			ls.config.Logger.Warn(
-				"TX " + tx.Hash().
-					String() +
-					" failed validation: " + err.Error(),
+	if shouldValidate {
+		if ls.currentEra.ValidateTxFunc != nil {
+			lv := &LedgerView{
+				txn: txn,
+				ls:  ls,
+			}
+			err := ls.currentEra.ValidateTxFunc(
+				tx,
+				point.Slot,
+				lv,
+				ls.currentPParams,
 			)
-			// return fmt.Errorf("TX validation failure: %w", err)
+			if err != nil {
+				ls.config.Logger.Warn(
+					"TX " + tx.Hash().
+						String() +
+						" failed validation: " + err.Error(),
+				)
+				// return fmt.Errorf("TX validation failure: %w", err)
+			}
 		}
 	}
 	// Process consumed UTxOs

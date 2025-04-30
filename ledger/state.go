@@ -41,14 +41,17 @@ import (
 const (
 	cleanupConsumedUtxosInterval   = 5 * time.Minute
 	cleanupConsumedUtxosSlotWindow = 50000 // TODO: calculate this from params (#395)
+
+	validateHistoricalThreshold = 14 * (24 * time.Hour) // 2 weeks
 )
 
 type LedgerStateConfig struct {
-	Logger            *slog.Logger
-	DataDir           string
-	EventBus          *event.EventBus
-	CardanoNodeConfig *cardano.CardanoNodeConfig
-	PromRegistry      prometheus.Registerer
+	Logger             *slog.Logger
+	DataDir            string
+	EventBus           *event.EventBus
+	CardanoNodeConfig  *cardano.CardanoNodeConfig
+	PromRegistry       prometheus.Registerer
+	ValidateHistorical bool
 	// Callback(s)
 	BlockfetchRequestRangeFunc BlockfetchRequestRangeFunc
 }
@@ -357,6 +360,7 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 		return
 	}
 	shouldBlock := false
+	shouldValidate := ls.config.ValidateHistorical
 	// We chose 500 as an arbitrary max batch size. A "chain extended" message will be logged after each batch
 	nextBatch := make([]*chain.ChainIteratorResult, 0, 500)
 	var next, nextRollback *chain.ChainIteratorResult
@@ -384,6 +388,26 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 				ls.config.Logger.Error("next block from chain iterator is nil")
 				return
 			}
+			// Enable validation if we're getting near current tip
+			// We currently special-case the first batch of blocks before we do the first epoch rollover, but
+			// we'll handle this better later
+			if !shouldValidate && len(nextBatch) == 0 && ls.currentEpoch.SlotLength > 0 {
+				// Determine wall time for next block slot
+				slotTime, err := ls.SlotToTime(next.Point.Slot)
+				if err != nil {
+					ls.config.Logger.Error(
+						"failed to convert slot to time: " + err.Error(),
+					)
+					return
+				}
+				// Check difference from current time
+				timeDiff := time.Since(slotTime)
+				if timeDiff < validateHistoricalThreshold {
+					shouldValidate = true
+					ls.config.Logger.Debug("enabling validation as we approach tip")
+				}
+			}
+			// Add to batch
 			nextBatch = append(nextBatch, next)
 			// End batch if there's a rollback, since we need special processing
 			if next.Rollback {
@@ -416,7 +440,7 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 					if err != nil {
 						return err
 					}
-					if err = ls.ledgerProcessBlock(txn, next.Point, tmpBlock); err != nil {
+					if err = ls.ledgerProcessBlock(txn, next.Point, tmpBlock, shouldValidate); err != nil {
 						return err
 					}
 					// Update tip
@@ -484,6 +508,7 @@ func (ls *LedgerState) ledgerProcessBlock(
 	txn *database.Txn,
 	point ocommon.Point,
 	block ledger.Block,
+	shouldValidate bool,
 ) error {
 	// Check that we're processing things in order
 	if len(ls.currentTip.Point.Hash) > 0 {
@@ -517,7 +542,7 @@ func (ls *LedgerState) ledgerProcessBlock(
 	}
 	// Process transactions
 	for _, tx := range block.Transactions() {
-		if err := ls.processTransaction(txn, tx, point); err != nil {
+		if err := ls.processTransaction(txn, tx, point, shouldValidate); err != nil {
 			return err
 		}
 	}
