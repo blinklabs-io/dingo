@@ -263,7 +263,10 @@ func (ls *LedgerState) calculateEpochNonce(
 		genesisHashBytes, err := hex.DecodeString(
 			ls.config.CardanoNodeConfig.ShelleyGenesisHash,
 		)
-		return genesisHashBytes, fmt.Errorf("decode genesis hash: %w", err)
+		if err != nil {
+			return nil, fmt.Errorf("decode genesis hash: %w", err)
+		}
+		return genesisHashBytes, nil
 	}
 	// Calculate stability window
 	byronGenesis := ls.config.CardanoNodeConfig.ByronGenesis()
