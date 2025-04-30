@@ -18,6 +18,7 @@ import (
 	"fmt"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	pcommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
@@ -25,10 +26,10 @@ import (
 func (ls *LedgerState) processTransactionCertificates(
 	txn *database.Txn,
 	blockPoint pcommon.Point,
-	tx lcommon.Transaction,
+	certs []ledger.Certificate,
 ) error {
 	var tmpCert lcommon.Certificate
-	for _, tmpCert = range tx.Certificates() {
+	for _, tmpCert = range certs {
 		certDeposit, err := ls.currentEra.CertDepositFunc(
 			tmpCert,
 			ls.currentPParams,
