@@ -106,7 +106,7 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 	if err != nil {
 		var dbErr database.CommitTimestampError
 		if !errors.As(err, &dbErr) {
-			return nil, err
+			return nil, fmt.Errorf("failed to open database: %w", err)
 		}
 		ls.config.Logger.Warn(
 			"database initialization error, needs recovery",
@@ -124,7 +124,7 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 		true, // persistent
 	)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to load chain: %w", err)
 	}
 	ls.chain = chain
 	// Run recovery if needed
@@ -146,19 +146,19 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 	ls.scheduleCleanupConsumedUtxos()
 	// Load epoch info from DB
 	if err := ls.loadEpochs(nil); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to load epoch info: %w", err)
 	}
 	// Load current protocol parameters from DB
 	if err := ls.loadPParams(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to load pparams: %w", err)
 	}
 	// Load current tip
 	if err := ls.loadTip(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to load tip: %w", err)
 	}
 	// Create genesis block
 	if err := ls.createGenesisBlock(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to create genesis block: %w", err)
 	}
 	// Start goroutine to process new blocks
 	go ls.ledgerProcessBlocks()
@@ -169,7 +169,7 @@ func (ls *LedgerState) recoverCommitTimestampConflict() error {
 	// Load current ledger tip
 	tmpTip, err := ls.db.GetTip(nil)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to get tip: %w", err)
 	}
 	// Check if we can lookup tip block in chain
 	_, err = ls.chain.BlockByPoint(tmpTip.Point, nil)
@@ -256,12 +256,12 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 		if point.Slot > 0 {
 			rollbackBlock, err := ls.chain.BlockByPoint(point, txn)
 			if err != nil {
-				return err
+				return fmt.Errorf("failed to get rollback block: %w", err)
 			}
 			ls.currentTip.BlockNumber = rollbackBlock.Number
 		}
 		if err = ls.db.SetTip(ls.currentTip, txn); err != nil {
-			return err
+			return fmt.Errorf("failed to set tip: %w", err)
 		}
 		ls.updateTipMetrics()
 		return nil
@@ -271,7 +271,7 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 	}
 	// Reload tip
 	if err := ls.loadTip(); err != nil {
-		return err
+		return fmt.Errorf("failed to load tip: %w", err)
 	}
 	var hash string
 	if point.Slot == 0 {
@@ -306,7 +306,7 @@ func (ls *LedgerState) transitionToEra(
 			ls.currentPParams,
 		)
 		if err != nil {
-			return err
+			return fmt.Errorf("hard fork failed: %w", err)
 		}
 		ls.currentPParams = newPParams
 		ls.config.Logger.Debug(
@@ -317,7 +317,7 @@ func (ls *LedgerState) transitionToEra(
 		// Write pparams update to DB
 		pparamsCbor, err := cbor.Encode(&ls.currentPParams)
 		if err != nil {
-			return err
+			return fmt.Errorf("failed to encode pparams: %w", err)
 		}
 		err = ls.db.SetPParams(
 			pparamsCbor,
@@ -327,7 +327,7 @@ func (ls *LedgerState) transitionToEra(
 			txn,
 		)
 		if err != nil {
-			return err
+			return fmt.Errorf("failed to set pparams: %w", err)
 		}
 	}
 	ls.currentEra = nextEra
@@ -414,7 +414,7 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 					// Process block
 					tmpBlock, err = next.Block.Decode()
 					if err != nil {
-						return err
+						return fmt.Errorf("block decode failed: %w", err)
 					}
 					if err = ls.ledgerProcessBlock(txn, next.Point, tmpBlock); err != nil {
 						return err
@@ -429,7 +429,7 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 				}
 				// Update tip in database
 				if err := ls.db.SetTip(ls.currentTip, txn); err != nil {
-					return err
+					return fmt.Errorf("failed to set tip: %w", err)
 				}
 				ls.updateTipMetrics()
 				return nil
@@ -507,13 +507,13 @@ func (ls *LedgerState) ledgerProcessBlock(
 		// Transition through every era between the current and the target era
 		for nextEraId := ls.currentEra.Id + 1; nextEraId <= targetEraId; nextEraId++ {
 			if err := ls.transitionToEra(txn, nextEraId, ls.currentEpoch.EpochId, point.Slot); err != nil {
-				return err
+				return fmt.Errorf("failed era transition: %w", err)
 			}
 		}
 	}
 	// Check for epoch rollover
 	if err := ls.processEpochRollover(txn, point); err != nil {
-		return err
+		return fmt.Errorf("failed to process epoch rollover: %w", err)
 	}
 	// Process transactions
 	var delta *LedgerDelta
@@ -602,7 +602,7 @@ func (ls *LedgerState) loadTip() error {
 	if ls.currentTip.Point.Slot > 0 {
 		tipBlock, err := ls.chain.BlockByPoint(ls.currentTip.Point, nil)
 		if err != nil {
-			return err
+			return fmt.Errorf("failed to get tip block: %w", err)
 		}
 		ls.currentTipBlockNonce = tipBlock.Nonce
 	}
@@ -667,7 +667,7 @@ func (ls *LedgerState) GetIntersectPoint(
 				if errors.Is(err, chain.ErrBlockNotFound) {
 					continue
 				}
-				return err
+				return fmt.Errorf("failed to get block: %w", err)
 			}
 			// Update return value
 			ret.Slot = tmpBlock.Slot
