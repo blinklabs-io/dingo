@@ -97,7 +97,7 @@ func (ls *LedgerState) handleEventBlockfetch(evt event.Event) {
 
 func (ls *LedgerState) handleEventChainsyncRollback(e ChainsyncEvent) error {
 	if err := ls.chain.Rollback(e.Point); err != nil {
-		return err
+		return fmt.Errorf("chain rollback failed: %w", err)
 	}
 	return nil
 }
@@ -118,7 +118,7 @@ func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 	// Add header to chain
 	if err := ls.chain.AddBlockHeader(e.BlockHeader); err != nil {
 		if !errors.As(err, &chain.BlockNotFitChainTipError{}) {
-			return err
+			return fmt.Errorf("failed adding chain block header: %w", err)
 		}
 		ls.config.Logger.Warn(
 			fmt.Sprintf(
@@ -199,7 +199,7 @@ func (ls *LedgerState) processBlockEvents() error {
 		err := txn.Do(func(txn *database.Txn) error {
 			for _, evt := range ls.chainsyncBlockEvents[batchOffset : batchOffset+batchSize] {
 				if err := ls.processBlockEvent(txn, evt); err != nil {
-					return err
+					return fmt.Errorf("failed processing block event: %w", err)
 				}
 			}
 			return nil
@@ -224,13 +224,13 @@ func (ls *LedgerState) createGenesisBlock() error {
 		byronGenesis := ls.config.CardanoNodeConfig.ByronGenesis()
 		genesisUtxos, err := byronGenesis.GenesisUtxos()
 		if err != nil {
-			return err
+			return fmt.Errorf("failed to generate genesis UTxOs: %w", err)
 		}
 		for _, utxo := range genesisUtxos {
 			outAddr := utxo.Output.Address()
 			outputCbor, err := cbor.Encode(utxo.Output)
 			if err != nil {
-				return err
+				return fmt.Errorf("encode UTxO: %w", err)
 			}
 			err = ls.db.NewUtxo(
 				utxo.Id.Id().Bytes(),
@@ -263,7 +263,7 @@ func (ls *LedgerState) calculateEpochNonce(
 		genesisHashBytes, err := hex.DecodeString(
 			ls.config.CardanoNodeConfig.ShelleyGenesisHash,
 		)
-		return genesisHashBytes, err
+		return genesisHashBytes, fmt.Errorf("decode genesis hash: %w", err)
 	}
 	// Calculate stability window
 	byronGenesis := ls.config.CardanoNodeConfig.ByronGenesis()
@@ -285,7 +285,7 @@ func (ls *LedgerState) calculateEpochNonce(
 		stabilityWindowStartSlot,
 	)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("lookup block before slot: %w", err)
 	}
 	// Get last block in previous epoch
 	blockLastPrevEpoch, err := database.BlockBeforeSlotTxn(
@@ -296,7 +296,7 @@ func (ls *LedgerState) calculateEpochNonce(
 		if errors.Is(err, database.ErrBlockNotFound) {
 			return blockBeforeStabilityWindow.Nonce, nil
 		}
-		return nil, err
+		return nil, fmt.Errorf("lookup block before slot: %w", err)
 	}
 	// Calculate nonce from inputs
 	ret, err := lcommon.CalculateEpochNonce(
@@ -318,11 +318,11 @@ func (ls *LedgerState) processEpochRollover(
 			ls.config.CardanoNodeConfig,
 		)
 		if err != nil {
-			return err
+			return fmt.Errorf("calculate epoch length: %w", err)
 		}
 		tmpNonce, err := ls.calculateEpochNonce(txn, 0)
 		if err != nil {
-			return err
+			return fmt.Errorf("calculate epoch nonce: %w", err)
 		}
 		err = ls.db.SetEpoch(
 			0, // start slot
@@ -334,11 +334,11 @@ func (ls *LedgerState) processEpochRollover(
 			txn,
 		)
 		if err != nil {
-			return err
+			return fmt.Errorf("set epoch: %w", err)
 		}
 		// Reload epoch info
 		if err := ls.loadEpochs(txn); err != nil {
-			return err
+			return fmt.Errorf("load epochs: %w", err)
 		}
 		ls.config.Logger.Debug(
 			"added initial epoch to DB",
@@ -361,21 +361,21 @@ func (ls *LedgerState) processEpochRollover(
 			txn,
 		)
 		if err != nil {
-			return err
+			return fmt.Errorf("apply pparam updates: %w", err)
 		}
 		// Create next epoch record
 		epochSlotLength, epochLength, err := ls.currentEra.EpochLengthFunc(
 			ls.config.CardanoNodeConfig,
 		)
 		if err != nil {
-			return err
+			return fmt.Errorf("calculate epoch length: %w", err)
 		}
 		epochStartSlot := ls.currentEpoch.StartSlot + uint64(
 			ls.currentEpoch.LengthInSlots,
 		)
 		tmpNonce, err := ls.calculateEpochNonce(txn, epochStartSlot)
 		if err != nil {
-			return err
+			return fmt.Errorf("calculate epoch nonce: %w", err)
 		}
 		err = ls.db.SetEpoch(
 			epochStartSlot,
@@ -387,11 +387,11 @@ func (ls *LedgerState) processEpochRollover(
 			txn,
 		)
 		if err != nil {
-			return err
+			return fmt.Errorf("set epoch: %w", err)
 		}
 		// Reload epoch info
 		if err := ls.loadEpochs(txn); err != nil {
-			return err
+			return fmt.Errorf("load epochs: %w", err)
 		}
 		ls.config.Logger.Debug(
 			"added next epoch to DB",
@@ -417,7 +417,7 @@ func (ls *LedgerState) processBlockEvent(
 			e.Block,
 		)
 		if err != nil {
-			return err
+			return fmt.Errorf("calculate etaV: %w", err)
 		}
 		blockNonce = tmpNonce
 	}
@@ -426,7 +426,7 @@ func (ls *LedgerState) processBlockEvent(
 		// Ignore and log errors about block not fitting on chain or matching first header
 		if !errors.As(err, &chain.BlockNotFitChainTipError{}) &&
 			!errors.As(err, &chain.BlockNotMatchHeaderError{}) {
-			return err
+			return fmt.Errorf("add chain block: %w", err)
 		}
 		ls.config.Logger.Warn(
 			fmt.Sprintf(
@@ -449,7 +449,7 @@ func (ls *LedgerState) blockfetchRequestRangeStart(
 		end,
 	)
 	if err != nil {
-		return err
+		return fmt.Errorf("request block range: %w", err)
 	}
 	// Create our blockfetch done signal channel
 	ls.chainsyncBlockfetchDoneChan = make(chan struct{})
@@ -478,7 +478,7 @@ func (ls *LedgerState) handleEventBlockfetchBatchDone(e BlockfetchEvent) error {
 	// Process pending block events
 	if err := ls.processBlockEvents(); err != nil {
 		ls.blockfetchRequestRangeCleanup(true)
-		return err
+		return fmt.Errorf("process block events: %w", err)
 	}
 	// Check for pending block range request
 	if !ls.chainsyncBlockfetchWaiting ||
