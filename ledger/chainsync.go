@@ -28,7 +28,6 @@ import (
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/cbor"
-	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
@@ -435,77 +434,6 @@ func (ls *LedgerState) processBlockEvent(
 				err,
 			),
 		)
-	}
-	return nil
-}
-
-func (ls *LedgerState) processTransaction(
-	txn *database.Txn,
-	tx ledger.Transaction,
-	point ocommon.Point,
-) error {
-	// Validate transaction
-	if ls.currentEra.ValidateTxFunc != nil {
-		lv := &LedgerView{
-			txn: txn,
-			ls:  ls,
-		}
-		err := ls.currentEra.ValidateTxFunc(
-			tx,
-			point.Slot,
-			lv,
-			ls.currentPParams,
-		)
-		if err != nil {
-			ls.config.Logger.Warn(
-				"TX " + tx.Hash().
-					String() +
-					" failed validation: " + err.Error(),
-			)
-			// return fmt.Errorf("TX validation failure: %w", err)
-		}
-	}
-	// Process consumed UTxOs
-	for _, consumed := range tx.Consumed() {
-		if err := ls.consumeUtxo(txn, consumed, point.Slot); err != nil {
-			return fmt.Errorf("remove consumed UTxO: %w", err)
-		}
-	}
-	// Process produced UTxOs
-	for _, produced := range tx.Produced() {
-		outAddr := produced.Output.Address()
-		err := ls.db.NewUtxo(
-			produced.Id.Id().Bytes(),
-			produced.Id.Index(),
-			point.Slot,
-			outAddr.PaymentKeyHash().Bytes(),
-			outAddr.StakeKeyHash().Bytes(),
-			produced.Output.Cbor(),
-			txn,
-		)
-		if err != nil {
-			return fmt.Errorf("add produced UTxO: %w", err)
-		}
-	}
-	// XXX: generate event for each TX/UTxO?
-	// Protocol parameter updates
-	if updateEpoch, paramUpdates := tx.ProtocolParameterUpdates(); updateEpoch > 0 {
-		for genesisHash, update := range paramUpdates {
-			err := ls.db.SetPParamUpdate(
-				genesisHash.Bytes(),
-				update.Cbor(),
-				point.Slot,
-				updateEpoch,
-				txn,
-			)
-			if err != nil {
-				return err
-			}
-		}
-	}
-	// Certificates
-	if err := ls.processTransactionCertificates(txn, point, tx); err != nil {
-		return err
 	}
 	return nil
 }

@@ -516,9 +516,38 @@ func (ls *LedgerState) ledgerProcessBlock(
 		return err
 	}
 	// Process transactions
+	var delta *LedgerDelta
 	for _, tx := range block.Transactions() {
-		if err := ls.processTransaction(txn, tx, point); err != nil {
-			return err
+		// Validate transaction
+		if ls.currentEra.ValidateTxFunc != nil {
+			lv := &LedgerView{
+				txn: txn,
+				ls:  ls,
+			}
+			err := ls.currentEra.ValidateTxFunc(
+				tx,
+				point.Slot,
+				lv,
+				ls.currentPParams,
+			)
+			if err != nil {
+				ls.config.Logger.Warn(
+					"TX " + tx.Hash().
+						String() +
+						" failed validation: " + err.Error(),
+				)
+				// return fmt.Errorf("TX validation failure: %w", err)
+			}
+		}
+		// Populate ledger delta from transaction and apply
+		delta = &LedgerDelta{
+			Point: point,
+		}
+		if err := delta.processTransaction(tx); err != nil {
+			return fmt.Errorf("process transaction: %w", err)
+		}
+		if err := delta.apply(ls, txn); err != nil {
+			return fmt.Errorf("apply ledger delta: %w", err)
 		}
 	}
 	return nil
