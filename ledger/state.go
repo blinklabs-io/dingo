@@ -359,43 +359,113 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 	shouldBlock := false
 	// We chose 500 as an arbitrary max batch size. A "chain extended" message will be logged after each batch
 	nextBatch := make([]*chain.ChainIteratorResult, 0, 500)
-	var next, nextRollback *chain.ChainIteratorResult
+	var next, nextRollback, cachedNext *chain.ChainIteratorResult
 	var tmpBlock ledger.Block
-	var needsRollback bool
+	var needsRollback, needsEpochRollover bool
+	var nextEpochEraId uint
 	var end, i int
 	var txn *database.Txn
 	for {
+		if needsEpochRollover {
+			needsEpochRollover = false
+			txn := ls.db.Transaction(true)
+			err := txn.Do(func(txn *database.Txn) error {
+				// Check for era change
+				if nextEpochEraId != ls.currentEra.Id {
+					// Transition through every era between the current and the target era
+					for nextEraId := ls.currentEra.Id + 1; nextEraId <= nextEpochEraId; nextEraId++ {
+						if err := ls.transitionToEra(txn, nextEraId, ls.currentEpoch.EpochId, ls.currentEpoch.StartSlot+uint64(ls.currentEpoch.LengthInSlots)); err != nil {
+							return err
+						}
+					}
+				}
+				// Process epoch rollover
+				if err := ls.processEpochRollover(txn); err != nil {
+					return err
+				}
+				return nil
+			})
+			if err != nil {
+				ls.config.Logger.Error(
+					"failed to process epoch rollover: " + err.Error(),
+				)
+				return
+			}
+		}
 		// Gather up next batch of blocks
 		for {
-			next, err = iter.Next(shouldBlock)
-			shouldBlock = false
-			if err != nil {
-				if !errors.Is(err, chain.ErrIteratorChainTip) {
-					ls.config.Logger.Error(
-						"failed to get next block from chain iterator: " + err.Error(),
-					)
-					return
+			if cachedNext != nil {
+				next = cachedNext
+				cachedNext = nil
+			} else {
+				next, err = iter.Next(shouldBlock)
+				shouldBlock = false
+				if err != nil {
+					if !errors.Is(err, chain.ErrIteratorChainTip) {
+						ls.config.Logger.Error(
+							"failed to get next block from chain iterator: " + err.Error(),
+						)
+						return
+					}
+					shouldBlock = true
+					// Break out of inner loop to flush DB transaction and log
+					break
 				}
-				shouldBlock = true
-				// Break out of inner loop to flush DB transaction and log
-				break
 			}
 			if next == nil {
 				ls.config.Logger.Error("next block from chain iterator is nil")
 				return
 			}
-			nextBatch = append(nextBatch, next)
-			// End batch if there's a rollback, since we need special processing
-			if next.Rollback {
+			// End batch and cache next if we get a block from after the current epoch end, or if we need the initial epoch
+			if next.Point.Slot >= (ls.currentEpoch.StartSlot+uint64(ls.currentEpoch.LengthInSlots)) || ls.currentEpoch.SlotLength == 0 {
+				cachedNext = next
+				needsEpochRollover = true
+				// Decode next block to get era ID
+				tmpBlock, err = next.Block.Decode()
+				if err != nil {
+					ls.config.Logger.Error(
+						"failed to decode block: " + err.Error(),
+					)
+					return
+				}
+				nextEpochEraId = uint(tmpBlock.Era().Id)
 				break
 			}
+			if next.Rollback {
+				// End existing batch and cache rollback if we have any blocks in the batch
+				// We need special processing for rollbacks below
+				if len(nextBatch) > 0 {
+					cachedNext = next
+					break
+				}
+				needsRollback = true
+			}
+			// Add to batch
+			nextBatch = append(nextBatch, next)
 			// Don't exceed our pre-allocated capacity
 			if len(nextBatch) == cap(nextBatch) {
 				break
 			}
 		}
+		// Process rollback
+		if needsRollback {
+			needsRollback = false
+			// The rollback should be alone in the batch
+			nextRollback = nextBatch[0]
+			ls.Lock()
+			if err = ls.rollback(nextRollback.Point); err != nil {
+				ls.Unlock()
+				ls.config.Logger.Error(
+					"failed to process rollback: " + err.Error(),
+				)
+				return
+			}
+			ls.Unlock()
+			// Clear out batch buffer
+			nextBatch = slices.Delete(nextBatch, 0, len(nextBatch))
+			continue
+		}
 		// Process batch in groups of 50 to stay under DB txn limits
-		needsRollback = false
 		for i = 0; i < len(nextBatch); i += 50 {
 			ls.Lock()
 			end = min(
@@ -405,12 +475,6 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 			txn = ls.db.Transaction(true)
 			err = txn.Do(func(txn *database.Txn) error {
 				for _, next := range nextBatch[i:end] {
-					// Rollbacks need to be handled outside of the batch DB transaction
-					// A rollback should only occur at the end of a batch
-					if next.Rollback {
-						needsRollback = true
-						return nil
-					}
 					// Process block
 					tmpBlock, err = next.Block.Decode()
 					if err != nil {
@@ -442,27 +506,6 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 				return
 			}
 			ls.Unlock()
-		}
-		// Process rollback from end of batch
-		if needsRollback {
-			needsRollback = false
-			// The rollback should be at the end of the batch
-			nextRollback = nextBatch[len(nextBatch)-1]
-			ls.Lock()
-			if err = ls.rollback(nextRollback.Point); err != nil {
-				ls.Unlock()
-				ls.config.Logger.Error(
-					"failed to process rollback: " + err.Error(),
-				)
-				return
-			}
-			ls.Unlock()
-			// Skip "chain extended" logging below if batch only contains a rollback
-			if len(nextBatch) == 1 {
-				// Clear out batch buffer
-				nextBatch = slices.Delete(nextBatch, 0, len(nextBatch))
-				continue
-			}
 		}
 		if len(nextBatch) > 0 {
 			// Clear out batch buffer
@@ -499,21 +542,6 @@ func (ls *LedgerState) ledgerProcessBlock(
 				ls.currentTip.Point.Hash,
 			)
 		}
-	}
-	// TODO: track this using protocol params and hard forks
-	// Check for era change
-	if uint(block.Era().Id) != ls.currentEra.Id {
-		targetEraId := uint(block.Era().Id)
-		// Transition through every era between the current and the target era
-		for nextEraId := ls.currentEra.Id + 1; nextEraId <= targetEraId; nextEraId++ {
-			if err := ls.transitionToEra(txn, nextEraId, ls.currentEpoch.EpochId, point.Slot); err != nil {
-				return fmt.Errorf("failed era transition: %w", err)
-			}
-		}
-	}
-	// Check for epoch rollover
-	if err := ls.processEpochRollover(txn, point); err != nil {
-		return fmt.Errorf("failed to process epoch rollover: %w", err)
 	}
 	// Process transactions
 	var delta *LedgerDelta
