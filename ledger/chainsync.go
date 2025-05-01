@@ -312,8 +312,10 @@ func (ls *LedgerState) calculateEpochNonce(
 
 func (ls *LedgerState) processEpochRollover(
 	txn *database.Txn,
-	point ocommon.Point,
 ) error {
+	epochStartSlot := ls.currentEpoch.StartSlot + uint64(
+		ls.currentEpoch.LengthInSlots,
+	)
 	// Create initial epoch
 	if ls.currentEpoch.SlotLength == 0 {
 		// Create initial epoch record
@@ -328,7 +330,7 @@ func (ls *LedgerState) processEpochRollover(
 			return fmt.Errorf("calculate epoch nonce: %w", err)
 		}
 		err = ls.db.SetEpoch(
-			0, // start slot
+			epochStartSlot,
 			0, // epoch
 			tmpNonce,
 			ls.currentEra.Id,
@@ -348,60 +350,53 @@ func (ls *LedgerState) processEpochRollover(
 			"epoch", fmt.Sprintf("%+v", ls.currentEpoch),
 			"component", "ledger",
 		)
+		return nil
 	}
-	// Check for epoch rollover
-	if point.Slot > ls.currentEpoch.StartSlot+uint64(
-		ls.currentEpoch.LengthInSlots,
-	) {
-		// Apply pending pparam updates
-		err := ls.db.ApplyPParamUpdates(
-			point.Slot,
-			ls.currentEpoch.EpochId,
-			ls.currentEra.Id,
-			&ls.currentPParams,
-			ls.currentEra.DecodePParamsUpdateFunc,
-			ls.currentEra.PParamsUpdateFunc,
-			txn,
-		)
-		if err != nil {
-			return fmt.Errorf("apply pparam updates: %w", err)
-		}
-		// Create next epoch record
-		epochSlotLength, epochLength, err := ls.currentEra.EpochLengthFunc(
-			ls.config.CardanoNodeConfig,
-		)
-		if err != nil {
-			return fmt.Errorf("calculate epoch length: %w", err)
-		}
-		epochStartSlot := ls.currentEpoch.StartSlot + uint64(
-			ls.currentEpoch.LengthInSlots,
-		)
-		tmpNonce, err := ls.calculateEpochNonce(txn, epochStartSlot)
-		if err != nil {
-			return fmt.Errorf("calculate epoch nonce: %w", err)
-		}
-		err = ls.db.SetEpoch(
-			epochStartSlot,
-			ls.currentEpoch.EpochId+1,
-			tmpNonce,
-			ls.currentEra.Id,
-			epochSlotLength,
-			epochLength,
-			txn,
-		)
-		if err != nil {
-			return fmt.Errorf("set epoch: %w", err)
-		}
-		// Reload epoch info
-		if err := ls.loadEpochs(txn); err != nil {
-			return fmt.Errorf("load epochs: %w", err)
-		}
-		ls.config.Logger.Debug(
-			"added next epoch to DB",
-			"epoch", fmt.Sprintf("%+v", ls.currentEpoch),
-			"component", "ledger",
-		)
+	// Apply pending pparam updates
+	err := ls.db.ApplyPParamUpdates(
+		epochStartSlot,
+		ls.currentEpoch.EpochId,
+		ls.currentEra.Id,
+		&ls.currentPParams,
+		ls.currentEra.DecodePParamsUpdateFunc,
+		ls.currentEra.PParamsUpdateFunc,
+		txn,
+	)
+	if err != nil {
+		return fmt.Errorf("apply pparam updates: %w", err)
 	}
+	// Create next epoch record
+	epochSlotLength, epochLength, err := ls.currentEra.EpochLengthFunc(
+		ls.config.CardanoNodeConfig,
+	)
+	if err != nil {
+		return fmt.Errorf("calculate epoch length: %w", err)
+	}
+	tmpNonce, err := ls.calculateEpochNonce(txn, epochStartSlot)
+	if err != nil {
+		return fmt.Errorf("calculate epoch nonce: %w", err)
+	}
+	err = ls.db.SetEpoch(
+		epochStartSlot,
+		ls.currentEpoch.EpochId+1,
+		tmpNonce,
+		ls.currentEra.Id,
+		epochSlotLength,
+		epochLength,
+		txn,
+	)
+	if err != nil {
+		return fmt.Errorf("set epoch: %w", err)
+	}
+	// Reload epoch info
+	if err := ls.loadEpochs(txn); err != nil {
+		return fmt.Errorf("load epochs: %w", err)
+	}
+	ls.config.Logger.Debug(
+		"added next epoch to DB",
+		"epoch", fmt.Sprintf("%+v", ls.currentEpoch),
+		"component", "ledger",
+	)
 	return nil
 }
 
