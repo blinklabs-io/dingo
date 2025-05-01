@@ -100,33 +100,6 @@ func (d *MetadataStoreSqlite) SetDeregistration(
 	return nil
 }
 
-// SetStakeRegistration saves a stake registration certificate and account
-func (d *MetadataStoreSqlite) SetStakeRegistration(
-	cert *lcommon.StakeRegistrationCertificate,
-	slot, deposit uint64,
-	txn *gorm.DB,
-) error {
-	stakeKey := cert.StakeRegistration.Credential.Bytes()
-	tmpItem := models.StakeRegistration{
-		StakingKey:    stakeKey,
-		AddedSlot:     slot,
-		DepositAmount: deposit,
-	}
-	if err := d.SetAccount(stakeKey, nil, nil, slot, true, txn); err != nil {
-		return err
-	}
-	if txn != nil {
-		if result := txn.Create(&tmpItem); result.Error != nil {
-			return result.Error
-		}
-	} else {
-		if result := d.DB().Create(&tmpItem); result.Error != nil {
-			return result.Error
-		}
-	}
-	return nil
-}
-
 // SetRegistration saves a registration certificate and account
 func (d *MetadataStoreSqlite) SetRegistration(
 	cert *lcommon.RegistrationCertificate,
@@ -216,6 +189,62 @@ func (d *MetadataStoreSqlite) SetStakeDeregistration(
 		if accountErr := d.DB().Save(&tmpAccount); accountErr.Error != nil {
 			return accountErr.Error
 		}
+		if result := d.DB().Create(&tmpItem); result.Error != nil {
+			return result.Error
+		}
+	}
+	return nil
+}
+
+// SetStakeRegistration saves a stake registration certificate and account
+func (d *MetadataStoreSqlite) SetStakeRegistration(
+	cert *lcommon.StakeRegistrationCertificate,
+	slot, deposit uint64,
+	txn *gorm.DB,
+) error {
+	stakeKey := cert.StakeRegistration.Credential.Bytes()
+	tmpItem := models.StakeRegistration{
+		StakingKey:    stakeKey,
+		AddedSlot:     slot,
+		DepositAmount: deposit,
+	}
+	if err := d.SetAccount(stakeKey, nil, nil, slot, true, txn); err != nil {
+		return err
+	}
+	if txn != nil {
+		if result := txn.Create(&tmpItem); result.Error != nil {
+			return result.Error
+		}
+	} else {
+		if result := d.DB().Create(&tmpItem); result.Error != nil {
+			return result.Error
+		}
+	}
+	return nil
+}
+
+// SetStakeRegistrationDelegation saves a stake registration delegation certificate and account
+func (d *MetadataStoreSqlite) SetStakeRegistrationDelegation(
+	cert *lcommon.StakeRegistrationDelegationCertificate,
+	slot, deposit uint64,
+	txn *gorm.DB,
+) error {
+	stakeKey := cert.StakeCredential.Credential.Bytes()
+	pkh := cert.PoolKeyHash[:]
+	tmpItem := models.StakeRegistrationDelegation{
+		StakingKey:    stakeKey,
+		PoolKeyHash:   pkh,
+		AddedSlot:     slot,
+		DepositAmount: deposit,
+	}
+	if err := d.SetAccount(stakeKey, pkh, nil, slot, true, txn); err != nil {
+		return err
+	}
+	if txn != nil {
+		if result := txn.Create(&tmpItem); result.Error != nil {
+			return result.Error
+		}
+	} else {
 		if result := d.DB().Create(&tmpItem); result.Error != nil {
 			return result.Error
 		}
