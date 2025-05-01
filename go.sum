@@ -15,8 +15,8 @@ github.com/andybalholm/brotli v1.1.0 h1:eLKJA0d02Lf0mVpIDgYnqXcUn0GqVmEFny3VuID1
 github.com/andybalholm/brotli v1.1.0/go.mod h1:sms7XGricyQI9K10gOSf56VKKWS4oLer58Q+mhRPtnY=
 github.com/beorn7/perks v1.0.1 h1:VlbKKnNfV8bJzeqoa4cOKqO6bYr3WgKZxO8Z16+hsOM=
 github.com/beorn7/perks v1.0.1/go.mod h1:G2ZrVWU2WbWT9wwq4/hrbKbnv/1ERSJQ0ibhJ6rlkpw=
-github.com/blinklabs-io/gouroboros v0.118.0 h1:6ntqmaYDVU/APofYUNdRR/9ssuoOmWyBLbsTA6J2Q7g=
-github.com/blinklabs-io/gouroboros v0.118.0/go.mod h1:4slb9HmHNlV1Z7wi6WDDa9GlYCutff8qCEfGYRVN9i8=
+github.com/blinklabs-io/gouroboros v0.119.0 h1:CbGzPlLbnroW3ogb4zItt/bIgMfpdpidikRAbybd3xc=
+github.com/blinklabs-io/gouroboros v0.119.0/go.mod h1:4slb9HmHNlV1Z7wi6WDDa9GlYCutff8qCEfGYRVN9i8=
 github.com/blinklabs-io/ouroboros-mock v0.3.7 h1:86FvD591XhdGk2BqQweRKfwc6Y6ll5Lunmo/RUehJ6o=
 github.com/blinklabs-io/ouroboros-mock v0.3.7/go.mod h1:611xZgdWCxZsSaS5tjgxqjmWIkSpsM9eKuQAKozw+sk=
 github.com/btcsuite/btcd v0.20.1-beta/go.mod h1:wVuoA8VJLEcwgqHBwHmzLRazpKxTv13Px/pDuV7OomQ=
