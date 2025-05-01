@@ -421,7 +421,8 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 				return
 			}
 			// End batch and cache next if we get a block from after the current epoch end, or if we need the initial epoch
-			if next.Point.Slot >= (ls.currentEpoch.StartSlot+uint64(ls.currentEpoch.LengthInSlots)) || ls.currentEpoch.SlotLength == 0 {
+			if next.Point.Slot >= (ls.currentEpoch.StartSlot+uint64(ls.currentEpoch.LengthInSlots)) ||
+				ls.currentEpoch.SlotLength == 0 {
 				cachedNext = next
 				needsEpochRollover = true
 				// Decode next block to get era ID
@@ -458,7 +459,9 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 				timeDiff := time.Since(slotTime)
 				if timeDiff < validateHistoricalThreshold {
 					shouldValidate = true
-					ls.config.Logger.Debug("enabling validation as we approach tip")
+					ls.config.Logger.Debug(
+						"enabling validation as we approach tip",
+					)
 				}
 			}
 			// Add to batch

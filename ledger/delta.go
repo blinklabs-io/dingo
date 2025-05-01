@@ -42,7 +42,9 @@ func (d *LedgerDelta) processTransaction(tx lcommon.Transaction) error {
 	if updateEpoch, paramUpdates := tx.ProtocolParameterUpdates(); updateEpoch > 0 {
 		d.PParamUpdateEpoch = updateEpoch
 		if d.PParamUpdates == nil {
-			d.PParamUpdates = make(map[lcommon.Blake2b224]lcommon.ProtocolParameterUpdate)
+			d.PParamUpdates = make(
+				map[lcommon.Blake2b224]lcommon.ProtocolParameterUpdate,
+			)
 		}
 		for genesisHash, update := range paramUpdates {
 			d.PParamUpdates[genesisHash] = update
