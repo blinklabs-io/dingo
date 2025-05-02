@@ -25,3 +25,16 @@ type Drep struct {
 func (d *Drep) TableName() string {
 	return "drep"
 }
+
+type RegistrationDrep struct {
+	ID             uint   `gorm:"primarykey"`
+	DrepCredential []byte `gorm:"index"`
+	AddedSlot      uint64
+	DepositAmount  uint64
+	AnchorUrl      string
+	AnchorHash     []byte
+}
+
+func (RegistrationDrep) TableName() string {
+	return "registration_drep"
+}

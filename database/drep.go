@@ -12,17 +12,22 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package models
+package database
 
-type RegistrationDrep struct {
-	ID             uint   `gorm:"primarykey"`
-	DrepCredential []byte `gorm:"index"`
-	AddedSlot      uint64
-	DepositAmount  uint64
-	AnchorUrl      string
-	AnchorHash     []byte
-}
+import (
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+)
 
-func (RegistrationDrep) TableName() string {
-	return "registration_drep"
+// SetRegistrationDrep saves a registration drep certificate
+func (d *Database) SetRegistrationDrep(
+	cert *lcommon.RegistrationDrepCertificate,
+	slot, deposit uint64,
+	txn *Txn,
+) error {
+	return d.metadata.SetRegistrationDrep(
+		cert,
+		slot,
+		deposit,
+		txn.Metadata(),
+	)
 }
