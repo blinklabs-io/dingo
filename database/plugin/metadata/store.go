@@ -75,6 +75,12 @@ type MetadataStore interface {
 		uint64, // slot
 		*gorm.DB,
 	) error
+	SetDeregistrationDrep(
+		*lcommon.DeregistrationDrepCertificate,
+		uint64, // slot
+		uint64, // deposit
+		*gorm.DB,
+	) error
 	SetEpoch(
 		uint64, // slot
 		uint64, // epoch

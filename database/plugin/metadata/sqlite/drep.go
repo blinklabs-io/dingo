@@ -47,6 +47,7 @@ func (d *MetadataStoreSqlite) SetDrep(
 	slot uint64,
 	url string,
 	hash []byte,
+	active bool,
 	txn *gorm.DB,
 ) error {
 	tmpItem := models.Drep{
@@ -54,6 +55,7 @@ func (d *MetadataStoreSqlite) SetDrep(
 		AddedSlot:  slot,
 		AnchorUrl:  url,
 		AnchorHash: hash,
+		Active:     active,
 	}
 	if txn != nil {
 		if result := txn.Clauses(clause.OnConflict{UpdateAll: true}).Create(&tmpItem); result.Error != nil {
@@ -67,7 +69,42 @@ func (d *MetadataStoreSqlite) SetDrep(
 	return nil
 }
 
-// SetRegistration saves a registration drep certificate and drep
+// SetDeregistrationDrep saves a deregistration drep certificate and drep
+func (d *MetadataStoreSqlite) SetDeregistrationDrep(
+	cert *lcommon.DeregistrationDrepCertificate,
+	slot, deposit uint64,
+	txn *gorm.DB,
+) error {
+	drep := cert.DrepCredential.Credential.Bytes()
+	tmpDrep, err := d.GetDrep(drep, txn)
+	if err != nil {
+		return err
+	}
+	tmpItem := models.DeregistrationDrep{
+		DrepCredential: drep,
+		AddedSlot:      slot,
+		DepositAmount:  deposit,
+	}
+	tmpDrep.Active = false
+	if txn != nil {
+		if drepErr := txn.Save(&tmpDrep); drepErr.Error != nil {
+			return drepErr.Error
+		}
+		if result := txn.Create(&tmpItem); result.Error != nil {
+			return result.Error
+		}
+	} else {
+		if drepErr := d.DB().Save(&tmpDrep); drepErr.Error != nil {
+			return drepErr.Error
+		}
+		if result := d.DB().Create(&tmpItem); result.Error != nil {
+			return result.Error
+		}
+	}
+	return nil
+}
+
+// SetRegistrationDrep saves a registration drep certificate and drep
 func (d *MetadataStoreSqlite) SetRegistrationDrep(
 	cert *lcommon.RegistrationDrepCertificate,
 	slot, deposit uint64,
@@ -87,7 +124,7 @@ func (d *MetadataStoreSqlite) SetRegistrationDrep(
 	}
 	tmpItem.AnchorUrl = anchorUrl
 	tmpItem.AnchorHash = anchorHash
-	if err := d.SetDrep(drep, slot, anchorUrl, anchorHash, txn); err != nil {
+	if err := d.SetDrep(drep, slot, anchorUrl, anchorHash, true, txn); err != nil {
 		return err
 	}
 	if txn != nil {

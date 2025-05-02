@@ -47,6 +47,16 @@ func (ls *LedgerState) processTransactionCertificates(
 			if err != nil {
 				return err
 			}
+		case *lcommon.DeregistrationDrepCertificate:
+			err := ls.db.SetDeregistrationDrep(
+				cert,
+				blockPoint.Slot,
+				certDeposit,
+				txn,
+			)
+			if err != nil {
+				return err
+			}
 		case *lcommon.PoolRegistrationCertificate:
 			err := ls.db.SetPoolRegistration(
 				cert,
