@@ -144,6 +144,16 @@ func (ls *LedgerState) processTransactionCertificates(
 			if err != nil {
 				return err
 			}
+		case *lcommon.VoteRegistrationDelegationCertificate:
+			err := ls.db.SetVoteRegistrationDelegation(
+				cert,
+				blockPoint.Slot,
+				certDeposit,
+				txn,
+			)
+			if err != nil {
+				return err
+			}
 		default:
 			ls.config.Logger.Warn(
 				fmt.Sprintf("ignoring unsupported certificate type %T", cert),

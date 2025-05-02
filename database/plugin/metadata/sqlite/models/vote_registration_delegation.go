@@ -13,14 +13,3 @@
 // limitations under the License.
 
 package models
-
-type VoteRegistrationDelegation struct {
-	ID         uint   `gorm:"primarykey"`
-	StakingKey []byte `gorm:"index"`
-	Drep       []byte `gorm:"index"`
-	AddedSlot  uint64
-}
-
-func (VoteRegistrationDelegation) TableName() string {
-	return "vote_registration_delegation"
-}
