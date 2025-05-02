@@ -164,3 +164,17 @@ func (d *Database) SetStakeVoteRegistrationDelegation(
 		txn.Metadata(),
 	)
 }
+
+// SetVoteRegistrationDelegation saves a vote registration delegation certificate
+func (d *Database) SetVoteRegistrationDelegation(
+	cert *lcommon.VoteRegistrationDelegationCertificate,
+	slot, deposit uint64,
+	txn *Txn,
+) error {
+	return d.metadata.SetVoteRegistrationDelegation(
+		cert,
+		slot,
+		deposit,
+		txn.Metadata(),
+	)
+}

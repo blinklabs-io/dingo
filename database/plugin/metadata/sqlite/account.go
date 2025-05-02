@@ -282,3 +282,32 @@ func (d *MetadataStoreSqlite) SetStakeVoteRegistrationDelegation(
 	}
 	return nil
 }
+
+// SetVoteRegistrationDelegation saves a vote registration delegation certificate and account
+func (d *MetadataStoreSqlite) SetVoteRegistrationDelegation(
+	cert *lcommon.VoteRegistrationDelegationCertificate,
+	slot, deposit uint64,
+	txn *gorm.DB,
+) error {
+	stakeKey := cert.StakeCredential.Credential.Bytes()
+	drep := cert.Drep.Credential[:]
+	tmpItem := models.VoteRegistrationDelegation{
+		StakingKey:    stakeKey,
+		Drep:          drep,
+		AddedSlot:     slot,
+		DepositAmount: deposit,
+	}
+	if err := d.SetAccount(stakeKey, nil, drep, slot, true, txn); err != nil {
+		return err
+	}
+	if txn != nil {
+		if result := txn.Create(&tmpItem); result.Error != nil {
+			return result.Error
+		}
+	} else {
+		if result := d.DB().Create(&tmpItem); result.Error != nil {
+			return result.Error
+		}
+	}
+	return nil
+}
