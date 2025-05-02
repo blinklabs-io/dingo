@@ -20,10 +20,22 @@ type Drep struct {
 	AnchorUrl  string
 	AnchorHash []byte
 	AddedSlot  uint64
+	Active     bool `gorm:"default:true"`
 }
 
 func (d *Drep) TableName() string {
 	return "drep"
+}
+
+type DeregistrationDrep struct {
+	ID             uint   `gorm:"primarykey"`
+	DrepCredential []byte `gorm:"index"`
+	AddedSlot      uint64
+	DepositAmount  uint64
+}
+
+func (DeregistrationDrep) TableName() string {
+	return "deregistration_drep"
 }
 
 type RegistrationDrep struct {

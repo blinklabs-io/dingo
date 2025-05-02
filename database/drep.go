@@ -31,3 +31,17 @@ func (d *Database) SetRegistrationDrep(
 		txn.Metadata(),
 	)
 }
+
+// SetDeregistrationDrep saves a deregistration drep certificate
+func (d *Database) SetDeregistrationDrep(
+	cert *lcommon.DeregistrationDrepCertificate,
+	slot, deposit uint64,
+	txn *Txn,
+) error {
+	return d.metadata.SetDeregistrationDrep(
+		cert,
+		slot,
+		deposit,
+		txn.Metadata(),
+	)
+}
