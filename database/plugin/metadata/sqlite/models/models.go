@@ -19,6 +19,7 @@ var MigrateModels = []any{
 	&Account{},
 	&AuthCommitteeHot{},
 	&Deregistration{},
+	&DeregistrationDrep{},
 	&Drep{},
 	&Epoch{},
 	&Pool{},
