@@ -20,7 +20,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"slices"
 	"sync"
 	"time"
 
@@ -351,7 +350,19 @@ func (ls *LedgerState) consumeUtxo(
 	)
 }
 
-func (ls *LedgerState) ledgerProcessBlocks() {
+type readChainResult struct {
+	blocks        []readChainResultBlock
+	rollback      bool
+	rollbackPoint ocommon.Point
+}
+
+type readChainResultBlock struct {
+	block ledger.Block
+	nonce []byte
+}
+
+func (ls *LedgerState) ledgerReadChain(resultCh chan readChainResult) {
+	// Create chain iterator
 	iter, err := ls.chain.FromPoint(ls.currentTip.Point, false)
 	if err != nil {
 		ls.config.Logger.Error(
@@ -359,16 +370,98 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 		)
 		return
 	}
-	shouldBlock := false
-	shouldValidate := ls.config.ValidateHistorical
-	// We chose 500 as an arbitrary max batch size. A "chain extended" message will be logged after each batch
-	nextBatch := make([]*chain.ChainIteratorResult, 0, 500)
-	var next, nextRollback, cachedNext *chain.ChainIteratorResult
+	// Read blocks from chain iterator and decode
+	var next, cachedNext *chain.ChainIteratorResult
 	var tmpBlock ledger.Block
-	var needsRollback, needsEpochRollover bool
+	var needsRollback, shouldBlock bool
+	var rollbackPoint ocommon.Point
+	var result readChainResult
+	for {
+		// We chose 500 as an arbitrary max batch size. A "chain extended" message will be logged after each batch
+		nextBatch := make([]readChainResultBlock, 0, 500)
+		// Gather up next batch of blocks
+		for {
+			if cachedNext != nil {
+				next = cachedNext
+				cachedNext = nil
+			} else {
+				next, err = iter.Next(shouldBlock)
+				shouldBlock = false
+				if err != nil {
+					if !errors.Is(err, chain.ErrIteratorChainTip) {
+						ls.config.Logger.Error(
+							"failed to get next block from chain iterator: " + err.Error(),
+						)
+						return
+					}
+					shouldBlock = true
+					// Break out of inner loop to flush DB transaction and log
+					break
+				}
+			}
+			if next == nil {
+				ls.config.Logger.Error("next block from chain iterator is nil")
+				return
+			}
+			if next.Rollback {
+				// End existing batch and cache rollback if we have any blocks in the batch
+				// We need special processing for rollbacks below
+				if len(nextBatch) > 0 {
+					cachedNext = next
+					break
+				}
+				needsRollback = true
+				rollbackPoint = next.Point
+				break
+			}
+			// Decode block
+			tmpBlock, err = next.Block.Decode()
+			if err != nil {
+				ls.config.Logger.Error(
+					"failed to decode block: " + err.Error(),
+				)
+				return
+			}
+			// Add to batch
+			nextBatch = append(
+				nextBatch,
+				readChainResultBlock{
+					block: tmpBlock,
+					nonce: next.Block.Nonce,
+				},
+			)
+			// Don't exceed our pre-allocated capacity
+			if len(nextBatch) == cap(nextBatch) {
+				break
+			}
+		}
+		if needsRollback {
+			needsRollback = false
+			result = readChainResult{
+				rollback:      true,
+				rollbackPoint: rollbackPoint,
+			}
+		} else {
+			result = readChainResult{
+				blocks: nextBatch,
+			}
+		}
+		resultCh <- result
+	}
+}
+
+func (ls *LedgerState) ledgerProcessBlocks() {
+	// Start chain reader goroutine
+	readChainResultCh := make(chan readChainResult)
+	go ls.ledgerReadChain(readChainResultCh)
+	// Process blocks
 	var nextEpochEraId uint
+	var needsEpochRollover bool
 	var end, i int
 	var txn *database.Txn
+	var err error
+	var nextBatch, cachedNextBatch []readChainResultBlock
+	shouldValidate := ls.config.ValidateHistorical
 	for {
 		if needsEpochRollover {
 			needsEpochRollover = false
@@ -396,101 +489,30 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 				return
 			}
 		}
-		// Gather up next batch of blocks
-		for {
-			if cachedNext != nil {
-				next = cachedNext
-				cachedNext = nil
-			} else {
-				next, err = iter.Next(shouldBlock)
-				shouldBlock = false
-				if err != nil {
-					if !errors.Is(err, chain.ErrIteratorChainTip) {
-						ls.config.Logger.Error(
-							"failed to get next block from chain iterator: " + err.Error(),
-						)
-						return
-					}
-					shouldBlock = true
-					// Break out of inner loop to flush DB transaction and log
-					break
-				}
-			}
-			if next == nil {
-				ls.config.Logger.Error("next block from chain iterator is nil")
+		if cachedNextBatch != nil {
+			// Use cached block batch
+			nextBatch = cachedNextBatch
+			cachedNextBatch = nil
+		} else {
+			// Read next result from readChain channel
+			result, ok := <-readChainResultCh
+			if !ok {
 				return
 			}
-			// End batch and cache next if we get a block from after the current epoch end, or if we need the initial epoch
-			if next.Point.Slot >= (ls.currentEpoch.StartSlot+uint64(ls.currentEpoch.LengthInSlots)) ||
-				ls.currentEpoch.SlotLength == 0 {
-				cachedNext = next
-				needsEpochRollover = true
-				// Decode next block to get era ID
-				tmpBlock, err = next.Block.Decode()
-				if err != nil {
+			nextBatch = result.blocks
+			// Process rollback
+			if result.rollback {
+				ls.Lock()
+				if err = ls.rollback(result.rollbackPoint); err != nil {
+					ls.Unlock()
 					ls.config.Logger.Error(
-						"failed to decode block: " + err.Error(),
+						"failed to process rollback: " + err.Error(),
 					)
 					return
 				}
-				nextEpochEraId = uint(tmpBlock.Era().Id)
-				break
-			}
-			if next.Rollback {
-				// End existing batch and cache rollback if we have any blocks in the batch
-				// We need special processing for rollbacks below
-				if len(nextBatch) > 0 {
-					cachedNext = next
-					break
-				}
-				needsRollback = true
-				// The rollback should be the only thing in the batch
-				nextBatch = append(nextBatch, next)
-				break
-			}
-			// Enable validation if we're getting near current tip
-			if !shouldValidate && len(nextBatch) == 0 {
-				// Determine wall time for next block slot
-				slotTime, err := ls.SlotToTime(next.Point.Slot)
-				if err != nil {
-					ls.config.Logger.Error(
-						"failed to convert slot to time: " + err.Error(),
-					)
-					return
-				}
-				// Check difference from current time
-				timeDiff := time.Since(slotTime)
-				if timeDiff < validateHistoricalThreshold {
-					shouldValidate = true
-					ls.config.Logger.Debug(
-						"enabling validation as we approach tip",
-					)
-				}
-			}
-			// Add to batch
-			nextBatch = append(nextBatch, next)
-			// Don't exceed our pre-allocated capacity
-			if len(nextBatch) == cap(nextBatch) {
-				break
-			}
-		}
-		// Process rollback
-		if needsRollback {
-			needsRollback = false
-			// The rollback should be alone in the batch
-			nextRollback = nextBatch[0]
-			ls.Lock()
-			if err = ls.rollback(nextRollback.Point); err != nil {
 				ls.Unlock()
-				ls.config.Logger.Error(
-					"failed to process rollback: " + err.Error(),
-				)
-				return
+				continue
 			}
-			ls.Unlock()
-			// Clear out batch buffer
-			nextBatch = slices.Delete(nextBatch, 0, len(nextBatch))
-			continue
 		}
 		// Process batch in groups of 50 to stay under DB txn limits
 		for i = 0; i < len(nextBatch); i += 50 {
@@ -501,22 +523,50 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 			)
 			txn = ls.db.Transaction(true)
 			err = txn.Do(func(txn *database.Txn) error {
-				for _, next := range nextBatch[i:end] {
-					// Process block
-					tmpBlock, err = next.Block.Decode()
-					if err != nil {
-						return fmt.Errorf("block decode failed: %w", err)
+				for offset, next := range nextBatch[i:end] {
+					tmpPoint := ocommon.Point{
+						Slot: next.block.SlotNumber(),
+						Hash: next.block.Hash().Bytes(),
 					}
-					if err = ls.ledgerProcessBlock(txn, next.Point, tmpBlock, shouldValidate); err != nil {
+					// End processing of batch and cache remainder if we get a block from after the current epoch end, or if we need the initial epoch
+					if tmpPoint.Slot >= (ls.currentEpoch.StartSlot+uint64(ls.currentEpoch.LengthInSlots)) ||
+						ls.currentEpoch.SlotLength == 0 {
+						needsEpochRollover = true
+						nextEpochEraId = uint(next.block.Era().Id)
+						// Cache rest of the batch for next loop
+						cachedNextBatch = nextBatch[i+offset:]
+						return nil
+					}
+					// Enable validation if we're getting near current tip
+					if !shouldValidate && i == 0 {
+						// Determine wall time for next block slot
+						slotTime, err := ls.SlotToTime(tmpPoint.Slot)
+						if err != nil {
+							return fmt.Errorf(
+								"convert slot to time: %w",
+								err,
+							)
+						}
+						// Check difference from current time
+						timeDiff := time.Since(slotTime)
+						if timeDiff < validateHistoricalThreshold {
+							shouldValidate = true
+							ls.config.Logger.Debug(
+								"enabling validation as we approach tip",
+							)
+						}
+					}
+					// Process block
+					if err = ls.ledgerProcessBlock(txn, tmpPoint, next.block, shouldValidate); err != nil {
 						return err
 					}
 					// Update tip
 					ls.currentTip = ochainsync.Tip{
-						Point:       next.Point,
-						BlockNumber: next.Block.Number,
+						Point:       tmpPoint,
+						BlockNumber: next.block.BlockNumber(),
 					}
 					// Update tip block nonce
-					ls.currentTipBlockNonce = next.Block.Nonce
+					ls.currentTipBlockNonce = next.nonce
 				}
 				// Update tip in database
 				if err := ls.db.SetTip(ls.currentTip, txn); err != nil {
@@ -533,10 +583,11 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 				return
 			}
 			ls.Unlock()
+			if needsEpochRollover {
+				break
+			}
 		}
 		if len(nextBatch) > 0 {
-			// Clear out batch buffer
-			nextBatch = slices.Delete(nextBatch, 0, len(nextBatch))
 			ls.config.Logger.Info(
 				fmt.Sprintf(
 					"chain extended, new tip: %x at slot %d",
