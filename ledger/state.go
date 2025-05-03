@@ -444,6 +444,9 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 					break
 				}
 				needsRollback = true
+				// The rollback should be the only thing in the batch
+				nextBatch = append(nextBatch, next)
+				break
 			}
 			// Enable validation if we're getting near current tip
 			if !shouldValidate && len(nextBatch) == 0 {
