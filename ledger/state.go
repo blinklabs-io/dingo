@@ -708,7 +708,8 @@ func (ls *LedgerState) loadEpochs(txn *database.Txn) error {
 		return err
 	}
 	ls.epochCache = epochs
-	// Set current epoch
+	// Set current epoch and era
+	ls.currentEra = eras.Eras[0]
 	if len(epochs) > 0 {
 		ls.currentEpoch = epochs[len(epochs)-1]
 		ls.currentEra = eras.Eras[ls.currentEpoch.EraId]
