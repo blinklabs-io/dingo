@@ -461,6 +461,8 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 	var txn *database.Txn
 	var err error
 	var nextBatch, cachedNextBatch []readChainResultBlock
+	var delta *LedgerDelta
+	var deltaBatch LedgerDeltaBatch
 	shouldValidate := ls.config.ValidateHistorical
 	for {
 		if needsEpochRollover {
@@ -523,6 +525,7 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 			)
 			txn = ls.db.Transaction(true)
 			err = txn.Do(func(txn *database.Txn) error {
+				deltaBatch = LedgerDeltaBatch{}
 				for offset, next := range nextBatch[i:end] {
 					tmpPoint := ocommon.Point{
 						Slot: next.block.SlotNumber(),
@@ -535,7 +538,7 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 						nextEpochEraId = uint(next.block.Era().Id)
 						// Cache rest of the batch for next loop
 						cachedNextBatch = nextBatch[i+offset:]
-						return nil
+						break
 					}
 					// Enable validation if we're getting near current tip
 					if !shouldValidate && i == 0 {
@@ -557,8 +560,12 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 						}
 					}
 					// Process block
-					if err = ls.ledgerProcessBlock(txn, tmpPoint, next.block, shouldValidate); err != nil {
+					delta, err = ls.ledgerProcessBlock(txn, tmpPoint, next.block, shouldValidate)
+					if err != nil {
 						return err
+					}
+					if delta != nil {
+						deltaBatch.addDelta(delta)
 					}
 					// Update tip
 					ls.currentTip = ochainsync.Tip{
@@ -567,6 +574,10 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 					}
 					// Update tip block nonce
 					ls.currentTipBlockNonce = next.nonce
+				}
+				// Apply delta batch
+				if err := deltaBatch.apply(ls, txn); err != nil {
+					return err
 				}
 				// Update tip in database
 				if err := ls.db.SetTip(ls.currentTip, txn); err != nil {
@@ -606,7 +617,7 @@ func (ls *LedgerState) ledgerProcessBlock(
 	point ocommon.Point,
 	block ledger.Block,
 	shouldValidate bool,
-) error {
+) (*LedgerDelta, error) {
 	// Check that we're processing things in order
 	if len(ls.currentTip.Point.Hash) > 0 {
 		if string(
@@ -614,7 +625,7 @@ func (ls *LedgerState) ledgerProcessBlock(
 		) != string(
 			ls.currentTip.Point.Hash,
 		) {
-			return fmt.Errorf(
+			return nil, fmt.Errorf(
 				"block %s (with prev hash %s) does not fit on current chain tip (%x)",
 				block.Hash().String(),
 				block.PrevHash().String(),
@@ -655,22 +666,17 @@ func (ls *LedgerState) ledgerProcessBlock(
 		}
 		// Populate ledger delta from transaction
 		if err := delta.processTransaction(tx); err != nil {
-			return fmt.Errorf("process transaction: %w", err)
+			return nil, fmt.Errorf("process transaction: %w", err)
 		}
 		// Apply delta immediately if we may need the data to validate the next TX
 		if shouldValidate {
 			if err := delta.apply(ls, txn); err != nil {
-				return err
+				return nil, err
 			}
 			delta = nil
 		}
 	}
-	if delta != nil {
-		if err := delta.apply(ls, txn); err != nil {
-			return fmt.Errorf("apply ledger delta: %w", err)
-		}
-	}
-	return nil
+	return delta, nil
 }
 
 func (ls *LedgerState) updateTipMetrics() {
