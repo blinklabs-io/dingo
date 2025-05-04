@@ -19,9 +19,10 @@
 
 ## Running
 
-Dingo does not support a configuration file of its own and uses environment
+Dingo supports configuration via both a YAML config file (`dingo.yaml`) and uses environment
 variables to modify its own behavior.
 
+A sample configuration file is provided at `dingo.yaml.example`.You can copy and edit this file to configure Dingo for your local or production environment:
 This behavior can be changed via the following environment variables:
 
 - `CARDANO_BIND_ADDR`
