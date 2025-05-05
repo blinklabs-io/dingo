@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/blinklabs-io/dingo/topology"
 	ouroboros "github.com/blinklabs-io/gouroboros"
@@ -77,9 +78,24 @@ var globalConfig = &Config{
 
 func LoadConfig(configFile string) (*Config, error) {
 	// Load config file as YAML if provided
-	fmt.Println(configFile)
+	if configFile == "" {
+		// Check for config file in this path: ~/.dingo/dingo.yaml
+		if homeDir, err := os.UserHomeDir(); err == nil {
+			userPath := filepath.Join(homeDir, ".dingo", "dingo.yaml")
+			if _, err := os.Stat(userPath); err == nil {
+				configFile = userPath
+			}
+		}
+
+		// Try to check for /etc/dingo/dingo.yaml if still not found
+		if configFile == "" {
+			systemPath := "/etc/dingo/dingo.yaml"
+			if _, err := os.Stat(systemPath); err == nil {
+				configFile = systemPath
+			}
+		}
+	}
 	if configFile != "" {
-		fmt.Printf("Reading from config file %s\n", configFile)
 		buf, err := os.ReadFile(configFile)
 		if err != nil {
 			return nil, fmt.Errorf("error reading config file: %w", err)
@@ -88,7 +104,6 @@ func LoadConfig(configFile string) (*Config, error) {
 		if err != nil {
 			return nil, fmt.Errorf("error parsing config file: %w", err)
 		}
-		fmt.Printf("Successfully loaded the config file %s\n", configFile)
 	}
 	err := envconfig.Process("cardano", globalConfig)
 	if err != nil {
