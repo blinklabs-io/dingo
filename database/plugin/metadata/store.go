@@ -53,6 +53,10 @@ type MetadataStore interface {
 		[]byte, // stakeKey
 		*gorm.DB,
 	) (models.Account, error)
+	GetDatum(
+		*lcommon.Blake2b256,
+		*gorm.DB,
+	) (models.Datum, error)
 	GetPParams(
 		uint64, // epoch
 		*gorm.DB,
@@ -73,6 +77,11 @@ type MetadataStore interface {
 		[]byte, // drep
 		uint64, // slot
 		bool, // active
+		*gorm.DB,
+	) error
+	SetDatum(
+		*lcommon.Blake2b256,
+		[]byte,
 		*gorm.DB,
 	) error
 	SetDeregistration(
