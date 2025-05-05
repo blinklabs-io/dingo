@@ -77,9 +77,7 @@ var globalConfig = &Config{
 
 func LoadConfig(configFile string) (*Config, error) {
 	// Load config file as YAML if provided
-	fmt.Println(configFile)
 	if configFile != "" {
-		fmt.Printf("Reading from config file %s\n", configFile)
 		buf, err := os.ReadFile(configFile)
 		if err != nil {
 			return nil, fmt.Errorf("error reading config file: %w", err)
@@ -88,7 +86,6 @@ func LoadConfig(configFile string) (*Config, error) {
 		if err != nil {
 			return nil, fmt.Errorf("error parsing config file: %w", err)
 		}
-		fmt.Printf("Successfully loaded the config file %s\n", configFile)
 	}
 	err := envconfig.Process("cardano", globalConfig)
 	if err != nil {
