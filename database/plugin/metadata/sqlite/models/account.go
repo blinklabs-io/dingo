@@ -16,7 +16,7 @@ package models
 
 type Account struct {
 	ID         uint   `gorm:"primarykey"`
-	StakingKey []byte `gorm:"index,unique"`
+	StakingKey []byte `gorm:"uniqueIndex"`
 	Pool       []byte `gorm:"index"`
 	Drep       []byte `gorm:"index"`
 	AddedSlot  uint64
