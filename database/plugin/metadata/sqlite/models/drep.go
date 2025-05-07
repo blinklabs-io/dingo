@@ -16,7 +16,7 @@ package models
 
 type Drep struct {
 	ID         uint   `gorm:"primarykey"`
-	Credential []byte `gorm:"index"`
+	Credential []byte `gorm:"uniqueIndex"`
 	AnchorUrl  string
 	AnchorHash []byte
 	AddedSlot  uint64
