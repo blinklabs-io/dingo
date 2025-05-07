@@ -22,7 +22,7 @@ import (
 
 type Pool struct {
 	ID            uint   `gorm:"primarykey"`
-	PoolKeyHash   []byte `gorm:"index"`
+	PoolKeyHash   []byte `gorm:"uniqueIndex"`
 	VrfKeyHash    []byte
 	Pledge        types.Uint64
 	Cost          types.Uint64

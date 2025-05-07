@@ -57,12 +57,16 @@ func (d *MetadataStoreSqlite) SetDrep(
 		AnchorHash: hash,
 		Active:     active,
 	}
+	onConflict := clause.OnConflict{
+		Columns:   []clause.Column{{Name: "credential"}},
+		UpdateAll: true,
+	}
 	if txn != nil {
-		if result := txn.Clauses(clause.OnConflict{UpdateAll: true}).Create(&tmpItem); result.Error != nil {
+		if result := txn.Clauses(onConflict).Create(&tmpItem); result.Error != nil {
 			return result.Error
 		}
 	} else {
-		if result := d.DB().Clauses(clause.OnConflict{UpdateAll: true}).Create(&tmpItem); result.Error != nil {
+		if result := d.DB().Clauses(onConflict).Create(&tmpItem); result.Error != nil {
 			return result.Error
 		}
 	}
