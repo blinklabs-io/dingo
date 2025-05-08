@@ -397,6 +397,8 @@ func (ls *LedgerState) processEpochRollover(
 		"epoch", fmt.Sprintf("%+v", ls.currentEpoch),
 		"component", "ledger",
 	)
+	// Start background cleanup of consumed UTxOs
+	go ls.cleanupConsumedUtxos()
 	return nil
 }
 
