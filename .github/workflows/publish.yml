@@ -87,13 +87,7 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         run: |
           _filename=${{ env.APPLICATION_NAME }}-${{ env.RELEASE_TAG }}-${{ matrix.os }}-${{ matrix.arch }}.tar.gz
-          if [[ "${{ matrix.os }}" != "darwin" ]]; then
-            tar czf ${_filename} ${{ env.APPLICATION_NAME }}
-          fi
-          if [[ "${{ matrix.os }}" == "darwin" ]]; then
-            _filename=${{ env.APPLICATION_NAME }}-${{ env.RELEASE_TAG }}-${{ matrix.os }}-${{ matrix.arch }}.zip
-            zip -r ${_filename} ${{ env.APPLICATION_NAME }}
-          fi
+          tar czf ${_filename} ${{ env.APPLICATION_NAME }}
           curl \
             -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
             -H "Content-Type: application/octet-stream" \
