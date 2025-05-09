@@ -74,23 +74,24 @@ func (d *MetadataStoreSqlite) GetUtxosAddedAfterSlot(
 // GetUtxosDeletedBeforeSlot returns a list of Utxos marked as deleted before a given slot
 func (d *MetadataStoreSqlite) GetUtxosDeletedBeforeSlot(
 	slot uint64,
+	limit int,
 	txn *gorm.DB,
 ) ([]models.Utxo, error) {
 	var ret []models.Utxo
+	var query *gorm.DB
 	if txn != nil {
-		result := txn.Where("deleted_slot > 0 AND deleted_slot <= ?", slot).
-			Order("id DESC").
-			Find(&ret)
-		if result.Error != nil {
-			return ret, result.Error
-		}
+		query = txn
 	} else {
-		result := d.DB().Where("deleted_slot > 0 AND deleted_slot <= ?", slot).
-			Order("id DESC").
-			Find(&ret)
-		if result.Error != nil {
-			return ret, result.Error
-		}
+		query = d.DB()
+	}
+	query = query.Where("deleted_slot > 0 AND deleted_slot <= ?", slot).
+		Order("id DESC")
+	if limit > 0 {
+		query = query.Limit(limit)
+	}
+	result := query.Find(&ret)
+	if result.Error != nil {
+		return ret, result.Error
 	}
 	return ret, nil
 }
@@ -186,27 +187,6 @@ func (d *MetadataStoreSqlite) DeleteUtxosAfterSlot(
 		}
 	} else {
 		result := d.DB().Where("deleted_slot > ?", slot).
-			Delete(&models.Utxo{})
-		if result.Error != nil {
-			return result.Error
-		}
-	}
-	return nil
-}
-
-// DeleteUtxosBeforeSlot deletes Utxos marked as deleted before a given slot
-func (d *MetadataStoreSqlite) DeleteUtxosBeforeSlot(
-	slot uint64,
-	txn *gorm.DB,
-) error {
-	if txn != nil {
-		result := txn.Where("deleted_slot > 0 AND deleted_slot < ?", slot).
-			Delete(&models.Utxo{})
-		if result.Error != nil {
-			return result.Error
-		}
-	} else {
-		result := d.DB().Where("deleted_slot >0 AND deleted_slot < ?", slot).
 			Delete(&models.Utxo{})
 		if result.Error != nil {
 			return result.Error

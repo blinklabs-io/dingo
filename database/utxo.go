@@ -167,21 +167,27 @@ func (d *Database) UtxosByAddress(
 
 func (d *Database) UtxosDeleteConsumed(
 	slot uint64,
+	limit int,
 	txn *Txn,
-) error {
+) (int, error) {
 	var ret error
 	if txn == nil {
 		txn = d.Transaction(true)
 		defer txn.Commit() //nolint:errcheck
 	}
 	// Get UTxOs that are marked as deleted and older than our slot window
-	utxos, err := d.metadata.GetUtxosDeletedBeforeSlot(slot, txn.Metadata())
+	utxos, err := d.metadata.GetUtxosDeletedBeforeSlot(slot, limit, txn.Metadata())
 	if err != nil {
-		return errors.New("failed to query consumed UTxOs during cleanup")
+		return 0, errors.New("failed to query consumed UTxOs during cleanup")
 	}
-	err = d.metadata.DeleteUtxosBeforeSlot(slot, txn.Metadata())
+	utxoCount := len(utxos)
+	deleteUtxos := make([]any, utxoCount)
+	for idx, utxo := range utxos {
+		deleteUtxos[idx] = utxo
+	}
+	err = d.metadata.DeleteUtxos(deleteUtxos, txn.Metadata())
 	if err != nil {
-		return err
+		return 0, err
 	}
 
 	// Loop through UTxOs and delete, with a new transaction each loop
@@ -212,7 +218,7 @@ func (d *Database) UtxosDeleteConsumed(
 		// Remove batch
 		utxos = slices.Delete(utxos, 0, batchSize)
 	}
-	return ret
+	return utxoCount, ret
 }
 
 func (d *Database) UtxosDeleteRolledback(
@@ -224,7 +230,7 @@ func (d *Database) UtxosDeleteRolledback(
 		txn = d.Transaction(true)
 		defer txn.Commit() //nolint:errcheck
 	}
-	utxos, err := d.metadata.GetUtxosDeletedBeforeSlot(slot, txn.Metadata())
+	utxos, err := d.metadata.GetUtxosDeletedBeforeSlot(slot, -1, txn.Metadata())
 	if err != nil {
 		return err
 	}

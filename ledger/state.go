@@ -221,18 +221,25 @@ func (ls *LedgerState) cleanupConsumedUtxos() {
 		"component", "ledger",
 	)
 	if tip.Point.Slot > cleanupConsumedUtxosSlotWindow {
-		ls.Lock()
-		err := ls.db.UtxosDeleteConsumed(
-			tip.Point.Slot-cleanupConsumedUtxosSlotWindow,
-			nil,
-		)
-		ls.Unlock()
-		if err != nil {
-			ls.config.Logger.Error(
-				"failed to cleanup consumed UTxOs",
-				"component", "ledger",
-				"error", err,
+		for {
+			ls.Lock()
+			count, err := ls.db.UtxosDeleteConsumed(
+				tip.Point.Slot-cleanupConsumedUtxosSlotWindow,
+				10000,
+				nil,
 			)
+			ls.Unlock()
+			if count == 0 {
+				break
+			}
+			if err != nil {
+				ls.config.Logger.Error(
+					"failed to cleanup consumed UTxOs",
+					"component", "ledger",
+					"error", err,
+				)
+				break
+			}
 		}
 	}
 }
