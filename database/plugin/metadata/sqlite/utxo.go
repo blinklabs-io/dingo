@@ -54,14 +54,14 @@ func (d *MetadataStoreSqlite) GetUtxosAddedAfterSlot(
 ) ([]models.Utxo, error) {
 	var ret []models.Utxo
 	if txn != nil {
-		result := txn.Where("added_slot > 0", slot).
+		result := txn.Where("added_slot > ?", slot).
 			Order("id DESC").
 			Find(&ret)
 		if result.Error != nil {
 			return ret, result.Error
 		}
 	} else {
-		result := d.DB().Where("added_slot > 0", slot).
+		result := d.DB().Where("added_slot > ?", slot).
 			Order("id DESC").
 			Find(&ret)
 		if result.Error != nil {
@@ -180,13 +180,13 @@ func (d *MetadataStoreSqlite) DeleteUtxosAfterSlot(
 	txn *gorm.DB,
 ) error {
 	if txn != nil {
-		result := txn.Where("deleted_slot > ?", slot).
+		result := txn.Where("added_slot > ?", slot).
 			Delete(&models.Utxo{})
 		if result.Error != nil {
 			return result.Error
 		}
 	} else {
-		result := d.DB().Where("deleted_slot > ?", slot).
+		result := d.DB().Where("added_slot > ?", slot).
 			Delete(&models.Utxo{})
 		if result.Error != nil {
 			return result.Error
