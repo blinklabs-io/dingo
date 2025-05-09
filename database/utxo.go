@@ -230,7 +230,7 @@ func (d *Database) UtxosDeleteRolledback(
 		txn = d.Transaction(true)
 		defer txn.Commit() //nolint:errcheck
 	}
-	utxos, err := d.metadata.GetUtxosDeletedBeforeSlot(slot, -1, txn.Metadata())
+	utxos, err := d.metadata.GetUtxosAddedAfterSlot(slot, txn.Metadata())
 	if err != nil {
 		return err
 	}
