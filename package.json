@@ -3,6 +3,7 @@
   "version": "0.7.0",
   "description": "Dingo is a Cardano blockchain data node",
   "main": "index.js",
+  "bin": "dingo",
   "scripts": {
     "postinstall": "golang-npm install",
     "preuninstall": "golang-npm uninstall"
