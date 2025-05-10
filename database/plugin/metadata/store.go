@@ -82,7 +82,7 @@ type MetadataStore interface {
 	SetDatum(
 		lcommon.Blake2b256,
 		[]byte,
-		uint64, //slot
+		uint64, // slot
 		*gorm.DB,
 	) error
 	SetDeregistration(
