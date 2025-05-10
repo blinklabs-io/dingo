@@ -21,7 +21,7 @@ import (
 
 // GetDatum returns the datum for a given Blake2b256 hash
 func (d *Database) GetDatumByHash(
-	hash *lcommon.Blake2b256,
+	hash lcommon.Blake2b256,
 	txn *Txn,
 ) ([]byte, error) {
 	var datum models.Datum
@@ -39,16 +39,17 @@ func (d *Database) GetDatumByHash(
 }
 
 // SetDatum saves the raw datum into the database by computing the hash before inserting.
-func (d *Database) SetDatumByHash(
+func (d *Database) SetDatum(
 	rawDatum []byte,
+	addedSlot uint64,
 	txn *Txn,
 ) error {
 	// Compute Blake2b-256 hash
-	datumHash := lcommon.NewBlake2b256(rawDatum)
+	datumHash := lcommon.Blake2b256Hash(rawDatum)
 
 	if txn == nil {
-		return d.metadata.SetDatum(&datumHash, rawDatum, nil)
+		return d.metadata.SetDatum(datumHash, rawDatum, addedSlot, nil)
 	} else {
-		return d.metadata.SetDatum(&datumHash, rawDatum, txn.Metadata())
+		return d.metadata.SetDatum(datumHash, rawDatum, addedSlot, txn.Metadata())
 	}
 }

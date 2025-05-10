@@ -15,9 +15,10 @@
 package models
 
 type Datum struct {
-	ID       uint   `gorm:"primarykey"`
-	Hash     []byte `gorm:"index;not null;unique"`
-	RawDatum []byte `gorm:"not null"`
+	ID        uint   `gorm:"primarykey"`
+	Hash      []byte `gorm:"index;not null;unique"`
+	RawDatum  []byte `gorm:"not null"`
+	AddedSlot uint64 `gorm:"not null"`
 }
 
 func (Datum) TableName() string {

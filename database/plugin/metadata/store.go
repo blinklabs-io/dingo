@@ -54,7 +54,7 @@ type MetadataStore interface {
 		*gorm.DB,
 	) (models.Account, error)
 	GetDatum(
-		*lcommon.Blake2b256,
+		lcommon.Blake2b256,
 		*gorm.DB,
 	) (models.Datum, error)
 	GetPParams(
@@ -80,8 +80,9 @@ type MetadataStore interface {
 		*gorm.DB,
 	) error
 	SetDatum(
-		*lcommon.Blake2b256,
+		lcommon.Blake2b256,
 		[]byte,
+		uint64, //slot
 		*gorm.DB,
 	) error
 	SetDeregistration(

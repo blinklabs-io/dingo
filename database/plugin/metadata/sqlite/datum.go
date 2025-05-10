@@ -25,7 +25,7 @@ import (
 
 // GetDatum returns a datum by its hash
 func (d *MetadataStoreSqlite) GetDatum(
-	hash *lcommon.Blake2b256,
+	hash lcommon.Blake2b256,
 	txn *gorm.DB,
 ) (models.Datum, error) {
 	var datum models.Datum
@@ -46,13 +46,15 @@ func (d *MetadataStoreSqlite) GetDatum(
 
 // SetDatum saves a datum into the database, or updates it if it already exists
 func (d *MetadataStoreSqlite) SetDatum(
-	hash *lcommon.Blake2b256,
+	hash lcommon.Blake2b256,
 	rawDatum []byte,
+	addedSlot uint64,
 	txn *gorm.DB,
 ) error {
 	tmpItem := models.Datum{
-		Hash:     hash[:],
-		RawDatum: rawDatum,
+		Hash:      hash[:],
+		RawDatum:  rawDatum,
+		AddedSlot: addedSlot,
 	}
 	if txn != nil {
 		if result := txn.Clauses(clause.OnConflict{UpdateAll: true}).Create(&tmpItem); result.Error != nil {
