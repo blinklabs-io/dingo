@@ -7,10 +7,12 @@ cmd
 config
 connmanager
 database
+.dingo
 dingo
 dingo.socket
 Dockerfile
 event
+.github
 go.*
 internal
 ledger
