@@ -61,23 +61,24 @@ type BlockfetchRequestRangeFunc func(ouroboros.ConnectionId, ocommon.Point, ocom
 
 type LedgerState struct {
 	sync.RWMutex
-	chainsyncMutex              sync.Mutex
-	config                      LedgerStateConfig
-	db                          *database.Database
-	timerCleanupConsumedUtxos   *time.Timer
-	currentPParams              lcommon.ProtocolParameters
-	currentEpoch                database.Epoch
-	epochCache                  []database.Epoch
-	currentEra                  eras.EraDesc
-	currentTip                  ochainsync.Tip
-	currentTipBlockNonce        []byte
-	metrics                     stateMetrics
-	chainsyncBlockEvents        []BlockfetchEvent
-	chainsyncBlockfetchBusyTime time.Time
-	chainsyncBlockfetchDoneChan chan struct{}
-	chainsyncBlockfetchMutex    sync.Mutex
-	chainsyncBlockfetchWaiting  bool
-	chain                       *chain.Chain
+	chainsyncMutex                   sync.Mutex
+	config                           LedgerStateConfig
+	db                               *database.Database
+	timerCleanupConsumedUtxos        *time.Timer
+	currentPParams                   lcommon.ProtocolParameters
+	currentEpoch                     database.Epoch
+	epochCache                       []database.Epoch
+	currentEra                       eras.EraDesc
+	currentTip                       ochainsync.Tip
+	currentTipBlockNonce             []byte
+	metrics                          stateMetrics
+	chainsyncBlockEvents             []BlockfetchEvent
+	chainsyncBlockfetchBusyTime      time.Time
+	chainsyncBlockfetchBatchDoneChan chan struct{}
+	chainsyncBlockfetchReadyChan     chan struct{}
+	chainsyncBlockfetchMutex         sync.Mutex
+	chainsyncBlockfetchWaiting       bool
+	chain                            *chain.Chain
 }
 
 func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {

@@ -110,7 +110,7 @@ func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 	if headerCount >= allowedHeaderCount {
 		// We assign the channel to a temp var to protect against trying to read from a nil channel
 		// without a race condition
-		tmpDoneChan := ls.chainsyncBlockfetchDoneChan
+		tmpDoneChan := ls.chainsyncBlockfetchReadyChan
 		if tmpDoneChan != nil {
 			<-tmpDoneChan
 		}
@@ -140,20 +140,7 @@ func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 	ls.chainsyncBlockfetchMutex.Lock()
 	defer ls.chainsyncBlockfetchMutex.Unlock()
 	// Don't start fetch if there's already one in progress
-	if ls.chainsyncBlockfetchDoneChan != nil {
-		// Clear blockfetch busy flag on timeout
-		if time.Since(ls.chainsyncBlockfetchBusyTime) > blockfetchBusyTimeout {
-			ls.blockfetchRequestRangeCleanup(true)
-			ls.config.Logger.Warn(
-				fmt.Sprintf(
-					"blockfetch operation timed out after %s",
-					blockfetchBusyTimeout,
-				),
-				"component",
-				"ledger",
-			)
-			return nil
-		}
+	if ls.chainsyncBlockfetchReadyChan != nil {
 		ls.chainsyncBlockfetchWaiting = true
 		return nil
 	}
@@ -168,7 +155,6 @@ func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 		ls.blockfetchRequestRangeCleanup(true)
 		return err
 	}
-	ls.chainsyncBlockfetchBusyTime = time.Now()
 	return nil
 }
 
@@ -451,8 +437,34 @@ func (ls *LedgerState) blockfetchRequestRangeStart(
 	if err != nil {
 		return fmt.Errorf("request block range: %w", err)
 	}
-	// Create our blockfetch done signal channel
-	ls.chainsyncBlockfetchDoneChan = make(chan struct{})
+	// Reset blockfetch busy time
+	ls.chainsyncBlockfetchBusyTime = time.Now()
+	// Create our blockfetch done signal channels
+	ls.chainsyncBlockfetchReadyChan = make(chan struct{})
+	ls.chainsyncBlockfetchBatchDoneChan = make(chan struct{})
+	// Start goroutine to handle blockfetch timeout
+	go func() {
+		for {
+			select {
+			case <-ls.chainsyncBlockfetchBatchDoneChan:
+				return
+			case <-time.After(500 * time.Millisecond):
+			}
+			// Clear blockfetch busy flag on timeout
+			if time.Since(ls.chainsyncBlockfetchBusyTime) > blockfetchBusyTimeout {
+				ls.blockfetchRequestRangeCleanup(true)
+				ls.config.Logger.Warn(
+					fmt.Sprintf(
+						"blockfetch operation timed out after %s",
+						blockfetchBusyTimeout,
+					),
+					"component",
+					"ledger",
+				)
+				return
+			}
+		}
+	}()
 	return nil
 }
 
@@ -464,9 +476,9 @@ func (ls *LedgerState) blockfetchRequestRangeCleanup(resetFlags bool) {
 		len(ls.chainsyncBlockEvents),
 	)
 	// Close our blockfetch done signal channel
-	if ls.chainsyncBlockfetchDoneChan != nil {
-		close(ls.chainsyncBlockfetchDoneChan)
-		ls.chainsyncBlockfetchDoneChan = nil
+	if ls.chainsyncBlockfetchReadyChan != nil {
+		close(ls.chainsyncBlockfetchReadyChan)
+		ls.chainsyncBlockfetchReadyChan = nil
 	}
 	// Reset flags
 	if resetFlags {
@@ -475,6 +487,10 @@ func (ls *LedgerState) blockfetchRequestRangeCleanup(resetFlags bool) {
 }
 
 func (ls *LedgerState) handleEventBlockfetchBatchDone(e BlockfetchEvent) error {
+	// Cancel our blockfetch timeout watcher
+	if ls.chainsyncBlockfetchBatchDoneChan != nil {
+		close(ls.chainsyncBlockfetchBatchDoneChan)
+	}
 	// Process pending block events
 	if err := ls.processBlockEvents(); err != nil {
 		ls.blockfetchRequestRangeCleanup(true)
@@ -500,7 +516,6 @@ func (ls *LedgerState) handleEventBlockfetchBatchDone(e BlockfetchEvent) error {
 		ls.blockfetchRequestRangeCleanup(true)
 		return err
 	}
-	ls.chainsyncBlockfetchBusyTime = time.Now()
 	ls.chainsyncBlockfetchWaiting = false
 	return nil
 }
