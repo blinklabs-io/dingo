@@ -56,12 +56,16 @@ func (d *MetadataStoreSqlite) SetDatum(
 		RawDatum:  rawDatum,
 		AddedSlot: addedSlot,
 	}
+	onConflict := clause.OnConflict{
+		Columns:   []clause.Column{{Name: "hash"}},
+		UpdateAll: true,
+	}
 	if txn != nil {
-		if result := txn.Clauses(clause.OnConflict{UpdateAll: true}).Create(&tmpItem); result.Error != nil {
+		if result := txn.Clauses(onConflict).Create(&tmpItem); result.Error != nil {
 			return result.Error
 		}
 	} else {
-		if result := d.DB().Clauses(clause.OnConflict{UpdateAll: true}).Create(&tmpItem); result.Error != nil {
+		if result := d.DB().Clauses(onConflict).Create(&tmpItem); result.Error != nil {
 			return result.Error
 		}
 	}
