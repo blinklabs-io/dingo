@@ -9,7 +9,7 @@ require (
 	connectrpc.com/grpchealth v1.4.0
 	connectrpc.com/grpcreflect v1.3.0
 	github.com/blinklabs-io/gouroboros v0.120.1
-	github.com/blinklabs-io/ouroboros-mock v0.3.7
+	github.com/blinklabs-io/ouroboros-mock v0.3.8
 	github.com/dgraph-io/badger/v4 v4.7.0
 	github.com/glebarez/sqlite v1.11.0
 	github.com/kelseyhightower/envconfig v1.4.0
