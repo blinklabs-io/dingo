@@ -196,7 +196,7 @@ func (n *Node) chainsyncClientRollBackward(
 func (n *Node) chainsyncClientRollForward(
 	ctx ochainsync.CallbackContext,
 	blockType uint,
-	blockData interface{},
+	blockData any,
 	tip ochainsync.Tip,
 ) error {
 	switch v := blockData.(type) {

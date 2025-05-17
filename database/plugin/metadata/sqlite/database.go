@@ -170,7 +170,7 @@ func (d *MetadataStoreSqlite) scheduleDailyVacuum() {
 }
 
 // AutoMigrate wraps the gorm AutoMigrate
-func (d *MetadataStoreSqlite) AutoMigrate(dst ...interface{}) error {
+func (d *MetadataStoreSqlite) AutoMigrate(dst ...any) error {
 	return d.DB().AutoMigrate(dst...)
 }
 
@@ -185,7 +185,7 @@ func (d *MetadataStoreSqlite) Close() error {
 }
 
 // Create creates a record
-func (d *MetadataStoreSqlite) Create(value interface{}) *gorm.DB {
+func (d *MetadataStoreSqlite) Create(value any) *gorm.DB {
 	return d.DB().Create(value)
 }
 
@@ -195,12 +195,12 @@ func (d *MetadataStoreSqlite) DB() *gorm.DB {
 }
 
 // First returns the first DB entry
-func (d *MetadataStoreSqlite) First(args interface{}) *gorm.DB {
+func (d *MetadataStoreSqlite) First(args any) *gorm.DB {
 	return d.DB().First(args)
 }
 
 // Order orders a DB query
-func (d *MetadataStoreSqlite) Order(args interface{}) *gorm.DB {
+func (d *MetadataStoreSqlite) Order(args any) *gorm.DB {
 	return d.DB().Order(args)
 }
 
@@ -211,8 +211,8 @@ func (d *MetadataStoreSqlite) Transaction() *gorm.DB {
 
 // Where constrains a DB query
 func (d *MetadataStoreSqlite) Where(
-	query interface{},
-	args ...interface{},
+	query any,
+	args ...any,
 ) *gorm.DB {
 	return d.DB().Where(query, args...)
 }

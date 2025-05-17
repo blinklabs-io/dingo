@@ -37,8 +37,8 @@ type PluginOption struct {
 	CustomEnvVar string
 	CustomFlag   string
 	Description  string
-	DefaultValue interface{}
-	Dest         interface{}
+	DefaultValue any
+	Dest         any
 }
 
 func (p *PluginOption) AddToFlagSet(
@@ -143,7 +143,7 @@ func (p *PluginOption) ProcessEnvVars(envPrefix string) error {
 }
 
 func (p *PluginOption) ProcessConfig(
-	pluginData map[interface{}]interface{},
+	pluginData map[any]any,
 ) error {
 	if optionData, ok := pluginData[p.Name]; ok {
 		switch p.Type {

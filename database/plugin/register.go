@@ -80,7 +80,7 @@ func ProcessEnvVars() error {
 }
 
 func ProcessConfig(
-	pluginConfig map[string]map[string]map[interface{}]interface{},
+	pluginConfig map[string]map[string]map[any]any,
 ) error {
 	for _, plugin := range pluginEntries {
 		if pluginTypeData, ok := pluginConfig[PluginTypeName(plugin.Type)]; ok {
