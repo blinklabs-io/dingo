@@ -165,6 +165,19 @@ func (d *Database) SetStakeVoteRegistrationDelegation(
 	)
 }
 
+// SetVoteDelegation saves a vote delegation certificate
+func (d *Database) SetVoteDelegation(
+	cert *lcommon.VoteDelegationCertificate,
+	slot uint64,
+	txn *Txn,
+) error {
+	return d.metadata.SetVoteDelegation(
+		cert,
+		slot,
+		txn.Metadata(),
+	)
+}
+
 // SetVoteRegistrationDelegation saves a vote registration delegation certificate
 func (d *Database) SetVoteRegistrationDelegation(
 	cert *lcommon.VoteRegistrationDelegationCertificate,

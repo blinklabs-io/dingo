@@ -15,6 +15,8 @@
 package sqlite
 
 import (
+	"errors"
+
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite/models"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"gorm.io/gorm"
@@ -284,6 +286,47 @@ func (d *MetadataStoreSqlite) SetStakeVoteRegistrationDelegation(
 			return result.Error
 		}
 	}
+	return nil
+}
+
+// SetVoteDelegation saves a vote-only delegation certificate and updates the account.
+func (d *MetadataStoreSqlite) SetVoteDelegation(
+	cert *lcommon.VoteDelegationCertificate,
+	slot uint64,
+	txn *gorm.DB,
+) error {
+	stakeKey := cert.StakeCredential.Credential.Bytes()
+	drep := cert.Drep.Credential[:]
+
+	// Fetch current account
+	existingAccount, err := d.GetAccount(stakeKey, txn)
+	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+		return err
+	}
+	var pool []byte
+	if existingAccount.ID != 0 {
+		pool = existingAccount.Pool
+	}
+	// Update only the drep field
+	if err := d.SetAccount(stakeKey, pool, drep, slot, true, txn); err != nil {
+		return err
+	}
+	tmpItem := models.VoteDelegation{
+		StakingKey: stakeKey,
+		Drep:       drep,
+		AddedSlot:  slot,
+	}
+
+	if txn != nil {
+		if result := txn.Create(&tmpItem); result.Error != nil {
+			return result.Error
+		}
+	} else {
+		if result := d.DB().Create(&tmpItem); result.Error != nil {
+			return result.Error
+		}
+	}
+
 	return nil
 }
 
