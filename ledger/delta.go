@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"fmt"
+	"maps"
 	"slices"
 
 	"github.com/blinklabs-io/dingo/database"
@@ -47,9 +48,7 @@ func (d *LedgerDelta) processTransaction(tx lcommon.Transaction) error {
 				map[lcommon.Blake2b224]lcommon.ProtocolParameterUpdate,
 			)
 		}
-		for genesisHash, update := range paramUpdates {
-			d.PParamUpdates[genesisHash] = update
-		}
+		maps.Copy(d.PParamUpdates, paramUpdates)
 	}
 	// Certificates
 	d.Certificates = slices.Concat(d.Certificates, tx.Certificates())
