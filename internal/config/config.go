@@ -43,20 +43,20 @@ func FromContext(ctx context.Context) *Config {
 }
 
 type Config struct {
-	BindAddr        string `yaml:"bindAddr"        split_words:"true"`
-	CardanoConfig   string `yaml:"cardanoConfig"                      envconfig:"config"`
-	DatabasePath    string `yaml:"databasePath"    split_words:"true"`
-	SocketPath      string `yaml:"socketPath"      split_words:"true"`
-	Network         string `yaml:"network"`
-	TlsCertFilePath string `yaml:"tlsCertFilePath"                    envconfig:"TLS_CERT_FILE_PATH"`
-	TlsKeyFilePath  string `yaml:"tlsKeyFilePath"                     envconfig:"TLS_KEY_FILE_PATH"`
-	Topology        string `yaml:"topology"`
-	MetricsPort     uint   `yaml:"metricsPort"     split_words:"true"`
-	PrivateBindAddr string `yaml:"privateBindAddr" split_words:"true"`
-	PrivatePort     uint   `yaml:"privatePort"     split_words:"true"`
-	RelayPort       uint   `yaml:"relayPort"                          envconfig:"port"`
-	UtxorpcPort     uint   `yaml:"utxorpcPort"     split_words:"true"`
-	IntersectTip    bool   `yaml:"intersectTip"    split_words:"true"`
+	BindAddr        string `split_words:"true" yaml:"bindAddr"`
+	CardanoConfig   string `                   yaml:"cardanoConfig"   envconfig:"config"`
+	DatabasePath    string `split_words:"true" yaml:"databasePath"`
+	SocketPath      string `split_words:"true" yaml:"socketPath"`
+	Network         string `                   yaml:"network"`
+	TlsCertFilePath string `                   yaml:"tlsCertFilePath" envconfig:"TLS_CERT_FILE_PATH"`
+	TlsKeyFilePath  string `                   yaml:"tlsKeyFilePath"  envconfig:"TLS_KEY_FILE_PATH"`
+	Topology        string `                   yaml:"topology"`
+	MetricsPort     uint   `split_words:"true" yaml:"metricsPort"`
+	PrivateBindAddr string `split_words:"true" yaml:"privateBindAddr"`
+	PrivatePort     uint   `split_words:"true" yaml:"privatePort"`
+	RelayPort       uint   `                   yaml:"relayPort"       envconfig:"port"`
+	UtxorpcPort     uint   `split_words:"true" yaml:"utxorpcPort"`
+	IntersectTip    bool   `split_words:"true" yaml:"intersectTip"`
 }
 
 var globalConfig = &Config{
