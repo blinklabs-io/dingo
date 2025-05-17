@@ -34,7 +34,7 @@ func (n *Node) localtxmonitorServerGetMempool(
 	tip := n.ledgerState.Tip()
 	mempoolTxs := n.mempool.Transactions()
 	retTxs := make([]olocaltxmonitor.TxAndEraId, len(mempoolTxs))
-	for i := 0; i < len(mempoolTxs); i++ {
+	for i := range mempoolTxs {
 		retTxs[i] = olocaltxmonitor.TxAndEraId{
 			EraId: mempoolTxs[i].Type,
 			Tx:    mempoolTxs[i].Cbor,
