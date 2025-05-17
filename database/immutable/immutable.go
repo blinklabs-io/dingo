@@ -277,7 +277,7 @@ func (i *ImmutableDb) BlocksFromPoint(
 	}
 	ret := &BlockIterator{
 		db:         i,
-		chunkNames: chunkNames[:],
+		chunkNames: chunkNames,
 		startPoint: point,
 	}
 	return ret, nil
