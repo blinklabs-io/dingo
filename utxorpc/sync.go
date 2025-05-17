@@ -222,7 +222,7 @@ func (s *syncServiceServer) FollowTip(
 		}
 		if next != nil {
 			// Send block response
-			blockBytes := next.Block.Cbor[:]
+			blockBytes := next.Block.Cbor
 			blockType, err := ledger.DetermineBlockType(blockBytes)
 			if err != nil {
 				s.utxorpc.config.Logger.Error(

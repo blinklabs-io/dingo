@@ -66,7 +66,7 @@ func (n *Node) blockfetchServerRequestRange(
 			if next.Block.Slot > end.Slot {
 				break
 			}
-			blockBytes := next.Block.Cbor[:]
+			blockBytes := next.Block.Cbor
 			err := ctx.Server.Block(
 				next.Block.Type,
 				blockBytes,

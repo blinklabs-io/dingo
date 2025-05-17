@@ -232,7 +232,7 @@ func (m *Mempool) AddTransaction(txType uint, txBytes []byte) error {
 			AddTransactionEvent{
 				Hash: tx.Hash,
 				Type: tx.Type,
-				Body: tx.Cbor[:],
+				Body: tx.Cbor,
 			},
 		),
 	)

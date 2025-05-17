@@ -234,7 +234,7 @@ func (d *MetadataStoreSqlite) SetStakeRegistrationDelegation(
 	txn *gorm.DB,
 ) error {
 	stakeKey := cert.StakeCredential.Credential.Bytes()
-	pkh := cert.PoolKeyHash[:]
+	pkh := cert.PoolKeyHash
 	tmpItem := models.StakeRegistrationDelegation{
 		StakingKey:    stakeKey,
 		PoolKeyHash:   pkh,
@@ -264,7 +264,7 @@ func (d *MetadataStoreSqlite) SetStakeVoteRegistrationDelegation(
 ) error {
 	stakeKey := cert.StakeCredential.Credential.Bytes()
 	pkh := cert.PoolKeyHash[:]
-	drep := cert.Drep.Credential[:]
+	drep := cert.Drep.Credential
 	tmpItem := models.StakeVoteRegistrationDelegation{
 		StakingKey:    stakeKey,
 		PoolKeyHash:   pkh,
@@ -294,7 +294,7 @@ func (d *MetadataStoreSqlite) SetVoteRegistrationDelegation(
 	txn *gorm.DB,
 ) error {
 	stakeKey := cert.StakeCredential.Credential.Bytes()
-	drep := cert.Drep.Credential[:]
+	drep := cert.Drep.Credential
 	tmpItem := models.VoteRegistrationDelegation{
 		StakingKey:    stakeKey,
 		Drep:          drep,
