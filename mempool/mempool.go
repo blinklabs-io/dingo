@@ -253,7 +253,7 @@ func (m *Mempool) Transactions() []MempoolTransaction {
 	m.Lock()
 	defer m.Unlock()
 	ret := make([]MempoolTransaction, len(m.transactions))
-	for i := 0; i < len(m.transactions); i++ {
+	for i := range m.transactions {
 		ret[i] = *m.transactions[i]
 	}
 	return ret
