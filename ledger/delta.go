@@ -34,7 +34,7 @@ type LedgerDelta struct {
 	Certificates      []lcommon.Certificate
 }
 
-// nolint:unparam
+//nolint:unparam
 func (d *LedgerDelta) processTransaction(tx lcommon.Transaction) error {
 	// Consumed UTxOs
 	d.Consumed = slices.Concat(d.Consumed, tx.Consumed())
