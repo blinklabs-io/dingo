@@ -15,8 +15,6 @@
 package sqlite
 
 import (
-	"errors"
-
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite/models"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"gorm.io/gorm"
@@ -296,32 +294,30 @@ func (d *MetadataStoreSqlite) SetVoteDelegation(
 	txn *gorm.DB,
 ) error {
 	stakeKey := cert.StakeCredential.Credential.Bytes()
-	drep := cert.Drep.Credential[:]
+	tmpAccount, err := d.GetAccount(stakeKey, txn)
+	if err != nil {
+		return err
+	}
 
-	// Fetch current account
-	existingAccount, err := d.GetAccount(stakeKey, txn)
-	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
-		return err
-	}
-	var pool []byte
-	if existingAccount.ID != 0 {
-		pool = existingAccount.Pool
-	}
-	// Update only the drep field
-	if err := d.SetAccount(stakeKey, pool, drep, slot, true, txn); err != nil {
-		return err
-	}
 	tmpItem := models.VoteDelegation{
 		StakingKey: stakeKey,
-		Drep:       drep,
+		Drep:       cert.Drep.Credential[:],
 		AddedSlot:  slot,
 	}
 
+	tmpAccount.Drep = tmpItem.Drep
+
 	if txn != nil {
+		if accountErr := txn.Save(&tmpAccount); accountErr.Error != nil {
+			return accountErr.Error
+		}
 		if result := txn.Create(&tmpItem); result.Error != nil {
 			return result.Error
 		}
 	} else {
+		if accountErr := d.DB().Save(&tmpAccount); accountErr.Error != nil {
+			return accountErr.Error
+		}
 		if result := d.DB().Create(&tmpItem); result.Error != nil {
 			return result.Error
 		}
