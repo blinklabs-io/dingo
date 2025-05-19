@@ -50,3 +50,15 @@ type RegistrationDrep struct {
 func (RegistrationDrep) TableName() string {
 	return "registration_drep"
 }
+
+type UpdateDrep struct {
+	ID         uint   `gorm:"primarykey"`
+	Credential []byte `gorm:"index"`
+	AnchorUrl  string
+	AnchorHash []byte
+	AddedSlot  uint64
+}
+
+func (UpdateDrep) TableName() string {
+	return "update_drep"
+}

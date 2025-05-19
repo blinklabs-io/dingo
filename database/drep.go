@@ -45,3 +45,16 @@ func (d *Database) SetDeregistrationDrep(
 		txn.Metadata(),
 	)
 }
+
+// SetUpdateDrep saves an update drep certificate
+func (d *Database) SetUpdateDrep(
+	cert *lcommon.UpdateDrepCertificate,
+	slot uint64,
+	txn *Txn,
+) error {
+	return d.metadata.SetUpdateDrep(
+		cert,
+		slot,
+		txn.Metadata(),
+	)
+}
