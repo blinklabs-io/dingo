@@ -164,6 +164,11 @@ type MetadataStore interface {
 		uint64, // deposit
 		*gorm.DB,
 	) error
+	SetStakeVoteDelegation(
+		*lcommon.StakeVoteDelegationCertificate,
+		uint64, // slot
+		*gorm.DB,
+	) error
 	SetStakeVoteRegistrationDelegation(
 		*lcommon.StakeVoteRegistrationDelegationCertificate,
 		uint64, // slot

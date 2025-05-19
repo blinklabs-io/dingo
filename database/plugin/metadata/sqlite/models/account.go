@@ -92,6 +92,18 @@ func (StakeRegistrationDelegation) TableName() string {
 	return "stake_registration_delegation"
 }
 
+type StakeVoteDelegation struct {
+	ID          uint   `gorm:"primarykey"`
+	StakingKey  []byte `gorm:"index"`
+	PoolKeyHash []byte `gorm:"index"`
+	Drep        []byte `gorm:"index"`
+	AddedSlot   uint64
+}
+
+func (StakeVoteDelegation) TableName() string {
+	return "stake_vote_delegation"
+}
+
 type StakeVoteRegistrationDelegation struct {
 	ID            uint   `gorm:"primarykey"`
 	StakingKey    []byte `gorm:"index"`
