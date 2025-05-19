@@ -6,7 +6,7 @@ RUN go mod download
 COPY . .
 RUN make build
 
-FROM ghcr.io/blinklabs-io/cardano-configs:20250213-1 AS cardano-configs
+FROM ghcr.io/blinklabs-io/cardano-configs:20250518-1 AS cardano-configs
 FROM ghcr.io/blinklabs-io/txtop:0.12.3 AS txtop
 
 FROM debian:bookworm-slim AS dingo
