@@ -134,6 +134,15 @@ func (ls *LedgerState) processTransactionCertificates(
 			if err != nil {
 				return err
 			}
+		case *lcommon.StakeVoteDelegationCertificate:
+			err := ls.db.SetStakeVoteDelegation(
+				cert,
+				blockPoint.Slot,
+				txn,
+			)
+			if err != nil {
+				return err
+			}
 		case *lcommon.StakeVoteRegistrationDelegationCertificate:
 			err := ls.db.SetStakeVoteRegistrationDelegation(
 				cert,
