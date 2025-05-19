@@ -155,17 +155,23 @@ func (d *MetadataStoreSqlite) SetUpdateDrep(
 		return err
 	}
 
+	var anchorUrl string
+	var anchorHash []byte
 	// Update the active Drep fields
-	tmpDrep.AnchorUrl = cert.Anchor.Url
-	tmpDrep.AnchorHash = cert.Anchor.DataHash[:]
+	if cert.Anchor != nil {
+		anchorUrl = cert.Anchor.Url
+		anchorHash = cert.Anchor.DataHash[:]
+	}
+	tmpDrep.AnchorUrl = anchorUrl
+	tmpDrep.AnchorHash = anchorHash
 	tmpDrep.AddedSlot = slot
 	tmpDrep.Active = true
 
 	// Create a history record in update_drep table
 	tmpItem := models.UpdateDrep{
 		Credential: drepKey,
-		AnchorUrl:  cert.Anchor.Url,
-		AnchorHash: cert.Anchor.DataHash[:],
+		AnchorUrl:  anchorUrl,
+		AnchorHash: anchorHash,
 		AddedSlot:  slot,
 	}
 
