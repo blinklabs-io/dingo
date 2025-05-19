@@ -142,3 +142,49 @@ func (d *MetadataStoreSqlite) SetRegistrationDrep(
 	}
 	return nil
 }
+
+// SetUpdateDrep saves an update drep certificate and updates the Dreps anchor fields
+func (d *MetadataStoreSqlite) SetUpdateDrep(
+	cert *lcommon.UpdateDrepCertificate,
+	slot uint64,
+	txn *gorm.DB,
+) error {
+	drepKey := cert.DrepCredential.Credential.Bytes()
+	tmpDrep, err := d.GetDrep(drepKey, txn)
+	if err != nil {
+		return err
+	}
+
+	// Update the active Drep fields
+	tmpDrep.AnchorUrl = cert.Anchor.Url
+	tmpDrep.AnchorHash = cert.Anchor.DataHash[:]
+	tmpDrep.AddedSlot = slot
+	tmpDrep.Active = true
+
+	// Create a history record in update_drep table
+	tmpItem := models.UpdateDrep{
+		Credential: drepKey,
+		AnchorUrl:  cert.Anchor.Url,
+		AnchorHash: cert.Anchor.DataHash[:],
+		AddedSlot:  slot,
+	}
+
+	// Save to both live Drep and UpdateDrep table
+	if txn != nil {
+		if err := txn.Save(&tmpDrep); err.Error != nil {
+			return err.Error
+		}
+		if result := txn.Create(&tmpItem); result.Error != nil {
+			return result.Error
+		}
+	} else {
+		if err := d.DB().Save(&tmpDrep); err.Error != nil {
+			return err.Error
+		}
+		if result := d.DB().Create(&tmpItem); result.Error != nil {
+			return result.Error
+		}
+	}
+
+	return nil
+}

@@ -174,6 +174,11 @@ type MetadataStore interface {
 		ochainsync.Tip,
 		*gorm.DB,
 	) error
+	SetUpdateDrep(
+		*lcommon.UpdateDrepCertificate,
+		uint64, // slot
+		*gorm.DB,
+	) error
 	SetUtxo(
 		[]byte, // hash
 		uint32, // idx
