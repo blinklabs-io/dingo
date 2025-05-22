@@ -451,7 +451,9 @@ func (ls *LedgerState) blockfetchRequestRangeStart(
 			case <-time.After(500 * time.Millisecond):
 			}
 			// Clear blockfetch busy flag on timeout
-			if time.Since(ls.chainsyncBlockfetchBusyTime) > blockfetchBusyTimeout {
+			if time.Since(
+				ls.chainsyncBlockfetchBusyTime,
+			) > blockfetchBusyTimeout {
 				ls.blockfetchRequestRangeCleanup(true)
 				ls.config.Logger.Warn(
 					fmt.Sprintf(
