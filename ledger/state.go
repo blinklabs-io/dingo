@@ -573,7 +573,12 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 						}
 					}
 					// Process block
-					delta, err = ls.ledgerProcessBlock(txn, tmpPoint, next.block, shouldValidate)
+					delta, err = ls.ledgerProcessBlock(
+						txn,
+						tmpPoint,
+						next.block,
+						shouldValidate,
+					)
 					if err != nil {
 						return err
 					}

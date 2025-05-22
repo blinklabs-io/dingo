@@ -96,7 +96,10 @@ func (d *Database) AddUtxos(
 	}
 	for _, utxoSlot := range utxos {
 		// Add UTxO to blob DB
-		key := UtxoBlobKey(utxoSlot.Utxo.Id.Id().Bytes(), utxoSlot.Utxo.Id.Index())
+		key := UtxoBlobKey(
+			utxoSlot.Utxo.Id.Id().Bytes(),
+			utxoSlot.Utxo.Id.Index(),
+		)
 		err := txn.Blob().Set(key, utxoSlot.Utxo.Output.Cbor())
 		if err != nil {
 			return err
@@ -176,7 +179,11 @@ func (d *Database) UtxosDeleteConsumed(
 		defer txn.Commit() //nolint:errcheck
 	}
 	// Get UTxOs that are marked as deleted and older than our slot window
-	utxos, err := d.metadata.GetUtxosDeletedBeforeSlot(slot, limit, txn.Metadata())
+	utxos, err := d.metadata.GetUtxosDeletedBeforeSlot(
+		slot,
+		limit,
+		txn.Metadata(),
+	)
 	if err != nil {
 		return 0, errors.New("failed to query consumed UTxOs during cleanup")
 	}
