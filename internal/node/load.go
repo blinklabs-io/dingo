@@ -20,7 +20,9 @@ import (
 	"slices"
 	"time"
 
+	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/config/cardano"
+	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/immutable"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/config"
@@ -44,20 +46,37 @@ func Load(cfg *config.Config, logger *slog.Logger, immutableDir string) error {
 			"component", "node",
 		)
 	}
-	// Load state
+	// Load database
+	db, err := database.New(logger, cfg.DatabasePath)
+	if err != nil {
+		return err
+	}
+	// Load chain
 	eventBus := event.NewEventBus(nil)
+	c, err := chain.NewChain(
+		db,
+		eventBus,
+		true, // persistent
+	)
+	if err != nil {
+		return fmt.Errorf("failed to load chain: %w", err)
+	}
+	// Load state
 	ls, err := ledger.NewLedgerState(
 		ledger.LedgerStateConfig{
-			DataDir:           cfg.DatabasePath,
+			Database:          db,
+			Chain:             c,
 			Logger:            logger,
 			CardanoNodeConfig: nodeCfg,
 			EventBus:          eventBus,
 		},
 	)
 	if err != nil {
-		return fmt.Errorf("failed to load state database: %w", err)
+		return fmt.Errorf("failed to load state: %w", err)
 	}
-	c := ls.Chain()
+	if err := ls.Start(); err != nil {
+		return fmt.Errorf("failed to load state: %w", err)
+	}
 	// Open immutable DB
 	immutable, err := immutable.New(immutableDir)
 	if err != nil {

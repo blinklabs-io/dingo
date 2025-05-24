@@ -20,8 +20,10 @@ import (
 	"fmt"
 	"slices"
 
+	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/chainsync"
 	"github.com/blinklabs-io/dingo/connmanager"
+	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/mempool"
@@ -44,6 +46,8 @@ type Node struct {
 	chainsyncState *chainsync.State
 	eventBus       *event.EventBus
 	mempool        *mempool.Mempool
+	chain          *chain.Chain
+	db             *database.Database
 	ledgerState    *ledger.LedgerState
 	utxorpc        *utxorpc.Utxorpc
 	shutdownFuncs  []func(context.Context) error
@@ -71,10 +75,45 @@ func (n *Node) Run() error {
 			return err
 		}
 	}
+	// Load database
+	dbNeedsRecovery := false
+	db, err := database.New(n.config.logger, n.config.dataDir)
+	if db == nil {
+		n.config.logger.Error(
+			"failed to create database",
+			"error",
+			"empty database returned",
+		)
+		return errors.New("empty database returned")
+	}
+	n.db = db
+	if err != nil {
+		var dbErr database.CommitTimestampError
+		if !errors.As(err, &dbErr) {
+			return fmt.Errorf("failed to open database: %w", err)
+		}
+		n.config.logger.Warn(
+			"database initialization error, needs recovery",
+			"error",
+			err,
+		)
+		dbNeedsRecovery = true
+	}
+	// Load chain
+	chain, err := chain.NewChain(
+		n.db,
+		n.eventBus,
+		true, // persistent
+	)
+	if err != nil {
+		return fmt.Errorf("failed to load chain: %w", err)
+	}
+	n.chain = chain
 	// Load state
 	state, err := ledger.NewLedgerState(
 		ledger.LedgerStateConfig{
-			DataDir:                    n.config.dataDir,
+			Chain:                      n.chain,
+			Database:                   n.db,
 			EventBus:                   n.eventBus,
 			Logger:                     n.config.logger,
 			CardanoNodeConfig:          n.config.cardanoNodeConfig,
@@ -93,6 +132,16 @@ func (n *Node) Run() error {
 		},
 	)
 	n.ledgerState = state
+	// Run DB recovery if needed
+	if dbNeedsRecovery {
+		if err := n.ledgerState.RecoverCommitTimestampConflict(); err != nil {
+			return fmt.Errorf("failed to recover database: %w", err)
+		}
+	}
+	// Start ledger
+	if err := n.ledgerState.Start(); err != nil {
+		return fmt.Errorf("failed to start ledger: %w", err)
+	}
 	// Initialize mempool
 	n.mempool = mempool.NewMempool(
 		n.config.logger,
