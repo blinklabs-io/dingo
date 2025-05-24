@@ -40,6 +40,11 @@ func (d *LedgerDelta) processTransaction(tx lcommon.Transaction) error {
 	d.Consumed = slices.Concat(d.Consumed, tx.Consumed())
 	// Produced UTxOs
 	d.Produced = slices.Concat(d.Produced, tx.Produced())
+	// Stop processing transaction if it's marked as invalid
+	// This allows us to capture collateral returns in the case of phase 2 validation failure
+	if !tx.IsValid() {
+		return nil
+	}
 	// Protocol parameter updates
 	if updateEpoch, paramUpdates := tx.ProtocolParameterUpdates(); updateEpoch > 0 {
 		d.PParamUpdateEpoch = updateEpoch
