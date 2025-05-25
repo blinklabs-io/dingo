@@ -46,7 +46,8 @@ const (
 
 type LedgerStateConfig struct {
 	Logger             *slog.Logger
-	DataDir            string
+	Database           *database.Database
+	Chain              *chain.Chain
 	EventBus           *event.EventBus
 	CardanoNodeConfig  *cardano.CardanoNodeConfig
 	PromRegistry       prometheus.Registerer
@@ -84,58 +85,20 @@ type LedgerState struct {
 func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 	ls := &LedgerState{
 		config: cfg,
+		db:     cfg.Database,
+		chain:  cfg.Chain,
 	}
 	if cfg.Logger == nil {
 		// Create logger to throw away logs
 		// We do this so we don't have to add guards around every log operation
 		cfg.Logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
 	}
+	return ls, nil
+}
+
+func (ls *LedgerState) Start() error {
 	// Init metrics
 	ls.metrics.init(ls.config.PromRegistry)
-	// Load database
-	needsRecovery := false
-	db, err := database.New(cfg.Logger, cfg.DataDir)
-	if db == nil {
-		ls.config.Logger.Error(
-			"failed to create database",
-			"error",
-			"empty database returned",
-			"component",
-			"ledger",
-		)
-		return nil, errors.New("empty database returned")
-	}
-	ls.db = db
-	if err != nil {
-		var dbErr database.CommitTimestampError
-		if !errors.As(err, &dbErr) {
-			return nil, fmt.Errorf("failed to open database: %w", err)
-		}
-		ls.config.Logger.Warn(
-			"database initialization error, needs recovery",
-			"error",
-			err,
-			"component",
-			"ledger",
-		)
-		needsRecovery = true
-	}
-	// Load chain
-	chain, err := chain.NewChain(
-		ls.db,
-		ls.config.EventBus,
-		true, // persistent
-	)
-	if err != nil {
-		return nil, fmt.Errorf("failed to load chain: %w", err)
-	}
-	ls.chain = chain
-	// Run recovery if needed
-	if needsRecovery {
-		if err := ls.recoverCommitTimestampConflict(); err != nil {
-			return nil, fmt.Errorf("failed to recover database: %w", err)
-		}
-	}
 	// Setup event handlers
 	ls.config.EventBus.SubscribeFunc(
 		ChainsyncEventType,
@@ -149,26 +112,26 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 	ls.scheduleCleanupConsumedUtxos()
 	// Load epoch info from DB
 	if err := ls.loadEpochs(nil); err != nil {
-		return nil, fmt.Errorf("failed to load epoch info: %w", err)
+		return fmt.Errorf("failed to load epoch info: %w", err)
 	}
 	// Load current protocol parameters from DB
 	if err := ls.loadPParams(); err != nil {
-		return nil, fmt.Errorf("failed to load pparams: %w", err)
+		return fmt.Errorf("failed to load pparams: %w", err)
 	}
 	// Load current tip
 	if err := ls.loadTip(); err != nil {
-		return nil, fmt.Errorf("failed to load tip: %w", err)
+		return fmt.Errorf("failed to load tip: %w", err)
 	}
 	// Create genesis block
 	if err := ls.createGenesisBlock(); err != nil {
-		return nil, fmt.Errorf("failed to create genesis block: %w", err)
+		return fmt.Errorf("failed to create genesis block: %w", err)
 	}
 	// Start goroutine to process new blocks
 	go ls.ledgerProcessBlocks()
-	return ls, nil
+	return nil
 }
 
-func (ls *LedgerState) recoverCommitTimestampConflict() error {
+func (ls *LedgerState) RecoverCommitTimestampConflict() error {
 	// Load current ledger tip
 	tmpTip, err := ls.db.GetTip(nil)
 	if err != nil {
