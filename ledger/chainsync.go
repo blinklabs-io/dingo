@@ -406,7 +406,7 @@ func (ls *LedgerState) processBlockEvent(
 		}
 		blockNonce = tmpNonce
 	}
-	// Add block to chain with calculated nonce
+	// Add block to chain
 	if err := ls.chain.AddBlock(e.Block, blockNonce, txn); err != nil {
 		// Ignore and log errors about block not fitting on chain or matching first header
 		if !errors.As(err, &chain.BlockNotFitChainTipError{}) &&
