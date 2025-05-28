@@ -383,23 +383,6 @@ func (ls *LedgerState) processEpochRollover(
 		"epoch", fmt.Sprintf("%+v", ls.currentEpoch),
 		"component", "ledger",
 	)
-
-	//  NEW: Cleanup old block nonces beyond stability window
-	byronGenesis := ls.config.CardanoNodeConfig.ByronGenesis()
-	shelleyGenesis := ls.config.CardanoNodeConfig.ShelleyGenesis()
-
-	stabilityWindow := new(big.Rat).Quo(
-		big.NewRat(int64(3*byronGenesis.ProtocolConsts.K), 1),
-		shelleyGenesis.ActiveSlotsCoeff.Rat,
-	).Num().Uint64()
-
-	stabilityWindowStartSlot := epochStartSlot - stabilityWindow
-
-	err = ls.db.DeleteBlockNoncesBeforeSlot(stabilityWindowStartSlot, txn)
-	if err != nil {
-		return fmt.Errorf("delete old block nonces: %w", err)
-	}
-
 	// Start background cleanup of consumed UTxOs
 	go ls.cleanupConsumedUtxos()
 	return nil
@@ -423,20 +406,6 @@ func (ls *LedgerState) processBlockEvent(
 		}
 		blockNonce = tmpNonce
 	}
-
-	isCheckpoint := (e.Block.SlotNumber())%1000 == 0
-	// Store block nonce in the DB
-	err := ls.db.SetBlockNonce(
-		e.Block.Hash().String(), // block hash
-		e.Block.SlotNumber(),    // slot number
-		blockNonce,              // calculated nonce
-		isCheckpoint,
-		txn, // underlying GORM DB
-	)
-	if err != nil {
-		return fmt.Errorf("insert block nonce: %w", err)
-	}
-
 	// Add block to chain with calculated nonce
 	if err := ls.chain.AddBlock(e.Block, blockNonce, txn); err != nil {
 		// Ignore and log errors about block not fitting on chain or matching first header

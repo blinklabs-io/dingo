@@ -86,7 +86,19 @@ func (d *Database) BlockCreate(block Block, txn *Txn) error {
 		Type:     block.Type,
 		Height:   block.Number,
 		PrevHash: block.PrevHash,
-		Nonce:    block.Nonce,
+	}
+
+	isCheckpoint := (block.Slot)%1000 == 0
+	// Store block nonce in the DB
+	err := d.metadata.SetBlockNonce(
+		hex.EncodeToString(block.Hash), // block hash
+		block.Slot,                     // slot number
+		block.Nonce,                    // calculated nonce
+		isCheckpoint,
+		txn.Metadata(), // underlying GORM DB
+	)
+	if err != nil {
+		return err
 	}
 	tmpMetadataBytes, err := cbor.Encode(tmpMetadata)
 	if err != nil {
