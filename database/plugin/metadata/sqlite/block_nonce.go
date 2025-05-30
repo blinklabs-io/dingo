@@ -15,13 +15,12 @@
 package sqlite
 
 import (
-	"fmt"
+	"strconv"
 
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite/models"
 	"gorm.io/gorm"
 )
 
-// SetBlockNonce inserts a block nonce into the block_nonce table
 // SetBlockNonce inserts a block nonce into the block_nonce table
 func (d *MetadataStoreSqlite) SetBlockNonce(
 	blockHash string,
@@ -52,7 +51,7 @@ func (d *MetadataStoreSqlite) SetBlockNonce(
 	if err := d.runVacuum(); err != nil {
 		d.logger.Error(
 			"failed to vacuum after SetBlockNonce",
-			"slot", fmt.Sprintf("%d", slotNumber),
+			"slot", strconv.FormatUint(slotNumber, 10),
 			"error", err,
 		)
 	}
