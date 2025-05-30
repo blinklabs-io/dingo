@@ -18,6 +18,7 @@ package models
 var MigrateModels = []any{
 	&Account{},
 	&AuthCommitteeHot{},
+	&BlockNonce{},
 	&Datum{},
 	&Deregistration{},
 	&DeregistrationDrep{},

@@ -79,6 +79,13 @@ type MetadataStore interface {
 		bool, // active
 		*gorm.DB,
 	) error
+	SetBlockNonce(
+		string, // blockHash
+		uint64, // slotNumber
+		[]byte, // nonce
+		bool, // isCheckpoint
+		*gorm.DB,
+	) error
 	SetDatum(
 		lcommon.Blake2b256,
 		[]byte,
@@ -205,6 +212,8 @@ type MetadataStore interface {
 	) error
 
 	// Helpers
+	DeleteBlockNoncesBeforeSlot(uint64, *gorm.DB) error
+	DeleteBlockNoncesBeforeSlotWithoutCheckpoints(uint64, *gorm.DB) error
 	DeleteUtxo(any, *gorm.DB) error
 	DeleteUtxos([]any, *gorm.DB) error
 	DeleteUtxosAfterSlot(uint64, *gorm.DB) error

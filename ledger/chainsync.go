@@ -392,7 +392,6 @@ func (ls *LedgerState) processBlockEvent(
 	txn *database.Txn,
 	e BlockfetchEvent,
 ) error {
-	// TODO: move this to ledger block processing
 	// Calculate block rolling nonce
 	var blockNonce []byte
 	if ls.currentEra.CalculateEtaVFunc != nil {
