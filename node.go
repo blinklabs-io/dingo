@@ -46,7 +46,7 @@ type Node struct {
 	chainsyncState *chainsync.State
 	eventBus       *event.EventBus
 	mempool        *mempool.Mempool
-	chain          *chain.Chain
+	chainManager   *chain.ChainManager
 	db             *database.Database
 	ledgerState    *ledger.LedgerState
 	utxorpc        *utxorpc.Utxorpc
@@ -99,20 +99,19 @@ func (n *Node) Run() error {
 		)
 		dbNeedsRecovery = true
 	}
-	// Load chain
-	chain, err := chain.NewChain(
+	// Load chain manager
+	cm, err := chain.NewManager(
 		n.db,
 		n.eventBus,
-		true, // persistent
 	)
 	if err != nil {
-		return fmt.Errorf("failed to load chain: %w", err)
+		return fmt.Errorf("failed to load chain manager: %w", err)
 	}
-	n.chain = chain
+	n.chainManager = cm
 	// Load state
 	state, err := ledger.NewLedgerState(
 		ledger.LedgerStateConfig{
-			Chain:                      n.chain,
+			ChainManager:               n.chainManager,
 			Database:                   n.db,
 			EventBus:                   n.eventBus,
 			Logger:                     n.config.logger,

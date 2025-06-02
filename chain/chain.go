@@ -17,7 +17,6 @@ package chain
 import (
 	"encoding/hex"
 	"errors"
-	"fmt"
 	"slices"
 	"sync"
 
@@ -33,61 +32,18 @@ const (
 )
 
 type Chain struct {
-	mutex            sync.RWMutex
-	db               *database.Database
-	eventBus         *event.EventBus
-	currentTip       ochainsync.Tip
-	tipBlockIndex    uint64
-	persistent       bool
-	lastDbSlot       uint64
-	lastDbBlockIndex uint64
-	blocks           []database.Block
-	headers          []ledger.BlockHeader
-	waitingChan      chan struct{}
-	waitingChanMutex sync.Mutex
-	iterators        []*ChainIterator
-}
-
-func NewChain(
-	db *database.Database,
-	eventBus *event.EventBus,
-	persistent bool,
-) (*Chain, error) {
-	c := &Chain{
-		db:         db,
-		eventBus:   eventBus,
-		persistent: persistent,
-	}
-	if persistent && db == nil {
-		return nil, errors.New("persistence enabled but no database provided")
-	}
-	if db != nil {
-		if err := c.load(); err != nil {
-			return nil, fmt.Errorf("failed to load chain: %w", err)
-		}
-		// Set last block index and slot from database
-		c.lastDbBlockIndex = c.tipBlockIndex
-		c.lastDbSlot = c.currentTip.Point.Slot
-	}
-	return c, nil
-}
-
-func (c *Chain) load() error {
-	recentBlocks, err := database.BlocksRecent(c.db, 1)
-	if err != nil {
-		return err
-	}
-	if len(recentBlocks) > 0 {
-		c.currentTip = ochainsync.Tip{
-			Point: ocommon.Point{
-				Slot: recentBlocks[0].Slot,
-				Hash: recentBlocks[0].Hash,
-			},
-			BlockNumber: recentBlocks[0].Number,
-		}
-		c.tipBlockIndex = recentBlocks[0].ID
-	}
-	return nil
+	manager              *ChainManager
+	mutex                sync.RWMutex
+	eventBus             *event.EventBus
+	currentTip           ochainsync.Tip
+	tipBlockIndex        uint64
+	persistent           bool
+	lastCommonBlockIndex uint64
+	blocks               []ocommon.Point
+	headers              []ledger.BlockHeader
+	waitingChan          chan struct{}
+	waitingChanMutex     sync.Mutex
+	iterators            []*ChainIterator
 }
 
 func (c *Chain) Tip() ochainsync.Tip {
@@ -177,19 +133,11 @@ func (c *Chain) AddBlock(
 		PrevHash: block.PrevHash().Bytes(),
 		Cbor:     block.Cbor(),
 	}
-	if c.persistent {
-		// Add block to database
-		if err := c.db.BlockCreate(tmpBlock, txn); err != nil {
-			return err
-		}
-		c.lastDbBlockIndex = newBlockIndex
-		c.lastDbSlot = tmpPoint.Slot
-	} else {
-		// Add block to memory buffer
-		c.blocks = append(
-			c.blocks,
-			tmpBlock,
-		)
+	if err := c.manager.addBlock(tmpBlock, txn, c.persistent); err != nil {
+		return err
+	}
+	if !c.persistent {
+		c.blocks = append(c.blocks, tmpPoint)
 	}
 	// Remove matching header entry, if any
 	if len(c.headers) > 0 {
@@ -202,10 +150,12 @@ func (c *Chain) AddBlock(
 	}
 	c.tipBlockIndex = newBlockIndex
 	// Notify waiting iterators
+	c.waitingChanMutex.Lock()
 	if c.waitingChan != nil {
 		close(c.waitingChan)
 		c.waitingChan = nil
 	}
+	c.waitingChanMutex.Unlock()
 	// Generate event
 	if c.eventBus != nil {
 		c.eventBus.Publish(
@@ -233,7 +183,7 @@ func (c *Chain) AddBlocks(blocks []ledger.Block) error {
 		if batchSize == 0 {
 			break
 		}
-		txn := c.db.BlobTxn(true)
+		txn := c.manager.db.BlobTxn(true)
 		err := txn.Do(func(txn *database.Txn) error {
 			for _, tmpBlock := range blocks[batchOffset : batchOffset+batchSize] {
 				if err := c.AddBlock(tmpBlock, txn); err != nil {
@@ -280,28 +230,18 @@ func (c *Chain) Rollback(point ocommon.Point) error {
 	// Delete any rolled-back blocks
 	for i := c.tipBlockIndex; i > rollbackBlockIndex; i-- {
 		if c.persistent {
-			// Remove from database
-			txn := c.db.BlobTxn(true)
-			err := txn.Do(func(txn *database.Txn) error {
-				tmpBlock, err := c.db.BlockByIndex(i, txn)
-				if err != nil {
-					return err
-				}
-				if err := database.BlockDeleteTxn(txn, tmpBlock); err != nil {
-					return err
-				}
-				return nil
-			})
-			if err != nil {
+			// Remove block from persistent store
+			if err := c.manager.removeBlockByIndex(i); err != nil {
 				return err
 			}
 		} else {
-			// Return an error if we try to rollback beyond memory buffer
-			if i <= c.lastDbBlockIndex {
-				return ErrRollbackBeyondEphemeralChain
+			// Decrement our fork point block index if we rollback beyond it
+			if i < c.lastCommonBlockIndex {
+				c.lastCommonBlockIndex = i
+				continue
 			}
 			// Remove from memory buffer
-			memBlockIndex := int(i - c.lastDbBlockIndex - initialBlockIndex) //nolint:gosec
+			memBlockIndex := int(i - c.lastCommonBlockIndex - initialBlockIndex) //nolint:gosec
 			c.blocks = slices.Delete(
 				c.blocks,
 				memBlockIndex,
@@ -393,41 +333,17 @@ func (c *Chain) BlockByPoint(
 	point ocommon.Point,
 	txn *database.Txn,
 ) (database.Block, error) {
-	if point.Slot <= c.lastDbSlot {
-		// Query database
-		tmpBlock, err := database.BlockByPoint(c.db, point)
-		if err != nil {
-			if errors.Is(err, database.ErrBlockNotFound) {
-				return database.Block{}, ErrBlockNotFound
-			}
-			return database.Block{}, err
-		}
-		return tmpBlock, nil
-	}
-	// Search memory buffer
-	for _, block := range c.blocks {
-		if point.Slot != block.Slot {
-			continue
-		}
-		if string(point.Hash) != string(block.Hash) {
-			continue
-		}
-		return block, nil
-	}
-	return database.Block{}, ErrBlockNotFound
+	return c.manager.BlockByPoint(point, txn)
 }
 
 func (c *Chain) blockByIndex(
 	blockIndex uint64,
 	txn *database.Txn,
 ) (database.Block, error) {
-	if blockIndex <= c.lastDbBlockIndex {
-		// Query database
-		tmpBlock, err := c.db.BlockByIndex(blockIndex, txn)
+	if c.lastCommonBlockIndex == 0 || blockIndex <= c.lastCommonBlockIndex {
+		// Query via manager for common blocks
+		tmpBlock, err := c.manager.blockByIndex(blockIndex, txn)
 		if err != nil {
-			if errors.Is(err, database.ErrBlockNotFound) {
-				return database.Block{}, ErrBlockNotFound
-			}
 			return database.Block{}, err
 		}
 		return tmpBlock, nil
@@ -435,12 +351,17 @@ func (c *Chain) blockByIndex(
 	// Get from memory buffer
 	//nolint:gosec
 	memBlockIndex := int(
-		blockIndex - c.lastDbBlockIndex - initialBlockIndex,
+		blockIndex - c.lastCommonBlockIndex - initialBlockIndex,
 	)
 	if memBlockIndex < 0 || len(c.blocks) < memBlockIndex+1 {
 		return database.Block{}, ErrBlockNotFound
 	}
-	return c.blocks[memBlockIndex], nil
+	memBlockPoint := c.blocks[memBlockIndex]
+	tmpBlock, err := c.BlockByPoint(memBlockPoint, txn)
+	if err != nil {
+		return database.Block{}, err
+	}
+	return tmpBlock, nil
 }
 
 func (c *Chain) iterNext(

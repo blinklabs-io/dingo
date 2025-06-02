@@ -101,14 +101,11 @@ var (
 )
 
 func TestChainBasic(t *testing.T) {
-	c, err := chain.NewChain(
-		nil,   // db
-		nil,   // eventBus,
-		false, // persistent
-	)
+	cm, err := chain.NewManager(nil, nil)
 	if err != nil {
-		t.Fatalf("unexpected error creating chain: %s", err)
+		t.Fatalf("unexpected error creating chain manager: %s", err)
 	}
+	c := cm.PrimaryChain()
 	for _, testBlock := range testBlocks {
 		if err := c.AddBlock(testBlock, nil); err != nil {
 			t.Fatalf("unexpected error adding block to chain: %s", err)
@@ -202,14 +199,11 @@ func TestChainBasic(t *testing.T) {
 }
 
 func TestChainRollback(t *testing.T) {
-	c, err := chain.NewChain(
-		nil,   // db
-		nil,   // eventBus,
-		false, // persistent
-	)
+	cm, err := chain.NewManager(nil, nil)
 	if err != nil {
-		t.Fatalf("unexpected error creating chain: %s", err)
+		t.Fatalf("unexpected error creating chain manager: %s", err)
 	}
+	c := cm.PrimaryChain()
 	for _, testBlock := range testBlocks {
 		if err := c.AddBlock(testBlock, nil); err != nil {
 			t.Fatalf("unexpected error adding block to chain: %s", err)
@@ -300,14 +294,11 @@ func TestChainRollback(t *testing.T) {
 
 func TestChainHeaderRange(t *testing.T) {
 	testBlockCount := 3
-	c, err := chain.NewChain(
-		nil,   // db
-		nil,   // eventBus,
-		false, // persistent
-	)
+	cm, err := chain.NewManager(nil, nil)
 	if err != nil {
-		t.Fatalf("unexpected error creating chain: %s", err)
+		t.Fatalf("unexpected error creating chain manager: %s", err)
 	}
+	c := cm.PrimaryChain()
 	// Add blocks
 	for _, testBlock := range testBlocks[0:testBlockCount] {
 		if err := c.AddBlock(testBlock, nil); err != nil {
@@ -348,14 +339,11 @@ func TestChainHeaderRange(t *testing.T) {
 
 func TestChainHeaderBlock(t *testing.T) {
 	testBlockCount := 3
-	c, err := chain.NewChain(
-		nil,   // db
-		nil,   // eventBus,
-		false, // persistent
-	)
+	cm, err := chain.NewManager(nil, nil)
 	if err != nil {
-		t.Fatalf("unexpected error creating chain: %s", err)
+		t.Fatalf("unexpected error creating chain manager: %s", err)
 	}
+	c := cm.PrimaryChain()
 	// Add blocks
 	for _, testBlock := range testBlocks[0:testBlockCount] {
 		if err := c.AddBlock(testBlock, nil); err != nil {
@@ -378,14 +366,11 @@ func TestChainHeaderBlock(t *testing.T) {
 
 func TestChainHeaderWrongBlock(t *testing.T) {
 	testBlockCount := 3
-	c, err := chain.NewChain(
-		nil,   // db
-		nil,   // eventBus,
-		false, // persistent
-	)
+	cm, err := chain.NewManager(nil, nil)
 	if err != nil {
-		t.Fatalf("unexpected error creating chain: %s", err)
+		t.Fatalf("unexpected error creating chain manager: %s", err)
 	}
+	c := cm.PrimaryChain()
 	// Add blocks
 	for _, testBlock := range testBlocks[0:testBlockCount] {
 		if err := c.AddBlock(testBlock, nil); err != nil {
@@ -422,14 +407,11 @@ func TestChainHeaderWrongBlock(t *testing.T) {
 
 func TestChainHeaderRollback(t *testing.T) {
 	testBlockCount := 3
-	c, err := chain.NewChain(
-		nil,   // db
-		nil,   // eventBus,
-		false, // persistent
-	)
+	cm, err := chain.NewManager(nil, nil)
 	if err != nil {
-		t.Fatalf("unexpected error creating chain: %s", err)
+		t.Fatalf("unexpected error creating chain manager: %s", err)
 	}
+	c := cm.PrimaryChain()
 	// Add blocks
 	for _, testBlock := range testBlocks[0:testBlockCount] {
 		if err := c.AddBlock(testBlock, nil); err != nil {
