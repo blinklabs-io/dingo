@@ -21,6 +21,7 @@ import (
 
 var (
 	ErrBlockNotFound                = errors.New("block not found")
+	ErrIntersectNotFound            = errors.New("chain intersect not found")
 	ErrRollbackBeyondEphemeralChain = errors.New(
 		"cannot rollback ephemeral chain beyond memory buffer",
 	)

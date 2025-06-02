@@ -53,19 +53,19 @@ func Load(cfg *config.Config, logger *slog.Logger, immutableDir string) error {
 	}
 	// Load chain
 	eventBus := event.NewEventBus(nil)
-	c, err := chain.NewChain(
+	cm, err := chain.NewManager(
 		db,
 		eventBus,
-		true, // persistent
 	)
 	if err != nil {
-		return fmt.Errorf("failed to load chain: %w", err)
+		return fmt.Errorf("failed to load chain manager: %w", err)
 	}
+	c := cm.PrimaryChain()
 	// Load state
 	ls, err := ledger.NewLedgerState(
 		ledger.LedgerStateConfig{
 			Database:          db,
-			Chain:             c,
+			ChainManager:      cm,
 			Logger:            logger,
 			CardanoNodeConfig: nodeCfg,
 			EventBus:          eventBus,

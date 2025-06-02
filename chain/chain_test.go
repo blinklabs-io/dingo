@@ -17,13 +17,21 @@ package chain_test
 import (
 	"encoding/hex"
 	"errors"
+	"reflect"
+	"slices"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/chain"
+	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
+
+func decodeHex(hexData string) []byte {
+	data, _ := hex.DecodeString(hexData)
+	return data
+}
 
 type MockBlock struct {
 	ledger.ConwayBlock
@@ -101,14 +109,11 @@ var (
 )
 
 func TestChainBasic(t *testing.T) {
-	c, err := chain.NewChain(
-		nil,   // db
-		nil,   // eventBus,
-		false, // persistent
-	)
+	cm, err := chain.NewManager(nil, nil)
 	if err != nil {
-		t.Fatalf("unexpected error creating chain: %s", err)
+		t.Fatalf("unexpected error creating chain manager: %s", err)
 	}
+	c := cm.PrimaryChain()
 	for _, testBlock := range testBlocks {
 		if err := c.AddBlock(testBlock, nil); err != nil {
 			t.Fatalf("unexpected error adding block to chain: %s", err)
@@ -202,14 +207,11 @@ func TestChainBasic(t *testing.T) {
 }
 
 func TestChainRollback(t *testing.T) {
-	c, err := chain.NewChain(
-		nil,   // db
-		nil,   // eventBus,
-		false, // persistent
-	)
+	cm, err := chain.NewManager(nil, nil)
 	if err != nil {
-		t.Fatalf("unexpected error creating chain: %s", err)
+		t.Fatalf("unexpected error creating chain manager: %s", err)
 	}
+	c := cm.PrimaryChain()
 	for _, testBlock := range testBlocks {
 		if err := c.AddBlock(testBlock, nil); err != nil {
 			t.Fatalf("unexpected error adding block to chain: %s", err)
@@ -300,14 +302,11 @@ func TestChainRollback(t *testing.T) {
 
 func TestChainHeaderRange(t *testing.T) {
 	testBlockCount := 3
-	c, err := chain.NewChain(
-		nil,   // db
-		nil,   // eventBus,
-		false, // persistent
-	)
+	cm, err := chain.NewManager(nil, nil)
 	if err != nil {
-		t.Fatalf("unexpected error creating chain: %s", err)
+		t.Fatalf("unexpected error creating chain manager: %s", err)
 	}
+	c := cm.PrimaryChain()
 	// Add blocks
 	for _, testBlock := range testBlocks[0:testBlockCount] {
 		if err := c.AddBlock(testBlock, nil); err != nil {
@@ -348,14 +347,11 @@ func TestChainHeaderRange(t *testing.T) {
 
 func TestChainHeaderBlock(t *testing.T) {
 	testBlockCount := 3
-	c, err := chain.NewChain(
-		nil,   // db
-		nil,   // eventBus,
-		false, // persistent
-	)
+	cm, err := chain.NewManager(nil, nil)
 	if err != nil {
-		t.Fatalf("unexpected error creating chain: %s", err)
+		t.Fatalf("unexpected error creating chain manager: %s", err)
 	}
+	c := cm.PrimaryChain()
 	// Add blocks
 	for _, testBlock := range testBlocks[0:testBlockCount] {
 		if err := c.AddBlock(testBlock, nil); err != nil {
@@ -378,14 +374,11 @@ func TestChainHeaderBlock(t *testing.T) {
 
 func TestChainHeaderWrongBlock(t *testing.T) {
 	testBlockCount := 3
-	c, err := chain.NewChain(
-		nil,   // db
-		nil,   // eventBus,
-		false, // persistent
-	)
+	cm, err := chain.NewManager(nil, nil)
 	if err != nil {
-		t.Fatalf("unexpected error creating chain: %s", err)
+		t.Fatalf("unexpected error creating chain manager: %s", err)
 	}
+	c := cm.PrimaryChain()
 	// Add blocks
 	for _, testBlock := range testBlocks[0:testBlockCount] {
 		if err := c.AddBlock(testBlock, nil); err != nil {
@@ -422,14 +415,11 @@ func TestChainHeaderWrongBlock(t *testing.T) {
 
 func TestChainHeaderRollback(t *testing.T) {
 	testBlockCount := 3
-	c, err := chain.NewChain(
-		nil,   // db
-		nil,   // eventBus,
-		false, // persistent
-	)
+	cm, err := chain.NewManager(nil, nil)
 	if err != nil {
-		t.Fatalf("unexpected error creating chain: %s", err)
+		t.Fatalf("unexpected error creating chain manager: %s", err)
 	}
+	c := cm.PrimaryChain()
 	// Add blocks
 	for _, testBlock := range testBlocks[0:testBlockCount] {
 		if err := c.AddBlock(testBlock, nil); err != nil {
@@ -462,5 +452,183 @@ func TestChainHeaderRollback(t *testing.T) {
 			testFirstHeaderPoint.Slot,
 			testFirstHeaderPoint.Hash,
 		)
+	}
+}
+
+func TestChainFromIntersect(t *testing.T) {
+	testForkPointIndex := 2
+	testIntersectPoints := []ocommon.Point{
+		{
+			Hash: decodeHex(testBlocks[testForkPointIndex].MockHash),
+			Slot: testBlocks[testForkPointIndex].MockSlot,
+		},
+	}
+	db, err := database.New(nil, nil, "")
+	if err != nil {
+		t.Fatalf("unexpected error creating database: %s", err)
+	}
+	cm, err := chain.NewManager(db, nil)
+	if err != nil {
+		t.Fatalf("unexpected error creating chain manager: %s", err)
+	}
+	c := cm.PrimaryChain()
+	for _, testBlock := range testBlocks {
+		if err := c.AddBlock(testBlock, nil); err != nil {
+			t.Fatalf("unexpected error adding block to chain: %s", err)
+		}
+	}
+	testChain, err := cm.NewChainFromIntersect(testIntersectPoints)
+	if err != nil {
+		t.Fatalf("unexpected error creating chain from intersect: %s", err)
+	}
+	testChainTip := testChain.Tip()
+	if !reflect.DeepEqual(testChainTip.Point, testIntersectPoints[0]) {
+		t.Fatalf(
+			"did not get expected tip, got %d.%x, wanted %d.%x",
+			testChainTip.Point.Slot,
+			testChainTip.Point.Hash,
+			testIntersectPoints[0].Slot,
+			testIntersectPoints[0].Hash,
+		)
+	}
+}
+
+func TestChainFork(t *testing.T) {
+	testForkPointIndex := 2
+	testIntersectPoints := []ocommon.Point{
+		{
+			Hash: decodeHex(testBlocks[testForkPointIndex].MockHash),
+			Slot: testBlocks[testForkPointIndex].MockSlot,
+		},
+	}
+	testForkBlocks := []*MockBlock{
+		{
+			MockBlockNumber: 4,
+			MockSlot:        60,
+			MockHash:        testHashPrefix + "00a4",
+			MockPrevHash:    testHashPrefix + "0003",
+		},
+		{
+			MockBlockNumber: 5,
+			MockSlot:        80,
+			MockHash:        testHashPrefix + "00a5",
+			MockPrevHash:    testHashPrefix + "00a4",
+		},
+		{
+			MockBlockNumber: 6,
+			MockSlot:        100,
+			MockHash:        testHashPrefix + "00a6",
+			MockPrevHash:    testHashPrefix + "00a5",
+		},
+	}
+	db, err := database.New(nil, nil, "")
+	if err != nil {
+		t.Fatalf("unexpected error creating database: %s", err)
+	}
+	cm, err := chain.NewManager(db, nil)
+	if err != nil {
+		t.Fatalf("unexpected error creating chain manager: %s", err)
+	}
+	c := cm.PrimaryChain()
+	for _, testBlock := range testBlocks {
+		if err := c.AddBlock(testBlock, nil); err != nil {
+			t.Fatalf("unexpected error adding block to chain: %s", err)
+		}
+	}
+	testChain, err := cm.NewChainFromIntersect(testIntersectPoints)
+	if err != nil {
+		t.Fatalf("unexpected error creating chain from intersect: %s", err)
+	}
+	// Add additional blocks to forked test chain
+	for _, testBlock := range testForkBlocks {
+		if err := testChain.AddBlock(testBlock, nil); err != nil {
+			t.Fatalf("unexpected error adding block to chain: %s", err)
+		}
+	}
+	iter, err := testChain.FromPoint(ocommon.NewPointOrigin(), false)
+	if err != nil {
+		t.Fatalf("unexpected error creating chain iterator: %s", err)
+	}
+	// Iterate until hitting chain tip, and make sure we get blocks in the correct order with
+	// all expected data
+	testBlockIdx := 0
+	testBlocks := slices.Concat(testBlocks[0:testForkPointIndex+1], testForkBlocks)
+	for {
+		next, err := iter.Next(false)
+		if err != nil {
+			if errors.Is(err, chain.ErrIteratorChainTip) {
+				if testBlockIdx < len(testBlocks)-1 {
+					t.Fatal("encountered chain tip before we expected to")
+				}
+				break
+			}
+			t.Fatalf(
+				"unexpected error getting next block from chain iterator: %s",
+				err,
+			)
+		}
+		if testBlockIdx >= len(testBlocks) {
+			t.Fatal("ran out of test blocks before reaching chain tip")
+		}
+		testBlock := testBlocks[testBlockIdx]
+		if next.Rollback {
+			t.Fatalf("unexpected rollback from chain iterator")
+		}
+		nextBlock := next.Block
+		if nextBlock.ID != uint64(testBlockIdx+1) {
+			t.Fatalf(
+				"did not get expected block from iterator: got index %d, expected %d",
+				nextBlock.ID,
+				testBlockIdx+1,
+			)
+		}
+		nextHashHex := hex.EncodeToString(nextBlock.Hash)
+		if nextHashHex != testBlock.MockHash {
+			t.Fatalf(
+				"did not get expected block from iterator: got hash %s, expected %s",
+				nextHashHex,
+				testBlock.MockHash,
+			)
+		}
+		if testBlock.MockPrevHash != "" {
+			nextPrevHashHex := hex.EncodeToString(nextBlock.PrevHash)
+			if nextPrevHashHex != testBlock.MockPrevHash {
+				t.Fatalf(
+					"did not get expected block from iterator: got prev hash %s, expected %s",
+					nextPrevHashHex,
+					testBlock.MockPrevHash,
+				)
+			}
+		}
+		if nextBlock.Slot != testBlock.MockSlot {
+			t.Fatalf(
+				"did not get expected block from iterator: got slot %d, expected %d",
+				nextBlock.Slot,
+				testBlock.MockSlot,
+			)
+		}
+		if nextBlock.Number != testBlock.MockBlockNumber {
+			t.Fatalf(
+				"did not get expected block from iterator: got block number %d, expected %d",
+				nextBlock.Number,
+				testBlock.MockBlockNumber,
+			)
+		}
+		nextPoint := next.Point
+		if nextPoint.Slot != nextBlock.Slot {
+			t.Fatalf(
+				"did not get expected point from iterator: got slot %d, expected %d",
+				nextPoint.Slot,
+				nextBlock.Slot,
+			)
+		}
+		if string(nextPoint.Hash) != string(nextBlock.Hash) {
+			t.Fatalf(
+				"did not get expected point from iterator: got hash %x, expected %x",
+				nextPoint.Hash,
+				nextBlock.Hash,
+			)
+		}
+		testBlockIdx++
 	}
 }
