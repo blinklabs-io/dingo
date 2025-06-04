@@ -60,8 +60,6 @@ func (b *MockBlock) BlockNumber() uint64 {
 var (
 	// Mock hash prefix used when building mock hashes in test blocks below
 	testHashPrefix = "000047442c8830c700ecb099064ee1b038ed6fd254133f582e906a4bc3fd"
-	// Mock nonce value
-	testNonce = []byte{0xab, 0xcd, 0xef, 0x01}
 	// Mock blocks
 	testBlocks = []*MockBlock{
 		{
@@ -112,7 +110,7 @@ func TestChainBasic(t *testing.T) {
 		t.Fatalf("unexpected error creating chain: %s", err)
 	}
 	for _, testBlock := range testBlocks {
-		if err := c.AddBlock(testBlock, testNonce, nil); err != nil {
+		if err := c.AddBlock(testBlock, nil); err != nil {
 			t.Fatalf("unexpected error adding block to chain: %s", err)
 		}
 	}
@@ -213,7 +211,7 @@ func TestChainRollback(t *testing.T) {
 		t.Fatalf("unexpected error creating chain: %s", err)
 	}
 	for _, testBlock := range testBlocks {
-		if err := c.AddBlock(testBlock, testNonce, nil); err != nil {
+		if err := c.AddBlock(testBlock, nil); err != nil {
 			t.Fatalf("unexpected error adding block to chain: %s", err)
 		}
 	}
@@ -312,7 +310,7 @@ func TestChainHeaderRange(t *testing.T) {
 	}
 	// Add blocks
 	for _, testBlock := range testBlocks[0:testBlockCount] {
-		if err := c.AddBlock(testBlock, testNonce, nil); err != nil {
+		if err := c.AddBlock(testBlock, nil); err != nil {
 			t.Fatalf("unexpected error adding block to chain: %s", err)
 		}
 	}
@@ -360,7 +358,7 @@ func TestChainHeaderBlock(t *testing.T) {
 	}
 	// Add blocks
 	for _, testBlock := range testBlocks[0:testBlockCount] {
-		if err := c.AddBlock(testBlock, testNonce, nil); err != nil {
+		if err := c.AddBlock(testBlock, nil); err != nil {
 			t.Fatalf("unexpected error adding block to chain: %s", err)
 		}
 	}
@@ -372,7 +370,7 @@ func TestChainHeaderBlock(t *testing.T) {
 	}
 	// Add blocks for headers
 	for _, testBlock := range testBlocks[testBlockCount:] {
-		if err := c.AddBlock(testBlock, testNonce, nil); err != nil {
+		if err := c.AddBlock(testBlock, nil); err != nil {
 			t.Fatalf("unexpected error adding header to chain: %s", err)
 		}
 	}
@@ -390,7 +388,7 @@ func TestChainHeaderWrongBlock(t *testing.T) {
 	}
 	// Add blocks
 	for _, testBlock := range testBlocks[0:testBlockCount] {
-		if err := c.AddBlock(testBlock, testNonce, nil); err != nil {
+		if err := c.AddBlock(testBlock, nil); err != nil {
 			t.Fatalf("unexpected error adding block to chain: %s", err)
 		}
 	}
@@ -407,7 +405,7 @@ func TestChainHeaderWrongBlock(t *testing.T) {
 		testWrongBlock.Hash().String(),
 		testFirstHeader.Hash().String(),
 	)
-	err = c.AddBlock(testWrongBlock, testNonce, nil)
+	err = c.AddBlock(testWrongBlock, nil)
 	if err == nil {
 		t.Fatalf(
 			"AddBlock should fail when adding block that doesn't match first header",
@@ -434,7 +432,7 @@ func TestChainHeaderRollback(t *testing.T) {
 	}
 	// Add blocks
 	for _, testBlock := range testBlocks[0:testBlockCount] {
-		if err := c.AddBlock(testBlock, testNonce, nil); err != nil {
+		if err := c.AddBlock(testBlock, nil); err != nil {
 			t.Fatalf("unexpected error adding block to chain: %s", err)
 		}
 	}

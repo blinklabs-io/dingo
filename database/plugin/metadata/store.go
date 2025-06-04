@@ -53,6 +53,11 @@ type MetadataStore interface {
 		[]byte, // stakeKey
 		*gorm.DB,
 	) (models.Account, error)
+	GetBlockNonce(
+		[]byte, // blockHash
+		uint64, // slotNumber
+		*gorm.DB,
+	) ([]byte, error)
 	GetDatum(
 		lcommon.Blake2b256,
 		*gorm.DB,
@@ -80,7 +85,7 @@ type MetadataStore interface {
 		*gorm.DB,
 	) error
 	SetBlockNonce(
-		string, // blockHash
+		[]byte, // blockHash
 		uint64, // slotNumber
 		[]byte, // nonce
 		bool, // isCheckpoint

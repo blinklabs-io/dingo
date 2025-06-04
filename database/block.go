@@ -44,7 +44,6 @@ type Block struct {
 	Hash     []byte
 	Type     uint
 	PrevHash []byte
-	Nonce    []byte
 	Cbor     []byte
 }
 
@@ -86,19 +85,6 @@ func (d *Database) BlockCreate(block Block, txn *Txn) error {
 		Type:     block.Type,
 		Height:   block.Number,
 		PrevHash: block.PrevHash,
-	}
-
-	isCheckpoint := (block.Slot)%1000 == 0
-	// Store block nonce in the DB
-	err := d.metadata.SetBlockNonce(
-		hex.EncodeToString(block.Hash), // block hash
-		block.Slot,                     // slot number
-		block.Nonce,                    // calculated nonce
-		isCheckpoint,
-		txn.Metadata(), // underlying GORM DB
-	)
-	if err != nil {
-		return err
 	}
 	tmpMetadataBytes, err := cbor.Encode(tmpMetadata)
 	if err != nil {
@@ -172,7 +158,6 @@ func blockByKey(txn *Txn, blockKey []byte) (Block, error) {
 	ret.Type = tmpMetadata.Type
 	ret.Number = tmpMetadata.Height
 	ret.PrevHash = tmpMetadata.PrevHash
-	ret.Nonce = tmpMetadata.Nonce
 	return ret, nil
 }
 
@@ -370,5 +355,4 @@ type BlockBlobMetadata struct {
 	Type     uint
 	Height   uint64
 	PrevHash []byte
-	Nonce    []byte
 }
