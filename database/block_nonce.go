@@ -14,14 +14,12 @@
 
 package database
 
-import "time"
-
 type BlockNonce struct {
-	BlockHash    string    `gorm:"primaryKey;column:block_hash"`
-	SlotNumber   uint64    `gorm:"column:slot_number"`
-	Nonce        []byte    `gorm:"column:nonce"`
-	IsCheckpoint bool      `gorm:"column:is_checkpoint"`
-	CreatedAt    time.Time `gorm:"column:created_at;autoCreateTime"`
+	ID           uint `gorm:"primarykey"`
+	Hash         []byte
+	Slot         uint64
+	Nonce        []byte
+	IsCheckpoint bool
 }
 
 func (BlockNonce) TableName() string {
@@ -29,8 +27,8 @@ func (BlockNonce) TableName() string {
 }
 
 func (d *Database) SetBlockNonce(
-	blockHash string,
-	slot uint64,
+	blockHash []byte,
+	slotNumber uint64,
 	nonce []byte,
 	isCheckpoint bool,
 	txn *Txn,
@@ -38,7 +36,7 @@ func (d *Database) SetBlockNonce(
 	if txn == nil {
 		return d.metadata.SetBlockNonce(
 			blockHash,
-			slot,
+			slotNumber,
 			nonce,
 			isCheckpoint,
 			nil,
@@ -46,11 +44,22 @@ func (d *Database) SetBlockNonce(
 	}
 	return d.metadata.SetBlockNonce(
 		blockHash,
-		slot,
+		slotNumber,
 		nonce,
 		isCheckpoint,
 		txn.Metadata(),
 	)
+}
+
+func (d *Database) GetBlockNonce(
+	blockHash []byte,
+	slotNumber uint64,
+	txn *Txn,
+) ([]byte, error) {
+	if txn == nil {
+		return d.metadata.GetBlockNonce(blockHash, slotNumber, nil)
+	}
+	return d.metadata.GetBlockNonce(blockHash, slotNumber, txn.Metadata())
 }
 
 // DeleteBlockNoncesBeforeSlot removes all block_nonces older than the given slot number

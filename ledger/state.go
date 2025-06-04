@@ -325,14 +325,9 @@ func (ls *LedgerState) consumeUtxo(
 }
 
 type readChainResult struct {
-	blocks        []readChainResultBlock
+	blocks        []ledger.Block
 	rollback      bool
 	rollbackPoint ocommon.Point
-}
-
-type readChainResultBlock struct {
-	block ledger.Block
-	nonce []byte
 }
 
 func (ls *LedgerState) ledgerReadChain(resultCh chan readChainResult) {
@@ -352,7 +347,7 @@ func (ls *LedgerState) ledgerReadChain(resultCh chan readChainResult) {
 	var result readChainResult
 	for {
 		// We chose 500 as an arbitrary max batch size. A "chain extended" message will be logged after each batch
-		nextBatch := make([]readChainResultBlock, 0, 500)
+		nextBatch := make([]ledger.Block, 0, 500)
 		// Gather up next batch of blocks
 		for {
 			if cachedNext != nil {
@@ -399,10 +394,7 @@ func (ls *LedgerState) ledgerReadChain(resultCh chan readChainResult) {
 			// Add to batch
 			nextBatch = append(
 				nextBatch,
-				readChainResultBlock{
-					block: tmpBlock,
-					nonce: next.Block.Nonce,
-				},
+				tmpBlock,
 			)
 			// Don't exceed our pre-allocated capacity
 			if len(nextBatch) == cap(nextBatch) {
@@ -434,7 +426,7 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 	var end, i int
 	var txn *database.Txn
 	var err error
-	var nextBatch, cachedNextBatch []readChainResultBlock
+	var nextBatch, cachedNextBatch []ledger.Block
 	var delta *LedgerDelta
 	var deltaBatch LedgerDeltaBatch
 	shouldValidate := ls.config.ValidateHistorical
@@ -504,14 +496,14 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 				deltaBatch = LedgerDeltaBatch{}
 				for offset, next := range nextBatch[i:end] {
 					tmpPoint := ocommon.Point{
-						Slot: next.block.SlotNumber(),
-						Hash: next.block.Hash().Bytes(),
+						Slot: next.SlotNumber(),
+						Hash: next.Hash().Bytes(),
 					}
 					// End processing of batch and cache remainder if we get a block from after the current epoch end, or if we need the initial epoch
 					if tmpPoint.Slot >= (ls.currentEpoch.StartSlot+uint64(ls.currentEpoch.LengthInSlots)) ||
 						ls.currentEpoch.SlotLength == 0 {
 						needsEpochRollover = true
-						nextEpochEraId = uint(next.block.Era().Id)
+						nextEpochEraId = uint(next.Era().Id)
 						// Cache rest of the batch for next loop
 						cachedNextBatch = nextBatch[i+offset:]
 						break
@@ -539,7 +531,7 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 					delta, err = ls.ledgerProcessBlock(
 						txn,
 						tmpPoint,
-						next.block,
+						next,
 						shouldValidate,
 					)
 					if err != nil {
@@ -551,10 +543,36 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 					// Update tip
 					ls.currentTip = ochainsync.Tip{
 						Point:       tmpPoint,
-						BlockNumber: next.block.BlockNumber(),
+						BlockNumber: next.BlockNumber(),
+					}
+					// Calculate block rolling nonce
+					var blockNonce []byte
+					if ls.currentEra.CalculateEtaVFunc != nil {
+						tmpEra := eras.Eras[next.Era().Id]
+						tmpNonce, err := tmpEra.CalculateEtaVFunc(
+							ls.config.CardanoNodeConfig,
+							ls.currentTipBlockNonce,
+							next,
+						)
+						if err != nil {
+							return fmt.Errorf("calculate etaV: %w", err)
+						}
+						blockNonce = tmpNonce
+					}
+					// TODO: batch this
+					// Store block nonce in the DB
+					err := ls.db.SetBlockNonce(
+						tmpPoint.Hash,
+						tmpPoint.Slot,
+						blockNonce,
+						false,
+						txn,
+					)
+					if err != nil {
+						return err
 					}
 					// Update tip block nonce
-					ls.currentTipBlockNonce = next.nonce
+					ls.currentTipBlockNonce = blockNonce
 				}
 				// Apply delta batch
 				if err := deltaBatch.apply(ls, txn); err != nil {
@@ -708,11 +726,11 @@ func (ls *LedgerState) loadTip() error {
 	ls.currentTip = tmpTip
 	// Load tip block and set cached block nonce
 	if ls.currentTip.Point.Slot > 0 {
-		tipBlock, err := ls.chain.BlockByPoint(ls.currentTip.Point, nil)
+		tipNonce, err := ls.db.GetBlockNonce(tmpTip.Point.Hash, tmpTip.Point.Slot, nil)
 		if err != nil {
-			return fmt.Errorf("failed to get tip block: %w", err)
+			return err
 		}
-		ls.currentTipBlockNonce = tipBlock.Nonce
+		ls.currentTipBlockNonce = tipNonce
 	}
 	ls.updateTipMetrics()
 	return nil

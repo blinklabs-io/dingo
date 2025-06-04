@@ -15,7 +15,7 @@
 package sqlite
 
 import (
-	"strconv"
+	"errors"
 
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite/models"
 	"gorm.io/gorm"
@@ -23,15 +23,15 @@ import (
 
 // SetBlockNonce inserts a block nonce into the block_nonce table
 func (d *MetadataStoreSqlite) SetBlockNonce(
-	blockHash string,
+	blockHash []byte,
 	slotNumber uint64,
 	nonce []byte,
 	isCheckpoint bool,
 	txn *gorm.DB,
 ) error {
 	item := models.BlockNonce{
-		BlockHash:    blockHash,
-		SlotNumber:   slotNumber,
+		Hash:         blockHash,
+		Slot:         slotNumber,
 		Nonce:        nonce,
 		IsCheckpoint: isCheckpoint,
 	}
@@ -47,16 +47,32 @@ func (d *MetadataStoreSqlite) SetBlockNonce(
 		return result.Error
 	}
 
-	// Optional: same pattern as SetEpoch
-	if err := d.runVacuum(); err != nil {
-		d.logger.Error(
-			"failed to vacuum after SetBlockNonce",
-			"slot", strconv.FormatUint(slotNumber, 10),
-			"error", err,
-		)
-	}
-
 	return nil
+}
+
+// GetBlockNonce retrieves the block nonce for a specific block
+func (d *MetadataStoreSqlite) GetBlockNonce(
+	blockHash []byte,
+	slotNumber uint64,
+	txn *gorm.DB,
+) ([]byte, error) {
+	ret := models.BlockNonce{}
+	if txn != nil {
+		result := txn.Where("hash = ? AND slot = ?", blockHash, slotNumber).First(&ret)
+		if result.Error != nil {
+			if !errors.Is(result.Error, gorm.ErrRecordNotFound) {
+				return nil, result.Error
+			}
+		}
+	} else {
+		result := d.DB().Where("hash = ? AND slot = ?", blockHash, slotNumber).First(&ret)
+		if result.Error != nil {
+			if !errors.Is(result.Error, gorm.ErrRecordNotFound) {
+				return nil, result.Error
+			}
+		}
+	}
+	return ret.Nonce, nil
 }
 
 // DeleteBlockNoncesBeforeSlot deletes block_nonce records with slot_number less than the specified value

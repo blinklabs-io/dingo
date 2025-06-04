@@ -25,7 +25,6 @@ import (
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/event"
-	"github.com/blinklabs-io/dingo/ledger/eras"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -276,6 +275,10 @@ func (ls *LedgerState) calculateEpochNonce(
 	if err != nil {
 		return nil, fmt.Errorf("lookup block before slot: %w", err)
 	}
+	blockBeforeStabilityWindowNonce, err := ls.db.GetBlockNonce(blockBeforeStabilityWindow.Hash, blockBeforeStabilityWindow.Slot, txn)
+	if err != nil {
+		return nil, fmt.Errorf("lookup block nonce: %w", err)
+	}
 	// Get last block in previous epoch
 	blockLastPrevEpoch, err := database.BlockBeforeSlotTxn(
 		txn,
@@ -283,13 +286,13 @@ func (ls *LedgerState) calculateEpochNonce(
 	)
 	if err != nil {
 		if errors.Is(err, database.ErrBlockNotFound) {
-			return blockBeforeStabilityWindow.Nonce, nil
+			return blockBeforeStabilityWindowNonce, nil
 		}
 		return nil, fmt.Errorf("lookup block before slot: %w", err)
 	}
 	// Calculate nonce from inputs
 	ret, err := lcommon.CalculateEpochNonce(
-		blockBeforeStabilityWindow.Nonce,
+		blockBeforeStabilityWindowNonce,
 		blockLastPrevEpoch.PrevHash,
 		nil,
 	)
@@ -392,22 +395,8 @@ func (ls *LedgerState) processBlockEvent(
 	txn *database.Txn,
 	e BlockfetchEvent,
 ) error {
-	// Calculate block rolling nonce
-	var blockNonce []byte
-	if ls.currentEra.CalculateEtaVFunc != nil {
-		tmpEra := eras.Eras[e.Block.Era().Id]
-		tmpNonce, err := tmpEra.CalculateEtaVFunc(
-			ls.config.CardanoNodeConfig,
-			ls.currentTipBlockNonce,
-			e.Block,
-		)
-		if err != nil {
-			return fmt.Errorf("calculate etaV: %w", err)
-		}
-		blockNonce = tmpNonce
-	}
 	// Add block to chain
-	if err := ls.chain.AddBlock(e.Block, blockNonce, txn); err != nil {
+	if err := ls.chain.AddBlock(e.Block, txn); err != nil {
 		// Ignore and log errors about block not fitting on chain or matching first header
 		if !errors.As(err, &chain.BlockNotFitChainTipError{}) &&
 			!errors.As(err, &chain.BlockNotMatchHeaderError{}) {

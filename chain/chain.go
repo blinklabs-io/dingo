@@ -138,7 +138,6 @@ func (c *Chain) AddBlockHeader(header ledger.BlockHeader) error {
 
 func (c *Chain) AddBlock(
 	block ledger.Block,
-	blockNonce []byte,
 	txn *database.Txn,
 ) error {
 	c.mutex.Lock()
@@ -176,7 +175,6 @@ func (c *Chain) AddBlock(
 		Number:   block.BlockNumber(),
 		Type:     uint(block.Type()), //nolint:gosec
 		PrevHash: block.PrevHash().Bytes(),
-		Nonce:    blockNonce,
 		Cbor:     block.Cbor(),
 	}
 	if c.persistent {
@@ -238,7 +236,7 @@ func (c *Chain) AddBlocks(blocks []ledger.Block) error {
 		txn := c.db.BlobTxn(true)
 		err := txn.Do(func(txn *database.Txn) error {
 			for _, tmpBlock := range blocks[batchOffset : batchOffset+batchSize] {
-				if err := c.AddBlock(tmpBlock, nil, txn); err != nil {
+				if err := c.AddBlock(tmpBlock, txn); err != nil {
 					return err
 				}
 			}

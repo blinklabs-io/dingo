@@ -14,14 +14,12 @@
 
 package models
 
-import "time"
-
 type BlockNonce struct {
-	BlockHash    string    `gorm:"primaryKey;column:block_hash"`
-	SlotNumber   uint64    `gorm:"column:slot_number"`
-	Nonce        []byte    `gorm:"column:nonce"`
-	IsCheckpoint bool      `gorm:"column:is_checkpoint"`
-	CreatedAt    time.Time `gorm:"column:created_at;autoCreateTime"`
+	ID           uint   `gorm:"primarykey"`
+	Hash         []byte `gorm:"index:hash_slot"`
+	Slot         uint64 `gorm:"index:hash_slot"`
+	Nonce        []byte
+	IsCheckpoint bool
 }
 
 // TableName overrides default table name
