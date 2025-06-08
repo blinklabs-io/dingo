@@ -47,7 +47,7 @@ func Load(cfg *config.Config, logger *slog.Logger, immutableDir string) error {
 		)
 	}
 	// Load database
-	db, err := database.New(logger, cfg.DatabasePath)
+	db, err := database.New(logger, nil, cfg.DatabasePath)
 	if err != nil {
 		return err
 	}

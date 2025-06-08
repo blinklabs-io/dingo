@@ -42,7 +42,7 @@ func TestInMemorySqliteMultipleTransaction(t *testing.T) {
 		}
 		return nil
 	}
-	db, err := database.New(nil, "") // in-memory
+	db, err := database.New(nil, nil, "") // in-memory
 	if err != nil {
 		t.Fatalf("unexpected error: %s", err)
 	}

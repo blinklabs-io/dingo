@@ -21,6 +21,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/plugin/blob"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 // Database represents our data storage services
@@ -94,13 +95,14 @@ func (d *Database) init() error {
 // New creates a new database instance with optional persistence using the provided data directory
 func New(
 	logger *slog.Logger,
+	promRegistry prometheus.Registerer,
 	dataDir string,
 ) (*Database, error) {
-	metadataDb, err := metadata.New("sqlite", dataDir, logger)
+	metadataDb, err := metadata.New("sqlite", dataDir, logger, promRegistry)
 	if err != nil {
 		return nil, err
 	}
-	blobDb, err := blob.New("badger", dataDir, logger)
+	blobDb, err := blob.New("badger", dataDir, logger, promRegistry)
 	if err != nil {
 		return nil, err
 	}

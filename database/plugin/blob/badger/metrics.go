@@ -94,5 +94,5 @@ func (d *BlobStoreBadger) registerBlobMetrics() {
 			),
 		},
 	)
-	prometheus.MustRegister(collector)
+	d.promRegistry.MustRegister(collector)
 }
