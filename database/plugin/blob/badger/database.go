@@ -26,6 +26,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/plugin"
 	badger "github.com/dgraph-io/badger/v4"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 // Register plugin
@@ -40,22 +41,25 @@ func init() {
 
 // BlobStoreBadger stores all data in badger. Data may not be persisted
 type BlobStoreBadger struct {
-	dataDir   string
-	db        *badger.DB
-	logger    *slog.Logger
-	gcEnabled bool
+	dataDir      string
+	db           *badger.DB
+	logger       *slog.Logger
+	promRegistry prometheus.Registerer
+	gcEnabled    bool
 }
 
 // New creates a new database
 func New(
 	dataDir string,
 	logger *slog.Logger,
+	promRegistry prometheus.Registerer,
 ) (*BlobStoreBadger, error) {
 	var blobDb *badger.DB
 	var err error
 	db := &BlobStoreBadger{
-		dataDir: dataDir,
-		logger:  logger,
+		dataDir:      dataDir,
+		logger:       logger,
+		promRegistry: promRegistry,
 	}
 	if dataDir == "" {
 		// No dataDir, use in-memory config
@@ -108,7 +112,9 @@ func (d *BlobStoreBadger) init() error {
 		d.logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
 	}
 	// Configure metrics
-	d.registerBlobMetrics()
+	if d.promRegistry != nil {
+		d.registerBlobMetrics()
+	}
 	// Configure GC
 	if d.gcEnabled {
 		go d.blobGc(time.NewTicker(5 * time.Minute))

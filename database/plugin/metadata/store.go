@@ -23,6 +23,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
+	"github.com/prometheus/client_golang/prometheus"
 	"gorm.io/gorm"
 )
 
@@ -236,6 +237,7 @@ type MetadataStore interface {
 func New(
 	pluginName, dataDir string,
 	logger *slog.Logger,
+	promRegistry prometheus.Registerer,
 ) (MetadataStore, error) {
-	return sqlite.New(dataDir, logger)
+	return sqlite.New(dataDir, logger, promRegistry)
 }
