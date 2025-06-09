@@ -85,7 +85,9 @@ func HardForkShelley(
 	// a dummy call for consistency
 	ret := shelley.UpgradePParams(nil)
 	shelleyGenesis := nodeConfig.ShelleyGenesis()
-	ret.UpdateFromGenesis(shelleyGenesis)
+	if err := ret.UpdateFromGenesis(shelleyGenesis); err != nil {
+		return nil, err
+	}
 	return &ret, nil
 }
 

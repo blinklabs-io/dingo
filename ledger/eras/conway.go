@@ -91,7 +91,9 @@ func HardForkConway(
 	}
 	ret := conway.UpgradePParams(*babbagePParams)
 	conwayGenesis := nodeConfig.ConwayGenesis()
-	ret.UpdateFromGenesis(conwayGenesis)
+	if err := ret.UpdateFromGenesis(conwayGenesis); err != nil {
+		return nil, err
+	}
 	return &ret, nil
 }
 

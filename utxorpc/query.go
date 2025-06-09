@@ -98,8 +98,12 @@ func (s *queryServiceServer) ReadUtxos(
 		if ret == nil {
 			return nil, errors.New("decode returned empty utxo")
 		}
+		tmpUtxo, err := ret.Utxorpc()
+		if err != nil {
+			return nil, fmt.Errorf("failed to convert UTxO: %w", err)
+		}
 		audc := query.AnyUtxoData_Cardano{
-			Cardano: ret.Utxorpc(),
+			Cardano: tmpUtxo,
 		}
 		aud.NativeBytes = utxo.Cbor
 		aud.TxoRef = txo
@@ -224,8 +228,12 @@ func (s *queryServiceServer) SearchUtxos(
 			if ret == nil {
 				return nil, errors.New("decode returned empty utxo")
 			}
+			tmpUtxo, err := ret.Utxorpc()
+			if err != nil {
+				return nil, fmt.Errorf("failed to convert UTxO: %w", err)
+			}
 			audc := query.AnyUtxoData_Cardano{
-				Cardano: ret.Utxorpc(),
+				Cardano: tmpUtxo,
 			}
 			aud.NativeBytes = utxo.Cbor
 			aud.TxoRef = &query.TxoRef{
