@@ -47,7 +47,7 @@ const (
 type LedgerStateConfig struct {
 	Logger             *slog.Logger
 	Database           *database.Database
-	Chain              *chain.Chain
+	ChainManager       *chain.ChainManager
 	EventBus           *event.EventBus
 	CardanoNodeConfig  *cardano.CardanoNodeConfig
 	PromRegistry       prometheus.Registerer
@@ -86,7 +86,7 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 	ls := &LedgerState{
 		config: cfg,
 		db:     cfg.Database,
-		chain:  cfg.Chain,
+		chain:  cfg.ChainManager.PrimaryChain(),
 	}
 	if cfg.Logger == nil {
 		// Create logger to throw away logs

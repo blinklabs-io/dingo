@@ -17,7 +17,6 @@ package chain
 import (
 	"encoding/hex"
 	"errors"
-	"fmt"
 	"slices"
 	"sync"
 
@@ -33,61 +32,19 @@ const (
 )
 
 type Chain struct {
-	mutex            sync.RWMutex
-	db               *database.Database
-	eventBus         *event.EventBus
-	currentTip       ochainsync.Tip
-	tipBlockIndex    uint64
-	persistent       bool
-	lastDbSlot       uint64
-	lastDbBlockIndex uint64
-	blocks           []database.Block
-	headers          []ledger.BlockHeader
-	waitingChan      chan struct{}
-	waitingChanMutex sync.Mutex
-	iterators        []*ChainIterator
-}
-
-func NewChain(
-	db *database.Database,
-	eventBus *event.EventBus,
-	persistent bool,
-) (*Chain, error) {
-	c := &Chain{
-		db:         db,
-		eventBus:   eventBus,
-		persistent: persistent,
-	}
-	if persistent && db == nil {
-		return nil, errors.New("persistence enabled but no database provided")
-	}
-	if db != nil {
-		if err := c.load(); err != nil {
-			return nil, fmt.Errorf("failed to load chain: %w", err)
-		}
-		// Set last block index and slot from database
-		c.lastDbBlockIndex = c.tipBlockIndex
-		c.lastDbSlot = c.currentTip.Point.Slot
-	}
-	return c, nil
-}
-
-func (c *Chain) load() error {
-	recentBlocks, err := database.BlocksRecent(c.db, 1)
-	if err != nil {
-		return err
-	}
-	if len(recentBlocks) > 0 {
-		c.currentTip = ochainsync.Tip{
-			Point: ocommon.Point{
-				Slot: recentBlocks[0].Slot,
-				Hash: recentBlocks[0].Hash,
-			},
-			BlockNumber: recentBlocks[0].Number,
-		}
-		c.tipBlockIndex = recentBlocks[0].ID
-	}
-	return nil
+	id                   ChainId
+	manager              *ChainManager
+	mutex                sync.RWMutex
+	eventBus             *event.EventBus
+	currentTip           ochainsync.Tip
+	tipBlockIndex        uint64
+	persistent           bool
+	lastCommonBlockIndex uint64
+	blocks               []ocommon.Point
+	headers              []ledger.BlockHeader
+	waitingChan          chan struct{}
+	waitingChanMutex     sync.Mutex
+	iterators            []*ChainIterator
 }
 
 func (c *Chain) Tip() ochainsync.Tip {
@@ -142,6 +99,13 @@ func (c *Chain) AddBlock(
 ) error {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
+	// We get a write lock on the manager to cover the integrity checks and adding the block below
+	c.manager.mutex.Lock()
+	defer c.manager.mutex.Unlock()
+	// Verify chain integrity
+	if err := c.reconcile(); err != nil {
+		return err
+	}
 	// Check that the new block matches our first header, if any
 	if len(c.headers) > 0 {
 		firstHeader := c.headers[0]
@@ -177,19 +141,11 @@ func (c *Chain) AddBlock(
 		PrevHash: block.PrevHash().Bytes(),
 		Cbor:     block.Cbor(),
 	}
-	if c.persistent {
-		// Add block to database
-		if err := c.db.BlockCreate(tmpBlock, txn); err != nil {
-			return err
-		}
-		c.lastDbBlockIndex = newBlockIndex
-		c.lastDbSlot = tmpPoint.Slot
-	} else {
-		// Add block to memory buffer
-		c.blocks = append(
-			c.blocks,
-			tmpBlock,
-		)
+	if err := c.manager.addBlock(tmpBlock, txn, c.persistent); err != nil {
+		return err
+	}
+	if !c.persistent {
+		c.blocks = append(c.blocks, tmpPoint)
 	}
 	// Remove matching header entry, if any
 	if len(c.headers) > 0 {
@@ -202,10 +158,12 @@ func (c *Chain) AddBlock(
 	}
 	c.tipBlockIndex = newBlockIndex
 	// Notify waiting iterators
+	c.waitingChanMutex.Lock()
 	if c.waitingChan != nil {
 		close(c.waitingChan)
 		c.waitingChan = nil
 	}
+	c.waitingChanMutex.Unlock()
 	// Generate event
 	if c.eventBus != nil {
 		c.eventBus.Publish(
@@ -233,7 +191,7 @@ func (c *Chain) AddBlocks(blocks []ledger.Block) error {
 		if batchSize == 0 {
 			break
 		}
-		txn := c.db.BlobTxn(true)
+		txn := c.manager.db.BlobTxn(true)
 		err := txn.Do(func(txn *database.Txn) error {
 			for _, tmpBlock := range blocks[batchOffset : batchOffset+batchSize] {
 				if err := c.AddBlock(tmpBlock, txn); err != nil {
@@ -253,6 +211,13 @@ func (c *Chain) AddBlocks(blocks []ledger.Block) error {
 func (c *Chain) Rollback(point ocommon.Point) error {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
+	// We get a write lock on the manager to cover the integrity checks and block deletions
+	c.manager.mutex.Lock()
+	defer c.manager.mutex.Unlock()
+	// Verify chain integrity
+	if err := c.reconcile(); err != nil {
+		return err
+	}
 	// Check headers for rollback point
 	if len(c.headers) > 0 {
 		for idx, header := range c.headers {
@@ -271,7 +236,7 @@ func (c *Chain) Rollback(point ocommon.Point) error {
 	var tmpBlock database.Block
 	if point.Slot > 0 {
 		var err error
-		tmpBlock, err = c.BlockByPoint(point, nil)
+		tmpBlock, err = c.manager.blockByPoint(point, nil)
 		if err != nil {
 			return err
 		}
@@ -280,28 +245,18 @@ func (c *Chain) Rollback(point ocommon.Point) error {
 	// Delete any rolled-back blocks
 	for i := c.tipBlockIndex; i > rollbackBlockIndex; i-- {
 		if c.persistent {
-			// Remove from database
-			txn := c.db.BlobTxn(true)
-			err := txn.Do(func(txn *database.Txn) error {
-				tmpBlock, err := c.db.BlockByIndex(i, txn)
-				if err != nil {
-					return err
-				}
-				if err := database.BlockDeleteTxn(txn, tmpBlock); err != nil {
-					return err
-				}
-				return nil
-			})
-			if err != nil {
+			// Remove block from persistent store
+			if err := c.manager.removeBlockByIndex(i); err != nil {
 				return err
 			}
 		} else {
-			// Return an error if we try to rollback beyond memory buffer
-			if i <= c.lastDbBlockIndex {
-				return ErrRollbackBeyondEphemeralChain
+			// Decrement our fork point block index if we rollback beyond it
+			if i < c.lastCommonBlockIndex {
+				c.lastCommonBlockIndex = i
+				continue
 			}
 			// Remove from memory buffer
-			memBlockIndex := int(i - c.lastDbBlockIndex - initialBlockIndex) //nolint:gosec
+			memBlockIndex := int(i - c.lastCommonBlockIndex - initialBlockIndex) //nolint:gosec
 			c.blocks = slices.Delete(
 				c.blocks,
 				memBlockIndex,
@@ -393,41 +348,17 @@ func (c *Chain) BlockByPoint(
 	point ocommon.Point,
 	txn *database.Txn,
 ) (database.Block, error) {
-	if point.Slot <= c.lastDbSlot {
-		// Query database
-		tmpBlock, err := database.BlockByPoint(c.db, point)
-		if err != nil {
-			if errors.Is(err, database.ErrBlockNotFound) {
-				return database.Block{}, ErrBlockNotFound
-			}
-			return database.Block{}, err
-		}
-		return tmpBlock, nil
-	}
-	// Search memory buffer
-	for _, block := range c.blocks {
-		if point.Slot != block.Slot {
-			continue
-		}
-		if string(point.Hash) != string(block.Hash) {
-			continue
-		}
-		return block, nil
-	}
-	return database.Block{}, ErrBlockNotFound
+	return c.manager.BlockByPoint(point, txn)
 }
 
 func (c *Chain) blockByIndex(
 	blockIndex uint64,
 	txn *database.Txn,
 ) (database.Block, error) {
-	if blockIndex <= c.lastDbBlockIndex {
-		// Query database
-		tmpBlock, err := c.db.BlockByIndex(blockIndex, txn)
+	if c.persistent || blockIndex <= c.lastCommonBlockIndex {
+		// Query via manager for common blocks
+		tmpBlock, err := c.manager.blockByIndex(blockIndex, txn)
 		if err != nil {
-			if errors.Is(err, database.ErrBlockNotFound) {
-				return database.Block{}, ErrBlockNotFound
-			}
 			return database.Block{}, err
 		}
 		return tmpBlock, nil
@@ -435,12 +366,17 @@ func (c *Chain) blockByIndex(
 	// Get from memory buffer
 	//nolint:gosec
 	memBlockIndex := int(
-		blockIndex - c.lastDbBlockIndex - initialBlockIndex,
+		blockIndex - c.lastCommonBlockIndex - initialBlockIndex,
 	)
 	if memBlockIndex < 0 || len(c.blocks) < memBlockIndex+1 {
 		return database.Block{}, ErrBlockNotFound
 	}
-	return c.blocks[memBlockIndex], nil
+	memBlockPoint := c.blocks[memBlockIndex]
+	tmpBlock, err := c.manager.blockByPoint(memBlockPoint, txn)
+	if err != nil {
+		return database.Block{}, err
+	}
+	return tmpBlock, nil
 }
 
 func (c *Chain) iterNext(
@@ -448,6 +384,13 @@ func (c *Chain) iterNext(
 	blocking bool,
 ) (*ChainIteratorResult, error) {
 	c.mutex.RLock()
+	// We get a read lock on the manager for the integrity check and initial block lookup
+	c.manager.mutex.RLock()
+	// Verify chain integrity
+	if err := c.reconcile(); err != nil {
+		c.manager.mutex.RUnlock()
+		return nil, err
+	}
 	// Check for pending rollback
 	if iter.needsRollback {
 		ret := &ChainIteratorResult{}
@@ -457,14 +400,16 @@ func (c *Chain) iterNext(
 		iter.needsRollback = false
 		if iter.rollbackPoint.Slot > 0 {
 			// Lookup block index for rollback point
-			tmpBlock, err := c.BlockByPoint(iter.rollbackPoint, nil)
+			tmpBlock, err := c.manager.blockByPoint(iter.rollbackPoint, nil)
 			if err != nil {
 				c.mutex.RUnlock()
+				c.manager.mutex.RUnlock()
 				return nil, err
 			}
 			iter.nextBlockIndex = tmpBlock.ID + 1
 		}
 		c.mutex.RUnlock()
+		c.manager.mutex.RUnlock()
 		return ret, nil
 	}
 	ret := &ChainIteratorResult{}
@@ -477,19 +422,23 @@ func (c *Chain) iterNext(
 		iter.nextBlockIndex++
 		iter.lastPoint = ret.Point
 		c.mutex.RUnlock()
+		c.manager.mutex.RUnlock()
 		return ret, nil
 	}
 	// Return any actual error
 	if !errors.Is(err, ErrBlockNotFound) {
 		c.mutex.RUnlock()
+		c.manager.mutex.RUnlock()
 		return ret, err
 	}
 	// Return immediately if we're not blocking
 	if !blocking {
 		c.mutex.RUnlock()
+		c.manager.mutex.RUnlock()
 		return nil, ErrIteratorChainTip
 	}
 	c.mutex.RUnlock()
+	c.manager.mutex.RUnlock()
 	// Wait for chain update
 	c.waitingChanMutex.Lock()
 	if c.waitingChan == nil {
@@ -499,4 +448,81 @@ func (c *Chain) iterNext(
 	<-c.waitingChan
 	// Call ourselves again now that we should have new data
 	return c.iterNext(iter, blocking)
+}
+
+func (c *Chain) reconcile() error {
+	// We reconcile against the primary/persistent chain, so no need to check if we are that chain
+	if c.persistent {
+		return nil
+	}
+	// Check with manager if there have been any primary chain rollback events that would trigger a reconcile
+	if !c.manager.chainNeedsReconcile(c.id, c.lastCommonBlockIndex) {
+		return nil
+	}
+	// Check our blocks against primary chain until we find a match
+	primaryChain := c.manager.PrimaryChain()
+	for i := len(c.blocks) - 1; i >= 0; i-- {
+		tmpBlock, err := primaryChain.blockByIndex(c.lastCommonBlockIndex+uint64(i), nil)
+		if err != nil {
+			if errors.Is(err, ErrBlockNotFound) {
+				continue
+			}
+			return err
+		}
+		if c.blocks[i].Slot != tmpBlock.Slot {
+			continue
+		}
+		if string(c.blocks[i].Hash) != string(tmpBlock.Hash) {
+			continue
+		}
+		// Adjust our chain-local blocks and offset point from primary chain
+		c.blocks = slices.Delete(c.blocks, 0, i+1)
+		c.lastCommonBlockIndex = tmpBlock.ID
+		return nil
+	}
+	// Determine prev-hash from earliest known good block
+	knownPoint := c.currentTip.Point
+	if len(c.blocks) > 0 {
+		knownPoint = c.blocks[0]
+	}
+	knownBlock, err := c.manager.blockByPoint(knownPoint, nil)
+	if err != nil {
+		return err
+	}
+	decodedKnownBlock, err := knownBlock.Decode()
+	if err != nil {
+		return err
+	}
+	lastPrevHash := decodedKnownBlock.PrevHash().Bytes()
+	// Iterate backward through chain based on prev-hash until we find a matching block on the primary chain
+	for {
+		tmpBlock, err := c.manager.blockByHash(lastPrevHash)
+		if err != nil {
+			return err
+		}
+		// Lookup same block index on primary chain
+		primaryBlock, err := primaryChain.blockByIndex(tmpBlock.ID, nil)
+		if err != nil {
+			return err
+		}
+		// Update last common block index and return when we find a matching block on the primary chain
+		if tmpBlock.Slot == primaryBlock.Slot &&
+			string(tmpBlock.Hash) == string(primaryBlock.Hash) {
+			c.lastCommonBlockIndex = tmpBlock.ID
+			break
+		}
+		// Decode block and extract prev-hash
+		decodedBlock, err := tmpBlock.Decode()
+		if err != nil {
+			return err
+		}
+		lastPrevHash = decodedBlock.PrevHash().Bytes()
+		tmpPoint := ocommon.Point{
+			Hash: tmpBlock.Hash,
+			Slot: tmpBlock.Slot,
+		}
+		c.blocks = slices.Concat([]ocommon.Point{tmpPoint}, c.blocks)
+		c.lastCommonBlockIndex--
+	}
+	return nil
 }
