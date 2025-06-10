@@ -23,6 +23,7 @@ import (
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/chainsync"
 	"github.com/blinklabs-io/dingo/connmanager"
+	"github.com/blinklabs-io/dingo/consensus"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/ledger"
@@ -42,6 +43,7 @@ import (
 type Node struct {
 	config         Config
 	connManager    *connmanager.ConnectionManager
+	consensus      *consensus.Consensus
 	peerGov        *peergov.PeerGovernor
 	chainsyncState *chainsync.State
 	eventBus       *event.EventBus
@@ -123,6 +125,17 @@ func (n *Node) Run() error {
 	if err != nil {
 		return fmt.Errorf("failed to load state database: %w", err)
 	}
+	// Load consensus
+	cons, err := consensus.New(
+		n.config.logger,
+		n.eventBus,
+		n.chainManager,
+		state,
+	)
+	if err != nil {
+		return fmt.Errorf("load consensus: %w", err)
+	}
+	n.consensus = cons
 	// Add shutdown cleanup for ledger/database
 	n.shutdownFuncs = append(
 		n.shutdownFuncs,

@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math/big"
 	"sync"
 	"time"
 
@@ -62,24 +63,17 @@ type BlockfetchRequestRangeFunc func(ouroboros.ConnectionId, ocommon.Point, ocom
 
 type LedgerState struct {
 	sync.RWMutex
-	chainsyncMutex                   sync.Mutex
-	config                           LedgerStateConfig
-	db                               *database.Database
-	timerCleanupConsumedUtxos        *time.Timer
-	currentPParams                   lcommon.ProtocolParameters
-	currentEpoch                     database.Epoch
-	epochCache                       []database.Epoch
-	currentEra                       eras.EraDesc
-	currentTip                       ochainsync.Tip
-	currentTipBlockNonce             []byte
-	metrics                          stateMetrics
-	chainsyncBlockEvents             []BlockfetchEvent
-	chainsyncBlockfetchBusyTime      time.Time
-	chainsyncBlockfetchBatchDoneChan chan struct{}
-	chainsyncBlockfetchReadyChan     chan struct{}
-	chainsyncBlockfetchMutex         sync.Mutex
-	chainsyncBlockfetchWaiting       bool
-	chain                            *chain.Chain
+	config                    LedgerStateConfig
+	db                        *database.Database
+	timerCleanupConsumedUtxos *time.Timer
+	currentPParams            lcommon.ProtocolParameters
+	currentEpoch              database.Epoch
+	epochCache                []database.Epoch
+	currentEra                eras.EraDesc
+	currentTip                ochainsync.Tip
+	currentTipBlockNonce      []byte
+	metrics                   stateMetrics
+	chain                     *chain.Chain
 }
 
 func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
@@ -99,15 +93,6 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 func (ls *LedgerState) Start() error {
 	// Init metrics
 	ls.metrics.init(ls.config.PromRegistry)
-	// Setup event handlers
-	ls.config.EventBus.SubscribeFunc(
-		ChainsyncEventType,
-		ls.handleEventChainsync,
-	)
-	ls.config.EventBus.SubscribeFunc(
-		BlockfetchEventType,
-		ls.handleEventBlockfetch,
-	)
 	// Schedule periodic process to purge consumed UTxOs outside of the rollback window
 	ls.scheduleCleanupConsumedUtxos()
 	// Load epoch info from DB
@@ -878,4 +863,196 @@ func (ls *LedgerState) ValidateTx(
 		}
 	}
 	return nil
+}
+
+func (ls *LedgerState) processEpochRollover(
+	txn *database.Txn,
+) error {
+	epochStartSlot := ls.currentEpoch.StartSlot + uint64(
+		ls.currentEpoch.LengthInSlots,
+	)
+	// Create initial epoch
+	if ls.currentEpoch.SlotLength == 0 {
+		// Create initial epoch record
+		epochSlotLength, epochLength, err := ls.currentEra.EpochLengthFunc(
+			ls.config.CardanoNodeConfig,
+		)
+		if err != nil {
+			return fmt.Errorf("calculate epoch length: %w", err)
+		}
+		tmpNonce, err := ls.calculateEpochNonce(txn, 0)
+		if err != nil {
+			return fmt.Errorf("calculate epoch nonce: %w", err)
+		}
+		err = ls.db.SetEpoch(
+			epochStartSlot,
+			0, // epoch
+			tmpNonce,
+			ls.currentEra.Id,
+			epochSlotLength,
+			epochLength,
+			txn,
+		)
+		if err != nil {
+			return fmt.Errorf("set epoch: %w", err)
+		}
+		// Reload epoch info
+		if err := ls.loadEpochs(txn); err != nil {
+			return fmt.Errorf("load epochs: %w", err)
+		}
+		ls.config.Logger.Debug(
+			"added initial epoch to DB",
+			"epoch", fmt.Sprintf("%+v", ls.currentEpoch),
+			"component", "ledger",
+		)
+		return nil
+	}
+	// Apply pending pparam updates
+	err := ls.db.ApplyPParamUpdates(
+		epochStartSlot,
+		ls.currentEpoch.EpochId,
+		ls.currentEra.Id,
+		&ls.currentPParams,
+		ls.currentEra.DecodePParamsUpdateFunc,
+		ls.currentEra.PParamsUpdateFunc,
+		txn,
+	)
+	if err != nil {
+		return fmt.Errorf("apply pparam updates: %w", err)
+	}
+	// Create next epoch record
+	epochSlotLength, epochLength, err := ls.currentEra.EpochLengthFunc(
+		ls.config.CardanoNodeConfig,
+	)
+	if err != nil {
+		return fmt.Errorf("calculate epoch length: %w", err)
+	}
+	tmpNonce, err := ls.calculateEpochNonce(txn, epochStartSlot)
+	if err != nil {
+		return fmt.Errorf("calculate epoch nonce: %w", err)
+	}
+	err = ls.db.SetEpoch(
+		epochStartSlot,
+		ls.currentEpoch.EpochId+1,
+		tmpNonce,
+		ls.currentEra.Id,
+		epochSlotLength,
+		epochLength,
+		txn,
+	)
+	if err != nil {
+		return fmt.Errorf("set epoch: %w", err)
+	}
+	// Reload epoch info
+	if err := ls.loadEpochs(txn); err != nil {
+		return fmt.Errorf("load epochs: %w", err)
+	}
+	ls.config.Logger.Debug(
+		"added next epoch to DB",
+		"epoch", fmt.Sprintf("%+v", ls.currentEpoch),
+		"component", "ledger",
+	)
+	// Start background cleanup of consumed UTxOs
+	go ls.cleanupConsumedUtxos()
+	return nil
+}
+
+func (ls *LedgerState) createGenesisBlock() error {
+	if ls.currentEpoch.SlotLength > 0 {
+		return nil
+	}
+	txn := ls.db.Transaction(true)
+	err := txn.Do(func(txn *database.Txn) error {
+		// Record genesis UTxOs
+		byronGenesis := ls.config.CardanoNodeConfig.ByronGenesis()
+		genesisUtxos, err := byronGenesis.GenesisUtxos()
+		if err != nil {
+			return fmt.Errorf("failed to generate genesis UTxOs: %w", err)
+		}
+		for _, utxo := range genesisUtxos {
+			outAddr := utxo.Output.Address()
+			outputCbor, err := cbor.Encode(utxo.Output)
+			if err != nil {
+				return fmt.Errorf("encode UTxO: %w", err)
+			}
+			err = ls.db.NewUtxo(
+				utxo.Id.Id().Bytes(),
+				utxo.Id.Index(),
+				0,
+				outAddr.PaymentKeyHash().Bytes(),
+				outAddr.StakeKeyHash().Bytes(),
+				outputCbor,
+				txn,
+			)
+			if err != nil {
+				return fmt.Errorf("add genesis UTxO: %w", err)
+			}
+		}
+		return nil
+	})
+	return err
+}
+
+func (ls *LedgerState) calculateEpochNonce(
+	txn *database.Txn,
+	epochStartSlot uint64,
+) ([]byte, error) {
+	// No epoch nonce in Byron
+	if ls.currentEra.Id == 0 {
+		return nil, nil
+	}
+	// Use Shelley genesis hash for initial epoch nonce
+	if len(ls.currentEpoch.Nonce) == 0 {
+		genesisHashBytes, err := hex.DecodeString(
+			ls.config.CardanoNodeConfig.ShelleyGenesisHash,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("decode genesis hash: %w", err)
+		}
+		return genesisHashBytes, nil
+	}
+	// Calculate stability window
+	byronGenesis := ls.config.CardanoNodeConfig.ByronGenesis()
+	shelleyGenesis := ls.config.CardanoNodeConfig.ShelleyGenesis()
+	if byronGenesis == nil || shelleyGenesis == nil {
+		return nil, errors.New("could not get genesis config")
+	}
+	stabilityWindow := new(big.Rat).Quo(
+		big.NewRat(
+			int64(3*byronGenesis.ProtocolConsts.K),
+			1,
+		),
+		shelleyGenesis.ActiveSlotsCoeff.Rat,
+	).Num().Uint64()
+	stabilityWindowStartSlot := epochStartSlot - stabilityWindow
+	// Get last block before stability window
+	blockBeforeStabilityWindow, err := database.BlockBeforeSlotTxn(
+		txn,
+		stabilityWindowStartSlot,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("lookup block before slot: %w", err)
+	}
+	blockBeforeStabilityWindowNonce, err := ls.db.GetBlockNonce(blockBeforeStabilityWindow.Hash, blockBeforeStabilityWindow.Slot, txn)
+	if err != nil {
+		return nil, fmt.Errorf("lookup block nonce: %w", err)
+	}
+	// Get last block in previous epoch
+	blockLastPrevEpoch, err := database.BlockBeforeSlotTxn(
+		txn,
+		ls.currentEpoch.StartSlot,
+	)
+	if err != nil {
+		if errors.Is(err, database.ErrBlockNotFound) {
+			return blockBeforeStabilityWindowNonce, nil
+		}
+		return nil, fmt.Errorf("lookup block before slot: %w", err)
+	}
+	// Calculate nonce from inputs
+	ret, err := lcommon.CalculateEpochNonce(
+		blockBeforeStabilityWindowNonce,
+		blockLastPrevEpoch.PrevHash,
+		nil,
+	)
+	return ret.Bytes(), err
 }
