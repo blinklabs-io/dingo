@@ -207,11 +207,16 @@ func (ls *LedgerState) createGenesisBlock() error {
 	err := txn.Do(func(txn *database.Txn) error {
 		// Record genesis UTxOs
 		byronGenesis := ls.config.CardanoNodeConfig.ByronGenesis()
-		genesisUtxos, err := byronGenesis.GenesisUtxos()
+		byronGenesisUtxos, err := byronGenesis.GenesisUtxos()
 		if err != nil {
-			return fmt.Errorf("failed to generate genesis UTxOs: %w", err)
+			return fmt.Errorf("generate Byron genesis UTxOs: %w", err)
 		}
-		for _, utxo := range genesisUtxos {
+		shelleyGenesis := ls.config.CardanoNodeConfig.ShelleyGenesis()
+		shelleyGenesisUtxos, err := shelleyGenesis.GenesisUtxos()
+		if err != nil {
+			return fmt.Errorf("generate Shelley genesis UTxOs: %w", err)
+		}
+		for _, utxo := range slices.Concat(byronGenesisUtxos, shelleyGenesisUtxos) {
 			outAddr := utxo.Output.Address()
 			outputCbor, err := cbor.Encode(utxo.Output)
 			if err != nil {
