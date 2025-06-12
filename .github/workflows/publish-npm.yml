@@ -1,0 +1,30 @@
+name: publish-npm
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  npm-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - run: |
+          echo "RELEASE_TAG=${{ github.event.release.tag_name }}" >> $GITHUB_ENV
+          echo "RELEASE_VERSION=${RELEASE_TAG:1}" >> $GITHUB_ENV
+      - uses: actions/checkout@v4
+      - name: setup nodejs
+        uses: actions/setup-node@v2
+        with:
+          node-version: '23.x'
+      - name: Update package.json
+        run: sed -e "s/0.999.0/${RELEASE_VERSION}/" .github/package.json > package.json
+      - name: Install dependencies
+        run: npm install
+      - name: Build
+        run: npm run build
+      - name: Publish to NPM
+        run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
