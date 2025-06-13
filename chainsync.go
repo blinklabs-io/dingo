@@ -15,8 +15,10 @@
 package dingo
 
 import (
+	"errors"
 	"fmt"
 
+	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/ledger"
 	ouroboros "github.com/blinklabs-io/gouroboros"
@@ -144,7 +146,9 @@ func (n *Node) chainsyncServerRequestNext(
 	// Check for available block
 	next, err := clientState.ChainIter.Next(false)
 	if err != nil {
-		return err
+		if !errors.Is(err, chain.ErrIteratorChainTip) {
+			return err
+		}
 	}
 	if next != nil {
 		return ctx.Server.RollForward(
