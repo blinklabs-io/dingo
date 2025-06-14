@@ -97,12 +97,13 @@ func New(
 	logger *slog.Logger,
 	promRegistry prometheus.Registerer,
 	dataDir string,
+	badgerCacheSize int64,
 ) (*Database, error) {
 	metadataDb, err := metadata.New("sqlite", dataDir, logger, promRegistry)
 	if err != nil {
 		return nil, err
 	}
-	blobDb, err := blob.New("badger", dataDir, logger, promRegistry)
+	blobDb, err := blob.New("badger", dataDir, logger, promRegistry, badgerCacheSize)
 	if err != nil {
 		return nil, err
 	}
