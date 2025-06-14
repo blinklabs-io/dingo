@@ -168,6 +168,11 @@ func (n *Node) txsubmissionClientRequestTxIds(
 	// Get available TXs
 	var tmpTxs []*mempool.MempoolTransaction
 	for {
+		// nolint:staticcheck
+		// The linter wants to move this up into the loop condition, but it's more readable this way
+		if len(tmpTxs) >= int(req) {
+			break
+		}
 		if blocking && len(tmpTxs) == 0 {
 			// Wait until we see a TX
 			tmpTx := consumer.NextTx(true)
