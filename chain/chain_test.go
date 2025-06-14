@@ -463,7 +463,8 @@ func TestChainFromIntersect(t *testing.T) {
 			Slot: testBlocks[testForkPointIndex].MockSlot,
 		},
 	}
-	db, err := database.New(nil, nil, "")
+	const testCacheSize int64 = 1 << 20
+	db, err := database.New(nil, nil, "", testCacheSize)
 	if err != nil {
 		t.Fatalf("unexpected error creating database: %s", err)
 	}
@@ -521,7 +522,8 @@ func TestChainFork(t *testing.T) {
 			MockPrevHash:    testHashPrefix + "00a5",
 		},
 	}
-	db, err := database.New(nil, nil, "")
+	const testCacheSize int64 = 1 << 20
+	db, err := database.New(nil, nil, "", testCacheSize)
 	if err != nil {
 		t.Fatalf("unexpected error creating database: %s", err)
 	}

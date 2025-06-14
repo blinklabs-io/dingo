@@ -53,6 +53,7 @@ func New(
 	dataDir string,
 	logger *slog.Logger,
 	promRegistry prometheus.Registerer,
+	badgerCacheSize int64,
 ) (*BlobStoreBadger, error) {
 	var blobDb *badger.DB
 	var err error
@@ -68,6 +69,9 @@ func New(
 			// The default INFO logging is a bit verbose
 			WithLoggingLevel(badger.WARNING).
 			WithInMemory(true)
+		badgerOpts = badgerOpts.
+			WithBlockCacheSize(badgerCacheSize).
+			WithIndexCacheSize(badgerCacheSize)
 		blobDb, err = badger.Open(badgerOpts)
 		if err != nil {
 			return nil, err
@@ -93,6 +97,9 @@ func New(
 			WithLogger(NewBadgerLogger(logger)).
 			// The default INFO logging is a bit verbose
 			WithLoggingLevel(badger.WARNING)
+		badgerOpts = badgerOpts.
+			WithBlockCacheSize(badgerCacheSize).
+			WithIndexCacheSize(badgerCacheSize)
 		blobDb, err = badger.Open(badgerOpts)
 		if err != nil {
 			return nil, err
