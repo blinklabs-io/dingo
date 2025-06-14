@@ -18,6 +18,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math/big"
 
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -100,7 +101,17 @@ func EpochLengthShelley(
 	}
 	// These are known to be within uint range
 	// #nosec G115
-	return uint(shelleyGenesis.SlotLength * 1000),
+	slotLengthMs := new(big.Int).Div(
+		// Slot length ratio numerator times 1000 (seconds to milliseconds)
+		new(big.Int).Mul(
+			shelleyGenesis.SlotLength.Num(),
+			big.NewInt(1_000),
+		),
+		// Divided by slot length ratio denominator
+		shelleyGenesis.SlotLength.Denom(),
+	).Uint64()
+	// #nosec G115
+	return uint(slotLengthMs),
 		uint(shelleyGenesis.EpochLength),
 		nil
 }
