@@ -37,6 +37,7 @@ func New(
 	pluginName, dataDir string,
 	logger *slog.Logger,
 	promRegistry prometheus.Registerer,
+	badgerCacheSize int64,
 ) (BlobStore, error) {
-	return badgerPlugin.New(dataDir, logger, promRegistry)
+	return badgerPlugin.New(dataDir, logger, promRegistry, badgerCacheSize)
 }

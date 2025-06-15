@@ -43,6 +43,7 @@ func FromContext(ctx context.Context) *Config {
 }
 
 type Config struct {
+	BadgerCacheSize int64  `split_words:"true" yaml:"badgerCacheSize"`
 	BindAddr        string `split_words:"true" yaml:"bindAddr"`
 	CardanoConfig   string `                   yaml:"cardanoConfig"   envconfig:"config"`
 	DatabasePath    string `split_words:"true" yaml:"databasePath"`
@@ -60,6 +61,7 @@ type Config struct {
 }
 
 var globalConfig = &Config{
+	BadgerCacheSize: 67108864,
 	BindAddr:        "0.0.0.0",
 	CardanoConfig:   "./config/cardano/preview/config.json",
 	DatabasePath:    ".dingo",
