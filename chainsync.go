@@ -151,11 +151,19 @@ func (n *Node) chainsyncServerRequestNext(
 		}
 	}
 	if next != nil {
-		return ctx.Server.RollForward(
-			next.Block.Type,
-			next.Block.Cbor,
-			tip,
-		)
+		if next.Rollback {
+			err = ctx.Server.RollBackward(
+				next.Point,
+				tip,
+			)
+		} else {
+			err = ctx.Server.RollForward(
+				next.Block.Type,
+				next.Block.Cbor,
+				tip,
+			)
+		}
+		return err
 	}
 	// Send AwaitReply
 	if err := ctx.Server.AwaitReply(); err != nil {
@@ -168,11 +176,18 @@ func (n *Node) chainsyncServerRequestNext(
 			return
 		}
 		tip := n.ledgerState.Tip()
-		_ = ctx.Server.RollForward(
-			next.Block.Type,
-			next.Block.Cbor,
-			tip,
-		)
+		if next.Rollback {
+			_ = ctx.Server.RollBackward(
+				next.Point,
+				tip,
+			)
+		} else {
+			_ = ctx.Server.RollForward(
+				next.Block.Type,
+				next.Block.Cbor,
+				tip,
+			)
+		}
 	}()
 	return nil
 }
