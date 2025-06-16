@@ -26,7 +26,7 @@ require (
 	golang.org/x/sys v0.33.0
 	gopkg.in/yaml.v3 v3.0.1
 	gorm.io/gorm v1.30.0
-	gorm.io/plugin/opentelemetry v0.1.14
+	gorm.io/plugin/opentelemetry v0.1.15
 )
 
 // XXX: uncomment when testing local changes to gouroboros
@@ -35,8 +35,8 @@ require (
 require (
 	filippo.io/edwards25519 v1.1.0 // indirect
 	github.com/ClickHouse/ch-go v0.61.5 // indirect
-	github.com/ClickHouse/clickhouse-go/v2 v2.23.2 // indirect
-	github.com/andybalholm/brotli v1.1.0 // indirect
+	github.com/ClickHouse/clickhouse-go/v2 v2.30.0 // indirect
+	github.com/andybalholm/brotli v1.1.1 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/btcsuite/btcd/btcutil v1.1.6 // indirect
 	github.com/cenkalti/backoff/v5 v5.0.2 // indirect
@@ -88,7 +88,7 @@ require (
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20250519155744-55703ea1f237 // indirect
 	google.golang.org/grpc v1.72.1 // indirect
 	google.golang.org/protobuf v1.36.6 // indirect
-	gorm.io/driver/clickhouse v0.6.1 // indirect
+	gorm.io/driver/clickhouse v0.7.0 // indirect
 	gorm.io/driver/mysql v1.5.7 // indirect
 	gorm.io/driver/postgres v1.5.11 // indirect
 	modernc.org/libc v1.22.5 // indirect
