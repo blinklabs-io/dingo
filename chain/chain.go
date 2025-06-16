@@ -383,11 +383,12 @@ func (c *Chain) iterNext(
 	iter *ChainIterator,
 	blocking bool,
 ) (*ChainIteratorResult, error) {
-	c.mutex.RLock()
+	c.mutex.Lock()
 	// We get a read lock on the manager for the integrity check and initial block lookup
 	c.manager.mutex.RLock()
 	// Verify chain integrity
 	if err := c.reconcile(); err != nil {
+		c.mutex.Unlock()
 		c.manager.mutex.RUnlock()
 		return nil, err
 	}
@@ -402,13 +403,13 @@ func (c *Chain) iterNext(
 			// Lookup block index for rollback point
 			tmpBlock, err := c.manager.blockByPoint(iter.rollbackPoint, nil)
 			if err != nil {
-				c.mutex.RUnlock()
+				c.mutex.Unlock()
 				c.manager.mutex.RUnlock()
 				return nil, err
 			}
 			iter.nextBlockIndex = tmpBlock.ID + 1
 		}
-		c.mutex.RUnlock()
+		c.mutex.Unlock()
 		c.manager.mutex.RUnlock()
 		return ret, nil
 	}
@@ -421,23 +422,23 @@ func (c *Chain) iterNext(
 		ret.Block = tmpBlock
 		iter.nextBlockIndex++
 		iter.lastPoint = ret.Point
-		c.mutex.RUnlock()
+		c.mutex.Unlock()
 		c.manager.mutex.RUnlock()
 		return ret, nil
 	}
 	// Return any actual error
 	if !errors.Is(err, ErrBlockNotFound) {
-		c.mutex.RUnlock()
+		c.mutex.Unlock()
 		c.manager.mutex.RUnlock()
 		return ret, err
 	}
 	// Return immediately if we're not blocking
 	if !blocking {
-		c.mutex.RUnlock()
+		c.mutex.Unlock()
 		c.manager.mutex.RUnlock()
 		return nil, ErrIteratorChainTip
 	}
-	c.mutex.RUnlock()
+	c.mutex.Unlock()
 	c.manager.mutex.RUnlock()
 	// Wait for chain update
 	c.waitingChanMutex.Lock()
