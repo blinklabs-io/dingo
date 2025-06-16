@@ -15,7 +15,7 @@ jobs:
           echo "RELEASE_VERSION=${RELEASE_TAG:1}" >> $GITHUB_ENV
       - uses: actions/checkout@v4
       - name: setup nodejs
-        uses: actions/setup-node@v2
+        uses: actions/setup-node@v4
         with:
           node-version: '23.x'
       - name: Update package.json
