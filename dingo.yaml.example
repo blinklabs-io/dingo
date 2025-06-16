@@ -53,5 +53,5 @@ utxorpcPort: 9090
 intersectTip: false
 
 # Maximum cache size in bytes used by BadgerDB for block/index cache
-# Default: 67108864 (64 MB)
-badgerCacheSize: 67108864
+# Default: 1073741824 (1 GB)
+badgerCacheSize: 1073741824

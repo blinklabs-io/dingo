@@ -61,7 +61,7 @@ type Config struct {
 }
 
 var globalConfig = &Config{
-	BadgerCacheSize: 67108864,
+	BadgerCacheSize: 1073741824,
 	BindAddr:        "0.0.0.0",
 	CardanoConfig:   "./config/cardano/preview/config.json",
 	DatabasePath:    ".dingo",

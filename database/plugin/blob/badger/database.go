@@ -69,9 +69,6 @@ func New(
 			// The default INFO logging is a bit verbose
 			WithLoggingLevel(badger.WARNING).
 			WithInMemory(true)
-		badgerOpts = badgerOpts.
-			WithBlockCacheSize(badgerCacheSize).
-			WithIndexCacheSize(badgerCacheSize)
 		blobDb, err = badger.Open(badgerOpts)
 		if err != nil {
 			return nil, err
@@ -95,11 +92,9 @@ func New(
 		db.gcEnabled = true
 		badgerOpts := badger.DefaultOptions(blobDir).
 			WithLogger(NewBadgerLogger(logger)).
-			// The default INFO logging is a bit verbose
-			WithLoggingLevel(badger.WARNING)
-		badgerOpts = badgerOpts.
-			WithBlockCacheSize(badgerCacheSize).
-			WithIndexCacheSize(badgerCacheSize)
+			WithLoggingLevel(badger.WARNING).
+			WithBlockCacheSize(int64(float64(badgerCacheSize) * 0.75)). // 75% for block cache
+			WithIndexCacheSize(int64(float64(badgerCacheSize) * 0.25))  // 25% for index cache
 		blobDb, err = badger.Open(badgerOpts)
 		if err != nil {
 			return nil, err
