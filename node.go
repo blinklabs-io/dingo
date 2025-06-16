@@ -77,7 +77,7 @@ func (n *Node) Run() error {
 	}
 	// Load database
 	dbNeedsRecovery := false
-	db, err := database.New(n.config.logger, n.config.promRegistry, n.config.dataDir)
+	db, err := database.New(n.config.logger, n.config.promRegistry, n.config.dataDir, n.config.badgerCacheSize)
 	if db == nil {
 		n.config.logger.Error(
 			"failed to create database",

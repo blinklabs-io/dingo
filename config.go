@@ -31,6 +31,7 @@ import (
 type ListenerConfig = connmanager.ListenerConfig
 
 type Config struct {
+	badgerCacheSize    int64
 	cardanoNodeConfig  *cardano.CardanoNodeConfig
 	dataDir            string
 	intersectPoints    []ocommon.Point
@@ -241,5 +242,13 @@ func WithTracing(tracing bool) ConfigOptionFunc {
 func WithTracingStdout(stdout bool) ConfigOptionFunc {
 	return func(c *Config) {
 		c.tracingStdout = stdout
+	}
+}
+
+// WithBadgerCacheSize sets the maximum cache size (in bytes).This controls memory usage by limiting the size of block and index caches.
+// If not set, the default size defined in internal config will be used.
+func WithBadgerCacheSize(cacheSize int64) ConfigOptionFunc {
+	return func(c *Config) {
+		c.badgerCacheSize = cacheSize
 	}
 }

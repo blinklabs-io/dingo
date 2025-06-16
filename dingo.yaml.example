@@ -51,3 +51,7 @@ utxorpcPort: 9090
 # Ignore prior chain history and start from current tip (default: false)
 # This is experimental and may break — use with caution
 intersectTip: false
+
+# Maximum cache size in bytes used by BadgerDB for block/index cache
+# Default: 1073741824 (1 GB)
+badgerCacheSize: 1073741824
