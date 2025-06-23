@@ -15,6 +15,7 @@
 package mempool
 
 import (
+	"fmt"
 	"io"
 	"log/slog"
 	"slices"
@@ -23,6 +24,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/ledger"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
@@ -213,6 +215,25 @@ func (m *Mempool) AddTransaction(txType uint, txBytes []byte) error {
 			"tx_hash", tx.Hash,
 		)
 		return nil
+	}
+	// Enforce mempool capacity
+	cfg := config.GetConfig()
+	m.logger.Info(
+		"configured mempool capacity",
+		"component", "mempool",
+		"mempool_capacity_bytes", cfg.MempoolCapacity,
+	)
+	currentSize := 0
+	for _, existing := range m.transactions {
+		currentSize += len(existing.Cbor)
+	}
+	if currentSize+len(tx.Cbor) > int(cfg.MempoolCapacity) {
+		return fmt.Errorf(
+			"mempool full: current size %d + new tx %d > capacity %d bytes",
+			currentSize,
+			len(tx.Cbor),
+			cfg.MempoolCapacity,
+		)
 	}
 	// Add transaction record
 	m.transactions = append(m.transactions, &tx)
