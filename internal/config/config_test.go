@@ -9,6 +9,7 @@ import (
 func resetGlobalConfig() {
 	globalConfig = &Config{
 		BadgerCacheSize: 1073741824,
+		MempoolCapacity: 1048576,
 		BindAddr:        "0.0.0.0",
 		CardanoConfig:   "./config/cardano/preview/config.json",
 		DatabasePath:    ".dingo",
@@ -30,6 +31,7 @@ func TestLoad_CompareFullStruct(t *testing.T) {
 	resetGlobalConfig()
 	yamlContent := `
 badgerCacheSize: 8388608
+mempoolCapacity: 2097152
 bindAddr: "127.0.0.1"
 cardanoConfig: "./cardano/preview/config.json"
 databasePath: ".dingo"
@@ -55,6 +57,7 @@ tlsKeyFilePath: "key1.pem"
 
 	expected := &Config{
 		BadgerCacheSize: 8388608,
+		MempoolCapacity: 2097152,
 		BindAddr:        "127.0.0.1",
 		CardanoConfig:   "./cardano/preview/config.json",
 		DatabasePath:    ".dingo",
@@ -96,6 +99,7 @@ func TestLoad_WithoutConfigFile_UsesDefaults(t *testing.T) {
 	// Expected is the original default values from globalConfig
 	expected := &Config{
 		BadgerCacheSize: 1073741824,
+		MempoolCapacity: 1048576,
 		BindAddr:        "0.0.0.0",
 		CardanoConfig:   "./config/cardano/preview/config.json",
 		DatabasePath:    ".dingo",
