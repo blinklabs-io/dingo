@@ -95,6 +95,10 @@ func (ls *LedgerState) handleEventBlockfetch(evt event.Event) {
 }
 
 func (ls *LedgerState) handleEventChainsyncRollback(e ChainsyncEvent) error {
+	if ls.chainsyncState == SyncingChainsyncState {
+		ls.config.Logger.Warn(fmt.Sprintf("ledger: rolling back to %d.%s", e.Point.Slot, hex.EncodeToString(e.Point.Hash)))
+		ls.chainsyncState = RollbackChainsyncState
+	}
 	if err := ls.chain.Rollback(e.Point); err != nil {
 		return fmt.Errorf("chain rollback failed: %w", err)
 	}
@@ -102,6 +106,11 @@ func (ls *LedgerState) handleEventChainsyncRollback(e ChainsyncEvent) error {
 }
 
 func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
+	if ls.chainsyncState == RollbackChainsyncState {
+		ls.config.Logger.Info(fmt.Sprintf("ledger: switched to fork at %d.%s", e.Point.Slot, hex.EncodeToString(e.Point.Hash)))
+		ls.metrics.forks.Add(1)
+	}
+	ls.chainsyncState = SyncingChainsyncState
 	// Allow us to build up a few blockfetch batches worth of headers
 	allowedHeaderCount := blockfetchBatchSize * 4
 	headerCount := ls.chain.HeaderCount()

@@ -44,6 +44,14 @@ const (
 	validateHistoricalThreshold = 14 * (24 * time.Hour) // 2 weeks
 )
 
+type ChainsyncState string
+
+const (
+	InitChainsyncState     ChainsyncState = "init"
+	RollbackChainsyncState ChainsyncState = "rollback"
+	SyncingChainsyncState  ChainsyncState = "syncing"
+)
+
 type LedgerStateConfig struct {
 	Logger             *slog.Logger
 	Database           *database.Database
@@ -63,6 +71,7 @@ type BlockfetchRequestRangeFunc func(ouroboros.ConnectionId, ocommon.Point, ocom
 type LedgerState struct {
 	sync.RWMutex
 	chainsyncMutex                   sync.Mutex
+	chainsyncState                   ChainsyncState
 	config                           LedgerStateConfig
 	db                               *database.Database
 	timerCleanupConsumedUtxos        *time.Timer
@@ -84,9 +93,10 @@ type LedgerState struct {
 
 func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 	ls := &LedgerState{
-		config: cfg,
-		db:     cfg.Database,
-		chain:  cfg.ChainManager.PrimaryChain(),
+		config:         cfg,
+		chainsyncState: InitChainsyncState,
+		db:             cfg.Database,
+		chain:          cfg.ChainManager.PrimaryChain(),
 	}
 	if cfg.Logger == nil {
 		// Create logger to throw away logs

@@ -25,6 +25,7 @@ type stateMetrics struct {
 	epochNum    prometheus.Gauge
 	slotInEpoch prometheus.Gauge
 	slotNum     prometheus.Gauge
+	forks       prometheus.Gauge
 }
 
 func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
@@ -49,5 +50,9 @@ func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
 	m.slotNum = promautoFactory.NewGauge(prometheus.GaugeOpts{
 		Name: "cardano_node_metrics_slotNum_int",
 		Help: "current slot number",
+	})
+	m.forks = promautoFactory.NewGauge(prometheus.GaugeOpts{
+		Name: "cardano_node_metrics_forks_int",
+		Help: "number of forks seen",
 	})
 }
