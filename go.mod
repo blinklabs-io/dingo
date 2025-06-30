@@ -18,7 +18,7 @@ require (
 	github.com/utxorpc/go-codegen v0.16.0
 	go.opentelemetry.io/otel v1.37.0
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp v1.37.0
-	go.opentelemetry.io/otel/exporters/stdout/stdouttrace v1.36.0
+	go.opentelemetry.io/otel/exporters/stdout/stdouttrace v1.37.0
 	go.opentelemetry.io/otel/sdk v1.37.0
 	go.uber.org/automaxprocs v1.6.0
 	go.uber.org/goleak v1.3.0
