@@ -608,10 +608,16 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 			}
 		}
 		if len(nextBatch) > 0 {
+			var hash string
+			if ls.currentTip.Point.Slot == 0 {
+				hash = "<genesis>"
+			} else {
+				hash = hex.EncodeToString(ls.currentTip.Point.Hash)
+			}
 			ls.config.Logger.Info(
 				fmt.Sprintf(
-					"chain extended, new tip: %x at slot %d",
-					ls.currentTip.Point.Hash,
+					"chain extended, new tip: %s at slot %d",
+					hash,
 					ls.currentTip.Point.Slot,
 				),
 				"component",
