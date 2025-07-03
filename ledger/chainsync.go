@@ -96,7 +96,13 @@ func (ls *LedgerState) handleEventBlockfetch(evt event.Event) {
 
 func (ls *LedgerState) handleEventChainsyncRollback(e ChainsyncEvent) error {
 	if ls.chainsyncState == SyncingChainsyncState {
-		ls.config.Logger.Warn(fmt.Sprintf("ledger: rolling back to %d.%s", e.Point.Slot, hex.EncodeToString(e.Point.Hash)))
+		ls.config.Logger.Warn(
+			fmt.Sprintf(
+				"ledger: rolling back to %d.%s",
+				e.Point.Slot,
+				hex.EncodeToString(e.Point.Hash),
+			),
+		)
 		ls.chainsyncState = RollbackChainsyncState
 	}
 	if err := ls.chain.Rollback(e.Point); err != nil {
@@ -107,7 +113,13 @@ func (ls *LedgerState) handleEventChainsyncRollback(e ChainsyncEvent) error {
 
 func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 	if ls.chainsyncState == RollbackChainsyncState {
-		ls.config.Logger.Info(fmt.Sprintf("ledger: switched to fork at %d.%s", e.Point.Slot, hex.EncodeToString(e.Point.Hash)))
+		ls.config.Logger.Info(
+			fmt.Sprintf(
+				"ledger: switched to fork at %d.%s",
+				e.Point.Slot,
+				hex.EncodeToString(e.Point.Hash),
+			),
+		)
 		ls.metrics.forks.Add(1)
 	}
 	ls.chainsyncState = SyncingChainsyncState
@@ -289,7 +301,11 @@ func (ls *LedgerState) calculateEpochNonce(
 	if err != nil {
 		return nil, fmt.Errorf("lookup block before slot: %w", err)
 	}
-	blockBeforeStabilityWindowNonce, err := ls.db.GetBlockNonce(blockBeforeStabilityWindow.Hash, blockBeforeStabilityWindow.Slot, txn)
+	blockBeforeStabilityWindowNonce, err := ls.db.GetBlockNonce(
+		blockBeforeStabilityWindow.Hash,
+		blockBeforeStabilityWindow.Slot,
+		txn,
+	)
 	if err != nil {
 		return nil, fmt.Errorf("lookup block nonce: %w", err)
 	}

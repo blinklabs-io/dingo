@@ -24,12 +24,29 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 )
 
+var DefaultConfig = &Config{
+	BlobCacheSize:  1073741824,
+	BlobPlugin:     "badger",
+	DataDir:        ".dingo",
+	MetadataPlugin: "sqlite",
+}
+
+// Config represents the configuration for a database instance
+type Config struct {
+	BlobCacheSize  int64
+	BlobPlugin     string
+	DataDir        string
+	MetadataPlugin string
+	Logger         *slog.Logger
+	PromRegistry   prometheus.Registerer
+}
+
 // Database represents our data storage services
 type Database struct {
+	config   *Config
 	logger   *slog.Logger
 	blob     blob.BlobStore
 	metadata metadata.MetadataStore
-	dataDir  string
 }
 
 // Blob returns the underling blob store instance
@@ -37,14 +54,19 @@ func (d *Database) Blob() blob.BlobStore {
 	return d.blob
 }
 
+// Config returns the config object used for the database instance
+func (d *Database) Config() *Config {
+	return d.config
+}
+
 // DataDir returns the path to the data directory used for storage
 func (d *Database) DataDir() string {
-	return d.dataDir
+	return d.config.DataDir
 }
 
 // Logger returns the logger instance
 func (d *Database) Logger() *slog.Logger {
-	return d.logger
+	return d.config.Logger
 }
 
 // Metadata returns the underlying metadata store instance
@@ -94,24 +116,35 @@ func (d *Database) init() error {
 
 // New creates a new database instance with optional persistence using the provided data directory
 func New(
-	logger *slog.Logger,
-	promRegistry prometheus.Registerer,
-	dataDir string,
-	badgerCacheSize int64,
+	config *Config,
 ) (*Database, error) {
-	metadataDb, err := metadata.New("sqlite", dataDir, logger, promRegistry)
+	if config == nil {
+		config = DefaultConfig
+	}
+	blobDb, err := blob.New(
+		config.BlobPlugin,
+		config.DataDir,
+		config.Logger,
+		config.PromRegistry,
+		config.BlobCacheSize,
+	)
 	if err != nil {
 		return nil, err
 	}
-	blobDb, err := blob.New("badger", dataDir, logger, promRegistry, badgerCacheSize)
+	metadataDb, err := metadata.New(
+		config.MetadataPlugin,
+		config.DataDir,
+		config.Logger,
+		config.PromRegistry,
+	)
 	if err != nil {
 		return nil, err
 	}
 	db := &Database{
-		logger:   logger,
 		blob:     blobDb,
 		metadata: metadataDb,
-		dataDir:  dataDir,
+		logger:   config.Logger,
+		config:   config,
 	}
 	if err := db.init(); err != nil {
 		// Database is available for recovery, so return it with error

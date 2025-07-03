@@ -58,7 +58,8 @@ func (d *MetadataStoreSqlite) GetBlockNonce(
 ) ([]byte, error) {
 	ret := models.BlockNonce{}
 	if txn != nil {
-		result := txn.Where("hash = ? AND slot = ?", blockHash, slotNumber).First(&ret)
+		result := txn.Where("hash = ? AND slot = ?", blockHash, slotNumber).
+			First(&ret)
 		if result.Error != nil {
 			if !errors.Is(result.Error, gorm.ErrRecordNotFound) {
 				return nil, result.Error
