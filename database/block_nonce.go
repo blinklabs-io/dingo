@@ -79,7 +79,13 @@ func (d *Database) DeleteBlockNoncesBeforeSlotWithoutCheckpoints(
 	txn *Txn,
 ) error {
 	if txn == nil {
-		return d.metadata.DeleteBlockNoncesBeforeSlotWithoutCheckpoints(slotNumber, nil)
+		return d.metadata.DeleteBlockNoncesBeforeSlotWithoutCheckpoints(
+			slotNumber,
+			nil,
+		)
 	}
-	return d.metadata.DeleteBlockNoncesBeforeSlotWithoutCheckpoints(slotNumber, txn.Metadata())
+	return d.metadata.DeleteBlockNoncesBeforeSlotWithoutCheckpoints(
+		slotNumber,
+		txn.Metadata(),
+	)
 }

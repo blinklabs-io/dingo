@@ -42,7 +42,10 @@ type ChainManager struct {
 	blocks              map[string]database.Block
 }
 
-func NewManager(db *database.Database, eventBus *event.EventBus) (*ChainManager, error) {
+func NewManager(
+	db *database.Database,
+	eventBus *event.EventBus,
+) (*ChainManager, error) {
 	cm := &ChainManager{
 		db:                  db,
 		eventBus:            eventBus,
@@ -98,7 +101,9 @@ func (cm *ChainManager) NewChain(point ocommon.Point) (*Chain, error) {
 }
 
 // NewChainFromIntersect creates a new Chain that forks the primary chain at the latest common point.
-func (cm *ChainManager) NewChainFromIntersect(points []ocommon.Point) (*Chain, error) {
+func (cm *ChainManager) NewChainFromIntersect(
+	points []ocommon.Point,
+) (*Chain, error) {
 	cm.mutex.Lock()
 	defer cm.mutex.Unlock()
 	primaryChain := cm.PrimaryChain()
@@ -264,7 +269,11 @@ func (cm *ChainManager) loadPrimaryChain() error {
 	return nil
 }
 
-func (cm *ChainManager) addBlock(block database.Block, txn *database.Txn, persistent bool) error {
+func (cm *ChainManager) addBlock(
+	block database.Block,
+	txn *database.Txn,
+	persistent bool,
+) error {
 	if persistent {
 		// Add block to database
 		if err := cm.db.BlockCreate(block, txn); err != nil {
@@ -309,7 +318,10 @@ func (cm *ChainManager) removeBlockByIndex(blockIndex uint64) error {
 	return nil
 }
 
-func (cm *ChainManager) chainNeedsReconcile(chainId ChainId, lastCommonBlockIndex uint64) bool {
+func (cm *ChainManager) chainNeedsReconcile(
+	chainId ChainId,
+	lastCommonBlockIndex uint64,
+) bool {
 	events, ok := cm.chainRollbackEvents[chainId]
 	if !ok {
 		return false

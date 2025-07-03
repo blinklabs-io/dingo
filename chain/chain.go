@@ -463,7 +463,10 @@ func (c *Chain) reconcile() error {
 	// Check our blocks against primary chain until we find a match
 	primaryChain := c.manager.PrimaryChain()
 	for i := len(c.blocks) - 1; i >= 0; i-- {
-		tmpBlock, err := primaryChain.blockByIndex(c.lastCommonBlockIndex+uint64(i), nil)
+		tmpBlock, err := primaryChain.blockByIndex(
+			c.lastCommonBlockIndex+uint64(i),
+			nil,
+		)
 		if err != nil {
 			if errors.Is(err, ErrBlockNotFound) {
 				continue

@@ -106,6 +106,12 @@ var (
 			MockPrevHash:    testHashPrefix + "0005",
 		},
 	}
+	dbConfig = &database.Config{
+		BlobCacheSize: 1 << 20,
+		Logger:        nil,
+		PromRegistry:  nil,
+		DataDir:       "",
+	}
 )
 
 func TestChainBasic(t *testing.T) {
@@ -463,8 +469,7 @@ func TestChainFromIntersect(t *testing.T) {
 			Slot: testBlocks[testForkPointIndex].MockSlot,
 		},
 	}
-	const testCacheSize int64 = 1 << 20
-	db, err := database.New(nil, nil, "", testCacheSize)
+	db, err := database.New(dbConfig)
 	if err != nil {
 		t.Fatalf("unexpected error creating database: %s", err)
 	}
@@ -522,8 +527,7 @@ func TestChainFork(t *testing.T) {
 			MockPrevHash:    testHashPrefix + "00a5",
 		},
 	}
-	const testCacheSize int64 = 1 << 20
-	db, err := database.New(nil, nil, "", testCacheSize)
+	db, err := database.New(dbConfig)
 	if err != nil {
 		t.Fatalf("unexpected error creating database: %s", err)
 	}
@@ -554,7 +558,10 @@ func TestChainFork(t *testing.T) {
 	// Iterate until hitting chain tip, and make sure we get blocks in the correct order with
 	// all expected data
 	testBlockIdx := 0
-	testBlocks := slices.Concat(testBlocks[0:testForkPointIndex+1], testForkBlocks)
+	testBlocks := slices.Concat(
+		testBlocks[0:testForkPointIndex+1],
+		testForkBlocks,
+	)
 	for {
 		next, err := iter.Next(false)
 		if err != nil {
