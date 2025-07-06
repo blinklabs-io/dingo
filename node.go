@@ -147,6 +147,9 @@ func (n *Node) Run() error {
 		n.eventBus,
 		n.config.promRegistry,
 		n.ledgerState,
+		mempool.MempoolConfig{
+			MempoolCapacity: n.config.MempoolCapacity(),
+		},
 	)
 	// Initialize chainsync state
 	n.chainsyncState = chainsync.NewState(

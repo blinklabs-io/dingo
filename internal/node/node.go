@@ -105,6 +105,7 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 			dingo.WithLogger(logger),
 			dingo.WithDatabasePath(cfg.DatabasePath),
 			dingo.WithBadgerCacheSize(cfg.BadgerCacheSize),
+			dingo.WithMempoolCapacity(cfg.MempoolCapacity),
 			dingo.WithNetwork(cfg.Network),
 			dingo.WithCardanoNodeConfig(nodeCfg),
 			dingo.WithListeners(listeners...),
