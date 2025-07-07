@@ -211,7 +211,10 @@ func (s *submitServiceServer) WatchMempool(
 			if err != nil {
 				return err
 			}
-			cTx := tx.Utxorpc() // *cardano.Tx
+			cTx, err := tx.Utxorpc() // *cardano.Tx
+			if err != nil {
+				return fmt.Errorf("convert transaction: %w", err)
+			}
 			resp := &submit.WatchMempoolResponse{}
 			record := &submit.TxInMempool{
 				NativeBytes: txRawBytes,
