@@ -220,14 +220,21 @@ func (c *Chain) Rollback(point ocommon.Point) error {
 	}
 	// Check headers for rollback point
 	if len(c.headers) > 0 {
-		for idx, header := range c.headers {
+		// Iterate backwards to make deletion safe
+		var header ledger.BlockHeader
+		for i := len(c.headers) - 1; i >= 0; i-- {
+			header = c.headers[i]
+			// Remove headers after rollback slot
+			if header.SlotNumber() > point.Slot {
+				c.headers = slices.Delete(c.headers, i, i+1)
+				continue
+			}
 			if header.SlotNumber() == point.Slot &&
 				string(header.Hash().Bytes()) == string(point.Hash) {
-				// Remove headers after rollback point
-				if idx < len(c.headers)-1 {
-					c.headers = slices.Delete(c.headers, idx+1, len(c.headers))
-				}
 				return nil
+			}
+			if header.SlotNumber() < point.Slot {
+				return ErrBlockNotFound
 			}
 		}
 	}
