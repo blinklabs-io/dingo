@@ -56,8 +56,12 @@ func (s *queryServiceServer) ReadParams(
 	point := s.utxorpc.config.LedgerState.Tip().Point
 
 	// Set up response parameters
+	tmpPparams, err := protoParams.Utxorpc()
+	if err != nil {
+		return nil, fmt.Errorf("convert pparams: %w", err)
+	}
 	acpc := &query.AnyChainParams_Cardano{
-		Cardano: protoParams.Utxorpc(),
+		Cardano: tmpPparams,
 	}
 	resp.LedgerTip = &query.ChainPoint{
 		Slot: point.Slot,

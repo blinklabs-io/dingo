@@ -77,8 +77,12 @@ func (s *syncServiceServer) FetchBlock(
 		if err != nil {
 			return nil, err
 		}
+		tmpBlock, err := ret.Utxorpc()
+		if err != nil {
+			return nil, fmt.Errorf("convert block: %w", err)
+		}
 		acbc := sync.AnyChainBlock_Cardano{
-			Cardano: ret.Utxorpc(),
+			Cardano: tmpBlock,
 		}
 		acb.Chain = &acbc
 		resp.Block = append(resp.Block, &acb)
@@ -141,8 +145,12 @@ func (s *syncServiceServer) DumpHistory(
 		if err != nil {
 			return nil, err
 		}
+		tmpBlock, err := ret.Utxorpc()
+		if err != nil {
+			return nil, fmt.Errorf("convert block: %w", err)
+		}
 		acbc := sync.AnyChainBlock_Cardano{
-			Cardano: ret.Utxorpc(),
+			Cardano: tmpBlock,
 		}
 		acb.Chain = &acbc
 		resp.Block = append(resp.Block, &acb)
@@ -239,9 +247,13 @@ func (s *syncServiceServer) FollowTip(
 				)
 				return err
 			}
+			tmpBlock, err := block.Utxorpc()
+			if err != nil {
+				return fmt.Errorf("convert block: %w", err)
+			}
 			var acb sync.AnyChainBlock
 			acbc := sync.AnyChainBlock_Cardano{
-				Cardano: block.Utxorpc(),
+				Cardano: tmpBlock,
 			}
 			acb.Chain = &acbc
 			resp := &sync.FollowTipResponse{

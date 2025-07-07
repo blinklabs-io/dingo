@@ -129,9 +129,13 @@ func (s *watchServiceServer) WatchTx(
 
 			// Loop through transactions
 			for _, tx := range block.Transactions() {
+				tmpTx, err := tx.Utxorpc()
+				if err != nil {
+					return fmt.Errorf("convert transaction: %w", err)
+				}
 				var act watch.AnyChainTx
 				actc := watch.AnyChainTx_Cardano{
-					Cardano: tx.Utxorpc(),
+					Cardano: tmpTx,
 				}
 				act.Chain = &actc
 				resp := &watch.WatchTxResponse{
