@@ -15,6 +15,7 @@
 package mempool
 
 import (
+	"fmt"
 	"io"
 	"log/slog"
 	"slices"
@@ -52,6 +53,10 @@ type MempoolTransaction struct {
 	LastSeen time.Time
 }
 
+type MempoolConfig struct {
+	MempoolCapacity int64
+}
+
 type Mempool struct {
 	sync.RWMutex
 	logger         *slog.Logger
@@ -60,6 +65,7 @@ type Mempool struct {
 	consumers      map[ouroboros.ConnectionId]*MempoolConsumer
 	consumersMutex sync.Mutex
 	transactions   []*MempoolTransaction
+	config         MempoolConfig
 	metrics        struct {
 		txsProcessedNum prometheus.Counter
 		txsInMempool    prometheus.Gauge
@@ -67,16 +73,26 @@ type Mempool struct {
 	}
 }
 
+type MempoolFullError struct {
+	Message string
+}
+
+func (e *MempoolFullError) Error() string {
+	return e.Message
+}
+
 func NewMempool(
 	logger *slog.Logger,
 	eventBus *event.EventBus,
 	promRegistry prometheus.Registerer,
 	ledgerState *ledger.LedgerState,
+	config MempoolConfig,
 ) *Mempool {
 	m := &Mempool{
 		eventBus:    eventBus,
 		consumers:   make(map[ouroboros.ConnectionId]*MempoolConsumer),
 		ledgerState: ledgerState,
+		config:      config,
 	}
 	if logger == nil {
 		// Create logger to throw away logs
@@ -213,6 +229,21 @@ func (m *Mempool) AddTransaction(txType uint, txBytes []byte) error {
 			"tx_hash", tx.Hash,
 		)
 		return nil
+	}
+	// Enforce mempool capacity
+	currentSize := 0
+	for _, existing := range m.transactions {
+		currentSize += len(existing.Cbor)
+	}
+	if currentSize+len(tx.Cbor) > int(m.config.MempoolCapacity) {
+		return &MempoolFullError{
+			Message: fmt.Sprintf(
+				"mempool full: current size %d + new tx %d > capacity %d bytes",
+				currentSize,
+				len(tx.Cbor),
+				m.config.MempoolCapacity,
+			),
+		}
 	}
 	// Add transaction record
 	m.transactions = append(m.transactions, &tx)

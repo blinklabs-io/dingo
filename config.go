@@ -32,6 +32,7 @@ type ListenerConfig = connmanager.ListenerConfig
 
 type Config struct {
 	badgerCacheSize    int64
+	mempoolCapacity    int64
 	cardanoNodeConfig  *cardano.CardanoNodeConfig
 	dataDir            string
 	intersectPoints    []ocommon.Point
@@ -251,4 +252,15 @@ func WithBadgerCacheSize(cacheSize int64) ConfigOptionFunc {
 	return func(c *Config) {
 		c.badgerCacheSize = cacheSize
 	}
+}
+
+// WithMempoolCapacity sets the mempool capacity (in bytes)
+func WithMempoolCapacity(capacity int64) ConfigOptionFunc {
+	return func(c *Config) {
+		c.mempoolCapacity = capacity
+	}
+}
+
+func (c *Config) MempoolCapacity() int64 {
+	return c.mempoolCapacity
 }
