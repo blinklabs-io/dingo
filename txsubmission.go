@@ -67,6 +67,9 @@ func (n *Node) txsubmissionServerInit(ctx txsubmission.CallbackContext) error {
 				txsubmissionRequestTxIdsCount,
 			)
 			if err != nil {
+				if errors.Is(err, txsubmission.ErrStopServerProcess) {
+					return
+				}
 				n.config.logger.Error(
 					fmt.Sprintf(
 						"failed to get TxIds: %s",
