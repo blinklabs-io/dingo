@@ -55,6 +55,10 @@ type MempoolTransaction struct {
 
 type MempoolConfig struct {
 	MempoolCapacity int64
+	Logger          *slog.Logger
+	EventBus        *event.EventBus
+	PromRegistry    prometheus.Registerer
+	LedgerState     *ledger.LedgerState
 }
 
 type Mempool struct {
@@ -81,30 +85,24 @@ func (e *MempoolFullError) Error() string {
 	return e.Message
 }
 
-func NewMempool(
-	logger *slog.Logger,
-	eventBus *event.EventBus,
-	promRegistry prometheus.Registerer,
-	ledgerState *ledger.LedgerState,
-	config MempoolConfig,
-) *Mempool {
+func NewMempool(config MempoolConfig) *Mempool {
 	m := &Mempool{
-		eventBus:    eventBus,
+		eventBus:    config.EventBus,
 		consumers:   make(map[ouroboros.ConnectionId]*MempoolConsumer),
-		ledgerState: ledgerState,
+		ledgerState: config.LedgerState,
 		config:      config,
 	}
-	if logger == nil {
+	if config.Logger == nil {
 		// Create logger to throw away logs
 		// We do this so we don't have to add guards around every log operation
 		m.logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
 	} else {
-		m.logger = logger
+		m.logger = config.Logger
 	}
 	// Subscribe to chain update events
 	go m.processChainEvents()
 	// Init metrics
-	promautoFactory := promauto.With(promRegistry)
+	promautoFactory := promauto.With(config.PromRegistry)
 	m.metrics.txsProcessedNum = promautoFactory.NewCounter(
 		prometheus.CounterOpts{
 			Name: "cardano_node_metrics_txsProcessedNum_int",
