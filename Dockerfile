@@ -1,4 +1,4 @@
-FROM ghcr.io/blinklabs-io/go:1.24.4-1 AS build
+FROM ghcr.io/blinklabs-io/go:1.24.5-1 AS build
 
 WORKDIR /code
 RUN go env -w GOCACHE=/go-cache
