@@ -260,7 +260,3 @@ func WithMempoolCapacity(capacity int64) ConfigOptionFunc {
 		c.mempoolCapacity = capacity
 	}
 }
-
-func (c *Config) MempoolCapacity() int64 {
-	return c.mempoolCapacity
-}

@@ -143,7 +143,7 @@ func (n *Node) Run() error {
 	}
 	// Initialize mempool
 	n.mempool = mempool.NewMempool(mempool.MempoolConfig{
-		MempoolCapacity: n.config.MempoolCapacity(),
+		MempoolCapacity: n.config.mempoolCapacity,
 		Logger:          n.config.logger,
 		EventBus:        n.eventBus,
 		PromRegistry:    n.config.promRegistry,
