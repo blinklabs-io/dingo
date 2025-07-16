@@ -148,11 +148,13 @@ func (n *Node) Run() error {
 		return fmt.Errorf("failed to start ledger: %w", err)
 	}
 	// Initialize mempool
-	n.mempool = mempool.NewMempool(
-		n.config.logger,
-		n.eventBus,
-		n.config.promRegistry,
-		n.ledgerState,
+	n.mempool = mempool.NewMempool(mempool.MempoolConfig{
+		MempoolCapacity: n.config.mempoolCapacity,
+		Logger:          n.config.logger,
+		EventBus:        n.eventBus,
+		PromRegistry:    n.config.promRegistry,
+		LedgerState:     n.ledgerState,
+	},
 	)
 	// Initialize chainsync state
 	n.chainsyncState = chainsync.NewState(

@@ -15,6 +15,7 @@
 package mempool
 
 import (
+	"fmt"
 	"io"
 	"log/slog"
 	"slices"
@@ -52,6 +53,14 @@ type MempoolTransaction struct {
 	LastSeen time.Time
 }
 
+type MempoolConfig struct {
+	MempoolCapacity int64
+	Logger          *slog.Logger
+	EventBus        *event.EventBus
+	PromRegistry    prometheus.Registerer
+	LedgerState     *ledger.LedgerState
+}
+
 type Mempool struct {
 	sync.RWMutex
 	logger         *slog.Logger
@@ -60,6 +69,7 @@ type Mempool struct {
 	consumers      map[ouroboros.ConnectionId]*MempoolConsumer
 	consumersMutex sync.Mutex
 	transactions   []*MempoolTransaction
+	config         MempoolConfig
 	metrics        struct {
 		txsProcessedNum prometheus.Counter
 		txsInMempool    prometheus.Gauge
@@ -67,28 +77,35 @@ type Mempool struct {
 	}
 }
 
-func NewMempool(
-	logger *slog.Logger,
-	eventBus *event.EventBus,
-	promRegistry prometheus.Registerer,
-	ledgerState *ledger.LedgerState,
-) *Mempool {
+type MempoolFullError struct {
+	CurrentSize int
+	TxSize      int
+	Capacity    int64
+}
+
+func (e *MempoolFullError) Error() string {
+	return fmt.Sprintf("mempool full: current size=%d bytes, tx size=%d bytes, capacity=%d bytes",
+		e.CurrentSize, e.TxSize, e.Capacity)
+}
+
+func NewMempool(config MempoolConfig) *Mempool {
 	m := &Mempool{
-		eventBus:    eventBus,
+		eventBus:    config.EventBus,
 		consumers:   make(map[ouroboros.ConnectionId]*MempoolConsumer),
-		ledgerState: ledgerState,
+		ledgerState: config.LedgerState,
+		config:      config,
 	}
-	if logger == nil {
+	if config.Logger == nil {
 		// Create logger to throw away logs
 		// We do this so we don't have to add guards around every log operation
 		m.logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
 	} else {
-		m.logger = logger
+		m.logger = config.Logger
 	}
 	// Subscribe to chain update events
 	go m.processChainEvents()
 	// Init metrics
-	promautoFactory := promauto.With(promRegistry)
+	promautoFactory := promauto.With(config.PromRegistry)
 	m.metrics.txsProcessedNum = promautoFactory.NewCounter(
 		prometheus.CounterOpts{
 			Name: "cardano_node_metrics_txsProcessedNum_int",
@@ -213,6 +230,18 @@ func (m *Mempool) AddTransaction(txType uint, txBytes []byte) error {
 			"tx_hash", tx.Hash,
 		)
 		return nil
+	}
+	// Enforce mempool capacity
+	currentSize := 0
+	for _, existing := range m.transactions {
+		currentSize += len(existing.Cbor)
+	}
+	if currentSize+len(tx.Cbor) > int(m.config.MempoolCapacity) {
+		return &MempoolFullError{
+			CurrentSize: currentSize,
+			TxSize:      len(tx.Cbor),
+			Capacity:    m.config.MempoolCapacity,
+		}
 	}
 	// Add transaction record
 	m.transactions = append(m.transactions, &tx)
