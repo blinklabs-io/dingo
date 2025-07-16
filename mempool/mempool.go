@@ -78,11 +78,14 @@ type Mempool struct {
 }
 
 type MempoolFullError struct {
-	Message string
+	CurrentSize int
+	TxSize      int
+	Capacity    int64
 }
 
 func (e *MempoolFullError) Error() string {
-	return e.Message
+	return fmt.Sprintf("mempool full: current size=%d bytes, tx size=%d bytes, capacity=%d bytes",
+		e.CurrentSize, e.TxSize, e.Capacity)
 }
 
 func NewMempool(config MempoolConfig) *Mempool {
@@ -235,12 +238,9 @@ func (m *Mempool) AddTransaction(txType uint, txBytes []byte) error {
 	}
 	if currentSize+len(tx.Cbor) > int(m.config.MempoolCapacity) {
 		return &MempoolFullError{
-			Message: fmt.Sprintf(
-				"mempool full: current size %d + new tx %d > capacity %d bytes",
-				currentSize,
-				len(tx.Cbor),
-				m.config.MempoolCapacity,
-			),
+			CurrentSize: currentSize,
+			TxSize:      len(tx.Cbor),
+			Capacity:    m.config.MempoolCapacity,
 		}
 	}
 	// Add transaction record
