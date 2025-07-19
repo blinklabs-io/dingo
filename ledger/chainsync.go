@@ -404,7 +404,7 @@ func (ls *LedgerState) processEpochRollover(
 	}
 	// Update the slot timer interval based on the new epoch's slot length
 	if ls.SlotTimer != nil {
-		ls.SlotTimer.ChangeInterval(time.Duration(ls.currentEpoch.SlotLength) * time.Millisecond)
+		ls.SlotTimer.ChangeInterval(time.Duration(int64(ls.currentEpoch.SlotLength)) * time.Millisecond)
 	}
 	ls.config.Logger.Debug(
 		"added next epoch to DB",

@@ -733,7 +733,7 @@ func (ls *LedgerState) loadEpochs(txn *database.Txn) error {
 
 	// Initialize timer with current slot length
 	if ls.SlotTimer == nil && ls.currentEpoch.SlotLength > 0 {
-		ls.SlotTimer = NewSlotTimer(time.Duration(ls.currentEpoch.SlotLength) * time.Millisecond)
+		ls.SlotTimer = NewSlotTimer(time.Duration(int64(ls.currentEpoch.SlotLength)) * time.Millisecond)
 		ls.SlotTimer.Start()
 	}
 
