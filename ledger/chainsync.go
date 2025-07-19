@@ -18,6 +18,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math"
 	"math/big"
 	"slices"
 	"time"
@@ -404,9 +405,12 @@ func (ls *LedgerState) processEpochRollover(
 	}
 	// Update the slot timer interval based on the new epoch's slot length
 	if ls.SlotTimer != nil {
-		ls.SlotTimer.ChangeInterval(
-			time.Duration(time.Millisecond.Nanoseconds() * int64(ls.currentEpoch.SlotLength)),
-		)
+		slotLength := ls.currentEpoch.SlotLength
+		if slotLength > uint(time.Duration(math.MaxInt64/time.Millisecond)) {
+			return fmt.Errorf("SlotLength %d too large; overflows time.Duration", slotLength)
+		}
+		interval := time.Duration(uint64(slotLength)) * time.Millisecond
+		ls.SlotTimer.ChangeInterval(interval)
 	}
 	ls.config.Logger.Debug(
 		"added next epoch to DB",
