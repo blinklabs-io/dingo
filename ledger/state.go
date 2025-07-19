@@ -734,10 +734,11 @@ func (ls *LedgerState) loadEpochs(txn *database.Txn) error {
 
 	// Initialize timer with current slot length
 	if ls.SlotTimer == nil && ls.currentEpoch.SlotLength > 0 {
-		if ls.currentEpoch.SlotLength > uint(time.Duration(math.MaxInt64/time.Millisecond)) {
+		maxSafe := uint(math.MaxInt64 / time.Millisecond)
+		if ls.currentEpoch.SlotLength > maxSafe {
 			return fmt.Errorf("slot length %d too large; overflows time.Duration", ls.currentEpoch.SlotLength)
 		}
-		interval := time.Duration(uint64(ls.currentEpoch.SlotLength)) * time.Millisecond
+		interval := time.Duration(int64(ls.currentEpoch.SlotLength)) * time.Millisecond
 		ls.SlotTimer = NewSlotTimer(interval)
 		ls.SlotTimer.Start()
 	}
