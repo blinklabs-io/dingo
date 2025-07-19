@@ -100,7 +100,10 @@ func (st *SlotTimer) Register(interval int, task func()) {
 
 // ChangeInterval updates the tick interval of the SlotTimer at runtime.
 func (st *SlotTimer) ChangeInterval(newInterval time.Duration) {
-	st.updateIntervalChan <- newInterval
+	select {
+	case st.updateIntervalChan <- newInterval:
+	default:
+	}
 }
 
 // Stop the timer (terminates)
