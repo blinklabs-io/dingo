@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"sync"
 	"time"
 
@@ -75,6 +76,7 @@ type LedgerState struct {
 	config                           LedgerStateConfig
 	db                               *database.Database
 	timerCleanupConsumedUtxos        *time.Timer
+	SlotTimer                        *SlotTimer
 	currentPParams                   lcommon.ProtocolParameters
 	currentEpoch                     database.Epoch
 	epochCache                       []database.Epoch
@@ -716,6 +718,14 @@ func (ls *LedgerState) loadPParams() error {
 	return nil
 }
 
+func safeMiliToDuration(ms uint) (time.Duration, error) {
+	maxSafe := uint(math.MaxInt64 / time.Millisecond)
+	if ms > maxSafe {
+		return 0, fmt.Errorf("value %d too large; overflows time.Duration", ms)
+	}
+	return time.Duration(int64(ms)) * time.Millisecond, nil
+}
+
 func (ls *LedgerState) loadEpochs(txn *database.Txn) error {
 	// Load and cache all epochs
 	epochs, err := ls.db.GetEpochs(txn)
@@ -729,6 +739,17 @@ func (ls *LedgerState) loadEpochs(txn *database.Txn) error {
 		ls.currentEpoch = epochs[len(epochs)-1]
 		ls.currentEra = eras.Eras[ls.currentEpoch.EraId]
 	}
+
+	// Initialize timer with current slot length
+	if ls.SlotTimer == nil && ls.currentEpoch.SlotLength > 0 {
+		interval, err := safeMiliToDuration(ls.currentEpoch.SlotLength)
+		if err != nil {
+			return fmt.Errorf("slot length: %w", err)
+		}
+		ls.SlotTimer = NewSlotTimer(interval)
+		ls.SlotTimer.Start()
+	}
+
 	// Update metrics
 	ls.metrics.epochNum.Set(float64(ls.currentEpoch.EpochId))
 	return nil
