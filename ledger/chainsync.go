@@ -402,6 +402,10 @@ func (ls *LedgerState) processEpochRollover(
 	if err := ls.loadEpochs(txn); err != nil {
 		return fmt.Errorf("load epochs: %w", err)
 	}
+	// Update the slot timer interval based on the new epoch's slot length
+	if ls.SlotTimer != nil {
+		ls.SlotTimer.ChangeInterval(time.Duration(ls.currentEpoch.SlotLength) * time.Millisecond)
+	}
 	ls.config.Logger.Debug(
 		"added next epoch to DB",
 		"epoch", fmt.Sprintf("%+v", ls.currentEpoch),

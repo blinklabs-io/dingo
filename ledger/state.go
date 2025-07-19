@@ -75,6 +75,7 @@ type LedgerState struct {
 	config                           LedgerStateConfig
 	db                               *database.Database
 	timerCleanupConsumedUtxos        *time.Timer
+	SlotTimer                        *SlotTimer
 	currentPParams                   lcommon.ProtocolParameters
 	currentEpoch                     database.Epoch
 	epochCache                       []database.Epoch
@@ -729,6 +730,13 @@ func (ls *LedgerState) loadEpochs(txn *database.Txn) error {
 		ls.currentEpoch = epochs[len(epochs)-1]
 		ls.currentEra = eras.Eras[ls.currentEpoch.EraId]
 	}
+
+	// Initialize timer with current slot length
+	if ls.SlotTimer == nil && ls.currentEpoch.SlotLength > 0 {
+		ls.SlotTimer = NewSlotTimer(time.Duration(ls.currentEpoch.SlotLength) * time.Millisecond)
+		ls.SlotTimer.Start()
+	}
+
 	// Update metrics
 	ls.metrics.epochNum.Set(float64(ls.currentEpoch.EpochId))
 	return nil
