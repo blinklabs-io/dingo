@@ -145,7 +145,6 @@ func (ls *LedgerState) Start() error {
 		if ms > uint(maxSafe) {
 			return fmt.Errorf("slot length %d too large; overflows time.Duration", ms)
 		}
-		// #nosec G115: safe overflow-checked uint→int64 conversion
 		interval := time.Duration(int64(ms)) * time.Millisecond
 		ls.Scheduler = NewScheduler(interval)
 		ls.Scheduler.Start()
