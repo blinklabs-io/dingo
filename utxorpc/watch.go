@@ -57,7 +57,7 @@ func (s *watchServiceServer) WatchTx(
 	var points []ocommon.Point
 	if len(intersect) > 0 {
 		for _, blockRef := range intersect {
-			blockIdx := blockRef.GetIndex()
+			blockIdx := blockRef.GetSlot()
 			blockHash := blockRef.GetHash()
 			slot := blockIdx
 			point := ocommon.NewPoint(slot, blockHash)
