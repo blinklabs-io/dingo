@@ -26,7 +26,7 @@ require (
 	golang.org/x/sys v0.34.0
 	gopkg.in/yaml.v3 v3.0.1
 	gorm.io/gorm v1.30.0
-	gorm.io/plugin/opentelemetry v0.1.15
+	gorm.io/plugin/opentelemetry v0.1.16
 )
 
 // XXX: uncomment when testing local changes to gouroboros
