@@ -139,25 +139,18 @@ func (ls *LedgerState) Start() error {
 		return fmt.Errorf("failed to create genesis block: %w", err)
 	}
 	// Initialize timer with current slot length
-	if ls.Scheduler == nil && ls.currentEpoch.SlotLength > 0 {
-		interval, err := safeMiliToDuration(ls.currentEpoch.SlotLength)
-		if err != nil {
-			return fmt.Errorf("slot length: %w", err)
+	if ls.currentEpoch.SlotLength > 0 {
+		maxSafe := uint(math.MaxInt64 / time.Millisecond)
+		if ls.currentEpoch.SlotLength > uint(maxSafe) {
+			return fmt.Errorf("slot length %d too large; overflows time.Duration", ls.currentEpoch.SlotLength)
 		}
+		interval := time.Duration(int64(ls.currentEpoch.SlotLength)) * time.Millisecond
 		ls.Scheduler = NewScheduler(interval)
 		ls.Scheduler.Start()
 	}
 	// Start goroutine to process new blocks
 	go ls.ledgerProcessBlocks()
 	return nil
-}
-
-func safeMiliToDuration(ms uint) (time.Duration, error) {
-	maxSafe := uint(math.MaxInt64 / time.Millisecond)
-	if ms > maxSafe {
-		return 0, fmt.Errorf("value %d too large; overflows time.Duration", ms)
-	}
-	return time.Duration(int64(ms)) * time.Millisecond, nil
 }
 
 func (ls *LedgerState) RecoverCommitTimestampConflict() error {
