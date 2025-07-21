@@ -23,6 +23,7 @@ import (
 	"github.com/blinklabs-io/dingo/mempool"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/ledger"
+	"github.com/blinklabs-io/gouroboros/protocol"
 	"github.com/blinklabs-io/gouroboros/protocol/txsubmission"
 )
 
@@ -67,7 +68,12 @@ func (n *Node) txsubmissionServerInit(ctx txsubmission.CallbackContext) error {
 				txsubmissionRequestTxIdsCount,
 			)
 			if err != nil {
+				// Peer requested shutdown
 				if errors.Is(err, txsubmission.ErrStopServerProcess) {
+					return
+				}
+				// Don't log on connection close
+				if errors.Is(err, protocol.ErrProtocolShuttingDown) {
 					return
 				}
 				n.config.logger.Error(
