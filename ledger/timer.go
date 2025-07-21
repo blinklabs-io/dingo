@@ -20,24 +20,23 @@ import (
 )
 
 type ScheduledTask struct {
-	interval int
-	lastRun  int
-	task     func()
+	interval          int
+	ticksSinceLastRun int
+	task              func()
 }
 
-type SlotTimer struct {
+type Scheduler struct {
 	mutex              sync.Mutex
 	interval           time.Duration
 	ticker             *time.Ticker
 	quit               chan struct{}
 	updateIntervalChan chan time.Duration
 	tasks              []*ScheduledTask
-	tickCount          int
 	startOnce          sync.Once
 }
 
-func NewSlotTimer(interval time.Duration) *SlotTimer {
-	return &SlotTimer{
+func NewScheduler(interval time.Duration) *Scheduler {
+	return &Scheduler{
 		interval:           interval,
 		quit:               make(chan struct{}),
 		updateIntervalChan: make(chan time.Duration),
@@ -46,7 +45,7 @@ func NewSlotTimer(interval time.Duration) *SlotTimer {
 }
 
 // Start the timer (run goroutine once)
-func (st *SlotTimer) Start() {
+func (st *Scheduler) Start() {
 	st.startOnce.Do(func() {
 		st.ticker = time.NewTicker(st.interval)
 		go st.run()
@@ -54,7 +53,7 @@ func (st *SlotTimer) Start() {
 }
 
 // Listens for tick events and interval updates and updating the ticker accordingly.
-func (st *SlotTimer) run() {
+func (st *Scheduler) run() {
 	for {
 		select {
 		case <-st.ticker.C:
@@ -72,34 +71,34 @@ func (st *SlotTimer) run() {
 	}
 }
 
-// Increments tick counter and executes pending tasks
-func (st *SlotTimer) tick() {
+// Increments per-task tick counters and executes tasks when due
+func (st *Scheduler) tick() {
 	st.mutex.Lock()
 	defer st.mutex.Unlock()
 
-	st.tickCount++
 	for _, task := range st.tasks {
-		if st.tickCount-task.lastRun >= task.interval {
+		task.ticksSinceLastRun++
+		if task.ticksSinceLastRun >= task.interval {
 			go task.task()
-			task.lastRun = st.tickCount
+			task.ticksSinceLastRun = 0
 		}
 	}
 }
 
-// Adds a new task to be scheduled
-func (st *SlotTimer) Register(interval int, task func()) {
+// Adds a new task to be scheduler
+func (st *Scheduler) Register(interval int, task func()) {
 	st.mutex.Lock()
 	defer st.mutex.Unlock()
 
 	st.tasks = append(st.tasks, &ScheduledTask{
-		interval: interval,
-		lastRun:  st.tickCount,
-		task:     task,
+		interval:          interval,
+		ticksSinceLastRun: 0,
+		task:              task,
 	})
 }
 
-// ChangeInterval updates the tick interval of the SlotTimer at runtime.
-func (st *SlotTimer) ChangeInterval(newInterval time.Duration) {
+// ChangeInterval updates the tick interval of the Scheduler at runtime.
+func (st *Scheduler) ChangeInterval(newInterval time.Duration) {
 	select {
 	case st.updateIntervalChan <- newInterval:
 	default:
@@ -107,7 +106,7 @@ func (st *SlotTimer) ChangeInterval(newInterval time.Duration) {
 }
 
 // Stop the timer (terminates)
-func (st *SlotTimer) Stop() {
+func (st *Scheduler) Stop() {
 	close(st.quit)
 	if st.ticker != nil {
 		st.ticker.Stop()

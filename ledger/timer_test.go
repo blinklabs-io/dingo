@@ -20,11 +20,11 @@ import (
 	"time"
 )
 
-func TestSlotTimer_RegistersAndRunsTask(t *testing.T) {
+func TestScheduler_RegistersAndRunsTask(t *testing.T) {
 	var counter int32
 
-	// Create a SlotTimer with 10ms tick interval
-	timer := NewSlotTimer(10 * time.Millisecond)
+	// Create a Scheduler with 10ms tick interval
+	timer := NewScheduler(10 * time.Millisecond)
 	timer.Start()
 	defer timer.Stop()
 
@@ -44,11 +44,11 @@ func TestSlotTimer_RegistersAndRunsTask(t *testing.T) {
 	}
 }
 
-func TestSlotTimer_ChangeInterval(t *testing.T) {
+func TestScheduler_ChangeInterval(t *testing.T) {
 	var counter int32
 
-	// Create a SlotTimer with 50ms tick interval
-	timer := NewSlotTimer(50 * time.Millisecond)
+	// Create a Scheduler with 50ms tick interval
+	timer := NewScheduler(50 * time.Millisecond)
 	timer.Start()
 	defer timer.Stop()
 

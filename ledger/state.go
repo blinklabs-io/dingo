@@ -76,7 +76,7 @@ type LedgerState struct {
 	config                           LedgerStateConfig
 	db                               *database.Database
 	timerCleanupConsumedUtxos        *time.Timer
-	SlotTimer                        *SlotTimer
+	Scheduler                        *Scheduler
 	currentPParams                   lcommon.ProtocolParameters
 	currentEpoch                     database.Epoch
 	epochCache                       []database.Epoch
@@ -138,9 +138,26 @@ func (ls *LedgerState) Start() error {
 	if err := ls.createGenesisBlock(); err != nil {
 		return fmt.Errorf("failed to create genesis block: %w", err)
 	}
+	// Initialize timer with current slot length
+	if ls.Scheduler == nil && ls.currentEpoch.SlotLength > 0 {
+		interval, err := safeMiliToDuration(ls.currentEpoch.SlotLength)
+		if err != nil {
+			return fmt.Errorf("slot length: %w", err)
+		}
+		ls.Scheduler = NewScheduler(interval)
+		ls.Scheduler.Start()
+	}
 	// Start goroutine to process new blocks
 	go ls.ledgerProcessBlocks()
 	return nil
+}
+
+func safeMiliToDuration(ms uint) (time.Duration, error) {
+	maxSafe := uint(math.MaxInt64 / time.Millisecond)
+	if ms > maxSafe {
+		return 0, fmt.Errorf("value %d too large; overflows time.Duration", ms)
+	}
+	return time.Duration(int64(ms)) * time.Millisecond, nil
 }
 
 func (ls *LedgerState) RecoverCommitTimestampConflict() error {
@@ -718,14 +735,6 @@ func (ls *LedgerState) loadPParams() error {
 	return nil
 }
 
-func safeMiliToDuration(ms uint) (time.Duration, error) {
-	maxSafe := uint(math.MaxInt64 / time.Millisecond)
-	if ms > maxSafe {
-		return 0, fmt.Errorf("value %d too large; overflows time.Duration", ms)
-	}
-	return time.Duration(int64(ms)) * time.Millisecond, nil
-}
-
 func (ls *LedgerState) loadEpochs(txn *database.Txn) error {
 	// Load and cache all epochs
 	epochs, err := ls.db.GetEpochs(txn)
@@ -738,16 +747,6 @@ func (ls *LedgerState) loadEpochs(txn *database.Txn) error {
 	if len(epochs) > 0 {
 		ls.currentEpoch = epochs[len(epochs)-1]
 		ls.currentEra = eras.Eras[ls.currentEpoch.EraId]
-	}
-
-	// Initialize timer with current slot length
-	if ls.SlotTimer == nil && ls.currentEpoch.SlotLength > 0 {
-		interval, err := safeMiliToDuration(ls.currentEpoch.SlotLength)
-		if err != nil {
-			return fmt.Errorf("slot length: %w", err)
-		}
-		ls.SlotTimer = NewSlotTimer(interval)
-		ls.SlotTimer.Start()
 	}
 
 	// Update metrics
