@@ -25,7 +25,6 @@ linters:
     - musttag
     - nilerr
     - nilnesserr
-    - noctx
     - perfsprint
     - prealloc
     - protogetter
@@ -41,6 +40,7 @@ linters:
     - zerologlint
   disable:
     - depguard
+    - noctx
   exclusions:
     generated: lax
     presets:
