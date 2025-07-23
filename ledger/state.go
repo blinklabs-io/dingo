@@ -140,12 +140,16 @@ func (ls *LedgerState) Start() error {
 	}
 	// Initialize timer with current slot length
 	if ls.currentEpoch.SlotLength > 0 {
-		maxSafe := uint(math.MaxInt64 / time.Millisecond)
-		ms := ls.currentEpoch.SlotLength
-		if ms > uint(maxSafe) {
-			return fmt.Errorf("slot length %d too large; overflows time.Duration", ms)
+		slotLength := float64(ls.currentEpoch.SlotLength)
+		if slotLength <= 0 {
+			return fmt.Errorf("SlotLength must be greater than 0, got %.3f", slotLength)
 		}
-		interval := time.Duration(int64(ms)) * time.Millisecond
+		durationNs := slotLength * float64(time.Second)
+		if durationNs > float64(math.MaxInt64) {
+			return fmt.Errorf("SlotLength %.3f too large; overflows time.Duration", slotLength)
+		}
+
+		interval := time.Duration(durationNs)
 		ls.Scheduler = NewScheduler(interval)
 		ls.Scheduler.Start()
 	}

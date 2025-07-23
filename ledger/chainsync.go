@@ -405,12 +405,15 @@ func (ls *LedgerState) processEpochRollover(
 	}
 	// Update the scheduler interval based on the new epoch's slot length
 	if ls.Scheduler != nil {
-		slotLength := ls.currentEpoch.SlotLength
-		maxSafe := uint(math.MaxInt64 / time.Millisecond)
-		if slotLength > maxSafe {
-			return fmt.Errorf("SlotLength %d too large; overflows time.Duration", slotLength)
+		slotLength := float64(ls.currentEpoch.SlotLength)
+		if slotLength <= 0 {
+			return fmt.Errorf("SlotLength must be greater than 0, got %.3f", slotLength)
 		}
-		interval := time.Duration(int64(slotLength)) * time.Millisecond
+		durationNs := slotLength * float64(time.Second)
+		if durationNs > float64(math.MaxInt64) {
+			return fmt.Errorf("SlotLength %.3f too large; overflows time.Duration", slotLength)
+		}
+		interval := time.Duration(durationNs)
 		ls.Scheduler.ChangeInterval(interval)
 	}
 	ls.config.Logger.Debug(
