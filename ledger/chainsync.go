@@ -18,6 +18,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math"
 	"math/big"
 	"slices"
 	"time"
@@ -401,6 +402,19 @@ func (ls *LedgerState) processEpochRollover(
 	// Reload epoch info
 	if err := ls.loadEpochs(txn); err != nil {
 		return fmt.Errorf("load epochs: %w", err)
+	}
+	// Update the scheduler interval based on the new epoch's slot length
+	if ls.Scheduler != nil {
+		slotLength := float64(ls.currentEpoch.SlotLength)
+		if slotLength <= 0 {
+			return fmt.Errorf("SlotLength must be greater than 0, got %.3f", slotLength)
+		}
+		durationNs := slotLength * float64(time.Second)
+		if durationNs > float64(math.MaxInt64) {
+			return fmt.Errorf("SlotLength %.3f too large; overflows time.Duration", slotLength)
+		}
+		interval := time.Duration(durationNs)
+		ls.Scheduler.ChangeInterval(interval)
 	}
 	ls.config.Logger.Debug(
 		"added next epoch to DB",

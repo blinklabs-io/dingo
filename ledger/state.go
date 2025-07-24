@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"sync"
 	"time"
 
@@ -75,6 +76,7 @@ type LedgerState struct {
 	config                           LedgerStateConfig
 	db                               *database.Database
 	timerCleanupConsumedUtxos        *time.Timer
+	Scheduler                        *Scheduler
 	currentPParams                   lcommon.ProtocolParameters
 	currentEpoch                     database.Epoch
 	epochCache                       []database.Epoch
@@ -135,6 +137,21 @@ func (ls *LedgerState) Start() error {
 	// Create genesis block
 	if err := ls.createGenesisBlock(); err != nil {
 		return fmt.Errorf("failed to create genesis block: %w", err)
+	}
+	// Initialize timer with current slot length
+	if ls.currentEpoch.SlotLength > 0 {
+		slotLength := float64(ls.currentEpoch.SlotLength)
+		if slotLength <= 0 {
+			return fmt.Errorf("SlotLength must be greater than 0, got %.3f", slotLength)
+		}
+		durationNs := slotLength * float64(time.Second)
+		if durationNs > float64(math.MaxInt64) {
+			return fmt.Errorf("SlotLength %.3f too large; overflows time.Duration", slotLength)
+		}
+
+		interval := time.Duration(durationNs)
+		ls.Scheduler = NewScheduler(interval)
+		ls.Scheduler.Start()
 	}
 	// Start goroutine to process new blocks
 	go ls.ledgerProcessBlocks()
@@ -729,6 +746,7 @@ func (ls *LedgerState) loadEpochs(txn *database.Txn) error {
 		ls.currentEpoch = epochs[len(epochs)-1]
 		ls.currentEra = eras.Eras[ls.currentEpoch.EraId]
 	}
+
 	// Update metrics
 	ls.metrics.epochNum.Set(float64(ls.currentEpoch.EpochId))
 	return nil
