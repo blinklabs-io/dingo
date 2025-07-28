@@ -60,3 +60,7 @@ badgerCacheSize: 1073741824
 # Transactions exceeding this limit will be rejected.
 # Default: 1048576 (1 MB)
 mempoolCapacity: 1048576
+
+# Enable development mode which prevents outbound connections
+# Default: false
+devMode: false
