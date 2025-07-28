@@ -82,7 +82,7 @@ var globalConfig = &Config{
 	DevMode:         false,
 }
 
-func LoadConfig(configFile string, devModeOverride *bool) (*Config, error) {
+func LoadConfig(configFile string) (*Config, error) {
 	// Load config file as YAML if provided
 	if configFile == "" {
 		// Check for config file in this path: ~/.dingo/dingo.yaml
@@ -114,11 +114,6 @@ func LoadConfig(configFile string, devModeOverride *bool) (*Config, error) {
 	err := envconfig.Process("cardano", globalConfig)
 	if err != nil {
 		return nil, fmt.Errorf("error processing environment: %+w", err)
-	}
-
-	// Apply command line override if provided
-	if devModeOverride != nil {
-		globalConfig.DevMode = *devModeOverride
 	}
 
 	_, err = LoadTopologyConfig()

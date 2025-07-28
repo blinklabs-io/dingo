@@ -42,10 +42,10 @@ type PeerGovernor struct {
 }
 
 type PeerGovernorConfig struct {
-	Logger      *slog.Logger
-	EventBus    *event.EventBus
-	ConnManager *connmanager.ConnectionManager
-	DevMode     bool
+	Logger          *slog.Logger
+	EventBus        *event.EventBus
+	ConnManager     *connmanager.ConnectionManager
+	DisableOutbound bool
 }
 
 func NewPeerGovernor(cfg PeerGovernorConfig) *PeerGovernor {
@@ -183,19 +183,19 @@ func (p *PeerGovernor) peerIndexByConnId(connId ouroboros.ConnectionId) int {
 }
 
 func (p *PeerGovernor) startOutboundConnections() {
-	p.config.Logger.Debug(
-		"starting connections",
-		"role", "client",
-	)
-
-	// Prevent making outbound connections in dev mode
-	if p.config.DevMode {
+	// Skip outbound connections if disabled
+	if p.config.DisableOutbound {
 		p.config.Logger.Info(
-			"dev mode enabled, skipping outbound connections",
+			"outbound connections disabled, skipping outbound connections",
 			"role", "client",
 		)
 		return
 	}
+
+	p.config.Logger.Debug(
+		"starting connections",
+		"role", "client",
+	)
 
 	for _, tmpPeer := range p.peers {
 		go p.createOutboundConnection(tmpPeer)

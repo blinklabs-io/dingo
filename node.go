@@ -168,10 +168,10 @@ func (n *Node) Run() error {
 	// Configure peer governor
 	n.peerGov = peergov.NewPeerGovernor(
 		peergov.PeerGovernorConfig{
-			Logger:      n.config.logger,
-			EventBus:    n.eventBus,
-			ConnManager: n.connManager,
-			DevMode:     n.config.devMode,
+			Logger:          n.config.logger,
+			EventBus:        n.eventBus,
+			ConnManager:     n.connManager,
+			DisableOutbound: n.config.devMode,
 		},
 	)
 	n.eventBus.SubscribeFunc(

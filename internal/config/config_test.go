@@ -76,7 +76,7 @@ tlsKeyFilePath: "key1.pem"
 		DevMode:         false,
 	}
 
-	actual, err := LoadConfig(tmpFile, nil)
+	actual, err := LoadConfig(tmpFile)
 	if err != nil {
 		t.Fatalf("failed to load config: %v", err)
 	}
@@ -93,7 +93,7 @@ func TestLoad_WithoutConfigFile_UsesDefaults(t *testing.T) {
 	resetGlobalConfig()
 
 	// Without Config file
-	cfg, err := LoadConfig("", nil)
+	cfg, err := LoadConfig("")
 	if err != nil {
 		t.Fatalf("expected no error, got: %v", err)
 	}
@@ -128,38 +128,27 @@ func TestLoad_WithoutConfigFile_UsesDefaults(t *testing.T) {
 	}
 }
 
-func TestLoad_WithDevModeOverride(t *testing.T) {
+func TestLoad_WithDevModeConfig(t *testing.T) {
 	resetGlobalConfig()
 
-	// Test with dev mode override enabled
-	devModeTrue := true
-	cfg, err := LoadConfig("", &devModeTrue)
+	// Test with dev mode in config file
+	yamlContent := `
+devMode: true
+network: "preview"
+`
+	tmpFile := "test-dev-mode.yaml"
+	err := os.WriteFile(tmpFile, []byte(yamlContent), 0644)
+	if err != nil {
+		t.Fatalf("failed to write config file: %v", err)
+	}
+	defer os.Remove(tmpFile)
+
+	cfg, err := LoadConfig(tmpFile)
 	if err != nil {
 		t.Fatalf("expected no error, got: %v", err)
 	}
 
 	if !cfg.DevMode {
 		t.Errorf("expected DevMode to be true, got: %v", cfg.DevMode)
-	}
-
-	// Test with dev mode override disabled
-	devModeFalse := false
-	cfg, err = LoadConfig("", &devModeFalse)
-	if err != nil {
-		t.Fatalf("expected no error, got: %v", err)
-	}
-
-	if cfg.DevMode {
-		t.Errorf("expected DevMode to be false, got: %v", cfg.DevMode)
-	}
-
-	// Test with no override (should use default)
-	cfg, err = LoadConfig("", nil)
-	if err != nil {
-		t.Fatalf("expected no error, got: %v", err)
-	}
-
-	if cfg.DevMode {
-		t.Errorf("expected DevMode to be false (default), got: %v", cfg.DevMode)
 	}
 }
