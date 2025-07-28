@@ -2,6 +2,7 @@ package config
 
 import (
 	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 )
@@ -49,7 +50,9 @@ tlsCertFilePath: "cert1.pem"
 tlsKeyFilePath: "key1.pem"
 `
 
-	tmpFile := "test-dingo.yaml"
+	tmpDir := t.TempDir()
+	tmpFile := filepath.Join(tmpDir, "test-dingo.yaml")
+
 	err := os.WriteFile(tmpFile, []byte(yamlContent), 0644)
 	if err != nil {
 		t.Fatalf("failed to write config file: %v", err)
@@ -136,12 +139,14 @@ func TestLoad_WithDevModeConfig(t *testing.T) {
 devMode: true
 network: "preview"
 `
-	tmpFile := "test-dev-mode.yaml"
+
+	tmpDir := t.TempDir()
+	tmpFile := filepath.Join(tmpDir, "test-dev-mode.yaml")
+
 	err := os.WriteFile(tmpFile, []byte(yamlContent), 0644)
 	if err != nil {
 		t.Fatalf("failed to write config file: %v", err)
 	}
-	defer os.Remove(tmpFile)
 
 	cfg, err := LoadConfig(tmpFile)
 	if err != nil {
