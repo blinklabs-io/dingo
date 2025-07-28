@@ -101,7 +101,11 @@ func main() {
 		BoolVarP(&globalFlags.devMode, "dev-mode", "", false, "enable development mode (prevents outbound connections)")
 
 	rootCmd.PersistentPreRunE = func(cmd *cobra.Command, args []string) error {
-		cfg, err := config.LoadConfig(configFile, &globalFlags.devMode)
+		var devModeOverride *bool
+		if cmd.Flags().Changed("dev-mode") {
+			devModeOverride = &globalFlags.devMode
+		}
+		cfg, err := config.LoadConfig(configFile, devModeOverride)
 		if err != nil {
 			return fmt.Errorf("failed to load config: %w", err)
 		}
