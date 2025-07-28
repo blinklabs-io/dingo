@@ -171,6 +171,7 @@ func (n *Node) Run() error {
 			Logger:      n.config.logger,
 			EventBus:    n.eventBus,
 			ConnManager: n.connManager,
+			DevMode:     n.config.devMode,
 		},
 	)
 	n.eventBus.SubscribeFunc(

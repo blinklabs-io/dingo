@@ -59,6 +59,7 @@ type Config struct {
 	RelayPort       uint   `                   yaml:"relayPort"       envconfig:"port"`
 	UtxorpcPort     uint   `split_words:"true" yaml:"utxorpcPort"`
 	IntersectTip    bool   `split_words:"true" yaml:"intersectTip"`
+	DevMode         bool   `split_words:"true" yaml:"devMode"`
 }
 
 var globalConfig = &Config{
@@ -78,9 +79,10 @@ var globalConfig = &Config{
 	Topology:        "",
 	TlsCertFilePath: "",
 	TlsKeyFilePath:  "",
+	DevMode:         false,
 }
 
-func LoadConfig(configFile string) (*Config, error) {
+func LoadConfig(configFile string, devModeOverride *bool) (*Config, error) {
 	// Load config file as YAML if provided
 	if configFile == "" {
 		// Check for config file in this path: ~/.dingo/dingo.yaml
@@ -113,6 +115,12 @@ func LoadConfig(configFile string) (*Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("error processing environment: %+w", err)
 	}
+
+	// Apply command line override if provided
+	if devModeOverride != nil {
+		globalConfig.DevMode = *devModeOverride
+	}
+
 	_, err = LoadTopologyConfig()
 	if err != nil {
 		return nil, fmt.Errorf("error loading topology: %+w", err)

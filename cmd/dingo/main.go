@@ -39,6 +39,7 @@ var (
 	globalFlags = struct {
 		version bool
 		debug   bool
+		devMode bool
 	}{}
 	configFile string
 )
@@ -96,9 +97,11 @@ func main() {
 		BoolVarP(&globalFlags.version, "version", "", false, "show version and exit")
 	rootCmd.PersistentFlags().
 		StringVar(&configFile, "config", "", "path to config file")
+	rootCmd.PersistentFlags().
+		BoolVarP(&globalFlags.devMode, "dev-mode", "", false, "enable development mode (prevents outbound connections)")
 
 	rootCmd.PersistentPreRunE = func(cmd *cobra.Command, args []string) error {
-		cfg, err := config.LoadConfig(configFile)
+		cfg, err := config.LoadConfig(configFile, &globalFlags.devMode)
 		if err != nil {
 			return fmt.Errorf("failed to load config: %w", err)
 		}

@@ -50,6 +50,7 @@ type Config struct {
 	topologyConfig     *topology.TopologyConfig
 	tracing            bool
 	tracingStdout      bool
+	devMode            bool
 }
 
 // configPopulateNetworkMagic uses the named network (if specified) to determine the network magic value (if not specified)
@@ -258,5 +259,12 @@ func WithBadgerCacheSize(cacheSize int64) ConfigOptionFunc {
 func WithMempoolCapacity(capacity int64) ConfigOptionFunc {
 	return func(c *Config) {
 		c.mempoolCapacity = capacity
+	}
+}
+
+// WithDevMode enables development mode which prevents outbound connections.
+func WithDevMode(devMode bool) ConfigOptionFunc {
+	return func(c *Config) {
+		c.devMode = devMode
 	}
 }
