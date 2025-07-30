@@ -61,6 +61,7 @@ type LedgerStateConfig struct {
 	CardanoNodeConfig  *cardano.CardanoNodeConfig
 	PromRegistry       prometheus.Registerer
 	ValidateHistorical bool
+	DevMode            bool
 	// Callback(s)
 	BlockfetchRequestRangeFunc BlockfetchRequestRangeFunc
 }
@@ -152,6 +153,30 @@ func (ls *LedgerState) Start() error {
 		interval := time.Duration(durationNs)
 		ls.Scheduler = NewScheduler(interval)
 		ls.Scheduler.Start()
+
+		// Schedule block forging if dev mode is enabled
+		if ls.config.DevMode {
+			// Calculate block interval from ActiveSlotsCoeff
+			shelleyGenesis := ls.config.CardanoNodeConfig.ShelleyGenesis()
+			if shelleyGenesis != nil {
+				// Calculate block interval (1 / ActiveSlotsCoeff)
+				activeSlotsCoeff := shelleyGenesis.ActiveSlotsCoeff
+				if activeSlotsCoeff.Rat != nil && activeSlotsCoeff.Rat.Num().Int64() > 0 {
+					activeSlotsCoeffFloat := float64(activeSlotsCoeff.Rat.Num().Int64()) / float64(activeSlotsCoeff.Rat.Denom().Int64())
+					blockInterval := int(1.0 / activeSlotsCoeffFloat)
+
+					// Scheduled forgeBlock to run at the calculated block interval
+					ls.Scheduler.Register(blockInterval, ls.forgeBlock)
+
+					ls.config.Logger.Info(
+						"dev mode block forging enabled",
+						"component", "ledger",
+						"block_interval", blockInterval,
+						"active_slots_coeff", activeSlotsCoeffFloat,
+					)
+				}
+			}
+		}
 	}
 	// Start goroutine to process new blocks
 	go ls.ledgerProcessBlocks()
@@ -916,4 +941,67 @@ func (ls *LedgerState) ValidateTx(
 		}
 	}
 	return nil
+}
+
+// forgeBlock creates an empty block and logs its CBOR representation
+func (ls *LedgerState) forgeBlock() {
+	// Get current chain tip
+	currentTip := ls.Tip()
+
+	// Calculate next slot and block number
+	nextSlot := currentTip.Point.Slot + 1
+	nextBlockNumber := currentTip.BlockNumber + 1
+
+	// Create a proper Shelley empty block with minimum required parameters
+	emptyBlock := struct {
+		cbor.StructAsArray
+		Header struct {
+			cbor.StructAsArray
+			PrevHash    []byte `cbor:"0,keyasint"`
+			BlockNumber uint64 `cbor:"1,keyasint"`
+			SlotNumber  uint64 `cbor:"2,keyasint"`
+		} `cbor:"0,keyasint"`
+		Body struct {
+			cbor.StructAsArray
+			Transactions []interface{} `cbor:"0,keyasint"`
+		} `cbor:"1,keyasint"`
+	}{
+		Header: struct {
+			cbor.StructAsArray
+			PrevHash    []byte `cbor:"0,keyasint"`
+			BlockNumber uint64 `cbor:"1,keyasint"`
+			SlotNumber  uint64 `cbor:"2,keyasint"`
+		}{
+			PrevHash:    currentTip.Point.Hash,
+			BlockNumber: nextBlockNumber,
+			SlotNumber:  nextSlot,
+		},
+		Body: struct {
+			cbor.StructAsArray
+			Transactions []interface{} `cbor:"0,keyasint"`
+		}{
+			Transactions: []interface{}{}, // Empty transactions list
+		},
+	}
+
+	// Marshal the block to CBOR
+	blockCbor, err := cbor.Encode(emptyBlock)
+	if err != nil {
+		ls.config.Logger.Error(
+			"failed to marshal forged block to CBOR",
+			"component", "ledger",
+			"error", err,
+		)
+		return
+	}
+
+	// Log the generated block CBOR (DEBUG level)
+	ls.config.Logger.Debug(
+		"forged empty block",
+		"component", "ledger",
+		"slot", nextSlot,
+		"block_number", nextBlockNumber,
+		"prev_hash", hex.EncodeToString(currentTip.Point.Hash),
+		"block_cbor", hex.EncodeToString(blockCbor),
+	)
 }
