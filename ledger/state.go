@@ -32,7 +32,9 @@ import (
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
+	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/prometheus/client_golang/prometheus"
@@ -61,7 +63,7 @@ type LedgerStateConfig struct {
 	CardanoNodeConfig  *cardano.CardanoNodeConfig
 	PromRegistry       prometheus.Registerer
 	ValidateHistorical bool
-	DevMode            bool
+	ForgeBlocks        bool
 	// Callback(s)
 	BlockfetchRequestRangeFunc BlockfetchRequestRangeFunc
 }
@@ -155,16 +157,14 @@ func (ls *LedgerState) Start() error {
 		ls.Scheduler.Start()
 
 		// Schedule block forging if dev mode is enabled
-		if ls.config.DevMode {
+		if ls.config.ForgeBlocks {
 			// Calculate block interval from ActiveSlotsCoeff
 			shelleyGenesis := ls.config.CardanoNodeConfig.ShelleyGenesis()
 			if shelleyGenesis != nil {
 				// Calculate block interval (1 / ActiveSlotsCoeff)
 				activeSlotsCoeff := shelleyGenesis.ActiveSlotsCoeff
 				if activeSlotsCoeff.Rat != nil && activeSlotsCoeff.Rat.Num().Int64() > 0 {
-					activeSlotsCoeffFloat := float64(activeSlotsCoeff.Rat.Num().Int64()) / float64(activeSlotsCoeff.Rat.Denom().Int64())
-					blockInterval := int(1.0 / activeSlotsCoeffFloat)
-
+					blockInterval := int((1 * activeSlotsCoeff.Rat.Denom().Int64()) / activeSlotsCoeff.Rat.Num().Int64())
 					// Scheduled forgeBlock to run at the calculated block interval
 					ls.Scheduler.Register(blockInterval, ls.forgeBlock)
 
@@ -172,7 +172,7 @@ func (ls *LedgerState) Start() error {
 						"dev mode block forging enabled",
 						"component", "ledger",
 						"block_interval", blockInterval,
-						"active_slots_coeff", activeSlotsCoeffFloat,
+						"active_slots_coeff", activeSlotsCoeff.Rat.String(),
 					)
 				}
 			}
@@ -943,7 +943,7 @@ func (ls *LedgerState) ValidateTx(
 	return nil
 }
 
-// forgeBlock creates an empty block and logs its CBOR representation
+// forgeBlock creates an empty conway block and logs its CBOR representation
 func (ls *LedgerState) forgeBlock() {
 	// Get current chain tip
 	currentTip := ls.Tip()
@@ -952,43 +952,45 @@ func (ls *LedgerState) forgeBlock() {
 	nextSlot := currentTip.Point.Slot + 1
 	nextBlockNumber := currentTip.BlockNumber + 1
 
-	// Create a proper Shelley empty block with minimum required parameters
-	emptyBlock := struct {
-		cbor.StructAsArray
-		Header struct {
-			cbor.StructAsArray
-			PrevHash    []byte `cbor:"0,keyasint"`
-			BlockNumber uint64 `cbor:"1,keyasint"`
-			SlotNumber  uint64 `cbor:"2,keyasint"`
-		} `cbor:"0,keyasint"`
-		Body struct {
-			cbor.StructAsArray
-			Transactions []interface{} `cbor:"0,keyasint"`
-		} `cbor:"1,keyasint"`
-	}{
-		Header: struct {
-			cbor.StructAsArray
-			PrevHash    []byte `cbor:"0,keyasint"`
-			BlockNumber uint64 `cbor:"1,keyasint"`
-			SlotNumber  uint64 `cbor:"2,keyasint"`
-		}{
-			PrevHash:    currentTip.Point.Hash,
-			BlockNumber: nextBlockNumber,
-			SlotNumber:  nextSlot,
-		},
-		Body: struct {
-			cbor.StructAsArray
-			Transactions []interface{} `cbor:"0,keyasint"`
-		}{
-			Transactions: []interface{}{}, // Empty transactions list
+	// Create empty Babbage block header body
+	headerBody := babbage.BabbageBlockHeaderBody{
+		BlockNumber:   nextBlockNumber,
+		Slot:          nextSlot,
+		PrevHash:      lcommon.NewBlake2b256(currentTip.Point.Hash),
+		IssuerVkey:    lcommon.IssuerVkey{},
+		VrfKey:        []byte{},
+		VrfResult:     lcommon.VrfResult{},
+		BlockBodySize: 0,
+		BlockBodyHash: lcommon.Blake2b256{},
+		OpCert:        babbage.BabbageOpCert{},
+		ProtoVersion: babbage.BabbageProtoVersion{
+			Major: 2,
+			Minor: 0,
 		},
 	}
 
-	// Marshal the block to CBOR
-	blockCbor, err := cbor.Encode(emptyBlock)
+	// Create Conway block header
+	conwayHeader := &conway.ConwayBlockHeader{
+		BabbageBlockHeader: babbage.BabbageBlockHeader{
+			Body:      headerBody,
+			Signature: []byte{},
+		},
+	}
+
+	// Create a conway block
+	conwayBlock := &conway.ConwayBlock{
+		BlockHeader:            conwayHeader,
+		TransactionBodies:      []conway.ConwayTransactionBody{},
+		TransactionWitnessSets: []conway.ConwayTransactionWitnessSet{},
+		TransactionMetadataSet: map[uint]*cbor.LazyValue{},
+		InvalidTransactions:    []uint{},
+	}
+
+	// Marshal the conway block to CBOR
+	blockCbor, err := cbor.Encode(conwayBlock)
 	if err != nil {
 		ls.config.Logger.Error(
-			"failed to marshal forged block to CBOR",
+			"failed to marshal forged conway block to CBOR",
 			"component", "ledger",
 			"error", err,
 		)
@@ -997,7 +999,7 @@ func (ls *LedgerState) forgeBlock() {
 
 	// Log the generated block CBOR (DEBUG level)
 	ls.config.Logger.Debug(
-		"forged empty block",
+		"forged empty conway block",
 		"component", "ledger",
 		"slot", nextSlot,
 		"block_number", nextBlockNumber,
