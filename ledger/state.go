@@ -172,7 +172,7 @@ func (ls *LedgerState) Start() error {
 						"dev mode block forging enabled",
 						"component", "ledger",
 						"block_interval", blockInterval,
-						"active_slots_coeff", activeSlotsCoeff.Rat.String(),
+						"active_slots_coeff", activeSlotsCoeff.String(),
 					)
 				}
 			}
