@@ -946,10 +946,18 @@ func (ls *LedgerState) ValidateTx(
 // forgeBlock creates an empty conway block and logs its CBOR representation
 func (ls *LedgerState) forgeBlock() {
 	// Get current chain tip
-	currentTip := ls.Tip()
+	currentTip := ls.chain.Tip()
 
 	// Calculate next slot and block number
-	nextSlot := currentTip.Point.Slot + 1
+	nextSlot, err := ls.TimeToSlot(time.Now())
+	if err != nil {
+		ls.config.Logger.Error(
+			"failed to calculate slot from current time",
+			"component", "ledger",
+			"error", err,
+		)
+		return
+	}
 	nextBlockNumber := currentTip.BlockNumber + 1
 
 	// Create empty Babbage block header body
