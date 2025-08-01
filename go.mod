@@ -10,6 +10,7 @@ require (
 	connectrpc.com/grpcreflect v1.3.0
 	github.com/blinklabs-io/gouroboros v0.131.0
 	github.com/blinklabs-io/ouroboros-mock v0.3.8
+	github.com/blinklabs-io/plutigo v0.0.5-0.20250812225239-11f08fcf77f3
 	github.com/dgraph-io/badger/v4 v4.8.0
 	github.com/glebarez/sqlite v1.11.0
 	github.com/kelseyhightower/envconfig v1.4.0
@@ -30,7 +31,7 @@ require (
 )
 
 // XXX: uncomment when testing local changes to gouroboros
-// replace github.com/blinklabs-io/gouroboros => ../gouroboros
+replace github.com/blinklabs-io/gouroboros => ../gouroboros
 
 require (
 	filippo.io/edwards25519 v1.1.0 // indirect
@@ -38,7 +39,6 @@ require (
 	github.com/ClickHouse/clickhouse-go/v2 v2.30.0 // indirect
 	github.com/andybalholm/brotli v1.1.1 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
-	github.com/blinklabs-io/plutigo v0.0.4 // indirect
 	github.com/btcsuite/btcd/btcutil v1.1.6 // indirect
 	github.com/cenkalti/backoff/v5 v5.0.2 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect

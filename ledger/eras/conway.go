@@ -18,6 +18,8 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
+	"slices"
 
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -25,6 +27,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	"github.com/blinklabs-io/plutigo/scriptcontext"
 )
 
 var ConwayEraDesc = EraDesc{
@@ -38,6 +41,7 @@ var ConwayEraDesc = EraDesc{
 	CalculateEtaVFunc:       CalculateEtaVConway,
 	CertDepositFunc:         CertDepositConway,
 	ValidateTxFunc:          ValidateTxConway,
+	EvaluateScriptFunc:      EvaluateScriptConway,
 }
 
 func DecodePParamsConway(data []byte) (lcommon.ProtocolParameters, error) {
@@ -157,12 +161,113 @@ func ValidateTxConway(
 	ls lcommon.LedgerState,
 	pp lcommon.ProtocolParameters,
 ) error {
+	//fee, exUnits, redeemers, err := EvaluateTxConway(tx, slot, ls, pp)
+	_, _, _, err := EvaluateTxConway(tx, slot, ls, pp)
+	if err != nil {
+		return err
+	}
+	// TODO: check exUnits against budget for each redeemer
+	return nil
+}
+
+func EvaluateTxConway(
+	tx lcommon.Transaction,
+	slot uint64,
+	ls lcommon.LedgerState,
+	pp lcommon.ProtocolParameters,
+) (uint64, lcommon.ExUnits, lcommon.TransactionWitnessRedeemers, error) {
+	// Phase 1 validation
 	errs := []error{}
+	var err error
 	for _, validationFunc := range conway.UtxoValidationRules {
-		errs = append(
-			errs,
-			validationFunc(tx, slot, ls, pp),
+		err = validationFunc(tx, slot, ls, pp)
+		if err != nil {
+			errs = append(
+				errs,
+				err,
+			)
+		}
+	}
+	if len(errs) > 0 {
+		return 0, lcommon.ExUnits{}, nil, errors.Join(errs...)
+	}
+	// Phase 2 validation
+	// Resolve inputs
+	var resolvedInputs []lcommon.Utxo
+	for _, tmpInput := range tx.Inputs() {
+		tmpUtxo, err := ls.UtxoById(tmpInput)
+		if err != nil {
+			return 0, lcommon.ExUnits{}, nil, err
+		}
+		resolvedInputs = append(
+			resolvedInputs,
+			tmpUtxo,
 		)
 	}
-	return errors.Join(errs...)
+	// Resolve reference inputs
+	var refInputs []lcommon.Utxo
+	for _, tmpRefInput := range tx.ReferenceInputs() {
+		tmpUtxo, err := ls.UtxoById(tmpRefInput)
+		if err != nil {
+			return 0, lcommon.ExUnits{}, nil, err
+		}
+		refInputs = append(
+			refInputs,
+			tmpUtxo,
+		)
+	}
+	txInfo := scriptcontext.NewTxInfoV3FromTransaction(tx, resolvedInputs)
+	for _, redeemerPair := range txInfo.Redeemers {
+		purpose := redeemerPair.Key
+		fmt.Printf("purpose = %#v\n", purpose)
+		redeemer := redeemerPair.Value
+		sc := scriptcontext.NewScriptContextV3(txInfo, redeemer, purpose)
+		fmt.Printf("sc = %#v\n", sc)
+		//var script lcommon.Script
+		for _, refInput := range refInputs {
+			tmpScript := refInput.Output.ScriptRef()
+			if tmpScript != nil {
+				switch s := tmpScript.(type) {
+				case *lcommon.PlutusV3Script:
+					fmt.Printf("TX ID: %s\n", tx.Hash().String())
+					fmt.Printf("purpose = %#v, redeemer = %#v\n", purpose, redeemer)
+					fmt.Printf("tmpScript(%T) = %x\n", s, *s)
+					scriptBytes := slices.Concat([]byte{3}, []byte(*s))
+					scriptHash := lcommon.Blake2b224Hash(scriptBytes)
+					fmt.Printf("scriptHash = %s\n", scriptHash.String())
+					// NOTE: using io.EOF to identify this particular failure upstream
+					return 0, lcommon.ExUnits{}, nil, io.EOF
+				}
+			}
+		}
+		// TODO: find script for redeemer
+		// TODO: evaluate script
+		// TODO: build new redeemer with script consumed ExUnits
+	}
+	// TODO
+	return 0, lcommon.ExUnits{}, nil, nil
+}
+
+func EvaluateScriptConway(
+	script lcommon.Script,
+	tx lcommon.Transaction,
+	budget lcommon.ExUnits,
+) (lcommon.ExUnits, error) {
+	if script == nil {
+		return lcommon.ExUnits{}, errors.New("nil script")
+	}
+	var exUnits lcommon.ExUnits
+	switch script.(type) {
+	case lcommon.PlutusV1Script:
+		return exUnits, errors.New("PlutusV1 execution is not yet supported")
+	case lcommon.PlutusV2Script:
+		return exUnits, errors.New("PlutusV2 execution is not yet supported")
+	case lcommon.PlutusV3Script:
+		// TODO: create script context
+		// TODO: initialize VM
+		// TODO: evaluate script
+	default:
+		return exUnits, fmt.Errorf("unknown script type %T", script)
+	}
+	return exUnits, nil
 }

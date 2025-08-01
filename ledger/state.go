@@ -756,7 +756,10 @@ func (ls *LedgerState) ledgerProcessBlock(
 							String() +
 							" failed validation: " + err.Error(),
 					)
-					// return fmt.Errorf("TX validation failure: %w", err)
+					// TODO: remove this
+					if errors.Is(err, io.EOF) {
+						return nil, fmt.Errorf("TX validation failure: %w", err)
+					}
 				}
 			}
 		}
