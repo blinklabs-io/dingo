@@ -1002,6 +1002,36 @@ func (ls *LedgerState) ValidateTx(
 	return nil
 }
 
+// EvaluateTx evaluates the scripts in the provided transaction and returns the calculated
+// fee, per-redeemer ExUnits, and total ExUnits
+func (ls *LedgerState) EvaluateTx(
+	tx lcommon.Transaction,
+) (uint64, lcommon.ExUnits, map[lcommon.RedeemerKey]lcommon.ExUnits, error) {
+	var fee uint64
+	var totalExUnits lcommon.ExUnits
+	var redeemerExUnits map[lcommon.RedeemerKey]lcommon.ExUnits
+	if ls.currentEra.EvaluateTxFunc != nil {
+		txn := ls.db.Transaction(false)
+		err := txn.Do(func(txn *database.Txn) error {
+			lv := &LedgerView{
+				txn: txn,
+				ls:  ls,
+			}
+			var err error
+			fee, totalExUnits, redeemerExUnits, err = ls.currentEra.EvaluateTxFunc(
+				tx,
+				lv,
+				ls.currentPParams,
+			)
+			return err
+		})
+		if err != nil {
+			return 0, lcommon.ExUnits{}, nil, fmt.Errorf("TX %s failed evaluation: %w", tx.Hash(), err)
+		}
+	}
+	return fee, totalExUnits, redeemerExUnits, nil
+}
+
 // Sets the mempool for accessing transactions
 func (ls *LedgerState) SetMempool(mempool MempoolProvider) {
 	ls.mempool = mempool
@@ -1112,7 +1142,7 @@ func (ls *LedgerState) forgeBlock() {
 			}
 
 			// Pull ExUnits from redeemers in the witness set
-			var txMemory, txSteps uint64
+			var txMemory, txSteps int64
 			for _, redeemer := range fullTx.WitnessSet.Redeemers().Iter() {
 				txMemory += redeemer.ExUnits.Memory
 				txSteps += redeemer.ExUnits.Steps
