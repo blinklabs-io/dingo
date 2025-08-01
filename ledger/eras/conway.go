@@ -23,6 +23,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
+	"github.com/blinklabs-io/gouroboros/ledger/common"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 )
@@ -165,4 +166,32 @@ func ValidateTxConway(
 		)
 	}
 	return errors.Join(errs...)
+}
+
+func ExecScriptConway(
+	script []byte,
+	tx lcommon.Transaction,
+	budget common.ExUnits,
+) (common.ExUnits, error) {
+	if len(script) == 0 {
+		return errors.New("empty script")
+	}
+	scriptVer := script[0]
+	switch scriptVer {
+	case 0:
+		// PlutusV1
+		return errors.New("PlutusV1 execution is not yet supported")
+	case 1:
+		// PlutusV2
+		return errors.New("PlutusV2 execution is not yet supported")
+	case 2:
+		// PlutusV3
+		// TODO: create script context
+		// TODO: initialize VM
+		// TODO: evaluate script
+	default:
+		return errors.New("unknown script version %d", scriptVer)
+	}
+	// TODO
+	return nil
 }
