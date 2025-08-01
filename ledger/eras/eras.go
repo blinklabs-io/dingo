@@ -17,6 +17,7 @@ package eras
 import (
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/gouroboros/ledger"
+	"github.com/blinklabs-io/gouroboros/ledger/common"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
 
@@ -31,6 +32,7 @@ type EraDesc struct {
 	CalculateEtaVFunc       func(*cardano.CardanoNodeConfig, []byte, ledger.Block) ([]byte, error)
 	CertDepositFunc         func(lcommon.Certificate, lcommon.ProtocolParameters) (uint64, error)
 	ValidateTxFunc          func(lcommon.Transaction, uint64, lcommon.LedgerState, lcommon.ProtocolParameters) error
+	EvaluateScriptFunc      func(lcommon.Script, lcommon.Transaction, common.ExUnits) (common.ExUnits, error)
 }
 
 var Eras = []EraDesc{

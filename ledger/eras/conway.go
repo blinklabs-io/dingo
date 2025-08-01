@@ -18,13 +18,19 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
+	"slices"
+	"strings"
 
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
+	"github.com/blinklabs-io/gouroboros/ledger/common"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/common/script"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	"github.com/blinklabs-io/plutigo/data"
 )
 
 var ConwayEraDesc = EraDesc{
@@ -38,6 +44,7 @@ var ConwayEraDesc = EraDesc{
 	CalculateEtaVFunc:       CalculateEtaVConway,
 	CertDepositFunc:         CertDepositConway,
 	ValidateTxFunc:          ValidateTxConway,
+	EvaluateScriptFunc:      EvaluateScriptConway,
 }
 
 func DecodePParamsConway(data []byte) (lcommon.ProtocolParameters, error) {
@@ -157,12 +164,145 @@ func ValidateTxConway(
 	ls lcommon.LedgerState,
 	pp lcommon.ProtocolParameters,
 ) error {
+	//fee, exUnits, redeemers, err := EvaluateTxConway(tx, slot, ls, pp)
+	_, _, _, err := EvaluateTxConway(tx, slot, ls, pp)
+	if err != nil {
+		return err
+	}
+	// TODO: check exUnits against budget for each redeemer
+	return nil
+}
+
+func EvaluateTxConway(
+	tx lcommon.Transaction,
+	slot uint64,
+	ls lcommon.LedgerState,
+	pp lcommon.ProtocolParameters,
+) (uint64, lcommon.ExUnits, lcommon.TransactionWitnessRedeemers, error) {
+	// Phase 1 validation
 	errs := []error{}
+	var err error
 	for _, validationFunc := range conway.UtxoValidationRules {
-		errs = append(
-			errs,
-			validationFunc(tx, slot, ls, pp),
+		err = validationFunc(tx, slot, ls, pp)
+		if err != nil {
+			errs = append(
+				errs,
+				err,
+			)
+		}
+	}
+	if len(errs) > 0 {
+		return 0, lcommon.ExUnits{}, nil, errors.Join(errs...)
+	}
+	// Phase 2 validation
+	// Resolve inputs
+	var resolvedInputs []lcommon.Utxo
+	for _, tmpInput := range tx.Inputs() {
+		tmpUtxo, err := ls.UtxoById(tmpInput)
+		if err != nil {
+			return 0, lcommon.ExUnits{}, nil, err
+		}
+		resolvedInputs = append(
+			resolvedInputs,
+			tmpUtxo,
 		)
 	}
-	return errors.Join(errs...)
+	// Resolve reference inputs
+	var resolvedRefInputs []lcommon.Utxo
+	for _, tmpRefInput := range tx.ReferenceInputs() {
+		tmpUtxo, err := ls.UtxoById(tmpRefInput)
+		if err != nil {
+			return 0, lcommon.ExUnits{}, nil, err
+		}
+		resolvedRefInputs = append(
+			resolvedRefInputs,
+			tmpUtxo,
+		)
+	}
+	txInfo := script.NewTxInfoV3FromTransaction(tx, slices.Concat(resolvedInputs, resolvedRefInputs))
+	for _, redeemerPair := range txInfo.Redeemers {
+		purpose := redeemerPair.Key
+		if purpose == nil {
+			// Skip unsupported redeemer tags for now
+			continue
+		}
+		redeemer := redeemerPair.Value
+		sc := script.NewScriptContextV3(txInfo, redeemer, purpose)
+		for _, refInput := range resolvedRefInputs {
+			tmpScript := refInput.Output.ScriptRef()
+			if tmpScript != nil {
+				switch s := tmpScript.(type) {
+				case *lcommon.PlutusV3Script:
+					usedBudget, err := s.Evaluate(sc.ToPlutusData(), common.ExUnits{})
+					/*
+						if err != nil {
+							return 0, lcommon.ExUnits{}, nil, err
+						}
+					*/
+					fmt.Printf("err = %v\n", err)
+					fmt.Printf("usedBudget = %#v\n", usedBudget)
+					if err != nil && !strings.Contains(err.Error(), "unimplemented") {
+						fmt.Printf("TX ID: %s\n", tx.Hash().String())
+						fmt.Printf("purpose = %#v, redeemer = %#v\n", purpose, redeemer)
+						scriptHash := s.Hash()
+						fmt.Printf("scriptHash = %s\n", scriptHash.String())
+						fmt.Printf("tx = %x\n", tx.Cbor())
+						var tmpInputs []lcommon.TransactionInput
+						var tmpOutputs []lcommon.TransactionOutput
+						for _, input := range slices.Concat(resolvedInputs, resolvedRefInputs) {
+							tmpInputs = append(tmpInputs, input.Id)
+							tmpOutputs = append(tmpOutputs, input.Output)
+						}
+						tmpInputsCbor, err := cbor.Encode(tmpInputs)
+						if err != nil {
+							return 0, lcommon.ExUnits{}, nil, err
+						}
+						fmt.Printf("tmpInputs = %x\n", tmpInputsCbor)
+						tmpOutputsCbor, err := cbor.Encode(tmpOutputs)
+						if err != nil {
+							return 0, lcommon.ExUnits{}, nil, err
+						}
+						fmt.Printf("tmpOutputs = %x\n", tmpOutputsCbor)
+						fmt.Printf("sc = %#v\n", sc)
+						scCbor, err := data.Encode(sc.ToPlutusData())
+						if err != nil {
+							return 0, lcommon.ExUnits{}, nil, err
+						}
+						fmt.Printf("scCbor = %x\n", scCbor)
+						// NOTE: using io.EOF to identify this particular failure upstream
+						return 0, lcommon.ExUnits{}, nil, io.EOF
+					}
+				}
+			}
+		}
+		// TODO: find script for redeemer
+		// TODO: evaluate script
+		// TODO: build new redeemer with script consumed ExUnits
+	}
+	// TODO
+	return 0, lcommon.ExUnits{}, nil, nil
+}
+
+func EvaluateScriptConway(
+	script lcommon.Script,
+	tx lcommon.Transaction,
+	budget lcommon.ExUnits,
+) (lcommon.ExUnits, error) {
+	if script == nil {
+		return lcommon.ExUnits{}, errors.New("nil script")
+	}
+	var exUnits lcommon.ExUnits
+	switch script.(type) {
+	case lcommon.PlutusV1Script:
+		return exUnits, errors.New("PlutusV1 execution is not yet supported")
+	case lcommon.PlutusV2Script:
+		return exUnits, errors.New("PlutusV2 execution is not yet supported")
+	case lcommon.PlutusV3Script:
+		// TODO: create script context
+		// TODO: initialize VM
+		// TODO: evaluate script
+	default:
+		return exUnits, fmt.Errorf("unknown script type %T", script)
+	}
+	return exUnits, nil
 }
