@@ -26,6 +26,7 @@ go.work
 
 # Local data directory
 /.dingo
+/.devnet
 
 # node_modules for npm publishing
 node_modules/
