@@ -123,6 +123,7 @@ func (n *Node) Run() error {
 			Logger:                     n.config.logger,
 			CardanoNodeConfig:          n.config.cardanoNodeConfig,
 			PromRegistry:               n.config.promRegistry,
+			ForgeBlocks:                n.config.devMode,
 			BlockfetchRequestRangeFunc: n.blockfetchClientRequestRange,
 		},
 	)
