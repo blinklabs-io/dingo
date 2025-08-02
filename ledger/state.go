@@ -1066,7 +1066,7 @@ func (ls *LedgerState) forgeBlock() {
 						// Check MaxBlockSize limit and added afe conversion to prevent integer overflow
 						var totalBlockSize uint
 						if blockSize >= 0 && txSize >= 0 {
-							// Check if addition would overflow by comparing with max int
+							// Check for overflow by comparing with max int
 							maxInt := 1<<31 - 1
 							if blockSize <= maxInt && txSize <= maxInt && blockSize+txSize <= maxInt {
 								totalBlockSize = uint(blockSize + txSize)
