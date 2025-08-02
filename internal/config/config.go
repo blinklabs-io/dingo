@@ -130,6 +130,9 @@ func GetConfig() *Config {
 var globalTopologyConfig = &topology.TopologyConfig{}
 
 func LoadTopologyConfig() (*topology.TopologyConfig, error) {
+	if globalConfig.DevMode {
+		return globalTopologyConfig, nil
+	}
 	if globalConfig.Topology == "" {
 		// Use default bootstrap peers for specified network
 		network, ok := ouroboros.NetworkByName(globalConfig.Network)

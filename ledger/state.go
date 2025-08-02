@@ -20,8 +20,8 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"math"
 	"reflect"
+	"math/big"
 	"sync"
 	"time"
 
@@ -143,43 +143,12 @@ func (ls *LedgerState) Start() error {
 	if err := ls.createGenesisBlock(); err != nil {
 		return fmt.Errorf("failed to create genesis block: %w", err)
 	}
-	// Initialize timer with current slot length
-	if ls.currentEpoch.SlotLength > 0 {
-		slotLength := float64(ls.currentEpoch.SlotLength)
-		if slotLength <= 0 {
-			return fmt.Errorf("SlotLength must be greater than 0, got %.3f", slotLength)
-		}
-		durationNs := slotLength * float64(time.Second)
-		if durationNs > float64(math.MaxInt64) {
-			return fmt.Errorf("SlotLength %.3f too large; overflows time.Duration", slotLength)
-		}
-
-		interval := time.Duration(durationNs)
-		ls.Scheduler = NewScheduler(interval)
-		ls.Scheduler.Start()
-
-		// Schedule block forging if dev mode is enabled
-		if ls.config.ForgeBlocks {
-			// Calculate block interval from ActiveSlotsCoeff
-			shelleyGenesis := ls.config.CardanoNodeConfig.ShelleyGenesis()
-			if shelleyGenesis != nil {
-				// Calculate block interval (1 / ActiveSlotsCoeff)
-				activeSlotsCoeff := shelleyGenesis.ActiveSlotsCoeff
-				if activeSlotsCoeff.Rat != nil && activeSlotsCoeff.Rat.Num().Int64() > 0 {
-					blockInterval := int((1 * activeSlotsCoeff.Rat.Denom().Int64()) / activeSlotsCoeff.Rat.Num().Int64())
-					// Scheduled forgeBlock to run at the calculated block interval
-					ls.Scheduler.Register(blockInterval, ls.forgeBlock)
-
-					ls.config.Logger.Info(
-						"dev mode block forging enabled",
-						"component", "ledger",
-						"block_interval", blockInterval,
-						"active_slots_coeff", activeSlotsCoeff.String(),
-					)
-				}
-			}
-		}
+	// Initialize scheduler
+	if err := ls.initScheduler(); err != nil {
+		return fmt.Errorf("initialize scheduler: %w", err)
 	}
+	// Schedule block forging
+	ls.initForge()
 	// Start goroutine to process new blocks
 	go ls.ledgerProcessBlocks()
 	return nil
@@ -212,6 +181,56 @@ func (ls *LedgerState) Chain() *chain.Chain {
 
 func (ls *LedgerState) Close() error {
 	return ls.db.Close()
+}
+
+func (ls *LedgerState) initScheduler() error {
+	// Initialize timer with current slot length
+	slotLength := ls.currentEpoch.SlotLength
+	if slotLength == 0 {
+		shelleyGenesis := ls.config.CardanoNodeConfig.ShelleyGenesis()
+		if shelleyGenesis == nil {
+			return errors.New("could not get genesis config")
+		}
+		slotLength = uint(
+			new(big.Int).Div(
+				new(big.Int).Mul(
+					big.NewInt(1000),
+					shelleyGenesis.SlotLength.Num(),
+				),
+				shelleyGenesis.SlotLength.Denom(),
+			).Uint64(),
+		)
+	}
+	// nolint:gosec
+	// Slot length is small enough to not overflow int64
+	interval := time.Duration(slotLength) * time.Millisecond
+	ls.Scheduler = NewScheduler(interval)
+	ls.Scheduler.Start()
+	return nil
+}
+
+func (ls *LedgerState) initForge() {
+	// Schedule block forging if dev mode is enabled
+	if ls.config.ForgeBlocks {
+		// Calculate block interval from ActiveSlotsCoeff
+		shelleyGenesis := ls.config.CardanoNodeConfig.ShelleyGenesis()
+		if shelleyGenesis != nil {
+			// Calculate block interval (1 / ActiveSlotsCoeff)
+			activeSlotsCoeff := shelleyGenesis.ActiveSlotsCoeff
+			if activeSlotsCoeff.Rat != nil && activeSlotsCoeff.Rat.Num().Int64() > 0 {
+				blockInterval := int((1 * activeSlotsCoeff.Rat.Denom().Int64()) / activeSlotsCoeff.Rat.Num().Int64())
+				// Scheduled forgeBlock to run at the calculated block interval
+				ls.Scheduler.Register(blockInterval, ls.forgeBlock)
+
+				ls.config.Logger.Info(
+					"dev mode block forging enabled",
+					"component", "ledger",
+					"block_interval", blockInterval,
+					"active_slots_coeff", activeSlotsCoeff.String(),
+				)
+			}
+		}
+	}
 }
 
 func (ls *LedgerState) scheduleCleanupConsumedUtxos() {

@@ -76,6 +76,9 @@ func (p *PeerGovernor) Start() error {
 func (p *PeerGovernor) LoadTopologyConfig(
 	topologyConfig *topology.TopologyConfig,
 ) {
+	if p.config.DisableOutbound {
+		return
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	// Remove peers originally sourced from the topology
