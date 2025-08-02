@@ -773,6 +773,9 @@ func (ls *LedgerState) loadPParams() error {
 	if err != nil {
 		return err
 	}
+	if pparams == nil {
+		// TODO: load pparams from genesis
+	}
 	ls.currentPParams = pparams
 	return nil
 }
@@ -784,6 +787,22 @@ func (ls *LedgerState) loadEpochs(txn *database.Txn) error {
 		return err
 	}
 	ls.epochCache = epochs
+	// Populate initial epoch, if needed
+	if len(epochs) == 0 {
+		// TODO
+		// Check for era change
+		if nextEpochEraId != ls.currentEra.Id {
+			// Transition through every era between the current and the target era
+			for nextEraId := ls.currentEra.Id + 1; nextEraId <= nextEpochEraId; nextEraId++ {
+				if err := ls.transitionToEra(txn, nextEraId, ls.currentEpoch.EpochId, ls.currentEpoch.StartSlot+uint64(ls.currentEpoch.LengthInSlots)); err != nil {
+					return err
+				}
+			}
+		}
+		if err := ls.processEpochRollover(txn); err != nil {
+			return err
+		}
+	}
 	// Set current epoch and era
 	ls.currentEra = eras.Eras[0]
 	if len(epochs) > 0 {
