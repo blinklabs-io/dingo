@@ -997,11 +997,23 @@ func (ls *LedgerState) forgeBlock() {
 		return
 	}
 
-	// Get transactions from mempool if available
-	var transactionBodies []conway.ConwayTransactionBody
-	var transactionWitnessSets []conway.ConwayTransactionWitnessSet
-	var blockSize int
-	var totalExUnits lcommon.ExUnits
+	var (
+		transactionBodies      []conway.ConwayTransactionBody
+		transactionWitnessSets []conway.ConwayTransactionWitnessSet
+		blockSize              uint64
+		totalExUnits           lcommon.ExUnits
+		maxTxSize              uint64 = uint64(pparams.(*conway.ConwayProtocolParameters).MaxTxSize)
+		maxBlockSize           uint64 = uint64(pparams.(*conway.ConwayProtocolParameters).MaxBlockBodySize)
+		maxExUnits                    = pparams.(*conway.ConwayProtocolParameters).MaxBlockExUnits
+	)
+
+	ls.config.Logger.Debug(
+		"protocol parameter limits",
+		"component", "ledger",
+		"max_tx_size", maxTxSize,
+		"max_block_size", maxBlockSize,
+		"max_ex_units", maxExUnits,
+	)
 
 	if ls.mempool != nil {
 		// Access mempool transactions
@@ -1019,41 +1031,30 @@ func (ls *LedgerState) forgeBlock() {
 						"tx_count", len(mempoolTxs),
 					)
 
-					// Get protocol parameter limits
-					maxTxSize := pparams.(*conway.ConwayProtocolParameters).MaxTxSize
-					maxBlockSize := pparams.(*conway.ConwayProtocolParameters).MaxBlockBodySize
-					maxExUnits := pparams.(*conway.ConwayProtocolParameters).MaxBlockExUnits
-
-					ls.config.Logger.Debug(
-						"protocol parameter limits",
-						"component", "ledger",
-						"max_tx_size", maxTxSize,
-						"max_block_size", maxBlockSize,
-						"max_ex_units", maxExUnits,
-					)
-
 					// Iterate through transactions and add them until we hit limits
 					for _, mempoolTx := range mempoolTxs {
-						// Marshal each transaction to get its size
-						txCbor, err := cbor.Encode(mempoolTx)
-						if err != nil {
+						// Use raw CBOR from the mempool transaction
+						txVal := reflect.ValueOf(mempoolTx)
+						cborVal := txVal.FieldByName("Cbor")
+						if !cborVal.IsValid() || cborVal.Kind() != reflect.Slice {
 							ls.config.Logger.Debug(
-								"failed to marshal transaction, skipping",
+								"transaction missing Cbor field, skipping",
 								"component", "ledger",
-								"error", err,
 							)
 							continue
 						}
-						txSize := len(txCbor)
-						// Check MaxTxSize limit with safe conversion
-						var txSizeUint uint
-						if txSize >= 0 {
-							txSizeUint = uint(txSize)
-						} else {
-							// If txSize is negative, use max value
-							txSizeUint = ^uint(0)
+						txCbor, ok := cborVal.Interface().([]byte)
+						if !ok {
+							ls.config.Logger.Debug(
+								"Cbor field not []byte, skipping",
+								"component", "ledger",
+							)
+							continue
 						}
-						if txSizeUint > maxTxSize {
+						txSize := uint64(len(txCbor))
+
+						// Check MaxTxSize limit
+						if txSize > maxTxSize {
 							ls.config.Logger.Debug(
 								"skipping transaction - exceeds MaxTxSize",
 								"component", "ledger",
@@ -1063,23 +1064,8 @@ func (ls *LedgerState) forgeBlock() {
 							continue
 						}
 
-						// Check MaxBlockSize limit and added afe conversion to prevent integer overflow
-						var totalBlockSize uint
-						if blockSize >= 0 && txSize >= 0 {
-							// Check for overflow by comparing with max int
-							maxInt := 1<<31 - 1
-							if blockSize <= maxInt && txSize <= maxInt && blockSize+txSize <= maxInt {
-								// Safe conversion
-								totalBlockSize = uint(uint64(blockSize) + uint64(txSize))
-							} else {
-								// use max value in case of overflow
-								totalBlockSize = ^uint(0)
-							}
-						} else {
-							// use max value in case of negative
-							totalBlockSize = ^uint(0)
-						}
-						if totalBlockSize > maxBlockSize {
+						// Check MaxBlockSize limit
+						if blockSize+txSize > maxBlockSize {
 							ls.config.Logger.Debug(
 								"block size limit reached",
 								"component", "ledger",
@@ -1089,20 +1075,30 @@ func (ls *LedgerState) forgeBlock() {
 							)
 							break
 						}
-						// Safe conversion to prevent integer overflow
-						var estimatedMemory, estimatedSteps uint64
-						if txSize >= 0 && txSize <= int(^uint(0)>>1) {
-							// Safe conversion
-							txSizeUint64 := uint64(txSize)
-							estimatedMemory = txSizeUint64 * 2
-							estimatedSteps = txSizeUint64 * 10
-						} else {
-							estimatedMemory = 0
-							estimatedSteps = 0
+
+						// Decode the transaction CBOR into full Conway transaction
+						fullTx, err := conway.NewConwayTransactionFromCbor(txCbor)
+						if err != nil {
+							ls.config.Logger.Debug(
+								"failed to decode full transaction, skipping",
+								"component", "ledger",
+								"error", err,
+							)
+							continue
 						}
+
+						// Pull ExUnits from redeemers in the witness set
+						var txMemory, txSteps uint64
+						fullTx.WitnessSet.Redeemers().Iter()(
+							func(_ lcommon.RedeemerKey, redeemer lcommon.RedeemerValue) bool {
+								txMemory += redeemer.ExUnits.Memory
+								txSteps += redeemer.ExUnits.Steps
+								return true
+							},
+						)
 						estimatedTxExUnits := lcommon.ExUnits{
-							Memory: estimatedMemory,
-							Steps:  estimatedSteps,
+							Memory: txMemory,
+							Steps:  txSteps,
 						}
 
 						// Check MaxExUnits limit
@@ -1119,24 +1115,6 @@ func (ls *LedgerState) forgeBlock() {
 								"max_steps", maxExUnits.Steps,
 							)
 							break
-						}
-
-						// Create Conway transaction structures from mempool transaction
-						var fullTx conway.ConwayTransaction
-
-						// Decode the transaction CBOR into full Conway transaction
-						if _, err := cbor.Decode(txCbor, &fullTx); err != nil {
-							ls.config.Logger.Debug(
-								"failed to decode full transaction, using empty structure",
-								"component", "ledger",
-								"error", err,
-							)
-							// If decoding fails
-							fullTx = conway.ConwayTransaction{
-								Body:       conway.ConwayTransactionBody{},
-								WitnessSet: conway.ConwayTransactionWitnessSet{},
-								TxIsValid:  true,
-							}
 						}
 
 						// Add transaction to our lists for later block creation
@@ -1163,22 +1141,13 @@ func (ls *LedgerState) forgeBlock() {
 
 	// Create Babbage block header body
 	headerBody := babbage.BabbageBlockHeaderBody{
-		BlockNumber: nextBlockNumber,
-		Slot:        nextSlot,
-		PrevHash:    lcommon.NewBlake2b256(currentTip.Point.Hash),
-		IssuerVkey:  lcommon.IssuerVkey{},
-		VrfKey:      []byte{},
-		VrfResult:   lcommon.VrfResult{},
-		BlockBodySize: func() uint64 {
-			if blockSize < 0 {
-				return 0
-			}
-			// Safe conversion
-			if blockSize <= int(^uint(0)>>1) {
-				return uint64(blockSize)
-			}
-			return ^uint64(0)
-		}(),
+		BlockNumber:   nextBlockNumber,
+		Slot:          nextSlot,
+		PrevHash:      lcommon.NewBlake2b256(currentTip.Point.Hash),
+		IssuerVkey:    lcommon.IssuerVkey{},
+		VrfKey:        []byte{},
+		VrfResult:     lcommon.VrfResult{},
+		BlockBodySize: blockSize,
 		BlockBodyHash: lcommon.Blake2b256{},
 		OpCert:        babbage.BabbageOpCert{},
 		ProtoVersion: babbage.BabbageProtoVersion{
@@ -1229,10 +1198,7 @@ func (ls *LedgerState) forgeBlock() {
 	ledgerBlock := ledger.Block(conwayBlock)
 
 	// Add the block to the primary chain
-	txn := ls.db.Transaction(true)
-	err = txn.Do(func(txn *database.Txn) error {
-		return ls.chain.AddBlock(ledgerBlock, txn)
-	})
+	err = ls.chain.AddBlock(ledgerBlock, nil)
 	if err != nil {
 		ls.config.Logger.Error(
 			"failed to add forged block to primary chain",
