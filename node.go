@@ -157,6 +157,8 @@ func (n *Node) Run() error {
 		LedgerState:     n.ledgerState,
 	},
 	)
+	// Set mempool in ledger state for block forging
+	n.ledgerState.SetMempool(n.mempool)
 	// Initialize chainsync state
 	n.chainsyncState = chainsync.NewState(
 		n.eventBus,
