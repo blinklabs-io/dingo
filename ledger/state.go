@@ -1002,9 +1002,9 @@ func (ls *LedgerState) forgeBlock() {
 		transactionWitnessSets []conway.ConwayTransactionWitnessSet
 		blockSize              uint64
 		totalExUnits           lcommon.ExUnits
-		maxTxSize              uint64 = uint64(pparams.(*conway.ConwayProtocolParameters).MaxTxSize)
-		maxBlockSize           uint64 = uint64(pparams.(*conway.ConwayProtocolParameters).MaxBlockBodySize)
-		maxExUnits                    = pparams.(*conway.ConwayProtocolParameters).MaxBlockExUnits
+		maxTxSize              = uint64(pparams.(*conway.ConwayProtocolParameters).MaxTxSize)
+		maxBlockSize           = uint64(pparams.(*conway.ConwayProtocolParameters).MaxBlockBodySize)
+		maxExUnits             = pparams.(*conway.ConwayProtocolParameters).MaxBlockExUnits
 	)
 
 	ls.config.Logger.Debug(
