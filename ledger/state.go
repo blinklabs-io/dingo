@@ -1069,7 +1069,8 @@ func (ls *LedgerState) forgeBlock() {
 							// Check for overflow by comparing with max int
 							maxInt := 1<<31 - 1
 							if blockSize <= maxInt && txSize <= maxInt && blockSize+txSize <= maxInt {
-								totalBlockSize = uint(blockSize + txSize)
+								// Safe conversion
+								totalBlockSize = uint(uint64(blockSize) + uint64(txSize))
 							} else {
 								// use max value in case of overflow
 								totalBlockSize = ^uint(0)
@@ -1091,8 +1092,10 @@ func (ls *LedgerState) forgeBlock() {
 						// Safe conversion to prevent integer overflow
 						var estimatedMemory, estimatedSteps uint64
 						if txSize >= 0 && txSize <= int(^uint(0)>>1) {
-							estimatedMemory = uint64(uint(txSize) * 2)
-							estimatedSteps = uint64(uint(txSize) * 10)
+							// Safe conversion
+							txSizeUint64 := uint64(txSize)
+							estimatedMemory = txSizeUint64 * 2
+							estimatedSteps = txSizeUint64 * 10
 						} else {
 							estimatedMemory = 0
 							estimatedSteps = 0
@@ -1170,9 +1173,9 @@ func (ls *LedgerState) forgeBlock() {
 			if blockSize < 0 {
 				return 0
 			}
-			// Safe conversion to overflow
+			// Safe conversion
 			if blockSize <= int(^uint(0)>>1) {
-				return uint64(uint(blockSize))
+				return uint64(blockSize)
 			}
 			return ^uint64(0)
 		}(),
