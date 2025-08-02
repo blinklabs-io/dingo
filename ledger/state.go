@@ -1087,7 +1087,7 @@ func (ls *LedgerState) forgeBlock() {
 							}
 						}
 
-						// Add transaction to block
+						// Add transaction to our lists for later block creation
 						transactionBodies = append(transactionBodies, fullTx.Body)
 						transactionWitnessSets = append(transactionWitnessSets, fullTx.WitnessSet)
 						blockSize += txSize
@@ -1095,7 +1095,7 @@ func (ls *LedgerState) forgeBlock() {
 						totalExUnits.Steps += estimatedTxExUnits.Steps
 
 						ls.config.Logger.Debug(
-							"added transaction to conway block",
+							"added transaction to block candidate lists",
 							"component", "ledger",
 							"tx_size", txSize,
 							"block_size", blockSize,
