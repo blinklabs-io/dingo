@@ -42,3 +42,17 @@ var Eras = []EraDesc{
 	BabbageEraDesc,
 	ConwayEraDesc,
 }
+
+var ProtocolMajorVersionToEra = map[uint]EraDesc{
+	0:  ByronEraDesc,
+	1:  ByronEraDesc,
+	2:  ShelleyEraDesc,
+	3:  AllegraEraDesc,
+	4:  MaryEraDesc,
+	5:  AlonzoEraDesc,
+	6:  AlonzoEraDesc,
+	7:  BabbageEraDesc,
+	8:  BabbageEraDesc,
+	9:  ConwayEraDesc,
+	10: ConwayEraDesc,
+}

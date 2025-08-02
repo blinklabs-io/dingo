@@ -784,15 +784,31 @@ func (ls *LedgerState) loadEpochs(txn *database.Txn) error {
 		return err
 	}
 	ls.epochCache = epochs
-	// Set current epoch and era
-	ls.currentEra = eras.Eras[0]
 	if len(epochs) > 0 {
+		// Set current epoch and era
 		ls.currentEpoch = epochs[len(epochs)-1]
 		ls.currentEra = eras.Eras[ls.currentEpoch.EraId]
+		// Update metrics
+		ls.metrics.epochNum.Set(float64(ls.currentEpoch.EpochId))
+		return nil
 	}
-
-	// Update metrics
-	ls.metrics.epochNum.Set(float64(ls.currentEpoch.EpochId))
+	// Populate initial epoch
+	shelleyGenesis := ls.config.CardanoNodeConfig.ShelleyGenesis()
+	if shelleyGenesis == nil {
+		return errors.New("failed to load Shelley genesis")
+	}
+	startProtoVersion := shelleyGenesis.ProtocolParameters.ProtocolVersion.Major
+	startEra := eras.ProtocolMajorVersionToEra[startProtoVersion]
+	// Transition through every era between the current and the target era
+	for nextEraId := ls.currentEra.Id + 1; nextEraId <= startEra.Id; nextEraId++ {
+		if err := ls.transitionToEra(txn, nextEraId, ls.currentEpoch.EpochId, ls.currentEpoch.StartSlot+uint64(ls.currentEpoch.LengthInSlots)); err != nil {
+			return err
+		}
+	}
+	// Generate initial epoch
+	if err := ls.processEpochRollover(txn); err != nil {
+		return err
+	}
 	return nil
 }
 

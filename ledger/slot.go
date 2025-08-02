@@ -74,23 +74,6 @@ func (ls *LedgerState) TimeToSlot(t time.Time) (uint64, error) {
 		return 0, errors.New("could not get genesis config")
 	}
 	epochStartTime := shelleyGenesis.SystemStart
-	// Special case for chain genesis
-	if len(ls.epochCache) == 0 {
-		sinceStart := time.Since(shelleyGenesis.SystemStart) / time.Millisecond
-		slotLength := uint(
-			new(big.Int).Div(
-				new(big.Int).Mul(
-					big.NewInt(1000),
-					shelleyGenesis.SlotLength.Num(),
-				),
-				shelleyGenesis.SlotLength.Denom(),
-			).Uint64(),
-		)
-		// nolint:gosec
-		// Slot length is small enough to not overflow int64
-		timeSlot := uint64(sinceStart / time.Duration(slotLength))
-		return timeSlot, nil
-	}
 	var timeSlot uint64
 	foundTime := false
 	for _, epoch := range ls.epochCache {
@@ -122,6 +105,24 @@ func (ls *LedgerState) TimeToSlot(t time.Time) (uint64, error) {
 		timeSlot += uint64(epoch.LengthInSlots)
 	}
 	if !foundTime {
+		// Special case for current time
+		// This is mostly useful at chain genesis
+		if time.Since(t) < (5 * time.Second) {
+			sinceStart := time.Since(shelleyGenesis.SystemStart) / time.Millisecond
+			slotLength := uint(
+				new(big.Int).Div(
+					new(big.Int).Mul(
+						big.NewInt(1000),
+						shelleyGenesis.SlotLength.Num(),
+					),
+					shelleyGenesis.SlotLength.Denom(),
+				).Uint64(),
+			)
+			// nolint:gosec
+			// Slot length is small enough to not overflow int64
+			timeSlot := uint64(sinceStart / time.Duration(slotLength))
+			return timeSlot, nil
+		}
 		return timeSlot, errors.New("time not found in known epochs")
 	}
 	return timeSlot, nil
