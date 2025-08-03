@@ -53,7 +53,7 @@ func commonRun() *slog.Logger {
 	addSource := false
 	if globalFlags.debug {
 		logLevel = slog.LevelDebug
-		// addSource = true
+		addSource = true
 	}
 	logger := slog.New(
 		slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
