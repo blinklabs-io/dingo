@@ -29,6 +29,7 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/ledger/eras"
+	"github.com/blinklabs-io/dingo/mempool"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
@@ -72,6 +73,10 @@ type LedgerStateConfig struct {
 // a range of blocks
 type BlockfetchRequestRangeFunc func(ouroboros.ConnectionId, ocommon.Point, ocommon.Point) error
 
+// In ledger/state.go or a shared package
+type MempoolProvider interface {
+	Transactions() []mempool.MempoolTransaction
+}
 type LedgerState struct {
 	sync.RWMutex
 	chainsyncMutex                   sync.Mutex
@@ -94,6 +99,7 @@ type LedgerState struct {
 	chainsyncBlockfetchMutex         sync.Mutex
 	chainsyncBlockfetchWaiting       bool
 	chain                            *chain.Chain
+	mempool                          MempoolProvider
 }
 
 func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
@@ -978,7 +984,13 @@ func (ls *LedgerState) ValidateTx(
 	return nil
 }
 
-// forgeBlock creates an empty conway block and logs its CBOR representation
+// Sets the mempool for accessing transactions
+func (ls *LedgerState) SetMempool(mempool MempoolProvider) {
+	ls.mempool = mempool
+}
+
+// forgeBlock creates a conway block with transactions from mempool
+// Also adds it to the primary chain
 func (ls *LedgerState) forgeBlock() {
 	// Get current chain tip
 	currentTip := ls.chain.Tip()
@@ -995,7 +1007,133 @@ func (ls *LedgerState) forgeBlock() {
 	}
 	nextBlockNumber := currentTip.BlockNumber + 1
 
-	// Create empty Babbage block header body
+	// Get current protocol parameters for limits
+	pparams := ls.GetCurrentPParams()
+	if pparams == nil {
+		ls.config.Logger.Error(
+			"failed to get protocol parameters",
+			"component", "ledger",
+		)
+		return
+	}
+
+	var (
+		transactionBodies      []conway.ConwayTransactionBody
+		transactionWitnessSets []conway.ConwayTransactionWitnessSet
+		blockSize              uint64
+		totalExUnits           lcommon.ExUnits
+		maxTxSize              = uint64(pparams.(*conway.ConwayProtocolParameters).MaxTxSize)
+		maxBlockSize           = uint64(pparams.(*conway.ConwayProtocolParameters).MaxBlockBodySize)
+		maxExUnits             = pparams.(*conway.ConwayProtocolParameters).MaxBlockExUnits
+	)
+
+	ls.config.Logger.Debug(
+		"protocol parameter limits",
+		"component", "ledger",
+		"max_tx_size", maxTxSize,
+		"max_block_size", maxBlockSize,
+		"max_ex_units", maxExUnits,
+	)
+
+	var mempoolTxs []mempool.MempoolTransaction
+	if ls.mempool != nil {
+		mempoolTxs = ls.mempool.Transactions()
+		ls.config.Logger.Debug(
+			"found transactions in mempool",
+			"component", "ledger",
+			"tx_count", len(mempoolTxs),
+		)
+
+		// Iterate through transactions and add them until we hit limits
+		for _, mempoolTx := range mempoolTxs {
+			// Use raw CBOR from the mempool transaction
+			txCbor := mempoolTx.Cbor
+			txSize := uint64(len(txCbor))
+
+			// Check MaxTxSize limit
+			if txSize > maxTxSize {
+				ls.config.Logger.Debug(
+					"skipping transaction - exceeds MaxTxSize",
+					"component", "ledger",
+					"tx_size", txSize,
+					"max_tx_size", maxTxSize,
+				)
+				continue
+			}
+
+			// Check MaxBlockSize limit
+			if blockSize+txSize > maxBlockSize {
+				ls.config.Logger.Debug(
+					"block size limit reached",
+					"component", "ledger",
+					"current_size", blockSize,
+					"tx_size", txSize,
+					"max_block_size", maxBlockSize,
+				)
+				break
+			}
+
+			// Decode the transaction CBOR into full Conway transaction
+			fullTx, err := conway.NewConwayTransactionFromCbor(txCbor)
+			if err != nil {
+				ls.config.Logger.Debug(
+					"failed to decode full transaction, skipping",
+					"component", "ledger",
+					"error", err,
+				)
+				continue
+			}
+
+			// Pull ExUnits from redeemers in the witness set
+			var txMemory, txSteps uint64
+			fullTx.WitnessSet.Redeemers().Iter()(
+				func(_ lcommon.RedeemerKey, redeemer lcommon.RedeemerValue) bool {
+					txMemory += redeemer.ExUnits.Memory
+					txSteps += redeemer.ExUnits.Steps
+					return true
+				},
+			)
+			estimatedTxExUnits := lcommon.ExUnits{
+				Memory: txMemory,
+				Steps:  txSteps,
+			}
+
+			// Check MaxExUnits limit
+			if totalExUnits.Memory+estimatedTxExUnits.Memory > maxExUnits.Memory ||
+				totalExUnits.Steps+estimatedTxExUnits.Steps > maxExUnits.Steps {
+				ls.config.Logger.Debug(
+					"ex units limit reached",
+					"component", "ledger",
+					"current_memory", totalExUnits.Memory,
+					"current_steps", totalExUnits.Steps,
+					"tx_memory", estimatedTxExUnits.Memory,
+					"tx_steps", estimatedTxExUnits.Steps,
+					"max_memory", maxExUnits.Memory,
+					"max_steps", maxExUnits.Steps,
+				)
+				break
+			}
+
+			// Add transaction to our lists for later block creation
+			transactionBodies = append(transactionBodies, fullTx.Body)
+			transactionWitnessSets = append(transactionWitnessSets, fullTx.WitnessSet)
+			blockSize += txSize
+			totalExUnits.Memory += estimatedTxExUnits.Memory
+			totalExUnits.Steps += estimatedTxExUnits.Steps
+
+			ls.config.Logger.Debug(
+				"added transaction to block candidate lists",
+				"component", "ledger",
+				"tx_size", txSize,
+				"block_size", blockSize,
+				"tx_count", len(transactionBodies),
+				"total_memory", totalExUnits.Memory,
+				"total_steps", totalExUnits.Steps,
+			)
+		}
+	}
+
+	// Create Babbage block header body
 	headerBody := babbage.BabbageBlockHeaderBody{
 		BlockNumber:   nextBlockNumber,
 		Slot:          nextSlot,
@@ -1003,11 +1141,11 @@ func (ls *LedgerState) forgeBlock() {
 		IssuerVkey:    lcommon.IssuerVkey{},
 		VrfKey:        []byte{},
 		VrfResult:     lcommon.VrfResult{},
-		BlockBodySize: 0,
+		BlockBodySize: blockSize,
 		BlockBodyHash: lcommon.Blake2b256{},
 		OpCert:        babbage.BabbageOpCert{},
 		ProtoVersion: babbage.BabbageProtoVersion{
-			Major: 2,
+			Major: 8,
 			Minor: 0,
 		},
 	}
@@ -1020,11 +1158,11 @@ func (ls *LedgerState) forgeBlock() {
 		},
 	}
 
-	// Create a conway block
+	// Create a conway block with transactions
 	conwayBlock := &conway.ConwayBlock{
 		BlockHeader:            conwayHeader,
-		TransactionBodies:      []conway.ConwayTransactionBody{},
-		TransactionWitnessSets: []conway.ConwayTransactionWitnessSet{},
+		TransactionBodies:      transactionBodies,
+		TransactionWitnessSets: transactionWitnessSets,
 		TransactionMetadataSet: map[uint]*cbor.LazyValue{},
 		InvalidTransactions:    []uint{},
 	}
@@ -1048,5 +1186,32 @@ func (ls *LedgerState) forgeBlock() {
 		"block_number", nextBlockNumber,
 		"prev_hash", hex.EncodeToString(currentTip.Point.Hash),
 		"block_cbor", hex.EncodeToString(blockCbor),
+	)
+
+	// Create a proper ledger.Block from the Conway block
+	ledgerBlock := ledger.Block(conwayBlock)
+
+	// Add the block to the primary chain
+	err = ls.chain.AddBlock(ledgerBlock, nil)
+	if err != nil {
+		ls.config.Logger.Error(
+			"failed to add forged block to primary chain",
+			"component", "ledger",
+			"error", err,
+		)
+		return
+	}
+
+	// Log the successful block creation (Info)
+	ls.config.Logger.Info(
+		"successfully forged and added conway block to primary chain",
+		"component", "ledger",
+		"slot", nextSlot,
+		"block_number", nextBlockNumber,
+		"prev_hash", hex.EncodeToString(currentTip.Point.Hash),
+		"block_size", blockSize,
+		"tx_count", len(transactionBodies),
+		"total_memory", totalExUnits.Memory,
+		"total_steps", totalExUnits.Steps,
 	)
 }
