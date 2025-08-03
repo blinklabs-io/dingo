@@ -1182,21 +1182,16 @@ func (ls *LedgerState) forgeBlock() {
 		return
 	}
 
-	// Add block CBOR to itself for later decode
-	conwayBlock.SetCbor(blockCbor)
-
-	// Log the generated block CBOR (DEBUG level)
-	ls.config.Logger.Debug(
-		"forged empty conway block",
-		"component", "ledger",
-		"slot", nextSlot,
-		"block_number", nextBlockNumber,
-		"prev_hash", hex.EncodeToString(currentTip.Point.Hash),
-		"block_cbor", hex.EncodeToString(blockCbor),
-	)
-
-	// Create a proper ledger.Block from the Conway block
-	ledgerBlock := ledger.Block(conwayBlock)
+	// Re-decode block from CBOR
+	// This is a bit of a hack, because things like Hash() rely on having the original CBOR available
+	ledgerBlock, err := conway.NewConwayBlockFromCbor(blockCbor)
+	if err != nil {
+		ls.config.Logger.Error(
+			"failed to unmarshal forced Conway block from generated CBOR",
+			"error", err,
+		)
+		return
+	}
 
 	// Add the block to the primary chain
 	err = ls.chain.AddBlock(ledgerBlock, nil)
@@ -1209,16 +1204,18 @@ func (ls *LedgerState) forgeBlock() {
 		return
 	}
 
-	// Log the successful block creation (Info)
-	ls.config.Logger.Info(
+	// Log the successful block creation
+	ls.config.Logger.Debug(
 		"successfully forged and added conway block to primary chain",
 		"component", "ledger",
-		"slot", nextSlot,
-		"block_number", nextBlockNumber,
-		"prev_hash", hex.EncodeToString(currentTip.Point.Hash),
+		"slot", ledgerBlock.SlotNumber(),
+		"hash", ledgerBlock.Hash(),
+		"block_number", ledgerBlock.BlockNumber(),
+		"prev_hash", ledgerBlock.PrevHash(),
 		"block_size", blockSize,
 		"tx_count", len(transactionBodies),
 		"total_memory", totalExUnits.Memory,
 		"total_steps", totalExUnits.Steps,
+		"block_cbor", hex.EncodeToString(blockCbor),
 	)
 }
