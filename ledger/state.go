@@ -1086,13 +1086,10 @@ func (ls *LedgerState) forgeBlock() {
 
 			// Pull ExUnits from redeemers in the witness set
 			var txMemory, txSteps uint64
-			fullTx.WitnessSet.Redeemers().Iter()(
-				func(_ lcommon.RedeemerKey, redeemer lcommon.RedeemerValue) bool {
-					txMemory += redeemer.ExUnits.Memory
-					txSteps += redeemer.ExUnits.Steps
-					return true
-				},
-			)
+			for _, redeemer := range fullTx.WitnessSet.Redeemers().Iter() {
+				txMemory += redeemer.ExUnits.Memory
+				txSteps += redeemer.ExUnits.Steps
+			}
 			estimatedTxExUnits := lcommon.ExUnits{
 				Memory: txMemory,
 				Steps:  txSteps,
