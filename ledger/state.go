@@ -995,6 +995,11 @@ func (ls *LedgerState) forgeBlock() {
 	// Get current chain tip
 	currentTip := ls.chain.Tip()
 
+	// Set Hash if empty
+	if len(currentTip.Point.Hash) == 0 {
+		currentTip.Point.Hash = make([]byte, 28)
+	}
+
 	// Calculate next slot and block number
 	nextSlot, err := ls.TimeToSlot(time.Now())
 	if err != nil {
@@ -1174,6 +1179,9 @@ func (ls *LedgerState) forgeBlock() {
 		)
 		return
 	}
+
+	// Add block CBOR to itself for later decode
+	conwayBlock.SetCbor(blockCbor)
 
 	// Log the generated block CBOR (DEBUG level)
 	ls.config.Logger.Debug(
