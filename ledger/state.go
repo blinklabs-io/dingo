@@ -21,7 +21,6 @@ import (
 	"io"
 	"log/slog"
 	"math/big"
-	"reflect"
 	"sync"
 	"time"
 
@@ -30,6 +29,7 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/ledger/eras"
+	"github.com/blinklabs-io/dingo/mempool"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
@@ -73,6 +73,10 @@ type LedgerStateConfig struct {
 // a range of blocks
 type BlockfetchRequestRangeFunc func(ouroboros.ConnectionId, ocommon.Point, ocommon.Point) error
 
+// In ledger/state.go or a shared package
+type MempoolProvider interface {
+	Transactions() []mempool.MempoolTransaction
+}
 type LedgerState struct {
 	sync.RWMutex
 	chainsyncMutex                   sync.Mutex
@@ -95,7 +99,7 @@ type LedgerState struct {
 	chainsyncBlockfetchMutex         sync.Mutex
 	chainsyncBlockfetchWaiting       bool
 	chain                            *chain.Chain
-	mempool                          interface{}
+	mempool                          MempoolProvider
 }
 
 func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
@@ -981,7 +985,7 @@ func (ls *LedgerState) ValidateTx(
 }
 
 // Sets the mempool for accessing transactions
-func (ls *LedgerState) SetMempool(mempool interface{}) {
+func (ls *LedgerState) SetMempool(mempool MempoolProvider) {
 	ls.mempool = mempool
 }
 
@@ -1031,128 +1035,103 @@ func (ls *LedgerState) forgeBlock() {
 		"max_ex_units", maxExUnits,
 	)
 
+	var mempoolTxs []mempool.MempoolTransaction
 	if ls.mempool != nil {
-		// Access mempool transactions
-		mempoolValue := reflect.ValueOf(ls.mempool)
-		if mempoolValue.IsValid() {
-			transactionsMethod := mempoolValue.MethodByName("Transactions")
-			if transactionsMethod.IsValid() {
-				results := transactionsMethod.Call(nil)
-				if len(results) > 0 {
-					mempoolTxs := results[0].Interface().([]interface{})
+		mempoolTxs = ls.mempool.Transactions()
+		ls.config.Logger.Debug(
+			"found transactions in mempool",
+			"component", "ledger",
+			"tx_count", len(mempoolTxs),
+		)
 
-					ls.config.Logger.Debug(
-						"found transactions in mempool",
-						"component", "ledger",
-						"tx_count", len(mempoolTxs),
-					)
+		// Iterate through transactions and add them until we hit limits
+		for _, mempoolTx := range mempoolTxs {
+			// Use raw CBOR from the mempool transaction
+			txCbor := mempoolTx.Cbor
+			txSize := uint64(len(txCbor))
 
-					// Iterate through transactions and add them until we hit limits
-					for _, mempoolTx := range mempoolTxs {
-						// Use raw CBOR from the mempool transaction
-						txVal := reflect.ValueOf(mempoolTx)
-						cborVal := txVal.FieldByName("Cbor")
-						if !cborVal.IsValid() || cborVal.Kind() != reflect.Slice {
-							ls.config.Logger.Debug(
-								"transaction missing Cbor field, skipping",
-								"component", "ledger",
-							)
-							continue
-						}
-						txCbor, ok := cborVal.Interface().([]byte)
-						if !ok {
-							ls.config.Logger.Debug(
-								"Cbor field not []byte, skipping",
-								"component", "ledger",
-							)
-							continue
-						}
-						txSize := uint64(len(txCbor))
-
-						// Check MaxTxSize limit
-						if txSize > maxTxSize {
-							ls.config.Logger.Debug(
-								"skipping transaction - exceeds MaxTxSize",
-								"component", "ledger",
-								"tx_size", txSize,
-								"max_tx_size", maxTxSize,
-							)
-							continue
-						}
-
-						// Check MaxBlockSize limit
-						if blockSize+txSize > maxBlockSize {
-							ls.config.Logger.Debug(
-								"block size limit reached",
-								"component", "ledger",
-								"current_size", blockSize,
-								"tx_size", txSize,
-								"max_block_size", maxBlockSize,
-							)
-							break
-						}
-
-						// Decode the transaction CBOR into full Conway transaction
-						fullTx, err := conway.NewConwayTransactionFromCbor(txCbor)
-						if err != nil {
-							ls.config.Logger.Debug(
-								"failed to decode full transaction, skipping",
-								"component", "ledger",
-								"error", err,
-							)
-							continue
-						}
-
-						// Pull ExUnits from redeemers in the witness set
-						var txMemory, txSteps uint64
-						fullTx.WitnessSet.Redeemers().Iter()(
-							func(_ lcommon.RedeemerKey, redeemer lcommon.RedeemerValue) bool {
-								txMemory += redeemer.ExUnits.Memory
-								txSteps += redeemer.ExUnits.Steps
-								return true
-							},
-						)
-						estimatedTxExUnits := lcommon.ExUnits{
-							Memory: txMemory,
-							Steps:  txSteps,
-						}
-
-						// Check MaxExUnits limit
-						if totalExUnits.Memory+estimatedTxExUnits.Memory > maxExUnits.Memory ||
-							totalExUnits.Steps+estimatedTxExUnits.Steps > maxExUnits.Steps {
-							ls.config.Logger.Debug(
-								"ex units limit reached",
-								"component", "ledger",
-								"current_memory", totalExUnits.Memory,
-								"current_steps", totalExUnits.Steps,
-								"tx_memory", estimatedTxExUnits.Memory,
-								"tx_steps", estimatedTxExUnits.Steps,
-								"max_memory", maxExUnits.Memory,
-								"max_steps", maxExUnits.Steps,
-							)
-							break
-						}
-
-						// Add transaction to our lists for later block creation
-						transactionBodies = append(transactionBodies, fullTx.Body)
-						transactionWitnessSets = append(transactionWitnessSets, fullTx.WitnessSet)
-						blockSize += txSize
-						totalExUnits.Memory += estimatedTxExUnits.Memory
-						totalExUnits.Steps += estimatedTxExUnits.Steps
-
-						ls.config.Logger.Debug(
-							"added transaction to block candidate lists",
-							"component", "ledger",
-							"tx_size", txSize,
-							"block_size", blockSize,
-							"tx_count", len(transactionBodies),
-							"total_memory", totalExUnits.Memory,
-							"total_steps", totalExUnits.Steps,
-						)
-					}
-				}
+			// Check MaxTxSize limit
+			if txSize > maxTxSize {
+				ls.config.Logger.Debug(
+					"skipping transaction - exceeds MaxTxSize",
+					"component", "ledger",
+					"tx_size", txSize,
+					"max_tx_size", maxTxSize,
+				)
+				continue
 			}
+
+			// Check MaxBlockSize limit
+			if blockSize+txSize > maxBlockSize {
+				ls.config.Logger.Debug(
+					"block size limit reached",
+					"component", "ledger",
+					"current_size", blockSize,
+					"tx_size", txSize,
+					"max_block_size", maxBlockSize,
+				)
+				break
+			}
+
+			// Decode the transaction CBOR into full Conway transaction
+			fullTx, err := conway.NewConwayTransactionFromCbor(txCbor)
+			if err != nil {
+				ls.config.Logger.Debug(
+					"failed to decode full transaction, skipping",
+					"component", "ledger",
+					"error", err,
+				)
+				continue
+			}
+
+			// Pull ExUnits from redeemers in the witness set
+			var txMemory, txSteps uint64
+			fullTx.WitnessSet.Redeemers().Iter()(
+				func(_ lcommon.RedeemerKey, redeemer lcommon.RedeemerValue) bool {
+					txMemory += redeemer.ExUnits.Memory
+					txSteps += redeemer.ExUnits.Steps
+					return true
+				},
+			)
+			estimatedTxExUnits := lcommon.ExUnits{
+				Memory: txMemory,
+				Steps:  txSteps,
+			}
+
+			// Check MaxExUnits limit
+			if totalExUnits.Memory+estimatedTxExUnits.Memory > maxExUnits.Memory ||
+				totalExUnits.Steps+estimatedTxExUnits.Steps > maxExUnits.Steps {
+				ls.config.Logger.Debug(
+					"ex units limit reached",
+					"component", "ledger",
+					"current_memory", totalExUnits.Memory,
+					"current_steps", totalExUnits.Steps,
+					"tx_memory", estimatedTxExUnits.Memory,
+					"tx_steps", estimatedTxExUnits.Steps,
+					"max_memory", maxExUnits.Memory,
+					"max_steps", maxExUnits.Steps,
+				)
+				break
+			}
+
+			// Add transaction to our lists for later block creation
+			transactionBodies = append(transactionBodies, fullTx.Body)
+			transactionWitnessSets = append(transactionWitnessSets, fullTx.WitnessSet)
+			blockSize += txSize
+			totalExUnits.Memory += estimatedTxExUnits.Memory
+			totalExUnits.Steps += estimatedTxExUnits.Steps
+
+			ls.config.Logger.Debug(
+				"added transaction to block candidate lists",
+				"component", "ledger",
+				"tx_size", txSize,
+				"block_size", blockSize,
+				"tx_count", len(transactionBodies),
+				"total_memory", totalExUnits.Memory,
+				"total_steps", totalExUnits.Steps,
+			)
 		}
+
 	}
 
 	// Create Babbage block header body

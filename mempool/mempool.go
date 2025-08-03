@@ -24,7 +24,6 @@ import (
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/event"
-	"github.com/blinklabs-io/dingo/ledger"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/prometheus/client_golang/prometheus"
@@ -53,19 +52,23 @@ type MempoolTransaction struct {
 	LastSeen time.Time
 }
 
+// TxValidator defines the interface for transaction validation needed by mempool.
+type TxValidator interface {
+	ValidateTx(tx gledger.Transaction) error
+}
 type MempoolConfig struct {
 	MempoolCapacity int64
 	Logger          *slog.Logger
 	EventBus        *event.EventBus
 	PromRegistry    prometheus.Registerer
-	LedgerState     *ledger.LedgerState
+	Validator       TxValidator
 }
 
 type Mempool struct {
 	sync.RWMutex
 	logger         *slog.Logger
 	eventBus       *event.EventBus
-	ledgerState    *ledger.LedgerState
+	validator      TxValidator
 	consumers      map[ouroboros.ConnectionId]*MempoolConsumer
 	consumersMutex sync.Mutex
 	transactions   []*MempoolTransaction
@@ -90,10 +93,10 @@ func (e *MempoolFullError) Error() string {
 
 func NewMempool(config MempoolConfig) *Mempool {
 	m := &Mempool{
-		eventBus:    config.EventBus,
-		consumers:   make(map[ouroboros.ConnectionId]*MempoolConsumer),
-		ledgerState: config.LedgerState,
-		config:      config,
+		eventBus:  config.EventBus,
+		consumers: make(map[ouroboros.ConnectionId]*MempoolConsumer),
+		validator: config.Validator,
+		config:    config,
 	}
 	if config.Logger == nil {
 		// Create logger to throw away logs
@@ -182,7 +185,7 @@ func (m *Mempool) processChainEvents() {
 				continue
 			}
 			// Validate transaction
-			if err := m.ledgerState.ValidateTx(tmpTx); err != nil {
+			if err := m.validator.ValidateTx(tmpTx); err != nil {
 				m.removeTransactionByIndex(i)
 				m.logger.Debug(
 					"removed transaction after re-validation failure",
@@ -203,7 +206,7 @@ func (m *Mempool) AddTransaction(txType uint, txBytes []byte) error {
 		return err
 	}
 	// Validate transaction
-	if err := m.ledgerState.ValidateTx(tmpTx); err != nil {
+	if err := m.validator.ValidateTx(tmpTx); err != nil {
 		return err
 	}
 	// Build mempool entry

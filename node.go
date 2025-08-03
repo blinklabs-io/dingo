@@ -154,7 +154,7 @@ func (n *Node) Run() error {
 		Logger:          n.config.logger,
 		EventBus:        n.eventBus,
 		PromRegistry:    n.config.promRegistry,
-		LedgerState:     n.ledgerState,
+		Validator:       n.ledgerState,
 	},
 	)
 	// Set mempool in ledger state for block forging
