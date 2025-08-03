@@ -1137,12 +1137,14 @@ func (ls *LedgerState) forgeBlock() {
 
 	// Create Babbage block header body
 	headerBody := babbage.BabbageBlockHeaderBody{
-		BlockNumber:   nextBlockNumber,
-		Slot:          nextSlot,
-		PrevHash:      lcommon.NewBlake2b256(currentTip.Point.Hash),
-		IssuerVkey:    lcommon.IssuerVkey{},
-		VrfKey:        []byte{},
-		VrfResult:     lcommon.VrfResult{},
+		BlockNumber: nextBlockNumber,
+		Slot:        nextSlot,
+		PrevHash:    lcommon.NewBlake2b256(currentTip.Point.Hash),
+		IssuerVkey:  lcommon.IssuerVkey{},
+		VrfKey:      []byte{},
+		VrfResult: lcommon.VrfResult{
+			Output: lcommon.Blake2b256{}.Bytes(),
+		},
 		BlockBodySize: blockSize,
 		BlockBodyHash: lcommon.Blake2b256{},
 		OpCert:        babbage.BabbageOpCert{},
