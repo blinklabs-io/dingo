@@ -1131,7 +1131,6 @@ func (ls *LedgerState) forgeBlock() {
 				"total_steps", totalExUnits.Steps,
 			)
 		}
-
 	}
 
 	// Create Babbage block header body
