@@ -212,7 +212,7 @@ func (ls *LedgerState) processBlockEvents() error {
 }
 
 func (ls *LedgerState) createGenesisBlock() error {
-	if ls.currentEpoch.SlotLength > 0 {
+	if ls.currentTip.Point.Slot > 0 {
 		return nil
 	}
 	txn := ls.db.Transaction(true)
