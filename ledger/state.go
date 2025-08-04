@@ -583,6 +583,7 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 						nextEpochEraId = uint(next.Era().Id)
 						// Cache rest of the batch for next loop
 						cachedNextBatch = nextBatch[i+offset:]
+						nextBatch = nil
 						break
 					}
 					// Enable validation if we're getting near current tip
@@ -675,16 +676,10 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 			}
 		}
 		if len(nextBatch) > 0 {
-			var hash string
-			if ls.currentTip.Point.Slot == 0 {
-				hash = "<genesis>"
-			} else {
-				hash = hex.EncodeToString(ls.currentTip.Point.Hash)
-			}
 			ls.config.Logger.Info(
 				fmt.Sprintf(
-					"chain extended, new tip: %s at slot %d",
-					hash,
+					"chain extended, new tip: %x at slot %d",
+					ls.currentTip.Point.Hash,
 					ls.currentTip.Point.Slot,
 				),
 				"component",
