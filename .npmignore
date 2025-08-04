@@ -7,6 +7,7 @@ cmd
 config
 connmanager
 database
+.devnet
 .dingo
 dingo
 dingo.socket
@@ -14,6 +15,7 @@ Dockerfile
 event
 .github
 go.*
+.golangci.yml
 internal
 ledger
 Makefile

@@ -264,7 +264,7 @@ jobs:
     needs: [finalize-release]
     steps:
       - run: |
-          echo "RELEASE_TAG=${{ github.event.release.tag_name }}" >> $GITHUB_ENV
+          echo "RELEASE_TAG=${GITHUB_REF#refs/tags/}" >> $GITHUB_ENV
           echo "RELEASE_VERSION=${RELEASE_TAG:1}" >> $GITHUB_ENV
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2 https://github.com/actions/checkout/releases/tag/v4.2.2
         if: startsWith(github.ref, 'refs/tags/')
