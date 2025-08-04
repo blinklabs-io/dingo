@@ -5,6 +5,8 @@ export CARDANO_CONFIG=./config/cardano/devnet/config.json
 export CARDANO_DATABASE_PATH=.devnet
 export CARDANO_DEV_MODE=true
 
+DEBUG=${DEBUG:-false}
+
 conf=$(dirname $CARDANO_CONFIG)
 now=$(date -u +%s)
 echo setting start time in $conf to $now
@@ -14,4 +16,8 @@ sed -i -e "s/systemStart\": .*,/systemStart\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ -
 echo resetting .devnet
 rm -rf .devnet/*
 
-go run ./cmd/dingo/ --debug
+if [[ ${DEBUG} == true ]]; then
+	go run ./cmd/dingo/ --debug
+else
+	go run ./cmd/dingo/
+fi
