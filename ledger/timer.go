@@ -20,9 +20,11 @@ import (
 )
 
 type ScheduledTask struct {
+	mutex             sync.Mutex
 	interval          int
 	ticksSinceLastRun int
-	task              func()
+	taskFunc          func()
+	runFailFunc       func()
 }
 
 type Scheduler struct {
@@ -79,21 +81,33 @@ func (st *Scheduler) tick() {
 	for _, task := range st.tasks {
 		task.ticksSinceLastRun++
 		if task.ticksSinceLastRun >= task.interval {
-			go task.task()
+			if task.mutex.TryLock() {
+				go func() {
+					task.taskFunc()
+					task.mutex.Unlock()
+				}()
+			} else {
+				// Run callback on failure to acquire task lock
+				// This means a previous instance of the task is still running
+				if task.runFailFunc != nil {
+					task.runFailFunc()
+				}
+			}
 			task.ticksSinceLastRun = 0
 		}
 	}
 }
 
 // Adds a new task to be scheduler
-func (st *Scheduler) Register(interval int, task func()) {
+func (st *Scheduler) Register(interval int, taskFunc func(), runFailFunc func()) {
 	st.mutex.Lock()
 	defer st.mutex.Unlock()
 
 	st.tasks = append(st.tasks, &ScheduledTask{
 		interval:          interval,
 		ticksSinceLastRun: 0,
-		task:              task,
+		taskFunc:          taskFunc,
+		runFailFunc:       runFailFunc,
 	})
 }
 
