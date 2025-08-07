@@ -31,14 +31,12 @@ func TestScheduler_RegistersAndRunsTask(t *testing.T) {
 	// Registering task to execute every 3 ticks
 	timer.Register(3, func() {
 		atomic.AddInt32(&counter, 1)
-	})
+	}, nil)
 
 	// Sleeping for 100ms to allow multiple ticks to occur
 	time.Sleep(100 * time.Millisecond)
 
 	finalCount := atomic.LoadInt32(&counter)
-	t.Logf("Task executed %d times after 100ms (expected at least 2)", finalCount)
-
 	if finalCount < 2 {
 		t.Errorf("Expected task to run at least 2 times, but got %d", finalCount)
 	}
@@ -55,12 +53,11 @@ func TestScheduler_ChangeInterval(t *testing.T) {
 	// Registering task with 50ms tick interval to execute for every 1 tick
 	timer.Register(1, func() {
 		atomic.AddInt32(&counter, 1)
-	})
+	}, nil)
 
 	// Waiting 120ms to observe task execution at 50ms interval
 	time.Sleep(120 * time.Millisecond)
 	beforeChange := atomic.LoadInt32(&counter)
-	t.Logf("Task executed %d times before interval change", beforeChange)
 	if beforeChange < 2 {
 		t.Errorf("Expected at least 2 executions before interval change, got %d", beforeChange)
 	}
@@ -73,9 +70,38 @@ func TestScheduler_ChangeInterval(t *testing.T) {
 
 	secondCount := atomic.LoadInt32(&counter)
 	afterChange := secondCount - beforeChange
-	t.Logf("Task ran %d more times after interval change (total now = %d)", afterChange, secondCount)
 
 	if afterChange < 1 || afterChange > 3 {
 		t.Errorf("timer did not respect interval change, ran too frequently: %d more ticks", afterChange)
+	}
+}
+
+func TestSchedulerRunFailFunc(t *testing.T) {
+	var failCounter int32
+
+	// Create a Scheduler with 10ms tick interval
+	timer := NewScheduler(10 * time.Millisecond)
+	timer.Start()
+	defer timer.Stop()
+
+	// Registering task to execute every 3 ticks
+	timer.Register(
+		3,
+		// Task func
+		func() {
+			time.Sleep(50 * time.Millisecond)
+		},
+		// Run fail func
+		func() {
+			atomic.AddInt32(&failCounter, 1)
+		},
+	)
+
+	// Sleeping for 200ms to allow multiple ticks to occur
+	time.Sleep(200 * time.Millisecond)
+
+	finalCount := atomic.LoadInt32(&failCounter)
+	if finalCount < 3 {
+		t.Errorf("Expected failure to run task at least 3 times, but got %d", finalCount)
 	}
 }

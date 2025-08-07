@@ -224,7 +224,8 @@ func (ls *LedgerState) initForge() {
 			if activeSlotsCoeff.Rat != nil && activeSlotsCoeff.Rat.Num().Int64() > 0 {
 				blockInterval := int((1 * activeSlotsCoeff.Rat.Denom().Int64()) / activeSlotsCoeff.Rat.Num().Int64())
 				// Scheduled forgeBlock to run at the calculated block interval
-				ls.Scheduler.Register(blockInterval, ls.forgeBlock)
+				// TODO: add callback to capture task run failure and increment "missed slot leader check" metric
+				ls.Scheduler.Register(blockInterval, ls.forgeBlock, nil)
 
 				ls.config.Logger.Info(
 					"dev mode block forging enabled",
