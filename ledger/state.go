@@ -44,8 +44,6 @@ import (
 const (
 	cleanupConsumedUtxosInterval   = 5 * time.Minute
 	cleanupConsumedUtxosSlotWindow = 50000 // TODO: calculate this from params (#395)
-
-	validateHistoricalThreshold = 14 * (24 * time.Hour) // 2 weeks
 )
 
 type ChainsyncState string
@@ -57,14 +55,15 @@ const (
 )
 
 type LedgerStateConfig struct {
-	Logger             *slog.Logger
-	Database           *database.Database
-	ChainManager       *chain.ChainManager
-	EventBus           *event.EventBus
-	CardanoNodeConfig  *cardano.CardanoNodeConfig
-	PromRegistry       prometheus.Registerer
-	ValidateHistorical bool
-	ForgeBlocks        bool
+	Logger                   *slog.Logger
+	Database                 *database.Database
+	ChainManager             *chain.ChainManager
+	EventBus                 *event.EventBus
+	CardanoNodeConfig        *cardano.CardanoNodeConfig
+	PromRegistry             prometheus.Registerer
+	ValidateHistorical       bool
+	ForgeBlocks              bool
+	ValidateHistoricalPeriod time.Duration
 	// Callback(s)
 	BlockfetchRequestRangeFunc BlockfetchRequestRangeFunc
 }
@@ -599,7 +598,7 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 						}
 						// Check difference from current time
 						timeDiff := time.Since(slotTime)
-						if timeDiff < validateHistoricalThreshold {
+						if timeDiff < ls.config.ValidateHistoricalPeriod {
 							shouldValidate = true
 							ls.config.Logger.Debug(
 								"enabling validation as we approach tip",
