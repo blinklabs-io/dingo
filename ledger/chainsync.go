@@ -355,6 +355,7 @@ func (ls *LedgerState) processEpochRollover(
 		if err := ls.loadEpochs(txn); err != nil {
 			return fmt.Errorf("load epochs: %w", err)
 		}
+		ls.checkpointWrittenForEpoch = false
 		ls.config.Logger.Debug(
 			"added initial epoch to DB",
 			"epoch", fmt.Sprintf("%+v", ls.currentEpoch),
@@ -402,6 +403,7 @@ func (ls *LedgerState) processEpochRollover(
 	if err := ls.loadEpochs(txn); err != nil {
 		return fmt.Errorf("load epochs: %w", err)
 	}
+	ls.checkpointWrittenForEpoch = false
 	// Update the scheduler interval based on the new epoch's slot length
 	if ls.Scheduler != nil {
 		// nolint:gosec
@@ -416,7 +418,41 @@ func (ls *LedgerState) processEpochRollover(
 	)
 	// Start background cleanup of consumed UTxOs
 	go ls.cleanupConsumedUtxos()
+
+	// Clean up old block nonces and keep only last 3 epochs along with checkpoints
+	var cutoffStart uint64
+	if ls.currentEpoch.EpochId >= 4 {
+		target := ls.currentEpoch.EpochId - 3
+		for _, ep := range ls.epochCache {
+			if ep.EpochId == target {
+				cutoffStart = ep.StartSlot
+				break
+			}
+		}
+	}
+	if cutoffStart > 0 {
+		go ls.cleanupBlockNoncesBefore(cutoffStart)
+	}
 	return nil
+}
+
+func (ls *LedgerState) cleanupBlockNoncesBefore(startSlot uint64) {
+	if startSlot == 0 {
+		return
+	}
+	ls.config.Logger.Info(
+		fmt.Sprintf("cleaning up non-checkpoint block nonces before slot %d", startSlot),
+		"component", "ledger",
+	)
+	txn := ls.db.Transaction(true)
+	if err := txn.Do(func(txn *database.Txn) error {
+		return ls.db.DeleteBlockNoncesBeforeSlotWithoutCheckpoints(startSlot, txn)
+	}); err != nil {
+		ls.config.Logger.Error(
+			fmt.Sprintf("failed to clean up old block nonces: %s", err),
+			"component", "ledger",
+		)
+	}
 }
 
 func (ls *LedgerState) processBlockEvent(

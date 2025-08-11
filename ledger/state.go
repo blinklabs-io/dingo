@@ -100,6 +100,7 @@ type LedgerState struct {
 	chainsyncBlockfetchWaiting       bool
 	chain                            *chain.Chain
 	mempool                          MempoolProvider
+	checkpointWrittenForEpoch        bool
 }
 
 func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
@@ -135,6 +136,7 @@ func (ls *LedgerState) Start() error {
 	if err := ls.loadEpochs(nil); err != nil {
 		return fmt.Errorf("failed to load epoch info: %w", err)
 	}
+	ls.checkpointWrittenForEpoch = false
 	// Load current protocol parameters from DB
 	if err := ls.loadPParams(); err != nil {
 		return fmt.Errorf("failed to load pparams: %w", err)
@@ -639,12 +641,24 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 						blockNonce = tmpNonce
 					}
 					// TODO: batch this
+					// Determine epoch for this slot
+					tmpEpoch, err := ls.SlotToEpoch(tmpPoint.Slot)
+					if err != nil {
+						return fmt.Errorf("slot->epoch: %w", err)
+					}
+
+					// First block we persist in the current epoch becomes the checkpoint
+					isCheckpoint := false
+					if tmpEpoch.EpochId == ls.currentEpoch.EpochId && !ls.checkpointWrittenForEpoch {
+						isCheckpoint = true
+						ls.checkpointWrittenForEpoch = true
+					}
 					// Store block nonce in the DB
-					err := ls.db.SetBlockNonce(
+					err = ls.db.SetBlockNonce(
 						tmpPoint.Hash,
 						tmpPoint.Slot,
 						blockNonce,
-						false,
+						isCheckpoint,
 						txn,
 					)
 					if err != nil {
