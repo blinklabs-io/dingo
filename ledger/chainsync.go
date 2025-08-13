@@ -441,8 +441,12 @@ func (ls *LedgerState) cleanupBlockNoncesBefore(startSlot uint64) {
 		return
 	}
 	ls.config.Logger.Debug(
-		fmt.Sprintf("cleaning up non-checkpoint block nonces before slot %d", startSlot),
-		"component", "ledger",
+		fmt.Sprintf(
+			"cleaning up non-checkpoint block nonces before slot %d",
+			startSlot,
+		),
+		"component",
+		"ledger",
 	)
 	txn := ls.db.Transaction(true)
 	if err := txn.Do(func(txn *database.Txn) error {

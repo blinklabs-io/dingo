@@ -99,7 +99,11 @@ func (st *Scheduler) tick() {
 }
 
 // Adds a new task to be scheduler
-func (st *Scheduler) Register(interval int, taskFunc func(), runFailFunc func()) {
+func (st *Scheduler) Register(
+	interval int,
+	taskFunc func(),
+	runFailFunc func(),
+) {
 	st.mutex.Lock()
 	defer st.mutex.Unlock()
 

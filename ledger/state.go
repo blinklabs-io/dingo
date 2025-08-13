@@ -223,8 +223,12 @@ func (ls *LedgerState) initForge() {
 		if shelleyGenesis != nil {
 			// Calculate block interval (1 / ActiveSlotsCoeff)
 			activeSlotsCoeff := shelleyGenesis.ActiveSlotsCoeff
-			if activeSlotsCoeff.Rat != nil && activeSlotsCoeff.Rat.Num().Int64() > 0 {
-				blockInterval := int((1 * activeSlotsCoeff.Rat.Denom().Int64()) / activeSlotsCoeff.Rat.Num().Int64())
+			if activeSlotsCoeff.Rat != nil &&
+				activeSlotsCoeff.Rat.Num().Int64() > 0 {
+				blockInterval := int(
+					(1 * activeSlotsCoeff.Rat.Denom().Int64()) / activeSlotsCoeff.Rat.Num().
+						Int64(),
+				)
 				// Scheduled forgeBlock to run at the calculated block interval
 				// TODO: add callback to capture task run failure and increment "missed slot leader check" metric
 				ls.Scheduler.Register(blockInterval, ls.forgeBlock, nil)
@@ -649,7 +653,8 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 
 					// First block we persist in the current epoch becomes the checkpoint
 					isCheckpoint := false
-					if tmpEpoch.EpochId == ls.currentEpoch.EpochId && !ls.checkpointWrittenForEpoch {
+					if tmpEpoch.EpochId == ls.currentEpoch.EpochId &&
+						!ls.checkpointWrittenForEpoch {
 						isCheckpoint = true
 						ls.checkpointWrittenForEpoch = true
 					}
@@ -1037,9 +1042,13 @@ func (ls *LedgerState) forgeBlock() {
 		transactionWitnessSets []conway.ConwayTransactionWitnessSet
 		blockSize              uint64
 		totalExUnits           lcommon.ExUnits
-		maxTxSize              = uint64(pparams.(*conway.ConwayProtocolParameters).MaxTxSize)
-		maxBlockSize           = uint64(pparams.(*conway.ConwayProtocolParameters).MaxBlockBodySize)
-		maxExUnits             = pparams.(*conway.ConwayProtocolParameters).MaxBlockExUnits
+		maxTxSize              = uint64(
+			pparams.(*conway.ConwayProtocolParameters).MaxTxSize,
+		)
+		maxBlockSize = uint64(
+			pparams.(*conway.ConwayProtocolParameters).MaxBlockBodySize,
+		)
+		maxExUnits = pparams.(*conway.ConwayProtocolParameters).MaxBlockExUnits
 	)
 
 	ls.config.Logger.Debug(
@@ -1128,7 +1137,10 @@ func (ls *LedgerState) forgeBlock() {
 
 			// Add transaction to our lists for later block creation
 			transactionBodies = append(transactionBodies, fullTx.Body)
-			transactionWitnessSets = append(transactionWitnessSets, fullTx.WitnessSet)
+			transactionWitnessSets = append(
+				transactionWitnessSets,
+				fullTx.WitnessSet,
+			)
 			blockSize += txSize
 			totalExUnits.Memory += estimatedTxExUnits.Memory
 			totalExUnits.Steps += estimatedTxExUnits.Steps
