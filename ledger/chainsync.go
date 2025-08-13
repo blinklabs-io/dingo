@@ -440,7 +440,7 @@ func (ls *LedgerState) cleanupBlockNoncesBefore(startSlot uint64) {
 	if startSlot == 0 {
 		return
 	}
-	ls.config.Logger.Info(
+	ls.config.Logger.Debug(
 		fmt.Sprintf("cleaning up non-checkpoint block nonces before slot %d", startSlot),
 		"component", "ledger",
 	)
