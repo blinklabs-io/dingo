@@ -76,7 +76,7 @@ func (d *MetadataStoreSqlite) GetBlockNonce(
 	return ret.Nonce, nil
 }
 
-// DeleteBlockNoncesBeforeSlot deletes block_nonce records with slot_number less than the specified value
+// DeleteBlockNoncesBeforeSlot deletes block_nonce records with slot less than the specified value
 func (d *MetadataStoreSqlite) DeleteBlockNoncesBeforeSlot(
 	slotNumber uint64,
 	txn *gorm.DB,
@@ -84,11 +84,11 @@ func (d *MetadataStoreSqlite) DeleteBlockNoncesBeforeSlot(
 	var result *gorm.DB
 	if txn != nil {
 		result = txn.
-			Where("slot_number < ?", slotNumber).
+			Where("slot < ?", slotNumber).
 			Delete(&models.BlockNonce{})
 	} else {
 		result = d.DB().
-			Where("slot_number < ?", slotNumber).
+			Where("slot < ?", slotNumber).
 			Delete(&models.BlockNonce{})
 	}
 
@@ -99,7 +99,7 @@ func (d *MetadataStoreSqlite) DeleteBlockNoncesBeforeSlot(
 	return nil
 }
 
-// DeleteBlockNoncesBeforeSlotWithoutCheckpoints deletes block_nonce records with slot_number < given value AND is_checkpoint = false
+// DeleteBlockNoncesBeforeSlotWithoutCheckpoints deletes block_nonce records with slot < given value AND is_checkpoint = false
 func (d *MetadataStoreSqlite) DeleteBlockNoncesBeforeSlotWithoutCheckpoints(
 	slotNumber uint64,
 	txn *gorm.DB,
@@ -109,7 +109,7 @@ func (d *MetadataStoreSqlite) DeleteBlockNoncesBeforeSlotWithoutCheckpoints(
 		db = d.DB()
 	}
 	result := db.
-		Where("slot_number < ? AND is_checkpoint = ?", slotNumber, false).
+		Where("slot < ? AND is_checkpoint = ?", slotNumber, false).
 		Delete(&models.BlockNonce{})
 
 	return result.Error
