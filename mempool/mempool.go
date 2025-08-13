@@ -87,8 +87,12 @@ type MempoolFullError struct {
 }
 
 func (e *MempoolFullError) Error() string {
-	return fmt.Sprintf("mempool full: current size=%d bytes, tx size=%d bytes, capacity=%d bytes",
-		e.CurrentSize, e.TxSize, e.Capacity)
+	return fmt.Sprintf(
+		"mempool full: current size=%d bytes, tx size=%d bytes, capacity=%d bytes",
+		e.CurrentSize,
+		e.TxSize,
+		e.Capacity,
+	)
 }
 
 func NewMempool(config MempoolConfig) *Mempool {

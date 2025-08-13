@@ -38,7 +38,10 @@ func TestScheduler_RegistersAndRunsTask(t *testing.T) {
 
 	finalCount := atomic.LoadInt32(&counter)
 	if finalCount < 2 {
-		t.Errorf("Expected task to run at least 2 times, but got %d", finalCount)
+		t.Errorf(
+			"Expected task to run at least 2 times, but got %d",
+			finalCount,
+		)
 	}
 }
 
@@ -59,7 +62,10 @@ func TestScheduler_ChangeInterval(t *testing.T) {
 	time.Sleep(120 * time.Millisecond)
 	beforeChange := atomic.LoadInt32(&counter)
 	if beforeChange < 2 {
-		t.Errorf("Expected at least 2 executions before interval change, got %d", beforeChange)
+		t.Errorf(
+			"Expected at least 2 executions before interval change, got %d",
+			beforeChange,
+		)
 	}
 
 	// Change interval to 200ms
@@ -72,7 +78,10 @@ func TestScheduler_ChangeInterval(t *testing.T) {
 	afterChange := secondCount - beforeChange
 
 	if afterChange < 1 || afterChange > 3 {
-		t.Errorf("timer did not respect interval change, ran too frequently: %d more ticks", afterChange)
+		t.Errorf(
+			"timer did not respect interval change, ran too frequently: %d more ticks",
+			afterChange,
+		)
 	}
 }
 
@@ -102,6 +111,9 @@ func TestSchedulerRunFailFunc(t *testing.T) {
 
 	finalCount := atomic.LoadInt32(&failCounter)
 	if finalCount < 3 {
-		t.Errorf("Expected failure to run task at least 3 times, but got %d", finalCount)
+		t.Errorf(
+			"Expected failure to run task at least 3 times, but got %d",
+			finalCount,
+		)
 	}
 }

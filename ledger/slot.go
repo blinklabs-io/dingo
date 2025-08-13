@@ -108,7 +108,9 @@ func (ls *LedgerState) TimeToSlot(t time.Time) (uint64, error) {
 		// Special case for current time
 		// This is mostly useful at chain genesis
 		if time.Since(t) < (5 * time.Second) {
-			sinceStart := time.Since(shelleyGenesis.SystemStart) / time.Millisecond
+			sinceStart := time.Since(
+				shelleyGenesis.SystemStart,
+			) / time.Millisecond
 			slotLength := uint(
 				new(big.Int).Div(
 					new(big.Int).Mul(
