@@ -81,7 +81,7 @@ var globalConfig = &Config{
 	TlsCertFilePath:          "",
 	TlsKeyFilePath:           "",
 	DevMode:                  false,
-	LedgerValidateHistorical: "14d",
+	LedgerValidateHistorical: "12h",
 }
 
 func LoadConfig(configFile string) (*Config, error) {
