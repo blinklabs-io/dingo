@@ -448,6 +448,8 @@ func (ls *LedgerState) cleanupBlockNoncesBefore(startSlot uint64) {
 		"component",
 		"ledger",
 	)
+	ls.Lock()
+	defer ls.Unlock()
 	txn := ls.db.Transaction(true)
 	if err := txn.Do(func(txn *database.Txn) error {
 		return ls.db.DeleteBlockNoncesBeforeSlotWithoutCheckpoints(startSlot, txn)
