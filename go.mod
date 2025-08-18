@@ -8,7 +8,7 @@ require (
 	connectrpc.com/connect v1.18.1
 	connectrpc.com/grpchealth v1.4.0
 	connectrpc.com/grpcreflect v1.3.0
-	github.com/blinklabs-io/gouroboros v0.130.1
+	github.com/blinklabs-io/gouroboros v0.131.0
 	github.com/blinklabs-io/ouroboros-mock v0.3.8
 	github.com/dgraph-io/badger/v4 v4.8.0
 	github.com/glebarez/sqlite v1.11.0
@@ -38,7 +38,7 @@ require (
 	github.com/ClickHouse/clickhouse-go/v2 v2.30.0 // indirect
 	github.com/andybalholm/brotli v1.1.1 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
-	github.com/blinklabs-io/plutigo v0.0.3 // indirect
+	github.com/blinklabs-io/plutigo v0.0.4 // indirect
 	github.com/btcsuite/btcd/btcutil v1.1.6 // indirect
 	github.com/cenkalti/backoff/v5 v5.0.2 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
