@@ -76,7 +76,7 @@ jobs:
       - name: Set RELEASE_TAG
         run: "echo \"RELEASE_TAG=${GITHUB_REF#refs/tags/}\" >> $GITHUB_ENV"
       - run: git config --global --add safe.directory $PWD
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2 https://github.com/actions/checkout/releases/tag/v4.2.2
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0 https://github.com/actions/checkout/releases/tag/v5.0.0
         with:
           fetch-depth: 0
       - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0 https://github.com/actions/setup-go/releases/tag/v5.5.0
@@ -122,7 +122,7 @@ jobs:
     steps:
       - run: "echo \"RELEASE_TAG=${GITHUB_REF#refs/tags/}\" >> $GITHUB_ENV"
       - run: git config --global --add safe.directory $PWD
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2 https://github.com/actions/checkout/releases/tag/v4.2.2
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0 https://github.com/actions/checkout/releases/tag/v5.0.0
         with:
           fetch-depth: 0
       - name: Set up Docker Buildx
@@ -219,7 +219,7 @@ jobs:
             docker manifest push ${t}
           done
       # Checkout repo so README.md is available for next step
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       # Update Docker Hub from README
       - name: Docker Hub Description
         uses: peter-evans/dockerhub-description@432a30c9e07499fd01da9f8a49f0faf9e0ca5b77 # v4.0.2 https://github.com/peter-evans/dockerhub-description/releases/tag/v4.0.2
@@ -266,7 +266,7 @@ jobs:
       - run: |
           echo "RELEASE_TAG=${GITHUB_REF#refs/tags/}" >> $GITHUB_ENV
           echo "RELEASE_VERSION=${RELEASE_TAG:1}" >> $GITHUB_ENV
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2 https://github.com/actions/checkout/releases/tag/v4.2.2
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0 https://github.com/actions/checkout/releases/tag/v5.0.0
         if: startsWith(github.ref, 'refs/tags/')
       - name: setup nodejs
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0 https://github.com/actions/setup-node/releases/tag/v4.4.0
