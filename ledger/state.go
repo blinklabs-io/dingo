@@ -633,15 +633,17 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 					var blockNonce []byte
 					if ls.currentEra.CalculateEtaVFunc != nil {
 						tmpEra := eras.Eras[next.Era().Id]
-						tmpNonce, err := tmpEra.CalculateEtaVFunc(
-							ls.config.CardanoNodeConfig,
-							ls.currentTipBlockNonce,
-							next,
-						)
-						if err != nil {
-							return fmt.Errorf("calculate etaV: %w", err)
+						if tmpEra.CalculateEtaVFunc != nil {
+							tmpNonce, err := tmpEra.CalculateEtaVFunc(
+								ls.config.CardanoNodeConfig,
+								ls.currentTipBlockNonce,
+								next,
+							)
+							if err != nil {
+								return fmt.Errorf("calculate etaV: %w", err)
+							}
+							blockNonce = tmpNonce
 						}
-						blockNonce = tmpNonce
 					}
 					// TODO: batch this
 					// Determine epoch for this slot
@@ -658,18 +660,20 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 						ls.checkpointWrittenForEpoch = true
 					}
 					// Store block nonce in the DB
-					err = ls.db.SetBlockNonce(
-						tmpPoint.Hash,
-						tmpPoint.Slot,
-						blockNonce,
-						isCheckpoint,
-						txn,
-					)
-					if err != nil {
-						return err
+					if len(blockNonce) > 0 {
+						err = ls.db.SetBlockNonce(
+							tmpPoint.Hash,
+							tmpPoint.Slot,
+							blockNonce,
+							isCheckpoint,
+							txn,
+						)
+						if err != nil {
+							return err
+						}
+						// Update tip block nonce
+						ls.currentTipBlockNonce = blockNonce
 					}
-					// Update tip block nonce
-					ls.currentTipBlockNonce = blockNonce
 				}
 				// Apply delta batch
 				if err := deltaBatch.apply(ls, txn); err != nil {
