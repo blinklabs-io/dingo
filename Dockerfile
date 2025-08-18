@@ -8,7 +8,7 @@ RUN --mount=type=cache,target=/gomod-cache go mod download
 COPY . .
 RUN --mount=type=cache,target=/gomod-cache --mount=type=cache,target=/go-cache make build
 
-FROM ghcr.io/blinklabs-io/cardano-configs:20250618-1 AS cardano-configs
+FROM ghcr.io/blinklabs-io/cardano-configs:20250812-1 AS cardano-configs
 FROM ghcr.io/blinklabs-io/txtop:0.12.3 AS txtop
 
 FROM debian:bookworm-slim AS dingo
