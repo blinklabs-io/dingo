@@ -202,6 +202,7 @@ func (d *MetadataStoreSqlite) SetUtxo(
 	slot uint64, // slot
 	payment []byte, // payment
 	stake []byte, // stake
+	amount uint64, //amount
 	txn *gorm.DB,
 ) error {
 	tmpUtxo := models.Utxo{

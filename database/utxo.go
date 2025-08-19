@@ -32,6 +32,7 @@ type Utxo struct {
 	DeletedSlot uint64 `gorm:"index"`
 	PaymentKey  []byte `gorm:"index"`
 	StakingKey  []byte `gorm:"index"`
+	Amount      uint64 `gorm:"index"`
 	Cbor        []byte `gorm:"-"` // This is not represented in the metadata DB
 }
 
@@ -64,7 +65,9 @@ func (d *Database) NewUtxo(
 	outputIdx uint32,
 	slot uint64,
 	paymentKey, stakeKey, cbor []byte,
+	amt uint64,
 	txn *Txn,
+
 ) error {
 	if txn == nil {
 		txn = d.Transaction(false)
@@ -82,6 +85,7 @@ func (d *Database) NewUtxo(
 		slot,
 		paymentKey,
 		stakeKey,
+		amt,
 		txn.Metadata(),
 	)
 }
