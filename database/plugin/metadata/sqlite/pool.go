@@ -19,7 +19,6 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite/models"
 	"github.com/blinklabs-io/dingo/database/types"
-	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -76,10 +75,10 @@ func (d *MetadataStoreSqlite) GetPoolRegistrations(
 	}
 	var addrKeyHash lcommon.AddrKeyHash
 	var tmpCert lcommon.PoolRegistrationCertificate
-	var tmpMargin cbor.Rat
+	var tmpMargin lcommon.GenesisRat
 	var tmpRelay lcommon.PoolRelay
 	for _, cert := range certs {
-		tmpMargin = cbor.Rat{Rat: cert.Margin.Rat}
+		tmpMargin = lcommon.GenesisRat{Rat: cert.Margin.Rat}
 		tmpCert = lcommon.PoolRegistrationCertificate{
 			CertType: lcommon.CertificateTypePoolRegistration,
 			Operator: lcommon.PoolKeyHash(
