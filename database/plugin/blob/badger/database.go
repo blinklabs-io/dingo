@@ -33,8 +33,8 @@ import (
 func init() {
 	plugin.Register(
 		plugin.PluginEntry{
-			Type: plugin.PluginTypeMetadata,
-			Name: "sqlite",
+			Type: plugin.PluginTypeBlob,
+			Name: "badger",
 		},
 	)
 }
