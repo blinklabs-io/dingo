@@ -67,7 +67,6 @@ func (d *Database) NewUtxo(
 	paymentKey, stakeKey, cbor []byte,
 	amt uint64,
 	txn *Txn,
-
 ) error {
 	if txn == nil {
 		txn = d.Transaction(false)
