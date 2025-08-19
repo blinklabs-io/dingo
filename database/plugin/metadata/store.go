@@ -203,6 +203,7 @@ type MetadataStore interface {
 		uint64, // slot
 		[]byte, // payment
 		[]byte, // stake
+		uint64, // amount
 		*gorm.DB,
 	) error
 	SetVoteDelegation(

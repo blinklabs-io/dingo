@@ -241,6 +241,7 @@ func (ls *LedgerState) createGenesisBlock() error {
 				outAddr.PaymentKeyHash().Bytes(),
 				outAddr.StakeKeyHash().Bytes(),
 				outputCbor,
+				utxo.Output.Amount(),
 				txn,
 			)
 			if err != nil {
