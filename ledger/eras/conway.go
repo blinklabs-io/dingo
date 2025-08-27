@@ -18,12 +18,14 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"slices"
 
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/common/script"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 )
 
@@ -38,6 +40,7 @@ var ConwayEraDesc = EraDesc{
 	CalculateEtaVFunc:       CalculateEtaVConway,
 	CertDepositFunc:         CertDepositConway,
 	ValidateTxFunc:          ValidateTxConway,
+	EvaluateTxFunc:          EvaluateTxConway,
 }
 
 func DecodePParamsConway(data []byte) (lcommon.ProtocolParameters, error) {
@@ -165,4 +168,130 @@ func ValidateTxConway(
 		)
 	}
 	return errors.Join(errs...)
+}
+
+func EvaluateTxConway(
+	tx lcommon.Transaction,
+	ls lcommon.LedgerState,
+	pp lcommon.ProtocolParameters,
+) (uint64, lcommon.ExUnits, map[lcommon.RedeemerKey]lcommon.ExUnits, error) {
+	conwayPParams, ok := pp.(*conway.ConwayProtocolParameters)
+	if !ok {
+		return 0, lcommon.ExUnits{}, nil, fmt.Errorf(
+			"current PParams (%T) is not expected type",
+			pp,
+		)
+	}
+	// Resolve inputs
+	resolvedInputs := []lcommon.Utxo{}
+	for _, tmpInput := range tx.Inputs() {
+		tmpUtxo, err := ls.UtxoById(tmpInput)
+		if err != nil {
+			return 0, lcommon.ExUnits{}, nil, err
+		}
+		resolvedInputs = append(
+			resolvedInputs,
+			tmpUtxo,
+		)
+	}
+	// Resolve reference inputs
+	resolvedRefInputs := []lcommon.Utxo{}
+	for _, tmpRefInput := range tx.ReferenceInputs() {
+		tmpUtxo, err := ls.UtxoById(tmpRefInput)
+		if err != nil {
+			return 0, lcommon.ExUnits{}, nil, err
+		}
+		resolvedRefInputs = append(
+			resolvedRefInputs,
+			tmpUtxo,
+		)
+	}
+	// Build TX script map
+	scripts := make(map[lcommon.ScriptHash]lcommon.Script)
+	for _, refInput := range resolvedRefInputs {
+		tmpScript := refInput.Output.ScriptRef()
+		if tmpScript == nil {
+			continue
+		}
+		scripts[tmpScript.Hash()] = tmpScript
+	}
+	for _, tmpScript := range tx.Witnesses().PlutusV1Scripts() {
+		scripts[tmpScript.Hash()] = tmpScript
+	}
+	for _, tmpScript := range tx.Witnesses().PlutusV2Scripts() {
+		scripts[tmpScript.Hash()] = tmpScript
+	}
+	for _, tmpScript := range tx.Witnesses().PlutusV3Scripts() {
+		scripts[tmpScript.Hash()] = tmpScript
+	}
+	// Evaluate scripts
+	var retTotalExUnits lcommon.ExUnits
+	retRedeemerExUnits := make(map[lcommon.RedeemerKey]lcommon.ExUnits)
+	var txInfoV3 script.TxInfo = script.NewTxInfoV3FromTransaction(tx, slices.Concat(resolvedInputs, resolvedRefInputs))
+	for _, redeemerPair := range txInfoV3.(script.TxInfoV3).Redeemers {
+		purpose := redeemerPair.Key
+		if purpose == nil {
+			// Skip unsupported redeemer tags for now
+			continue
+		}
+		redeemer := redeemerPair.Value
+		// Lookup script from redeemer purpose
+		tmpScript := scripts[purpose.ScriptHash()]
+		if tmpScript == nil {
+			return 0, lcommon.ExUnits{}, nil, errors.New("could not find needed script")
+		}
+		switch s := tmpScript.(type) {
+		case *lcommon.PlutusV3Script:
+			sc := script.NewScriptContextV3(txInfoV3, redeemer, purpose)
+			usedBudget, err := s.Evaluate(
+				sc.ToPlutusData(),
+				conwayPParams.MaxTxExUnits,
+			)
+			if err != nil {
+				return 0, lcommon.ExUnits{}, nil, err
+			}
+			retTotalExUnits.Steps += usedBudget.Steps
+			retTotalExUnits.Memory += usedBudget.Memory
+			retRedeemerExUnits[lcommon.RedeemerKey{
+				Tag:   redeemer.Tag,
+				Index: redeemer.Index,
+			}] = usedBudget
+			/*
+				if err != nil && !strings.Contains(err.Error(), "unimplemented") {
+					fmt.Printf("TX ID: %s\n", tx.Hash().String())
+					fmt.Printf("purpose = %#v, redeemer = %#v\n", purpose, redeemer)
+					scriptHash := s.Hash()
+					fmt.Printf("scriptHash = %s\n", scriptHash.String())
+					fmt.Printf("tx = %x\n", tx.Cbor())
+					// Build inputs/outputs strings that can be plugged into Aiken script_context tests for comparison
+					var tmpInputs []lcommon.TransactionInput
+					var tmpOutputs []lcommon.TransactionOutput
+					for _, input := range slices.Concat(resolvedInputs, resolvedRefInputs) {
+						tmpInputs = append(tmpInputs, input.Id)
+						tmpOutputs = append(tmpOutputs, input.Output)
+					}
+					tmpInputsCbor, err := cbor.Encode(tmpInputs)
+					if err != nil {
+						return 0, lcommon.ExUnits{}, nil, err
+					}
+					fmt.Printf("tmpInputs = %x\n", tmpInputsCbor)
+					tmpOutputsCbor, err := cbor.Encode(tmpOutputs)
+					if err != nil {
+						return 0, lcommon.ExUnits{}, nil, err
+					}
+					fmt.Printf("tmpOutputs = %x\n", tmpOutputsCbor)
+					fmt.Printf("sc = %#v\n", sc)
+					scCbor, err := data.Encode(sc.ToPlutusData())
+					if err != nil {
+						return 0, lcommon.ExUnits{}, nil, err
+					}
+					fmt.Printf("scCbor = %x\n", scCbor)
+				}
+			*/
+		default:
+			return 0, lcommon.ExUnits{}, nil, fmt.Errorf("unimplemented script type: %T", tmpScript)
+		}
+	}
+	// TODO: calculate fee based on current TX and calculated ExUnits
+	return 0, retTotalExUnits, retRedeemerExUnits, nil
 }
