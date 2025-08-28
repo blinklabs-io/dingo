@@ -64,7 +64,3 @@ mempoolCapacity: 1048576
 # Enable development mode which prevents outbound connections
 # Default: false
 devMode: false
-
-# How far back in history to validate all transactions
-# Default: "14d"
-ledgerValidateHistorical: "14d"

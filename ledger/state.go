@@ -55,15 +55,14 @@ const (
 )
 
 type LedgerStateConfig struct {
-	Logger                   *slog.Logger
-	Database                 *database.Database
-	ChainManager             *chain.ChainManager
-	EventBus                 *event.EventBus
-	CardanoNodeConfig        *cardano.CardanoNodeConfig
-	PromRegistry             prometheus.Registerer
-	ValidateHistorical       bool
-	ForgeBlocks              bool
-	ValidateHistoricalPeriod time.Duration
+	Logger             *slog.Logger
+	Database           *database.Database
+	ChainManager       *chain.ChainManager
+	EventBus           *event.EventBus
+	CardanoNodeConfig  *cardano.CardanoNodeConfig
+	PromRegistry       prometheus.Registerer
+	ValidateHistorical bool
+	ForgeBlocks        bool
 	// Callback(s)
 	BlockfetchRequestRangeFunc BlockfetchRequestRangeFunc
 }
@@ -592,22 +591,42 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 						nextBatch = nil
 						break
 					}
-					// Enable validation if we're getting near current tip
+					// Enable validation using the k-slot window from ShelleyGenesis.
 					if !shouldValidate && i == 0 {
-						// Determine wall time for next block slot
-						slotTime, err := ls.SlotToTime(tmpPoint.Slot)
-						if err != nil {
-							return fmt.Errorf(
-								"convert slot to time: %w",
-								err,
-							)
+						var cutoffSlot uint64
+						// Get parameters from Shelley Genesis
+						shelleyGenesis := ls.config.CardanoNodeConfig.ShelleyGenesis()
+						if shelleyGenesis == nil {
+							return fmt.Errorf("failed to get Shelley Genesis config")
 						}
-						// Check difference from current time
-						timeDiff := time.Since(slotTime)
-						if timeDiff < ls.config.ValidateHistoricalPeriod {
+						// Get security parameter (k)
+						securityParam := uint64(shelleyGenesis.SecurityParam)
+						currentTipSlot := ls.currentTip.Point.Slot
+						blockSlot := next.SlotNumber()
+						if currentTipSlot >= securityParam {
+							cutoffSlot = currentTipSlot - securityParam
+						} else {
+							cutoffSlot = 0
+						}
+
+						// Validate only if blockSlot ≥ cutoffSlot and skip if it fails
+						if blockSlot >= cutoffSlot {
 							shouldValidate = true
 							ls.config.Logger.Debug(
-								"enabling validation as we approach tip",
+								"enabling validation as block within k-slot window",
+								"security_param", securityParam,
+								"currentTipSlot", currentTipSlot,
+								"cutoffSlot", cutoffSlot,
+								"blockSlot", blockSlot,
+							)
+						} else {
+							shouldValidate = false
+							ls.config.Logger.Debug(
+								"skipping validation as block is older than k-slot window",
+								"security_param", securityParam,
+								"currentTipSlot", currentTipSlot,
+								"cutoffSlot", cutoffSlot,
+								"blockSlot", blockSlot,
 							)
 						}
 					}
