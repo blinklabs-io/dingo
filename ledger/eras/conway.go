@@ -238,7 +238,9 @@ func EvaluateTxConway(
 		// Lookup script from redeemer purpose
 		tmpScript := scripts[purpose.ScriptHash()]
 		if tmpScript == nil {
-			return 0, lcommon.ExUnits{}, nil, errors.New("could not find needed script")
+			return 0, lcommon.ExUnits{}, nil, errors.New(
+				"could not find needed script",
+			)
 		}
 		switch s := tmpScript.(type) {
 		case *lcommon.PlutusV3Script:

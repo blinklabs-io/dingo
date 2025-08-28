@@ -230,7 +230,10 @@ func (s *syncServiceServer) FollowTip(
 		}
 		if next != nil {
 			// Send block response
-			block, err := ledger.NewBlockFromCbor(next.Block.Type, next.Block.Cbor)
+			block, err := ledger.NewBlockFromCbor(
+				next.Block.Type,
+				next.Block.Cbor,
+			)
 			if err != nil {
 				s.utxorpc.config.Logger.Error(
 					"failed to get block",
