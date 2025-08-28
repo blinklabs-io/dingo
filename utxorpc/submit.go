@@ -55,11 +55,25 @@ func (s *submitServiceServer) SubmitTx(
 	// Loop through the transactions and add each to the mempool
 	errorList := make([]error, len(txRawList))
 	hasError := false
+	placeholderRef := []byte{}
 	for i, txi := range txRawList {
 		txRawBytes := txi.GetRaw() // raw bytes
-		txHash := lcommon.Blake2b256Hash(txRawBytes)
 		txType, err := gledger.DetermineTransactionType(txRawBytes)
-		placeholderRef := []byte{}
+		if err != nil {
+			resp.Ref = append(resp.Ref, placeholderRef)
+			errorList[i] = err
+			s.utxorpc.config.Logger.Error(
+				fmt.Sprintf(
+					"failed decoding tx %d: %v",
+					i,
+					err,
+				),
+			)
+			hasError = true
+			continue
+		}
+		tx, err := gledger.NewTransactionFromCbor(txType, txRawBytes)
+		txHash := tx.Hash()
 		if err != nil {
 			resp.Ref = append(resp.Ref, placeholderRef)
 			errorList[i] = err
