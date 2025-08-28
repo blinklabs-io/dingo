@@ -602,7 +602,7 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 						// Get security parameter (k)
 						k := shelleyGenesis.SecurityParam
 						if k < 0 {
-							return fmt.Errorf("security param must be non-negative: %d", p)
+							return fmt.Errorf("security param must be non-negative: %d", k)
 						}
 						securityParam := uint64(k)
 						currentTipSlot := ls.currentTip.Point.Slot
