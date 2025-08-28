@@ -597,10 +597,14 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 						// Get parameters from Shelley Genesis
 						shelleyGenesis := ls.config.CardanoNodeConfig.ShelleyGenesis()
 						if shelleyGenesis == nil {
-							return fmt.Errorf("failed to get Shelley Genesis config")
+							return errors.New("failed to get Shelley Genesis config")
 						}
 						// Get security parameter (k)
-						securityParam := uint64(shelleyGenesis.SecurityParam)
+						k := shelleyGenesis.SecurityParam
+						if k < 0 {
+							return fmt.Errorf("security param must be non-negative: %d", p)
+						}
+						securityParam := uint64(k)
 						currentTipSlot := ls.currentTip.Point.Slot
 						blockSlot := next.SlotNumber()
 						if currentTipSlot >= securityParam {
