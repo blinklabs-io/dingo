@@ -197,7 +197,9 @@ func (s *submitServiceServer) EvalTx(
 			return nil, fmt.Errorf("failed to parse transaction CBOR: %w", err)
 		}
 		// Evaluate TX
-		fee, totalExUnits, redeemerExUnits, err := s.utxorpc.config.LedgerState.EvaluateTx(tx)
+		fee, totalExUnits, redeemerExUnits, err := s.utxorpc.config.LedgerState.EvaluateTx(
+			tx,
+		)
 		// Populate response
 		tmpRedeemers := make([]*cardano.Redeemer, 0, len(redeemerExUnits))
 		for key, val := range redeemerExUnits {

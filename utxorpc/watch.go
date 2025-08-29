@@ -109,7 +109,10 @@ func (s *watchServiceServer) WatchTx(
 		}
 		if next != nil {
 			// Get ledger.Block from bytes
-			block, err := ledger.NewBlockFromCbor(next.Block.Type, next.Block.Cbor)
+			block, err := ledger.NewBlockFromCbor(
+				next.Block.Type,
+				next.Block.Cbor,
+			)
 			if err != nil {
 				s.utxorpc.config.Logger.Error(
 					"failed to get block",

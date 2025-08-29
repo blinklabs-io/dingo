@@ -597,12 +597,17 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 						// Get parameters from Shelley Genesis
 						shelleyGenesis := ls.config.CardanoNodeConfig.ShelleyGenesis()
 						if shelleyGenesis == nil {
-							return errors.New("failed to get Shelley Genesis config")
+							return errors.New(
+								"failed to get Shelley Genesis config",
+							)
 						}
 						// Get security parameter (k)
 						k := shelleyGenesis.SecurityParam
 						if k < 0 {
-							return fmt.Errorf("security param must be non-negative: %d", k)
+							return fmt.Errorf(
+								"security param must be non-negative: %d",
+								k,
+							)
 						}
 						securityParam := uint64(k)
 						currentTipSlot := ls.currentTip.Point.Slot
@@ -618,10 +623,14 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 							shouldValidate = true
 							ls.config.Logger.Debug(
 								"enabling validation as block within k-slot window",
-								"security_param", securityParam,
-								"currentTipSlot", currentTipSlot,
-								"cutoffSlot", cutoffSlot,
-								"blockSlot", blockSlot,
+								"security_param",
+								securityParam,
+								"currentTipSlot",
+								currentTipSlot,
+								"cutoffSlot",
+								cutoffSlot,
+								"blockSlot",
+								blockSlot,
 							)
 						} else {
 							shouldValidate = false
@@ -1049,7 +1058,11 @@ func (ls *LedgerState) EvaluateTx(
 			return err
 		})
 		if err != nil {
-			return 0, lcommon.ExUnits{}, nil, fmt.Errorf("TX %s failed evaluation: %w", tx.Hash(), err)
+			return 0, lcommon.ExUnits{}, nil, fmt.Errorf(
+				"TX %s failed evaluation: %w",
+				tx.Hash(),
+				err,
+			)
 		}
 	}
 	return fee, totalExUnits, redeemerExUnits, nil
