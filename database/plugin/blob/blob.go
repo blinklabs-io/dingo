@@ -16,4 +16,5 @@ package blob
 
 import (
 	_ "github.com/blinklabs-io/dingo/database/plugin/blob/badger"
+	_ "github.com/blinklabs-io/dingo/database/plugin/blob/gcs"
 )
