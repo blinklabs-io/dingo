@@ -109,16 +109,10 @@ func (s *watchServiceServer) WatchTx(
 		}
 		if next != nil {
 			// Get ledger.Block from bytes
-			blockBytes := next.Block.Cbor
-			blockType, err := ledger.DetermineBlockType(blockBytes)
-			if err != nil {
-				s.utxorpc.config.Logger.Error(
-					"failed to get block type",
-					"error", err,
-				)
-				return err
-			}
-			block, err := ledger.NewBlockFromCbor(blockType, blockBytes)
+			block, err := ledger.NewBlockFromCbor(
+				next.Block.Type,
+				next.Block.Cbor,
+			)
 			if err != nil {
 				s.utxorpc.config.Logger.Error(
 					"failed to get block",

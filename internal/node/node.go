@@ -57,10 +57,6 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 			"component", "node",
 		)
 	}
-	ledgerValidateHistorical, err := time.ParseDuration(cfg.LedgerValidateHistorical)
-	if err != nil {
-		return err
-	}
 	listeners := []dingo.ListenerConfig{}
 	if cfg.RelayPort > 0 {
 		// Public "relay" port (node-to-node)
@@ -118,7 +114,6 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 			dingo.WithUtxorpcTlsCertFilePath(cfg.TlsCertFilePath),
 			dingo.WithUtxorpcTlsKeyFilePath(cfg.TlsKeyFilePath),
 			dingo.WithDevMode(cfg.DevMode),
-			dingo.WithLedgerValidateHistorical(ledgerValidateHistorical),
 			// Enable metrics with default prometheus registry
 			dingo.WithPrometheusRegistry(prometheus.DefaultRegisterer),
 			// TODO: make this configurable (#387)

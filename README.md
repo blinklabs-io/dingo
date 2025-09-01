@@ -67,8 +67,11 @@ This behavior can be changed via the following environment variables:
 Running on mainnet (:sweat_smile:):
 
 ```bash
-CARDANO_NODE=mainnet ./dingo
+CARDANO_NETWORK=mainnet CARDANO_CONFIG=path/to/cardano/configs/mainnet/config.json ./dingo
 ```
+
+Note: you can find cardano configuration files at
+<https://github.com/blinklabs-io/docker-cardano-configs/tree/main/config>
 
 Dingo will drop a `dingo.socket` file which can be used by other clients, such
 as `cardano-cli` or software like `adder` or `kupo`. This has only had limited
@@ -146,6 +149,7 @@ make
 ```
 
 You can also run the code without building a binary, first
+
 ```bash
 go run ./cmd/dingo/
 ```

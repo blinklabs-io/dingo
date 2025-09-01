@@ -55,15 +55,14 @@ const (
 )
 
 type LedgerStateConfig struct {
-	Logger                   *slog.Logger
-	Database                 *database.Database
-	ChainManager             *chain.ChainManager
-	EventBus                 *event.EventBus
-	CardanoNodeConfig        *cardano.CardanoNodeConfig
-	PromRegistry             prometheus.Registerer
-	ValidateHistorical       bool
-	ForgeBlocks              bool
-	ValidateHistoricalPeriod time.Duration
+	Logger             *slog.Logger
+	Database           *database.Database
+	ChainManager       *chain.ChainManager
+	EventBus           *event.EventBus
+	CardanoNodeConfig  *cardano.CardanoNodeConfig
+	PromRegistry       prometheus.Registerer
+	ValidateHistorical bool
+	ForgeBlocks        bool
 	// Callback(s)
 	BlockfetchRequestRangeFunc BlockfetchRequestRangeFunc
 }
@@ -592,22 +591,55 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 						nextBatch = nil
 						break
 					}
-					// Enable validation if we're getting near current tip
+					// Enable validation using the k-slot window from ShelleyGenesis.
 					if !shouldValidate && i == 0 {
-						// Determine wall time for next block slot
-						slotTime, err := ls.SlotToTime(tmpPoint.Slot)
-						if err != nil {
-							return fmt.Errorf(
-								"convert slot to time: %w",
-								err,
+						var cutoffSlot uint64
+						// Get parameters from Shelley Genesis
+						shelleyGenesis := ls.config.CardanoNodeConfig.ShelleyGenesis()
+						if shelleyGenesis == nil {
+							return errors.New(
+								"failed to get Shelley Genesis config",
 							)
 						}
-						// Check difference from current time
-						timeDiff := time.Since(slotTime)
-						if timeDiff < ls.config.ValidateHistoricalPeriod {
+						// Get security parameter (k)
+						k := shelleyGenesis.SecurityParam
+						if k < 0 {
+							return fmt.Errorf(
+								"security param must be non-negative: %d",
+								k,
+							)
+						}
+						securityParam := uint64(k)
+						currentTipSlot := ls.currentTip.Point.Slot
+						blockSlot := next.SlotNumber()
+						if currentTipSlot >= securityParam {
+							cutoffSlot = currentTipSlot - securityParam
+						} else {
+							cutoffSlot = 0
+						}
+
+						// Validate only if blockSlot ≥ cutoffSlot and skip if it fails
+						if blockSlot >= cutoffSlot {
 							shouldValidate = true
 							ls.config.Logger.Debug(
-								"enabling validation as we approach tip",
+								"enabling validation as block within k-slot window",
+								"security_param",
+								securityParam,
+								"currentTipSlot",
+								currentTipSlot,
+								"cutoffSlot",
+								cutoffSlot,
+								"blockSlot",
+								blockSlot,
+							)
+						} else {
+							shouldValidate = false
+							ls.config.Logger.Debug(
+								"skipping validation as block is older than k-slot window",
+								"security_param", securityParam,
+								"currentTipSlot", currentTipSlot,
+								"cutoffSlot", cutoffSlot,
+								"blockSlot", blockSlot,
 							)
 						}
 					}
@@ -633,15 +665,17 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 					var blockNonce []byte
 					if ls.currentEra.CalculateEtaVFunc != nil {
 						tmpEra := eras.Eras[next.Era().Id]
-						tmpNonce, err := tmpEra.CalculateEtaVFunc(
-							ls.config.CardanoNodeConfig,
-							ls.currentTipBlockNonce,
-							next,
-						)
-						if err != nil {
-							return fmt.Errorf("calculate etaV: %w", err)
+						if tmpEra.CalculateEtaVFunc != nil {
+							tmpNonce, err := tmpEra.CalculateEtaVFunc(
+								ls.config.CardanoNodeConfig,
+								ls.currentTipBlockNonce,
+								next,
+							)
+							if err != nil {
+								return fmt.Errorf("calculate etaV: %w", err)
+							}
+							blockNonce = tmpNonce
 						}
-						blockNonce = tmpNonce
 					}
 					// TODO: batch this
 					// Determine epoch for this slot
@@ -658,18 +692,20 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 						ls.checkpointWrittenForEpoch = true
 					}
 					// Store block nonce in the DB
-					err = ls.db.SetBlockNonce(
-						tmpPoint.Hash,
-						tmpPoint.Slot,
-						blockNonce,
-						isCheckpoint,
-						txn,
-					)
-					if err != nil {
-						return err
+					if len(blockNonce) > 0 {
+						err = ls.db.SetBlockNonce(
+							tmpPoint.Hash,
+							tmpPoint.Slot,
+							blockNonce,
+							isCheckpoint,
+							txn,
+						)
+						if err != nil {
+							return err
+						}
+						// Update tip block nonce
+						ls.currentTipBlockNonce = blockNonce
 					}
-					// Update tip block nonce
-					ls.currentTipBlockNonce = blockNonce
 				}
 				// Apply delta batch
 				if err := deltaBatch.apply(ls, txn); err != nil {
@@ -998,6 +1034,40 @@ func (ls *LedgerState) ValidateTx(
 	return nil
 }
 
+// EvaluateTx evaluates the scripts in the provided transaction and returns the calculated
+// fee, per-redeemer ExUnits, and total ExUnits
+func (ls *LedgerState) EvaluateTx(
+	tx lcommon.Transaction,
+) (uint64, lcommon.ExUnits, map[lcommon.RedeemerKey]lcommon.ExUnits, error) {
+	var fee uint64
+	var totalExUnits lcommon.ExUnits
+	var redeemerExUnits map[lcommon.RedeemerKey]lcommon.ExUnits
+	if ls.currentEra.EvaluateTxFunc != nil {
+		txn := ls.db.Transaction(false)
+		err := txn.Do(func(txn *database.Txn) error {
+			lv := &LedgerView{
+				txn: txn,
+				ls:  ls,
+			}
+			var err error
+			fee, totalExUnits, redeemerExUnits, err = ls.currentEra.EvaluateTxFunc(
+				tx,
+				lv,
+				ls.currentPParams,
+			)
+			return err
+		})
+		if err != nil {
+			return 0, lcommon.ExUnits{}, nil, fmt.Errorf(
+				"TX %s failed evaluation: %w",
+				tx.Hash(),
+				err,
+			)
+		}
+	}
+	return fee, totalExUnits, redeemerExUnits, nil
+}
+
 // Sets the mempool for accessing transactions
 func (ls *LedgerState) SetMempool(mempool MempoolProvider) {
 	ls.mempool = mempool
@@ -1108,7 +1178,7 @@ func (ls *LedgerState) forgeBlock() {
 			}
 
 			// Pull ExUnits from redeemers in the witness set
-			var txMemory, txSteps uint64
+			var txMemory, txSteps int64
 			for _, redeemer := range fullTx.WitnessSet.Redeemers().Iter() {
 				txMemory += redeemer.ExUnits.Memory
 				txSteps += redeemer.ExUnits.Steps

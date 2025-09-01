@@ -19,7 +19,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"time"
 
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/connmanager"
@@ -32,27 +31,26 @@ import (
 type ListenerConfig = connmanager.ListenerConfig
 
 type Config struct {
-	badgerCacheSize          int64
-	mempoolCapacity          int64
-	cardanoNodeConfig        *cardano.CardanoNodeConfig
-	dataDir                  string
-	intersectPoints          []ocommon.Point
-	intersectTip             bool
-	logger                   *slog.Logger
-	listeners                []ListenerConfig
-	network                  string
-	networkMagic             uint32
-	outboundSourcePort       uint
-	utxorpcPort              uint
-	tlsCertFilePath          string
-	tlsKeyFilePath           string
-	peerSharing              bool
-	promRegistry             prometheus.Registerer
-	topologyConfig           *topology.TopologyConfig
-	tracing                  bool
-	tracingStdout            bool
-	devMode                  bool
-	ledgerValidateHistorical time.Duration
+	badgerCacheSize    int64
+	mempoolCapacity    int64
+	cardanoNodeConfig  *cardano.CardanoNodeConfig
+	dataDir            string
+	intersectPoints    []ocommon.Point
+	intersectTip       bool
+	logger             *slog.Logger
+	listeners          []ListenerConfig
+	network            string
+	networkMagic       uint32
+	outboundSourcePort uint
+	utxorpcPort        uint
+	tlsCertFilePath    string
+	tlsKeyFilePath     string
+	peerSharing        bool
+	promRegistry       prometheus.Registerer
+	topologyConfig     *topology.TopologyConfig
+	tracing            bool
+	tracingStdout      bool
+	devMode            bool
 }
 
 // configPopulateNetworkMagic uses the named network (if specified) to determine the network magic value (if not specified)
@@ -268,12 +266,5 @@ func WithMempoolCapacity(capacity int64) ConfigOptionFunc {
 func WithDevMode(devMode bool) ConfigOptionFunc {
 	return func(c *Config) {
 		c.devMode = devMode
-	}
-}
-
-// WithLedgerValidateHistorical specifies how far back in history to validate all transactions
-func WithLedgerValidateHistorical(duration time.Duration) ConfigOptionFunc {
-	return func(c *Config) {
-		c.ledgerValidateHistorical = duration
 	}
 }
