@@ -20,7 +20,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"os"
+	"strings"
 	"time"
 
 	"cloud.google.com/go/storage"
@@ -61,10 +61,14 @@ func New(
 		logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
 	}
 
-	bucketName := os.Getenv("BLOB_GCS_BUCKET")
+	const prefix = "gcs://"
+	var bucketName string
+	if strings.HasPrefix(dataDir, prefix) {
+		bucketName = strings.TrimPrefix(dataDir, prefix)
+	}
 	if bucketName == "" {
 		cancel()
-		return nil, errors.New("gcs blob: bucket not set")
+		return nil, errors.New("gcs blob: bucket not set (expected dataDir='gcs://<bucket>')")
 	}
 
 	client, err := storage.NewClient(ctx)
