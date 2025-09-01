@@ -236,10 +236,7 @@ func (ls *LedgerState) createGenesisBlock() error {
 				return fmt.Errorf("encode UTxO: %w", err)
 			}
 			// Extract assets from the UTxO output
-			assets, err := extractAssetsFromOutput(utxo.Output)
-			if err != nil {
-				return fmt.Errorf("extract assets from UTxO: %w", err)
-			}
+			assets := extractAssetsFromOutput(utxo.Output)
 			err = ls.db.NewUtxo(
 				utxo.Id.Id().Bytes(),
 				utxo.Id.Index(),
@@ -589,32 +586,34 @@ func (ls *LedgerState) handleEventBlockfetchBatchDone(e BlockfetchEvent) error {
 }
 
 // extractAssetsFromOutput is helper function to extract assets from a transaction output
-func extractAssetsFromOutput(output lcommon.TransactionOutput) ([]models.Asset, error) {
+func extractAssetsFromOutput(output lcommon.TransactionOutput) []models.Asset {
 	var assets []models.Asset
-	if outputWithAssets, ok := output.(interface {
-		Assets() map[lcommon.Blake2b224]map[cbor.ByteString]uint64
-	}); ok {
-		assetMap := outputWithAssets.Assets()
-		for policyId, assetsMap := range assetMap {
-			policyIdBytes := policyId.Bytes()
-			for assetName, amount := range assetsMap {
-				assetNameBytes := assetName.Bytes()
 
-				var fingerprintBytes []byte
-				fingerprint := lcommon.NewAssetFingerprint(policyIdBytes, assetNameBytes)
-				fingerprintBytes = []byte(fingerprint.String())
+	// Get the MultiAsset from the output
+	multiAsset := output.Assets()
+	if multiAsset == nil {
+		return assets
+	}
+	// Iterate through policies
+	for _, policyId := range multiAsset.Policies() {
+		policyIdBytes := policyId.Bytes()
 
-				asset := models.Asset{
-					Name:        assetNameBytes,
-					NameHex:     []byte(hex.EncodeToString(assetNameBytes)),
-					PolicyId:    policyIdBytes,
-					Fingerprint: fingerprintBytes,
-					Amount:      amount,
-				}
-				assets = append(assets, asset)
+		// Iterate through assets for this policy
+		for _, assetNameBytes := range multiAsset.Assets(policyId) {
+			amount := multiAsset.Asset(policyId, assetNameBytes)
+
+			fingerprint := lcommon.NewAssetFingerprint(policyIdBytes, assetNameBytes)
+
+			asset := models.Asset{
+				Name:        assetNameBytes,
+				NameHex:     []byte(hex.EncodeToString(assetNameBytes)),
+				PolicyId:    policyIdBytes,
+				Fingerprint: []byte(fingerprint.String()),
+				Amount:      amount,
 			}
+			assets = append(assets, asset)
 		}
 	}
 
-	return assets, nil
+	return assets
 }
