@@ -96,7 +96,7 @@ jobs:
             https://uploads.github.com/repos/${{ github.repository_owner }}/${{ env.APPLICATION_NAME }}/releases/${{ needs.create-draft-release.outputs.RELEASE_ID }}/assets?name=${_filename}
       - name: Attest binary
         if: startsWith(github.ref, 'refs/tags/')
-        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0 https://github.com/actions/attest-build-provenance/releases/tag/v2.4.0
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3.0.0 https://github.com/actions/attest-build-provenance/releases/tag/v3.0.0
         with:
           subject-path: '${{ env.APPLICATION_NAME }}'
 
@@ -163,13 +163,13 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
       - name: Attest Docker Hub image
-        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0 https://github.com/actions/attest-build-provenance/releases/tag/v2.4.0
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3.0.0 https://github.com/actions/attest-build-provenance/releases/tag/v3.0.0
         with:
           subject-name: index.docker.io/blinklabs/dingo
           subject-digest: ${{ steps.push.outputs.digest }}
           push-to-registry: true
       - name: Attest GHCR image
-        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0 https://github.com/actions/attest-build-provenance/releases/tag/v2.4.0
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3.0.0 https://github.com/actions/attest-build-provenance/releases/tag/v3.0.0
         with:
           subject-name: ghcr.io/${{ github.repository }}
           subject-digest: ${{ steps.push.outputs.digest }}
