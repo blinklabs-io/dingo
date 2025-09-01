@@ -16,6 +16,7 @@ package gcs
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -63,7 +64,7 @@ func New(
 	bucketName := os.Getenv("BLOB_GCS_BUCKET")
 	if bucketName == "" {
 		cancel()
-		return nil, fmt.Errorf("gcs blob: bucket not set")
+		return nil, errors.New("gcs blob: bucket not set")
 	}
 
 	client, err := storage.NewClient(ctx)
