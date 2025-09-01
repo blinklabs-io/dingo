@@ -25,7 +25,7 @@ require (
 	golang.org/x/net v0.43.0
 	golang.org/x/sys v0.35.0
 	gopkg.in/yaml.v3 v3.0.1
-	gorm.io/gorm v1.30.1
+	gorm.io/gorm v1.30.2
 	gorm.io/plugin/opentelemetry v0.1.16
 )
 
