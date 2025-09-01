@@ -33,16 +33,24 @@ func (d *MetadataStoreSqlite) GetPool(
 	ret := models.Pool{}
 	tmpPool := models.Pool{}
 	if txn != nil {
-		result := txn.First(
-			&tmpPool,
-			"pool_key_hash = ?",
-			lcommon.Blake2b224(pkh).Bytes(),
-		)
+		result := txn.
+			Preload("Registration", func(db *gorm.DB) *gorm.DB { return db.Order("id DESC").Limit(1) }).
+			First(
+				&tmpPool,
+				"pool_key_hash = ?",
+				pkh,
+			)
 		if result.Error != nil {
 			return ret, result.Error
 		}
 	} else {
-		result := d.DB().First(&tmpPool, "pool_key_hash = ?", lcommon.Blake2b224(pkh).Bytes())
+		result := d.DB().
+			Preload("Registration", func(db *gorm.DB) *gorm.DB { return db.Order("id DESC").Limit(1) }).
+			First(
+				&tmpPool,
+				"pool_key_hash = ?",
+				pkh,
+			)
 		if result.Error != nil {
 			return ret, result.Error
 		}

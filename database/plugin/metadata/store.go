@@ -44,6 +44,10 @@ type MetadataStore interface {
 		lcommon.PoolKeyHash,
 		*gorm.DB,
 	) ([]lcommon.PoolRegistrationCertificate, error)
+	GetPool(
+		[]byte, // pool key hash
+		*gorm.DB,
+	) (models.Pool, error)
 	GetStakeRegistrations(
 		[]byte, // stakeKey
 		*gorm.DB,
