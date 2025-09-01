@@ -19,21 +19,23 @@ import (
 	"math/big"
 	"slices"
 
+	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/dgraph-io/badger/v4"
 )
 
 type Utxo struct {
-	ID          uint   `gorm:"primarykey"`
-	TxId        []byte `gorm:"index:tx_id_output_idx"`
-	OutputIdx   uint32 `gorm:"index:tx_id_output_idx"`
-	AddedSlot   uint64 `gorm:"index"`
-	DeletedSlot uint64 `gorm:"index"`
-	PaymentKey  []byte `gorm:"index"`
-	StakingKey  []byte `gorm:"index"`
-	Amount      uint64 `gorm:"index"`
-	Cbor        []byte `gorm:"-"` // This is not represented in the metadata DB
+	ID          uint           `gorm:"primarykey"`
+	TxId        []byte         `gorm:"index:tx_id_output_idx"`
+	OutputIdx   uint32         `gorm:"index:tx_id_output_idx"`
+	AddedSlot   uint64         `gorm:"index"`
+	DeletedSlot uint64         `gorm:"index"`
+	PaymentKey  []byte         `gorm:"index"`
+	StakingKey  []byte         `gorm:"index"`
+	Amount      uint64         `gorm:"index"`
+	Asset       []models.Asset `gorm:"index"`
+	Cbor        []byte         `gorm:"-"` // This is not represented in the metadata DB
 }
 
 func (u *Utxo) TableName() string {
@@ -66,6 +68,7 @@ func (d *Database) NewUtxo(
 	slot uint64,
 	paymentKey, stakeKey, cbor []byte,
 	amt uint64,
+	asset []models.Asset,
 	txn *Txn,
 ) error {
 	if txn == nil {
@@ -85,6 +88,7 @@ func (d *Database) NewUtxo(
 		paymentKey,
 		stakeKey,
 		amt,
+		asset,
 		txn.Metadata(),
 	)
 }

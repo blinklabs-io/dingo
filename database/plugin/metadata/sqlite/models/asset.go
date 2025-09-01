@@ -14,19 +14,16 @@
 
 package models
 
-type Utxo struct {
-	ID          uint    `gorm:"primarykey"`
-	TxId        []byte  `gorm:"index:tx_id_output_idx"`
-	OutputIdx   uint32  `gorm:"index:tx_id_output_idx"`
-	AddedSlot   uint64  `gorm:"index"`
-	DeletedSlot uint64  `gorm:"index"`
-	PaymentKey  []byte  `gorm:"index"`
-	StakingKey  []byte  `gorm:"index"`
-	Amount      uint64  `gorm:"index"`
-	Asset       []Asset `gorm:"index"`
-	Cbor        []byte  `gorm:"-"` // This is here for convenience but not represented in the metadata DB
+type Asset struct {
+	ID          uint   `gorm:"primaryKey"`
+	UTxOID      []byte `gorm:"index"`
+	Name        []byte `gorm:"index"`
+	NameHex     []byte `gorm:"index"`
+	PolicyId    []byte `gorm:"index"`
+	Fingerprint []byte `gorm:"index"`
+	Amount      uint64 `gorm:"index"`
 }
 
-func (u *Utxo) TableName() string {
-	return "utxo"
+func (Asset) TableName() string {
+	return "assets"
 }

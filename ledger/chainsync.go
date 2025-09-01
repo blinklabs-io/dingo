@@ -24,6 +24,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite/models"
 	"github.com/blinklabs-io/dingo/event"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -234,6 +235,11 @@ func (ls *LedgerState) createGenesisBlock() error {
 			if err != nil {
 				return fmt.Errorf("encode UTxO: %w", err)
 			}
+			// Extract assets from the UTxO output
+			assets, err := extractAssetsFromOutput(utxo.Output)
+			if err != nil {
+				return fmt.Errorf("extract assets from UTxO: %w", err)
+			}
 			err = ls.db.NewUtxo(
 				utxo.Id.Id().Bytes(),
 				utxo.Id.Index(),
@@ -242,6 +248,7 @@ func (ls *LedgerState) createGenesisBlock() error {
 				outAddr.StakeKeyHash().Bytes(),
 				outputCbor,
 				utxo.Output.Amount(),
+				assets,
 				txn,
 			)
 			if err != nil {
@@ -579,4 +586,35 @@ func (ls *LedgerState) handleEventBlockfetchBatchDone(e BlockfetchEvent) error {
 	}
 	ls.chainsyncBlockfetchWaiting = false
 	return nil
+}
+
+// extractAssetsFromOutput is helper function to extract assets from a transaction output
+func extractAssetsFromOutput(output lcommon.TransactionOutput) ([]models.Asset, error) {
+	var assets []models.Asset
+	if outputWithAssets, ok := output.(interface {
+		Assets() map[lcommon.Blake2b224]map[cbor.ByteString]uint64
+	}); ok {
+		assetMap := outputWithAssets.Assets()
+		for policyId, assetsMap := range assetMap {
+			policyIdBytes := policyId.Bytes()
+			for assetName, amount := range assetsMap {
+				assetNameBytes := assetName.Bytes()
+
+				var fingerprintBytes []byte
+				fingerprint := lcommon.NewAssetFingerprint(policyIdBytes, assetNameBytes)
+				fingerprintBytes = []byte(fingerprint.String())
+
+				asset := models.Asset{
+					Name:        assetNameBytes,
+					NameHex:     []byte(hex.EncodeToString(assetNameBytes)),
+					PolicyId:    policyIdBytes,
+					Fingerprint: fingerprintBytes,
+					Amount:      amount,
+				}
+				assets = append(assets, asset)
+			}
+		}
+	}
+
+	return assets, nil
 }
