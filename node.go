@@ -125,6 +125,7 @@ func (n *Node) Run() error {
 			PromRegistry:               n.config.promRegistry,
 			ForgeBlocks:                n.config.devMode,
 			BlockfetchRequestRangeFunc: n.blockfetchClientRequestRange,
+			ValidateHistorical:         true,
 		},
 	)
 	if err != nil {

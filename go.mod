@@ -33,6 +33,8 @@ require (
 // XXX: uncomment when testing local changes to gouroboros
 // replace github.com/blinklabs-io/gouroboros => ../gouroboros
 
+replace github.com/blinklabs-io/plutigo => ../plutigo
+
 require (
 	cel.dev/expr v0.24.0 // indirect
 	cloud.google.com/go v0.121.6 // indirect

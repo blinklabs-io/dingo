@@ -161,13 +161,93 @@ func ValidateTxConway(
 	pp lcommon.ProtocolParameters,
 ) error {
 	errs := []error{}
+	var err error
 	for _, validationFunc := range conway.UtxoValidationRules {
-		errs = append(
-			errs,
-			validationFunc(tx, slot, ls, pp),
+		err = validationFunc(tx, slot, ls, pp)
+		if err != nil {
+			errs = append(
+				errs,
+				err,
+			)
+		}
+	}
+	if len(errs) > 0 {
+		return errors.Join(errs...)
+	}
+	// TODO: script evaluation
+	// Resolve inputs
+	resolvedInputs := []lcommon.Utxo{}
+	for _, tmpInput := range tx.Inputs() {
+		tmpUtxo, err := ls.UtxoById(tmpInput)
+		if err != nil {
+			return err
+		}
+		resolvedInputs = append(
+			resolvedInputs,
+			tmpUtxo,
 		)
 	}
-	return errors.Join(errs...)
+	// Resolve reference inputs
+	resolvedRefInputs := []lcommon.Utxo{}
+	for _, tmpRefInput := range tx.ReferenceInputs() {
+		tmpUtxo, err := ls.UtxoById(tmpRefInput)
+		if err != nil {
+			return err
+		}
+		resolvedRefInputs = append(
+			resolvedRefInputs,
+			tmpUtxo,
+		)
+	}
+	// Build TX script map
+	scripts := make(map[lcommon.ScriptHash]lcommon.Script)
+	for _, refInput := range resolvedRefInputs {
+		tmpScript := refInput.Output.ScriptRef()
+		if tmpScript == nil {
+			continue
+		}
+		scripts[tmpScript.Hash()] = tmpScript
+	}
+	for _, tmpScript := range tx.Witnesses().PlutusV1Scripts() {
+		scripts[tmpScript.Hash()] = tmpScript
+	}
+	for _, tmpScript := range tx.Witnesses().PlutusV2Scripts() {
+		scripts[tmpScript.Hash()] = tmpScript
+	}
+	for _, tmpScript := range tx.Witnesses().PlutusV3Scripts() {
+		scripts[tmpScript.Hash()] = tmpScript
+	}
+	// Evaluate scripts
+	var txInfoV3 script.TxInfo
+	txInfoV3, err = script.NewTxInfoV3FromTransaction(ls, tx, slices.Concat(resolvedInputs, resolvedRefInputs))
+	if err != nil {
+		return err
+	}
+	for _, redeemerPair := range txInfoV3.(script.TxInfoV3).Redeemers {
+		purpose := redeemerPair.Key
+		if purpose == nil {
+			// Skip unsupported redeemer tags for now
+			continue
+		}
+		redeemer := redeemerPair.Value
+		// Lookup script from redeemer purpose
+		tmpScript := scripts[purpose.ScriptHash()]
+		if tmpScript == nil {
+			return fmt.Errorf("could not find script with hash %s", purpose.ScriptHash().String())
+		}
+		switch s := tmpScript.(type) {
+		case *lcommon.PlutusV3Script:
+			sc := script.NewScriptContextV3(txInfoV3, redeemer, purpose)
+			_, err = s.Evaluate(
+				sc.ToPlutusData(),
+				redeemer.ExUnits,
+			)
+			if err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func EvaluateTxConway(
