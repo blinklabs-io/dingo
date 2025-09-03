@@ -56,8 +56,12 @@ func (s *queryServiceServer) ReadParams(
 	point := s.utxorpc.config.LedgerState.Tip().Point
 
 	// Set up response parameters
+	tmpPparams, err := protoParams.Utxorpc()
+	if err != nil {
+		return nil, fmt.Errorf("convert pparams: %w", err)
+	}
 	acpc := &query.AnyChainParams_Cardano{
-		Cardano: protoParams.Utxorpc(),
+		Cardano: tmpPparams,
 	}
 	resp.LedgerTip = &query.ChainPoint{
 		Slot: point.Slot,
@@ -98,8 +102,12 @@ func (s *queryServiceServer) ReadUtxos(
 		if ret == nil {
 			return nil, errors.New("decode returned empty utxo")
 		}
+		tmpUtxo, err := ret.Utxorpc()
+		if err != nil {
+			return nil, fmt.Errorf("failed to convert UTxO: %w", err)
+		}
 		audc := query.AnyUtxoData_Cardano{
-			Cardano: ret.Utxorpc(),
+			Cardano: tmpUtxo,
 		}
 		aud.NativeBytes = utxo.Cbor
 		aud.TxoRef = txo
@@ -224,8 +232,12 @@ func (s *queryServiceServer) SearchUtxos(
 			if ret == nil {
 				return nil, errors.New("decode returned empty utxo")
 			}
+			tmpUtxo, err := ret.Utxorpc()
+			if err != nil {
+				return nil, fmt.Errorf("failed to convert UTxO: %w", err)
+			}
 			audc := query.AnyUtxoData_Cardano{
-				Cardano: ret.Utxorpc(),
+				Cardano: tmpUtxo,
 			}
 			aud.NativeBytes = utxo.Cbor
 			aud.TxoRef = &query.TxoRef{

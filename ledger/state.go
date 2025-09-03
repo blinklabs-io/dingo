@@ -20,7 +20,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"slices"
+	"math/big"
 	"sync"
 	"time"
 
@@ -29,10 +29,13 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/ledger/eras"
+	"github.com/blinklabs-io/dingo/mempool"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
+	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/prometheus/client_golang/prometheus"
@@ -43,12 +46,23 @@ const (
 	cleanupConsumedUtxosSlotWindow = 50000 // TODO: calculate this from params (#395)
 )
 
+type ChainsyncState string
+
+const (
+	InitChainsyncState     ChainsyncState = "init"
+	RollbackChainsyncState ChainsyncState = "rollback"
+	SyncingChainsyncState  ChainsyncState = "syncing"
+)
+
 type LedgerStateConfig struct {
-	Logger            *slog.Logger
-	DataDir           string
-	EventBus          *event.EventBus
-	CardanoNodeConfig *cardano.CardanoNodeConfig
-	PromRegistry      prometheus.Registerer
+	Logger             *slog.Logger
+	Database           *database.Database
+	ChainManager       *chain.ChainManager
+	EventBus           *event.EventBus
+	CardanoNodeConfig  *cardano.CardanoNodeConfig
+	PromRegistry       prometheus.Registerer
+	ValidateHistorical bool
+	ForgeBlocks        bool
 	// Callback(s)
 	BlockfetchRequestRangeFunc BlockfetchRequestRangeFunc
 }
@@ -57,81 +71,54 @@ type LedgerStateConfig struct {
 // a range of blocks
 type BlockfetchRequestRangeFunc func(ouroboros.ConnectionId, ocommon.Point, ocommon.Point) error
 
+// In ledger/state.go or a shared package
+type MempoolProvider interface {
+	Transactions() []mempool.MempoolTransaction
+}
 type LedgerState struct {
 	sync.RWMutex
-	chainsyncMutex              sync.Mutex
-	config                      LedgerStateConfig
-	db                          *database.Database
-	timerCleanupConsumedUtxos   *time.Timer
-	currentPParams              lcommon.ProtocolParameters
-	currentEpoch                database.Epoch
-	currentEra                  eras.EraDesc
-	currentTip                  ochainsync.Tip
-	currentTipBlockNonce        []byte
-	metrics                     stateMetrics
-	chainsyncBlockEvents        []BlockfetchEvent
-	chainsyncBlockfetchBusyTime time.Time
-	chainsyncBlockfetchDoneChan chan struct{}
-	chainsyncBlockfetchMutex    sync.Mutex
-	chainsyncBlockfetchWaiting  bool
-	chain                       *chain.Chain
+	chainsyncMutex                   sync.Mutex
+	chainsyncState                   ChainsyncState
+	config                           LedgerStateConfig
+	db                               *database.Database
+	timerCleanupConsumedUtxos        *time.Timer
+	Scheduler                        *Scheduler
+	currentPParams                   lcommon.ProtocolParameters
+	currentEpoch                     database.Epoch
+	epochCache                       []database.Epoch
+	currentEra                       eras.EraDesc
+	currentTip                       ochainsync.Tip
+	currentTipBlockNonce             []byte
+	metrics                          stateMetrics
+	chainsyncBlockEvents             []BlockfetchEvent
+	chainsyncBlockfetchBusyTime      time.Time
+	chainsyncBlockfetchBatchDoneChan chan struct{}
+	chainsyncBlockfetchReadyChan     chan struct{}
+	chainsyncBlockfetchMutex         sync.Mutex
+	chainsyncBlockfetchWaiting       bool
+	chain                            *chain.Chain
+	mempool                          MempoolProvider
+	checkpointWrittenForEpoch        bool
 }
 
 func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 	ls := &LedgerState{
-		config: cfg,
+		config:         cfg,
+		chainsyncState: InitChainsyncState,
+		db:             cfg.Database,
+		chain:          cfg.ChainManager.PrimaryChain(),
 	}
 	if cfg.Logger == nil {
 		// Create logger to throw away logs
 		// We do this so we don't have to add guards around every log operation
 		cfg.Logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
 	}
+	return ls, nil
+}
+
+func (ls *LedgerState) Start() error {
 	// Init metrics
 	ls.metrics.init(ls.config.PromRegistry)
-	// Load database
-	needsRecovery := false
-	db, err := database.New(cfg.Logger, cfg.DataDir)
-	if db == nil {
-		ls.config.Logger.Error(
-			"failed to create database",
-			"error",
-			"empty database returned",
-			"component",
-			"ledger",
-		)
-		return nil, errors.New("empty database returned")
-	}
-	ls.db = db
-	if err != nil {
-		var dbErr database.CommitTimestampError
-		if !errors.As(err, &dbErr) {
-			return nil, err
-		}
-		ls.config.Logger.Warn(
-			"database initialization error, needs recovery",
-			"error",
-			err,
-			"component",
-			"ledger",
-		)
-		needsRecovery = true
-	}
-	// Load chain
-	chain, err := chain.NewChain(
-		ls.db,
-		ls.config.EventBus,
-		true, // persistent
-	)
-	if err != nil {
-		return nil, err
-	}
-	ls.chain = chain
-	// Run recovery if needed
-	if needsRecovery {
-		if err := ls.recoverCommitTimestampConflict(); err != nil {
-			return nil, fmt.Errorf("failed to recover database: %w", err)
-		}
-	}
 	// Setup event handlers
 	ls.config.EventBus.SubscribeFunc(
 		ChainsyncEventType,
@@ -143,32 +130,39 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 	)
 	// Schedule periodic process to purge consumed UTxOs outside of the rollback window
 	ls.scheduleCleanupConsumedUtxos()
-	// Load current epoch from DB
-	if err := ls.loadEpoch(); err != nil {
-		return nil, err
+	// Load epoch info from DB
+	if err := ls.loadEpochs(nil); err != nil {
+		return fmt.Errorf("failed to load epoch info: %w", err)
 	}
+	ls.checkpointWrittenForEpoch = false
 	// Load current protocol parameters from DB
 	if err := ls.loadPParams(); err != nil {
-		return nil, err
+		return fmt.Errorf("failed to load pparams: %w", err)
 	}
 	// Load current tip
 	if err := ls.loadTip(); err != nil {
-		return nil, err
+		return fmt.Errorf("failed to load tip: %w", err)
 	}
 	// Create genesis block
 	if err := ls.createGenesisBlock(); err != nil {
-		return nil, err
+		return fmt.Errorf("failed to create genesis block: %w", err)
 	}
+	// Initialize scheduler
+	if err := ls.initScheduler(); err != nil {
+		return fmt.Errorf("initialize scheduler: %w", err)
+	}
+	// Schedule block forging
+	ls.initForge()
 	// Start goroutine to process new blocks
 	go ls.ledgerProcessBlocks()
-	return ls, nil
+	return nil
 }
 
-func (ls *LedgerState) recoverCommitTimestampConflict() error {
+func (ls *LedgerState) RecoverCommitTimestampConflict() error {
 	// Load current ledger tip
 	tmpTip, err := ls.db.GetTip(nil)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to get tip: %w", err)
 	}
 	// Check if we can lookup tip block in chain
 	_, err = ls.chain.BlockByPoint(tmpTip.Point, nil)
@@ -193,6 +187,61 @@ func (ls *LedgerState) Close() error {
 	return ls.db.Close()
 }
 
+func (ls *LedgerState) initScheduler() error {
+	// Initialize timer with current slot length
+	slotLength := ls.currentEpoch.SlotLength
+	if slotLength == 0 {
+		shelleyGenesis := ls.config.CardanoNodeConfig.ShelleyGenesis()
+		if shelleyGenesis == nil {
+			return errors.New("could not get genesis config")
+		}
+		slotLength = uint(
+			new(big.Int).Div(
+				new(big.Int).Mul(
+					big.NewInt(1000),
+					shelleyGenesis.SlotLength.Num(),
+				),
+				shelleyGenesis.SlotLength.Denom(),
+			).Uint64(),
+		)
+	}
+	// nolint:gosec
+	// Slot length is small enough to not overflow int64
+	interval := time.Duration(slotLength) * time.Millisecond
+	ls.Scheduler = NewScheduler(interval)
+	ls.Scheduler.Start()
+	return nil
+}
+
+func (ls *LedgerState) initForge() {
+	// Schedule block forging if dev mode is enabled
+	if ls.config.ForgeBlocks {
+		// Calculate block interval from ActiveSlotsCoeff
+		shelleyGenesis := ls.config.CardanoNodeConfig.ShelleyGenesis()
+		if shelleyGenesis != nil {
+			// Calculate block interval (1 / ActiveSlotsCoeff)
+			activeSlotsCoeff := shelleyGenesis.ActiveSlotsCoeff
+			if activeSlotsCoeff.Rat != nil &&
+				activeSlotsCoeff.Rat.Num().Int64() > 0 {
+				blockInterval := int(
+					(1 * activeSlotsCoeff.Rat.Denom().Int64()) / activeSlotsCoeff.Rat.Num().
+						Int64(),
+				)
+				// Scheduled forgeBlock to run at the calculated block interval
+				// TODO: add callback to capture task run failure and increment "missed slot leader check" metric
+				ls.Scheduler.Register(blockInterval, ls.forgeBlock, nil)
+
+				ls.config.Logger.Info(
+					"dev mode block forging enabled",
+					"component", "ledger",
+					"block_interval", blockInterval,
+					"active_slots_coeff", activeSlotsCoeff.String(),
+				)
+			}
+		}
+	}
+}
+
 func (ls *LedgerState) scheduleCleanupConsumedUtxos() {
 	ls.Lock()
 	defer ls.Unlock()
@@ -202,33 +251,43 @@ func (ls *LedgerState) scheduleCleanupConsumedUtxos() {
 	ls.timerCleanupConsumedUtxos = time.AfterFunc(
 		cleanupConsumedUtxosInterval,
 		func() {
-			defer func() {
-				// Schedule the next run
-				ls.scheduleCleanupConsumedUtxos()
-			}()
-			// Get the current tip, since we're querying by slot
-			tip := ls.Tip()
-			// Delete UTxOs that are marked as deleted and older than our slot window
-			ls.config.Logger.Debug(
-				"cleaning up consumed UTxOs",
-				"component", "ledger",
-			)
+			ls.cleanupConsumedUtxos()
+			// Schedule the next run
+			ls.scheduleCleanupConsumedUtxos()
+		},
+	)
+}
+
+func (ls *LedgerState) cleanupConsumedUtxos() {
+	// Get the current tip, since we're querying by slot
+	tip := ls.Tip()
+	// Delete UTxOs that are marked as deleted and older than our slot window
+	ls.config.Logger.Debug(
+		"cleaning up consumed UTxOs",
+		"component", "ledger",
+	)
+	if tip.Point.Slot > cleanupConsumedUtxosSlotWindow {
+		for {
 			ls.Lock()
-			err := ls.db.UtxosDeleteConsumed(
+			count, err := ls.db.UtxosDeleteConsumed(
 				tip.Point.Slot-cleanupConsumedUtxosSlotWindow,
+				10000,
 				nil,
 			)
 			ls.Unlock()
+			if count == 0 {
+				break
+			}
 			if err != nil {
 				ls.config.Logger.Error(
 					"failed to cleanup consumed UTxOs",
 					"component", "ledger",
 					"error", err,
 				)
-				return
+				break
 			}
-		},
-	)
+		}
+	}
 }
 
 func (ls *LedgerState) rollback(point ocommon.Point) error {
@@ -255,13 +314,14 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 		if point.Slot > 0 {
 			rollbackBlock, err := ls.chain.BlockByPoint(point, txn)
 			if err != nil {
-				return err
+				return fmt.Errorf("failed to get rollback block: %w", err)
 			}
 			ls.currentTip.BlockNumber = rollbackBlock.Number
 		}
 		if err = ls.db.SetTip(ls.currentTip, txn); err != nil {
-			return err
+			return fmt.Errorf("failed to set tip: %w", err)
 		}
+		ls.updateTipMetrics()
 		return nil
 	})
 	if err != nil {
@@ -269,7 +329,7 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 	}
 	// Reload tip
 	if err := ls.loadTip(); err != nil {
-		return err
+		return fmt.Errorf("failed to load tip: %w", err)
 	}
 	var hash string
 	if point.Slot == 0 {
@@ -304,7 +364,7 @@ func (ls *LedgerState) transitionToEra(
 			ls.currentPParams,
 		)
 		if err != nil {
-			return err
+			return fmt.Errorf("hard fork failed: %w", err)
 		}
 		ls.currentPParams = newPParams
 		ls.config.Logger.Debug(
@@ -315,7 +375,7 @@ func (ls *LedgerState) transitionToEra(
 		// Write pparams update to DB
 		pparamsCbor, err := cbor.Encode(&ls.currentPParams)
 		if err != nil {
-			return err
+			return fmt.Errorf("failed to encode pparams: %w", err)
 		}
 		err = ls.db.SetPParams(
 			pparamsCbor,
@@ -325,7 +385,7 @@ func (ls *LedgerState) transitionToEra(
 			txn,
 		)
 		if err != nil {
-			return err
+			return fmt.Errorf("failed to set pparams: %w", err)
 		}
 	}
 	ls.currentEra = nextEra
@@ -346,7 +406,14 @@ func (ls *LedgerState) consumeUtxo(
 	)
 }
 
-func (ls *LedgerState) ledgerProcessBlocks() {
+type readChainResult struct {
+	blocks        []ledger.Block
+	rollback      bool
+	rollbackPoint ocommon.Point
+}
+
+func (ls *LedgerState) ledgerReadChain(resultCh chan readChainResult) {
+	// Create chain iterator
 	iter, err := ls.chain.FromPoint(ls.currentTip.Point, false)
 	if err != nil {
 		ls.config.Logger.Error(
@@ -354,46 +421,152 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 		)
 		return
 	}
-	shouldBlock := false
-	// We chose 500 as an arbitrary max batch size. A "chain extended" message will be logged after each batch
-	nextBatch := make([]*chain.ChainIteratorResult, 0, 500)
-	var next, nextRollback *chain.ChainIteratorResult
+	// Read blocks from chain iterator and decode
+	var next, cachedNext *chain.ChainIteratorResult
 	var tmpBlock ledger.Block
-	var needsRollback bool
-	var end, i int
-	var txn *database.Txn
+	var needsRollback, shouldBlock bool
+	var rollbackPoint ocommon.Point
+	var result readChainResult
 	for {
+		// We chose 500 as an arbitrary max batch size. A "chain extended" message will be logged after each batch
+		nextBatch := make([]ledger.Block, 0, 500)
 		// Gather up next batch of blocks
 		for {
-			next, err = iter.Next(shouldBlock)
-			shouldBlock = false
-			if err != nil {
-				if !errors.Is(err, chain.ErrIteratorChainTip) {
-					ls.config.Logger.Error(
-						"failed to get next block from chain iterator: " + err.Error(),
-					)
-					return
+			if cachedNext != nil {
+				next = cachedNext
+				cachedNext = nil
+			} else {
+				next, err = iter.Next(shouldBlock)
+				shouldBlock = false
+				if err != nil {
+					if !errors.Is(err, chain.ErrIteratorChainTip) {
+						ls.config.Logger.Error(
+							"failed to get next block from chain iterator: " + err.Error(),
+						)
+						return
+					}
+					shouldBlock = true
+					// Break out of inner loop to flush DB transaction and log
+					break
 				}
-				shouldBlock = true
-				// Break out of inner loop to flush DB transaction and log
-				break
 			}
 			if next == nil {
 				ls.config.Logger.Error("next block from chain iterator is nil")
 				return
 			}
-			nextBatch = append(nextBatch, next)
-			// End batch if there's a rollback, since we need special processing
 			if next.Rollback {
+				// End existing batch and cache rollback if we have any blocks in the batch
+				// We need special processing for rollbacks below
+				if len(nextBatch) > 0 {
+					cachedNext = next
+					break
+				}
+				needsRollback = true
+				rollbackPoint = next.Point
 				break
 			}
+			// Decode block
+			tmpBlock, err = next.Block.Decode()
+			if err != nil {
+				ls.config.Logger.Error(
+					"failed to decode block: " + err.Error(),
+				)
+				return
+			}
+			// Add to batch
+			nextBatch = append(
+				nextBatch,
+				tmpBlock,
+			)
 			// Don't exceed our pre-allocated capacity
 			if len(nextBatch) == cap(nextBatch) {
 				break
 			}
 		}
+		if needsRollback {
+			needsRollback = false
+			result = readChainResult{
+				rollback:      true,
+				rollbackPoint: rollbackPoint,
+			}
+		} else {
+			result = readChainResult{
+				blocks: nextBatch,
+			}
+		}
+		resultCh <- result
+	}
+}
+
+func (ls *LedgerState) ledgerProcessBlocks() {
+	// Start chain reader goroutine
+	readChainResultCh := make(chan readChainResult)
+	go ls.ledgerReadChain(readChainResultCh)
+	// Process blocks
+	var nextEpochEraId uint
+	var needsEpochRollover bool
+	var end, i int
+	var txn *database.Txn
+	var err error
+	var nextBatch, cachedNextBatch []ledger.Block
+	var delta *LedgerDelta
+	var deltaBatch LedgerDeltaBatch
+	shouldValidate := ls.config.ValidateHistorical
+	for {
+		if needsEpochRollover {
+			ls.Lock()
+			needsEpochRollover = false
+			txn := ls.db.Transaction(true)
+			err := txn.Do(func(txn *database.Txn) error {
+				// Check for era change
+				if nextEpochEraId != ls.currentEra.Id {
+					// Transition through every era between the current and the target era
+					for nextEraId := ls.currentEra.Id + 1; nextEraId <= nextEpochEraId; nextEraId++ {
+						if err := ls.transitionToEra(txn, nextEraId, ls.currentEpoch.EpochId, ls.currentEpoch.StartSlot+uint64(ls.currentEpoch.LengthInSlots)); err != nil {
+							return err
+						}
+					}
+				}
+				// Process epoch rollover
+				if err := ls.processEpochRollover(txn); err != nil {
+					return err
+				}
+				return nil
+			})
+			ls.Unlock()
+			if err != nil {
+				ls.config.Logger.Error(
+					"failed to process epoch rollover: " + err.Error(),
+				)
+				return
+			}
+		}
+		if cachedNextBatch != nil {
+			// Use cached block batch
+			nextBatch = cachedNextBatch
+			cachedNextBatch = nil
+		} else {
+			// Read next result from readChain channel
+			result, ok := <-readChainResultCh
+			if !ok {
+				return
+			}
+			nextBatch = result.blocks
+			// Process rollback
+			if result.rollback {
+				ls.Lock()
+				if err = ls.rollback(result.rollbackPoint); err != nil {
+					ls.Unlock()
+					ls.config.Logger.Error(
+						"failed to process rollback: " + err.Error(),
+					)
+					return
+				}
+				ls.Unlock()
+				continue
+			}
+		}
 		// Process batch in groups of 50 to stay under DB txn limits
-		needsRollback = false
 		for i = 0; i < len(nextBatch); i += 50 {
 			ls.Lock()
 			end = min(
@@ -402,22 +575,147 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 			)
 			txn = ls.db.Transaction(true)
 			err = txn.Do(func(txn *database.Txn) error {
-				for _, next := range nextBatch[i:end] {
-					// Rollbacks need to be handled outside of the batch DB transaction
-					// A rollback should only occur at the end of a batch
-					if next.Rollback {
-						needsRollback = true
-						return nil
+				deltaBatch = LedgerDeltaBatch{}
+				for offset, next := range nextBatch[i:end] {
+					tmpPoint := ocommon.Point{
+						Slot: next.SlotNumber(),
+						Hash: next.Hash().Bytes(),
+					}
+					// End processing of batch and cache remainder if we get a block from after the current epoch end, or if we need the initial epoch
+					if tmpPoint.Slot >= (ls.currentEpoch.StartSlot+uint64(ls.currentEpoch.LengthInSlots)) ||
+						ls.currentEpoch.SlotLength == 0 {
+						needsEpochRollover = true
+						nextEpochEraId = uint(next.Era().Id)
+						// Cache rest of the batch for next loop
+						cachedNextBatch = nextBatch[i+offset:]
+						nextBatch = nil
+						break
+					}
+					// Enable validation using the k-slot window from ShelleyGenesis.
+					if !shouldValidate && i == 0 {
+						var cutoffSlot uint64
+						// Get parameters from Shelley Genesis
+						shelleyGenesis := ls.config.CardanoNodeConfig.ShelleyGenesis()
+						if shelleyGenesis == nil {
+							return errors.New(
+								"failed to get Shelley Genesis config",
+							)
+						}
+						// Get security parameter (k)
+						k := shelleyGenesis.SecurityParam
+						if k < 0 {
+							return fmt.Errorf(
+								"security param must be non-negative: %d",
+								k,
+							)
+						}
+						securityParam := uint64(k)
+						currentTipSlot := ls.currentTip.Point.Slot
+						blockSlot := next.SlotNumber()
+						if currentTipSlot >= securityParam {
+							cutoffSlot = currentTipSlot - securityParam
+						} else {
+							cutoffSlot = 0
+						}
+
+						// Validate only if blockSlot ≥ cutoffSlot and skip if it fails
+						if blockSlot >= cutoffSlot {
+							shouldValidate = true
+							ls.config.Logger.Debug(
+								"enabling validation as block within k-slot window",
+								"security_param",
+								securityParam,
+								"currentTipSlot",
+								currentTipSlot,
+								"cutoffSlot",
+								cutoffSlot,
+								"blockSlot",
+								blockSlot,
+							)
+						} else {
+							shouldValidate = false
+							ls.config.Logger.Debug(
+								"skipping validation as block is older than k-slot window",
+								"security_param", securityParam,
+								"currentTipSlot", currentTipSlot,
+								"cutoffSlot", cutoffSlot,
+								"blockSlot", blockSlot,
+							)
+						}
 					}
 					// Process block
-					tmpBlock, err = next.Block.Decode()
+					delta, err = ls.ledgerProcessBlock(
+						txn,
+						tmpPoint,
+						next,
+						shouldValidate,
+					)
 					if err != nil {
 						return err
 					}
-					if err = ls.ledgerProcessBlock(txn, next.Point, tmpBlock, next.Block.Nonce); err != nil {
-						return err
+					if delta != nil {
+						deltaBatch.addDelta(delta)
+					}
+					// Update tip
+					ls.currentTip = ochainsync.Tip{
+						Point:       tmpPoint,
+						BlockNumber: next.BlockNumber(),
+					}
+					// Calculate block rolling nonce
+					var blockNonce []byte
+					if ls.currentEra.CalculateEtaVFunc != nil {
+						tmpEra := eras.Eras[next.Era().Id]
+						if tmpEra.CalculateEtaVFunc != nil {
+							tmpNonce, err := tmpEra.CalculateEtaVFunc(
+								ls.config.CardanoNodeConfig,
+								ls.currentTipBlockNonce,
+								next,
+							)
+							if err != nil {
+								return fmt.Errorf("calculate etaV: %w", err)
+							}
+							blockNonce = tmpNonce
+						}
+					}
+					// TODO: batch this
+					// Determine epoch for this slot
+					tmpEpoch, err := ls.SlotToEpoch(tmpPoint.Slot)
+					if err != nil {
+						return fmt.Errorf("slot->epoch: %w", err)
+					}
+
+					// First block we persist in the current epoch becomes the checkpoint
+					isCheckpoint := false
+					if tmpEpoch.EpochId == ls.currentEpoch.EpochId &&
+						!ls.checkpointWrittenForEpoch {
+						isCheckpoint = true
+						ls.checkpointWrittenForEpoch = true
+					}
+					// Store block nonce in the DB
+					if len(blockNonce) > 0 {
+						err = ls.db.SetBlockNonce(
+							tmpPoint.Hash,
+							tmpPoint.Slot,
+							blockNonce,
+							isCheckpoint,
+							txn,
+						)
+						if err != nil {
+							return err
+						}
+						// Update tip block nonce
+						ls.currentTipBlockNonce = blockNonce
 					}
 				}
+				// Apply delta batch
+				if err := deltaBatch.apply(ls, txn); err != nil {
+					return err
+				}
+				// Update tip in database
+				if err := ls.db.SetTip(ls.currentTip, txn); err != nil {
+					return fmt.Errorf("failed to set tip: %w", err)
+				}
+				ls.updateTipMetrics()
 				return nil
 			})
 			if err != nil {
@@ -428,31 +726,11 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 				return
 			}
 			ls.Unlock()
-		}
-		// Process rollback from end of batch
-		if needsRollback {
-			needsRollback = false
-			// The rollback should be at the end of the batch
-			nextRollback = nextBatch[len(nextBatch)-1]
-			ls.Lock()
-			if err = ls.rollback(nextRollback.Point); err != nil {
-				ls.Unlock()
-				ls.config.Logger.Error(
-					"failed to process rollback: " + err.Error(),
-				)
-				return
-			}
-			ls.Unlock()
-			// Skip "chain extended" logging below if batch only contains a rollback
-			if len(nextBatch) == 1 {
-				// Clear out batch buffer
-				nextBatch = slices.Delete(nextBatch, 0, len(nextBatch))
-				continue
+			if needsEpochRollover {
+				break
 			}
 		}
 		if len(nextBatch) > 0 {
-			// Clear out batch buffer
-			nextBatch = slices.Delete(nextBatch, 0, len(nextBatch))
 			ls.config.Logger.Info(
 				fmt.Sprintf(
 					"chain extended, new tip: %x at slot %d",
@@ -466,11 +744,20 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 	}
 }
 
-func (ls *LedgerState) ledgerProcessBlock(txn *database.Txn, point ocommon.Point, block ledger.Block, nonce []byte) error {
+func (ls *LedgerState) ledgerProcessBlock(
+	txn *database.Txn,
+	point ocommon.Point,
+	block ledger.Block,
+	shouldValidate bool,
+) (*LedgerDelta, error) {
 	// Check that we're processing things in order
 	if len(ls.currentTip.Point.Hash) > 0 {
-		if string(block.PrevHash().Bytes()) != string(ls.currentTip.Point.Hash) {
-			return fmt.Errorf(
+		if string(
+			block.PrevHash().Bytes(),
+		) != string(
+			ls.currentTip.Point.Hash,
+		) {
+			return nil, fmt.Errorf(
 				"block %s (with prev hash %s) does not fit on current chain tip (%x)",
 				block.Hash().String(),
 				block.PrevHash().String(),
@@ -478,42 +765,59 @@ func (ls *LedgerState) ledgerProcessBlock(txn *database.Txn, point ocommon.Point
 			)
 		}
 	}
-	// TODO: track this using protocol params and hard forks
-	// Check for era change
-	if uint(block.Era().Id) != ls.currentEra.Id {
-		targetEraId := uint(block.Era().Id)
-		// Transition through every era between the current and the target era
-		for nextEraId := ls.currentEra.Id + 1; nextEraId <= targetEraId; nextEraId++ {
-			if err := ls.transitionToEra(txn, nextEraId, ls.currentEpoch.EpochId, point.Slot); err != nil {
-				return err
+	// Process transactions
+	var delta *LedgerDelta
+	for _, tx := range block.Transactions() {
+		if delta == nil {
+			delta = &LedgerDelta{
+				Point: point,
 			}
 		}
-	}
-	// Check for epoch rollover
-	if err := ls.processEpochRollover(txn, point); err != nil {
-		return err
-	}
-	// Process transactions
-	for _, tx := range block.Transactions() {
-		if err := ls.processTransaction(txn, tx, point); err != nil {
-			return err
+		// Validate transaction
+		if shouldValidate {
+			if ls.currentEra.ValidateTxFunc != nil {
+				lv := &LedgerView{
+					txn: txn,
+					ls:  ls,
+				}
+				err := ls.currentEra.ValidateTxFunc(
+					tx,
+					point.Slot,
+					lv,
+					ls.currentPParams,
+				)
+				if err != nil {
+					ls.config.Logger.Warn(
+						"TX " + tx.Hash().
+							String() +
+							" failed validation: " + err.Error(),
+					)
+					// return fmt.Errorf("TX validation failure: %w", err)
+				}
+			}
+		}
+		// Populate ledger delta from transaction
+		if err := delta.processTransaction(tx); err != nil {
+			return nil, fmt.Errorf("process transaction: %w", err)
+		}
+		// Apply delta immediately if we may need the data to validate the next TX
+		if shouldValidate {
+			if err := delta.apply(ls, txn); err != nil {
+				return nil, err
+			}
+			delta = nil
 		}
 	}
-	// Update tip
-	ls.currentTip = ochainsync.Tip{
-		Point:       point,
-		BlockNumber: block.BlockNumber(),
-	}
-	if err := ls.db.SetTip(ls.currentTip, txn); err != nil {
-		return err
-	}
-	// Update tip block nonce
-	ls.currentTipBlockNonce = nonce
+	return delta, nil
+}
+
+func (ls *LedgerState) updateTipMetrics() {
 	// Update metrics
 	ls.metrics.blockNum.Set(float64(ls.currentTip.BlockNumber))
-	ls.metrics.slotNum.Set(float64(point.Slot))
-	ls.metrics.slotInEpoch.Set(float64(point.Slot - ls.currentEpoch.StartSlot))
-	return nil
+	ls.metrics.slotNum.Set(float64(ls.currentTip.Point.Slot))
+	ls.metrics.slotInEpoch.Set(
+		float64(ls.currentTip.Point.Slot - ls.currentEpoch.StartSlot),
+	)
 }
 
 func (ls *LedgerState) loadPParams() error {
@@ -529,15 +833,38 @@ func (ls *LedgerState) loadPParams() error {
 	return nil
 }
 
-func (ls *LedgerState) loadEpoch() error {
-	tmpEpoch, err := ls.db.GetEpochLatest(nil)
+func (ls *LedgerState) loadEpochs(txn *database.Txn) error {
+	// Load and cache all epochs
+	epochs, err := ls.db.GetEpochs(txn)
 	if err != nil {
 		return err
 	}
-	ls.currentEpoch = tmpEpoch
-	ls.currentEra = eras.Eras[tmpEpoch.EraId]
-	// Update metrics
-	ls.metrics.epochNum.Set(float64(ls.currentEpoch.EpochId))
+	ls.epochCache = epochs
+	if len(epochs) > 0 {
+		// Set current epoch and era
+		ls.currentEpoch = epochs[len(epochs)-1]
+		ls.currentEra = eras.Eras[ls.currentEpoch.EraId]
+		// Update metrics
+		ls.metrics.epochNum.Set(float64(ls.currentEpoch.EpochId))
+		return nil
+	}
+	// Populate initial epoch
+	shelleyGenesis := ls.config.CardanoNodeConfig.ShelleyGenesis()
+	if shelleyGenesis == nil {
+		return errors.New("failed to load Shelley genesis")
+	}
+	startProtoVersion := shelleyGenesis.ProtocolParameters.ProtocolVersion.Major
+	startEra := eras.ProtocolMajorVersionToEra[startProtoVersion]
+	// Transition through every era between the current and the target era
+	for nextEraId := ls.currentEra.Id + 1; nextEraId <= startEra.Id; nextEraId++ {
+		if err := ls.transitionToEra(txn, nextEraId, ls.currentEpoch.EpochId, ls.currentEpoch.StartSlot+uint64(ls.currentEpoch.LengthInSlots)); err != nil {
+			return err
+		}
+	}
+	// Generate initial epoch
+	if err := ls.processEpochRollover(txn); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -549,18 +876,17 @@ func (ls *LedgerState) loadTip() error {
 	ls.currentTip = tmpTip
 	// Load tip block and set cached block nonce
 	if ls.currentTip.Point.Slot > 0 {
-		tipBlock, err := ls.chain.BlockByPoint(ls.currentTip.Point, nil)
+		tipNonce, err := ls.db.GetBlockNonce(
+			tmpTip.Point.Hash,
+			tmpTip.Point.Slot,
+			nil,
+		)
 		if err != nil {
 			return err
 		}
-		ls.currentTipBlockNonce = tipBlock.Nonce
+		ls.currentTipBlockNonce = tipNonce
 	}
-	// Update metrics
-	ls.metrics.blockNum.Set(float64(ls.currentTip.BlockNumber))
-	ls.metrics.slotNum.Set(float64(ls.currentTip.Point.Slot))
-	ls.metrics.slotInEpoch.Set(
-		float64(ls.currentTip.Point.Slot - ls.currentEpoch.StartSlot),
-	)
+	ls.updateTipMetrics()
 	return nil
 }
 
@@ -621,7 +947,7 @@ func (ls *LedgerState) GetIntersectPoint(
 				if errors.Is(err, chain.ErrBlockNotFound) {
 					continue
 				}
-				return err
+				return fmt.Errorf("failed to get block: %w", err)
 			}
 			// Update return value
 			ret.Slot = tmpBlock.Slot
@@ -706,4 +1032,281 @@ func (ls *LedgerState) ValidateTx(
 		}
 	}
 	return nil
+}
+
+// EvaluateTx evaluates the scripts in the provided transaction and returns the calculated
+// fee, per-redeemer ExUnits, and total ExUnits
+func (ls *LedgerState) EvaluateTx(
+	tx lcommon.Transaction,
+) (uint64, lcommon.ExUnits, map[lcommon.RedeemerKey]lcommon.ExUnits, error) {
+	var fee uint64
+	var totalExUnits lcommon.ExUnits
+	var redeemerExUnits map[lcommon.RedeemerKey]lcommon.ExUnits
+	if ls.currentEra.EvaluateTxFunc != nil {
+		txn := ls.db.Transaction(false)
+		err := txn.Do(func(txn *database.Txn) error {
+			lv := &LedgerView{
+				txn: txn,
+				ls:  ls,
+			}
+			var err error
+			fee, totalExUnits, redeemerExUnits, err = ls.currentEra.EvaluateTxFunc(
+				tx,
+				lv,
+				ls.currentPParams,
+			)
+			return err
+		})
+		if err != nil {
+			return 0, lcommon.ExUnits{}, nil, fmt.Errorf(
+				"TX %s failed evaluation: %w",
+				tx.Hash(),
+				err,
+			)
+		}
+	}
+	return fee, totalExUnits, redeemerExUnits, nil
+}
+
+// Sets the mempool for accessing transactions
+func (ls *LedgerState) SetMempool(mempool MempoolProvider) {
+	ls.mempool = mempool
+}
+
+// forgeBlock creates a conway block with transactions from mempool
+// Also adds it to the primary chain
+func (ls *LedgerState) forgeBlock() {
+	// Get current chain tip
+	currentTip := ls.chain.Tip()
+
+	// Set Hash if empty
+	if len(currentTip.Point.Hash) == 0 {
+		currentTip.Point.Hash = make([]byte, 28)
+	}
+
+	// Calculate next slot and block number
+	nextSlot, err := ls.TimeToSlot(time.Now())
+	if err != nil {
+		ls.config.Logger.Error(
+			"failed to calculate slot from current time",
+			"component", "ledger",
+			"error", err,
+		)
+		return
+	}
+	nextBlockNumber := currentTip.BlockNumber + 1
+
+	// Get current protocol parameters for limits
+	pparams := ls.GetCurrentPParams()
+	if pparams == nil {
+		ls.config.Logger.Error(
+			"failed to get protocol parameters",
+			"component", "ledger",
+		)
+		return
+	}
+
+	var (
+		transactionBodies      []conway.ConwayTransactionBody
+		transactionWitnessSets []conway.ConwayTransactionWitnessSet
+		blockSize              uint64
+		totalExUnits           lcommon.ExUnits
+		maxTxSize              = uint64(
+			pparams.(*conway.ConwayProtocolParameters).MaxTxSize,
+		)
+		maxBlockSize = uint64(
+			pparams.(*conway.ConwayProtocolParameters).MaxBlockBodySize,
+		)
+		maxExUnits = pparams.(*conway.ConwayProtocolParameters).MaxBlockExUnits
+	)
+
+	ls.config.Logger.Debug(
+		"protocol parameter limits",
+		"component", "ledger",
+		"max_tx_size", maxTxSize,
+		"max_block_size", maxBlockSize,
+		"max_ex_units", maxExUnits,
+	)
+
+	var mempoolTxs []mempool.MempoolTransaction
+	if ls.mempool != nil {
+		mempoolTxs = ls.mempool.Transactions()
+		ls.config.Logger.Debug(
+			"found transactions in mempool",
+			"component", "ledger",
+			"tx_count", len(mempoolTxs),
+		)
+
+		// Iterate through transactions and add them until we hit limits
+		for _, mempoolTx := range mempoolTxs {
+			// Use raw CBOR from the mempool transaction
+			txCbor := mempoolTx.Cbor
+			txSize := uint64(len(txCbor))
+
+			// Check MaxTxSize limit
+			if txSize > maxTxSize {
+				ls.config.Logger.Debug(
+					"skipping transaction - exceeds MaxTxSize",
+					"component", "ledger",
+					"tx_size", txSize,
+					"max_tx_size", maxTxSize,
+				)
+				continue
+			}
+
+			// Check MaxBlockSize limit
+			if blockSize+txSize > maxBlockSize {
+				ls.config.Logger.Debug(
+					"block size limit reached",
+					"component", "ledger",
+					"current_size", blockSize,
+					"tx_size", txSize,
+					"max_block_size", maxBlockSize,
+				)
+				break
+			}
+
+			// Decode the transaction CBOR into full Conway transaction
+			fullTx, err := conway.NewConwayTransactionFromCbor(txCbor)
+			if err != nil {
+				ls.config.Logger.Debug(
+					"failed to decode full transaction, skipping",
+					"component", "ledger",
+					"error", err,
+				)
+				continue
+			}
+
+			// Pull ExUnits from redeemers in the witness set
+			var txMemory, txSteps int64
+			for _, redeemer := range fullTx.WitnessSet.Redeemers().Iter() {
+				txMemory += redeemer.ExUnits.Memory
+				txSteps += redeemer.ExUnits.Steps
+			}
+			estimatedTxExUnits := lcommon.ExUnits{
+				Memory: txMemory,
+				Steps:  txSteps,
+			}
+
+			// Check MaxExUnits limit
+			if totalExUnits.Memory+estimatedTxExUnits.Memory > maxExUnits.Memory ||
+				totalExUnits.Steps+estimatedTxExUnits.Steps > maxExUnits.Steps {
+				ls.config.Logger.Debug(
+					"ex units limit reached",
+					"component", "ledger",
+					"current_memory", totalExUnits.Memory,
+					"current_steps", totalExUnits.Steps,
+					"tx_memory", estimatedTxExUnits.Memory,
+					"tx_steps", estimatedTxExUnits.Steps,
+					"max_memory", maxExUnits.Memory,
+					"max_steps", maxExUnits.Steps,
+				)
+				break
+			}
+
+			// Add transaction to our lists for later block creation
+			transactionBodies = append(transactionBodies, fullTx.Body)
+			transactionWitnessSets = append(
+				transactionWitnessSets,
+				fullTx.WitnessSet,
+			)
+			blockSize += txSize
+			totalExUnits.Memory += estimatedTxExUnits.Memory
+			totalExUnits.Steps += estimatedTxExUnits.Steps
+
+			ls.config.Logger.Debug(
+				"added transaction to block candidate lists",
+				"component", "ledger",
+				"tx_size", txSize,
+				"block_size", blockSize,
+				"tx_count", len(transactionBodies),
+				"total_memory", totalExUnits.Memory,
+				"total_steps", totalExUnits.Steps,
+			)
+		}
+	}
+
+	// Create Babbage block header body
+	headerBody := babbage.BabbageBlockHeaderBody{
+		BlockNumber: nextBlockNumber,
+		Slot:        nextSlot,
+		PrevHash:    lcommon.NewBlake2b256(currentTip.Point.Hash),
+		IssuerVkey:  lcommon.IssuerVkey{},
+		VrfKey:      []byte{},
+		VrfResult: lcommon.VrfResult{
+			Output: lcommon.Blake2b256{}.Bytes(),
+		},
+		BlockBodySize: blockSize,
+		BlockBodyHash: lcommon.Blake2b256{},
+		OpCert:        babbage.BabbageOpCert{},
+		ProtoVersion: babbage.BabbageProtoVersion{
+			Major: 8,
+			Minor: 0,
+		},
+	}
+
+	// Create Conway block header
+	conwayHeader := &conway.ConwayBlockHeader{
+		BabbageBlockHeader: babbage.BabbageBlockHeader{
+			Body:      headerBody,
+			Signature: []byte{},
+		},
+	}
+
+	// Create a conway block with transactions
+	conwayBlock := &conway.ConwayBlock{
+		BlockHeader:            conwayHeader,
+		TransactionBodies:      transactionBodies,
+		TransactionWitnessSets: transactionWitnessSets,
+		TransactionMetadataSet: map[uint]*cbor.LazyValue{},
+		InvalidTransactions:    []uint{},
+	}
+
+	// Marshal the conway block to CBOR
+	blockCbor, err := cbor.Encode(conwayBlock)
+	if err != nil {
+		ls.config.Logger.Error(
+			"failed to marshal forged conway block to CBOR",
+			"component", "ledger",
+			"error", err,
+		)
+		return
+	}
+
+	// Re-decode block from CBOR
+	// This is a bit of a hack, because things like Hash() rely on having the original CBOR available
+	ledgerBlock, err := conway.NewConwayBlockFromCbor(blockCbor)
+	if err != nil {
+		ls.config.Logger.Error(
+			"failed to unmarshal forced Conway block from generated CBOR",
+			"error", err,
+		)
+		return
+	}
+
+	// Add the block to the primary chain
+	err = ls.chain.AddBlock(ledgerBlock, nil)
+	if err != nil {
+		ls.config.Logger.Error(
+			"failed to add forged block to primary chain",
+			"component", "ledger",
+			"error", err,
+		)
+		return
+	}
+
+	// Log the successful block creation
+	ls.config.Logger.Debug(
+		"successfully forged and added conway block to primary chain",
+		"component", "ledger",
+		"slot", ledgerBlock.SlotNumber(),
+		"hash", ledgerBlock.Hash(),
+		"block_number", ledgerBlock.BlockNumber(),
+		"prev_hash", ledgerBlock.PrevHash(),
+		"block_size", blockSize,
+		"tx_count", len(transactionBodies),
+		"total_memory", totalExUnits.Memory,
+		"total_steps", totalExUnits.Steps,
+		"block_cbor", hex.EncodeToString(blockCbor),
+	)
 }

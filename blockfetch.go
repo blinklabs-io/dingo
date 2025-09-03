@@ -66,7 +66,7 @@ func (n *Node) blockfetchServerRequestRange(
 			if next.Block.Slot > end.Slot {
 				break
 			}
-			blockBytes := next.Block.Cbor[:]
+			blockBytes := next.Block.Cbor
 			err := ctx.Server.Block(
 				next.Block.Type,
 				blockBytes,
@@ -114,7 +114,10 @@ func (n *Node) blockfetchClientBlock(
 		event.NewEvent(
 			ledger.BlockfetchEventType,
 			ledger.BlockfetchEvent{
-				Point: ocommon.NewPoint(block.SlotNumber(), block.Hash().Bytes()),
+				Point: ocommon.NewPoint(
+					block.SlotNumber(),
+					block.Hash().Bytes(),
+				),
 				Type:  blockType,
 				Block: block,
 			},

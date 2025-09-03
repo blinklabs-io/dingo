@@ -18,6 +18,7 @@ import (
 	"fmt"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	pcommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
@@ -25,18 +26,46 @@ import (
 func (ls *LedgerState) processTransactionCertificates(
 	txn *database.Txn,
 	blockPoint pcommon.Point,
-	tx lcommon.Transaction,
+	certs []ledger.Certificate,
 ) error {
 	var tmpCert lcommon.Certificate
-	for _, tmpCert = range tx.Certificates() {
+	for _, tmpCert = range certs {
 		certDeposit, err := ls.currentEra.CertDepositFunc(
 			tmpCert,
 			ls.currentPParams,
 		)
 		if err != nil {
-			return err
+			return fmt.Errorf("get certificate deposit: %w", err)
 		}
 		switch cert := tmpCert.(type) {
+		case *lcommon.DeregistrationCertificate:
+			err := ls.db.SetDeregistration(
+				cert,
+				blockPoint.Slot,
+				txn,
+			)
+			if err != nil {
+				return err
+			}
+		case *lcommon.DeregistrationDrepCertificate:
+			err := ls.db.SetDeregistrationDrep(
+				cert,
+				blockPoint.Slot,
+				certDeposit,
+				txn,
+			)
+			if err != nil {
+				return err
+			}
+		case *lcommon.UpdateDrepCertificate:
+			err := ls.db.SetUpdateDrep(
+				cert,
+				blockPoint.Slot,
+				txn,
+			)
+			if err != nil {
+				return err
+			}
 		case *lcommon.PoolRegistrationCertificate:
 			err := ls.db.SetPoolRegistration(
 				cert,
@@ -66,6 +95,16 @@ func (ls *LedgerState) processTransactionCertificates(
 			if err != nil {
 				return err
 			}
+		case *lcommon.RegistrationDrepCertificate:
+			err := ls.db.SetRegistrationDrep(
+				cert,
+				blockPoint.Slot,
+				certDeposit,
+				txn,
+			)
+			if err != nil {
+				return err
+			}
 		case *lcommon.StakeDelegationCertificate:
 			err := ls.db.SetStakeDelegation(
 				cert,
@@ -86,6 +125,54 @@ func (ls *LedgerState) processTransactionCertificates(
 			}
 		case *lcommon.StakeRegistrationCertificate:
 			err := ls.db.SetStakeRegistration(
+				cert,
+				blockPoint.Slot,
+				certDeposit,
+				txn,
+			)
+			if err != nil {
+				return err
+			}
+		case *lcommon.StakeRegistrationDelegationCertificate:
+			err := ls.db.SetStakeRegistrationDelegation(
+				cert,
+				blockPoint.Slot,
+				certDeposit,
+				txn,
+			)
+			if err != nil {
+				return err
+			}
+		case *lcommon.StakeVoteDelegationCertificate:
+			err := ls.db.SetStakeVoteDelegation(
+				cert,
+				blockPoint.Slot,
+				txn,
+			)
+			if err != nil {
+				return err
+			}
+		case *lcommon.StakeVoteRegistrationDelegationCertificate:
+			err := ls.db.SetStakeVoteRegistrationDelegation(
+				cert,
+				blockPoint.Slot,
+				certDeposit,
+				txn,
+			)
+			if err != nil {
+				return err
+			}
+		case *lcommon.VoteDelegationCertificate:
+			err := ls.db.SetVoteDelegation(
+				cert,
+				blockPoint.Slot,
+				txn,
+			)
+			if err != nil {
+				return err
+			}
+		case *lcommon.VoteRegistrationDelegationCertificate:
+			err := ls.db.SetVoteRegistrationDelegation(
 				cert,
 				blockPoint.Slot,
 				certDeposit,

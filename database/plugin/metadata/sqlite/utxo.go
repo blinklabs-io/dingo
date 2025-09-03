@@ -18,6 +18,7 @@ import (
 	"fmt"
 
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite/models"
+	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	"gorm.io/gorm"
 )
@@ -53,14 +54,14 @@ func (d *MetadataStoreSqlite) GetUtxosAddedAfterSlot(
 ) ([]models.Utxo, error) {
 	var ret []models.Utxo
 	if txn != nil {
-		result := txn.Where("added_slot > 0", slot).
+		result := txn.Where("added_slot > ?", slot).
 			Order("id DESC").
 			Find(&ret)
 		if result.Error != nil {
 			return ret, result.Error
 		}
 	} else {
-		result := d.DB().Where("added_slot > 0", slot).
+		result := d.DB().Where("added_slot > ?", slot).
 			Order("id DESC").
 			Find(&ret)
 		if result.Error != nil {
@@ -73,23 +74,24 @@ func (d *MetadataStoreSqlite) GetUtxosAddedAfterSlot(
 // GetUtxosDeletedBeforeSlot returns a list of Utxos marked as deleted before a given slot
 func (d *MetadataStoreSqlite) GetUtxosDeletedBeforeSlot(
 	slot uint64,
+	limit int,
 	txn *gorm.DB,
 ) ([]models.Utxo, error) {
 	var ret []models.Utxo
+	var query *gorm.DB
 	if txn != nil {
-		result := txn.Where("deleted_slot > 0 AND deleted_slot <= ?", slot).
-			Order("id DESC").
-			Find(&ret)
-		if result.Error != nil {
-			return ret, result.Error
-		}
+		query = txn
 	} else {
-		result := d.DB().Where("deleted_slot > 0 AND deleted_slot <= ?", slot).
-			Order("id DESC").
-			Find(&ret)
-		if result.Error != nil {
-			return ret, result.Error
-		}
+		query = d.DB()
+	}
+	query = query.Where("deleted_slot > 0 AND deleted_slot <= ?", slot).
+		Order("id DESC")
+	if limit > 0 {
+		query = query.Limit(limit)
+	}
+	result := query.Find(&ret)
+	if result.Error != nil {
+		return ret, result.Error
 	}
 	return ret, nil
 }
@@ -178,34 +180,13 @@ func (d *MetadataStoreSqlite) DeleteUtxosAfterSlot(
 	txn *gorm.DB,
 ) error {
 	if txn != nil {
-		result := txn.Where("deleted_slot > ?", slot).
+		result := txn.Where("added_slot > ?", slot).
 			Delete(&models.Utxo{})
 		if result.Error != nil {
 			return result.Error
 		}
 	} else {
-		result := d.DB().Where("deleted_slot > ?", slot).
-			Delete(&models.Utxo{})
-		if result.Error != nil {
-			return result.Error
-		}
-	}
-	return nil
-}
-
-// DeleteUtxosBeforeSlot deletes Utxos marked as deleted before a given slot
-func (d *MetadataStoreSqlite) DeleteUtxosBeforeSlot(
-	slot uint64,
-	txn *gorm.DB,
-) error {
-	if txn != nil {
-		result := txn.Where("deleted_slot > 0 AND deleted_slot < ?", slot).
-			Delete(&models.Utxo{})
-		if result.Error != nil {
-			return result.Error
-		}
-	} else {
-		result := d.DB().Where("deleted_slot >0 AND deleted_slot < ?", slot).
+		result := d.DB().Where("added_slot > ?", slot).
 			Delete(&models.Utxo{})
 		if result.Error != nil {
 			return result.Error
@@ -221,6 +202,7 @@ func (d *MetadataStoreSqlite) SetUtxo(
 	slot uint64, // slot
 	payment []byte, // payment
 	stake []byte, // stake
+	amount uint64, // amount
 	txn *gorm.DB,
 ) error {
 	tmpUtxo := models.Utxo{
@@ -237,6 +219,32 @@ func (d *MetadataStoreSqlite) SetUtxo(
 		}
 	} else {
 		result := d.DB().Create(&tmpUtxo)
+		if result.Error != nil {
+			return result.Error
+		}
+	}
+	return nil
+}
+
+// AddUtxos saves a batch of UTxOs
+func (d *MetadataStoreSqlite) AddUtxos(
+	utxos []types.UtxoSlot,
+	txn *gorm.DB,
+) error {
+	items := make([]models.Utxo, 0, len(utxos))
+	for _, utxo := range utxos {
+		items = append(
+			items,
+			utxoLedgerToModel(utxo.Utxo, utxo.Slot),
+		)
+	}
+	if txn != nil {
+		result := txn.Create(items)
+		if result.Error != nil {
+			return result.Error
+		}
+	} else {
+		result := d.DB().Create(items)
 		if result.Error != nil {
 			return result.Error
 		}
@@ -289,4 +297,20 @@ func (d *MetadataStoreSqlite) SetUtxosNotDeletedAfterSlot(
 		}
 	}
 	return nil
+}
+
+func utxoLedgerToModel(
+	utxo ledger.Utxo,
+	slot uint64,
+) models.Utxo {
+	outAddr := utxo.Output.Address()
+	ret := models.Utxo{
+		TxId:       utxo.Id.Id().Bytes(),
+		OutputIdx:  utxo.Id.Index(),
+		AddedSlot:  slot,
+		PaymentKey: outAddr.PaymentKeyHash().Bytes(),
+		StakingKey: outAddr.StakeKeyHash().Bytes(),
+		Cbor:       utxo.Output.Cbor(),
+	}
+	return ret
 }

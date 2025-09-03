@@ -19,9 +19,10 @@
 
 ## Running
 
-Dingo does not support a configuration file of its own and uses environment
+Dingo supports configuration via both a YAML config file (`dingo.yaml`) and uses environment
 variables to modify its own behavior.
 
+A sample configuration file is provided at `dingo.yaml.example`.You can copy and edit this file to configure Dingo for your local or production environment:
 This behavior can be changed via the following environment variables:
 
 - `CARDANO_BIND_ADDR`
@@ -66,8 +67,11 @@ This behavior can be changed via the following environment variables:
 Running on mainnet (:sweat_smile:):
 
 ```bash
-CARDANO_NODE=mainnet ./dingo
+CARDANO_NETWORK=mainnet CARDANO_CONFIG=path/to/cardano/configs/mainnet/config.json ./dingo
 ```
+
+Note: you can find cardano configuration files at
+<https://github.com/blinklabs-io/docker-cardano-configs/tree/main/config>
 
 Dingo will drop a `dingo.socket` file which can be used by other clients, such
 as `cardano-cli` or software like `adder` or `kupo`. This has only had limited
@@ -145,6 +149,7 @@ make
 ```
 
 You can also run the code without building a binary, first
+
 ```bash
 go run ./cmd/dingo/
 ```

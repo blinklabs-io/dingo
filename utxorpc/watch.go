@@ -57,7 +57,7 @@ func (s *watchServiceServer) WatchTx(
 	var points []ocommon.Point
 	if len(intersect) > 0 {
 		for _, blockRef := range intersect {
-			blockIdx := blockRef.GetIndex()
+			blockIdx := blockRef.GetSlot()
 			blockHash := blockRef.GetHash()
 			slot := blockIdx
 			point := ocommon.NewPoint(slot, blockHash)
@@ -109,16 +109,10 @@ func (s *watchServiceServer) WatchTx(
 		}
 		if next != nil {
 			// Get ledger.Block from bytes
-			blockBytes := next.Block.Cbor[:]
-			blockType, err := ledger.DetermineBlockType(blockBytes)
-			if err != nil {
-				s.utxorpc.config.Logger.Error(
-					"failed to get block type",
-					"error", err,
-				)
-				return err
-			}
-			block, err := ledger.NewBlockFromCbor(blockType, blockBytes)
+			block, err := ledger.NewBlockFromCbor(
+				next.Block.Type,
+				next.Block.Cbor,
+			)
 			if err != nil {
 				s.utxorpc.config.Logger.Error(
 					"failed to get block",
@@ -129,9 +123,13 @@ func (s *watchServiceServer) WatchTx(
 
 			// Loop through transactions
 			for _, tx := range block.Transactions() {
+				tmpTx, err := tx.Utxorpc()
+				if err != nil {
+					return fmt.Errorf("convert transaction: %w", err)
+				}
 				var act watch.AnyChainTx
 				actc := watch.AnyChainTx_Cardano{
-					Cardano: tx.Utxorpc(),
+					Cardano: tmpTx,
 				}
 				act.Chain = &actc
 				resp := &watch.WatchTxResponse{

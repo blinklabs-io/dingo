@@ -20,7 +20,9 @@ import (
 	"slices"
 	"time"
 
+	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/config/cardano"
+	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/immutable"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/config"
@@ -44,20 +46,43 @@ func Load(cfg *config.Config, logger *slog.Logger, immutableDir string) error {
 			"component", "node",
 		)
 	}
-	// Load state
+	// Load database
+	dbConfig := &database.Config{
+		BlobCacheSize: cfg.BadgerCacheSize,
+		DataDir:       cfg.DatabasePath,
+		Logger:        logger,
+		PromRegistry:  nil,
+	}
+	db, err := database.New(dbConfig)
+	if err != nil {
+		return err
+	}
+	// Load chain
 	eventBus := event.NewEventBus(nil)
+	cm, err := chain.NewManager(
+		db,
+		eventBus,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to load chain manager: %w", err)
+	}
+	c := cm.PrimaryChain()
+	// Load state
 	ls, err := ledger.NewLedgerState(
 		ledger.LedgerStateConfig{
-			DataDir:           cfg.DatabasePath,
+			Database:          db,
+			ChainManager:      cm,
 			Logger:            logger,
 			CardanoNodeConfig: nodeCfg,
 			EventBus:          eventBus,
 		},
 	)
 	if err != nil {
-		return fmt.Errorf("failed to load state database: %w", err)
+		return fmt.Errorf("failed to load state: %w", err)
 	}
-	c := ls.Chain()
+	if err := ls.Start(); err != nil {
+		return fmt.Errorf("failed to load state: %w", err)
+	}
 	// Open immutable DB
 	immutable, err := immutable.New(immutableDir)
 	if err != nil {
@@ -92,7 +117,8 @@ func Load(cfg *config.Config, logger *slog.Logger, immutableDir string) error {
 				return err
 			}
 			// Skip first block when continuing a load operation
-			if blocksCopied == 0 && tmpBlock.SlotNumber() == chainTip.Point.Slot {
+			if blocksCopied == 0 &&
+				tmpBlock.SlotNumber() == chainTip.Point.Slot {
 				continue
 			}
 			blockBatch = append(blockBatch, tmpBlock)
@@ -117,7 +143,10 @@ func Load(cfg *config.Config, logger *slog.Logger, immutableDir string) error {
 		blockBatch = slices.Delete(blockBatch, 0, len(blockBatch))
 		if blocksCopied > 0 && blocksCopied%10000 == 0 {
 			logger.Info(
-				fmt.Sprintf("copying blocks from immutable DB (%d blocks copied)", blocksCopied),
+				fmt.Sprintf(
+					"copying blocks from immutable DB (%d blocks copied)",
+					blocksCopied,
+				),
 			)
 		}
 	}

@@ -12,15 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package models
+package types
 
-type StakeDelegation struct {
-	ID          uint   `gorm:"primarykey"`
-	StakingKey  []byte `gorm:"index"`
-	PoolKeyHash []byte `gorm:"index"`
-	AddedSlot   uint64
-}
+import (
+	"github.com/blinklabs-io/gouroboros/ledger"
+)
 
-func (StakeDelegation) TableName() string {
-	return "stake_delegation"
+// UtxoSlot allows providing a slot number with a ledger.Utxo object in a batch
+type UtxoSlot struct {
+	Utxo ledger.Utxo
+	Slot uint64
 }

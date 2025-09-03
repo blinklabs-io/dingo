@@ -22,6 +22,7 @@ type Utxo struct {
 	DeletedSlot uint64 `gorm:"index"`
 	PaymentKey  []byte `gorm:"index"`
 	StakingKey  []byte `gorm:"index"`
+	Amount      uint64 `gorm:"index"`
 	Cbor        []byte `gorm:"-"` // This is here for convenience but not represented in the metadata DB
 }
 

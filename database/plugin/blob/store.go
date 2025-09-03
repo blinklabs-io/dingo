@@ -19,6 +19,7 @@ import (
 
 	badgerPlugin "github.com/blinklabs-io/dingo/database/plugin/blob/badger"
 	badger "github.com/dgraph-io/badger/v4"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 type BlobStore interface {
@@ -35,6 +36,8 @@ type BlobStore interface {
 func New(
 	pluginName, dataDir string,
 	logger *slog.Logger,
+	promRegistry prometheus.Registerer,
+	badgerCacheSize int64,
 ) (BlobStore, error) {
-	return badgerPlugin.New(dataDir, logger)
+	return badgerPlugin.New(dataDir, logger, promRegistry, badgerCacheSize)
 }

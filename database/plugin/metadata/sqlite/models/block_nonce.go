@@ -14,12 +14,15 @@
 
 package models
 
-type StakeDeregistration struct {
-	ID         uint   `gorm:"primarykey"`
-	StakingKey []byte `gorm:"index"`
-	AddedSlot  uint64
+type BlockNonce struct {
+	ID           uint   `gorm:"primarykey"`
+	Hash         []byte `gorm:"index:hash_slot"`
+	Slot         uint64 `gorm:"index:hash_slot"`
+	Nonce        []byte
+	IsCheckpoint bool
 }
 
-func (StakeDeregistration) TableName() string {
-	return "stake_deregistration"
+// TableName overrides default table name
+func (BlockNonce) TableName() string {
+	return "block_nonce"
 }

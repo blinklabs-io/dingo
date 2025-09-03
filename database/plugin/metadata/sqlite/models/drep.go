@@ -16,12 +16,49 @@ package models
 
 type Drep struct {
 	ID         uint   `gorm:"primarykey"`
+	Credential []byte `gorm:"uniqueIndex"`
+	AnchorUrl  string
+	AnchorHash []byte
+	AddedSlot  uint64
+	Active     bool `gorm:"default:true"`
+}
+
+func (d *Drep) TableName() string {
+	return "drep"
+}
+
+type DeregistrationDrep struct {
+	ID             uint   `gorm:"primarykey"`
+	DrepCredential []byte `gorm:"index"`
+	AddedSlot      uint64
+	DepositAmount  uint64
+}
+
+func (DeregistrationDrep) TableName() string {
+	return "deregistration_drep"
+}
+
+type RegistrationDrep struct {
+	ID             uint   `gorm:"primarykey"`
+	DrepCredential []byte `gorm:"index"`
+	AddedSlot      uint64
+	DepositAmount  uint64
+	AnchorUrl      string
+	AnchorHash     []byte
+}
+
+func (RegistrationDrep) TableName() string {
+	return "registration_drep"
+}
+
+type UpdateDrep struct {
+	ID         uint   `gorm:"primarykey"`
 	Credential []byte `gorm:"index"`
 	AnchorUrl  string
 	AnchorHash []byte
 	AddedSlot  uint64
 }
 
-func (d *Drep) TableName() string {
-	return "drep"
+func (UpdateDrep) TableName() string {
+	return "update_drep"
 }

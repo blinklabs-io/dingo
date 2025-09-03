@@ -27,6 +27,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/plugin"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite/models"
 	"github.com/glebarez/sqlite"
+	"github.com/prometheus/client_golang/prometheus"
 	"gorm.io/gorm"
 	gormlogger "gorm.io/gorm/logger"
 	"gorm.io/plugin/opentelemetry/tracing"
@@ -44,16 +45,18 @@ func init() {
 
 // MetadataStoreSqlite stores all data in sqlite. Data may not be persisted
 type MetadataStoreSqlite struct {
-	dataDir     string
-	db          *gorm.DB
-	logger      *slog.Logger
-	timerVacuum *time.Timer
+	dataDir      string
+	db           *gorm.DB
+	logger       *slog.Logger
+	promRegistry prometheus.Registerer
+	timerVacuum  *time.Timer
 }
 
 // New creates a new database
 func New(
 	dataDir string,
 	logger *slog.Logger,
+	promRegistry prometheus.Registerer,
 ) (*MetadataStoreSqlite, error) {
 	var metadataDb *gorm.DB
 	var err error
@@ -101,9 +104,10 @@ func New(
 		}
 	}
 	db := &MetadataStoreSqlite{
-		db:      metadataDb,
-		dataDir: dataDir,
-		logger:  logger,
+		db:           metadataDb,
+		dataDir:      dataDir,
+		logger:       logger,
+		promRegistry: promRegistry,
 	}
 	if err := db.init(); err != nil {
 		// MetadataStoreSqlite is available for recovery, so return it with error
@@ -170,7 +174,7 @@ func (d *MetadataStoreSqlite) scheduleDailyVacuum() {
 }
 
 // AutoMigrate wraps the gorm AutoMigrate
-func (d *MetadataStoreSqlite) AutoMigrate(dst ...interface{}) error {
+func (d *MetadataStoreSqlite) AutoMigrate(dst ...any) error {
 	return d.DB().AutoMigrate(dst...)
 }
 
@@ -185,7 +189,7 @@ func (d *MetadataStoreSqlite) Close() error {
 }
 
 // Create creates a record
-func (d *MetadataStoreSqlite) Create(value interface{}) *gorm.DB {
+func (d *MetadataStoreSqlite) Create(value any) *gorm.DB {
 	return d.DB().Create(value)
 }
 
@@ -195,12 +199,12 @@ func (d *MetadataStoreSqlite) DB() *gorm.DB {
 }
 
 // First returns the first DB entry
-func (d *MetadataStoreSqlite) First(args interface{}) *gorm.DB {
+func (d *MetadataStoreSqlite) First(args any) *gorm.DB {
 	return d.DB().First(args)
 }
 
 // Order orders a DB query
-func (d *MetadataStoreSqlite) Order(args interface{}) *gorm.DB {
+func (d *MetadataStoreSqlite) Order(args any) *gorm.DB {
 	return d.DB().Order(args)
 }
 
@@ -211,8 +215,8 @@ func (d *MetadataStoreSqlite) Transaction() *gorm.DB {
 
 // Where constrains a DB query
 func (d *MetadataStoreSqlite) Where(
-	query interface{},
-	args ...interface{},
+	query any,
+	args ...any,
 ) *gorm.DB {
 	return d.DB().Where(query, args...)
 }

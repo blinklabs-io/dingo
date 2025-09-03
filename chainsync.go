@@ -15,8 +15,10 @@
 package dingo
 
 import (
+	"errors"
 	"fmt"
 
+	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/ledger"
 	ouroboros "github.com/blinklabs-io/gouroboros"
@@ -144,14 +146,24 @@ func (n *Node) chainsyncServerRequestNext(
 	// Check for available block
 	next, err := clientState.ChainIter.Next(false)
 	if err != nil {
-		return err
+		if !errors.Is(err, chain.ErrIteratorChainTip) {
+			return err
+		}
 	}
 	if next != nil {
-		return ctx.Server.RollForward(
-			next.Block.Type,
-			next.Block.Cbor,
-			tip,
-		)
+		if next.Rollback {
+			err = ctx.Server.RollBackward(
+				next.Point,
+				tip,
+			)
+		} else {
+			err = ctx.Server.RollForward(
+				next.Block.Type,
+				next.Block.Cbor,
+				tip,
+			)
+		}
+		return err
 	}
 	// Send AwaitReply
 	if err := ctx.Server.AwaitReply(); err != nil {
@@ -164,11 +176,18 @@ func (n *Node) chainsyncServerRequestNext(
 			return
 		}
 		tip := n.ledgerState.Tip()
-		_ = ctx.Server.RollForward(
-			next.Block.Type,
-			next.Block.Cbor,
-			tip,
-		)
+		if next.Rollback {
+			_ = ctx.Server.RollBackward(
+				next.Point,
+				tip,
+			)
+		} else {
+			_ = ctx.Server.RollForward(
+				next.Block.Type,
+				next.Block.Cbor,
+				tip,
+			)
+		}
 	}()
 	return nil
 }
@@ -196,7 +215,7 @@ func (n *Node) chainsyncClientRollBackward(
 func (n *Node) chainsyncClientRollForward(
 	ctx ochainsync.CallbackContext,
 	blockType uint,
-	blockData interface{},
+	blockData any,
 	tip ochainsync.Tip,
 ) error {
 	switch v := blockData.(type) {

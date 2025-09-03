@@ -111,7 +111,7 @@ func (c *chunk) Next() (*Block, error) {
 			Slot:  c.currentEntry.BlockOrEbb,
 			Hash:  c.currentEntry.HeaderHash[:],
 			IsEbb: c.currentEntry.IsEbb,
-			Cbor:  blkBytes[:],
+			Cbor:  blkBytes,
 		}
 		c.currentEntry = nil
 		c.nextEntry = nil
@@ -157,7 +157,7 @@ func (c *chunk) Next() (*Block, error) {
 			Type: blkType,
 			Slot: c.currentEntry.BlockOrEbb,
 			Hash: c.currentEntry.HeaderHash[:],
-			Cbor: blkBytes[:],
+			Cbor: blkBytes,
 		}
 		c.currentEntry = c.nextEntry
 		nextEntry, err := c.secondary.Next()

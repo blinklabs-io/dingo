@@ -1,0 +1,35 @@
+{
+  "name": "@blinklabs/dingo",
+  "version": "0.999.0",
+  "description": "Dingo is a Cardano blockchain data node",
+  "main": "index.js",
+  "bin": {
+    "dingo": "dingo"
+  },
+  "scripts": {
+    "postinstall": "golang-npm install",
+    "preuninstall": "golang-npm uninstall"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/blinklabs-io/dingo.git"
+  },
+  "keywords": [
+    "go",
+    "cardano-node"
+  ],
+  "author": "Blink Labs Software",
+  "license": "Apache-2.0",
+  "bugs": {
+    "url": "https://github.com/blinklabs-io/dingo/issues"
+  },
+  "homepage": "https://github.com/blinklabs-io/dingo#readme",
+  "dependencies": {
+    "golang-npm": "^0.0.6"
+  },
+  "goBinary": {
+    "name": "dingo",
+    "path": "./bin",
+    "url": "https://github.com/blinklabs-io/dingo/releases/download/v{{version}}/dingo-v{{version}}-{{platform}}-{{arch}}.tar.gz"
+  }
+}

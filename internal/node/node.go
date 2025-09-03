@@ -104,6 +104,8 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 			dingo.WithIntersectTip(cfg.IntersectTip),
 			dingo.WithLogger(logger),
 			dingo.WithDatabasePath(cfg.DatabasePath),
+			dingo.WithBadgerCacheSize(cfg.BadgerCacheSize),
+			dingo.WithMempoolCapacity(cfg.MempoolCapacity),
 			dingo.WithNetwork(cfg.Network),
 			dingo.WithCardanoNodeConfig(nodeCfg),
 			dingo.WithListeners(listeners...),
@@ -111,6 +113,7 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 			dingo.WithUtxorpcPort(cfg.UtxorpcPort),
 			dingo.WithUtxorpcTlsCertFilePath(cfg.TlsCertFilePath),
 			dingo.WithUtxorpcTlsKeyFilePath(cfg.TlsKeyFilePath),
+			dingo.WithDevMode(cfg.DevMode),
 			// Enable metrics with default prometheus registry
 			dingo.WithPrometheusRegistry(prometheus.DefaultRegisterer),
 			// TODO: make this configurable (#387)
@@ -150,12 +153,16 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 		}
 	}()
 	// Wait for interrupt/termination signal
-	signalCtx, signalCtxStop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	signalCtx, signalCtxStop := signal.NotifyContext(
+		context.Background(),
+		syscall.SIGINT,
+		syscall.SIGTERM,
+	)
 	defer signalCtxStop()
 	go func() {
 		<-signalCtx.Done()
 		logger.Info("signal received, shutting down")
-		if err := d.Stop(); err != nil { // nolint:contextcheck
+		if err := d.Stop(); err != nil { //nolint:contextcheck
 			logger.Error(
 				"failure(s) while shutting down",
 				"error",

@@ -53,7 +53,7 @@ func (s *syncServiceServer) FetchBlock(
 	var points []ocommon.Point
 	if len(ref) > 0 {
 		for _, blockRef := range ref {
-			blockIdx := blockRef.GetIndex()
+			blockIdx := blockRef.GetSlot()
 			blockHash := blockRef.GetHash()
 			slot := blockIdx
 			point := ocommon.NewPoint(slot, blockHash)
@@ -77,8 +77,12 @@ func (s *syncServiceServer) FetchBlock(
 		if err != nil {
 			return nil, err
 		}
+		tmpBlock, err := ret.Utxorpc()
+		if err != nil {
+			return nil, fmt.Errorf("convert block: %w", err)
+		}
 		acbc := sync.AnyChainBlock_Cardano{
-			Cardano: ret.Utxorpc(),
+			Cardano: tmpBlock,
 		}
 		acb.Chain = &acbc
 		resp.Block = append(resp.Block, &acb)
@@ -141,8 +145,12 @@ func (s *syncServiceServer) DumpHistory(
 		if err != nil {
 			return nil, err
 		}
+		tmpBlock, err := ret.Utxorpc()
+		if err != nil {
+			return nil, fmt.Errorf("convert block: %w", err)
+		}
 		acbc := sync.AnyChainBlock_Cardano{
-			Cardano: ret.Utxorpc(),
+			Cardano: tmpBlock,
 		}
 		acb.Chain = &acbc
 		resp.Block = append(resp.Block, &acb)
@@ -170,7 +178,7 @@ func (s *syncServiceServer) FollowTip(
 	var points []ocommon.Point
 	if len(intersect) > 0 {
 		for _, blockRef := range intersect {
-			blockIdx := blockRef.GetIndex()
+			blockIdx := blockRef.GetSlot()
 			blockHash := blockRef.GetHash()
 			slot := blockIdx
 			point := ocommon.NewPoint(slot, blockHash)
@@ -222,16 +230,10 @@ func (s *syncServiceServer) FollowTip(
 		}
 		if next != nil {
 			// Send block response
-			blockBytes := next.Block.Cbor[:]
-			blockType, err := ledger.DetermineBlockType(blockBytes)
-			if err != nil {
-				s.utxorpc.config.Logger.Error(
-					"failed to get block type",
-					"error", err,
-				)
-				return err
-			}
-			block, err := ledger.NewBlockFromCbor(blockType, blockBytes)
+			block, err := ledger.NewBlockFromCbor(
+				next.Block.Type,
+				next.Block.Cbor,
+			)
 			if err != nil {
 				s.utxorpc.config.Logger.Error(
 					"failed to get block",
@@ -239,9 +241,13 @@ func (s *syncServiceServer) FollowTip(
 				)
 				return err
 			}
+			tmpBlock, err := block.Utxorpc()
+			if err != nil {
+				return fmt.Errorf("convert block: %w", err)
+			}
 			var acb sync.AnyChainBlock
 			acbc := sync.AnyChainBlock_Cardano{
-				Cardano: block.Utxorpc(),
+				Cardano: tmpBlock,
 			}
 			acb.Chain = &acbc
 			resp := &sync.FollowTipResponse{
@@ -270,7 +276,7 @@ func (s *syncServiceServer) ReadTip(
 	resp := &sync.ReadTipResponse{}
 
 	point := s.utxorpc.config.LedgerState.Tip().Point
-	resp.Tip = &sync.BlockRef{Index: point.Slot, Hash: point.Hash}
+	resp.Tip = &sync.BlockRef{Slot: point.Slot, Hash: point.Hash}
 
 	return connect.NewResponse(resp), nil
 }

@@ -22,6 +22,11 @@ go.work
 
 # Program binary
 /dingo
+/bin/dingo
 
 # Local data directory
 /.dingo
+/.devnet
+
+# node_modules for npm publishing
+node_modules/

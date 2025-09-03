@@ -14,15 +14,13 @@
 
 package models
 
-type RegistrationDrep struct {
-	ID             uint   `gorm:"primarykey"`
-	DrepCredential []byte `gorm:"index"`
-	AddedSlot      uint64
-	DepositAmount  uint64
-	AnchorUrl      string
-	AnchorHash     []byte
+type Datum struct {
+	ID        uint   `gorm:"primarykey"`
+	Hash      []byte `gorm:"index;not null;unique"`
+	RawDatum  []byte `gorm:"not null"`
+	AddedSlot uint64 `gorm:"not null"`
 }
 
-func (RegistrationDrep) TableName() string {
-	return "registration_drep"
+func (Datum) TableName() string {
+	return "datum"
 }

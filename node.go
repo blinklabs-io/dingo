@@ -20,8 +20,10 @@ import (
 	"fmt"
 	"slices"
 
+	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/chainsync"
 	"github.com/blinklabs-io/dingo/connmanager"
+	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/mempool"
@@ -44,6 +46,8 @@ type Node struct {
 	chainsyncState *chainsync.State
 	eventBus       *event.EventBus
 	mempool        *mempool.Mempool
+	chainManager   *chain.ChainManager
+	db             *database.Database
 	ledgerState    *ledger.LedgerState
 	utxorpc        *utxorpc.Utxorpc
 	shutdownFuncs  []func(context.Context) error
@@ -71,14 +75,55 @@ func (n *Node) Run() error {
 			return err
 		}
 	}
+	// Load database
+	dbNeedsRecovery := false
+	dbConfig := &database.Config{
+		BlobCacheSize: n.config.badgerCacheSize,
+		DataDir:       n.config.dataDir,
+		Logger:        n.config.logger,
+		PromRegistry:  n.config.promRegistry,
+	}
+	db, err := database.New(dbConfig)
+	if db == nil {
+		n.config.logger.Error(
+			"failed to create database",
+			"error",
+			"empty database returned",
+		)
+		return errors.New("empty database returned")
+	}
+	n.db = db
+	if err != nil {
+		var dbErr database.CommitTimestampError
+		if !errors.As(err, &dbErr) {
+			return fmt.Errorf("failed to open database: %w", err)
+		}
+		n.config.logger.Warn(
+			"database initialization error, needs recovery",
+			"error",
+			err,
+		)
+		dbNeedsRecovery = true
+	}
+	// Load chain manager
+	cm, err := chain.NewManager(
+		n.db,
+		n.eventBus,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to load chain manager: %w", err)
+	}
+	n.chainManager = cm
 	// Load state
 	state, err := ledger.NewLedgerState(
 		ledger.LedgerStateConfig{
-			DataDir:                    n.config.dataDir,
+			ChainManager:               n.chainManager,
+			Database:                   n.db,
 			EventBus:                   n.eventBus,
 			Logger:                     n.config.logger,
 			CardanoNodeConfig:          n.config.cardanoNodeConfig,
 			PromRegistry:               n.config.promRegistry,
+			ForgeBlocks:                n.config.devMode,
 			BlockfetchRequestRangeFunc: n.blockfetchClientRequestRange,
 		},
 	)
@@ -93,13 +138,27 @@ func (n *Node) Run() error {
 		},
 	)
 	n.ledgerState = state
+	// Run DB recovery if needed
+	if dbNeedsRecovery {
+		if err := n.ledgerState.RecoverCommitTimestampConflict(); err != nil {
+			return fmt.Errorf("failed to recover database: %w", err)
+		}
+	}
+	// Start ledger
+	if err := n.ledgerState.Start(); err != nil {
+		return fmt.Errorf("failed to start ledger: %w", err)
+	}
 	// Initialize mempool
-	n.mempool = mempool.NewMempool(
-		n.config.logger,
-		n.eventBus,
-		n.config.promRegistry,
-		n.ledgerState,
+	n.mempool = mempool.NewMempool(mempool.MempoolConfig{
+		MempoolCapacity: n.config.mempoolCapacity,
+		Logger:          n.config.logger,
+		EventBus:        n.eventBus,
+		PromRegistry:    n.config.promRegistry,
+		Validator:       n.ledgerState,
+	},
 	)
+	// Set mempool in ledger state for block forging
+	n.ledgerState.SetMempool(n.mempool)
 	// Initialize chainsync state
 	n.chainsyncState = chainsync.NewState(
 		n.eventBus,
@@ -112,9 +171,10 @@ func (n *Node) Run() error {
 	// Configure peer governor
 	n.peerGov = peergov.NewPeerGovernor(
 		peergov.PeerGovernorConfig{
-			Logger:      n.config.logger,
-			EventBus:    n.eventBus,
-			ConnManager: n.connManager,
+			Logger:          n.config.logger,
+			EventBus:        n.eventBus,
+			ConnManager:     n.connManager,
+			DisableOutbound: n.config.devMode,
 		},
 	)
 	n.eventBus.SubscribeFunc(

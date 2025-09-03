@@ -42,9 +42,10 @@ type PeerGovernor struct {
 }
 
 type PeerGovernorConfig struct {
-	Logger      *slog.Logger
-	EventBus    *event.EventBus
-	ConnManager *connmanager.ConnectionManager
+	Logger          *slog.Logger
+	EventBus        *event.EventBus
+	ConnManager     *connmanager.ConnectionManager
+	DisableOutbound bool
 }
 
 func NewPeerGovernor(cfg PeerGovernorConfig) *PeerGovernor {
@@ -75,6 +76,9 @@ func (p *PeerGovernor) Start() error {
 func (p *PeerGovernor) LoadTopologyConfig(
 	topologyConfig *topology.TopologyConfig,
 ) {
+	if p.config.DisableOutbound {
+		return
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	// Remove peers originally sourced from the topology
@@ -182,10 +186,20 @@ func (p *PeerGovernor) peerIndexByConnId(connId ouroboros.ConnectionId) int {
 }
 
 func (p *PeerGovernor) startOutboundConnections() {
+	// Skip outbound connections if disabled
+	if p.config.DisableOutbound {
+		p.config.Logger.Info(
+			"outbound connections disabled, skipping outbound connections",
+			"role", "client",
+		)
+		return
+	}
+
 	p.config.Logger.Debug(
 		"starting connections",
 		"role", "client",
 	)
+
 	for _, tmpPeer := range p.peers {
 		go p.createOutboundConnection(tmpPeer)
 	}

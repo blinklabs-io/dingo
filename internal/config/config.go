@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/blinklabs-io/dingo/topology"
 	ouroboros "github.com/blinklabs-io/gouroboros"
@@ -42,23 +43,28 @@ func FromContext(ctx context.Context) *Config {
 }
 
 type Config struct {
-	BindAddr        string `yaml:"bindAddr" split_words:"true"`
-	CardanoConfig   string `yaml:"cardanoConfig" envconfig:"config"`
-	DatabasePath    string `yaml:"databasePath" split_words:"true"`
-	SocketPath      string `yaml:"socketPath" split_words:"true"`
-	Network         string `yaml:"network"`
-	TlsCertFilePath string `yaml:"tlsCertFilePath" envconfig:"TLS_CERT_FILE_PATH"`
-	TlsKeyFilePath  string `yaml:"tlsKeyFilePath" envconfig:"TLS_KEY_FILE_PATH"`
-	Topology        string `yaml:"topology"`
-	MetricsPort     uint   `yaml:"metricsPort" split_words:"true"`
-	PrivateBindAddr string `yaml:"privateBindAddr" split_words:"true"`
-	PrivatePort     uint   `yaml:"privatePort" split_words:"true"`
-	RelayPort       uint   `yaml:"relayPort" envconfig:"port"`
-	UtxorpcPort     uint   `yaml:"utxorpcPort" split_words:"true"`
-	IntersectTip    bool   `yaml:"intersectTip" split_words:"true"`
+	BadgerCacheSize int64  `split_words:"true" yaml:"badgerCacheSize"`
+	MempoolCapacity int64  `split_words:"true" yaml:"mempoolCapacity"`
+	BindAddr        string `split_words:"true" yaml:"bindAddr"`
+	CardanoConfig   string `                   yaml:"cardanoConfig"   envconfig:"config"`
+	DatabasePath    string `split_words:"true" yaml:"databasePath"`
+	SocketPath      string `split_words:"true" yaml:"socketPath"`
+	Network         string `                   yaml:"network"`
+	TlsCertFilePath string `                   yaml:"tlsCertFilePath" envconfig:"TLS_CERT_FILE_PATH"`
+	TlsKeyFilePath  string `                   yaml:"tlsKeyFilePath"  envconfig:"TLS_KEY_FILE_PATH"`
+	Topology        string `                   yaml:"topology"`
+	MetricsPort     uint   `split_words:"true" yaml:"metricsPort"`
+	PrivateBindAddr string `split_words:"true" yaml:"privateBindAddr"`
+	PrivatePort     uint   `split_words:"true" yaml:"privatePort"`
+	RelayPort       uint   `                   yaml:"relayPort"       envconfig:"port"`
+	UtxorpcPort     uint   `split_words:"true" yaml:"utxorpcPort"`
+	IntersectTip    bool   `split_words:"true" yaml:"intersectTip"`
+	DevMode         bool   `split_words:"true" yaml:"devMode"`
 }
 
 var globalConfig = &Config{
+	BadgerCacheSize: 1073741824,
+	MempoolCapacity: 1048576,
 	BindAddr:        "0.0.0.0",
 	CardanoConfig:   "./config/cardano/preview/config.json",
 	DatabasePath:    ".dingo",
@@ -73,13 +79,29 @@ var globalConfig = &Config{
 	Topology:        "",
 	TlsCertFilePath: "",
 	TlsKeyFilePath:  "",
+	DevMode:         false,
 }
 
 func LoadConfig(configFile string) (*Config, error) {
 	// Load config file as YAML if provided
-	fmt.Println(configFile)
+	if configFile == "" {
+		// Check for config file in this path: ~/.dingo/dingo.yaml
+		if homeDir, err := os.UserHomeDir(); err == nil {
+			userPath := filepath.Join(homeDir, ".dingo", "dingo.yaml")
+			if _, err := os.Stat(userPath); err == nil {
+				configFile = userPath
+			}
+		}
+
+		// Try to check for /etc/dingo/dingo.yaml if still not found
+		if configFile == "" {
+			systemPath := "/etc/dingo/dingo.yaml"
+			if _, err := os.Stat(systemPath); err == nil {
+				configFile = systemPath
+			}
+		}
+	}
 	if configFile != "" {
-		fmt.Printf("Reading from config file %s\n", configFile)
 		buf, err := os.ReadFile(configFile)
 		if err != nil {
 			return nil, fmt.Errorf("error reading config file: %w", err)
@@ -88,12 +110,12 @@ func LoadConfig(configFile string) (*Config, error) {
 		if err != nil {
 			return nil, fmt.Errorf("error parsing config file: %w", err)
 		}
-		fmt.Printf("Successfully loaded the config file %s\n", configFile)
 	}
 	err := envconfig.Process("cardano", globalConfig)
 	if err != nil {
 		return nil, fmt.Errorf("error processing environment: %+w", err)
 	}
+
 	_, err = LoadTopologyConfig()
 	if err != nil {
 		return nil, fmt.Errorf("error loading topology: %+w", err)
@@ -108,6 +130,9 @@ func GetConfig() *Config {
 var globalTopologyConfig = &topology.TopologyConfig{}
 
 func LoadTopologyConfig() (*topology.TopologyConfig, error) {
+	if globalConfig.DevMode {
+		return globalTopologyConfig, nil
+	}
 	if globalConfig.Topology == "" {
 		// Use default bootstrap peers for specified network
 		network, ok := ouroboros.NetworkByName(globalConfig.Network)

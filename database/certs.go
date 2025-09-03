@@ -51,39 +51,3 @@ func (d *Database) SetPoolRetirement(
 ) error {
 	return d.metadata.SetPoolRetirement(cert, slot, txn.Metadata())
 }
-
-// SetRegistration saves a registration certificate
-func (d *Database) SetRegistration(
-	cert *lcommon.RegistrationCertificate,
-	slot, deposit uint64,
-	txn *Txn,
-) error {
-	return d.metadata.SetRegistration(cert, slot, deposit, txn.Metadata())
-}
-
-// SetStakeDelegation saves a stake delegation certificate
-func (d *Database) SetStakeDelegation(
-	cert *lcommon.StakeDelegationCertificate,
-	slot uint64,
-	txn *Txn,
-) error {
-	return d.metadata.SetStakeDelegation(cert, slot, txn.Metadata())
-}
-
-// SetStakeDeregistration saves a stake deregistration certificate
-func (d *Database) SetStakeDeregistration(
-	cert *lcommon.StakeDeregistrationCertificate,
-	slot uint64,
-	txn *Txn,
-) error {
-	return d.metadata.SetStakeDeregistration(cert, slot, txn.Metadata())
-}
-
-// SetStakeRegistration saves a stake registration certificate
-func (d *Database) SetStakeRegistration(
-	cert *lcommon.StakeRegistrationCertificate,
-	slot, deposit uint64,
-	txn *Txn,
-) error {
-	return d.metadata.SetStakeRegistration(cert, slot, deposit, txn.Metadata())
-}

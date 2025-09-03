@@ -31,6 +31,8 @@ import (
 type ListenerConfig = connmanager.ListenerConfig
 
 type Config struct {
+	badgerCacheSize    int64
+	mempoolCapacity    int64
 	cardanoNodeConfig  *cardano.CardanoNodeConfig
 	dataDir            string
 	intersectPoints    []ocommon.Point
@@ -48,6 +50,7 @@ type Config struct {
 	topologyConfig     *topology.TopologyConfig
 	tracing            bool
 	tracingStdout      bool
+	devMode            bool
 }
 
 // configPopulateNetworkMagic uses the named network (if specified) to determine the network magic value (if not specified)
@@ -241,5 +244,27 @@ func WithTracing(tracing bool) ConfigOptionFunc {
 func WithTracingStdout(stdout bool) ConfigOptionFunc {
 	return func(c *Config) {
 		c.tracingStdout = stdout
+	}
+}
+
+// WithBadgerCacheSize sets the maximum cache size (in bytes).This controls memory usage by limiting the size of block and index caches.
+// If not set, the default size defined in internal config will be used.
+func WithBadgerCacheSize(cacheSize int64) ConfigOptionFunc {
+	return func(c *Config) {
+		c.badgerCacheSize = cacheSize
+	}
+}
+
+// WithMempoolCapacity sets the mempool capacity (in bytes)
+func WithMempoolCapacity(capacity int64) ConfigOptionFunc {
+	return func(c *Config) {
+		c.mempoolCapacity = capacity
+	}
+}
+
+// WithDevMode enables development mode which prevents outbound connections.
+func WithDevMode(devMode bool) ConfigOptionFunc {
+	return func(c *Config) {
+		c.devMode = devMode
 	}
 }

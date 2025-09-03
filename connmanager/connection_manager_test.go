@@ -81,7 +81,7 @@ func TestConnectionManagerConnError(t *testing.T) {
 	)
 	testIdx := 2
 	var connIds []ouroboros.ConnectionId
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		mockConversation := ouroboros_mock.ConversationKeepAlive
 		if i == testIdx {
 			mockConversation = ouroboros_mock.ConversationKeepAliveClose

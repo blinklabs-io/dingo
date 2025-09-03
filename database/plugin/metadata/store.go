@@ -19,9 +19,11 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite/models"
+	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
+	"github.com/prometheus/client_golang/prometheus"
 	"gorm.io/gorm"
 )
 
@@ -34,16 +36,37 @@ type MetadataStore interface {
 	Transaction() *gorm.DB
 
 	// Ledger state
+	AddUtxos(
+		[]types.UtxoSlot,
+		*gorm.DB,
+	) error
 	GetPoolRegistrations(
 		lcommon.PoolKeyHash,
 		*gorm.DB,
 	) ([]lcommon.PoolRegistrationCertificate, error)
+	GetPool(
+		[]byte, // pool key hash
+		*gorm.DB,
+	) (models.Pool, error)
 	GetStakeRegistrations(
 		[]byte, // stakeKey
 		*gorm.DB,
 	) ([]lcommon.StakeRegistrationCertificate, error)
 	GetTip(*gorm.DB) (ochainsync.Tip, error)
 
+	GetAccount(
+		[]byte, // stakeKey
+		*gorm.DB,
+	) (models.Account, error)
+	GetBlockNonce(
+		[]byte, // blockHash
+		uint64, // slotNumber
+		*gorm.DB,
+	) ([]byte, error)
+	GetDatum(
+		lcommon.Blake2b256,
+		*gorm.DB,
+	) (models.Datum, error)
 	GetPParams(
 		uint64, // epoch
 		*gorm.DB,
@@ -58,6 +81,38 @@ type MetadataStore interface {
 		*gorm.DB,
 	) (models.Utxo, error)
 
+	SetAccount(
+		[]byte, // stakeKey
+		[]byte, // pkh
+		[]byte, // drep
+		uint64, // slot
+		bool, // active
+		*gorm.DB,
+	) error
+	SetBlockNonce(
+		[]byte, // blockHash
+		uint64, // slotNumber
+		[]byte, // nonce
+		bool, // isCheckpoint
+		*gorm.DB,
+	) error
+	SetDatum(
+		lcommon.Blake2b256,
+		[]byte,
+		uint64, // slot
+		*gorm.DB,
+	) error
+	SetDeregistration(
+		*lcommon.DeregistrationCertificate,
+		uint64, // slot
+		*gorm.DB,
+	) error
+	SetDeregistrationDrep(
+		*lcommon.DeregistrationDrepCertificate,
+		uint64, // slot
+		uint64, // deposit
+		*gorm.DB,
+	) error
 	SetEpoch(
 		uint64, // slot
 		uint64, // epoch
@@ -98,6 +153,12 @@ type MetadataStore interface {
 		uint64, // deposit
 		*gorm.DB,
 	) error
+	SetRegistrationDrep(
+		*lcommon.RegistrationDrepCertificate,
+		uint64, // slot
+		uint64, // deposit
+		*gorm.DB,
+	) error
 	SetStakeDelegation(
 		*lcommon.StakeDelegationCertificate,
 		uint64, // slot
@@ -114,8 +175,30 @@ type MetadataStore interface {
 		uint64, // deposit
 		*gorm.DB,
 	) error
+	SetStakeRegistrationDelegation(
+		*lcommon.StakeRegistrationDelegationCertificate,
+		uint64, // slot
+		uint64, // deposit
+		*gorm.DB,
+	) error
+	SetStakeVoteDelegation(
+		*lcommon.StakeVoteDelegationCertificate,
+		uint64, // slot
+		*gorm.DB,
+	) error
+	SetStakeVoteRegistrationDelegation(
+		*lcommon.StakeVoteRegistrationDelegationCertificate,
+		uint64, // slot
+		uint64, // deposit
+		*gorm.DB,
+	) error
 	SetTip(
 		ochainsync.Tip,
+		*gorm.DB,
+	) error
+	SetUpdateDrep(
+		*lcommon.UpdateDrepCertificate,
+		uint64, // slot
 		*gorm.DB,
 	) error
 	SetUtxo(
@@ -124,19 +207,33 @@ type MetadataStore interface {
 		uint64, // slot
 		[]byte, // payment
 		[]byte, // stake
+		uint64, // amount
+		*gorm.DB,
+	) error
+	SetVoteDelegation(
+		*lcommon.VoteDelegationCertificate,
+		uint64, // slot
+		*gorm.DB,
+	) error
+	SetVoteRegistrationDelegation(
+		*lcommon.VoteRegistrationDelegationCertificate,
+		uint64, // slot
+		uint64, // deposit
 		*gorm.DB,
 	) error
 
 	// Helpers
+	DeleteBlockNoncesBeforeSlot(uint64, *gorm.DB) error
+	DeleteBlockNoncesBeforeSlotWithoutCheckpoints(uint64, *gorm.DB) error
 	DeleteUtxo(any, *gorm.DB) error
 	DeleteUtxos([]any, *gorm.DB) error
 	DeleteUtxosAfterSlot(uint64, *gorm.DB) error
-	DeleteUtxosBeforeSlot(uint64, *gorm.DB) error
 	GetEpochLatest(*gorm.DB) (models.Epoch, error)
 	GetEpochsByEra(uint, *gorm.DB) ([]models.Epoch, error)
+	GetEpochs(*gorm.DB) ([]models.Epoch, error)
 	GetUtxosAddedAfterSlot(uint64, *gorm.DB) ([]models.Utxo, error)
 	GetUtxosByAddress(ledger.Address, *gorm.DB) ([]models.Utxo, error)
-	GetUtxosDeletedBeforeSlot(uint64, *gorm.DB) ([]models.Utxo, error)
+	GetUtxosDeletedBeforeSlot(uint64, int, *gorm.DB) ([]models.Utxo, error)
 	SetUtxoDeletedAtSlot(ledger.TransactionInput, uint64, *gorm.DB) error
 	SetUtxosNotDeletedAfterSlot(uint64, *gorm.DB) error
 }
@@ -145,6 +242,7 @@ type MetadataStore interface {
 func New(
 	pluginName, dataDir string,
 	logger *slog.Logger,
+	promRegistry prometheus.Registerer,
 ) (MetadataStore, error) {
-	return sqlite.New(dataDir, logger)
+	return sqlite.New(dataDir, logger, promRegistry)
 }

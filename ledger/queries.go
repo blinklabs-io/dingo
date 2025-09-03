@@ -61,12 +61,10 @@ func (ls *LedgerState) querySystemStart() (any, error) {
 			"unable to get shelley era genesis for system start",
 		)
 	}
-	// Nanosecond is always within uint64 range
-	// #nosec G115
 	ret := olocalstatequery.SystemStartResult{
-		Year:        shelleyGenesis.SystemStart.Year(),
+		Year:        *big.NewInt(int64(shelleyGenesis.SystemStart.Year())),
 		Day:         shelleyGenesis.SystemStart.YearDay(),
-		Picoseconds: uint64(shelleyGenesis.SystemStart.Nanosecond() * 1000),
+		Picoseconds: *big.NewInt(int64(shelleyGenesis.SystemStart.Nanosecond() * 1000)),
 	}
 	return ret, nil
 }

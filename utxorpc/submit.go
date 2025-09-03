@@ -55,11 +55,25 @@ func (s *submitServiceServer) SubmitTx(
 	// Loop through the transactions and add each to the mempool
 	errorList := make([]error, len(txRawList))
 	hasError := false
+	placeholderRef := []byte{}
 	for i, txi := range txRawList {
 		txRawBytes := txi.GetRaw() // raw bytes
-		txHash := lcommon.Blake2b256Hash(txRawBytes)
 		txType, err := gledger.DetermineTransactionType(txRawBytes)
-		placeholderRef := []byte{}
+		if err != nil {
+			resp.Ref = append(resp.Ref, placeholderRef)
+			errorList[i] = err
+			s.utxorpc.config.Logger.Error(
+				fmt.Sprintf(
+					"failed decoding tx %d: %v",
+					i,
+					err,
+				),
+			)
+			hasError = true
+			continue
+		}
+		tx, err := gledger.NewTransactionFromCbor(txType, txRawBytes)
+		txHash := tx.Hash()
 		if err != nil {
 			resp.Ref = append(resp.Ref, placeholderRef)
 			errorList[i] = err
@@ -160,6 +174,79 @@ func (s *submitServiceServer) WaitForTx(
 	return nil
 }
 
+// EvalTx
+func (s *submitServiceServer) EvalTx(
+	ctx context.Context,
+	req *connect.Request[submit.EvalTxRequest],
+) (*connect.Response[submit.EvalTxResponse], error) {
+	s.utxorpc.config.Logger.Info("Got an EvalTx request")
+	txRawList := req.Msg.GetTx() // []*AnyChainTx
+	resp := &submit.EvalTxResponse{}
+	for _, txi := range txRawList {
+		txRawBytes := txi.GetRaw()
+		// Decode TX
+		txType, err := gledger.DetermineTransactionType(txRawBytes)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"could not parse transaction to determine type: %w",
+				err,
+			)
+		}
+		tx, err := gledger.NewTransactionFromCbor(txType, txRawBytes)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse transaction CBOR: %w", err)
+		}
+		// Evaluate TX
+		fee, totalExUnits, redeemerExUnits, err := s.utxorpc.config.LedgerState.EvaluateTx(
+			tx,
+		)
+		// Populate response
+		tmpRedeemers := make([]*cardano.Redeemer, 0, len(redeemerExUnits))
+		for key, val := range redeemerExUnits {
+			tmpRedeemers = append(
+				tmpRedeemers,
+				&cardano.Redeemer{
+					Purpose: cardano.RedeemerPurpose(key.Tag),
+					Index:   key.Index,
+					ExUnits: &cardano.ExUnits{
+						Steps:  uint64(val.Steps),  // nolint:gosec
+						Memory: uint64(val.Memory), // nolint:gosec
+					},
+					// TODO: Payload
+				},
+			)
+		}
+		var txEval *cardano.TxEval
+		if err != nil {
+			txEval = &cardano.TxEval{
+				Errors: []*cardano.EvalError{
+					{
+						Msg: err.Error(),
+					},
+				},
+			}
+		} else {
+			txEval = &cardano.TxEval{
+				Fee: fee,
+				ExUnits: &cardano.ExUnits{
+					Steps:  uint64(totalExUnits.Steps),  // nolint:gosec
+					Memory: uint64(totalExUnits.Memory), // nolint:gosec
+				},
+				Redeemers: tmpRedeemers,
+			}
+		}
+		resp.Report = append(
+			resp.Report,
+			&submit.AnyChainEval{
+				Chain: &submit.AnyChainEval_Cardano{
+					Cardano: txEval,
+				},
+			},
+		)
+	}
+	return connect.NewResponse(resp), nil
+}
+
 // ReadMempool
 func (s *submitServiceServer) ReadMempool(
 	ctx context.Context,
@@ -211,7 +298,10 @@ func (s *submitServiceServer) WatchMempool(
 			if err != nil {
 				return err
 			}
-			cTx := tx.Utxorpc() // *cardano.Tx
+			cTx, err := tx.Utxorpc() // *cardano.Tx
+			if err != nil {
+				return fmt.Errorf("convert transaction: %w", err)
+			}
 			resp := &submit.WatchMempoolResponse{}
 			record := &submit.TxInMempool{
 				NativeBytes: txRawBytes,

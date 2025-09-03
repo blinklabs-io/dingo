@@ -26,6 +26,13 @@ type TestTable struct {
 	gorm.Model
 }
 
+var dbConfig = &database.Config{
+	BlobCacheSize: 1 << 20,
+	Logger:        nil,
+	PromRegistry:  nil,
+	DataDir:       "",
+}
+
 // TestInMemorySqliteMultipleTransaction tests that our sqlite connection allows multiple
 // concurrent transactions when using in-memory mode. This requires special URI flags, and
 // this is mostly making sure that we don't lose them
@@ -42,7 +49,7 @@ func TestInMemorySqliteMultipleTransaction(t *testing.T) {
 		}
 		return nil
 	}
-	db, err := database.New(nil, "") // in-memory
+	db, err := database.New(dbConfig)
 	if err != nil {
 		t.Fatalf("unexpected error: %s", err)
 	}

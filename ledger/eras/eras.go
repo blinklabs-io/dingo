@@ -31,6 +31,7 @@ type EraDesc struct {
 	CalculateEtaVFunc       func(*cardano.CardanoNodeConfig, []byte, ledger.Block) ([]byte, error)
 	CertDepositFunc         func(lcommon.Certificate, lcommon.ProtocolParameters) (uint64, error)
 	ValidateTxFunc          func(lcommon.Transaction, uint64, lcommon.LedgerState, lcommon.ProtocolParameters) error
+	EvaluateTxFunc          func(tx lcommon.Transaction, ls lcommon.LedgerState, pp lcommon.ProtocolParameters) (uint64, lcommon.ExUnits, map[lcommon.RedeemerKey]lcommon.ExUnits, error)
 }
 
 var Eras = []EraDesc{
@@ -41,4 +42,18 @@ var Eras = []EraDesc{
 	AlonzoEraDesc,
 	BabbageEraDesc,
 	ConwayEraDesc,
+}
+
+var ProtocolMajorVersionToEra = map[uint]EraDesc{
+	0:  ByronEraDesc,
+	1:  ByronEraDesc,
+	2:  ShelleyEraDesc,
+	3:  AllegraEraDesc,
+	4:  MaryEraDesc,
+	5:  AlonzoEraDesc,
+	6:  AlonzoEraDesc,
+	7:  BabbageEraDesc,
+	8:  BabbageEraDesc,
+	9:  ConwayEraDesc,
+	10: ConwayEraDesc,
 }

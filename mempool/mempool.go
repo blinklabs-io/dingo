@@ -15,6 +15,7 @@
 package mempool
 
 import (
+	"fmt"
 	"io"
 	"log/slog"
 	"slices"
@@ -23,7 +24,6 @@ import (
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/event"
-	"github.com/blinklabs-io/dingo/ledger"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/prometheus/client_golang/prometheus"
@@ -52,14 +52,27 @@ type MempoolTransaction struct {
 	LastSeen time.Time
 }
 
+// TxValidator defines the interface for transaction validation needed by mempool.
+type TxValidator interface {
+	ValidateTx(tx gledger.Transaction) error
+}
+type MempoolConfig struct {
+	MempoolCapacity int64
+	Logger          *slog.Logger
+	EventBus        *event.EventBus
+	PromRegistry    prometheus.Registerer
+	Validator       TxValidator
+}
+
 type Mempool struct {
 	sync.RWMutex
 	logger         *slog.Logger
 	eventBus       *event.EventBus
-	ledgerState    *ledger.LedgerState
+	validator      TxValidator
 	consumers      map[ouroboros.ConnectionId]*MempoolConsumer
 	consumersMutex sync.Mutex
 	transactions   []*MempoolTransaction
+	config         MempoolConfig
 	metrics        struct {
 		txsProcessedNum prometheus.Counter
 		txsInMempool    prometheus.Gauge
@@ -67,28 +80,39 @@ type Mempool struct {
 	}
 }
 
-func NewMempool(
-	logger *slog.Logger,
-	eventBus *event.EventBus,
-	promRegistry prometheus.Registerer,
-	ledgerState *ledger.LedgerState,
-) *Mempool {
+type MempoolFullError struct {
+	CurrentSize int
+	TxSize      int
+	Capacity    int64
+}
+
+func (e *MempoolFullError) Error() string {
+	return fmt.Sprintf(
+		"mempool full: current size=%d bytes, tx size=%d bytes, capacity=%d bytes",
+		e.CurrentSize,
+		e.TxSize,
+		e.Capacity,
+	)
+}
+
+func NewMempool(config MempoolConfig) *Mempool {
 	m := &Mempool{
-		eventBus:    eventBus,
-		consumers:   make(map[ouroboros.ConnectionId]*MempoolConsumer),
-		ledgerState: ledgerState,
+		eventBus:  config.EventBus,
+		consumers: make(map[ouroboros.ConnectionId]*MempoolConsumer),
+		validator: config.Validator,
+		config:    config,
 	}
-	if logger == nil {
+	if config.Logger == nil {
 		// Create logger to throw away logs
 		// We do this so we don't have to add guards around every log operation
 		m.logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
 	} else {
-		m.logger = logger
+		m.logger = config.Logger
 	}
 	// Subscribe to chain update events
 	go m.processChainEvents()
 	// Init metrics
-	promautoFactory := promauto.With(promRegistry)
+	promautoFactory := promauto.With(config.PromRegistry)
 	m.metrics.txsProcessedNum = promautoFactory.NewCounter(
 		prometheus.CounterOpts{
 			Name: "cardano_node_metrics_txsProcessedNum_int",
@@ -165,7 +189,7 @@ func (m *Mempool) processChainEvents() {
 				continue
 			}
 			// Validate transaction
-			if err := m.ledgerState.ValidateTx(tmpTx); err != nil {
+			if err := m.validator.ValidateTx(tmpTx); err != nil {
 				m.removeTransactionByIndex(i)
 				m.logger.Debug(
 					"removed transaction after re-validation failure",
@@ -186,7 +210,7 @@ func (m *Mempool) AddTransaction(txType uint, txBytes []byte) error {
 		return err
 	}
 	// Validate transaction
-	if err := m.ledgerState.ValidateTx(tmpTx); err != nil {
+	if err := m.validator.ValidateTx(tmpTx); err != nil {
 		return err
 	}
 	// Build mempool entry
@@ -214,6 +238,18 @@ func (m *Mempool) AddTransaction(txType uint, txBytes []byte) error {
 		)
 		return nil
 	}
+	// Enforce mempool capacity
+	currentSize := 0
+	for _, existing := range m.transactions {
+		currentSize += len(existing.Cbor)
+	}
+	if currentSize+len(tx.Cbor) > int(m.config.MempoolCapacity) {
+		return &MempoolFullError{
+			CurrentSize: currentSize,
+			TxSize:      len(tx.Cbor),
+			Capacity:    m.config.MempoolCapacity,
+		}
+	}
 	// Add transaction record
 	m.transactions = append(m.transactions, &tx)
 	m.logger.Debug(
@@ -232,7 +268,7 @@ func (m *Mempool) AddTransaction(txType uint, txBytes []byte) error {
 			AddTransactionEvent{
 				Hash: tx.Hash,
 				Type: tx.Type,
-				Body: tx.Cbor[:],
+				Body: tx.Cbor,
 			},
 		),
 	)
@@ -253,7 +289,7 @@ func (m *Mempool) Transactions() []MempoolTransaction {
 	m.Lock()
 	defer m.Unlock()
 	ret := make([]MempoolTransaction, len(m.transactions))
-	for i := 0; i < len(m.transactions); i++ {
+	for i := range m.transactions {
 		ret[i] = *m.transactions[i]
 	}
 	return ret

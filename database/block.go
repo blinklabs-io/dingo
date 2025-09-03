@@ -44,7 +44,6 @@ type Block struct {
 	Hash     []byte
 	Type     uint
 	PrevHash []byte
-	Nonce    []byte
 	Cbor     []byte
 }
 
@@ -86,7 +85,6 @@ func (d *Database) BlockCreate(block Block, txn *Txn) error {
 		Type:     block.Type,
 		Height:   block.Number,
 		PrevHash: block.PrevHash,
-		Nonce:    block.Nonce,
 	}
 	tmpMetadataBytes, err := cbor.Encode(tmpMetadata)
 	if err != nil {
@@ -160,7 +158,6 @@ func blockByKey(txn *Txn, blockKey []byte) (Block, error) {
 	ret.Type = tmpMetadata.Type
 	ret.Number = tmpMetadata.Height
 	ret.PrevHash = tmpMetadata.PrevHash
-	ret.Nonce = tmpMetadata.Nonce
 	return ret, nil
 }
 
@@ -358,5 +355,4 @@ type BlockBlobMetadata struct {
 	Type     uint
 	Height   uint64
 	PrevHash []byte
-	Nonce    []byte
 }
