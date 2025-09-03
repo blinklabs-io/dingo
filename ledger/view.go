@@ -15,6 +15,8 @@
 package ledger
 
 import (
+	"time"
+
 	"github.com/blinklabs-io/dingo/database"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
@@ -70,4 +72,17 @@ func (lv *LedgerView) StakeRegistration(
 ) ([]lcommon.StakeRegistrationCertificate, error) {
 	// stakingKey = lcommon.NewBlake2b224(stakingKey)
 	return lv.ls.db.GetStakeRegistrations(stakingKey, lv.txn)
+}
+
+func (lv *LedgerView) TimeToSlot(t time.Time) (uint64, error) {
+	return lv.ls.TimeToSlot(t)
+}
+
+func (lv *LedgerView) SlotToTime(slot uint64) (time.Time, error) {
+	return lv.ls.SlotToTime(slot)
+}
+
+func (lv *LedgerView) PoolCurrentState(poolId []byte) (*lcommon.PoolRegistrationCertificate, *uint64, error) {
+	// TODO: implement this
+	return nil, nil, nil
 }
