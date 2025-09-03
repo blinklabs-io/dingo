@@ -17,6 +17,7 @@ package chain
 import (
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"slices"
 	"sync"
 
