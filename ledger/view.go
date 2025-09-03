@@ -15,6 +15,8 @@
 package ledger
 
 import (
+	"time"
+
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -147,4 +149,14 @@ func (lv *LedgerView) PoolCurrentState(
 		}
 	}
 	return currentReg, pendingEpoch, nil
+}
+
+// SlotToTime returns the current time for a given slot based on known epochs
+func (lv *LedgerView) SlotToTime(slot uint64) (time.Time, error) {
+	return lv.ls.SlotToTime(slot)
+}
+
+// TimeToSlot returns the slot number for a given time based on known epochs
+func (lv *LedgerView) TimeToSlot(t time.Time) (uint64, error) {
+	return lv.ls.TimeToSlot(t)
 }

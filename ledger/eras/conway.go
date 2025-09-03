@@ -227,8 +227,11 @@ func EvaluateTxConway(
 	// Evaluate scripts
 	var retTotalExUnits lcommon.ExUnits
 	retRedeemerExUnits := make(map[lcommon.RedeemerKey]lcommon.ExUnits)
-	var txInfoV3 script.TxInfo = script.NewTxInfoV3FromTransaction(tx, slices.Concat(resolvedInputs, resolvedRefInputs))
-	for _, redeemerPair := range txInfoV3.(script.TxInfoV3).Redeemers {
+	txInfoV3, err := script.NewTxInfoV3FromTransaction(ls, tx, slices.Concat(resolvedInputs, resolvedRefInputs))
+	if err != nil {
+		return 0, lcommon.ExUnits{}, nil, err
+	}
+	for _, redeemerPair := range txInfoV3.Redeemers {
 		purpose := redeemerPair.Key
 		if purpose == nil {
 			// Skip unsupported redeemer tags for now
