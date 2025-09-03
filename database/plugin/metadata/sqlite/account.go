@@ -172,7 +172,7 @@ func (d *MetadataStoreSqlite) SetStakeDeregistration(
 	slot uint64,
 	txn *gorm.DB,
 ) error {
-	stakeKey := cert.StakeDeregistration.Credential.Bytes()
+	stakeKey := cert.StakeCredential.Credential.Bytes()
 	tmpAccount, err := d.GetAccount(stakeKey, txn)
 	if err != nil {
 		return err
@@ -206,7 +206,7 @@ func (d *MetadataStoreSqlite) SetStakeRegistration(
 	slot, deposit uint64,
 	txn *gorm.DB,
 ) error {
-	stakeKey := cert.StakeRegistration.Credential.Bytes()
+	stakeKey := cert.StakeCredential.Credential.Bytes()
 	tmpItem := models.StakeRegistration{
 		StakingKey:    stakeKey,
 		AddedSlot:     slot,
