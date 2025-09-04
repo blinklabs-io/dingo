@@ -80,6 +80,10 @@ type MetadataStore interface {
 		uint32, // idx
 		*gorm.DB,
 	) (models.Utxo, error)
+	GetAssetByID(
+		uint, // id
+		*gorm.DB,
+	) (models.Asset, error)
 
 	SetAccount(
 		[]byte, // stakeKey
@@ -207,6 +211,16 @@ type MetadataStore interface {
 		uint64, // slot
 		[]byte, // payment
 		[]byte, // stake
+		uint64, // amount
+		[]models.Asset, // asset
+		*gorm.DB,
+	) error
+	SetAsset(
+		[]byte, // utxoId
+		[]byte, // name
+		[]byte, // nameHex
+		lcommon.Blake2b224, // policyId
+		[]byte, // fingerprint
 		uint64, // amount
 		*gorm.DB,
 	) error

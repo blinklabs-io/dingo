@@ -19,6 +19,7 @@ import (
 	"math/big"
 	"slices"
 
+	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/dgraph-io/badger/v4"
@@ -66,6 +67,7 @@ func (d *Database) NewUtxo(
 	slot uint64,
 	paymentKey, stakeKey, cbor []byte,
 	amt uint64,
+	asset []models.Asset,
 	txn *Txn,
 ) error {
 	if txn == nil {
@@ -85,6 +87,7 @@ func (d *Database) NewUtxo(
 		paymentKey,
 		stakeKey,
 		amt,
+		asset,
 		txn.Metadata(),
 	)
 }
