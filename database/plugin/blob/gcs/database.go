@@ -71,7 +71,7 @@ func New(
 		return nil, errors.New("gcs blob: bucket not set (expected dataDir='gcs://<bucket>')")
 	}
 
-	client, err := storage.NewClient(ctx)
+	client, err := storage.NewGRPCClient(ctx, storage.WithDisabledClientMetrics())
 	if err != nil {
 		cancel()
 		return nil, fmt.Errorf("gcs blob: failed in creating storage client: %w", err)
