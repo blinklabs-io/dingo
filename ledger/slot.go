@@ -62,7 +62,13 @@ func (ls *LedgerState) SlotToTime(slot uint64) (time.Time, error) {
 		)
 	}
 	if !foundSlot {
-		return slotTime, errors.New("slot not found in known epochs")
+		// Project the current slot length forward to calculate future slots
+		lastEpoch := ls.epochCache[len(ls.epochCache)-1]
+		leftoverSlots := slot - (lastEpoch.StartSlot + uint64(lastEpoch.LengthInSlots))
+		slotTime = slotTime.Add(
+			// nolint:gosec
+			time.Duration(leftoverSlots) * (time.Duration(lastEpoch.SlotLength) * time.Millisecond),
+		)
 	}
 	return slotTime, nil
 }
