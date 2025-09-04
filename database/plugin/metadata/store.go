@@ -47,7 +47,7 @@ type MetadataStore interface {
 	GetPool(
 		[]byte, // pool key hash
 		*gorm.DB,
-	) (models.Pool, error)
+	) (*models.Pool, error)
 	GetStakeRegistrations(
 		[]byte, // stakeKey
 		*gorm.DB,
