@@ -191,6 +191,14 @@ func (d *Database) UtxosDeleteConsumed(
 		return 0, errors.New("failed to query consumed UTxOs during cleanup")
 	}
 	utxoCount := len(utxos)
+	deleteUtxos := make([]any, utxoCount)
+	for idx, utxo := range utxos {
+		deleteUtxos[idx] = utxo
+	}
+	err = d.metadata.DeleteUtxos(deleteUtxos, txn.Metadata())
+	if err != nil {
+		return 0, err
+	}
 
 	// Loop through UTxOs and delete, with a new transaction each loop
 	for ret == nil {
