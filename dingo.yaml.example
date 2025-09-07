@@ -64,3 +64,6 @@ mempoolCapacity: 1048576
 # Enable development mode which prevents outbound connections
 # Default: false
 devMode: false
+
+# Validate historical blocks during ledger processing (default: false)
+validateHistorical: false

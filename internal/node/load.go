@@ -70,11 +70,12 @@ func Load(cfg *config.Config, logger *slog.Logger, immutableDir string) error {
 	// Load state
 	ls, err := ledger.NewLedgerState(
 		ledger.LedgerStateConfig{
-			Database:          db,
-			ChainManager:      cm,
-			Logger:            logger,
-			CardanoNodeConfig: nodeCfg,
-			EventBus:          eventBus,
+			Database:           db,
+			ChainManager:       cm,
+			Logger:             logger,
+			CardanoNodeConfig:  nodeCfg,
+			EventBus:           eventBus,
+			ValidateHistorical: cfg.ValidateHistorical,
 		},
 	)
 	if err != nil {

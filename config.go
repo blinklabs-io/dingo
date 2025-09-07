@@ -37,6 +37,7 @@ type Config struct {
 	dataDir            string
 	intersectPoints    []ocommon.Point
 	intersectTip       bool
+	validateHistorical bool
 	logger             *slog.Logger
 	listeners          []ListenerConfig
 	network            string
@@ -266,5 +267,12 @@ func WithMempoolCapacity(capacity int64) ConfigOptionFunc {
 func WithDevMode(devMode bool) ConfigOptionFunc {
 	return func(c *Config) {
 		c.devMode = devMode
+	}
+}
+
+// WithValidateHistorical specifies whether to validate all historical blocks during ledger processing
+func WithValidateHistorical(validate bool) ConfigOptionFunc {
+	return func(c *Config) {
+		c.validateHistorical = validate
 	}
 }
