@@ -124,6 +124,7 @@ func (n *Node) Run() error {
 			CardanoNodeConfig:          n.config.cardanoNodeConfig,
 			PromRegistry:               n.config.promRegistry,
 			ForgeBlocks:                n.config.devMode,
+			ValidateHistorical:         n.config.validateHistorical,
 			BlockfetchRequestRangeFunc: n.blockfetchClientRequestRange,
 		},
 	)

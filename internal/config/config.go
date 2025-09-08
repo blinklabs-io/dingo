@@ -43,43 +43,45 @@ func FromContext(ctx context.Context) *Config {
 }
 
 type Config struct {
-	BadgerCacheSize int64  `split_words:"true" yaml:"badgerCacheSize"`
-	MempoolCapacity int64  `split_words:"true" yaml:"mempoolCapacity"`
-	BindAddr        string `split_words:"true" yaml:"bindAddr"`
-	CardanoConfig   string `                   yaml:"cardanoConfig"   envconfig:"config"`
-	DatabasePath    string `split_words:"true" yaml:"databasePath"`
-	SocketPath      string `split_words:"true" yaml:"socketPath"`
-	Network         string `                   yaml:"network"`
-	TlsCertFilePath string `                   yaml:"tlsCertFilePath" envconfig:"TLS_CERT_FILE_PATH"`
-	TlsKeyFilePath  string `                   yaml:"tlsKeyFilePath"  envconfig:"TLS_KEY_FILE_PATH"`
-	Topology        string `                   yaml:"topology"`
-	MetricsPort     uint   `split_words:"true" yaml:"metricsPort"`
-	PrivateBindAddr string `split_words:"true" yaml:"privateBindAddr"`
-	PrivatePort     uint   `split_words:"true" yaml:"privatePort"`
-	RelayPort       uint   `                   yaml:"relayPort"       envconfig:"port"`
-	UtxorpcPort     uint   `split_words:"true" yaml:"utxorpcPort"`
-	IntersectTip    bool   `split_words:"true" yaml:"intersectTip"`
-	DevMode         bool   `split_words:"true" yaml:"devMode"`
+	BadgerCacheSize    int64  `split_words:"true" yaml:"badgerCacheSize"`
+	MempoolCapacity    int64  `split_words:"true" yaml:"mempoolCapacity"`
+	BindAddr           string `split_words:"true" yaml:"bindAddr"`
+	CardanoConfig      string `                   yaml:"cardanoConfig"   envconfig:"config"`
+	DatabasePath       string `split_words:"true" yaml:"databasePath"`
+	SocketPath         string `split_words:"true" yaml:"socketPath"`
+	Network            string `                   yaml:"network"`
+	TlsCertFilePath    string `                   yaml:"tlsCertFilePath" envconfig:"TLS_CERT_FILE_PATH"`
+	TlsKeyFilePath     string `                   yaml:"tlsKeyFilePath"  envconfig:"TLS_KEY_FILE_PATH"`
+	Topology           string `                   yaml:"topology"`
+	MetricsPort        uint   `split_words:"true" yaml:"metricsPort"`
+	PrivateBindAddr    string `split_words:"true" yaml:"privateBindAddr"`
+	PrivatePort        uint   `split_words:"true" yaml:"privatePort"`
+	RelayPort          uint   `                   yaml:"relayPort"       envconfig:"port"`
+	UtxorpcPort        uint   `split_words:"true" yaml:"utxorpcPort"`
+	IntersectTip       bool   `split_words:"true" yaml:"intersectTip"`
+	ValidateHistorical bool   `split_words:"true" yaml:"validateHistorical"`
+	DevMode            bool   `split_words:"true" yaml:"devMode"`
 }
 
 var globalConfig = &Config{
-	BadgerCacheSize: 1073741824,
-	MempoolCapacity: 1048576,
-	BindAddr:        "0.0.0.0",
-	CardanoConfig:   "./config/cardano/preview/config.json",
-	DatabasePath:    ".dingo",
-	SocketPath:      "dingo.socket",
-	IntersectTip:    false,
-	Network:         "preview",
-	MetricsPort:     12798,
-	PrivateBindAddr: "127.0.0.1",
-	PrivatePort:     3002,
-	RelayPort:       3001,
-	UtxorpcPort:     9090,
-	Topology:        "",
-	TlsCertFilePath: "",
-	TlsKeyFilePath:  "",
-	DevMode:         false,
+	BadgerCacheSize:    1073741824,
+	MempoolCapacity:    1048576,
+	BindAddr:           "0.0.0.0",
+	CardanoConfig:      "./config/cardano/preview/config.json",
+	DatabasePath:       ".dingo",
+	SocketPath:         "dingo.socket",
+	IntersectTip:       false,
+	ValidateHistorical: false,
+	Network:            "preview",
+	MetricsPort:        12798,
+	PrivateBindAddr:    "127.0.0.1",
+	PrivatePort:        3002,
+	RelayPort:          3001,
+	UtxorpcPort:        9090,
+	Topology:           "",
+	TlsCertFilePath:    "",
+	TlsKeyFilePath:     "",
+	DevMode:            false,
 }
 
 func LoadConfig(configFile string) (*Config, error) {
