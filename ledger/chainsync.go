@@ -24,6 +24,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite/models"
 	"github.com/blinklabs-io/dingo/event"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -234,6 +235,8 @@ func (ls *LedgerState) createGenesisBlock() error {
 			if err != nil {
 				return fmt.Errorf("encode UTxO: %w", err)
 			}
+			// Extract assets from the UTxO output
+			assets := extractAssetsFromOutput(utxo.Output)
 			err = ls.db.NewUtxo(
 				utxo.Id.Id().Bytes(),
 				utxo.Id.Index(),
@@ -242,6 +245,7 @@ func (ls *LedgerState) createGenesisBlock() error {
 				outAddr.StakeKeyHash().Bytes(),
 				outputCbor,
 				utxo.Output.Amount(),
+				assets,
 				txn,
 			)
 			if err != nil {
@@ -579,4 +583,37 @@ func (ls *LedgerState) handleEventBlockfetchBatchDone(e BlockfetchEvent) error {
 	}
 	ls.chainsyncBlockfetchWaiting = false
 	return nil
+}
+
+// extractAssetsFromOutput is helper function to extract assets from a transaction output
+func extractAssetsFromOutput(output lcommon.TransactionOutput) []models.Asset {
+	var assets []models.Asset
+
+	// Get the MultiAsset from the output
+	multiAsset := output.Assets()
+	if multiAsset == nil {
+		return assets
+	}
+	// Iterate through policies
+	for _, policyId := range multiAsset.Policies() {
+		policyIdBytes := policyId.Bytes()
+
+		// Iterate through assets for this policy
+		for _, assetNameBytes := range multiAsset.Assets(policyId) {
+			amount := multiAsset.Asset(policyId, assetNameBytes)
+
+			fingerprint := lcommon.NewAssetFingerprint(policyIdBytes, assetNameBytes)
+
+			asset := models.Asset{
+				Name:        assetNameBytes,
+				NameHex:     []byte(hex.EncodeToString(assetNameBytes)),
+				PolicyId:    policyIdBytes,
+				Fingerprint: []byte(fingerprint.String()),
+				Amount:      amount,
+			}
+			assets = append(assets, asset)
+		}
+	}
+
+	return assets
 }

@@ -203,6 +203,7 @@ func (d *MetadataStoreSqlite) SetUtxo(
 	payment []byte, // payment
 	stake []byte, // stake
 	amount uint64, // amount
+	asset []models.Asset, // asset
 	txn *gorm.DB,
 ) error {
 	tmpUtxo := models.Utxo{
