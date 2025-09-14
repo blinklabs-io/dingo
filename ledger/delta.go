@@ -15,13 +15,11 @@
 package ledger
 
 import (
-	"encoding/hex"
 	"fmt"
 	"maps"
 	"slices"
 
 	"github.com/blinklabs-io/dingo/database"
-	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -66,11 +64,6 @@ func (d *LedgerDelta) apply(ls *LedgerState, txn *database.Txn) error {
 	// Process produced UTxOs
 	for _, produced := range d.Produced {
 		outAddr := produced.Output.Address()
-		// Extract assets from MultiAsset and convert to models.Asset slice
-		var assets []models.Asset
-		if multiAsset := produced.Output.Assets(); multiAsset != nil {
-			assets = convertMultiAssetToModels(multiAsset)
-		}
 		err := ls.db.NewUtxo(
 			produced.Id.Id().Bytes(),
 			produced.Id.Index(),
@@ -79,7 +72,7 @@ func (d *LedgerDelta) apply(ls *LedgerState, txn *database.Txn) error {
 			outAddr.StakeKeyHash().Bytes(),
 			produced.Output.Cbor(),
 			produced.Output.Amount(),
-			assets,
+			produced.Output.Assets(),
 			txn,
 		)
 		if err != nil {
@@ -173,34 +166,4 @@ func (b *LedgerDeltaBatch) apply(ls *LedgerState, txn *database.Txn) error {
 		}
 	}
 	return nil
-}
-
-func convertMultiAssetToModels(multiAsset *lcommon.MultiAsset[lcommon.MultiAssetTypeOutput]) []models.Asset {
-	var assets []models.Asset
-
-	// Get all policy IDs
-	policyIds := multiAsset.Policies()
-	for _, policyId := range policyIds {
-		policyIdBytes := policyId.Bytes()
-
-		// Get asset names for this policy
-		assetNames := multiAsset.Assets(policyId)
-		for _, assetNameBytes := range assetNames {
-			amount := multiAsset.Asset(policyId, assetNameBytes)
-
-			// Calculate fingerprint
-			fingerprint := lcommon.NewAssetFingerprint(policyIdBytes, assetNameBytes)
-
-			asset := models.Asset{
-				Name:        assetNameBytes,
-				NameHex:     []byte(hex.EncodeToString(assetNameBytes)),
-				PolicyId:    policyIdBytes,
-				Fingerprint: []byte(fingerprint.String()),
-				Amount:      amount,
-			}
-			assets = append(assets, asset)
-		}
-	}
-
-	return assets
 }

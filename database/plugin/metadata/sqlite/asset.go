@@ -22,29 +22,6 @@ import (
 	"gorm.io/gorm"
 )
 
-// GetAssetByID returns an asset by its primary key ID
-func (d *MetadataStoreSqlite) GetAssetByID(
-	id uint,
-	txn *gorm.DB,
-) (models.Asset, error) {
-	var asset models.Asset
-	var result *gorm.DB
-
-	query := d.DB()
-	if txn != nil {
-		query = txn
-	}
-
-	result = query.Where("id = ?", id).First(&asset)
-	if result.Error != nil {
-		if errors.Is(result.Error, gorm.ErrRecordNotFound) {
-			return models.Asset{}, nil
-		}
-		return models.Asset{}, result.Error
-	}
-	return asset, nil
-}
-
 // GetAssetByPolicyAndName returns an asset by policy ID and asset name
 func (d *MetadataStoreSqlite) GetAssetByPolicyAndName(
 	policyId lcommon.Blake2b224,
@@ -91,7 +68,7 @@ func (d *MetadataStoreSqlite) GetAssetsByPolicy(
 
 // GetAssetsByUTxO returns all assets for a given UTxO
 func (d *MetadataStoreSqlite) GetAssetsByUTxO(
-	utxoId []byte,
+	utxoId uint,
 	txn *gorm.DB,
 ) ([]models.Asset, error) {
 	var assets []models.Asset
@@ -111,7 +88,7 @@ func (d *MetadataStoreSqlite) GetAssetsByUTxO(
 
 // SetAsset saves an asset into the database
 func (d *MetadataStoreSqlite) SetAsset(
-	utxoId []byte,
+	utxoId uint,
 	name []byte,
 	nameHex []byte,
 	policyId lcommon.Blake2b224,
@@ -197,7 +174,7 @@ func (d *MetadataStoreSqlite) DeleteAsset(
 
 // DeleteAssetsByUTxO deletes all assets associated with a specific UTxO
 func (d *MetadataStoreSqlite) DeleteAssetsByUTxO(
-	utxoId []byte,
+	utxoId uint,
 	txn *gorm.DB,
 ) error {
 	if txn != nil {

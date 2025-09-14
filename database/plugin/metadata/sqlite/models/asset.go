@@ -15,8 +15,8 @@
 package models
 
 type Asset struct {
-	ID          uint   `gorm:"primaryKey"`
-	UTxOID      []byte `gorm:"index"`
+	ID          uint `gorm:"primaryKey"`
+	UTxOID      uint
 	Name        []byte `gorm:"index"`
 	NameHex     []byte `gorm:"index"`
 	PolicyId    []byte `gorm:"index"`
@@ -25,5 +25,5 @@ type Asset struct {
 }
 
 func (Asset) TableName() string {
-	return "assets"
+	return "asset"
 }
