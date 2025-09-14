@@ -204,7 +204,7 @@ func (d *MetadataStoreSqlite) SetUtxo(
 	payment []byte, // payment
 	stake []byte, // stake
 	amount uint64, // amount
-	asset *lcommon.MultiAsset[T], // asset
+	asset *lcommon.MultiAsset[lcommon.MultiAssetTypeOutput], // asset
 	txn *gorm.DB,
 ) error {
 	tmpUtxo := models.Utxo{
