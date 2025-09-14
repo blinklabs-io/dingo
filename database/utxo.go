@@ -116,7 +116,6 @@ func (d *Database) AddUtxos(
 		txn.Metadata(),
 	)
 }
-
 func (d *Database) UtxoByRef(
 	txId []byte,
 	outputIdx uint32,
@@ -131,7 +130,16 @@ func (d *Database) UtxoByRef(
 	if err != nil {
 		return tmpUtxo, err
 	}
-	tmpUtxo = Utxo(utxo)
+	tmpUtxo = Utxo{
+		ID:          utxo.ID,
+		TxId:        utxo.TxId,
+		OutputIdx:   utxo.OutputIdx,
+		AddedSlot:   utxo.AddedSlot,
+		DeletedSlot: utxo.DeletedSlot,
+		PaymentKey:  utxo.PaymentKey,
+		StakingKey:  utxo.StakingKey,
+		Amount:      utxo.Amount,
+	}
 	if err := tmpUtxo.loadCbor(txn); err != nil {
 		return tmpUtxo, err
 	}
@@ -163,9 +171,17 @@ func (d *Database) UtxosByAddress(
 	if err != nil {
 		return ret, err
 	}
-	var tmpUtxo Utxo
 	for _, utxo := range utxos {
-		tmpUtxo = Utxo(utxo)
+		tmpUtxo := Utxo{
+			ID:          utxo.ID,
+			TxId:        utxo.TxId,
+			OutputIdx:   utxo.OutputIdx,
+			AddedSlot:   utxo.AddedSlot,
+			DeletedSlot: utxo.DeletedSlot,
+			PaymentKey:  utxo.PaymentKey,
+			StakingKey:  utxo.StakingKey,
+			Amount:      utxo.Amount,
+		}
 		if err := tmpUtxo.loadCbor(txn); err != nil {
 			return ret, err
 		}

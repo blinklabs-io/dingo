@@ -15,6 +15,7 @@
 package sqlite
 
 import (
+	"encoding/hex"
 	"fmt"
 
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite/models"
@@ -225,6 +226,17 @@ func (d *MetadataStoreSqlite) SetUtxo(
 			return result.Error
 		}
 	}
+	// handles conversion
+	if asset != nil {
+		assetModels := convertMultiAssetToModels(asset)
+		for i := range assetModels {
+			assetModels[i].UTxOID = tmpUtxo.ID // Set foreign key
+		}
+
+		if err := d.SetAssets(assetModels, txn); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -315,4 +327,34 @@ func utxoLedgerToModel(
 		Cbor:       utxo.Output.Cbor(),
 	}
 	return ret
+}
+
+func convertMultiAssetToModels(multiAsset *lcommon.MultiAsset[lcommon.MultiAssetTypeOutput]) []models.Asset {
+	var assets []models.Asset
+
+	// Get all policy IDs
+	policyIds := multiAsset.Policies()
+	for _, policyId := range policyIds {
+		policyIdBytes := policyId.Bytes()
+
+		// Get asset names for this policy
+		assetNames := multiAsset.Assets(policyId)
+		for _, assetNameBytes := range assetNames {
+			amount := multiAsset.Asset(policyId, assetNameBytes)
+
+			// Calculate fingerprint
+			fingerprint := lcommon.NewAssetFingerprint(policyIdBytes, assetNameBytes)
+
+			asset := models.Asset{
+				Name:        assetNameBytes,
+				NameHex:     []byte(hex.EncodeToString(assetNameBytes)),
+				PolicyId:    policyIdBytes,
+				Fingerprint: []byte(fingerprint.String()),
+				Amount:      amount,
+			}
+			assets = append(assets, asset)
+		}
+	}
+
+	return assets
 }
