@@ -204,7 +204,7 @@ type MetadataStore interface {
 		[]byte, // payment
 		[]byte, // stake
 		uint64, // amount
-		[]models.Asset, // asset
+		*lcommon.MultiAsset[lcommon.MultiAssetTypeOutput], // asset
 		*gorm.DB,
 	) error
 	SetAsset(
