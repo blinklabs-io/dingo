@@ -116,6 +116,7 @@ func (d *Database) AddUtxos(
 		txn.Metadata(),
 	)
 }
+
 func (d *Database) UtxoByRef(
 	txId []byte,
 	outputIdx uint32,
