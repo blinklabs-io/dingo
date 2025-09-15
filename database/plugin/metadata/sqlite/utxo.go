@@ -32,13 +32,12 @@ func (d *MetadataStoreSqlite) GetUtxo(
 	ret := models.Utxo{}
 	tmpUtxo := models.Utxo{}
 	if txn != nil {
-		result := txn.Where("deleted_slot = 0").
-			First(&tmpUtxo, "tx_id = ? AND output_idx = ?", txId, idx)
+		result := txn.First(&tmpUtxo, "tx_id = ? AND output_idx = ?", txId, idx)
 		if result.Error != nil {
 			return ret, result.Error
 		}
 	} else {
-		result := d.DB().Where("deleted_slot = 0").First(&tmpUtxo, "tx_id = ? AND output_idx = ?", txId, idx)
+		result := d.DB().First(&tmpUtxo, "tx_id = ? AND output_idx = ?", txId, idx)
 		if result.Error != nil {
 			return ret, result.Error
 		}
