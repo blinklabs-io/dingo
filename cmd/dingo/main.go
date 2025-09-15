@@ -109,6 +109,7 @@ func main() {
 	// Subcommands
 	rootCmd.AddCommand(serveCommand())
 	rootCmd.AddCommand(loadCommand())
+	rootCmd.AddCommand(versionCommand())
 
 	// Execute cobra command
 	if err := rootCmd.Execute(); err != nil {
