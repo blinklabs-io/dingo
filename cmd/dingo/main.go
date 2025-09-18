@@ -37,17 +37,12 @@ func slogPrintf(format string, v ...any) {
 
 var (
 	globalFlags = struct {
-		version bool
-		debug   bool
+		debug bool
 	}{}
 	configFile string
 )
 
 func commonRun() *slog.Logger {
-	if globalFlags.version {
-		fmt.Printf("%s %s\n", programName, version.GetVersionString())
-		os.Exit(0)
-	}
 	// Configure logger
 	logLevel := slog.LevelInfo
 	addSource := false
@@ -93,8 +88,6 @@ func main() {
 	rootCmd.PersistentFlags().
 		BoolVarP(&globalFlags.debug, "debug", "D", false, "enable debug logging")
 	rootCmd.PersistentFlags().
-		BoolVarP(&globalFlags.version, "version", "", false, "show version and exit")
-	rootCmd.PersistentFlags().
 		StringVar(&configFile, "config", "", "path to config file")
 
 	rootCmd.PersistentPreRunE = func(cmd *cobra.Command, args []string) error {
@@ -109,6 +102,7 @@ func main() {
 	// Subcommands
 	rootCmd.AddCommand(serveCommand())
 	rootCmd.AddCommand(loadCommand())
+	rootCmd.AddCommand(versionCommand())
 
 	// Execute cobra command
 	if err := rootCmd.Execute(); err != nil {
