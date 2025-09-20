@@ -66,9 +66,10 @@ func (d *MetadataStoreSqlite) GetAssetsByPolicy(
 	return assets, nil
 }
 
-// GetAssetsByUTxO returns all assets for a given UTxO
+// GetAssetsByUTxO returns all assets for a given UTxO using transaction ID and output index
 func (d *MetadataStoreSqlite) GetAssetsByUTxO(
-	utxoId uint,
+	txId []byte,
+	idx uint32,
 	txn *gorm.DB,
 ) ([]models.Asset, error) {
 	var assets []models.Asset
@@ -79,112 +80,12 @@ func (d *MetadataStoreSqlite) GetAssetsByUTxO(
 		query = txn
 	}
 
-	result = query.Where("utxo_id = ?", utxoId).Find(&assets)
+	// Join with UTxO table to find assets by transaction ID and output index
+	result = query.Joins("INNER JOIN utxos ON assets.utxo_id = utxos.id").
+		Where("utxos.tx_id = ? AND utxos.idx = ?", txId, idx).
+		Find(&assets)
 	if result.Error != nil {
 		return nil, result.Error
 	}
 	return assets, nil
-}
-
-// SetAsset saves an asset into the database
-func (d *MetadataStoreSqlite) SetAsset(
-	utxoId uint,
-	name []byte,
-	nameHex []byte,
-	policyId lcommon.Blake2b224,
-	fingerprint []byte,
-	amount uint64,
-	txn *gorm.DB,
-) error {
-	tmpItem := models.Asset{
-		UTxOID:      utxoId,
-		Name:        name,
-		NameHex:     nameHex,
-		PolicyId:    policyId[:],
-		Fingerprint: fingerprint,
-		Amount:      amount,
-	}
-
-	if txn != nil {
-		if result := txn.Create(&tmpItem); result.Error != nil {
-			return result.Error
-		}
-	} else {
-		if result := d.DB().Create(&tmpItem); result.Error != nil {
-			return result.Error
-		}
-	}
-	return nil
-}
-
-// SetAssets saves multiple assets into the database
-func (d *MetadataStoreSqlite) SetAssets(
-	assets []models.Asset,
-	txn *gorm.DB,
-) error {
-	if len(assets) == 0 {
-		return nil
-	}
-
-	if txn != nil {
-		if result := txn.Create(&assets); result.Error != nil {
-			return result.Error
-		}
-	} else {
-		if result := d.DB().Create(&assets); result.Error != nil {
-			return result.Error
-		}
-	}
-	return nil
-}
-
-// UpdateAsset updates an existing asset
-func (d *MetadataStoreSqlite) UpdateAsset(
-	asset models.Asset,
-	txn *gorm.DB,
-) error {
-	if txn != nil {
-		if result := txn.Save(&asset); result.Error != nil {
-			return result.Error
-		}
-	} else {
-		if result := d.DB().Save(&asset); result.Error != nil {
-			return result.Error
-		}
-	}
-	return nil
-}
-
-// DeleteAsset deletes a specific asset by ID
-func (d *MetadataStoreSqlite) DeleteAsset(
-	id uint,
-	txn *gorm.DB,
-) error {
-	if txn != nil {
-		if result := txn.Where("id = ?", id).Delete(&models.Asset{}); result.Error != nil {
-			return result.Error
-		}
-	} else {
-		if result := d.DB().Where("id = ?", id).Delete(&models.Asset{}); result.Error != nil {
-			return result.Error
-		}
-	}
-	return nil
-}
-
-// DeleteAssetsByUTxO deletes all assets associated with a specific UTxO
-func (d *MetadataStoreSqlite) DeleteAssetsByUTxO(
-	utxoId uint,
-	txn *gorm.DB,
-) error {
-	if txn != nil {
-		if result := txn.Where("utxo_id = ?", utxoId).Delete(&models.Asset{}); result.Error != nil {
-			return result.Error
-		}
-	} else {
-		if result := d.DB().Where("utxo_id = ?", utxoId).Delete(&models.Asset{}); result.Error != nil {
-			return result.Error
-		}
-	}
-	return nil
 }

@@ -207,15 +207,6 @@ type MetadataStore interface {
 		*lcommon.MultiAsset[lcommon.MultiAssetTypeOutput], // asset
 		*gorm.DB,
 	) error
-	SetAsset(
-		uint, // utxoId
-		[]byte, // name
-		[]byte, // nameHex
-		lcommon.Blake2b224, // policyId
-		[]byte, // fingerprint
-		uint64, // amount
-		*gorm.DB,
-	) error
 	SetVoteDelegation(
 		*lcommon.VoteDelegationCertificate,
 		uint64, // slot

@@ -205,7 +205,7 @@ func (d *MetadataStoreSqlite) SetUtxo(
 	payment []byte, // payment
 	stake []byte, // stake
 	amount uint64, // amount
-	asset *lcommon.MultiAsset[lcommon.MultiAssetTypeOutput], // asset
+	assets *lcommon.MultiAsset[lcommon.MultiAssetTypeOutput], // assets (multi-asset)
 	txn *gorm.DB,
 ) error {
 	tmpUtxo := models.Utxo{
@@ -215,27 +215,21 @@ func (d *MetadataStoreSqlite) SetUtxo(
 		PaymentKey: payment,
 		StakingKey: stake,
 	}
-	if txn != nil {
-		result := txn.Create(&tmpUtxo)
-		if result.Error != nil {
-			return result.Error
-		}
-	} else {
-		result := d.DB().Create(&tmpUtxo)
-		if result.Error != nil {
-			return result.Error
-		}
-	}
-	// handles conversion
-	if asset != nil {
-		assetModels := convertMultiAssetToModels(asset)
-		for i := range assetModels {
-			assetModels[i].UTxOID = tmpUtxo.ID // Set foreign key
-		}
 
-		if err := d.SetAssets(assetModels, txn); err != nil {
-			return err
-		}
+	// Handle assets if present
+	if assets != nil {
+		tmpUtxo.Assets = convertMultiAssetToModels(assets)
+	}
+
+	var result *gorm.DB
+	if txn != nil {
+		result = txn.Create(&tmpUtxo)
+	} else {
+		result = d.DB().Create(&tmpUtxo)
+	}
+
+	if result.Error != nil {
+		return result.Error
 	}
 	return nil
 }
@@ -326,6 +320,15 @@ func utxoLedgerToModel(
 		StakingKey: outAddr.StakeKeyHash().Bytes(),
 		Cbor:       utxo.Output.Cbor(),
 	}
+
+	if multiAssetOutput, ok := utxo.Output.(interface {
+		MultiAsset() *lcommon.MultiAsset[lcommon.MultiAssetTypeOutput]
+	}); ok {
+		if multiAsset := multiAssetOutput.MultiAsset(); multiAsset != nil {
+			ret.Assets = convertMultiAssetToModels(multiAsset)
+		}
+	}
+
 	return ret
 }
 
