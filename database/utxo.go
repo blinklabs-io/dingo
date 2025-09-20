@@ -21,6 +21,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/ledger"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/dgraph-io/badger/v4"
 )
 
@@ -66,6 +67,7 @@ func (d *Database) NewUtxo(
 	slot uint64,
 	paymentKey, stakeKey, cbor []byte,
 	amt uint64,
+	asset *lcommon.MultiAsset[lcommon.MultiAssetTypeOutput],
 	txn *Txn,
 ) error {
 	if txn == nil {
@@ -85,6 +87,7 @@ func (d *Database) NewUtxo(
 		paymentKey,
 		stakeKey,
 		amt,
+		asset,
 		txn.Metadata(),
 	)
 }
@@ -128,7 +131,16 @@ func (d *Database) UtxoByRef(
 	if err != nil {
 		return tmpUtxo, err
 	}
-	tmpUtxo = Utxo(utxo)
+	tmpUtxo = Utxo{
+		ID:          utxo.ID,
+		TxId:        utxo.TxId,
+		OutputIdx:   utxo.OutputIdx,
+		AddedSlot:   utxo.AddedSlot,
+		DeletedSlot: utxo.DeletedSlot,
+		PaymentKey:  utxo.PaymentKey,
+		StakingKey:  utxo.StakingKey,
+		Amount:      utxo.Amount,
+	}
 	if err := tmpUtxo.loadCbor(txn); err != nil {
 		return tmpUtxo, err
 	}
@@ -160,9 +172,17 @@ func (d *Database) UtxosByAddress(
 	if err != nil {
 		return ret, err
 	}
-	var tmpUtxo Utxo
 	for _, utxo := range utxos {
-		tmpUtxo = Utxo(utxo)
+		tmpUtxo := Utxo{
+			ID:          utxo.ID,
+			TxId:        utxo.TxId,
+			OutputIdx:   utxo.OutputIdx,
+			AddedSlot:   utxo.AddedSlot,
+			DeletedSlot: utxo.DeletedSlot,
+			PaymentKey:  utxo.PaymentKey,
+			StakingKey:  utxo.StakingKey,
+			Amount:      utxo.Amount,
+		}
 		if err := tmpUtxo.loadCbor(txn); err != nil {
 			return ret, err
 		}
