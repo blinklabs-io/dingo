@@ -8,7 +8,7 @@ RUN --mount=type=cache,target=/gomod-cache go mod download
 COPY . .
 RUN --mount=type=cache,target=/gomod-cache --mount=type=cache,target=/go-cache make build
 
-FROM ghcr.io/blinklabs-io/cardano-cli:10.11.1.0-1 AS cardano-cli
+FROM ghcr.io/blinklabs-io/cardano-cli:10.12.0.0-1 AS cardano-cli
 FROM ghcr.io/blinklabs-io/cardano-configs:20250917-1 AS cardano-configs
 FROM ghcr.io/blinklabs-io/mithril-client:0.12.30-1 AS mithril-client
 FROM ghcr.io/blinklabs-io/txtop:0.13.0 AS txtop
