@@ -242,6 +242,7 @@ func (ls *LedgerState) createGenesisBlock() error {
 				outAddr.StakeKeyHash().Bytes(),
 				outputCbor,
 				utxo.Output.Amount(),
+				utxo.Output.Assets(),
 				txn,
 			)
 			if err != nil {
