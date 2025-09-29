@@ -6,7 +6,7 @@ toolchain go1.24.1
 
 require (
 	cloud.google.com/go/storage v1.57.0
-	connectrpc.com/connect v1.18.1
+	connectrpc.com/connect v1.19.0
 	connectrpc.com/grpchealth v1.4.0
 	connectrpc.com/grpcreflect v1.3.0
 	github.com/blinklabs-io/gouroboros v0.135.2
@@ -188,7 +188,7 @@ require (
 	google.golang.org/genproto/googleapis/api v0.0.0-20250825161204-c5933d9347a5 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20250825161204-c5933d9347a5 // indirect
 	google.golang.org/grpc v1.75.0 // indirect
-	google.golang.org/protobuf v1.36.8 // indirect
+	google.golang.org/protobuf v1.36.9 // indirect
 	gopkg.in/ini.v1 v1.67.0 // indirect
 	gorm.io/driver/clickhouse v0.7.0 // indirect
 	gorm.io/driver/mysql v1.5.7 // indirect
