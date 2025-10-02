@@ -16,7 +16,7 @@ package models
 
 type Asset struct {
 	ID          uint `gorm:"primaryKey"`
-	UTxOID      uint
+	UtxoID      uint
 	Name        []byte `gorm:"index"`
 	NameHex     []byte `gorm:"index"`
 	PolicyId    []byte `gorm:"index"`

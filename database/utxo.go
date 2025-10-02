@@ -34,7 +34,18 @@ type Utxo struct {
 	PaymentKey  []byte `gorm:"index"`
 	StakingKey  []byte `gorm:"index"`
 	Amount      uint64 `gorm:"index"`
+	Assets      []Asset
 	Cbor        []byte `gorm:"-"` // This is not represented in the metadata DB
+}
+
+type Asset struct {
+	ID          uint `gorm:"primaryKey"`
+	UtxoID      uint
+	Name        []byte `gorm:"index"`
+	NameHex     []byte `gorm:"index"`
+	PolicyId    []byte `gorm:"index"`
+	Fingerprint []byte `gorm:"index"`
+	Amount      uint64 `gorm:"index"`
 }
 
 func (u *Utxo) TableName() string {
@@ -141,6 +152,9 @@ func (d *Database) UtxoByRef(
 		StakingKey:  utxo.StakingKey,
 		Amount:      utxo.Amount,
 	}
+	for _, asset := range utxo.Assets {
+		tmpUtxo.Assets = append(tmpUtxo.Assets, Asset(asset))
+	}
 	if err := tmpUtxo.loadCbor(txn); err != nil {
 		return tmpUtxo, err
 	}
@@ -182,6 +196,9 @@ func (d *Database) UtxosByAddress(
 			PaymentKey:  utxo.PaymentKey,
 			StakingKey:  utxo.StakingKey,
 			Amount:      utxo.Amount,
+		}
+		for _, asset := range utxo.Assets {
+			tmpUtxo.Assets = append(tmpUtxo.Assets, Asset(asset))
 		}
 		if err := tmpUtxo.loadCbor(txn); err != nil {
 			return ret, err

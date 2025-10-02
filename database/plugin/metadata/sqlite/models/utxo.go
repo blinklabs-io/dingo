@@ -23,7 +23,7 @@ type Utxo struct {
 	PaymentKey  []byte  `gorm:"index"`
 	StakingKey  []byte  `gorm:"index"`
 	Amount      uint64  `gorm:"index"`
-	Assets      []Asset `gorm:"-"`
+	Assets      []Asset
 	Cbor        []byte  `gorm:"-"` // This is here for convenience but not represented in the metadata DB
 }
 
