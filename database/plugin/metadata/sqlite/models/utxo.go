@@ -15,16 +15,16 @@
 package models
 
 type Utxo struct {
-	ID          uint    `gorm:"primarykey"`
-	TxId        []byte  `gorm:"index:tx_id_output_idx"`
-	OutputIdx   uint32  `gorm:"index:tx_id_output_idx"`
-	AddedSlot   uint64  `gorm:"index"`
-	DeletedSlot uint64  `gorm:"index"`
-	PaymentKey  []byte  `gorm:"index"`
-	StakingKey  []byte  `gorm:"index"`
-	Amount      uint64  `gorm:"index"`
+	ID          uint   `gorm:"primarykey"`
+	TxId        []byte `gorm:"index:tx_id_output_idx"`
+	OutputIdx   uint32 `gorm:"index:tx_id_output_idx"`
+	AddedSlot   uint64 `gorm:"index"`
+	DeletedSlot uint64 `gorm:"index"`
+	PaymentKey  []byte `gorm:"index"`
+	StakingKey  []byte `gorm:"index"`
+	Amount      uint64 `gorm:"index"`
 	Assets      []Asset
-	Cbor        []byte  `gorm:"-"` // This is here for convenience but not represented in the metadata DB
+	Cbor        []byte `gorm:"-"` // This is here for convenience but not represented in the metadata DB
 }
 
 func (u *Utxo) TableName() string {
