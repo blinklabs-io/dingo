@@ -14,14 +14,16 @@
 
 package models
 
+import "github.com/blinklabs-io/dingo/database/types"
+
 type Asset struct {
 	ID          uint `gorm:"primaryKey"`
 	UtxoID      uint
-	Name        []byte `gorm:"index"`
-	NameHex     []byte `gorm:"index"`
-	PolicyId    []byte `gorm:"index"`
-	Fingerprint []byte `gorm:"index"`
-	Amount      uint64 `gorm:"index"`
+	Name        []byte       `gorm:"index"`
+	NameHex     []byte       `gorm:"index"`
+	PolicyId    []byte       `gorm:"index"`
+	Fingerprint []byte       `gorm:"index"`
+	Amount      types.Uint64 `gorm:"index"`
 }
 
 func (Asset) TableName() string {
