@@ -72,6 +72,7 @@ func (d *LedgerDelta) apply(ls *LedgerState, txn *database.Txn) error {
 			outAddr.StakeKeyHash().Bytes(),
 			produced.Output.Cbor(),
 			produced.Output.Amount(),
+			produced.Output.Assets(),
 			txn,
 		)
 		if err != nil {

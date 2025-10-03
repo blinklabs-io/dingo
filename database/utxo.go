@@ -21,6 +21,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/ledger"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/dgraph-io/badger/v4"
 )
 
@@ -33,7 +34,18 @@ type Utxo struct {
 	PaymentKey  []byte `gorm:"index"`
 	StakingKey  []byte `gorm:"index"`
 	Amount      uint64 `gorm:"index"`
+	Assets      []Asset
 	Cbor        []byte `gorm:"-"` // This is not represented in the metadata DB
+}
+
+type Asset struct {
+	ID          uint `gorm:"primaryKey"`
+	UtxoID      uint
+	Name        []byte       `gorm:"index"`
+	NameHex     []byte       `gorm:"index"`
+	PolicyId    []byte       `gorm:"index"`
+	Fingerprint []byte       `gorm:"index"`
+	Amount      types.Uint64 `gorm:"index"`
 }
 
 func (u *Utxo) TableName() string {
@@ -66,6 +78,7 @@ func (d *Database) NewUtxo(
 	slot uint64,
 	paymentKey, stakeKey, cbor []byte,
 	amt uint64,
+	asset *lcommon.MultiAsset[lcommon.MultiAssetTypeOutput],
 	txn *Txn,
 ) error {
 	if txn == nil {
@@ -85,6 +98,7 @@ func (d *Database) NewUtxo(
 		paymentKey,
 		stakeKey,
 		amt,
+		asset,
 		txn.Metadata(),
 	)
 }
@@ -128,7 +142,19 @@ func (d *Database) UtxoByRef(
 	if err != nil {
 		return tmpUtxo, err
 	}
-	tmpUtxo = Utxo(utxo)
+	tmpUtxo = Utxo{
+		ID:          utxo.ID,
+		TxId:        utxo.TxId,
+		OutputIdx:   utxo.OutputIdx,
+		AddedSlot:   utxo.AddedSlot,
+		DeletedSlot: utxo.DeletedSlot,
+		PaymentKey:  utxo.PaymentKey,
+		StakingKey:  utxo.StakingKey,
+		Amount:      utxo.Amount,
+	}
+	for _, asset := range utxo.Assets {
+		tmpUtxo.Assets = append(tmpUtxo.Assets, Asset(asset))
+	}
 	if err := tmpUtxo.loadCbor(txn); err != nil {
 		return tmpUtxo, err
 	}
@@ -160,9 +186,20 @@ func (d *Database) UtxosByAddress(
 	if err != nil {
 		return ret, err
 	}
-	var tmpUtxo Utxo
 	for _, utxo := range utxos {
-		tmpUtxo = Utxo(utxo)
+		tmpUtxo := Utxo{
+			ID:          utxo.ID,
+			TxId:        utxo.TxId,
+			OutputIdx:   utxo.OutputIdx,
+			AddedSlot:   utxo.AddedSlot,
+			DeletedSlot: utxo.DeletedSlot,
+			PaymentKey:  utxo.PaymentKey,
+			StakingKey:  utxo.StakingKey,
+			Amount:      utxo.Amount,
+		}
+		for _, asset := range utxo.Assets {
+			tmpUtxo.Assets = append(tmpUtxo.Assets, Asset(asset))
+		}
 		if err := tmpUtxo.loadCbor(txn); err != nil {
 			return ret, err
 		}
