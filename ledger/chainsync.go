@@ -27,6 +27,7 @@ import (
 	"github.com/blinklabs-io/dingo/event"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/cbor"
+	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
@@ -217,6 +218,29 @@ func (ls *LedgerState) createGenesisBlock() error {
 	}
 	txn := ls.db.Transaction(true)
 	err := txn.Do(func(txn *database.Txn) error {
+		// Create a single "genesis" transaction
+		inputsCbor, err := cbor.Encode([]lcommon.TransactionInput{})
+		if err != nil {
+			return fmt.Errorf("encode genesis inputs: %w", err)
+		}
+		outputsCbor, err := cbor.Encode([]ledger.Utxo{})
+		if err != nil {
+			return fmt.Errorf("encode genesis outputs: %w", err)
+		}
+		genesisTx, err := ls.db.NewTransaction(
+			make([]byte, 32), // Dummy hash for genesis
+			"genesis",
+			make([]byte, 32), // Dummy block hash
+			0,
+			inputsCbor,
+			outputsCbor,
+			txn,
+		)
+		if err != nil {
+			return fmt.Errorf("create genesis transaction: %w", err)
+		}
+		genesisTxId := genesisTx.ID
+
 		// Record genesis UTxOs
 		byronGenesis := ls.config.CardanoNodeConfig.ByronGenesis()
 		byronGenesisUtxos, err := byronGenesis.GenesisUtxos()
@@ -243,6 +267,7 @@ func (ls *LedgerState) createGenesisBlock() error {
 				outputCbor,
 				utxo.Output.Amount(),
 				utxo.Output.Assets(),
+				&genesisTxId,
 				txn,
 			)
 			if err != nil {

@@ -80,6 +80,10 @@ type MetadataStore interface {
 		uint32, // idx
 		*gorm.DB,
 	) (models.Utxo, error)
+	GetTransactionByHash(
+		[]byte, // hash
+		*gorm.DB,
+	) (models.Transaction, error)
 
 	SetAccount(
 		[]byte, // stakeKey
@@ -192,6 +196,15 @@ type MetadataStore interface {
 		uint64, // deposit
 		*gorm.DB,
 	) error
+	SetTransaction(
+		[]byte, // hash
+		string, // type
+		[]byte, // blockHash
+		uint32, // blockIndex
+		[]byte, // inputs
+		[]byte, // outputs
+		*gorm.DB,
+	) (models.Transaction, error)
 	SetTip(
 		ochainsync.Tip,
 		*gorm.DB,
@@ -209,6 +222,7 @@ type MetadataStore interface {
 		[]byte, // stake
 		uint64, // amount
 		*lcommon.MultiAsset[lcommon.MultiAssetTypeOutput], // asset
+		*uint, // transactionId
 		*gorm.DB,
 	) error
 	SetVoteDelegation(
