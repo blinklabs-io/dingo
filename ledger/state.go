@@ -797,7 +797,7 @@ func (ls *LedgerState) ledgerProcessBlock(
 			}
 		}
 		// Populate ledger delta from transaction
-		if err := delta.processTransaction(tx, uint32(i)); err != nil {
+		if err := delta.processTransaction(tx, uint32(i)); err != nil { //nolint:gosec
 			return nil, fmt.Errorf("process transaction: %w", err)
 		}
 		// Apply delta immediately if we may need the data to validate the next TX
