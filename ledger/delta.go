@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"strconv"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/types"
@@ -81,7 +82,7 @@ func (d *LedgerDelta) apply(ls *LedgerState, txn *database.Txn) error {
 		if err != nil {
 			return fmt.Errorf("encode transaction outputs: %w", err)
 		}
-		tx, err := ls.db.NewTransaction(tr.Tx.Hash().Bytes(), "regular", d.Point.Hash, tr.Index, inputsCbor, outputsCbor, txn)
+		tx, err := ls.db.NewTransaction(tr.Tx.Hash().Bytes(), strconv.Itoa(tr.Tx.Type()), d.Point.Hash, tr.Index, inputsCbor, outputsCbor, txn)
 		if err != nil {
 			return fmt.Errorf("record transaction: %w", err)
 		}
@@ -157,7 +158,7 @@ func (b *LedgerDeltaBatch) apply(ls *LedgerState, txn *database.Txn) error {
 			if err != nil {
 				return fmt.Errorf("encode transaction outputs: %w", err)
 			}
-			tx, err := ls.db.NewTransaction(tr.Tx.Hash().Bytes(), "regular", delta.Point.Hash, tr.Index, inputsCbor, outputsCbor, txn)
+			tx, err := ls.db.NewTransaction(tr.Tx.Hash().Bytes(), strconv.Itoa(tr.Tx.Type()), delta.Point.Hash, tr.Index, inputsCbor, outputsCbor, txn)
 			if err != nil {
 				return fmt.Errorf("record transaction: %w", err)
 			}
@@ -168,8 +169,7 @@ func (b *LedgerDeltaBatch) apply(ls *LedgerState, txn *database.Txn) error {
 	produced := make([]types.UtxoSlot, 0, 100)
 	for _, delta := range b.deltas {
 		for _, utxo := range delta.Produced {
-			txId, ok := txIdMap[string(utxo.Id.Id().Bytes())]
-			if !ok {
+			if _, ok := txIdMap[string(utxo.Id.Id().Bytes())]; !ok {
 				return fmt.Errorf("transaction ID not found for UTxO %s", utxo.Id.String())
 			}
 			produced = append(
@@ -177,7 +177,6 @@ func (b *LedgerDeltaBatch) apply(ls *LedgerState, txn *database.Txn) error {
 				types.UtxoSlot{
 					Slot: delta.Point.Slot,
 					Utxo: utxo,
-					TxId: &txId,
 				},
 			)
 		}

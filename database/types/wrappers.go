@@ -22,5 +22,4 @@ import (
 type UtxoSlot struct {
 	Utxo ledger.Utxo
 	Slot uint64
-	TxId *uint
 }

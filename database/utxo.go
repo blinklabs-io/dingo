@@ -100,7 +100,6 @@ func (d *Database) NewUtxo(
 		stakeKey,
 		amt,
 		asset,
-		transactionId,
 		txn.Metadata(),
 	)
 }

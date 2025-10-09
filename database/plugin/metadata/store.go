@@ -222,7 +222,6 @@ type MetadataStore interface {
 		[]byte, // stake
 		uint64, // amount
 		*lcommon.MultiAsset[lcommon.MultiAssetTypeOutput], // asset
-		*uint, // transactionId
 		*gorm.DB,
 	) error
 	SetVoteDelegation(

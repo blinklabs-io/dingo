@@ -206,16 +206,14 @@ func (d *MetadataStoreSqlite) SetUtxo(
 	stake []byte, // stake
 	amount uint64, // amount
 	assets *lcommon.MultiAsset[lcommon.MultiAssetTypeOutput], // assets (multi-asset)
-	transactionId *uint,
 	txn *gorm.DB,
 ) error {
 	tmpUtxo := models.Utxo{
-		TxId:          txId,
-		OutputIdx:     idx,
-		AddedSlot:     slot,
-		PaymentKey:    payment,
-		StakingKey:    stake,
-		TransactionID: transactionId,
+		TxId:       txId,
+		OutputIdx:  idx,
+		AddedSlot:  slot,
+		PaymentKey: payment,
+		StakingKey: stake,
 	}
 
 	// Handle assets if present
@@ -244,7 +242,6 @@ func (d *MetadataStoreSqlite) AddUtxos(
 	items := make([]models.Utxo, 0, len(utxos))
 	for _, utxo := range utxos {
 		item := utxoLedgerToModel(utxo.Utxo, utxo.Slot)
-		item.TransactionID = utxo.TxId
 		items = append(items, item)
 	}
 	if txn != nil {
