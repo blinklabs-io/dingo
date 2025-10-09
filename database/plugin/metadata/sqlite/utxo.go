@@ -241,8 +241,10 @@ func (d *MetadataStoreSqlite) AddUtxos(
 ) error {
 	items := make([]models.Utxo, 0, len(utxos))
 	for _, utxo := range utxos {
-		item := utxoLedgerToModel(utxo.Utxo, utxo.Slot)
-		items = append(items, item)
+		items = append(
+			items,
+			utxoLedgerToModel(utxo.Utxo, utxo.Slot),
+		)
 	}
 	if txn != nil {
 		result := txn.Create(items)
