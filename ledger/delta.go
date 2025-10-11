@@ -91,8 +91,7 @@ func (d *LedgerDelta) apply(ls *LedgerState, txn *database.Txn) error {
 	// Process produced UTxOs
 	for _, produced := range d.Produced {
 		outAddr := produced.Output.Address()
-		txId, ok := txIdMap[string(produced.Id.Id().Bytes())]
-		if !ok {
+		if _, ok := txIdMap[string(produced.Id.Id().Bytes())]; !ok {
 			return fmt.Errorf("transaction ID not found for UTxO %s", produced.Id.String())
 		}
 		err := ls.db.NewUtxo(
@@ -104,7 +103,6 @@ func (d *LedgerDelta) apply(ls *LedgerState, txn *database.Txn) error {
 			produced.Output.Cbor(),
 			produced.Output.Amount(),
 			produced.Output.Assets(),
-			&txId,
 			txn,
 		)
 		if err != nil {

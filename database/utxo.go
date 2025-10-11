@@ -79,7 +79,6 @@ func (d *Database) NewUtxo(
 	paymentKey, stakeKey, cbor []byte,
 	amt uint64,
 	asset *lcommon.MultiAsset[lcommon.MultiAssetTypeOutput],
-	transactionId *uint,
 	txn *Txn,
 ) error {
 	if txn == nil {

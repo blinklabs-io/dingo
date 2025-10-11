@@ -243,7 +243,6 @@ func (ls *LedgerState) createGenesisBlock() error {
 				outputCbor,
 				utxo.Output.Amount(),
 				utxo.Output.Assets(),
-				nil,
 				txn,
 			)
 			if err != nil {
