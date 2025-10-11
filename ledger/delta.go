@@ -18,12 +18,19 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"strconv"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
+
+type TransactionRecord struct {
+	Tx    lcommon.Transaction
+	Index uint32
+}
 
 type LedgerDelta struct {
 	Point             ocommon.Point
@@ -32,14 +39,17 @@ type LedgerDelta struct {
 	PParamUpdateEpoch uint64
 	PParamUpdates     map[lcommon.Blake2b224]lcommon.ProtocolParameterUpdate
 	Certificates      []lcommon.Certificate
+	Transactions      []TransactionRecord
 }
 
 //nolint:unparam
-func (d *LedgerDelta) processTransaction(tx lcommon.Transaction) error {
+func (d *LedgerDelta) processTransaction(tx lcommon.Transaction, index uint32) error {
 	// Consumed UTxOs
 	d.Consumed = slices.Concat(d.Consumed, tx.Consumed())
 	// Produced UTxOs
 	d.Produced = slices.Concat(d.Produced, tx.Produced())
+	// Collect transaction
+	d.Transactions = append(d.Transactions, TransactionRecord{Tx: tx, Index: index})
 	// Stop processing transaction if it's marked as invalid
 	// This allows us to capture collateral returns in the case of phase 2 validation failure
 	if !tx.IsValid() {
@@ -61,9 +71,29 @@ func (d *LedgerDelta) processTransaction(tx lcommon.Transaction) error {
 }
 
 func (d *LedgerDelta) apply(ls *LedgerState, txn *database.Txn) error {
+	// Record transactions first to get IDs
+	txIdMap := make(map[string]uint)
+	for _, tr := range d.Transactions {
+		inputsCbor, err := cbor.Encode(tr.Tx.Consumed())
+		if err != nil {
+			return fmt.Errorf("encode transaction inputs: %w", err)
+		}
+		outputsCbor, err := cbor.Encode(tr.Tx.Produced())
+		if err != nil {
+			return fmt.Errorf("encode transaction outputs: %w", err)
+		}
+		tx, err := ls.db.NewTransaction(tr.Tx.Hash().Bytes(), strconv.Itoa(tr.Tx.Type()), d.Point.Hash, tr.Index, inputsCbor, outputsCbor, txn)
+		if err != nil {
+			return fmt.Errorf("record transaction: %w", err)
+		}
+		txIdMap[string(tr.Tx.Hash().Bytes())] = tx.ID
+	}
 	// Process produced UTxOs
 	for _, produced := range d.Produced {
 		outAddr := produced.Output.Address()
+		if _, ok := txIdMap[string(produced.Id.Id().Bytes())]; !ok {
+			return fmt.Errorf("transaction ID not found for UTxO %s", produced.Id.String())
+		}
 		err := ls.db.NewUtxo(
 			produced.Id.Id().Bytes(),
 			produced.Id.Index(),
@@ -114,10 +144,32 @@ func (b *LedgerDeltaBatch) addDelta(delta *LedgerDelta) {
 }
 
 func (b *LedgerDeltaBatch) apply(ls *LedgerState, txn *database.Txn) error {
-	// Produced
+	// Record all transactions first to get IDs
+	txIdMap := make(map[string]uint)
+	for _, delta := range b.deltas {
+		for _, tr := range delta.Transactions {
+			inputsCbor, err := cbor.Encode(tr.Tx.Consumed())
+			if err != nil {
+				return fmt.Errorf("encode transaction inputs: %w", err)
+			}
+			outputsCbor, err := cbor.Encode(tr.Tx.Produced())
+			if err != nil {
+				return fmt.Errorf("encode transaction outputs: %w", err)
+			}
+			tx, err := ls.db.NewTransaction(tr.Tx.Hash().Bytes(), strconv.Itoa(tr.Tx.Type()), delta.Point.Hash, tr.Index, inputsCbor, outputsCbor, txn)
+			if err != nil {
+				return fmt.Errorf("record transaction: %w", err)
+			}
+			txIdMap[string(tr.Tx.Hash().Bytes())] = tx.ID
+		}
+	}
+	// Produced UTxOs with transaction IDs
 	produced := make([]types.UtxoSlot, 0, 100)
 	for _, delta := range b.deltas {
 		for _, utxo := range delta.Produced {
+			if _, ok := txIdMap[string(utxo.Id.Id().Bytes())]; !ok {
+				return fmt.Errorf("transaction ID not found for UTxO %s", utxo.Id.String())
+			}
 			produced = append(
 				produced,
 				types.UtxoSlot{

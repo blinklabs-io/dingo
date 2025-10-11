@@ -42,6 +42,7 @@ var MigrateModels = []any{
 	&StakeVoteDelegation{},
 	&StakeVoteRegistrationDelegation{},
 	&Tip{},
+	&Transaction{},
 	&UpdateDrep{},
 	&Utxo{},
 	&VoteDelegation{},
