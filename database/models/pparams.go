@@ -25,3 +25,15 @@ type PParams struct {
 func (PParams) TableName() string {
 	return "pparams"
 }
+
+type PParamUpdate struct {
+	ID          uint `gorm:"primarykey"`
+	GenesisHash []byte
+	Cbor        []byte
+	AddedSlot   uint64
+	Epoch       uint64
+}
+
+func (PParamUpdate) TableName() string {
+	return "pparam_update"
+}
