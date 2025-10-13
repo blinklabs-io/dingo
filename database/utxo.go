@@ -19,58 +19,12 @@ import (
 	"math/big"
 	"slices"
 
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/dgraph-io/badger/v4"
 )
-
-type Utxo struct {
-	ID          uint   `gorm:"primarykey"`
-	TxId        []byte `gorm:"index:tx_id_output_idx"`
-	OutputIdx   uint32 `gorm:"index:tx_id_output_idx"`
-	AddedSlot   uint64 `gorm:"index"`
-	DeletedSlot uint64 `gorm:"index"`
-	PaymentKey  []byte `gorm:"index"`
-	StakingKey  []byte `gorm:"index"`
-	Amount      uint64 `gorm:"index"`
-	Assets      []Asset
-	Cbor        []byte `gorm:"-"` // This is not represented in the metadata DB
-}
-
-type Asset struct {
-	ID          uint `gorm:"primaryKey"`
-	UtxoID      uint
-	Name        []byte       `gorm:"index"`
-	NameHex     []byte       `gorm:"index"`
-	PolicyId    []byte       `gorm:"index"`
-	Fingerprint []byte       `gorm:"index"`
-	Amount      types.Uint64 `gorm:"index"`
-}
-
-func (u *Utxo) TableName() string {
-	return "utxo"
-}
-
-func (u *Utxo) Decode() (ledger.TransactionOutput, error) {
-	return ledger.NewTransactionOutputFromCbor(u.Cbor)
-}
-
-func (u *Utxo) loadCbor(txn *Txn) error {
-	key := UtxoBlobKey(u.TxId, u.OutputIdx)
-	item, err := txn.Blob().Get(key)
-	if err != nil {
-		return err
-	}
-	u.Cbor, err = item.ValueCopy(nil)
-	if err != nil {
-		if errors.Is(err, badger.ErrKeyNotFound) {
-			return nil
-		}
-		return err
-	}
-	return nil
-}
 
 func (d *Database) NewUtxo(
 	txId []byte,
@@ -132,33 +86,19 @@ func (d *Database) UtxoByRef(
 	txId []byte,
 	outputIdx uint32,
 	txn *Txn,
-) (Utxo, error) {
-	tmpUtxo := Utxo{}
+) (models.Utxo, error) {
 	if txn == nil {
 		txn = d.Transaction(false)
 		defer txn.Commit() //nolint:errcheck
 	}
 	utxo, err := d.metadata.GetUtxo(txId, outputIdx, txn.Metadata())
 	if err != nil {
-		return tmpUtxo, err
+		return models.Utxo{}, err
 	}
-	tmpUtxo = Utxo{
-		ID:          utxo.ID,
-		TxId:        utxo.TxId,
-		OutputIdx:   utxo.OutputIdx,
-		AddedSlot:   utxo.AddedSlot,
-		DeletedSlot: utxo.DeletedSlot,
-		PaymentKey:  utxo.PaymentKey,
-		StakingKey:  utxo.StakingKey,
-		Amount:      utxo.Amount,
+	if err := UtxoLoadCbor(&utxo, txn); err != nil {
+		return models.Utxo{}, err
 	}
-	for _, asset := range utxo.Assets {
-		tmpUtxo.Assets = append(tmpUtxo.Assets, Asset(asset))
-	}
-	if err := tmpUtxo.loadCbor(txn); err != nil {
-		return tmpUtxo, err
-	}
-	return tmpUtxo, nil
+	return utxo, nil
 }
 
 func (d *Database) UtxoConsume(
@@ -176,36 +116,21 @@ func (d *Database) UtxoConsume(
 func (d *Database) UtxosByAddress(
 	addr ledger.Address,
 	txn *Txn,
-) ([]Utxo, error) {
-	ret := []Utxo{}
+) ([]models.Utxo, error) {
 	if txn == nil {
 		txn = d.Transaction(false)
 		defer txn.Commit() //nolint:errcheck
 	}
 	utxos, err := d.metadata.GetUtxosByAddress(addr, txn.Metadata())
 	if err != nil {
-		return ret, err
+		return []models.Utxo{}, err
 	}
 	for _, utxo := range utxos {
-		tmpUtxo := Utxo{
-			ID:          utxo.ID,
-			TxId:        utxo.TxId,
-			OutputIdx:   utxo.OutputIdx,
-			AddedSlot:   utxo.AddedSlot,
-			DeletedSlot: utxo.DeletedSlot,
-			PaymentKey:  utxo.PaymentKey,
-			StakingKey:  utxo.StakingKey,
-			Amount:      utxo.Amount,
+		if err := UtxoLoadCbor(&utxo, txn); err != nil {
+			return utxos, err
 		}
-		for _, asset := range utxo.Assets {
-			tmpUtxo.Assets = append(tmpUtxo.Assets, Asset(asset))
-		}
-		if err := tmpUtxo.loadCbor(txn); err != nil {
-			return ret, err
-		}
-		ret = append(ret, tmpUtxo)
 	}
-	return ret, nil
+	return utxos, nil
 }
 
 func (d *Database) UtxosDeleteConsumed(
@@ -326,6 +251,22 @@ func (d *Database) UtxosUnspend(
 		defer txn.Commit() //nolint:errcheck
 	}
 	return d.metadata.SetUtxosNotDeletedAfterSlot(slot, txn.Metadata())
+}
+
+func UtxoLoadCbor(u *models.Utxo, txn *Txn) error {
+	key := UtxoBlobKey(u.TxId, u.OutputIdx)
+	item, err := txn.Blob().Get(key)
+	if err != nil {
+		return err
+	}
+	u.Cbor, err = item.ValueCopy(nil)
+	if err != nil {
+		if errors.Is(err, badger.ErrKeyNotFound) {
+			return nil
+		}
+		return err
+	}
+	return nil
 }
 
 func UtxoBlobKey(txId []byte, outputIdx uint32) []byte {

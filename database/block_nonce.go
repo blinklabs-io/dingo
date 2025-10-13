@@ -14,18 +14,6 @@
 
 package database
 
-type BlockNonce struct {
-	ID           uint `gorm:"primarykey"`
-	Hash         []byte
-	Slot         uint64
-	Nonce        []byte
-	IsCheckpoint bool
-}
-
-func (BlockNonce) TableName() string {
-	return "block_nonce"
-}
-
 func (d *Database) SetBlockNonce(
 	blockHash []byte,
 	slotNumber uint64,

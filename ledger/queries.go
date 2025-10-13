@@ -19,7 +19,7 @@ import (
 	"fmt"
 	"math/big"
 
-	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
@@ -97,11 +97,11 @@ func (ls *LedgerState) queryHardFork(
 func (ls *LedgerState) queryHardForkEraHistory() (any, error) {
 	retData := []any{}
 	timespan := big.NewInt(0)
-	var epochs []database.Epoch
+	var epochs []models.Epoch
 	var era eras.EraDesc
 	var err error
 	var tmpStart, tmpEnd []any
-	var tmpEpoch database.Epoch
+	var tmpEpoch models.Epoch
 	var tmpEra, tmpParams []any
 	var epochSlotLength, epochLength uint
 	var idx int

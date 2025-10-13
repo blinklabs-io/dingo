@@ -27,6 +27,7 @@ import (
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/mempool"
@@ -84,8 +85,8 @@ type LedgerState struct {
 	timerCleanupConsumedUtxos        *time.Timer
 	Scheduler                        *Scheduler
 	currentPParams                   lcommon.ProtocolParameters
-	currentEpoch                     database.Epoch
-	epochCache                       []database.Epoch
+	currentEpoch                     models.Epoch
+	epochCache                       []models.Epoch
 	currentEra                       eras.EraDesc
 	currentTip                       ochainsync.Tip
 	currentTipBlockNonce             []byte
@@ -987,25 +988,15 @@ func (ls *LedgerState) GetCurrentPParams() lcommon.ProtocolParameters {
 func (ls *LedgerState) UtxoByRef(
 	txId []byte,
 	outputIdx uint32,
-) (database.Utxo, error) {
+) (models.Utxo, error) {
 	return ls.db.UtxoByRef(txId, outputIdx, nil)
 }
 
 // UtxosByAddress returns all UTxOs that belong to the specified address
 func (ls *LedgerState) UtxosByAddress(
 	addr ledger.Address,
-) ([]database.Utxo, error) {
-	ret := []database.Utxo{}
-	utxos, err := ls.db.UtxosByAddress(addr, nil)
-	if err != nil {
-		return ret, err
-	}
-	var tmpUtxo database.Utxo
-	for _, utxo := range utxos {
-		tmpUtxo = database.Utxo(utxo)
-		ret = append(ret, tmpUtxo)
-	}
-	return ret, nil
+) ([]models.Utxo, error) {
+	return ls.db.UtxosByAddress(addr, nil)
 }
 
 // ValidateTx runs ledger validation on the provided transaction

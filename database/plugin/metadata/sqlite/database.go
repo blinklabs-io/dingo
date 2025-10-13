@@ -24,8 +24,8 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin"
-	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite/models"
 	"github.com/glebarez/sqlite"
 	"github.com/prometheus/client_golang/prometheus"
 	"gorm.io/gorm"
@@ -50,6 +50,41 @@ type MetadataStoreSqlite struct {
 	logger       *slog.Logger
 	promRegistry prometheus.Registerer
 	timerVacuum  *time.Timer
+}
+
+// MigrateModels contains a list of model objects that should have DB migrations applied
+var MigrateModels = []any{
+	&models.Account{},
+	&models.Asset{},
+	&models.AuthCommitteeHot{},
+	&models.BlockNonce{},
+	&models.Datum{},
+	&models.Deregistration{},
+	&models.DeregistrationDrep{},
+	&models.Drep{},
+	&models.Epoch{},
+	&models.Pool{},
+	&models.PoolRegistration{},
+	&models.PoolRegistrationOwner{},
+	&models.PoolRegistrationRelay{},
+	&models.PoolRetirement{},
+	&models.PParams{},
+	&models.PParamUpdate{},
+	&models.Registration{},
+	&models.RegistrationDrep{},
+	&models.ResignCommitteeCold{},
+	&models.StakeDelegation{},
+	&models.StakeDeregistration{},
+	&models.StakeRegistration{},
+	&models.StakeRegistrationDelegation{},
+	&models.StakeVoteDelegation{},
+	&models.StakeVoteRegistrationDelegation{},
+	&models.Tip{},
+	&models.Transaction{},
+	&models.UpdateDrep{},
+	&models.Utxo{},
+	&models.VoteDelegation{},
+	&models.VoteRegistrationDelegation{},
 }
 
 // New creates a new database
@@ -118,7 +153,7 @@ func New(
 	if err := db.db.AutoMigrate(&CommitTimestamp{}); err != nil {
 		return db, err
 	}
-	for _, model := range models.MigrateModels {
+	for _, model := range MigrateModels {
 		db.logger.Debug(fmt.Sprintf("creating table: %#v", model))
 		if err := db.db.AutoMigrate(model); err != nil {
 			return db, err

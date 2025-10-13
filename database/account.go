@@ -15,38 +15,20 @@
 package database
 
 import (
+	"github.com/blinklabs-io/dingo/database/models"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
-
-type Account struct {
-	ID         uint   `gorm:"primarykey"`
-	StakingKey []byte `gorm:"uniqueIndex"`
-	Pool       []byte `gorm:"index"`
-	Drep       []byte `gorm:"index"`
-	AddedSlot  uint64
-	Active     bool
-}
-
-func (a *Account) TableName() string {
-	return "account"
-}
 
 // GetAccount returns an account by staking key
 func (d *Database) GetAccount(
 	stakeKey []byte,
 	txn *Txn,
-) (Account, error) {
-	tmpAccount := Account{}
+) (models.Account, error) {
 	if txn == nil {
 		txn = d.Transaction(false)
 		defer txn.Commit() //nolint:errcheck
 	}
-	account, err := d.metadata.GetAccount(stakeKey, txn.Metadata())
-	if err != nil {
-		return tmpAccount, err
-	}
-	tmpAccount = Account(account)
-	return tmpAccount, nil
+	return d.metadata.GetAccount(stakeKey, txn.Metadata())
 }
 
 // SetAccount saves an account

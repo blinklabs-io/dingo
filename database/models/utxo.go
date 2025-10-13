@@ -14,6 +14,10 @@
 
 package models
 
+import (
+	"github.com/blinklabs-io/gouroboros/ledger"
+)
+
 type Utxo struct {
 	ID            uint   `gorm:"primarykey"`
 	TxId          []byte `gorm:"index:tx_id_output_idx"`
@@ -30,4 +34,8 @@ type Utxo struct {
 
 func (u *Utxo) TableName() string {
 	return "utxo"
+}
+
+func (u *Utxo) Decode() (ledger.TransactionOutput, error) {
+	return ledger.NewTransactionOutputFromCbor(u.Cbor)
 }
