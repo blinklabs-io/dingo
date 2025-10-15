@@ -96,7 +96,7 @@ func (d *Database) UtxoByRef(
 		return nil, err
 	}
 	if utxo == nil {
-		return nil, errors.New("utxo not found")
+		return nil, nil
 	}
 	if err := UtxoLoadCbor(utxo, txn); err != nil {
 		return nil, err
