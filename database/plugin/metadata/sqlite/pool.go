@@ -170,6 +170,9 @@ func (d *MetadataStoreSqlite) SetPoolRegistration(
 		}
 	} else {
 		// Store our fetched pool
+		if tmpPool == nil {
+			return errors.New("pool not found")
+		}
 		tmpItem = *tmpPool
 	}
 	tmpItem.Pledge = types.Uint64(cert.Pledge)
