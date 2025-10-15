@@ -18,7 +18,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 )
 
-func (d *Database) GetEpochLatest(txn *Txn) (models.Epoch, error) {
+func (d *Database) GetEpochLatest(txn *Txn) (*models.Epoch, error) {
 	if txn == nil {
 		txn = d.Transaction(false)
 		defer txn.Commit() //nolint:errcheck
@@ -26,7 +26,10 @@ func (d *Database) GetEpochLatest(txn *Txn) (models.Epoch, error) {
 	return d.metadata.GetEpochLatest(txn.Metadata())
 }
 
-func (d *Database) GetEpochsByEra(eraId uint, txn *Txn) ([]models.Epoch, error) {
+func (d *Database) GetEpochsByEra(
+	eraId uint,
+	txn *Txn,
+) ([]models.Epoch, error) {
 	if txn == nil {
 		txn = d.Transaction(false)
 		defer txn.Commit() //nolint:errcheck
@@ -52,5 +55,13 @@ func (d *Database) SetEpoch(
 		txn = d.Transaction(false)
 		defer txn.Commit() //nolint:errcheck
 	}
-	return d.metadata.SetEpoch(slot, epoch, nonce, era, slotLength, lengthInSlots, txn.Metadata())
+	return d.metadata.SetEpoch(
+		slot,
+		epoch,
+		nonce,
+		era,
+		slotLength,
+		lengthInSlots,
+		txn.Metadata(),
+	)
 }

@@ -16,6 +16,7 @@ package sqlite
 
 import (
 	"encoding/hex"
+	"errors"
 	"fmt"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -30,23 +31,27 @@ func (d *MetadataStoreSqlite) GetUtxo(
 	txId []byte,
 	idx uint32,
 	txn *gorm.DB,
-) (models.Utxo, error) {
-	ret := models.Utxo{}
+) (*models.Utxo, error) {
 	tmpUtxo := models.Utxo{}
 	if txn != nil {
 		result := txn.Where("deleted_slot = 0").
 			First(&tmpUtxo, "tx_id = ? AND output_idx = ?", txId, idx)
 		if result.Error != nil {
-			return ret, result.Error
+			if errors.Is(result.Error, gorm.ErrRecordNotFound) {
+				return nil, nil
+			}
+			return nil, result.Error
 		}
 	} else {
 		result := d.DB().Where("deleted_slot = 0").First(&tmpUtxo, "tx_id = ? AND output_idx = ?", txId, idx)
 		if result.Error != nil {
-			return ret, result.Error
+			if errors.Is(result.Error, gorm.ErrRecordNotFound) {
+				return nil, nil
+			}
+			return nil, result.Error
 		}
 	}
-	ret = tmpUtxo
-	return ret, nil
+	return &tmpUtxo, nil
 }
 
 // GetUtxosAddedAfterSlot returns a list of Utxos added after a given slot
@@ -332,7 +337,9 @@ func utxoLedgerToModel(
 	return ret
 }
 
-func convertMultiAssetToModels(multiAsset *lcommon.MultiAsset[lcommon.MultiAssetTypeOutput]) []models.Asset {
+func convertMultiAssetToModels(
+	multiAsset *lcommon.MultiAsset[lcommon.MultiAssetTypeOutput],
+) []models.Asset {
 	var assets []models.Asset
 
 	// Get all policy IDs
@@ -346,7 +353,10 @@ func convertMultiAssetToModels(multiAsset *lcommon.MultiAsset[lcommon.MultiAsset
 			amount := multiAsset.Asset(policyId, assetNameBytes)
 
 			// Calculate fingerprint
-			fingerprint := lcommon.NewAssetFingerprint(policyIdBytes, assetNameBytes)
+			fingerprint := lcommon.NewAssetFingerprint(
+				policyIdBytes,
+				assetNameBytes,
+			)
 
 			asset := models.Asset{
 				Name:        assetNameBytes,

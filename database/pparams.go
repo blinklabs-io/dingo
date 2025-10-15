@@ -30,7 +30,7 @@ func (d *Database) GetPParams(
 	var err error
 	if txn == nil {
 		pparams, ppErr := d.metadata.GetPParams(epoch, nil)
-		if err != nil {
+		if ppErr != nil {
 			return ret, ppErr
 		}
 		if len(pparams) == 0 {
@@ -41,7 +41,7 @@ func (d *Database) GetPParams(
 		ret, err = decodeFunc(tmpPParams.Cbor)
 	} else {
 		pparams, ppErr := d.metadata.GetPParams(epoch, txn.Metadata())
-		if err != nil {
+		if ppErr != nil {
 			return ret, ppErr
 		}
 		if len(pparams) == 0 {

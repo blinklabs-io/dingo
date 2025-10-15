@@ -60,7 +60,9 @@ func Encrypt(data []byte) ([]byte, error) {
 	// Configure Google KMS from env to encrypt
 	rid := os.Getenv("DINGO_GCP_KMS_RESOURCE_ID")
 	if rid == "" {
-		return nil, errors.New("DINGO_GCP_KMS_RESOURCE_ID not set: SOPS requires at least one master key to encrypt")
+		return nil, errors.New(
+			"DINGO_GCP_KMS_RESOURCE_ID not set: SOPS requires at least one master key to encrypt",
+		)
 	}
 	keys := []skeys.MasterKey{}
 	for _, k := range gcpkms.MasterKeysFromResourceIDString(rid) {

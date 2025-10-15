@@ -25,24 +25,26 @@ import (
 // GetEpochLatest returns the latest epoch
 func (d *MetadataStoreSqlite) GetEpochLatest(
 	txn *gorm.DB,
-) (models.Epoch, error) {
+) (*models.Epoch, error) {
 	ret := models.Epoch{}
 	if txn != nil {
 		result := txn.Order("epoch_id DESC").First(&ret)
 		if result.Error != nil {
-			if !errors.Is(result.Error, gorm.ErrRecordNotFound) {
-				return ret, result.Error
+			if errors.Is(result.Error, gorm.ErrRecordNotFound) {
+				return nil, nil
 			}
+			return nil, result.Error
 		}
 	} else {
 		result := d.DB().Order("epoch_id DESC").First(&ret)
 		if result.Error != nil {
-			if !errors.Is(result.Error, gorm.ErrRecordNotFound) {
-				return ret, result.Error
+			if errors.Is(result.Error, gorm.ErrRecordNotFound) {
+				return nil, nil
 			}
+			return nil, result.Error
 		}
 	}
-	return ret, nil
+	return &ret, nil
 }
 
 // GetEpochsByEra returns the list of epochs by era

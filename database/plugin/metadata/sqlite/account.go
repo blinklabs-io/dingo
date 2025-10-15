@@ -15,6 +15,8 @@
 package sqlite
 
 import (
+	"errors"
+
 	"github.com/blinklabs-io/dingo/database/models"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"gorm.io/gorm"
@@ -25,20 +27,24 @@ import (
 func (d *MetadataStoreSqlite) GetAccount(
 	stakeKey []byte,
 	txn *gorm.DB,
-) (models.Account, error) {
-	ret := models.Account{}
+) (*models.Account, error) {
 	tmpAccount := models.Account{}
 	if txn != nil {
 		if result := txn.First(&tmpAccount, "staking_key = ?", stakeKey); result.Error != nil {
-			return ret, result.Error
+			if errors.Is(result.Error, gorm.ErrRecordNotFound) {
+				return nil, nil
+			}
+			return nil, result.Error
 		}
 	} else {
 		if result := d.DB().First(&tmpAccount, "staking_key = ?", stakeKey); result.Error != nil {
-			return ret, result.Error
+			if errors.Is(result.Error, gorm.ErrRecordNotFound) {
+				return nil, nil
+			}
+			return nil, result.Error
 		}
 	}
-	ret = tmpAccount
-	return ret, nil
+	return &tmpAccount, nil
 }
 
 // SetAccount saves an account
@@ -79,7 +85,15 @@ func (d *MetadataStoreSqlite) SetDeregistration(
 	stakeKey := cert.StakeCredential.Credential.Bytes()
 	tmpAccount, err := d.GetAccount(stakeKey, txn)
 	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			// Account doesn't exist, nothing to deregister
+			return nil
+		}
 		return err
+	}
+	if tmpAccount == nil {
+		// Account doesn't exist, nothing to deregister
+		return nil
 	}
 	tmpItem := models.Deregistration{
 		StakingKey: stakeKey,
@@ -87,14 +101,14 @@ func (d *MetadataStoreSqlite) SetDeregistration(
 	}
 	tmpAccount.Active = false
 	if txn != nil {
-		if accountErr := txn.Save(&tmpAccount); accountErr.Error != nil {
+		if accountErr := txn.Save(tmpAccount); accountErr.Error != nil {
 			return accountErr.Error
 		}
 		if result := txn.Create(&tmpItem); result.Error != nil {
 			return result.Error
 		}
 	} else {
-		if accountErr := d.DB().Save(&tmpAccount); accountErr.Error != nil {
+		if accountErr := d.DB().Save(tmpAccount); accountErr.Error != nil {
 			return accountErr.Error
 		}
 		if result := d.DB().Create(&tmpItem); result.Error != nil {
@@ -140,7 +154,30 @@ func (d *MetadataStoreSqlite) SetStakeDelegation(
 	stakeKey := cert.StakeCredential.Credential.Bytes()
 	tmpAccount, err := d.GetAccount(stakeKey, txn)
 	if err != nil {
-		return err
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			// Account doesn't exist, create it first
+			if err := d.SetAccount(stakeKey, nil, nil, slot, true, txn); err != nil {
+				return err
+			}
+			// Retry getting the account
+			tmpAccount, err = d.GetAccount(stakeKey, txn)
+			if err != nil || tmpAccount == nil {
+				return err
+			}
+		} else {
+			return err
+		}
+	}
+	if tmpAccount == nil {
+		// Account doesn't exist, create it first
+		if err := d.SetAccount(stakeKey, nil, nil, slot, true, txn); err != nil {
+			return err
+		}
+		// Retry getting the account
+		tmpAccount, err = d.GetAccount(stakeKey, txn)
+		if err != nil || tmpAccount == nil {
+			return err
+		}
 	}
 	tmpItem := models.StakeDelegation{
 		StakingKey:  stakeKey,
@@ -149,14 +186,14 @@ func (d *MetadataStoreSqlite) SetStakeDelegation(
 	}
 	tmpAccount.Pool = tmpItem.PoolKeyHash
 	if txn != nil {
-		if accountErr := txn.Save(&tmpAccount); accountErr.Error != nil {
+		if accountErr := txn.Save(tmpAccount); accountErr.Error != nil {
 			return accountErr.Error
 		}
 		if result := txn.Create(&tmpItem); result.Error != nil {
 			return result.Error
 		}
 	} else {
-		if accountErr := d.DB().Save(&tmpAccount); accountErr.Error != nil {
+		if accountErr := d.DB().Save(tmpAccount); accountErr.Error != nil {
 			return accountErr.Error
 		}
 		if result := d.DB().Create(&tmpItem); result.Error != nil {
@@ -175,7 +212,15 @@ func (d *MetadataStoreSqlite) SetStakeDeregistration(
 	stakeKey := cert.StakeCredential.Credential.Bytes()
 	tmpAccount, err := d.GetAccount(stakeKey, txn)
 	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			// Account doesn't exist, nothing to deregister
+			return nil
+		}
 		return err
+	}
+	if tmpAccount == nil {
+		// Account doesn't exist, nothing to deregister
+		return nil
 	}
 	tmpItem := models.StakeDeregistration{
 		StakingKey: stakeKey,
@@ -183,14 +228,14 @@ func (d *MetadataStoreSqlite) SetStakeDeregistration(
 	}
 	tmpAccount.Active = false
 	if txn != nil {
-		if accountErr := txn.Save(&tmpAccount); accountErr.Error != nil {
+		if accountErr := txn.Save(tmpAccount); accountErr.Error != nil {
 			return accountErr.Error
 		}
 		if result := txn.Create(&tmpItem); result.Error != nil {
 			return result.Error
 		}
 	} else {
-		if accountErr := d.DB().Save(&tmpAccount); accountErr.Error != nil {
+		if accountErr := d.DB().Save(tmpAccount); accountErr.Error != nil {
 			return accountErr.Error
 		}
 		if result := d.DB().Create(&tmpItem); result.Error != nil {
@@ -265,7 +310,30 @@ func (d *MetadataStoreSqlite) SetStakeVoteDelegation(
 	stakeKey := cert.StakeCredential.Credential.Bytes()
 	tmpAccount, err := d.GetAccount(stakeKey, txn)
 	if err != nil {
-		return err // Account must exist
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			// Account doesn't exist, create it first
+			if err := d.SetAccount(stakeKey, nil, nil, slot, true, txn); err != nil {
+				return err
+			}
+			// Retry getting the account
+			tmpAccount, err = d.GetAccount(stakeKey, txn)
+			if err != nil || tmpAccount == nil {
+				return err
+			}
+		} else {
+			return err
+		}
+	}
+	if tmpAccount == nil {
+		// Account doesn't exist, create it first
+		if err := d.SetAccount(stakeKey, nil, nil, slot, true, txn); err != nil {
+			return err
+		}
+		// Retry getting the account
+		tmpAccount, err = d.GetAccount(stakeKey, txn)
+		if err != nil || tmpAccount == nil {
+			return err
+		}
 	}
 
 	tmpItem := models.StakeVoteDelegation{
@@ -280,14 +348,14 @@ func (d *MetadataStoreSqlite) SetStakeVoteDelegation(
 	tmpAccount.Drep = tmpItem.Drep
 
 	if txn != nil {
-		if accountErr := txn.Save(&tmpAccount); accountErr.Error != nil {
+		if accountErr := txn.Save(tmpAccount); accountErr.Error != nil {
 			return accountErr.Error
 		}
 		if result := txn.Create(&tmpItem); result.Error != nil {
 			return result.Error
 		}
 	} else {
-		if accountErr := d.DB().Save(&tmpAccount); accountErr.Error != nil {
+		if accountErr := d.DB().Save(tmpAccount); accountErr.Error != nil {
 			return accountErr.Error
 		}
 		if result := d.DB().Create(&tmpItem); result.Error != nil {
@@ -338,7 +406,30 @@ func (d *MetadataStoreSqlite) SetVoteDelegation(
 	stakeKey := cert.StakeCredential.Credential.Bytes()
 	tmpAccount, err := d.GetAccount(stakeKey, txn)
 	if err != nil {
-		return err
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			// Account doesn't exist, create it first
+			if err := d.SetAccount(stakeKey, nil, nil, slot, true, txn); err != nil {
+				return err
+			}
+			// Retry getting the account
+			tmpAccount, err = d.GetAccount(stakeKey, txn)
+			if err != nil || tmpAccount == nil {
+				return err
+			}
+		} else {
+			return err
+		}
+	}
+	if tmpAccount == nil {
+		// Account doesn't exist, create it first
+		if err := d.SetAccount(stakeKey, nil, nil, slot, true, txn); err != nil {
+			return err
+		}
+		// Retry getting the account
+		tmpAccount, err = d.GetAccount(stakeKey, txn)
+		if err != nil || tmpAccount == nil {
+			return err
+		}
 	}
 
 	tmpItem := models.VoteDelegation{
@@ -350,14 +441,14 @@ func (d *MetadataStoreSqlite) SetVoteDelegation(
 	tmpAccount.Drep = tmpItem.Drep
 
 	if txn != nil {
-		if accountErr := txn.Save(&tmpAccount); accountErr.Error != nil {
+		if accountErr := txn.Save(tmpAccount); accountErr.Error != nil {
 			return accountErr.Error
 		}
 		if result := txn.Create(&tmpItem); result.Error != nil {
 			return result.Error
 		}
 	} else {
-		if accountErr := d.DB().Save(&tmpAccount); accountErr.Error != nil {
+		if accountErr := d.DB().Save(tmpAccount); accountErr.Error != nil {
 			return accountErr.Error
 		}
 		if result := d.DB().Create(&tmpItem); result.Error != nil {

@@ -896,7 +896,7 @@ func (ls *LedgerState) GetBlock(point ocommon.Point) (*database.Block, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &ret, nil
+	return ret, nil
 }
 
 // RecentChainPoints returns the requested count of recent chain points in descending order. This is used mostly
@@ -923,7 +923,7 @@ func (ls *LedgerState) GetIntersectPoint(
 ) (*ocommon.Point, error) {
 	tip := ls.Tip()
 	var ret ocommon.Point
-	var tmpBlock database.Block
+	var tmpBlock *database.Block
 	var err error
 	foundOrigin := false
 	txn := ls.db.Transaction(false)
@@ -949,6 +949,9 @@ func (ls *LedgerState) GetIntersectPoint(
 					continue
 				}
 				return fmt.Errorf("failed to get block: %w", err)
+			}
+			if tmpBlock == nil {
+				continue
 			}
 			// Update return value
 			ret.Slot = tmpBlock.Slot
@@ -989,7 +992,14 @@ func (ls *LedgerState) UtxoByRef(
 	txId []byte,
 	outputIdx uint32,
 ) (models.Utxo, error) {
-	return ls.db.UtxoByRef(txId, outputIdx, nil)
+	utxo, err := ls.db.UtxoByRef(txId, outputIdx, nil)
+	if err != nil {
+		return models.Utxo{}, err
+	}
+	if utxo == nil {
+		return models.Utxo{}, errors.New("utxo not found")
+	}
+	return *utxo, nil
 }
 
 // UtxosByAddress returns all UTxOs that belong to the specified address

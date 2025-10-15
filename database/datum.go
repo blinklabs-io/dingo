@@ -15,6 +15,8 @@
 package database
 
 import (
+	"errors"
+
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
 
@@ -30,6 +32,9 @@ func (d *Database) GetDatumByHash(
 	datum, err := d.metadata.GetDatum(hash, txn.Metadata())
 	if err != nil {
 		return nil, err
+	}
+	if datum == nil {
+		return nil, errors.New("datum not found")
 	}
 	return datum.RawDatum, nil
 }

@@ -22,7 +22,7 @@ import (
 func (d *Database) GetPool(
 	pkh []byte,
 	txn *Txn,
-) (models.Pool, error) {
+) (*models.Pool, error) {
 	if txn == nil {
 		txn = d.Transaction(false)
 		defer txn.Commit() //nolint:errcheck

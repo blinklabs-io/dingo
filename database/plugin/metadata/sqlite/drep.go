@@ -15,6 +15,8 @@
 package sqlite
 
 import (
+	"errors"
+
 	"github.com/blinklabs-io/dingo/database/models"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"gorm.io/gorm"
@@ -25,20 +27,21 @@ import (
 func (d *MetadataStoreSqlite) GetDrep(
 	cred []byte,
 	txn *gorm.DB,
-) (models.Drep, error) {
-	ret := models.Drep{}
+) (*models.Drep, error) {
 	tmpDrep := models.Drep{}
+	var result *gorm.DB
 	if txn != nil {
-		if result := txn.First(&tmpDrep, "credential = ?", cred); result.Error != nil {
-			return ret, result.Error
-		}
+		result = txn.First(&tmpDrep, "credential = ?", cred)
 	} else {
-		if result := d.DB().First(&tmpDrep, "credential = ?", cred); result.Error != nil {
-			return ret, result.Error
-		}
+		result = d.DB().First(&tmpDrep, "credential = ?", cred)
 	}
-	ret = tmpDrep
-	return ret, nil
+	if result.Error != nil {
+		if errors.Is(result.Error, gorm.ErrRecordNotFound) {
+			return nil, nil
+		}
+		return nil, result.Error
+	}
+	return &tmpDrep, nil
 }
 
 // SetDrep saves a drep
@@ -83,6 +86,9 @@ func (d *MetadataStoreSqlite) SetDeregistrationDrep(
 	tmpDrep, err := d.GetDrep(drep, txn)
 	if err != nil {
 		return err
+	}
+	if tmpDrep == nil {
+		return errors.New("drep not found")
 	}
 	tmpItem := models.DeregistrationDrep{
 		DrepCredential: drep,
@@ -153,6 +159,9 @@ func (d *MetadataStoreSqlite) SetUpdateDrep(
 	tmpDrep, err := d.GetDrep(drepKey, txn)
 	if err != nil {
 		return err
+	}
+	if tmpDrep == nil {
+		return errors.New("drep not found")
 	}
 
 	var anchorUrl string

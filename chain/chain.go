@@ -240,12 +240,15 @@ func (c *Chain) Rollback(point ocommon.Point) error {
 	}
 	// Lookup block for rollback point
 	var rollbackBlockIndex uint64
-	var tmpBlock database.Block
+	var tmpBlock *database.Block
 	if point.Slot > 0 {
 		var err error
 		tmpBlock, err = c.manager.blockByPoint(point, nil)
 		if err != nil {
 			return err
+		}
+		if tmpBlock == nil {
+			return errors.New("rollback block not found")
 		}
 		rollbackBlockIndex = tmpBlock.ID
 	}
@@ -354,19 +357,19 @@ func (c *Chain) FromPoint(
 func (c *Chain) BlockByPoint(
 	point ocommon.Point,
 	txn *database.Txn,
-) (database.Block, error) {
+) (*database.Block, error) {
 	return c.manager.BlockByPoint(point, txn)
 }
 
 func (c *Chain) blockByIndex(
 	blockIndex uint64,
 	txn *database.Txn,
-) (database.Block, error) {
+) (*database.Block, error) {
 	if c.persistent || blockIndex <= c.lastCommonBlockIndex {
 		// Query via manager for common blocks
 		tmpBlock, err := c.manager.blockByIndex(blockIndex, txn)
 		if err != nil {
-			return database.Block{}, err
+			return nil, err
 		}
 		return tmpBlock, nil
 	}
@@ -376,12 +379,12 @@ func (c *Chain) blockByIndex(
 		blockIndex - c.lastCommonBlockIndex - initialBlockIndex,
 	)
 	if memBlockIndex < 0 || len(c.blocks) < memBlockIndex+1 {
-		return database.Block{}, ErrBlockNotFound
+		return nil, ErrBlockNotFound
 	}
 	memBlockPoint := c.blocks[memBlockIndex]
 	tmpBlock, err := c.manager.blockByPoint(memBlockPoint, txn)
 	if err != nil {
-		return database.Block{}, err
+		return nil, err
 	}
 	return tmpBlock, nil
 }
@@ -425,13 +428,15 @@ func (c *Chain) iterNext(
 	tmpBlock, err := c.blockByIndex(iter.nextBlockIndex, nil)
 	// Return immedidately if a block is found
 	if err == nil {
-		ret.Point = ocommon.NewPoint(tmpBlock.Slot, tmpBlock.Hash)
-		ret.Block = tmpBlock
-		iter.nextBlockIndex++
-		iter.lastPoint = ret.Point
-		c.mutex.Unlock()
-		c.manager.mutex.RUnlock()
-		return ret, nil
+		if tmpBlock != nil {
+			ret.Point = ocommon.NewPoint(tmpBlock.Slot, tmpBlock.Hash)
+			ret.Block = *tmpBlock
+			iter.nextBlockIndex++
+			iter.lastPoint = ret.Point
+			c.mutex.Unlock()
+			c.manager.mutex.RUnlock()
+			return ret, nil
+		}
 	}
 	// Return any actual error
 	if !errors.Is(err, ErrBlockNotFound) {

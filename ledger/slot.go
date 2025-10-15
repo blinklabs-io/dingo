@@ -67,7 +67,9 @@ func (ls *LedgerState) SlotToTime(slot uint64) (time.Time, error) {
 		leftoverSlots := slot - (lastEpoch.StartSlot + uint64(lastEpoch.LengthInSlots))
 		slotTime = slotTime.Add(
 			// nolint:gosec
-			time.Duration(leftoverSlots) * (time.Duration(lastEpoch.SlotLength) * time.Millisecond),
+			time.Duration(
+				leftoverSlots,
+			) * (time.Duration(lastEpoch.SlotLength) * time.Millisecond),
 		)
 	}
 	return slotTime, nil
@@ -137,14 +139,14 @@ func (ls *LedgerState) TimeToSlot(t time.Time) (uint64, error) {
 }
 
 // SlotToEpoch returns a known epoch by slot number
-func (ls *LedgerState) SlotToEpoch(slot uint64) (models.Epoch, error) {
+func (ls *LedgerState) SlotToEpoch(slot uint64) (*models.Epoch, error) {
 	for _, epoch := range ls.epochCache {
 		if slot < epoch.StartSlot {
 			continue
 		}
 		if slot < epoch.StartSlot+uint64(epoch.LengthInSlots) {
-			return epoch, nil
+			return &epoch, nil
 		}
 	}
-	return models.Epoch{}, errors.New("slot not found in known epochs")
+	return nil, errors.New("slot not found in known epochs")
 }

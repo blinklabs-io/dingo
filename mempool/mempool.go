@@ -275,14 +275,14 @@ func (m *Mempool) AddTransaction(txType uint, txBytes []byte) error {
 	return nil
 }
 
-func (m *Mempool) GetTransaction(txHash string) (MempoolTransaction, bool) {
+func (m *Mempool) GetTransaction(txHash string) (*MempoolTransaction, bool) {
 	m.Lock()
 	defer m.Unlock()
 	ret := m.getTransaction(txHash)
 	if ret == nil {
-		return MempoolTransaction{}, false
+		return nil, false
 	}
-	return *ret, true
+	return ret, true
 }
 
 func (m *Mempool) Transactions() []MempoolTransaction {

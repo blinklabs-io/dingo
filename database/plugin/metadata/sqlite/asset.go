@@ -27,7 +27,7 @@ func (d *MetadataStoreSqlite) GetAssetByPolicyAndName(
 	policyId lcommon.Blake2b224,
 	assetName []byte,
 	txn *gorm.DB,
-) (models.Asset, error) {
+) (*models.Asset, error) {
 	var asset models.Asset
 	var result *gorm.DB
 
@@ -36,14 +36,15 @@ func (d *MetadataStoreSqlite) GetAssetByPolicyAndName(
 		query = txn
 	}
 
-	result = query.Where("policy_id = ? AND name = ?", policyId[:], assetName).First(&asset)
+	result = query.Where("policy_id = ? AND name = ?", policyId[:], assetName).
+		First(&asset)
 	if result.Error != nil {
 		if errors.Is(result.Error, gorm.ErrRecordNotFound) {
-			return models.Asset{}, nil
+			return nil, nil
 		}
-		return models.Asset{}, result.Error
+		return nil, result.Error
 	}
-	return asset, nil
+	return &asset, nil
 }
 
 // GetAssetsByPolicy returns all assets for a given policy ID

@@ -78,6 +78,9 @@ func (cm *ChainManager) NewChain(point ocommon.Point) (*Chain, error) {
 	if err != nil {
 		return nil, err
 	}
+	if intersectBlock == nil {
+		return nil, errors.New("intersect block not found")
+	}
 	// Increment current largest chain ID for new ID
 	chainIds := slices.Sorted(maps.Keys(cm.chains))
 	chainId := chainIds[len(chainIds)-1] + 1
@@ -111,7 +114,7 @@ func (cm *ChainManager) NewChainFromIntersect(
 	defer primaryChain.mutex.Unlock()
 	tip := primaryChain.currentTip
 	var intersectPoint ocommon.Point
-	var intersectBlock database.Block
+	var intersectBlock *database.Block
 	var err error
 	foundOrigin := false
 	txn := cm.db.BlobTxn(false)
@@ -137,6 +140,9 @@ func (cm *ChainManager) NewChainFromIntersect(
 					continue
 				}
 				return fmt.Errorf("failed to get block: %w", err)
+			}
+			if intersectBlock == nil {
+				continue
 			}
 			// Update return value
 			intersectPoint.Slot = intersectBlock.Slot
@@ -175,7 +181,7 @@ func (cm *ChainManager) NewChainFromIntersect(
 func (cm *ChainManager) BlockByPoint(
 	point ocommon.Point,
 	txn *database.Txn,
-) (database.Block, error) {
+) (*database.Block, error) {
 	cm.mutex.RLock()
 	defer cm.mutex.RUnlock()
 	return cm.blockByPoint(point, txn)
@@ -184,16 +190,16 @@ func (cm *ChainManager) BlockByPoint(
 func (cm *ChainManager) blockByPoint(
 	point ocommon.Point,
 	txn *database.Txn,
-) (database.Block, error) {
+) (*database.Block, error) {
 	// Check in-memory blocks
 	if blk, ok := cm.blocks[string(point.Hash)]; ok {
 		if blk.Slot == point.Slot {
-			return blk, nil
+			return &blk, nil
 		}
 	}
 	// Query database
 	if cm.db != nil {
-		var tmpBlock database.Block
+		var tmpBlock *database.Block
 		var err error
 		if txn == nil {
 			tmpBlock, err = database.BlockByPoint(cm.db, point)
@@ -202,43 +208,49 @@ func (cm *ChainManager) blockByPoint(
 		}
 		if err != nil {
 			if errors.Is(err, database.ErrBlockNotFound) {
-				return database.Block{}, ErrBlockNotFound
+				return nil, ErrBlockNotFound
 			}
-			return database.Block{}, err
+			return nil, err
+		}
+		if tmpBlock == nil {
+			return nil, ErrBlockNotFound
 		}
 		return tmpBlock, nil
 	}
-	return database.Block{}, ErrBlockNotFound
+	return nil, ErrBlockNotFound
 }
 
 func (cm *ChainManager) blockByHash(
 	blockHash []byte,
-) (database.Block, error) {
+) (*database.Block, error) {
 	cm.mutex.RLock()
 	defer cm.mutex.RUnlock()
 	// Check in-memory blocks
 	if blk, ok := cm.blocks[string(blockHash)]; ok {
-		return blk, nil
+		return &blk, nil
 	}
-	return database.Block{}, ErrBlockNotFound
+	return nil, ErrBlockNotFound
 }
 
 func (cm *ChainManager) blockByIndex(
 	blockIndex uint64,
 	txn *database.Txn,
-) (database.Block, error) {
+) (*database.Block, error) {
 	// Query database
 	if cm.db != nil {
 		tmpBlock, err := cm.db.BlockByIndex(blockIndex, txn)
 		if err != nil {
 			if errors.Is(err, database.ErrBlockNotFound) {
-				return database.Block{}, ErrBlockNotFound
+				return nil, ErrBlockNotFound
 			}
-			return database.Block{}, err
+			return nil, err
+		}
+		if tmpBlock == nil {
+			return nil, ErrBlockNotFound
 		}
 		return tmpBlock, nil
 	}
-	return database.Block{}, ErrBlockNotFound
+	return nil, ErrBlockNotFound
 }
 
 func (cm *ChainManager) loadPrimaryChain() error {
@@ -305,9 +317,12 @@ func (cm *ChainManager) removeBlockByIndex(blockIndex uint64) error {
 		if err != nil {
 			return err
 		}
+		if tmpBlock == nil {
+			return database.ErrBlockNotFound
+		}
 		// Add block to memory buffer in case other chains are using it
-		cm.blocks[string(tmpBlock.Hash)] = tmpBlock
-		if err := database.BlockDeleteTxn(txn, tmpBlock); err != nil {
+		cm.blocks[string(tmpBlock.Hash)] = *tmpBlock
+		if err := database.BlockDeleteTxn(txn, *tmpBlock); err != nil {
 			return err
 		}
 		return nil

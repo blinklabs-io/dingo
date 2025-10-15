@@ -25,7 +25,7 @@ import (
 func (d *MetadataStoreSqlite) GetTransactionByHash(
 	hash []byte,
 	txn *gorm.DB,
-) (models.Transaction, error) {
+) (*models.Transaction, error) {
 	var tx models.Transaction
 	var result *gorm.DB
 
@@ -37,11 +37,11 @@ func (d *MetadataStoreSqlite) GetTransactionByHash(
 	result = query.Where("hash = ?", hash).First(&tx)
 	if result.Error != nil {
 		if errors.Is(result.Error, gorm.ErrRecordNotFound) {
-			return models.Transaction{}, nil
+			return nil, result.Error
 		}
-		return models.Transaction{}, result.Error
+		return nil, result.Error
 	}
-	return tx, nil
+	return &tx, nil
 }
 
 // SetTransaction adds a new transaction to the database

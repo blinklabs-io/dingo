@@ -42,14 +42,21 @@ type LedgerDelta struct {
 	Transactions      []TransactionRecord
 }
 
+//
 //nolint:unparam
-func (d *LedgerDelta) processTransaction(tx lcommon.Transaction, index uint32) error {
+func (d *LedgerDelta) processTransaction(
+	tx lcommon.Transaction,
+	index uint32,
+) error {
 	// Consumed UTxOs
 	d.Consumed = slices.Concat(d.Consumed, tx.Consumed())
 	// Produced UTxOs
 	d.Produced = slices.Concat(d.Produced, tx.Produced())
 	// Collect transaction
-	d.Transactions = append(d.Transactions, TransactionRecord{Tx: tx, Index: index})
+	d.Transactions = append(
+		d.Transactions,
+		TransactionRecord{Tx: tx, Index: index},
+	)
 	// Stop processing transaction if it's marked as invalid
 	// This allows us to capture collateral returns in the case of phase 2 validation failure
 	if !tx.IsValid() {
@@ -82,7 +89,15 @@ func (d *LedgerDelta) apply(ls *LedgerState, txn *database.Txn) error {
 		if err != nil {
 			return fmt.Errorf("encode transaction outputs: %w", err)
 		}
-		tx, err := ls.db.NewTransaction(tr.Tx.Hash().Bytes(), strconv.Itoa(tr.Tx.Type()), d.Point.Hash, tr.Index, inputsCbor, outputsCbor, txn)
+		tx, err := ls.db.NewTransaction(
+			tr.Tx.Hash().Bytes(),
+			strconv.Itoa(tr.Tx.Type()),
+			d.Point.Hash,
+			tr.Index,
+			inputsCbor,
+			outputsCbor,
+			txn,
+		)
 		if err != nil {
 			return fmt.Errorf("record transaction: %w", err)
 		}
@@ -92,7 +107,10 @@ func (d *LedgerDelta) apply(ls *LedgerState, txn *database.Txn) error {
 	for _, produced := range d.Produced {
 		outAddr := produced.Output.Address()
 		if _, ok := txIdMap[string(produced.Id.Id().Bytes())]; !ok {
-			return fmt.Errorf("transaction ID not found for UTxO %s", produced.Id.String())
+			return fmt.Errorf(
+				"transaction ID not found for UTxO %s",
+				produced.Id.String(),
+			)
 		}
 		err := ls.db.NewUtxo(
 			produced.Id.Id().Bytes(),
@@ -156,7 +174,15 @@ func (b *LedgerDeltaBatch) apply(ls *LedgerState, txn *database.Txn) error {
 			if err != nil {
 				return fmt.Errorf("encode transaction outputs: %w", err)
 			}
-			tx, err := ls.db.NewTransaction(tr.Tx.Hash().Bytes(), strconv.Itoa(tr.Tx.Type()), delta.Point.Hash, tr.Index, inputsCbor, outputsCbor, txn)
+			tx, err := ls.db.NewTransaction(
+				tr.Tx.Hash().Bytes(),
+				strconv.Itoa(tr.Tx.Type()),
+				delta.Point.Hash,
+				tr.Index,
+				inputsCbor,
+				outputsCbor,
+				txn,
+			)
 			if err != nil {
 				return fmt.Errorf("record transaction: %w", err)
 			}
@@ -168,7 +194,10 @@ func (b *LedgerDeltaBatch) apply(ls *LedgerState, txn *database.Txn) error {
 	for _, delta := range b.deltas {
 		for _, utxo := range delta.Produced {
 			if _, ok := txIdMap[string(utxo.Id.Id().Bytes())]; !ok {
-				return fmt.Errorf("transaction ID not found for UTxO %s", utxo.Id.String())
+				return fmt.Errorf(
+					"transaction ID not found for UTxO %s",
+					utxo.Id.String(),
+				)
 			}
 			produced = append(
 				produced,

@@ -23,7 +23,7 @@ import (
 func (d *Database) GetAccount(
 	stakeKey []byte,
 	txn *Txn,
-) (models.Account, error) {
+) (*models.Account, error) {
 	if txn == nil {
 		txn = d.Transaction(false)
 		defer txn.Commit() //nolint:errcheck

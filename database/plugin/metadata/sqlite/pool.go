@@ -29,20 +29,24 @@ func (d *MetadataStoreSqlite) GetPool(
 	// pkh lcommon.PoolKeyHash,
 	pkh []byte,
 	txn *gorm.DB,
-) (models.Pool, error) {
+) (*models.Pool, error) {
 	tmpPool := models.Pool{}
 	if txn != nil {
 		result := txn.
-			Preload("Registration", func(db *gorm.DB) *gorm.DB { return db.Order("id DESC").Limit(1) }).
+			Preload(
+				"Registration",
+				func(db *gorm.DB) *gorm.DB { return db.Order("id DESC").Limit(1) },
+			).
 			First(
 				&tmpPool,
 				"pool_key_hash = ?",
 				pkh,
 			)
 		if result.Error != nil {
-			if !errors.Is(result.Error, gorm.ErrRecordNotFound) {
-				return tmpPool, result.Error
+			if errors.Is(result.Error, gorm.ErrRecordNotFound) {
+				return nil, nil
 			}
+			return nil, result.Error
 		}
 	} else {
 		result := d.DB().
@@ -53,12 +57,13 @@ func (d *MetadataStoreSqlite) GetPool(
 				pkh,
 			)
 		if result.Error != nil {
-			if !errors.Is(result.Error, gorm.ErrRecordNotFound) {
-				return tmpPool, result.Error
+			if errors.Is(result.Error, gorm.ErrRecordNotFound) {
+				return nil, nil
 			}
+			return nil, result.Error
 		}
 	}
-	return tmpPool, nil
+	return &tmpPool, nil
 }
 
 // GetPoolRegistrations returns pool registration certificates
@@ -165,7 +170,7 @@ func (d *MetadataStoreSqlite) SetPoolRegistration(
 		}
 	} else {
 		// Store our fetched pool
-		tmpItem = tmpPool
+		tmpItem = *tmpPool
 	}
 	tmpItem.Pledge = types.Uint64(cert.Pledge)
 	tmpItem.Cost = types.Uint64(cert.Cost)

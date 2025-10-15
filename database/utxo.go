@@ -86,17 +86,20 @@ func (d *Database) UtxoByRef(
 	txId []byte,
 	outputIdx uint32,
 	txn *Txn,
-) (models.Utxo, error) {
+) (*models.Utxo, error) {
 	if txn == nil {
 		txn = d.Transaction(false)
 		defer txn.Commit() //nolint:errcheck
 	}
 	utxo, err := d.metadata.GetUtxo(txId, outputIdx, txn.Metadata())
 	if err != nil {
-		return models.Utxo{}, err
+		return nil, err
 	}
-	if err := UtxoLoadCbor(&utxo, txn); err != nil {
-		return models.Utxo{}, err
+	if utxo == nil {
+		return nil, errors.New("utxo not found")
+	}
+	if err := UtxoLoadCbor(utxo, txn); err != nil {
+		return nil, err
 	}
 	return utxo, nil
 }
