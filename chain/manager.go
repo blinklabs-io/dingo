@@ -242,9 +242,6 @@ func (cm *ChainManager) blockByIndex(
 			}
 			return nil, err
 		}
-		if tmpBlock == nil {
-			return nil, ErrBlockNotFound
-		}
 		return tmpBlock, nil
 	}
 	return nil, ErrBlockNotFound
