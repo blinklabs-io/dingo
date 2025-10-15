@@ -212,9 +212,6 @@ func (cm *ChainManager) blockByPoint(
 			}
 			return nil, err
 		}
-		if tmpBlock == nil {
-			return nil, ErrBlockNotFound
-		}
 		return tmpBlock, nil
 	}
 	return nil, ErrBlockNotFound
