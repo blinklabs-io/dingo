@@ -37,7 +37,7 @@ func (d *MetadataStoreSqlite) GetTransactionByHash(
 	result = query.Where("hash = ?", hash).First(&tx)
 	if result.Error != nil {
 		if errors.Is(result.Error, gorm.ErrRecordNotFound) {
-			return nil, result.Error
+			return nil, nil
 		}
 		return nil, result.Error
 	}
