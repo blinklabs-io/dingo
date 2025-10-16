@@ -25,23 +25,19 @@ import (
 func (d *MetadataStoreSqlite) GetTransactionByHash(
 	hash []byte,
 	txn *gorm.DB,
-) (models.Transaction, error) {
-	var tx models.Transaction
-	var result *gorm.DB
-
-	query := d.DB()
-	if txn != nil {
-		query = txn
+) (*models.Transaction, error) {
+	ret := &models.Transaction{}
+	if txn == nil {
+		txn = d.DB()
 	}
-
-	result = query.Where("hash = ?", hash).First(&tx)
+	result := txn.First(ret, "hash = ?", hash)
 	if result.Error != nil {
 		if errors.Is(result.Error, gorm.ErrRecordNotFound) {
-			return models.Transaction{}, nil
+			return nil, nil
 		}
-		return models.Transaction{}, result.Error
+		return nil, result.Error
 	}
-	return tx, nil
+	return ret, nil
 }
 
 // SetTransaction adds a new transaction to the database
@@ -53,16 +49,11 @@ func (d *MetadataStoreSqlite) SetTransaction(
 	inputs []byte,
 	outputs []byte,
 	txn *gorm.DB,
-) (models.Transaction, error) {
-	var tx models.Transaction
-	var result *gorm.DB
-
-	query := d.DB()
-	if txn != nil {
-		query = txn
+) error {
+	if txn == nil {
+		txn = d.DB()
 	}
-
-	tx = models.Transaction{
+	tx := &models.Transaction{
 		Hash:       hash,
 		Type:       txType,
 		BlockHash:  blockHash,
@@ -70,11 +61,9 @@ func (d *MetadataStoreSqlite) SetTransaction(
 		Inputs:     inputs,
 		Outputs:    outputs,
 	}
-
-	result = query.Create(&tx)
+	result := txn.Create(&tx)
 	if result.Error != nil {
-		return models.Transaction{}, result.Error
+		return result.Error
 	}
-
-	return tx, nil
+	return nil
 }

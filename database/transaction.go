@@ -12,19 +12,32 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package models
+package database
 
-// Transaction represents a transaction record
-type Transaction struct {
-	ID         uint   `gorm:"primaryKey"`
-	Hash       []byte `gorm:"uniqueIndex"`
-	Type       string
-	BlockHash  []byte `gorm:"index"`
-	BlockIndex uint32
-	Inputs     []byte
-	Outputs    []byte
-}
-
-func (Transaction) TableName() string {
-	return "transaction"
+func (d *Database) NewTransaction(
+	hash []byte,
+	txType string,
+	blockHash []byte,
+	blockIndex uint32,
+	inputs []byte,
+	outputs []byte,
+	txn *Txn,
+) error {
+	if txn == nil {
+		txn = d.Transaction(false)
+		defer txn.Commit() //nolint:errcheck
+	}
+	err := d.metadata.SetTransaction(
+		hash,
+		txType,
+		blockHash,
+		blockIndex,
+		inputs,
+		outputs,
+		txn.Metadata(),
+	)
+	if err != nil {
+		return err
+	}
+	return nil
 }
