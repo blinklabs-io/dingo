@@ -14,43 +14,7 @@
 
 package database
 
-type BlockNonce struct {
-	ID           uint `gorm:"primarykey"`
-	Hash         []byte
-	Slot         uint64
-	Nonce        []byte
-	IsCheckpoint bool
-}
-
-func (BlockNonce) TableName() string {
-	return "block_nonce"
-}
-
-func (d *Database) SetBlockNonce(
-	blockHash []byte,
-	slotNumber uint64,
-	nonce []byte,
-	isCheckpoint bool,
-	txn *Txn,
-) error {
-	if txn == nil {
-		return d.metadata.SetBlockNonce(
-			blockHash,
-			slotNumber,
-			nonce,
-			isCheckpoint,
-			nil,
-		)
-	}
-	return d.metadata.SetBlockNonce(
-		blockHash,
-		slotNumber,
-		nonce,
-		isCheckpoint,
-		txn.Metadata(),
-	)
-}
-
+// GetBlockNonce fetches the block nonce for a given slot/hash
 func (d *Database) GetBlockNonce(
 	blockHash []byte,
 	slotNumber uint64,
@@ -86,6 +50,31 @@ func (d *Database) DeleteBlockNoncesBeforeSlotWithoutCheckpoints(
 	}
 	return d.metadata.DeleteBlockNoncesBeforeSlotWithoutCheckpoints(
 		slotNumber,
+		txn.Metadata(),
+	)
+}
+
+func (d *Database) SetBlockNonce(
+	blockHash []byte,
+	slotNumber uint64,
+	nonce []byte,
+	isCheckpoint bool,
+	txn *Txn,
+) error {
+	if txn == nil {
+		return d.metadata.SetBlockNonce(
+			blockHash,
+			slotNumber,
+			nonce,
+			isCheckpoint,
+			nil,
+		)
+	}
+	return d.metadata.SetBlockNonce(
+		blockHash,
+		slotNumber,
+		nonce,
+		isCheckpoint,
 		txn.Metadata(),
 	)
 }
