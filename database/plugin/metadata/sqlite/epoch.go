@@ -18,7 +18,7 @@ import (
 	"errors"
 	"strconv"
 
-	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite/models"
+	"github.com/blinklabs-io/dingo/database/models"
 	"gorm.io/gorm"
 )
 

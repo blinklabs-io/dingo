@@ -24,8 +24,8 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin"
-	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite/models"
 	"github.com/glebarez/sqlite"
 	"github.com/prometheus/client_golang/prometheus"
 	"gorm.io/gorm"
