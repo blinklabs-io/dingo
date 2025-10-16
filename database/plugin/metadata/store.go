@@ -66,7 +66,7 @@ type MetadataStore interface {
 	GetDatum(
 		lcommon.Blake2b256,
 		*gorm.DB,
-	) (models.Datum, error)
+	) (*models.Datum, error)
 	GetPParams(
 		uint64, // epoch
 		*gorm.DB,

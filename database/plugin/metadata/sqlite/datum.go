@@ -27,21 +27,19 @@ import (
 func (d *MetadataStoreSqlite) GetDatum(
 	hash lcommon.Blake2b256,
 	txn *gorm.DB,
-) (models.Datum, error) {
-	var datum models.Datum
-	var result *gorm.DB
-	if txn != nil {
-		result = txn.Where("hash = ?", hash[:]).First(&datum)
-	} else {
-		result = d.DB().Where("hash = ?", hash[:]).First(&datum)
+) (*models.Datum, error) {
+	ret := &models.Datum{}
+	if txn == nil {
+		txn = d.DB()
 	}
+	result := txn.First(ret, "hash = ?", hash[:])
 	if result.Error != nil {
 		if errors.Is(result.Error, gorm.ErrRecordNotFound) {
-			return models.Datum{}, nil
+			return nil, nil
 		}
-		return models.Datum{}, result.Error
+		return nil, result.Error
 	}
-	return datum, nil
+	return ret, nil
 }
 
 // SetDatum saves a datum into the database, or updates it if it already exists
@@ -60,14 +58,12 @@ func (d *MetadataStoreSqlite) SetDatum(
 		Columns:   []clause.Column{{Name: "hash"}},
 		UpdateAll: true,
 	}
-	if txn != nil {
-		if result := txn.Clauses(onConflict).Create(&tmpItem); result.Error != nil {
-			return result.Error
-		}
-	} else {
-		if result := d.DB().Clauses(onConflict).Create(&tmpItem); result.Error != nil {
-			return result.Error
-		}
+	if txn == nil {
+		txn = d.DB()
+	}
+	result := txn.Clauses(onConflict).Create(&tmpItem)
+	if result.Error != nil {
+		return result.Error
 	}
 	return nil
 }
