@@ -41,17 +41,6 @@ type Config struct {
 	PromRegistry   prometheus.Registerer
 }
 
-// Transaction represents a transaction record
-type Transaction struct {
-	ID         uint
-	Hash       []byte
-	Type       string
-	BlockHash  []byte
-	BlockIndex uint32
-	Inputs     []byte
-	Outputs    []byte
-}
-
 // Database represents our data storage services
 type Database struct {
 	config   *Config
@@ -83,42 +72,6 @@ func (d *Database) Logger() *slog.Logger {
 // Metadata returns the underlying metadata store instance
 func (d *Database) Metadata() metadata.MetadataStore {
 	return d.metadata
-}
-
-func (d *Database) NewTransaction(
-	hash []byte,
-	txType string,
-	blockHash []byte,
-	blockIndex uint32,
-	inputs []byte,
-	outputs []byte,
-	txn *Txn,
-) (Transaction, error) {
-	if txn == nil {
-		txn = d.Transaction(false)
-		defer txn.Commit() //nolint:errcheck
-	}
-	ret, err := d.metadata.SetTransaction(
-		hash,
-		txType,
-		blockHash,
-		blockIndex,
-		inputs,
-		outputs,
-		txn.Metadata(),
-	)
-	if err != nil {
-		return Transaction{}, err
-	}
-	return Transaction{
-		ID:         ret.ID,
-		Hash:       ret.Hash,
-		Type:       ret.Type,
-		BlockHash:  ret.BlockHash,
-		BlockIndex: ret.BlockIndex,
-		Inputs:     ret.Inputs,
-		Outputs:    ret.Outputs,
-	}, nil
 }
 
 // Transaction starts a new database transaction and returns a handle to it

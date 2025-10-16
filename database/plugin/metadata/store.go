@@ -83,7 +83,7 @@ type MetadataStore interface {
 	GetTransactionByHash(
 		[]byte, // hash
 		*gorm.DB,
-	) (models.Transaction, error)
+	) (*models.Transaction, error)
 
 	SetAccount(
 		[]byte, // stakeKey
@@ -204,7 +204,7 @@ type MetadataStore interface {
 		[]byte, // inputs
 		[]byte, // outputs
 		*gorm.DB,
-	) (models.Transaction, error)
+	) error
 	SetTip(
 		ochainsync.Tip,
 		*gorm.DB,

@@ -71,8 +71,6 @@ func (d *LedgerDelta) processTransaction(tx lcommon.Transaction, index uint32) e
 }
 
 func (d *LedgerDelta) apply(ls *LedgerState, txn *database.Txn) error {
-	// Record transactions first to get IDs
-	txIdMap := make(map[string]uint)
 	for _, tr := range d.Transactions {
 		inputsCbor, err := cbor.Encode(tr.Tx.Consumed())
 		if err != nil {
@@ -82,18 +80,14 @@ func (d *LedgerDelta) apply(ls *LedgerState, txn *database.Txn) error {
 		if err != nil {
 			return fmt.Errorf("encode transaction outputs: %w", err)
 		}
-		tx, err := ls.db.NewTransaction(tr.Tx.Hash().Bytes(), strconv.Itoa(tr.Tx.Type()), d.Point.Hash, tr.Index, inputsCbor, outputsCbor, txn)
+		err = ls.db.NewTransaction(tr.Tx.Hash().Bytes(), strconv.Itoa(tr.Tx.Type()), d.Point.Hash, tr.Index, inputsCbor, outputsCbor, txn)
 		if err != nil {
 			return fmt.Errorf("record transaction: %w", err)
 		}
-		txIdMap[string(tr.Tx.Hash().Bytes())] = tx.ID
 	}
 	// Process produced UTxOs
 	for _, produced := range d.Produced {
 		outAddr := produced.Output.Address()
-		if _, ok := txIdMap[string(produced.Id.Id().Bytes())]; !ok {
-			return fmt.Errorf("transaction ID not found for UTxO %s", produced.Id.String())
-		}
 		err := ls.db.NewUtxo(
 			produced.Id.Id().Bytes(),
 			produced.Id.Index(),
@@ -144,8 +138,6 @@ func (b *LedgerDeltaBatch) addDelta(delta *LedgerDelta) {
 }
 
 func (b *LedgerDeltaBatch) apply(ls *LedgerState, txn *database.Txn) error {
-	// Record all transactions first to get IDs
-	txIdMap := make(map[string]uint)
 	for _, delta := range b.deltas {
 		for _, tr := range delta.Transactions {
 			inputsCbor, err := cbor.Encode(tr.Tx.Consumed())
@@ -156,20 +148,16 @@ func (b *LedgerDeltaBatch) apply(ls *LedgerState, txn *database.Txn) error {
 			if err != nil {
 				return fmt.Errorf("encode transaction outputs: %w", err)
 			}
-			tx, err := ls.db.NewTransaction(tr.Tx.Hash().Bytes(), strconv.Itoa(tr.Tx.Type()), delta.Point.Hash, tr.Index, inputsCbor, outputsCbor, txn)
+			err = ls.db.NewTransaction(tr.Tx.Hash().Bytes(), strconv.Itoa(tr.Tx.Type()), delta.Point.Hash, tr.Index, inputsCbor, outputsCbor, txn)
 			if err != nil {
 				return fmt.Errorf("record transaction: %w", err)
 			}
-			txIdMap[string(tr.Tx.Hash().Bytes())] = tx.ID
 		}
 	}
 	// Produced UTxOs with transaction IDs
 	produced := make([]types.UtxoSlot, 0, 100)
 	for _, delta := range b.deltas {
 		for _, utxo := range delta.Produced {
-			if _, ok := txIdMap[string(utxo.Id.Id().Bytes())]; !ok {
-				return fmt.Errorf("transaction ID not found for UTxO %s", utxo.Id.String())
-			}
 			produced = append(
 				produced,
 				types.UtxoSlot{
