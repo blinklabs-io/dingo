@@ -14,6 +14,18 @@
 
 package models
 
+type PParams struct {
+	ID        uint `gorm:"primarykey"`
+	Cbor      []byte
+	AddedSlot uint64
+	Epoch     uint64
+	EraId     uint
+}
+
+func (PParams) TableName() string {
+	return "pparams"
+}
+
 type PParamUpdate struct {
 	ID          uint `gorm:"primarykey"`
 	GenesisHash []byte
