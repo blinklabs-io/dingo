@@ -25,19 +25,15 @@ import (
 func (d *MetadataStoreSqlite) GetAccount(
 	stakeKey []byte,
 	txn *gorm.DB,
-) (models.Account, error) {
-	ret := models.Account{}
-	tmpAccount := models.Account{}
-	if txn != nil {
-		if result := txn.First(&tmpAccount, "staking_key = ?", stakeKey); result.Error != nil {
-			return ret, result.Error
-		}
-	} else {
-		if result := d.DB().First(&tmpAccount, "staking_key = ?", stakeKey); result.Error != nil {
-			return ret, result.Error
-		}
+) (*models.Account, error) {
+	ret := &models.Account{}
+	if txn == nil {
+		txn = d.DB()
 	}
-	ret = tmpAccount
+	result := txn.First(ret, "staking_key = ?", stakeKey)
+	if result.Error != nil {
+		return nil, result.Error
+	}
 	return ret, nil
 }
 
