@@ -30,35 +30,24 @@ func (d *MetadataStoreSqlite) GetPool(
 	pkh []byte,
 	txn *gorm.DB,
 ) (*models.Pool, error) {
-	tmpPool := &models.Pool{}
-	if txn != nil {
-		result := txn.
-			Preload("Registration", func(db *gorm.DB) *gorm.DB { return db.Order("id DESC").Limit(1) }).
-			First(
-				&tmpPool,
-				"pool_key_hash = ?",
-				pkh,
-			)
-		if result.Error != nil {
-			if !errors.Is(result.Error, gorm.ErrRecordNotFound) {
-				return nil, result.Error
-			}
-		}
-	} else {
-		result := d.DB().
-			Preload("Registration", func(db *gorm.DB) *gorm.DB { return db.Order("id DESC").Limit(1) }).
-			First(
-				&tmpPool,
-				"pool_key_hash = ?",
-				pkh,
-			)
-		if result.Error != nil {
-			if !errors.Is(result.Error, gorm.ErrRecordNotFound) {
-				return nil, result.Error
-			}
-		}
+	ret := &models.Pool{}
+	if txn == nil {
+		txn = d.DB()
 	}
-	return tmpPool, nil
+	result := txn.
+		Preload("Registration", func(db *gorm.DB) *gorm.DB { return db.Order("id DESC").Limit(1) }).
+		First(
+			ret,
+			"pool_key_hash = ?",
+			pkh,
+		)
+	if result.Error != nil {
+		if errors.Is(result.Error, gorm.ErrRecordNotFound) {
+			return nil, nil
+		}
+		return nil, result.Error
+	}
+	return ret, nil
 }
 
 // GetPoolRegistrations returns pool registration certificates
