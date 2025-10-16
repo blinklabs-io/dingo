@@ -57,7 +57,7 @@ type MetadataStore interface {
 	GetAccount(
 		[]byte, // stakeKey
 		*gorm.DB,
-	) (models.Account, error)
+	) (*models.Account, error)
 	GetBlockNonce(
 		[]byte, // blockHash
 		uint64, // slotNumber
