@@ -17,8 +17,8 @@ package metadata
 import (
 	"log/slog"
 
-	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -47,7 +47,7 @@ type MetadataStore interface {
 	GetPool(
 		[]byte, // pool key hash
 		*gorm.DB,
-	) (models.Pool, error)
+	) (*models.Pool, error)
 	GetStakeRegistrations(
 		[]byte, // stakeKey
 		*gorm.DB,

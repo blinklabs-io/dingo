@@ -18,11 +18,19 @@ import (
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
 
+type Datum struct {
+	ID        uint   `gorm:"primarykey"`
+	Hash      []byte `gorm:"index;not null;unique"`
+	RawDatum  []byte `gorm:"not null"`
+	AddedSlot uint64 `gorm:"not null"`
+}
+
 // GetDatum returns the datum for a given Blake2b256 hash
 func (d *Database) GetDatumByHash(
 	hash lcommon.Blake2b256,
 	txn *Txn,
 ) ([]byte, error) {
+	tmpDatum := Datum{}
 	if txn == nil {
 		txn = d.Transaction(false)
 		defer txn.Commit() //nolint:errcheck
@@ -31,7 +39,8 @@ func (d *Database) GetDatumByHash(
 	if err != nil {
 		return nil, err
 	}
-	return datum.RawDatum, nil
+	tmpDatum = Datum(datum)
+	return tmpDatum.RawDatum, nil
 }
 
 // SetDatum saves the raw datum into the database by computing the hash before inserting.
