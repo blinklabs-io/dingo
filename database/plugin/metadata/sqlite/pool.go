@@ -17,7 +17,7 @@ package sqlite
 import (
 	"errors"
 
-	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"gorm.io/gorm"
@@ -29,8 +29,8 @@ func (d *MetadataStoreSqlite) GetPool(
 	// pkh lcommon.PoolKeyHash,
 	pkh []byte,
 	txn *gorm.DB,
-) (models.Pool, error) {
-	tmpPool := models.Pool{}
+) (*models.Pool, error) {
+	tmpPool := &models.Pool{}
 	if txn != nil {
 		result := txn.
 			Preload("Registration", func(db *gorm.DB) *gorm.DB { return db.Order("id DESC").Limit(1) }).
@@ -41,7 +41,7 @@ func (d *MetadataStoreSqlite) GetPool(
 			)
 		if result.Error != nil {
 			if !errors.Is(result.Error, gorm.ErrRecordNotFound) {
-				return tmpPool, result.Error
+				return nil, result.Error
 			}
 		}
 	} else {
@@ -54,7 +54,7 @@ func (d *MetadataStoreSqlite) GetPool(
 			)
 		if result.Error != nil {
 			if !errors.Is(result.Error, gorm.ErrRecordNotFound) {
-				return tmpPool, result.Error
+				return nil, result.Error
 			}
 		}
 	}
@@ -165,7 +165,7 @@ func (d *MetadataStoreSqlite) SetPoolRegistration(
 		}
 	} else {
 		// Store our fetched pool
-		tmpItem = tmpPool
+		tmpItem = *tmpPool
 	}
 	tmpItem.Pledge = types.Uint64(cert.Pledge)
 	tmpItem.Cost = types.Uint64(cert.Cost)

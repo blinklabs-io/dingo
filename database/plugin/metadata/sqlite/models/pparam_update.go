@@ -12,32 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package database
+package models
 
-import (
-	"github.com/blinklabs-io/dingo/database/models"
-)
+type PParamUpdate struct {
+	ID          uint `gorm:"primarykey"`
+	GenesisHash []byte
+	Cbor        []byte
+	AddedSlot   uint64
+	Epoch       uint64
+}
 
-func (d *Database) NewTransaction(
-	hash []byte,
-	txType string,
-	blockHash []byte,
-	blockIndex uint32,
-	inputs []byte,
-	outputs []byte,
-	txn *Txn,
-) (models.Transaction, error) {
-	if txn == nil {
-		txn = d.Transaction(false)
-		defer txn.Commit() //nolint:errcheck
-	}
-	return d.metadata.SetTransaction(
-		hash,
-		txType,
-		blockHash,
-		blockIndex,
-		inputs,
-		outputs,
-		txn.Metadata(),
-	)
+func (PParamUpdate) TableName() string {
+	return "pparam_update"
 }
