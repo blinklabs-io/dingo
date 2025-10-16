@@ -242,7 +242,6 @@ type MetadataStore interface {
 	DeleteUtxo(any, *gorm.DB) error
 	DeleteUtxos([]any, *gorm.DB) error
 	DeleteUtxosAfterSlot(uint64, *gorm.DB) error
-	GetEpochLatest(*gorm.DB) (models.Epoch, error)
 	GetEpochsByEra(uint, *gorm.DB) ([]models.Epoch, error)
 	GetEpochs(*gorm.DB) ([]models.Epoch, error)
 	GetUtxosAddedAfterSlot(uint64, *gorm.DB) ([]models.Utxo, error)

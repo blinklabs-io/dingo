@@ -27,6 +27,7 @@ import (
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/mempool"
@@ -84,8 +85,8 @@ type LedgerState struct {
 	timerCleanupConsumedUtxos        *time.Timer
 	Scheduler                        *Scheduler
 	currentPParams                   lcommon.ProtocolParameters
-	currentEpoch                     database.Epoch
-	epochCache                       []database.Epoch
+	currentEpoch                     models.Epoch
+	epochCache                       []models.Epoch
 	currentEra                       eras.EraDesc
 	currentTip                       ochainsync.Tip
 	currentTipBlockNonce             []byte

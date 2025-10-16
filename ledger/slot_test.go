@@ -20,12 +20,12 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/config/cardano"
-	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/models"
 )
 
 func TestSlotCalc(t *testing.T) {
 	testLedgerState := &LedgerState{
-		epochCache: []database.Epoch{
+		epochCache: []models.Epoch{
 			{
 				EpochId:       0,
 				StartSlot:     0,
