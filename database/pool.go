@@ -15,12 +15,8 @@
 package database
 
 import (
-	"errors"
-
 	"github.com/blinklabs-io/dingo/database/models"
 )
-
-var ErrPoolNotFound = errors.New("pool not found")
 
 // GetPool returns a pool by its key hash
 func (d *Database) GetPool(
@@ -36,7 +32,7 @@ func (d *Database) GetPool(
 		return nil, err
 	}
 	if ret == nil {
-		return nil, ErrPoolNotFound
+		return nil, models.ErrPoolNotFound
 	}
 	return ret, nil
 }

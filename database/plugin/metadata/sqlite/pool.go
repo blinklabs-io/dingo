@@ -144,7 +144,7 @@ func (d *MetadataStoreSqlite) SetPoolRegistration(
 	var tmpItem models.Pool
 	tmpPool, err := d.GetPool(cert.Operator[:], txn)
 	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
+		if errors.Is(err, models.ErrPoolNotFound) {
 			tmpItem = models.Pool{
 				PoolKeyHash: cert.Operator[:],
 				VrfKeyHash:  cert.VrfKeyHash[:],
