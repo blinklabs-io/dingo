@@ -15,10 +15,13 @@
 package models
 
 import (
+	"errors"
 	"net"
 
 	"github.com/blinklabs-io/dingo/database/types"
 )
+
+var ErrPoolNotFound = errors.New("pool not found")
 
 type Pool struct {
 	ID            uint   `gorm:"primarykey"`
