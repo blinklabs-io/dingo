@@ -47,7 +47,10 @@ func (b *BlobStoreGCS) GetCommitTimestamp(ctx context.Context) (int64, error) {
 	return new(big.Int).SetBytes(plaintext).Int64(), nil
 }
 
-func (b *BlobStoreGCS) SetCommitTimestamp(ctx context.Context, timestamp int64) error {
+func (b *BlobStoreGCS) SetCommitTimestamp(
+	ctx context.Context,
+	timestamp int64,
+) error {
 	raw := new(big.Int).SetInt64(timestamp).Bytes()
 
 	ciphertext, err := dingosops.Encrypt(raw)

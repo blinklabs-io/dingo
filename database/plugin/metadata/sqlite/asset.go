@@ -36,7 +36,8 @@ func (d *MetadataStoreSqlite) GetAssetByPolicyAndName(
 		query = txn
 	}
 
-	result = query.Where("policy_id = ? AND name = ?", policyId[:], assetName).First(&asset)
+	result = query.Where("policy_id = ? AND name = ?", policyId[:], assetName).
+		First(&asset)
 	if result.Error != nil {
 		if errors.Is(result.Error, gorm.ErrRecordNotFound) {
 			return models.Asset{}, nil

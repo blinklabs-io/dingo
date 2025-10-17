@@ -224,7 +224,11 @@ func ValidateTxConway(
 	}
 	// Evaluate scripts
 	var txInfoV3 script.TxInfo
-	txInfoV3, err = script.NewTxInfoV3FromTransaction(ls, tx, slices.Concat(resolvedInputs, resolvedRefInputs))
+	txInfoV3, err = script.NewTxInfoV3FromTransaction(
+		ls,
+		tx,
+		slices.Concat(resolvedInputs, resolvedRefInputs),
+	)
 	if err != nil {
 		return err
 	}
@@ -234,7 +238,10 @@ func ValidateTxConway(
 		// Lookup script from redeemer purpose
 		tmpScript := scripts[purpose.ScriptHash()]
 		if tmpScript == nil {
-			return fmt.Errorf("could not find script with hash %s", purpose.ScriptHash().String())
+			return fmt.Errorf(
+				"could not find script with hash %s",
+				purpose.ScriptHash().String(),
+			)
 		}
 		switch s := tmpScript.(type) {
 		case *lcommon.PlutusV3Script:
@@ -349,7 +356,11 @@ func EvaluateTxConway(
 	retRedeemerExUnits := make(map[lcommon.RedeemerKey]lcommon.ExUnits)
 	var txInfoV3 script.TxInfo
 	var err error
-	txInfoV3, err = script.NewTxInfoV3FromTransaction(ls, tx, slices.Concat(resolvedInputs, resolvedRefInputs))
+	txInfoV3, err = script.NewTxInfoV3FromTransaction(
+		ls,
+		tx,
+		slices.Concat(resolvedInputs, resolvedRefInputs),
+	)
 	if err != nil {
 		return 0, lcommon.ExUnits{}, nil, err
 	}

@@ -18,7 +18,10 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 )
 
-func (d *Database) GetEpochsByEra(eraId uint, txn *Txn) ([]models.Epoch, error) {
+func (d *Database) GetEpochsByEra(
+	eraId uint,
+	txn *Txn,
+) ([]models.Epoch, error) {
 	if txn == nil {
 		return d.metadata.GetEpochsByEra(eraId, nil)
 	}
@@ -49,5 +52,13 @@ func (d *Database) SetEpoch(
 			nil,
 		)
 	}
-	return d.metadata.SetEpoch(slot, epoch, nonce, era, slotLength, lengthInSlots, txn.Metadata())
+	return d.metadata.SetEpoch(
+		slot,
+		epoch,
+		nonce,
+		era,
+		slotLength,
+		lengthInSlots,
+		txn.Metadata(),
+	)
 }

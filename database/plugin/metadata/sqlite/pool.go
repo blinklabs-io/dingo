@@ -35,7 +35,10 @@ func (d *MetadataStoreSqlite) GetPool(
 		txn = d.DB()
 	}
 	result := txn.
-		Preload("Registration", func(db *gorm.DB) *gorm.DB { return db.Order("id DESC").Limit(1) }).
+		Preload(
+			"Registration",
+			func(db *gorm.DB) *gorm.DB { return db.Order("id DESC").Limit(1) },
+		).
 		First(
 			ret,
 			"pool_key_hash = ?",

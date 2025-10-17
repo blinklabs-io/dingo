@@ -67,7 +67,9 @@ func (ls *LedgerState) SlotToTime(slot uint64) (time.Time, error) {
 		leftoverSlots := slot - (lastEpoch.StartSlot + uint64(lastEpoch.LengthInSlots))
 		slotTime = slotTime.Add(
 			// nolint:gosec
-			time.Duration(leftoverSlots) * (time.Duration(lastEpoch.SlotLength) * time.Millisecond),
+			time.Duration(
+				leftoverSlots,
+			) * (time.Duration(lastEpoch.SlotLength) * time.Millisecond),
 		)
 	}
 	return slotTime, nil
