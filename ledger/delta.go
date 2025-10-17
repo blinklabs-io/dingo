@@ -21,7 +21,7 @@ import (
 	"strconv"
 
 	"github.com/blinklabs-io/dingo/database"
-	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -155,12 +155,12 @@ func (b *LedgerDeltaBatch) apply(ls *LedgerState, txn *database.Txn) error {
 		}
 	}
 	// Produced UTxOs with transaction IDs
-	produced := make([]types.UtxoSlot, 0, 100)
+	produced := make([]models.UtxoSlot, 0, 100)
 	for _, delta := range b.deltas {
 		for _, utxo := range delta.Produced {
 			produced = append(
 				produced,
-				types.UtxoSlot{
+				models.UtxoSlot{
 					Slot: delta.Point.Slot,
 					Utxo: utxo,
 				},

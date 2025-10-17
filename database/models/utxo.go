@@ -14,6 +14,11 @@
 
 package models
 
+import (
+	"github.com/blinklabs-io/gouroboros/ledger"
+)
+
+// Utxo represents an unspent transaction output
 type Utxo struct {
 	ID            uint   `gorm:"primarykey"`
 	TxId          []byte `gorm:"index:tx_id_output_idx"`
@@ -30,4 +35,14 @@ type Utxo struct {
 
 func (u *Utxo) TableName() string {
 	return "utxo"
+}
+
+func (u *Utxo) Decode() (ledger.TransactionOutput, error) {
+	return ledger.NewTransactionOutputFromCbor(u.Cbor)
+}
+
+// UtxoSlot allows providing a slot number with a ledger.Utxo object
+type UtxoSlot struct {
+	Utxo ledger.Utxo
+	Slot uint64
 }

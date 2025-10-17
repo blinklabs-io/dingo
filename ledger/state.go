@@ -988,24 +988,20 @@ func (ls *LedgerState) GetCurrentPParams() lcommon.ProtocolParameters {
 func (ls *LedgerState) UtxoByRef(
 	txId []byte,
 	outputIdx uint32,
-) (database.Utxo, error) {
+) (*models.Utxo, error) {
 	return ls.db.UtxoByRef(txId, outputIdx, nil)
 }
 
 // UtxosByAddress returns all UTxOs that belong to the specified address
 func (ls *LedgerState) UtxosByAddress(
 	addr ledger.Address,
-) ([]database.Utxo, error) {
-	ret := []database.Utxo{}
+) ([]models.Utxo, error) {
+	ret := []models.Utxo{}
 	utxos, err := ls.db.UtxosByAddress(addr, nil)
 	if err != nil {
 		return ret, err
 	}
-	var tmpUtxo database.Utxo
-	for _, utxo := range utxos {
-		tmpUtxo = database.Utxo(utxo)
-		ret = append(ret, tmpUtxo)
-	}
+	ret = append(ret, utxos...)
 	return ret, nil
 }
 

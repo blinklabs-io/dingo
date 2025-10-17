@@ -19,44 +19,15 @@ import (
 	"math/big"
 	"slices"
 
-	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/dgraph-io/badger/v4"
 )
 
-type Utxo struct {
-	ID          uint   `gorm:"primarykey"`
-	TxId        []byte `gorm:"index:tx_id_output_idx"`
-	OutputIdx   uint32 `gorm:"index:tx_id_output_idx"`
-	AddedSlot   uint64 `gorm:"index"`
-	DeletedSlot uint64 `gorm:"index"`
-	PaymentKey  []byte `gorm:"index"`
-	StakingKey  []byte `gorm:"index"`
-	Amount      uint64 `gorm:"index"`
-	Assets      []Asset
-	Cbor        []byte `gorm:"-"` // This is not represented in the metadata DB
-}
+var ErrUtxoNotFound = errors.New("utxo not found")
 
-type Asset struct {
-	ID          uint `gorm:"primaryKey"`
-	UtxoID      uint
-	Name        []byte       `gorm:"index"`
-	NameHex     []byte       `gorm:"index"`
-	PolicyId    []byte       `gorm:"index"`
-	Fingerprint []byte       `gorm:"index"`
-	Amount      types.Uint64 `gorm:"index"`
-}
-
-func (u *Utxo) TableName() string {
-	return "utxo"
-}
-
-func (u *Utxo) Decode() (ledger.TransactionOutput, error) {
-	return ledger.NewTransactionOutputFromCbor(u.Cbor)
-}
-
-func (u *Utxo) loadCbor(txn *Txn) error {
+func loadCbor(u *models.Utxo, txn *Txn) error {
 	key := UtxoBlobKey(u.TxId, u.OutputIdx)
 	item, err := txn.Blob().Get(key)
 	if err != nil {
@@ -104,7 +75,7 @@ func (d *Database) NewUtxo(
 }
 
 func (d *Database) AddUtxos(
-	utxos []types.UtxoSlot,
+	utxos []models.UtxoSlot,
 	txn *Txn,
 ) error {
 	if txn == nil {
@@ -132,33 +103,22 @@ func (d *Database) UtxoByRef(
 	txId []byte,
 	outputIdx uint32,
 	txn *Txn,
-) (Utxo, error) {
-	tmpUtxo := Utxo{}
+) (*models.Utxo, error) {
 	if txn == nil {
 		txn = d.Transaction(false)
 		defer txn.Commit() //nolint:errcheck
 	}
 	utxo, err := d.metadata.GetUtxo(txId, outputIdx, txn.Metadata())
 	if err != nil {
-		return tmpUtxo, err
+		return nil, err
 	}
-	tmpUtxo = Utxo{
-		ID:          utxo.ID,
-		TxId:        utxo.TxId,
-		OutputIdx:   utxo.OutputIdx,
-		AddedSlot:   utxo.AddedSlot,
-		DeletedSlot: utxo.DeletedSlot,
-		PaymentKey:  utxo.PaymentKey,
-		StakingKey:  utxo.StakingKey,
-		Amount:      utxo.Amount,
+	if utxo == nil {
+		return nil, ErrUtxoNotFound
 	}
-	for _, asset := range utxo.Assets {
-		tmpUtxo.Assets = append(tmpUtxo.Assets, Asset(asset))
+	if err := loadCbor(utxo, txn); err != nil {
+		return nil, err
 	}
-	if err := tmpUtxo.loadCbor(txn); err != nil {
-		return tmpUtxo, err
-	}
-	return tmpUtxo, nil
+	return utxo, nil
 }
 
 func (d *Database) UtxoConsume(
@@ -176,8 +136,9 @@ func (d *Database) UtxoConsume(
 func (d *Database) UtxosByAddress(
 	addr ledger.Address,
 	txn *Txn,
-) ([]Utxo, error) {
-	ret := []Utxo{}
+) ([]models.Utxo, error) {
+	ret := []models.Utxo{}
+	tmpUtxo := models.Utxo{}
 	if txn == nil {
 		txn = d.Transaction(false)
 		defer txn.Commit() //nolint:errcheck
@@ -187,7 +148,7 @@ func (d *Database) UtxosByAddress(
 		return ret, err
 	}
 	for _, utxo := range utxos {
-		tmpUtxo := Utxo{
+		tmpUtxo = models.Utxo{
 			ID:          utxo.ID,
 			TxId:        utxo.TxId,
 			OutputIdx:   utxo.OutputIdx,
@@ -196,11 +157,9 @@ func (d *Database) UtxosByAddress(
 			PaymentKey:  utxo.PaymentKey,
 			StakingKey:  utxo.StakingKey,
 			Amount:      utxo.Amount,
+			Assets:      utxo.Assets,
 		}
-		for _, asset := range utxo.Assets {
-			tmpUtxo.Assets = append(tmpUtxo.Assets, Asset(asset))
-		}
-		if err := tmpUtxo.loadCbor(txn); err != nil {
+		if err := loadCbor(&tmpUtxo, txn); err != nil {
 			return ret, err
 		}
 		ret = append(ret, tmpUtxo)

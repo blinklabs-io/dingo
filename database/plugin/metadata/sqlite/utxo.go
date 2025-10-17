@@ -16,6 +16,7 @@ package sqlite
 
 import (
 	"encoding/hex"
+	"errors"
 	"fmt"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -30,22 +31,19 @@ func (d *MetadataStoreSqlite) GetUtxo(
 	txId []byte,
 	idx uint32,
 	txn *gorm.DB,
-) (models.Utxo, error) {
-	ret := models.Utxo{}
-	tmpUtxo := models.Utxo{}
-	if txn != nil {
-		result := txn.Where("deleted_slot = 0").
-			First(&tmpUtxo, "tx_id = ? AND output_idx = ?", txId, idx)
-		if result.Error != nil {
-			return ret, result.Error
-		}
-	} else {
-		result := d.DB().Where("deleted_slot = 0").First(&tmpUtxo, "tx_id = ? AND output_idx = ?", txId, idx)
-		if result.Error != nil {
-			return ret, result.Error
-		}
+) (*models.Utxo, error) {
+	ret := &models.Utxo{}
+	if txn == nil {
+		txn = d.DB()
 	}
-	ret = tmpUtxo
+	result := txn.Where("deleted_slot = 0").
+		First(ret, "tx_id = ? AND output_idx = ?", txId, idx)
+	if result.Error != nil {
+		if errors.Is(result.Error, gorm.ErrRecordNotFound) {
+			return nil, nil
+		}
+		return nil, result.Error
+	}
 	return ret, nil
 }
 
@@ -236,7 +234,7 @@ func (d *MetadataStoreSqlite) SetUtxo(
 
 // AddUtxos saves a batch of UTxOs
 func (d *MetadataStoreSqlite) AddUtxos(
-	utxos []types.UtxoSlot,
+	utxos []models.UtxoSlot,
 	txn *gorm.DB,
 ) error {
 	items := make([]models.Utxo, 0, len(utxos))
