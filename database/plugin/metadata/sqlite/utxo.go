@@ -330,7 +330,9 @@ func utxoLedgerToModel(
 	return ret
 }
 
-func convertMultiAssetToModels(multiAsset *lcommon.MultiAsset[lcommon.MultiAssetTypeOutput]) []models.Asset {
+func convertMultiAssetToModels(
+	multiAsset *lcommon.MultiAsset[lcommon.MultiAssetTypeOutput],
+) []models.Asset {
 	var assets []models.Asset
 
 	// Get all policy IDs
@@ -344,7 +346,10 @@ func convertMultiAssetToModels(multiAsset *lcommon.MultiAsset[lcommon.MultiAsset
 			amount := multiAsset.Asset(policyId, assetNameBytes)
 
 			// Calculate fingerprint
-			fingerprint := lcommon.NewAssetFingerprint(policyIdBytes, assetNameBytes)
+			fingerprint := lcommon.NewAssetFingerprint(
+				policyIdBytes,
+				assetNameBytes,
+			)
 
 			asset := models.Asset{
 				Name:        assetNameBytes,
