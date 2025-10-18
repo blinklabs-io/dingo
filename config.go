@@ -31,24 +31,24 @@ import (
 type ListenerConfig = connmanager.ListenerConfig
 
 type Config struct {
-	badgerCacheSize    int64
-	mempoolCapacity    int64
-	cardanoNodeConfig  *cardano.CardanoNodeConfig
-	dataDir            string
-	intersectPoints    []ocommon.Point
-	intersectTip       bool
-	validateHistorical bool
-	logger             *slog.Logger
-	listeners          []ListenerConfig
-	network            string
-	networkMagic       uint32
-	outboundSourcePort uint
-	utxorpcPort        uint
-	tlsCertFilePath    string
-	tlsKeyFilePath     string
-	peerSharing        bool
 	promRegistry       prometheus.Registerer
 	topologyConfig     *topology.TopologyConfig
+	logger             *slog.Logger
+	cardanoNodeConfig  *cardano.CardanoNodeConfig
+	dataDir            string
+	network            string
+	tlsCertFilePath    string
+	tlsKeyFilePath     string
+	intersectPoints    []ocommon.Point
+	listeners          []ListenerConfig
+	badgerCacheSize    int64
+	mempoolCapacity    int64
+	outboundSourcePort uint
+	utxorpcPort        uint
+	networkMagic       uint32
+	intersectTip       bool
+	peerSharing        bool
+	validateHistorical bool
 	tracing            bool
 	tracingStdout      bool
 	devMode            bool

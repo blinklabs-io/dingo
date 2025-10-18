@@ -15,9 +15,9 @@
 package models
 
 type Tip struct {
+	Hash        []byte
 	ID          uint `gorm:"primarykey"`
 	Slot        uint64
-	Hash        []byte
 	BlockNumber uint64
 }
 

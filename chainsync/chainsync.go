@@ -26,17 +26,17 @@ import (
 )
 
 type ChainsyncClientState struct {
-	Cursor               ocommon.Point
 	ChainIter            *chain.ChainIterator
+	Cursor               ocommon.Point
 	NeedsInitialRollback bool
 }
 
 type State struct {
-	sync.Mutex
 	eventBus     *event.EventBus
 	ledgerState  *ledger.LedgerState
 	clients      map[ouroboros.ConnectionId]*ChainsyncClientState
 	clientConnId *ouroboros.ConnectionId // TODO: replace with handling of multiple chainsync clients (#385)
+	sync.Mutex
 }
 
 func NewState(

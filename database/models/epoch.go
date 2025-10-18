@@ -15,12 +15,12 @@
 package models
 
 type Epoch struct {
-	ID uint `gorm:"primarykey"`
+	Nonce []byte
+	ID    uint `gorm:"primarykey"`
 	// NOTE: we would normally use this as the primary key, but GORM doesn't
 	// like a primary key value of 0
 	EpochId       uint64 `gorm:"uniqueIndex"`
 	StartSlot     uint64
-	Nonce         []byte
 	EraId         uint
 	SlotLength    uint
 	LengthInSlots uint

@@ -29,11 +29,11 @@ type ImmutableDb struct {
 }
 
 type Block struct {
+	Hash  []byte
+	Cbor  []byte
 	Type  uint
 	Slot  uint64
-	Hash  []byte
 	IsEbb bool
-	Cbor  []byte
 }
 
 // New returns a new ImmutableDb using the specified data directory or an error
@@ -285,11 +285,11 @@ func (i *ImmutableDb) BlocksFromPoint(
 
 type BlockIterator struct {
 	db              *ImmutableDb
+	chunk           *chunk
 	startPoint      ocommon.Point
-	foundStartPoint bool
 	chunkNames      []string
 	chunkIdx        int
-	chunk           *chunk
+	foundStartPoint bool
 }
 
 func (b *BlockIterator) Next() (*Block, error) {

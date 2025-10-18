@@ -26,8 +26,8 @@ const (
 
 type secondaryIndex struct {
 	file     *os.File
-	fileSize int64
 	primary  *primaryIndex
+	fileSize int64
 }
 
 type secondaryIndexEntryInner struct {

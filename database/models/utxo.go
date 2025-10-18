@@ -20,17 +20,17 @@ import (
 
 // Utxo represents an unspent transaction output
 type Utxo struct {
-	ID            uint   `gorm:"primarykey"`
+	TransactionID *uint  `gorm:"index"`
 	TxId          []byte `gorm:"index:tx_id_output_idx"`
-	OutputIdx     uint32 `gorm:"index:tx_id_output_idx"`
-	AddedSlot     uint64 `gorm:"index"`
-	DeletedSlot   uint64 `gorm:"index"`
 	PaymentKey    []byte `gorm:"index"`
 	StakingKey    []byte `gorm:"index"`
-	Amount        uint64 `gorm:"index"`
-	TransactionID *uint  `gorm:"index"`
 	Assets        []Asset
 	Cbor          []byte `gorm:"-"` // This is here for convenience but not represented in the metadata DB
+	ID            uint   `gorm:"primarykey"`
+	AddedSlot     uint64 `gorm:"index"`
+	DeletedSlot   uint64 `gorm:"index"`
+	Amount        uint64 `gorm:"index"`
+	OutputIdx     uint32 `gorm:"index:tx_id_output_idx"`
 }
 
 func (u *Utxo) TableName() string {

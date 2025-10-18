@@ -15,9 +15,9 @@
 package models
 
 type AuthCommitteeHot struct {
-	ID             uint   `gorm:"primarykey"`
 	ColdCredential []byte `gorm:"index"`
 	HostCredential []byte `gorm:"index"`
+	ID             uint   `gorm:"primarykey"`
 	AddedSlot      uint64
 }
 

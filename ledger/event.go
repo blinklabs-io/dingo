@@ -31,20 +31,20 @@ const (
 // a single event type for both to make synchronization easier.
 type BlockfetchEvent struct {
 	ConnectionId ouroboros.ConnectionId // Connection ID associated with event
-	Point        ocommon.Point          // Chain point for block
 	Block        ledger.Block
-	Type         uint // Block type ID
-	BatchDone    bool // Set to true for a BatchDone event
+	Point        ocommon.Point // Chain point for block
+	Type         uint          // Block type ID
+	BatchDone    bool          // Set to true for a BatchDone event
 }
 
 // ChainsyncEvent represents either a RollForward or RollBackward chainsync event.
 // We use a single event type for both to make synchronization easier.
 type ChainsyncEvent struct {
 	ConnectionId ouroboros.ConnectionId // Connection ID associated with event
-	Point        ocommon.Point          // Chain point for roll forward/backward
-	Tip          ochainsync.Tip         // Upstream chain tip
-	BlockNumber  uint64
 	BlockHeader  ledger.BlockHeader
+	Point        ocommon.Point  // Chain point for roll forward/backward
+	Tip          ochainsync.Tip // Upstream chain tip
+	BlockNumber  uint64
 	Type         uint // Block or header type ID
-	Rollback     bool
+	Rollback     bool // Set to true for a Rollback event
 }

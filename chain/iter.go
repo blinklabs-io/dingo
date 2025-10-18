@@ -22,10 +22,10 @@ import (
 type ChainIterator struct {
 	chain          *Chain
 	startPoint     ocommon.Point
-	nextBlockIndex uint64
 	lastPoint      ocommon.Point
-	needsRollback  bool
 	rollbackPoint  ocommon.Point
+	nextBlockIndex uint64
+	needsRollback  bool
 }
 
 type ChainIteratorResult struct {

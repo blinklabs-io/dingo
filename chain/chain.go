@@ -32,19 +32,19 @@ const (
 )
 
 type Chain struct {
-	id                   ChainId
-	manager              *ChainManager
-	mutex                sync.RWMutex
 	eventBus             *event.EventBus
+	manager              *ChainManager
+	waitingChan          chan struct{}
+	headers              []ledger.BlockHeader
+	blocks               []ocommon.Point
+	iterators            []*ChainIterator
 	currentTip           ochainsync.Tip
 	tipBlockIndex        uint64
-	persistent           bool
 	lastCommonBlockIndex uint64
-	blocks               []ocommon.Point
-	headers              []ledger.BlockHeader
-	waitingChan          chan struct{}
+	id                   ChainId
+	mutex                sync.RWMutex
 	waitingChanMutex     sync.Mutex
-	iterators            []*ChainIterator
+	persistent           bool
 }
 
 func (c *Chain) Tip() ochainsync.Tip {

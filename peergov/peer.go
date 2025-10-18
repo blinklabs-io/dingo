@@ -34,12 +34,12 @@ const (
 )
 
 type Peer struct {
-	Address        string
-	Source         PeerSource
 	Connection     *PeerConnection
-	Sharable       bool
+	Address        string
 	ReconnectCount int
 	ReconnectDelay time.Duration
+	Source         PeerSource
+	Sharable       bool
 }
 
 func (p *Peer) setConnection(conn *ouroboros.Connection, outbound bool) {
@@ -61,7 +61,7 @@ func (p *Peer) setConnection(conn *ouroboros.Connection, outbound bool) {
 
 type PeerConnection struct {
 	Id              ouroboros.ConnectionId
-	ProtocolVersion uint
 	VersionData     oprotocol.VersionData
+	ProtocolVersion uint
 	IsClient        bool
 }

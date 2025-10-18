@@ -33,12 +33,12 @@ var DefaultConfig = &Config{
 
 // Config represents the configuration for a database instance
 type Config struct {
-	BlobCacheSize  int64
+	PromRegistry   prometheus.Registerer
+	Logger         *slog.Logger
 	BlobPlugin     string
 	DataDir        string
 	MetadataPlugin string
-	Logger         *slog.Logger
-	PromRegistry   prometheus.Registerer
+	BlobCacheSize  int64
 }
 
 // Database represents our data storage services

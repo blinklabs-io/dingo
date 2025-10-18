@@ -46,10 +46,10 @@ type RemoveTransactionEvent struct {
 }
 
 type MempoolTransaction struct {
-	Hash     string
-	Type     uint
-	Cbor     []byte
 	LastSeen time.Time
+	Hash     string
+	Cbor     []byte
+	Type     uint
 }
 
 // TxValidator defines the interface for transaction validation needed by mempool.
@@ -57,27 +57,27 @@ type TxValidator interface {
 	ValidateTx(tx gledger.Transaction) error
 }
 type MempoolConfig struct {
-	MempoolCapacity int64
-	Logger          *slog.Logger
-	EventBus        *event.EventBus
 	PromRegistry    prometheus.Registerer
 	Validator       TxValidator
+	Logger          *slog.Logger
+	EventBus        *event.EventBus
+	MempoolCapacity int64
 }
 
 type Mempool struct {
-	sync.RWMutex
-	logger         *slog.Logger
-	eventBus       *event.EventBus
-	validator      TxValidator
-	consumers      map[ouroboros.ConnectionId]*MempoolConsumer
-	consumersMutex sync.Mutex
-	transactions   []*MempoolTransaction
-	config         MempoolConfig
-	metrics        struct {
+	config  MempoolConfig
+	metrics struct {
 		txsProcessedNum prometheus.Counter
 		txsInMempool    prometheus.Gauge
 		mempoolBytes    prometheus.Gauge
 	}
+	validator    TxValidator
+	logger       *slog.Logger
+	eventBus     *event.EventBus
+	consumers    map[ouroboros.ConnectionId]*MempoolConsumer
+	transactions []*MempoolTransaction
+	sync.RWMutex
+	consumersMutex sync.Mutex
 }
 
 type MempoolFullError struct {

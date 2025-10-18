@@ -24,12 +24,12 @@ import (
 )
 
 type ListenerConfig struct {
-	UseNtC         bool
 	Listener       net.Listener
 	ListenNetwork  string
 	ListenAddress  string
-	ReuseAddress   bool
 	ConnectionOpts []ouroboros.ConnectionOptionFunc
+	UseNtC         bool
+	ReuseAddress   bool
 }
 
 func (c *ConnectionManager) startListeners() error {
