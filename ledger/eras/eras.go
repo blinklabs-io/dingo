@@ -21,8 +21,6 @@ import (
 )
 
 type EraDesc struct {
-	Id                      uint
-	Name                    string
 	DecodePParamsFunc       func([]byte) (lcommon.ProtocolParameters, error)
 	DecodePParamsUpdateFunc func([]byte) (any, error)
 	PParamsUpdateFunc       func(lcommon.ProtocolParameters, any) (lcommon.ProtocolParameters, error)
@@ -32,6 +30,8 @@ type EraDesc struct {
 	CertDepositFunc         func(lcommon.Certificate, lcommon.ProtocolParameters) (uint64, error)
 	ValidateTxFunc          func(lcommon.Transaction, uint64, lcommon.LedgerState, lcommon.ProtocolParameters) error
 	EvaluateTxFunc          func(tx lcommon.Transaction, ls lcommon.LedgerState, pp lcommon.ProtocolParameters) (uint64, lcommon.ExUnits, map[lcommon.RedeemerKey]lcommon.ExUnits, error)
+	Name                    string
+	Id                      uint
 }
 
 var Eras = []EraDesc{

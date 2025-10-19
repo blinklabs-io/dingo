@@ -15,10 +15,10 @@
 package models
 
 type BlockNonce struct {
-	ID           uint   `gorm:"primarykey"`
 	Hash         []byte `gorm:"index:hash_slot"`
-	Slot         uint64 `gorm:"index:hash_slot"`
 	Nonce        []byte
+	ID           uint   `gorm:"primarykey"`
+	Slot         uint64 `gorm:"index:hash_slot"`
 	IsCheckpoint bool
 }
 

@@ -38,13 +38,13 @@ const (
 var ErrBlockNotFound = errors.New("block not found")
 
 type Block struct {
+	Hash     []byte
+	PrevHash []byte
+	Cbor     []byte
 	ID       uint64
 	Slot     uint64
 	Number   uint64
-	Hash     []byte
 	Type     uint
-	PrevHash []byte
-	Cbor     []byte
 }
 
 func (b Block) Decode() (ledger.Block, error) {

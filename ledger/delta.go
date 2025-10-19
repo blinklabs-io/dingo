@@ -33,13 +33,13 @@ type TransactionRecord struct {
 }
 
 type LedgerDelta struct {
+	PParamUpdates     map[lcommon.Blake2b224]lcommon.ProtocolParameterUpdate
 	Point             ocommon.Point
 	Produced          []lcommon.Utxo
 	Consumed          []lcommon.TransactionInput
-	PParamUpdateEpoch uint64
-	PParamUpdates     map[lcommon.Blake2b224]lcommon.ProtocolParameterUpdate
 	Certificates      []lcommon.Certificate
 	Transactions      []TransactionRecord
+	PParamUpdateEpoch uint64
 }
 
 //

@@ -20,8 +20,8 @@ import (
 
 type MempoolConsumer struct {
 	mempool    *Mempool
-	nextTxIdx  int
 	cache      map[string]*MempoolTransaction
+	nextTxIdx  int
 	cacheMutex sync.Mutex
 }
 

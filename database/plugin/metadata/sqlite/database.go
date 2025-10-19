@@ -45,11 +45,11 @@ func init() {
 
 // MetadataStoreSqlite stores all data in sqlite. Data may not be persisted
 type MetadataStoreSqlite struct {
-	dataDir      string
+	promRegistry prometheus.Registerer
 	db           *gorm.DB
 	logger       *slog.Logger
-	promRegistry prometheus.Registerer
 	timerVacuum  *time.Timer
+	dataDir      string
 }
 
 // New creates a new database

@@ -16,13 +16,13 @@ package models
 
 // Transaction represents a transaction record
 type Transaction struct {
-	ID         uint   `gorm:"primaryKey"`
-	Hash       []byte `gorm:"uniqueIndex"`
 	Type       string
+	Hash       []byte `gorm:"uniqueIndex"`
 	BlockHash  []byte `gorm:"index"`
-	BlockIndex uint32
 	Inputs     []byte
 	Outputs    []byte
+	ID         uint `gorm:"primaryKey"`
+	BlockIndex uint32
 }
 
 func (Transaction) TableName() string {

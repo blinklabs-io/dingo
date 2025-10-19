@@ -41,10 +41,10 @@ func init() {
 
 // BlobStoreBadger stores all data in badger. Data may not be persisted
 type BlobStoreBadger struct {
-	dataDir      string
+	promRegistry prometheus.Registerer
 	db           *badger.DB
 	logger       *slog.Logger
-	promRegistry prometheus.Registerer
+	dataDir      string
 	gcEnabled    bool
 }
 

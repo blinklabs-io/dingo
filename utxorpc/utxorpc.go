@@ -44,10 +44,10 @@ type UtxorpcConfig struct {
 	EventBus        *event.EventBus
 	LedgerState     *ledger.LedgerState
 	Mempool         *mempool.Mempool
-	Host            string
-	Port            uint
 	TlsCertFilePath string
 	TlsKeyFilePath  string
+	Host            string
+	Port            uint
 }
 
 func NewUtxorpc(cfg UtxorpcConfig) *Utxorpc {

@@ -27,8 +27,8 @@ import (
 type ConnectionManagerConnClosedFunc func(ouroboros.ConnectionId, error)
 
 type ConnectionManager struct {
-	config           ConnectionManagerConfig
 	connections      map[ouroboros.ConnectionId]*ouroboros.Connection
+	config           ConnectionManagerConfig
 	connectionsMutex sync.Mutex
 }
 

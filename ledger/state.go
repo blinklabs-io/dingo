@@ -56,16 +56,15 @@ const (
 )
 
 type LedgerStateConfig struct {
-	Logger             *slog.Logger
-	Database           *database.Database
-	ChainManager       *chain.ChainManager
-	EventBus           *event.EventBus
-	CardanoNodeConfig  *cardano.CardanoNodeConfig
-	PromRegistry       prometheus.Registerer
-	ValidateHistorical bool
-	ForgeBlocks        bool
-	// Callback(s)
+	PromRegistry               prometheus.Registerer
+	Logger                     *slog.Logger
+	Database                   *database.Database
+	ChainManager               *chain.ChainManager
+	EventBus                   *event.EventBus
+	CardanoNodeConfig          *cardano.CardanoNodeConfig
 	BlockfetchRequestRangeFunc BlockfetchRequestRangeFunc
+	ValidateHistorical         bool
+	ForgeBlocks                bool
 }
 
 // BlockfetchRequestRangeFunc describes a callback function used to start a blockfetch request for
@@ -77,29 +76,29 @@ type MempoolProvider interface {
 	Transactions() []mempool.MempoolTransaction
 }
 type LedgerState struct {
-	sync.RWMutex
-	chainsyncMutex                   sync.Mutex
-	chainsyncState                   ChainsyncState
+	metrics                          stateMetrics
+	currentEra                       eras.EraDesc
 	config                           LedgerStateConfig
-	db                               *database.Database
+	chainsyncBlockfetchBusyTime      time.Time
+	currentPParams                   lcommon.ProtocolParameters
+	mempool                          MempoolProvider
+	chainsyncBlockfetchBatchDoneChan chan struct{}
 	timerCleanupConsumedUtxos        *time.Timer
 	Scheduler                        *Scheduler
-	currentPParams                   lcommon.ProtocolParameters
-	currentEpoch                     models.Epoch
-	epochCache                       []models.Epoch
-	currentEra                       eras.EraDesc
-	currentTip                       ochainsync.Tip
-	currentTipBlockNonce             []byte
-	metrics                          stateMetrics
-	chainsyncBlockEvents             []BlockfetchEvent
-	chainsyncBlockfetchBusyTime      time.Time
-	chainsyncBlockfetchBatchDoneChan chan struct{}
-	chainsyncBlockfetchReadyChan     chan struct{}
-	chainsyncBlockfetchMutex         sync.Mutex
-	chainsyncBlockfetchWaiting       bool
 	chain                            *chain.Chain
-	mempool                          MempoolProvider
-	checkpointWrittenForEpoch        bool
+	chainsyncBlockfetchReadyChan     chan struct{}
+	db                               *database.Database
+	chainsyncState                   ChainsyncState
+	currentTipBlockNonce             []byte
+	chainsyncBlockEvents             []BlockfetchEvent
+	epochCache                       []models.Epoch
+	currentTip                       ochainsync.Tip
+	currentEpoch                     models.Epoch
+	sync.RWMutex
+	chainsyncMutex             sync.Mutex
+	chainsyncBlockfetchMutex   sync.Mutex
+	chainsyncBlockfetchWaiting bool
+	checkpointWrittenForEpoch  bool
 }
 
 func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
@@ -408,9 +407,9 @@ func (ls *LedgerState) consumeUtxo(
 }
 
 type readChainResult struct {
+	rollbackPoint ocommon.Point
 	blocks        []ledger.Block
 	rollback      bool
-	rollbackPoint ocommon.Point
 }
 
 func (ls *LedgerState) ledgerReadChain(resultCh chan readChainResult) {

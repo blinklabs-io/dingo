@@ -36,9 +36,9 @@ const (
 )
 
 type PeerGovernor struct {
-	mu     sync.Mutex
 	config PeerGovernorConfig
 	peers  []*Peer
+	mu     sync.Mutex
 }
 
 type PeerGovernorConfig struct {
