@@ -9,7 +9,7 @@ require (
 	connectrpc.com/connect v1.19.1
 	connectrpc.com/grpchealth v1.4.0
 	connectrpc.com/grpcreflect v1.3.0
-	github.com/blinklabs-io/gouroboros v0.135.2
+	github.com/blinklabs-io/gouroboros v0.136.0
 	github.com/blinklabs-io/ouroboros-mock v0.3.8
 	github.com/blinklabs-io/plutigo v0.0.13
 	github.com/dgraph-io/badger/v4 v4.8.0
