@@ -133,12 +133,14 @@ func (c *Chain) AddBlock(
 		// Validate block
 		headerCbor := block.Header().Cbor()
 		blockHexCbor := ledger.BlockHexCbor{
-			HeaderCbor: hex.EncodeToString(headerCbor),
-			Eta0: nonceStr,
-			Spk: int(129600), // TODO: get from protocol parameters
+			HeaderCbor:    hex.EncodeToString(headerCbor),
+			Eta0:          nonceStr,
+			Spk:           int(129600), // TODO: get from protocol parameters
 			BlockBodyCbor: hex.EncodeToString(block.Cbor()),
 		}
-		verifyError, isValid, vrfHex, blockNo, slotNo := ledger.VerifyBlock(blockHexCbor)
+		verifyError, isValid, vrfHex, blockNo, slotNo := ledger.VerifyBlock(
+			blockHexCbor,
+		)
 		if verifyError != nil {
 			panic(fmt.Sprintf(
 				"failed block validation: %+v, isValid: %+v, vrfHex: %+v, blockNo: %d, slotNo: %d, blockHash: %s",
@@ -152,8 +154,8 @@ func (c *Chain) AddBlock(
 		} else if !isValid {
 			// TODO error
 			return fmt.Errorf(fmt.Sprintf("invalid block found: slotNo: %d, blockHash: %s",
-			slotNo, block.Hash().String(),
-		))
+				slotNo, block.Hash().String(),
+			))
 		}
 	}
 	// Build new block record
