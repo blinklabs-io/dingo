@@ -15,6 +15,8 @@
 package sqlite
 
 import (
+	"errors"
+
 	"github.com/blinklabs-io/dingo/database/models"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"gorm.io/gorm"
@@ -32,6 +34,9 @@ func (d *MetadataStoreSqlite) GetAccount(
 	}
 	result := txn.First(ret, "staking_key = ?", stakeKey)
 	if result.Error != nil {
+		if errors.Is(result.Error, gorm.ErrRecordNotFound) {
+			return nil, nil
+		}
 		return nil, result.Error
 	}
 	return ret, nil

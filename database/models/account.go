@@ -14,6 +14,10 @@
 
 package models
 
+import "errors"
+
+var ErrAccountNotFound = errors.New("account not found")
+
 type Account struct {
 	StakingKey []byte `gorm:"uniqueIndex"`
 	Pool       []byte `gorm:"index"`
