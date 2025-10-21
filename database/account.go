@@ -32,6 +32,9 @@ func (d *Database) GetAccount(
 	if err != nil {
 		return nil, err
 	}
+	if account == nil {
+		return nil, models.ErrAccountNotFound
+	}
 	return account, nil
 }
 
