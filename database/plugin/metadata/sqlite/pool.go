@@ -227,7 +227,9 @@ func (d *MetadataStoreSqlite) SetPoolRetirement(
 		return err
 	}
 	if tmpPool == nil {
-		return models.ErrPoolNotFound
+		tmpPool = &models.Pool{
+			PoolKeyHash: cert.PoolKeyHash[:],
+		}
 	}
 	tmpItem := models.PoolRetirement{
 		PoolKeyHash: cert.PoolKeyHash[:],
