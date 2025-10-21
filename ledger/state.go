@@ -27,6 +27,7 @@ import (
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/mempool"
@@ -55,16 +56,15 @@ const (
 )
 
 type LedgerStateConfig struct {
-	Logger             *slog.Logger
-	Database           *database.Database
-	ChainManager       *chain.ChainManager
-	EventBus           *event.EventBus
-	CardanoNodeConfig  *cardano.CardanoNodeConfig
-	PromRegistry       prometheus.Registerer
-	ValidateHistorical bool
-	ForgeBlocks        bool
-	// Callback(s)
+	PromRegistry               prometheus.Registerer
+	Logger                     *slog.Logger
+	Database                   *database.Database
+	ChainManager               *chain.ChainManager
+	EventBus                   *event.EventBus
+	CardanoNodeConfig          *cardano.CardanoNodeConfig
 	BlockfetchRequestRangeFunc BlockfetchRequestRangeFunc
+	ValidateHistorical         bool
+	ForgeBlocks                bool
 }
 
 // BlockfetchRequestRangeFunc describes a callback function used to start a blockfetch request for
@@ -76,29 +76,29 @@ type MempoolProvider interface {
 	Transactions() []mempool.MempoolTransaction
 }
 type LedgerState struct {
-	sync.RWMutex
-	chainsyncMutex                   sync.Mutex
-	chainsyncState                   ChainsyncState
+	metrics                          stateMetrics
+	currentEra                       eras.EraDesc
 	config                           LedgerStateConfig
-	db                               *database.Database
+	chainsyncBlockfetchBusyTime      time.Time
+	currentPParams                   lcommon.ProtocolParameters
+	mempool                          MempoolProvider
+	chainsyncBlockfetchBatchDoneChan chan struct{}
 	timerCleanupConsumedUtxos        *time.Timer
 	Scheduler                        *Scheduler
-	currentPParams                   lcommon.ProtocolParameters
-	currentEpoch                     database.Epoch
-	epochCache                       []database.Epoch
-	currentEra                       eras.EraDesc
-	currentTip                       ochainsync.Tip
-	currentTipBlockNonce             []byte
-	metrics                          stateMetrics
-	chainsyncBlockEvents             []BlockfetchEvent
-	chainsyncBlockfetchBusyTime      time.Time
-	chainsyncBlockfetchBatchDoneChan chan struct{}
-	chainsyncBlockfetchReadyChan     chan struct{}
-	chainsyncBlockfetchMutex         sync.Mutex
-	chainsyncBlockfetchWaiting       bool
 	chain                            *chain.Chain
-	mempool                          MempoolProvider
-	checkpointWrittenForEpoch        bool
+	chainsyncBlockfetchReadyChan     chan struct{}
+	db                               *database.Database
+	chainsyncState                   ChainsyncState
+	currentTipBlockNonce             []byte
+	chainsyncBlockEvents             []BlockfetchEvent
+	epochCache                       []models.Epoch
+	currentTip                       ochainsync.Tip
+	currentEpoch                     models.Epoch
+	sync.RWMutex
+	chainsyncMutex             sync.Mutex
+	chainsyncBlockfetchMutex   sync.Mutex
+	chainsyncBlockfetchWaiting bool
+	checkpointWrittenForEpoch  bool
 }
 
 func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
@@ -407,9 +407,9 @@ func (ls *LedgerState) consumeUtxo(
 }
 
 type readChainResult struct {
+	rollbackPoint ocommon.Point
 	blocks        []ledger.Block
 	rollback      bool
-	rollbackPoint ocommon.Point
 }
 
 func (ls *LedgerState) ledgerReadChain(resultCh chan readChainResult) {
@@ -767,7 +767,7 @@ func (ls *LedgerState) ledgerProcessBlock(
 	}
 	// Process transactions
 	var delta *LedgerDelta
-	for _, tx := range block.Transactions() {
+	for i, tx := range block.Transactions() {
 		if delta == nil {
 			delta = &LedgerDelta{
 				Point: point,
@@ -797,7 +797,7 @@ func (ls *LedgerState) ledgerProcessBlock(
 			}
 		}
 		// Populate ledger delta from transaction
-		if err := delta.processTransaction(tx); err != nil {
+		if err := delta.processTransaction(tx, uint32(i)); err != nil { //nolint:gosec
 			return nil, fmt.Errorf("process transaction: %w", err)
 		}
 		// Apply delta immediately if we may need the data to validate the next TX
@@ -987,24 +987,20 @@ func (ls *LedgerState) GetCurrentPParams() lcommon.ProtocolParameters {
 func (ls *LedgerState) UtxoByRef(
 	txId []byte,
 	outputIdx uint32,
-) (database.Utxo, error) {
+) (*models.Utxo, error) {
 	return ls.db.UtxoByRef(txId, outputIdx, nil)
 }
 
 // UtxosByAddress returns all UTxOs that belong to the specified address
 func (ls *LedgerState) UtxosByAddress(
 	addr ledger.Address,
-) ([]database.Utxo, error) {
-	ret := []database.Utxo{}
+) ([]models.Utxo, error) {
+	ret := []models.Utxo{}
 	utxos, err := ls.db.UtxosByAddress(addr, nil)
 	if err != nil {
 		return ret, err
 	}
-	var tmpUtxo database.Utxo
-	for _, utxo := range utxos {
-		tmpUtxo = database.Utxo(utxo)
-		ret = append(ret, tmpUtxo)
-	}
+	ret = append(ret, utxos...)
 	return ret, nil
 }
 

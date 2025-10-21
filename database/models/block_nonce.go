@@ -14,13 +14,15 @@
 
 package models
 
-type AuthCommitteeHot struct {
-	ID             uint   `gorm:"primarykey"`
-	ColdCredential []byte `gorm:"index"`
-	HostCredential []byte `gorm:"index"`
-	AddedSlot      uint64
+type BlockNonce struct {
+	Hash         []byte `gorm:"index:hash_slot"`
+	Nonce        []byte
+	ID           uint   `gorm:"primarykey"`
+	Slot         uint64 `gorm:"index:hash_slot"`
+	IsCheckpoint bool
 }
 
-func (AuthCommitteeHot) TableName() string {
-	return "auth_committee_hot"
+// TableName overrides default table name
+func (BlockNonce) TableName() string {
+	return "block_nonce"
 }

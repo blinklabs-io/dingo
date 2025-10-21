@@ -32,9 +32,9 @@ type EventSubscriberId int
 type EventHandlerFunc func(Event)
 
 type Event struct {
-	Type      EventType
 	Timestamp time.Time
 	Data      any
+	Type      EventType
 }
 
 func NewEvent(eventType EventType, eventData any) Event {
@@ -46,10 +46,10 @@ func NewEvent(eventType EventType, eventData any) Event {
 }
 
 type EventBus struct {
-	mu          sync.RWMutex
 	subscribers map[EventType]map[EventSubscriberId]chan Event
-	lastSubId   EventSubscriberId
 	metrics     *eventMetrics
+	lastSubId   EventSubscriberId
+	mu          sync.RWMutex
 }
 
 // NewEventBus creates a new EventBus

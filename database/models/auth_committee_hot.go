@@ -12,14 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package types
+package models
 
-import (
-	"github.com/blinklabs-io/gouroboros/ledger"
-)
+type AuthCommitteeHot struct {
+	ColdCredential []byte `gorm:"index"`
+	HostCredential []byte `gorm:"index"`
+	ID             uint   `gorm:"primarykey"`
+	AddedSlot      uint64
+}
 
-// UtxoSlot allows providing a slot number with a ledger.Utxo object in a batch
-type UtxoSlot struct {
-	Utxo ledger.Utxo
-	Slot uint64
+func (AuthCommitteeHot) TableName() string {
+	return "auth_committee_hot"
 }

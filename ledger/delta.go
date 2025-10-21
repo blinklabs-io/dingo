@@ -18,28 +18,45 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"strconv"
 
 	"github.com/blinklabs-io/dingo/database"
-	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
+type TransactionRecord struct {
+	Tx    lcommon.Transaction
+	Index uint32
+}
+
 type LedgerDelta struct {
+	PParamUpdates     map[lcommon.Blake2b224]lcommon.ProtocolParameterUpdate
 	Point             ocommon.Point
 	Produced          []lcommon.Utxo
 	Consumed          []lcommon.TransactionInput
-	PParamUpdateEpoch uint64
-	PParamUpdates     map[lcommon.Blake2b224]lcommon.ProtocolParameterUpdate
 	Certificates      []lcommon.Certificate
+	Transactions      []TransactionRecord
+	PParamUpdateEpoch uint64
 }
 
+//
 //nolint:unparam
-func (d *LedgerDelta) processTransaction(tx lcommon.Transaction) error {
+func (d *LedgerDelta) processTransaction(
+	tx lcommon.Transaction,
+	index uint32,
+) error {
 	// Consumed UTxOs
 	d.Consumed = slices.Concat(d.Consumed, tx.Consumed())
 	// Produced UTxOs
 	d.Produced = slices.Concat(d.Produced, tx.Produced())
+	// Collect transaction
+	d.Transactions = append(
+		d.Transactions,
+		TransactionRecord{Tx: tx, Index: index},
+	)
 	// Stop processing transaction if it's marked as invalid
 	// This allows us to capture collateral returns in the case of phase 2 validation failure
 	if !tx.IsValid() {
@@ -61,6 +78,28 @@ func (d *LedgerDelta) processTransaction(tx lcommon.Transaction) error {
 }
 
 func (d *LedgerDelta) apply(ls *LedgerState, txn *database.Txn) error {
+	for _, tr := range d.Transactions {
+		inputsCbor, err := cbor.Encode(tr.Tx.Consumed())
+		if err != nil {
+			return fmt.Errorf("encode transaction inputs: %w", err)
+		}
+		outputsCbor, err := cbor.Encode(tr.Tx.Produced())
+		if err != nil {
+			return fmt.Errorf("encode transaction outputs: %w", err)
+		}
+		err = ls.db.NewTransaction(
+			tr.Tx.Hash().Bytes(),
+			strconv.Itoa(tr.Tx.Type()),
+			d.Point.Hash,
+			tr.Index,
+			inputsCbor,
+			outputsCbor,
+			txn,
+		)
+		if err != nil {
+			return fmt.Errorf("record transaction: %w", err)
+		}
+	}
 	// Process produced UTxOs
 	for _, produced := range d.Produced {
 		outAddr := produced.Output.Address()
@@ -72,6 +111,7 @@ func (d *LedgerDelta) apply(ls *LedgerState, txn *database.Txn) error {
 			outAddr.StakeKeyHash().Bytes(),
 			produced.Output.Cbor(),
 			produced.Output.Amount(),
+			produced.Output.Assets(),
 			txn,
 		)
 		if err != nil {
@@ -113,13 +153,37 @@ func (b *LedgerDeltaBatch) addDelta(delta *LedgerDelta) {
 }
 
 func (b *LedgerDeltaBatch) apply(ls *LedgerState, txn *database.Txn) error {
-	// Produced
-	produced := make([]types.UtxoSlot, 0, 100)
+	for _, delta := range b.deltas {
+		for _, tr := range delta.Transactions {
+			inputsCbor, err := cbor.Encode(tr.Tx.Consumed())
+			if err != nil {
+				return fmt.Errorf("encode transaction inputs: %w", err)
+			}
+			outputsCbor, err := cbor.Encode(tr.Tx.Produced())
+			if err != nil {
+				return fmt.Errorf("encode transaction outputs: %w", err)
+			}
+			err = ls.db.NewTransaction(
+				tr.Tx.Hash().Bytes(),
+				strconv.Itoa(tr.Tx.Type()),
+				delta.Point.Hash,
+				tr.Index,
+				inputsCbor,
+				outputsCbor,
+				txn,
+			)
+			if err != nil {
+				return fmt.Errorf("record transaction: %w", err)
+			}
+		}
+	}
+	// Produced UTxOs with transaction IDs
+	produced := make([]models.UtxoSlot, 0, 100)
 	for _, delta := range b.deltas {
 		for _, utxo := range delta.Produced {
 			produced = append(
 				produced,
-				types.UtxoSlot{
+				models.UtxoSlot{
 					Slot: delta.Point.Slot,
 					Utxo: utxo,
 				},

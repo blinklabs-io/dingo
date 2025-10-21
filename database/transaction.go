@@ -12,15 +12,32 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package models
+package database
 
-type Tip struct {
-	ID          uint `gorm:"primarykey"`
-	Slot        uint64
-	Hash        []byte
-	BlockNumber uint64
-}
-
-func (Tip) TableName() string {
-	return "tip"
+func (d *Database) NewTransaction(
+	hash []byte,
+	txType string,
+	blockHash []byte,
+	blockIndex uint32,
+	inputs []byte,
+	outputs []byte,
+	txn *Txn,
+) error {
+	if txn == nil {
+		txn = d.Transaction(false)
+		defer txn.Commit() //nolint:errcheck
+	}
+	err := d.metadata.SetTransaction(
+		hash,
+		txType,
+		blockHash,
+		blockIndex,
+		inputs,
+		outputs,
+		txn.Metadata(),
+	)
+	if err != nil {
+		return err
+	}
+	return nil
 }

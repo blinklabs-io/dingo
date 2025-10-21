@@ -18,6 +18,8 @@ import (
 	"context"
 	"io"
 	"math/big"
+
+	dingosops "github.com/blinklabs-io/dingo/database/sops"
 )
 
 const commitTimestampBlobKey = "metadata_commit_timestamp"
@@ -29,18 +31,36 @@ func (b *BlobStoreGCS) GetCommitTimestamp(ctx context.Context) (int64, error) {
 		return 0, err
 	}
 	defer r.Close()
-	data, err := io.ReadAll(r)
+
+	ciphertext, err := io.ReadAll(r)
 	if err != nil {
-		b.logger.Errorf("failed to read data from object: %v", err)
+		b.logger.Errorf("failed to read commit timestamp object: %v", err)
 		return 0, err
 	}
-	return new(big.Int).SetBytes(data).Int64(), nil
+
+	plaintext, err := dingosops.Decrypt(ciphertext)
+	if err != nil {
+		b.logger.Errorf("failed to decrypt commit timestamp: %v", err)
+		return 0, err
+	}
+
+	return new(big.Int).SetBytes(plaintext).Int64(), nil
 }
 
-func (b *BlobStoreGCS) SetCommitTimestamp(ctx context.Context, timestamp int64) error {
-	w := b.bucket.Object(commitTimestampBlobKey).NewWriter(ctx)
-	_, err := w.Write(new(big.Int).SetInt64(timestamp).Bytes())
+func (b *BlobStoreGCS) SetCommitTimestamp(
+	ctx context.Context,
+	timestamp int64,
+) error {
+	raw := new(big.Int).SetInt64(timestamp).Bytes()
+
+	ciphertext, err := dingosops.Encrypt(raw)
 	if err != nil {
+		b.logger.Errorf("failed to encrypt commit timestamp: %v", err)
+		return err
+	}
+
+	w := b.bucket.Object(commitTimestampBlobKey).NewWriter(ctx)
+	if _, err := w.Write(ciphertext); err != nil {
 		_ = w.Close()
 		b.logger.Errorf("failed to write commit timestamp: %v", err)
 		return err

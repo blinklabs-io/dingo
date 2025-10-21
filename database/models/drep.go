@@ -15,10 +15,10 @@
 package models
 
 type Drep struct {
-	ID         uint   `gorm:"primarykey"`
-	Credential []byte `gorm:"uniqueIndex"`
 	AnchorUrl  string
+	Credential []byte `gorm:"uniqueIndex"`
 	AnchorHash []byte
+	ID         uint `gorm:"primarykey"`
 	AddedSlot  uint64
 	Active     bool `gorm:"default:true"`
 }
@@ -28,8 +28,8 @@ func (d *Drep) TableName() string {
 }
 
 type DeregistrationDrep struct {
-	ID             uint   `gorm:"primarykey"`
 	DrepCredential []byte `gorm:"index"`
+	ID             uint   `gorm:"primarykey"`
 	AddedSlot      uint64
 	DepositAmount  uint64
 }
@@ -39,12 +39,12 @@ func (DeregistrationDrep) TableName() string {
 }
 
 type RegistrationDrep struct {
-	ID             uint   `gorm:"primarykey"`
+	AnchorUrl      string
 	DrepCredential []byte `gorm:"index"`
+	AnchorHash     []byte
+	ID             uint `gorm:"primarykey"`
 	AddedSlot      uint64
 	DepositAmount  uint64
-	AnchorUrl      string
-	AnchorHash     []byte
 }
 
 func (RegistrationDrep) TableName() string {
@@ -52,10 +52,10 @@ func (RegistrationDrep) TableName() string {
 }
 
 type UpdateDrep struct {
-	ID         uint   `gorm:"primarykey"`
-	Credential []byte `gorm:"index"`
 	AnchorUrl  string
+	Credential []byte `gorm:"index"`
 	AnchorHash []byte
+	ID         uint `gorm:"primarykey"`
 	AddedSlot  uint64
 }
 

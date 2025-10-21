@@ -32,13 +32,13 @@ const (
 )
 
 type PluginOption struct {
+	DefaultValue any
+	Dest         any
 	Name         string
-	Type         PluginOptionType
 	CustomEnvVar string
 	CustomFlag   string
 	Description  string
-	DefaultValue any
-	Dest         any
+	Type         PluginOptionType
 }
 
 func (p *PluginOption) AddToFlagSet(

@@ -20,21 +20,21 @@ import (
 )
 
 type ScheduledTask struct {
-	mutex             sync.Mutex
-	interval          int
-	ticksSinceLastRun int
 	taskFunc          func()
 	runFailFunc       func()
+	interval          int
+	ticksSinceLastRun int
+	mutex             sync.Mutex
 }
 
 type Scheduler struct {
-	mutex              sync.Mutex
-	interval           time.Duration
 	ticker             *time.Ticker
 	quit               chan struct{}
 	updateIntervalChan chan time.Duration
 	tasks              []*ScheduledTask
+	interval           time.Duration
 	startOnce          sync.Once
+	mutex              sync.Mutex
 }
 
 func NewScheduler(interval time.Duration) *Scheduler {

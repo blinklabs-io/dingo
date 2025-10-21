@@ -14,82 +14,25 @@
 
 package database
 
-type Epoch struct {
-	ID uint `gorm:"primarykey"`
-	// NOTE: we would normally use this as the primary key, but GORM doesn't
-	// like a primary key value of 0
-	EpochId       uint64 `gorm:"uniqueIndex"`
-	StartSlot     uint64
-	Nonce         []byte
-	EraId         uint
-	SlotLength    uint
-	LengthInSlots uint
-}
+import (
+	"github.com/blinklabs-io/dingo/database/models"
+)
 
-func (Epoch) TableName() string {
-	return "epoch"
-}
-
-func (d *Database) GetEpochLatest(txn *Txn) (Epoch, error) {
-	tmpEpoch := Epoch{}
+func (d *Database) GetEpochsByEra(
+	eraId uint,
+	txn *Txn,
+) ([]models.Epoch, error) {
 	if txn == nil {
-		latestEpoch, err := d.metadata.GetEpochLatest(nil)
-		if err != nil {
-			return tmpEpoch, err
-		}
-		tmpEpoch = Epoch(latestEpoch)
-	} else {
-		latestEpoch, err := d.metadata.GetEpochLatest(txn.Metadata())
-		if err != nil {
-			return tmpEpoch, err
-		}
-		tmpEpoch = Epoch(latestEpoch)
+		return d.metadata.GetEpochsByEra(eraId, nil)
 	}
-	return tmpEpoch, nil
+	return txn.db.metadata.GetEpochsByEra(eraId, txn.Metadata())
 }
 
-func (d *Database) GetEpochsByEra(eraId uint, txn *Txn) ([]Epoch, error) {
-	tmpEpochs := []Epoch{}
+func (d *Database) GetEpochs(txn *Txn) ([]models.Epoch, error) {
 	if txn == nil {
-		epochs, err := d.metadata.GetEpochsByEra(eraId, nil)
-		if err != nil {
-			return tmpEpochs, err
-		}
-		for _, epoch := range epochs {
-			tmpEpochs = append(tmpEpochs, Epoch(epoch))
-		}
-	} else {
-		epochs, err := txn.db.metadata.GetEpochsByEra(eraId, txn.Metadata())
-		if err != nil {
-			return tmpEpochs, err
-		}
-		for _, epoch := range epochs {
-			tmpEpochs = append(tmpEpochs, Epoch(epoch))
-		}
+		return d.metadata.GetEpochs(nil)
 	}
-	return tmpEpochs, nil
-}
-
-func (d *Database) GetEpochs(txn *Txn) ([]Epoch, error) {
-	tmpEpochs := []Epoch{}
-	if txn == nil {
-		epochs, err := d.metadata.GetEpochs(nil)
-		if err != nil {
-			return tmpEpochs, err
-		}
-		for _, epoch := range epochs {
-			tmpEpochs = append(tmpEpochs, Epoch(epoch))
-		}
-	} else {
-		epochs, err := txn.db.metadata.GetEpochs(txn.Metadata())
-		if err != nil {
-			return tmpEpochs, err
-		}
-		for _, epoch := range epochs {
-			tmpEpochs = append(tmpEpochs, Epoch(epoch))
-		}
-	}
-	return tmpEpochs, nil
+	return txn.db.metadata.GetEpochs(txn.Metadata())
 }
 
 func (d *Database) SetEpoch(
@@ -99,7 +42,7 @@ func (d *Database) SetEpoch(
 	txn *Txn,
 ) error {
 	if txn == nil {
-		err := d.metadata.SetEpoch(
+		return d.metadata.SetEpoch(
 			slot,
 			epoch,
 			nonce,
@@ -108,14 +51,14 @@ func (d *Database) SetEpoch(
 			lengthInSlots,
 			nil,
 		)
-		if err != nil {
-			return err
-		}
-	} else {
-		err := d.metadata.SetEpoch(slot, epoch, nonce, era, slotLength, lengthInSlots, txn.Metadata())
-		if err != nil {
-			return err
-		}
 	}
-	return nil
+	return d.metadata.SetEpoch(
+		slot,
+		epoch,
+		nonce,
+		era,
+		slotLength,
+		lengthInSlots,
+		txn.Metadata(),
+	)
 }

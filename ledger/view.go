@@ -96,18 +96,27 @@ func (lv *LedgerView) PoolCurrentState(
 		}
 		reg := pool.Registration[latestIdx]
 		tmp := lcommon.PoolRegistrationCertificate{
-			CertType:   lcommon.CertificateTypePoolRegistration,
-			Operator:   lcommon.PoolKeyHash(lcommon.NewBlake2b224(pool.PoolKeyHash)),
-			VrfKeyHash: lcommon.VrfKeyHash(lcommon.NewBlake2b256(pool.VrfKeyHash)),
-			Pledge:     uint64(pool.Pledge),
-			Cost:       uint64(pool.Cost),
+			CertType: lcommon.CertificateTypePoolRegistration,
+			Operator: lcommon.PoolKeyHash(
+				lcommon.NewBlake2b224(pool.PoolKeyHash),
+			),
+			VrfKeyHash: lcommon.VrfKeyHash(
+				lcommon.NewBlake2b256(pool.VrfKeyHash),
+			),
+			Pledge: uint64(pool.Pledge),
+			Cost:   uint64(pool.Cost),
 		}
 		if pool.Margin != nil {
 			tmp.Margin = cbor.Rat{Rat: pool.Margin.Rat}
 		}
-		tmp.RewardAccount = lcommon.AddrKeyHash(lcommon.NewBlake2b224(pool.RewardAccount))
+		tmp.RewardAccount = lcommon.AddrKeyHash(
+			lcommon.NewBlake2b224(pool.RewardAccount),
+		)
 		for _, owner := range pool.Owners {
-			tmp.PoolOwners = append(tmp.PoolOwners, lcommon.AddrKeyHash(lcommon.NewBlake2b224(owner.KeyHash)))
+			tmp.PoolOwners = append(
+				tmp.PoolOwners,
+				lcommon.AddrKeyHash(lcommon.NewBlake2b224(owner.KeyHash)),
+			)
 		}
 		for _, relay := range pool.Relays {
 			r := lcommon.PoolRelay{}
@@ -128,8 +137,10 @@ func (lv *LedgerView) PoolCurrentState(
 		}
 		if reg.MetadataUrl != "" {
 			tmp.PoolMetadata = &lcommon.PoolMetadata{
-				Url:  reg.MetadataUrl,
-				Hash: lcommon.PoolMetadataHash(lcommon.NewBlake2b256(reg.MetadataHash)),
+				Url: reg.MetadataUrl,
+				Hash: lcommon.PoolMetadataHash(
+					lcommon.NewBlake2b256(reg.MetadataHash),
+				),
 			}
 		}
 		currentReg = &tmp

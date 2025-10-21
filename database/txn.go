@@ -25,12 +25,12 @@ import (
 
 // Txn is a wrapper around the transaction objects for the underlying DB engines
 type Txn struct {
-	lock        sync.Mutex
-	finished    bool
 	db          *Database
-	readWrite   bool
 	blobTxn     *badger.Txn
 	metadataTxn *gorm.DB
+	lock        sync.Mutex
+	finished    bool
+	readWrite   bool
 }
 
 func NewTxn(db *Database, readWrite bool) *Txn {

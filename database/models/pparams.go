@@ -14,14 +14,26 @@
 
 package models
 
-type ResignCommitteeCold struct {
-	ID             uint   `gorm:"primarykey"`
-	ColdCredential []byte `gorm:"index"`
-	AnchorUrl      string
-	AnchorHash     []byte
-	AddedSlot      uint64
+type PParams struct {
+	Cbor      []byte
+	ID        uint `gorm:"primarykey"`
+	AddedSlot uint64
+	Epoch     uint64
+	EraId     uint
 }
 
-func (ResignCommitteeCold) TableName() string {
-	return "resign_committee_cold"
+func (PParams) TableName() string {
+	return "pparams"
+}
+
+type PParamUpdate struct {
+	GenesisHash []byte
+	Cbor        []byte
+	ID          uint `gorm:"primarykey"`
+	AddedSlot   uint64
+	Epoch       uint64
+}
+
+func (PParamUpdate) TableName() string {
+	return "pparam_update"
 }

@@ -27,6 +27,7 @@ import (
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/common/script"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	"github.com/blinklabs-io/plutigo/data"
 )
 
 var ConwayEraDesc = EraDesc{
@@ -160,14 +161,140 @@ func ValidateTxConway(
 	ls lcommon.LedgerState,
 	pp lcommon.ProtocolParameters,
 ) error {
+	// Validate TX through ledger validation rules
 	errs := []error{}
+	var err error
 	for _, validationFunc := range conway.UtxoValidationRules {
-		errs = append(
-			errs,
-			validationFunc(tx, slot, ls, pp),
+		err = validationFunc(tx, slot, ls, pp)
+		if err != nil {
+			errs = append(
+				errs,
+				err,
+			)
+		}
+	}
+	if len(errs) > 0 {
+		return errors.Join(errs...)
+	}
+	// Skip script evaluation if TX is marked as not valid
+	if !tx.IsValid() {
+		return nil
+	}
+	// Resolve inputs
+	resolvedInputs := []lcommon.Utxo{}
+	for _, tmpInput := range tx.Inputs() {
+		tmpUtxo, err := ls.UtxoById(tmpInput)
+		if err != nil {
+			return err
+		}
+		resolvedInputs = append(
+			resolvedInputs,
+			tmpUtxo,
 		)
 	}
-	return errors.Join(errs...)
+	// Resolve reference inputs
+	resolvedRefInputs := []lcommon.Utxo{}
+	for _, tmpRefInput := range tx.ReferenceInputs() {
+		tmpUtxo, err := ls.UtxoById(tmpRefInput)
+		if err != nil {
+			return err
+		}
+		resolvedRefInputs = append(
+			resolvedRefInputs,
+			tmpUtxo,
+		)
+	}
+	// Build TX script map
+	scripts := make(map[lcommon.ScriptHash]lcommon.Script)
+	for _, refInput := range resolvedRefInputs {
+		tmpScript := refInput.Output.ScriptRef()
+		if tmpScript == nil {
+			continue
+		}
+		scripts[tmpScript.Hash()] = tmpScript
+	}
+	for _, tmpScript := range tx.Witnesses().PlutusV1Scripts() {
+		scripts[tmpScript.Hash()] = tmpScript
+	}
+	for _, tmpScript := range tx.Witnesses().PlutusV2Scripts() {
+		scripts[tmpScript.Hash()] = tmpScript
+	}
+	for _, tmpScript := range tx.Witnesses().PlutusV3Scripts() {
+		scripts[tmpScript.Hash()] = tmpScript
+	}
+	// Evaluate scripts
+	var txInfoV3 script.TxInfo
+	txInfoV3, err = script.NewTxInfoV3FromTransaction(
+		ls,
+		tx,
+		slices.Concat(resolvedInputs, resolvedRefInputs),
+	)
+	if err != nil {
+		return err
+	}
+	for _, redeemerPair := range txInfoV3.(script.TxInfoV3).Redeemers {
+		purpose := redeemerPair.Key
+		redeemer := redeemerPair.Value
+		// Lookup script from redeemer purpose
+		tmpScript := scripts[purpose.ScriptHash()]
+		if tmpScript == nil {
+			return fmt.Errorf(
+				"could not find script with hash %s",
+				purpose.ScriptHash().String(),
+			)
+		}
+		switch s := tmpScript.(type) {
+		case *lcommon.PlutusV3Script:
+			sc := script.NewScriptContextV3(txInfoV3, redeemer, purpose)
+			// Round-trip the script context through CBOR
+			// This is a temporary hack to work around a bug in plutigo
+			scCbor, err := data.Encode(sc.ToPlutusData())
+			if err != nil {
+				return err
+			}
+			scNew, err := data.Decode(scCbor)
+			if err != nil {
+				return err
+			}
+			_, err = s.Evaluate(
+				scNew,
+				redeemer.ExUnits,
+			)
+			if err != nil {
+				/*
+					fmt.Printf("TX ID: %s\n", tx.Hash().String())
+					fmt.Printf("purpose = %#v, redeemer = %#v\n", purpose, redeemer)
+					scriptHash := s.Hash()
+					fmt.Printf("scriptHash = %s\n", scriptHash.String())
+					fmt.Printf("tx = %x\n", tx.Cbor())
+					// Build inputs/outputs strings that can be plugged into Aiken script_context tests for comparison
+					var tmpInputs []lcommon.TransactionInput
+					var tmpOutputs []lcommon.TransactionOutput
+					for _, input := range slices.Concat(resolvedInputs, resolvedRefInputs) {
+						tmpInputs = append(tmpInputs, input.Id)
+						tmpOutputs = append(tmpOutputs, input.Output)
+					}
+					tmpInputsCbor, err2 := cbor.Encode(tmpInputs)
+					if err2 != nil {
+						return err2
+					}
+					fmt.Printf("tmpInputs = %x\n", tmpInputsCbor)
+					tmpOutputsCbor, err2 := cbor.Encode(tmpOutputs)
+					if err2 != nil {
+						return err2
+					}
+					fmt.Printf("tmpOutputs = %x\n", tmpOutputsCbor)
+					scCbor, err2 := data.Encode(sc.ToPlutusData())
+					if err2 != nil {
+						return err2
+					}
+					fmt.Printf("scCbor = %x\n", scCbor)
+				*/
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func EvaluateTxConway(
@@ -229,7 +356,11 @@ func EvaluateTxConway(
 	retRedeemerExUnits := make(map[lcommon.RedeemerKey]lcommon.ExUnits)
 	var txInfoV3 script.TxInfo
 	var err error
-	txInfoV3, err = script.NewTxInfoV3FromTransaction(ls, tx, slices.Concat(resolvedInputs, resolvedRefInputs))
+	txInfoV3, err = script.NewTxInfoV3FromTransaction(
+		ls,
+		tx,
+		slices.Concat(resolvedInputs, resolvedRefInputs),
+	)
 	if err != nil {
 		return 0, lcommon.ExUnits{}, nil, err
 	}
@@ -263,38 +394,6 @@ func EvaluateTxConway(
 				Tag:   redeemer.Tag,
 				Index: redeemer.Index,
 			}] = usedBudget
-			/*
-				if err != nil && !strings.Contains(err.Error(), "unimplemented") {
-					fmt.Printf("TX ID: %s\n", tx.Hash().String())
-					fmt.Printf("purpose = %#v, redeemer = %#v\n", purpose, redeemer)
-					scriptHash := s.Hash()
-					fmt.Printf("scriptHash = %s\n", scriptHash.String())
-					fmt.Printf("tx = %x\n", tx.Cbor())
-					// Build inputs/outputs strings that can be plugged into Aiken script_context tests for comparison
-					var tmpInputs []lcommon.TransactionInput
-					var tmpOutputs []lcommon.TransactionOutput
-					for _, input := range slices.Concat(resolvedInputs, resolvedRefInputs) {
-						tmpInputs = append(tmpInputs, input.Id)
-						tmpOutputs = append(tmpOutputs, input.Output)
-					}
-					tmpInputsCbor, err := cbor.Encode(tmpInputs)
-					if err != nil {
-						return 0, lcommon.ExUnits{}, nil, err
-					}
-					fmt.Printf("tmpInputs = %x\n", tmpInputsCbor)
-					tmpOutputsCbor, err := cbor.Encode(tmpOutputs)
-					if err != nil {
-						return 0, lcommon.ExUnits{}, nil, err
-					}
-					fmt.Printf("tmpOutputs = %x\n", tmpOutputsCbor)
-					fmt.Printf("sc = %#v\n", sc)
-					scCbor, err := data.Encode(sc.ToPlutusData())
-					if err != nil {
-						return 0, lcommon.ExUnits{}, nil, err
-					}
-					fmt.Printf("scCbor = %x\n", scCbor)
-				}
-			*/
 		default:
 			return 0, lcommon.ExUnits{}, nil, fmt.Errorf("unimplemented script type: %T", tmpScript)
 		}

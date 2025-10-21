@@ -1,4 +1,4 @@
-FROM ghcr.io/blinklabs-io/go:1.24.6-1 AS build
+FROM ghcr.io/blinklabs-io/go:1.24.7-1 AS build
 
 WORKDIR /code
 RUN go env -w GOCACHE=/go-cache
@@ -8,10 +8,20 @@ RUN --mount=type=cache,target=/gomod-cache go mod download
 COPY . .
 RUN --mount=type=cache,target=/gomod-cache --mount=type=cache,target=/go-cache make build
 
-FROM ghcr.io/blinklabs-io/cardano-cli:10.11.1.0-1 AS cardano-cli
-FROM ghcr.io/blinklabs-io/cardano-configs:20250812-1 AS cardano-configs
-FROM ghcr.io/blinklabs-io/mithril-client:0.12.11-1 AS mithril-client
-FROM ghcr.io/blinklabs-io/txtop:0.13.0 AS txtop
+FROM build AS antithesis-build
+RUN go get github.com/antithesishq/antithesis-sdk-go@latest
+RUN go install github.com/antithesishq/antithesis-sdk-go/tools/antithesis-go-instrumentor@latest
+RUN --mount=type=cache,target=/gomod-cache make mod-tidy
+RUN mkdir -p /antithesis
+# Create instrumented code in /antithesis
+RUN --mount=type=cache,target=/gomod-cache `go env GOPATH`/bin/antithesis-go-instrumentor /code /antithesis
+WORKDIR /antithesis/customer
+RUN --mount=type=cache,target=/gomod-cache --mount=type=cache,target=/go-cache make build
+
+FROM ghcr.io/blinklabs-io/cardano-cli:10.12.0.0-1 AS cardano-cli
+FROM ghcr.io/blinklabs-io/cardano-configs:20251014-1 AS cardano-configs
+FROM ghcr.io/blinklabs-io/mithril-client:0.12.30-1 AS mithril-client
+FROM ghcr.io/blinklabs-io/txtop:0.13.1 AS txtop
 
 FROM debian:bookworm-slim AS dingo
 RUN apt-get update -y && \
@@ -41,3 +51,15 @@ VOLUME /ipc
 ENV CARDANO_NODE_SOCKET_PATH=/ipc/dingo.socket
 ENV CARDANO_SOCKET_PATH=/ipc/dingo.socket
 ENTRYPOINT ["dingo"]
+
+FROM dingo AS antithesis
+RUN apt-get update -y && \
+  apt-get install -y \
+    curl \
+    lsof \
+    netcat-openbsd \
+    socat
+COPY --from=antithesis-build /antithesis/customer/dingo /bin/
+COPY --from=antithesis-build /antithesis/symbols/*.sym.tsv /symbols/
+
+FROM dingo AS final

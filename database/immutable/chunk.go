@@ -29,10 +29,10 @@ const (
 
 type chunk struct {
 	file         *os.File
-	fileSize     int64
 	secondary    *secondaryIndex
 	currentEntry *secondaryIndexEntry
 	nextEntry    *secondaryIndexEntry
+	fileSize     int64
 }
 
 func newChunk() *chunk {

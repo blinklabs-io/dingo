@@ -17,9 +17,8 @@ package metadata
 import (
 	"log/slog"
 
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
-	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite/models"
-	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
@@ -37,7 +36,7 @@ type MetadataStore interface {
 
 	// Ledger state
 	AddUtxos(
-		[]types.UtxoSlot,
+		[]models.UtxoSlot,
 		*gorm.DB,
 	) error
 	GetPoolRegistrations(
@@ -47,7 +46,7 @@ type MetadataStore interface {
 	GetPool(
 		[]byte, // pool key hash
 		*gorm.DB,
-	) (models.Pool, error)
+	) (*models.Pool, error)
 	GetStakeRegistrations(
 		[]byte, // stakeKey
 		*gorm.DB,
@@ -57,7 +56,7 @@ type MetadataStore interface {
 	GetAccount(
 		[]byte, // stakeKey
 		*gorm.DB,
-	) (models.Account, error)
+	) (*models.Account, error)
 	GetBlockNonce(
 		[]byte, // blockHash
 		uint64, // slotNumber
@@ -66,7 +65,7 @@ type MetadataStore interface {
 	GetDatum(
 		lcommon.Blake2b256,
 		*gorm.DB,
-	) (models.Datum, error)
+	) (*models.Datum, error)
 	GetPParams(
 		uint64, // epoch
 		*gorm.DB,
@@ -79,7 +78,11 @@ type MetadataStore interface {
 		[]byte, // txId
 		uint32, // idx
 		*gorm.DB,
-	) (models.Utxo, error)
+	) (*models.Utxo, error)
+	GetTransactionByHash(
+		[]byte, // hash
+		*gorm.DB,
+	) (*models.Transaction, error)
 
 	SetAccount(
 		[]byte, // stakeKey
@@ -192,6 +195,15 @@ type MetadataStore interface {
 		uint64, // deposit
 		*gorm.DB,
 	) error
+	SetTransaction(
+		[]byte, // hash
+		string, // type
+		[]byte, // blockHash
+		uint32, // blockIndex
+		[]byte, // inputs
+		[]byte, // outputs
+		*gorm.DB,
+	) error
 	SetTip(
 		ochainsync.Tip,
 		*gorm.DB,
@@ -208,6 +220,7 @@ type MetadataStore interface {
 		[]byte, // payment
 		[]byte, // stake
 		uint64, // amount
+		*lcommon.MultiAsset[lcommon.MultiAssetTypeOutput], // asset
 		*gorm.DB,
 	) error
 	SetVoteDelegation(
@@ -228,7 +241,6 @@ type MetadataStore interface {
 	DeleteUtxo(any, *gorm.DB) error
 	DeleteUtxos([]any, *gorm.DB) error
 	DeleteUtxosAfterSlot(uint64, *gorm.DB) error
-	GetEpochLatest(*gorm.DB) (models.Epoch, error)
 	GetEpochsByEra(uint, *gorm.DB) ([]models.Epoch, error)
 	GetEpochs(*gorm.DB) ([]models.Epoch, error)
 	GetUtxosAddedAfterSlot(uint64, *gorm.DB) ([]models.Utxo, error)

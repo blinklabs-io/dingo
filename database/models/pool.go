@@ -15,23 +15,26 @@
 package models
 
 import (
+	"errors"
 	"net"
 
 	"github.com/blinklabs-io/dingo/database/types"
 )
 
+var ErrPoolNotFound = errors.New("pool not found")
+
 type Pool struct {
-	ID            uint   `gorm:"primarykey"`
+	Margin        *types.Rat
 	PoolKeyHash   []byte `gorm:"uniqueIndex"`
 	VrfKeyHash    []byte
-	Pledge        types.Uint64
-	Cost          types.Uint64
-	Margin        *types.Rat
 	RewardAccount []byte
 	Owners        []PoolRegistrationOwner
 	Relays        []PoolRegistrationRelay
 	Registration  []PoolRegistration
 	Retirement    []PoolRetirement
+	ID            uint `gorm:"primarykey"`
+	Pledge        types.Uint64
+	Cost          types.Uint64
 }
 
 func (p *Pool) TableName() string {
@@ -39,18 +42,18 @@ func (p *Pool) TableName() string {
 }
 
 type PoolRegistration struct {
-	ID            uint `gorm:"primarykey"`
-	PoolID        uint
-	PoolKeyHash   []byte `gorm:"index"`
-	VrfKeyHash    []byte
-	Pledge        types.Uint64
-	Cost          types.Uint64
 	Margin        *types.Rat
+	MetadataUrl   string
+	VrfKeyHash    []byte
+	PoolKeyHash   []byte `gorm:"index"`
 	RewardAccount []byte
+	MetadataHash  []byte
 	Owners        []PoolRegistrationOwner
 	Relays        []PoolRegistrationRelay
-	MetadataUrl   string
-	MetadataHash  []byte
+	Pledge        types.Uint64
+	Cost          types.Uint64
+	ID            uint `gorm:"primarykey"`
+	PoolID        uint
 	AddedSlot     uint64
 	DepositAmount uint64
 }
@@ -60,10 +63,10 @@ func (PoolRegistration) TableName() string {
 }
 
 type PoolRegistrationOwner struct {
+	KeyHash            []byte
 	ID                 uint `gorm:"primarykey"`
 	PoolRegistrationID uint
 	PoolID             uint
-	KeyHash            []byte
 }
 
 func (PoolRegistrationOwner) TableName() string {
@@ -71,13 +74,13 @@ func (PoolRegistrationOwner) TableName() string {
 }
 
 type PoolRegistrationRelay struct {
+	Ipv4               *net.IP
+	Ipv6               *net.IP
+	Hostname           string
 	ID                 uint `gorm:"primarykey"`
 	PoolRegistrationID uint
 	PoolID             uint
 	Port               uint
-	Ipv4               *net.IP
-	Ipv6               *net.IP
-	Hostname           string
 }
 
 func (PoolRegistrationRelay) TableName() string {
@@ -85,9 +88,9 @@ func (PoolRegistrationRelay) TableName() string {
 }
 
 type PoolRetirement struct {
-	ID          uint `gorm:"primarykey"`
-	PoolID      uint
 	PoolKeyHash []byte `gorm:"index"`
+	ID          uint   `gorm:"primarykey"`
+	PoolID      uint
 	Epoch       uint64
 	AddedSlot   uint64
 }

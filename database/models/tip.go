@@ -14,13 +14,13 @@
 
 package models
 
-type Datum struct {
-	ID        uint   `gorm:"primarykey"`
-	Hash      []byte `gorm:"index;not null;unique"`
-	RawDatum  []byte `gorm:"not null"`
-	AddedSlot uint64 `gorm:"not null"`
+type Tip struct {
+	Hash        []byte
+	ID          uint `gorm:"primarykey"`
+	Slot        uint64
+	BlockNumber uint64
 }
 
-func (Datum) TableName() string {
-	return "datum"
+func (Tip) TableName() string {
+	return "tip"
 }

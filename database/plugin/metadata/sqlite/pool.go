@@ -17,7 +17,7 @@ package sqlite
 import (
 	"errors"
 
-	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite/models"
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"gorm.io/gorm"
@@ -29,33 +29,27 @@ func (d *MetadataStoreSqlite) GetPool(
 	// pkh lcommon.PoolKeyHash,
 	pkh []byte,
 	txn *gorm.DB,
-) (models.Pool, error) {
-	ret := models.Pool{}
-	tmpPool := models.Pool{}
-	if txn != nil {
-		result := txn.
-			Preload("Registration", func(db *gorm.DB) *gorm.DB { return db.Order("id DESC").Limit(1) }).
-			First(
-				&tmpPool,
-				"pool_key_hash = ?",
-				pkh,
-			)
-		if result.Error != nil {
-			return ret, result.Error
-		}
-	} else {
-		result := d.DB().
-			Preload("Registration", func(db *gorm.DB) *gorm.DB { return db.Order("id DESC").Limit(1) }).
-			First(
-				&tmpPool,
-				"pool_key_hash = ?",
-				pkh,
-			)
-		if result.Error != nil {
-			return ret, result.Error
-		}
+) (*models.Pool, error) {
+	ret := &models.Pool{}
+	if txn == nil {
+		txn = d.DB()
 	}
-	ret = tmpPool
+	result := txn.
+		Preload(
+			"Registration",
+			func(db *gorm.DB) *gorm.DB { return db.Order("id DESC").Limit(1) },
+		).
+		First(
+			ret,
+			"pool_key_hash = ?",
+			pkh,
+		)
+	if result.Error != nil {
+		if errors.Is(result.Error, gorm.ErrRecordNotFound) {
+			return nil, nil
+		}
+		return nil, result.Error
+	}
 	return ret, nil
 }
 
@@ -150,25 +144,27 @@ func (d *MetadataStoreSqlite) SetPoolRegistration(
 	slot, deposit uint64,
 	txn *gorm.DB,
 ) error {
-	var tmpItem models.Pool
+	if txn == nil {
+		txn = d.DB()
+	}
 	tmpPool, err := d.GetPool(cert.Operator[:], txn)
 	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			tmpItem = models.Pool{
-				PoolKeyHash: cert.Operator[:],
-				VrfKeyHash:  cert.VrfKeyHash[:],
-			}
+		if errors.Is(err, models.ErrPoolNotFound) {
+			// Do nothing :-)
 		} else {
 			return err
 		}
-	} else {
-		// Store our fetched pool
-		tmpItem = tmpPool
 	}
-	tmpItem.Pledge = types.Uint64(cert.Pledge)
-	tmpItem.Cost = types.Uint64(cert.Cost)
-	tmpItem.Margin = &types.Rat{Rat: cert.Margin.Rat}
-	tmpItem.RewardAccount = cert.RewardAccount[:]
+	if tmpPool == nil {
+		tmpPool = &models.Pool{
+			PoolKeyHash: cert.Operator[:],
+			VrfKeyHash:  cert.VrfKeyHash[:],
+		}
+	}
+	tmpPool.Pledge = types.Uint64(cert.Pledge)
+	tmpPool.Cost = types.Uint64(cert.Cost)
+	tmpPool.Margin = &types.Rat{Rat: cert.Margin.Rat}
+	tmpPool.RewardAccount = cert.RewardAccount[:]
 
 	tmpReg := models.PoolRegistration{
 		PoolKeyHash:   cert.Operator[:],
@@ -189,7 +185,7 @@ func (d *MetadataStoreSqlite) SetPoolRegistration(
 			models.PoolRegistrationOwner{KeyHash: owner[:]},
 		)
 	}
-	tmpItem.Owners = tmpReg.Owners
+	tmpPool.Owners = tmpReg.Owners
 	var tmpRelay models.PoolRegistrationRelay
 	for _, relay := range cert.Relays {
 		tmpRelay = models.PoolRegistrationRelay{
@@ -202,22 +198,17 @@ func (d *MetadataStoreSqlite) SetPoolRegistration(
 		if relay.Hostname != nil {
 			tmpRelay.Hostname = *relay.Hostname
 		}
-		tmpItem.Relays = append(tmpReg.Relays, tmpRelay)
+		tmpPool.Relays = append(tmpReg.Relays, tmpRelay)
 	}
-	tmpItem.Registration = append(tmpItem.Registration, tmpReg)
-	tmpItem.Relays = tmpReg.Relays
+	tmpPool.Registration = append(tmpPool.Registration, tmpReg)
+	tmpPool.Relays = tmpReg.Relays
 	onConflict := clause.OnConflict{
 		Columns:   []clause.Column{{Name: "pool_key_hash"}},
 		UpdateAll: true,
 	}
-	if txn != nil {
-		if result := txn.Clauses(onConflict).Create(&tmpItem); result.Error != nil {
-			return result.Error
-		}
-	} else {
-		if result := d.DB().Clauses(onConflict).Create(&tmpItem); result.Error != nil {
-			return result.Error
-		}
+	result := txn.Clauses(onConflict).Create(&tmpPool)
+	if result.Error != nil {
+		return result.Error
 	}
 	return nil
 }
@@ -228,9 +219,15 @@ func (d *MetadataStoreSqlite) SetPoolRetirement(
 	slot uint64,
 	txn *gorm.DB,
 ) error {
+	if txn == nil {
+		txn = d.DB()
+	}
 	tmpPool, err := d.GetPool(cert.PoolKeyHash[:], txn)
 	if err != nil {
 		return err
+	}
+	if tmpPool == nil {
+		return models.ErrPoolNotFound
 	}
 	tmpItem := models.PoolRetirement{
 		PoolKeyHash: cert.PoolKeyHash[:],
@@ -238,14 +235,9 @@ func (d *MetadataStoreSqlite) SetPoolRetirement(
 		AddedSlot:   slot,
 	}
 	tmpPool.Retirement = append(tmpPool.Retirement, tmpItem)
-	if txn != nil {
-		if result := txn.Save(&tmpPool); result.Error != nil {
-			return result.Error
-		}
-	} else {
-		if result := d.DB().Save(&tmpPool); result.Error != nil {
-			return result.Error
-		}
+	result := txn.Save(&tmpPool)
+	if result.Error != nil {
+		return result.Error
 	}
 	return nil
 }

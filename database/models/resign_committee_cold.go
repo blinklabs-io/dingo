@@ -14,18 +14,14 @@
 
 package models
 
-type Utxo struct {
-	ID          uint   `gorm:"primarykey"`
-	TxId        []byte `gorm:"index:tx_id_output_idx"`
-	OutputIdx   uint32 `gorm:"index:tx_id_output_idx"`
-	AddedSlot   uint64 `gorm:"index"`
-	DeletedSlot uint64 `gorm:"index"`
-	PaymentKey  []byte `gorm:"index"`
-	StakingKey  []byte `gorm:"index"`
-	Amount      uint64 `gorm:"index"`
-	Cbor        []byte `gorm:"-"` // This is here for convenience but not represented in the metadata DB
+type ResignCommitteeCold struct {
+	AnchorUrl      string
+	ColdCredential []byte `gorm:"index"`
+	AnchorHash     []byte
+	ID             uint `gorm:"primarykey"`
+	AddedSlot      uint64
 }
 
-func (u *Utxo) TableName() string {
-	return "utxo"
+func (ResignCommitteeCold) TableName() string {
+	return "resign_committee_cold"
 }

@@ -40,13 +40,13 @@ func init() {
 
 // BlobStoreGCS stores data in a Google Cloud Storage bucket.
 type BlobStoreGCS struct {
-	logger        *GcsLogger
 	promRegistry  prometheus.Registerer
+	startupCtx    context.Context
+	logger        *GcsLogger
 	client        *storage.Client
 	bucket        *storage.BucketHandle
-	bucketName    string
-	startupCtx    context.Context
 	startupCancel context.CancelFunc
+	bucketName    string
 }
 
 // New creates a new GCS-backed blob store.
@@ -68,13 +68,21 @@ func New(
 	}
 	if bucketName == "" {
 		cancel()
-		return nil, errors.New("gcs blob: bucket not set (expected dataDir='gcs://<bucket>')")
+		return nil, errors.New(
+			"gcs blob: bucket not set (expected dataDir='gcs://<bucket>')",
+		)
 	}
 
-	client, err := storage.NewClient(ctx)
+	client, err := storage.NewGRPCClient(
+		ctx,
+		storage.WithDisabledClientMetrics(),
+	)
 	if err != nil {
 		cancel()
-		return nil, fmt.Errorf("gcs blob: failed in creating storage client: %w", err)
+		return nil, fmt.Errorf(
+			"gcs blob: failed in creating storage client: %w",
+			err,
+		)
 	}
 
 	db := &BlobStoreGCS{

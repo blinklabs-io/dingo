@@ -14,14 +14,18 @@
 
 package models
 
-type PParams struct {
-	ID        uint `gorm:"primarykey"`
-	Cbor      []byte
-	AddedSlot uint64
-	Epoch     uint64
-	EraId     uint
+type Epoch struct {
+	Nonce []byte
+	ID    uint `gorm:"primarykey"`
+	// NOTE: we would normally use this as the primary key, but GORM doesn't
+	// like a primary key value of 0
+	EpochId       uint64 `gorm:"uniqueIndex"`
+	StartSlot     uint64
+	EraId         uint
+	SlotLength    uint
+	LengthInSlots uint
 }
 
-func (PParams) TableName() string {
-	return "pparams"
+func (Epoch) TableName() string {
+	return "epoch"
 }

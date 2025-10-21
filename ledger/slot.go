@@ -20,7 +20,7 @@ import (
 	"math/big"
 	"time"
 
-	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/models"
 )
 
 // SlotToTime returns the current time for a given slot based on known epochs
@@ -62,7 +62,15 @@ func (ls *LedgerState) SlotToTime(slot uint64) (time.Time, error) {
 		)
 	}
 	if !foundSlot {
-		return slotTime, errors.New("slot not found in known epochs")
+		// Project the current slot length forward to calculate future slots
+		lastEpoch := ls.epochCache[len(ls.epochCache)-1]
+		leftoverSlots := slot - (lastEpoch.StartSlot + uint64(lastEpoch.LengthInSlots))
+		slotTime = slotTime.Add(
+			// nolint:gosec
+			time.Duration(
+				leftoverSlots,
+			) * (time.Duration(lastEpoch.SlotLength) * time.Millisecond),
+		)
 	}
 	return slotTime, nil
 }
@@ -131,7 +139,7 @@ func (ls *LedgerState) TimeToSlot(t time.Time) (uint64, error) {
 }
 
 // SlotToEpoch returns a known epoch by slot number
-func (ls *LedgerState) SlotToEpoch(slot uint64) (database.Epoch, error) {
+func (ls *LedgerState) SlotToEpoch(slot uint64) (models.Epoch, error) {
 	for _, epoch := range ls.epochCache {
 		if slot < epoch.StartSlot {
 			continue
@@ -140,5 +148,5 @@ func (ls *LedgerState) SlotToEpoch(slot uint64) (database.Epoch, error) {
 			return epoch, nil
 		}
 	}
-	return database.Epoch{}, errors.New("slot not found in known epochs")
+	return models.Epoch{}, errors.New("slot not found in known epochs")
 }

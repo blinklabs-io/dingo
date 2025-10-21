@@ -34,12 +34,12 @@ const (
 )
 
 type ChainManager struct {
-	mutex               sync.RWMutex
 	db                  *database.Database
 	eventBus            *event.EventBus
 	chains              map[ChainId]*Chain
 	chainRollbackEvents map[ChainId][]uint64
 	blocks              map[string]database.Block
+	mutex               sync.RWMutex
 }
 
 func NewManager(

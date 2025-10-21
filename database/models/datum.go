@@ -14,15 +14,13 @@
 
 package models
 
-type BlockNonce struct {
-	ID           uint   `gorm:"primarykey"`
-	Hash         []byte `gorm:"index:hash_slot"`
-	Slot         uint64 `gorm:"index:hash_slot"`
-	Nonce        []byte
-	IsCheckpoint bool
+type Datum struct {
+	Hash      []byte `gorm:"index;not null;unique"`
+	RawDatum  []byte `gorm:"not null"`
+	ID        uint   `gorm:"primarykey"`
+	AddedSlot uint64 `gorm:"not null"`
 }
 
-// TableName overrides default table name
-func (BlockNonce) TableName() string {
-	return "block_nonce"
+func (Datum) TableName() string {
+	return "datum"
 }

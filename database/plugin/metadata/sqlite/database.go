@@ -24,8 +24,8 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin"
-	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite/models"
 	"github.com/glebarez/sqlite"
 	"github.com/prometheus/client_golang/prometheus"
 	"gorm.io/gorm"
@@ -45,11 +45,11 @@ func init() {
 
 // MetadataStoreSqlite stores all data in sqlite. Data may not be persisted
 type MetadataStoreSqlite struct {
-	dataDir      string
+	promRegistry prometheus.Registerer
 	db           *gorm.DB
 	logger       *slog.Logger
-	promRegistry prometheus.Registerer
 	timerVacuum  *time.Timer
+	dataDir      string
 }
 
 // New creates a new database

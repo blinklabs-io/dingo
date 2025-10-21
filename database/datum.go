@@ -15,28 +15,8 @@
 package database
 
 import (
-	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite/models"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
-
-// GetDatum returns the datum for a given Blake2b256 hash
-func (d *Database) GetDatumByHash(
-	hash lcommon.Blake2b256,
-	txn *Txn,
-) ([]byte, error) {
-	var datum models.Datum
-	var err error
-
-	if txn == nil {
-		datum, err = d.metadata.GetDatum(hash, nil)
-	} else {
-		datum, err = d.metadata.GetDatum(hash, txn.Metadata())
-	}
-	if err != nil {
-		return nil, err
-	}
-	return datum.RawDatum, nil
-}
 
 // SetDatum saves the raw datum into the database by computing the hash before inserting.
 func (d *Database) SetDatum(
@@ -48,8 +28,8 @@ func (d *Database) SetDatum(
 	datumHash := lcommon.Blake2b256Hash(rawDatum)
 
 	if txn == nil {
-		return d.metadata.SetDatum(datumHash, rawDatum, addedSlot, nil)
-	} else {
-		return d.metadata.SetDatum(datumHash, rawDatum, addedSlot, txn.Metadata())
+		txn = d.Transaction(false)
+		defer txn.Commit() //nolint:errcheck
 	}
+	return d.metadata.SetDatum(datumHash, rawDatum, addedSlot, txn.Metadata())
 }

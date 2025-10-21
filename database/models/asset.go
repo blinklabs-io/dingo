@@ -13,3 +13,19 @@
 // limitations under the License.
 
 package models
+
+import "github.com/blinklabs-io/dingo/database/types"
+
+type Asset struct {
+	Name        []byte `gorm:"index"`
+	NameHex     []byte `gorm:"index"`
+	PolicyId    []byte `gorm:"index"`
+	Fingerprint []byte `gorm:"index"`
+	ID          uint   `gorm:"primaryKey"`
+	UtxoID      uint
+	Amount      types.Uint64 `gorm:"index"`
+}
+
+func (Asset) TableName() string {
+	return "asset"
+}

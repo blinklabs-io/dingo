@@ -1,4 +1,4 @@
-// Copyright 2024 Blink Labs Software
+// Copyright 2025 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -43,43 +43,45 @@ func FromContext(ctx context.Context) *Config {
 }
 
 type Config struct {
-	BadgerCacheSize int64  `split_words:"true" yaml:"badgerCacheSize"`
-	MempoolCapacity int64  `split_words:"true" yaml:"mempoolCapacity"`
-	BindAddr        string `split_words:"true" yaml:"bindAddr"`
-	CardanoConfig   string `                   yaml:"cardanoConfig"   envconfig:"config"`
-	DatabasePath    string `split_words:"true" yaml:"databasePath"`
-	SocketPath      string `split_words:"true" yaml:"socketPath"`
-	Network         string `                   yaml:"network"`
-	TlsCertFilePath string `                   yaml:"tlsCertFilePath" envconfig:"TLS_CERT_FILE_PATH"`
-	TlsKeyFilePath  string `                   yaml:"tlsKeyFilePath"  envconfig:"TLS_KEY_FILE_PATH"`
-	Topology        string `                   yaml:"topology"`
-	MetricsPort     uint   `split_words:"true" yaml:"metricsPort"`
-	PrivateBindAddr string `split_words:"true" yaml:"privateBindAddr"`
-	PrivatePort     uint   `split_words:"true" yaml:"privatePort"`
-	RelayPort       uint   `                   yaml:"relayPort"       envconfig:"port"`
-	UtxorpcPort     uint   `split_words:"true" yaml:"utxorpcPort"`
-	IntersectTip    bool   `split_words:"true" yaml:"intersectTip"`
-	DevMode         bool   `split_words:"true" yaml:"devMode"`
+	Network            string `yaml:"network"`
+	TlsKeyFilePath     string `yaml:"tlsKeyFilePath"     envconfig:"TLS_KEY_FILE_PATH"`
+	Topology           string `yaml:"topology"`
+	CardanoConfig      string `yaml:"cardanoConfig"      envconfig:"config"`
+	DatabasePath       string `yaml:"databasePath"                                      split_words:"true"`
+	SocketPath         string `yaml:"socketPath"                                        split_words:"true"`
+	TlsCertFilePath    string `yaml:"tlsCertFilePath"    envconfig:"TLS_CERT_FILE_PATH"`
+	BindAddr           string `yaml:"bindAddr"                                          split_words:"true"`
+	PrivateBindAddr    string `yaml:"privateBindAddr"                                   split_words:"true"`
+	BadgerCacheSize    int64  `yaml:"badgerCacheSize"                                   split_words:"true"`
+	MempoolCapacity    int64  `yaml:"mempoolCapacity"                                   split_words:"true"`
+	MetricsPort        uint   `yaml:"metricsPort"                                       split_words:"true"`
+	PrivatePort        uint   `yaml:"privatePort"                                       split_words:"true"`
+	RelayPort          uint   `yaml:"relayPort"          envconfig:"port"`
+	UtxorpcPort        uint   `yaml:"utxorpcPort"                                       split_words:"true"`
+	IntersectTip       bool   `yaml:"intersectTip"                                      split_words:"true"`
+	ValidateHistorical bool   `yaml:"validateHistorical"                                split_words:"true"`
+	DevMode            bool   `yaml:"devMode"                                           split_words:"true"`
 }
 
 var globalConfig = &Config{
-	BadgerCacheSize: 1073741824,
-	MempoolCapacity: 1048576,
-	BindAddr:        "0.0.0.0",
-	CardanoConfig:   "./config/cardano/preview/config.json",
-	DatabasePath:    ".dingo",
-	SocketPath:      "dingo.socket",
-	IntersectTip:    false,
-	Network:         "preview",
-	MetricsPort:     12798,
-	PrivateBindAddr: "127.0.0.1",
-	PrivatePort:     3002,
-	RelayPort:       3001,
-	UtxorpcPort:     9090,
-	Topology:        "",
-	TlsCertFilePath: "",
-	TlsKeyFilePath:  "",
-	DevMode:         false,
+	BadgerCacheSize:    1073741824,
+	MempoolCapacity:    1048576,
+	BindAddr:           "0.0.0.0",
+	CardanoConfig:      "./config/cardano/preview/config.json",
+	DatabasePath:       ".dingo",
+	SocketPath:         "dingo.socket",
+	IntersectTip:       false,
+	ValidateHistorical: false,
+	Network:            "preview",
+	MetricsPort:        12798,
+	PrivateBindAddr:    "127.0.0.1",
+	PrivatePort:        3002,
+	RelayPort:          3001,
+	UtxorpcPort:        9090,
+	Topology:           "",
+	TlsCertFilePath:    "",
+	TlsKeyFilePath:     "",
+	DevMode:            false,
 }
 
 func LoadConfig(configFile string) (*Config, error) {

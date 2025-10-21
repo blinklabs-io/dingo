@@ -14,14 +14,17 @@
 
 package models
 
-type PParamUpdate struct {
-	ID          uint `gorm:"primarykey"`
-	GenesisHash []byte
-	Cbor        []byte
-	AddedSlot   uint64
-	Epoch       uint64
+// Transaction represents a transaction record
+type Transaction struct {
+	Type       string
+	Hash       []byte `gorm:"uniqueIndex"`
+	BlockHash  []byte `gorm:"index"`
+	Inputs     []byte
+	Outputs    []byte
+	ID         uint `gorm:"primaryKey"`
+	BlockIndex uint32
 }
 
-func (PParamUpdate) TableName() string {
-	return "pparam_update"
+func (Transaction) TableName() string {
+	return "transaction"
 }

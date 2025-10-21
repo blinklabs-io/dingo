@@ -12,20 +12,28 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package models
+package main
 
-type Epoch struct {
-	ID uint `gorm:"primarykey"`
-	// NOTE: we would normally use this as the primary key, but GORM doesn't
-	// like a primary key value of 0
-	EpochId       uint64 `gorm:"uniqueIndex"`
-	StartSlot     uint64
-	Nonce         []byte
-	EraId         uint
-	SlotLength    uint
-	LengthInSlots uint
+import (
+	"fmt"
+	"os"
+
+	"github.com/blinklabs-io/dingo/internal/version"
+	"github.com/spf13/cobra"
+)
+
+func versionRun(_ *cobra.Command, _ []string) {
+	fmt.Println(version.GetVersionString())
+	os.Exit(0)
 }
 
-func (Epoch) TableName() string {
-	return "epoch"
+func versionCommand() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "version",
+		Short: "Print version and exit",
+		Run: func(cmd *cobra.Command, args []string) {
+			versionRun(cmd, args)
+		},
+	}
+	return cmd
 }
