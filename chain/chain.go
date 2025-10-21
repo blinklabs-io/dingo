@@ -363,6 +363,9 @@ func (c *Chain) blockByIndex(
 	txn *database.Txn,
 ) (database.Block, error) {
 	if c.persistent || blockIndex <= c.lastCommonBlockIndex {
+		if c.manager == nil {
+			return database.Block{}, errors.New("chain manager missing")
+		}
 		// Query via manager for common blocks
 		tmpBlock, err := c.manager.blockByIndex(blockIndex, txn)
 		if err != nil {
