@@ -890,12 +890,12 @@ func (ls *LedgerState) loadTip() error {
 	return nil
 }
 
-func (ls *LedgerState) GetBlock(point ocommon.Point) (*models.Block, error) {
+func (ls *LedgerState) GetBlock(point ocommon.Point) (models.Block, error) {
 	ret, err := ls.chain.BlockByPoint(point, nil)
 	if err != nil {
-		return nil, err
+		return models.Block{}, err
 	}
-	return &ret, nil
+	return ret, nil
 }
 
 // RecentChainPoints returns the requested count of recent chain points in descending order. This is used mostly
