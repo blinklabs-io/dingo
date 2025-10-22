@@ -890,7 +890,7 @@ func (ls *LedgerState) loadTip() error {
 	return nil
 }
 
-func (ls *LedgerState) GetBlock(point ocommon.Point) (*database.Block, error) {
+func (ls *LedgerState) GetBlock(point ocommon.Point) (*models.Block, error) {
 	ret, err := ls.chain.BlockByPoint(point, nil)
 	if err != nil {
 		return nil, err
@@ -906,7 +906,7 @@ func (ls *LedgerState) RecentChainPoints(count int) ([]ocommon.Point, error) {
 		return nil, err
 	}
 	ret := []ocommon.Point{}
-	var tmpBlock database.Block
+	var tmpBlock models.Block
 	for _, tmpBlock = range tmpBlocks {
 		ret = append(
 			ret,
@@ -922,7 +922,7 @@ func (ls *LedgerState) GetIntersectPoint(
 ) (*ocommon.Point, error) {
 	tip := ls.Tip()
 	var ret ocommon.Point
-	var tmpBlock database.Block
+	var tmpBlock models.Block
 	var err error
 	foundOrigin := false
 	txn := ls.db.Transaction(false)
@@ -944,7 +944,7 @@ func (ls *LedgerState) GetIntersectPoint(
 			// Lookup block in metadata DB
 			tmpBlock, err = ls.chain.BlockByPoint(point, txn)
 			if err != nil {
-				if errors.Is(err, chain.ErrBlockNotFound) {
+				if errors.Is(err, models.ErrBlockNotFound) {
 					continue
 				}
 				return fmt.Errorf("failed to get block: %w", err)

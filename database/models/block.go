@@ -12,22 +12,31 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package chain
+package models
 
 import (
-	"github.com/blinklabs-io/dingo/database/models"
-	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	"errors"
+
+	"github.com/blinklabs-io/gouroboros/ledger"
 )
 
-const (
-	ChainUpdateEventType = "chain.update"
-)
+var ErrBlockNotFound = errors.New("block not found")
 
-type ChainBlockEvent struct {
-	Point ocommon.Point
-	Block models.Block
+type Block struct {
+	Hash     []byte `gorm:"index:hash_slot"`
+	PrevHash []byte
+	Cbor     []byte
+	ID       uint64 `gorm:"primaryKey"`
+	Slot     uint64 `gorm:"index:hash_slot"`
+	Number   uint64
+	Type     uint
 }
 
-type ChainRollbackEvent struct {
-	Point ocommon.Point
+func (b Block) Decode() (ledger.Block, error) {
+	return ledger.NewBlockFromCbor(b.Type, b.Cbor)
+}
+
+// TableName overrides default table name
+func (Block) TableName() string {
+	return "block"
 }

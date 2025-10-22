@@ -24,6 +24,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -308,7 +309,7 @@ func (ls *LedgerState) calculateEpochNonce(
 		ls.currentEpoch.StartSlot,
 	)
 	if err != nil {
-		if errors.Is(err, database.ErrBlockNotFound) {
+		if errors.Is(err, models.ErrBlockNotFound) {
 			return blockBeforeStabilityWindowNonce, nil
 		}
 		return nil, fmt.Errorf("lookup block before slot: %w", err)

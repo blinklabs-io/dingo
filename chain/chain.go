@@ -21,6 +21,7 @@ import (
 	"sync"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
@@ -132,7 +133,7 @@ func (c *Chain) AddBlock(
 		block.Hash().Bytes(),
 	)
 	newBlockIndex := c.tipBlockIndex + 1
-	tmpBlock := database.Block{
+	tmpBlock := models.Block{
 		ID:       newBlockIndex,
 		Slot:     tmpPoint.Slot,
 		Hash:     tmpPoint.Hash,
@@ -234,13 +235,13 @@ func (c *Chain) Rollback(point ocommon.Point) error {
 				return nil
 			}
 			if header.SlotNumber() < point.Slot {
-				return ErrBlockNotFound
+				return models.ErrBlockNotFound
 			}
 		}
 	}
 	// Lookup block for rollback point
 	var rollbackBlockIndex uint64
-	var tmpBlock database.Block
+	var tmpBlock models.Block
 	if point.Slot > 0 {
 		var err error
 		tmpBlock, err = c.manager.blockByPoint(point, nil)
@@ -354,19 +355,19 @@ func (c *Chain) FromPoint(
 func (c *Chain) BlockByPoint(
 	point ocommon.Point,
 	txn *database.Txn,
-) (database.Block, error) {
+) (models.Block, error) {
 	return c.manager.BlockByPoint(point, txn)
 }
 
 func (c *Chain) blockByIndex(
 	blockIndex uint64,
 	txn *database.Txn,
-) (database.Block, error) {
+) (models.Block, error) {
 	if c.persistent || blockIndex <= c.lastCommonBlockIndex {
 		// Query via manager for common blocks
 		tmpBlock, err := c.manager.blockByIndex(blockIndex, txn)
 		if err != nil {
-			return database.Block{}, err
+			return models.Block{}, err
 		}
 		return tmpBlock, nil
 	}
@@ -376,12 +377,12 @@ func (c *Chain) blockByIndex(
 		blockIndex - c.lastCommonBlockIndex - initialBlockIndex,
 	)
 	if memBlockIndex < 0 || len(c.blocks) < memBlockIndex+1 {
-		return database.Block{}, ErrBlockNotFound
+		return models.Block{}, models.ErrBlockNotFound
 	}
 	memBlockPoint := c.blocks[memBlockIndex]
 	tmpBlock, err := c.manager.blockByPoint(memBlockPoint, txn)
 	if err != nil {
-		return database.Block{}, err
+		return models.Block{}, err
 	}
 	return tmpBlock, nil
 }
@@ -434,7 +435,7 @@ func (c *Chain) iterNext(
 		return ret, nil
 	}
 	// Return any actual error
-	if !errors.Is(err, ErrBlockNotFound) {
+	if !errors.Is(err, models.ErrBlockNotFound) {
 		c.mutex.Unlock()
 		c.manager.mutex.RUnlock()
 		return ret, err
@@ -475,7 +476,7 @@ func (c *Chain) reconcile() error {
 			nil,
 		)
 		if err != nil {
-			if errors.Is(err, ErrBlockNotFound) {
+			if errors.Is(err, models.ErrBlockNotFound) {
 				continue
 			}
 			return err
