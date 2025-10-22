@@ -15,7 +15,7 @@
 package chain
 
 import (
-	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/models"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
@@ -30,7 +30,7 @@ type ChainIterator struct {
 
 type ChainIteratorResult struct {
 	Point    ocommon.Point
-	Block    database.Block
+	Block    models.Block
 	Rollback bool
 }
 

@@ -21,8 +21,8 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/gouroboros/cbor"
-	"github.com/blinklabs-io/gouroboros/ledger"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/dgraph-io/badger/v4"
 )
@@ -35,23 +35,7 @@ const (
 	blockBlobMetadataKeySuffix = "_metadata"
 )
 
-var ErrBlockNotFound = errors.New("block not found")
-
-type Block struct {
-	Hash     []byte
-	PrevHash []byte
-	Cbor     []byte
-	ID       uint64
-	Slot     uint64
-	Number   uint64
-	Type     uint
-}
-
-func (b Block) Decode() (ledger.Block, error) {
-	return ledger.NewBlockFromCbor(b.Type, b.Cbor)
-}
-
-func (d *Database) BlockCreate(block Block, txn *Txn) error {
+func (d *Database) BlockCreate(block models.Block, txn *Txn) error {
 	if txn == nil {
 		txn = d.BlobTxn(true)
 		defer txn.Commit() //nolint:errcheck
@@ -96,7 +80,7 @@ func (d *Database) BlockCreate(block Block, txn *Txn) error {
 	return nil
 }
 
-func BlockDeleteTxn(txn *Txn, block Block) error {
+func BlockDeleteTxn(txn *Txn, block models.Block) error {
 	// Remove from blob store
 	key := BlockBlobKey(block.Slot, block.Hash)
 	if err := txn.Blob().Delete(key); err != nil {
@@ -113,8 +97,8 @@ func BlockDeleteTxn(txn *Txn, block Block) error {
 	return nil
 }
 
-func BlockByPoint(db *Database, point ocommon.Point) (Block, error) {
-	var ret Block
+func BlockByPoint(db *Database, point ocommon.Point) (models.Block, error) {
+	var ret models.Block
 	txn := db.Transaction(false)
 	err := txn.Do(func(txn *Txn) error {
 		var err error
@@ -124,16 +108,16 @@ func BlockByPoint(db *Database, point ocommon.Point) (Block, error) {
 	return ret, err
 }
 
-func blockByKey(txn *Txn, blockKey []byte) (Block, error) {
+func blockByKey(txn *Txn, blockKey []byte) (models.Block, error) {
 	point := blockBlobKeyToPoint(blockKey)
-	ret := Block{
+	ret := models.Block{
 		Slot: point.Slot,
 		Hash: point.Hash,
 	}
 	item, err := txn.Blob().Get(blockKey)
 	if err != nil {
 		if errors.Is(err, badger.ErrKeyNotFound) {
-			return ret, ErrBlockNotFound
+			return ret, models.ErrBlockNotFound
 		}
 		return ret, err
 	}
@@ -161,12 +145,12 @@ func blockByKey(txn *Txn, blockKey []byte) (Block, error) {
 	return ret, nil
 }
 
-func BlockByPointTxn(txn *Txn, point ocommon.Point) (Block, error) {
+func BlockByPointTxn(txn *Txn, point ocommon.Point) (models.Block, error) {
 	key := BlockBlobKey(point.Slot, point.Hash)
 	return blockByKey(txn, key)
 }
 
-func (d *Database) BlockByIndex(blockIndex uint64, txn *Txn) (Block, error) {
+func (d *Database) BlockByIndex(blockIndex uint64, txn *Txn) (models.Block, error) {
 	if txn == nil {
 		txn = d.BlobTxn(false)
 		defer txn.Commit() //nolint:errcheck
@@ -175,19 +159,19 @@ func (d *Database) BlockByIndex(blockIndex uint64, txn *Txn) (Block, error) {
 	item, err := txn.Blob().Get(indexKey)
 	if err != nil {
 		if errors.Is(err, badger.ErrKeyNotFound) {
-			return Block{}, ErrBlockNotFound
+			return models.Block{}, models.ErrBlockNotFound
 		}
-		return Block{}, err
+		return models.Block{}, err
 	}
 	blockKey, err := item.ValueCopy(nil)
 	if err != nil {
-		return Block{}, err
+		return models.Block{}, err
 	}
 	return blockByKey(txn, blockKey)
 }
 
-func BlocksRecent(db *Database, count int) ([]Block, error) {
-	var ret []Block
+func BlocksRecent(db *Database, count int) ([]models.Block, error) {
+	var ret []models.Block
 	txn := db.Transaction(false)
 	err := txn.Do(func(txn *Txn) error {
 		var err error
@@ -197,8 +181,8 @@ func BlocksRecent(db *Database, count int) ([]Block, error) {
 	return ret, err
 }
 
-func BlocksRecentTxn(txn *Txn, count int) ([]Block, error) {
-	ret := make([]Block, 0, count)
+func BlocksRecentTxn(txn *Txn, count int) ([]models.Block, error) {
+	ret := make([]models.Block, 0, count)
 	iterOpts := badger.IteratorOptions{
 		Reverse: true,
 	}
@@ -212,7 +196,7 @@ func BlocksRecentTxn(txn *Txn, count int) ([]Block, error) {
 	tmpPrefix := append([]byte(blockBlobIndexKeyPrefix), 0xff)
 	var blockKey []byte
 	var err error
-	var tmpBlock Block
+	var tmpBlock models.Block
 	for it.Seek(tmpPrefix); it.ValidForPrefix([]byte(blockBlobIndexKeyPrefix)); it.Next() {
 		item := it.Item()
 		blockKey, err = item.ValueCopy(nil)
@@ -232,8 +216,8 @@ func BlocksRecentTxn(txn *Txn, count int) ([]Block, error) {
 	return ret, nil
 }
 
-func BlockBeforeSlot(db *Database, slotNumber uint64) (Block, error) {
-	var ret Block
+func BlockBeforeSlot(db *Database, slotNumber uint64) (models.Block, error) {
+	var ret models.Block
 	txn := db.Transaction(false)
 	err := txn.Do(func(txn *Txn) error {
 		var err error
@@ -243,7 +227,7 @@ func BlockBeforeSlot(db *Database, slotNumber uint64) (Block, error) {
 	return ret, err
 }
 
-func BlockBeforeSlotTxn(txn *Txn, slotNumber uint64) (Block, error) {
+func BlockBeforeSlotTxn(txn *Txn, slotNumber uint64) (models.Block, error) {
 	iterOpts := badger.IteratorOptions{
 		Reverse: true,
 	}
@@ -260,7 +244,7 @@ func BlockBeforeSlotTxn(txn *Txn, slotNumber uint64) (Block, error) {
 		}
 		// Check for end of block keys
 		if !it.ValidForPrefix([]byte(blockBlobKeyPrefix)) {
-			return Block{}, ErrBlockNotFound
+			return models.Block{}, models.ErrBlockNotFound
 		}
 		item := it.Item()
 		k := item.Key()
@@ -270,11 +254,11 @@ func BlockBeforeSlotTxn(txn *Txn, slotNumber uint64) (Block, error) {
 		}
 		return blockByKey(txn, k)
 	}
-	return Block{}, ErrBlockNotFound
+	return models.Block{}, models.ErrBlockNotFound
 }
 
-func BlocksAfterSlotTxn(txn *Txn, slotNumber uint64) ([]Block, error) {
-	var ret []Block
+func BlocksAfterSlotTxn(txn *Txn, slotNumber uint64) ([]models.Block, error) {
+	var ret []models.Block
 	iterOpts := badger.IteratorOptions{}
 	it := txn.Blob().NewIterator(iterOpts)
 	defer it.Close()
@@ -284,7 +268,7 @@ func BlocksAfterSlotTxn(txn *Txn, slotNumber uint64) ([]Block, error) {
 	)
 	var err error
 	var k []byte
-	var tmpBlock Block
+	var tmpBlock models.Block
 	for it.Seek(keyPrefix); it.ValidForPrefix([]byte(blockBlobKeyPrefix)); it.Next() {
 		// Skip the start slot
 		if it.ValidForPrefix(keyPrefix) {
@@ -298,7 +282,7 @@ func BlocksAfterSlotTxn(txn *Txn, slotNumber uint64) ([]Block, error) {
 		}
 		tmpBlock, err = blockByKey(txn, k)
 		if err != nil {
-			return []Block{}, err
+			return []models.Block{}, err
 		}
 		ret = append(ret, tmpBlock)
 	}

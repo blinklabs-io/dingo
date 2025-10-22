@@ -22,6 +22,7 @@ import (
 	"sync"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -38,7 +39,7 @@ type ChainManager struct {
 	eventBus            *event.EventBus
 	chains              map[ChainId]*Chain
 	chainRollbackEvents map[ChainId][]uint64
-	blocks              map[string]database.Block
+	blocks              map[string]models.Block
 	mutex               sync.RWMutex
 }
 
@@ -51,7 +52,7 @@ func NewManager(
 		eventBus:            eventBus,
 		chains:              make(map[ChainId]*Chain),
 		chainRollbackEvents: make(map[ChainId][]uint64),
-		blocks:              make(map[string]database.Block),
+		blocks:              make(map[string]models.Block),
 	}
 	if err := cm.loadPrimaryChain(); err != nil {
 		return nil, err
@@ -111,7 +112,7 @@ func (cm *ChainManager) NewChainFromIntersect(
 	defer primaryChain.mutex.Unlock()
 	tip := primaryChain.currentTip
 	var intersectPoint ocommon.Point
-	var intersectBlock database.Block
+	var intersectBlock models.Block
 	var err error
 	foundOrigin := false
 	txn := cm.db.BlobTxn(false)
@@ -133,7 +134,7 @@ func (cm *ChainManager) NewChainFromIntersect(
 			// Lookup block in database
 			intersectBlock, err = cm.blockByPoint(point, txn)
 			if err != nil {
-				if errors.Is(err, ErrBlockNotFound) {
+				if errors.Is(err, models.ErrBlockNotFound) {
 					continue
 				}
 				return fmt.Errorf("failed to get block: %w", err)
@@ -175,7 +176,7 @@ func (cm *ChainManager) NewChainFromIntersect(
 func (cm *ChainManager) BlockByPoint(
 	point ocommon.Point,
 	txn *database.Txn,
-) (database.Block, error) {
+) (models.Block, error) {
 	cm.mutex.RLock()
 	defer cm.mutex.RUnlock()
 	return cm.blockByPoint(point, txn)
@@ -184,7 +185,7 @@ func (cm *ChainManager) BlockByPoint(
 func (cm *ChainManager) blockByPoint(
 	point ocommon.Point,
 	txn *database.Txn,
-) (database.Block, error) {
+) (models.Block, error) {
 	// Check in-memory blocks
 	if blk, ok := cm.blocks[string(point.Hash)]; ok {
 		if blk.Slot == point.Slot {
@@ -193,7 +194,7 @@ func (cm *ChainManager) blockByPoint(
 	}
 	// Query database
 	if cm.db != nil {
-		var tmpBlock database.Block
+		var tmpBlock models.Block
 		var err error
 		if txn == nil {
 			tmpBlock, err = database.BlockByPoint(cm.db, point)
@@ -201,44 +202,44 @@ func (cm *ChainManager) blockByPoint(
 			tmpBlock, err = database.BlockByPointTxn(txn, point)
 		}
 		if err != nil {
-			if errors.Is(err, database.ErrBlockNotFound) {
-				return database.Block{}, ErrBlockNotFound
+			if errors.Is(err, models.ErrBlockNotFound) {
+				return models.Block{}, models.ErrBlockNotFound
 			}
-			return database.Block{}, err
+			return models.Block{}, err
 		}
 		return tmpBlock, nil
 	}
-	return database.Block{}, ErrBlockNotFound
+	return models.Block{}, models.ErrBlockNotFound
 }
 
 func (cm *ChainManager) blockByHash(
 	blockHash []byte,
-) (database.Block, error) {
+) (models.Block, error) {
 	cm.mutex.RLock()
 	defer cm.mutex.RUnlock()
 	// Check in-memory blocks
 	if blk, ok := cm.blocks[string(blockHash)]; ok {
 		return blk, nil
 	}
-	return database.Block{}, ErrBlockNotFound
+	return models.Block{}, models.ErrBlockNotFound
 }
 
 func (cm *ChainManager) blockByIndex(
 	blockIndex uint64,
 	txn *database.Txn,
-) (database.Block, error) {
+) (models.Block, error) {
 	// Query database
 	if cm.db != nil {
 		tmpBlock, err := cm.db.BlockByIndex(blockIndex, txn)
 		if err != nil {
-			if errors.Is(err, database.ErrBlockNotFound) {
-				return database.Block{}, ErrBlockNotFound
+			if errors.Is(err, models.ErrBlockNotFound) {
+				return models.Block{}, models.ErrBlockNotFound
 			}
-			return database.Block{}, err
+			return models.Block{}, err
 		}
 		return tmpBlock, nil
 	}
-	return database.Block{}, ErrBlockNotFound
+	return models.Block{}, models.ErrBlockNotFound
 }
 
 func (cm *ChainManager) loadPrimaryChain() error {
@@ -270,7 +271,7 @@ func (cm *ChainManager) loadPrimaryChain() error {
 }
 
 func (cm *ChainManager) addBlock(
-	block database.Block,
+	block models.Block,
 	txn *database.Txn,
 	persistent bool,
 ) error {
