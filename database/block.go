@@ -36,9 +36,11 @@ const (
 )
 
 func (d *Database) BlockCreate(block models.Block, txn *Txn) error {
+	owned := false
 	if txn == nil {
 		txn = d.BlobTxn(true)
-		defer txn.Commit() //nolint:errcheck
+		owned = true
+		defer txn.Rollback() //nolint:errcheck
 	}
 	// Block content by point
 	key := BlockBlobKey(block.Slot, block.Hash)
@@ -76,6 +78,11 @@ func (d *Database) BlockCreate(block models.Block, txn *Txn) error {
 	}
 	if err := txn.Blob().Set(metadataKey, tmpMetadataBytes); err != nil {
 		return err
+	}
+	if owned {
+		if err := txn.Commit(); err != nil {
+			return err
+		}
 	}
 	return nil
 }
