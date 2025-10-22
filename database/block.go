@@ -40,7 +40,7 @@ func (d *Database) BlockCreate(block models.Block, txn *Txn) error {
 	if txn == nil {
 		txn = d.BlobTxn(true)
 		owned = true
-		defer txn.Rollback()
+		defer txn.Rollback() //nolint:errcheck
 	}
 	// Block content by point
 	key := BlockBlobKey(block.Slot, block.Hash)
