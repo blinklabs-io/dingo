@@ -905,7 +905,7 @@ func (ls *LedgerState) RecentChainPoints(count int) ([]ocommon.Point, error) {
 	if err != nil {
 		return nil, err
 	}
-	ret := []ocommon.Point{}
+	ret := make([]ocommon.Point, 0, len(tmpBlocks))
 	var tmpBlock models.Block
 	for _, tmpBlock = range tmpBlocks {
 		ret = append(
