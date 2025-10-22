@@ -472,7 +472,8 @@ func (c *Chain) reconcile() error {
 	primaryChain := c.manager.PrimaryChain()
 	for i := len(c.blocks) - 1; i >= 0; i-- {
 		tmpBlock, err := primaryChain.blockByIndex(
-			c.lastCommonBlockIndex+uint64(i),
+			// Add 1 to prevent off-by-one error
+			c.lastCommonBlockIndex+uint64(i)+1,
 			nil,
 		)
 		if err != nil {
