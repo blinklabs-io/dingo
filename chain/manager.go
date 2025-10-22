@@ -283,13 +283,16 @@ func (cm *ChainManager) addBlock(
 		// TODO: trigger periodic async signal to chains to do reconcile to prune buffer
 	} else {
 		// Add block to memory buffer
+		cm.mutex.Lock()
 		cm.blocks[string(block.Hash)] = block
+		cm.mutex.Unlock()
 	}
 	return nil
 }
 
 func (cm *ChainManager) removeBlockByIndex(blockIndex uint64) error {
 	// Record removed block event for each non-primary chain
+	cm.mutex.Lock()
 	for chainId := range cm.chains {
 		if chainId == primaryChainId {
 			continue
@@ -299,6 +302,7 @@ func (cm *ChainManager) removeBlockByIndex(blockIndex uint64) error {
 			blockIndex,
 		)
 	}
+	cm.mutex.Unlock()
 	// Remove from database
 	txn := cm.db.BlobTxn(true)
 	err := txn.Do(func(txn *database.Txn) error {
@@ -307,7 +311,9 @@ func (cm *ChainManager) removeBlockByIndex(blockIndex uint64) error {
 			return err
 		}
 		// Add block to memory buffer in case other chains are using it
+		cm.mutex.Lock()
 		cm.blocks[string(tmpBlock.Hash)] = tmpBlock
+		cm.mutex.Unlock()
 		if err := database.BlockDeleteTxn(txn, tmpBlock); err != nil {
 			return err
 		}
