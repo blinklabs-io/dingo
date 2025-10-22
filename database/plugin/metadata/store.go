@@ -84,14 +84,6 @@ type MetadataStore interface {
 		*gorm.DB,
 	) (*models.Transaction, error)
 
-	SetAccount(
-		[]byte, // stakeKey
-		[]byte, // pkh
-		[]byte, // drep
-		uint64, // slot
-		bool, // active
-		*gorm.DB,
-	) error
 	SetBlockNonce(
 		[]byte, // blockHash
 		uint64, // slotNumber
