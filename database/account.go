@@ -38,27 +38,6 @@ func (d *Database) GetAccount(
 	return account, nil
 }
 
-// SetAccount saves an account
-func (d *Database) SetAccount(
-	stakeKey, pkh, drep []byte,
-	slot uint64,
-	active bool,
-	txn *Txn,
-) error {
-	if txn == nil {
-		txn = d.Transaction(false)
-		defer txn.Commit() //nolint:errcheck
-	}
-	return d.metadata.SetAccount(
-		stakeKey,
-		pkh,
-		drep,
-		slot,
-		active,
-		txn.Metadata(),
-	)
-}
-
 // SetDeregistration saves a deregistration certificate
 func (d *Database) SetDeregistration(
 	cert *lcommon.DeregistrationCertificate,
