@@ -286,7 +286,12 @@ func (ls *LedgerState) calculateEpochNonce(
 		),
 		shelleyGenesis.ActiveSlotsCoeff.Rat,
 	).Num().Uint64()
-	stabilityWindowStartSlot := epochStartSlot - stabilityWindow
+	var stabilityWindowStartSlot uint64
+	if epochStartSlot > stabilityWindow {
+		stabilityWindowStartSlot = epochStartSlot - stabilityWindow
+	} else {
+		stabilityWindowStartSlot = 0
+	}
 	// Get last block before stability window
 	blockBeforeStabilityWindow, err := database.BlockBeforeSlotTxn(
 		txn,
