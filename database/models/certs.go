@@ -14,18 +14,21 @@
 
 package models
 
-import "github.com/blinklabs-io/dingo/database/types"
-
-type Asset struct {
-	Name        []byte       `gorm:"index"`
-	NameHex     []byte       `gorm:"index"`
-	PolicyId    []byte       `gorm:"index"`
-	Fingerprint []byte       `gorm:"index"`
-	ID          uint         `gorm:"primaryKey"`
-	UtxoID      uint         `gorm:"index"`
-	Amount      types.Uint64 `gorm:"index"`
+type Certificate struct {
+	Cbor       []byte `gorm:"-"`
+	Pool       []byte
+	Credential []byte
+	Drep       []byte
+	CertType   uint `gorm:"index"`
+	Epoch      uint64
+	Amount     uint64
+	ID         uint `gorm:"primaryKey"`
 }
 
-func (Asset) TableName() string {
-	return "asset"
+func (Certificate) TableName() string {
+	return "certs"
+}
+
+func (c Certificate) Type() uint {
+	return c.CertType
 }

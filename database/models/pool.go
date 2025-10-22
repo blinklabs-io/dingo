@@ -52,8 +52,9 @@ type PoolRegistration struct {
 	Relays        []PoolRegistrationRelay
 	Pledge        types.Uint64
 	Cost          types.Uint64
+	CertificateID uint `gorm:"index"`
 	ID            uint `gorm:"primarykey"`
-	PoolID        uint
+	PoolID        uint `gorm:"index"`
 	AddedSlot     uint64
 	DepositAmount uint64
 }
@@ -65,8 +66,8 @@ func (PoolRegistration) TableName() string {
 type PoolRegistrationOwner struct {
 	KeyHash            []byte
 	ID                 uint `gorm:"primarykey"`
-	PoolRegistrationID uint
-	PoolID             uint
+	PoolRegistrationID uint `gorm:"index"`
+	PoolID             uint `gorm:"index"`
 }
 
 func (PoolRegistrationOwner) TableName() string {
@@ -78,8 +79,8 @@ type PoolRegistrationRelay struct {
 	Ipv6               *net.IP
 	Hostname           string
 	ID                 uint `gorm:"primarykey"`
-	PoolRegistrationID uint
-	PoolID             uint
+	PoolRegistrationID uint `gorm:"index"`
+	PoolID             uint `gorm:"index"`
 	Port               uint
 }
 
@@ -88,11 +89,12 @@ func (PoolRegistrationRelay) TableName() string {
 }
 
 type PoolRetirement struct {
-	PoolKeyHash []byte `gorm:"index"`
-	ID          uint   `gorm:"primarykey"`
-	PoolID      uint
-	Epoch       uint64
-	AddedSlot   uint64
+	PoolKeyHash   []byte `gorm:"index"`
+	CertificateID uint   `gorm:"index"`
+	ID            uint   `gorm:"primarykey"`
+	PoolID        uint   `gorm:"index"`
+	Epoch         uint64
+	AddedSlot     uint64
 }
 
 func (PoolRetirement) TableName() string {
