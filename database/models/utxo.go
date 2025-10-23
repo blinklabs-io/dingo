@@ -16,6 +16,7 @@ package models
 
 import (
 	"github.com/blinklabs-io/gouroboros/ledger"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
 
 // Utxo represents an unspent transaction output
@@ -26,6 +27,7 @@ type Utxo struct {
 	StakingKey    []byte `gorm:"index"`
 	Assets        []Asset
 	Cbor          []byte `gorm:"-"` // This is here for convenience but not represented in the metadata DB
+	SpentAtTxId   []byte
 	ID            uint   `gorm:"primarykey"`
 	AddedSlot     uint64 `gorm:"index"`
 	DeletedSlot   uint64 `gorm:"index"`
@@ -39,6 +41,31 @@ func (u *Utxo) TableName() string {
 
 func (u *Utxo) Decode() (ledger.TransactionOutput, error) {
 	return ledger.NewTransactionOutputFromCbor(u.Cbor)
+}
+
+func UtxoLedgerToModel(
+	utxo ledger.Utxo,
+	slot uint64,
+) Utxo {
+	outAddr := utxo.Output.Address()
+	ret := Utxo{
+		TxId:       utxo.Id.Id().Bytes(),
+		OutputIdx:  utxo.Id.Index(),
+		AddedSlot:  slot,
+		PaymentKey: outAddr.PaymentKeyHash().Bytes(),
+		StakingKey: outAddr.StakeKeyHash().Bytes(),
+		Cbor:       utxo.Output.Cbor(),
+	}
+
+	if multiAssetOutput, ok := utxo.Output.(interface {
+		MultiAsset() *lcommon.MultiAsset[lcommon.MultiAssetTypeOutput]
+	}); ok {
+		if multiAsset := multiAssetOutput.MultiAsset(); multiAsset != nil {
+			ret.Assets = ConvertMultiAssetToModels(multiAsset)
+		}
+	}
+
+	return ret
 }
 
 // UtxoSlot allows providing a slot number with a ledger.Utxo object

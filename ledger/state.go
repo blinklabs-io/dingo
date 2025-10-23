@@ -766,13 +766,8 @@ func (ls *LedgerState) ledgerProcessBlock(
 		}
 	}
 	// Process transactions
-	var delta *LedgerDelta
+	delta := &LedgerDelta{Point: point}
 	for i, tx := range block.Transactions() {
-		if delta == nil {
-			delta = &LedgerDelta{
-				Point: point,
-			}
-		}
 		// Validate transaction
 		if shouldValidate {
 			if ls.currentEra.ValidateTxFunc != nil {
@@ -797,9 +792,8 @@ func (ls *LedgerState) ledgerProcessBlock(
 			}
 		}
 		// Populate ledger delta from transaction
-		if err := delta.processTransaction(tx, uint32(i)); err != nil { //nolint:gosec
-			return nil, fmt.Errorf("process transaction: %w", err)
-		}
+		delta.addTransaction(tx, i)
+
 		// Apply delta immediately if we may need the data to validate the next TX
 		if shouldValidate {
 			if err := delta.apply(ls, txn); err != nil {

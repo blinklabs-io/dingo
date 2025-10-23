@@ -21,7 +21,6 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/gouroboros/ledger"
-	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/dgraph-io/badger/v4"
 )
 
@@ -41,37 +40,6 @@ func loadCbor(u *models.Utxo, txn *Txn) error {
 		return err
 	}
 	return nil
-}
-
-func (d *Database) NewUtxo(
-	txId []byte,
-	outputIdx uint32,
-	slot uint64,
-	paymentKey, stakeKey, cbor []byte,
-	amt uint64,
-	asset *lcommon.MultiAsset[lcommon.MultiAssetTypeOutput],
-	txn *Txn,
-) error {
-	if txn == nil {
-		txn = d.Transaction(false)
-		defer txn.Commit() //nolint:errcheck
-	}
-	// Add UTxO to blob DB
-	key := UtxoBlobKey(txId, outputIdx)
-	err := txn.Blob().Set(key, cbor)
-	if err != nil {
-		return err
-	}
-	return d.metadata.SetUtxo(
-		txId,
-		outputIdx,
-		slot,
-		paymentKey,
-		stakeKey,
-		amt,
-		asset,
-		txn.Metadata(),
-	)
 }
 
 func (d *Database) AddUtxos(

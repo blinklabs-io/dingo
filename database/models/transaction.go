@@ -16,12 +16,12 @@ package models
 
 // Transaction represents a transaction record
 type Transaction struct {
-	Type       string
 	Hash       []byte `gorm:"uniqueIndex"`
 	BlockHash  []byte `gorm:"index"`
-	Inputs     []byte
-	Outputs    []byte
+	Inputs     []Utxo
+	Outputs    []Utxo
 	ID         uint `gorm:"primaryKey"`
+	Type       int
 	BlockIndex uint32
 }
 

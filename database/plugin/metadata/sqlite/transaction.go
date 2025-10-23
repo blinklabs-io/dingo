@@ -16,8 +16,11 @@ package sqlite
 
 import (
 	"errors"
+	"fmt"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"gorm.io/gorm"
 )
 
@@ -42,26 +45,36 @@ func (d *MetadataStoreSqlite) GetTransactionByHash(
 
 // SetTransaction adds a new transaction to the database
 func (d *MetadataStoreSqlite) SetTransaction(
-	hash []byte,
-	txType string,
-	blockHash []byte,
-	blockIndex uint32,
-	inputs []byte,
-	outputs []byte,
+	tx lcommon.Transaction,
+	point ocommon.Point,
+	idx uint32,
 	txn *gorm.DB,
 ) error {
 	if txn == nil {
 		txn = d.DB()
 	}
-	tx := &models.Transaction{
-		Hash:       hash,
-		Type:       txType,
-		BlockHash:  blockHash,
-		BlockIndex: blockIndex,
-		Inputs:     inputs,
-		Outputs:    outputs,
+	tmpTx := &models.Transaction{
+		Hash:       tx.Hash().Bytes(),
+		Type:       tx.Type(),
+		BlockHash:  point.Hash,
+		BlockIndex: idx,
 	}
-	result := txn.Create(&tx)
+	for _, input := range tx.Consumed() {
+		utxo, err := d.GetUtxo(input.Id().Bytes(), input.Index(), txn)
+		if err != nil {
+			return fmt.Errorf("failed to fetch input: %w", err)
+		}
+		utxo.DeletedSlot = point.Slot
+		utxo.SpentAtTxId = tx.Hash().Bytes()
+		tmpTx.Inputs = append(tmpTx.Inputs, *utxo)
+	}
+	for _, utxo := range tx.Produced() {
+		tmpTx.Outputs = append(
+			tmpTx.Outputs,
+			models.UtxoLedgerToModel(utxo, point.Slot),
+		)
+	}
+	result := txn.Save(&tmpTx)
 	if result.Error != nil {
 		return result.Error
 	}

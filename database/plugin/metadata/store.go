@@ -22,6 +22,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/prometheus/client_golang/prometheus"
 	"gorm.io/gorm"
 )
@@ -187,32 +188,19 @@ type MetadataStore interface {
 		uint64, // deposit
 		*gorm.DB,
 	) error
-	SetTransaction(
-		[]byte, // hash
-		string, // type
-		[]byte, // blockHash
-		uint32, // blockIndex
-		[]byte, // inputs
-		[]byte, // outputs
-		*gorm.DB,
-	) error
 	SetTip(
 		ochainsync.Tip,
+		*gorm.DB,
+	) error
+	SetTransaction(
+		lcommon.Transaction,
+		ocommon.Point,
+		uint32, // idx
 		*gorm.DB,
 	) error
 	SetUpdateDrep(
 		*lcommon.UpdateDrepCertificate,
 		uint64, // slot
-		*gorm.DB,
-	) error
-	SetUtxo(
-		[]byte, // hash
-		uint32, // idx
-		uint64, // slot
-		[]byte, // payment
-		[]byte, // stake
-		uint64, // amount
-		*lcommon.MultiAsset[lcommon.MultiAssetTypeOutput], // asset
 		*gorm.DB,
 	) error
 	SetVoteDelegation(

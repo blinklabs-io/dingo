@@ -27,7 +27,6 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
 	ouroboros "github.com/blinklabs-io/gouroboros"
-	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
@@ -229,26 +228,13 @@ func (ls *LedgerState) createGenesisBlock() error {
 		if err != nil {
 			return fmt.Errorf("generate Shelley genesis UTxOs: %w", err)
 		}
+		batch := []models.UtxoSlot{}
 		for _, utxo := range slices.Concat(byronGenesisUtxos, shelleyGenesisUtxos) {
-			outAddr := utxo.Output.Address()
-			outputCbor, err := cbor.Encode(utxo.Output)
-			if err != nil {
-				return fmt.Errorf("encode UTxO: %w", err)
-			}
-			err = ls.db.NewUtxo(
-				utxo.Id.Id().Bytes(),
-				utxo.Id.Index(),
-				0,
-				outAddr.PaymentKeyHash().Bytes(),
-				outAddr.StakeKeyHash().Bytes(),
-				outputCbor,
-				utxo.Output.Amount(),
-				utxo.Output.Assets(),
-				txn,
-			)
-			if err != nil {
-				return fmt.Errorf("add genesis UTxO: %w", err)
-			}
+			batch = append(batch, models.UtxoSlot{Slot: 0, Utxo: utxo})
+		}
+		err = ls.db.AddUtxos(batch, txn)
+		if err != nil {
+			return fmt.Errorf("add genesis UTxOs: %w", err)
 		}
 		return nil
 	})

@@ -16,130 +16,81 @@ package ledger
 
 import (
 	"fmt"
-	"maps"
-	"slices"
-	"strconv"
 
 	"github.com/blinklabs-io/dingo/database"
-	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
 type TransactionRecord struct {
 	Tx    lcommon.Transaction
-	Index uint32
+	Index int
 }
 
 type LedgerDelta struct {
-	PParamUpdates     map[lcommon.Blake2b224]lcommon.ProtocolParameterUpdate
-	Point             ocommon.Point
-	Produced          []lcommon.Utxo
-	Consumed          []lcommon.TransactionInput
-	Certificates      []lcommon.Certificate
-	Transactions      []TransactionRecord
-	PParamUpdateEpoch uint64
+	Point        ocommon.Point
+	Transactions []TransactionRecord
 }
 
-//
-//nolint:unparam
-func (d *LedgerDelta) processTransaction(
+func (d *LedgerDelta) addTransaction(
 	tx lcommon.Transaction,
-	index uint32,
-) error {
-	// Consumed UTxOs
-	d.Consumed = slices.Concat(d.Consumed, tx.Consumed())
-	// Produced UTxOs
-	d.Produced = slices.Concat(d.Produced, tx.Produced())
+	index int,
+) {
 	// Collect transaction
 	d.Transactions = append(
 		d.Transactions,
 		TransactionRecord{Tx: tx, Index: index},
 	)
-	// Stop processing transaction if it's marked as invalid
-	// This allows us to capture collateral returns in the case of phase 2 validation failure
-	if !tx.IsValid() {
-		return nil
-	}
-	// Protocol parameter updates
-	if updateEpoch, paramUpdates := tx.ProtocolParameterUpdates(); updateEpoch > 0 {
-		d.PParamUpdateEpoch = updateEpoch
-		if d.PParamUpdates == nil {
-			d.PParamUpdates = make(
-				map[lcommon.Blake2b224]lcommon.ProtocolParameterUpdate,
-			)
-		}
-		maps.Copy(d.PParamUpdates, paramUpdates)
-	}
-	// Certificates
-	d.Certificates = slices.Concat(d.Certificates, tx.Certificates())
-	return nil
 }
 
 func (d *LedgerDelta) apply(ls *LedgerState, txn *database.Txn) error {
 	for _, tr := range d.Transactions {
-		inputsCbor, err := cbor.Encode(tr.Tx.Consumed())
-		if err != nil {
-			return fmt.Errorf("encode transaction inputs: %w", err)
-		}
-		outputsCbor, err := cbor.Encode(tr.Tx.Produced())
-		if err != nil {
-			return fmt.Errorf("encode transaction outputs: %w", err)
-		}
-		err = ls.db.NewTransaction(
-			tr.Tx.Hash().Bytes(),
-			strconv.Itoa(tr.Tx.Type()),
-			d.Point.Hash,
-			tr.Index,
-			inputsCbor,
-			outputsCbor,
+		err := ls.db.SetTransaction(
+			tr.Tx,
+			d.Point,
+			uint32(tr.Index), //nolint:gosec
 			txn,
 		)
 		if err != nil {
 			return fmt.Errorf("record transaction: %w", err)
 		}
-	}
-	// Process produced UTxOs
-	for _, produced := range d.Produced {
-		outAddr := produced.Output.Address()
-		err := ls.db.NewUtxo(
-			produced.Id.Id().Bytes(),
-			produced.Id.Index(),
-			d.Point.Slot,
-			outAddr.PaymentKeyHash().Bytes(),
-			outAddr.StakeKeyHash().Bytes(),
-			produced.Output.Cbor(),
-			produced.Output.Amount(),
-			produced.Output.Assets(),
+		// Use consumeUtxo if tx is marked invalid
+		// This allows us to capture collateral returns in the case of
+		// phase 2 validation failure
+		if !tr.Tx.IsValid() {
+			// Process consumed UTxOs
+			for _, consumed := range tr.Tx.Consumed() {
+				if err := ls.consumeUtxo(txn, consumed, d.Point.Slot); err != nil {
+					return fmt.Errorf("remove consumed UTxO: %w", err)
+				}
+			}
+			// Stop processing this transaction
+			continue
+		}
+		// Protocol parameter updates
+		if updateEpoch, paramUpdates := tr.Tx.ProtocolParameterUpdates(); updateEpoch > 0 {
+			for genesisHash, update := range paramUpdates {
+				err := ls.db.SetPParamUpdate(
+					genesisHash.Bytes(),
+					update.Cbor(),
+					d.Point.Slot,
+					updateEpoch,
+					txn,
+				)
+				if err != nil {
+					return fmt.Errorf("set pparam update: %w", err)
+				}
+			}
+		}
+		// Certificates
+		err = ls.processTransactionCertificates(
 			txn,
+			d.Point,
+			tr.Tx.Certificates(),
 		)
 		if err != nil {
-			return fmt.Errorf("add produced UTxO: %w", err)
+			return fmt.Errorf("process transaction certificates: %w", err)
 		}
-	}
-	// Process consumed UTxOs
-	for _, consumed := range d.Consumed {
-		if err := ls.consumeUtxo(txn, consumed, d.Point.Slot); err != nil {
-			return fmt.Errorf("remove consumed UTxO: %w", err)
-		}
-	}
-	// Protocol parameter updates
-	for genesisHash, update := range d.PParamUpdates {
-		err := ls.db.SetPParamUpdate(
-			genesisHash.Bytes(),
-			update.Cbor(),
-			d.Point.Slot,
-			d.PParamUpdateEpoch,
-			txn,
-		)
-		if err != nil {
-			return fmt.Errorf("set pparam update: %w", err)
-		}
-	}
-	// Certificates
-	if err := ls.processTransactionCertificates(txn, d.Point, d.Certificates); err != nil {
-		return fmt.Errorf("process transaction certificates: %w", err)
 	}
 	return nil
 }
@@ -154,78 +105,9 @@ func (b *LedgerDeltaBatch) addDelta(delta *LedgerDelta) {
 
 func (b *LedgerDeltaBatch) apply(ls *LedgerState, txn *database.Txn) error {
 	for _, delta := range b.deltas {
-		for _, tr := range delta.Transactions {
-			inputsCbor, err := cbor.Encode(tr.Tx.Consumed())
-			if err != nil {
-				return fmt.Errorf("encode transaction inputs: %w", err)
-			}
-			outputsCbor, err := cbor.Encode(tr.Tx.Produced())
-			if err != nil {
-				return fmt.Errorf("encode transaction outputs: %w", err)
-			}
-			err = ls.db.NewTransaction(
-				tr.Tx.Hash().Bytes(),
-				strconv.Itoa(tr.Tx.Type()),
-				delta.Point.Hash,
-				tr.Index,
-				inputsCbor,
-				outputsCbor,
-				txn,
-			)
-			if err != nil {
-				return fmt.Errorf("record transaction: %w", err)
-			}
-		}
-	}
-	// Produced UTxOs with transaction IDs
-	produced := make([]models.UtxoSlot, 0, 100)
-	for _, delta := range b.deltas {
-		for _, utxo := range delta.Produced {
-			produced = append(
-				produced,
-				models.UtxoSlot{
-					Slot: delta.Point.Slot,
-					Utxo: utxo,
-				},
-			)
-		}
-	}
-	if len(produced) > 0 {
-		// Process in groups of 1000 to avoid hitting DB limits
-		for i := 0; i < len(produced); i += 1000 {
-			end := min(
-				len(produced),
-				i+1000,
-			)
-			batch := produced[i:end]
-			if err := ls.db.AddUtxos(batch, txn); err != nil {
-				return err
-			}
-		}
-	}
-	for _, delta := range b.deltas {
-		// Process consumed UTxOs
-		for _, consumed := range delta.Consumed {
-			if err := ls.consumeUtxo(txn, consumed, delta.Point.Slot); err != nil {
-				return fmt.Errorf("remove consumed UTxO: %w", err)
-			}
-		}
-		// Protocol parameter updates
-		for genesisHash, update := range delta.PParamUpdates {
-			err := ls.db.SetPParamUpdate(
-				genesisHash.Bytes(),
-				update.Cbor(),
-				delta.Point.Slot,
-				delta.PParamUpdateEpoch,
-				txn,
-			)
-			if err != nil {
-				return fmt.Errorf("set pparam update: %w", err)
-			}
-		}
-		// Certificates
-		if err := ls.processTransactionCertificates(txn, delta.Point, delta.Certificates); err != nil {
-			return fmt.Errorf("process transaction certificates: %w", err)
+		err := delta.apply(ls, txn)
+		if err != nil {
+			return err
 		}
 	}
 	return nil
