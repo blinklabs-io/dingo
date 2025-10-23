@@ -15,12 +15,10 @@
 package sqlite
 
 import (
-	"encoding/hex"
 	"errors"
 	"fmt"
 
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"gorm.io/gorm"
@@ -216,7 +214,7 @@ func (d *MetadataStoreSqlite) SetUtxo(
 
 	// Handle assets if present
 	if assets != nil {
-		tmpUtxo.Assets = convertMultiAssetToModels(assets)
+		tmpUtxo.Assets = models.ConvertMultiAssetToModels(assets)
 	}
 
 	var result *gorm.DB
@@ -323,44 +321,9 @@ func utxoLedgerToModel(
 		MultiAsset() *lcommon.MultiAsset[lcommon.MultiAssetTypeOutput]
 	}); ok {
 		if multiAsset := multiAssetOutput.MultiAsset(); multiAsset != nil {
-			ret.Assets = convertMultiAssetToModels(multiAsset)
+			ret.Assets = models.ConvertMultiAssetToModels(multiAsset)
 		}
 	}
 
 	return ret
-}
-
-func convertMultiAssetToModels(
-	multiAsset *lcommon.MultiAsset[lcommon.MultiAssetTypeOutput],
-) []models.Asset {
-	var assets []models.Asset
-
-	// Get all policy IDs
-	policyIds := multiAsset.Policies()
-	for _, policyId := range policyIds {
-		policyIdBytes := policyId.Bytes()
-
-		// Get asset names for this policy
-		assetNames := multiAsset.Assets(policyId)
-		for _, assetNameBytes := range assetNames {
-			amount := multiAsset.Asset(policyId, assetNameBytes)
-
-			// Calculate fingerprint
-			fingerprint := lcommon.NewAssetFingerprint(
-				policyIdBytes,
-				assetNameBytes,
-			)
-
-			asset := models.Asset{
-				Name:        assetNameBytes,
-				NameHex:     []byte(hex.EncodeToString(assetNameBytes)),
-				PolicyId:    policyIdBytes,
-				Fingerprint: []byte(fingerprint.String()),
-				Amount:      types.Uint64(amount),
-			}
-			assets = append(assets, asset)
-		}
-	}
-
-	return assets
 }

@@ -14,7 +14,12 @@
 
 package models
 
-import "github.com/blinklabs-io/dingo/database/types"
+import (
+	"encoding/hex"
+
+	"github.com/blinklabs-io/dingo/database/types"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+)
 
 type Asset struct {
 	Name        []byte `gorm:"index"`
@@ -28,4 +33,48 @@ type Asset struct {
 
 func (Asset) TableName() string {
 	return "asset"
+}
+
+// ConvertMultiAssetToModels converts a MultiAsset structure into a slice of Asset models.
+// Each asset is populated with its name, hex-encoded name, policy ID, fingerprint, and amount.
+// Returns an empty slice if multiAsset is nil or contains no assets.
+func ConvertMultiAssetToModels(
+	multiAsset *lcommon.MultiAsset[lcommon.MultiAssetTypeOutput],
+) []Asset {
+	if multiAsset == nil {
+		return []Asset{}
+	}
+	numAssets := 0
+	// Get all policy IDs
+	policyIds := multiAsset.Policies()
+	for _, policyId := range policyIds {
+		numAssets += len(multiAsset.Assets(policyId))
+	}
+	assets := make([]Asset, 0, numAssets)
+	for _, policyId := range policyIds {
+		policyIdBytes := policyId.Bytes()
+
+		// Get asset names for this policy
+		assetNames := multiAsset.Assets(policyId)
+		for _, assetNameBytes := range assetNames {
+			amount := multiAsset.Asset(policyId, assetNameBytes)
+
+			// Calculate fingerprint
+			fingerprint := lcommon.NewAssetFingerprint(
+				policyIdBytes,
+				assetNameBytes,
+			)
+
+			asset := Asset{
+				Name:        assetNameBytes,
+				NameHex:     []byte(hex.EncodeToString(assetNameBytes)),
+				PolicyId:    policyIdBytes,
+				Fingerprint: []byte(fingerprint.String()),
+				Amount:      types.Uint64(amount),
+			}
+			assets = append(assets, asset)
+		}
+	}
+
+	return assets
 }
