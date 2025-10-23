@@ -19,12 +19,13 @@ import "errors"
 var ErrAccountNotFound = errors.New("account not found")
 
 type Account struct {
-	StakingKey []byte `gorm:"uniqueIndex"`
-	Pool       []byte `gorm:"index"`
-	Drep       []byte `gorm:"index"`
-	ID         uint   `gorm:"primarykey"`
-	AddedSlot  uint64
-	Active     bool `gorm:"default:true"`
+	StakingKey    []byte `gorm:"uniqueIndex"`
+	Pool          []byte `gorm:"index"`
+	Drep          []byte `gorm:"index"`
+	ID            uint   `gorm:"primarykey"`
+	AddedSlot     uint64
+	CertificateID uint `gorm:"index"`
+	Active        bool `gorm:"default:true"`
 }
 
 func (a *Account) TableName() string {
@@ -32,9 +33,10 @@ func (a *Account) TableName() string {
 }
 
 type Deregistration struct {
-	StakingKey []byte `gorm:"index"`
-	ID         uint   `gorm:"primarykey"`
-	AddedSlot  uint64
+	StakingKey    []byte `gorm:"index"`
+	ID            uint   `gorm:"primarykey"`
+	CertificateID uint   `gorm:"index"`
+	AddedSlot     uint64
 }
 
 func (Deregistration) TableName() string {
@@ -44,6 +46,7 @@ func (Deregistration) TableName() string {
 type Registration struct {
 	StakingKey    []byte `gorm:"index"`
 	ID            uint   `gorm:"primarykey"`
+	CertificateID uint   `gorm:"index"`
 	AddedSlot     uint64
 	DepositAmount uint64
 }
@@ -53,10 +56,11 @@ func (Registration) TableName() string {
 }
 
 type StakeDelegation struct {
-	StakingKey  []byte `gorm:"index"`
-	PoolKeyHash []byte `gorm:"index"`
-	ID          uint   `gorm:"primarykey"`
-	AddedSlot   uint64
+	StakingKey    []byte `gorm:"index"`
+	PoolKeyHash   []byte `gorm:"index"`
+	CertificateID uint   `gorm:"index"`
+	ID            uint   `gorm:"primarykey"`
+	AddedSlot     uint64
 }
 
 func (StakeDelegation) TableName() string {
@@ -64,9 +68,10 @@ func (StakeDelegation) TableName() string {
 }
 
 type StakeDeregistration struct {
-	StakingKey []byte `gorm:"index"`
-	ID         uint   `gorm:"primarykey"`
-	AddedSlot  uint64
+	StakingKey    []byte `gorm:"index"`
+	CertificateID uint   `gorm:"index"`
+	ID            uint   `gorm:"primarykey"`
+	AddedSlot     uint64
 }
 
 func (StakeDeregistration) TableName() string {
@@ -75,6 +80,7 @@ func (StakeDeregistration) TableName() string {
 
 type StakeRegistration struct {
 	StakingKey    []byte `gorm:"index"`
+	CertificateID uint   `gorm:"index"`
 	ID            uint   `gorm:"primarykey"`
 	AddedSlot     uint64
 	DepositAmount uint64
@@ -87,6 +93,7 @@ func (StakeRegistration) TableName() string {
 type StakeRegistrationDelegation struct {
 	StakingKey    []byte `gorm:"index"`
 	PoolKeyHash   []byte `gorm:"index"`
+	CertificateID uint   `gorm:"index"`
 	ID            uint   `gorm:"primarykey"`
 	AddedSlot     uint64
 	DepositAmount uint64
@@ -97,11 +104,12 @@ func (StakeRegistrationDelegation) TableName() string {
 }
 
 type StakeVoteDelegation struct {
-	StakingKey  []byte `gorm:"index"`
-	PoolKeyHash []byte `gorm:"index"`
-	Drep        []byte `gorm:"index"`
-	ID          uint   `gorm:"primarykey"`
-	AddedSlot   uint64
+	StakingKey    []byte `gorm:"index"`
+	PoolKeyHash   []byte `gorm:"index"`
+	Drep          []byte `gorm:"index"`
+	CertificateID uint   `gorm:"index"`
+	ID            uint   `gorm:"primarykey"`
+	AddedSlot     uint64
 }
 
 func (StakeVoteDelegation) TableName() string {
@@ -112,6 +120,7 @@ type StakeVoteRegistrationDelegation struct {
 	StakingKey    []byte `gorm:"index"`
 	PoolKeyHash   []byte `gorm:"index"`
 	Drep          []byte `gorm:"index"`
+	CertificateID uint   `gorm:"index"`
 	ID            uint   `gorm:"primarykey"`
 	AddedSlot     uint64
 	DepositAmount uint64
@@ -122,10 +131,11 @@ func (StakeVoteRegistrationDelegation) TableName() string {
 }
 
 type VoteDelegation struct {
-	StakingKey []byte `gorm:"index"`
-	Drep       []byte `gorm:"index"`
-	ID         uint   `gorm:"primarykey"`
-	AddedSlot  uint64
+	StakingKey    []byte `gorm:"index"`
+	Drep          []byte `gorm:"index"`
+	CertificateID uint   `gorm:"index"`
+	ID            uint   `gorm:"primarykey"`
+	AddedSlot     uint64
 }
 
 func (VoteDelegation) TableName() string {
@@ -135,6 +145,7 @@ func (VoteDelegation) TableName() string {
 type VoteRegistrationDelegation struct {
 	StakingKey    []byte `gorm:"index"`
 	Drep          []byte `gorm:"index"`
+	CertificateID uint   `gorm:"index"`
 	ID            uint   `gorm:"primarykey"`
 	AddedSlot     uint64
 	DepositAmount uint64

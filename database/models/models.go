@@ -20,6 +20,7 @@ var MigrateModels = []any{
 	&Asset{},
 	&AuthCommitteeHot{},
 	&BlockNonce{},
+	&Certificate{},
 	&Datum{},
 	&Deregistration{},
 	&DeregistrationDrep{},
