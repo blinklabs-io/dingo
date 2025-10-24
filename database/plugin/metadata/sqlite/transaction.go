@@ -70,9 +70,21 @@ func (d *MetadataStoreSqlite) SetTransaction(
 	}
 	result := txn.Create(&tmpTx)
 	if result.Error != nil {
-		return result.Error
+		return fmt.Errorf("create transaction: %w", result.Error)
 	}
-	for _, input := range tx.Consumed() {
+	// Explicitly create produced outputs with TransactionID set
+	if tx.IsValid() && len(tmpTx.Outputs) > 0 {
+		for o := range tmpTx.Outputs {
+			tmpTx.Outputs[o].TransactionID = &tmpTx.ID
+		}
+		result = txn.Clauses(clause.OnConflict{
+			UpdateAll: true,
+		}).Create(&tmpTx.Outputs)
+		if result.Error != nil {
+			return fmt.Errorf("create outputs: %w", result.Error)
+		}
+	}
+	for i, input := range tx.Consumed() {
 		inTxId := input.Id().Bytes()
 		inIdx := input.Index()
 		utxo, err := d.GetUtxo(inTxId, inIdx, txn)
@@ -97,13 +109,15 @@ func (d *MetadataStoreSqlite) SetTransaction(
 		if result.Error != nil {
 			return result.Error
 		}
+		// Explicitly set consumed inputs with TransactionID set
 		tmpTx.Inputs = append(
 			tmpTx.Inputs,
 			*utxo,
 		)
+		tmpTx.Inputs[i].TransactionID = &utxo.ID
 	}
 	// Avoid updating associations
-	result = txn.Omit(clause.Associations).Save(&tmpTx)
+	result = txn.Omit(clause.Associations).Save(&tmpTx.Inputs)
 	if result.Error != nil {
 		return result.Error
 	}
