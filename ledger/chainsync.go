@@ -228,7 +228,7 @@ func (ls *LedgerState) createGenesisBlock() error {
 		if err != nil {
 			return fmt.Errorf("generate Shelley genesis UTxOs: %w", err)
 		}
-		batch := []models.UtxoSlot{}
+		batch := make([]models.UtxoSlot, 0, len(byronGenesisUtxos)+len(shelleyGenesisUtxos))
 		for _, utxo := range slices.Concat(byronGenesisUtxos, shelleyGenesisUtxos) {
 			batch = append(batch, models.UtxoSlot{Slot: 0, Utxo: utxo})
 		}
