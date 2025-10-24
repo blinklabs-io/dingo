@@ -59,24 +59,36 @@ func (d *MetadataStoreSqlite) SetTransaction(
 		BlockHash:  point.Hash,
 		BlockIndex: idx,
 	}
-	for _, input := range tx.Consumed() {
-		utxo, err := d.GetUtxo(input.Id().Bytes(), input.Index(), txn)
-		if err != nil {
-			return fmt.Errorf("failed to fetch input: %w", err)
-		}
-		utxo.DeletedSlot = point.Slot
-		utxo.SpentAtTxId = tx.Hash().Bytes()
-		tmpTx.Inputs = append(tmpTx.Inputs, *utxo)
-	}
 	for _, utxo := range tx.Produced() {
 		tmpTx.Outputs = append(
 			tmpTx.Outputs,
 			models.UtxoLedgerToModel(utxo, point.Slot),
 		)
 	}
-	result := txn.Save(&tmpTx)
+	result := txn.Create(&tmpTx)
 	if result.Error != nil {
 		return result.Error
+	}
+	for _, input := range tx.Consumed() {
+		inTxId := input.Id().Bytes()
+		inIdx := input.Index()
+		utxo, err := d.GetUtxo(inTxId, inIdx, txn)
+		if err != nil {
+			return fmt.Errorf("failed to fetch input %x#%d: %w", inTxId, inIdx, err)
+		}
+		if utxo == nil {
+			return errors.New("input UTxO not found: %x#%d", inTxId, inIdx)
+		}
+		// Update existing UTxOs
+		result = txn.Model(&models.Utxo{}).
+			Where("tx_id = ? AND output_idx = ?", inTxId, inIdx).
+			Updates(map[string]any{
+				"deleted_slot":   point.Slot,
+				"spent_at_tx_id": tx.Hash().Bytes(),
+			})
+		if result.Error != nil {
+			return result.Error
+		}
 	}
 	return nil
 }
