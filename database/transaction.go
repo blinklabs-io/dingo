@@ -29,15 +29,17 @@ func (d *Database) SetTransaction(
 		txn = d.Transaction(false)
 		defer txn.Commit() //nolint:errcheck
 	}
-	for u, utxo := range tx.Produced() {
-		// Add UTxO to blob DB
-		key := UtxoBlobKey(
-			utxo.Id.Id().Bytes(),
-			uint32(u), //nolint:gosec
-		)
-		err := txn.Blob().Set(key, utxo.Output.Cbor())
-		if err != nil {
-			return err
+	if tx.IsValid() {
+		for u, utxo := range tx.Produced() {
+			// Add UTxO to blob DB
+			key := UtxoBlobKey(
+				utxo.Id.Id().Bytes(),
+				uint32(u), //nolint:gosec
+			)
+			err := txn.Blob().Set(key, utxo.Output.Cbor())
+			if err != nil {
+				return err
+			}
 		}
 	}
 	return d.metadata.SetTransaction(tx, point, idx, txn.Metadata())
