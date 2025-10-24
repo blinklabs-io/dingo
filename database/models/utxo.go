@@ -50,11 +50,12 @@ func UtxoLedgerToModel(
 	outAddr := utxo.Output.Address()
 	ret := Utxo{
 		TxId:       utxo.Id.Id().Bytes(),
-		OutputIdx:  utxo.Id.Index(),
-		AddedSlot:  slot,
 		PaymentKey: outAddr.PaymentKeyHash().Bytes(),
 		StakingKey: outAddr.StakeKeyHash().Bytes(),
 		Cbor:       utxo.Output.Cbor(),
+		AddedSlot:  slot,
+		Amount:     utxo.Output.Amount(),
+		OutputIdx:  utxo.Id.Index(),
 	}
 
 	if multiAssetOutput, ok := utxo.Output.(interface {
