@@ -22,6 +22,7 @@ import (
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // GetTransactionByHash returns a transaction by its hash
@@ -96,6 +97,15 @@ func (d *MetadataStoreSqlite) SetTransaction(
 		if result.Error != nil {
 			return result.Error
 		}
+		tmpTx.Inputs = append(
+			tmpTx.Inputs,
+			*utxo,
+		)
+	}
+	// Avoid updating associations
+	result = txn.Omit(clause.Associations).Save(&tmpTx)
+	if result.Error != nil {
+		return result.Error
 	}
 	return nil
 }
