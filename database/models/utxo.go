@@ -27,7 +27,7 @@ type Utxo struct {
 	StakingKey    []byte `gorm:"index"`
 	Assets        []Asset
 	Cbor          []byte `gorm:"-"` // This is here for convenience but not represented in the metadata DB
-	SpentAtTxId   []byte
+	SpentAtTxId   []byte `gorm:"index"`
 	ID            uint   `gorm:"primarykey"`
 	AddedSlot     uint64 `gorm:"index"`
 	DeletedSlot   uint64 `gorm:"index"`
