@@ -59,11 +59,13 @@ func (d *MetadataStoreSqlite) SetTransaction(
 		BlockHash:  point.Hash,
 		BlockIndex: idx,
 	}
-	for _, utxo := range tx.Produced() {
-		tmpTx.Outputs = append(
-			tmpTx.Outputs,
-			models.UtxoLedgerToModel(utxo, point.Slot),
-		)
+	if tx.IsValid() {
+		for _, utxo := range tx.Produced() {
+			tmpTx.Outputs = append(
+				tmpTx.Outputs,
+				models.UtxoLedgerToModel(utxo, point.Slot),
+			)
+		}
 	}
 	result := txn.Create(&tmpTx)
 	if result.Error != nil {
