@@ -18,9 +18,9 @@ package models
 type Transaction struct {
 	Hash       []byte `gorm:"uniqueIndex"`
 	BlockHash  []byte `gorm:"index"`
-	Inputs     []Utxo
-	Outputs    []Utxo
-	ID         uint `gorm:"primaryKey"`
+	Inputs     []Utxo `gorm:"foreignKey:SpentAtTxId;references:Hash"`
+	Outputs    []Utxo `gorm:"foreignKey:TransactionID;references:ID"`
+	ID         uint   `gorm:"primaryKey"`
 	Type       int
 	BlockIndex uint32
 }
