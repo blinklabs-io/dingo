@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"fmt"
+	"math"
 
 	"github.com/blinklabs-io/dingo/database"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -45,6 +46,9 @@ func (d *LedgerDelta) addTransaction(
 
 func (d *LedgerDelta) apply(ls *LedgerState, txn *database.Txn) error {
 	for _, tr := range d.Transactions {
+		if tr.Index < 0 || tr.Index > math.MaxUint32 {
+			return fmt.Errorf("transaction index out of range: %d", tr.Index)
+		}
 		err := ls.db.SetTransaction(
 			tr.Tx,
 			d.Point,
