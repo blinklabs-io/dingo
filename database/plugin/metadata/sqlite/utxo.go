@@ -101,6 +101,9 @@ func (d *MetadataStoreSqlite) GetUtxosByAddress(
 	var ret []models.Utxo
 	// Build sub-query for address
 	var addrQuery *gorm.DB
+	if txn == nil {
+		txn = d.DB()
+	}
 	if addr.PaymentKeyHash() != ledger.NewBlake2b224(nil) {
 		addrQuery = txn.Where("payment_key = ?", addr.PaymentKeyHash().Bytes())
 	}
@@ -113,6 +116,9 @@ func (d *MetadataStoreSqlite) GetUtxosByAddress(
 		} else {
 			addrQuery = txn.Where("staking_key = ?", addr.StakeKeyHash().Bytes())
 		}
+	}
+	if addrQuery == nil {
+		return ret, nil
 	}
 	result := txn.
 		Where("deleted_slot = 0").
@@ -204,16 +210,12 @@ func (d *MetadataStoreSqlite) AddUtxos(
 			models.UtxoLedgerToModel(utxo.Utxo, utxo.Slot),
 		)
 	}
-	if txn != nil {
-		result := txn.Create(items)
-		if result.Error != nil {
-			return result.Error
-		}
-	} else {
-		result := d.DB().Create(items)
-		if result.Error != nil {
-			return result.Error
-		}
+	if txn == nil {
+		txn = d.DB()
+	}
+	result := txn.CreateInBatches(items, 1000)
+	if result.Error != nil {
+		return result.Error
 	}
 	return nil
 }
