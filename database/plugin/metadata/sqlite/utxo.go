@@ -213,7 +213,8 @@ func (d *MetadataStoreSqlite) AddUtxos(
 	if txn == nil {
 		txn = d.DB()
 	}
-	result := txn.CreateInBatches(items, 1000)
+	result := txn.Session(&gorm.Session{FullSaveAssociations: true}).
+		CreateInBatches(items, 1000)
 	if result.Error != nil {
 		return result.Error
 	}
