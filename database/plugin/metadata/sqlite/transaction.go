@@ -77,7 +77,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 			return fmt.Errorf("failed to fetch input %x#%d: %w", inTxId, inIdx, err)
 		}
 		if utxo == nil {
-			return errors.New("input UTxO not found: %x#%d", inTxId, inIdx)
+			return fmt.Errorf("input UTxO not found: %x#%d", inTxId, inIdx)
 		}
 		// Update existing UTxOs
 		result = txn.Model(&models.Utxo{}).
