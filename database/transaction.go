@@ -30,11 +30,11 @@ func (d *Database) SetTransaction(
 		defer txn.Commit() //nolint:errcheck
 	}
 	if tx.IsValid() {
-		for u, utxo := range tx.Produced() {
+		for _, utxo := range tx.Produced() {
 			// Add UTxO to blob DB
 			key := UtxoBlobKey(
 				utxo.Id.Id().Bytes(),
-				uint32(u), //nolint:gosec
+				utxo.Id.Index(),
 			)
 			err := txn.Blob().Set(key, utxo.Output.Cbor())
 			if err != nil {
