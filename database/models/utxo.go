@@ -49,11 +49,11 @@ func UtxoLedgerToModel(
 ) Utxo {
 	outAddr := utxo.Output.Address()
 	ret := Utxo{
-		TxId:       utxo.Id.Id().Bytes(),
-		Cbor:       utxo.Output.Cbor(),
-		AddedSlot:  slot,
-		Amount:     utxo.Output.Amount(),
-		OutputIdx:  utxo.Id.Index(),
+		TxId:      utxo.Id.Id().Bytes(),
+		Cbor:      utxo.Output.Cbor(),
+		AddedSlot: slot,
+		Amount:    utxo.Output.Amount(),
+		OutputIdx: utxo.Id.Index(),
 	}
 	if outAddr.PaymentKeyHash() != ledger.NewBlake2b224(nil) {
 		ret.PaymentKey = outAddr.PaymentKeyHash().Bytes()

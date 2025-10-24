@@ -74,7 +74,12 @@ func (d *MetadataStoreSqlite) SetTransaction(
 		inIdx := input.Index()
 		utxo, err := d.GetUtxo(inTxId, inIdx, txn)
 		if err != nil {
-			return fmt.Errorf("failed to fetch input %x#%d: %w", inTxId, inIdx, err)
+			return fmt.Errorf(
+				"failed to fetch input %x#%d: %w",
+				inTxId,
+				inIdx,
+				err,
+			)
 		}
 		if utxo == nil {
 			return fmt.Errorf("input UTxO not found: %x#%d", inTxId, inIdx)
