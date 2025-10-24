@@ -55,11 +55,13 @@ func UtxoLedgerToModel(
 		Amount:    utxo.Output.Amount(),
 		OutputIdx: utxo.Id.Index(),
 	}
-	if outAddr.PaymentKeyHash() != ledger.NewBlake2b224(nil) {
-		ret.PaymentKey = outAddr.PaymentKeyHash().Bytes()
+	pkh := outAddr.PaymentKeyHash()
+	if pkh != ledger.NewBlake2b224(nil) {
+		ret.PaymentKey = pkh.Bytes()
 	}
-	if outAddr.StakeKeyHash() != ledger.NewBlake2b224(nil) {
-		ret.StakingKey = outAddr.StakeKeyHash().Bytes()
+	skh := outAddr.StakeKeyHash()
+	if skh != ledger.NewBlake2b224(nil) {
+		ret.StakingKey = skh.Bytes()
 	}
 	if multiAssetOutput, ok := utxo.Output.(interface {
 		MultiAsset() *lcommon.MultiAsset[lcommon.MultiAssetTypeOutput]
