@@ -62,7 +62,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 		txn = d.DB()
 	}
 	tmpTx := &models.Transaction{
-		Hash:       txHash(),
+		Hash:       txHash,
 		Type:       tx.Type(),
 		BlockHash:  point.Hash,
 		BlockIndex: idx,
