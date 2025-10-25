@@ -245,7 +245,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 			Where("spent_at_tx_id IS NULL OR spent_at_tx_id = ?", txHash).
 			Updates(map[string]any{
 				"deleted_slot":   point.Slot,
-				"spent_at_tx_id": tx.Hash().Bytes(),
+				"spent_at_tx_id": txHash,
 			})
 		if result.Error != nil {
 			return result.Error
