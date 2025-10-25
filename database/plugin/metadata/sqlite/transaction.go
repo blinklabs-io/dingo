@@ -140,7 +140,8 @@ func (d *MetadataStoreSqlite) SetTransaction(
 	if len(tx.Collateral()) > 0 {
 		var caseClauses []string
 		var whereConditions []string
-		var args []any
+		var caseArgs []any
+		var whereArgs []any
 
 		for _, input := range tx.Collateral() {
 			inTxId := input.Id().Bytes()
@@ -159,15 +160,16 @@ func (d *MetadataStoreSqlite) SetTransaction(
 				continue
 			}
 			caseClauses = append(caseClauses, "WHEN tx_id = ? AND output_idx = ? THEN ?")
-			args = append(args, inTxId, inIdx, txHash)
+			caseArgs = append(args, inTxId, inIdx, txHash)
 			whereConditions = append(whereConditions, "(tx_id = ? AND output_idx = ?)")
-			args = append(args, inTxId, inIdx)
+			whereArgs = append(args, inTxId, inIdx)
 			tmpTx.Collateral = append(
 				tmpTx.Collateral,
 				*utxo,
 			)
 		}
 		if len(caseClauses) > 0 {
+			args := append(caseArgs, whereArgs...)
 			sql := fmt.Sprintf(
 				"UPDATE utxos SET collateral_by_tx_id = CASE %s ELSE collateral_by_tx_id END WHERE %s",
 				strings.Join(caseClauses, " "),
@@ -183,7 +185,8 @@ func (d *MetadataStoreSqlite) SetTransaction(
 	if len(tx.ReferenceInputs()) > 0 {
 		var caseClauses []string
 		var whereConditions []string
-		var args []any
+		var caseArgs []any
+		var whereArgs []any
 
 		for _, input := range tx.ReferenceInputs() {
 			inTxId := input.Id().Bytes()
@@ -202,15 +205,16 @@ func (d *MetadataStoreSqlite) SetTransaction(
 				continue
 			}
 			caseClauses = append(caseClauses, "WHEN tx_id = ? AND output_idx = ? THEN ?")
-			args = append(args, inTxId, inIdx, txHash)
+			caseArgs = append(args, inTxId, inIdx, txHash)
 			whereConditions = append(whereConditions, "(tx_id = ? AND output_idx = ?)")
-			args = append(args, inTxId, inIdx)
+			whereArgs = append(args, inTxId, inIdx)
 			tmpTx.ReferenceInputs = append(
 				tmpTx.ReferenceInputs,
 				*utxo,
 			)
 		}
 		if len(caseClauses) > 0 {
+			args := append(caseArgs, whereArgs...)
 			sql := fmt.Sprintf(
 				"UPDATE utxos SET referenced_by_tx_id = CASE %s ELSE referenced_by_tx_id END WHERE %s",
 				strings.Join(caseClauses, " "),
