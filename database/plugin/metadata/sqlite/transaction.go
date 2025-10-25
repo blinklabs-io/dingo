@@ -174,7 +174,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 				strings.Join(whereConditions, " OR "),
 			)
 			result = txn.Exec(sql, args...)
-			if result.Error!= nil {
+			if result.Error != nil {
 				return fmt.Errorf("batch update collateral: %w", result.Error)
 			}
 		}
@@ -184,7 +184,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 		var caseClauses []string
 		var whereConditions []string
 		var args []any
-		
+
 		for _, input := range tx.ReferenceInputs() {
 			inTxId := input.Id().Bytes()
 			inIdx := input.Index()
