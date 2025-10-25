@@ -160,9 +160,9 @@ func (d *MetadataStoreSqlite) SetTransaction(
 				continue
 			}
 			caseClauses = append(caseClauses, "WHEN tx_id = ? AND output_idx = ? THEN ?")
-			caseArgs = append(args, inTxId, inIdx, txHash)
+			caseArgs = append(caseArgs, inTxId, inIdx, txHash)
 			whereConditions = append(whereConditions, "(tx_id = ? AND output_idx = ?)")
-			whereArgs = append(args, inTxId, inIdx)
+			whereArgs = append(whereArgs, inTxId, inIdx)
 			tmpTx.Collateral = append(
 				tmpTx.Collateral,
 				*utxo,
@@ -205,9 +205,9 @@ func (d *MetadataStoreSqlite) SetTransaction(
 				continue
 			}
 			caseClauses = append(caseClauses, "WHEN tx_id = ? AND output_idx = ? THEN ?")
-			caseArgs = append(args, inTxId, inIdx, txHash)
+			caseArgs = append(caseArgs, inTxId, inIdx, txHash)
 			whereConditions = append(whereConditions, "(tx_id = ? AND output_idx = ?)")
-			whereArgs = append(args, inTxId, inIdx)
+			whereArgs = append(whereArgs, inTxId, inIdx)
 			tmpTx.ReferenceInputs = append(
 				tmpTx.ReferenceInputs,
 				*utxo,
