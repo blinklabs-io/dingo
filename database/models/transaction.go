@@ -20,8 +20,8 @@ type Transaction struct {
 	BlockHash        []byte `gorm:"index"`
 	Inputs           []Utxo `gorm:"foreignKey:SpentAtTxId;references:Hash"`
 	Outputs          []Utxo `gorm:"foreignKey:TransactionID;references:ID"`
-	ReferenceInputs  []Utxo `gorm:"foreignKey:SpentAtTxId;references:Hash"`
-	Collateral       []Utxo `gorm:"foreignKey:SpentAtTxId;references:Hash"`
+	ReferenceInputs  []Utxo `gorm:"foreignKey:ReferencedByTxId;references:Hash"`
+	Collateral       []Utxo `gorm:"foreignKey:CollateralByTxId;references:Hash"`
 	CollateralReturn Utxo   `gorm:"foreignKey:TransactionID;references:ID"`
 	ID               uint   `gorm:"primaryKey"`
 	Type             int

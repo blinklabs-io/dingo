@@ -57,11 +57,12 @@ func (d *MetadataStoreSqlite) SetTransaction(
 	idx uint32,
 	txn *gorm.DB,
 ) error {
+	txHash := tx.Hash().Bytes()
 	if txn == nil {
 		txn = d.DB()
 	}
 	tmpTx := &models.Transaction{
-		Hash:       tx.Hash().Bytes(),
+		Hash:       txHash(),
 		Type:       tx.Type(),
 		BlockHash:  point.Hash,
 		BlockIndex: idx,
@@ -151,6 +152,13 @@ func (d *MetadataStoreSqlite) SetTransaction(
 			// Do nothing
 			continue
 		}
+		// Set CollateralByTxId
+		result = txn.Model(&models.Utxo{}).
+			Where("tx_id = ? AND output_idx = ?", inTxId, inIdx).
+			Update("collateral_by_tx_id": txHash)
+		if result.Error != nil {
+			return result.Error
+		}
 		tmpTx.Collateral = append(
 			tmpTx.Collateral,
 			*utxo,
@@ -172,6 +180,13 @@ func (d *MetadataStoreSqlite) SetTransaction(
 		if utxo == nil {
 			// Do nothing
 			continue
+		}
+		// Set ReferencedByTxId
+		result = txn.Model(&models.Utxo{}).
+			Where("tx_id = ? AND output_idx = ?", inTxId, inIdx).
+			Update("referenced_by_tx_id": txHash)
+		if result.Error != nil {
+			return result.Error
 		}
 		tmpTx.ReferenceInputs = append(
 			tmpTx.ReferenceInputs,
@@ -198,7 +213,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 		// Update existing UTxOs
 		result = txn.Model(&models.Utxo{}).
 			Where("tx_id = ? AND output_idx = ?", inTxId, inIdx).
-			Where("spent_at_tx_id IS NULL OR spent_at_tx_id = ?", tx.Hash().Bytes()).
+			Where("spent_at_tx_id IS NULL OR spent_at_tx_id = ?", txHash).
 			Updates(map[string]any{
 				"deleted_slot":   point.Slot,
 				"spent_at_tx_id": tx.Hash().Bytes(),

@@ -28,6 +28,8 @@ type Utxo struct {
 	Assets        []Asset
 	Cbor          []byte `gorm:"-"` // This is here for convenience but not represented in the metadata DB
 	SpentAtTxId   []byte `gorm:"index"`
+	ReferencedByTxId []byte `gorm:"index"`
+	CollateralByTxId []byte `gorm:"index"`
 	ID            uint   `gorm:"primarykey"`
 	AddedSlot     uint64 `gorm:"index"`
 	DeletedSlot   uint64 `gorm:"index"`
