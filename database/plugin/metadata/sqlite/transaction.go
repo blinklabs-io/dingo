@@ -89,14 +89,18 @@ func (d *MetadataStoreSqlite) SetTransaction(
 			return fmt.Errorf("create outputs: %w", result.Error)
 		}
 	}
-	// Explicitly create collateral Utxo with TransactionID set
+	// Explicitly create collateral return Utxo with TransactionID set
 	if collateralReturn != nil {
+		// Verify the collateral return was actually found and populated
+		if tmpTx.CollateralReturn.TxId == nil {
+			return fmt.Errorf("collateral return output not found in produced outputs")
+		}
 		tmpTx.CollateralReturn.TransactionID = &tmpTx.ID
 		result = txn.Clauses(clause.OnConflict{
 			UpdateAll: true,
 		}).Create(&tmpTx.CollateralReturn)
 		if result.Error != nil {
-			return fmt.Errorf("create collateral retutn output: %w", result.Error)
+			return fmt.Errorf("create collateral return output: %w", result.Error)
 		}
 	}
 	// Add Inputs to Transaction
