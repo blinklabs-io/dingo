@@ -61,19 +61,20 @@ func (d *MetadataStoreSqlite) SetTransaction(
 		BlockIndex: idx,
 	}
 	collateralReturn := tx.CollateralReturn()
-	if tx.IsValid() {
-		for _, utxo := range tx.Produced() {
-			if utxo.Output == collateralReturn {
-				tmpTx.CollateralReturn = models.UtxoLedgerToModel(utxo, point.Slot)
-				continue
-			}
-			tmpTx.Outputs = append(
-				tmpTx.Outputs,
-				models.UtxoLedgerToModel(utxo, point.Slot),
-			)
+	for _, utxo := range tx.Produced() {
+		if collateralReturn != nil && utxo.Output == collateralReturn {
+			tmpTx.CollateralReturn = models.UtxoLedgerToModel(utxo, point.Slot)
+			continue
 		}
+		tmpTx.Outputs = append(
+			tmpTx.Outputs,
+			models.UtxoLedgerToModel(utxo, point.Slot),
+		)
 	}
-	result := txn.Create(&tmpTx)
+	result := txn.Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "hash"}}, // unique txn hash
+		DoUpdates: clause.AssignmentColumns([]string{"block_hash", "block_index", "type"}),
+	}).Create(&tmpTx)
 	if result.Error != nil {
 		return fmt.Errorf("create transaction: %w", result.Error)
 	}
@@ -83,6 +84,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 			tmpTx.Outputs[o].TransactionID = &tmpTx.ID
 		}
 		result = txn.Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "tx_id"}, {Name: "output_idx"}},
 			UpdateAll: true,
 		}).Create(&tmpTx.Outputs)
 		if result.Error != nil {
@@ -97,6 +99,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 		}
 		tmpTx.CollateralReturn.TransactionID = &tmpTx.ID
 		result = txn.Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "tx_id"}, {Name: "output_idx"}},
 			UpdateAll: true,
 		}).Create(&tmpTx.CollateralReturn)
 		if result.Error != nil {
@@ -189,6 +192,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 		// Update existing UTxOs
 		result = txn.Model(&models.Utxo{}).
 			Where("tx_id = ? AND output_idx = ?", inTxId, inIdx).
+			Where("spent_at_tx_id IS NULL OR spent_at_tx_id = ?", tx.Hash().Bytes()).
 			Updates(map[string]any{
 				"deleted_slot":   point.Slot,
 				"spent_at_tx_id": tx.Hash().Bytes(),
