@@ -93,7 +93,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 	if collateralReturn != nil {
 		// Verify the collateral return was actually found and populated
 		if tmpTx.CollateralReturn.TxId == nil {
-			return fmt.Errorf("collateral return output not found in produced outputs")
+			return errors.New("collateral return output not found in produced outputs")
 		}
 		tmpTx.CollateralReturn.TransactionID = &tmpTx.ID
 		result = txn.Clauses(clause.OnConflict{
