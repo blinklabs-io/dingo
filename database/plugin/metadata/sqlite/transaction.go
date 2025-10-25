@@ -17,6 +17,7 @@ package sqlite
 import (
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -136,62 +137,90 @@ func (d *MetadataStoreSqlite) SetTransaction(
 		)
 	}
 	// Add Collateral to Transaction
-	for _, input := range tx.Collateral() {
-		inTxId := input.Id().Bytes()
-		inIdx := input.Index()
-		utxo, err := d.GetUtxo(inTxId, inIdx, txn)
-		if err != nil {
-			return fmt.Errorf(
-				"failed to fetch input %x#%d: %w",
-				inTxId,
-				inIdx,
-				err,
+	if len(tx.Collateral()) > 0 {
+		var caseClauses []string
+		var whereConditions []string
+		var args []any
+
+		for _, input := range tx.Collateral() {
+			inTxId := input.Id().Bytes()
+			inIdx := input.Index()
+			utxo, err := d.GetUtxo(inTxId, inIdx, txn)
+			if err != nil {
+				return fmt.Errorf(
+					"failed to fetch input %x#%d: %w",
+					inTxId,
+					inIdx,
+					err,
+				)
+			}
+			if utxo == nil {
+				// Do nothing
+				continue
+			}
+			caseClauses = append(caseClauses, "WHEN tx_id = ? AND output_idx = ? THEN ?")
+			args = append(args, inTxId, inIdx, txHash)
+			whereConditions = append(whereConditions, "(tx_id = ? AND output_idx = ?)")
+			args = append(args, inTxId, inIdx)
+			tmpTx.Collateral = append(
+				tmpTx.Collateral,
+				*utxo,
 			)
 		}
-		if utxo == nil {
-			// Do nothing
-			continue
+		if len(caseClauses) > 0 {
+			sql := fmt.Sprintf(
+				"UPDATE utxos SET collateral_by_tx_id = CASE %s ELSE collateral_by_tx_id END WHERE %s",
+				strings.Join(caseClauses, " "),
+				strings.Join(whereConditions, " OR "),
+			)
+			result = txn.Exec(sql, args...)
+			if result.Error!= nil {
+				return fmt.Errorf("batch update collateral: %w", result.Error)
+			}
 		}
-		// Set CollateralByTxId
-		result = txn.Model(&models.Utxo{}).
-			Where("tx_id = ? AND output_idx = ?", inTxId, inIdx).
-			Update("collateral_by_tx_id", txHash)
-		if result.Error != nil {
-			return result.Error
-		}
-		tmpTx.Collateral = append(
-			tmpTx.Collateral,
-			*utxo,
-		)
 	}
 	// Add ReferenceInputs to Transaction
-	for _, input := range tx.ReferenceInputs() {
-		inTxId := input.Id().Bytes()
-		inIdx := input.Index()
-		utxo, err := d.GetUtxo(inTxId, inIdx, txn)
-		if err != nil {
-			return fmt.Errorf(
-				"failed to fetch input %x#%d: %w",
-				inTxId,
-				inIdx,
-				err,
+	if len(tx.ReferenceInputs()) > 0 {
+		var caseClauses []string
+		var whereConditions []string
+		var args []any
+		
+		for _, input := range tx.ReferenceInputs() {
+			inTxId := input.Id().Bytes()
+			inIdx := input.Index()
+			utxo, err := d.GetUtxo(inTxId, inIdx, txn)
+			if err != nil {
+				return fmt.Errorf(
+					"failed to fetch input %x#%d: %w",
+					inTxId,
+					inIdx,
+					err,
+				)
+			}
+			if utxo == nil {
+				// Do nothing
+				continue
+			}
+			caseClauses = append(caseClauses, "WHEN tx_id = ? AND output_idx = ? THEN ?")
+			args = append(args, inTxId, inIdx, txHash)
+			whereConditions = append(whereConditions, "(tx_id = ? AND output_idx = ?)")
+			args = append(args, inTxId, inIdx)
+			tmpTx.ReferenceInputs = append(
+				tmpTx.ReferenceInputs,
+				*utxo,
 			)
 		}
-		if utxo == nil {
-			// Do nothing
-			continue
+		if len(caseClauses) > 0 {
+			sql := fmt.Sprintf(
+				"UPDATE utxos SET referenced_by_tx_id = CASE %s ELSE referenced_by_tx_id END WHERE %s",
+				strings.Join(caseClauses, " "),
+				strings.Join(whereConditions, " OR "),
+			)
+			result = txn.Exec(sql, args...)
+			if result.Error != nil {
+				return fmt.Errorf("batch update reference inputs: %w", result.Error)
+			}
 		}
-		// Set ReferencedByTxId
-		result = txn.Model(&models.Utxo{}).
-			Where("tx_id = ? AND output_idx = ?", inTxId, inIdx).
-			Update("referenced_by_tx_id", txHash)
-		if result.Error != nil {
-			return result.Error
-		}
-		tmpTx.ReferenceInputs = append(
-			tmpTx.ReferenceInputs,
-			*utxo,
-		)
 	}
 
 	// Consume input UTxOs
