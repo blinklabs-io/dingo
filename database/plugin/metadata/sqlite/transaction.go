@@ -60,8 +60,13 @@ func (d *MetadataStoreSqlite) SetTransaction(
 		BlockHash:  point.Hash,
 		BlockIndex: idx,
 	}
+	collateralReturn := tx.CollateralReturn()
 	if tx.IsValid() {
 		for _, utxo := range tx.Produced() {
+			if utxo.Output == collateralReturn {
+				tmpTx.CollateralReturn = models.UtxoLedgerToModel(utxo, point.Slot)
+				continue
+			}
 			tmpTx.Outputs = append(
 				tmpTx.Outputs,
 				models.UtxoLedgerToModel(utxo, point.Slot),
@@ -72,7 +77,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 	if result.Error != nil {
 		return fmt.Errorf("create transaction: %w", result.Error)
 	}
-	// Explicitly create produced outputs with TransactionID set
+	// Explicitly create produced Utxos with TransactionID set
 	if tx.IsValid() && len(tmpTx.Outputs) > 0 {
 		for o := range tmpTx.Outputs {
 			tmpTx.Outputs[o].TransactionID = &tmpTx.ID
@@ -84,7 +89,89 @@ func (d *MetadataStoreSqlite) SetTransaction(
 			return fmt.Errorf("create outputs: %w", result.Error)
 		}
 	}
-	for i, input := range tx.Consumed() {
+	// Explicitly create collateral return Utxo with TransactionID set
+	if collateralReturn != nil {
+		// Verify the collateral return was actually found and populated
+		if tmpTx.CollateralReturn.TxId == nil {
+			return errors.New("collateral return output not found in produced outputs")
+		}
+		tmpTx.CollateralReturn.TransactionID = &tmpTx.ID
+		result = txn.Clauses(clause.OnConflict{
+			UpdateAll: true,
+		}).Create(&tmpTx.CollateralReturn)
+		if result.Error != nil {
+			return fmt.Errorf("create collateral return output: %w", result.Error)
+		}
+	}
+	// Add Inputs to Transaction
+	for _, input := range tx.Inputs() {
+		inTxId := input.Id().Bytes()
+		inIdx := input.Index()
+		utxo, err := d.GetUtxo(inTxId, inIdx, txn)
+		if err != nil {
+			return fmt.Errorf(
+				"failed to fetch input %x#%d: %w",
+				inTxId,
+				inIdx,
+				err,
+			)
+		}
+		if utxo == nil {
+			// Do nothing
+			continue
+		}
+		tmpTx.Inputs = append(
+			tmpTx.Inputs,
+			*utxo,
+		)
+	}
+	// Add Collateral to Transaction
+	for _, input := range tx.Collateral() {
+		inTxId := input.Id().Bytes()
+		inIdx := input.Index()
+		utxo, err := d.GetUtxo(inTxId, inIdx, txn)
+		if err != nil {
+			return fmt.Errorf(
+				"failed to fetch input %x#%d: %w",
+				inTxId,
+				inIdx,
+				err,
+			)
+		}
+		if utxo == nil {
+			// Do nothing
+			continue
+		}
+		tmpTx.Collateral = append(
+			tmpTx.Collateral,
+			*utxo,
+		)
+	}
+	// Add ReferenceInputs to Transaction
+	for _, input := range tx.ReferenceInputs() {
+		inTxId := input.Id().Bytes()
+		inIdx := input.Index()
+		utxo, err := d.GetUtxo(inTxId, inIdx, txn)
+		if err != nil {
+			return fmt.Errorf(
+				"failed to fetch input %x#%d: %w",
+				inTxId,
+				inIdx,
+				err,
+			)
+		}
+		if utxo == nil {
+			// Do nothing
+			continue
+		}
+		tmpTx.ReferenceInputs = append(
+			tmpTx.ReferenceInputs,
+			*utxo,
+		)
+	}
+
+	// Consume input UTxOs
+	for _, input := range tx.Consumed() {
 		inTxId := input.Id().Bytes()
 		inIdx := input.Index()
 		utxo, err := d.GetUtxo(inTxId, inIdx, txn)
@@ -109,15 +196,9 @@ func (d *MetadataStoreSqlite) SetTransaction(
 		if result.Error != nil {
 			return result.Error
 		}
-		// Explicitly set consumed inputs with TransactionID set
-		tmpTx.Inputs = append(
-			tmpTx.Inputs,
-			*utxo,
-		)
-		tmpTx.Inputs[i].TransactionID = &utxo.ID
 	}
 	// Avoid updating associations
-	result = txn.Omit(clause.Associations).Save(&tmpTx.Inputs)
+	result = txn.Omit(clause.Associations).Save(&tmpTx)
 	if result.Error != nil {
 		return result.Error
 	}
