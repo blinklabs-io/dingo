@@ -104,7 +104,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 		}
 	}
 	// Add Inputs to Transaction
-	for i, input := range tx.Inputs() {
+	for _, input := range tx.Inputs() {
 		inTxId := input.Id().Bytes()
 		inIdx := input.Index()
 		utxo, err := d.GetUtxo(inTxId, inIdx, txn)
@@ -124,10 +124,9 @@ func (d *MetadataStoreSqlite) SetTransaction(
 			tmpTx.Inputs,
 			*utxo,
 		)
-		tmpTx.Inputs[i].TransactionID = utxo.TransactionID
 	}
 	// Add Collateral to Transaction
-	for i, input := range tx.Collateral() {
+	for _, input := range tx.Collateral() {
 		inTxId := input.Id().Bytes()
 		inIdx := input.Index()
 		utxo, err := d.GetUtxo(inTxId, inIdx, txn)
@@ -147,10 +146,9 @@ func (d *MetadataStoreSqlite) SetTransaction(
 			tmpTx.Collateral,
 			*utxo,
 		)
-		tmpTx.Collateral[i].TransactionID = utxo.TransactionID
 	}
 	// Add ReferenceInputs to Transaction
-	for i, input := range tx.ReferenceInputs() {
+	for _, input := range tx.ReferenceInputs() {
 		inTxId := input.Id().Bytes()
 		inIdx := input.Index()
 		utxo, err := d.GetUtxo(inTxId, inIdx, txn)
@@ -170,7 +168,6 @@ func (d *MetadataStoreSqlite) SetTransaction(
 			tmpTx.ReferenceInputs,
 			*utxo,
 		)
-		tmpTx.ReferenceInputs[i].TransactionID = utxo.TransactionID
 	}
 
 	// Consume input UTxOs
