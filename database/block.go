@@ -157,10 +157,13 @@ func BlockByPointTxn(txn *Txn, point ocommon.Point) (models.Block, error) {
 	return blockByKey(txn, key)
 }
 
-func (d *Database) BlockByIndex(blockIndex uint64, txn *Txn) (models.Block, error) {
+func (d *Database) BlockByIndex(
+	blockIndex uint64,
+	txn *Txn,
+) (models.Block, error) {
 	if txn == nil {
 		txn = d.BlobTxn(false)
-		defer txn.Commit() //nolint:errcheck
+		defer txn.Rollback() //nolint:errcheck
 	}
 	indexKey := BlockBlobIndexKey(blockIndex)
 	item, err := txn.Blob().Get(indexKey)

@@ -14,30 +14,33 @@
 
 package database
 
-func (d *Database) NewTransaction(
-	hash []byte,
-	txType string,
-	blockHash []byte,
-	blockIndex uint32,
-	inputs []byte,
-	outputs []byte,
+import (
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+)
+
+func (d *Database) SetTransaction(
+	tx lcommon.Transaction,
+	point ocommon.Point,
+	idx uint32,
 	txn *Txn,
 ) error {
 	if txn == nil {
 		txn = d.Transaction(false)
 		defer txn.Commit() //nolint:errcheck
 	}
-	err := d.metadata.SetTransaction(
-		hash,
-		txType,
-		blockHash,
-		blockIndex,
-		inputs,
-		outputs,
-		txn.Metadata(),
-	)
-	if err != nil {
-		return err
+	if tx.IsValid() {
+		for _, utxo := range tx.Produced() {
+			// Add UTxO to blob DB
+			key := UtxoBlobKey(
+				utxo.Id.Id().Bytes(),
+				utxo.Id.Index(),
+			)
+			err := txn.Blob().Set(key, utxo.Output.Cbor())
+			if err != nil {
+				return err
+			}
+		}
 	}
-	return nil
+	return d.metadata.SetTransaction(tx, point, idx, txn.Metadata())
 }

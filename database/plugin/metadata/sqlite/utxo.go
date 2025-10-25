@@ -20,7 +20,6 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/gouroboros/ledger"
-	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"gorm.io/gorm"
 )
 
@@ -102,6 +101,9 @@ func (d *MetadataStoreSqlite) GetUtxosByAddress(
 	var ret []models.Utxo
 	// Build sub-query for address
 	var addrQuery *gorm.DB
+	if txn == nil {
+		txn = d.DB()
+	}
 	if addr.PaymentKeyHash() != ledger.NewBlake2b224(nil) {
 		addrQuery = txn.Where("payment_key = ?", addr.PaymentKeyHash().Bytes())
 	}
@@ -114,6 +116,9 @@ func (d *MetadataStoreSqlite) GetUtxosByAddress(
 		} else {
 			addrQuery = txn.Where("staking_key = ?", addr.StakeKeyHash().Bytes())
 		}
+	}
+	if addrQuery == nil {
+		return ret, nil
 	}
 	result := txn.
 		Where("deleted_slot = 0").
@@ -193,43 +198,6 @@ func (d *MetadataStoreSqlite) DeleteUtxosAfterSlot(
 	return nil
 }
 
-// SetUtxo saves a UTxO
-func (d *MetadataStoreSqlite) SetUtxo(
-	txId []byte, // hash
-	idx uint32, // idx
-	slot uint64, // slot
-	payment []byte, // payment
-	stake []byte, // stake
-	amount uint64, // amount
-	assets *lcommon.MultiAsset[lcommon.MultiAssetTypeOutput], // assets (multi-asset)
-	txn *gorm.DB,
-) error {
-	tmpUtxo := models.Utxo{
-		TxId:       txId,
-		OutputIdx:  idx,
-		AddedSlot:  slot,
-		PaymentKey: payment,
-		StakingKey: stake,
-	}
-
-	// Handle assets if present
-	if assets != nil {
-		tmpUtxo.Assets = models.ConvertMultiAssetToModels(assets)
-	}
-
-	var result *gorm.DB
-	if txn != nil {
-		result = txn.Create(&tmpUtxo)
-	} else {
-		result = d.DB().Create(&tmpUtxo)
-	}
-
-	if result.Error != nil {
-		return result.Error
-	}
-	return nil
-}
-
 // AddUtxos saves a batch of UTxOs
 func (d *MetadataStoreSqlite) AddUtxos(
 	utxos []models.UtxoSlot,
@@ -239,19 +207,16 @@ func (d *MetadataStoreSqlite) AddUtxos(
 	for _, utxo := range utxos {
 		items = append(
 			items,
-			utxoLedgerToModel(utxo.Utxo, utxo.Slot),
+			models.UtxoLedgerToModel(utxo.Utxo, utxo.Slot),
 		)
 	}
-	if txn != nil {
-		result := txn.Create(items)
-		if result.Error != nil {
-			return result.Error
-		}
-	} else {
-		result := d.DB().Create(items)
-		if result.Error != nil {
-			return result.Error
-		}
+	if txn == nil {
+		txn = d.DB()
+	}
+	result := txn.Session(&gorm.Session{FullSaveAssociations: true}).
+		CreateInBatches(items, 1000)
+	if result.Error != nil {
+		return result.Error
 	}
 	return nil
 }
@@ -301,29 +266,4 @@ func (d *MetadataStoreSqlite) SetUtxosNotDeletedAfterSlot(
 		}
 	}
 	return nil
-}
-
-func utxoLedgerToModel(
-	utxo ledger.Utxo,
-	slot uint64,
-) models.Utxo {
-	outAddr := utxo.Output.Address()
-	ret := models.Utxo{
-		TxId:       utxo.Id.Id().Bytes(),
-		OutputIdx:  utxo.Id.Index(),
-		AddedSlot:  slot,
-		PaymentKey: outAddr.PaymentKeyHash().Bytes(),
-		StakingKey: outAddr.StakeKeyHash().Bytes(),
-		Cbor:       utxo.Output.Cbor(),
-	}
-
-	if multiAssetOutput, ok := utxo.Output.(interface {
-		MultiAsset() *lcommon.MultiAsset[lcommon.MultiAssetTypeOutput]
-	}); ok {
-		if multiAsset := multiAssetOutput.MultiAsset(); multiAsset != nil {
-			ret.Assets = models.ConvertMultiAssetToModels(multiAsset)
-		}
-	}
-
-	return ret
 }

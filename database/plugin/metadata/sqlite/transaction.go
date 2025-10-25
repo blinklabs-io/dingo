@@ -16,9 +16,13 @@ package sqlite
 
 import (
 	"errors"
+	"fmt"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // GetTransactionByHash returns a transaction by its hash
@@ -42,26 +46,78 @@ func (d *MetadataStoreSqlite) GetTransactionByHash(
 
 // SetTransaction adds a new transaction to the database
 func (d *MetadataStoreSqlite) SetTransaction(
-	hash []byte,
-	txType string,
-	blockHash []byte,
-	blockIndex uint32,
-	inputs []byte,
-	outputs []byte,
+	tx lcommon.Transaction,
+	point ocommon.Point,
+	idx uint32,
 	txn *gorm.DB,
 ) error {
 	if txn == nil {
 		txn = d.DB()
 	}
-	tx := &models.Transaction{
-		Hash:       hash,
-		Type:       txType,
-		BlockHash:  blockHash,
-		BlockIndex: blockIndex,
-		Inputs:     inputs,
-		Outputs:    outputs,
+	tmpTx := &models.Transaction{
+		Hash:       tx.Hash().Bytes(),
+		Type:       tx.Type(),
+		BlockHash:  point.Hash,
+		BlockIndex: idx,
 	}
-	result := txn.Create(&tx)
+	if tx.IsValid() {
+		for _, utxo := range tx.Produced() {
+			tmpTx.Outputs = append(
+				tmpTx.Outputs,
+				models.UtxoLedgerToModel(utxo, point.Slot),
+			)
+		}
+	}
+	result := txn.Create(&tmpTx)
+	if result.Error != nil {
+		return fmt.Errorf("create transaction: %w", result.Error)
+	}
+	// Explicitly create produced outputs with TransactionID set
+	if tx.IsValid() && len(tmpTx.Outputs) > 0 {
+		for o := range tmpTx.Outputs {
+			tmpTx.Outputs[o].TransactionID = &tmpTx.ID
+		}
+		result = txn.Clauses(clause.OnConflict{
+			UpdateAll: true,
+		}).Create(&tmpTx.Outputs)
+		if result.Error != nil {
+			return fmt.Errorf("create outputs: %w", result.Error)
+		}
+	}
+	for i, input := range tx.Consumed() {
+		inTxId := input.Id().Bytes()
+		inIdx := input.Index()
+		utxo, err := d.GetUtxo(inTxId, inIdx, txn)
+		if err != nil {
+			return fmt.Errorf(
+				"failed to fetch input %x#%d: %w",
+				inTxId,
+				inIdx,
+				err,
+			)
+		}
+		if utxo == nil {
+			return fmt.Errorf("input UTxO not found: %x#%d", inTxId, inIdx)
+		}
+		// Update existing UTxOs
+		result = txn.Model(&models.Utxo{}).
+			Where("tx_id = ? AND output_idx = ?", inTxId, inIdx).
+			Updates(map[string]any{
+				"deleted_slot":   point.Slot,
+				"spent_at_tx_id": tx.Hash().Bytes(),
+			})
+		if result.Error != nil {
+			return result.Error
+		}
+		// Explicitly set consumed inputs with TransactionID set
+		tmpTx.Inputs = append(
+			tmpTx.Inputs,
+			*utxo,
+		)
+		tmpTx.Inputs[i].TransactionID = &utxo.ID
+	}
+	// Avoid updating associations
+	result = txn.Omit(clause.Associations).Save(&tmpTx.Inputs)
 	if result.Error != nil {
 		return result.Error
 	}
