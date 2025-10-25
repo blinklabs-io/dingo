@@ -155,7 +155,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 		// Set CollateralByTxId
 		result = txn.Model(&models.Utxo{}).
 			Where("tx_id = ? AND output_idx = ?", inTxId, inIdx).
-			Update("collateral_by_tx_id": txHash)
+			Update("collateral_by_tx_id", txHash)
 		if result.Error != nil {
 			return result.Error
 		}
@@ -184,7 +184,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 		// Set ReferencedByTxId
 		result = txn.Model(&models.Utxo{}).
 			Where("tx_id = ? AND output_idx = ?", inTxId, inIdx).
-			Update("referenced_by_tx_id": txHash)
+			Update("referenced_by_tx_id", txHash)
 		if result.Error != nil {
 			return result.Error
 		}
