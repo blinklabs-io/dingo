@@ -124,7 +124,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 			tmpTx.Inputs,
 			*utxo,
 		)
-		tmpTx.Inputs[i].TransactionID = &utxo.ID
+		tmpTx.Inputs[i].TransactionID = utxo.TransactionID
 	}
 	// Add Collateral to Transaction
 	for i, input := range tx.Collateral() {
@@ -147,7 +147,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 			tmpTx.Collateral,
 			*utxo,
 		)
-		tmpTx.Collateral[i].TransactionID = &utxo.ID
+		tmpTx.Collateral[i].TransactionID = utxo.TransactionID
 	}
 	// Add ReferenceInputs to Transaction
 	for i, input := range tx.ReferenceInputs() {
@@ -170,7 +170,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 			tmpTx.ReferenceInputs,
 			*utxo,
 		)
-		tmpTx.ReferenceInputs[i].TransactionID = &utxo.ID
+		tmpTx.ReferenceInputs[i].TransactionID = utxo.TransactionID
 	}
 
 	// Consume input UTxOs
