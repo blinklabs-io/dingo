@@ -164,7 +164,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 		if len(caseClauses) > 0 {
 			args := append(caseArgs, whereArgs...)
 			sql := fmt.Sprintf(
-				"UPDATE utxos SET collateral_by_tx_id = CASE %s ELSE collateral_by_tx_id END WHERE %s",
+				"UPDATE utxo SET collateral_by_tx_id = CASE %s ELSE collateral_by_tx_id END WHERE %s",
 				strings.Join(caseClauses, " "),
 				strings.Join(whereConditions, " OR "),
 			)
@@ -226,7 +226,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 		if len(caseClauses) > 0 {
 			args := append(caseArgs, whereArgs...)
 			sql := fmt.Sprintf(
-				"UPDATE utxos SET referenced_by_tx_id = CASE %s ELSE referenced_by_tx_id END WHERE %s",
+				"UPDATE utxo SET referenced_by_tx_id = CASE %s ELSE referenced_by_tx_id END WHERE %s",
 				strings.Join(caseClauses, " "),
 				strings.Join(whereConditions, " OR "),
 			)
