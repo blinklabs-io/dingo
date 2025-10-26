@@ -67,7 +67,8 @@ func (d *MetadataStoreSqlite) SetTransaction(
 	collateralReturn := tx.CollateralReturn()
 	for _, utxo := range tx.Produced() {
 		if collateralReturn != nil && utxo.Output == collateralReturn {
-			tmpTx.CollateralReturn = models.UtxoLedgerToModel(utxo, point.Slot)
+			utxo := models.UtxoLedgerToModel(utxo, point.Slot)
+			tmpTx.CollateralReturn = &utxo
 			continue
 		}
 		tmpTx.Outputs = append(
