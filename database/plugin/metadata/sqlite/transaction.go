@@ -128,7 +128,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 			)
 		}
 		if utxo == nil {
-			// Do nothing
+			d.logger.Warn("Skipping missing input UTxO", "hash", input.Id().String(), "index", inIdx)
 			continue
 		}
 		tmpTx.Inputs = append(
@@ -156,7 +156,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 				)
 			}
 			if utxo == nil {
-				// Do nothing
+				d.logger.Warn("Skipping missing collateral UTxO", "hash", input.Id().String(), "index", inIdx)
 				continue
 			}
 			caseClauses = append(caseClauses, "WHEN tx_id = ? AND output_idx = ? THEN ?")
@@ -201,7 +201,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 				)
 			}
 			if utxo == nil {
-				// Do nothing
+				d.logger.Warn("Skipping missing reference input UTxO", "hash", input.Id().String(), "index", inIdx)
 				continue
 			}
 			caseClauses = append(caseClauses, "WHEN tx_id = ? AND output_idx = ? THEN ?")
