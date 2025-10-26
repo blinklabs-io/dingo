@@ -76,8 +76,10 @@ func (d *MetadataStoreSqlite) SetTransaction(
 		)
 	}
 	result := txn.Clauses(clause.OnConflict{
-		Columns:   []clause.Column{{Name: "hash"}}, // unique txn hash
-		DoUpdates: clause.AssignmentColumns([]string{"block_hash", "block_index", "type"}),
+		Columns: []clause.Column{{Name: "hash"}}, // unique txn hash
+		DoUpdates: clause.AssignmentColumns(
+			[]string{"block_hash", "block_index", "type"},
+		),
 	}).Create(&tmpTx)
 	if result.Error != nil {
 		return fmt.Errorf("create transaction: %w", result.Error)
@@ -96,7 +98,13 @@ func (d *MetadataStoreSqlite) SetTransaction(
 			)
 		}
 		if utxo == nil {
-			d.logger.Warn("Skipping missing input UTxO", "hash", input.Id().String(), "index", inIdx)
+			d.logger.Warn(
+				"Skipping missing input UTxO",
+				"hash",
+				input.Id().String(),
+				"index",
+				inIdx,
+			)
 			continue
 		}
 		tmpTx.Inputs = append(
@@ -124,18 +132,35 @@ func (d *MetadataStoreSqlite) SetTransaction(
 				)
 			}
 			if utxo == nil {
-				d.logger.Warn("Skipping missing collateral UTxO", "hash", input.Id().String(), "index", inIdx)
+				d.logger.Warn(
+					"Skipping missing collateral UTxO",
+					"hash",
+					input.Id().String(),
+					"index",
+					inIdx,
+				)
 				continue
 			}
-			caseClauses = append(caseClauses, "WHEN tx_id = ? AND output_idx = ? THEN ?")
+			// Found the Utxo, add it to the SQL UPDATE list
+			// First, add it to the CASE statement so it's selected
+			caseClauses = append(
+				caseClauses,
+				"WHEN tx_id = ? AND output_idx = ? THEN ?",
+			)
 			caseArgs = append(caseArgs, inTxId, inIdx, txHash)
-			whereConditions = append(whereConditions, "(tx_id = ? AND output_idx = ?)")
+			// Also add it to the WHERE clause in the SQL UPDATE
+			whereConditions = append(
+				whereConditions,
+				"(tx_id = ? AND output_idx = ?)",
+			)
 			whereArgs = append(whereArgs, inTxId, inIdx)
+			// Add it to the Transaction
 			tmpTx.Collateral = append(
 				tmpTx.Collateral,
 				*utxo,
 			)
 		}
+		// Update reference where this Utxo was used as collateral in a Transaction
 		if len(caseClauses) > 0 {
 			args := append(caseArgs, whereArgs...)
 			sql := fmt.Sprintf(
@@ -169,18 +194,35 @@ func (d *MetadataStoreSqlite) SetTransaction(
 				)
 			}
 			if utxo == nil {
-				d.logger.Warn("Skipping missing reference input UTxO", "hash", input.Id().String(), "index", inIdx)
+				d.logger.Warn(
+					"Skipping missing reference input UTxO",
+					"hash",
+					input.Id().String(),
+					"index",
+					inIdx,
+				)
 				continue
 			}
-			caseClauses = append(caseClauses, "WHEN tx_id = ? AND output_idx = ? THEN ?")
+			// Found the Utxo, add it to the SQL UPDATE list
+			// First, add it to the CASE statement so it's selected
+			caseClauses = append(
+				caseClauses,
+				"WHEN tx_id = ? AND output_idx = ? THEN ?",
+			)
 			caseArgs = append(caseArgs, inTxId, inIdx, txHash)
-			whereConditions = append(whereConditions, "(tx_id = ? AND output_idx = ?)")
+			// Also add it to the WHERE clause in the SQL UPDATE
+			whereConditions = append(
+				whereConditions,
+				"(tx_id = ? AND output_idx = ?)",
+			)
 			whereArgs = append(whereArgs, inTxId, inIdx)
+			// Add it to the Transaction
 			tmpTx.ReferenceInputs = append(
 				tmpTx.ReferenceInputs,
 				*utxo,
 			)
 		}
+		// Update reference where this Utxo was used as a reference input in a Transaction
 		if len(caseClauses) > 0 {
 			args := append(caseArgs, whereArgs...)
 			sql := fmt.Sprintf(
@@ -190,7 +232,10 @@ func (d *MetadataStoreSqlite) SetTransaction(
 			)
 			result = txn.Exec(sql, args...)
 			if result.Error != nil {
-				return fmt.Errorf("batch update reference inputs: %w", result.Error)
+				return fmt.Errorf(
+					"batch update reference inputs: %w",
+					result.Error,
+				)
 			}
 		}
 	}
