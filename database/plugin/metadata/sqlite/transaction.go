@@ -82,34 +82,6 @@ func (d *MetadataStoreSqlite) SetTransaction(
 	if result.Error != nil {
 		return fmt.Errorf("create transaction: %w", result.Error)
 	}
-	// Explicitly create produced Utxos with TransactionID set
-	if tx.IsValid() && len(tmpTx.Outputs) > 0 {
-		for o := range tmpTx.Outputs {
-			tmpTx.Outputs[o].TransactionID = &tmpTx.ID
-		}
-		result = txn.Clauses(clause.OnConflict{
-			Columns:   []clause.Column{{Name: "tx_id"}, {Name: "output_idx"}},
-			UpdateAll: true,
-		}).Create(&tmpTx.Outputs)
-		if result.Error != nil {
-			return fmt.Errorf("create outputs: %w", result.Error)
-		}
-	}
-	// Explicitly create collateral return Utxo with TransactionID set
-	if collateralReturn != nil {
-		// Verify the collateral return was actually found and populated
-		if tmpTx.CollateralReturn.TxId == nil {
-			return errors.New("collateral return output not found in produced outputs")
-		}
-		tmpTx.CollateralReturn.TransactionID = &tmpTx.ID
-		result = txn.Clauses(clause.OnConflict{
-			Columns:   []clause.Column{{Name: "tx_id"}, {Name: "output_idx"}},
-			UpdateAll: true,
-		}).Create(&tmpTx.CollateralReturn)
-		if result.Error != nil {
-			return fmt.Errorf("create collateral return output: %w", result.Error)
-		}
-	}
 	// Add Inputs to Transaction
 	for _, input := range tx.Inputs() {
 		inTxId := input.Id().Bytes()
