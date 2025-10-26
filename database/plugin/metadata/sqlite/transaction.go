@@ -79,7 +79,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 	result := txn.Clauses(clause.OnConflict{
 		Columns: []clause.Column{{Name: "hash"}}, // unique txn hash
 		DoUpdates: clause.AssignmentColumns(
-			[]string{"block_hash", "block_index", "type"},
+			[]string{"block_hash", "block_index"},
 		),
 	}).Create(&tmpTx)
 	if result.Error != nil {
