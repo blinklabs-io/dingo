@@ -22,7 +22,7 @@ import (
 // Utxo represents an unspent transaction output
 type Utxo struct {
 	TransactionID    *uint  `gorm:"index"`
-	TxId             []byte `gorm:"index:tx_id_output_idx"`
+	TxId             []byte `gorm:"index:tx_id_output_idx,unique"`
 	PaymentKey       []byte `gorm:"index"`
 	StakingKey       []byte `gorm:"index"`
 	Assets           []Asset
@@ -34,7 +34,7 @@ type Utxo struct {
 	AddedSlot        uint64 `gorm:"index"`
 	DeletedSlot      uint64 `gorm:"index"`
 	Amount           uint64 `gorm:"index"`
-	OutputIdx        uint32 `gorm:"index:tx_id_output_idx"`
+	OutputIdx        uint32 `gorm:"index:tx_id_output_idx,unique"`
 }
 
 func (u *Utxo) TableName() string {
