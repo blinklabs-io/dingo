@@ -36,11 +36,7 @@ func (d *MetadataStoreSqlite) GetTransactionByHash(
 		txn = d.DB()
 	}
 	result := txn.
-		Preload("Inputs").
-		Preload("Outputs").
-		Preload("ReferenceInputs").
-		Preload("Collateral").
-		Preload("CollateralReturn").
+		Preload(clause.Associations).
 		First(ret, "hash = ?", hash)
 	if result.Error != nil {
 		if errors.Is(result.Error, gorm.ErrRecordNotFound) {
