@@ -15,8 +15,10 @@
 package sqlite
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -59,6 +61,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 		Type:       tx.Type(),
 		BlockHash:  point.Hash,
 		BlockIndex: idx,
+		Metadata:   createTransactionMetadata(tx, point, idx),
 	}
 	if tx.IsValid() {
 		for _, utxo := range tx.Produced() {
@@ -122,4 +125,25 @@ func (d *MetadataStoreSqlite) SetTransaction(
 		return result.Error
 	}
 	return nil
+}
+
+// createTransactionMetadata creates metadata for a transaction
+func createTransactionMetadata(tx lcommon.Transaction, point ocommon.Point, idx uint32) []byte {
+	metadata := map[string]interface{}{
+		"tx_hash":     fmt.Sprintf("%x", tx.Hash().Bytes()),
+		"block_hash":  fmt.Sprintf("%x", point.Hash),
+		"block_index": idx,
+		"slot":        point.Slot,
+		"timestamp":   time.Now().Unix(),
+		"is_valid":    tx.IsValid(),
+		"tx_type":     tx.Type(),
+	}
+
+	metadataBytes, err := json.Marshal(metadata)
+	if err != nil {
+		// Return empty metadata on error
+		return []byte{}
+	}
+
+	return metadataBytes
 }
