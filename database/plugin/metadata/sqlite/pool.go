@@ -149,9 +149,7 @@ func (d *MetadataStoreSqlite) SetPoolRegistration(
 	}
 	tmpPool, err := d.GetPool(cert.Operator[:], txn)
 	if err != nil {
-		if errors.Is(err, models.ErrPoolNotFound) {
-			// Do nothing :-)
-		} else {
+		if !errors.Is(err, models.ErrPoolNotFound) {
 			return err
 		}
 	}
@@ -202,11 +200,11 @@ func (d *MetadataStoreSqlite) SetPoolRegistration(
 	}
 	tmpPool.Registration = append(tmpPool.Registration, tmpReg)
 	tmpPool.Relays = tmpReg.Relays
-	onConflict := clause.OnConflict{
+	// d.logger.Debug("pool registration", "hash", tmpReg.PoolKeyHash)
+	result := txn.Clauses(clause.OnConflict{
 		Columns:   []clause.Column{{Name: "pool_key_hash"}},
 		UpdateAll: true,
-	}
-	result := txn.Clauses(onConflict).Create(&tmpPool)
+	}).Create(&tmpPool)
 	if result.Error != nil {
 		return result.Error
 	}
@@ -227,7 +225,9 @@ func (d *MetadataStoreSqlite) SetPoolRetirement(
 		return err
 	}
 	if tmpPool == nil {
-		return models.ErrPoolNotFound
+		d.logger.Warn("retiring non-existent pool", "hash", cert.PoolKeyHash)
+		tmpPool = &models.Pool{PoolKeyHash: cert.PoolKeyHash[:]}
+		// return models.ErrPoolNotFound
 	}
 	tmpItem := models.PoolRetirement{
 		PoolKeyHash: cert.PoolKeyHash[:],
