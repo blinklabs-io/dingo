@@ -15,6 +15,7 @@
 package sqlite
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -130,8 +131,8 @@ func (d *MetadataStoreSqlite) SetTransaction(
 // createTransactionMetadata creates metadata for a transaction
 func createTransactionMetadata(tx lcommon.Transaction, point ocommon.Point, idx uint32) []byte {
 	metadata := map[string]interface{}{
-		"tx_hash":     fmt.Sprintf("%x", tx.Hash().Bytes()),
-		"block_hash":  fmt.Sprintf("%x", point.Hash),
+		"tx_hash":     hex.EncodeToString(tx.Hash().Bytes()),
+		"block_hash":  hex.EncodeToString(point.Hash),
 		"block_index": idx,
 		"slot":        point.Slot,
 		"timestamp":   time.Now().Unix(),
