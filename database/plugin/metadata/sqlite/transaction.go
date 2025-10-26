@@ -255,7 +255,11 @@ func (d *MetadataStoreSqlite) SetTransaction(
 			)
 		}
 		if utxo == nil {
-			return fmt.Errorf("input UTxO not found: %x#%d", inTxId, inIdx)
+			d.logger.Warn(
+				fmt.Sprintf("input UTxO not found: %x#%d", inTxId, inIdx),
+			)
+			continue
+			// return fmt.Errorf("input UTxO not found: %x#%d", inTxId, inIdx)
 		}
 		// Update existing UTxOs
 		result = txn.Model(&models.Utxo{}).
