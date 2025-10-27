@@ -15,9 +15,11 @@
 package ledger
 
 import (
+	"errors"
 	"time"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
@@ -82,7 +84,11 @@ func (lv *LedgerView) PoolCurrentState(
 ) (*lcommon.PoolRegistrationCertificate, *uint64, error) {
 	pool, err := lv.ls.db.GetPool(pkh, lv.txn)
 	if err != nil {
-		return nil, nil, err
+		if errors.Is(err, models.ErrPoolNotFound) {
+			pool = &models.Pool{}
+		} else {
+			return nil, nil, err
+		}
 	}
 	var currentReg *lcommon.PoolRegistrationCertificate
 	if len(pool.Registration) > 0 {
