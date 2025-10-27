@@ -17,6 +17,7 @@ package sqlite
 import (
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -34,7 +35,9 @@ func (d *MetadataStoreSqlite) GetTransactionByHash(
 	if txn == nil {
 		txn = d.DB()
 	}
-	result := txn.First(ret, "hash = ?", hash)
+	result := txn.
+		Preload(clause.Associations).
+		First(ret, "hash = ?", hash)
 	if result.Error != nil {
 		if errors.Is(result.Error, gorm.ErrRecordNotFound) {
 			return nil, nil
@@ -51,40 +54,39 @@ func (d *MetadataStoreSqlite) SetTransaction(
 	idx uint32,
 	txn *gorm.DB,
 ) error {
+	txHash := tx.Hash().Bytes()
 	if txn == nil {
 		txn = d.DB()
 	}
 	tmpTx := &models.Transaction{
-		Hash:       tx.Hash().Bytes(),
+		Hash:       txHash,
 		Type:       tx.Type(),
 		BlockHash:  point.Hash,
 		BlockIndex: idx,
 	}
-	if tx.IsValid() {
-		for _, utxo := range tx.Produced() {
-			tmpTx.Outputs = append(
-				tmpTx.Outputs,
-				models.UtxoLedgerToModel(utxo, point.Slot),
-			)
+	collateralReturn := tx.CollateralReturn()
+	for _, utxo := range tx.Produced() {
+		if collateralReturn != nil && utxo.Output == collateralReturn {
+			utxo := models.UtxoLedgerToModel(utxo, point.Slot)
+			tmpTx.CollateralReturn = &utxo
+			continue
 		}
+		tmpTx.Outputs = append(
+			tmpTx.Outputs,
+			models.UtxoLedgerToModel(utxo, point.Slot),
+		)
 	}
-	result := txn.Create(&tmpTx)
+	result := txn.Clauses(clause.OnConflict{
+		Columns: []clause.Column{{Name: "hash"}}, // unique txn hash
+		DoUpdates: clause.AssignmentColumns(
+			[]string{"block_hash", "block_index"},
+		),
+	}).Create(&tmpTx)
 	if result.Error != nil {
 		return fmt.Errorf("create transaction: %w", result.Error)
 	}
-	// Explicitly create produced outputs with TransactionID set
-	if tx.IsValid() && len(tmpTx.Outputs) > 0 {
-		for o := range tmpTx.Outputs {
-			tmpTx.Outputs[o].TransactionID = &tmpTx.ID
-		}
-		result = txn.Clauses(clause.OnConflict{
-			UpdateAll: true,
-		}).Create(&tmpTx.Outputs)
-		if result.Error != nil {
-			return fmt.Errorf("create outputs: %w", result.Error)
-		}
-	}
-	for i, input := range tx.Consumed() {
+	// Add Inputs to Transaction
+	for _, input := range tx.Inputs() {
 		inTxId := input.Id().Bytes()
 		inIdx := input.Index()
 		utxo, err := d.GetUtxo(inTxId, inIdx, txn)
@@ -97,27 +99,182 @@ func (d *MetadataStoreSqlite) SetTransaction(
 			)
 		}
 		if utxo == nil {
-			return fmt.Errorf("input UTxO not found: %x#%d", inTxId, inIdx)
+			d.logger.Warn(
+				"Skipping missing input UTxO",
+				"hash",
+				input.Id().String(),
+				"index",
+				inIdx,
+			)
+			continue
 		}
-		// Update existing UTxOs
-		result = txn.Model(&models.Utxo{}).
-			Where("tx_id = ? AND output_idx = ?", inTxId, inIdx).
-			Updates(map[string]any{
-				"deleted_slot":   point.Slot,
-				"spent_at_tx_id": tx.Hash().Bytes(),
-			})
-		if result.Error != nil {
-			return result.Error
-		}
-		// Explicitly set consumed inputs with TransactionID set
 		tmpTx.Inputs = append(
 			tmpTx.Inputs,
 			*utxo,
 		)
-		tmpTx.Inputs[i].TransactionID = &utxo.ID
+	}
+	// Add Collateral to Transaction
+	if len(tx.Collateral()) > 0 {
+		var caseClauses []string
+		var whereConditions []string
+		var caseArgs []any
+		var whereArgs []any
+
+		for _, input := range tx.Collateral() {
+			inTxId := input.Id().Bytes()
+			inIdx := input.Index()
+			utxo, err := d.GetUtxo(inTxId, inIdx, txn)
+			if err != nil {
+				return fmt.Errorf(
+					"failed to fetch input %x#%d: %w",
+					inTxId,
+					inIdx,
+					err,
+				)
+			}
+			if utxo == nil {
+				d.logger.Warn(
+					"Skipping missing collateral UTxO",
+					"hash",
+					input.Id().String(),
+					"index",
+					inIdx,
+				)
+				continue
+			}
+			// Found the Utxo, add it to the SQL UPDATE list
+			// First, add it to the CASE statement so it's selected
+			caseClauses = append(
+				caseClauses,
+				"WHEN tx_id = ? AND output_idx = ? THEN ?",
+			)
+			caseArgs = append(caseArgs, inTxId, inIdx, txHash)
+			// Also add it to the WHERE clause in the SQL UPDATE
+			whereConditions = append(
+				whereConditions,
+				"(tx_id = ? AND output_idx = ?)",
+			)
+			whereArgs = append(whereArgs, inTxId, inIdx)
+			// Add it to the Transaction
+			tmpTx.Collateral = append(
+				tmpTx.Collateral,
+				*utxo,
+			)
+		}
+		// Update reference where this Utxo was used as collateral in a Transaction
+		if len(caseClauses) > 0 {
+			args := append(caseArgs, whereArgs...)
+			sql := fmt.Sprintf(
+				"UPDATE utxo SET collateral_by_tx_id = CASE %s ELSE collateral_by_tx_id END WHERE %s",
+				strings.Join(caseClauses, " "),
+				strings.Join(whereConditions, " OR "),
+			)
+			result = txn.Exec(sql, args...)
+			if result.Error != nil {
+				return fmt.Errorf("batch update collateral: %w", result.Error)
+			}
+		}
+	}
+	// Add ReferenceInputs to Transaction
+	if len(tx.ReferenceInputs()) > 0 {
+		var caseClauses []string
+		var whereConditions []string
+		var caseArgs []any
+		var whereArgs []any
+
+		for _, input := range tx.ReferenceInputs() {
+			inTxId := input.Id().Bytes()
+			inIdx := input.Index()
+			utxo, err := d.GetUtxo(inTxId, inIdx, txn)
+			if err != nil {
+				return fmt.Errorf(
+					"failed to fetch input %x#%d: %w",
+					inTxId,
+					inIdx,
+					err,
+				)
+			}
+			if utxo == nil {
+				d.logger.Warn(
+					"Skipping missing reference input UTxO",
+					"hash",
+					input.Id().String(),
+					"index",
+					inIdx,
+				)
+				continue
+			}
+			// Found the Utxo, add it to the SQL UPDATE list
+			// First, add it to the CASE statement so it's selected
+			caseClauses = append(
+				caseClauses,
+				"WHEN tx_id = ? AND output_idx = ? THEN ?",
+			)
+			caseArgs = append(caseArgs, inTxId, inIdx, txHash)
+			// Also add it to the WHERE clause in the SQL UPDATE
+			whereConditions = append(
+				whereConditions,
+				"(tx_id = ? AND output_idx = ?)",
+			)
+			whereArgs = append(whereArgs, inTxId, inIdx)
+			// Add it to the Transaction
+			tmpTx.ReferenceInputs = append(
+				tmpTx.ReferenceInputs,
+				*utxo,
+			)
+		}
+		// Update reference where this Utxo was used as a reference input in a Transaction
+		if len(caseClauses) > 0 {
+			args := append(caseArgs, whereArgs...)
+			sql := fmt.Sprintf(
+				"UPDATE utxo SET referenced_by_tx_id = CASE %s ELSE referenced_by_tx_id END WHERE %s",
+				strings.Join(caseClauses, " "),
+				strings.Join(whereConditions, " OR "),
+			)
+			result = txn.Exec(sql, args...)
+			if result.Error != nil {
+				return fmt.Errorf(
+					"batch update reference inputs: %w",
+					result.Error,
+				)
+			}
+		}
+	}
+
+	// Consume input UTxOs
+	for _, input := range tx.Consumed() {
+		inTxId := input.Id().Bytes()
+		inIdx := input.Index()
+		utxo, err := d.GetUtxo(inTxId, inIdx, txn)
+		if err != nil {
+			return fmt.Errorf(
+				"failed to fetch input %x#%d: %w",
+				inTxId,
+				inIdx,
+				err,
+			)
+		}
+		if utxo == nil {
+			d.logger.Warn(
+				fmt.Sprintf("input UTxO not found: %x#%d", inTxId, inIdx),
+			)
+			continue
+			// return fmt.Errorf("input UTxO not found: %x#%d", inTxId, inIdx)
+		}
+		// Update existing UTxOs
+		result = txn.Model(&models.Utxo{}).
+			Where("tx_id = ? AND output_idx = ?", inTxId, inIdx).
+			Where("spent_at_tx_id IS NULL OR spent_at_tx_id = ?", txHash).
+			Updates(map[string]any{
+				"deleted_slot":   point.Slot,
+				"spent_at_tx_id": txHash,
+			})
+		if result.Error != nil {
+			return result.Error
+		}
 	}
 	// Avoid updating associations
-	result = txn.Omit(clause.Associations).Save(&tmpTx.Inputs)
+	result = txn.Omit(clause.Associations).Save(&tmpTx)
 	if result.Error != nil {
 		return result.Error
 	}
