@@ -140,6 +140,11 @@ func createTransactionMetadata(tx lcommon.Transaction, point ocommon.Point, idx 
 		"tx_type":     tx.Type(),
 	}
 
+	// Include transaction metadata if present
+	if txMetadata := tx.Metadata(); txMetadata != nil {
+		metadata["tx_metadata"] = hex.EncodeToString(txMetadata.Cbor())
+	}
+
 	metadataBytes, err := json.Marshal(metadata)
 	if err != nil {
 		// Return empty metadata on error
