@@ -26,7 +26,7 @@ type Transaction struct {
 	ID               uint   `gorm:"primaryKey"`
 	Type             int
 	BlockIndex       uint32
-  Metadata   []byte
+	Metadata         []byte
 }
 
 func (Transaction) TableName() string {
