@@ -15,12 +15,9 @@
 package sqlite
 
 import (
-	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -66,7 +63,10 @@ func (d *MetadataStoreSqlite) SetTransaction(
 		Type:       tx.Type(),
 		BlockHash:  point.Hash,
 		BlockIndex: idx,
-		Metadata:   createTransactionMetadata(tx, point, idx),
+	}
+	if tx.Metadata() != nil {
+		tmpMetadata := tx.Metadata().Cbor()
+		tmpTx.Metadata = tmpMetadata
 	}
 	collateralReturn := tx.CollateralReturn()
 	for _, utxo := range tx.Produced() {
@@ -283,30 +283,4 @@ func (d *MetadataStoreSqlite) SetTransaction(
 		return result.Error
 	}
 	return nil
-}
-
-// createTransactionMetadata creates metadata for a transaction
-func createTransactionMetadata(tx lcommon.Transaction, point ocommon.Point, idx uint32) []byte {
-	metadata := map[string]interface{}{
-		"tx_hash":     hex.EncodeToString(tx.Hash().Bytes()),
-		"block_hash":  hex.EncodeToString(point.Hash),
-		"block_index": idx,
-		"slot":        point.Slot,
-		"timestamp":   time.Now().Unix(),
-		"is_valid":    tx.IsValid(),
-		"tx_type":     tx.Type(),
-	}
-
-	// Include transaction metadata if present
-	if txMetadata := tx.Metadata(); txMetadata != nil {
-		metadata["tx_metadata"] = hex.EncodeToString(txMetadata.Cbor())
-	}
-
-	metadataBytes, err := json.Marshal(metadata)
-	if err != nil {
-		// Return empty metadata on error
-		return []byte{}
-	}
-
-	return metadataBytes
 }
