@@ -16,14 +16,17 @@ package models
 
 // Transaction represents a transaction record
 type Transaction struct {
-	Hash       []byte `gorm:"uniqueIndex"`
-	BlockHash  []byte `gorm:"index"`
-	Inputs     []Utxo `gorm:"foreignKey:SpentAtTxId;references:Hash"`
-	Outputs    []Utxo `gorm:"foreignKey:TransactionID;references:ID"`
-	ID         uint   `gorm:"primaryKey"`
-	Type       int
-	BlockIndex uint32
-	Metadata   []byte
+	Hash             []byte `gorm:"uniqueIndex"`
+	BlockHash        []byte `gorm:"index"`
+	Inputs           []Utxo `gorm:"foreignKey:SpentAtTxId;references:Hash"`
+	Outputs          []Utxo `gorm:"foreignKey:TransactionID;references:ID"`
+	ReferenceInputs  []Utxo `gorm:"foreignKey:ReferencedByTxId;references:Hash"`
+	Collateral       []Utxo `gorm:"foreignKey:CollateralByTxId;references:Hash"`
+	CollateralReturn *Utxo  `gorm:"foreignKey:TransactionID;references:ID"`
+	ID               uint   `gorm:"primaryKey"`
+	Type             int
+	BlockIndex       uint32
+  Metadata   []byte
 }
 
 func (Transaction) TableName() string {
