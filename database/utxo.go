@@ -20,6 +20,7 @@ import (
 	"slices"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/dgraph-io/badger/v4"
 )
@@ -56,7 +57,16 @@ func (d *Database) AddUtxos(
 			utxoSlot.Utxo.Id.Id().Bytes(),
 			utxoSlot.Utxo.Id.Index(),
 		)
-		err := txn.Blob().Set(key, utxoSlot.Utxo.Output.Cbor())
+		utxoCbor := utxoSlot.Utxo.Output.Cbor()
+		// Encode output to CBOR if stored CBOR is empty
+		if len(utxoCbor) == 0 {
+			var err error
+			utxoCbor, err = cbor.Encode(utxoSlot.Utxo.Output)
+			if err != nil {
+				return err
+			}
+		}
+		err := txn.Blob().Set(key, utxoCbor)
 		if err != nil {
 			return err
 		}
