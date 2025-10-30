@@ -164,8 +164,8 @@ github.com/cloudflare/circl v1.6.1 h1:zqIqSPIndyBh1bjLVVDHMPpVKqp8Su/V+6MeDzzQBQ
 github.com/cloudflare/circl v1.6.1/go.mod h1:uddAzsPgqdMAYatqJ0lsjX1oECcQLIlRpzZh3pJrofs=
 github.com/cncf/xds/go v0.0.0-20250501225837-2ac532fd4443 h1:aQ3y1lwWyqYPiWZThqv1aFbZMiM9vblcSArJRf2Irls=
 github.com/cncf/xds/go v0.0.0-20250501225837-2ac532fd4443/go.mod h1:W+zGtBO5Y1IgJhy4+A9GOqVhqLpfZi+vwmdNXUehLA8=
-github.com/consensys/gnark-crypto v0.19.0 h1:zXCqeY2txSaMl6G5wFpZzMWJU9HPNh8qxPnYJ1BL9vA=
-github.com/consensys/gnark-crypto v0.19.0/go.mod h1:rT23F0XSZqE0mUA0+pRtnL56IbPxs6gp4CeRsBk4XS0=
+github.com/consensys/gnark-crypto v0.19.1 h1:FWO1JDs7A2OajswzwMG7f8l2Zrxc/yOkxSTByKTc3O0=
+github.com/consensys/gnark-crypto v0.19.1/go.mod h1:rT23F0XSZqE0mUA0+pRtnL56IbPxs6gp4CeRsBk4XS0=
 github.com/containerd/continuity v0.4.5 h1:ZRoN1sXq9u7V6QoHMcVWGhOwDFqZ4B9i5H6un1Wh0x4=
 github.com/containerd/continuity v0.4.5/go.mod h1:/lNJvtJKUQStBzpVQ1+rasXO1LAWtUQssk28EZvJ3nE=
 github.com/cpuguy83/go-md2man/v2 v2.0.6/go.mod h1:oOW0eioCTA6cOiMLiUPZOpcVxMig6NIQQ7OS05n1F4g=
