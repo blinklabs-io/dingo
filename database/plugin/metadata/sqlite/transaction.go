@@ -64,6 +64,10 @@ func (d *MetadataStoreSqlite) SetTransaction(
 		BlockHash:  point.Hash,
 		BlockIndex: idx,
 	}
+	if tx.Metadata() != nil {
+		tmpMetadata := tx.Metadata().Cbor()
+		tmpTx.Metadata = tmpMetadata
+	}
 	collateralReturn := tx.CollateralReturn()
 	for _, utxo := range tx.Produced() {
 		if collateralReturn != nil && utxo.Output == collateralReturn {
