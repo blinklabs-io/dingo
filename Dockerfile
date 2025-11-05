@@ -41,6 +41,7 @@ COPY --from=cardano-cli /usr/local/lib/ /usr/local/lib/
 COPY --from=cardano-configs /config/ /opt/cardano/config/
 COPY --from=mithril-client /bin/mithril-client /usr/local/bin/
 COPY --from=txtop /bin/txtop /usr/local/bin/
+ENV CARDANO_NODE_BINARY=dingo
 ENV CARDANO_CONFIG=/opt/cardano/config/preview/config.json
 ENV CARDANO_NETWORK=preview
 # Create database dir owned by container user
