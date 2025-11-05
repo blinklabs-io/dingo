@@ -16,11 +16,12 @@ package database
 
 import (
 	"github.com/blinklabs-io/dingo/database/models"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
 
 // GetPool returns a pool by its key hash
 func (d *Database) GetPool(
-	pkh []byte,
+	pkh lcommon.PoolKeyHash,
 	txn *Txn,
 ) (*models.Pool, error) {
 	if txn == nil {

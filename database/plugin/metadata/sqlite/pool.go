@@ -26,8 +26,7 @@ import (
 
 // GetPool gets a pool
 func (d *MetadataStoreSqlite) GetPool(
-	// pkh lcommon.PoolKeyHash,
-	pkh []byte,
+	pkh lcommon.PoolKeyHash,
 	txn *gorm.DB,
 ) (*models.Pool, error) {
 	ret := &models.Pool{}
@@ -42,7 +41,7 @@ func (d *MetadataStoreSqlite) GetPool(
 		First(
 			ret,
 			"pool_key_hash = ?",
-			pkh,
+			pkh.Bytes(),
 		)
 	if result.Error != nil {
 		if errors.Is(result.Error, gorm.ErrRecordNotFound) {
@@ -147,7 +146,7 @@ func (d *MetadataStoreSqlite) SetPoolRegistration(
 	if txn == nil {
 		txn = d.DB()
 	}
-	tmpPool, err := d.GetPool(cert.Operator[:], txn)
+	tmpPool, err := d.GetPool(lcommon.PoolKeyHash(cert.Operator[:]), txn)
 	if err != nil {
 		if !errors.Is(err, models.ErrPoolNotFound) {
 			return err
@@ -220,7 +219,7 @@ func (d *MetadataStoreSqlite) SetPoolRetirement(
 	if txn == nil {
 		txn = d.DB()
 	}
-	tmpPool, err := d.GetPool(cert.PoolKeyHash[:], txn)
+	tmpPool, err := d.GetPool(lcommon.PoolKeyHash(cert.PoolKeyHash[:]), txn)
 	if err != nil {
 		return err
 	}

@@ -80,7 +80,7 @@ func (lv *LedgerView) StakeRegistration(
 // It returns the most recent active pool registration certificate
 // and the epoch of any pending retirement for the given pool key hash.
 func (lv *LedgerView) PoolCurrentState(
-	pkh []byte,
+	pkh lcommon.PoolKeyHash,
 ) (*lcommon.PoolRegistrationCertificate, *uint64, error) {
 	pool, err := lv.ls.db.GetPool(pkh, lv.txn)
 	if err != nil {

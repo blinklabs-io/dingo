@@ -122,8 +122,8 @@ github.com/bits-and-blooms/bitset v1.20.0 h1:2F+rfL86jE2d/bmw7OhqUg2Sj/1rURkBn3M
 github.com/bits-and-blooms/bitset v1.20.0/go.mod h1:7hO7Gc7Pp1vODcmWvKMRA9BNmbv6a/7QIWpPxHddWR8=
 github.com/blang/semver v3.5.1+incompatible h1:cQNTCjp13qL8KC3Nbxr/y2Bqb63oX6wdnnjpJbkM4JQ=
 github.com/blang/semver v3.5.1+incompatible/go.mod h1:kRBLl5iJ+tD4TcOOxsy/0fnwebNt5EWlYSAyrTnjyyk=
-github.com/blinklabs-io/gouroboros v0.137.1 h1:4d3Yp50i53JiBUmpCDQQ98Wh2PsBm3HfcV/axjK789U=
-github.com/blinklabs-io/gouroboros v0.137.1/go.mod h1:6Gnhu76jzCE0p7zHmQn7TjP8t2MMghF711LgxiuLelg=
+github.com/blinklabs-io/gouroboros v0.138.0 h1:yQF18YmC/hOz6g0/z/SdwsLB1bHD8019wQRQPwabUck=
+github.com/blinklabs-io/gouroboros v0.138.0/go.mod h1:xwDWF3wRp/9l7uZ6DLfy/OFGdO4GjKomsWmv9i3le6s=
 github.com/blinklabs-io/ouroboros-mock v0.3.9 h1:UnciDccJ5tZCR1xI0BcxGZcYjJ/PS5MpnjiiGtrZ680=
 github.com/blinklabs-io/ouroboros-mock v0.3.9/go.mod h1:uTkE8/LAYL7yQSntH48Pudf5Xn+jaBWMj+9udbzYXhI=
 github.com/blinklabs-io/plutigo v0.0.13 h1:JztPigFmknQmQ3Ti1+mdTY96ihOUDh6wJ3pPnN2YYBU=
