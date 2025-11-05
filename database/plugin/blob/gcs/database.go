@@ -63,8 +63,8 @@ func New(
 
 	const prefix = "gcs://"
 	var bucketName string
-	if strings.HasPrefix(dataDir, prefix) {
-		bucketName = strings.TrimPrefix(dataDir, prefix)
+	if after, ok := strings.CutPrefix(dataDir, prefix); ok {
+		bucketName = after
 	}
 	if bucketName == "" {
 		cancel()
