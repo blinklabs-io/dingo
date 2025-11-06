@@ -123,17 +123,19 @@ func (c *ConnectionManager) startListener(l ListenerConfig) error {
 			// Add to connection manager
 			c.AddConnection(oConn)
 			// Generate event
-			c.config.EventBus.Publish(
-				InboundConnectionEventType,
-				event.NewEvent(
+			if c.config.EventBus != nil {
+				c.config.EventBus.Publish(
 					InboundConnectionEventType,
-					InboundConnectionEvent{
-						ConnectionId: oConn.Id(),
-						LocalAddr:    conn.LocalAddr(),
-						RemoteAddr:   conn.RemoteAddr(),
-					},
-				),
-			)
+					event.NewEvent(
+						InboundConnectionEventType,
+						InboundConnectionEvent{
+							ConnectionId: oConn.Id(),
+							LocalAddr:    conn.LocalAddr(),
+							RemoteAddr:   conn.RemoteAddr(),
+						},
+					),
+				)
+			}
 		}
 	}()
 	return nil

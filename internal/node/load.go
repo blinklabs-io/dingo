@@ -15,6 +15,7 @@
 package node
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"slices"
@@ -67,6 +68,9 @@ func Load(cfg *config.Config, logger *slog.Logger, immutableDir string) error {
 		return fmt.Errorf("failed to load chain manager: %w", err)
 	}
 	c := cm.PrimaryChain()
+	if c == nil {
+		return errors.New("primary chain not available")
+	}
 	// Load state
 	ls, err := ledger.NewLedgerState(
 		ledger.LedgerStateConfig{
@@ -93,6 +97,9 @@ func Load(cfg *config.Config, logger *slog.Logger, immutableDir string) error {
 	immutableTip, err := immutable.GetTip()
 	if err != nil {
 		return fmt.Errorf("failed to read immutable DB tip: %w", err)
+	}
+	if immutableTip == nil {
+		return errors.New("immutable DB tip is nil")
 	}
 	// Copy all blocks
 	logger.Info("copying blocks from immutable DB")

@@ -82,6 +82,10 @@ func (d *MetadataStoreSqlite) SetDeregistration(
 	if err != nil {
 		return err
 	}
+	if tmpAccount == nil {
+		// Account not found, nothing to deregister
+		return nil
+	}
 	tmpItem := models.Deregistration{
 		StakingKey: stakeKey,
 		AddedSlot:  slot,
@@ -143,6 +147,19 @@ func (d *MetadataStoreSqlite) SetStakeDelegation(
 	if err != nil {
 		return err
 	}
+	if tmpAccount == nil {
+		// Account not found, create a new one
+		if err := d.SetAccount(stakeKey, cert.PoolKeyHash[:], nil, slot, true, txn); err != nil {
+			return err
+		}
+		tmpAccount, err = d.GetAccount(stakeKey, txn)
+		if err != nil {
+			return err
+		}
+		if tmpAccount == nil {
+			return errors.New("failed to create account for stake key")
+		}
+	}
 	tmpItem := models.StakeDelegation{
 		StakingKey:  stakeKey,
 		PoolKeyHash: cert.PoolKeyHash[:],
@@ -177,6 +194,10 @@ func (d *MetadataStoreSqlite) SetStakeDeregistration(
 	tmpAccount, err := d.GetAccount(stakeKey, txn)
 	if err != nil {
 		return err
+	}
+	if tmpAccount == nil {
+		// Account not found, nothing to deregister
+		return nil
 	}
 	tmpItem := models.StakeDeregistration{
 		StakingKey: stakeKey,
@@ -266,7 +287,20 @@ func (d *MetadataStoreSqlite) SetStakeVoteDelegation(
 	stakeKey := cert.StakeCredential.Credential.Bytes()
 	tmpAccount, err := d.GetAccount(stakeKey, txn)
 	if err != nil {
-		return err // Account must exist
+		return err
+	}
+	if tmpAccount == nil {
+		// Account not found, create a new one
+		if err := d.SetAccount(stakeKey, cert.PoolKeyHash[:], cert.Drep.Credential[:], slot, true, txn); err != nil {
+			return err
+		}
+		tmpAccount, err = d.GetAccount(stakeKey, txn)
+		if err != nil {
+			return err
+		}
+		if tmpAccount == nil {
+			return errors.New("failed to create account for stake key")
+		}
 	}
 
 	tmpItem := models.StakeVoteDelegation{
@@ -340,6 +374,19 @@ func (d *MetadataStoreSqlite) SetVoteDelegation(
 	tmpAccount, err := d.GetAccount(stakeKey, txn)
 	if err != nil {
 		return err
+	}
+	if tmpAccount == nil {
+		// Account not found, create a new one
+		if err := d.SetAccount(stakeKey, nil, cert.Drep.Credential[:], slot, true, txn); err != nil {
+			return err
+		}
+		tmpAccount, err = d.GetAccount(stakeKey, txn)
+		if err != nil {
+			return err
+		}
+		if tmpAccount == nil {
+			return errors.New("failed to create account for stake key")
+		}
 	}
 
 	tmpItem := models.VoteDelegation{

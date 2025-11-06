@@ -49,12 +49,18 @@ type Chain struct {
 }
 
 func (c *Chain) Tip() ochainsync.Tip {
+	if c == nil {
+		return ochainsync.Tip{}
+	}
 	c.mutex.RLock()
 	defer c.mutex.RUnlock()
 	return c.currentTip
 }
 
 func (c *Chain) HeaderTip() ochainsync.Tip {
+	if c == nil {
+		return ochainsync.Tip{}
+	}
 	c.mutex.RLock()
 	defer c.mutex.RUnlock()
 	return c.headerTip()
@@ -75,6 +81,9 @@ func (c *Chain) headerTip() ochainsync.Tip {
 }
 
 func (c *Chain) AddBlockHeader(header ledger.BlockHeader) error {
+	if c == nil {
+		return errors.New("chain is nil")
+	}
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 	// Make sure header fits on chain tip
@@ -98,6 +107,9 @@ func (c *Chain) AddBlock(
 	block ledger.Block,
 	txn *database.Txn,
 ) error {
+	if c == nil {
+		return errors.New("chain is nil")
+	}
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 	// We get a write lock on the manager to cover the integrity checks and adding the block below
@@ -182,6 +194,9 @@ func (c *Chain) AddBlock(
 }
 
 func (c *Chain) AddBlocks(blocks []ledger.Block) error {
+	if c == nil {
+		return errors.New("chain is nil")
+	}
 	batchOffset := 0
 	batchSize := 0
 	for {
@@ -210,6 +225,9 @@ func (c *Chain) AddBlocks(blocks []ledger.Block) error {
 }
 
 func (c *Chain) Rollback(point ocommon.Point) error {
+	if c == nil {
+		return errors.New("chain is nil")
+	}
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 	// We get a write lock on the manager to cover the integrity checks and block deletions
@@ -313,6 +331,9 @@ func (c *Chain) HeaderCount() int {
 }
 
 func (c *Chain) HeaderRange(count int) (ocommon.Point, ocommon.Point) {
+	if c == nil {
+		return ocommon.Point{}, ocommon.Point{}
+	}
 	c.mutex.RLock()
 	defer c.mutex.RUnlock()
 	var startPoint, endPoint ocommon.Point
@@ -338,6 +359,9 @@ func (c *Chain) FromPoint(
 	point ocommon.Point,
 	inclusive bool,
 ) (*ChainIterator, error) {
+	if c == nil {
+		return nil, errors.New("chain is nil")
+	}
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 	iter, err := newChainIterator(
@@ -470,6 +494,9 @@ func (c *Chain) reconcile() error {
 	}
 	// Check our blocks against primary chain until we find a match
 	primaryChain := c.manager.PrimaryChain()
+	if primaryChain == nil {
+		return models.ErrBlockNotFound
+	}
 	for i := len(c.blocks) - 1; i >= 0; i-- {
 		tmpBlock, err := primaryChain.blockByIndex(
 			// Add 1 to prevent off-by-one error

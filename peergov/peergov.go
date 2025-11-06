@@ -120,7 +120,7 @@ func (p *PeerGovernor) LoadTopologyConfig(
 			}
 			for i, peer := range p.peers {
 				// This peer already appears, remove it
-				if peer.Address == tmpAddress {
+				if peer != nil && peer.Address == tmpAddress {
 					copy(p.peers[i:], p.peers[i+1:])   // shift left
 					p.peers[len(p.peers)-1] = nil      // clear last
 					p.peers = p.peers[:len(p.peers)-1] // truncate
@@ -143,7 +143,7 @@ func (p *PeerGovernor) LoadTopologyConfig(
 			}
 			for i, peer := range p.peers {
 				// This peer already appears, remove it
-				if peer.Address == tmpAddress {
+				if peer != nil && peer.Address == tmpAddress {
 					copy(p.peers[i:], p.peers[i+1:])   // shift left
 					p.peers[len(p.peers)-1] = nil      // clear last
 					p.peers = p.peers[:len(p.peers)-1] // truncate
@@ -157,16 +157,18 @@ func (p *PeerGovernor) LoadTopologyConfig(
 func (p *PeerGovernor) GetPeers() []Peer {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	ret := make([]Peer, len(p.peers))
-	for idx, peer := range p.peers {
-		ret[idx] = *peer
+	ret := make([]Peer, 0, len(p.peers))
+	for _, peer := range p.peers {
+		if peer != nil {
+			ret = append(ret, *peer)
+		}
 	}
 	return ret
 }
 
 func (p *PeerGovernor) peerIndexByAddress(address string) int {
 	for idx, tmpPeer := range p.peers {
-		if tmpPeer.Address == address {
+		if tmpPeer != nil && tmpPeer.Address == address {
 			return idx
 		}
 	}
@@ -175,7 +177,7 @@ func (p *PeerGovernor) peerIndexByAddress(address string) int {
 
 func (p *PeerGovernor) peerIndexByConnId(connId ouroboros.ConnectionId) int {
 	for idx, tmpPeer := range p.peers {
-		if tmpPeer.Connection == nil {
+		if tmpPeer == nil || tmpPeer.Connection == nil {
 			continue
 		}
 		if tmpPeer.Connection.Id == connId {
@@ -201,11 +203,16 @@ func (p *PeerGovernor) startOutboundConnections() {
 	)
 
 	for _, tmpPeer := range p.peers {
-		go p.createOutboundConnection(tmpPeer)
+		if tmpPeer != nil {
+			go p.createOutboundConnection(tmpPeer)
+		}
 	}
 }
 
 func (p *PeerGovernor) createOutboundConnection(peer *Peer) {
+	if peer == nil {
+		return
+	}
 	for {
 		conn, err := p.config.ConnManager.CreateOutboundConn(peer.Address)
 		if err == nil {
@@ -270,6 +277,9 @@ func (p *PeerGovernor) handleInboundConnectionEvent(evt event.Event) {
 	} else {
 		tmpPeer = p.peers[peerIdx]
 	}
+	if tmpPeer == nil {
+		return
+	}
 	conn := p.config.ConnManager.GetConnectionById(e.ConnectionId)
 	tmpPeer.setConnection(conn, false)
 	if tmpPeer.Connection != nil {
@@ -295,7 +305,7 @@ func (p *PeerGovernor) handleConnectionClosedEvent(evt event.Event) {
 		)
 	}
 	peerIdx := p.peerIndexByConnId(e.ConnectionId)
-	if peerIdx != -1 {
+	if peerIdx != -1 && p.peers[peerIdx] != nil {
 		p.peers[peerIdx].Connection = nil
 		if p.peers[peerIdx].Source != PeerSourceInboundConn {
 			go p.createOutboundConnection(p.peers[peerIdx])

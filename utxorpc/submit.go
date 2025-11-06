@@ -73,20 +73,23 @@ func (s *submitServiceServer) SubmitTx(
 			continue
 		}
 		tx, err := gledger.NewTransactionFromCbor(txType, txRawBytes)
-		txHash := tx.Hash()
 		if err != nil {
 			resp.Ref = append(resp.Ref, placeholderRef)
 			errorList[i] = err
 			s.utxorpc.config.Logger.Error(
-				fmt.Sprintf(
-					"failed decoding tx %d: %v",
-					i,
-					err,
-				),
+				"failed to decode transaction from CBOR: " + err.Error(),
 			)
 			hasError = true
 			continue
 		}
+		if tx == nil {
+			resp.Ref = append(resp.Ref, placeholderRef)
+			errorList[i] = errors.New("decoded transaction is nil")
+			s.utxorpc.config.Logger.Error("decoded transaction is nil")
+			hasError = true
+			continue
+		}
+		txHash := tx.Hash()
 		// Add transaction to mempool
 		err = s.utxorpc.config.Mempool.AddTransaction(txType, txRawBytes)
 		if err != nil {
