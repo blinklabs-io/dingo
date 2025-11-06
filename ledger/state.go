@@ -418,6 +418,103 @@ func (ls *LedgerState) consumeUtxo(
 	)
 }
 
+// calculateStabilityWindow returns the stability window based on the current era.
+// For Byron era, returns 2k. For Shelley+ eras, returns 3k/f.
+// Returns the default threshold if genesis data is unavailable or invalid.
+func (ls *LedgerState) calculateStabilityWindow() uint64 {
+	if ls.config.CardanoNodeConfig == nil {
+		ls.config.Logger.Warn(
+			"cardano node config is nil, using default stability window",
+		)
+		return blockfetchBatchSlotThresholdDefault
+	}
+
+	// Byron era only needs Byron genesis
+	if ls.currentEra.Id == 0 {
+		byronGenesis := ls.config.CardanoNodeConfig.ByronGenesis()
+		if byronGenesis == nil {
+			return blockfetchBatchSlotThresholdDefault
+		}
+		k := byronGenesis.ProtocolConsts.K
+		if k < 0 {
+			ls.config.Logger.Warn("invalid negative security parameter", "k", k)
+			return blockfetchBatchSlotThresholdDefault
+		}
+		if k == 0 {
+			ls.config.Logger.Warn("security parameter is zero", "k", k)
+			return blockfetchBatchSlotThresholdDefault
+		}
+		// Byron stability window is 2k slots
+		return uint64(k) * 2 // #nosec G115
+	}
+
+	// Shelley+ eras only need Shelley genesis
+	shelleyGenesis := ls.config.CardanoNodeConfig.ShelleyGenesis()
+	if shelleyGenesis == nil {
+		return blockfetchBatchSlotThresholdDefault
+	}
+	k := shelleyGenesis.SecurityParam
+	if k < 0 {
+		ls.config.Logger.Warn("invalid negative security parameter", "k", k)
+		return blockfetchBatchSlotThresholdDefault
+	}
+	if k == 0 {
+		ls.config.Logger.Warn("security parameter is zero", "k", k)
+		return blockfetchBatchSlotThresholdDefault
+	}
+	securityParam := uint64(k)
+
+	// Calculate 3k/f
+	activeSlotsCoeff := shelleyGenesis.ActiveSlotsCoeff.Rat
+	if activeSlotsCoeff == nil {
+		ls.config.Logger.Warn("ActiveSlotsCoeff.Rat is nil")
+		return blockfetchBatchSlotThresholdDefault
+	}
+
+	if activeSlotsCoeff.Num().Sign() <= 0 {
+		ls.config.Logger.Warn(
+			"ActiveSlotsCoeff must be positive",
+			"active_slots_coeff",
+			activeSlotsCoeff.String(),
+		)
+		return blockfetchBatchSlotThresholdDefault
+	}
+
+	numerator := new(big.Int).SetUint64(securityParam)
+	numerator.Mul(numerator, big.NewInt(3))
+	numerator.Mul(numerator, activeSlotsCoeff.Denom())
+	denominator := new(big.Int).Set(activeSlotsCoeff.Num())
+	window, remainder := new(
+		big.Int,
+	).QuoRem(numerator, denominator, new(big.Int))
+	if remainder.Sign() != 0 {
+		window.Add(window, big.NewInt(1))
+	}
+	if window.Sign() <= 0 {
+		ls.config.Logger.Warn(
+			"stability window calculation produced non-positive result",
+			"security_param",
+			securityParam,
+			"active_slots_coeff",
+			activeSlotsCoeff.String(),
+		)
+		return blockfetchBatchSlotThresholdDefault
+	}
+	if !window.IsUint64() {
+		ls.config.Logger.Warn(
+			"stability window calculation overflowed uint64",
+			"security_param",
+			securityParam,
+			"active_slots_coeff",
+			activeSlotsCoeff.String(),
+			"window_num",
+			window.String(),
+		)
+		return blockfetchBatchSlotThresholdDefault
+	}
+	return window.Uint64()
+}
+
 type readChainResult struct {
 	rollbackPoint ocommon.Point
 	blocks        []ledger.Block
@@ -606,26 +703,11 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 					// Enable validation using the k-slot window from ShelleyGenesis.
 					if !shouldValidate && i == 0 {
 						var cutoffSlot uint64
-						// Get parameters from Shelley Genesis
-						shelleyGenesis := ls.config.CardanoNodeConfig.ShelleyGenesis()
-						if shelleyGenesis == nil {
-							return errors.New(
-								"failed to get Shelley Genesis config",
-							)
-						}
-						// Get security parameter (k)
-						k := shelleyGenesis.SecurityParam
-						if k < 0 {
-							return fmt.Errorf(
-								"security param must be non-negative: %d",
-								k,
-							)
-						}
-						securityParam := uint64(k)
+						stabilityWindow := ls.calculateStabilityWindow()
 						currentTipSlot := ls.currentTip.Point.Slot
 						blockSlot := next.SlotNumber()
-						if currentTipSlot >= securityParam {
-							cutoffSlot = currentTipSlot - securityParam
+						if currentTipSlot >= stabilityWindow {
+							cutoffSlot = currentTipSlot - stabilityWindow
 						} else {
 							cutoffSlot = 0
 						}
@@ -635,8 +717,8 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 							shouldValidate = true
 							ls.config.Logger.Debug(
 								"enabling validation as block within k-slot window",
-								"security_param",
-								securityParam,
+								"stability_window",
+								stabilityWindow,
 								"currentTipSlot",
 								currentTipSlot,
 								"cutoffSlot",
@@ -648,7 +730,8 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 							shouldValidate = false
 							ls.config.Logger.Debug(
 								"skipping validation as block is older than k-slot window",
-								"security_param", securityParam,
+								"stability_window",
+								stabilityWindow,
 								"currentTipSlot", currentTipSlot,
 								"cutoffSlot", cutoffSlot,
 								"blockSlot", blockSlot,
