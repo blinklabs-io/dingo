@@ -102,6 +102,12 @@ type LedgerState struct {
 }
 
 func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
+	if cfg.ChainManager == nil {
+		return nil, errors.New("a ChainManager is required")
+	}
+	if cfg.Database == nil {
+		return nil, errors.New("a Database is required")
+	}
 	ls := &LedgerState{
 		config:         cfg,
 		chainsyncState: InitChainsyncState,
@@ -120,18 +126,24 @@ func (ls *LedgerState) Start() error {
 	// Init metrics
 	ls.metrics.init(ls.config.PromRegistry)
 	// Setup event handlers
-	ls.config.EventBus.SubscribeFunc(
-		ChainsyncEventType,
-		ls.handleEventChainsync,
-	)
-	ls.config.EventBus.SubscribeFunc(
-		BlockfetchEventType,
-		ls.handleEventBlockfetch,
-	)
+	if ls.config.EventBus != nil {
+		ls.config.EventBus.SubscribeFunc(
+			ChainsyncEventType,
+			ls.handleEventChainsync,
+		)
+		ls.config.EventBus.SubscribeFunc(
+			BlockfetchEventType,
+			ls.handleEventBlockfetch,
+		)
+	}
 	// Schedule periodic process to purge consumed UTxOs outside of the rollback window
 	ls.scheduleCleanupConsumedUtxos()
 	// Load epoch info from DB
-	if err := ls.loadEpochs(nil); err != nil {
+	txn := ls.db.Transaction(false)
+	err := txn.Do(func(txn *database.Txn) error {
+		return ls.loadEpochs(txn)
+	})
+	if err != nil {
 		return fmt.Errorf("failed to load epoch info: %w", err)
 	}
 	ls.checkpointWrittenForEpoch = false
@@ -1099,18 +1111,24 @@ func (ls *LedgerState) forgeBlock() {
 		return
 	}
 
+	// Safely cast protocol parameters to Conway type
+	conwayPParams, ok := pparams.(*conway.ConwayProtocolParameters)
+	if !ok {
+		ls.config.Logger.Error(
+			"protocol parameters are not Conway type",
+			"component", "ledger",
+		)
+		return
+	}
+
 	var (
 		transactionBodies      []conway.ConwayTransactionBody
 		transactionWitnessSets []conway.ConwayTransactionWitnessSet
 		blockSize              uint64
 		totalExUnits           lcommon.ExUnits
-		maxTxSize              = uint64(
-			pparams.(*conway.ConwayProtocolParameters).MaxTxSize,
-		)
-		maxBlockSize = uint64(
-			pparams.(*conway.ConwayProtocolParameters).MaxBlockBodySize,
-		)
-		maxExUnits = pparams.(*conway.ConwayProtocolParameters).MaxBlockExUnits
+		maxTxSize              = uint64(conwayPParams.MaxTxSize)
+		maxBlockSize           = uint64(conwayPParams.MaxBlockBodySize)
+		maxExUnits             = conwayPParams.MaxBlockExUnits
 	)
 
 	ls.config.Logger.Debug(

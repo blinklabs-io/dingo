@@ -61,6 +61,9 @@ func NewManager(
 }
 
 func (cm *ChainManager) PrimaryChain() *Chain {
+	if cm.chains == nil {
+		return nil
+	}
 	return cm.chains[primaryChainId]
 }
 
@@ -73,6 +76,9 @@ func (cm *ChainManager) NewChain(point ocommon.Point) (*Chain, error) {
 	cm.mutex.Lock()
 	defer cm.mutex.Unlock()
 	primaryChain := cm.PrimaryChain()
+	if primaryChain == nil {
+		return nil, errors.New("primary chain not available")
+	}
 	primaryChain.mutex.Lock()
 	defer primaryChain.mutex.Unlock()
 	intersectBlock, err := cm.BlockByPoint(point, nil)
@@ -108,6 +114,9 @@ func (cm *ChainManager) NewChainFromIntersect(
 	cm.mutex.Lock()
 	defer cm.mutex.Unlock()
 	primaryChain := cm.PrimaryChain()
+	if primaryChain == nil {
+		return nil, errors.New("primary chain not available")
+	}
 	primaryChain.mutex.Lock()
 	defer primaryChain.mutex.Unlock()
 	tip := primaryChain.currentTip

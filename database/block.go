@@ -121,7 +121,11 @@ func blockByKey(txn *Txn, blockKey []byte) (models.Block, error) {
 		Slot: point.Slot,
 		Hash: point.Hash,
 	}
-	item, err := txn.Blob().Get(blockKey)
+	blobTxn := txn.Blob()
+	if blobTxn == nil {
+		return ret, errors.New("blob transaction is not available")
+	}
+	item, err := blobTxn.Get(blockKey)
 	if err != nil {
 		if errors.Is(err, badger.ErrKeyNotFound) {
 			return ret, models.ErrBlockNotFound
@@ -238,6 +242,9 @@ func BlockBeforeSlot(db *Database, slotNumber uint64) (models.Block, error) {
 }
 
 func BlockBeforeSlotTxn(txn *Txn, slotNumber uint64) (models.Block, error) {
+	if txn == nil || txn.Blob() == nil {
+		return models.Block{}, errors.New("valid blob transaction is required")
+	}
 	iterOpts := badger.IteratorOptions{
 		Reverse: true,
 	}
