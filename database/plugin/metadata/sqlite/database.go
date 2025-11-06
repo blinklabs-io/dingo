@@ -25,23 +25,12 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/plugin"
 	"github.com/glebarez/sqlite"
 	"github.com/prometheus/client_golang/prometheus"
 	"gorm.io/gorm"
 	gormlogger "gorm.io/gorm/logger"
 	"gorm.io/plugin/opentelemetry/tracing"
 )
-
-// Register plugin
-func init() {
-	plugin.Register(
-		plugin.PluginEntry{
-			Type: plugin.PluginTypeMetadata,
-			Name: "sqlite",
-		},
-	)
-}
 
 // MetadataStoreSqlite stores all data in sqlite. Data may not be persisted
 type MetadataStoreSqlite struct {
