@@ -18,7 +18,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"math/big"
 	"slices"
 	"time"
 
@@ -36,9 +35,8 @@ const (
 	// This prevents us exceeding the configured recv queue size in the block-fetch protocol
 	blockfetchBatchSize = 500
 
-	// TODO: calculate from protocol params
-	// Number of slots from upstream tip to stop doing blockfetch batches
-	blockfetchBatchSlotThreshold = 2500 * 20
+	// Default/fallback slot threshold for blockfetch batches
+	blockfetchBatchSlotThresholdDefault = 2500 * 20
 
 	// Timeout for updates on a blockfetch operation. This is based on a 2s BatchStart
 	// and a 2s Block timeout for blockfetch
@@ -141,8 +139,10 @@ func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 	}
 	// Wait for additional block headers before fetching block bodies if we're
 	// far enough out from upstream tip
+	// Use security window as slot threshold if available
+	slotThreshold := ls.calculateStabilityWindow()
 	if e.Point.Slot < e.Tip.Point.Slot &&
-		(e.Tip.Point.Slot-e.Point.Slot > blockfetchBatchSlotThreshold) &&
+		(e.Tip.Point.Slot-e.Point.Slot > slotThreshold) &&
 		(headerCount+1) < allowedHeaderCount {
 		return nil
 	}
@@ -258,6 +258,9 @@ func (ls *LedgerState) calculateEpochNonce(
 	}
 	// Use Shelley genesis hash for initial epoch nonce
 	if len(ls.currentEpoch.Nonce) == 0 {
+		if ls.config.CardanoNodeConfig.ShelleyGenesisHash == "" {
+			return nil, errors.New("could not get Shelley genesis hash")
+		}
 		genesisHashBytes, err := hex.DecodeString(
 			ls.config.CardanoNodeConfig.ShelleyGenesisHash,
 		)
@@ -267,18 +270,7 @@ func (ls *LedgerState) calculateEpochNonce(
 		return genesisHashBytes, nil
 	}
 	// Calculate stability window
-	byronGenesis := ls.config.CardanoNodeConfig.ByronGenesis()
-	shelleyGenesis := ls.config.CardanoNodeConfig.ShelleyGenesis()
-	if byronGenesis == nil || shelleyGenesis == nil {
-		return nil, errors.New("could not get genesis config")
-	}
-	stabilityWindow := new(big.Rat).Quo(
-		big.NewRat(
-			int64(3*byronGenesis.ProtocolConsts.K),
-			1,
-		),
-		shelleyGenesis.ActiveSlotsCoeff.Rat,
-	).Num().Uint64()
+	stabilityWindow := ls.calculateStabilityWindow()
 	var stabilityWindowStartSlot uint64
 	if epochStartSlot > stabilityWindow {
 		stabilityWindowStartSlot = epochStartSlot - stabilityWindow
