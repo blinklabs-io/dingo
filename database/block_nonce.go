@@ -14,16 +14,19 @@
 
 package database
 
-// GetBlockNonce fetches the block nonce for a given slot/hash
+import (
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+)
+
+// GetBlockNonce fetches the block nonce for a given chain point
 func (d *Database) GetBlockNonce(
-	blockHash []byte,
-	slotNumber uint64,
+	point ocommon.Point,
 	txn *Txn,
 ) ([]byte, error) {
 	if txn == nil {
-		return d.metadata.GetBlockNonce(blockHash, slotNumber, nil)
+		return d.metadata.GetBlockNonce(point, nil)
 	}
-	return d.metadata.GetBlockNonce(blockHash, slotNumber, txn.Metadata())
+	return d.metadata.GetBlockNonce(point, txn.Metadata())
 }
 
 // DeleteBlockNoncesBeforeSlot removes all block_nonces older than the given slot number

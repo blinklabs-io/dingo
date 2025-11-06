@@ -969,8 +969,7 @@ func (ls *LedgerState) loadTip() error {
 	// Load tip block and set cached block nonce
 	if ls.currentTip.Point.Slot > 0 {
 		tipNonce, err := ls.db.GetBlockNonce(
-			tmpTip.Point.Hash,
-			tmpTip.Point.Slot,
+			tmpTip.Point,
 			nil,
 		)
 		if err != nil {

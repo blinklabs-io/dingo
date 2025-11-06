@@ -18,6 +18,7 @@ import (
 	"errors"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"gorm.io/gorm"
 )
 
@@ -52,25 +53,18 @@ func (d *MetadataStoreSqlite) SetBlockNonce(
 
 // GetBlockNonce retrieves the block nonce for a specific block
 func (d *MetadataStoreSqlite) GetBlockNonce(
-	blockHash []byte,
-	slotNumber uint64,
+	point ocommon.Point,
 	txn *gorm.DB,
 ) ([]byte, error) {
 	ret := models.BlockNonce{}
-	if txn != nil {
-		result := txn.Where("hash = ? AND slot = ?", blockHash, slotNumber).
-			First(&ret)
-		if result.Error != nil {
-			if !errors.Is(result.Error, gorm.ErrRecordNotFound) {
-				return nil, result.Error
-			}
-		}
-	} else {
-		result := d.DB().Where("hash = ? AND slot = ?", blockHash, slotNumber).First(&ret)
-		if result.Error != nil {
-			if !errors.Is(result.Error, gorm.ErrRecordNotFound) {
-				return nil, result.Error
-			}
+	if txn == nil {
+		txn = d.DB()
+	}
+	result := txn.Where("hash = ? AND slot = ?", point.Hash, point.Slot).
+		First(&ret)
+	if result.Error != nil {
+		if !errors.Is(result.Error, gorm.ErrRecordNotFound) {
+			return nil, result.Error
 		}
 	}
 	return ret.Nonce, nil
