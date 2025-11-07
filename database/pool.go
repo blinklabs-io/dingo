@@ -15,8 +15,8 @@
 package database
 
 import (
-	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/dingo/database/models"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
 
 // GetPool returns a pool by its key hash
