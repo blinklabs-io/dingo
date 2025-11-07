@@ -286,8 +286,10 @@ func (ls *LedgerState) calculateEpochNonce(
 		return nil, fmt.Errorf("lookup block before slot: %w", err)
 	}
 	blockBeforeStabilityWindowNonce, err := ls.db.GetBlockNonce(
-		blockBeforeStabilityWindow.Hash,
-		blockBeforeStabilityWindow.Slot,
+		ocommon.Point{
+			Hash: blockBeforeStabilityWindow.Hash,
+			Slot: blockBeforeStabilityWindow.Slot,
+		},
 		txn,
 	)
 	if err != nil {

@@ -59,8 +59,7 @@ type MetadataStore interface {
 		*gorm.DB,
 	) (*models.Account, error)
 	GetBlockNonce(
-		[]byte, // blockHash
-		uint64, // slotNumber
+		ocommon.Point,
 		*gorm.DB,
 	) ([]byte, error)
 	GetDatum(

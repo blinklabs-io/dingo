@@ -64,10 +64,9 @@ func (lv *LedgerView) UtxoById(
 }
 
 func (lv *LedgerView) PoolRegistration(
-	pkh []byte,
+	pkh lcommon.PoolKeyHash,
 ) ([]lcommon.PoolRegistrationCertificate, error) {
-	poolKeyHash := lcommon.PoolKeyHash(lcommon.NewBlake2b224(pkh))
-	return lv.ls.db.GetPoolRegistrations(poolKeyHash, lv.txn)
+	return lv.ls.db.GetPoolRegistrations(pkh, lv.txn)
 }
 
 func (lv *LedgerView) StakeRegistration(
