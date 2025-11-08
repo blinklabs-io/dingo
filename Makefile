@@ -43,6 +43,10 @@ golines:
 test: mod-tidy
 	go test -v -race ./...
 
+test-load:
+	rm -rf .dingo
+	go run ./cmd/dingo load database/immutable/testdata
+
 # Build our program binaries
 # Depends on GO_FILES to determine when rebuild is needed
 $(BINARIES): mod-tidy $(GO_FILES)
