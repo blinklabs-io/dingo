@@ -14,7 +14,12 @@
 
 package models
 
-import "errors"
+import (
+	"errors"
+	"fmt"
+
+	"github.com/btcsuite/btcd/btcutil/bech32"
+)
 
 var ErrAccountNotFound = errors.New("account not found")
 
@@ -30,6 +35,25 @@ type Account struct {
 
 func (a *Account) TableName() string {
 	return "account"
+}
+
+// String returns the bech32-encoded representation of the Account's StakingKey
+// with the "stake" human-readable part. Returns an error if the StakingKey is
+// empty or if encoding fails.
+func (a *Account) String() (string, error) {
+	if len(a.StakingKey) == 0 {
+		return "", errors.New("staking key is empty")
+	}
+	// Convert data to base32 and encode as bech32
+	convData, err := bech32.ConvertBits(a.StakingKey, 8, 5, true)
+	if err != nil {
+		return "", fmt.Errorf("failed to convert bits: %w", err)
+	}
+	encoded, err := bech32.Encode("stake", convData)
+	if err != nil {
+		return "", fmt.Errorf("failed to encode bech32: %w", err)
+	}
+	return encoded, nil
 }
 
 type Deregistration struct {
