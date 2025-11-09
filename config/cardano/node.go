@@ -15,6 +15,7 @@
 package cardano
 
 import (
+	"embed"
 	"io"
 	"os"
 	"path"
@@ -27,19 +28,21 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// CardanoNodeConfig represents the config.json/yaml file used by cardano-node
+// CardanoNodeConfig represents the config.json/yaml file used by cardano-node.
 type CardanoNodeConfig struct {
-	path               string
+	// Embedded filesystem for loading genesis files
+	embedFS            embed.FS
 	alonzoGenesis      *alonzo.AlonzoGenesis
+	byronGenesis       *byron.ByronGenesis
+	conwayGenesis      *conway.ConwayGenesis
+	shelleyGenesis     *shelley.ShelleyGenesis
+	path               string
 	AlonzoGenesisFile  string `yaml:"AlonzoGenesisFile"`
 	AlonzoGenesisHash  string `yaml:"AlonzoGenesisHash"`
-	byronGenesis       *byron.ByronGenesis
 	ByronGenesisFile   string `yaml:"ByronGenesisFile"`
 	ByronGenesisHash   string `yaml:"ByronGenesisHash"`
-	conwayGenesis      *conway.ConwayGenesis
 	ConwayGenesisFile  string `yaml:"ConwayGenesisFile"`
 	ConwayGenesisHash  string `yaml:"ConwayGenesisHash"`
-	shelleyGenesis     *shelley.ShelleyGenesis
 	ShelleyGenesisFile string `yaml:"ShelleyGenesisFile"`
 	ShelleyGenesisHash string `yaml:"ShelleyGenesisHash"`
 }
@@ -64,6 +67,31 @@ func NewCardanoNodeConfigFromFile(file string) (*CardanoNodeConfig, error) {
 	}
 	c.path = path.Dir(file)
 	if err := c.loadGenesisConfigs(); err != nil {
+		return nil, err
+	}
+	return c, nil
+}
+
+// NewCardanoNodeConfigFromEmbedFS creates a CardanoNodeConfig from an embedded filesystem.
+// It loads the main config file and all referenced genesis files from the embedded FS.
+// The file parameter should be a path relative to the root of the embedded filesystem.
+func NewCardanoNodeConfigFromEmbedFS(
+	fs embed.FS,
+	file string,
+) (*CardanoNodeConfig, error) {
+	f, err := fs.Open(file)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	c, err := NewCardanoNodeConfigFromReader(f)
+	if err != nil {
+		return nil, err
+	}
+	c.path = path.Dir(file)
+	c.embedFS = fs // Store reference to embedded FS
+	if err := c.loadGenesisConfigsFromEmbed(); err != nil {
 		return nil, err
 	}
 	return c, nil
@@ -124,6 +152,79 @@ func (c *CardanoNodeConfig) loadGenesisConfigs() error {
 		}
 		c.conwayGenesis = &conwayGenesis
 	}
+	return nil
+}
+
+// loadGenesisFromEmbedFS loads a single genesis file from the embedded filesystem.
+// It handles path resolution and file opening/closing automatically.
+func (c *CardanoNodeConfig) loadGenesisFromEmbedFS(
+	filename string,
+) (io.ReadCloser, error) {
+	if filename == "" {
+		return nil, nil
+	}
+
+	genesisPath := filename
+	genesisPath = path.Join(c.path, genesisPath)
+
+	f, err := c.embedFS.Open(genesisPath)
+	if err != nil {
+		return nil, err
+	}
+	return f, nil
+}
+
+// loadGenesisConfigsFromEmbed loads all genesis configuration files from the embedded filesystem.
+// This method mirrors loadGenesisConfigs but reads from embed.FS instead of the regular filesystem.
+func (c *CardanoNodeConfig) loadGenesisConfigsFromEmbed() error {
+	// Load Byron genesis
+	if f, err := c.loadGenesisFromEmbedFS(c.ByronGenesisFile); err != nil {
+		return err
+	} else if f != nil {
+		defer f.Close()
+		byronGenesis, err := byron.NewByronGenesisFromReader(f)
+		if err != nil {
+			return err
+		}
+		c.byronGenesis = &byronGenesis
+	}
+
+	// Load Shelley genesis
+	if f, err := c.loadGenesisFromEmbedFS(c.ShelleyGenesisFile); err != nil {
+		return err
+	} else if f != nil {
+		defer f.Close()
+		shelleyGenesis, err := shelley.NewShelleyGenesisFromReader(f)
+		if err != nil {
+			return err
+		}
+		c.shelleyGenesis = &shelleyGenesis
+	}
+
+	// Load Alonzo genesis
+	if f, err := c.loadGenesisFromEmbedFS(c.AlonzoGenesisFile); err != nil {
+		return err
+	} else if f != nil {
+		defer f.Close()
+		alonzoGenesis, err := alonzo.NewAlonzoGenesisFromReader(f)
+		if err != nil {
+			return err
+		}
+		c.alonzoGenesis = &alonzoGenesis
+	}
+
+	// Load Conway genesis
+	if f, err := c.loadGenesisFromEmbedFS(c.ConwayGenesisFile); err != nil {
+		return err
+	} else if f != nil {
+		defer f.Close()
+		conwayGenesis, err := conway.NewConwayGenesisFromReader(f)
+		if err != nil {
+			return err
+		}
+		c.conwayGenesis = &conwayGenesis
+	}
+
 	return nil
 }
 
