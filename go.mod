@@ -12,6 +12,7 @@ require (
 	github.com/blinklabs-io/gouroboros v0.138.0
 	github.com/blinklabs-io/ouroboros-mock v0.3.9
 	github.com/blinklabs-io/plutigo v0.0.13
+	github.com/btcsuite/btcd/btcutil v1.1.6
 	github.com/dgraph-io/badger/v4 v4.8.0
 	github.com/getsops/sops/v3 v3.11.0
 	github.com/glebarez/sqlite v1.11.0
@@ -84,7 +85,6 @@ require (
 	github.com/bits-and-blooms/bitset v1.20.0 // indirect
 	github.com/blang/semver v3.5.1+incompatible // indirect
 	github.com/btcsuite/btcd/btcec/v2 v2.3.5 // indirect
-	github.com/btcsuite/btcd/btcutil v1.1.6 // indirect
 	github.com/btcsuite/btcd/chaincfg/chainhash v1.1.0 // indirect
 	github.com/cenkalti/backoff/v4 v4.3.0 // indirect
 	github.com/cenkalti/backoff/v5 v5.0.3 // indirect
