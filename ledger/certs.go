@@ -15,9 +15,11 @@
 package ledger
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	pcommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -27,15 +29,15 @@ func (ls *LedgerState) processTransactionCertificates(
 	txn *database.Txn,
 	blockPoint pcommon.Point,
 	certs []ledger.Certificate,
+	blockEraId uint,
 ) error {
 	var tmpCert lcommon.Certificate
 	for _, tmpCert = range certs {
-		certDeposit, err := ls.currentEra.CertDepositFunc(
-			tmpCert,
-			ls.currentPParams,
-		)
+		// Calculate certificate deposits using the block's era functions
+		// This ensures we use the correct era-specific logic instead of current era
+		certDeposit, err := ls.calculateCertificateDeposit(tmpCert, blockEraId)
 		if err != nil {
-			return fmt.Errorf("failed load cert deposit func: %w", err)
+			return fmt.Errorf("get certificate deposit: %w", err)
 		}
 		switch cert := tmpCert.(type) {
 		case *lcommon.DeregistrationCertificate:
@@ -188,4 +190,37 @@ func (ls *LedgerState) processTransactionCertificates(
 		}
 	}
 	return nil
+}
+
+// calculateCertificateDeposit calculates the certificate deposit using the appropriate era's
+// certificate deposit function. This ensures we use the correct era-specific logic instead
+// of always using the current era, which may not match the block's era for historical data.
+func (ls *LedgerState) calculateCertificateDeposit(
+	cert lcommon.Certificate,
+	blockEraId uint,
+) (uint64, error) {
+	// Get the era descriptor for this block
+	blockEra := eras.GetEraById(blockEraId)
+	if blockEra == nil {
+		return 0, fmt.Errorf("unknown era ID %d", blockEraId)
+	}
+
+	// If this era doesn't support certificates (like Byron), return 0
+	if blockEra.CertDepositFunc == nil {
+		return 0, nil
+	}
+
+	// Use the block era's certificate deposit function with current protocol parameters
+	certDeposit, err := blockEra.CertDepositFunc(cert, ls.currentPParams)
+	if err != nil {
+		// Handle era type mismatch - this can happen when processing historical blocks
+		// with newer protocol parameters, or when the certificate type didn't exist
+		// in that era
+		if errors.Is(err, eras.ErrIncompatibleProtocolParams) {
+			return 0, nil
+		}
+		return 0, err
+	}
+
+	return certDeposit, nil
 }

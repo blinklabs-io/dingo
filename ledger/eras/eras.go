@@ -15,10 +15,14 @@
 package eras
 
 import (
+	"errors"
+
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
+
+var ErrIncompatibleProtocolParams = errors.New("pparams are not expected type")
 
 type EraDesc struct {
 	DecodePParamsFunc       func([]byte) (lcommon.ProtocolParameters, error)
@@ -56,4 +60,15 @@ var ProtocolMajorVersionToEra = map[uint]EraDesc{
 	8:  BabbageEraDesc,
 	9:  ConwayEraDesc,
 	10: ConwayEraDesc,
+}
+
+// GetEraById returns the era descriptor for the given era ID.
+// Returns nil if the era ID is not found.
+func GetEraById(eraId uint) *EraDesc {
+	for i := range Eras {
+		if Eras[i].Id == eraId {
+			return &Eras[i]
+		}
+	}
+	return nil
 }

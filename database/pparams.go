@@ -30,7 +30,7 @@ func (d *Database) GetPParams(
 	var err error
 	if txn == nil {
 		pparams, ppErr := d.metadata.GetPParams(epoch, nil)
-		if err != nil {
+		if ppErr != nil {
 			return ret, ppErr
 		}
 		if len(pparams) == 0 {
@@ -41,7 +41,7 @@ func (d *Database) GetPParams(
 		ret, err = decodeFunc(tmpPParams.Cbor)
 	} else {
 		pparams, ppErr := d.metadata.GetPParams(epoch, txn.Metadata())
-		if err != nil {
+		if ppErr != nil {
 			return ret, ppErr
 		}
 		if len(pparams) == 0 {
@@ -98,6 +98,12 @@ func (d *Database) ApplyPParamUpdates(
 		return err
 	}
 	// Update current pparams
+	if *currentPParams == nil {
+		return fmt.Errorf(
+			"current PParams is nil - cannot apply protocol parameter updates for epoch %d",
+			epoch,
+		)
+	}
 	newPParams, err := updateFunc(
 		*currentPParams,
 		tmpPParamUpdate,

@@ -701,6 +701,7 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 						break
 					}
 					// Enable validation using the k-slot window from ShelleyGenesis.
+					// Only recalculate if validation is not already enabled
 					if !shouldValidate && i == 0 {
 						var cutoffSlot uint64
 						stabilityWindow := ls.calculateStabilityWindow()
@@ -712,31 +713,9 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 							cutoffSlot = 0
 						}
 
-						// Validate only if blockSlot ≥ cutoffSlot and skip if it fails
-						if blockSlot >= cutoffSlot {
-							shouldValidate = true
-							ls.config.Logger.Debug(
-								"enabling validation as block within k-slot window",
-								"stability_window",
-								stabilityWindow,
-								"currentTipSlot",
-								currentTipSlot,
-								"cutoffSlot",
-								cutoffSlot,
-								"blockSlot",
-								blockSlot,
-							)
-						} else {
-							shouldValidate = false
-							ls.config.Logger.Debug(
-								"skipping validation as block is older than k-slot window",
-								"stability_window",
-								stabilityWindow,
-								"currentTipSlot", currentTipSlot,
-								"cutoffSlot", cutoffSlot,
-								"blockSlot", blockSlot,
-							)
-						}
+						// Validate blocks within k-slot window, or historical blocks if ValidateHistorical enabled
+						shouldValidate = blockSlot >= cutoffSlot ||
+							ls.config.ValidateHistorical
 					}
 					// Process block
 					delta, err = ls.ledgerProcessBlock(
@@ -864,7 +843,7 @@ func (ls *LedgerState) ledgerProcessBlock(
 	var delta *LedgerDelta
 	for i, tx := range block.Transactions() {
 		if delta == nil {
-			delta = &LedgerDelta{Point: point}
+			delta = &LedgerDelta{Point: point, BlockEraId: uint(block.Era().Id)}
 		}
 		// Validate transaction
 		if shouldValidate {
@@ -921,8 +900,42 @@ func (ls *LedgerState) loadPParams() error {
 	if err != nil {
 		return err
 	}
+	if pparams == nil {
+		pparams, err = ls.loadGenesisProtocolParameters()
+		if err != nil {
+			return fmt.Errorf("bootstrap genesis protocol parameters: %w", err)
+		}
+	}
 	ls.currentPParams = pparams
 	return nil
+}
+
+func (ls *LedgerState) loadGenesisProtocolParameters() (lcommon.ProtocolParameters, error) {
+	// Start with Shelley parameters as the base for all eras (Byron also uses Shelley as base)
+	pparams, err := eras.HardForkShelley(ls.config.CardanoNodeConfig, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	// If target era is Byron or Shelley, return the Shelley parameters
+	if ls.currentEra.Id <= eras.ShelleyEraDesc.Id {
+		return pparams, nil
+	}
+
+	// Chain through each era up to the target era
+	for eraId := eras.AllegraEraDesc.Id; eraId <= ls.currentEra.Id; eraId++ {
+		era := eras.GetEraById(eraId)
+		if era == nil {
+			return nil, fmt.Errorf("unknown era ID %d", eraId)
+		}
+
+		pparams, err = era.HardForkFunc(ls.config.CardanoNodeConfig, pparams)
+		if err != nil {
+			return nil, fmt.Errorf("era %s transition: %w", era.Name, err)
+		}
+	}
+
+	return pparams, nil
 }
 
 func (ls *LedgerState) loadEpochs(txn *database.Txn) error {
@@ -935,7 +948,11 @@ func (ls *LedgerState) loadEpochs(txn *database.Txn) error {
 	if len(epochs) > 0 {
 		// Set current epoch and era
 		ls.currentEpoch = epochs[len(epochs)-1]
-		ls.currentEra = eras.Eras[ls.currentEpoch.EraId]
+		eraDesc := eras.GetEraById(ls.currentEpoch.EraId)
+		if eraDesc == nil {
+			return fmt.Errorf("unknown era ID %d", ls.currentEpoch.EraId)
+		}
+		ls.currentEra = *eraDesc
 		// Update metrics
 		ls.metrics.epochNum.Set(float64(ls.currentEpoch.EpochId))
 		return nil
@@ -947,6 +964,8 @@ func (ls *LedgerState) loadEpochs(txn *database.Txn) error {
 	}
 	startProtoVersion := shelleyGenesis.ProtocolParameters.ProtocolVersion.Major
 	startEra := eras.ProtocolMajorVersionToEra[startProtoVersion]
+	// Initialize current era to Byron when starting from genesis
+	ls.currentEra = eras.Eras[0] // Byron era
 	// Transition through every era between the current and the target era
 	for nextEraId := ls.currentEra.Id + 1; nextEraId <= startEra.Id; nextEraId++ {
 		if err := ls.transitionToEra(txn, nextEraId, ls.currentEpoch.EpochId, ls.currentEpoch.StartSlot+uint64(ls.currentEpoch.LengthInSlots)); err != nil {
