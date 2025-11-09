@@ -143,7 +143,8 @@ func TestCalculateEpochNonce_InitialEpochWithoutNonce(t *testing.T) {
 	}
 }
 
-// TestCalculateEpochNonce_InvalidGenesisHash tests handling of invalid genesis hash
+// TestCalculateEpochNonce_InvalidGenesisHash tests handling of invalid genesis
+// hash
 func TestCalculateEpochNonce_InvalidGenesisHash(t *testing.T) {
 	invalidHash := "not-a-valid-hex-string"
 	byronGenesisJSON := `{
@@ -187,7 +188,8 @@ func TestCalculateEpochNonce_InvalidGenesisHash(t *testing.T) {
 	}
 }
 
-// TestCalculateEpochNonce_MissingShelleyGenesis tests handling of missing Shelley genesis
+// TestCalculateEpochNonce_MissingShelleyGenesis tests handling of missing
+// Shelley genesis
 func TestCalculateEpochNonce_MissingShelleyGenesis(t *testing.T) {
 	cfg := &cardano.CardanoNodeConfig{}
 
@@ -213,7 +215,8 @@ func TestCalculateEpochNonce_MissingShelleyGenesis(t *testing.T) {
 	}
 }
 
-// TestCalculateEpochNonce_NegativeSecurityParam tests handling of negative security parameter
+// TestCalculateEpochNonce_NegativeSecurityParam tests handling of negative
+// security parameter
 func TestCalculateEpochNonce_NegativeSecurityParam(t *testing.T) {
 	byronGenesisJSON := `{
 		"protocolConsts": {
@@ -255,7 +258,8 @@ func TestCalculateEpochNonce_NegativeSecurityParam(t *testing.T) {
 	}
 }
 
-// TestCalculateEpochNonce_ShelleyEraDifferentParams tests Shelley era with various parameters
+// TestCalculateEpochNonce_ShelleyEraDifferentParams tests Shelley era with
+// various parameters
 func TestCalculateEpochNonce_ShelleyEraDifferentParams(t *testing.T) {
 	testCases := []struct {
 		name             string
@@ -337,7 +341,8 @@ func TestCalculateEpochNonce_ShelleyEraDifferentParams(t *testing.T) {
 	}
 }
 
-// TestCalculateEpochNonce_ZeroActiveSlots tests handling of zero active slots coefficient
+// TestCalculateEpochNonce_ZeroActiveSlots tests handling of zero active slots
+// coefficient
 func TestCalculateEpochNonce_ZeroActiveSlots(t *testing.T) {
 	shelleyGenesisJSON := `{
 		"activeSlotsCoeff": 0,
@@ -376,7 +381,8 @@ func TestCalculateEpochNonce_ZeroActiveSlots(t *testing.T) {
 	}
 }
 
-// TestCalculateEpochNonce_StabilityWindowCalculation tests the stability window calculation logic
+// TestCalculateEpochNonce_StabilityWindowCalculation tests the stability window
+// calculation logic
 func TestCalculateEpochNonce_StabilityWindowCalculation(t *testing.T) {
 	testCases := []struct {
 		name             string
@@ -475,7 +481,8 @@ func TestCalculateEpochNonce_StabilityWindowCalculation(t *testing.T) {
 	}
 }
 
-// TestCalculateEpochNonce_IntegerArithmeticPrecision tests precision of integer arithmetic
+// TestCalculateEpochNonce_IntegerArithmeticPrecision tests precision of integer
+// arithmetic
 func TestCalculateEpochNonce_IntegerArithmeticPrecision(t *testing.T) {
 	byronGenesisJSON := `{
 		"protocolConsts": {
@@ -523,7 +530,8 @@ func TestCalculateEpochNonce_IntegerArithmeticPrecision(t *testing.T) {
 	}
 }
 
-// TestHandleEventChainsyncBlockHeader_StabilityWindowUsage tests the stability window usage in block header handling
+// TestHandleEventChainsyncBlockHeader_StabilityWindowUsage tests the stability
+// window usage in block header handling
 func TestHandleEventChainsyncBlockHeader_StabilityWindowUsage(t *testing.T) {
 	// This test verifies that the handleEventChainsyncBlockHeader function
 	// correctly uses calculateStabilityWindow instead of the old constant
@@ -684,7 +692,8 @@ func TestCalculateEpochNonce_AllEras(t *testing.T) {
 	}
 }
 
-// TestCalculateEpochNonce_MissingByronGenesisInByronEra tests missing Byron genesis during Byron era
+// TestCalculateEpochNonce_MissingByronGenesisInByronEra tests missing Byron
+// genesis during Byron era
 func TestCalculateEpochNonce_MissingByronGenesisInByronEra(t *testing.T) {
 	shelleyGenesisJSON := `{
 		"activeSlotsCoeff": 0.05,

@@ -77,7 +77,8 @@ func New(
 			dataDir,
 			"metadata.sqlite",
 		)
-		// WAL journal mode, disable sync on write, increase cache size to 50MB (from 2MB)
+		// WAL journal mode, disable sync on write, increase cache size to 50MB
+		// (from 2MB)
 		metadataConnOpts := "_pragma=journal_mode(WAL)&_pragma=sync(OFF)&_pragma=cache_size(-50000)"
 		metadataDb, err = gorm.Open(
 			sqlite.Open(
@@ -99,7 +100,8 @@ func New(
 		promRegistry: promRegistry,
 	}
 	if err := db.init(); err != nil {
-		// MetadataStoreSqlite is available for recovery, so return it with error
+		// MetadataStoreSqlite is available for recovery, so return it with
+		// error
 		return db, err
 	}
 	// Create table schemas

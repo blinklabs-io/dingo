@@ -23,7 +23,8 @@ import (
 	ouroboros "github.com/blinklabs-io/gouroboros"
 )
 
-// ConnectionManagerConnClosedFunc is a function that takes a connection ID and an optional error
+// ConnectionManagerConnClosedFunc is a function that takes a connection ID and
+// an optional error
 type ConnectionManagerConnClosedFunc func(ouroboros.ConnectionId, error)
 
 type ConnectionManager struct {

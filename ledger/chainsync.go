@@ -32,13 +32,15 @@ import (
 
 const (
 	// Max number of blocks to fetch in a single blockfetch call
-	// This prevents us exceeding the configured recv queue size in the block-fetch protocol
+	// This prevents us exceeding the configured recv queue size in the
+	// block-fetch protocol
 	blockfetchBatchSize = 500
 
 	// Default/fallback slot threshold for blockfetch batches
 	blockfetchBatchSlotThresholdDefault = 2500 * 20
 
-	// Timeout for updates on a blockfetch operation. This is based on a 2s BatchStart
+	// Timeout for updates on a blockfetch operation. This is based on a 2s
+	// BatchStart
 	// and a 2s Block timeout for blockfetch
 	blockfetchBusyTimeout = 5 * time.Second
 )
@@ -124,9 +126,11 @@ func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 	// Allow us to build up a few blockfetch batches worth of headers
 	allowedHeaderCount := blockfetchBatchSize * 4
 	headerCount := ls.chain.HeaderCount()
-	// Wait for current blockfetch batch to finish before we collect more block headers
+	// Wait for current blockfetch batch to finish before we collect more block
+	// headers
 	if headerCount >= allowedHeaderCount {
-		// We assign the channel to a temp var to protect against trying to read from a nil channel
+		// We assign the channel to a temp var to protect against trying to read
+		// from a nil channel
 		// without a race condition
 		tmpDoneChan := ls.chainsyncBlockfetchReadyChan
 		if tmpDoneChan != nil {
@@ -146,7 +150,8 @@ func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 		(headerCount+1) < allowedHeaderCount {
 		return nil
 	}
-	// We use the blockfetch lock to ensure we aren't starting a batch at the same
+	// We use the blockfetch lock to ensure we aren't starting a batch at the
+	// same
 	// time as blockfetch starts a new one to avoid deadlocks
 	ls.chainsyncBlockfetchMutex.Lock()
 	defer ls.chainsyncBlockfetchMutex.Unlock()
@@ -414,7 +419,8 @@ func (ls *LedgerState) processEpochRollover(
 	// Start background cleanup of consumed UTxOs
 	go ls.cleanupConsumedUtxos()
 
-	// Clean up old block nonces and keep only last 3 epochs along with checkpoints
+	// Clean up old block nonces and keep only last 3 epochs along with
+	// checkpoints
 	var cutoffStart uint64
 	if ls.currentEpoch.EpochId >= 4 {
 		target := ls.currentEpoch.EpochId - 3
@@ -462,7 +468,8 @@ func (ls *LedgerState) processBlockEvent(
 ) error {
 	// Add block to chain
 	if err := ls.chain.AddBlock(e.Block, txn); err != nil {
-		// Ignore and log errors about block not fitting on chain or matching first header
+		// Ignore and log errors about block not fitting on chain or matching
+		// first header
 		if !errors.As(err, &chain.BlockNotFitChainTipError{}) &&
 			!errors.As(err, &chain.BlockNotMatchHeaderError{}) {
 			return fmt.Errorf("add chain block: %w", err)

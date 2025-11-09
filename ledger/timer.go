@@ -54,7 +54,8 @@ func (st *Scheduler) Start() {
 	})
 }
 
-// Listens for tick events and interval updates and updating the ticker accordingly.
+// Listens for tick events and interval updates and updating the ticker
+// accordingly.
 func (st *Scheduler) run() {
 	for {
 		select {

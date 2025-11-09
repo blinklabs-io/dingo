@@ -251,7 +251,8 @@ func (d *MetadataStoreSqlite) SetStakeRegistration(
 	return nil
 }
 
-// SetStakeRegistrationDelegation saves a stake registration delegation certificate and account
+// SetStakeRegistrationDelegation saves a stake registration delegation
+// certificate and account
 func (d *MetadataStoreSqlite) SetStakeRegistrationDelegation(
 	cert *lcommon.StakeRegistrationDelegationCertificate,
 	slot, deposit uint64,
@@ -335,7 +336,8 @@ func (d *MetadataStoreSqlite) SetStakeVoteDelegation(
 	return nil
 }
 
-// SetStakeVoteRegistrationDelegation saves a stake vote registration delegation certificate and account
+// SetStakeVoteRegistrationDelegation saves a stake vote registration delegation
+// certificate and account
 func (d *MetadataStoreSqlite) SetStakeVoteRegistrationDelegation(
 	cert *lcommon.StakeVoteRegistrationDelegationCertificate,
 	slot, deposit uint64,
@@ -366,7 +368,8 @@ func (d *MetadataStoreSqlite) SetStakeVoteRegistrationDelegation(
 	return nil
 }
 
-// SetVoteDelegation saves a vote-only delegation certificate and updates the account.
+// SetVoteDelegation saves a vote-only delegation certificate and updates the
+// account.
 func (d *MetadataStoreSqlite) SetVoteDelegation(
 	cert *lcommon.VoteDelegationCertificate,
 	slot uint64,
@@ -418,7 +421,8 @@ func (d *MetadataStoreSqlite) SetVoteDelegation(
 	return nil
 }
 
-// SetVoteRegistrationDelegation saves a vote registration delegation certificate and account
+// SetVoteRegistrationDelegation saves a vote registration delegation
+// certificate and account
 func (d *MetadataStoreSqlite) SetVoteRegistrationDelegation(
 	cert *lcommon.VoteRegistrationDelegationCertificate,
 	slot, deposit uint64,

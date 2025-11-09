@@ -70,7 +70,8 @@ func (t *Txn) Blob() *badger.Txn {
 	return t.blobTxn
 }
 
-// Do executes the specified function in the context of the transaction. Any errors returned will result
+// Do executes the specified function in the context of the transaction. Any
+// errors returned will result
 // in the transaction being rolled back
 func (t *Txn) Do(fn func(*Txn) error) error {
 	if err := fn(t); err != nil {

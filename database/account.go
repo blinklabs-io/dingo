@@ -105,7 +105,8 @@ func (d *Database) SetStakeRegistration(
 	)
 }
 
-// SetStakeRegistrationDelegation saves a stake registration delegation certificate
+// SetStakeRegistrationDelegation saves a stake registration delegation
+// certificate
 func (d *Database) SetStakeRegistrationDelegation(
 	cert *lcommon.StakeRegistrationDelegationCertificate,
 	slot, deposit uint64,
@@ -132,7 +133,8 @@ func (d *Database) SetStakeVoteDelegation(
 	)
 }
 
-// SetStakeVoteRegistrationDelegation saves a stake vote registration delegation certificate
+// SetStakeVoteRegistrationDelegation saves a stake vote registration delegation
+// certificate
 func (d *Database) SetStakeVoteRegistrationDelegation(
 	cert *lcommon.StakeVoteRegistrationDelegationCertificate,
 	slot, deposit uint64,
@@ -159,7 +161,8 @@ func (d *Database) SetVoteDelegation(
 	)
 }
 
-// SetVoteRegistrationDelegation saves a vote registration delegation certificate
+// SetVoteRegistrationDelegation saves a vote registration delegation
+// certificate
 func (d *Database) SetVoteRegistrationDelegation(
 	cert *lcommon.VoteRegistrationDelegationCertificate,
 	slot, deposit uint64,

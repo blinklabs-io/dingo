@@ -25,7 +25,8 @@ const (
 	commitTimestampRowId = 1
 )
 
-// CommitTimestamp represents the sqlite table used to track the current commit timestamp
+// CommitTimestamp represents the sqlite table used to track the current commit
+// timestamp
 type CommitTimestamp struct {
 	ID        uint `gorm:"primarykey"`
 	Timestamp int64

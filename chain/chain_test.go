@@ -129,7 +129,8 @@ func TestChainBasic(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error creating chain iterator: %s", err)
 	}
-	// Iterate until hitting chain tip, and make sure we get blocks in the correct order with
+	// Iterate until hitting chain tip, and make sure we get blocks in the
+	// correct order with
 	// all expected data
 	testBlockIdx := 0
 	for {
@@ -227,7 +228,8 @@ func TestChainRollback(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error creating chain iterator: %s", err)
 	}
-	// Iterate until hitting chain tip, and make sure we get blocks in the correct order
+	// Iterate until hitting chain tip, and make sure we get blocks in the
+	// correct order
 	testBlockIdx := 0
 	for {
 		next, err := iter.Next(false)
@@ -555,7 +557,8 @@ func TestChainFork(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error creating chain iterator: %s", err)
 	}
-	// Iterate until hitting chain tip, and make sure we get blocks in the correct order with
+	// Iterate until hitting chain tip, and make sure we get blocks in the
+	// correct order with
 	// all expected data
 	testBlockIdx := 0
 	testBlocks := slices.Concat(

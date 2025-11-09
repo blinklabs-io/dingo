@@ -26,7 +26,8 @@ import (
 	"github.com/blinklabs-io/dingo/ledger/eras"
 )
 
-// TestCalculateStabilityWindow_ByronEra tests the stability window calculation for Byron era
+// TestCalculateStabilityWindow_ByronEra tests the stability window calculation
+// for Byron era
 func TestCalculateStabilityWindow_ByronEra(t *testing.T) {
 	testCases := []struct {
 		name           string
@@ -100,7 +101,8 @@ func TestCalculateStabilityWindow_ByronEra(t *testing.T) {
 	}
 }
 
-// TestCalculateStabilityWindow_ShelleyEra tests the stability window calculation for Shelley+ eras
+// TestCalculateStabilityWindow_ShelleyEra tests the stability window
+// calculation for Shelley+ eras
 func TestCalculateStabilityWindow_ShelleyEra(t *testing.T) {
 	testCases := []struct {
 		name             string
@@ -337,7 +339,8 @@ func TestCalculateStabilityWindow_EdgeCases(t *testing.T) {
 	})
 }
 
-// TestCalculateStabilityWindow_ActiveSlotsCoefficientEdgeCases tests various active slots coefficient scenarios
+// TestCalculateStabilityWindow_ActiveSlotsCoefficientEdgeCases tests various
+// active slots coefficient scenarios
 func TestCalculateStabilityWindow_ActiveSlotsCoefficientEdgeCases(
 	t *testing.T,
 ) {
@@ -553,7 +556,8 @@ func TestCalculateStabilityWindow_AllEras(t *testing.T) {
 	}
 }
 
-// TestCalculateStabilityWindow_Integration tests the function in realistic scenarios
+// TestCalculateStabilityWindow_Integration tests the function in realistic
+// scenarios
 func TestCalculateStabilityWindow_Integration(t *testing.T) {
 	t.Run("Mainnet-like configuration", func(t *testing.T) {
 		byronGenesisJSON := `{

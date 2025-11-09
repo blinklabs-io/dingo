@@ -112,7 +112,8 @@ func (c *Chain) AddBlock(
 	}
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
-	// We get a write lock on the manager to cover the integrity checks and adding the block below
+	// We get a write lock on the manager to cover the integrity checks and
+	// adding the block below
 	c.manager.mutex.Lock()
 	defer c.manager.mutex.Unlock()
 	// Verify chain integrity
@@ -230,7 +231,8 @@ func (c *Chain) Rollback(point ocommon.Point) error {
 	}
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
-	// We get a write lock on the manager to cover the integrity checks and block deletions
+	// We get a write lock on the manager to cover the integrity checks and
+	// block deletions
 	c.manager.mutex.Lock()
 	defer c.manager.mutex.Unlock()
 	// Verify chain integrity
@@ -301,7 +303,8 @@ func (c *Chain) Rollback(point ocommon.Point) error {
 	// Update iterators for rollback
 	for _, iter := range c.iterators {
 		if iter.lastPoint.Slot > point.Slot {
-			// Don't update rollback point if the iterator already has an older one pending
+			// Don't update rollback point if the iterator already has an older
+			// one pending
 			if iter.needsRollback && point.Slot > iter.rollbackPoint.Slot {
 				continue
 			}
@@ -353,8 +356,9 @@ func (c *Chain) HeaderRange(count int) (ocommon.Point, ocommon.Point) {
 	return startPoint, endPoint
 }
 
-// FromPoint returns a ChainIterator starting at the specified point. If inclusive is true, the iterator
-// will start at the specified point. Otherwise it will start at the point following the specified point
+// FromPoint returns a ChainIterator starting at the specified point. If
+// inclusive is true, the iterator will start at the specified point. Otherwise
+// it will start at the point following the specified point
 func (c *Chain) FromPoint(
 	point ocommon.Point,
 	inclusive bool,
@@ -416,7 +420,8 @@ func (c *Chain) iterNext(
 	blocking bool,
 ) (*ChainIteratorResult, error) {
 	c.mutex.Lock()
-	// We get a read lock on the manager for the integrity check and initial block lookup
+	// We get a read lock on the manager for the integrity check and initial
+	// block lookup
 	c.manager.mutex.RLock()
 	// Verify chain integrity
 	if err := c.reconcile(); err != nil {
@@ -484,11 +489,13 @@ func (c *Chain) iterNext(
 }
 
 func (c *Chain) reconcile() error {
-	// We reconcile against the primary/persistent chain, so no need to check if we are that chain
+	// We reconcile against the primary/persistent chain, so no need to check if
+	// we are that chain
 	if c.persistent {
 		return nil
 	}
-	// Check with manager if there have been any primary chain rollback events that would trigger a reconcile
+	// Check with manager if there have been any primary chain rollback events
+	// that would trigger a reconcile
 	if !c.manager.chainNeedsReconcile(c.id, c.lastCommonBlockIndex) {
 		return nil
 	}
@@ -534,7 +541,8 @@ func (c *Chain) reconcile() error {
 		return err
 	}
 	lastPrevHash := decodedKnownBlock.PrevHash().Bytes()
-	// Iterate backward through chain based on prev-hash until we find a matching block on the primary chain
+	// Iterate backward through chain based on prev-hash until we find a
+	// matching block on the primary chain
 	for {
 		tmpBlock, err := c.manager.blockByHash(lastPrevHash)
 		if err != nil {
@@ -545,7 +553,8 @@ func (c *Chain) reconcile() error {
 		if err != nil {
 			return err
 		}
-		// Update last common block index and return when we find a matching block on the primary chain
+		// Update last common block index and return when we find a matching
+		// block on the primary chain
 		if tmpBlock.Slot == primaryBlock.Slot &&
 			string(tmpBlock.Hash) == string(primaryBlock.Hash) {
 			c.lastCommonBlockIndex = tmpBlock.ID

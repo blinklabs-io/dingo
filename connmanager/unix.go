@@ -20,7 +20,8 @@ import (
 	"net"
 )
 
-// UnixConn is a wrapper around net.UnixConn that provides a unique remote address
+// UnixConn is a wrapper around net.UnixConn that provides a unique remote
+// address
 type UnixConn struct {
 	*net.UnixConn
 	remoteAddr UnixConnAddr

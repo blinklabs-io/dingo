@@ -204,8 +204,9 @@ func BlocksRecentTxn(txn *Txn, count int) ([]models.Block, error) {
 	defer it.Close()
 	var foundCount int
 	// Generate our seek key
-	// We use our block index key prefix and append 0xFF to get a key that should be
-	// after any legitimate key. This should leave our most recent block as the next
+	// We use our block index key prefix and append 0xFF to get a key that
+	// should be after any legitimate key. This should leave our most recent
+	// block as the next
 	// item when doing reverse iteration
 	tmpPrefix := append([]byte(blockBlobIndexKeyPrefix), 0xff)
 	var blockKey []byte

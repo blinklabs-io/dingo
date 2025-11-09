@@ -20,7 +20,8 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// socketControl is a helper function for setting socket options on outbound and listener sockets
+// socketControl is a helper function for setting socket options on outbound and
+// listener sockets
 func socketControl(network, address string, c syscall.RawConn) error {
 	var innerErr error
 	err := c.Control(func(fd uintptr) {

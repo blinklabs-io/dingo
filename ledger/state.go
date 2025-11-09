@@ -67,7 +67,8 @@ type LedgerStateConfig struct {
 	ForgeBlocks                bool
 }
 
-// BlockfetchRequestRangeFunc describes a callback function used to start a blockfetch request for
+// BlockfetchRequestRangeFunc describes a callback function used to start a
+// blockfetch request for
 // a range of blocks
 type BlockfetchRequestRangeFunc func(ouroboros.ConnectionId, ocommon.Point, ocommon.Point) error
 
@@ -136,7 +137,8 @@ func (ls *LedgerState) Start() error {
 			ls.handleEventBlockfetch,
 		)
 	}
-	// Schedule periodic process to purge consumed UTxOs outside of the rollback window
+	// Schedule periodic process to purge consumed UTxOs outside of the rollback
+	// window
 	ls.scheduleCleanupConsumedUtxos()
 	// Load epoch info from DB
 	txn := ls.db.Transaction(false)
@@ -240,7 +242,8 @@ func (ls *LedgerState) initForge() {
 						Int64(),
 				)
 				// Scheduled forgeBlock to run at the calculated block interval
-				// TODO: add callback to capture task run failure and increment "missed slot leader check" metric
+				// TODO: add callback to capture task run failure and increment
+				// "missed slot leader check" metric
 				ls.Scheduler.Register(blockInterval, ls.forgeBlock, nil)
 
 				ls.config.Logger.Info(
@@ -404,7 +407,8 @@ func (ls *LedgerState) transitionToEra(
 	return nil
 }
 
-// consumeUtxo marks a UTxO as "deleted" without actually deleting it. This allows for a UTxO
+// consumeUtxo marks a UTxO as "deleted" without actually deleting it. This
+// allows for a UTxO
 // to be easily on rollback
 func (ls *LedgerState) consumeUtxo(
 	txn *database.Txn,
@@ -418,7 +422,8 @@ func (ls *LedgerState) consumeUtxo(
 	)
 }
 
-// calculateStabilityWindow returns the stability window based on the current era.
+// calculateStabilityWindow returns the stability window based on the current
+// era.
 // For Byron era, returns 2k. For Shelley+ eras, returns 3k/f.
 // Returns the default threshold if genesis data is unavailable or invalid.
 func (ls *LedgerState) calculateStabilityWindow() uint64 {
@@ -537,7 +542,8 @@ func (ls *LedgerState) ledgerReadChain(resultCh chan readChainResult) {
 	var rollbackPoint ocommon.Point
 	var result readChainResult
 	for {
-		// We chose 500 as an arbitrary max batch size. A "chain extended" message will be logged after each batch
+		// We chose 500 as an arbitrary max batch size. A "chain extended"
+		// message will be logged after each batch
 		nextBatch := make([]ledger.Block, 0, 500)
 		// Gather up next batch of blocks
 		for {
@@ -564,7 +570,8 @@ func (ls *LedgerState) ledgerReadChain(resultCh chan readChainResult) {
 				return
 			}
 			if next.Rollback {
-				// End existing batch and cache rollback if we have any blocks in the batch
+				// End existing batch and cache rollback if we have any blocks
+				// in the batch
 				// We need special processing for rollbacks below
 				if len(nextBatch) > 0 {
 					cachedNext = next
@@ -629,7 +636,8 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 			err := txn.Do(func(txn *database.Txn) error {
 				// Check for era change
 				if nextEpochEraId != ls.currentEra.Id {
-					// Transition through every era between the current and the target era
+					// Transition through every era between the current and the
+					// target era
 					for nextEraId := ls.currentEra.Id + 1; nextEraId <= nextEpochEraId; nextEraId++ {
 						if err := ls.transitionToEra(txn, nextEraId, ls.currentEpoch.EpochId, ls.currentEpoch.StartSlot+uint64(ls.currentEpoch.LengthInSlots)); err != nil {
 							return err
@@ -690,7 +698,9 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 						Slot: next.SlotNumber(),
 						Hash: next.Hash().Bytes(),
 					}
-					// End processing of batch and cache remainder if we get a block from after the current epoch end, or if we need the initial epoch
+					// End processing of batch and cache remainder if we get a
+					// block from after the current epoch end, or if we need the
+					// initial epoch
 					if tmpPoint.Slot >= (ls.currentEpoch.StartSlot+uint64(ls.currentEpoch.LengthInSlots)) ||
 						ls.currentEpoch.SlotLength == 0 {
 						needsEpochRollover = true
@@ -700,7 +710,8 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 						nextBatch = nil
 						break
 					}
-					// Enable validation using the k-slot window from ShelleyGenesis.
+					// Enable validation using the k-slot window from
+					// ShelleyGenesis.
 					if !shouldValidate && i == 0 {
 						var cutoffSlot uint64
 						stabilityWindow := ls.calculateStabilityWindow()
@@ -712,7 +723,8 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 							cutoffSlot = 0
 						}
 
-						// Validate only if blockSlot ≥ cutoffSlot and skip if it fails
+						// Validate only if blockSlot ≥ cutoffSlot and skip if
+						// it fails
 						if blockSlot >= cutoffSlot {
 							shouldValidate = true
 							ls.config.Logger.Debug(
@@ -779,7 +791,8 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 						return fmt.Errorf("slot->epoch: %w", err)
 					}
 
-					// First block we persist in the current epoch becomes the checkpoint
+					// First block we persist in the current epoch becomes the
+					// checkpoint
 					isCheckpoint := false
 					if tmpEpoch.EpochId == ls.currentEpoch.EpochId &&
 						!ls.checkpointWrittenForEpoch {
@@ -892,7 +905,8 @@ func (ls *LedgerState) ledgerProcessBlock(
 		// Populate ledger delta from transaction
 		delta.addTransaction(tx, i)
 
-		// Apply delta immediately if we may need the data to validate the next TX
+		// Apply delta immediately if we may need the data to validate the next
+		// TX
 		if shouldValidate {
 			if err := delta.apply(ls, txn); err != nil {
 				return nil, err
@@ -989,7 +1003,8 @@ func (ls *LedgerState) GetBlock(point ocommon.Point) (models.Block, error) {
 	return ret, nil
 }
 
-// RecentChainPoints returns the requested count of recent chain points in descending order. This is used mostly
+// RecentChainPoints returns the requested count of recent chain points in
+// descending order. This is used mostly
 // for building a set of intersect points when acting as a chainsync client
 func (ls *LedgerState) RecentChainPoints(count int) ([]ocommon.Point, error) {
 	tmpBlocks, err := database.BlocksRecent(ls.db, count)
@@ -1007,7 +1022,8 @@ func (ls *LedgerState) RecentChainPoints(count int) ([]ocommon.Point, error) {
 	return ret, nil
 }
 
-// GetIntersectPoint returns the intersect between the specified points and the current chain
+// GetIntersectPoint returns the intersect between the specified points and the
+// current chain
 func (ls *LedgerState) GetIntersectPoint(
 	points []ocommon.Point,
 ) (*ocommon.Point, error) {
@@ -1055,7 +1071,8 @@ func (ls *LedgerState) GetIntersectPoint(
 	return nil, nil
 }
 
-// GetChainFromPoint returns a ChainIterator starting at the specified point. If inclusive is true, the iterator
+// GetChainFromPoint returns a ChainIterator starting at the specified point. If
+// inclusive is true, the iterator
 // will start at the requested point, otherwise it will start at the next block.
 func (ls *LedgerState) GetChainFromPoint(
 	point ocommon.Point,
@@ -1121,7 +1138,8 @@ func (ls *LedgerState) ValidateTx(
 	return nil
 }
 
-// EvaluateTx evaluates the scripts in the provided transaction and returns the calculated
+// EvaluateTx evaluates the scripts in the provided transaction and returns the
+// calculated
 // fee, per-redeemer ExUnits, and total ExUnits
 func (ls *LedgerState) EvaluateTx(
 	tx lcommon.Transaction,
@@ -1367,7 +1385,8 @@ func (ls *LedgerState) forgeBlock() {
 	}
 
 	// Re-decode block from CBOR
-	// This is a bit of a hack, because things like Hash() rely on having the original CBOR available
+	// This is a bit of a hack, because things like Hash() rely on having the
+	// original CBOR available
 	ledgerBlock, err := conway.NewConwayBlockFromCbor(blockCbor)
 	if err != nil {
 		ls.config.Logger.Error(

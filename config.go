@@ -54,7 +54,8 @@ type Config struct {
 	devMode            bool
 }
 
-// configPopulateNetworkMagic uses the named network (if specified) to determine the network magic value (if not specified)
+// configPopulateNetworkMagic uses the named network (if specified) to determine
+// the network magic value (if not specified)
 func (n *Node) configPopulateNetworkMagic() error {
 	if n.config.networkMagic == 0 && n.config.network != "" {
 		tmpCfg := n.config
@@ -105,7 +106,8 @@ func (n *Node) configValidate() error {
 	return nil
 }
 
-// ConfigOptionFunc is a type that represents functions that modify the Connection config
+// ConfigOptionFunc is a type that represents functions that modify the
+// Connection config
 type ConfigOptionFunc func(*Config)
 
 // NewConfig creates a new dingo config with the specified options
@@ -122,7 +124,8 @@ func NewConfig(opts ...ConfigOptionFunc) Config {
 	return c
 }
 
-// WithCardanoNodeConfig specifies the CardanoNodeConfig object to use. This is mostly used for loading genesis config files
+// WithCardanoNodeConfig specifies the CardanoNodeConfig object to use. This is
+// mostly used for loading genesis config files
 // referenced by the dingo config
 func WithCardanoNodeConfig(
 	cardanoNodeConfig *cardano.CardanoNodeConfig,
@@ -132,28 +135,32 @@ func WithCardanoNodeConfig(
 	}
 }
 
-// WithDatabasePath specifies the persistent data directory to use. The default is to store everything in memory
+// WithDatabasePath specifies the persistent data directory to use. The default
+// is to store everything in memory
 func WithDatabasePath(dataDir string) ConfigOptionFunc {
 	return func(c *Config) {
 		c.dataDir = dataDir
 	}
 }
 
-// WithIntersectPoints specifies intersect point(s) for the initial chainsync. The default is to start at chain genesis
+// WithIntersectPoints specifies intersect point(s) for the initial chainsync.
+// The default is to start at chain genesis
 func WithIntersectPoints(points []ocommon.Point) ConfigOptionFunc {
 	return func(c *Config) {
 		c.intersectPoints = points
 	}
 }
 
-// WithIntersectTip specifies whether to start the initial chainsync at the current tip. The default is to start at chain genesis
+// WithIntersectTip specifies whether to start the initial chainsync at the
+// current tip. The default is to start at chain genesis
 func WithIntersectTip(intersectTip bool) ConfigOptionFunc {
 	return func(c *Config) {
 		c.intersectTip = intersectTip
 	}
 }
 
-// WithLogger specifies the logger to use. This defaults to discarding log output
+// WithLogger specifies the logger to use. This defaults to discarding log
+// output
 func WithLogger(logger *slog.Logger) ConfigOptionFunc {
 	return func(c *Config) {
 		c.logger = logger
@@ -167,56 +174,64 @@ func WithListeners(listeners ...ListenerConfig) ConfigOptionFunc {
 	}
 }
 
-// WithNetwork specifies the named network to operate on. This will automatically set the appropriate network magic value
+// WithNetwork specifies the named network to operate on. This will
+// automatically set the appropriate network magic value
 func WithNetwork(network string) ConfigOptionFunc {
 	return func(c *Config) {
 		c.network = network
 	}
 }
 
-// WithNetworkMagic specifies the network magic value to use. This will override any named network specified
+// WithNetworkMagic specifies the network magic value to use. This will override
+// any named network specified
 func WithNetworkMagic(networkMagic uint32) ConfigOptionFunc {
 	return func(c *Config) {
 		c.networkMagic = networkMagic
 	}
 }
 
-// WithOutboundSourcePort specifies the source port to use for outbound connections. This defaults to dynamic source ports
+// WithOutboundSourcePort specifies the source port to use for outbound
+// connections. This defaults to dynamic source ports
 func WithOutboundSourcePort(port uint) ConfigOptionFunc {
 	return func(c *Config) {
 		c.outboundSourcePort = port
 	}
 }
 
-// WithUtxorpcTlsCertFilePath specifies the path to the TLS certificate for the gRPC API listener. This defaults to empty
+// WithUtxorpcTlsCertFilePath specifies the path to the TLS certificate for the
+// gRPC API listener. This defaults to empty
 func WithUtxorpcTlsCertFilePath(path string) ConfigOptionFunc {
 	return func(c *Config) {
 		c.tlsCertFilePath = path
 	}
 }
 
-// WithUtxorpcTlsKeyFilePath specifies the path to the TLS key for the gRPC API listener. This defaults to empty
+// WithUtxorpcTlsKeyFilePath specifies the path to the TLS key for the gRPC API
+// listener. This defaults to empty
 func WithUtxorpcTlsKeyFilePath(path string) ConfigOptionFunc {
 	return func(c *Config) {
 		c.tlsKeyFilePath = path
 	}
 }
 
-// WithUtxorpcPort specifies the port to use for the gRPC API listener. This defaults to port 9090
+// WithUtxorpcPort specifies the port to use for the gRPC API listener. This
+// defaults to port 9090
 func WithUtxorpcPort(port uint) ConfigOptionFunc {
 	return func(c *Config) {
 		c.utxorpcPort = port
 	}
 }
 
-// WithPeerSharing specifies whether to enable peer sharing. This is disabled by default
+// WithPeerSharing specifies whether to enable peer sharing. This is disabled by
+// default
 func WithPeerSharing(peerSharing bool) ConfigOptionFunc {
 	return func(c *Config) {
 		c.peerSharing = peerSharing
 	}
 }
 
-// WithPrometheusRegistry specifies a prometheus.Registerer instance to add metrics to. In most cases, prometheus.DefaultRegistry would be
+// WithPrometheusRegistry specifies a prometheus.Registerer instance to add
+// metrics to. In most cases, prometheus.DefaultRegistry would be
 // a good choice to get metrics working
 func WithPrometheusRegistry(registry prometheus.Registerer) ConfigOptionFunc {
 	return func(c *Config) {
@@ -224,7 +239,8 @@ func WithPrometheusRegistry(registry prometheus.Registerer) ConfigOptionFunc {
 	}
 }
 
-// WithTopologyConfig specifies a topology.TopologyConfig to use for outbound peers
+// WithTopologyConfig specifies a topology.TopologyConfig to use for outbound
+// peers
 func WithTopologyConfig(
 	topologyConfig *topology.TopologyConfig,
 ) ConfigOptionFunc {
@@ -233,22 +249,26 @@ func WithTopologyConfig(
 	}
 }
 
-// WithTracing enables tracing. By default, spans are submitted to a HTTP(s) endpoint using OTLP. This can be configured
-// using the OTEL_EXPORTER_OTLP_* env vars documented in the README for [go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp]
+// WithTracing enables tracing. By default, spans are submitted to a HTTP(s)
+// endpoint using OTLP. This can be configured using the OTEL_EXPORTER_OTLP_*
+// env vars documented in the README for
+// [go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp]
 func WithTracing(tracing bool) ConfigOptionFunc {
 	return func(c *Config) {
 		c.tracing = tracing
 	}
 }
 
-// WithTracingStdout enables tracing output to stdout. This also requires tracing to enabled separately. This is mostly useful for debugging
+// WithTracingStdout enables tracing output to stdout. This also requires
+// tracing to enabled separately. This is mostly useful for debugging
 func WithTracingStdout(stdout bool) ConfigOptionFunc {
 	return func(c *Config) {
 		c.tracingStdout = stdout
 	}
 }
 
-// WithBadgerCacheSize sets the maximum cache size (in bytes).This controls memory usage by limiting the size of block and index caches.
+// WithBadgerCacheSize sets the maximum cache size (in bytes).This controls
+// memory usage by limiting the size of block and index caches.
 // If not set, the default size defined in internal config will be used.
 func WithBadgerCacheSize(cacheSize int64) ConfigOptionFunc {
 	return func(c *Config) {
@@ -270,7 +290,8 @@ func WithDevMode(devMode bool) ConfigOptionFunc {
 	}
 }
 
-// WithValidateHistorical specifies whether to validate all historical blocks during ledger processing
+// WithValidateHistorical specifies whether to validate all historical blocks
+// during ledger processing
 func WithValidateHistorical(validate bool) ConfigOptionFunc {
 	return func(c *Config) {
 		c.validateHistorical = validate

@@ -127,7 +127,8 @@ func (c *CardanoNodeConfig) loadGenesisConfigs() error {
 	return nil
 }
 
-// ByronGenesis returns the Byron genesis config specified in the cardano-node config
+// ByronGenesis returns the Byron genesis config specified in the cardano-node
+// config
 func (c *CardanoNodeConfig) ByronGenesis() *byron.ByronGenesis {
 	return c.byronGenesis
 }
@@ -143,7 +144,8 @@ func (c *CardanoNodeConfig) LoadByronGenesisFromReader(r io.Reader) error {
 	return nil
 }
 
-// ShelleyGenesis returns the Shelley genesis config specified in the cardano-node config
+// ShelleyGenesis returns the Shelley genesis config specified in the
+// cardano-node config
 func (c *CardanoNodeConfig) ShelleyGenesis() *shelley.ShelleyGenesis {
 	return c.shelleyGenesis
 }
@@ -159,7 +161,8 @@ func (c *CardanoNodeConfig) LoadShelleyGenesisFromReader(r io.Reader) error {
 	return nil
 }
 
-// AlonzoGenesis returns the Alonzo genesis config specified in the cardano-node config
+// AlonzoGenesis returns the Alonzo genesis config specified in the cardano-node
+// config
 func (c *CardanoNodeConfig) AlonzoGenesis() *alonzo.AlonzoGenesis {
 	return c.alonzoGenesis
 }
@@ -175,7 +178,8 @@ func (c *CardanoNodeConfig) LoadAlonzoGenesisFromReader(r io.Reader) error {
 	return nil
 }
 
-// ConwayGenesis returns the Conway genesis config specified in the cardano-node config
+// ConwayGenesis returns the Conway genesis config specified in the cardano-node
+// config
 func (c *CardanoNodeConfig) ConwayGenesis() *conway.ConwayGenesis {
 	return c.conwayGenesis
 }

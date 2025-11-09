@@ -267,7 +267,19 @@ func ValidateTxConway(
 					scriptHash := s.Hash()
 					fmt.Printf("scriptHash = %s\n", scriptHash.String())
 					fmt.Printf("tx = %x\n", tx.Cbor())
-					// Build inputs/outputs strings that can be plugged into Aiken script_context tests for comparison
+					// Build
+					// inputs/outputs
+					// strings
+					// that
+					// can
+					// be
+					// plugged
+					// into
+					// Aiken
+					// script_context
+					// tests
+					// for
+					// comparison
 					var tmpInputs []lcommon.TransactionInput
 					var tmpOutputs []lcommon.TransactionOutput
 					for _, input := range slices.Concat(resolvedInputs, resolvedRefInputs) {

@@ -18,7 +18,8 @@ import (
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
 
-// SetDatum saves the raw datum into the database by computing the hash before inserting.
+// SetDatum saves the raw datum into the database by computing the hash before
+// inserting.
 func (d *Database) SetDatum(
 	rawDatum []byte,
 	addedSlot uint64,

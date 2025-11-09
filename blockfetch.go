@@ -48,7 +48,8 @@ func (n *Node) blockfetchServerRequestRange(
 	start ocommon.Point,
 	end ocommon.Point,
 ) error {
-	// TODO: check if we have requested block range available and send NoBlocks if not (#397)
+	// TODO: check if we have requested block range available and send NoBlocks
+	// if not (#397)
 	chainIter, err := n.ledgerState.GetChainFromPoint(start, true)
 	if err != nil {
 		return err
@@ -75,7 +76,8 @@ func (n *Node) blockfetchServerRequestRange(
 				// TODO: push this error somewhere (#398)
 				return
 			}
-			// Make sure we don't hang waiting for the next block if we've already hit the end
+			// Make sure we don't hang waiting for the next block if we've
+			// already hit the end
 			if next.Block.Slot == end.Slot {
 				break
 			}
@@ -87,7 +89,8 @@ func (n *Node) blockfetchServerRequestRange(
 	return nil
 }
 
-// blockfetchClientRequestRange is called by the ledger when it needs to request a range of block bodies
+// blockfetchClientRequestRange is called by the ledger when it needs to request
+// a range of block bodies
 func (n *Node) blockfetchClientRequestRange(
 	connId ouroboros.ConnectionId,
 	start ocommon.Point,

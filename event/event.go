@@ -63,7 +63,8 @@ func NewEventBus(promRegistry prometheus.Registerer) *EventBus {
 	return e
 }
 
-// Subscribe allows a consumer to receive events of a particular type via a channel
+// Subscribe allows a consumer to receive events of a particular type via a
+// channel
 func (e *EventBus) Subscribe(
 	eventType EventType,
 ) (EventSubscriberId, <-chan Event) {
@@ -86,7 +87,8 @@ func (e *EventBus) Subscribe(
 	return subId, evtCh
 }
 
-// SubscribeFunc allows a consumer to receive events of a particular type via a callback function
+// SubscribeFunc allows a consumer to receive events of a particular type via a
+// callback function
 func (e *EventBus) SubscribeFunc(
 	eventType EventType,
 	handlerFunc EventHandlerFunc,
@@ -104,7 +106,8 @@ func (e *EventBus) SubscribeFunc(
 	return subId
 }
 
-// Unsubscribe stops delivery of events for a particular type for an existing subscriber
+// Unsubscribe stops delivery of events for a particular type for an existing
+// subscriber
 func (e *EventBus) Unsubscribe(eventType EventType, subId EventSubscriberId) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -116,7 +119,8 @@ func (e *EventBus) Unsubscribe(eventType EventType, subId EventSubscriberId) {
 	}
 }
 
-// Publish allows a producer to send an event of a particular type to all subscribers
+// Publish allows a producer to send an event of a particular type to all
+// subscribers
 func (e *EventBus) Publish(eventType EventType, evt Event) {
 	// Build list of channels inside read lock to avoid map race condition
 	e.mu.RLock()
@@ -131,7 +135,8 @@ func (e *EventBus) Publish(eventType EventType, evt Event) {
 	// Send event on gathered channels
 	for _, subCh := range subChans {
 		// NOTE: this is purposely a blocking operation to prevent dropping data
-		// XXX: do we maybe want to detect a blocked channel and temporarily set it aside
+		// XXX: do we maybe want to detect a blocked channel and temporarily set
+		// it aside
 		// to get the event sent to the other subscribers?
 		subCh <- evt
 	}

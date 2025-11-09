@@ -103,7 +103,8 @@ func (ls *LedgerState) TimeToSlot(t time.Time) (uint64, error) {
 			// Figure out how far into the epoch the specified time is
 			timeDiff := t.Sub(epochStartTime)
 			//nolint:gosec
-			// This will never overflow using 2 positive int64 values, but gosec seems determined
+			// This will never overflow using 2 positive int64 values, but gosec
+			// seems determined
 			// to complain about it
 			timeSlot += uint64(timeDiff / slotDuration)
 			foundTime = true

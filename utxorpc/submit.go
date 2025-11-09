@@ -77,7 +77,12 @@ func (s *submitServiceServer) SubmitTx(
 			resp.Ref = append(resp.Ref, placeholderRef)
 			errorList[i] = err
 			s.utxorpc.config.Logger.Error(
-				fmt.Sprint(fmt.Errorf("failed to decode transaction from CBOR: %w", err)),
+				fmt.Sprint(
+					fmt.Errorf(
+						"failed to decode transaction from CBOR: %w",
+						err,
+					),
+				),
 			)
 			hasError = true
 			continue
@@ -380,7 +385,8 @@ func (s *submitServiceServer) WatchMempool(
 						assetPatterns = append(assetPatterns, moveAssetPattern)
 					}
 
-					// Convert everything to utxos (gledger.TransactionOutput) for matching
+					// Convert everything to utxos (gledger.TransactionOutput)
+					// for matching
 					var utxos []gledger.TransactionOutput
 					utxos = append(tx.Outputs(), tx.CollateralReturn())
 					var inputs []gledger.TransactionInput

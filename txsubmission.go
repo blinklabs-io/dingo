@@ -46,7 +46,8 @@ func (n *Node) txsubmissionClientConnOpts() []txsubmission.TxSubmissionOptionFun
 
 func (n *Node) txsubmissionClientStart(connId ouroboros.ConnectionId) error {
 	// Register mempool consumer
-	// We don't bother capturing the consumer because we can easily look it up later by connection ID
+	// We don't bother capturing the consumer because we can easily look it up
+	// later by connection ID
 	_ = n.mempool.AddConsumer(connId)
 	// Start TxSubmission loop
 	conn := n.connManager.GetConnectionById(connId)
@@ -178,7 +179,8 @@ func (n *Node) txsubmissionClientRequestTxIds(
 	var tmpTxs []*mempool.MempoolTransaction
 	for {
 		// nolint:staticcheck
-		// The linter wants to move this up into the loop condition, but it's more readable this way
+		// The linter wants to move this up into the loop condition, but it's
+		// more readable this way
 		if len(tmpTxs) >= int(req) {
 			break
 		}

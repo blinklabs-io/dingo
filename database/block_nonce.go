@@ -29,7 +29,8 @@ func (d *Database) GetBlockNonce(
 	return d.metadata.GetBlockNonce(point, txn.Metadata())
 }
 
-// DeleteBlockNoncesBeforeSlot removes all block_nonces older than the given slot number
+// DeleteBlockNoncesBeforeSlot removes all block_nonces older than the given
+// slot number
 func (d *Database) DeleteBlockNoncesBeforeSlot(
 	slotNumber uint64,
 	txn *Txn,
@@ -40,7 +41,8 @@ func (d *Database) DeleteBlockNoncesBeforeSlot(
 	return d.metadata.DeleteBlockNoncesBeforeSlot(slotNumber, txn.Metadata())
 }
 
-// DeleteBlockNoncesBeforeSlotWithoutCheckpoints removes non-checkpoint block_nonces older than the given slot number
+// DeleteBlockNoncesBeforeSlotWithoutCheckpoints removes non-checkpoint
+// block_nonces older than the given slot number
 func (d *Database) DeleteBlockNoncesBeforeSlotWithoutCheckpoints(
 	slotNumber uint64,
 	txn *Txn,

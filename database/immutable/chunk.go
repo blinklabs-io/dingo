@@ -117,7 +117,8 @@ func (c *chunk) Next() (*Block, error) {
 		c.nextEntry = nil
 		return ret, nil
 	} else {
-		// Calculate block size based on the offsets for the current and next entries
+		// Calculate block size based on the offsets for the current and next
+		// entries
 		if c.currentEntry.BlockOffset > math.MaxInt64 {
 			return nil, errors.New("current block offset integer overflow")
 		}

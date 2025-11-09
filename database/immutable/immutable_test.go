@@ -56,4 +56,5 @@ func TestGetTip(t *testing.T) {
 	}
 }
 
-// TODO: add tests for getting a specific block and getting a range of blocks that traverses multiple chunks (#386)
+// TODO: add tests for getting a specific block and getting a range of blocks
+// that traverses multiple chunks (#386)

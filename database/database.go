@@ -79,12 +79,14 @@ func (d *Database) Transaction(readWrite bool) *Txn {
 	return NewTxn(d, readWrite)
 }
 
-// BlobTxn starts a new blob-only database transaction and returns a handle to it
+// BlobTxn starts a new blob-only database transaction and returns a handle to
+// it
 func (d *Database) BlobTxn(readWrite bool) *Txn {
 	return NewBlobOnlyTxn(d, readWrite)
 }
 
-// MetadataTxn starts a new metadata-only database transaction and returns a handle to it
+// MetadataTxn starts a new metadata-only database transaction and returns a
+// handle to it
 func (d *Database) MetadataTxn(readWrite bool) *Txn {
 	return NewMetadataOnlyTxn(d, readWrite)
 }
@@ -114,7 +116,8 @@ func (d *Database) init() error {
 	return nil
 }
 
-// New creates a new database instance with optional persistence using the provided data directory
+// New creates a new database instance with optional persistence using the
+// provided data directory
 func New(
 	config *Config,
 ) (*Database, error) {

@@ -67,7 +67,8 @@ func (d *MetadataStoreSqlite) GetAssetsByPolicy(
 	return assets, nil
 }
 
-// GetAssetsByUTxO returns all assets for a given UTxO using transaction ID and output index
+// GetAssetsByUTxO returns all assets for a given UTxO using transaction ID and
+// output index
 func (d *MetadataStoreSqlite) GetAssetsByUTxO(
 	txId []byte,
 	idx uint32,

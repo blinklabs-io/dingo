@@ -19,8 +19,9 @@ import (
 	"gorm.io/gorm"
 )
 
-// GetPParams returns a list of protocol parameters for a given epoch. If there are no pparams
-// for the specified epoch, it will return the most recent pparams before the specified epoch
+// GetPParams returns a list of protocol parameters for a given epoch. If there
+// are no pparams for the specified epoch, it will return the most recent
+// pparams before the specified epoch
 func (d *MetadataStoreSqlite) GetPParams(
 	epoch uint64,
 	txn *gorm.DB,
@@ -40,7 +41,8 @@ func (d *MetadataStoreSqlite) GetPParams(
 	return ret, nil
 }
 
-// GetPParamUpdates returns a list of protocol parameter updates for a given epoch
+// GetPParamUpdates returns a list of protocol parameter updates for a given
+// epoch
 func (d *MetadataStoreSqlite) GetPParamUpdates(
 	epoch uint64,
 	txn *gorm.DB,

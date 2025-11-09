@@ -71,7 +71,8 @@ func (cm *ChainManager) Chain(id ChainId) *Chain {
 	return cm.chains[id]
 }
 
-// NewChain creates a new Chain that forks from the primary chain at the specified point. This is useful for managing outbound ChainSync clients
+// NewChain creates a new Chain that forks from the primary chain at the
+// specified point. This is useful for managing outbound ChainSync clients
 func (cm *ChainManager) NewChain(point ocommon.Point) (*Chain, error) {
 	cm.mutex.Lock()
 	defer cm.mutex.Unlock()
@@ -107,7 +108,8 @@ func (cm *ChainManager) NewChain(point ocommon.Point) (*Chain, error) {
 	return c, nil
 }
 
-// NewChainFromIntersect creates a new Chain that forks the primary chain at the latest common point.
+// NewChainFromIntersect creates a new Chain that forks the primary chain at the
+// latest common point.
 func (cm *ChainManager) NewChainFromIntersect(
 	points []ocommon.Point,
 ) (*Chain, error) {
@@ -289,7 +291,8 @@ func (cm *ChainManager) addBlock(
 		if err := cm.db.BlockCreate(block, txn); err != nil {
 			return err
 		}
-		// TODO: trigger periodic async signal to chains to do reconcile to prune buffer
+		// TODO: trigger periodic async signal to chains to do reconcile to
+		// prune buffer
 	} else {
 		// Add block to memory buffer
 		cm.blocks[string(block.Hash)] = block

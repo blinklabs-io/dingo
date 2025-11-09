@@ -27,7 +27,8 @@ const (
 	ChainsyncEventType  event.EventType = "chainsync.event"
 )
 
-// BlockfetchEvent represents either a Block or BatchDone blockfetch event. We use
+// BlockfetchEvent represents either a Block or BatchDone blockfetch event. We
+// use
 // a single event type for both to make synchronization easier.
 type BlockfetchEvent struct {
 	ConnectionId ouroboros.ConnectionId // Connection ID associated with event
@@ -37,7 +38,8 @@ type BlockfetchEvent struct {
 	BatchDone    bool          // Set to true for a BatchDone event
 }
 
-// ChainsyncEvent represents either a RollForward or RollBackward chainsync event.
+// ChainsyncEvent represents either a RollForward or RollBackward chainsync
+// event.
 // We use a single event type for both to make synchronization easier.
 type ChainsyncEvent struct {
 	ConnectionId ouroboros.ConnectionId // Connection ID associated with event

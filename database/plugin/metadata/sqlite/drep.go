@@ -143,7 +143,8 @@ func (d *MetadataStoreSqlite) SetRegistrationDrep(
 	return nil
 }
 
-// SetUpdateDrep saves an update drep certificate and updates the Dreps anchor fields
+// SetUpdateDrep saves an update drep certificate and updates the Dreps anchor
+// fields
 func (d *MetadataStoreSqlite) SetUpdateDrep(
 	cert *lcommon.UpdateDrepCertificate,
 	slot uint64,

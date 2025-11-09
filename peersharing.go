@@ -28,7 +28,8 @@ func (n *Node) peersharingServerConnOpts() []opeersharing.PeerSharingOptionFunc 
 }
 
 func (n *Node) peersharingClientConnOpts() []opeersharing.PeerSharingOptionFunc {
-	// We don't provide any client options, but we have this here for consistency
+	// We don't provide any client options, but we have this here for
+	// consistency
 	return []opeersharing.PeerSharingOptionFunc{}
 }
 

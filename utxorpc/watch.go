@@ -205,7 +205,8 @@ func (s *watchServiceServer) WatchTx(
 						assetPatterns = append(assetPatterns, moveAssetPattern)
 					}
 
-					// Convert everything to utxos (ledger.TransactionOutput) for matching
+					// Convert everything to utxos (ledger.TransactionOutput)
+					// for matching
 					var utxos []ledger.TransactionOutput
 					utxos = append(tx.Outputs(), tx.CollateralReturn())
 					var inputs []ledger.TransactionInput

@@ -165,7 +165,8 @@ func (d *MetadataStoreSqlite) SetTransaction(
 				*utxo,
 			)
 		}
-		// Update reference where this Utxo was used as collateral in a Transaction
+		// Update reference where this Utxo was used as collateral in a
+		// Transaction
 		if len(caseClauses) > 0 {
 			args := append(caseArgs, whereArgs...)
 			sql := fmt.Sprintf(
@@ -227,7 +228,8 @@ func (d *MetadataStoreSqlite) SetTransaction(
 				*utxo,
 			)
 		}
-		// Update reference where this Utxo was used as a reference input in a Transaction
+		// Update reference where this Utxo was used as a reference input in a
+		// Transaction
 		if len(caseClauses) > 0 {
 			args := append(caseArgs, whereArgs...)
 			sql := fmt.Sprintf(

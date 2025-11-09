@@ -52,7 +52,8 @@ type MempoolTransaction struct {
 	Type     uint
 }
 
-// TxValidator defines the interface for transaction validation needed by mempool.
+// TxValidator defines the interface for transaction validation needed by
+// mempool.
 type TxValidator interface {
 	ValidateTx(tx gledger.Transaction) error
 }
@@ -173,7 +174,8 @@ func (m *Mempool) processChainEvents() {
 		}
 		m.Lock()
 		// Re-validate each TX in mempool
-		// We iterate backward to avoid issues with shifting indexes when deleting
+		// We iterate backward to avoid issues with shifting indexes when
+		// deleting
 		for i := len(m.transactions) - 1; i >= 0; i-- {
 			tx := m.transactions[i]
 			// Decode transaction

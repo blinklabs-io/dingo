@@ -70,7 +70,8 @@ func (d *MetadataStoreSqlite) GetBlockNonce(
 	return ret.Nonce, nil
 }
 
-// DeleteBlockNoncesBeforeSlot deletes block_nonce records with slot less than the specified value
+// DeleteBlockNoncesBeforeSlot deletes block_nonce records with slot less than
+// the specified value
 func (d *MetadataStoreSqlite) DeleteBlockNoncesBeforeSlot(
 	slotNumber uint64,
 	txn *gorm.DB,
@@ -93,7 +94,8 @@ func (d *MetadataStoreSqlite) DeleteBlockNoncesBeforeSlot(
 	return nil
 }
 
-// DeleteBlockNoncesBeforeSlotWithoutCheckpoints deletes block_nonce records with slot < given value AND is_checkpoint = false
+// DeleteBlockNoncesBeforeSlotWithoutCheckpoints deletes block_nonce records
+// with slot < given value AND is_checkpoint = false
 func (d *MetadataStoreSqlite) DeleteBlockNoncesBeforeSlotWithoutCheckpoints(
 	slotNumber uint64,
 	txn *gorm.DB,

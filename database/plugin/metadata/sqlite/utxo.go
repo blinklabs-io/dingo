@@ -68,7 +68,8 @@ func (d *MetadataStoreSqlite) GetUtxosAddedAfterSlot(
 	return ret, nil
 }
 
-// GetUtxosDeletedBeforeSlot returns a list of Utxos marked as deleted before a given slot
+// GetUtxosDeletedBeforeSlot returns a list of Utxos marked as deleted before a
+// given slot
 func (d *MetadataStoreSqlite) GetUtxosDeletedBeforeSlot(
 	slot uint64,
 	limit int,
@@ -245,7 +246,8 @@ func (d *MetadataStoreSqlite) SetUtxoDeletedAtSlot(
 	return nil
 }
 
-// SetUtxosNotDeletedAfterSlot marks a list of Utxos as not deleted after a given slot
+// SetUtxosNotDeletedAfterSlot marks a list of Utxos as not deleted after a
+// given slot
 func (d *MetadataStoreSqlite) SetUtxosNotDeletedAfterSlot(
 	slot uint64,
 	txn *gorm.DB,

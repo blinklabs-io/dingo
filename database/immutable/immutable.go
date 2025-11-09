@@ -107,11 +107,13 @@ func (i *ImmutableDb) getChunkNamesFromPoint(
 			endSlot = next.BlockOrEbb
 		}
 		if point.Slot < startSlot {
-			// The slot we're looking for is less than the first slot in the chunk, so
+			// The slot we're looking for is less than the first slot in the
+			// chunk, so
 			// we can eliminate all later chunks
 			upperBound = middlePoint - 1
 		} else if point.Slot > endSlot {
-			// The slot we're looking for is greater than the last slot in the chunk, so
+			// The slot we're looking for is greater than the last slot in the
+			// chunk, so
 			// we can eliminate all earlier chunks
 			lowerBound = middlePoint + 1
 		} else {

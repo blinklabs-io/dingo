@@ -117,14 +117,16 @@ func (p *PluginOption) ProcessEnvVars(envPrefix string) error {
 				}
 				*(p.Dest.(*bool)) = value
 			case PluginOptionTypeInt:
-				// We limit to 32-bit to not get inconsistent behavior on 32-bit platforms
+				// We limit to 32-bit to not get inconsistent behavior on 32-bit
+				// platforms
 				value, err := strconv.ParseInt(value, 10, 32)
 				if err != nil {
 					return fmt.Errorf("error processing env vars: %w", err)
 				}
 				*(p.Dest.(*int)) = int(value)
 			case PluginOptionTypeUint:
-				// We limit to 32-bit to not get inconsistent behavior on 32-bit platforms
+				// We limit to 32-bit to not get inconsistent behavior on 32-bit
+				// platforms
 				value, err := strconv.ParseUint(value, 10, 32)
 				if err != nil {
 					return fmt.Errorf("error processing env vars: %w", err)
