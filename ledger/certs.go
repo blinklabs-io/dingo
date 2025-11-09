@@ -35,7 +35,7 @@ func (ls *LedgerState) processTransactionCertificates(
 			ls.currentPParams,
 		)
 		if err != nil {
-			return fmt.Errorf("get certificate deposit: %w", err)
+			return fmt.Errorf("failed load cert deposit func: %w", err)
 		}
 		switch cert := tmpCert.(type) {
 		case *lcommon.DeregistrationCertificate:
@@ -45,7 +45,7 @@ func (ls *LedgerState) processTransactionCertificates(
 				txn,
 			)
 			if err != nil {
-				return err
+				return fmt.Errorf("failed to process dereg cert: %w", err)
 			}
 		case *lcommon.DeregistrationDrepCertificate:
 			err := ls.db.SetDeregistrationDrep(
@@ -74,7 +74,7 @@ func (ls *LedgerState) processTransactionCertificates(
 				txn,
 			)
 			if err != nil {
-				return err
+				return fmt.Errorf("failed to process pool regis cert: %w", err)
 			}
 		case *lcommon.PoolRetirementCertificate:
 			err := ls.db.SetPoolRetirement(
