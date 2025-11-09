@@ -16,6 +16,7 @@ package sqlite
 
 import (
 	"errors"
+	"fmt"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -80,7 +81,7 @@ func (d *MetadataStoreSqlite) SetDeregistration(
 	stakeKey := cert.StakeCredential.Credential.Bytes()
 	tmpAccount, err := d.GetAccount(stakeKey, txn)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed getting account: %w", err)
 	}
 	if tmpAccount == nil {
 		// Account not found, nothing to deregister
@@ -89,6 +90,7 @@ func (d *MetadataStoreSqlite) SetDeregistration(
 	tmpItem := models.Deregistration{
 		StakingKey: stakeKey,
 		AddedSlot:  slot,
+		Amount:     cert.Amount,
 	}
 	tmpAccount.Active = false
 	if txn != nil {

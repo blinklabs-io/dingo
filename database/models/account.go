@@ -61,6 +61,7 @@ type Deregistration struct {
 	ID            uint   `gorm:"primarykey"`
 	CertificateID uint   `gorm:"index"`
 	AddedSlot     uint64
+	Amount        int64
 }
 
 func (Deregistration) TableName() string {
