@@ -69,7 +69,7 @@ func New(
 		return nil, errors.New("s3 blob: expected dataDir='s3://<bucket>[/prefix]'")
 	}
 
-	path := strings.TrimPrefix(dataDir, prefix)
+	path := strings.TrimPrefix(strings.ToLower(dataDir), prefix)
 	if path == "" {
 		cancel()
 		return nil, errors.New("s3 blob: bucket not set")
