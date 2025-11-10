@@ -25,17 +25,19 @@ import (
 
 func TestAccount_String(t *testing.T) {
 	tests := []struct {
-		name          string
-		stakingKey    []byte
-		wantErr       bool
-		wantErrMsg    string
-		validateAddr  bool
-		expectedHRP   string
+		name         string
+		stakingKey   []byte
+		wantErr      bool
+		wantErrMsg   string
+		validateAddr bool
+		expectedHRP  string
 	}{
 		{
 			name: "valid staking key - 28 bytes",
 			// Sample 28-byte staking key hash
-			stakingKey:   hexDecode("e1cbb80db89e292d1175088b0ce5cd27857d5f1e53e41a754d566a6b"),
+			stakingKey: hexDecode(
+				"e1cbb80db89e292d1175088b0ce5cd27857d5f1e53e41a754d566a6b",
+			),
 			wantErr:      false,
 			validateAddr: true,
 			expectedHRP:  "stake",
@@ -43,7 +45,9 @@ func TestAccount_String(t *testing.T) {
 		{
 			name: "valid staking key - 32 bytes",
 			// Sample 32-byte staking key hash
-			stakingKey:   hexDecode("e1cbb80db89e292d1175088b0ce5cd27857d5f1e53e41a754d566a6b12345678"),
+			stakingKey: hexDecode(
+				"e1cbb80db89e292d1175088b0ce5cd27857d5f1e53e41a754d566a6b12345678",
+			),
 			wantErr:      false,
 			validateAddr: true,
 			expectedHRP:  "stake",
@@ -98,7 +102,11 @@ func TestAccount_String(t *testing.T) {
 			}
 			got, err := a.String()
 			if (err != nil) != tt.wantErr {
-				t.Errorf("Account.String() error = %v, wantErr %v", err, tt.wantErr)
+				t.Errorf(
+					"Account.String() error = %v, wantErr %v",
+					err,
+					tt.wantErr,
+				)
 				return
 			}
 			if tt.wantErr {
@@ -106,8 +114,13 @@ func TestAccount_String(t *testing.T) {
 					t.Errorf("Account.String() expected error but got none")
 					return
 				}
-				if tt.wantErrMsg != "" && !strings.Contains(err.Error(), tt.wantErrMsg) {
-					t.Errorf("Account.String() error = %v, want error containing %q", err, tt.wantErrMsg)
+				if tt.wantErrMsg != "" &&
+					!strings.Contains(err.Error(), tt.wantErrMsg) {
+					t.Errorf(
+						"Account.String() error = %v, want error containing %q",
+						err,
+						tt.wantErrMsg,
+					)
 				}
 				return
 			}
@@ -116,18 +129,27 @@ func TestAccount_String(t *testing.T) {
 				return
 			}
 			if got == "" {
-				t.Errorf("Account.String() returned empty string for valid input")
+				t.Errorf(
+					"Account.String() returned empty string for valid input",
+				)
 				return
 			}
 			if tt.validateAddr {
 				// Validate the returned bech32 address
 				hrp, data, err := bech32.Decode(got)
 				if err != nil {
-					t.Errorf("Account.String() returned invalid bech32 address: %v", err)
+					t.Errorf(
+						"Account.String() returned invalid bech32 address: %v",
+						err,
+					)
 					return
 				}
 				if hrp != tt.expectedHRP {
-					t.Errorf("Account.String() HRP = %v, want %v", hrp, tt.expectedHRP)
+					t.Errorf(
+						"Account.String() HRP = %v, want %v",
+						hrp,
+						tt.expectedHRP,
+					)
 				}
 				// Convert back and verify we get the original data
 				converted, err := bech32.ConvertBits(data, 5, 8, false)
@@ -136,7 +158,11 @@ func TestAccount_String(t *testing.T) {
 					return
 				}
 				if !bytes.Equal(converted, tt.stakingKey) {
-					t.Errorf("Account.String() round-trip failed: got %x, want %x", converted, tt.stakingKey)
+					t.Errorf(
+						"Account.String() round-trip failed: got %x, want %x",
+						converted,
+						tt.stakingKey,
+					)
 				}
 			}
 		})
@@ -145,7 +171,9 @@ func TestAccount_String(t *testing.T) {
 
 func TestAccount_String_Idempotent(t *testing.T) {
 	// Test that calling String() multiple times returns the same result
-	stakingKey := hexDecode("e1cbb80db89e292d1175088b0ce5cd27857d5f1e53e41a754d566a6b")
+	stakingKey := hexDecode(
+		"e1cbb80db89e292d1175088b0ce5cd27857d5f1e53e41a754d566a6b",
+	)
 	a := &Account{
 		StakingKey: stakingKey,
 	}
@@ -161,14 +189,22 @@ func TestAccount_String_Idempotent(t *testing.T) {
 	}
 
 	if result1 != result2 {
-		t.Errorf("Account.String() not idempotent: first=%s, second=%s", result1, result2)
+		t.Errorf(
+			"Account.String() not idempotent: first=%s, second=%s",
+			result1,
+			result2,
+		)
 	}
 }
 
 func TestAccount_String_DifferentKeys(t *testing.T) {
 	// Test that different staking keys produce different addresses
-	key1 := hexDecode("e1cbb80db89e292d1175088b0ce5cd27857d5f1e53e41a754d566a6b")
-	key2 := hexDecode("a1cbb80db89e292d1175088b0ce5cd27857d5f1e53e41a754d566a6b")
+	key1 := hexDecode(
+		"e1cbb80db89e292d1175088b0ce5cd27857d5f1e53e41a754d566a6b",
+	)
+	key2 := hexDecode(
+		"a1cbb80db89e292d1175088b0ce5cd27857d5f1e53e41a754d566a6b",
+	)
 
 	a1 := &Account{StakingKey: key1}
 	a2 := &Account{StakingKey: key2}
@@ -184,13 +220,18 @@ func TestAccount_String_DifferentKeys(t *testing.T) {
 	}
 
 	if addr1 == addr2 {
-		t.Errorf("Account.String() produced same address for different keys: %s", addr1)
+		t.Errorf(
+			"Account.String() produced same address for different keys: %s",
+			addr1,
+		)
 	}
 }
 
 func TestAccount_String_Bech32Format(t *testing.T) {
 	// Test that the output follows bech32 format conventions
-	stakingKey := hexDecode("e1cbb80db89e292d1175088b0ce5cd27857d5f1e53e41a754d566a6b")
+	stakingKey := hexDecode(
+		"e1cbb80db89e292d1175088b0ce5cd27857d5f1e53e41a754d566a6b",
+	)
 	a := &Account{
 		StakingKey: stakingKey,
 	}
@@ -202,12 +243,18 @@ func TestAccount_String_Bech32Format(t *testing.T) {
 
 	// Check that address starts with "stake"
 	if !strings.HasPrefix(addr, "stake") {
-		t.Errorf("Account.String() address doesn't start with 'stake': %s", addr)
+		t.Errorf(
+			"Account.String() address doesn't start with 'stake': %s",
+			addr,
+		)
 	}
 
 	// Check that address contains the separator '1'
 	if !strings.Contains(addr, "1") {
-		t.Errorf("Account.String() address doesn't contain separator '1': %s", addr)
+		t.Errorf(
+			"Account.String() address doesn't contain separator '1': %s",
+			addr,
+		)
 	}
 
 	// Check that address only contains valid bech32 characters (lowercase alphanumeric, no '1', 'b', 'i', 'o')
@@ -216,7 +263,11 @@ func TestAccount_String_Bech32Format(t *testing.T) {
 	validChars := "qpzry9x8gf2tvdw0s3jn54khce6mua7l"
 	for _, c := range datapart {
 		if !strings.ContainsRune(validChars, c) {
-			t.Errorf("Account.String() address contains invalid bech32 character: %c in %s", c, addr)
+			t.Errorf(
+				"Account.String() address contains invalid bech32 character: %c in %s",
+				c,
+				addr,
+			)
 		}
 	}
 }

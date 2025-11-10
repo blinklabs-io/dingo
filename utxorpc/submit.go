@@ -77,7 +77,12 @@ func (s *submitServiceServer) SubmitTx(
 			resp.Ref = append(resp.Ref, placeholderRef)
 			errorList[i] = err
 			s.utxorpc.config.Logger.Error(
-				fmt.Sprint(fmt.Errorf("failed to decode transaction from CBOR: %w", err)),
+				fmt.Sprint(
+					fmt.Errorf(
+						"failed to decode transaction from CBOR: %w",
+						err,
+					),
+				),
 			)
 			hasError = true
 			continue
