@@ -19,10 +19,12 @@ import (
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
+// SetTransaction persists transaction to blob storage (UTXOs) and metadata storage (certificates).
 func (d *Database) SetTransaction(
-	tx lcommon.Transaction,
 	point ocommon.Point,
+	tx lcommon.Transaction,
 	idx uint32,
+	deposits map[int]uint64,
 	txn *Txn,
 ) error {
 	if txn == nil {
@@ -42,5 +44,12 @@ func (d *Database) SetTransaction(
 			}
 		}
 	}
-	return d.metadata.SetTransaction(tx, point, idx, txn.Metadata())
+
+	return d.metadata.SetTransaction(
+		point,
+		tx,
+		idx,
+		deposits,
+		txn.Metadata(),
+	)
 }

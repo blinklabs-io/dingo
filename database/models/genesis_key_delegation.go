@@ -14,23 +14,16 @@
 
 package models
 
-import "github.com/blinklabs-io/dingo/database/types"
-
-type Certificate struct {
-	Cbor       []byte `gorm:"-"`
-	Pool       []byte
-	Credential []byte
-	Drep       []byte
-	CertType   uint `gorm:"index"`
-	Epoch      uint64
-	Amount     types.Uint64
-	ID         uint `gorm:"primaryKey"`
+// GenesisKeyDelegation represents a genesis key delegation certificate
+type GenesisKeyDelegation struct {
+	GenesisHash         []byte `gorm:"index;uniqueIndex:uniq_genesis_delegation"`
+	GenesisDelegateHash []byte `gorm:"uniqueIndex:uniq_genesis_delegation"`
+	VrfKeyHash          []byte `gorm:"uniqueIndex:uniq_genesis_delegation"`
+	ID                  uint   `gorm:"primaryKey"`
+	AddedSlot           uint64 `gorm:"index"`
 }
 
-func (Certificate) TableName() string {
-	return "certs"
-}
-
-func (c Certificate) Type() uint {
-	return c.CertType
+// TableName returns the database table name for the GenesisKeyDelegation model.
+func (GenesisKeyDelegation) TableName() string {
+	return "genesis_key_delegations"
 }

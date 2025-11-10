@@ -25,7 +25,7 @@ import (
 var ErrAccountNotFound = errors.New("account not found")
 
 type Account struct {
-	StakingKey    []byte `gorm:"uniqueIndex"`
+	StakingKey    []byte `gorm:"index"`
 	Pool          []byte `gorm:"index"`
 	Drep          []byte `gorm:"index"`
 	ID            uint   `gorm:"primarykey"`
@@ -57,10 +57,18 @@ func (a *Account) String() (string, error) {
 	return encoded, nil
 }
 
+// Certificate models constraint strategy:
+// - Deregistration, StakeDeregistration, and StakeRegistration use composite unique constraints on (StakingKey, CertificateID)
+//   to prevent duplicate certificates for the same staking key and certificate ID.
+// - Other certificate models (Registration, StakeDelegation, etc.) use simple indexes
+//   without uniqueness constraints, allowing multiple entries for the same staking key and certificate ID.
+// This design ensures that deregistration and stake registration certificates are processed only once,
+// while other certificate types can be handled multiple times if needed (e.g., for historical tracking or retries).
+
 type Deregistration struct {
-	StakingKey    []byte `gorm:"index"`
+	StakingKey    []byte `gorm:"index;uniqueIndex:uniq_deregistration_cert"`
 	ID            uint   `gorm:"primarykey"`
-	CertificateID uint   `gorm:"index"`
+	CertificateID uint   `gorm:"uniqueIndex:uniq_deregistration_cert"`
 	AddedSlot     uint64
 	Amount        types.Uint64
 }
@@ -94,8 +102,8 @@ func (StakeDelegation) TableName() string {
 }
 
 type StakeDeregistration struct {
-	StakingKey    []byte `gorm:"index"`
-	CertificateID uint   `gorm:"index"`
+	StakingKey    []byte `gorm:"index;uniqueIndex:uniq_stake_deregistration_cert"`
+	CertificateID uint   `gorm:"uniqueIndex:uniq_stake_deregistration_cert"`
 	ID            uint   `gorm:"primarykey"`
 	AddedSlot     uint64
 }
@@ -105,8 +113,8 @@ func (StakeDeregistration) TableName() string {
 }
 
 type StakeRegistration struct {
-	StakingKey    []byte `gorm:"index"`
-	CertificateID uint   `gorm:"index"`
+	StakingKey    []byte `gorm:"index;uniqueIndex:uniq_stake_registration_cert"`
+	CertificateID uint   `gorm:"uniqueIndex:uniq_stake_registration_cert"`
 	ID            uint   `gorm:"primarykey"`
 	AddedSlot     uint64
 	DepositAmount types.Uint64

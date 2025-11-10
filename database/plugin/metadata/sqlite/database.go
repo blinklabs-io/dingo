@@ -33,7 +33,9 @@ import (
 	"gorm.io/plugin/opentelemetry/tracing"
 )
 
-// MetadataStoreSqlite stores all data in sqlite. Data may not be persisted
+// MetadataStoreSqlite is a SQLite-based implementation of the metadata store.
+// It provides persistent storage for blockchain metadata including certificates,
+// transactions, blocks, and other ledger state data.
 type MetadataStoreSqlite struct {
 	promRegistry prometheus.Registerer
 	db           *gorm.DB
@@ -42,9 +44,10 @@ type MetadataStoreSqlite struct {
 	timerMutex   sync.Mutex
 	dataDir      string
 	closed       bool
+	vacuumWG     sync.WaitGroup
 }
 
-// New creates a new database
+// New creates a SQLite metadata store. Uses in-memory database if dataDir is empty.
 func New(
 	dataDir string,
 	logger *slog.Logger,
@@ -53,7 +56,8 @@ func New(
 	var metadataDb *gorm.DB
 	var err error
 	if dataDir == "" {
-		// No dataDir, use in-memory config
+		// Use in-memory database when no data directory is specified, useful for testing
+		// cache=shared allows multiple connections to share the same in-memory database
 		metadataDb, err = gorm.Open(
 			sqlite.Open("file::memory:?cache=shared"),
 			&gorm.Config{
@@ -141,6 +145,11 @@ func (d *MetadataStoreSqlite) runVacuum() error {
 	if d.dataDir == "" || closed {
 		return nil
 	}
+
+	// Track this vacuum operation
+	d.vacuumWG.Add(1)
+	defer d.vacuumWG.Done()
+
 	if result := d.DB().Raw("VACUUM"); result.Error != nil {
 		return result.Error
 	}
@@ -175,12 +184,12 @@ func (d *MetadataStoreSqlite) scheduleDailyVacuum() {
 	d.timerVacuum = time.AfterFunc(daily, f)
 }
 
-// AutoMigrate wraps the gorm AutoMigrate
+// AutoMigrate creates or updates database schema for the given models.
 func (d *MetadataStoreSqlite) AutoMigrate(dst ...any) error {
 	return d.DB().AutoMigrate(dst...)
 }
 
-// Close gets the database handle from our MetadataStore and closes it
+// Close shuts down the database connection and stops background processes.
 func (d *MetadataStoreSqlite) Close() error {
 	d.timerMutex.Lock()
 	d.closed = true
@@ -190,40 +199,43 @@ func (d *MetadataStoreSqlite) Close() error {
 	}
 	d.timerMutex.Unlock()
 
+	// Wait for any in-flight vacuum operations to complete
+	d.vacuumWG.Wait()
+
 	// get DB handle from gorm.DB
 	db, err := d.DB().DB()
 	if err != nil {
-		return err
+		return fmt.Errorf("get database handle: %w", err)
 	}
 	return db.Close()
 }
 
-// Create creates a record
+// Create inserts a new record into the database.
 func (d *MetadataStoreSqlite) Create(value any) *gorm.DB {
 	return d.DB().Create(value)
 }
 
-// DB returns the database handle
+// DB returns the underlying GORM database handle.
 func (d *MetadataStoreSqlite) DB() *gorm.DB {
 	return d.db
 }
 
-// First returns the first DB entry
+// First retrieves the first record that matches the query.
 func (d *MetadataStoreSqlite) First(args any) *gorm.DB {
 	return d.DB().First(args)
 }
 
-// Order orders a DB query
+// Order adds ORDER BY clause to the database query.
 func (d *MetadataStoreSqlite) Order(args any) *gorm.DB {
 	return d.DB().Order(args)
 }
 
-// Transaction creates a gorm transaction
+// Transaction creates a new database transaction.
 func (d *MetadataStoreSqlite) Transaction() *gorm.DB {
 	return d.DB().Begin()
 }
 
-// Where constrains a DB query
+// Where adds WHERE conditions to the database query.
 func (d *MetadataStoreSqlite) Where(
 	query any,
 	args ...any,

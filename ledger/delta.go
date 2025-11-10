@@ -16,7 +16,6 @@ package ledger
 
 import (
 	"fmt"
-	"math"
 
 	"github.com/blinklabs-io/dingo/database"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -47,9 +46,6 @@ func (d *LedgerDelta) addTransaction(
 
 func (d *LedgerDelta) apply(ls *LedgerState, txn *database.Txn) error {
 	for _, tr := range d.Transactions {
-		if tr.Index < 0 || tr.Index > math.MaxUint32 {
-			return fmt.Errorf("transaction index out of range: %d", tr.Index)
-		}
 		// Use consumeUtxo if tx is marked invalid
 		// This allows us to capture collateral returns in the case of
 		// phase 2 validation failure
@@ -60,10 +56,13 @@ func (d *LedgerDelta) apply(ls *LedgerState, txn *database.Txn) error {
 					return fmt.Errorf("remove consumed UTxO: %w", err)
 				}
 			}
+			// No deposit calculation for invalid transactions
+			var deposits map[int]uint64
 			err := ls.db.SetTransaction(
-				tr.Tx,
 				d.Point,
+				tr.Tx,
 				uint32(tr.Index), //nolint:gosec
+				deposits,
 				txn,
 			)
 			if err != nil {
@@ -72,15 +71,30 @@ func (d *LedgerDelta) apply(ls *LedgerState, txn *database.Txn) error {
 			// Stop processing this transaction
 			continue
 		}
+		// Calculate certificate deposits if the transaction has certificates
+		var deposits map[int]uint64
+		if len(tr.Tx.Certificates()) > 0 {
+			var err error
+			deposits, err = ls.CalculateCertificateDeposits(
+				tr.Tx.Certificates(),
+			)
+			if err != nil {
+				return fmt.Errorf("calculate certificate deposits: %w", err)
+			}
+		}
+
+		// Store transaction (with or without certificates)
 		err := ls.db.SetTransaction(
-			tr.Tx,
 			d.Point,
+			tr.Tx,
 			uint32(tr.Index), //nolint:gosec
+			deposits,
 			txn,
 		)
 		if err != nil {
 			return fmt.Errorf("record transaction: %w", err)
 		}
+
 		// Protocol parameter updates
 		if updateEpoch, paramUpdates := tr.Tx.ProtocolParameterUpdates(); updateEpoch > 0 {
 			for genesisHash, update := range paramUpdates {
@@ -95,16 +109,6 @@ func (d *LedgerDelta) apply(ls *LedgerState, txn *database.Txn) error {
 					return fmt.Errorf("set pparam update: %w", err)
 				}
 			}
-		}
-		// Certificates
-		err = ls.processTransactionCertificates(
-			txn,
-			d.Point,
-			tr.Tx.Certificates(),
-			d.BlockEraId,
-		)
-		if err != nil {
-			return fmt.Errorf("process transaction certificates: %w", err)
 		}
 	}
 	return nil

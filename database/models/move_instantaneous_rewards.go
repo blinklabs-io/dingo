@@ -14,15 +14,16 @@
 
 package models
 
-type ResignCommitteeCold struct {
-	AnchorUrl      string
-	ColdCredential []byte `gorm:"index;uniqueIndex:uniq_resign_committee_cold_cert"`
-	AnchorHash     []byte
-	ID             uint `gorm:"primarykey"`
-	CertificateID  uint `gorm:"unique;uniqueIndex:uniq_resign_committee_cold_cert"`
-	AddedSlot      uint64
+// MoveInstantaneousRewards represents a move instantaneous rewards certificate
+type MoveInstantaneousRewards struct {
+	RewardData []byte // JSON-encoded rewards map
+	ID         uint   `gorm:"primaryKey"`
+	Source     uint   `gorm:"index"` // 0=reserves, 1=treasury
+	OtherPot   uint64 `gorm:"index"` // Amount moved from other pot
+	AddedSlot  uint64 `gorm:"index"`
 }
 
-func (ResignCommitteeCold) TableName() string {
-	return "resign_committee_cold"
+// TableName returns the database table name for the MoveInstantaneousRewards model.
+func (MoveInstantaneousRewards) TableName() string {
+	return "move_instantaneous_rewards"
 }

@@ -14,23 +14,25 @@
 
 package models
 
-import "github.com/blinklabs-io/dingo/database/types"
+import (
+	"github.com/blinklabs-io/dingo/database/types"
+)
 
 // Transaction represents a transaction record
 type Transaction struct {
 	Hash             []byte `gorm:"uniqueIndex"`
 	BlockHash        []byte `gorm:"index"`
 	Inputs           []Utxo `gorm:"foreignKey:SpentAtTxId;references:Hash"`
-	Outputs          []Utxo `gorm:"foreignKey:TransactionID;references:ID"`
+	Outputs          []Utxo `gorm:"foreignKey:TransactionID;references:ID;where:is_collateral_return = false"`
 	ReferenceInputs  []Utxo `gorm:"foreignKey:ReferencedByTxId;references:Hash"`
 	Collateral       []Utxo `gorm:"foreignKey:CollateralByTxId;references:Hash"`
-	CollateralReturn *Utxo  `gorm:"foreignKey:TransactionID;references:ID"`
+	CollateralReturn *Utxo  `gorm:"foreignKey:TransactionID;references:ID;where:is_collateral_return = true"`
 	ID               uint   `gorm:"primaryKey"`
 	Type             int
-	BlockIndex       uint32
-	Metadata         []byte
 	Fee              types.Uint64
 	TTL              types.Uint64
+	BlockIndex       uint32
+	Metadata         []byte
 }
 
 func (Transaction) TableName() string {
