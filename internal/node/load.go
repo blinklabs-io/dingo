@@ -34,11 +34,15 @@ import (
 func Load(cfg *config.Config, logger *slog.Logger, immutableDir string) error {
 	var nodeCfg *cardano.CardanoNodeConfig
 	if cfg.CardanoConfig != "" {
-		tmpCfg, err := cardano.NewCardanoNodeConfigFromFile(cfg.CardanoConfig)
+		var err error
+		nodeCfg, err = cardano.LoadCardanoNodeConfigWithFallback(
+			cfg.CardanoConfig,
+			cfg.Network,
+			cardano.EmbeddedConfigPreviewNetworkFS,
+		)
 		if err != nil {
 			return err
 		}
-		nodeCfg = tmpCfg
 		logger.Debug(
 			fmt.Sprintf(
 				"cardano network config: %+v",

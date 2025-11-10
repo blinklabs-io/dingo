@@ -67,7 +67,7 @@ var globalConfig = &Config{
 	BadgerCacheSize:    1073741824,
 	MempoolCapacity:    1048576,
 	BindAddr:           "0.0.0.0",
-	CardanoConfig:      "./config/cardano/preview/config.json",
+	CardanoConfig:      "", // Will be set dynamically based on network
 	DatabasePath:       ".dingo",
 	SocketPath:         "dingo.socket",
 	IntersectTip:       false,
@@ -103,6 +103,7 @@ func LoadConfig(configFile string) (*Config, error) {
 			}
 		}
 	}
+
 	if configFile != "" {
 		buf, err := os.ReadFile(configFile)
 		if err != nil {
@@ -113,9 +114,19 @@ func LoadConfig(configFile string) (*Config, error) {
 			return nil, fmt.Errorf("error parsing config file: %w", err)
 		}
 	}
+	// Process environment variables
 	err := envconfig.Process("cardano", globalConfig)
 	if err != nil {
 		return nil, fmt.Errorf("error processing environment: %+w", err)
+	}
+
+	// Set default CardanoConfig path based on network if not provided by user
+	if globalConfig.CardanoConfig == "" {
+		if globalConfig.Network == "preview" {
+			globalConfig.CardanoConfig = "preview/config.json"
+		} else {
+			globalConfig.CardanoConfig = "/opt/cardano/" + globalConfig.Network + "/config.json"
+		}
 	}
 
 	_, err = LoadTopologyConfig()
