@@ -68,15 +68,22 @@ func New(
 		cancel()
 		return nil, errors.New("s3 blob: expected dataDir='s3://<bucket>[/prefix]'")
 	}
+
 	path := strings.TrimPrefix(dataDir, prefix)
-	parts := strings.SplitN(path, "/", 2)
-	if parts[0] == "" {
+	if path == "" {
 		cancel()
 		return nil, errors.New("s3 blob: bucket not set")
 	}
+
+	parts := strings.SplitN(path, "/", 2)
+	if len(parts) == 0 || parts[0] == "" {
+		cancel()
+		return nil, errors.New("s3 blob: invalid S3 path (missing bucket)")
+	}
+
 	bucket := parts[0]
 	keyPrefix := ""
-	if len(parts) == 2 {
+	if len(parts) > 1 && parts[1] != "" {
 		keyPrefix = strings.TrimSuffix(parts[1], "/")
 		if keyPrefix != "" {
 			keyPrefix += "/"
