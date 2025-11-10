@@ -108,7 +108,8 @@ func New(
 		startupCancel: cancel,
 	}
 	if err := db.init(); err != nil {
-		return db, err
+		cancel()
+		return nil, err
 	}
 	return db, nil
 }
@@ -124,7 +125,6 @@ func (d *BlobStoreS3) init() error {
 		d.startupCancel()
 		d.startupCancel = nil
 	}
-	d.startupCtx = context.Background()
 	return nil
 }
 
