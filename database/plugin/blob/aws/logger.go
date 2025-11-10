@@ -33,14 +33,26 @@ func NewS3Logger(logger *slog.Logger) *S3Logger {
 }
 
 func (g *S3Logger) Infof(msg string, args ...any) {
-	g.logger.Info(fmt.Sprintf(msg, args...), "component", "database")
+	g.logger.Info(
+		fmt.Sprintf(msg, args...),
+		"component", "database",
+	)
 }
 func (g *S3Logger) Warningf(msg string, args ...any) {
-	g.logger.Warn(fmt.Sprintf(msg, args...), "component", "database")
+	g.logger.Warn(
+		fmt.Sprintf(msg, args...),
+		"component", "database",
+	)
 }
 func (g *S3Logger) Debugf(msg string, args ...any) {
-	g.logger.Debug(fmt.Sprintf(msg, args...), "component", "database")
+	g.logger.Debug(
+		fmt.Sprintf(msg, args...),
+		"component", "database",
+	)
 }
 func (g *S3Logger) Errorf(msg string, args ...any) {
-	g.logger.Error(fmt.Sprintf(msg, args...), "component", "database")
+	g.logger.Error(
+		fmt.Sprintf(msg, args...),
+		"component", "database",
+	)
 }
