@@ -30,6 +30,7 @@ type TransactionRecord struct {
 
 type LedgerDelta struct {
 	Point        ocommon.Point
+	BlockEraId   uint
 	Transactions []TransactionRecord
 }
 
@@ -100,6 +101,7 @@ func (d *LedgerDelta) apply(ls *LedgerState, txn *database.Txn) error {
 			txn,
 			d.Point,
 			tr.Tx.Certificates(),
+			d.BlockEraId,
 		)
 		if err != nil {
 			return fmt.Errorf("process transaction certificates: %w", err)

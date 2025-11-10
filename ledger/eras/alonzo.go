@@ -129,7 +129,7 @@ func CertDepositAlonzo(
 ) (uint64, error) {
 	tmpPparams, ok := pp.(*alonzo.AlonzoProtocolParameters)
 	if !ok {
-		return 0, errors.New("pparams are not expected type")
+		return 0, ErrIncompatibleProtocolParams
 	}
 	switch cert.(type) {
 	case *lcommon.PoolRegistrationCertificate:
