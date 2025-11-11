@@ -65,7 +65,10 @@ func (d *MetadataStoreSqlite) SetTransaction(
 		BlockIndex: idx,
 	}
 	if tx.Metadata() != nil {
-		tmpMetadata := tx.Metadata().Cbor()
+		tmpMetadata, err := tx.Metadata().Cbor()
+		if err != nil {
+			return fmt.Errorf("failed to encode transaction metadata: %w", err)
+		}
 		tmpTx.Metadata = tmpMetadata
 	}
 	collateralReturn := tx.CollateralReturn()
