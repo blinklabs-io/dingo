@@ -27,6 +27,8 @@ type Transaction struct {
 	Type             int
 	BlockIndex       uint32
 	Metadata         []byte
+	Fee              uint64
+	TTL              uint64
 }
 
 func (Transaction) TableName() string {
