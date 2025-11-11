@@ -63,6 +63,8 @@ func (d *MetadataStoreSqlite) SetTransaction(
 		Type:       tx.Type(),
 		BlockHash:  point.Hash,
 		BlockIndex: idx,
+		Fee:        tx.Fee(),
+		TTL:        tx.TTL(),
 	}
 	if tx.Metadata() != nil {
 		tmpMetadata := tx.Metadata().Cbor()
