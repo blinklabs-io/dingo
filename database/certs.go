@@ -42,7 +42,12 @@ func (d *Database) SetPoolRegistration(
 	deposit uint64,
 	txn *Txn,
 ) error {
-	return d.metadata.SetPoolRegistration(cert, slot, types.Uint64(deposit), txn.Metadata())
+	return d.metadata.SetPoolRegistration(
+		cert,
+		slot,
+		types.Uint64(deposit),
+		txn.Metadata(),
+	)
 }
 
 // SetPoolRetirement saves a pool retirement certificate

@@ -22,6 +22,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -38,6 +39,7 @@ type MetadataStoreSqlite struct {
 	db           *gorm.DB
 	logger       *slog.Logger
 	timerVacuum  *time.Timer
+	timerMutex   sync.Mutex
 	dataDir      string
 }
 
@@ -141,7 +143,11 @@ func (d *MetadataStoreSqlite) runVacuum() error {
 	return nil
 }
 
+// scheduleDailyVacuum schedules a daily vacuum operation
 func (d *MetadataStoreSqlite) scheduleDailyVacuum() {
+	d.timerMutex.Lock()
+	defer d.timerMutex.Unlock()
+
 	if d.timerVacuum != nil {
 		d.timerVacuum.Stop()
 	}
@@ -169,6 +175,13 @@ func (d *MetadataStoreSqlite) AutoMigrate(dst ...any) error {
 
 // Close gets the database handle from our MetadataStore and closes it
 func (d *MetadataStoreSqlite) Close() error {
+	d.timerMutex.Lock()
+	if d.timerVacuum != nil {
+		d.timerVacuum.Stop()
+		d.timerVacuum = nil
+	}
+	d.timerMutex.Unlock()
+
 	// get DB handle from gorm.DB
 	db, err := d.DB().DB()
 	if err != nil {
