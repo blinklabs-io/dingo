@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/btcsuite/btcd/btcutil/bech32"
 )
 
@@ -61,7 +62,7 @@ type Deregistration struct {
 	ID            uint   `gorm:"primarykey"`
 	CertificateID uint   `gorm:"index"`
 	AddedSlot     uint64
-	Amount        int64
+	Amount        types.Uint64
 }
 
 func (Deregistration) TableName() string {
@@ -73,7 +74,7 @@ type Registration struct {
 	ID            uint   `gorm:"primarykey"`
 	CertificateID uint   `gorm:"index"`
 	AddedSlot     uint64
-	DepositAmount uint64
+	DepositAmount types.Uint64
 }
 
 func (Registration) TableName() string {
@@ -108,7 +109,7 @@ type StakeRegistration struct {
 	CertificateID uint   `gorm:"index"`
 	ID            uint   `gorm:"primarykey"`
 	AddedSlot     uint64
-	DepositAmount uint64
+	DepositAmount types.Uint64
 }
 
 func (StakeRegistration) TableName() string {
@@ -121,7 +122,7 @@ type StakeRegistrationDelegation struct {
 	CertificateID uint   `gorm:"index"`
 	ID            uint   `gorm:"primarykey"`
 	AddedSlot     uint64
-	DepositAmount uint64
+	DepositAmount types.Uint64
 }
 
 func (StakeRegistrationDelegation) TableName() string {
@@ -148,7 +149,7 @@ type StakeVoteRegistrationDelegation struct {
 	CertificateID uint   `gorm:"index"`
 	ID            uint   `gorm:"primarykey"`
 	AddedSlot     uint64
-	DepositAmount uint64
+	DepositAmount types.Uint64
 }
 
 func (StakeVoteRegistrationDelegation) TableName() string {
@@ -173,7 +174,7 @@ type VoteRegistrationDelegation struct {
 	CertificateID uint   `gorm:"index"`
 	ID            uint   `gorm:"primarykey"`
 	AddedSlot     uint64
-	DepositAmount uint64
+	DepositAmount types.Uint64
 }
 
 func (VoteRegistrationDelegation) TableName() string {

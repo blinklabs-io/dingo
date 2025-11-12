@@ -14,6 +14,8 @@
 
 package models
 
+import "github.com/blinklabs-io/dingo/database/types"
+
 type Certificate struct {
 	Cbor       []byte `gorm:"-"`
 	Pool       []byte
@@ -21,7 +23,7 @@ type Certificate struct {
 	Drep       []byte
 	CertType   uint `gorm:"index"`
 	Epoch      uint64
-	Amount     uint64
+	Amount     types.Uint64
 	ID         uint `gorm:"primaryKey"`
 }
 

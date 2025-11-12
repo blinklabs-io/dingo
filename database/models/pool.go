@@ -56,7 +56,7 @@ type PoolRegistration struct {
 	ID            uint `gorm:"primarykey"`
 	PoolID        uint `gorm:"index"`
 	AddedSlot     uint64
-	DepositAmount uint64
+	DepositAmount types.Uint64
 }
 
 func (PoolRegistration) TableName() string {

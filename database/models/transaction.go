@@ -14,6 +14,8 @@
 
 package models
 
+import "github.com/blinklabs-io/dingo/database/types"
+
 // Transaction represents a transaction record
 type Transaction struct {
 	Hash             []byte `gorm:"uniqueIndex"`
@@ -27,8 +29,8 @@ type Transaction struct {
 	Type             int
 	BlockIndex       uint32
 	Metadata         []byte
-	Fee              uint64
-	TTL              uint64
+	Fee              types.Uint64
+	TTL              types.Uint64
 }
 
 func (Transaction) TableName() string {

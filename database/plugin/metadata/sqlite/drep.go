@@ -16,6 +16,7 @@ package sqlite
 
 import (
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/types"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -76,7 +77,8 @@ func (d *MetadataStoreSqlite) SetDrep(
 // SetDeregistrationDrep saves a deregistration drep certificate and drep
 func (d *MetadataStoreSqlite) SetDeregistrationDrep(
 	cert *lcommon.DeregistrationDrepCertificate,
-	slot, deposit uint64,
+	slot uint64,
+	deposit types.Uint64,
 	txn *gorm.DB,
 ) error {
 	drep := cert.DrepCredential.Credential.Bytes()
@@ -111,7 +113,8 @@ func (d *MetadataStoreSqlite) SetDeregistrationDrep(
 // SetRegistrationDrep saves a registration drep certificate and drep
 func (d *MetadataStoreSqlite) SetRegistrationDrep(
 	cert *lcommon.RegistrationDrepCertificate,
-	slot, deposit uint64,
+	slot uint64,
+	deposit types.Uint64,
 	txn *gorm.DB,
 ) error {
 	drep := cert.DrepCredential.Credential.Bytes()
