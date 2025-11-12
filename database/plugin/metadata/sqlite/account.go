@@ -19,6 +19,7 @@ import (
 	"fmt"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/types"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -87,10 +88,13 @@ func (d *MetadataStoreSqlite) SetDeregistration(
 		// Account not found, nothing to deregister
 		return nil
 	}
+	if cert.Amount < 0 {
+		return fmt.Errorf("invalid negative amount: %d", cert.Amount)
+	}
 	tmpItem := models.Deregistration{
 		StakingKey: stakeKey,
 		AddedSlot:  slot,
-		Amount:     cert.Amount,
+		Amount:     types.Uint64(cert.Amount),
 	}
 	tmpAccount.Active = false
 	if txn != nil {
@@ -114,7 +118,8 @@ func (d *MetadataStoreSqlite) SetDeregistration(
 // SetRegistration saves a registration certificate and account
 func (d *MetadataStoreSqlite) SetRegistration(
 	cert *lcommon.RegistrationCertificate,
-	slot, deposit uint64,
+	slot uint64,
+	deposit types.Uint64,
 	txn *gorm.DB,
 ) error {
 	stakeKey := cert.StakeCredential.Credential.Bytes()
@@ -227,7 +232,8 @@ func (d *MetadataStoreSqlite) SetStakeDeregistration(
 // SetStakeRegistration saves a stake registration certificate and account
 func (d *MetadataStoreSqlite) SetStakeRegistration(
 	cert *lcommon.StakeRegistrationCertificate,
-	slot, deposit uint64,
+	slot uint64,
+	deposit types.Uint64,
 	txn *gorm.DB,
 ) error {
 	stakeKey := cert.StakeCredential.Credential.Bytes()
@@ -254,7 +260,8 @@ func (d *MetadataStoreSqlite) SetStakeRegistration(
 // SetStakeRegistrationDelegation saves a stake registration delegation certificate and account
 func (d *MetadataStoreSqlite) SetStakeRegistrationDelegation(
 	cert *lcommon.StakeRegistrationDelegationCertificate,
-	slot, deposit uint64,
+	slot uint64,
+	deposit types.Uint64,
 	txn *gorm.DB,
 ) error {
 	stakeKey := cert.StakeCredential.Credential.Bytes()
@@ -338,7 +345,8 @@ func (d *MetadataStoreSqlite) SetStakeVoteDelegation(
 // SetStakeVoteRegistrationDelegation saves a stake vote registration delegation certificate and account
 func (d *MetadataStoreSqlite) SetStakeVoteRegistrationDelegation(
 	cert *lcommon.StakeVoteRegistrationDelegationCertificate,
-	slot, deposit uint64,
+	slot uint64,
+	deposit types.Uint64,
 	txn *gorm.DB,
 ) error {
 	stakeKey := cert.StakeCredential.Credential.Bytes()
@@ -421,7 +429,8 @@ func (d *MetadataStoreSqlite) SetVoteDelegation(
 // SetVoteRegistrationDelegation saves a vote registration delegation certificate and account
 func (d *MetadataStoreSqlite) SetVoteRegistrationDelegation(
 	cert *lcommon.VoteRegistrationDelegationCertificate,
-	slot, deposit uint64,
+	slot uint64,
+	deposit types.Uint64,
 	txn *gorm.DB,
 ) error {
 	stakeKey := cert.StakeCredential.Credential.Bytes()

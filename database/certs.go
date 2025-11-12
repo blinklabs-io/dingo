@@ -15,6 +15,7 @@
 package database
 
 import (
+	"github.com/blinklabs-io/dingo/database/types"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
 
@@ -37,10 +38,11 @@ func (d *Database) GetStakeRegistrations(
 // SetPoolRegistration saves a pool registration certificate
 func (d *Database) SetPoolRegistration(
 	cert *lcommon.PoolRegistrationCertificate,
-	slot, deposit uint64, // slot
+	slot uint64,
+	deposit uint64,
 	txn *Txn,
 ) error {
-	return d.metadata.SetPoolRegistration(cert, slot, deposit, txn.Metadata())
+	return d.metadata.SetPoolRegistration(cert, slot, types.Uint64(deposit), txn.Metadata())
 }
 
 // SetPoolRetirement saves a pool retirement certificate

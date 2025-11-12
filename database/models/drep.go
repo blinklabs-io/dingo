@@ -14,6 +14,8 @@
 
 package models
 
+import "github.com/blinklabs-io/dingo/database/types"
+
 type Drep struct {
 	AnchorUrl     string
 	Credential    []byte `gorm:"uniqueIndex"`
@@ -33,7 +35,7 @@ type DeregistrationDrep struct {
 	CertificateID  uint   `gorm:"index"`
 	ID             uint   `gorm:"primarykey"`
 	AddedSlot      uint64
-	DepositAmount  uint64
+	DepositAmount  types.Uint64
 }
 
 func (DeregistrationDrep) TableName() string {
@@ -47,7 +49,7 @@ type RegistrationDrep struct {
 	CertificateID  uint `gorm:"index"`
 	ID             uint `gorm:"primarykey"`
 	AddedSlot      uint64
-	DepositAmount  uint64
+	DepositAmount  types.Uint64
 }
 
 func (RegistrationDrep) TableName() string {

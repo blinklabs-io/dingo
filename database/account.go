@@ -16,6 +16,7 @@ package database
 
 import (
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/types"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
 
@@ -54,13 +55,14 @@ func (d *Database) SetDeregistration(
 // SetRegistration saves a registration certificate
 func (d *Database) SetRegistration(
 	cert *lcommon.RegistrationCertificate,
-	slot, deposit uint64,
+	slot uint64,
+	deposit uint64,
 	txn *Txn,
 ) error {
 	return d.metadata.SetRegistration(
 		cert,
 		slot,
-		deposit,
+		types.Uint64(deposit),
 		txn.Metadata(),
 	)
 }
@@ -94,13 +96,14 @@ func (d *Database) SetStakeDeregistration(
 // SetStakeRegistration saves a stake registration certificate
 func (d *Database) SetStakeRegistration(
 	cert *lcommon.StakeRegistrationCertificate,
-	slot, deposit uint64,
+	slot uint64,
+	deposit uint64,
 	txn *Txn,
 ) error {
 	return d.metadata.SetStakeRegistration(
 		cert,
 		slot,
-		deposit,
+		types.Uint64(deposit),
 		txn.Metadata(),
 	)
 }
@@ -108,13 +111,14 @@ func (d *Database) SetStakeRegistration(
 // SetStakeRegistrationDelegation saves a stake registration delegation certificate
 func (d *Database) SetStakeRegistrationDelegation(
 	cert *lcommon.StakeRegistrationDelegationCertificate,
-	slot, deposit uint64,
+	slot uint64,
+	deposit uint64,
 	txn *Txn,
 ) error {
 	return d.metadata.SetStakeRegistrationDelegation(
 		cert,
 		slot,
-		deposit,
+		types.Uint64(deposit),
 		txn.Metadata(),
 	)
 }
@@ -135,13 +139,14 @@ func (d *Database) SetStakeVoteDelegation(
 // SetStakeVoteRegistrationDelegation saves a stake vote registration delegation certificate
 func (d *Database) SetStakeVoteRegistrationDelegation(
 	cert *lcommon.StakeVoteRegistrationDelegationCertificate,
-	slot, deposit uint64,
+	slot uint64,
+	deposit uint64,
 	txn *Txn,
 ) error {
 	return d.metadata.SetStakeVoteRegistrationDelegation(
 		cert,
 		slot,
-		deposit,
+		types.Uint64(deposit),
 		txn.Metadata(),
 	)
 }
@@ -162,13 +167,14 @@ func (d *Database) SetVoteDelegation(
 // SetVoteRegistrationDelegation saves a vote registration delegation certificate
 func (d *Database) SetVoteRegistrationDelegation(
 	cert *lcommon.VoteRegistrationDelegationCertificate,
-	slot, deposit uint64,
+	slot uint64,
+	deposit uint64,
 	txn *Txn,
 ) error {
 	return d.metadata.SetVoteRegistrationDelegation(
 		cert,
 		slot,
-		deposit,
+		types.Uint64(deposit),
 		txn.Metadata(),
 	)
 }

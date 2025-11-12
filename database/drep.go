@@ -15,19 +15,21 @@
 package database
 
 import (
+	"github.com/blinklabs-io/dingo/database/types"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
 
 // SetRegistrationDrep saves a registration drep certificate
 func (d *Database) SetRegistrationDrep(
 	cert *lcommon.RegistrationDrepCertificate,
-	slot, deposit uint64,
+	slot uint64,
+	deposit uint64,
 	txn *Txn,
 ) error {
 	return d.metadata.SetRegistrationDrep(
 		cert,
 		slot,
-		deposit,
+		types.Uint64(deposit),
 		txn.Metadata(),
 	)
 }
@@ -35,13 +37,14 @@ func (d *Database) SetRegistrationDrep(
 // SetDeregistrationDrep saves a deregistration drep certificate
 func (d *Database) SetDeregistrationDrep(
 	cert *lcommon.DeregistrationDrepCertificate,
-	slot, deposit uint64,
+	slot uint64,
+	deposit uint64,
 	txn *Txn,
 ) error {
 	return d.metadata.SetDeregistrationDrep(
 		cert,
 		slot,
-		deposit,
+		types.Uint64(deposit),
 		txn.Metadata(),
 	)
 }

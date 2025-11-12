@@ -19,6 +19,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
+	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
@@ -105,7 +106,7 @@ type MetadataStore interface {
 	SetDeregistrationDrep(
 		*lcommon.DeregistrationDrepCertificate,
 		uint64, // slot
-		uint64, // deposit
+		types.Uint64, // deposit
 		*gorm.DB,
 	) error
 	SetEpoch(
@@ -120,7 +121,7 @@ type MetadataStore interface {
 	SetPoolRegistration(
 		*lcommon.PoolRegistrationCertificate,
 		uint64, // slot
-		uint64, // deposit
+		types.Uint64, // deposit
 		*gorm.DB,
 	) error
 	SetPoolRetirement(
@@ -145,13 +146,13 @@ type MetadataStore interface {
 	SetRegistration(
 		*lcommon.RegistrationCertificate,
 		uint64, // slot
-		uint64, // deposit
+		types.Uint64, // deposit
 		*gorm.DB,
 	) error
 	SetRegistrationDrep(
 		*lcommon.RegistrationDrepCertificate,
 		uint64, // slot
-		uint64, // deposit
+		types.Uint64, // deposit
 		*gorm.DB,
 	) error
 	SetStakeDelegation(
@@ -167,13 +168,13 @@ type MetadataStore interface {
 	SetStakeRegistration(
 		*lcommon.StakeRegistrationCertificate,
 		uint64, // slot
-		uint64, // deposit
+		types.Uint64, // deposit
 		*gorm.DB,
 	) error
 	SetStakeRegistrationDelegation(
 		*lcommon.StakeRegistrationDelegationCertificate,
 		uint64, // slot
-		uint64, // deposit
+		types.Uint64, // deposit
 		*gorm.DB,
 	) error
 	SetStakeVoteDelegation(
@@ -184,7 +185,7 @@ type MetadataStore interface {
 	SetStakeVoteRegistrationDelegation(
 		*lcommon.StakeVoteRegistrationDelegationCertificate,
 		uint64, // slot
-		uint64, // deposit
+		types.Uint64, // deposit
 		*gorm.DB,
 	) error
 	SetTip(
@@ -210,7 +211,7 @@ type MetadataStore interface {
 	SetVoteRegistrationDelegation(
 		*lcommon.VoteRegistrationDelegationCertificate,
 		uint64, // slot
-		uint64, // deposit
+		types.Uint64, // deposit
 		*gorm.DB,
 	) error
 

@@ -20,6 +20,7 @@ import (
 	"strings"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/types"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"gorm.io/gorm"
@@ -63,8 +64,8 @@ func (d *MetadataStoreSqlite) SetTransaction(
 		Type:       tx.Type(),
 		BlockHash:  point.Hash,
 		BlockIndex: idx,
-		Fee:        tx.Fee(),
-		TTL:        tx.TTL(),
+		Fee:        types.Uint64(tx.Fee()),
+		TTL:        types.Uint64(tx.TTL()),
 	}
 	if tx.Metadata() != nil {
 		tmpMetadata := tx.Metadata().Cbor()
@@ -89,7 +90,15 @@ func (d *MetadataStoreSqlite) SetTransaction(
 		),
 	}).Create(&tmpTx)
 	if result.Error != nil {
-		return fmt.Errorf("create transaction: %w", result.Error)
+		return fmt.Errorf(
+			"create transaction at slot %d, block %x, txHash %x, txIndex %d: %#v, %w",
+			point.Slot,
+			point.Hash,
+			txHash,
+			idx,
+			tx,
+			result.Error,
+		)
 	}
 	// Add Inputs to Transaction
 	for _, input := range tx.Inputs() {

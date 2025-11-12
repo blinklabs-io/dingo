@@ -140,7 +140,8 @@ func (d *MetadataStoreSqlite) GetPoolRegistrations(
 // SetPoolRegistration saves a pool registration certificate and pool
 func (d *MetadataStoreSqlite) SetPoolRegistration(
 	cert *lcommon.PoolRegistrationCertificate,
-	slot, deposit uint64,
+	slot uint64,
+	deposit types.Uint64,
 	txn *gorm.DB,
 ) error {
 	if txn == nil {
