@@ -41,6 +41,7 @@ type MetadataStoreSqlite struct {
 	timerVacuum  *time.Timer
 	timerMutex   sync.Mutex
 	dataDir      string
+	closed       bool
 }
 
 // New creates a new database
@@ -134,7 +135,10 @@ func (d *MetadataStoreSqlite) init() error {
 }
 
 func (d *MetadataStoreSqlite) runVacuum() error {
-	if d.dataDir == "" {
+	d.timerMutex.Lock()
+	closed := d.closed
+	d.timerMutex.Unlock()
+	if d.dataDir == "" || closed {
 		return nil
 	}
 	if result := d.DB().Raw("VACUUM"); result.Error != nil {
@@ -147,6 +151,9 @@ func (d *MetadataStoreSqlite) runVacuum() error {
 func (d *MetadataStoreSqlite) scheduleDailyVacuum() {
 	d.timerMutex.Lock()
 	defer d.timerMutex.Unlock()
+	if d.closed {
+		return
+	}
 
 	if d.timerVacuum != nil {
 		d.timerVacuum.Stop()
@@ -176,6 +183,7 @@ func (d *MetadataStoreSqlite) AutoMigrate(dst ...any) error {
 // Close gets the database handle from our MetadataStore and closes it
 func (d *MetadataStoreSqlite) Close() error {
 	d.timerMutex.Lock()
+	d.closed = true
 	if d.timerVacuum != nil {
 		d.timerVacuum.Stop()
 		d.timerVacuum = nil
