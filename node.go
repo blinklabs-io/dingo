@@ -1,4 +1,4 @@
-// Copyright 2024 Blink Labs Software
+// Copyright 2025 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -18,7 +18,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"slices"
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/chainsync"
@@ -27,16 +26,9 @@ import (
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/mempool"
+	"github.com/blinklabs-io/dingo/ouroboros"
 	"github.com/blinklabs-io/dingo/peergov"
 	"github.com/blinklabs-io/dingo/utxorpc"
-	ouroboros "github.com/blinklabs-io/gouroboros"
-	oblockfetch "github.com/blinklabs-io/gouroboros/protocol/blockfetch"
-	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
-	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
-	olocaltxmonitor "github.com/blinklabs-io/gouroboros/protocol/localtxmonitor"
-	olocaltxsubmission "github.com/blinklabs-io/gouroboros/protocol/localtxsubmission"
-	opeersharing "github.com/blinklabs-io/gouroboros/protocol/peersharing"
-	otxsubmission "github.com/blinklabs-io/gouroboros/protocol/txsubmission"
 )
 
 type Node struct {
@@ -50,6 +42,7 @@ type Node struct {
 	db             *database.Database
 	ledgerState    *ledger.LedgerState
 	utxorpc        *utxorpc.Utxorpc
+	ouroboros      *ouroboros.Ouroboros
 	shutdownFuncs  []func(context.Context) error
 }
 
@@ -65,6 +58,10 @@ func New(cfg Config) (*Node, error) {
 	if err := n.configValidate(); err != nil {
 		return nil, fmt.Errorf("invalid configuration: %w", err)
 	}
+	n.ouroboros = ouroboros.NewOuroboros(ouroboros.OuroborosConfig{
+		NetworkMagic: n.config.networkMagic,
+		Node:         n,
+	})
 	return n, nil
 }
 
@@ -125,7 +122,7 @@ func (n *Node) Run() error {
 			PromRegistry:               n.config.promRegistry,
 			ForgeBlocks:                n.config.devMode,
 			ValidateHistorical:         n.config.validateHistorical,
-			BlockfetchRequestRangeFunc: n.blockfetchClientRequestRange,
+			BlockfetchRequestRangeFunc: n.ouroboros.BlockfetchClientRequestRange,
 		},
 	)
 	if err != nil {
@@ -225,64 +222,26 @@ func (n *Node) shutdown() error {
 
 func (n *Node) configureConnManager() error {
 	// Configure listeners
-	tmpListeners := make([]ListenerConfig, len(n.config.listeners))
-	for idx, l := range n.config.listeners {
-		if l.UseNtC {
-			// Node-to-client
-			l.ConnectionOpts = append(
-				l.ConnectionOpts,
-				ouroboros.WithNetworkMagic(n.config.networkMagic),
-				ouroboros.WithChainSyncConfig(
-					ochainsync.NewConfig(
-						n.chainsyncServerConnOpts()...,
-					),
-				),
-				ouroboros.WithLocalStateQueryConfig(
-					olocalstatequery.NewConfig(
-						n.localstatequeryServerConnOpts()...,
-					),
-				),
-				ouroboros.WithLocalTxMonitorConfig(
-					olocaltxmonitor.NewConfig(
-						n.localtxmonitorServerConnOpts()...,
-					),
-				),
-				ouroboros.WithLocalTxSubmissionConfig(
-					olocaltxsubmission.NewConfig(
-						n.localtxsubmissionServerConnOpts()...,
-					),
-				),
-			)
-		} else {
-			// Node-to-node config
-			l.ConnectionOpts = append(
-				l.ConnectionOpts,
-				ouroboros.WithPeerSharing(n.config.peerSharing),
-				ouroboros.WithNetworkMagic(n.config.networkMagic),
-				ouroboros.WithPeerSharingConfig(
-					opeersharing.NewConfig(
-						n.peersharingServerConnOpts()...,
-					),
-				),
-				ouroboros.WithTxSubmissionConfig(
-					otxsubmission.NewConfig(
-						n.txsubmissionServerConnOpts()...,
-					),
-				),
-				ouroboros.WithChainSyncConfig(
-					ochainsync.NewConfig(
-						n.chainsyncServerConnOpts()...,
-					),
-				),
-				ouroboros.WithBlockFetchConfig(
-					oblockfetch.NewConfig(
-						n.blockfetchServerConnOpts()...,
-					),
-				),
-			)
-		}
-		tmpListeners[idx] = l
-	}
+	nodeToClientOpts := ouroboros.NodeToClientServerOpts(
+		n.config.networkMagic,
+		n.ouroboros.ChainsyncServerConnOpts(),
+		n.ouroboros.LocalstatequeryServerConnOpts(),
+		n.ouroboros.LocaltxmonitorServerConnOpts(),
+		n.ouroboros.LocaltxsubmissionServerConnOpts(),
+	)
+	nodeToNodeOpts := ouroboros.NodeToNodeServerOpts(
+		n.config.peerSharing,
+		n.config.networkMagic,
+		n.ouroboros.PeersharingServerConnOpts(),
+		n.ouroboros.TxsubmissionServerConnOpts(),
+		n.ouroboros.ChainsyncServerConnOpts(),
+		n.ouroboros.BlockfetchServerConnOpts(),
+	)
+	tmpListeners := ouroboros.ConfigureListeners(
+		n.config.listeners,
+		nodeToClientOpts,
+		nodeToNodeOpts,
+	)
 	// Create connection manager
 	n.connManager = connmanager.NewConnectionManager(
 		connmanager.ConnectionManagerConfig{
@@ -290,45 +249,17 @@ func (n *Node) configureConnManager() error {
 			EventBus:           n.eventBus,
 			Listeners:          tmpListeners,
 			OutboundSourcePort: n.config.outboundSourcePort,
-			OutboundConnOpts: []ouroboros.ConnectionOptionFunc{
-				ouroboros.WithNetworkMagic(n.config.networkMagic),
-				ouroboros.WithNodeToNode(true),
-				ouroboros.WithKeepAlive(true),
-				ouroboros.WithFullDuplex(true),
-				ouroboros.WithPeerSharing(n.config.peerSharing),
-				ouroboros.WithPeerSharingConfig(
-					opeersharing.NewConfig(
-						slices.Concat(
-							n.peersharingClientConnOpts(),
-							n.peersharingServerConnOpts(),
-						)...,
-					),
-				),
-				ouroboros.WithTxSubmissionConfig(
-					otxsubmission.NewConfig(
-						slices.Concat(
-							n.txsubmissionClientConnOpts(),
-							n.txsubmissionServerConnOpts(),
-						)...,
-					),
-				),
-				ouroboros.WithChainSyncConfig(
-					ochainsync.NewConfig(
-						slices.Concat(
-							n.chainsyncClientConnOpts(),
-							n.chainsyncServerConnOpts(),
-						)...,
-					),
-				),
-				ouroboros.WithBlockFetchConfig(
-					oblockfetch.NewConfig(
-						slices.Concat(
-							n.blockfetchClientConnOpts(),
-							n.blockfetchServerConnOpts(),
-						)...,
-					),
-				),
-			},
+			OutboundConnOpts: ouroboros.OutboundOpts(
+				n.config.networkMagic,
+				n.ouroboros.PeersharingClientConnOpts(),
+				n.ouroboros.PeersharingServerConnOpts(),
+				n.ouroboros.TxsubmissionClientConnOpts(),
+				n.ouroboros.TxsubmissionServerConnOpts(),
+				n.ouroboros.ChainsyncClientConnOpts(),
+				n.ouroboros.ChainsyncServerConnOpts(),
+				n.ouroboros.BlockfetchClientConnOpts(),
+				n.ouroboros.BlockfetchServerConnOpts(),
+			),
 		},
 	)
 	// Subscribe to connection closed events
@@ -363,7 +294,7 @@ func (n *Node) handleOutboundConnEvent(evt event.Event) {
 	defer n.chainsyncState.Unlock()
 	chainsyncClientConnId := n.chainsyncState.GetClientConnId()
 	if chainsyncClientConnId == nil {
-		if err := n.chainsyncClientStart(connId); err != nil {
+		if err := n.ouroboros.ChainsyncClientStart(connId); err != nil {
 			n.config.logger.Error(
 				"failed to start chainsync client",
 				"error",
@@ -374,8 +305,26 @@ func (n *Node) handleOutboundConnEvent(evt event.Event) {
 		n.chainsyncState.SetClientConnId(connId)
 	}
 	// Start txsubmission client
-	if err := n.txsubmissionClientStart(connId); err != nil {
-		n.config.logger.Error("failed to start chainsync client", "error", err)
+	if err := n.ouroboros.TxSubmissionClientStart(connId); err != nil {
+		n.config.logger.Error(
+			"failed to start txsubmission client",
+			"error",
+			err,
+		)
 		return
 	}
 }
+
+func (n *Node) ConnManager() *connmanager.ConnectionManager { return n.connManager }
+
+func (n *Node) Config() ouroboros.ConfigInterface { return n.config }
+
+func (n *Node) LedgerState() *ledger.LedgerState { return n.ledgerState }
+
+func (n *Node) ChainsyncState() *chainsync.State { return n.chainsyncState }
+
+func (n *Node) EventBus() *event.EventBus { return n.eventBus }
+
+func (n *Node) Mempool() *mempool.Mempool { return n.mempool }
+
+func (n *Node) PeerGov() *peergov.PeerGovernor { return n.peerGov }

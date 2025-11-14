@@ -20,8 +20,8 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/blinklabs-io/dingo/ouroboros"
 	"github.com/blinklabs-io/dingo/topology"
-	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/kelseyhightower/envconfig"
 	"gopkg.in/yaml.v3"
 )
@@ -148,9 +148,9 @@ func LoadTopologyConfig() (*topology.TopologyConfig, error) {
 	}
 	if globalConfig.Topology == "" {
 		// Use default bootstrap peers for specified network
-		network, ok := ouroboros.NetworkByName(globalConfig.Network)
-		if !ok {
-			return nil, fmt.Errorf("unknown network: %s", globalConfig.Network)
+		network, err := ouroboros.GetNetwork(globalConfig.Network)
+		if err != nil {
+			return nil, err
 		}
 		if len(network.BootstrapPeers) == 0 {
 			return nil, fmt.Errorf(

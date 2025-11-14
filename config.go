@@ -22,8 +22,8 @@ import (
 
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/connmanager"
+	"github.com/blinklabs-io/dingo/ouroboros"
 	"github.com/blinklabs-io/dingo/topology"
-	ouroboros "github.com/blinklabs-io/gouroboros"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/prometheus/client_golang/prometheus"
 )
@@ -58,11 +58,11 @@ type Config struct {
 func (n *Node) configPopulateNetworkMagic() error {
 	if n.config.networkMagic == 0 && n.config.network != "" {
 		tmpCfg := n.config
-		tmpNetwork, ok := ouroboros.NetworkByName(n.config.network)
-		if !ok {
-			return fmt.Errorf("unknown network name: %s", n.config.network)
+		networkMagic, err := ouroboros.GetNetworkMagic(n.config.network)
+		if err != nil {
+			return err
 		}
-		tmpCfg.networkMagic = tmpNetwork.NetworkMagic
+		tmpCfg.networkMagic = networkMagic
 		n.config = tmpCfg
 	}
 	return nil
@@ -276,3 +276,9 @@ func WithValidateHistorical(validate bool) ConfigOptionFunc {
 		c.validateHistorical = validate
 	}
 }
+
+func (c Config) IntersectTip() bool { return c.intersectTip }
+
+func (c Config) IntersectPoints() []ocommon.Point { return c.intersectPoints }
+
+func (c Config) Logger() *slog.Logger { return c.logger }
