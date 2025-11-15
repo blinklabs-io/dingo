@@ -19,7 +19,7 @@ import (
 	"fmt"
 
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/gouroboros/ledger"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"gorm.io/gorm"
 )
 
@@ -95,7 +95,7 @@ func (d *MetadataStoreSqlite) GetUtxosDeletedBeforeSlot(
 
 // GetUtxosByAddress returns a list of Utxos
 func (d *MetadataStoreSqlite) GetUtxosByAddress(
-	addr ledger.Address,
+	addr lcommon.Address,
 	txn *gorm.DB,
 ) ([]models.Utxo, error) {
 	var ret []models.Utxo
@@ -104,10 +104,13 @@ func (d *MetadataStoreSqlite) GetUtxosByAddress(
 	if txn == nil {
 		txn = d.DB()
 	}
-	if addr.PaymentKeyHash() != ledger.NewBlake2b224(nil) {
-		addrQuery = txn.Where("payment_key = ?", addr.PaymentKeyHash().Bytes())
+	if addr.PaymentKeyHash() != lcommon.NewBlake2b224(nil) {
+		addrQuery = txn.Where(
+			"payment_key = ?",
+			addr.PaymentKeyHash().Bytes(),
+		)
 	}
-	if addr.StakeKeyHash() != ledger.NewBlake2b224(nil) {
+	if addr.StakeKeyHash() != lcommon.NewBlake2b224(nil) {
 		if addrQuery != nil {
 			addrQuery = addrQuery.Or(
 				"staking_key = ?",
@@ -223,7 +226,7 @@ func (d *MetadataStoreSqlite) AddUtxos(
 
 // SetUtxoDeletedAtSlot marks a UTxO as deleted at a given slot
 func (d *MetadataStoreSqlite) SetUtxoDeletedAtSlot(
-	utxoId ledger.TransactionInput,
+	utxoId lcommon.TransactionInput,
 	slot uint64,
 	txn *gorm.DB,
 ) error {

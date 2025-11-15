@@ -34,10 +34,3 @@ func init() {
 		},
 	)
 }
-
-// WithDataDir specifies the data directory to use, if any
-func WithDataDir(dataDir string) SqliteOptionFunc {
-	return func(m *MetadataStoreSqlite) {
-		m.dataDir = dataDir
-	}
-}

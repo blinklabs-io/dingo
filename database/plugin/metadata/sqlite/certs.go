@@ -47,8 +47,6 @@ func (d *MetadataStoreSqlite) GetStakeRegistrations(
 		tmpCert = lcommon.StakeRegistrationCertificate{
 			CertType: lcommon.CertificateTypeStakeRegistration,
 			StakeCredential: lcommon.Credential{
-				// TODO: determine correct type
-				// CredType: lcommon.CredentialTypeAddrKeyHash,
 				Credential: lcommon.CredentialHash(cert.StakingKey),
 			},
 		}

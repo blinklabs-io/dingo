@@ -15,11 +15,14 @@
 package database
 
 import (
-	"github.com/blinklabs-io/dingo/database/types"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
 
-// GetPoolRegistrations returns a list of pool registration certificates
+// Certificate persistence is handled by SetTransaction.
+// The ledger layer calculates deposits and calls SetTransaction
+// to persist transactions and certificates together in a single operation.
+
+// GetPoolRegistrations returns pool registration certificates for the given pool key hash
 func (d *Database) GetPoolRegistrations(
 	poolKeyHash lcommon.PoolKeyHash,
 	txn *Txn,
@@ -27,34 +30,10 @@ func (d *Database) GetPoolRegistrations(
 	return d.metadata.GetPoolRegistrations(poolKeyHash, txn.Metadata())
 }
 
-// GetStakeRegistrations returns a list of stake registration certificates
+// GetStakeRegistrations returns stake registration certificates for the given staking key
 func (d *Database) GetStakeRegistrations(
 	stakingKey []byte,
 	txn *Txn,
 ) ([]lcommon.StakeRegistrationCertificate, error) {
 	return d.metadata.GetStakeRegistrations(stakingKey, txn.Metadata())
-}
-
-// SetPoolRegistration saves a pool registration certificate
-func (d *Database) SetPoolRegistration(
-	cert *lcommon.PoolRegistrationCertificate,
-	slot uint64,
-	deposit uint64,
-	txn *Txn,
-) error {
-	return d.metadata.SetPoolRegistration(
-		cert,
-		slot,
-		types.Uint64(deposit),
-		txn.Metadata(),
-	)
-}
-
-// SetPoolRetirement saves a pool retirement certificate
-func (d *Database) SetPoolRetirement(
-	cert *lcommon.PoolRetirementCertificate,
-	slot uint64,
-	txn *Txn,
-) error {
-	return d.metadata.SetPoolRetirement(cert, slot, txn.Metadata())
 }

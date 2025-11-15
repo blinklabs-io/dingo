@@ -16,8 +16,6 @@ package sqlite
 
 import (
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/types"
-	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
@@ -26,19 +24,17 @@ import (
 func (d *MetadataStoreSqlite) GetDrep(
 	cred []byte,
 	txn *gorm.DB,
-) (models.Drep, error) {
-	ret := models.Drep{}
-	tmpDrep := models.Drep{}
+) (*models.Drep, error) {
+	ret := &models.Drep{}
 	if txn != nil {
-		if result := txn.First(&tmpDrep, "credential = ?", cred); result.Error != nil {
-			return ret, result.Error
+		if result := txn.First(ret, "drep_credential = ?", cred); result.Error != nil {
+			return nil, result.Error
 		}
 	} else {
-		if result := d.DB().First(&tmpDrep, "credential = ?", cred); result.Error != nil {
-			return ret, result.Error
+		if result := d.DB().First(ret, "drep_credential = ?", cred); result.Error != nil {
+			return nil, result.Error
 		}
 	}
-	ret = tmpDrep
 	return ret, nil
 }
 
@@ -52,15 +48,17 @@ func (d *MetadataStoreSqlite) SetDrep(
 	txn *gorm.DB,
 ) error {
 	tmpItem := models.Drep{
-		Credential: cred,
-		AddedSlot:  slot,
-		AnchorUrl:  url,
-		AnchorHash: hash,
-		Active:     active,
+		DrepCredential: cred,
+		AddedSlot:      slot,
+		AnchorUrl:      url,
+		AnchorHash:     hash,
+		Active:         active,
 	}
 	onConflict := clause.OnConflict{
-		Columns:   []clause.Column{{Name: "credential"}},
-		UpdateAll: true,
+		Columns: []clause.Column{{Name: "drep_credential"}},
+		DoUpdates: clause.AssignmentColumns(
+			[]string{"added_slot", "anchor_url", "anchor_hash", "active"},
+		),
 	}
 	if txn != nil {
 		if result := txn.Clauses(onConflict).Create(&tmpItem); result.Error != nil {
@@ -71,129 +69,5 @@ func (d *MetadataStoreSqlite) SetDrep(
 			return result.Error
 		}
 	}
-	return nil
-}
-
-// SetDeregistrationDrep saves a deregistration drep certificate and drep
-func (d *MetadataStoreSqlite) SetDeregistrationDrep(
-	cert *lcommon.DeregistrationDrepCertificate,
-	slot uint64,
-	deposit types.Uint64,
-	txn *gorm.DB,
-) error {
-	drep := cert.DrepCredential.Credential.Bytes()
-	tmpDrep, err := d.GetDrep(drep, txn)
-	if err != nil {
-		return err
-	}
-	tmpItem := models.DeregistrationDrep{
-		DrepCredential: drep,
-		AddedSlot:      slot,
-		DepositAmount:  deposit,
-	}
-	tmpDrep.Active = false
-	if txn != nil {
-		if drepErr := txn.Save(&tmpDrep); drepErr.Error != nil {
-			return drepErr.Error
-		}
-		if result := txn.Create(&tmpItem); result.Error != nil {
-			return result.Error
-		}
-	} else {
-		if drepErr := d.DB().Save(&tmpDrep); drepErr.Error != nil {
-			return drepErr.Error
-		}
-		if result := d.DB().Create(&tmpItem); result.Error != nil {
-			return result.Error
-		}
-	}
-	return nil
-}
-
-// SetRegistrationDrep saves a registration drep certificate and drep
-func (d *MetadataStoreSqlite) SetRegistrationDrep(
-	cert *lcommon.RegistrationDrepCertificate,
-	slot uint64,
-	deposit types.Uint64,
-	txn *gorm.DB,
-) error {
-	drep := cert.DrepCredential.Credential.Bytes()
-	tmpItem := models.RegistrationDrep{
-		DrepCredential: drep,
-		AddedSlot:      slot,
-		DepositAmount:  deposit,
-	}
-	var anchorUrl string
-	var anchorHash []byte
-	if cert.Anchor != nil {
-		anchorUrl = cert.Anchor.Url
-		anchorHash = cert.Anchor.DataHash[:]
-	}
-	tmpItem.AnchorUrl = anchorUrl
-	tmpItem.AnchorHash = anchorHash
-	if err := d.SetDrep(drep, slot, anchorUrl, anchorHash, true, txn); err != nil {
-		return err
-	}
-	if txn != nil {
-		if result := txn.Create(&tmpItem); result.Error != nil {
-			return result.Error
-		}
-	} else {
-		if result := d.DB().Create(&tmpItem); result.Error != nil {
-			return result.Error
-		}
-	}
-	return nil
-}
-
-// SetUpdateDrep saves an update drep certificate and updates the Dreps anchor fields
-func (d *MetadataStoreSqlite) SetUpdateDrep(
-	cert *lcommon.UpdateDrepCertificate,
-	slot uint64,
-	txn *gorm.DB,
-) error {
-	drepKey := cert.DrepCredential.Credential.Bytes()
-	tmpDrep, err := d.GetDrep(drepKey, txn)
-	if err != nil {
-		return err
-	}
-
-	var anchorUrl string
-	var anchorHash []byte
-	// Update the active Drep fields
-	if cert.Anchor != nil {
-		anchorUrl = cert.Anchor.Url
-		anchorHash = cert.Anchor.DataHash[:]
-	}
-	tmpDrep.AnchorUrl = anchorUrl
-	tmpDrep.AnchorHash = anchorHash
-	tmpDrep.AddedSlot = slot
-	tmpDrep.Active = true
-
-	// Create a history record in update_drep table
-	tmpItem := models.UpdateDrep{
-		Credential: drepKey,
-		AnchorUrl:  anchorUrl,
-		AnchorHash: anchorHash,
-		AddedSlot:  slot,
-	}
-
-	// Save to both live Drep and UpdateDrep table
-	if txn != nil {
-		if err := txn.Save(&tmpDrep); err.Error != nil {
-			return err.Error
-		}
-		if result := txn.Create(&tmpItem); result.Error != nil {
-			return result.Error
-		}
-	} else {
-		if err := d.DB().Save(&tmpDrep); err.Error != nil {
-			return err.Error
-		}
-		if result := d.DB().Create(&tmpItem); result.Error != nil {
-			return result.Error
-		}
-	}
-
 	return nil
 }

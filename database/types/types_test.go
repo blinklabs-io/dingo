@@ -31,7 +31,7 @@ func TestTypesScanValue(t *testing.T) {
 	}{
 		{
 			origValue: func(v types.Uint64) *types.Uint64 { return &v }(
-				types.Uint64(123),
+				types.Uint64{Val: 123},
 			),
 			expectedValue: "123",
 		},

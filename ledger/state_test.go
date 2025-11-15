@@ -18,7 +18,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"math/big"
 	"strings"
 	"testing"
 
@@ -694,28 +693,4 @@ func TestCalculateStabilityWindow_LargeValues(t *testing.T) {
 	if result != expectedWindow {
 		t.Errorf("expected stability window %d, got %d", expectedWindow, result)
 	}
-}
-
-// Helper function to calculate expected window using big.Rat for precision
-func calculateExpectedWindow(k int, activeSlotsCoeff float64) uint64 {
-	// Convert activeSlotsCoeff to big.Rat
-	rat := new(big.Rat).SetFloat64(activeSlotsCoeff)
-
-	// Calculate 3*k
-	numerator := new(big.Int).SetInt64(int64(3 * k))
-
-	// Multiply by denominator of activeSlotsCoeff
-	numerator.Mul(numerator, rat.Denom())
-
-	// Divide by numerator of activeSlotsCoeff
-	quotient, remainder := new(
-		big.Int,
-	).QuoRem(numerator, rat.Num(), new(big.Int))
-
-	// Round up if there's a remainder
-	if remainder.Sign() != 0 {
-		quotient.Add(quotient, big.NewInt(1))
-	}
-
-	return quotient.Uint64()
 }

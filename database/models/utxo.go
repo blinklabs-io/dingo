@@ -22,20 +22,21 @@ import (
 
 // Utxo represents an unspent transaction output
 type Utxo struct {
-	TransactionID    *uint  `gorm:"index"`
-	TxId             []byte `gorm:"uniqueIndex:tx_id_output_idx"`
-	PaymentKey       []byte `gorm:"index"`
-	StakingKey       []byte `gorm:"index"`
-	Assets           []Asset
-	Cbor             []byte       `gorm:"-"` // This is here for convenience but not represented in the metadata DB
-	SpentAtTxId      []byte       `gorm:"index"`
-	ReferencedByTxId []byte       `gorm:"index"`
-	CollateralByTxId []byte       `gorm:"index"`
-	ID               uint         `gorm:"primarykey"`
-	AddedSlot        uint64       `gorm:"index"`
-	DeletedSlot      uint64       `gorm:"index"`
-	Amount           types.Uint64 `gorm:"index"`
-	OutputIdx        uint32       `gorm:"uniqueIndex:tx_id_output_idx"`
+	TransactionID      *uint  `gorm:"index"`
+	TxId               []byte `gorm:"uniqueIndex:tx_id_output_idx"`
+	PaymentKey         []byte `gorm:"index"`
+	StakingKey         []byte `gorm:"index"`
+	Assets             []Asset
+	Cbor               []byte       `gorm:"-"` // This is here for convenience but not represented in the metadata DB
+	SpentAtTxId        []byte       `gorm:"index"`
+	ReferencedByTxId   []byte       `gorm:"index"`
+	CollateralByTxId   []byte       `gorm:"index"`
+	ID                 uint         `gorm:"primarykey"`
+	AddedSlot          types.Uint64 `gorm:"index"`
+	DeletedSlot        types.Uint64 `gorm:"index"`
+	Amount             types.Uint64 `gorm:"index"`
+	OutputIdx          uint32       `gorm:"uniqueIndex:tx_id_output_idx"`
+	IsCollateralReturn bool         `gorm:"index"`
 }
 
 func (u *Utxo) TableName() string {
@@ -54,8 +55,8 @@ func UtxoLedgerToModel(
 	ret := Utxo{
 		TxId:      utxo.Id.Id().Bytes(),
 		Cbor:      utxo.Output.Cbor(),
-		AddedSlot: slot,
-		Amount:    types.Uint64(utxo.Output.Amount()),
+		AddedSlot: types.Uint64{Val: slot},
+		Amount:    types.Uint64{Val: utxo.Output.Amount()},
 		OutputIdx: utxo.Id.Index(),
 	}
 	pkh := outAddr.PaymentKeyHash()

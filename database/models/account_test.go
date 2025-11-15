@@ -26,11 +26,11 @@ import (
 func TestAccount_String(t *testing.T) {
 	tests := []struct {
 		name         string
+		wantErrMsg   string
+		expectedHRP  string
 		stakingKey   []byte
 		wantErr      bool
-		wantErrMsg   string
 		validateAddr bool
-		expectedHRP  string
 	}{
 		{
 			name: "valid staking key - 28 bytes",

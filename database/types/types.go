@@ -51,10 +51,12 @@ func (r *Rat) Scan(val any) error {
 }
 
 //nolint:recvcheck
-type Uint64 uint64
+type Uint64 struct {
+	Val uint64
+}
 
 func (u Uint64) Value() (driver.Value, error) {
-	return strconv.FormatUint(uint64(u), 10), nil
+	return strconv.FormatUint(u.Val, 10), nil
 }
 
 func (u *Uint64) Scan(val any) error {
@@ -69,6 +71,6 @@ func (u *Uint64) Scan(val any) error {
 	if err != nil {
 		return err
 	}
-	*u = Uint64(tmpUint)
+	u.Val = tmpUint
 	return nil
 }
