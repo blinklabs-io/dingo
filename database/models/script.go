@@ -14,25 +14,25 @@
 
 package models
 
-type Datum struct {
-	Hash      []byte `gorm:"index;not null;unique"`
-	RawDatum  []byte `gorm:"not null"`
-	ID        uint   `gorm:"primarykey"`
-	AddedSlot uint64 `gorm:"not null"`
-}
+// ScriptType represents the type of script
+type ScriptType uint8
 
-func (Datum) TableName() string {
-	return "datum"
-}
+const (
+	ScriptTypeNative   ScriptType = 0
+	ScriptTypePlutusV1 ScriptType = 1
+	ScriptTypePlutusV2 ScriptType = 2
+	ScriptTypePlutusV3 ScriptType = 3
+)
 
-// PlutusData represents a Plutus data value in the witness set
-type PlutusData struct {
+// Script represents a script entry in the witness set
+type Script struct {
 	ID            uint   `gorm:"primaryKey"`
 	TransactionID uint   `gorm:"index"`
-	Data          []byte `gorm:"type:bytea"`
+	Type          uint8  `gorm:"index"` // ScriptType (0=Native, 1=PlutusV1, 2=PlutusV2, 3=PlutusV3)
+	ScriptData    []byte `gorm:"type:bytea"`
 	Transaction   *Transaction
 }
 
-func (PlutusData) TableName() string {
-	return "plutus_data"
+func (Script) TableName() string {
+	return "script"
 }

@@ -48,4 +48,8 @@ var MigrateModels = []any{
 	&Utxo{},
 	&VoteDelegation{},
 	&VoteRegistrationDelegation{},
+	&Witness{},
+	&Script{},
+	&Redeemer{},
+	&PlutusData{},
 }

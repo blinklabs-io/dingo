@@ -14,25 +14,30 @@
 
 package models
 
-type Datum struct {
-	Hash      []byte `gorm:"index;not null;unique"`
-	RawDatum  []byte `gorm:"not null"`
-	ID        uint   `gorm:"primarykey"`
-	AddedSlot uint64 `gorm:"not null"`
-}
+// RedeemerTag represents the tag for a redeemer (spend, mint, cert, reward, voting, proposing)
+type RedeemerTag uint8
 
-func (Datum) TableName() string {
-	return "datum"
-}
+const (
+	RedeemerTagSpend     RedeemerTag = 0
+	RedeemerTagMint      RedeemerTag = 1
+	RedeemerTagCert      RedeemerTag = 2
+	RedeemerTagReward    RedeemerTag = 3
+	RedeemerTagVoting    RedeemerTag = 4
+	RedeemerTagProposing RedeemerTag = 5
+)
 
-// PlutusData represents a Plutus data value in the witness set
-type PlutusData struct {
+// Redeemer represents a redeemer in the witness set
+type Redeemer struct {
 	ID            uint   `gorm:"primaryKey"`
 	TransactionID uint   `gorm:"index"`
-	Data          []byte `gorm:"type:bytea"`
+	Tag           uint8  `gorm:"index"` // RedeemerTag
+	Index         uint32 `gorm:"index"`
+	Data          []byte `gorm:"type:bytea"` // Plutus data
+	ExUnitsMemory uint64
+	ExUnitsCPU    uint64
 	Transaction   *Transaction
 }
 
-func (PlutusData) TableName() string {
-	return "plutus_data"
+func (Redeemer) TableName() string {
+	return "redeemer"
 }
