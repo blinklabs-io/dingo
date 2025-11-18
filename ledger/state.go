@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"context"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -108,21 +109,21 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 	if cfg.Database == nil {
 		return nil, errors.New("a Database is required")
 	}
+	if cfg.Logger == nil {
+		// Create logger to throw away logs
+		// We do this so we don't have to add guards around every log operation
+		cfg.Logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
+	}
 	ls := &LedgerState{
 		config:         cfg,
 		chainsyncState: InitChainsyncState,
 		db:             cfg.Database,
 		chain:          cfg.ChainManager.PrimaryChain(),
 	}
-	if cfg.Logger == nil {
-		// Create logger to throw away logs
-		// We do this so we don't have to add guards around every log operation
-		cfg.Logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
-	}
 	return ls, nil
 }
 
-func (ls *LedgerState) Start() error {
+func (ls *LedgerState) Start(ctx context.Context) error {
 	// Init metrics
 	ls.metrics.init(ls.config.PromRegistry)
 	// Setup event handlers
@@ -166,7 +167,7 @@ func (ls *LedgerState) Start() error {
 	// Schedule block forging
 	ls.initForge()
 	// Start goroutine to process new blocks
-	go ls.ledgerProcessBlocks()
+	go ls.ledgerProcessBlocks(ctx)
 	return nil
 }
 
@@ -350,13 +351,10 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 		hash = hex.EncodeToString(point.Hash)
 	}
 	ls.config.Logger.Info(
-		fmt.Sprintf(
-			"chain rolled back, new tip: %s at slot %d",
-			hash,
-			point.Slot,
-		),
-		"component",
-		"ledger",
+		"chain rolled back, new tip",
+		"component", "ledger",
+		"hash", hash,
+		"slot", point.Slot,
 	)
 	return nil
 }
@@ -521,12 +519,19 @@ type readChainResult struct {
 	rollback      bool
 }
 
-func (ls *LedgerState) ledgerReadChain(resultCh chan readChainResult) {
+func (ls *LedgerState) ledgerReadChain(
+	ctx context.Context,
+	resultCh chan readChainResult,
+) {
+	// Ensure the consumer can detect when the reader stops
+	defer close(resultCh)
+
 	// Create chain iterator
 	iter, err := ls.chain.FromPoint(ls.currentTip.Point, false)
 	if err != nil {
 		ls.config.Logger.Error(
-			"failed to create chain iterator: " + err.Error(),
+			"failed to create chain iterator",
+			"error", err,
 		)
 		return
 	}
@@ -545,12 +550,17 @@ func (ls *LedgerState) ledgerReadChain(resultCh chan readChainResult) {
 				next = cachedNext
 				cachedNext = nil
 			} else {
-				next, err = iter.Next(shouldBlock)
+				next, err = iter.Next(ctx, shouldBlock)
 				shouldBlock = false
 				if err != nil {
+					if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+						// Normal shutdown, no need to log as error
+						return
+					}
 					if !errors.Is(err, chain.ErrIteratorChainTip) {
 						ls.config.Logger.Error(
-							"failed to get next block from chain iterator: " + err.Error(),
+							"failed to get next block from chain iterator",
+							"error", err,
 						)
 						return
 					}
@@ -578,7 +588,8 @@ func (ls *LedgerState) ledgerReadChain(resultCh chan readChainResult) {
 			tmpBlock, err = next.Block.Decode()
 			if err != nil {
 				ls.config.Logger.Error(
-					"failed to decode block: " + err.Error(),
+					"failed to decode block",
+					"error", err,
 				)
 				return
 			}
@@ -603,14 +614,22 @@ func (ls *LedgerState) ledgerReadChain(resultCh chan readChainResult) {
 				blocks: nextBatch,
 			}
 		}
-		resultCh <- result
+		select {
+		case <-ctx.Done():
+			return
+		case resultCh <- result:
+		}
 	}
 }
 
-func (ls *LedgerState) ledgerProcessBlocks() {
+func (ls *LedgerState) ledgerProcessBlocks(ctx context.Context) {
+	// Use a derived context so we can signal the reader on fatal errors
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
 	// Start chain reader goroutine
 	readChainResultCh := make(chan readChainResult)
-	go ls.ledgerReadChain(readChainResultCh)
+	go ls.ledgerReadChain(ctx, readChainResultCh)
 	// Process blocks
 	var nextEpochEraId uint
 	var needsEpochRollover bool
@@ -645,7 +664,8 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 			ls.Unlock()
 			if err != nil {
 				ls.config.Logger.Error(
-					"failed to process epoch rollover: " + err.Error(),
+					"failed to process epoch rollover",
+					"error", err,
 				)
 				return
 			}
@@ -667,7 +687,8 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 				if err = ls.rollback(result.rollbackPoint); err != nil {
 					ls.Unlock()
 					ls.config.Logger.Error(
-						"failed to process rollback: " + err.Error(),
+						"failed to process rollback",
+						"error", err,
 					)
 					return
 				}
@@ -795,7 +816,8 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 			if err != nil {
 				ls.Unlock()
 				ls.config.Logger.Error(
-					"failed to process block: " + err.Error(),
+					"failed to process block",
+					"error", err,
 				)
 				return
 			}

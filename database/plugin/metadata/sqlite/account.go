@@ -265,7 +265,7 @@ func (d *MetadataStoreSqlite) SetStakeRegistrationDelegation(
 	txn *gorm.DB,
 ) error {
 	stakeKey := cert.StakeCredential.Credential.Bytes()
-	pkh := cert.PoolKeyHash
+	pkh := cert.PoolKeyHash[:]
 	tmpItem := models.StakeRegistrationDelegation{
 		StakingKey:    stakeKey,
 		PoolKeyHash:   pkh,

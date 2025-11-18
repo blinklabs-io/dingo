@@ -36,6 +36,7 @@ type State struct {
 	ledgerState  *ledger.LedgerState
 	clients      map[ouroboros.ConnectionId]*ChainsyncClientState
 	clientConnId *ouroboros.ConnectionId // TODO: replace with handling of multiple chainsync clients (#385)
+	starting     bool
 	sync.Mutex
 }
 
@@ -81,17 +82,53 @@ func (s *State) RemoveClient(connId connection.ConnectionId) {
 
 // TODO: replace with handling of multiple chainsync clients (#385)
 func (s *State) GetClientConnId() *ouroboros.ConnectionId {
+	s.Lock()
+	defer s.Unlock()
 	return s.clientConnId
 }
 
 // TODO: replace with handling of multiple chainsync clients (#385)
 func (s *State) SetClientConnId(connId ouroboros.ConnectionId) {
+	s.Lock()
+	defer s.Unlock()
 	s.clientConnId = &connId
 }
 
 // TODO: replace with handling of multiple chainsync clients (#385)
 func (s *State) RemoveClientConnId(connId ouroboros.ConnectionId) {
+	s.Lock()
+	defer s.Unlock()
 	if s.clientConnId != nil && *s.clientConnId == connId {
 		s.clientConnId = nil
 	}
+}
+
+// TODO: replace with handling of multiple chainsync clients (#385)
+// TryStartChainsync checks if chainsync should start and sets starting to true if so.
+// Returns true if chainsync should be started.
+func (s *State) TryStartChainsync() bool {
+	s.Lock()
+	defer s.Unlock()
+	if s.clientConnId != nil || s.starting {
+		return false
+	}
+	s.starting = true
+	return true
+}
+
+// TODO: replace with handling of multiple chainsync clients (#385)
+// SetStartingFalse sets the starting flag to false.
+func (s *State) SetStartingFalse() {
+	s.Lock()
+	defer s.Unlock()
+	s.starting = false
+}
+
+// TODO: replace with handling of multiple chainsync clients (#385)
+// SetClientConnIdAndStartingFalse sets the client conn id and starting to false.
+func (s *State) SetClientConnIdAndStartingFalse(connId ouroboros.ConnectionId) {
+	s.Lock()
+	defer s.Unlock()
+	s.clientConnId = &connId
+	s.starting = false
 }

@@ -15,6 +15,8 @@
 package chain
 
 import (
+	"context"
+
 	"github.com/blinklabs-io/dingo/database/models"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
@@ -59,6 +61,9 @@ func newChainIterator(
 	return ci, nil
 }
 
-func (ci *ChainIterator) Next(blocking bool) (*ChainIteratorResult, error) {
-	return ci.chain.iterNext(ci, blocking)
+func (ci *ChainIterator) Next(
+	ctx context.Context,
+	blocking bool,
+) (*ChainIteratorResult, error) {
+	return ci.chain.iterNext(ctx, ci, blocking)
 }

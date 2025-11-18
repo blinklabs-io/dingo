@@ -15,6 +15,7 @@
 package node
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -31,7 +32,12 @@ import (
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 )
 
-func Load(cfg *config.Config, logger *slog.Logger, immutableDir string) error {
+func Load(
+	ctx context.Context,
+	cfg *config.Config,
+	logger *slog.Logger,
+	immutableDir string,
+) error {
 	var nodeCfg *cardano.CardanoNodeConfig
 	if cfg.CardanoConfig != "" {
 		var err error
@@ -89,7 +95,7 @@ func Load(cfg *config.Config, logger *slog.Logger, immutableDir string) error {
 	if err != nil {
 		return fmt.Errorf("failed to load state: %w", err)
 	}
-	if err := ls.Start(); err != nil {
+	if err := ls.Start(ctx); err != nil {
 		return fmt.Errorf("failed to load state: %w", err)
 	}
 	// Open immutable DB
@@ -115,10 +121,20 @@ func Load(cfg *config.Config, logger *slog.Logger, immutableDir string) error {
 	var blocksCopied int
 	blockBatch := make([]gledger.Block, 0, 500)
 	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
 		for {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			default:
+			}
 			next, err := iter.Next()
 			if err != nil {
-				return err
+				return fmt.Errorf("failed to read next block from immutable DB (blocks copied: %d): %w", blocksCopied, err)
 			}
 			// No more blocks
 			if next == nil {
@@ -126,7 +142,7 @@ func Load(cfg *config.Config, logger *slog.Logger, immutableDir string) error {
 			}
 			tmpBlock, err := gledger.NewBlockFromCbor(next.Type, next.Cbor)
 			if err != nil {
-				return err
+				return fmt.Errorf("failed to parse block CBOR (type: %d, blocks copied: %d): %w", next.Type, blocksCopied, err)
 			}
 			// Skip first block when continuing a load operation
 			if blocksCopied == 0 &&
@@ -149,7 +165,7 @@ func Load(cfg *config.Config, logger *slog.Logger, immutableDir string) error {
 					err,
 				),
 			)
-			return nil
+			return err
 		}
 		blocksCopied += len(blockBatch)
 		blockBatch = slices.Delete(blockBatch, 0, len(blockBatch))
@@ -170,17 +186,14 @@ func Load(cfg *config.Config, logger *slog.Logger, immutableDir string) error {
 	)
 	// Wait for ledger to catch up
 	for {
-		time.Sleep(5 * time.Second)
-		tip := ls.Tip()
-		if tip.Point.Slot >= immutableTip.Slot {
-			break
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(5 * time.Second):
+			tip := ls.Tip()
+			if tip.Point.Slot >= immutableTip.Slot {
+				return nil
+			}
 		}
 	}
-	logger.Info(
-		fmt.Sprintf(
-			"finished processing %d blocks from immutable DB",
-			blocksCopied,
-		),
-	)
-	return nil
 }

@@ -20,8 +20,8 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/blinklabs-io/dingo/ouroboros"
 	"github.com/blinklabs-io/dingo/topology"
-	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/kelseyhightower/envconfig"
 	"gopkg.in/yaml.v3"
 )
@@ -148,9 +148,12 @@ func LoadTopologyConfig() (*topology.TopologyConfig, error) {
 	}
 	if globalConfig.Topology == "" {
 		// Use default bootstrap peers for specified network
-		network, ok := ouroboros.NetworkByName(globalConfig.Network)
-		if !ok {
-			return nil, fmt.Errorf("unknown network: %s", globalConfig.Network)
+		network, err := ouroboros.GetNetwork(globalConfig.Network)
+		if err != nil {
+			return nil, fmt.Errorf("load topology for network %q: %w", globalConfig.Network, err)
+		}
+		if network == nil {
+			return nil, fmt.Errorf("load topology for network %q: network is nil", globalConfig.Network)
 		}
 		if len(network.BootstrapPeers) == 0 {
 			return nil, fmt.Errorf(
@@ -158,6 +161,8 @@ func LoadTopologyConfig() (*topology.TopologyConfig, error) {
 				globalConfig.Network,
 			)
 		}
+		// Clear existing bootstrap peers to avoid duplication on repeated calls
+		globalTopologyConfig.BootstrapPeers = nil
 		for _, peer := range network.BootstrapPeers {
 			globalTopologyConfig.BootstrapPeers = append(
 				globalTopologyConfig.BootstrapPeers,

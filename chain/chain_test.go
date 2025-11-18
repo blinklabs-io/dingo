@@ -15,6 +15,7 @@
 package chain_test
 
 import (
+	"context"
 	"encoding/hex"
 	"errors"
 	"reflect"
@@ -133,7 +134,7 @@ func TestChainBasic(t *testing.T) {
 	// all expected data
 	testBlockIdx := 0
 	for {
-		next, err := iter.Next(false)
+		next, err := iter.Next(context.Background(), false)
 		if err != nil {
 			if errors.Is(err, chain.ErrIteratorChainTip) {
 				if testBlockIdx < len(testBlocks)-1 {
@@ -150,6 +151,9 @@ func TestChainBasic(t *testing.T) {
 			t.Fatal("ran out of test blocks before reaching chain tip")
 		}
 		testBlock := testBlocks[testBlockIdx]
+		if next == nil {
+			t.Fatal("next is nil when err is nil")
+		}
 		if next.Rollback {
 			t.Fatalf("unexpected rollback from chain iterator")
 		}
@@ -230,7 +234,7 @@ func TestChainRollback(t *testing.T) {
 	// Iterate until hitting chain tip, and make sure we get blocks in the correct order
 	testBlockIdx := 0
 	for {
-		next, err := iter.Next(false)
+		next, err := iter.Next(context.Background(), false)
 		if err != nil {
 			if errors.Is(err, chain.ErrIteratorChainTip) {
 				if testBlockIdx < len(testBlocks)-1 {
@@ -245,6 +249,9 @@ func TestChainRollback(t *testing.T) {
 		}
 		if testBlockIdx >= len(testBlocks) {
 			t.Fatal("ran out of test blocks before reaching chain tip")
+		}
+		if next == nil {
+			t.Fatal("next is nil when err is nil")
 		}
 		testBlock := testBlocks[testBlockIdx]
 		if next.Rollback {
@@ -284,9 +291,12 @@ func TestChainRollback(t *testing.T) {
 		)
 	}
 	// The chain iterator should give us a rollback
-	next, err := iter.Next(false)
+	next, err := iter.Next(context.Background(), false)
 	if err != nil {
 		t.Fatalf("unexpected error calling chain iterator next: %s", err)
+	}
+	if next == nil {
+		t.Fatal("next is nil when err is nil")
 	}
 	if !next.Rollback {
 		t.Fatalf(
@@ -563,7 +573,7 @@ func TestChainFork(t *testing.T) {
 		testForkBlocks,
 	)
 	for {
-		next, err := iter.Next(false)
+		next, err := iter.Next(context.Background(), false)
 		if err != nil {
 			if errors.Is(err, chain.ErrIteratorChainTip) {
 				if testBlockIdx < len(testBlocks)-1 {
@@ -578,6 +588,9 @@ func TestChainFork(t *testing.T) {
 		}
 		if testBlockIdx >= len(testBlocks) {
 			t.Fatal("ran out of test blocks before reaching chain tip")
+		}
+		if next == nil {
+			t.Fatal("next is nil when err is nil")
 		}
 		testBlock := testBlocks[testBlockIdx]
 		if next.Rollback {

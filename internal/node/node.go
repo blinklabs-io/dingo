@@ -167,7 +167,12 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 	go func() {
 		<-signalCtx.Done()
 		logger.Info("signal received, shutting down")
-		if err := d.Stop(); err != nil { //nolint:contextcheck
+		shutdownCtx, shutdownCancel := context.WithTimeout(
+			context.Background(),
+			30*time.Second,
+		)
+		defer shutdownCancel()
+		if err := d.Stop(shutdownCtx); err != nil { //nolint:contextcheck
 			logger.Error(
 				"failure(s) while shutting down",
 				"error",

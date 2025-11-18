@@ -22,8 +22,8 @@ import (
 
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/connmanager"
+	"github.com/blinklabs-io/dingo/ouroboros"
 	"github.com/blinklabs-io/dingo/topology"
-	ouroboros "github.com/blinklabs-io/gouroboros"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/prometheus/client_golang/prometheus"
 )
@@ -57,13 +57,15 @@ type Config struct {
 // configPopulateNetworkMagic uses the named network (if specified) to determine the network magic value (if not specified)
 func (n *Node) configPopulateNetworkMagic() error {
 	if n.config.networkMagic == 0 && n.config.network != "" {
-		tmpCfg := n.config
-		tmpNetwork, ok := ouroboros.NetworkByName(n.config.network)
-		if !ok {
-			return fmt.Errorf("unknown network name: %s", n.config.network)
+		networkMagic, err := ouroboros.GetNetworkMagic(n.config.network)
+		if err != nil {
+			return fmt.Errorf(
+				"failed to get network magic for network %s: %w",
+				n.config.network,
+				err,
+			)
 		}
-		tmpCfg.networkMagic = tmpNetwork.NetworkMagic
-		n.config = tmpCfg
+		n.config.networkMagic = networkMagic
 	}
 	return nil
 }
@@ -276,3 +278,11 @@ func WithValidateHistorical(validate bool) ConfigOptionFunc {
 		c.validateHistorical = validate
 	}
 }
+
+func (c Config) IntersectTip() bool { return c.intersectTip }
+
+func (c Config) IntersectPoints() []ocommon.Point {
+	return append([]ocommon.Point(nil), c.intersectPoints...)
+}
+
+func (c Config) Logger() *slog.Logger { return c.logger }
