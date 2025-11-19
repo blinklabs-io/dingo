@@ -19,28 +19,45 @@ import (
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
+// SetTransaction persists transaction to blob storage (UTXOs) and metadata storage (certificates).
 func (d *Database) SetTransaction(
-	tx lcommon.Transaction,
 	point ocommon.Point,
+	tx lcommon.Transaction,
 	idx uint32,
+	deposits map[int]uint64,
 	txn *Txn,
-) error {
+) (err error) {
 	if txn == nil {
 		txn = d.Transaction(false)
-		defer txn.Commit() //nolint:errcheck
-	}
-	if tx.IsValid() {
-		for _, utxo := range tx.Produced() {
-			// Add UTxO to blob DB
-			key := UtxoBlobKey(
-				utxo.Id.Id().Bytes(),
-				utxo.Id.Index(),
-			)
-			err := txn.Blob().Set(key, utxo.Output.Cbor())
+		defer func() {
 			if err != nil {
-				return err
+				txn.Rollback() //nolint:errcheck
+			} else {
+				txn.Commit() //nolint:errcheck
 			}
+		}()
+	}
+	for _, utxo := range tx.Produced() {
+		// Add UTxO to blob DB
+		key := UtxoBlobKey(
+			utxo.Id.Id().Bytes(),
+			utxo.Id.Index(),
+		)
+		if err = txn.Blob().Set(key, utxo.Output.Cbor()); err != nil {
+			return err
 		}
 	}
-	return d.metadata.SetTransaction(tx, point, idx, txn.Metadata())
+
+	err = d.metadata.SetTransaction(
+		point,
+		tx,
+		idx,
+		deposits,
+		txn.Metadata(),
+	)
+	if err != nil {
+		return err
+	}
+
+	return nil
 }

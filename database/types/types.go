@@ -37,10 +37,22 @@ func (r *Rat) Scan(val any) error {
 	if r.Rat == nil {
 		r.Rat = new(big.Rat)
 	}
-	v, ok := val.(string)
-	if !ok {
+	if val == nil {
+		// Keep zero-value rat when column is NULL.
+		return nil
+	}
+	var v string
+	switch t := val.(type) {
+	case string:
+		v = t
+	case []byte:
+		v = string(t)
+	case int64:
+		r.SetInt64(t)
+		return nil
+	default:
 		return fmt.Errorf(
-			"value was not expected type, wanted string, got %T",
+			"value was not expected type, wanted string, []byte, or int64, got %T",
 			val,
 		)
 	}
@@ -51,17 +63,32 @@ func (r *Rat) Scan(val any) error {
 }
 
 //nolint:recvcheck
-type Uint64 uint64
+type Uint64 struct {
+	Val uint64
+}
 
 func (u Uint64) Value() (driver.Value, error) {
-	return strconv.FormatUint(uint64(u), 10), nil
+	return strconv.FormatUint(u.Val, 10), nil
 }
 
 func (u *Uint64) Scan(val any) error {
-	v, ok := val.(string)
-	if !ok {
+	if val == nil {
+		// Treat NULL as zero; adjust if a different semantic is desired.
+		u.Val = 0
+		return nil
+	}
+	var v string
+	switch t := val.(type) {
+	case string:
+		v = t
+	case []byte:
+		v = string(t)
+	case int64:
+		u.Val = uint64(t) // #nosec G115 – application-level guarantee about range
+		return nil
+	default:
 		return fmt.Errorf(
-			"value was not expected type, wanted string, got %T",
+			"value was not expected type, wanted string, []byte, or int64, got %T",
 			val,
 		)
 	}
@@ -69,6 +96,6 @@ func (u *Uint64) Scan(val any) error {
 	if err != nil {
 		return err
 	}
-	*u = Uint64(tmpUint)
+	u.Val = tmpUint
 	return nil
 }

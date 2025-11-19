@@ -31,6 +31,13 @@ import (
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 )
 
+const (
+	// LedgerCatchupPollInterval is how often to check if ledger has caught up
+	LedgerCatchupPollInterval = config.DefaultLedgerCatchupPollInterval
+	// LedgerCatchupStallTimeout is the maximum time to wait without progress before failing
+	LedgerCatchupStallTimeout = config.DefaultLedgerCatchupStallTimeout
+)
+
 func Load(cfg *config.Config, logger *slog.Logger, immutableDir string) error {
 	var nodeCfg *cardano.CardanoNodeConfig
 	if cfg.CardanoConfig != "" {
@@ -89,8 +96,9 @@ func Load(cfg *config.Config, logger *slog.Logger, immutableDir string) error {
 	if err != nil {
 		return fmt.Errorf("failed to load state: %w", err)
 	}
+	// Start ledger asynchronously
 	if err := ls.Start(); err != nil {
-		return fmt.Errorf("failed to load state: %w", err)
+		return fmt.Errorf("failed to start ledger state: %w", err)
 	}
 	// Open immutable DB
 	immutable, err := immutable.New(immutableDir)
@@ -168,19 +176,83 @@ func Load(cfg *config.Config, logger *slog.Logger, immutableDir string) error {
 			blocksCopied,
 		),
 	)
-	// Wait for ledger to catch up
-	for {
-		time.Sleep(5 * time.Second)
+	// Wait for ledger to catch up with progress-based timeout
+	pollInterval := cfg.LedgerCatchupPollInterval
+	if pollInterval == 0 {
+		pollInterval = LedgerCatchupPollInterval // fallback to default
+	}
+	stallTimeout := cfg.LedgerCatchupStallTimeout
+	if stallTimeout == 0 {
+		stallTimeout = LedgerCatchupStallTimeout // fallback to default
+	}
+
+	ticker := time.NewTicker(pollInterval)
+	defer ticker.Stop()
+
+	var lastSlot uint64
+	lastProgressTime := time.Now()
+	var zeroSlotSeenAt time.Time
+
+	for range ticker.C {
 		tip := ls.Tip()
-		if tip.Point.Slot >= immutableTip.Slot {
-			break
+		if tip.Point.Slot == 0 {
+			// Record when we first saw slot 0
+			if zeroSlotSeenAt.IsZero() {
+				zeroSlotSeenAt = time.Now()
+			}
+			// Check if we've been stuck at slot 0 for too long
+			if time.Since(zeroSlotSeenAt) > stallTimeout {
+				return fmt.Errorf(
+					"ledger processing appears stalled: stuck at slot 0 for %v",
+					stallTimeout,
+				)
+			}
+			logger.Debug(
+				"ledger tip slot is 0, waiting for ledger to initialize",
+			)
+			continue
+		}
+
+		// Slot has advanced from 0, reset zero slot tracking
+		if !zeroSlotSeenAt.IsZero() {
+			zeroSlotSeenAt = time.Time{}
+		}
+
+		currentSlot := tip.Point.Slot
+		currentTime := time.Now()
+
+		// Check if we've reached the target
+		if currentSlot >= immutableTip.Slot {
+			logger.Info(
+				fmt.Sprintf(
+					"finished processing %d blocks from immutable DB",
+					blocksCopied,
+				),
+			)
+			return nil
+		}
+
+		// Check for progress
+		if currentSlot > lastSlot {
+			// Progress made, reset the stall timer
+			lastSlot = currentSlot
+			lastProgressTime = currentTime
+			logger.Debug(
+				fmt.Sprintf(
+					"ledger progress: slot %d/%d",
+					currentSlot,
+					immutableTip.Slot,
+				),
+			)
+		} else if currentTime.Sub(lastProgressTime) > stallTimeout {
+			// No progress for too long, fail
+			return fmt.Errorf(
+				"ledger processing appears stalled: no progress for %v (last slot: %d, target: %d)",
+				stallTimeout,
+				lastSlot,
+				immutableTip.Slot,
+			)
 		}
 	}
-	logger.Info(
-		fmt.Sprintf(
-			"finished processing %d blocks from immutable DB",
-			blocksCopied,
-		),
-	)
-	return nil
+	panic("unreachable")
 }

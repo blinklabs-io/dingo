@@ -21,7 +21,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/gouroboros/cbor"
-	"github.com/blinklabs-io/gouroboros/ledger"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/dgraph-io/badger/v4"
 )
 
@@ -100,7 +100,7 @@ func (d *Database) UtxoByRef(
 }
 
 func (d *Database) UtxoConsume(
-	utxoId ledger.TransactionInput,
+	utxoId lcommon.TransactionInput,
 	slot uint64,
 	txn *Txn,
 ) error {
@@ -112,7 +112,7 @@ func (d *Database) UtxoConsume(
 }
 
 func (d *Database) UtxosByAddress(
-	addr ledger.Address,
+	addr lcommon.Address,
 	txn *Txn,
 ) ([]models.Utxo, error) {
 	ret := []models.Utxo{}
@@ -127,15 +127,16 @@ func (d *Database) UtxosByAddress(
 	}
 	for _, utxo := range utxos {
 		tmpUtxo = models.Utxo{
-			ID:          utxo.ID,
-			TxId:        utxo.TxId,
-			OutputIdx:   utxo.OutputIdx,
-			AddedSlot:   utxo.AddedSlot,
-			DeletedSlot: utxo.DeletedSlot,
-			PaymentKey:  utxo.PaymentKey,
-			StakingKey:  utxo.StakingKey,
-			Amount:      utxo.Amount,
-			Assets:      utxo.Assets,
+			ID:                 utxo.ID,
+			TxId:               utxo.TxId,
+			OutputIdx:          utxo.OutputIdx,
+			AddedSlot:          utxo.AddedSlot,
+			DeletedSlot:        utxo.DeletedSlot,
+			PaymentKey:         utxo.PaymentKey,
+			StakingKey:         utxo.StakingKey,
+			Amount:             utxo.Amount,
+			Assets:             utxo.Assets,
+			IsCollateralReturn: utxo.IsCollateralReturn,
 		}
 		if err := loadCbor(&tmpUtxo, txn); err != nil {
 			return ret, err

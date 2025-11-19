@@ -33,18 +33,23 @@ import (
 	"gorm.io/plugin/opentelemetry/tracing"
 )
 
-// MetadataStoreSqlite stores all data in sqlite. Data may not be persisted
+// MetadataStoreSqlite is a SQLite-based implementation of the metadata store.
+// It provides persistent storage for blockchain metadata including certificates,
+// transactions, blocks, and other ledger state data.
 type MetadataStoreSqlite struct {
-	promRegistry prometheus.Registerer
-	db           *gorm.DB
-	logger       *slog.Logger
-	timerVacuum  *time.Timer
-	timerMutex   sync.Mutex
-	dataDir      string
-	closed       bool
+	promRegistry            prometheus.Registerer
+	db                      *gorm.DB
+	logger                  *slog.Logger
+	timerVacuum             *time.Timer
+	timerCertificateCleanup *time.Timer
+	timerMutex              sync.Mutex
+	dataDir                 string
+	closed                  bool
+	vacuumWG                sync.WaitGroup
+	certificateCleanupWG    sync.WaitGroup
 }
 
-// New creates a new database
+// New creates a SQLite metadata store. Uses in-memory database if dataDir is empty.
 func New(
 	dataDir string,
 	logger *slog.Logger,
@@ -53,7 +58,8 @@ func New(
 	var metadataDb *gorm.DB
 	var err error
 	if dataDir == "" {
-		// No dataDir, use in-memory config
+		// Use in-memory database when no data directory is specified, useful for testing
+		// cache=shared allows multiple connections to share the same in-memory database
 		metadataDb, err = gorm.Open(
 			sqlite.Open("file::memory:?cache=shared"),
 			&gorm.Config{
@@ -131,16 +137,22 @@ func (d *MetadataStoreSqlite) init() error {
 	}
 	// Schedule daily database vacuum to free unused space
 	d.scheduleDailyVacuum()
+	// Schedule periodic certificate cleanup for data integrity
+	d.scheduleCertificateCleanup()
 	return nil
 }
 
 func (d *MetadataStoreSqlite) runVacuum() error {
 	d.timerMutex.Lock()
-	closed := d.closed
-	d.timerMutex.Unlock()
-	if d.dataDir == "" || closed {
+	if d.dataDir == "" || d.closed {
+		d.timerMutex.Unlock()
 		return nil
 	}
+	// Track this vacuum operation while we know the store is open
+	d.vacuumWG.Add(1)
+	d.timerMutex.Unlock()
+	defer d.vacuumWG.Done()
+
 	if result := d.DB().Raw("VACUUM"); result.Error != nil {
 		return result.Error
 	}
@@ -175,12 +187,70 @@ func (d *MetadataStoreSqlite) scheduleDailyVacuum() {
 	d.timerVacuum = time.AfterFunc(daily, f)
 }
 
-// AutoMigrate wraps the gorm AutoMigrate
+// runCertificateCleanup performs periodic cleanup of certificate data for data integrity.
+// Currently a no-op placeholder - implement cleanup logic as needed.
+func (d *MetadataStoreSqlite) runCertificateCleanup() error {
+	d.timerMutex.Lock()
+	if d.closed {
+		d.timerMutex.Unlock()
+		return nil
+	}
+	// Track this cleanup operation while we know the store is open
+	d.certificateCleanupWG.Add(1)
+	d.timerMutex.Unlock()
+	defer d.certificateCleanupWG.Done()
+
+	// TODO: Implement certificate cleanup logic
+	// This could include:
+	// - Cleaning up orphaned certificate records
+	// - Removing certificates from invalid transactions beyond rollback window
+	// - Optimizing certificate indexes
+	// - Removing duplicate or redundant certificate data
+
+	d.logger.Debug(
+		"running certificate cleanup on sqlite metadata database",
+		"component", "database",
+	)
+
+	// Placeholder for certificate cleanup logic
+	// For now, this is a no-op that can be implemented as needed
+
+	return nil
+}
+
+// scheduleCertificateCleanup schedules periodic certificate cleanup
+func (d *MetadataStoreSqlite) scheduleCertificateCleanup() {
+	d.timerMutex.Lock()
+	defer d.timerMutex.Unlock()
+	if d.closed {
+		return
+	}
+
+	if d.timerCertificateCleanup != nil {
+		d.timerCertificateCleanup.Stop()
+	}
+	// Run certificate cleanup every 6 hours (4 times per day)
+	interval := time.Duration(6) * time.Hour
+	f := func() {
+		// schedule next run
+		defer d.scheduleCertificateCleanup()
+		if err := d.runCertificateCleanup(); err != nil {
+			d.logger.Error(
+				"failed to cleanup certificate data in metadata store",
+				"component", "database",
+				"error", err,
+			)
+		}
+	}
+	d.timerCertificateCleanup = time.AfterFunc(interval, f)
+}
+
+// AutoMigrate creates or updates database schema for the given models.
 func (d *MetadataStoreSqlite) AutoMigrate(dst ...any) error {
 	return d.DB().AutoMigrate(dst...)
 }
 
-// Close gets the database handle from our MetadataStore and closes it
+// Close shuts down the database connection and stops background processes.
 func (d *MetadataStoreSqlite) Close() error {
 	d.timerMutex.Lock()
 	d.closed = true
@@ -188,42 +258,52 @@ func (d *MetadataStoreSqlite) Close() error {
 		d.timerVacuum.Stop()
 		d.timerVacuum = nil
 	}
+	if d.timerCertificateCleanup != nil {
+		d.timerCertificateCleanup.Stop()
+		d.timerCertificateCleanup = nil
+	}
 	d.timerMutex.Unlock()
+
+	// Wait for any in-flight vacuum operations to complete
+	d.vacuumWG.Wait()
+
+	// Wait for any in-flight certificate cleanup operations to complete
+	d.certificateCleanupWG.Wait()
 
 	// get DB handle from gorm.DB
 	db, err := d.DB().DB()
 	if err != nil {
-		return err
+		return fmt.Errorf("get database handle: %w", err)
 	}
 	return db.Close()
 }
 
-// Create creates a record
+// Create inserts a new record into the database.
 func (d *MetadataStoreSqlite) Create(value any) *gorm.DB {
 	return d.DB().Create(value)
 }
 
-// DB returns the database handle
+// DB returns the underlying GORM database handle.
 func (d *MetadataStoreSqlite) DB() *gorm.DB {
 	return d.db
 }
 
-// First returns the first DB entry
+// First retrieves the first record that matches the query.
 func (d *MetadataStoreSqlite) First(args any) *gorm.DB {
 	return d.DB().First(args)
 }
 
-// Order orders a DB query
+// Order adds ORDER BY clause to the database query.
 func (d *MetadataStoreSqlite) Order(args any) *gorm.DB {
 	return d.DB().Order(args)
 }
 
-// Transaction creates a gorm transaction
+// Transaction creates a new database transaction.
 func (d *MetadataStoreSqlite) Transaction() *gorm.DB {
 	return d.DB().Begin()
 }
 
-// Where constrains a DB query
+// Where adds WHERE conditions to the database query.
 func (d *MetadataStoreSqlite) Where(
 	query any,
 	args ...any,

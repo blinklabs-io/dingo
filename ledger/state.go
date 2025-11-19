@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"context"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -99,6 +100,10 @@ type LedgerState struct {
 	chainsyncBlockfetchMutex   sync.Mutex
 	chainsyncBlockfetchWaiting bool
 	checkpointWrittenForEpoch  bool
+	// Goroutine lifecycle management
+	ctx    context.Context
+	cancel context.CancelFunc
+	wg     sync.WaitGroup
 }
 
 func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
@@ -119,6 +124,8 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 		// We do this so we don't have to add guards around every log operation
 		cfg.Logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
 	}
+	// Initialize context for goroutine lifecycle management
+	ls.ctx, ls.cancel = context.WithCancel(context.Background())
 	return ls, nil
 }
 
@@ -166,7 +173,11 @@ func (ls *LedgerState) Start() error {
 	// Schedule block forging
 	ls.initForge()
 	// Start goroutine to process new blocks
-	go ls.ledgerProcessBlocks()
+	ls.wg.Add(1)
+	go func() {
+		defer ls.wg.Done()
+		ls.ledgerProcessBlocks()
+	}()
 	return nil
 }
 
@@ -196,6 +207,13 @@ func (ls *LedgerState) Chain() *chain.Chain {
 }
 
 func (ls *LedgerState) Close() error {
+	// Cancel context to signal goroutines to stop
+	if ls.cancel != nil {
+		ls.cancel()
+	}
+	// Wait for all goroutines to finish
+	ls.wg.Wait()
+	// Close database
 	return ls.db.Close()
 }
 
@@ -522,6 +540,7 @@ type readChainResult struct {
 }
 
 func (ls *LedgerState) ledgerReadChain(resultCh chan readChainResult) {
+	defer close(resultCh)
 	// Create chain iterator
 	iter, err := ls.chain.FromPoint(ls.currentTip.Point, false)
 	if err != nil {
@@ -537,6 +556,11 @@ func (ls *LedgerState) ledgerReadChain(resultCh chan readChainResult) {
 	var rollbackPoint ocommon.Point
 	var result readChainResult
 	for {
+		select {
+		case <-ls.ctx.Done():
+			return
+		default:
+		}
 		// We chose 500 as an arbitrary max batch size. A "chain extended" message will be logged after each batch
 		nextBatch := make([]ledger.Block, 0, 500)
 		// Gather up next batch of blocks
@@ -609,8 +633,15 @@ func (ls *LedgerState) ledgerReadChain(resultCh chan readChainResult) {
 
 func (ls *LedgerState) ledgerProcessBlocks() {
 	// Start chain reader goroutine
-	readChainResultCh := make(chan readChainResult)
-	go ls.ledgerReadChain(readChainResultCh)
+	readChainResultCh := make(
+		chan readChainResult,
+		1,
+	) // Add buffer to prevent blocking
+	ls.wg.Add(1)
+	go func() {
+		defer ls.wg.Done()
+		ls.ledgerReadChain(readChainResultCh)
+	}()
 	// Process blocks
 	var nextEpochEraId uint
 	var needsEpochRollover bool
@@ -622,11 +653,17 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 	var deltaBatch LedgerDeltaBatch
 	shouldValidate := ls.config.ValidateHistorical
 	for {
+		select {
+		case <-ls.ctx.Done():
+			// Context cancelled, shutdown gracefully
+			return
+		default:
+		}
 		if needsEpochRollover {
 			ls.Lock()
 			needsEpochRollover = false
 			txn := ls.db.Transaction(true)
-			err := txn.Do(func(txn *database.Txn) error {
+			err = txn.Do(func(txn *database.Txn) error {
 				// Check for era change
 				if nextEpochEraId != ls.currentEra.Id {
 					// Transition through every era between the current and the target era
@@ -647,6 +684,7 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 				ls.config.Logger.Error(
 					"failed to process epoch rollover: " + err.Error(),
 				)
+				ls.cancel() // Cancel context on fatal error to stop other goroutines
 				return
 			}
 		}
@@ -656,23 +694,28 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 			cachedNextBatch = nil
 		} else {
 			// Read next result from readChain channel
-			result, ok := <-readChainResultCh
-			if !ok {
-				return
-			}
-			nextBatch = result.blocks
-			// Process rollback
-			if result.rollback {
-				ls.Lock()
-				if err = ls.rollback(result.rollbackPoint); err != nil {
-					ls.Unlock()
-					ls.config.Logger.Error(
-						"failed to process rollback: " + err.Error(),
-					)
+			select {
+			case result, ok := <-readChainResultCh:
+				if !ok {
 					return
 				}
-				ls.Unlock()
-				continue
+				nextBatch = result.blocks
+				// Process rollback
+				if result.rollback {
+					ls.Lock()
+					if err = ls.rollback(result.rollbackPoint); err != nil {
+						ls.Unlock()
+						ls.config.Logger.Error(
+							"failed to process rollback: " + err.Error(),
+						)
+						ls.cancel() // Cancel context on fatal error to stop other goroutines
+						return
+					}
+					ls.Unlock()
+					continue
+				}
+			case <-ls.ctx.Done():
+				return
 			}
 		}
 		// Process batch in groups of 50 to stay under DB txn limits
@@ -797,6 +840,7 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 				ls.config.Logger.Error(
 					"failed to process block: " + err.Error(),
 				)
+				ls.cancel() // Cancel context on fatal error to stop other goroutines
 				return
 			}
 			ls.Unlock()
@@ -845,6 +889,22 @@ func (ls *LedgerState) ledgerProcessBlock(
 		if delta == nil {
 			delta = &LedgerDelta{Point: point, BlockEraId: uint(block.Era().Id)}
 		}
+
+		// Calculate certificate deposits before validation if the transaction has certificates
+		var deposits map[int]uint64
+		if len(tx.Certificates()) > 0 {
+			var err error
+			deposits, err = ls.CalculateCertificateDeposits(
+				tx.Certificates(),
+			)
+			if err != nil {
+				return nil, fmt.Errorf(
+					"calculate certificate deposits: %w",
+					err,
+				)
+			}
+		}
+
 		// Validate transaction
 		if shouldValidate {
 			if ls.currentEra.ValidateTxFunc != nil {
@@ -859,17 +919,13 @@ func (ls *LedgerState) ledgerProcessBlock(
 					ls.currentPParams,
 				)
 				if err != nil {
-					ls.config.Logger.Warn(
-						"TX " + tx.Hash().
-							String() +
-							" failed validation: " + err.Error(),
-					)
-					// return fmt.Errorf("TX validation failure: %w", err)
+					return nil, fmt.Errorf("TX validation failure: %w", err)
 				}
 			}
 		}
-		// Populate ledger delta from transaction
-		delta.addTransaction(tx, i)
+
+		// Populate ledger delta from transaction with pre-calculated deposits
+		delta.addTransactionWithDeposits(tx, i, deposits)
 
 		// Apply delta immediately if we may need the data to validate the next TX
 		if shouldValidate {

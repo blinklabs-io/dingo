@@ -29,9 +29,9 @@ type Account struct {
 	Pool          []byte `gorm:"index"`
 	Drep          []byte `gorm:"index"`
 	ID            uint   `gorm:"primarykey"`
-	AddedSlot     uint64
-	CertificateID uint `gorm:"index"`
-	Active        bool `gorm:"default:true"`
+	AddedSlot     uint64 `gorm:"index"`
+	CertificateID uint   `gorm:"index"`
+	Active        bool   `gorm:"index;default:true"`
 }
 
 func (a *Account) TableName() string {
@@ -39,9 +39,17 @@ func (a *Account) TableName() string {
 }
 
 // String returns the bech32-encoded representation of the Account's StakingKey
-// with the "stake" human-readable part. Returns an error if the StakingKey is
+// with the "stake" human-readable part for mainnet. Returns an error if the StakingKey is
 // empty or if encoding fails.
 func (a *Account) String() (string, error) {
+	return a.StringWithNetwork(false)
+}
+
+// StringWithNetwork returns the bech32-encoded representation of the Account's StakingKey
+// with the appropriate human-readable part based on the network.
+// Use isTestnet=true for testnet networks (HRP: "stake_test"), false for mainnet (HRP: "stake").
+// Returns an error if the StakingKey is empty or if encoding fails.
+func (a *Account) StringWithNetwork(isTestnet bool) (string, error) {
 	if len(a.StakingKey) == 0 {
 		return "", errors.New("staking key is empty")
 	}
@@ -50,17 +58,29 @@ func (a *Account) String() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("failed to convert bits: %w", err)
 	}
-	encoded, err := bech32.Encode("stake", convData)
+	hrp := "stake"
+	if isTestnet {
+		hrp = "stake_test"
+	}
+	encoded, err := bech32.Encode(hrp, convData)
 	if err != nil {
 		return "", fmt.Errorf("failed to encode bech32: %w", err)
 	}
 	return encoded, nil
 }
 
+// Certificate models constraint strategy:
+// - Deregistration, StakeDeregistration, and StakeRegistration use composite unique constraints on (StakingKey, CertificateID)
+//   to prevent duplicate certificates for the same staking key and certificate ID.
+// - Other certificate models (Registration, StakeDelegation, etc.) use simple indexes
+//   without uniqueness constraints, allowing multiple entries for the same staking key across different certificates.
+// This design ensures that deregistration and stake registration certificates are processed only once,
+// while other certificate types can be handled multiple times if needed (e.g., for historical tracking or retries).
+
 type Deregistration struct {
-	StakingKey    []byte `gorm:"index"`
+	StakingKey    []byte `gorm:"index;uniqueIndex:uniq_deregistration_cert"`
 	ID            uint   `gorm:"primarykey"`
-	CertificateID uint   `gorm:"index"`
+	CertificateID uint   `gorm:"uniqueIndex:uniq_deregistration_cert"`
 	AddedSlot     uint64
 	Amount        types.Uint64
 }
@@ -94,8 +114,8 @@ func (StakeDelegation) TableName() string {
 }
 
 type StakeDeregistration struct {
-	StakingKey    []byte `gorm:"index"`
-	CertificateID uint   `gorm:"index"`
+	StakingKey    []byte `gorm:"index;uniqueIndex:uniq_stake_deregistration_cert"`
+	CertificateID uint   `gorm:"uniqueIndex:uniq_stake_deregistration_cert"`
 	ID            uint   `gorm:"primarykey"`
 	AddedSlot     uint64
 }
@@ -105,8 +125,8 @@ func (StakeDeregistration) TableName() string {
 }
 
 type StakeRegistration struct {
-	StakingKey    []byte `gorm:"index"`
-	CertificateID uint   `gorm:"index"`
+	StakingKey    []byte `gorm:"index;uniqueIndex:uniq_stake_registration_cert"`
+	CertificateID uint   `gorm:"uniqueIndex:uniq_stake_registration_cert"`
 	ID            uint   `gorm:"primarykey"`
 	AddedSlot     uint64
 	DepositAmount types.Uint64

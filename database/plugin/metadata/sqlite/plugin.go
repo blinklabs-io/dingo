@@ -20,11 +20,6 @@ import (
 
 type SqliteOptionFunc func(*MetadataStoreSqlite)
 
-//nolint:unused
-var cmdLineOptions struct {
-	dataDir string
-}
-
 // Register plugin
 func init() {
 	plugin.Register(

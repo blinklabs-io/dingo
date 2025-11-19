@@ -108,8 +108,8 @@ func (lv *LedgerView) PoolCurrentState(
 			VrfKeyHash: lcommon.VrfKeyHash(
 				lcommon.NewBlake2b256(pool.VrfKeyHash),
 			),
-			Pledge: uint64(pool.Pledge),
-			Cost:   uint64(pool.Cost),
+			Pledge: pool.Pledge.Val,
+			Cost:   pool.Cost.Val,
 		}
 		if pool.Margin != nil {
 			tmp.Margin = cbor.Rat{Rat: pool.Margin.Rat}

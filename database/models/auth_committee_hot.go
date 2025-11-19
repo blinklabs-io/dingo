@@ -14,11 +14,16 @@
 
 package models
 
+import (
+	"github.com/blinklabs-io/dingo/database/types"
+)
+
 type AuthCommitteeHot struct {
-	ColdCredential []byte `gorm:"index"`
-	HostCredential []byte `gorm:"index"`
-	ID             uint   `gorm:"primarykey"`
-	AddedSlot      uint64
+	ColdCredential []byte       `gorm:"unique"`
+	HostCredential []byte       `gorm:"index"`
+	ID             uint         `gorm:"primarykey"`
+	CertificateID  uint         `gorm:"uniqueIndex:uniq_auth_committee_hot_cert"`
+	AddedSlot      types.Uint64 `gorm:"index"`
 }
 
 func (AuthCommitteeHot) TableName() string {

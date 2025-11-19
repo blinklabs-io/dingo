@@ -19,8 +19,6 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
-	"github.com/blinklabs-io/dingo/database/types"
-	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -57,6 +55,7 @@ type MetadataStore interface {
 
 	GetAccount(
 		[]byte, // stakeKey
+		bool, // includeInactive
 		*gorm.DB,
 	) (*models.Account, error)
 	GetBlockNonce(
@@ -98,17 +97,6 @@ type MetadataStore interface {
 		uint64, // slot
 		*gorm.DB,
 	) error
-	SetDeregistration(
-		*lcommon.DeregistrationCertificate,
-		uint64, // slot
-		*gorm.DB,
-	) error
-	SetDeregistrationDrep(
-		*lcommon.DeregistrationDrepCertificate,
-		uint64, // slot
-		types.Uint64, // deposit
-		*gorm.DB,
-	) error
 	SetEpoch(
 		uint64, // slot
 		uint64, // epoch
@@ -116,17 +104,6 @@ type MetadataStore interface {
 		uint, // era
 		uint, // slotLength
 		uint, // lengthInSlots
-		*gorm.DB,
-	) error
-	SetPoolRegistration(
-		*lcommon.PoolRegistrationCertificate,
-		uint64, // slot
-		types.Uint64, // deposit
-		*gorm.DB,
-	) error
-	SetPoolRetirement(
-		*lcommon.PoolRetirementCertificate,
-		uint64, // slot
 		*gorm.DB,
 	) error
 	SetPParams(
@@ -143,75 +120,15 @@ type MetadataStore interface {
 		uint64, // epoch
 		*gorm.DB,
 	) error
-	SetRegistration(
-		*lcommon.RegistrationCertificate,
-		uint64, // slot
-		types.Uint64, // deposit
-		*gorm.DB,
-	) error
-	SetRegistrationDrep(
-		*lcommon.RegistrationDrepCertificate,
-		uint64, // slot
-		types.Uint64, // deposit
-		*gorm.DB,
-	) error
-	SetStakeDelegation(
-		*lcommon.StakeDelegationCertificate,
-		uint64, // slot
-		*gorm.DB,
-	) error
-	SetStakeDeregistration(
-		*lcommon.StakeDeregistrationCertificate,
-		uint64, // slot
-		*gorm.DB,
-	) error
-	SetStakeRegistration(
-		*lcommon.StakeRegistrationCertificate,
-		uint64, // slot
-		types.Uint64, // deposit
-		*gorm.DB,
-	) error
-	SetStakeRegistrationDelegation(
-		*lcommon.StakeRegistrationDelegationCertificate,
-		uint64, // slot
-		types.Uint64, // deposit
-		*gorm.DB,
-	) error
-	SetStakeVoteDelegation(
-		*lcommon.StakeVoteDelegationCertificate,
-		uint64, // slot
-		*gorm.DB,
-	) error
-	SetStakeVoteRegistrationDelegation(
-		*lcommon.StakeVoteRegistrationDelegationCertificate,
-		uint64, // slot
-		types.Uint64, // deposit
-		*gorm.DB,
-	) error
 	SetTip(
 		ochainsync.Tip,
 		*gorm.DB,
 	) error
 	SetTransaction(
-		lcommon.Transaction,
 		ocommon.Point,
-		uint32, // idx
-		*gorm.DB,
-	) error
-	SetUpdateDrep(
-		*lcommon.UpdateDrepCertificate,
-		uint64, // slot
-		*gorm.DB,
-	) error
-	SetVoteDelegation(
-		*lcommon.VoteDelegationCertificate,
-		uint64, // slot
-		*gorm.DB,
-	) error
-	SetVoteRegistrationDelegation(
-		*lcommon.VoteRegistrationDelegationCertificate,
-		uint64, // slot
-		types.Uint64, // deposit
+		lcommon.Transaction,
+		uint32, // transaction index within block
+		map[int]uint64, // deposits: certificate index -> deposit amount in lovelace. Keys must align with transaction certificate slice order. Missing keys default to 0.
 		*gorm.DB,
 	) error
 
@@ -224,9 +141,9 @@ type MetadataStore interface {
 	GetEpochsByEra(uint, *gorm.DB) ([]models.Epoch, error)
 	GetEpochs(*gorm.DB) ([]models.Epoch, error)
 	GetUtxosAddedAfterSlot(uint64, *gorm.DB) ([]models.Utxo, error)
-	GetUtxosByAddress(ledger.Address, *gorm.DB) ([]models.Utxo, error)
+	GetUtxosByAddress(lcommon.Address, *gorm.DB) ([]models.Utxo, error)
 	GetUtxosDeletedBeforeSlot(uint64, int, *gorm.DB) ([]models.Utxo, error)
-	SetUtxoDeletedAtSlot(ledger.TransactionInput, uint64, *gorm.DB) error
+	SetUtxoDeletedAtSlot(lcommon.TransactionInput, uint64, *gorm.DB) error
 	SetUtxosNotDeletedAfterSlot(uint64, *gorm.DB) error
 }
 

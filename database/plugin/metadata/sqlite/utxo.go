@@ -19,7 +19,7 @@ import (
 	"fmt"
 
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/gouroboros/ledger"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"gorm.io/gorm"
 )
 
@@ -95,35 +95,41 @@ func (d *MetadataStoreSqlite) GetUtxosDeletedBeforeSlot(
 
 // GetUtxosByAddress returns a list of Utxos
 func (d *MetadataStoreSqlite) GetUtxosByAddress(
-	addr ledger.Address,
+	addr lcommon.Address,
 	txn *gorm.DB,
 ) ([]models.Utxo, error) {
 	var ret []models.Utxo
-	// Build sub-query for address
-	var addrQuery *gorm.DB
 	if txn == nil {
 		txn = d.DB()
 	}
-	if addr.PaymentKeyHash() != ledger.NewBlake2b224(nil) {
-		addrQuery = txn.Where("payment_key = ?", addr.PaymentKeyHash().Bytes())
-	}
-	if addr.StakeKeyHash() != ledger.NewBlake2b224(nil) {
-		if addrQuery != nil {
-			addrQuery = addrQuery.Or(
-				"staking_key = ?",
-				addr.StakeKeyHash().Bytes(),
-			)
-		} else {
-			addrQuery = txn.Where("staking_key = ?", addr.StakeKeyHash().Bytes())
-		}
-	}
-	if addrQuery == nil {
+
+	zeroHash := lcommon.NewBlake2b224(nil)
+	pkh := addr.PaymentKeyHash()
+	skh := addr.StakeKeyHash()
+
+	// Build query with explicit conditions for clarity and correctness
+	query := txn.Where("deleted_slot = 0")
+
+	// Add address-based conditions
+	if pkh != zeroHash && skh != zeroHash {
+		// Both payment and staking keys present: match both (exact address)
+		query = query.Where(
+			"payment_key = ? AND staking_key = ?",
+			pkh.Bytes(),
+			skh.Bytes(),
+		)
+	} else if pkh != zeroHash {
+		// Only payment key present
+		query = query.Where("payment_key = ?", pkh.Bytes())
+	} else if skh != zeroHash {
+		// Only staking key present
+		query = query.Where("staking_key = ?", skh.Bytes())
+	} else {
+		// No valid keys, return empty result
 		return ret, nil
 	}
-	result := txn.
-		Where("deleted_slot = 0").
-		Where(addrQuery).
-		Find(&ret)
+
+	result := query.Find(&ret)
 	if result.Error != nil {
 		return nil, result.Error
 	}
@@ -207,7 +213,7 @@ func (d *MetadataStoreSqlite) AddUtxos(
 	for _, utxo := range utxos {
 		items = append(
 			items,
-			models.UtxoLedgerToModel(utxo.Utxo, utxo.Slot),
+			models.UtxoLedgerToModel(utxo.Utxo, utxo.Slot, false),
 		)
 	}
 	if txn == nil {
@@ -223,7 +229,7 @@ func (d *MetadataStoreSqlite) AddUtxos(
 
 // SetUtxoDeletedAtSlot marks a UTxO as deleted at a given slot
 func (d *MetadataStoreSqlite) SetUtxoDeletedAtSlot(
-	utxoId ledger.TransactionInput,
+	utxoId lcommon.TransactionInput,
 	slot uint64,
 	txn *gorm.DB,
 ) error {

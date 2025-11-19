@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/blinklabs-io/dingo/topology"
 	ouroboros "github.com/blinklabs-io/gouroboros"
@@ -29,6 +30,13 @@ import (
 type ctxKey string
 
 const configContextKey ctxKey = "dingo.config"
+
+// Default ledger catchup configuration values
+const (
+	DefaultLedgerCatchupTimeout      = 5 * time.Minute
+	DefaultLedgerCatchupPollInterval = 5 * time.Second
+	DefaultLedgerCatchupStallTimeout = 10 * time.Minute
+)
 
 func WithContext(ctx context.Context, cfg *Config) context.Context {
 	return context.WithValue(ctx, configContextKey, cfg)
@@ -43,45 +51,51 @@ func FromContext(ctx context.Context) *Config {
 }
 
 type Config struct {
-	Network            string `yaml:"network"`
-	TlsKeyFilePath     string `yaml:"tlsKeyFilePath"     envconfig:"TLS_KEY_FILE_PATH"`
-	Topology           string `yaml:"topology"`
-	CardanoConfig      string `yaml:"cardanoConfig"      envconfig:"config"`
-	DatabasePath       string `yaml:"databasePath"                                      split_words:"true"`
-	SocketPath         string `yaml:"socketPath"                                        split_words:"true"`
-	TlsCertFilePath    string `yaml:"tlsCertFilePath"    envconfig:"TLS_CERT_FILE_PATH"`
-	BindAddr           string `yaml:"bindAddr"                                          split_words:"true"`
-	PrivateBindAddr    string `yaml:"privateBindAddr"                                   split_words:"true"`
-	BadgerCacheSize    int64  `yaml:"badgerCacheSize"                                   split_words:"true"`
-	MempoolCapacity    int64  `yaml:"mempoolCapacity"                                   split_words:"true"`
-	MetricsPort        uint   `yaml:"metricsPort"                                       split_words:"true"`
-	PrivatePort        uint   `yaml:"privatePort"                                       split_words:"true"`
-	RelayPort          uint   `yaml:"relayPort"          envconfig:"port"`
-	UtxorpcPort        uint   `yaml:"utxorpcPort"                                       split_words:"true"`
-	IntersectTip       bool   `yaml:"intersectTip"                                      split_words:"true"`
-	ValidateHistorical bool   `yaml:"validateHistorical"                                split_words:"true"`
-	DevMode            bool   `yaml:"devMode"                                           split_words:"true"`
+	Network                   string        `yaml:"network"`
+	TlsKeyFilePath            string        `yaml:"tlsKeyFilePath"            envconfig:"TLS_KEY_FILE_PATH"`
+	Topology                  string        `yaml:"topology"`
+	CardanoConfig             string        `yaml:"cardanoConfig"             envconfig:"config"`
+	DatabasePath              string        `yaml:"databasePath"                                             split_words:"true"`
+	SocketPath                string        `yaml:"socketPath"                                               split_words:"true"`
+	TlsCertFilePath           string        `yaml:"tlsCertFilePath"           envconfig:"TLS_CERT_FILE_PATH"`
+	BindAddr                  string        `yaml:"bindAddr"                                                 split_words:"true"`
+	PrivateBindAddr           string        `yaml:"privateBindAddr"                                          split_words:"true"`
+	BadgerCacheSize           int64         `yaml:"badgerCacheSize"                                          split_words:"true"`
+	MempoolCapacity           int64         `yaml:"mempoolCapacity"                                          split_words:"true"`
+	MetricsPort               uint          `yaml:"metricsPort"                                              split_words:"true"`
+	PrivatePort               uint          `yaml:"privatePort"                                              split_words:"true"`
+	RelayPort                 uint          `yaml:"relayPort"                 envconfig:"port"`
+	UtxorpcPort               uint          `yaml:"utxorpcPort"                                              split_words:"true"`
+	IntersectTip              bool          `yaml:"intersectTip"                                             split_words:"true"`
+	ValidateHistorical        bool          `yaml:"validateHistorical"                                       split_words:"true"`
+	DevMode                   bool          `yaml:"devMode"                                                  split_words:"true"`
+	LedgerCatchupTimeout      time.Duration `yaml:"ledgerCatchupTimeout"                                     split_words:"true"`
+	LedgerCatchupPollInterval time.Duration `yaml:"ledgerCatchupPollInterval"                                split_words:"true"`
+	LedgerCatchupStallTimeout time.Duration `yaml:"ledgerCatchupStallTimeout"                                split_words:"true"`
 }
 
 var globalConfig = &Config{
-	BadgerCacheSize:    1073741824,
-	MempoolCapacity:    1048576,
-	BindAddr:           "0.0.0.0",
-	CardanoConfig:      "", // Will be set dynamically based on network
-	DatabasePath:       ".dingo",
-	SocketPath:         "dingo.socket",
-	IntersectTip:       false,
-	ValidateHistorical: false,
-	Network:            "preview",
-	MetricsPort:        12798,
-	PrivateBindAddr:    "127.0.0.1",
-	PrivatePort:        3002,
-	RelayPort:          3001,
-	UtxorpcPort:        9090,
-	Topology:           "",
-	TlsCertFilePath:    "",
-	TlsKeyFilePath:     "",
-	DevMode:            false,
+	BadgerCacheSize:           1073741824,
+	MempoolCapacity:           1048576,
+	BindAddr:                  "0.0.0.0",
+	CardanoConfig:             "", // Will be set dynamically based on network
+	DatabasePath:              ".dingo",
+	SocketPath:                "dingo.socket",
+	IntersectTip:              false,
+	ValidateHistorical:        false,
+	Network:                   "preview",
+	MetricsPort:               12798,
+	PrivateBindAddr:           "127.0.0.1",
+	PrivatePort:               3002,
+	RelayPort:                 3001,
+	UtxorpcPort:               9090,
+	Topology:                  "",
+	TlsCertFilePath:           "",
+	TlsKeyFilePath:            "",
+	DevMode:                   false,
+	LedgerCatchupTimeout:      DefaultLedgerCatchupTimeout,
+	LedgerCatchupPollInterval: DefaultLedgerCatchupPollInterval,
+	LedgerCatchupStallTimeout: DefaultLedgerCatchupStallTimeout,
 }
 
 func LoadConfig(configFile string) (*Config, error) {
