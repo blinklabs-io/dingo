@@ -402,8 +402,8 @@ func (d *MetadataStoreSqlite) SetTransaction(
 					Tag:           uint8(key.Tag),
 					Index:         key.Index,
 					Data:          value.Data.Cbor(),
-					ExUnitsMemory: uint64(value.ExUnits.Memory),
-					ExUnitsCPU:    uint64(value.ExUnits.Steps),
+					ExUnitsMemory: uint64(max(0, value.ExUnits.Memory)), //nolint:gosec
+					ExUnitsCPU:    uint64(max(0, value.ExUnits.Steps)),  //nolint:gosec
 				}
 				if result := txn.Create(&redeemer); result.Error != nil {
 					return fmt.Errorf("create redeemer: %w", result.Error)
