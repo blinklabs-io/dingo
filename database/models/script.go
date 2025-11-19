@@ -14,21 +14,16 @@
 
 package models
 
-// ScriptType represents the type of script
-type ScriptType uint8
-
-const (
-	ScriptTypeNative   ScriptType = 0
-	ScriptTypePlutusV1 ScriptType = 1
-	ScriptTypePlutusV2 ScriptType = 2
-	ScriptTypePlutusV3 ScriptType = 3
-)
-
 // Script represents a script entry in the witness set
+// Type corresponds to ScriptRefType constants from gouroboros/ledger/common:
+// 0=NativeScript (ScriptRefTypeNativeScript)
+// 1=PlutusV1 (ScriptRefTypePlutusV1)
+// 2=PlutusV2 (ScriptRefTypePlutusV2)
+// 3=PlutusV3 (ScriptRefTypePlutusV3)
 type Script struct {
 	ID            uint   `gorm:"primaryKey"`
 	TransactionID uint   `gorm:"index"`
-	Type          uint8  `gorm:"index"` // ScriptType (0=Native, 1=PlutusV1, 2=PlutusV2, 3=PlutusV3)
+	Type          uint8  `gorm:"index"` // Script type
 	ScriptData    []byte `gorm:"type:bytea"`
 	Transaction   *Transaction
 }

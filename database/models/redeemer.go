@@ -14,23 +14,11 @@
 
 package models
 
-// RedeemerTag represents the tag for a redeemer (spend, mint, cert, reward, voting, proposing)
-type RedeemerTag uint8
-
-const (
-	RedeemerTagSpend     RedeemerTag = 0
-	RedeemerTagMint      RedeemerTag = 1
-	RedeemerTagCert      RedeemerTag = 2
-	RedeemerTagReward    RedeemerTag = 3
-	RedeemerTagVoting    RedeemerTag = 4
-	RedeemerTagProposing RedeemerTag = 5
-)
-
 // Redeemer represents a redeemer in the witness set
 type Redeemer struct {
 	ID            uint   `gorm:"primaryKey"`
 	TransactionID uint   `gorm:"index"`
-	Tag           uint8  `gorm:"index"` // RedeemerTag
+	Tag           uint8  `gorm:"index"` // Redeemer tag
 	Index         uint32 `gorm:"index"`
 	Data          []byte `gorm:"type:bytea"` // Plutus data
 	ExUnitsMemory uint64

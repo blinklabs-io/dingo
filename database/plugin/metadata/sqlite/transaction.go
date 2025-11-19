@@ -277,6 +277,115 @@ func (d *MetadataStoreSqlite) SetTransaction(
 			return result.Error
 		}
 	}
+	// Extract and save witness set data
+	if tx.Witnesses() != nil {
+		ws := tx.Witnesses()
+
+		// Add Vkey Witnesses
+		for _, vkey := range ws.Vkey() {
+			keyWitness := models.KeyWitness{
+				TransactionID: tmpTx.ID,
+				Type:          0, // VkeyWitness
+				Vkey:          vkey.Vkey,
+				Signature:     vkey.Signature,
+			}
+			if result := txn.Create(&keyWitness); result.Error != nil {
+				return fmt.Errorf("create vkey witness: %w", result.Error)
+			}
+		}
+
+		// Add Bootstrap Witnesses
+		for _, bootstrap := range ws.Bootstrap() {
+			keyWitness := models.KeyWitness{
+				TransactionID: tmpTx.ID,
+				Type:          1, // BootstrapWitness
+				PublicKey:     bootstrap.PublicKey,
+				Signature:     bootstrap.Signature,
+				ChainCode:     bootstrap.ChainCode,
+				Attributes:    bootstrap.Attributes,
+			}
+			if result := txn.Create(&keyWitness); result.Error != nil {
+				return fmt.Errorf("create bootstrap witness: %w", result.Error)
+			}
+		}
+
+		// Add Native Scripts
+		for _, script := range ws.NativeScripts() {
+			scriptRecord := models.Script{
+				TransactionID: tmpTx.ID,
+				Type:          uint8(lcommon.ScriptRefTypeNativeScript),
+				ScriptData:    script.Cbor(),
+			}
+			if result := txn.Create(&scriptRecord); result.Error != nil {
+				return fmt.Errorf("create native script: %w", result.Error)
+			}
+		}
+
+		// Add PlutusV1 Scripts
+		for _, script := range ws.PlutusV1Scripts() {
+			scriptRecord := models.Script{
+				TransactionID: tmpTx.ID,
+				Type:          uint8(lcommon.ScriptRefTypePlutusV1),
+				ScriptData:    script,
+			}
+			if result := txn.Create(&scriptRecord); result.Error != nil {
+				return fmt.Errorf("create plutus v1 script: %w", result.Error)
+			}
+		}
+
+		// Add PlutusV2 Scripts
+		for _, script := range ws.PlutusV2Scripts() {
+			scriptRecord := models.Script{
+				TransactionID: tmpTx.ID,
+				Type:          uint8(lcommon.ScriptRefTypePlutusV2),
+				ScriptData:    script,
+			}
+			if result := txn.Create(&scriptRecord); result.Error != nil {
+				return fmt.Errorf("create plutus v2 script: %w", result.Error)
+			}
+		}
+
+		// Add PlutusV3 Scripts
+		for _, script := range ws.PlutusV3Scripts() {
+			scriptRecord := models.Script{
+				TransactionID: tmpTx.ID,
+				Type:          uint8(lcommon.ScriptRefTypePlutusV3),
+				ScriptData:    script,
+			}
+			if result := txn.Create(&scriptRecord); result.Error != nil {
+				return fmt.Errorf("create plutus v3 script: %w", result.Error)
+			}
+		}
+
+		// Add PlutusData (Datums)
+		for _, datum := range ws.PlutusData() {
+			plutusData := models.PlutusData{
+				TransactionID: tmpTx.ID,
+				Data:          datum.Cbor(),
+			}
+			if result := txn.Create(&plutusData); result.Error != nil {
+				return fmt.Errorf("create plutus data: %w", result.Error)
+			}
+		}
+
+		// Add Redeemers
+		if ws.Redeemers() != nil {
+			for key, value := range ws.Redeemers().Iter() {
+				redeemer := models.Redeemer{
+					TransactionID: tmpTx.ID,
+					Tag:           uint8(key.Tag),
+					Index:         key.Index,
+					Data:          value.Data.Cbor(),
+					ExUnitsMemory: uint64(value.ExUnits.Memory),
+					ExUnitsCPU:    uint64(value.ExUnits.Steps),
+				}
+				if result := txn.Create(&redeemer); result.Error != nil {
+					return fmt.Errorf("create redeemer: %w", result.Error)
+				}
+			}
+		}
+	}
+
 	// Avoid updating associations
 	result = txn.Omit(clause.Associations).Save(&tmpTx)
 	if result.Error != nil {

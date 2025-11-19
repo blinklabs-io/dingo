@@ -14,19 +14,12 @@
 
 package models
 
-// WitnessType represents the type of witness
-type WitnessType uint8
-
-const (
-	WitnessTypeVkey      WitnessType = 0
-	WitnessTypeBootstrap WitnessType = 1
-)
-
-// Witness represents a witness entry (Vkey or Bootstrap)
-type Witness struct {
+// KeyWitness represents a key witness entry (Vkey or Bootstrap)
+// Type: 0 = VkeyWitness, 1 = BootstrapWitness
+type KeyWitness struct {
 	ID            uint   `gorm:"primaryKey"`
 	TransactionID uint   `gorm:"index"`
-	Type          uint8  `gorm:"index"` // WitnessType (0=Vkey, 1=Bootstrap)
+	Type          uint8  `gorm:"index"` // 0=Vkey, 1=Bootstrap
 	Vkey          []byte `gorm:"type:bytea"`
 	Signature     []byte `gorm:"type:bytea"`
 	PublicKey     []byte `gorm:"type:bytea"` // For Bootstrap
@@ -35,6 +28,6 @@ type Witness struct {
 	Transaction   *Transaction
 }
 
-func (Witness) TableName() string {
-	return "witness"
+func (KeyWitness) TableName() string {
+	return "key_witness"
 }

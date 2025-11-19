@@ -23,10 +23,10 @@ type Transaction struct {
 	ReferenceInputs  []Utxo       `gorm:"foreignKey:ReferencedByTxId;references:Hash"`
 	Collateral       []Utxo       `gorm:"foreignKey:CollateralByTxId;references:Hash"`
 	CollateralReturn *Utxo        `gorm:"foreignKey:TransactionID;references:ID"`
-	Witnesses        []Witness    `gorm:"foreignKey:TransactionID;references:ID"`
+	KeyWitnesses     []KeyWitness `gorm:"foreignKey:TransactionID;references:ID"`
 	Scripts          []Script     `gorm:"foreignKey:TransactionID;references:ID"`
 	Redeemers        []Redeemer   `gorm:"foreignKey:TransactionID;references:ID"`
-	PlutusDataList   []PlutusData `gorm:"foreignKey:TransactionID;references:ID"`
+	PlutusData       []PlutusData `gorm:"foreignKey:TransactionID;references:ID"`
 	ID               uint         `gorm:"primaryKey"`
 	Type             int
 	BlockIndex       uint32
