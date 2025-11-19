@@ -89,6 +89,17 @@ func (d *MetadataStoreSqlite) SetTransaction(
 	if result.Error != nil {
 		return fmt.Errorf("create transaction: %w", result.Error)
 	}
+	// If ID is still zero (conflict path with SQLite), fetch it by hash
+	if tmpTx.ID == 0 {
+		existingTx, err := d.GetTransactionByHash(txHash, txn)
+		if err != nil {
+			return fmt.Errorf("failed to fetch transaction ID after upsert: %w", err)
+		}
+		if existingTx == nil {
+			return fmt.Errorf("transaction not found after upsert: %x", txHash)
+		}
+		tmpTx.ID = existingTx.ID
+	}
 	// Add Inputs to Transaction
 	for _, input := range tx.Inputs() {
 		inTxId := input.Id().Bytes()
@@ -278,6 +289,21 @@ func (d *MetadataStoreSqlite) SetTransaction(
 		}
 	}
 	// Extract and save witness set data
+	// Delete existing witness records to ensure idempotency on retry
+	if tmpTx.ID != 0 {
+		if result := txn.Where("transaction_id = ?", tmpTx.ID).Delete(&models.KeyWitness{}); result.Error != nil {
+			return fmt.Errorf("delete existing key witnesses: %w", result.Error)
+		}
+		if result := txn.Where("transaction_id = ?", tmpTx.ID).Delete(&models.Script{}); result.Error != nil {
+			return fmt.Errorf("delete existing scripts: %w", result.Error)
+		}
+		if result := txn.Where("transaction_id = ?", tmpTx.ID).Delete(&models.Redeemer{}); result.Error != nil {
+			return fmt.Errorf("delete existing redeemers: %w", result.Error)
+		}
+		if result := txn.Where("transaction_id = ?", tmpTx.ID).Delete(&models.PlutusData{}); result.Error != nil {
+			return fmt.Errorf("delete existing plutus data: %w", result.Error)
+		}
+	}
 	if tx.Witnesses() != nil {
 		ws := tx.Witnesses()
 
