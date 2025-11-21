@@ -38,8 +38,6 @@ func (n *Node) blockfetchClientConnOpts() []blockfetch.BlockFetchOptionFunc {
 		blockfetch.WithBatchDoneFunc(n.blockfetchClientBatchDone),
 		blockfetch.WithBatchStartTimeout(2 * time.Second),
 		blockfetch.WithBlockTimeout(2 * time.Second),
-		// Set the recv queue size to 2x our block batch size
-		blockfetch.WithRecvQueueSize(1000),
 	}
 }
 

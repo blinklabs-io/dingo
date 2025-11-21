@@ -66,7 +66,9 @@ func New(
 	const prefix = "s3://"
 	if !strings.HasPrefix(strings.ToLower(dataDir), prefix) {
 		cancel()
-		return nil, errors.New("s3 blob: expected dataDir='s3://<bucket>[/prefix]'")
+		return nil, errors.New(
+			"s3 blob: expected dataDir='s3://<bucket>[/prefix]'",
+		)
 	}
 
 	path := strings.TrimPrefix(strings.ToLower(dataDir), prefix)

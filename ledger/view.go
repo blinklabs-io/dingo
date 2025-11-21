@@ -101,7 +101,7 @@ func (lv *LedgerView) PoolCurrentState(
 		}
 		reg := pool.Registration[latestIdx]
 		tmp := lcommon.PoolRegistrationCertificate{
-			CertType: lcommon.CertificateTypePoolRegistration,
+			CertType: uint(lcommon.CertificateTypePoolRegistration),
 			Operator: lcommon.PoolKeyHash(
 				lcommon.NewBlake2b224(pool.PoolKeyHash),
 			),

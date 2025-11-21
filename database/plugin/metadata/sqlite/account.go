@@ -268,11 +268,11 @@ func (d *MetadataStoreSqlite) SetStakeRegistrationDelegation(
 	pkh := cert.PoolKeyHash
 	tmpItem := models.StakeRegistrationDelegation{
 		StakingKey:    stakeKey,
-		PoolKeyHash:   pkh,
+		PoolKeyHash:   pkh[:],
 		AddedSlot:     slot,
 		DepositAmount: deposit,
 	}
-	if err := d.SetAccount(stakeKey, pkh, nil, slot, true, txn); err != nil {
+	if err := d.SetAccount(stakeKey, pkh[:], nil, slot, true, txn); err != nil {
 		return err
 	}
 	if txn != nil {

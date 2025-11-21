@@ -81,7 +81,7 @@ func (d *MetadataStoreSqlite) GetPoolRegistrations(
 	for _, cert := range certs {
 		tmpMargin = lcommon.GenesisRat{Rat: cert.Margin.Rat}
 		tmpCert = lcommon.PoolRegistrationCertificate{
-			CertType: lcommon.CertificateTypePoolRegistration,
+			CertType: uint(lcommon.CertificateTypePoolRegistration),
 			Operator: lcommon.PoolKeyHash(
 				lcommon.NewBlake2b224(cert.PoolKeyHash),
 			),
