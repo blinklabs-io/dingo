@@ -18,17 +18,17 @@ import (
 	"github.com/blinklabs-io/dingo/database/types"
 )
 
-// ResignCommitteeCold represents a resign committee cold certificate.
-// The ColdCredential must be unique to prevent duplicate resignations for the same cold credential.
-type ResignCommitteeCold struct {
-	AnchorUrl      string
-	ColdCredential []byte `gorm:"unique"` // Unique constraint to prevent duplicate resignations
-	AnchorHash     []byte
-	ID             uint         `gorm:"primarykey"`
-	CertificateID  uint         `gorm:"uniqueIndex:uniq_resign_committee_cold"`
-	AddedSlot      types.Uint64 `gorm:"index"`
+// MoveInstantaneousRewards represents a move instantaneous rewards certificate
+type MoveInstantaneousRewards struct {
+	RewardData    []byte       // JSON-encoded rewards map
+	ID            uint         `gorm:"primaryKey"`
+	CertificateID uint         `gorm:"uniqueIndex:uniq_move_instantaneous_rewards_cert"`
+	Source        uint         `gorm:"index"` // 0=reserves, 1=treasury
+	OtherPot      types.Uint64 // Amount moved from other pot
+	AddedSlot     types.Uint64 `gorm:"index"`
 }
 
-func (ResignCommitteeCold) TableName() string {
-	return "resign_committee_cold"
+// TableName returns the database table name for the MoveInstantaneousRewards model.
+func (MoveInstantaneousRewards) TableName() string {
+	return "move_instantaneous_rewards"
 }

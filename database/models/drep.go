@@ -14,16 +14,18 @@
 
 package models
 
-import "github.com/blinklabs-io/dingo/database/types"
+import (
+	"github.com/blinklabs-io/dingo/database/types"
+)
 
 type Drep struct {
-	AnchorUrl     string
-	Credential    []byte `gorm:"uniqueIndex"`
-	AnchorHash    []byte
-	CertificateID uint `gorm:"index"`
-	ID            uint `gorm:"primarykey"`
-	AddedSlot     uint64
-	Active        bool `gorm:"default:true"`
+	AnchorUrl      string
+	DrepCredential []byte `gorm:"uniqueIndex"`
+	AnchorHash     []byte
+	CertificateID  uint `gorm:"index"`
+	ID             uint `gorm:"primarykey"`
+	AddedSlot      uint64
+	Active         bool `gorm:"default:true"`
 }
 
 func (d *Drep) TableName() string {
@@ -57,12 +59,12 @@ func (RegistrationDrep) TableName() string {
 }
 
 type UpdateDrep struct {
-	AnchorUrl     string
-	Credential    []byte `gorm:"index"`
-	AnchorHash    []byte
-	CertificateID uint `gorm:"index"`
-	ID            uint `gorm:"primarykey"`
-	AddedSlot     uint64
+	AnchorUrl      string
+	DrepCredential []byte `gorm:"index"`
+	AnchorHash     []byte
+	CertificateID  uint `gorm:"index"`
+	ID             uint `gorm:"primarykey"`
+	AddedSlot      uint64
 }
 
 func (UpdateDrep) TableName() string {

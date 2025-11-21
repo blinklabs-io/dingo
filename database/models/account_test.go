@@ -26,31 +26,56 @@ import (
 func TestAccount_String(t *testing.T) {
 	tests := []struct {
 		name         string
-		stakingKey   []byte
-		wantErr      bool
 		wantErrMsg   string
-		validateAddr bool
 		expectedHRP  string
+		stakingKey   []byte
+		isTestnet    bool
+		wantErr      bool
+		validateAddr bool
 	}{
 		{
-			name: "valid staking key - 28 bytes",
+			name: "valid staking key - 28 bytes - mainnet",
 			// Sample 28-byte staking key hash
 			stakingKey: hexDecode(
 				"e1cbb80db89e292d1175088b0ce5cd27857d5f1e53e41a754d566a6b",
 			),
+			isTestnet:    false,
 			wantErr:      false,
 			validateAddr: true,
 			expectedHRP:  "stake",
 		},
 		{
-			name: "valid staking key - 32 bytes",
+			name: "valid staking key - 28 bytes - testnet",
+			// Sample 28-byte staking key hash
+			stakingKey: hexDecode(
+				"e1cbb80db89e292d1175088b0ce5cd27857d5f1e53e41a754d566a6b",
+			),
+			isTestnet:    true,
+			wantErr:      false,
+			validateAddr: true,
+			expectedHRP:  "stake_test",
+		},
+		{
+			name: "valid staking key - 32 bytes - mainnet",
 			// Sample 32-byte staking key hash
 			stakingKey: hexDecode(
 				"e1cbb80db89e292d1175088b0ce5cd27857d5f1e53e41a754d566a6b12345678",
 			),
+			isTestnet:    false,
 			wantErr:      false,
 			validateAddr: true,
 			expectedHRP:  "stake",
+		},
+		{
+			name: "valid staking key - 32 bytes - testnet",
+			// Sample 32-byte staking key hash
+			stakingKey: hexDecode(
+				"e1cbb80db89e292d1175088b0ce5cd27857d5f1e53e41a754d566a6b12345678",
+			),
+			isTestnet:    true,
+			wantErr:      false,
+			validateAddr: true,
+			expectedHRP:  "stake_test",
 		},
 		{
 			name:       "empty staking key",
@@ -65,23 +90,43 @@ func TestAccount_String(t *testing.T) {
 			wantErrMsg: "staking key is empty",
 		},
 		{
-			name: "single byte staking key",
+			name: "single byte staking key - mainnet",
 			// Edge case with minimal data
 			stakingKey:   []byte{0x01},
+			isTestnet:    false,
 			wantErr:      false,
 			validateAddr: true,
 			expectedHRP:  "stake",
 		},
 		{
-			name: "all zeros staking key",
+			name: "single byte staking key - testnet",
+			// Edge case with minimal data
+			stakingKey:   []byte{0x01},
+			isTestnet:    true,
+			wantErr:      false,
+			validateAddr: true,
+			expectedHRP:  "stake_test",
+		},
+		{
+			name: "all zeros staking key - mainnet",
 			// Edge case with all zeros
 			stakingKey:   make([]byte, 28),
+			isTestnet:    false,
 			wantErr:      false,
 			validateAddr: true,
 			expectedHRP:  "stake",
 		},
 		{
-			name: "all ones staking key",
+			name: "all zeros staking key - testnet",
+			// Edge case with all zeros
+			stakingKey:   make([]byte, 28),
+			isTestnet:    true,
+			wantErr:      false,
+			validateAddr: true,
+			expectedHRP:  "stake_test",
+		},
+		{
+			name: "all ones staking key - mainnet",
 			// Edge case with all 0xFF
 			stakingKey: []byte{
 				0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
@@ -89,9 +134,24 @@ func TestAccount_String(t *testing.T) {
 				0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
 				0xff, 0xff, 0xff, 0xff,
 			},
+			isTestnet:    false,
 			wantErr:      false,
 			validateAddr: true,
 			expectedHRP:  "stake",
+		},
+		{
+			name: "all ones staking key - testnet",
+			// Edge case with all 0xFF
+			stakingKey: []byte{
+				0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+				0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+				0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+				0xff, 0xff, 0xff, 0xff,
+			},
+			isTestnet:    true,
+			wantErr:      false,
+			validateAddr: true,
+			expectedHRP:  "stake_test",
 		},
 	}
 
@@ -100,10 +160,10 @@ func TestAccount_String(t *testing.T) {
 			a := &Account{
 				StakingKey: tt.stakingKey,
 			}
-			got, err := a.String()
+			got, err := a.StringWithNetwork(tt.isTestnet)
 			if (err != nil) != tt.wantErr {
 				t.Errorf(
-					"Account.String() error = %v, wantErr %v",
+					"Account.StringWithNetwork() error = %v, wantErr %v",
 					err,
 					tt.wantErr,
 				)
@@ -111,13 +171,15 @@ func TestAccount_String(t *testing.T) {
 			}
 			if tt.wantErr {
 				if err == nil {
-					t.Errorf("Account.String() expected error but got none")
+					t.Errorf(
+						"Account.StringWithNetwork() expected error but got none",
+					)
 					return
 				}
 				if tt.wantErrMsg != "" &&
 					!strings.Contains(err.Error(), tt.wantErrMsg) {
 					t.Errorf(
-						"Account.String() error = %v, want error containing %q",
+						"Account.StringWithNetwork() error = %v, want error containing %q",
 						err,
 						tt.wantErrMsg,
 					)
@@ -125,12 +187,15 @@ func TestAccount_String(t *testing.T) {
 				return
 			}
 			if err != nil {
-				t.Errorf("Account.String() unexpected error: %v", err)
+				t.Errorf(
+					"Account.StringWithNetwork() unexpected error: %v",
+					err,
+				)
 				return
 			}
 			if got == "" {
 				t.Errorf(
-					"Account.String() returned empty string for valid input",
+					"Account.StringWithNetwork() returned empty string for valid input",
 				)
 				return
 			}
@@ -139,14 +204,14 @@ func TestAccount_String(t *testing.T) {
 				hrp, data, err := bech32.Decode(got)
 				if err != nil {
 					t.Errorf(
-						"Account.String() returned invalid bech32 address: %v",
+						"Account.StringWithNetwork() returned invalid bech32 address: %v",
 						err,
 					)
 					return
 				}
 				if hrp != tt.expectedHRP {
 					t.Errorf(
-						"Account.String() HRP = %v, want %v",
+						"Account.StringWithNetwork() HRP = %v, want %v",
 						hrp,
 						tt.expectedHRP,
 					)
@@ -159,7 +224,7 @@ func TestAccount_String(t *testing.T) {
 				}
 				if !bytes.Equal(converted, tt.stakingKey) {
 					t.Errorf(
-						"Account.String() round-trip failed: got %x, want %x",
+						"Account.StringWithNetwork() round-trip failed: got %x, want %x",
 						converted,
 						tt.stakingKey,
 					)

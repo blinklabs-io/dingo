@@ -19,6 +19,11 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/types"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
 )
 
@@ -66,4 +71,77 @@ func TestInMemorySqliteMultipleTransaction(t *testing.T) {
 	if err := doQuery(0); err != nil {
 		t.Fatalf("unexpected error: %s", err)
 	}
+}
+
+func TestUtxosByAddressCollateralReturnFlag(t *testing.T) {
+	// Test that UtxosByAddress properly returns UTXOs with the IsCollateralReturn flag set
+	// This tests the actual database query and mapping logic, not just copy operations
+
+	// Setup database
+	db, err := database.New(dbConfig)
+	require.NoError(t, err)
+	defer db.Close()
+
+	// Test data - use 28-byte hashes for address parts
+	paymentKeyBytes := make([]byte, 28)
+	copy(
+		paymentKeyBytes,
+		[]byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A},
+	)
+	stakingKeyBytes := make([]byte, 28)
+	copy(
+		stakingKeyBytes,
+		[]byte{0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1A},
+	)
+
+	// Create hashes from the key bytes
+	paymentKeyHash := lcommon.NewBlake2b224(paymentKeyBytes)
+	stakingKeyHash := lcommon.NewBlake2b224(stakingKeyBytes)
+
+	// Create a test address that matches our UTXO
+	testAddr, err := lcommon.NewAddressFromParts(
+		0x00, // Shelley address type
+		0x00, // Mainnet network ID
+		paymentKeyBytes,
+		stakingKeyBytes,
+	)
+	require.NoError(t, err)
+
+	// Insert a UTXO directly into the metadata store
+	utxo := models.Utxo{
+		TxId:               []byte{0x10, 0x11, 0x12, 0x13},
+		OutputIdx:          0,
+		AddedSlot:          types.Uint64{Val: 1000},
+		DeletedSlot:        types.Uint64{Val: 0},
+		PaymentKey:         paymentKeyHash.Bytes(),
+		StakingKey:         stakingKeyHash.Bytes(),
+		Amount:             types.Uint64{Val: 1000000},
+		Assets:             nil,
+		IsCollateralReturn: true, // This flag should be preserved
+	}
+
+	// Insert the UTXO using the metadata store
+	txn := db.Metadata().Transaction()
+	err = txn.Create(&utxo).Error
+	require.NoError(t, err)
+	err = txn.Commit().Error
+	require.NoError(t, err)
+
+	// Query UTXOs by address using the metadata API (this tests the core query logic)
+	metadataUtxos, err := db.Metadata().GetUtxosByAddress(testAddr, nil)
+	require.NoError(t, err)
+	require.Len(t, metadataUtxos, 1, "Metadata should return exactly one UTXO")
+
+	// Verify the IsCollateralReturn flag is properly preserved at the metadata level
+	assert.True(
+		t,
+		metadataUtxos[0].IsCollateralReturn,
+		"IsCollateralReturn flag should be true in metadata result",
+	)
+	assert.Equal(t, utxo.TxId, metadataUtxos[0].TxId)
+	assert.Equal(t, utxo.OutputIdx, metadataUtxos[0].OutputIdx)
+	assert.Equal(t, utxo.PaymentKey, metadataUtxos[0].PaymentKey)
+	assert.Equal(t, utxo.StakingKey, metadataUtxos[0].StakingKey)
+	assert.Equal(t, utxo.Amount.Val, metadataUtxos[0].Amount.Val)
+	assert.Equal(t, utxo.Assets, metadataUtxos[0].Assets)
 }

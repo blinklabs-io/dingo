@@ -18,10 +18,8 @@ import (
 	"errors"
 
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/types"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"gorm.io/gorm"
-	"gorm.io/gorm/clause"
 )
 
 // GetPool gets a pool
@@ -60,14 +58,14 @@ func (d *MetadataStoreSqlite) GetPoolRegistrations(
 	ret := []lcommon.PoolRegistrationCertificate{}
 	certs := []models.PoolRegistration{}
 	if txn != nil {
-		result := txn.Where("pool_key_hash = ?", lcommon.Blake2b224(pkh).Bytes()).
+		result := txn.Where("pool_key_hash = ?", pkh.Bytes()).
 			Order("id DESC").
 			Find(&certs)
 		if result.Error != nil {
 			return ret, result.Error
 		}
 	} else {
-		result := d.DB().Where("pool_key_hash = ?", lcommon.Blake2b224(pkh).Bytes()).
+		result := d.DB().Where("pool_key_hash = ?", pkh.Bytes()).
 			Order("id DESC").
 			Find(&certs)
 		if result.Error != nil {
@@ -88,8 +86,8 @@ func (d *MetadataStoreSqlite) GetPoolRegistrations(
 			VrfKeyHash: lcommon.VrfKeyHash(
 				lcommon.NewBlake2b256(cert.VrfKeyHash),
 			),
-			Pledge: uint64(cert.Pledge),
-			Cost:   uint64(cert.Cost),
+			Pledge: cert.Pledge.Val,
+			Cost:   cert.Cost.Val,
 			Margin: tmpMargin,
 			RewardAccount: lcommon.AddrKeyHash(
 				lcommon.NewBlake2b224(cert.RewardAccount),
@@ -135,109 +133,4 @@ func (d *MetadataStoreSqlite) GetPoolRegistrations(
 		ret = append(ret, tmpCert)
 	}
 	return ret, nil
-}
-
-// SetPoolRegistration saves a pool registration certificate and pool
-func (d *MetadataStoreSqlite) SetPoolRegistration(
-	cert *lcommon.PoolRegistrationCertificate,
-	slot uint64,
-	deposit types.Uint64,
-	txn *gorm.DB,
-) error {
-	if txn == nil {
-		txn = d.DB()
-	}
-	tmpPool, err := d.GetPool(lcommon.PoolKeyHash(cert.Operator[:]), txn)
-	if err != nil {
-		if !errors.Is(err, models.ErrPoolNotFound) {
-			return err
-		}
-	}
-	if tmpPool == nil {
-		tmpPool = &models.Pool{
-			PoolKeyHash: cert.Operator[:],
-			VrfKeyHash:  cert.VrfKeyHash[:],
-		}
-	}
-	tmpPool.Pledge = types.Uint64(cert.Pledge)
-	tmpPool.Cost = types.Uint64(cert.Cost)
-	tmpPool.Margin = &types.Rat{Rat: cert.Margin.Rat}
-	tmpPool.RewardAccount = cert.RewardAccount[:]
-
-	tmpReg := models.PoolRegistration{
-		PoolKeyHash:   cert.Operator[:],
-		VrfKeyHash:    cert.VrfKeyHash[:],
-		Pledge:        types.Uint64(cert.Pledge),
-		Cost:          types.Uint64(cert.Cost),
-		Margin:        &types.Rat{Rat: cert.Margin.Rat},
-		AddedSlot:     slot,
-		DepositAmount: deposit,
-	}
-	if cert.PoolMetadata != nil {
-		tmpReg.MetadataUrl = cert.PoolMetadata.Url
-		tmpReg.MetadataHash = cert.PoolMetadata.Hash[:]
-	}
-	for _, owner := range cert.PoolOwners {
-		tmpReg.Owners = append(
-			tmpReg.Owners,
-			models.PoolRegistrationOwner{KeyHash: owner[:]},
-		)
-	}
-	tmpPool.Owners = tmpReg.Owners
-	var tmpRelay models.PoolRegistrationRelay
-	for _, relay := range cert.Relays {
-		tmpRelay = models.PoolRegistrationRelay{
-			Ipv4: relay.Ipv4,
-			Ipv6: relay.Ipv6,
-		}
-		if relay.Port != nil {
-			tmpRelay.Port = uint(*relay.Port)
-		}
-		if relay.Hostname != nil {
-			tmpRelay.Hostname = *relay.Hostname
-		}
-		tmpPool.Relays = append(tmpReg.Relays, tmpRelay)
-	}
-	tmpPool.Registration = append(tmpPool.Registration, tmpReg)
-	tmpPool.Relays = tmpReg.Relays
-	// d.logger.Debug("pool registration", "hash", tmpReg.PoolKeyHash)
-	result := txn.Clauses(clause.OnConflict{
-		Columns:   []clause.Column{{Name: "pool_key_hash"}},
-		UpdateAll: true,
-	}).Create(&tmpPool)
-	if result.Error != nil {
-		return result.Error
-	}
-	return nil
-}
-
-// SetPoolRetirement saves a pool retirement certificate
-func (d *MetadataStoreSqlite) SetPoolRetirement(
-	cert *lcommon.PoolRetirementCertificate,
-	slot uint64,
-	txn *gorm.DB,
-) error {
-	if txn == nil {
-		txn = d.DB()
-	}
-	tmpPool, err := d.GetPool(lcommon.PoolKeyHash(cert.PoolKeyHash[:]), txn)
-	if err != nil {
-		return err
-	}
-	if tmpPool == nil {
-		d.logger.Warn("retiring non-existent pool", "hash", cert.PoolKeyHash)
-		tmpPool = &models.Pool{PoolKeyHash: cert.PoolKeyHash[:]}
-		// return models.ErrPoolNotFound
-	}
-	tmpItem := models.PoolRetirement{
-		PoolKeyHash: cert.PoolKeyHash[:],
-		Epoch:       cert.Epoch,
-		AddedSlot:   slot,
-	}
-	tmpPool.Retirement = append(tmpPool.Retirement, tmpItem)
-	result := txn.Save(&tmpPool)
-	if result.Error != nil {
-		return result.Error
-	}
-	return nil
 }

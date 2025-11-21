@@ -31,7 +31,7 @@ func TestTypesScanValue(t *testing.T) {
 	}{
 		{
 			origValue: func(v types.Uint64) *types.Uint64 { return &v }(
-				types.Uint64(123),
+				types.Uint64{Val: 123},
 			),
 			expectedValue: "123",
 		},
@@ -78,6 +78,33 @@ func TestTypesScanValue(t *testing.T) {
 				tmpScanner,
 				testDef.origValue,
 			)
+		}
+		// Test scanning []byte as well
+		if err := tmpScanner.Scan([]byte(valueOut.(string))); err != nil {
+			t.Fatalf("unexpected error scanning []byte: %s", err)
+		}
+		// Verify the underlying value was correctly restored after []byte scan
+		switch orig := testDef.origValue.(type) {
+		case *types.Uint64:
+			scanned := tmpScanner.(*types.Uint64)
+			if scanned.Val != orig.Val {
+				t.Fatalf(
+					"Uint64 value mismatch after []byte Scan: got %d, expected %d",
+					scanned.Val,
+					orig.Val,
+				)
+			}
+		case *types.Rat:
+			scanned := tmpScanner.(*types.Rat)
+			if scanned.Rat.Cmp(orig.Rat) != 0 {
+				t.Fatalf(
+					"Rat value mismatch after []byte Scan: got %s, expected %s",
+					scanned.Rat.String(),
+					orig.Rat.String(),
+				)
+			}
+		default:
+			t.Fatalf("unexpected type in test: %T", testDef.origValue)
 		}
 	}
 }

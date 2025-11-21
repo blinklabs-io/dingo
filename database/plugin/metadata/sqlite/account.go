@@ -19,22 +19,26 @@ import (
 	"fmt"
 
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/types"
-	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"gorm.io/gorm"
-	"gorm.io/gorm/clause"
 )
 
 // GetAccount gets an account
 func (d *MetadataStoreSqlite) GetAccount(
 	stakeKey []byte,
+	includeInactive bool,
 	txn *gorm.DB,
 ) (*models.Account, error) {
 	ret := &models.Account{}
 	if txn == nil {
 		txn = d.DB()
 	}
-	result := txn.First(ret, "staking_key = ?", stakeKey)
+
+	query := txn.Where("staking_key = ?", stakeKey)
+	if !includeInactive {
+		query = query.Where("active = ?", true)
+	}
+
+	result := query.First(ret)
 	if result.Error != nil {
 		if errors.Is(result.Error, gorm.ErrRecordNotFound) {
 			return nil, nil
@@ -49,409 +53,34 @@ func (d *MetadataStoreSqlite) SetAccount(
 	stakeKey, pkh, drep []byte,
 	slot uint64,
 	active bool,
+	certificateID uint,
 	txn *gorm.DB,
 ) error {
-	tmpItem := models.Account{
-		StakingKey: stakeKey,
-		AddedSlot:  slot,
-		Pool:       pkh,
-		Drep:       drep,
-	}
-	onConflict := clause.OnConflict{
-		Columns:   []clause.Column{{Name: "staking_key"}},
-		UpdateAll: true,
-	}
+	db := d.DB()
 	if txn != nil {
-		if result := txn.Clauses(onConflict).Create(&tmpItem); result.Error != nil {
-			return result.Error
-		}
-	} else {
-		if result := d.DB().Clauses(onConflict).Create(&tmpItem); result.Error != nil {
-			return result.Error
-		}
-	}
-	return nil
-}
-
-// SetDeregistration saves a deregistration certificate
-func (d *MetadataStoreSqlite) SetDeregistration(
-	cert *lcommon.DeregistrationCertificate,
-	slot uint64,
-	txn *gorm.DB,
-) error {
-	stakeKey := cert.StakeCredential.Credential.Bytes()
-	tmpAccount, err := d.GetAccount(stakeKey, txn)
-	if err != nil {
-		return fmt.Errorf("failed getting account: %w", err)
-	}
-	if tmpAccount == nil {
-		// Account not found, nothing to deregister
-		return nil
-	}
-	if cert.Amount < 0 {
-		return fmt.Errorf("invalid negative amount: %d", cert.Amount)
-	}
-	tmpItem := models.Deregistration{
-		StakingKey: stakeKey,
-		AddedSlot:  slot,
-		Amount:     types.Uint64(cert.Amount),
-	}
-	tmpAccount.Active = false
-	if txn != nil {
-		if accountErr := txn.Save(&tmpAccount); accountErr.Error != nil {
-			return accountErr.Error
-		}
-		if result := txn.Create(&tmpItem); result.Error != nil {
-			return result.Error
-		}
-	} else {
-		if accountErr := d.DB().Save(&tmpAccount); accountErr.Error != nil {
-			return accountErr.Error
-		}
-		if result := d.DB().Create(&tmpItem); result.Error != nil {
-			return result.Error
-		}
-	}
-	return nil
-}
-
-// SetRegistration saves a registration certificate and account
-func (d *MetadataStoreSqlite) SetRegistration(
-	cert *lcommon.RegistrationCertificate,
-	slot uint64,
-	deposit types.Uint64,
-	txn *gorm.DB,
-) error {
-	stakeKey := cert.StakeCredential.Credential.Bytes()
-	tmpItem := models.Registration{
-		StakingKey:    stakeKey,
-		AddedSlot:     slot,
-		DepositAmount: deposit,
-	}
-	if err := d.SetAccount(stakeKey, nil, nil, slot, true, txn); err != nil {
-		return err
-	}
-	if txn != nil {
-		if result := txn.Create(&tmpItem); result.Error != nil {
-			return result.Error
-		}
-	} else {
-		if result := d.DB().Create(&tmpItem); result.Error != nil {
-			return result.Error
-		}
-	}
-	return nil
-}
-
-// SetStakeDelegation saves a stake delegation certificate
-func (d *MetadataStoreSqlite) SetStakeDelegation(
-	cert *lcommon.StakeDelegationCertificate,
-	slot uint64,
-	txn *gorm.DB,
-) error {
-	stakeKey := cert.StakeCredential.Credential.Bytes()
-	tmpAccount, err := d.GetAccount(stakeKey, txn)
-	if err != nil {
-		return err
-	}
-	if tmpAccount == nil {
-		// Account not found, create a new one
-		if err := d.SetAccount(stakeKey, cert.PoolKeyHash[:], nil, slot, true, txn); err != nil {
-			return err
-		}
-		tmpAccount, err = d.GetAccount(stakeKey, txn)
-		if err != nil {
-			return err
-		}
-		if tmpAccount == nil {
-			return errors.New("failed to create account for stake key")
-		}
-	}
-	tmpItem := models.StakeDelegation{
-		StakingKey:  stakeKey,
-		PoolKeyHash: cert.PoolKeyHash[:],
-		AddedSlot:   slot,
-	}
-	tmpAccount.Pool = tmpItem.PoolKeyHash
-	if txn != nil {
-		if accountErr := txn.Save(&tmpAccount); accountErr.Error != nil {
-			return accountErr.Error
-		}
-		if result := txn.Create(&tmpItem); result.Error != nil {
-			return result.Error
-		}
-	} else {
-		if accountErr := d.DB().Save(&tmpAccount); accountErr.Error != nil {
-			return accountErr.Error
-		}
-		if result := d.DB().Create(&tmpItem); result.Error != nil {
-			return result.Error
-		}
-	}
-	return nil
-}
-
-// SetStakeDeregistration saves a stake deregistration certificate
-func (d *MetadataStoreSqlite) SetStakeDeregistration(
-	cert *lcommon.StakeDeregistrationCertificate,
-	slot uint64,
-	txn *gorm.DB,
-) error {
-	stakeKey := cert.StakeCredential.Credential.Bytes()
-	tmpAccount, err := d.GetAccount(stakeKey, txn)
-	if err != nil {
-		return err
-	}
-	if tmpAccount == nil {
-		// Account not found, nothing to deregister
-		return nil
-	}
-	tmpItem := models.StakeDeregistration{
-		StakingKey: stakeKey,
-		AddedSlot:  slot,
-	}
-	tmpAccount.Active = false
-	if txn != nil {
-		if accountErr := txn.Save(&tmpAccount); accountErr.Error != nil {
-			return accountErr.Error
-		}
-		if result := txn.Create(&tmpItem); result.Error != nil {
-			return result.Error
-		}
-	} else {
-		if accountErr := d.DB().Save(&tmpAccount); accountErr.Error != nil {
-			return accountErr.Error
-		}
-		if result := d.DB().Create(&tmpItem); result.Error != nil {
-			return result.Error
-		}
-	}
-	return nil
-}
-
-// SetStakeRegistration saves a stake registration certificate and account
-func (d *MetadataStoreSqlite) SetStakeRegistration(
-	cert *lcommon.StakeRegistrationCertificate,
-	slot uint64,
-	deposit types.Uint64,
-	txn *gorm.DB,
-) error {
-	stakeKey := cert.StakeCredential.Credential.Bytes()
-	tmpItem := models.StakeRegistration{
-		StakingKey:    stakeKey,
-		AddedSlot:     slot,
-		DepositAmount: deposit,
-	}
-	if err := d.SetAccount(stakeKey, nil, nil, slot, true, txn); err != nil {
-		return err
-	}
-	if txn != nil {
-		if result := txn.Create(&tmpItem); result.Error != nil {
-			return result.Error
-		}
-	} else {
-		if result := d.DB().Create(&tmpItem); result.Error != nil {
-			return result.Error
-		}
-	}
-	return nil
-}
-
-// SetStakeRegistrationDelegation saves a stake registration delegation certificate and account
-func (d *MetadataStoreSqlite) SetStakeRegistrationDelegation(
-	cert *lcommon.StakeRegistrationDelegationCertificate,
-	slot uint64,
-	deposit types.Uint64,
-	txn *gorm.DB,
-) error {
-	stakeKey := cert.StakeCredential.Credential.Bytes()
-	pkh := cert.PoolKeyHash
-	tmpItem := models.StakeRegistrationDelegation{
-		StakingKey:    stakeKey,
-		PoolKeyHash:   pkh[:],
-		AddedSlot:     slot,
-		DepositAmount: deposit,
-	}
-	if err := d.SetAccount(stakeKey, pkh[:], nil, slot, true, txn); err != nil {
-		return err
-	}
-	if txn != nil {
-		if result := txn.Create(&tmpItem); result.Error != nil {
-			return result.Error
-		}
-	} else {
-		if result := d.DB().Create(&tmpItem); result.Error != nil {
-			return result.Error
-		}
-	}
-	return nil
-}
-
-// SetStakeVoteDelegation saves a stake and vote delegation certificate
-func (d *MetadataStoreSqlite) SetStakeVoteDelegation(
-	cert *lcommon.StakeVoteDelegationCertificate,
-	slot uint64,
-	txn *gorm.DB,
-) error {
-	stakeKey := cert.StakeCredential.Credential.Bytes()
-	tmpAccount, err := d.GetAccount(stakeKey, txn)
-	if err != nil {
-		return err
-	}
-	if tmpAccount == nil {
-		// Account not found, create a new one
-		if err := d.SetAccount(stakeKey, cert.PoolKeyHash[:], cert.Drep.Credential[:], slot, true, txn); err != nil {
-			return err
-		}
-		tmpAccount, err = d.GetAccount(stakeKey, txn)
-		if err != nil {
-			return err
-		}
-		if tmpAccount == nil {
-			return errors.New("failed to create account for stake key")
-		}
+		db = txn
 	}
 
-	tmpItem := models.StakeVoteDelegation{
-		StakingKey:  stakeKey,
-		PoolKeyHash: cert.PoolKeyHash[:],
-		Drep:        cert.Drep.Credential[:],
-		AddedSlot:   slot,
+	// Find or create account for this staking key (accounts are unique per staking key)
+	account := &models.Account{}
+	result := db.FirstOrCreate(account, models.Account{StakingKey: stakeKey})
+	if result.Error != nil {
+		return fmt.Errorf("failed to find or create account: %w", result.Error)
 	}
 
-	// Set both Pool and Drep on the account
-	tmpAccount.Pool = tmpItem.PoolKeyHash
-	tmpAccount.Drep = tmpItem.Drep
-
-	if txn != nil {
-		if accountErr := txn.Save(&tmpAccount); accountErr.Error != nil {
-			return accountErr.Error
-		}
-		if result := txn.Create(&tmpItem); result.Error != nil {
-			return result.Error
-		}
-	} else {
-		if accountErr := d.DB().Save(&tmpAccount); accountErr.Error != nil {
-			return accountErr.Error
-		}
-		if result := d.DB().Create(&tmpItem); result.Error != nil {
-			return result.Error
-		}
+	// Update account fields
+	// Note: added_slot represents the last time this account was updated by a certificate,
+	// not the initial creation time
+	updates := map[string]interface{}{
+		"pool":           pkh,
+		"drep":           drep,
+		"added_slot":     slot,
+		"active":         active,
+		"certificate_id": certificateID,
+	}
+	if err := db.Model(account).Updates(updates).Error; err != nil {
+		return fmt.Errorf("failed to update account: %w", err)
 	}
 
-	return nil
-}
-
-// SetStakeVoteRegistrationDelegation saves a stake vote registration delegation certificate and account
-func (d *MetadataStoreSqlite) SetStakeVoteRegistrationDelegation(
-	cert *lcommon.StakeVoteRegistrationDelegationCertificate,
-	slot uint64,
-	deposit types.Uint64,
-	txn *gorm.DB,
-) error {
-	stakeKey := cert.StakeCredential.Credential.Bytes()
-	pkh := cert.PoolKeyHash[:]
-	drep := cert.Drep.Credential
-	tmpItem := models.StakeVoteRegistrationDelegation{
-		StakingKey:    stakeKey,
-		PoolKeyHash:   pkh,
-		Drep:          drep,
-		AddedSlot:     slot,
-		DepositAmount: deposit,
-	}
-	if err := d.SetAccount(stakeKey, pkh, drep, slot, true, txn); err != nil {
-		return err
-	}
-	if txn != nil {
-		if result := txn.Create(&tmpItem); result.Error != nil {
-			return result.Error
-		}
-	} else {
-		if result := d.DB().Create(&tmpItem); result.Error != nil {
-			return result.Error
-		}
-	}
-	return nil
-}
-
-// SetVoteDelegation saves a vote-only delegation certificate and updates the account.
-func (d *MetadataStoreSqlite) SetVoteDelegation(
-	cert *lcommon.VoteDelegationCertificate,
-	slot uint64,
-	txn *gorm.DB,
-) error {
-	stakeKey := cert.StakeCredential.Credential.Bytes()
-	tmpAccount, err := d.GetAccount(stakeKey, txn)
-	if err != nil {
-		return err
-	}
-	if tmpAccount == nil {
-		// Account not found, create a new one
-		if err := d.SetAccount(stakeKey, nil, cert.Drep.Credential[:], slot, true, txn); err != nil {
-			return err
-		}
-		tmpAccount, err = d.GetAccount(stakeKey, txn)
-		if err != nil {
-			return err
-		}
-		if tmpAccount == nil {
-			return errors.New("failed to create account for stake key")
-		}
-	}
-
-	tmpItem := models.VoteDelegation{
-		StakingKey: stakeKey,
-		Drep:       cert.Drep.Credential[:],
-		AddedSlot:  slot,
-	}
-
-	tmpAccount.Drep = tmpItem.Drep
-
-	if txn != nil {
-		if accountErr := txn.Save(&tmpAccount); accountErr.Error != nil {
-			return accountErr.Error
-		}
-		if result := txn.Create(&tmpItem); result.Error != nil {
-			return result.Error
-		}
-	} else {
-		if accountErr := d.DB().Save(&tmpAccount); accountErr.Error != nil {
-			return accountErr.Error
-		}
-		if result := d.DB().Create(&tmpItem); result.Error != nil {
-			return result.Error
-		}
-	}
-
-	return nil
-}
-
-// SetVoteRegistrationDelegation saves a vote registration delegation certificate and account
-func (d *MetadataStoreSqlite) SetVoteRegistrationDelegation(
-	cert *lcommon.VoteRegistrationDelegationCertificate,
-	slot uint64,
-	deposit types.Uint64,
-	txn *gorm.DB,
-) error {
-	stakeKey := cert.StakeCredential.Credential.Bytes()
-	drep := cert.Drep.Credential
-	tmpItem := models.VoteRegistrationDelegation{
-		StakingKey:    stakeKey,
-		Drep:          drep,
-		AddedSlot:     slot,
-		DepositAmount: deposit,
-	}
-	if err := d.SetAccount(stakeKey, nil, drep, slot, true, txn); err != nil {
-		return err
-	}
-	if txn != nil {
-		if result := txn.Create(&tmpItem); result.Error != nil {
-			return result.Error
-		}
-	} else {
-		if result := d.DB().Create(&tmpItem); result.Error != nil {
-			return result.Error
-		}
-	}
 	return nil
 }

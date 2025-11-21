@@ -52,7 +52,7 @@ type PoolRegistration struct {
 	Relays        []PoolRegistrationRelay
 	Pledge        types.Uint64
 	Cost          types.Uint64
-	CertificateID uint `gorm:"index"`
+	CertificateID uint `gorm:"uniqueIndex:uniq_pool_registration_cert"`
 	ID            uint `gorm:"primarykey"`
 	PoolID        uint `gorm:"index"`
 	AddedSlot     uint64
@@ -90,7 +90,7 @@ func (PoolRegistrationRelay) TableName() string {
 
 type PoolRetirement struct {
 	PoolKeyHash   []byte `gorm:"index"`
-	CertificateID uint   `gorm:"index"`
+	CertificateID uint   `gorm:"uniqueIndex:uniq_pool_retirement_cert"`
 	ID            uint   `gorm:"primarykey"`
 	PoolID        uint   `gorm:"index"`
 	Epoch         uint64
