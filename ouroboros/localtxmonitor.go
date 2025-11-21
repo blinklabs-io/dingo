@@ -1,4 +1,4 @@
-// Copyright 2024 Blink Labs Software
+// Copyright 2025 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package dingo
+package ouroboros
 
 import (
 	olocaltxmonitor "github.com/blinklabs-io/gouroboros/protocol/localtxmonitor"
@@ -22,17 +22,17 @@ const (
 	localtxmonitorMempoolCapacity = 10 * 1024 * 1024 // TODO: replace with configurable value (#400)
 )
 
-func (n *Node) localtxmonitorServerConnOpts() []olocaltxmonitor.LocalTxMonitorOptionFunc {
+func (o *Ouroboros) localtxmonitorServerConnOpts() []olocaltxmonitor.LocalTxMonitorOptionFunc {
 	return []olocaltxmonitor.LocalTxMonitorOptionFunc{
-		olocaltxmonitor.WithGetMempoolFunc(n.localtxmonitorServerGetMempool),
+		olocaltxmonitor.WithGetMempoolFunc(o.localtxmonitorServerGetMempool),
 	}
 }
 
-func (n *Node) localtxmonitorServerGetMempool(
+func (o *Ouroboros) localtxmonitorServerGetMempool(
 	ctx olocaltxmonitor.CallbackContext,
 ) (uint64, uint32, []olocaltxmonitor.TxAndEraId, error) {
-	tip := n.ledgerState.Tip()
-	mempoolTxs := n.mempool.Transactions()
+	tip := o.LedgerState.Tip()
+	mempoolTxs := o.Mempool.Transactions()
 	retTxs := make([]olocaltxmonitor.TxAndEraId, len(mempoolTxs))
 	for i := range mempoolTxs {
 		retTxs[i] = olocaltxmonitor.TxAndEraId{

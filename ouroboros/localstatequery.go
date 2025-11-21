@@ -1,4 +1,4 @@
-// Copyright 2024 Blink Labs Software
+// Copyright 2025 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,21 +12,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package dingo
+package ouroboros
 
 import (
 	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
 )
 
-func (n *Node) localstatequeryServerConnOpts() []olocalstatequery.LocalStateQueryOptionFunc {
+func (o *Ouroboros) localstatequeryServerConnOpts() []olocalstatequery.LocalStateQueryOptionFunc {
 	return []olocalstatequery.LocalStateQueryOptionFunc{
-		olocalstatequery.WithAcquireFunc(n.localstatequeryServerAcquire),
-		olocalstatequery.WithQueryFunc(n.localstatequeryServerQuery),
-		olocalstatequery.WithReleaseFunc(n.localstatequeryServerRelease),
+		olocalstatequery.WithAcquireFunc(o.localstatequeryServerAcquire),
+		olocalstatequery.WithQueryFunc(o.localstatequeryServerQuery),
+		olocalstatequery.WithReleaseFunc(o.localstatequeryServerRelease),
 	}
 }
 
-func (n *Node) localstatequeryServerAcquire(
+func (o *Ouroboros) localstatequeryServerAcquire(
 	ctx olocalstatequery.CallbackContext,
 	acquireTarget olocalstatequery.AcquireTarget,
 	reAcquire bool,
@@ -35,14 +35,14 @@ func (n *Node) localstatequeryServerAcquire(
 	return nil
 }
 
-func (n *Node) localstatequeryServerQuery(
+func (o *Ouroboros) localstatequeryServerQuery(
 	ctx olocalstatequery.CallbackContext,
 	query olocalstatequery.QueryWrapper,
 ) (any, error) {
-	return n.ledgerState.Query(query.Query)
+	return o.LedgerState.Query(query.Query)
 }
 
-func (n *Node) localstatequeryServerRelease(
+func (o *Ouroboros) localstatequeryServerRelease(
 	ctx olocalstatequery.CallbackContext,
 ) error {
 	// TODO: release "view" from ledger state (#382)

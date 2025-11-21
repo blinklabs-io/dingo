@@ -1,4 +1,4 @@
-// Copyright 2024 Blink Labs Software
+// Copyright 2025 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package dingo
+package ouroboros
 
 import (
 	"fmt"
@@ -20,23 +20,23 @@ import (
 	olocaltxsubmission "github.com/blinklabs-io/gouroboros/protocol/localtxsubmission"
 )
 
-func (n *Node) localtxsubmissionServerConnOpts() []olocaltxsubmission.LocalTxSubmissionOptionFunc {
+func (o *Ouroboros) localtxsubmissionServerConnOpts() []olocaltxsubmission.LocalTxSubmissionOptionFunc {
 	return []olocaltxsubmission.LocalTxSubmissionOptionFunc{
-		olocaltxsubmission.WithSubmitTxFunc(n.localtxsubmissionServerSubmitTx),
+		olocaltxsubmission.WithSubmitTxFunc(o.localtxsubmissionServerSubmitTx),
 	}
 }
 
-func (n *Node) localtxsubmissionServerSubmitTx(
+func (o *Ouroboros) localtxsubmissionServerSubmitTx(
 	ctx olocaltxsubmission.CallbackContext,
 	tx olocaltxsubmission.MsgSubmitTxTransaction,
 ) error {
 	// Add transaction to mempool
-	err := n.mempool.AddTransaction(
+	err := o.Mempool.AddTransaction(
 		uint(tx.EraId),
 		tx.Raw.Content.([]byte),
 	)
 	if err != nil {
-		n.config.logger.Error(
+		o.config.Logger.Error(
 			fmt.Sprintf(
 				"failed to add transaction to mempool: %s",
 				err,

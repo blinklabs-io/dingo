@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package dingo
+package ouroboros
 
 import (
 	"encoding/hex"
@@ -31,25 +31,27 @@ const (
 	txsubmissionRequestTxIdsCount = 10 // Number of TxIds to request from peer at one time
 )
 
-func (n *Node) txsubmissionServerConnOpts() []txsubmission.TxSubmissionOptionFunc {
+func (o *Ouroboros) txsubmissionServerConnOpts() []txsubmission.TxSubmissionOptionFunc {
 	return []txsubmission.TxSubmissionOptionFunc{
-		txsubmission.WithInitFunc(n.txsubmissionServerInit),
+		txsubmission.WithInitFunc(o.txsubmissionServerInit),
 	}
 }
 
-func (n *Node) txsubmissionClientConnOpts() []txsubmission.TxSubmissionOptionFunc {
+func (o *Ouroboros) txsubmissionClientConnOpts() []txsubmission.TxSubmissionOptionFunc {
 	return []txsubmission.TxSubmissionOptionFunc{
-		txsubmission.WithRequestTxIdsFunc(n.txsubmissionClientRequestTxIds),
-		txsubmission.WithRequestTxsFunc(n.txsubmissionClientRequestTxs),
+		txsubmission.WithRequestTxIdsFunc(o.txsubmissionClientRequestTxIds),
+		txsubmission.WithRequestTxsFunc(o.txsubmissionClientRequestTxs),
 	}
 }
 
-func (n *Node) txsubmissionClientStart(connId ouroboros.ConnectionId) error {
+func (o *Ouroboros) txsubmissionClientStart(
+	connId ouroboros.ConnectionId,
+) error {
 	// Register mempool consumer
 	// We don't bother capturing the consumer because we can easily look it up later by connection ID
-	_ = n.mempool.AddConsumer(connId)
+	_ = o.Mempool.AddConsumer(connId)
 	// Start TxSubmission loop
-	conn := n.connManager.GetConnectionById(connId)
+	conn := o.ConnManager.GetConnectionById(connId)
 	if conn == nil {
 		return fmt.Errorf("failed to lookup connection ID: %s", connId.String())
 	}
@@ -57,7 +59,9 @@ func (n *Node) txsubmissionClientStart(connId ouroboros.ConnectionId) error {
 	return nil
 }
 
-func (n *Node) txsubmissionServerInit(ctx txsubmission.CallbackContext) error {
+func (o *Ouroboros) txsubmissionServerInit(
+	ctx txsubmission.CallbackContext,
+) error {
 	// Start async loop to request transactions from the peer's mempool
 	go func() {
 		for {
@@ -76,7 +80,7 @@ func (n *Node) txsubmissionServerInit(ctx txsubmission.CallbackContext) error {
 				if errors.Is(err, protocol.ErrProtocolShuttingDown) {
 					return
 				}
-				n.config.logger.Error(
+				o.config.Logger.Error(
 					fmt.Sprintf(
 						"failed to get TxIds: %s",
 						err,
@@ -97,7 +101,7 @@ func (n *Node) txsubmissionServerInit(ctx txsubmission.CallbackContext) error {
 				// Request TX content for TxIds from above
 				txs, err := ctx.Server.RequestTxs(requestTxIds)
 				if err != nil {
-					n.config.logger.Error(
+					o.config.Logger.Error(
 						fmt.Sprintf(
 							"failed to get Txs: %s",
 							err,
@@ -116,7 +120,7 @@ func (n *Node) txsubmissionServerInit(ctx txsubmission.CallbackContext) error {
 						txBody.TxBody,
 					)
 					if err != nil {
-						n.config.logger.Error(
+						o.config.Logger.Error(
 							fmt.Sprintf(
 								"failed to parse transaction CBOR: %s",
 								err,
@@ -128,7 +132,7 @@ func (n *Node) txsubmissionServerInit(ctx txsubmission.CallbackContext) error {
 						)
 						return
 					}
-					n.config.logger.Debug(
+					o.config.Logger.Debug(
 						"received tx",
 						"tx_hash", tx.Hash(),
 						"protocol", "tx-submission",
@@ -136,12 +140,12 @@ func (n *Node) txsubmissionServerInit(ctx txsubmission.CallbackContext) error {
 						"connection_id", ctx.ConnectionId.String(),
 					)
 					// Add transaction to mempool
-					err = n.mempool.AddTransaction(
+					err = o.Mempool.AddTransaction(
 						uint(txBody.EraId),
 						txBody.TxBody,
 					)
 					if err != nil {
-						n.config.logger.Error(
+						o.config.Logger.Error(
 							fmt.Sprintf(
 								"failed to add tx %x to mempool: %s",
 								tx.Hash(),
@@ -161,7 +165,7 @@ func (n *Node) txsubmissionServerInit(ctx txsubmission.CallbackContext) error {
 	return nil
 }
 
-func (n *Node) txsubmissionClientRequestTxIds(
+func (o *Ouroboros) txsubmissionClientRequestTxIds(
 	ctx txsubmission.CallbackContext,
 	blocking bool,
 	ack uint16,
@@ -169,7 +173,7 @@ func (n *Node) txsubmissionClientRequestTxIds(
 ) ([]txsubmission.TxIdAndSize, error) {
 	connId := ctx.ConnectionId
 	ret := []txsubmission.TxIdAndSize{}
-	consumer := n.mempool.Consumer(connId)
+	consumer := o.Mempool.Consumer(connId)
 	// Clear TX cache
 	if ack > 0 {
 		consumer.ClearCache()
@@ -204,6 +208,15 @@ func (n *Node) txsubmissionClientRequestTxIds(
 		if err != nil {
 			return nil, err
 		}
+		if len(txHashBytes) != 32 {
+			return nil, fmt.Errorf(
+				"unexpected tx hash length %d for %s",
+				len(txHashBytes),
+				tmpTx.Hash,
+			)
+		}
+		var txIdArr [32]byte
+		copy(txIdArr[:], txHashBytes)
 		txSize := len(tmpTx.Cbor)
 		if txSize > math.MaxUint32 {
 			return nil, errors.New("tx impossibly large")
@@ -213,7 +226,7 @@ func (n *Node) txsubmissionClientRequestTxIds(
 			txsubmission.TxIdAndSize{
 				TxId: txsubmission.TxId{
 					EraId: uint16(tmpTx.Type), // #nosec G115
-					TxId:  [32]byte(txHashBytes),
+					TxId:  txIdArr,
 				},
 				Size: uint32(txSize),
 			},
@@ -222,13 +235,13 @@ func (n *Node) txsubmissionClientRequestTxIds(
 	return ret, nil
 }
 
-func (n *Node) txsubmissionClientRequestTxs(
+func (o *Ouroboros) txsubmissionClientRequestTxs(
 	ctx txsubmission.CallbackContext,
 	txIds []txsubmission.TxId,
 ) ([]txsubmission.TxBody, error) {
 	connId := ctx.ConnectionId
 	ret := []txsubmission.TxBody{}
-	consumer := n.mempool.Consumer(connId)
+	consumer := o.Mempool.Consumer(connId)
 	for _, txId := range txIds {
 		txHash := hex.EncodeToString(txId.TxId[:])
 		tx := consumer.GetTxFromCache(txHash)
