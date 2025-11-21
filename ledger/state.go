@@ -108,16 +108,16 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 	if cfg.Database == nil {
 		return nil, errors.New("a Database is required")
 	}
+	if cfg.Logger == nil {
+		// Create logger to throw away logs
+		// We do this so we don't have to add guards around every log operation
+		cfg.Logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
+	}
 	ls := &LedgerState{
 		config:         cfg,
 		chainsyncState: InitChainsyncState,
 		db:             cfg.Database,
 		chain:          cfg.ChainManager.PrimaryChain(),
-	}
-	if cfg.Logger == nil {
-		// Create logger to throw away logs
-		// We do this so we don't have to add guards around every log operation
-		cfg.Logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
 	}
 	return ls, nil
 }
