@@ -21,6 +21,7 @@ RUN --mount=type=cache,target=/gomod-cache --mount=type=cache,target=/go-cache m
 FROM ghcr.io/blinklabs-io/cardano-cli:10.12.0.0-1 AS cardano-cli
 FROM ghcr.io/blinklabs-io/cardano-configs:20251014-1 AS cardano-configs
 FROM ghcr.io/blinklabs-io/mithril-client:0.12.33-1 AS mithril-client
+FROM ghcr.io/blinklabs-io/nview:0.12.0 AS nview
 FROM ghcr.io/blinklabs-io/txtop:0.13.1 AS txtop
 
 FROM debian:bookworm-slim AS dingo
@@ -40,6 +41,7 @@ COPY --from=cardano-cli /usr/local/include/ /usr/local/include/
 COPY --from=cardano-cli /usr/local/lib/ /usr/local/lib/
 COPY --from=cardano-configs /config/ /opt/cardano/config/
 COPY --from=mithril-client /bin/mithril-client /usr/local/bin/
+COPY --from=nview /bin/nview /usr/local/bin/
 COPY --from=txtop /bin/txtop /usr/local/bin/
 ENV CARDANO_NODE_BINARY=dingo
 ENV CARDANO_CONFIG=/opt/cardano/config/preview/config.json
