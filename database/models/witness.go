@@ -14,25 +14,20 @@
 
 package models
 
-type Datum struct {
-	Hash      []byte `gorm:"index;not null;unique"`
-	RawDatum  []byte `gorm:"not null"`
-	ID        uint   `gorm:"primarykey"`
-	AddedSlot uint64 `gorm:"not null"`
-}
-
-func (Datum) TableName() string {
-	return "datum"
-}
-
-// PlutusData represents a Plutus data value in the witness set
-type PlutusData struct {
+// KeyWitness represents a key witness entry (Vkey or Bootstrap)
+// Type: 0 = VkeyWitness, 1 = BootstrapWitness
+type KeyWitness struct {
 	ID            uint   `gorm:"primaryKey"`
 	TransactionID uint   `gorm:"index"`
-	Data          []byte `gorm:"type:bytea"`
+	Type          uint8  `gorm:"index"` // 0=Vkey, 1=Bootstrap
+	Vkey          []byte `gorm:"type:bytea"`
+	Signature     []byte `gorm:"type:bytea"`
+	PublicKey     []byte `gorm:"type:bytea"` // For Bootstrap
+	ChainCode     []byte `gorm:"type:bytea"` // For Bootstrap
+	Attributes    []byte `gorm:"type:bytea"` // For Bootstrap
 	Transaction   *Transaction
 }
 
-func (PlutusData) TableName() string {
-	return "plutus_data"
+func (KeyWitness) TableName() string {
+	return "key_witness"
 }
