@@ -1,4 +1,4 @@
-// Copyright 2024 Blink Labs Software
+// Copyright 2025 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -32,10 +32,11 @@ type ChainsyncClientState struct {
 }
 
 type State struct {
-	eventBus     *event.EventBus
-	ledgerState  *ledger.LedgerState
-	clients      map[ouroboros.ConnectionId]*ChainsyncClientState
-	clientConnId *ouroboros.ConnectionId // TODO: replace with handling of multiple chainsync clients (#385)
+	eventBus          *event.EventBus
+	ledgerState       *ledger.LedgerState
+	clients           map[ouroboros.ConnectionId]*ChainsyncClientState
+	clientConnId      *ouroboros.ConnectionId // TODO: replace with handling of multiple chainsync clients (#385)
+	clientConnIdMutex sync.RWMutex
 	sync.Mutex
 }
 
@@ -81,16 +82,22 @@ func (s *State) RemoveClient(connId connection.ConnectionId) {
 
 // TODO: replace with handling of multiple chainsync clients (#385)
 func (s *State) GetClientConnId() *ouroboros.ConnectionId {
+	s.clientConnIdMutex.RLock()
+	defer s.clientConnIdMutex.RUnlock()
 	return s.clientConnId
 }
 
 // TODO: replace with handling of multiple chainsync clients (#385)
 func (s *State) SetClientConnId(connId ouroboros.ConnectionId) {
+	s.clientConnIdMutex.Lock()
+	defer s.clientConnIdMutex.Unlock()
 	s.clientConnId = &connId
 }
 
 // TODO: replace with handling of multiple chainsync clients (#385)
 func (s *State) RemoveClientConnId(connId ouroboros.ConnectionId) {
+	s.clientConnIdMutex.Lock()
+	defer s.clientConnIdMutex.Unlock()
 	if s.clientConnId != nil && *s.clientConnId == connId {
 		s.clientConnId = nil
 	}

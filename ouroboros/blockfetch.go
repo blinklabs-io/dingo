@@ -1,4 +1,4 @@
-// Copyright 2024 Blink Labs Software
+// Copyright 2025 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,9 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package dingo
+package ouroboros
 
 import (
+	"errors"
 	"fmt"
 	"time"
 
@@ -26,28 +27,28 @@ import (
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
-func (n *Node) blockfetchServerConnOpts() []blockfetch.BlockFetchOptionFunc {
+func (o *Ouroboros) blockfetchServerConnOpts() []blockfetch.BlockFetchOptionFunc {
 	return []blockfetch.BlockFetchOptionFunc{
-		blockfetch.WithRequestRangeFunc(n.blockfetchServerRequestRange),
+		blockfetch.WithRequestRangeFunc(o.blockfetchServerRequestRange),
 	}
 }
 
-func (n *Node) blockfetchClientConnOpts() []blockfetch.BlockFetchOptionFunc {
+func (o *Ouroboros) blockfetchClientConnOpts() []blockfetch.BlockFetchOptionFunc {
 	return []blockfetch.BlockFetchOptionFunc{
-		blockfetch.WithBlockFunc(n.blockfetchClientBlock),
-		blockfetch.WithBatchDoneFunc(n.blockfetchClientBatchDone),
+		blockfetch.WithBlockFunc(o.blockfetchClientBlock),
+		blockfetch.WithBatchDoneFunc(o.blockfetchClientBatchDone),
 		blockfetch.WithBatchStartTimeout(2 * time.Second),
 		blockfetch.WithBlockTimeout(2 * time.Second),
 	}
 }
 
-func (n *Node) blockfetchServerRequestRange(
+func (o *Ouroboros) blockfetchServerRequestRange(
 	ctx blockfetch.CallbackContext,
 	start ocommon.Point,
 	end ocommon.Point,
 ) error {
 	// TODO: check if we have requested block range available and send NoBlocks if not (#397)
-	chainIter, err := n.ledgerState.GetChainFromPoint(start, true)
+	chainIter, err := o.LedgerState.GetChainFromPoint(start, true)
 	if err != nil {
 		return err
 	}
@@ -85,13 +86,16 @@ func (n *Node) blockfetchServerRequestRange(
 	return nil
 }
 
-// blockfetchClientRequestRange is called by the ledger when it needs to request a range of block bodies
-func (n *Node) blockfetchClientRequestRange(
+// BlockfetchClientRequestRange is called by the ledger when it needs to request a range of block bodies
+func (o *Ouroboros) BlockfetchClientRequestRange(
 	connId ouroboros.ConnectionId,
 	start ocommon.Point,
 	end ocommon.Point,
 ) error {
-	conn := n.connManager.GetConnectionById(connId)
+	if o.ConnManager == nil {
+		return errors.New("ConnManager not initialized")
+	}
+	conn := o.ConnManager.GetConnectionById(connId)
 	if conn == nil {
 		return fmt.Errorf("failed to lookup connection ID: %s", connId.String())
 	}
@@ -101,13 +105,13 @@ func (n *Node) blockfetchClientRequestRange(
 	return nil
 }
 
-func (n *Node) blockfetchClientBlock(
+func (o *Ouroboros) blockfetchClientBlock(
 	ctx blockfetch.CallbackContext,
 	blockType uint,
 	block gledger.Block,
 ) error {
 	// Generate event
-	n.eventBus.Publish(
+	o.EventBus.Publish(
 		ledger.BlockfetchEventType,
 		event.NewEvent(
 			ledger.BlockfetchEventType,
@@ -124,11 +128,11 @@ func (n *Node) blockfetchClientBlock(
 	return nil
 }
 
-func (n *Node) blockfetchClientBatchDone(
+func (o *Ouroboros) blockfetchClientBatchDone(
 	ctx blockfetch.CallbackContext,
 ) error {
 	// Generate event
-	n.eventBus.Publish(
+	o.EventBus.Publish(
 		ledger.BlockfetchEventType,
 		event.NewEvent(
 			ledger.BlockfetchEventType,

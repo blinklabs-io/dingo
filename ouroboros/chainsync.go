@@ -1,4 +1,4 @@
-// Copyright 2024 Blink Labs Software
+// Copyright 2025 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package dingo
+package ouroboros
 
 import (
 	"errors"
@@ -31,17 +31,17 @@ const (
 	chainsyncIntersectPointCount = 100
 )
 
-func (n *Node) chainsyncServerConnOpts() []ochainsync.ChainSyncOptionFunc {
+func (o *Ouroboros) chainsyncServerConnOpts() []ochainsync.ChainSyncOptionFunc {
 	return []ochainsync.ChainSyncOptionFunc{
-		ochainsync.WithFindIntersectFunc(n.chainsyncServerFindIntersect),
-		ochainsync.WithRequestNextFunc(n.chainsyncServerRequestNext),
+		ochainsync.WithFindIntersectFunc(o.chainsyncServerFindIntersect),
+		ochainsync.WithRequestNextFunc(o.chainsyncServerRequestNext),
 	}
 }
 
-func (n *Node) chainsyncClientConnOpts() []ochainsync.ChainSyncOptionFunc {
+func (o *Ouroboros) chainsyncClientConnOpts() []ochainsync.ChainSyncOptionFunc {
 	return []ochainsync.ChainSyncOptionFunc{
-		ochainsync.WithRollForwardFunc(n.chainsyncClientRollForward),
-		ochainsync.WithRollBackwardFunc(n.chainsyncClientRollBackward),
+		ochainsync.WithRollForwardFunc(o.chainsyncClientRollForward),
+		ochainsync.WithRollBackwardFunc(o.chainsyncClientRollBackward),
 		// Enable pipelining of RequestNext messages to speed up chainsync
 		ochainsync.WithPipelineLimit(50),
 		// Set the recv queue size to 2x our pipeline limit
@@ -49,12 +49,12 @@ func (n *Node) chainsyncClientConnOpts() []ochainsync.ChainSyncOptionFunc {
 	}
 }
 
-func (n *Node) chainsyncClientStart(connId ouroboros.ConnectionId) error {
-	conn := n.connManager.GetConnectionById(connId)
+func (o *Ouroboros) chainsyncClientStart(connId ouroboros.ConnectionId) error {
+	conn := o.ConnManager.GetConnectionById(connId)
 	if conn == nil {
 		return fmt.Errorf("failed to lookup connection ID: %s", connId.String())
 	}
-	intersectPoints, err := n.ledgerState.RecentChainPoints(
+	intersectPoints, err := o.LedgerState.RecentChainPoints(
 		chainsyncIntersectPointCount,
 	)
 	if err != nil {
@@ -62,7 +62,7 @@ func (n *Node) chainsyncClientStart(connId ouroboros.ConnectionId) error {
 	}
 	// Determine start point if we have no stored chain points
 	if len(intersectPoints) == 0 {
-		if n.config.intersectTip {
+		if o.config.IntersectTip {
 			// Start initial chainsync from current chain tip
 			tip, err := conn.ChainSync().Client.GetCurrentTip()
 			if err != nil {
@@ -73,40 +73,40 @@ func (n *Node) chainsyncClientStart(connId ouroboros.ConnectionId) error {
 				tip.Point,
 			)
 			return conn.ChainSync().Client.Sync(intersectPoints)
-		} else if len(n.config.intersectPoints) > 0 {
+		} else if len(o.config.IntersectPoints) > 0 {
 			// Start initial chainsync at specific point(s)
 			intersectPoints = append(
 				intersectPoints,
-				n.config.intersectPoints...,
+				o.config.IntersectPoints...,
 			)
 		}
 	}
 	return conn.ChainSync().Client.Sync(intersectPoints)
 }
 
-func (n *Node) chainsyncServerFindIntersect(
+func (o *Ouroboros) chainsyncServerFindIntersect(
 	ctx ochainsync.CallbackContext,
 	points []ocommon.Point,
 ) (ocommon.Point, ochainsync.Tip, error) {
-	n.ledgerState.RLock()
-	defer n.ledgerState.RUnlock()
+	o.LedgerState.RLock()
+	defer o.LedgerState.RUnlock()
 	var retPoint ocommon.Point
 	var retTip ochainsync.Tip
 	// Find intersection
-	intersectPoint, err := n.ledgerState.GetIntersectPoint(points)
+	intersectPoint, err := o.LedgerState.GetIntersectPoint(points)
 	if err != nil {
 		return retPoint, retTip, err
 	}
 
 	// Populate return tip
-	retTip = n.ledgerState.Tip()
+	retTip = o.LedgerState.Tip()
 
 	if intersectPoint == nil {
 		return retPoint, retTip, ochainsync.ErrIntersectNotFound
 	}
 
 	// Add our client to the chainsync state
-	_, err = n.chainsyncState.AddClient(
+	_, err = o.ChainsyncState.AddClient(
 		ctx.ConnectionId,
 		*intersectPoint,
 	)
@@ -120,12 +120,12 @@ func (n *Node) chainsyncServerFindIntersect(
 	return retPoint, retTip, nil
 }
 
-func (n *Node) chainsyncServerRequestNext(
+func (o *Ouroboros) chainsyncServerRequestNext(
 	ctx ochainsync.CallbackContext,
 ) error {
 	// Create/retrieve chainsync state for connection
-	tip := n.ledgerState.Tip()
-	clientState, err := n.chainsyncState.AddClient(
+	tip := o.LedgerState.Tip()
+	clientState, err := o.ChainsyncState.AddClient(
 		ctx.ConnectionId,
 		tip.Point,
 	)
@@ -175,7 +175,7 @@ func (n *Node) chainsyncServerRequestNext(
 		if next == nil {
 			return
 		}
-		tip := n.ledgerState.Tip()
+		tip := o.LedgerState.Tip()
 		if next.Rollback {
 			_ = ctx.Server.RollBackward(
 				next.Point,
@@ -192,13 +192,13 @@ func (n *Node) chainsyncServerRequestNext(
 	return nil
 }
 
-func (n *Node) chainsyncClientRollBackward(
+func (o *Ouroboros) chainsyncClientRollBackward(
 	ctx ochainsync.CallbackContext,
 	point ocommon.Point,
 	tip ochainsync.Tip,
 ) error {
 	// Generate event
-	n.eventBus.Publish(
+	o.EventBus.Publish(
 		ledger.ChainsyncEventType,
 		event.NewEvent(
 			ledger.ChainsyncEventType,
@@ -212,7 +212,7 @@ func (n *Node) chainsyncClientRollBackward(
 	return nil
 }
 
-func (n *Node) chainsyncClientRollForward(
+func (o *Ouroboros) chainsyncClientRollForward(
 	ctx ochainsync.CallbackContext,
 	blockType uint,
 	blockData any,
@@ -222,7 +222,7 @@ func (n *Node) chainsyncClientRollForward(
 	case gledger.BlockHeader:
 		blockSlot := v.SlotNumber()
 		blockHash := v.Hash().Bytes()
-		n.eventBus.Publish(
+		o.EventBus.Publish(
 			ledger.ChainsyncEventType,
 			event.NewEvent(
 				ledger.ChainsyncEventType,
