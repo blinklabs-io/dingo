@@ -55,6 +55,7 @@ func NewPeerGovernor(cfg PeerGovernorConfig) *PeerGovernor {
 	cfg.Logger = cfg.Logger.With("component", "peergov")
 	return &PeerGovernor{
 		config: cfg,
+		peers:  []*Peer{},
 	}
 }
 
@@ -84,6 +85,9 @@ func (p *PeerGovernor) LoadTopologyConfig(
 	// Remove peers originally sourced from the topology
 	tmpPeers := []*Peer{}
 	for _, tmpPeer := range p.peers {
+		if tmpPeer == nil {
+			continue
+		}
 		if tmpPeer.Source == PeerSourceTopologyBootstrapPeer ||
 			tmpPeer.Source == PeerSourceTopologyLocalRoot ||
 			tmpPeer.Source == PeerSourceTopologyPublicRoot {
