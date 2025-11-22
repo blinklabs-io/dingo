@@ -17,6 +17,7 @@ package ouroboros
 import (
 	"errors"
 	"fmt"
+	"sync/atomic"
 	"time"
 
 	"github.com/blinklabs-io/dingo/event"
@@ -74,6 +75,9 @@ func (o *Ouroboros) blockfetchServerRequestRange(
 				// TODO: push this error somewhere (#398)
 				return
 			}
+			if o.metrics != nil {
+				o.metrics.servedBlockCount.Inc()
+			}
 			// Make sure we don't hang waiting for the next block if we've already hit the end
 			if next.Block.Slot == end.Slot {
 				break
@@ -99,7 +103,19 @@ func (o *Ouroboros) BlockfetchClientRequestRange(
 	if conn == nil {
 		return fmt.Errorf("failed to lookup connection ID: %s", connId.String())
 	}
+	// Record start time for metrics
+	if o.metrics != nil {
+		o.blockFetchMutex.Lock()
+		o.blockFetchStarts[connId] = time.Now()
+		o.blockFetchMutex.Unlock()
+	}
 	if err := conn.BlockFetch().Client.GetBlockRange(start, end); err != nil {
+		// Clean up start time on error to prevent stale entries
+		if o.metrics != nil {
+			o.blockFetchMutex.Lock()
+			delete(o.blockFetchStarts, connId)
+			o.blockFetchMutex.Unlock()
+		}
 		return err
 	}
 	return nil
@@ -110,12 +126,69 @@ func (o *Ouroboros) blockfetchClientBlock(
 	blockType uint,
 	block gledger.Block,
 ) error {
+	// Update metrics
+	if o.metrics != nil {
+		o.blockFetchMutex.Lock()
+		startTime, exists := o.blockFetchStarts[ctx.ConnectionId]
+		o.blockFetchMutex.Unlock()
+		if exists {
+			fetchDuration := time.Since(startTime)
+			fetchSeconds := fetchDuration.Seconds()
+
+			// Calculate block delay as wallclock time minus block slot time (cardano-node compatible)
+			var delaySeconds float64
+			if o.LedgerState != nil {
+				blockSlotTime, err := o.LedgerState.SlotToTime(
+					block.SlotNumber(),
+				)
+				if err == nil {
+					delaySeconds = time.Since(blockSlotTime).Seconds()
+				} else {
+					// Fallback to fetch time if slot conversion fails
+					delaySeconds = fetchSeconds
+				}
+			} else {
+				// Fallback to fetch time if no ledger state
+				delaySeconds = fetchSeconds
+			}
+
+			o.metrics.blockDelay.Set(delaySeconds)
+			atomic.AddInt64(&o.metrics.totalBlocksFetched, 1)
+			if delaySeconds < 1.0 {
+				atomic.AddInt64(&o.metrics.blocksUnder1s, 1)
+			} else if delaySeconds < 3.0 {
+				atomic.AddInt64(&o.metrics.blocksUnder3s, 1)
+			} else if delaySeconds < 5.0 {
+				atomic.AddInt64(&o.metrics.blocksUnder5s, 1)
+			} else {
+				// delaySeconds >= 5.0
+				o.metrics.lateBlocks.Inc()
+			}
+			// Update CDF percentages based on block delay
+			total := atomic.LoadInt64(&o.metrics.totalBlocksFetched)
+			if total > 0 {
+				under1 := atomic.LoadInt64(&o.metrics.blocksUnder1s)
+				under3 := atomic.LoadInt64(&o.metrics.blocksUnder3s)
+				under5 := atomic.LoadInt64(&o.metrics.blocksUnder5s)
+				o.metrics.blockDelayCdfOne.Set(
+					float64(under1) / float64(total) * 100,
+				)
+				o.metrics.blockDelayCdfThree.Set(
+					float64(under3) / float64(total) * 100,
+				)
+				o.metrics.blockDelayCdfFive.Set(
+					float64(under5) / float64(total) * 100,
+				)
+			}
+		}
+	}
 	// Generate event
 	o.EventBus.Publish(
 		ledger.BlockfetchEventType,
 		event.NewEvent(
 			ledger.BlockfetchEventType,
 			ledger.BlockfetchEvent{
+				ConnectionId: ctx.ConnectionId,
 				Point: ocommon.NewPoint(
 					block.SlotNumber(),
 					block.Hash().Bytes(),
@@ -131,6 +204,12 @@ func (o *Ouroboros) blockfetchClientBlock(
 func (o *Ouroboros) blockfetchClientBatchDone(
 	ctx blockfetch.CallbackContext,
 ) error {
+	// Clean up start time
+	if o.metrics != nil {
+		o.blockFetchMutex.Lock()
+		delete(o.blockFetchStarts, ctx.ConnectionId)
+		o.blockFetchMutex.Unlock()
+	}
 	// Generate event
 	o.EventBus.Publish(
 		ledger.BlockfetchEventType,
