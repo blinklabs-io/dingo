@@ -180,6 +180,7 @@ func (n *Node) Run() error {
 			Listeners:          tmpListeners,
 			OutboundSourcePort: n.config.outboundSourcePort,
 			OutboundConnOpts:   n.ouroboros.OutboundConnOpts(),
+			PromRegistry:       n.config.promRegistry,
 		},
 	)
 	n.ouroboros.ConnManager = n.connManager
@@ -199,6 +200,7 @@ func (n *Node) Run() error {
 			EventBus:        n.eventBus,
 			ConnManager:     n.connManager,
 			DisableOutbound: n.config.devMode,
+			PromRegistry:    n.config.promRegistry,
 		},
 	)
 	n.ouroboros.PeerGov = n.peerGov
