@@ -19,6 +19,8 @@ import (
 	"io"
 	"log/slog"
 	"slices"
+	"sync"
+	"time"
 
 	"github.com/blinklabs-io/dingo/chainsync"
 	"github.com/blinklabs-io/dingo/connmanager"
@@ -35,16 +37,21 @@ import (
 	olocaltxsubmission "github.com/blinklabs-io/gouroboros/protocol/localtxsubmission"
 	opeersharing "github.com/blinklabs-io/gouroboros/protocol/peersharing"
 	otxsubmission "github.com/blinklabs-io/gouroboros/protocol/txsubmission"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 )
 
 type Ouroboros struct {
-	ConnManager    *connmanager.ConnectionManager
-	PeerGov        *peergov.PeerGovernor
-	ChainsyncState *chainsync.State
-	EventBus       *event.EventBus
-	Mempool        *mempool.Mempool
-	LedgerState    *ledger.LedgerState
-	config         OuroborosConfig
+	ConnManager      *connmanager.ConnectionManager
+	PeerGov          *peergov.PeerGovernor
+	ChainsyncState   *chainsync.State
+	EventBus         *event.EventBus
+	Mempool          *mempool.Mempool
+	LedgerState      *ledger.LedgerState
+	config           OuroborosConfig
+	metrics          *blockfetchMetrics
+	blockFetchStarts map[ouroboros.ConnectionId]time.Time
+	blockFetchMutex  sync.Mutex
 }
 
 type OuroborosConfig struct {
@@ -54,6 +61,20 @@ type OuroborosConfig struct {
 	NetworkMagic    uint32
 	PeerSharing     bool
 	IntersectTip    bool
+	PromRegistry    prometheus.Registerer
+}
+
+type blockfetchMetrics struct {
+	servedBlockCount   prometheus.Counter
+	blockDelay         prometheus.Gauge
+	lateBlocks         prometheus.Counter
+	blockDelayCdfOne   prometheus.Gauge
+	blockDelayCdfThree prometheus.Gauge
+	blockDelayCdfFive  prometheus.Gauge
+	totalBlocksFetched int64
+	blocksUnder1s      int64
+	blocksUnder3s      int64
+	blocksUnder5s      int64
 }
 
 func NewOuroboros(cfg OuroborosConfig) *Ouroboros {
@@ -61,10 +82,48 @@ func NewOuroboros(cfg OuroborosConfig) *Ouroboros {
 		cfg.Logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
 	}
 	cfg.Logger = cfg.Logger.With("component", "ouroboros")
-	return &Ouroboros{
-		config:   cfg,
-		EventBus: cfg.EventBus,
+	o := &Ouroboros{
+		config:           cfg,
+		EventBus:         cfg.EventBus,
+		blockFetchStarts: make(map[ouroboros.ConnectionId]time.Time),
 	}
+	if cfg.PromRegistry != nil {
+		o.initMetrics()
+	}
+	return o
+}
+
+func (o *Ouroboros) initMetrics() {
+	promautoFactory := promauto.With(o.config.PromRegistry)
+	o.metrics = &blockfetchMetrics{}
+	o.metrics.servedBlockCount = promautoFactory.NewCounter(
+		prometheus.CounterOpts{
+			Name: "cardano_node_metrics_served_block_count_int",
+			Help: "total blocks served to clients",
+		},
+	)
+	o.metrics.blockDelay = promautoFactory.NewGauge(prometheus.GaugeOpts{
+		Name: "cardano_node_metrics_blockfetchclient_blockdelay_s",
+		Help: "delay in seconds for the most recent block fetch",
+	})
+	o.metrics.lateBlocks = promautoFactory.NewCounter(prometheus.CounterOpts{
+		Name: "cardano_node_metrics_blockfetchclient_lateblocks",
+		Help: "blocks that took more than 5 seconds to fetch",
+	})
+	o.metrics.blockDelayCdfOne = promautoFactory.NewGauge(prometheus.GaugeOpts{
+		Name: "cardano_node_metrics_blockfetchclient_blockdelay_cdfOne",
+		Help: "percentage of blocks fetched in less than 1 second",
+	})
+	o.metrics.blockDelayCdfThree = promautoFactory.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "cardano_node_metrics_blockfetchclient_blockdelay_cdfThree",
+			Help: "percentage of blocks fetched in less than 3 seconds",
+		},
+	)
+	o.metrics.blockDelayCdfFive = promautoFactory.NewGauge(prometheus.GaugeOpts{
+		Name: "cardano_node_metrics_blockfetchclient_blockdelay_cdfFive",
+		Help: "percentage of blocks fetched in less than 5 seconds",
+	})
 }
 
 func (o *Ouroboros) ConfigureListeners(
@@ -193,6 +252,10 @@ func (o *Ouroboros) HandleConnClosedEvent(evt event.Event) {
 	if o.Mempool != nil {
 		o.Mempool.RemoveConsumer(connId)
 	}
+	// Clean up any pending block fetch start times
+	o.blockFetchMutex.Lock()
+	delete(o.blockFetchStarts, connId)
+	o.blockFetchMutex.Unlock()
 }
 
 func (o *Ouroboros) HandleOutboundConnEvent(evt event.Event) {

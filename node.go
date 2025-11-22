@@ -32,7 +32,6 @@ import (
 )
 
 type Node struct {
-	config         Config
 	connManager    *connmanager.ConnectionManager
 	peerGov        *peergov.PeerGovernor
 	chainsyncState *chainsync.State
@@ -44,6 +43,7 @@ type Node struct {
 	utxorpc        *utxorpc.Utxorpc
 	ouroboros      *ouroborosPkg.Ouroboros
 	shutdownFuncs  []func(context.Context) error
+	config         Config
 }
 
 func New(cfg Config) (*Node, error) {
@@ -115,6 +115,7 @@ func (n *Node) Run() error {
 		PeerSharing:     n.config.peerSharing,
 		IntersectTip:    n.config.intersectTip,
 		IntersectPoints: n.config.intersectPoints,
+		PromRegistry:    n.config.promRegistry,
 	})
 	// Load state
 	state, err := ledger.NewLedgerState(
