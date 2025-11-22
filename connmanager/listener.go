@@ -121,7 +121,11 @@ func (c *ConnectionManager) startListener(l ListenerConfig) error {
 				continue
 			}
 			// Add to connection manager
-			c.AddConnection(oConn)
+			peerAddr := "unknown"
+			if conn.RemoteAddr() != nil {
+				peerAddr = conn.RemoteAddr().String()
+			}
+			c.AddConnection(oConn, true, peerAddr)
 			// Generate event
 			if c.config.EventBus != nil {
 				c.config.EventBus.Publish(

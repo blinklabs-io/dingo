@@ -116,6 +116,7 @@ func (o *Ouroboros) blockfetchClientBlock(
 		event.NewEvent(
 			ledger.BlockfetchEventType,
 			ledger.BlockfetchEvent{
+				ConnectionId: ctx.ConnectionId,
 				Point: ocommon.NewPoint(
 					block.SlotNumber(),
 					block.Hash().Bytes(),

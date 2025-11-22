@@ -27,6 +27,8 @@ import (
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/topology"
 	ouroboros "github.com/blinklabs-io/gouroboros"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 )
 
 const (
@@ -36,9 +38,10 @@ const (
 )
 
 type PeerGovernor struct {
-	config PeerGovernorConfig
-	peers  []*Peer
-	mu     sync.Mutex
+	config  PeerGovernorConfig
+	peers   []*Peer
+	mu      sync.Mutex
+	metrics *peerGovernorMetrics
 }
 
 type PeerGovernorConfig struct {
@@ -46,6 +49,16 @@ type PeerGovernorConfig struct {
 	EventBus        *event.EventBus
 	ConnManager     *connmanager.ConnectionManager
 	DisableOutbound bool
+	PromRegistry    prometheus.Registerer
+}
+
+type peerGovernorMetrics struct {
+	coldPeers        prometheus.Gauge
+	warmPeers        prometheus.Gauge
+	hotPeers         prometheus.Gauge
+	activePeers      prometheus.Gauge
+	establishedPeers prometheus.Gauge
+	knownPeers       prometheus.Gauge
 }
 
 func NewPeerGovernor(cfg PeerGovernorConfig) *PeerGovernor {
@@ -53,9 +66,85 @@ func NewPeerGovernor(cfg PeerGovernorConfig) *PeerGovernor {
 		cfg.Logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
 	}
 	cfg.Logger = cfg.Logger.With("component", "peergov")
-	return &PeerGovernor{
+	p := &PeerGovernor{
 		config: cfg,
 	}
+	if cfg.PromRegistry != nil {
+		p.initMetrics()
+	}
+	return p
+}
+
+func (p *PeerGovernor) initMetrics() {
+	promautoFactory := promauto.With(p.config.PromRegistry)
+	p.metrics = &peerGovernorMetrics{}
+	p.metrics.coldPeers = promautoFactory.NewGauge(prometheus.GaugeOpts{
+		Name: "cardano_node_metrics_peerSelection_cold",
+		Help: "number of cold peers",
+	})
+	p.metrics.warmPeers = promautoFactory.NewGauge(prometheus.GaugeOpts{
+		Name: "cardano_node_metrics_peerSelection_warm",
+		Help: "number of warm peers",
+	})
+	p.metrics.hotPeers = promautoFactory.NewGauge(prometheus.GaugeOpts{
+		Name: "cardano_node_metrics_peerSelection_hot",
+		Help: "number of hot peers",
+	})
+	p.metrics.activePeers = promautoFactory.NewGauge(prometheus.GaugeOpts{
+		Name: "cardano_node_metrics_peerSelection_ActivePeers",
+		Help: "number of active peers",
+	})
+	p.metrics.establishedPeers = promautoFactory.NewGauge(prometheus.GaugeOpts{
+		Name: "cardano_node_metrics_peerSelection_EstablishedPeers",
+		Help: "number of established peers",
+	})
+	p.metrics.knownPeers = promautoFactory.NewGauge(prometheus.GaugeOpts{
+		Name: "cardano_node_metrics_peerSelection_KnownPeers",
+		Help: "number of known peers",
+	})
+}
+
+// updatePeerMetrics updates the Prometheus metrics for peer counts.
+// This function assumes p.mu is already held by the caller.
+func (p *PeerGovernor) updatePeerMetrics() {
+	if p.metrics == nil {
+		return
+	}
+	// NOTE: Caller must hold p.mu
+
+	coldCount := 0
+	warmCount := 0
+	hotCount := 0
+	activeCount := 0
+	establishedCount := 0
+	knownCount := len(p.peers)
+
+	for _, peer := range p.peers {
+		switch peer.State {
+		case PeerStateCold:
+			coldCount++
+		case PeerStateWarm:
+			warmCount++
+			// Warm peers have established connections
+			if peer.Connection != nil {
+				establishedCount++
+			}
+		case PeerStateHot:
+			hotCount++
+			// Hot peers have established connections and are active
+			if peer.Connection != nil {
+				establishedCount++
+				activeCount++
+			}
+		}
+	}
+
+	p.metrics.coldPeers.Set(float64(coldCount))
+	p.metrics.warmPeers.Set(float64(warmCount))
+	p.metrics.hotPeers.Set(float64(hotCount))
+	p.metrics.activePeers.Set(float64(activeCount))
+	p.metrics.establishedPeers.Set(float64(establishedCount))
+	p.metrics.knownPeers.Set(float64(knownCount))
 }
 
 func (p *PeerGovernor) Start() error {
@@ -103,6 +192,7 @@ func (p *PeerGovernor) LoadTopologyConfig(
 			&Peer{
 				Address: tmpAddress,
 				Source:  PeerSourceTopologyBootstrapPeer,
+				State:   PeerStateCold,
 			},
 		)
 	}
@@ -116,15 +206,29 @@ func (p *PeerGovernor) LoadTopologyConfig(
 			tmpPeer := &Peer{
 				Address:  tmpAddress,
 				Source:   PeerSourceTopologyLocalRoot,
+				State:    PeerStateCold,
 				Sharable: localRoot.Advertise,
 			}
-			for i, peer := range p.peers {
-				// This peer already appears, remove it
-				if peer != nil && peer.Address == tmpAddress {
-					copy(p.peers[i:], p.peers[i+1:])   // shift left
-					p.peers[len(p.peers)-1] = nil      // clear last
-					p.peers = p.peers[:len(p.peers)-1] // truncate
+			// Check for existing peer with this address
+			existingPeerIdx := -1
+			for i, existingPeer := range p.peers {
+				if existingPeer != nil && existingPeer.Address == tmpAddress {
+					existingPeerIdx = i
+					break
 				}
+			}
+			if existingPeerIdx >= 0 {
+				existingPeer := p.peers[existingPeerIdx]
+				// Preserve active inbound connection state
+				if existingPeer.Source == PeerSourceInboundConn && existingPeer.Connection != nil {
+					tmpPeer.Connection = existingPeer.Connection
+					tmpPeer.State = existingPeer.State
+					tmpPeer.ReconnectCount = existingPeer.ReconnectCount
+					tmpPeer.ReconnectDelay = existingPeer.ReconnectDelay
+					tmpPeer.Sharable = existingPeer.Sharable
+				}
+				// Remove the existing peer
+				p.peers = append(p.peers[:existingPeerIdx], p.peers[existingPeerIdx+1:]...)
 			}
 			p.peers = append(p.peers, tmpPeer)
 		}
@@ -139,19 +243,34 @@ func (p *PeerGovernor) LoadTopologyConfig(
 			tmpPeer := &Peer{
 				Address:  tmpAddress,
 				Source:   PeerSourceTopologyPublicRoot,
+				State:    PeerStateCold,
 				Sharable: publicRoot.Advertise,
 			}
-			for i, peer := range p.peers {
-				// This peer already appears, remove it
-				if peer != nil && peer.Address == tmpAddress {
-					copy(p.peers[i:], p.peers[i+1:])   // shift left
-					p.peers[len(p.peers)-1] = nil      // clear last
-					p.peers = p.peers[:len(p.peers)-1] // truncate
+			// Check for existing peer with this address
+			existingPeerIdx := -1
+			for i, existingPeer := range p.peers {
+				if existingPeer != nil && existingPeer.Address == tmpAddress {
+					existingPeerIdx = i
+					break
 				}
+			}
+			if existingPeerIdx >= 0 {
+				existingPeer := p.peers[existingPeerIdx]
+				// Preserve active inbound connection state
+				if existingPeer.Source == PeerSourceInboundConn && existingPeer.Connection != nil {
+					tmpPeer.Connection = existingPeer.Connection
+					tmpPeer.State = existingPeer.State
+					tmpPeer.ReconnectCount = existingPeer.ReconnectCount
+					tmpPeer.ReconnectDelay = existingPeer.ReconnectDelay
+					tmpPeer.Sharable = existingPeer.Sharable
+				}
+				// Remove the existing peer
+				p.peers = append(p.peers[:existingPeerIdx], p.peers[existingPeerIdx+1:]...)
 			}
 			p.peers = append(p.peers, tmpPeer)
 		}
 	}
+	p.updatePeerMetrics()
 }
 
 func (p *PeerGovernor) GetPeers() []Peer {
@@ -187,6 +306,16 @@ func (p *PeerGovernor) peerIndexByConnId(connId ouroboros.ConnectionId) int {
 	return -1
 }
 
+func (p *PeerGovernor) SetPeerHotByConnId(connId ouroboros.ConnectionId) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	peerIdx := p.peerIndexByConnId(connId)
+	if peerIdx != -1 && p.peers[peerIdx] != nil {
+		p.peers[peerIdx].State = PeerStateHot
+		p.updatePeerMetrics()
+	}
+}
+
 func (p *PeerGovernor) startOutboundConnections() {
 	// Skip outbound connections if disabled
 	if p.config.DisableOutbound {
@@ -217,8 +346,12 @@ func (p *PeerGovernor) createOutboundConnection(peer *Peer) {
 		conn, err := p.config.ConnManager.CreateOutboundConn(peer.Address)
 		if err == nil {
 			connId := conn.Id()
+			p.mu.Lock()
 			peer.ReconnectCount = 0
 			peer.setConnection(conn, true)
+			peer.State = PeerStateWarm
+			p.updatePeerMetrics()
+			p.mu.Unlock()
 			// Generate event
 			if p.config.EventBus != nil {
 				p.config.EventBus.Publish(
@@ -268,6 +401,7 @@ func (p *PeerGovernor) handleInboundConnectionEvent(evt event.Event) {
 		tmpPeer = &Peer{
 			Address: e.RemoteAddr.String(),
 			Source:  PeerSourceInboundConn,
+			State:   PeerStateCold,
 		}
 		// Add inbound peer
 		p.peers = append(
@@ -284,7 +418,9 @@ func (p *PeerGovernor) handleInboundConnectionEvent(evt event.Event) {
 	tmpPeer.setConnection(conn, false)
 	if tmpPeer.Connection != nil {
 		tmpPeer.Sharable = tmpPeer.Connection.VersionData.PeerSharing()
+		tmpPeer.State = PeerStateWarm
 	}
+	p.updatePeerMetrics()
 }
 
 func (p *PeerGovernor) handleConnectionClosedEvent(evt event.Event) {
@@ -307,6 +443,8 @@ func (p *PeerGovernor) handleConnectionClosedEvent(evt event.Event) {
 	peerIdx := p.peerIndexByConnId(e.ConnectionId)
 	if peerIdx != -1 && p.peers[peerIdx] != nil {
 		p.peers[peerIdx].Connection = nil
+		p.peers[peerIdx].State = PeerStateCold
+		p.updatePeerMetrics()
 		if p.peers[peerIdx].Source != PeerSourceInboundConn {
 			go p.createOutboundConnection(p.peers[peerIdx])
 		}

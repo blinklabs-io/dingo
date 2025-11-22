@@ -33,12 +33,21 @@ const (
 	PeerSourceInboundConn           = 6
 )
 
+type PeerState uint16
+
+const (
+	PeerStateCold PeerState = iota
+	PeerStateWarm
+	PeerStateHot
+)
+
 type Peer struct {
 	Connection     *PeerConnection
 	Address        string
 	ReconnectCount int
 	ReconnectDelay time.Duration
 	Source         PeerSource
+	State          PeerState
 	Sharable       bool
 }
 

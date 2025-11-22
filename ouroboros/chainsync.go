@@ -72,6 +72,9 @@ func (o *Ouroboros) chainsyncClientStart(connId ouroboros.ConnectionId) error {
 				intersectPoints,
 				tip.Point,
 			)
+			if o.PeerGov != nil {
+				o.PeerGov.SetPeerHotByConnId(connId)
+			}
 			return conn.ChainSync().Client.Sync(intersectPoints)
 		} else if len(o.config.IntersectPoints) > 0 {
 			// Start initial chainsync at specific point(s)
@@ -80,6 +83,9 @@ func (o *Ouroboros) chainsyncClientStart(connId ouroboros.ConnectionId) error {
 				o.config.IntersectPoints...,
 			)
 		}
+	}
+	if o.PeerGov != nil {
+		o.PeerGov.SetPeerHotByConnId(connId)
 	}
 	return conn.ChainSync().Client.Sync(intersectPoints)
 }

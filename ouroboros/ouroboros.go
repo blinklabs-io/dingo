@@ -35,6 +35,7 @@ import (
 	olocaltxsubmission "github.com/blinklabs-io/gouroboros/protocol/localtxsubmission"
 	opeersharing "github.com/blinklabs-io/gouroboros/protocol/peersharing"
 	otxsubmission "github.com/blinklabs-io/gouroboros/protocol/txsubmission"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 type Ouroboros struct {
@@ -54,6 +55,7 @@ type OuroborosConfig struct {
 	NetworkMagic    uint32
 	PeerSharing     bool
 	IntersectTip    bool
+	PromRegistry    prometheus.Registerer
 }
 
 func NewOuroboros(cfg OuroborosConfig) *Ouroboros {
@@ -61,10 +63,11 @@ func NewOuroboros(cfg OuroborosConfig) *Ouroboros {
 		cfg.Logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
 	}
 	cfg.Logger = cfg.Logger.With("component", "ouroboros")
-	return &Ouroboros{
+	o := &Ouroboros{
 		config:   cfg,
 		EventBus: cfg.EventBus,
 	}
+	return o
 }
 
 func (o *Ouroboros) ConfigureListeners(
