@@ -64,6 +64,9 @@ func (d *LedgerDelta) apply(ls *LedgerState, txn *database.Txn) error {
 				tr.Tx,
 				d.Point,
 				uint32(tr.Index), //nolint:gosec
+				0,                // updateEpoch
+				nil,              // pparamUpdates
+				nil,              // certDeposits
 				txn,
 			)
 			if err != nil {
@@ -72,39 +75,31 @@ func (d *LedgerDelta) apply(ls *LedgerState, txn *database.Txn) error {
 			// Stop processing this transaction
 			continue
 		}
+		// Extract protocol parameter updates
+		updateEpoch, paramUpdates := tr.Tx.ProtocolParameterUpdates()
+
+		// Calculate certificate deposits
+		certs := tr.Tx.Certificates()
+		certDeposits := make(map[int]uint64)
+		for i, cert := range certs {
+			deposit, err := ls.calculateCertificateDeposit(cert, d.BlockEraId)
+			if err != nil {
+				return fmt.Errorf("calculate certificate deposit: %w", err)
+			}
+			certDeposits[i] = deposit
+		}
+
 		err := ls.db.SetTransaction(
 			tr.Tx,
 			d.Point,
 			uint32(tr.Index), //nolint:gosec
+			updateEpoch,
+			paramUpdates,
+			certDeposits,
 			txn,
 		)
 		if err != nil {
 			return fmt.Errorf("record transaction: %w", err)
-		}
-		// Protocol parameter updates
-		if updateEpoch, paramUpdates := tr.Tx.ProtocolParameterUpdates(); updateEpoch > 0 {
-			for genesisHash, update := range paramUpdates {
-				err := ls.db.SetPParamUpdate(
-					genesisHash.Bytes(),
-					update.Cbor(),
-					d.Point.Slot,
-					updateEpoch,
-					txn,
-				)
-				if err != nil {
-					return fmt.Errorf("set pparam update: %w", err)
-				}
-			}
-		}
-		// Certificates
-		err = ls.processTransactionCertificates(
-			txn,
-			d.Point,
-			tr.Tx.Certificates(),
-			d.BlockEraId,
-		)
-		if err != nil {
-			return fmt.Errorf("process transaction certificates: %w", err)
 		}
 	}
 	return nil
