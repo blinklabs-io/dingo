@@ -109,6 +109,14 @@ func (c *ConnectionManager) initMetrics() {
 		Name: metricNamePrefix + "duplexConns",
 		Help: "number of peers with duplex connections",
 	})
+	c.metrics.fullDuplexConns = promautoFactory.NewGauge(prometheus.GaugeOpts{
+		Name: metricNamePrefix + "fullDuplexConns",
+		Help: "number of full-duplex connections",
+	})
+	c.metrics.prunableConns = promautoFactory.NewGauge(prometheus.GaugeOpts{
+		Name: metricNamePrefix + "prunableConns",
+		Help: "number of prunable connections",
+	})
 }
 
 func (c *ConnectionManager) updateConnectionMetrics() {
