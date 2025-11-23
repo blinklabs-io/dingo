@@ -15,11 +15,10 @@
 package blob
 
 import (
-	"log/slog"
+	"fmt"
 
-	badgerPlugin "github.com/blinklabs-io/dingo/database/plugin/blob/badger"
+	"github.com/blinklabs-io/dingo/database/plugin"
 	badger "github.com/dgraph-io/badger/v4"
-	"github.com/prometheus/client_golang/prometheus"
 )
 
 type BlobStore interface {
@@ -32,12 +31,22 @@ type BlobStore interface {
 	SetCommitTimestamp(*badger.Txn, int64) error
 }
 
-// For now, this always returns a badger plugin
-func New(
-	pluginName, dataDir string,
-	logger *slog.Logger,
-	promRegistry prometheus.Registerer,
-	badgerCacheSize int64,
-) (BlobStore, error) {
-	return badgerPlugin.New(dataDir, logger, promRegistry, badgerCacheSize)
+// New returns the started blob plugin selected by name
+func New(pluginName string) (BlobStore, error) {
+	// Get and start the plugin
+	p, err := plugin.StartPlugin(plugin.PluginTypeBlob, pluginName)
+	if err != nil {
+		return nil, err
+	}
+
+	// Type assert to BlobStore interface
+	blobStore, ok := p.(BlobStore)
+	if !ok {
+		return nil, fmt.Errorf(
+			"plugin '%s' does not implement BlobStore interface",
+			pluginName,
+		)
+	}
+
+	return blobStore, nil
 }

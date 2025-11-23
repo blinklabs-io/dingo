@@ -27,10 +27,11 @@ type TestTable struct {
 }
 
 var dbConfig = &database.Config{
-	BlobCacheSize: 1 << 20,
-	Logger:        nil,
-	PromRegistry:  nil,
-	DataDir:       "",
+	Logger:         nil,
+	PromRegistry:   nil,
+	DataDir:        "",
+	BlobPlugin:     "badger",
+	MetadataPlugin: "sqlite",
 }
 
 // TestInMemorySqliteMultipleTransaction tests that our sqlite connection allows multiple

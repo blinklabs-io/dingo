@@ -48,7 +48,10 @@ func (b *BlobStoreGCS) GetCommitTimestamp(ctx context.Context) (int64, error) {
 				err,
 			)
 			if migrateErr := b.SetCommitTimestamp(ctx, ts); migrateErr != nil {
-				b.logger.Errorf("failed to migrate plaintext commit timestamp: %v", migrateErr)
+				b.logger.Errorf(
+					"failed to migrate plaintext commit timestamp: %v",
+					migrateErr,
+				)
 			}
 			return ts, nil
 		}

@@ -105,7 +105,7 @@ func saveAccountIfNew(account *models.Account, txn *gorm.DB) error {
 }
 
 // saveCertRecord saves a certificate record and returns any error
-func saveCertRecord(record interface{}, txn *gorm.DB) error {
+func saveCertRecord(record any, txn *gorm.DB) error {
 	result := txn.Create(record)
 	return result.Error
 }

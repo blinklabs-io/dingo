@@ -71,10 +71,9 @@ func (n *Node) Run() error {
 	// Load database
 	dbNeedsRecovery := false
 	dbConfig := &database.Config{
-		BlobCacheSize: n.config.badgerCacheSize,
-		DataDir:       n.config.dataDir,
-		Logger:        n.config.logger,
-		PromRegistry:  n.config.promRegistry,
+		DataDir:      n.config.dataDir,
+		Logger:       n.config.logger,
+		PromRegistry: n.config.promRegistry,
 	}
 	db, err := database.New(dbConfig)
 	if db == nil {

@@ -41,7 +41,6 @@ type Config struct {
 	tlsKeyFilePath     string
 	intersectPoints    []ocommon.Point
 	listeners          []ListenerConfig
-	badgerCacheSize    int64
 	mempoolCapacity    int64
 	outboundSourcePort uint
 	utxorpcPort        uint
@@ -245,14 +244,6 @@ func WithTracing(tracing bool) ConfigOptionFunc {
 func WithTracingStdout(stdout bool) ConfigOptionFunc {
 	return func(c *Config) {
 		c.tracingStdout = stdout
-	}
-}
-
-// WithBadgerCacheSize sets the maximum cache size (in bytes).This controls memory usage by limiting the size of block and index caches.
-// If not set, the default size defined in internal config will be used.
-func WithBadgerCacheSize(cacheSize int64) ConfigOptionFunc {
-	return func(c *Config) {
-		c.badgerCacheSize = cacheSize
 	}
 }
 

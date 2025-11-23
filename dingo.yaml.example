@@ -9,8 +9,51 @@ bindAddr: "0.0.0.0"
 # Can be overridden with the config environment variable
 cardanoConfig: "./config/cardano/preview/config.json"
 
-# A directory which contains the ledger database files
-databasePath: ".dingo"
+# Database configuration
+database:
+  # Blob storage plugin configuration
+  blob:
+    # Plugin to use for blob storage (badger, gcs, s3)
+    plugin: "badger"
+    # Configuration options for each plugin
+    badger:
+      # Data directory for BadgerDB storage
+      data-dir: ".dingo/badger"
+      # Block cache size in bytes (default: 805306368 ~768MB)
+      block-cache-size: 805306368
+      # Index cache size in bytes (default: 268435456 ~256MB)
+      index-cache-size: 268435456
+      # Enable garbage collection (default: true)
+      gc: true
+    gcs:
+      # Google Cloud Storage bucket name
+      bucket: ""
+      # Google Cloud project ID
+      project-id: ""
+      # Path prefix within the bucket
+      prefix: ""
+      # Path to service account credentials file (optional - uses Application Default Credentials if not set)
+      credentials-file: ""
+    s3:
+      # AWS S3 bucket name
+      bucket: ""
+      # AWS region
+      region: ""
+      # Path prefix within the bucket
+      prefix: ""
+      # AWS access key ID (optional - uses default credential chain if not set)
+      access-key-id: ""
+      # AWS secret access key (optional - uses default credential chain if not set)
+      secret-access-key: ""
+
+  # Metadata storage plugin configuration
+  metadata:
+    # Plugin to use for metadata storage (sqlite)
+    plugin: "sqlite"
+    # Configuration options for each plugin
+    sqlite:
+      # Data directory for SQLite database file
+      data-dir: ".dingo/metadata.db"
 
 # Path to the UNIX domain socket file used by the server
 socketPath: "dingo.socket"
@@ -51,10 +94,6 @@ utxorpcPort: 9090
 # Ignore prior chain history and start from current tip (default: false)
 # This is experimental and may break — use with caution
 intersectTip: false
-
-# Maximum cache size in bytes used by BadgerDB for block/index cache
-# Default: 1073741824 (1 GB)
-badgerCacheSize: 1073741824
 
 # Maximum total size (in bytes) of all transactions allowed in the mempool.
 # Transactions exceeding this limit will be rejected.
