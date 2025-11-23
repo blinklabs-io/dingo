@@ -220,7 +220,8 @@ func (p *PeerGovernor) LoadTopologyConfig(
 			if existingPeerIdx >= 0 {
 				existingPeer := p.peers[existingPeerIdx]
 				// Preserve active inbound connection state
-				if existingPeer.Source == PeerSourceInboundConn && existingPeer.Connection != nil {
+				if existingPeer.Source == PeerSourceInboundConn &&
+					existingPeer.Connection != nil {
 					tmpPeer.Connection = existingPeer.Connection
 					tmpPeer.State = existingPeer.State
 					tmpPeer.ReconnectCount = existingPeer.ReconnectCount
@@ -228,7 +229,9 @@ func (p *PeerGovernor) LoadTopologyConfig(
 					tmpPeer.Sharable = existingPeer.Sharable
 				}
 				// Remove the existing peer
-				p.peers = append(p.peers[:existingPeerIdx], p.peers[existingPeerIdx+1:]...)
+				p.peers = append(
+					p.peers[:existingPeerIdx],
+					p.peers[existingPeerIdx+1:]...)
 			}
 			p.peers = append(p.peers, tmpPeer)
 		}
@@ -257,7 +260,8 @@ func (p *PeerGovernor) LoadTopologyConfig(
 			if existingPeerIdx >= 0 {
 				existingPeer := p.peers[existingPeerIdx]
 				// Preserve active inbound connection state
-				if existingPeer.Source == PeerSourceInboundConn && existingPeer.Connection != nil {
+				if existingPeer.Source == PeerSourceInboundConn &&
+					existingPeer.Connection != nil {
 					tmpPeer.Connection = existingPeer.Connection
 					tmpPeer.State = existingPeer.State
 					tmpPeer.ReconnectCount = existingPeer.ReconnectCount
@@ -265,7 +269,9 @@ func (p *PeerGovernor) LoadTopologyConfig(
 					tmpPeer.Sharable = existingPeer.Sharable
 				}
 				// Remove the existing peer
-				p.peers = append(p.peers[:existingPeerIdx], p.peers[existingPeerIdx+1:]...)
+				p.peers = append(
+					p.peers[:existingPeerIdx],
+					p.peers[existingPeerIdx+1:]...)
 			}
 			p.peers = append(p.peers, tmpPeer)
 		}
