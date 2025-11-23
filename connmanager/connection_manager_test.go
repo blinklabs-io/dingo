@@ -109,7 +109,7 @@ func TestConnectionManagerConnError(t *testing.T) {
 		if i == testIdx {
 			expectedConnId = oConn.Id()
 		}
-		connManager.AddConnection(oConn)
+		connManager.AddConnection(oConn, false, "127.0.0.1:1234")
 		connIds = append(connIds, oConn.Id())
 	}
 	select {
@@ -167,7 +167,7 @@ func TestConnectionManagerConnClosed(t *testing.T) {
 		t.Fatalf("unexpected error when creating Ouroboros object: %s", err)
 	}
 	expectedConnId = oConn.Id()
-	connManager.AddConnection(oConn)
+	connManager.AddConnection(oConn, false, "127.0.0.1:1234")
 	time.AfterFunc(
 		1*time.Second,
 		func() {

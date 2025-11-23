@@ -88,6 +88,16 @@ func (c *ConnectionManager) CreateOutboundConn(
 		"role", "client",
 		"connection_id", oConn.Id().String(),
 	)
-	c.AddConnection(oConn)
+	peerAddr := address
+	if tmpConn.RemoteAddr() != nil {
+		peerAddr = tmpConn.RemoteAddr().String()
+	}
+	c.config.Logger.Debug(
+		"outbound connection established",
+		"target_address", address,
+		"resolved_address", peerAddr,
+		"connection_id", oConn.Id().String(),
+	)
+	c.AddConnection(oConn, false, peerAddr)
 	return oConn, nil
 }
