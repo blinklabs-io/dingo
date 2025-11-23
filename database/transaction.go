@@ -21,48 +21,6 @@ import (
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
-func (d *Database) processCertificate(
-	cert lcommon.Certificate,
-	deposit uint64,
-	slot uint64,
-	txn *Txn,
-) error {
-	switch c := cert.(type) {
-	case *lcommon.DeregistrationCertificate:
-		return d.SetDeregistration(c, slot, txn)
-	case *lcommon.DeregistrationDrepCertificate:
-		return d.SetDeregistrationDrep(c, slot, deposit, txn)
-	case *lcommon.UpdateDrepCertificate:
-		return d.SetUpdateDrep(c, slot, txn)
-	case *lcommon.PoolRegistrationCertificate:
-		return d.SetPoolRegistration(c, slot, deposit, txn)
-	case *lcommon.PoolRetirementCertificate:
-		return d.SetPoolRetirement(c, slot, txn)
-	case *lcommon.RegistrationCertificate:
-		return d.SetRegistration(c, slot, deposit, txn)
-	case *lcommon.RegistrationDrepCertificate:
-		return d.SetRegistrationDrep(c, slot, deposit, txn)
-	case *lcommon.StakeDelegationCertificate:
-		return d.SetStakeDelegation(c, slot, txn)
-	case *lcommon.StakeDeregistrationCertificate:
-		return d.SetStakeDeregistration(c, slot, txn)
-	case *lcommon.StakeRegistrationCertificate:
-		return d.SetStakeRegistration(c, slot, deposit, txn)
-	case *lcommon.StakeRegistrationDelegationCertificate:
-		return d.SetStakeRegistrationDelegation(c, slot, deposit, txn)
-	case *lcommon.StakeVoteDelegationCertificate:
-		return d.SetStakeVoteDelegation(c, slot, txn)
-	case *lcommon.StakeVoteRegistrationDelegationCertificate:
-		return d.SetStakeVoteRegistrationDelegation(c, slot, deposit, txn)
-	case *lcommon.VoteDelegationCertificate:
-		return d.SetVoteDelegation(c, slot, txn)
-	case *lcommon.VoteRegistrationDelegationCertificate:
-		return d.SetVoteRegistrationDelegation(c, slot, deposit, txn)
-	default:
-		return fmt.Errorf("unsupported certificate type %T", cert)
-	}
-}
-
 func (d *Database) SetTransaction(
 	tx lcommon.Transaction,
 	point ocommon.Point,
@@ -89,7 +47,13 @@ func (d *Database) SetTransaction(
 			}
 		}
 	}
-	err := d.metadata.SetTransaction(tx, point, idx, txn.Metadata())
+	err := d.metadata.SetTransaction(
+		tx,
+		point,
+		idx,
+		certDeposits,
+		txn.Metadata(),
+	)
 	if err != nil {
 		return err
 	}
@@ -107,15 +71,6 @@ func (d *Database) SetTransaction(
 			if err != nil {
 				return fmt.Errorf("set pparam update: %w", err)
 			}
-		}
-	}
-
-	// Certificates
-	certs := tx.Certificates()
-	for i, tmpCert := range certs {
-		deposit := certDeposits[i]
-		if err := d.processCertificate(tmpCert, deposit, point.Slot, txn); err != nil {
-			return err
 		}
 	}
 

@@ -19,7 +19,6 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
-	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
@@ -98,17 +97,6 @@ type MetadataStore interface {
 		uint64, // slot
 		*gorm.DB,
 	) error
-	SetDeregistration(
-		*lcommon.DeregistrationCertificate,
-		uint64, // slot
-		*gorm.DB,
-	) error
-	SetDeregistrationDrep(
-		*lcommon.DeregistrationDrepCertificate,
-		uint64, // slot
-		types.Uint64, // deposit
-		*gorm.DB,
-	) error
 	SetEpoch(
 		uint64, // slot
 		uint64, // epoch
@@ -118,22 +106,11 @@ type MetadataStore interface {
 		uint, // lengthInSlots
 		*gorm.DB,
 	) error
-	SetPoolRegistration(
-		*lcommon.PoolRegistrationCertificate,
-		uint64, // slot
-		types.Uint64, // deposit
-		*gorm.DB,
-	) error
-	SetPoolRetirement(
-		*lcommon.PoolRetirementCertificate,
-		uint64, // slot
-		*gorm.DB,
-	) error
 	SetPParams(
-		[]byte, // pparams
+		[]byte, // params
 		uint64, // slot
 		uint64, // epoch
-		uint, // era
+		uint, // eraId
 		*gorm.DB,
 	) error
 	SetPParamUpdate(
@@ -141,51 +118,6 @@ type MetadataStore interface {
 		[]byte, // update
 		uint64, // slot
 		uint64, // epoch
-		*gorm.DB,
-	) error
-	SetRegistration(
-		*lcommon.RegistrationCertificate,
-		uint64, // slot
-		types.Uint64, // deposit
-		*gorm.DB,
-	) error
-	SetRegistrationDrep(
-		*lcommon.RegistrationDrepCertificate,
-		uint64, // slot
-		types.Uint64, // deposit
-		*gorm.DB,
-	) error
-	SetStakeDelegation(
-		*lcommon.StakeDelegationCertificate,
-		uint64, // slot
-		*gorm.DB,
-	) error
-	SetStakeDeregistration(
-		*lcommon.StakeDeregistrationCertificate,
-		uint64, // slot
-		*gorm.DB,
-	) error
-	SetStakeRegistration(
-		*lcommon.StakeRegistrationCertificate,
-		uint64, // slot
-		types.Uint64, // deposit
-		*gorm.DB,
-	) error
-	SetStakeRegistrationDelegation(
-		*lcommon.StakeRegistrationDelegationCertificate,
-		uint64, // slot
-		types.Uint64, // deposit
-		*gorm.DB,
-	) error
-	SetStakeVoteDelegation(
-		*lcommon.StakeVoteDelegationCertificate,
-		uint64, // slot
-		*gorm.DB,
-	) error
-	SetStakeVoteRegistrationDelegation(
-		*lcommon.StakeVoteRegistrationDelegationCertificate,
-		uint64, // slot
-		types.Uint64, // deposit
 		*gorm.DB,
 	) error
 	SetTip(
@@ -196,22 +128,7 @@ type MetadataStore interface {
 		lcommon.Transaction,
 		ocommon.Point,
 		uint32, // idx
-		*gorm.DB,
-	) error
-	SetUpdateDrep(
-		*lcommon.UpdateDrepCertificate,
-		uint64, // slot
-		*gorm.DB,
-	) error
-	SetVoteDelegation(
-		*lcommon.VoteDelegationCertificate,
-		uint64, // slot
-		*gorm.DB,
-	) error
-	SetVoteRegistrationDelegation(
-		*lcommon.VoteRegistrationDelegationCertificate,
-		uint64, // slot
-		types.Uint64, // deposit
+		map[int]uint64, // certDeposits
 		*gorm.DB,
 	) error
 
