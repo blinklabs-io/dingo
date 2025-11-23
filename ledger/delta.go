@@ -80,7 +80,7 @@ func (d *LedgerDelta) apply(ls *LedgerState, txn *database.Txn) error {
 
 		// Calculate certificate deposits
 		certs := tr.Tx.Certificates()
-		certDeposits := make(map[int]uint64)
+		certDeposits := make(map[int]uint64, len(certs))
 		for i, cert := range certs {
 			deposit, err := ls.calculateCertificateDeposit(cert, d.BlockEraId)
 			if err != nil {

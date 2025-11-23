@@ -59,6 +59,7 @@ func (d *Database) processCertificate(
 	case *lcommon.VoteRegistrationDelegationCertificate:
 		return d.SetVoteRegistrationDelegation(c, slot, deposit, txn)
 	default:
+		// Fail fast on unsupported certificate types to ensure new types are properly implemented
 		return fmt.Errorf("unsupported certificate type %T", cert)
 	}
 }
@@ -88,34 +89,32 @@ func (d *Database) SetTransaction(
 				return err
 			}
 		}
-	}
-	err := d.metadata.SetTransaction(tx, point, idx, txn.Metadata())
-	if err != nil {
-		return err
-	}
 
-	// Protocol parameter updates
-	if updateEpoch > 0 {
-		for genesisHash, update := range pparamUpdates {
-			err := d.SetPParamUpdate(
-				genesisHash.Bytes(),
-				update.Cbor(),
-				point.Slot,
-				updateEpoch,
-				txn,
-			)
-			if err != nil {
-				return fmt.Errorf("set pparam update: %w", err)
+		// Protocol parameter updates
+		if updateEpoch > 0 {
+			for genesisHash, update := range pparamUpdates {
+				err := d.SetPParamUpdate(
+					genesisHash.Bytes(),
+					update.Cbor(),
+					point.Slot,
+					updateEpoch,
+					txn,
+				)
+				if err != nil {
+					return fmt.Errorf("set pparam update: %w", err)
+				}
 			}
 		}
-	}
 
-	// Certificates
-	certs := tx.Certificates()
-	for i, tmpCert := range certs {
-		deposit := certDeposits[i]
-		if err := d.processCertificate(tmpCert, deposit, point.Slot, txn); err != nil {
-			return err
+		// Certificates
+		if certDeposits != nil {
+			certs := tx.Certificates()
+			for i, tmpCert := range certs {
+				deposit := certDeposits[i]
+				if err := d.processCertificate(tmpCert, deposit, point.Slot, txn); err != nil {
+					return err
+				}
+			}
 		}
 	}
 
