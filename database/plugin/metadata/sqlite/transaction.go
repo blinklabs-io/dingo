@@ -87,8 +87,10 @@ func (d *MetadataStoreSqlite) getOrCreateAccount(
 func saveAccountIfNew(account *models.Account, txn *gorm.DB) error {
 	if account.ID == 0 {
 		result := txn.Clauses(clause.OnConflict{
-			Columns:   []clause.Column{{Name: "staking_key"}},
-			UpdateAll: true,
+			Columns: []clause.Column{{Name: "staking_key"}},
+			DoUpdates: clause.AssignmentColumns(
+				[]string{"pool", "drep"},
+			),
 		}).Create(account)
 		if result.Error != nil {
 			return result.Error
