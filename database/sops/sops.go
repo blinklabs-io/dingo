@@ -22,6 +22,7 @@ import (
 	sopsapi "github.com/getsops/sops/v3"
 	"github.com/getsops/sops/v3/aes"
 	scommon "github.com/getsops/sops/v3/cmd/sops/common"
+	"github.com/getsops/sops/v3/config"
 	"github.com/getsops/sops/v3/decrypt"
 	"github.com/getsops/sops/v3/gcpkms"
 	skeys "github.com/getsops/sops/v3/keys"
@@ -31,7 +32,7 @@ import (
 )
 
 func Decrypt(data []byte) ([]byte, error) {
-	ret, err := decrypt.Data(data, "json")
+	ret, err := decrypt.Data(data, "binary")
 	if err != nil {
 		return nil, err
 	}
@@ -39,8 +40,9 @@ func Decrypt(data []byte) ([]byte, error) {
 }
 
 func Encrypt(data []byte) ([]byte, error) {
-	input := &jsonstore.Store{}
-	output := &jsonstore.Store{}
+	storeConfig := &config.JSONBinaryStoreConfig{}
+	input := jsonstore.NewBinaryStore(storeConfig)
+	output := jsonstore.NewBinaryStore(storeConfig)
 
 	// prevent double encryption
 	branches, err := input.LoadPlainFile(data)
@@ -89,8 +91,7 @@ func getMasterKeyGroupsFromEnv() ([]sopsapi.KeyGroup, error) {
 	keyGroups := []sopsapi.KeyGroup{}
 
 	// Configure Google KMS from env to encrypt
-	rid := os.Getenv("DINGO_GCP_KMS_RESOURCE_ID")
-	if rid != "" {
+	if rid := os.Getenv("DINGO_GCP_KMS_RESOURCE_ID"); rid != "" {
 		keys := []skeys.MasterKey{}
 		for _, k := range gcpkms.MasterKeysFromResourceIDString(rid) {
 			keys = append(keys, k)
@@ -98,10 +99,6 @@ func getMasterKeyGroupsFromEnv() ([]sopsapi.KeyGroup, error) {
 		if len(keys) > 0 {
 			keyGroups = append(keyGroups, keys)
 		}
-	} else {
-		return nil, errors.New(
-			"DINGO_GCP_KMS_RESOURCE_ID not set: SOPS requires at least one master key to encrypt",
-		)
 	}
 
 	// Configure AWS KMS from env to encrypt
@@ -114,10 +111,6 @@ func getMasterKeyGroupsFromEnv() ([]sopsapi.KeyGroup, error) {
 		if len(keys) > 0 {
 			keyGroups = append(keyGroups, keys)
 		}
-	} else {
-		return nil, errors.New(
-			"DINGO_AWS_KMS_KEY_ARNS not set: SOPS requires at least one master key to encrypt",
-		)
 	}
 
 	if len(keyGroups) == 0 {

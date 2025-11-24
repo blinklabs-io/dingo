@@ -16,6 +16,7 @@ package gcs
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"math/big"
 
@@ -40,6 +41,17 @@ func (b *BlobStoreGCS) GetCommitTimestamp(ctx context.Context) (int64, error) {
 
 	plaintext, err := dingosops.Decrypt(ciphertext)
 	if err != nil {
+		if !json.Valid(ciphertext) {
+			ts := new(big.Int).SetBytes(ciphertext).Int64()
+			b.logger.Warningf(
+				"commit timestamp stored plaintext in GCS, migrating to SOPS encryption: %v",
+				err,
+			)
+			if migrateErr := b.SetCommitTimestamp(ctx, ts); migrateErr != nil {
+				b.logger.Errorf("failed to migrate plaintext commit timestamp: %v", migrateErr)
+			}
+			return ts, nil
+		}
 		b.logger.Errorf("failed to decrypt commit timestamp: %v", err)
 		return 0, err
 	}
