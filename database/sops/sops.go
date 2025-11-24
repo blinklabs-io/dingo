@@ -25,6 +25,7 @@ import (
 	"github.com/getsops/sops/v3/decrypt"
 	"github.com/getsops/sops/v3/gcpkms"
 	skeys "github.com/getsops/sops/v3/keys"
+	awskms "github.com/getsops/sops/v3/kms"
 	jsonstore "github.com/getsops/sops/v3/stores/json"
 	"github.com/getsops/sops/v3/version"
 )
@@ -56,20 +57,12 @@ func Encrypt(data []byte) ([]byte, error) {
 
 	// create tree and encrypt
 	tree := sopsapi.Tree{Branches: branches}
-
-	// Configure Google KMS from env to encrypt
-	rid := os.Getenv("DINGO_GCP_KMS_RESOURCE_ID")
-	if rid == "" {
-		return nil, errors.New(
-			"DINGO_GCP_KMS_RESOURCE_ID not set: SOPS requires at least one master key to encrypt",
-		)
-	}
-	keys := []skeys.MasterKey{}
-	for _, k := range gcpkms.MasterKeysFromResourceIDString(rid) {
-		keys = append(keys, k)
+	keyGroups, err := getMasterKeyGroupsFromEnv()
+	if err != nil {
+		return nil, err
 	}
 	tree.Metadata = sopsapi.Metadata{
-		KeyGroups: []sopsapi.KeyGroup{keys},
+		KeyGroups: keyGroups,
 		Version:   version.Version,
 	}
 
@@ -90,4 +83,48 @@ func Encrypt(data []byte) ([]byte, error) {
 		return nil, fmt.Errorf("failed output: %w", err)
 	}
 	return encrypted, nil
+}
+
+func getMasterKeyGroupsFromEnv() ([]sopsapi.KeyGroup, error) {
+	keyGroups := []sopsapi.KeyGroup{}
+
+	// Configure Google KMS from env to encrypt
+	rid := os.Getenv("DINGO_GCP_KMS_RESOURCE_ID")
+	if rid != "" {
+		keys := []skeys.MasterKey{}
+		for _, k := range gcpkms.MasterKeysFromResourceIDString(rid) {
+			keys = append(keys, k)
+		}
+		if len(keys) > 0 {
+			keyGroups = append(keyGroups, keys)
+		}
+	} else {
+		return nil, errors.New(
+			"DINGO_GCP_KMS_RESOURCE_ID not set: SOPS requires at least one master key to encrypt",
+		)
+	}
+
+	// Configure AWS KMS from env to encrypt
+	if arns := os.Getenv("DINGO_AWS_KMS_KEY_ARNS"); arns != "" {
+		keys := []skeys.MasterKey{}
+		profile := os.Getenv("DINGO_AWS_KMS_PROFILE")
+		for _, k := range awskms.MasterKeysFromArnString(arns, nil, profile) {
+			keys = append(keys, k)
+		}
+		if len(keys) > 0 {
+			keyGroups = append(keyGroups, keys)
+		}
+	} else {
+		return nil, errors.New(
+			"DINGO_AWS_KMS_RESOURCE_ID not set: SOPS requires at least one master key to encrypt",
+		)
+	}
+
+	if len(keyGroups) == 0 {
+		return nil, errors.New(
+			"SOPS requires at least one master key to encrypt: set DINGO_GCP_KMS_RESOURCE_ID and/or DINGO_AWS_KMS_KEY_ARNS",
+		)
+	}
+
+	return keyGroups, nil
 }

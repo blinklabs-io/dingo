@@ -17,19 +17,35 @@ package aws
 import (
 	"context"
 	"math/big"
+
+	dingosops "github.com/blinklabs-io/dingo/database/sops"
 )
 
 const commitTimestampBlobKey = "metadata_commit_timestamp"
 
 func (b *BlobStoreS3) GetCommitTimestamp(ctx context.Context) (int64, error) {
-	data, err := b.Get(ctx, commitTimestampBlobKey)
+	ciphertext, err := b.Get(ctx, commitTimestampBlobKey)
 	if err != nil {
 		return 0, err
 	}
-	return new(big.Int).SetBytes(data).Int64(), nil
+	plaintext, err := dingosops.Decrypt(ciphertext)
+	if err != nil {
+		b.logger.Errorf("failed to decrypt commit timestamp: %v", err)
+		return 0, err
+	}
+	return new(big.Int).SetBytes(plaintext).Int64(), nil
 }
 
 func (b *BlobStoreS3) SetCommitTimestamp(ctx context.Context, ts int64) error {
 	raw := new(big.Int).SetInt64(ts).Bytes()
-	return b.Put(ctx, commitTimestampBlobKey, raw)
+	ciphertext, err := dingosops.Encrypt(raw)
+	if err != nil {
+		b.logger.Errorf("failed to encrypt commit timestamp: %v", err)
+		return err
+	}
+	if err := b.Put(ctx, commitTimestampBlobKey, ciphertext); err != nil {
+		return err
+	}
+	b.logger.Infof("commit timestamp %d written to S3", ts)
+	return nil
 }
