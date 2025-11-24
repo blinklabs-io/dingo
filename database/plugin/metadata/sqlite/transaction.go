@@ -308,7 +308,6 @@ func (d *MetadataStoreSqlite) SetTransaction(
 	}
 	ws := tx.Witnesses()
 	if ws != nil {
-
 		// Add Vkey Witnesses
 		for _, vkey := range ws.Vkey() {
 			keyWitness := models.KeyWitness{
