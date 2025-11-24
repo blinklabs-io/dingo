@@ -66,6 +66,10 @@ type MetadataStore interface {
 		lcommon.Blake2b256,
 		*gorm.DB,
 	) (*models.Datum, error)
+	GetDrep(
+		[]byte, // credential
+		*gorm.DB,
+	) (models.Drep, error)
 	GetPParams(
 		uint64, // epoch
 		*gorm.DB,
