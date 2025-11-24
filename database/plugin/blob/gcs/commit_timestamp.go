@@ -41,7 +41,7 @@ func (b *BlobStoreGCS) GetCommitTimestamp(ctx context.Context) (int64, error) {
 
 	plaintext, err := dingosops.Decrypt(ciphertext)
 	if err != nil {
-		if !json.Valid(ciphertext) {
+		if !json.Valid(ciphertext) && len(ciphertext) <= 8 {
 			ts := new(big.Int).SetBytes(ciphertext).Int64()
 			b.logger.Warningf(
 				"commit timestamp stored plaintext in GCS, migrating to SOPS encryption: %v",
