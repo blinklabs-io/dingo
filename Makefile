@@ -13,9 +13,12 @@ GOMODULE=$(shell grep ^module $(ROOT_DIR)/go.mod | awk '{ print $$2 }')
 # Set version strings based on git tag and current ref
 GO_LDFLAGS=-ldflags "-s -w -X '$(GOMODULE)/internal/version.Version=$(shell git describe --tags --exact-match 2>/dev/null)' -X '$(GOMODULE)/internal/version.CommitHash=$(shell git rev-parse --short HEAD)'"
 
-.PHONY: build mod-tidy clean format golines test
+.PHONY: all build mod-tidy clean format golines test bench test-load-profile
 
-# Alias for building program binary
+# Default target
+all: build test bench
+
+# Build target
 build: $(BINARIES)
 
 # Builds and installs binary in ~/.local/bin
@@ -43,9 +46,18 @@ golines:
 test: mod-tidy
 	go test -v -race ./...
 
+bench: mod-tidy
+	go test -run=^$$ -bench=. -benchmem ./...
+
 test-load:
 	rm -rf .dingo
 	go run ./cmd/dingo load database/immutable/testdata
+
+test-load-profile:
+	rm -rf .dingo dingo
+	go build -o dingo ./cmd/dingo
+	./dingo --cpuprofile=cpu.prof --memprofile=mem.prof load database/immutable/testdata
+	@echo "Profiling complete. Run 'go tool pprof cpu.prof' or 'go tool pprof mem.prof' to analyze"
 
 # Build our program binaries
 # Depends on GO_FILES to determine when rebuild is needed
