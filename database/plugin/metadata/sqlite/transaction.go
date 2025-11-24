@@ -626,6 +626,35 @@ func (d *MetadataStoreSqlite) SetTransaction(
 				if err := saveCertRecord(&tmpReg, txn); err != nil {
 					return fmt.Errorf("process certificate: %w", err)
 				}
+			case *lcommon.DeregistrationDrepCertificate:
+				drepCredential := c.DrepCredential.Credential[:]
+
+				tmpDereg := models.DeregistrationDrep{
+					DrepCredential: drepCredential,
+					AddedSlot:      point.Slot,
+					DepositAmount:  types.Uint64(deposit),
+					CertificateID:  uint(i), //nolint:gosec
+				}
+
+				if err := saveCertRecord(&tmpDereg, txn); err != nil {
+					return fmt.Errorf("process certificate: %w", err)
+				}
+			case *lcommon.UpdateDrepCertificate:
+				drepCredential := c.DrepCredential.Credential[:]
+
+				tmpUpdate := models.UpdateDrep{
+					Credential:    drepCredential,
+					AddedSlot:     point.Slot,
+					CertificateID: uint(i), //nolint:gosec
+				}
+				if c.Anchor != nil {
+					tmpUpdate.AnchorUrl = c.Anchor.Url
+					tmpUpdate.AnchorHash = c.Anchor.DataHash[:]
+				}
+
+				if err := saveCertRecord(&tmpUpdate, txn); err != nil {
+					return fmt.Errorf("process certificate: %w", err)
+				}
 			case *lcommon.StakeVoteRegistrationDelegationCertificate:
 				stakeKey := c.StakeCredential.Credential[:]
 				tmpAccount, err := d.getOrCreateAccount(stakeKey, txn)
@@ -674,6 +703,70 @@ func (d *MetadataStoreSqlite) SetTransaction(
 				}
 
 				if err := saveCertRecord(&tmpReg, txn); err != nil {
+					return fmt.Errorf("process certificate: %w", err)
+				}
+			case *lcommon.VoteDelegationCertificate:
+				stakeKey := c.StakeCredential.Credential[:]
+				tmpAccount, err := d.GetAccount(stakeKey, txn)
+				if err != nil {
+					return fmt.Errorf("process certificate: %w", err)
+				}
+				if tmpAccount == nil {
+					d.logger.Warn("delegating vote for non-existent account", "hash", stakeKey)
+					tmpAccount = &models.Account{
+						StakingKey: stakeKey,
+					}
+					result := txn.Clauses(clause.OnConflict{
+						Columns:   []clause.Column{{Name: "staking_key"}},
+						UpdateAll: true,
+					}).Create(&tmpAccount)
+					if result.Error != nil {
+						return fmt.Errorf("process certificate: %w", result.Error)
+					}
+				}
+
+				tmpAccount.Drep = c.Drep.Credential[:]
+
+				tmpItem := models.VoteDelegation{
+					StakingKey:    stakeKey,
+					Drep:          c.Drep.Credential[:],
+					AddedSlot:     point.Slot,
+					CertificateID: uint(i), //nolint:gosec
+				}
+
+				if err := saveAccountIfNew(tmpAccount, txn); err != nil {
+					return fmt.Errorf("process certificate: %w", err)
+				}
+
+				if err := saveCertRecord(&tmpItem, txn); err != nil {
+					return fmt.Errorf("process certificate: %w", err)
+				}
+			case *lcommon.AuthCommitteeHotCertificate:
+				coldCredential := c.ColdCredential.Credential[:]
+				hotCredential := c.HotCredential.Credential[:]
+
+				tmpAuth := models.AuthCommitteeHot{
+					ColdCredential: coldCredential,
+					HostCredential: hotCredential,
+					AddedSlot:      point.Slot,
+				}
+
+				if err := saveCertRecord(&tmpAuth, txn); err != nil {
+					return fmt.Errorf("process certificate: %w", err)
+				}
+			case *lcommon.ResignCommitteeColdCertificate:
+				coldCredential := c.ColdCredential.Credential[:]
+
+				tmpResign := models.ResignCommitteeCold{
+					ColdCredential: coldCredential,
+					AddedSlot:      point.Slot,
+				}
+				if c.Anchor != nil {
+					tmpResign.AnchorUrl = c.Anchor.Url
+					tmpResign.AnchorHash = c.Anchor.DataHash[:]
+				}
+
+				if err := saveCertRecord(&tmpResign, txn); err != nil {
 					return fmt.Errorf("process certificate: %w", err)
 				}
 			default:
