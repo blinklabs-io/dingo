@@ -76,7 +76,7 @@ jobs:
       - name: Set RELEASE_TAG
         run: "echo \"RELEASE_TAG=${GITHUB_REF#refs/tags/}\" >> $GITHUB_ENV"
       - run: git config --global --add safe.directory $PWD
-      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0 https://github.com/actions/checkout/releases/tag/v5.0.0
+      - uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0 https://github.com/actions/checkout/releases/tag/v6.0.0
         with:
           fetch-depth: 0
       - uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0 https://github.com/actions/setup-go/releases/tag/v6.0.0
@@ -122,7 +122,7 @@ jobs:
     steps:
       - run: "echo \"RELEASE_TAG=${GITHUB_REF#refs/tags/}\" >> $GITHUB_ENV"
       - run: git config --global --add safe.directory $PWD
-      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0 https://github.com/actions/checkout/releases/tag/v5.0.0
+      - uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0 https://github.com/actions/checkout/releases/tag/v6.0.0
         with:
           fetch-depth: 0
       - name: Set up Docker Buildx
@@ -219,7 +219,7 @@ jobs:
             docker manifest push ${t}
           done
       # Checkout repo so README.md is available for next step
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
       # Update Docker Hub from README
       - name: Docker Hub Description
         uses: peter-evans/dockerhub-description@1b9a80c056b620d92cedb9d9b5a223409c68ddfa # v5.0.0 https://github.com/peter-evans/dockerhub-description/releases/tag/v5.0.0
@@ -268,7 +268,7 @@ jobs:
           RELEASE_TAG=${GITHUB_REF#refs/tags/}
           echo "RELEASE_TAG=${RELEASE_TAG}" >> $GITHUB_ENV
           echo "RELEASE_VERSION=${RELEASE_TAG:1}" >> $GITHUB_ENV
-      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0 https://github.com/actions/checkout/releases/tag/v5.0.0
+      - uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0 https://github.com/actions/checkout/releases/tag/v6.0.0
         if: startsWith(github.ref, 'refs/tags/')
       - name: setup nodejs
         uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903 # v6.0.0 https://github.com/actions/setup-node/releases/tag/v6.0.0
