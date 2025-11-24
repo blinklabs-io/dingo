@@ -120,6 +120,9 @@ func (c *ConnectionManager) initMetrics() {
 }
 
 func (c *ConnectionManager) updateConnectionMetrics() {
+	if c == nil {
+		return
+	}
 	if c.metrics == nil {
 		return
 	}
@@ -181,12 +184,24 @@ func (c *ConnectionManager) updateConnectionMetrics() {
 		}
 	}
 
-	c.metrics.incomingConns.Set(float64(incomingCount))
-	c.metrics.outgoingConns.Set(float64(outgoingCount))
-	c.metrics.unidirectionalConns.Set(float64(unidirectionalCount))
-	c.metrics.duplexConns.Set(float64(duplexCount))
-	c.metrics.fullDuplexConns.Set(float64(fullDuplexCount))
-	c.metrics.prunableConns.Set(float64(prunableCount))
+	if c.metrics.incomingConns != nil {
+		c.metrics.incomingConns.Set(float64(incomingCount))
+	}
+	if c.metrics.outgoingConns != nil {
+		c.metrics.outgoingConns.Set(float64(outgoingCount))
+	}
+	if c.metrics.unidirectionalConns != nil {
+		c.metrics.unidirectionalConns.Set(float64(unidirectionalCount))
+	}
+	if c.metrics.duplexConns != nil {
+		c.metrics.duplexConns.Set(float64(duplexCount))
+	}
+	if c.metrics.fullDuplexConns != nil {
+		c.metrics.fullDuplexConns.Set(float64(fullDuplexCount))
+	}
+	if c.metrics.prunableConns != nil {
+		c.metrics.prunableConns.Set(float64(prunableCount))
+	}
 }
 
 func (c *ConnectionManager) Start() error {
