@@ -128,7 +128,7 @@ type MetadataStore interface {
 		lcommon.Transaction,
 		ocommon.Point,
 		uint32, // idx
-		map[int]uint64, // certDeposits
+		map[int]uint64, // certDeposits: indexed by certificate position in tx.Certificates(); absent keys are treated as zero/no deposit
 		*gorm.DB,
 	) error
 
