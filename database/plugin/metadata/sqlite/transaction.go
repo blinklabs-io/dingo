@@ -86,7 +86,10 @@ func (d *MetadataStoreSqlite) getOrCreateAccount(
 // saveAccountIfNew saves the account if it doesn't exist in the database yet
 func saveAccountIfNew(account *models.Account, txn *gorm.DB) error {
 	if account.ID == 0 {
-		result := txn.Create(account)
+		result := txn.Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "staking_key"}},
+			UpdateAll: true,
+		}).Create(account)
 		if result.Error != nil {
 			return result.Error
 		}
@@ -509,7 +512,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 					result := txn.Clauses(clause.OnConflict{
 						Columns:   []clause.Column{{Name: "staking_key"}},
 						UpdateAll: true,
-					}).Create(&tmpAccount)
+					}).Create(tmpAccount)
 					if result.Error != nil {
 						return fmt.Errorf("process certificate: %w", result.Error)
 					}
@@ -530,22 +533,9 @@ func (d *MetadataStoreSqlite) SetTransaction(
 				}
 			case *lcommon.StakeDelegationCertificate:
 				stakeKey := c.StakeCredential.Credential[:]
-				tmpAccount, err := d.GetAccount(stakeKey, txn)
+				tmpAccount, err := d.getOrCreateAccount(stakeKey, txn)
 				if err != nil {
 					return fmt.Errorf("process certificate: %w", err)
-				}
-				if tmpAccount == nil {
-					d.logger.Warn("delegating non-existent account", "hash", stakeKey)
-					tmpAccount = &models.Account{
-						StakingKey: stakeKey,
-					}
-					result := txn.Clauses(clause.OnConflict{
-						Columns:   []clause.Column{{Name: "staking_key"}},
-						UpdateAll: true,
-					}).Create(&tmpAccount)
-					if result.Error != nil {
-						return fmt.Errorf("process certificate: %w", result.Error)
-					}
 				}
 
 				tmpAccount.Pool = c.PoolKeyHash[:]
@@ -707,22 +697,9 @@ func (d *MetadataStoreSqlite) SetTransaction(
 				}
 			case *lcommon.VoteDelegationCertificate:
 				stakeKey := c.StakeCredential.Credential[:]
-				tmpAccount, err := d.GetAccount(stakeKey, txn)
+				tmpAccount, err := d.getOrCreateAccount(stakeKey, txn)
 				if err != nil {
 					return fmt.Errorf("process certificate: %w", err)
-				}
-				if tmpAccount == nil {
-					d.logger.Warn("delegating vote for non-existent account", "hash", stakeKey)
-					tmpAccount = &models.Account{
-						StakingKey: stakeKey,
-					}
-					result := txn.Clauses(clause.OnConflict{
-						Columns:   []clause.Column{{Name: "staking_key"}},
-						UpdateAll: true,
-					}).Create(&tmpAccount)
-					if result.Error != nil {
-						return fmt.Errorf("process certificate: %w", result.Error)
-					}
 				}
 
 				tmpAccount.Drep = c.Drep.Credential[:]
