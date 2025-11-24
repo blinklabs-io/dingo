@@ -714,7 +714,7 @@ func (d *MetadataStoreSqlite) storeTransactionDatums(
 	return nil
 }
 
-// Marshal the raw CNOR and hashes with Blake2b256Hash & calls SetDatum of metdata store.
+// Marshal the raw CBOR and hashes with Blake2b256Hash & calls SetDatum of metadata store.
 func (d *MetadataStoreSqlite) storeDatum(
 	datum *lcommon.Datum,
 	slot uint64,
