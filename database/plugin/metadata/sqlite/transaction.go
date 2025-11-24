@@ -752,5 +752,61 @@ func (d *MetadataStoreSqlite) SetTransaction(
 		}
 	}
 
+	if err := d.storeTransactionDatums(tx, point.Slot, txn); err != nil {
+		return fmt.Errorf("store datums failed: %w", err)
+	}
+
+	return nil
+}
+
+// Traverse each utxo and check for inline datum & calls storeDatum
+func (d *MetadataStoreSqlite) storeTransactionDatums(
+	tx lcommon.Transaction,
+	slot uint64,
+	txn *gorm.DB,
+) error {
+	for _, utxo := range tx.Produced() {
+		if err := d.storeDatum(utxo.Output.Datum(), slot, txn); err != nil {
+			return err
+		}
+	}
+	witnesses := tx.Witnesses()
+	if witnesses == nil {
+		return nil
+	}
+	// Looks over the transaction witness set & store each datum.
+	for _, datum := range witnesses.PlutusData() {
+		datumCopy := datum
+		if err := d.storeDatum(&datumCopy, slot, txn); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// Marshal the raw CBOR and hashes with Blake2b256Hash & calls SetDatum of metadata store.
+func (d *MetadataStoreSqlite) storeDatum(
+	datum *lcommon.Datum,
+	slot uint64,
+	txn *gorm.DB,
+) error {
+	if datum == nil {
+		return nil
+	}
+	rawDatum := datum.Cbor()
+	if len(rawDatum) == 0 {
+		var err error
+		rawDatum, err = datum.MarshalCBOR()
+		if err != nil {
+			return fmt.Errorf("marshal datum: %w", err)
+		}
+	}
+	if len(rawDatum) == 0 {
+		return nil
+	}
+	datumHash := lcommon.Blake2b256Hash(rawDatum)
+	if err := d.SetDatum(datumHash, rawDatum, slot, txn); err != nil {
+		return err
+	}
 	return nil
 }
