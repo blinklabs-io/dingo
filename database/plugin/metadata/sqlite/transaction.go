@@ -89,7 +89,9 @@ func (d *MetadataStoreSqlite) SetTransaction(
 	if result.Error != nil {
 		return fmt.Errorf("create transaction: %w", result.Error)
 	}
-	// If ID is still zero (conflict path with SQLite), fetch it by hash
+	// SQLite's ON CONFLICT clause doesn't return the ID of an existing row when
+	// the conflict path is taken (no insert occurs). We need to fetch the ID
+	// explicitly so we can associate witness records with the correct transaction.
 	if tmpTx.ID == 0 {
 		existingTx, err := d.GetTransactionByHash(txHash, txn)
 		if err != nil {
@@ -304,14 +306,14 @@ func (d *MetadataStoreSqlite) SetTransaction(
 			return fmt.Errorf("delete existing plutus data: %w", result.Error)
 		}
 	}
-	if tx.Witnesses() != nil {
-		ws := tx.Witnesses()
+	ws := tx.Witnesses()
+	if ws != nil {
 
 		// Add Vkey Witnesses
 		for _, vkey := range ws.Vkey() {
 			keyWitness := models.KeyWitness{
 				TransactionID: tmpTx.ID,
-				Type:          0, // VkeyWitness
+				Type:          models.KeyWitnessTypeVkey,
 				Vkey:          vkey.Vkey,
 				Signature:     vkey.Signature,
 			}
@@ -324,7 +326,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 		for _, bootstrap := range ws.Bootstrap() {
 			keyWitness := models.KeyWitness{
 				TransactionID: tmpTx.ID,
-				Type:          1, // BootstrapWitness
+				Type:          models.KeyWitnessTypeBootstrap,
 				PublicKey:     bootstrap.PublicKey,
 				Signature:     bootstrap.Signature,
 				ChainCode:     bootstrap.ChainCode,
@@ -337,49 +339,105 @@ func (d *MetadataStoreSqlite) SetTransaction(
 
 		// Add Native Scripts
 		for _, script := range ws.NativeScripts() {
+			scriptHash := script.Hash()
 			scriptRecord := models.Script{
 				TransactionID: tmpTx.ID,
 				Type:          uint8(lcommon.ScriptRefTypeNativeScript),
-				ScriptData:    script.Cbor(),
+				ScriptHash:    scriptHash.Bytes(),
 			}
 			if result := txn.Create(&scriptRecord); result.Error != nil {
 				return fmt.Errorf("create native script: %w", result.Error)
+			}
+			// Also store the script content separately to avoid duplicates
+			scriptContent := models.ScriptContent{
+				Hash:        scriptHash.Bytes(),
+				Type:        uint8(lcommon.ScriptRefTypeNativeScript),
+				Content:     script.Cbor(),
+				CreatedSlot: point.Slot,
+			}
+			if result := txn.Clauses(clause.OnConflict{
+				Columns:   []clause.Column{{Name: "hash"}},
+				DoNothing: true,
+			}).Create(&scriptContent); result.Error != nil {
+				return fmt.Errorf("create native script content: %w", result.Error)
 			}
 		}
 
 		// Add PlutusV1 Scripts
 		for _, script := range ws.PlutusV1Scripts() {
+			scriptHash := script.Hash()
 			scriptRecord := models.Script{
 				TransactionID: tmpTx.ID,
 				Type:          uint8(lcommon.ScriptRefTypePlutusV1),
-				ScriptData:    script,
+				ScriptHash:    scriptHash.Bytes(),
 			}
 			if result := txn.Create(&scriptRecord); result.Error != nil {
 				return fmt.Errorf("create plutus v1 script: %w", result.Error)
+			}
+			// Also store the script content separately to avoid duplicates
+			scriptContent := models.ScriptContent{
+				Hash:        scriptHash.Bytes(),
+				Type:        uint8(lcommon.ScriptRefTypePlutusV1),
+				Content:     script.RawScriptBytes(),
+				CreatedSlot: point.Slot,
+			}
+			if result := txn.Clauses(clause.OnConflict{
+				Columns:   []clause.Column{{Name: "hash"}},
+				DoNothing: true,
+			}).Create(&scriptContent); result.Error != nil {
+				return fmt.Errorf("create plutus v1 script content: %w", result.Error)
 			}
 		}
 
 		// Add PlutusV2 Scripts
 		for _, script := range ws.PlutusV2Scripts() {
+			scriptHash := script.Hash()
 			scriptRecord := models.Script{
 				TransactionID: tmpTx.ID,
 				Type:          uint8(lcommon.ScriptRefTypePlutusV2),
-				ScriptData:    script,
+				ScriptHash:    scriptHash.Bytes(),
 			}
 			if result := txn.Create(&scriptRecord); result.Error != nil {
 				return fmt.Errorf("create plutus v2 script: %w", result.Error)
+			}
+			// Also store the script content separately to avoid duplicates
+			scriptContent := models.ScriptContent{
+				Hash:        scriptHash.Bytes(),
+				Type:        uint8(lcommon.ScriptRefTypePlutusV2),
+				Content:     script.RawScriptBytes(),
+				CreatedSlot: point.Slot,
+			}
+			if result := txn.Clauses(clause.OnConflict{
+				Columns:   []clause.Column{{Name: "hash"}},
+				DoNothing: true,
+			}).Create(&scriptContent); result.Error != nil {
+				return fmt.Errorf("create plutus v2 script content: %w", result.Error)
 			}
 		}
 
 		// Add PlutusV3 Scripts
 		for _, script := range ws.PlutusV3Scripts() {
+			scriptHash := script.Hash()
 			scriptRecord := models.Script{
 				TransactionID: tmpTx.ID,
 				Type:          uint8(lcommon.ScriptRefTypePlutusV3),
-				ScriptData:    script,
+				ScriptHash:    scriptHash.Bytes(),
 			}
 			if result := txn.Create(&scriptRecord); result.Error != nil {
 				return fmt.Errorf("create plutus v3 script: %w", result.Error)
+			}
+			// Also store the script content separately to avoid duplicates
+			scriptContent := models.ScriptContent{
+				Hash:        scriptHash.Bytes(),
+				Type:        uint8(lcommon.ScriptRefTypePlutusV3),
+				Content:     script.RawScriptBytes(),
+				CreatedSlot: point.Slot,
+			}
+			if result := txn.Clauses(clause.OnConflict{
+				Columns:   []clause.Column{{Name: "hash"}},
+				DoNothing: true,
+			}).Create(&scriptContent); result.Error != nil {
+				return fmt.Errorf("create plutus v3 script content: %w", result.Error)
 			}
 		}
 

@@ -40,6 +40,7 @@ var MigrateModels = []any{
 	&Redeemer{},
 	&ResignCommitteeCold{},
 	&Script{},
+	&ScriptContent{},
 	&StakeDelegation{},
 	&StakeDeregistration{},
 	&StakeRegistration{},

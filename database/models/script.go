@@ -14,17 +14,21 @@
 
 package models
 
-// Script represents a script entry in the witness set
+// Script represents a reference to a script in the witness set
 // Type corresponds to ScriptRefType constants from gouroboros/ledger/common:
 // 0=NativeScript (ScriptRefTypeNativeScript)
 // 1=PlutusV1 (ScriptRefTypePlutusV1)
 // 2=PlutusV2 (ScriptRefTypePlutusV2)
 // 3=PlutusV3 (ScriptRefTypePlutusV3)
+//
+// To avoid storing duplicate script data for the same script used in multiple
+// transactions, we store only the script hash here. The actual script content
+// is stored separately in ScriptContent table, indexed by hash.
 type Script struct {
 	ID            uint   `gorm:"primaryKey"`
 	TransactionID uint   `gorm:"index"`
 	Type          uint8  `gorm:"index"` // Script type
-	ScriptData    []byte `gorm:"type:bytea"`
+	ScriptHash    []byte `gorm:"index"` // Hash of the script
 	Transaction   *Transaction
 }
 

@@ -14,17 +14,24 @@
 
 package models
 
+const (
+	// KeyWitnessTypeVkey represents a Vkey witness
+	KeyWitnessTypeVkey uint8 = iota
+	// KeyWitnessTypeBootstrap represents a Bootstrap witness
+	KeyWitnessTypeBootstrap
+)
+
 // KeyWitness represents a key witness entry (Vkey or Bootstrap)
-// Type: 0 = VkeyWitness, 1 = BootstrapWitness
+// Type: KeyWitnessTypeVkey = VkeyWitness, KeyWitnessTypeBootstrap = BootstrapWitness
 type KeyWitness struct {
 	ID            uint   `gorm:"primaryKey"`
 	TransactionID uint   `gorm:"index"`
-	Type          uint8  `gorm:"index"` // 0=Vkey, 1=Bootstrap
-	Vkey          []byte `gorm:"type:bytea"`
-	Signature     []byte `gorm:"type:bytea"`
-	PublicKey     []byte `gorm:"type:bytea"` // For Bootstrap
-	ChainCode     []byte `gorm:"type:bytea"` // For Bootstrap
-	Attributes    []byte `gorm:"type:bytea"` // For Bootstrap
+	Type          uint8  `gorm:"index"` // See KeyWitnessType* constants
+	Vkey          []byte // Vkey witness key
+	Signature     []byte // Witness signature
+	PublicKey     []byte // For Bootstrap witness
+	ChainCode     []byte // For Bootstrap witness
+	Attributes    []byte // For Bootstrap witness
 	Transaction   *Transaction
 }
 

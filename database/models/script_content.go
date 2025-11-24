@@ -14,18 +14,17 @@
 
 package models
 
-// Redeemer represents a redeemer in the witness set
-type Redeemer struct {
-	ID            uint   `gorm:"primaryKey"`
-	TransactionID uint   `gorm:"index"`
-	Tag           uint8  `gorm:"index"` // Redeemer tag
-	Index         uint32 `gorm:"index"`
-	Data          []byte // Plutus data
-	ExUnitsMemory uint64
-	ExUnitsCPU    uint64
-	Transaction   *Transaction
+// ScriptContent represents the content of a script, indexed by its hash
+// This avoids storing duplicate script data when the same script appears
+// in multiple transactions
+type ScriptContent struct {
+	ID          uint   `gorm:"primaryKey"`
+	Hash        []byte `gorm:"index;unique"` // Script hash
+	Type        uint8  `gorm:"index"`        // Script type
+	Content     []byte // Script content
+	CreatedSlot uint64 // Slot when this script was first seen
 }
 
-func (Redeemer) TableName() string {
-	return "redeemer"
+func (ScriptContent) TableName() string {
+	return "script_content"
 }
