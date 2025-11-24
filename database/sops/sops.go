@@ -116,7 +116,7 @@ func getMasterKeyGroupsFromEnv() ([]sopsapi.KeyGroup, error) {
 		}
 	} else {
 		return nil, errors.New(
-			"DINGO_AWS_KMS_RESOURCE_ID not set: SOPS requires at least one master key to encrypt",
+			"DINGO_AWS_KMS_KEY_ARNS not set: SOPS requires at least one master key to encrypt",
 		)
 	}
 
