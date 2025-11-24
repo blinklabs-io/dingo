@@ -195,6 +195,11 @@ func (ls *LedgerState) Chain() *chain.Chain {
 	return ls.chain
 }
 
+// Datum looks up a datum by hash & adding this for implementing query.ReadData #741
+func (ls *LedgerState) Datum(hash []byte) (*models.Datum, error) {
+	return ls.db.GetDatum(hash, nil)
+}
+
 func (ls *LedgerState) Close() error {
 	return ls.db.Close()
 }
