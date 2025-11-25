@@ -19,11 +19,24 @@ jobs:
         go-version: [1.24.x, 1.25.x]
         # We want to make sure that this builds on Linux and Darwin
         platform: [ubuntu-latest, macos-latest]
+        include:
+          - platform: ubuntu-latest
+            cache_path: ~/.cache/go-build
+          - platform: macos-latest
+            cache_path: ~/Library/Caches/go-build
     runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0 https://github.com/actions/checkout/releases/tag/v6.0.0
       - uses: actions/setup-go@4dc6199c7b1a012772edbd06daecab0f50c9053c # v6.1.0 https://github.com/actions/setup-go/releases/tag/v6.1.0
         with:
           go-version: ${{ matrix.go-version }}
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0 https://github.com/actions/cache/releases/tag/v4.3.0
+        with:
+          path: |
+            ~/go/pkg/mod
+            ${{ matrix.cache_path }}
+          key: ${{ runner.os }}-go-${{ matrix.go-version }}-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-${{ matrix.go-version }}-
       - name: go-test
         run: go test ./...
