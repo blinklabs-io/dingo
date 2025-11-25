@@ -27,9 +27,9 @@ func (Datum) TableName() string {
 
 // PlutusData represents a Plutus data value in the witness set
 type PlutusData struct {
-	ID            uint   `gorm:"primaryKey"`
-	TransactionID uint   `gorm:"index"`
-	Data          []byte `gorm:"type:bytea"`
+	ID            uint `gorm:"primaryKey"`
+	TransactionID uint `gorm:"index"`
+	Data          []byte
 	Transaction   *Transaction
 }
 

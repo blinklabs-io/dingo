@@ -14,10 +14,10 @@
 
 package models
 
-// ScriptContent represents the content of a script, indexed by its hash
+// Script represents the content of a script, indexed by its hash
 // This avoids storing duplicate script data when the same script appears
 // in multiple transactions
-type ScriptContent struct {
+type Script struct {
 	ID          uint   `gorm:"primaryKey"`
 	Hash        []byte `gorm:"index;unique"` // Script hash
 	Type        uint8  `gorm:"index"`        // Script type
@@ -25,6 +25,6 @@ type ScriptContent struct {
 	CreatedSlot uint64 // Slot when this script was first seen
 }
 
-func (ScriptContent) TableName() string {
-	return "script_content"
+func (Script) TableName() string {
+	return "script"
 }

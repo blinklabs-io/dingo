@@ -22,12 +22,12 @@ import (
 	"gorm.io/gorm"
 )
 
-// GetScriptContent returns the script content by its hash
-func (d *MetadataStoreSqlite) GetScriptContent(
+// GetScript returns the script content by its hash
+func (d *MetadataStoreSqlite) GetScript(
 	hash lcommon.ScriptHash,
 	txn *gorm.DB,
-) (*models.ScriptContent, error) {
-	ret := &models.ScriptContent{}
+) (*models.Script, error) {
+	ret := &models.Script{}
 	if txn == nil {
 		txn = d.DB()
 	}
@@ -39,20 +39,4 @@ func (d *MetadataStoreSqlite) GetScriptContent(
 		return nil, result.Error
 	}
 	return ret, nil
-}
-
-// GetScriptsByTransaction returns all scripts (references) used in a particular transaction
-func (d *MetadataStoreSqlite) GetScriptsByTransaction(
-	txID uint,
-	txn *gorm.DB,
-) ([]models.Script, error) {
-	var scripts []models.Script
-	if txn == nil {
-		txn = d.DB()
-	}
-	result := txn.Where("transaction_id = ?", txID).Find(&scripts)
-	if result.Error != nil {
-		return nil, result.Error
-	}
-	return scripts, nil
 }

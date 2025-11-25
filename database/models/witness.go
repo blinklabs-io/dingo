@@ -16,9 +16,9 @@ package models
 
 const (
 	// KeyWitnessTypeVkey represents a Vkey witness
-	KeyWitnessTypeVkey uint8 = iota
+	KeyWitnessTypeVkey uint8 = 0
 	// KeyWitnessTypeBootstrap represents a Bootstrap witness
-	KeyWitnessTypeBootstrap
+	KeyWitnessTypeBootstrap uint8 = 1
 )
 
 // KeyWitness represents a key witness entry (Vkey or Bootstrap)
