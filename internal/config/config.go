@@ -55,15 +55,6 @@ const (
 // This is not an error condition but a successful operation that displays plugin information
 var ErrPluginListRequested = errors.New("plugin list requested")
 
-// convertToStringAnyMap converts map[string]interface{} to map[string]any for YAML compatibility
-func convertToStringAnyMap(m map[string]interface{}) map[string]any {
-	result := make(map[string]any)
-	for k, v := range m {
-		result[k] = v
-	}
-	return result
-}
-
 type tempConfig struct {
 	Config   *Config                   `yaml:"config,omitempty"`
 	Database *databaseConfig           `yaml:"database,omitempty"`
@@ -240,14 +231,14 @@ func LoadConfig(configFile string) (*Config, error) {
 					if val, ok := v.(map[string]any); ok {
 						blobConfig[k] = val
 					} else if val, ok := v.(map[any]any); ok {
-						// Convert map[any]any to map[string]interface{} then to map[string]any
-						stringInterfaceMap := make(map[string]interface{})
+						// Convert map[any]any to map[string]any
+						stringAnyMap := make(map[string]any)
 						for vk, vv := range val {
 							if keyStr, ok := vk.(string); ok {
-								stringInterfaceMap[keyStr] = vv
+								stringAnyMap[keyStr] = vv
 							}
 						}
-						blobConfig[k] = convertToStringAnyMap(stringInterfaceMap)
+						blobConfig[k] = stringAnyMap
 					} else {
 						// Log skipped non-map config entries
 						fmt.Fprintf(os.Stderr, "warning: skipping blob config entry %q: expected map, got %T\n", k, v)
@@ -275,14 +266,14 @@ func LoadConfig(configFile string) (*Config, error) {
 					if val, ok := v.(map[string]any); ok {
 						metadataConfig[k] = val
 					} else if val, ok := v.(map[any]any); ok {
-						// Convert map[any]any to map[string]interface{} then to map[string]any
-						stringInterfaceMap := make(map[string]interface{})
+						// Convert map[any]any to map[string]any
+						stringAnyMap := make(map[string]any)
 						for vk, vv := range val {
 							if keyStr, ok := vk.(string); ok {
-								stringInterfaceMap[keyStr] = vv
+								stringAnyMap[keyStr] = vv
 							}
 						}
-						metadataConfig[k] = convertToStringAnyMap(stringInterfaceMap)
+						metadataConfig[k] = stringAnyMap
 					} else {
 						// Log skipped non-map config entries
 						fmt.Fprintf(os.Stderr, "warning: skipping metadata config entry %q: expected map, got %T\n", k, v)
