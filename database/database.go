@@ -25,7 +25,6 @@ import (
 )
 
 var DefaultConfig = &Config{
-	BlobCacheSize:  1073741824,
 	BlobPlugin:     "badger",
 	DataDir:        ".dingo",
 	MetadataPlugin: "sqlite",
@@ -38,7 +37,6 @@ type Config struct {
 	BlobPlugin     string
 	DataDir        string
 	MetadataPlugin string
-	BlobCacheSize  int64
 }
 
 // Database represents our data storage services
@@ -114,28 +112,38 @@ func (d *Database) init() error {
 	return nil
 }
 
-// New creates a new database instance with optional persistence using the provided data directory
+// New creates a new database instance with optional persistence using the provided data directory.
+// When config is nil, DefaultConfig is used (DataDir = ".dingo" for persistence).
+// When config is provided but DataDir is empty, storage is in-memory only.
+// When config.DataDir is non-empty, it specifies the persistent storage directory.
 func New(
 	config *Config,
 ) (*Database, error) {
 	if config == nil {
 		config = DefaultConfig
 	}
+	// Create a copy of the config to avoid mutating the original
+	cfgVal := *config
+	configCopy := &cfgVal
+	// Apply defaults for empty fields
+	if configCopy.BlobPlugin == "" {
+		configCopy.BlobPlugin = DefaultConfig.BlobPlugin
+	}
+	if configCopy.MetadataPlugin == "" {
+		configCopy.MetadataPlugin = DefaultConfig.MetadataPlugin
+	}
+	// DataDir defaulting behavior:
+	// - nil config → DefaultConfig.DataDir (".dingo" for persistence)
+	// - empty DataDir → in-memory storage
+	// - non-empty DataDir → persistent storage at specified path
 	blobDb, err := blob.New(
-		config.BlobPlugin,
-		config.DataDir,
-		config.Logger,
-		config.PromRegistry,
-		config.BlobCacheSize,
+		configCopy.BlobPlugin,
 	)
 	if err != nil {
 		return nil, err
 	}
 	metadataDb, err := metadata.New(
-		config.MetadataPlugin,
-		config.DataDir,
-		config.Logger,
-		config.PromRegistry,
+		configCopy.MetadataPlugin,
 	)
 	if err != nil {
 		return nil, err
@@ -143,8 +151,8 @@ func New(
 	db := &Database{
 		blob:     blobDb,
 		metadata: metadataDb,
-		logger:   config.Logger,
-		config:   config,
+		logger:   configCopy.Logger,
+		config:   configCopy,
 	}
 	if err := db.init(); err != nil {
 		// Database is available for recovery, so return it with error

@@ -24,29 +24,20 @@ import (
 	"time"
 
 	"cloud.google.com/go/storage"
-	"github.com/blinklabs-io/dingo/database/plugin"
 	"github.com/prometheus/client_golang/prometheus"
+	"google.golang.org/api/option"
 )
-
-// Register plugin
-func init() {
-	plugin.Register(
-		plugin.PluginEntry{
-			Type: plugin.PluginTypeBlob,
-			Name: "gcs",
-		},
-	)
-}
 
 // BlobStoreGCS stores data in a Google Cloud Storage bucket.
 type BlobStoreGCS struct {
-	promRegistry  prometheus.Registerer
-	startupCtx    context.Context
-	logger        *GcsLogger
-	client        *storage.Client
-	bucket        *storage.BucketHandle
-	startupCancel context.CancelFunc
-	bucketName    string
+	promRegistry    prometheus.Registerer
+	startupCtx      context.Context
+	logger          *GcsLogger
+	client          *storage.Client
+	bucket          *storage.BucketHandle
+	startupCancel   context.CancelFunc
+	bucketName      string
+	credentialsFile string
 }
 
 // New creates a new GCS-backed blob store.
@@ -55,49 +46,38 @@ func New(
 	logger *slog.Logger,
 	promRegistry prometheus.Registerer,
 ) (*BlobStoreGCS, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-
-	if logger == nil {
-		logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
-	}
-
 	const prefix = "gcs://"
 	var bucketName string
 	if after, ok := strings.CutPrefix(dataDir, prefix); ok {
 		bucketName = after
 	}
 	if bucketName == "" {
-		cancel()
 		return nil, errors.New(
 			"gcs blob: bucket not set (expected dataDir='gcs://<bucket>')",
 		)
 	}
 
-	client, err := storage.NewGRPCClient(
-		ctx,
-		storage.WithDisabledClientMetrics(),
+	return NewWithOptions(
+		WithBucket(bucketName),
+		WithLogger(logger),
+		WithPromRegistry(promRegistry),
 	)
-	if err != nil {
-		cancel()
-		return nil, fmt.Errorf(
-			"gcs blob: failed in creating storage client: %w",
-			err,
-		)
+}
+
+// NewWithOptions creates a new GCS-backed blob store using options.
+func NewWithOptions(opts ...BlobStoreGCSOptionFunc) (*BlobStoreGCS, error) {
+	db := &BlobStoreGCS{}
+
+	// Apply options
+	for _, opt := range opts {
+		opt(db)
 	}
 
-	db := &BlobStoreGCS{
-		logger:        NewGcsLogger(logger),
-		promRegistry:  promRegistry,
-		client:        client,
-		bucket:        client.Bucket(bucketName),
-		bucketName:    bucketName,
-		startupCtx:    ctx,
-		startupCancel: cancel,
+	// Set defaults
+	if db.logger == nil {
+		db.logger = NewGcsLogger(slog.New(slog.NewJSONHandler(io.Discard, nil)))
 	}
 
-	if err := db.init(); err != nil {
-		return db, err
-	}
 	return db, nil
 }
 
@@ -116,9 +96,14 @@ func (d *BlobStoreGCS) init() error {
 	return nil
 }
 
-// closes the GCS client.
+// Close closes the GCS client.
 func (d *BlobStoreGCS) Close() error {
-	return d.client.Close()
+	if d.client == nil {
+		return nil
+	}
+	err := d.client.Close()
+	d.client = nil
+	return err
 }
 
 // Returns the GCS client.
@@ -129,4 +114,59 @@ func (d *BlobStoreGCS) Client() *storage.Client {
 // Returns the bucket handle.
 func (d *BlobStoreGCS) Bucket() *storage.BucketHandle {
 	return d.bucket
+}
+
+// Start implements the plugin.Plugin interface.
+func (d *BlobStoreGCS) Start() error {
+	// Validate required fields
+	if d.bucketName == "" {
+		return errors.New("gcs blob: bucket not set")
+	}
+
+	// Validate credentials file if specified
+	if d.credentialsFile != "" {
+		if err := validateCredentials(d.credentialsFile); err != nil {
+			return err
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+
+	var clientOpts []option.ClientOption
+	clientOpts = append(clientOpts, storage.WithDisabledClientMetrics())
+	if d.credentialsFile != "" {
+		clientOpts = append(
+			clientOpts,
+			option.WithCredentialsFile(d.credentialsFile),
+		)
+	}
+
+	client, err := storage.NewGRPCClient(
+		ctx,
+		clientOpts...,
+	)
+	if err != nil {
+		cancel()
+		return fmt.Errorf(
+			"gcs blob: failed in creating storage client: %w",
+			err,
+		)
+	}
+
+	d.client = client
+	d.bucket = client.Bucket(d.bucketName)
+	d.startupCtx = ctx
+	d.startupCancel = cancel
+
+	if err := d.init(); err != nil {
+		// Clean up resources on init failure
+		d.Close()
+		return err
+	}
+	return nil
+}
+
+// Stop implements the plugin.Plugin interface.
+func (d *BlobStoreGCS) Stop() error {
+	return d.Close()
 }

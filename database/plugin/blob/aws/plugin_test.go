@@ -12,10 +12,25 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package blob
+package aws
 
 import (
-	_ "github.com/blinklabs-io/dingo/database/plugin/blob/aws"
-	_ "github.com/blinklabs-io/dingo/database/plugin/blob/badger"
-	_ "github.com/blinklabs-io/dingo/database/plugin/blob/gcs"
+	"testing"
 )
+
+func TestNewFromCmdlineOptions(t *testing.T) {
+	// Save original cmdlineOptions
+	originalOptions := cmdlineOptions
+	cmdlineOptions.bucket = "test-bucket"
+	cmdlineOptions.region = "us-east-1"
+	cmdlineOptions.prefix = "test-prefix"
+
+	// This should succeed
+	plugin := NewFromCmdlineOptions()
+	if plugin == nil {
+		t.Error("Expected plugin to be created, got nil")
+	}
+
+	// Restore original options
+	cmdlineOptions = originalOptions
+}

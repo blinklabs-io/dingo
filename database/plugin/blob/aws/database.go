@@ -26,19 +26,8 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
-	"github.com/blinklabs-io/dingo/database/plugin"
 	"github.com/prometheus/client_golang/prometheus"
 )
-
-// Register plugin
-func init() {
-	plugin.Register(
-		plugin.PluginEntry{
-			Type: plugin.PluginTypeBlob,
-			Name: "s3",
-		},
-	)
-}
 
 // BlobStoreS3 stores data in an AWS S3 bucket
 type BlobStoreS3 struct {
@@ -48,7 +37,9 @@ type BlobStoreS3 struct {
 	client        *s3.Client
 	bucket        string
 	prefix        string
+	region        string
 	startupCancel context.CancelFunc
+	timeout       time.Duration
 }
 
 // New creates a new S3-backed blob store and dataDir must be "s3://bucket" or "s3://bucket/prefix"
@@ -57,29 +48,20 @@ func New(
 	logger *slog.Logger,
 	promRegistry prometheus.Registerer,
 ) (*BlobStoreS3, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-
-	if logger == nil {
-		logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
-	}
-
 	const prefix = "s3://"
-	if !strings.HasPrefix(strings.ToLower(dataDir), prefix) {
-		cancel()
+	if !strings.HasPrefix(dataDir, prefix) {
 		return nil, errors.New(
 			"s3 blob: expected dataDir='s3://<bucket>[/prefix]'",
 		)
 	}
 
-	path := strings.TrimPrefix(strings.ToLower(dataDir), prefix)
+	path := strings.TrimPrefix(dataDir, prefix)
 	if path == "" {
-		cancel()
 		return nil, errors.New("s3 blob: bucket not set")
 	}
 
 	parts := strings.SplitN(path, "/", 2)
 	if len(parts) == 0 || parts[0] == "" {
-		cancel()
 		return nil, errors.New("s3 blob: invalid S3 path (missing bucket)")
 	}
 
@@ -92,27 +74,29 @@ func New(
 		}
 	}
 
-	// Loads all the aws credentials.
-	awsCfg, err := config.LoadDefaultConfig(ctx)
-	if err != nil {
-		cancel()
-		return nil, fmt.Errorf("s3 blob: load default AWS config: %w", err)
-	}
-	client := s3.NewFromConfig(awsCfg)
+	return NewWithOptions(
+		WithBucket(bucket),
+		WithPrefix(keyPrefix),
+		WithLogger(logger),
+		WithPromRegistry(promRegistry),
+	)
+}
 
-	db := &BlobStoreS3{
-		logger:        NewS3Logger(logger),
-		promRegistry:  promRegistry,
-		client:        client,
-		bucket:        bucket,
-		prefix:        keyPrefix,
-		startupCtx:    ctx,
-		startupCancel: cancel,
+// NewWithOptions creates a new S3-backed blob store using options.
+func NewWithOptions(opts ...BlobStoreS3OptionFunc) (*BlobStoreS3, error) {
+	db := &BlobStoreS3{}
+
+	// Apply options
+	for _, opt := range opts {
+		opt(db)
 	}
-	if err := db.init(); err != nil {
-		cancel()
-		return nil, err
+
+	// Set defaults (no side effects)
+	if db.logger == nil {
+		db.logger = NewS3Logger(slog.New(slog.NewJSONHandler(io.Discard, nil)))
 	}
+
+	// Note: AWS config loading and validation moved to Start()
 	return db, nil
 }
 
@@ -182,5 +166,52 @@ func (d *BlobStoreS3) Put(ctx context.Context, key string, value []byte) error {
 		return err
 	}
 	d.logger.Infof("s3 put %q ok (%d bytes)", key, len(value))
+	return nil
+}
+
+// Start implements the plugin.Plugin interface.
+func (d *BlobStoreS3) Start() error {
+	// Validate required fields
+	if d.bucket == "" {
+		return errors.New("s3 blob: bucket not set")
+	}
+
+	// Use configured timeout or default to 60 seconds for better reliability
+	timeout := d.timeout
+	if timeout == 0 {
+		timeout = 60 * time.Second
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+
+	// Load AWS config
+	awsCfg, err := config.LoadDefaultConfig(ctx)
+	if err != nil {
+		cancel()
+		return fmt.Errorf("s3 blob: load default AWS config: %w", err)
+	}
+
+	// Override region if specified
+	if d.region != "" {
+		awsCfg.Region = d.region
+	}
+
+	client := s3.NewFromConfig(awsCfg)
+
+	d.client = client
+	d.startupCtx = ctx
+	d.startupCancel = cancel
+
+	if err := d.init(); err != nil {
+		cancel()
+		d.startupCancel = nil
+		return err
+	}
+	return nil
+}
+
+// Stop implements the plugin.Plugin interface.
+func (d *BlobStoreS3) Stop() error {
+	// S3 client doesn't need explicit closing
 	return nil
 }

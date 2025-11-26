@@ -62,6 +62,78 @@ This behavior can be changed via the following environment variables:
     (default: empty)
 - `TLS_KEY_FILE_PATH` - SSL certificate key to use (default: empty)
 
+## Database Plugins
+
+Dingo supports pluggable storage backends for both blob storage (blocks, transactions) and metadata storage. This allows you to choose the best storage solution for your use case.
+
+### Available Plugins
+
+**Blob Storage Plugins:**
+- `badger` - BadgerDB local key-value store (default)
+- `gcs` - Google Cloud Storage blob store
+- `s3` - AWS S3 blob store
+
+**Metadata Storage Plugins:**
+- `sqlite` - SQLite relational database (default)
+
+### Plugin Selection
+
+Plugins can be selected via command-line flags, environment variables, or configuration file:
+
+```bash
+# Command line
+./dingo --blob gcs --metadata sqlite
+
+# Environment variables
+DINGO_DATABASE_BLOB_PLUGIN=gcs
+DINGO_DATABASE_METADATA_PLUGIN=sqlite
+
+# Configuration file (dingo.yaml)
+database:
+  blob:
+    plugin: "gcs"
+  metadata:
+    plugin: "sqlite"
+```
+
+### Plugin Configuration
+
+Each plugin supports specific configuration options. See `dingo.yaml.example` for detailed configuration examples.
+
+**BadgerDB Options:**
+- `data-dir` - Directory for database files
+- `block-cache-size` - Block cache size in bytes
+- `index-cache-size` - Index cache size in bytes
+- `gc` - Enable garbage collection
+
+**Google Cloud Storage Options:**
+- `bucket` - GCS bucket name
+- `project-id` - Google Cloud project ID
+- `prefix` - Path prefix within bucket
+- `credentials-file` - Path to service account credentials file (optional - uses Application Default Credentials if not provided)
+
+**AWS S3 Options:**
+- `bucket` - S3 bucket name
+- `region` - AWS region
+- `prefix` - Path prefix within bucket
+- `access-key-id` - AWS access key ID (optional - uses default credential chain if not provided)
+- `secret-access-key` - AWS secret access key (optional - uses default credential chain if not provided)
+
+**SQLite Options:**
+- `data-dir` - Path to SQLite database file
+
+### Listing Available Plugins
+
+You can see all available plugins and their descriptions:
+
+```bash
+./dingo list
+```
+
+## Plugin Development
+
+For information on developing custom storage plugins, see [PLUGIN_DEVELOPMENT.md](PLUGIN_DEVELOPMENT.md).
+
 ### Example
 
 Running on mainnet (:sweat_smile:):

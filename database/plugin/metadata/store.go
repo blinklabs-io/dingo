@@ -15,15 +15,14 @@
 package metadata
 
 import (
-	"log/slog"
+	"fmt"
 
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
+	"github.com/blinklabs-io/dingo/database/plugin"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
-	"github.com/prometheus/client_golang/prometheus"
 	"gorm.io/gorm"
 )
 
@@ -151,11 +150,22 @@ type MetadataStore interface {
 	SetUtxosNotDeletedAfterSlot(uint64, *gorm.DB) error
 }
 
-// For now, this always returns a sqlite plugin
-func New(
-	pluginName, dataDir string,
-	logger *slog.Logger,
-	promRegistry prometheus.Registerer,
-) (MetadataStore, error) {
-	return sqlite.New(dataDir, logger, promRegistry)
+// New creates a new metadata store instance using the specified plugin
+func New(pluginName string) (MetadataStore, error) {
+	// Get and start the plugin
+	p, err := plugin.StartPlugin(plugin.PluginTypeMetadata, pluginName)
+	if err != nil {
+		return nil, err
+	}
+
+	// Type assert to MetadataStore interface
+	metadataStore, ok := p.(MetadataStore)
+	if !ok {
+		return nil, fmt.Errorf(
+			"plugin '%s' does not implement MetadataStore interface",
+			pluginName,
+		)
+	}
+
+	return metadataStore, nil
 }

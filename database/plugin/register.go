@@ -15,8 +15,10 @@
 package plugin
 
 import (
-	"flag"
 	"fmt"
+	"strings"
+
+	"github.com/spf13/pflag"
 )
 
 type PluginType int
@@ -51,7 +53,7 @@ func Register(pluginEntry PluginEntry) {
 	pluginEntries = append(pluginEntries, pluginEntry)
 }
 
-func PopulateCmdlineOptions(fs *flag.FlagSet) error {
+func PopulateCmdlineOptions(fs *pflag.FlagSet) error {
 	for _, plugin := range pluginEntries {
 		for _, option := range plugin.Options {
 			if err := option.AddToFlagSet(fs, PluginTypeName(plugin.Type), plugin.Name); err != nil {
@@ -66,9 +68,9 @@ func ProcessEnvVars() error {
 	for _, plugin := range pluginEntries {
 		// Generate env var prefix based on plugin type and name
 		envVarPrefix := fmt.Sprintf(
-			"%s-%s-",
-			PluginTypeName(plugin.Type),
-			plugin.Name,
+			"DINGO_DATABASE_%s_%s_",
+			strings.ToUpper(PluginTypeName(plugin.Type)),
+			strings.ToUpper(plugin.Name),
 		)
 		for _, option := range plugin.Options {
 			if err := option.ProcessEnvVars(envVarPrefix); err != nil {
@@ -80,7 +82,7 @@ func ProcessEnvVars() error {
 }
 
 func ProcessConfig(
-	pluginConfig map[string]map[string]map[any]any,
+	pluginConfig map[string]map[string]map[string]any,
 ) error {
 	for _, plugin := range pluginEntries {
 		if pluginTypeData, ok := pluginConfig[PluginTypeName(plugin.Type)]; ok {

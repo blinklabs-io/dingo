@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package sqlite
+package aws
 
 import (
 	"sync"
@@ -22,34 +22,42 @@ import (
 
 var (
 	cmdlineOptions struct {
-		dataDir string
+		bucket string
+		region string
+		prefix string
 	}
 	cmdlineOptionsMutex sync.RWMutex
 )
 
-// initCmdlineOptions sets default values for cmdlineOptions
-func initCmdlineOptions() {
-	cmdlineOptionsMutex.Lock()
-	defer cmdlineOptionsMutex.Unlock()
-	cmdlineOptions.dataDir = ""
-}
-
 // Register plugin
 func init() {
-	initCmdlineOptions()
 	plugin.Register(
 		plugin.PluginEntry{
-			Type:               plugin.PluginTypeMetadata,
-			Name:               "sqlite",
-			Description:        "SQLite relational database",
+			Type:               plugin.PluginTypeBlob,
+			Name:               "s3",
+			Description:        "AWS S3 blob store",
 			NewFromOptionsFunc: NewFromCmdlineOptions,
 			Options: []plugin.PluginOption{
 				{
-					Name:         "data-dir",
+					Name:         "bucket",
 					Type:         plugin.PluginOptionTypeString,
-					Description:  "Data directory for sqlite storage",
+					Description:  "S3 bucket name",
 					DefaultValue: "",
-					Dest:         &(cmdlineOptions.dataDir),
+					Dest:         &(cmdlineOptions.bucket),
+				},
+				{
+					Name:         "region",
+					Type:         plugin.PluginOptionTypeString,
+					Description:  "AWS region",
+					DefaultValue: "",
+					Dest:         &(cmdlineOptions.region),
+				},
+				{
+					Name:         "prefix",
+					Type:         plugin.PluginOptionTypeString,
+					Description:  "S3 object key prefix",
+					DefaultValue: "",
+					Dest:         &(cmdlineOptions.prefix),
 				},
 			},
 		},
@@ -58,12 +66,15 @@ func init() {
 
 func NewFromCmdlineOptions() plugin.Plugin {
 	cmdlineOptionsMutex.RLock()
-	dataDir := cmdlineOptions.dataDir
+	bucket := cmdlineOptions.bucket
+	region := cmdlineOptions.region
+	prefix := cmdlineOptions.prefix
 	cmdlineOptionsMutex.RUnlock()
 
-	opts := []SqliteOptionFunc{
-		WithDataDir(dataDir),
-		// Logger and promRegistry will use defaults if nil
+	opts := []BlobStoreS3OptionFunc{
+		WithBucket(bucket),
+		WithRegion(region),
+		WithPrefix(prefix),
 	}
 	p, err := NewWithOptions(opts...)
 	if err != nil {

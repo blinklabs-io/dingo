@@ -22,50 +22,46 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
-	"github.com/blinklabs-io/dingo/database/plugin"
 	badger "github.com/dgraph-io/badger/v4"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
-// Register plugin
-func init() {
-	plugin.Register(
-		plugin.PluginEntry{
-			Type: plugin.PluginTypeBlob,
-			Name: "badger",
-		},
-	)
-}
-
 // BlobStoreBadger stores all data in badger. Data may not be persisted
 type BlobStoreBadger struct {
-	promRegistry prometheus.Registerer
-	db           *badger.DB
-	logger       *slog.Logger
-	dataDir      string
-	gcEnabled    bool
+	promRegistry   prometheus.Registerer
+	db             *badger.DB
+	logger         *slog.Logger
+	dataDir        string
+	gcEnabled      bool
+	blockCacheSize uint64
+	indexCacheSize uint64
+	gcTicker       *time.Ticker
+	gcStopCh       chan struct{}
+	gcWg           sync.WaitGroup
 }
 
 // New creates a new database
-func New(
-	dataDir string,
-	logger *slog.Logger,
-	promRegistry prometheus.Registerer,
-	badgerCacheSize int64,
-) (*BlobStoreBadger, error) {
+func New(opts ...BlobStoreBadgerOptionFunc) (*BlobStoreBadger, error) {
+	db := &BlobStoreBadger{
+		// Set defaults
+		gcEnabled:      true, // Enable GC by default for disk-backed stores
+		blockCacheSize: DefaultBlockCacheSize,
+		indexCacheSize: DefaultIndexCacheSize,
+	}
+	for _, opt := range opts {
+		opt(db)
+	}
+
 	var blobDb *badger.DB
 	var err error
-	db := &BlobStoreBadger{
-		dataDir:      dataDir,
-		logger:       logger,
-		promRegistry: promRegistry,
-	}
-	if dataDir == "" {
+
+	if db.dataDir == "" {
 		// No dataDir, use in-memory config
 		badgerOpts := badger.DefaultOptions("").
-			WithLogger(NewBadgerLogger(logger)).
+			WithLogger(NewBadgerLogger(db.logger)).
 			// The default INFO logging is a bit verbose
 			WithLoggingLevel(badger.WARNING).
 			WithInMemory(true)
@@ -75,26 +71,24 @@ func New(
 		}
 	} else {
 		// Make sure that we can read data dir, and create if it doesn't exist
-		if _, err := os.Stat(dataDir); err != nil {
+		if _, err := os.Stat(db.dataDir); err != nil {
 			if !errors.Is(err, fs.ErrNotExist) {
 				return nil, fmt.Errorf("failed to read data dir: %w", err)
 			}
 			// Create data directory
-			if err := os.MkdirAll(dataDir, fs.ModePerm); err != nil {
+			if err := os.MkdirAll(db.dataDir, fs.ModePerm); err != nil {
 				return nil, fmt.Errorf("failed to create data dir: %w", err)
 			}
 		}
 		blobDir := filepath.Join(
-			dataDir,
+			db.dataDir,
 			"blob",
 		)
-		// Run GC periodically
-		db.gcEnabled = true
 		badgerOpts := badger.DefaultOptions(blobDir).
-			WithLogger(NewBadgerLogger(logger)).
+			WithLogger(NewBadgerLogger(db.logger)).
 			WithLoggingLevel(badger.WARNING).
-			WithBlockCacheSize(int64(float64(badgerCacheSize) * 0.75)). // 75% for block cache
-			WithIndexCacheSize(int64(float64(badgerCacheSize) * 0.25))  // 25% for index cache
+			WithBlockCacheSize(int64(db.blockCacheSize)). //nolint:gosec // blockCacheSize is controlled and reasonable
+			WithIndexCacheSize(int64(db.indexCacheSize))  //nolint:gosec // indexCacheSize is controlled and reasonable
 		blobDb, err = badger.Open(badgerOpts)
 		if err != nil {
 			return nil, err
@@ -119,32 +113,63 @@ func (d *BlobStoreBadger) init() error {
 	}
 	// Configure GC
 	if d.gcEnabled {
-		go d.blobGc(time.NewTicker(5 * time.Minute))
+		d.gcTicker = time.NewTicker(5 * time.Minute)
+		d.gcStopCh = make(chan struct{})
+		d.gcWg.Add(1)
+		go d.blobGc(d.gcTicker, d.gcStopCh)
 	}
 	return nil
 }
 
-func (d *BlobStoreBadger) blobGc(t *time.Ticker) {
-	for range t.C {
-	again:
-		err := d.DB().RunValueLogGC(0.5)
-		if err != nil {
-			// Log any actual errors
-			if !errors.Is(err, badger.ErrNoRewrite) {
-				d.logger.Warn(
-					fmt.Sprintf("blob DB: GC failure: %s", err),
-					"component", "database",
-				)
+func (d *BlobStoreBadger) blobGc(t *time.Ticker, stop <-chan struct{}) {
+	defer d.gcWg.Done()
+	for {
+		select {
+		case <-t.C:
+		again:
+			err := d.DB().RunValueLogGC(0.5)
+			if err != nil {
+				// Log any actual errors
+				if !errors.Is(err, badger.ErrNoRewrite) {
+					d.logger.Warn(
+						fmt.Sprintf("blob DB: GC failure: %s", err),
+						"component", "database",
+					)
+				}
+			} else {
+				// Run it again if it just ran successfully
+				goto again
 			}
-		} else {
-			// Run it again if it just ran successfully
-			goto again
+		case <-stop:
+			return
 		}
 	}
 }
 
+// Start implements the plugin.Plugin interface
+func (d *BlobStoreBadger) Start() error {
+	// Database is already started in New(), so this is a no-op
+	return nil
+}
+
+// Stop implements the plugin.Plugin interface
+func (d *BlobStoreBadger) Stop() error {
+	return d.Close()
+}
+
 // Close gets the database handle from our BlobStore and closes it
 func (d *BlobStoreBadger) Close() error {
+	// Stop GC ticker if it exists
+	if d.gcTicker != nil {
+		d.gcTicker.Stop()
+		if d.gcStopCh != nil {
+			close(d.gcStopCh)
+			d.gcStopCh = nil
+		}
+		// Wait for GC goroutine to finish
+		d.gcWg.Wait()
+		d.gcTicker = nil
+	}
 	db := d.DB()
 	return db.Close()
 }
