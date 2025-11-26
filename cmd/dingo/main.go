@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"runtime/pprof"
 	"strings"
 
 	"github.com/blinklabs-io/dingo/database/plugin"
@@ -137,6 +138,50 @@ func listCommand() *cobra.Command {
 }
 
 func main() {
+	// Parse profiling flags before cobra setup (handle both --flag=value and --flag value syntax)
+	cpuprofile := ""
+	memprofile := ""
+	args := os.Args
+	if len(args) > 0 {
+		args = args[1:] // Skip program name
+	} else {
+		args = []string{}
+	}
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch {
+		case strings.HasPrefix(arg, "--cpuprofile="):
+			cpuprofile = strings.TrimPrefix(arg, "--cpuprofile=")
+		case arg == "--cpuprofile" && i+1 < len(args):
+			cpuprofile = args[i+1]
+			i++ // Skip next arg
+		case strings.HasPrefix(arg, "--memprofile="):
+			memprofile = strings.TrimPrefix(arg, "--memprofile=")
+		case arg == "--memprofile" && i+1 < len(args):
+			memprofile = args[i+1]
+			i++ // Skip next arg
+		}
+	}
+
+	// Initialize CPU profiling (starts immediately, stops on exit)
+	if cpuprofile != "" {
+		fmt.Fprintf(os.Stderr, "Starting CPU profiling to %s\n", cpuprofile)
+		f, err := os.Create(cpuprofile)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "could not create CPU profile: %v\n", err)
+			os.Exit(1)
+		}
+		defer f.Close()
+		if err := pprof.StartCPUProfile(f); err != nil {
+			fmt.Fprintf(os.Stderr, "could not start CPU profile: %v\n", err)
+			os.Exit(1)
+		}
+		defer func() {
+			pprof.StopCPUProfile()
+			fmt.Fprintf(os.Stderr, "CPU profiling stopped\n")
+		}()
+	}
+
 	rootCmd := &cobra.Command{
 		Use: programName,
 		Run: func(cmd *cobra.Command, args []string) {
@@ -200,8 +245,27 @@ func main() {
 	rootCmd.AddCommand(versionCommand())
 
 	// Execute cobra command
+	exitCode := 0
 	if err := rootCmd.Execute(); err != nil {
-		// NOTE: we purposely don't display the error, since cobra will have already displayed it
-		os.Exit(1)
+		exitCode = 1
+	}
+
+	// Finalize memory profiling before exit
+	if memprofile != "" {
+		f, err := os.Create(memprofile)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "could not create memory profile: %v\n", err)
+		} else {
+			if err := pprof.WriteHeapProfile(f); err != nil {
+				fmt.Fprintf(os.Stderr, "could not write memory profile: %v\n", err)
+			} else {
+				fmt.Fprintf(os.Stderr, "Memory profiling complete\n")
+			}
+			f.Close()
+		}
+	}
+
+	if exitCode != 0 {
+		os.Exit(exitCode)
 	}
 }
