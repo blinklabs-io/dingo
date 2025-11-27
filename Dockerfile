@@ -1,5 +1,10 @@
 FROM ghcr.io/blinklabs-io/go:1.25.4-1 AS build
 
+ARG VERSION
+ARG COMMIT_HASH
+ENV VERSION=${VERSION}
+ENV COMMIT_HASH=${COMMIT_HASH}
+
 WORKDIR /code
 RUN go env -w GOCACHE=/go-cache
 RUN go env -w GOMODCACHE=/gomod-cache
