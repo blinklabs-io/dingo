@@ -28,10 +28,10 @@ const (
 
 var (
 	cmdlineOptions struct {
-		dataDir        string
-		blockCacheSize uint64
-		indexCacheSize uint64
-		gcEnabled      bool
+		DataDir        string
+		BlockCacheSize uint64
+		IndexCacheSize uint64
+		GcEnabled      bool
 	}
 	cmdlineOptionsMutex sync.RWMutex
 )
@@ -40,9 +40,9 @@ var (
 func initCmdlineOptions() {
 	cmdlineOptionsMutex.Lock()
 	defer cmdlineOptionsMutex.Unlock()
-	cmdlineOptions.blockCacheSize = DefaultBlockCacheSize
-	cmdlineOptions.indexCacheSize = DefaultIndexCacheSize
-	cmdlineOptions.gcEnabled = true
+	cmdlineOptions.BlockCacheSize = DefaultBlockCacheSize
+	cmdlineOptions.IndexCacheSize = DefaultIndexCacheSize
+	cmdlineOptions.GcEnabled = true
 }
 
 // Register plugin
@@ -60,28 +60,28 @@ func init() {
 					Type:         plugin.PluginOptionTypeString,
 					Description:  "Data directory for badger storage",
 					DefaultValue: "",
-					Dest:         &(cmdlineOptions.dataDir),
+					Dest:         &(cmdlineOptions.DataDir),
 				},
 				{
 					Name:         "block-cache-size",
 					Type:         plugin.PluginOptionTypeUint,
 					Description:  "Badger block cache size",
 					DefaultValue: uint64(DefaultBlockCacheSize),
-					Dest:         &(cmdlineOptions.blockCacheSize),
+					Dest:         &(cmdlineOptions.BlockCacheSize),
 				},
 				{
 					Name:         "index-cache-size",
 					Type:         plugin.PluginOptionTypeUint,
 					Description:  "Badger index cache size",
 					DefaultValue: uint64(DefaultIndexCacheSize),
-					Dest:         &(cmdlineOptions.indexCacheSize),
+					Dest:         &(cmdlineOptions.IndexCacheSize),
 				},
 				{
 					Name:         "gc",
 					Type:         plugin.PluginOptionTypeBool,
 					Description:  "Enable garbage collection",
 					DefaultValue: true,
-					Dest:         &(cmdlineOptions.gcEnabled),
+					Dest:         &(cmdlineOptions.GcEnabled),
 				},
 			},
 		},
@@ -91,10 +91,10 @@ func init() {
 func NewFromCmdlineOptions() plugin.Plugin {
 	cmdlineOptionsMutex.RLock()
 	opts := []BlobStoreBadgerOptionFunc{
-		WithDataDir(cmdlineOptions.dataDir),
-		WithBlockCacheSize(cmdlineOptions.blockCacheSize),
-		WithIndexCacheSize(cmdlineOptions.indexCacheSize),
-		WithGc(cmdlineOptions.gcEnabled),
+		WithDataDir(cmdlineOptions.DataDir),
+		WithBlockCacheSize(cmdlineOptions.BlockCacheSize),
+		WithIndexCacheSize(cmdlineOptions.IndexCacheSize),
+		WithGc(cmdlineOptions.GcEnabled),
 	}
 	cmdlineOptionsMutex.RUnlock()
 	p, err := New(opts...)

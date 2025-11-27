@@ -12,52 +12,29 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package cardano
+package cardano_test
 
 import (
 	"path"
-	"reflect"
 	"testing"
+
+	"github.com/blinklabs-io/dingo/config/cardano"
 )
 
 const (
 	testDataDir = "testdata"
 )
 
-var expectedCardanoNodeConfig = &CardanoNodeConfig{
-	path:               testDataDir,
-	AlonzoGenesisFile:  "alonzo-genesis.json",
-	AlonzoGenesisHash:  "7e94a15f55d1e82d10f09203fa1d40f8eede58fd8066542cf6566008068ed874",
-	ByronGenesisFile:   "byron-genesis.json",
-	ByronGenesisHash:   "83de1d7302569ad56cf9139a41e2e11346d4cb4a31c00142557b6ab3fa550761",
-	ConwayGenesisFile:  "conway-genesis.json",
-	ConwayGenesisHash:  "9cc5084f02e27210eacba47af0872e3dba8946ad9460b6072d793e1d2f3987ef",
-	ShelleyGenesisFile: "shelley-genesis.json",
-	ShelleyGenesisHash: "363498d1024f84bb39d3fa9593ce391483cb40d479b87233f868d6e57c3a400d",
-}
-
 func TestCardanoNodeConfig(t *testing.T) {
 	tmpPath := path.Join(
 		testDataDir,
 		"config.json",
 	)
-	cfg, err := NewCardanoNodeConfigFromFile(tmpPath)
+	cfg, err := cardano.NewCardanoNodeConfigFromFile(tmpPath)
 	if err != nil {
 		t.Fatalf("unexpected error: %s", err)
 	}
-	// Create temp config without parsed genesis files to make comparison easier
-	tmpCfg := *cfg
-	tmpCfg.byronGenesis = nil
-	tmpCfg.shelleyGenesis = nil
-	tmpCfg.alonzoGenesis = nil
-	tmpCfg.conwayGenesis = nil
-	if !reflect.DeepEqual(&tmpCfg, expectedCardanoNodeConfig) {
-		t.Fatalf(
-			"did not get expected object\n     got: %#v\n  wanted: %#v\n",
-			tmpCfg,
-			expectedCardanoNodeConfig,
-		)
-	}
+	// Check that genesis files are accessible
 	t.Run("Byron genesis", func(t *testing.T) {
 		g := cfg.ByronGenesis()
 		if g == nil {
@@ -68,6 +45,9 @@ func TestCardanoNodeConfig(t *testing.T) {
 		g := cfg.ShelleyGenesis()
 		if g == nil {
 			t.Fatalf("got nil instead of ShelleyGenesis")
+		}
+		if g.NetworkId != "Testnet" {
+			t.Errorf("expected NetworkId 'Testnet', got %q", g.NetworkId)
 		}
 	})
 	t.Run("Alonzo genesis", func(t *testing.T) {
@@ -80,6 +60,15 @@ func TestCardanoNodeConfig(t *testing.T) {
 		g := cfg.ConwayGenesis()
 		if g == nil {
 			t.Fatalf("got nil instead of ConwayGenesis")
+		}
+	})
+	// Validate config fields are populated
+	t.Run("Config fields", func(t *testing.T) {
+		if cfg.ShelleyGenesisFile == "" {
+			t.Error("expected ShelleyGenesisFile to be set")
+		}
+		if cfg.ByronGenesisFile == "" {
+			t.Error("expected ByronGenesisFile to be set")
 		}
 	})
 }

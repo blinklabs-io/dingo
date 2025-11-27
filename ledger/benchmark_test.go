@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package ledger
+package ledger_test
 
 import (
 	"errors"
@@ -22,7 +22,8 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/immutable"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/gouroboros/ledger"
+	"github.com/blinklabs-io/dingo/ledger"
+	lg "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"gorm.io/gorm"
@@ -68,7 +69,7 @@ func seedBlocksFromSlots(
 		}
 
 		// Store block in database
-		ledgerBlock, err := ledger.NewBlockFromCbor(block.Type, block.Cbor)
+		ledgerBlock, err := lg.NewBlockFromCbor(block.Type, block.Cbor)
 		if err != nil {
 			continue // Skip problematic blocks
 		}
@@ -137,7 +138,7 @@ func BenchmarkBlockMemoryUsage(b *testing.B) {
 		block := realBlocks[i%len(realBlocks)]
 
 		// Decode block (this is where most memory allocation happens)
-		ledgerBlock, err := ledger.NewBlockFromCbor(block.Type, block.Cbor)
+		ledgerBlock, err := lg.NewBlockFromCbor(block.Type, block.Cbor)
 		if err != nil {
 			// Skip problematic blocks in benchmark
 			continue
@@ -166,7 +167,7 @@ func BenchmarkUtxoLookupByAddressNoData(b *testing.B) {
 	// Create a test address
 	paymentKey := make([]byte, 28) // dummy 28-byte key hash
 	stakeKey := make([]byte, 28)
-	testAddr, err := ledger.NewAddressFromParts(0, 0, paymentKey, stakeKey)
+	testAddr, err := lg.NewAddressFromParts(0, 0, paymentKey, stakeKey)
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -206,7 +207,7 @@ func BenchmarkUtxoLookupByAddressRealData(b *testing.B) {
 	// Create a test address for queries
 	paymentKey := make([]byte, 28)
 	stakeKey := make([]byte, 28)
-	testAddr, err := ledger.NewAddressFromParts(0, 0, paymentKey, stakeKey)
+	testAddr, err := lg.NewAddressFromParts(0, 0, paymentKey, stakeKey)
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -351,7 +352,7 @@ func BenchmarkBlockRetrievalByIndexRealData(b *testing.B) {
 			continue
 		}
 
-		ledgerBlock, err := ledger.NewBlockFromCbor(block.Type, block.Cbor)
+		ledgerBlock, err := lg.NewBlockFromCbor(block.Type, block.Cbor)
 		if err != nil {
 			continue
 		}
@@ -448,7 +449,7 @@ func BenchmarkTransactionHistoryQueriesRealData(b *testing.B) {
 			continue
 		}
 
-		ledgerBlock, err := ledger.NewBlockFromCbor(block.Type, block.Cbor)
+		ledgerBlock, err := lg.NewBlockFromCbor(block.Type, block.Cbor)
 		if err != nil {
 			continue
 		}
@@ -555,7 +556,7 @@ func BenchmarkAccountLookupByStakeKeyRealData(b *testing.B) {
 			continue
 		}
 
-		ledgerBlock, err := ledger.NewBlockFromCbor(block.Type, block.Cbor)
+		ledgerBlock, err := lg.NewBlockFromCbor(block.Type, block.Cbor)
 		if err != nil {
 			continue
 		}
@@ -659,7 +660,7 @@ func BenchmarkPoolLookupByKeyHashRealData(b *testing.B) {
 			continue
 		}
 
-		ledgerBlock, err := ledger.NewBlockFromCbor(block.Type, block.Cbor)
+		ledgerBlock, err := lg.NewBlockFromCbor(block.Type, block.Cbor)
 		if err != nil {
 			continue
 		}
@@ -764,7 +765,7 @@ func BenchmarkDRepLookupByKeyHashRealData(b *testing.B) {
 			continue
 		}
 
-		ledgerBlock, err := ledger.NewBlockFromCbor(block.Type, block.Cbor)
+		ledgerBlock, err := lg.NewBlockFromCbor(block.Type, block.Cbor)
 		if err != nil {
 			continue
 		}
@@ -870,7 +871,7 @@ func BenchmarkDatumLookupByHashRealData(b *testing.B) {
 			continue
 		}
 
-		ledgerBlock, err := ledger.NewBlockFromCbor(block.Type, block.Cbor)
+		ledgerBlock, err := lg.NewBlockFromCbor(block.Type, block.Cbor)
 		if err != nil {
 			continue
 		}
@@ -973,7 +974,7 @@ func BenchmarkProtocolParametersLookupByEpochRealData(b *testing.B) {
 			continue
 		}
 
-		ledgerBlock, err := ledger.NewBlockFromCbor(block.Type, block.Cbor)
+		ledgerBlock, err := lg.NewBlockFromCbor(block.Type, block.Cbor)
 		if err != nil {
 			continue
 		}
@@ -1077,7 +1078,7 @@ func BenchmarkBlockNonceLookupRealData(b *testing.B) {
 			continue
 		}
 
-		ledgerBlock, err := ledger.NewBlockFromCbor(block.Type, block.Cbor)
+		ledgerBlock, err := lg.NewBlockFromCbor(block.Type, block.Cbor)
 		if err != nil {
 			continue
 		}
@@ -1188,7 +1189,7 @@ func BenchmarkStakeRegistrationLookupsRealData(b *testing.B) {
 			continue
 		}
 
-		ledgerBlock, err := ledger.NewBlockFromCbor(block.Type, block.Cbor)
+		ledgerBlock, err := lg.NewBlockFromCbor(block.Type, block.Cbor)
 		if err != nil {
 			continue
 		}
@@ -1297,7 +1298,7 @@ func BenchmarkPoolRegistrationLookupsRealData(b *testing.B) {
 			continue
 		}
 
-		ledgerBlock, err := ledger.NewBlockFromCbor(block.Type, block.Cbor)
+		ledgerBlock, err := lg.NewBlockFromCbor(block.Type, block.Cbor)
 		if err != nil {
 			continue
 		}
@@ -1381,7 +1382,7 @@ func BenchmarkEraTransitionPerformance(b *testing.B) {
 	// Benchmark processing blocks across era transitions
 	for b.Loop() {
 		for _, block := range blocks {
-			ledgerBlock, err := ledger.NewBlockFromCbor(block.Type, block.Cbor)
+			ledgerBlock, err := lg.NewBlockFromCbor(block.Type, block.Cbor)
 			if err != nil {
 				b.Fatal(err)
 			}
@@ -1442,7 +1443,7 @@ func BenchmarkEraTransitionPerformanceRealData(b *testing.B) {
 			blocks = append(blocks, block)
 
 			// Also seed the database with this block
-			ledgerBlock, err := ledger.NewBlockFromCbor(block.Type, block.Cbor)
+			ledgerBlock, err := lg.NewBlockFromCbor(block.Type, block.Cbor)
 			if err != nil {
 				continue
 			}
@@ -1478,7 +1479,7 @@ func BenchmarkEraTransitionPerformanceRealData(b *testing.B) {
 	// Benchmark processing blocks across era transitions with database operations
 	for b.Loop() {
 		for _, block := range blocks {
-			ledgerBlock, err := ledger.NewBlockFromCbor(block.Type, block.Cbor)
+			ledgerBlock, err := lg.NewBlockFromCbor(block.Type, block.Cbor)
 			if err != nil {
 				b.Fatal(err)
 			}
@@ -1551,7 +1552,7 @@ func BenchmarkIndexBuildingTime(b *testing.B) {
 		block := realBlocks[i%len(realBlocks)]
 
 		// Decode block
-		ledgerBlock, err := ledger.NewBlockFromCbor(block.Type, block.Cbor)
+		ledgerBlock, err := lg.NewBlockFromCbor(block.Type, block.Cbor)
 		if err != nil {
 			// Skip problematic blocks in benchmark
 			continue
@@ -1674,7 +1675,7 @@ func BenchmarkRealBlockProcessing(b *testing.B) {
 		}
 
 		// Convert immutable block to ledger block
-		ledgerBlock, err := ledger.NewBlockFromCbor(block.Type, block.Cbor)
+		ledgerBlock, err := lg.NewBlockFromCbor(block.Type, block.Cbor)
 		if err != nil {
 			b.Fatalf("NewBlockFromCbor failed: %v", err)
 		}
@@ -1740,7 +1741,7 @@ func BenchmarkRealDataQueries(b *testing.B) {
 		}
 
 		// Convert and store block
-		ledgerBlock, err := ledger.NewBlockFromCbor(block.Type, block.Cbor)
+		ledgerBlock, err := lg.NewBlockFromCbor(block.Type, block.Cbor)
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -1820,7 +1821,7 @@ func BenchmarkChainSyncFromGenesis(b *testing.B) {
 			}
 
 			// Decode block to ensure it's valid
-			ledgerBlock, err := ledger.NewBlockFromCbor(block.Type, block.Cbor)
+			ledgerBlock, err := lg.NewBlockFromCbor(block.Type, block.Cbor)
 			if err != nil {
 				// Skip problematic blocks
 				continue
@@ -1876,11 +1877,11 @@ func BenchmarkTransactionValidation(b *testing.B) {
 	}
 
 	// Create ledger state for validation
-	ledgerCfg := LedgerStateConfig{
+	ledgerCfg := ledger.LedgerStateConfig{
 		Database:     db,
 		ChainManager: chainManager,
 	}
-	ledgerState, err := NewLedgerState(ledgerCfg)
+	ledgerState, err := ledger.NewLedgerState(ledgerCfg)
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -1907,7 +1908,7 @@ func BenchmarkTransactionValidation(b *testing.B) {
 		}
 
 		// Decode block
-		ledgerBlock, err := ledger.NewBlockFromCbor(block.Type, block.Cbor)
+		ledgerBlock, err := lg.NewBlockFromCbor(block.Type, block.Cbor)
 		if err != nil {
 			continue
 		}
@@ -1980,11 +1981,11 @@ func BenchmarkBlockProcessingThroughput(b *testing.B) {
 	}
 
 	// Create ledger state for validation
-	ledgerCfg := LedgerStateConfig{
+	ledgerCfg := ledger.LedgerStateConfig{
 		Database:     db,
 		ChainManager: chainManager,
 	}
-	ledgerState, err := NewLedgerState(ledgerCfg)
+	ledgerState, err := ledger.NewLedgerState(ledgerCfg)
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -2029,7 +2030,7 @@ func BenchmarkBlockProcessingThroughput(b *testing.B) {
 		block := blocks[i%len(blocks)]
 
 		// Convert to ledger block
-		ledgerBlock, err := ledger.NewBlockFromCbor(block.Type, block.Cbor)
+		ledgerBlock, err := lg.NewBlockFromCbor(block.Type, block.Cbor)
 		if err != nil {
 			b.Fatalf("NewBlockFromCbor failed: %v", err)
 		}
@@ -2107,7 +2108,7 @@ func BenchmarkConcurrentQueries(b *testing.B) {
 				// Query UTxO by address (using test address)
 				paymentKey := make([]byte, 28) // dummy 28-byte key hash
 				stakeKey := make([]byte, 28)
-				testAddr, err := ledger.NewAddressFromParts(
+				testAddr, err := lg.NewAddressFromParts(
 					0,
 					0,
 					paymentKey,

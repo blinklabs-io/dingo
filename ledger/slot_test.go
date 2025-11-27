@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package ledger
+package ledger_test
 
 import (
 	"strings"
@@ -21,11 +21,12 @@ import (
 
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/ledger"
 )
 
 func TestSlotCalc(t *testing.T) {
-	testLedgerState := &LedgerState{
-		epochCache: []models.Epoch{
+	testLedgerState := &ledger.LedgerState{
+		EpochCache: []models.Epoch{
 			{
 				EpochId:       0,
 				StartSlot:     0,
@@ -63,12 +64,12 @@ func TestSlotCalc(t *testing.T) {
 				LengthInSlots: 86400,
 			},
 		},
-		config: LedgerStateConfig{
+		Config: ledger.LedgerStateConfig{
 			CardanoNodeConfig: &cardano.CardanoNodeConfig{},
 		},
 	}
 	testShelleyGenesis := `{"systemStart": "2022-10-25T00:00:00Z"}`
-	if err := testLedgerState.config.CardanoNodeConfig.LoadShelleyGenesisFromReader(strings.NewReader(testShelleyGenesis)); err != nil {
+	if err := testLedgerState.Config.CardanoNodeConfig.LoadShelleyGenesisFromReader(strings.NewReader(testShelleyGenesis)); err != nil {
 		t.Fatalf("unexpected error loading cardano node config: %s", err)
 	}
 	testDefs := []struct {

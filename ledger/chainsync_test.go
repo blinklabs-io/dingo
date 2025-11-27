@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package ledger
+package ledger_test
 
 import (
 	"encoding/hex"
@@ -24,6 +24,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 )
 
@@ -52,21 +53,21 @@ func TestCalculateEpochNonce_ByronEra(t *testing.T) {
 		t.Fatalf("failed to load Shelley genesis: %v", err)
 	}
 
-	ls := &LedgerState{
-		currentEra: eras.ByronEraDesc,
-		currentEpoch: models.Epoch{
+	ls := &ledger.LedgerState{
+		CurrentEra: eras.ByronEraDesc,
+		CurrentEpoch: models.Epoch{
 			EpochId:   0,
 			StartSlot: 0,
 			Nonce:     nil,
 		},
-		config: LedgerStateConfig{
+		Config: ledger.LedgerStateConfig{
 			CardanoNodeConfig: cfg,
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
 
 	// Byron era should return nil nonce
-	nonce, err := ls.calculateEpochNonce(nil, 0)
+	nonce, err := ls.CalculateEpochNonce(nil, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -100,21 +101,21 @@ func TestCalculateEpochNonce_InitialEpochWithoutNonce(t *testing.T) {
 		t.Fatalf("failed to load Shelley genesis: %v", err)
 	}
 
-	ls := &LedgerState{
-		currentEra: eras.ShelleyEraDesc,
-		currentEpoch: models.Epoch{
+	ls := &ledger.LedgerState{
+		CurrentEra: eras.ShelleyEraDesc,
+		CurrentEpoch: models.Epoch{
 			EpochId:   0,
 			StartSlot: 0,
 			Nonce:     nil, // No nonce means initial epoch
 		},
-		config: LedgerStateConfig{
+		Config: ledger.LedgerStateConfig{
 			CardanoNodeConfig: cfg,
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
 
 	// Initial epoch should return genesis hash
-	nonce, err := ls.calculateEpochNonce(nil, 0)
+	nonce, err := ls.CalculateEpochNonce(nil, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -168,20 +169,20 @@ func TestCalculateEpochNonce_InvalidGenesisHash(t *testing.T) {
 		t.Fatalf("failed to load Shelley genesis: %v", err)
 	}
 
-	ls := &LedgerState{
-		currentEra: eras.ShelleyEraDesc,
-		currentEpoch: models.Epoch{
+	ls := &ledger.LedgerState{
+		CurrentEra: eras.ShelleyEraDesc,
+		CurrentEpoch: models.Epoch{
 			EpochId:   0,
 			StartSlot: 0,
 			Nonce:     nil,
 		},
-		config: LedgerStateConfig{
+		Config: ledger.LedgerStateConfig{
 			CardanoNodeConfig: cfg,
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
 
-	_, err := ls.calculateEpochNonce(nil, 0)
+	_, err := ls.CalculateEpochNonce(nil, 0)
 	if err == nil {
 		t.Fatal("expected error for invalid genesis hash, got nil")
 	}
@@ -191,20 +192,20 @@ func TestCalculateEpochNonce_InvalidGenesisHash(t *testing.T) {
 func TestCalculateEpochNonce_MissingShelleyGenesis(t *testing.T) {
 	cfg := &cardano.CardanoNodeConfig{}
 
-	ls := &LedgerState{
-		currentEra: eras.ShelleyEraDesc,
-		currentEpoch: models.Epoch{
+	ls := &ledger.LedgerState{
+		CurrentEra: eras.ShelleyEraDesc,
+		CurrentEpoch: models.Epoch{
 			EpochId:   1,
 			StartSlot: 86400,
 			Nonce:     nil,
 		},
-		config: LedgerStateConfig{
+		Config: ledger.LedgerStateConfig{
 			CardanoNodeConfig: cfg,
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
 
-	_, err := ls.calculateEpochNonce(nil, 86400)
+	_, err := ls.CalculateEpochNonce(nil, 86400)
 	if err == nil {
 		t.Fatal("expected error for missing Shelley genesis, got nil")
 	}
@@ -233,14 +234,14 @@ func TestCalculateEpochNonce_NegativeSecurityParam(t *testing.T) {
 	_ = cfg.LoadByronGenesisFromReader(strings.NewReader(byronGenesisJSON))
 	_ = cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON))
 
-	ls := &LedgerState{
-		currentEra: eras.ByronEraDesc,
-		currentEpoch: models.Epoch{
+	ls := &ledger.LedgerState{
+		CurrentEra: eras.ByronEraDesc,
+		CurrentEpoch: models.Epoch{
 			EpochId:   1,
 			StartSlot: 86400,
 			Nonce:     []byte{0x01, 0x02, 0x03},
 		},
-		config: LedgerStateConfig{
+		Config: ledger.LedgerStateConfig{
 			CardanoNodeConfig: cfg,
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
@@ -248,7 +249,7 @@ func TestCalculateEpochNonce_NegativeSecurityParam(t *testing.T) {
 
 	// Test will depend on whether the genesis loads successfully
 	// If it loads, we expect an error about negative k
-	_, err := ls.calculateEpochNonce(nil, 86400)
+	_, err := ls.CalculateEpochNonce(nil, 86400)
 	// Either genesis loading fails or calculateEpochNonce catches negative k
 	if err == nil {
 		t.Log("Note: negative k may be caught during genesis loading")
@@ -307,14 +308,14 @@ func TestCalculateEpochNonce_ShelleyEraDifferentParams(t *testing.T) {
 				t.Fatalf("failed to load Shelley genesis: %v", err)
 			}
 
-			ls := &LedgerState{
-				currentEra: eras.ShelleyEraDesc,
-				currentEpoch: models.Epoch{
+			ls := &ledger.LedgerState{
+				CurrentEra: eras.ShelleyEraDesc,
+				CurrentEpoch: models.Epoch{
 					EpochId:   0,
 					StartSlot: 0,
 					Nonce:     nil,
 				},
-				config: LedgerStateConfig{
+				Config: ledger.LedgerStateConfig{
 					CardanoNodeConfig: cfg,
 					Logger: slog.New(
 						slog.NewJSONHandler(io.Discard, nil),
@@ -323,7 +324,7 @@ func TestCalculateEpochNonce_ShelleyEraDifferentParams(t *testing.T) {
 			}
 
 			// Initial epoch should return genesis hash
-			nonce, err := ls.calculateEpochNonce(nil, 0)
+			nonce, err := ls.CalculateEpochNonce(nil, 0)
 			if err != nil {
 				t.Fatalf("%s: unexpected error: %v", tc.description, err)
 			}
@@ -352,25 +353,25 @@ func TestCalculateEpochNonce_ZeroActiveSlots(t *testing.T) {
 		t.Fatalf("failed to load Shelley genesis: %v", err)
 	}
 
-	ls := &LedgerState{
-		currentEra: eras.ShelleyEraDesc,
-		currentEpoch: models.Epoch{
+	ls := &ledger.LedgerState{
+		CurrentEra: eras.ShelleyEraDesc,
+		CurrentEpoch: models.Epoch{
 			EpochId:   1,
 			StartSlot: 86400,
 			Nonce:     nil,
 		},
-		config: LedgerStateConfig{
+		Config: ledger.LedgerStateConfig{
 			CardanoNodeConfig: cfg,
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
 
 	// Verify fallback behavior when ActiveSlotsCoeff cannot be used
-	window := ls.calculateStabilityWindow()
-	if window != blockfetchBatchSlotThresholdDefault {
+	window := ls.CalculateStabilityWindow()
+	if window != ledger.BlockfetchBatchSlotThresholdDefault {
 		t.Fatalf(
 			"expected fallback window %d, got %d",
-			blockfetchBatchSlotThresholdDefault,
+			ledger.BlockfetchBatchSlotThresholdDefault,
 			window,
 		)
 	}
@@ -432,14 +433,14 @@ func TestCalculateEpochNonce_StabilityWindowCalculation(t *testing.T) {
 				t.Fatalf("failed to load Shelley genesis: %v", err)
 			}
 
-			ls := &LedgerState{
-				currentEra: tc.era,
-				currentEpoch: models.Epoch{
+			ls := &ledger.LedgerState{
+				CurrentEra: tc.era,
+				CurrentEpoch: models.Epoch{
 					EpochId:   0,
 					StartSlot: 0,
 					Nonce:     nil,
 				},
-				config: LedgerStateConfig{
+				Config: ledger.LedgerStateConfig{
 					CardanoNodeConfig: cfg,
 					Logger: slog.New(
 						slog.NewJSONHandler(io.Discard, nil),
@@ -449,7 +450,7 @@ func TestCalculateEpochNonce_StabilityWindowCalculation(t *testing.T) {
 
 			// Test for Byron era - should return nil
 			if tc.era.Id == 0 {
-				nonce, err := ls.calculateEpochNonce(nil, 0)
+				nonce, err := ls.CalculateEpochNonce(nil, 0)
 				if err != nil {
 					t.Fatalf("unexpected error: %v", err)
 				}
@@ -463,7 +464,7 @@ func TestCalculateEpochNonce_StabilityWindowCalculation(t *testing.T) {
 			}
 
 			// For non-Byron eras, test initial epoch returns genesis hash
-			nonce, err := ls.calculateEpochNonce(nil, 0)
+			nonce, err := ls.CalculateEpochNonce(nil, 0)
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
@@ -500,21 +501,21 @@ func TestCalculateEpochNonce_IntegerArithmeticPrecision(t *testing.T) {
 		t.Fatalf("failed to load Shelley genesis: %v", err)
 	}
 
-	ls := &LedgerState{
-		currentEra: eras.ShelleyEraDesc,
-		currentEpoch: models.Epoch{
+	ls := &ledger.LedgerState{
+		CurrentEra: eras.ShelleyEraDesc,
+		CurrentEpoch: models.Epoch{
 			EpochId:   0,
 			StartSlot: 0,
 			Nonce:     nil,
 		},
-		config: LedgerStateConfig{
+		Config: ledger.LedgerStateConfig{
 			CardanoNodeConfig: cfg,
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
 
 	// Should handle fractional coefficients correctly using integer arithmetic
-	nonce, err := ls.calculateEpochNonce(nil, 0)
+	nonce, err := ls.CalculateEpochNonce(nil, 0)
 	if err != nil {
 		t.Fatalf("unexpected error with fractional coefficient: %v", err)
 	}
@@ -548,23 +549,23 @@ func TestHandleEventChainsyncBlockHeader_StabilityWindowUsage(t *testing.T) {
 		t.Fatalf("failed to load Shelley genesis: %v", err)
 	}
 
-	ls := &LedgerState{
-		currentEra: eras.ShelleyEraDesc,
-		config: LedgerStateConfig{
+	ls := &ledger.LedgerState{
+		CurrentEra: eras.ShelleyEraDesc,
+		Config: ledger.LedgerStateConfig{
 			CardanoNodeConfig: cfg,
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
 
 	// Verify that calculateStabilityWindow returns correct value
-	window := ls.calculateStabilityWindow()
+	window := ls.CalculateStabilityWindow()
 	expectedWindow := uint64(25920) // 3*432/0.05
 	if window != expectedWindow {
 		t.Errorf("expected stability window %d, got %d", expectedWindow, window)
 	}
 
 	// Verify it's different from the old constant
-	if window == blockfetchBatchSlotThresholdDefault {
+	if window == ledger.BlockfetchBatchSlotThresholdDefault {
 		t.Error(
 			"stability window should not equal the old constant for Shelley era",
 		)
@@ -647,14 +648,14 @@ func TestCalculateEpochNonce_AllEras(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			ls := &LedgerState{
-				currentEra: tc.era,
-				currentEpoch: models.Epoch{
+			ls := &ledger.LedgerState{
+				CurrentEra: tc.era,
+				CurrentEpoch: models.Epoch{
 					EpochId:   0,
 					StartSlot: 0,
 					Nonce:     nil,
 				},
-				config: LedgerStateConfig{
+				Config: ledger.LedgerStateConfig{
 					CardanoNodeConfig: cfg,
 					Logger: slog.New(
 						slog.NewJSONHandler(io.Discard, nil),
@@ -662,7 +663,7 @@ func TestCalculateEpochNonce_AllEras(t *testing.T) {
 				},
 			}
 
-			nonce, err := ls.calculateEpochNonce(nil, 0)
+			nonce, err := ls.CalculateEpochNonce(nil, 0)
 			if err != nil {
 				t.Fatalf("%s: unexpected error: %v", tc.description, err)
 			}
@@ -699,21 +700,21 @@ func TestCalculateEpochNonce_MissingByronGenesisInByronEra(t *testing.T) {
 		t.Fatalf("failed to load Shelley genesis: %v", err)
 	}
 
-	ls := &LedgerState{
-		currentEra: eras.ByronEraDesc,
-		currentEpoch: models.Epoch{
+	ls := &ledger.LedgerState{
+		CurrentEra: eras.ByronEraDesc,
+		CurrentEpoch: models.Epoch{
 			EpochId:   1,
 			StartSlot: 86400,
 			Nonce:     nil,
 		},
-		config: LedgerStateConfig{
+		Config: ledger.LedgerStateConfig{
 			CardanoNodeConfig: cfg,
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
 
 	// Byron era returns nil nonce immediately without genesis validation
-	nonce, err := ls.calculateEpochNonce(nil, 86400)
+	nonce, err := ls.CalculateEpochNonce(nil, 86400)
 	if err != nil {
 		t.Fatalf("unexpected error for Byron era: %v", err)
 	}

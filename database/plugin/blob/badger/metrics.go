@@ -94,5 +94,5 @@ func (d *BlobStoreBadger) registerBlobMetrics() {
 			),
 		},
 	)
-	d.promRegistry.MustRegister(collector)
+	d.PromRegistry.MustRegister(collector)
 }

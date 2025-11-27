@@ -12,25 +12,27 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package aws
+package aws_test
 
 import (
 	"testing"
+
+	"github.com/blinklabs-io/dingo/database/plugin/blob/aws"
 )
 
 func TestNewFromCmdlineOptions(t *testing.T) {
-	// Save original cmdlineOptions
-	originalOptions := cmdlineOptions
-	cmdlineOptions.bucket = "test-bucket"
-	cmdlineOptions.region = "us-east-1"
-	cmdlineOptions.prefix = "test-prefix"
+	// Save original aws.CmdlineOptions
+	originalOptions := aws.CmdlineOptions
+	aws.CmdlineOptions.Bucket = "test-bucket"
+	aws.CmdlineOptions.Region = "us-east-1"
+	aws.CmdlineOptions.Prefix = "test-prefix"
 
 	// This should succeed
-	plugin := NewFromCmdlineOptions()
+	plugin := aws.NewFromCmdlineOptions()
 	if plugin == nil {
 		t.Error("Expected plugin to be created, got nil")
 	}
 
 	// Restore original options
-	cmdlineOptions = originalOptions
+	aws.CmdlineOptions = originalOptions
 }

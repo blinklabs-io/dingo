@@ -22,7 +22,7 @@ import (
 
 // BadgerLogger is a wrapper type to give our logger the expected interface
 type BadgerLogger struct {
-	logger *slog.Logger
+	Logger *slog.Logger
 }
 
 func NewBadgerLogger(logger *slog.Logger) *BadgerLogger {
@@ -31,32 +31,32 @@ func NewBadgerLogger(logger *slog.Logger) *BadgerLogger {
 		// We do this so we don't have to add guards around every log operation
 		logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
 	}
-	return &BadgerLogger{logger: logger}
+	return &BadgerLogger{Logger: logger}
 }
 
 func (b *BadgerLogger) Infof(msg string, args ...any) {
-	b.logger.Info(
+	b.Logger.Info(
 		fmt.Sprintf(msg, args...),
 		"component", "database",
 	)
 }
 
 func (b *BadgerLogger) Warningf(msg string, args ...any) {
-	b.logger.Warn(
+	b.Logger.Warn(
 		fmt.Sprintf(msg, args...),
 		"component", "database",
 	)
 }
 
 func (b *BadgerLogger) Debugf(msg string, args ...any) {
-	b.logger.Debug(
+	b.Logger.Debug(
 		fmt.Sprintf(msg, args...),
 		"component", "database",
 	)
 }
 
 func (b *BadgerLogger) Errorf(msg string, args ...any) {
-	b.logger.Error(
+	b.Logger.Error(
 		fmt.Sprintf(msg, args...),
 		"component", "database",
 	)

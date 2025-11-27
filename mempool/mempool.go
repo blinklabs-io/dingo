@@ -141,8 +141,8 @@ func (m *Mempool) AddConsumer(connId ouroboros.ConnectionId) *MempoolConsumer {
 
 func (m *Mempool) RemoveConsumer(connId ouroboros.ConnectionId) {
 	m.consumersMutex.Lock()
+	defer m.consumersMutex.Unlock()
 	delete(m.consumers, connId)
-	m.consumersMutex.Unlock()
 }
 
 func (m *Mempool) Consumer(connId ouroboros.ConnectionId) *MempoolConsumer {

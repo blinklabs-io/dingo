@@ -22,8 +22,8 @@ import (
 	"github.com/blinklabs-io/dingo/database/plugin"
 )
 
-// validateCredentials checks if the credentials file exists and is readable
-func validateCredentials(credentialsFile string) error {
+// ValidateCredentials checks if the credentials file exists and is readable
+func ValidateCredentials(credentialsFile string) error {
 	if credentialsFile == "" {
 		return nil // Empty credentials file is allowed (will use ADC)
 	}
@@ -45,8 +45,8 @@ func validateCredentials(credentialsFile string) error {
 
 var (
 	cmdlineOptions struct {
-		bucket          string
-		credentialsFile string
+		Bucket          string
+		CredentialsFile string
 	}
 	cmdlineOptionsMutex sync.RWMutex
 )
@@ -73,14 +73,14 @@ func init() {
 					Type:         plugin.PluginOptionTypeString,
 					Description:  "GCS bucket name",
 					DefaultValue: "",
-					Dest:         &(cmdlineOptions.bucket),
+					Dest:         &(cmdlineOptions.Bucket),
 				},
 				{
 					Name:         "credentials-file",
 					Type:         plugin.PluginOptionTypeString,
 					Description:  "Path to GCS service account credentials file",
 					DefaultValue: "",
-					Dest:         &(cmdlineOptions.credentialsFile),
+					Dest:         &(cmdlineOptions.CredentialsFile),
 				},
 			},
 		},
@@ -89,8 +89,8 @@ func init() {
 
 func NewFromCmdlineOptions() plugin.Plugin {
 	cmdlineOptionsMutex.RLock()
-	bucket := cmdlineOptions.bucket
-	credentialsFile := cmdlineOptions.credentialsFile
+	bucket := cmdlineOptions.Bucket
+	credentialsFile := cmdlineOptions.CredentialsFile
 	cmdlineOptionsMutex.RUnlock()
 
 	opts := []BlobStoreGCSOptionFunc{

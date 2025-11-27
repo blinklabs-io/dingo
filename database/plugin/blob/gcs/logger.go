@@ -22,7 +22,7 @@ import (
 
 // GcsLogger is a wrapper type to give our logger a consistent interface
 type GcsLogger struct {
-	logger *slog.Logger
+	Logger *slog.Logger
 }
 
 func NewGcsLogger(logger *slog.Logger) *GcsLogger {
@@ -30,32 +30,32 @@ func NewGcsLogger(logger *slog.Logger) *GcsLogger {
 		// Create logger to throw away logs
 		logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
 	}
-	return &GcsLogger{logger: logger}
+	return &GcsLogger{Logger: logger}
 }
 
 func (g *GcsLogger) Infof(msg string, args ...any) {
-	g.logger.Info(
+	g.Logger.Info(
 		fmt.Sprintf(msg, args...),
 		"component", "database",
 	)
 }
 
 func (g *GcsLogger) Warningf(msg string, args ...any) {
-	g.logger.Warn(
+	g.Logger.Warn(
 		fmt.Sprintf(msg, args...),
 		"component", "database",
 	)
 }
 
 func (g *GcsLogger) Debugf(msg string, args ...any) {
-	g.logger.Debug(
+	g.Logger.Debug(
 		fmt.Sprintf(msg, args...),
 		"component", "database",
 	)
 }
 
 func (g *GcsLogger) Errorf(msg string, args ...any) {
-	g.logger.Error(
+	g.Logger.Error(
 		fmt.Sprintf(msg, args...),
 		"component", "database",
 	)

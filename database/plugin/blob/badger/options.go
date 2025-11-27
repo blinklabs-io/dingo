@@ -25,7 +25,7 @@ type BlobStoreBadgerOptionFunc func(*BlobStoreBadger)
 // WithLogger specifies the logger object to use for logging messages
 func WithLogger(logger *slog.Logger) BlobStoreBadgerOptionFunc {
 	return func(b *BlobStoreBadger) {
-		b.logger = logger
+		b.Logger = logger
 	}
 }
 
@@ -34,34 +34,34 @@ func WithPromRegistry(
 	registry prometheus.Registerer,
 ) BlobStoreBadgerOptionFunc {
 	return func(b *BlobStoreBadger) {
-		b.promRegistry = registry
+		b.PromRegistry = registry
 	}
 }
 
 // WithDataDir specifies the data directory to use for storage
 func WithDataDir(dataDir string) BlobStoreBadgerOptionFunc {
 	return func(b *BlobStoreBadger) {
-		b.dataDir = dataDir
+		b.DataDir = dataDir
 	}
 }
 
 // WithBlockCacheSize specifies the block cache size
 func WithBlockCacheSize(size uint64) BlobStoreBadgerOptionFunc {
 	return func(b *BlobStoreBadger) {
-		b.blockCacheSize = size
+		b.BlockCacheSize = size
 	}
 }
 
 // WithIndexCacheSize specifies the index cache size
 func WithIndexCacheSize(size uint64) BlobStoreBadgerOptionFunc {
 	return func(b *BlobStoreBadger) {
-		b.indexCacheSize = size
+		b.IndexCacheSize = size
 	}
 }
 
 // WithGc specifies whether garbage collection is enabled
 func WithGc(enabled bool) BlobStoreBadgerOptionFunc {
 	return func(b *BlobStoreBadger) {
-		b.gcEnabled = enabled
+		b.GcEnabled = enabled
 	}
 }

@@ -12,46 +12,48 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package sqlite
+package sqlite_test
 
 import (
+	"io"
 	"log/slog"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
 func TestWithDataDir(t *testing.T) {
-	m := &MetadataStoreSqlite{}
-	option := WithDataDir("/tmp/test")
+	m := &sqlite.MetadataStoreSqlite{}
+	option := sqlite.WithDataDir("/tmp/test")
 
 	option(m)
 
-	if m.dataDir != "/tmp/test" {
-		t.Errorf("Expected dataDir to be '/tmp/test', got '%s'", m.dataDir)
+	if m.DataDir != "/tmp/test" {
+		t.Errorf("Expected DataDir to be '/tmp/test', got '%s'", m.DataDir)
 	}
 }
 
 func TestWithLogger(t *testing.T) {
-	logger := slog.New(slog.NewTextHandler(nil, nil))
-	m := &MetadataStoreSqlite{}
-	option := WithLogger(logger)
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	m := &sqlite.MetadataStoreSqlite{}
+	option := sqlite.WithLogger(logger)
 
 	option(m)
 
-	if m.logger != logger {
+	if m.Logger != logger {
 		t.Errorf("Expected logger to be set")
 	}
 }
 
 func TestWithPromRegistry(t *testing.T) {
 	reg := prometheus.NewRegistry()
-	m := &MetadataStoreSqlite{}
-	option := WithPromRegistry(reg)
+	m := &sqlite.MetadataStoreSqlite{}
+	option := sqlite.WithPromRegistry(reg)
 
 	option(m)
 
-	if m.promRegistry != reg {
-		t.Errorf("Expected promRegistry to be set")
+	if m.PromRegistry != reg {
+		t.Errorf("Expected PromRegistry to be set")
 	}
 }

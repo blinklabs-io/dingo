@@ -37,5 +37,5 @@ func (d *BlobStoreGCS) registerBlobMetrics() {
 		},
 	)
 
-	d.promRegistry.MustRegister(opsTotal, bytesTotal)
+	d.PromRegistry.MustRegister(opsTotal, bytesTotal)
 }

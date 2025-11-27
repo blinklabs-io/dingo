@@ -55,7 +55,12 @@ func (ls *LedgerState) queryBlock(
 }
 
 func (ls *LedgerState) querySystemStart() (any, error) {
-	shelleyGenesis := ls.config.CardanoNodeConfig.ShelleyGenesis()
+	if ls.Config.CardanoNodeConfig == nil {
+		return nil, errors.New(
+			"cardano node config is required for SystemStartQuery",
+		)
+	}
+	shelleyGenesis := ls.Config.CardanoNodeConfig.ShelleyGenesis()
 	if shelleyGenesis == nil {
 		return nil, errors.New(
 			"unable to get shelley era genesis for system start",
@@ -86,7 +91,7 @@ func (ls *LedgerState) queryHardFork(
 ) (any, error) {
 	switch q := query.Query.(type) {
 	case *olocalstatequery.HardForkCurrentEraQuery:
-		return ls.currentEra.Id, nil
+		return ls.CurrentEra.Id, nil
 	case *olocalstatequery.HardForkEraHistoryQuery:
 		return ls.queryHardForkEraHistory()
 	default:
@@ -95,6 +100,11 @@ func (ls *LedgerState) queryHardFork(
 }
 
 func (ls *LedgerState) queryHardForkEraHistory() (any, error) {
+	if ls.Config.CardanoNodeConfig == nil {
+		return nil, errors.New(
+			"cardano node config is required for HardForkEraHistoryQuery",
+		)
+	}
 	retData := []any{}
 	timespan := big.NewInt(0)
 	var epochs []models.Epoch
@@ -107,7 +117,7 @@ func (ls *LedgerState) queryHardForkEraHistory() (any, error) {
 	var idx int
 	for _, era = range eras.Eras {
 		epochSlotLength, epochLength, err = era.EpochLengthFunc(
-			ls.config.CardanoNodeConfig,
+			ls.Config.CardanoNodeConfig,
 		)
 		if err != nil {
 			return nil, err
@@ -170,7 +180,7 @@ func (ls *LedgerState) queryShelley(
 ) (any, error) {
 	switch q := query.Query.(type) {
 	case *olocalstatequery.ShelleyEpochNoQuery:
-		return []any{ls.currentEpoch.EpochId}, nil
+		return []any{ls.CurrentEpoch.EpochId}, nil
 	case *olocalstatequery.ShelleyCurrentProtocolParamsQuery:
 		return []any{ls.currentPParams}, nil
 	case *olocalstatequery.ShelleyGenesisConfigQuery:
@@ -205,7 +215,12 @@ func (ls *LedgerState) queryShelley(
 }
 
 func (ls *LedgerState) queryShelleyGenesisConfig() (any, error) {
-	shelleyGenesis := ls.config.CardanoNodeConfig.ShelleyGenesis()
+	if ls.Config.CardanoNodeConfig == nil {
+		return nil, errors.New(
+			"cardano node config is required for ShelleyGenesisConfigQuery",
+		)
+	}
+	shelleyGenesis := ls.Config.CardanoNodeConfig.ShelleyGenesis()
 	return []any{shelleyGenesis}, nil
 }
 

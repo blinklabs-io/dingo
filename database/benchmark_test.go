@@ -12,19 +12,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package database
+package database_test
 
 import (
 	"testing"
+
+	"github.com/blinklabs-io/dingo/database"
 )
 
 // BenchmarkTransactionCreate benchmarks creating a read-only transaction
 func BenchmarkTransactionCreate(b *testing.B) {
 	// Create a temporary database
-	config := &Config{
+	config := &database.Config{
 		DataDir: "", // In-memory
 	}
-	db, err := New(config)
+	db, err := database.New(config)
 	if err != nil {
 		b.Fatal(err)
 	}

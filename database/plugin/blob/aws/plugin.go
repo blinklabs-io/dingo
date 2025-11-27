@@ -21,10 +21,12 @@ import (
 )
 
 var (
-	cmdlineOptions struct {
-		bucket string
-		region string
-		prefix string
+	// CmdlineOptions holds S3 plugin options populated from command‑line flags.
+	// It is exported so tests and external wiring can configure the plugin.
+	CmdlineOptions struct {
+		Bucket string
+		Region string
+		Prefix string
 	}
 	cmdlineOptionsMutex sync.RWMutex
 )
@@ -43,21 +45,21 @@ func init() {
 					Type:         plugin.PluginOptionTypeString,
 					Description:  "S3 bucket name",
 					DefaultValue: "",
-					Dest:         &(cmdlineOptions.bucket),
+					Dest:         &(CmdlineOptions.Bucket),
 				},
 				{
 					Name:         "region",
 					Type:         plugin.PluginOptionTypeString,
 					Description:  "AWS region",
 					DefaultValue: "",
-					Dest:         &(cmdlineOptions.region),
+					Dest:         &(CmdlineOptions.Region),
 				},
 				{
 					Name:         "prefix",
 					Type:         plugin.PluginOptionTypeString,
 					Description:  "S3 object key prefix",
 					DefaultValue: "",
-					Dest:         &(cmdlineOptions.prefix),
+					Dest:         &(CmdlineOptions.Prefix),
 				},
 			},
 		},
@@ -66,9 +68,9 @@ func init() {
 
 func NewFromCmdlineOptions() plugin.Plugin {
 	cmdlineOptionsMutex.RLock()
-	bucket := cmdlineOptions.bucket
-	region := cmdlineOptions.region
-	prefix := cmdlineOptions.prefix
+	bucket := CmdlineOptions.Bucket
+	region := CmdlineOptions.Region
+	prefix := CmdlineOptions.Prefix
 	cmdlineOptionsMutex.RUnlock()
 
 	opts := []BlobStoreS3OptionFunc{

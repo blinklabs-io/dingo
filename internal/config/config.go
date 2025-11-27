@@ -22,6 +22,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"sync"
 
 	"github.com/blinklabs-io/dingo/database/plugin"
 	"github.com/blinklabs-io/dingo/topology"
@@ -132,29 +133,57 @@ func (c *Config) ParseCmdlineArgs(programName string, args []string) error {
 	return nil
 }
 
-var globalConfig = &Config{
-	MempoolCapacity:    1048576,
-	BindAddr:           "0.0.0.0",
-	CardanoConfig:      "", // Will be set dynamically based on network
-	DatabasePath:       ".dingo",
-	SocketPath:         "dingo.socket",
-	IntersectTip:       false,
-	ValidateHistorical: false,
-	Network:            "preview",
-	MetricsPort:        12798,
-	PrivateBindAddr:    "127.0.0.1",
-	PrivatePort:        3002,
-	RelayPort:          3001,
-	UtxorpcPort:        9090,
-	Topology:           "",
-	TlsCertFilePath:    "",
-	TlsKeyFilePath:     "",
-	BlobPlugin:         DefaultBlobPlugin,
-	MetadataPlugin:     DefaultMetadataPlugin,
-	DevMode:            false,
+func NewDefaultConfig() *Config {
+	return &Config{
+		MempoolCapacity:    1048576,
+		BindAddr:           "0.0.0.0",
+		CardanoConfig:      "", // Will be set dynamically based on network
+		DatabasePath:       ".dingo",
+		SocketPath:         "dingo.socket",
+		IntersectTip:       false,
+		ValidateHistorical: false,
+		Network:            "preview",
+		MetricsPort:        12798,
+		PrivateBindAddr:    "127.0.0.1",
+		PrivatePort:        3002,
+		RelayPort:          3001,
+		UtxorpcPort:        9090,
+		Topology:           "",
+		TlsCertFilePath:    "",
+		TlsKeyFilePath:     "",
+		BlobPlugin:         DefaultBlobPlugin,
+		MetadataPlugin:     DefaultMetadataPlugin,
+		DevMode:            false,
+	}
+}
+
+var (
+	globalConfig *Config
+	configMutex  sync.RWMutex
+)
+
+func init() {
+	globalConfig = NewDefaultConfig()
+}
+
+func SetConfig(cfg Config) {
+	configMutex.Lock()
+	defer configMutex.Unlock()
+	if globalConfig == nil {
+		globalConfig = NewDefaultConfig()
+	}
+	*globalConfig = cfg
+}
+
+// ResetGlobalConfig resets GlobalConfig to defaults. For testing only.
+func ResetGlobalConfig() {
+	SetConfig(*NewDefaultConfig())
 }
 
 func LoadConfig(configFile string) (*Config, error) {
+	if globalConfig == nil {
+		return nil, errors.New("global config is nil")
+	}
 	// Load config file as YAML if provided
 	if configFile == "" {
 		// Check for config file in this path: ~/.dingo/dingo.yaml
@@ -328,14 +357,26 @@ func LoadConfig(configFile string) (*Config, error) {
 	return globalConfig, nil
 }
 
-func GetConfig() *Config {
-	return globalConfig
+func GetConfig() Config {
+	configMutex.RLock()
+	defer configMutex.RUnlock()
+	if globalConfig == nil {
+		return *NewDefaultConfig()
+	}
+	return *globalConfig
 }
 
 var globalTopologyConfig = &topology.TopologyConfig{}
 
+var topologyMutex sync.RWMutex
+
 func LoadTopologyConfig() (*topology.TopologyConfig, error) {
+	if globalConfig == nil {
+		return nil, errors.New("global config is nil")
+	}
 	if globalConfig.DevMode {
+		topologyMutex.RLock()
+		defer topologyMutex.RUnlock()
 		return globalTopologyConfig, nil
 	}
 	if globalConfig.Topology == "" {
@@ -350,15 +391,19 @@ func LoadTopologyConfig() (*topology.TopologyConfig, error) {
 				globalConfig.Network,
 			)
 		}
+		tc := &topology.TopologyConfig{}
 		for _, peer := range network.BootstrapPeers {
-			globalTopologyConfig.BootstrapPeers = append(
-				globalTopologyConfig.BootstrapPeers,
+			tc.BootstrapPeers = append(
+				tc.BootstrapPeers,
 				topology.TopologyConfigP2PAccessPoint{
 					Address: peer.Address,
 					Port:    peer.Port,
 				},
 			)
 		}
+		topologyMutex.Lock()
+		globalTopologyConfig = tc
+		topologyMutex.Unlock()
 		return globalTopologyConfig, nil
 	}
 	tc, err := topology.NewTopologyConfigFromFile(globalConfig.Topology)
@@ -366,10 +411,14 @@ func LoadTopologyConfig() (*topology.TopologyConfig, error) {
 		return nil, fmt.Errorf("failed to load topology file: %+w", err)
 	}
 	// update globalTopologyConfig
+	topologyMutex.Lock()
 	globalTopologyConfig = tc
+	topologyMutex.Unlock()
 	return globalTopologyConfig, nil
 }
 
 func GetTopologyConfig() *topology.TopologyConfig {
+	topologyMutex.RLock()
+	defer topologyMutex.RUnlock()
 	return globalTopologyConfig
 }

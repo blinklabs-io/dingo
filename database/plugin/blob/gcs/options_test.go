@@ -12,64 +12,65 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package gcs
+package gcs_test
 
 import (
 	"io"
 	"log/slog"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/database/plugin/blob/gcs"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
 func TestWithLogger(t *testing.T) {
-	b := &BlobStoreGCS{}
+	b := &gcs.BlobStoreGCS{}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	option := WithLogger(logger)
+	option := gcs.WithLogger(logger)
 
 	option(b)
 
-	if b.logger == nil {
+	if b.Logger == nil {
 		t.Errorf("Expected logger to be set")
 	}
 }
 
 func TestWithPromRegistry(t *testing.T) {
-	b := &BlobStoreGCS{}
+	b := &gcs.BlobStoreGCS{}
 	registry := prometheus.NewRegistry()
-	option := WithPromRegistry(registry)
+	option := gcs.WithPromRegistry(registry)
 
 	option(b)
 
-	if b.promRegistry != registry {
+	if b.PromRegistry != registry {
 		t.Errorf("Expected promRegistry to be set correctly")
 	}
 }
 
 func TestWithBucket(t *testing.T) {
-	b := &BlobStoreGCS{}
-	option := WithBucket("test-bucket")
+	b := &gcs.BlobStoreGCS{}
+	option := gcs.WithBucket("test-bucket")
 
 	option(b)
 
-	if b.bucketName != "test-bucket" {
+	if b.BucketName != "test-bucket" {
 		t.Errorf(
 			"Expected bucketName to be 'test-bucket', got '%s'",
-			b.bucketName,
+			b.BucketName,
 		)
 	}
 }
 
 func TestWithCredentialsFile(t *testing.T) {
-	b := &BlobStoreGCS{}
-	option := WithCredentialsFile("/path/to/creds.json")
+	b := &gcs.BlobStoreGCS{}
+	option := gcs.WithCredentialsFile("/path/to/creds.json")
 
 	option(b)
 
-	if b.credentialsFile != "/path/to/creds.json" {
+	if b.CredentialsFile != "/path/to/creds.json" {
 		t.Errorf(
 			"Expected credentialsFile to be '/path/to/creds.json', got '%s'",
-			b.credentialsFile,
+			b.CredentialsFile,
 		)
 	}
 }

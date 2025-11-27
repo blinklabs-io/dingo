@@ -12,19 +12,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package ledger
+package ledger_test
 
 import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/blinklabs-io/dingo/ledger"
 )
 
 func TestScheduler_RegistersAndRunsTask(t *testing.T) {
 	var counter int32
 
 	// Create a Scheduler with 10ms tick interval
-	timer := NewScheduler(10 * time.Millisecond)
+	timer := ledger.NewScheduler(10 * time.Millisecond)
 	timer.Start()
 	defer timer.Stop()
 
@@ -49,7 +51,7 @@ func TestScheduler_ChangeInterval(t *testing.T) {
 	var counter int32
 
 	// Create a Scheduler with 50ms tick interval
-	timer := NewScheduler(50 * time.Millisecond)
+	timer := ledger.NewScheduler(50 * time.Millisecond)
 	timer.Start()
 	defer timer.Stop()
 
@@ -89,7 +91,7 @@ func TestSchedulerRunFailFunc(t *testing.T) {
 	var failCounter int32
 
 	// Create a Scheduler with 10ms tick interval
-	timer := NewScheduler(10 * time.Millisecond)
+	timer := ledger.NewScheduler(10 * time.Millisecond)
 	timer.Start()
 	defer timer.Stop()
 

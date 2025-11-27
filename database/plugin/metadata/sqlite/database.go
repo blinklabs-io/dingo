@@ -35,12 +35,12 @@ import (
 
 // MetadataStoreSqlite stores all data in sqlite. Data may not be persisted
 type MetadataStoreSqlite struct {
-	promRegistry prometheus.Registerer
+	PromRegistry prometheus.Registerer
 	db           *gorm.DB
-	logger       *slog.Logger
+	Logger       *slog.Logger
 	timerVacuum  *time.Timer
 	timerMutex   sync.Mutex
-	dataDir      string
+	DataDir      string
 	closed       bool
 }
 
@@ -67,8 +67,8 @@ func NewWithOptions(opts ...SqliteOptionFunc) (*MetadataStoreSqlite, error) {
 	}
 
 	// Set defaults after options are applied (no side effects)
-	if db.logger == nil {
-		db.logger = slog.New(slog.NewTextHandler(os.Stderr, nil))
+	if db.Logger == nil {
+		db.Logger = slog.New(slog.NewTextHandler(os.Stderr, nil))
 	}
 
 	// Note: Database initialization moved to Start()
@@ -76,10 +76,10 @@ func NewWithOptions(opts ...SqliteOptionFunc) (*MetadataStoreSqlite, error) {
 }
 
 func (d *MetadataStoreSqlite) init() error {
-	if d.logger == nil {
+	if d.Logger == nil {
 		// Create logger to throw away logs
 		// We do this so we don't have to add guards around every log operation
-		d.logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
+		d.Logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
 	}
 	// Configure tracing for GORM
 	if err := d.db.Use(tracing.NewPlugin(tracing.WithoutMetrics())); err != nil {
@@ -94,7 +94,7 @@ func (d *MetadataStoreSqlite) runVacuum() error {
 	d.timerMutex.Lock()
 	closed := d.closed
 	d.timerMutex.Unlock()
-	if d.dataDir == "" || closed {
+	if d.DataDir == "" || closed {
 		return nil
 	}
 	if result := d.DB().Raw("VACUUM"); result.Error != nil {
@@ -116,13 +116,13 @@ func (d *MetadataStoreSqlite) scheduleDailyVacuum() {
 	}
 	daily := time.Duration(24) * time.Hour
 	f := func() {
-		d.logger.Debug(
+		d.Logger.Debug(
 			"running vacuum on sqlite metadata database",
 		)
 		// schedule next run
 		defer d.scheduleDailyVacuum()
 		if err := d.runVacuum(); err != nil {
-			d.logger.Error(
+			d.Logger.Error(
 				"failed to free unused space in metadata store",
 				"component", "database",
 			)
@@ -140,7 +140,7 @@ func (d *MetadataStoreSqlite) AutoMigrate(dst ...any) error {
 func (d *MetadataStoreSqlite) Start() error {
 	var metadataDb *gorm.DB
 	var err error
-	if d.dataDir == "" {
+	if d.DataDir == "" {
 		// No dataDir, use in-memory config
 		metadataDb, err = gorm.Open(
 			sqlite.Open("file::memory:?cache=shared"),
@@ -154,18 +154,18 @@ func (d *MetadataStoreSqlite) Start() error {
 		}
 	} else {
 		// Make sure that we can read data dir, and create if it doesn't exist
-		if _, err := os.Stat(d.dataDir); err != nil {
+		if _, err := os.Stat(d.DataDir); err != nil {
 			if !errors.Is(err, fs.ErrNotExist) {
 				return fmt.Errorf("failed to read data dir: %w", err)
 			}
 			// Create data directory
-			if err := os.MkdirAll(d.dataDir, fs.ModePerm); err != nil {
+			if err := os.MkdirAll(d.DataDir, fs.ModePerm); err != nil {
 				return fmt.Errorf("failed to create data dir: %w", err)
 			}
 		}
 		// Open sqlite DB
 		metadataDbPath := filepath.Join(
-			d.dataDir,
+			d.DataDir,
 			"metadata.sqlite",
 		)
 		// WAL journal mode, disable sync on write, increase cache size to 50MB (from 2MB)
@@ -189,12 +189,12 @@ func (d *MetadataStoreSqlite) Start() error {
 		return err
 	}
 	// Create table schemas
-	d.logger.Debug(fmt.Sprintf("creating table: %#v", &CommitTimestamp{}))
+	d.Logger.Debug(fmt.Sprintf("creating table: %#v", &CommitTimestamp{}))
 	if err := d.db.AutoMigrate(&CommitTimestamp{}); err != nil {
 		return err
 	}
 	for _, model := range models.MigrateModels {
-		d.logger.Debug(fmt.Sprintf("creating table: %#v", model))
+		d.Logger.Debug(fmt.Sprintf("creating table: %#v", model))
 		if err := d.db.AutoMigrate(model); err != nil {
 			return err
 		}

@@ -86,8 +86,8 @@ func (d *MetadataStoreSqlite) SetEpoch(
 	}
 	// Run a vacuum, on error only log
 	if err := d.runVacuum(); err != nil {
-		d.logger.Error(
-			"failed to free space in metdata store",
+		d.Logger.Error(
+			"failed to free space in metadata store",
 			"epoch", strconv.FormatUint(epoch, 10),
 			"error", err,
 		)

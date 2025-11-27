@@ -28,7 +28,7 @@ func (ls *LedgerState) SlotToTime(slot uint64) (time.Time, error) {
 	if slot > math.MaxInt64 {
 		return time.Time{}, errors.New("slot is larger than time.Duration")
 	}
-	shelleyGenesis := ls.config.CardanoNodeConfig.ShelleyGenesis()
+	shelleyGenesis := ls.Config.CardanoNodeConfig.ShelleyGenesis()
 	if shelleyGenesis == nil {
 		return time.Time{}, errors.New("could not get genesis config")
 	}
@@ -38,7 +38,7 @@ func (ls *LedgerState) SlotToTime(slot uint64) (time.Time, error) {
 		return slotTime, nil
 	}
 	foundSlot := false
-	for _, epoch := range ls.epochCache {
+	for _, epoch := range ls.EpochCache {
 		if epoch.StartSlot > math.MaxInt64 ||
 			epoch.LengthInSlots > math.MaxInt64 ||
 			epoch.SlotLength > math.MaxInt64 {
@@ -63,7 +63,7 @@ func (ls *LedgerState) SlotToTime(slot uint64) (time.Time, error) {
 	}
 	if !foundSlot {
 		// Project the current slot length forward to calculate future slots
-		lastEpoch := ls.epochCache[len(ls.epochCache)-1]
+		lastEpoch := ls.EpochCache[len(ls.EpochCache)-1]
 		leftoverSlots := slot - (lastEpoch.StartSlot + uint64(lastEpoch.LengthInSlots))
 		slotTime = slotTime.Add(
 			// nolint:gosec
@@ -77,14 +77,14 @@ func (ls *LedgerState) SlotToTime(slot uint64) (time.Time, error) {
 
 // TimeToSlot returns the slot number for a given time based on known epochs
 func (ls *LedgerState) TimeToSlot(t time.Time) (uint64, error) {
-	shelleyGenesis := ls.config.CardanoNodeConfig.ShelleyGenesis()
+	shelleyGenesis := ls.Config.CardanoNodeConfig.ShelleyGenesis()
 	if shelleyGenesis == nil {
 		return 0, errors.New("could not get genesis config")
 	}
 	epochStartTime := shelleyGenesis.SystemStart
 	var timeSlot uint64
 	foundTime := false
-	for _, epoch := range ls.epochCache {
+	for _, epoch := range ls.EpochCache {
 		if epoch.LengthInSlots > math.MaxInt64 ||
 			epoch.SlotLength > math.MaxInt64 {
 			return 0, errors.New(
@@ -140,7 +140,7 @@ func (ls *LedgerState) TimeToSlot(t time.Time) (uint64, error) {
 
 // SlotToEpoch returns a known epoch by slot number
 func (ls *LedgerState) SlotToEpoch(slot uint64) (models.Epoch, error) {
-	for _, epoch := range ls.epochCache {
+	for _, epoch := range ls.EpochCache {
 		if slot < epoch.StartSlot {
 			continue
 		}

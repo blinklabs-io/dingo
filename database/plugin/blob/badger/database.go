@@ -31,13 +31,13 @@ import (
 
 // BlobStoreBadger stores all data in badger. Data may not be persisted
 type BlobStoreBadger struct {
-	promRegistry   prometheus.Registerer
+	PromRegistry   prometheus.Registerer
 	db             *badger.DB
-	logger         *slog.Logger
-	dataDir        string
-	gcEnabled      bool
-	blockCacheSize uint64
-	indexCacheSize uint64
+	Logger         *slog.Logger
+	DataDir        string
+	GcEnabled      bool
+	BlockCacheSize uint64
+	IndexCacheSize uint64
 	gcTicker       *time.Ticker
 	gcStopCh       chan struct{}
 	gcWg           sync.WaitGroup
@@ -47,9 +47,9 @@ type BlobStoreBadger struct {
 func New(opts ...BlobStoreBadgerOptionFunc) (*BlobStoreBadger, error) {
 	db := &BlobStoreBadger{
 		// Set defaults
-		gcEnabled:      true, // Enable GC by default for disk-backed stores
-		blockCacheSize: DefaultBlockCacheSize,
-		indexCacheSize: DefaultIndexCacheSize,
+		GcEnabled:      true, // Enable GC by default for disk-backed stores
+		BlockCacheSize: DefaultBlockCacheSize,
+		IndexCacheSize: DefaultIndexCacheSize,
 	}
 	for _, opt := range opts {
 		opt(db)
@@ -58,10 +58,10 @@ func New(opts ...BlobStoreBadgerOptionFunc) (*BlobStoreBadger, error) {
 	var blobDb *badger.DB
 	var err error
 
-	if db.dataDir == "" {
+	if db.DataDir == "" {
 		// No dataDir, use in-memory config
 		badgerOpts := badger.DefaultOptions("").
-			WithLogger(NewBadgerLogger(db.logger)).
+			WithLogger(NewBadgerLogger(db.Logger)).
 			// The default INFO logging is a bit verbose
 			WithLoggingLevel(badger.WARNING).
 			WithInMemory(true)
@@ -71,24 +71,24 @@ func New(opts ...BlobStoreBadgerOptionFunc) (*BlobStoreBadger, error) {
 		}
 	} else {
 		// Make sure that we can read data dir, and create if it doesn't exist
-		if _, err := os.Stat(db.dataDir); err != nil {
+		if _, err := os.Stat(db.DataDir); err != nil {
 			if !errors.Is(err, fs.ErrNotExist) {
 				return nil, fmt.Errorf("failed to read data dir: %w", err)
 			}
 			// Create data directory
-			if err := os.MkdirAll(db.dataDir, fs.ModePerm); err != nil {
+			if err := os.MkdirAll(db.DataDir, fs.ModePerm); err != nil {
 				return nil, fmt.Errorf("failed to create data dir: %w", err)
 			}
 		}
 		blobDir := filepath.Join(
-			db.dataDir,
+			db.DataDir,
 			"blob",
 		)
 		badgerOpts := badger.DefaultOptions(blobDir).
-			WithLogger(NewBadgerLogger(db.logger)).
+			WithLogger(NewBadgerLogger(db.Logger)).
 			WithLoggingLevel(badger.WARNING).
-			WithBlockCacheSize(int64(db.blockCacheSize)). //nolint:gosec // blockCacheSize is controlled and reasonable
-			WithIndexCacheSize(int64(db.indexCacheSize))  //nolint:gosec // indexCacheSize is controlled and reasonable
+			WithBlockCacheSize(int64(db.BlockCacheSize)). //nolint:gosec // blockCacheSize is controlled and reasonable
+			WithIndexCacheSize(int64(db.IndexCacheSize))  //nolint:gosec // indexCacheSize is controlled and reasonable
 		blobDb, err = badger.Open(badgerOpts)
 		if err != nil {
 			return nil, err
@@ -102,17 +102,17 @@ func New(opts ...BlobStoreBadgerOptionFunc) (*BlobStoreBadger, error) {
 }
 
 func (d *BlobStoreBadger) init() error {
-	if d.logger == nil {
+	if d.Logger == nil {
 		// Create logger to throw away logs
 		// We do this so we don't have to add guards around every log operation
-		d.logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
+		d.Logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
 	}
 	// Configure metrics
-	if d.promRegistry != nil {
+	if d.PromRegistry != nil {
 		d.registerBlobMetrics()
 	}
 	// Configure GC
-	if d.gcEnabled {
+	if d.GcEnabled {
 		d.gcTicker = time.NewTicker(5 * time.Minute)
 		d.gcStopCh = make(chan struct{})
 		d.gcWg.Add(1)
@@ -131,7 +131,7 @@ func (d *BlobStoreBadger) blobGc(t *time.Ticker, stop <-chan struct{}) {
 			if err != nil {
 				// Log any actual errors
 				if !errors.Is(err, badger.ErrNoRewrite) {
-					d.logger.Warn(
+					d.Logger.Warn(
 						fmt.Sprintf("blob DB: GC failure: %s", err),
 						"component", "database",
 					)

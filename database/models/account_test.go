@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package models
+package models_test
 
 import (
 	"bytes"
@@ -20,6 +20,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/btcsuite/btcd/btcutil/bech32"
 )
 
@@ -97,7 +98,7 @@ func TestAccount_String(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			a := &Account{
+			a := &models.Account{
 				StakingKey: tt.stakingKey,
 			}
 			got, err := a.String()
@@ -174,7 +175,7 @@ func TestAccount_String_Idempotent(t *testing.T) {
 	stakingKey := hexDecode(
 		"e1cbb80db89e292d1175088b0ce5cd27857d5f1e53e41a754d566a6b",
 	)
-	a := &Account{
+	a := &models.Account{
 		StakingKey: stakingKey,
 	}
 
@@ -206,8 +207,8 @@ func TestAccount_String_DifferentKeys(t *testing.T) {
 		"a1cbb80db89e292d1175088b0ce5cd27857d5f1e53e41a754d566a6b",
 	)
 
-	a1 := &Account{StakingKey: key1}
-	a2 := &Account{StakingKey: key2}
+	a1 := &models.Account{StakingKey: key1}
+	a2 := &models.Account{StakingKey: key2}
 
 	addr1, err := a1.String()
 	if err != nil {
@@ -232,7 +233,7 @@ func TestAccount_String_Bech32Format(t *testing.T) {
 	stakingKey := hexDecode(
 		"e1cbb80db89e292d1175088b0ce5cd27857d5f1e53e41a754d566a6b",
 	)
-	a := &Account{
+	a := &models.Account{
 		StakingKey: stakingKey,
 	}
 

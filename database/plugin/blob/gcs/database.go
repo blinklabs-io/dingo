@@ -30,14 +30,14 @@ import (
 
 // BlobStoreGCS stores data in a Google Cloud Storage bucket.
 type BlobStoreGCS struct {
-	promRegistry    prometheus.Registerer
+	PromRegistry    prometheus.Registerer
 	startupCtx      context.Context
-	logger          *GcsLogger
+	Logger          *GcsLogger
 	client          *storage.Client
 	bucket          *storage.BucketHandle
 	startupCancel   context.CancelFunc
-	bucketName      string
-	credentialsFile string
+	BucketName      string
+	CredentialsFile string
 }
 
 // New creates a new GCS-backed blob store.
@@ -74,8 +74,8 @@ func NewWithOptions(opts ...BlobStoreGCSOptionFunc) (*BlobStoreGCS, error) {
 	}
 
 	// Set defaults
-	if db.logger == nil {
-		db.logger = NewGcsLogger(slog.New(slog.NewJSONHandler(io.Discard, nil)))
+	if db.Logger == nil {
+		db.Logger = NewGcsLogger(slog.New(slog.NewJSONHandler(io.Discard, nil)))
 	}
 
 	return db, nil
@@ -83,7 +83,7 @@ func NewWithOptions(opts ...BlobStoreGCSOptionFunc) (*BlobStoreGCS, error) {
 
 func (d *BlobStoreGCS) init() error {
 	// Configure metrics
-	if d.promRegistry != nil {
+	if d.PromRegistry != nil {
 		d.registerBlobMetrics()
 	}
 
@@ -119,13 +119,13 @@ func (d *BlobStoreGCS) Bucket() *storage.BucketHandle {
 // Start implements the plugin.Plugin interface.
 func (d *BlobStoreGCS) Start() error {
 	// Validate required fields
-	if d.bucketName == "" {
+	if d.BucketName == "" {
 		return errors.New("gcs blob: bucket not set")
 	}
 
 	// Validate credentials file if specified
-	if d.credentialsFile != "" {
-		if err := validateCredentials(d.credentialsFile); err != nil {
+	if d.CredentialsFile != "" {
+		if err := ValidateCredentials(d.CredentialsFile); err != nil {
 			return err
 		}
 	}
@@ -134,10 +134,10 @@ func (d *BlobStoreGCS) Start() error {
 
 	var clientOpts []option.ClientOption
 	clientOpts = append(clientOpts, storage.WithDisabledClientMetrics())
-	if d.credentialsFile != "" {
+	if d.CredentialsFile != "" {
 		clientOpts = append(
 			clientOpts,
-			option.WithCredentialsFile(d.credentialsFile),
+			option.WithCredentialsFile(d.CredentialsFile),
 		)
 	}
 
@@ -154,7 +154,7 @@ func (d *BlobStoreGCS) Start() error {
 	}
 
 	d.client = client
-	d.bucket = client.Bucket(d.bucketName)
+	d.bucket = client.Bucket(d.BucketName)
 	d.startupCtx = ctx
 	d.startupCancel = cancel
 

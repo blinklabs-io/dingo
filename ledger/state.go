@@ -77,8 +77,8 @@ type MempoolProvider interface {
 }
 type LedgerState struct {
 	metrics                          stateMetrics
-	currentEra                       eras.EraDesc
-	config                           LedgerStateConfig
+	CurrentEra                       eras.EraDesc
+	Config                           LedgerStateConfig
 	chainsyncBlockfetchBusyTime      time.Time
 	currentPParams                   lcommon.ProtocolParameters
 	mempool                          MempoolProvider
@@ -91,9 +91,9 @@ type LedgerState struct {
 	chainsyncState                   ChainsyncState
 	currentTipBlockNonce             []byte
 	chainsyncBlockEvents             []BlockfetchEvent
-	epochCache                       []models.Epoch
+	EpochCache                       []models.Epoch
 	currentTip                       ochainsync.Tip
-	currentEpoch                     models.Epoch
+	CurrentEpoch                     models.Epoch
 	sync.RWMutex
 	chainsyncMutex             sync.Mutex
 	chainsyncBlockfetchMutex   sync.Mutex
@@ -114,7 +114,7 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 		cfg.Logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
 	}
 	ls := &LedgerState{
-		config:         cfg,
+		Config:         cfg,
 		chainsyncState: InitChainsyncState,
 		db:             cfg.Database,
 		chain:          cfg.ChainManager.PrimaryChain(),
@@ -124,14 +124,14 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 
 func (ls *LedgerState) Start() error {
 	// Init metrics
-	ls.metrics.init(ls.config.PromRegistry)
+	ls.metrics.init(ls.Config.PromRegistry)
 	// Setup event handlers
-	if ls.config.EventBus != nil {
-		ls.config.EventBus.SubscribeFunc(
+	if ls.Config.EventBus != nil {
+		ls.Config.EventBus.SubscribeFunc(
 			ChainsyncEventType,
 			ls.handleEventChainsync,
 		)
-		ls.config.EventBus.SubscribeFunc(
+		ls.Config.EventBus.SubscribeFunc(
 			BlockfetchEventType,
 			ls.handleEventBlockfetch,
 		)
@@ -206,9 +206,9 @@ func (ls *LedgerState) Close() error {
 
 func (ls *LedgerState) initScheduler() error {
 	// Initialize timer with current slot length
-	slotLength := ls.currentEpoch.SlotLength
+	slotLength := ls.CurrentEpoch.SlotLength
 	if slotLength == 0 {
-		shelleyGenesis := ls.config.CardanoNodeConfig.ShelleyGenesis()
+		shelleyGenesis := ls.Config.CardanoNodeConfig.ShelleyGenesis()
 		if shelleyGenesis == nil {
 			return errors.New("could not get genesis config")
 		}
@@ -232,9 +232,9 @@ func (ls *LedgerState) initScheduler() error {
 
 func (ls *LedgerState) initForge() {
 	// Schedule block forging if dev mode is enabled
-	if ls.config.ForgeBlocks {
+	if ls.Config.ForgeBlocks {
 		// Calculate block interval from ActiveSlotsCoeff
-		shelleyGenesis := ls.config.CardanoNodeConfig.ShelleyGenesis()
+		shelleyGenesis := ls.Config.CardanoNodeConfig.ShelleyGenesis()
 		if shelleyGenesis != nil {
 			// Calculate block interval (1 / ActiveSlotsCoeff)
 			activeSlotsCoeff := shelleyGenesis.ActiveSlotsCoeff
@@ -248,7 +248,7 @@ func (ls *LedgerState) initForge() {
 				// TODO: add callback to capture task run failure and increment "missed slot leader check" metric
 				ls.Scheduler.Register(blockInterval, ls.forgeBlock, nil)
 
-				ls.config.Logger.Info(
+				ls.Config.Logger.Info(
 					"dev mode block forging enabled",
 					"component", "ledger",
 					"block_interval", blockInterval,
@@ -279,7 +279,7 @@ func (ls *LedgerState) cleanupConsumedUtxos() {
 	// Get the current tip, since we're querying by slot
 	tip := ls.Tip()
 	// Delete UTxOs that are marked as deleted and older than our slot window
-	ls.config.Logger.Debug(
+	ls.Config.Logger.Debug(
 		"cleaning up consumed UTxOs",
 		"component", "ledger",
 	)
@@ -296,7 +296,7 @@ func (ls *LedgerState) cleanupConsumedUtxos() {
 				break
 			}
 			if err != nil {
-				ls.config.Logger.Error(
+				ls.Config.Logger.Error(
 					"failed to cleanup consumed UTxOs",
 					"component", "ledger",
 					"error", err,
@@ -354,7 +354,7 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 	} else {
 		hash = hex.EncodeToString(point.Hash)
 	}
-	ls.config.Logger.Info(
+	ls.Config.Logger.Info(
 		fmt.Sprintf(
 			"chain rolled back, new tip: %s at slot %d",
 			hash,
@@ -377,14 +377,14 @@ func (ls *LedgerState) transitionToEra(
 		// Perform hard fork
 		// This generally means upgrading pparams from previous era
 		newPParams, err := nextEra.HardForkFunc(
-			ls.config.CardanoNodeConfig,
+			ls.Config.CardanoNodeConfig,
 			ls.currentPParams,
 		)
 		if err != nil {
 			return fmt.Errorf("hard fork failed: %w", err)
 		}
 		ls.currentPParams = newPParams
-		ls.config.Logger.Debug(
+		ls.Config.Logger.Debug(
 			"updated protocol params",
 			"pparams",
 			fmt.Sprintf("%#v", ls.currentPParams),
@@ -405,7 +405,7 @@ func (ls *LedgerState) transitionToEra(
 			return fmt.Errorf("failed to set pparams: %w", err)
 		}
 	}
-	ls.currentEra = nextEra
+	ls.CurrentEra = nextEra
 	return nil
 }
 
@@ -423,66 +423,66 @@ func (ls *LedgerState) consumeUtxo(
 	)
 }
 
-// calculateStabilityWindow returns the stability window based on the current era.
+// CalculateStabilityWindow returns the stability window based on the current era.
 // For Byron era, returns 2k. For Shelley+ eras, returns 3k/f.
 // Returns the default threshold if genesis data is unavailable or invalid.
-func (ls *LedgerState) calculateStabilityWindow() uint64 {
-	if ls.config.CardanoNodeConfig == nil {
-		ls.config.Logger.Warn(
+func (ls *LedgerState) CalculateStabilityWindow() uint64 {
+	if ls.Config.CardanoNodeConfig == nil {
+		ls.Config.Logger.Warn(
 			"cardano node config is nil, using default stability window",
 		)
-		return blockfetchBatchSlotThresholdDefault
+		return BlockfetchBatchSlotThresholdDefault
 	}
 
 	// Byron era only needs Byron genesis
-	if ls.currentEra.Id == 0 {
-		byronGenesis := ls.config.CardanoNodeConfig.ByronGenesis()
+	if ls.CurrentEra.Id == 0 {
+		byronGenesis := ls.Config.CardanoNodeConfig.ByronGenesis()
 		if byronGenesis == nil {
-			return blockfetchBatchSlotThresholdDefault
+			return BlockfetchBatchSlotThresholdDefault
 		}
 		k := byronGenesis.ProtocolConsts.K
 		if k < 0 {
-			ls.config.Logger.Warn("invalid negative security parameter", "k", k)
-			return blockfetchBatchSlotThresholdDefault
+			ls.Config.Logger.Warn("invalid negative security parameter", "k", k)
+			return BlockfetchBatchSlotThresholdDefault
 		}
 		if k == 0 {
-			ls.config.Logger.Warn("security parameter is zero", "k", k)
-			return blockfetchBatchSlotThresholdDefault
+			ls.Config.Logger.Warn("security parameter is zero", "k", k)
+			return BlockfetchBatchSlotThresholdDefault
 		}
 		// Byron stability window is 2k slots
 		return uint64(k) * 2 // #nosec G115
 	}
 
 	// Shelley+ eras only need Shelley genesis
-	shelleyGenesis := ls.config.CardanoNodeConfig.ShelleyGenesis()
+	shelleyGenesis := ls.Config.CardanoNodeConfig.ShelleyGenesis()
 	if shelleyGenesis == nil {
-		return blockfetchBatchSlotThresholdDefault
+		return BlockfetchBatchSlotThresholdDefault
 	}
 	k := shelleyGenesis.SecurityParam
 	if k < 0 {
-		ls.config.Logger.Warn("invalid negative security parameter", "k", k)
-		return blockfetchBatchSlotThresholdDefault
+		ls.Config.Logger.Warn("invalid negative security parameter", "k", k)
+		return BlockfetchBatchSlotThresholdDefault
 	}
 	if k == 0 {
-		ls.config.Logger.Warn("security parameter is zero", "k", k)
-		return blockfetchBatchSlotThresholdDefault
+		ls.Config.Logger.Warn("security parameter is zero", "k", k)
+		return BlockfetchBatchSlotThresholdDefault
 	}
 	securityParam := uint64(k)
 
 	// Calculate 3k/f
 	activeSlotsCoeff := shelleyGenesis.ActiveSlotsCoeff.Rat
 	if activeSlotsCoeff == nil {
-		ls.config.Logger.Warn("ActiveSlotsCoeff.Rat is nil")
-		return blockfetchBatchSlotThresholdDefault
+		ls.Config.Logger.Warn("ActiveSlotsCoeff.Rat is nil")
+		return BlockfetchBatchSlotThresholdDefault
 	}
 
 	if activeSlotsCoeff.Num().Sign() <= 0 {
-		ls.config.Logger.Warn(
+		ls.Config.Logger.Warn(
 			"ActiveSlotsCoeff must be positive",
 			"active_slots_coeff",
 			activeSlotsCoeff.String(),
 		)
-		return blockfetchBatchSlotThresholdDefault
+		return BlockfetchBatchSlotThresholdDefault
 	}
 
 	numerator := new(big.Int).SetUint64(securityParam)
@@ -496,17 +496,17 @@ func (ls *LedgerState) calculateStabilityWindow() uint64 {
 		window.Add(window, big.NewInt(1))
 	}
 	if window.Sign() <= 0 {
-		ls.config.Logger.Warn(
+		ls.Config.Logger.Warn(
 			"stability window calculation produced non-positive result",
 			"security_param",
 			securityParam,
 			"active_slots_coeff",
 			activeSlotsCoeff.String(),
 		)
-		return blockfetchBatchSlotThresholdDefault
+		return BlockfetchBatchSlotThresholdDefault
 	}
 	if !window.IsUint64() {
-		ls.config.Logger.Warn(
+		ls.Config.Logger.Warn(
 			"stability window calculation overflowed uint64",
 			"security_param",
 			securityParam,
@@ -515,7 +515,7 @@ func (ls *LedgerState) calculateStabilityWindow() uint64 {
 			"window_num",
 			window.String(),
 		)
-		return blockfetchBatchSlotThresholdDefault
+		return BlockfetchBatchSlotThresholdDefault
 	}
 	return window.Uint64()
 }
@@ -530,7 +530,7 @@ func (ls *LedgerState) ledgerReadChain(resultCh chan readChainResult) {
 	// Create chain iterator
 	iter, err := ls.chain.FromPoint(ls.currentTip.Point, false)
 	if err != nil {
-		ls.config.Logger.Error(
+		ls.Config.Logger.Error(
 			"failed to create chain iterator: " + err.Error(),
 		)
 		return
@@ -554,7 +554,7 @@ func (ls *LedgerState) ledgerReadChain(resultCh chan readChainResult) {
 				shouldBlock = false
 				if err != nil {
 					if !errors.Is(err, chain.ErrIteratorChainTip) {
-						ls.config.Logger.Error(
+						ls.Config.Logger.Error(
 							"failed to get next block from chain iterator: " + err.Error(),
 						)
 						return
@@ -565,7 +565,7 @@ func (ls *LedgerState) ledgerReadChain(resultCh chan readChainResult) {
 				}
 			}
 			if next == nil {
-				ls.config.Logger.Error("next block from chain iterator is nil")
+				ls.Config.Logger.Error("next block from chain iterator is nil")
 				return
 			}
 			if next.Rollback {
@@ -582,7 +582,7 @@ func (ls *LedgerState) ledgerReadChain(resultCh chan readChainResult) {
 			// Decode block
 			tmpBlock, err = next.Block.Decode()
 			if err != nil {
-				ls.config.Logger.Error(
+				ls.Config.Logger.Error(
 					"failed to decode block: " + err.Error(),
 				)
 				return
@@ -625,7 +625,7 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 	var nextBatch, cachedNextBatch []ledger.Block
 	var delta *LedgerDelta
 	var deltaBatch LedgerDeltaBatch
-	shouldValidate := ls.config.ValidateHistorical
+	shouldValidate := ls.Config.ValidateHistorical
 	for {
 		if needsEpochRollover {
 			ls.Lock()
@@ -633,10 +633,10 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 			txn := ls.db.Transaction(true)
 			err := txn.Do(func(txn *database.Txn) error {
 				// Check for era change
-				if nextEpochEraId != ls.currentEra.Id {
+				if nextEpochEraId != ls.CurrentEra.Id {
 					// Transition through every era between the current and the target era
-					for nextEraId := ls.currentEra.Id + 1; nextEraId <= nextEpochEraId; nextEraId++ {
-						if err := ls.transitionToEra(txn, nextEraId, ls.currentEpoch.EpochId, ls.currentEpoch.StartSlot+uint64(ls.currentEpoch.LengthInSlots)); err != nil {
+					for nextEraId := ls.CurrentEra.Id + 1; nextEraId <= nextEpochEraId; nextEraId++ {
+						if err := ls.transitionToEra(txn, nextEraId, ls.CurrentEpoch.EpochId, ls.CurrentEpoch.StartSlot+uint64(ls.CurrentEpoch.LengthInSlots)); err != nil {
 							return err
 						}
 					}
@@ -649,7 +649,7 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 			})
 			ls.Unlock()
 			if err != nil {
-				ls.config.Logger.Error(
+				ls.Config.Logger.Error(
 					"failed to process epoch rollover: " + err.Error(),
 				)
 				return
@@ -671,7 +671,7 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 				ls.Lock()
 				if err = ls.rollback(result.rollbackPoint); err != nil {
 					ls.Unlock()
-					ls.config.Logger.Error(
+					ls.Config.Logger.Error(
 						"failed to process rollback: " + err.Error(),
 					)
 					return
@@ -696,8 +696,8 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 						Hash: next.Hash().Bytes(),
 					}
 					// End processing of batch and cache remainder if we get a block from after the current epoch end, or if we need the initial epoch
-					if tmpPoint.Slot >= (ls.currentEpoch.StartSlot+uint64(ls.currentEpoch.LengthInSlots)) ||
-						ls.currentEpoch.SlotLength == 0 {
+					if tmpPoint.Slot >= (ls.CurrentEpoch.StartSlot+uint64(ls.CurrentEpoch.LengthInSlots)) ||
+						ls.CurrentEpoch.SlotLength == 0 {
 						needsEpochRollover = true
 						nextEpochEraId = uint(next.Era().Id)
 						// Cache rest of the batch for next loop
@@ -709,7 +709,7 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 					// Only recalculate if validation is not already enabled
 					if !shouldValidate && i == 0 {
 						var cutoffSlot uint64
-						stabilityWindow := ls.calculateStabilityWindow()
+						stabilityWindow := ls.CalculateStabilityWindow()
 						currentTipSlot := ls.currentTip.Point.Slot
 						blockSlot := next.SlotNumber()
 						if currentTipSlot >= stabilityWindow {
@@ -720,7 +720,7 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 
 						// Validate blocks within k-slot window, or historical blocks if ValidateHistorical enabled
 						shouldValidate = blockSlot >= cutoffSlot ||
-							ls.config.ValidateHistorical
+							ls.Config.ValidateHistorical
 					}
 					// Process block
 					delta, err = ls.ledgerProcessBlock(
@@ -742,11 +742,11 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 					}
 					// Calculate block rolling nonce
 					var blockNonce []byte
-					if ls.currentEra.CalculateEtaVFunc != nil {
+					if ls.CurrentEra.CalculateEtaVFunc != nil {
 						tmpEra := eras.Eras[next.Era().Id]
 						if tmpEra.CalculateEtaVFunc != nil {
 							tmpNonce, err := tmpEra.CalculateEtaVFunc(
-								ls.config.CardanoNodeConfig,
+								ls.Config.CardanoNodeConfig,
 								ls.currentTipBlockNonce,
 								next,
 							)
@@ -765,7 +765,7 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 
 					// First block we persist in the current epoch becomes the checkpoint
 					isCheckpoint := false
-					if tmpEpoch.EpochId == ls.currentEpoch.EpochId &&
+					if tmpEpoch.EpochId == ls.CurrentEpoch.EpochId &&
 						!ls.checkpointWrittenForEpoch {
 						isCheckpoint = true
 						ls.checkpointWrittenForEpoch = true
@@ -799,7 +799,7 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 			})
 			if err != nil {
 				ls.Unlock()
-				ls.config.Logger.Error(
+				ls.Config.Logger.Error(
 					"failed to process block: " + err.Error(),
 				)
 				return
@@ -810,7 +810,7 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 			}
 		}
 		if len(nextBatch) > 0 {
-			ls.config.Logger.Info(
+			ls.Config.Logger.Info(
 				fmt.Sprintf(
 					"chain extended, new tip: %x at slot %d",
 					ls.currentTip.Point.Hash,
@@ -852,19 +852,19 @@ func (ls *LedgerState) ledgerProcessBlock(
 		}
 		// Validate transaction
 		if shouldValidate {
-			if ls.currentEra.ValidateTxFunc != nil {
+			if ls.CurrentEra.ValidateTxFunc != nil {
 				lv := &LedgerView{
 					txn: txn,
 					ls:  ls,
 				}
-				err := ls.currentEra.ValidateTxFunc(
+				err := ls.CurrentEra.ValidateTxFunc(
 					tx,
 					point.Slot,
 					lv,
 					ls.currentPParams,
 				)
 				if err != nil {
-					ls.config.Logger.Warn(
+					ls.Config.Logger.Warn(
 						"TX " + tx.Hash().
 							String() +
 							" failed validation: " + err.Error(),
@@ -892,14 +892,14 @@ func (ls *LedgerState) updateTipMetrics() {
 	ls.metrics.blockNum.Set(float64(ls.currentTip.BlockNumber))
 	ls.metrics.slotNum.Set(float64(ls.currentTip.Point.Slot))
 	ls.metrics.slotInEpoch.Set(
-		float64(ls.currentTip.Point.Slot - ls.currentEpoch.StartSlot),
+		float64(ls.currentTip.Point.Slot - ls.CurrentEpoch.StartSlot),
 	)
 }
 
 func (ls *LedgerState) loadPParams() error {
 	pparams, err := ls.db.GetPParams(
-		ls.currentEpoch.EpochId,
-		ls.currentEra.DecodePParamsFunc,
+		ls.CurrentEpoch.EpochId,
+		ls.CurrentEra.DecodePParamsFunc,
 		nil,
 	)
 	if err != nil {
@@ -917,24 +917,24 @@ func (ls *LedgerState) loadPParams() error {
 
 func (ls *LedgerState) loadGenesisProtocolParameters() (lcommon.ProtocolParameters, error) {
 	// Start with Shelley parameters as the base for all eras (Byron also uses Shelley as base)
-	pparams, err := eras.HardForkShelley(ls.config.CardanoNodeConfig, nil)
+	pparams, err := eras.HardForkShelley(ls.Config.CardanoNodeConfig, nil)
 	if err != nil {
 		return nil, err
 	}
 
 	// If target era is Byron or Shelley, return the Shelley parameters
-	if ls.currentEra.Id <= eras.ShelleyEraDesc.Id {
+	if ls.CurrentEra.Id <= eras.ShelleyEraDesc.Id {
 		return pparams, nil
 	}
 
 	// Chain through each era up to the target era
-	for eraId := eras.AllegraEraDesc.Id; eraId <= ls.currentEra.Id; eraId++ {
+	for eraId := eras.AllegraEraDesc.Id; eraId <= ls.CurrentEra.Id; eraId++ {
 		era := eras.GetEraById(eraId)
 		if era == nil {
 			return nil, fmt.Errorf("unknown era ID %d", eraId)
 		}
 
-		pparams, err = era.HardForkFunc(ls.config.CardanoNodeConfig, pparams)
+		pparams, err = era.HardForkFunc(ls.Config.CardanoNodeConfig, pparams)
 		if err != nil {
 			return nil, fmt.Errorf("era %s transition: %w", era.Name, err)
 		}
@@ -949,31 +949,31 @@ func (ls *LedgerState) loadEpochs(txn *database.Txn) error {
 	if err != nil {
 		return err
 	}
-	ls.epochCache = epochs
+	ls.EpochCache = epochs
 	if len(epochs) > 0 {
 		// Set current epoch and era
-		ls.currentEpoch = epochs[len(epochs)-1]
-		eraDesc := eras.GetEraById(ls.currentEpoch.EraId)
+		ls.CurrentEpoch = epochs[len(epochs)-1]
+		eraDesc := eras.GetEraById(ls.CurrentEpoch.EraId)
 		if eraDesc == nil {
-			return fmt.Errorf("unknown era ID %d", ls.currentEpoch.EraId)
+			return fmt.Errorf("unknown era ID %d", ls.CurrentEpoch.EraId)
 		}
-		ls.currentEra = *eraDesc
+		ls.CurrentEra = *eraDesc
 		// Update metrics
-		ls.metrics.epochNum.Set(float64(ls.currentEpoch.EpochId))
+		ls.metrics.epochNum.Set(float64(ls.CurrentEpoch.EpochId))
 		return nil
 	}
 	// Populate initial epoch
-	shelleyGenesis := ls.config.CardanoNodeConfig.ShelleyGenesis()
+	shelleyGenesis := ls.Config.CardanoNodeConfig.ShelleyGenesis()
 	if shelleyGenesis == nil {
 		return errors.New("failed to load Shelley genesis")
 	}
 	startProtoVersion := shelleyGenesis.ProtocolParameters.ProtocolVersion.Major
 	startEra := eras.ProtocolMajorVersionToEra[startProtoVersion]
 	// Initialize current era to Byron when starting from genesis
-	ls.currentEra = eras.Eras[0] // Byron era
+	ls.CurrentEra = eras.Eras[0] // Byron era
 	// Transition through every era between the current and the target era
-	for nextEraId := ls.currentEra.Id + 1; nextEraId <= startEra.Id; nextEraId++ {
-		if err := ls.transitionToEra(txn, nextEraId, ls.currentEpoch.EpochId, ls.currentEpoch.StartSlot+uint64(ls.currentEpoch.LengthInSlots)); err != nil {
+	for nextEraId := ls.CurrentEra.Id + 1; nextEraId <= startEra.Id; nextEraId++ {
+		if err := ls.transitionToEra(txn, nextEraId, ls.CurrentEpoch.EpochId, ls.CurrentEpoch.StartSlot+uint64(ls.CurrentEpoch.LengthInSlots)); err != nil {
 			return err
 		}
 	}
@@ -1123,14 +1123,14 @@ func (ls *LedgerState) UtxosByAddress(
 func (ls *LedgerState) ValidateTx(
 	tx lcommon.Transaction,
 ) error {
-	if ls.currentEra.ValidateTxFunc != nil {
+	if ls.CurrentEra.ValidateTxFunc != nil {
 		txn := ls.db.Transaction(false)
 		err := txn.Do(func(txn *database.Txn) error {
 			lv := &LedgerView{
 				txn: txn,
 				ls:  ls,
 			}
-			err := ls.currentEra.ValidateTxFunc(
+			err := ls.CurrentEra.ValidateTxFunc(
 				tx,
 				ls.currentTip.Point.Slot,
 				lv,
@@ -1153,7 +1153,7 @@ func (ls *LedgerState) EvaluateTx(
 	var fee uint64
 	var totalExUnits lcommon.ExUnits
 	var redeemerExUnits map[lcommon.RedeemerKey]lcommon.ExUnits
-	if ls.currentEra.EvaluateTxFunc != nil {
+	if ls.CurrentEra.EvaluateTxFunc != nil {
 		txn := ls.db.Transaction(false)
 		err := txn.Do(func(txn *database.Txn) error {
 			lv := &LedgerView{
@@ -1161,7 +1161,7 @@ func (ls *LedgerState) EvaluateTx(
 				ls:  ls,
 			}
 			var err error
-			fee, totalExUnits, redeemerExUnits, err = ls.currentEra.EvaluateTxFunc(
+			fee, totalExUnits, redeemerExUnits, err = ls.CurrentEra.EvaluateTxFunc(
 				tx,
 				lv,
 				ls.currentPParams,
@@ -1198,7 +1198,7 @@ func (ls *LedgerState) forgeBlock() {
 	// Calculate next slot and block number
 	nextSlot, err := ls.TimeToSlot(time.Now())
 	if err != nil {
-		ls.config.Logger.Error(
+		ls.Config.Logger.Error(
 			"failed to calculate slot from current time",
 			"component", "ledger",
 			"error", err,
@@ -1210,7 +1210,7 @@ func (ls *LedgerState) forgeBlock() {
 	// Get current protocol parameters for limits
 	pparams := ls.GetCurrentPParams()
 	if pparams == nil {
-		ls.config.Logger.Error(
+		ls.Config.Logger.Error(
 			"failed to get protocol parameters",
 			"component", "ledger",
 		)
@@ -1220,7 +1220,7 @@ func (ls *LedgerState) forgeBlock() {
 	// Safely cast protocol parameters to Conway type
 	conwayPParams, ok := pparams.(*conway.ConwayProtocolParameters)
 	if !ok {
-		ls.config.Logger.Error(
+		ls.Config.Logger.Error(
 			"protocol parameters are not Conway type",
 			"component", "ledger",
 		)
@@ -1237,7 +1237,7 @@ func (ls *LedgerState) forgeBlock() {
 		maxExUnits             = conwayPParams.MaxBlockExUnits
 	)
 
-	ls.config.Logger.Debug(
+	ls.Config.Logger.Debug(
 		"protocol parameter limits",
 		"component", "ledger",
 		"max_tx_size", maxTxSize,
@@ -1248,7 +1248,7 @@ func (ls *LedgerState) forgeBlock() {
 	var mempoolTxs []mempool.MempoolTransaction
 	if ls.mempool != nil {
 		mempoolTxs = ls.mempool.Transactions()
-		ls.config.Logger.Debug(
+		ls.Config.Logger.Debug(
 			"found transactions in mempool",
 			"component", "ledger",
 			"tx_count", len(mempoolTxs),
@@ -1262,7 +1262,7 @@ func (ls *LedgerState) forgeBlock() {
 
 			// Check MaxTxSize limit
 			if txSize > maxTxSize {
-				ls.config.Logger.Debug(
+				ls.Config.Logger.Debug(
 					"skipping transaction - exceeds MaxTxSize",
 					"component", "ledger",
 					"tx_size", txSize,
@@ -1273,7 +1273,7 @@ func (ls *LedgerState) forgeBlock() {
 
 			// Check MaxBlockSize limit
 			if blockSize+txSize > maxBlockSize {
-				ls.config.Logger.Debug(
+				ls.Config.Logger.Debug(
 					"block size limit reached",
 					"component", "ledger",
 					"current_size", blockSize,
@@ -1286,7 +1286,7 @@ func (ls *LedgerState) forgeBlock() {
 			// Decode the transaction CBOR into full Conway transaction
 			fullTx, err := conway.NewConwayTransactionFromCbor(txCbor)
 			if err != nil {
-				ls.config.Logger.Debug(
+				ls.Config.Logger.Debug(
 					"failed to decode full transaction, skipping",
 					"component", "ledger",
 					"error", err,
@@ -1308,7 +1308,7 @@ func (ls *LedgerState) forgeBlock() {
 			// Check MaxExUnits limit
 			if totalExUnits.Memory+estimatedTxExUnits.Memory > maxExUnits.Memory ||
 				totalExUnits.Steps+estimatedTxExUnits.Steps > maxExUnits.Steps {
-				ls.config.Logger.Debug(
+				ls.Config.Logger.Debug(
 					"ex units limit reached",
 					"component", "ledger",
 					"current_memory", totalExUnits.Memory,
@@ -1331,7 +1331,7 @@ func (ls *LedgerState) forgeBlock() {
 			totalExUnits.Memory += estimatedTxExUnits.Memory
 			totalExUnits.Steps += estimatedTxExUnits.Steps
 
-			ls.config.Logger.Debug(
+			ls.Config.Logger.Debug(
 				"added transaction to block candidate lists",
 				"component", "ledger",
 				"tx_size", txSize,
@@ -1382,7 +1382,7 @@ func (ls *LedgerState) forgeBlock() {
 	// Marshal the conway block to CBOR
 	blockCbor, err := cbor.Encode(conwayBlock)
 	if err != nil {
-		ls.config.Logger.Error(
+		ls.Config.Logger.Error(
 			"failed to marshal forged conway block to CBOR",
 			"component", "ledger",
 			"error", err,
@@ -1394,7 +1394,7 @@ func (ls *LedgerState) forgeBlock() {
 	// This is a bit of a hack, because things like Hash() rely on having the original CBOR available
 	ledgerBlock, err := conway.NewConwayBlockFromCbor(blockCbor)
 	if err != nil {
-		ls.config.Logger.Error(
+		ls.Config.Logger.Error(
 			"failed to unmarshal forced Conway block from generated CBOR",
 			"error", err,
 		)
@@ -1404,7 +1404,7 @@ func (ls *LedgerState) forgeBlock() {
 	// Add the block to the primary chain
 	err = ls.chain.AddBlock(ledgerBlock, nil)
 	if err != nil {
-		ls.config.Logger.Error(
+		ls.Config.Logger.Error(
 			"failed to add forged block to primary chain",
 			"component", "ledger",
 			"error", err,
@@ -1413,7 +1413,7 @@ func (ls *LedgerState) forgeBlock() {
 	}
 
 	// Log the successful block creation
-	ls.config.Logger.Debug(
+	ls.Config.Logger.Debug(
 		"successfully forged and added conway block to primary chain",
 		"component", "ledger",
 		"slot", ledgerBlock.SlotNumber(),

@@ -25,7 +25,7 @@ type BlobStoreGCSOptionFunc func(*BlobStoreGCS)
 // WithLogger specifies the logger object to use for logging messages
 func WithLogger(logger *slog.Logger) BlobStoreGCSOptionFunc {
 	return func(b *BlobStoreGCS) {
-		b.logger = NewGcsLogger(logger)
+		b.Logger = NewGcsLogger(logger)
 	}
 }
 
@@ -34,20 +34,20 @@ func WithPromRegistry(
 	registry prometheus.Registerer,
 ) BlobStoreGCSOptionFunc {
 	return func(b *BlobStoreGCS) {
-		b.promRegistry = registry
+		b.PromRegistry = registry
 	}
 }
 
 // WithBucket specifies the GCS bucket name
 func WithBucket(bucket string) BlobStoreGCSOptionFunc {
 	return func(b *BlobStoreGCS) {
-		b.bucketName = bucket
+		b.BucketName = bucket
 	}
 }
 
 // WithCredentialsFile specifies the path to the service account credentials file
 func WithCredentialsFile(credentialsFile string) BlobStoreGCSOptionFunc {
 	return func(b *BlobStoreGCS) {
-		b.credentialsFile = credentialsFile
+		b.CredentialsFile = credentialsFile
 	}
 }

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package ledger
+package ledger_test
 
 import (
 	"fmt"
@@ -22,6 +22,7 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/config/cardano"
+	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 )
 
@@ -77,9 +78,9 @@ func TestCalculateStabilityWindow_ByronEra(t *testing.T) {
 				t.Fatalf("failed to load Shelley genesis: %v", err)
 			}
 
-			ls := &LedgerState{
-				currentEra: eras.ByronEraDesc, // Byron era has Id = 0
-				config: LedgerStateConfig{
+			ls := &ledger.LedgerState{
+				CurrentEra: eras.ByronEraDesc, // Byron era has Id = 0
+				Config: ledger.LedgerStateConfig{
 					CardanoNodeConfig: cfg,
 					Logger: slog.New(
 						slog.NewJSONHandler(io.Discard, nil),
@@ -87,7 +88,7 @@ func TestCalculateStabilityWindow_ByronEra(t *testing.T) {
 				},
 			}
 
-			result := ls.calculateStabilityWindow()
+			result := ls.CalculateStabilityWindow()
 			if result != tc.expectedWindow {
 				t.Errorf(
 					"expected stability window %d, got %d",
@@ -173,9 +174,9 @@ func TestCalculateStabilityWindow_ShelleyEra(t *testing.T) {
 				t.Fatalf("failed to load Shelley genesis: %v", err)
 			}
 
-			ls := &LedgerState{
-				currentEra: eras.ShelleyEraDesc, // Shelley era has Id = 1
-				config: LedgerStateConfig{
+			ls := &ledger.LedgerState{
+				CurrentEra: eras.ShelleyEraDesc, // Shelley era has Id = 1
+				Config: ledger.LedgerStateConfig{
 					CardanoNodeConfig: cfg,
 					Logger: slog.New(
 						slog.NewJSONHandler(io.Discard, nil),
@@ -183,7 +184,7 @@ func TestCalculateStabilityWindow_ShelleyEra(t *testing.T) {
 				},
 			}
 
-			result := ls.calculateStabilityWindow()
+			result := ls.CalculateStabilityWindow()
 			if result != tc.expectedWindow {
 				t.Errorf(
 					"%s: expected stability window %d, got %d",
@@ -209,9 +210,9 @@ func TestCalculateStabilityWindow_EdgeCases(t *testing.T) {
 			t.Fatalf("failed to load Shelley genesis: %v", err)
 		}
 
-		ls := &LedgerState{
-			currentEra: eras.ByronEraDesc,
-			config: LedgerStateConfig{
+		ls := &ledger.LedgerState{
+			CurrentEra: eras.ByronEraDesc,
+			Config: ledger.LedgerStateConfig{
 				CardanoNodeConfig: cfg,
 				Logger: slog.New(
 					slog.NewJSONHandler(io.Discard, nil),
@@ -219,11 +220,11 @@ func TestCalculateStabilityWindow_EdgeCases(t *testing.T) {
 			},
 		}
 
-		result := ls.calculateStabilityWindow()
-		if result != blockfetchBatchSlotThresholdDefault {
+		result := ls.CalculateStabilityWindow()
+		if result != ledger.BlockfetchBatchSlotThresholdDefault {
 			t.Errorf(
 				"expected default threshold %d, got %d",
-				blockfetchBatchSlotThresholdDefault,
+				ledger.BlockfetchBatchSlotThresholdDefault,
 				result,
 			)
 		}
@@ -241,9 +242,9 @@ func TestCalculateStabilityWindow_EdgeCases(t *testing.T) {
 			t.Fatalf("failed to load Byron genesis: %v", err)
 		}
 
-		ls := &LedgerState{
-			currentEra: eras.ByronEraDesc,
-			config: LedgerStateConfig{
+		ls := &ledger.LedgerState{
+			CurrentEra: eras.ByronEraDesc,
+			Config: ledger.LedgerStateConfig{
 				CardanoNodeConfig: cfg,
 				Logger: slog.New(
 					slog.NewJSONHandler(io.Discard, nil),
@@ -251,7 +252,7 @@ func TestCalculateStabilityWindow_EdgeCases(t *testing.T) {
 			},
 		}
 
-		result := ls.calculateStabilityWindow()
+		result := ls.CalculateStabilityWindow()
 		if result != 864 {
 			t.Errorf("expected default threshold %d, got %d", 864, result)
 		}
@@ -276,9 +277,9 @@ func TestCalculateStabilityWindow_EdgeCases(t *testing.T) {
 			strings.NewReader(shelleyGenesisJSON),
 		)
 
-		ls := &LedgerState{
-			currentEra: eras.ByronEraDesc,
-			config: LedgerStateConfig{
+		ls := &ledger.LedgerState{
+			CurrentEra: eras.ByronEraDesc,
+			Config: ledger.LedgerStateConfig{
 				CardanoNodeConfig: cfg,
 				Logger: slog.New(
 					slog.NewJSONHandler(io.Discard, nil),
@@ -286,11 +287,11 @@ func TestCalculateStabilityWindow_EdgeCases(t *testing.T) {
 			},
 		}
 
-		result := ls.calculateStabilityWindow()
-		if result != blockfetchBatchSlotThresholdDefault {
+		result := ls.CalculateStabilityWindow()
+		if result != ledger.BlockfetchBatchSlotThresholdDefault {
 			t.Errorf(
 				"expected default threshold %d for zero k, got %d",
-				blockfetchBatchSlotThresholdDefault,
+				ledger.BlockfetchBatchSlotThresholdDefault,
 				result,
 			)
 		}
@@ -315,9 +316,9 @@ func TestCalculateStabilityWindow_EdgeCases(t *testing.T) {
 			strings.NewReader(shelleyGenesisJSON),
 		)
 
-		ls := &LedgerState{
-			currentEra: eras.ShelleyEraDesc,
-			config: LedgerStateConfig{
+		ls := &ledger.LedgerState{
+			CurrentEra: eras.ShelleyEraDesc,
+			Config: ledger.LedgerStateConfig{
 				CardanoNodeConfig: cfg,
 				Logger: slog.New(
 					slog.NewJSONHandler(io.Discard, nil),
@@ -325,11 +326,11 @@ func TestCalculateStabilityWindow_EdgeCases(t *testing.T) {
 			},
 		}
 
-		result := ls.calculateStabilityWindow()
-		if result != blockfetchBatchSlotThresholdDefault {
+		result := ls.CalculateStabilityWindow()
+		if result != ledger.BlockfetchBatchSlotThresholdDefault {
 			t.Errorf(
 				"expected default threshold %d for zero k, got %d",
-				blockfetchBatchSlotThresholdDefault,
+				ledger.BlockfetchBatchSlotThresholdDefault,
 				result,
 			)
 		}
@@ -361,9 +362,9 @@ func TestCalculateStabilityWindow_ActiveSlotsCoefficientEdgeCases(
 			t.Fatalf("failed to load Shelley genesis: %v", err)
 		}
 
-		ls := &LedgerState{
-			currentEra: eras.ShelleyEraDesc,
-			config: LedgerStateConfig{
+		ls := &ledger.LedgerState{
+			CurrentEra: eras.ShelleyEraDesc,
+			Config: ledger.LedgerStateConfig{
 				CardanoNodeConfig: cfg,
 				Logger: slog.New(
 					slog.NewJSONHandler(io.Discard, nil),
@@ -371,7 +372,7 @@ func TestCalculateStabilityWindow_ActiveSlotsCoefficientEdgeCases(
 			},
 		}
 
-		result := ls.calculateStabilityWindow()
+		result := ls.CalculateStabilityWindow()
 		// 3*432/0.01 = 129600
 		expectedWindow := uint64(129600)
 		if result != expectedWindow {
@@ -404,9 +405,9 @@ func TestCalculateStabilityWindow_ActiveSlotsCoefficientEdgeCases(
 			t.Fatalf("failed to load Shelley genesis: %v", err)
 		}
 
-		ls := &LedgerState{
-			currentEra: eras.ShelleyEraDesc,
-			config: LedgerStateConfig{
+		ls := &ledger.LedgerState{
+			CurrentEra: eras.ShelleyEraDesc,
+			Config: ledger.LedgerStateConfig{
 				CardanoNodeConfig: cfg,
 				Logger: slog.New(
 					slog.NewJSONHandler(io.Discard, nil),
@@ -414,7 +415,7 @@ func TestCalculateStabilityWindow_ActiveSlotsCoefficientEdgeCases(
 			},
 		}
 
-		result := ls.calculateStabilityWindow()
+		result := ls.CalculateStabilityWindow()
 		// 3*100/0.07 = 300/0.07 = 4285.714... should round up to 4286
 		if result < 4285 || result > 4287 {
 			t.Errorf("expected stability window around 4286, got %d", result)
@@ -442,9 +443,9 @@ func TestCalculateStabilityWindow_ActiveSlotsCoefficientEdgeCases(
 			t.Fatalf("failed to load Shelley genesis: %v", err)
 		}
 
-		ls := &LedgerState{
-			currentEra: eras.ShelleyEraDesc,
-			config: LedgerStateConfig{
+		ls := &ledger.LedgerState{
+			CurrentEra: eras.ShelleyEraDesc,
+			Config: ledger.LedgerStateConfig{
 				CardanoNodeConfig: cfg,
 				Logger: slog.New(
 					slog.NewJSONHandler(io.Discard, nil),
@@ -452,7 +453,7 @@ func TestCalculateStabilityWindow_ActiveSlotsCoefficientEdgeCases(
 			},
 		}
 
-		result := ls.calculateStabilityWindow()
+		result := ls.CalculateStabilityWindow()
 		// 3*1000/0.333333 ≈ 9000
 		if result == 0 {
 			t.Error("expected non-zero stability window")
@@ -529,9 +530,9 @@ func TestCalculateStabilityWindow_AllEras(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			ls := &LedgerState{
-				currentEra: tc.era,
-				config: LedgerStateConfig{
+			ls := &ledger.LedgerState{
+				CurrentEra: tc.era,
+				Config: ledger.LedgerStateConfig{
 					CardanoNodeConfig: cfg,
 					Logger: slog.New(
 						slog.NewJSONHandler(io.Discard, nil),
@@ -539,7 +540,7 @@ func TestCalculateStabilityWindow_AllEras(t *testing.T) {
 				},
 			}
 
-			result := ls.calculateStabilityWindow()
+			result := ls.CalculateStabilityWindow()
 			if result != tc.expectedWindow {
 				t.Errorf(
 					"era %s: expected stability window %d, got %d",
@@ -576,9 +577,9 @@ func TestCalculateStabilityWindow_Integration(t *testing.T) {
 		}
 
 		// Test Byron era with mainnet params
-		lsByron := &LedgerState{
-			currentEra: eras.ByronEraDesc,
-			config: LedgerStateConfig{
+		lsByron := &ledger.LedgerState{
+			CurrentEra: eras.ByronEraDesc,
+			Config: ledger.LedgerStateConfig{
 				CardanoNodeConfig: cfg,
 				Logger: slog.New(
 					slog.NewJSONHandler(io.Discard, nil),
@@ -586,7 +587,7 @@ func TestCalculateStabilityWindow_Integration(t *testing.T) {
 			},
 		}
 
-		resultByron := lsByron.calculateStabilityWindow()
+		resultByron := lsByron.CalculateStabilityWindow()
 		if resultByron != 4320 {
 			t.Errorf(
 				"Byron era: expected stability window 4320, got %d",
@@ -595,9 +596,9 @@ func TestCalculateStabilityWindow_Integration(t *testing.T) {
 		}
 
 		// Test Shelley era with mainnet params
-		lsShelley := &LedgerState{
-			currentEra: eras.ShelleyEraDesc,
-			config: LedgerStateConfig{
+		lsShelley := &ledger.LedgerState{
+			CurrentEra: eras.ShelleyEraDesc,
+			Config: ledger.LedgerStateConfig{
 				CardanoNodeConfig: cfg,
 				Logger: slog.New(
 					slog.NewJSONHandler(io.Discard, nil),
@@ -605,7 +606,7 @@ func TestCalculateStabilityWindow_Integration(t *testing.T) {
 			},
 		}
 
-		resultShelley := lsShelley.calculateStabilityWindow()
+		resultShelley := lsShelley.CalculateStabilityWindow()
 		// 3*2160/0.05 = 129600
 		if resultShelley != 129600 {
 			t.Errorf(
@@ -636,9 +637,9 @@ func TestCalculateStabilityWindow_Integration(t *testing.T) {
 			t.Fatalf("failed to load Shelley genesis: %v", err)
 		}
 
-		lsShelley := &LedgerState{
-			currentEra: eras.ShelleyEraDesc,
-			config: LedgerStateConfig{
+		lsShelley := &ledger.LedgerState{
+			CurrentEra: eras.ShelleyEraDesc,
+			Config: ledger.LedgerStateConfig{
 				CardanoNodeConfig: cfg,
 				Logger: slog.New(
 					slog.NewJSONHandler(io.Discard, nil),
@@ -646,7 +647,7 @@ func TestCalculateStabilityWindow_Integration(t *testing.T) {
 			},
 		}
 
-		result := lsShelley.calculateStabilityWindow()
+		result := lsShelley.CalculateStabilityWindow()
 		// 3*432/0.05 = 25920
 		if result != 25920 {
 			t.Errorf(
@@ -679,15 +680,15 @@ func TestCalculateStabilityWindow_LargeValues(t *testing.T) {
 		t.Fatalf("failed to load Shelley genesis: %v", err)
 	}
 
-	ls := &LedgerState{
-		currentEra: eras.ShelleyEraDesc,
-		config: LedgerStateConfig{
+	ls := &ledger.LedgerState{
+		CurrentEra: eras.ShelleyEraDesc,
+		Config: ledger.LedgerStateConfig{
 			CardanoNodeConfig: cfg,
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
 
-	result := ls.calculateStabilityWindow()
+	result := ls.CalculateStabilityWindow()
 	// 3*1000000/0.05 = 60000000
 	expectedWindow := uint64(60000000)
 	if result != expectedWindow {

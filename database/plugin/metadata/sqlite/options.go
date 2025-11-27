@@ -25,7 +25,7 @@ type SqliteOptionFunc func(*MetadataStoreSqlite)
 // WithLogger specifies the logger object to use for logging messages
 func WithLogger(logger *slog.Logger) SqliteOptionFunc {
 	return func(m *MetadataStoreSqlite) {
-		m.logger = logger
+		m.Logger = logger
 	}
 }
 
@@ -34,13 +34,13 @@ func WithPromRegistry(
 	registry prometheus.Registerer,
 ) SqliteOptionFunc {
 	return func(m *MetadataStoreSqlite) {
-		m.promRegistry = registry
+		m.PromRegistry = registry
 	}
 }
 
 // WithDataDir specifies the data directory to use for storage
 func WithDataDir(dataDir string) SqliteOptionFunc {
 	return func(m *MetadataStoreSqlite) {
-		m.dataDir = dataDir
+		m.DataDir = dataDir
 	}
 }

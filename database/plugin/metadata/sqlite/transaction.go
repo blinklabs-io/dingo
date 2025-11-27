@@ -177,7 +177,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 			)
 		}
 		if utxo == nil {
-			d.logger.Warn(
+			d.Logger.Warn(
 				"Skipping missing input UTxO",
 				"hash",
 				input.Id().String(),
@@ -211,7 +211,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 				)
 			}
 			if utxo == nil {
-				d.logger.Warn(
+				d.Logger.Warn(
 					"Skipping missing collateral UTxO",
 					"hash",
 					input.Id().String(),
@@ -273,7 +273,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 				)
 			}
 			if utxo == nil {
-				d.logger.Warn(
+				d.Logger.Warn(
 					"Skipping missing reference input UTxO",
 					"hash",
 					input.Id().String(),
@@ -333,7 +333,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 			)
 		}
 		if utxo == nil {
-			d.logger.Warn(
+			d.Logger.Warn(
 				fmt.Sprintf("input UTxO not found: %x#%d", inTxId, inIdx),
 			)
 			continue
@@ -367,7 +367,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 				if depositVal, ok := certDeposits[i]; ok {
 					deposit = depositVal
 				} else if certRequiresDeposit(cert) {
-					d.logger.Warn("missing deposit for deposit-bearing certificate",
+					d.Logger.Warn("missing deposit for deposit-bearing certificate",
 						"index", i, "type", fmt.Sprintf("%T", cert))
 				}
 			}
@@ -479,7 +479,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 					return fmt.Errorf("process certificate: %w", err)
 				}
 				if tmpPool == nil {
-					d.logger.Warn("retiring non-existent pool", "hash", c.PoolKeyHash)
+					d.Logger.Warn("retiring non-existent pool", "hash", c.PoolKeyHash)
 					tmpPool = &models.Pool{PoolKeyHash: c.PoolKeyHash[:]}
 					result := txn.Clauses(clause.OnConflict{
 						Columns:   []clause.Column{{Name: "pool_key_hash"}},
@@ -507,7 +507,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 					return fmt.Errorf("process certificate: %w", err)
 				}
 				if tmpAccount == nil {
-					d.logger.Warn("deregistering non-existent account", "hash", stakeKey)
+					d.Logger.Warn("deregistering non-existent account", "hash", stakeKey)
 					tmpAccount = &models.Account{
 						StakingKey: stakeKey,
 					}

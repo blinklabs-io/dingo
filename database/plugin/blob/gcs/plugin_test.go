@@ -12,13 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package gcs
+package gcs_test
 
 import (
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/blinklabs-io/dingo/database/plugin/blob/gcs"
 )
 
 func TestCredentialValidation(t *testing.T) {
@@ -27,13 +29,13 @@ func TestCredentialValidation(t *testing.T) {
 
 	tests := []struct {
 		name            string
-		credentialsFile string
+		CredentialsFile string
 		expectError     bool
 		errorMessage    string
 	}{
 		{
 			name: "valid credentials file",
-			credentialsFile: func() string {
+			CredentialsFile: func() string {
 				// Create a temporary file that exists
 				tempFile, err := os.CreateTemp(tempDir, "credentials-*.json")
 				if err != nil {
@@ -46,7 +48,7 @@ func TestCredentialValidation(t *testing.T) {
 		},
 		{
 			name: "nonexistent credentials file",
-			credentialsFile: filepath.Join(
+			CredentialsFile: filepath.Join(
 				tempDir,
 				"nonexistent-credentials.json",
 			),
@@ -55,14 +57,14 @@ func TestCredentialValidation(t *testing.T) {
 		},
 		{
 			name:            "empty credentials file path",
-			credentialsFile: "",
+			CredentialsFile: "",
 			expectError:     false, // Should not error when empty
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := validateCredentials(tt.credentialsFile)
+			err := gcs.ValidateCredentials(tt.CredentialsFile)
 			if tt.expectError {
 				if err == nil {
 					t.Errorf(

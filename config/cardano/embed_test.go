@@ -12,16 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package cardano
+package cardano_test
 
 import (
 	"testing"
+
+	"github.com/blinklabs-io/dingo/config/cardano"
 )
 
 func TestNewCardanoNodeConfigFromEmbedFS(t *testing.T) {
 	// Test loading config from embedded filesystem
-	cfg, err := NewCardanoNodeConfigFromEmbedFS(
-		EmbeddedConfigPreviewNetworkFS,
+	cfg, err := cardano.NewCardanoNodeConfigFromEmbedFS(
+		cardano.EmbeddedConfigPreviewNetworkFS,
 		"preview/config.json",
 	)
 	if err != nil {
@@ -53,8 +55,8 @@ func TestNewCardanoNodeConfigFromEmbedFS(t *testing.T) {
 
 func TestNewCardanoNodeConfigFromEmbedFS_InvalidPath(t *testing.T) {
 	// Test loading config from embedded filesystem with invalid path
-	_, err := NewCardanoNodeConfigFromEmbedFS(
-		EmbeddedConfigPreviewNetworkFS,
+	_, err := cardano.NewCardanoNodeConfigFromEmbedFS(
+		cardano.EmbeddedConfigPreviewNetworkFS,
 		"nonexistent/config.json",
 	)
 	if err == nil {
@@ -64,7 +66,9 @@ func TestNewCardanoNodeConfigFromEmbedFS_InvalidPath(t *testing.T) {
 
 func TestEmbedFS_ListFiles(t *testing.T) {
 	// Test that embedded FS contains expected files in preview directory
-	previewEntries, err := EmbeddedConfigPreviewNetworkFS.ReadDir("preview")
+	previewEntries, err := cardano.EmbeddedConfigPreviewNetworkFS.ReadDir(
+		"preview",
+	)
 	if err != nil {
 		t.Fatalf("failed to read preview directory: %v", err)
 	}

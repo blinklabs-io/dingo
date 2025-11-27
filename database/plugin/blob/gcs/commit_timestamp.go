@@ -28,14 +28,14 @@ const commitTimestampBlobKey = "metadata_commit_timestamp"
 func (b *BlobStoreGCS) GetCommitTimestamp(ctx context.Context) (int64, error) {
 	r, err := b.bucket.Object(commitTimestampBlobKey).NewReader(ctx)
 	if err != nil {
-		b.logger.Errorf("failed to read commit timestamp: %v", err)
+		b.Logger.Errorf("failed to read commit timestamp: %v", err)
 		return 0, err
 	}
 	defer r.Close()
 
 	ciphertext, err := io.ReadAll(r)
 	if err != nil {
-		b.logger.Errorf("failed to read commit timestamp object: %v", err)
+		b.Logger.Errorf("failed to read commit timestamp object: %v", err)
 		return 0, err
 	}
 
@@ -43,19 +43,19 @@ func (b *BlobStoreGCS) GetCommitTimestamp(ctx context.Context) (int64, error) {
 	if err != nil {
 		if !json.Valid(ciphertext) && len(ciphertext) <= 8 {
 			ts := new(big.Int).SetBytes(ciphertext).Int64()
-			b.logger.Warningf(
+			b.Logger.Warningf(
 				"commit timestamp stored plaintext in GCS, migrating to SOPS encryption: %v",
 				err,
 			)
 			if migrateErr := b.SetCommitTimestamp(ctx, ts); migrateErr != nil {
-				b.logger.Errorf(
+				b.Logger.Errorf(
 					"failed to migrate plaintext commit timestamp: %v",
 					migrateErr,
 				)
 			}
 			return ts, nil
 		}
-		b.logger.Errorf("failed to decrypt commit timestamp: %v", err)
+		b.Logger.Errorf("failed to decrypt commit timestamp: %v", err)
 		return 0, err
 	}
 
@@ -70,20 +70,20 @@ func (b *BlobStoreGCS) SetCommitTimestamp(
 
 	ciphertext, err := dingosops.Encrypt(raw)
 	if err != nil {
-		b.logger.Errorf("failed to encrypt commit timestamp: %v", err)
+		b.Logger.Errorf("failed to encrypt commit timestamp: %v", err)
 		return err
 	}
 
 	w := b.bucket.Object(commitTimestampBlobKey).NewWriter(ctx)
 	if _, err := w.Write(ciphertext); err != nil {
 		_ = w.Close()
-		b.logger.Errorf("failed to write commit timestamp: %v", err)
+		b.Logger.Errorf("failed to write commit timestamp: %v", err)
 		return err
 	}
 	if err := w.Close(); err != nil {
-		b.logger.Errorf("failed to close writer: %v", err)
+		b.Logger.Errorf("failed to close writer: %v", err)
 		return err
 	}
-	b.logger.Infof("commit timestamp %d written to GCS", timestamp)
+	b.Logger.Infof("commit timestamp %d written to GCS", timestamp)
 	return nil
 }

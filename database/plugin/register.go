@@ -17,6 +17,7 @@ package plugin
 import (
 	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/spf13/pflag"
 )
@@ -47,13 +48,20 @@ type PluginEntry struct {
 	Type               PluginType
 }
 
-var pluginEntries []PluginEntry
+var (
+	pluginEntries      []PluginEntry
+	pluginEntriesMutex sync.RWMutex
+)
 
 func Register(pluginEntry PluginEntry) {
+	pluginEntriesMutex.Lock()
+	defer pluginEntriesMutex.Unlock()
 	pluginEntries = append(pluginEntries, pluginEntry)
 }
 
 func PopulateCmdlineOptions(fs *pflag.FlagSet) error {
+	pluginEntriesMutex.RLock()
+	defer pluginEntriesMutex.RUnlock()
 	for _, plugin := range pluginEntries {
 		for _, option := range plugin.Options {
 			if err := option.AddToFlagSet(fs, PluginTypeName(plugin.Type), plugin.Name); err != nil {
@@ -65,6 +73,8 @@ func PopulateCmdlineOptions(fs *pflag.FlagSet) error {
 }
 
 func ProcessEnvVars() error {
+	pluginEntriesMutex.RLock()
+	defer pluginEntriesMutex.RUnlock()
 	for _, plugin := range pluginEntries {
 		// Generate env var prefix based on plugin type and name
 		envVarPrefix := fmt.Sprintf(
@@ -84,6 +94,8 @@ func ProcessEnvVars() error {
 func ProcessConfig(
 	pluginConfig map[string]map[string]map[string]any,
 ) error {
+	pluginEntriesMutex.RLock()
+	defer pluginEntriesMutex.RUnlock()
 	for _, plugin := range pluginEntries {
 		if pluginTypeData, ok := pluginConfig[PluginTypeName(plugin.Type)]; ok {
 			if pluginData, ok := pluginTypeData[plugin.Name]; ok {
@@ -99,6 +111,8 @@ func ProcessConfig(
 }
 
 func GetPlugins(pluginType PluginType) []PluginEntry {
+	pluginEntriesMutex.RLock()
+	defer pluginEntriesMutex.RUnlock()
 	ret := []PluginEntry{}
 	for _, plugin := range pluginEntries {
 		if plugin.Type == pluginType {
@@ -109,12 +123,19 @@ func GetPlugins(pluginType PluginType) []PluginEntry {
 }
 
 func GetPlugin(pluginType PluginType, name string) Plugin {
+	pluginEntriesMutex.RLock()
+	var factory func() Plugin
 	for _, plugin := range pluginEntries {
 		if plugin.Type == pluginType {
 			if plugin.Name == name {
-				return plugin.NewFromOptionsFunc()
+				factory = plugin.NewFromOptionsFunc
+				break
 			}
 		}
+	}
+	pluginEntriesMutex.RUnlock()
+	if factory != nil {
+		return factory()
 	}
 	return nil
 }

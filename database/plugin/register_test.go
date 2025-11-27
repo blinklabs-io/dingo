@@ -12,10 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package plugin
+package plugin_test
 
 import (
 	"testing"
+
+	"github.com/blinklabs-io/dingo/database/plugin"
 )
 
 // Mock plugin implementation for testing
@@ -25,110 +27,110 @@ func (m *mockPlugin) Start() error { return nil }
 func (m *mockPlugin) Stop() error  { return nil }
 
 func TestRegister(t *testing.T) {
-	// Save original plugin entries
-	originalEntries := pluginEntries
-	defer func() { pluginEntries = originalEntries }()
-
-	// Reset plugin entries for this test
-	pluginEntries = []PluginEntry{}
-
-	// Register a test plugin
-	testEntry := PluginEntry{
-		Type:               PluginTypeBlob,
-		Name:               "test-plugin",
-		NewFromOptionsFunc: func() Plugin { return &mockPlugin{} },
+	pluginName := "test-plugin-" + t.Name()
+	testEntry := plugin.PluginEntry{
+		Type:               plugin.PluginTypeBlob,
+		Name:               pluginName,
+		NewFromOptionsFunc: func() plugin.Plugin { return &mockPlugin{} },
 	}
 
-	Register(testEntry)
+	plugin.Register(testEntry)
 
-	// Verify the plugin was registered
-	if len(pluginEntries) != 1 {
-		t.Errorf("Expected 1 plugin entry, got %d", len(pluginEntries))
+	// Check that GetPlugin finds it
+	p := plugin.GetPlugin(plugin.PluginTypeBlob, pluginName)
+	if p == nil {
+		t.Error("plugin not found")
 	}
 
-	if pluginEntries[0].Type != PluginTypeBlob {
-		t.Errorf(
-			"Expected plugin type %d, got %d",
-			PluginTypeBlob,
-			pluginEntries[0].Type,
-		)
+	// Check that GetPlugins includes it
+	plugins := plugin.GetPlugins(plugin.PluginTypeBlob)
+	found := false
+	for _, pl := range plugins {
+		if pl.Name == pluginName && pl.Type == plugin.PluginTypeBlob {
+			found = true
+			break
+		}
 	}
-
-	if pluginEntries[0].Name != "test-plugin" {
-		t.Errorf(
-			"Expected plugin name 'test-plugin', got '%s'",
-			pluginEntries[0].Name,
-		)
+	if !found {
+		t.Error("plugin not in GetPlugins list")
 	}
 }
 
 func TestGetPlugins(t *testing.T) {
-	// Save original plugin entries
-	originalEntries := pluginEntries
-	defer func() { pluginEntries = originalEntries }()
+	blobName1 := "blob-test-1-" + t.Name()
+	blobName2 := "blob-test-2-" + t.Name()
+	metaName := "meta-test-" + t.Name()
 
-	// Reset plugin entries for this test
-	pluginEntries = []PluginEntry{}
-
-	// Register test plugins
-	Register(PluginEntry{
-		Type:               PluginTypeBlob,
-		Name:               "blob-plugin-1",
-		NewFromOptionsFunc: func() Plugin { return &mockPlugin{} },
+	plugin.Register(plugin.PluginEntry{
+		Type:               plugin.PluginTypeBlob,
+		Name:               blobName1,
+		NewFromOptionsFunc: func() plugin.Plugin { return &mockPlugin{} },
 	})
 
-	Register(PluginEntry{
-		Type:               PluginTypeBlob,
-		Name:               "blob-plugin-2",
-		NewFromOptionsFunc: func() Plugin { return &mockPlugin{} },
+	plugin.Register(plugin.PluginEntry{
+		Type:               plugin.PluginTypeBlob,
+		Name:               blobName2,
+		NewFromOptionsFunc: func() plugin.Plugin { return &mockPlugin{} },
 	})
 
-	Register(PluginEntry{
-		Type:               PluginTypeMetadata,
-		Name:               "metadata-plugin-1",
-		NewFromOptionsFunc: func() Plugin { return &mockPlugin{} },
+	plugin.Register(plugin.PluginEntry{
+		Type:               plugin.PluginTypeMetadata,
+		Name:               metaName,
+		NewFromOptionsFunc: func() plugin.Plugin { return &mockPlugin{} },
 	})
 
-	// Test getting blob plugins
-	blobPlugins := GetPlugins(PluginTypeBlob)
-	if len(blobPlugins) != 2 {
-		t.Errorf("Expected 2 blob plugins, got %d", len(blobPlugins))
+	blobPlugins := plugin.GetPlugins(plugin.PluginTypeBlob)
+	// Check that the registered blob plugins are in the list
+	found1 := false
+	found2 := false
+	for _, pl := range blobPlugins {
+		if pl.Name == blobName1 && pl.Type == plugin.PluginTypeBlob {
+			found1 = true
+		}
+		if pl.Name == blobName2 && pl.Type == plugin.PluginTypeBlob {
+			found2 = true
+		}
+	}
+	if !found1 || !found2 {
+		t.Error("not all blob plugins found")
 	}
 
-	// Test getting metadata plugins
-	metadataPlugins := GetPlugins(PluginTypeMetadata)
-	if len(metadataPlugins) != 1 {
-		t.Errorf("Expected 1 metadata plugin, got %d", len(metadataPlugins))
+	metaPlugins := plugin.GetPlugins(plugin.PluginTypeMetadata)
+	foundMeta := false
+	for _, pl := range metaPlugins {
+		if pl.Name == metaName && pl.Type == plugin.PluginTypeMetadata {
+			foundMeta = true
+			break
+		}
+	}
+	if !foundMeta {
+		t.Error("metadata plugin not found")
 	}
 }
 
 func TestGetPlugin(t *testing.T) {
-	// Save original plugin entries
-	originalEntries := pluginEntries
-	defer func() { pluginEntries = originalEntries }()
-
-	// Reset plugin entries for this test
-	pluginEntries = []PluginEntry{}
-
-	// Register a test plugin
-	Register(PluginEntry{
-		Type:               PluginTypeBlob,
-		Name:               "test-plugin",
-		NewFromOptionsFunc: func() Plugin { return &mockPlugin{} },
+	pluginName := "test-get-plugin-" + t.Name()
+	plugin.Register(plugin.PluginEntry{
+		Type:               plugin.PluginTypeBlob,
+		Name:               pluginName,
+		NewFromOptionsFunc: func() plugin.Plugin { return &mockPlugin{} },
 	})
 
 	// Test getting the plugin
-	plugin := GetPlugin(PluginTypeBlob, "test-plugin")
-	if plugin == nil {
+	p := plugin.GetPlugin(plugin.PluginTypeBlob, pluginName)
+	if p == nil {
 		t.Fatal("Expected plugin instance, got nil")
 	}
 
-	if _, ok := plugin.(*mockPlugin); !ok {
-		t.Errorf("Expected plugin of type *mockPlugin, got %T", plugin)
+	if _, ok := p.(*mockPlugin); !ok {
+		t.Errorf("Expected plugin of type *mockPlugin, got %T", p)
 	}
 
 	// Test getting non-existent plugin
-	nonExistentPlugin := GetPlugin(PluginTypeBlob, "non-existent")
+	nonExistentPlugin := plugin.GetPlugin(
+		plugin.PluginTypeBlob,
+		"non-existent-"+t.Name(),
+	)
 	if nonExistentPlugin != nil {
 		t.Errorf(
 			"Expected nil for non-existent plugin, got %v",

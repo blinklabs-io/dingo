@@ -22,7 +22,7 @@ import (
 
 var (
 	cmdlineOptions struct {
-		dataDir string
+		DataDir string
 	}
 	cmdlineOptionsMutex sync.RWMutex
 )
@@ -31,7 +31,7 @@ var (
 func initCmdlineOptions() {
 	cmdlineOptionsMutex.Lock()
 	defer cmdlineOptionsMutex.Unlock()
-	cmdlineOptions.dataDir = ""
+	cmdlineOptions.DataDir = ""
 }
 
 // Register plugin
@@ -49,7 +49,7 @@ func init() {
 					Type:         plugin.PluginOptionTypeString,
 					Description:  "Data directory for sqlite storage",
 					DefaultValue: "",
-					Dest:         &(cmdlineOptions.dataDir),
+					Dest:         &(cmdlineOptions.DataDir),
 				},
 			},
 		},
@@ -58,7 +58,7 @@ func init() {
 
 func NewFromCmdlineOptions() plugin.Plugin {
 	cmdlineOptionsMutex.RLock()
-	dataDir := cmdlineOptions.dataDir
+	dataDir := cmdlineOptions.DataDir
 	cmdlineOptionsMutex.RUnlock()
 
 	opts := []SqliteOptionFunc{
