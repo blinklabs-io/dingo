@@ -10,13 +10,15 @@ BINARIES=$(shell cd $(ROOT_DIR)/cmd && ls -1 | grep -v ^common)
 # Extract Go module name from go.mod
 GOMODULE=$(shell grep ^module $(ROOT_DIR)/go.mod | awk '{ print $$2 }')
 
-# Set version strings based on git tag and current ref
-GO_LDFLAGS=-ldflags "-s -w -X '$(GOMODULE)/internal/version.Version=$(shell git describe --tags --exact-match 2>/dev/null)' -X '$(GOMODULE)/internal/version.CommitHash=$(shell git rev-parse --short HEAD)'"
+# Set version strings: use env vars if set, else git
+VERSION ?= $(shell git describe --tags --exact-match 2>/dev/null)
+COMMIT_HASH ?= $(shell git rev-parse --short HEAD)
+GO_LDFLAGS=-ldflags "-s -w -X '$(GOMODULE)/internal/version.Version=$(VERSION)' -X '$(GOMODULE)/internal/version.CommitHash=$(COMMIT_HASH)'"
 
 .PHONY: all build mod-tidy clean format golines test bench test-load-profile
 
 # Default target
-all: build test bench
+all: format golines build test
 
 # Build target
 build: $(BINARIES)
