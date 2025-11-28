@@ -1,4 +1,6 @@
-// Copyright 2024 Blink Labs Software
+//go:build !windows
+
+// Copyright 2025 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,6 +17,8 @@
 package connmanager
 
 import (
+	"errors"
+	"net"
 	"syscall"
 
 	"golang.org/x/sys/unix"
@@ -52,4 +56,9 @@ func socketControl(network, address string, c syscall.RawConn) error {
 		return err
 	}
 	return nil
+}
+
+// createPipeListener should never be called on non-Windows systems
+func createPipeListener(_, _ string) (net.Listener, error) {
+	return nil, errors.New("pipe listener not supported on non-Windows systems")
 }

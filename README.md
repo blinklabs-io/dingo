@@ -13,6 +13,8 @@
 
 ⚠️ This is a work in progress and is currently under heavy development
 
+**Note:** On Windows systems, named pipes are used instead of Unix sockets for node-to-client communication.
+
 <div align="center">
   <img src="./.github/dingo-20241210.png" alt="dingo screenshot" width="640">
 </div>
