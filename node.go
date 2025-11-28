@@ -110,6 +110,7 @@ func (n *Node) Run() error {
 	n.ouroboros = ouroborosPkg.NewOuroboros(ouroborosPkg.OuroborosConfig{
 		Logger:          n.config.logger,
 		EventBus:        n.eventBus,
+		ConnManager:     n.connManager,
 		NetworkMagic:    n.config.networkMagic,
 		PeerSharing:     n.config.peerSharing,
 		IntersectTip:    n.config.intersectTip,
@@ -200,6 +201,7 @@ func (n *Node) Run() error {
 			ConnManager:     n.connManager,
 			DisableOutbound: n.config.devMode,
 			PromRegistry:    n.config.promRegistry,
+			PeerRequestFunc: n.ouroboros.RequestPeersFromPeer,
 		},
 	)
 	n.ouroboros.PeerGov = n.peerGov
