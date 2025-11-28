@@ -57,6 +57,7 @@ type Ouroboros struct {
 type OuroborosConfig struct {
 	Logger          *slog.Logger
 	EventBus        *event.EventBus
+	ConnManager     *connmanager.ConnectionManager
 	IntersectPoints []ocommon.Point
 	NetworkMagic    uint32
 	PeerSharing     bool
@@ -85,6 +86,7 @@ func NewOuroboros(cfg OuroborosConfig) *Ouroboros {
 	o := &Ouroboros{
 		config:           cfg,
 		EventBus:         cfg.EventBus,
+		ConnManager:      cfg.ConnManager,
 		blockFetchStarts: make(map[ouroboros.ConnectionId]time.Time),
 	}
 	if cfg.PromRegistry != nil {

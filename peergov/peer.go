@@ -42,6 +42,7 @@ const (
 )
 
 type Peer struct {
+	LastActivity   time.Time
 	Connection     *PeerConnection
 	Address        string
 	ReconnectCount int

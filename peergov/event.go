@@ -20,8 +20,17 @@ import (
 
 const (
 	OutboundConnectionEventType = "peergov.outbound-conn"
+	PeerDemotedEventType        = "peergov.peer-demoted"
+	PeerPromotedEventType       = "peergov.peer-promoted"
+	PeerRemovedEventType        = "peergov.peer-removed"
+	PeerAddedEventType          = "peergov.peer-added"
 )
 
 type OutboundConnectionEvent struct {
 	ConnectionId ouroboros.ConnectionId
+}
+
+type PeerStateChangeEvent struct {
+	Address string
+	Reason  string
 }
