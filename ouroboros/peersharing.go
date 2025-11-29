@@ -18,8 +18,11 @@ import (
 	"net"
 	"strconv"
 
+	"github.com/blinklabs-io/dingo/peergov"
 	opeersharing "github.com/blinklabs-io/gouroboros/protocol/peersharing"
 )
+
+const defaultPeersToRequest = 5
 
 func (o *Ouroboros) peersharingServerConnOpts() []opeersharing.PeerSharingOptionFunc {
 	return []opeersharing.PeerSharingOptionFunc{
@@ -28,8 +31,19 @@ func (o *Ouroboros) peersharingServerConnOpts() []opeersharing.PeerSharingOption
 }
 
 func (o *Ouroboros) peersharingClientConnOpts() []opeersharing.PeerSharingOptionFunc {
-	// We don't provide any client options, but we have this here for consistency
-	return []opeersharing.PeerSharingOptionFunc{}
+	return []opeersharing.PeerSharingOptionFunc{
+		opeersharing.WithShareRequestFunc(o.peersharingClientRequest),
+	}
+}
+
+func (o *Ouroboros) peersharingClientRequest(
+	ctx opeersharing.CallbackContext,
+	amount int,
+) ([]opeersharing.PeerAddress, error) {
+	// This callback is intentionally a no-op stub.
+	// Peer requests are driven explicitly by the reconcile loop via RequestPeersFromPeer,
+	// not through the protocol's automatic peer sharing callbacks.
+	return []opeersharing.PeerAddress{}, nil
 }
 
 func (o *Ouroboros) peersharingShareRequest(
@@ -73,4 +87,50 @@ func (o *Ouroboros) peersharingShareRequest(
 		shared++
 	}
 	return peers, nil
+}
+
+func (o *Ouroboros) RequestPeersFromPeer(peer *peergov.Peer) {
+	if peer == nil || peer.Connection == nil {
+		return
+	}
+	if o.ConnManager == nil {
+		o.config.Logger.Debug("ConnManager not available")
+		return
+	}
+	conn := o.ConnManager.GetConnectionById(peer.Connection.Id)
+	if conn == nil {
+		return
+	}
+	// Get the peer sharing client
+	ps := conn.PeerSharing()
+	if ps == nil || ps.Client == nil {
+		o.config.Logger.Debug(
+			"peer sharing client not available",
+			"peer",
+			peer.Address,
+		)
+		return
+	}
+	// Request 5 peers
+	peers, err := ps.Client.GetPeers(defaultPeersToRequest)
+	if err != nil {
+		o.config.Logger.Debug(
+			"failed to request peers",
+			"error",
+			err,
+			"peer",
+			peer.Address,
+		)
+		return
+	}
+	// Add to PeerGov
+	if o.PeerGov == nil {
+		o.config.Logger.Debug("PeerGov not available, skipping peer addition")
+		return
+	}
+	for _, p := range peers {
+		addr := net.JoinHostPort(p.IP.String(), strconv.Itoa(int(p.Port)))
+		o.PeerGov.AddPeer(addr, peergov.PeerSourceP2PGossip)
+		o.config.Logger.Debug("added peer from sharing", "addr", addr)
+	}
 }
