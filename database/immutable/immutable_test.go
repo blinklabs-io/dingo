@@ -27,8 +27,8 @@ const (
 
 func TestGetTip(t *testing.T) {
 	// These expected values correspond to the last block in our test data
-	var expectedSlot uint64 = 863996
-	expectedHash := "f47eb039637ba8da866d5a400e81abe468833a158802a6edd708c0559240fc48"
+	var expectedSlot uint64 = 1295990
+	expectedHash := "acff9c292f679ca2bd321fadd20f89af16d8f36d1b74794f0e97a6fa29fed359"
 	imm, err := immutable.New(testDataDir)
 	if err != nil {
 		t.Fatalf("unexpected error: %s", err)
