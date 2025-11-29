@@ -17,13 +17,15 @@ jobs:
     strategy:
       matrix:
         go-version: [1.24.x, 1.25.x]
-        # We want to make sure that this builds on Linux and Darwin
-        platform: [ubuntu-latest, macos-latest]
+        # We want to make sure that this builds on Linux, Darwin, and Windows
+        platform: [ubuntu-latest, macos-latest, windows-latest]
         include:
           - platform: ubuntu-latest
             cache_path: ~/.cache/go-build
           - platform: macos-latest
             cache_path: ~/Library/Caches/go-build
+          - platform: windows-latest
+            cache_path: ~\AppData\Local\go-build
     runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0 https://github.com/actions/checkout/releases/tag/v6.0.0
@@ -38,5 +40,7 @@ jobs:
           key: ${{ runner.os }}-go-${{ matrix.go-version }}-${{ hashFiles('**/go.sum') }}
           restore-keys: |
             ${{ runner.os }}-go-${{ matrix.go-version }}-
+      - name: go-build
+        run: go build ./cmd/dingo
       - name: go-test
         run: go test ./...
