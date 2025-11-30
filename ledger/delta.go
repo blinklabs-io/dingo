@@ -50,31 +50,6 @@ func (d *LedgerDelta) apply(ls *LedgerState, txn *database.Txn) error {
 		if tr.Index < 0 || tr.Index > math.MaxUint32 {
 			return fmt.Errorf("transaction index out of range: %d", tr.Index)
 		}
-		// Use consumeUtxo if tx is marked invalid
-		// This allows us to capture collateral returns in the case of
-		// phase 2 validation failure
-		if !tr.Tx.IsValid() {
-			// Process consumed UTxOs
-			for _, consumed := range tr.Tx.Consumed() {
-				if err := ls.consumeUtxo(txn, consumed, d.Point.Slot); err != nil {
-					return fmt.Errorf("remove consumed UTxO: %w", err)
-				}
-			}
-			err := ls.db.SetTransaction(
-				tr.Tx,
-				d.Point,
-				uint32(tr.Index), //nolint:gosec
-				0,                // updateEpoch
-				nil,              // pparamUpdates
-				nil,              // certDeposits
-				txn,
-			)
-			if err != nil {
-				return fmt.Errorf("record invalid transaction: %w", err)
-			}
-			// Stop processing this transaction
-			continue
-		}
 		// Extract protocol parameter updates
 		updateEpoch, paramUpdates := tr.Tx.ProtocolParameterUpdates()
 

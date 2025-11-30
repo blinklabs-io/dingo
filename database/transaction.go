@@ -59,7 +59,7 @@ func (d *Database) SetTransaction(
 	}
 
 	// Protocol parameter updates
-	if updateEpoch > 0 {
+	if updateEpoch > 0 && tx.IsValid() {
 		for genesisHash, update := range pparamUpdates {
 			err := d.SetPParamUpdate(
 				genesisHash.Bytes(),
