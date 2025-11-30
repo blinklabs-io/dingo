@@ -409,20 +409,6 @@ func (ls *LedgerState) transitionToEra(
 	return nil
 }
 
-// consumeUtxo marks a UTxO as "deleted" without actually deleting it. This allows for a UTxO
-// to be easily on rollback
-func (ls *LedgerState) consumeUtxo(
-	txn *database.Txn,
-	utxoId ledger.TransactionInput,
-	slot uint64,
-) error {
-	return ls.db.UtxoConsume(
-		utxoId,
-		slot,
-		txn,
-	)
-}
-
 // calculateStabilityWindow returns the stability window based on the current era.
 // For Byron era, returns 2k. For Shelley+ eras, returns 3k/f.
 // Returns the default threshold if genesis data is unavailable or invalid.

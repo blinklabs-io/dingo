@@ -31,6 +31,7 @@ type Transaction struct {
 	Metadata         []byte
 	Fee              types.Uint64
 	TTL              types.Uint64
+	Valid            bool
 }
 
 func (Transaction) TableName() string {
