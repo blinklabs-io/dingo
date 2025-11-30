@@ -19,6 +19,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"slices"
 	"strconv"
 	"sync"
 	"time"
@@ -233,9 +234,9 @@ func (p *PeerGovernor) LoadTopologyConfig(
 					tmpPeer.Sharable = existingPeer.Sharable
 				}
 				// Remove the existing peer
-				p.peers = append(
-					p.peers[:existingPeerIdx],
-					p.peers[existingPeerIdx+1:]...)
+				p.peers = slices.Delete(
+					p.peers, existingPeerIdx,
+					existingPeerIdx+1)
 			}
 			p.peers = append(p.peers, tmpPeer)
 		}
@@ -273,9 +274,9 @@ func (p *PeerGovernor) LoadTopologyConfig(
 					tmpPeer.Sharable = existingPeer.Sharable
 				}
 				// Remove the existing peer
-				p.peers = append(
-					p.peers[:existingPeerIdx],
-					p.peers[existingPeerIdx+1:]...)
+				p.peers = slices.Delete(
+					p.peers, existingPeerIdx,
+					existingPeerIdx+1)
 			}
 			p.peers = append(p.peers, tmpPeer)
 		}
