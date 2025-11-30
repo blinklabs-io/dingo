@@ -321,13 +321,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 	}
 
 	// Consume UTxOs
-	var consumed []lcommon.TransactionInput
-	if tx.IsValid() {
-		consumed = tx.Consumed()
-	} else {
-		consumed = tx.Collateral()
-	}
-	for _, input := range consumed {
+	for _, input := range tx.Consumed() {
 		inTxId := input.Id().Bytes()
 		inIdx := input.Index()
 		utxo, err := d.GetUtxo(inTxId, inIdx, txn)
