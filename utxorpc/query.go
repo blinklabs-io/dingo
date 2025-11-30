@@ -318,6 +318,34 @@ func (s *queryServiceServer) ReadData(
 	)
 	resp := &query.ReadDataResponse{}
 
-	// TODO: do the thing once #317 is resolved
+	for _, key := range keys {
+		datum, err := s.utxorpc.config.LedgerState.Datum(key)
+		if err != nil {
+			if errors.Is(err, errors.New("datum not found")) {
+				return nil, connect.NewError(
+					connect.CodeNotFound,
+					fmt.Errorf("datum not found: %x", key),
+				)
+			}
+			return nil, fmt.Errorf("get datum %x: %w", key, err)
+		}
+		resp.Values = append(
+			resp.Values,
+			&query.AnyChainDatum{
+				Key:         datum.Hash,
+				NativeBytes: datum.RawDatum,
+			},
+		)
+	}
+
+	// Get chain point (slot and hash)
+	point := s.utxorpc.config.LedgerState.Tip().Point
+
+	// Set up response utxos
+	resp.LedgerTip = &query.ChainPoint{
+		Slot: point.Slot,
+		Hash: point.Hash,
+	}
+
 	return connect.NewResponse(resp), nil
 }
