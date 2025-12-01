@@ -21,6 +21,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"gorm.io/gorm"
@@ -132,7 +133,10 @@ func (d *MetadataStoreSqlite) SetTransaction(
 		Valid:      tx.IsValid(),
 	}
 	if tx.Metadata() != nil {
-		tmpMetadata := tx.Metadata().Cbor()
+		tmpMetadata, err := cbor.Encode(tx.Metadata())
+		if err != nil {
+			return fmt.Errorf("failed to encode metadata: %w", err)
+		}
 		tmpTx.Metadata = tmpMetadata
 	}
 	collateralReturn := tx.CollateralReturn()
