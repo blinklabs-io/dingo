@@ -14,7 +14,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.92.0
 	github.com/blinklabs-io/gouroboros v0.140.0
 	github.com/blinklabs-io/ouroboros-mock v0.3.9
-	github.com/blinklabs-io/plutigo v0.0.14
+	github.com/blinklabs-io/plutigo v0.0.15
 	github.com/btcsuite/btcd/btcutil v1.1.6
 	github.com/dgraph-io/badger/v4 v4.8.0
 	github.com/getsops/sops/v3 v3.11.0
