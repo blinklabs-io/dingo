@@ -27,7 +27,7 @@ FROM ghcr.io/blinklabs-io/cardano-cli:10.13.1.0-1 AS cardano-cli
 FROM ghcr.io/blinklabs-io/cardano-configs:20251014-1 AS cardano-configs
 FROM ghcr.io/blinklabs-io/mithril-client:0.12.33-1 AS mithril-client
 FROM ghcr.io/blinklabs-io/nview:0.12.0 AS nview
-FROM ghcr.io/blinklabs-io/txtop:0.13.1 AS txtop
+FROM ghcr.io/blinklabs-io/txtop:0.14.0 AS txtop
 
 FROM debian:bookworm-slim AS dingo
 RUN apt-get update -y && \
