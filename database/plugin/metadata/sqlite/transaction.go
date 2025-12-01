@@ -585,6 +585,31 @@ func (d *MetadataStoreSqlite) SetTransaction(
 					if err := saveCertRecord(&tmpReg, txn); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
+				case *lcommon.StakeVoteDelegationCertificate:
+					stakeKey := c.StakeCredential.Credential[:]
+					tmpAccount, err := d.getOrCreateAccount(stakeKey, txn)
+					if err != nil {
+						return fmt.Errorf("process certificate: %w", err)
+					}
+
+					tmpAccount.Pool = c.PoolKeyHash[:]
+					tmpAccount.Drep = c.Drep.Credential[:]
+
+					tmpItem := models.StakeVoteDelegation{
+						StakingKey:    stakeKey,
+						PoolKeyHash:   c.PoolKeyHash[:],
+						Drep:          c.Drep.Credential[:],
+						AddedSlot:     point.Slot,
+						CertificateID: uint(i), //nolint:gosec
+					}
+
+					if err := saveAccountIfNew(tmpAccount, txn); err != nil {
+						return fmt.Errorf("process certificate: %w", err)
+					}
+
+					if err := saveCertRecord(&tmpItem, txn); err != nil {
+						return fmt.Errorf("process certificate: %w", err)
+					}
 				case *lcommon.RegistrationCertificate:
 					stakeKey := c.StakeCredential.Credential[:]
 					tmpAccount, err := d.getOrCreateAccount(stakeKey, txn)
