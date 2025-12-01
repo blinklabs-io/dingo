@@ -525,10 +525,48 @@ func (d *MetadataStoreSqlite) SetTransaction(
 						}
 					}
 
+					tmpAccount.Active = false
+
 					tmpItem := models.StakeDeregistration{
 						StakingKey:    stakeKey,
 						AddedSlot:     point.Slot,
 						CertificateID: uint(i), //nolint:gosec
+					}
+
+					if err := saveAccountIfNew(tmpAccount, txn); err != nil {
+						return fmt.Errorf("process certificate: %w", err)
+					}
+
+					if err := saveCertRecord(&tmpItem, txn); err != nil {
+						return fmt.Errorf("process certificate: %w", err)
+					}
+				case *lcommon.DeregistrationCertificate:
+					stakeKey := c.StakeCredential.Credential[:]
+					tmpAccount, err := d.GetAccount(stakeKey, txn)
+					if err != nil {
+						return fmt.Errorf("process certificate: %w", err)
+					}
+					if tmpAccount == nil {
+						d.logger.Warn("deregistering non-existent account", "hash", stakeKey)
+						tmpAccount = &models.Account{
+							StakingKey: stakeKey,
+						}
+						result := txn.Clauses(clause.OnConflict{
+							Columns:   []clause.Column{{Name: "staking_key"}},
+							UpdateAll: true,
+						}).Create(tmpAccount)
+						if result.Error != nil {
+							return fmt.Errorf("process certificate: %w", result.Error)
+						}
+					}
+
+					tmpAccount.Active = false
+
+					tmpItem := models.Deregistration{
+						StakingKey:    stakeKey,
+						AddedSlot:     point.Slot,
+						CertificateID: uint(i), //nolint:gosec
+						Amount:        types.Uint64(deposit),
 					}
 
 					if err := saveAccountIfNew(tmpAccount, txn); err != nil {
