@@ -21,6 +21,7 @@ import (
 	"fmt"
 
 	"connectrpc.com/connect"
+	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	query "github.com/utxorpc/go-codegen/utxorpc/v1alpha/query"
 	"github.com/utxorpc/go-codegen/utxorpc/v1alpha/query/queryconnect"
@@ -321,7 +322,7 @@ func (s *queryServiceServer) ReadData(
 	for _, key := range keys {
 		datum, err := s.utxorpc.config.LedgerState.Datum(key)
 		if err != nil {
-			if errors.Is(err, errors.New("datum not found")) {
+			if errors.Is(err, database.ErrDatumNotFound) {
 				return nil, connect.NewError(
 					connect.CodeNotFound,
 					fmt.Errorf("datum not found: %x", key),
