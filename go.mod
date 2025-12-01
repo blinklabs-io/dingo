@@ -2,7 +2,7 @@ module github.com/blinklabs-io/dingo
 
 go 1.24.0
 
-toolchain go1.24.1
+toolchain go1.24.10
 
 require (
 	cloud.google.com/go/storage v1.57.2
@@ -12,9 +12,9 @@ require (
 	github.com/Microsoft/go-winio v0.6.2
 	github.com/aws/aws-sdk-go-v2/config v1.32.1
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.92.0
-	github.com/blinklabs-io/gouroboros v0.140.0
-	github.com/blinklabs-io/ouroboros-mock v0.3.9
-	github.com/blinklabs-io/plutigo v0.0.14
+	github.com/blinklabs-io/gouroboros v0.142.0
+	github.com/blinklabs-io/ouroboros-mock v0.4.0
+	github.com/blinklabs-io/plutigo v0.0.15
 	github.com/btcsuite/btcd/btcutil v1.1.6
 	github.com/dgraph-io/badger/v4 v4.8.0
 	github.com/getsops/sops/v3 v3.11.0

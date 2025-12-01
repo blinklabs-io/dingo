@@ -51,11 +51,11 @@ test: mod-tidy
 bench: mod-tidy
 	go test -run=^$$ -bench=. -benchmem ./...
 
-test-load:
+test-load: mod-tidy
 	rm -rf .dingo
 	go run ./cmd/dingo load database/immutable/testdata
 
-test-load-profile:
+test-load-profile: mod-tidy
 	rm -rf .dingo dingo
 	go build -o dingo ./cmd/dingo
 	./dingo --cpuprofile=cpu.prof --memprofile=mem.prof load database/immutable/testdata

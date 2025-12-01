@@ -176,3 +176,33 @@ func (lv *LedgerView) SlotToTime(slot uint64) (time.Time, error) {
 func (lv *LedgerView) TimeToSlot(t time.Time) (uint64, error) {
 	return lv.ls.TimeToSlot(t)
 }
+
+// CalculateRewards calculates rewards for the given stake keys
+func (lv *LedgerView) CalculateRewards(
+	adaPots lcommon.AdaPots,
+	rewardSnapshot lcommon.RewardSnapshot,
+	rewardParams lcommon.RewardParameters,
+) (*lcommon.RewardCalculationResult, error) {
+	// TODO: implement reward calculation
+	return nil, nil
+}
+
+// GetAdaPots returns the current Ada pots
+func (lv *LedgerView) GetAdaPots() lcommon.AdaPots {
+	// TODO: implement Ada pots retrieval
+	return lcommon.AdaPots{}
+}
+
+// GetRewardSnapshot returns the current reward snapshot
+func (lv *LedgerView) GetRewardSnapshot(
+	epoch uint64,
+) (lcommon.RewardSnapshot, error) {
+	// TODO: implement reward snapshot retrieval
+	return lcommon.RewardSnapshot{}, nil
+}
+
+// UpdateAdaPots updates the Ada pots
+func (lv *LedgerView) UpdateAdaPots(adaPots lcommon.AdaPots) error {
+	// TODO: implement Ada pots update
+	return nil
+}

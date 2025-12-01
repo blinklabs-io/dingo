@@ -1216,6 +1216,7 @@ func (ls *LedgerState) forgeBlock() {
 	var (
 		transactionBodies      []conway.ConwayTransactionBody
 		transactionWitnessSets []conway.ConwayTransactionWitnessSet
+		transactionMetadataSet = make(map[uint]cbor.RawMessage)
 		blockSize              uint64
 		totalExUnits           lcommon.ExUnits
 		maxTxSize              = uint64(conwayPParams.MaxTxSize)
@@ -1307,12 +1308,30 @@ func (ls *LedgerState) forgeBlock() {
 				break
 			}
 
+			// Handle metadata encoding before adding transaction
+			var metadataCbor cbor.RawMessage
+			if fullTx.Metadata() != nil {
+				var err error
+				metadataCbor, err = cbor.Encode(fullTx.Metadata())
+				if err != nil {
+					ls.config.Logger.Debug(
+						"failed to encode transaction metadata",
+						"component", "ledger",
+						"error", err,
+					)
+					continue
+				}
+			}
+
 			// Add transaction to our lists for later block creation
 			transactionBodies = append(transactionBodies, fullTx.Body)
 			transactionWitnessSets = append(
 				transactionWitnessSets,
 				fullTx.WitnessSet,
 			)
+			if metadataCbor != nil {
+				transactionMetadataSet[uint(len(transactionBodies))-1] = metadataCbor
+			}
 			blockSize += txSize
 			totalExUnits.Memory += estimatedTxExUnits.Memory
 			totalExUnits.Steps += estimatedTxExUnits.Steps
@@ -1326,6 +1345,29 @@ func (ls *LedgerState) forgeBlock() {
 				"total_memory", totalExUnits.Memory,
 				"total_steps", totalExUnits.Steps,
 			)
+		}
+	}
+
+	// Process transaction metadata set
+	var metadataSet lcommon.TransactionMetadataSet
+	if len(transactionMetadataSet) > 0 {
+		metadataCbor, err := cbor.Encode(transactionMetadataSet)
+		if err != nil {
+			ls.config.Logger.Error(
+				"failed to encode transaction metadata set",
+				"component", "ledger",
+				"error", err,
+			)
+			return
+		}
+		err = metadataSet.UnmarshalCBOR(metadataCbor)
+		if err != nil {
+			ls.config.Logger.Error(
+				"failed to unmarshal transaction metadata set",
+				"component", "ledger",
+				"error", err,
+			)
+			return
 		}
 	}
 
@@ -1361,7 +1403,7 @@ func (ls *LedgerState) forgeBlock() {
 		BlockHeader:            conwayHeader,
 		TransactionBodies:      transactionBodies,
 		TransactionWitnessSets: transactionWitnessSets,
-		TransactionMetadataSet: map[uint]*cbor.LazyValue{},
+		TransactionMetadataSet: metadataSet,
 		InvalidTransactions:    []uint{},
 	}
 
