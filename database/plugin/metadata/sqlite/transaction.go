@@ -83,7 +83,11 @@ func processScripts[T scriptWithHashAndBytes](
 			DoNothing: true,
 		}).Create(&scriptContent); result.Error != nil {
 			return fmt.Errorf("create script content: %w", result.Error)
-      
+		}
+	}
+	return nil
+}
+
 // certRequiresDeposit returns true if the certificate type requires a deposit
 func certRequiresDeposit(cert lcommon.Certificate) bool {
 	switch cert.(type) {
