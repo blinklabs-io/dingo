@@ -15,10 +15,14 @@
 package utxorpc
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"strings"
+	"sync"
 	"time"
 
 	"connectrpc.com/connect"
@@ -36,7 +40,9 @@ import (
 )
 
 type Utxorpc struct {
+	server *http.Server
 	config UtxorpcConfig
+	mu     sync.Mutex
 }
 
 type UtxorpcConfig struct {
@@ -67,6 +73,11 @@ func NewUtxorpc(cfg UtxorpcConfig) *Utxorpc {
 }
 
 func (u *Utxorpc) Start() error {
+	u.mu.Lock()
+	if u.server != nil {
+		u.mu.Unlock()
+		return errors.New("server already started")
+	}
 	mux := http.NewServeMux()
 	compress1KB := connect.WithCompressMinBytes(1024)
 	queryPath, queryHandler := queryconnect.NewQueryServiceHandler(
@@ -130,7 +141,7 @@ func (u *Utxorpc) Start() error {
 				u.config.Port,
 			),
 		)
-		utxorpc := &http.Server{
+		server := &http.Server{
 			Addr: fmt.Sprintf(
 				"%s:%d",
 				u.config.Host,
@@ -139,10 +150,9 @@ func (u *Utxorpc) Start() error {
 			Handler:           mux,
 			ReadHeaderTimeout: 60 * time.Second,
 		}
-		return utxorpc.ListenAndServeTLS(
-			u.config.TlsCertFilePath,
-			u.config.TlsKeyFilePath,
-		)
+		u.server = server
+		u.mu.Unlock()
+		return u.startServer(server, "TLS")
 	} else {
 		u.config.Logger.Info(
 			fmt.Sprintf(
@@ -151,7 +161,7 @@ func (u *Utxorpc) Start() error {
 				u.config.Port,
 			),
 		)
-		utxorpc := &http.Server{
+		server := &http.Server{
 			Addr: fmt.Sprintf(
 				"%s:%d",
 				u.config.Host,
@@ -161,6 +171,59 @@ func (u *Utxorpc) Start() error {
 			Handler:           h2c.NewHandler(mux, &http2.Server{}),
 			ReadHeaderTimeout: 60 * time.Second,
 		}
-		return utxorpc.ListenAndServe()
+		u.server = server
+		u.mu.Unlock()
+		return u.startServer(server, "non-TLS")
 	}
+}
+
+func (u *Utxorpc) Stop(ctx context.Context) error {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+
+	if u.server != nil {
+		u.config.Logger.Debug("shutting down gRPC server")
+		if err := u.server.Shutdown(ctx); err != nil {
+			return fmt.Errorf("failed to shutdown gRPC server: %w", err)
+		}
+		u.server = nil
+	}
+	return nil
+}
+
+// startServer starts the HTTP server with error detection
+func (u *Utxorpc) startServer(server *http.Server, serverType string) error {
+	startErr := make(chan error, 1)
+	go func() {
+		var err error
+		if strings.EqualFold(serverType, "tls") {
+			err = server.ListenAndServeTLS(
+				u.config.TlsCertFilePath,
+				u.config.TlsKeyFilePath,
+			)
+		} else {
+			err = server.ListenAndServe()
+		}
+		if err != nil && err != http.ErrServerClosed {
+			select {
+			case startErr <- err:
+			default:
+				u.config.Logger.Error(
+					"gRPC server error",
+					"error", err,
+				)
+			}
+		}
+	}()
+
+	// Wait briefly for startup to succeed or fail
+	// NOTE: 100ms timeout assumes startup errors occur quickly (e.g., port binding).
+	// Delayed failures (e.g., certificate loading issues) may not be detected.
+	select {
+	case err := <-startErr:
+		return fmt.Errorf("failed to start gRPC %s server: %w", serverType, err)
+	case <-time.After(100 * time.Millisecond):
+		// Assume startup succeeded if no error within 100ms
+	}
+	return nil
 }

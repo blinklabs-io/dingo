@@ -15,6 +15,7 @@
 package mempool
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"log/slog"
@@ -78,6 +79,8 @@ type Mempool struct {
 	transactions []*MempoolTransaction
 	sync.RWMutex
 	consumersMutex sync.Mutex
+	done           chan struct{}
+	doneOnce       sync.Once
 }
 
 type MempoolFullError struct {
@@ -101,6 +104,7 @@ func NewMempool(config MempoolConfig) *Mempool {
 		consumers: make(map[ouroboros.ConnectionId]*MempoolConsumer),
 		validator: config.Validator,
 		config:    config,
+		done:      make(chan struct{}),
 	}
 	if config.Logger == nil {
 		// Create logger to throw away logs
@@ -145,6 +149,35 @@ func (m *Mempool) RemoveConsumer(connId ouroboros.ConnectionId) {
 	m.consumersMutex.Unlock()
 }
 
+func (m *Mempool) Stop(ctx context.Context) error {
+	// Context is accepted for API consistency but not used since cleanup is synchronous and fast
+	m.logger.Debug("stopping mempool")
+
+	// Signal the processChainEvents goroutine to stop (safe to call multiple times)
+	m.doneOnce.Do(func() { close(m.done) })
+
+	// Stop all consumers
+	m.consumersMutex.Lock()
+	for _, consumer := range m.consumers {
+		if consumer != nil {
+			consumer.ClearCache()
+		}
+	}
+	m.consumers = make(map[ouroboros.ConnectionId]*MempoolConsumer)
+	m.consumersMutex.Unlock()
+
+	// Clear transactions
+	m.Lock()
+	m.transactions = []*MempoolTransaction{}
+	// Reset metrics
+	m.metrics.txsInMempool.Set(0)
+	m.metrics.mempoolBytes.Set(0)
+	m.Unlock()
+
+	m.logger.Debug("mempool stopped")
+	return nil
+}
+
 func (m *Mempool) Consumer(connId ouroboros.ConnectionId) *MempoolConsumer {
 	m.consumersMutex.Lock()
 	defer m.consumersMutex.Unlock()
@@ -152,6 +185,10 @@ func (m *Mempool) Consumer(connId ouroboros.ConnectionId) *MempoolConsumer {
 }
 
 func (m *Mempool) processChainEvents() {
+	if m.eventBus == nil {
+		// No event bus configured; nothing to process
+		return
+	}
 	chainUpdateSubId, chainUpdateChan := m.eventBus.Subscribe(
 		chain.ChainUpdateEventType,
 	)
@@ -161,9 +198,12 @@ func (m *Mempool) processChainEvents() {
 	lastValidationTime := time.Now()
 	var ok bool
 	for {
-		// Wait for chain event
-		_, ok = <-chainUpdateChan
-		if !ok {
+		select {
+		case _, ok = <-chainUpdateChan:
+			if !ok {
+				return
+			}
+		case <-m.done:
 			return
 		}
 		// Only purge once every 30 seconds when there are more blocks available
@@ -260,18 +300,20 @@ func (m *Mempool) AddTransaction(txType uint, txBytes []byte) error {
 	m.metrics.txsProcessedNum.Inc()
 	m.metrics.txsInMempool.Inc()
 	m.metrics.mempoolBytes.Add(float64(len(tx.Cbor)))
-	// Generate event
-	m.eventBus.Publish(
-		AddTransactionEventType,
-		event.NewEvent(
+	// Generate event if event bus is configured
+	if m.eventBus != nil {
+		m.eventBus.Publish(
 			AddTransactionEventType,
-			AddTransactionEvent{
-				Hash: tx.Hash,
-				Type: tx.Type,
-				Body: tx.Cbor,
-			},
-		),
-	)
+			event.NewEvent(
+				AddTransactionEventType,
+				AddTransactionEvent{
+					Hash: tx.Hash,
+					Type: tx.Type,
+					Body: tx.Cbor,
+				},
+			),
+		)
+	}
 	return nil
 }
 
@@ -347,14 +389,16 @@ func (m *Mempool) removeTransactionByIndex(txIdx int) bool {
 	}
 	m.consumersMutex.Unlock()
 	// Generate event
-	m.eventBus.Publish(
-		RemoveTransactionEventType,
-		event.NewEvent(
+	if m.eventBus != nil {
+		m.eventBus.Publish(
 			RemoveTransactionEventType,
-			RemoveTransactionEvent{
-				Hash: tx.Hash,
-			},
-		),
-	)
+			event.NewEvent(
+				RemoveTransactionEventType,
+				RemoveTransactionEvent{
+					Hash: tx.Hash,
+				},
+			),
+		)
+	}
 	return true
 }

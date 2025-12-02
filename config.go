@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"time"
 
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/connmanager"
@@ -51,6 +52,7 @@ type Config struct {
 	tracing            bool
 	tracingStdout      bool
 	devMode            bool
+	shutdownTimeout    time.Duration
 }
 
 // configPopulateNetworkMagic uses the named network (if specified) to determine the network magic value (if not specified)
@@ -244,6 +246,13 @@ func WithTracing(tracing bool) ConfigOptionFunc {
 func WithTracingStdout(stdout bool) ConfigOptionFunc {
 	return func(c *Config) {
 		c.tracingStdout = stdout
+	}
+}
+
+// WithShutdownTimeout specifies the timeout for graceful shutdown. The default is 30 seconds
+func WithShutdownTimeout(timeout time.Duration) ConfigOptionFunc {
+	return func(c *Config) {
+		c.shutdownTimeout = timeout
 	}
 }
 

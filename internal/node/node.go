@@ -106,6 +106,17 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 			},
 		)
 	}
+
+	// Parse shutdown timeout
+	shutdownTimeout := 30 * time.Second // Default timeout
+	if cfg.ShutdownTimeout != "" {
+		var err error
+		shutdownTimeout, err = time.ParseDuration(cfg.ShutdownTimeout)
+		if err != nil {
+			return fmt.Errorf("invalid shutdown timeout: %w", err)
+		}
+	}
+
 	d, err := dingo.New(
 		dingo.NewConfig(
 			dingo.WithIntersectTip(cfg.IntersectTip),
@@ -121,6 +132,7 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 			dingo.WithUtxorpcTlsKeyFilePath(cfg.TlsKeyFilePath),
 			dingo.WithValidateHistorical(cfg.ValidateHistorical),
 			dingo.WithDevMode(cfg.DevMode),
+			dingo.WithShutdownTimeout(shutdownTimeout),
 			// Enable metrics with default prometheus registry
 			dingo.WithPrometheusRegistry(prometheus.DefaultRegisterer),
 			// TODO: make this configurable (#387)
@@ -142,16 +154,19 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 		"component",
 		"node",
 	)
+	metricsServer := &http.Server{
+		Addr: fmt.Sprintf(
+			"%s:%d",
+			cfg.BindAddr,
+			cfg.MetricsPort,
+		),
+		ReadHeaderTimeout: 60 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
 	go func() {
-		debugger := &http.Server{
-			Addr: fmt.Sprintf(
-				"%s:%d",
-				cfg.BindAddr,
-				cfg.MetricsPort,
-			),
-			ReadHeaderTimeout: 60 * time.Second,
-		}
-		if err := debugger.ListenAndServe(); err != nil {
+		if err := metricsServer.ListenAndServe(); err != nil &&
+			err != http.ErrServerClosed {
 			logger.Error(
 				fmt.Sprintf("failed to start metrics listener: %s", err),
 				"component", "node",
@@ -166,21 +181,81 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 		syscall.SIGTERM,
 	)
 	defer signalCtxStop()
+
+	// Run node in goroutine
+	errChan := make(chan error, 1)
 	go func() {
-		<-signalCtx.Done()
-		logger.Info("signal received, shutting down")
-		if err := d.Stop(); err != nil { //nolint:contextcheck
+		//nolint:contextcheck
+		err := d.Run()
+		select {
+		case errChan <- err:
+		case <-signalCtx.Done():
+		}
+	}()
+
+	// Wait for signal or error
+	select {
+	case <-signalCtx.Done():
+		logger.Info("signal received, initiating graceful shutdown")
+
+		// Shutdown metrics server
+		shutdownCtx, cancel := context.WithTimeout(
+			context.Background(),
+			shutdownTimeout,
+		)
+		defer cancel()
+		if err := metricsServer.Shutdown(shutdownCtx); err != nil {
+			logger.Error("metrics server shutdown error", "error", err)
+		}
+
+		// Shutdown node
+		if err := d.Stop(); err != nil {
+			logger.Error("shutdown errors occurred", "error", err)
+			return err
+		}
+		logger.Info("shutdown complete")
+		return nil
+
+	case err := <-errChan:
+		if err == nil {
+			logger.Info("node stopped")
+			// Graceful cleanup
+			shutdownCtx, cancel := context.WithTimeout(
+				context.Background(),
+				shutdownTimeout,
+			)
+			defer cancel()
+			if err := metricsServer.Shutdown(shutdownCtx); err != nil {
+				logger.Error("metrics server shutdown error", "error", err)
+			}
+			if err := d.Stop(); err != nil {
+				logger.Error("shutdown errors occurred", "error", err)
+				return err
+			}
+			return nil
+		}
+		logger.Error("node error", "error", err)
+		signalCtxStop()
+
+		// Shutdown node resources
+		if stopErr := d.Stop(); stopErr != nil {
 			logger.Error(
-				"failure(s) while shutting down",
+				"shutdown errors occurred during error cleanup",
 				"error",
-				err,
+				stopErr,
 			)
 		}
-		os.Exit(0)
-	}()
-	// Run node
-	if err := d.Run(); err != nil {
+
+		// Cleanup on error
+		shutdownCtx, cancel := context.WithTimeout(
+			context.Background(),
+			shutdownTimeout,
+		)
+		defer cancel()
+		if shutdownErr := metricsServer.Shutdown(shutdownCtx); shutdownErr != nil {
+			logger.Error("metrics server shutdown error", "error", shutdownErr)
+		}
+
 		return err
 	}
-	return nil
 }

@@ -59,6 +59,9 @@ func (m *MempoolConsumer) NextTx(blocking bool) *MempoolTransaction {
 			m.nextTxIdx = len(m.mempool.transactions) - 1
 		}
 	}
+	if m.nextTxIdx < 0 || m.nextTxIdx >= len(m.mempool.transactions) {
+		return nil
+	}
 	nextTx := m.mempool.transactions[m.nextTxIdx]
 	if nextTx != nil {
 		// Increment next TX index
