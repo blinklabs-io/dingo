@@ -98,7 +98,7 @@ func TestSchedulerRunFailFunc(t *testing.T) {
 		3,
 		// Task func
 		func() {
-			time.Sleep(50 * time.Millisecond)
+			time.Sleep(100 * time.Millisecond)
 		},
 		// Run fail func
 		func() {
