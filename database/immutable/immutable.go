@@ -82,6 +82,13 @@ func (i *ImmutableDb) getChunkNamesFromPoint(
 	for lowerBound <= upperBound {
 		// Get chunk in the middle of the current bounds
 		middlePoint := (lowerBound + upperBound) / 2
+		if middlePoint < 0 || middlePoint >= len(chunkNames) {
+			return nil, fmt.Errorf(
+				"immutable DB: middlePoint %d out of bounds (chunkNames len=%d)",
+				middlePoint,
+				len(chunkNames),
+			)
+		}
 		middleChunkName := chunkNames[middlePoint]
 		middleSecondary, err := i.getChunkSecondaryIndex(middleChunkName)
 		if err != nil {

@@ -22,6 +22,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -38,7 +39,9 @@ type MetadataStoreSqlite struct {
 	db           *gorm.DB
 	logger       *slog.Logger
 	timerVacuum  *time.Timer
+	timerMutex   sync.Mutex
 	dataDir      string
+	closed       bool
 }
 
 // New creates a new database
@@ -47,72 +50,28 @@ func New(
 	logger *slog.Logger,
 	promRegistry prometheus.Registerer,
 ) (*MetadataStoreSqlite, error) {
-	var metadataDb *gorm.DB
-	var err error
-	if dataDir == "" {
-		// No dataDir, use in-memory config
-		metadataDb, err = gorm.Open(
-			sqlite.Open("file::memory:?cache=shared"),
-			&gorm.Config{
-				Logger:                 gormlogger.Discard,
-				SkipDefaultTransaction: true,
-			},
-		)
-		if err != nil {
-			return nil, err
-		}
-	} else {
-		// Make sure that we can read data dir, and create if it doesn't exist
-		if _, err := os.Stat(dataDir); err != nil {
-			if !errors.Is(err, fs.ErrNotExist) {
-				return nil, fmt.Errorf("failed to read data dir: %w", err)
-			}
-			// Create data directory
-			if err := os.MkdirAll(dataDir, fs.ModePerm); err != nil {
-				return nil, fmt.Errorf("failed to create data dir: %w", err)
-			}
-		}
-		// Open sqlite DB
-		metadataDbPath := filepath.Join(
-			dataDir,
-			"metadata.sqlite",
-		)
-		// WAL journal mode, disable sync on write, increase cache size to 50MB (from 2MB)
-		metadataConnOpts := "_pragma=journal_mode(WAL)&_pragma=sync(OFF)&_pragma=cache_size(-50000)"
-		metadataDb, err = gorm.Open(
-			sqlite.Open(
-				fmt.Sprintf("file:%s?%s", metadataDbPath, metadataConnOpts),
-			),
-			&gorm.Config{
-				Logger:                 gormlogger.Discard,
-				SkipDefaultTransaction: true,
-			},
-		)
-		if err != nil {
-			return nil, err
-		}
+	return NewWithOptions(
+		WithDataDir(dataDir),
+		WithLogger(logger),
+		WithPromRegistry(promRegistry),
+	)
+}
+
+// NewWithOptions creates a new database with options
+func NewWithOptions(opts ...SqliteOptionFunc) (*MetadataStoreSqlite, error) {
+	db := &MetadataStoreSqlite{}
+
+	// Apply options
+	for _, opt := range opts {
+		opt(db)
 	}
-	db := &MetadataStoreSqlite{
-		db:           metadataDb,
-		dataDir:      dataDir,
-		logger:       logger,
-		promRegistry: promRegistry,
+
+	// Set defaults after options are applied (no side effects)
+	if db.logger == nil {
+		db.logger = slog.New(slog.NewTextHandler(os.Stderr, nil))
 	}
-	if err := db.init(); err != nil {
-		// MetadataStoreSqlite is available for recovery, so return it with error
-		return db, err
-	}
-	// Create table schemas
-	db.logger.Debug(fmt.Sprintf("creating table: %#v", &CommitTimestamp{}))
-	if err := db.db.AutoMigrate(&CommitTimestamp{}); err != nil {
-		return db, err
-	}
-	for _, model := range models.MigrateModels {
-		db.logger.Debug(fmt.Sprintf("creating table: %#v", model))
-		if err := db.db.AutoMigrate(model); err != nil {
-			return db, err
-		}
-	}
+
+	// Note: Database initialization moved to Start()
 	return db, nil
 }
 
@@ -132,7 +91,10 @@ func (d *MetadataStoreSqlite) init() error {
 }
 
 func (d *MetadataStoreSqlite) runVacuum() error {
-	if d.dataDir == "" {
+	d.timerMutex.Lock()
+	closed := d.closed
+	d.timerMutex.Unlock()
+	if d.dataDir == "" || closed {
 		return nil
 	}
 	if result := d.DB().Raw("VACUUM"); result.Error != nil {
@@ -141,7 +103,14 @@ func (d *MetadataStoreSqlite) runVacuum() error {
 	return nil
 }
 
+// scheduleDailyVacuum schedules a daily vacuum operation
 func (d *MetadataStoreSqlite) scheduleDailyVacuum() {
+	d.timerMutex.Lock()
+	defer d.timerMutex.Unlock()
+	if d.closed {
+		return
+	}
+
 	if d.timerVacuum != nil {
 		d.timerVacuum.Stop()
 	}
@@ -167,8 +136,87 @@ func (d *MetadataStoreSqlite) AutoMigrate(dst ...any) error {
 	return d.DB().AutoMigrate(dst...)
 }
 
+// Start implements the plugin.Plugin interface
+func (d *MetadataStoreSqlite) Start() error {
+	var metadataDb *gorm.DB
+	var err error
+	if d.dataDir == "" {
+		// No dataDir, use in-memory config
+		metadataDb, err = gorm.Open(
+			sqlite.Open("file::memory:?cache=shared"),
+			&gorm.Config{
+				Logger:                 gormlogger.Discard,
+				SkipDefaultTransaction: true,
+			},
+		)
+		if err != nil {
+			return err
+		}
+	} else {
+		// Make sure that we can read data dir, and create if it doesn't exist
+		if _, err := os.Stat(d.dataDir); err != nil {
+			if !errors.Is(err, fs.ErrNotExist) {
+				return fmt.Errorf("failed to read data dir: %w", err)
+			}
+			// Create data directory
+			if err := os.MkdirAll(d.dataDir, fs.ModePerm); err != nil {
+				return fmt.Errorf("failed to create data dir: %w", err)
+			}
+		}
+		// Open sqlite DB
+		metadataDbPath := filepath.Join(
+			d.dataDir,
+			"metadata.sqlite",
+		)
+		// WAL journal mode, disable sync on write, increase cache size to 50MB (from 2MB)
+		metadataConnOpts := "_pragma=journal_mode(WAL)&_pragma=sync(OFF)&_pragma=cache_size(-50000)"
+		metadataDb, err = gorm.Open(
+			sqlite.Open(
+				fmt.Sprintf("file:%s?%s", metadataDbPath, metadataConnOpts),
+			),
+			&gorm.Config{
+				Logger:                 gormlogger.Discard,
+				SkipDefaultTransaction: true,
+			},
+		)
+		if err != nil {
+			return err
+		}
+	}
+	d.db = metadataDb
+	if err := d.init(); err != nil {
+		// MetadataStoreSqlite is available for recovery, so return error but keep instance
+		return err
+	}
+	// Create table schemas
+	d.logger.Debug(fmt.Sprintf("creating table: %#v", &CommitTimestamp{}))
+	if err := d.db.AutoMigrate(&CommitTimestamp{}); err != nil {
+		return err
+	}
+	for _, model := range models.MigrateModels {
+		d.logger.Debug(fmt.Sprintf("creating table: %#v", model))
+		if err := d.db.AutoMigrate(model); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// Stop implements the plugin.Plugin interface
+func (d *MetadataStoreSqlite) Stop() error {
+	return d.Close()
+}
+
 // Close gets the database handle from our MetadataStore and closes it
 func (d *MetadataStoreSqlite) Close() error {
+	d.timerMutex.Lock()
+	d.closed = true
+	if d.timerVacuum != nil {
+		d.timerVacuum.Stop()
+		d.timerVacuum = nil
+	}
+	d.timerMutex.Unlock()
+
 	// get DB handle from gorm.DB
 	db, err := d.DB().DB()
 	if err != nil {

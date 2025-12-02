@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"runtime"
 
 	"github.com/blinklabs-io/dingo/event"
 	ouroboros "github.com/blinklabs-io/gouroboros"
@@ -44,19 +45,32 @@ func (c *ConnectionManager) startListeners() error {
 func (c *ConnectionManager) startListener(l ListenerConfig) error {
 	// Create listener if none is provided
 	if l.Listener == nil {
-		listenConfig := net.ListenConfig{}
-		if l.ReuseAddress {
-			listenConfig.Control = socketControl
+		// On Windows, the "unix" network type is repurposed to create named pipes
+		// for compatibility with configurations that specify "unix" network on Unix systems.
+		if runtime.GOOS == "windows" && l.ListenNetwork == "unix" {
+			listener, err := createPipeListener(
+				l.ListenNetwork,
+				l.ListenAddress,
+			)
+			if err != nil {
+				return fmt.Errorf("failed to open listening pipe: %w", err)
+			}
+			l.Listener = listener
+		} else {
+			listenConfig := net.ListenConfig{}
+			if l.ReuseAddress {
+				listenConfig.Control = socketControl
+			}
+			listener, err := listenConfig.Listen(
+				context.Background(),
+				l.ListenNetwork,
+				l.ListenAddress,
+			)
+			if err != nil {
+				return fmt.Errorf("failed to open listening socket: %w", err)
+			}
+			l.Listener = listener
 		}
-		listener, err := listenConfig.Listen(
-			context.Background(),
-			l.ListenNetwork,
-			l.ListenAddress,
-		)
-		if err != nil {
-			return fmt.Errorf("failed to open listening socket: %w", err)
-		}
-		l.Listener = listener
 		if l.UseNtC {
 			c.config.Logger.Info(
 				"listening for ouroboros node-to-client connections on " + l.ListenAddress,
@@ -121,7 +135,11 @@ func (c *ConnectionManager) startListener(l ListenerConfig) error {
 				continue
 			}
 			// Add to connection manager
-			c.AddConnection(oConn)
+			peerAddr := "unknown"
+			if conn.RemoteAddr() != nil {
+				peerAddr = conn.RemoteAddr().String()
+			}
+			c.AddConnection(oConn, true, peerAddr)
 			// Generate event
 			if c.config.EventBus != nil {
 				c.config.EventBus.Publish(

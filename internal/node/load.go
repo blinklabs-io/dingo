@@ -53,10 +53,11 @@ func Load(cfg *config.Config, logger *slog.Logger, immutableDir string) error {
 	}
 	// Load database
 	dbConfig := &database.Config{
-		BlobCacheSize: cfg.BadgerCacheSize,
-		DataDir:       cfg.DatabasePath,
-		Logger:        logger,
-		PromRegistry:  nil,
+		DataDir:        cfg.DatabasePath,
+		Logger:         logger,
+		PromRegistry:   nil,
+		BlobPlugin:     cfg.BlobPlugin,
+		MetadataPlugin: cfg.MetadataPlugin,
 	}
 	db, err := database.New(dbConfig)
 	if err != nil {

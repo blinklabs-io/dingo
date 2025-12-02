@@ -15,29 +15,60 @@
 package sqlite
 
 import (
+	"sync"
+
 	"github.com/blinklabs-io/dingo/database/plugin"
 )
 
-type SqliteOptionFunc func(*MetadataStoreSqlite)
+var (
+	cmdlineOptions struct {
+		dataDir string
+	}
+	cmdlineOptionsMutex sync.RWMutex
+)
 
-//nolint:unused
-var cmdLineOptions struct {
-	dataDir string
+// initCmdlineOptions sets default values for cmdlineOptions
+func initCmdlineOptions() {
+	cmdlineOptionsMutex.Lock()
+	defer cmdlineOptionsMutex.Unlock()
+	cmdlineOptions.dataDir = ""
 }
 
 // Register plugin
 func init() {
+	initCmdlineOptions()
 	plugin.Register(
 		plugin.PluginEntry{
-			Type: plugin.PluginTypeMetadata,
-			Name: "sqlite",
+			Type:               plugin.PluginTypeMetadata,
+			Name:               "sqlite",
+			Description:        "SQLite relational database",
+			NewFromOptionsFunc: NewFromCmdlineOptions,
+			Options: []plugin.PluginOption{
+				{
+					Name:         "data-dir",
+					Type:         plugin.PluginOptionTypeString,
+					Description:  "Data directory for sqlite storage",
+					DefaultValue: "",
+					Dest:         &(cmdlineOptions.dataDir),
+				},
+			},
 		},
 	)
 }
 
-// WithDataDir specifies the data directory to use, if any
-func WithDataDir(dataDir string) SqliteOptionFunc {
-	return func(m *MetadataStoreSqlite) {
-		m.dataDir = dataDir
+func NewFromCmdlineOptions() plugin.Plugin {
+	cmdlineOptionsMutex.RLock()
+	dataDir := cmdlineOptions.dataDir
+	cmdlineOptionsMutex.RUnlock()
+
+	opts := []SqliteOptionFunc{
+		WithDataDir(dataDir),
+		// Logger and promRegistry will use defaults if nil
 	}
+	p, err := NewWithOptions(opts...)
+	if err != nil {
+		// Return a plugin that defers the error to Start()
+		return plugin.NewErrorPlugin(err)
+	}
+	return p
 }

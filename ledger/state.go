@@ -108,16 +108,16 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 	if cfg.Database == nil {
 		return nil, errors.New("a Database is required")
 	}
+	if cfg.Logger == nil {
+		// Create logger to throw away logs
+		// We do this so we don't have to add guards around every log operation
+		cfg.Logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
+	}
 	ls := &LedgerState{
 		config:         cfg,
 		chainsyncState: InitChainsyncState,
 		db:             cfg.Database,
 		chain:          cfg.ChainManager.PrimaryChain(),
-	}
-	if cfg.Logger == nil {
-		// Create logger to throw away logs
-		// We do this so we don't have to add guards around every log operation
-		cfg.Logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
 	}
 	return ls, nil
 }
@@ -193,6 +193,11 @@ func (ls *LedgerState) RecoverCommitTimestampConflict() error {
 
 func (ls *LedgerState) Chain() *chain.Chain {
 	return ls.chain
+}
+
+// Datum looks up a datum by hash & adding this for implementing query.ReadData #741
+func (ls *LedgerState) Datum(hash []byte) (*models.Datum, error) {
+	return ls.db.GetDatum(hash, nil)
 }
 
 func (ls *LedgerState) Close() error {
@@ -402,20 +407,6 @@ func (ls *LedgerState) transitionToEra(
 	}
 	ls.currentEra = nextEra
 	return nil
-}
-
-// consumeUtxo marks a UTxO as "deleted" without actually deleting it. This allows for a UTxO
-// to be easily on rollback
-func (ls *LedgerState) consumeUtxo(
-	txn *database.Txn,
-	utxoId ledger.TransactionInput,
-	slot uint64,
-) error {
-	return ls.db.UtxoConsume(
-		utxoId,
-		slot,
-		txn,
-	)
 }
 
 // calculateStabilityWindow returns the stability window based on the current era.
@@ -1225,6 +1216,7 @@ func (ls *LedgerState) forgeBlock() {
 	var (
 		transactionBodies      []conway.ConwayTransactionBody
 		transactionWitnessSets []conway.ConwayTransactionWitnessSet
+		transactionMetadataSet = make(map[uint]cbor.RawMessage)
 		blockSize              uint64
 		totalExUnits           lcommon.ExUnits
 		maxTxSize              = uint64(conwayPParams.MaxTxSize)
@@ -1316,12 +1308,30 @@ func (ls *LedgerState) forgeBlock() {
 				break
 			}
 
+			// Handle metadata encoding before adding transaction
+			var metadataCbor cbor.RawMessage
+			if fullTx.Metadata() != nil {
+				var err error
+				metadataCbor, err = cbor.Encode(fullTx.Metadata())
+				if err != nil {
+					ls.config.Logger.Debug(
+						"failed to encode transaction metadata",
+						"component", "ledger",
+						"error", err,
+					)
+					continue
+				}
+			}
+
 			// Add transaction to our lists for later block creation
 			transactionBodies = append(transactionBodies, fullTx.Body)
 			transactionWitnessSets = append(
 				transactionWitnessSets,
 				fullTx.WitnessSet,
 			)
+			if metadataCbor != nil {
+				transactionMetadataSet[uint(len(transactionBodies))-1] = metadataCbor
+			}
 			blockSize += txSize
 			totalExUnits.Memory += estimatedTxExUnits.Memory
 			totalExUnits.Steps += estimatedTxExUnits.Steps
@@ -1335,6 +1345,29 @@ func (ls *LedgerState) forgeBlock() {
 				"total_memory", totalExUnits.Memory,
 				"total_steps", totalExUnits.Steps,
 			)
+		}
+	}
+
+	// Process transaction metadata set
+	var metadataSet lcommon.TransactionMetadataSet
+	if len(transactionMetadataSet) > 0 {
+		metadataCbor, err := cbor.Encode(transactionMetadataSet)
+		if err != nil {
+			ls.config.Logger.Error(
+				"failed to encode transaction metadata set",
+				"component", "ledger",
+				"error", err,
+			)
+			return
+		}
+		err = metadataSet.UnmarshalCBOR(metadataCbor)
+		if err != nil {
+			ls.config.Logger.Error(
+				"failed to unmarshal transaction metadata set",
+				"component", "ledger",
+				"error", err,
+			)
+			return
 		}
 	}
 
@@ -1370,7 +1403,7 @@ func (ls *LedgerState) forgeBlock() {
 		BlockHeader:            conwayHeader,
 		TransactionBodies:      transactionBodies,
 		TransactionWitnessSets: transactionWitnessSets,
-		TransactionMetadataSet: map[uint]*cbor.LazyValue{},
+		TransactionMetadataSet: metadataSet,
 		InvalidTransactions:    []uint{},
 	}
 

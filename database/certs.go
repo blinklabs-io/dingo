@@ -33,21 +33,3 @@ func (d *Database) GetStakeRegistrations(
 ) ([]lcommon.StakeRegistrationCertificate, error) {
 	return d.metadata.GetStakeRegistrations(stakingKey, txn.Metadata())
 }
-
-// SetPoolRegistration saves a pool registration certificate
-func (d *Database) SetPoolRegistration(
-	cert *lcommon.PoolRegistrationCertificate,
-	slot, deposit uint64, // slot
-	txn *Txn,
-) error {
-	return d.metadata.SetPoolRegistration(cert, slot, deposit, txn.Metadata())
-}
-
-// SetPoolRetirement saves a pool retirement certificate
-func (d *Database) SetPoolRetirement(
-	cert *lcommon.PoolRetirementCertificate,
-	slot uint64,
-	txn *Txn,
-) error {
-	return d.metadata.SetPoolRetirement(cert, slot, txn.Metadata())
-}

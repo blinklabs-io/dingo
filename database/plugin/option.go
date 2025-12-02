@@ -15,11 +15,12 @@
 package plugin
 
 import (
-	"flag"
 	"fmt"
 	"os"
 	"strconv"
 	"strings"
+
+	"github.com/spf13/pflag"
 )
 
 type PluginOptionType int
@@ -42,7 +43,7 @@ type PluginOption struct {
 }
 
 func (p *PluginOption) AddToFlagSet(
-	fs *flag.FlagSet,
+	fs *pflag.FlagSet,
 	pluginType string,
 	pluginName string,
 ) error {
@@ -70,10 +71,10 @@ func (p *PluginOption) AddToFlagSet(
 	case PluginOptionTypeInt:
 		fs.IntVar(p.Dest.(*int), flagName, p.DefaultValue.(int), p.Description)
 	case PluginOptionTypeUint:
-		fs.UintVar(
-			p.Dest.(*uint),
+		fs.Uint64Var(
+			p.Dest.(*uint64),
 			flagName,
-			p.DefaultValue.(uint),
+			p.DefaultValue.(uint64),
 			p.Description,
 		)
 	default:
@@ -124,12 +125,11 @@ func (p *PluginOption) ProcessEnvVars(envPrefix string) error {
 				}
 				*(p.Dest.(*int)) = int(value)
 			case PluginOptionTypeUint:
-				// We limit to 32-bit to not get inconsistent behavior on 32-bit platforms
-				value, err := strconv.ParseUint(value, 10, 32)
+				value, err := strconv.ParseUint(value, 10, 64)
 				if err != nil {
 					return fmt.Errorf("error processing env vars: %w", err)
 				}
-				*(p.Dest.(*uint)) = uint(value)
+				*(p.Dest.(*uint64)) = value
 			default:
 				return fmt.Errorf(
 					"unknown plugin option type %d for option %s",
@@ -143,7 +143,7 @@ func (p *PluginOption) ProcessEnvVars(envPrefix string) error {
 }
 
 func (p *PluginOption) ProcessConfig(
-	pluginData map[any]any,
+	pluginData map[string]any,
 ) error {
 	if optionData, ok := pluginData[p.Name]; ok {
 		switch p.Type {
@@ -169,14 +169,17 @@ func (p *PluginOption) ProcessConfig(
 				return fmt.Errorf("invalid value for option '%s': expected int and got %T", p.Name, optionData)
 			}
 		case PluginOptionTypeUint:
+			// Accept int values from YAML/config and convert to uint64 if non-negative
 			switch value := optionData.(type) {
 			case int:
 				if value < 0 {
 					return fmt.Errorf("invalid value for option '%s': negative value: %T", p.Name, optionData)
 				}
-				*(p.Dest.(*uint)) = uint(value)
+				*(p.Dest.(*uint64)) = uint64(value)
+			case uint64:
+				*(p.Dest.(*uint64)) = value
 			default:
-				return fmt.Errorf("invalid value for option '%s': expected uint and got %T", p.Name, optionData)
+				return fmt.Errorf("invalid value for option '%s': expected uint64 or int and got %T", p.Name, optionData)
 			}
 		default:
 			return fmt.Errorf(

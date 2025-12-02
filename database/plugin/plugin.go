@@ -14,7 +14,52 @@
 
 package plugin
 
+import "fmt"
+
 type Plugin interface {
 	Start() error
 	Stop() error
+}
+
+// ErrorPlugin is a plugin that always returns an error on Start()
+type ErrorPlugin struct {
+	Err error
+}
+
+func (e *ErrorPlugin) Start() error {
+	return e.Err
+}
+
+func (e *ErrorPlugin) Stop() error {
+	return nil
+}
+
+// NewErrorPlugin creates a new error plugin that returns the given error on Start()
+func NewErrorPlugin(err error) Plugin {
+	return &ErrorPlugin{Err: err}
+}
+
+// StartPlugin gets a plugin from the registry and starts it
+func StartPlugin(pluginType PluginType, pluginName string) (Plugin, error) {
+	// Get the plugin from the registry
+	p := GetPlugin(pluginType, pluginName)
+	if p == nil {
+		return nil, fmt.Errorf(
+			"%s plugin '%s' not found",
+			PluginTypeName(pluginType),
+			pluginName,
+		)
+	}
+
+	// Start the plugin
+	if err := p.Start(); err != nil {
+		return nil, fmt.Errorf(
+			"failed to start %s plugin '%s': %w",
+			PluginTypeName(pluginType),
+			pluginName,
+			err,
+		)
+	}
+
+	return p, nil
 }

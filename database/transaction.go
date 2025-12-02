@@ -15,6 +15,8 @@
 package database
 
 import (
+	"fmt"
+
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
@@ -23,6 +25,9 @@ func (d *Database) SetTransaction(
 	tx lcommon.Transaction,
 	point ocommon.Point,
 	idx uint32,
+	updateEpoch uint64,
+	pparamUpdates map[lcommon.Blake2b224]lcommon.ProtocolParameterUpdate,
+	certDeposits map[int]uint64,
 	txn *Txn,
 ) error {
 	if txn == nil {
@@ -42,5 +47,32 @@ func (d *Database) SetTransaction(
 			}
 		}
 	}
-	return d.metadata.SetTransaction(tx, point, idx, txn.Metadata())
+	err := d.metadata.SetTransaction(
+		tx,
+		point,
+		idx,
+		certDeposits,
+		txn.Metadata(),
+	)
+	if err != nil {
+		return err
+	}
+
+	// Protocol parameter updates
+	if updateEpoch > 0 && tx.IsValid() {
+		for genesisHash, update := range pparamUpdates {
+			err := d.SetPParamUpdate(
+				genesisHash.Bytes(),
+				update.Cbor(),
+				point.Slot,
+				updateEpoch,
+				txn,
+			)
+			if err != nil {
+				return fmt.Errorf("set pparam update: %w", err)
+			}
+		}
+	}
+
+	return nil
 }

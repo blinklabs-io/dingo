@@ -50,61 +50,31 @@ func (d *LedgerDelta) apply(ls *LedgerState, txn *database.Txn) error {
 		if tr.Index < 0 || tr.Index > math.MaxUint32 {
 			return fmt.Errorf("transaction index out of range: %d", tr.Index)
 		}
-		// Use consumeUtxo if tx is marked invalid
-		// This allows us to capture collateral returns in the case of
-		// phase 2 validation failure
-		if !tr.Tx.IsValid() {
-			// Process consumed UTxOs
-			for _, consumed := range tr.Tx.Consumed() {
-				if err := ls.consumeUtxo(txn, consumed, d.Point.Slot); err != nil {
-					return fmt.Errorf("remove consumed UTxO: %w", err)
-				}
-			}
-			err := ls.db.SetTransaction(
-				tr.Tx,
-				d.Point,
-				uint32(tr.Index), //nolint:gosec
-				txn,
-			)
+		// Extract protocol parameter updates
+		updateEpoch, paramUpdates := tr.Tx.ProtocolParameterUpdates()
+
+		// Calculate certificate deposits
+		certs := tr.Tx.Certificates()
+		certDeposits := make(map[int]uint64)
+		for i, cert := range certs {
+			deposit, err := ls.calculateCertificateDeposit(cert, d.BlockEraId)
 			if err != nil {
-				return fmt.Errorf("record invalid transaction: %w", err)
+				return fmt.Errorf("calculate certificate deposit: %w", err)
 			}
-			// Stop processing this transaction
-			continue
+			certDeposits[i] = deposit
 		}
+
 		err := ls.db.SetTransaction(
 			tr.Tx,
 			d.Point,
 			uint32(tr.Index), //nolint:gosec
+			updateEpoch,
+			paramUpdates,
+			certDeposits,
 			txn,
 		)
 		if err != nil {
 			return fmt.Errorf("record transaction: %w", err)
-		}
-		// Protocol parameter updates
-		if updateEpoch, paramUpdates := tr.Tx.ProtocolParameterUpdates(); updateEpoch > 0 {
-			for genesisHash, update := range paramUpdates {
-				err := ls.db.SetPParamUpdate(
-					genesisHash.Bytes(),
-					update.Cbor(),
-					d.Point.Slot,
-					updateEpoch,
-					txn,
-				)
-				if err != nil {
-					return fmt.Errorf("set pparam update: %w", err)
-				}
-			}
-		}
-		// Certificates
-		err = ls.processTransactionCertificates(
-			txn,
-			d.Point,
-			tr.Tx.Certificates(),
-			d.BlockEraId,
-		)
-		if err != nil {
-			return fmt.Errorf("process transaction certificates: %w", err)
 		}
 	}
 	return nil

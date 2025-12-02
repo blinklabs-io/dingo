@@ -20,6 +20,8 @@ import (
 	"strings"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"gorm.io/gorm"
@@ -81,16 +83,75 @@ func processScripts[T scriptWithHashAndBytes](
 			DoNothing: true,
 		}).Create(&scriptContent); result.Error != nil {
 			return fmt.Errorf("create script content: %w", result.Error)
+      
+// certRequiresDeposit returns true if the certificate type requires a deposit
+func certRequiresDeposit(cert lcommon.Certificate) bool {
+	switch cert.(type) {
+	case *lcommon.PoolRegistrationCertificate,
+		*lcommon.RegistrationCertificate,
+		*lcommon.RegistrationDrepCertificate,
+		*lcommon.StakeRegistrationCertificate,
+		*lcommon.StakeRegistrationDelegationCertificate,
+		*lcommon.StakeVoteRegistrationDelegationCertificate,
+		*lcommon.VoteRegistrationDelegationCertificate:
+		return true
+	default:
+		return false
+	}
+}
+
+// getOrCreateAccount retrieves an existing account or creates a new one
+func (d *MetadataStoreSqlite) getOrCreateAccount(
+	stakeKey []byte,
+	txn *gorm.DB,
+) (*models.Account, error) {
+	tmpAccount, err := d.GetAccount(stakeKey, txn)
+	if err != nil {
+		if !errors.Is(err, models.ErrAccountNotFound) {
+			return nil, err
+		}
+	}
+	if tmpAccount == nil {
+		tmpAccount = &models.Account{
+			StakingKey: stakeKey,
+		}
+	}
+	return tmpAccount, nil
+}
+
+// saveAccountIfNew saves the account if it doesn't exist in the database yet
+func saveAccountIfNew(account *models.Account, txn *gorm.DB) error {
+	if account.ID == 0 {
+		result := txn.Clauses(clause.OnConflict{
+			Columns: []clause.Column{{Name: "staking_key"}},
+			DoUpdates: clause.AssignmentColumns(
+				[]string{"pool", "drep"},
+			),
+		}).Create(account)
+		if result.Error != nil {
+			return result.Error
+		}
+	} else {
+		result := txn.Save(account)
+		if result.Error != nil {
+			return result.Error
 		}
 	}
 	return nil
 }
 
-// SetTransaction adds a new transaction to the database
+// saveCertRecord saves a certificate record and returns any error
+func saveCertRecord(record any, txn *gorm.DB) error {
+	result := txn.Create(record)
+	return result.Error
+}
+
+// SetTransaction adds a new transaction to the database and processes all certificates
 func (d *MetadataStoreSqlite) SetTransaction(
 	tx lcommon.Transaction,
 	point ocommon.Point,
 	idx uint32,
+	certDeposits map[int]uint64,
 	txn *gorm.DB,
 ) error {
 	txHash := tx.Hash().Bytes()
@@ -102,9 +163,15 @@ func (d *MetadataStoreSqlite) SetTransaction(
 		Type:       tx.Type(),
 		BlockHash:  point.Hash,
 		BlockIndex: idx,
+		Fee:        types.Uint64(tx.Fee()),
+		TTL:        types.Uint64(tx.TTL()),
+		Valid:      tx.IsValid(),
 	}
 	if tx.Metadata() != nil {
-		tmpMetadata := tx.Metadata().Cbor()
+		tmpMetadata, err := cbor.Encode(tx.Metadata())
+		if err != nil {
+			return fmt.Errorf("failed to encode metadata: %w", err)
+		}
 		tmpTx.Metadata = tmpMetadata
 	}
 	collateralReturn := tx.CollateralReturn()
@@ -126,7 +193,15 @@ func (d *MetadataStoreSqlite) SetTransaction(
 		),
 	}).Create(&tmpTx)
 	if result.Error != nil {
-		return fmt.Errorf("create transaction: %w", result.Error)
+		return fmt.Errorf(
+			"create transaction at slot %d, block %x, txHash %x, txIndex %d: %#v, %w",
+			point.Slot,
+			point.Hash,
+			txHash,
+			idx,
+			tx,
+			result.Error,
+		)
 	}
 	// SQLite's ON CONFLICT clause doesn't return the ID of an existing row when
 	// the conflict path is taken (no insert occurs). We need to fetch the ID
@@ -297,7 +372,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 		}
 	}
 
-	// Consume input UTxOs
+	// Consume UTxOs
 	for _, input := range tx.Consumed() {
 		inTxId := input.Id().Bytes()
 		inIdx := input.Index()
@@ -312,10 +387,13 @@ func (d *MetadataStoreSqlite) SetTransaction(
 		}
 		if utxo == nil {
 			d.logger.Warn(
-				fmt.Sprintf("input UTxO not found: %x#%d", inTxId, inIdx),
+				"input UTxO not found",
+				"hash",
+				input.Id().String(),
+				"index",
+				inIdx,
 			)
 			continue
-			// return fmt.Errorf("input UTxO not found: %x#%d", inTxId, inIdx)
 		}
 		// Update existing UTxOs
 		result = txn.Model(&models.Utxo{}).
@@ -420,6 +498,525 @@ func (d *MetadataStoreSqlite) SetTransaction(
 	result = txn.Omit(clause.Associations).Save(&tmpTx)
 	if result.Error != nil {
 		return result.Error
+	}
+
+	// Process certificates - all certificate types are handled here in a consolidated manner
+	// This centralizes certificate processing logic within the metadata layer following DRY principles
+	if tx.IsValid() {
+		certs := tx.Certificates()
+		if len(certs) > 0 {
+			for i, cert := range certs {
+				deposit := uint64(0)
+				if certDeposits != nil {
+					if depositVal, ok := certDeposits[i]; ok {
+						deposit = depositVal
+					} else if certRequiresDeposit(cert) {
+						d.logger.Warn("missing deposit for deposit-bearing certificate",
+							"index", i, "type", fmt.Sprintf("%T", cert))
+					}
+				}
+				switch c := cert.(type) {
+				case *lcommon.PoolRegistrationCertificate:
+					// Pool registration logic here
+					tmpPool, err := d.GetPool(lcommon.PoolKeyHash(c.Operator[:]), txn)
+					if err != nil {
+						if !errors.Is(err, models.ErrPoolNotFound) {
+							return fmt.Errorf("process certificate: %w", err)
+						}
+					}
+					if tmpPool == nil {
+						tmpPool = &models.Pool{
+							PoolKeyHash: c.Operator[:],
+							VrfKeyHash:  c.VrfKeyHash[:],
+						}
+					}
+
+					// Update pool's current state
+					tmpPool.Pledge = types.Uint64(c.Pledge)
+					tmpPool.Cost = types.Uint64(c.Cost)
+					tmpPool.Margin = &types.Rat{Rat: c.Margin.Rat}
+					tmpPool.RewardAccount = c.RewardAccount[:]
+
+					// Create registration record
+					tmpReg := models.PoolRegistration{
+						PoolKeyHash:   c.Operator[:],
+						VrfKeyHash:    c.VrfKeyHash[:],
+						Pledge:        types.Uint64(c.Pledge),
+						Cost:          types.Uint64(c.Cost),
+						Margin:        &types.Rat{Rat: c.Margin.Rat},
+						RewardAccount: c.RewardAccount[:],
+						AddedSlot:     point.Slot,
+						DepositAmount: types.Uint64(deposit),
+						CertificateID: uint(i), //nolint:gosec
+					}
+					if c.PoolMetadata != nil {
+						tmpReg.MetadataUrl = c.PoolMetadata.Url
+						tmpReg.MetadataHash = c.PoolMetadata.Hash[:]
+					}
+					for _, owner := range c.PoolOwners {
+						tmpReg.Owners = append(
+							tmpReg.Owners,
+							models.PoolRegistrationOwner{KeyHash: owner[:]},
+						)
+					}
+					tmpPool.Owners = tmpReg.Owners
+
+					var tmpRelay models.PoolRegistrationRelay
+					for _, relay := range c.Relays {
+						tmpRelay = models.PoolRegistrationRelay{
+							Ipv4: relay.Ipv4,
+							Ipv6: relay.Ipv6,
+						}
+						if relay.Port != nil {
+							tmpRelay.Port = uint(*relay.Port)
+						}
+						if relay.Hostname != nil {
+							tmpRelay.Hostname = *relay.Hostname
+						}
+						tmpReg.Relays = append(tmpReg.Relays, tmpRelay)
+					}
+					tmpPool.Relays = tmpReg.Relays
+
+					// Set the PoolID for the registration record
+					if tmpPool.ID == 0 {
+						result := txn.Create(tmpPool)
+						if result.Error != nil {
+							return fmt.Errorf("process certificate: %w", result.Error)
+						}
+					} else {
+						result := txn.Save(tmpPool)
+						if result.Error != nil {
+							return fmt.Errorf("process certificate: %w", result.Error)
+						}
+					}
+					tmpReg.PoolID = tmpPool.ID
+
+					// Save the registration record
+					result := txn.Create(&tmpReg)
+					if result.Error != nil {
+						return fmt.Errorf("process certificate: %w", result.Error)
+					}
+				case *lcommon.StakeRegistrationCertificate:
+					stakeKey := c.StakeCredential.Credential[:]
+					tmpAccount, err := d.getOrCreateAccount(stakeKey, txn)
+					if err != nil {
+						return fmt.Errorf("process certificate: %w", err)
+					}
+
+					tmpReg := models.StakeRegistration{
+						StakingKey:    stakeKey,
+						AddedSlot:     point.Slot,
+						DepositAmount: types.Uint64(deposit),
+						CertificateID: uint(i), //nolint:gosec
+					}
+
+					if err := saveAccountIfNew(tmpAccount, txn); err != nil {
+						return fmt.Errorf("process certificate: %w", err)
+					}
+
+					if err := saveCertRecord(&tmpReg, txn); err != nil {
+						return fmt.Errorf("process certificate: %w", err)
+					}
+				case *lcommon.PoolRetirementCertificate:
+					tmpPool, err := d.GetPool(lcommon.PoolKeyHash(c.PoolKeyHash[:]), txn)
+					if err != nil {
+						return fmt.Errorf("process certificate: %w", err)
+					}
+					if tmpPool == nil {
+						d.logger.Warn("retiring non-existent pool", "hash", c.PoolKeyHash)
+						tmpPool = &models.Pool{PoolKeyHash: c.PoolKeyHash[:]}
+						result := txn.Clauses(clause.OnConflict{
+							Columns:   []clause.Column{{Name: "pool_key_hash"}},
+							UpdateAll: true,
+						}).Create(&tmpPool)
+						if result.Error != nil {
+							return fmt.Errorf("process certificate: %w", result.Error)
+						}
+					}
+
+					tmpItem := models.PoolRetirement{
+						PoolKeyHash: c.PoolKeyHash[:],
+						Epoch:       c.Epoch,
+						AddedSlot:   point.Slot,
+						PoolID:      tmpPool.ID,
+					}
+
+					if err := saveCertRecord(&tmpItem, txn); err != nil {
+						return fmt.Errorf("process certificate: %w", err)
+					}
+				case *lcommon.StakeDeregistrationCertificate:
+					stakeKey := c.StakeCredential.Credential[:]
+					tmpAccount, err := d.GetAccount(stakeKey, txn)
+					if err != nil {
+						return fmt.Errorf("process certificate: %w", err)
+					}
+					if tmpAccount == nil {
+						d.logger.Warn("deregistering non-existent account", "hash", stakeKey)
+						tmpAccount = &models.Account{
+							StakingKey: stakeKey,
+						}
+						result := txn.Clauses(clause.OnConflict{
+							Columns:   []clause.Column{{Name: "staking_key"}},
+							UpdateAll: true,
+						}).Create(tmpAccount)
+						if result.Error != nil {
+							return fmt.Errorf("process certificate: %w", result.Error)
+						}
+					}
+
+					tmpAccount.Active = false
+
+					tmpItem := models.StakeDeregistration{
+						StakingKey:    stakeKey,
+						AddedSlot:     point.Slot,
+						CertificateID: uint(i), //nolint:gosec
+					}
+
+					if err := saveAccountIfNew(tmpAccount, txn); err != nil {
+						return fmt.Errorf("process certificate: %w", err)
+					}
+
+					if err := saveCertRecord(&tmpItem, txn); err != nil {
+						return fmt.Errorf("process certificate: %w", err)
+					}
+				case *lcommon.DeregistrationCertificate:
+					stakeKey := c.StakeCredential.Credential[:]
+					tmpAccount, err := d.GetAccount(stakeKey, txn)
+					if err != nil {
+						return fmt.Errorf("process certificate: %w", err)
+					}
+					if tmpAccount == nil {
+						d.logger.Warn("deregistering non-existent account", "hash", stakeKey)
+						tmpAccount = &models.Account{
+							StakingKey: stakeKey,
+						}
+						result := txn.Clauses(clause.OnConflict{
+							Columns:   []clause.Column{{Name: "staking_key"}},
+							UpdateAll: true,
+						}).Create(tmpAccount)
+						if result.Error != nil {
+							return fmt.Errorf("process certificate: %w", result.Error)
+						}
+					}
+
+					tmpAccount.Active = false
+
+					tmpItem := models.Deregistration{
+						StakingKey:    stakeKey,
+						AddedSlot:     point.Slot,
+						CertificateID: uint(i), //nolint:gosec
+						Amount:        types.Uint64(deposit),
+					}
+
+					if err := saveAccountIfNew(tmpAccount, txn); err != nil {
+						return fmt.Errorf("process certificate: %w", err)
+					}
+
+					if err := saveCertRecord(&tmpItem, txn); err != nil {
+						return fmt.Errorf("process certificate: %w", err)
+					}
+				case *lcommon.StakeDelegationCertificate:
+					stakeKey := c.StakeCredential.Credential[:]
+					tmpAccount, err := d.getOrCreateAccount(stakeKey, txn)
+					if err != nil {
+						return fmt.Errorf("process certificate: %w", err)
+					}
+
+					tmpAccount.Pool = c.PoolKeyHash[:]
+
+					tmpItem := models.StakeDelegation{
+						StakingKey:    stakeKey,
+						PoolKeyHash:   c.PoolKeyHash[:],
+						AddedSlot:     point.Slot,
+						CertificateID: uint(i), //nolint:gosec
+					}
+
+					if err := saveAccountIfNew(tmpAccount, txn); err != nil {
+						return fmt.Errorf("process certificate: %w", err)
+					}
+
+					if err := saveCertRecord(&tmpItem, txn); err != nil {
+						return fmt.Errorf("process certificate: %w", err)
+					}
+				case *lcommon.StakeRegistrationDelegationCertificate:
+					stakeKey := c.StakeCredential.Credential[:]
+					tmpAccount, err := d.getOrCreateAccount(stakeKey, txn)
+					if err != nil {
+						return fmt.Errorf("process certificate: %w", err)
+					}
+
+					tmpAccount.Pool = c.PoolKeyHash[:]
+
+					tmpReg := models.StakeRegistrationDelegation{
+						StakingKey:    stakeKey,
+						PoolKeyHash:   c.PoolKeyHash[:],
+						AddedSlot:     point.Slot,
+						DepositAmount: types.Uint64(deposit),
+						CertificateID: uint(i), //nolint:gosec
+					}
+
+					if err := saveAccountIfNew(tmpAccount, txn); err != nil {
+						return fmt.Errorf("process certificate: %w", err)
+					}
+
+					if err := saveCertRecord(&tmpReg, txn); err != nil {
+						return fmt.Errorf("process certificate: %w", err)
+					}
+				case *lcommon.StakeVoteDelegationCertificate:
+					stakeKey := c.StakeCredential.Credential[:]
+					tmpAccount, err := d.getOrCreateAccount(stakeKey, txn)
+					if err != nil {
+						return fmt.Errorf("process certificate: %w", err)
+					}
+
+					tmpAccount.Pool = c.PoolKeyHash[:]
+					tmpAccount.Drep = c.Drep.Credential[:]
+
+					tmpItem := models.StakeVoteDelegation{
+						StakingKey:    stakeKey,
+						PoolKeyHash:   c.PoolKeyHash[:],
+						Drep:          c.Drep.Credential[:],
+						AddedSlot:     point.Slot,
+						CertificateID: uint(i), //nolint:gosec
+					}
+
+					if err := saveAccountIfNew(tmpAccount, txn); err != nil {
+						return fmt.Errorf("process certificate: %w", err)
+					}
+
+					if err := saveCertRecord(&tmpItem, txn); err != nil {
+						return fmt.Errorf("process certificate: %w", err)
+					}
+				case *lcommon.RegistrationCertificate:
+					stakeKey := c.StakeCredential.Credential[:]
+					tmpAccount, err := d.getOrCreateAccount(stakeKey, txn)
+					if err != nil {
+						return fmt.Errorf("process certificate: %w", err)
+					}
+
+					tmpReg := models.Registration{
+						StakingKey:    stakeKey,
+						AddedSlot:     point.Slot,
+						DepositAmount: types.Uint64(deposit),
+						CertificateID: uint(i), //nolint:gosec
+					}
+
+					if err := saveAccountIfNew(tmpAccount, txn); err != nil {
+						return fmt.Errorf("process certificate: %w", err)
+					}
+
+					if err := saveCertRecord(&tmpReg, txn); err != nil {
+						return fmt.Errorf("process certificate: %w", err)
+					}
+				case *lcommon.RegistrationDrepCertificate:
+					drepCredential := c.DrepCredential.Credential[:]
+
+					tmpReg := models.RegistrationDrep{
+						DrepCredential: drepCredential,
+						AddedSlot:      point.Slot,
+						DepositAmount:  types.Uint64(deposit),
+						CertificateID:  uint(i), //nolint:gosec
+					}
+					if c.Anchor != nil {
+						tmpReg.AnchorUrl = c.Anchor.Url
+						tmpReg.AnchorHash = c.Anchor.DataHash[:]
+					}
+
+					if err := saveCertRecord(&tmpReg, txn); err != nil {
+						return fmt.Errorf("process certificate: %w", err)
+					}
+				case *lcommon.DeregistrationDrepCertificate:
+					drepCredential := c.DrepCredential.Credential[:]
+
+					tmpDereg := models.DeregistrationDrep{
+						DrepCredential: drepCredential,
+						AddedSlot:      point.Slot,
+						DepositAmount:  types.Uint64(deposit),
+						CertificateID:  uint(i), //nolint:gosec
+					}
+
+					if err := saveCertRecord(&tmpDereg, txn); err != nil {
+						return fmt.Errorf("process certificate: %w", err)
+					}
+				case *lcommon.UpdateDrepCertificate:
+					drepCredential := c.DrepCredential.Credential[:]
+
+					tmpUpdate := models.UpdateDrep{
+						Credential:    drepCredential,
+						AddedSlot:     point.Slot,
+						CertificateID: uint(i), //nolint:gosec
+					}
+					if c.Anchor != nil {
+						tmpUpdate.AnchorUrl = c.Anchor.Url
+						tmpUpdate.AnchorHash = c.Anchor.DataHash[:]
+					}
+
+					if err := saveCertRecord(&tmpUpdate, txn); err != nil {
+						return fmt.Errorf("process certificate: %w", err)
+					}
+				case *lcommon.StakeVoteRegistrationDelegationCertificate:
+					stakeKey := c.StakeCredential.Credential[:]
+					tmpAccount, err := d.getOrCreateAccount(stakeKey, txn)
+					if err != nil {
+						return fmt.Errorf("process certificate: %w", err)
+					}
+
+					tmpAccount.Pool = c.PoolKeyHash[:]
+					tmpAccount.Drep = c.Drep.Credential[:]
+
+					tmpReg := models.StakeVoteRegistrationDelegation{
+						StakingKey:    stakeKey,
+						PoolKeyHash:   c.PoolKeyHash[:],
+						Drep:          c.Drep.Credential[:],
+						AddedSlot:     point.Slot,
+						DepositAmount: types.Uint64(deposit),
+						CertificateID: uint(i), //nolint:gosec
+					}
+
+					if err := saveAccountIfNew(tmpAccount, txn); err != nil {
+						return fmt.Errorf("process certificate: %w", err)
+					}
+
+					if err := saveCertRecord(&tmpReg, txn); err != nil {
+						return fmt.Errorf("process certificate: %w", err)
+					}
+				case *lcommon.VoteRegistrationDelegationCertificate:
+					stakeKey := c.StakeCredential.Credential[:]
+					tmpAccount, err := d.getOrCreateAccount(stakeKey, txn)
+					if err != nil {
+						return fmt.Errorf("process certificate: %w", err)
+					}
+
+					tmpAccount.Drep = c.Drep.Credential[:]
+
+					tmpReg := models.VoteRegistrationDelegation{
+						StakingKey:    stakeKey,
+						Drep:          c.Drep.Credential[:],
+						AddedSlot:     point.Slot,
+						DepositAmount: types.Uint64(deposit),
+						CertificateID: uint(i), //nolint:gosec
+					}
+
+					if err := saveAccountIfNew(tmpAccount, txn); err != nil {
+						return fmt.Errorf("process certificate: %w", err)
+					}
+
+					if err := saveCertRecord(&tmpReg, txn); err != nil {
+						return fmt.Errorf("process certificate: %w", err)
+					}
+				case *lcommon.VoteDelegationCertificate:
+					stakeKey := c.StakeCredential.Credential[:]
+					tmpAccount, err := d.getOrCreateAccount(stakeKey, txn)
+					if err != nil {
+						return fmt.Errorf("process certificate: %w", err)
+					}
+
+					tmpAccount.Drep = c.Drep.Credential[:]
+
+					tmpItem := models.VoteDelegation{
+						StakingKey:    stakeKey,
+						Drep:          c.Drep.Credential[:],
+						AddedSlot:     point.Slot,
+						CertificateID: uint(i), //nolint:gosec
+					}
+
+					if err := saveAccountIfNew(tmpAccount, txn); err != nil {
+						return fmt.Errorf("process certificate: %w", err)
+					}
+
+					if err := saveCertRecord(&tmpItem, txn); err != nil {
+						return fmt.Errorf("process certificate: %w", err)
+					}
+				case *lcommon.AuthCommitteeHotCertificate:
+					coldCredential := c.ColdCredential.Credential[:]
+					hotCredential := c.HotCredential.Credential[:]
+
+					tmpAuth := models.AuthCommitteeHot{
+						ColdCredential: coldCredential,
+						HostCredential: hotCredential,
+						AddedSlot:      point.Slot,
+					}
+
+					if err := saveCertRecord(&tmpAuth, txn); err != nil {
+						return fmt.Errorf("process certificate: %w", err)
+					}
+				case *lcommon.ResignCommitteeColdCertificate:
+					coldCredential := c.ColdCredential.Credential[:]
+
+					tmpResign := models.ResignCommitteeCold{
+						ColdCredential: coldCredential,
+						AddedSlot:      point.Slot,
+					}
+					if c.Anchor != nil {
+						tmpResign.AnchorUrl = c.Anchor.Url
+						tmpResign.AnchorHash = c.Anchor.DataHash[:]
+					}
+
+					if err := saveCertRecord(&tmpResign, txn); err != nil {
+						return fmt.Errorf("process certificate: %w", err)
+					}
+				default:
+					return fmt.Errorf("unsupported certificate type %T", cert)
+				}
+			}
+		}
+
+		if err := d.storeTransactionDatums(tx, point.Slot, txn); err != nil {
+			return fmt.Errorf("store datums failed: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// Traverse each utxo and check for inline datum & calls storeDatum
+func (d *MetadataStoreSqlite) storeTransactionDatums(
+	tx lcommon.Transaction,
+	slot uint64,
+	txn *gorm.DB,
+) error {
+	for _, utxo := range tx.Produced() {
+		if err := d.storeDatum(utxo.Output.Datum(), slot, txn); err != nil {
+			return err
+		}
+	}
+	witnesses := tx.Witnesses()
+	if witnesses == nil {
+		return nil
+	}
+	// Looks over the transaction witness set & store each datum.
+	for _, datum := range witnesses.PlutusData() {
+		datumCopy := datum
+		if err := d.storeDatum(&datumCopy, slot, txn); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// Marshal the raw CBOR and hashes with Blake2b256Hash & calls SetDatum of metadata store.
+func (d *MetadataStoreSqlite) storeDatum(
+	datum *lcommon.Datum,
+	slot uint64,
+	txn *gorm.DB,
+) error {
+	if datum == nil {
+		return nil
+	}
+	rawDatum := datum.Cbor()
+	if len(rawDatum) == 0 {
+		var err error
+		rawDatum, err = datum.MarshalCBOR()
+		if err != nil {
+			return fmt.Errorf("marshal datum: %w", err)
+		}
+	}
+	if len(rawDatum) == 0 {
+		return nil
+	}
+	datumHash := lcommon.Blake2b256Hash(rawDatum)
+	if err := d.SetDatum(datumHash, rawDatum, slot, txn); err != nil {
+		return err
 	}
 	return nil
 }

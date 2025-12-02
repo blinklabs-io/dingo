@@ -1,3 +1,17 @@
+// Copyright 2025 Blink Labs Software
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package config
 
 import (
@@ -9,7 +23,6 @@ import (
 
 func resetGlobalConfig() {
 	globalConfig = &Config{
-		BadgerCacheSize: 1073741824,
 		MempoolCapacity: 1048576,
 		BindAddr:        "0.0.0.0",
 		CardanoConfig:   "", // Will be set dynamically based on network
@@ -60,7 +73,6 @@ tlsKeyFilePath: "key1.pem"
 	defer os.Remove(tmpFile)
 
 	expected := &Config{
-		BadgerCacheSize: 8388608,
 		MempoolCapacity: 2097152,
 		BindAddr:        "127.0.0.1",
 		CardanoConfig:   "./cardano/preview/config.json",
@@ -103,7 +115,6 @@ func TestLoad_WithoutConfigFile_UsesDefaults(t *testing.T) {
 
 	// Expected is the updated default values from globalConfig
 	expected := &Config{
-		BadgerCacheSize: 1073741824,
 		MempoolCapacity: 1048576,
 		BindAddr:        "0.0.0.0",
 		CardanoConfig:   "preview/config.json", // Set dynamically based on network
@@ -257,6 +268,48 @@ func TestLoadConfig_UnsupportedNetworkWithUserConfig(t *testing.T) {
 		t.Errorf(
 			"expected CardanoConfig to be user-provided path, got %q",
 			cfg.CardanoConfig,
+		)
+	}
+}
+
+func TestLoad_DatabaseSection(t *testing.T) {
+	resetGlobalConfig()
+	yamlContent := `
+database:
+  blob:
+    plugin: "badger"
+    badger:
+      data-dir: "/tmp/badger"
+      block-cache-size: 1000000
+    gcs:
+      bucket: "test-bucket"
+  metadata:
+    plugin: "sqlite"
+    sqlite:
+      db-path: "/tmp/test.db"
+`
+	tmpDir := t.TempDir()
+	tmpFile := filepath.Join(tmpDir, "test-dingo.yaml")
+
+	err := os.WriteFile(tmpFile, []byte(yamlContent), 0644)
+	if err != nil {
+		t.Fatalf("failed to write config file: %v", err)
+	}
+	defer os.Remove(tmpFile)
+
+	cfg, err := LoadConfig(tmpFile)
+	if err != nil {
+		t.Fatalf("failed to load config: %v", err)
+	}
+
+	if cfg.BlobPlugin != "badger" {
+		t.Errorf("expected BlobPlugin to be 'badger', got %q", cfg.BlobPlugin)
+	}
+
+	if cfg.MetadataPlugin != "sqlite" {
+		t.Errorf(
+			"expected MetadataPlugin to be 'sqlite', got %q",
+			cfg.MetadataPlugin,
 		)
 	}
 }

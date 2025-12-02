@@ -22,6 +22,7 @@ import (
 	_ "net/http/pprof" // #nosec G108
 	"os"
 	"os/signal"
+	"runtime"
 	"syscall"
 	"time"
 
@@ -39,8 +40,10 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 		"component", "node",
 	)
 	// TODO: make this safer, check PID, create parent, etc. (#276)
-	if _, err := os.Stat(cfg.SocketPath); err == nil {
-		os.Remove(cfg.SocketPath)
+	if runtime.GOOS != "windows" {
+		if _, err := os.Stat(cfg.SocketPath); err == nil {
+			os.Remove(cfg.SocketPath)
+		}
 	}
 	var nodeCfg *cardano.CardanoNodeConfig
 	if cfg.CardanoConfig != "" {
@@ -108,7 +111,6 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 			dingo.WithIntersectTip(cfg.IntersectTip),
 			dingo.WithLogger(logger),
 			dingo.WithDatabasePath(cfg.DatabasePath),
-			dingo.WithBadgerCacheSize(cfg.BadgerCacheSize),
 			dingo.WithMempoolCapacity(cfg.MempoolCapacity),
 			dingo.WithNetwork(cfg.Network),
 			dingo.WithCardanoNodeConfig(nodeCfg),

@@ -1,4 +1,4 @@
-// Copyright 2024 Blink Labs Software
+// Copyright 2025 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -18,7 +18,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"slices"
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/chainsync"
@@ -27,20 +26,12 @@ import (
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/mempool"
+	ouroborosPkg "github.com/blinklabs-io/dingo/ouroboros"
 	"github.com/blinklabs-io/dingo/peergov"
 	"github.com/blinklabs-io/dingo/utxorpc"
-	ouroboros "github.com/blinklabs-io/gouroboros"
-	oblockfetch "github.com/blinklabs-io/gouroboros/protocol/blockfetch"
-	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
-	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
-	olocaltxmonitor "github.com/blinklabs-io/gouroboros/protocol/localtxmonitor"
-	olocaltxsubmission "github.com/blinklabs-io/gouroboros/protocol/localtxsubmission"
-	opeersharing "github.com/blinklabs-io/gouroboros/protocol/peersharing"
-	otxsubmission "github.com/blinklabs-io/gouroboros/protocol/txsubmission"
 )
 
 type Node struct {
-	config         Config
 	connManager    *connmanager.ConnectionManager
 	peerGov        *peergov.PeerGovernor
 	chainsyncState *chainsync.State
@@ -50,7 +41,9 @@ type Node struct {
 	db             *database.Database
 	ledgerState    *ledger.LedgerState
 	utxorpc        *utxorpc.Utxorpc
+	ouroboros      *ouroborosPkg.Ouroboros
 	shutdownFuncs  []func(context.Context) error
+	config         Config
 }
 
 func New(cfg Config) (*Node, error) {
@@ -78,10 +71,9 @@ func (n *Node) Run() error {
 	// Load database
 	dbNeedsRecovery := false
 	dbConfig := &database.Config{
-		BlobCacheSize: n.config.badgerCacheSize,
-		DataDir:       n.config.dataDir,
-		Logger:        n.config.logger,
-		PromRegistry:  n.config.promRegistry,
+		DataDir:      n.config.dataDir,
+		Logger:       n.config.logger,
+		PromRegistry: n.config.promRegistry,
 	}
 	db, err := database.New(dbConfig)
 	if db == nil {
@@ -114,6 +106,17 @@ func (n *Node) Run() error {
 		return fmt.Errorf("failed to load chain manager: %w", err)
 	}
 	n.chainManager = cm
+	// Initialize Ouroboros
+	n.ouroboros = ouroborosPkg.NewOuroboros(ouroborosPkg.OuroborosConfig{
+		Logger:          n.config.logger,
+		EventBus:        n.eventBus,
+		ConnManager:     n.connManager,
+		NetworkMagic:    n.config.networkMagic,
+		PeerSharing:     n.config.peerSharing,
+		IntersectTip:    n.config.intersectTip,
+		IntersectPoints: n.config.intersectPoints,
+		PromRegistry:    n.config.promRegistry,
+	})
 	// Load state
 	state, err := ledger.NewLedgerState(
 		ledger.LedgerStateConfig{
@@ -125,7 +128,7 @@ func (n *Node) Run() error {
 			PromRegistry:               n.config.promRegistry,
 			ForgeBlocks:                n.config.devMode,
 			ValidateHistorical:         n.config.validateHistorical,
-			BlockfetchRequestRangeFunc: n.blockfetchClientRequestRange,
+			BlockfetchRequestRangeFunc: n.ouroboros.BlockfetchClientRequestRange,
 		},
 	)
 	if err != nil {
@@ -139,6 +142,7 @@ func (n *Node) Run() error {
 		},
 	)
 	n.ledgerState = state
+	n.ouroboros.LedgerState = n.ledgerState
 	// Run DB recovery if needed
 	if dbNeedsRecovery {
 		if err := n.ledgerState.RecoverCommitTimestampConflict(); err != nil {
@@ -160,13 +164,33 @@ func (n *Node) Run() error {
 	)
 	// Set mempool in ledger state for block forging
 	n.ledgerState.SetMempool(n.mempool)
+	n.ouroboros.Mempool = n.mempool
 	// Initialize chainsync state
 	n.chainsyncState = chainsync.NewState(
 		n.eventBus,
 		n.ledgerState,
 	)
+	n.ouroboros.ChainsyncState = n.chainsyncState
 	// Configure connection manager
-	if err := n.configureConnManager(); err != nil {
+	tmpListeners := n.ouroboros.ConfigureListeners(n.config.listeners)
+	n.connManager = connmanager.NewConnectionManager(
+		connmanager.ConnectionManagerConfig{
+			Logger:             n.config.logger,
+			EventBus:           n.eventBus,
+			Listeners:          tmpListeners,
+			OutboundSourcePort: n.config.outboundSourcePort,
+			OutboundConnOpts:   n.ouroboros.OutboundConnOpts(),
+			PromRegistry:       n.config.promRegistry,
+		},
+	)
+	n.ouroboros.ConnManager = n.connManager
+	// Subscribe to connection closed events
+	n.eventBus.SubscribeFunc(
+		connmanager.ConnectionClosedEventType,
+		n.ouroboros.HandleConnClosedEvent,
+	)
+	// Start listeners
+	if err := n.connManager.Start(); err != nil {
 		return err
 	}
 	// Configure peer governor
@@ -176,11 +200,14 @@ func (n *Node) Run() error {
 			EventBus:        n.eventBus,
 			ConnManager:     n.connManager,
 			DisableOutbound: n.config.devMode,
+			PromRegistry:    n.config.promRegistry,
+			PeerRequestFunc: n.ouroboros.RequestPeersFromPeer,
 		},
 	)
+	n.ouroboros.PeerGov = n.peerGov
 	n.eventBus.SubscribeFunc(
 		peergov.OutboundConnectionEventType,
-		n.handleOutboundConnEvent,
+		n.ouroboros.HandleOutboundConnEvent,
 	)
 	if n.config.topologyConfig != nil {
 		n.peerGov.LoadTopologyConfig(n.config.topologyConfig)
@@ -221,161 +248,4 @@ func (n *Node) shutdown() error {
 	}
 	n.shutdownFuncs = nil
 	return err
-}
-
-func (n *Node) configureConnManager() error {
-	// Configure listeners
-	tmpListeners := make([]ListenerConfig, len(n.config.listeners))
-	for idx, l := range n.config.listeners {
-		if l.UseNtC {
-			// Node-to-client
-			l.ConnectionOpts = append(
-				l.ConnectionOpts,
-				ouroboros.WithNetworkMagic(n.config.networkMagic),
-				ouroboros.WithChainSyncConfig(
-					ochainsync.NewConfig(
-						n.chainsyncServerConnOpts()...,
-					),
-				),
-				ouroboros.WithLocalStateQueryConfig(
-					olocalstatequery.NewConfig(
-						n.localstatequeryServerConnOpts()...,
-					),
-				),
-				ouroboros.WithLocalTxMonitorConfig(
-					olocaltxmonitor.NewConfig(
-						n.localtxmonitorServerConnOpts()...,
-					),
-				),
-				ouroboros.WithLocalTxSubmissionConfig(
-					olocaltxsubmission.NewConfig(
-						n.localtxsubmissionServerConnOpts()...,
-					),
-				),
-			)
-		} else {
-			// Node-to-node config
-			l.ConnectionOpts = append(
-				l.ConnectionOpts,
-				ouroboros.WithPeerSharing(n.config.peerSharing),
-				ouroboros.WithNetworkMagic(n.config.networkMagic),
-				ouroboros.WithPeerSharingConfig(
-					opeersharing.NewConfig(
-						n.peersharingServerConnOpts()...,
-					),
-				),
-				ouroboros.WithTxSubmissionConfig(
-					otxsubmission.NewConfig(
-						n.txsubmissionServerConnOpts()...,
-					),
-				),
-				ouroboros.WithChainSyncConfig(
-					ochainsync.NewConfig(
-						n.chainsyncServerConnOpts()...,
-					),
-				),
-				ouroboros.WithBlockFetchConfig(
-					oblockfetch.NewConfig(
-						n.blockfetchServerConnOpts()...,
-					),
-				),
-			)
-		}
-		tmpListeners[idx] = l
-	}
-	// Create connection manager
-	n.connManager = connmanager.NewConnectionManager(
-		connmanager.ConnectionManagerConfig{
-			Logger:             n.config.logger,
-			EventBus:           n.eventBus,
-			Listeners:          tmpListeners,
-			OutboundSourcePort: n.config.outboundSourcePort,
-			OutboundConnOpts: []ouroboros.ConnectionOptionFunc{
-				ouroboros.WithNetworkMagic(n.config.networkMagic),
-				ouroboros.WithNodeToNode(true),
-				ouroboros.WithKeepAlive(true),
-				ouroboros.WithFullDuplex(true),
-				ouroboros.WithPeerSharing(n.config.peerSharing),
-				ouroboros.WithPeerSharingConfig(
-					opeersharing.NewConfig(
-						slices.Concat(
-							n.peersharingClientConnOpts(),
-							n.peersharingServerConnOpts(),
-						)...,
-					),
-				),
-				ouroboros.WithTxSubmissionConfig(
-					otxsubmission.NewConfig(
-						slices.Concat(
-							n.txsubmissionClientConnOpts(),
-							n.txsubmissionServerConnOpts(),
-						)...,
-					),
-				),
-				ouroboros.WithChainSyncConfig(
-					ochainsync.NewConfig(
-						slices.Concat(
-							n.chainsyncClientConnOpts(),
-							n.chainsyncServerConnOpts(),
-						)...,
-					),
-				),
-				ouroboros.WithBlockFetchConfig(
-					oblockfetch.NewConfig(
-						slices.Concat(
-							n.blockfetchClientConnOpts(),
-							n.blockfetchServerConnOpts(),
-						)...,
-					),
-				),
-			},
-		},
-	)
-	// Subscribe to connection closed events
-	n.eventBus.SubscribeFunc(
-		connmanager.ConnectionClosedEventType,
-		n.handleConnClosedEvent,
-	)
-	// Start listeners
-	if err := n.connManager.Start(); err != nil {
-		return err
-	}
-	return nil
-}
-
-func (n *Node) handleConnClosedEvent(evt event.Event) {
-	e := evt.Data.(connmanager.ConnectionClosedEvent)
-	connId := e.ConnectionId
-	// Remove any chainsync client state
-	n.chainsyncState.RemoveClient(connId)
-	// Remove mempool consumer
-	n.mempool.RemoveConsumer(connId)
-	// Release chainsync client
-	n.chainsyncState.RemoveClientConnId(connId)
-}
-
-func (n *Node) handleOutboundConnEvent(evt event.Event) {
-	e := evt.Data.(peergov.OutboundConnectionEvent)
-	connId := e.ConnectionId
-	// TODO: replace this with handling for multiple chainsync clients (#385)
-	// Start chainsync client if we don't have another
-	n.chainsyncState.Lock()
-	defer n.chainsyncState.Unlock()
-	chainsyncClientConnId := n.chainsyncState.GetClientConnId()
-	if chainsyncClientConnId == nil {
-		if err := n.chainsyncClientStart(connId); err != nil {
-			n.config.logger.Error(
-				"failed to start chainsync client",
-				"error",
-				err,
-			)
-			return
-		}
-		n.chainsyncState.SetClientConnId(connId)
-	}
-	// Start txsubmission client
-	if err := n.txsubmissionClientStart(connId); err != nil {
-		n.config.logger.Error("failed to start chainsync client", "error", err)
-		return
-	}
 }

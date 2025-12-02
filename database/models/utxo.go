@@ -15,6 +15,7 @@
 package models
 
 import (
+	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
@@ -26,15 +27,15 @@ type Utxo struct {
 	PaymentKey       []byte `gorm:"index"`
 	StakingKey       []byte `gorm:"index"`
 	Assets           []Asset
-	Cbor             []byte `gorm:"-"` // This is here for convenience but not represented in the metadata DB
-	SpentAtTxId      []byte `gorm:"index"`
-	ReferencedByTxId []byte `gorm:"index"`
-	CollateralByTxId []byte `gorm:"index"`
-	ID               uint   `gorm:"primarykey"`
-	AddedSlot        uint64 `gorm:"index"`
-	DeletedSlot      uint64 `gorm:"index"`
-	Amount           uint64 `gorm:"index"`
-	OutputIdx        uint32 `gorm:"uniqueIndex:tx_id_output_idx"`
+	Cbor             []byte       `gorm:"-"` // This is here for convenience but not represented in the metadata DB
+	SpentAtTxId      []byte       `gorm:"index"`
+	ReferencedByTxId []byte       `gorm:"index"`
+	CollateralByTxId []byte       `gorm:"index"`
+	ID               uint         `gorm:"primarykey"`
+	AddedSlot        uint64       `gorm:"index"`
+	DeletedSlot      uint64       `gorm:"index"`
+	Amount           types.Uint64 `gorm:"index"`
+	OutputIdx        uint32       `gorm:"uniqueIndex:tx_id_output_idx"`
 }
 
 func (u *Utxo) TableName() string {
@@ -54,7 +55,7 @@ func UtxoLedgerToModel(
 		TxId:      utxo.Id.Id().Bytes(),
 		Cbor:      utxo.Output.Cbor(),
 		AddedSlot: slot,
-		Amount:    utxo.Output.Amount(),
+		Amount:    types.Uint64(utxo.Output.Amount()),
 		OutputIdx: utxo.Id.Index(),
 	}
 	pkh := outAddr.PaymentKeyHash()

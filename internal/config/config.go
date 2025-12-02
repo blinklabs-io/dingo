@@ -16,10 +16,14 @@ package config
 
 import (
 	"context"
+	"errors"
+	"flag"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 
+	"github.com/blinklabs-io/dingo/database/plugin"
 	"github.com/blinklabs-io/dingo/topology"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/kelseyhightower/envconfig"
@@ -42,29 +46,93 @@ func FromContext(ctx context.Context) *Config {
 	return cfg
 }
 
+const (
+	DefaultBlobPlugin     = "badger"
+	DefaultMetadataPlugin = "sqlite"
+)
+
+// ErrPluginListRequested is returned when the user requests to list available plugins
+// This is not an error condition but a successful operation that displays plugin information
+var ErrPluginListRequested = errors.New("plugin list requested")
+
+type tempConfig struct {
+	Config   *Config                   `yaml:"config,omitempty"`
+	Database *databaseConfig           `yaml:"database,omitempty"`
+	Blob     map[string]map[string]any `yaml:"blob,omitempty"`
+	Metadata map[string]map[string]any `yaml:"metadata,omitempty"`
+}
+
+type databaseConfig struct {
+	Blob     map[string]any `yaml:"blob,omitempty"`
+	Metadata map[string]any `yaml:"metadata,omitempty"`
+}
+
 type Config struct {
 	Network            string `yaml:"network"`
 	TlsKeyFilePath     string `yaml:"tlsKeyFilePath"     envconfig:"TLS_KEY_FILE_PATH"`
 	Topology           string `yaml:"topology"`
 	CardanoConfig      string `yaml:"cardanoConfig"      envconfig:"config"`
-	DatabasePath       string `yaml:"databasePath"                                      split_words:"true"`
-	SocketPath         string `yaml:"socketPath"                                        split_words:"true"`
+	DatabasePath       string `yaml:"databasePath"                                                  split_words:"true"`
+	SocketPath         string `yaml:"socketPath"                                                    split_words:"true"`
 	TlsCertFilePath    string `yaml:"tlsCertFilePath"    envconfig:"TLS_CERT_FILE_PATH"`
-	BindAddr           string `yaml:"bindAddr"                                          split_words:"true"`
-	PrivateBindAddr    string `yaml:"privateBindAddr"                                   split_words:"true"`
-	BadgerCacheSize    int64  `yaml:"badgerCacheSize"                                   split_words:"true"`
-	MempoolCapacity    int64  `yaml:"mempoolCapacity"                                   split_words:"true"`
-	MetricsPort        uint   `yaml:"metricsPort"                                       split_words:"true"`
-	PrivatePort        uint   `yaml:"privatePort"                                       split_words:"true"`
+	BindAddr           string `yaml:"bindAddr"                                                      split_words:"true"`
+	PrivateBindAddr    string `yaml:"privateBindAddr"                                               split_words:"true"`
+	BlobPlugin         string `yaml:"blobPlugin"         envconfig:"DINGO_DATABASE_BLOB_PLUGIN"`
+	MetadataPlugin     string `yaml:"metadataPlugin"     envconfig:"DINGO_DATABASE_METADATA_PLUGIN"`
+	MempoolCapacity    int64  `yaml:"mempoolCapacity"                                               split_words:"true"`
+	MetricsPort        uint   `yaml:"metricsPort"                                                   split_words:"true"`
+	PrivatePort        uint   `yaml:"privatePort"                                                   split_words:"true"`
 	RelayPort          uint   `yaml:"relayPort"          envconfig:"port"`
-	UtxorpcPort        uint   `yaml:"utxorpcPort"                                       split_words:"true"`
-	IntersectTip       bool   `yaml:"intersectTip"                                      split_words:"true"`
-	ValidateHistorical bool   `yaml:"validateHistorical"                                split_words:"true"`
-	DevMode            bool   `yaml:"devMode"                                           split_words:"true"`
+	UtxorpcPort        uint   `yaml:"utxorpcPort"                                                   split_words:"true"`
+	IntersectTip       bool   `yaml:"intersectTip"                                                  split_words:"true"`
+	ValidateHistorical bool   `yaml:"validateHistorical"                                            split_words:"true"`
+	DevMode            bool   `yaml:"devMode"                                                       split_words:"true"`
+}
+
+func (c *Config) ParseCmdlineArgs(programName string, args []string) error {
+	fs := flag.NewFlagSet(programName, flag.ExitOnError)
+	fs.StringVar(
+		&c.BlobPlugin,
+		"blob",
+		DefaultBlobPlugin,
+		"blob store plugin to use, 'list' to show available",
+	)
+	fs.StringVar(
+		&c.MetadataPlugin,
+		"metadata",
+		DefaultMetadataPlugin,
+		"metadata store plugin to use, 'list' to show available",
+	)
+	// NOTE: Plugin flags are handled by Cobra in main.go
+	// if err := plugin.PopulateCmdlineOptions(fs); err != nil {
+	// 	return err
+	// }
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	// Handle plugin listing
+	if c.BlobPlugin == "list" {
+		fmt.Println("Available blob plugins:")
+		blobPlugins := plugin.GetPlugins(plugin.PluginTypeBlob)
+		for _, p := range blobPlugins {
+			fmt.Printf("  %s: %s\n", p.Name, p.Description)
+		}
+		return ErrPluginListRequested
+	}
+	if c.MetadataPlugin == "list" {
+		fmt.Println("Available metadata plugins:")
+		metadataPlugins := plugin.GetPlugins(plugin.PluginTypeMetadata)
+		for _, p := range metadataPlugins {
+			fmt.Printf("  %s: %s\n", p.Name, p.Description)
+		}
+		return ErrPluginListRequested
+	}
+
+	return nil
 }
 
 var globalConfig = &Config{
-	BadgerCacheSize:    1073741824,
 	MempoolCapacity:    1048576,
 	BindAddr:           "0.0.0.0",
 	CardanoConfig:      "", // Will be set dynamically based on network
@@ -81,6 +149,8 @@ var globalConfig = &Config{
 	Topology:           "",
 	TlsCertFilePath:    "",
 	TlsKeyFilePath:     "",
+	BlobPlugin:         DefaultBlobPlugin,
+	MetadataPlugin:     DefaultMetadataPlugin,
 	DevMode:            false,
 }
 
@@ -109,15 +179,137 @@ func LoadConfig(configFile string) (*Config, error) {
 		if err != nil {
 			return nil, fmt.Errorf("error reading config file: %w", err)
 		}
-		err = yaml.Unmarshal(buf, globalConfig)
+
+		// First unmarshal into temp config to handle plugin sections
+		var tempCfg tempConfig
+		err = yaml.Unmarshal(buf, &tempCfg)
 		if err != nil {
 			return nil, fmt.Errorf("error parsing config file: %w", err)
+		}
+
+		// If config section exists, use it for main config
+		if tempCfg.Config != nil {
+			// Overlay config values onto existing defaults
+			configBytes, err := yaml.Marshal(tempCfg.Config)
+			if err != nil {
+				return nil, fmt.Errorf("error re-marshalling config: %w", err)
+			}
+			err = yaml.Unmarshal(configBytes, globalConfig)
+			if err != nil {
+				return nil, fmt.Errorf("error parsing config section: %w", err)
+			}
+		} else {
+			// Otherwise unmarshal the whole file as main config (backward compatibility)
+			err = yaml.Unmarshal(buf, globalConfig)
+			if err != nil {
+				return nil, fmt.Errorf("error parsing config file: %w", err)
+			}
+		}
+
+		// Process plugin configurations
+		pluginConfig := make(map[string]map[string]map[string]any)
+		if tempCfg.Blob != nil {
+			pluginConfig["blob"] = tempCfg.Blob
+		}
+		if tempCfg.Metadata != nil {
+			pluginConfig["metadata"] = tempCfg.Metadata
+		}
+		// Handle database section if present
+		if tempCfg.Database != nil {
+			if tempCfg.Database.Blob != nil {
+				// Extract plugin name if specified
+				if pluginVal, exists := tempCfg.Database.Blob["plugin"]; exists {
+					if pluginName, ok := pluginVal.(string); ok {
+						globalConfig.BlobPlugin = pluginName
+						// Remove plugin from config map
+						delete(tempCfg.Database.Blob, "plugin")
+					}
+				}
+				// Build plugin config map
+				blobConfig := make(map[string]map[string]any)
+				for k, v := range tempCfg.Database.Blob {
+					if val, ok := v.(map[string]any); ok {
+						blobConfig[k] = val
+					} else if val, ok := v.(map[any]any); ok {
+						// Convert map[any]any to map[string]any
+						stringAnyMap := make(map[string]any)
+						for vk, vv := range val {
+							if keyStr, ok := vk.(string); ok {
+								stringAnyMap[keyStr] = vv
+							}
+						}
+						blobConfig[k] = stringAnyMap
+					} else {
+						// Log skipped non-map config entries
+						fmt.Fprintf(os.Stderr, "warning: skipping blob config entry %q: expected map, got %T\n", k, v)
+					}
+				}
+				// Merge with existing blob config instead of overwriting
+				if pluginConfig["blob"] == nil {
+					pluginConfig["blob"] = blobConfig
+				} else {
+					maps.Copy(pluginConfig["blob"], blobConfig)
+				}
+			}
+			if tempCfg.Database.Metadata != nil {
+				// Extract plugin name if specified
+				if pluginVal, exists := tempCfg.Database.Metadata["plugin"]; exists {
+					if pluginName, ok := pluginVal.(string); ok {
+						globalConfig.MetadataPlugin = pluginName
+						// Remove plugin from config map
+						delete(tempCfg.Database.Metadata, "plugin")
+					}
+				}
+				// Build plugin config map
+				metadataConfig := make(map[string]map[string]any)
+				for k, v := range tempCfg.Database.Metadata {
+					if val, ok := v.(map[string]any); ok {
+						metadataConfig[k] = val
+					} else if val, ok := v.(map[any]any); ok {
+						// Convert map[any]any to map[string]any
+						stringAnyMap := make(map[string]any)
+						for vk, vv := range val {
+							if keyStr, ok := vk.(string); ok {
+								stringAnyMap[keyStr] = vv
+							}
+						}
+						metadataConfig[k] = stringAnyMap
+					} else {
+						// Log skipped non-map config entries
+						fmt.Fprintf(os.Stderr, "warning: skipping metadata config entry %q: expected map, got %T\n", k, v)
+					}
+				}
+				// Merge with existing metadata config instead of overwriting
+				if pluginConfig["metadata"] == nil {
+					pluginConfig["metadata"] = metadataConfig
+				} else {
+					maps.Copy(pluginConfig["metadata"], metadataConfig)
+				}
+			}
+		}
+		if len(pluginConfig) > 0 {
+			err = plugin.ProcessConfig(pluginConfig)
+			if err != nil {
+				return nil, fmt.Errorf(
+					"error processing plugin config: %w",
+					err,
+				)
+			}
 		}
 	}
 	// Process environment variables
 	err := envconfig.Process("cardano", globalConfig)
 	if err != nil {
 		return nil, fmt.Errorf("error processing environment: %+w", err)
+	}
+
+	// Process plugin environment variables
+	err = plugin.ProcessEnvVars()
+	if err != nil {
+		return nil, fmt.Errorf(
+			"error processing plugin environment variables: %w",
+			err,
+		)
 	}
 
 	// Set default CardanoConfig path based on network if not provided by user
