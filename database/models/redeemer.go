@@ -23,7 +23,6 @@ type Redeemer struct {
 	Data          []byte // Plutus data
 	ExUnitsMemory uint64
 	ExUnitsCPU    uint64
-	Transaction   *Transaction
 }
 
 func (Redeemer) TableName() string {

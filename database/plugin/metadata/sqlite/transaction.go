@@ -47,6 +47,45 @@ func (d *MetadataStoreSqlite) GetTransactionByHash(
 	return ret, nil
 }
 
+// scriptWithHashAndBytes is an interface for scripts that have Hash() and RawScriptBytes()
+type scriptWithHashAndBytes interface {
+	Hash() lcommon.ScriptHash
+	RawScriptBytes() []byte
+}
+
+// processScripts is a generic helper to process any script type
+func processScripts[T scriptWithHashAndBytes](
+	txn *gorm.DB,
+	transactionID uint,
+	scriptType uint8,
+	scripts []T,
+	point ocommon.Point,
+) error {
+	for _, script := range scripts {
+		witnessScript := models.WitnessScripts{
+			TransactionID: transactionID,
+			Type:          scriptType,
+			ScriptHash:    script.Hash().Bytes(),
+		}
+		if result := txn.Create(&witnessScript); result.Error != nil {
+			return fmt.Errorf("create witness script: %w", result.Error)
+		}
+		scriptContent := models.Script{
+			Hash:        script.Hash().Bytes(),
+			Type:        scriptType,
+			Content:     script.RawScriptBytes(),
+			CreatedSlot: point.Slot,
+		}
+		if result := txn.Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "hash"}},
+			DoNothing: true,
+		}).Create(&scriptContent); result.Error != nil {
+			return fmt.Errorf("create script content: %w", result.Error)
+		}
+	}
+	return nil
+}
+
 // SetTransaction adds a new transaction to the database
 func (d *MetadataStoreSqlite) SetTransaction(
 	tx lcommon.Transaction,
@@ -334,74 +373,17 @@ func (d *MetadataStoreSqlite) SetTransaction(
 			}
 		}
 
-		// Helper function to process scripts - deduplicates the 4 script type blocks
-		processScripts := func(scriptType uint8, scripts interface{}) error {
-			// Common logic for creating script records
-			createScriptRecords := func(scriptHash lcommon.ScriptHash, content []byte) error {
-				witnessScript := models.WitnessScripts{
-					TransactionID: tmpTx.ID,
-					Type:          scriptType,
-					ScriptHash:    scriptHash.Bytes(),
-				}
-				if result := txn.Create(&witnessScript); result.Error != nil {
-					return fmt.Errorf("create witness script: %w", result.Error)
-				}
-				scriptContent := models.Script{
-					Hash:        scriptHash.Bytes(),
-					Type:        scriptType,
-					Content:     content,
-					CreatedSlot: point.Slot,
-				}
-				if result := txn.Clauses(clause.OnConflict{
-					Columns:   []clause.Column{{Name: "hash"}},
-					DoNothing: true,
-				}).Create(&scriptContent); result.Error != nil {
-					return fmt.Errorf("create script content: %w", result.Error)
-				}
-				return nil
-			}
-
-			// Type switch to handle different script types
-			switch s := scripts.(type) {
-			case []lcommon.NativeScript:
-				for _, script := range s {
-					if err := createScriptRecords(script.Hash(), script.Cbor()); err != nil {
-						return err
-					}
-				}
-			case []lcommon.PlutusV1Script:
-				for _, script := range s {
-					if err := createScriptRecords(script.Hash(), script.RawScriptBytes()); err != nil {
-						return err
-					}
-				}
-			case []lcommon.PlutusV2Script:
-				for _, script := range s {
-					if err := createScriptRecords(script.Hash(), script.RawScriptBytes()); err != nil {
-						return err
-					}
-				}
-			case []lcommon.PlutusV3Script:
-				for _, script := range s {
-					if err := createScriptRecords(script.Hash(), script.RawScriptBytes()); err != nil {
-						return err
-					}
-				}
-			}
-			return nil
-		}
-
-		// Process all script types
-		if err := processScripts(uint8(lcommon.ScriptRefTypeNativeScript), ws.NativeScripts()); err != nil {
+		// Process all script types using the generic helper
+		if err := processScripts(txn, tmpTx.ID, uint8(lcommon.ScriptRefTypeNativeScript), ws.NativeScripts(), point); err != nil {
 			return err
 		}
-		if err := processScripts(uint8(lcommon.ScriptRefTypePlutusV1), ws.PlutusV1Scripts()); err != nil {
+		if err := processScripts(txn, tmpTx.ID, uint8(lcommon.ScriptRefTypePlutusV1), ws.PlutusV1Scripts(), point); err != nil {
 			return err
 		}
-		if err := processScripts(uint8(lcommon.ScriptRefTypePlutusV2), ws.PlutusV2Scripts()); err != nil {
+		if err := processScripts(txn, tmpTx.ID, uint8(lcommon.ScriptRefTypePlutusV2), ws.PlutusV2Scripts(), point); err != nil {
 			return err
 		}
-		if err := processScripts(uint8(lcommon.ScriptRefTypePlutusV3), ws.PlutusV3Scripts()); err != nil {
+		if err := processScripts(txn, tmpTx.ID, uint8(lcommon.ScriptRefTypePlutusV3), ws.PlutusV3Scripts(), point); err != nil {
 			return err
 		}
 

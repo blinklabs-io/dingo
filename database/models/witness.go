@@ -32,7 +32,6 @@ type KeyWitness struct {
 	PublicKey     []byte // For Bootstrap witness
 	ChainCode     []byte // For Bootstrap witness
 	Attributes    []byte // For Bootstrap witness
-	Transaction   *Transaction
 }
 
 func (KeyWitness) TableName() string {
