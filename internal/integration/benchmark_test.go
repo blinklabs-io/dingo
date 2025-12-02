@@ -99,12 +99,12 @@ func loadBlockData(numBlocks int) ([][]byte, error) {
 
 // getTestBackends returns a slice of test backends for benchmarking
 func getTestBackends(b *testing.B, diskDataDir string) []struct {
-	name   string
 	config *database.Config
+	name   string
 } {
 	backends := []struct {
-		name   string
 		config *database.Config
+		name   string
 	}{
 		{
 			name: "memory",
@@ -133,8 +133,8 @@ func getTestBackends(b *testing.B, diskDataDir string) []struct {
 		// Use path prefix for isolation instead of unique bucket names
 		testPrefix := strings.ReplaceAll(b.Name(), "/", "-")
 		backends = append(backends, struct {
-			name   string
 			config *database.Config
+			name   string
 		}{
 			name: "GCS",
 			config: &database.Config{
@@ -153,8 +153,8 @@ func getTestBackends(b *testing.B, diskDataDir string) []struct {
 		// Use path prefix for isolation instead of unique bucket names
 		testPrefix := strings.ReplaceAll(b.Name(), "/", "-")
 		backends = append(backends, struct {
-			name   string
 			config *database.Config
+			name   string
 		}{
 			name: "S3",
 			config: &database.Config{

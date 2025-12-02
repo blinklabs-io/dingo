@@ -31,7 +31,7 @@ var (
 func initCmdlineOptions() {
 	cmdlineOptionsMutex.Lock()
 	defer cmdlineOptionsMutex.Unlock()
-	cmdlineOptions.dataDir = ""
+	cmdlineOptions.dataDir = ".dingo"
 }
 
 // Register plugin
@@ -48,7 +48,7 @@ func init() {
 					Name:         "data-dir",
 					Type:         plugin.PluginOptionTypeString,
 					Description:  "Data directory for sqlite storage",
-					DefaultValue: "",
+					DefaultValue: ".dingo",
 					Dest:         &(cmdlineOptions.dataDir),
 				},
 			},

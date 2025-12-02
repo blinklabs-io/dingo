@@ -277,3 +277,23 @@ Test environment variables and YAML configuration:
 ```bash
 DINGO_DATABASE_BLOB_MYPLUGIN_OPTION1=value ./dingo --blob myplugin
 ```
+
+## Programmatic Option Overrides (for tests)
+
+When writing tests or programmatically constructing database instances you can override plugin options
+without importing plugin implementation packages directly by using the plugin registry helper:
+
+```go
+// Set data-dir for the blob plugin to a per-test temp directory
+plugin.SetPluginOption(plugin.PluginTypeBlob, "badger", "data-dir", t.TempDir())
+
+// Set data-dir for the metadata plugin
+plugin.SetPluginOption(plugin.PluginTypeMetadata, "sqlite", "data-dir", t.TempDir())
+```
+
+The helper sets the plugin option's destination variable in the registry before plugin instantiation.
+If the requested option is not defined by the targeted plugin the call is non-fatal and returns nil,
+allowing tests to run regardless of which plugin implementation is selected.
+
+Using `t.TempDir()` guarantees each test uses its own on-disk path and prevents concurrent tests from
+colliding on shared directories (for example the default `.dingo` Badger directory).
