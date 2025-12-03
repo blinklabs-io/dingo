@@ -49,14 +49,8 @@ func (d *MetadataStoreSqlite) GetTransactionByHash(
 	return ret, nil
 }
 
-// scriptWithHashAndBytes is an interface for scripts that have Hash() and RawScriptBytes()
-type scriptWithHashAndBytes interface {
-	Hash() lcommon.ScriptHash
-	RawScriptBytes() []byte
-}
-
 // processScripts is a generic helper to process any script type
-func processScripts[T scriptWithHashAndBytes](
+func processScripts[T lcommon.Script](
 	txn *gorm.DB,
 	transactionID uint,
 	scriptType uint8,
