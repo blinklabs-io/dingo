@@ -100,6 +100,7 @@ type LedgerState struct {
 	chainsyncBlockfetchWaiting bool
 	checkpointWrittenForEpoch  bool
 	closed                     bool
+	validationEnabled          bool
 }
 
 func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
@@ -115,10 +116,11 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 		cfg.Logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
 	}
 	ls := &LedgerState{
-		config:         cfg,
-		chainsyncState: InitChainsyncState,
-		db:             cfg.Database,
-		chain:          cfg.ChainManager.PrimaryChain(),
+		config:            cfg,
+		chainsyncState:    InitChainsyncState,
+		db:                cfg.Database,
+		chain:             cfg.ChainManager.PrimaryChain(),
+		validationEnabled: cfg.ValidateHistorical,
 	}
 	return ls, nil
 }
@@ -619,7 +621,6 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 	var nextBatch, cachedNextBatch []ledger.Block
 	var delta *LedgerDelta
 	var deltaBatch LedgerDeltaBatch
-	shouldValidate := ls.config.ValidateHistorical
 	for {
 		if needsEpochRollover {
 			ls.Lock()
@@ -699,29 +700,34 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 						nextBatch = nil
 						break
 					}
-					// Enable validation using the k-slot window from ShelleyGenesis.
-					// Only recalculate if validation is not already enabled
-					if !shouldValidate && i == 0 {
-						var cutoffSlot uint64
+					// Determine if this block should be validated
+					// Skip validation of historical blocks when ValidateHistorical=false, as they
+					// were already validated by the network. However, validate blocks within the
+					// k-slot stability window to ensure live blocks near the tip are validated.
+					var shouldValidateBlock bool
+					if ls.validationEnabled {
+						shouldValidateBlock = true
+					} else {
 						stabilityWindow := ls.calculateStabilityWindow()
 						currentTipSlot := ls.currentTip.Point.Slot
 						blockSlot := next.SlotNumber()
+						var cutoffSlot uint64
 						if currentTipSlot >= stabilityWindow {
 							cutoffSlot = currentTipSlot - stabilityWindow
 						} else {
 							cutoffSlot = 0
 						}
-
-						// Validate blocks within k-slot window, or historical blocks if ValidateHistorical enabled
-						shouldValidate = blockSlot >= cutoffSlot ||
-							ls.config.ValidateHistorical
+						if ls.chainsyncState == SyncingChainsyncState && blockSlot >= cutoffSlot {
+							ls.validationEnabled = true
+							shouldValidateBlock = true
+						}
 					}
 					// Process block
 					delta, err = ls.ledgerProcessBlock(
 						txn,
 						tmpPoint,
 						next,
-						shouldValidate,
+						shouldValidateBlock,
 					)
 					if err != nil {
 						return err
