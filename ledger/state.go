@@ -420,6 +420,7 @@ type LedgerState struct {
 	checkpointWrittenForEpoch  bool
 	closed                     bool
 	inRecovery                 bool // guards against recursive recovery in SubmitAsyncDBTxn
+	validationEnabled          bool
 }
 
 // EraTransitionResult holds computed state from an era transition
@@ -457,10 +458,11 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 		cfg.DatabaseWorkerPoolConfig = DefaultDatabaseWorkerPoolConfig()
 	}
 	ls := &LedgerState{
-		config:         cfg,
-		chainsyncState: InitChainsyncState,
-		db:             cfg.Database,
-		chain:          cfg.ChainManager.PrimaryChain(),
+		config:            cfg,
+		chainsyncState:    InitChainsyncState,
+		db:                cfg.Database,
+		chain:             cfg.ChainManager.PrimaryChain(),
+		validationEnabled: cfg.ValidateHistorical,
 	}
 	return ls, nil
 }
@@ -1251,7 +1253,6 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 	var nextBatch, cachedNextBatch []ledger.Block
 	var delta *LedgerDelta
 	var deltaBatch *LedgerDeltaBatch
-	shouldValidate := ls.config.ValidateHistorical
 	for {
 		if needsEpochRollover {
 			needsEpochRollover = false
@@ -1409,11 +1410,23 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 			ls.RLock()
 			snapshotEpoch := ls.currentEpoch
 			snapshotEra := ls.currentEra
-			snapshotTipSlot := ls.currentTip.Point.Slot
 			snapshotTipHash := ls.currentTip.Point.Hash
 			snapshotNonce := ls.currentTipBlockNonce
 			localCheckpointWritten := ls.checkpointWrittenForEpoch
+			snapshotValidationEnabled := ls.validationEnabled
+			snapshotChainsyncState := ls.chainsyncState
+			chainTipSlot := ls.chain.Tip().Point.Slot
 			ls.RUnlock()
+
+			// Compute stability window and cutoff slot outside the callback
+			// to avoid reading ls fields without the lock. Use chain tip slot
+			// (not ledger tip) to prevent enabling validation too early during
+			// historical block sync.
+			stabilityWindow := ls.calculateStabilityWindowForEra(snapshotEra.Id)
+			var cutoffSlot uint64
+			if chainTipSlot >= stabilityWindow {
+				cutoffSlot = chainTipSlot - stabilityWindow
+			}
 
 			// Track pending state changes during transaction
 			var pendingTip ochainsync.Tip
@@ -1422,6 +1435,9 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 			runningNonce := snapshotNonce
 			// Track expected previous hash for batch processing - updated after each block
 			expectedPrevHash := snapshotTipHash
+			// Flag to enable validation after transaction commits (set inside callback,
+			// applied after commit to avoid mutating in-memory state on txn failure)
+			var wantEnableValidation bool
 
 			err = ls.SubmitAsyncDBTxn(func(txn *database.Txn) error {
 				deltaBatch = NewLedgerDeltaBatch()
@@ -1440,28 +1456,23 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 						nextBatch = nil
 						break
 					}
-					// Enable validation using the k-slot window from ShelleyGenesis.
-					// Only recalculate if validation is not already enabled
-					if !shouldValidate && i == 0 {
-						var cutoffSlot uint64
-						stabilityWindow := ls.calculateStabilityWindow()
-						blockSlot := next.SlotNumber()
-						if snapshotTipSlot >= stabilityWindow {
-							cutoffSlot = snapshotTipSlot - stabilityWindow
-						} else {
-							cutoffSlot = 0
-						}
-
-						// Validate blocks within k-slot window, or historical blocks if ValidateHistorical enabled
-						shouldValidate = blockSlot >= cutoffSlot ||
-							ls.config.ValidateHistorical
+					// Determine if this block should be validated
+					// Skip validation of historical blocks when ValidateHistorical=false, as they
+					// were already validated by the network. However, validate blocks within the
+					// k-slot stability window to ensure live blocks near the tip are validated.
+					var shouldValidateBlock bool
+					if snapshotValidationEnabled {
+						shouldValidateBlock = true
+					} else if snapshotChainsyncState == SyncingChainsyncState && next.SlotNumber() >= cutoffSlot {
+						wantEnableValidation = true
+						shouldValidateBlock = true
 					}
 					// Process block
 					delta, err = ls.ledgerProcessBlock(
 						txn,
 						tmpPoint,
 						next,
-						shouldValidate,
+						shouldValidateBlock,
 						expectedPrevHash,
 					)
 					if err != nil {
@@ -1559,6 +1570,9 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 					ls.currentTipBlockNonce = pendingNonce
 				}
 				ls.checkpointWrittenForEpoch = localCheckpointWritten
+				if wantEnableValidation {
+					ls.validationEnabled = true
+				}
 				ls.updateTipMetrics()
 				// Capture tip for logging while holding the lock
 				tipForLog = ls.currentTip
