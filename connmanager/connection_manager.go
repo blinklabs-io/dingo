@@ -36,8 +36,8 @@ const (
 
 type connectionInfo struct {
 	conn      *ouroboros.Connection
-	isInbound bool
 	peerAddr  string
+	isInbound bool
 }
 
 type peerConnectionState struct {
@@ -47,19 +47,19 @@ type peerConnectionState struct {
 
 type ConnectionManager struct {
 	connections      map[ouroboros.ConnectionId]*connectionInfo
+	metrics          *connectionManagerMetrics
 	config           ConnectionManagerConfig
 	connectionsMutex sync.Mutex
-	metrics          *connectionManagerMetrics
 }
 
 type ConnectionManagerConfig struct {
+	PromRegistry       prometheus.Registerer
 	Logger             *slog.Logger
 	EventBus           *event.EventBus
 	ConnClosedFunc     ConnectionManagerConnClosedFunc
 	Listeners          []ListenerConfig
 	OutboundConnOpts   []ouroboros.ConnectionOptionFunc
 	OutboundSourcePort uint
-	PromRegistry       prometheus.Registerer
 }
 
 type connectionManagerMetrics struct {

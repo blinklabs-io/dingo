@@ -19,6 +19,7 @@ import (
 	"io"
 	"log/slog"
 
+	"github.com/blinklabs-io/dingo/database/plugin"
 	"github.com/blinklabs-io/dingo/database/plugin/blob"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/prometheus/client_golang/prometheus"
@@ -119,6 +120,7 @@ func (d *Database) init() error {
 func New(
 	config *Config,
 ) (*Database, error) {
+	var err error
 	if config == nil {
 		config = DefaultConfig
 	}
@@ -132,10 +134,31 @@ func New(
 	if configCopy.MetadataPlugin == "" {
 		configCopy.MetadataPlugin = DefaultConfig.MetadataPlugin
 	}
-	// DataDir defaulting behavior:
+	// Handle DataDir configuration for plugins:
 	// - nil config → DefaultConfig.DataDir (".dingo" for persistence)
 	// - empty DataDir → in-memory storage
 	// - non-empty DataDir → persistent storage at specified path
+	// NOTE: SetPluginOption mutates global plugin state, so DataDir is effectively
+	// process-wide and not concurrency-safe. Multiple Database instances in the
+	// same process will share and overwrite these options.
+	err = plugin.SetPluginOption(
+		plugin.PluginTypeBlob,
+		configCopy.BlobPlugin,
+		"data-dir",
+		configCopy.DataDir,
+	)
+	if err != nil {
+		return nil, err
+	}
+	err = plugin.SetPluginOption(
+		plugin.PluginTypeMetadata,
+		configCopy.MetadataPlugin,
+		"data-dir",
+		configCopy.DataDir,
+	)
+	if err != nil {
+		return nil, err
+	}
 	blobDb, err := blob.New(
 		configCopy.BlobPlugin,
 	)

@@ -34,13 +34,13 @@ type BlobStoreBadger struct {
 	promRegistry   prometheus.Registerer
 	db             *badger.DB
 	logger         *slog.Logger
-	dataDir        string
-	gcEnabled      bool
-	blockCacheSize uint64
-	indexCacheSize uint64
 	gcTicker       *time.Ticker
 	gcStopCh       chan struct{}
+	dataDir        string
 	gcWg           sync.WaitGroup
+	blockCacheSize uint64
+	indexCacheSize uint64
+	gcEnabled      bool
 }
 
 // New creates a new database
@@ -76,7 +76,7 @@ func New(opts ...BlobStoreBadgerOptionFunc) (*BlobStoreBadger, error) {
 				return nil, fmt.Errorf("failed to read data dir: %w", err)
 			}
 			// Create data directory
-			if err := os.MkdirAll(db.dataDir, fs.ModePerm); err != nil {
+			if err := os.MkdirAll(db.dataDir, 0o755); err != nil {
 				return nil, fmt.Errorf("failed to create data dir: %w", err)
 			}
 		}

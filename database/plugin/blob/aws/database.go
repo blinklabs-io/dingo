@@ -35,10 +35,10 @@ type BlobStoreS3 struct {
 	startupCtx    context.Context
 	logger        *S3Logger
 	client        *s3.Client
+	startupCancel context.CancelFunc
 	bucket        string
 	prefix        string
 	region        string
-	startupCancel context.CancelFunc
 	timeout       time.Duration
 }
 

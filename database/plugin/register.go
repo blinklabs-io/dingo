@@ -49,6 +49,10 @@ type PluginEntry struct {
 
 var pluginEntries []PluginEntry
 
+// Register adds a plugin entry to the global registry.
+// NOTE: This function is not thread-safe and should only be called during
+// package initialization (e.g., in init() functions) before any concurrent
+// goroutines begin. Concurrent access to pluginEntries is not protected.
 func Register(pluginEntry PluginEntry) {
 	pluginEntries = append(pluginEntries, pluginEntry)
 }

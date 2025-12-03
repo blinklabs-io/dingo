@@ -28,8 +28,8 @@ func TestCredentialValidation(t *testing.T) {
 	tests := []struct {
 		name            string
 		credentialsFile string
-		expectError     bool
 		errorMessage    string
+		expectError     bool
 	}{
 		{
 			name: "valid credentials file",

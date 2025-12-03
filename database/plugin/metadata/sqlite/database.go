@@ -39,8 +39,8 @@ type MetadataStoreSqlite struct {
 	db           *gorm.DB
 	logger       *slog.Logger
 	timerVacuum  *time.Timer
-	timerMutex   sync.Mutex
 	dataDir      string
+	timerMutex   sync.Mutex
 	closed       bool
 }
 
@@ -159,7 +159,7 @@ func (d *MetadataStoreSqlite) Start() error {
 				return fmt.Errorf("failed to read data dir: %w", err)
 			}
 			// Create data directory
-			if err := os.MkdirAll(d.dataDir, fs.ModePerm); err != nil {
+			if err := os.MkdirAll(d.dataDir, 0o755); err != nil {
 				return fmt.Errorf("failed to create data dir: %w", err)
 			}
 		}

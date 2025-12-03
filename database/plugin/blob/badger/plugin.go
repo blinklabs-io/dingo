@@ -43,6 +43,7 @@ func initCmdlineOptions() {
 	cmdlineOptions.blockCacheSize = DefaultBlockCacheSize
 	cmdlineOptions.indexCacheSize = DefaultIndexCacheSize
 	cmdlineOptions.gcEnabled = true
+	cmdlineOptions.dataDir = ".dingo"
 }
 
 // Register plugin
@@ -59,7 +60,7 @@ func init() {
 					Name:         "data-dir",
 					Type:         plugin.PluginOptionTypeString,
 					Description:  "Data directory for badger storage",
-					DefaultValue: "",
+					DefaultValue: ".dingo",
 					Dest:         &(cmdlineOptions.dataDir),
 				},
 				{
