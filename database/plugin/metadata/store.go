@@ -86,6 +86,10 @@ type MetadataStore interface {
 		[]byte, // hash
 		*gorm.DB,
 	) (*models.Transaction, error)
+	GetScript(
+		lcommon.ScriptHash,
+		*gorm.DB,
+	) (*models.Script, error)
 
 	SetBlockNonce(
 		[]byte, // blockHash

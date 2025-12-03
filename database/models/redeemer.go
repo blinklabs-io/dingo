@@ -14,25 +14,17 @@
 
 package models
 
-type Datum struct {
-	Hash      []byte `gorm:"index;not null;unique"`
-	RawDatum  []byte `gorm:"not null"`
-	ID        uint   `gorm:"primarykey"`
-	AddedSlot uint64 `gorm:"not null"`
+// Redeemer represents a redeemer in the witness set
+type Redeemer struct {
+	ID            uint   `gorm:"primaryKey"`
+	TransactionID uint   `gorm:"index"`
+	Tag           uint8  `gorm:"index"` // Redeemer tag
+	Index         uint32 `gorm:"index"`
+	Data          []byte // Plutus data
+	ExUnitsMemory uint64
+	ExUnitsCPU    uint64
 }
 
-func (Datum) TableName() string {
-	return "datum"
-}
-
-// PlutusData represents a Plutus data value in the witness set
-type PlutusData struct {
-	ID            uint `gorm:"primaryKey"`
-	TransactionID uint `gorm:"index"`
-	Data          []byte
-	Transaction   *Transaction
-}
-
-func (PlutusData) TableName() string {
-	return "plutus_data"
+func (Redeemer) TableName() string {
+	return "redeemer"
 }

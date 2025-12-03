@@ -12,27 +12,31 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package models
+package sqlite
 
-type Datum struct {
-	Hash      []byte `gorm:"index;not null;unique"`
-	RawDatum  []byte `gorm:"not null"`
-	ID        uint   `gorm:"primarykey"`
-	AddedSlot uint64 `gorm:"not null"`
-}
+import (
+	"errors"
 
-func (Datum) TableName() string {
-	return "datum"
-}
+	"github.com/blinklabs-io/dingo/database/models"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"gorm.io/gorm"
+)
 
-// PlutusData represents a Plutus data value in the witness set
-type PlutusData struct {
-	ID            uint `gorm:"primaryKey"`
-	TransactionID uint `gorm:"index"`
-	Data          []byte
-	Transaction   *Transaction
-}
-
-func (PlutusData) TableName() string {
-	return "plutus_data"
+// GetScript returns the script content by its hash
+func (d *MetadataStoreSqlite) GetScript(
+	hash lcommon.ScriptHash,
+	txn *gorm.DB,
+) (*models.Script, error) {
+	ret := &models.Script{}
+	if txn == nil {
+		txn = d.DB()
+	}
+	result := txn.First(ret, "hash = ?", hash[:])
+	if result.Error != nil {
+		if errors.Is(result.Error, gorm.ErrRecordNotFound) {
+			return nil, nil
+		}
+		return nil, result.Error
+	}
+	return ret, nil
 }

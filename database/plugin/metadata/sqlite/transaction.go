@@ -49,6 +49,39 @@ func (d *MetadataStoreSqlite) GetTransactionByHash(
 	return ret, nil
 }
 
+// processScripts is a generic helper to process any script type
+func processScripts[T lcommon.Script](
+	txn *gorm.DB,
+	transactionID uint,
+	scriptType uint8,
+	scripts []T,
+	point ocommon.Point,
+) error {
+	for _, script := range scripts {
+		witnessScript := models.WitnessScripts{
+			TransactionID: transactionID,
+			Type:          scriptType,
+			ScriptHash:    script.Hash().Bytes(),
+		}
+		if result := txn.Create(&witnessScript); result.Error != nil {
+			return fmt.Errorf("create witness script: %w", result.Error)
+		}
+		scriptContent := models.Script{
+			Hash:        script.Hash().Bytes(),
+			Type:        scriptType,
+			Content:     script.RawScriptBytes(),
+			CreatedSlot: point.Slot,
+		}
+		if result := txn.Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "hash"}},
+			DoNothing: true,
+		}).Create(&scriptContent); result.Error != nil {
+			return fmt.Errorf("create script content: %w", result.Error)
+		}
+	}
+	return nil
+}
+
 // certRequiresDeposit returns true if the certificate type requires a deposit
 func certRequiresDeposit(cert lcommon.Certificate) bool {
 	switch cert.(type) {
@@ -167,6 +200,19 @@ func (d *MetadataStoreSqlite) SetTransaction(
 			tx,
 			result.Error,
 		)
+	}
+	// SQLite's ON CONFLICT clause doesn't return the ID of an existing row when
+	// the conflict path is taken (no insert occurs). We need to fetch the ID
+	// explicitly so we can associate witness records with the correct transaction.
+	if tmpTx.ID == 0 {
+		existingTx, err := d.GetTransactionByHash(txHash, txn)
+		if err != nil {
+			return fmt.Errorf("failed to fetch transaction ID after upsert: %w", err)
+		}
+		if existingTx == nil {
+			return fmt.Errorf("transaction not found after upsert: %x", txHash)
+		}
+		tmpTx.ID = existingTx.ID
 	}
 	// Add Inputs to Transaction
 	for _, input := range tx.Inputs() {
@@ -359,6 +405,93 @@ func (d *MetadataStoreSqlite) SetTransaction(
 			return result.Error
 		}
 	}
+	// Extract and save witness set data
+	// Delete existing witness records to ensure idempotency on retry
+	if result := txn.Where("transaction_id = ?", tmpTx.ID).Delete(&models.KeyWitness{}); result.Error != nil {
+		return fmt.Errorf("delete existing key witnesses: %w", result.Error)
+	}
+	if result := txn.Where("transaction_id = ?", tmpTx.ID).Delete(&models.WitnessScripts{}); result.Error != nil {
+		return fmt.Errorf("delete existing witness scripts: %w", result.Error)
+	}
+	if result := txn.Where("transaction_id = ?", tmpTx.ID).Delete(&models.Redeemer{}); result.Error != nil {
+		return fmt.Errorf("delete existing redeemers: %w", result.Error)
+	}
+	if result := txn.Where("transaction_id = ?", tmpTx.ID).Delete(&models.PlutusData{}); result.Error != nil {
+		return fmt.Errorf("delete existing plutus data: %w", result.Error)
+	}
+	ws := tx.Witnesses()
+	if ws != nil {
+		// Add Vkey Witnesses
+		for _, vkey := range ws.Vkey() {
+			keyWitness := models.KeyWitness{
+				TransactionID: tmpTx.ID,
+				Type:          models.KeyWitnessTypeVkey,
+				Vkey:          vkey.Vkey,
+				Signature:     vkey.Signature,
+			}
+			if result := txn.Create(&keyWitness); result.Error != nil {
+				return fmt.Errorf("create vkey witness: %w", result.Error)
+			}
+		}
+
+		// Add Bootstrap Witnesses
+		for _, bootstrap := range ws.Bootstrap() {
+			keyWitness := models.KeyWitness{
+				TransactionID: tmpTx.ID,
+				Type:          models.KeyWitnessTypeBootstrap,
+				PublicKey:     bootstrap.PublicKey,
+				Signature:     bootstrap.Signature,
+				ChainCode:     bootstrap.ChainCode,
+				Attributes:    bootstrap.Attributes,
+			}
+			if result := txn.Create(&keyWitness); result.Error != nil {
+				return fmt.Errorf("create bootstrap witness: %w", result.Error)
+			}
+		}
+
+		// Process all script types using the generic helper
+		if err := processScripts(txn, tmpTx.ID, uint8(lcommon.ScriptRefTypeNativeScript), ws.NativeScripts(), point); err != nil {
+			return err
+		}
+		if err := processScripts(txn, tmpTx.ID, uint8(lcommon.ScriptRefTypePlutusV1), ws.PlutusV1Scripts(), point); err != nil {
+			return err
+		}
+		if err := processScripts(txn, tmpTx.ID, uint8(lcommon.ScriptRefTypePlutusV2), ws.PlutusV2Scripts(), point); err != nil {
+			return err
+		}
+		if err := processScripts(txn, tmpTx.ID, uint8(lcommon.ScriptRefTypePlutusV3), ws.PlutusV3Scripts(), point); err != nil {
+			return err
+		}
+
+		// Add PlutusData (Datums)
+		for _, datum := range ws.PlutusData() {
+			plutusData := models.PlutusData{
+				TransactionID: tmpTx.ID,
+				Data:          datum.Cbor(),
+			}
+			if result := txn.Create(&plutusData); result.Error != nil {
+				return fmt.Errorf("create plutus data: %w", result.Error)
+			}
+		}
+
+		// Add Redeemers
+		if ws.Redeemers() != nil {
+			for key, value := range ws.Redeemers().Iter() {
+				redeemer := models.Redeemer{
+					TransactionID: tmpTx.ID,
+					Tag:           uint8(key.Tag),
+					Index:         key.Index,
+					Data:          value.Data.Cbor(),
+					ExUnitsMemory: uint64(max(0, value.ExUnits.Memory)), //nolint:gosec
+					ExUnitsCPU:    uint64(max(0, value.ExUnits.Steps)),  //nolint:gosec
+				}
+				if result := txn.Create(&redeemer); result.Error != nil {
+					return fmt.Errorf("create redeemer: %w", result.Error)
+				}
+			}
+		}
+	}
+
 	// Avoid updating associations
 	result = txn.Omit(clause.Associations).Save(&tmpTx)
 	if result.Error != nil {
