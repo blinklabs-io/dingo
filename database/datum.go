@@ -21,6 +21,8 @@ import (
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
 
+var ErrDatumNotFound = errors.New("datum not found")
+
 // SetDatum saves the raw datum into the database by computing the hash before inserting.
 func (d *Database) SetDatum(
 	rawDatum []byte,
@@ -43,7 +45,7 @@ func (d *Database) GetDatum(
 	txn *Txn,
 ) (*models.Datum, error) {
 	if len(hash) == 0 {
-		return nil, errors.New("datum not found")
+		return nil, ErrDatumNotFound
 	}
 	if txn == nil {
 		txn = d.Transaction(false)
@@ -55,7 +57,7 @@ func (d *Database) GetDatum(
 		return nil, err
 	}
 	if ret == nil {
-		return nil, errors.New("datum not found")
+		return nil, ErrDatumNotFound
 	}
 	return ret, nil
 }
