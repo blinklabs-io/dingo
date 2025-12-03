@@ -959,6 +959,31 @@ func (d *MetadataStoreSqlite) SetTransaction(
 					if err := saveCertRecord(&tmpResign, txn); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
+				case *lcommon.MoveInstantaneousRewardsCertificate:
+					tmpMIR := models.MoveInstantaneousRewards{
+						Pot:           c.Reward.Source,
+						AddedSlot:     point.Slot,
+						CertificateID: uint(i), //nolint:gosec
+					}
+
+					// Save the MIR record
+					result := txn.Create(&tmpMIR)
+					if result.Error != nil {
+						return fmt.Errorf("process certificate: %w", result.Error)
+					}
+
+					// Save individual rewards
+					for credential, amount := range c.Reward.Rewards {
+						tmpReward := models.MoveInstantaneousRewardsReward{
+							Credential: credential.Credential[:],
+							Amount:     types.Uint64(amount),
+							MIRID:      tmpMIR.ID,
+						}
+						result := txn.Create(&tmpReward)
+						if result.Error != nil {
+							return fmt.Errorf("process certificate: %w", result.Error)
+						}
+					}
 				default:
 					return fmt.Errorf("unsupported certificate type %T", cert)
 				}
