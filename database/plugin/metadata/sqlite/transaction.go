@@ -486,10 +486,10 @@ func (d *MetadataStoreSqlite) SetTransaction(
 					Tag:           uint8(key.Tag),
 					Index:         key.Index,
 					Data:          value.Data.Cbor(),
-					ExUnitsMemory: uint64(
+					ExUnitsMemory: uint64( //nolint:gosec
 						max(0, value.ExUnits.Memory),
 					),
-					ExUnitsCPU: uint64(
+					ExUnitsCPU: uint64( //nolint:gosec
 						max(0, value.ExUnits.Steps),
 					),
 				}
@@ -511,6 +511,108 @@ func (d *MetadataStoreSqlite) SetTransaction(
 	if tx.IsValid() {
 		certs := tx.Certificates()
 		if len(certs) > 0 {
+			// Delete existing specialized certificate records to ensure idempotency on retry
+			// This ensures 1:1 correspondence between unified and specialized certificates
+			unifiedIDs := []uint{}
+			if result := txn.Model(&models.Certificate{}).Where("transaction_id = ?", tmpTx.ID).Pluck("id", &unifiedIDs); result.Error != nil {
+				return fmt.Errorf(
+					"query existing unified certificates: %w",
+					result.Error,
+				)
+			}
+			if len(unifiedIDs) > 0 {
+				// Delete specialized records linked to existing unified certificates
+				tables := []string{
+					"stake_registration", "pool_registration", "pool_retirement", "auth_committee_hot", "resign_committee_cold",
+					"deregistration", "stake_delegation", "stake_registration_delegation", "stake_vote_delegation",
+					"stake_vote_registration_delegation", "registration", "registration_drep", "deregistration_drep",
+					"update_drep", "vote_delegation", "vote_registration_delegation", "move_instantaneous_rewards",
+				}
+				for _, table := range tables {
+					if result := txn.Table(table).Where("certificate_id IN ?", unifiedIDs).Delete(nil); result.Error != nil {
+						return fmt.Errorf(
+							"delete existing %s records: %w",
+							table,
+							result.Error,
+						)
+					}
+				}
+			}
+			// Create unified certificate records first (idempotent with ON CONFLICT DO NOTHING)
+			certIDMap := make(map[int]uint)
+			certIDUpdates := make(map[uint]uint) // unifiedID -> specializedID
+			for i, cert := range certs {
+				var certType uint
+				switch cert.(type) {
+				case *lcommon.PoolRegistrationCertificate:
+					certType = uint(lcommon.CertificateTypePoolRegistration)
+				case *lcommon.StakeRegistrationCertificate:
+					certType = uint(lcommon.CertificateTypeStakeRegistration)
+				case *lcommon.PoolRetirementCertificate:
+					certType = uint(lcommon.CertificateTypePoolRetirement)
+				case *lcommon.StakeDeregistrationCertificate:
+					certType = uint(lcommon.CertificateTypeStakeDeregistration)
+				case *lcommon.DeregistrationCertificate:
+					certType = uint(lcommon.CertificateTypeDeregistration)
+				case *lcommon.StakeDelegationCertificate:
+					certType = uint(lcommon.CertificateTypeStakeDelegation)
+				case *lcommon.StakeRegistrationDelegationCertificate:
+					certType = uint(lcommon.CertificateTypeStakeRegistrationDelegation)
+				case *lcommon.StakeVoteDelegationCertificate:
+					certType = uint(lcommon.CertificateTypeStakeVoteDelegation)
+				case *lcommon.RegistrationCertificate:
+					certType = uint(lcommon.CertificateTypeRegistration)
+				case *lcommon.RegistrationDrepCertificate:
+					certType = uint(lcommon.CertificateTypeRegistrationDrep)
+				case *lcommon.DeregistrationDrepCertificate:
+					certType = uint(lcommon.CertificateTypeDeregistrationDrep)
+				case *lcommon.UpdateDrepCertificate:
+					certType = uint(lcommon.CertificateTypeUpdateDrep)
+				case *lcommon.StakeVoteRegistrationDelegationCertificate:
+					certType = uint(lcommon.CertificateTypeStakeVoteRegistrationDelegation)
+				case *lcommon.VoteRegistrationDelegationCertificate:
+					certType = uint(lcommon.CertificateTypeVoteRegistrationDelegation)
+				case *lcommon.VoteDelegationCertificate:
+					certType = uint(lcommon.CertificateTypeVoteDelegation)
+				case *lcommon.AuthCommitteeHotCertificate:
+					certType = uint(lcommon.CertificateTypeAuthCommitteeHot)
+				case *lcommon.ResignCommitteeColdCertificate:
+					certType = uint(lcommon.CertificateTypeResignCommitteeCold)
+				case *lcommon.MoveInstantaneousRewardsCertificate:
+					certType = uint(lcommon.CertificateTypeMoveInstantaneousRewards)
+				default:
+					d.logger.Warn("unknown certificate type", "type", fmt.Sprintf("%T", cert))
+					continue
+				}
+				unifiedCert := models.Certificate{
+					TransactionID: tmpTx.ID,
+					CertIndex:     uint(i), //nolint:gosec
+					CertType:      certType,
+					Slot:          point.Slot,
+					BlockHash:     point.Hash,
+					CertificateID: 0, // Will be set to specialized record ID later if needed
+				}
+				// Use ON CONFLICT DO NOTHING to handle retries idempotently
+				if result := txn.Clauses(clause.OnConflict{
+					Columns:   []clause.Column{{Name: "transaction_id"}, {Name: "cert_index"}},
+					DoNothing: true,
+				}).Create(&unifiedCert); result.Error != nil {
+					return fmt.Errorf(
+						"create unified certificate: %w",
+						result.Error,
+					)
+				}
+				// If the record already existed, we need to fetch its ID
+				if unifiedCert.ID == 0 {
+					if result := txn.Where("transaction_id = ? AND cert_index = ?", tmpTx.ID, uint(i)).First(&unifiedCert); result.Error != nil { //nolint:gosec
+						return fmt.Errorf(
+							"fetch existing unified certificate: %w",
+							result.Error,
+						)
+					}
+				}
+				certIDMap[i] = unifiedCert.ID
+			}
 			for i, cert := range certs {
 				deposit := uint64(0)
 				if certDeposits != nil {
@@ -553,7 +655,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 						RewardAccount: c.RewardAccount[:],
 						AddedSlot:     point.Slot,
 						DepositAmount: types.Uint64(deposit),
-						CertificateID: uint(i), //nolint:gosec
+						CertificateID: certIDMap[i],
 					}
 					if c.PoolMetadata != nil {
 						tmpReg.MetadataUrl = c.PoolMetadata.Url
@@ -602,6 +704,9 @@ func (d *MetadataStoreSqlite) SetTransaction(
 					if result.Error != nil {
 						return fmt.Errorf("process certificate: %w", result.Error)
 					}
+
+					// Collect update for batch processing
+					certIDUpdates[certIDMap[i]] = tmpReg.ID
 				case *lcommon.StakeRegistrationCertificate:
 					stakeKey := c.StakeCredential.Credential[:]
 					tmpAccount, err := d.getOrCreateAccount(stakeKey, txn)
@@ -613,7 +718,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 						StakingKey:    stakeKey,
 						AddedSlot:     point.Slot,
 						DepositAmount: types.Uint64(deposit),
-						CertificateID: uint(i), //nolint:gosec
+						CertificateID: certIDMap[i],
 					}
 
 					if err := saveAccountIfNew(tmpAccount, txn); err != nil {
@@ -623,6 +728,9 @@ func (d *MetadataStoreSqlite) SetTransaction(
 					if err := saveCertRecord(&tmpReg, txn); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
+
+					// Collect update for batch processing
+					certIDUpdates[certIDMap[i]] = tmpReg.ID
 				case *lcommon.PoolRetirementCertificate:
 					tmpPool, err := d.GetPool(lcommon.PoolKeyHash(c.PoolKeyHash[:]), txn)
 					if err != nil {
@@ -641,15 +749,19 @@ func (d *MetadataStoreSqlite) SetTransaction(
 					}
 
 					tmpItem := models.PoolRetirement{
-						PoolKeyHash: c.PoolKeyHash[:],
-						Epoch:       c.Epoch,
-						AddedSlot:   point.Slot,
-						PoolID:      tmpPool.ID,
+						PoolKeyHash:   c.PoolKeyHash[:],
+						Epoch:         c.Epoch,
+						AddedSlot:     point.Slot,
+						PoolID:        tmpPool.ID,
+						CertificateID: certIDMap[i],
 					}
 
 					if err := saveCertRecord(&tmpItem, txn); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
+
+					// Collect update for batch processing
+					certIDUpdates[certIDMap[i]] = tmpItem.ID
 				case *lcommon.StakeDeregistrationCertificate:
 					stakeKey := c.StakeCredential.Credential[:]
 					tmpAccount, err := d.GetAccount(stakeKey, txn)
@@ -675,7 +787,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 					tmpItem := models.StakeDeregistration{
 						StakingKey:    stakeKey,
 						AddedSlot:     point.Slot,
-						CertificateID: uint(i), //nolint:gosec
+						CertificateID: certIDMap[i],
 					}
 
 					if err := saveAccountIfNew(tmpAccount, txn); err != nil {
@@ -685,6 +797,9 @@ func (d *MetadataStoreSqlite) SetTransaction(
 					if err := saveCertRecord(&tmpItem, txn); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
+
+					// Collect update for batch processing
+					certIDUpdates[certIDMap[i]] = tmpItem.ID
 				case *lcommon.DeregistrationCertificate:
 					stakeKey := c.StakeCredential.Credential[:]
 					tmpAccount, err := d.GetAccount(stakeKey, txn)
@@ -710,7 +825,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 					tmpItem := models.Deregistration{
 						StakingKey:    stakeKey,
 						AddedSlot:     point.Slot,
-						CertificateID: uint(i), //nolint:gosec
+						CertificateID: certIDMap[i],
 						Amount:        types.Uint64(deposit),
 					}
 
@@ -721,6 +836,9 @@ func (d *MetadataStoreSqlite) SetTransaction(
 					if err := saveCertRecord(&tmpItem, txn); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
+
+					// Collect update for batch processing
+					certIDUpdates[certIDMap[i]] = tmpItem.ID
 				case *lcommon.StakeDelegationCertificate:
 					stakeKey := c.StakeCredential.Credential[:]
 					tmpAccount, err := d.getOrCreateAccount(stakeKey, txn)
@@ -734,7 +852,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 						StakingKey:    stakeKey,
 						PoolKeyHash:   c.PoolKeyHash[:],
 						AddedSlot:     point.Slot,
-						CertificateID: uint(i), //nolint:gosec
+						CertificateID: certIDMap[i],
 					}
 
 					if err := saveAccountIfNew(tmpAccount, txn); err != nil {
@@ -744,6 +862,9 @@ func (d *MetadataStoreSqlite) SetTransaction(
 					if err := saveCertRecord(&tmpItem, txn); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
+
+					// Collect update for batch processing
+					certIDUpdates[certIDMap[i]] = tmpItem.ID
 				case *lcommon.StakeRegistrationDelegationCertificate:
 					stakeKey := c.StakeCredential.Credential[:]
 					tmpAccount, err := d.getOrCreateAccount(stakeKey, txn)
@@ -758,7 +879,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 						PoolKeyHash:   c.PoolKeyHash[:],
 						AddedSlot:     point.Slot,
 						DepositAmount: types.Uint64(deposit),
-						CertificateID: uint(i), //nolint:gosec
+						CertificateID: certIDMap[i],
 					}
 
 					if err := saveAccountIfNew(tmpAccount, txn); err != nil {
@@ -768,6 +889,9 @@ func (d *MetadataStoreSqlite) SetTransaction(
 					if err := saveCertRecord(&tmpReg, txn); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
+
+					// Collect update for batch processing
+					certIDUpdates[certIDMap[i]] = tmpReg.ID
 				case *lcommon.StakeVoteDelegationCertificate:
 					stakeKey := c.StakeCredential.Credential[:]
 					tmpAccount, err := d.getOrCreateAccount(stakeKey, txn)
@@ -783,7 +907,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 						PoolKeyHash:   c.PoolKeyHash[:],
 						Drep:          c.Drep.Credential[:],
 						AddedSlot:     point.Slot,
-						CertificateID: uint(i), //nolint:gosec
+						CertificateID: certIDMap[i],
 					}
 
 					if err := saveAccountIfNew(tmpAccount, txn); err != nil {
@@ -793,6 +917,9 @@ func (d *MetadataStoreSqlite) SetTransaction(
 					if err := saveCertRecord(&tmpItem, txn); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
+
+					// Collect update for batch processing
+					certIDUpdates[certIDMap[i]] = tmpItem.ID
 				case *lcommon.RegistrationCertificate:
 					stakeKey := c.StakeCredential.Credential[:]
 					tmpAccount, err := d.getOrCreateAccount(stakeKey, txn)
@@ -804,7 +931,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 						StakingKey:    stakeKey,
 						AddedSlot:     point.Slot,
 						DepositAmount: types.Uint64(deposit),
-						CertificateID: uint(i), //nolint:gosec
+						CertificateID: certIDMap[i],
 					}
 
 					if err := saveAccountIfNew(tmpAccount, txn); err != nil {
@@ -814,6 +941,9 @@ func (d *MetadataStoreSqlite) SetTransaction(
 					if err := saveCertRecord(&tmpReg, txn); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
+
+					// Collect update for batch processing
+					certIDUpdates[certIDMap[i]] = tmpReg.ID
 				case *lcommon.RegistrationDrepCertificate:
 					drepCredential := c.DrepCredential.Credential[:]
 
@@ -821,7 +951,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 						DrepCredential: drepCredential,
 						AddedSlot:      point.Slot,
 						DepositAmount:  types.Uint64(deposit),
-						CertificateID:  uint(i), //nolint:gosec
+						CertificateID:  certIDMap[i],
 					}
 					if c.Anchor != nil {
 						tmpReg.AnchorUrl = c.Anchor.Url
@@ -831,6 +961,9 @@ func (d *MetadataStoreSqlite) SetTransaction(
 					if err := saveCertRecord(&tmpReg, txn); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
+
+					// Collect update for batch processing
+					certIDUpdates[certIDMap[i]] = tmpReg.ID
 				case *lcommon.DeregistrationDrepCertificate:
 					drepCredential := c.DrepCredential.Credential[:]
 
@@ -838,19 +971,22 @@ func (d *MetadataStoreSqlite) SetTransaction(
 						DrepCredential: drepCredential,
 						AddedSlot:      point.Slot,
 						DepositAmount:  types.Uint64(deposit),
-						CertificateID:  uint(i), //nolint:gosec
+						CertificateID:  certIDMap[i],
 					}
 
 					if err := saveCertRecord(&tmpDereg, txn); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
+
+					// Collect update for batch processing
+					certIDUpdates[certIDMap[i]] = tmpDereg.ID
 				case *lcommon.UpdateDrepCertificate:
 					drepCredential := c.DrepCredential.Credential[:]
 
 					tmpUpdate := models.UpdateDrep{
 						Credential:    drepCredential,
 						AddedSlot:     point.Slot,
-						CertificateID: uint(i), //nolint:gosec
+						CertificateID: certIDMap[i],
 					}
 					if c.Anchor != nil {
 						tmpUpdate.AnchorUrl = c.Anchor.Url
@@ -860,6 +996,9 @@ func (d *MetadataStoreSqlite) SetTransaction(
 					if err := saveCertRecord(&tmpUpdate, txn); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
+
+					// Collect update for batch processing
+					certIDUpdates[certIDMap[i]] = tmpUpdate.ID
 				case *lcommon.StakeVoteRegistrationDelegationCertificate:
 					stakeKey := c.StakeCredential.Credential[:]
 					tmpAccount, err := d.getOrCreateAccount(stakeKey, txn)
@@ -876,7 +1015,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 						Drep:          c.Drep.Credential[:],
 						AddedSlot:     point.Slot,
 						DepositAmount: types.Uint64(deposit),
-						CertificateID: uint(i), //nolint:gosec
+						CertificateID: certIDMap[i],
 					}
 
 					if err := saveAccountIfNew(tmpAccount, txn); err != nil {
@@ -886,6 +1025,9 @@ func (d *MetadataStoreSqlite) SetTransaction(
 					if err := saveCertRecord(&tmpReg, txn); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
+
+					// Collect update for batch processing
+					certIDUpdates[certIDMap[i]] = tmpReg.ID
 				case *lcommon.VoteRegistrationDelegationCertificate:
 					stakeKey := c.StakeCredential.Credential[:]
 					tmpAccount, err := d.getOrCreateAccount(stakeKey, txn)
@@ -900,7 +1042,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 						Drep:          c.Drep.Credential[:],
 						AddedSlot:     point.Slot,
 						DepositAmount: types.Uint64(deposit),
-						CertificateID: uint(i), //nolint:gosec
+						CertificateID: certIDMap[i],
 					}
 
 					if err := saveAccountIfNew(tmpAccount, txn); err != nil {
@@ -910,6 +1052,9 @@ func (d *MetadataStoreSqlite) SetTransaction(
 					if err := saveCertRecord(&tmpReg, txn); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
+
+					// Collect update for batch processing
+					certIDUpdates[certIDMap[i]] = tmpReg.ID
 				case *lcommon.VoteDelegationCertificate:
 					stakeKey := c.StakeCredential.Credential[:]
 					tmpAccount, err := d.getOrCreateAccount(stakeKey, txn)
@@ -923,7 +1068,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 						StakingKey:    stakeKey,
 						Drep:          c.Drep.Credential[:],
 						AddedSlot:     point.Slot,
-						CertificateID: uint(i), //nolint:gosec
+						CertificateID: certIDMap[i],
 					}
 
 					if err := saveAccountIfNew(tmpAccount, txn); err != nil {
@@ -933,6 +1078,9 @@ func (d *MetadataStoreSqlite) SetTransaction(
 					if err := saveCertRecord(&tmpItem, txn); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
+
+					// Collect update for batch processing
+					certIDUpdates[certIDMap[i]] = tmpItem.ID
 				case *lcommon.AuthCommitteeHotCertificate:
 					coldCredential := c.ColdCredential.Credential[:]
 					hotCredential := c.HotCredential.Credential[:]
@@ -940,17 +1088,22 @@ func (d *MetadataStoreSqlite) SetTransaction(
 					tmpAuth := models.AuthCommitteeHot{
 						ColdCredential: coldCredential,
 						HostCredential: hotCredential,
+						CertificateID:  certIDMap[i],
 						AddedSlot:      point.Slot,
 					}
 
 					if err := saveCertRecord(&tmpAuth, txn); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
+
+					// Collect update for batch processing
+					certIDUpdates[certIDMap[i]] = tmpAuth.ID
 				case *lcommon.ResignCommitteeColdCertificate:
 					coldCredential := c.ColdCredential.Credential[:]
 
 					tmpResign := models.ResignCommitteeCold{
 						ColdCredential: coldCredential,
+						CertificateID:  certIDMap[i],
 						AddedSlot:      point.Slot,
 					}
 					if c.Anchor != nil {
@@ -961,11 +1114,14 @@ func (d *MetadataStoreSqlite) SetTransaction(
 					if err := saveCertRecord(&tmpResign, txn); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
+
+					// Collect update for batch processing
+					certIDUpdates[certIDMap[i]] = tmpResign.ID
 				case *lcommon.MoveInstantaneousRewardsCertificate:
 					tmpMIR := models.MoveInstantaneousRewards{
 						Pot:           c.Reward.Source,
 						AddedSlot:     point.Slot,
-						CertificateID: uint(i), //nolint:gosec
+						CertificateID: certIDMap[i],
 					}
 
 					// Save the MIR record
@@ -973,6 +1129,9 @@ func (d *MetadataStoreSqlite) SetTransaction(
 					if result.Error != nil {
 						return fmt.Errorf("process certificate: %w", result.Error)
 					}
+
+					// Collect update for batch processing
+					certIDUpdates[certIDMap[i]] = tmpMIR.ID
 
 					// Save individual rewards
 					for credential, amount := range c.Reward.Rewards {
@@ -988,6 +1147,34 @@ func (d *MetadataStoreSqlite) SetTransaction(
 					}
 				default:
 					return fmt.Errorf("unsupported certificate type %T", cert)
+				}
+			}
+
+			// Batch update unified certificates with specialized record IDs
+			if len(certIDUpdates) > 0 {
+				// Build CASE statement for batch update
+				var ids []uint
+				var whenClauses []string
+				var values []interface{}
+
+				for unifiedID, specializedID := range certIDUpdates {
+					ids = append(ids, unifiedID)
+					whenClauses = append(whenClauses, "WHEN id = ? THEN ?")
+					values = append(values, unifiedID, specializedID)
+				}
+
+				caseStmt := strings.Join(whenClauses, " ")
+				query := fmt.Sprintf(
+					"UPDATE certs SET certificate_id = CASE %s END WHERE id IN (?)",
+					caseStmt,
+				)
+				values = append(values, ids)
+
+				if result := txn.Exec(query, values...); result.Error != nil {
+					return fmt.Errorf(
+						"batch update unified certificates: %w",
+						result.Error,
+					)
 				}
 			}
 		}

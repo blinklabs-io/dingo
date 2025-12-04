@@ -14,17 +14,19 @@
 
 package models
 
-import "github.com/blinklabs-io/dingo/database/types"
-
+// Certificate maps transaction certificates to their specialized table records.
+// Provides unified indexing across all certificate types without requiring joins.
+//
+// All certificate types now have dedicated specialized models. The CertificateID field
+// references the ID of the specific certificate record based on CertType.
 type Certificate struct {
-	Cbor       []byte `gorm:"-"`
-	Pool       []byte
-	Credential []byte
-	Drep       []byte
-	CertType   uint `gorm:"index"`
-	Epoch      uint64
-	Amount     types.Uint64
-	ID         uint `gorm:"primaryKey"`
+	BlockHash     []byte `gorm:"index"`
+	ID            uint   `gorm:"primaryKey"`
+	TransactionID uint   `gorm:"index;uniqueIndex:uniq_tx_cert;constraint:OnDelete:CASCADE"`
+	CertificateID uint   `gorm:"index"` // Polymorphic FK to certificate table based on CertType. Not DB-enforced.
+	Slot          uint64 `gorm:"index"`
+	CertIndex     uint   `gorm:"column:cert_index;uniqueIndex:uniq_tx_cert"`
+	CertType      uint   `gorm:"index"`
 }
 
 func (Certificate) TableName() string {

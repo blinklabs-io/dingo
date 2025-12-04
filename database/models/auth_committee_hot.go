@@ -18,6 +18,7 @@ type AuthCommitteeHot struct {
 	ColdCredential []byte `gorm:"index"`
 	HostCredential []byte `gorm:"index"`
 	ID             uint   `gorm:"primarykey"`
+	CertificateID  uint   `gorm:"index"`
 	AddedSlot      uint64
 }
 
