@@ -19,6 +19,7 @@ type ResignCommitteeCold struct {
 	ColdCredential []byte `gorm:"index"`
 	AnchorHash     []byte
 	ID             uint `gorm:"primarykey"`
+	CertificateID  uint `gorm:"index"`
 	AddedSlot      uint64
 }
 
