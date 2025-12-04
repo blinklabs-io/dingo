@@ -14,7 +14,13 @@
 
 package models
 
-import "github.com/blinklabs-io/dingo/database/types"
+import (
+	"errors"
+
+	"github.com/blinklabs-io/dingo/database/types"
+)
+
+var ErrDrepNotFound = errors.New("drep not found")
 
 type Drep struct {
 	AnchorUrl     string

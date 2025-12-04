@@ -45,6 +45,7 @@ type MetadataStore interface {
 	) ([]lcommon.PoolRegistrationCertificate, error)
 	GetPool(
 		lcommon.PoolKeyHash,
+		bool, // includeInactive
 		*gorm.DB,
 	) (*models.Pool, error)
 	GetStakeRegistrations(
@@ -55,6 +56,7 @@ type MetadataStore interface {
 
 	GetAccount(
 		[]byte, // stakeKey
+		bool, // includeInactive
 		*gorm.DB,
 	) (*models.Account, error)
 	GetBlockNonce(
@@ -67,8 +69,9 @@ type MetadataStore interface {
 	) (*models.Datum, error)
 	GetDrep(
 		[]byte, // credential
+		bool, // includeInactive
 		*gorm.DB,
-	) (models.Drep, error)
+	) (*models.Drep, error)
 	GetPParams(
 		uint64, // epoch
 		*gorm.DB,

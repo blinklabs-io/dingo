@@ -13,3 +13,27 @@
 // limitations under the License.
 
 package database
+
+import (
+	"github.com/blinklabs-io/dingo/database/models"
+)
+
+// GetDrep returns a drep by credential
+func (d *Database) GetDrep(
+	cred []byte,
+	includeInactive bool,
+	txn *Txn,
+) (*models.Drep, error) {
+	if txn == nil {
+		txn = d.Transaction(false)
+		defer txn.Commit() //nolint:errcheck
+	}
+	ret, err := d.metadata.GetDrep(cred, includeInactive, txn.Metadata())
+	if err != nil {
+		return nil, err
+	}
+	if ret == nil {
+		return nil, models.ErrDrepNotFound
+	}
+	return ret, nil
+}

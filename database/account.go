@@ -21,13 +21,18 @@ import (
 // GetAccount returns an account by staking key
 func (d *Database) GetAccount(
 	stakeKey []byte,
+	includeInactive bool,
 	txn *Txn,
 ) (*models.Account, error) {
 	if txn == nil {
 		txn = d.Transaction(false)
 		defer txn.Commit() //nolint:errcheck
 	}
-	account, err := d.metadata.GetAccount(stakeKey, txn.Metadata())
+	account, err := d.metadata.GetAccount(
+		stakeKey,
+		includeInactive,
+		txn.Metadata(),
+	)
 	if err != nil {
 		return nil, err
 	}

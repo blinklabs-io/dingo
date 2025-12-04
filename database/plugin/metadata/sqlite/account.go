@@ -25,13 +25,18 @@ import (
 // GetAccount gets an account
 func (d *MetadataStoreSqlite) GetAccount(
 	stakeKey []byte,
+	includeInactive bool,
 	txn *gorm.DB,
 ) (*models.Account, error) {
 	ret := &models.Account{}
 	if txn == nil {
 		txn = d.DB()
 	}
-	result := txn.Where("staking_key = ? AND active = ?", stakeKey, true).First(ret)
+	query := txn
+	if !includeInactive {
+		query = query.Where("active = ?", true)
+	}
+	result := query.First(ret, "staking_key = ?", stakeKey)
 	if result.Error != nil {
 		if errors.Is(result.Error, gorm.ErrRecordNotFound) {
 			return nil, nil

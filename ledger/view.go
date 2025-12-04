@@ -81,7 +81,7 @@ func (lv *LedgerView) StakeRegistration(
 func (lv *LedgerView) PoolCurrentState(
 	pkh lcommon.PoolKeyHash,
 ) (*lcommon.PoolRegistrationCertificate, *uint64, error) {
-	pool, err := lv.ls.db.GetPool(pkh, lv.txn)
+	pool, err := lv.ls.db.GetPool(pkh, false, lv.txn)
 	if err != nil {
 		if errors.Is(err, models.ErrPoolNotFound) {
 			pool = &models.Pool{}

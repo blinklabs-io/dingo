@@ -103,7 +103,8 @@ func (d *MetadataStoreSqlite) getOrCreateAccount(
 	stakeKey []byte,
 	txn *gorm.DB,
 ) (*models.Account, error) {
-	tmpAccount, err := d.GetAccount(stakeKey, txn)
+	// Include inactive accounts to allow reactivation on registration.
+	tmpAccount, err := d.GetAccount(stakeKey, true, txn)
 	if err != nil {
 		if !errors.Is(err, models.ErrAccountNotFound) {
 			return nil, err
@@ -113,6 +114,8 @@ func (d *MetadataStoreSqlite) getOrCreateAccount(
 		tmpAccount = &models.Account{
 			StakingKey: stakeKey,
 		}
+	} else if !tmpAccount.Active {
+		tmpAccount.Active = true
 	}
 	return tmpAccount, nil
 }
@@ -486,10 +489,10 @@ func (d *MetadataStoreSqlite) SetTransaction(
 					Tag:           uint8(key.Tag),
 					Index:         key.Index,
 					Data:          value.Data.Cbor(),
-					ExUnitsMemory: uint64( //nolint:gosec
+					ExUnitsMemory: uint64(
 						max(0, value.ExUnits.Memory),
 					),
-					ExUnitsCPU: uint64( //nolint:gosec
+					ExUnitsCPU: uint64(
 						max(0, value.ExUnits.Steps),
 					),
 				}
@@ -625,8 +628,8 @@ func (d *MetadataStoreSqlite) SetTransaction(
 				}
 				switch c := cert.(type) {
 				case *lcommon.PoolRegistrationCertificate:
-					// Pool registration logic here
-					tmpPool, err := d.GetPool(lcommon.PoolKeyHash(c.Operator[:]), txn)
+					// Include inactive pools to allow re-registration.
+					tmpPool, err := d.GetPool(lcommon.PoolKeyHash(c.Operator[:]), true, txn)
 					if err != nil {
 						if !errors.Is(err, models.ErrPoolNotFound) {
 							return fmt.Errorf("process certificate: %w", err)
@@ -638,6 +641,8 @@ func (d *MetadataStoreSqlite) SetTransaction(
 							VrfKeyHash:  c.VrfKeyHash[:],
 						}
 					}
+
+					// Reactivation handled by writing a registration record.
 
 					// Update pool's current state
 					tmpPool.Pledge = types.Uint64(c.Pledge)
@@ -732,7 +737,8 @@ func (d *MetadataStoreSqlite) SetTransaction(
 					// Collect update for batch processing
 					certIDUpdates[certIDMap[i]] = tmpReg.ID
 				case *lcommon.PoolRetirementCertificate:
-					tmpPool, err := d.GetPool(lcommon.PoolKeyHash(c.PoolKeyHash[:]), txn)
+					// Include inactive pools when retiring.
+					tmpPool, err := d.GetPool(lcommon.PoolKeyHash(c.PoolKeyHash[:]), true, txn)
 					if err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
@@ -764,7 +770,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 					certIDUpdates[certIDMap[i]] = tmpItem.ID
 				case *lcommon.StakeDeregistrationCertificate:
 					stakeKey := c.StakeCredential.Credential[:]
-					tmpAccount, err := d.GetAccount(stakeKey, txn)
+					tmpAccount, err := d.GetAccount(stakeKey, false, txn)
 					if err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
@@ -802,7 +808,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 					certIDUpdates[certIDMap[i]] = tmpItem.ID
 				case *lcommon.DeregistrationCertificate:
 					stakeKey := c.StakeCredential.Credential[:]
-					tmpAccount, err := d.GetAccount(stakeKey, txn)
+					tmpAccount, err := d.GetAccount(stakeKey, false, txn)
 					if err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
@@ -947,6 +953,8 @@ func (d *MetadataStoreSqlite) SetTransaction(
 				case *lcommon.RegistrationDrepCertificate:
 					drepCredential := c.DrepCredential.Credential[:]
 
+					// Registration (re)creates/activates the DRep regardless of prior state.
+
 					tmpReg := models.RegistrationDrep{
 						DrepCredential: drepCredential,
 						AddedSlot:      point.Slot,
@@ -956,6 +964,11 @@ func (d *MetadataStoreSqlite) SetTransaction(
 					if c.Anchor != nil {
 						tmpReg.AnchorUrl = c.Anchor.Url
 						tmpReg.AnchorHash = c.Anchor.DataHash[:]
+					}
+
+					// Persist DRep anchor and active state
+					if err := d.SetDrep(drepCredential, point.Slot, tmpReg.AnchorUrl, tmpReg.AnchorHash, true, txn); err != nil {
+						return fmt.Errorf("process certificate: %w", err)
 					}
 
 					if err := saveCertRecord(&tmpReg, txn); err != nil {
@@ -972,6 +985,21 @@ func (d *MetadataStoreSqlite) SetTransaction(
 						AddedSlot:      point.Slot,
 						DepositAmount:  types.Uint64(deposit),
 						CertificateID:  certIDMap[i],
+					}
+
+					// Mark DRep inactive
+					// Ensure we don't create a new DRep during deregistration. Check existence first.
+					existingDrep, err := d.GetDrep(drepCredential, true, txn)
+					if err != nil {
+						if !errors.Is(err, models.ErrDrepNotFound) {
+							return fmt.Errorf("process certificate: %w", err)
+						}
+					}
+					if existingDrep == nil {
+						return fmt.Errorf("process certificate: %w", models.ErrDrepNotFound)
+					}
+					if err := d.SetDrep(drepCredential, point.Slot, "", nil, false, txn); err != nil {
+						return fmt.Errorf("process certificate: %w", err)
 					}
 
 					if err := saveCertRecord(&tmpDereg, txn); err != nil {
@@ -991,6 +1019,21 @@ func (d *MetadataStoreSqlite) SetTransaction(
 					if c.Anchor != nil {
 						tmpUpdate.AnchorUrl = c.Anchor.Url
 						tmpUpdate.AnchorHash = c.Anchor.DataHash[:]
+					}
+
+					// Update DRep anchor and mark active
+					// Require that the DRep already exists for updates.
+					existingDrep, err := d.GetDrep(drepCredential, true, txn)
+					if err != nil {
+						if !errors.Is(err, models.ErrDrepNotFound) {
+							return fmt.Errorf("process certificate: %w", err)
+						}
+					}
+					if existingDrep == nil {
+						return fmt.Errorf("process certificate: %w", models.ErrDrepNotFound)
+					}
+					if err := d.SetDrep(drepCredential, point.Slot, tmpUpdate.AnchorUrl, tmpUpdate.AnchorHash, true, txn); err != nil {
+						return fmt.Errorf("process certificate: %w", err)
 					}
 
 					if err := saveCertRecord(&tmpUpdate, txn); err != nil {
