@@ -60,7 +60,7 @@ func (m *MempoolConsumer) NextTx(blocking bool) *MempoolTransaction {
 		}
 	}
 	if m.nextTxIdx < 0 || m.nextTxIdx >= len(m.mempool.transactions) {
-		return nil
+		panic("mempool consumer nextTxIdx out of bounds")
 	}
 	nextTx := m.mempool.transactions[m.nextTxIdx]
 	if nextTx != nil {
