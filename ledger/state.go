@@ -99,6 +99,7 @@ type LedgerState struct {
 	chainsyncBlockfetchMutex   sync.Mutex
 	chainsyncBlockfetchWaiting bool
 	checkpointWrittenForEpoch  bool
+	closed                     bool
 }
 
 func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
@@ -201,6 +202,13 @@ func (ls *LedgerState) Datum(hash []byte) (*models.Datum, error) {
 }
 
 func (ls *LedgerState) Close() error {
+	ls.Lock()
+	if ls.closed {
+		ls.Unlock()
+		return nil
+	}
+	ls.closed = true
+	ls.Unlock()
 	return ls.db.Close()
 }
 

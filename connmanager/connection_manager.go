@@ -15,8 +15,11 @@
 package connmanager
 
 import (
+	"context"
+	"errors"
 	"io"
 	"log/slog"
+	"net"
 	"sync"
 
 	"github.com/blinklabs-io/dingo/event"
@@ -48,8 +51,11 @@ type peerConnectionState struct {
 type ConnectionManager struct {
 	connections      map[ouroboros.ConnectionId]*connectionInfo
 	metrics          *connectionManagerMetrics
+	listeners        []net.Listener
 	config           ConnectionManagerConfig
 	connectionsMutex sync.Mutex
+	listenersMutex   sync.Mutex
+	closing          bool
 }
 
 type ConnectionManagerConfig struct {
@@ -209,6 +215,79 @@ func (c *ConnectionManager) Start() error {
 		return err
 	}
 	return nil
+}
+
+func (c *ConnectionManager) Stop(ctx context.Context) error {
+	var err error
+
+	c.config.Logger.Debug("stopping connection manager")
+
+	// Mark closing to suppress accept-loop noise
+	c.listenersMutex.Lock()
+	c.closing = true
+	c.listenersMutex.Unlock()
+
+	// Stop accepting new connections
+	c.stopListeners()
+
+	// Close all existing connections gracefully
+	c.connectionsMutex.Lock()
+	conns := make([]*ouroboros.Connection, 0, len(c.connections))
+	for _, info := range c.connections {
+		conns = append(conns, info.conn)
+	}
+	c.connectionsMutex.Unlock()
+
+	// Close connections with timeout awareness
+	done := make(chan error, 1)
+	go func() {
+		var closeErr error
+		for _, conn := range conns {
+			if conn != nil {
+				if err := conn.Close(); err != nil {
+					closeErr = errors.Join(closeErr, err)
+				}
+			}
+		}
+		done <- closeErr
+	}()
+
+	select {
+	case closeErr := <-done:
+		if closeErr != nil {
+			err = errors.Join(err, closeErr)
+		}
+		// All connections closed
+	case <-ctx.Done():
+		c.config.Logger.Warn(
+			"shutdown timeout exceeded, some connections may not have closed cleanly",
+		)
+		err = errors.Join(err, ctx.Err())
+	}
+
+	c.config.Logger.Debug("connection manager stopped")
+	return err
+}
+
+func (c *ConnectionManager) stopListeners() {
+	c.listenersMutex.Lock()
+	listeners := make([]net.Listener, 0, len(c.listeners))
+	for _, listener := range c.listeners {
+		if listener != nil {
+			listeners = append(listeners, listener)
+		}
+	}
+	c.listeners = nil
+	c.listenersMutex.Unlock()
+
+	for _, listener := range listeners {
+		if err := listener.Close(); err != nil {
+			c.config.Logger.Warn(
+				"error closing listener",
+				"error", err,
+			)
+		}
+	}
 }
 
 func (c *ConnectionManager) AddConnection(

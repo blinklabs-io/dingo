@@ -34,6 +34,8 @@ type ctxKey string
 
 const configContextKey ctxKey = "dingo.config"
 
+const DefaultShutdownTimeout = "30s"
+
 func WithContext(ctx context.Context, cfg *Config) context.Context {
 	return context.WithValue(ctx, configContextKey, cfg)
 }
@@ -68,7 +70,7 @@ type databaseConfig struct {
 }
 
 type Config struct {
-	Network            string `yaml:"network"`
+	MetadataPlugin     string `yaml:"metadataPlugin"     envconfig:"DINGO_DATABASE_METADATA_PLUGIN"`
 	TlsKeyFilePath     string `yaml:"tlsKeyFilePath"     envconfig:"TLS_KEY_FILE_PATH"`
 	Topology           string `yaml:"topology"`
 	CardanoConfig      string `yaml:"cardanoConfig"      envconfig:"config"`
@@ -76,14 +78,15 @@ type Config struct {
 	SocketPath         string `yaml:"socketPath"                                                    split_words:"true"`
 	TlsCertFilePath    string `yaml:"tlsCertFilePath"    envconfig:"TLS_CERT_FILE_PATH"`
 	BindAddr           string `yaml:"bindAddr"                                                      split_words:"true"`
-	PrivateBindAddr    string `yaml:"privateBindAddr"                                               split_words:"true"`
 	BlobPlugin         string `yaml:"blobPlugin"         envconfig:"DINGO_DATABASE_BLOB_PLUGIN"`
-	MetadataPlugin     string `yaml:"metadataPlugin"     envconfig:"DINGO_DATABASE_METADATA_PLUGIN"`
+	PrivateBindAddr    string `yaml:"privateBindAddr"                                               split_words:"true"`
+	ShutdownTimeout    string `yaml:"shutdownTimeout"                                               split_words:"true"`
+	Network            string `yaml:"network"`
 	MempoolCapacity    int64  `yaml:"mempoolCapacity"                                               split_words:"true"`
-	MetricsPort        uint   `yaml:"metricsPort"                                                   split_words:"true"`
 	PrivatePort        uint   `yaml:"privatePort"                                                   split_words:"true"`
 	RelayPort          uint   `yaml:"relayPort"          envconfig:"port"`
 	UtxorpcPort        uint   `yaml:"utxorpcPort"                                                   split_words:"true"`
+	MetricsPort        uint   `yaml:"metricsPort"                                                   split_words:"true"`
 	IntersectTip       bool   `yaml:"intersectTip"                                                  split_words:"true"`
 	ValidateHistorical bool   `yaml:"validateHistorical"                                            split_words:"true"`
 	DevMode            bool   `yaml:"devMode"                                                       split_words:"true"`
@@ -152,6 +155,7 @@ var globalConfig = &Config{
 	BlobPlugin:         DefaultBlobPlugin,
 	MetadataPlugin:     DefaultMetadataPlugin,
 	DevMode:            false,
+	ShutdownTimeout:    DefaultShutdownTimeout,
 }
 
 func LoadConfig(configFile string) (*Config, error) {

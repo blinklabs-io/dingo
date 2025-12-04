@@ -207,7 +207,10 @@ func (d *MetadataStoreSqlite) SetTransaction(
 	if tmpTx.ID == 0 {
 		existingTx, err := d.GetTransactionByHash(txHash, txn)
 		if err != nil {
-			return fmt.Errorf("failed to fetch transaction ID after upsert: %w", err)
+			return fmt.Errorf(
+				"failed to fetch transaction ID after upsert: %w",
+				err,
+			)
 		}
 		if existingTx == nil {
 			return fmt.Errorf("transaction not found after upsert: %x", txHash)
@@ -477,13 +480,18 @@ func (d *MetadataStoreSqlite) SetTransaction(
 		// Add Redeemers
 		if ws.Redeemers() != nil {
 			for key, value := range ws.Redeemers().Iter() {
+				//nolint:gosec
 				redeemer := models.Redeemer{
 					TransactionID: tmpTx.ID,
 					Tag:           uint8(key.Tag),
 					Index:         key.Index,
 					Data:          value.Data.Cbor(),
-					ExUnitsMemory: uint64(max(0, value.ExUnits.Memory)), //nolint:gosec
-					ExUnitsCPU:    uint64(max(0, value.ExUnits.Steps)),  //nolint:gosec
+					ExUnitsMemory: uint64(
+						max(0, value.ExUnits.Memory),
+					),
+					ExUnitsCPU: uint64(
+						max(0, value.ExUnits.Steps),
+					),
 				}
 				if result := txn.Create(&redeemer); result.Error != nil {
 					return fmt.Errorf("create redeemer: %w", result.Error)

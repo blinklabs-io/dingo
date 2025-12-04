@@ -15,16 +15,21 @@
 package connmanager_test
 
 import (
+	"context"
 	"errors"
 	"io"
+	"net"
 	"testing"
 	"time"
+
+	"log/slog"
 
 	"github.com/blinklabs-io/dingo/connmanager"
 
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/protocol/keepalive"
 	ouroboros_mock "github.com/blinklabs-io/ouroboros-mock"
+	"github.com/prometheus/client_golang/prometheus"
 	"go.uber.org/goleak"
 )
 
@@ -181,5 +186,54 @@ func TestConnectionManagerConnClosed(t *testing.T) {
 		return
 	case <-time.After(10 * time.Second):
 		t.Fatalf("did not receive error within timeout")
+	}
+}
+
+func TestConnectionManager_Stop(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	connManager := connmanager.NewConnectionManager(
+		connmanager.ConnectionManagerConfig{},
+	)
+
+	// Test stopping an empty connection manager
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	defer cancel()
+
+	err := connManager.Stop(ctx)
+	if err != nil {
+		t.Fatalf("Stop() returned error: %v", err)
+	}
+}
+
+func TestConnectionManager_Stop_WithListener(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	// Create a real TCP listener on an ephemeral port
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to create listener: %v", err)
+	}
+	defer ln.Close()
+
+	cfg := connmanager.ConnectionManagerConfig{
+		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		PromRegistry: prometheus.NewRegistry(),
+		Listeners: []connmanager.ListenerConfig{
+			{
+				Listener: ln,
+			},
+		},
+	}
+	// Use package-level constructor
+	cm := connmanager.NewConnectionManager(cfg)
+	if err := cm.Start(); err != nil {
+		t.Fatalf("start failed: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := cm.Stop(ctx); err != nil {
+		t.Fatalf("stop failed: %v", err)
 	}
 }

@@ -16,6 +16,7 @@ package connmanager
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"runtime"
@@ -81,6 +82,11 @@ func (c *ConnectionManager) startListener(l ListenerConfig) error {
 			)
 		}
 	}
+	// Track listener for shutdown
+	c.listenersMutex.Lock()
+	c.listeners = append(c.listeners, l.Listener)
+	c.listenersMutex.Unlock()
+
 	// Build connection options
 	defaultConnOpts := []ouroboros.ConnectionOptionFunc{
 		ouroboros.WithLogger(c.config.Logger),
@@ -96,6 +102,33 @@ func (c *ConnectionManager) startListener(l ListenerConfig) error {
 			// Accept connection
 			conn, err := l.Listener.Accept()
 			if err != nil {
+				// During shutdown, closing the listener will cause Accept to return
+				// a net.ErrClosed. Treat this as a normal termination and exit the loop
+				if errors.Is(err, net.ErrClosed) {
+					c.config.Logger.Debug(
+						"listener: closed, stopping accept loop",
+					)
+					return
+				}
+				// If we're closing, exit quietly
+				c.listenersMutex.Lock()
+				isClosing := c.closing
+				c.listenersMutex.Unlock()
+				if isClosing {
+					c.config.Logger.Debug(
+						"listener: shutting down, stopping accept loop",
+					)
+					return
+				}
+				// Some platforms may return timeout errors; handle and continue
+				var ne net.Error
+				if errors.As(err, &ne) && ne.Timeout() {
+					c.config.Logger.Warn(
+						fmt.Sprintf("listener: accept timeout: %s", err),
+					)
+					continue
+				}
+				// Otherwise, log at error level and continue
 				c.config.Logger.Error(
 					fmt.Sprintf("listener: accept failed: %s", err),
 				)

@@ -39,6 +39,7 @@ func resetGlobalConfig() {
 		TlsCertFilePath: "",
 		TlsKeyFilePath:  "",
 		DevMode:         false,
+		ShutdownTimeout: DefaultShutdownTimeout,
 	}
 }
 
@@ -89,6 +90,7 @@ tlsKeyFilePath: "key1.pem"
 		TlsCertFilePath: "cert1.pem",
 		TlsKeyFilePath:  "key1.pem",
 		DevMode:         false,
+		ShutdownTimeout: DefaultShutdownTimeout,
 	}
 
 	actual, err := LoadConfig(tmpFile)
@@ -131,6 +133,7 @@ func TestLoad_WithoutConfigFile_UsesDefaults(t *testing.T) {
 		TlsCertFilePath: "",
 		TlsKeyFilePath:  "",
 		DevMode:         false,
+		ShutdownTimeout: DefaultShutdownTimeout,
 	}
 
 	if !reflect.DeepEqual(cfg, expected) {
