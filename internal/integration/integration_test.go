@@ -16,18 +16,23 @@ package integration
 
 import (
 	"fmt"
+	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/blinklabs-io/dingo"
 	"github.com/blinklabs-io/dingo/database/plugin"
 	"github.com/blinklabs-io/dingo/database/plugin/blob/aws"
 	_ "github.com/blinklabs-io/dingo/database/plugin/blob/badger"
 	"github.com/blinklabs-io/dingo/database/plugin/blob/gcs"
 	_ "github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
 	"github.com/blinklabs-io/dingo/internal/config"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 func TestMain(m *testing.M) {
@@ -466,4 +471,42 @@ func findPluginEntry(
 		}
 	}
 	return nil
+}
+
+func TestNodeShutdownIntegration(t *testing.T) {
+	// Create a temporary directory for the test
+	tmpDir := t.TempDir()
+
+	// Create a minimal node config
+	cfg := dingo.NewConfig(
+		dingo.WithDatabasePath(tmpDir),
+		dingo.WithLogger(slog.New(slog.NewJSONHandler(io.Discard, nil))),
+		dingo.WithPrometheusRegistry(prometheus.NewRegistry()),
+		dingo.WithNetworkMagic(764824073), // preview testnet magic
+		dingo.WithShutdownTimeout(5*time.Second),
+		dingo.WithListeners(dingo.ListenerConfig{
+			ListenNetwork: "tcp",
+			ListenAddress: "127.0.0.1:0", // dummy listener, won't actually be used
+		}),
+	)
+
+	// Create node (this should work without listeners since we're not calling Run)
+	node, err := dingo.New(cfg)
+	if err != nil {
+		t.Fatalf("failed to create node: %v", err)
+	}
+
+	// Test that Stop works even when no components are initialized
+	stopErr := node.Stop()
+	if stopErr != nil {
+		t.Fatalf("node shutdown failed: %v", stopErr)
+	}
+
+	// Test that calling Stop multiple times is safe
+	stopErr2 := node.Stop()
+	if stopErr2 != nil {
+		t.Fatalf("second node shutdown failed: %v", stopErr2)
+	}
+
+	t.Log("node shutdown integration test passed")
 }

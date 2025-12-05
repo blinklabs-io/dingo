@@ -113,3 +113,77 @@ func TestEventBusUnsubscribe(t *testing.T) {
 		// NOTE: this is the expected way for the test to end
 	}
 }
+
+func TestEventBusStop(t *testing.T) {
+	var testEvtType event.EventType = "test.event"
+	eb := event.NewEventBus(nil)
+
+	// Subscribe regular subscriber
+	_, subCh1 := eb.Subscribe(testEvtType)
+
+	// Subscribe function subscriber
+	doneCh := make(chan bool, 1)
+	eb.SubscribeFunc(testEvtType, func(evt event.Event) {
+		doneCh <- true
+	})
+
+	// Publish an event before Stop
+	eb.Publish(testEvtType, event.NewEvent(testEvtType, "before"))
+	select {
+	case <-doneCh:
+		// Good, event was received
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("SubscribeFunc did not receive event before Stop")
+	}
+
+	// Call Stop
+	eb.Stop()
+
+	// Drain any buffered events and verify channel eventually closes
+	channelClosed := false
+	timeout := time.After(100 * time.Millisecond)
+	for !channelClosed {
+		select {
+		case _, ok := <-subCh1:
+			if !ok {
+				channelClosed = true
+			}
+		case <-timeout:
+			t.Fatal("regular subscriber channel was not closed within timeout")
+		}
+	}
+
+	// Verify SubscribeFunc goroutine exits (by trying to publish, which should not reach the handler)
+	eb.Publish(testEvtType, event.NewEvent(testEvtType, "after"))
+	select {
+	case <-doneCh:
+		t.Fatal("SubscribeFunc should not have received event after Stop")
+	case <-time.After(100 * time.Millisecond):
+		// Good, no event received
+	}
+
+	// Verify we can still subscribe after Stop
+	_, subCh3 := eb.Subscribe(testEvtType)
+
+	// Publish to the new subscriber
+	eb.Publish(testEvtType, event.NewEvent(testEvtType, "new"))
+	select {
+	case _, ok := <-subCh3:
+		if !ok {
+			t.Fatal("new subscriber should receive event")
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("new subscriber did not receive event")
+	}
+
+	// Clean up with second Stop
+	eb.Stop()
+	select {
+	case _, ok := <-subCh3:
+		if ok {
+			t.Fatal("new subscriber channel should be closed after second Stop")
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("new subscriber channel was not closed after second Stop")
+	}
+}
