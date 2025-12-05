@@ -31,7 +31,7 @@ func (d *MetadataStoreSqlite) GetAccount(
 	if txn == nil {
 		txn = d.DB()
 	}
-	result := txn.First(ret, "staking_key = ?", stakeKey)
+	result := txn.Where("staking_key = ? AND active = ?", stakeKey, true).First(ret)
 	if result.Error != nil {
 		if errors.Is(result.Error, gorm.ErrRecordNotFound) {
 			return nil, nil
@@ -53,6 +53,7 @@ func (d *MetadataStoreSqlite) SetAccount(
 		AddedSlot:  slot,
 		Pool:       pkh,
 		Drep:       drep,
+		Active:     active,
 	}
 	onConflict := clause.OnConflict{
 		Columns:   []clause.Column{{Name: "staking_key"}},
