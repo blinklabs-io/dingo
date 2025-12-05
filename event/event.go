@@ -139,3 +139,25 @@ func (e *EventBus) Publish(eventType EventType, evt Event) {
 		e.metrics.eventsTotal.WithLabelValues(string(eventType)).Inc()
 	}
 }
+
+// Stop closes all subscriber channels and clears the subscribers map.
+// This ensures that SubscribeFunc goroutines exit cleanly during shutdown.
+func (e *EventBus) Stop() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	// Close all subscriber channels
+	for _, evtTypeSubs := range e.subscribers {
+		for _, subCh := range evtTypeSubs {
+			close(subCh)
+		}
+	}
+
+	// Clear the subscribers map
+	e.subscribers = make(map[EventType]map[EventSubscriberId]chan Event)
+
+	// Reset subscriber metrics if they exist
+	if e.metrics != nil {
+		e.metrics.subscribers.Reset()
+	}
+}

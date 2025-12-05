@@ -307,6 +307,10 @@ func (n *Node) shutdown() error {
 	}
 	n.shutdownFuncs = nil
 
+	if n.eventBus != nil {
+		n.eventBus.Stop()
+	}
+
 	n.config.logger.Debug("graceful shutdown complete")
 	close(n.done)
 	return err
