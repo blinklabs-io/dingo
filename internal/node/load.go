@@ -64,7 +64,7 @@ func Load(cfg *config.Config, logger *slog.Logger, immutableDir string) error {
 		return err
 	}
 	// Load chain
-	eventBus := event.NewEventBus(nil)
+	eventBus := event.NewEventBus(nil, logger)
 	cm, err := chain.NewManager(
 		db,
 		eventBus,

@@ -29,7 +29,7 @@ func TestUtxorpc_StartStop(t *testing.T) {
 	// Start server on ephemeral port by setting Port to 0
 	u := NewUtxorpc(UtxorpcConfig{
 		Logger:   slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		EventBus: event.NewEventBus(nil),
+		EventBus: event.NewEventBus(nil, nil),
 		Host:     "127.0.0.1",
 		Port:     0,
 	})

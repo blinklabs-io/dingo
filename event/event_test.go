@@ -24,7 +24,7 @@ import (
 func TestEventBusSingleSubscriber(t *testing.T) {
 	var testEvtData int = 999
 	var testEvtType event.EventType = "test.event"
-	eb := event.NewEventBus(nil)
+	eb := event.NewEventBus(nil, nil)
 	_, subCh := eb.Subscribe(testEvtType)
 	eb.Publish(testEvtType, event.NewEvent(testEvtType, testEvtData))
 	select {
@@ -48,7 +48,7 @@ func TestEventBusSingleSubscriber(t *testing.T) {
 func TestEventBusMultipleSubscribers(t *testing.T) {
 	var testEvtData int = 999
 	var testEvtType event.EventType = "test.event"
-	eb := event.NewEventBus(nil)
+	eb := event.NewEventBus(nil, nil)
 	_, sub1Ch := eb.Subscribe(testEvtType)
 	_, sub2Ch := eb.Subscribe(testEvtType)
 	eb.Publish(testEvtType, event.NewEvent(testEvtType, testEvtData))
@@ -99,24 +99,25 @@ func TestEventBusMultipleSubscribers(t *testing.T) {
 func TestEventBusUnsubscribe(t *testing.T) {
 	var testEvtData int = 999
 	var testEvtType event.EventType = "test.event"
-	eb := event.NewEventBus(nil)
+	eb := event.NewEventBus(nil, nil)
 	subId, subCh := eb.Subscribe(testEvtType)
 	eb.Unsubscribe(testEvtType, subId)
 	eb.Publish(testEvtType, event.NewEvent(testEvtType, testEvtData))
 	select {
 	case _, ok := <-subCh:
 		if !ok {
-			t.Fatalf("event channel closed unexpectedly")
+			// Expected: Unsubscribe closes the subscriber channel
+			return
 		}
 		t.Fatalf("received unexpected event")
 	case <-time.After(1 * time.Second):
-		// NOTE: this is the expected way for the test to end
+		t.Fatalf("subscriber channel was not closed after Unsubscribe")
 	}
 }
 
 func TestEventBusStop(t *testing.T) {
 	var testEvtType event.EventType = "test.event"
-	eb := event.NewEventBus(nil)
+	eb := event.NewEventBus(nil, nil)
 
 	// Subscribe regular subscriber
 	_, subCh1 := eb.Subscribe(testEvtType)

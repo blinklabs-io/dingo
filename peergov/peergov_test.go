@@ -32,7 +32,7 @@ import (
 
 func newMockEventBus() *event.EventBus {
 	// Use the real EventBus for simplicity
-	return event.NewEventBus(nil)
+	return event.NewEventBus(nil, nil)
 }
 
 func TestNewPeerGovernor(t *testing.T) {
