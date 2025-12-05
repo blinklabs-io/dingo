@@ -31,7 +31,8 @@ func (d *MetadataStoreSqlite) GetAccount(
 	if txn == nil {
 		txn = d.DB()
 	}
-	result := txn.Where("staking_key = ? AND active = ?", stakeKey, true).First(ret)
+	result := txn.Where("staking_key = ? AND active = ?", stakeKey, true).
+		First(ret)
 	if result.Error != nil {
 		if errors.Is(result.Error, gorm.ErrRecordNotFound) {
 			return nil, nil

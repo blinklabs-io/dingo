@@ -51,7 +51,7 @@ type Node struct {
 }
 
 func New(cfg Config) (*Node, error) {
-	eventBus := event.NewEventBus(cfg.promRegistry)
+	eventBus := event.NewEventBus(cfg.promRegistry, cfg.logger)
 	n := &Node{
 		config:   cfg,
 		eventBus: eventBus,
