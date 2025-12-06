@@ -25,6 +25,7 @@ import (
 // GetPool gets a pool
 func (d *MetadataStoreSqlite) GetPool(
 	pkh lcommon.PoolKeyHash,
+	includeInactive bool,
 	txn *gorm.DB,
 ) (*models.Pool, error) {
 	ret := &models.Pool{}
@@ -34,7 +35,11 @@ func (d *MetadataStoreSqlite) GetPool(
 	result := txn.
 		Preload(
 			"Registration",
-			func(db *gorm.DB) *gorm.DB { return db.Order("id DESC").Limit(1) },
+			func(db *gorm.DB) *gorm.DB { return db.Order("added_slot DESC").Limit(1) },
+		).
+		Preload(
+			"Retirement",
+			func(db *gorm.DB) *gorm.DB { return db.Order("added_slot DESC").Limit(1) },
 		).
 		First(
 			ret,
@@ -46,6 +51,38 @@ func (d *MetadataStoreSqlite) GetPool(
 			return nil, nil
 		}
 		return nil, result.Error
+	}
+	if !includeInactive {
+		hasReg := len(ret.Registration) > 0
+		hasRet := len(ret.Retirement) > 0
+		if !hasReg {
+			return nil, nil
+		}
+		// If the latest retirement is more recent than the latest registration,
+		// check whether the retirement epoch has passed. A retirement in the
+		// future means the pool is still active until that epoch is reached.
+		if hasRet &&
+			ret.Retirement[0].AddedSlot > ret.Registration[0].AddedSlot {
+			retEpoch := ret.Retirement[0].Epoch
+			// Determine current epoch from tip -> epoch table. If we cannot
+			// determine the current epoch, conservatively treat the pool as active.
+			var tmpTip models.Tip
+			if res := txn.Where("id = ?", tipEntryId).First(&tmpTip); res.Error != nil {
+				// Can't get tip, assume active
+				return ret, nil //nolint:nilerr
+			}
+			var curEpoch models.Epoch
+			if res := txn.Where("start_slot <= ?", tmpTip.Slot).Order("start_slot DESC").First(&curEpoch); res.Error != nil {
+				// Can't determine current epoch, assume active
+				return ret, nil //nolint:nilerr
+			}
+			if retEpoch > curEpoch.EpochId {
+				// Retirement is in the future -> pool still active
+				return ret, nil
+			}
+			// Retirement epoch has passed -> treat as inactive
+			return nil, nil
+		}
 	}
 	return ret, nil
 }

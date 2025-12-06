@@ -15,6 +15,8 @@
 package sqlite
 
 import (
+	"errors"
+
 	"github.com/blinklabs-io/dingo/database/models"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -23,21 +25,24 @@ import (
 // GetDrep gets a drep
 func (d *MetadataStoreSqlite) GetDrep(
 	cred []byte,
+	includeInactive bool,
 	txn *gorm.DB,
-) (models.Drep, error) {
-	ret := models.Drep{}
-	tmpDrep := models.Drep{}
+) (*models.Drep, error) {
+	var drep models.Drep
+	query := d.DB()
 	if txn != nil {
-		if result := txn.First(&tmpDrep, "credential = ?", cred); result.Error != nil {
-			return ret, result.Error
-		}
-	} else {
-		if result := d.DB().First(&tmpDrep, "credential = ?", cred); result.Error != nil {
-			return ret, result.Error
-		}
+		query = txn
 	}
-	ret = tmpDrep
-	return ret, nil
+	if !includeInactive {
+		query = query.Where("active = ?", true)
+	}
+	if result := query.First(&drep, "credential = ?", cred); result.Error != nil {
+		if errors.Is(result.Error, gorm.ErrRecordNotFound) {
+			return nil, nil
+		}
+		return nil, result.Error
+	}
+	return &drep, nil
 }
 
 // SetDrep saves a drep

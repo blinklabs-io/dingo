@@ -517,7 +517,7 @@ func BenchmarkAccountLookupByStakeKeyNoData(b *testing.B) {
 
 	// Benchmark lookup (on empty database for now)
 	for b.Loop() {
-		_, err := db.Metadata().GetAccount(testStakeKey, nil)
+		_, err := db.Metadata().GetAccount(testStakeKey, false, nil)
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -591,7 +591,7 @@ func BenchmarkAccountLookupByStakeKeyRealData(b *testing.B) {
 	// Benchmark lookup against real seeded data
 	for i := 0; b.Loop(); i++ {
 		key := testStakeKeys[i%len(testStakeKeys)]
-		_, err := db.Metadata().GetAccount(key, nil)
+		_, err := db.Metadata().GetAccount(key, false, nil)
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -621,7 +621,7 @@ func BenchmarkPoolLookupByKeyHashNoData(b *testing.B) {
 
 	// Benchmark lookup (on empty database for now)
 	for b.Loop() {
-		_, err := db.Metadata().GetPool(testPoolKeyHash, nil)
+		_, err := db.Metadata().GetPool(testPoolKeyHash, false, nil)
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -695,7 +695,7 @@ func BenchmarkPoolLookupByKeyHashRealData(b *testing.B) {
 	// Benchmark lookup against real seeded data
 	for i := 0; b.Loop(); i++ {
 		hash := testPoolKeyHashes[i%len(testPoolKeyHashes)]
-		_, err := db.Metadata().GetPool(hash, nil)
+		_, err := db.Metadata().GetPool(hash, false, nil)
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -725,9 +725,8 @@ func BenchmarkDRepLookupByKeyHashNoData(b *testing.B) {
 
 	// Benchmark lookup (on empty database for now)
 	for b.Loop() {
-		_, err := db.Metadata().GetDrep(testDRepCredential, nil)
-		// Don't fail on "record not found" - this is expected for non-existent DReps
-		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+		_, err := db.Metadata().GetDrep(testDRepCredential, false, nil)
+		if err != nil {
 			b.Fatal(err)
 		}
 	}
@@ -800,9 +799,8 @@ func BenchmarkDRepLookupByKeyHashRealData(b *testing.B) {
 	// Benchmark lookup against real seeded data
 	for i := 0; b.Loop(); i++ {
 		cred := testDRepCredentials[i%len(testDRepCredentials)]
-		_, err := db.Metadata().GetDrep(cred, nil)
-		// Don't fail on "record not found" - this is expected for non-existent DReps
-		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+		_, err := db.Metadata().GetDrep(cred, false, nil)
+		if err != nil {
 			b.Fatal(err)
 		}
 	}

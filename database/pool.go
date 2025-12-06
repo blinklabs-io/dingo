@@ -22,13 +22,14 @@ import (
 // GetPool returns a pool by its key hash
 func (d *Database) GetPool(
 	pkh lcommon.PoolKeyHash,
+	includeInactive bool,
 	txn *Txn,
 ) (*models.Pool, error) {
 	if txn == nil {
 		txn = d.Transaction(false)
 		defer txn.Commit() //nolint:errcheck
 	}
-	ret, err := d.metadata.GetPool(pkh, txn.Metadata())
+	ret, err := d.metadata.GetPool(pkh, includeInactive, txn.Metadata())
 	if err != nil {
 		return nil, err
 	}
