@@ -32,7 +32,7 @@ func TestMempool_Stop(t *testing.T) {
 	// Create a mempool with minimal config
 	m := NewMempool(MempoolConfig{
 		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		EventBus:     event.NewEventBus(nil),
+		EventBus:     event.NewEventBus(nil, nil),
 		PromRegistry: prometheus.NewRegistry(),
 	})
 
