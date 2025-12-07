@@ -141,6 +141,7 @@ func main() {
 	// Parse profiling flags before cobra setup (handle both --flag=value and --flag value syntax)
 	cpuprofile := ""
 	memprofile := ""
+	var newArgs []string
 	args := os.Args
 	if len(args) > 0 {
 		args = args[1:] // Skip program name
@@ -160,8 +161,17 @@ func main() {
 		case arg == "--memprofile" && i+1 < len(args):
 			memprofile = args[i+1]
 			i++ // Skip next arg
+		default:
+			// Not a profiling flag, keep it
+			newArgs = append(newArgs, arg)
 		}
 	}
+	// Reconstruct os.Args with program name (os.Args[0] is never nil in practice, but nilaway doesn't know this)
+	programName := "dingo"
+	if len(os.Args) > 0 {
+		programName = os.Args[0]
+	}
+	os.Args = append([]string{programName}, newArgs...)
 
 	// Initialize CPU profiling (starts immediately, stops on exit)
 	if cpuprofile != "" {
