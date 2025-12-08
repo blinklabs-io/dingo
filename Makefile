@@ -38,7 +38,7 @@ mod-tidy:
 clean:
 	rm -f $(BINARIES)
 
-format:
+format: mod-tidy
 	go fmt ./...
 	gofmt -s -w $(GO_FILES)
 
