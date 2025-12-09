@@ -674,12 +674,12 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 				continue
 			}
 		}
-		// Process batch in groups of 50 to stay under DB txn limits
-		for i = 0; i < len(nextBatch); i += 50 {
+		// Process batch in groups of 200 to stay under DB txn limits
+		for i = 0; i < len(nextBatch); i += 200 {
 			ls.Lock()
 			end = min(
 				len(nextBatch),
-				i+50,
+				i+200,
 			)
 			txn = ls.db.Transaction(true)
 			err = txn.Do(func(txn *database.Txn) error {
