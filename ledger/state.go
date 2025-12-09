@@ -618,7 +618,7 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 	var err error
 	var nextBatch, cachedNextBatch []ledger.Block
 	var delta *LedgerDelta
-	var deltaBatch LedgerDeltaBatch
+	var deltaBatch *LedgerDeltaBatch
 	shouldValidate := ls.config.ValidateHistorical
 	for {
 		if needsEpochRollover {
@@ -683,7 +683,7 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 			)
 			txn = ls.db.Transaction(true)
 			err = txn.Do(func(txn *database.Txn) error {
-				deltaBatch = LedgerDeltaBatch{}
+				deltaBatch = NewLedgerDeltaBatch()
 				for offset, next := range nextBatch[i:end] {
 					tmpPoint := ocommon.Point{
 						Slot: next.SlotNumber(),
@@ -724,6 +724,7 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 						shouldValidate,
 					)
 					if err != nil {
+						deltaBatch.Release()
 						return err
 					}
 					if delta != nil {
@@ -745,6 +746,7 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 								next,
 							)
 							if err != nil {
+								deltaBatch.Release()
 								return fmt.Errorf("calculate etaV: %w", err)
 							}
 							blockNonce = tmpNonce
@@ -754,6 +756,7 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 					// Determine epoch for this slot
 					tmpEpoch, err := ls.SlotToEpoch(tmpPoint.Slot)
 					if err != nil {
+						deltaBatch.Release()
 						return fmt.Errorf("slot->epoch: %w", err)
 					}
 
@@ -774,6 +777,7 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 							txn,
 						)
 						if err != nil {
+							deltaBatch.Release()
 							return err
 						}
 						// Update tip block nonce
@@ -782,8 +786,10 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 				}
 				// Apply delta batch
 				if err := deltaBatch.apply(ls, txn); err != nil {
+					deltaBatch.Release()
 					return err
 				}
+				deltaBatch.Release()
 				// Update tip in database
 				if err := ls.db.SetTip(ls.currentTip, txn); err != nil {
 					return fmt.Errorf("failed to set tip: %w", err)
@@ -842,7 +848,7 @@ func (ls *LedgerState) ledgerProcessBlock(
 	var delta *LedgerDelta
 	for i, tx := range block.Transactions() {
 		if delta == nil {
-			delta = &LedgerDelta{Point: point, BlockEraId: uint(block.Era().Id)}
+			delta = NewLedgerDelta(point, uint(block.Era().Id))
 		}
 		// Validate transaction
 		if shouldValidate {
@@ -873,8 +879,10 @@ func (ls *LedgerState) ledgerProcessBlock(
 		// Apply delta immediately if we may need the data to validate the next TX
 		if shouldValidate {
 			if err := delta.apply(ls, txn); err != nil {
+				delta.Release()
 				return nil, err
 			}
+			delta.Release()
 			delta = nil // reset
 		}
 	}
