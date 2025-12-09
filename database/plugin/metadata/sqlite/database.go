@@ -147,6 +147,7 @@ func (d *MetadataStoreSqlite) Start() error {
 			&gorm.Config{
 				Logger:                 gormlogger.Discard,
 				SkipDefaultTransaction: true,
+				PrepareStmt:            true,
 			},
 		)
 		if err != nil {
@@ -177,6 +178,7 @@ func (d *MetadataStoreSqlite) Start() error {
 			&gorm.Config{
 				Logger:                 gormlogger.Discard,
 				SkipDefaultTransaction: true,
+				PrepareStmt:            true,
 			},
 		)
 		if err != nil {
@@ -184,6 +186,15 @@ func (d *MetadataStoreSqlite) Start() error {
 		}
 	}
 	d.db = metadataDb
+	// Configure connection pool
+	sqlDB, err := d.db.DB()
+	if err != nil {
+		return err
+	}
+	sqlDB.SetMaxIdleConns(10)
+	sqlDB.SetMaxOpenConns(100)
+	sqlDB.SetConnMaxLifetime(time.Hour)
+
 	if err := d.init(); err != nil {
 		// MetadataStoreSqlite is available for recovery, so return error but keep instance
 		return err
