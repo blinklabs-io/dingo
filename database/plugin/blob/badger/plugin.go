@@ -22,8 +22,8 @@ import (
 
 // Default cache sizes for BadgerDB (in bytes)
 const (
-	DefaultBlockCacheSize = 805306368 // 768MB
-	DefaultIndexCacheSize = 268435456 // 256MB
+	DefaultBlockCacheSize = 1610612736 // 1.5GB (increased from 768MB)
+	DefaultIndexCacheSize = 536870912  // 512MB (increased from 256MB)
 )
 
 var (

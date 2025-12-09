@@ -19,10 +19,10 @@ database:
     badger:
       # Data directory for BadgerDB storage
       data-dir: ".dingo/badger"
-      # Block cache size in bytes (default: 805306368 ~768MB)
-      block-cache-size: 805306368
-      # Index cache size in bytes (default: 268435456 ~256MB)
-      index-cache-size: 268435456
+      # Block cache size in bytes (default: 1610612736 ~1.5GB)
+      block-cache-size: 1610612736
+      # Index cache size in bytes (default: 536870912 ~512MB)
+      index-cache-size: 536870912
       # Enable garbage collection (default: true)
       gc: true
     gcs:

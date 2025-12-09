@@ -26,6 +26,7 @@ import (
 	"time"
 
 	badger "github.com/dgraph-io/badger/v4"
+	"github.com/dgraph-io/badger/v4/options"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -88,7 +89,8 @@ func New(opts ...BlobStoreBadgerOptionFunc) (*BlobStoreBadger, error) {
 			WithLogger(NewBadgerLogger(db.logger)).
 			WithLoggingLevel(badger.WARNING).
 			WithBlockCacheSize(int64(db.blockCacheSize)). //nolint:gosec // blockCacheSize is controlled and reasonable
-			WithIndexCacheSize(int64(db.indexCacheSize))  //nolint:gosec // indexCacheSize is controlled and reasonable
+			WithIndexCacheSize(int64(db.indexCacheSize)). //nolint:gosec // indexCacheSize is controlled and reasonable
+			WithCompression(options.Snappy)
 		blobDb, err = badger.Open(badgerOpts)
 		if err != nil {
 			return nil, err
