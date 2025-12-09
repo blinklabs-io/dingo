@@ -12,7 +12,7 @@ require (
 	github.com/Microsoft/go-winio v0.6.2
 	github.com/aws/aws-sdk-go-v2/config v1.32.2
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.92.0
-	github.com/blinklabs-io/gouroboros v0.143.0
+	github.com/blinklabs-io/gouroboros v0.144.0
 	github.com/blinklabs-io/ouroboros-mock v0.4.0
 	github.com/blinklabs-io/plutigo v0.0.16
 	github.com/btcsuite/btcd/btcutil v1.1.6
