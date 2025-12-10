@@ -193,7 +193,10 @@ func TestScheduler_Config(t *testing.T) {
 		WorkerPoolSize: -5,
 		TaskQueueSize:  -10,
 	}
-	negativeScheduler := NewSchedulerWithConfig(100*time.Millisecond, negativeConfig)
+	negativeScheduler := NewSchedulerWithConfig(
+		100*time.Millisecond,
+		negativeConfig,
+	)
 	if negativeScheduler.workerPoolSize != 10 {
 		t.Errorf(
 			"Expected negative worker pool size to be coerced to 10, got %d",
@@ -209,8 +212,8 @@ func TestScheduler_Config(t *testing.T) {
 
 	// Test mixed valid/invalid values
 	mixedConfig := SchedulerConfig{
-		WorkerPoolSize: 15,  // Valid
-		TaskQueueSize:  -5,  // Invalid
+		WorkerPoolSize: 15, // Valid
+		TaskQueueSize:  -5, // Invalid
 	}
 	mixedScheduler := NewSchedulerWithConfig(100*time.Millisecond, mixedConfig)
 	if mixedScheduler.workerPoolSize != 15 {
