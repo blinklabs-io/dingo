@@ -285,7 +285,9 @@ func (ls *LedgerState) scheduleCleanupConsumedUtxos() {
 
 func (ls *LedgerState) cleanupConsumedUtxos() {
 	// Get the current tip, since we're querying by slot
-	tip := ls.Tip()
+	ls.RLock()
+	tip := ls.currentTip
+	ls.RUnlock()
 	// Delete UTxOs that are marked as deleted and older than our slot window
 	ls.config.Logger.Debug(
 		"cleaning up consumed UTxOs",
@@ -1037,7 +1039,9 @@ func (ls *LedgerState) RecentChainPoints(count int) ([]ocommon.Point, error) {
 func (ls *LedgerState) GetIntersectPoint(
 	points []ocommon.Point,
 ) (*ocommon.Point, error) {
-	tip := ls.Tip()
+	ls.RLock()
+	tip := ls.currentTip
+	ls.RUnlock()
 	var ret ocommon.Point
 	var tmpBlock models.Block
 	var err error
