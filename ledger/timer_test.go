@@ -117,3 +117,112 @@ func TestSchedulerRunFailFunc(t *testing.T) {
 		)
 	}
 }
+
+func TestScheduler_Config(t *testing.T) {
+	// Test default configuration
+	defaultScheduler := NewScheduler(100 * time.Millisecond)
+	if defaultScheduler.workerPoolSize != 10 {
+		t.Errorf(
+			"Expected default worker pool size 10, got %d",
+			defaultScheduler.workerPoolSize,
+		)
+	}
+	if cap(defaultScheduler.taskQueue) != 100 {
+		t.Errorf(
+			"Expected default task queue size 100, got %d",
+			cap(defaultScheduler.taskQueue),
+		)
+	}
+
+	// Test custom configuration
+	config := SchedulerConfig{
+		WorkerPoolSize: 5,
+		TaskQueueSize:  50,
+	}
+	customScheduler := NewSchedulerWithConfig(100*time.Millisecond, config)
+	if customScheduler.workerPoolSize != 5 {
+		t.Errorf(
+			"Expected custom worker pool size 5, got %d",
+			customScheduler.workerPoolSize,
+		)
+	}
+	if cap(customScheduler.taskQueue) != 50 {
+		t.Errorf(
+			"Expected custom task queue size 50, got %d",
+			cap(customScheduler.taskQueue),
+		)
+	}
+
+	// Test default config function
+	defaultConfig := DefaultSchedulerConfig()
+	if defaultConfig.WorkerPoolSize != 10 {
+		t.Errorf(
+			"Expected default config worker pool size 10, got %d",
+			defaultConfig.WorkerPoolSize,
+		)
+	}
+	if defaultConfig.TaskQueueSize != 100 {
+		t.Errorf(
+			"Expected default config task queue size 100, got %d",
+			defaultConfig.TaskQueueSize,
+		)
+	}
+
+	// Test validation/coercion of invalid values
+	// Test zero values
+	zeroConfig := SchedulerConfig{
+		WorkerPoolSize: 0,
+		TaskQueueSize:  0,
+	}
+	zeroScheduler := NewSchedulerWithConfig(100*time.Millisecond, zeroConfig)
+	if zeroScheduler.workerPoolSize != 10 {
+		t.Errorf(
+			"Expected zero worker pool size to be coerced to 10, got %d",
+			zeroScheduler.workerPoolSize,
+		)
+	}
+	if cap(zeroScheduler.taskQueue) != 100 {
+		t.Errorf(
+			"Expected zero task queue size to be coerced to 100, got %d",
+			cap(zeroScheduler.taskQueue),
+		)
+	}
+
+	// Test negative values
+	negativeConfig := SchedulerConfig{
+		WorkerPoolSize: -5,
+		TaskQueueSize:  -10,
+	}
+	negativeScheduler := NewSchedulerWithConfig(100*time.Millisecond, negativeConfig)
+	if negativeScheduler.workerPoolSize != 10 {
+		t.Errorf(
+			"Expected negative worker pool size to be coerced to 10, got %d",
+			negativeScheduler.workerPoolSize,
+		)
+	}
+	if cap(negativeScheduler.taskQueue) != 100 {
+		t.Errorf(
+			"Expected negative task queue size to be coerced to 100, got %d",
+			cap(negativeScheduler.taskQueue),
+		)
+	}
+
+	// Test mixed valid/invalid values
+	mixedConfig := SchedulerConfig{
+		WorkerPoolSize: 15,  // Valid
+		TaskQueueSize:  -5,  // Invalid
+	}
+	mixedScheduler := NewSchedulerWithConfig(100*time.Millisecond, mixedConfig)
+	if mixedScheduler.workerPoolSize != 15 {
+		t.Errorf(
+			"Expected valid worker pool size 15 to be preserved, got %d",
+			mixedScheduler.workerPoolSize,
+		)
+	}
+	if cap(mixedScheduler.taskQueue) != 100 {
+		t.Errorf(
+			"Expected invalid task queue size to be coerced to 100, got %d",
+			cap(mixedScheduler.taskQueue),
+		)
+	}
+}
