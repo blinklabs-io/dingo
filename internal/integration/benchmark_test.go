@@ -97,6 +97,18 @@ func loadBlockData(numBlocks int) ([][]byte, error) {
 	return blocks[:numBlocks], nil
 }
 
+// canCreateDatabase tests if a database configuration is actually usable
+func canCreateDatabase(config *database.Config) bool {
+	db, err := database.New(config)
+	if db != nil {
+		defer db.Close()
+	}
+	if err != nil {
+		return false
+	}
+	return true
+}
+
 // getTestBackends returns a slice of test backends for benchmarking
 func getTestBackends(b *testing.B, diskDataDir string) []struct {
 	config *database.Config
@@ -124,7 +136,7 @@ func getTestBackends(b *testing.B, diskDataDir string) []struct {
 		},
 	}
 
-	// Add cloud backends if credentials are available
+	// Add cloud backends if credentials are available AND database can be created
 	if hasGCSCredentials() {
 		testBucket := os.Getenv("DINGO_TEST_GCS_BUCKET")
 		if testBucket == "" {
@@ -132,17 +144,20 @@ func getTestBackends(b *testing.B, diskDataDir string) []struct {
 		}
 		// Use path prefix for isolation instead of unique bucket names
 		testPrefix := strings.ReplaceAll(b.Name(), "/", "-")
-		backends = append(backends, struct {
-			config *database.Config
-			name   string
-		}{
-			name: "GCS",
-			config: &database.Config{
-				BlobPlugin:     "gcs",
-				DataDir:        "gcs://" + testBucket + "/" + testPrefix,
-				MetadataPlugin: "sqlite",
-			},
-		})
+		gcsConfig := &database.Config{
+			BlobPlugin:     "gcs",
+			DataDir:        "gcs://" + testBucket + "/" + testPrefix,
+			MetadataPlugin: "sqlite",
+		}
+		if canCreateDatabase(gcsConfig) {
+			backends = append(backends, struct {
+				config *database.Config
+				name   string
+			}{
+				name:   "GCS",
+				config: gcsConfig,
+			})
+		}
 	}
 
 	if hasS3Credentials() {
@@ -152,17 +167,20 @@ func getTestBackends(b *testing.B, diskDataDir string) []struct {
 		}
 		// Use path prefix for isolation instead of unique bucket names
 		testPrefix := strings.ReplaceAll(b.Name(), "/", "-")
-		backends = append(backends, struct {
-			config *database.Config
-			name   string
-		}{
-			name: "S3",
-			config: &database.Config{
-				BlobPlugin:     "s3",
-				DataDir:        "s3://" + testBucket + "/" + testPrefix,
-				MetadataPlugin: "sqlite",
-			},
-		})
+		s3Config := &database.Config{
+			BlobPlugin:     "s3",
+			DataDir:        "s3://" + testBucket + "/" + testPrefix,
+			MetadataPlugin: "sqlite",
+		}
+		if canCreateDatabase(s3Config) {
+			backends = append(backends, struct {
+				config *database.Config
+				name   string
+			}{
+				name:   "S3",
+				config: s3Config,
+			})
+		}
 	}
 
 	return backends
