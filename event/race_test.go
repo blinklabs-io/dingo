@@ -11,7 +11,7 @@ import (
 // surface races; the implementation should be deterministic and not panic.
 func TestPublishUnsubscribeRace(t *testing.T) {
 	const iters = 1000
-	for i := 0; i < iters; i++ {
+	for range iters {
 		eb := NewEventBus(nil, nil)
 		typ := EventType("race.test")
 
@@ -25,7 +25,7 @@ func TestPublishUnsubscribeRace(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			// Publish many events to increase chance of overlapping with close
-			for j := 0; j < 10; j++ {
+			for j := range 10 {
 				eb.Publish(typ, NewEvent(typ, j))
 			}
 		}()

@@ -243,7 +243,13 @@ func (e *EventBus) Publish(eventType EventType, evt Event) {
 			}
 			// Log the delivery error/panic for observability using provided logger if present
 			if e.Logger != nil {
-				e.Logger.Debug("event delivery error", "type", eventType, "err", deliverErr)
+				e.Logger.Debug(
+					"event delivery error",
+					"type",
+					eventType,
+					"err",
+					deliverErr,
+				)
 			} else {
 				slog.Default().Debug("event delivery error", "type", eventType, "err", deliverErr)
 			}
