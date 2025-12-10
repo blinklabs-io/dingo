@@ -47,6 +47,209 @@ const (
 	cleanupConsumedUtxosSlotWindow = 50000 // TODO: calculate this from params (#395)
 )
 
+// DatabaseOperation represents an asynchronous database operation
+type DatabaseOperation struct {
+	// Operation function that performs the database work
+	OpFunc func(db *database.Database) error
+	// Channel to send the result back. Must be non-nil and buffered to avoid blocking.
+	// If nil, the operation will be executed but the result will be discarded (fire and forget).
+	ResultChan chan<- DatabaseResult
+}
+
+// DatabaseResult represents the result of a database operation
+type DatabaseResult struct {
+	Error error
+}
+
+// DatabaseWorkerPoolConfig holds configuration for the database worker pool
+type DatabaseWorkerPoolConfig struct {
+	WorkerPoolSize int
+	TaskQueueSize  int
+	Disabled       bool
+}
+
+// DefaultDatabaseWorkerPoolConfig returns the default configuration for the database worker pool
+func DefaultDatabaseWorkerPoolConfig() DatabaseWorkerPoolConfig {
+	return DatabaseWorkerPoolConfig{
+		WorkerPoolSize: 5,
+		TaskQueueSize:  50,
+	}
+}
+
+// DatabaseWorkerPool manages a pool of workers for async database operations
+type DatabaseWorkerPool struct {
+	db         *database.Database
+	taskQueue  chan DatabaseOperation
+	shutdownCh chan struct{}
+	wg         sync.WaitGroup
+	closed     bool
+	mu         sync.Mutex
+}
+
+// NewDatabaseWorkerPool creates a new database worker pool
+func NewDatabaseWorkerPool(
+	db *database.Database,
+	config DatabaseWorkerPoolConfig,
+) *DatabaseWorkerPool {
+	if config.WorkerPoolSize <= 0 {
+		config.WorkerPoolSize = 5 // Default to 5 workers
+	}
+	if config.TaskQueueSize <= 0 {
+		config.TaskQueueSize = 50 // Default queue size
+	}
+
+	pool := &DatabaseWorkerPool{
+		db:         db,
+		taskQueue:  make(chan DatabaseOperation, config.TaskQueueSize),
+		shutdownCh: make(chan struct{}),
+		closed:     false,
+	}
+
+	// Start workers
+	for i := 0; i < config.WorkerPoolSize; i++ {
+		pool.wg.Add(1)
+		go pool.worker()
+	}
+
+	return pool
+}
+
+// worker runs a single database worker
+func (p *DatabaseWorkerPool) worker() {
+	defer p.wg.Done()
+
+	for {
+		select {
+		case op := <-p.taskQueue:
+			// Execute the database operation
+			result := DatabaseResult{}
+			result.Error = op.OpFunc(p.db)
+			if op.ResultChan != nil {
+				select {
+				case op.ResultChan <- result:
+				default:
+					// If result channel is full, skip (fire and forget)
+				}
+			}
+		case <-p.shutdownCh:
+			return
+		}
+	}
+}
+
+// Submit submits a database operation for async execution
+func (p *DatabaseWorkerPool) Submit(op DatabaseOperation) {
+	p.mu.Lock()
+	if p.closed {
+		p.mu.Unlock()
+		if op.ResultChan != nil {
+			select {
+			case op.ResultChan <- DatabaseResult{Error: errors.New("database worker pool is shut down")}:
+			default:
+				// If result channel is full, skip
+			}
+		}
+		return
+	}
+
+	select {
+	case p.taskQueue <- op:
+		// Operation submitted successfully
+	default:
+		// Queue is full, this shouldn't happen in normal operation
+		// but we could add backpressure handling here
+		if op.ResultChan != nil {
+			select {
+			case op.ResultChan <- DatabaseResult{Error: errors.New("database worker pool queue full")}:
+			default:
+				// If result channel is full, skip
+			}
+		}
+	}
+	p.mu.Unlock()
+}
+
+// SubmitAsyncDBOperation submits a database operation for execution on the worker pool.
+// This method blocks waiting for the result and must be called after Start() and before Close().
+// If the worker pool is disabled, it falls back to synchronous execution.
+func (ls *LedgerState) SubmitAsyncDBOperation(
+	opFunc func(db *database.Database) error,
+) error {
+	if ls.dbWorkerPool == nil {
+		// Fallback to synchronous execution when pool is disabled
+		return opFunc(ls.db)
+	}
+
+	resultChan := make(chan DatabaseResult, 1)
+
+	ls.dbWorkerPool.Submit(DatabaseOperation{
+		OpFunc:     opFunc,
+		ResultChan: resultChan,
+	})
+
+	// Wait for the result
+	result := <-resultChan
+	return result.Error
+}
+
+// SubmitAsyncDBTxn submits a database transaction operation for execution on the worker pool.
+// This method blocks waiting for the result and must be called after Start() and before Close().
+func (ls *LedgerState) SubmitAsyncDBTxn(
+	opFunc func(txn *database.Txn) error,
+	readWrite bool,
+) error {
+	return ls.SubmitAsyncDBOperation(func(db *database.Database) error {
+		txn := db.Transaction(readWrite)
+		return txn.Do(opFunc)
+	})
+}
+
+// SubmitAsyncDBReadTxn submits a read-only database transaction operation for execution on the worker pool.
+// This method blocks waiting for the result and must be called after Start() and before Close().
+func (ls *LedgerState) SubmitAsyncDBReadTxn(
+	opFunc func(txn *database.Txn) error,
+) error {
+	return ls.SubmitAsyncDBTxn(opFunc, false)
+}
+
+// Shutdown gracefully shuts down the worker pool
+func (p *DatabaseWorkerPool) Shutdown() {
+	p.mu.Lock()
+	if p.closed {
+		p.mu.Unlock()
+		return
+	}
+	p.closed = true
+	taskQueue := p.taskQueue
+	p.taskQueue = nil
+	p.mu.Unlock()
+
+	close(p.shutdownCh)
+	p.wg.Wait()
+
+	// Drain any remaining operations from the queue and send shutdown errors
+drainLoop:
+	for {
+		select {
+		case op := <-taskQueue:
+			// Send shutdown error to the operation's result channel
+			if op.ResultChan != nil {
+				select {
+				case op.ResultChan <- DatabaseResult{Error: errors.New("database worker pool shutting down")}:
+				default:
+					// If result channel is full or closed, continue
+				}
+			}
+		default:
+			// No more operations in queue
+			break drainLoop
+		}
+	}
+
+	// Close the task queue to prevent further sends
+	close(taskQueue)
+}
+
 type ChainsyncState string
 
 const (
@@ -65,6 +268,7 @@ type LedgerStateConfig struct {
 	BlockfetchRequestRangeFunc BlockfetchRequestRangeFunc
 	ValidateHistorical         bool
 	ForgeBlocks                bool
+	DatabaseWorkerPoolConfig   DatabaseWorkerPoolConfig
 }
 
 // BlockfetchRequestRangeFunc describes a callback function used to start a blockfetch request for
@@ -94,6 +298,7 @@ type LedgerState struct {
 	epochCache                       []models.Epoch
 	currentTip                       ochainsync.Tip
 	currentEpoch                     models.Epoch
+	dbWorkerPool                     *DatabaseWorkerPool
 	sync.RWMutex
 	chainsyncMutex             sync.Mutex
 	chainsyncBlockfetchMutex   sync.Mutex
@@ -114,6 +319,11 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 		// We do this so we don't have to add guards around every log operation
 		cfg.Logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
 	}
+	// Initialize database worker pool config with defaults if not set
+	if cfg.DatabaseWorkerPoolConfig.WorkerPoolSize == 0 &&
+		cfg.DatabaseWorkerPoolConfig.TaskQueueSize == 0 {
+		cfg.DatabaseWorkerPoolConfig = DefaultDatabaseWorkerPoolConfig()
+	}
 	ls := &LedgerState{
 		config:         cfg,
 		chainsyncState: InitChainsyncState,
@@ -126,6 +336,22 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 func (ls *LedgerState) Start() error {
 	// Init metrics
 	ls.metrics.init(ls.config.PromRegistry)
+
+	// Initialize database worker pool for async operations
+	if !ls.config.DatabaseWorkerPoolConfig.Disabled {
+		ls.dbWorkerPool = NewDatabaseWorkerPool(
+			ls.db,
+			ls.config.DatabaseWorkerPoolConfig,
+		)
+		ls.config.Logger.Info(
+			"database worker pool initialized",
+			"workers", ls.config.DatabaseWorkerPoolConfig.WorkerPoolSize,
+			"queue_size", ls.config.DatabaseWorkerPoolConfig.TaskQueueSize,
+		)
+	} else {
+		ls.config.Logger.Info("database worker pool disabled")
+	}
+
 	// Setup event handlers
 	if ls.config.EventBus != nil {
 		ls.config.EventBus.SubscribeFunc(
@@ -140,10 +366,9 @@ func (ls *LedgerState) Start() error {
 	// Schedule periodic process to purge consumed UTxOs outside of the rollback window
 	ls.scheduleCleanupConsumedUtxos()
 	// Load epoch info from DB
-	txn := ls.db.Transaction(false)
-	err := txn.Do(func(txn *database.Txn) error {
+	err := ls.SubmitAsyncDBTxn(func(txn *database.Txn) error {
 		return ls.loadEpochs(txn)
-	})
+	}, true)
 	if err != nil {
 		return fmt.Errorf("failed to load epoch info: %w", err)
 	}
@@ -209,6 +434,12 @@ func (ls *LedgerState) Close() error {
 	}
 	ls.closed = true
 	ls.Unlock()
+
+	// Shutdown database worker pool
+	if ls.dbWorkerPool != nil {
+		ls.dbWorkerPool.Shutdown()
+	}
+
 	return ls.db.Close()
 }
 
@@ -235,6 +466,7 @@ func (ls *LedgerState) initScheduler() error {
 	interval := time.Duration(slotLength) * time.Millisecond
 	ls.Scheduler = NewScheduler(interval)
 	ls.Scheduler.Start()
+
 	return nil
 }
 
@@ -319,8 +551,7 @@ func (ls *LedgerState) cleanupConsumedUtxos() {
 
 func (ls *LedgerState) rollback(point ocommon.Point) error {
 	// Start a transaction
-	txn := ls.db.Transaction(true)
-	err := txn.Do(func(txn *database.Txn) error {
+	err := ls.SubmitAsyncDBTxn(func(txn *database.Txn) error {
 		// Delete rolled-back UTxOs
 		err := ls.db.UtxosDeleteRolledback(point.Slot, txn)
 		if err != nil {
@@ -350,7 +581,7 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 		}
 		ls.updateTipMetrics()
 		return nil
-	})
+	}, true)
 	if err != nil {
 		return err
 	}
@@ -616,7 +847,6 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 	var nextEpochEraId uint
 	var needsEpochRollover bool
 	var end, i int
-	var txn *database.Txn
 	var err error
 	var nextBatch, cachedNextBatch []ledger.Block
 	var delta *LedgerDelta
@@ -626,8 +856,7 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 		if needsEpochRollover {
 			ls.Lock()
 			needsEpochRollover = false
-			txn := ls.db.Transaction(true)
-			err := txn.Do(func(txn *database.Txn) error {
+			err := ls.SubmitAsyncDBTxn(func(txn *database.Txn) error {
 				// Check for era change
 				if nextEpochEraId != ls.currentEra.Id {
 					// Transition through every era between the current and the target era
@@ -642,7 +871,7 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 					return err
 				}
 				return nil
-			})
+			}, true)
 			ls.Unlock()
 			if err != nil {
 				ls.config.Logger.Error(
@@ -683,8 +912,7 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 				len(nextBatch),
 				i+200,
 			)
-			txn = ls.db.Transaction(true)
-			err = txn.Do(func(txn *database.Txn) error {
+			err = ls.SubmitAsyncDBTxn(func(txn *database.Txn) error {
 				deltaBatch = NewLedgerDeltaBatch()
 				for offset, next := range nextBatch[i:end] {
 					tmpPoint := ocommon.Point{
@@ -798,7 +1026,7 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 				}
 				ls.updateTipMetrics()
 				return nil
-			})
+			}, true)
 			if err != nil {
 				ls.Unlock()
 				ls.config.Logger.Error(
