@@ -38,6 +38,8 @@ func TestDeliverFailureUnregisters(t *testing.T) {
 		}
 	}
 	if !sub.closed {
-		t.Fatalf("expected subscriber Close() to be called after deliver failure")
+		t.Fatalf(
+			"expected subscriber Close() to be called after deliver failure",
+		)
 	}
 }
