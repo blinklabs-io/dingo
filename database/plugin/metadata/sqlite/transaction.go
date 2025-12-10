@@ -1198,7 +1198,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 				// Build CASE statement for batch update
 				var ids []uint
 				var whenClauses []string
-				var values []interface{}
+				var values []any
 
 				for unifiedID, specializedID := range certIDUpdates {
 					ids = append(ids, unifiedID)
