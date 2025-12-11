@@ -16,6 +16,7 @@ package types
 
 import (
 	"database/sql/driver"
+	"errors"
 	"fmt"
 	"math/big"
 	"strconv"
@@ -71,4 +72,57 @@ func (u *Uint64) Scan(val any) error {
 	}
 	*u = Uint64(tmpUint)
 	return nil
+}
+
+// ErrBlobKeyNotFound is returned by blob operations when a key is missing
+var ErrBlobKeyNotFound = errors.New("blob key not found")
+
+// ErrTxnWrongType is returned when a transaction has the wrong type
+var ErrTxnWrongType = errors.New("invalid transaction type")
+
+// ErrNilTxn is returned when a nil transaction is provided where a valid transaction is required
+var ErrNilTxn = errors.New("nil transaction")
+
+// ErrNoStoreAvailable is returned when no blob or metadata store is available
+var ErrNoStoreAvailable = errors.New("no store available")
+
+// ErrBlobStoreUnavailable is returned when blob store cannot be accessed
+var ErrBlobStoreUnavailable = errors.New("blob store unavailable")
+
+// BlobItem represents a value returned by an iterator
+type BlobItem interface {
+	Key() []byte
+	ValueCopy(dst []byte) ([]byte, error)
+}
+
+// BlobIterator provides key iteration over the blob store.
+//
+// Important lifecycle constraint: items returned by `Item()` must only be
+// accessed while the underlying transaction used to create the iterator is
+// still active. Implementations may validate transaction state at access
+// time (for example `ValueCopy` may fail if the transaction has been committed
+// or rolled back). Typical usage iterates and accesses item values within the
+// same transaction scope.
+type BlobIterator interface {
+	Rewind()
+	Seek(prefix []byte)
+	Valid() bool
+	ValidForPrefix(prefix []byte) bool
+	Next()
+	Item() BlobItem
+	Close()
+	Err() error
+}
+
+// BlobIteratorOptions configures blob iterator creation
+type BlobIteratorOptions struct {
+	Prefix  []byte
+	Reverse bool
+}
+
+// Txn is a simple transaction handle for commit/rollback only.
+// Database layer (Txn) coordinates metadata and blob operations separately.
+type Txn interface {
+	Commit() error
+	Rollback() error
 }

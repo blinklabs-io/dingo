@@ -15,58 +15,73 @@
 package database
 
 import (
+	"errors"
 	"fmt"
 	"sync"
 	"time"
 
-	"github.com/dgraph-io/badger/v4"
-	"gorm.io/gorm"
+	"github.com/blinklabs-io/dingo/database/types"
 )
 
-// Txn is a wrapper around the transaction objects for the underlying DB engines
+// Txn is a wrapper that coordinates both metadata and blob transactions.
+// Metadata and blob are first-class siblings, not nested.
 type Txn struct {
 	db          *Database
-	blobTxn     *badger.Txn
-	metadataTxn *gorm.DB
+	blobTxn     types.Txn
+	metadataTxn types.Txn
 	lock        sync.Mutex
 	finished    bool
 	readWrite   bool
 }
 
 func NewTxn(db *Database, readWrite bool) *Txn {
-	return &Txn{
-		db:          db,
-		readWrite:   readWrite,
-		blobTxn:     db.Blob().NewTransaction(readWrite),
-		metadataTxn: db.Metadata().Transaction(),
+	t := &Txn{db: db, readWrite: readWrite}
+	if bs := db.Blob(); bs != nil {
+		t.blobTxn = bs.NewTransaction(readWrite)
 	}
+	if ms := db.Metadata(); ms != nil {
+		t.metadataTxn = ms.Transaction()
+		if t.metadataTxn == nil {
+			db.logger.Warn(
+				"metadata transaction is nil; callers must nil-check txn.Metadata()",
+			)
+		}
+	}
+	return t
 }
 
 func NewBlobOnlyTxn(db *Database, readWrite bool) *Txn {
-	return &Txn{
-		db:        db,
-		readWrite: readWrite,
-		blobTxn:   db.Blob().NewTransaction(readWrite),
+	t := &Txn{db: db, readWrite: readWrite}
+	if bs := db.Blob(); bs != nil {
+		t.blobTxn = bs.NewTransaction(readWrite)
 	}
+	return t
 }
 
 func NewMetadataOnlyTxn(db *Database, readWrite bool) *Txn {
-	return &Txn{
-		db:          db,
-		readWrite:   readWrite,
-		metadataTxn: db.Metadata().Transaction(),
+	t := &Txn{db: db, readWrite: readWrite}
+	if ms := db.Metadata(); ms != nil {
+		t.metadataTxn = ms.Transaction()
+		if t.metadataTxn == nil {
+			db.logger.Warn(
+				"metadata transaction is nil; callers must nil-check txn.Metadata()",
+			)
+		}
 	}
+	return t
 }
 
 func (t *Txn) DB() *Database {
 	return t.db
 }
 
-func (t *Txn) Metadata() *gorm.DB {
+// Metadata returns the underlying metadata transaction handle
+func (t *Txn) Metadata() types.Txn {
 	return t.metadataTxn
 }
 
-func (t *Txn) Blob() *badger.Txn {
+// Blob returns the blob transaction handle
+func (t *Txn) Blob() types.Txn {
 	return t.blobTxn
 }
 
@@ -95,6 +110,11 @@ func (t *Txn) Commit() error {
 	if t.finished {
 		return nil
 	}
+	// Fail fast if neither store is available for a read-write transaction
+	if t.readWrite && t.blobTxn == nil && t.metadataTxn == nil {
+		t.finished = true
+		return types.ErrNoStoreAvailable
+	}
 	// No need to commit for read-only, but we do want to free up resources
 	if !t.readWrite {
 		return t.rollback()
@@ -103,21 +123,38 @@ func (t *Txn) Commit() error {
 	if t.blobTxn != nil && t.metadataTxn != nil {
 		commitTimestamp := time.Now().UnixMilli()
 		if err := t.db.updateCommitTimestamp(t, commitTimestamp); err != nil {
-			return err
+			// Rollback both transactions on timestamp update failure
+			_ = t.blobTxn.Rollback()
+			_ = t.metadataTxn.Rollback()
+			t.finished = true
+			return fmt.Errorf("failed to update commit timestamp: %w", err)
 		}
 	}
-	// Commit sqlite transaction
-	if t.metadataTxn != nil {
-		if result := t.metadataTxn.Commit(); result.Error != nil {
-			// Failed to commit metadata DB, so discard blob txn
-			t.blobTxn.Discard()
-			return result.Error
-		}
-	}
-	// Commit badger transaction
+	// Commit blob transaction first (so if this fails, metadata never commits)
 	if t.blobTxn != nil {
 		if err := t.blobTxn.Commit(); err != nil {
-			return err
+			// Blob commit failed - rollback metadata only
+			// Note: Most DB engines auto-rollback on commit failure
+			if t.metadataTxn != nil {
+				_ = t.metadataTxn.Rollback()
+			}
+			t.finished = true
+			return fmt.Errorf("blob commit failed: %w", err)
+		}
+	}
+	// Commit metadata transaction
+	if t.metadataTxn != nil {
+		if err := t.metadataTxn.Commit(); err != nil {
+			t.db.logger.Error(
+				"partial commit: blob committed, metadata failed",
+				"error", err,
+			)
+			_ = t.metadataTxn.Rollback()
+			t.finished = true
+			return fmt.Errorf(
+				"partial commit: metadata commit failed after blob commit: %w",
+				err,
+			)
 		}
 	}
 	t.finished = true
@@ -134,14 +171,17 @@ func (t *Txn) rollback() error {
 	if t.finished {
 		return nil
 	}
+	var errs []error
 	if t.blobTxn != nil {
-		t.blobTxn.Discard()
+		if err := t.blobTxn.Rollback(); err != nil {
+			errs = append(errs, fmt.Errorf("blob rollback: %w", err))
+		}
 	}
 	if t.metadataTxn != nil {
-		if result := t.metadataTxn.Rollback(); result.Error != nil {
-			return result.Error
+		if err := t.metadataTxn.Rollback(); err != nil {
+			errs = append(errs, fmt.Errorf("metadata rollback: %w", err))
 		}
 	}
 	t.finished = true
-	return nil
+	return errors.Join(errs...)
 }

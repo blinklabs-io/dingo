@@ -18,6 +18,7 @@ import (
 	"errors"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/types"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"gorm.io/gorm"
 )
@@ -25,13 +26,14 @@ import (
 // GetScript returns the script content by its hash
 func (d *MetadataStoreSqlite) GetScript(
 	hash lcommon.ScriptHash,
-	txn *gorm.DB,
+	txn types.Txn,
 ) (*models.Script, error) {
 	ret := &models.Script{}
-	if txn == nil {
-		txn = d.DB()
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return nil, err
 	}
-	result := txn.First(ret, "hash = ?", hash[:])
+	result := db.First(ret, "hash = ?", hash[:])
 	if result.Error != nil {
 		if errors.Is(result.Error, gorm.ErrRecordNotFound) {
 			return nil, nil

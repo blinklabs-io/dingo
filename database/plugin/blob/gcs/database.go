@@ -20,11 +20,14 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"sort"
 	"strings"
 	"time"
 
 	"cloud.google.com/go/storage"
+	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/prometheus/client_golang/prometheus"
+	"google.golang.org/api/iterator"
 	"google.golang.org/api/option"
 )
 
@@ -38,6 +41,16 @@ type BlobStoreGCS struct {
 	startupCancel   context.CancelFunc
 	bucketName      string
 	credentialsFile string
+	timeout         time.Duration
+}
+
+// gcsTxn wraps GCS operations to satisfy types.Txn and types.BlobTx
+// Operations are not atomic but respect the transaction interface used by the
+// database layer.
+type gcsTxn struct {
+	store     *BlobStoreGCS
+	finished  bool
+	readWrite bool
 }
 
 // New creates a new GCS-backed blob store.
@@ -81,6 +94,317 @@ func NewWithOptions(opts ...BlobStoreGCSOptionFunc) (*BlobStoreGCS, error) {
 	return db, nil
 }
 
+func (d *BlobStoreGCS) opContext() (context.Context, context.CancelFunc) {
+	timeout := d.timeout
+	if timeout == 0 {
+		timeout = 60 * time.Second
+	}
+	return context.WithTimeout(context.Background(), timeout)
+}
+
+// Close closes the GCS client.
+func (d *BlobStoreGCS) Close() error {
+	if d.client == nil {
+		return nil
+	}
+	err := d.client.Close()
+	d.client = nil
+	return err
+}
+
+// NewTransaction returns a lightweight transaction wrapper.
+func (d *BlobStoreGCS) NewTransaction(readWrite bool) types.Txn {
+	return &gcsTxn{store: d, readWrite: readWrite}
+}
+
+func (t *gcsTxn) assertWritable() error {
+	if !t.readWrite {
+		return errors.New("transaction is read-only")
+	}
+	return nil
+}
+
+func (d *BlobStoreGCS) validateTxn(txn types.Txn) error {
+	if txn == nil {
+		return types.ErrNilTxn
+	}
+	t, ok := txn.(*gcsTxn)
+	if !ok || t.store != d {
+		return types.ErrTxnWrongType
+	}
+	if t.finished {
+		return errors.New("transaction already finished")
+	}
+	if d.bucket == nil || d.client == nil {
+		return types.ErrBlobStoreUnavailable
+	}
+	return nil
+}
+
+// Get retrieves a value from GCS within a transaction
+func (d *BlobStoreGCS) Get(txn types.Txn, key []byte) ([]byte, error) {
+	if err := d.validateTxn(txn); err != nil {
+		return nil, err
+	}
+	ctx, cancel := d.opContext()
+	defer cancel()
+	r, err := d.bucket.Object(string(key)).NewReader(ctx)
+	if err != nil {
+		if errors.Is(err, storage.ErrObjectNotExist) {
+			return nil, types.ErrBlobKeyNotFound
+		}
+		wrappedErr := fmt.Errorf(
+			"read object %q from bucket %q: %w",
+			string(key),
+			d.bucketName,
+			err,
+		)
+		d.logger.Errorf("%v", wrappedErr)
+		return nil, wrappedErr
+	}
+	defer r.Close()
+
+	ciphertext, err := io.ReadAll(r)
+	if err != nil {
+		wrappedErr := fmt.Errorf(
+			"read object %q from bucket %q: %w",
+			string(key),
+			d.bucketName,
+			err,
+		)
+		d.logger.Errorf("%v", wrappedErr)
+		return nil, wrappedErr
+	}
+	return ciphertext, nil
+}
+
+// Set stores a key-value pair in GCS within a transaction
+func (d *BlobStoreGCS) Set(txn types.Txn, key, val []byte) error {
+	if err := d.validateTxn(txn); err != nil {
+		return err
+	}
+	t := txn.(*gcsTxn) // safe after validateTxn
+	if err := t.assertWritable(); err != nil {
+		return err
+	}
+	ctx, cancel := d.opContext()
+	defer cancel()
+	w := d.bucket.Object(string(key)).NewWriter(ctx)
+	if _, err := w.Write(val); err != nil {
+		_ = w.Close()
+		d.logger.Errorf("failed to write object %q: %v", string(key), err)
+		return err
+	}
+	if err := w.Close(); err != nil {
+		d.logger.Errorf(
+			"failed to close writer for %q: %v",
+			string(key),
+			err,
+		)
+		return err
+	}
+	return nil
+}
+
+// Delete removes a key from GCS within a transaction
+func (d *BlobStoreGCS) Delete(txn types.Txn, key []byte) error {
+	if err := d.validateTxn(txn); err != nil {
+		return err
+	}
+	t := txn.(*gcsTxn) // safe after validateTxn
+	if err := t.assertWritable(); err != nil {
+		return err
+	}
+	ctx, cancel := d.opContext()
+	defer cancel()
+	if err := d.bucket.Object(string(key)).Delete(ctx); err != nil {
+		if errors.Is(err, storage.ErrObjectNotExist) {
+			return types.ErrBlobKeyNotFound
+		}
+		d.logger.Errorf("gcs delete %q failed: %v", string(key), err)
+		return err
+	}
+	return nil
+}
+
+// NewIterator creates an iterator for GCS within a transaction.
+//
+// Important: items returned by the iterator's `Item()` must only be
+// accessed while the transaction used to create the iterator is still
+// active. Implementations may validate transaction state at access time
+// (for example `ValueCopy` may fail if the transaction has been committed
+// or rolled back). Typical usage iterates and accesses item values within
+// the same transaction scope.
+func (d *BlobStoreGCS) NewIterator(
+	txn types.Txn,
+	opts types.BlobIteratorOptions,
+) types.BlobIterator {
+	if err := d.validateTxn(txn); err != nil {
+		return &gcsErrorIterator{err: err}
+	}
+	keys, err := d.listKeys(opts)
+	if err != nil {
+		d.logger.Errorf("gcs list failed: %v", err)
+		return &gcsIterator{
+			store:   d,
+			txn:     txn,
+			keys:    []string{},
+			reverse: opts.Reverse,
+			err:     err,
+		}
+	}
+	return &gcsIterator{store: d, txn: txn, keys: keys, reverse: opts.Reverse}
+}
+
+func (t *gcsTxn) Commit() error {
+	if t.finished {
+		return nil
+	}
+	t.finished = true
+	return nil
+}
+
+func (t *gcsTxn) Rollback() error {
+	if t.finished {
+		return nil
+	}
+	t.finished = true
+	return nil
+}
+
+type gcsIterator struct {
+	store   *BlobStoreGCS
+	txn     types.Txn
+	keys    []string
+	idx     int
+	reverse bool
+	err     error
+}
+
+// Note: Iterator items (gcsItem) must only be accessed while the transaction (txn)
+// is still active. ValueCopy validates the transaction state at access time, so if
+// the transaction is committed or rolled back before accessing an item, it will fail.
+// This is a minor edge case since iterators are typically used within a single
+// transaction scope, but callers should be aware of this constraint.
+
+func (it *gcsIterator) Rewind() {
+	it.idx = 0
+}
+
+func (it *gcsIterator) Seek(prefix []byte) {
+	target := string(prefix)
+	it.idx = len(it.keys)
+	if it.reverse {
+		for i, key := range it.keys {
+			if key <= target {
+				it.idx = i
+				break
+			}
+		}
+		return
+	}
+	for i, key := range it.keys {
+		if key >= target {
+			it.idx = i
+			break
+		}
+	}
+}
+
+func (it *gcsIterator) Valid() bool {
+	return it.err == nil && it.idx < len(it.keys)
+}
+
+func (it *gcsIterator) ValidForPrefix(prefix []byte) bool {
+	if !it.Valid() {
+		return false
+	}
+	return strings.HasPrefix(it.keys[it.idx], string(prefix))
+}
+
+func (it *gcsIterator) Next() {
+	if it.idx < len(it.keys) {
+		it.idx++
+	}
+}
+
+func (it *gcsIterator) Item() types.BlobItem {
+	if !it.Valid() {
+		return nil
+	}
+	return &gcsItem{store: it.store, txn: it.txn, key: it.keys[it.idx]}
+}
+
+// Err surfaces any iterator initialization error (e.g. listKeys failures).
+func (it *gcsIterator) Err() error {
+	return it.err
+}
+
+func (it *gcsIterator) Close() {}
+
+type gcsErrorIterator struct {
+	err error
+}
+
+func (it *gcsErrorIterator) Rewind()                      {}
+func (it *gcsErrorIterator) Seek(prefix []byte)           {}
+func (it *gcsErrorIterator) Valid() bool                  { return false }
+func (it *gcsErrorIterator) ValidForPrefix(p []byte) bool { return false }
+func (it *gcsErrorIterator) Next()                        {}
+func (it *gcsErrorIterator) Item() types.BlobItem         { return nil }
+func (it *gcsErrorIterator) Close()                       {}
+func (it *gcsErrorIterator) Err() error                   { return it.err }
+
+type gcsItem struct {
+	store *BlobStoreGCS
+	txn   types.Txn
+	key   string
+}
+
+func (i *gcsItem) Key() []byte {
+	return []byte(i.key)
+}
+
+func (i *gcsItem) ValueCopy(dst []byte) ([]byte, error) {
+	// Note: this will fail if the transaction has been committed or rolled back
+	// between Item() and ValueCopy(), because Get validates the transaction
+	// state at call time.
+	data, err := i.store.Get(i.txn, []byte(i.key))
+	if err != nil {
+		return nil, err
+	}
+	if dst != nil {
+		return append(dst[:0], data...), nil
+	}
+	return data, nil
+}
+
+func (d *BlobStoreGCS) listKeys(
+	opts types.BlobIteratorOptions,
+) ([]string, error) {
+	ctx, cancel := d.opContext()
+	defer cancel()
+	iter := d.bucket.Objects(ctx, &storage.Query{Prefix: string(opts.Prefix)})
+	keys := make([]string, 0)
+	for {
+		objAttrs, err := iter.Next()
+		if errors.Is(err, iterator.Done) {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+		keys = append(keys, objAttrs.Name)
+	}
+	sort.Strings(keys)
+	if opts.Reverse {
+		for i, j := 0, len(keys)-1; i < j; i, j = i+1, j-1 {
+			keys[i], keys[j] = keys[j], keys[i]
+		}
+	}
+	return keys, nil
+}
+
 func (d *BlobStoreGCS) init() error {
 	// Configure metrics
 	if d.promRegistry != nil {
@@ -94,16 +418,6 @@ func (d *BlobStoreGCS) init() error {
 	}
 	d.startupCtx = context.Background()
 	return nil
-}
-
-// Close closes the GCS client.
-func (d *BlobStoreGCS) Close() error {
-	if d.client == nil {
-		return nil
-	}
-	err := d.client.Close()
-	d.client = nil
-	return err
 }
 
 // Returns the GCS client.

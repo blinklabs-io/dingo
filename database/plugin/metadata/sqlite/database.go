@@ -26,12 +26,62 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/glebarez/sqlite"
 	"github.com/prometheus/client_golang/prometheus"
 	"gorm.io/gorm"
 	gormlogger "gorm.io/gorm/logger"
 	"gorm.io/plugin/opentelemetry/tracing"
 )
+
+// sqliteTxn wraps a gorm transaction and implements types.Txn
+type sqliteTxn struct {
+	db       *gorm.DB
+	finished bool
+	beginErr error
+}
+
+func newSqliteTxn(db *gorm.DB) *sqliteTxn {
+	return &sqliteTxn{db: db}
+}
+
+func newFailedSqliteTxn(err error) *sqliteTxn {
+	return &sqliteTxn{beginErr: err}
+}
+
+func (t *sqliteTxn) Commit() error {
+	if t.beginErr != nil {
+		return t.beginErr
+	}
+	if t.finished {
+		return nil
+	}
+	if t.db == nil {
+		t.finished = true
+		return nil
+	}
+	if result := t.db.Commit(); result.Error != nil {
+		return result.Error
+	}
+	t.finished = true
+	return nil
+}
+
+func (t *sqliteTxn) Rollback() error {
+	if t.beginErr != nil {
+		return t.beginErr
+	}
+	if t.finished {
+		return nil
+	}
+	if t.db != nil {
+		if result := t.db.Rollback(); result.Error != nil {
+			return result.Error
+		}
+	}
+	t.finished = true
+	return nil
+}
 
 // MetadataStoreSqlite stores all data in sqlite. Data may not be persisted
 type MetadataStoreSqlite struct {
@@ -169,12 +219,20 @@ func (d *MetadataStoreSqlite) Start() error {
 			d.dataDir,
 			"metadata.sqlite",
 		)
-		// WAL journal mode, disable sync on write, increase cache size to 50MB (from 2MB)
-		metadataConnOpts := "_pragma=journal_mode(WAL)&_pragma=sync(OFF)&_pragma=cache_size(-50000)"
+		// Use default settings. Include PRAGMA/query parameters on the DSN
+		// to enable WAL mode, reduce synchronous writes for performance, and
+		// set a larger negative cache size (shared cache) which historically
+		// improved metadata sync and throughput. These settings mirror the
+		// previously-used pragma fragment and are intentionally applied here
+		// to preserve observed performance characteristics.
+		//
+		// Keep these parameters in sync with project performance testing.
+		connStr := fmt.Sprintf(
+			"file:%s?cache=shared&_journal_mode=WAL&sync=OFF&cache_size=-50000",
+			metadataDbPath,
+		)
 		metadataDb, err = gorm.Open(
-			sqlite.Open(
-				fmt.Sprintf("file:%s?%s", metadataDbPath, metadataConnOpts),
-			),
+			sqlite.Open(connStr),
 			&gorm.Config{
 				Logger:                 gormlogger.Discard,
 				SkipDefaultTransaction: true,
@@ -257,8 +315,30 @@ func (d *MetadataStoreSqlite) Order(args any) *gorm.DB {
 }
 
 // Transaction creates a gorm transaction
-func (d *MetadataStoreSqlite) Transaction() *gorm.DB {
-	return d.DB().Begin()
+func (d *MetadataStoreSqlite) Transaction() types.Txn {
+	db := d.DB().Begin()
+	if db.Error != nil {
+		d.logger.Error(
+			"failed to begin transaction",
+			"error", db.Error,
+		)
+		return newFailedSqliteTxn(db.Error)
+	}
+	return newSqliteTxn(db)
+}
+
+// BeginTxn starts a transaction and returns the handle with an error.
+// Callers that prefer explicit error handling can use this instead of Transaction().
+func (d *MetadataStoreSqlite) BeginTxn() (types.Txn, error) {
+	db := d.DB().Begin()
+	if db.Error != nil {
+		d.logger.Error(
+			"failed to begin transaction",
+			"error", db.Error,
+		)
+		return newFailedSqliteTxn(db.Error), db.Error
+	}
+	return newSqliteTxn(db), nil
 }
 
 // Where constrains a DB query

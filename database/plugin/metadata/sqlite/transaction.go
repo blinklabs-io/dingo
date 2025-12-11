@@ -28,16 +28,51 @@ import (
 	"gorm.io/gorm/clause"
 )
 
+// dbFromTxn returns d.DB() only when txn is nil, unwraps known *sqliteTxn or provider.MetadataTxn() when available, and returns nil for unrecognized txn types so callers can detect errors
+func (d *MetadataStoreSqlite) dbFromTxn(txn types.Txn) *gorm.DB {
+	if txn == nil {
+		return d.DB()
+	}
+	if stx, ok := txn.(*sqliteTxn); ok && stx != nil {
+		return stx.db
+	}
+	if provider, ok := txn.(interface{ MetadataTxn() *gorm.DB }); ok {
+		if db := provider.MetadataTxn(); db != nil {
+			return db
+		}
+	}
+	return nil // Return nil for unrecognized txn types to allow callers to detect errors
+}
+
+// resolveDB returns the *gorm.DB for the given transaction, or d.DB() if txn is nil.
+// Returns nil, ErrTxnWrongType if txn is non-nil but not the expected type.
+func (d *MetadataStoreSqlite) resolveDB(txn types.Txn) (*gorm.DB, error) {
+	if stx, ok := txn.(*sqliteTxn); ok {
+		if stx != nil && stx.beginErr != nil {
+			return nil, stx.beginErr
+		}
+	}
+	if txn == nil {
+		return d.DB(), nil
+	}
+	db := d.dbFromTxn(txn)
+	if db == nil {
+		return nil, types.ErrTxnWrongType
+	}
+	return db, nil
+}
+
 // GetTransactionByHash returns a transaction by its hash
 func (d *MetadataStoreSqlite) GetTransactionByHash(
 	hash []byte,
-	txn *gorm.DB,
+	txn types.Txn,
 ) (*models.Transaction, error) {
 	ret := &models.Transaction{}
-	if txn == nil {
-		txn = d.DB()
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return nil, err
 	}
-	result := txn.
+	result := db.
 		Preload(clause.Associations).
 		First(ret, "hash = ?", hash)
 	if result.Error != nil {
@@ -51,7 +86,7 @@ func (d *MetadataStoreSqlite) GetTransactionByHash(
 
 // processScripts is a generic helper to process any script type
 func processScripts[T lcommon.Script](
-	txn *gorm.DB,
+	db *gorm.DB,
 	transactionID uint,
 	scriptType uint8,
 	scripts []T,
@@ -63,7 +98,7 @@ func processScripts[T lcommon.Script](
 			Type:          scriptType,
 			ScriptHash:    script.Hash().Bytes(),
 		}
-		if result := txn.Create(&witnessScript); result.Error != nil {
+		if result := db.Create(&witnessScript); result.Error != nil {
 			return fmt.Errorf("create witness script: %w", result.Error)
 		}
 		scriptContent := models.Script{
@@ -72,7 +107,7 @@ func processScripts[T lcommon.Script](
 			Content:     script.RawScriptBytes(),
 			CreatedSlot: point.Slot,
 		}
-		if result := txn.Clauses(clause.OnConflict{
+		if result := db.Clauses(clause.OnConflict{
 			Columns:   []clause.Column{{Name: "hash"}},
 			DoNothing: true,
 		}).Create(&scriptContent); result.Error != nil {
@@ -101,7 +136,7 @@ func certRequiresDeposit(cert lcommon.Certificate) bool {
 // getOrCreateAccount retrieves an existing account or creates a new one
 func (d *MetadataStoreSqlite) getOrCreateAccount(
 	stakeKey []byte,
-	txn *gorm.DB,
+	txn types.Txn,
 ) (*models.Account, error) {
 	// Include inactive accounts to allow reactivation on registration.
 	tmpAccount, err := d.GetAccount(stakeKey, true, txn)
@@ -121,9 +156,9 @@ func (d *MetadataStoreSqlite) getOrCreateAccount(
 }
 
 // saveAccountIfNew saves the account if it doesn't exist in the database yet
-func saveAccountIfNew(account *models.Account, txn *gorm.DB) error {
+func saveAccountIfNew(account *models.Account, db *gorm.DB) error {
 	if account.ID == 0 {
-		result := txn.Clauses(clause.OnConflict{
+		result := db.Clauses(clause.OnConflict{
 			Columns: []clause.Column{{Name: "staking_key"}},
 			DoUpdates: clause.AssignmentColumns(
 				[]string{"pool", "drep"},
@@ -133,7 +168,7 @@ func saveAccountIfNew(account *models.Account, txn *gorm.DB) error {
 			return result.Error
 		}
 	} else {
-		result := txn.Save(account)
+		result := db.Save(account)
 		if result.Error != nil {
 			return result.Error
 		}
@@ -142,8 +177,8 @@ func saveAccountIfNew(account *models.Account, txn *gorm.DB) error {
 }
 
 // saveCertRecord saves a certificate record and returns any error
-func saveCertRecord(record any, txn *gorm.DB) error {
-	result := txn.Create(record)
+func saveCertRecord(record any, db *gorm.DB) error {
+	result := db.Create(record)
 	return result.Error
 }
 
@@ -153,11 +188,12 @@ func (d *MetadataStoreSqlite) SetTransaction(
 	point ocommon.Point,
 	idx uint32,
 	certDeposits map[int]uint64,
-	txn *gorm.DB,
+	txn types.Txn,
 ) error {
 	txHash := tx.Hash().Bytes()
-	if txn == nil {
-		txn = d.DB()
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return err
 	}
 	tmpTx := &models.Transaction{
 		Hash:       txHash,
@@ -206,12 +242,12 @@ func (d *MetadataStoreSqlite) SetTransaction(
 		m := models.UtxoLedgerToModel(utxo, point.Slot)
 		tmpTx.Outputs = append(tmpTx.Outputs, m)
 	}
-	result := txn.Clauses(clause.OnConflict{
+	result := db.Clauses(clause.OnConflict{
 		Columns: []clause.Column{{Name: "hash"}}, // unique txn hash
 		DoUpdates: clause.AssignmentColumns(
 			[]string{"block_hash", "block_index"},
 		),
-	}).Create(&tmpTx)
+	}).Create(tmpTx)
 	if result.Error != nil {
 		return fmt.Errorf(
 			"create transaction at slot %d, block %x, txHash %x, txIndex %d: %#v, %w",
@@ -323,7 +359,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 				strings.Join(caseClauses, " "),
 				strings.Join(whereConditions, " OR "),
 			)
-			result = txn.Exec(sql, args...)
+			result = db.Exec(sql, args...)
 			if result.Error != nil {
 				return fmt.Errorf("batch update collateral: %w", result.Error)
 			}
@@ -385,7 +421,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 				strings.Join(caseClauses, " "),
 				strings.Join(whereConditions, " OR "),
 			)
-			result = txn.Exec(sql, args...)
+			result = db.Exec(sql, args...)
 			if result.Error != nil {
 				return fmt.Errorf(
 					"batch update reference inputs: %w",
@@ -419,7 +455,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 			continue
 		}
 		// Update existing UTxOs
-		result = txn.Model(&models.Utxo{}).
+		result = db.Model(&models.Utxo{}).
 			Where("tx_id = ? AND output_idx = ?", inTxId, inIdx).
 			Where("spent_at_tx_id IS NULL OR spent_at_tx_id = ?", txHash).
 			Updates(map[string]any{
@@ -432,16 +468,16 @@ func (d *MetadataStoreSqlite) SetTransaction(
 	}
 	// Extract and save witness set data
 	// Delete existing witness records to ensure idempotency on retry
-	if result := txn.Where("transaction_id = ?", tmpTx.ID).Delete(&models.KeyWitness{}); result.Error != nil {
+	if result := db.Where("transaction_id = ?", tmpTx.ID).Delete(&models.KeyWitness{}); result.Error != nil {
 		return fmt.Errorf("delete existing key witnesses: %w", result.Error)
 	}
-	if result := txn.Where("transaction_id = ?", tmpTx.ID).Delete(&models.WitnessScripts{}); result.Error != nil {
+	if result := db.Where("transaction_id = ?", tmpTx.ID).Delete(&models.WitnessScripts{}); result.Error != nil {
 		return fmt.Errorf("delete existing witness scripts: %w", result.Error)
 	}
-	if result := txn.Where("transaction_id = ?", tmpTx.ID).Delete(&models.Redeemer{}); result.Error != nil {
+	if result := db.Where("transaction_id = ?", tmpTx.ID).Delete(&models.Redeemer{}); result.Error != nil {
 		return fmt.Errorf("delete existing redeemers: %w", result.Error)
 	}
-	if result := txn.Where("transaction_id = ?", tmpTx.ID).Delete(&models.PlutusData{}); result.Error != nil {
+	if result := db.Where("transaction_id = ?", tmpTx.ID).Delete(&models.PlutusData{}); result.Error != nil {
 		return fmt.Errorf("delete existing plutus data: %w", result.Error)
 	}
 	ws := tx.Witnesses()
@@ -454,7 +490,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 				Vkey:          vkey.Vkey,
 				Signature:     vkey.Signature,
 			}
-			if result := txn.Create(&keyWitness); result.Error != nil {
+			if result := db.Create(&keyWitness); result.Error != nil {
 				return fmt.Errorf("create vkey witness: %w", result.Error)
 			}
 		}
@@ -469,22 +505,22 @@ func (d *MetadataStoreSqlite) SetTransaction(
 				ChainCode:     bootstrap.ChainCode,
 				Attributes:    bootstrap.Attributes,
 			}
-			if result := txn.Create(&keyWitness); result.Error != nil {
+			if result := db.Create(&keyWitness); result.Error != nil {
 				return fmt.Errorf("create bootstrap witness: %w", result.Error)
 			}
 		}
 
 		// Process all script types using the generic helper
-		if err := processScripts(txn, tmpTx.ID, uint8(lcommon.ScriptRefTypeNativeScript), ws.NativeScripts(), point); err != nil {
+		if err := processScripts(db, tmpTx.ID, uint8(lcommon.ScriptRefTypeNativeScript), ws.NativeScripts(), point); err != nil {
 			return err
 		}
-		if err := processScripts(txn, tmpTx.ID, uint8(lcommon.ScriptRefTypePlutusV1), ws.PlutusV1Scripts(), point); err != nil {
+		if err := processScripts(db, tmpTx.ID, uint8(lcommon.ScriptRefTypePlutusV1), ws.PlutusV1Scripts(), point); err != nil {
 			return err
 		}
-		if err := processScripts(txn, tmpTx.ID, uint8(lcommon.ScriptRefTypePlutusV2), ws.PlutusV2Scripts(), point); err != nil {
+		if err := processScripts(db, tmpTx.ID, uint8(lcommon.ScriptRefTypePlutusV2), ws.PlutusV2Scripts(), point); err != nil {
 			return err
 		}
-		if err := processScripts(txn, tmpTx.ID, uint8(lcommon.ScriptRefTypePlutusV3), ws.PlutusV3Scripts(), point); err != nil {
+		if err := processScripts(db, tmpTx.ID, uint8(lcommon.ScriptRefTypePlutusV3), ws.PlutusV3Scripts(), point); err != nil {
 			return err
 		}
 
@@ -494,7 +530,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 				TransactionID: tmpTx.ID,
 				Data:          datum.Cbor(),
 			}
-			if result := txn.Create(&plutusData); result.Error != nil {
+			if result := db.Create(&plutusData); result.Error != nil {
 				return fmt.Errorf("create plutus data: %w", result.Error)
 			}
 		}
@@ -515,7 +551,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 						max(0, value.ExUnits.Steps),
 					),
 				}
-				if result := txn.Create(&redeemer); result.Error != nil {
+				if result := db.Create(&redeemer); result.Error != nil {
 					return fmt.Errorf("create redeemer: %w", result.Error)
 				}
 			}
@@ -523,7 +559,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 	}
 
 	// Avoid updating associations
-	result = txn.Omit(clause.Associations).Save(&tmpTx)
+	result = db.Omit(clause.Associations).Save(tmpTx)
 	if result.Error != nil {
 		return result.Error
 	}
@@ -536,7 +572,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 			// Delete existing specialized certificate records to ensure idempotency on retry
 			// This ensures 1:1 correspondence between unified and specialized certificates
 			unifiedIDs := []uint{}
-			if result := txn.Model(&models.Certificate{}).Where("transaction_id = ?", tmpTx.ID).Pluck("id", &unifiedIDs); result.Error != nil {
+			if result := db.Model(&models.Certificate{}).Where("transaction_id = ?", tmpTx.ID).Pluck("id", &unifiedIDs); result.Error != nil {
 				return fmt.Errorf(
 					"query existing unified certificates: %w",
 					result.Error,
@@ -551,7 +587,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 					"update_drep", "vote_delegation", "vote_registration_delegation", "move_instantaneous_rewards",
 				}
 				for _, table := range tables {
-					if result := txn.Table(table).Where("certificate_id IN ?", unifiedIDs).Delete(nil); result.Error != nil {
+					if result := db.Table(table).Where("certificate_id IN ?", unifiedIDs).Delete(nil); result.Error != nil {
 						return fmt.Errorf(
 							"delete existing %s records: %w",
 							table,
@@ -615,7 +651,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 					CertificateID: 0, // Will be set to specialized record ID later if needed
 				}
 				// Use ON CONFLICT DO NOTHING to handle retries idempotently
-				if result := txn.Clauses(clause.OnConflict{
+				if result := db.Clauses(clause.OnConflict{
 					Columns:   []clause.Column{{Name: "transaction_id"}, {Name: "cert_index"}},
 					DoNothing: true,
 				}).Create(&unifiedCert); result.Error != nil {
@@ -626,7 +662,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 				}
 				// If the record already existed, we need to fetch its ID
 				if unifiedCert.ID == 0 {
-					if result := txn.Where("transaction_id = ? AND cert_index = ?", tmpTx.ID, uint(i)).First(&unifiedCert); result.Error != nil { //nolint:gosec
+					if result := db.Where("transaction_id = ? AND cert_index = ?", tmpTx.ID, uint(i)).First(&unifiedCert); result.Error != nil { //nolint:gosec
 						return fmt.Errorf(
 							"fetch existing unified certificate: %w",
 							result.Error,
@@ -711,12 +747,12 @@ func (d *MetadataStoreSqlite) SetTransaction(
 
 					// Set the PoolID for the registration record
 					if tmpPool.ID == 0 {
-						result := txn.Create(tmpPool)
+						result := db.Create(tmpPool)
 						if result.Error != nil {
 							return fmt.Errorf("process certificate: %w", result.Error)
 						}
 					} else {
-						result := txn.Save(tmpPool)
+						result := db.Save(tmpPool)
 						if result.Error != nil {
 							return fmt.Errorf("process certificate: %w", result.Error)
 						}
@@ -724,7 +760,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 					tmpReg.PoolID = tmpPool.ID
 
 					// Save the registration record
-					result := txn.Create(&tmpReg)
+					result := db.Create(&tmpReg)
 					if result.Error != nil {
 						return fmt.Errorf("process certificate: %w", result.Error)
 					}
@@ -745,11 +781,11 @@ func (d *MetadataStoreSqlite) SetTransaction(
 						CertificateID: certIDMap[i],
 					}
 
-					if err := saveAccountIfNew(tmpAccount, txn); err != nil {
+					if err := saveAccountIfNew(tmpAccount, db); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
-					if err := saveCertRecord(&tmpReg, txn); err != nil {
+					if err := saveCertRecord(&tmpReg, db); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
@@ -764,7 +800,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 					if tmpPool == nil {
 						d.logger.Warn("retiring non-existent pool", "hash", c.PoolKeyHash)
 						tmpPool = &models.Pool{PoolKeyHash: c.PoolKeyHash[:]}
-						result := txn.Clauses(clause.OnConflict{
+						result := db.Clauses(clause.OnConflict{
 							Columns:   []clause.Column{{Name: "pool_key_hash"}},
 							UpdateAll: true,
 						}).Create(&tmpPool)
@@ -781,7 +817,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 						CertificateID: certIDMap[i],
 					}
 
-					if err := saveCertRecord(&tmpItem, txn); err != nil {
+					if err := saveCertRecord(&tmpItem, db); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
@@ -798,7 +834,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 						tmpAccount = &models.Account{
 							StakingKey: stakeKey,
 						}
-						result := txn.Clauses(clause.OnConflict{
+						result := db.Clauses(clause.OnConflict{
 							Columns:   []clause.Column{{Name: "staking_key"}},
 							UpdateAll: true,
 						}).Create(tmpAccount)
@@ -815,11 +851,11 @@ func (d *MetadataStoreSqlite) SetTransaction(
 						CertificateID: certIDMap[i],
 					}
 
-					if err := saveAccountIfNew(tmpAccount, txn); err != nil {
+					if err := saveAccountIfNew(tmpAccount, db); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
-					if err := saveCertRecord(&tmpItem, txn); err != nil {
+					if err := saveCertRecord(&tmpItem, db); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
@@ -836,7 +872,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 						tmpAccount = &models.Account{
 							StakingKey: stakeKey,
 						}
-						result := txn.Clauses(clause.OnConflict{
+						result := db.Clauses(clause.OnConflict{
 							Columns:   []clause.Column{{Name: "staking_key"}},
 							UpdateAll: true,
 						}).Create(tmpAccount)
@@ -854,11 +890,11 @@ func (d *MetadataStoreSqlite) SetTransaction(
 						Amount:        types.Uint64(deposit),
 					}
 
-					if err := saveAccountIfNew(tmpAccount, txn); err != nil {
+					if err := saveAccountIfNew(tmpAccount, db); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
-					if err := saveCertRecord(&tmpItem, txn); err != nil {
+					if err := saveCertRecord(&tmpItem, db); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
@@ -880,11 +916,11 @@ func (d *MetadataStoreSqlite) SetTransaction(
 						CertificateID: certIDMap[i],
 					}
 
-					if err := saveAccountIfNew(tmpAccount, txn); err != nil {
+					if err := saveAccountIfNew(tmpAccount, db); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
-					if err := saveCertRecord(&tmpItem, txn); err != nil {
+					if err := saveCertRecord(&tmpItem, db); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
@@ -907,11 +943,11 @@ func (d *MetadataStoreSqlite) SetTransaction(
 						CertificateID: certIDMap[i],
 					}
 
-					if err := saveAccountIfNew(tmpAccount, txn); err != nil {
+					if err := saveAccountIfNew(tmpAccount, db); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
-					if err := saveCertRecord(&tmpReg, txn); err != nil {
+					if err := saveCertRecord(&tmpReg, db); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
@@ -935,11 +971,11 @@ func (d *MetadataStoreSqlite) SetTransaction(
 						CertificateID: certIDMap[i],
 					}
 
-					if err := saveAccountIfNew(tmpAccount, txn); err != nil {
+					if err := saveAccountIfNew(tmpAccount, db); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
-					if err := saveCertRecord(&tmpItem, txn); err != nil {
+					if err := saveCertRecord(&tmpItem, db); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
@@ -959,11 +995,11 @@ func (d *MetadataStoreSqlite) SetTransaction(
 						CertificateID: certIDMap[i],
 					}
 
-					if err := saveAccountIfNew(tmpAccount, txn); err != nil {
+					if err := saveAccountIfNew(tmpAccount, db); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
-					if err := saveCertRecord(&tmpReg, txn); err != nil {
+					if err := saveCertRecord(&tmpReg, db); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
@@ -990,7 +1026,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
-					if err := saveCertRecord(&tmpReg, txn); err != nil {
+					if err := saveCertRecord(&tmpReg, db); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
@@ -1021,7 +1057,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
-					if err := saveCertRecord(&tmpDereg, txn); err != nil {
+					if err := saveCertRecord(&tmpDereg, db); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
@@ -1055,7 +1091,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
-					if err := saveCertRecord(&tmpUpdate, txn); err != nil {
+					if err := saveCertRecord(&tmpUpdate, db); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
@@ -1080,11 +1116,11 @@ func (d *MetadataStoreSqlite) SetTransaction(
 						CertificateID: certIDMap[i],
 					}
 
-					if err := saveAccountIfNew(tmpAccount, txn); err != nil {
+					if err := saveAccountIfNew(tmpAccount, db); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
-					if err := saveCertRecord(&tmpReg, txn); err != nil {
+					if err := saveCertRecord(&tmpReg, db); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
@@ -1107,11 +1143,11 @@ func (d *MetadataStoreSqlite) SetTransaction(
 						CertificateID: certIDMap[i],
 					}
 
-					if err := saveAccountIfNew(tmpAccount, txn); err != nil {
+					if err := saveAccountIfNew(tmpAccount, db); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
-					if err := saveCertRecord(&tmpReg, txn); err != nil {
+					if err := saveCertRecord(&tmpReg, db); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
@@ -1133,11 +1169,11 @@ func (d *MetadataStoreSqlite) SetTransaction(
 						CertificateID: certIDMap[i],
 					}
 
-					if err := saveAccountIfNew(tmpAccount, txn); err != nil {
+					if err := saveAccountIfNew(tmpAccount, db); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
-					if err := saveCertRecord(&tmpItem, txn); err != nil {
+					if err := saveCertRecord(&tmpItem, db); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
@@ -1154,7 +1190,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 						AddedSlot:      point.Slot,
 					}
 
-					if err := saveCertRecord(&tmpAuth, txn); err != nil {
+					if err := saveCertRecord(&tmpAuth, db); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
@@ -1173,7 +1209,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 						tmpResign.AnchorHash = c.Anchor.DataHash[:]
 					}
 
-					if err := saveCertRecord(&tmpResign, txn); err != nil {
+					if err := saveCertRecord(&tmpResign, db); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
@@ -1187,7 +1223,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 					}
 
 					// Save the MIR record
-					result := txn.Create(&tmpMIR)
+					result := db.Create(&tmpMIR)
 					if result.Error != nil {
 						return fmt.Errorf("process certificate: %w", result.Error)
 					}
@@ -1202,7 +1238,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 							Amount:     types.Uint64(amount),
 							MIRID:      tmpMIR.ID,
 						}
-						result := txn.Create(&tmpReward)
+						result := db.Create(&tmpReward)
 						if result.Error != nil {
 							return fmt.Errorf("process certificate: %w", result.Error)
 						}
@@ -1232,7 +1268,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 				)
 				values = append(values, ids)
 
-				if result := txn.Exec(query, values...); result.Error != nil {
+				if result := db.Exec(query, values...); result.Error != nil {
 					return fmt.Errorf(
 						"batch update unified certificates: %w",
 						result.Error,
@@ -1253,7 +1289,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 func (d *MetadataStoreSqlite) storeTransactionDatums(
 	tx lcommon.Transaction,
 	slot uint64,
-	txn *gorm.DB,
+	txn types.Txn,
 ) error {
 	for _, utxo := range tx.Produced() {
 		if err := d.storeDatum(utxo.Output.Datum(), slot, txn); err != nil {
@@ -1278,7 +1314,7 @@ func (d *MetadataStoreSqlite) storeTransactionDatums(
 func (d *MetadataStoreSqlite) storeDatum(
 	datum *lcommon.Datum,
 	slot uint64,
-	txn *gorm.DB,
+	txn types.Txn,
 ) error {
 	if datum == nil {
 		return nil

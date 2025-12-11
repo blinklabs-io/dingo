@@ -21,11 +21,16 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"sort"
 	"strings"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"github.com/aws/smithy-go"
+	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -40,6 +45,15 @@ type BlobStoreS3 struct {
 	prefix        string
 	region        string
 	timeout       time.Duration
+}
+
+// s3Txn wraps S3 operations to satisfy types.Txn and types.BlobTx
+// Operations are not atomic but respect the transaction interface used by the
+// database layer.
+type s3Txn struct {
+	store     *BlobStoreS3
+	finished  bool
+	readWrite bool
 }
 
 // New creates a new S3-backed blob store and dataDir must be "s3://bucket" or "s3://bucket/prefix"
@@ -100,6 +114,295 @@ func NewWithOptions(opts ...BlobStoreS3OptionFunc) (*BlobStoreS3, error) {
 	return db, nil
 }
 
+func (d *BlobStoreS3) opContext() (context.Context, context.CancelFunc) {
+	timeout := d.timeout
+	if timeout == 0 {
+		timeout = 60 * time.Second
+	}
+	return context.WithTimeout(context.Background(), timeout)
+}
+
+// Close implements the BlobStore interface.
+func (d *BlobStoreS3) Close() error {
+	return d.Stop()
+}
+
+// NewTransaction returns a lightweight transaction wrapper.
+func (d *BlobStoreS3) NewTransaction(readWrite bool) types.Txn {
+	return &s3Txn{store: d, readWrite: readWrite}
+}
+
+func (t *s3Txn) assertWritable() error {
+	if !t.readWrite {
+		return errors.New("transaction is read-only")
+	}
+	return nil
+}
+
+func (d *BlobStoreS3) validateTxn(txn types.Txn) (*s3Txn, error) {
+	if txn == nil {
+		return nil, types.ErrNilTxn
+	}
+	t, ok := txn.(*s3Txn)
+	if !ok || t.store != d {
+		return nil, types.ErrTxnWrongType
+	}
+	if t.finished {
+		return nil, errors.New("transaction already finished")
+	}
+	if d.client == nil {
+		return nil, types.ErrBlobStoreUnavailable
+	}
+	return t, nil
+}
+
+// Get retrieves a value from S3 within a transaction
+func (d *BlobStoreS3) Get(txn types.Txn, key []byte) ([]byte, error) {
+	if _, err := d.validateTxn(txn); err != nil {
+		return nil, err
+	}
+	ctx, cancel := d.opContext()
+	defer cancel()
+	data, err := d.getInternal(ctx, string(key))
+	if err != nil {
+		if isS3NotFound(err) {
+			return nil, types.ErrBlobKeyNotFound
+		}
+		return nil, err
+	}
+	return data, nil
+}
+
+// Set stores a key-value pair in S3 within a transaction
+func (d *BlobStoreS3) Set(txn types.Txn, key, val []byte) error {
+	t, err := d.validateTxn(txn)
+	if err != nil {
+		return err
+	}
+	if err := t.assertWritable(); err != nil {
+		return err
+	}
+	ctx, cancel := d.opContext()
+	defer cancel()
+	if err := d.Put(ctx, string(key), val); err != nil {
+		return err
+	}
+	return nil
+}
+
+// Delete removes a key from S3 within a transaction
+func (d *BlobStoreS3) Delete(txn types.Txn, key []byte) error {
+	t, err := d.validateTxn(txn)
+	if err != nil {
+		return err
+	}
+	if err := t.assertWritable(); err != nil {
+		return err
+	}
+	ctx, cancel := d.opContext()
+	defer cancel()
+	_, err = d.client.DeleteObject(ctx, &s3.DeleteObjectInput{
+		Bucket: aws.String(d.bucket),
+		Key:    awsString(d.fullKey(string(key))),
+	})
+	if err != nil {
+		if isS3NotFound(err) {
+			return types.ErrBlobKeyNotFound
+		}
+		d.logger.Errorf("s3 delete %q failed: %v", string(key), err)
+		return err
+	}
+	return nil
+}
+
+// NewIterator creates an iterator for S3 within a transaction.
+//
+// Important: items returned by the iterator's `Item()` must only be
+// accessed while the transaction used to create the iterator is still
+// active. Implementations may validate transaction state at access time
+// (for example `ValueCopy` may fail if the transaction has been committed
+// or rolled back). Typical usage iterates and accesses item values within
+// the same transaction scope.
+func (d *BlobStoreS3) NewIterator(
+	txn types.Txn,
+	opts types.BlobIteratorOptions,
+) types.BlobIterator {
+	if _, err := d.validateTxn(txn); err != nil {
+		return &s3ErrorIterator{err: err}
+	}
+	keys, err := d.listKeys(opts)
+	if err != nil {
+		d.logger.Errorf("s3 list failed: %v", err)
+		return &s3Iterator{
+			store:   d,
+			keys:    []string{},
+			reverse: opts.Reverse,
+			err:     err,
+			txn:     txn,
+		}
+	}
+	return &s3Iterator{store: d, keys: keys, reverse: opts.Reverse, txn: txn}
+}
+
+func (t *s3Txn) Commit() error {
+	if t.finished {
+		return nil
+	}
+	t.finished = true
+	return nil
+}
+
+func (t *s3Txn) Rollback() error {
+	if t.finished {
+		return nil
+	}
+	t.finished = true
+	return nil
+}
+
+type s3Iterator struct {
+	store   *BlobStoreS3
+	keys    []string
+	idx     int
+	reverse bool
+	err     error
+	txn     types.Txn
+}
+
+func (it *s3Iterator) Rewind() {
+	it.idx = 0
+}
+
+func (it *s3Iterator) Seek(prefix []byte) {
+	target := string(prefix)
+	it.idx = len(it.keys)
+	if it.reverse {
+		for i, key := range it.keys {
+			if key <= target {
+				it.idx = i
+				break
+			}
+		}
+		return
+	}
+	for i, key := range it.keys {
+		if key >= target {
+			it.idx = i
+			break
+		}
+	}
+}
+
+func (it *s3Iterator) Valid() bool {
+	return it.err == nil && it.idx < len(it.keys)
+}
+
+func (it *s3Iterator) ValidForPrefix(prefix []byte) bool {
+	if !it.Valid() {
+		return false
+	}
+	return strings.HasPrefix(it.keys[it.idx], string(prefix))
+}
+
+func (it *s3Iterator) Next() {
+	if it.idx < len(it.keys) {
+		it.idx++
+	}
+}
+
+func (it *s3Iterator) Item() types.BlobItem {
+	if !it.Valid() {
+		return nil
+	}
+	return &s3Item{store: it.store, key: it.keys[it.idx], txn: it.txn}
+}
+
+// Err surfaces any iterator initialization error (e.g. listKeys failures).
+func (it *s3Iterator) Err() error {
+	return it.err
+}
+
+func (it *s3Iterator) Close() {}
+
+type s3ErrorIterator struct {
+	err error
+}
+
+func (it *s3ErrorIterator) Rewind()                      {}
+func (it *s3ErrorIterator) Seek(prefix []byte)           {}
+func (it *s3ErrorIterator) Valid() bool                  { return false }
+func (it *s3ErrorIterator) ValidForPrefix(p []byte) bool { return false }
+func (it *s3ErrorIterator) Next()                        {}
+func (it *s3ErrorIterator) Item() types.BlobItem         { return nil }
+func (it *s3ErrorIterator) Close()                       {}
+func (it *s3ErrorIterator) Err() error                   { return it.err }
+
+type s3Item struct {
+	store *BlobStoreS3
+	key   string
+	txn   types.Txn
+}
+
+func (i *s3Item) Key() []byte {
+	return []byte(i.key)
+}
+
+func (i *s3Item) ValueCopy(dst []byte) ([]byte, error) {
+	data, err := i.store.Get(i.txn, []byte(i.key))
+	if err != nil {
+		return nil, err
+	}
+	if dst != nil {
+		return append(dst[:0], data...), nil
+	}
+	return data, nil
+}
+
+func isS3NotFound(err error) bool {
+	var apiErr smithy.APIError
+	if errors.As(err, &apiErr) && apiErr.ErrorCode() == "NoSuchKey" {
+		return true
+	}
+	var noSuchKey *s3types.NoSuchKey
+	return errors.As(err, &noSuchKey)
+}
+
+func (d *BlobStoreS3) listKeys(
+	opts types.BlobIteratorOptions,
+) ([]string, error) {
+	// TODO: Consider longer timeout or no timeout for large buckets with many pages
+	ctx, cancel := d.opContext()
+	defer cancel()
+	prefix := d.fullKey(string(opts.Prefix))
+	input := &s3.ListObjectsV2Input{
+		Bucket: aws.String(d.bucket),
+	}
+	if prefix != "" {
+		input.Prefix = aws.String(prefix)
+	} else if d.prefix != "" {
+		input.Prefix = aws.String(d.prefix)
+	}
+	paginator := s3.NewListObjectsV2Paginator(d.client, input)
+	keys := make([]string, 0)
+	for paginator.HasMorePages() {
+		page, err := paginator.NextPage(ctx)
+		if err != nil {
+			return nil, err
+		}
+		for _, obj := range page.Contents {
+			key := strings.TrimPrefix(aws.ToString(obj.Key), d.prefix)
+			keys = append(keys, key)
+		}
+	}
+	sort.Strings(keys)
+	if opts.Reverse {
+		for i, j := 0, len(keys)-1; i < j; i, j = i+1, j-1 {
+			keys[i], keys[j] = keys[j], keys[i]
+		}
+	}
+	return keys, nil
+}
+
 func (d *BlobStoreS3) init() error {
 	// Configure metrics
 	if d.promRegistry != nil {
@@ -133,14 +436,19 @@ func awsString(s string) *string {
 	return &s
 }
 
-// Get reads the value at key.
-func (d *BlobStoreS3) Get(ctx context.Context, key string) ([]byte, error) {
+// getInternal reads the value at key.
+func (d *BlobStoreS3) getInternal(
+	ctx context.Context,
+	key string,
+) ([]byte, error) {
 	out, err := d.client.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: &d.bucket,
 		Key:    awsString(d.fullKey(key)),
 	})
 	if err != nil {
-		d.logger.Errorf("s3 get %q failed: %v", key, err)
+		if !isS3NotFound(err) {
+			d.logger.Errorf("s3 get %q failed: %v", key, err)
+		}
 		return nil, err
 	}
 	defer out.Body.Close()

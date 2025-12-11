@@ -25,7 +25,6 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
-	"gorm.io/gorm"
 )
 
 // Helper functions for benchmark seeding
@@ -47,24 +46,16 @@ func seedBlocksFromSlots(
 	slots []uint64,
 ) int {
 	seeded := 0
-	// Use iterator to get blocks (more reliable than GetBlock)
-	originPoint := ocommon.NewPoint(0, nil)
-	iterator, err := immDb.BlocksFromPoint(originPoint)
-	if err != nil {
-		b.Logf("Failed to create iterator: %v", err)
-		return 0
-	}
-	defer iterator.Close()
-
-	// Collect first N blocks from iterator
-	for seeded < len(slots) {
-		block, err := iterator.Next()
+	for _, slot := range slots {
+		point := ocommon.NewPoint(slot, nil)
+		block, err := immDb.GetBlock(point)
 		if err != nil {
-			b.Logf("Iterator error: %v", err)
-			break
+			b.Logf("GetBlock error for slot %d: %v", slot, err)
+			continue
 		}
 		if block == nil {
-			break
+			// missing block is acceptable in some ranges; skip
+			continue
 		}
 
 		// Store block in database
@@ -247,10 +238,11 @@ func BenchmarkUtxoLookupByRefNoData(b *testing.B) {
 
 	// Benchmark lookup (on empty database for now)
 	for b.Loop() {
+		// UtxoByRef returns nil, ErrUtxoNotFound for missing UTxOs
+		// This is expected and not an error for benchmarking
 		_, err := db.UtxoByRef(testTxId, testOutputIdx, nil)
-		// Don't fail on "not found" - this is expected for non-existent UTxOs
 		if err != nil && !errors.Is(err, database.ErrUtxoNotFound) {
-			b.Fatal(err)
+			b.Fatalf("unexpected error: %v", err)
 		}
 	}
 }
@@ -312,10 +304,11 @@ func BenchmarkBlockRetrievalByIndexNoData(b *testing.B) {
 
 	// Benchmark retrieval (will return error for non-existent block)
 	for b.Loop() {
+		// BlockByIndex returns nil, ErrBlockNotFound for missing blocks
+		// This is expected and not an error for benchmarking
 		_, err := db.BlockByIndex(1, nil)
-		// Ignore not found errors
 		if err != nil && !errors.Is(err, models.ErrBlockNotFound) {
-			b.Fatal(err)
+			b.Fatalf("unexpected error: %v", err)
 		}
 	}
 }
@@ -345,6 +338,7 @@ func BenchmarkBlockRetrievalByIndexRealData(b *testing.B) {
 		point := ocommon.NewPoint(slot, nil)
 		block, err := immDb.GetBlock(point)
 		if err != nil {
+			b.Logf("Could not get block at slot %d: %v", slot, err)
 			continue
 		}
 		if block == nil {
@@ -353,6 +347,7 @@ func BenchmarkBlockRetrievalByIndexRealData(b *testing.B) {
 
 		ledgerBlock, err := ledger.NewBlockFromCbor(block.Type, block.Cbor)
 		if err != nil {
+			b.Logf("Could not parse block: %v", err)
 			continue
 		}
 
@@ -367,6 +362,7 @@ func BenchmarkBlockRetrievalByIndexRealData(b *testing.B) {
 		}
 
 		if err := db.BlockCreate(blockModel, nil); err != nil {
+			b.Logf("Could not create block: %v", err)
 			continue
 		}
 	}
@@ -377,9 +373,11 @@ func BenchmarkBlockRetrievalByIndexRealData(b *testing.B) {
 	// Benchmark retrieval against real seeded data
 	for i := 0; b.Loop(); i++ {
 		blockID := uint64((i % len(sampleSlots)) + 1)
+		// BlockByIndex returns nil, ErrBlockNotFound for missing blocks
+		// This is expected and not an error for benchmarking
 		_, err := db.BlockByIndex(blockID, nil)
 		if err != nil && !errors.Is(err, models.ErrBlockNotFound) {
-			b.Fatal(err)
+			b.Fatalf("unexpected error: %v", err)
 		}
 	}
 }
@@ -442,6 +440,7 @@ func BenchmarkTransactionHistoryQueriesRealData(b *testing.B) {
 		point := ocommon.NewPoint(slot, nil)
 		block, err := immDb.GetBlock(point)
 		if err != nil {
+			b.Logf("Could not get block at slot %d: %v", slot, err)
 			continue
 		}
 		if block == nil {
@@ -450,6 +449,7 @@ func BenchmarkTransactionHistoryQueriesRealData(b *testing.B) {
 
 		ledgerBlock, err := ledger.NewBlockFromCbor(block.Type, block.Cbor)
 		if err != nil {
+			b.Logf("Could not parse block: %v", err)
 			continue
 		}
 
@@ -464,6 +464,7 @@ func BenchmarkTransactionHistoryQueriesRealData(b *testing.B) {
 		}
 
 		if err := db.BlockCreate(blockModel, nil); err != nil {
+			b.Logf("Could not create block: %v", err)
 			continue
 		}
 	}
@@ -518,8 +519,8 @@ func BenchmarkAccountLookupByStakeKeyNoData(b *testing.B) {
 	// Benchmark lookup (on empty database for now)
 	for b.Loop() {
 		_, err := db.Metadata().GetAccount(testStakeKey, false, nil)
-		if err != nil {
-			b.Fatal(err)
+		if err != nil && !errors.Is(err, models.ErrAccountNotFound) {
+			b.Fatalf("unexpected error: %v", err)
 		}
 	}
 }
@@ -549,6 +550,7 @@ func BenchmarkAccountLookupByStakeKeyRealData(b *testing.B) {
 		point := ocommon.NewPoint(slot, nil)
 		block, err := immDb.GetBlock(point)
 		if err != nil {
+			b.Logf("Could not get block at slot %d: %v", slot, err)
 			continue
 		}
 		if block == nil {
@@ -557,6 +559,7 @@ func BenchmarkAccountLookupByStakeKeyRealData(b *testing.B) {
 
 		ledgerBlock, err := ledger.NewBlockFromCbor(block.Type, block.Cbor)
 		if err != nil {
+			b.Logf("Could not parse block: %v", err)
 			continue
 		}
 
@@ -571,6 +574,7 @@ func BenchmarkAccountLookupByStakeKeyRealData(b *testing.B) {
 		}
 
 		if err := db.BlockCreate(blockModel, nil); err != nil {
+			b.Logf("Could not create block: %v", err)
 			continue
 		}
 	}
@@ -592,8 +596,8 @@ func BenchmarkAccountLookupByStakeKeyRealData(b *testing.B) {
 	for i := 0; b.Loop(); i++ {
 		key := testStakeKeys[i%len(testStakeKeys)]
 		_, err := db.Metadata().GetAccount(key, false, nil)
-		if err != nil {
-			b.Fatal(err)
+		if err != nil && !errors.Is(err, models.ErrAccountNotFound) {
+			b.Fatalf("unexpected error: %v", err)
 		}
 	}
 }
@@ -622,8 +626,8 @@ func BenchmarkPoolLookupByKeyHashNoData(b *testing.B) {
 	// Benchmark lookup (on empty database for now)
 	for b.Loop() {
 		_, err := db.Metadata().GetPool(testPoolKeyHash, false, nil)
-		if err != nil {
-			b.Fatal(err)
+		if err != nil && !errors.Is(err, models.ErrPoolNotFound) {
+			b.Fatalf("unexpected error: %v", err)
 		}
 	}
 }
@@ -653,6 +657,7 @@ func BenchmarkPoolLookupByKeyHashRealData(b *testing.B) {
 		point := ocommon.NewPoint(slot, nil)
 		block, err := immDb.GetBlock(point)
 		if err != nil {
+			b.Logf("Could not get block at slot %d: %v", slot, err)
 			continue
 		}
 		if block == nil {
@@ -661,6 +666,7 @@ func BenchmarkPoolLookupByKeyHashRealData(b *testing.B) {
 
 		ledgerBlock, err := ledger.NewBlockFromCbor(block.Type, block.Cbor)
 		if err != nil {
+			b.Logf("Could not parse block: %v", err)
 			continue
 		}
 
@@ -675,6 +681,7 @@ func BenchmarkPoolLookupByKeyHashRealData(b *testing.B) {
 		}
 
 		if err := db.BlockCreate(blockModel, nil); err != nil {
+			b.Logf("Could not create block: %v", err)
 			continue
 		}
 	}
@@ -696,8 +703,8 @@ func BenchmarkPoolLookupByKeyHashRealData(b *testing.B) {
 	for i := 0; b.Loop(); i++ {
 		hash := testPoolKeyHashes[i%len(testPoolKeyHashes)]
 		_, err := db.Metadata().GetPool(hash, false, nil)
-		if err != nil {
-			b.Fatal(err)
+		if err != nil && !errors.Is(err, models.ErrPoolNotFound) {
+			b.Fatalf("unexpected error: %v", err)
 		}
 	}
 }
@@ -726,8 +733,8 @@ func BenchmarkDRepLookupByKeyHashNoData(b *testing.B) {
 	// Benchmark lookup (on empty database for now)
 	for b.Loop() {
 		_, err := db.Metadata().GetDrep(testDRepCredential, false, nil)
-		if err != nil {
-			b.Fatal(err)
+		if err != nil && !errors.Is(err, models.ErrDrepNotFound) {
+			b.Fatalf("unexpected error: %v", err)
 		}
 	}
 }
@@ -757,6 +764,7 @@ func BenchmarkDRepLookupByKeyHashRealData(b *testing.B) {
 		point := ocommon.NewPoint(slot, nil)
 		block, err := immDb.GetBlock(point)
 		if err != nil {
+			b.Logf("Could not get block at slot %d: %v", slot, err)
 			continue
 		}
 		if block == nil {
@@ -765,6 +773,7 @@ func BenchmarkDRepLookupByKeyHashRealData(b *testing.B) {
 
 		ledgerBlock, err := ledger.NewBlockFromCbor(block.Type, block.Cbor)
 		if err != nil {
+			b.Logf("Could not parse block: %v", err)
 			continue
 		}
 
@@ -779,6 +788,7 @@ func BenchmarkDRepLookupByKeyHashRealData(b *testing.B) {
 		}
 
 		if err := db.BlockCreate(blockModel, nil); err != nil {
+			b.Logf("Could not create block: %v", err)
 			continue
 		}
 	}
@@ -800,8 +810,8 @@ func BenchmarkDRepLookupByKeyHashRealData(b *testing.B) {
 	for i := 0; b.Loop(); i++ {
 		cred := testDRepCredentials[i%len(testDRepCredentials)]
 		_, err := db.Metadata().GetDrep(cred, false, nil)
-		if err != nil {
-			b.Fatal(err)
+		if err != nil && !errors.Is(err, models.ErrDrepNotFound) {
+			b.Fatalf("unexpected error: %v", err)
 		}
 	}
 }
@@ -829,9 +839,10 @@ func BenchmarkDatumLookupByHashNoData(b *testing.B) {
 
 	// Benchmark lookup (on empty database for now)
 	for b.Loop() {
+		// In the sqlite implementation, GetDatum returns (nil, nil) for missing datums.
+		// Receiving a nil datum with no error is expected here and not a failure.
 		_, err := db.Metadata().GetDatum(testDatumHash, nil)
-		// Don't fail on "record not found" - this is expected for non-existent datums
-		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+		if err != nil {
 			b.Fatal(err)
 		}
 	}
@@ -862,6 +873,7 @@ func BenchmarkDatumLookupByHashRealData(b *testing.B) {
 		point := ocommon.NewPoint(slot, nil)
 		block, err := immDb.GetBlock(point)
 		if err != nil {
+			b.Logf("Could not get block at slot %d: %v", slot, err)
 			continue
 		}
 		if block == nil {
@@ -870,6 +882,7 @@ func BenchmarkDatumLookupByHashRealData(b *testing.B) {
 
 		ledgerBlock, err := ledger.NewBlockFromCbor(block.Type, block.Cbor)
 		if err != nil {
+			b.Logf("Could not parse block: %v", err)
 			continue
 		}
 
@@ -884,6 +897,7 @@ func BenchmarkDatumLookupByHashRealData(b *testing.B) {
 		}
 
 		if err := db.BlockCreate(blockModel, nil); err != nil {
+			b.Logf("Could not create block: %v", err)
 			continue
 		}
 	}
@@ -904,9 +918,10 @@ func BenchmarkDatumLookupByHashRealData(b *testing.B) {
 	// Benchmark lookup against real seeded data
 	for i := 0; b.Loop(); i++ {
 		hash := testDatumHashes[i%len(testDatumHashes)]
+		// GetDatum returns nil, nil for missing datums
+		// This is expected and not an error for benchmarking
 		_, err := db.Metadata().GetDatum(hash, nil)
-		// Don't fail on "record not found" - this is expected for non-existent datums
-		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+		if err != nil {
 			b.Fatal(err)
 		}
 	}
@@ -935,7 +950,7 @@ func BenchmarkProtocolParametersLookupByEpochNoData(b *testing.B) {
 		epoch := testEpochs[i%len(testEpochs)]
 		_, err := db.Metadata().GetPParams(epoch, nil)
 		if err != nil {
-			b.Fatal(err)
+			b.Fatalf("unexpected error: %v", err)
 		}
 	}
 }
@@ -965,6 +980,7 @@ func BenchmarkProtocolParametersLookupByEpochRealData(b *testing.B) {
 		point := ocommon.NewPoint(slot, nil)
 		block, err := immDb.GetBlock(point)
 		if err != nil {
+			b.Logf("Could not get block at slot %d: %v", slot, err)
 			continue
 		}
 		if block == nil {
@@ -973,6 +989,7 @@ func BenchmarkProtocolParametersLookupByEpochRealData(b *testing.B) {
 
 		ledgerBlock, err := ledger.NewBlockFromCbor(block.Type, block.Cbor)
 		if err != nil {
+			b.Logf("Could not parse block: %v", err)
 			continue
 		}
 
@@ -987,6 +1004,7 @@ func BenchmarkProtocolParametersLookupByEpochRealData(b *testing.B) {
 		}
 
 		if err := db.BlockCreate(blockModel, nil); err != nil {
+			b.Logf("Could not create block: %v", err)
 			continue
 		}
 	}
@@ -1036,10 +1054,11 @@ func BenchmarkBlockNonceLookupNoData(b *testing.B) {
 	// Benchmark lookup (on empty database for now)
 	for i := 0; b.Loop(); i++ {
 		point := testPoints[i%len(testPoints)]
+		// GetBlockNonce returns empty nonce for missing blocks
+		// This is expected and not an error for benchmarking
 		_, err := db.Metadata().GetBlockNonce(point, nil)
-		// Don't fail on "record not found" - this is expected for non-existent blocks
-		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
-			b.Fatal(err)
+		if err != nil {
+			b.Fatalf("unexpected error: %v", err)
 		}
 	}
 }
@@ -1069,6 +1088,7 @@ func BenchmarkBlockNonceLookupRealData(b *testing.B) {
 		point := ocommon.NewPoint(slot, nil)
 		block, err := immDb.GetBlock(point)
 		if err != nil {
+			b.Logf("Could not get block at slot %d: %v", slot, err)
 			continue
 		}
 		if block == nil {
@@ -1077,6 +1097,7 @@ func BenchmarkBlockNonceLookupRealData(b *testing.B) {
 
 		ledgerBlock, err := ledger.NewBlockFromCbor(block.Type, block.Cbor)
 		if err != nil {
+			b.Logf("Could not parse block: %v", err)
 			continue
 		}
 
@@ -1091,6 +1112,7 @@ func BenchmarkBlockNonceLookupRealData(b *testing.B) {
 		}
 
 		if err := db.BlockCreate(blockModel, nil); err != nil {
+			b.Logf("Could not create block: %v", err)
 			continue
 		}
 	}
@@ -1112,10 +1134,11 @@ func BenchmarkBlockNonceLookupRealData(b *testing.B) {
 	// Benchmark lookup against real seeded data
 	for i := 0; b.Loop(); i++ {
 		point := testPoints[i%len(testPoints)]
+		// GetBlockNonce returns empty nonce for missing blocks
+		// This is expected and not an error for benchmarking
 		_, err := db.Metadata().GetBlockNonce(point, nil)
-		// Don't fail on "record not found" - this is expected for non-existent blocks
-		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
-			b.Fatal(err)
+		if err != nil {
+			b.Fatalf("unexpected error: %v", err)
 		}
 	}
 }
@@ -1150,7 +1173,7 @@ func BenchmarkStakeRegistrationLookupsNoData(b *testing.B) {
 		stakeKey := testStakeKeys[i%len(testStakeKeys)]
 		_, err := db.Metadata().GetStakeRegistrations(stakeKey, nil)
 		if err != nil {
-			b.Fatal(err)
+			b.Fatalf("unexpected error: %v", err)
 		}
 	}
 }
@@ -1180,6 +1203,7 @@ func BenchmarkStakeRegistrationLookupsRealData(b *testing.B) {
 		point := ocommon.NewPoint(slot, nil)
 		block, err := immDb.GetBlock(point)
 		if err != nil {
+			b.Logf("Could not get block at slot %d: %v", slot, err)
 			continue
 		}
 		if block == nil {
@@ -1188,6 +1212,7 @@ func BenchmarkStakeRegistrationLookupsRealData(b *testing.B) {
 
 		ledgerBlock, err := ledger.NewBlockFromCbor(block.Type, block.Cbor)
 		if err != nil {
+			b.Logf("Could not parse block: %v", err)
 			continue
 		}
 
@@ -1202,6 +1227,7 @@ func BenchmarkStakeRegistrationLookupsRealData(b *testing.B) {
 		}
 
 		if err := db.BlockCreate(blockModel, nil); err != nil {
+			b.Logf("Could not create block: %v", err)
 			continue
 		}
 	}
@@ -1259,7 +1285,7 @@ func BenchmarkPoolRegistrationLookupsNoData(b *testing.B) {
 		poolKeyHash := testPoolKeyHashes[i%len(testPoolKeyHashes)]
 		_, err := db.Metadata().GetPoolRegistrations(poolKeyHash, nil)
 		if err != nil {
-			b.Fatal(err)
+			b.Fatalf("unexpected error: %v", err)
 		}
 	}
 }
@@ -1289,6 +1315,7 @@ func BenchmarkPoolRegistrationLookupsRealData(b *testing.B) {
 		point := ocommon.NewPoint(slot, nil)
 		block, err := immDb.GetBlock(point)
 		if err != nil {
+			b.Logf("Could not get block at slot %d: %v", slot, err)
 			continue
 		}
 		if block == nil {
@@ -1297,6 +1324,7 @@ func BenchmarkPoolRegistrationLookupsRealData(b *testing.B) {
 
 		ledgerBlock, err := ledger.NewBlockFromCbor(block.Type, block.Cbor)
 		if err != nil {
+			b.Logf("Could not parse block: %v", err)
 			continue
 		}
 
@@ -1311,6 +1339,7 @@ func BenchmarkPoolRegistrationLookupsRealData(b *testing.B) {
 		}
 
 		if err := db.BlockCreate(blockModel, nil); err != nil {
+			b.Logf("Could not create block: %v", err)
 			continue
 		}
 	}
@@ -1356,6 +1385,7 @@ func BenchmarkEraTransitionPerformance(b *testing.B) {
 		point := ocommon.NewPoint(slot, nil)
 		block, err := immDb.GetBlock(point)
 		if err != nil {
+			b.Logf("Could not get block at slot %d: %v", slot, err)
 			continue
 		}
 		if block == nil {
@@ -1442,6 +1472,7 @@ func BenchmarkEraTransitionPerformanceRealData(b *testing.B) {
 			// Also seed the database with this block
 			ledgerBlock, err := ledger.NewBlockFromCbor(block.Type, block.Cbor)
 			if err != nil {
+				b.Logf("Could not parse block: %v", err)
 				continue
 			}
 
@@ -1456,6 +1487,7 @@ func BenchmarkEraTransitionPerformanceRealData(b *testing.B) {
 			}
 
 			if err := db.BlockCreate(blockModel, nil); err != nil {
+				b.Logf("Could not create block: %v", err)
 				continue
 			}
 		}
@@ -1487,8 +1519,10 @@ func BenchmarkEraTransitionPerformanceRealData(b *testing.B) {
 			_ = ledgerBlock.Type()
 
 			// Additional database operations that might happen during processing
-			_, err = db.Metadata().GetPParams(1, nil)
-			if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+			// GetPParams returns empty slice for missing params, not an error
+			res, err := db.Metadata().GetPParams(1, nil)
+			_ = res
+			if err != nil {
 				b.Fatal(err)
 			}
 		}
@@ -1907,6 +1941,7 @@ func BenchmarkTransactionValidation(b *testing.B) {
 		// Decode block
 		ledgerBlock, err := ledger.NewBlockFromCbor(block.Type, block.Cbor)
 		if err != nil {
+			b.Logf("Could not parse block: %v", err)
 			continue
 		}
 
@@ -2038,11 +2073,13 @@ func BenchmarkBlockProcessingThroughput(b *testing.B) {
 		// Add block to chain (this includes transaction validation and state updates)
 		if err := ledgerState.Chain().AddBlock(ledgerBlock, txn); err != nil {
 			// Some blocks may fail validation due to missing context, but we measure throughput anyway
-			_ = err
+			_ = txn.Rollback()
+			continue
 		}
 
 		// Commit transaction to finalize DB resources for this iteration
 		if err := txn.Commit(); err != nil {
+			_ = txn.Rollback()
 			b.Fatalf("Failed to commit transaction: %v", err)
 		}
 
@@ -2114,7 +2151,8 @@ func BenchmarkConcurrentQueries(b *testing.B) {
 				if err != nil {
 					b.Fatal(err)
 				}
-				_, err = db.UtxosByAddress(testAddr, nil)
+				res, err := db.UtxosByAddress(testAddr, nil)
+				_ = res
 				_ = err // Ignore errors for benchmark
 
 			case "utxo_ref":

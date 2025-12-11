@@ -14,6 +14,13 @@ Store blockchain data (blocks, transactions, etc.). Examples:
 - `gcs` - Google Cloud Storage
 - `s3` - AWS S3
 
+#### Iterator lifetime note
+Blob plugins expose iterators via `NewIterator(txn, opts)`. Items returned by the
+iterator's `Item()` must only be accessed while the transaction used to create
+the iterator is still active — implementations may validate transaction state at
+access time and will return errors if the transaction has been committed or
+rolled back. See `database/types/types.go` `BlobIterator` for details.
+
 ### Metadata Storage Plugins
 Store metadata and indexes. Examples:
 - `sqlite` - SQLite relational database

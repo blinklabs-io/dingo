@@ -251,10 +251,15 @@ func benchmarkStorageBackend(
 	}
 
 	for i := range 10 {
-		txn := db.Blob().NewTransaction(true)
+		txn := db.Transaction(true)
 		key := fmt.Appendf(nil, "block-%d", i)
-		if err := txn.Set(key, blocks[i]); err != nil {
-			txn.Discard()
+		blob := txn.DB().Blob()
+		if blob == nil || txn.Blob() == nil {
+			txn.Rollback()
+			b.Fatalf("blob store/txn not available")
+		}
+		if err := blob.Set(txn.Blob(), key, blocks[i]); err != nil {
+			txn.Rollback()
 			b.Fatalf("failed to set block %d: %v", i, err)
 		}
 		if err := txn.Commit(); err != nil {
@@ -266,15 +271,21 @@ func benchmarkStorageBackend(
 
 	for b.Loop() {
 		// Process 10 blocks of data
-		txn := db.Blob().NewTransaction(false)
+		txn := db.Transaction(false)
+		blob := txn.DB().Blob()
+		if blob == nil || txn.Blob() == nil {
+			txn.Rollback()
+			b.Fatalf("blob store/txn not available")
+		}
 		for blockNum := range 10 {
 			key := fmt.Appendf(nil, "block-%d", blockNum)
-			_, err := txn.Get(key)
+			_, err := blob.Get(txn.Blob(), key)
 			if err != nil {
+				txn.Rollback()
 				b.Fatalf("failed to get block %d: %v", blockNum, err)
 			}
 		}
-		txn.Discard()
+		txn.Rollback()
 	}
 }
 
@@ -316,10 +327,15 @@ func benchmarkTestLoad(
 	}
 
 	for i := range 200 {
-		txn := db.Blob().NewTransaction(true)
+		txn := db.Transaction(true)
 		key := fmt.Appendf(nil, "block-%d", i)
-		if err := txn.Set(key, blocks[i]); err != nil {
-			txn.Discard()
+		blob := txn.DB().Blob()
+		if blob == nil || txn.Blob() == nil {
+			txn.Rollback()
+			b.Fatalf("blob store/txn not available")
+		}
+		if err := blob.Set(txn.Blob(), key, blocks[i]); err != nil {
+			txn.Rollback()
 			b.Fatalf("failed to set block %d: %v", i, err)
 		}
 		if err := txn.Commit(); err != nil {
@@ -331,14 +347,20 @@ func benchmarkTestLoad(
 
 	for b.Loop() {
 		// Load first 200 blocks
-		txn := db.Blob().NewTransaction(false)
+		txn := db.Transaction(false)
+		blob := txn.DB().Blob()
+		if blob == nil || txn.Blob() == nil {
+			txn.Rollback()
+			b.Fatalf("blob store/txn not available")
+		}
 		for blockNum := range 200 {
 			key := fmt.Appendf(nil, "block-%d", blockNum)
-			_, err := txn.Get(key)
+			_, err := blob.Get(txn.Blob(), key)
 			if err != nil {
+				txn.Rollback()
 				b.Fatalf("failed to get block %d: %v", blockNum, err)
 			}
 		}
-		txn.Discard()
+		txn.Rollback()
 	}
 }

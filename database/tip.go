@@ -18,28 +18,16 @@ import ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 
 // GetTip returns the current tip as represented by the protocol
 func (d *Database) GetTip(txn *Txn) (ochainsync.Tip, error) {
-	tmpTip := ochainsync.Tip{}
 	if txn == nil {
-		tip, err := d.metadata.GetTip(nil)
-		if err != nil {
-			return tmpTip, err
-		}
-		tmpTip = tip
-	} else {
-		tip, err := d.metadata.GetTip(txn.Metadata())
-		if err != nil {
-			return tmpTip, err
-		}
-		tmpTip = tip
+		return d.metadata.GetTip(nil)
 	}
-	return tmpTip, nil
+	return d.metadata.GetTip(txn.Metadata())
 }
 
 // SetTip saves the current tip
 func (d *Database) SetTip(tip ochainsync.Tip, txn *Txn) error {
 	if txn == nil {
 		return d.metadata.SetTip(tip, nil)
-	} else {
-		return d.metadata.SetTip(tip, txn.Metadata())
 	}
+	return d.metadata.SetTip(tip, txn.Metadata())
 }

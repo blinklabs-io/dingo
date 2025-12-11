@@ -18,6 +18,7 @@ import (
 	"errors"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/types"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"gorm.io/gorm"
 )
@@ -26,13 +27,14 @@ import (
 func (d *MetadataStoreSqlite) GetPool(
 	pkh lcommon.PoolKeyHash,
 	includeInactive bool,
-	txn *gorm.DB,
+	txn types.Txn,
 ) (*models.Pool, error) {
 	ret := &models.Pool{}
-	if txn == nil {
-		txn = d.DB()
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return nil, err
 	}
-	result := txn.
+	result := db.
 		Preload(
 			"Registration",
 			func(db *gorm.DB) *gorm.DB { return db.Order("added_slot DESC").Limit(1) },
@@ -67,12 +69,12 @@ func (d *MetadataStoreSqlite) GetPool(
 			// Determine current epoch from tip -> epoch table. If we cannot
 			// determine the current epoch, conservatively treat the pool as active.
 			var tmpTip models.Tip
-			if res := txn.Where("id = ?", tipEntryId).First(&tmpTip); res.Error != nil {
+			if res := db.Where("id = ?", tipEntryId).First(&tmpTip); res.Error != nil {
 				// Can't get tip, assume active
 				return ret, nil //nolint:nilerr
 			}
 			var curEpoch models.Epoch
-			if res := txn.Where("start_slot <= ?", tmpTip.Slot).Order("start_slot DESC").First(&curEpoch); res.Error != nil {
+			if res := db.Where("start_slot <= ?", tmpTip.Slot).Order("start_slot DESC").First(&curEpoch); res.Error != nil {
 				// Can't determine current epoch, assume active
 				return ret, nil //nolint:nilerr
 			}
@@ -90,24 +92,19 @@ func (d *MetadataStoreSqlite) GetPool(
 // GetPoolRegistrations returns pool registration certificates
 func (d *MetadataStoreSqlite) GetPoolRegistrations(
 	pkh lcommon.PoolKeyHash,
-	txn *gorm.DB,
+	txn types.Txn,
 ) ([]lcommon.PoolRegistrationCertificate, error) {
 	ret := []lcommon.PoolRegistrationCertificate{}
 	certs := []models.PoolRegistration{}
-	if txn != nil {
-		result := txn.Where("pool_key_hash = ?", lcommon.Blake2b224(pkh).Bytes()).
-			Order("id DESC").
-			Find(&certs)
-		if result.Error != nil {
-			return ret, result.Error
-		}
-	} else {
-		result := d.DB().Where("pool_key_hash = ?", lcommon.Blake2b224(pkh).Bytes()).
-			Order("id DESC").
-			Find(&certs)
-		if result.Error != nil {
-			return ret, result.Error
-		}
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return ret, err
+	}
+	result := db.Where("pool_key_hash = ?", pkh.Bytes()).
+		Order("id DESC").
+		Find(&certs)
+	if result.Error != nil {
+		return ret, result.Error
 	}
 	var addrKeyHash lcommon.AddrKeyHash
 	var tmpCert lcommon.PoolRegistrationCertificate
