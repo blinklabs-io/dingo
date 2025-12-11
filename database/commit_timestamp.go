@@ -16,6 +16,8 @@ package database
 
 import (
 	"fmt"
+
+	"github.com/blinklabs-io/dingo/database/types"
 )
 
 // CommitTimestampError contains the timestamps of the metadata and blob stores
@@ -66,11 +68,19 @@ func (b *Database) checkCommitTimestamp() error {
 
 func (b *Database) updateCommitTimestamp(txn *Txn, timestamp int64) error {
 	// Update metadata
-	if err := b.Metadata().SetCommitTimestamp(txn.Metadata(), timestamp); err != nil {
+	var metaTxn types.Txn
+	if txn != nil {
+		metaTxn = txn.Metadata()
+	}
+	if err := b.Metadata().SetCommitTimestamp(metaTxn, timestamp); err != nil {
 		return err
 	}
 	// Update blob
-	if err := b.Blob().SetCommitTimestamp(txn.Blob(), timestamp); err != nil {
+	var blobTxn types.Txn
+	if txn != nil {
+		blobTxn = txn.Blob()
+	}
+	if err := b.Blob().SetCommitTimestamp(blobTxn, timestamp); err != nil {
 		return err
 	}
 	return nil

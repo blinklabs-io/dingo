@@ -18,17 +18,30 @@ import (
 	"fmt"
 
 	"github.com/blinklabs-io/dingo/database/plugin"
-	badger "github.com/dgraph-io/badger/v4"
+	"github.com/blinklabs-io/dingo/database/types"
 )
 
+// BlobStore defines the interface for a blob storage provider.
+// All transactional methods (Get, Set, Delete, NewIterator, SetCommitTimestamp)
+// require a non-nil types.Txn created by NewTransaction(). Passing nil will
+// result in types.ErrTxnWrongType.
 type BlobStore interface {
-	// matches badger.DB
+	// Transaction management
 	Close() error
-	NewTransaction(bool) *badger.Txn
+	NewTransaction(bool) types.Txn
 
-	// Our specific functions
+	// KV operations (plugins map these to their internals with transaction context)
+	Get(txn types.Txn, key []byte) ([]byte, error)
+	Set(txn types.Txn, key, val []byte) error
+	Delete(txn types.Txn, key []byte) error
+	NewIterator(
+		txn types.Txn,
+		opts types.BlobIteratorOptions,
+	) types.BlobIterator
+
+	// Commit timestamp management
 	GetCommitTimestamp() (int64, error)
-	SetCommitTimestamp(*badger.Txn, int64) error
+	SetCommitTimestamp(txn types.Txn, timestamp int64) error
 }
 
 // New returns the started blob plugin selected by name

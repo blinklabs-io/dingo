@@ -19,79 +19,78 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin"
+	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
-	"gorm.io/gorm"
 )
 
 type MetadataStore interface {
 	// Database
 	Close() error
-	DB() *gorm.DB
 	GetCommitTimestamp() (int64, error)
-	SetCommitTimestamp(*gorm.DB, int64) error
-	Transaction() *gorm.DB
+	SetCommitTimestamp(types.Txn, int64) error
+	Transaction() types.Txn
 
 	// Ledger state
 	AddUtxos(
 		[]models.UtxoSlot,
-		*gorm.DB,
+		types.Txn,
 	) error
 	GetPoolRegistrations(
 		lcommon.PoolKeyHash,
-		*gorm.DB,
+		types.Txn,
 	) ([]lcommon.PoolRegistrationCertificate, error)
 	GetPool(
 		lcommon.PoolKeyHash,
 		bool, // includeInactive
-		*gorm.DB,
+		types.Txn,
 	) (*models.Pool, error)
 	GetStakeRegistrations(
 		[]byte, // stakeKey
-		*gorm.DB,
+		types.Txn,
 	) ([]lcommon.StakeRegistrationCertificate, error)
-	GetTip(*gorm.DB) (ochainsync.Tip, error)
+	GetTip(types.Txn) (ochainsync.Tip, error)
 
 	GetAccount(
 		[]byte, // stakeKey
 		bool, // includeInactive
-		*gorm.DB,
+		types.Txn,
 	) (*models.Account, error)
 	GetBlockNonce(
 		ocommon.Point,
-		*gorm.DB,
+		types.Txn,
 	) ([]byte, error)
 	GetDatum(
 		lcommon.Blake2b256,
-		*gorm.DB,
+		types.Txn,
 	) (*models.Datum, error)
 	GetDrep(
 		[]byte, // credential
 		bool, // includeInactive
-		*gorm.DB,
+		types.Txn,
 	) (*models.Drep, error)
 	GetPParams(
 		uint64, // epoch
-		*gorm.DB,
+		types.Txn,
 	) ([]models.PParams, error)
 	GetPParamUpdates(
 		uint64, // epoch
-		*gorm.DB,
+		types.Txn,
 	) ([]models.PParamUpdate, error)
 	GetUtxo(
 		[]byte, // txId
 		uint32, // idx
-		*gorm.DB,
+		types.Txn,
 	) (*models.Utxo, error)
 	GetTransactionByHash(
 		[]byte, // hash
-		*gorm.DB,
+		types.Txn,
 	) (*models.Transaction, error)
 	GetScript(
 		lcommon.ScriptHash,
-		*gorm.DB,
+		types.Txn,
 	) (*models.Script, error)
 
 	SetBlockNonce(
@@ -99,13 +98,13 @@ type MetadataStore interface {
 		uint64, // slotNumber
 		[]byte, // nonce
 		bool, // isCheckpoint
-		*gorm.DB,
+		types.Txn,
 	) error
 	SetDatum(
 		lcommon.Blake2b256,
 		[]byte,
 		uint64, // slot
-		*gorm.DB,
+		types.Txn,
 	) error
 	SetEpoch(
 		uint64, // slot
@@ -114,47 +113,58 @@ type MetadataStore interface {
 		uint, // era
 		uint, // slotLength
 		uint, // lengthInSlots
-		*gorm.DB,
+		types.Txn,
 	) error
 	SetPParams(
 		[]byte, // params
 		uint64, // slot
 		uint64, // epoch
 		uint, // eraId
-		*gorm.DB,
+		types.Txn,
 	) error
 	SetPParamUpdate(
 		[]byte, // genesis
 		[]byte, // update
 		uint64, // slot
 		uint64, // epoch
-		*gorm.DB,
+		types.Txn,
 	) error
 	SetTip(
 		ochainsync.Tip,
-		*gorm.DB,
+		types.Txn,
 	) error
 	SetTransaction(
 		lcommon.Transaction,
 		ocommon.Point,
 		uint32, // idx
 		map[int]uint64, // certDeposits: indexed by certificate position in tx.Certificates(); absent keys are treated as zero/no deposit
-		*gorm.DB,
+		types.Txn,
 	) error
 
 	// Helpers
-	DeleteBlockNoncesBeforeSlot(uint64, *gorm.DB) error
-	DeleteBlockNoncesBeforeSlotWithoutCheckpoints(uint64, *gorm.DB) error
-	DeleteUtxo(any, *gorm.DB) error
-	DeleteUtxos([]any, *gorm.DB) error
-	DeleteUtxosAfterSlot(uint64, *gorm.DB) error
-	GetEpochsByEra(uint, *gorm.DB) ([]models.Epoch, error)
-	GetEpochs(*gorm.DB) ([]models.Epoch, error)
-	GetUtxosAddedAfterSlot(uint64, *gorm.DB) ([]models.Utxo, error)
-	GetUtxosByAddress(ledger.Address, *gorm.DB) ([]models.Utxo, error)
-	GetUtxosDeletedBeforeSlot(uint64, int, *gorm.DB) ([]models.Utxo, error)
-	SetUtxoDeletedAtSlot(ledger.TransactionInput, uint64, *gorm.DB) error
-	SetUtxosNotDeletedAfterSlot(uint64, *gorm.DB) error
+	DeleteBlockNoncesBeforeSlot(uint64, types.Txn) error
+	DeleteBlockNoncesBeforeSlotWithoutCheckpoints(
+		uint64,
+		types.Txn,
+	) error
+	DeleteUtxo(any, types.Txn) error
+	DeleteUtxos([]any, types.Txn) error
+	DeleteUtxosAfterSlot(uint64, types.Txn) error
+	GetEpochsByEra(uint, types.Txn) ([]models.Epoch, error)
+	GetEpochs(types.Txn) ([]models.Epoch, error)
+	GetUtxosAddedAfterSlot(uint64, types.Txn) ([]models.Utxo, error)
+	GetUtxosByAddress(ledger.Address, types.Txn) ([]models.Utxo, error)
+	GetUtxosDeletedBeforeSlot(
+		uint64,
+		int,
+		types.Txn,
+	) ([]models.Utxo, error)
+	SetUtxoDeletedAtSlot(
+		ledger.TransactionInput,
+		uint64,
+		types.Txn,
+	) error
+	SetUtxosNotDeletedAfterSlot(uint64, types.Txn) error
 }
 
 // New creates a new metadata store instance using the specified plugin

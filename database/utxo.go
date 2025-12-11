@@ -20,26 +20,27 @@ import (
 	"slices"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
-	"github.com/dgraph-io/badger/v4"
 )
 
 var ErrUtxoNotFound = errors.New("utxo not found")
 
 func loadCbor(u *models.Utxo, txn *Txn) error {
 	key := UtxoBlobKey(u.TxId, u.OutputIdx)
-	item, err := txn.Blob().Get(key)
-	if err != nil {
-		return err
+	blob := txn.DB().Blob()
+	if blob == nil {
+		return errors.New("blob store is not available")
 	}
-	u.Cbor, err = item.ValueCopy(nil)
+	val, err := blob.Get(txn.Blob(), key)
 	if err != nil {
-		if errors.Is(err, badger.ErrKeyNotFound) {
-			return nil
+		if errors.Is(err, types.ErrBlobKeyNotFound) {
+			return err
 		}
 		return err
 	}
+	u.Cbor = val
 	return nil
 }
 
@@ -48,7 +49,7 @@ func (d *Database) AddUtxos(
 	txn *Txn,
 ) error {
 	if txn == nil {
-		txn = d.Transaction(false)
+		txn = d.Transaction(true)
 		defer txn.Commit() //nolint:errcheck
 	}
 	for _, utxoSlot := range utxos {
@@ -66,7 +67,11 @@ func (d *Database) AddUtxos(
 				return err
 			}
 		}
-		err := txn.Blob().Set(key, utxoCbor)
+		blob := txn.DB().Blob()
+		if blob == nil {
+			return types.ErrBlobStoreUnavailable
+		}
+		err := blob.Set(txn.Blob(), key, utxoCbor)
 		if err != nil {
 			return err
 		}
@@ -172,10 +177,16 @@ func (d *Database) UtxosDeleteConsumed(
 		}
 		loopTxn := NewBlobOnlyTxn(d, true)
 		err := loopTxn.Do(func(txn *Txn) error {
+			// Resolve blob store once before loop
+			blob := txn.DB().Blob()
+			if blob == nil {
+				ret = types.ErrBlobStoreUnavailable
+				return ret
+			}
 			// Remove from blob DB
 			for _, utxo := range utxos[0:batchSize] {
 				key := UtxoBlobKey(utxo.TxId, utxo.OutputIdx)
-				err := txn.Blob().Delete(key)
+				err := blob.Delete(txn.Blob(), key)
 				if err != nil {
 					ret = err
 					return err
@@ -221,10 +232,16 @@ func (d *Database) UtxosDeleteRolledback(
 		}
 		loopTxn := NewBlobOnlyTxn(d, true)
 		err := loopTxn.Do(func(txn *Txn) error {
+			// Resolve blob store once before loop
+			blob := txn.DB().Blob()
+			if blob == nil {
+				ret = types.ErrBlobStoreUnavailable
+				return ret
+			}
 			// Remove from blob DB
 			for _, utxo := range utxos[0:batchSize] {
 				key := UtxoBlobKey(utxo.TxId, utxo.OutputIdx)
-				err := txn.Blob().Delete(key)
+				err := blob.Delete(txn.Blob(), key)
 				if err != nil {
 					ret = err
 					return err

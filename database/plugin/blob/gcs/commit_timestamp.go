@@ -15,43 +15,47 @@
 package gcs
 
 import (
-	"context"
 	"encoding/json"
-	"io"
 	"math/big"
 
 	dingosops "github.com/blinklabs-io/dingo/database/sops"
+	"github.com/blinklabs-io/dingo/database/types"
 )
 
 const commitTimestampBlobKey = "metadata_commit_timestamp"
 
-func (b *BlobStoreGCS) GetCommitTimestamp(ctx context.Context) (int64, error) {
-	r, err := b.bucket.Object(commitTimestampBlobKey).NewReader(ctx)
-	if err != nil {
-		b.logger.Errorf("failed to read commit timestamp: %v", err)
-		return 0, err
-	}
-	defer r.Close()
+func (b *BlobStoreGCS) GetCommitTimestamp() (int64, error) {
+	txn := b.NewTransaction(false)
+	defer txn.Rollback() //nolint:errcheck // no-op for this backend
 
-	ciphertext, err := io.ReadAll(r)
+	r, err := b.Get(txn, []byte(commitTimestampBlobKey))
 	if err != nil {
-		b.logger.Errorf("failed to read commit timestamp object: %v", err)
 		return 0, err
 	}
 
-	plaintext, err := dingosops.Decrypt(ciphertext)
+	plaintext, err := dingosops.Decrypt(r)
 	if err != nil {
-		if !json.Valid(ciphertext) && len(ciphertext) <= 8 {
-			ts := new(big.Int).SetBytes(ciphertext).Int64()
+		if !json.Valid(r) && len(r) <= 8 {
+			ts := new(big.Int).SetBytes(r).Int64()
 			b.logger.Warningf(
 				"commit timestamp stored plaintext in GCS, migrating to SOPS encryption: %v",
 				err,
 			)
-			if migrateErr := b.SetCommitTimestamp(ctx, ts); migrateErr != nil {
+			// Create a new transaction for migration
+			migrateTxn := b.NewTransaction(true)
+			defer migrateTxn.Rollback() //nolint:errcheck
+			if migrateErr := b.SetCommitTimestamp(migrateTxn, ts); migrateErr != nil {
 				b.logger.Errorf(
 					"failed to migrate plaintext commit timestamp: %v",
 					migrateErr,
 				)
+			} else {
+				if migrateErr := migrateTxn.Commit(); migrateErr != nil {
+					b.logger.Errorf(
+						"failed to commit plaintext commit timestamp migration: %v",
+						migrateErr,
+					)
+				}
 			}
 			return ts, nil
 		}
@@ -63,9 +67,12 @@ func (b *BlobStoreGCS) GetCommitTimestamp(ctx context.Context) (int64, error) {
 }
 
 func (b *BlobStoreGCS) SetCommitTimestamp(
-	ctx context.Context,
+	txn types.Txn,
 	timestamp int64,
 ) error {
+	if txn == nil {
+		return types.ErrBlobKeyNotFound
+	}
 	raw := new(big.Int).SetInt64(timestamp).Bytes()
 
 	ciphertext, err := dingosops.Encrypt(raw)
@@ -74,14 +81,7 @@ func (b *BlobStoreGCS) SetCommitTimestamp(
 		return err
 	}
 
-	w := b.bucket.Object(commitTimestampBlobKey).NewWriter(ctx)
-	if _, err := w.Write(ciphertext); err != nil {
-		_ = w.Close()
-		b.logger.Errorf("failed to write commit timestamp: %v", err)
-		return err
-	}
-	if err := w.Close(); err != nil {
-		b.logger.Errorf("failed to close writer: %v", err)
+	if err := b.Set(txn, []byte(commitTimestampBlobKey), ciphertext); err != nil {
 		return err
 	}
 	b.logger.Infof("commit timestamp %d written to GCS", timestamp)

@@ -25,10 +25,78 @@ import (
 	"sync"
 	"time"
 
+	"github.com/blinklabs-io/dingo/database/types"
 	badger "github.com/dgraph-io/badger/v4"
 	"github.com/dgraph-io/badger/v4/options"
 	"github.com/prometheus/client_golang/prometheus"
 )
+
+// badgerTxn wraps a badger transaction and implements types.Txn
+type badgerTxn struct {
+	tx       *badger.Txn
+	finished bool
+}
+
+func newBadgerTxn(tx *badger.Txn) *badgerTxn {
+	return &badgerTxn{tx: tx}
+}
+
+func (t *badgerTxn) Commit() error {
+	if t.finished {
+		return nil
+	}
+	if t.tx == nil {
+		t.finished = true
+		return nil
+	}
+	if err := t.tx.Commit(); err != nil {
+		return err
+	}
+	t.finished = true
+	return nil
+}
+
+func (t *badgerTxn) Rollback() error {
+	if t.finished {
+		return nil
+	}
+	if t.tx != nil {
+		t.tx.Discard()
+	}
+	t.finished = true
+	return nil
+}
+
+type badgerIterator struct {
+	iter *badger.Iterator
+}
+
+func (it *badgerIterator) Rewind()            { it.iter.Rewind() }
+func (it *badgerIterator) Seek(prefix []byte) { it.iter.Seek(prefix) }
+
+func (it *badgerIterator) Valid() bool { return it.iter.Valid() }
+
+func (it *badgerIterator) ValidForPrefix(
+	p []byte,
+) bool {
+	return it.iter.ValidForPrefix(p)
+}
+func (it *badgerIterator) Next() { it.iter.Next() }
+
+func (it *badgerIterator) Item() types.BlobItem { return &badgerItem{item: it.iter.Item()} }
+func (it *badgerIterator) Close()               { it.iter.Close() }
+
+type badgerItem struct {
+	item *badger.Item
+}
+
+func (i *badgerItem) Key() []byte {
+	return i.item.KeyCopy(nil)
+}
+
+func (i *badgerItem) ValueCopy(dst []byte) ([]byte, error) {
+	return i.item.ValueCopy(dst)
+}
 
 // BlobStoreBadger stores all data in badger. Data may not be persisted
 type BlobStoreBadger struct {
@@ -182,6 +250,59 @@ func (d *BlobStoreBadger) DB() *badger.DB {
 }
 
 // NewTransaction creates a new badger transaction
-func (d *BlobStoreBadger) NewTransaction(update bool) *badger.Txn {
-	return d.DB().NewTransaction(update)
+func (d *BlobStoreBadger) NewTransaction(update bool) types.Txn {
+	return newBadgerTxn(d.DB().NewTransaction(update))
+}
+
+// Get retrieves a value from badger within a transaction
+func (d *BlobStoreBadger) Get(
+	txn types.Txn,
+	key []byte,
+) ([]byte, error) {
+	badgerTxn, ok := txn.(*badgerTxn)
+	if !ok {
+		return nil, types.ErrTxnWrongType
+	}
+	item, err := badgerTxn.tx.Get(key)
+	if err != nil {
+		if errors.Is(err, badger.ErrKeyNotFound) {
+			return nil, types.ErrBlobKeyNotFound
+		}
+		return nil, err
+	}
+	return item.ValueCopy(nil)
+}
+
+// Set stores a key-value pair in badger within a transaction
+func (d *BlobStoreBadger) Set(txn types.Txn, key, val []byte) error {
+	badgerTxn, ok := txn.(*badgerTxn)
+	if !ok {
+		return types.ErrTxnWrongType
+	}
+	return badgerTxn.tx.Set(key, val)
+}
+
+// Delete removes a key from badger within a transaction
+func (d *BlobStoreBadger) Delete(txn types.Txn, key []byte) error {
+	badgerTxn, ok := txn.(*badgerTxn)
+	if !ok {
+		return types.ErrTxnWrongType
+	}
+	return badgerTxn.tx.Delete(key)
+}
+
+// NewIterator creates an iterator for badger within a transaction
+func (d *BlobStoreBadger) NewIterator(
+	txn types.Txn,
+	opts types.BlobIteratorOptions,
+) types.BlobIterator {
+	badgerTxn, ok := txn.(*badgerTxn)
+	if !ok {
+		return nil
+	}
+	iterOpts := badger.IteratorOptions{
+		Prefix:  opts.Prefix,
+		Reverse: opts.Reverse,
+	}
+	return &badgerIterator{iter: badgerTxn.tx.NewIterator(iterOpts)}
 }

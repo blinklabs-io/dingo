@@ -18,6 +18,7 @@ import (
 	"errors"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/types"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
@@ -26,12 +27,12 @@ import (
 func (d *MetadataStoreSqlite) GetDrep(
 	cred []byte,
 	includeInactive bool,
-	txn *gorm.DB,
+	txn types.Txn,
 ) (*models.Drep, error) {
 	var drep models.Drep
 	query := d.DB()
 	if txn != nil {
-		query = txn
+		query = d.dbFromTxn(txn)
 	}
 	if !includeInactive {
 		query = query.Where("active = ?", true)
@@ -52,7 +53,7 @@ func (d *MetadataStoreSqlite) SetDrep(
 	url string,
 	hash []byte,
 	active bool,
-	txn *gorm.DB,
+	txn types.Txn,
 ) error {
 	tmpItem := models.Drep{
 		Credential: cred,
@@ -65,14 +66,14 @@ func (d *MetadataStoreSqlite) SetDrep(
 		Columns:   []clause.Column{{Name: "credential"}},
 		UpdateAll: true,
 	}
-	if txn != nil {
-		if result := txn.Clauses(onConflict).Create(&tmpItem); result.Error != nil {
-			return result.Error
-		}
+	var db *gorm.DB
+	if txn == nil {
+		db = d.DB()
 	} else {
-		if result := d.DB().Clauses(onConflict).Create(&tmpItem); result.Error != nil {
-			return result.Error
-		}
+		db = d.dbFromTxn(txn)
+	}
+	if result := db.Clauses(onConflict).Create(&tmpItem); result.Error != nil {
+		return result.Error
 	}
 	return nil
 }

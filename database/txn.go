@@ -19,15 +19,15 @@ import (
 	"sync"
 	"time"
 
-	"github.com/dgraph-io/badger/v4"
-	"gorm.io/gorm"
+	"github.com/blinklabs-io/dingo/database/types"
 )
 
-// Txn is a wrapper around the transaction objects for the underlying DB engines
+// Txn is a wrapper that coordinates both metadata and blob transactions.
+// Metadata and blob are first-class siblings, not nested.
 type Txn struct {
 	db          *Database
-	blobTxn     *badger.Txn
-	metadataTxn *gorm.DB
+	blobTxn     types.Txn
+	metadataTxn types.Txn
 	lock        sync.Mutex
 	finished    bool
 	readWrite   bool
@@ -62,11 +62,13 @@ func (t *Txn) DB() *Database {
 	return t.db
 }
 
-func (t *Txn) Metadata() *gorm.DB {
+// Metadata returns the underlying metadata transaction handle
+func (t *Txn) Metadata() types.Txn {
 	return t.metadataTxn
 }
 
-func (t *Txn) Blob() *badger.Txn {
+// Blob returns the blob transaction handle
+func (t *Txn) Blob() types.Txn {
 	return t.blobTxn
 }
 
@@ -103,20 +105,32 @@ func (t *Txn) Commit() error {
 	if t.blobTxn != nil && t.metadataTxn != nil {
 		commitTimestamp := time.Now().UnixMilli()
 		if err := t.db.updateCommitTimestamp(t, commitTimestamp); err != nil {
+			if t.blobTxn != nil {
+				_ = t.blobTxn.Rollback()
+			}
+			if t.metadataTxn != nil {
+				_ = t.metadataTxn.Rollback()
+			}
 			return err
 		}
 	}
-	// Commit sqlite transaction
-	if t.metadataTxn != nil {
-		if result := t.metadataTxn.Commit(); result.Error != nil {
-			// Failed to commit metadata DB, so discard blob txn
-			t.blobTxn.Discard()
-			return result.Error
-		}
-	}
-	// Commit badger transaction
+	// Commit blob transaction first (so if this fails, metadata never commits)
 	if t.blobTxn != nil {
 		if err := t.blobTxn.Commit(); err != nil {
+			// Failed to commit blob DB, so rollback metadata txn
+			if t.metadataTxn != nil {
+				_ = t.metadataTxn.Rollback()
+			}
+			return err
+		}
+	}
+	// Commit metadata transaction
+	if t.metadataTxn != nil {
+		if err := t.metadataTxn.Commit(); err != nil {
+			if t.blobTxn != nil {
+				_ = t.blobTxn.Rollback()
+			}
+			_ = t.metadataTxn.Rollback()
 			return err
 		}
 	}
@@ -134,14 +148,17 @@ func (t *Txn) rollback() error {
 	if t.finished {
 		return nil
 	}
+	var rollbackErr error
 	if t.blobTxn != nil {
-		t.blobTxn.Discard()
+		if err := t.blobTxn.Rollback(); err != nil {
+			rollbackErr = err
+		}
 	}
 	if t.metadataTxn != nil {
-		if result := t.metadataTxn.Rollback(); result.Error != nil {
-			return result.Error
+		if err := t.metadataTxn.Rollback(); err != nil {
+			return err
 		}
 	}
 	t.finished = true
-	return nil
+	return rollbackErr
 }

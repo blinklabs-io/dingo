@@ -16,6 +16,7 @@ package sqlite
 
 import (
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/types"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"gorm.io/gorm"
 )
@@ -23,24 +24,24 @@ import (
 // GetStakeRegistrations returns stake registration certificates
 func (d *MetadataStoreSqlite) GetStakeRegistrations(
 	stakingKey []byte,
-	txn *gorm.DB,
+	txn types.Txn,
 ) ([]lcommon.StakeRegistrationCertificate, error) {
 	ret := []lcommon.StakeRegistrationCertificate{}
 	certs := []models.StakeRegistration{}
-	if txn != nil {
-		result := txn.Where("staking_key = ?", stakingKey).
-			Order("id DESC").
-			Find(&certs)
-		if result.Error != nil {
-			return ret, result.Error
-		}
+	var db *gorm.DB
+	if txn == nil {
+		db = d.DB()
 	} else {
-		result := d.DB().Where("staking_key = ?", stakingKey).
-			Order("id DESC").
-			Find(&certs)
-		if result.Error != nil {
-			return ret, result.Error
-		}
+		db = d.dbFromTxn(txn)
+	}
+	if db == nil {
+		return ret, types.ErrTxnWrongType
+	}
+	result := db.Where("staking_key = ?", stakingKey).
+		Order("id DESC").
+		Find(&certs)
+	if result.Error != nil {
+		return ret, result.Error
 	}
 	var tmpCert lcommon.StakeRegistrationCertificate
 	for _, cert := range certs {
