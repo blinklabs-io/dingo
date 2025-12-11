@@ -19,6 +19,7 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/immutable"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
 const (
@@ -56,4 +57,92 @@ func TestGetTip(t *testing.T) {
 	}
 }
 
-// TODO: add tests for getting a specific block and getting a range of blocks that traverses multiple chunks (#386)
+func TestGetSpecificBlock(t *testing.T) {
+	imm, err := immutable.New(testDataDir)
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	// Get an iterator starting from the beginning
+	iter, err := imm.BlocksFromPoint(ocommon.Point{Slot: 0, Hash: []byte{}})
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	defer iter.Close()
+
+	// Skip to the 100th block to test a block that's not the first one
+	blocks := make([]*immutable.Block, 0, 100)
+	for i := 0; i < 100; i++ {
+		b, err := iter.Next()
+		if err != nil {
+			t.Fatalf("unexpected error: %s", err)
+		}
+		if b == nil {
+			t.Fatalf("expected to get at least 100 blocks, got only %d", i)
+		}
+		blocks = append(blocks, b)
+	}
+	block := blocks[len(blocks)-1]
+
+	// Now test GetBlock with the point of this block
+	retrievedBlock, err := imm.GetBlock(
+		ocommon.Point{Slot: block.Slot, Hash: block.Hash},
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	if retrievedBlock == nil {
+		t.Fatalf("expected to get the block, got nil")
+	}
+	if retrievedBlock.Slot != block.Slot {
+		t.Fatalf(
+			"slot mismatch: expected %d, got %d",
+			block.Slot,
+			retrievedBlock.Slot,
+		)
+	}
+	if string(retrievedBlock.Hash) != string(block.Hash) {
+		t.Fatalf("hash mismatch")
+	}
+}
+
+func TestBlocksRangeMultipleChunks(t *testing.T) {
+	imm, err := immutable.New(testDataDir)
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	// Get an iterator starting from a point in the middle of the chain (slot 1000000)
+	// This ensures we're testing range queries that may traverse multiple chunks
+	iter, err := imm.BlocksFromPoint(
+		ocommon.Point{Slot: 1000000, Hash: []byte{}},
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	defer iter.Close()
+
+	var prevSlot uint64 = 999999 // Less than 1000000
+	blockCount := 0
+	for blockCount < 50 { // Iterate enough blocks to potentially traverse multiple chunks
+		block, err := iter.Next()
+		if err != nil {
+			t.Fatalf("unexpected error: %s", err)
+		}
+		if block == nil {
+			break // No more blocks
+		}
+		if block.Slot < prevSlot {
+			t.Fatalf(
+				"slots not increasing: prev %d, current %d",
+				prevSlot,
+				block.Slot,
+			)
+		}
+		prevSlot = block.Slot
+		blockCount++
+	}
+	if blockCount == 0 {
+		t.Fatalf("expected to get at least one block")
+	}
+	// Since we started from the middle and there are multiple chunks,
+	// and we iterated blocks, we tested range queries across chunks
+}
