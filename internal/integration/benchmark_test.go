@@ -101,7 +101,12 @@ func loadBlockData(numBlocks int) ([][]byte, error) {
 func canCreateDatabase(config *database.Config) bool {
 	db, err := database.New(config)
 	if db != nil {
-		defer db.Close()
+		defer func() {
+			if closeErr := db.Close(); closeErr != nil {
+				// Close failure indicates config may not be fully usable
+				err = closeErr
+			}
+		}()
 	}
 	if err != nil {
 		return false
