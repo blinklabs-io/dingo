@@ -134,16 +134,19 @@ parse_benchmark() {
     echo "$formatted_name|$ops_sec|$time_op|$mem_op|$allocs_op"
 }
 
-# Parse current results into associative array
-declare -A current_results
+# Parse current results into temporary file
+CURRENT_RESULTS_FILE=$(mktemp "${TMPDIR:-/tmp}/dingo_bench_XXXXXX")
 while IFS= read -r line; do
     if [[ "$line" =~ ^Benchmark ]]; then
         parsed=$(parse_benchmark "$line")
         name=$(echo "$parsed" | cut -d'|' -f1)
         data=$(echo "$parsed" | cut -d'|' -f2-)
-        current_results["$name"]="$data"
+        echo "$name|$data" >> "$CURRENT_RESULTS_FILE"
     fi
 done <<< "$BENCHMARK_OUTPUT"
+
+# Deduplicate benchmark names
+sort -t'|' -k1,1 -u "$CURRENT_RESULTS_FILE" > "$CURRENT_RESULTS_FILE.tmp" && mv "$CURRENT_RESULTS_FILE.tmp" "$CURRENT_RESULTS_FILE"
 
 # Display current results summary
 echo "Current Benchmark Summary"
@@ -172,7 +175,8 @@ echo "$BENCHMARK_OUTPUT" | grep "^Benchmark" | sort -k5 -nr | head -3 | while re
 done
 
 # Read previous results if file exists and we're comparing
-declare -A previous_results
+PREVIOUS_RESULTS_FILE=$(mktemp "${TMPDIR:-/tmp}/dingo_bench_XXXXXX")
+trap 'rm -f "$CURRENT_RESULTS_FILE" "$PREVIOUS_RESULTS_FILE"' EXIT
 previous_date=""
 MAJOR_CHANGES=false
 
@@ -201,7 +205,7 @@ if [[ -f "$OUTPUT_FILE" && "$WRITE_TO_FILE" == "true" ]]; then
             mem_op=$(echo "$line" | sed 's/^| //' | cut -d'|' -f4 | sed 's/ //g')
             allocs_op=$(echo "$line" | sed 's/^| //' | cut -d'|' -f5 | sed 's/ //g')
             if [[ -n "$benchmark" && -n "$ops_sec" ]]; then
-                previous_results["$benchmark"]="$ops_sec|$time_op|$mem_op|$allocs_op"
+                echo "$benchmark|$ops_sec|$time_op|$mem_op|$allocs_op" >> "$PREVIOUS_RESULTS_FILE"
             fi
         fi
         if [[ "$in_table" == true && "$line" == "" ]]; then
@@ -210,20 +214,42 @@ if [[ -f "$OUTPUT_FILE" && "$WRITE_TO_FILE" == "true" ]]; then
     done < "$OUTPUT_FILE"
 fi
 
+# Deduplicate previous benchmark names
+sort -t'|' -k1,1 -u "$PREVIOUS_RESULTS_FILE" > "$PREVIOUS_RESULTS_FILE.tmp" && mv "$PREVIOUS_RESULTS_FILE.tmp" "$PREVIOUS_RESULTS_FILE"
+
+# Helper functions to get data from temp files
+get_current_data() {
+    local benchmark="$1"
+    awk -F'|' '$1 == "'"$benchmark"'" {print substr($0, index($0, "|")+1)}' "$CURRENT_RESULTS_FILE"
+}
+
+get_previous_data() {
+    local benchmark="$1"
+    awk -F'|' '$1 == "'"$benchmark"'" {print substr($0, index($0, "|")+1)}' "$PREVIOUS_RESULTS_FILE"
+}
+
+list_current_benchmarks() {
+    awk -F'|' '!seen[$1]++ {print $1}' "$CURRENT_RESULTS_FILE"
+}
+
+list_previous_benchmarks() {
+    awk -F'|' '!seen[$1]++ {print $1}' "$PREVIOUS_RESULTS_FILE"
+}
+
 # Generate performance comparison if we have previous results
 if [[ -n "$previous_date" && "$WRITE_TO_FILE" == "true" ]]; then
     # Track changes
-    declare -a faster_benchmarks
-    declare -a slower_benchmarks
-    declare -a new_benchmarks
-    declare -a removed_benchmarks
+    faster_benchmarks=""
+    slower_benchmarks=""
+    new_benchmarks=""
+    removed_benchmarks=""
 
     # Compare results
-    for benchmark in "${!current_results[@]}"; do
-        if [[ -n "${previous_results[$benchmark]}" ]]; then
+    while IFS= read -r benchmark; do
+        if [[ -n "$(get_previous_data "$benchmark")" ]]; then
             # Benchmark exists in both
-            current_data="${current_results[$benchmark]}"
-            previous_data="${previous_results[$benchmark]}"
+            current_data=$(get_current_data "$benchmark")
+            previous_data=$(get_previous_data "$benchmark")
 
             current_ops=$(echo "$current_data" | cut -d'|' -f1)
             previous_ops=$(echo "$previous_data" | cut -d'|' -f1)
@@ -231,31 +257,41 @@ if [[ -n "$previous_date" && "$WRITE_TO_FILE" == "true" ]]; then
             if [[ "$current_ops" =~ ^[0-9]+$ && "$previous_ops" =~ ^[0-9]+$ && $previous_ops -gt 0 ]]; then
                 change=$(( (current_ops - previous_ops) * 100 / previous_ops ))
                 if [[ $change -gt 10 ]]; then
-                    faster_benchmarks+=("$benchmark (+${change}%)")
+                    faster_benchmarks="$faster_benchmarks
+$benchmark (+${change}%)"
                 elif [[ $change -lt -10 ]]; then
                     change_abs=$(( (previous_ops - current_ops) * 100 / previous_ops ))
-                    slower_benchmarks+=("$benchmark (-${change_abs}%)")
+                    slower_benchmarks="$slower_benchmarks
+$benchmark (-${change_abs}%)"
                     MAJOR_CHANGES=true
                 fi
             fi
         else
-            new_benchmarks+=("$benchmark")
+            new_benchmarks="$new_benchmarks
+$benchmark"
         fi
-    done
+    done < <(list_current_benchmarks)
 
     # Check for removed benchmarks
-    for benchmark in "${!previous_results[@]}"; do
-        if [[ -z "${current_results[$benchmark]}" ]]; then
-            removed_benchmarks+=("$benchmark")
+    while IFS= read -r benchmark; do
+        if [[ -z "$(get_current_data "$benchmark")" ]]; then
+            removed_benchmarks="$removed_benchmarks
+$benchmark"
         fi
-    done
+    done < <(list_previous_benchmarks)
+
+    # Count items (remove empty lines and count)
+    faster_count=$(echo "$faster_benchmarks" | grep -c "^." || echo "0")
+    slower_count=$(echo "$slower_benchmarks" | grep -c "^." || echo "0")
+    new_count=$(echo "$new_benchmarks" | grep -c "^." || echo "0")
+    removed_count=$(echo "$removed_benchmarks" | grep -c "^." || echo "0")
 
     echo ""
     echo "Performance Changes Summary:"
-    echo "  Faster: ${#faster_benchmarks[@]} | Slower: ${#slower_benchmarks[@]} | New: ${#new_benchmarks[@]} | Removed: ${#removed_benchmarks[@]}"
+    echo "  Faster: $faster_count | Slower: $slower_count | New: $new_count | Removed: $removed_count"
 
     # Report changes if any improvements, regressions, or new benchmarks detected
-    if [[ ${#faster_benchmarks[@]} -gt 0 || ${#slower_benchmarks[@]} -gt 0 || ${#new_benchmarks[@]} -gt 0 ]]; then
+    if [[ $faster_count -gt 0 || $slower_count -gt 0 || $new_count -gt 0 ]]; then
         MAJOR_CHANGES=true
     fi
 fi
@@ -285,17 +321,17 @@ if [[ "$WRITE_TO_FILE" == "true" ]]; then
             echo ""
 
             # Track changes
-            declare -a faster_benchmarks
-            declare -a slower_benchmarks
-            declare -a new_benchmarks
-            declare -a removed_benchmarks
+            faster_benchmarks=""
+            slower_benchmarks=""
+            new_benchmarks=""
+            removed_benchmarks=""
 
             # Compare results
-            for benchmark in "${!current_results[@]}"; do
-                if [[ -n "${previous_results[$benchmark]}" ]]; then
+            while IFS= read -r benchmark; do
+                if [[ -n "$(get_previous_data "$benchmark")" ]]; then
                     # Benchmark exists in both
-                    current_data="${current_results[$benchmark]}"
-                    previous_data="${previous_results[$benchmark]}"
+                    current_data=$(get_current_data "$benchmark")
+                    previous_data=$(get_previous_data "$benchmark")
 
                     current_ops=$(echo "$current_data" | cut -d'|' -f1)
                     previous_ops=$(echo "$previous_data" | cut -d'|' -f1)
@@ -303,52 +339,62 @@ if [[ "$WRITE_TO_FILE" == "true" ]]; then
                     if [[ "$current_ops" =~ ^[0-9]+$ && "$previous_ops" =~ ^[0-9]+$ && $previous_ops -gt 0 ]]; then
                         if [[ $current_ops -gt $previous_ops ]]; then
                             change=$(( (current_ops - previous_ops) * 100 / previous_ops ))
-                            faster_benchmarks+=("$benchmark (+${change}%)")
+                            faster_benchmarks="$faster_benchmarks
+$benchmark (+${change}%)"
                         elif [[ $current_ops -lt $previous_ops ]]; then
                             change=$(( (previous_ops - current_ops) * 100 / previous_ops ))
-                            slower_benchmarks+=("$benchmark (-${change}%)")
+                            slower_benchmarks="$slower_benchmarks
+$benchmark (-${change}%)"
                         fi
                     fi
                 else
-                    new_benchmarks+=("$benchmark")
+                    new_benchmarks="$new_benchmarks
+$benchmark"
                 fi
-            done
+            done < <(list_current_benchmarks)
 
             # Check for removed benchmarks
-            for benchmark in "${!previous_results[@]}"; do
-                if [[ -z "${current_results[$benchmark]}" ]]; then
-                    removed_benchmarks+=("$benchmark")
+            while IFS= read -r benchmark; do
+                if [[ -z "$(get_current_data "$benchmark")" ]]; then
+                    removed_benchmarks="$removed_benchmarks
+$benchmark"
                 fi
-            done
+            done < <(list_previous_benchmarks)
+
+            # Count items
+            faster_count=$(echo "$faster_benchmarks" | grep -c "^." || echo "0")
+            slower_count=$(echo "$slower_benchmarks" | grep -c "^." || echo "0")
+            new_count=$(echo "$new_benchmarks" | grep -c "^." || echo "0")
+            removed_count=$(echo "$removed_benchmarks" | grep -c "^." || echo "0")
 
             echo "### Summary"
-            echo "- **Faster benchmarks**: ${#faster_benchmarks[@]}"
-            echo "- **Slower benchmarks**: ${#slower_benchmarks[@]}"
-            echo "- **New benchmarks**: ${#new_benchmarks[@]}"
-            echo "- **Removed benchmarks**: ${#removed_benchmarks[@]}"
+            echo "- **Faster benchmarks**: $faster_count"
+            echo "- **Slower benchmarks**: $slower_count"
+            echo "- **New benchmarks**: $new_count"
+            echo "- **Removed benchmarks**: $removed_count"
             echo ""
 
-            if [[ ${#faster_benchmarks[@]} -gt 0 ]]; then
+            if [[ $faster_count -gt 0 ]]; then
                 echo "### Top Improvements"
-                printf '%s\n' "${faster_benchmarks[@]}" | sort -t'(' -k2 -nr | head -5 | sed 's/^/- /'
+                echo "$faster_benchmarks" | grep "^." | sort -t'(' -k2 -nr | head -5 | sed 's/^/- /'
                 echo ""
             fi
 
-            if [[ ${#slower_benchmarks[@]} -gt 0 ]]; then
+            if [[ $slower_count -gt 0 ]]; then
                 echo "### Performance Regressions"
-                printf '%s\n' "${slower_benchmarks[@]}" | sort -t'(' -k2 -nr | head -5 | sed 's/^/- /'
+                echo "$slower_benchmarks" | grep "^." | sort -t'(' -k2 -nr | head -5 | sed 's/^/- /'
                 echo ""
             fi
 
-            if [[ ${#new_benchmarks[@]} -gt 0 ]]; then
+            if [[ $new_count -gt 0 ]]; then
                 echo "### New Benchmarks Added"
-                printf '%s\n' "${new_benchmarks[@]}" | sed 's/^/- /'
+                echo "$new_benchmarks" | grep "^." | sed 's/^/- /'
                 echo ""
             fi
 
-            if [[ ${#removed_benchmarks[@]} -gt 0 ]]; then
+            if [[ $removed_count -gt 0 ]]; then
                 echo "### Benchmarks Removed"
-                printf '%s\n' "${removed_benchmarks[@]}" | sed 's/^/- /'
+                echo "$removed_benchmarks" | grep "^." | sed 's/^/- /'
                 echo ""
             fi
         }
@@ -376,14 +422,14 @@ All benchmarks run with \`-benchmem\` flag showing memory allocations and operat
 EOF
 
         # Add current results to table
-        for benchmark in "${!current_results[@]}"; do
-            data="${current_results[$benchmark]}"
+        while IFS= read -r benchmark; do
+            data=$(get_current_data "$benchmark")
             ops_sec=$(echo "$data" | cut -d'|' -f1)
             time_op=$(echo "$data" | cut -d'|' -f2)
             mem_op=$(echo "$data" | cut -d'|' -f3)
             allocs_op=$(echo "$data" | cut -d'|' -f4)
             echo "| $benchmark | $ops_sec | $time_op | $mem_op | $allocs_op |" >> "$OUTPUT_FILE.tmp"
-        done
+        done < <(list_current_benchmarks)
 
         # Add comparison section
         generate_comparison >> "$OUTPUT_FILE.tmp"
@@ -399,14 +445,14 @@ EOF
             echo "|-----------|----------------|---------|-----------|-----------|" >> "$OUTPUT_FILE.tmp"
 
             # Add previous results
-            for benchmark in "${!previous_results[@]}"; do
-                data="${previous_results[$benchmark]}"
+            while IFS= read -r benchmark; do
+                data=$(get_previous_data "$benchmark")
                 ops_sec=$(echo "$data" | cut -d'|' -f1)
                 time_op=$(echo "$data" | cut -d'|' -f2)
                 mem_op=$(echo "$data" | cut -d'|' -f3)
                 allocs_op=$(echo "$data" | cut -d'|' -f4)
                 echo "| $benchmark | $ops_sec | $time_op | $mem_op | $allocs_op |" >> "$OUTPUT_FILE.tmp"
-            done
+            done < <(list_previous_benchmarks)
         fi
 
         # Move temp file to final location
