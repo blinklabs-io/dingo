@@ -18,6 +18,7 @@ import (
 	"errors"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/types"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
@@ -26,13 +27,16 @@ import (
 func (d *MetadataStoreSqlite) GetAccount(
 	stakeKey []byte,
 	includeInactive bool,
-	txn *gorm.DB,
+	txn types.Txn,
 ) (*models.Account, error) {
 	ret := &models.Account{}
+	var db *gorm.DB
 	if txn == nil {
-		txn = d.DB()
+		db = d.DB()
+	} else {
+		db = d.dbFromTxn(txn)
 	}
-	query := txn
+	query := db
 	if !includeInactive {
 		query = query.Where("active = ?", true)
 	}
@@ -51,7 +55,7 @@ func (d *MetadataStoreSqlite) SetAccount(
 	stakeKey, pkh, drep []byte,
 	slot uint64,
 	active bool,
-	txn *gorm.DB,
+	txn types.Txn,
 ) error {
 	tmpItem := models.Account{
 		StakingKey: stakeKey,
@@ -64,14 +68,14 @@ func (d *MetadataStoreSqlite) SetAccount(
 		Columns:   []clause.Column{{Name: "staking_key"}},
 		UpdateAll: true,
 	}
-	if txn != nil {
-		if result := txn.Clauses(onConflict).Create(&tmpItem); result.Error != nil {
-			return result.Error
-		}
+	var db *gorm.DB
+	if txn == nil {
+		db = d.DB()
 	} else {
-		if result := d.DB().Clauses(onConflict).Create(&tmpItem); result.Error != nil {
-			return result.Error
-		}
+		db = d.dbFromTxn(txn)
+	}
+	if result := db.Clauses(onConflict).Create(&tmpItem); result.Error != nil {
+		return result.Error
 	}
 	return nil
 }

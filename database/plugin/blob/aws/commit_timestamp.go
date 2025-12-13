@@ -15,17 +15,20 @@
 package aws
 
 import (
-	"context"
 	"encoding/json"
 	"math/big"
 
 	dingosops "github.com/blinklabs-io/dingo/database/sops"
+	"github.com/blinklabs-io/dingo/database/types"
 )
 
 const commitTimestampBlobKey = "metadata_commit_timestamp"
 
-func (b *BlobStoreS3) GetCommitTimestamp(ctx context.Context) (int64, error) {
-	ciphertext, err := b.Get(ctx, commitTimestampBlobKey)
+func (b *BlobStoreS3) GetCommitTimestamp() (int64, error) {
+	txn := b.NewTransaction(false)
+	defer txn.Rollback() //nolint:errcheck // no-op for this backend
+
+	ciphertext, err := b.Get(txn, []byte(commitTimestampBlobKey))
 	if err != nil {
 		return 0, err
 	}
@@ -37,11 +40,21 @@ func (b *BlobStoreS3) GetCommitTimestamp(ctx context.Context) (int64, error) {
 				"commit timestamp stored plaintext in S3, migrating to SOPS encryption: %v",
 				err,
 			)
-			if migrateErr := b.SetCommitTimestamp(ctx, ts); migrateErr != nil {
+			// Create a new transaction for migration
+			migrateTxn := b.NewTransaction(true)
+			defer migrateTxn.Rollback() //nolint:errcheck
+			if migrateErr := b.SetCommitTimestamp(migrateTxn, ts); migrateErr != nil {
 				b.logger.Errorf(
 					"failed to migrate plaintext commit timestamp: %v",
 					migrateErr,
 				)
+			} else {
+				if migrateErr := migrateTxn.Commit(); migrateErr != nil {
+					b.logger.Errorf(
+						"failed to commit plaintext commit timestamp migration: %v",
+						migrateErr,
+					)
+				}
 			}
 			return ts, nil
 		}
@@ -51,14 +64,20 @@ func (b *BlobStoreS3) GetCommitTimestamp(ctx context.Context) (int64, error) {
 	return new(big.Int).SetBytes(plaintext).Int64(), nil
 }
 
-func (b *BlobStoreS3) SetCommitTimestamp(ctx context.Context, ts int64) error {
+func (b *BlobStoreS3) SetCommitTimestamp(
+	txn types.Txn,
+	ts int64,
+) error {
+	if txn == nil {
+		return types.ErrTxnWrongType
+	}
 	raw := new(big.Int).SetInt64(ts).Bytes()
 	ciphertext, err := dingosops.Encrypt(raw)
 	if err != nil {
 		b.logger.Errorf("failed to encrypt commit timestamp: %v", err)
 		return err
 	}
-	if err := b.Put(ctx, commitTimestampBlobKey, ciphertext); err != nil {
+	if err := b.Set(txn, []byte(commitTimestampBlobKey), ciphertext); err != nil {
 		return err
 	}
 	b.logger.Infof("commit timestamp %d written to S3", ts)

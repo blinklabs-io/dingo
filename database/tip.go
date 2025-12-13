@@ -39,7 +39,6 @@ func (d *Database) GetTip(txn *Txn) (ochainsync.Tip, error) {
 func (d *Database) SetTip(tip ochainsync.Tip, txn *Txn) error {
 	if txn == nil {
 		return d.metadata.SetTip(tip, nil)
-	} else {
-		return d.metadata.SetTip(tip, txn.Metadata())
 	}
+	return d.metadata.SetTip(tip, txn.Metadata())
 }

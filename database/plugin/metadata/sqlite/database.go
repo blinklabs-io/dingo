@@ -26,12 +26,51 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/glebarez/sqlite"
 	"github.com/prometheus/client_golang/prometheus"
 	"gorm.io/gorm"
 	gormlogger "gorm.io/gorm/logger"
 	"gorm.io/plugin/opentelemetry/tracing"
 )
+
+// sqliteTxn wraps a gorm transaction and implements types.Txn
+type sqliteTxn struct {
+	db       *gorm.DB
+	finished bool
+}
+
+func newSqliteTxn(db *gorm.DB) *sqliteTxn {
+	return &sqliteTxn{db: db}
+}
+
+func (t *sqliteTxn) Commit() error {
+	if t.finished {
+		return nil
+	}
+	if t.db == nil {
+		t.finished = true
+		return nil
+	}
+	if result := t.db.Commit(); result.Error != nil {
+		return result.Error
+	}
+	t.finished = true
+	return nil
+}
+
+func (t *sqliteTxn) Rollback() error {
+	if t.finished {
+		return nil
+	}
+	if t.db != nil {
+		if result := t.db.Rollback(); result.Error != nil {
+			return result.Error
+		}
+	}
+	t.finished = true
+	return nil
+}
 
 // MetadataStoreSqlite stores all data in sqlite. Data may not be persisted
 type MetadataStoreSqlite struct {
@@ -169,8 +208,8 @@ func (d *MetadataStoreSqlite) Start() error {
 			d.dataDir,
 			"metadata.sqlite",
 		)
-		// WAL journal mode, disable sync on write, increase cache size to 50MB (from 2MB)
-		metadataConnOpts := "_pragma=journal_mode(WAL)&_pragma=sync(OFF)&_pragma=cache_size(-50000)"
+		// Use default settings
+		metadataConnOpts := ""
 		metadataDb, err = gorm.Open(
 			sqlite.Open(
 				fmt.Sprintf("file:%s?%s", metadataDbPath, metadataConnOpts),
@@ -257,8 +296,16 @@ func (d *MetadataStoreSqlite) Order(args any) *gorm.DB {
 }
 
 // Transaction creates a gorm transaction
-func (d *MetadataStoreSqlite) Transaction() *gorm.DB {
-	return d.DB().Begin()
+func (d *MetadataStoreSqlite) Transaction() types.Txn {
+	db := d.DB().Begin()
+	if db.Error != nil {
+		d.logger.Error(
+			"failed to begin transaction",
+			"error", db.Error,
+		)
+		return nil
+	}
+	return newSqliteTxn(db)
 }
 
 // Where constrains a DB query

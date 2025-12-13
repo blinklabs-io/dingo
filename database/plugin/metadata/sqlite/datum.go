@@ -18,6 +18,7 @@ import (
 	"errors"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/types"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -26,13 +27,19 @@ import (
 // GetDatum returns a datum by its hash
 func (d *MetadataStoreSqlite) GetDatum(
 	hash lcommon.Blake2b256,
-	txn *gorm.DB,
+	txn types.Txn,
 ) (*models.Datum, error) {
 	ret := &models.Datum{}
+	var db *gorm.DB
 	if txn == nil {
-		txn = d.DB()
+		db = d.DB()
+	} else {
+		db = d.dbFromTxn(txn)
 	}
-	result := txn.First(ret, "hash = ?", hash[:])
+	if db == nil {
+		return nil, types.ErrTxnWrongType
+	}
+	result := db.First(ret, "hash = ?", hash[:])
 	if result.Error != nil {
 		if errors.Is(result.Error, gorm.ErrRecordNotFound) {
 			return nil, nil
@@ -42,12 +49,12 @@ func (d *MetadataStoreSqlite) GetDatum(
 	return ret, nil
 }
 
-// SetDatum saves a datum into the database, or updates it if it already exists
+// SetDatum saves a datum
 func (d *MetadataStoreSqlite) SetDatum(
 	hash lcommon.Blake2b256,
 	rawDatum []byte,
 	addedSlot uint64,
-	txn *gorm.DB,
+	txn types.Txn,
 ) error {
 	tmpItem := models.Datum{
 		Hash:      hash[:],
@@ -58,10 +65,13 @@ func (d *MetadataStoreSqlite) SetDatum(
 		Columns:   []clause.Column{{Name: "hash"}},
 		UpdateAll: true,
 	}
+	var db *gorm.DB
 	if txn == nil {
-		txn = d.DB()
+		db = d.DB()
+	} else {
+		db = d.dbFromTxn(txn)
 	}
-	result := txn.Clauses(onConflict).Create(&tmpItem)
+	result := db.Clauses(onConflict).Create(&tmpItem)
 	if result.Error != nil {
 		return result.Error
 	}

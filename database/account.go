@@ -31,7 +31,7 @@ func (d *Database) GetAccount(
 	account, err := d.metadata.GetAccount(
 		stakeKey,
 		includeInactive,
-		txn.Metadata(),
+		txn,
 	)
 	if err != nil {
 		return nil, err

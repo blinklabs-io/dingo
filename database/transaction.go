@@ -17,6 +17,7 @@ package database
 import (
 	"fmt"
 
+	"github.com/blinklabs-io/dingo/database/types"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
@@ -30,18 +31,24 @@ func (d *Database) SetTransaction(
 	certDeposits map[int]uint64,
 	txn *Txn,
 ) error {
+	owned := false
 	if txn == nil {
 		txn = d.Transaction(false)
-		defer txn.Commit() //nolint:errcheck
+		owned = true
+		defer txn.Rollback() //nolint:errcheck
 	}
 	if tx.IsValid() {
+		blob := txn.DB().Blob()
+		if blob == nil {
+			return types.ErrBlobStoreUnavailable
+		}
 		for _, utxo := range tx.Produced() {
 			// Add UTxO to blob DB
 			key := UtxoBlobKey(
 				utxo.Id.Id().Bytes(),
 				utxo.Id.Index(),
 			)
-			err := txn.Blob().Set(key, utxo.Output.Cbor())
+			err := blob.Set(txn.Blob(), key, utxo.Output.Cbor())
 			if err != nil {
 				return err
 			}
@@ -71,6 +78,13 @@ func (d *Database) SetTransaction(
 			if err != nil {
 				return fmt.Errorf("set pparam update: %w", err)
 			}
+		}
+	}
+
+	// Commit transaction if we owned it
+	if owned {
+		if err := txn.Commit(); err != nil {
+			return err
 		}
 	}
 
