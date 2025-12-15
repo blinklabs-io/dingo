@@ -34,17 +34,37 @@ func (d *Database) SetTransaction(
 		txn = d.Transaction(false)
 		defer txn.Commit() //nolint:errcheck
 	}
-	if tx.IsValid() {
-		for _, utxo := range tx.Produced() {
-			// Add UTxO to blob DB
-			key := UtxoBlobKey(
-				utxo.Id.Id().Bytes(),
-				utxo.Id.Index(),
-			)
-			err := txn.Blob().Set(key, utxo.Output.Cbor())
-			if err != nil {
-				return err
+	// Build index map for invalid transactions with collateral returns
+	var realIndexMap map[lcommon.Blake2b256]uint32
+	collateralReturn := tx.CollateralReturn()
+	if !tx.IsValid() && collateralReturn != nil {
+		realIndexMap = make(map[lcommon.Blake2b256]uint32)
+		for idx, out := range tx.Outputs() {
+			if out != nil && idx <= int(^uint32(0)) {
+				outputHash := lcommon.NewBlake2b256(out.Cbor())
+				//nolint:gosec // G115: idx bounds already checked above
+				realIndexMap[outputHash] = uint32(idx)
 			}
+		}
+	}
+	// Always store Produced UTxOs (outputs or collateral return)
+	for _, utxo := range tx.Produced() {
+		// For invalid transactions, use real index from CBOR matching
+		outputIdx := utxo.Id.Index()
+		if realIndexMap != nil {
+			outputHash := lcommon.NewBlake2b256(utxo.Output.Cbor())
+			if realIdx, ok := realIndexMap[outputHash]; ok {
+				outputIdx = realIdx
+			}
+		}
+		// Add UTxO to blob DB
+		key := UtxoBlobKey(
+			utxo.Id.Id().Bytes(),
+			outputIdx,
+		)
+		err := txn.Blob().Set(key, utxo.Output.Cbor())
+		if err != nil {
+			return err
 		}
 	}
 	err := d.metadata.SetTransaction(
