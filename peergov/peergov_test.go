@@ -285,9 +285,9 @@ func TestPeerGovernor_Reconcile_MinimumHotPeers(t *testing.T) {
 	}
 	assert.Equal(
 		t,
-		3,
+		2,
 		hotCount,
-	) // All warm peers with connections should be promoted to hot
+	) // Only MinHotPeers warm peers should be promoted to hot (score-based selection)
 
 	// Event publishing is tested indirectly
 }
