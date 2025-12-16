@@ -17,6 +17,7 @@ package database
 import (
 	"fmt"
 
+	"github.com/blinklabs-io/dingo/database/types"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
@@ -30,26 +31,35 @@ func (d *Database) SetTransaction(
 	certDeposits map[int]uint64,
 	txn *Txn,
 ) error {
+	owned := false
 	if txn == nil {
-		txn = d.Transaction(false)
-		defer txn.Commit() //nolint:errcheck
+		txn = d.Transaction(true)
+		owned = true
+		defer txn.Rollback() //nolint:errcheck
 	}
-	// Build index map for invalid transactions with collateral returns
+
 	var realIndexMap map[lcommon.Blake2b256]uint32
-	collateralReturn := tx.CollateralReturn()
-	if !tx.IsValid() && collateralReturn != nil {
+	if !tx.IsValid() && tx.CollateralReturn() != nil {
 		realIndexMap = make(map[lcommon.Blake2b256]uint32)
-		for idx, out := range tx.Outputs() {
-			if out != nil && idx <= int(^uint32(0)) {
+		for i, out := range tx.Outputs() {
+			if out != nil && i <= int(^uint32(0)) {
 				outputHash := lcommon.NewBlake2b256(out.Cbor())
-				//nolint:gosec // G115: idx bounds already checked above
-				realIndexMap[outputHash] = uint32(idx)
+				//nolint:gosec // index bounds already checked above
+				realIndexMap[outputHash] = uint32(i)
 			}
 		}
 	}
-	// Always store Produced UTxOs (outputs or collateral return)
+
+	blob := txn.DB().Blob()
+	if blob == nil {
+		return types.ErrBlobStoreUnavailable
+	}
+	blobTxn := txn.Blob()
+	if blobTxn == nil {
+		return types.ErrNilTxn
+	}
+
 	for _, utxo := range tx.Produced() {
-		// For invalid transactions, use real index from CBOR matching
 		outputIdx := utxo.Id.Index()
 		if realIndexMap != nil {
 			outputHash := lcommon.NewBlake2b256(utxo.Output.Cbor())
@@ -57,40 +67,27 @@ func (d *Database) SetTransaction(
 				outputIdx = realIdx
 			}
 		}
-		// Add UTxO to blob DB
-		key := UtxoBlobKey(
-			utxo.Id.Id().Bytes(),
-			outputIdx,
-		)
-		err := txn.Blob().Set(key, utxo.Output.Cbor())
-		if err != nil {
+		key := UtxoBlobKey(utxo.Id.Id().Bytes(), outputIdx)
+		if err := blob.Set(blobTxn, key, utxo.Output.Cbor()); err != nil {
 			return err
 		}
 	}
-	err := d.metadata.SetTransaction(
-		tx,
-		point,
-		idx,
-		certDeposits,
-		txn.Metadata(),
-	)
-	if err != nil {
+
+	if err := d.metadata.SetTransaction(tx, point, idx, certDeposits, txn.Metadata()); err != nil {
 		return err
 	}
 
-	// Protocol parameter updates
 	if updateEpoch > 0 && tx.IsValid() {
 		for genesisHash, update := range pparamUpdates {
-			err := d.SetPParamUpdate(
-				genesisHash.Bytes(),
-				update.Cbor(),
-				point.Slot,
-				updateEpoch,
-				txn,
-			)
-			if err != nil {
+			if err := d.SetPParamUpdate(genesisHash.Bytes(), update.Cbor(), point.Slot, updateEpoch, txn); err != nil {
 				return fmt.Errorf("set pparam update: %w", err)
 			}
+		}
+	}
+
+	if owned {
+		if err := txn.Commit(); err != nil {
+			return err
 		}
 	}
 

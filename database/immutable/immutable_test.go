@@ -71,7 +71,7 @@ func TestGetSpecificBlock(t *testing.T) {
 
 	// Skip to the 100th block to test a block that's not the first one
 	blocks := make([]*immutable.Block, 0, 100)
-	for i := 0; i < 100; i++ {
+	for i := range 100 {
 		b, err := iter.Next()
 		if err != nil {
 			t.Fatalf("unexpected error: %s", err)

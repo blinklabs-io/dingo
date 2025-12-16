@@ -12,14 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package database_test
+package sqlite
 
 import (
 	"math/big"
 	"testing"
 	"time"
 
-	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -32,50 +31,6 @@ type TestTable struct {
 	gorm.Model
 }
 
-var dbConfig = &database.Config{
-	Logger:         nil,
-	PromRegistry:   nil,
-	DataDir:        "",
-	BlobPlugin:     "badger",
-	MetadataPlugin: "sqlite",
-}
-
-// TestInMemorySqliteMultipleTransaction tests that our sqlite connection allows multiple
-// concurrent transactions when using in-memory mode. This requires special URI flags, and
-// this is mostly making sure that we don't lose them
-func TestInMemorySqliteMultipleTransaction(t *testing.T) {
-	var db *database.Database
-	doQuery := func(sleep time.Duration) error {
-		txn := db.Metadata().Transaction()
-		if result := txn.First(&TestTable{}); result.Error != nil {
-			return result.Error
-		}
-		time.Sleep(sleep)
-		if result := txn.Commit(); result.Error != nil {
-			return result.Error
-		}
-		return nil
-	}
-	db, err := database.New(dbConfig)
-	if err != nil {
-		t.Fatalf("unexpected error: %s", err)
-	}
-	if err := db.Metadata().DB().AutoMigrate(&TestTable{}); err != nil {
-		t.Fatalf("unexpected error: %s", err)
-	}
-	if result := db.Metadata().DB().Create(&TestTable{}); result.Error != nil {
-		t.Fatalf("unexpected error: %s", result.Error)
-	}
-	// The linter calls us on the lack of error checking, but it's a goroutine...
-	//nolint:errcheck
-	go doQuery(5 * time.Second)
-	time.Sleep(1 * time.Second)
-	if err := doQuery(0); err != nil {
-		t.Fatalf("unexpected error: %s", err)
-	}
-}
-
-// mockTransaction implements lcommon.Transaction for testing
 type mockTransaction struct {
 	hash         lcommon.Blake2b256
 	certificates []lcommon.Certificate
@@ -206,16 +161,66 @@ func (m *mockTransaction) LeiosHash() lcommon.Blake2b256 {
 	return lcommon.Blake2b256{}
 }
 
-// TestUnifiedCertificateCreation tests that unified certificate records are created
-// when processing transactions with certificates
-func TestUnifiedCertificateCreation(t *testing.T) {
-	db, err := database.New(dbConfig)
+// TestInMemorySqliteMultipleTransaction tests that our sqlite connection allows multiple
+// concurrent transactions when using in-memory mode. This requires special URI flags, and
+// this is mostly making sure that we don't lose them
+func TestInMemorySqliteMultipleTransaction(t *testing.T) {
+	sqliteStore, err := New("", nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %s", err)
 	}
+	if err := sqliteStore.Start(); err != nil {
+		t.Fatalf("unexpected error starting store: %s", err)
+	}
+	defer sqliteStore.Close() //nolint:errcheck
+
+	if err := sqliteStore.DB().AutoMigrate(&TestTable{}); err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	if result := sqliteStore.DB().Create(&TestTable{}); result.Error != nil {
+		t.Fatalf("unexpected error: %s", result.Error)
+	}
+
+	doQuery := func(sleep time.Duration) error {
+		txn := sqliteStore.DB().Begin()
+		defer txn.Rollback() //nolint:errcheck
+		if result := txn.First(&TestTable{}); result.Error != nil {
+			return result.Error
+		}
+		time.Sleep(sleep)
+		if result := txn.Commit(); result.Error != nil {
+			return result.Error
+		}
+		return nil
+	}
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- doQuery(5 * time.Second)
+	}()
+	time.Sleep(1 * time.Second)
+	if err := doQuery(0); err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	if err := <-errCh; err != nil {
+		t.Fatalf("goroutine error: %s", err)
+	}
+}
+
+// TestUnifiedCertificateCreation tests that unified certificate records are created
+// correctly and linked to specialized certificate records
+func TestUnifiedCertificateCreation(t *testing.T) {
+	sqliteStore, err := New("", nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	if err := sqliteStore.Start(); err != nil {
+		t.Fatalf("unexpected error starting store: %s", err)
+	}
+	defer sqliteStore.Close() //nolint:errcheck
 
 	// Run auto-migration to ensure tables exist
-	if err := db.Metadata().DB().AutoMigrate(models.MigrateModels...); err != nil {
+	if err := sqliteStore.DB().AutoMigrate(models.MigrateModels...); err != nil {
 		t.Fatalf("failed to auto-migrate: %v", err)
 	}
 
@@ -279,15 +284,20 @@ func TestUnifiedCertificateCreation(t *testing.T) {
 	}
 
 	// Process the transaction
-	err = db.Metadata().
-		SetTransaction(mockTx, point, 0, map[int]uint64{0: 2000000, 1: 500000000}, nil)
+	err = sqliteStore.SetTransaction(
+		mockTx,
+		point,
+		0,
+		map[int]uint64{0: 2000000, 1: 500000000},
+		nil,
+	)
 	if err != nil {
 		t.Fatalf("failed to set transaction: %v", err)
 	}
 
 	// Verify unified certificate records were created
 	var unifiedCerts []models.Certificate
-	if result := db.Metadata().DB().Order("cert_index ASC").Find(&unifiedCerts); result.Error != nil {
+	if result := sqliteStore.DB().Order("cert_index ASC").Find(&unifiedCerts); result.Error != nil {
 		t.Fatalf("failed to query unified certificates: %v", result.Error)
 	}
 
@@ -323,13 +333,13 @@ func TestUnifiedCertificateCreation(t *testing.T) {
 
 	// Verify specialized certificate records were created with correct CertificateID
 	var stakeReg models.StakeRegistration
-	if result := db.Metadata().DB().First(&stakeReg); result.Error != nil {
+	if result := sqliteStore.DB().First(&stakeReg); result.Error != nil {
 		t.Fatalf("failed to query stake registration: %v", result.Error)
 	}
 
 	// Find the unified cert for stake registration (should be index 0)
 	var stakeUnified models.Certificate
-	if result := db.Metadata().DB().Where("cert_index = ? AND cert_type = ?", 0, uint(lcommon.CertificateTypeStakeRegistration)).First(&stakeUnified); result.Error != nil {
+	if result := sqliteStore.DB().Where("cert_index = ? AND cert_type = ?", 0, uint(lcommon.CertificateTypeStakeRegistration)).First(&stakeUnified); result.Error != nil {
 		t.Fatalf(
 			"failed to find unified stake registration cert: %v",
 			result.Error,
@@ -345,13 +355,13 @@ func TestUnifiedCertificateCreation(t *testing.T) {
 	}
 
 	var poolReg models.PoolRegistration
-	if result := db.Metadata().DB().First(&poolReg); result.Error != nil {
+	if result := sqliteStore.DB().First(&poolReg); result.Error != nil {
 		t.Fatalf("failed to query pool registration: %v", result.Error)
 	}
 
 	// Find the unified cert for pool registration (should be index 1)
 	var poolUnified models.Certificate
-	if result := db.Metadata().DB().Where("cert_index = ? AND cert_type = ?", 1, uint(lcommon.CertificateTypePoolRegistration)).First(&poolUnified); result.Error != nil {
+	if result := sqliteStore.DB().Where("cert_index = ? AND cert_type = ?", 1, uint(lcommon.CertificateTypePoolRegistration)).First(&poolUnified); result.Error != nil {
 		t.Fatalf(
 			"failed to find unified pool registration cert: %v",
 			result.Error,
@@ -367,13 +377,13 @@ func TestUnifiedCertificateCreation(t *testing.T) {
 	}
 
 	var authHot models.AuthCommitteeHot
-	if result := db.Metadata().DB().First(&authHot); result.Error != nil {
+	if result := sqliteStore.DB().First(&authHot); result.Error != nil {
 		t.Fatalf("failed to query auth committee hot: %v", result.Error)
 	}
 
 	// Find the unified cert for auth committee hot (should be index 2)
 	var authUnified models.Certificate
-	if result := db.Metadata().DB().Where("cert_index = ? AND cert_type = ?", 2, uint(lcommon.CertificateTypeAuthCommitteeHot)).First(&authUnified); result.Error != nil {
+	if result := sqliteStore.DB().Where("cert_index = ? AND cert_type = ?", 2, uint(lcommon.CertificateTypeAuthCommitteeHot)).First(&authUnified); result.Error != nil {
 		t.Fatalf(
 			"failed to find unified auth committee hot cert: %v",
 			result.Error,

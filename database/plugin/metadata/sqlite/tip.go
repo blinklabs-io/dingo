@@ -18,6 +18,7 @@ import (
 	"errors"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/types"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"gorm.io/gorm"
@@ -30,26 +31,20 @@ const (
 
 // GetTip returns the current metadata Tip as ocommon.Tip
 func (d *MetadataStoreSqlite) GetTip(
-	txn *gorm.DB,
+	txn types.Txn,
 ) (ocommon.Tip, error) {
 	ret := ocommon.Tip{}
 	tmpTip := models.Tip{}
-	if txn != nil {
-		result := txn.Where("id = ?", tipEntryId).First(&tmpTip)
-		if result.Error != nil {
-			if errors.Is(result.Error, gorm.ErrRecordNotFound) {
-				return ret, nil
-			}
-			return ret, result.Error
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return ret, err
+	}
+	result := db.Where("id = ?", tipEntryId).First(&tmpTip)
+	if result.Error != nil {
+		if errors.Is(result.Error, gorm.ErrRecordNotFound) {
+			return ret, nil
 		}
-	} else {
-		result := d.DB().Where("id = ?", tipEntryId).First(&tmpTip)
-		if result.Error != nil {
-			if errors.Is(result.Error, gorm.ErrRecordNotFound) {
-				return ret, nil
-			}
-			return ret, result.Error
-		}
+		return ret, result.Error
 	}
 	ret.Point = ocommon.Point{
 		Slot: tmpTip.Slot,
@@ -62,7 +57,7 @@ func (d *MetadataStoreSqlite) GetTip(
 // SetTip saves a tip
 func (d *MetadataStoreSqlite) SetTip(
 	tip ochainsync.Tip,
-	txn *gorm.DB,
+	txn types.Txn,
 ) error {
 	tmpItem := models.Tip{
 		ID:          tipEntryId,
@@ -70,14 +65,12 @@ func (d *MetadataStoreSqlite) SetTip(
 		Hash:        tip.Point.Hash,
 		BlockNumber: tip.BlockNumber,
 	}
-	if txn != nil {
-		if result := txn.Clauses(clause.OnConflict{UpdateAll: true}).Create(&tmpItem); result.Error != nil {
-			return result.Error
-		}
-	} else {
-		if result := d.DB().Clauses(clause.OnConflict{UpdateAll: true}).Create(&tmpItem); result.Error != nil {
-			return result.Error
-		}
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return err
+	}
+	if result := db.Clauses(clause.OnConflict{UpdateAll: true}).Create(&tmpItem); result.Error != nil {
+		return result.Error
 	}
 	return nil
 }

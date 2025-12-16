@@ -18,17 +18,39 @@ import (
 	"fmt"
 
 	"github.com/blinklabs-io/dingo/database/plugin"
-	badger "github.com/dgraph-io/badger/v4"
+	"github.com/blinklabs-io/dingo/database/types"
 )
 
+// BlobStore defines the interface for a blob storage provider.
+// All transactional methods (Get, Set, Delete, NewIterator, SetCommitTimestamp)
+// require a non-nil types.Txn created by NewTransaction(). Passing nil will
+// result in types.ErrNilTxn.
+//
+// Important: iterators returned by `NewIterator` yield `Item()` values that
+// must only be accessed while the transaction used to create the iterator is
+// still active. Implementations may validate transaction state at access time
+// (for example `ValueCopy` may fail if the transaction has been committed or
+// rolled back). Typical usage iterates and accesses item values within the
+// same transaction scope.
 type BlobStore interface {
-	// matches badger.DB
+	// Transaction management
 	Close() error
-	NewTransaction(bool) *badger.Txn
+	NewTransaction(bool) types.Txn
 
-	// Our specific functions
+	// KV operations (plugins map these to their internals with transaction context)
+	Get(txn types.Txn, key []byte) ([]byte, error)
+	Set(txn types.Txn, key, val []byte) error
+	Delete(txn types.Txn, key []byte) error
+	NewIterator(
+		txn types.Txn,
+		opts types.BlobIteratorOptions,
+	) types.BlobIterator
+
+	// Commit timestamp management
 	GetCommitTimestamp() (int64, error)
-	SetCommitTimestamp(*badger.Txn, int64) error
+	// SetCommitTimestamp stores the last commit timestamp; parameter order is
+	// (timestamp, txn) to keep the transaction as the final parameter.
+	SetCommitTimestamp(int64, types.Txn) error
 }
 
 // New returns the started blob plugin selected by name

@@ -16,26 +16,26 @@ package sqlite
 
 import (
 	"github.com/blinklabs-io/dingo/database/models"
-	"gorm.io/gorm"
+	"github.com/blinklabs-io/dingo/database/types"
 )
 
 // GetPParams returns a list of protocol parameters for a given epoch. If there are no pparams
 // for the specified epoch, it will return the most recent pparams before the specified epoch
 func (d *MetadataStoreSqlite) GetPParams(
 	epoch uint64,
-	txn *gorm.DB,
+	txn types.Txn,
 ) ([]models.PParams, error) {
 	ret := []models.PParams{}
-	if txn != nil {
-		result := txn.Where("epoch <= ?", epoch).Order("id DESC").Find(&ret)
-		if result.Error != nil {
-			return ret, result.Error
-		}
-	} else {
-		result := d.DB().Where("epoch <= ?", epoch).Order("id DESC").Find(&ret)
-		if result.Error != nil {
-			return ret, result.Error
-		}
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return ret, err
+	}
+	result := db.Where("epoch <= ?", epoch).
+		Order("epoch DESC, id DESC").
+		Limit(1).
+		Find(&ret)
+	if result.Error != nil {
+		return ret, result.Error
 	}
 	return ret, nil
 }
@@ -43,19 +43,16 @@ func (d *MetadataStoreSqlite) GetPParams(
 // GetPParamUpdates returns a list of protocol parameter updates for a given epoch
 func (d *MetadataStoreSqlite) GetPParamUpdates(
 	epoch uint64,
-	txn *gorm.DB,
+	txn types.Txn,
 ) ([]models.PParamUpdate, error) {
 	ret := []models.PParamUpdate{}
-	if txn != nil {
-		result := txn.Where("epoch = ?", epoch).Order("id DESC").Find(&ret)
-		if result.Error != nil {
-			return ret, result.Error
-		}
-	} else {
-		result := d.DB().Where("epoch = ?", epoch).Order("id DESC").Find(&ret)
-		if result.Error != nil {
-			return ret, result.Error
-		}
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return ret, err
+	}
+	result := db.Where("epoch = ?", epoch).Order("id DESC").Find(&ret)
+	if result.Error != nil {
+		return ret, result.Error
 	}
 	return ret, nil
 }
@@ -65,7 +62,7 @@ func (d *MetadataStoreSqlite) SetPParams(
 	params []byte,
 	slot, epoch uint64,
 	eraId uint,
-	txn *gorm.DB,
+	txn types.Txn,
 ) error {
 	tmpItem := models.PParams{
 		Cbor:      params,
@@ -73,14 +70,12 @@ func (d *MetadataStoreSqlite) SetPParams(
 		Epoch:     epoch,
 		EraId:     eraId,
 	}
-	if txn != nil {
-		if result := txn.Create(&tmpItem); result.Error != nil {
-			return result.Error
-		}
-	} else {
-		if result := d.DB().Create(&tmpItem); result.Error != nil {
-			return result.Error
-		}
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return err
+	}
+	if result := db.Create(&tmpItem); result.Error != nil {
+		return result.Error
 	}
 	return nil
 }
@@ -89,7 +84,7 @@ func (d *MetadataStoreSqlite) SetPParams(
 func (d *MetadataStoreSqlite) SetPParamUpdate(
 	genesis, update []byte,
 	slot, epoch uint64,
-	txn *gorm.DB,
+	txn types.Txn,
 ) error {
 	tmpItem := models.PParamUpdate{
 		GenesisHash: genesis,
@@ -97,14 +92,12 @@ func (d *MetadataStoreSqlite) SetPParamUpdate(
 		AddedSlot:   slot,
 		Epoch:       epoch,
 	}
-	if txn != nil {
-		if result := txn.Create(&tmpItem); result.Error != nil {
-			return result.Error
-		}
-	} else {
-		if result := d.DB().Create(&tmpItem); result.Error != nil {
-			return result.Error
-		}
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return err
+	}
+	if result := db.Create(&tmpItem); result.Error != nil {
+		return result.Error
 	}
 	return nil
 }

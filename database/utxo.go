@@ -15,31 +15,95 @@
 package database
 
 import (
+	"encoding/hex"
 	"errors"
+	"fmt"
 	"math/big"
-	"slices"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
-	"github.com/dgraph-io/badger/v4"
 )
 
 var ErrUtxoNotFound = errors.New("utxo not found")
 
+// utxoBlobKeyFromModel generates a blob key for a UTxO from a model
+func utxoBlobKeyFromModel(u *models.Utxo) []byte {
+	return UtxoBlobKey(u.TxId, u.OutputIdx)
+}
+
+// deleteUtxoBlobs attempts to delete blob data for the given UTxOs.
+// This is a best-effort operation; metadata remains the source of truth. If the
+// provided transaction does not include a blob handle, a temporary blob-only
+// transaction is used instead.
+func deleteUtxoBlobs(d *Database, utxos []models.Utxo, txn *Txn) error {
+	blob := d.Blob()
+	if blob == nil {
+		return types.ErrBlobStoreUnavailable
+	}
+
+	useTxn := txn
+	owned := false
+	if useTxn == nil || useTxn.Blob() == nil {
+		useTxn = NewBlobOnlyTxn(d, true)
+		owned = true
+		defer func() {
+			if owned {
+				useTxn.Rollback() //nolint:errcheck
+			}
+		}()
+	}
+
+	var deleteErrors int
+	for _, utxo := range utxos {
+		key := utxoBlobKeyFromModel(&utxo)
+		if err := blob.Delete(useTxn.Blob(), key); err != nil {
+			deleteErrors++
+			d.logger.Debug(
+				"failed to delete UTxO blob data",
+				"txid", hex.EncodeToString(utxo.TxId),
+				"output_idx", utxo.OutputIdx,
+				"error", err,
+			)
+		}
+	}
+	if deleteErrors > 0 {
+		d.logger.Debug(
+			"blob deletion completed with errors",
+			"failed",
+			deleteErrors,
+			"total",
+			len(utxos),
+		)
+	}
+
+	if owned {
+		owned = false // prevent deferred rollback
+		if err := useTxn.Commit(); err != nil {
+			_ = useTxn.Rollback() // explicit rollback on commit failure
+			d.logger.Debug("blob delete commit failed", "error", err)
+		}
+	}
+
+	return nil
+}
+
 func loadCbor(u *models.Utxo, txn *Txn) error {
 	key := UtxoBlobKey(u.TxId, u.OutputIdx)
-	item, err := txn.Blob().Get(key)
-	if err != nil {
-		return err
+	blob := txn.DB().Blob()
+	if blob == nil {
+		return types.ErrBlobStoreUnavailable
 	}
-	u.Cbor, err = item.ValueCopy(nil)
+	val, err := blob.Get(txn.Blob(), key)
 	if err != nil {
-		if errors.Is(err, badger.ErrKeyNotFound) {
-			return nil
+		// Map blob-key-not-found to ErrUtxoNotFound since it means the UTxO's blob is missing
+		if errors.Is(err, types.ErrBlobKeyNotFound) {
+			return ErrUtxoNotFound
 		}
 		return err
 	}
+	u.Cbor = val
 	return nil
 }
 
@@ -47,10 +111,20 @@ func (d *Database) AddUtxos(
 	utxos []models.UtxoSlot,
 	txn *Txn,
 ) error {
-	if txn == nil {
-		txn = d.Transaction(false)
-		defer txn.Commit() //nolint:errcheck
+	owned := txn == nil
+	if owned {
+		txn = d.Transaction(true)
+		defer func() {
+			if owned {
+				txn.Rollback() //nolint:errcheck
+			}
+		}()
 	}
+	blob := txn.DB().Blob()
+	if blob == nil {
+		return types.ErrBlobStoreUnavailable
+	}
+	blobTxn := txn.Blob()
 	for _, utxoSlot := range utxos {
 		// Add UTxO to blob DB
 		key := UtxoBlobKey(
@@ -66,15 +140,26 @@ func (d *Database) AddUtxos(
 				return err
 			}
 		}
-		err := txn.Blob().Set(key, utxoCbor)
+		err := blob.Set(blobTxn, key, utxoCbor)
 		if err != nil {
 			return err
 		}
 	}
-	return d.metadata.AddUtxos(
+	err := d.metadata.AddUtxos(
 		utxos,
 		txn.Metadata(),
 	)
+	if err != nil {
+		return err
+	}
+	if owned {
+		if err := txn.Commit(); err != nil {
+			return err
+		}
+		owned = false // prevent deferred rollback after successful commit
+		return nil
+	}
+	return nil
 }
 
 func (d *Database) UtxoByRef(
@@ -138,10 +223,15 @@ func (d *Database) UtxosDeleteConsumed(
 	limit int,
 	txn *Txn,
 ) (int, error) {
-	var ret error
+	owned := false
 	if txn == nil {
 		txn = d.Transaction(true)
-		defer txn.Commit() //nolint:errcheck
+		owned = true
+		defer func() {
+			if owned {
+				txn.Rollback() //nolint:errcheck
+			}
+		}()
 	}
 	// Get UTxOs that are marked as deleted and older than our slot window
 	utxos, err := d.metadata.GetUtxosDeletedBeforeSlot(
@@ -150,107 +240,98 @@ func (d *Database) UtxosDeleteConsumed(
 		txn.Metadata(),
 	)
 	if err != nil {
-		return 0, errors.New("failed to query consumed UTxOs during cleanup")
+		return 0, fmt.Errorf(
+			"failed to query consumed UTxOs during cleanup: %w",
+			err,
+		)
 	}
 	utxoCount := len(utxos)
-	deleteUtxos := make([]any, utxoCount)
+	deleteUtxos := make([]models.UtxoId, utxoCount)
 	for idx, utxo := range utxos {
-		deleteUtxos[idx] = utxo
+		deleteUtxos[idx] = models.UtxoId{Hash: utxo.TxId, Idx: utxo.OutputIdx}
 	}
+
+	// Delete blob data first (best effort)
+	_ = deleteUtxoBlobs(d, utxos, txn)
+
+	// Then delete metadata (source of truth)
 	err = d.metadata.DeleteUtxos(deleteUtxos, txn.Metadata())
 	if err != nil {
 		return 0, err
 	}
 
-	// Loop through UTxOs and delete, with a new transaction each loop
-	for ret == nil {
-		// short-circuit loop
-
-		batchSize := min(1000, len(utxos))
-		if batchSize == 0 {
-			break
+	if owned {
+		if err := txn.Commit(); err != nil {
+			return 0, err
 		}
-		loopTxn := NewBlobOnlyTxn(d, true)
-		err := loopTxn.Do(func(txn *Txn) error {
-			// Remove from blob DB
-			for _, utxo := range utxos[0:batchSize] {
-				key := UtxoBlobKey(utxo.TxId, utxo.OutputIdx)
-				err := txn.Blob().Delete(key)
-				if err != nil {
-					ret = err
-					return err
-				}
-			}
-			return nil
-		})
-		if err != nil {
-			ret = err
-			break
-		}
-		// Remove batch
-		utxos = slices.Delete(utxos, 0, batchSize)
+		owned = false
 	}
-	return utxoCount, ret
+
+	return utxoCount, nil
 }
 
 func (d *Database) UtxosDeleteRolledback(
 	slot uint64,
 	txn *Txn,
 ) error {
-	var ret error
+	owned := false
 	if txn == nil {
 		txn = d.Transaction(true)
-		defer txn.Commit() //nolint:errcheck
+		owned = true
+		defer func() {
+			if owned {
+				txn.Rollback() //nolint:errcheck
+			}
+		}()
 	}
 	utxos, err := d.metadata.GetUtxosAddedAfterSlot(slot, txn.Metadata())
 	if err != nil {
 		return err
 	}
+
+	// Delete blob data first (best effort)
+	_ = deleteUtxoBlobs(d, utxos, txn)
+
+	// Then delete metadata (source of truth)
 	err = d.metadata.DeleteUtxosAfterSlot(slot, txn.Metadata())
 	if err != nil {
 		return err
 	}
 
-	// Loop through UTxOs and delete, reusing our transaction
-	for ret == nil {
-		// short-circuit loop
-
-		batchSize := min(1000, len(utxos))
-		if batchSize == 0 {
-			break
+	if owned {
+		if err := txn.Commit(); err != nil {
+			return err
 		}
-		loopTxn := NewBlobOnlyTxn(d, true)
-		err := loopTxn.Do(func(txn *Txn) error {
-			// Remove from blob DB
-			for _, utxo := range utxos[0:batchSize] {
-				key := UtxoBlobKey(utxo.TxId, utxo.OutputIdx)
-				err := txn.Blob().Delete(key)
-				if err != nil {
-					ret = err
-					return err
-				}
-			}
-			return nil
-		})
-		if err != nil {
-			ret = err
-			break
-		}
-		// Remove batch
-		utxos = slices.Delete(utxos, 0, batchSize)
+		owned = false
 	}
-	return ret
+
+	return nil
 }
 
 func (d *Database) UtxosUnspend(
 	slot uint64,
 	txn *Txn,
 ) error {
+	owned := false
 	if txn == nil {
 		txn = NewMetadataOnlyTxn(d, true)
-		defer txn.Commit() //nolint:errcheck
+		owned = true
+		defer func() {
+			if owned {
+				txn.Rollback() //nolint:errcheck
+			}
+		}()
 	}
-	return d.metadata.SetUtxosNotDeletedAfterSlot(slot, txn.Metadata())
+	if err := d.metadata.SetUtxosNotDeletedAfterSlot(slot, txn.Metadata()); err != nil {
+		return err
+	}
+	if owned {
+		if err := txn.Commit(); err != nil {
+			return err
+		}
+		owned = false
+	}
+	return nil
 }
 
 func UtxoBlobKey(txId []byte, outputIdx uint32) []byte {

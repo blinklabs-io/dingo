@@ -18,44 +18,38 @@ import (
 	"strconv"
 
 	"github.com/blinklabs-io/dingo/database/models"
-	"gorm.io/gorm"
+	"github.com/blinklabs-io/dingo/database/types"
 )
 
 // GetEpochsByEra returns the list of epochs by era
 func (d *MetadataStoreSqlite) GetEpochsByEra(
 	eraId uint,
-	txn *gorm.DB,
+	txn types.Txn,
 ) ([]models.Epoch, error) {
 	ret := []models.Epoch{}
-	if txn != nil {
-		result := txn.Where("era_id = ?", eraId).Order("epoch_id").Find(&ret)
-		if result.Error != nil {
-			return ret, result.Error
-		}
-	} else {
-		result := d.DB().Where("era_id = ?", eraId).Order("epoch_id").Find(&ret)
-		if result.Error != nil {
-			return ret, result.Error
-		}
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return nil, err
+	}
+	result := db.Where("era_id = ?", eraId).Order("epoch_id").Find(&ret)
+	if result.Error != nil {
+		return ret, result.Error
 	}
 	return ret, nil
 }
 
 // GetEpochs returns the list of epochs
 func (d *MetadataStoreSqlite) GetEpochs(
-	txn *gorm.DB,
+	txn types.Txn,
 ) ([]models.Epoch, error) {
 	ret := []models.Epoch{}
-	if txn != nil {
-		result := txn.Order("epoch_id").Find(&ret)
-		if result.Error != nil {
-			return ret, result.Error
-		}
-	} else {
-		result := d.DB().Order("epoch_id").Find(&ret)
-		if result.Error != nil {
-			return ret, result.Error
-		}
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return nil, err
+	}
+	result := db.Order("epoch_id").Find(&ret)
+	if result.Error != nil {
+		return ret, result.Error
 	}
 	return ret, nil
 }
@@ -65,7 +59,7 @@ func (d *MetadataStoreSqlite) SetEpoch(
 	slot, epoch uint64,
 	nonce []byte,
 	era, slotLength, lengthInSlots uint,
-	txn *gorm.DB,
+	txn types.Txn,
 ) error {
 	tmpItem := models.Epoch{
 		EpochId:       epoch,
@@ -75,22 +69,23 @@ func (d *MetadataStoreSqlite) SetEpoch(
 		SlotLength:    slotLength,
 		LengthInSlots: lengthInSlots,
 	}
-	if txn != nil {
-		if result := txn.Create(&tmpItem); result.Error != nil {
-			return result.Error
-		}
-	} else {
-		if result := d.DB().Create(&tmpItem); result.Error != nil {
-			return result.Error
-		}
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return err
 	}
-	// Run a vacuum, on error only log
-	if err := d.runVacuum(); err != nil {
-		d.logger.Error(
-			"failed to free space in metdata store",
-			"epoch", strconv.FormatUint(epoch, 10),
-			"error", err,
-		)
+	if result := db.Create(&tmpItem); result.Error != nil {
+		return result.Error
+	}
+	// Run a vacuum only when not in a transaction, on error only log
+	// (VACUUM during transaction causes lock contention)
+	if txn == nil {
+		if err := d.runVacuum(); err != nil {
+			d.logger.Error(
+				"failed to free space in metadata store",
+				"epoch", strconv.FormatUint(epoch, 10),
+				"error", err,
+			)
+		}
 	}
 	return nil
 }

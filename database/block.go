@@ -22,9 +22,9 @@ import (
 	"strings"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
-	"github.com/dgraph-io/badger/v4"
 )
 
 const (
@@ -44,7 +44,15 @@ func (d *Database) BlockCreate(block models.Block, txn *Txn) error {
 	}
 	// Block content by point
 	key := BlockBlobKey(block.Slot, block.Hash)
-	if err := txn.Blob().Set(key, block.Cbor); err != nil {
+	blobTxn := txn.Blob()
+	if blobTxn == nil {
+		return types.ErrNilTxn
+	}
+	blob := txn.DB().Blob()
+	if blob == nil {
+		return types.ErrBlobStoreUnavailable
+	}
+	if err := blob.Set(blobTxn, key, block.Cbor); err != nil {
 		return err
 	}
 	// Set index if not provided
@@ -61,7 +69,7 @@ func (d *Database) BlockCreate(block models.Block, txn *Txn) error {
 	}
 	// Block index to point key
 	indexKey := BlockBlobIndexKey(block.ID)
-	if err := txn.Blob().Set(indexKey, key); err != nil {
+	if err := blob.Set(blobTxn, indexKey, key); err != nil {
 		return err
 	}
 	// Block metadata by point
@@ -76,7 +84,7 @@ func (d *Database) BlockCreate(block models.Block, txn *Txn) error {
 	if err != nil {
 		return err
 	}
-	if err := txn.Blob().Set(metadataKey, tmpMetadataBytes); err != nil {
+	if err := blob.Set(blobTxn, metadataKey, tmpMetadataBytes); err != nil {
 		return err
 	}
 	if owned {
@@ -88,17 +96,28 @@ func (d *Database) BlockCreate(block models.Block, txn *Txn) error {
 }
 
 func BlockDeleteTxn(txn *Txn, block models.Block) error {
+	if txn == nil {
+		return types.ErrNilTxn
+	}
+	blobTxn := txn.Blob()
+	if blobTxn == nil {
+		return types.ErrNilTxn
+	}
+	blob := txn.DB().Blob()
+	if blob == nil {
+		return types.ErrBlobStoreUnavailable
+	}
 	// Remove from blob store
 	key := BlockBlobKey(block.Slot, block.Hash)
-	if err := txn.Blob().Delete(key); err != nil {
+	if err := blob.Delete(blobTxn, key); err != nil {
 		return err
 	}
 	indexKey := BlockBlobIndexKey(block.ID)
-	if err := txn.Blob().Delete(indexKey); err != nil {
+	if err := blob.Delete(blobTxn, indexKey); err != nil {
 		return err
 	}
 	metadataKey := BlockBlobMetadataKey(key)
-	if err := txn.Blob().Delete(metadataKey); err != nil {
+	if err := blob.Delete(blobTxn, metadataKey); err != nil {
 		return err
 	}
 	return nil
@@ -116,32 +135,31 @@ func BlockByPoint(db *Database, point ocommon.Point) (models.Block, error) {
 }
 
 func blockByKey(txn *Txn, blockKey []byte) (models.Block, error) {
+	if txn == nil {
+		return models.Block{}, types.ErrNilTxn
+	}
+	if txn.Blob() == nil {
+		return models.Block{}, types.ErrNilTxn
+	}
 	point := blockBlobKeyToPoint(blockKey)
 	ret := models.Block{
 		Slot: point.Slot,
 		Hash: point.Hash,
 	}
-	blobTxn := txn.Blob()
-	if blobTxn == nil {
-		return ret, errors.New("blob transaction is not available")
+	blob := txn.DB().Blob()
+	if blob == nil {
+		return ret, types.ErrBlobStoreUnavailable
 	}
-	item, err := blobTxn.Get(blockKey)
+	val, err := blob.Get(txn.Blob(), blockKey)
 	if err != nil {
-		if errors.Is(err, badger.ErrKeyNotFound) {
+		if errors.Is(err, types.ErrBlobKeyNotFound) {
 			return ret, models.ErrBlockNotFound
 		}
 		return ret, err
 	}
-	ret.Cbor, err = item.ValueCopy(nil)
-	if err != nil {
-		return ret, err
-	}
+	ret.Cbor = val
 	metadataKey := BlockBlobMetadataKey(blockKey)
-	item, err = txn.Blob().Get(metadataKey)
-	if err != nil {
-		return ret, err
-	}
-	metadataBytes, err := item.ValueCopy(nil)
+	metadataBytes, err := blob.Get(txn.Blob(), metadataKey)
 	if err != nil {
 		return ret, err
 	}
@@ -170,18 +188,22 @@ func (d *Database) BlockByIndex(
 		defer txn.Rollback() //nolint:errcheck
 	}
 	indexKey := BlockBlobIndexKey(blockIndex)
-	item, err := txn.Blob().Get(indexKey)
+	blobTxn := txn.Blob()
+	if blobTxn == nil {
+		return models.Block{}, types.ErrNilTxn
+	}
+	blob := txn.DB().Blob()
+	if blob == nil {
+		return models.Block{}, types.ErrBlobStoreUnavailable
+	}
+	val, err := blob.Get(blobTxn, indexKey)
 	if err != nil {
-		if errors.Is(err, badger.ErrKeyNotFound) {
+		if errors.Is(err, types.ErrBlobKeyNotFound) {
 			return models.Block{}, models.ErrBlockNotFound
 		}
 		return models.Block{}, err
 	}
-	blockKey, err := item.ValueCopy(nil)
-	if err != nil {
-		return models.Block{}, err
-	}
-	return blockByKey(txn, blockKey)
+	return blockByKey(txn, val)
 }
 
 func BlocksRecent(db *Database, count int) ([]models.Block, error) {
@@ -195,12 +217,28 @@ func BlocksRecent(db *Database, count int) ([]models.Block, error) {
 	return ret, err
 }
 
+// BlocksRecentTxn returns the N most recent blocks; keep txn valid until results are consumed.
 func BlocksRecentTxn(txn *Txn, count int) ([]models.Block, error) {
-	ret := make([]models.Block, 0, count)
-	iterOpts := badger.IteratorOptions{
-		Reverse: true,
+	if txn == nil {
+		return nil, types.ErrNilTxn
 	}
-	it := txn.Blob().NewIterator(iterOpts)
+	ret := make([]models.Block, 0, count)
+	blobTxn := txn.Blob()
+	if blobTxn == nil {
+		return ret, types.ErrNilTxn
+	}
+	blob := txn.DB().Blob()
+	if blob == nil {
+		return ret, types.ErrBlobStoreUnavailable
+	}
+	iterOpts := types.BlobIteratorOptions{
+		Reverse: true,
+		Prefix:  []byte(blockBlobIndexKeyPrefix),
+	}
+	it := blob.NewIterator(blobTxn, iterOpts)
+	if it == nil {
+		return ret, errors.New("blob iterator is nil")
+	}
 	defer it.Close()
 	var foundCount int
 	// Generate our seek key
@@ -213,6 +251,9 @@ func BlocksRecentTxn(txn *Txn, count int) ([]models.Block, error) {
 	var tmpBlock models.Block
 	for it.Seek(tmpPrefix); it.ValidForPrefix([]byte(blockBlobIndexKeyPrefix)); it.Next() {
 		item := it.Item()
+		if item == nil {
+			continue
+		}
 		blockKey, err = item.ValueCopy(nil)
 		if err != nil {
 			return ret, err
@@ -226,6 +267,9 @@ func BlocksRecentTxn(txn *Txn, count int) ([]models.Block, error) {
 		if foundCount >= count {
 			break
 		}
+	}
+	if err := it.Err(); err != nil {
+		return ret, err
 	}
 	return ret, nil
 }
@@ -242,13 +286,25 @@ func BlockBeforeSlot(db *Database, slotNumber uint64) (models.Block, error) {
 }
 
 func BlockBeforeSlotTxn(txn *Txn, slotNumber uint64) (models.Block, error) {
-	if txn == nil || txn.Blob() == nil {
-		return models.Block{}, errors.New("valid blob transaction is required")
+	if txn == nil {
+		return models.Block{}, types.ErrNilTxn
 	}
-	iterOpts := badger.IteratorOptions{
+	blobTxn := txn.Blob()
+	if blobTxn == nil {
+		return models.Block{}, types.ErrNilTxn
+	}
+	blob := txn.DB().Blob()
+	if blob == nil {
+		return models.Block{}, types.ErrBlobStoreUnavailable
+	}
+	iterOpts := types.BlobIteratorOptions{
 		Reverse: true,
+		Prefix:  []byte(blockBlobKeyPrefix),
 	}
-	it := txn.Blob().NewIterator(iterOpts)
+	it := blob.NewIterator(blobTxn, iterOpts)
+	if it == nil {
+		return models.Block{}, errors.New("blob iterator is nil")
+	}
 	defer it.Close()
 	keyPrefix := slices.Concat(
 		[]byte(blockBlobKeyPrefix),
@@ -264,20 +320,46 @@ func BlockBeforeSlotTxn(txn *Txn, slotNumber uint64) (models.Block, error) {
 			return models.Block{}, models.ErrBlockNotFound
 		}
 		item := it.Item()
+		if item == nil {
+			continue
+		}
 		k := item.Key()
+		if k == nil {
+			continue
+		}
 		// Skip the metadata key
 		if strings.HasSuffix(string(k), blockBlobMetadataKeySuffix) {
 			continue
 		}
 		return blockByKey(txn, k)
 	}
+	if err := it.Err(); err != nil {
+		return models.Block{}, err
+	}
 	return models.Block{}, models.ErrBlockNotFound
 }
 
+// BlocksAfterSlotTxn returns all blocks after the specified slot; keep txn valid until results are consumed.
 func BlocksAfterSlotTxn(txn *Txn, slotNumber uint64) ([]models.Block, error) {
+	if txn == nil {
+		return nil, types.ErrNilTxn
+	}
 	var ret []models.Block
-	iterOpts := badger.IteratorOptions{}
-	it := txn.Blob().NewIterator(iterOpts)
+	blobTxn := txn.Blob()
+	if blobTxn == nil {
+		return ret, types.ErrNilTxn
+	}
+	blob := txn.DB().Blob()
+	if blob == nil {
+		return ret, types.ErrBlobStoreUnavailable
+	}
+	iterOpts := types.BlobIteratorOptions{
+		Prefix: []byte(blockBlobKeyPrefix),
+	}
+	it := blob.NewIterator(blobTxn, iterOpts)
+	if it == nil {
+		return ret, errors.New("blob iterator is nil")
+	}
 	defer it.Close()
 	keyPrefix := slices.Concat(
 		[]byte(blockBlobKeyPrefix),
@@ -292,16 +374,25 @@ func BlocksAfterSlotTxn(txn *Txn, slotNumber uint64) ([]models.Block, error) {
 			continue
 		}
 		item := it.Item()
+		if item == nil {
+			continue
+		}
 		k = item.Key()
+		if k == nil {
+			continue
+		}
 		// Skip the metadata key
 		if strings.HasSuffix(string(k), blockBlobMetadataKeySuffix) {
 			continue
 		}
 		tmpBlock, err = blockByKey(txn, k)
 		if err != nil {
-			return []models.Block{}, err
+			return ret, err
 		}
 		ret = append(ret, tmpBlock)
+	}
+	if err := it.Err(); err != nil {
+		return ret, err
 	}
 	return ret, nil
 }

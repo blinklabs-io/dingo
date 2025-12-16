@@ -17,7 +17,7 @@ package badger
 import (
 	"math/big"
 
-	badger "github.com/dgraph-io/badger/v4"
+	"github.com/blinklabs-io/dingo/database/types"
 )
 
 const (
@@ -26,11 +26,9 @@ const (
 
 func (b *BlobStoreBadger) GetCommitTimestamp() (int64, error) {
 	txn := b.NewTransaction(false)
-	item, err := txn.Get([]byte(commitTimestampBlobKey))
-	if err != nil {
-		return 0, err
-	}
-	val, err := item.ValueCopy(nil)
+	defer txn.Rollback() //nolint:errcheck
+
+	val, err := b.Get(txn, []byte(commitTimestampBlobKey))
 	if err != nil {
 		return 0, err
 	}
@@ -38,12 +36,15 @@ func (b *BlobStoreBadger) GetCommitTimestamp() (int64, error) {
 }
 
 func (b *BlobStoreBadger) SetCommitTimestamp(
-	txn *badger.Txn,
 	timestamp int64,
+	txn types.Txn,
 ) error {
+	if txn == nil {
+		return types.ErrNilTxn
+	}
 	// Update badger
 	tmpTimestamp := new(big.Int).SetInt64(timestamp)
-	if err := txn.Set([]byte(commitTimestampBlobKey), tmpTimestamp.Bytes()); err != nil {
+	if err := b.Set(txn, []byte(commitTimestampBlobKey), tmpTimestamp.Bytes()); err != nil {
 		return err
 	}
 	return nil

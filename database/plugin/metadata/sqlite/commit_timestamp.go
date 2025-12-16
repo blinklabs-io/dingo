@@ -17,6 +17,7 @@ package sqlite
 import (
 	"errors"
 
+	"github.com/blinklabs-io/dingo/database/types"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
@@ -50,14 +51,18 @@ func (d *MetadataStoreSqlite) GetCommitTimestamp() (int64, error) {
 }
 
 func (d *MetadataStoreSqlite) SetCommitTimestamp(
-	txn *gorm.DB,
 	timestamp int64,
+	txn types.Txn,
 ) error {
 	tmpCommitTimestamp := CommitTimestamp{
 		ID:        commitTimestampRowId,
 		Timestamp: timestamp,
 	}
-	result := txn.Clauses(clause.OnConflict{
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return err
+	}
+	result := db.Clauses(clause.OnConflict{
 		Columns:   []clause.Column{{Name: "id"}},
 		DoUpdates: clause.AssignmentColumns([]string{"timestamp"}),
 	}).Create(&tmpCommitTimestamp)

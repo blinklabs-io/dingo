@@ -19,94 +19,135 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin"
+	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
-	"gorm.io/gorm"
 )
 
 type MetadataStore interface {
-	// Database
-	Close() error
-	DB() *gorm.DB
-	GetCommitTimestamp() (int64, error)
-	SetCommitTimestamp(*gorm.DB, int64) error
-	Transaction() *gorm.DB
+	// Database management methods
 
-	// Ledger state
+	// Close closes the metadata store and releases all resources.
+	Close() error
+
+	// GetCommitTimestamp retrieves the last commit timestamp from the database.
+	GetCommitTimestamp() (int64, error)
+
+	// SetCommitTimestamp sets the last commit timestamp in the database.
+	// Parameter order is (timestamp, txn) to match other store methods where
+	// the transaction is the final parameter.
+	SetCommitTimestamp(int64, types.Txn) error
+
+	// Transaction creates a new metadata transaction.
+	Transaction() types.Txn
+
+	// Ledger state methods
+
+	// AddUtxos adds one or more unspent transaction outputs to the database.
 	AddUtxos(
 		[]models.UtxoSlot,
-		*gorm.DB,
+		types.Txn,
 	) error
+
+	// GetPoolRegistrations retrieves all registration certificates for a pool.
 	GetPoolRegistrations(
 		lcommon.PoolKeyHash,
-		*gorm.DB,
+		types.Txn,
 	) ([]lcommon.PoolRegistrationCertificate, error)
+
+	// GetPool retrieves a pool by its key hash, optionally including inactive pools.
 	GetPool(
 		lcommon.PoolKeyHash,
 		bool, // includeInactive
-		*gorm.DB,
+		types.Txn,
 	) (*models.Pool, error)
+
+	// GetStakeRegistrations retrieves all stake registration certificates for an account.
 	GetStakeRegistrations(
 		[]byte, // stakeKey
-		*gorm.DB,
+		types.Txn,
 	) ([]lcommon.StakeRegistrationCertificate, error)
-	GetTip(*gorm.DB) (ochainsync.Tip, error)
 
+	// GetTip retrieves the current chain tip.
+	GetTip(types.Txn) (ochainsync.Tip, error)
+
+	// GetAccount retrieves an account by stake key, optionally including inactive accounts.
 	GetAccount(
 		[]byte, // stakeKey
 		bool, // includeInactive
-		*gorm.DB,
+		types.Txn,
 	) (*models.Account, error)
+
+	// GetBlockNonce retrieves a block nonce for a given point.
 	GetBlockNonce(
 		ocommon.Point,
-		*gorm.DB,
+		types.Txn,
 	) ([]byte, error)
+
+	// GetDatum retrieves a datum by its hash, returning nil if not found.
 	GetDatum(
 		lcommon.Blake2b256,
-		*gorm.DB,
+		types.Txn,
 	) (*models.Datum, error)
+
+	// GetDrep retrieves a DRep by its credential, optionally including inactive DReps.
 	GetDrep(
 		[]byte, // credential
 		bool, // includeInactive
-		*gorm.DB,
+		types.Txn,
 	) (*models.Drep, error)
+
+	// GetPParams retrieves protocol parameters for a given epoch.
 	GetPParams(
 		uint64, // epoch
-		*gorm.DB,
+		types.Txn,
 	) ([]models.PParams, error)
+
+	// GetPParamUpdates retrieves protocol parameter updates for a given epoch.
 	GetPParamUpdates(
 		uint64, // epoch
-		*gorm.DB,
+		types.Txn,
 	) ([]models.PParamUpdate, error)
+
+	// GetUtxo retrieves an unspent transaction output by transaction ID and index.
 	GetUtxo(
 		[]byte, // txId
 		uint32, // idx
-		*gorm.DB,
+		types.Txn,
 	) (*models.Utxo, error)
+
+	// GetTransactionByHash retrieves a transaction by its hash.
 	GetTransactionByHash(
 		[]byte, // hash
-		*gorm.DB,
+		types.Txn,
 	) (*models.Transaction, error)
+
+	// GetScript retrieves a script by its hash.
 	GetScript(
 		lcommon.ScriptHash,
-		*gorm.DB,
+		types.Txn,
 	) (*models.Script, error)
 
+	// SetBlockNonce stores a block nonce for a given block hash and slot.
 	SetBlockNonce(
 		[]byte, // blockHash
 		uint64, // slotNumber
 		[]byte, // nonce
 		bool, // isCheckpoint
-		*gorm.DB,
+		types.Txn,
 	) error
+
+	// SetDatum stores a datum with its hash and slot.
 	SetDatum(
 		lcommon.Blake2b256,
 		[]byte,
 		uint64, // slot
-		*gorm.DB,
+		types.Txn,
 	) error
+
+	// SetEpoch sets epoch information.
 	SetEpoch(
 		uint64, // slot
 		uint64, // epoch
@@ -114,47 +155,91 @@ type MetadataStore interface {
 		uint, // era
 		uint, // slotLength
 		uint, // lengthInSlots
-		*gorm.DB,
+		types.Txn,
 	) error
+
+	// SetPParams stores protocol parameters.
 	SetPParams(
 		[]byte, // params
 		uint64, // slot
 		uint64, // epoch
 		uint, // eraId
-		*gorm.DB,
+		types.Txn,
 	) error
+
+	// SetPParamUpdate stores a protocol parameter update.
 	SetPParamUpdate(
 		[]byte, // genesis
 		[]byte, // update
 		uint64, // slot
 		uint64, // epoch
-		*gorm.DB,
+		types.Txn,
 	) error
+
+	// SetTip sets the current chain tip.
 	SetTip(
 		ochainsync.Tip,
-		*gorm.DB,
+		types.Txn,
 	) error
+
+	// SetTransaction stores a transaction with its metadata.
 	SetTransaction(
 		lcommon.Transaction,
 		ocommon.Point,
 		uint32, // idx
 		map[int]uint64, // certDeposits: indexed by certificate position in tx.Certificates(); absent keys are treated as zero/no deposit
-		*gorm.DB,
+		types.Txn,
 	) error
 
-	// Helpers
-	DeleteBlockNoncesBeforeSlot(uint64, *gorm.DB) error
-	DeleteBlockNoncesBeforeSlotWithoutCheckpoints(uint64, *gorm.DB) error
-	DeleteUtxo(any, *gorm.DB) error
-	DeleteUtxos([]any, *gorm.DB) error
-	DeleteUtxosAfterSlot(uint64, *gorm.DB) error
-	GetEpochsByEra(uint, *gorm.DB) ([]models.Epoch, error)
-	GetEpochs(*gorm.DB) ([]models.Epoch, error)
-	GetUtxosAddedAfterSlot(uint64, *gorm.DB) ([]models.Utxo, error)
-	GetUtxosByAddress(ledger.Address, *gorm.DB) ([]models.Utxo, error)
-	GetUtxosDeletedBeforeSlot(uint64, int, *gorm.DB) ([]models.Utxo, error)
-	SetUtxoDeletedAtSlot(ledger.TransactionInput, uint64, *gorm.DB) error
-	SetUtxosNotDeletedAfterSlot(uint64, *gorm.DB) error
+	// Helper methods
+
+	// DeleteBlockNoncesBeforeSlot removes block nonces older than the given slot.
+	DeleteBlockNoncesBeforeSlot(uint64, types.Txn) error
+
+	// DeleteBlockNoncesBeforeSlotWithoutCheckpoints removes block nonces older than the given slot,
+	// excluding checkpoint nonces.
+	DeleteBlockNoncesBeforeSlotWithoutCheckpoints(
+		uint64,
+		types.Txn,
+	) error
+
+	// DeleteUtxo removes a single unspent transaction output.
+	DeleteUtxo(models.UtxoId, types.Txn) error
+
+	// DeleteUtxos removes multiple unspent transaction outputs.
+	DeleteUtxos([]models.UtxoId, types.Txn) error
+
+	// DeleteUtxosAfterSlot removes all UTxOs created after the given slot.
+	DeleteUtxosAfterSlot(uint64, types.Txn) error
+
+	// GetEpochsByEra retrieves all epochs for a given era.
+	GetEpochsByEra(uint, types.Txn) ([]models.Epoch, error)
+
+	// GetEpochs retrieves all epochs.
+	GetEpochs(types.Txn) ([]models.Epoch, error)
+
+	// GetUtxosAddedAfterSlot retrieves all UTxOs added after the given slot.
+	GetUtxosAddedAfterSlot(uint64, types.Txn) ([]models.Utxo, error)
+
+	// GetUtxosByAddress retrieves all UTxOs for a given address.
+	GetUtxosByAddress(ledger.Address, types.Txn) ([]models.Utxo, error)
+
+	// GetUtxosDeletedBeforeSlot retrieves UTxOs deleted before the given slot, up to the specified limit.
+	GetUtxosDeletedBeforeSlot(
+		uint64,
+		int,
+		types.Txn,
+	) ([]models.Utxo, error)
+
+	// SetUtxoDeletedAtSlot marks a UTxO as deleted at the given slot.
+	SetUtxoDeletedAtSlot(
+		ledger.TransactionInput,
+		uint64,
+		types.Txn,
+	) error
+
+	// SetUtxosNotDeletedAfterSlot marks all UTxOs created after the given slot as not deleted.
+	SetUtxosNotDeletedAfterSlot(uint64, types.Txn) error
 }
 
 // New creates a new metadata store instance using the specified plugin

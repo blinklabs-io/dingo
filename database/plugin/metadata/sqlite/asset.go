@@ -18,6 +18,7 @@ import (
 	"errors"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/types"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"gorm.io/gorm"
 )
@@ -26,14 +27,14 @@ import (
 func (d *MetadataStoreSqlite) GetAssetByPolicyAndName(
 	policyId lcommon.Blake2b224,
 	assetName []byte,
-	txn *gorm.DB,
+	txn types.Txn,
 ) (models.Asset, error) {
 	var asset models.Asset
 	var result *gorm.DB
 
-	query := d.DB()
-	if txn != nil {
-		query = txn
+	query, err := d.resolveDB(txn)
+	if err != nil {
+		return models.Asset{}, err
 	}
 
 	result = query.Where("policy_id = ? AND name = ?", policyId[:], assetName).
@@ -50,14 +51,14 @@ func (d *MetadataStoreSqlite) GetAssetByPolicyAndName(
 // GetAssetsByPolicy returns all assets for a given policy ID
 func (d *MetadataStoreSqlite) GetAssetsByPolicy(
 	policyId lcommon.Blake2b224,
-	txn *gorm.DB,
+	txn types.Txn,
 ) ([]models.Asset, error) {
 	var assets []models.Asset
 	var result *gorm.DB
 
-	query := d.DB()
-	if txn != nil {
-		query = txn
+	query, err := d.resolveDB(txn)
+	if err != nil {
+		return nil, err
 	}
 
 	result = query.Where("policy_id = ?", policyId[:]).Find(&assets)
@@ -71,14 +72,14 @@ func (d *MetadataStoreSqlite) GetAssetsByPolicy(
 func (d *MetadataStoreSqlite) GetAssetsByUTxO(
 	txId []byte,
 	idx uint32,
-	txn *gorm.DB,
+	txn types.Txn,
 ) ([]models.Asset, error) {
 	var assets []models.Asset
 	var result *gorm.DB
 
-	query := d.DB()
-	if txn != nil {
-		query = txn
+	query, err := d.resolveDB(txn)
+	if err != nil {
+		return nil, err
 	}
 
 	// Join with UTxO table to find assets by transaction ID and output index
