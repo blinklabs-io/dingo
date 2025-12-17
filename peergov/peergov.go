@@ -480,6 +480,35 @@ func (p *PeerGovernor) SetPeerHotByConnId(connId ouroboros.ConnectionId) {
 	}
 }
 
+// UpdatePeerBlockFetchObservation updates block fetch metrics for the peer with
+// the given connection ID. This method is thread-safe.
+func (p *PeerGovernor) UpdatePeerBlockFetchObservation(
+	connId ouroboros.ConnectionId,
+	latencyMs float64,
+	success bool,
+) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	idx := p.peerIndexByConnId(connId)
+	if idx != -1 && p.peers[idx] != nil {
+		p.peers[idx].UpdateBlockFetchObservation(latencyMs, success)
+	}
+}
+
+// UpdatePeerConnectionStability updates connection stability for the peer with
+// the given connection ID. This method is thread-safe.
+func (p *PeerGovernor) UpdatePeerConnectionStability(
+	connId ouroboros.ConnectionId,
+	observed float64,
+) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	idx := p.peerIndexByConnId(connId)
+	if idx != -1 && p.peers[idx] != nil {
+		p.peers[idx].UpdateConnectionStability(observed)
+	}
+}
+
 func (p *PeerGovernor) startOutboundConnections() {
 	// Skip outbound connections if disabled
 	if p.config.DisableOutbound {

@@ -245,6 +245,14 @@ func (o *Ouroboros) HandleConnClosedEvent(evt event.Event) {
 		return
 	}
 	connId := e.ConnectionId
+
+	// Record connection stability observation for peer scoring
+	// Connection closure indicates reduced stability
+	if o.PeerGov != nil {
+		// Treat connection closure as negative stability signal (0.0)
+		o.PeerGov.UpdatePeerConnectionStability(connId, 0.0)
+	}
+
 	// Remove any chainsync client state
 	if o.ChainsyncState != nil {
 		o.ChainsyncState.RemoveClient(connId)
@@ -271,6 +279,14 @@ func (o *Ouroboros) HandleOutboundConnEvent(evt event.Event) {
 		return
 	}
 	connId := e.ConnectionId
+
+	// Record connection stability observation for peer scoring
+	// Successful outbound connection establishment indicates good stability
+	if o.PeerGov != nil {
+		// Treat successful connection as positive stability signal (1.0)
+		o.PeerGov.UpdatePeerConnectionStability(connId, 1.0)
+	}
+
 	// TODO: replace this with handling for multiple chainsync clients (#385)
 	// Start chainsync client if we don't have another
 	if o.ChainsyncState != nil {
