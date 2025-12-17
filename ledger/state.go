@@ -45,6 +45,7 @@ import (
 const (
 	cleanupConsumedUtxosInterval   = 5 * time.Minute
 	cleanupConsumedUtxosSlotWindow = 50000 // TODO: calculate this from params (#395)
+	batchSize                      = 50    // Number of blocks to process in a single DB transaction
 )
 
 // DatabaseOperation represents an asynchronous database operation
@@ -905,12 +906,12 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 				continue
 			}
 		}
-		// Process batch in groups of 200 to stay under DB txn limits
-		for i = 0; i < len(nextBatch); i += 200 {
+		// Process batch in groups of batchSize to stay under DB txn limits
+		for i = 0; i < len(nextBatch); i += batchSize {
 			ls.Lock()
 			end = min(
 				len(nextBatch),
-				i+200,
+				i+batchSize,
 			)
 			err = ls.SubmitAsyncDBTxn(func(txn *database.Txn) error {
 				deltaBatch = NewLedgerDeltaBatch()
