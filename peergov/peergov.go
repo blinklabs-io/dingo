@@ -15,6 +15,7 @@
 package peergov
 
 import (
+	"cmp"
 	"fmt"
 	"io"
 	"log/slog"
@@ -661,30 +662,11 @@ func (p *PeerGovernor) reconcile() {
 				}
 			}
 		case PeerStateWarm:
-			// Promote if stable connection
-			if peer.Connection != nil {
-				p.peers[i].State = PeerStateHot
-				p.peers[i].LastActivity = time.Now()
-				warmPromotions++
-				activeIncreased++
-				p.config.Logger.Info(
-					"promoted peer to hot",
-					"address",
-					peer.Address,
-				)
-				if p.config.EventBus != nil {
-					p.config.EventBus.Publish(
-						PeerPromotedEventType,
-						event.NewEvent(
-							PeerPromotedEventType,
-							PeerStateChangeEvent{
-								Address: peer.Address,
-								Reason:  "stable connection",
-							},
-						),
-					)
-				}
-			}
+			// Do not promote warm peers here; collect them and perform
+			// score-based promotion later. This avoids unconditional
+			// promotion and lets the scoring policy decide which warm
+			// peers to promote when ensuring MinHotPeers.
+			// Note: warm peers remain warm unless promoted in scoring block below.
 		case PeerStateCold:
 			// Promote to warm if connection exists
 			if peer.Connection != nil {
@@ -742,35 +724,48 @@ func (p *PeerGovernor) reconcile() {
 		}
 	}
 	if hotCount < p.config.MinHotPeers {
+		// Score-based selection: collect warm peers with connections, compute scores,
+		// sort descending and promote top N required to reach MinHotPeers.
+		candidates := []*Peer{}
 		for _, peer := range p.peers {
 			if peer != nil && peer.State == PeerStateWarm &&
 				peer.Connection != nil {
-				peer.State = PeerStateHot
-				peer.LastActivity = time.Now()
-				warmPromotions++
-				activeIncreased++
-				p.config.Logger.Info(
-					"promoted peer to hot to meet minimum",
-					"address",
-					peer.Address,
-				)
-				if p.config.EventBus != nil {
-					p.config.EventBus.Publish(
-						PeerPromotedEventType,
-						event.NewEvent(
-							PeerPromotedEventType,
-							PeerStateChangeEvent{
-								Address: peer.Address,
-								Reason:  "minimum hot peers",
-							},
-						),
-					)
-				}
-				hotCount++
-				if hotCount >= p.config.MinHotPeers {
-					break
-				}
+				peer.UpdatePeerScore()
+				candidates = append(candidates, peer)
 			}
+		}
+		// Sort candidates by PerformanceScore descending using cmp.Compare
+		slices.SortFunc(candidates, func(a, b *Peer) int {
+			return cmp.Compare(b.PerformanceScore, a.PerformanceScore)
+		})
+
+		needed := p.config.MinHotPeers - hotCount
+		for i := 0; i < len(candidates) && i < needed; i++ {
+			peer := candidates[i]
+			peer.State = PeerStateHot
+			peer.LastActivity = time.Now()
+			warmPromotions++
+			activeIncreased++
+			p.config.Logger.Info(
+				"promoted peer to hot to meet minimum (score-based)",
+				"address",
+				peer.Address,
+				"score",
+				peer.PerformanceScore,
+			)
+			if p.config.EventBus != nil {
+				p.config.EventBus.Publish(
+					PeerPromotedEventType,
+					event.NewEvent(
+						PeerPromotedEventType,
+						PeerStateChangeEvent{
+							Address: peer.Address,
+							Reason:  "minimum hot peers (score)",
+						},
+					),
+				)
+			}
+			hotCount++
 		}
 	}
 

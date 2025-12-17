@@ -1,4 +1,4 @@
-// Copyright 2024 Blink Labs Software
+// Copyright 2025 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -50,6 +50,23 @@ type Peer struct {
 	Source         PeerSource
 	State          PeerState
 	Sharable       bool
+	// Performance metrics (used by the peer scoring system)
+	// Average block fetch latency in milliseconds (exponential moving average)
+	BlockFetchLatencyMs float64
+	// Whether we have seen an initial block fetch latency observation
+	BlockFetchLatencyInit bool
+	// Average block fetch success rate [0..1] (exponential moving average)
+	BlockFetchSuccessRate float64
+	// Whether we have seen an initial block fetch success observation
+	BlockFetchSuccessInit bool
+	// Connection stability score [0..1] (uptime / expected uptime)
+	ConnectionStability float64
+	// Whether we have seen an initial connection stability observation
+	ConnectionStabilityInit bool
+	// Timestamp of last observed block fetch
+	LastBlockFetchTime time.Time
+	// Composite performance score computed from the above metrics
+	PerformanceScore float64
 }
 
 func (p *Peer) setConnection(conn *ouroboros.Connection, outbound bool) {
