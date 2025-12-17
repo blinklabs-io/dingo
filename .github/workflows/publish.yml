@@ -62,6 +62,12 @@ jobs:
           - runner: ubuntu-latest
             os: linux
             arch: arm64
+          - runner: windows-latest
+            os: windows
+            arch: amd64
+          - runner: windows-latest
+            os: windows
+            arch: arm64
     runs-on: ${{ matrix.runner }}
     needs: [create-draft-release]
     permissions:
@@ -86,27 +92,33 @@ jobs:
         with:
           path: |
             ~/go/pkg/mod
-            ${{ runner.os == 'macOS' && '~/Library/Caches/go-build' || '~/.cache/go-build' }}
+            ${{ runner.os == 'macOS' && '~/Library/Caches/go-build' || runner.os == 'Windows' && '~\\AppData\\Local\\go-build' || '~/.cache/go-build' }}
           key: ${{ runner.os }}-go-1.25.x-${{ hashFiles('**/go.sum') }}
           restore-keys: |
             ${{ runner.os }}-go-1.25.x-
       - name: Build binary
         run: GOOS=${{ matrix.os }} GOARCH=${{ matrix.arch }} make build
+        shell: bash
       - name: Upload release asset
         if: startsWith(github.ref, 'refs/tags/')
         run: |
+          _binary_name=${{ env.APPLICATION_NAME }}
+          if [ "${{ matrix.os }}" = "windows" ]; then
+            _binary_name="${{ env.APPLICATION_NAME }}.exe"
+          fi
           _filename=${{ env.APPLICATION_NAME }}-${{ env.RELEASE_TAG }}-${{ matrix.os }}-${{ matrix.arch }}.tar.gz
-          tar czf ${_filename} ${{ env.APPLICATION_NAME }}
+          tar czf ${_filename} ${_binary_name}
           curl \
             -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
             -H "Content-Type: application/octet-stream" \
             --data-binary @${_filename} \
             https://uploads.github.com/repos/${{ github.repository_owner }}/${{ env.APPLICATION_NAME }}/releases/${{ needs.create-draft-release.outputs.RELEASE_ID }}/assets?name=${_filename}
+        shell: bash
       - name: Attest binary
         if: startsWith(github.ref, 'refs/tags/')
         uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3.0.0 https://github.com/actions/attest-build-provenance/releases/tag/v3.0.0
         with:
-          subject-path: '${{ env.APPLICATION_NAME }}'
+          subject-path: "${{ matrix.os == 'windows' && format('{0}.exe', env.APPLICATION_NAME) || env.APPLICATION_NAME }}"
 
   build-images:
     strategy:
