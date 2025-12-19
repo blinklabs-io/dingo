@@ -145,25 +145,29 @@ func (i *badgerItem) ValueCopy(dst []byte) ([]byte, error) {
 
 // BlobStoreBadger stores all data in badger. Data may not be persisted
 type BlobStoreBadger struct {
-	promRegistry   prometheus.Registerer
-	db             *badger.DB
-	logger         *slog.Logger
-	gcTicker       *time.Ticker
-	gcStopCh       chan struct{}
-	dataDir        string
-	gcWg           sync.WaitGroup
-	blockCacheSize uint64
-	indexCacheSize uint64
-	gcEnabled      bool
+	promRegistry     prometheus.Registerer
+	db               *badger.DB
+	logger           *slog.Logger
+	gcTicker         *time.Ticker
+	gcStopCh         chan struct{}
+	dataDir          string
+	gcWg             sync.WaitGroup
+	blockCacheSize   uint64
+	indexCacheSize   uint64
+	valueLogFileSize int64
+	memTableSize     int64
+	gcEnabled        bool
 }
 
 // New creates a new database
 func New(opts ...BlobStoreBadgerOptionFunc) (*BlobStoreBadger, error) {
 	db := &BlobStoreBadger{
 		// Set defaults
-		gcEnabled:      true, // Enable GC by default for disk-backed stores
-		blockCacheSize: DefaultBlockCacheSize,
-		indexCacheSize: DefaultIndexCacheSize,
+		gcEnabled:        true, // Enable GC by default for disk-backed stores
+		blockCacheSize:   DefaultBlockCacheSize,
+		indexCacheSize:   DefaultIndexCacheSize,
+		valueLogFileSize: int64(DefaultValueLogFileSize),
+		memTableSize:     int64(DefaultMemTableSize),
 	}
 	for _, opt := range opts {
 		opt(db)
@@ -203,6 +207,8 @@ func New(opts ...BlobStoreBadgerOptionFunc) (*BlobStoreBadger, error) {
 			WithLoggingLevel(badger.WARNING).
 			WithBlockCacheSize(int64(db.blockCacheSize)). //nolint:gosec // blockCacheSize is controlled and reasonable
 			WithIndexCacheSize(int64(db.indexCacheSize)). //nolint:gosec // indexCacheSize is controlled and reasonable
+			WithValueLogFileSize(db.valueLogFileSize).
+			WithMemTableSize(db.memTableSize).
 			WithCompression(options.Snappy)
 		blobDb, err = badger.Open(badgerOpts)
 		if err != nil {

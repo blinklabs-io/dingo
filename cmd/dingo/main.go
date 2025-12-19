@@ -213,6 +213,10 @@ func main() {
 		StringP("blob", "b", config.DefaultBlobPlugin, "blob store plugin to use, 'list' to show available")
 	rootCmd.PersistentFlags().
 		StringP("metadata", "m", config.DefaultMetadataPlugin, "metadata store plugin to use, 'list' to show available")
+	rootCmd.PersistentFlags().
+		Int("db-workers", 5, "database worker pool worker count")
+	rootCmd.PersistentFlags().
+		Int("db-queue-size", 50, "database worker pool task queue size")
 
 	// Add plugin-specific flags
 	if err := plugin.PopulateCmdlineOptions(rootCmd.PersistentFlags()); err != nil {
@@ -242,6 +246,18 @@ func main() {
 		}
 		if metadataPlugin != config.DefaultMetadataPlugin {
 			cfg.MetadataPlugin = metadataPlugin
+		}
+
+		// Override database worker pool config if flags are provided
+		if cmd.Root().PersistentFlags().Changed("db-workers") {
+			if workers, err := cmd.Root().PersistentFlags().GetInt("db-workers"); err == nil {
+				cfg.DatabaseWorkers = workers
+			}
+		}
+		if cmd.Root().PersistentFlags().Changed("db-queue-size") {
+			if queueSize, err := cmd.Root().PersistentFlags().GetInt("db-queue-size"); err == nil {
+				cfg.DatabaseQueueSize = queueSize
+			}
 		}
 
 		cmd.SetContext(config.WithContext(cmd.Context(), cfg))

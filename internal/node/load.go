@@ -85,6 +85,11 @@ func Load(cfg *config.Config, logger *slog.Logger, immutableDir string) error {
 			CardanoNodeConfig:  nodeCfg,
 			EventBus:           eventBus,
 			ValidateHistorical: cfg.ValidateHistorical,
+			DatabaseWorkerPoolConfig: ledger.DatabaseWorkerPoolConfig{
+				WorkerPoolSize: cfg.DatabaseWorkers,
+				TaskQueueSize:  cfg.DatabaseQueueSize,
+				Disabled:       false,
+			},
 		},
 	)
 	if err != nil {

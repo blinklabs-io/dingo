@@ -65,3 +65,17 @@ func WithGc(enabled bool) BlobStoreBadgerOptionFunc {
 		b.gcEnabled = enabled
 	}
 }
+
+// WithValueLogFileSize specifies the value log file size in bytes
+func WithValueLogFileSize(size int64) BlobStoreBadgerOptionFunc {
+	return func(b *BlobStoreBadger) {
+		b.valueLogFileSize = size
+	}
+}
+
+// WithMemTableSize specifies the memtable size in bytes
+func WithMemTableSize(size int64) BlobStoreBadgerOptionFunc {
+	return func(b *BlobStoreBadger) {
+		b.memTableSize = size
+	}
+}

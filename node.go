@@ -134,6 +134,7 @@ func (n *Node) Run() error {
 			ForgeBlocks:                n.config.devMode,
 			ValidateHistorical:         n.config.validateHistorical,
 			BlockfetchRequestRangeFunc: n.ouroboros.BlockfetchClientRequestRange,
+			DatabaseWorkerPoolConfig:   n.config.DatabaseWorkerPoolConfig,
 		},
 	)
 	if err != nil {
