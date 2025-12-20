@@ -90,6 +90,9 @@ type Config struct {
 	IntersectTip       bool   `yaml:"intersectTip"                                                  split_words:"true"`
 	ValidateHistorical bool   `yaml:"validateHistorical"                                            split_words:"true"`
 	DevMode            bool   `yaml:"devMode"                                                       split_words:"true"`
+	// Database worker pool tuning (worker count and task queue size)
+	DatabaseWorkers   int `yaml:"databaseWorkers"    envconfig:"DINGO_DATABASE_WORKERS"`
+	DatabaseQueueSize int `yaml:"databaseQueueSize"  envconfig:"DINGO_DATABASE_QUEUE_SIZE"`
 }
 
 func (c *Config) ParseCmdlineArgs(programName string, args []string) error {
@@ -105,6 +108,19 @@ func (c *Config) ParseCmdlineArgs(programName string, args []string) error {
 		"metadata",
 		DefaultMetadataPlugin,
 		"metadata store plugin to use, 'list' to show available",
+	)
+	// Database worker pool flags
+	fs.IntVar(
+		&c.DatabaseWorkers,
+		"db-workers",
+		5,
+		"database worker pool worker count",
+	)
+	fs.IntVar(
+		&c.DatabaseQueueSize,
+		"db-queue-size",
+		50,
+		"database worker pool task queue size",
 	)
 	// NOTE: Plugin flags are handled by Cobra in main.go
 	// if err := plugin.PopulateCmdlineOptions(fs); err != nil {
@@ -156,6 +172,9 @@ var globalConfig = &Config{
 	MetadataPlugin:     DefaultMetadataPlugin,
 	DevMode:            false,
 	ShutdownTimeout:    DefaultShutdownTimeout,
+	// Defaults for database worker pool tuning
+	DatabaseWorkers:   5,
+	DatabaseQueueSize: 50,
 }
 
 func LoadConfig(configFile string) (*Config, error) {

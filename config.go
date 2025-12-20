@@ -23,6 +23,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/connmanager"
+	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/topology"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -32,27 +33,28 @@ import (
 type ListenerConfig = connmanager.ListenerConfig
 
 type Config struct {
-	promRegistry       prometheus.Registerer
-	topologyConfig     *topology.TopologyConfig
-	logger             *slog.Logger
-	cardanoNodeConfig  *cardano.CardanoNodeConfig
-	dataDir            string
-	network            string
-	tlsCertFilePath    string
-	tlsKeyFilePath     string
-	intersectPoints    []ocommon.Point
-	listeners          []ListenerConfig
-	mempoolCapacity    int64
-	outboundSourcePort uint
-	utxorpcPort        uint
-	networkMagic       uint32
-	intersectTip       bool
-	peerSharing        bool
-	validateHistorical bool
-	tracing            bool
-	tracingStdout      bool
-	devMode            bool
-	shutdownTimeout    time.Duration
+	promRegistry             prometheus.Registerer
+	topologyConfig           *topology.TopologyConfig
+	logger                   *slog.Logger
+	cardanoNodeConfig        *cardano.CardanoNodeConfig
+	dataDir                  string
+	network                  string
+	tlsCertFilePath          string
+	tlsKeyFilePath           string
+	intersectPoints          []ocommon.Point
+	listeners                []ListenerConfig
+	mempoolCapacity          int64
+	outboundSourcePort       uint
+	utxorpcPort              uint
+	networkMagic             uint32
+	intersectTip             bool
+	peerSharing              bool
+	validateHistorical       bool
+	tracing                  bool
+	tracingStdout            bool
+	devMode                  bool
+	shutdownTimeout          time.Duration
+	DatabaseWorkerPoolConfig ledger.DatabaseWorkerPoolConfig
 }
 
 // configPopulateNetworkMagic uses the named network (if specified) to determine the network magic value (if not specified)
@@ -274,5 +276,14 @@ func WithDevMode(devMode bool) ConfigOptionFunc {
 func WithValidateHistorical(validate bool) ConfigOptionFunc {
 	return func(c *Config) {
 		c.validateHistorical = validate
+	}
+}
+
+// WithDatabaseWorkerPoolConfig specifies the database worker pool configuration
+func WithDatabaseWorkerPoolConfig(
+	cfg ledger.DatabaseWorkerPoolConfig,
+) ConfigOptionFunc {
+	return func(c *Config) {
+		c.DatabaseWorkerPoolConfig = cfg
 	}
 }

@@ -29,6 +29,7 @@ import (
 	"github.com/blinklabs-io/dingo"
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/internal/config"
+	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
@@ -138,6 +139,11 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 			// TODO: make this configurable (#387)
 			// dingo.WithTracing(true),
 			dingo.WithTopologyConfig(config.GetTopologyConfig()),
+			dingo.WithDatabaseWorkerPoolConfig(ledger.DatabaseWorkerPoolConfig{
+				WorkerPoolSize: cfg.DatabaseWorkers,
+				TaskQueueSize:  cfg.DatabaseQueueSize,
+				Disabled:       false,
+			}),
 		),
 	)
 	if err != nil {

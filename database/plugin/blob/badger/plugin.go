@@ -22,16 +22,20 @@ import (
 
 // Default cache sizes for BadgerDB (in bytes)
 const (
-	DefaultBlockCacheSize = 1610612736 // 1.5GB (increased from 768MB)
-	DefaultIndexCacheSize = 536870912  // 512MB (increased from 256MB)
+	DefaultBlockCacheSize   = 1610612736 // 1.5GB (increased from 768MB)
+	DefaultIndexCacheSize   = 536870912  // 512MB (increased from 256MB)
+	DefaultValueLogFileSize = 1073741824 // 1GB (keep large values on disk, write amplification reduction)
+	DefaultMemTableSize     = 67108864   // 64MB (conservative default)
 )
 
 var (
 	cmdlineOptions struct {
-		dataDir        string
-		blockCacheSize uint64
-		indexCacheSize uint64
-		gcEnabled      bool
+		dataDir          string
+		blockCacheSize   uint64
+		indexCacheSize   uint64
+		valueLogFileSize uint64
+		memTableSize     uint64
+		gcEnabled        bool
 	}
 	cmdlineOptionsMutex sync.RWMutex
 )
@@ -42,6 +46,8 @@ func initCmdlineOptions() {
 	defer cmdlineOptionsMutex.Unlock()
 	cmdlineOptions.blockCacheSize = DefaultBlockCacheSize
 	cmdlineOptions.indexCacheSize = DefaultIndexCacheSize
+	cmdlineOptions.valueLogFileSize = DefaultValueLogFileSize
+	cmdlineOptions.memTableSize = DefaultMemTableSize
 	cmdlineOptions.gcEnabled = true
 	cmdlineOptions.dataDir = ".dingo"
 }
@@ -84,6 +90,20 @@ func init() {
 					DefaultValue: true,
 					Dest:         &(cmdlineOptions.gcEnabled),
 				},
+				{
+					Name:         "value-log-file-size",
+					Type:         plugin.PluginOptionTypeUint,
+					Description:  "Badger value log file size",
+					DefaultValue: uint64(DefaultValueLogFileSize),
+					Dest:         &(cmdlineOptions.valueLogFileSize),
+				},
+				{
+					Name:         "memtable-size",
+					Type:         plugin.PluginOptionTypeUint,
+					Description:  "Badger memtable size",
+					DefaultValue: uint64(DefaultMemTableSize),
+					Dest:         &(cmdlineOptions.memTableSize),
+				},
 			},
 		},
 	)
@@ -91,10 +111,26 @@ func init() {
 
 func NewFromCmdlineOptions() plugin.Plugin {
 	cmdlineOptionsMutex.RLock()
+	// Safe conversion from uint64 to int64 with bounds checking
+	valueLogFileSize := cmdlineOptions.valueLogFileSize
+	if valueLogFileSize > 1<<63-1 {
+		valueLogFileSize = 1<<63 - 1 // Cap at max int64
+	}
+	memTableSize := cmdlineOptions.memTableSize
+	if memTableSize > 1<<63-1 {
+		memTableSize = 1<<63 - 1 // Cap at max int64
+	}
+	// #nosec G115
 	opts := []BlobStoreBadgerOptionFunc{
 		WithDataDir(cmdlineOptions.dataDir),
 		WithBlockCacheSize(cmdlineOptions.blockCacheSize),
 		WithIndexCacheSize(cmdlineOptions.indexCacheSize),
+		WithValueLogFileSize(
+			int64(valueLogFileSize),
+		),
+		WithMemTableSize(
+			int64(memTableSize),
+		),
 		WithGc(cmdlineOptions.gcEnabled),
 	}
 	cmdlineOptionsMutex.RUnlock()
