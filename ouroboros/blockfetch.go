@@ -103,18 +103,23 @@ func (o *Ouroboros) BlockfetchClientRequestRange(
 	if conn == nil {
 		return fmt.Errorf("failed to lookup connection ID: %s", connId.String())
 	}
-	// Record start time for metrics
-	if o.metrics != nil {
-		o.blockFetchMutex.Lock()
-		o.blockFetchStarts[connId] = time.Now()
-		o.blockFetchMutex.Unlock()
-	}
+	// Record start time for metrics and scoring
+	o.blockFetchMutex.Lock()
+	o.blockFetchStarts[connId] = time.Now()
+	o.blockFetchMutex.Unlock()
 	if err := conn.BlockFetch().Client.GetBlockRange(start, end); err != nil {
-		// Clean up start time on error to prevent stale entries
-		if o.metrics != nil {
-			o.blockFetchMutex.Lock()
-			delete(o.blockFetchStarts, connId)
-			o.blockFetchMutex.Unlock()
+		// Clean up start time and record failed observation
+		o.blockFetchMutex.Lock()
+		startTime, exists := o.blockFetchStarts[connId]
+		delete(o.blockFetchStarts, connId)
+		o.blockFetchMutex.Unlock()
+		if exists && o.PeerGov != nil {
+			latencyMs := time.Since(startTime).Milliseconds()
+			o.PeerGov.UpdatePeerBlockFetchObservation(
+				connId,
+				float64(latencyMs),
+				false,
+			)
 		}
 		return err
 	}
@@ -126,32 +131,27 @@ func (o *Ouroboros) blockfetchClientBlock(
 	blockType uint,
 	block gledger.Block,
 ) error {
-	// Update metrics
-	if o.metrics != nil {
-		o.blockFetchMutex.Lock()
-		startTime, exists := o.blockFetchStarts[ctx.ConnectionId]
-		o.blockFetchMutex.Unlock()
-		if exists {
-			fetchDuration := time.Since(startTime)
-			fetchSeconds := fetchDuration.Seconds()
+	// Update metrics and peer scoring
+	o.blockFetchMutex.Lock()
+	startTime, exists := o.blockFetchStarts[ctx.ConnectionId]
+	o.blockFetchMutex.Unlock()
+	if exists {
+		fetchDuration := time.Since(startTime)
+		fetchSeconds := fetchDuration.Seconds()
 
-			// Calculate block delay as wallclock time minus block slot time (cardano-node compatible)
-			var delaySeconds float64
-			if o.LedgerState != nil {
-				blockSlotTime, err := o.LedgerState.SlotToTime(
-					block.SlotNumber(),
-				)
-				if err == nil {
-					delaySeconds = time.Since(blockSlotTime).Seconds()
-				} else {
-					// Fallback to fetch time if slot conversion fails
-					delaySeconds = fetchSeconds
-				}
+		// Calculate block delay as wallclock time minus block slot time (cardano-node compatible)
+		var delaySeconds float64
+		if o.LedgerState != nil {
+			if blockSlotTime, err := o.LedgerState.SlotToTime(block.SlotNumber()); err == nil {
+				delaySeconds = time.Since(blockSlotTime).Seconds()
 			} else {
-				// Fallback to fetch time if no ledger state
 				delaySeconds = fetchSeconds
 			}
+		} else {
+			delaySeconds = fetchSeconds
+		}
 
+		if o.metrics != nil {
 			o.metrics.blockDelay.Set(delaySeconds)
 			atomic.AddInt64(&o.metrics.totalBlocksFetched, 1)
 			if delaySeconds < 1.0 {
@@ -161,10 +161,8 @@ func (o *Ouroboros) blockfetchClientBlock(
 			} else if delaySeconds < 5.0 {
 				atomic.AddInt64(&o.metrics.blocksUnder5s, 1)
 			} else {
-				// delaySeconds >= 5.0
 				o.metrics.lateBlocks.Inc()
 			}
-			// Update CDF percentages based on block delay
 			total := atomic.LoadInt64(&o.metrics.totalBlocksFetched)
 			if total > 0 {
 				under1 := atomic.LoadInt64(&o.metrics.blocksUnder1s)
@@ -180,6 +178,15 @@ func (o *Ouroboros) blockfetchClientBlock(
 					float64(under5) / float64(total) * 100,
 				)
 			}
+		}
+
+		if o.PeerGov != nil {
+			latencyMs := fetchDuration.Milliseconds()
+			o.PeerGov.UpdatePeerBlockFetchObservation(
+				ctx.ConnectionId,
+				float64(latencyMs),
+				true,
+			)
 		}
 	}
 	// Generate event
@@ -205,11 +212,9 @@ func (o *Ouroboros) blockfetchClientBatchDone(
 	ctx blockfetch.CallbackContext,
 ) error {
 	// Clean up start time
-	if o.metrics != nil {
-		o.blockFetchMutex.Lock()
-		delete(o.blockFetchStarts, ctx.ConnectionId)
-		o.blockFetchMutex.Unlock()
-	}
+	o.blockFetchMutex.Lock()
+	delete(o.blockFetchStarts, ctx.ConnectionId)
+	o.blockFetchMutex.Unlock()
 	// Generate event
 	o.EventBus.Publish(
 		ledger.BlockfetchEventType,
