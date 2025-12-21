@@ -664,7 +664,9 @@ func (d *MetadataStoreSqlite) SetTransaction(
 				}
 				// If the record already existed, we need to fetch its ID
 				if unifiedCert.ID == 0 {
-					if result := db.Where("transaction_id = ? AND cert_index = ?", tmpTx.ID, uint(i)).First(&unifiedCert); result.Error != nil { //nolint:gosec
+					result := db.Where("transaction_id = ? AND cert_index = ?", tmpTx.ID, uint(i)). // #nosec G115
+															First(&unifiedCert)
+					if result.Error != nil {
 						return fmt.Errorf(
 							"fetch existing unified certificate: %w",
 							result.Error,
@@ -684,9 +686,17 @@ func (d *MetadataStoreSqlite) SetTransaction(
 					}
 				}
 				if certDeposits == nil && certRequiresDeposit(cert) {
-					d.logger.Error("certDeposits is nil for deposit-bearing certificate",
-						"index", i, "type", fmt.Sprintf("%T", cert))
-					return fmt.Errorf("missing certDeposits for deposit-bearing certificate at index %d", i)
+					d.logger.Error(
+						"certDeposits is nil for deposit-bearing certificate",
+						"index",
+						i,
+						"type",
+						fmt.Sprintf("%T", cert),
+					)
+					return fmt.Errorf(
+						"missing certDeposits for deposit-bearing certificate at index %d",
+						i,
+					)
 				}
 				switch c := cert.(type) {
 				case *lcommon.PoolRegistrationCertificate:
@@ -788,6 +798,10 @@ func (d *MetadataStoreSqlite) SetTransaction(
 						CertificateID: certIDMap[i],
 					}
 
+					if tmpAccount.ID == 0 {
+						tmpAccount.AddedSlot = point.Slot
+						tmpAccount.CertificateID = certIDMap[i]
+					}
 					if err := saveAccount(tmpAccount, db); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
@@ -1002,6 +1016,10 @@ func (d *MetadataStoreSqlite) SetTransaction(
 						CertificateID: certIDMap[i],
 					}
 
+					if tmpAccount.ID == 0 {
+						tmpAccount.AddedSlot = point.Slot
+						tmpAccount.CertificateID = certIDMap[i]
+					}
 					if err := saveAccount(tmpAccount, db); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
