@@ -55,7 +55,11 @@ func (o *Ouroboros) txsubmissionClientStart(
 	if conn == nil {
 		return fmt.Errorf("failed to lookup connection ID: %s", connId.String())
 	}
-	conn.TxSubmission().Client.Init()
+	tx := conn.TxSubmission()
+	if tx == nil {
+		return fmt.Errorf("TxSubmission protocol not available on connection: %s", connId.String())
+	}
+	tx.Client.Init()
 	return nil
 }
 
