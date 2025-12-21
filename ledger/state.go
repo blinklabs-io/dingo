@@ -748,6 +748,48 @@ func (ls *LedgerState) calculateStabilityWindow() uint64 {
 	return window.Uint64()
 }
 
+// SecurityParam returns the security parameter for the current era
+func (ls *LedgerState) SecurityParam() int {
+	if ls.config.CardanoNodeConfig == nil {
+		ls.config.Logger.Warn(
+			"CardanoNodeConfig is nil, using default security parameter",
+		)
+		return blockfetchBatchSlotThresholdDefault
+	}
+	// Byron era only needs Byron genesis
+	if ls.currentEra.Id == 0 {
+		byronGenesis := ls.config.CardanoNodeConfig.ByronGenesis()
+		if byronGenesis == nil {
+			return blockfetchBatchSlotThresholdDefault
+		}
+		k := byronGenesis.ProtocolConsts.K
+		if k < 0 {
+			ls.config.Logger.Warn("invalid negative security parameter", "k", k)
+			return blockfetchBatchSlotThresholdDefault
+		}
+		if k == 0 {
+			ls.config.Logger.Warn("security parameter is zero", "k", k)
+			return blockfetchBatchSlotThresholdDefault
+		}
+		return int(k) // #nosec G115
+	}
+	// Shelley+ eras only need Shelley genesis
+	shelleyGenesis := ls.config.CardanoNodeConfig.ShelleyGenesis()
+	if shelleyGenesis == nil {
+		return blockfetchBatchSlotThresholdDefault
+	}
+	k := shelleyGenesis.SecurityParam
+	if k < 0 {
+		ls.config.Logger.Warn("invalid negative security parameter", "k", k)
+		return blockfetchBatchSlotThresholdDefault
+	}
+	if k == 0 {
+		ls.config.Logger.Warn("security parameter is zero", "k", k)
+		return blockfetchBatchSlotThresholdDefault
+	}
+	return int(k)
+}
+
 type readChainResult struct {
 	rollbackPoint ocommon.Point
 	blocks        []ledger.Block

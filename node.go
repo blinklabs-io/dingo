@@ -142,6 +142,7 @@ func (n *Node) Run() error {
 	}
 	n.ledgerState = state
 	n.ouroboros.LedgerState = n.ledgerState
+	n.chainManager.SetLedger(n.ledgerState)
 	// Run DB recovery if needed
 	if dbNeedsRecovery {
 		if err := n.ledgerState.RecoverCommitTimestampConflict(); err != nil {
