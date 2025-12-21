@@ -33,7 +33,7 @@ func TestUtxorpc_StartStop(t *testing.T) {
 		Host:     "127.0.0.1",
 		Port:     0,
 	})
-	if err := u.Start(); err != nil {
+	if err := u.Start(context.Background()); err != nil {
 		t.Fatalf("failed to start utxorpc: %v", err)
 	}
 	// Brief delay to ensure server is listening

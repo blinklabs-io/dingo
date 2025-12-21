@@ -192,7 +192,7 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 	errChan := make(chan error, 1)
 	go func() {
 		//nolint:contextcheck
-		err := d.Run()
+		err := d.Run(signalCtx)
 		select {
 		case errChan <- err:
 		case <-signalCtx.Done():

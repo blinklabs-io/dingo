@@ -76,6 +76,11 @@ func (s *State) AddClient(
 func (s *State) RemoveClient(connId connection.ConnectionId) {
 	s.Lock()
 	defer s.Unlock()
+	// Cancel any pending iterator operations
+	if clientState, exists := s.clients[connId]; exists &&
+		clientState.ChainIter != nil {
+		clientState.ChainIter.Cancel()
+	}
 	// Remove client state entry
 	delete(s.clients, connId)
 }

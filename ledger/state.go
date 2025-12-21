@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"context"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -300,6 +301,7 @@ type LedgerState struct {
 	currentTip                       ochainsync.Tip
 	currentEpoch                     models.Epoch
 	dbWorkerPool                     *DatabaseWorkerPool
+	ctx                              context.Context
 	sync.RWMutex
 	chainsyncMutex             sync.Mutex
 	chainsyncBlockfetchMutex   sync.Mutex
@@ -334,7 +336,8 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 	return ls, nil
 }
 
-func (ls *LedgerState) Start() error {
+func (ls *LedgerState) Start(ctx context.Context) error {
+	ls.ctx = ctx
 	// Init metrics
 	ls.metrics.init(ls.config.PromRegistry)
 
@@ -754,7 +757,10 @@ type readChainResult struct {
 	rollback      bool
 }
 
-func (ls *LedgerState) ledgerReadChain(resultCh chan readChainResult) {
+func (ls *LedgerState) ledgerReadChain(
+	ctx context.Context,
+	resultCh chan readChainResult,
+) {
 	// Create chain iterator
 	iter, err := ls.chain.FromPoint(ls.currentTip.Point, false)
 	if err != nil {
@@ -770,6 +776,11 @@ func (ls *LedgerState) ledgerReadChain(resultCh chan readChainResult) {
 	var rollbackPoint ocommon.Point
 	var result readChainResult
 	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
 		// We chose 500 as an arbitrary max batch size. A "chain extended" message will be logged after each batch
 		nextBatch := make([]ledger.Block, 0, 500)
 		// Gather up next batch of blocks
@@ -836,14 +847,18 @@ func (ls *LedgerState) ledgerReadChain(resultCh chan readChainResult) {
 				blocks: nextBatch,
 			}
 		}
-		resultCh <- result
+		select {
+		case resultCh <- result:
+		case <-ctx.Done():
+			return
+		}
 	}
 }
 
 func (ls *LedgerState) ledgerProcessBlocks() {
 	// Start chain reader goroutine
 	readChainResultCh := make(chan readChainResult)
-	go ls.ledgerReadChain(readChainResultCh)
+	go ls.ledgerReadChain(ls.ctx, readChainResultCh)
 	// Process blocks
 	var nextEpochEraId uint
 	var needsEpochRollover bool
@@ -887,23 +902,27 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 			cachedNextBatch = nil
 		} else {
 			// Read next result from readChain channel
-			result, ok := <-readChainResultCh
-			if !ok {
-				return
-			}
-			nextBatch = result.blocks
-			// Process rollback
-			if result.rollback {
-				ls.Lock()
-				if err = ls.rollback(result.rollbackPoint); err != nil {
-					ls.Unlock()
-					ls.config.Logger.Error(
-						"failed to process rollback: " + err.Error(),
-					)
+			select {
+			case result, ok := <-readChainResultCh:
+				if !ok {
 					return
 				}
-				ls.Unlock()
-				continue
+				nextBatch = result.blocks
+				// Process rollback
+				if result.rollback {
+					ls.Lock()
+					if err = ls.rollback(result.rollbackPoint); err != nil {
+						ls.Unlock()
+						ls.config.Logger.Error(
+							"failed to process rollback: " + err.Error(),
+						)
+						return
+					}
+					ls.Unlock()
+					continue
+				}
+			case <-ls.ctx.Done():
+				return
 			}
 		}
 		// Process batch in groups of batchSize to stay under DB txn limits

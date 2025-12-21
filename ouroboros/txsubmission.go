@@ -57,7 +57,10 @@ func (o *Ouroboros) txsubmissionClientStart(
 	}
 	tx := conn.TxSubmission()
 	if tx == nil {
-		return fmt.Errorf("TxSubmission protocol not available on connection: %s", connId.String())
+		return fmt.Errorf(
+			"TxSubmission protocol not available on connection: %s",
+			connId.String(),
+		)
 	}
 	tx.Client.Init()
 	return nil
@@ -68,13 +71,26 @@ func (o *Ouroboros) txsubmissionServerInit(
 ) error {
 	// Start async loop to request transactions from the peer's mempool
 	go func() {
+		conn := o.ConnManager.GetConnectionById(ctx.ConnectionId)
+		if conn == nil {
+			return
+		}
 		for {
-			// Request available TX IDs (era and TX hash) and sizes
-			// We make the request blocking to avoid looping on our side
-			txIds, err := ctx.Server.RequestTxIds(
-				true,
-				txsubmissionRequestTxIdsCount,
-			)
+			done := make(chan struct{})
+			var txIds []txsubmission.TxIdAndSize
+			var err error
+			go func() {
+				defer close(done)
+				txIds, err = ctx.Server.RequestTxIds(
+					true,
+					txsubmissionRequestTxIdsCount,
+				)
+			}()
+			select {
+			case <-done:
+			case <-conn.ErrorChan():
+				return
+			}
 			if err != nil {
 				// Peer requested shutdown
 				if errors.Is(err, txsubmission.ErrStopServerProcess) {
