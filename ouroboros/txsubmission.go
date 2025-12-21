@@ -57,7 +57,10 @@ func (o *Ouroboros) txsubmissionClientStart(
 	}
 	tx := conn.TxSubmission()
 	if tx == nil {
-		return fmt.Errorf("TxSubmission protocol not available on connection: %s", connId.String())
+		return fmt.Errorf(
+			"TxSubmission protocol not available on connection: %s",
+			connId.String(),
+		)
 	}
 	tx.Client.Init()
 	return nil

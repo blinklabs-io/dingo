@@ -51,6 +51,29 @@ type BlobStore interface {
 	// SetCommitTimestamp stores the last commit timestamp; parameter order is
 	// (timestamp, txn) to keep the transaction as the final parameter.
 	SetCommitTimestamp(int64, types.Txn) error
+
+	// Block operations
+	SetBlock(
+		txn types.Txn,
+		slot uint64,
+		hash []byte,
+		cbor []byte,
+		id uint64,
+		blockType uint,
+		height uint64,
+		prevHash []byte,
+	) error
+	GetBlock(
+		txn types.Txn,
+		slot uint64,
+		hash []byte,
+	) ([]byte, types.BlockMetadata, error)
+	DeleteBlock(txn types.Txn, slot uint64, hash []byte, id uint64) error
+
+	// UTxO operations
+	SetUtxo(txn types.Txn, txId []byte, outputIdx uint32, cbor []byte) error
+	GetUtxo(txn types.Txn, txId []byte, outputIdx uint32) ([]byte, error)
+	DeleteUtxo(txn types.Txn, txId []byte, outputIdx uint32) error
 }
 
 // New returns the started blob plugin selected by name

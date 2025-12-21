@@ -67,8 +67,7 @@ func (d *Database) SetTransaction(
 				outputIdx = realIdx
 			}
 		}
-		key := UtxoBlobKey(utxo.Id.Id().Bytes(), outputIdx)
-		if err := blob.Set(blobTxn, key, utxo.Output.Cbor()); err != nil {
+		if err := blob.SetUtxo(blobTxn, utxo.Id.Id().Bytes(), outputIdx, utxo.Output.Cbor()); err != nil {
 			return err
 		}
 	}
