@@ -683,6 +683,11 @@ func (d *MetadataStoreSqlite) SetTransaction(
 							"index", i, "type", fmt.Sprintf("%T", cert))
 					}
 				}
+				if certDeposits == nil && certRequiresDeposit(cert) {
+					d.logger.Error("certDeposits is nil for deposit-bearing certificate",
+						"index", i, "type", fmt.Sprintf("%T", cert))
+					return fmt.Errorf("missing certDeposits for deposit-bearing certificate at index %d", i)
+				}
 				switch c := cert.(type) {
 				case *lcommon.PoolRegistrationCertificate:
 					// Include inactive pools to allow re-registration.
