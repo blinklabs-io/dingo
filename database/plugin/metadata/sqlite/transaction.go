@@ -155,8 +155,10 @@ func (d *MetadataStoreSqlite) getOrCreateAccount(
 	return tmpAccount, nil
 }
 
-// saveAccountIfNew saves the account if it doesn't exist in the database yet
-func saveAccountIfNew(account *models.Account, db *gorm.DB) error {
+// saveAccount persists the account to the database. It creates a new
+// record when `account.ID == 0` (with an upsert on `staking_key`) or saves
+// the existing record otherwise.
+func saveAccount(account *models.Account, db *gorm.DB) error {
 	if account.ID == 0 {
 		result := db.Clauses(clause.OnConflict{
 			Columns: []clause.Column{{Name: "staking_key"}},
@@ -781,7 +783,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 						CertificateID: certIDMap[i],
 					}
 
-					if err := saveAccountIfNew(tmpAccount, db); err != nil {
+					if err := saveAccount(tmpAccount, db); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
@@ -851,7 +853,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 						CertificateID: certIDMap[i],
 					}
 
-					if err := saveAccountIfNew(tmpAccount, db); err != nil {
+					if err := saveAccount(tmpAccount, db); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
@@ -890,7 +892,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 						Amount:        types.Uint64(deposit),
 					}
 
-					if err := saveAccountIfNew(tmpAccount, db); err != nil {
+					if err := saveAccount(tmpAccount, db); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
@@ -916,7 +918,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 						CertificateID: certIDMap[i],
 					}
 
-					if err := saveAccountIfNew(tmpAccount, db); err != nil {
+					if err := saveAccount(tmpAccount, db); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
@@ -943,7 +945,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 						CertificateID: certIDMap[i],
 					}
 
-					if err := saveAccountIfNew(tmpAccount, db); err != nil {
+					if err := saveAccount(tmpAccount, db); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
@@ -971,7 +973,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 						CertificateID: certIDMap[i],
 					}
 
-					if err := saveAccountIfNew(tmpAccount, db); err != nil {
+					if err := saveAccount(tmpAccount, db); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
@@ -995,7 +997,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 						CertificateID: certIDMap[i],
 					}
 
-					if err := saveAccountIfNew(tmpAccount, db); err != nil {
+					if err := saveAccount(tmpAccount, db); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
@@ -1116,7 +1118,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 						CertificateID: certIDMap[i],
 					}
 
-					if err := saveAccountIfNew(tmpAccount, db); err != nil {
+					if err := saveAccount(tmpAccount, db); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
@@ -1143,7 +1145,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 						CertificateID: certIDMap[i],
 					}
 
-					if err := saveAccountIfNew(tmpAccount, db); err != nil {
+					if err := saveAccount(tmpAccount, db); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
@@ -1169,7 +1171,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 						CertificateID: certIDMap[i],
 					}
 
-					if err := saveAccountIfNew(tmpAccount, db); err != nil {
+					if err := saveAccount(tmpAccount, db); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
