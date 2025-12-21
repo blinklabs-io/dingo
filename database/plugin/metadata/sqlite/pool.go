@@ -100,7 +100,10 @@ func (d *MetadataStoreSqlite) GetPoolRegistrations(
 	if err != nil {
 		return ret, err
 	}
-	result := db.Where("pool_key_hash = ?", pkh.Bytes()).
+	result := db.
+		Preload("Owners").
+		Preload("Relays").
+		Where("pool_key_hash = ?", pkh.Bytes()).
 		Order("id DESC").
 		Find(&certs)
 	if result.Error != nil {
