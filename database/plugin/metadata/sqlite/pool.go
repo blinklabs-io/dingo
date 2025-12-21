@@ -16,6 +16,7 @@ package sqlite
 
 import (
 	"errors"
+	"fmt"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
@@ -111,9 +112,15 @@ func (d *MetadataStoreSqlite) GetPoolRegistrations(
 	}
 	var addrKeyHash lcommon.AddrKeyHash
 	var tmpCert lcommon.PoolRegistrationCertificate
-	var tmpMargin lcommon.GenesisRat
 	var tmpRelay lcommon.PoolRelay
 	for _, cert := range certs {
+		var tmpMargin lcommon.GenesisRat
+		if cert.Margin == nil || cert.Margin.Rat == nil {
+			return nil, fmt.Errorf(
+				"pool registration margin is nil (id=%d)",
+				cert.ID,
+			)
+		}
 		tmpMargin = lcommon.GenesisRat{Rat: cert.Margin.Rat}
 		tmpCert = lcommon.PoolRegistrationCertificate{
 			CertType: uint(lcommon.CertificateTypePoolRegistration),
