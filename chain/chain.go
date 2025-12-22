@@ -484,6 +484,7 @@ func (c *Chain) iterNext(
 }
 
 func (c *Chain) reconcile() error {
+	securityParam := c.manager.securityParam
 	// We reconcile against the primary/persistent chain, so no need to check if we are that chain
 	if c.persistent {
 		return nil
@@ -535,7 +536,12 @@ func (c *Chain) reconcile() error {
 	}
 	lastPrevHash := decodedKnownBlock.PrevHash().Bytes()
 	// Iterate backward through chain based on prev-hash until we find a matching block on the primary chain
+	iterationCount := 0
 	for {
+		if iterationCount >= securityParam {
+			return models.ErrBlockNotFound
+		}
+		iterationCount++
 		tmpBlock, err := c.manager.blockByHash(lastPrevHash)
 		if err != nil {
 			return err

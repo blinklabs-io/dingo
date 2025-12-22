@@ -37,6 +37,7 @@ const (
 type ChainManager struct {
 	db                  *database.Database
 	eventBus            *event.EventBus
+	securityParam       int
 	chains              map[ChainId]*Chain
 	chainRollbackEvents map[ChainId][]uint64
 	blocks              map[string]models.Block
@@ -58,6 +59,12 @@ func NewManager(
 		return nil, err
 	}
 	return cm, nil
+}
+
+func (cm *ChainManager) SetLedger(
+	ledgerState interface{ SecurityParam() int },
+) {
+	cm.securityParam = ledgerState.SecurityParam()
 }
 
 func (cm *ChainManager) PrimaryChain() *Chain {
