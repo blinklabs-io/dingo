@@ -15,7 +15,6 @@
 package database
 
 import (
-	"encoding/hex"
 	"errors"
 	"math/big"
 	"slices"
@@ -23,16 +22,11 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
-	"github.com/blinklabs-io/gouroboros/cbor"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
 const (
 	BlockInitialIndex uint64 = 1
-
-	blockBlobKeyPrefix         = "bp"
-	blockBlobIndexKeyPrefix    = "bi"
-	blockBlobMetadataKeySuffix = "_metadata"
 )
 
 func (d *Database) BlockCreate(block models.Block, txn *Txn) error {
@@ -42,8 +36,6 @@ func (d *Database) BlockCreate(block models.Block, txn *Txn) error {
 		owned = true
 		defer txn.Rollback() //nolint:errcheck
 	}
-	// Block content by point
-	key := BlockBlobKey(block.Slot, block.Hash)
 	blobTxn := txn.Blob()
 	if blobTxn == nil {
 		return types.ErrNilTxn
@@ -51,9 +43,6 @@ func (d *Database) BlockCreate(block models.Block, txn *Txn) error {
 	blob := txn.DB().Blob()
 	if blob == nil {
 		return types.ErrBlobStoreUnavailable
-	}
-	if err := blob.Set(blobTxn, key, block.Cbor); err != nil {
-		return err
 	}
 	// Set index if not provided
 	if block.ID == 0 {
@@ -67,24 +56,8 @@ func (d *Database) BlockCreate(block models.Block, txn *Txn) error {
 			block.ID = BlockInitialIndex
 		}
 	}
-	// Block index to point key
-	indexKey := BlockBlobIndexKey(block.ID)
-	if err := blob.Set(blobTxn, indexKey, key); err != nil {
-		return err
-	}
-	// Block metadata by point
-	metadataKey := BlockBlobMetadataKey(key)
-	tmpMetadata := BlockBlobMetadata{
-		ID:       block.ID,
-		Type:     block.Type,
-		Height:   block.Number,
-		PrevHash: block.PrevHash,
-	}
-	tmpMetadataBytes, err := cbor.Encode(tmpMetadata)
-	if err != nil {
-		return err
-	}
-	if err := blob.Set(blobTxn, metadataKey, tmpMetadataBytes); err != nil {
+	// Use the new SetBlock method
+	if err := blob.SetBlock(blobTxn, block.Slot, block.Hash, block.Cbor, block.ID, block.Type, block.Number, block.PrevHash); err != nil {
 		return err
 	}
 	if owned {
@@ -107,20 +80,8 @@ func BlockDeleteTxn(txn *Txn, block models.Block) error {
 	if blob == nil {
 		return types.ErrBlobStoreUnavailable
 	}
-	// Remove from blob store
-	key := BlockBlobKey(block.Slot, block.Hash)
-	if err := blob.Delete(blobTxn, key); err != nil {
-		return err
-	}
-	indexKey := BlockBlobIndexKey(block.ID)
-	if err := blob.Delete(blobTxn, indexKey); err != nil {
-		return err
-	}
-	metadataKey := BlockBlobMetadataKey(key)
-	if err := blob.Delete(blobTxn, metadataKey); err != nil {
-		return err
-	}
-	return nil
+	// Use the new DeleteBlock method
+	return blob.DeleteBlock(blobTxn, block.Slot, block.Hash, block.ID)
 }
 
 func BlockByPoint(db *Database, point ocommon.Point) (models.Block, error) {
@@ -142,40 +103,31 @@ func blockByKey(txn *Txn, blockKey []byte) (models.Block, error) {
 		return models.Block{}, types.ErrNilTxn
 	}
 	point := blockBlobKeyToPoint(blockKey)
-	ret := models.Block{
-		Slot: point.Slot,
-		Hash: point.Hash,
-	}
 	blob := txn.DB().Blob()
 	if blob == nil {
-		return ret, types.ErrBlobStoreUnavailable
+		return models.Block{}, types.ErrBlobStoreUnavailable
 	}
-	val, err := blob.Get(txn.Blob(), blockKey)
+	cborData, metadata, err := blob.GetBlock(txn.Blob(), point.Slot, point.Hash)
 	if err != nil {
 		if errors.Is(err, types.ErrBlobKeyNotFound) {
-			return ret, models.ErrBlockNotFound
+			return models.Block{}, models.ErrBlockNotFound
 		}
-		return ret, err
+		return models.Block{}, err
 	}
-	ret.Cbor = val
-	metadataKey := BlockBlobMetadataKey(blockKey)
-	metadataBytes, err := blob.Get(txn.Blob(), metadataKey)
-	if err != nil {
-		return ret, err
+	ret := models.Block{
+		Slot:     point.Slot,
+		Hash:     point.Hash,
+		Cbor:     cborData,
+		ID:       metadata.ID,
+		Type:     metadata.Type,
+		Number:   metadata.Height,
+		PrevHash: metadata.PrevHash,
 	}
-	var tmpMetadata BlockBlobMetadata
-	if _, err := cbor.Decode(metadataBytes, &tmpMetadata); err != nil {
-		return ret, err
-	}
-	ret.ID = tmpMetadata.ID
-	ret.Type = tmpMetadata.Type
-	ret.Number = tmpMetadata.Height
-	ret.PrevHash = tmpMetadata.PrevHash
 	return ret, nil
 }
 
 func BlockByPointTxn(txn *Txn, point ocommon.Point) (models.Block, error) {
-	key := BlockBlobKey(point.Slot, point.Hash)
+	key := types.BlockBlobKey(point.Slot, point.Hash)
 	return blockByKey(txn, key)
 }
 
@@ -187,7 +139,7 @@ func (d *Database) BlockByIndex(
 		txn = d.BlobTxn(false)
 		defer txn.Rollback() //nolint:errcheck
 	}
-	indexKey := BlockBlobIndexKey(blockIndex)
+	indexKey := types.BlockBlobIndexKey(blockIndex)
 	blobTxn := txn.Blob()
 	if blobTxn == nil {
 		return models.Block{}, types.ErrNilTxn
@@ -233,7 +185,7 @@ func BlocksRecentTxn(txn *Txn, count int) ([]models.Block, error) {
 	}
 	iterOpts := types.BlobIteratorOptions{
 		Reverse: true,
-		Prefix:  []byte(blockBlobIndexKeyPrefix),
+		Prefix:  []byte(types.BlockBlobIndexKeyPrefix),
 	}
 	it := blob.NewIterator(blobTxn, iterOpts)
 	if it == nil {
@@ -245,11 +197,11 @@ func BlocksRecentTxn(txn *Txn, count int) ([]models.Block, error) {
 	// We use our block index key prefix and append 0xFF to get a key that should be
 	// after any legitimate key. This should leave our most recent block as the next
 	// item when doing reverse iteration
-	tmpPrefix := append([]byte(blockBlobIndexKeyPrefix), 0xff)
+	tmpPrefix := append([]byte(types.BlockBlobIndexKeyPrefix), 0xff)
 	var blockKey []byte
 	var err error
 	var tmpBlock models.Block
-	for it.Seek(tmpPrefix); it.ValidForPrefix([]byte(blockBlobIndexKeyPrefix)); it.Next() {
+	for it.Seek(tmpPrefix); it.ValidForPrefix([]byte(types.BlockBlobIndexKeyPrefix)); it.Next() {
 		item := it.Item()
 		if item == nil {
 			continue
@@ -299,7 +251,7 @@ func BlockBeforeSlotTxn(txn *Txn, slotNumber uint64) (models.Block, error) {
 	}
 	iterOpts := types.BlobIteratorOptions{
 		Reverse: true,
-		Prefix:  []byte(blockBlobKeyPrefix),
+		Prefix:  []byte(types.BlockBlobKeyPrefix),
 	}
 	it := blob.NewIterator(blobTxn, iterOpts)
 	if it == nil {
@@ -307,8 +259,8 @@ func BlockBeforeSlotTxn(txn *Txn, slotNumber uint64) (models.Block, error) {
 	}
 	defer it.Close()
 	keyPrefix := slices.Concat(
-		[]byte(blockBlobKeyPrefix),
-		blockBlobKeyUint64ToBytes(slotNumber),
+		[]byte(types.BlockBlobKeyPrefix),
+		types.BlockBlobKeyUint64ToBytes(slotNumber),
 	)
 	for it.Seek(keyPrefix); it.Valid(); it.Next() {
 		// Skip if we get a key matching the input slot number
@@ -316,7 +268,7 @@ func BlockBeforeSlotTxn(txn *Txn, slotNumber uint64) (models.Block, error) {
 			continue
 		}
 		// Check for end of block keys
-		if !it.ValidForPrefix([]byte(blockBlobKeyPrefix)) {
+		if !it.ValidForPrefix([]byte(types.BlockBlobKeyPrefix)) {
 			return models.Block{}, models.ErrBlockNotFound
 		}
 		item := it.Item()
@@ -328,7 +280,7 @@ func BlockBeforeSlotTxn(txn *Txn, slotNumber uint64) (models.Block, error) {
 			continue
 		}
 		// Skip the metadata key
-		if strings.HasSuffix(string(k), blockBlobMetadataKeySuffix) {
+		if strings.HasSuffix(string(k), types.BlockBlobMetadataKeySuffix) {
 			continue
 		}
 		return blockByKey(txn, k)
@@ -354,7 +306,7 @@ func BlocksAfterSlotTxn(txn *Txn, slotNumber uint64) ([]models.Block, error) {
 		return ret, types.ErrBlobStoreUnavailable
 	}
 	iterOpts := types.BlobIteratorOptions{
-		Prefix: []byte(blockBlobKeyPrefix),
+		Prefix: []byte(types.BlockBlobKeyPrefix),
 	}
 	it := blob.NewIterator(blobTxn, iterOpts)
 	if it == nil {
@@ -362,13 +314,13 @@ func BlocksAfterSlotTxn(txn *Txn, slotNumber uint64) ([]models.Block, error) {
 	}
 	defer it.Close()
 	keyPrefix := slices.Concat(
-		[]byte(blockBlobKeyPrefix),
-		blockBlobKeyUint64ToBytes(slotNumber),
+		[]byte(types.BlockBlobKeyPrefix),
+		types.BlockBlobKeyUint64ToBytes(slotNumber),
 	)
 	var err error
 	var k []byte
 	var tmpBlock models.Block
-	for it.Seek(keyPrefix); it.ValidForPrefix([]byte(blockBlobKeyPrefix)); it.Next() {
+	for it.Seek(keyPrefix); it.ValidForPrefix([]byte(types.BlockBlobKeyPrefix)); it.Next() {
 		// Skip the start slot
 		if it.ValidForPrefix(keyPrefix) {
 			continue
@@ -382,7 +334,7 @@ func BlocksAfterSlotTxn(txn *Txn, slotNumber uint64) ([]models.Block, error) {
 			continue
 		}
 		// Skip the metadata key
-		if strings.HasSuffix(string(k), blockBlobMetadataKeySuffix) {
+		if strings.HasSuffix(string(k), types.BlockBlobMetadataKeySuffix) {
 			continue
 		}
 		tmpBlock, err = blockByKey(txn, k)
@@ -397,12 +349,6 @@ func BlocksAfterSlotTxn(txn *Txn, slotNumber uint64) ([]models.Block, error) {
 	return ret, nil
 }
 
-func blockBlobKeyUint64ToBytes(input uint64) []byte {
-	ret := make([]byte, 8)
-	new(big.Int).SetUint64(input).FillBytes(ret)
-	return ret
-}
-
 func blockBlobKeyToPoint(key []byte) ocommon.Point {
 	slotBytes := make([]byte, 8)
 	copy(slotBytes, key[2:2+8])
@@ -410,41 +356,4 @@ func blockBlobKeyToPoint(key []byte) ocommon.Point {
 	copy(hash, key[10:10+32])
 	slot := new(big.Int).SetBytes(slotBytes).Uint64()
 	return ocommon.NewPoint(slot, hash)
-}
-
-func BlockBlobKey(slot uint64, hash []byte) []byte {
-	key := []byte(blockBlobKeyPrefix)
-	// Convert slot to bytes
-	slotBytes := blockBlobKeyUint64ToBytes(slot)
-	key = append(key, slotBytes...)
-	key = append(key, hash...)
-	return key
-}
-
-func BlockBlobIndexKey(blockNumber uint64) []byte {
-	key := []byte(blockBlobIndexKeyPrefix)
-	// Convert block number to bytes
-	blockNumberBytes := blockBlobKeyUint64ToBytes(blockNumber)
-	key = append(key, blockNumberBytes...)
-	return key
-}
-
-func BlockBlobMetadataKey(baseKey []byte) []byte {
-	return slices.Concat(baseKey, []byte(blockBlobMetadataKeySuffix))
-}
-
-func BlockBlobKeyHashHex(slot uint64, hashHex string) ([]byte, error) {
-	hashBytes, err := hex.DecodeString(hashHex)
-	if err != nil {
-		return nil, err
-	}
-	return BlockBlobKey(slot, hashBytes), nil
-}
-
-type BlockBlobMetadata struct {
-	cbor.StructAsArray
-	ID       uint64
-	Type     uint
-	Height   uint64
-	PrevHash []byte
 }

@@ -31,6 +31,7 @@ import (
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/smithy-go"
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -242,6 +243,197 @@ func (d *BlobStoreS3) NewIterator(
 		}
 	}
 	return &s3Iterator{store: d, keys: keys, reverse: opts.Reverse, txn: txn}
+}
+
+// SetBlock stores a block with its metadata and index
+func (d *BlobStoreS3) SetBlock(
+	txn types.Txn,
+	slot uint64,
+	hash []byte,
+	cborData []byte,
+	id uint64,
+	blockType uint,
+	height uint64,
+	prevHash []byte,
+) error {
+	t, err := d.validateTxn(txn)
+	if err != nil {
+		return err
+	}
+	if err := t.assertWritable(); err != nil {
+		return err
+	}
+	ctx, cancel := d.opContext()
+	defer cancel()
+	// Block content by point
+	key := types.BlockBlobKey(slot, hash)
+	if err := d.Put(ctx, string(key), cborData); err != nil {
+		return err
+	}
+	// Block index to point key
+	indexKey := types.BlockBlobIndexKey(id)
+	if err := d.Put(ctx, string(indexKey), key); err != nil {
+		return err
+	}
+	// Block metadata by point
+	metadataKey := types.BlockBlobMetadataKey(key)
+	tmpMetadata := types.BlockMetadata{
+		ID:       id,
+		Type:     blockType,
+		Height:   height,
+		PrevHash: prevHash,
+	}
+	tmpMetadataBytes, err := cbor.Encode(tmpMetadata)
+	if err != nil {
+		return err
+	}
+	if err := d.Put(ctx, string(metadataKey), tmpMetadataBytes); err != nil {
+		return err
+	}
+	return nil
+}
+
+// GetBlock retrieves a block's CBOR data and metadata
+func (d *BlobStoreS3) GetBlock(
+	txn types.Txn,
+	slot uint64,
+	hash []byte,
+) ([]byte, types.BlockMetadata, error) {
+	if _, err := d.validateTxn(txn); err != nil {
+		return nil, types.BlockMetadata{}, err
+	}
+	ctx, cancel := d.opContext()
+	defer cancel()
+	key := types.BlockBlobKey(slot, hash)
+	cborData, err := d.getInternal(ctx, string(key))
+	if err != nil {
+		if isS3NotFound(err) {
+			return nil, types.BlockMetadata{}, types.ErrBlobKeyNotFound
+		}
+		return nil, types.BlockMetadata{}, err
+	}
+	metadataKey := types.BlockBlobMetadataKey(key)
+	metadataBytes, err := d.getInternal(ctx, string(metadataKey))
+	if err != nil {
+		if isS3NotFound(err) {
+			return nil, types.BlockMetadata{}, types.ErrBlobKeyNotFound
+		}
+		return nil, types.BlockMetadata{}, err
+	}
+	var tmpMetadata types.BlockMetadata
+	if _, err := cbor.Decode(metadataBytes, &tmpMetadata); err != nil {
+		return nil, types.BlockMetadata{}, err
+	}
+	return cborData, tmpMetadata, nil
+}
+
+// DeleteBlock removes a block and its associated data
+func (d *BlobStoreS3) DeleteBlock(
+	txn types.Txn,
+	slot uint64,
+	hash []byte,
+	id uint64,
+) error {
+	t, err := d.validateTxn(txn)
+	if err != nil {
+		return err
+	}
+	if err := t.assertWritable(); err != nil {
+		return err
+	}
+	ctx, cancel := d.opContext()
+	defer cancel()
+	key := types.BlockBlobKey(slot, hash)
+	if _, err := d.client.DeleteObject(ctx, &s3.DeleteObjectInput{
+		Bucket: aws.String(d.bucket),
+		Key:    awsString(d.fullKey(string(key))),
+	}); err != nil && !isS3NotFound(err) {
+		return err
+	}
+	indexKey := types.BlockBlobIndexKey(id)
+	if _, err := d.client.DeleteObject(ctx, &s3.DeleteObjectInput{
+		Bucket: aws.String(d.bucket),
+		Key:    awsString(d.fullKey(string(indexKey))),
+	}); err != nil && !isS3NotFound(err) {
+		return err
+	}
+	metadataKey := types.BlockBlobMetadataKey(key)
+	if _, err := d.client.DeleteObject(ctx, &s3.DeleteObjectInput{
+		Bucket: aws.String(d.bucket),
+		Key:    awsString(d.fullKey(string(metadataKey))),
+	}); err != nil && !isS3NotFound(err) {
+		return err
+	}
+	return nil
+}
+
+// SetUtxo stores a UTxO's CBOR data
+func (d *BlobStoreS3) SetUtxo(
+	txn types.Txn,
+	txId []byte,
+	outputIdx uint32,
+	cborData []byte,
+) error {
+	t, err := d.validateTxn(txn)
+	if err != nil {
+		return err
+	}
+	if err := t.assertWritable(); err != nil {
+		return err
+	}
+	ctx, cancel := d.opContext()
+	defer cancel()
+	key := types.UtxoBlobKey(txId, outputIdx)
+	return d.Put(ctx, string(key), cborData)
+}
+
+// GetUtxo retrieves a UTxO's CBOR data
+func (d *BlobStoreS3) GetUtxo(
+	txn types.Txn,
+	txId []byte,
+	outputIdx uint32,
+) ([]byte, error) {
+	if _, err := d.validateTxn(txn); err != nil {
+		return nil, err
+	}
+	ctx, cancel := d.opContext()
+	defer cancel()
+	key := types.UtxoBlobKey(txId, outputIdx)
+	data, err := d.getInternal(ctx, string(key))
+	if err != nil {
+		if isS3NotFound(err) {
+			return nil, types.ErrBlobKeyNotFound
+		}
+		return nil, err
+	}
+	return data, nil
+}
+
+// DeleteUtxo removes a UTxO's data
+func (d *BlobStoreS3) DeleteUtxo(
+	txn types.Txn,
+	txId []byte,
+	outputIdx uint32,
+) error {
+	t, err := d.validateTxn(txn)
+	if err != nil {
+		return err
+	}
+	if err := t.assertWritable(); err != nil {
+		return err
+	}
+	ctx, cancel := d.opContext()
+	defer cancel()
+	key := types.UtxoBlobKey(txId, outputIdx)
+	_, err = d.client.DeleteObject(ctx, &s3.DeleteObjectInput{
+		Bucket: aws.String(d.bucket),
+		Key:    awsString(d.fullKey(string(key))),
+	})
+	if err != nil && !isS3NotFound(err) {
+		d.logger.Errorf("s3 delete %q failed: %v", string(key), err)
+		return err
+	}
+	return nil
 }
 
 func (t *s3Txn) Commit() error {

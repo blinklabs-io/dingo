@@ -18,7 +18,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"math/big"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
@@ -27,11 +26,6 @@ import (
 )
 
 var ErrUtxoNotFound = errors.New("utxo not found")
-
-// utxoBlobKeyFromModel generates a blob key for a UTxO from a model
-func utxoBlobKeyFromModel(u *models.Utxo) []byte {
-	return UtxoBlobKey(u.TxId, u.OutputIdx)
-}
 
 // deleteUtxoBlobs attempts to delete blob data for the given UTxOs.
 // This is a best-effort operation; metadata remains the source of truth. If the
@@ -57,8 +51,7 @@ func deleteUtxoBlobs(d *Database, utxos []models.Utxo, txn *Txn) error {
 
 	var deleteErrors int
 	for _, utxo := range utxos {
-		key := utxoBlobKeyFromModel(&utxo)
-		if err := blob.Delete(useTxn.Blob(), key); err != nil {
+		if err := blob.DeleteUtxo(useTxn.Blob(), utxo.TxId, utxo.OutputIdx); err != nil {
 			deleteErrors++
 			d.logger.Debug(
 				"failed to delete UTxO blob data",
@@ -90,12 +83,11 @@ func deleteUtxoBlobs(d *Database, utxos []models.Utxo, txn *Txn) error {
 }
 
 func loadCbor(u *models.Utxo, txn *Txn) error {
-	key := UtxoBlobKey(u.TxId, u.OutputIdx)
 	blob := txn.DB().Blob()
 	if blob == nil {
 		return types.ErrBlobStoreUnavailable
 	}
-	val, err := blob.Get(txn.Blob(), key)
+	val, err := blob.GetUtxo(txn.Blob(), u.TxId, u.OutputIdx)
 	if err != nil {
 		// Map blob-key-not-found to ErrUtxoNotFound since it means the UTxO's blob is missing
 		if errors.Is(err, types.ErrBlobKeyNotFound) {
@@ -127,10 +119,8 @@ func (d *Database) AddUtxos(
 	blobTxn := txn.Blob()
 	for _, utxoSlot := range utxos {
 		// Add UTxO to blob DB
-		key := UtxoBlobKey(
-			utxoSlot.Utxo.Id.Id().Bytes(),
-			utxoSlot.Utxo.Id.Index(),
-		)
+		txId := utxoSlot.Utxo.Id.Id().Bytes()
+		outputIdx := utxoSlot.Utxo.Id.Index()
 		utxoCbor := utxoSlot.Utxo.Output.Cbor()
 		// Encode output to CBOR if stored CBOR is empty
 		if len(utxoCbor) == 0 {
@@ -140,7 +130,7 @@ func (d *Database) AddUtxos(
 				return err
 			}
 		}
-		err := blob.Set(blobTxn, key, utxoCbor)
+		err := blob.SetUtxo(blobTxn, txId, outputIdx, utxoCbor)
 		if err != nil {
 			return err
 		}
@@ -332,14 +322,4 @@ func (d *Database) UtxosUnspend(
 		owned = false
 	}
 	return nil
-}
-
-func UtxoBlobKey(txId []byte, outputIdx uint32) []byte {
-	key := []byte("u")
-	key = append(key, txId...)
-	// Convert index to bytes
-	idxBytes := make([]byte, 4)
-	new(big.Int).SetUint64(uint64(outputIdx)).FillBytes(idxBytes)
-	key = append(key, idxBytes...)
-	return key
 }

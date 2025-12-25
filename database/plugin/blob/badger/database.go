@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/gouroboros/cbor"
 	badger "github.com/dgraph-io/badger/v4"
 	"github.com/dgraph-io/badger/v4/options"
 	"github.com/prometheus/client_golang/prometheus"
@@ -363,4 +364,164 @@ func (d *BlobStoreBadger) NewIterator(
 		Reverse: opts.Reverse,
 	}
 	return &badgerIterator{iter: badgerTxn.tx.NewIterator(iterOpts)}
+}
+
+// SetBlock stores a block with its metadata and index
+func (d *BlobStoreBadger) SetBlock(
+	txn types.Txn,
+	slot uint64,
+	hash []byte,
+	cborData []byte,
+	id uint64,
+	blockType uint,
+	height uint64,
+	prevHash []byte,
+) error {
+	badgerTxn, err := d.validateTxn(txn)
+	if err != nil {
+		return err
+	}
+	// Block content by point
+	key := types.BlockBlobKey(slot, hash)
+	if err := badgerTxn.tx.Set(key, cborData); err != nil {
+		return err
+	}
+	// Block index to point key
+	indexKey := types.BlockBlobIndexKey(id)
+	if err := badgerTxn.tx.Set(indexKey, key); err != nil {
+		return err
+	}
+	// Block metadata by point
+	metadataKey := types.BlockBlobMetadataKey(key)
+	tmpMetadata := types.BlockMetadata{
+		ID:       id,
+		Type:     blockType,
+		Height:   height,
+		PrevHash: prevHash,
+	}
+	tmpMetadataBytes, err := cbor.Encode(tmpMetadata)
+	if err != nil {
+		return err
+	}
+	if err := badgerTxn.tx.Set(metadataKey, tmpMetadataBytes); err != nil {
+		return err
+	}
+	return nil
+}
+
+// GetBlock retrieves a block's CBOR data and metadata
+func (d *BlobStoreBadger) GetBlock(
+	txn types.Txn,
+	slot uint64,
+	hash []byte,
+) ([]byte, types.BlockMetadata, error) {
+	badgerTxn, err := d.validateTxn(txn)
+	if err != nil {
+		return nil, types.BlockMetadata{}, err
+	}
+	key := types.BlockBlobKey(slot, hash)
+	val, err := badgerTxn.tx.Get(key)
+	if err != nil {
+		if errors.Is(err, badger.ErrKeyNotFound) {
+			return nil, types.BlockMetadata{}, types.ErrBlobKeyNotFound
+		}
+		return nil, types.BlockMetadata{}, err
+	}
+	cborData, err := val.ValueCopy(nil)
+	if err != nil {
+		return nil, types.BlockMetadata{}, err
+	}
+	metadataKey := types.BlockBlobMetadataKey(key)
+	metadataVal, err := badgerTxn.tx.Get(metadataKey)
+	if err != nil {
+		if errors.Is(err, badger.ErrKeyNotFound) {
+			return nil, types.BlockMetadata{}, types.ErrBlobKeyNotFound
+		}
+		return nil, types.BlockMetadata{}, err
+	}
+	metadataBytes, err := metadataVal.ValueCopy(nil)
+	if err != nil {
+		return nil, types.BlockMetadata{}, err
+	}
+	var tmpMetadata types.BlockMetadata
+	if _, err := cbor.Decode(metadataBytes, &tmpMetadata); err != nil {
+		return nil, types.BlockMetadata{}, err
+	}
+	return cborData, tmpMetadata, nil
+}
+
+// DeleteBlock removes a block and its associated data
+func (d *BlobStoreBadger) DeleteBlock(
+	txn types.Txn,
+	slot uint64,
+	hash []byte,
+	id uint64,
+) error {
+	badgerTxn, err := d.validateTxn(txn)
+	if err != nil {
+		return err
+	}
+	key := types.BlockBlobKey(slot, hash)
+	if err := badgerTxn.tx.Delete(key); err != nil {
+		return err
+	}
+	indexKey := types.BlockBlobIndexKey(id)
+	if err := badgerTxn.tx.Delete(indexKey); err != nil {
+		return err
+	}
+	metadataKey := types.BlockBlobMetadataKey(key)
+	if err := badgerTxn.tx.Delete(metadataKey); err != nil {
+		return err
+	}
+	return nil
+}
+
+// SetUtxo stores a UTxO's CBOR data
+func (d *BlobStoreBadger) SetUtxo(
+	txn types.Txn,
+	txId []byte,
+	outputIdx uint32,
+	cborData []byte,
+) error {
+	badgerTxn, err := d.validateTxn(txn)
+	if err != nil {
+		return err
+	}
+	key := types.UtxoBlobKey(txId, outputIdx)
+	return badgerTxn.tx.Set(key, cborData)
+}
+
+// GetUtxo retrieves a UTxO's CBOR data
+func (d *BlobStoreBadger) GetUtxo(
+	txn types.Txn,
+	txId []byte,
+	outputIdx uint32,
+) ([]byte, error) {
+	badgerTxn, err := d.validateTxn(txn)
+	if err != nil {
+		return nil, err
+	}
+	key := types.UtxoBlobKey(txId, outputIdx)
+	val, err := badgerTxn.tx.Get(key)
+	if err != nil {
+		if errors.Is(err, badger.ErrKeyNotFound) {
+			return nil, types.ErrBlobKeyNotFound
+		}
+		return nil, err
+	}
+	return val.ValueCopy(nil)
+}
+
+// DeleteUtxo removes a UTxO's data
+func (d *BlobStoreBadger) DeleteUtxo(
+	txn types.Txn,
+	txId []byte,
+	outputIdx uint32,
+) error {
+	badgerTxn, err := d.validateTxn(txn)
+	if err != nil {
+		return err
+	}
+	key := types.UtxoBlobKey(txId, outputIdx)
+	return badgerTxn.tx.Delete(key)
 }
