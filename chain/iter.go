@@ -15,6 +15,8 @@
 package chain
 
 import (
+	"context"
+
 	"github.com/blinklabs-io/dingo/database/models"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
@@ -26,6 +28,8 @@ type ChainIterator struct {
 	rollbackPoint  ocommon.Point
 	nextBlockIndex uint64
 	needsRollback  bool
+	ctx            context.Context
+	cancel         context.CancelFunc
 }
 
 type ChainIteratorResult struct {
@@ -39,10 +43,13 @@ func newChainIterator(
 	startPoint ocommon.Point,
 	inclusive bool,
 ) (*ChainIterator, error) {
+	ctx, cancel := context.WithCancel(context.Background())
 	ci := &ChainIterator{
 		chain:          chain,
 		startPoint:     startPoint,
 		nextBlockIndex: initialBlockIndex,
+		ctx:            ctx,
+		cancel:         cancel,
 	}
 	// Lookup start block in metadata DB if not origin
 	if startPoint.Slot > 0 || len(startPoint.Hash) > 0 {
@@ -61,4 +68,10 @@ func newChainIterator(
 
 func (ci *ChainIterator) Next(blocking bool) (*ChainIteratorResult, error) {
 	return ci.chain.iterNext(ci, blocking)
+}
+
+func (ci *ChainIterator) Cancel() {
+	if ci.cancel != nil {
+		ci.cancel()
+	}
 }

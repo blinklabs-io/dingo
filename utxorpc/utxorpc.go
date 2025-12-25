@@ -21,7 +21,6 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"strings"
 	"sync"
 	"time"
 
@@ -72,7 +71,7 @@ func NewUtxorpc(cfg UtxorpcConfig) *Utxorpc {
 	}
 }
 
-func (u *Utxorpc) Start() error {
+func (u *Utxorpc) Start(ctx context.Context) error {
 	u.mu.Lock()
 	if u.server != nil {
 		u.mu.Unlock()
@@ -133,6 +132,7 @@ func (u *Utxorpc) Start() error {
 			compress1KB,
 		),
 	)
+	var server *http.Server
 	if u.config.TlsCertFilePath != "" && u.config.TlsKeyFilePath != "" {
 		u.config.Logger.Info(
 			fmt.Sprintf(
@@ -141,7 +141,7 @@ func (u *Utxorpc) Start() error {
 				u.config.Port,
 			),
 		)
-		server := &http.Server{
+		server = &http.Server{
 			Addr: fmt.Sprintf(
 				"%s:%d",
 				u.config.Host,
@@ -150,9 +150,6 @@ func (u *Utxorpc) Start() error {
 			Handler:           mux,
 			ReadHeaderTimeout: 60 * time.Second,
 		}
-		u.server = server
-		u.mu.Unlock()
-		return u.startServer(server, "TLS")
 	} else {
 		u.config.Logger.Info(
 			fmt.Sprintf(
@@ -161,7 +158,7 @@ func (u *Utxorpc) Start() error {
 				u.config.Port,
 			),
 		)
-		server := &http.Server{
+		server = &http.Server{
 			Addr: fmt.Sprintf(
 				"%s:%d",
 				u.config.Host,
@@ -171,10 +168,45 @@ func (u *Utxorpc) Start() error {
 			Handler:           h2c.NewHandler(mux, &http2.Server{}),
 			ReadHeaderTimeout: 60 * time.Second,
 		}
-		u.server = server
-		u.mu.Unlock()
-		return u.startServer(server, "non-TLS")
 	}
+	u.server = server
+	u.mu.Unlock()
+
+	// Start the server
+	if err := u.startServer(server); err != nil {
+		u.mu.Lock()
+		u.server = nil
+		u.mu.Unlock()
+		return err
+	}
+
+	// Monitor context for cancellation and shutdown server
+	go func() {
+		<-ctx.Done()
+		u.mu.Lock()
+		if u.server != nil {
+			u.config.Logger.Debug(
+				"context cancelled, shutting down gRPC server",
+			)
+			//nolint:contextcheck // shutdownCtx is intentionally created from background to allow shutdown to complete even if ctx is cancelled
+			shutdownCtx, cancel := context.WithTimeout(
+				context.Background(),
+				30*time.Second,
+			)
+			defer cancel()
+			if err := u.server.Shutdown(shutdownCtx); err != nil { //nolint:contextcheck // shutdownCtx is intentionally created from background to allow shutdown to complete even if ctx is cancelled
+				u.config.Logger.Error(
+					"failed to shutdown gRPC server on context cancellation",
+					"error",
+					err,
+				)
+			}
+			u.server = nil
+		}
+		u.mu.Unlock()
+	}()
+
+	return nil
 }
 
 func (u *Utxorpc) Stop(ctx context.Context) error {
@@ -192,11 +224,11 @@ func (u *Utxorpc) Stop(ctx context.Context) error {
 }
 
 // startServer starts the HTTP server with error detection
-func (u *Utxorpc) startServer(server *http.Server, serverType string) error {
+func (u *Utxorpc) startServer(server *http.Server) error {
 	startErr := make(chan error, 1)
 	go func() {
 		var err error
-		if strings.EqualFold(serverType, "tls") {
+		if u.config.TlsCertFilePath != "" && u.config.TlsKeyFilePath != "" {
 			err = server.ListenAndServeTLS(
 				u.config.TlsCertFilePath,
 				u.config.TlsKeyFilePath,
@@ -221,6 +253,10 @@ func (u *Utxorpc) startServer(server *http.Server, serverType string) error {
 	// Delayed failures (e.g., certificate loading issues) may not be detected.
 	select {
 	case err := <-startErr:
+		serverType := "non-TLS"
+		if u.config.TlsCertFilePath != "" && u.config.TlsKeyFilePath != "" {
+			serverType = "TLS"
+		}
 		return fmt.Errorf("failed to start gRPC %s server: %w", serverType, err)
 	case <-time.After(100 * time.Millisecond):
 		// Assume startup succeeded if no error within 100ms

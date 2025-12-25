@@ -147,6 +147,9 @@ func TestChainBasic(t *testing.T) {
 				err,
 			)
 		}
+		if next == nil {
+			t.Fatal("unexpected nil result from chain iterator")
+		}
 		if testBlockIdx >= len(testBlocks) {
 			t.Fatal("ran out of test blocks before reaching chain tip")
 		}
@@ -244,6 +247,9 @@ func TestChainRollback(t *testing.T) {
 				err,
 			)
 		}
+		if next == nil {
+			t.Fatal("unexpected nil result from chain iterator")
+		}
 		if testBlockIdx >= len(testBlocks) {
 			t.Fatal("ran out of test blocks before reaching chain tip")
 		}
@@ -288,6 +294,9 @@ func TestChainRollback(t *testing.T) {
 	next, err := iter.Next(false)
 	if err != nil {
 		t.Fatalf("unexpected error calling chain iterator next: %s", err)
+	}
+	if next == nil {
+		t.Fatal("unexpected nil result from chain iterator")
 	}
 	if !next.Rollback {
 		t.Fatalf(
@@ -576,6 +585,9 @@ func TestChainFork(t *testing.T) {
 				"unexpected error getting next block from chain iterator: %s",
 				err,
 			)
+		}
+		if next == nil {
+			t.Fatal("unexpected nil result from chain iterator")
 		}
 		if testBlockIdx >= len(testBlocks) {
 			t.Fatal("ran out of test blocks before reaching chain tip")

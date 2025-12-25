@@ -34,16 +34,19 @@ type ListenerConfig struct {
 	ReuseAddress   bool
 }
 
-func (c *ConnectionManager) startListeners() error {
+func (c *ConnectionManager) startListeners(ctx context.Context) error {
 	for _, l := range c.config.Listeners {
-		if err := c.startListener(l); err != nil {
+		if err := c.startListener(ctx, l); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func (c *ConnectionManager) startListener(l ListenerConfig) error {
+func (c *ConnectionManager) startListener(
+	ctx context.Context,
+	l ListenerConfig,
+) error {
 	// Create listener if none is provided
 	if l.Listener == nil {
 		// On Windows, the "unix" network type is repurposed to create named pipes
@@ -63,7 +66,7 @@ func (c *ConnectionManager) startListener(l ListenerConfig) error {
 				listenConfig.Control = socketControl
 			}
 			listener, err := listenConfig.Listen(
-				context.Background(),
+				ctx,
 				l.ListenNetwork,
 				l.ListenAddress,
 			)

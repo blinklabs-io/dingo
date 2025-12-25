@@ -55,36 +55,51 @@ func (o *Ouroboros) blockfetchServerRequestRange(
 	}
 	// Start async process to send requested block range
 	go func() {
+		conn := o.ConnManager.GetConnectionById(ctx.ConnectionId)
+		if conn == nil {
+			return
+		}
 		if err := ctx.Server.StartBatch(); err != nil {
 			return
 		}
+	Loop:
 		for {
-			next, _ := chainIter.Next(false)
-			if next == nil {
-				break
-			}
-			if next.Block.Slot > end.Slot {
-				break
-			}
-			blockBytes := next.Block.Cbor
-			err := ctx.Server.Block(
-				next.Block.Type,
-				blockBytes,
-			)
-			if err != nil {
-				// TODO: push this error somewhere (#398)
+			select {
+			case <-conn.ErrorChan():
 				return
-			}
-			if o.metrics != nil {
-				o.metrics.servedBlockCount.Inc()
-			}
-			// Make sure we don't hang waiting for the next block if we've already hit the end
-			if next.Block.Slot == end.Slot {
-				break
+			default:
+				next, _ := chainIter.Next(false)
+				if next == nil {
+					break Loop
+				}
+				if next.Block.Slot > end.Slot {
+					break Loop
+				}
+				blockBytes := next.Block.Cbor
+				err := ctx.Server.Block(
+					next.Block.Type,
+					blockBytes,
+				)
+				if err != nil {
+					// TODO: push this error somewhere (#398)
+					return
+				}
+				if o.metrics != nil {
+					o.metrics.servedBlockCount.Inc()
+				}
+				// Make sure we don't hang waiting for the next block if we've already hit the end
+				if next.Block.Slot == end.Slot {
+					break Loop
+				}
 			}
 		}
+		// Signal batch completion
 		if err := ctx.Server.BatchDone(); err != nil {
-			return
+			o.config.Logger.Error(
+				"failed to signal batch completion",
+				"error",
+				err,
+			)
 		}
 	}()
 	return nil

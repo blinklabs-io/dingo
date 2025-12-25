@@ -210,8 +210,8 @@ func (c *ConnectionManager) updateConnectionMetrics() {
 	}
 }
 
-func (c *ConnectionManager) Start() error {
-	if err := c.startListeners(); err != nil {
+func (c *ConnectionManager) Start(ctx context.Context) error {
+	if err := c.startListeners(ctx); err != nil {
 		return err
 	}
 	return nil
