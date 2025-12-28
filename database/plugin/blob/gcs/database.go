@@ -33,15 +33,14 @@ import (
 
 // BlobStoreGCS stores data in a Google Cloud Storage bucket.
 type BlobStoreGCS struct {
-	promRegistry    prometheus.Registerer
-	startupCtx      context.Context
-	logger          *GcsLogger
-	client          *storage.Client
-	bucket          *storage.BucketHandle
-	startupCancel   context.CancelFunc
-	bucketName      string
-	credentialsFile string
-	timeout         time.Duration
+	promRegistry  prometheus.Registerer
+	startupCtx    context.Context
+	logger        *GcsLogger
+	client        *storage.Client
+	bucket        *storage.BucketHandle
+	startupCancel context.CancelFunc
+	bucketName    string
+	timeout       time.Duration
 }
 
 // gcsTxn wraps GCS operations to satisfy types.Txn and types.BlobTx
@@ -437,23 +436,10 @@ func (d *BlobStoreGCS) Start() error {
 		return errors.New("gcs blob: bucket not set")
 	}
 
-	// Validate credentials file if specified
-	if d.credentialsFile != "" {
-		if err := validateCredentials(d.credentialsFile); err != nil {
-			return err
-		}
-	}
-
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 
 	var clientOpts []option.ClientOption
 	clientOpts = append(clientOpts, storage.WithDisabledClientMetrics())
-	if d.credentialsFile != "" {
-		clientOpts = append(
-			clientOpts,
-			option.WithCredentialsFile(d.credentialsFile),
-		)
-	}
 
 	client, err := storage.NewGRPCClient(
 		ctx,

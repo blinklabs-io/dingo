@@ -44,10 +44,3 @@ func WithBucket(bucket string) BlobStoreGCSOptionFunc {
 		b.bucketName = bucket
 	}
 }
-
-// WithCredentialsFile specifies the path to the service account credentials file
-func WithCredentialsFile(credentialsFile string) BlobStoreGCSOptionFunc {
-	return func(b *BlobStoreGCS) {
-		b.credentialsFile = credentialsFile
-	}
-}
