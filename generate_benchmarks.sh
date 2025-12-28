@@ -281,10 +281,10 @@ $benchmark"
     done < <(list_previous_benchmarks)
 
     # Count items (remove empty lines and count)
-    faster_count=$(echo "$faster_benchmarks" | grep -c "^." || echo "0")
-    slower_count=$(echo "$slower_benchmarks" | grep -c "^." || echo "0")
-    new_count=$(echo "$new_benchmarks" | grep -c "^." || echo "0")
-    removed_count=$(echo "$removed_benchmarks" | grep -c "^." || echo "0")
+    faster_count=$(echo "$faster_benchmarks" | sed '/^$/d' | wc -l)
+    slower_count=$(echo "$slower_benchmarks" | sed '/^$/d' | wc -l)
+    new_count=$(echo "$new_benchmarks" | sed '/^$/d' | wc -l)
+    removed_count=$(echo "$removed_benchmarks" | sed '/^$/d' | wc -l)
 
     echo ""
     echo "Performance Changes Summary:"
@@ -362,10 +362,10 @@ $benchmark"
             done < <(list_previous_benchmarks)
 
             # Count items
-            faster_count=$(echo "$faster_benchmarks" | grep -c "^." || echo "0")
-            slower_count=$(echo "$slower_benchmarks" | grep -c "^." || echo "0")
-            new_count=$(echo "$new_benchmarks" | grep -c "^." || echo "0")
-            removed_count=$(echo "$removed_benchmarks" | grep -c "^." || echo "0")
+            faster_count=$(echo "$faster_benchmarks" | sed '/^$/d' | wc -l)
+            slower_count=$(echo "$slower_benchmarks" | sed '/^$/d' | wc -l)
+            new_count=$(echo "$new_benchmarks" | sed '/^$/d' | wc -l)
+            removed_count=$(echo "$removed_benchmarks" | sed '/^$/d' | wc -l)
 
             echo "### Summary"
             echo "- **Faster benchmarks**: $faster_count"
