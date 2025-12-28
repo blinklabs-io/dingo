@@ -112,7 +112,6 @@ Each plugin supports specific configuration options. See `dingo.yaml.example` fo
 - `bucket` - GCS bucket name
 - `project-id` - Google Cloud project ID
 - `prefix` - Path prefix within bucket
-- `credentials-file` - Path to service account credentials file (optional - uses Application Default Credentials if not provided)
 
 **AWS S3 Options:**
 - `bucket` - S3 bucket name
