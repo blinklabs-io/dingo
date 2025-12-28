@@ -25,7 +25,8 @@ const (
 	DefaultBlockCacheSize   = 1610612736 // 1.5GB (increased from 768MB)
 	DefaultIndexCacheSize   = 536870912  // 512MB (increased from 256MB)
 	DefaultValueLogFileSize = 1073741824 // 1GB (keep large values on disk, write amplification reduction)
-	DefaultMemTableSize     = 67108864   // 64MB (conservative default)
+	DefaultMemTableSize     = 134217728  // 128MB (increased from 64MB for better write buffering)
+	DefaultValueThreshold   = 1048576    // 1MB (keep small values in LSM, large blobs in value log)
 )
 
 var (
@@ -35,6 +36,7 @@ var (
 		indexCacheSize   uint64
 		valueLogFileSize uint64
 		memTableSize     uint64
+		valueThreshold   uint64
 		gcEnabled        bool
 	}
 	cmdlineOptionsMutex sync.RWMutex
@@ -48,6 +50,7 @@ func initCmdlineOptions() {
 	cmdlineOptions.indexCacheSize = DefaultIndexCacheSize
 	cmdlineOptions.valueLogFileSize = DefaultValueLogFileSize
 	cmdlineOptions.memTableSize = DefaultMemTableSize
+	cmdlineOptions.valueThreshold = DefaultValueThreshold
 	cmdlineOptions.gcEnabled = true
 	cmdlineOptions.dataDir = ".dingo"
 }
@@ -104,6 +107,13 @@ func init() {
 					DefaultValue: uint64(DefaultMemTableSize),
 					Dest:         &(cmdlineOptions.memTableSize),
 				},
+				{
+					Name:         "value-threshold",
+					Type:         plugin.PluginOptionTypeUint,
+					Description:  "Badger value threshold for LSM vs value log",
+					DefaultValue: uint64(DefaultValueThreshold),
+					Dest:         &(cmdlineOptions.valueThreshold),
+				},
 			},
 		},
 	)
@@ -120,6 +130,10 @@ func NewFromCmdlineOptions() plugin.Plugin {
 	if memTableSize > 1<<63-1 {
 		memTableSize = 1<<63 - 1 // Cap at max int64
 	}
+	valueThreshold := cmdlineOptions.valueThreshold
+	if valueThreshold > 1<<63-1 {
+		valueThreshold = 1<<63 - 1 // Cap at max int64
+	}
 	// #nosec G115
 	opts := []BlobStoreBadgerOptionFunc{
 		WithDataDir(cmdlineOptions.dataDir),
@@ -130,6 +144,9 @@ func NewFromCmdlineOptions() plugin.Plugin {
 		),
 		WithMemTableSize(
 			int64(memTableSize),
+		),
+		WithValueThreshold(
+			int64(valueThreshold),
 		),
 		WithGc(cmdlineOptions.gcEnabled),
 	}

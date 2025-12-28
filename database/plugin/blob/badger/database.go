@@ -156,6 +156,7 @@ type BlobStoreBadger struct {
 	indexCacheSize   uint64
 	valueLogFileSize int64
 	memTableSize     int64
+	valueThreshold   int64
 	gcEnabled        bool
 }
 
@@ -168,6 +169,7 @@ func New(opts ...BlobStoreBadgerOptionFunc) (*BlobStoreBadger, error) {
 		indexCacheSize:   DefaultIndexCacheSize,
 		valueLogFileSize: int64(DefaultValueLogFileSize),
 		memTableSize:     int64(DefaultMemTableSize),
+		valueThreshold:   int64(DefaultValueThreshold),
 	}
 	for _, opt := range opts {
 		opt(db)
@@ -182,7 +184,8 @@ func New(opts ...BlobStoreBadgerOptionFunc) (*BlobStoreBadger, error) {
 			WithLogger(NewBadgerLogger(db.logger)).
 			// The default INFO logging is a bit verbose
 			WithLoggingLevel(badger.WARNING).
-			WithInMemory(true)
+			WithInMemory(true).
+			WithValueThreshold(db.valueThreshold)
 		blobDb, err = badger.Open(badgerOpts)
 		if err != nil {
 			return nil, err
@@ -209,6 +212,7 @@ func New(opts ...BlobStoreBadgerOptionFunc) (*BlobStoreBadger, error) {
 			WithIndexCacheSize(int64(db.indexCacheSize)). //nolint:gosec // indexCacheSize is controlled and reasonable
 			WithValueLogFileSize(db.valueLogFileSize).
 			WithMemTableSize(db.memTableSize).
+			WithValueThreshold(db.valueThreshold).
 			WithCompression(options.Snappy)
 		blobDb, err = badger.Open(badgerOpts)
 		if err != nil {

@@ -79,3 +79,10 @@ func WithMemTableSize(size int64) BlobStoreBadgerOptionFunc {
 		b.memTableSize = size
 	}
 }
+
+// WithValueThreshold specifies the value threshold for keeping values in LSM tree
+func WithValueThreshold(threshold int64) BlobStoreBadgerOptionFunc {
+	return func(b *BlobStoreBadger) {
+		b.valueThreshold = threshold
+	}
+}
