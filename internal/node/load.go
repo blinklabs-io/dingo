@@ -15,6 +15,7 @@
 package node
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -95,7 +96,7 @@ func Load(cfg *config.Config, logger *slog.Logger, immutableDir string) error {
 	if err != nil {
 		return fmt.Errorf("failed to load state: %w", err)
 	}
-	if err := ls.Start(); err != nil {
+	if err := ls.Start(context.Background()); err != nil {
 		return fmt.Errorf("failed to load state: %w", err)
 	}
 	// Open immutable DB

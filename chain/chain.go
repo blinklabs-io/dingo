@@ -477,10 +477,17 @@ func (c *Chain) iterNext(
 	if c.waitingChan == nil {
 		c.waitingChan = make(chan struct{})
 	}
+	waitChan := c.waitingChan
 	c.waitingChanMutex.Unlock()
-	<-c.waitingChan
-	// Call ourselves again now that we should have new data
-	return c.iterNext(iter, blocking)
+
+	select {
+	case <-waitChan:
+		// Call ourselves again now that we should have new data
+		return c.iterNext(iter, blocking)
+	case <-iter.ctx.Done():
+		// Iterator was cancelled
+		return nil, iter.ctx.Err()
+	}
 }
 
 func (c *Chain) reconcile() error {

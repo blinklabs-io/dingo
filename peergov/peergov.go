@@ -16,6 +16,7 @@ package peergov
 
 import (
 	"cmp"
+	"context"
 	"fmt"
 	"io"
 	"log/slog"
@@ -227,7 +228,7 @@ func (p *PeerGovernor) updatePeerMetrics() {
 	p.metrics.knownPeers.Set(float64(knownCount))
 }
 
-func (p *PeerGovernor) Start() error {
+func (p *PeerGovernor) Start(ctx context.Context) error {
 	// Setup connmanager event listeners
 	if p.config.EventBus != nil {
 		p.config.EventBus.SubscribeFunc(
@@ -247,11 +248,14 @@ func (p *PeerGovernor) Start() error {
 	p.stopCh = stopCh
 	p.mu.Unlock()
 	go func(t *time.Ticker, stop <-chan struct{}) {
+		defer t.Stop()
 		for {
 			select {
 			case <-t.C:
 				p.reconcile()
 			case <-stop:
+				return
+			case <-ctx.Done():
 				return
 			}
 		}

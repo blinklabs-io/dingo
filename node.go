@@ -46,7 +46,8 @@ type Node struct {
 	ouroboros      *ouroborosPkg.Ouroboros
 	shutdownFuncs  []func(context.Context) error
 	config         Config
-	done           chan struct{}
+	ctx            context.Context
+	cancel         context.CancelFunc
 	shutdownOnce   sync.Once
 }
 
@@ -55,7 +56,6 @@ func New(cfg Config) (*Node, error) {
 	n := &Node{
 		config:   cfg,
 		eventBus: eventBus,
-		done:     make(chan struct{}),
 	}
 	if err := n.configPopulateNetworkMagic(); err != nil {
 		return nil, fmt.Errorf("invalid configuration: %w", err)
@@ -66,13 +66,14 @@ func New(cfg Config) (*Node, error) {
 	return n, nil
 }
 
-func (n *Node) Run() error {
+func (n *Node) Run(ctx context.Context) error {
 	// Configure tracing
 	if n.config.tracing {
-		if err := n.setupTracing(); err != nil {
+		if err := n.setupTracing(); err != nil { //nolint:contextcheck
 			return err
 		}
 	}
+	n.ctx, n.cancel = context.WithCancel(ctx)
 	// Load database
 	dbNeedsRecovery := false
 	dbConfig := &database.Config{
@@ -150,7 +151,7 @@ func (n *Node) Run() error {
 		}
 	}
 	// Start ledger
-	if err := n.ledgerState.Start(); err != nil {
+	if err := n.ledgerState.Start(n.ctx); err != nil { //nolint:contextcheck
 		return fmt.Errorf("failed to start ledger: %w", err)
 	}
 	// Initialize mempool
@@ -190,7 +191,7 @@ func (n *Node) Run() error {
 		n.ouroboros.HandleConnClosedEvent,
 	)
 	// Start listeners
-	if err := n.connManager.Start(); err != nil {
+	if err := n.connManager.Start(n.ctx); err != nil { //nolint:contextcheck
 		return err
 	}
 	// Configure peer governor
@@ -212,7 +213,7 @@ func (n *Node) Run() error {
 	if n.config.topologyConfig != nil {
 		n.peerGov.LoadTopologyConfig(n.config.topologyConfig)
 	}
-	if err := n.peerGov.Start(); err != nil {
+	if err := n.peerGov.Start(n.ctx); err != nil { //nolint:contextcheck
 		return err
 	}
 	// Configure UTxO RPC
@@ -225,12 +226,12 @@ func (n *Node) Run() error {
 			Port:        n.config.utxorpcPort,
 		},
 	)
-	if err := n.utxorpc.Start(); err != nil {
+	if err := n.utxorpc.Start(n.ctx); err != nil { //nolint:contextcheck
 		return err
 	}
 
 	// Wait for shutdown signal
-	<-n.done
+	<-n.ctx.Done()
 	return nil
 }
 
@@ -250,6 +251,9 @@ func (n *Node) shutdown() error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
+	if n.cancel != nil {
+		n.cancel()
+	}
 
 	var err error
 
@@ -314,6 +318,5 @@ func (n *Node) shutdown() error {
 	}
 
 	n.config.logger.Debug("graceful shutdown complete")
-	close(n.done)
 	return err
 }

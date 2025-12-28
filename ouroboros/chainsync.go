@@ -15,6 +15,7 @@
 package ouroboros
 
 import (
+	"context"
 	"errors"
 	"fmt"
 
@@ -53,6 +54,12 @@ func (o *Ouroboros) chainsyncClientStart(connId ouroboros.ConnectionId) error {
 	conn := o.ConnManager.GetConnectionById(connId)
 	if conn == nil {
 		return fmt.Errorf("failed to lookup connection ID: %s", connId.String())
+	}
+	if conn.ChainSync() == nil {
+		return fmt.Errorf(
+			"ChainSync protocol not available on connection: %s",
+			connId.String(),
+		)
 	}
 	intersectPoints, err := o.LedgerState.RecentChainPoints(
 		chainsyncIntersectPointCount,
@@ -176,23 +183,53 @@ func (o *Ouroboros) chainsyncServerRequestNext(
 		return err
 	}
 	// Wait for next block and send
+	conn := o.ConnManager.GetConnectionById(ctx.ConnectionId)
+	if conn == nil {
+		return fmt.Errorf("connection %s not found", ctx.ConnectionId.String())
+	}
 	go func() {
-		next, _ := clientState.ChainIter.Next(true)
+		// Monitor connection and cancel iterator if connection fails
+		go func() {
+			<-conn.ErrorChan()
+			clientState.ChainIter.Cancel()
+		}()
+
+		// Wait for next block from iterator
+		next, err := clientState.ChainIter.Next(true)
+		if err != nil {
+			// Don't log context.Canceled errors as they're expected during connection closure
+			if !errors.Is(err, context.Canceled) {
+				o.config.Logger.Debug(
+					"failed to get next block from chain iterator",
+					"error",
+					err,
+				)
+			}
+			return
+		}
 		if next == nil {
 			return
 		}
 		tip := o.LedgerState.Tip()
 		if next.Rollback {
-			_ = ctx.Server.RollBackward(
+			if err := ctx.Server.RollBackward(
 				next.Point,
 				tip,
-			)
+			); err != nil {
+				o.config.Logger.Debug(
+					"failed to roll backward",
+					"error",
+					err,
+				)
+			}
 		} else {
-			_ = ctx.Server.RollForward(
+			if err := ctx.Server.RollForward(
 				next.Block.Type,
 				next.Block.Cbor,
 				tip,
-			)
+			); err != nil {
+				o.config.Logger.Debug("failed to roll forward", "error", err)
+			}
 		}
 	}()
 	return nil

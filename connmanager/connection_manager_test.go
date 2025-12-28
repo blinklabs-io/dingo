@@ -227,7 +227,7 @@ func TestConnectionManager_Stop_WithListener(t *testing.T) {
 	}
 	// Use package-level constructor
 	cm := connmanager.NewConnectionManager(cfg)
-	if err := cm.Start(); err != nil {
+	if err := cm.Start(context.Background()); err != nil {
 		t.Fatalf("start failed: %v", err)
 	}
 
