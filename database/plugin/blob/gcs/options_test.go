@@ -59,17 +59,3 @@ func TestWithBucket(t *testing.T) {
 		)
 	}
 }
-
-func TestWithCredentialsFile(t *testing.T) {
-	b := &BlobStoreGCS{}
-	option := WithCredentialsFile("/path/to/creds.json")
-
-	option(b)
-
-	if b.credentialsFile != "/path/to/creds.json" {
-		t.Errorf(
-			"Expected credentialsFile to be '/path/to/creds.json', got '%s'",
-			b.credentialsFile,
-		)
-	}
-}
