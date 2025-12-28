@@ -26,6 +26,7 @@ import (
 
 	"cloud.google.com/go/storage"
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/prometheus/client_golang/prometheus"
 	"google.golang.org/api/iterator"
 	"google.golang.org/api/option"
@@ -253,6 +254,336 @@ func (d *BlobStoreGCS) NewIterator(
 		}
 	}
 	return &gcsIterator{store: d, txn: txn, keys: keys, reverse: opts.Reverse}
+}
+
+// SetBlock stores a block with its metadata and index
+func (d *BlobStoreGCS) SetBlock(
+	txn types.Txn,
+	slot uint64,
+	hash []byte,
+	cborData []byte,
+	id uint64,
+	blockType uint,
+	height uint64,
+	prevHash []byte,
+) error {
+	if err := d.validateTxn(txn); err != nil {
+		return err
+	}
+	t := txn.(*gcsTxn) // safe after validateTxn
+	if err := t.assertWritable(); err != nil {
+		return err
+	}
+	ctx, cancel := d.opContext()
+	defer cancel()
+
+	// Track written objects for cleanup on failure
+	var writtenObjects []string
+
+	// Block content by point
+	key := types.BlockBlobKey(slot, hash)
+	w := d.bucket.Object(string(key)).NewWriter(ctx)
+	if _, err := w.Write(cborData); err != nil {
+		_ = w.Close()
+		d.logger.Errorf("failed to write object %q: %v", string(key), err)
+		return err
+	}
+	if err := w.Close(); err != nil {
+		d.logger.Errorf("failed to close writer for %q: %v", string(key), err)
+		return err
+	}
+	writtenObjects = append(writtenObjects, string(key))
+
+	// Block index to point key
+	indexKey := types.BlockBlobIndexKey(id)
+	w = d.bucket.Object(string(indexKey)).NewWriter(ctx)
+	if _, err := w.Write(key); err != nil {
+		_ = w.Close()
+		d.logger.Errorf("failed to write object %q: %v", string(indexKey), err)
+		d.cleanupObjects(ctx, writtenObjects)
+		return err
+	}
+	if err := w.Close(); err != nil {
+		d.logger.Errorf(
+			"failed to close writer for %q: %v",
+			string(indexKey),
+			err,
+		)
+		d.cleanupObjects(ctx, writtenObjects)
+		return err
+	}
+	writtenObjects = append(writtenObjects, string(indexKey))
+
+	// Block metadata by point
+	metadataKey := types.BlockBlobMetadataKey(key)
+	tmpMetadata := types.BlockMetadata{
+		ID:       id,
+		Type:     blockType,
+		Height:   height,
+		PrevHash: prevHash,
+	}
+	tmpMetadataBytes, err := cbor.Encode(tmpMetadata)
+	if err != nil {
+		d.cleanupObjects(ctx, writtenObjects)
+		return err
+	}
+	w = d.bucket.Object(string(metadataKey)).NewWriter(ctx)
+	if _, err := w.Write(tmpMetadataBytes); err != nil {
+		_ = w.Close()
+		d.logger.Errorf(
+			"failed to write object %q: %v",
+			string(metadataKey),
+			err,
+		)
+		d.cleanupObjects(ctx, writtenObjects)
+		return err
+	}
+	if err := w.Close(); err != nil {
+		d.logger.Errorf(
+			"failed to close writer for %q: %v",
+			string(metadataKey),
+			err,
+		)
+		d.cleanupObjects(ctx, writtenObjects)
+		return err
+	}
+
+	return nil
+}
+
+// cleanupObjects deletes the specified objects from GCS, logging any failures
+// but not treating them as fatal since cleanup is best-effort
+func (d *BlobStoreGCS) cleanupObjects(
+	ctx context.Context,
+	objectNames []string,
+) {
+	for _, objName := range objectNames {
+		if err := d.bucket.Object(objName).Delete(ctx); err != nil {
+			if !errors.Is(err, storage.ErrObjectNotExist) {
+				d.logger.Warningf(
+					"failed to cleanup orphaned object during SetBlock failure: object=%s error=%v",
+					objName,
+					err,
+				)
+			}
+			// Ignore ErrObjectNotExist as the object may have been deleted already
+		} else {
+			d.logger.Debugf(
+				"cleaned up orphaned object during SetBlock failure: object=%s",
+				objName,
+			)
+		}
+	}
+}
+
+// GetBlock retrieves a block's CBOR data and metadata
+func (d *BlobStoreGCS) GetBlock(
+	txn types.Txn,
+	slot uint64,
+	hash []byte,
+) ([]byte, types.BlockMetadata, error) {
+	if err := d.validateTxn(txn); err != nil {
+		return nil, types.BlockMetadata{}, err
+	}
+	ctx, cancel := d.opContext()
+	defer cancel()
+	key := types.BlockBlobKey(slot, hash)
+	r, err := d.bucket.Object(string(key)).NewReader(ctx)
+	if err != nil {
+		if errors.Is(err, storage.ErrObjectNotExist) {
+			return nil, types.BlockMetadata{}, types.ErrBlobKeyNotFound
+		}
+		wrappedErr := fmt.Errorf(
+			"read object %q from bucket %q: %w",
+			string(key),
+			d.bucketName,
+			err,
+		)
+		d.logger.Errorf("%v", wrappedErr)
+		return nil, types.BlockMetadata{}, wrappedErr
+	}
+	defer r.Close()
+	cborData, err := io.ReadAll(r)
+	if err != nil {
+		wrappedErr := fmt.Errorf(
+			"read object %q from bucket %q: %w",
+			string(key),
+			d.bucketName,
+			err,
+		)
+		d.logger.Errorf("%v", wrappedErr)
+		return nil, types.BlockMetadata{}, wrappedErr
+	}
+	metadataKey := types.BlockBlobMetadataKey(key)
+	r, err = d.bucket.Object(string(metadataKey)).NewReader(ctx)
+	if err != nil {
+		if errors.Is(err, storage.ErrObjectNotExist) {
+			// Block content exists but metadata is missing - this indicates a partial write
+			d.logger.Warningf(
+				"block content exists but metadata is missing, possible partial write: key=%s metadataKey=%s",
+				string(key),
+				string(metadataKey),
+			)
+			return nil, types.BlockMetadata{}, types.ErrBlobKeyNotFound
+		}
+		wrappedErr := fmt.Errorf(
+			"read object %q from bucket %q: %w",
+			string(metadataKey),
+			d.bucketName,
+			err,
+		)
+		d.logger.Errorf("%v", wrappedErr)
+		return nil, types.BlockMetadata{}, wrappedErr
+	}
+	defer r.Close()
+	metadataBytes, err := io.ReadAll(r)
+	if err != nil {
+		wrappedErr := fmt.Errorf(
+			"read object %q from bucket %q: %w",
+			string(metadataKey),
+			d.bucketName,
+			err,
+		)
+		d.logger.Errorf("%v", wrappedErr)
+		return nil, types.BlockMetadata{}, wrappedErr
+	}
+	var tmpMetadata types.BlockMetadata
+	if _, err := cbor.Decode(metadataBytes, &tmpMetadata); err != nil {
+		return nil, types.BlockMetadata{}, err
+	}
+	return cborData, tmpMetadata, nil
+}
+
+// DeleteBlock removes a block and its associated data
+func (d *BlobStoreGCS) DeleteBlock(
+	txn types.Txn,
+	slot uint64,
+	hash []byte,
+	id uint64,
+) error {
+	if err := d.validateTxn(txn); err != nil {
+		return err
+	}
+	t := txn.(*gcsTxn) // safe after validateTxn
+	if err := t.assertWritable(); err != nil {
+		return err
+	}
+	ctx, cancel := d.opContext()
+	defer cancel()
+	key := types.BlockBlobKey(slot, hash)
+	if err := d.bucket.Object(string(key)).Delete(ctx); err != nil &&
+		!errors.Is(err, storage.ErrObjectNotExist) {
+		d.logger.Errorf("gcs delete %q failed: %v", string(key), err)
+		return err
+	}
+	indexKey := types.BlockBlobIndexKey(id)
+	if err := d.bucket.Object(string(indexKey)).Delete(ctx); err != nil &&
+		!errors.Is(err, storage.ErrObjectNotExist) {
+		d.logger.Errorf("gcs delete %q failed: %v", string(indexKey), err)
+		return err
+	}
+	metadataKey := types.BlockBlobMetadataKey(key)
+	if err := d.bucket.Object(string(metadataKey)).Delete(ctx); err != nil &&
+		!errors.Is(err, storage.ErrObjectNotExist) {
+		d.logger.Errorf("gcs delete %q failed: %v", string(metadataKey), err)
+		return err
+	}
+	return nil
+}
+
+// SetUtxo stores a UTxO's CBOR data
+func (d *BlobStoreGCS) SetUtxo(
+	txn types.Txn,
+	txId []byte,
+	outputIdx uint32,
+	cborData []byte,
+) error {
+	if err := d.validateTxn(txn); err != nil {
+		return err
+	}
+	t := txn.(*gcsTxn) // safe after validateTxn
+	if err := t.assertWritable(); err != nil {
+		return err
+	}
+	ctx, cancel := d.opContext()
+	defer cancel()
+	key := types.UtxoBlobKey(txId, outputIdx)
+	w := d.bucket.Object(string(key)).NewWriter(ctx)
+	if _, err := w.Write(cborData); err != nil {
+		_ = w.Close()
+		d.logger.Errorf("failed to write object %q: %v", string(key), err)
+		return err
+	}
+	if err := w.Close(); err != nil {
+		d.logger.Errorf("failed to close writer for %q: %v", string(key), err)
+		return err
+	}
+	return nil
+}
+
+// GetUtxo retrieves a UTxO's CBOR data
+func (d *BlobStoreGCS) GetUtxo(
+	txn types.Txn,
+	txId []byte,
+	outputIdx uint32,
+) ([]byte, error) {
+	if err := d.validateTxn(txn); err != nil {
+		return nil, err
+	}
+	ctx, cancel := d.opContext()
+	defer cancel()
+	key := types.UtxoBlobKey(txId, outputIdx)
+	r, err := d.bucket.Object(string(key)).NewReader(ctx)
+	if err != nil {
+		if errors.Is(err, storage.ErrObjectNotExist) {
+			return nil, types.ErrBlobKeyNotFound
+		}
+		wrappedErr := fmt.Errorf(
+			"read object %q from bucket %q: %w",
+			string(key),
+			d.bucketName,
+			err,
+		)
+		d.logger.Errorf("%v", wrappedErr)
+		return nil, wrappedErr
+	}
+	defer r.Close()
+	ciphertext, err := io.ReadAll(r)
+	if err != nil {
+		wrappedErr := fmt.Errorf(
+			"read object %q from bucket %q: %w",
+			string(key),
+			d.bucketName,
+			err,
+		)
+		d.logger.Errorf("%v", wrappedErr)
+		return nil, wrappedErr
+	}
+	return ciphertext, nil
+}
+
+// DeleteUtxo removes a UTxO's data
+func (d *BlobStoreGCS) DeleteUtxo(
+	txn types.Txn,
+	txId []byte,
+	outputIdx uint32,
+) error {
+	if err := d.validateTxn(txn); err != nil {
+		return err
+	}
+	t := txn.(*gcsTxn) // safe after validateTxn
+	if err := t.assertWritable(); err != nil {
+		return err
+	}
+	ctx, cancel := d.opContext()
+	defer cancel()
+	key := types.UtxoBlobKey(txId, outputIdx)
+	if err := d.bucket.Object(string(key)).Delete(ctx); err != nil &&
+		!errors.Is(err, storage.ErrObjectNotExist) {
+		d.logger.Errorf("gcs delete %q failed: %v", string(key), err)
+		return err
+	}
+	return nil
 }
 
 func (t *gcsTxn) Commit() error {

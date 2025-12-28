@@ -20,6 +20,8 @@ import (
 	"fmt"
 	"math/big"
 	"strconv"
+
+	"github.com/blinklabs-io/gouroboros/cbor"
 )
 
 //nolint:recvcheck
@@ -125,4 +127,13 @@ type BlobIteratorOptions struct {
 type Txn interface {
 	Commit() error
 	Rollback() error
+}
+
+// BlockMetadata contains metadata for a block stored in blob
+type BlockMetadata struct {
+	cbor.StructAsArray
+	ID       uint64
+	Type     uint
+	Height   uint64
+	PrevHash []byte
 }
