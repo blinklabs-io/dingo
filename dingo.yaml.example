@@ -32,8 +32,6 @@ database:
       project-id: ""
       # Path prefix within the bucket
       prefix: ""
-      # Path to service account credentials file (optional - uses Application Default Credentials if not set)
-      credentials-file: ""
     s3:
       # AWS S3 bucket name
       bucket: ""
