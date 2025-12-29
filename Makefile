@@ -15,7 +15,7 @@ VERSION ?= $(shell git describe --tags --exact-match 2>/dev/null)
 COMMIT_HASH ?= $(shell git rev-parse --short HEAD)
 GO_LDFLAGS=-ldflags "-s -w -X '$(GOMODULE)/internal/version.Version=$(VERSION)' -X '$(GOMODULE)/internal/version.CommitHash=$(COMMIT_HASH)'"
 
-.PHONY: all build mod-tidy clean format golines test bench test-load-profile
+.PHONY: all build mod-tidy clean format golines test bench test-load test-load-profile
 
 # Default target
 all: format build test
@@ -51,13 +51,12 @@ test: mod-tidy
 bench: mod-tidy
 	go test -run=^$$ -bench=. -benchmem ./...
 
-test-load: mod-tidy
+test-load: build
 	rm -rf .dingo
-	go run ./cmd/dingo load database/immutable/testdata
+	./dingo load database/immutable/testdata
 
-test-load-profile: mod-tidy
-	rm -rf .dingo dingo
-	go build -o dingo ./cmd/dingo
+test-load-profile: build
+	rm -rf .dingo
 	./dingo --cpuprofile=cpu.prof --memprofile=mem.prof load database/immutable/testdata
 	@echo "Profiling complete. Run 'go tool pprof cpu.prof' or 'go tool pprof mem.prof' to analyze"
 
