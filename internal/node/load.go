@@ -33,25 +33,33 @@ import (
 )
 
 func Load(cfg *config.Config, logger *slog.Logger, immutableDir string) error {
-	var nodeCfg *cardano.CardanoNodeConfig
-	if cfg.CardanoConfig != "" {
-		var err error
-		nodeCfg, err = cardano.LoadCardanoNodeConfigWithFallback(
-			cfg.CardanoConfig,
-			cfg.Network,
-			cardano.EmbeddedConfigPreviewNetworkFS,
-		)
-		if err != nil {
-			return err
+	// Derive default config path from cfg.Network when cfg.CardanoConfig is empty
+	cardanoConfigPath := cfg.CardanoConfig
+	if cardanoConfigPath == "" {
+		network := cfg.Network
+		if network == "" {
+			network = "preview"
 		}
-		logger.Debug(
-			fmt.Sprintf(
-				"cardano network config: %+v",
-				nodeCfg,
-			),
-			"component", "node",
-		)
+		cardanoConfigPath = network + "/config.json"
 	}
+
+	var nodeCfg *cardano.CardanoNodeConfig
+	var err error
+	nodeCfg, err = cardano.LoadCardanoNodeConfigWithFallback(
+		cardanoConfigPath,
+		cfg.Network,
+		cardano.EmbeddedConfigPreviewNetworkFS,
+	)
+	if err != nil {
+		return err
+	}
+	logger.Debug(
+		fmt.Sprintf(
+			"cardano network config: %+v",
+			nodeCfg,
+		),
+		"component", "node",
+	)
 	// Load database
 	dbConfig := &database.Config{
 		DataDir:        cfg.DatabasePath,
