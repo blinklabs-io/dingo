@@ -22,7 +22,9 @@ import (
 
 	"connectrpc.com/connect"
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/gouroboros/ledger"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	query "github.com/utxorpc/go-codegen/utxorpc/v1alpha/query"
 	"github.com/utxorpc/go-codegen/utxorpc/v1alpha/query/queryconnect"
 )
@@ -346,6 +348,114 @@ func (s *queryServiceServer) ReadData(
 	resp.LedgerTip = &query.ChainPoint{
 		Slot: point.Slot,
 		Hash: point.Hash,
+	}
+
+	return connect.NewResponse(resp), nil
+}
+
+// ReadTx
+func (s *queryServiceServer) ReadTx(
+	ctx context.Context,
+	req *connect.Request[query.ReadTxRequest],
+) (*connect.Response[query.ReadTxResponse], error) {
+	hash := req.Msg.GetHash()
+	fieldMask := req.Msg.GetFieldMask()
+
+	s.utxorpc.config.Logger.Info(
+		fmt.Sprintf(
+			"Got a ReadTx request with hash %x and fieldMask %v",
+			hash,
+			fieldMask,
+		),
+	)
+
+	if len(hash) == 0 {
+		return nil, connect.NewError(
+			connect.CodeInvalidArgument,
+			errors.New("hash is required"),
+		)
+	}
+
+	// Resolve the transaction metadata to find it's containing block.
+	txRecord, err := s.utxorpc.config.LedgerState.TransactionByHash(hash)
+	if err != nil {
+		return nil, fmt.Errorf("lookup transaction: %w", err)
+	}
+	if txRecord == nil {
+		return nil, connect.NewError(
+			connect.CodeNotFound,
+			fmt.Errorf("transaction not found: %x", hash),
+		)
+	}
+
+	// Find the block blob to decode and extract the transaction.
+	block, err := s.utxorpc.config.LedgerState.BlockByHash(txRecord.BlockHash)
+	if err != nil {
+		if errors.Is(err, models.ErrBlockNotFound) {
+			return nil, connect.NewError(
+				connect.CodeNotFound,
+				fmt.Errorf("block not found: %x", txRecord.BlockHash),
+			)
+		}
+		return nil, fmt.Errorf("lookup block: %w", err)
+	}
+
+	// Decode the block CBOR into a ledger block.
+	ledgerBlock, err := ledger.NewBlockFromCbor(block.Type, block.Cbor)
+	if err != nil {
+		return nil, fmt.Errorf("decode block: %w", err)
+	}
+
+	// Find the transaction by index first, then fall back to a hash scan.
+	var tx lcommon.Transaction
+	transactions := ledgerBlock.Transactions()
+	if int(txRecord.BlockIndex) < len(transactions) {
+		value := transactions[txRecord.BlockIndex]
+		if bytes.Equal(value.Hash().Bytes(), hash) {
+			tx = value
+		}
+	}
+	if tx == nil {
+		for _, candidate := range transactions {
+			if bytes.Equal(candidate.Hash().Bytes(), hash) {
+				tx = candidate
+				break
+			}
+		}
+	}
+	if tx == nil {
+		return nil, connect.NewError(
+			connect.CodeNotFound,
+			fmt.Errorf("transaction not found in block: %x", hash),
+		)
+	}
+
+	tmpTx, err := tx.Utxorpc()
+	if err != nil {
+		return nil, fmt.Errorf("convert transaction: %w", err)
+	}
+
+	anyTx := &query.AnyChainTx{
+		NativeBytes: tx.Cbor(),
+		Chain: &query.AnyChainTx_Cardano{
+			Cardano: tmpTx,
+		},
+		BlockRef: &query.ChainPoint{
+			Slot: block.Slot,
+			Hash: block.Hash,
+		},
+	}
+
+	// Get chain point (slot and hash)
+	point := s.utxorpc.config.LedgerState.Tip().Point
+
+	// Set up response utxos
+	resp := &query.ReadTxResponse{
+		Tx: anyTx,
+		LedgerTip: &query.ChainPoint{
+			Slot: point.Slot,
+			Hash: point.Hash,
+		},
 	}
 
 	return connect.NewResponse(resp), nil
