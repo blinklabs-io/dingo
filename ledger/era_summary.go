@@ -23,7 +23,7 @@ import (
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
 
-// SystemStart returns the system start timestamp from the Shelley genesis.
+// It returns the system start timestamp from the Shelley genesis.
 func (ls *LedgerState) SystemStart() (time.Time, error) {
 	shelleyGenesis := ls.config.CardanoNodeConfig.ShelleyGenesis()
 	if shelleyGenesis == nil {
@@ -32,12 +32,12 @@ func (ls *LedgerState) SystemStart() (time.Time, error) {
 	return shelleyGenesis.SystemStart, nil
 }
 
-// GetEpochs returns all epochs stored in the database.
+// It returns all epochs stored in the database.
 func (ls *LedgerState) GetEpochs() ([]models.Epoch, error) {
 	return ls.db.GetEpochs(nil)
 }
 
-// GetPParamsForEpoch returns protocol parameters for the specific epoch.
+// It returns protocol parameters for the specific epoch.
 func (ls *LedgerState) GetPParamsForEpoch(
 	epoch uint64,
 	era eras.EraDesc,
