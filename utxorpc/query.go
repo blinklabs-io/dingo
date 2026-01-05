@@ -138,7 +138,7 @@ func (s *queryServiceServer) ReadEraSummary(
 				Name:  eraDescriptor.Name,
 				Start: startBoundary,
 			}
-			// Get the protocol params for the era
+			// Get the protocol params for the era epoch
 			pparams, err := s.utxorpc.config.LedgerState.GetPParamsForEpoch(
 				epoch.EpochId,
 				*eraDescriptor,
@@ -166,11 +166,11 @@ func (s *queryServiceServer) ReadEraSummary(
 			// Sets the previous era end boundary to current era start boundary
 			if hasLastEra {
 				prevSummary := summaryByEra[lastEraId]
-				if prevSummary != nil && prevSummary.End == nil {
+				if prevSummary != nil && prevSummary.GetEnd() == nil {
 					prevSummary.End = &cardano.EraBoundary{
-						Time:  startBoundary.Time,
-						Slot:  startBoundary.Slot,
-						Epoch: startBoundary.Epoch,
+						Time:  startBoundary.GetTime(),
+						Slot:  startBoundary.GetSlot(),
+						Epoch: startBoundary.GetEpoch(),
 					}
 				}
 			}
