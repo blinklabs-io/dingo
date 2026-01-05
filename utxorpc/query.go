@@ -133,7 +133,7 @@ func (s *queryServiceServer) ReadEraSummary(
 				Slot:  epoch.StartSlot,
 				Epoch: epoch.EpochId,
 			}
-			// Create a new era summary for each epoch
+			// Create a new era summary when era changes
 			summary := &cardano.EraSummary{
 				Name:  eraDescriptor.Name,
 				Start: startBoundary,
