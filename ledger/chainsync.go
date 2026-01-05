@@ -26,7 +26,10 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
 	ouroboros "github.com/blinklabs-io/gouroboros"
+	"github.com/blinklabs-io/gouroboros/cbor"
+	"github.com/blinklabs-io/gouroboros/ledger/byron"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
@@ -215,6 +218,7 @@ func (ls *LedgerState) createGenesisBlock() error {
 	if ls.currentTip.Point.Slot > 0 {
 		return nil
 	}
+
 	txn := ls.db.Transaction(true)
 	err := txn.Do(func(txn *database.Txn) error {
 		// Record genesis UTxOs
@@ -231,18 +235,53 @@ func (ls *LedgerState) createGenesisBlock() error {
 		if len(byronGenesisUtxos)+len(shelleyGenesisUtxos) == 0 {
 			return errors.New("failed to generate genesis UTxOs")
 		}
-		batch := make(
-			[]models.UtxoSlot,
-			0,
-			len(byronGenesisUtxos)+len(shelleyGenesisUtxos),
+		ls.config.Logger.Debug(
+			fmt.Sprintf("creating %d genesis UTxOs (%d Byron, %d Shelley)",
+				len(byronGenesisUtxos)+len(shelleyGenesisUtxos),
+				len(byronGenesisUtxos),
+				len(shelleyGenesisUtxos),
+			),
 		)
-		for _, utxo := range slices.Concat(byronGenesisUtxos, shelleyGenesisUtxos) {
-			batch = append(batch, models.UtxoSlot{Slot: 0, Utxo: utxo})
+
+		// Create genesis UTxOs directly using AddUtxos
+		genesisUtxos := slices.Concat(byronGenesisUtxos, shelleyGenesisUtxos)
+		utxoSlots := make([]models.UtxoSlot, len(genesisUtxos))
+		for i := range genesisUtxos {
+			// Generate CBOR for genesis UTxO outputs since they don't have original CBOR
+			cborData, err := cbor.Encode(genesisUtxos[i].Output)
+			if err != nil {
+				return fmt.Errorf("encode genesis UTxO output to CBOR: %w", err)
+			}
+
+			// Create a new Utxo with CBOR-encoded output
+			// We need to create a new output object with CBOR set
+			var newOutput lcommon.TransactionOutput
+			switch output := genesisUtxos[i].Output.(type) {
+			case byron.ByronTransactionOutput:
+				newByronOutput := output
+				(&newByronOutput).SetCbor(cborData)
+				newOutput = newByronOutput
+			case shelley.ShelleyTransactionOutput:
+				newShelleyOutput := output
+				(&newShelleyOutput).SetCbor(cborData)
+				newOutput = newShelleyOutput
+			default:
+				return fmt.Errorf("unsupported genesis UTxO output type: %T", genesisUtxos[i].Output)
+			}
+
+			utxoSlots[i] = models.UtxoSlot{
+				Utxo: lcommon.Utxo{
+					Id:     genesisUtxos[i].Id,
+					Output: newOutput,
+				},
+				Slot: 0, // genesis slot
+			}
 		}
-		err = ls.db.AddUtxos(batch, txn)
-		if err != nil {
+
+		if err := ls.db.AddUtxos(utxoSlots, txn); err != nil {
 			return fmt.Errorf("add genesis UTxOs: %w", err)
 		}
+
 		return nil
 	})
 	return err
