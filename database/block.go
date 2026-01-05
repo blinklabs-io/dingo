@@ -147,9 +147,6 @@ func BlockByHashTxn(txn *Txn, hash []byte) (models.Block, error) {
 	if txn == nil {
 		return models.Block{}, types.ErrNilTxn
 	}
-	if len(hash) == 0 {
-		return models.Block{}, models.ErrBlockNotFound
-	}
 	blobTxn := txn.Blob()
 	if blobTxn == nil {
 		return models.Block{}, types.ErrNilTxn
