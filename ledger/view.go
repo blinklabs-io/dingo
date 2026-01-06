@@ -206,3 +206,49 @@ func (lv *LedgerView) UpdateAdaPots(adaPots lcommon.AdaPots) error {
 	// TODO: implement Ada pots update
 	return nil
 }
+
+// CostModels returns the Plutus cost models
+func (lv *LedgerView) CostModels() map[lcommon.PlutusLanguage]lcommon.CostModel {
+	// TODO: implement cost models retrieval from protocol parameters
+	return map[lcommon.PlutusLanguage]lcommon.CostModel{}
+}
+
+// CommitteeMember returns a committee member by cold key
+func (lv *LedgerView) CommitteeMember(
+	coldKey lcommon.Blake2b224,
+) (*lcommon.CommitteeMember, error) {
+	// TODO: implement committee member retrieval
+	return nil, nil
+}
+
+// CommitteeMembers returns all committee members
+func (lv *LedgerView) CommitteeMembers() ([]lcommon.CommitteeMember, error) {
+	// TODO: implement committee members retrieval
+	return []lcommon.CommitteeMember{}, nil
+}
+
+// DRepRegistration returns a DRep registration by credential
+func (lv *LedgerView) DRepRegistration(
+	credential lcommon.Blake2b224,
+) (*lcommon.DRepRegistration, error) {
+	// TODO: implement DRep registration retrieval
+	return nil, nil
+}
+
+// DRepRegistrations returns all DRep registrations
+func (lv *LedgerView) DRepRegistrations() ([]lcommon.DRepRegistration, error) {
+	// TODO: implement DRep registrations retrieval
+	return []lcommon.DRepRegistration{}, nil
+}
+
+// Constitution returns the current constitution
+func (lv *LedgerView) Constitution() (*lcommon.Constitution, error) {
+	// TODO: implement constitution retrieval
+	return nil, nil
+}
+
+// TreasuryValue returns the current treasury value
+func (lv *LedgerView) TreasuryValue() (uint64, error) {
+	// TODO: implement treasury value retrieval
+	return 0, nil
+}
