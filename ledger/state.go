@@ -1394,6 +1394,18 @@ func (ls *LedgerState) GetCurrentPParams() lcommon.ProtocolParameters {
 	return ls.currentPParams
 }
 
+// TransactionByHash returns a transaction record by its hash.
+func (ls *LedgerState) TransactionByHash(
+	hash []byte,
+) (*models.Transaction, error) {
+	return ls.db.GetTransactionByHash(hash, nil)
+}
+
+// BlockByHash returns a block by its hash.
+func (ls *LedgerState) BlockByHash(hash []byte) (models.Block, error) {
+	return database.BlockByHash(ls.db, hash)
+}
+
 // UtxoByRef returns a single UTxO by reference
 func (ls *LedgerState) UtxoByRef(
 	txId []byte,

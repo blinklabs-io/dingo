@@ -15,6 +15,7 @@
 package database
 
 import (
+	"bytes"
 	"errors"
 	"math/big"
 	"slices"
@@ -95,6 +96,17 @@ func BlockByPoint(db *Database, point ocommon.Point) (models.Block, error) {
 	return ret, err
 }
 
+func BlockByHash(db *Database, hash []byte) (models.Block, error) {
+	var ret models.Block
+	txn := db.Transaction(false)
+	err := txn.Do(func(txn *Txn) error {
+		var err error
+		ret, err = BlockByHashTxn(txn, hash)
+		return err
+	})
+	return ret, err
+}
+
 func blockByKey(txn *Txn, blockKey []byte) (models.Block, error) {
 	if txn == nil {
 		return models.Block{}, types.ErrNilTxn
@@ -129,6 +141,54 @@ func blockByKey(txn *Txn, blockKey []byte) (models.Block, error) {
 func BlockByPointTxn(txn *Txn, point ocommon.Point) (models.Block, error) {
 	key := types.BlockBlobKey(point.Slot, point.Hash)
 	return blockByKey(txn, key)
+}
+
+func BlockByHashTxn(txn *Txn, hash []byte) (models.Block, error) {
+	if txn == nil {
+		return models.Block{}, types.ErrNilTxn
+	}
+	blobTxn := txn.Blob()
+	if blobTxn == nil {
+		return models.Block{}, types.ErrNilTxn
+	}
+	blob := txn.DB().Blob()
+	if blob == nil {
+		return models.Block{}, types.ErrBlobStoreUnavailable
+	}
+	iterOpts := types.BlobIteratorOptions{
+		Prefix: []byte(types.BlockBlobKeyPrefix),
+	}
+	it := blob.NewIterator(blobTxn, iterOpts)
+	if it == nil {
+		return models.Block{}, errors.New("blob iterator is nil")
+	}
+	defer it.Close()
+	for it.Seek([]byte(types.BlockBlobKeyPrefix)); it.ValidForPrefix([]byte(types.BlockBlobKeyPrefix)); it.Next() {
+		item := it.Item()
+		if item == nil {
+			continue
+		}
+		key := item.Key()
+		if key == nil {
+			continue
+		}
+		// Skip the metadata key
+		if strings.HasSuffix(string(key), types.BlockBlobMetadataKeySuffix) {
+			continue
+		}
+		// Validate key length and hash segment before comparing.
+		if len(key) < 10+len(hash) {
+			continue
+		}
+		if !bytes.Equal(key[10:10+len(hash)], hash) {
+			continue
+		}
+		return blockByKey(txn, key)
+	}
+	if err := it.Err(); err != nil {
+		return models.Block{}, err
+	}
+	return models.Block{}, models.ErrBlockNotFound
 }
 
 func (d *Database) BlockByIndex(

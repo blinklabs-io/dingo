@@ -17,6 +17,7 @@ package database
 import (
 	"fmt"
 
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -91,4 +92,18 @@ func (d *Database) SetTransaction(
 	}
 
 	return nil
+}
+
+func (d *Database) GetTransactionByHash(
+	hash []byte,
+	txn *Txn,
+) (*models.Transaction, error) {
+	if len(hash) == 0 {
+		return nil, nil
+	}
+	if txn == nil {
+		txn = d.Transaction(false)
+		defer txn.Commit() //nolint:errcheck
+	}
+	return d.metadata.GetTransactionByHash(hash, txn.Metadata())
 }
