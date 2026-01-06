@@ -17,6 +17,7 @@ package peergov
 import (
 	"cmp"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -39,6 +40,7 @@ const (
 	defaultMaxReconnectFailures = 3
 	defaultMinHotPeers          = 3
 	defaultInactivityTimeout    = 10 * time.Minute
+	defaultTestCooldown         = 5 * time.Minute
 )
 
 const (
@@ -62,10 +64,12 @@ type PeerGovernorConfig struct {
 	EventBus             *event.EventBus
 	ConnManager          *connmanager.ConnectionManager
 	PeerRequestFunc      func(peer *Peer) []string
+	PeerTestFunc         func(address string) error // Custom peer test function
 	ReconcileInterval    time.Duration
 	MaxReconnectFailures int
 	MinHotPeers          int
 	InactivityTimeout    time.Duration
+	TestCooldown         time.Duration // Min time between suitability tests
 	DisableOutbound      bool
 }
 
@@ -101,6 +105,9 @@ func NewPeerGovernor(cfg PeerGovernorConfig) *PeerGovernor {
 	}
 	if cfg.InactivityTimeout == 0 {
 		cfg.InactivityTimeout = defaultInactivityTimeout
+	}
+	if cfg.TestCooldown == 0 {
+		cfg.TestCooldown = defaultTestCooldown
 	}
 	cfg.Logger = cfg.Logger.With("component", "peergov")
 	p := &PeerGovernor{
@@ -511,6 +518,93 @@ func (p *PeerGovernor) UpdatePeerConnectionStability(
 	if idx != -1 && p.peers[idx] != nil {
 		p.peers[idx].UpdateConnectionStability(observed)
 	}
+}
+
+// TestPeer tests a peer's suitability by attempting a connection and verifying
+// the Ouroboros protocol handshake succeeds. Returns true if the peer is
+// suitable, false otherwise. Results are cached to avoid excessive testing.
+// This method is thread-safe.
+func (p *PeerGovernor) TestPeer(address string) (bool, error) {
+	p.mu.Lock()
+
+	// Find or create peer entry
+	var peer *Peer
+	if idx := p.peerIndexByAddress(address); idx == -1 {
+		// Peer not known yet, create temporary entry to track test result
+		peer = &Peer{
+			Address: address,
+			Source:  PeerSourceUnknown,
+			State:   PeerStateCold,
+		}
+		p.peers = append(p.peers, peer)
+		p.updatePeerMetrics()
+	} else {
+		peer = p.peers[idx]
+	}
+
+	// Check if recently tested (within cooldown)
+	if !peer.LastTestTime.IsZero() &&
+		time.Since(peer.LastTestTime) < p.config.TestCooldown {
+		result := peer.LastTestResult == TestResultPass
+		p.mu.Unlock()
+		if result {
+			return true, nil
+		}
+		return false, errors.New("peer failed previous test")
+	}
+
+	p.mu.Unlock()
+
+	// Perform the test (outside lock to avoid blocking)
+	var testErr error
+	if p.config.PeerTestFunc != nil {
+		// Use custom test function if provided
+		testErr = p.config.PeerTestFunc(address)
+	} else if p.config.ConnManager != nil {
+		// Default: attempt connection via ConnManager
+		conn, err := p.config.ConnManager.CreateOutboundConn(address)
+		if err != nil {
+			testErr = err
+		} else {
+			// Connection succeeded, close it since this is just a test
+			conn.Close()
+		}
+	} else {
+		testErr = errors.New("no test function or connection manager configured")
+	}
+
+	// Update test result
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	// Re-find peer in case slice changed
+	idx := p.peerIndexByAddress(address)
+	if idx == -1 {
+		// Peer was removed during test, nothing to update
+		if testErr != nil {
+			return false, testErr
+		}
+		return true, nil
+	}
+	peer = p.peers[idx]
+
+	peer.LastTestTime = time.Now()
+	if testErr != nil {
+		peer.LastTestResult = TestResultFail
+		p.config.Logger.Debug(
+			"peer suitability test failed",
+			"address", address,
+			"error", testErr,
+		)
+		return false, testErr
+	}
+
+	peer.LastTestResult = TestResultPass
+	p.config.Logger.Debug(
+		"peer suitability test passed",
+		"address", address,
+	)
+	return true, nil
 }
 
 func (p *PeerGovernor) startOutboundConnections() {
