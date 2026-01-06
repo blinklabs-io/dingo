@@ -15,6 +15,7 @@
 package peergov
 
 import (
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -562,4 +563,129 @@ func TestPeer_SetConnection(t *testing.T) {
 	assert.Equal(t, connId, peer.Connection.Id)
 	assert.Equal(t, uint(1), peer.Connection.ProtocolVersion)
 	assert.True(t, peer.Connection.IsClient)
+}
+
+func TestPeerGovernor_TestPeer_WithCustomFunc(t *testing.T) {
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		PeerTestFunc: func(address string) error {
+			if address == "pass:3001" {
+				return nil
+			}
+			return fmt.Errorf("test failure")
+		},
+	})
+
+	// Test passing peer
+	result, err := pg.TestPeer("pass:3001")
+	assert.True(t, result)
+	assert.NoError(t, err)
+
+	// Verify peer was added and marked as passed
+	peers := pg.GetPeers()
+	assert.Len(t, peers, 1)
+	assert.Equal(t, TestResultPass, peers[0].LastTestResult)
+	assert.False(t, peers[0].LastTestTime.IsZero())
+
+	// Test failing peer
+	result, err = pg.TestPeer("fail:3001")
+	assert.False(t, result)
+	assert.Error(t, err)
+
+	// Verify peer was added and marked as failed
+	peers = pg.GetPeers()
+	assert.Len(t, peers, 2)
+	var failPeer *Peer
+	for i := range peers {
+		if peers[i].Address == "fail:3001" {
+			failPeer = &peers[i]
+			break
+		}
+	}
+	assert.NotNil(t, failPeer)
+	assert.Equal(t, TestResultFail, failPeer.LastTestResult)
+}
+
+func TestPeerGovernor_TestPeer_CachedResult(t *testing.T) {
+	callCount := 0
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		TestCooldown: 1 * time.Hour, // Long cooldown for test
+		PeerTestFunc: func(address string) error {
+			callCount++
+			return nil
+		},
+	})
+
+	// First test should call the function
+	result, err := pg.TestPeer("127.0.0.1:3001")
+	assert.True(t, result)
+	assert.NoError(t, err)
+	assert.Equal(t, 1, callCount)
+
+	// Second test should use cached result
+	result, err = pg.TestPeer("127.0.0.1:3001")
+	assert.True(t, result)
+	assert.NoError(t, err)
+	assert.Equal(t, 1, callCount) // Should not have called again
+}
+
+func TestPeerGovernor_TestPeer_CachedFailure(t *testing.T) {
+	callCount := 0
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		TestCooldown: 1 * time.Hour,
+		PeerTestFunc: func(address string) error {
+			callCount++
+			return fmt.Errorf("connection failed")
+		},
+	})
+
+	// First test should fail
+	result, err := pg.TestPeer("127.0.0.1:3001")
+	assert.False(t, result)
+	assert.Error(t, err)
+	assert.Equal(t, 1, callCount)
+
+	// Second test should return cached failure
+	result, err = pg.TestPeer("127.0.0.1:3001")
+	assert.False(t, result)
+	assert.Error(t, err)
+	assert.Equal(t, 1, callCount) // Should not have called again
+}
+
+func TestPeerGovernor_TestPeer_ExistingPeer(t *testing.T) {
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		PeerTestFunc: func(address string) error {
+			return nil
+		},
+	})
+
+	// Add peer first
+	pg.AddPeer("127.0.0.1:3001", PeerSourceP2PGossip)
+
+	// Test should update existing peer
+	result, err := pg.TestPeer("127.0.0.1:3001")
+	assert.True(t, result)
+	assert.NoError(t, err)
+
+	// Should still have only one peer
+	peers := pg.GetPeers()
+	assert.Len(t, peers, 1)
+	assert.EqualValues(t, PeerSourceP2PGossip, peers[0].Source)
+	assert.Equal(t, TestResultPass, peers[0].LastTestResult)
+}
+
+func TestPeerGovernor_TestPeer_NoConnManager(t *testing.T) {
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		// No PeerTestFunc or ConnManager
+	})
+
+	// Should fail with appropriate error
+	result, err := pg.TestPeer("127.0.0.1:3001")
+	assert.False(t, result)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "no test function or connection manager")
 }

@@ -41,6 +41,14 @@ const (
 	PeerStateHot
 )
 
+type TestResult uint8
+
+const (
+	TestResultUnknown TestResult = iota
+	TestResultPass
+	TestResultFail
+)
+
 type Peer struct {
 	LastActivity   time.Time
 	Connection     *PeerConnection
@@ -67,6 +75,9 @@ type Peer struct {
 	LastBlockFetchTime time.Time
 	// Composite performance score computed from the above metrics
 	PerformanceScore float64
+	// Suitability test results
+	LastTestTime   time.Time  // When peer was last tested for suitability
+	LastTestResult TestResult // Result of last suitability test
 }
 
 func (p *Peer) setConnection(conn *ouroboros.Connection, outbound bool) {
