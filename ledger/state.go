@@ -1156,10 +1156,55 @@ func (ls *LedgerState) ledgerProcessBlock(
 					ls.currentPParams,
 				)
 				if err != nil {
+					// Attempt to include raw CBOR for diagnostics (if available)
+					var txCborHex string
+					txCbor := tx.Cbor()
+					if len(txCbor) > 0 {
+						txCborHex = hex.EncodeToString(txCbor)
+					}
+					var bodyCborHex string
+					var witnessCborHex string
+					var auxCborHex string
+					if len(txCbor) > 0 {
+						var txArray []cbor.RawMessage
+						if _, err := cbor.Decode(txCbor, &txArray); err == nil &&
+							len(txArray) >= 3 {
+							if len(txArray[0]) > 0 {
+								bodyCborHex = hex.EncodeToString(
+									[]byte(txArray[0]),
+								)
+							}
+							if len(txArray[1]) > 0 {
+								witnessCborHex = hex.EncodeToString(
+									[]byte(txArray[1]),
+								)
+							}
+							// Filter placeholders (0xF4 false, 0xF5 true, 0xF6 null)
+							if len(txArray[2]) > 0 && txArray[2][0] != 0xF4 && txArray[2][0] != 0xF5 && txArray[2][0] != 0xF6 {
+								auxCborHex = hex.EncodeToString(
+									[]byte(txArray[2]),
+								)
+							}
+						}
+					} else {
+						if aux := tx.AuxiliaryData(); aux != nil {
+							if ac := aux.Cbor(); len(ac) > 0 {
+								auxCborHex = hex.EncodeToString(ac)
+							}
+						}
+					}
 					ls.config.Logger.Warn(
-						"TX " + tx.Hash().
-							String() +
-							" failed validation: " + err.Error(),
+						"TX "+tx.Hash().
+							String()+
+							" failed validation: "+err.Error(),
+						"tx_cbor_hex",
+						txCborHex,
+						"body_cbor_hex",
+						bodyCborHex,
+						"witness_cbor_hex",
+						witnessCborHex,
+						"aux_cbor_hex",
+						auxCborHex,
 					)
 					// return fmt.Errorf("TX validation failure: %w", err)
 				}
@@ -1618,9 +1663,22 @@ func (ls *LedgerState) forgeBlock() {
 				break
 			}
 
-			// Handle metadata encoding before adding transaction
+			// Handle metadata encoding before adding transaction.
+			// Prefer using the original auxiliary data CBOR bytes when available
+			// to preserve the producer's encoding (important for metadata hash
+			// calculations). Some producers place a single-byte CBOR simple-value
+			// (0xF4 false, 0xF5 true, 0xF6 null) into the tx-level auxiliary
+			// field as a placeholder; treat those as absent and fall back to
+			// the decoded Metadata value or block-level metadata.
 			var metadataCbor cbor.RawMessage
-			if fullTx.Metadata() != nil {
+			if aux := fullTx.AuxiliaryData(); aux != nil {
+				ac := aux.Cbor()
+				if len(ac) > 0 &&
+					(len(ac) != 1 || (ac[0] != 0xF6 && ac[0] != 0xF5 && ac[0] != 0xF4)) {
+					metadataCbor = ac
+				}
+			}
+			if metadataCbor == nil && fullTx.Metadata() != nil {
 				var err error
 				metadataCbor, err = cbor.Encode(fullTx.Metadata())
 				if err != nil {
