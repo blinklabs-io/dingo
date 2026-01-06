@@ -179,33 +179,33 @@ func (d *MetadataStoreSqlite) DeleteUtxosAfterSlot(
 	return nil
 }
 
-// AddUtxos saves a batch of UTxOs
+// AddUtxos saves a batch of UTxOs directly
 func (d *MetadataStoreSqlite) AddUtxos(
 	utxos []models.UtxoSlot,
 	txn types.Txn,
 ) error {
-	items := make([]models.Utxo, 0, len(utxos))
-	for _, utxo := range utxos {
-		items = append(
-			items,
-			models.UtxoLedgerToModel(utxo.Utxo, utxo.Slot),
-		)
-	}
 	db, err := d.resolveDB(txn)
 	if err != nil {
 		return err
 	}
-	result := db.Session(&gorm.Session{FullSaveAssociations: true}).
-		CreateInBatches(items, 1000)
-	if result.Error != nil {
-		return result.Error
+
+	if len(utxos) == 0 {
+		return nil
 	}
-	return nil
+
+	items := make([]models.Utxo, 0, len(utxos))
+	for _, utxo := range utxos {
+		modelUtxo := models.UtxoLedgerToModel(utxo.Utxo, utxo.Slot)
+		items = append(items, modelUtxo)
+	}
+
+	result := db.Create(&items)
+	return result.Error
 }
 
-// SetUtxoDeletedAtSlot marks a UTxO as deleted at a given slot
+// SetUtxoDeletedAtSlot marks a UTxO as deleted at the given slot
 func (d *MetadataStoreSqlite) SetUtxoDeletedAtSlot(
-	utxoId ledger.TransactionInput,
+	input ledger.TransactionInput,
 	slot uint64,
 	txn types.Txn,
 ) error {
@@ -213,8 +213,8 @@ func (d *MetadataStoreSqlite) SetUtxoDeletedAtSlot(
 	if err != nil {
 		return err
 	}
-	result := db.Model(models.Utxo{}).
-		Where("tx_id = ? AND output_idx = ?", utxoId.Id().Bytes(), utxoId.Index()).
+	result := db.Model(&models.Utxo{}).
+		Where("tx_id = ? AND output_idx = ?", input.Id().Bytes(), input.Index()).
 		Update("deleted_slot", slot)
 	if result.Error != nil {
 		return result.Error
