@@ -244,12 +244,22 @@ func (d *MetadataStoreSqlite) SetTransaction(
 		m := models.UtxoLedgerToModel(utxo, point.Slot)
 		tmpTx.Outputs = append(tmpTx.Outputs, m)
 	}
+
+	// Store outputs in a separate slice for explicit creation later
+	// GORM's Create with OnConflict doesn't properly handle associations
+	outputsToCreate := tmpTx.Outputs
+	tmpTx.Outputs = nil
+
 	result := db.Clauses(clause.OnConflict{
 		Columns: []clause.Column{{Name: "hash"}}, // unique txn hash
 		DoUpdates: clause.AssignmentColumns(
 			[]string{"block_hash", "block_index"},
 		),
 	}).Create(tmpTx)
+
+	// Restore outputs for later explicit creation
+	tmpTx.Outputs = outputsToCreate
+
 	if result.Error != nil {
 		return fmt.Errorf(
 			"create transaction at slot %d, block %x, txHash %x, txIndex %d: %#v, %w",
@@ -277,6 +287,36 @@ func (d *MetadataStoreSqlite) SetTransaction(
 		}
 		tmpTx.ID = existingTx.ID
 	}
+
+	// Create UTxO records for outputs
+	// OnConflict doesn't process associations, so we create them explicitly
+	for i := range tmpTx.Outputs {
+		tmpTx.Outputs[i].ID = 0 // Reset ID to let GORM auto-increment
+		tmpTx.Outputs[i].TransactionID = &tmpTx.ID
+		result := db.Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "tx_id"}, {Name: "output_idx"}},
+			DoNothing: true,
+		}).Create(&tmpTx.Outputs[i])
+		if result.Error != nil {
+			return fmt.Errorf(
+				"create utxo output %d for tx %x: %w",
+				i,
+				txHash,
+				result.Error,
+			)
+		}
+	}
+	// Create CollateralReturn UTxO if present
+	if tmpTx.CollateralReturn != nil {
+		tmpTx.CollateralReturn.TransactionID = &tmpTx.ID
+		if result := db.Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "tx_id"}, {Name: "output_idx"}},
+			DoNothing: true,
+		}).Create(tmpTx.CollateralReturn); result.Error != nil {
+			return fmt.Errorf("create collateral return utxo: %w", result.Error)
+		}
+	}
+
 	// Add Inputs to Transaction
 	for _, input := range tx.Inputs() {
 		inTxId := input.Id().Bytes()
@@ -664,8 +704,10 @@ func (d *MetadataStoreSqlite) SetTransaction(
 				}
 				// If the record already existed, we need to fetch its ID
 				if unifiedCert.ID == 0 {
-					result := db.Where("transaction_id = ? AND cert_index = ?", tmpTx.ID, uint(i)). // #nosec G115
-															First(&unifiedCert)
+					result := db.
+						// #nosec G115
+						Where("transaction_id = ? AND cert_index = ?", tmpTx.ID, uint(i)).
+						First(&unifiedCert)
 					if result.Error != nil {
 						return fmt.Errorf(
 							"fetch existing unified certificate: %w",
