@@ -15,6 +15,7 @@
 package badger
 
 import (
+	"math"
 	"sync"
 
 	"github.com/blinklabs-io/dingo/database/plugin"
@@ -122,18 +123,15 @@ func init() {
 func NewFromCmdlineOptions() plugin.Plugin {
 	cmdlineOptionsMutex.RLock()
 	// Safe conversion from uint64 to int64 with bounds checking
-	valueLogFileSize := cmdlineOptions.valueLogFileSize
-	if valueLogFileSize > 1<<63-1 {
-		valueLogFileSize = 1<<63 - 1 // Cap at max int64
-	}
-	memTableSize := cmdlineOptions.memTableSize
-	if memTableSize > 1<<63-1 {
-		memTableSize = 1<<63 - 1 // Cap at max int64
-	}
-	valueThreshold := cmdlineOptions.valueThreshold
-	if valueThreshold > 1<<63-1 {
-		valueThreshold = 1<<63 - 1 // Cap at max int64
-	}
+	valueLogFileSize := min(cmdlineOptions.valueLogFileSize,
+		// Cap at max int64
+		uint64(math.MaxInt64))
+	memTableSize := min(cmdlineOptions.memTableSize,
+		// Cap at max int64
+		uint64(math.MaxInt64))
+	valueThreshold := min(cmdlineOptions.valueThreshold,
+		// Cap at max int64
+		uint64(math.MaxInt64))
 	// #nosec G115
 	opts := []BlobStoreBadgerOptionFunc{
 		WithDataDir(cmdlineOptions.dataDir),
