@@ -33,6 +33,26 @@ const (
 	PeerSourceInboundConn           = 6
 )
 
+// String returns a human-readable name for the peer source.
+func (s PeerSource) String() string {
+	switch s {
+	case PeerSourceTopologyLocalRoot:
+		return "topology-local-root"
+	case PeerSourceTopologyPublicRoot:
+		return "topology-public-root"
+	case PeerSourceTopologyBootstrapPeer:
+		return "topology-bootstrap"
+	case PeerSourceP2PLedger:
+		return "ledger"
+	case PeerSourceP2PGossip:
+		return "gossip"
+	case PeerSourceInboundConn:
+		return "inbound"
+	default:
+		return "unknown"
+	}
+}
+
 type PeerState uint16
 
 const (
@@ -55,6 +75,7 @@ type Peer struct {
 	LastBlockFetchTime time.Time // Timestamp of last observed block fetch
 	Connection         *PeerConnection
 	Address            string
+	NormalizedAddress  string // Cached normalized form of Address for deduplication
 	// Performance metrics (used by the peer scoring system)
 	BlockFetchLatencyMs     float64 // Average block fetch latency in ms (EMA)
 	BlockFetchSuccessRate   float64 // Average block fetch success rate 0..1 (EMA)

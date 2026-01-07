@@ -93,6 +93,11 @@ type Config struct {
 	// Database worker pool tuning (worker count and task queue size)
 	DatabaseWorkers   int `yaml:"databaseWorkers"    envconfig:"DINGO_DATABASE_WORKERS"`
 	DatabaseQueueSize int `yaml:"databaseQueueSize"  envconfig:"DINGO_DATABASE_QUEUE_SIZE"`
+
+	// Peer limits (0 = use default, -1 = unlimited)
+	MaxColdPeers int `yaml:"maxColdPeers" envconfig:"DINGO_MAX_COLD_PEERS"`
+	MaxWarmPeers int `yaml:"maxWarmPeers" envconfig:"DINGO_MAX_WARM_PEERS"`
+	MaxHotPeers  int `yaml:"maxHotPeers"  envconfig:"DINGO_MAX_HOT_PEERS"`
 }
 
 func (c *Config) ParseCmdlineArgs(programName string, args []string) error {

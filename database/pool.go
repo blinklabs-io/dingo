@@ -38,3 +38,13 @@ func (d *Database) GetPool(
 	}
 	return ret, nil
 }
+
+// GetActivePoolRelays returns all relays from currently active pools.
+// This is used for ledger peer discovery.
+func (d *Database) GetActivePoolRelays(txn *Txn) ([]models.PoolRegistrationRelay, error) {
+	if txn == nil {
+		txn = d.Transaction(false)
+		defer txn.Commit() //nolint:errcheck
+	}
+	return d.metadata.GetActivePoolRelays(txn.Metadata())
+}

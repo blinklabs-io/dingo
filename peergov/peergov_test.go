@@ -15,6 +15,7 @@
 package peergov
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -726,6 +727,31 @@ func TestPeerGovernor_DenyPeer(t *testing.T) {
 	pg.mu.Unlock()
 }
 
+func TestPeerGovernor_DenyPeer_CaseInsensitive(t *testing.T) {
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		DenyDuration: 1 * time.Hour,
+	})
+
+	// Deny a peer with uppercase hostname
+	pg.DenyPeer("RELAY.EXAMPLE.COM:3001", 0)
+
+	// Should be denied with lowercase (normalized) lookup
+	assert.True(t, pg.IsDenied("relay.example.com:3001"))
+
+	// Should also be denied with original case
+	assert.True(t, pg.IsDenied("RELAY.EXAMPLE.COM:3001"))
+
+	// Should be denied with mixed case
+	assert.True(t, pg.IsDenied("Relay.Example.Com:3001"))
+
+	// Verify deny list stores normalized address
+	pg.mu.Lock()
+	_, exists := pg.denyList["relay.example.com:3001"]
+	pg.mu.Unlock()
+	assert.True(t, exists, "deny list should store normalized (lowercase) address")
+}
+
 func TestPeerGovernor_IsDenied_Expiry(t *testing.T) {
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -815,4 +841,534 @@ func TestPeerGovernor_Reconcile_CleanupDenyList(t *testing.T) {
 	_, exists := pg.denyList["127.0.0.1:3003"]
 	pg.mu.Unlock()
 	assert.True(t, exists)
+}
+
+// mockLedgerPeerProvider implements LedgerPeerProvider for testing
+type mockLedgerPeerProvider struct {
+	relays      []PoolRelay
+	currentSlot uint64
+	err         error
+}
+
+func (m *mockLedgerPeerProvider) GetPoolRelays() ([]PoolRelay, error) {
+	if m.err != nil {
+		return nil, m.err
+	}
+	return m.relays, nil
+}
+
+func (m *mockLedgerPeerProvider) CurrentSlot() uint64 {
+	return m.currentSlot
+}
+
+func TestPeerGovernor_DiscoverLedgerPeers_Disabled(t *testing.T) {
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		UseLedgerAfterSlot: -1, // Disabled
+		LedgerPeerProvider: &mockLedgerPeerProvider{
+			relays: []PoolRelay{
+				{Hostname: "relay.example.com", Port: 3001},
+			},
+			currentSlot: 1000,
+		},
+	})
+
+	// Should not add any peers when disabled
+	pg.discoverLedgerPeers()
+
+	assert.Len(t, pg.peers, 0)
+}
+
+func TestPeerGovernor_DiscoverLedgerPeers_SlotNotReached(t *testing.T) {
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		UseLedgerAfterSlot: 5000, // Require slot 5000
+		LedgerPeerProvider: &mockLedgerPeerProvider{
+			relays: []PoolRelay{
+				{Hostname: "relay.example.com", Port: 3001},
+			},
+			currentSlot: 1000, // Only at slot 1000
+		},
+	})
+
+	// Should not add any peers when slot threshold not reached
+	pg.discoverLedgerPeers()
+
+	assert.Len(t, pg.peers, 0)
+}
+
+func TestPeerGovernor_DiscoverLedgerPeers_Success(t *testing.T) {
+	ipv4 := net.ParseIP("192.168.1.1")
+	ipv6 := net.ParseIP("2001:db8::1")
+
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		EventBus:           newMockEventBus(),
+		UseLedgerAfterSlot: 0, // Always enabled
+		LedgerPeerProvider: &mockLedgerPeerProvider{
+			relays: []PoolRelay{
+				{Hostname: "relay1.example.com", Port: 3001},
+				{IPv4: &ipv4, Port: 3002},
+				{IPv6: &ipv6, Port: 3003},
+			},
+			currentSlot: 1000,
+		},
+	})
+
+	pg.discoverLedgerPeers()
+
+	// Should have added 3 peers
+	assert.Len(t, pg.peers, 3)
+
+	// Verify peer sources and shareability
+	for _, peer := range pg.peers {
+		assert.Equal(t, PeerSource(PeerSourceP2PLedger), peer.Source)
+		assert.True(t, peer.Sharable)
+		assert.Equal(t, PeerState(PeerStateCold), peer.State)
+	}
+}
+
+func TestPeerGovernor_DiscoverLedgerPeers_Deduplication(t *testing.T) {
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		EventBus:           newMockEventBus(),
+		UseLedgerAfterSlot: 0,
+		LedgerPeerProvider: &mockLedgerPeerProvider{
+			relays: []PoolRelay{
+				{Hostname: "relay.example.com", Port: 3001},
+				{Hostname: "relay.example.com", Port: 3001}, // Duplicate
+				{Hostname: "RELAY.EXAMPLE.COM", Port: 3001}, // Same but different case
+			},
+			currentSlot: 1000,
+		},
+	})
+
+	pg.discoverLedgerPeers()
+
+	// Should have only 1 peer due to deduplication
+	assert.Len(t, pg.peers, 1)
+}
+
+func TestPeerGovernor_DiscoverLedgerPeers_RefreshInterval(t *testing.T) {
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:                    slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		EventBus:                  newMockEventBus(),
+		UseLedgerAfterSlot:        0,
+		LedgerPeerRefreshInterval: 1 * time.Hour, // Long refresh interval
+		LedgerPeerProvider: &mockLedgerPeerProvider{
+			relays: []PoolRelay{
+				{Hostname: "relay1.example.com", Port: 3001},
+			},
+			currentSlot: 1000,
+		},
+	})
+
+	// First discovery should work
+	pg.discoverLedgerPeers()
+	assert.Len(t, pg.peers, 1)
+
+	// Update mock to return different relays
+	pg.config.LedgerPeerProvider = &mockLedgerPeerProvider{
+		relays: []PoolRelay{
+			{Hostname: "relay2.example.com", Port: 3001},
+		},
+		currentSlot: 2000,
+	}
+
+	// Second discovery should be skipped due to refresh interval
+	pg.discoverLedgerPeers()
+	assert.Len(t, pg.peers, 1) // Still only 1 peer
+
+	// Force refresh by setting last refresh time to the past
+	pg.lastLedgerPeerRefresh.Store(time.Now().Add(-2 * time.Hour).UnixNano())
+
+	// Now discovery should add the new peer
+	pg.discoverLedgerPeers()
+	assert.Len(t, pg.peers, 2)
+}
+
+func TestPeerGovernor_DiscoverLedgerPeers_ExistingPeersNotDuplicated(t *testing.T) {
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		EventBus:           newMockEventBus(),
+		UseLedgerAfterSlot: 0,
+		LedgerPeerProvider: &mockLedgerPeerProvider{
+			relays: []PoolRelay{
+				{Hostname: "relay.example.com", Port: 3001},
+			},
+			currentSlot: 1000,
+		},
+	})
+
+	// Add existing peer from another source
+	pg.AddPeer("relay.example.com:3001", PeerSourceP2PGossip)
+	assert.Len(t, pg.peers, 1)
+
+	// Ledger discovery should not add duplicate
+	pg.discoverLedgerPeers()
+	assert.Len(t, pg.peers, 1)
+
+	// Verify original source is preserved
+	assert.Equal(t, PeerSource(PeerSourceP2PGossip), pg.peers[0].Source)
+}
+
+func TestPeerGovernor_DiscoverLedgerPeers_DeniedPeersSkipped(t *testing.T) {
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		EventBus:           newMockEventBus(),
+		UseLedgerAfterSlot: 0,
+		DenyDuration:       1 * time.Hour,
+		LedgerPeerProvider: &mockLedgerPeerProvider{
+			relays: []PoolRelay{
+				{Hostname: "relay.example.com", Port: 3001},
+			},
+			currentSlot: 1000,
+		},
+	})
+
+	// Deny the relay
+	pg.DenyPeer("relay.example.com:3001", 0)
+
+	// Ledger discovery should skip denied peer
+	pg.discoverLedgerPeers()
+	assert.Len(t, pg.peers, 0)
+}
+
+func TestPeerGovernor_DiscoverLedgerPeers_Error(t *testing.T) {
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		UseLedgerAfterSlot: 0,
+		LedgerPeerProvider: &mockLedgerPeerProvider{
+			err:         errors.New("database error"),
+			currentSlot: 1000,
+		},
+	})
+
+	// Should not panic and should not add any peers when error occurs
+	pg.discoverLedgerPeers()
+	assert.Len(t, pg.peers, 0)
+}
+
+func TestPeerGovernor_DiscoverLedgerPeers_ErrorAllowsRetry(t *testing.T) {
+	// Create a mock provider that fails first, then succeeds
+	mockProvider := &mockLedgerPeerProvider{
+		err:         errors.New("transient error"),
+		currentSlot: 1000,
+	}
+
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:                    slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		UseLedgerAfterSlot:        0,
+		LedgerPeerProvider:        mockProvider,
+		LedgerPeerRefreshInterval: 1 * time.Hour, // Long interval
+	})
+
+	// First call fails
+	pg.discoverLedgerPeers()
+	assert.Len(t, pg.peers, 0)
+
+	// Fix the provider (simulate transient error recovery)
+	mockProvider.err = nil
+	mockProvider.relays = []PoolRelay{
+		{Hostname: "relay.example.com", Port: 3001},
+	}
+
+	// Second call should succeed immediately (not wait for refresh interval)
+	// because the timestamp was reset on error
+	pg.discoverLedgerPeers()
+	assert.Len(t, pg.peers, 1)
+}
+
+func TestPeerSource_String(t *testing.T) {
+	tests := []struct {
+		source   PeerSource
+		expected string
+	}{
+		{PeerSourceUnknown, "unknown"},
+		{PeerSourceTopologyLocalRoot, "topology-local-root"},
+		{PeerSourceTopologyPublicRoot, "topology-public-root"},
+		{PeerSourceTopologyBootstrapPeer, "topology-bootstrap"},
+		{PeerSourceP2PLedger, "ledger"},
+		{PeerSourceP2PGossip, "gossip"},
+		{PeerSourceInboundConn, "inbound"},
+		{PeerSource(99), "unknown"}, // Unknown value
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.expected, func(t *testing.T) {
+			assert.Equal(t, tc.expected, tc.source.String())
+		})
+	}
+}
+
+func TestPeerGovernor_NormalizeAddress(t *testing.T) {
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+	})
+
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{
+			name:     "lowercase hostname",
+			input:    "RELAY.EXAMPLE.COM:3001",
+			expected: "relay.example.com:3001",
+		},
+		{
+			name:     "ipv4 address",
+			input:    "192.168.1.1:3001",
+			expected: "192.168.1.1:3001",
+		},
+		{
+			name:     "ipv6 short form",
+			input:    "[::1]:3001",
+			expected: "[::1]:3001",
+		},
+		{
+			name:     "ipv6 full form normalized",
+			input:    "[0:0:0:0:0:0:0:1]:3001",
+			expected: "[::1]:3001",
+		},
+		{
+			name:     "invalid address passthrough",
+			input:    "invalid",
+			expected: "invalid",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			result := pg.normalizeAddress(tc.input)
+			assert.Equal(t, tc.expected, result)
+		})
+	}
+}
+
+func TestPoolRelay_Addresses(t *testing.T) {
+	ipv4 := net.ParseIP("192.168.1.1")
+	ipv6 := net.ParseIP("2001:db8::1")
+
+	tests := []struct {
+		name     string
+		relay    PoolRelay
+		expected []string
+	}{
+		{
+			name:     "hostname only",
+			relay:    PoolRelay{Hostname: "relay.example.com", Port: 3001},
+			expected: []string{"relay.example.com:3001"},
+		},
+		{
+			name:     "ipv4 only",
+			relay:    PoolRelay{IPv4: &ipv4, Port: 3002},
+			expected: []string{"192.168.1.1:3002"},
+		},
+		{
+			name:     "ipv6 only",
+			relay:    PoolRelay{IPv6: &ipv6, Port: 3003},
+			expected: []string{"[2001:db8::1]:3003"},
+		},
+		{
+			name:     "all addresses",
+			relay:    PoolRelay{Hostname: "relay.example.com", IPv4: &ipv4, IPv6: &ipv6, Port: 3001},
+			expected: []string{"relay.example.com:3001", "192.168.1.1:3001", "[2001:db8::1]:3001"},
+		},
+		{
+			name:     "default port",
+			relay:    PoolRelay{Hostname: "relay.example.com", Port: 0},
+			expected: []string{"relay.example.com:3001"},
+		},
+		{
+			name:     "empty ipv4 slice ignored",
+			relay:    PoolRelay{Hostname: "relay.example.com", IPv4: &net.IP{}, Port: 3001},
+			expected: []string{"relay.example.com:3001"},
+		},
+		{
+			name:     "empty ipv6 slice ignored",
+			relay:    PoolRelay{Hostname: "relay.example.com", IPv6: &net.IP{}, Port: 3001},
+			expected: []string{"relay.example.com:3001"},
+		},
+		{
+			name:     "nil ip pointers ignored",
+			relay:    PoolRelay{Hostname: "relay.example.com", IPv4: nil, IPv6: nil, Port: 3001},
+			expected: []string{"relay.example.com:3001"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			result := tc.relay.Addresses()
+			assert.Equal(t, tc.expected, result)
+		})
+	}
+}
+
+func TestPeerGovernor_PeerLimits_DefaultValues(t *testing.T) {
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		// MaxColdPeers, MaxWarmPeers, MaxHotPeers not set (0)
+	})
+
+	// Should use default values
+	assert.Equal(t, 200, pg.config.MaxColdPeers)
+	assert.Equal(t, 50, pg.config.MaxWarmPeers)
+	assert.Equal(t, 20, pg.config.MaxHotPeers)
+}
+
+func TestPeerGovernor_PeerLimits_CustomValues(t *testing.T) {
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		MaxColdPeers: 100,
+		MaxWarmPeers: 25,
+		MaxHotPeers:  10,
+	})
+
+	assert.Equal(t, 100, pg.config.MaxColdPeers)
+	assert.Equal(t, 25, pg.config.MaxWarmPeers)
+	assert.Equal(t, 10, pg.config.MaxHotPeers)
+}
+
+func TestPeerGovernor_PeerLimits_Unlimited(t *testing.T) {
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		MaxColdPeers: -1, // Unlimited
+		MaxWarmPeers: -1,
+		MaxHotPeers:  -1,
+	})
+
+	// -1 should be converted to 0 (unlimited internally)
+	assert.Equal(t, 0, pg.config.MaxColdPeers)
+	assert.Equal(t, 0, pg.config.MaxWarmPeers)
+	assert.Equal(t, 0, pg.config.MaxHotPeers)
+}
+
+func TestPeerGovernor_EnforcePeerLimits_ColdPeers(t *testing.T) {
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		EventBus:     newMockEventBus(),
+		MaxColdPeers: 3, // Limit to 3 cold peers
+		MaxWarmPeers: -1,
+		MaxHotPeers:  -1,
+	})
+
+	// Add 5 cold peers from different sources
+	pg.AddPeer("ledger1.example.com:3001", PeerSourceP2PLedger)
+	pg.AddPeer("ledger2.example.com:3001", PeerSourceP2PLedger)
+	pg.AddPeer("gossip1.example.com:3001", PeerSourceP2PGossip)
+	pg.AddPeer("gossip2.example.com:3001", PeerSourceP2PGossip)
+	pg.AddPeer("inbound1.example.com:3001", PeerSourceInboundConn)
+
+	assert.Len(t, pg.peers, 5)
+
+	// Run reconcile to enforce limits
+	pg.reconcile()
+
+	// Should have removed 2 peers (down to 3)
+	assert.Len(t, pg.peers, 3)
+
+	// Lower priority peers should be removed first (ledger before gossip)
+	// Check that gossip peers are kept (higher priority than ledger)
+	hasGossip1 := false
+	hasGossip2 := false
+	for _, peer := range pg.peers {
+		if peer.Address == "gossip1.example.com:3001" {
+			hasGossip1 = true
+		}
+		if peer.Address == "gossip2.example.com:3001" {
+			hasGossip2 = true
+		}
+	}
+	assert.True(t, hasGossip1, "gossip1 peer should be kept")
+	assert.True(t, hasGossip2, "gossip2 peer should be kept")
+}
+
+func TestPeerGovernor_EnforcePeerLimits_TopologyPeersNeverRemoved(t *testing.T) {
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		EventBus:     newMockEventBus(),
+		MaxColdPeers: 2, // Very low limit
+		MaxWarmPeers: -1,
+		MaxHotPeers:  -1,
+	})
+
+	// Add topology peers (should never be removed)
+	pg.AddPeer("bootstrap1.example.com:3001", PeerSourceTopologyBootstrapPeer)
+	pg.AddPeer("localroot1.example.com:3001", PeerSourceTopologyLocalRoot)
+	pg.AddPeer("publicroot1.example.com:3001", PeerSourceTopologyPublicRoot)
+
+	// Add regular peers
+	pg.AddPeer("ledger1.example.com:3001", PeerSourceP2PLedger)
+	pg.AddPeer("ledger2.example.com:3001", PeerSourceP2PLedger)
+
+	assert.Len(t, pg.peers, 5)
+
+	// Run reconcile to enforce limits
+	pg.reconcile()
+
+	// All topology peers should be kept (3) even though limit is 2
+	// Only ledger peers should be removed
+	topologyCount := 0
+	for _, peer := range pg.peers {
+		switch peer.Source {
+		case PeerSourceTopologyBootstrapPeer,
+			PeerSourceTopologyLocalRoot,
+			PeerSourceTopologyPublicRoot:
+			topologyCount++
+		}
+	}
+	assert.Equal(t, 3, topologyCount, "all topology peers should be kept")
+}
+
+func TestPeerGovernor_EnforcePeerLimits_Unlimited(t *testing.T) {
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		EventBus:     newMockEventBus(),
+		MaxColdPeers: -1, // Unlimited
+		MaxWarmPeers: -1,
+		MaxHotPeers:  -1,
+	})
+
+	// Add many peers
+	for i := 0; i < 10; i++ {
+		pg.AddPeer(fmt.Sprintf("peer%d.example.com:3001", i), PeerSourceP2PLedger)
+	}
+
+	assert.Len(t, pg.peers, 10)
+
+	// Run reconcile - should not remove any peers when unlimited
+	pg.reconcile()
+
+	assert.Len(t, pg.peers, 10)
+}
+
+func TestPeerGovernor_PeerSourcePriority(t *testing.T) {
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+	})
+
+	// Topology peers should have highest priority
+	assert.Greater(t,
+		pg.peerSourcePriority(PeerSourceTopologyLocalRoot),
+		pg.peerSourcePriority(PeerSourceP2PGossip),
+	)
+
+	// Gossip should be higher than ledger
+	assert.Greater(t,
+		pg.peerSourcePriority(PeerSourceP2PGossip),
+		pg.peerSourcePriority(PeerSourceP2PLedger),
+	)
+
+	// Ledger should be higher than inbound
+	assert.Greater(t,
+		pg.peerSourcePriority(PeerSourceP2PLedger),
+		pg.peerSourcePriority(PeerSourceInboundConn),
+	)
+
+	// Inbound should be higher than unknown
+	assert.Greater(t,
+		pg.peerSourcePriority(PeerSourceInboundConn),
+		pg.peerSourcePriority(PeerSourceUnknown),
+	)
 }

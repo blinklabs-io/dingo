@@ -104,3 +104,14 @@ devMode: false
 
 # Validate historical blocks during ledger processing (default: false)
 validateHistorical: false
+
+# Peer limits - maximum number of peers in each state
+# Use 0 for default values, -1 for unlimited
+# Default: cold=200, warm=50, hot=20
+#
+# Maximum cold (known but not connected) peers
+maxColdPeers: 0
+# Maximum warm (connected but not active) peers
+maxWarmPeers: 0
+# Maximum hot (active) peers
+maxHotPeers: 0
