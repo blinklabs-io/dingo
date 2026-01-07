@@ -689,3 +689,116 @@ func TestPeerGovernor_TestPeer_NoConnManager(t *testing.T) {
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "no test function or connection manager")
 }
+
+func TestPeerGovernor_DenyPeer(t *testing.T) {
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		DenyDuration: 1 * time.Hour,
+	})
+
+	// Deny a peer
+	pg.DenyPeer("127.0.0.1:3001", 0) // Use default duration
+
+	// Verify peer is denied
+	assert.True(t, pg.IsDenied("127.0.0.1:3001"))
+
+	// Deny another peer with custom duration
+	pg.DenyPeer("127.0.0.1:3002", 30*time.Minute)
+	assert.True(t, pg.IsDenied("127.0.0.1:3002"))
+
+	// Verify deny list size
+	pg.mu.Lock()
+	assert.Len(t, pg.denyList, 2)
+	pg.mu.Unlock()
+}
+
+func TestPeerGovernor_IsDenied_Expiry(t *testing.T) {
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		DenyDuration: 1 * time.Millisecond, // Very short for testing
+	})
+
+	// Deny a peer with very short duration
+	pg.DenyPeer("127.0.0.1:3001", 1*time.Millisecond)
+
+	// Should be denied initially
+	assert.True(t, pg.IsDenied("127.0.0.1:3001"))
+
+	// Wait for expiry
+	time.Sleep(5 * time.Millisecond)
+
+	// Should no longer be denied
+	assert.False(t, pg.IsDenied("127.0.0.1:3001"))
+}
+
+func TestPeerGovernor_AddPeer_Denied(t *testing.T) {
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		DenyDuration: 1 * time.Hour,
+	})
+
+	// Deny a peer first
+	pg.DenyPeer("127.0.0.1:3001", 0)
+
+	// Try to add the denied peer
+	pg.AddPeer("127.0.0.1:3001", PeerSourceP2PGossip)
+
+	// Should not be added
+	peers := pg.GetPeers()
+	assert.Empty(t, peers)
+
+	// Add a non-denied peer
+	pg.AddPeer("127.0.0.1:3002", PeerSourceP2PGossip)
+	peers = pg.GetPeers()
+	assert.Len(t, peers, 1)
+	assert.Equal(t, "127.0.0.1:3002", peers[0].Address)
+}
+
+func TestPeerGovernor_TestPeer_DeniesOnFailure(t *testing.T) {
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		DenyDuration: 1 * time.Hour,
+		PeerTestFunc: func(address string) error {
+			return fmt.Errorf("connection failed")
+		},
+	})
+
+	// Test peer (will fail)
+	result, err := pg.TestPeer("127.0.0.1:3001")
+	assert.False(t, result)
+	assert.Error(t, err)
+
+	// Peer should now be denied
+	assert.True(t, pg.IsDenied("127.0.0.1:3001"))
+
+	// Verify deny list has entry
+	pg.mu.Lock()
+	_, exists := pg.denyList["127.0.0.1:3001"]
+	pg.mu.Unlock()
+	assert.True(t, exists)
+}
+
+func TestPeerGovernor_Reconcile_CleanupDenyList(t *testing.T) {
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		DenyDuration:      1 * time.Millisecond,
+		ReconcileInterval: 1 * time.Hour, // Don't auto-trigger
+	})
+
+	// Add expired entries directly
+	pg.mu.Lock()
+	pg.denyList["127.0.0.1:3001"] = time.Now().Add(-1 * time.Hour) // Already expired
+	pg.denyList["127.0.0.1:3002"] = time.Now().Add(-1 * time.Hour) // Already expired
+	pg.denyList["127.0.0.1:3003"] = time.Now().Add(1 * time.Hour)  // Not expired
+	pg.mu.Unlock()
+
+	// Run reconcile to trigger cleanup
+	pg.reconcile()
+
+	// Check deny list - only non-expired entry should remain
+	pg.mu.Lock()
+	assert.Len(t, pg.denyList, 1)
+	_, exists := pg.denyList["127.0.0.1:3003"]
+	pg.mu.Unlock()
+	assert.True(t, exists)
+}

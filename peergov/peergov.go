@@ -41,6 +41,7 @@ const (
 	defaultMinHotPeers          = 3
 	defaultInactivityTimeout    = 10 * time.Minute
 	defaultTestCooldown         = 5 * time.Minute
+	defaultDenyDuration         = 30 * time.Minute
 )
 
 const (
@@ -50,11 +51,12 @@ const (
 )
 
 type PeerGovernor struct {
-	config          PeerGovernorConfig
 	metrics         *peerGovernorMetrics
 	reconcileTicker *time.Ticker
 	stopCh          chan struct{}
+	denyList        map[string]time.Time // address -> expiry time
 	peers           []*Peer
+	config          PeerGovernorConfig
 	mu              sync.Mutex
 }
 
@@ -70,6 +72,7 @@ type PeerGovernorConfig struct {
 	MinHotPeers          int
 	InactivityTimeout    time.Duration
 	TestCooldown         time.Duration // Min time between suitability tests
+	DenyDuration         time.Duration // How long to deny failed peers
 	DisableOutbound      bool
 }
 
@@ -109,10 +112,14 @@ func NewPeerGovernor(cfg PeerGovernorConfig) *PeerGovernor {
 	if cfg.TestCooldown == 0 {
 		cfg.TestCooldown = defaultTestCooldown
 	}
+	if cfg.DenyDuration == 0 {
+		cfg.DenyDuration = defaultDenyDuration
+	}
 	cfg.Logger = cfg.Logger.With("component", "peergov")
 	p := &PeerGovernor{
-		config: cfg,
-		peers:  []*Peer{},
+		config:   cfg,
+		peers:    []*Peer{},
+		denyList: make(map[string]time.Time),
 	}
 	if cfg.PromRegistry != nil {
 		p.initMetrics()
@@ -422,6 +429,14 @@ func (p *PeerGovernor) GetPeers() []Peer {
 func (p *PeerGovernor) AddPeer(address string, source PeerSource) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	// Check deny list before adding
+	if p.isDeniedLocked(address) {
+		p.config.Logger.Debug(
+			"not adding denied peer",
+			"address", address,
+		)
+		return
+	}
 	// Check if already exists
 	for _, peer := range p.peers {
 		if peer != nil && peer.Address == address {
@@ -520,6 +535,58 @@ func (p *PeerGovernor) UpdatePeerConnectionStability(
 	}
 }
 
+// DenyPeer adds a peer to the deny list for the specified duration.
+// If duration is 0, the configured default duration is used.
+// This method is thread-safe.
+func (p *PeerGovernor) DenyPeer(address string, duration time.Duration) {
+	if duration == 0 {
+		duration = p.config.DenyDuration
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.denyList[address] = time.Now().Add(duration)
+	p.config.Logger.Debug(
+		"peer added to deny list",
+		"address", address,
+		"duration", duration,
+	)
+}
+
+// IsDenied checks if a peer is currently on the deny list.
+// Returns true if the peer is denied and the denial has not expired.
+// This method is thread-safe.
+func (p *PeerGovernor) IsDenied(address string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.isDeniedLocked(address)
+}
+
+// isDeniedLocked checks if a peer is on the deny list.
+// This method assumes the mutex is already held by the caller.
+func (p *PeerGovernor) isDeniedLocked(address string) bool {
+	expiry, exists := p.denyList[address]
+	if !exists {
+		return false
+	}
+	if time.Now().After(expiry) {
+		// Expired, remove from deny list
+		delete(p.denyList, address)
+		return false
+	}
+	return true
+}
+
+// cleanupDenyList removes expired entries from the deny list.
+// This method assumes the mutex is already held by the caller.
+func (p *PeerGovernor) cleanupDenyList() {
+	now := time.Now()
+	for address, expiry := range p.denyList {
+		if now.After(expiry) {
+			delete(p.denyList, address)
+		}
+	}
+}
+
 // TestPeer tests a peer's suitability by attempting a connection and verifying
 // the Ouroboros protocol handshake succeeds. Returns true if the peer is
 // suitable, false otherwise. Results are cached to avoid excessive testing.
@@ -591,10 +658,13 @@ func (p *PeerGovernor) TestPeer(address string) (bool, error) {
 	peer.LastTestTime = time.Now()
 	if testErr != nil {
 		peer.LastTestResult = TestResultFail
+		// Add to deny list (we already hold the lock)
+		p.denyList[address] = time.Now().Add(p.config.DenyDuration)
 		p.config.Logger.Debug(
-			"peer suitability test failed",
+			"peer suitability test failed, added to deny list",
 			"address", address,
 			"error", testErr,
+			"deny_duration", p.config.DenyDuration,
 		)
 		return false, testErr
 	}
@@ -752,6 +822,9 @@ func (p *PeerGovernor) reconcile() {
 	p.mu.Lock()
 
 	p.config.Logger.Debug("starting peer reconcile")
+
+	// Cleanup expired deny list entries
+	p.cleanupDenyList()
 
 	// Track changes for metrics
 	var coldPromotions, warmPromotions, warmDemotions, knownRemoved, activeIncreased, activeDecreased int
