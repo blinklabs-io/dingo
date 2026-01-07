@@ -443,11 +443,16 @@ func (p *PeerGovernor) AddPeer(address string, source PeerSource) {
 			return
 		}
 	}
-	p.peers = append(p.peers, &Peer{
+	newPeer := &Peer{
 		Address: address,
 		Source:  source,
 		State:   PeerStateCold,
-	})
+	}
+	// Gossip-discovered peers are sharable since they were already shared
+	if source == PeerSourceP2PGossip {
+		newPeer.Sharable = true
+	}
+	p.peers = append(p.peers, newPeer)
 	p.updatePeerMetrics()
 	if source == PeerSourceP2PGossip && p.metrics != nil {
 		p.metrics.increasedKnownPeers.Inc()
