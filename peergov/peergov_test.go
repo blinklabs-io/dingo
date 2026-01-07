@@ -103,7 +103,7 @@ func TestPeerGovernor_AddPeer(t *testing.T) {
 		PromRegistry: reg,
 	})
 
-	// Test adding a new peer
+	// Test adding a gossip peer (should be sharable)
 	pg.AddPeer("127.0.0.1:3001", PeerSourceP2PGossip)
 
 	peers := pg.GetPeers()
@@ -111,13 +111,27 @@ func TestPeerGovernor_AddPeer(t *testing.T) {
 	assert.Equal(t, "127.0.0.1:3001", peers[0].Address)
 	assert.EqualValues(t, PeerSourceP2PGossip, peers[0].Source)
 	assert.Equal(t, PeerStateCold, peers[0].State)
+	assert.True(t, peers[0].Sharable, "gossip-discovered peers should be sharable")
 
 	// Test adding duplicate peer (should not add)
 	pg.AddPeer("127.0.0.1:3001", PeerSourceP2PGossip)
 	peers = pg.GetPeers()
 	assert.Len(t, peers, 1)
 
-	// Event publishing is tested indirectly through the real EventBus
+	// Test adding a non-gossip peer (should not be sharable by default)
+	pg.AddPeer("127.0.0.1:3002", PeerSourceUnknown)
+	peers = pg.GetPeers()
+	assert.Len(t, peers, 2)
+	// Find the non-gossip peer
+	var nonGossipPeer *Peer
+	for _, p := range peers {
+		if p.Address == "127.0.0.1:3002" {
+			nonGossipPeer = &p
+			break
+		}
+	}
+	assert.NotNil(t, nonGossipPeer, "non-gossip peer should be found")
+	assert.False(t, nonGossipPeer.Sharable, "non-gossip peers should not be sharable by default")
 }
 
 func TestPeerGovernor_LoadTopologyConfig(t *testing.T) {
