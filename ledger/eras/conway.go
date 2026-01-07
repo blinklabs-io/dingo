@@ -163,6 +163,10 @@ func ValidateTxConway(
 	ls lcommon.LedgerState,
 	pp lcommon.ProtocolParameters,
 ) error {
+	tmpPparams, ok := pp.(*conway.ConwayProtocolParameters)
+	if !ok {
+		return ErrIncompatibleProtocolParams
+	}
 	// Validate TX through ledger validation rules
 	errs := []error{}
 	var err error
@@ -177,17 +181,6 @@ func ValidateTxConway(
 	}
 	if len(errs) > 0 {
 		return errors.Join(errs...)
-	}
-	conwayPParams, ok := pp.(*conway.ConwayProtocolParameters)
-	if !ok {
-		return fmt.Errorf(
-			"current PParams (%T) is not expected type",
-			pp,
-		)
-	}
-	costModel, err := cek.CostModelFromList(lang.LanguageVersionV3, conwayPParams.CostModels[2])
-	if err != nil {
-		return err
 	}
 	// Skip script evaluation if TX is marked as not valid
 	if !tx.IsValid() {
@@ -247,6 +240,9 @@ func ValidateTxConway(
 	}
 	for _, redeemerPair := range txInfoV3.(script.TxInfoV3).Redeemers {
 		purpose := redeemerPair.Key
+		if purpose == nil {
+			return errors.New("script purpose is nil")
+		}
 		redeemer := redeemerPair.Value
 		// Lookup script from redeemer purpose
 		tmpScript := scripts[purpose.ScriptHash()]
@@ -257,22 +253,95 @@ func ValidateTxConway(
 			)
 		}
 		switch s := tmpScript.(type) {
-		case *lcommon.PlutusV3Script:
-			sc := script.NewScriptContextV3(txInfoV3, redeemer, purpose)
-			// Round-trip the script context through CBOR
-			// This is a temporary hack to work around a bug in plutigo
-			scCbor, err := data.Encode(sc.ToPlutusData())
+		case lcommon.PlutusV1Script:
+			txInfoV1, err := script.NewTxInfoV1FromTransaction(
+				ls,
+				tx,
+				slices.Concat(resolvedInputs, resolvedRefInputs),
+			)
 			if err != nil {
 				return err
 			}
-			scNew, err := data.Decode(scCbor)
+			// Get spent UTxO datum
+			var datum data.PlutusData
+			if tmp, ok := purpose.(script.ScriptPurposeSpending); ok {
+				datum = tmp.Datum
+			}
+			sc := script.NewScriptContextV1V2(txInfoV1, purpose)
+			evalContext, err := cek.NewEvalContext(
+				lang.LanguageVersionV1,
+				cek.ProtoVersion{
+					Major: tmpPparams.ProtocolVersion.Major,
+					Minor: tmpPparams.ProtocolVersion.Minor,
+				},
+				tmpPparams.CostModels[0],
+			)
 			if err != nil {
-				return err
+				return fmt.Errorf("build evaluation context: %w", err)
 			}
 			_, err = s.Evaluate(
-				scNew,
+				datum,
+				redeemer.Data,
+				sc.ToPlutusData(),
 				redeemer.ExUnits,
-				costModel,
+				evalContext,
+			)
+			if err != nil {
+				return err
+			}
+		case lcommon.PlutusV2Script:
+			txInfoV2, err := script.NewTxInfoV2FromTransaction(
+				ls,
+				tx,
+				slices.Concat(resolvedInputs, resolvedRefInputs),
+			)
+			if err != nil {
+				return err
+			}
+			// Get spent UTxO datum
+			var datum data.PlutusData
+			if tmp, ok := purpose.(script.ScriptPurposeSpending); ok {
+				datum = tmp.Datum
+			}
+			sc := script.NewScriptContextV1V2(txInfoV2, purpose)
+			evalContext, err := cek.NewEvalContext(
+				lang.LanguageVersionV2,
+				cek.ProtoVersion{
+					Major: tmpPparams.ProtocolVersion.Major,
+					Minor: tmpPparams.ProtocolVersion.Minor,
+				},
+				tmpPparams.CostModels[1],
+			)
+			if err != nil {
+				return fmt.Errorf("build evaluation context: %w", err)
+			}
+			_, err = s.Evaluate(
+				datum,
+				redeemer.Data,
+				sc.ToPlutusData(),
+				redeemer.ExUnits,
+				evalContext,
+			)
+			if err != nil {
+				return err
+			}
+		case lcommon.PlutusV3Script:
+			sc := script.NewScriptContextV3(txInfoV3, redeemer, purpose)
+			evalContext, err := cek.NewEvalContext(
+				lang.LanguageVersionV3,
+				cek.ProtoVersion{
+					Major: tmpPparams.ProtocolVersion.Major,
+					Minor: tmpPparams.ProtocolVersion.Minor,
+				},
+				tmpPparams.CostModels[2],
+			)
+			if err != nil {
+				return fmt.Errorf("build evaluation context: %w", err)
+			}
+			_, err = s.Evaluate(
+				sc.ToPlutusData(),
+				redeemer.ExUnits,
+				evalContext,
 			)
 			if err != nil {
 				/*
@@ -306,6 +375,8 @@ func ValidateTxConway(
 				*/
 				return err
 			}
+		default:
+			return fmt.Errorf("unimplemented script type: %T", tmpScript)
 		}
 	}
 	return nil
@@ -316,17 +387,9 @@ func EvaluateTxConway(
 	ls lcommon.LedgerState,
 	pp lcommon.ProtocolParameters,
 ) (uint64, lcommon.ExUnits, map[lcommon.RedeemerKey]lcommon.ExUnits, error) {
-	var err error
-	conwayPParams, ok := pp.(*conway.ConwayProtocolParameters)
+	tmpPparams, ok := pp.(*conway.ConwayProtocolParameters)
 	if !ok {
-		return 0, lcommon.ExUnits{}, nil, fmt.Errorf(
-			"current PParams (%T) is not expected type",
-			pp,
-		)
-	}
-	costModel, err := cek.CostModelFromList(lang.LanguageVersionV3, conwayPParams.CostModels[2])
-	if err != nil {
-		return 0, lcommon.ExUnits{}, nil, err
+		return 0, lcommon.ExUnits{}, nil, ErrIncompatibleProtocolParams
 	}
 	// Resolve inputs
 	resolvedInputs := []lcommon.Utxo{}
@@ -374,6 +437,7 @@ func EvaluateTxConway(
 	var retTotalExUnits lcommon.ExUnits
 	retRedeemerExUnits := make(map[lcommon.RedeemerKey]lcommon.ExUnits)
 	var txInfoV3 script.TxInfo
+	var err error
 	txInfoV3, err = script.NewTxInfoV3FromTransaction(
 		ls,
 		tx,
@@ -385,8 +449,7 @@ func EvaluateTxConway(
 	for _, redeemerPair := range txInfoV3.(script.TxInfoV3).Redeemers {
 		purpose := redeemerPair.Key
 		if purpose == nil {
-			// Skip unsupported redeemer tags for now
-			continue
+			return 0, lcommon.ExUnits{}, nil, errors.New("script purpose is nil")
 		}
 		redeemer := redeemerPair.Value
 		// Lookup script from redeemer purpose
@@ -397,13 +460,107 @@ func EvaluateTxConway(
 			)
 		}
 		switch s := tmpScript.(type) {
-		case *lcommon.PlutusV3Script:
-			var usedBudget lcommon.ExUnits
-			sc := script.NewScriptContextV3(txInfoV3, redeemer, purpose)
-			usedBudget, err = s.Evaluate(
+		case lcommon.PlutusV1Script:
+			txInfoV1, err := script.NewTxInfoV1FromTransaction(
+				ls,
+				tx,
+				slices.Concat(resolvedInputs, resolvedRefInputs),
+			)
+			if err != nil {
+				return 0, lcommon.ExUnits{}, nil, err
+			}
+			// Get spent UTxO datum
+			var datum data.PlutusData
+			if tmp, ok := purpose.(script.ScriptPurposeSpending); ok {
+				datum = tmp.Datum
+			}
+			sc := script.NewScriptContextV1V2(txInfoV1, purpose)
+			evalContext, err := cek.NewEvalContext(
+				lang.LanguageVersionV1,
+				cek.ProtoVersion{
+					Major: tmpPparams.ProtocolVersion.Major,
+					Minor: tmpPparams.ProtocolVersion.Minor,
+				},
+				tmpPparams.CostModels[0],
+			)
+			if err != nil {
+				return 0, lcommon.ExUnits{}, nil, fmt.Errorf("build evaluation context: %w", err)
+			}
+			usedBudget, err := s.Evaluate(
+				datum,
+				redeemer.Data,
 				sc.ToPlutusData(),
-				conwayPParams.MaxTxExUnits,
-				costModel,
+				tmpPparams.MaxTxExUnits,
+				evalContext,
+			)
+			if err != nil {
+				return 0, lcommon.ExUnits{}, nil, err
+			}
+			retTotalExUnits.Steps += usedBudget.Steps
+			retTotalExUnits.Memory += usedBudget.Memory
+			retRedeemerExUnits[lcommon.RedeemerKey{
+				Tag:   redeemer.Tag,
+				Index: redeemer.Index,
+			}] = usedBudget
+		case lcommon.PlutusV2Script:
+			txInfoV2, err := script.NewTxInfoV2FromTransaction(
+				ls,
+				tx,
+				slices.Concat(resolvedInputs, resolvedRefInputs),
+			)
+			if err != nil {
+				return 0, lcommon.ExUnits{}, nil, err
+			}
+			// Get spent UTxO datum
+			var datum data.PlutusData
+			if tmp, ok := purpose.(script.ScriptPurposeSpending); ok {
+				datum = tmp.Datum
+			}
+			sc := script.NewScriptContextV1V2(txInfoV2, purpose)
+			evalContext, err := cek.NewEvalContext(
+				lang.LanguageVersionV2,
+				cek.ProtoVersion{
+					Major: tmpPparams.ProtocolVersion.Major,
+					Minor: tmpPparams.ProtocolVersion.Minor,
+				},
+				tmpPparams.CostModels[1],
+			)
+			if err != nil {
+				return 0, lcommon.ExUnits{}, nil, fmt.Errorf("build evaluation context: %w", err)
+			}
+			usedBudget, err := s.Evaluate(
+				datum,
+				redeemer.Data,
+				sc.ToPlutusData(),
+				tmpPparams.MaxTxExUnits,
+				evalContext,
+			)
+			if err != nil {
+				return 0, lcommon.ExUnits{}, nil, err
+			}
+			retTotalExUnits.Steps += usedBudget.Steps
+			retTotalExUnits.Memory += usedBudget.Memory
+			retRedeemerExUnits[lcommon.RedeemerKey{
+				Tag:   redeemer.Tag,
+				Index: redeemer.Index,
+			}] = usedBudget
+		case lcommon.PlutusV3Script:
+			sc := script.NewScriptContextV3(txInfoV3, redeemer, purpose)
+			evalContext, err := cek.NewEvalContext(
+				lang.LanguageVersionV3,
+				cek.ProtoVersion{
+					Major: tmpPparams.ProtocolVersion.Major,
+					Minor: tmpPparams.ProtocolVersion.Minor,
+				},
+				tmpPparams.CostModels[2],
+			)
+			if err != nil {
+				return 0, lcommon.ExUnits{}, nil, fmt.Errorf("build evaluation context: %w", err)
+			}
+			usedBudget, err := s.Evaluate(
+				sc.ToPlutusData(),
+				tmpPparams.MaxTxExUnits,
+				evalContext,
 			)
 			if err != nil {
 				return 0, lcommon.ExUnits{}, nil, err
