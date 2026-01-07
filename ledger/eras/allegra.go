@@ -143,7 +143,7 @@ func ValidateTxAllegra(
 	ls lcommon.LedgerState,
 	pp lcommon.ProtocolParameters,
 ) error {
-	errs := []error{}
+	errs := make([]error, 0, len(allegra.UtxoValidationRules))
 	for _, validationFunc := range allegra.UtxoValidationRules {
 		errs = append(
 			errs,

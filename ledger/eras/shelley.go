@@ -166,7 +166,7 @@ func ValidateTxShelley(
 	ls lcommon.LedgerState,
 	pp lcommon.ProtocolParameters,
 ) error {
-	errs := []error{}
+	errs := make([]error, 0, len(shelley.UtxoValidationRules))
 	for _, validationFunc := range shelley.UtxoValidationRules {
 		errs = append(
 			errs,

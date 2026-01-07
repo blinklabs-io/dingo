@@ -147,7 +147,7 @@ func ValidateTxAlonzo(
 	ls lcommon.LedgerState,
 	pp lcommon.ProtocolParameters,
 ) error {
-	errs := []error{}
+	errs := make([]error, 0, len(alonzo.UtxoValidationRules))
 	for _, validationFunc := range alonzo.UtxoValidationRules {
 		errs = append(
 			errs,

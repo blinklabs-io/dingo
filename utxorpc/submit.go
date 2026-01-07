@@ -224,8 +224,9 @@ func (s *submitServiceServer) ReadMempool(
 	s.utxorpc.config.Logger.Info("Got a ReadMempool request")
 	resp := &submit.ReadMempoolResponse{}
 
-	mempool := []*submit.TxInMempool{}
-	for _, tx := range s.utxorpc.config.Mempool.Transactions() {
+	txs := s.utxorpc.config.Mempool.Transactions()
+	mempool := make([]*submit.TxInMempool, 0, len(txs))
+	for _, tx := range txs {
 		record := &submit.TxInMempool{
 			NativeBytes: tx.Cbor,
 			Stage:       submit.Stage_STAGE_MEMPOOL,

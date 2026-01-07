@@ -92,8 +92,9 @@ func getMasterKeyGroupsFromEnv() ([]sopsapi.KeyGroup, error) {
 
 	// Configure Google KMS from env to encrypt
 	if rid := os.Getenv("DINGO_GCP_KMS_RESOURCE_ID"); rid != "" {
-		keys := []skeys.MasterKey{}
-		for _, k := range gcpkms.MasterKeysFromResourceIDString(rid) {
+		gcpKeys := gcpkms.MasterKeysFromResourceIDString(rid)
+		keys := make([]skeys.MasterKey, 0, len(gcpKeys))
+		for _, k := range gcpKeys {
 			keys = append(keys, k)
 		}
 		if len(keys) > 0 {
@@ -103,9 +104,10 @@ func getMasterKeyGroupsFromEnv() ([]sopsapi.KeyGroup, error) {
 
 	// Configure AWS KMS from env to encrypt
 	if arns := os.Getenv("DINGO_AWS_KMS_KEY_ARNS"); arns != "" {
-		keys := []skeys.MasterKey{}
 		profile := os.Getenv("DINGO_AWS_KMS_PROFILE")
-		for _, k := range awskms.MasterKeysFromArnString(arns, nil, profile) {
+		awsKeys := awskms.MasterKeysFromArnString(arns, nil, profile)
+		keys := make([]skeys.MasterKey, 0, len(awsKeys))
+		for _, k := range awsKeys {
 			keys = append(keys, k)
 		}
 		if len(keys) > 0 {
