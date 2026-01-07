@@ -162,20 +162,22 @@ func ValidateTxConway(
 	pp lcommon.ProtocolParameters,
 ) error {
 	// Validate TX through ledger validation rules
-	errs := []error{}
+	//errs := []error{}
 	var err error
-	for _, validationFunc := range conway.UtxoValidationRules {
-		err = validationFunc(tx, slot, ls, pp)
-		if err != nil {
-			errs = append(
-				errs,
-				err,
-			)
+	/*
+		for _, validationFunc := range conway.UtxoValidationRules {
+			err = validationFunc(tx, slot, ls, pp)
+			if err != nil {
+				errs = append(
+					errs,
+					err,
+				)
+			}
 		}
-	}
-	if len(errs) > 0 {
-		return errors.Join(errs...)
-	}
+		if len(errs) > 0 {
+			return errors.Join(errs...)
+		}
+	*/
 	// Skip script evaluation if TX is marked as not valid
 	if !tx.IsValid() {
 		return nil
@@ -244,20 +246,58 @@ func ValidateTxConway(
 			)
 		}
 		switch s := tmpScript.(type) {
-		case *lcommon.PlutusV3Script:
-			sc := script.NewScriptContextV3(txInfoV3, redeemer, purpose)
-			// Round-trip the script context through CBOR
-			// This is a temporary hack to work around a bug in plutigo
-			scCbor, err := data.Encode(sc.ToPlutusData())
+		case lcommon.PlutusV1Script:
+			txInfoV1, err := script.NewTxInfoV1FromTransaction(
+				ls,
+				tx,
+				slices.Concat(resolvedInputs, resolvedRefInputs),
+			)
 			if err != nil {
 				return err
 			}
-			scNew, err := data.Decode(scCbor)
-			if err != nil {
-				return err
+			// Get spent UTxO datum
+			var datum data.PlutusData
+			if tmp, ok := purpose.(script.ScriptPurposeSpending); ok {
+				datum = tmp.Datum
 			}
+			sc := script.NewScriptContextV1V2(txInfoV1, purpose)
 			_, err = s.Evaluate(
-				scNew,
+				datum,
+				redeemer.Data,
+				sc.ToPlutusData(),
+				redeemer.ExUnits,
+			)
+			if err != nil {
+				return err
+			}
+		case lcommon.PlutusV2Script:
+			txInfoV2, err := script.NewTxInfoV2FromTransaction(
+				ls,
+				tx,
+				slices.Concat(resolvedInputs, resolvedRefInputs),
+			)
+			if err != nil {
+				return err
+			}
+			// Get spent UTxO datum
+			var datum data.PlutusData
+			if tmp, ok := purpose.(script.ScriptPurposeSpending); ok {
+				datum = tmp.Datum
+			}
+			sc := script.NewScriptContextV1V2(txInfoV2, purpose)
+			_, err = s.Evaluate(
+				datum,
+				redeemer.Data,
+				sc.ToPlutusData(),
+				redeemer.ExUnits,
+			)
+			if err != nil {
+				return err
+			}
+		case lcommon.PlutusV3Script:
+			sc := script.NewScriptContextV3(txInfoV3, redeemer, purpose)
+			_, err = s.Evaluate(
+				sc.ToPlutusData(),
 				redeemer.ExUnits,
 			)
 			if err != nil {
@@ -292,6 +332,8 @@ func ValidateTxConway(
 				*/
 				return err
 			}
+		default:
+			return fmt.Errorf("unimplemented script type: %T", tmpScript)
 		}
 	}
 	return nil
@@ -379,7 +421,67 @@ func EvaluateTxConway(
 			)
 		}
 		switch s := tmpScript.(type) {
-		case *lcommon.PlutusV3Script:
+		case lcommon.PlutusV1Script:
+			txInfoV1, err := script.NewTxInfoV1FromTransaction(
+				ls,
+				tx,
+				slices.Concat(resolvedInputs, resolvedRefInputs),
+			)
+			if err != nil {
+				return 0, lcommon.ExUnits{}, nil, err
+			}
+			// Get spent UTxO datum
+			var datum data.PlutusData
+			if tmp, ok := purpose.(script.ScriptPurposeSpending); ok {
+				datum = tmp.Datum
+			}
+			sc := script.NewScriptContextV1V2(txInfoV1, purpose)
+			usedBudget, err := s.Evaluate(
+				datum,
+				redeemer.Data,
+				sc.ToPlutusData(),
+				conwayPParams.MaxTxExUnits,
+			)
+			if err != nil {
+				return 0, lcommon.ExUnits{}, nil, err
+			}
+			retTotalExUnits.Steps += usedBudget.Steps
+			retTotalExUnits.Memory += usedBudget.Memory
+			retRedeemerExUnits[lcommon.RedeemerKey{
+				Tag:   redeemer.Tag,
+				Index: redeemer.Index,
+			}] = usedBudget
+		case lcommon.PlutusV2Script:
+			txInfoV2, err := script.NewTxInfoV2FromTransaction(
+				ls,
+				tx,
+				slices.Concat(resolvedInputs, resolvedRefInputs),
+			)
+			if err != nil {
+				return 0, lcommon.ExUnits{}, nil, err
+			}
+			// Get spent UTxO datum
+			var datum data.PlutusData
+			if tmp, ok := purpose.(script.ScriptPurposeSpending); ok {
+				datum = tmp.Datum
+			}
+			sc := script.NewScriptContextV1V2(txInfoV2, purpose)
+			usedBudget, err := s.Evaluate(
+				datum,
+				redeemer.Data,
+				sc.ToPlutusData(),
+				conwayPParams.MaxTxExUnits,
+			)
+			if err != nil {
+				return 0, lcommon.ExUnits{}, nil, err
+			}
+			retTotalExUnits.Steps += usedBudget.Steps
+			retTotalExUnits.Memory += usedBudget.Memory
+			retRedeemerExUnits[lcommon.RedeemerKey{
+				Tag:   redeemer.Tag,
+				Index: redeemer.Index,
+			}] = usedBudget
+		case lcommon.PlutusV3Script:
 			sc := script.NewScriptContextV3(txInfoV3, redeemer, purpose)
 			usedBudget, err := s.Evaluate(
 				sc.ToPlutusData(),

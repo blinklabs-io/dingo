@@ -16,7 +16,7 @@ require (
 	github.com/aws/smithy-go v1.24.0
 	github.com/blinklabs-io/gouroboros v0.147.0
 	github.com/blinklabs-io/ouroboros-mock v0.4.0
-	github.com/blinklabs-io/plutigo v0.0.18
+	github.com/blinklabs-io/plutigo v0.0.19
 	github.com/btcsuite/btcd/btcutil v1.1.6
 	github.com/dgraph-io/badger/v4 v4.9.0
 	github.com/getsops/sops/v3 v3.11.0
@@ -42,7 +42,7 @@ require (
 )
 
 // XXX: uncomment when testing local changes to gouroboros
-// replace github.com/blinklabs-io/gouroboros => ../gouroboros
+replace github.com/blinklabs-io/gouroboros => ../gouroboros
 
 // XXX: uncomment when testing local changes to plutigo
 // replace github.com/blinklabs-io/plutigo => ../plutigo
@@ -109,7 +109,7 @@ require (
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/envoyproxy/go-control-plane/envoy v1.35.0 // indirect
 	github.com/envoyproxy/protoc-gen-validate v1.2.1 // indirect
-	github.com/ethereum/go-ethereum v1.16.7 // indirect
+	github.com/ethereum/go-ethereum v1.16.8 // indirect
 	github.com/fatih/color v1.18.0 // indirect
 	github.com/felixge/httpsnoop v1.0.4 // indirect
 	github.com/fxamacker/cbor/v2 v2.9.0 // indirect

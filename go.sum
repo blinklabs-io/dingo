@@ -126,12 +126,10 @@ github.com/bits-and-blooms/bitset v1.24.4 h1:95H15Og1clikBrKr/DuzMXkQzECs1M6hhoG
 github.com/bits-and-blooms/bitset v1.24.4/go.mod h1:7hO7Gc7Pp1vODcmWvKMRA9BNmbv6a/7QIWpPxHddWR8=
 github.com/blang/semver v3.5.1+incompatible h1:cQNTCjp13qL8KC3Nbxr/y2Bqb63oX6wdnnjpJbkM4JQ=
 github.com/blang/semver v3.5.1+incompatible/go.mod h1:kRBLl5iJ+tD4TcOOxsy/0fnwebNt5EWlYSAyrTnjyyk=
-github.com/blinklabs-io/gouroboros v0.147.0 h1:4A88jYoc1OvmC/EqPhvpk3cfmH8jCASOeQy9P6Ps/vg=
-github.com/blinklabs-io/gouroboros v0.147.0/go.mod h1:qRfnn0az84aaPjsvtQK52yoApww0bxQsMu9LJgQ1ftg=
 github.com/blinklabs-io/ouroboros-mock v0.4.0 h1:ppOcTMnC/2f5rYYSlvNqcGfAQOIpMCSDUrNh9K6a4mY=
 github.com/blinklabs-io/ouroboros-mock v0.4.0/go.mod h1:e+Kck8bmdOuaN7IfkbVvbqAVlskXNXB95oHI3YlFG5g=
-github.com/blinklabs-io/plutigo v0.0.18 h1:axw0QVrdiqEjt+ssKs5zY2ycogZ+j5r0IETHkAda+8Q=
-github.com/blinklabs-io/plutigo v0.0.18/go.mod h1:L72ik2SFGruMCxqI5nnuMMz0TwSu9Fk+MekKynr3SPQ=
+github.com/blinklabs-io/plutigo v0.0.19 h1:xEcVuMWUpmhMGP4NvXjiWvB9Ca7JVlDdDZloNAVhTG8=
+github.com/blinklabs-io/plutigo v0.0.19/go.mod h1:1lnzWoxGFZ/kHM7P8yw+XNKACwRgELLaGtm+PDp8uuw=
 github.com/btcsuite/btcd v0.20.1-beta/go.mod h1:wVuoA8VJLEcwgqHBwHmzLRazpKxTv13Px/pDuV7OomQ=
 github.com/btcsuite/btcd v0.22.0-beta.0.20220111032746-97732e52810c/go.mod h1:tjmYdS6MLJ5/s0Fj4DbLgSbDHbEqLJrtnHecBFkdz5M=
 github.com/btcsuite/btcd v0.23.5-0.20231215221805-96c9fd8078fd/go.mod h1:nm3Bko6zh6bWP60UxwoT5LzdGJsQJaPo6HjduXq9p6A=
@@ -211,8 +209,8 @@ github.com/envoyproxy/go-control-plane/ratelimit v0.1.0 h1:/G9QYbddjL25KvtKTv3an
 github.com/envoyproxy/go-control-plane/ratelimit v0.1.0/go.mod h1:Wk+tMFAFbCXaJPzVVHnPgRKdUdwW/KdbRt94AzgRee4=
 github.com/envoyproxy/protoc-gen-validate v1.2.1 h1:DEo3O99U8j4hBFwbJfrz9VtgcDfUKS7KJ7spH3d86P8=
 github.com/envoyproxy/protoc-gen-validate v1.2.1/go.mod h1:d/C80l/jxXLdfEIhX1W2TmLfsJ31lvEjwamM4DxlWXU=
-github.com/ethereum/go-ethereum v1.16.7 h1:qeM4TvbrWK0UC0tgkZ7NiRsmBGwsjqc64BHo20U59UQ=
-github.com/ethereum/go-ethereum v1.16.7/go.mod h1:Fs6QebQbavneQTYcA39PEKv2+zIjX7rPUZ14DER46wk=
+github.com/ethereum/go-ethereum v1.16.8 h1:LLLfkZWijhR5m6yrAXbdlTeXoqontH+Ga2f9igY7law=
+github.com/ethereum/go-ethereum v1.16.8/go.mod h1:Fs6QebQbavneQTYcA39PEKv2+zIjX7rPUZ14DER46wk=
 github.com/fatih/color v1.18.0 h1:S8gINlzdQ840/4pfAwic/ZE0djQEH3wM94VfqLTZcOM=
 github.com/fatih/color v1.18.0/go.mod h1:4FelSpRwEGDpQ12mAdzqdOukCy4u8WUtOY6lkT/6HfU=
 github.com/felixge/httpsnoop v1.0.4 h1:NFTV2Zj1bL4mc9sqWACXbQFVBBg2W3GPvqp8/ESS2Wg=
