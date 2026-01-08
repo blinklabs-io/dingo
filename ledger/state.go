@@ -1463,11 +1463,11 @@ func (ls *LedgerState) UtxoByRef(
 func (ls *LedgerState) UtxosByAddress(
 	addr ledger.Address,
 ) ([]models.Utxo, error) {
-	ret := []models.Utxo{}
 	utxos, err := ls.db.UtxosByAddress(addr, nil)
 	if err != nil {
-		return ret, err
+		return nil, err
 	}
+	ret := make([]models.Utxo, 0, len(utxos))
 	ret = append(ret, utxos...)
 	return ret, nil
 }

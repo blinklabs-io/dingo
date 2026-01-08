@@ -143,7 +143,7 @@ func ValidateTxMary(
 	ls lcommon.LedgerState,
 	pp lcommon.ProtocolParameters,
 ) error {
-	errs := []error{}
+	errs := make([]error, 0, len(mary.UtxoValidationRules))
 	for _, validationFunc := range mary.UtxoValidationRules {
 		errs = append(
 			errs,

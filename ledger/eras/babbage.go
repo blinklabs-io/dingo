@@ -143,7 +143,7 @@ func ValidateTxBabbage(
 	ls lcommon.LedgerState,
 	pp lcommon.ProtocolParameters,
 ) error {
-	errs := []error{}
+	errs := make([]error, 0, len(babbage.UtxoValidationRules))
 	for _, validationFunc := range babbage.UtxoValidationRules {
 		errs = append(
 			errs,
