@@ -64,6 +64,10 @@ type MetadataStore interface {
 		types.Txn,
 	) (*models.Pool, error)
 
+	// GetActivePoolRelays retrieves all relays from currently active pools.
+	// This is used for ledger peer discovery.
+	GetActivePoolRelays(types.Txn) ([]models.PoolRegistrationRelay, error)
+
 	// GetStakeRegistrations retrieves all stake registration certificates for an account.
 	GetStakeRegistrations(
 		[]byte, // stakeKey

@@ -195,14 +195,31 @@ func (n *Node) Run(ctx context.Context) error {
 		return err
 	}
 	// Configure peer governor
+	// Create ledger peer provider for discovering peers from stake pool relays
+	ledgerPeerProvider, err := ledger.NewLedgerPeerProvider(n.ledgerState, n.db)
+	if err != nil {
+		return fmt.Errorf("failed to create ledger peer provider: %w", err)
+	}
+
+	// Get UseLedgerAfterSlot from topology config (defaults to -1 = disabled)
+	var useLedgerAfterSlot int64 = -1
+	if n.config.topologyConfig != nil {
+		useLedgerAfterSlot = n.config.topologyConfig.UseLedgerAfterSlot
+	}
+
 	n.peerGov = peergov.NewPeerGovernor(
 		peergov.PeerGovernorConfig{
-			Logger:          n.config.logger,
-			EventBus:        n.eventBus,
-			ConnManager:     n.connManager,
-			DisableOutbound: n.config.devMode,
-			PromRegistry:    n.config.promRegistry,
-			PeerRequestFunc: n.ouroboros.RequestPeersFromPeer,
+			Logger:             n.config.logger,
+			EventBus:           n.eventBus,
+			ConnManager:        n.connManager,
+			DisableOutbound:    n.config.devMode,
+			PromRegistry:       n.config.promRegistry,
+			PeerRequestFunc:    n.ouroboros.RequestPeersFromPeer,
+			LedgerPeerProvider: ledgerPeerProvider,
+			UseLedgerAfterSlot: useLedgerAfterSlot,
+			MaxColdPeers:       n.config.maxColdPeers,
+			MaxWarmPeers:       n.config.maxWarmPeers,
+			MaxHotPeers:        n.config.maxHotPeers,
 		},
 	)
 	n.ouroboros.PeerGov = n.peerGov
