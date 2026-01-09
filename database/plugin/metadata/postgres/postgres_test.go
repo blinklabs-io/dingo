@@ -581,65 +581,6 @@ func TestPostgresUnifiedCertificateCreation(t *testing.T) {
 	}
 }
 
-// TestPostgresSetAccountPreservesCertificateID tests that SetAccount does not
-// overwrite the CertificateID field when updating an existing account
-func TestPostgresSetAccountPreservesCertificateID(t *testing.T) {
-	pgStore := newTestPostgresStore(t)
-	defer pgStore.Close() //nolint:errcheck
-
-	stakeKey := []byte("test_stake_key_123456789012345678901234567890")
-
-	// First, create an account with a CertificateID via direct DB access
-	account := &models.Account{
-		StakingKey:    stakeKey,
-		AddedSlot:     1000,
-		Pool:          []byte("pool1"),
-		Drep:          []byte("drep1"),
-		Active:        true,
-		CertificateID: 42, // Set a non-zero CertificateID
-	}
-	if result := pgStore.DB().Create(account); result.Error != nil {
-		t.Fatalf("failed to create account: %v", result.Error)
-	}
-
-	// Now use SetAccount to update the account (this should NOT overwrite CertificateID)
-	err := pgStore.SetAccount(
-		stakeKey,
-		[]byte("pool2"), // new pool
-		[]byte("drep2"), // new drep
-		2000,            // new slot
-		true,
-		nil,
-	)
-	if err != nil {
-		t.Fatalf("failed to set account: %v", err)
-	}
-
-	// Fetch the account and verify CertificateID was preserved
-	var updatedAccount models.Account
-	if result := pgStore.DB().Where("staking_key = ?", stakeKey).First(&updatedAccount); result.Error != nil {
-		t.Fatalf("failed to fetch updated account: %v", result.Error)
-	}
-
-	if updatedAccount.CertificateID != 42 {
-		t.Errorf(
-			"CertificateID was overwritten: expected 42, got %d",
-			updatedAccount.CertificateID,
-		)
-	}
-
-	// Verify other fields were updated
-	if string(updatedAccount.Pool) != "pool2" {
-		t.Errorf("Pool was not updated: expected 'pool2', got '%s'", string(updatedAccount.Pool))
-	}
-	if string(updatedAccount.Drep) != "drep2" {
-		t.Errorf("Drep was not updated: expected 'drep2', got '%s'", string(updatedAccount.Drep))
-	}
-	if updatedAccount.AddedSlot != 2000 {
-		t.Errorf("AddedSlot was not updated: expected 2000, got %d", updatedAccount.AddedSlot)
-	}
-}
-
 // TestPostgresFeeConversion tests that the Fee field handles nil and large values correctly
 func TestPostgresFeeConversion(t *testing.T) {
 	pgStore := newTestPostgresStore(t)

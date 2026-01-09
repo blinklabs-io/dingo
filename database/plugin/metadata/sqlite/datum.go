@@ -16,6 +16,7 @@ package sqlite
 
 import (
 	"errors"
+	"fmt"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
@@ -68,7 +69,7 @@ func (d *MetadataStoreSqlite) SetDatum(
 	}
 	result := db.Clauses(onConflict).Create(&tmpItem)
 	if result.Error != nil {
-		return result.Error
+		return fmt.Errorf("create datum: %w", result.Error)
 	}
 	return nil
 }

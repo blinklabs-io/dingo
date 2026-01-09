@@ -23,13 +23,12 @@ import (
 var ErrDrepNotFound = errors.New("drep not found")
 
 type Drep struct {
-	AnchorUrl     string
-	Credential    []byte `gorm:"uniqueIndex"`
-	AnchorHash    []byte
-	CertificateID uint `gorm:"index"`
-	ID            uint `gorm:"primarykey"`
-	AddedSlot     uint64
-	Active        bool `gorm:"default:true"`
+	AnchorUrl  string
+	Credential []byte `gorm:"uniqueIndex"`
+	AnchorHash []byte
+	ID         uint   `gorm:"primarykey"`
+	AddedSlot  uint64 `gorm:"index"`
+	Active     bool   `gorm:"default:true"`
 }
 
 func (d *Drep) TableName() string {
@@ -40,7 +39,7 @@ type DeregistrationDrep struct {
 	DrepCredential []byte `gorm:"index"`
 	CertificateID  uint   `gorm:"index"`
 	ID             uint   `gorm:"primarykey"`
-	AddedSlot      uint64
+	AddedSlot      uint64 `gorm:"index"`
 	DepositAmount  types.Uint64
 }
 
@@ -52,9 +51,9 @@ type RegistrationDrep struct {
 	AnchorUrl      string
 	DrepCredential []byte `gorm:"index"`
 	AnchorHash     []byte
-	CertificateID  uint `gorm:"index"`
-	ID             uint `gorm:"primarykey"`
-	AddedSlot      uint64
+	CertificateID  uint   `gorm:"index"`
+	ID             uint   `gorm:"primarykey"`
+	AddedSlot      uint64 `gorm:"index"`
 	DepositAmount  types.Uint64
 }
 
@@ -66,9 +65,9 @@ type UpdateDrep struct {
 	AnchorUrl     string
 	Credential    []byte `gorm:"index"`
 	AnchorHash    []byte
-	CertificateID uint `gorm:"index"`
-	ID            uint `gorm:"primarykey"`
-	AddedSlot     uint64
+	CertificateID uint   `gorm:"index"`
+	ID            uint   `gorm:"primarykey"`
+	AddedSlot     uint64 `gorm:"index"`
 }
 
 func (UpdateDrep) TableName() string {

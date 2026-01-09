@@ -112,9 +112,13 @@ func (lv *LedgerView) PoolCurrentState(
 	if len(pool.Registration) > 0 {
 		var latestIdx int
 		var latestSlot uint64
+		var latestCertID uint
 		for i, reg := range pool.Registration {
-			if reg.AddedSlot >= latestSlot {
+			// Use CertificateID for deterministic disambiguation when slots are equal
+			if reg.AddedSlot > latestSlot ||
+				(reg.AddedSlot == latestSlot && reg.CertificateID > latestCertID) {
 				latestSlot = reg.AddedSlot
+				latestCertID = reg.CertificateID
 				latestIdx = i
 			}
 		}
@@ -136,13 +140,13 @@ func (lv *LedgerView) PoolCurrentState(
 		tmp.RewardAccount = lcommon.AddrKeyHash(
 			lcommon.NewBlake2b224(pool.RewardAccount),
 		)
-		for _, owner := range pool.Owners {
+		for _, owner := range reg.Owners {
 			tmp.PoolOwners = append(
 				tmp.PoolOwners,
 				lcommon.AddrKeyHash(lcommon.NewBlake2b224(owner.KeyHash)),
 			)
 		}
-		for _, relay := range pool.Relays {
+		for _, relay := range reg.Relays {
 			r := lcommon.PoolRelay{}
 			if relay.Port != 0 {
 				port := uint32(relay.Port) // #nosec G115

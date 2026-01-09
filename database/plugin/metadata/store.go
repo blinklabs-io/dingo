@@ -244,6 +244,42 @@ type MetadataStore interface {
 
 	// SetUtxosNotDeletedAfterSlot marks all UTxOs created after the given slot as not deleted.
 	SetUtxosNotDeletedAfterSlot(uint64, types.Txn) error
+
+	// Rollback methods
+
+	// DeleteCertificatesAfterSlot removes all certificate records added after the given slot.
+	// This includes all certificate-related tables: stake registrations, delegations,
+	// pool registrations, DRep registrations, and their associated records.
+	DeleteCertificatesAfterSlot(uint64, types.Txn) error
+
+	// RestoreAccountStateAtSlot reverts account delegation state to the given slot.
+	// For accounts modified after the slot, this restores their Pool and Drep
+	// delegations to the state they had at the given slot, or marks them inactive
+	// if they were registered after that slot.
+	RestoreAccountStateAtSlot(uint64, types.Txn) error
+
+	// RestorePoolStateAtSlot reverts pool state to the given slot.
+	// Pools that have no registrations at or before the given slot are deleted.
+	// Pool retirement records added after the slot are removed via
+	// DeleteCertificatesAfterSlot, effectively undoing any retirements.
+	RestorePoolStateAtSlot(uint64, types.Txn) error
+
+	// RestoreDrepStateAtSlot reverts DRep state to the given slot.
+	// DReps that have no registrations at or before the given slot are deleted.
+	// DReps that have prior registrations have their Active status and anchor
+	// data restored based on the most recent certificate at or before the slot.
+	// DRep retirement records added after the slot are removed via
+	// DeleteCertificatesAfterSlot, effectively undoing any retirements.
+	RestoreDrepStateAtSlot(uint64, types.Txn) error
+
+	// DeletePParamsAfterSlot removes protocol parameter records added after the given slot.
+	DeletePParamsAfterSlot(uint64, types.Txn) error
+
+	// DeletePParamUpdatesAfterSlot removes protocol parameter update records added after the given slot.
+	DeletePParamUpdatesAfterSlot(uint64, types.Txn) error
+
+	// DeleteTransactionsAfterSlot removes transaction records added after the given slot.
+	DeleteTransactionsAfterSlot(uint64, types.Txn) error
 }
 
 // New creates a new metadata store instance using the specified plugin

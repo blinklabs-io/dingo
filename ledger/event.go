@@ -23,9 +23,11 @@ import (
 )
 
 const (
-	BlockfetchEventType  event.EventType = "blockfetch.event"
-	ChainsyncEventType   event.EventType = "chainsync.event"
-	LedgerErrorEventType event.EventType = "ledger.error"
+	BlockfetchEventType        event.EventType = "blockfetch.event"
+	ChainsyncEventType         event.EventType = "chainsync.event"
+	LedgerErrorEventType       event.EventType = "ledger.error"
+	TransactionEventType       event.EventType = "ledger.tx"
+	PoolStateRestoredEventType event.EventType = "ledger.pool.restored"
 )
 
 // BlockfetchEvent represents either a Block or BatchDone blockfetch event. We use
@@ -55,4 +57,20 @@ type LedgerErrorEvent struct {
 	Error     error         // The actual error that occurred
 	Operation string        // The operation that failed (e.g., "block_header", "rollback")
 	Point     ocommon.Point // Chain point where the error occurred, if applicable
+}
+
+// TransactionEvent is emitted when a transaction is applied or rolled back.
+// Check the Rollback field to determine direction.
+type TransactionEvent struct {
+	Transaction ledger.Transaction
+	Point       ocommon.Point
+	BlockNumber uint64
+	TxIndex     uint32
+	Rollback    bool
+}
+
+// PoolStateRestoredEvent is emitted after pool state is restored during a rollback.
+// Subscribers (like peer providers) can use this to invalidate cached pool data.
+type PoolStateRestoredEvent struct {
+	Slot uint64 // The slot to which pool state was restored
 }

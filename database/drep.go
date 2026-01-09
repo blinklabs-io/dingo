@@ -37,3 +37,23 @@ func (d *Database) GetDrep(
 	}
 	return ret, nil
 }
+
+// RestoreDrepStateAtSlot reverts DRep state to the given slot.
+// This is used during chain rollbacks to undo DRep registration/retirement changes.
+func (d *Database) RestoreDrepStateAtSlot(slot uint64, txn *Txn) error {
+	owned := false
+	if txn == nil {
+		txn = d.Transaction(true)
+		owned = true
+		defer txn.Rollback() //nolint:errcheck
+	}
+	if err := d.metadata.RestoreDrepStateAtSlot(slot, txn.Metadata()); err != nil {
+		return err
+	}
+	if owned {
+		if err := txn.Commit(); err != nil {
+			return err
+		}
+	}
+	return nil
+}

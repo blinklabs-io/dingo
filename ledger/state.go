@@ -23,6 +23,7 @@ import (
 	"log/slog"
 	"math/big"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/blinklabs-io/dingo/chain"
@@ -366,10 +367,15 @@ type LedgerState struct {
 	sync.RWMutex
 	chainsyncMutex             sync.Mutex
 	chainsyncBlockfetchMutex   sync.Mutex
+	rollbackWG                 sync.WaitGroup
 	chainsyncBlockfetchWaiting bool
 	checkpointWrittenForEpoch  bool
-	closed                     bool
+	closed                     atomic.Bool
 	inRecovery                 bool // guards against recursive recovery in SubmitAsyncDBTxn
+	// Subscription IDs for unsubscribing during Close()
+	chainsyncSubID   event.EventSubscriberId
+	blockfetchSubID  event.EventSubscriberId
+	chainUpdateSubID event.EventSubscriberId
 }
 
 func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
@@ -420,13 +426,17 @@ func (ls *LedgerState) Start(ctx context.Context) error {
 
 	// Setup event handlers
 	if ls.config.EventBus != nil {
-		ls.config.EventBus.SubscribeFunc(
+		ls.chainsyncSubID = ls.config.EventBus.SubscribeFunc(
 			ChainsyncEventType,
 			ls.handleEventChainsync,
 		)
-		ls.config.EventBus.SubscribeFunc(
+		ls.blockfetchSubID = ls.config.EventBus.SubscribeFunc(
 			BlockfetchEventType,
 			ls.handleEventBlockfetch,
+		)
+		ls.chainUpdateSubID = ls.config.EventBus.SubscribeFunc(
+			chain.ChainUpdateEventType,
+			ls.handleEventChainUpdate,
 		)
 	}
 	// Schedule periodic process to purge consumed UTxOs outside of the rollback window
@@ -493,13 +503,28 @@ func (ls *LedgerState) Datum(hash []byte) (*models.Datum, error) {
 }
 
 func (ls *LedgerState) Close() error {
-	ls.Lock()
-	if ls.closed {
-		ls.Unlock()
+	// Use atomic swap to ensure only one Close() proceeds.
+	if !ls.closed.CompareAndSwap(false, true) {
 		return nil
 	}
-	ls.closed = true
-	ls.Unlock()
+
+	// Unsubscribe from all events BEFORE waiting on rollbackWG.
+	// This prevents the race condition where handleEventChainUpdate could call
+	// rollbackWG.Add(1) after we've started Wait(), which would cause a panic.
+	// The closed flag check in handleEventChainUpdate alone is not sufficient
+	// due to the TOCTOU race between Load() and Add(1).
+	if ls.config.EventBus != nil {
+		ls.config.EventBus.Unsubscribe(ChainsyncEventType, ls.chainsyncSubID)
+		ls.config.EventBus.Unsubscribe(BlockfetchEventType, ls.blockfetchSubID)
+		ls.config.EventBus.Unsubscribe(
+			chain.ChainUpdateEventType,
+			ls.chainUpdateSubID,
+		)
+	}
+
+	// Wait for any pending rollback event emitters to finish.
+	// Now safe because no new events can trigger handleEventChainUpdate.
+	ls.rollbackWG.Wait()
 
 	// Shutdown database worker pool
 	if ls.dbWorkerPool != nil {
@@ -631,6 +656,70 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 				err,
 			)
 		}
+
+		// Delete certificate records added after rollback slot
+		err = ls.db.DeleteCertificatesAfterSlot(point.Slot, txn)
+		if err != nil {
+			return fmt.Errorf(
+				"delete certificates after rollback: %w",
+				err,
+			)
+		}
+
+		// Restore account delegation state to rollback slot
+		err = ls.db.RestoreAccountStateAtSlot(point.Slot, txn)
+		if err != nil {
+			return fmt.Errorf(
+				"restore account state after rollback: %w",
+				err,
+			)
+		}
+
+		// Restore pool state to rollback slot
+		err = ls.db.RestorePoolStateAtSlot(point.Slot, txn)
+		if err != nil {
+			return fmt.Errorf(
+				"restore pool state after rollback: %w",
+				err,
+			)
+		}
+
+		// Restore DRep state to rollback slot
+		err = ls.db.RestoreDrepStateAtSlot(point.Slot, txn)
+		if err != nil {
+			return fmt.Errorf(
+				"restore drep state after rollback: %w",
+				err,
+			)
+		}
+
+		// Delete protocol parameters added after rollback slot
+		err = ls.db.DeletePParamsAfterSlot(point.Slot, txn)
+		if err != nil {
+			return fmt.Errorf(
+				"delete pparams after rollback: %w",
+				err,
+			)
+		}
+
+		// Delete protocol parameter updates added after rollback slot
+		err = ls.db.DeletePParamUpdatesAfterSlot(point.Slot, txn)
+		if err != nil {
+			return fmt.Errorf(
+				"delete pparam updates after rollback: %w",
+				err,
+			)
+		}
+
+		// Delete transaction records added after rollback slot
+		err = ls.db.DeleteTransactionsAfterSlot(point.Slot, txn)
+		if err != nil {
+			return fmt.Errorf(
+				"delete transactions after rollback: %w",
+				err,
+			)
+		}
+
 		// Update tip
 		ls.currentTip = ochainsync.Tip{
 			Point: point,
@@ -651,9 +740,25 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 	if err != nil {
 		return err
 	}
+	// Notify subscribers that pool state has been restored (e.g., for cache invalidation)
+	// This is done after the transaction commits to avoid notifying on failed rollbacks.
+	// Use PublishAsync to avoid blocking/deadlock since rollback may be called with locks held.
+	if ls.config.EventBus != nil {
+		ls.config.EventBus.PublishAsync(
+			PoolStateRestoredEventType,
+			event.NewEvent(
+				PoolStateRestoredEventType,
+				PoolStateRestoredEvent{Slot: point.Slot},
+			),
+		)
+	}
 	// Reload tip
 	if err := ls.loadTip(); err != nil {
 		return fmt.Errorf("failed to load tip: %w", err)
+	}
+	// Reload protocol parameters to reflect rolled-back state
+	if err := ls.loadPParams(); err != nil {
+		return fmt.Errorf("failed to reload pparams after rollback: %w", err)
 	}
 	var hash string
 	if point.Slot == 0 {
@@ -1202,7 +1307,11 @@ func (ls *LedgerState) ledgerProcessBlock(
 	var delta *LedgerDelta
 	for i, tx := range block.Transactions() {
 		if delta == nil {
-			delta = NewLedgerDelta(point, uint(block.Era().Id))
+			delta = NewLedgerDelta(
+				point,
+				uint(block.Era().Id),
+				block.BlockNumber(),
+			)
 		}
 		// Validate transaction
 		if shouldValidate {

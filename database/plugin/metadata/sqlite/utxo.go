@@ -16,12 +16,20 @@ package sqlite
 
 import (
 	"errors"
+	"fmt"
+	"strings"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	"gorm.io/gorm"
 )
+
+// UtxoRef represents a reference to a UTXO by transaction ID and output index
+type UtxoRef struct {
+	TxId      []byte
+	OutputIdx uint32
+}
 
 // GetUtxo returns a Utxo by reference
 func (d *MetadataStoreSqlite) GetUtxo(
@@ -43,6 +51,62 @@ func (d *MetadataStoreSqlite) GetUtxo(
 		return nil, result.Error
 	}
 	return ret, nil
+}
+
+// batchChunkSize is the maximum number of UTXO refs to query in a single SQL statement.
+// Each ref uses 2 bind parameters (tx_id and output_idx), so this must be <= 499 to stay
+// under SQLite's default SQLITE_MAX_VARIABLE_NUMBER limit of 999 bind parameters.
+const batchChunkSize = 499
+
+// GetUtxosBatch retrieves multiple UTXOs by their references in a single query.
+// Returns a map keyed by "txid:outputidx" for easy lookup.
+// Large batches are automatically chunked to avoid SQLite expression limits.
+func (d *MetadataStoreSqlite) GetUtxosBatch(
+	refs []UtxoRef,
+	txn types.Txn,
+) (map[string]*models.Utxo, error) {
+	if len(refs) == 0 {
+		return make(map[string]*models.Utxo), nil
+	}
+
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return nil, err
+	}
+
+	result := make(map[string]*models.Utxo, len(refs))
+
+	// Process in chunks to avoid SQLite expression depth limits
+	for i := 0; i < len(refs); i += batchChunkSize {
+		end := min(i+batchChunkSize, len(refs))
+		chunk := refs[i:end]
+
+		// Build OR conditions for this chunk with preallocated slices
+		conditions := make([]string, 0, len(chunk))
+		args := make([]any, 0, len(chunk)*2)
+		for _, ref := range chunk {
+			conditions = append(conditions, "(tx_id = ? AND output_idx = ?)")
+			args = append(args, ref.TxId, ref.OutputIdx)
+		}
+
+		var utxos []models.Utxo
+		// Wrap OR conditions in parentheses to ensure deleted_slot=0 applies to all refs.
+		// Without parens, SQL operator precedence (AND > OR) causes deleted_slot=0
+		// to only apply to the first condition.
+		query := db.Where("deleted_slot = 0").
+			Where("("+strings.Join(conditions, " OR ")+")", args...)
+		if queryResult := query.Find(&utxos); queryResult.Error != nil {
+			return nil, queryResult.Error
+		}
+
+		// Add to result map
+		for j := range utxos {
+			key := fmt.Sprintf("%x:%d", utxos[j].TxId, utxos[j].OutputIdx)
+			result[key] = &utxos[j]
+		}
+	}
+
+	return result, nil
 }
 
 // GetUtxosAddedAfterSlot returns a list of Utxos added after a given slot
@@ -152,10 +216,20 @@ func (d *MetadataStoreSqlite) DeleteUtxos(
 	if err != nil {
 		return err
 	}
-	// Delete each UTxO by tx_id and output_idx. Use a transaction-aware delete.
-	for _, u := range utxos {
-		result := db.Where("tx_id = ? AND output_idx = ?", u.Hash, u.Idx).
-			Delete(&models.Utxo{})
+	// Process in chunks to avoid SQLite bind parameter limits
+	for i := 0; i < len(utxos); i += batchChunkSize {
+		end := min(i+batchChunkSize, len(utxos))
+		chunk := utxos[i:end]
+
+		// Build batch delete with OR conditions for this chunk (preallocated slices)
+		conditions := make([]string, 0, len(chunk))
+		args := make([]any, 0, len(chunk)*2)
+		for _, u := range chunk {
+			conditions = append(conditions, "(tx_id = ? AND output_idx = ?)")
+			args = append(args, u.Hash, u.Idx)
+		}
+		query := strings.Join(conditions, " OR ")
+		result := db.Where(query, args...).Delete(&models.Utxo{})
 		if result.Error != nil {
 			return result.Error
 		}

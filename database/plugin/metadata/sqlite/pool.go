@@ -25,6 +25,112 @@ import (
 	"gorm.io/gorm"
 )
 
+// poolRegRecord holds registration data for batch processing during pool restoration.
+// Includes blockIndex, certIndex, and certID for deterministic same-slot disambiguation.
+type poolRegRecord struct {
+	pledge        types.Uint64
+	cost          types.Uint64
+	margin        *types.Rat
+	vrfKeyHash    []byte
+	rewardAccount []byte
+	addedSlot     uint64
+	blockIndex    uint32
+	certIndex     uint32
+	certID        uint
+}
+
+// isMoreRecent checks if this registration is more recent than the other.
+// Uses lexicographic comparison of (addedSlot, blockIndex, certIndex, certID)
+// for deterministic ordering when multiple registrations occur in the same slot.
+func (r poolRegRecord) isMoreRecent(other poolRegRecord) bool {
+	if r.addedSlot != other.addedSlot {
+		return r.addedSlot > other.addedSlot
+	}
+	if r.blockIndex != other.blockIndex {
+		return r.blockIndex > other.blockIndex
+	}
+	if r.certIndex != other.certIndex {
+		return r.certIndex > other.certIndex
+	}
+	return r.certID > other.certID
+}
+
+// poolRegCache holds batch-fetched registration data for all pools being restored.
+type poolRegCache struct {
+	// Maps pool ID to the most recent registration
+	registration map[uint]poolRegRecord
+	hasReg       map[uint]bool
+}
+
+// newPoolRegCache creates an empty pool registration cache.
+func newPoolRegCache(capacity int) *poolRegCache {
+	return &poolRegCache{
+		registration: make(map[uint]poolRegRecord, capacity),
+		hasReg:       make(map[uint]bool, capacity),
+	}
+}
+
+// batchFetchPoolRegs fetches all relevant registrations for the given pool IDs
+// at or before the given slot. Uses one query with JOIN to get cert_index for
+// same-slot disambiguation. Chunks queries to avoid exceeding SQLite bind
+// variable limits.
+func batchFetchPoolRegs(
+	db *gorm.DB,
+	poolIDs []uint,
+	slot uint64,
+) (*poolRegCache, error) {
+	cache := newPoolRegCache(len(poolIDs))
+
+	// Process pool IDs in chunks to avoid SQLite bind variable limits
+	for start := 0; start < len(poolIDs); start += sqliteBindVarLimit {
+		end := min(start+sqliteBindVarLimit, len(poolIDs))
+		idChunk := poolIDs[start:end]
+
+		// Fetch registration records with cert_index, block_index, and cert ID from joined tables
+		type regResult struct {
+			PoolID        uint
+			AddedSlot     uint64
+			BlockIndex    uint32
+			CertIndex     uint32
+			CertID        uint
+			Pledge        types.Uint64
+			Cost          types.Uint64
+			Margin        *types.Rat
+			VrfKeyHash    []byte
+			RewardAccount []byte
+		}
+		var regRecords []regResult
+		if err := db.Table("pool_registration").
+			Select("pool_registration.pool_id, pool_registration.added_slot, pool_registration.pledge, pool_registration.cost, pool_registration.margin, pool_registration.vrf_key_hash, pool_registration.reward_account, certs.cert_index, certs.id AS cert_id, transaction.block_index").
+			Joins("INNER JOIN certs ON certs.id = pool_registration.certificate_id").
+			Joins("INNER JOIN transaction ON transaction.id = certs.transaction_id").
+			Where("pool_registration.pool_id IN ? AND pool_registration.added_slot <= ?", idChunk, slot).
+			Find(&regRecords).Error; err != nil {
+			return nil, err
+		}
+		for _, r := range regRecords {
+			rec := poolRegRecord{
+				addedSlot:     r.AddedSlot,
+				blockIndex:    r.BlockIndex,
+				certIndex:     r.CertIndex,
+				certID:        r.CertID,
+				pledge:        r.Pledge,
+				cost:          r.Cost,
+				margin:        r.Margin,
+				vrfKeyHash:    r.VrfKeyHash,
+				rewardAccount: r.RewardAccount,
+			}
+			if !cache.hasReg[r.PoolID] ||
+				rec.isMoreRecent(cache.registration[r.PoolID]) {
+				cache.registration[r.PoolID] = rec
+				cache.hasReg[r.PoolID] = true
+			}
+		}
+	}
+
+	return cache, nil
+}
+
 // GetPool gets a pool
 func (d *MetadataStoreSqlite) GetPool(
 	pkh lcommon.PoolKeyHash,
@@ -39,11 +145,13 @@ func (d *MetadataStoreSqlite) GetPool(
 	result := db.
 		Preload(
 			"Registration",
-			func(db *gorm.DB) *gorm.DB { return db.Order("added_slot DESC").Limit(1) },
+			func(db *gorm.DB) *gorm.DB { return db.Order("added_slot DESC, id DESC").Limit(1) },
 		).
+		Preload("Registration.Owners").
+		Preload("Registration.Relays").
 		Preload(
 			"Retirement",
-			func(db *gorm.DB) *gorm.DB { return db.Order("added_slot DESC").Limit(1) },
+			func(db *gorm.DB) *gorm.DB { return db.Order("added_slot DESC, id DESC").Limit(1) },
 		).
 		First(
 			ret,
@@ -95,6 +203,110 @@ func (d *MetadataStoreSqlite) GetPool(
 		}
 	}
 	return ret, nil
+}
+
+// RestorePoolStateAtSlot reverts pool state to the given slot.
+//
+// This function handles two cases for pools:
+//  1. Pools with no registration certificates at or before the slot are deleted
+//     (they didn't exist at that point in the chain).
+//  2. Pools with at least one registration at or before the slot have their
+//     denormalized fields (Pledge, Cost, Margin, VrfKeyHash, RewardAccount)
+//     restored from the most recent such registration.
+//
+// Child records are automatically removed via CASCADE constraints when pools
+// are deleted. PoolRegistration records after the slot are removed separately
+// by DeleteCertificatesAfterSlot.
+//
+// This implementation uses batch fetching to avoid N+1 query patterns:
+// instead of querying certificates per-pool, it fetches all relevant
+// registrations for all affected pools upfront in one query with a JOIN
+// to the certs table to get cert_index for deterministic same-slot ordering.
+func (d *MetadataStoreSqlite) RestorePoolStateAtSlot(
+	slot uint64,
+	txn types.Txn,
+) error {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return err
+	}
+
+	// Phase 1: Delete pools with no registrations at or before the rollback slot
+	poolsWithNoValidRegsSubquery := db.Model(&models.Pool{}).
+		Select("pool.id").
+		Where(
+			"NOT EXISTS (?)",
+			db.Model(&models.PoolRegistration{}).
+				Select("1").
+				Where("pool_registration.pool_id = pool.id AND pool_registration.added_slot <= ?", slot),
+		)
+
+	if result := db.Where(
+		"id IN (?)",
+		poolsWithNoValidRegsSubquery,
+	).Delete(&models.Pool{}); result.Error != nil {
+		return result.Error
+	}
+
+	// Phase 2: Restore denormalized fields for remaining pools that had any
+	// registration after the rollback slot. These pools survive Phase 1
+	// (meaning they have at least one registration at or before the slot),
+	// but their denormalized fields may reflect a now-invalid later registration.
+	var poolsToRestore []models.Pool
+	poolsWithRegsAfterSlotSubquery := db.Model(&models.PoolRegistration{}).
+		Select("DISTINCT pool_id").
+		Where("added_slot > ?", slot)
+
+	if result := db.Where(
+		"id IN (?)",
+		poolsWithRegsAfterSlotSubquery,
+	).Find(&poolsToRestore); result.Error != nil {
+		return result.Error
+	}
+
+	if len(poolsToRestore) == 0 {
+		return nil
+	}
+
+	// Extract pool IDs for batch fetching
+	poolIDs := make([]uint, len(poolsToRestore))
+	for i, pool := range poolsToRestore {
+		poolIDs[i] = pool.ID
+	}
+
+	// Batch-fetch all registrations for all affected pools
+	cache, err := batchFetchPoolRegs(db, poolIDs, slot)
+	if err != nil {
+		return err
+	}
+
+	// Process each pool using the cached registration data
+	for _, pool := range poolsToRestore {
+		// Get registration from cache (must exist due to Phase 1 deletion)
+		latestReg, hasRegAtSlot := cache.registration[pool.ID], cache.hasReg[pool.ID]
+		if !hasRegAtSlot {
+			// This indicates database inconsistency: Phase 1 should have deleted
+			// any pool without a registration cert at or before the rollback slot.
+			return fmt.Errorf(
+				"pool %d has no registration cert at or before slot %d but wasn't deleted in Phase 1",
+				pool.ID,
+				slot,
+			)
+		}
+
+		// Update the Pool's denormalized fields from the registration
+		if result := db.Model(&pool).Updates(map[string]any{
+			"pledge":         latestReg.pledge,
+			"cost":           latestReg.cost,
+			"margin":         latestReg.margin,
+			"vrf_key_hash":   latestReg.vrfKeyHash,
+			"reward_account": latestReg.rewardAccount,
+		}); result.Error != nil {
+			return result.Error
+		}
+	}
+
+	return nil
 }
 
 // GetPoolRegistrations returns pool registration certificates
@@ -249,11 +461,11 @@ func (d *MetadataStoreSqlite) GetActivePoolRelays(
 	var pools []models.Pool
 	result := db.
 		Preload("Registration", func(db *gorm.DB) *gorm.DB {
-			return db.Order("added_slot DESC")
+			return db.Order("added_slot DESC, id DESC")
 		}).
 		Preload("Registration.Relays").
 		Preload("Retirement", func(db *gorm.DB) *gorm.DB {
-			return db.Order("added_slot DESC")
+			return db.Order("added_slot DESC, id DESC")
 		}).
 		Find(&pools)
 	if result.Error != nil {

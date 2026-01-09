@@ -24,7 +24,9 @@ import (
 )
 
 const (
-	EventQueueSize = 20
+	EventQueueSize      = 20
+	AsyncQueueSize      = 1000
+	AsyncWorkerPoolSize = 4
 )
 
 type EventType string
@@ -47,15 +49,29 @@ func NewEvent(eventType EventType, eventData any) Event {
 	}
 }
 
+// asyncEvent wraps an event with its type for the async queue
+type asyncEvent struct {
+	eventType EventType
+	event     Event
+}
+
 type EventBus struct {
 	subscribers map[EventType]map[EventSubscriberId]Subscriber
 	metrics     *eventMetrics
 	lastSubId   EventSubscriberId
 	mu          sync.RWMutex
 	Logger      *slog.Logger
+
+	// Async publishing infrastructure
+	asyncQueue chan asyncEvent
+	asyncWg    sync.WaitGroup
+	stopCh     chan struct{}
+	stopped    bool
+	stopMu     sync.RWMutex
+	stopOpMu   sync.Mutex // Serializes Stop() calls to prevent duplicate worker pools
 }
 
-// NewEventBus creates a new EventBus
+// NewEventBus creates a new EventBus with async worker pool
 func NewEventBus(
 	promRegistry prometheus.Registerer,
 	logger *slog.Logger,
@@ -63,11 +79,34 @@ func NewEventBus(
 	e := &EventBus{
 		subscribers: make(map[EventType]map[EventSubscriberId]Subscriber),
 		Logger:      logger,
+		asyncQueue:  make(chan asyncEvent, AsyncQueueSize),
+		stopCh:      make(chan struct{}),
 	}
 	if promRegistry != nil {
 		e.initMetrics(promRegistry)
 	}
+	// Start async worker pool
+	for range AsyncWorkerPoolSize {
+		e.asyncWg.Add(1)
+		go e.asyncWorker()
+	}
 	return e
+}
+
+// asyncWorker processes events from the async queue
+func (e *EventBus) asyncWorker() {
+	defer e.asyncWg.Done()
+	for {
+		select {
+		case <-e.stopCh:
+			return
+		case ae, ok := <-e.asyncQueue:
+			if !ok {
+				return
+			}
+			e.Publish(ae.eventType, ae.event)
+		}
+	}
 }
 
 // Subscriber is a delivery abstraction that allows the EventBus to deliver
@@ -260,6 +299,38 @@ func (e *EventBus) Publish(eventType EventType, evt Event) {
 	}
 }
 
+// PublishAsync enqueues an event for asynchronous delivery to all subscribers.
+// This method returns immediately without blocking on subscriber delivery.
+// Use this for non-critical events where immediate delivery is not required.
+// Returns false if the EventBus is stopped or the async queue is full.
+func (e *EventBus) PublishAsync(eventType EventType, evt Event) bool {
+	e.stopMu.RLock()
+	if e.stopped {
+		e.stopMu.RUnlock()
+		return false
+	}
+	e.stopMu.RUnlock()
+
+	select {
+	case e.asyncQueue <- asyncEvent{eventType: eventType, event: evt}:
+		return true
+	default:
+		// Queue is full, log and drop the event
+		if e.Logger != nil {
+			e.Logger.Warn(
+				"async event queue full, dropping event",
+				"type",
+				eventType,
+			)
+		}
+		if e.metrics != nil {
+			e.metrics.deliveryErrors.WithLabelValues(string(eventType), "async-dropped").
+				Inc()
+		}
+		return false
+	}
+}
+
 // RegisterSubscriber allows external adapters (e.g., network-backed subscribers)
 // to register with the EventBus. It returns the assigned subscriber id.
 func (e *EventBus) RegisterSubscriber(
@@ -282,7 +353,25 @@ func (e *EventBus) RegisterSubscriber(
 
 // Stop closes all subscriber channels and clears the subscribers map.
 // This ensures that SubscribeFunc goroutines exit cleanly during shutdown.
+// The EventBus can still be reused after Stop() is called.
 func (e *EventBus) Stop() {
+	// Serialize Stop() calls to prevent race conditions that could spawn
+	// duplicate worker pools when called concurrently
+	e.stopOpMu.Lock()
+	defer e.stopOpMu.Unlock()
+
+	// Mark as stopped to prevent new async publishes during shutdown
+	e.stopMu.Lock()
+	wasAlreadyStopped := e.stopped
+	e.stopped = true
+	e.stopMu.Unlock()
+
+	if !wasAlreadyStopped {
+		// Signal async workers to stop and wait for them to finish
+		close(e.stopCh)
+		e.asyncWg.Wait()
+	}
+
 	e.mu.Lock()
 	// Copy and clear subscribers
 	subsCopy := e.subscribers
@@ -299,5 +388,18 @@ func (e *EventBus) Stop() {
 	// Reset subscriber metrics if they exist
 	if e.metrics != nil {
 		e.metrics.subscribers.Reset()
+	}
+
+	// Reinitialize async infrastructure to allow continued use
+	e.stopMu.Lock()
+	e.asyncQueue = make(chan asyncEvent, AsyncQueueSize)
+	e.stopCh = make(chan struct{})
+	e.stopped = false
+	e.stopMu.Unlock()
+
+	// Restart async worker pool
+	for range AsyncWorkerPoolSize {
+		e.asyncWg.Add(1)
+		go e.asyncWorker()
 	}
 }

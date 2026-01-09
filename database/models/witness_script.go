@@ -25,10 +25,10 @@ package models
 // transactions, we store only the script hash here. The actual script content
 // is stored separately in Script table, indexed by hash.
 type WitnessScripts struct {
+	ScriptHash    []byte `gorm:"index"`
 	ID            uint   `gorm:"primaryKey"`
 	TransactionID uint   `gorm:"index"`
-	Type          uint8  `gorm:"index"` // Script type
-	ScriptHash    []byte `gorm:"index"` // Hash of the script
+	Type          uint8  `gorm:"index"`
 }
 
 func (WitnessScripts) TableName() string {

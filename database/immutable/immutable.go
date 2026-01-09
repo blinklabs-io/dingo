@@ -47,6 +47,12 @@ func New(dataDir string) (*ImmutableDb, error) {
 	return i, nil
 }
 
+// Close releases any resources held by the ImmutableDb.
+// Currently a no-op, but provided for interface consistency.
+func (i *ImmutableDb) Close() error {
+	return nil
+}
+
 func (i *ImmutableDb) getChunkNames() ([]string, error) {
 	ret := []string{}
 	files, err := os.ReadDir(i.dataDir)

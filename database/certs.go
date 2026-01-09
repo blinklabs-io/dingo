@@ -33,3 +33,23 @@ func (d *Database) GetStakeRegistrations(
 ) ([]lcommon.StakeRegistrationCertificate, error) {
 	return d.metadata.GetStakeRegistrations(stakingKey, txn.Metadata())
 }
+
+// DeleteCertificatesAfterSlot removes all certificate records added after the given slot.
+// This is used during chain rollbacks to undo certificate state changes.
+func (d *Database) DeleteCertificatesAfterSlot(slot uint64, txn *Txn) error {
+	owned := false
+	if txn == nil {
+		txn = d.Transaction(true)
+		owned = true
+		defer txn.Rollback() //nolint:errcheck
+	}
+	if err := d.metadata.DeleteCertificatesAfterSlot(slot, txn.Metadata()); err != nil {
+		return err
+	}
+	if owned {
+		if err := txn.Commit(); err != nil {
+			return err
+		}
+	}
+	return nil
+}

@@ -149,3 +149,43 @@ func (d *Database) SetPParamUpdate(
 	}
 	return nil
 }
+
+// DeletePParamsAfterSlot removes protocol parameter records added after the given slot.
+// This is used during chain rollbacks to undo protocol parameter changes.
+func (d *Database) DeletePParamsAfterSlot(slot uint64, txn *Txn) error {
+	owned := false
+	if txn == nil {
+		txn = d.Transaction(true)
+		owned = true
+		defer txn.Rollback() //nolint:errcheck
+	}
+	if err := d.metadata.DeletePParamsAfterSlot(slot, txn.Metadata()); err != nil {
+		return err
+	}
+	if owned {
+		if err := txn.Commit(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// DeletePParamUpdatesAfterSlot removes protocol parameter update records added after the given slot.
+// This is used during chain rollbacks to undo pending protocol parameter updates.
+func (d *Database) DeletePParamUpdatesAfterSlot(slot uint64, txn *Txn) error {
+	owned := false
+	if txn == nil {
+		txn = d.Transaction(true)
+		owned = true
+		defer txn.Rollback() //nolint:errcheck
+	}
+	if err := d.metadata.DeletePParamUpdatesAfterSlot(slot, txn.Metadata()); err != nil {
+		return err
+	}
+	if owned {
+		if err := txn.Commit(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
