@@ -28,13 +28,16 @@ type Pool struct {
 	PoolKeyHash   []byte `gorm:"uniqueIndex"`
 	VrfKeyHash    []byte
 	RewardAccount []byte
-	Owners        []PoolRegistrationOwner
-	Relays        []PoolRegistrationRelay
-	Registration  []PoolRegistration
-	Retirement    []PoolRetirement
-	ID            uint `gorm:"primarykey"`
-	Pledge        types.Uint64
-	Cost          types.Uint64
+	// Owners and Relays are query-only associations (no CASCADE).
+	// The actual parent-child relationship is PoolRegistration -> Owners/Relays.
+	// When Pool is deleted, PoolRegistrations cascade, which then cascade to Owners/Relays.
+	Owners       []PoolRegistrationOwner `gorm:"foreignKey:PoolID"`
+	Relays       []PoolRegistrationRelay `gorm:"foreignKey:PoolID"`
+	Registration []PoolRegistration      `gorm:"foreignKey:PoolID;constraint:OnDelete:CASCADE"`
+	Retirement   []PoolRetirement        `gorm:"foreignKey:PoolID;constraint:OnDelete:CASCADE"`
+	ID           uint                    `gorm:"primarykey"`
+	Pledge       types.Uint64
+	Cost         types.Uint64
 }
 
 func (p *Pool) TableName() string {
@@ -43,19 +46,20 @@ func (p *Pool) TableName() string {
 
 type PoolRegistration struct {
 	Margin        *types.Rat
+	Pool          *Pool // Belongs-to relationship; CASCADE is defined on Pool.Registration
 	MetadataUrl   string
 	VrfKeyHash    []byte
 	PoolKeyHash   []byte `gorm:"index"`
 	RewardAccount []byte
 	MetadataHash  []byte
-	Owners        []PoolRegistrationOwner
-	Relays        []PoolRegistrationRelay
+	Owners        []PoolRegistrationOwner `gorm:"foreignKey:PoolRegistrationID;constraint:OnDelete:CASCADE"`
+	Relays        []PoolRegistrationRelay `gorm:"foreignKey:PoolRegistrationID;constraint:OnDelete:CASCADE"`
 	Pledge        types.Uint64
 	Cost          types.Uint64
-	CertificateID uint `gorm:"index"`
-	ID            uint `gorm:"primarykey"`
-	PoolID        uint `gorm:"index"`
-	AddedSlot     uint64
+	CertificateID uint   `gorm:"index"`
+	ID            uint   `gorm:"primarykey"`
+	PoolID        uint   `gorm:"index"`
+	AddedSlot     uint64 `gorm:"index"`
 	DepositAmount types.Uint64
 }
 
@@ -94,7 +98,7 @@ type PoolRetirement struct {
 	ID            uint   `gorm:"primarykey"`
 	PoolID        uint   `gorm:"index"`
 	Epoch         uint64
-	AddedSlot     uint64
+	AddedSlot     uint64 `gorm:"index"`
 }
 
 func (PoolRetirement) TableName() string {

@@ -17,10 +17,11 @@ package models
 import "github.com/blinklabs-io/dingo/database/types"
 
 type MoveInstantaneousRewards struct {
-	Pot           uint `gorm:"index"`
-	CertificateID uint `gorm:"index"`
-	ID            uint `gorm:"primarykey"`
-	AddedSlot     uint64
+	Rewards       []MoveInstantaneousRewardsReward `gorm:"foreignKey:MIRID;constraint:OnDelete:CASCADE"`
+	Pot           uint                             `gorm:"index"`
+	CertificateID uint                             `gorm:"index"`
+	ID            uint                             `gorm:"primarykey"`
+	AddedSlot     uint64                           `gorm:"index"`
 }
 
 func (MoveInstantaneousRewards) TableName() string {
@@ -31,7 +32,7 @@ type MoveInstantaneousRewardsReward struct {
 	Credential []byte
 	Amount     types.Uint64
 	ID         uint `gorm:"primarykey"`
-	MIRID      uint `gorm:"index;constraint:OnDelete:CASCADE"`
+	MIRID      uint `gorm:"index"`
 }
 
 func (MoveInstantaneousRewardsReward) TableName() string {

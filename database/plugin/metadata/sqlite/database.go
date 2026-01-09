@@ -34,11 +34,15 @@ import (
 	"gorm.io/plugin/opentelemetry/tracing"
 )
 
+// sqliteBindVarLimit is a conservative chunk size for IN clauses to avoid
+// exceeding SQLite's max bind variable limit (default 999).
+const sqliteBindVarLimit = 400
+
 // sqliteTxn wraps a gorm transaction and implements types.Txn
 type sqliteTxn struct {
+	beginErr error
 	db       *gorm.DB
 	finished bool
-	beginErr error
 }
 
 func newSqliteTxn(db *gorm.DB) *sqliteTxn {
@@ -175,6 +179,7 @@ func (d *MetadataStoreSqlite) scheduleDailyVacuum() {
 			d.logger.Error(
 				"failed to free unused space in metadata store",
 				"component", "database",
+				"error", err,
 			)
 		}
 	}
@@ -193,7 +198,7 @@ func (d *MetadataStoreSqlite) Start() error {
 	if d.dataDir == "" {
 		// No dataDir, use in-memory config
 		metadataDb, err = gorm.Open(
-			sqlite.Open("file::memory:?cache=shared"),
+			sqlite.Open("file::memory:?cache=shared&_pragma=foreign_keys(1)"),
 			&gorm.Config{
 				Logger:                 gormlogger.Discard,
 				SkipDefaultTransaction: true,
@@ -228,7 +233,7 @@ func (d *MetadataStoreSqlite) Start() error {
 		//
 		// Keep these parameters in sync with project performance testing.
 		connStr := fmt.Sprintf(
-			"file:%s?cache=shared&_journal_mode=WAL&sync=OFF&cache_size=-50000",
+			"file:%s?cache=shared&_journal_mode=WAL&sync=NORMAL&cache_size=-50000&_pragma=foreign_keys(1)",
 			metadataDbPath,
 		)
 		metadataDb, err = gorm.Open(
