@@ -496,7 +496,7 @@ func (s *queryServiceServer) ReadGenesis(
 		},
 	}
 
-	// Decode the hex if shelley genesis has is configured
+	// Decode the hex if shelley genesis hash is configured
 	if nodeConfig.ShelleyGenesisHash != "" {
 		hashBytes, err := hex.DecodeString(nodeConfig.ShelleyGenesisHash)
 		if err != nil {
