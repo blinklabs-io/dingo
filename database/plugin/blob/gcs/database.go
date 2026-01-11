@@ -769,7 +769,7 @@ func (d *BlobStoreGCS) Start() error {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 
-	var clientOpts []option.ClientOption
+	clientOpts := make([]option.ClientOption, 0, 1)
 	clientOpts = append(clientOpts, storage.WithDisabledClientMetrics())
 
 	client, err := storage.NewGRPCClient(

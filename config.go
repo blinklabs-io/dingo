@@ -55,6 +55,10 @@ type Config struct {
 	devMode                  bool
 	shutdownTimeout          time.Duration
 	DatabaseWorkerPoolConfig ledger.DatabaseWorkerPoolConfig
+	// Peer limits (0 = use default, -1 = unlimited)
+	maxColdPeers int
+	maxWarmPeers int
+	maxHotPeers  int
 }
 
 // configPopulateNetworkMagic uses the named network (if specified) to determine the network magic value (if not specified)
@@ -285,5 +289,16 @@ func WithDatabaseWorkerPoolConfig(
 ) ConfigOptionFunc {
 	return func(c *Config) {
 		c.DatabaseWorkerPoolConfig = cfg
+	}
+}
+
+// WithPeerLimits specifies the maximum number of peers in each state.
+// Use 0 to use the default limit, or -1 for unlimited.
+// Default limits: cold=200, warm=50, hot=20
+func WithPeerLimits(maxCold, maxWarm, maxHot int) ConfigOptionFunc {
+	return func(c *Config) {
+		c.maxColdPeers = maxCold
+		c.maxWarmPeers = maxWarm
+		c.maxHotPeers = maxHot
 	}
 }

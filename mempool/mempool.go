@@ -66,7 +66,6 @@ type MempoolConfig struct {
 }
 
 type Mempool struct {
-	config  MempoolConfig
 	metrics struct {
 		txsProcessedNum prometheus.Counter
 		txsInMempool    prometheus.Gauge
@@ -76,11 +75,12 @@ type Mempool struct {
 	logger       *slog.Logger
 	eventBus     *event.EventBus
 	consumers    map[ouroboros.ConnectionId]*MempoolConsumer
+	done         chan struct{}
+	config       MempoolConfig
 	transactions []*MempoolTransaction
 	sync.RWMutex
-	consumersMutex sync.Mutex
-	done           chan struct{}
 	doneOnce       sync.Once
+	consumersMutex sync.Mutex
 }
 
 type MempoolFullError struct {
@@ -270,7 +270,7 @@ func (m *Mempool) AddTransaction(txType uint, txBytes []byte) error {
 	// Update last seen for existing TX
 	existingTx := m.getTransaction(tx.Hash)
 	if existingTx != nil {
-		tx.LastSeen = time.Now()
+		existingTx.LastSeen = time.Now()
 		m.logger.Debug(
 			"updated last seen for transaction",
 			"component", "mempool",

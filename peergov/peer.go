@@ -33,6 +33,26 @@ const (
 	PeerSourceInboundConn           = 6
 )
 
+// String returns a human-readable name for the peer source.
+func (s PeerSource) String() string {
+	switch s {
+	case PeerSourceTopologyLocalRoot:
+		return "topology-local-root"
+	case PeerSourceTopologyPublicRoot:
+		return "topology-public-root"
+	case PeerSourceTopologyBootstrapPeer:
+		return "topology-bootstrap"
+	case PeerSourceP2PLedger:
+		return "ledger"
+	case PeerSourceP2PGossip:
+		return "gossip"
+	case PeerSourceInboundConn:
+		return "inbound"
+	default:
+		return "unknown"
+	}
+}
+
 type PeerState uint16
 
 const (
@@ -41,32 +61,35 @@ const (
 	PeerStateHot
 )
 
+type TestResult uint8
+
+const (
+	TestResultUnknown TestResult = iota
+	TestResultPass
+	TestResultFail
+)
+
 type Peer struct {
-	LastActivity   time.Time
-	Connection     *PeerConnection
-	Address        string
-	ReconnectCount int
-	ReconnectDelay time.Duration
-	Source         PeerSource
-	State          PeerState
-	Sharable       bool
+	LastActivity       time.Time
+	LastTestTime       time.Time // When peer was last tested for suitability
+	LastBlockFetchTime time.Time // Timestamp of last observed block fetch
+	Connection         *PeerConnection
+	Address            string
+	NormalizedAddress  string // Cached normalized form of Address for deduplication
 	// Performance metrics (used by the peer scoring system)
-	// Average block fetch latency in milliseconds (exponential moving average)
-	BlockFetchLatencyMs float64
-	// Whether we have seen an initial block fetch latency observation
-	BlockFetchLatencyInit bool
-	// Average block fetch success rate [0..1] (exponential moving average)
-	BlockFetchSuccessRate float64
-	// Whether we have seen an initial block fetch success observation
-	BlockFetchSuccessInit bool
-	// Connection stability score [0..1] (uptime / expected uptime)
-	ConnectionStability float64
-	// Whether we have seen an initial connection stability observation
-	ConnectionStabilityInit bool
-	// Timestamp of last observed block fetch
-	LastBlockFetchTime time.Time
-	// Composite performance score computed from the above metrics
-	PerformanceScore float64
+	BlockFetchLatencyMs     float64 // Average block fetch latency in ms (EMA)
+	BlockFetchSuccessRate   float64 // Average block fetch success rate 0..1 (EMA)
+	ConnectionStability     float64 // Connection stability score 0..1
+	ReconnectDelay          time.Duration
+	PerformanceScore        float64 // Composite score from the above metrics
+	ReconnectCount          int
+	State                   PeerState
+	Source                  PeerSource
+	Sharable                bool
+	BlockFetchLatencyInit   bool       // Whether latency has been initialized
+	BlockFetchSuccessInit   bool       // Whether success rate has been initialized
+	ConnectionStabilityInit bool       // Whether stability has been initialized
+	LastTestResult          TestResult // Result of last suitability test
 }
 
 func (p *Peer) setConnection(conn *ouroboros.Connection, outbound bool) {

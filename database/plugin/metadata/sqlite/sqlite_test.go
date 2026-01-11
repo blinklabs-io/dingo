@@ -65,6 +65,14 @@ func (m *mockTransaction) Metadata() lcommon.TransactionMetadatum {
 	return nil
 }
 
+func (m *mockTransaction) AuxiliaryData() lcommon.AuxiliaryData {
+	return nil
+}
+
+func (m *mockTransaction) RawAuxiliaryData() []byte {
+	return nil
+}
+
 func (m *mockTransaction) CollateralReturn() lcommon.TransactionOutput {
 	return nil
 }
