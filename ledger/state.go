@@ -1451,6 +1451,11 @@ func (ls *LedgerState) BlockByHash(hash []byte) (models.Block, error) {
 	return database.BlockByHash(ls.db, hash)
 }
 
+// CardanoNodeConfig returns the Cardano node configuration used for this ledger state.
+func (ls *LedgerState) CardanoNodeConfig() *cardano.CardanoNodeConfig {
+	return ls.config.CardanoNodeConfig
+}
+
 // UtxoByRef returns a single UTxO by reference
 func (ls *LedgerState) UtxoByRef(
 	txId []byte,

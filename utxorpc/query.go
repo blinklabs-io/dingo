@@ -17,14 +17,21 @@ package utxorpc
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"math"
+	"math/big"
+	"time"
 
 	"connectrpc.com/connect"
+	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/shelley"
+	utxorpcCardano "github.com/utxorpc/go-codegen/utxorpc/v1alpha/cardano"
 	query "github.com/utxorpc/go-codegen/utxorpc/v1alpha/query"
 	"github.com/utxorpc/go-codegen/utxorpc/v1alpha/query/queryconnect"
 )
@@ -459,4 +466,203 @@ func (s *queryServiceServer) ReadTx(
 	}
 
 	return connect.NewResponse(resp), nil
+}
+
+// ReadGenesis
+func (s *queryServiceServer) ReadGenesis(
+	ctx context.Context,
+	req *connect.Request[query.ReadGenesisRequest],
+) (*connect.Response[query.ReadGenesisResponse], error) {
+	fieldMask := req.Msg.GetFieldMask()
+
+	s.utxorpc.config.Logger.Info(
+		fmt.Sprintf("Got a ReadGenesis request with fieldMask %v", fieldMask),
+	)
+
+	// Pulls the Cardano node config via ledger state
+	nodeConfig := s.utxorpc.config.LedgerState.CardanoNodeConfig()
+	if nodeConfig == nil {
+		return nil, errors.New("cardano node config is nil")
+	}
+
+	cardanoGenesis, err := buildCardanoGenesis(nodeConfig)
+	if err != nil {
+		return nil, err
+	}
+
+	resp := &query.ReadGenesisResponse{
+		Config: &query.ReadGenesisResponse_Cardano{
+			Cardano: cardanoGenesis,
+		},
+	}
+
+	// Decode the hex if shelley genesis has is configured
+	if nodeConfig.ShelleyGenesisHash != "" {
+		hashBytes, err := hex.DecodeString(nodeConfig.ShelleyGenesisHash)
+		if err != nil {
+			return nil, fmt.Errorf("decode Shelley genesis hash: %w", err)
+		}
+		resp.Genesis = hashBytes
+	}
+
+	return connect.NewResponse(resp), nil
+}
+
+func buildCardanoGenesis(
+	nodeConfig *cardano.CardanoNodeConfig,
+) (*utxorpcCardano.Genesis, error) {
+	if nodeConfig == nil {
+		return nil, errors.New("cardano node config is nil")
+	}
+
+	// Builds a utxorpc.cardano.Genesis using shelley genesis
+	shelleyGenesis := nodeConfig.ShelleyGenesis()
+	if shelleyGenesis == nil {
+		return nil, errors.New("shelley genesis config is nil")
+	}
+
+	// Converts active slots coefficient, pparams into rational number
+	activeSlotsCoeffRat := shelleyGenesis.ActiveSlotsCoeff.Rat
+	if activeSlotsCoeffRat == nil {
+		return nil, errors.New("active slots coeff is nil")
+	}
+	activeSlotsCoeff, err := rationalToUtxorpc(
+		activeSlotsCoeffRat,
+		"active slots coeff",
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	slotLengthRat := shelleyGenesis.SlotLength.Rat
+	if slotLengthRat == nil {
+		return nil, errors.New("slot length is nil")
+	}
+	if slotLengthRat.Sign() < 0 {
+		return nil, errors.New("slot length cannot be negative")
+	}
+	if slotLengthRat.Denom().Sign() == 0 {
+		return nil, errors.New("slot length denominator cannot be zero")
+	}
+	slotMillis := new(big.Int).Mul(
+		slotLengthRat.Num(),
+		big.NewInt(1000),
+	)
+	slotMillis.Div(slotMillis, slotLengthRat.Denom())
+	if !slotMillis.IsUint64() || slotMillis.Uint64() > math.MaxUint32 {
+		return nil, fmt.Errorf("slot length out of range: %s", slotMillis)
+	}
+	slotLength := uint32(slotMillis.Uint64())
+	pparams, err := shelleyGenesisPParams(
+		shelleyGenesis.ProtocolParameters,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("shelley protocol params: %w", err)
+	}
+
+	ret := &utxorpcCardano.Genesis{
+		ActiveSlotsCoeff:  activeSlotsCoeff,
+		EpochLength:       uint32(shelleyGenesis.EpochLength),
+		MaxKesEvolutions:  uint32(shelleyGenesis.MaxKESEvolutions),
+		MaxLovelaceSupply: lcommon.ToUtxorpcBigInt(shelleyGenesis.MaxLovelaceSupply),
+		NetworkId:         shelleyGenesis.NetworkId,
+		NetworkMagic:      shelleyGenesis.NetworkMagic,
+		ProtocolParams:    pparams,
+		SecurityParam:     uint32(shelleyGenesis.SecurityParam),
+		SlotLength:        slotLength,
+		SlotsPerKesPeriod: uint32(shelleyGenesis.SlotsPerKESPeriod),
+		SystemStart: shelleyGenesis.SystemStart.UTC().Format(
+			time.RFC3339Nano,
+		),
+		UpdateQuorum: uint32(shelleyGenesis.UpdateQuorum),
+	}
+
+	if len(shelleyGenesis.GenDelegs) > 0 {
+		ret.GenDelegs = make(
+			map[string]*utxorpcCardano.GenDelegs,
+			len(shelleyGenesis.GenDelegs),
+		)
+		for k, v := range shelleyGenesis.GenDelegs {
+			ret.GenDelegs[k] = &utxorpcCardano.GenDelegs{
+				Delegate: v["delegate"],
+				Vrf:      v["vrf"],
+			}
+		}
+	}
+	if len(shelleyGenesis.InitialFunds) > 0 {
+		ret.InitialFunds = make(
+			map[string]*utxorpcCardano.BigInt,
+			len(shelleyGenesis.InitialFunds),
+		)
+		for k, v := range shelleyGenesis.InitialFunds {
+			ret.InitialFunds[k] = lcommon.ToUtxorpcBigInt(v)
+		}
+	}
+
+	return ret, nil
+}
+
+func shelleyGenesisPParams(
+	params shelley.ShelleyGenesisProtocolParams,
+) (*utxorpcCardano.PParams, error) {
+	if params.A0 == nil || params.Rho == nil || params.Tau == nil {
+		return nil, errors.New("missing Shelley genesis rational params")
+	}
+	poolInfluence, err := rationalToUtxorpc(params.A0.Rat, "pool influence")
+	if err != nil {
+		return nil, err
+	}
+	monetaryExpansion, err := rationalToUtxorpc(params.Rho.Rat, "monetary expansion")
+	if err != nil {
+		return nil, err
+	}
+	treasuryExpansion, err := rationalToUtxorpc(params.Tau.Rat, "treasury expansion")
+	if err != nil {
+		return nil, err
+	}
+
+	return &utxorpcCardano.PParams{
+		MaxTxSize:                uint64(params.MaxTxSize),
+		MinFeeCoefficient:        lcommon.ToUtxorpcBigInt(uint64(params.MinFeeA)),
+		MinFeeConstant:           lcommon.ToUtxorpcBigInt(uint64(params.MinFeeB)),
+		MaxBlockBodySize:         uint64(params.MaxBlockBodySize),
+		MaxBlockHeaderSize:       uint64(params.MaxBlockHeaderSize),
+		StakeKeyDeposit:          lcommon.ToUtxorpcBigInt(uint64(params.KeyDeposit)),
+		PoolDeposit:              lcommon.ToUtxorpcBigInt(uint64(params.PoolDeposit)),
+		PoolRetirementEpochBound: uint64(params.MaxEpoch),
+		DesiredNumberOfPools:     uint64(params.NOpt),
+		PoolInfluence:            poolInfluence,
+		MonetaryExpansion:        monetaryExpansion,
+		TreasuryExpansion:        treasuryExpansion,
+		MinPoolCost:              lcommon.ToUtxorpcBigInt(uint64(params.MinPoolCost)),
+		ProtocolVersion: &utxorpcCardano.ProtocolVersion{
+			Major: uint32(params.ProtocolVersion.Major),
+			Minor: uint32(params.ProtocolVersion.Minor),
+		},
+	}, nil
+}
+
+func rationalToUtxorpc(
+	rat *big.Rat,
+	label string,
+) (*utxorpcCardano.RationalNumber, error) {
+	if rat == nil {
+		return nil, fmt.Errorf("%s is nil", label)
+	}
+	num := rat.Num()
+	den := rat.Denom()
+	if den.Sign() <= 0 {
+		return nil, fmt.Errorf("%s denominator invalid", label)
+	}
+	if num.Cmp(big.NewInt(math.MinInt32)) < 0 ||
+		num.Cmp(big.NewInt(math.MaxInt32)) > 0 {
+		return nil, fmt.Errorf("%s numerator out of range: %s", label, num)
+	}
+	if den.BitLen() > 32 {
+		return nil, fmt.Errorf("%s denominator out of range: %s", label, den)
+	}
+	return &utxorpcCardano.RationalNumber{
+		Numerator:   int32(num.Int64()),
+		Denominator: uint32(den.Int64()),
+	}, nil
 }
