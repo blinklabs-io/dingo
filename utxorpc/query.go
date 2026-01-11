@@ -552,7 +552,7 @@ func buildCardanoGenesis(
 	if !slotMillis.IsUint64() || slotMillis.Uint64() > math.MaxUint32 {
 		return nil, fmt.Errorf("slot length out of range: %s", slotMillis)
 	}
-	slotLength := uint32(slotMillis.Uint64())
+	slotLength := uint32(slotMillis.Uint64()) // #nosec G115 -- bounds checked above
 	pparams, err := shelleyGenesisPParams(
 		shelleyGenesis.ProtocolParameters,
 	)
@@ -560,21 +560,54 @@ func buildCardanoGenesis(
 		return nil, fmt.Errorf("shelley protocol params: %w", err)
 	}
 
+	epochLength, err := uint32FromInt(shelleyGenesis.EpochLength, "epoch length")
+	if err != nil {
+		return nil, err
+	}
+	maxKesEvolutions, err := uint32FromInt(
+		shelleyGenesis.MaxKESEvolutions,
+		"max KES evolutions",
+	)
+	if err != nil {
+		return nil, err
+	}
+	securityParam, err := uint32FromInt(
+		shelleyGenesis.SecurityParam,
+		"security param",
+	)
+	if err != nil {
+		return nil, err
+	}
+	slotsPerKesPeriod, err := uint32FromInt(
+		shelleyGenesis.SlotsPerKESPeriod,
+		"slots per KES period",
+	)
+	if err != nil {
+		return nil, err
+	}
+	updateQuorum, err := uint32FromInt(
+		shelleyGenesis.UpdateQuorum,
+		"update quorum",
+	)
+	if err != nil {
+		return nil, err
+	}
+
 	ret := &utxorpcCardano.Genesis{
 		ActiveSlotsCoeff:  activeSlotsCoeff,
-		EpochLength:       uint32(shelleyGenesis.EpochLength),
-		MaxKesEvolutions:  uint32(shelleyGenesis.MaxKESEvolutions),
+		EpochLength:       epochLength,
+		MaxKesEvolutions:  maxKesEvolutions,
 		MaxLovelaceSupply: lcommon.ToUtxorpcBigInt(shelleyGenesis.MaxLovelaceSupply),
 		NetworkId:         shelleyGenesis.NetworkId,
 		NetworkMagic:      shelleyGenesis.NetworkMagic,
 		ProtocolParams:    pparams,
-		SecurityParam:     uint32(shelleyGenesis.SecurityParam),
+		SecurityParam:     securityParam,
 		SlotLength:        slotLength,
-		SlotsPerKesPeriod: uint32(shelleyGenesis.SlotsPerKESPeriod),
+		SlotsPerKesPeriod: slotsPerKesPeriod,
 		SystemStart: shelleyGenesis.SystemStart.UTC().Format(
 			time.RFC3339Nano,
 		),
-		UpdateQuorum: uint32(shelleyGenesis.UpdateQuorum),
+		UpdateQuorum: updateQuorum,
 	}
 
 	if len(shelleyGenesis.GenDelegs) > 0 {
@@ -620,6 +653,14 @@ func shelleyGenesisPParams(
 	if err != nil {
 		return nil, err
 	}
+	protocolMajor, err := uint32FromUint(params.ProtocolVersion.Major, "protocol major")
+	if err != nil {
+		return nil, err
+	}
+	protocolMinor, err := uint32FromUint(params.ProtocolVersion.Minor, "protocol minor")
+	if err != nil {
+		return nil, err
+	}
 
 	return &utxorpcCardano.PParams{
 		MaxTxSize:                uint64(params.MaxTxSize),
@@ -636,8 +677,8 @@ func shelleyGenesisPParams(
 		TreasuryExpansion:        treasuryExpansion,
 		MinPoolCost:              lcommon.ToUtxorpcBigInt(uint64(params.MinPoolCost)),
 		ProtocolVersion: &utxorpcCardano.ProtocolVersion{
-			Major: uint32(params.ProtocolVersion.Major),
-			Minor: uint32(params.ProtocolVersion.Minor),
+			Major: protocolMajor,
+			Minor: protocolMinor,
 		},
 	}, nil
 }
@@ -662,7 +703,21 @@ func rationalToUtxorpc(
 		return nil, fmt.Errorf("%s denominator out of range: %s", label, den)
 	}
 	return &utxorpcCardano.RationalNumber{
-		Numerator:   int32(num.Int64()),
-		Denominator: uint32(den.Int64()),
+		Numerator:   int32(num.Int64()),  // #nosec G115 -- bounds checked above
+		Denominator: uint32(den.Int64()), // #nosec G115 -- bounds checked above
 	}, nil
+}
+
+func uint32FromInt(value int, label string) (uint32, error) {
+	if value < 0 || value > math.MaxUint32 {
+		return 0, fmt.Errorf("%s out of range: %d", label, value)
+	}
+	return uint32(value), nil // #nosec G115 -- bounds checked above
+}
+
+func uint32FromUint(value uint, label string) (uint32, error) {
+	if value > math.MaxUint32 {
+		return 0, fmt.Errorf("%s out of range: %d", label, value)
+	}
+	return uint32(value), nil // #nosec G115 -- bounds checked above
 }
