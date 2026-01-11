@@ -27,7 +27,7 @@ import (
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
-	cardano "github.com/utxorpc/go-codegen/utxorpc/v1alpha/cardano"
+	utxorpcCardano "github.com/utxorpc/go-codegen/utxorpc/v1alpha/cardano"
 	query "github.com/utxorpc/go-codegen/utxorpc/v1alpha/query"
 	"github.com/utxorpc/go-codegen/utxorpc/v1alpha/query/queryconnect"
 )
@@ -116,8 +116,8 @@ func (s *queryServiceServer) ReadEraSummary(
 		return epochs[i].StartSlot < epochs[j].StartSlot
 	})
 
-	summaries := make([]*cardano.EraSummary, 0, len(epochs))
-	summaryByEra := map[uint]*cardano.EraSummary{}
+	summaries := make([]*utxorpcCardano.EraSummary, 0, len(epochs))
+	summaryByEra := map[uint]*utxorpcCardano.EraSummary{}
 	timespanMs := uint64(0)
 	baseMs := uint64(systemStartMs)
 	var lastEraId uint
@@ -130,13 +130,13 @@ func (s *queryServiceServer) ReadEraSummary(
 				return nil, fmt.Errorf("unknown era ID %d", epoch.EraId)
 			}
 			// Build the start boundary for the era using current accumulated time and epoch metadata
-			startBoundary := &cardano.EraBoundary{
+			startBoundary := &utxorpcCardano.EraBoundary{
 				Time:  baseMs + timespanMs,
 				Slot:  epoch.StartSlot,
 				Epoch: epoch.EpochId,
 			}
 			// Create a new era summary when era changes
-			summary := &cardano.EraSummary{
+			summary := &utxorpcCardano.EraSummary{
 				Name:  eraDescriptor.Name,
 				Start: startBoundary,
 			}
@@ -169,7 +169,7 @@ func (s *queryServiceServer) ReadEraSummary(
 			if hasLastEra {
 				prevSummary := summaryByEra[lastEraId]
 				if prevSummary != nil && prevSummary.GetEnd() == nil {
-					prevSummary.End = &cardano.EraBoundary{
+					prevSummary.End = &utxorpcCardano.EraBoundary{
 						Time:  startBoundary.GetTime(),
 						Slot:  startBoundary.GetSlot(),
 						Epoch: startBoundary.GetEpoch(),
@@ -187,7 +187,7 @@ func (s *queryServiceServer) ReadEraSummary(
 
 	resp := &query.ReadEraSummaryResponse{
 		Summary: &query.ReadEraSummaryResponse_Cardano{
-			Cardano: &cardano.EraSummaries{
+			Cardano: &utxorpcCardano.EraSummaries{
 				Summaries: summaries,
 			},
 		},
