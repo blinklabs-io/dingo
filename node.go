@@ -77,9 +77,11 @@ func (n *Node) Run(ctx context.Context) error {
 	// Load database
 	dbNeedsRecovery := false
 	dbConfig := &database.Config{
-		DataDir:      n.config.dataDir,
-		Logger:       n.config.logger,
-		PromRegistry: n.config.promRegistry,
+		DataDir:        n.config.dataDir,
+		Logger:         n.config.logger,
+		PromRegistry:   n.config.promRegistry,
+		BlobPlugin:     n.config.blobPlugin,
+		MetadataPlugin: n.config.metadataPlugin,
 	}
 	db, err := database.New(dbConfig)
 	if db == nil {
