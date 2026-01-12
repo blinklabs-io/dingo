@@ -76,6 +76,14 @@ func (lv *LedgerView) StakeRegistration(
 	return lv.ls.db.GetStakeRegistrations(stakingKey, lv.txn)
 }
 
+// IsStakeCredentialRegistered checks if a stake credential is currently registered
+func (lv *LedgerView) IsStakeCredentialRegistered(
+	cred lcommon.Credential,
+) bool {
+	// TODO: implement stake credential registration check
+	return false
+}
+
 // It returns the most recent active pool registration certificate
 // and the epoch of any pending retirement for the given pool key hash.
 func (lv *LedgerView) PoolCurrentState(
@@ -167,6 +175,15 @@ func (lv *LedgerView) PoolCurrentState(
 	return currentReg, pendingEpoch, nil
 }
 
+// IsPoolRegistered checks if a pool is currently registered
+func (lv *LedgerView) IsPoolRegistered(pkh lcommon.PoolKeyHash) bool {
+	reg, _, err := lv.PoolCurrentState(pkh)
+	if err != nil {
+		return false
+	}
+	return reg != nil
+}
+
 // SlotToTime returns the current time for a given slot based on known epochs
 func (lv *LedgerView) SlotToTime(slot uint64) (time.Time, error) {
 	return lv.ls.SlotToTime(slot)
@@ -205,6 +222,22 @@ func (lv *LedgerView) GetRewardSnapshot(
 func (lv *LedgerView) UpdateAdaPots(adaPots lcommon.AdaPots) error {
 	// TODO: implement Ada pots update
 	return nil
+}
+
+// IsRewardAccountRegistered checks if a reward account is registered
+func (lv *LedgerView) IsRewardAccountRegistered(
+	cred lcommon.Credential,
+) bool {
+	// TODO: implement reward account registration check
+	return false
+}
+
+// RewardAccountBalance returns the current reward balance for a stake credential
+func (lv *LedgerView) RewardAccountBalance(
+	cred lcommon.Credential,
+) (*uint64, error) {
+	// TODO: implement reward account balance retrieval
+	return nil, nil
 }
 
 // CostModels returns the Plutus cost models
@@ -251,4 +284,18 @@ func (lv *LedgerView) Constitution() (*lcommon.Constitution, error) {
 func (lv *LedgerView) TreasuryValue() (uint64, error) {
 	// TODO: implement treasury value retrieval
 	return 0, nil
+}
+
+// GovActionById returns a governance action by its ID
+func (lv *LedgerView) GovActionById(
+	id lcommon.GovActionId,
+) (*lcommon.GovActionState, error) {
+	// TODO: implement governance action retrieval
+	return nil, nil
+}
+
+// GovActionExists returns whether a governance action exists
+func (lv *LedgerView) GovActionExists(id lcommon.GovActionId) bool {
+	// TODO: implement governance action existence check
+	return false
 }
