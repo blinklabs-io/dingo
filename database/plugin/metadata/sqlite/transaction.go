@@ -202,7 +202,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 		Type:       tx.Type(),
 		BlockHash:  point.Hash,
 		BlockIndex: idx,
-		Fee:        types.Uint64(tx.Fee()),
+		Fee:        types.Uint64(tx.Fee().Uint64()),
 		TTL:        types.Uint64(tx.TTL()),
 		Valid:      tx.IsValid(),
 	}
