@@ -98,9 +98,20 @@ intersectTip: false
 # Default: 1048576 (1 MB)
 mempoolCapacity: 1048576
 
-# Enable development mode which prevents outbound connections
-# Default: false
-devMode: false
+# Operational mode: "serve" (default), "load", or "dev"
+# - serve: Full node with network connectivity (default)
+# - load: Batch import from ImmutableDB (requires immutableDbPath)
+# - dev: Development mode (forge blocks, disable outbound, skip topology)
+# Note: CLI commands (serve, load) take priority over this setting
+#
+# Can be overridden with the DINGO_RUN_MODE environment variable
+runMode: "serve"
+
+# Path to ImmutableDB for batch import (used when runMode is "load")
+# Can also be provided as argument to 'dingo load' command
+#
+# Can be overridden with the DINGO_IMMUTABLE_DB_PATH environment variable
+immutableDbPath: ""
 
 # Validate historical blocks during ledger processing (default: false)
 validateHistorical: false

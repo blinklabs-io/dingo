@@ -200,7 +200,22 @@ func main() {
 				slog.Error("no config found in context")
 				os.Exit(1)
 			}
-			serveRun(cmd, args, cfg)
+
+			// When no subcommand given, check RunMode from config
+			switch cfg.RunMode {
+			case config.RunModeLoad:
+				if cfg.ImmutableDbPath == "" {
+					slog.Error("immutableDbPath must be set when runMode is 'load'")
+					os.Exit(1)
+				}
+				loadRun(cmd, []string{cfg.ImmutableDbPath}, cfg)
+			case config.RunModeServe, config.RunModeDev:
+				// serve and dev modes both run the server
+				serveRun(cmd, args, cfg)
+			default:
+				// Empty or unrecognized RunMode defaults to serve mode
+				serveRun(cmd, args, cfg)
+			}
 		},
 	}
 
