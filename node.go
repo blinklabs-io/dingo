@@ -209,17 +209,20 @@ func (n *Node) Run(ctx context.Context) error {
 
 	n.peerGov = peergov.NewPeerGovernor(
 		peergov.PeerGovernorConfig{
-			Logger:             n.config.logger,
-			EventBus:           n.eventBus,
-			ConnManager:        n.connManager,
-			DisableOutbound:    n.config.isDevMode(),
-			PromRegistry:       n.config.promRegistry,
-			PeerRequestFunc:    n.ouroboros.RequestPeersFromPeer,
-			LedgerPeerProvider: ledgerPeerProvider,
-			UseLedgerAfterSlot: useLedgerAfterSlot,
-			MaxColdPeers:       n.config.maxColdPeers,
-			MaxWarmPeers:       n.config.maxWarmPeers,
-			MaxHotPeers:        n.config.maxHotPeers,
+			Logger:                         n.config.logger,
+			EventBus:                       n.eventBus,
+			ConnManager:                    n.connManager,
+			DisableOutbound:                n.config.isDevMode(),
+			PromRegistry:                   n.config.promRegistry,
+			PeerRequestFunc:                n.ouroboros.RequestPeersFromPeer,
+			LedgerPeerProvider:             ledgerPeerProvider,
+			UseLedgerAfterSlot:             useLedgerAfterSlot,
+			TargetNumberOfKnownPeers:       n.config.targetNumberOfKnownPeers,
+			TargetNumberOfEstablishedPeers: n.config.targetNumberOfEstablishedPeers,
+			TargetNumberOfActivePeers:      n.config.targetNumberOfActivePeers,
+			ActivePeersTopologyQuota:       n.config.activePeersTopologyQuota,
+			ActivePeersGossipQuota:         n.config.activePeersGossipQuota,
+			ActivePeersLedgerQuota:         n.config.activePeersLedgerQuota,
 		},
 	)
 	n.ouroboros.PeerGov = n.peerGov

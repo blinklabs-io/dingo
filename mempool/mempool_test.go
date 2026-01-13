@@ -377,7 +377,12 @@ func TestMempoolConsumer_NextTx_Blocking(t *testing.T) {
 	select {
 	case tx := <-resultChan:
 		require.NotNil(t, tx, "should receive transaction")
-		assert.Equal(t, txs[0].Hash, tx.Hash, "should receive correct transaction")
+		assert.Equal(
+			t,
+			txs[0].Hash,
+			tx.Hash,
+			"should receive correct transaction",
+		)
 	case <-time.After(2 * time.Second):
 		t.Fatal("timeout waiting for blocking NextTx to return")
 	}
@@ -1088,7 +1093,12 @@ func TestMempoolConsumer_ClearCache(t *testing.T) {
 
 	// Verify mempool still has transactions
 	allTxs := m.Transactions()
-	assert.Equal(t, 5, len(allTxs), "mempool should still have all transactions")
+	assert.Equal(
+		t,
+		5,
+		len(allTxs),
+		"mempool should still have all transactions",
+	)
 }
 
 // =============================================================================
@@ -1391,7 +1401,12 @@ func TestMempool_HighVolumeTransactions(t *testing.T) {
 	m.RLock()
 	finalCount := len(m.transactions)
 	m.RUnlock()
-	assert.Equal(t, numTxs/2, finalCount, "should have half transactions remaining")
+	assert.Equal(
+		t,
+		numTxs/2,
+		finalCount,
+		"should have half transactions remaining",
+	)
 }
 
 func TestMempool_RapidConsumerCreationDeletion(t *testing.T) {

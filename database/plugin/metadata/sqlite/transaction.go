@@ -705,8 +705,11 @@ func (d *MetadataStoreSqlite) SetTransaction(
 				// If the record already existed, we need to fetch its ID
 				if unifiedCert.ID == 0 {
 					result := db.
-						// #nosec G115
-						Where("transaction_id = ? AND cert_index = ?", tmpTx.ID, uint(i)).
+						Where(
+							"transaction_id = ? AND cert_index = ?",
+							tmpTx.ID,
+							uint(i), //nolint:gosec
+						).
 						First(&unifiedCert)
 					if result.Error != nil {
 						return fmt.Errorf(

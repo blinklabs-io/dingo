@@ -181,7 +181,11 @@ func (s *queryServiceServer) ReadEraSummary(
 			lastEraId = epoch.EraId
 			hasLastEra = true
 		}
-		epochDurationMs := uint64(epoch.SlotLength) * uint64(epoch.LengthInSlots)
+		epochDurationMs := uint64(
+			epoch.SlotLength,
+		) * uint64(
+			epoch.LengthInSlots,
+		)
 		timespanMs += epochDurationMs
 	}
 

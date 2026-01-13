@@ -152,10 +152,15 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 				TaskQueueSize:  cfg.DatabaseQueueSize,
 				Disabled:       false,
 			}),
-			dingo.WithPeerLimits(
-				cfg.MaxColdPeers,
-				cfg.MaxWarmPeers,
-				cfg.MaxHotPeers,
+			dingo.WithPeerTargets(
+				cfg.TargetNumberOfKnownPeers,
+				cfg.TargetNumberOfEstablishedPeers,
+				cfg.TargetNumberOfActivePeers,
+			),
+			dingo.WithActivePeersQuotas(
+				cfg.ActivePeersTopologyQuota,
+				cfg.ActivePeersGossipQuota,
+				cfg.ActivePeersLedgerQuota,
 			),
 		),
 	)
