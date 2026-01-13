@@ -1180,7 +1180,9 @@ func (ls *LedgerState) ledgerProcessBlock(
 								)
 							}
 							// Filter placeholders (0xF4 false, 0xF5 true, 0xF6 null)
-							if len(txArray[2]) > 0 && txArray[2][0] != 0xF4 && txArray[2][0] != 0xF5 && txArray[2][0] != 0xF6 {
+							if len(txArray[2]) > 0 && txArray[2][0] != 0xF4 &&
+								txArray[2][0] != 0xF5 &&
+								txArray[2][0] != 0xF6 {
 								auxCborHex = hex.EncodeToString(
 									[]byte(txArray[2]),
 								)

@@ -19,6 +19,16 @@ import (
 	"strconv"
 )
 
+// SyncProgressProvider defines an interface for querying sync progress.
+// This allows the peer governor to check sync progress without directly
+// depending on the chain or node packages.
+type SyncProgressProvider interface {
+	// SyncProgress returns the current sync progress as a value between 0 and 1.
+	// A value of 1.0 indicates fully synced.
+	// A value of 0.0 indicates just started or unknown.
+	SyncProgress() float64
+}
+
 // LedgerPeerProvider defines an interface for querying ledger peer information.
 // This allows the peer governor to discover peers from on-chain stake pool
 // relay registrations without directly depending on the ledger package.
@@ -79,10 +89,16 @@ func (r PoolRelay) Addresses() []string {
 		addresses = append(addresses, net.JoinHostPort(r.Hostname, portStr))
 	}
 	if r.IPv4 != nil && len(*r.IPv4) > 0 {
-		addresses = append(addresses, net.JoinHostPort(r.IPv4.String(), portStr))
+		addresses = append(
+			addresses,
+			net.JoinHostPort(r.IPv4.String(), portStr),
+		)
 	}
 	if r.IPv6 != nil && len(*r.IPv6) > 0 {
-		addresses = append(addresses, net.JoinHostPort(r.IPv6.String(), portStr))
+		addresses = append(
+			addresses,
+			net.JoinHostPort(r.IPv6.String(), portStr),
+		)
 	}
 
 	return addresses

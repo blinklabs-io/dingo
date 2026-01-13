@@ -52,6 +52,15 @@ type Ouroboros struct {
 	metrics          *blockfetchMetrics
 	blockFetchStarts map[ouroboros.ConnectionId]time.Time
 	blockFetchMutex  sync.Mutex
+	// ChainSync measurement tracking for peer scoring
+	chainsyncStats map[ouroboros.ConnectionId]*chainsyncPeerStats
+	chainsyncMutex sync.Mutex
+}
+
+// chainsyncPeerStats tracks ChainSync performance metrics per peer connection.
+type chainsyncPeerStats struct {
+	lastObservationTime time.Time
+	headerCount         int64
 }
 
 type OuroborosConfig struct {
@@ -88,6 +97,7 @@ func NewOuroboros(cfg OuroborosConfig) *Ouroboros {
 		EventBus:         cfg.EventBus,
 		ConnManager:      cfg.ConnManager,
 		blockFetchStarts: make(map[ouroboros.ConnectionId]time.Time),
+		chainsyncStats:   make(map[ouroboros.ConnectionId]*chainsyncPeerStats),
 	}
 	if cfg.PromRegistry != nil {
 		o.initMetrics()
@@ -266,6 +276,10 @@ func (o *Ouroboros) HandleConnClosedEvent(evt event.Event) {
 	o.blockFetchMutex.Lock()
 	delete(o.blockFetchStarts, connId)
 	o.blockFetchMutex.Unlock()
+	// Clean up chainsync stats
+	o.chainsyncMutex.Lock()
+	delete(o.chainsyncStats, connId)
+	o.chainsyncMutex.Unlock()
 }
 
 func (o *Ouroboros) HandleOutboundConnEvent(evt event.Event) {

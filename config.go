@@ -62,10 +62,14 @@ type Config struct {
 	runMode                  string
 	shutdownTimeout          time.Duration
 	DatabaseWorkerPoolConfig ledger.DatabaseWorkerPoolConfig
-	// Peer limits (0 = use default, -1 = unlimited)
-	maxColdPeers int
-	maxWarmPeers int
-	maxHotPeers  int
+	// Peer targets (0 = use default, -1 = unlimited)
+	targetNumberOfKnownPeers       int
+	targetNumberOfEstablishedPeers int
+	targetNumberOfActivePeers      int
+	// Per-source quotas for active peers (0 = use default)
+	activePeersTopologyQuota int
+	activePeersGossipQuota   int
+	activePeersLedgerQuota   int
 }
 
 // configPopulateNetworkMagic uses the named network (if specified) to determine the network magic value (if not specified)
@@ -305,13 +309,28 @@ func WithDatabaseWorkerPoolConfig(
 	}
 }
 
-// WithPeerLimits specifies the maximum number of peers in each state.
-// Use 0 to use the default limit, or -1 for unlimited.
-// Default limits: cold=200, warm=50, hot=20
-func WithPeerLimits(maxCold, maxWarm, maxHot int) ConfigOptionFunc {
+// WithPeerTargets specifies the target number of peers in each state.
+// Use 0 to use the default target, or -1 for unlimited.
+// Default targets: known=150, established=50, active=20
+func WithPeerTargets(
+	targetKnown, targetEstablished, targetActive int,
+) ConfigOptionFunc {
 	return func(c *Config) {
-		c.maxColdPeers = maxCold
-		c.maxWarmPeers = maxWarm
-		c.maxHotPeers = maxHot
+		c.targetNumberOfKnownPeers = targetKnown
+		c.targetNumberOfEstablishedPeers = targetEstablished
+		c.targetNumberOfActivePeers = targetActive
+	}
+}
+
+// WithActivePeersQuotas specifies the per-source quotas for active peers.
+// Use 0 to use the default quota, or a negative value to disable enforcement.
+// Default quotas: topology=3, gossip=12, ledger=5
+func WithActivePeersQuotas(
+	topologyQuota, gossipQuota, ledgerQuota int,
+) ConfigOptionFunc {
+	return func(c *Config) {
+		c.activePeersTopologyQuota = topologyQuota
+		c.activePeersGossipQuota = gossipQuota
+		c.activePeersLedgerQuota = ledgerQuota
 	}
 }

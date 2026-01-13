@@ -206,7 +206,12 @@ func TestRunMode_Validation(t *testing.T) {
 	}
 	for _, tt := range tests {
 		if got := tt.mode.Valid(); got != tt.valid {
-			t.Errorf("RunMode(%q).Valid() = %v, want %v", tt.mode, got, tt.valid)
+			t.Errorf(
+				"RunMode(%q).Valid() = %v, want %v",
+				tt.mode,
+				got,
+				tt.valid,
+			)
 		}
 	}
 }
@@ -223,7 +228,12 @@ func TestRunMode_IsDevMode(t *testing.T) {
 	}
 	for _, tt := range tests {
 		if got := tt.mode.IsDevMode(); got != tt.isDevMode {
-			t.Errorf("RunMode(%q).IsDevMode() = %v, want %v", tt.mode, got, tt.isDevMode)
+			t.Errorf(
+				"RunMode(%q).IsDevMode() = %v, want %v",
+				tt.mode,
+				got,
+				tt.isDevMode,
+			)
 		}
 	}
 }
