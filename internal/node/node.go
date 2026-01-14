@@ -140,7 +140,7 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 			dingo.WithUtxorpcTlsCertFilePath(cfg.TlsCertFilePath),
 			dingo.WithUtxorpcTlsKeyFilePath(cfg.TlsKeyFilePath),
 			dingo.WithValidateHistorical(cfg.ValidateHistorical),
-			dingo.WithDevMode(cfg.DevMode),
+			dingo.WithRunMode(string(cfg.RunMode)),
 			dingo.WithShutdownTimeout(shutdownTimeout),
 			// Enable metrics with default prometheus registry
 			dingo.WithPrometheusRegistry(prometheus.DefaultRegisterer),

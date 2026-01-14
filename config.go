@@ -32,6 +32,13 @@ import (
 
 type ListenerConfig = connmanager.ListenerConfig
 
+// runMode constants for operational mode configuration
+const (
+	runModeServe = "serve"
+	runModeLoad  = "load"
+	runModeDev   = "dev"
+)
+
 type Config struct {
 	promRegistry             prometheus.Registerer
 	topologyConfig           *topology.TopologyConfig
@@ -52,7 +59,7 @@ type Config struct {
 	validateHistorical       bool
 	tracing                  bool
 	tracingStdout            bool
-	devMode                  bool
+	runMode                  string
 	shutdownTimeout          time.Duration
 	DatabaseWorkerPoolConfig ledger.DatabaseWorkerPoolConfig
 	// Peer limits (0 = use default, -1 = unlimited)
@@ -73,6 +80,11 @@ func (n *Node) configPopulateNetworkMagic() error {
 		n.config = tmpCfg
 	}
 	return nil
+}
+
+// isDevMode returns true if running in development mode
+func (c *Config) isDevMode() bool {
+	return c.runMode == runModeDev
 }
 
 func (n *Node) configValidate() error {
@@ -269,10 +281,11 @@ func WithMempoolCapacity(capacity int64) ConfigOptionFunc {
 	}
 }
 
-// WithDevMode enables development mode which prevents outbound connections.
-func WithDevMode(devMode bool) ConfigOptionFunc {
+// WithRunMode sets the operational mode ("serve", "load", or "dev").
+// "dev" mode enables development behaviors (forge blocks, disable outbound).
+func WithRunMode(mode string) ConfigOptionFunc {
 	return func(c *Config) {
-		c.devMode = devMode
+		c.runMode = mode
 	}
 }
 
