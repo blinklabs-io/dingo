@@ -30,3 +30,7 @@ go.work
 
 # node_modules for npm publishing
 node_modules/
+
+# IDEs
+.idea/
+.vscode/
