@@ -136,6 +136,13 @@ func (n *Node) Run(ctx context.Context) error {
 			ValidateHistorical:         n.config.validateHistorical,
 			BlockfetchRequestRangeFunc: n.ouroboros.BlockfetchClientRequestRange,
 			DatabaseWorkerPoolConfig:   n.config.DatabaseWorkerPoolConfig,
+			FatalErrorFunc: func(err error) {
+				n.config.logger.Error(
+					"fatal ledger error, initiating shutdown",
+					"error", err,
+				)
+				n.cancel()
+			},
 		},
 	)
 	if err != nil {
