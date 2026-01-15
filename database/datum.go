@@ -33,8 +33,7 @@ func (d *Database) SetDatum(
 	datumHash := lcommon.Blake2b256Hash(rawDatum)
 
 	if txn == nil {
-		txn = d.Transaction(false)
-		defer txn.Commit() //nolint:errcheck
+		return d.metadata.SetDatum(datumHash, rawDatum, addedSlot, nil)
 	}
 	return d.metadata.SetDatum(datumHash, rawDatum, addedSlot, txn.Metadata())
 }
@@ -49,7 +48,7 @@ func (d *Database) GetDatum(
 	}
 	if txn == nil {
 		txn = d.Transaction(false)
-		defer txn.Commit() //nolint:errcheck
+		defer txn.Release()
 	}
 	tmpHash := lcommon.NewBlake2b256(hash)
 	ret, err := d.metadata.GetDatum(tmpHash, txn.Metadata())

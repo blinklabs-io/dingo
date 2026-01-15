@@ -159,7 +159,7 @@ func (d *Database) UtxoByRef(
 ) (*models.Utxo, error) {
 	if txn == nil {
 		txn = d.Transaction(false)
-		defer txn.Commit() //nolint:errcheck
+		defer txn.Release()
 	}
 	utxo, err := d.metadata.GetUtxo(txId, outputIdx, txn.Metadata())
 	if err != nil {
@@ -182,7 +182,7 @@ func (d *Database) UtxosByAddress(
 	tmpUtxo := models.Utxo{}
 	if txn == nil {
 		txn = d.Transaction(false)
-		defer txn.Commit() //nolint:errcheck
+		defer txn.Release()
 	}
 	utxos, err := d.metadata.GetUtxosByAddress(addr, txn.Metadata())
 	if err != nil {

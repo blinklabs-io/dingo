@@ -26,7 +26,7 @@ func (d *Database) GetAccount(
 ) (*models.Account, error) {
 	if txn == nil {
 		txn = d.Transaction(false)
-		defer txn.Commit() //nolint:errcheck
+		defer txn.Release()
 	}
 	account, err := d.metadata.GetAccount(
 		stakeKey,
