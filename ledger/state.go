@@ -260,6 +260,10 @@ const (
 	SyncingChainsyncState  ChainsyncState = "syncing"
 )
 
+// FatalErrorFunc is a callback invoked when a fatal error occurs that requires
+// the node to shut down. The callback should trigger graceful shutdown.
+type FatalErrorFunc func(err error)
+
 type LedgerStateConfig struct {
 	PromRegistry               prometheus.Registerer
 	Logger                     *slog.Logger
@@ -268,6 +272,7 @@ type LedgerStateConfig struct {
 	EventBus                   *event.EventBus
 	CardanoNodeConfig          *cardano.CardanoNodeConfig
 	BlockfetchRequestRangeFunc BlockfetchRequestRangeFunc
+	FatalErrorFunc             FatalErrorFunc
 	ValidateHistorical         bool
 	ForgeBlocks                bool
 	DatabaseWorkerPoolConfig   DatabaseWorkerPoolConfig

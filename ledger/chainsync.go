@@ -52,20 +52,40 @@ func (ls *LedgerState) handleEventChainsync(evt event.Event) {
 	e := evt.Data.(ChainsyncEvent)
 	if e.Rollback {
 		if err := ls.handleEventChainsyncRollback(e); err != nil {
-			// TODO: actually handle this error
 			ls.config.Logger.Error(
 				"failed to handle rollback",
 				"component", "ledger",
 				"error", err,
+				"slot", e.Point.Slot,
+				"hash", hex.EncodeToString(e.Point.Hash),
 			)
+			if ls.config.FatalErrorFunc != nil {
+				ls.config.FatalErrorFunc(err)
+			}
 			return
 		}
 	} else if e.BlockHeader != nil {
 		if err := ls.handleEventChainsyncBlockHeader(e); err != nil {
-			// TODO: actually handle this error
 			ls.config.Logger.Error(
-				fmt.Sprintf("ledger: failed to handle block header: %s", err),
+				"failed to handle block header",
+				"component", "ledger",
+				"error", err,
+				"slot", e.Point.Slot,
+				"hash", hex.EncodeToString(e.Point.Hash),
 			)
+			if ls.config.EventBus != nil {
+				ls.config.EventBus.Publish(
+					LedgerErrorEventType,
+					event.NewEvent(
+						LedgerErrorEventType,
+						LedgerErrorEvent{
+							Error:     err,
+							Operation: "block_header",
+							Point:     e.Point,
+						},
+					),
+				)
+			}
 			return
 		}
 	}
@@ -77,20 +97,46 @@ func (ls *LedgerState) handleEventBlockfetch(evt event.Event) {
 	e := evt.Data.(BlockfetchEvent)
 	if e.BatchDone {
 		if err := ls.handleEventBlockfetchBatchDone(e); err != nil {
-			// TODO: actually handle this error
 			ls.config.Logger.Error(
-				fmt.Sprintf(
-					"ledger: failed to handle blockfetch batch done: %s",
-					err,
-				),
+				"failed to handle blockfetch batch done",
+				"component", "ledger",
+				"error", err,
 			)
+			if ls.config.EventBus != nil {
+				ls.config.EventBus.Publish(
+					LedgerErrorEventType,
+					event.NewEvent(
+						LedgerErrorEventType,
+						LedgerErrorEvent{
+							Error:     err,
+							Operation: "blockfetch_batch_done",
+						},
+					),
+				)
+			}
 		}
 	} else if e.Block != nil {
 		if err := ls.handleEventBlockfetchBlock(e); err != nil {
-			// TODO: actually handle this error
 			ls.config.Logger.Error(
-				fmt.Sprintf("ledger: failed to handle block: %s", err),
+				"failed to handle block",
+				"component", "ledger",
+				"error", err,
+				"slot", e.Point.Slot,
+				"hash", hex.EncodeToString(e.Point.Hash),
 			)
+			if ls.config.EventBus != nil {
+				ls.config.EventBus.Publish(
+					LedgerErrorEventType,
+					event.NewEvent(
+						LedgerErrorEventType,
+						LedgerErrorEvent{
+							Error:     err,
+							Operation: "blockfetch_block",
+							Point:     e.Point,
+						},
+					),
+				)
+			}
 		}
 	}
 }

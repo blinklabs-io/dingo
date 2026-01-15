@@ -23,8 +23,9 @@ import (
 )
 
 const (
-	BlockfetchEventType event.EventType = "blockfetch.event"
-	ChainsyncEventType  event.EventType = "chainsync.event"
+	BlockfetchEventType  event.EventType = "blockfetch.event"
+	ChainsyncEventType   event.EventType = "chainsync.event"
+	LedgerErrorEventType event.EventType = "ledger.error"
 )
 
 // BlockfetchEvent represents either a Block or BatchDone blockfetch event. We use
@@ -47,4 +48,11 @@ type ChainsyncEvent struct {
 	BlockNumber  uint64
 	Type         uint // Block or header type ID
 	Rollback     bool // Set to true for a Rollback event
+}
+
+// LedgerErrorEvent represents an error that occurred during ledger processing.
+type LedgerErrorEvent struct {
+	Error     error         // The actual error that occurred
+	Operation string        // The operation that failed (e.g., "block_header", "rollback")
+	Point     ocommon.Point // Chain point where the error occurred, if applicable
 }
