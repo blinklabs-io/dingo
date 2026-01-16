@@ -27,7 +27,7 @@ func (d *Database) GetPool(
 ) (*models.Pool, error) {
 	if txn == nil {
 		txn = d.Transaction(false)
-		defer txn.Commit() //nolint:errcheck
+		defer txn.Release()
 	}
 	ret, err := d.metadata.GetPool(pkh, includeInactive, txn.Metadata())
 	if err != nil {
@@ -44,7 +44,7 @@ func (d *Database) GetPool(
 func (d *Database) GetActivePoolRelays(txn *Txn) ([]models.PoolRegistrationRelay, error) {
 	if txn == nil {
 		txn = d.Transaction(false)
-		defer txn.Commit() //nolint:errcheck
+		defer txn.Release()
 	}
 	return d.metadata.GetActivePoolRelays(txn.Metadata())
 }
