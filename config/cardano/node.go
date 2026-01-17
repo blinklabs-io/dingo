@@ -144,7 +144,7 @@ func (c *CardanoNodeConfig) loadGenesisConfigs() error {
 		if err != nil {
 			return err
 		}
-		shelleyGenesisHashBytes := normalizeGenesisBytesForHash(
+		shelleyGenesisHashBytes := replaceGenesisLineEndings(
 			shelleyGenesisBytes,
 		)
 		shelleyHash, err := validateGenesisHash(
@@ -174,7 +174,7 @@ func (c *CardanoNodeConfig) loadGenesisConfigs() error {
 		if err != nil {
 			return err
 		}
-		alonzoGenesisHashBytes := normalizeGenesisBytesForHash(
+		alonzoGenesisHashBytes := replaceGenesisLineEndings(
 			alonzoGenesisBytes,
 		)
 		alonzoHash, err := validateGenesisHash(
@@ -202,7 +202,7 @@ func (c *CardanoNodeConfig) loadGenesisConfigs() error {
 		if err != nil {
 			return err
 		}
-		conwayGenesisHashBytes := normalizeGenesisBytesForHash(
+		conwayGenesisHashBytes := replaceGenesisLineEndings(
 			conwayGenesisBytes,
 		)
 		conwayHash, err := validateGenesisHash(
@@ -287,7 +287,7 @@ func (c *CardanoNodeConfig) loadGenesisConfigsFromEmbed() error {
 		if err != nil {
 			return err
 		}
-		shelleyGenesisHashBytes := normalizeGenesisBytesForHash(
+		shelleyGenesisHashBytes := replaceGenesisLineEndings(
 			shelleyGenesisBytes,
 		)
 		shelleyHash, err := validateGenesisHash(
@@ -317,7 +317,7 @@ func (c *CardanoNodeConfig) loadGenesisConfigsFromEmbed() error {
 		if err != nil {
 			return err
 		}
-		alonzoGenesisHashBytes := normalizeGenesisBytesForHash(
+		alonzoGenesisHashBytes := replaceGenesisLineEndings(
 			alonzoGenesisBytes,
 		)
 		alonzoHash, err := validateGenesisHash(
@@ -347,7 +347,7 @@ func (c *CardanoNodeConfig) loadGenesisConfigsFromEmbed() error {
 		if err != nil {
 			return err
 		}
-		conwayGenesisHashBytes := normalizeGenesisBytesForHash(
+		conwayGenesisHashBytes := replaceGenesisLineEndings(
 			conwayGenesisBytes,
 		)
 		conwayHash, err := validateGenesisHash(
@@ -460,7 +460,8 @@ func canonicalizeByronGenesisJSON(genesisBytes []byte) ([]byte, error) {
 	return json.Marshal(payload)
 }
 
-func normalizeGenesisBytesForHash(genesisBytes []byte) []byte {
+func replaceGenesisLineEndings(genesisBytes []byte) []byte {
+	// Normalize line endings so hashes to get rid of the hash mismatch on different environments
 	genesisBytes = bytes.ReplaceAll(genesisBytes, []byte("\r\n"), []byte("\n"))
 	return bytes.ReplaceAll(genesisBytes, []byte("\r"), []byte("\n"))
 }
