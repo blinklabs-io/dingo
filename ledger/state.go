@@ -290,6 +290,7 @@ type LedgerState struct {
 	metrics                          stateMetrics
 	currentEra                       eras.EraDesc
 	config                           LedgerStateConfig
+	chainsyncBlockfetchBusyTimeMutex sync.Mutex // protects chainsyncBlockfetchBusyTime
 	chainsyncBlockfetchBusyTime      time.Time
 	currentPParams                   lcommon.ProtocolParameters
 	mempool                          MempoolProvider
