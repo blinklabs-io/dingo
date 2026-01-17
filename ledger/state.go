@@ -1,4 +1,4 @@
-// Copyright 2025 Blink Labs Software
+// Copyright 2026 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -264,6 +264,10 @@ const (
 // the node to shut down. The callback should trigger graceful shutdown.
 type FatalErrorFunc func(err error)
 
+// GetActiveConnectionFunc is a callback to retrieve the currently active
+// chainsync connection ID for chain selection purposes.
+type GetActiveConnectionFunc func() *ouroboros.ConnectionId
+
 type LedgerStateConfig struct {
 	PromRegistry               prometheus.Registerer
 	Logger                     *slog.Logger
@@ -272,6 +276,7 @@ type LedgerStateConfig struct {
 	EventBus                   *event.EventBus
 	CardanoNodeConfig          *cardano.CardanoNodeConfig
 	BlockfetchRequestRangeFunc BlockfetchRequestRangeFunc
+	GetActiveConnectionFunc    GetActiveConnectionFunc
 	FatalErrorFunc             FatalErrorFunc
 	ValidateHistorical         bool
 	ForgeBlocks                bool

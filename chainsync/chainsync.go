@@ -1,4 +1,4 @@
-// Copyright 2025 Blink Labs Software
+// Copyright 2026 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -32,11 +32,12 @@ type ChainsyncClientState struct {
 }
 
 type State struct {
-	eventBus          *event.EventBus
-	ledgerState       *ledger.LedgerState
-	clients           map[ouroboros.ConnectionId]*ChainsyncClientState
-	clientConnId      *ouroboros.ConnectionId // TODO: replace with handling of multiple chainsync clients (#385)
-	clientConnIdMutex sync.RWMutex
+	eventBus           *event.EventBus
+	ledgerState        *ledger.LedgerState
+	clients            map[ouroboros.ConnectionId]*ChainsyncClientState
+	trackedClients     map[ouroboros.ConnectionId]struct{}
+	activeClientConnId *ouroboros.ConnectionId
+	clientConnIdMutex  sync.RWMutex
 	sync.Mutex
 }
 
@@ -45,9 +46,10 @@ func NewState(
 	ledgerState *ledger.LedgerState,
 ) *State {
 	s := &State{
-		eventBus:    eventBus,
-		ledgerState: ledgerState,
-		clients:     make(map[ouroboros.ConnectionId]*ChainsyncClientState),
+		eventBus:       eventBus,
+		ledgerState:    ledgerState,
+		clients:        make(map[ouroboros.ConnectionId]*ChainsyncClientState),
+		trackedClients: make(map[ouroboros.ConnectionId]struct{}),
 	}
 	return s
 }
@@ -85,25 +87,99 @@ func (s *State) RemoveClient(connId connection.ConnectionId) {
 	delete(s.clients, connId)
 }
 
-// TODO: replace with handling of multiple chainsync clients (#385)
+// GetClientConnId returns the active chainsync client connection ID.
+// This is the connection that should be used for block fetching.
 func (s *State) GetClientConnId() *ouroboros.ConnectionId {
 	s.clientConnIdMutex.RLock()
 	defer s.clientConnIdMutex.RUnlock()
-	return s.clientConnId
+	return s.activeClientConnId
 }
 
-// TODO: replace with handling of multiple chainsync clients (#385)
+// SetClientConnId sets the active chainsync client connection ID.
+// This is used when chain selection determines a new best peer.
 func (s *State) SetClientConnId(connId ouroboros.ConnectionId) {
 	s.clientConnIdMutex.Lock()
 	defer s.clientConnIdMutex.Unlock()
-	s.clientConnId = &connId
+	s.activeClientConnId = &connId
 }
 
-// TODO: replace with handling of multiple chainsync clients (#385)
+// RemoveClientConnId removes a connection from tracking. If this was the
+// active client, selects a fallback from remaining tracked clients.
 func (s *State) RemoveClientConnId(connId ouroboros.ConnectionId) {
 	s.clientConnIdMutex.Lock()
 	defer s.clientConnIdMutex.Unlock()
-	if s.clientConnId != nil && *s.clientConnId == connId {
-		s.clientConnId = nil
+	delete(s.trackedClients, connId)
+	if s.activeClientConnId != nil && *s.activeClientConnId == connId {
+		s.activeClientConnId = nil
+		// Select fallback from remaining tracked clients
+		for fallbackId := range s.trackedClients {
+			s.activeClientConnId = &fallbackId
+			break
+		}
 	}
+}
+
+// AddClientConnId adds a connection ID to the set of tracked chainsync clients.
+// If no active client exists, this connection is automatically set as the active
+// client. This ensures there is always an active client when at least one is tracked.
+func (s *State) AddClientConnId(connId ouroboros.ConnectionId) {
+	s.clientConnIdMutex.Lock()
+	defer s.clientConnIdMutex.Unlock()
+	s.trackedClients[connId] = struct{}{}
+	// Set as active if there's no active client
+	if s.activeClientConnId == nil {
+		s.activeClientConnId = &connId
+	}
+}
+
+// HasClientConnId returns true if the connection ID is being tracked.
+func (s *State) HasClientConnId(connId ouroboros.ConnectionId) bool {
+	s.clientConnIdMutex.RLock()
+	defer s.clientConnIdMutex.RUnlock()
+	_, exists := s.trackedClients[connId]
+	return exists
+}
+
+// GetClientConnIds returns all tracked chainsync client connection IDs.
+func (s *State) GetClientConnIds() []ouroboros.ConnectionId {
+	s.clientConnIdMutex.RLock()
+	defer s.clientConnIdMutex.RUnlock()
+	connIds := make([]ouroboros.ConnectionId, 0, len(s.trackedClients))
+	for connId := range s.trackedClients {
+		connIds = append(connIds, connId)
+	}
+	return connIds
+}
+
+// ClientConnCount returns the number of tracked chainsync clients.
+func (s *State) ClientConnCount() int {
+	s.clientConnIdMutex.RLock()
+	defer s.clientConnIdMutex.RUnlock()
+	return len(s.trackedClients)
+}
+
+// TryAddClientConnId atomically checks if a connection can be added (not
+// already tracked and under maxClients limit) and adds it if allowed.
+// Returns true if the connection was added, false otherwise.
+func (s *State) TryAddClientConnId(
+	connId ouroboros.ConnectionId,
+	maxClients int,
+) bool {
+	s.clientConnIdMutex.Lock()
+	defer s.clientConnIdMutex.Unlock()
+	// Check if already tracked
+	if _, exists := s.trackedClients[connId]; exists {
+		return false
+	}
+	// Check client limit
+	if len(s.trackedClients) >= maxClients {
+		return false
+	}
+	// Add the client
+	s.trackedClients[connId] = struct{}{}
+	// Set as active if there's no active client
+	if s.activeClientConnId == nil {
+		s.activeClientConnId = &connId
+	}
+	return true
 }
