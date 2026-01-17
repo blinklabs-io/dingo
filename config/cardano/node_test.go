@@ -15,6 +15,7 @@
 package cardano
 
 import (
+	"bytes"
 	"path"
 	"reflect"
 	"testing"
@@ -82,4 +83,49 @@ func TestCardanoNodeConfig(t *testing.T) {
 			t.Fatalf("got nil instead of ConwayGenesis")
 		}
 	})
+}
+
+func TestCardanoNodeConfigMissingGenesisHashes(t *testing.T) {
+	cfgBytes := []byte(`{
+  "AlonzoGenesisFile": "alonzo-genesis.json",
+  "ByronGenesisFile": "byron-genesis.json",
+  "ConwayGenesisFile": "conway-genesis.json",
+  "ShelleyGenesisFile": "shelley-genesis.json"
+}`)
+	cfg, err := NewCardanoNodeConfigFromReader(bytes.NewReader(cfgBytes))
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	cfg.path = testDataDir
+	if err := cfg.loadGenesisConfigs(); err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	if cfg.ByronGenesisHash != expectedCardanoNodeConfig.ByronGenesisHash {
+		t.Fatalf(
+			"unexpected Byron genesis hash: got %s, wanted %s",
+			cfg.ByronGenesisHash,
+			expectedCardanoNodeConfig.ByronGenesisHash,
+		)
+	}
+	if cfg.ShelleyGenesisHash != expectedCardanoNodeConfig.ShelleyGenesisHash {
+		t.Fatalf(
+			"unexpected Shelley genesis hash: got %s, wanted %s",
+			cfg.ShelleyGenesisHash,
+			expectedCardanoNodeConfig.ShelleyGenesisHash,
+		)
+	}
+	if cfg.AlonzoGenesisHash != expectedCardanoNodeConfig.AlonzoGenesisHash {
+		t.Fatalf(
+			"unexpected Alonzo genesis hash: got %s, wanted %s",
+			cfg.AlonzoGenesisHash,
+			expectedCardanoNodeConfig.AlonzoGenesisHash,
+		)
+	}
+	if cfg.ConwayGenesisHash != expectedCardanoNodeConfig.ConwayGenesisHash {
+		t.Fatalf(
+			"unexpected Conway genesis hash: got %s, wanted %s",
+			cfg.ConwayGenesisHash,
+			expectedCardanoNodeConfig.ConwayGenesisHash,
+		)
+	}
 }
