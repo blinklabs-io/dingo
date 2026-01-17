@@ -144,10 +144,13 @@ func (c *CardanoNodeConfig) loadGenesisConfigs() error {
 		if err != nil {
 			return err
 		}
+		shelleyGenesisHashBytes := normalizeGenesisBytesForHash(
+			shelleyGenesisBytes,
+		)
 		shelleyHash, err := validateGenesisHash(
 			"Shelley",
 			c.ShelleyGenesisHash,
-			shelleyGenesisBytes,
+			shelleyGenesisHashBytes,
 		)
 		if err != nil {
 			return err
@@ -171,10 +174,13 @@ func (c *CardanoNodeConfig) loadGenesisConfigs() error {
 		if err != nil {
 			return err
 		}
+		alonzoGenesisHashBytes := normalizeGenesisBytesForHash(
+			alonzoGenesisBytes,
+		)
 		alonzoHash, err := validateGenesisHash(
 			"Alonzo",
 			c.AlonzoGenesisHash,
-			alonzoGenesisBytes,
+			alonzoGenesisHashBytes,
 		)
 		if err != nil {
 			return err
@@ -196,10 +202,13 @@ func (c *CardanoNodeConfig) loadGenesisConfigs() error {
 		if err != nil {
 			return err
 		}
+		conwayGenesisHashBytes := normalizeGenesisBytesForHash(
+			conwayGenesisBytes,
+		)
 		conwayHash, err := validateGenesisHash(
 			"Conway",
 			c.ConwayGenesisHash,
-			conwayGenesisBytes,
+			conwayGenesisHashBytes,
 		)
 		if err != nil {
 			return err
@@ -278,10 +287,13 @@ func (c *CardanoNodeConfig) loadGenesisConfigsFromEmbed() error {
 		if err != nil {
 			return err
 		}
+		shelleyGenesisHashBytes := normalizeGenesisBytesForHash(
+			shelleyGenesisBytes,
+		)
 		shelleyHash, err := validateGenesisHash(
 			"Shelley",
 			c.ShelleyGenesisHash,
-			shelleyGenesisBytes,
+			shelleyGenesisHashBytes,
 		)
 		if err != nil {
 			return err
@@ -305,10 +317,13 @@ func (c *CardanoNodeConfig) loadGenesisConfigsFromEmbed() error {
 		if err != nil {
 			return err
 		}
+		alonzoGenesisHashBytes := normalizeGenesisBytesForHash(
+			alonzoGenesisBytes,
+		)
 		alonzoHash, err := validateGenesisHash(
 			"Alonzo",
 			c.AlonzoGenesisHash,
-			alonzoGenesisBytes,
+			alonzoGenesisHashBytes,
 		)
 		if err != nil {
 			return err
@@ -332,10 +347,13 @@ func (c *CardanoNodeConfig) loadGenesisConfigsFromEmbed() error {
 		if err != nil {
 			return err
 		}
+		conwayGenesisHashBytes := normalizeGenesisBytesForHash(
+			conwayGenesisBytes,
+		)
 		conwayHash, err := validateGenesisHash(
 			"Conway",
 			c.ConwayGenesisHash,
-			conwayGenesisBytes,
+			conwayGenesisHashBytes,
 		)
 		if err != nil {
 			return err
@@ -440,4 +458,9 @@ func canonicalizeByronGenesisJSON(genesisBytes []byte) ([]byte, error) {
 		return nil, err
 	}
 	return json.Marshal(payload)
+}
+
+func normalizeGenesisBytesForHash(genesisBytes []byte) []byte {
+	genesisBytes = bytes.ReplaceAll(genesisBytes, []byte("\r\n"), []byte("\n"))
+	return bytes.ReplaceAll(genesisBytes, []byte("\r"), []byte("\n"))
 }
