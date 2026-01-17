@@ -22,8 +22,8 @@ import (
 	"fmt"
 	"math"
 	"math/big"
-	"time"
 	"sort"
+	"time"
 
 	"connectrpc.com/connect"
 	"github.com/blinklabs-io/dingo/config/cardano"
