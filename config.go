@@ -32,12 +32,21 @@ import (
 
 type ListenerConfig = connmanager.ListenerConfig
 
+// runMode constants for operational mode configuration
+const (
+	runModeServe = "serve"
+	runModeLoad  = "load"
+	runModeDev   = "dev"
+)
+
 type Config struct {
 	promRegistry             prometheus.Registerer
 	topologyConfig           *topology.TopologyConfig
 	logger                   *slog.Logger
 	cardanoNodeConfig        *cardano.CardanoNodeConfig
 	dataDir                  string
+	blobPlugin               string
+	metadataPlugin           string
 	network                  string
 	tlsCertFilePath          string
 	tlsKeyFilePath           string
@@ -52,7 +61,7 @@ type Config struct {
 	validateHistorical       bool
 	tracing                  bool
 	tracingStdout            bool
-	devMode                  bool
+	runMode                  string
 	shutdownTimeout          time.Duration
 	DatabaseWorkerPoolConfig ledger.DatabaseWorkerPoolConfig
 	// Peer limits (0 = use default, -1 = unlimited)
@@ -73,6 +82,11 @@ func (n *Node) configPopulateNetworkMagic() error {
 		n.config = tmpCfg
 	}
 	return nil
+}
+
+// isDevMode returns true if running in development mode
+func (c *Config) isDevMode() bool {
+	return c.runMode == runModeDev
 }
 
 func (n *Node) configValidate() error {
@@ -143,6 +157,20 @@ func WithCardanoNodeConfig(
 func WithDatabasePath(dataDir string) ConfigOptionFunc {
 	return func(c *Config) {
 		c.dataDir = dataDir
+	}
+}
+
+// WithBlobPlugin specifies the blob storage plugin to use.
+func WithBlobPlugin(plugin string) ConfigOptionFunc {
+	return func(c *Config) {
+		c.blobPlugin = plugin
+	}
+}
+
+// WithMetadataPlugin specifies the metadata storage plugin to use.
+func WithMetadataPlugin(plugin string) ConfigOptionFunc {
+	return func(c *Config) {
+		c.metadataPlugin = plugin
 	}
 }
 
@@ -269,10 +297,11 @@ func WithMempoolCapacity(capacity int64) ConfigOptionFunc {
 	}
 }
 
-// WithDevMode enables development mode which prevents outbound connections.
-func WithDevMode(devMode bool) ConfigOptionFunc {
+// WithRunMode sets the operational mode ("serve", "load", or "dev").
+// "dev" mode enables development behaviors (forge blocks, disable outbound).
+func WithRunMode(mode string) ConfigOptionFunc {
 	return func(c *Config) {
-		c.devMode = devMode
+		c.runMode = mode
 	}
 }
 

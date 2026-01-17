@@ -103,7 +103,7 @@ func (d *Database) GetTransactionByHash(
 	}
 	if txn == nil {
 		txn = d.Transaction(false)
-		defer txn.Commit() //nolint:errcheck
+		defer txn.Release()
 	}
 	return d.metadata.GetTransactionByHash(hash, txn.Metadata())
 }

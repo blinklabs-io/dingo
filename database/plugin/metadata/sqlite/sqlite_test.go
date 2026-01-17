@@ -49,8 +49,8 @@ func (m *mockTransaction) Type() int {
 	return 0 // Shelley transaction
 }
 
-func (m *mockTransaction) Fee() uint64 {
-	return 1000
+func (m *mockTransaction) Fee() *big.Int {
+	return big.NewInt(1000)
 }
 
 func (m *mockTransaction) TTL() uint64 {
@@ -129,11 +129,11 @@ func (m *mockTransaction) ReferenceInputs() []lcommon.TransactionInput {
 	return nil
 }
 
-func (m *mockTransaction) TotalCollateral() uint64 {
-	return 0
+func (m *mockTransaction) TotalCollateral() *big.Int {
+	return big.NewInt(0)
 }
 
-func (m *mockTransaction) Withdrawals() map[*lcommon.Address]uint64 {
+func (m *mockTransaction) Withdrawals() map[*lcommon.Address]*big.Int {
 	return nil
 }
 
@@ -153,12 +153,12 @@ func (m *mockTransaction) ProposalProcedures() []lcommon.ProposalProcedure {
 	return nil
 }
 
-func (m *mockTransaction) CurrentTreasuryValue() int64 {
-	return 0
+func (m *mockTransaction) CurrentTreasuryValue() *big.Int {
+	return big.NewInt(0)
 }
 
-func (m *mockTransaction) Donation() uint64 {
-	return 0
+func (m *mockTransaction) Donation() *big.Int {
+	return big.NewInt(0)
 }
 
 func (m *mockTransaction) Utxorpc() (*cardano.Tx, error) {

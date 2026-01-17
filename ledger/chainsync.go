@@ -52,20 +52,40 @@ func (ls *LedgerState) handleEventChainsync(evt event.Event) {
 	e := evt.Data.(ChainsyncEvent)
 	if e.Rollback {
 		if err := ls.handleEventChainsyncRollback(e); err != nil {
-			// TODO: actually handle this error
 			ls.config.Logger.Error(
 				"failed to handle rollback",
 				"component", "ledger",
 				"error", err,
+				"slot", e.Point.Slot,
+				"hash", hex.EncodeToString(e.Point.Hash),
 			)
+			if ls.config.FatalErrorFunc != nil {
+				ls.config.FatalErrorFunc(err)
+			}
 			return
 		}
 	} else if e.BlockHeader != nil {
 		if err := ls.handleEventChainsyncBlockHeader(e); err != nil {
-			// TODO: actually handle this error
 			ls.config.Logger.Error(
-				fmt.Sprintf("ledger: failed to handle block header: %s", err),
+				"failed to handle block header",
+				"component", "ledger",
+				"error", err,
+				"slot", e.Point.Slot,
+				"hash", hex.EncodeToString(e.Point.Hash),
 			)
+			if ls.config.EventBus != nil {
+				ls.config.EventBus.Publish(
+					LedgerErrorEventType,
+					event.NewEvent(
+						LedgerErrorEventType,
+						LedgerErrorEvent{
+							Error:     err,
+							Operation: "block_header",
+							Point:     e.Point,
+						},
+					),
+				)
+			}
 			return
 		}
 	}
@@ -77,20 +97,46 @@ func (ls *LedgerState) handleEventBlockfetch(evt event.Event) {
 	e := evt.Data.(BlockfetchEvent)
 	if e.BatchDone {
 		if err := ls.handleEventBlockfetchBatchDone(e); err != nil {
-			// TODO: actually handle this error
 			ls.config.Logger.Error(
-				fmt.Sprintf(
-					"ledger: failed to handle blockfetch batch done: %s",
-					err,
-				),
+				"failed to handle blockfetch batch done",
+				"component", "ledger",
+				"error", err,
 			)
+			if ls.config.EventBus != nil {
+				ls.config.EventBus.Publish(
+					LedgerErrorEventType,
+					event.NewEvent(
+						LedgerErrorEventType,
+						LedgerErrorEvent{
+							Error:     err,
+							Operation: "blockfetch_batch_done",
+						},
+					),
+				)
+			}
 		}
 	} else if e.Block != nil {
 		if err := ls.handleEventBlockfetchBlock(e); err != nil {
-			// TODO: actually handle this error
 			ls.config.Logger.Error(
-				fmt.Sprintf("ledger: failed to handle block: %s", err),
+				"failed to handle block",
+				"component", "ledger",
+				"error", err,
+				"slot", e.Point.Slot,
+				"hash", hex.EncodeToString(e.Point.Hash),
 			)
+			if ls.config.EventBus != nil {
+				ls.config.EventBus.Publish(
+					LedgerErrorEventType,
+					event.NewEvent(
+						LedgerErrorEventType,
+						LedgerErrorEvent{
+							Error:     err,
+							Operation: "blockfetch_block",
+							Point:     e.Point,
+						},
+					),
+				)
+			}
 		}
 	}
 }
@@ -179,6 +225,8 @@ func (ls *LedgerState) handleEventBlockfetchBlock(e BlockfetchEvent) error {
 		e,
 	)
 	// Update busy time in order to detect fetch timeout
+	ls.chainsyncBlockfetchBusyTimeMutex.Lock()
+	defer ls.chainsyncBlockfetchBusyTimeMutex.Unlock()
 	ls.chainsyncBlockfetchBusyTime = time.Now()
 	return nil
 }
@@ -530,7 +578,10 @@ func (ls *LedgerState) blockfetchRequestRangeStart(
 		return fmt.Errorf("request block range: %w", err)
 	}
 	// Reset blockfetch busy time
+	ls.chainsyncBlockfetchBusyTimeMutex.Lock()
 	ls.chainsyncBlockfetchBusyTime = time.Now()
+	ls.chainsyncBlockfetchBusyTimeMutex.Unlock()
+
 	// Create our blockfetch done signal channels
 	ls.chainsyncBlockfetchReadyChan = make(chan struct{})
 	ls.chainsyncBlockfetchBatchDoneChan = make(chan struct{})
@@ -543,8 +594,12 @@ func (ls *LedgerState) blockfetchRequestRangeStart(
 			case <-time.After(500 * time.Millisecond):
 			}
 			// Clear blockfetch busy flag on timeout
+			ls.chainsyncBlockfetchBusyTimeMutex.Lock()
+			busyTime := ls.chainsyncBlockfetchBusyTime
+			ls.chainsyncBlockfetchBusyTimeMutex.Unlock()
+
 			if time.Since(
-				ls.chainsyncBlockfetchBusyTime,
+				busyTime,
 			) > blockfetchBusyTimeout {
 				ls.blockfetchRequestRangeCleanup(true)
 				ls.config.Logger.Warn(

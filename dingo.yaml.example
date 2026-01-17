@@ -46,12 +46,31 @@ database:
 
   # Metadata storage plugin configuration
   metadata:
-    # Plugin to use for metadata storage (sqlite)
+    # Plugin to use for metadata storage (sqlite, postgres)
     plugin: "sqlite"
     # Configuration options for each plugin
     sqlite:
-      # Data directory for SQLite database file
+      # Path to SQLite database file
       data-dir: ".dingo/metadata.db"
+    postgres:
+      # NOTE: These are example values for local development only.
+      # Do not use these credentials in production environments.
+      # Postgres host
+      host: "localhost"
+      # Postgres port
+      port: 5432
+      # Postgres user
+      user: "postgres"
+      # Postgres password (required - no default)
+      password: ""
+      # Postgres database name
+      database: "postgres"
+      # Postgres sslmode
+      ssl-mode: "disable"
+      # Postgres TimeZone
+      timezone: "UTC"
+      # Full Postgres DSN (overrides other options when set)
+      dsn: ""
 
 # Path to the UNIX domain socket file used by the server
 socketPath: "dingo.socket"
@@ -98,9 +117,20 @@ intersectTip: false
 # Default: 1048576 (1 MB)
 mempoolCapacity: 1048576
 
-# Enable development mode which prevents outbound connections
-# Default: false
-devMode: false
+# Operational mode: "serve" (default), "load", or "dev"
+# - serve: Full node with network connectivity (default)
+# - load: Batch import from ImmutableDB (requires immutableDbPath)
+# - dev: Development mode (forge blocks, disable outbound, skip topology)
+# Note: CLI commands (serve, load) take priority over this setting
+#
+# Can be overridden with the DINGO_RUN_MODE environment variable
+runMode: "serve"
+
+# Path to ImmutableDB for batch import (used when runMode is "load")
+# Can also be provided as argument to 'dingo load' command
+#
+# Can be overridden with the DINGO_IMMUTABLE_DB_PATH environment variable
+immutableDbPath: ""
 
 # Validate historical blocks during ledger processing (default: false)
 validateHistorical: false

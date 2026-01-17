@@ -70,7 +70,7 @@ func ConvertMultiAssetToModels(
 				NameHex:     []byte(hex.EncodeToString(assetNameBytes)),
 				PolicyId:    policyIdBytes,
 				Fingerprint: []byte(fingerprint.String()),
-				Amount:      types.Uint64(amount),
+				Amount:      types.Uint64(amount.Uint64()),
 			}
 			assets = append(assets, asset)
 		}

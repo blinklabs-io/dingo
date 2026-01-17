@@ -55,7 +55,7 @@ func UtxoLedgerToModel(
 		TxId:      utxo.Id.Id().Bytes(),
 		Cbor:      utxo.Output.Cbor(),
 		AddedSlot: slot,
-		Amount:    types.Uint64(utxo.Output.Amount()),
+		Amount:    types.Uint64(utxo.Output.Amount().Uint64()),
 		OutputIdx: utxo.Id.Index(),
 	}
 	pkh := outAddr.PaymentKeyHash()

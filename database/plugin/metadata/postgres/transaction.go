@@ -12,11 +12,12 @@
 // either express or implied. See the License for the specific language
 // governing permissions and limitations under the License.
 
-package sqlite
+package postgres
 
 import (
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -28,12 +29,12 @@ import (
 	"gorm.io/gorm/clause"
 )
 
-// dbFromTxn returns d.DB() only when txn is nil, unwraps known *sqliteTxn or provider.MetadataTxn() when available, and returns nil for unrecognized txn types so callers can detect errors
-func (d *MetadataStoreSqlite) dbFromTxn(txn types.Txn) *gorm.DB {
+// dbFromTxn returns d.DB() only when txn is nil, unwraps known *postgresTxn or provider.MetadataTxn() when available, and returns nil for unrecognized txn types so callers can detect errors
+func (d *MetadataStorePostgres) dbFromTxn(txn types.Txn) *gorm.DB {
 	if txn == nil {
 		return d.DB()
 	}
-	if stx, ok := txn.(*sqliteTxn); ok && stx != nil {
+	if stx, ok := txn.(*postgresTxn); ok && stx != nil {
 		return stx.db
 	}
 	if provider, ok := txn.(interface{ MetadataTxn() *gorm.DB }); ok {
@@ -46,8 +47,8 @@ func (d *MetadataStoreSqlite) dbFromTxn(txn types.Txn) *gorm.DB {
 
 // resolveDB returns the *gorm.DB for the given transaction, or d.DB() if txn is nil.
 // Returns nil, ErrTxnWrongType if txn is non-nil but not the expected type.
-func (d *MetadataStoreSqlite) resolveDB(txn types.Txn) (*gorm.DB, error) {
-	if stx, ok := txn.(*sqliteTxn); ok {
+func (d *MetadataStorePostgres) resolveDB(txn types.Txn) (*gorm.DB, error) {
+	if stx, ok := txn.(*postgresTxn); ok {
 		if stx != nil && stx.beginErr != nil {
 			return nil, stx.beginErr
 		}
@@ -63,7 +64,7 @@ func (d *MetadataStoreSqlite) resolveDB(txn types.Txn) (*gorm.DB, error) {
 }
 
 // GetTransactionByHash returns a transaction by its hash
-func (d *MetadataStoreSqlite) GetTransactionByHash(
+func (d *MetadataStorePostgres) GetTransactionByHash(
 	hash []byte,
 	txn types.Txn,
 ) (*models.Transaction, error) {
@@ -134,7 +135,7 @@ func certRequiresDeposit(cert lcommon.Certificate) bool {
 }
 
 // getOrCreateAccount retrieves an existing account or creates a new one
-func (d *MetadataStoreSqlite) getOrCreateAccount(
+func (d *MetadataStorePostgres) getOrCreateAccount(
 	stakeKey []byte,
 	txn types.Txn,
 ) (*models.Account, error) {
@@ -163,9 +164,11 @@ func saveAccount(account *models.Account, db *gorm.DB) error {
 		result := db.Clauses(clause.OnConflict{
 			Columns: []clause.Column{{Name: "staking_key"}},
 			DoUpdates: clause.AssignmentColumns(
-				[]string{"pool", "drep"},
+				[]string{"pool", "drep", "active", "certificate_id"},
 			),
-		}).Create(account)
+		},
+			clause.Returning{Columns: []clause.Column{{Name: "id"}}},
+		).Create(account)
 		if result.Error != nil {
 			return result.Error
 		}
@@ -185,7 +188,7 @@ func saveCertRecord(record any, db *gorm.DB) error {
 }
 
 // SetTransaction adds a new transaction to the database and processes all certificates
-func (d *MetadataStoreSqlite) SetTransaction(
+func (d *MetadataStorePostgres) SetTransaction(
 	tx lcommon.Transaction,
 	point ocommon.Point,
 	idx uint32,
@@ -197,12 +200,21 @@ func (d *MetadataStoreSqlite) SetTransaction(
 	if err != nil {
 		return err
 	}
+	// Safely convert tx.Fee() (*big.Int) to uint64
+	var feeUint uint64
+	if txFee := tx.Fee(); txFee != nil {
+		if txFee.BitLen() > 64 {
+			feeUint = math.MaxUint64
+		} else {
+			feeUint = txFee.Uint64()
+		}
+	}
 	tmpTx := &models.Transaction{
 		Hash:       txHash,
 		Type:       tx.Type(),
 		BlockHash:  point.Hash,
 		BlockIndex: idx,
-		Fee:        types.Uint64(tx.Fee().Uint64()),
+		Fee:        types.Uint64(feeUint),
 		TTL:        types.Uint64(tx.TTL()),
 		Valid:      tx.IsValid(),
 	}
@@ -244,22 +256,12 @@ func (d *MetadataStoreSqlite) SetTransaction(
 		m := models.UtxoLedgerToModel(utxo, point.Slot)
 		tmpTx.Outputs = append(tmpTx.Outputs, m)
 	}
-
-	// Store outputs in a separate slice for explicit creation later
-	// GORM's Create with OnConflict doesn't properly handle associations
-	outputsToCreate := tmpTx.Outputs
-	tmpTx.Outputs = nil
-
 	result := db.Clauses(clause.OnConflict{
 		Columns: []clause.Column{{Name: "hash"}}, // unique txn hash
 		DoUpdates: clause.AssignmentColumns(
 			[]string{"block_hash", "block_index"},
 		),
 	}).Create(tmpTx)
-
-	// Restore outputs for later explicit creation
-	tmpTx.Outputs = outputsToCreate
-
 	if result.Error != nil {
 		return fmt.Errorf(
 			"create transaction at slot %d, block %x, txHash %x, txIndex %d: %#v, %w",
@@ -271,9 +273,9 @@ func (d *MetadataStoreSqlite) SetTransaction(
 			result.Error,
 		)
 	}
-	// SQLite's ON CONFLICT clause doesn't return the ID of an existing row when
-	// the conflict path is taken (no insert occurs). We need to fetch the ID
-	// explicitly so we can associate witness records with the correct transaction.
+	// Defensive: when an upsert hits a conflict path, we may not have an ID for
+	// the existing row. Fetch it explicitly so we can link witness records to
+	// the correct transaction (behavior varies by driver/DB).
 	if tmpTx.ID == 0 {
 		existingTx, err := d.GetTransactionByHash(txHash, txn)
 		if err != nil {
@@ -287,36 +289,6 @@ func (d *MetadataStoreSqlite) SetTransaction(
 		}
 		tmpTx.ID = existingTx.ID
 	}
-
-	// Create UTxO records for outputs
-	// OnConflict doesn't process associations, so we create them explicitly
-	for i := range tmpTx.Outputs {
-		tmpTx.Outputs[i].ID = 0 // Reset ID to let GORM auto-increment
-		tmpTx.Outputs[i].TransactionID = &tmpTx.ID
-		result := db.Clauses(clause.OnConflict{
-			Columns:   []clause.Column{{Name: "tx_id"}, {Name: "output_idx"}},
-			DoNothing: true,
-		}).Create(&tmpTx.Outputs[i])
-		if result.Error != nil {
-			return fmt.Errorf(
-				"create utxo output %d for tx %x: %w",
-				i,
-				txHash,
-				result.Error,
-			)
-		}
-	}
-	// Create CollateralReturn UTxO if present
-	if tmpTx.CollateralReturn != nil {
-		tmpTx.CollateralReturn.TransactionID = &tmpTx.ID
-		if result := db.Clauses(clause.OnConflict{
-			Columns:   []clause.Column{{Name: "tx_id"}, {Name: "output_idx"}},
-			DoNothing: true,
-		}).Create(tmpTx.CollateralReturn); result.Error != nil {
-			return fmt.Errorf("create collateral return utxo: %w", result.Error)
-		}
-	}
-
 	// Add Inputs to Transaction
 	for _, input := range tx.Inputs() {
 		inTxId := input.Id().Bytes()
@@ -621,12 +593,30 @@ func (d *MetadataStoreSqlite) SetTransaction(
 				)
 			}
 			if len(unifiedIDs) > 0 {
-				// Delete specialized records linked to existing unified certificates
+				// Delete specialized records linked to existing unified certificates.
+				// Child tables must be deleted before parent tables due to FK constraints.
+				// Note: move_instantaneous_rewards_reward is deleted via CASCADE when its
+				// parent move_instantaneous_rewards is deleted (MIRID FK constraint).
 				tables := []string{
-					"stake_registration", "pool_registration", "pool_retirement", "auth_committee_hot", "resign_committee_cold",
-					"deregistration", "stake_delegation", "stake_registration_delegation", "stake_vote_delegation",
-					"stake_vote_registration_delegation", "registration", "registration_drep", "deregistration_drep",
-					"update_drep", "vote_delegation", "vote_registration_delegation", "move_instantaneous_rewards",
+					"pool_registration_owner",
+					"pool_registration_relay",
+					"stake_registration",
+					"pool_registration",
+					"pool_retirement",
+					"auth_committee_hot",
+					"resign_committee_cold",
+					"deregistration",
+					"stake_delegation",
+					"stake_registration_delegation",
+					"stake_vote_delegation",
+					"stake_vote_registration_delegation",
+					"registration",
+					"registration_drep",
+					"deregistration_drep",
+					"update_drep",
+					"vote_delegation",
+					"vote_registration_delegation",
+					"move_instantaneous_rewards",
 				}
 				for _, table := range tables {
 					if result := db.Table(table).Where("certificate_id IN ?", unifiedIDs).Delete(nil); result.Error != nil {
@@ -704,10 +694,8 @@ func (d *MetadataStoreSqlite) SetTransaction(
 				}
 				// If the record already existed, we need to fetch its ID
 				if unifiedCert.ID == 0 {
-					result := db.
-						// #nosec G115
-						Where("transaction_id = ? AND cert_index = ?", tmpTx.ID, uint(i)).
-						First(&unifiedCert)
+					result := db.Where("transaction_id = ? AND cert_index = ?", tmpTx.ID, uint(i)). // #nosec G115
+															First(&unifiedCert)
 					if result.Error != nil {
 						return fmt.Errorf(
 							"fetch existing unified certificate: %w",
@@ -786,7 +774,6 @@ func (d *MetadataStoreSqlite) SetTransaction(
 							models.PoolRegistrationOwner{KeyHash: owner[:]},
 						)
 					}
-					tmpPool.Owners = tmpReg.Owners
 
 					var tmpRelay models.PoolRegistrationRelay
 					for _, relay := range c.Relays {
@@ -802,7 +789,6 @@ func (d *MetadataStoreSqlite) SetTransaction(
 						}
 						tmpReg.Relays = append(tmpReg.Relays, tmpRelay)
 					}
-					tmpPool.Relays = tmpReg.Relays
 
 					// Set the PoolID for the registration record
 					if tmpPool.ID == 0 {
@@ -819,9 +805,29 @@ func (d *MetadataStoreSqlite) SetTransaction(
 					tmpReg.PoolID = tmpPool.ID
 
 					// Save the registration record
-					result := db.Create(&tmpReg)
+					result := db.Omit("Owners", "Relays").Create(&tmpReg)
 					if result.Error != nil {
 						return fmt.Errorf("process certificate: %w", result.Error)
+					}
+
+					if len(tmpReg.Owners) > 0 {
+						for i := range tmpReg.Owners {
+							tmpReg.Owners[i].PoolRegistrationID = tmpReg.ID
+							tmpReg.Owners[i].PoolID = tmpPool.ID
+						}
+						if result := db.Create(&tmpReg.Owners); result.Error != nil {
+							return fmt.Errorf("process certificate: %w", result.Error)
+						}
+					}
+
+					if len(tmpReg.Relays) > 0 {
+						for i := range tmpReg.Relays {
+							tmpReg.Relays[i].PoolRegistrationID = tmpReg.ID
+							tmpReg.Relays[i].PoolID = tmpPool.ID
+						}
+						if result := db.Create(&tmpReg.Relays); result.Error != nil {
+							return fmt.Errorf("process certificate: %w", result.Error)
+						}
 					}
 
 					// Collect update for batch processing
@@ -1324,13 +1330,13 @@ func (d *MetadataStoreSqlite) SetTransaction(
 
 				for unifiedID, specializedID := range certIDUpdates {
 					ids = append(ids, unifiedID)
-					whenClauses = append(whenClauses, "WHEN id = ? THEN ?")
+					whenClauses = append(whenClauses, "WHEN id = ? THEN CAST(? AS bigint)")
 					values = append(values, unifiedID, specializedID)
 				}
 
 				caseStmt := strings.Join(whenClauses, " ")
 				query := fmt.Sprintf(
-					"UPDATE certs SET certificate_id = CASE %s END WHERE id IN (?)",
+					"UPDATE certs SET certificate_id = CASE %s END WHERE id IN ?",
 					caseStmt,
 				)
 				values = append(values, ids)
@@ -1353,7 +1359,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 }
 
 // Traverse each utxo and check for inline datum & calls storeDatum
-func (d *MetadataStoreSqlite) storeTransactionDatums(
+func (d *MetadataStorePostgres) storeTransactionDatums(
 	tx lcommon.Transaction,
 	slot uint64,
 	txn types.Txn,
@@ -1378,7 +1384,7 @@ func (d *MetadataStoreSqlite) storeTransactionDatums(
 }
 
 // Marshal the raw CBOR and hashes with Blake2b256Hash & calls SetDatum of metadata store.
-func (d *MetadataStoreSqlite) storeDatum(
+func (d *MetadataStorePostgres) storeDatum(
 	datum *lcommon.Datum,
 	slot uint64,
 	txn types.Txn,
@@ -1398,8 +1404,5 @@ func (d *MetadataStoreSqlite) storeDatum(
 		return nil
 	}
 	datumHash := lcommon.Blake2b256Hash(rawDatum)
-	if err := d.SetDatum(datumHash, rawDatum, slot, txn); err != nil {
-		return err
-	}
-	return nil
+	return d.SetDatum(datumHash, rawDatum, slot, txn)
 }

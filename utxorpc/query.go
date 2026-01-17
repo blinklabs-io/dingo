@@ -23,11 +23,13 @@ import (
 	"math"
 	"math/big"
 	"time"
+	"sort"
 
 	"connectrpc.com/connect"
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
@@ -79,6 +81,122 @@ func (s *queryServiceServer) ReadParams(
 	}
 	resp.Values = &query.AnyChainParams{
 		Params: acpc,
+	}
+	return connect.NewResponse(resp), nil
+}
+
+// ReadEraSummary
+func (s *queryServiceServer) ReadEraSummary(
+	ctx context.Context,
+	req *connect.Request[query.ReadEraSummaryRequest],
+) (*connect.Response[query.ReadEraSummaryResponse], error) {
+	fieldMask := req.Msg.GetFieldMask()
+
+	s.utxorpc.config.Logger.Info(
+		fmt.Sprintf(
+			"Got a ReadEraSummary request with fieldMask %v",
+			fieldMask,
+		),
+	)
+
+	// Fetched chain system start time from shelley genesis
+	systemStart, err := s.utxorpc.config.LedgerState.SystemStart()
+	if err != nil {
+		return nil, fmt.Errorf("get system start: %w", err)
+	}
+	// converts system start time to milliseconds
+	systemStartMs := systemStart.UnixMilli()
+	if systemStartMs < 0 {
+		return nil, errors.New("system start is before unix epoch")
+	}
+	// Load all epochs from the database
+	epochs, err := s.utxorpc.config.LedgerState.GetEpochs()
+	if err != nil {
+		return nil, fmt.Errorf("get epochs: %w", err)
+	}
+	if len(epochs) == 0 {
+		return nil, errors.New("no epochs available for era summary")
+	}
+	// rearrange the order of epochs by start slot
+	sort.Slice(epochs, func(i, j int) bool {
+		return epochs[i].StartSlot < epochs[j].StartSlot
+	})
+
+	summaries := make([]*utxorpcCardano.EraSummary, 0, len(epochs))
+	summaryByEra := map[uint]*utxorpcCardano.EraSummary{}
+	timespanMs := uint64(0)
+	baseMs := uint64(systemStartMs)
+	var lastEraId uint
+	var hasLastEra bool
+
+	for _, epoch := range epochs {
+		if !hasLastEra || epoch.EraId != lastEraId {
+			eraDescriptor := eras.GetEraById(epoch.EraId)
+			if eraDescriptor == nil {
+				return nil, fmt.Errorf("unknown era ID %d", epoch.EraId)
+			}
+			// Build the start boundary for the era using current accumulated time and epoch metadata
+			startBoundary := &utxorpcCardano.EraBoundary{
+				Time:  baseMs + timespanMs,
+				Slot:  epoch.StartSlot,
+				Epoch: epoch.EpochId,
+			}
+			// Create a new era summary when era changes
+			summary := &utxorpcCardano.EraSummary{
+				Name:  eraDescriptor.Name,
+				Start: startBoundary,
+			}
+			// Get the protocol params for the era epoch
+			pparams, err := s.utxorpc.config.LedgerState.GetPParamsForEpoch(
+				epoch.EpochId,
+				*eraDescriptor,
+			)
+			if err != nil {
+				return nil, fmt.Errorf(
+					"get protocol params for era %s epoch %d: %w",
+					eraDescriptor.Name,
+					epoch.EpochId,
+					err,
+				)
+			}
+			// Converts params into utxorpc form
+			if pparams != nil {
+				tmpParams, err := pparams.Utxorpc()
+				if err != nil {
+					return nil, fmt.Errorf(
+						"convert protocol params for era %s: %w",
+						eraDescriptor.Name,
+						err,
+					)
+				}
+				summary.ProtocolParams = tmpParams
+			}
+			// Sets the previous era end boundary to current era start boundary
+			if hasLastEra {
+				prevSummary := summaryByEra[lastEraId]
+				if prevSummary != nil && prevSummary.GetEnd() == nil {
+					prevSummary.End = &utxorpcCardano.EraBoundary{
+						Time:  startBoundary.GetTime(),
+						Slot:  startBoundary.GetSlot(),
+						Epoch: startBoundary.GetEpoch(),
+					}
+				}
+			}
+			summaries = append(summaries, summary)
+			summaryByEra[epoch.EraId] = summary
+			lastEraId = epoch.EraId
+			hasLastEra = true
+		}
+		epochDurationMs := uint64(epoch.SlotLength) * uint64(epoch.LengthInSlots)
+		timespanMs += epochDurationMs
+	}
+
+	resp := &query.ReadEraSummaryResponse{
+		Summary: &query.ReadEraSummaryResponse_Cardano{
+			Cardano: &utxorpcCardano.EraSummaries{
+				Summaries: summaries,
+			},
+		},
 	}
 	return connect.NewResponse(resp), nil
 }

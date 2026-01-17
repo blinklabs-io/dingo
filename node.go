@@ -77,9 +77,11 @@ func (n *Node) Run(ctx context.Context) error {
 	// Load database
 	dbNeedsRecovery := false
 	dbConfig := &database.Config{
-		DataDir:      n.config.dataDir,
-		Logger:       n.config.logger,
-		PromRegistry: n.config.promRegistry,
+		DataDir:        n.config.dataDir,
+		Logger:         n.config.logger,
+		PromRegistry:   n.config.promRegistry,
+		BlobPlugin:     n.config.blobPlugin,
+		MetadataPlugin: n.config.metadataPlugin,
 	}
 	db, err := database.New(dbConfig)
 	if db == nil {
@@ -132,10 +134,17 @@ func (n *Node) Run(ctx context.Context) error {
 			Logger:                     n.config.logger,
 			CardanoNodeConfig:          n.config.cardanoNodeConfig,
 			PromRegistry:               n.config.promRegistry,
-			ForgeBlocks:                n.config.devMode,
+			ForgeBlocks:                n.config.isDevMode(),
 			ValidateHistorical:         n.config.validateHistorical,
 			BlockfetchRequestRangeFunc: n.ouroboros.BlockfetchClientRequestRange,
 			DatabaseWorkerPoolConfig:   n.config.DatabaseWorkerPoolConfig,
+			FatalErrorFunc: func(err error) {
+				n.config.logger.Error(
+					"fatal ledger error, initiating shutdown",
+					"error", err,
+				)
+				n.cancel()
+			},
 		},
 	)
 	if err != nil {
@@ -212,7 +221,7 @@ func (n *Node) Run(ctx context.Context) error {
 			Logger:             n.config.logger,
 			EventBus:           n.eventBus,
 			ConnManager:        n.connManager,
-			DisableOutbound:    n.config.devMode,
+			DisableOutbound:    n.config.isDevMode(),
 			PromRegistry:       n.config.promRegistry,
 			PeerRequestFunc:    n.ouroboros.RequestPeersFromPeer,
 			LedgerPeerProvider: ledgerPeerProvider,

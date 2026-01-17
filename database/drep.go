@@ -26,7 +26,7 @@ func (d *Database) GetDrep(
 ) (*models.Drep, error) {
 	if txn == nil {
 		txn = d.Transaction(false)
-		defer txn.Commit() //nolint:errcheck
+		defer txn.Release()
 	}
 	ret, err := d.metadata.GetDrep(cred, includeInactive, txn.Metadata())
 	if err != nil {

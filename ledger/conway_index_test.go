@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"encoding/hex"
+	"math/big"
 	"testing"
 
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
@@ -51,8 +52,8 @@ func TestConwayInvalidTxProducedIndexes(t *testing.T) {
 	if got := prod[0].Id.Index(); got != 1 {
 		t.Fatalf("expected collateral return index 1, got %d", got)
 	}
-	if amt := prod[0].Output.Amount(); amt != 7000000 {
-		t.Fatalf("expected collateral return amount 7000000, got %d", amt)
+	if amt := prod[0].Output.Amount(); amt.Cmp(big.NewInt(7000000)) != 0 {
+		t.Fatalf("expected collateral return amount 7000000, got %s", amt)
 	}
 
 	// Outputs() should list the regular outputs (not part of Produced for invalid tx)
@@ -60,7 +61,7 @@ func TestConwayInvalidTxProducedIndexes(t *testing.T) {
 	if len(outs) != 1 {
 		t.Fatalf("expected 1 regular output, got %d", len(outs))
 	}
-	if amt := outs[0].Amount(); amt <= 0 {
-		t.Fatalf("expected positive regular output amount, got %d", amt)
+	if amt := outs[0].Amount(); amt.Sign() <= 0 {
+		t.Fatalf("expected positive regular output amount, got %s", amt)
 	}
 }

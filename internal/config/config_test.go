@@ -23,23 +23,29 @@ import (
 
 func resetGlobalConfig() {
 	globalConfig = &Config{
-		MempoolCapacity: 1048576,
-		BindAddr:        "0.0.0.0",
-		CardanoConfig:   "", // Will be set dynamically based on network
-		DatabasePath:    ".dingo",
-		SocketPath:      "dingo.socket",
-		IntersectTip:    false,
-		Network:         "preview",
-		MetricsPort:     12798,
-		PrivateBindAddr: "127.0.0.1",
-		PrivatePort:     3002,
-		RelayPort:       3001,
-		UtxorpcPort:     9090,
-		Topology:        "",
-		TlsCertFilePath: "",
-		TlsKeyFilePath:  "",
-		DevMode:         false,
-		ShutdownTimeout: DefaultShutdownTimeout,
+		MempoolCapacity:    1048576,
+		BindAddr:           "0.0.0.0",
+		CardanoConfig:      "", // Will be set dynamically based on network
+		DatabasePath:       ".dingo",
+		SocketPath:         "dingo.socket",
+		IntersectTip:       false,
+		ValidateHistorical: false,
+		Network:            "preview",
+		MetricsPort:        12798,
+		PrivateBindAddr:    "127.0.0.1",
+		PrivatePort:        3002,
+		RelayPort:          3001,
+		UtxorpcPort:        9090,
+		Topology:           "",
+		TlsCertFilePath:    "",
+		TlsKeyFilePath:     "",
+		BlobPlugin:         DefaultBlobPlugin,
+		MetadataPlugin:     DefaultMetadataPlugin,
+		RunMode:            RunModeServe,
+		ImmutableDbPath:    "",
+		ShutdownTimeout:    DefaultShutdownTimeout,
+		DatabaseWorkers:    5,
+		DatabaseQueueSize:  50,
 	}
 }
 
@@ -74,23 +80,29 @@ tlsKeyFilePath: "key1.pem"
 	defer os.Remove(tmpFile)
 
 	expected := &Config{
-		MempoolCapacity: 2097152,
-		BindAddr:        "127.0.0.1",
-		CardanoConfig:   "./cardano/preview/config.json",
-		DatabasePath:    ".dingo",
-		SocketPath:      "env.socket",
-		IntersectTip:    true,
-		Network:         "preview",
-		MetricsPort:     8088,
-		PrivateBindAddr: "127.0.0.1",
-		PrivatePort:     8000,
-		RelayPort:       4000,
-		UtxorpcPort:     9940,
-		Topology:        "",
-		TlsCertFilePath: "cert1.pem",
-		TlsKeyFilePath:  "key1.pem",
-		DevMode:         false,
-		ShutdownTimeout: DefaultShutdownTimeout,
+		MempoolCapacity:    2097152,
+		BindAddr:           "127.0.0.1",
+		CardanoConfig:      "./cardano/preview/config.json",
+		DatabasePath:       ".dingo",
+		SocketPath:         "env.socket",
+		IntersectTip:       true,
+		ValidateHistorical: false,
+		Network:            "preview",
+		MetricsPort:        8088,
+		PrivateBindAddr:    "127.0.0.1",
+		PrivatePort:        8000,
+		RelayPort:          4000,
+		UtxorpcPort:        9940,
+		Topology:           "",
+		TlsCertFilePath:    "cert1.pem",
+		TlsKeyFilePath:     "key1.pem",
+		BlobPlugin:         DefaultBlobPlugin,
+		MetadataPlugin:     DefaultMetadataPlugin,
+		RunMode:            RunModeServe,
+		ImmutableDbPath:    "",
+		ShutdownTimeout:    DefaultShutdownTimeout,
+		DatabaseWorkers:    5,
+		DatabaseQueueSize:  50,
 	}
 
 	actual, err := LoadConfig(tmpFile)
@@ -117,23 +129,29 @@ func TestLoad_WithoutConfigFile_UsesDefaults(t *testing.T) {
 
 	// Expected is the updated default values from globalConfig
 	expected := &Config{
-		MempoolCapacity: 1048576,
-		BindAddr:        "0.0.0.0",
-		CardanoConfig:   "preview/config.json", // Set dynamically based on network
-		DatabasePath:    ".dingo",
-		SocketPath:      "dingo.socket",
-		IntersectTip:    false,
-		Network:         "preview",
-		MetricsPort:     12798,
-		PrivateBindAddr: "127.0.0.1",
-		PrivatePort:     3002,
-		RelayPort:       3001,
-		UtxorpcPort:     9090,
-		Topology:        "",
-		TlsCertFilePath: "",
-		TlsKeyFilePath:  "",
-		DevMode:         false,
-		ShutdownTimeout: DefaultShutdownTimeout,
+		MempoolCapacity:    1048576,
+		BindAddr:           "0.0.0.0",
+		CardanoConfig:      "preview/config.json", // Set dynamically based on network
+		DatabasePath:       ".dingo",
+		SocketPath:         "dingo.socket",
+		IntersectTip:       false,
+		ValidateHistorical: false,
+		Network:            "preview",
+		MetricsPort:        12798,
+		PrivateBindAddr:    "127.0.0.1",
+		PrivatePort:        3002,
+		RelayPort:          3001,
+		UtxorpcPort:        9090,
+		Topology:           "",
+		TlsCertFilePath:    "",
+		TlsKeyFilePath:     "",
+		BlobPlugin:         DefaultBlobPlugin,
+		MetadataPlugin:     DefaultMetadataPlugin,
+		RunMode:            RunModeServe,
+		ImmutableDbPath:    "",
+		ShutdownTimeout:    DefaultShutdownTimeout,
+		DatabaseWorkers:    5,
+		DatabaseQueueSize:  50,
 	}
 
 	if !reflect.DeepEqual(cfg, expected) {
@@ -145,17 +163,17 @@ func TestLoad_WithoutConfigFile_UsesDefaults(t *testing.T) {
 	}
 }
 
-func TestLoad_WithDevModeConfig(t *testing.T) {
+func TestLoad_WithRunModeConfig(t *testing.T) {
 	resetGlobalConfig()
 
 	// Test with dev mode in config file
 	yamlContent := `
-devMode: true
+runMode: "dev"
 network: "preview"
 `
 
 	tmpDir := t.TempDir()
-	tmpFile := filepath.Join(tmpDir, "test-dev-mode.yaml")
+	tmpFile := filepath.Join(tmpDir, "test-run-mode.yaml")
 
 	err := os.WriteFile(tmpFile, []byte(yamlContent), 0644)
 	if err != nil {
@@ -167,8 +185,82 @@ network: "preview"
 		t.Fatalf("expected no error, got: %v", err)
 	}
 
-	if !cfg.DevMode {
-		t.Errorf("expected DevMode to be true, got: %v", cfg.DevMode)
+	if cfg.RunMode != RunModeDev {
+		t.Errorf("expected RunMode to be 'dev', got: %v", cfg.RunMode)
+	}
+	if !cfg.RunMode.IsDevMode() {
+		t.Error("expected IsDevMode() to return true for 'dev' mode")
+	}
+}
+
+func TestRunMode_Validation(t *testing.T) {
+	tests := []struct {
+		mode  RunMode
+		valid bool
+	}{
+		{RunModeServe, true},
+		{RunModeLoad, true},
+		{RunModeDev, true},
+		{"", true}, // empty is valid (defaults to serve)
+		{"invalid", false},
+	}
+	for _, tt := range tests {
+		if got := tt.mode.Valid(); got != tt.valid {
+			t.Errorf("RunMode(%q).Valid() = %v, want %v", tt.mode, got, tt.valid)
+		}
+	}
+}
+
+func TestRunMode_IsDevMode(t *testing.T) {
+	tests := []struct {
+		mode      RunMode
+		isDevMode bool
+	}{
+		{RunModeServe, false},
+		{RunModeLoad, false},
+		{RunModeDev, true},
+		{"", false},
+	}
+	for _, tt := range tests {
+		if got := tt.mode.IsDevMode(); got != tt.isDevMode {
+			t.Errorf("RunMode(%q).IsDevMode() = %v, want %v", tt.mode, got, tt.isDevMode)
+		}
+	}
+}
+
+func TestLoad_WithLoadModeConfig(t *testing.T) {
+	resetGlobalConfig()
+
+	yamlContent := `
+runMode: "load"
+immutableDbPath: "/path/to/immutable"
+network: "preview"
+`
+
+	tmpDir := t.TempDir()
+	tmpFile := filepath.Join(tmpDir, "test-load-mode.yaml")
+
+	err := os.WriteFile(tmpFile, []byte(yamlContent), 0644)
+	if err != nil {
+		t.Fatalf("failed to write config file: %v", err)
+	}
+
+	// Set dev mode to avoid topology loading issues during test
+	globalConfig.RunMode = RunModeDev
+
+	cfg, err := LoadConfig(tmpFile)
+	if err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+
+	if cfg.RunMode != RunModeLoad {
+		t.Errorf("expected RunMode to be 'load', got: %v", cfg.RunMode)
+	}
+	if cfg.ImmutableDbPath != "/path/to/immutable" {
+		t.Errorf(
+			"expected ImmutableDbPath to be '/path/to/immutable', got: %v",
+			cfg.ImmutableDbPath,
+		)
 	}
 }
 
@@ -229,7 +321,7 @@ func TestLoadConfig_MainnetNetwork(t *testing.T) {
 func TestLoadConfig_DevnetNetwork(t *testing.T) {
 	resetGlobalConfig()
 	globalConfig.Network = "devnet"
-	globalConfig.DevMode = true // Set devmode to avoid topology issues
+	globalConfig.RunMode = RunModeDev // Set dev mode to avoid topology issues
 
 	// Test loading config with devnet network uses /opt/cardano path
 	cfg, err := LoadConfig("")
@@ -256,7 +348,7 @@ func TestLoadConfig_UnsupportedNetworkWithUserConfig(t *testing.T) {
 	resetGlobalConfig()
 	globalConfig.Network = "unsupported"
 	globalConfig.CardanoConfig = "/custom/path/config.json"
-	globalConfig.DevMode = true // Set devmode to avoid topology issues
+	globalConfig.RunMode = RunModeDev // Set dev mode to avoid topology issues
 
 	// Test that unsupported network works if user provides CardanoConfig
 	cfg, err := LoadConfig("")

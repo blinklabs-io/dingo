@@ -57,6 +57,31 @@ const (
 // This is not an error condition but a successful operation that displays plugin information
 var ErrPluginListRequested = errors.New("plugin list requested")
 
+// RunMode represents the operational mode of the dingo node
+type RunMode string
+
+const (
+	RunModeServe RunMode = "serve" // Full node with network connectivity (default)
+	RunModeLoad  RunMode = "load"  // Batch import from ImmutableDB
+	RunModeDev   RunMode = "dev"   // Development mode (isolated, no outbound)
+)
+
+// Valid returns true if the RunMode is a known valid mode
+func (m RunMode) Valid() bool {
+	switch m {
+	case RunModeServe, RunModeLoad, RunModeDev, "":
+		return true
+	default:
+		return false
+	}
+}
+
+// IsDevMode returns true if the mode enables development behaviors
+// (forge blocks, disable outbound, skip topology)
+func (m RunMode) IsDevMode() bool {
+	return m == RunModeDev
+}
+
 type tempConfig struct {
 	Config   *Config                   `yaml:"config,omitempty"`
 	Database *databaseConfig           `yaml:"database,omitempty"`
@@ -70,26 +95,27 @@ type databaseConfig struct {
 }
 
 type Config struct {
-	MetadataPlugin     string `yaml:"metadataPlugin"     envconfig:"DINGO_DATABASE_METADATA_PLUGIN"`
-	TlsKeyFilePath     string `yaml:"tlsKeyFilePath"     envconfig:"TLS_KEY_FILE_PATH"`
-	Topology           string `yaml:"topology"`
-	CardanoConfig      string `yaml:"cardanoConfig"      envconfig:"config"`
-	DatabasePath       string `yaml:"databasePath"                                                  split_words:"true"`
-	SocketPath         string `yaml:"socketPath"                                                    split_words:"true"`
-	TlsCertFilePath    string `yaml:"tlsCertFilePath"    envconfig:"TLS_CERT_FILE_PATH"`
-	BindAddr           string `yaml:"bindAddr"                                                      split_words:"true"`
-	BlobPlugin         string `yaml:"blobPlugin"         envconfig:"DINGO_DATABASE_BLOB_PLUGIN"`
-	PrivateBindAddr    string `yaml:"privateBindAddr"                                               split_words:"true"`
-	ShutdownTimeout    string `yaml:"shutdownTimeout"                                               split_words:"true"`
-	Network            string `yaml:"network"`
-	MempoolCapacity    int64  `yaml:"mempoolCapacity"                                               split_words:"true"`
-	PrivatePort        uint   `yaml:"privatePort"                                                   split_words:"true"`
-	RelayPort          uint   `yaml:"relayPort"          envconfig:"port"`
-	UtxorpcPort        uint   `yaml:"utxorpcPort"                                                   split_words:"true"`
-	MetricsPort        uint   `yaml:"metricsPort"                                                   split_words:"true"`
-	IntersectTip       bool   `yaml:"intersectTip"                                                  split_words:"true"`
-	ValidateHistorical bool   `yaml:"validateHistorical"                                            split_words:"true"`
-	DevMode            bool   `yaml:"devMode"                                                       split_words:"true"`
+	MetadataPlugin     string  `yaml:"metadataPlugin"     envconfig:"DINGO_DATABASE_METADATA_PLUGIN"`
+	TlsKeyFilePath     string  `yaml:"tlsKeyFilePath"     envconfig:"TLS_KEY_FILE_PATH"`
+	Topology           string  `yaml:"topology"`
+	CardanoConfig      string  `yaml:"cardanoConfig"      envconfig:"config"`
+	DatabasePath       string  `yaml:"databasePath"                                                  split_words:"true"`
+	SocketPath         string  `yaml:"socketPath"                                                    split_words:"true"`
+	TlsCertFilePath    string  `yaml:"tlsCertFilePath"    envconfig:"TLS_CERT_FILE_PATH"`
+	BindAddr           string  `yaml:"bindAddr"                                                      split_words:"true"`
+	BlobPlugin         string  `yaml:"blobPlugin"         envconfig:"DINGO_DATABASE_BLOB_PLUGIN"`
+	PrivateBindAddr    string  `yaml:"privateBindAddr"                                               split_words:"true"`
+	ShutdownTimeout    string  `yaml:"shutdownTimeout"                                               split_words:"true"`
+	Network            string  `yaml:"network"`
+	MempoolCapacity    int64   `yaml:"mempoolCapacity"                                               split_words:"true"`
+	PrivatePort        uint    `yaml:"privatePort"                                                   split_words:"true"`
+	RelayPort          uint    `yaml:"relayPort"          envconfig:"port"`
+	UtxorpcPort        uint    `yaml:"utxorpcPort"                                                   split_words:"true"`
+	MetricsPort        uint    `yaml:"metricsPort"                                                   split_words:"true"`
+	IntersectTip       bool    `yaml:"intersectTip"                                                  split_words:"true"`
+	ValidateHistorical bool    `yaml:"validateHistorical"                                            split_words:"true"`
+	RunMode            RunMode `yaml:"runMode"         envconfig:"DINGO_RUN_MODE"`
+	ImmutableDbPath    string  `yaml:"immutableDbPath" envconfig:"DINGO_IMMUTABLE_DB_PATH"`
 	// Database worker pool tuning (worker count and task queue size)
 	DatabaseWorkers   int `yaml:"databaseWorkers"    envconfig:"DINGO_DATABASE_WORKERS"`
 	DatabaseQueueSize int `yaml:"databaseQueueSize"  envconfig:"DINGO_DATABASE_QUEUE_SIZE"`
@@ -175,7 +201,8 @@ var globalConfig = &Config{
 	TlsKeyFilePath:     "",
 	BlobPlugin:         DefaultBlobPlugin,
 	MetadataPlugin:     DefaultMetadataPlugin,
-	DevMode:            false,
+	RunMode:            RunModeServe,
+	ImmutableDbPath:    "",
 	ShutdownTimeout:    DefaultShutdownTimeout,
 	// Defaults for database worker pool tuning
 	DatabaseWorkers:   5,
@@ -340,6 +367,17 @@ func LoadConfig(configFile string) (*Config, error) {
 		)
 	}
 
+	// Validate and default RunMode
+	if !globalConfig.RunMode.Valid() {
+		return nil, fmt.Errorf(
+			"invalid runMode: %q (must be 'serve', 'load', or 'dev')",
+			globalConfig.RunMode,
+		)
+	}
+	if globalConfig.RunMode == "" {
+		globalConfig.RunMode = RunModeServe
+	}
+
 	// Set default CardanoConfig path based on network if not provided by user
 	if globalConfig.CardanoConfig == "" {
 		if globalConfig.Network == "preview" {
@@ -363,7 +401,7 @@ func GetConfig() *Config {
 var globalTopologyConfig = &topology.TopologyConfig{}
 
 func LoadTopologyConfig() (*topology.TopologyConfig, error) {
-	if globalConfig.DevMode {
+	if globalConfig.RunMode.IsDevMode() {
 		return globalTopologyConfig, nil
 	}
 	if globalConfig.Topology == "" {

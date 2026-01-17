@@ -131,6 +131,8 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 			dingo.WithIntersectTip(cfg.IntersectTip),
 			dingo.WithLogger(logger),
 			dingo.WithDatabasePath(cfg.DatabasePath),
+			dingo.WithBlobPlugin(cfg.BlobPlugin),
+			dingo.WithMetadataPlugin(cfg.MetadataPlugin),
 			dingo.WithMempoolCapacity(cfg.MempoolCapacity),
 			dingo.WithNetwork(cfg.Network),
 			dingo.WithCardanoNodeConfig(nodeCfg),
@@ -140,7 +142,7 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 			dingo.WithUtxorpcTlsCertFilePath(cfg.TlsCertFilePath),
 			dingo.WithUtxorpcTlsKeyFilePath(cfg.TlsKeyFilePath),
 			dingo.WithValidateHistorical(cfg.ValidateHistorical),
-			dingo.WithDevMode(cfg.DevMode),
+			dingo.WithRunMode(string(cfg.RunMode)),
 			dingo.WithShutdownTimeout(shutdownTimeout),
 			// Enable metrics with default prometheus registry
 			dingo.WithPrometheusRegistry(prometheus.DefaultRegisterer),

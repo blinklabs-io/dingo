@@ -185,3 +185,17 @@ func (t *Txn) rollback() error {
 	t.finished = true
 	return errors.Join(errs...)
 }
+
+// Release releases transaction resources. For read-only transactions, this
+// releases locks and resources. For read-write transactions, this is equivalent
+// to Rollback. Use this in defer statements for clean resource cleanup.
+// Errors are logged but not returned, making this safe for deferred calls.
+func (t *Txn) Release() {
+	if err := t.Rollback(); err != nil {
+		t.db.logger.Debug(
+			"transaction release failed",
+			"error", err,
+			"read_write", t.readWrite,
+		)
+	}
+}

@@ -12,32 +12,33 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package database
+package postgres
 
 import (
+	"errors"
+
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/types"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"gorm.io/gorm"
 )
 
-// GetAccount returns an account by staking key
-func (d *Database) GetAccount(
-	stakeKey []byte,
-	includeInactive bool,
-	txn *Txn,
-) (*models.Account, error) {
-	if txn == nil {
-		txn = d.Transaction(false)
-		defer txn.Release()
-	}
-	account, err := d.metadata.GetAccount(
-		stakeKey,
-		includeInactive,
-		txn.Metadata(),
-	)
+// GetScript returns the script content by its hash
+func (d *MetadataStorePostgres) GetScript(
+	hash lcommon.ScriptHash,
+	txn types.Txn,
+) (*models.Script, error) {
+	ret := &models.Script{}
+	db, err := d.resolveDB(txn)
 	if err != nil {
 		return nil, err
 	}
-	if account == nil {
-		return nil, models.ErrAccountNotFound
+	result := db.First(ret, "hash = ?", hash[:])
+	if result.Error != nil {
+		if errors.Is(result.Error, gorm.ErrRecordNotFound) {
+			return nil, nil
+		}
+		return nil, result.Error
 	}
-	return account, nil
+	return ret, nil
 }

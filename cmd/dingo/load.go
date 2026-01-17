@@ -24,12 +24,22 @@ import (
 )
 
 func loadRun(_ *cobra.Command, args []string, cfg *config.Config) {
-	if len(args) != 1 {
-		slog.Error("you must provide the path to an ImmutableDB")
+	var immutablePath string
+
+	// CLI argument takes priority over config
+	if len(args) >= 1 {
+		immutablePath = args[0]
+	} else if cfg.ImmutableDbPath != "" {
+		immutablePath = cfg.ImmutableDbPath
+	} else {
+		slog.Error(
+			"path to ImmutableDB required (via argument or immutableDbPath config)",
+		)
 		os.Exit(1)
 	}
+
 	logger := commonRun()
-	if err := node.Load(cfg, logger, args[0]); err != nil {
+	if err := node.Load(cfg, logger, immutablePath); err != nil {
 		slog.Error(err.Error())
 		os.Exit(1)
 	}
@@ -37,8 +47,8 @@ func loadRun(_ *cobra.Command, args []string, cfg *config.Config) {
 
 func loadCommand() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "load db-path",
-		Short: "Load blocks from ImmutableDB",
+		Use:   "load [db-path]",
+		Short: "Load blocks from ImmutableDB (path via arg or immutableDbPath config)",
 		Run: func(cmd *cobra.Command, args []string) {
 			cfg := config.FromContext(cmd.Context())
 			if cfg == nil {
