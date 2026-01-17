@@ -126,7 +126,7 @@ func (c *CardanoNodeConfig) loadGenesisConfigs() error {
 		if err != nil {
 			return err
 		}
-		//Store computed hash if config does not contain hash
+		// Store computed hash if config does not contain hash.
 		c.ByronGenesisHash = byronHash
 		byronGenesis, err := byron.NewByronGenesisFromFile(byronGenesisPath)
 		if err != nil {
