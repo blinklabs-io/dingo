@@ -12,16 +12,59 @@ permissions:
   contents: read
 
 jobs:
-  go-test:
-    name: go-test
+  # Linux job with Postgres service for integration tests
+  go-test-linux:
+    name: go-test (Linux)
     strategy:
       matrix:
         go-version: [1.24.x, 1.25.x]
-        # We want to make sure that this builds on Linux, Darwin, and Windows
-        platform: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: dingo_test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+    env:
+      POSTGRES_HOST: localhost
+      POSTGRES_PORT: '5432'
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DATABASE: dingo_test
+    steps:
+      - uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0 https://github.com/actions/checkout/releases/tag/v6.0.0
+      - uses: actions/setup-go@4dc6199c7b1a012772edbd06daecab0f50c9053c # v6.1.0 https://github.com/actions/setup-go/releases/tag/v6.1.0
+        with:
+          go-version: ${{ matrix.go-version }}
+      - uses: actions/cache@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1 https://github.com/actions/cache/releases/tag/v5.0.1
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: ${{ runner.os }}-go-${{ matrix.go-version }}-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-${{ matrix.go-version }}-
+      - name: go-build
+        run: go build ./cmd/dingo
+      - name: go-test
+        run: go test ./...
+
+  # macOS and Windows jobs without Postgres service
+  go-test-other:
+    name: go-test (${{ matrix.platform }})
+    strategy:
+      matrix:
+        go-version: [1.24.x, 1.25.x]
+        platform: [macos-latest, windows-latest]
         include:
-          - platform: ubuntu-latest
-            cache_path: ~/.cache/go-build
           - platform: macos-latest
             cache_path: ~/Library/Caches/go-build
           - platform: windows-latest
