@@ -61,6 +61,20 @@ const (
 	PeerStateHot
 )
 
+// String returns a human-readable name for the peer state.
+func (s PeerState) String() string {
+	switch s {
+	case PeerStateCold:
+		return "cold"
+	case PeerStateWarm:
+		return "warm"
+	case PeerStateHot:
+		return "hot"
+	default:
+		return "unknown"
+	}
+}
+
 type TestResult uint8
 
 const (
@@ -73,6 +87,7 @@ type Peer struct {
 	LastActivity       time.Time
 	LastTestTime       time.Time // When peer was last tested for suitability
 	LastBlockFetchTime time.Time // Timestamp of last observed block fetch
+	FirstSeen          time.Time // When peer was first seen (used for tenure calculation)
 	Connection         *PeerConnection
 	Address            string
 	NormalizedAddress  string // Cached normalized form of Address for deduplication
@@ -90,6 +105,24 @@ type Peer struct {
 	BlockFetchSuccessInit   bool       // Whether success rate has been initialized
 	ConnectionStabilityInit bool       // Whether stability has been initialized
 	LastTestResult          TestResult // Result of last suitability test
+
+	// ChainSync performance metrics
+	HeaderArrivalRate     float64   // Headers received per second during sync (EMA)
+	TipSlotDelta          int64     // TipSlotDelta = ourTip - peerTip (negative = peer ahead, positive = we are ahead)
+	ChainSyncLastUpdate   time.Time // Last chainsync observation timestamp
+	HeaderArrivalRateInit bool      // Whether header rate has been initialized
+	TipSlotDeltaInit      bool      // Whether tip delta has been initialized
+
+	// EMA configuration (0 means use default)
+	EMAAlpha float64
+
+	// Topology valency configuration (only used for topology-sourced peers)
+	// Valency is the target number of hot connections from this peer's group
+	// WarmValency is the target number of warm connections from this peer's group
+	Valency     uint
+	WarmValency uint
+	// GroupID identifies the topology group this peer belongs to (for valency tracking)
+	GroupID string
 }
 
 func (p *Peer) setConnection(conn *ouroboros.Connection, outbound bool) {

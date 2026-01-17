@@ -205,7 +205,9 @@ func main() {
 			switch cfg.RunMode {
 			case config.RunModeLoad:
 				if cfg.ImmutableDbPath == "" {
-					slog.Error("immutableDbPath must be set when runMode is 'load'")
+					slog.Error(
+						"immutableDbPath must be set when runMode is 'load'",
+					)
 					os.Exit(1)
 				}
 				loadRun(cmd, []string{cfg.ImmutableDbPath}, cfg)

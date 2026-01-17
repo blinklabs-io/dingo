@@ -38,12 +38,14 @@ type TopologyConfigP2PLocalRoot struct {
 	Advertise    bool                           `json:"advertise"`
 	Trustable    bool                           `json:"trustable"`
 	Valency      uint                           `json:"valency"`
+	WarmValency  uint                           `json:"warmValency"`
 }
 
 type TopologyConfigP2PPublicRoot struct {
 	AccessPoints []TopologyConfigP2PAccessPoint `json:"accessPoints"`
 	Advertise    bool                           `json:"advertise"`
 	Valency      uint                           `json:"valency"`
+	WarmValency  uint                           `json:"warmValency"`
 }
 
 type TopologyConfigP2PBootstrapPeer = TopologyConfigP2PAccessPoint

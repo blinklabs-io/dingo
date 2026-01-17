@@ -114,16 +114,21 @@ type Config struct {
 	MetricsPort        uint    `yaml:"metricsPort"                                                   split_words:"true"`
 	IntersectTip       bool    `yaml:"intersectTip"                                                  split_words:"true"`
 	ValidateHistorical bool    `yaml:"validateHistorical"                                            split_words:"true"`
-	RunMode            RunMode `yaml:"runMode"         envconfig:"DINGO_RUN_MODE"`
-	ImmutableDbPath    string  `yaml:"immutableDbPath" envconfig:"DINGO_IMMUTABLE_DB_PATH"`
+	RunMode            RunMode `yaml:"runMode"            envconfig:"DINGO_RUN_MODE"`
+	ImmutableDbPath    string  `yaml:"immutableDbPath"    envconfig:"DINGO_IMMUTABLE_DB_PATH"`
 	// Database worker pool tuning (worker count and task queue size)
 	DatabaseWorkers   int `yaml:"databaseWorkers"    envconfig:"DINGO_DATABASE_WORKERS"`
 	DatabaseQueueSize int `yaml:"databaseQueueSize"  envconfig:"DINGO_DATABASE_QUEUE_SIZE"`
 
-	// Peer limits (0 = use default, -1 = unlimited)
-	MaxColdPeers int `yaml:"maxColdPeers" envconfig:"DINGO_MAX_COLD_PEERS"`
-	MaxWarmPeers int `yaml:"maxWarmPeers" envconfig:"DINGO_MAX_WARM_PEERS"`
-	MaxHotPeers  int `yaml:"maxHotPeers"  envconfig:"DINGO_MAX_HOT_PEERS"`
+	// Peer targets (0 = use default, -1 = unlimited)
+	TargetNumberOfKnownPeers       int `yaml:"targetNumberOfKnownPeers"       envconfig:"DINGO_TARGET_KNOWN_PEERS"`
+	TargetNumberOfEstablishedPeers int `yaml:"targetNumberOfEstablishedPeers" envconfig:"DINGO_TARGET_ESTABLISHED_PEERS"`
+	TargetNumberOfActivePeers      int `yaml:"targetNumberOfActivePeers"      envconfig:"DINGO_TARGET_ACTIVE_PEERS"`
+
+	// Per-source quotas for active peers (0 = use default, negative = disable)
+	ActivePeersTopologyQuota int `yaml:"activePeersTopologyQuota" envconfig:"DINGO_ACTIVE_PEERS_TOPOLOGY_QUOTA"`
+	ActivePeersGossipQuota   int `yaml:"activePeersGossipQuota"   envconfig:"DINGO_ACTIVE_PEERS_GOSSIP_QUOTA"`
+	ActivePeersLedgerQuota   int `yaml:"activePeersLedgerQuota"   envconfig:"DINGO_ACTIVE_PEERS_LEDGER_QUOTA"`
 }
 
 func (c *Config) ParseCmdlineArgs(programName string, args []string) error {
