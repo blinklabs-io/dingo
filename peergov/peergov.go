@@ -858,7 +858,7 @@ func (p *PeerGovernor) TestPeer(address string) (bool, error) {
 		peer.LastTestResult = TestResultFail
 		// Add to deny list (we already hold the lock)
 		// Use normalized address for consistent deny list lookups
-		p.denyList[p.normalizeAddress(address)] = time.Now().Add(p.config.DenyDuration)
+		p.denyList[normalized] = time.Now().Add(p.config.DenyDuration)
 		p.config.Logger.Debug(
 			"peer suitability test failed, added to deny list",
 			"address", address,

@@ -304,7 +304,9 @@ func (cm *ChainManager) addBlock(
 	return nil
 }
 
-func (cm *ChainManager) removeBlockByIndex(blockIndex uint64) error {
+func (cm *ChainManager) removeBlockByIndex(
+	blockIndex uint64,
+) (models.Block, error) {
 	// Record removed block event for each non-primary chain
 	for chainId := range cm.chains {
 		if chainId == primaryChainId {
@@ -316,12 +318,14 @@ func (cm *ChainManager) removeBlockByIndex(blockIndex uint64) error {
 		)
 	}
 	// Remove from database
+	var removedBlock models.Block
 	txn := cm.db.BlobTxn(true)
 	err := txn.Do(func(txn *database.Txn) error {
 		tmpBlock, err := cm.db.BlockByIndex(blockIndex, txn)
 		if err != nil {
 			return err
 		}
+		removedBlock = tmpBlock
 		// Add block to memory buffer in case other chains are using it
 		cm.blocks[string(tmpBlock.Hash)] = tmpBlock
 		if err := database.BlockDeleteTxn(txn, tmpBlock); err != nil {
@@ -330,9 +334,9 @@ func (cm *ChainManager) removeBlockByIndex(blockIndex uint64) error {
 		return nil
 	})
 	if err != nil {
-		return err
+		return models.Block{}, err
 	}
-	return nil
+	return removedBlock, nil
 }
 
 func (cm *ChainManager) chainNeedsReconcile(

@@ -79,10 +79,16 @@ func (r PoolRelay) Addresses() []string {
 		addresses = append(addresses, net.JoinHostPort(r.Hostname, portStr))
 	}
 	if r.IPv4 != nil && len(*r.IPv4) > 0 {
-		addresses = append(addresses, net.JoinHostPort(r.IPv4.String(), portStr))
+		addresses = append(
+			addresses,
+			net.JoinHostPort(r.IPv4.String(), portStr),
+		)
 	}
 	if r.IPv6 != nil && len(*r.IPv6) > 0 {
-		addresses = append(addresses, net.JoinHostPort(r.IPv6.String(), portStr))
+		addresses = append(
+			addresses,
+			net.JoinHostPort(r.IPv6.String(), portStr),
+		)
 	}
 
 	return addresses

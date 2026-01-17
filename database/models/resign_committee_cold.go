@@ -18,9 +18,9 @@ type ResignCommitteeCold struct {
 	AnchorUrl      string
 	ColdCredential []byte `gorm:"index"`
 	AnchorHash     []byte
-	ID             uint `gorm:"primarykey"`
-	CertificateID  uint `gorm:"index"`
-	AddedSlot      uint64
+	ID             uint   `gorm:"primarykey"`
+	CertificateID  uint   `gorm:"index"`
+	AddedSlot      uint64 `gorm:"index"`
 }
 
 func (ResignCommitteeCold) TableName() string {

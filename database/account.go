@@ -41,3 +41,23 @@ func (d *Database) GetAccount(
 	}
 	return account, nil
 }
+
+// RestoreAccountStateAtSlot reverts account delegation state to the given slot.
+// This is used during chain rollbacks to undo account state changes.
+func (d *Database) RestoreAccountStateAtSlot(slot uint64, txn *Txn) error {
+	owned := false
+	if txn == nil {
+		txn = d.Transaction(true)
+		owned = true
+		defer txn.Rollback() //nolint:errcheck
+	}
+	if err := d.metadata.RestoreAccountStateAtSlot(slot, txn.Metadata()); err != nil {
+		return err
+	}
+	if owned {
+		if err := txn.Commit(); err != nil {
+			return err
+		}
+	}
+	return nil
+}

@@ -112,7 +112,11 @@ func TestPeerGovernor_AddPeer(t *testing.T) {
 	assert.Equal(t, "127.0.0.1:3001", peers[0].Address)
 	assert.EqualValues(t, PeerSourceP2PGossip, peers[0].Source)
 	assert.Equal(t, PeerStateCold, peers[0].State)
-	assert.True(t, peers[0].Sharable, "gossip-discovered peers should be sharable")
+	assert.True(
+		t,
+		peers[0].Sharable,
+		"gossip-discovered peers should be sharable",
+	)
 
 	// Test adding duplicate peer (should not add)
 	pg.AddPeer("127.0.0.1:3001", PeerSourceP2PGossip)
@@ -132,7 +136,11 @@ func TestPeerGovernor_AddPeer(t *testing.T) {
 		}
 	}
 	assert.NotNil(t, nonGossipPeer, "non-gossip peer should be found")
-	assert.False(t, nonGossipPeer.Sharable, "non-gossip peers should not be sharable by default")
+	assert.False(
+		t,
+		nonGossipPeer.Sharable,
+		"non-gossip peers should not be sharable by default",
+	)
 }
 
 func TestPeerGovernor_LoadTopologyConfig(t *testing.T) {
@@ -749,7 +757,11 @@ func TestPeerGovernor_DenyPeer_CaseInsensitive(t *testing.T) {
 	pg.mu.Lock()
 	_, exists := pg.denyList["relay.example.com:3001"]
 	pg.mu.Unlock()
-	assert.True(t, exists, "deny list should store normalized (lowercase) address")
+	assert.True(
+		t,
+		exists,
+		"deny list should store normalized (lowercase) address",
+	)
 }
 
 func TestPeerGovernor_IsDenied_Expiry(t *testing.T) {
@@ -827,9 +839,15 @@ func TestPeerGovernor_Reconcile_CleanupDenyList(t *testing.T) {
 
 	// Add expired entries directly
 	pg.mu.Lock()
-	pg.denyList["127.0.0.1:3001"] = time.Now().Add(-1 * time.Hour) // Already expired
-	pg.denyList["127.0.0.1:3002"] = time.Now().Add(-1 * time.Hour) // Already expired
-	pg.denyList["127.0.0.1:3003"] = time.Now().Add(1 * time.Hour)  // Not expired
+	pg.denyList["127.0.0.1:3001"] = time.Now().
+		Add(-1 * time.Hour)
+		// Already expired
+	pg.denyList["127.0.0.1:3002"] = time.Now().
+		Add(-1 * time.Hour)
+		// Already expired
+	pg.denyList["127.0.0.1:3003"] = time.Now().
+		Add(1 * time.Hour)
+		// Not expired
 	pg.mu.Unlock()
 
 	// Run reconcile to trigger cleanup
@@ -937,7 +955,10 @@ func TestPeerGovernor_DiscoverLedgerPeers_Deduplication(t *testing.T) {
 			relays: []PoolRelay{
 				{Hostname: "relay.example.com", Port: 3001},
 				{Hostname: "relay.example.com", Port: 3001}, // Duplicate
-				{Hostname: "RELAY.EXAMPLE.COM", Port: 3001}, // Same but different case
+				{
+					Hostname: "RELAY.EXAMPLE.COM",
+					Port:     3001,
+				}, // Same but different case
 			},
 			currentSlot: 1000,
 		},
@@ -951,7 +972,9 @@ func TestPeerGovernor_DiscoverLedgerPeers_Deduplication(t *testing.T) {
 
 func TestPeerGovernor_DiscoverLedgerPeers_RefreshInterval(t *testing.T) {
 	pg := NewPeerGovernor(PeerGovernorConfig{
-		Logger:                    slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		Logger: slog.New(
+			slog.NewJSONHandler(io.Discard, nil),
+		),
 		EventBus:                  newMockEventBus(),
 		UseLedgerAfterSlot:        0,
 		LedgerPeerRefreshInterval: 1 * time.Hour, // Long refresh interval
@@ -987,7 +1010,9 @@ func TestPeerGovernor_DiscoverLedgerPeers_RefreshInterval(t *testing.T) {
 	assert.Len(t, pg.peers, 2)
 }
 
-func TestPeerGovernor_DiscoverLedgerPeers_ExistingPeersNotDuplicated(t *testing.T) {
+func TestPeerGovernor_DiscoverLedgerPeers_ExistingPeersNotDuplicated(
+	t *testing.T,
+) {
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		EventBus:           newMockEventBus(),
@@ -1057,7 +1082,9 @@ func TestPeerGovernor_DiscoverLedgerPeers_ErrorAllowsRetry(t *testing.T) {
 	}
 
 	pg := NewPeerGovernor(PeerGovernorConfig{
-		Logger:                    slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		Logger: slog.New(
+			slog.NewJSONHandler(io.Discard, nil),
+		),
 		UseLedgerAfterSlot:        0,
 		LedgerPeerProvider:        mockProvider,
 		LedgerPeerRefreshInterval: 1 * time.Hour, // Long interval
@@ -1171,9 +1198,18 @@ func TestPoolRelay_Addresses(t *testing.T) {
 			expected: []string{"[2001:db8::1]:3003"},
 		},
 		{
-			name:     "all addresses",
-			relay:    PoolRelay{Hostname: "relay.example.com", IPv4: &ipv4, IPv6: &ipv6, Port: 3001},
-			expected: []string{"relay.example.com:3001", "192.168.1.1:3001", "[2001:db8::1]:3001"},
+			name: "all addresses",
+			relay: PoolRelay{
+				Hostname: "relay.example.com",
+				IPv4:     &ipv4,
+				IPv6:     &ipv6,
+				Port:     3001,
+			},
+			expected: []string{
+				"relay.example.com:3001",
+				"192.168.1.1:3001",
+				"[2001:db8::1]:3001",
+			},
 		},
 		{
 			name:     "default port",
@@ -1181,18 +1217,31 @@ func TestPoolRelay_Addresses(t *testing.T) {
 			expected: []string{"relay.example.com:3001"},
 		},
 		{
-			name:     "empty ipv4 slice ignored",
-			relay:    PoolRelay{Hostname: "relay.example.com", IPv4: &net.IP{}, Port: 3001},
+			name: "empty ipv4 slice ignored",
+			relay: PoolRelay{
+				Hostname: "relay.example.com",
+				IPv4:     &net.IP{},
+				Port:     3001,
+			},
 			expected: []string{"relay.example.com:3001"},
 		},
 		{
-			name:     "empty ipv6 slice ignored",
-			relay:    PoolRelay{Hostname: "relay.example.com", IPv6: &net.IP{}, Port: 3001},
+			name: "empty ipv6 slice ignored",
+			relay: PoolRelay{
+				Hostname: "relay.example.com",
+				IPv6:     &net.IP{},
+				Port:     3001,
+			},
 			expected: []string{"relay.example.com:3001"},
 		},
 		{
-			name:     "nil ip pointers ignored",
-			relay:    PoolRelay{Hostname: "relay.example.com", IPv4: nil, IPv6: nil, Port: 3001},
+			name: "nil ip pointers ignored",
+			relay: PoolRelay{
+				Hostname: "relay.example.com",
+				IPv4:     nil,
+				IPv6:     nil,
+				Port:     3001,
+			},
 			expected: []string{"relay.example.com:3001"},
 		},
 	}
@@ -1284,7 +1333,9 @@ func TestPeerGovernor_EnforcePeerLimits_ColdPeers(t *testing.T) {
 	assert.True(t, hasGossip2, "gossip2 peer should be kept")
 }
 
-func TestPeerGovernor_EnforcePeerLimits_TopologyPeersNeverRemoved(t *testing.T) {
+func TestPeerGovernor_EnforcePeerLimits_TopologyPeersNeverRemoved(
+	t *testing.T,
+) {
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		EventBus:     newMockEventBus(),
@@ -1331,8 +1382,11 @@ func TestPeerGovernor_EnforcePeerLimits_Unlimited(t *testing.T) {
 	})
 
 	// Add many peers
-	for i := 0; i < 10; i++ {
-		pg.AddPeer(fmt.Sprintf("peer%d.example.com:3001", i), PeerSourceP2PLedger)
+	for i := range 10 {
+		pg.AddPeer(
+			fmt.Sprintf("peer%d.example.com:3001", i),
+			PeerSourceP2PLedger,
+		)
 	}
 
 	assert.Len(t, pg.peers, 10)

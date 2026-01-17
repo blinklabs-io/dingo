@@ -19,7 +19,7 @@ type AuthCommitteeHot struct {
 	HostCredential []byte `gorm:"index"`
 	ID             uint   `gorm:"primarykey"`
 	CertificateID  uint   `gorm:"index"`
-	AddedSlot      uint64
+	AddedSlot      uint64 `gorm:"index"`
 }
 
 func (AuthCommitteeHot) TableName() string {

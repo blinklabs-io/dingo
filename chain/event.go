@@ -29,5 +29,6 @@ type ChainBlockEvent struct {
 }
 
 type ChainRollbackEvent struct {
-	Point ocommon.Point
+	Point            ocommon.Point
+	RolledBackBlocks []models.Block // Blocks that were rolled back, in reverse order (newest first)
 }

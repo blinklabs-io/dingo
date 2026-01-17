@@ -18,7 +18,7 @@ type Datum struct {
 	Hash      []byte `gorm:"index;not null;unique"`
 	RawDatum  []byte `gorm:"not null"`
 	ID        uint   `gorm:"primarykey"`
-	AddedSlot uint64 `gorm:"not null"`
+	AddedSlot uint64 `gorm:"index;not null"`
 }
 
 func (Datum) TableName() string {
@@ -27,10 +27,10 @@ func (Datum) TableName() string {
 
 // PlutusData represents a Plutus data value in the witness set
 type PlutusData struct {
+	Transaction   *Transaction `gorm:"foreignKey:TransactionID"`
+	Data          []byte
 	ID            uint `gorm:"primaryKey"`
 	TransactionID uint `gorm:"index"`
-	Data          []byte
-	Transaction   *Transaction
 }
 
 func (PlutusData) TableName() string {
