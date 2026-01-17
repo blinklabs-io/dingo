@@ -1,4 +1,4 @@
-// Copyright 2025 Blink Labs Software
+// Copyright 2026 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -20,6 +20,7 @@ import (
 	"fmt"
 
 	"github.com/blinklabs-io/dingo/chain"
+	"github.com/blinklabs-io/dingo/chainselection"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/ledger"
 	ouroboros "github.com/blinklabs-io/gouroboros"
@@ -246,9 +247,10 @@ func (o *Ouroboros) chainsyncClientRollBackward(
 		event.NewEvent(
 			ledger.ChainsyncEventType,
 			ledger.ChainsyncEvent{
-				Rollback: true,
-				Point:    point,
-				Tip:      tip,
+				ConnectionId: ctx.ConnectionId,
+				Rollback:     true,
+				Point:        point,
+				Tip:          tip,
 			},
 		),
 	)
@@ -265,6 +267,18 @@ func (o *Ouroboros) chainsyncClientRollForward(
 	case gledger.BlockHeader:
 		blockSlot := v.SlotNumber()
 		blockHash := v.Hash().Bytes()
+		// Publish peer tip update for chain selection
+		o.EventBus.Publish(
+			chainselection.PeerTipUpdateEventType,
+			event.NewEvent(
+				chainselection.PeerTipUpdateEventType,
+				chainselection.PeerTipUpdateEvent{
+					ConnectionId: ctx.ConnectionId,
+					Tip:          tip,
+				},
+			),
+		)
+		// Publish chainsync event for ledger processing
 		o.EventBus.Publish(
 			ledger.ChainsyncEventType,
 			event.NewEvent(

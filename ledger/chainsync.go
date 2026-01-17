@@ -1,4 +1,4 @@
-// Copyright 2025 Blink Labs Software
+// Copyright 2026 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -142,6 +142,29 @@ func (ls *LedgerState) handleEventBlockfetch(evt event.Event) {
 }
 
 func (ls *LedgerState) handleEventChainsyncRollback(e ChainsyncEvent) error {
+	// Filter events from non-active connections when chain selection is enabled
+	if ls.config.GetActiveConnectionFunc != nil {
+		activeConnId := ls.config.GetActiveConnectionFunc()
+		if activeConnId == nil {
+			// No active connection set yet, process this event
+			ls.config.Logger.Debug(
+				"no active connection, processing rollback event",
+				"connection_id", e.ConnectionId.String(),
+				"slot", e.Point.Slot,
+			)
+		} else if *activeConnId != e.ConnectionId {
+			// Event is from non-active connection, skip
+			ls.config.Logger.Debug(
+				"dropping rollback from non-active connection",
+				"component", "ledger",
+				"event_connection_id", e.ConnectionId.String(),
+				"active_connection_id", activeConnId.String(),
+				"slot", e.Point.Slot,
+			)
+			return nil
+		}
+	}
+
 	if ls.chainsyncState == SyncingChainsyncState {
 		ls.config.Logger.Warn(
 			fmt.Sprintf(
@@ -159,6 +182,29 @@ func (ls *LedgerState) handleEventChainsyncRollback(e ChainsyncEvent) error {
 }
 
 func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
+	// Filter events from non-active connections when chain selection is enabled
+	if ls.config.GetActiveConnectionFunc != nil {
+		activeConnId := ls.config.GetActiveConnectionFunc()
+		if activeConnId == nil {
+			// No active connection set yet, process this event
+			ls.config.Logger.Debug(
+				"no active connection, processing event",
+				"connection_id", e.ConnectionId.String(),
+				"slot", e.Point.Slot,
+			)
+		} else if *activeConnId != e.ConnectionId {
+			// Event is from non-active connection, skip
+			ls.config.Logger.Debug(
+				"dropping event from non-active connection",
+				"component", "ledger",
+				"event_connection_id", e.ConnectionId.String(),
+				"active_connection_id", activeConnId.String(),
+				"slot", e.Point.Slot,
+			)
+			return nil
+		}
+	}
+
 	if ls.chainsyncState == RollbackChainsyncState {
 		ls.config.Logger.Info(
 			fmt.Sprintf(

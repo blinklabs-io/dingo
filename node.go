@@ -1,4 +1,4 @@
-// Copyright 2025 Blink Labs Software
+// Copyright 2026 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/chain"
+	"github.com/blinklabs-io/dingo/chainselection"
 	"github.com/blinklabs-io/dingo/chainsync"
 	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/database"
@@ -31,12 +32,14 @@ import (
 	ouroborosPkg "github.com/blinklabs-io/dingo/ouroboros"
 	"github.com/blinklabs-io/dingo/peergov"
 	"github.com/blinklabs-io/dingo/utxorpc"
+	ouroboros "github.com/blinklabs-io/gouroboros"
 )
 
 type Node struct {
 	connManager    *connmanager.ConnectionManager
 	peerGov        *peergov.PeerGovernor
 	chainsyncState *chainsync.State
+	chainSelector  *chainselection.ChainSelector
 	eventBus       *event.EventBus
 	mempool        *mempool.Mempool
 	chainManager   *chain.ChainManager
@@ -136,6 +139,13 @@ func (n *Node) Run(ctx context.Context) error {
 			ValidateHistorical:         n.config.validateHistorical,
 			BlockfetchRequestRangeFunc: n.ouroboros.BlockfetchClientRequestRange,
 			DatabaseWorkerPoolConfig:   n.config.DatabaseWorkerPoolConfig,
+			GetActiveConnectionFunc: func() *ouroboros.ConnectionId {
+				// Return the active chainsync client connection from chainsync state
+				if n.chainsyncState != nil {
+					return n.chainsyncState.GetClientConnId()
+				}
+				return nil
+			},
 			FatalErrorFunc: func(err error) {
 				n.config.logger.Error(
 					"fatal ledger error, initiating shutdown",
@@ -179,6 +189,51 @@ func (n *Node) Run(ctx context.Context) error {
 		n.ledgerState,
 	)
 	n.ouroboros.ChainsyncState = n.chainsyncState
+	// Initialize chain selector for multi-peer chain selection
+	n.chainSelector = chainselection.NewChainSelector(
+		chainselection.ChainSelectorConfig{
+			Logger:   n.config.logger,
+			EventBus: n.eventBus,
+		},
+	)
+	// Subscribe chain selector to peer tip update events
+	n.eventBus.SubscribeFunc(
+		chainselection.PeerTipUpdateEventType,
+		n.chainSelector.HandlePeerTipUpdateEvent,
+	)
+	// Subscribe to chain switch events to update active connection
+	n.eventBus.SubscribeFunc(
+		chainselection.ChainSwitchEventType,
+		func(evt event.Event) {
+			e, ok := evt.Data.(chainselection.ChainSwitchEvent)
+			if !ok {
+				return
+			}
+			n.config.logger.Info(
+				"chain switch: updating active connection",
+				"previous_connection", e.PreviousConnectionId.String(),
+				"new_connection", e.NewConnectionId.String(),
+				"new_tip_block", e.NewTip.BlockNumber,
+				"new_tip_slot", e.NewTip.Point.Slot,
+			)
+			n.chainsyncState.SetClientConnId(e.NewConnectionId)
+		},
+	)
+	// Subscribe to connection closed events to remove peers from chain selector
+	n.eventBus.SubscribeFunc(
+		connmanager.ConnectionClosedEventType,
+		func(evt event.Event) {
+			e, ok := evt.Data.(connmanager.ConnectionClosedEvent)
+			if !ok {
+				return
+			}
+			n.chainSelector.RemovePeer(e.ConnectionId)
+		},
+	)
+	// Start the chain selector
+	if err := n.chainSelector.Start(n.ctx); err != nil { //nolint:contextcheck
+		return fmt.Errorf("failed to start chain selector: %w", err)
+	}
 	// Configure connection manager
 	tmpListeners := n.ouroboros.ConfigureListeners(n.config.listeners)
 	n.connManager = connmanager.NewConnectionManager(
@@ -285,6 +340,10 @@ func (n *Node) shutdown() error {
 
 	// Phase 1: Stop accepting new work
 	n.config.logger.Debug("shutdown phase 1: stopping new work")
+
+	if n.chainSelector != nil {
+		n.chainSelector.Stop()
+	}
 
 	if n.peerGov != nil {
 		n.peerGov.Stop()
