@@ -185,7 +185,6 @@ func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 		}
 
 	}
-
 	// Add header to chain
 	if err := ls.chain.AddBlockHeader(e.BlockHeader); err != nil {
 		return fmt.Errorf("failed adding chain block header: %w", err)
