@@ -177,10 +177,13 @@ func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 	// Wait for current blockfetch batch to finish before we collect more block headers
 	if headerCount >= allowedHeaderCount {
 		ls.chainsyncBlockfetchReadyMutex.Lock()
-		if ls.chainsyncBlockfetchReadyChan != nil {
-			<-ls.chainsyncBlockfetchReadyChan
-		}
+		tmpChainsyncBlockfetchReadyChan := ls.chainsyncBlockfetchReadyChan
 		ls.chainsyncBlockfetchReadyMutex.Unlock()
+
+		if tmpChainsyncBlockfetchReadyChan != nil {
+			<-tmpChainsyncBlockfetchReadyChan
+		}
+
 	}
 
 	// Add header to chain
