@@ -23,6 +23,30 @@ import (
 	"github.com/blinklabs-io/dingo/database/types"
 )
 
+// PartialCommitError is returned when blob commits but metadata fails.
+// This indicates the database is in an inconsistent state requiring recovery.
+type PartialCommitError struct {
+	MetadataErr     error // The underlying metadata commit error
+	CommitTimestamp int64 // Timestamp written to the blob store
+}
+
+func (e PartialCommitError) Error() string {
+	return fmt.Sprintf(
+		"partial commit at timestamp %d: metadata failed: %v",
+		e.CommitTimestamp,
+		e.MetadataErr,
+	)
+}
+
+func (e PartialCommitError) Unwrap() error {
+	return e.MetadataErr
+}
+
+// Is allows errors.Is(err, types.ErrPartialCommit) to match this error.
+func (e PartialCommitError) Is(target error) bool {
+	return target == types.ErrPartialCommit
+}
+
 // Txn is a wrapper that coordinates both metadata and blob transactions.
 // Metadata and blob are first-class siblings, not nested.
 type Txn struct {
@@ -119,9 +143,11 @@ func (t *Txn) Commit() error {
 	if !t.readWrite {
 		return t.rollback()
 	}
-	// Update the commit timestamp in both DBs if using both
+	// Update the commit timestamp in both DBs if using both.
+	// Track timestamp for error reporting if partial commit occurs.
+	var commitTimestamp int64
 	if t.blobTxn != nil && t.metadataTxn != nil {
-		commitTimestamp := time.Now().UnixMilli()
+		commitTimestamp = time.Now().UnixMilli()
 		if err := t.db.updateCommitTimestamp(t, commitTimestamp); err != nil {
 			// Rollback both transactions on timestamp update failure
 			_ = t.blobTxn.Rollback()
@@ -145,16 +171,25 @@ func (t *Txn) Commit() error {
 	// Commit metadata transaction
 	if t.metadataTxn != nil {
 		if err := t.metadataTxn.Commit(); err != nil {
-			t.db.logger.Error(
-				"partial commit: blob committed, metadata failed",
-				"error", err,
-			)
 			_ = t.metadataTxn.Rollback()
 			t.finished = true
-			return fmt.Errorf(
-				"partial commit: metadata commit failed after blob commit: %w",
-				err,
-			)
+			// Only return PartialCommitError when blob was actually committed.
+			// Per docstring, this error type signifies "blob commits but metadata fails."
+			// When t.blobTxn == nil (metadata-only txn), no blob was committed.
+			if t.blobTxn != nil {
+				t.db.logger.Error(
+					"partial commit: blob committed, metadata failed",
+					"error", err,
+					"commit_timestamp", commitTimestamp,
+				)
+				// Return PartialCommitError so callers can detect with
+				// errors.Is(err, types.ErrPartialCommit) and trigger recovery
+				return PartialCommitError{
+					MetadataErr:     err,
+					CommitTimestamp: commitTimestamp,
+				}
+			}
+			return fmt.Errorf("metadata commit failed: %w", err)
 		}
 	}
 	t.finished = true
