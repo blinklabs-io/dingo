@@ -183,7 +183,6 @@ func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 		if tmpChainsyncBlockfetchReadyChan != nil {
 			<-tmpChainsyncBlockfetchReadyChan
 		}
-
 	}
 	// Add header to chain
 	if err := ls.chain.AddBlockHeader(e.BlockHeader); err != nil {
