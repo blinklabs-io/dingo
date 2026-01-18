@@ -303,6 +303,7 @@ type LedgerState struct {
 	timerCleanupConsumedUtxos        *time.Timer
 	Scheduler                        *Scheduler
 	chain                            *chain.Chain
+	chainsyncBlockfetchReadyMutex    sync.Mutex
 	chainsyncBlockfetchReadyChan     chan struct{}
 	db                               *database.Database
 	chainsyncState                   ChainsyncState

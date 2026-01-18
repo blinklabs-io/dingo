@@ -219,13 +219,15 @@ func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 	// Allow us to build up a few blockfetch batches worth of headers
 	allowedHeaderCount := blockfetchBatchSize * 4
 	headerCount := ls.chain.HeaderCount()
+
 	// Wait for current blockfetch batch to finish before we collect more block headers
 	if headerCount >= allowedHeaderCount {
-		// We assign the channel to a temp var to protect against trying to read from a nil channel
-		// without a race condition
-		tmpDoneChan := ls.chainsyncBlockfetchReadyChan
-		if tmpDoneChan != nil {
-			<-tmpDoneChan
+		ls.chainsyncBlockfetchReadyMutex.Lock()
+		tmpChainsyncBlockfetchReadyChan := ls.chainsyncBlockfetchReadyChan
+		ls.chainsyncBlockfetchReadyMutex.Unlock()
+
+		if tmpChainsyncBlockfetchReadyChan != nil {
+			<-tmpChainsyncBlockfetchReadyChan
 		}
 	}
 	// Add header to chain
@@ -629,7 +631,10 @@ func (ls *LedgerState) blockfetchRequestRangeStart(
 	ls.chainsyncBlockfetchBusyTimeMutex.Unlock()
 
 	// Create our blockfetch done signal channels
+	ls.chainsyncBlockfetchReadyMutex.Lock()
 	ls.chainsyncBlockfetchReadyChan = make(chan struct{})
+	ls.chainsyncBlockfetchReadyMutex.Unlock()
+
 	ls.chainsyncBlockfetchBatchDoneChan = make(chan struct{})
 	// Start goroutine to handle blockfetch timeout
 	go func() {
@@ -671,10 +676,13 @@ func (ls *LedgerState) blockfetchRequestRangeCleanup(resetFlags bool) {
 		len(ls.chainsyncBlockEvents),
 	)
 	// Close our blockfetch done signal channel
+	ls.chainsyncBlockfetchReadyMutex.Lock()
+	defer ls.chainsyncBlockfetchReadyMutex.Unlock()
 	if ls.chainsyncBlockfetchReadyChan != nil {
 		close(ls.chainsyncBlockfetchReadyChan)
 		ls.chainsyncBlockfetchReadyChan = nil
 	}
+
 	// Reset flags
 	if resetFlags {
 		ls.chainsyncBlockfetchWaiting = false
