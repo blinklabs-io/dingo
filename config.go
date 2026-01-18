@@ -45,6 +45,8 @@ type Config struct {
 	logger                   *slog.Logger
 	cardanoNodeConfig        *cardano.CardanoNodeConfig
 	dataDir                  string
+	blobPlugin               string
+	metadataPlugin           string
 	network                  string
 	tlsCertFilePath          string
 	tlsKeyFilePath           string
@@ -155,6 +157,20 @@ func WithCardanoNodeConfig(
 func WithDatabasePath(dataDir string) ConfigOptionFunc {
 	return func(c *Config) {
 		c.dataDir = dataDir
+	}
+}
+
+// WithBlobPlugin specifies the blob storage plugin to use.
+func WithBlobPlugin(plugin string) ConfigOptionFunc {
+	return func(c *Config) {
+		c.blobPlugin = plugin
+	}
+}
+
+// WithMetadataPlugin specifies the metadata storage plugin to use.
+func WithMetadataPlugin(plugin string) ConfigOptionFunc {
+	return func(c *Config) {
+		c.metadataPlugin = plugin
 	}
 }
 

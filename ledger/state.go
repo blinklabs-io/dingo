@@ -260,6 +260,10 @@ const (
 	SyncingChainsyncState  ChainsyncState = "syncing"
 )
 
+// FatalErrorFunc is a callback invoked when a fatal error occurs that requires
+// the node to shut down. The callback should trigger graceful shutdown.
+type FatalErrorFunc func(err error)
+
 type LedgerStateConfig struct {
 	PromRegistry               prometheus.Registerer
 	Logger                     *slog.Logger
@@ -268,6 +272,7 @@ type LedgerStateConfig struct {
 	EventBus                   *event.EventBus
 	CardanoNodeConfig          *cardano.CardanoNodeConfig
 	BlockfetchRequestRangeFunc BlockfetchRequestRangeFunc
+	FatalErrorFunc             FatalErrorFunc
 	ValidateHistorical         bool
 	ForgeBlocks                bool
 	DatabaseWorkerPoolConfig   DatabaseWorkerPoolConfig
@@ -1451,6 +1456,11 @@ func (ls *LedgerState) TransactionByHash(
 // BlockByHash returns a block by its hash.
 func (ls *LedgerState) BlockByHash(hash []byte) (models.Block, error) {
 	return database.BlockByHash(ls.db, hash)
+}
+
+// CardanoNodeConfig returns the Cardano node configuration used for this ledger state.
+func (ls *LedgerState) CardanoNodeConfig() *cardano.CardanoNodeConfig {
+	return ls.config.CardanoNodeConfig
 }
 
 // UtxoByRef returns a single UTxO by reference
