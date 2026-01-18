@@ -18,6 +18,7 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"math"
 	"sync"
 	"time"
 
@@ -31,24 +32,51 @@ const (
 	defaultStaleTipThreshold  = 60 * time.Second
 )
 
+// safeBlockDiff computes the difference between two block numbers as int64,
+// handling potential overflow by clamping to math.MaxInt64.
+func safeBlockDiff(a, b uint64) int64 {
+	if a >= b {
+		diff := a - b
+		if diff > math.MaxInt64 {
+			return math.MaxInt64
+		}
+		return int64(diff)
+	}
+	diff := b - a
+	if diff > math.MaxInt64 {
+		return math.MinInt64
+	}
+	return -int64(diff)
+}
+
+// safeUint64ToInt64 converts uint64 to int64, clamping to math.MaxInt64 on overflow.
+func safeUint64ToInt64(v uint64) int64 {
+	if v > math.MaxInt64 {
+		return math.MaxInt64
+	}
+	return int64(v)
+}
+
 // ChainSelectorConfig holds configuration for the ChainSelector.
 type ChainSelectorConfig struct {
 	Logger             *slog.Logger
 	EventBus           *event.EventBus
 	EvaluationInterval time.Duration
 	StaleTipThreshold  time.Duration
+	SecurityParam      uint64
 }
 
 // ChainSelector tracks chain tips from multiple peers and selects the best
 // chain according to Ouroboros Praos rules.
 type ChainSelector struct {
-	config       ChainSelectorConfig
-	peerTips     map[ouroboros.ConnectionId]*PeerChainTip
-	bestPeerConn *ouroboros.ConnectionId
-	localTip     ochainsync.Tip
-	mutex        sync.RWMutex
-	ctx          context.Context
-	cancel       context.CancelFunc
+	config        ChainSelectorConfig
+	securityParam uint64
+	peerTips      map[ouroboros.ConnectionId]*PeerChainTip
+	bestPeerConn  *ouroboros.ConnectionId
+	localTip      ochainsync.Tip
+	mutex         sync.RWMutex
+	ctx           context.Context
+	cancel        context.CancelFunc
 }
 
 // NewChainSelector creates a new ChainSelector with the given configuration.
@@ -64,8 +92,9 @@ func NewChainSelector(cfg ChainSelectorConfig) *ChainSelector {
 		cfg.StaleTipThreshold = defaultStaleTipThreshold
 	}
 	return &ChainSelector{
-		config:   cfg,
-		peerTips: make(map[ouroboros.ConnectionId]*PeerChainTip),
+		config:        cfg,
+		securityParam: cfg.SecurityParam,
+		peerTips:      make(map[ouroboros.ConnectionId]*PeerChainTip),
 	}
 }
 
@@ -85,10 +114,13 @@ func (cs *ChainSelector) Stop() {
 }
 
 // UpdatePeerTip updates the chain tip for a specific peer and triggers
-// evaluation if needed.
+// evaluation if needed. The vrfOutput parameter is the VRF output from the
+// tip block header, used for tie-breaking when chains have equal block number
+// and slot.
 func (cs *ChainSelector) UpdatePeerTip(
 	connId ouroboros.ConnectionId,
 	tip ochainsync.Tip,
+	vrfOutput []byte,
 ) {
 	shouldEvaluate := false
 
@@ -97,9 +129,9 @@ func (cs *ChainSelector) UpdatePeerTip(
 		defer cs.mutex.Unlock()
 
 		if peerTip, exists := cs.peerTips[connId]; exists {
-			peerTip.UpdateTip(tip)
+			peerTip.UpdateTip(tip, vrfOutput)
 		} else {
-			cs.peerTips[connId] = NewPeerChainTip(connId, tip)
+			cs.peerTips[connId] = NewPeerChainTip(connId, tip, vrfOutput)
 		}
 
 		cs.config.Logger.Debug(
@@ -156,6 +188,9 @@ func (cs *ChainSelector) RemovePeer(connId ouroboros.ConnectionId) {
 				// Emit ChainSwitchEvent so subscribers know to switch connections
 				if cs.config.EventBus != nil {
 					newPeerTip := cs.peerTips[*newBest]
+					// PreviousTip is zero value since the peer is removed
+					// ComparisonResult is ChainABetter since new chain is selected
+					// BlockDifference uses safe conversion of new tip block number
 					evt := event.NewEvent(
 						ChainSwitchEventType,
 						ChainSwitchEvent{
@@ -163,6 +198,8 @@ func (cs *ChainSelector) RemovePeer(connId ouroboros.ConnectionId) {
 							NewConnectionId:      *newBest,
 							NewTip:               newPeerTip.Tip,
 							// PreviousTip is zero value since the peer is removed
+							ComparisonResult: ChainABetter,
+							BlockDifference:  safeUint64ToInt64(newPeerTip.Tip.BlockNumber),
 						},
 					)
 					switchEvent = &evt
@@ -183,6 +220,15 @@ func (cs *ChainSelector) SetLocalTip(tip ochainsync.Tip) {
 	cs.mutex.Lock()
 	defer cs.mutex.Unlock()
 	cs.localTip = tip
+}
+
+// SetSecurityParam updates the security parameter (k) dynamically.
+// This allows the selector to use protocol parameters for density-based
+// comparison.
+func (cs *ChainSelector) SetSecurityParam(k uint64) {
+	cs.mutex.Lock()
+	defer cs.mutex.Unlock()
+	cs.securityParam = k
 }
 
 // GetBestPeer returns the connection ID of the peer with the best chain, or
@@ -234,8 +280,8 @@ func (cs *ChainSelector) selectBestChainLocked() *ouroboros.ConnectionId {
 		return nil
 	}
 
-	var bestConnId *ouroboros.ConnectionId
-	var bestTip ochainsync.Tip
+	var bestConnId ouroboros.ConnectionId
+	var bestPeerTip *PeerChainTip
 
 	for connId, peerTip := range cs.peerTips {
 		if peerTip.IsStale(cs.config.StaleTipThreshold) {
@@ -247,32 +293,47 @@ func (cs *ChainSelector) selectBestChainLocked() *ouroboros.ConnectionId {
 			continue
 		}
 
-		if bestConnId == nil {
-			connIdCopy := connId
-			bestConnId = &connIdCopy
-			bestTip = peerTip.Tip
+		if bestPeerTip == nil {
+			bestConnId = connId
+			bestPeerTip = peerTip
 			continue
 		}
 
-		comparison := CompareChains(peerTip.Tip, bestTip)
+		comparison := CompareChains(peerTip.Tip, bestPeerTip.Tip)
 		switch comparison {
 		case ChainABetter:
-			connIdCopy := connId
-			bestConnId = &connIdCopy
-			bestTip = peerTip.Tip
+			bestConnId = connId
+			bestPeerTip = peerTip
 		case ChainEqual:
-			// Deterministic tiebreaker: smaller connection ID string wins
-			if connId.String() < bestConnId.String() {
-				connIdCopy := connId
-				bestConnId = &connIdCopy
-				bestTip = peerTip.Tip
+			// VRF tiebreaker: lower VRF output wins (per Ouroboros Praos)
+			vrfComparison := CompareVRFOutputs(
+				peerTip.VRFOutput,
+				bestPeerTip.VRFOutput,
+			)
+			switch vrfComparison {
+			case ChainABetter:
+				// peerTip has lower VRF, it wins
+				bestConnId = connId
+				bestPeerTip = peerTip
+			case ChainEqual:
+				// VRF outputs are equal (or one/both nil), use connection ID
+				// as final deterministic tiebreaker
+				if connId.String() < bestConnId.String() {
+					bestConnId = connId
+					bestPeerTip = peerTip
+				}
+			case ChainBBetter:
+				// bestPeerTip has lower VRF, no change needed
 			}
 		case ChainBBetter:
 			// Current best is better, no change needed
 		}
 	}
 
-	return bestConnId
+	if bestPeerTip == nil {
+		return nil
+	}
+	return &bestConnId
 }
 
 // EvaluateAndSwitch evaluates all peer tips and switches to the best chain if
@@ -317,6 +378,9 @@ func (cs *ChainSelector) EvaluateAndSwitch() bool {
 				if pt, ok := cs.peerTips[*previousBest]; ok {
 					previousTip = pt.Tip
 				}
+				// Compute comparison result and block difference
+				comparisonResult := CompareChains(newTip, previousTip)
+				blockDiff := safeBlockDiff(newTip.BlockNumber, previousTip.BlockNumber)
 				evt := event.NewEvent(
 					ChainSwitchEventType,
 					ChainSwitchEvent{
@@ -324,6 +388,8 @@ func (cs *ChainSelector) EvaluateAndSwitch() bool {
 						NewConnectionId:      *newBest,
 						NewTip:               newTip,
 						PreviousTip:          previousTip,
+						ComparisonResult:     comparisonResult,
+						BlockDifference:      blockDiff,
 					},
 				)
 				switchEvent = &evt
@@ -373,7 +439,7 @@ func (cs *ChainSelector) HandlePeerTipUpdateEvent(evt event.Event) {
 		)
 		return
 	}
-	cs.UpdatePeerTip(e.ConnectionId, e.Tip)
+	cs.UpdatePeerTip(e.ConnectionId, e.Tip, e.VRFOutput)
 }
 
 func (cs *ChainSelector) evaluationLoop() {
@@ -452,6 +518,9 @@ func (cs *ChainSelector) cleanupStalePeers() {
 				// Emit ChainSwitchEvent so subscribers know to switch connections
 				if cs.config.EventBus != nil {
 					newPeerTip := cs.peerTips[*newBest]
+					// PreviousTip is zero value since the peer is removed
+					// ComparisonResult is ChainABetter since new chain is selected
+					// BlockDifference uses safe conversion of new tip block number
 					evt := event.NewEvent(
 						ChainSwitchEventType,
 						ChainSwitchEvent{
@@ -459,6 +528,8 @@ func (cs *ChainSelector) cleanupStalePeers() {
 							NewConnectionId:      *newBest,
 							NewTip:               newPeerTip.Tip,
 							// PreviousTip is zero value since the peer is removed
+							ComparisonResult: ChainABetter,
+							BlockDifference:  safeUint64ToInt64(newPeerTip.Tip.BlockNumber),
 						},
 					)
 					switchEvent = &evt

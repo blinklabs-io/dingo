@@ -221,6 +221,23 @@ func (n *Node) Run(ctx context.Context) error {
 			n.chainsyncState.SetClientConnId(e.NewConnectionId)
 		},
 	)
+	// Subscribe to chain fork events for monitoring
+	n.eventBus.SubscribeFunc(
+		chain.ChainForkEventType,
+		func(evt event.Event) {
+			e, ok := evt.Data.(chain.ChainForkEvent)
+			if !ok {
+				return
+			}
+			n.config.logger.Warn(
+				"chain fork detected",
+				"fork_point_slot", e.ForkPoint.Slot,
+				"fork_depth", e.ForkDepth,
+				"alternate_head_slot", e.AlternateHead.Slot,
+				"canonical_head_slot", e.CanonicalHead.Slot,
+			)
+		},
+	)
 	// Subscribe to connection closed events to remove peers from chain selector
 	n.eventBus.SubscribeFunc(
 		connmanager.ConnectionClosedEventType,

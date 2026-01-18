@@ -31,6 +31,7 @@ const (
 type PeerTipUpdateEvent struct {
 	ConnectionId ouroboros.ConnectionId
 	Tip          ochainsync.Tip
+	VRFOutput    []byte // VRF output from block header for tie-breaking
 }
 
 // ChainSwitchEvent is published when the chain selector decides to switch
@@ -41,11 +42,15 @@ type PeerTipUpdateEvent struct {
 //   - NewConnectionId: The connection ID of the peer we are now following.
 //   - NewTip: The chain tip of the new peer.
 //   - PreviousTip: The chain tip of the previous peer at the time of the switch.
+//   - ComparisonResult: Why the new chain is better than the previous chain.
+//   - BlockDifference: NewTip.BlockNumber - PreviousTip.BlockNumber.
 type ChainSwitchEvent struct {
 	PreviousConnectionId ouroboros.ConnectionId
 	NewConnectionId      ouroboros.ConnectionId
 	NewTip               ochainsync.Tip
 	PreviousTip          ochainsync.Tip
+	ComparisonResult     ChainComparisonResult
+	BlockDifference      int64
 }
 
 // ChainSelectionEvent is published when chain selection evaluation completes.
