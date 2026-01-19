@@ -25,25 +25,29 @@ import (
 type PeerChainTip struct {
 	ConnectionId ouroboros.ConnectionId
 	Tip          ochainsync.Tip
+	VRFOutput    []byte // VRF output from tip block for tie-breaking
 	LastUpdated  time.Time
 }
 
-// NewPeerChainTip creates a new PeerChainTip with the given connection ID and
-// tip.
+// NewPeerChainTip creates a new PeerChainTip with the given connection ID,
+// tip, and VRF output.
 func NewPeerChainTip(
 	connId ouroboros.ConnectionId,
 	tip ochainsync.Tip,
+	vrfOutput []byte,
 ) *PeerChainTip {
 	return &PeerChainTip{
 		ConnectionId: connId,
 		Tip:          tip,
+		VRFOutput:    vrfOutput,
 		LastUpdated:  time.Now(),
 	}
 }
 
-// UpdateTip updates the peer's chain tip and last updated timestamp.
-func (p *PeerChainTip) UpdateTip(tip ochainsync.Tip) {
+// UpdateTip updates the peer's chain tip, VRF output, and last updated timestamp.
+func (p *PeerChainTip) UpdateTip(tip ochainsync.Tip, vrfOutput []byte) {
 	p.Tip = tip
+	p.VRFOutput = vrfOutput
 	p.LastUpdated = time.Now()
 }
 

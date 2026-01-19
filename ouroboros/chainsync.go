@@ -267,6 +267,8 @@ func (o *Ouroboros) chainsyncClientRollForward(
 	case gledger.BlockHeader:
 		blockSlot := v.SlotNumber()
 		blockHash := v.Hash().Bytes()
+		// Extract VRF output from block header for chain selection tie-breaking
+		vrfOutput := chainselection.GetVRFOutput(v)
 		// Publish peer tip update for chain selection
 		o.EventBus.Publish(
 			chainselection.PeerTipUpdateEventType,
@@ -275,6 +277,7 @@ func (o *Ouroboros) chainsyncClientRollForward(
 				chainselection.PeerTipUpdateEvent{
 					ConnectionId: ctx.ConnectionId,
 					Tip:          tip,
+					VRFOutput:    vrfOutput,
 				},
 			),
 		)

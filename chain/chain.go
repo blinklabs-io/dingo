@@ -268,6 +268,10 @@ func (c *Chain) Rollback(point ocommon.Point) error {
 		}
 		rollbackBlockIndex = tmpBlock.ID
 	}
+	// Calculate fork depth before deleting blocks
+	forkDepth := c.tipBlockIndex - rollbackBlockIndex
+	// Capture old tip for fork event before we modify it
+	oldTip := c.currentTip
 	// Delete any rolled-back blocks
 	for i := c.tipBlockIndex; i > rollbackBlockIndex; i-- {
 		if c.persistent {
@@ -309,8 +313,9 @@ func (c *Chain) Rollback(point ocommon.Point) error {
 			iter.needsRollback = true
 		}
 	}
-	// Generate event
+	// Generate events
 	if c.eventBus != nil {
+		// Rollback event (existing)
 		c.eventBus.Publish(
 			ChainUpdateEventType,
 			event.NewEvent(
@@ -320,6 +325,21 @@ func (c *Chain) Rollback(point ocommon.Point) error {
 				},
 			),
 		)
+		// Fork event (new) - only emit if we actually rolled back blocks
+		if forkDepth > 0 {
+			c.eventBus.Publish(
+				ChainForkEventType,
+				event.NewEvent(
+					ChainForkEventType,
+					ChainForkEvent{
+						ForkPoint:     point,
+						ForkDepth:     forkDepth,
+						AlternateHead: oldTip.Point,
+						CanonicalHead: point,
+					},
+				),
+			)
+		}
 	}
 	return nil
 }

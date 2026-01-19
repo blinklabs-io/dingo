@@ -74,3 +74,137 @@ func IsSignificantlyBetter(
 	}
 	return newTip.BlockNumber-currentTip.BlockNumber >= minBlockDiff
 }
+
+// CompareChainsWithDensity compares two chain tips using density-based
+// comparison according to Ouroboros Praos rules:
+// 1. Higher block number wins (longer chain)
+// 2. At equal block number, higher density wins (more blocks in 3k/f window)
+// 3. At equal density, lower slot wins (tie-breaker)
+//
+// The blocksInWindowA and blocksInWindowB parameters represent the number of
+// blocks in the stability window (3k/f slots) for each chain tip. These values
+// should be computed by counting blocks within the window ending at each tip.
+//
+// Returns:
+//   - ChainABetter (1) if tipA represents a better chain
+//   - ChainBBetter (-1) if tipB represents a better chain
+//   - ChainEqual (0) if they are equal
+func CompareChainsWithDensity(
+	tipA, tipB ochainsync.Tip,
+	blocksInWindowA, blocksInWindowB uint64,
+) ChainComparisonResult {
+	// Rule 1: Higher block number wins (longer chain)
+	if tipA.BlockNumber > tipB.BlockNumber {
+		return ChainABetter
+	}
+	if tipB.BlockNumber > tipA.BlockNumber {
+		return ChainBBetter
+	}
+
+	// Rule 2: At equal block number, higher density wins
+	// (more blocks in 3k/f window)
+	if blocksInWindowA > blocksInWindowB {
+		return ChainABetter
+	}
+	if blocksInWindowB > blocksInWindowA {
+		return ChainBBetter
+	}
+
+	// Rule 3: At equal density, lower slot wins (tie-breaker)
+	if tipA.Point.Slot < tipB.Point.Slot {
+		return ChainABetter
+	}
+	if tipB.Point.Slot < tipA.Point.Slot {
+		return ChainBBetter
+	}
+
+	// Chains are equal
+	return ChainEqual
+}
+
+// IsBetterChainWithDensity returns true if newTip represents a better chain
+// than currentTip according to Ouroboros Praos density-based rules.
+func IsBetterChainWithDensity(
+	newTip, currentTip ochainsync.Tip,
+	blocksInWindowNew, blocksInWindowCurrent uint64,
+) bool {
+	return CompareChainsWithDensity(
+		newTip,
+		currentTip,
+		blocksInWindowNew,
+		blocksInWindowCurrent,
+	) == ChainABetter
+}
+
+// CompareChainsWithVRF compares two chain tips using the complete Ouroboros
+// Praos chain selection algorithm including VRF tie-breaking:
+// 1. Higher block number wins (longer chain)
+// 2. At equal block number, higher density wins (more blocks in 3k/f window)
+// 3. At equal density, lower VRF output wins (deterministic tie-breaker)
+//
+// The vrfOutputA and vrfOutputB parameters are the VRF outputs from the tip
+// blocks of each chain. These should be extracted using GetVRFOutput() from
+// the block headers. If VRF outputs are nil, falls back to slot-based comparison.
+//
+// Returns:
+//   - ChainABetter (1) if tipA represents a better chain
+//   - ChainBBetter (-1) if tipB represents a better chain
+//   - ChainEqual (0) if they are equal
+func CompareChainsWithVRF(
+	tipA, tipB ochainsync.Tip,
+	blocksInWindowA, blocksInWindowB uint64,
+	vrfOutputA, vrfOutputB []byte,
+) ChainComparisonResult {
+	// Rule 1: Higher block number wins (longer chain)
+	if tipA.BlockNumber > tipB.BlockNumber {
+		return ChainABetter
+	}
+	if tipB.BlockNumber > tipA.BlockNumber {
+		return ChainBBetter
+	}
+
+	// Rule 2: At equal block number, higher density wins
+	// (more blocks in 3k/f window)
+	if blocksInWindowA > blocksInWindowB {
+		return ChainABetter
+	}
+	if blocksInWindowB > blocksInWindowA {
+		return ChainBBetter
+	}
+
+	// Rule 3: At equal density, lower VRF output wins (per Ouroboros Praos)
+	if vrfOutputA != nil && vrfOutputB != nil {
+		vrfResult := CompareVRFOutputs(vrfOutputA, vrfOutputB)
+		if vrfResult != ChainEqual {
+			return vrfResult
+		}
+	}
+
+	// Fallback: At equal VRF (or if VRF unavailable), lower slot wins
+	if tipA.Point.Slot < tipB.Point.Slot {
+		return ChainABetter
+	}
+	if tipB.Point.Slot < tipA.Point.Slot {
+		return ChainBBetter
+	}
+
+	// Chains are equal
+	return ChainEqual
+}
+
+// IsBetterChainWithVRF returns true if newTip represents a better chain than
+// currentTip according to the complete Ouroboros Praos rules including VRF.
+func IsBetterChainWithVRF(
+	newTip, currentTip ochainsync.Tip,
+	blocksInWindowNew, blocksInWindowCurrent uint64,
+	vrfOutputNew, vrfOutputCurrent []byte,
+) bool {
+	return CompareChainsWithVRF(
+		newTip,
+		currentTip,
+		blocksInWindowNew,
+		blocksInWindowCurrent,
+		vrfOutputNew,
+		vrfOutputCurrent,
+	) == ChainABetter
+}
