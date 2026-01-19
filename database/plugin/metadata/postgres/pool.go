@@ -72,17 +72,19 @@ func (d *MetadataStorePostgres) GetPool(
 			// determine the current epoch, conservatively treat the pool as active.
 			var tmpTip models.Tip
 			if res := db.Where("id = ?", tipEntryId).First(&tmpTip); res.Error != nil {
-				if d.logger != nil {
-					d.logger.Warn("failed to load tip; treating pool as active", "err", res.Error)
+				if errors.Is(res.Error, gorm.ErrRecordNotFound) {
+					// Tip not yet available (e.g., initial sync), treat pool as active
+					return ret, nil
 				}
-				return ret, nil //nolint:nilerr
+				return nil, fmt.Errorf("failed to get tip entry: %w", res.Error)
 			}
 			var curEpoch models.Epoch
 			if res := db.Where("start_slot <= ?", tmpTip.Slot).Order("start_slot DESC").First(&curEpoch); res.Error != nil {
-				if d.logger != nil {
-					d.logger.Warn("failed to determine current epoch; treating pool as active", "err", res.Error)
+				if errors.Is(res.Error, gorm.ErrRecordNotFound) {
+					// Epoch data not yet available (e.g., initial sync), treat pool as active
+					return ret, nil
 				}
-				return ret, nil //nolint:nilerr
+				return nil, fmt.Errorf("failed to get current epoch: %w", res.Error)
 			}
 			if retEpoch > curEpoch.EpochId {
 				// Retirement is in the future -> pool still active

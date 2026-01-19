@@ -63,8 +63,10 @@ func (d *MetadataStoreSqlite) SetAccount(
 		Active:     active,
 	}
 	onConflict := clause.OnConflict{
-		Columns:   []clause.Column{{Name: "staking_key"}},
-		UpdateAll: true,
+		Columns: []clause.Column{{Name: "staking_key"}},
+		DoUpdates: clause.AssignmentColumns(
+			[]string{"added_slot", "pool", "drep", "active"},
+		),
 	}
 	db, err := d.resolveDB(txn)
 	if err != nil {

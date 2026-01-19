@@ -77,6 +77,26 @@ func (n *Node) Run(ctx context.Context) error {
 		}
 	}
 	n.ctx, n.cancel = context.WithCancel(ctx)
+
+	// Track started components for cleanup on failure
+	var started []func()
+	success := false
+	defer func() {
+		r := recover()
+		if r != nil {
+			// Cleanup on panic, then re-panic
+			for i := len(started) - 1; i >= 0; i-- {
+				started[i]()
+			}
+			panic(r)
+		} else if !success {
+			// Cleanup on failure (non-panic)
+			for i := len(started) - 1; i >= 0; i-- {
+				started[i]()
+			}
+		}
+	}()
+
 	// Load database
 	dbNeedsRecovery := false
 	dbConfig := &database.Config{
@@ -96,6 +116,7 @@ func (n *Node) Run(ctx context.Context) error {
 		return errors.New("empty database returned")
 	}
 	n.db = db
+	started = append(started, func() { n.db.Close() })
 	if err != nil {
 		var dbErr database.CommitTimestampError
 		if !errors.As(err, &dbErr) {
@@ -173,6 +194,7 @@ func (n *Node) Run(ctx context.Context) error {
 	if err := n.ledgerState.Start(n.ctx); err != nil { //nolint:contextcheck
 		return fmt.Errorf("failed to start ledger: %w", err)
 	}
+	started = append(started, func() { n.ledgerState.Close() })
 	// Initialize mempool
 	n.mempool = mempool.NewMempool(mempool.MempoolConfig{
 		MempoolCapacity: n.config.mempoolCapacity,
@@ -253,6 +275,7 @@ func (n *Node) Run(ctx context.Context) error {
 	if err := n.chainSelector.Start(n.ctx); err != nil { //nolint:contextcheck
 		return fmt.Errorf("failed to start chain selector: %w", err)
 	}
+	started = append(started, func() { n.chainSelector.Stop() })
 	// Configure connection manager
 	tmpListeners := n.ouroboros.ConfigureListeners(n.config.listeners)
 	n.connManager = connmanager.NewConnectionManager(
@@ -275,6 +298,11 @@ func (n *Node) Run(ctx context.Context) error {
 	if err := n.connManager.Start(n.ctx); err != nil { //nolint:contextcheck
 		return err
 	}
+	started = append(started, func() { //nolint:contextcheck
+		if err := n.connManager.Stop(context.Background()); err != nil {
+			n.config.logger.Error("failed to stop connection manager during cleanup", "error", err)
+		}
+	})
 	// Configure peer governor
 	// Create ledger peer provider for discovering peers from stake pool relays
 	ledgerPeerProvider, err := ledger.NewLedgerPeerProvider(n.ledgerState, n.db)
@@ -317,6 +345,7 @@ func (n *Node) Run(ctx context.Context) error {
 	if err := n.peerGov.Start(n.ctx); err != nil { //nolint:contextcheck
 		return err
 	}
+	started = append(started, func() { n.peerGov.Stop() })
 	// Configure UTxO RPC
 	n.utxorpc = utxorpc.NewUtxorpc(
 		utxorpc.UtxorpcConfig{
@@ -330,6 +359,14 @@ func (n *Node) Run(ctx context.Context) error {
 	if err := n.utxorpc.Start(n.ctx); err != nil { //nolint:contextcheck
 		return err
 	}
+	started = append(started, func() { //nolint:contextcheck
+		if err := n.utxorpc.Stop(context.Background()); err != nil {
+			n.config.logger.Error("failed to stop utxorpc during cleanup", "error", err)
+		}
+	})
+
+	// All components started successfully
+	success = true
 
 	// Wait for shutdown signal
 	<-n.ctx.Done()
@@ -403,6 +440,15 @@ func (n *Node) shutdown() error {
 			err = errors.Join(
 				err,
 				fmt.Errorf("ledger state close: %w", closeErr),
+			)
+		}
+	}
+
+	if n.db != nil {
+		if closeErr := n.db.Close(); closeErr != nil {
+			err = errors.Join(
+				err,
+				fmt.Errorf("database close: %w", closeErr),
 			)
 		}
 	}

@@ -25,14 +25,14 @@ func (d *MetadataStorePostgres) GetEpochsByEra(
 	eraId uint,
 	txn types.Txn,
 ) ([]models.Epoch, error) {
-	ret := []models.Epoch{}
+	var ret []models.Epoch
 	db, err := d.resolveDB(txn)
 	if err != nil {
 		return nil, err
 	}
 	result := db.Where("era_id = ?", eraId).Order("epoch_id").Find(&ret)
 	if result.Error != nil {
-		return ret, result.Error
+		return nil, result.Error
 	}
 	return ret, nil
 }
@@ -41,14 +41,14 @@ func (d *MetadataStorePostgres) GetEpochsByEra(
 func (d *MetadataStorePostgres) GetEpochs(
 	txn types.Txn,
 ) ([]models.Epoch, error) {
-	ret := []models.Epoch{}
+	var ret []models.Epoch
 	db, err := d.resolveDB(txn)
 	if err != nil {
 		return nil, err
 	}
 	result := db.Order("epoch_id").Find(&ret)
 	if result.Error != nil {
-		return ret, result.Error
+		return nil, result.Error
 	}
 	return ret, nil
 }
