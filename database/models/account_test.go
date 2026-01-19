@@ -258,8 +258,7 @@ func TestAccount_String_Bech32Format(t *testing.T) {
 	}
 
 	// Check that address only contains valid bech32 characters (lowercase alphanumeric, no '1', 'b', 'i', 'o')
-	separatorIdx := strings.Index(addr, "1")
-	datapart := addr[separatorIdx+1:]
+	_, datapart, _ := strings.Cut(addr, "1")
 	validChars := "qpzry9x8gf2tvdw0s3jn54khce6mua7l"
 	for _, c := range datapart {
 		if !strings.ContainsRune(validChars, c) {
