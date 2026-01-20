@@ -15,9 +15,13 @@
 package cardano
 
 import (
+	"bytes"
+	"os"
 	"path"
 	"reflect"
 	"testing"
+
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
 
 const (
@@ -82,4 +86,110 @@ func TestCardanoNodeConfig(t *testing.T) {
 			t.Fatalf("got nil instead of ConwayGenesis")
 		}
 	})
+}
+
+func TestCardanoNodeConfigMissingGenesisHashes(t *testing.T) {
+	cfgBytes := []byte(`{
+  "AlonzoGenesisFile": "alonzo-genesis.json",
+  "ByronGenesisFile": "byron-genesis.json",
+  "ConwayGenesisFile": "conway-genesis.json",
+  "ShelleyGenesisFile": "shelley-genesis.json"
+}`)
+	cfg, err := NewCardanoNodeConfigFromReader(bytes.NewReader(cfgBytes))
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	cfg.path = testDataDir
+	if err := cfg.loadGenesisConfigs(); err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	if cfg.ByronGenesisHash != expectedCardanoNodeConfig.ByronGenesisHash {
+		t.Fatalf(
+			"unexpected Byron genesis hash: got %s, wanted %s",
+			cfg.ByronGenesisHash,
+			expectedCardanoNodeConfig.ByronGenesisHash,
+		)
+	}
+	if cfg.ShelleyGenesisHash != expectedCardanoNodeConfig.ShelleyGenesisHash {
+		t.Fatalf(
+			"unexpected Shelley genesis hash: got %s, wanted %s",
+			cfg.ShelleyGenesisHash,
+			expectedCardanoNodeConfig.ShelleyGenesisHash,
+		)
+	}
+	if cfg.AlonzoGenesisHash != expectedCardanoNodeConfig.AlonzoGenesisHash {
+		t.Fatalf(
+			"unexpected Alonzo genesis hash: got %s, wanted %s",
+			cfg.AlonzoGenesisHash,
+			expectedCardanoNodeConfig.AlonzoGenesisHash,
+		)
+	}
+	if cfg.ConwayGenesisHash != expectedCardanoNodeConfig.ConwayGenesisHash {
+		t.Fatalf(
+			"unexpected Conway genesis hash: got %s, wanted %s",
+			cfg.ConwayGenesisHash,
+			expectedCardanoNodeConfig.ConwayGenesisHash,
+		)
+	}
+}
+
+func TestCanonicalizeByronGenesisJSON(t *testing.T) {
+	// Test 1: Verify deterministic canonicalization
+	// Different whitespace/formatting should produce identical canonical bytes
+	originalJSON := `{
+  "blockVersionData": {
+    "unlockStakeEpoch": "18446744073709551615"
+  },
+  "startTime": 1564431616
+}`
+
+	compactJSON := `{"blockVersionData":{"unlockStakeEpoch":"18446744073709551615"},"startTime":1564431616}`
+
+	canonical1, err := canonicalizeByronGenesisJSON([]byte(originalJSON))
+	if err != nil {
+		t.Fatalf("Failed to canonicalize original JSON: %v", err)
+	}
+
+	canonical2, err := canonicalizeByronGenesisJSON([]byte(compactJSON))
+	if err != nil {
+		t.Fatalf("Failed to canonicalize compact JSON: %v", err)
+	}
+
+	if !bytes.Equal(canonical1, canonical2) {
+		t.Errorf("Canonicalization is not deterministic:\n  canonical1: %s\n  canonical2: %s",
+			string(canonical1), string(canonical2))
+	}
+
+	// Test 2: Verify large numbers stored as strings are preserved
+	if !bytes.Contains(canonical1, []byte(`"18446744073709551615"`)) {
+		t.Errorf("Canonicalization corrupted large string-encoded number: %s", string(canonical1))
+	}
+
+	// Test 3: Verify hash stability with actual Byron genesis
+	// Read actual Byron genesis file
+	byronGenesisPath := "testdata/byron-genesis.json"
+	originalBytes, err := os.ReadFile(byronGenesisPath)
+	if err != nil {
+		t.Skipf("Skipping actual file test: %v", err)
+	}
+
+	canonicalBytes, err := canonicalizeByronGenesisJSON(originalBytes)
+	if err != nil {
+		t.Fatalf("Failed to canonicalize Byron genesis: %v", err)
+	}
+
+	// Compute hash
+	hash := lcommon.Blake2b256Hash(canonicalBytes).String()
+
+	// Re-canonicalize to ensure idempotence
+	canonical2nd, err := canonicalizeByronGenesisJSON(canonicalBytes)
+	if err != nil {
+		t.Fatalf("Failed second canonicalization: %v", err)
+	}
+
+	hash2nd := lcommon.Blake2b256Hash(canonical2nd).String()
+
+	if hash != hash2nd {
+		t.Errorf("Canonicalization is not idempotent: %s != %s", hash, hash2nd)
+	}
 }

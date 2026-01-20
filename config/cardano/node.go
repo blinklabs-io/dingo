@@ -15,7 +15,10 @@
 package cardano
 
 import (
+	"bytes"
 	"embed"
+	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"path"
@@ -23,6 +26,7 @@ import (
 
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
 	"github.com/blinklabs-io/gouroboros/ledger/byron"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	"gopkg.in/yaml.v3"
@@ -104,7 +108,26 @@ func (c *CardanoNodeConfig) loadGenesisConfigs() error {
 		if !filepath.IsAbs(byronGenesisPath) {
 			byronGenesisPath = path.Join(c.path, byronGenesisPath)
 		}
-		// TODO: check genesis file hash (#399)
+		byronGenesisBytes, err := os.ReadFile(byronGenesisPath)
+		if err != nil {
+			return err
+		}
+		byronGenesisHashBytes, err := canonicalizeByronGenesisJSON(
+			byronGenesisBytes,
+		)
+		if err != nil {
+			return err
+		}
+		byronHash, err := validateGenesisHash(
+			"Byron",
+			c.ByronGenesisHash,
+			byronGenesisHashBytes,
+		)
+		if err != nil {
+			return err
+		}
+		// Store computed hash if config does not contain hash.
+		c.ByronGenesisHash = byronHash
 		byronGenesis, err := byron.NewByronGenesisFromFile(byronGenesisPath)
 		if err != nil {
 			return err
@@ -117,7 +140,22 @@ func (c *CardanoNodeConfig) loadGenesisConfigs() error {
 		if !filepath.IsAbs(shelleyGenesisPath) {
 			shelleyGenesisPath = path.Join(c.path, shelleyGenesisPath)
 		}
-		// TODO: check genesis file hash (#399)
+		shelleyGenesisBytes, err := os.ReadFile(shelleyGenesisPath)
+		if err != nil {
+			return err
+		}
+		shelleyGenesisHashBytes := replaceGenesisLineEndings(
+			shelleyGenesisBytes,
+		)
+		shelleyHash, err := validateGenesisHash(
+			"Shelley",
+			c.ShelleyGenesisHash,
+			shelleyGenesisHashBytes,
+		)
+		if err != nil {
+			return err
+		}
+		c.ShelleyGenesisHash = shelleyHash
 		shelleyGenesis, err := shelley.NewShelleyGenesisFromFile(
 			shelleyGenesisPath,
 		)
@@ -132,7 +170,22 @@ func (c *CardanoNodeConfig) loadGenesisConfigs() error {
 		if !filepath.IsAbs(alonzoGenesisPath) {
 			alonzoGenesisPath = path.Join(c.path, alonzoGenesisPath)
 		}
-		// TODO: check genesis file hash (#399)
+		alonzoGenesisBytes, err := os.ReadFile(alonzoGenesisPath)
+		if err != nil {
+			return err
+		}
+		alonzoGenesisHashBytes := replaceGenesisLineEndings(
+			alonzoGenesisBytes,
+		)
+		alonzoHash, err := validateGenesisHash(
+			"Alonzo",
+			c.AlonzoGenesisHash,
+			alonzoGenesisHashBytes,
+		)
+		if err != nil {
+			return err
+		}
+		c.AlonzoGenesisHash = alonzoHash
 		alonzoGenesis, err := alonzo.NewAlonzoGenesisFromFile(alonzoGenesisPath)
 		if err != nil {
 			return err
@@ -145,7 +198,22 @@ func (c *CardanoNodeConfig) loadGenesisConfigs() error {
 		if !filepath.IsAbs(conwayGenesisPath) {
 			conwayGenesisPath = path.Join(c.path, conwayGenesisPath)
 		}
-		// TODO: check genesis file hash (#399)
+		conwayGenesisBytes, err := os.ReadFile(conwayGenesisPath)
+		if err != nil {
+			return err
+		}
+		conwayGenesisHashBytes := replaceGenesisLineEndings(
+			conwayGenesisBytes,
+		)
+		conwayHash, err := validateGenesisHash(
+			"Conway",
+			c.ConwayGenesisHash,
+			conwayGenesisHashBytes,
+		)
+		if err != nil {
+			return err
+		}
+		c.ConwayGenesisHash = conwayHash
 		conwayGenesis, err := conway.NewConwayGenesisFromFile(conwayGenesisPath)
 		if err != nil {
 			return err
@@ -182,7 +250,28 @@ func (c *CardanoNodeConfig) loadGenesisConfigsFromEmbed() error {
 		return err
 	} else if f != nil {
 		defer f.Close()
-		byronGenesis, err := byron.NewByronGenesisFromReader(f)
+		byronGenesisBytes, err := io.ReadAll(f)
+		if err != nil {
+			return err
+		}
+		byronGenesisHashBytes, err := canonicalizeByronGenesisJSON(
+			byronGenesisBytes,
+		)
+		if err != nil {
+			return err
+		}
+		byronHash, err := validateGenesisHash(
+			"Byron",
+			c.ByronGenesisHash,
+			byronGenesisHashBytes,
+		)
+		if err != nil {
+			return err
+		}
+		c.ByronGenesisHash = byronHash
+		byronGenesis, err := byron.NewByronGenesisFromReader(
+			bytes.NewReader(byronGenesisBytes),
+		)
 		if err != nil {
 			return err
 		}
@@ -194,7 +283,25 @@ func (c *CardanoNodeConfig) loadGenesisConfigsFromEmbed() error {
 		return err
 	} else if f != nil {
 		defer f.Close()
-		shelleyGenesis, err := shelley.NewShelleyGenesisFromReader(f)
+		shelleyGenesisBytes, err := io.ReadAll(f)
+		if err != nil {
+			return err
+		}
+		shelleyGenesisHashBytes := replaceGenesisLineEndings(
+			shelleyGenesisBytes,
+		)
+		shelleyHash, err := validateGenesisHash(
+			"Shelley",
+			c.ShelleyGenesisHash,
+			shelleyGenesisHashBytes,
+		)
+		if err != nil {
+			return err
+		}
+		c.ShelleyGenesisHash = shelleyHash
+		shelleyGenesis, err := shelley.NewShelleyGenesisFromReader(
+			bytes.NewReader(shelleyGenesisBytes),
+		)
 		if err != nil {
 			return err
 		}
@@ -206,7 +313,25 @@ func (c *CardanoNodeConfig) loadGenesisConfigsFromEmbed() error {
 		return err
 	} else if f != nil {
 		defer f.Close()
-		alonzoGenesis, err := alonzo.NewAlonzoGenesisFromReader(f)
+		alonzoGenesisBytes, err := io.ReadAll(f)
+		if err != nil {
+			return err
+		}
+		alonzoGenesisHashBytes := replaceGenesisLineEndings(
+			alonzoGenesisBytes,
+		)
+		alonzoHash, err := validateGenesisHash(
+			"Alonzo",
+			c.AlonzoGenesisHash,
+			alonzoGenesisHashBytes,
+		)
+		if err != nil {
+			return err
+		}
+		c.AlonzoGenesisHash = alonzoHash
+		alonzoGenesis, err := alonzo.NewAlonzoGenesisFromReader(
+			bytes.NewReader(alonzoGenesisBytes),
+		)
 		if err != nil {
 			return err
 		}
@@ -218,7 +343,25 @@ func (c *CardanoNodeConfig) loadGenesisConfigsFromEmbed() error {
 		return err
 	} else if f != nil {
 		defer f.Close()
-		conwayGenesis, err := conway.NewConwayGenesisFromReader(f)
+		conwayGenesisBytes, err := io.ReadAll(f)
+		if err != nil {
+			return err
+		}
+		conwayGenesisHashBytes := replaceGenesisLineEndings(
+			conwayGenesisBytes,
+		)
+		conwayHash, err := validateGenesisHash(
+			"Conway",
+			c.ConwayGenesisHash,
+			conwayGenesisHashBytes,
+		)
+		if err != nil {
+			return err
+		}
+		c.ConwayGenesisHash = conwayHash
+		conwayGenesis, err := conway.NewConwayGenesisFromReader(
+			bytes.NewReader(conwayGenesisBytes),
+		)
 		if err != nil {
 			return err
 		}
@@ -290,4 +433,35 @@ func (c *CardanoNodeConfig) LoadConwayGenesisFromReader(r io.Reader) error {
 	}
 	c.conwayGenesis = &conwayGenesis
 	return nil
+}
+
+func validateGenesisHash(
+	genesisName string,
+	expectedHash string,
+	genesisBytes []byte,
+) (string, error) {
+	actualHash := lcommon.Blake2b256Hash(genesisBytes).String()
+	if expectedHash != "" && expectedHash != actualHash {
+		return "", fmt.Errorf(
+			"%s genesis hash mismatch: expected %s, computed %s",
+			genesisName,
+			expectedHash,
+			actualHash,
+		)
+	}
+	return actualHash, nil
+}
+
+func canonicalizeByronGenesisJSON(genesisBytes []byte) ([]byte, error) {
+	var payload any
+	if err := json.Unmarshal(genesisBytes, &payload); err != nil {
+		return nil, err
+	}
+	return json.Marshal(payload)
+}
+
+func replaceGenesisLineEndings(genesisBytes []byte) []byte {
+	// Normalize line endings so hashes to get rid of the hash mismatch on different environments
+	genesisBytes = bytes.ReplaceAll(genesisBytes, []byte("\r\n"), []byte("\n"))
+	return bytes.ReplaceAll(genesisBytes, []byte("\r"), []byte("\n"))
 }
