@@ -196,14 +196,63 @@ func (ls *LedgerState) SubmitAsyncDBOperation(
 
 // SubmitAsyncDBTxn submits a database transaction operation for execution on the worker pool.
 // This method blocks waiting for the result and must be called after Start() and before Close().
+// If a partial commit occurs (blob committed but metadata failed), this method will attempt
+// to trigger database recovery to restore consistency.
 func (ls *LedgerState) SubmitAsyncDBTxn(
 	opFunc func(txn *database.Txn) error,
 	readWrite bool,
 ) error {
-	return ls.SubmitAsyncDBOperation(func(db *database.Database) error {
+	err := ls.SubmitAsyncDBOperation(func(db *database.Database) error {
 		txn := db.Transaction(readWrite)
 		return txn.Do(opFunc)
 	})
+	// Check for partial commit and trigger recovery if needed.
+	// Guard against recursive recovery: if we're already in recovery and another
+	// PartialCommitError occurs, don't attempt recovery again to prevent unbounded recursion.
+	var partialCommitErr database.PartialCommitError
+	if err != nil && errors.As(err, &partialCommitErr) {
+		ls.Lock()
+		alreadyInRecovery := ls.inRecovery
+		if !alreadyInRecovery {
+			ls.inRecovery = true
+		}
+		ls.Unlock()
+
+		if alreadyInRecovery {
+			ls.config.Logger.Error(
+				"partial commit detected during recovery, skipping nested recovery: " + err.Error(),
+			)
+			return err
+		}
+
+		defer func() {
+			ls.Lock()
+			ls.inRecovery = false
+			ls.Unlock()
+		}()
+
+		ls.config.Logger.Error(
+			"partial commit detected, attempting recovery: " + err.Error(),
+		)
+		// Attempt to recover from the partial commit state
+		if recoveryErr := ls.RecoverCommitTimestampConflict(); recoveryErr != nil {
+			ls.config.Logger.Error(
+				"failed to recover from partial commit: " + recoveryErr.Error(),
+			)
+			// Return both errors joined to preserve error chain for errors.Is checks
+			return errors.Join(err, recoveryErr)
+		}
+		ls.config.Logger.Info("successfully recovered from partial commit")
+		// Return an error so callers know the operation failed and should retry.
+		// Recovery restored consistency but did NOT complete the original transaction.
+		// Wrap the underlying metadata error (not PartialCommitError) so callers
+		// won't match errors.Is(err, types.ErrPartialCommit) and attempt recovery again.
+		return fmt.Errorf(
+			"transaction failed, recovered from partial commit: %w",
+			partialCommitErr.MetadataErr,
+		)
+	}
+	return err
 }
 
 // SubmitAsyncDBReadTxn submits a read-only database transaction operation for execution on the worker pool.
@@ -320,6 +369,7 @@ type LedgerState struct {
 	chainsyncBlockfetchWaiting bool
 	checkpointWrittenForEpoch  bool
 	closed                     bool
+	inRecovery                 bool // guards against recursive recovery in SubmitAsyncDBTxn
 }
 
 func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
