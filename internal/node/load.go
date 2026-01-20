@@ -106,9 +106,10 @@ func Load(cfg *config.Config, logger *slog.Logger, immutableDir string) error {
 	if err != nil {
 		return fmt.Errorf("failed to load state: %w", err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	if err := ls.Start(ctx); err != nil {
+	// Use a long-running context for the ledger state - the 30s timeout is only for
+	// the Start() initialization, not for the entire ledger processing lifetime.
+	// The load operation can take much longer than 30 seconds to process all blocks.
+	if err := ls.Start(context.Background()); err != nil {
 		return fmt.Errorf("failed to load state: %w", err)
 	}
 	defer ls.Close()
