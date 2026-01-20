@@ -26,14 +26,14 @@ func (d *MetadataStoreSqlite) GetEpochsByEra(
 	eraId uint,
 	txn types.Txn,
 ) ([]models.Epoch, error) {
-	ret := []models.Epoch{}
+	var ret []models.Epoch
 	db, err := d.resolveDB(txn)
 	if err != nil {
 		return nil, err
 	}
 	result := db.Where("era_id = ?", eraId).Order("epoch_id").Find(&ret)
 	if result.Error != nil {
-		return ret, result.Error
+		return nil, result.Error
 	}
 	return ret, nil
 }
@@ -42,14 +42,14 @@ func (d *MetadataStoreSqlite) GetEpochsByEra(
 func (d *MetadataStoreSqlite) GetEpochs(
 	txn types.Txn,
 ) ([]models.Epoch, error) {
-	ret := []models.Epoch{}
+	var ret []models.Epoch
 	db, err := d.resolveDB(txn)
 	if err != nil {
 		return nil, err
 	}
 	result := db.Order("epoch_id").Find(&ret)
 	if result.Error != nil {
-		return ret, result.Error
+		return nil, result.Error
 	}
 	return ret, nil
 }
@@ -80,7 +80,7 @@ func (d *MetadataStoreSqlite) SetEpoch(
 	// (VACUUM during transaction causes lock contention)
 	if txn == nil {
 		if err := d.runVacuum(); err != nil {
-			d.logger.Error(
+			d.logger.Warn(
 				"failed to free space in metadata store",
 				"epoch", strconv.FormatUint(epoch, 10),
 				"error", err,

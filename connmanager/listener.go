@@ -173,6 +173,7 @@ func (c *ConnectionManager) startListener(
 						err,
 					),
 				)
+				conn.Close()
 				continue
 			}
 			// Add to connection manager

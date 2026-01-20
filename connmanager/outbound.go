@@ -82,6 +82,7 @@ func (c *ConnectionManager) CreateOutboundConn(
 		connOpts...,
 	)
 	if err != nil {
+		tmpConn.Close()
 		return nil, err
 	}
 	c.config.Logger.Info(

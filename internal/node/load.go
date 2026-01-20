@@ -72,8 +72,10 @@ func Load(cfg *config.Config, logger *slog.Logger, immutableDir string) error {
 	if err != nil {
 		return err
 	}
+	defer db.Close()
 	// Load chain
 	eventBus := event.NewEventBus(nil, logger)
+	defer eventBus.Stop()
 	cm, err := chain.NewManager(
 		db,
 		eventBus,
@@ -104,9 +106,12 @@ func Load(cfg *config.Config, logger *slog.Logger, immutableDir string) error {
 	if err != nil {
 		return fmt.Errorf("failed to load state: %w", err)
 	}
-	if err := ls.Start(context.Background()); err != nil {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := ls.Start(ctx); err != nil {
 		return fmt.Errorf("failed to load state: %w", err)
 	}
+	defer ls.Close()
 	// Open immutable DB
 	immutable, err := immutable.New(immutableDir)
 	if err != nil {
@@ -127,6 +132,7 @@ func Load(cfg *config.Config, logger *slog.Logger, immutableDir string) error {
 	if err != nil {
 		return fmt.Errorf("failed to get immutable DB iterator: %w", err)
 	}
+	defer iter.Close()
 	var blocksCopied int
 	blockBatch := make([]gledger.Block, 0, 500)
 	for {

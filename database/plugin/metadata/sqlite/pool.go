@@ -17,6 +17,7 @@ package sqlite
 import (
 	"errors"
 	"fmt"
+	"math"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
@@ -71,13 +72,19 @@ func (d *MetadataStoreSqlite) GetPool(
 			// determine the current epoch, conservatively treat the pool as active.
 			var tmpTip models.Tip
 			if res := db.Where("id = ?", tipEntryId).First(&tmpTip); res.Error != nil {
-				// Can't get tip, assume active
-				return ret, nil //nolint:nilerr
+				if errors.Is(res.Error, gorm.ErrRecordNotFound) {
+					// Tip not yet available (e.g., initial sync), treat pool as active
+					return ret, nil
+				}
+				return nil, fmt.Errorf("failed to get tip entry: %w", res.Error)
 			}
 			var curEpoch models.Epoch
 			if res := db.Where("start_slot <= ?", tmpTip.Slot).Order("start_slot DESC").First(&curEpoch); res.Error != nil {
-				// Can't determine current epoch, assume active
-				return ret, nil //nolint:nilerr
+				if errors.Is(res.Error, gorm.ErrRecordNotFound) {
+					// Epoch data not yet available (e.g., initial sync), treat pool as active
+					return ret, nil
+				}
+				return nil, fmt.Errorf("failed to get current epoch: %w", res.Error)
 			}
 			if retEpoch > curEpoch.EpochId {
 				// Retirement is in the future -> pool still active
@@ -147,7 +154,10 @@ func (d *MetadataStoreSqlite) GetPoolRegistrations(
 			tmpRelay = lcommon.PoolRelay{}
 			// Determine type
 			if relay.Port != 0 {
-				port := uint32(relay.Port) // #nosec G115
+				if relay.Port > math.MaxUint32 {
+					return nil, fmt.Errorf("pool relay port out of range: %d", relay.Port)
+				}
+				port := uint32(relay.Port)
 				tmpRelay.Port = &port
 				if relay.Hostname != "" {
 					hostname := relay.Hostname
@@ -159,9 +169,17 @@ func (d *MetadataStoreSqlite) GetPoolRegistrations(
 					tmpRelay.Ipv6 = relay.Ipv6
 				}
 			} else {
-				hostname := relay.Hostname
-				tmpRelay.Type = lcommon.PoolRelayTypeMultiHostName
-				tmpRelay.Hostname = &hostname
+				// Port is 0, check if we have IP addresses first
+				if relay.Ipv4 != nil || relay.Ipv6 != nil {
+					tmpRelay.Type = lcommon.PoolRelayTypeSingleHostAddress
+					tmpRelay.Ipv4 = relay.Ipv4
+					tmpRelay.Ipv6 = relay.Ipv6
+					// Port remains nil
+				} else if relay.Hostname != "" {
+					hostname := relay.Hostname
+					tmpRelay.Type = lcommon.PoolRelayTypeMultiHostName
+					tmpRelay.Hostname = &hostname
+				}
 			}
 			tmpCert.Relays = append(tmpCert.Relays, tmpRelay)
 		}

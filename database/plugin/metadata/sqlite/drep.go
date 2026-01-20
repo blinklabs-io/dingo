@@ -63,8 +63,13 @@ func (d *MetadataStoreSqlite) SetDrep(
 		Active:     active,
 	}
 	onConflict := clause.OnConflict{
-		Columns:   []clause.Column{{Name: "credential"}},
-		UpdateAll: true,
+		Columns: []clause.Column{{Name: "credential"}},
+		DoUpdates: clause.AssignmentColumns([]string{
+			"added_slot",
+			"anchor_url",
+			"anchor_hash",
+			"active",
+		}),
 	}
 	db, err := d.resolveDB(txn)
 	if err != nil {
