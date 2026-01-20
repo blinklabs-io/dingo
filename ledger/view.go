@@ -82,6 +82,14 @@ func (lv *LedgerView) IsStakeCredentialRegistered(
 ) bool {
 	account, err := lv.ls.db.GetAccount(cred.Credential[:], false, lv.txn)
 	if err != nil {
+		if !errors.Is(err, models.ErrAccountNotFound) {
+			lv.ls.config.Logger.Error(
+				"failed to get account for stake credential",
+				"component", "ledger",
+				"credential", cred.Hash().String(),
+				"error", err,
+			)
+		}
 		return false
 	}
 	return account != nil && account.Active
@@ -233,6 +241,14 @@ func (lv *LedgerView) IsRewardAccountRegistered(
 ) bool {
 	account, err := lv.ls.db.GetAccount(cred.Credential[:], false, lv.txn)
 	if err != nil {
+		if !errors.Is(err, models.ErrAccountNotFound) {
+			lv.ls.config.Logger.Error(
+				"failed to get account for reward account",
+				"component", "ledger",
+				"credential", cred.Hash().String(),
+				"error", err,
+			)
+		}
 		return false
 	}
 	return account != nil && account.Active
