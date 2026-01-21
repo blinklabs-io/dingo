@@ -228,6 +228,10 @@ type MetadataStore interface {
 	// GetUtxosByAddress retrieves all UTxOs for a given address.
 	GetUtxosByAddress(ledger.Address, types.Txn) ([]models.Utxo, error)
 
+	// GetUtxosByAssets retrieves all UTxOs that contain the specified assets.
+	// Pass nil for assetName to match all assets under the policy, or empty []byte{} to match assets with empty names.
+	GetUtxosByAssets(policyId []byte, assetName []byte, txn types.Txn) ([]models.Utxo, error)
+
 	// GetUtxosDeletedBeforeSlot retrieves UTxOs deleted before the given slot, up to the specified limit.
 	GetUtxosDeletedBeforeSlot(
 		uint64,
