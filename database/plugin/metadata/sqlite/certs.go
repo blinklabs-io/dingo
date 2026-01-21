@@ -18,6 +18,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"gorm.io/gorm"
 )
 
 // GetStakeRegistrations returns stake registration certificates
@@ -50,4 +51,95 @@ func (d *MetadataStoreSqlite) GetStakeRegistrations(
 		ret = append(ret, tmpCert)
 	}
 	return ret, nil
+}
+
+// DeleteCertificatesAfterSlot removes all certificate records added after the given slot.
+// This is used during chain rollbacks to undo certificate state changes.
+// All deletions are performed atomically within a transaction to ensure consistency.
+func (d *MetadataStoreSqlite) DeleteCertificatesAfterSlot(
+	slot uint64,
+	txn types.Txn,
+) error {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return err
+	}
+
+	// Delete all specialized certificate tables.
+	// FK enforcement is enabled via _pragma=foreign_keys(1) in the connection DSN.
+	// However, GORM bulk deletes may not trigger CASCADE properly, so we explicitly
+	// delete child records for PoolRegistration (Owners, Relays) and
+	// MoveInstantaneousRewards (Rewards) before deleting their parents.
+	deleteCerts := func(tx *gorm.DB) error {
+		// Delete PoolRegistrationOwner and PoolRegistrationRelay records
+		// that belong to PoolRegistration records being deleted.
+		poolRegIDsSubquery := tx.Model(&models.PoolRegistration{}).
+			Select("id").
+			Where("added_slot > ?", slot)
+		if result := tx.Where(
+			"pool_registration_id IN (?)",
+			poolRegIDsSubquery,
+		).Delete(&models.PoolRegistrationOwner{}); result.Error != nil {
+			return result.Error
+		}
+		if result := tx.Where(
+			"pool_registration_id IN (?)",
+			poolRegIDsSubquery,
+		).Delete(&models.PoolRegistrationRelay{}); result.Error != nil {
+			return result.Error
+		}
+
+		// Delete MoveInstantaneousRewardsReward records that belong to
+		// MoveInstantaneousRewards records being deleted.
+		mirIDsSubquery := tx.Model(&models.MoveInstantaneousRewards{}).
+			Select("id").
+			Where("added_slot > ?", slot)
+		if result := tx.Where(
+			"mir_id IN (?)",
+			mirIDsSubquery,
+		).Delete(&models.MoveInstantaneousRewardsReward{}); result.Error != nil {
+			return result.Error
+		}
+
+		certTables := []any{
+			&models.StakeRegistration{},
+			&models.StakeDelegation{},
+			&models.StakeDeregistration{},
+			&models.StakeRegistrationDelegation{},
+			&models.StakeVoteDelegation{},
+			&models.StakeVoteRegistrationDelegation{},
+			&models.VoteDelegation{},
+			&models.VoteRegistrationDelegation{},
+			&models.Registration{},
+			&models.Deregistration{},
+			&models.PoolRegistration{},
+			&models.PoolRetirement{},
+			&models.RegistrationDrep{},
+			&models.DeregistrationDrep{},
+			&models.UpdateDrep{},
+			&models.AuthCommitteeHot{},
+			&models.ResignCommitteeCold{},
+			&models.MoveInstantaneousRewards{},
+		}
+
+		for _, table := range certTables {
+			if result := tx.Where("added_slot > ?", slot).Delete(table); result.Error != nil {
+				return result.Error
+			}
+		}
+
+		// Delete unified certificate records (Certificate table uses 'slot' not 'added_slot')
+		if result := tx.Where("slot > ?", slot).Delete(&models.Certificate{}); result.Error != nil {
+			return result.Error
+		}
+
+		return nil
+	}
+
+	// If caller provided a transaction, use it directly (avoid unnecessary savepoint).
+	// Otherwise, wrap in a transaction for atomicity.
+	if txn != nil {
+		return deleteCerts(db)
+	}
+	return db.Transaction(deleteCerts)
 }
