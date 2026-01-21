@@ -17,8 +17,8 @@ package chainselection
 import (
 	"testing"
 
-	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -78,15 +78,15 @@ func TestCompareVRFOutputs(t *testing.T) {
 			expected: ChainBBetter,
 		},
 		{
-			name: "full 64-byte VRF - A lower",
-			vrfA: make64ByteVRF(0x00),
-			vrfB: make64ByteVRF(0x01),
+			name:     "full 64-byte VRF - A lower",
+			vrfA:     make64ByteVRF(0x00),
+			vrfB:     make64ByteVRF(0x01),
 			expected: ChainABetter,
 		},
 		{
-			name: "full 64-byte VRF - B lower",
-			vrfA: make64ByteVRF(0x01),
-			vrfB: make64ByteVRF(0x00),
+			name:     "full 64-byte VRF - B lower",
+			vrfA:     make64ByteVRF(0x01),
+			vrfB:     make64ByteVRF(0x00),
 			expected: ChainBBetter,
 		},
 	}
@@ -118,17 +118,17 @@ func TestCompareChainsWithVRF(t *testing.T) {
 			blocksInWindowB: 100,
 			vrfA:            make64ByteVRF(0xFF), // Higher VRF
 			vrfB:            make64ByteVRF(0x00), // Lower VRF
-			expected:        ChainABetter, // Block number wins over VRF
+			expected:        ChainABetter,        // Block number wins over VRF
 		},
 		{
 			name:            "equal block number - higher density wins regardless of VRF",
 			tipA:            ochainsync.Tip{Point: ocommon.Point{Slot: 100}, BlockNumber: 50},
 			tipB:            ochainsync.Tip{Point: ocommon.Point{Slot: 100}, BlockNumber: 50},
-			blocksInWindowA: 100, // Higher density
-			blocksInWindowB: 80,  // Lower density
+			blocksInWindowA: 100,                 // Higher density
+			blocksInWindowB: 80,                  // Lower density
 			vrfA:            make64ByteVRF(0xFF), // Higher VRF
 			vrfB:            make64ByteVRF(0x00), // Lower VRF
-			expected:        ChainABetter, // Density wins over VRF
+			expected:        ChainABetter,        // Density wins over VRF
 		},
 		{
 			name:            "equal block number and density - VRF tie-breaker A wins",
@@ -158,7 +158,7 @@ func TestCompareChainsWithVRF(t *testing.T) {
 			blocksInWindowB: 100,
 			vrfA:            make64ByteVRF(0x50),
 			vrfB:            make64ByteVRF(0x50), // Equal VRF
-			expected:        ChainABetter, // Lower slot wins
+			expected:        ChainABetter,        // Lower slot wins
 		},
 		{
 			name:            "nil VRF - falls back to slot comparison",

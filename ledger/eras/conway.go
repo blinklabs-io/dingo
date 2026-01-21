@@ -27,7 +27,9 @@ import (
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/common/script"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	"github.com/blinklabs-io/plutigo/cek"
 	"github.com/blinklabs-io/plutigo/data"
+	"github.com/blinklabs-io/plutigo/lang"
 )
 
 var ConwayEraDesc = EraDesc{
@@ -176,6 +178,17 @@ func ValidateTxConway(
 	if len(errs) > 0 {
 		return errors.Join(errs...)
 	}
+	conwayPParams, ok := pp.(*conway.ConwayProtocolParameters)
+	if !ok {
+		return fmt.Errorf(
+			"current PParams (%T) is not expected type",
+			pp,
+		)
+	}
+	costModel, err := cek.CostModelFromList(lang.LanguageVersionV3, conwayPParams.CostModels[2])
+	if err != nil {
+		return err
+	}
 	// Skip script evaluation if TX is marked as not valid
 	if !tx.IsValid() {
 		return nil
@@ -259,6 +272,7 @@ func ValidateTxConway(
 			_, err = s.Evaluate(
 				scNew,
 				redeemer.ExUnits,
+				costModel,
 			)
 			if err != nil {
 				/*
@@ -302,12 +316,17 @@ func EvaluateTxConway(
 	ls lcommon.LedgerState,
 	pp lcommon.ProtocolParameters,
 ) (uint64, lcommon.ExUnits, map[lcommon.RedeemerKey]lcommon.ExUnits, error) {
+	var err error
 	conwayPParams, ok := pp.(*conway.ConwayProtocolParameters)
 	if !ok {
 		return 0, lcommon.ExUnits{}, nil, fmt.Errorf(
 			"current PParams (%T) is not expected type",
 			pp,
 		)
+	}
+	costModel, err := cek.CostModelFromList(lang.LanguageVersionV3, conwayPParams.CostModels[2])
+	if err != nil {
+		return 0, lcommon.ExUnits{}, nil, err
 	}
 	// Resolve inputs
 	resolvedInputs := []lcommon.Utxo{}
@@ -355,7 +374,6 @@ func EvaluateTxConway(
 	var retTotalExUnits lcommon.ExUnits
 	retRedeemerExUnits := make(map[lcommon.RedeemerKey]lcommon.ExUnits)
 	var txInfoV3 script.TxInfo
-	var err error
 	txInfoV3, err = script.NewTxInfoV3FromTransaction(
 		ls,
 		tx,
@@ -380,10 +398,12 @@ func EvaluateTxConway(
 		}
 		switch s := tmpScript.(type) {
 		case *lcommon.PlutusV3Script:
+			var usedBudget lcommon.ExUnits
 			sc := script.NewScriptContextV3(txInfoV3, redeemer, purpose)
-			usedBudget, err := s.Evaluate(
+			usedBudget, err = s.Evaluate(
 				sc.ToPlutusData(),
 				conwayPParams.MaxTxExUnits,
+				costModel,
 			)
 			if err != nil {
 				return 0, lcommon.ExUnits{}, nil, err
