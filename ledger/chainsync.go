@@ -693,6 +693,7 @@ func (ls *LedgerState) handleEventBlockfetchBatchDone(e BlockfetchEvent) error {
 	// Cancel our blockfetch timeout watcher
 	if ls.chainsyncBlockfetchBatchDoneChan != nil {
 		close(ls.chainsyncBlockfetchBatchDoneChan)
+		ls.chainsyncBlockfetchBatchDoneChan = nil
 	}
 	// Process pending block events
 	if err := ls.processBlockEvents(); err != nil {
