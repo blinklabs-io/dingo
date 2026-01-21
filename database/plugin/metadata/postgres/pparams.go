@@ -101,3 +101,33 @@ func (d *MetadataStorePostgres) SetPParamUpdate(
 	}
 	return nil
 }
+
+// DeletePParamsAfterSlot removes protocol parameter records added after the given slot.
+func (d *MetadataStorePostgres) DeletePParamsAfterSlot(
+	slot uint64,
+	txn types.Txn,
+) error {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return err
+	}
+	if result := db.Where("added_slot > ?", slot).Delete(&models.PParams{}); result.Error != nil {
+		return result.Error
+	}
+	return nil
+}
+
+// DeletePParamUpdatesAfterSlot removes protocol parameter update records added after the given slot.
+func (d *MetadataStorePostgres) DeletePParamUpdatesAfterSlot(
+	slot uint64,
+	txn types.Txn,
+) error {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return err
+	}
+	if result := db.Where("added_slot > ?", slot).Delete(&models.PParamUpdate{}); result.Error != nil {
+		return result.Error
+	}
+	return nil
+}

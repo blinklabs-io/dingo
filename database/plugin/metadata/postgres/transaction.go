@@ -1406,3 +1406,57 @@ func (d *MetadataStorePostgres) storeDatum(
 	datumHash := lcommon.Blake2b256Hash(rawDatum)
 	return d.SetDatum(datumHash, rawDatum, slot, txn)
 }
+
+// DeleteTransactionsAfterSlot removes transaction records added after the given slot.
+// This also clears UTXO references (spent_at_tx_id, collateral_by_tx_id, referenced_by_tx_id)
+// to transactions being deleted, effectively restoring UTXOs to their unspent state.
+// UTXO hash-based foreign keys are NULLed out before deleting transactions to prevent orphaned references.
+func (d *MetadataStorePostgres) DeleteTransactionsAfterSlot(
+	slot uint64,
+	txn types.Txn,
+) error {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return err
+	}
+
+	// Get transaction hashes that will be deleted
+	var txHashes [][]byte
+	if result := db.Model(&models.Transaction{}).
+		Where("slot > ?", slot).
+		Pluck("hash", &txHashes); result.Error != nil {
+		return fmt.Errorf("query transaction hashes: %w", result.Error)
+	}
+
+	// NULL out UTXO references to transactions being deleted
+	// These fields reference transaction hashes, not IDs, so CASCADE doesn't handle them
+	if len(txHashes) > 0 {
+		// Clear spent_at_tx_id and reset deleted_slot to restore UTXO active state
+		if result := db.Model(&models.Utxo{}).
+			Where("spent_at_tx_id IN ?", txHashes).
+			Updates(map[string]any{
+				"spent_at_tx_id": nil,
+				"deleted_slot":   0,
+			}); result.Error != nil {
+			return fmt.Errorf("clear spent_at_tx_id references: %w", result.Error)
+		}
+
+		if result := db.Model(&models.Utxo{}).
+			Where("collateral_by_tx_id IN ?", txHashes).
+			Update("collateral_by_tx_id", nil); result.Error != nil {
+			return fmt.Errorf("clear collateral_by_tx_id references: %w", result.Error)
+		}
+
+		if result := db.Model(&models.Utxo{}).
+			Where("referenced_by_tx_id IN ?", txHashes).
+			Update("referenced_by_tx_id", nil); result.Error != nil {
+			return fmt.Errorf("clear referenced_by_tx_id references: %w", result.Error)
+		}
+	}
+
+	if result := db.Where("slot > ?", slot).Delete(&models.Transaction{}); result.Error != nil {
+		return result.Error
+	}
+
+	return nil
+}

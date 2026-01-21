@@ -809,3 +809,507 @@ func (m *mockTransactionNilFee) Utxorpc() (*cardano.Tx, error) {
 func (m *mockTransactionNilFee) LeiosHash() lcommon.Blake2b256 {
 	return lcommon.Blake2b256{}
 }
+
+// createTestTransactionPg is a helper to create a Transaction record for FK constraints in postgres tests
+func createTestTransactionPg(db *gorm.DB, id uint, slot uint64) error {
+	tx := models.Transaction{
+		Hash:      []byte("tx_hash_" + strconv.FormatUint(uint64(id), 10) + "_123456789012345678901234567890"),
+		BlockHash: []byte("block_hash_" + strconv.FormatUint(slot, 10) + "_12345678901234567890123456789012"),
+		Slot:      slot,
+		Valid:     true,
+	}
+	tx.ID = id
+	return db.Create(&tx).Error
+}
+
+// TestPostgresDeleteCertificatesAfterSlot tests that certificates are correctly deleted after a slot
+func TestPostgresDeleteCertificatesAfterSlot(t *testing.T) {
+	pgStore := newTestPostgresStore(t)
+	defer pgStore.Close() //nolint:errcheck
+
+	// Clean up any existing records
+	pgStore.DB().Where("1 = 1").Delete(&models.StakeDelegation{})
+	pgStore.DB().Where("1 = 1").Delete(&models.Certificate{})
+	pgStore.DB().Where("1 = 1").Delete(&models.Transaction{})
+
+	// Create Transaction records for foreign key constraints
+	if err := createTestTransactionPg(pgStore.DB(), 1, 1000); err != nil {
+		t.Fatalf("failed to create transaction 1: %v", err)
+	}
+	if err := createTestTransactionPg(pgStore.DB(), 2, 2000); err != nil {
+		t.Fatalf("failed to create transaction 2: %v", err)
+	}
+
+	// Create certificate at slot 1000
+	cert1 := models.Certificate{
+		Slot:          1000,
+		BlockHash:     []byte("block_hash_1000_12345678901234567890123456789012"),
+		CertType:      uint(lcommon.CertificateTypeStakeDelegation),
+		TransactionID: 1,
+		CertIndex:     0,
+	}
+	if result := pgStore.DB().Create(&cert1); result.Error != nil {
+		t.Fatalf("failed to create cert1: %v", result.Error)
+	}
+
+	stakeReg1 := models.StakeDelegation{
+		CertificateID: cert1.ID,
+		StakingKey:    []byte("stake_key_1_1234567890123456789012345678"),
+		PoolKeyHash:   []byte("pool_hash_1_12345678901234567890123456789012"),
+		AddedSlot:     1000,
+	}
+	if result := pgStore.DB().Create(&stakeReg1); result.Error != nil {
+		t.Fatalf("failed to create stakeReg1: %v", result.Error)
+	}
+
+	// Create certificate at slot 2000
+	cert2 := models.Certificate{
+		Slot:          2000,
+		BlockHash:     []byte("block_hash_2000_12345678901234567890123456789012"),
+		CertType:      uint(lcommon.CertificateTypeStakeDelegation),
+		TransactionID: 2,
+		CertIndex:     0,
+	}
+	if result := pgStore.DB().Create(&cert2); result.Error != nil {
+		t.Fatalf("failed to create cert2: %v", result.Error)
+	}
+
+	stakeReg2 := models.StakeDelegation{
+		CertificateID: cert2.ID,
+		StakingKey:    []byte("stake_key_2_1234567890123456789012345678"),
+		PoolKeyHash:   []byte("pool_hash_2_12345678901234567890123456789012"),
+		AddedSlot:     2000,
+	}
+	if result := pgStore.DB().Create(&stakeReg2); result.Error != nil {
+		t.Fatalf("failed to create stakeReg2: %v", result.Error)
+	}
+
+	// Verify we have 2 certificates
+	var countBefore int64
+	pgStore.DB().Model(&models.Certificate{}).Count(&countBefore)
+	if countBefore != 2 {
+		t.Fatalf("expected 2 certificates before rollback, got %d", countBefore)
+	}
+
+	// Delete certificates after slot 1500 (should delete the one at slot 2000)
+	if err := pgStore.DeleteCertificatesAfterSlot(1500, nil); err != nil {
+		t.Fatalf("failed to delete certificates: %v", err)
+	}
+
+	// Verify only 1 certificate remains
+	var countAfter int64
+	pgStore.DB().Model(&models.Certificate{}).Count(&countAfter)
+	if countAfter != 1 {
+		t.Errorf("expected 1 certificate after rollback, got %d", countAfter)
+	}
+
+	// Verify the remaining certificate is at slot 1000
+	var remainingCert models.Certificate
+	if result := pgStore.DB().First(&remainingCert); result.Error != nil {
+		t.Fatalf("failed to query remaining certificate: %v", result.Error)
+	}
+	if remainingCert.Slot != 1000 {
+		t.Errorf("expected remaining certificate at slot 1000, got %d", remainingCert.Slot)
+	}
+
+	// Verify specialized delegation record was also deleted
+	var delegationCount int64
+	pgStore.DB().Model(&models.StakeDelegation{}).Count(&delegationCount)
+	if delegationCount != 1 {
+		t.Errorf("expected 1 delegation after rollback, got %d", delegationCount)
+	}
+}
+
+// TestPostgresRestoreAccountStateAtSlot tests account delegation state restoration
+func TestPostgresRestoreAccountStateAtSlot(t *testing.T) {
+	t.Run("account delegation is restored to prior pool", func(t *testing.T) {
+		pgStore := newTestPostgresStore(t)
+		defer pgStore.Close() //nolint:errcheck
+
+		// Clean up
+		pgStore.DB().Where("1 = 1").Delete(&models.StakeDelegation{})
+		pgStore.DB().Where("1 = 1").Delete(&models.StakeRegistration{})
+		pgStore.DB().Where("1 = 1").Delete(&models.Certificate{})
+		pgStore.DB().Where("1 = 1").Delete(&models.Account{})
+		pgStore.DB().Where("1 = 1").Delete(&models.Transaction{})
+
+		// Create transactions
+		if err := createTestTransactionPg(pgStore.DB(), 100, 1000); err != nil {
+			t.Fatalf("failed to create transaction: %v", err)
+		}
+		if err := createTestTransactionPg(pgStore.DB(), 101, 2000); err != nil {
+			t.Fatalf("failed to create transaction: %v", err)
+		}
+		if err := createTestTransactionPg(pgStore.DB(), 102, 3000); err != nil {
+			t.Fatalf("failed to create transaction: %v", err)
+		}
+
+		stakingKey := []byte("staking_key_test_12345678901234567890123456789012")
+		pool1 := []byte("pool1_12345678901234567890123456789012")
+		pool2 := []byte("pool2_12345678901234567890123456789012")
+
+		// Create registration certificate at slot 1000
+		regCert := models.Certificate{
+			Slot:          1000,
+			BlockHash:     []byte("block_hash_1000_12345678901234567890123456789012"),
+			CertType:      uint(lcommon.CertificateTypeStakeRegistration),
+			TransactionID: 100,
+			CertIndex:     0,
+		}
+		pgStore.DB().Create(&regCert)
+
+		stakeReg := models.StakeRegistration{
+			CertificateID: regCert.ID,
+			StakingKey:    stakingKey,
+			AddedSlot:     1000,
+		}
+		pgStore.DB().Create(&stakeReg)
+
+		// Create delegation to pool1 at slot 2000
+		delCert1 := models.Certificate{
+			Slot:          2000,
+			BlockHash:     []byte("block_hash_2000_12345678901234567890123456789012"),
+			CertType:      uint(lcommon.CertificateTypeStakeDelegation),
+			TransactionID: 101,
+			CertIndex:     0,
+		}
+		pgStore.DB().Create(&delCert1)
+
+		stakeDel1 := models.StakeDelegation{
+			CertificateID: delCert1.ID,
+			StakingKey:    stakingKey,
+			PoolKeyHash:   pool1,
+			AddedSlot:     2000,
+		}
+		pgStore.DB().Create(&stakeDel1)
+
+		// Create delegation to pool2 at slot 3000
+		delCert2 := models.Certificate{
+			Slot:          3000,
+			BlockHash:     []byte("block_hash_3000_12345678901234567890123456789012"),
+			CertType:      uint(lcommon.CertificateTypeStakeDelegation),
+			TransactionID: 102,
+			CertIndex:     0,
+		}
+		pgStore.DB().Create(&delCert2)
+
+		stakeDel2 := models.StakeDelegation{
+			CertificateID: delCert2.ID,
+			StakingKey:    stakingKey,
+			PoolKeyHash:   pool2,
+			AddedSlot:     3000,
+		}
+		pgStore.DB().Create(&stakeDel2)
+
+		// Create account with current state (pool2, slot 3000)
+		account := models.Account{
+			StakingKey: stakingKey,
+			Pool:       pool2,
+			AddedSlot:  3000,
+			Active:     true,
+		}
+		pgStore.DB().Create(&account)
+
+		// Restore to slot 2500 (should restore to pool1)
+		if err := pgStore.RestoreAccountStateAtSlot(2500, nil); err != nil {
+			t.Fatalf("failed to restore account state: %v", err)
+		}
+
+		// Verify account is restored to pool1
+		var restoredAccount models.Account
+		pgStore.DB().First(&restoredAccount, "staking_key = ?", stakingKey)
+
+		if string(restoredAccount.Pool) != string(pool1) {
+			t.Errorf("expected pool to be pool1, got %s", string(restoredAccount.Pool))
+		}
+		if !restoredAccount.Active {
+			t.Errorf("expected account to be active")
+		}
+	})
+
+	t.Run("account with no prior registration is deleted", func(t *testing.T) {
+		pgStore := newTestPostgresStore(t)
+		defer pgStore.Close() //nolint:errcheck
+
+		// Clean up
+		pgStore.DB().Where("1 = 1").Delete(&models.StakeRegistration{})
+		pgStore.DB().Where("1 = 1").Delete(&models.Certificate{})
+		pgStore.DB().Where("1 = 1").Delete(&models.Account{})
+		pgStore.DB().Where("1 = 1").Delete(&models.Transaction{})
+
+		stakingKey := []byte("staking_key_new_12345678901234567890123456789012")
+
+		// Create account registered at slot 2000 (no prior registration)
+		account := models.Account{
+			StakingKey: stakingKey,
+			AddedSlot:  2000,
+			Active:     true,
+		}
+		pgStore.DB().Create(&account)
+
+		// Restore to slot 1500 (before registration)
+		if err := pgStore.RestoreAccountStateAtSlot(1500, nil); err != nil {
+			t.Fatalf("failed to restore account state: %v", err)
+		}
+
+		// Verify account is deleted
+		var count int64
+		pgStore.DB().Model(&models.Account{}).Where("staking_key = ?", stakingKey).Count(&count)
+		if count != 0 {
+			t.Errorf("expected account to be deleted, but found %d", count)
+		}
+	})
+}
+
+// TestPostgresDeletePParamsAfterSlot tests protocol parameter deletion
+func TestPostgresDeletePParamsAfterSlot(t *testing.T) {
+	pgStore := newTestPostgresStore(t)
+	defer pgStore.Close() //nolint:errcheck
+
+	// Clean up
+	pgStore.DB().Where("1 = 1").Delete(&models.PParams{})
+
+	// Create pparams at different slots
+	pparams1 := models.PParams{AddedSlot: 1000, Epoch: 100, EraId: 1, Cbor: []byte("cbor1")}
+	pparams2 := models.PParams{AddedSlot: 2000, Epoch: 101, EraId: 1, Cbor: []byte("cbor2")}
+	pgStore.DB().Create(&pparams1)
+	pgStore.DB().Create(&pparams2)
+
+	// Verify we have 2
+	var countBefore int64
+	pgStore.DB().Model(&models.PParams{}).Count(&countBefore)
+	if countBefore != 2 {
+		t.Fatalf("expected 2 pparams before, got %d", countBefore)
+	}
+
+	// Delete after slot 1500
+	if err := pgStore.DeletePParamsAfterSlot(1500, nil); err != nil {
+		t.Fatalf("failed to delete pparams: %v", err)
+	}
+
+	// Verify only 1 remains
+	var countAfter int64
+	pgStore.DB().Model(&models.PParams{}).Count(&countAfter)
+	if countAfter != 1 {
+		t.Errorf("expected 1 pparam after rollback, got %d", countAfter)
+	}
+}
+
+// TestPostgresDeleteTransactionsAfterSlot tests transaction deletion and UTXO restoration
+func TestPostgresDeleteTransactionsAfterSlot(t *testing.T) {
+	pgStore := newTestPostgresStore(t)
+	defer pgStore.Close() //nolint:errcheck
+
+	// Clean up
+	pgStore.DB().Where("1 = 1").Delete(&models.Utxo{})
+	pgStore.DB().Where("1 = 1").Delete(&models.Transaction{})
+
+	// Create transactions at different slots
+	tx1Hash := []byte("tx1_hash_12345678901234567890123456789012345678901234567890")
+	tx2Hash := []byte("tx2_hash_12345678901234567890123456789012345678901234567890")
+
+	tx1 := models.Transaction{Hash: tx1Hash, Slot: 1000, Valid: true}
+	tx2 := models.Transaction{Hash: tx2Hash, Slot: 2000, Valid: true}
+	pgStore.DB().Create(&tx1)
+	pgStore.DB().Create(&tx2)
+
+	// Create a UTXO that was spent by tx2
+	utxo := models.Utxo{
+		TxId:        []byte("utxo_txid_123456789012345678901234567890123456789012"),
+		OutputIdx:   0,
+		AddedSlot:   500,
+		SpentAtTxId: tx2Hash,
+		DeletedSlot: 2000,
+	}
+	pgStore.DB().Create(&utxo)
+
+	// Verify setup
+	var txCountBefore int64
+	pgStore.DB().Model(&models.Transaction{}).Count(&txCountBefore)
+	if txCountBefore != 2 {
+		t.Fatalf("expected 2 transactions before, got %d", txCountBefore)
+	}
+
+	// Delete transactions after slot 1500
+	if err := pgStore.DeleteTransactionsAfterSlot(1500, nil); err != nil {
+		t.Fatalf("failed to delete transactions: %v", err)
+	}
+
+	// Verify only 1 transaction remains
+	var txCountAfter int64
+	pgStore.DB().Model(&models.Transaction{}).Count(&txCountAfter)
+	if txCountAfter != 1 {
+		t.Errorf("expected 1 transaction after rollback, got %d", txCountAfter)
+	}
+
+	// Verify UTXO spent_at_tx_id was cleared (UTXO restored to unspent)
+	var restoredUtxo models.Utxo
+	pgStore.DB().First(&restoredUtxo, "id = ?", utxo.ID)
+	if restoredUtxo.SpentAtTxId != nil {
+		t.Errorf("expected SpentAtTxId to be nil, got %v", restoredUtxo.SpentAtTxId)
+	}
+	if restoredUtxo.DeletedSlot != 0 {
+		t.Errorf("expected DeletedSlot to be 0, got %d", restoredUtxo.DeletedSlot)
+	}
+}
+
+// TestPostgresRestorePoolStateAtSlot tests pool state restoration
+func TestPostgresRestorePoolStateAtSlot(t *testing.T) {
+	t.Run("pool with no prior registrations is deleted", func(t *testing.T) {
+		pgStore := newTestPostgresStore(t)
+		defer pgStore.Close() //nolint:errcheck
+
+		// Clean up
+		pgStore.DB().Where("1 = 1").Delete(&models.PoolRegistration{})
+		pgStore.DB().Where("1 = 1").Delete(&models.Pool{})
+
+		poolKeyHash := []byte("pool_key_hash_12345678901234567890123456789012")
+
+		// Create pool registered at slot 2000
+		pool := models.Pool{
+			PoolKeyHash: poolKeyHash,
+		}
+		pgStore.DB().Create(&pool)
+
+		// Create registration at slot 2000 (after rollback point)
+		poolReg := models.PoolRegistration{
+			PoolID:      pool.ID,
+			PoolKeyHash: poolKeyHash,
+			AddedSlot:   2000,
+		}
+		pgStore.DB().Create(&poolReg)
+
+		// Restore to slot 1500 (before registration)
+		if err := pgStore.RestorePoolStateAtSlot(1500, nil); err != nil {
+			t.Fatalf("failed to restore pool state: %v", err)
+		}
+
+		// Verify pool is deleted
+		var count int64
+		pgStore.DB().Model(&models.Pool{}).Where("pool_key_hash = ?", poolKeyHash).Count(&count)
+		if count != 0 {
+			t.Errorf("expected pool to be deleted, found %d", count)
+		}
+	})
+}
+
+// TestPostgresRestoreDrepStateAtSlot tests DRep state restoration
+func TestPostgresRestoreDrepStateAtSlot(t *testing.T) {
+	t.Run("DRep with no prior registrations is deleted", func(t *testing.T) {
+		pgStore := newTestPostgresStore(t)
+		defer pgStore.Close() //nolint:errcheck
+
+		// Clean up
+		pgStore.DB().Where("1 = 1").Delete(&models.RegistrationDrep{})
+		pgStore.DB().Where("1 = 1").Delete(&models.Drep{})
+
+		drepCred := []byte("drep_credential_12345678901234567890123456789012")
+
+		// Create DRep registered at slot 2000
+		drep := models.Drep{
+			Credential: drepCred,
+			AddedSlot:  2000,
+			Active:     true,
+		}
+		pgStore.DB().Create(&drep)
+
+		// Restore to slot 1500 (before registration)
+		if err := pgStore.RestoreDrepStateAtSlot(1500, nil); err != nil {
+			t.Fatalf("failed to restore DRep state: %v", err)
+		}
+
+		// Verify DRep is deleted
+		var count int64
+		pgStore.DB().Model(&models.Drep{}).Where("credential = ?", drepCred).Count(&count)
+		if count != 0 {
+			t.Errorf("expected DRep to be deleted, found %d", count)
+		}
+	})
+
+	t.Run("DRep with prior registration has state restored", func(t *testing.T) {
+		pgStore := newTestPostgresStore(t)
+		defer pgStore.Close() //nolint:errcheck
+
+		// Clean up
+		pgStore.DB().Where("1 = 1").Delete(&models.RegistrationDrep{})
+		pgStore.DB().Where("1 = 1").Delete(&models.UpdateDrep{})
+		pgStore.DB().Where("1 = 1").Delete(&models.DeregistrationDrep{})
+		pgStore.DB().Where("1 = 1").Delete(&models.Certificate{})
+		pgStore.DB().Where("1 = 1").Delete(&models.Drep{})
+		pgStore.DB().Where("1 = 1").Delete(&models.Transaction{})
+
+		drepCred := []byte("drep_credential_12345678901234567890123456789012")
+
+		// Create transactions
+		if err := createTestTransactionPg(pgStore.DB(), 200, 1000); err != nil {
+			t.Fatalf("failed to create transaction: %v", err)
+		}
+		if err := createTestTransactionPg(pgStore.DB(), 201, 2000); err != nil {
+			t.Fatalf("failed to create transaction: %v", err)
+		}
+
+		// Create registration at slot 1000
+		regCert := models.Certificate{
+			Slot:          1000,
+			BlockHash:     []byte("block_hash_1000_12345678901234567890123456789012"),
+			CertType:      uint(lcommon.CertificateTypeRegistrationDrep),
+			TransactionID: 200,
+			CertIndex:     0,
+		}
+		pgStore.DB().Create(&regCert)
+
+		drepReg := models.RegistrationDrep{
+			CertificateID:  regCert.ID,
+			DrepCredential: drepCred,
+			AnchorUrl:      "https://example.com/drep1",
+			AnchorHash:     []byte("anchor_hash_1_12345678901234567890123456789012"),
+			AddedSlot:      1000,
+		}
+		pgStore.DB().Create(&drepReg)
+
+		// Create update at slot 2000 with different anchor
+		updateCert := models.Certificate{
+			Slot:          2000,
+			BlockHash:     []byte("block_hash_2000_12345678901234567890123456789012"),
+			CertType:      uint(lcommon.CertificateTypeUpdateDrep),
+			TransactionID: 201,
+			CertIndex:     0,
+		}
+		pgStore.DB().Create(&updateCert)
+
+		drepUpdate := models.UpdateDrep{
+			CertificateID: updateCert.ID,
+			Credential:    drepCred,
+			AnchorUrl:     "https://example.com/drep2",
+			AnchorHash:    []byte("anchor_hash_2_12345678901234567890123456789012"),
+			AddedSlot:     2000,
+		}
+		pgStore.DB().Create(&drepUpdate)
+
+		// Create DRep with current state (from update at slot 2000)
+		drep := models.Drep{
+			Credential: drepCred,
+			AnchorUrl:  "https://example.com/drep2",
+			AnchorHash: []byte("anchor_hash_2_12345678901234567890123456789012"),
+			AddedSlot:  2000,
+			Active:     true,
+		}
+		pgStore.DB().Create(&drep)
+
+		// Restore to slot 1500 (should restore to registration state)
+		if err := pgStore.RestoreDrepStateAtSlot(1500, nil); err != nil {
+			t.Fatalf("failed to restore DRep state: %v", err)
+		}
+
+		// Verify DRep is restored to registration state
+		var restoredDrep models.Drep
+		pgStore.DB().First(&restoredDrep, "credential = ?", drepCred)
+
+		if restoredDrep.AnchorUrl != "https://example.com/drep1" {
+			t.Errorf("expected anchor URL to be restored to drep1, got %s", restoredDrep.AnchorUrl)
+		}
+		if !restoredDrep.Active {
+			t.Errorf("expected DRep to be active")
+		}
+	})
+}

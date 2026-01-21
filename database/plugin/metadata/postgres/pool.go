@@ -196,3 +196,177 @@ func (d *MetadataStorePostgres) GetPoolRegistrations(
 	}
 	return ret, nil
 }
+
+// poolRegRecord holds fields from a pool registration for batch processing
+// during pool state restoration.
+type poolRegRecord struct {
+	pledge        types.Uint64
+	cost          types.Uint64
+	margin        *types.Rat
+	vrfKeyHash    []byte
+	rewardAccount []byte
+	addedSlot     uint64
+	certIndex     uint32
+}
+
+// poolRegCache holds batch-fetched registration data for all pools being restored.
+type poolRegCache struct {
+	registration map[uint]poolRegRecord
+	hasReg       map[uint]bool
+}
+
+// batchFetchPoolRegs fetches all registrations for the given pool IDs at or
+// before the given slot, returning only the most recent registration per pool.
+func batchFetchPoolRegs(
+	db *gorm.DB,
+	poolIDs []uint,
+	slot uint64,
+) (*poolRegCache, error) {
+	cache := &poolRegCache{
+		registration: make(map[uint]poolRegRecord, len(poolIDs)),
+		hasReg:       make(map[uint]bool, len(poolIDs)),
+	}
+
+	type result struct {
+		PoolID        uint
+		Pledge        types.Uint64
+		Cost          types.Uint64
+		Margin        *types.Rat
+		VrfKeyHash    []byte
+		RewardAccount []byte
+		AddedSlot     uint64
+		CertIndex     uint32
+	}
+	var records []result
+
+	// Use ROW_NUMBER to fetch only the latest registration per pool
+	query := `
+		WITH ranked AS (
+			SELECT pr.pool_id, pr.pledge, pr.cost, pr.margin,
+				pr.vrf_key_hash, pr.reward_account, pr.added_slot, c.cert_index,
+				ROW_NUMBER() OVER (
+					PARTITION BY pr.pool_id
+					ORDER BY pr.added_slot DESC, c.cert_index DESC
+				) as rn
+			FROM pool_registration pr
+			INNER JOIN certs c ON c.id = pr.certificate_id
+			WHERE pr.pool_id IN ? AND pr.added_slot <= ?
+		)
+		SELECT pool_id, pledge, cost, margin, vrf_key_hash, reward_account, added_slot, cert_index
+		FROM ranked WHERE rn = 1`
+	if err := db.Raw(query, poolIDs, slot).Scan(&records).Error; err != nil {
+		return nil, err
+	}
+
+	for _, r := range records {
+		cache.registration[r.PoolID] = poolRegRecord{
+			pledge:        r.Pledge,
+			cost:          r.Cost,
+			margin:        r.Margin,
+			vrfKeyHash:    r.VrfKeyHash,
+			rewardAccount: r.RewardAccount,
+			addedSlot:     r.AddedSlot,
+			certIndex:     r.CertIndex,
+		}
+		cache.hasReg[r.PoolID] = true
+	}
+
+	return cache, nil
+}
+
+// RestorePoolStateAtSlot reverts pool state to the given slot.
+// Pools that have no registrations at or before the given slot are deleted.
+// Pools that have registrations at or before the given slot have their
+// denormalized fields (pledge, cost, margin, etc.) restored from the most
+// recent registration at or before the slot.
+//
+// This implementation uses batch fetching to avoid N+1 query patterns:
+// instead of querying certificates per-pool, it fetches all relevant
+// registrations for all affected pools upfront in one query with a JOIN
+// to the certs table to get cert_index for deterministic same-slot ordering.
+func (d *MetadataStorePostgres) RestorePoolStateAtSlot(
+	slot uint64,
+	txn types.Txn,
+) error {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return err
+	}
+
+	// Phase 1: Delete pools with no registrations at or before the rollback slot
+	poolsWithNoValidRegsSubquery := db.Model(&models.Pool{}).
+		Select("pool.id").
+		Where(
+			"NOT EXISTS (?)",
+			db.Model(&models.PoolRegistration{}).
+				Select("1").
+				Where("pool_registration.pool_id = pool.id AND pool_registration.added_slot <= ?", slot),
+		)
+
+	if result := db.Where(
+		"id IN (?)",
+		poolsWithNoValidRegsSubquery,
+	).Delete(&models.Pool{}); result.Error != nil {
+		return result.Error
+	}
+
+	// Phase 2: Restore denormalized fields for remaining pools that had any
+	// registration after the rollback slot. These pools survive Phase 1
+	// (meaning they have at least one registration at or before the slot),
+	// but their denormalized fields may reflect a now-invalid later registration.
+	var poolsToRestore []models.Pool
+	poolsWithRegsAfterSlotSubquery := db.Model(&models.PoolRegistration{}).
+		Select("DISTINCT pool_id").
+		Where("added_slot > ?", slot)
+
+	if result := db.Where(
+		"id IN (?)",
+		poolsWithRegsAfterSlotSubquery,
+	).Find(&poolsToRestore); result.Error != nil {
+		return result.Error
+	}
+
+	if len(poolsToRestore) == 0 {
+		return nil
+	}
+
+	// Extract pool IDs for batch fetching
+	poolIDs := make([]uint, len(poolsToRestore))
+	for i, pool := range poolsToRestore {
+		poolIDs[i] = pool.ID
+	}
+
+	// Batch-fetch all registrations for all affected pools
+	cache, err := batchFetchPoolRegs(db, poolIDs, slot)
+	if err != nil {
+		return err
+	}
+
+	// Process each pool using the cached registration data
+	for _, pool := range poolsToRestore {
+		// Get registration from cache (must exist due to Phase 1 deletion)
+		latestReg, hasRegAtSlot := cache.registration[pool.ID], cache.hasReg[pool.ID]
+		if !hasRegAtSlot {
+			// This indicates database inconsistency: Phase 1 should have deleted
+			// any pool without a registration cert at or before the rollback slot.
+			return fmt.Errorf(
+				"pool %d has no registration cert at or before slot %d but wasn't deleted in Phase 1",
+				pool.ID,
+				slot,
+			)
+		}
+
+		// Update the Pool's denormalized fields from the registration
+		if result := db.Model(&pool).Updates(map[string]any{
+			"pledge":         latestReg.pledge,
+			"cost":           latestReg.cost,
+			"margin":         latestReg.margin,
+			"vrf_key_hash":   latestReg.vrfKeyHash,
+			"reward_account": latestReg.rewardAccount,
+		}); result.Error != nil {
+			return result.Error
+		}
+	}
+
+	return nil
+}
