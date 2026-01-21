@@ -208,6 +208,44 @@ func (d *Database) UtxosByAddress(
 	return ret, nil
 }
 
+// UtxosByAssets returns UTxOs that contain the specified assets
+// policyId: the policy ID of the asset (required)
+// assetName: the asset name (optional, pass nil or empty slice to match all assets under the policy)
+func (d *Database) UtxosByAssets(
+	policyId []byte,
+	assetName []byte,
+	txn *Txn,
+) ([]models.Utxo, error) {
+	ret := []models.Utxo{}
+	tmpUtxo := models.Utxo{}
+	if txn == nil {
+		txn = d.Transaction(false)
+		defer txn.Release()
+	}
+	utxos, err := d.metadata.GetUtxosByAssets(policyId, assetName, txn.Metadata())
+	if err != nil {
+		return ret, err
+	}
+	for _, utxo := range utxos {
+		tmpUtxo = models.Utxo{
+			ID:          utxo.ID,
+			TxId:        utxo.TxId,
+			OutputIdx:   utxo.OutputIdx,
+			AddedSlot:   utxo.AddedSlot,
+			DeletedSlot: utxo.DeletedSlot,
+			PaymentKey:  utxo.PaymentKey,
+			StakingKey:  utxo.StakingKey,
+			Amount:      utxo.Amount,
+			Assets:      utxo.Assets,
+		}
+		if err := loadCbor(&tmpUtxo, txn); err != nil {
+			return ret, err
+		}
+		ret = append(ret, tmpUtxo)
+	}
+	return ret, nil
+}
+
 func (d *Database) UtxosDeleteConsumed(
 	slot uint64,
 	limit int,

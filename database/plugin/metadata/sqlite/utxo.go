@@ -125,6 +125,38 @@ func (d *MetadataStoreSqlite) GetUtxosByAddress(
 	return ret, nil
 }
 
+// GetUtxosByAssets returns a list of Utxos that contain the specified assets
+// policyId: the policy ID of the asset (required)
+// assetName: the asset name (optional, pass nil to match all assets under the policy)
+func (d *MetadataStoreSqlite) GetUtxosByAssets(
+	policyId []byte,
+	assetName []byte,
+	txn types.Txn,
+) ([]models.Utxo, error) {
+	var ret []models.Utxo
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return nil, err
+	}
+
+	// Build the asset query
+	assetQuery := db.Table("asset").Select("utxo_id").Where("policy_id = ?", policyId)
+	if len(assetName) > 0 {
+		assetQuery = assetQuery.Where("name = ?", assetName)
+	}
+
+	// Query UTxOs that have matching assets and are not deleted
+	result := db.
+		Where("deleted_slot = 0").
+		Where("id IN (?)", assetQuery).
+		Preload("Assets").
+		Find(&ret)
+	if result.Error != nil {
+		return nil, result.Error
+	}
+	return ret, nil
+}
+
 func (d *MetadataStoreSqlite) DeleteUtxo(
 	utxoId models.UtxoId,
 	txn types.Txn,
