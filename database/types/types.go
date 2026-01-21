@@ -133,7 +133,10 @@ type Txn interface {
 	Rollback() error
 }
 
-// BlockMetadata contains metadata for a block stored in blob
+// BlockMetadata contains metadata for a block stored in blob.
+// IMPORTANT: Field order must remain [ID, Type, Height, PrevHash] because
+// cbor.StructAsArray encodes/decodes by position. Changing the order would
+// break deserialization of existing stored data.
 type BlockMetadata struct {
 	cbor.StructAsArray
 	ID       uint64
