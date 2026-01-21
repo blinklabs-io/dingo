@@ -127,7 +127,7 @@ func (d *MetadataStoreSqlite) GetUtxosByAddress(
 
 // GetUtxosByAssets returns a list of Utxos that contain the specified assets
 // policyId: the policy ID of the asset (required)
-// assetName: the asset name (optional, pass nil to match all assets under the policy)
+// assetName: the asset name (pass nil to match all assets under the policy, or empty []byte{} to match assets with empty names)
 func (d *MetadataStoreSqlite) GetUtxosByAssets(
 	policyId []byte,
 	assetName []byte,
@@ -141,7 +141,7 @@ func (d *MetadataStoreSqlite) GetUtxosByAssets(
 
 	// Build the asset query
 	assetQuery := db.Table("asset").Select("utxo_id").Where("policy_id = ?", policyId)
-	if len(assetName) > 0 {
+	if assetName != nil {
 		assetQuery = assetQuery.Where("name = ?", assetName)
 	}
 

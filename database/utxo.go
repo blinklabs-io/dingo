@@ -210,7 +210,7 @@ func (d *Database) UtxosByAddress(
 
 // UtxosByAssets returns UTxOs that contain the specified assets
 // policyId: the policy ID of the asset (required)
-// assetName: the asset name (optional, pass nil or empty slice to match all assets under the policy)
+// assetName: the asset name (pass nil to match all assets under the policy, or empty []byte{} to match assets with empty names)
 func (d *Database) UtxosByAssets(
 	policyId []byte,
 	assetName []byte,
