@@ -582,20 +582,23 @@ func (ls *LedgerState) scheduleCleanupConsumedUtxos() {
 }
 
 func (ls *LedgerState) cleanupConsumedUtxos() {
-	// Get the current tip, since we're querying by slot
+	// Get the current tip slot while holding the read lock to avoid TOCTOU race.
+	// We capture only the slot value we need, so even if currentTip changes after
+	// we release the lock, we're working with a consistent snapshot of the slot.
 	ls.RLock()
-	tip := ls.currentTip
+	tipSlot := ls.currentTip.Point.Slot
 	ls.RUnlock()
+
 	// Delete UTxOs that are marked as deleted and older than our slot window
 	ls.config.Logger.Debug(
 		"cleaning up consumed UTxOs",
 		"component", "ledger",
 	)
-	if tip.Point.Slot > cleanupConsumedUtxosSlotWindow {
+	if tipSlot > cleanupConsumedUtxosSlotWindow {
 		for {
 			ls.Lock()
 			count, err := ls.db.UtxosDeleteConsumed(
-				tip.Point.Slot-cleanupConsumedUtxosSlotWindow,
+				tipSlot-cleanupConsumedUtxosSlotWindow,
 				10000,
 				nil,
 			)
