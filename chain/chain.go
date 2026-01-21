@@ -17,6 +17,7 @@ package chain
 import (
 	"encoding/hex"
 	"errors"
+	"log/slog"
 	"slices"
 	"sync"
 
@@ -272,14 +273,32 @@ func (c *Chain) Rollback(point ocommon.Point) error {
 	forkDepth := c.tipBlockIndex - rollbackBlockIndex
 	// Capture old tip for fork event before we modify it
 	oldTip := c.currentTip
-	// Delete any rolled-back blocks
+	// Collect and delete rolled-back blocks in a single pass
+	var rolledBackBlocks []models.Block
 	for i := c.tipBlockIndex; i > rollbackBlockIndex; i-- {
 		if c.persistent {
-			// Remove block from persistent store
-			if err := c.manager.removeBlockByIndex(i); err != nil {
+			// Remove block from persistent store, returns the removed block
+			block, err := c.manager.removeBlockByIndex(i)
+			if err != nil {
 				return err
 			}
+			if c.eventBus != nil {
+				rolledBackBlocks = append(rolledBackBlocks, block)
+			}
 		} else {
+			// Collect block for event emission before deletion
+			if c.eventBus != nil {
+				block, err := c.blockByIndex(i)
+				if err != nil {
+					slog.Default().Warn(
+						"failed to get block for rollback event",
+						"index", i,
+						"error", err,
+					)
+				} else {
+					rolledBackBlocks = append(rolledBackBlocks, block)
+				}
+			}
 			// Decrement our fork point block index if we rollback beyond it
 			if i < c.lastCommonBlockIndex {
 				c.lastCommonBlockIndex = i
@@ -321,7 +340,8 @@ func (c *Chain) Rollback(point ocommon.Point) error {
 			event.NewEvent(
 				ChainUpdateEventType,
 				ChainRollbackEvent{
-					Point: point,
+					Point:            point,
+					RolledBackBlocks: rolledBackBlocks,
 				},
 			),
 		)
@@ -405,11 +425,10 @@ func (c *Chain) BlockByPoint(
 
 func (c *Chain) blockByIndex(
 	blockIndex uint64,
-	txn *database.Txn,
 ) (models.Block, error) {
 	if c.persistent || blockIndex <= c.lastCommonBlockIndex {
 		// Query via manager for common blocks
-		tmpBlock, err := c.manager.blockByIndex(blockIndex, txn)
+		tmpBlock, err := c.manager.blockByIndex(blockIndex, nil)
 		if err != nil {
 			return models.Block{}, err
 		}
@@ -424,7 +443,7 @@ func (c *Chain) blockByIndex(
 		return models.Block{}, models.ErrBlockNotFound
 	}
 	memBlockPoint := c.blocks[memBlockIndex]
-	tmpBlock, err := c.manager.blockByPoint(memBlockPoint, txn)
+	tmpBlock, err := c.manager.blockByPoint(memBlockPoint, nil)
 	if err != nil {
 		return models.Block{}, err
 	}
@@ -467,7 +486,7 @@ func (c *Chain) iterNext(
 	}
 	ret := &ChainIteratorResult{}
 	// Lookup next block in metadata DB
-	tmpBlock, err := c.blockByIndex(iter.nextBlockIndex, nil)
+	tmpBlock, err := c.blockByIndex(iter.nextBlockIndex)
 	// Return immedidately if a block is found
 	if err == nil {
 		ret.Point = ocommon.NewPoint(tmpBlock.Slot, tmpBlock.Hash)
@@ -528,8 +547,7 @@ func (c *Chain) reconcile() error {
 	for i := len(c.blocks) - 1; i >= 0; i-- {
 		tmpBlock, err := primaryChain.blockByIndex(
 			// Add 1 to prevent off-by-one error
-			c.lastCommonBlockIndex+uint64(i)+1,
-			nil,
+			c.lastCommonBlockIndex + uint64(i) + 1,
 		)
 		if err != nil {
 			if errors.Is(err, models.ErrBlockNotFound) {
@@ -574,7 +592,7 @@ func (c *Chain) reconcile() error {
 			return err
 		}
 		// Lookup same block index on primary chain
-		primaryBlock, err := primaryChain.blockByIndex(tmpBlock.ID, nil)
+		primaryBlock, err := primaryChain.blockByIndex(tmpBlock.ID)
 		if err != nil {
 			return err
 		}

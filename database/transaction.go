@@ -107,3 +107,22 @@ func (d *Database) GetTransactionByHash(
 	}
 	return d.metadata.GetTransactionByHash(hash, txn.Metadata())
 }
+
+// DeleteTransactionsAfterSlot removes transaction records added after the given slot.
+func (d *Database) DeleteTransactionsAfterSlot(slot uint64, txn *Txn) error {
+	owned := false
+	if txn == nil {
+		txn = d.Transaction(true)
+		owned = true
+		defer txn.Rollback() //nolint:errcheck
+	}
+	if err := d.metadata.DeleteTransactionsAfterSlot(slot, txn.Metadata()); err != nil {
+		return err
+	}
+	if owned {
+		if err := txn.Commit(); err != nil {
+			return err
+		}
+	}
+	return nil
+}

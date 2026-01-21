@@ -50,3 +50,22 @@ func (d *Database) GetActivePoolRelays(
 	}
 	return d.metadata.GetActivePoolRelays(txn.Metadata())
 }
+
+// RestorePoolStateAtSlot reverts pool state to the given slot.
+func (d *Database) RestorePoolStateAtSlot(slot uint64, txn *Txn) error {
+	owned := false
+	if txn == nil {
+		txn = d.Transaction(true)
+		owned = true
+		defer txn.Rollback() //nolint:errcheck
+	}
+	if err := d.metadata.RestorePoolStateAtSlot(slot, txn.Metadata()); err != nil {
+		return err
+	}
+	if owned {
+		if err := txn.Commit(); err != nil {
+			return err
+		}
+	}
+	return nil
+}

@@ -18,23 +18,28 @@ import "github.com/blinklabs-io/dingo/database/types"
 
 // Transaction represents a transaction record
 type Transaction struct {
+	// CollateralReturn uses a separate FK (CollateralReturnForTxID) to distinguish
+	// from regular Outputs which use TransactionID. This allows GORM to load each
+	// association correctly without ambiguity.
+	CollateralReturn *Utxo            `gorm:"foreignKey:CollateralReturnForTxID;references:ID;constraint:OnDelete:CASCADE"`
+	PlutusData       []PlutusData     `gorm:"foreignKey:TransactionID;references:ID;constraint:OnDelete:CASCADE"`
+	Certificates     []Certificate    `gorm:"foreignKey:TransactionID;references:ID;constraint:OnDelete:CASCADE"`
+	Outputs          []Utxo           `gorm:"foreignKey:TransactionID;references:ID;constraint:OnDelete:CASCADE"`
 	Hash             []byte           `gorm:"uniqueIndex"`
-	BlockHash        []byte           `gorm:"index"`
-	Inputs           []Utxo           `gorm:"foreignKey:SpentAtTxId;references:Hash"`
-	Outputs          []Utxo           `gorm:"foreignKey:TransactionID;references:ID"`
-	ReferenceInputs  []Utxo           `gorm:"foreignKey:ReferencedByTxId;references:Hash"`
 	Collateral       []Utxo           `gorm:"foreignKey:CollateralByTxId;references:Hash"`
-	CollateralReturn *Utxo            `gorm:"foreignKey:TransactionID;references:ID"`
-	KeyWitnesses     []KeyWitness     `gorm:"foreignKey:TransactionID;references:ID"`
-	WitnessScripts   []WitnessScripts `gorm:"foreignKey:TransactionID;references:ID"`
-	Redeemers        []Redeemer       `gorm:"foreignKey:TransactionID;references:ID"`
-	PlutusData       []PlutusData     `gorm:"foreignKey:TransactionID;references:ID"`
-	ID               uint             `gorm:"primaryKey"`
-	Type             int
-	BlockIndex       uint32
+	BlockHash        []byte           `gorm:"index"`
+	KeyWitnesses     []KeyWitness     `gorm:"foreignKey:TransactionID;references:ID;constraint:OnDelete:CASCADE"`
+	WitnessScripts   []WitnessScripts `gorm:"foreignKey:TransactionID;references:ID;constraint:OnDelete:CASCADE"`
+	Inputs           []Utxo           `gorm:"foreignKey:SpentAtTxId;references:Hash"`
+	Redeemers        []Redeemer       `gorm:"foreignKey:TransactionID;references:ID;constraint:OnDelete:CASCADE"`
+	ReferenceInputs  []Utxo           `gorm:"foreignKey:ReferencedByTxId;references:Hash"`
 	Metadata         []byte
+	Slot             uint64 `gorm:"index"`
+	Type             int
+	ID               uint `gorm:"primaryKey"`
 	Fee              types.Uint64
 	TTL              types.Uint64
+	BlockIndex       uint32
 	Valid            bool
 }
 

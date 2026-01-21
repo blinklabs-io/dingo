@@ -18,11 +18,11 @@ package models
 // This avoids storing duplicate script data when the same script appears
 // in multiple transactions
 type Script struct {
-	ID          uint   `gorm:"primaryKey"`
-	Hash        []byte `gorm:"index;unique"` // Script hash
-	Type        uint8  `gorm:"index"`        // Script type
-	Content     []byte // Script content
-	CreatedSlot uint64 // Slot when this script was first seen
+	Hash        []byte `gorm:"index;unique"`
+	Content     []byte
+	ID          uint `gorm:"primaryKey"`
+	CreatedSlot uint64
+	Type        uint8 `gorm:"index"`
 }
 
 func (Script) TableName() string {

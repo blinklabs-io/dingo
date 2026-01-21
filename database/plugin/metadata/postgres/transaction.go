@@ -848,7 +848,6 @@ func (d *MetadataStorePostgres) SetTransaction(
 
 					if tmpAccount.ID == 0 {
 						tmpAccount.AddedSlot = point.Slot
-						tmpAccount.CertificateID = certIDMap[i]
 					}
 					if err := saveAccount(tmpAccount, db); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
@@ -1066,7 +1065,6 @@ func (d *MetadataStorePostgres) SetTransaction(
 
 					if tmpAccount.ID == 0 {
 						tmpAccount.AddedSlot = point.Slot
-						tmpAccount.CertificateID = certIDMap[i]
 					}
 					if err := saveAccount(tmpAccount, db); err != nil {
 						return fmt.Errorf("process certificate: %w", err)

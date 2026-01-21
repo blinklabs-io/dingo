@@ -24,14 +24,14 @@ const (
 // KeyWitness represents a key witness entry (Vkey or Bootstrap)
 // Type: KeyWitnessTypeVkey = VkeyWitness, KeyWitnessTypeBootstrap = BootstrapWitness
 type KeyWitness struct {
-	ID            uint   `gorm:"primaryKey"`
-	TransactionID uint   `gorm:"index"`
-	Type          uint8  `gorm:"index"` // See KeyWitnessType* constants
-	Vkey          []byte // Vkey witness key
-	Signature     []byte // Witness signature
-	PublicKey     []byte // For Bootstrap witness
-	ChainCode     []byte // For Bootstrap witness
-	Attributes    []byte // For Bootstrap witness
+	Vkey          []byte
+	Signature     []byte
+	PublicKey     []byte
+	ChainCode     []byte
+	Attributes    []byte
+	ID            uint  `gorm:"primaryKey"`
+	TransactionID uint  `gorm:"index"`
+	Type          uint8 `gorm:"index"`
 }
 
 func (KeyWitness) TableName() string {

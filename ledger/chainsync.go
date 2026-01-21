@@ -141,6 +141,68 @@ func (ls *LedgerState) handleEventBlockfetch(evt event.Event) {
 	}
 }
 
+func (ls *LedgerState) handleEventChainUpdate(evt event.Event) {
+	// Handle chain rollback events to emit TransactionEvents
+	// Emit asynchronously to avoid blocking the chain update handler
+	if rollbackEvt, ok := evt.Data.(chain.ChainRollbackEvent); ok {
+		// Check if we're shutting down before starting new rollback goroutines.
+		// This prevents WaitGroup misuse panics where Add() races with Wait().
+		if ls.closed.Load() {
+			return
+		}
+		ls.rollbackWG.Add(1)
+		go ls.emitTransactionRollbackEvents(rollbackEvt)
+	}
+	// ChainBlockEvent is handled elsewhere, no action needed here
+}
+
+// emitTransactionRollbackEvents emits TransactionEvent for each transaction
+// in the rolled-back blocks, allowing subscribers to undo any state changes.
+func (ls *LedgerState) emitTransactionRollbackEvents(
+	rollbackEvt chain.ChainRollbackEvent,
+) {
+	defer ls.rollbackWG.Done()
+
+	if ls.config.EventBus == nil {
+		return
+	}
+
+	for _, block := range rollbackEvt.RolledBackBlocks {
+		blk, err := block.Decode()
+		if err != nil {
+			ls.config.Logger.Warn(
+				fmt.Sprintf(
+					"ledger: failed to decode block for undo events: %s",
+					err,
+				),
+			)
+			continue
+		}
+
+		blockPoint := ocommon.Point{
+			Slot: block.Slot,
+			Hash: block.Hash,
+		}
+
+		txs := blk.Transactions()
+		for i := len(txs) - 1; i >= 0; i-- {
+			ls.config.EventBus.PublishAsync(
+				TransactionEventType,
+				event.NewEvent(
+					TransactionEventType,
+					TransactionEvent{
+						Transaction: txs[i],
+						Point:       blockPoint,
+						BlockNumber: block.Number,
+						TxIndex:     uint32(i), //nolint:gosec
+						Rollback:    true,
+					},
+				),
+			)
+		}
+	}
+}
+
 func (ls *LedgerState) handleEventChainsyncRollback(e ChainsyncEvent) error {
 	// Filter events from non-active connections when chain selection is enabled
 	if ls.config.GetActiveConnectionFunc != nil {
