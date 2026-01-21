@@ -15,6 +15,7 @@
 package sqlite
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"strings"
@@ -133,25 +134,59 @@ func certRequiresDeposit(cert lcommon.Certificate) bool {
 	}
 }
 
-// getOrCreateAccount retrieves an existing account or creates a new one
+// getOrCreateAccount retrieves an existing account or creates a new one.
+// Uses a SELECT-then-INSERT pattern with OnConflict to handle race conditions
+// where two goroutines could both attempt to create the same account.
 func (d *MetadataStoreSqlite) getOrCreateAccount(
 	stakeKey []byte,
 	txn types.Txn,
 ) (*models.Account, error) {
-	// Include inactive accounts to allow reactivation on registration.
-	tmpAccount, err := d.GetAccount(stakeKey, true, txn)
+	db, err := d.resolveDB(txn)
 	if err != nil {
-		if !errors.Is(err, models.ErrAccountNotFound) {
-			return nil, err
+		return nil, err
+	}
+
+	// First, try to find an existing account
+	var existing models.Account
+	result := db.Where("staking_key = ?", stakeKey).First(&existing)
+	if result.Error == nil {
+		// Account exists - mark for reactivation if inactive
+		if !existing.Active {
+			existing.Active = true
+		}
+		return &existing, nil
+	}
+	if !errors.Is(result.Error, gorm.ErrRecordNotFound) {
+		return nil, result.Error
+	}
+
+	// Account doesn't exist - try to create with OnConflict to handle races.
+	// If another goroutine creates the same account concurrently, this will
+	// do nothing and we'll fetch the existing record below.
+	tmpAccount := &models.Account{
+		StakingKey: stakeKey,
+		Active:     true,
+	}
+	result = db.Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "staking_key"}},
+		DoNothing: true,
+	}).Create(tmpAccount)
+	if result.Error != nil {
+		return nil, result.Error
+	}
+
+	// If no row was inserted (conflict occurred), fetch the existing record
+	if result.RowsAffected == 0 {
+		result = db.Where("staking_key = ?", stakeKey).First(tmpAccount)
+		if result.Error != nil {
+			return nil, result.Error
+		}
+		// Mark for reactivation if inactive
+		if !tmpAccount.Active {
+			tmpAccount.Active = true
 		}
 	}
-	if tmpAccount == nil {
-		tmpAccount = &models.Account{
-			StakingKey: stakeKey,
-		}
-	} else if !tmpAccount.Active {
-		tmpAccount.Active = true
-	}
+
 	return tmpAccount, nil
 }
 
@@ -202,6 +237,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 		Type:       tx.Type(),
 		BlockHash:  point.Hash,
 		BlockIndex: idx,
+		Slot:       point.Slot,
 		Fee:        types.Uint64(tx.Fee().Uint64()),
 		TTL:        types.Uint64(tx.TTL()),
 		Valid:      tx.IsValid(),
@@ -253,7 +289,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 	result := db.Clauses(clause.OnConflict{
 		Columns: []clause.Column{{Name: "hash"}}, // unique txn hash
 		DoUpdates: clause.AssignmentColumns(
-			[]string{"block_hash", "block_index"},
+			[]string{"block_hash", "block_index", "slot"},
 		),
 	}).Create(tmpTx)
 
@@ -274,18 +310,16 @@ func (d *MetadataStoreSqlite) SetTransaction(
 	// SQLite's ON CONFLICT clause doesn't return the ID of an existing row when
 	// the conflict path is taken (no insert occurs). We need to fetch the ID
 	// explicitly so we can associate witness records with the correct transaction.
+	// Only fetch the ID column to avoid expensive association preloads.
 	if tmpTx.ID == 0 {
-		existingTx, err := d.GetTransactionByHash(txHash, txn)
-		if err != nil {
-			return fmt.Errorf(
-				"failed to fetch transaction ID after upsert: %w",
-				err,
-			)
+		var existing struct{ ID uint }
+		if err := db.Model(&models.Transaction{}).
+			Select("id").
+			Where("hash = ?", txHash).
+			Take(&existing).Error; err != nil {
+			return fmt.Errorf("failed to fetch transaction ID after upsert: %w", err)
 		}
-		if existingTx == nil {
-			return fmt.Errorf("transaction not found after upsert: %x", txHash)
-		}
-		tmpTx.ID = existingTx.ID
+		tmpTx.ID = existing.ID
 	}
 
 	// Create UTxO records for outputs
@@ -307,8 +341,9 @@ func (d *MetadataStoreSqlite) SetTransaction(
 		}
 	}
 	// Create CollateralReturn UTxO if present
+	// Uses CollateralReturnForTxID (not TransactionID) to distinguish from regular outputs
 	if tmpTx.CollateralReturn != nil {
-		tmpTx.CollateralReturn.TransactionID = &tmpTx.ID
+		tmpTx.CollateralReturn.CollateralReturnForTxID = &tmpTx.ID
 		if result := db.Clauses(clause.OnConflict{
 			Columns:   []clause.Column{{Name: "tx_id"}, {Name: "output_idx"}},
 			DoNothing: true,
@@ -317,26 +352,28 @@ func (d *MetadataStoreSqlite) SetTransaction(
 		}
 	}
 
-	// Add Inputs to Transaction
+	// Add Inputs to Transaction - batch fetch all input UTXOs
+	var inputRefs []UtxoRef
 	for _, input := range tx.Inputs() {
-		inTxId := input.Id().Bytes()
-		inIdx := input.Index()
-		utxo, err := d.GetUtxo(inTxId, inIdx, txn)
-		if err != nil {
-			return fmt.Errorf(
-				"failed to fetch input %x#%d: %w",
-				inTxId,
-				inIdx,
-				err,
-			)
-		}
+		inputRefs = append(inputRefs, UtxoRef{
+			TxId:      input.Id().Bytes(),
+			OutputIdx: input.Index(),
+		})
+	}
+	inputUtxos, err := d.GetUtxosBatch(inputRefs, txn)
+	if err != nil {
+		return fmt.Errorf("failed to batch fetch input UTXOs: %w", err)
+	}
+	for _, input := range tx.Inputs() {
+		key := fmt.Sprintf("%x:%d", input.Id().Bytes(), input.Index())
+		utxo := inputUtxos[key]
 		if utxo == nil {
 			d.logger.Warn(
 				"Skipping missing input UTxO",
 				"hash",
 				input.Id().String(),
 				"index",
-				inIdx,
+				input.Index(),
 			)
 			continue
 		}
@@ -345,8 +382,20 @@ func (d *MetadataStoreSqlite) SetTransaction(
 			*utxo,
 		)
 	}
-	// Add Collateral to Transaction
+	// Add Collateral to Transaction - batch fetch all collateral UTXOs
 	if len(tx.Collateral()) > 0 {
+		var collateralRefs []UtxoRef
+		for _, input := range tx.Collateral() {
+			collateralRefs = append(collateralRefs, UtxoRef{
+				TxId:      input.Id().Bytes(),
+				OutputIdx: input.Index(),
+			})
+		}
+		collateralUtxos, err := d.GetUtxosBatch(collateralRefs, txn)
+		if err != nil {
+			return fmt.Errorf("failed to batch fetch collateral UTXOs: %w", err)
+		}
+
 		var caseClauses []string
 		var whereConditions []string
 		var caseArgs []any
@@ -355,15 +404,8 @@ func (d *MetadataStoreSqlite) SetTransaction(
 		for _, input := range tx.Collateral() {
 			inTxId := input.Id().Bytes()
 			inIdx := input.Index()
-			utxo, err := d.GetUtxo(inTxId, inIdx, txn)
-			if err != nil {
-				return fmt.Errorf(
-					"failed to fetch input %x#%d: %w",
-					inTxId,
-					inIdx,
-					err,
-				)
-			}
+			key := fmt.Sprintf("%x:%d", inTxId, inIdx)
+			utxo := collateralUtxos[key]
 			if utxo == nil {
 				d.logger.Warn(
 					"Skipping missing collateral UTxO",
@@ -407,8 +449,23 @@ func (d *MetadataStoreSqlite) SetTransaction(
 			}
 		}
 	}
-	// Add ReferenceInputs to Transaction
+	// Add ReferenceInputs to Transaction - batch fetch all reference input UTXOs
 	if len(tx.ReferenceInputs()) > 0 {
+		var refInputRefs []UtxoRef
+		for _, input := range tx.ReferenceInputs() {
+			refInputRefs = append(refInputRefs, UtxoRef{
+				TxId:      input.Id().Bytes(),
+				OutputIdx: input.Index(),
+			})
+		}
+		refInputUtxos, err := d.GetUtxosBatch(refInputRefs, txn)
+		if err != nil {
+			return fmt.Errorf(
+				"failed to batch fetch reference input UTXOs: %w",
+				err,
+			)
+		}
+
 		var caseClauses []string
 		var whereConditions []string
 		var caseArgs []any
@@ -417,15 +474,8 @@ func (d *MetadataStoreSqlite) SetTransaction(
 		for _, input := range tx.ReferenceInputs() {
 			inTxId := input.Id().Bytes()
 			inIdx := input.Index()
-			utxo, err := d.GetUtxo(inTxId, inIdx, txn)
-			if err != nil {
-				return fmt.Errorf(
-					"failed to fetch input %x#%d: %w",
-					inTxId,
-					inIdx,
-					err,
-				)
-			}
+			key := fmt.Sprintf("%x:%d", inTxId, inIdx)
+			utxo := refInputUtxos[key]
 			if utxo == nil {
 				d.logger.Warn(
 					"Skipping missing reference input UTxO",
@@ -473,33 +523,21 @@ func (d *MetadataStoreSqlite) SetTransaction(
 		}
 	}
 
-	// Consume UTxOs
+	// Consume UTxOs using optimistic locking to prevent race conditions.
+	// The atomic update ensures only one transaction can successfully mark a UTXO as spent.
 	for _, input := range tx.Consumed() {
 		inTxId := input.Id().Bytes()
 		inIdx := input.Index()
-		utxo, err := d.GetUtxo(inTxId, inIdx, txn)
-		if err != nil {
-			return fmt.Errorf(
-				"failed to fetch input %x#%d: %w",
-				inTxId,
-				inIdx,
-				err,
-			)
-		}
-		if utxo == nil {
-			d.logger.Warn(
-				"input UTxO not found",
-				"hash",
-				input.Id().String(),
-				"index",
-				inIdx,
-			)
-			continue
-		}
-		// Update existing UTxOs
+
+		// Use atomic check-and-update: only update if UTXO is still unspent.
+		// This prevents TOCTOU race where:
+		// 1. GetUtxo reads UTXO with deleted_slot=0
+		// 2. Another transaction marks it spent
+		// 3. First transaction commits spend anyway
 		result = db.Model(&models.Utxo{}).
 			Where("tx_id = ? AND output_idx = ?", inTxId, inIdx).
-			Where("spent_at_tx_id IS NULL OR spent_at_tx_id = ?", txHash).
+			Where("deleted_slot = 0").       // Only update if still unspent
+			Where("spent_at_tx_id IS NULL"). // Require NULL for first spend
 			Updates(map[string]any{
 				"deleted_slot":   point.Slot,
 				"spent_at_tx_id": txHash,
@@ -507,20 +545,61 @@ func (d *MetadataStoreSqlite) SetTransaction(
 		if result.Error != nil {
 			return result.Error
 		}
+
+		// Check if update succeeded - if no rows affected, the UTXO was already spent
+		// or doesn't exist
+		if result.RowsAffected == 0 {
+			// Check if UTXO exists at all (may be missing or already spent)
+			var existingUtxo models.Utxo
+			checkResult := db.Where("tx_id = ? AND output_idx = ?", inTxId, inIdx).
+				First(&existingUtxo)
+			if checkResult.Error != nil {
+				if errors.Is(checkResult.Error, gorm.ErrRecordNotFound) {
+					d.logger.Warn(
+						"input UTxO not found",
+						"hash",
+						input.Id().String(),
+						"index",
+						inIdx,
+					)
+					continue
+				}
+				return fmt.Errorf(
+					"failed to check UTXO %x#%d: %w",
+					inTxId,
+					inIdx,
+					checkResult.Error,
+				)
+			}
+			// UTXO exists but was already spent - check if by the same transaction (idempotent retry)
+			if existingUtxo.SpentAtTxId != nil &&
+				bytes.Equal(existingUtxo.SpentAtTxId, txHash) {
+				// Same transaction, this is an idempotent retry - OK to continue
+				continue
+			}
+			// UTXO was spent by a different transaction - this is a conflict
+			return fmt.Errorf(
+				"UTXO already spent: %x:%d",
+				inTxId,
+				inIdx,
+			)
+		}
 	}
 	// Extract and save witness set data
-	// Delete existing witness records to ensure idempotency on retry
+	// Delete existing witness records to ensure idempotency on retry.
+	// Note: Caller's transaction (via txn parameter) already provides atomicity,
+	// so we don't need a nested db.Transaction() which would create an unnecessary savepoint.
 	if result := db.Where("transaction_id = ?", tmpTx.ID).Delete(&models.KeyWitness{}); result.Error != nil {
-		return fmt.Errorf("delete existing key witnesses: %w", result.Error)
+		return fmt.Errorf("failed to delete key witnesses: %w", result.Error)
 	}
 	if result := db.Where("transaction_id = ?", tmpTx.ID).Delete(&models.WitnessScripts{}); result.Error != nil {
-		return fmt.Errorf("delete existing witness scripts: %w", result.Error)
+		return fmt.Errorf("failed to delete witness scripts: %w", result.Error)
 	}
 	if result := db.Where("transaction_id = ?", tmpTx.ID).Delete(&models.Redeemer{}); result.Error != nil {
-		return fmt.Errorf("delete existing redeemers: %w", result.Error)
+		return fmt.Errorf("failed to delete redeemers: %w", result.Error)
 	}
 	if result := db.Where("transaction_id = ?", tmpTx.ID).Delete(&models.PlutusData{}); result.Error != nil {
-		return fmt.Errorf("delete existing plutus data: %w", result.Error)
+		return fmt.Errorf("failed to delete plutus data: %w", result.Error)
 	}
 	ws := tx.Witnesses()
 	if ws != nil {
@@ -613,6 +692,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 		if len(certs) > 0 {
 			// Delete existing specialized certificate records to ensure idempotency on retry
 			// This ensures 1:1 correspondence between unified and specialized certificates
+			// Wrap in transaction for atomicity - ensures all certificate data is deleted together
 			unifiedIDs := []uint{}
 			if result := db.Model(&models.Certificate{}).Where("transaction_id = ?", tmpTx.ID).Pluck("id", &unifiedIDs); result.Error != nil {
 				return fmt.Errorf(
@@ -621,7 +701,8 @@ func (d *MetadataStoreSqlite) SetTransaction(
 				)
 			}
 			if len(unifiedIDs) > 0 {
-				// Delete specialized records linked to existing unified certificates
+				// Delete specialized records linked to existing unified certificates.
+				// Note: Caller's transaction already provides atomicity, so no nested transaction needed.
 				tables := []string{
 					"stake_registration", "pool_registration", "pool_retirement", "auth_committee_hot", "resign_committee_cold",
 					"deregistration", "stake_delegation", "stake_registration_delegation", "stake_vote_delegation",
@@ -808,18 +889,27 @@ func (d *MetadataStoreSqlite) SetTransaction(
 					tmpPool.Relays = tmpReg.Relays
 
 					// Set the PoolID for the registration record
+					// Use Omit to skip creating associations - they should only be created through PoolRegistration
 					if tmpPool.ID == 0 {
-						result := db.Create(tmpPool)
+						result := db.Omit(clause.Associations).Create(tmpPool)
 						if result.Error != nil {
 							return fmt.Errorf("process certificate: %w", result.Error)
 						}
 					} else {
-						result := db.Save(tmpPool)
+						result := db.Omit(clause.Associations).Save(tmpPool)
 						if result.Error != nil {
 							return fmt.Errorf("process certificate: %w", result.Error)
 						}
 					}
 					tmpReg.PoolID = tmpPool.ID
+
+					// Set PoolID on Owners and Relays for FK constraint
+					for i := range tmpReg.Owners {
+						tmpReg.Owners[i].PoolID = tmpPool.ID
+					}
+					for i := range tmpReg.Relays {
+						tmpReg.Relays[i].PoolID = tmpPool.ID
+					}
 
 					// Save the registration record
 					result := db.Create(&tmpReg)
@@ -845,7 +935,6 @@ func (d *MetadataStoreSqlite) SetTransaction(
 
 					if tmpAccount.ID == 0 {
 						tmpAccount.AddedSlot = point.Slot
-						tmpAccount.CertificateID = certIDMap[i]
 					}
 					if err := saveAccount(tmpAccount, db); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
@@ -1063,7 +1152,6 @@ func (d *MetadataStoreSqlite) SetTransaction(
 
 					if tmpAccount.ID == 0 {
 						tmpAccount.AddedSlot = point.Slot
-						tmpAccount.CertificateID = certIDMap[i]
 					}
 					if err := saveAccount(tmpAccount, db); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
@@ -1404,5 +1492,59 @@ func (d *MetadataStoreSqlite) storeDatum(
 	if err := d.SetDatum(datumHash, rawDatum, slot, txn); err != nil {
 		return err
 	}
+	return nil
+}
+
+// DeleteTransactionsAfterSlot removes transaction records added after the given slot.
+// Child records are automatically removed via CASCADE constraints.
+// UTXO hash-based foreign keys (spent_at_tx_id, collateral_by_tx_id, referenced_by_tx_id)
+// are NULLed out before deleting transactions to prevent orphaned references.
+func (d *MetadataStoreSqlite) DeleteTransactionsAfterSlot(
+	slot uint64,
+	txn types.Txn,
+) error {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return err
+	}
+
+	// Get transaction hashes that will be deleted
+	var txHashes [][]byte
+	if result := db.Model(&models.Transaction{}).
+		Where("slot > ?", slot).
+		Pluck("hash", &txHashes); result.Error != nil {
+		return fmt.Errorf("query transaction hashes: %w", result.Error)
+	}
+
+	// NULL out UTXO references to transactions being deleted
+	// These fields reference transaction hashes, not IDs, so CASCADE doesn't handle them
+	if len(txHashes) > 0 {
+		// Clear spent_at_tx_id and reset deleted_slot to restore UTXO active state
+		if result := db.Model(&models.Utxo{}).
+			Where("spent_at_tx_id IN ?", txHashes).
+			Updates(map[string]any{
+				"spent_at_tx_id": nil,
+				"deleted_slot":   0,
+			}); result.Error != nil {
+			return fmt.Errorf("clear spent_at_tx_id references: %w", result.Error)
+		}
+
+		if result := db.Model(&models.Utxo{}).
+			Where("collateral_by_tx_id IN ?", txHashes).
+			Update("collateral_by_tx_id", nil); result.Error != nil {
+			return fmt.Errorf("clear collateral_by_tx_id references: %w", result.Error)
+		}
+
+		if result := db.Model(&models.Utxo{}).
+			Where("referenced_by_tx_id IN ?", txHashes).
+			Update("referenced_by_tx_id", nil); result.Error != nil {
+			return fmt.Errorf("clear referenced_by_tx_id references: %w", result.Error)
+		}
+	}
+
+	if result := db.Where("slot > ?", slot).Delete(&models.Transaction{}); result.Error != nil {
+		return result.Error
+	}
+
 	return nil
 }
