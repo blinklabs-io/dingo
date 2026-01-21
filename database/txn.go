@@ -110,8 +110,29 @@ func (t *Txn) Blob() types.Txn {
 }
 
 // Do executes the specified function in the context of the transaction. Any errors returned will result
-// in the transaction being rolled back
+// in the transaction being rolled back. If the function panics, the transaction is rolled back and the
+// panic is re-raised after logging.
 func (t *Txn) Do(fn func(*Txn) error) error {
+	defer func() {
+		if r := recover(); r != nil {
+			// Log the panic before attempting rollback
+			t.db.logger.Error(
+				"panic in transaction function, ensuring rollback",
+				"panic", fmt.Sprintf("%v", r),
+			)
+			// Attempt rollback to ensure transaction is cleaned up
+			if err := t.Rollback(); err != nil {
+				t.db.logger.Error(
+					"rollback failed after panic",
+					"panic", fmt.Sprintf("%v", r),
+					"rollback_error", err,
+				)
+			}
+			// Re-panic to propagate the error up the stack
+			panic(r)
+		}
+	}()
+
 	if err := fn(t); err != nil {
 		if err2 := t.Rollback(); err2 != nil {
 			return fmt.Errorf(
