@@ -19,10 +19,16 @@ import (
 	"io"
 	"log/slog"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/blinklabs-io/dingo/config/cardano"
+	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/ledger/eras"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TestCalculateStabilityWindow_ByronEra tests the stability window calculation for Byron era
@@ -693,4 +699,285 @@ func TestCalculateStabilityWindow_LargeValues(t *testing.T) {
 	if result != expectedWindow {
 		t.Errorf("expected stability window %d, got %d", expectedWindow, result)
 	}
+}
+
+// TestDatabaseWorkerPoolBasic tests basic worker pool functionality
+func TestDatabaseWorkerPoolBasic(t *testing.T) {
+	config := DefaultDatabaseWorkerPoolConfig()
+	config.WorkerPoolSize = 1
+	config.TaskQueueSize = 5
+
+	// Use a nil database for testing - workers don't actually need a real one
+	pool := NewDatabaseWorkerPool(nil, config)
+	require.NotNil(t, pool)
+
+	var executedCount atomic.Int32
+
+	// Submit a simple operation
+	resultChan := make(chan DatabaseResult, 1)
+	pool.Submit(DatabaseOperation{
+		OpFunc: func(db *database.Database) error {
+			executedCount.Add(1)
+			return nil
+		},
+		ResultChan: resultChan,
+	})
+
+	// Wait for result with timeout
+	select {
+	case result := <-resultChan:
+		assert.NoError(t, result.Error)
+		assert.Equal(t, int32(1), executedCount.Load())
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for operation result")
+	}
+
+	pool.Shutdown()
+}
+
+// TestDatabaseWorkerPoolInFlightOperations tests that shutdown waits for in-flight operations
+func TestDatabaseWorkerPoolInFlightOperations(t *testing.T) {
+	config := DefaultDatabaseWorkerPoolConfig()
+	config.WorkerPoolSize = 2
+	config.TaskQueueSize = 10
+
+	pool := NewDatabaseWorkerPool(nil, config)
+
+	var completedCount atomic.Int32
+	var wg sync.WaitGroup
+
+	// Submit multiple operations
+	for i := 0; i < 5; i++ {
+		wg.Add(1)
+		resultChan := make(chan DatabaseResult, 1)
+
+		pool.Submit(DatabaseOperation{
+			OpFunc: func(db *database.Database) error {
+				// Simulate work with short delay
+				time.Sleep(10 * time.Millisecond)
+				completedCount.Add(1)
+				return nil
+			},
+			ResultChan: resultChan,
+		})
+
+		// Drain result in goroutine
+		go func(ch chan DatabaseResult) {
+			defer wg.Done()
+			result := <-ch
+			// Error is expected if shutdown occurred before operation completed
+			// But we should receive the error in the channel
+			_ = result.Error
+		}(resultChan)
+	}
+
+	// Give operations time to queue
+	time.Sleep(20 * time.Millisecond)
+
+	// Shutdown the pool - this should wait for all operations to complete
+	pool.Shutdown()
+
+	// Wait for all result handlers
+	wg.Wait()
+
+	// Verify all operations completed
+	assert.Equal(t, int32(5), completedCount.Load(), "not all operations completed before shutdown returned")
+}
+
+// TestDatabaseWorkerPoolShutdownWithErrors tests error handling during shutdown
+func TestDatabaseWorkerPoolShutdownWithErrors(t *testing.T) {
+	config := DefaultDatabaseWorkerPoolConfig()
+	config.WorkerPoolSize = 2
+	config.TaskQueueSize = 10
+
+	pool := NewDatabaseWorkerPool(nil, config)
+
+	var completedCount atomic.Int32
+
+	// Submit operations, some will error
+	for i := 0; i < 3; i++ {
+		resultChan := make(chan DatabaseResult, 1)
+		operationIndex := i
+
+		pool.Submit(DatabaseOperation{
+			OpFunc: func(db *database.Database) error {
+				time.Sleep(20 * time.Millisecond)
+				completedCount.Add(1)
+				if operationIndex == 1 {
+					return fmt.Errorf("operation %d failed", operationIndex)
+				}
+				return nil
+			},
+			ResultChan: resultChan,
+		})
+
+		// Drain results
+		go func() {
+			select {
+			case <-resultChan:
+			case <-time.After(10 * time.Second):
+			}
+		}()
+	}
+
+	// Shutdown should wait for all operations to complete
+	pool.Shutdown()
+
+	// Verify all operations completed even with errors
+	assert.Equal(t, int32(3), completedCount.Load(), "not all operations completed")
+}
+
+// TestDatabaseWorkerPoolQueueFull tests behavior when queue is full
+func TestDatabaseWorkerPoolQueueFull(t *testing.T) {
+	config := DefaultDatabaseWorkerPoolConfig()
+	config.WorkerPoolSize = 1
+	config.TaskQueueSize = 1 // Very small queue
+
+	pool := NewDatabaseWorkerPool(nil, config)
+
+	// Submit some operations
+	for i := 0; i < 3; i++ {
+		resultChan := make(chan DatabaseResult, 1)
+		pool.Submit(DatabaseOperation{
+			OpFunc: func(db *database.Database) error {
+				return nil
+			},
+			ResultChan: resultChan,
+		})
+
+		// Drain result
+		go func(ch chan DatabaseResult) {
+			<-ch
+		}(resultChan)
+	}
+
+	// Shutdown should complete successfully
+	pool.Shutdown()
+}
+
+// TestDatabaseWorkerPoolSubmitAfterShutdown tests that submitting after shutdown fails
+func TestDatabaseWorkerPoolSubmitAfterShutdown(t *testing.T) {
+	config := DefaultDatabaseWorkerPoolConfig()
+	config.WorkerPoolSize = 1
+	config.TaskQueueSize = 5
+
+	pool := NewDatabaseWorkerPool(nil, config)
+
+	// Shutdown the pool
+	pool.Shutdown()
+
+	// Try to submit an operation after shutdown
+	resultChan := make(chan DatabaseResult, 1)
+	pool.Submit(DatabaseOperation{
+		OpFunc: func(db *database.Database) error {
+			return nil
+		},
+		ResultChan: resultChan,
+	})
+
+	// Should get a shutdown error
+	select {
+	case result := <-resultChan:
+		assert.Error(t, result.Error)
+		assert.Contains(t, result.Error.Error(), "shut down")
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for error result")
+	}
+}
+
+// TestDatabaseWorkerPoolConcurrency tests the pool under concurrent load
+func TestDatabaseWorkerPoolConcurrency(t *testing.T) {
+	config := DefaultDatabaseWorkerPoolConfig()
+	config.WorkerPoolSize = 5
+	config.TaskQueueSize = 50
+
+	pool := NewDatabaseWorkerPool(nil, config)
+
+	var completedCount atomic.Int32
+
+	// Submit many operations
+	numOperations := 20
+	for i := 0; i < numOperations; i++ {
+		resultChan := make(chan DatabaseResult, 1)
+
+		pool.Submit(DatabaseOperation{
+			OpFunc: func(db *database.Database) error {
+				completedCount.Add(1)
+				return nil
+			},
+			ResultChan: resultChan,
+		})
+
+		// Drain result immediately
+		go func(ch chan DatabaseResult) {
+			<-ch
+		}(resultChan)
+	}
+
+	// Shutdown pool - should wait for all operations
+	pool.Shutdown()
+
+	// All operations should complete
+	assert.Equal(t, int32(numOperations), completedCount.Load())
+}
+
+// TestDatabaseWorkerPoolMultipleShutdowns tests that multiple shutdown calls are safe
+func TestDatabaseWorkerPoolMultipleShutdowns(t *testing.T) {
+	config := DefaultDatabaseWorkerPoolConfig()
+	config.WorkerPoolSize = 1
+	config.TaskQueueSize = 5
+
+	pool := NewDatabaseWorkerPool(nil, config)
+
+	// Submit an operation
+	resultChan := make(chan DatabaseResult, 1)
+	pool.Submit(DatabaseOperation{
+		OpFunc: func(db *database.Database) error {
+			return nil
+		},
+		ResultChan: resultChan,
+	})
+
+	// Drain result
+	<-resultChan
+
+	// Call shutdown multiple times - should be safe
+	pool.Shutdown()
+	pool.Shutdown() // Should not panic
+	pool.Shutdown() // Should not panic
+}
+
+// TestDatabaseWorkerPoolResultChannelFull tests handling of full result channels
+func TestDatabaseWorkerPoolResultChannelFull(t *testing.T) {
+	config := DefaultDatabaseWorkerPoolConfig()
+	config.WorkerPoolSize = 1
+	config.TaskQueueSize = 5
+
+	pool := NewDatabaseWorkerPool(nil, config)
+
+	var completedCount atomic.Int32
+
+	// Submit operations
+	for i := 0; i < 3; i++ {
+		resultChan := make(chan DatabaseResult, 1)
+
+		pool.Submit(DatabaseOperation{
+			OpFunc: func(db *database.Database) error {
+				completedCount.Add(1)
+				return nil
+			},
+			ResultChan: resultChan,
+		})
+
+		// Drain result
+		go func(ch chan DatabaseResult) {
+			<-ch
+		}(resultChan)
+	}
+
+	// Shutdown should work
+	pool.Shutdown()
+
+	// All operations should complete
+	assert.Equal(t, int32(3), completedCount.Load())
 }

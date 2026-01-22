@@ -82,6 +82,7 @@ func DefaultDatabaseWorkerPoolConfig() DatabaseWorkerPoolConfig {
 type DatabaseWorkerPool struct {
 	db         *database.Database
 	taskQueue  chan DatabaseOperation
+	drainQueue chan DatabaseOperation // Reference for draining after shutdown
 	shutdownCh chan struct{}
 	wg         sync.WaitGroup
 	closed     bool
@@ -100,9 +101,11 @@ func NewDatabaseWorkerPool(
 		config.TaskQueueSize = 50 // Default queue size
 	}
 
+	taskQ := make(chan DatabaseOperation, config.TaskQueueSize)
 	pool := &DatabaseWorkerPool{
 		db:         db,
-		taskQueue:  make(chan DatabaseOperation, config.TaskQueueSize),
+		taskQueue:  taskQ,
+		drainQueue: taskQ,
 		shutdownCh: make(chan struct{}),
 		closed:     false,
 	}
@@ -123,17 +126,58 @@ func (p *DatabaseWorkerPool) worker() {
 	for {
 		select {
 		case op := <-p.taskQueue:
-			// Execute the database operation
-			result := DatabaseResult{}
-			result.Error = op.OpFunc(p.db)
-			if op.ResultChan != nil {
+			// Execute the database operation with panic protection
+			func() {
+				defer p.wg.Done()
+				result := DatabaseResult{}
+				defer func() {
+					if r := recover(); r != nil {
+						result.Error = fmt.Errorf("panic: %v", r)
+						slog.Error("worker panic during operation", "panic", r)
+					}
+					// Send result whether it's from normal execution or panic
+					if op.ResultChan != nil {
+						select {
+						case op.ResultChan <- result:
+						default:
+							// If result channel is full, skip (fire and forget)
+						}
+					}
+				}()
+				result.Error = op.OpFunc(p.db)
+			}()
+		case <-p.shutdownCh:
+			// Shutdown signal received - process any remaining operations in the queue
+			// This ensures no operations are lost during shutdown
+		drainQueueLoop:
+			for {
 				select {
-				case op.ResultChan <- result:
+				case op := <-p.drainQueue:
+					// Process remaining operation with panic protection
+					func() {
+						defer p.wg.Done()
+						result := DatabaseResult{}
+						defer func() {
+							if r := recover(); r != nil {
+								result.Error = fmt.Errorf("panic: %v", r)
+								slog.Error("worker panic during drain operation", "panic", r)
+							}
+							// Send result whether it's from normal execution or panic
+							if op.ResultChan != nil {
+								select {
+								case op.ResultChan <- result:
+								default:
+									// Result channel is full or closed
+								}
+							}
+						}()
+						result.Error = op.OpFunc(p.db)
+					}()
 				default:
-					// If result channel is full, skip (fire and forget)
+					// Queue is empty, exit
+					break drainQueueLoop
 				}
 			}
-		case <-p.shutdownCh:
 			return
 		}
 	}
@@ -154,12 +198,13 @@ func (p *DatabaseWorkerPool) Submit(op DatabaseOperation) {
 		return
 	}
 
+	p.wg.Add(1)
 	select {
 	case p.taskQueue <- op:
 		// Operation submitted successfully
 	default:
-		// Queue is full, this shouldn't happen in normal operation
-		// but we could add backpressure handling here
+		// Queue is full - undo the Add since operation won't be queued
+		p.wg.Done()
 		if op.ResultChan != nil {
 			select {
 			case op.ResultChan <- DatabaseResult{Error: errors.New("database worker pool queue full")}:
@@ -271,8 +316,11 @@ func (p *DatabaseWorkerPool) Shutdown() {
 		return
 	}
 	p.closed = true
+	// Store a reference to the task queue for use after unlocking.
+	// This avoids a race: we keep p.taskQueue unchanged so workers
+	// can continue reading it without synchronization, while we drain
+	// using a local reference.
 	taskQueue := p.taskQueue
-	p.taskQueue = nil
 	p.mu.Unlock()
 
 	close(p.shutdownCh)
