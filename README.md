@@ -13,7 +13,15 @@
 
 ⚠️ This is a work in progress and is currently under heavy development
 
-**Note:** On Windows systems, named pipes are used instead of Unix sockets for node-to-client communication.
+A high-performance Cardano blockchain node implementation in Go by Blink Labs. Dingo provides:
+- Full chain synchronization and validation via Ouroboros consensus protocol
+- UTxO tracking with 41 UTXO validation rules and Plutus smart contract execution
+- Client connectivity for wallets and applications
+- Pluggable storage backends (Badger, SQLite, PostgreSQL, GCS, S3)
+- Peer governance with dynamic peer selection and topology support
+- Chain rollback support for handling forks with automatic state restoration
+
+Note: On Windows systems, named pipes are used instead of Unix sockets for node-to-client communication.
 
 <div align="center">
   <img src="./.github/dingo-20241210.png" alt="dingo screenshot" width="640">
@@ -77,6 +85,7 @@ Dingo supports pluggable storage backends for both blob storage (blocks, transac
 
 **Metadata Storage Plugins:**
 - `sqlite` - SQLite relational database (default)
+- `postgres` - PostgreSQL relational database
 
 ### Plugin Selection
 
@@ -123,6 +132,13 @@ Each plugin supports specific configuration options. See `dingo.yaml.example` fo
 **SQLite Options:**
 - `data-dir` - Path to SQLite database file
 
+**PostgreSQL Options:**
+- `host` - PostgreSQL server hostname
+- `port` - PostgreSQL server port
+- `username` - Database user
+- `password` - Database password
+- `database` - Database name
+
 ### Listing Available Plugins
 
 You can see all available plugins and their descriptions:
@@ -164,10 +180,12 @@ testing, so success/failure reports are very welcome and encouraged!
       - [x] LocalTxMonitor
       - [x] LocalTxSubmission
       - [x] LocalStateQuery
-    - [ ] Peer governor
+    - [x] Peer governor
       - [x] Topology config
-      - [ ] Peer churn
-      - [ ] Ledger peers
+      - [x] Peer churn (full PeerChurnEvent with gossip/public root churn, bootstrap events)
+      - [x] Ledger peers
+      - [x] Peer sharing
+      - [x] Denied peers tracking
     - [x] Connection manager
       - [x] Inbound connections
         - [x] Node-to-client over TCP
@@ -178,12 +196,14 @@ testing, so success/failure reports are very welcome and encouraged!
 - [ ] Ledger
   - [x] Blocks
     - [x] Block storage
-    - [ ] Chain selection
+    - [x] Chain selection (density comparison, VRF tie-breaker, ChainForkEvent)
   - [x] UTxO tracking
   - [x] Protocol parameters
+  - [x] Genesis validation
   - [ ] Certificates
     - [x] Pool registration
     - [x] Stake registration/delegation
+    - [x] Account registration checks
     - [ ] Governance
   - [ ] Transaction validation
     - [ ] Phase 1 validation
@@ -201,6 +221,14 @@ testing, so success/failure reports are very welcome and encouraged!
   - [x] Validation of transaction on add
   - [x] Consumer tracking
   - [x] Transaction purging on chain update
+- [x] Database Recovery
+  - [x] Chain rollback support (SQLite and PostgreSQL plugins)
+  - [x] State restoration on rollback
+  - [x] WAL mode for crash recovery
+  - [x] Automatic rollback on transaction error
+- [x] Plutus Validation
+  - [x] Plutus V3 smart contract validation
+  - [ ] Plutus V1/V2 smart contract validation
 
 Additional planned features can be found in our issue tracker and project boards.
 
