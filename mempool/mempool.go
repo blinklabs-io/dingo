@@ -383,9 +383,11 @@ func (m *Mempool) removeTransactionByIndex(txIdx int) bool {
 	m.consumersMutex.Lock()
 	for _, consumer := range m.consumers {
 		// Decrement consumer index if the consumer has reached the removed TX
+		consumer.nextTxIdxMu.Lock()
 		if consumer.nextTxIdx > txIdx {
 			consumer.nextTxIdx--
 		}
+		consumer.nextTxIdxMu.Unlock()
 	}
 	m.consumersMutex.Unlock()
 	// Generate event
