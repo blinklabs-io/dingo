@@ -635,12 +635,18 @@ func (ls *LedgerState) blockfetchRequestRangeStart(
 	ls.chainsyncBlockfetchReadyChan = make(chan struct{})
 	ls.chainsyncBlockfetchReadyMutex.Unlock()
 
+	ls.chainsyncBlockfetchBatchDoneMutex.Lock()
 	ls.chainsyncBlockfetchBatchDoneChan = make(chan struct{})
+	ls.chainsyncBlockfetchBatchDoneMutex.Unlock()
+
 	// Start goroutine to handle blockfetch timeout
 	go func() {
 		for {
+			ls.chainsyncBlockfetchBatchDoneMutex.Lock()
+			tmpChainsyncBlockFetchBatchDoneChan := ls.chainsyncBlockfetchBatchDoneChan
+			ls.chainsyncBlockfetchBatchDoneMutex.Unlock()
 			select {
-			case <-ls.chainsyncBlockfetchBatchDoneChan:
+			case <-tmpChainsyncBlockFetchBatchDoneChan:
 				return
 			case <-time.After(500 * time.Millisecond):
 			}
@@ -691,10 +697,14 @@ func (ls *LedgerState) blockfetchRequestRangeCleanup(resetFlags bool) {
 
 func (ls *LedgerState) handleEventBlockfetchBatchDone(e BlockfetchEvent) error {
 	// Cancel our blockfetch timeout watcher
-	if ls.chainsyncBlockfetchBatchDoneChan != nil {
-		close(ls.chainsyncBlockfetchBatchDoneChan)
-		ls.chainsyncBlockfetchBatchDoneChan = nil
-	}
+	func() {
+		ls.chainsyncBlockfetchBatchDoneMutex.Lock()
+		defer ls.chainsyncBlockfetchBatchDoneMutex.Unlock()
+		if ls.chainsyncBlockfetchBatchDoneChan != nil {
+			close(ls.chainsyncBlockfetchBatchDoneChan)
+			ls.chainsyncBlockfetchBatchDoneChan = nil
+		}
+	}()
 	// Process pending block events
 	if err := ls.processBlockEvents(); err != nil {
 		ls.blockfetchRequestRangeCleanup(true)
