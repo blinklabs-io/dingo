@@ -643,13 +643,17 @@ func (ls *LedgerState) blockfetchRequestRangeStart(
 	go func() {
 		for {
 			ls.chainsyncBlockfetchBatchDoneMutex.Lock()
-			tmpChainsyncBlockFetchBatchDoneChan := ls.chainsyncBlockfetchBatchDoneChan
+			tmpChainsyncBlockfetchBatchDoneChan := ls.chainsyncBlockfetchBatchDoneChan
 			ls.chainsyncBlockfetchBatchDoneMutex.Unlock()
-			select {
-			case <-tmpChainsyncBlockFetchBatchDoneChan:
-				return
-			case <-time.After(500 * time.Millisecond):
+
+			if tmpChainsyncBlockfetchBatchDoneChan != nil {
+				select {
+				case <-tmpChainsyncBlockfetchBatchDoneChan:
+					return
+				case <-time.After(500 * time.Millisecond):
+				}
 			}
+
 			// Clear blockfetch busy flag on timeout
 			ls.chainsyncBlockfetchBusyTimeMutex.Lock()
 			busyTime := ls.chainsyncBlockfetchBusyTime
