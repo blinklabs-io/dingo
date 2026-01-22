@@ -237,3 +237,56 @@ func TestConnectionManager_Stop_WithListener(t *testing.T) {
 		t.Fatalf("stop failed: %v", err)
 	}
 }
+
+func TestConnectionManager_Stop_WithConnections(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	cm := connmanager.NewConnectionManager(
+		connmanager.ConnectionManagerConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	)
+
+	// Add multiple connections to spawn error watcher goroutines
+	var connIds []ouroboros.ConnectionId
+	for range 3 {
+		mockConn := ouroboros_mock.NewConnection(
+			ouroboros_mock.ProtocolRoleClient,
+			ouroboros_mock.ConversationKeepAlive,
+		)
+		oConn, err := ouroboros.New(
+			ouroboros.WithConnection(mockConn),
+			ouroboros.WithNetworkMagic(ouroboros_mock.MockNetworkMagic),
+			ouroboros.WithNodeToNode(true),
+			ouroboros.WithKeepAlive(true),
+			ouroboros.WithKeepAliveConfig(
+				keepalive.NewConfig(
+					keepalive.WithCookie(ouroboros_mock.MockKeepAliveCookie),
+					keepalive.WithPeriod(10*time.Second),
+					keepalive.WithTimeout(5*time.Second),
+				),
+			),
+		)
+		if err != nil {
+			t.Fatalf("failed to create connection: %v", err)
+		}
+		cm.AddConnection(oConn, false, "127.0.0.1:1234")
+		connIds = append(connIds, oConn.Id())
+	}
+
+	// Verify connections were added
+	for _, connId := range connIds {
+		if cm.GetConnectionById(connId) == nil {
+			t.Fatalf("connection %d not found after adding", connId)
+		}
+	}
+
+	// Stop should close all connections and wait for goroutines
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := cm.Stop(ctx); err != nil {
+		t.Fatalf("Stop() returned error: %v", err)
+	}
+
+	// goleak.VerifyNone will catch any leaked goroutines
+}

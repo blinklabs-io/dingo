@@ -105,7 +105,9 @@ func (c *ConnectionManager) startListener(
 		defaultConnOpts,
 		l.ConnectionOpts...,
 	)
+	c.goroutineWg.Add(1)
 	go func() {
+		defer c.goroutineWg.Done()
 		for {
 			// Accept connection
 			conn, err := l.Listener.Accept()
