@@ -56,6 +56,7 @@ type ConnectionManager struct {
 	connectionsMutex sync.Mutex
 	listenersMutex   sync.Mutex
 	closing          bool
+	goroutineWg      sync.WaitGroup // tracks spawned goroutines for clean shutdown
 }
 
 type ConnectionManagerConfig struct {
@@ -227,10 +228,11 @@ func (c *ConnectionManager) Stop(ctx context.Context) error {
 	c.closing = true
 	c.listenersMutex.Unlock()
 
-	// Stop accepting new connections
+	// Stop accepting new connections (this causes listener goroutines to exit)
 	c.stopListeners()
 
 	// Close all existing connections gracefully
+	// This triggers error watchers to receive from ErrorChan and exit
 	c.connectionsMutex.Lock()
 	conns := make([]*ouroboros.Connection, 0, len(c.connections))
 	for _, info := range c.connections {
@@ -239,7 +241,7 @@ func (c *ConnectionManager) Stop(ctx context.Context) error {
 	c.connectionsMutex.Unlock()
 
 	// Close connections with timeout awareness
-	done := make(chan error, 1)
+	closeDone := make(chan error, 1)
 	go func() {
 		var closeErr error
 		for _, conn := range conns {
@@ -249,11 +251,11 @@ func (c *ConnectionManager) Stop(ctx context.Context) error {
 				}
 			}
 		}
-		done <- closeErr
+		closeDone <- closeErr
 	}()
 
 	select {
-	case closeErr := <-done:
+	case closeErr := <-closeDone:
 		if closeErr != nil {
 			err = errors.Join(err, closeErr)
 		}
@@ -261,6 +263,26 @@ func (c *ConnectionManager) Stop(ctx context.Context) error {
 	case <-ctx.Done():
 		c.config.Logger.Warn(
 			"shutdown timeout exceeded, some connections may not have closed cleanly",
+		)
+		err = errors.Join(err, ctx.Err())
+		// Return early - don't wait for goroutines if we've already timed out
+		c.config.Logger.Debug("connection manager stopped with timeout")
+		return err
+	}
+
+	// Wait for all goroutines (listeners and error watchers) to exit
+	goroutineDone := make(chan struct{})
+	go func() {
+		c.goroutineWg.Wait()
+		close(goroutineDone)
+	}()
+
+	select {
+	case <-goroutineDone:
+		c.config.Logger.Debug("all goroutines stopped cleanly")
+	case <-ctx.Done():
+		c.config.Logger.Warn(
+			"shutdown timeout while waiting for goroutines",
 		)
 		err = errors.Join(err, ctx.Err())
 	}
@@ -295,6 +317,20 @@ func (c *ConnectionManager) AddConnection(
 	isInbound bool,
 	peerAddr string,
 ) {
+	// Check if shutting down before adding to WaitGroup to prevent panic
+	// during Stop()'s Wait() call. Must hold the same lock used to set closing.
+	c.listenersMutex.Lock()
+	if c.closing {
+		c.listenersMutex.Unlock()
+		// Shutting down - close connection and return
+		if conn != nil {
+			conn.Close()
+		}
+		return
+	}
+	c.goroutineWg.Add(1)
+	c.listenersMutex.Unlock()
+
 	connId := conn.Id()
 	c.connectionsMutex.Lock()
 	c.connections[connId] = &connectionInfo{
@@ -305,6 +341,7 @@ func (c *ConnectionManager) AddConnection(
 	c.connectionsMutex.Unlock()
 	c.updateConnectionMetrics()
 	go func() {
+		defer c.goroutineWg.Done()
 		err := <-conn.ErrorChan()
 		// Remove connection
 		c.RemoveConnection(connId)
