@@ -25,6 +25,7 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/ledger/eras"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/byron"
@@ -386,13 +387,15 @@ func (ls *LedgerState) createGenesisBlock() error {
 func (ls *LedgerState) calculateEpochNonce(
 	txn *database.Txn,
 	epochStartSlot uint64,
+	currentEra eras.EraDesc,
+	currentEpoch models.Epoch,
 ) ([]byte, error) {
 	// No epoch nonce in Byron
-	if ls.currentEra.Id == 0 {
+	if currentEra.Id == 0 {
 		return nil, nil
 	}
 	// Use Shelley genesis hash for initial epoch nonce
-	if len(ls.currentEpoch.Nonce) == 0 {
+	if len(currentEpoch.Nonce) == 0 {
 		if ls.config.CardanoNodeConfig.ShelleyGenesisHash == "" {
 			return nil, errors.New("could not get Shelley genesis hash")
 		}
@@ -404,8 +407,8 @@ func (ls *LedgerState) calculateEpochNonce(
 		}
 		return genesisHashBytes, nil
 	}
-	// Calculate stability window
-	stabilityWindow := ls.calculateStabilityWindow()
+	// Calculate stability window using the snapshot era
+	stabilityWindow := ls.calculateStabilityWindowForEra(currentEra.Id)
 	var stabilityWindowStartSlot uint64
 	if epochStartSlot > stabilityWindow {
 		stabilityWindowStartSlot = epochStartSlot - stabilityWindow
@@ -430,10 +433,10 @@ func (ls *LedgerState) calculateEpochNonce(
 	if err != nil {
 		return nil, fmt.Errorf("lookup block nonce: %w", err)
 	}
-	// Get last block in previous epoch
+	// Get last block in previous epoch using the snapshot epoch
 	blockLastPrevEpoch, err := database.BlockBeforeSlotTxn(
 		txn,
-		ls.currentEpoch.StartSlot,
+		currentEpoch.StartSlot,
 	)
 	if err != nil {
 		if errors.Is(err, models.ErrBlockNotFound) {
@@ -450,120 +453,149 @@ func (ls *LedgerState) calculateEpochNonce(
 	return ret.Bytes(), err
 }
 
+// processEpochRollover processes an epoch rollover and returns the result without
+// mutating LedgerState. This allows callers to capture the computed state in a
+// transaction and apply it to in-memory state after the transaction commits.
+// Parameters:
+//   - txn: database transaction
+//   - currentEpoch: current epoch (read-only input)
+//   - currentEra: current era descriptor (read-only input)
+//   - currentPParams: current protocol parameters (read-only input)
+//
+// Returns EpochRolloverResult with all computed state, or an error.
+// The caller is responsible for:
+//   - Applying the result to in-memory state after successful commit
+//   - Starting background cleanup goroutines
+//   - Calling Scheduler.ChangeInterval if SchedulerIntervalMs > 0
 func (ls *LedgerState) processEpochRollover(
 	txn *database.Txn,
-) error {
-	epochStartSlot := ls.currentEpoch.StartSlot + uint64(
-		ls.currentEpoch.LengthInSlots,
+	currentEpoch models.Epoch,
+	currentEra eras.EraDesc,
+	currentPParams lcommon.ProtocolParameters,
+) (*EpochRolloverResult, error) {
+	epochStartSlot := currentEpoch.StartSlot + uint64(
+		currentEpoch.LengthInSlots,
 	)
+	result := &EpochRolloverResult{
+		CheckpointWrittenForEpoch: false,
+		NewCurrentEra:             currentEra,
+		NewCurrentPParams:         currentPParams,
+	}
+
 	// Create initial epoch
-	if ls.currentEpoch.SlotLength == 0 {
+	if currentEpoch.SlotLength == 0 {
 		// Create initial epoch record
-		epochSlotLength, epochLength, err := ls.currentEra.EpochLengthFunc(
+		epochSlotLength, epochLength, err := currentEra.EpochLengthFunc(
 			ls.config.CardanoNodeConfig,
 		)
 		if err != nil {
-			return fmt.Errorf("calculate epoch length: %w", err)
+			return nil, fmt.Errorf("calculate epoch length: %w", err)
 		}
-		tmpNonce, err := ls.calculateEpochNonce(txn, 0)
+		tmpNonce, err := ls.calculateEpochNonce(txn, 0, currentEra, currentEpoch)
 		if err != nil {
-			return fmt.Errorf("calculate epoch nonce: %w", err)
+			return nil, fmt.Errorf("calculate epoch nonce: %w", err)
 		}
 		err = ls.db.SetEpoch(
 			epochStartSlot,
 			0, // epoch
 			tmpNonce,
-			ls.currentEra.Id,
+			currentEra.Id,
 			epochSlotLength,
 			epochLength,
 			txn,
 		)
 		if err != nil {
-			return fmt.Errorf("set epoch: %w", err)
+			return nil, fmt.Errorf("set epoch: %w", err)
 		}
-		// Reload epoch info
-		if err := ls.loadEpochs(txn); err != nil {
-			return fmt.Errorf("load epochs: %w", err)
+		// Load epoch info from DB to populate result
+		epochs, err := ls.db.GetEpochs(txn)
+		if err != nil {
+			return nil, fmt.Errorf("load epochs: %w", err)
 		}
-		ls.checkpointWrittenForEpoch = false
+		result.NewEpochCache = epochs
+		if len(epochs) > 0 {
+			result.NewCurrentEpoch = epochs[len(epochs)-1]
+			eraDesc := eras.GetEraById(result.NewCurrentEpoch.EraId)
+			if eraDesc == nil {
+				return nil, fmt.Errorf(
+					"unknown era ID %d",
+					result.NewCurrentEpoch.EraId,
+				)
+			}
+			result.NewCurrentEra = *eraDesc
+			result.NewEpochNum = float64(result.NewCurrentEpoch.EpochId)
+		}
 		ls.config.Logger.Debug(
 			"added initial epoch to DB",
-			"epoch", fmt.Sprintf("%+v", ls.currentEpoch),
+			"epoch", fmt.Sprintf("%+v", result.NewCurrentEpoch),
 			"component", "ledger",
 		)
-		return nil
+		return result, nil
 	}
-	// Apply pending pparam updates
-	err := ls.db.ApplyPParamUpdates(
+	// Apply pending pparam updates using the non-mutating version
+	newPParams, err := ls.db.ComputeAndApplyPParamUpdates(
 		epochStartSlot,
-		ls.currentEpoch.EpochId,
-		ls.currentEra.Id,
-		&ls.currentPParams,
-		ls.currentEra.DecodePParamsUpdateFunc,
-		ls.currentEra.PParamsUpdateFunc,
+		currentEpoch.EpochId,
+		currentEra.Id,
+		currentPParams,
+		currentEra.DecodePParamsUpdateFunc,
+		currentEra.PParamsUpdateFunc,
 		txn,
 	)
 	if err != nil {
-		return fmt.Errorf("apply pparam updates: %w", err)
+		return nil, fmt.Errorf("apply pparam updates: %w", err)
 	}
+	result.NewCurrentPParams = newPParams
+
 	// Create next epoch record
-	epochSlotLength, epochLength, err := ls.currentEra.EpochLengthFunc(
+	epochSlotLength, epochLength, err := currentEra.EpochLengthFunc(
 		ls.config.CardanoNodeConfig,
 	)
 	if err != nil {
-		return fmt.Errorf("calculate epoch length: %w", err)
+		return nil, fmt.Errorf("calculate epoch length: %w", err)
 	}
-	tmpNonce, err := ls.calculateEpochNonce(txn, epochStartSlot)
+	tmpNonce, err := ls.calculateEpochNonce(txn, epochStartSlot, currentEra, currentEpoch)
 	if err != nil {
-		return fmt.Errorf("calculate epoch nonce: %w", err)
+		return nil, fmt.Errorf("calculate epoch nonce: %w", err)
 	}
 	err = ls.db.SetEpoch(
 		epochStartSlot,
-		ls.currentEpoch.EpochId+1,
+		currentEpoch.EpochId+1,
 		tmpNonce,
-		ls.currentEra.Id,
+		currentEra.Id,
 		epochSlotLength,
 		epochLength,
 		txn,
 	)
 	if err != nil {
-		return fmt.Errorf("set epoch: %w", err)
+		return nil, fmt.Errorf("set epoch: %w", err)
 	}
-	// Reload epoch info
-	if err := ls.loadEpochs(txn); err != nil {
-		return fmt.Errorf("load epochs: %w", err)
+	// Load epoch info from DB to populate result
+	epochs, err := ls.db.GetEpochs(txn)
+	if err != nil {
+		return nil, fmt.Errorf("load epochs: %w", err)
 	}
-	ls.checkpointWrittenForEpoch = false
-	// Update the scheduler interval based on the new epoch's slot length
-	if ls.Scheduler != nil {
-		// nolint:gosec
-		// The slot length will not exceed int64
-		interval := time.Duration(ls.currentEpoch.SlotLength) * time.Millisecond
-		ls.Scheduler.ChangeInterval(interval)
+	result.NewEpochCache = epochs
+	if len(epochs) > 0 {
+		result.NewCurrentEpoch = epochs[len(epochs)-1]
+		eraDesc := eras.GetEraById(result.NewCurrentEpoch.EraId)
+		if eraDesc == nil {
+			return nil, fmt.Errorf(
+				"unknown era ID %d",
+				result.NewCurrentEpoch.EraId,
+			)
+		}
+		result.NewCurrentEra = *eraDesc
+		result.NewEpochNum = float64(result.NewCurrentEpoch.EpochId)
+		result.SchedulerIntervalMs = result.NewCurrentEpoch.SlotLength
 	}
+
 	ls.config.Logger.Debug(
 		"added next epoch to DB",
-		"epoch", fmt.Sprintf("%+v", ls.currentEpoch),
+		"epoch", fmt.Sprintf("%+v", result.NewCurrentEpoch),
 		"component", "ledger",
 	)
-	// Start background cleanup of consumed UTxOs
-	go ls.cleanupConsumedUtxos()
-
-	// Clean up old block nonces and keep only last 3 epochs along with checkpoints
-	var cutoffStart uint64
-	if ls.currentEpoch.EpochId >= 4 {
-		target := ls.currentEpoch.EpochId - 3
-		for _, ep := range ls.epochCache {
-			if ep.EpochId == target {
-				cutoffStart = ep.StartSlot
-				break
-			}
-		}
-	}
-	if cutoffStart > 0 {
-		go ls.cleanupBlockNoncesBefore(cutoffStart)
-	}
-	return nil
+	return result, nil
 }
 
 func (ls *LedgerState) cleanupBlockNoncesBefore(startSlot uint64) {
