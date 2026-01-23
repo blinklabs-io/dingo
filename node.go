@@ -97,6 +97,9 @@ func (n *Node) Run(ctx context.Context) error {
 		}
 	}()
 
+	// Register eventBus cleanup (created in New(), has background goroutines)
+	started = append(started, func() { n.eventBus.Stop() })
+
 	// Load database
 	dbNeedsRecovery := false
 	dbConfig := &database.Config{
@@ -204,6 +207,11 @@ func (n *Node) Run(ctx context.Context) error {
 		Validator:       n.ledgerState,
 	},
 	)
+	started = append(started, func() { //nolint:contextcheck
+		if err := n.mempool.Stop(context.Background()); err != nil {
+			n.config.logger.Error("failed to stop mempool during cleanup", "error", err)
+		}
+	})
 	// Set mempool in ledger state for block forging
 	n.ledgerState.SetMempool(n.mempool)
 	n.ouroboros.Mempool = n.mempool
