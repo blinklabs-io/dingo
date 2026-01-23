@@ -16,12 +16,14 @@ package ledger
 
 import (
 	"context"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"math/big"
+	"strings"
 	"sync"
 	"time"
 
@@ -29,6 +31,7 @@ import (
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/mempool"
@@ -528,7 +531,168 @@ func (ls *LedgerState) RecoverCommitTimestampConflict() error {
 			)
 		}
 	}
+	// Get the current tip after potential rollback for orphan cleanup.
+	// This ensures we use the post-rollback tip, not the stale tmpTip.
+	currentTip, err := ls.db.GetTip(nil)
+	if err != nil {
+		return fmt.Errorf("failed to get current tip for orphan cleanup: %w", err)
+	}
+	// Clean up orphaned blobs that may exist beyond the metadata tip.
+	// This handles the case where blob committed but metadata failed.
+	if cleanupErr := ls.cleanupOrphanedBlobs(currentTip.Point.Slot); cleanupErr != nil {
+		// Log but don't fail - partial cleanup is acceptable
+		ls.config.Logger.Warn(
+			"failed to clean up orphaned blobs",
+			"error", cleanupErr,
+		)
+	}
 	return nil
+}
+
+// orphanedBlock holds information needed to delete an orphaned block from blob store.
+type orphanedBlock struct {
+	slot uint64
+	hash []byte
+	id   uint64
+}
+
+// cleanupOrphanedBlobs removes blob blocks beyond the metadata tip.
+// Called during recovery when commit timestamp mismatch is detected.
+// This handles the case where blob committed successfully but metadata failed,
+// leaving orphaned blocks in the blob store.
+func (ls *LedgerState) cleanupOrphanedBlobs(tipSlot uint64) error {
+	blobStore := ls.db.Blob()
+	if blobStore == nil {
+		return nil // No blob store configured
+	}
+
+	ls.config.Logger.Info(
+		"starting orphaned blob cleanup",
+		"tip_slot", tipSlot,
+	)
+
+	// Phase 1: Scan for orphaned blocks (read-only transaction)
+	orphans, err := ls.scanOrphanedBlobs(blobStore, tipSlot)
+	if err != nil {
+		return err
+	}
+
+	if len(orphans) == 0 {
+		ls.config.Logger.Info("no orphaned blobs found")
+		return nil
+	}
+
+	// Phase 2: Delete orphaned blocks (read-write transaction)
+	writeTxn := blobStore.NewTransaction(true)
+	defer writeTxn.Rollback() //nolint:errcheck
+	deleted := 0
+
+	for _, orphan := range orphans {
+		if err := blobStore.DeleteBlock(writeTxn, orphan.slot, orphan.hash, orphan.id); err != nil {
+			ls.config.Logger.Warn(
+				"failed to delete orphaned block",
+				"slot", orphan.slot,
+				"hash", hex.EncodeToString(orphan.hash),
+				"error", err,
+			)
+			continue
+		}
+		deleted++
+	}
+
+	if err := writeTxn.Commit(); err != nil {
+		return fmt.Errorf("failed to commit orphan cleanup: %w", err)
+	}
+
+	ls.config.Logger.Info(
+		"orphaned blob cleanup complete",
+		"scanned", len(orphans),
+		"deleted", deleted,
+	)
+	return nil
+}
+
+// scanOrphanedBlobs scans the blob store for blocks beyond the given tip slot.
+// Returns a slice of orphaned blocks that should be deleted.
+func (ls *LedgerState) scanOrphanedBlobs(
+	blobStore interface {
+		NewTransaction(readWrite bool) types.Txn
+		NewIterator(txn types.Txn, opts types.BlobIteratorOptions) types.BlobIterator
+		GetBlock(txn types.Txn, slot uint64, hash []byte) ([]byte, types.BlockMetadata, error)
+	},
+	tipSlot uint64,
+) ([]orphanedBlock, error) {
+	var orphans []orphanedBlock
+
+	readTxn := blobStore.NewTransaction(false)
+	defer readTxn.Rollback() //nolint:errcheck
+
+	iterOpts := types.BlobIteratorOptions{
+		Prefix: []byte(types.BlockBlobKeyPrefix),
+	}
+	it := blobStore.NewIterator(readTxn, iterOpts)
+	if it == nil {
+		return nil, errors.New("failed to create blob iterator")
+	}
+	defer it.Close()
+
+	// Build seek key for slot > tipSlot (tipSlot + 1)
+	seekSlot := tipSlot + 1
+	seekKey := make([]byte, 0, 10) // "bp" + 8 bytes for slot
+	seekKey = append(seekKey, []byte(types.BlockBlobKeyPrefix)...)
+	slotBytes := make([]byte, 8)
+	binary.BigEndian.PutUint64(slotBytes, seekSlot)
+	seekKey = append(seekKey, slotBytes...)
+
+	for it.Seek(seekKey); it.ValidForPrefix([]byte(types.BlockBlobKeyPrefix)); it.Next() {
+		item := it.Item()
+		if item == nil {
+			continue
+		}
+		key := item.Key()
+		if key == nil {
+			continue
+		}
+		// Skip metadata keys (suffix "_metadata")
+		if strings.HasSuffix(string(key), types.BlockBlobMetadataKeySuffix) {
+			continue
+		}
+		// Parse slot from key: prefix (2 bytes) + slot (8 bytes) + hash (32 bytes)
+		if len(key) < 10 {
+			continue
+		}
+		blockSlot := binary.BigEndian.Uint64(key[2:10])
+		// Double-check slot is beyond tip (should be guaranteed by seek)
+		if blockSlot <= tipSlot {
+			continue
+		}
+		// Extract hash (remaining bytes after prefix + slot)
+		blockHash := make([]byte, len(key)-10)
+		copy(blockHash, key[10:])
+
+		// Get block metadata to retrieve the block ID
+		_, metadata, err := blobStore.GetBlock(readTxn, blockSlot, blockHash)
+		if err != nil {
+			ls.config.Logger.Warn(
+				"failed to get orphaned block metadata",
+				"slot", blockSlot,
+				"error", err,
+			)
+			continue
+		}
+
+		orphans = append(orphans, orphanedBlock{
+			slot: blockSlot,
+			hash: blockHash,
+			id:   metadata.ID,
+		})
+	}
+
+	if err := it.Err(); err != nil {
+		return nil, fmt.Errorf("iterator error during orphan scan: %w", err)
+	}
+
+	return orphans, nil
 }
 
 func (ls *LedgerState) Chain() *chain.Chain {

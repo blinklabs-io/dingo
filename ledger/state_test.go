@@ -15,6 +15,8 @@
 package ledger
 
 import (
+	"crypto/sha256"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"log/slog"
@@ -26,7 +28,9 @@ import (
 
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/ledger/eras"
+	pcommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -980,4 +984,164 @@ func TestDatabaseWorkerPoolResultChannelFull(t *testing.T) {
 
 	// All operations should complete
 	assert.Equal(t, int32(3), completedCount.Load())
+}
+
+// makeTestBlock creates a test block with deterministic hash based on slot
+func makeTestBlock(slot, id uint64) models.Block {
+	// Create deterministic hash from slot
+	slotBytes := make([]byte, 8)
+	binary.BigEndian.PutUint64(slotBytes, slot)
+	hash := sha256.Sum256(slotBytes)
+	return models.Block{
+		ID:       id,
+		Slot:     slot,
+		Hash:     hash[:],
+		Number:   id,
+		Type:     1, // Shelley era type
+		PrevHash: nil,
+		Cbor:     []byte{0x80}, // minimal CBOR (empty array)
+	}
+}
+
+// makeTestPoint creates a Point from a test block
+func makeTestPoint(block models.Block) pcommon.Point {
+	return pcommon.NewPoint(block.Slot, block.Hash)
+}
+
+// TestCleanupOrphanedBlobs_NoBlobStore tests that cleanup gracefully handles nil blob store
+func TestCleanupOrphanedBlobs_NoBlobStore(t *testing.T) {
+	ls := &LedgerState{
+		db: nil, // No database
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+
+	// Create a mock database that returns nil blob store
+	mockDB, err := database.New(&database.Config{
+		BlobPlugin:     "",
+		MetadataPlugin: "sqlite",
+		DataDir:        "",
+	})
+	require.NoError(t, err)
+	defer mockDB.Close()
+
+	ls.db = mockDB
+
+	// Cleanup should return nil when there's no blob store
+	err = ls.cleanupOrphanedBlobs(100)
+	assert.NoError(t, err)
+}
+
+// TestCleanupOrphanedBlobs_NoOrphans tests cleanup when there are no orphaned blocks
+func TestCleanupOrphanedBlobs_NoOrphans(t *testing.T) {
+	// Create an in-memory database
+	db, err := database.New(&database.Config{
+		BlobPlugin:     "badger",
+		MetadataPlugin: "sqlite",
+		DataDir:        "",
+	})
+	require.NoError(t, err)
+	defer db.Close()
+
+	ls := &LedgerState{
+		db: db,
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+
+	// Store a few blocks at slots 1, 2, 3
+	for slot := uint64(1); slot <= 3; slot++ {
+		block := makeTestBlock(slot, slot)
+		err = db.BlockCreate(block, nil)
+		require.NoError(t, err)
+	}
+
+	// Cleanup with tip at slot 3 - no orphans expected
+	err = ls.cleanupOrphanedBlobs(3)
+	assert.NoError(t, err)
+
+	// Verify all blocks still exist
+	for slot := uint64(1); slot <= 3; slot++ {
+		block := makeTestBlock(slot, slot)
+		_, err := database.BlockByPoint(db, makeTestPoint(block))
+		assert.NoError(t, err, "block at slot %d should still exist", slot)
+	}
+}
+
+// TestCleanupOrphanedBlobs_WithOrphans tests cleanup when orphaned blocks exist
+func TestCleanupOrphanedBlobs_WithOrphans(t *testing.T) {
+	// Create an in-memory database
+	db, err := database.New(&database.Config{
+		BlobPlugin:     "badger",
+		MetadataPlugin: "sqlite",
+		DataDir:        "",
+	})
+	require.NoError(t, err)
+	defer db.Close()
+
+	ls := &LedgerState{
+		db: db,
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+
+	// Store blocks at slots 1-5
+	for slot := uint64(1); slot <= 5; slot++ {
+		block := makeTestBlock(slot, slot)
+		err = db.BlockCreate(block, nil)
+		require.NoError(t, err)
+	}
+
+	// Cleanup with tip at slot 3 - blocks at slots 4 and 5 should be orphans
+	err = ls.cleanupOrphanedBlobs(3)
+	assert.NoError(t, err)
+
+	// Verify blocks at slots 1-3 still exist
+	for slot := uint64(1); slot <= 3; slot++ {
+		block := makeTestBlock(slot, slot)
+		_, err := database.BlockByPoint(db, makeTestPoint(block))
+		assert.NoError(t, err, "block at slot %d should still exist", slot)
+	}
+
+	// Verify blocks at slots 4-5 were deleted
+	for slot := uint64(4); slot <= 5; slot++ {
+		block := makeTestBlock(slot, slot)
+		_, err := database.BlockByPoint(db, makeTestPoint(block))
+		assert.Error(t, err, "block at slot %d should be deleted", slot)
+	}
+}
+
+// TestCleanupOrphanedBlobs_SlotZero tests cleanup behavior when tip is at slot 0
+func TestCleanupOrphanedBlobs_SlotZero(t *testing.T) {
+	// Create an in-memory database
+	db, err := database.New(&database.Config{
+		BlobPlugin:     "badger",
+		MetadataPlugin: "sqlite",
+		DataDir:        "",
+	})
+	require.NoError(t, err)
+	defer db.Close()
+
+	ls := &LedgerState{
+		db: db,
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+
+	// Store a block at slot 1 (would be orphan if tip is 0)
+	block := makeTestBlock(1, 1)
+	err = db.BlockCreate(block, nil)
+	require.NoError(t, err)
+
+	// Cleanup with tip at slot 0 - block at slot 1 should be deleted
+	err = ls.cleanupOrphanedBlobs(0)
+	assert.NoError(t, err)
+
+	// Verify block at slot 1 was deleted
+	_, err = database.BlockByPoint(db, makeTestPoint(block))
+	assert.Error(t, err, "block at slot 1 should be deleted")
 }
