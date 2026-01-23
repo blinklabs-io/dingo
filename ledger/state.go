@@ -644,13 +644,14 @@ func (ls *LedgerState) cleanupConsumedUtxos() {
 	)
 	if tipSlot > cleanupConsumedUtxosSlotWindow {
 		for {
-			ls.Lock()
+			// No lock needed here - the database handles its own consistency
+			// and we're not accessing any in-memory LedgerState fields.
+			// The tipSlot was captured above with a read lock.
 			count, err := ls.db.UtxosDeleteConsumed(
 				tipSlot-cleanupConsumedUtxosSlotWindow,
 				10000,
 				nil,
 			)
-			ls.Unlock()
 			if count == 0 {
 				break
 			}
