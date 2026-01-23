@@ -26,11 +26,12 @@ import (
 )
 
 func (c *ConnectionManager) CreateOutboundConn(
+	ctx context.Context,
 	address string,
 ) (*ouroboros.Connection, error) {
 	t := otel.Tracer("")
 	if t != nil {
-		_, span := t.Start(context.TODO(), "create outbound connection")
+		_, span := t.Start(ctx, "create outbound connection")
 		defer span.End()
 		span.SetAttributes(
 			attribute.String("peer.address", address),
@@ -55,7 +56,7 @@ func (c *ConnectionManager) CreateOutboundConn(
 		"establishing TCP connection to: "+address,
 		"role", "client",
 	)
-	tmpConn, err := dialer.Dial("tcp", address)
+	tmpConn, err := dialer.DialContext(ctx, "tcp", address)
 	if err != nil {
 		return nil, err
 	}
