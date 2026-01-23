@@ -71,13 +71,15 @@ type Mempool struct {
 		txsInMempool    prometheus.Gauge
 		mempoolBytes    prometheus.Gauge
 	}
-	validator    TxValidator
-	logger       *slog.Logger
-	eventBus     *event.EventBus
-	consumers    map[ouroboros.ConnectionId]*MempoolConsumer
-	done         chan struct{}
-	config       MempoolConfig
-	transactions []*MempoolTransaction
+	validator        TxValidator
+	logger           *slog.Logger
+	eventBus         *event.EventBus
+	consumers        map[ouroboros.ConnectionId]*MempoolConsumer
+	done             chan struct{}
+	config           MempoolConfig
+	transactions     []*MempoolTransaction
+	txByHash         map[string]*MempoolTransaction // O(1) lookup by hash
+	currentSizeBytes int64                          // Cached total size of all transactions in bytes
 	sync.RWMutex
 	doneOnce       sync.Once
 	consumersMutex sync.Mutex
@@ -102,6 +104,7 @@ func NewMempool(config MempoolConfig) *Mempool {
 	m := &Mempool{
 		eventBus:  config.EventBus,
 		consumers: make(map[ouroboros.ConnectionId]*MempoolConsumer),
+		txByHash:  make(map[string]*MempoolTransaction),
 		validator: config.Validator,
 		config:    config,
 		done:      make(chan struct{}),
@@ -169,6 +172,8 @@ func (m *Mempool) Stop(ctx context.Context) error {
 	// Clear transactions
 	m.Lock()
 	m.transactions = []*MempoolTransaction{}
+	m.txByHash = make(map[string]*MempoolTransaction)
+	m.currentSizeBytes = 0
 	// Reset metrics
 	m.metrics.txsInMempool.Set(0)
 	m.metrics.mempoolBytes.Set(0)
@@ -279,19 +284,18 @@ func (m *Mempool) AddTransaction(txType uint, txBytes []byte) error {
 		return nil
 	}
 	// Enforce mempool capacity
-	currentSize := 0
-	for _, existing := range m.transactions {
-		currentSize += len(existing.Cbor)
-	}
-	if currentSize+len(tx.Cbor) > int(m.config.MempoolCapacity) {
+	txSize := int64(len(tx.Cbor))
+	if m.currentSizeBytes+txSize > m.config.MempoolCapacity {
 		return &MempoolFullError{
-			CurrentSize: currentSize,
-			TxSize:      len(tx.Cbor),
+			CurrentSize: int(m.currentSizeBytes),
+			TxSize:      int(txSize),
 			Capacity:    m.config.MempoolCapacity,
 		}
 	}
 	// Add transaction record
 	m.transactions = append(m.transactions, &tx)
+	m.txByHash[tx.Hash] = &tx
+	m.currentSizeBytes += txSize
 	m.logger.Debug(
 		"added transaction",
 		"component", "mempool",
@@ -338,12 +342,7 @@ func (m *Mempool) Transactions() []MempoolTransaction {
 }
 
 func (m *Mempool) getTransaction(txHash string) *MempoolTransaction {
-	for _, tx := range m.transactions {
-		if tx.Hash == txHash {
-			return tx
-		}
-	}
-	return nil
+	return m.txByHash[txHash]
 }
 
 func (m *Mempool) RemoveTransaction(txHash string) {
@@ -372,13 +371,16 @@ func (m *Mempool) removeTransactionByIndex(txIdx int) bool {
 		return false
 	}
 	tx := m.transactions[txIdx]
+	txSize := int64(len(tx.Cbor))
 	m.transactions = slices.Delete(
 		m.transactions,
 		txIdx,
 		txIdx+1,
 	)
+	delete(m.txByHash, tx.Hash)
+	m.currentSizeBytes -= txSize
 	m.metrics.txsInMempool.Dec()
-	m.metrics.mempoolBytes.Sub(float64(len(tx.Cbor)))
+	m.metrics.mempoolBytes.Sub(float64(txSize))
 	// Update consumer indexes to reflect removed TX
 	m.consumersMutex.Lock()
 	for _, consumer := range m.consumers {
