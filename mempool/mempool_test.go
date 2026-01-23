@@ -139,6 +139,7 @@ func addMockTransactions(
 		}
 		txs[i] = tx
 		m.transactions = append(m.transactions, tx)
+		m.txByHash[tx.Hash] = tx
 		m.metrics.txsInMempool.Inc()
 		m.metrics.mempoolBytes.Add(float64(len(tx.Cbor)))
 	}
