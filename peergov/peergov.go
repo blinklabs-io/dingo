@@ -85,6 +85,7 @@ type PeerGovernor struct {
 	gossipChurnTicker     *time.Ticker
 	publicRootChurnTicker *time.Ticker
 	stopCh                chan struct{}
+	ctx                   context.Context      // Context for cancellation
 	denyList              map[string]time.Time // address -> expiry time
 	peers                 []*Peer
 	config                PeerGovernorConfig
@@ -282,6 +283,7 @@ func (p *PeerGovernor) Start(ctx context.Context) error {
 	publicRootChurnTicker := time.NewTicker(p.config.PublicRootChurnInterval)
 
 	p.mu.Lock()
+	p.ctx = ctx
 	p.reconcileTicker = ticker
 	p.gossipChurnTicker = gossipChurnTicker
 	p.publicRootChurnTicker = publicRootChurnTicker

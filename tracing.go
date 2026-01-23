@@ -25,7 +25,7 @@ import (
 	"go.opentelemetry.io/otel/sdk/trace"
 )
 
-func (n *Node) setupTracing() error {
+func (n *Node) setupTracing(ctx context.Context) error {
 	// Set up propagator.
 	otel.SetTextMapPropagator(
 		propagation.NewCompositeTextMapPropagator(
@@ -43,7 +43,7 @@ func (n *Node) setupTracing() error {
 		)
 	} else {
 		// TODO: make options configurable (#387)
-		traceExporter, err = otlptracehttp.New(context.TODO())
+		traceExporter, err = otlptracehttp.New(ctx)
 	}
 	if err != nil {
 		return err

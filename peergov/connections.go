@@ -88,7 +88,7 @@ func (p *PeerGovernor) createOutboundConnection(peer *Peer) {
 		}
 		p.mu.Unlock()
 
-		conn, err := p.config.ConnManager.CreateOutboundConn(peer.Address)
+		conn, err := p.config.ConnManager.CreateOutboundConn(p.ctx, peer.Address)
 		if err == nil {
 			connId := conn.Id()
 			p.mu.Lock()
@@ -372,7 +372,7 @@ func (p *PeerGovernor) TestPeer(address string) (bool, error) {
 		testErr = p.config.PeerTestFunc(address)
 	} else if p.config.ConnManager != nil {
 		// Default: attempt connection via ConnManager
-		conn, err := p.config.ConnManager.CreateOutboundConn(address)
+		conn, err := p.config.ConnManager.CreateOutboundConn(p.ctx, address)
 		if err != nil {
 			testErr = err
 		} else {

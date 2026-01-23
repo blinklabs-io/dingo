@@ -72,7 +72,7 @@ func New(cfg Config) (*Node, error) {
 func (n *Node) Run(ctx context.Context) error {
 	// Configure tracing
 	if n.config.tracing {
-		if err := n.setupTracing(); err != nil { //nolint:contextcheck
+		if err := n.setupTracing(ctx); err != nil {
 			return err
 		}
 	}
