@@ -2,6 +2,7 @@ package event
 
 import (
 	"sync"
+	"sync/atomic"
 	"testing"
 )
 
@@ -46,5 +47,45 @@ func TestPublishUnsubscribeRace(t *testing.T) {
 		}()
 
 		wg.Wait()
+	}
+}
+
+// TestSubscribeFuncStopRace tests the race condition where SubscribeFunc could
+// call subscriberWg.Add(1) after Stop() has started Wait() with counter=0,
+// which would panic or leave goroutines blocked forever. The fix ensures that
+// SubscribeFunc holds stopMu.RLock through Add(1), preventing Stop from
+// proceeding to Wait() until all pending subscriptions complete.
+func TestSubscribeFuncStopRace(t *testing.T) {
+	const iters = 1000
+	for range iters {
+		eb := NewEventBus(nil, nil)
+		typ := EventType("race.subscribefunc.stop")
+
+		var wg sync.WaitGroup
+		var successfulSubscribes atomic.Int32
+
+		// Spawn multiple SubscribeFunc goroutines concurrently
+		for range 5 {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				subId := eb.SubscribeFunc(typ, func(Event) {})
+				if subId != 0 {
+					successfulSubscribes.Add(1)
+				}
+			}()
+		}
+
+		// Concurrently call Stop
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			eb.Stop()
+		}()
+
+		wg.Wait()
+		// If we get here without panic, the race is handled correctly.
+		// Some SubscribeFunc calls may have succeeded (subId != 0) and
+		// their goroutines should have been properly shut down by Stop.
 	}
 }

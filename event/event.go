@@ -57,11 +57,12 @@ type asyncEvent struct {
 }
 
 type EventBus struct {
-	subscribers map[EventType]map[EventSubscriberId]Subscriber
-	metrics     *eventMetrics
-	lastSubId   EventSubscriberId
-	mu          sync.RWMutex
-	Logger      *slog.Logger
+	subscribers  map[EventType]map[EventSubscriberId]Subscriber
+	metrics      *eventMetrics
+	lastSubId    EventSubscriberId
+	mu           sync.RWMutex
+	Logger       *slog.Logger
+	subscriberWg sync.WaitGroup // Tracks SubscribeFunc goroutines
 
 	// Async publishing infrastructure
 	asyncQueue chan asyncEvent
@@ -201,10 +202,11 @@ func (c *channelSubscriber) Close() {
 	c.mu.Unlock()
 }
 
-// Subscribe allows a consumer to receive events of a particular type via a channel
-func (e *EventBus) Subscribe(
+// subscribeInternal does the actual subscription work without checking stopped.
+// Callers must hold stopMu.RLock or have otherwise ensured the EventBus is not stopped.
+func (e *EventBus) subscribeInternal(
 	eventType EventType,
-) (EventSubscriberId, <-chan Event) {
+) (EventSubscriberId, *channelSubscriber) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	// Create channel-backed subscriber
@@ -222,16 +224,46 @@ func (e *EventBus) Subscribe(
 		e.metrics.subscribers.WithLabelValues(string(eventType), "in-memory").
 			Inc()
 	}
+	return subId, chSub
+}
+
+// Subscribe allows a consumer to receive events of a particular type via a channel.
+// Returns (0, nil) if the EventBus is stopped.
+func (e *EventBus) Subscribe(
+	eventType EventType,
+) (EventSubscriberId, <-chan Event) {
+	e.stopMu.RLock()
+	if e.stopped {
+		e.stopMu.RUnlock()
+		return 0, nil
+	}
+	subId, chSub := e.subscribeInternal(eventType)
+	e.stopMu.RUnlock()
 	return subId, chSub.ch
 }
 
-// SubscribeFunc allows a consumer to receive events of a particular type via a callback function
+// SubscribeFunc allows a consumer to receive events of a particular type via a callback function.
+// Returns 0 if the EventBus is stopped.
 func (e *EventBus) SubscribeFunc(
 	eventType EventType,
 	handlerFunc EventHandlerFunc,
 ) EventSubscriberId {
-	subId, evtCh := e.Subscribe(eventType)
+	// Hold stopMu.RLock through Add(1) to prevent Stop() from calling Wait()
+	// before we increment the counter. This prevents the race where:
+	// 1. Stop() sets stopped=true and proceeds to subscriberWg.Wait()
+	// 2. SubscribeFunc() calls Add(1) after Wait() started with counter=0
+	// Which would cause a panic or leave the goroutine blocked forever.
+	e.stopMu.RLock()
+	if e.stopped {
+		e.stopMu.RUnlock()
+		return 0
+	}
+	subId, chSub := e.subscribeInternal(eventType)
+	e.subscriberWg.Add(1)
+	e.stopMu.RUnlock()
+
 	go func(evtCh <-chan Event, handlerFunc EventHandlerFunc) {
+		defer e.subscriberWg.Done()
 		for {
 			evt, ok := <-evtCh
 			if !ok {
@@ -239,7 +271,7 @@ func (e *EventBus) SubscribeFunc(
 			}
 			handlerFunc(evt)
 		}
-	}(evtCh, handlerFunc)
+	}(chSub.ch, handlerFunc)
 	return subId
 }
 
@@ -367,10 +399,18 @@ func (e *EventBus) PublishAsync(eventType EventType, evt Event) bool {
 
 // RegisterSubscriber allows external adapters (e.g., network-backed subscribers)
 // to register with the EventBus. It returns the assigned subscriber id.
+// Returns 0 if the EventBus is stopped.
 func (e *EventBus) RegisterSubscriber(
 	eventType EventType,
 	sub Subscriber,
 ) EventSubscriberId {
+	e.stopMu.RLock()
+	if e.stopped {
+		e.stopMu.RUnlock()
+		return 0
+	}
+	defer e.stopMu.RUnlock()
+
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	subId := e.lastSubId + 1
@@ -418,6 +458,9 @@ func (e *EventBus) Stop() {
 			sub.Close()
 		}
 	}
+
+	// Wait for SubscribeFunc goroutines to complete after closing their channels
+	e.subscriberWg.Wait()
 
 	// Reset subscriber metrics if they exist
 	if e.metrics != nil {
