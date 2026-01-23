@@ -552,7 +552,10 @@ func (ls *LedgerState) Close() error {
 		ls.dbWorkerPool.Shutdown()
 	}
 
-	return ls.db.Close()
+	// Note: We don't close the database here because LedgerState doesn't own it.
+	// The database is passed in via LedgerStateConfig and should be closed by
+	// the owner (typically Node.shutdown()).
+	return nil
 }
 
 func (ls *LedgerState) initScheduler() error {
