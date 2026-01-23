@@ -581,6 +581,8 @@ func (c *Chain) reconcile() error {
 	}
 	lastPrevHash := decodedKnownBlock.PrevHash().Bytes()
 	// Iterate backward through chain based on prev-hash until we find a matching block on the primary chain
+	// Accumulate blocks locally to avoid O(K²) prepending
+	newBlocks := make([]ocommon.Point, 0, securityParam)
 	iterationCount := 0
 	for {
 		if iterationCount >= securityParam {
@@ -612,8 +614,14 @@ func (c *Chain) reconcile() error {
 			Hash: tmpBlock.Hash,
 			Slot: tmpBlock.Slot,
 		}
-		c.blocks = slices.Concat([]ocommon.Point{tmpPoint}, c.blocks)
+		newBlocks = append(newBlocks, tmpPoint)
 		c.lastCommonBlockIndex--
+	}
+	// Prepend accumulated blocks in a single operation (O(K) instead of O(K²))
+	if len(newBlocks) > 0 {
+		// Reverse newBlocks since they were collected in reverse order
+		slices.Reverse(newBlocks)
+		c.blocks = slices.Concat(newBlocks, c.blocks)
 	}
 	return nil
 }
