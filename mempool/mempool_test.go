@@ -1209,6 +1209,43 @@ func TestMempool_BlockingNextTx_WithEmptyMempool(t *testing.T) {
 	}
 }
 
+func TestMempool_BlockingNextTx_UnblocksOnShutdown(t *testing.T) {
+	m := newTestMempool(t)
+
+	connId := newTestConnectionId(0)
+	consumer := m.AddConsumer(connId)
+
+	// Start blocking NextTx in goroutine
+	resultChan := make(chan *MempoolTransaction, 1)
+	go func() {
+		tx := consumer.NextTx(true) // This will block
+		resultChan <- tx
+	}()
+
+	// Give it time to start blocking
+	time.Sleep(50 * time.Millisecond)
+
+	// Verify it's still blocking (hasn't returned)
+	select {
+	case <-resultChan:
+		t.Fatal("NextTx should still be blocking")
+	default:
+		// Expected - still blocking
+	}
+
+	// Stop the mempool
+	err := m.Stop(context.Background())
+	require.NoError(t, err)
+
+	// Should unblock and return nil
+	select {
+	case gotTx := <-resultChan:
+		assert.Nil(t, gotTx, "NextTx should return nil on shutdown")
+	case <-time.After(2 * time.Second):
+		t.Fatal("NextTx failed to unblock after mempool stopped")
+	}
+}
+
 func TestMempool_Transactions_ReturnsCopies(t *testing.T) {
 	m := newTestMempool(t)
 	defer m.Stop(context.Background())

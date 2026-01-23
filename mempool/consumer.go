@@ -19,10 +19,11 @@ import (
 )
 
 type MempoolConsumer struct {
-	mempool    *Mempool
-	cache      map[string]*MempoolTransaction
-	nextTxIdx  int
-	cacheMutex sync.Mutex
+	mempool     *Mempool
+	cache       map[string]*MempoolTransaction
+	nextTxIdx   int
+	cacheMutex  sync.Mutex
+	nextTxIdxMu sync.Mutex
 }
 
 func newConsumer(mempool *Mempool) *MempoolConsumer {
@@ -36,42 +37,66 @@ func (m *MempoolConsumer) NextTx(blocking bool) *MempoolTransaction {
 	if m == nil {
 		return nil
 	}
-	m.mempool.RLock()
-	defer m.mempool.RUnlock()
-	if m.nextTxIdx >= len(m.mempool.transactions) {
+
+	for {
+		m.mempool.RLock()
+		m.nextTxIdxMu.Lock()
+
+		// Check if we have a transaction available
+		if m.nextTxIdx < len(m.mempool.transactions) {
+			nextTx := m.mempool.transactions[m.nextTxIdx]
+			if nextTx != nil {
+				// Increment next TX index atomically with reading it
+				m.nextTxIdx++
+				m.nextTxIdxMu.Unlock()
+				m.mempool.RUnlock()
+
+				// Add transaction to cache (outside of locks)
+				m.cacheMutex.Lock()
+				m.cache[nextTx.Hash] = nextTx
+				m.cacheMutex.Unlock()
+
+				return nextTx
+			}
+			m.nextTxIdx++
+			m.nextTxIdxMu.Unlock()
+			m.mempool.RUnlock()
+			continue
+		}
+
+		// No transaction available
 		if !blocking {
+			m.nextTxIdxMu.Unlock()
+			m.mempool.RUnlock()
 			return nil
 		}
-		// Wait for TX to be added to mempool
+
+		// If eventBus is nil, fall back to non-blocking behavior
+		if m.mempool.eventBus == nil {
+			m.nextTxIdxMu.Unlock()
+			m.mempool.RUnlock()
+			return nil
+		}
+
+		// Wait for a transaction to be added
 		addTxSubId, addTxChan := m.mempool.eventBus.Subscribe(
 			AddTransactionEventType,
 		)
+		m.nextTxIdxMu.Unlock()
 		m.mempool.RUnlock()
-		<-addTxChan
-		m.mempool.eventBus.Unsubscribe(AddTransactionEventType, addTxSubId)
-		m.mempool.RLock()
-		// Make sure our next TX index isn't beyond the bounds of the mempool
-		// This shouldn't be necessary, but we probably have a bug elsewhere around
-		// managing the consumer nextTxId values on add/remove TX in mempool.
-		// This is also potentially lossy in the case of multiple TXs being added to
-		// the mempool in short succession
-		if m.nextTxIdx >= len(m.mempool.transactions) {
-			m.nextTxIdx = len(m.mempool.transactions) - 1
+
+		// Block until an event arrives or shutdown is signaled
+		select {
+		case <-addTxChan:
+			m.mempool.eventBus.Unsubscribe(AddTransactionEventType, addTxSubId)
+			// Loop back to check if transaction is available
+			// This naturally handles the case of multiple rapid additions
+		case <-m.mempool.done:
+			// Mempool is shutting down, unsubscribe and exit
+			m.mempool.eventBus.Unsubscribe(AddTransactionEventType, addTxSubId)
+			return nil
 		}
 	}
-	if m.nextTxIdx < 0 || m.nextTxIdx >= len(m.mempool.transactions) {
-		panic("mempool consumer nextTxIdx out of bounds")
-	}
-	nextTx := m.mempool.transactions[m.nextTxIdx]
-	if nextTx != nil {
-		// Increment next TX index
-		m.nextTxIdx++
-		// Add transaction to cache
-		m.cacheMutex.Lock()
-		m.cache[nextTx.Hash] = nextTx
-		m.cacheMutex.Unlock()
-	}
-	return nextTx
 }
 
 func (m *MempoolConsumer) GetTxFromCache(hash string) *MempoolTransaction {
