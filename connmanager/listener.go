@@ -20,9 +20,17 @@ import (
 	"fmt"
 	"net"
 	"runtime"
+	"time"
 
 	"github.com/blinklabs-io/dingo/event"
 	ouroboros "github.com/blinklabs-io/gouroboros"
+)
+
+// Accept loop backoff constants
+const (
+	acceptBackoffMin = 10 * time.Millisecond // Initial backoff duration
+	acceptBackoffMax = 1 * time.Second       // Maximum backoff duration
+	acceptBackoffCap = 6                     // Max consecutive errors before capping (2^6 * 10ms = 640ms)
 )
 
 type ListenerConfig struct {
@@ -108,6 +116,7 @@ func (c *ConnectionManager) startListener(
 	c.goroutineWg.Add(1)
 	go func() {
 		defer c.goroutineWg.Done()
+		var consecutiveErrors int
 		for {
 			// Accept connection
 			conn, err := l.Listener.Accept()
@@ -138,12 +147,32 @@ func (c *ConnectionManager) startListener(
 					)
 					continue
 				}
-				// Otherwise, log at error level and continue
+				// Otherwise, log at error level and apply exponential backoff
 				c.config.Logger.Error(
 					fmt.Sprintf("listener: accept failed: %s", err),
 				)
+				// Calculate backoff with exponential increase
+				consecutiveErrors++
+				backoff := c.calculateAcceptBackoff(consecutiveErrors)
+				c.config.Logger.Debug(
+					fmt.Sprintf(
+						"listener: backing off for %v after %d consecutive errors",
+						backoff,
+						consecutiveErrors,
+					),
+				)
+				// Sleep with cancellation awareness
+				c.listenersMutex.Lock()
+				isClosing = c.closing
+				c.listenersMutex.Unlock()
+				if isClosing {
+					return
+				}
+				time.Sleep(backoff)
 				continue
 			}
+			// Successful accept - reset consecutive error count
+			consecutiveErrors = 0
 			// Wrap UNIX connections
 			if uConn, ok := conn.(*net.UnixConn); ok {
 				tmpConn, err := NewUnixConn(uConn)
@@ -201,4 +230,21 @@ func (c *ConnectionManager) startListener(
 		}
 	}()
 	return nil
+}
+
+// calculateAcceptBackoff computes an exponential backoff duration based on
+// the number of consecutive Accept() errors. The backoff starts at
+// acceptBackoffMin and doubles with each subsequent error up to acceptBackoffMax.
+func (c *ConnectionManager) calculateAcceptBackoff(
+	consecutiveErrors int,
+) time.Duration {
+	if consecutiveErrors <= 0 {
+		return acceptBackoffMin
+	}
+	// Cap the exponent to avoid overflow and limit max backoff
+	// Use (consecutiveErrors-1) so first error yields acceptBackoffMin
+	exponent := min(consecutiveErrors-1, acceptBackoffCap)
+	// Calculate backoff: min * 2^exponent
+	backoff := min(acceptBackoffMin<<exponent, acceptBackoffMax)
+	return backoff
 }
