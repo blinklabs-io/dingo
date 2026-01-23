@@ -272,10 +272,10 @@ func (ls *LedgerState) handleEventBlockfetchBlock(e BlockfetchEvent) error {
 		ls.chainsyncBlockEvents,
 		e,
 	)
-	// Update busy time in order to detect fetch timeout
-	ls.chainsyncBlockfetchBusyTimeMutex.Lock()
-	defer ls.chainsyncBlockfetchBusyTimeMutex.Unlock()
-	ls.chainsyncBlockfetchBusyTime = time.Now()
+	// Reset timeout timer since we received a block
+	if ls.chainsyncBlockfetchTimeoutTimer != nil {
+		ls.chainsyncBlockfetchTimeoutTimer.Reset(blockfetchBusyTimeout)
+	}
 	return nil
 }
 
@@ -625,50 +625,44 @@ func (ls *LedgerState) blockfetchRequestRangeStart(
 	if err != nil {
 		return fmt.Errorf("request block range: %w", err)
 	}
-	// Reset blockfetch busy time
-	ls.chainsyncBlockfetchBusyTimeMutex.Lock()
-	ls.chainsyncBlockfetchBusyTime = time.Now()
-	ls.chainsyncBlockfetchBusyTimeMutex.Unlock()
 
 	// Create our blockfetch done signal channels
 	ls.chainsyncBlockfetchReadyMutex.Lock()
 	ls.chainsyncBlockfetchReadyChan = make(chan struct{})
 	ls.chainsyncBlockfetchReadyMutex.Unlock()
 
-	ls.chainsyncBlockfetchBatchDoneChan = make(chan struct{})
-	// Start goroutine to handle blockfetch timeout
-	go func() {
-		for {
-			select {
-			case <-ls.chainsyncBlockfetchBatchDoneChan:
-				return
-			case <-time.After(500 * time.Millisecond):
-			}
-			// Clear blockfetch busy flag on timeout
-			ls.chainsyncBlockfetchBusyTimeMutex.Lock()
-			busyTime := ls.chainsyncBlockfetchBusyTime
-			ls.chainsyncBlockfetchBusyTimeMutex.Unlock()
-
-			if time.Since(
-				busyTime,
-			) > blockfetchBusyTimeout {
-				ls.blockfetchRequestRangeCleanup(true)
-				ls.config.Logger.Warn(
-					fmt.Sprintf(
-						"blockfetch operation timed out after %s",
-						blockfetchBusyTimeout,
-					),
-					"component",
-					"ledger",
-				)
+	// Start timeout timer for blockfetch operation
+	// The timer fires if no blocks are received within blockfetchBusyTimeout
+	// Each received block resets the timer in handleEventBlockfetchBlock
+	ls.chainsyncBlockfetchTimeoutTimer = time.AfterFunc(
+		blockfetchBusyTimeout,
+		func() {
+			ls.chainsyncBlockfetchMutex.Lock()
+			defer ls.chainsyncBlockfetchMutex.Unlock()
+			// Check if timer was already handled (e.g., by batch done or reset race)
+			if ls.chainsyncBlockfetchTimeoutTimer == nil {
 				return
 			}
-		}
-	}()
+			ls.blockfetchRequestRangeCleanup(true)
+			ls.config.Logger.Warn(
+				fmt.Sprintf(
+					"blockfetch operation timed out after %s",
+					blockfetchBusyTimeout,
+				),
+				"component",
+				"ledger",
+			)
+		},
+	)
 	return nil
 }
 
 func (ls *LedgerState) blockfetchRequestRangeCleanup(resetFlags bool) {
+	// Stop the timeout timer if running
+	if ls.chainsyncBlockfetchTimeoutTimer != nil {
+		ls.chainsyncBlockfetchTimeoutTimer.Stop()
+		ls.chainsyncBlockfetchTimeoutTimer = nil
+	}
 	// Reset buffer
 	ls.chainsyncBlockEvents = slices.Delete(
 		ls.chainsyncBlockEvents,
@@ -690,10 +684,10 @@ func (ls *LedgerState) blockfetchRequestRangeCleanup(resetFlags bool) {
 }
 
 func (ls *LedgerState) handleEventBlockfetchBatchDone(e BlockfetchEvent) error {
-	// Cancel our blockfetch timeout watcher
-	if ls.chainsyncBlockfetchBatchDoneChan != nil {
-		close(ls.chainsyncBlockfetchBatchDoneChan)
-		ls.chainsyncBlockfetchBatchDoneChan = nil
+	// Stop the blockfetch timeout timer
+	if ls.chainsyncBlockfetchTimeoutTimer != nil {
+		ls.chainsyncBlockfetchTimeoutTimer.Stop()
+		ls.chainsyncBlockfetchTimeoutTimer = nil
 	}
 	// Process pending block events
 	if err := ls.processBlockEvents(); err != nil {
