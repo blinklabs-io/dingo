@@ -20,9 +20,14 @@ import (
 	"github.com/blinklabs-io/dingo/database/plugin"
 )
 
+// DefaultMaxConnections is the default connection pool size for SQLite.
+// This should match the DatabaseWorkers configuration (default 5).
+const DefaultMaxConnections = 5
+
 var (
 	cmdlineOptions struct {
-		dataDir string
+		dataDir        string
+		maxConnections int
 	}
 	cmdlineOptionsMutex sync.RWMutex
 )
@@ -32,6 +37,7 @@ func initCmdlineOptions() {
 	cmdlineOptionsMutex.Lock()
 	defer cmdlineOptionsMutex.Unlock()
 	cmdlineOptions.dataDir = ".dingo"
+	cmdlineOptions.maxConnections = DefaultMaxConnections
 }
 
 // Register plugin
@@ -51,6 +57,13 @@ func init() {
 					DefaultValue: ".dingo",
 					Dest:         &(cmdlineOptions.dataDir),
 				},
+				{
+					Name:         "max-connections",
+					Type:         plugin.PluginOptionTypeInt,
+					Description:  "Maximum number of database connections (should match DatabaseWorkers)",
+					DefaultValue: DefaultMaxConnections,
+					Dest:         &(cmdlineOptions.maxConnections),
+				},
 			},
 		},
 	)
@@ -59,10 +72,12 @@ func init() {
 func NewFromCmdlineOptions() plugin.Plugin {
 	cmdlineOptionsMutex.RLock()
 	dataDir := cmdlineOptions.dataDir
+	maxConnections := cmdlineOptions.maxConnections
 	cmdlineOptionsMutex.RUnlock()
 
 	opts := []SqliteOptionFunc{
 		WithDataDir(dataDir),
+		WithMaxConnections(maxConnections),
 		// Logger and promRegistry will use defaults if nil
 	}
 	p, err := NewWithOptions(opts...)

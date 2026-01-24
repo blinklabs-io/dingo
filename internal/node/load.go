@@ -67,6 +67,7 @@ func Load(cfg *config.Config, logger *slog.Logger, immutableDir string) error {
 		PromRegistry:   nil,
 		BlobPlugin:     cfg.BlobPlugin,
 		MetadataPlugin: cfg.MetadataPlugin,
+		MaxConnections: cfg.DatabaseWorkers,
 	}
 	db, err := database.New(dbConfig)
 	if err != nil {

@@ -1055,9 +1055,9 @@ func TestTransitionToEra_ReturnsResultWithoutMutating(t *testing.T) {
 		result, err := ls.transitionToEra(
 			txn,
 			eras.ShelleyEraDesc.Id,
-			0,    // startEpoch
-			0,    // addedSlot
-			nil,  // currentPParams (Byron has none)
+			0,   // startEpoch
+			0,   // addedSlot
+			nil, // currentPParams (Byron has none)
 		)
 		if err != nil {
 			return err
@@ -1513,8 +1513,8 @@ func TestEpochRollover_ConcurrentReaders(t *testing.T) {
 					return
 				default:
 					ls.RLock()
-					_ = ls.currentEra    // Read era
-					_ = ls.currentEpoch  // Read epoch
+					_ = ls.currentEra   // Read era
+					_ = ls.currentEpoch // Read epoch
 					readCount.Add(1)
 					ls.RUnlock()
 					time.Sleep(5 * time.Millisecond)
