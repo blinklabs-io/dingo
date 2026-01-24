@@ -91,12 +91,12 @@ func (d *Database) MetadataTxn(readWrite bool) *Txn {
 // Close cleans up the database connections
 func (d *Database) Close() error {
 	var err error
-	// Close metadata
-	metadataErr := d.Metadata().Close()
-	err = errors.Join(err, metadataErr)
-	// Close blob
-	blobErr := d.Blob().Close()
-	err = errors.Join(err, blobErr)
+	if d.metadata != nil {
+		err = errors.Join(err, d.metadata.Close())
+	}
+	if d.blob != nil {
+		err = errors.Join(err, d.blob.Close())
+	}
 	return err
 }
 
@@ -169,6 +169,7 @@ func New(
 		configCopy.MetadataPlugin,
 	)
 	if err != nil {
+		err = errors.Join(err, blobDb.Close()) // Clean up blob store on metadata failure
 		return nil, err
 	}
 	db := &Database{
