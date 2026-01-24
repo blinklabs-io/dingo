@@ -40,7 +40,7 @@ type ChainManager struct {
 	securityParam       int
 	chains              map[ChainId]*Chain
 	chainRollbackEvents map[ChainId][]uint64
-	blocks              map[string]models.Block
+	blockCache          *blockCache
 	mutex               sync.RWMutex
 }
 
@@ -53,7 +53,7 @@ func NewManager(
 		eventBus:            eventBus,
 		chains:              make(map[ChainId]*Chain),
 		chainRollbackEvents: make(map[ChainId][]uint64),
-		blocks:              make(map[string]models.Block),
+		blockCache:          newBlockCache(DefaultBlockCacheCapacity),
 	}
 	if err := cm.loadPrimaryChain(); err != nil {
 		return nil, err
@@ -202,8 +202,8 @@ func (cm *ChainManager) blockByPoint(
 	point ocommon.Point,
 	txn *database.Txn,
 ) (models.Block, error) {
-	// Check in-memory blocks
-	if blk, ok := cm.blocks[string(point.Hash)]; ok {
+	// Check in-memory cache
+	if blk, ok := cm.blockCache.Get(string(point.Hash)); ok {
 		if blk.Slot == point.Slot {
 			return blk, nil
 		}
@@ -233,8 +233,8 @@ func (cm *ChainManager) blockByHash(
 ) (models.Block, error) {
 	cm.mutex.RLock()
 	defer cm.mutex.RUnlock()
-	// Check in-memory blocks
-	if blk, ok := cm.blocks[string(blockHash)]; ok {
+	// Check in-memory cache
+	if blk, ok := cm.blockCache.Get(string(blockHash)); ok {
 		return blk, nil
 	}
 	return models.Block{}, models.ErrBlockNotFound
@@ -296,10 +296,9 @@ func (cm *ChainManager) addBlock(
 		if err := cm.db.BlockCreate(block, txn); err != nil {
 			return err
 		}
-		// TODO: trigger periodic async signal to chains to do reconcile to prune buffer
 	} else {
-		// Add block to memory buffer
-		cm.blocks[string(block.Hash)] = block
+		// Add block to LRU cache (evicts oldest if at capacity)
+		cm.blockCache.Put(block)
 	}
 	return nil
 }
@@ -326,8 +325,8 @@ func (cm *ChainManager) removeBlockByIndex(
 			return err
 		}
 		removedBlock = tmpBlock
-		// Add block to memory buffer in case other chains are using it
-		cm.blocks[string(tmpBlock.Hash)] = tmpBlock
+		// Add block to LRU cache in case other chains are using it
+		cm.blockCache.Put(tmpBlock)
 		if err := database.BlockDeleteTxn(txn, tmpBlock); err != nil {
 			return err
 		}
