@@ -131,6 +131,74 @@ func (d *Database) ApplyPParamUpdates(
 	)
 }
 
+// ComputeAndApplyPParamUpdates computes the new protocol parameters by applying
+// pending updates for the given epoch. Unlike ApplyPParamUpdates, this function
+// takes currentPParams as a value and returns the updated parameters without
+// mutating the input. This allows callers to capture the result in a transaction
+// and apply it to in-memory state after the transaction commits.
+func (d *Database) ComputeAndApplyPParamUpdates(
+	slot, epoch uint64,
+	era uint,
+	currentPParams lcommon.ProtocolParameters,
+	decodeFunc func([]byte) (any, error),
+	updateFunc func(
+		lcommon.ProtocolParameters,
+		any,
+	) (lcommon.ProtocolParameters, error),
+	txn *Txn,
+) (lcommon.ProtocolParameters, error) {
+	// Check for pparam updates that apply at the end of the epoch
+	pparamUpdates, err := d.metadata.GetPParamUpdates(epoch, txn.Metadata())
+	if err != nil {
+		return nil, err
+	}
+	if len(pparamUpdates) == 0 {
+		// nothing to do, return current params unchanged
+		return currentPParams, nil
+	}
+	// We only want the latest for the epoch
+	pparamUpdate := pparamUpdates[0]
+	tmpPParamUpdate, err := decodeFunc(pparamUpdate.Cbor)
+	if err != nil {
+		return nil, err
+	}
+	// Compute updated pparams
+	if currentPParams == nil {
+		return nil, fmt.Errorf(
+			"current PParams is nil - cannot apply protocol parameter updates for epoch %d",
+			epoch,
+		)
+	}
+	newPParams, err := updateFunc(
+		currentPParams,
+		tmpPParamUpdate,
+	)
+	if err != nil {
+		return nil, err
+	}
+	d.logger.Debug(
+		"computed updated protocol params",
+		"pparams",
+		fmt.Sprintf("%#v", newPParams),
+	)
+	// Write pparams update to DB
+	pparamsCbor, err := cbor.Encode(&newPParams)
+	if err != nil {
+		return nil, err
+	}
+	err = d.metadata.SetPParams(
+		pparamsCbor,
+		slot,
+		uint64(epoch+1),
+		era,
+		txn.Metadata(),
+	)
+	if err != nil {
+		return nil, err
+	}
+	return newPParams, nil
+}
+
 func (d *Database) SetPParamUpdate(
 	genesis, params []byte,
 	slot, epoch uint64,

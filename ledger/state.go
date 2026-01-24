@@ -421,6 +421,23 @@ type LedgerState struct {
 	inRecovery                 bool // guards against recursive recovery in SubmitAsyncDBTxn
 }
 
+// EraTransitionResult holds computed state from an era transition
+type EraTransitionResult struct {
+	NewPParams lcommon.ProtocolParameters
+	NewEra     eras.EraDesc
+}
+
+// EpochRolloverResult holds computed state from epoch rollover
+type EpochRolloverResult struct {
+	NewEpochCache             []models.Epoch
+	NewCurrentEpoch           models.Epoch
+	NewCurrentEra             eras.EraDesc
+	NewCurrentPParams         lcommon.ProtocolParameters
+	NewEpochNum               float64
+	CheckpointWrittenForEpoch bool
+	SchedulerIntervalMs       uint
+}
+
 func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 	if cfg.ChainManager == nil {
 		return nil, errors.New("a ChainManager is required")
@@ -520,7 +537,11 @@ func (ls *LedgerState) RecoverCommitTimestampConflict() error {
 	// Check if we can lookup tip block in chain
 	_, err = ls.chain.BlockByPoint(tmpTip.Point, nil)
 	if err != nil {
-		// Rollback to raw chain tip on error
+		// Rollback to raw chain tip on error.
+		// Note: We do NOT hold ls.Lock() here because rollback() calls
+		// SubmitAsyncDBTxn() which may trigger PartialCommitError recovery
+		// that re-acquires ls.Lock(), causing a deadlock. The rollback
+		// method handles its own locking for in-memory state updates.
 		chainTip := ls.chain.Tip()
 		if err = ls.rollback(chainTip.Point); err != nil {
 			return fmt.Errorf(
@@ -833,6 +854,9 @@ func (ls *LedgerState) cleanupConsumedUtxos() {
 }
 
 func (ls *LedgerState) rollback(point ocommon.Point) error {
+	// Track new tip value built during transaction
+	var newTip ochainsync.Tip
+	var newNonce []byte
 	// Start a transaction
 	err := ls.SubmitAsyncDBTxn(func(txn *database.Txn) error {
 		// Delete rolled-back UTxOs
@@ -848,8 +872,8 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 				err,
 			)
 		}
-		// Update tip
-		ls.currentTip = ochainsync.Tip{
+		// Build new tip value
+		newTip = ochainsync.Tip{
 			Point: point,
 		}
 		if point.Slot > 0 {
@@ -857,21 +881,30 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 			if err != nil {
 				return fmt.Errorf("failed to get rollback block: %w", err)
 			}
-			ls.currentTip.BlockNumber = rollbackBlock.Number
+			newTip.BlockNumber = rollbackBlock.Number
+			// Load nonce for rollback point
+			newNonce, err = ls.db.GetBlockNonce(point, txn)
+			if err != nil {
+				return fmt.Errorf("failed to get block nonce: %w", err)
+			}
 		}
-		if err = ls.db.SetTip(ls.currentTip, txn); err != nil {
+		// Write tip to DB
+		if err = ls.db.SetTip(newTip, txn); err != nil {
 			return fmt.Errorf("failed to set tip: %w", err)
 		}
-		ls.updateTipMetrics()
 		return nil
 	}, true)
 	if err != nil {
 		return err
 	}
-	// Reload tip
-	if err := ls.loadTip(); err != nil {
-		return fmt.Errorf("failed to load tip: %w", err)
-	}
+	// Transaction committed successfully - now update in-memory state.
+	// Brief lock to ensure readers see consistent state.
+	ls.Lock()
+	ls.currentTip = newTip
+	// Always update nonce - clear it on genesis rollback, set it otherwise
+	ls.currentTipBlockNonce = newNonce
+	ls.updateTipMetrics()
+	ls.Unlock()
 	var hash string
 	if point.Slot == 0 {
 		hash = "<genesis>"
@@ -890,33 +923,49 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 	return nil
 }
 
+// transitionToEra performs an era transition and returns the result without
+// mutating LedgerState. This allows callers to capture the computed state in a
+// transaction and apply it to in-memory state after the transaction commits.
+// Parameters:
+//   - txn: database transaction
+//   - nextEraId: the target era ID to transition to
+//   - startEpoch: the epoch at which the transition occurs
+//   - addedSlot: the slot at which the transition occurs
+//   - currentPParams: current protocol parameters (read-only input)
+//
+// Returns the new era and protocol parameters, or an error.
 func (ls *LedgerState) transitionToEra(
 	txn *database.Txn,
 	nextEraId uint,
 	startEpoch uint64,
 	addedSlot uint64,
-) error {
+	currentPParams lcommon.ProtocolParameters,
+) (*EraTransitionResult, error) {
 	nextEra := eras.Eras[nextEraId]
+	result := &EraTransitionResult{
+		NewPParams: currentPParams,
+		NewEra:     nextEra,
+	}
 	if nextEra.HardForkFunc != nil {
 		// Perform hard fork
 		// This generally means upgrading pparams from previous era
 		newPParams, err := nextEra.HardForkFunc(
 			ls.config.CardanoNodeConfig,
-			ls.currentPParams,
+			currentPParams,
 		)
 		if err != nil {
-			return fmt.Errorf("hard fork failed: %w", err)
+			return nil, fmt.Errorf("hard fork failed: %w", err)
 		}
-		ls.currentPParams = newPParams
+		result.NewPParams = newPParams
 		ls.config.Logger.Debug(
 			"updated protocol params",
 			"pparams",
-			fmt.Sprintf("%#v", ls.currentPParams),
+			fmt.Sprintf("%#v", newPParams),
 		)
 		// Write pparams update to DB
-		pparamsCbor, err := cbor.Encode(&ls.currentPParams)
+		pparamsCbor, err := cbor.Encode(&newPParams)
 		if err != nil {
-			return fmt.Errorf("failed to encode pparams: %w", err)
+			return nil, fmt.Errorf("failed to encode pparams: %w", err)
 		}
 		err = ls.db.SetPParams(
 			pparamsCbor,
@@ -926,17 +975,22 @@ func (ls *LedgerState) transitionToEra(
 			txn,
 		)
 		if err != nil {
-			return fmt.Errorf("failed to set pparams: %w", err)
+			return nil, fmt.Errorf("failed to set pparams: %w", err)
 		}
 	}
-	ls.currentEra = nextEra
-	return nil
+	return result, nil
 }
 
 // calculateStabilityWindow returns the stability window based on the current era.
 // For Byron era, returns 2k. For Shelley+ eras, returns 3k/f.
 // Returns the default threshold if genesis data is unavailable or invalid.
 func (ls *LedgerState) calculateStabilityWindow() uint64 {
+	return ls.calculateStabilityWindowForEra(ls.currentEra.Id)
+}
+
+// calculateStabilityWindowForEra calculates the stability window for the given era.
+// This pure version takes the era ID as a parameter to avoid data races.
+func (ls *LedgerState) calculateStabilityWindowForEra(eraId uint) uint64 {
 	if ls.config.CardanoNodeConfig == nil {
 		ls.config.Logger.Warn(
 			"cardano node config is nil, using default stability window",
@@ -945,7 +999,7 @@ func (ls *LedgerState) calculateStabilityWindow() uint64 {
 	}
 
 	// Byron era only needs Byron genesis
-	if ls.currentEra.Id == 0 {
+	if eraId == 0 {
 		byronGenesis := ls.config.CardanoNodeConfig.ByronGenesis()
 		if byronGenesis == nil {
 			return blockfetchBatchSlotThresholdDefault
@@ -1191,30 +1245,112 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 	shouldValidate := ls.config.ValidateHistorical
 	for {
 		if needsEpochRollover {
-			ls.Lock()
 			needsEpochRollover = false
+
+			// Capture current state with read lock before the transaction.
+			// This avoids holding ls.Lock() during SubmitAsyncDBTxn, which
+			// would cause deadlock if PartialCommitError recovery tries to
+			// re-acquire the lock.
+			ls.RLock()
+			snapshotEra := ls.currentEra
+			snapshotEpoch := ls.currentEpoch
+			snapshotPParams := ls.currentPParams
+			ls.RUnlock()
+
+			var rolloverResult *EpochRolloverResult
+			var eraTransitions []*EraTransitionResult
+
+			// Execute transaction WITHOUT holding ls.Lock()
 			err := ls.SubmitAsyncDBTxn(func(txn *database.Txn) error {
+				workingPParams := snapshotPParams
+				workingEraId := snapshotEra.Id
+
 				// Check for era change
-				if nextEpochEraId != ls.currentEra.Id {
+				if nextEpochEraId != snapshotEra.Id {
 					// Transition through every era between the current and the target era
-					for nextEraId := ls.currentEra.Id + 1; nextEraId <= nextEpochEraId; nextEraId++ {
-						if err := ls.transitionToEra(txn, nextEraId, ls.currentEpoch.EpochId, ls.currentEpoch.StartSlot+uint64(ls.currentEpoch.LengthInSlots)); err != nil {
+					for nextEraId := snapshotEra.Id + 1; nextEraId <= nextEpochEraId; nextEraId++ {
+						result, err := ls.transitionToEra(
+							txn,
+							nextEraId,
+							snapshotEpoch.EpochId,
+							snapshotEpoch.StartSlot+uint64(snapshotEpoch.LengthInSlots),
+							workingPParams,
+						)
+						if err != nil {
 							return err
 						}
+						workingPParams = result.NewPParams
+						workingEraId = result.NewEra.Id
+						eraTransitions = append(eraTransitions, result)
 					}
 				}
+
 				// Process epoch rollover
-				if err := ls.processEpochRollover(txn); err != nil {
+				result, err := ls.processEpochRollover(
+					txn,
+					snapshotEpoch,
+					eras.Eras[workingEraId],
+					workingPParams,
+				)
+				if err != nil {
 					return err
 				}
+				rolloverResult = result
 				return nil
 			}, true)
-			ls.Unlock()
 			if err != nil {
 				ls.config.Logger.Error(
 					"failed to process epoch rollover: " + err.Error(),
 				)
 				return
+			}
+
+			// Apply in-memory state updates with brief lock after successful commit
+			ls.Lock()
+			for _, eraResult := range eraTransitions {
+				ls.currentPParams = eraResult.NewPParams
+				ls.currentEra = eraResult.NewEra
+			}
+			if rolloverResult != nil {
+				ls.epochCache = rolloverResult.NewEpochCache
+				ls.currentEpoch = rolloverResult.NewCurrentEpoch
+				ls.currentEra = rolloverResult.NewCurrentEra
+				ls.currentPParams = rolloverResult.NewCurrentPParams
+				ls.checkpointWrittenForEpoch = rolloverResult.CheckpointWrittenForEpoch
+				ls.metrics.epochNum.Set(rolloverResult.NewEpochNum)
+			}
+			ls.Unlock()
+
+			// Update scheduler (thread-safe, no lock needed)
+			if rolloverResult != nil &&
+				rolloverResult.SchedulerIntervalMs > 0 &&
+				ls.Scheduler != nil {
+				// nolint:gosec
+				// The slot length will not exceed int64
+				interval := time.Duration(
+					rolloverResult.SchedulerIntervalMs,
+				) * time.Millisecond
+				ls.Scheduler.ChangeInterval(interval)
+			}
+
+			// Start background cleanup goroutines
+			go ls.cleanupConsumedUtxos()
+
+			// Clean up old block nonces and keep only last 3 epochs along with checkpoints
+			if rolloverResult != nil {
+				var cutoffStart uint64
+				if rolloverResult.NewCurrentEpoch.EpochId >= 4 {
+					target := rolloverResult.NewCurrentEpoch.EpochId - 3
+					for _, ep := range rolloverResult.NewEpochCache {
+						if ep.EpochId == target {
+							cutoffStart = ep.StartSlot
+							break
+						}
+					}
+				}
+				if cutoffStart > 0 {
+					go ls.cleanupBlockNoncesBefore(cutoffStart)
+				}
 			}
 		}
 		if cachedNextBatch != nil {
@@ -1230,16 +1366,17 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 				}
 				nextBatch = result.blocks
 				// Process rollback
+				// Note: We do NOT hold ls.Lock() here because rollback() calls
+				// SubmitAsyncDBTxn() which may trigger PartialCommitError recovery
+				// that re-acquires ls.Lock(), causing a deadlock. The rollback
+				// method handles its own locking for in-memory state updates.
 				if result.rollback {
-					ls.Lock()
 					if err = ls.rollback(result.rollbackPoint); err != nil {
-						ls.Unlock()
 						ls.config.Logger.Error(
 							"failed to process rollback: " + err.Error(),
 						)
 						return
 					}
-					ls.Unlock()
 					continue
 				}
 			case <-ls.ctx.Done():
@@ -1248,11 +1385,31 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 		}
 		// Process batch in groups of batchSize to stay under DB txn limits
 		for i = 0; i < len(nextBatch); i += batchSize {
-			ls.Lock()
 			end = min(
 				len(nextBatch),
 				i+batchSize,
 			)
+
+			// Capture snapshots of state needed during transaction.
+			// Acquire read lock to prevent race with RecoverCommitTimestampConflict
+			// which can trigger rollback() and loadTip() that mutate these fields.
+			ls.RLock()
+			snapshotEpoch := ls.currentEpoch
+			snapshotEra := ls.currentEra
+			snapshotTipSlot := ls.currentTip.Point.Slot
+			snapshotTipHash := ls.currentTip.Point.Hash
+			snapshotNonce := ls.currentTipBlockNonce
+			localCheckpointWritten := ls.checkpointWrittenForEpoch
+			ls.RUnlock()
+
+			// Track pending state changes during transaction
+			var pendingTip ochainsync.Tip
+			var pendingNonce []byte
+			var blocksProcessed int
+			runningNonce := snapshotNonce
+			// Track expected previous hash for batch processing - updated after each block
+			expectedPrevHash := snapshotTipHash
+
 			err = ls.SubmitAsyncDBTxn(func(txn *database.Txn) error {
 				deltaBatch = NewLedgerDeltaBatch()
 				for offset, next := range nextBatch[i:end] {
@@ -1261,8 +1418,8 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 						Hash: next.Hash().Bytes(),
 					}
 					// End processing of batch and cache remainder if we get a block from after the current epoch end, or if we need the initial epoch
-					if tmpPoint.Slot >= (ls.currentEpoch.StartSlot+uint64(ls.currentEpoch.LengthInSlots)) ||
-						ls.currentEpoch.SlotLength == 0 {
+					if tmpPoint.Slot >= (snapshotEpoch.StartSlot+uint64(snapshotEpoch.LengthInSlots)) ||
+						snapshotEpoch.SlotLength == 0 {
 						needsEpochRollover = true
 						nextEpochEraId = uint(next.Era().Id)
 						// Cache rest of the batch for next loop
@@ -1275,10 +1432,9 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 					if !shouldValidate && i == 0 {
 						var cutoffSlot uint64
 						stabilityWindow := ls.calculateStabilityWindow()
-						currentTipSlot := ls.currentTip.Point.Slot
 						blockSlot := next.SlotNumber()
-						if currentTipSlot >= stabilityWindow {
-							cutoffSlot = currentTipSlot - stabilityWindow
+						if snapshotTipSlot >= stabilityWindow {
+							cutoffSlot = snapshotTipSlot - stabilityWindow
 						} else {
 							cutoffSlot = 0
 						}
@@ -1293,6 +1449,7 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 						tmpPoint,
 						next,
 						shouldValidate,
+						expectedPrevHash,
 					)
 					if err != nil {
 						deltaBatch.Release()
@@ -1301,19 +1458,22 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 					if delta != nil {
 						deltaBatch.addDelta(delta)
 					}
-					// Update tip
-					ls.currentTip = ochainsync.Tip{
+					// Update expected prev hash for next block in batch
+					expectedPrevHash = tmpPoint.Hash
+					// Track pending tip (will be committed after txn succeeds)
+					pendingTip = ochainsync.Tip{
 						Point:       tmpPoint,
 						BlockNumber: next.BlockNumber(),
 					}
+					blocksProcessed++
 					// Calculate block rolling nonce
 					var blockNonce []byte
-					if ls.currentEra.CalculateEtaVFunc != nil {
+					if snapshotEra.CalculateEtaVFunc != nil {
 						tmpEra := eras.Eras[next.Era().Id]
 						if tmpEra.CalculateEtaVFunc != nil {
 							tmpNonce, err := tmpEra.CalculateEtaVFunc(
 								ls.config.CardanoNodeConfig,
-								ls.currentTipBlockNonce,
+								runningNonce,
 								next,
 							)
 							if err != nil {
@@ -1321,6 +1481,7 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 								return fmt.Errorf("calculate etaV: %w", err)
 							}
 							blockNonce = tmpNonce
+							runningNonce = tmpNonce
 						}
 					}
 					// TODO: batch this
@@ -1333,10 +1494,10 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 
 					// First block we persist in the current epoch becomes the checkpoint
 					isCheckpoint := false
-					if tmpEpoch.EpochId == ls.currentEpoch.EpochId &&
-						!ls.checkpointWrittenForEpoch {
+					if tmpEpoch.EpochId == snapshotEpoch.EpochId &&
+						!localCheckpointWritten {
 						isCheckpoint = true
-						ls.checkpointWrittenForEpoch = true
+						localCheckpointWritten = true
 					}
 					// Store block nonce in the DB
 					if len(blockNonce) > 0 {
@@ -1351,8 +1512,8 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 							deltaBatch.Release()
 							return err
 						}
-						// Update tip block nonce
-						ls.currentTipBlockNonce = blockNonce
+						// Track pending nonce (will be committed after txn succeeds)
+						pendingNonce = blockNonce
 					}
 				}
 				// Apply delta batch
@@ -1361,21 +1522,33 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 					return err
 				}
 				deltaBatch.Release()
-				// Update tip in database
-				if err := ls.db.SetTip(ls.currentTip, txn); err != nil {
-					return fmt.Errorf("failed to set tip: %w", err)
+				// Update tip in database only if blocks were processed
+				if blocksProcessed > 0 {
+					if err := ls.db.SetTip(pendingTip, txn); err != nil {
+						return fmt.Errorf("failed to set tip: %w", err)
+					}
 				}
-				ls.updateTipMetrics()
 				return nil
 			}, true)
 			if err != nil {
-				ls.Unlock()
 				ls.config.Logger.Error(
 					"failed to process block: " + err.Error(),
 				)
 				return
 			}
-			ls.Unlock()
+			// Transaction committed successfully - now update in-memory state.
+			// Only update if blocks were actually processed to avoid resetting tip to zero.
+			if blocksProcessed > 0 {
+				// Brief lock to ensure readers see consistent state.
+				ls.Lock()
+				ls.currentTip = pendingTip
+				if len(pendingNonce) > 0 {
+					ls.currentTipBlockNonce = pendingNonce
+				}
+				ls.checkpointWrittenForEpoch = localCheckpointWritten
+				ls.updateTipMetrics()
+				ls.Unlock()
+			}
 			if needsEpochRollover {
 				break
 			}
@@ -1399,19 +1572,20 @@ func (ls *LedgerState) ledgerProcessBlock(
 	point ocommon.Point,
 	block ledger.Block,
 	shouldValidate bool,
+	expectedPrevHash []byte,
 ) (*LedgerDelta, error) {
 	// Check that we're processing things in order
-	if len(ls.currentTip.Point.Hash) > 0 {
+	if len(expectedPrevHash) > 0 {
 		if string(
 			block.PrevHash().Bytes(),
 		) != string(
-			ls.currentTip.Point.Hash,
+			expectedPrevHash,
 		) {
 			return nil, fmt.Errorf(
 				"block %s (with prev hash %s) does not fit on current chain tip (%x)",
 				block.Hash().String(),
 				block.PrevHash().String(),
-				ls.currentTip.Point.Hash,
+				expectedPrevHash,
 			)
 		}
 	}
@@ -1592,15 +1766,40 @@ func (ls *LedgerState) loadEpochs(txn *database.Txn) error {
 	// Initialize current era to Byron when starting from genesis
 	ls.currentEra = eras.Eras[0] // Byron era
 	// Transition through every era between the current and the target era
+	// During startup, it's safe to apply results immediately since there's
+	// no concurrent access.
 	for nextEraId := ls.currentEra.Id + 1; nextEraId <= startEra.Id; nextEraId++ {
-		if err := ls.transitionToEra(txn, nextEraId, ls.currentEpoch.EpochId, ls.currentEpoch.StartSlot+uint64(ls.currentEpoch.LengthInSlots)); err != nil {
+		result, err := ls.transitionToEra(
+			txn,
+			nextEraId,
+			ls.currentEpoch.EpochId,
+			ls.currentEpoch.StartSlot+uint64(ls.currentEpoch.LengthInSlots),
+			ls.currentPParams,
+		)
+		if err != nil {
 			return err
 		}
+		// Apply result immediately during startup
+		ls.currentPParams = result.NewPParams
+		ls.currentEra = result.NewEra
 	}
 	// Generate initial epoch
-	if err := ls.processEpochRollover(txn); err != nil {
+	rolloverResult, err := ls.processEpochRollover(
+		txn,
+		ls.currentEpoch,
+		ls.currentEra,
+		ls.currentPParams,
+	)
+	if err != nil {
 		return err
 	}
+	// Apply result immediately during startup
+	ls.epochCache = rolloverResult.NewEpochCache
+	ls.currentEpoch = rolloverResult.NewCurrentEpoch
+	ls.currentEra = rolloverResult.NewCurrentEra
+	ls.currentPParams = rolloverResult.NewCurrentPParams
+	ls.checkpointWrittenForEpoch = rolloverResult.CheckpointWrittenForEpoch
+	ls.metrics.epochNum.Set(rolloverResult.NewEpochNum)
 	return nil
 }
 
@@ -1609,19 +1808,25 @@ func (ls *LedgerState) loadTip() error {
 	if err != nil {
 		return err
 	}
-	ls.currentTip = tmpTip
-	// Load tip block and set cached block nonce
-	if ls.currentTip.Point.Slot > 0 {
-		tipNonce, err := ls.db.GetBlockNonce(
+	// Load tip block nonce before acquiring lock
+	var tipNonce []byte
+	if tmpTip.Point.Slot > 0 {
+		tipNonce, err = ls.db.GetBlockNonce(
 			tmpTip.Point,
 			nil,
 		)
 		if err != nil {
 			return err
 		}
+	}
+	// Lock only for in-memory state updates
+	ls.Lock()
+	ls.currentTip = tmpTip
+	if tmpTip.Point.Slot > 0 {
 		ls.currentTipBlockNonce = tipNonce
 	}
 	ls.updateTipMetrics()
+	ls.Unlock()
 	return nil
 }
 
@@ -1712,6 +1917,8 @@ func (ls *LedgerState) GetChainFromPoint(
 
 // Tip returns the current chain tip
 func (ls *LedgerState) Tip() ochainsync.Tip {
+	ls.RLock()
+	defer ls.RUnlock()
 	return ls.currentTip
 }
 

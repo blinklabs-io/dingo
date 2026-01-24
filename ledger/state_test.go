@@ -986,6 +986,595 @@ func TestDatabaseWorkerPoolResultChannelFull(t *testing.T) {
 	assert.Equal(t, int32(3), completedCount.Load())
 }
 
+// TestTransitionToEra_ReturnsResultWithoutMutating tests that transitionToEra
+// returns computed state without mutating LedgerState fields
+func TestTransitionToEra_ReturnsResultWithoutMutating(t *testing.T) {
+	// Setup: Create genesis configs for the transition
+	byronGenesisJSON := `{
+		"protocolConsts": {
+			"k": 432,
+			"protocolMagic": 2
+		}
+	}`
+	shelleyGenesisJSON := `{
+		"activeSlotsCoeff": 0.05,
+		"securityParam": 432,
+		"epochLength": 432000,
+		"slotLength": 1,
+		"protocolParams": {
+			"protocolVersion": {"major": 2, "minor": 0},
+			"decentralisationParam": 1,
+			"maxBlockBodySize": 65536,
+			"maxBlockHeaderSize": 1100,
+			"maxTxSize": 16384,
+			"minFeeA": 44,
+			"minFeeB": 155381,
+			"minUTxOValue": 1000000,
+			"keyDeposit": 2000000,
+			"poolDeposit": 500000000,
+			"eMax": 18,
+			"nOpt": 150,
+			"a0": 0.3,
+			"rho": 0.003,
+			"tau": 0.2,
+			"minPoolCost": 340000000
+		},
+		"systemStart": "2022-10-25T00:00:00Z"
+	}`
+
+	cfg := &cardano.CardanoNodeConfig{}
+	require.NoError(t, cfg.LoadByronGenesisFromReader(strings.NewReader(byronGenesisJSON)))
+	require.NoError(t, cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)))
+
+	// Create in-memory database
+	db, err := database.New(&database.Config{
+		BlobPlugin:     "badger",
+		MetadataPlugin: "sqlite",
+		DataDir:        "",
+	})
+	require.NoError(t, err)
+	defer db.Close()
+
+	ls := &LedgerState{
+		db:             db,
+		currentEra:     eras.ByronEraDesc,
+		currentPParams: nil, // Start with nil
+		config: LedgerStateConfig{
+			CardanoNodeConfig: cfg,
+			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+
+	// Capture original state
+	originalEra := ls.currentEra
+	originalPParams := ls.currentPParams
+
+	// Execute transition in a transaction
+	txn := db.Transaction(true)
+	err = txn.Do(func(txn *database.Txn) error {
+		result, err := ls.transitionToEra(
+			txn,
+			eras.ShelleyEraDesc.Id,
+			0,    // startEpoch
+			0,    // addedSlot
+			nil,  // currentPParams (Byron has none)
+		)
+		if err != nil {
+			return err
+		}
+
+		// Verify result contains expected values
+		assert.NotNil(t, result)
+		assert.Equal(t, eras.ShelleyEraDesc.Id, result.NewEra.Id)
+		assert.Equal(t, "Shelley", result.NewEra.Name)
+		// Shelley transition creates protocol parameters
+		assert.NotNil(t, result.NewPParams)
+
+		// Verify LedgerState was NOT mutated
+		assert.Equal(t, originalEra.Id, ls.currentEra.Id, "currentEra should not be mutated")
+		assert.Equal(t, originalPParams, ls.currentPParams, "currentPParams should not be mutated")
+
+		return nil
+	})
+	require.NoError(t, err)
+}
+
+// TestTransitionToEra_ChainedTransitions tests multiple era transitions in sequence
+func TestTransitionToEra_ChainedTransitions(t *testing.T) {
+	byronGenesisJSON := `{
+		"protocolConsts": {
+			"k": 432,
+			"protocolMagic": 2
+		}
+	}`
+	shelleyGenesisJSON := `{
+		"activeSlotsCoeff": 0.05,
+		"securityParam": 432,
+		"epochLength": 432000,
+		"slotLength": 1,
+		"protocolParams": {
+			"protocolVersion": {"major": 2, "minor": 0},
+			"decentralisationParam": 1,
+			"maxBlockBodySize": 65536,
+			"maxBlockHeaderSize": 1100,
+			"maxTxSize": 16384,
+			"minFeeA": 44,
+			"minFeeB": 155381,
+			"minUTxOValue": 1000000,
+			"keyDeposit": 2000000,
+			"poolDeposit": 500000000,
+			"eMax": 18,
+			"nOpt": 150,
+			"a0": 0.3,
+			"rho": 0.003,
+			"tau": 0.2,
+			"minPoolCost": 340000000
+		},
+		"systemStart": "2022-10-25T00:00:00Z"
+	}`
+
+	cfg := &cardano.CardanoNodeConfig{}
+	require.NoError(t, cfg.LoadByronGenesisFromReader(strings.NewReader(byronGenesisJSON)))
+	require.NoError(t, cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)))
+
+	db, err := database.New(&database.Config{
+		BlobPlugin:     "badger",
+		MetadataPlugin: "sqlite",
+		DataDir:        "",
+	})
+	require.NoError(t, err)
+	defer db.Close()
+
+	ls := &LedgerState{
+		db:         db,
+		currentEra: eras.ByronEraDesc,
+		config: LedgerStateConfig{
+			CardanoNodeConfig: cfg,
+			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+
+	// Chain transitions from Byron -> Shelley -> Allegra
+	txn := db.Transaction(true)
+	err = txn.Do(func(txn *database.Txn) error {
+		// Track working state as we chain transitions
+		workingPParams := ls.currentPParams
+
+		// Byron -> Shelley
+		result1, err := ls.transitionToEra(txn, eras.ShelleyEraDesc.Id, 0, 0, workingPParams)
+		require.NoError(t, err)
+		workingPParams = result1.NewPParams
+
+		// Shelley -> Allegra
+		result2, err := ls.transitionToEra(txn, eras.AllegraEraDesc.Id, 1, 432000, workingPParams)
+		require.NoError(t, err)
+
+		// Verify final result
+		assert.Equal(t, eras.AllegraEraDesc.Id, result2.NewEra.Id)
+		assert.NotNil(t, result2.NewPParams)
+
+		// Verify LedgerState still has original Byron era
+		assert.Equal(t, eras.ByronEraDesc.Id, ls.currentEra.Id)
+
+		return nil
+	})
+	require.NoError(t, err)
+}
+
+// TestEpochRolloverResult_FieldsPopulated tests that EpochRolloverResult
+// contains all expected fields after processEpochRollover
+func TestEpochRolloverResult_FieldsPopulated(t *testing.T) {
+	byronGenesisJSON := `{
+		"protocolConsts": {
+			"k": 432,
+			"protocolMagic": 2
+		}
+	}`
+	shelleyGenesisJSON := `{
+		"activeSlotsCoeff": 0.05,
+		"securityParam": 432,
+		"epochLength": 432000,
+		"slotLength": 1,
+		"protocolParams": {
+			"protocolVersion": {"major": 2, "minor": 0},
+			"decentralisationParam": 1,
+			"maxBlockBodySize": 65536,
+			"maxBlockHeaderSize": 1100,
+			"maxTxSize": 16384,
+			"minFeeA": 44,
+			"minFeeB": 155381,
+			"minUTxOValue": 1000000,
+			"keyDeposit": 2000000,
+			"poolDeposit": 500000000,
+			"eMax": 18,
+			"nOpt": 150,
+			"a0": 0.3,
+			"rho": 0.003,
+			"tau": 0.2,
+			"minPoolCost": 340000000
+		},
+		"systemStart": "2022-10-25T00:00:00Z"
+	}`
+	shelleyGenesisHash := "363498d1024f84bb39d3fa9593ce391483cb40d479b87233f868d6e57c3a400d"
+
+	cfg := &cardano.CardanoNodeConfig{
+		ShelleyGenesisHash: shelleyGenesisHash,
+	}
+	require.NoError(t, cfg.LoadByronGenesisFromReader(strings.NewReader(byronGenesisJSON)))
+	require.NoError(t, cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)))
+
+	db, err := database.New(&database.Config{
+		BlobPlugin:     "badger",
+		MetadataPlugin: "sqlite",
+		DataDir:        "",
+	})
+	require.NoError(t, err)
+	defer db.Close()
+
+	ls := &LedgerState{
+		db:         db,
+		currentEra: eras.ShelleyEraDesc,
+		currentEpoch: models.Epoch{
+			EpochId:       0,
+			StartSlot:     0,
+			SlotLength:    0, // Triggers initial epoch creation
+			LengthInSlots: 0,
+		},
+		config: LedgerStateConfig{
+			CardanoNodeConfig: cfg,
+			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+
+	// Execute epoch rollover for initial epoch
+	txn := db.Transaction(true)
+	err = txn.Do(func(txn *database.Txn) error {
+		result, err := ls.processEpochRollover(
+			txn,
+			ls.currentEpoch,
+			ls.currentEra,
+			ls.currentPParams,
+		)
+		require.NoError(t, err)
+
+		// Verify result fields are populated
+		assert.NotNil(t, result)
+		assert.NotEmpty(t, result.NewEpochCache, "NewEpochCache should be populated")
+		assert.Equal(t, uint64(0), result.NewCurrentEpoch.EpochId)
+		assert.Equal(t, false, result.CheckpointWrittenForEpoch)
+
+		// Verify LedgerState was NOT mutated
+		assert.Equal(t, uint64(0), ls.currentEpoch.EpochId)
+		assert.Empty(t, ls.epochCache, "epochCache should not be mutated")
+
+		return nil
+	})
+	require.NoError(t, err)
+}
+
+// TestEpochRollover_NoDeadlockDuringTransaction tests that epoch rollover
+// does not hold LedgerState lock during database operations.
+// This simulates the scenario that caused the original deadlock.
+func TestEpochRollover_NoDeadlockDuringTransaction(t *testing.T) {
+	byronGenesisJSON := `{
+		"protocolConsts": {
+			"k": 432,
+			"protocolMagic": 2
+		}
+	}`
+	shelleyGenesisJSON := `{
+		"activeSlotsCoeff": 0.05,
+		"securityParam": 432,
+		"epochLength": 432000,
+		"slotLength": 1,
+		"protocolParams": {
+			"protocolVersion": {"major": 2, "minor": 0},
+			"decentralisationParam": 1,
+			"maxBlockBodySize": 65536,
+			"maxBlockHeaderSize": 1100,
+			"maxTxSize": 16384,
+			"minFeeA": 44,
+			"minFeeB": 155381,
+			"minUTxOValue": 1000000,
+			"keyDeposit": 2000000,
+			"poolDeposit": 500000000,
+			"eMax": 18,
+			"nOpt": 150,
+			"a0": 0.3,
+			"rho": 0.003,
+			"tau": 0.2,
+			"minPoolCost": 340000000
+		},
+		"systemStart": "2022-10-25T00:00:00Z"
+	}`
+	shelleyGenesisHash := "363498d1024f84bb39d3fa9593ce391483cb40d479b87233f868d6e57c3a400d"
+
+	cfg := &cardano.CardanoNodeConfig{
+		ShelleyGenesisHash: shelleyGenesisHash,
+	}
+	require.NoError(t, cfg.LoadByronGenesisFromReader(strings.NewReader(byronGenesisJSON)))
+	require.NoError(t, cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)))
+
+	db, err := database.New(&database.Config{
+		BlobPlugin:     "badger",
+		MetadataPlugin: "sqlite",
+		DataDir:        "",
+	})
+	require.NoError(t, err)
+	defer db.Close()
+
+	ls := &LedgerState{
+		db:         db,
+		currentEra: eras.ShelleyEraDesc,
+		currentEpoch: models.Epoch{
+			EpochId:       0,
+			StartSlot:     0,
+			SlotLength:    0,
+			LengthInSlots: 0,
+		},
+		config: LedgerStateConfig{
+			CardanoNodeConfig: cfg,
+			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+
+	// This test verifies that the pattern doesn't deadlock:
+	// 1. Take RLock to capture snapshot
+	// 2. Release RLock
+	// 3. Execute transaction (which might need to acquire lock in recovery)
+	// 4. Take Lock briefly to apply results
+	// 5. Release Lock
+
+	errChan := make(chan error, 1)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+
+		// Step 1: Capture snapshot with RLock
+		ls.RLock()
+		snapshotEra := ls.currentEra
+		snapshotEpoch := ls.currentEpoch
+		snapshotPParams := ls.currentPParams
+		ls.RUnlock()
+
+		// Step 2: Execute transaction WITHOUT holding lock
+		var result *EpochRolloverResult
+		txn := db.Transaction(true)
+		err := txn.Do(func(txn *database.Txn) error {
+			var err error
+			result, err = ls.processEpochRollover(
+				txn,
+				snapshotEpoch,
+				snapshotEra,
+				snapshotPParams,
+			)
+			return err
+		})
+		if err != nil {
+			errChan <- err
+			return
+		}
+
+		// Step 3: Apply results with brief Lock
+		ls.Lock()
+		if result != nil {
+			ls.epochCache = result.NewEpochCache
+			ls.currentEpoch = result.NewCurrentEpoch
+			ls.currentEra = result.NewCurrentEra
+		}
+		ls.Unlock()
+	}()
+
+	// If this test times out, we have a deadlock
+	select {
+	case <-done:
+		// Success - no deadlock
+		select {
+		case err := <-errChan:
+			require.NoError(t, err)
+		default:
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("deadlock detected - epoch rollover did not complete in time")
+	}
+}
+
+// TestEpochRollover_ConcurrentReaders tests that the epoch rollover pattern
+// allows concurrent readers during the transaction phase
+func TestEpochRollover_ConcurrentReaders(t *testing.T) {
+	byronGenesisJSON := `{
+		"protocolConsts": {
+			"k": 432,
+			"protocolMagic": 2
+		}
+	}`
+	shelleyGenesisJSON := `{
+		"activeSlotsCoeff": 0.05,
+		"securityParam": 432,
+		"epochLength": 432000,
+		"slotLength": 1,
+		"protocolParams": {
+			"protocolVersion": {"major": 2, "minor": 0},
+			"decentralisationParam": 1,
+			"maxBlockBodySize": 65536,
+			"maxBlockHeaderSize": 1100,
+			"maxTxSize": 16384,
+			"minFeeA": 44,
+			"minFeeB": 155381,
+			"minUTxOValue": 1000000,
+			"keyDeposit": 2000000,
+			"poolDeposit": 500000000,
+			"eMax": 18,
+			"nOpt": 150,
+			"a0": 0.3,
+			"rho": 0.003,
+			"tau": 0.2,
+			"minPoolCost": 340000000
+		},
+		"systemStart": "2022-10-25T00:00:00Z"
+	}`
+	shelleyGenesisHash := "363498d1024f84bb39d3fa9593ce391483cb40d479b87233f868d6e57c3a400d"
+
+	cfg := &cardano.CardanoNodeConfig{
+		ShelleyGenesisHash: shelleyGenesisHash,
+	}
+	require.NoError(t, cfg.LoadByronGenesisFromReader(strings.NewReader(byronGenesisJSON)))
+	require.NoError(t, cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)))
+
+	db, err := database.New(&database.Config{
+		BlobPlugin:     "badger",
+		MetadataPlugin: "sqlite",
+		DataDir:        "",
+	})
+	require.NoError(t, err)
+	defer db.Close()
+
+	ls := &LedgerState{
+		db:         db,
+		currentEra: eras.ShelleyEraDesc,
+		currentEpoch: models.Epoch{
+			EpochId:       0,
+			StartSlot:     0,
+			SlotLength:    0,
+			LengthInSlots: 0,
+		},
+		config: LedgerStateConfig{
+			CardanoNodeConfig: cfg,
+			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+
+	var wg sync.WaitGroup
+	readCount := atomic.Int32{}
+	txnStarted := make(chan struct{})
+	txnDone := make(chan struct{})
+	rolloverErr := make(chan error, 1)
+
+	// Start the epoch rollover goroutine
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+
+		// Capture snapshot
+		ls.RLock()
+		snapshotEra := ls.currentEra
+		snapshotEpoch := ls.currentEpoch
+		snapshotPParams := ls.currentPParams
+		ls.RUnlock()
+
+		// Signal that transaction is starting
+		close(txnStarted)
+
+		// Execute transaction (simulates DB work)
+		var result *EpochRolloverResult
+		txn := db.Transaction(true)
+		err := txn.Do(func(txn *database.Txn) error {
+			// Add a small delay to give readers time to run
+			time.Sleep(50 * time.Millisecond)
+			var err error
+			result, err = ls.processEpochRollover(
+				txn,
+				snapshotEpoch,
+				snapshotEra,
+				snapshotPParams,
+			)
+			return err
+		})
+		if err != nil {
+			rolloverErr <- err
+			close(txnDone)
+			return
+		}
+
+		// Apply results
+		ls.Lock()
+		if result != nil {
+			ls.epochCache = result.NewEpochCache
+			ls.currentEpoch = result.NewCurrentEpoch
+		}
+		ls.Unlock()
+
+		close(txnDone)
+	}()
+
+	// Start multiple reader goroutines that try to read during the transaction
+	for i := 0; i < 5; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+
+			// Wait for transaction to start
+			<-txnStarted
+
+			// Try to read multiple times during the transaction
+			for j := 0; j < 10; j++ {
+				select {
+				case <-txnDone:
+					return
+				default:
+					ls.RLock()
+					_ = ls.currentEra    // Read era
+					_ = ls.currentEpoch  // Read epoch
+					readCount.Add(1)
+					ls.RUnlock()
+					time.Sleep(5 * time.Millisecond)
+				}
+			}
+		}()
+	}
+
+	// Wait for all goroutines with timeout
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// Success - check for rollover error
+		select {
+		case err := <-rolloverErr:
+			require.NoError(t, err)
+		default:
+		}
+		assert.Greater(t, readCount.Load(), int32(0), "readers should have been able to read during transaction")
+	case <-time.After(10 * time.Second):
+		t.Fatal("timeout - possible deadlock with concurrent readers")
+	}
+}
+
+// TestTransitionToEra_ErrorHandling tests error conditions in transitionToEra
+func TestTransitionToEra_ErrorHandling(t *testing.T) {
+	t.Run("invalid era ID panics", func(t *testing.T) {
+		db, err := database.New(&database.Config{
+			BlobPlugin:     "badger",
+			MetadataPlugin: "sqlite",
+			DataDir:        "",
+		})
+		require.NoError(t, err)
+		defer db.Close()
+
+		ls := &LedgerState{
+			db:         db,
+			currentEra: eras.ByronEraDesc,
+			config: LedgerStateConfig{
+				Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+			},
+		}
+
+		// Attempting to transition to an invalid era ID should panic
+		// because eras.Eras[invalidId] will be out of bounds
+		assert.Panics(t, func() {
+			txn := db.Transaction(true)
+			_ = txn.Do(func(txn *database.Txn) error {
+				_, _ = ls.transitionToEra(txn, 999, 0, 0, nil)
+				return nil
+			})
+		})
+	})
+}
+
 // makeTestBlock creates a test block with deterministic hash based on slot
 func makeTestBlock(slot, id uint64) models.Block {
 	// Create deterministic hash from slot
