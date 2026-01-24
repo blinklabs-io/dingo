@@ -416,6 +416,19 @@ func (c *Chain) FromPoint(
 	return iter, nil
 }
 
+// removeIterator removes an iterator from the chain's iterator list.
+// This is called when an iterator is cancelled to prevent memory leaks.
+func (c *Chain) removeIterator(iter *ChainIterator) {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	for i, it := range c.iterators {
+		if it == iter {
+			c.iterators = slices.Delete(c.iterators, i, i+1)
+			return
+		}
+	}
+}
+
 func (c *Chain) BlockByPoint(
 	point ocommon.Point,
 	txn *database.Txn,

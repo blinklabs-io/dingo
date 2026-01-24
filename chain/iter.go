@@ -74,4 +74,8 @@ func (ci *ChainIterator) Cancel() {
 	if ci.cancel != nil {
 		ci.cancel()
 	}
+	// Remove from chain's iterator list to prevent memory leak
+	if ci.chain != nil {
+		ci.chain.removeIterator(ci)
+	}
 }
