@@ -37,8 +37,15 @@ func (ls *LedgerState) SlotToTime(slot uint64) (time.Time, error) {
 	if slot == 0 {
 		return slotTime, nil
 	}
+	// Make a deep copy of epochCache while holding the read lock to avoid
+	// data races with concurrent writers
+	ls.RLock()
+	epochCacheCopy := make([]models.Epoch, len(ls.epochCache))
+	copy(epochCacheCopy, ls.epochCache)
+	ls.RUnlock()
+
 	foundSlot := false
-	for _, epoch := range ls.epochCache {
+	for _, epoch := range epochCacheCopy {
 		if epoch.StartSlot > math.MaxInt64 ||
 			epoch.LengthInSlots > math.MaxInt64 ||
 			epoch.SlotLength > math.MaxInt64 {
@@ -63,7 +70,7 @@ func (ls *LedgerState) SlotToTime(slot uint64) (time.Time, error) {
 	}
 	if !foundSlot {
 		// Project the current slot length forward to calculate future slots
-		lastEpoch := ls.epochCache[len(ls.epochCache)-1]
+		lastEpoch := epochCacheCopy[len(epochCacheCopy)-1]
 		leftoverSlots := slot - (lastEpoch.StartSlot + uint64(lastEpoch.LengthInSlots))
 		slotTime = slotTime.Add(
 			// nolint:gosec
@@ -84,7 +91,14 @@ func (ls *LedgerState) TimeToSlot(t time.Time) (uint64, error) {
 	epochStartTime := shelleyGenesis.SystemStart
 	var timeSlot uint64
 	foundTime := false
-	for _, epoch := range ls.epochCache {
+	// Make a deep copy of epochCache while holding the read lock to avoid
+	// data races with concurrent writers
+	ls.RLock()
+	epochCacheCopy := make([]models.Epoch, len(ls.epochCache))
+	copy(epochCacheCopy, ls.epochCache)
+	ls.RUnlock()
+
+	for _, epoch := range epochCacheCopy {
 		if epoch.LengthInSlots > math.MaxInt64 ||
 			epoch.SlotLength > math.MaxInt64 {
 			return 0, errors.New(
@@ -140,7 +154,14 @@ func (ls *LedgerState) TimeToSlot(t time.Time) (uint64, error) {
 
 // SlotToEpoch returns a known epoch by slot number
 func (ls *LedgerState) SlotToEpoch(slot uint64) (models.Epoch, error) {
-	for _, epoch := range ls.epochCache {
+	// Make a deep copy of epochCache while holding the read lock to avoid
+	// data races with concurrent writers
+	ls.RLock()
+	epochCacheCopy := make([]models.Epoch, len(ls.epochCache))
+	copy(epochCacheCopy, ls.epochCache)
+	ls.RUnlock()
+
+	for _, epoch := range epochCacheCopy {
 		if slot < epoch.StartSlot {
 			continue
 		}
