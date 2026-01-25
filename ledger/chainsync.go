@@ -663,6 +663,16 @@ func (ls *LedgerState) blockfetchRequestRangeStart(
 	ls.chainsyncBlockfetchReadyChan = make(chan struct{})
 	ls.chainsyncBlockfetchReadyMutex.Unlock()
 
+	// Stop any existing timer before creating a new one
+	if ls.chainsyncBlockfetchTimeoutTimer != nil {
+		ls.chainsyncBlockfetchTimeoutTimer.Stop()
+		ls.chainsyncBlockfetchTimeoutTimer = nil
+	}
+
+	// Increment generation counter to invalidate any pending timer callbacks
+	ls.chainsyncBlockfetchTimerGeneration++
+	currentGeneration := ls.chainsyncBlockfetchTimerGeneration
+
 	// Start timeout timer for blockfetch operation
 	// The timer fires if no blocks are received within blockfetchBusyTimeout
 	// Each received block resets the timer in handleEventBlockfetchBlock
@@ -671,8 +681,8 @@ func (ls *LedgerState) blockfetchRequestRangeStart(
 		func() {
 			ls.chainsyncBlockfetchMutex.Lock()
 			defer ls.chainsyncBlockfetchMutex.Unlock()
-			// Check if timer was already handled (e.g., by batch done or reset race)
-			if ls.chainsyncBlockfetchTimeoutTimer == nil {
+			// Check if this timer callback is stale (a newer timer was started)
+			if ls.chainsyncBlockfetchTimerGeneration != currentGeneration {
 				return
 			}
 			ls.blockfetchRequestRangeCleanup(true)
@@ -690,11 +700,13 @@ func (ls *LedgerState) blockfetchRequestRangeStart(
 }
 
 func (ls *LedgerState) blockfetchRequestRangeCleanup(resetFlags bool) {
-	// Stop the timeout timer if running
+	// Stop the timeout timer if running and invalidate any pending callbacks
 	if ls.chainsyncBlockfetchTimeoutTimer != nil {
 		ls.chainsyncBlockfetchTimeoutTimer.Stop()
 		ls.chainsyncBlockfetchTimeoutTimer = nil
 	}
+	// Increment generation to ensure any pending timer callbacks are ignored
+	ls.chainsyncBlockfetchTimerGeneration++
 	// Reset buffer
 	ls.chainsyncBlockEvents = slices.Delete(
 		ls.chainsyncBlockEvents,
@@ -716,11 +728,12 @@ func (ls *LedgerState) blockfetchRequestRangeCleanup(resetFlags bool) {
 }
 
 func (ls *LedgerState) handleEventBlockfetchBatchDone(e BlockfetchEvent) error {
-	// Stop the blockfetch timeout timer
+	// Stop the blockfetch timeout timer and invalidate any pending callbacks
 	if ls.chainsyncBlockfetchTimeoutTimer != nil {
 		ls.chainsyncBlockfetchTimeoutTimer.Stop()
 		ls.chainsyncBlockfetchTimeoutTimer = nil
 	}
+	ls.chainsyncBlockfetchTimerGeneration++
 	// Process pending block events
 	if err := ls.processBlockEvents(); err != nil {
 		ls.blockfetchRequestRangeCleanup(true)
