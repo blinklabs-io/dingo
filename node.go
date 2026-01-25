@@ -108,6 +108,7 @@ func (n *Node) Run(ctx context.Context) error {
 		PromRegistry:   n.config.promRegistry,
 		BlobPlugin:     n.config.blobPlugin,
 		MetadataPlugin: n.config.metadataPlugin,
+		MaxConnections: n.config.DatabaseWorkerPoolConfig.WorkerPoolSize,
 	}
 	db, err := database.New(dbConfig)
 	if db == nil {

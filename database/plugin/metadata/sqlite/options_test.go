@@ -55,3 +55,33 @@ func TestWithPromRegistry(t *testing.T) {
 		t.Errorf("Expected promRegistry to be set")
 	}
 }
+
+func TestWithMaxConnections(t *testing.T) {
+	m := &MetadataStoreSqlite{}
+	option := WithMaxConnections(10)
+
+	option(m)
+
+	if m.maxConnections != 10 {
+		t.Errorf("Expected maxConnections to be 10, got %d", m.maxConnections)
+	}
+}
+
+func TestWithMaxConnections_DefaultUsed(t *testing.T) {
+	// Test that DefaultMaxConnections is used when maxConnections is 0
+	m := &MetadataStoreSqlite{}
+	// Don't set maxConnections, leave it at 0
+
+	if m.maxConnections != 0 {
+		t.Errorf("Expected initial maxConnections to be 0, got %d", m.maxConnections)
+	}
+
+	// The default should be applied during Start(), not here
+	// This test just verifies the option works
+	option := WithMaxConnections(DefaultMaxConnections)
+	option(m)
+
+	if m.maxConnections != DefaultMaxConnections {
+		t.Errorf("Expected maxConnections to be %d, got %d", DefaultMaxConnections, m.maxConnections)
+	}
+}

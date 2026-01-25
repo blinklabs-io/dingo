@@ -44,3 +44,12 @@ func WithDataDir(dataDir string) SqliteOptionFunc {
 		m.dataDir = dataDir
 	}
 }
+
+// WithMaxConnections specifies the maximum number of database connections.
+// This should match the DatabaseWorkers configuration to avoid connection
+// pool exhaustion or unnecessary contention on SQLite's lock infrastructure.
+func WithMaxConnections(maxConnections int) SqliteOptionFunc {
+	return func(m *MetadataStoreSqlite) {
+		m.maxConnections = maxConnections
+	}
+}

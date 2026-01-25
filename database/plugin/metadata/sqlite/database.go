@@ -89,13 +89,14 @@ func (t *sqliteTxn) Rollback() error {
 
 // MetadataStoreSqlite stores all data in sqlite. Data may not be persisted
 type MetadataStoreSqlite struct {
-	promRegistry prometheus.Registerer
-	db           *gorm.DB
-	logger       *slog.Logger
-	timerVacuum  *time.Timer
-	dataDir      string
-	timerMutex   sync.Mutex
-	closed       bool
+	promRegistry   prometheus.Registerer
+	db             *gorm.DB
+	logger         *slog.Logger
+	timerVacuum    *time.Timer
+	dataDir        string
+	maxConnections int
+	timerMutex     sync.Mutex
+	closed         bool
 }
 
 // New creates a new database
@@ -197,8 +198,16 @@ func (d *MetadataStoreSqlite) Start() error {
 	var err error
 	if d.dataDir == "" {
 		// No dataDir, use in-memory config
+		// In-memory databases require cache=shared to be accessible from
+		// multiple connections. This is needed for tests that verify
+		// concurrent transaction behavior.
+		//
+		// Note: cache=shared can cause SQLITE_LOCKED with concurrent writes,
+		// but in-memory databases are only used for testing where write
+		// concurrency is controlled. The production file-based database
+		// uses WAL mode which handles concurrency properly.
 		metadataDb, err = gorm.Open(
-			sqlite.Open("file::memory:?cache=shared&_pragma=foreign_keys(1)"),
+			sqlite.Open("file::memory:?cache=shared&_pragma=busy_timeout(30000)&_pragma=foreign_keys(1)"),
 			&gorm.Config{
 				Logger:                 gormlogger.Discard,
 				SkipDefaultTransaction: true,
@@ -226,14 +235,28 @@ func (d *MetadataStoreSqlite) Start() error {
 		)
 		// Use default settings. Include PRAGMA/query parameters on the DSN
 		// to enable WAL mode, reduce synchronous writes for performance, and
-		// set a larger negative cache size (shared cache) which historically
-		// improved metadata sync and throughput. These settings mirror the
-		// previously-used pragma fragment and are intentionally applied here
-		// to preserve observed performance characteristics.
+		// set a larger negative cache size which historically improved
+		// metadata sync and throughput.
+		//
+		// Note: We intentionally do NOT use cache=shared because it causes
+		// SQLITE_LOCKED (error 6) conflicts with connection pooling that
+		// cannot be resolved by busy_timeout. WAL mode provides sufficient
+		// concurrency for our read-heavy workload.
+		//
+		// busy_timeout(30000) tells SQLite to wait up to 30 seconds for locks
+		// instead of immediately returning SQLITE_BUSY. This provides enough
+		// headroom for high-contention scenarios during bulk loading.
+		//
+		// _txlock=immediate starts transactions in IMMEDIATE mode, acquiring
+		// a RESERVED lock immediately instead of waiting until the first write.
+		// This prevents SQLITE_LOCKED (error 6) deadlocks that occur when
+		// multiple DEFERRED transactions try to upgrade from SHARED to RESERVED
+		// locks simultaneously. With IMMEDIATE mode, transactions either
+		// succeed in acquiring the write lock or wait (respecting busy_timeout).
 		//
 		// Keep these parameters in sync with project performance testing.
 		connStr := fmt.Sprintf(
-			"file:%s?cache=shared&_journal_mode=WAL&sync=NORMAL&cache_size=-50000&_pragma=foreign_keys(1)",
+			"file:%s?_txlock=immediate&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=cache_size(-50000)&_pragma=busy_timeout(30000)&_pragma=foreign_keys(1)",
 			metadataDbPath,
 		)
 		metadataDb, err = gorm.Open(
@@ -250,13 +273,21 @@ func (d *MetadataStoreSqlite) Start() error {
 	}
 	d.db = metadataDb
 	// Configure connection pool
+	// SQLite is fundamentally single-writer, so we limit connections to avoid
+	// SQLITE_LOCKED (error 6) deadlocks. The connection pool size should match
+	// the DatabaseWorkers configuration. Using more connections than workers
+	// creates contention on SQLite's lock infrastructure.
 	sqlDB, err := d.db.DB()
 	if err != nil {
 		return err
 	}
-	sqlDB.SetMaxIdleConns(10)
-	sqlDB.SetMaxOpenConns(100)
-	sqlDB.SetConnMaxLifetime(time.Hour)
+	maxConns := d.maxConnections
+	if maxConns <= 0 {
+		maxConns = DefaultMaxConnections // Use default if not configured
+	}
+	sqlDB.SetMaxIdleConns(maxConns)
+	sqlDB.SetMaxOpenConns(maxConns)
+	sqlDB.SetConnMaxLifetime(0) // Reuse connections indefinitely
 
 	if err := d.init(); err != nil {
 		// MetadataStoreSqlite is available for recovery, so return error but keep instance

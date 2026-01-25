@@ -38,6 +38,7 @@ type Config struct {
 	BlobPlugin     string
 	DataDir        string
 	MetadataPlugin string
+	MaxConnections int // Connection pool size for metadata plugin (should match DatabaseWorkers)
 }
 
 // Database represents our data storage services
@@ -158,6 +159,18 @@ func New(
 	)
 	if err != nil {
 		return nil, err
+	}
+	// Set max-connections if configured (for SQLite plugin)
+	if configCopy.MaxConnections > 0 {
+		err = plugin.SetPluginOption(
+			plugin.PluginTypeMetadata,
+			configCopy.MetadataPlugin,
+			"max-connections",
+			configCopy.MaxConnections,
+		)
+		if err != nil {
+			return nil, err
+		}
 	}
 	blobDb, err := blob.New(
 		configCopy.BlobPlugin,
