@@ -25,6 +25,7 @@ import (
 	"math/big"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/blinklabs-io/dingo/chain"
@@ -88,7 +89,7 @@ type DatabaseWorkerPool struct {
 	drainQueue chan DatabaseOperation // Reference for draining after shutdown
 	shutdownCh chan struct{}
 	wg         sync.WaitGroup
-	closed     bool
+	closed     atomic.Bool // Use atomic for thread-safe access without mutex in hot path
 	mu         sync.Mutex
 }
 
@@ -110,7 +111,7 @@ func NewDatabaseWorkerPool(
 		taskQueue:  taskQ,
 		drainQueue: taskQ,
 		shutdownCh: make(chan struct{}),
-		closed:     false,
+		// closed is zero-valued (false) by default for atomic.Bool
 	}
 
 	// Start workers
@@ -189,7 +190,7 @@ func (p *DatabaseWorkerPool) worker() {
 // Submit submits a database operation for async execution
 func (p *DatabaseWorkerPool) Submit(op DatabaseOperation) {
 	p.mu.Lock()
-	if p.closed {
+	if p.closed.Load() {
 		p.mu.Unlock()
 		if op.ResultChan != nil {
 			select {
@@ -314,11 +315,11 @@ func (ls *LedgerState) SubmitAsyncDBReadTxn(
 // Shutdown gracefully shuts down the worker pool
 func (p *DatabaseWorkerPool) Shutdown() {
 	p.mu.Lock()
-	if p.closed {
+	if p.closed.Load() {
 		p.mu.Unlock()
 		return
 	}
-	p.closed = true
+	p.closed.Store(true)
 	// Store a reference to the task queue for use after unlocking.
 	// This avoids a race: we keep p.taskQueue unchanged so workers
 	// can continue reading it without synchronization, while we drain
