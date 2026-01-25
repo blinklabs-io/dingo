@@ -392,26 +392,27 @@ type MempoolProvider interface {
 	Transactions() []mempool.MempoolTransaction
 }
 type LedgerState struct {
-	metrics                         stateMetrics
-	currentEra                      eras.EraDesc
-	config                          LedgerStateConfig
-	chainsyncBlockfetchTimeoutTimer *time.Timer // timeout timer for blockfetch operations
-	currentPParams                  lcommon.ProtocolParameters
-	mempool                         MempoolProvider
-	timerCleanupConsumedUtxos       *time.Timer
-	Scheduler                       *Scheduler
-	chain                           *chain.Chain
-	chainsyncBlockfetchReadyMutex   sync.Mutex
-	chainsyncBlockfetchReadyChan    chan struct{}
-	db                              *database.Database
-	chainsyncState                  ChainsyncState
-	currentTipBlockNonce            []byte
-	chainsyncBlockEvents            []BlockfetchEvent
-	epochCache                      []models.Epoch
-	currentTip                      ochainsync.Tip
-	currentEpoch                    models.Epoch
-	dbWorkerPool                    *DatabaseWorkerPool
-	ctx                             context.Context
+	metrics                            stateMetrics
+	currentEra                         eras.EraDesc
+	config                             LedgerStateConfig
+	chainsyncBlockfetchTimeoutTimer    *time.Timer // timeout timer for blockfetch operations
+	chainsyncBlockfetchTimerGeneration uint64      // generation counter to detect stale timer callbacks
+	currentPParams                     lcommon.ProtocolParameters
+	mempool                            MempoolProvider
+	timerCleanupConsumedUtxos          *time.Timer
+	Scheduler                          *Scheduler
+	chain                              *chain.Chain
+	chainsyncBlockfetchReadyMutex      sync.Mutex
+	chainsyncBlockfetchReadyChan       chan struct{}
+	db                                 *database.Database
+	chainsyncState                     ChainsyncState
+	currentTipBlockNonce               []byte
+	chainsyncBlockEvents               []BlockfetchEvent
+	epochCache                         []models.Epoch
+	currentTip                         ochainsync.Tip
+	currentEpoch                       models.Epoch
+	dbWorkerPool                       *DatabaseWorkerPool
+	ctx                                context.Context
 	sync.RWMutex
 	chainsyncMutex             sync.Mutex
 	chainsyncBlockfetchMutex   sync.Mutex
