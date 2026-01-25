@@ -1384,6 +1384,7 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 			}
 		}
 		// Process batch in groups of batchSize to stay under DB txn limits
+		var tipForLog ochainsync.Tip
 		for i = 0; i < len(nextBatch); i += batchSize {
 			end = min(
 				len(nextBatch),
@@ -1547,6 +1548,8 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 				}
 				ls.checkpointWrittenForEpoch = localCheckpointWritten
 				ls.updateTipMetrics()
+				// Capture tip for logging while holding the lock
+				tipForLog = ls.currentTip
 				ls.Unlock()
 			}
 			if needsEpochRollover {
@@ -1557,8 +1560,8 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 			ls.config.Logger.Info(
 				fmt.Sprintf(
 					"chain extended, new tip: %x at slot %d",
-					ls.currentTip.Point.Hash,
-					ls.currentTip.Point.Slot,
+					tipForLog.Point.Hash,
+					tipForLog.Point.Slot,
 				),
 				"component",
 				"ledger",
