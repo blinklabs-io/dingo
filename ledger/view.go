@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/blinklabs-io/dingo/database"
@@ -27,6 +28,9 @@ import (
 type LedgerView struct {
 	ls  *LedgerState
 	txn *database.Txn
+	// intraBlockUtxos tracks outputs created by earlier transactions in the same block.
+	// Key format: hex(txId) + ":" + outputIdx
+	intraBlockUtxos map[string]lcommon.Utxo
 }
 
 func (lv *LedgerView) NetworkId() uint {
@@ -45,6 +49,13 @@ func (lv *LedgerView) NetworkId() uint {
 func (lv *LedgerView) UtxoById(
 	utxoId lcommon.TransactionInput,
 ) (lcommon.Utxo, error) {
+	// Check intra-block UTxOs first (outputs from earlier txs in same block)
+	if lv.intraBlockUtxos != nil {
+		key := fmt.Sprintf("%s:%d", utxoId.Id().String(), utxoId.Index())
+		if utxo, ok := lv.intraBlockUtxos[key]; ok {
+			return utxo, nil
+		}
+	}
 	utxo, err := lv.ls.db.UtxoByRef(
 		utxoId.Id().Bytes(),
 		utxoId.Index(),
