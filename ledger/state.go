@@ -1351,7 +1351,8 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 					}
 				}
 				if cutoffStart > 0 {
-					go ls.cleanupBlockNoncesBefore(cutoffStart)
+					// Run cleanup inline to avoid SQLITE_BUSY from concurrent goroutine writes
+					ls.cleanupBlockNoncesBefore(cutoffStart)
 				}
 			}
 		}
@@ -1596,6 +1597,8 @@ func (ls *LedgerState) ledgerProcessBlock(
 	}
 	// Process transactions
 	var delta *LedgerDelta
+	// Track outputs from earlier transactions in this block for intra-block dependencies
+	intraBlockUtxos := make(map[string]lcommon.Utxo)
 	for i, tx := range block.Transactions() {
 		if delta == nil {
 			delta = NewLedgerDelta(point, uint(block.Era().Id))
@@ -1604,8 +1607,9 @@ func (ls *LedgerState) ledgerProcessBlock(
 		if shouldValidate {
 			if ls.currentEra.ValidateTxFunc != nil {
 				lv := &LedgerView{
-					txn: txn,
-					ls:  ls,
+					txn:             txn,
+					ls:              ls,
+					intraBlockUtxos: intraBlockUtxos,
 				}
 				err := ls.currentEra.ValidateTxFunc(
 					tx,
@@ -1681,6 +1685,15 @@ func (ls *LedgerState) ledgerProcessBlock(
 			}
 			delta.Release()
 			delta = nil // reset
+
+			// Add this transaction's outputs to intra-block map for subsequent TX lookups
+			// Use tx.Produced() instead of tx.Outputs() to handle failed transactions
+			// correctly - for failed TXs, Produced() returns collateral return at the
+			// correct index (len(Outputs())), while Outputs() returns regular outputs
+			for _, utxo := range tx.Produced() {
+				key := fmt.Sprintf("%s:%d", utxo.Id.Id().String(), utxo.Id.Index())
+				intraBlockUtxos[key] = utxo
+			}
 		}
 	}
 	return delta, nil
