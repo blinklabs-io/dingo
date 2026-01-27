@@ -40,7 +40,8 @@ func (d *MetadataStoreSqlite) GetPParams(
 	return ret, nil
 }
 
-// GetPParamUpdates returns a list of protocol parameter updates for a given epoch
+// GetPParamUpdates returns a list of protocol parameter updates for a given epoch.
+// Updates are returned in descending order by ID (most recent first).
 func (d *MetadataStoreSqlite) GetPParamUpdates(
 	epoch uint64,
 	txn types.Txn,
@@ -50,7 +51,15 @@ func (d *MetadataStoreSqlite) GetPParamUpdates(
 	if err != nil {
 		return ret, err
 	}
-	result := db.Where("epoch = ?", epoch).Order("id DESC").Find(&ret)
+	// Query for updates targeting this epoch OR the previous epoch.
+	// This handles the case where updates are stored with a target epoch
+	// but we're applying them at the next epoch boundary.
+	// Guard against uint64 underflow when epoch is 0.
+	query := db.Where("epoch = ?", epoch)
+	if epoch > 0 {
+		query = query.Or("epoch = ?", epoch-1)
+	}
+	result := query.Order("id DESC").Find(&ret)
 	if result.Error != nil {
 		return ret, result.Error
 	}

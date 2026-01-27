@@ -338,6 +338,7 @@ func (ls *LedgerState) createGenesisBlock() error {
 				len(byronGenesisUtxos),
 				len(shelleyGenesisUtxos),
 			),
+			"component", "ledger",
 		)
 
 		// Create genesis UTxOs directly using AddUtxos
@@ -533,9 +534,10 @@ func (ls *LedgerState) processEpochRollover(
 		return result, nil
 	}
 	// Apply pending pparam updates using the non-mutating version
+	// Updates target the next epoch, so we pass currentEpoch.EpochId + 1
 	newPParams, err := ls.db.ComputeAndApplyPParamUpdates(
 		epochStartSlot,
-		currentEpoch.EpochId,
+		currentEpoch.EpochId+1, // Target epoch for updates
 		currentEra.Id,
 		currentPParams,
 		currentEra.DecodePParamsUpdateFunc,

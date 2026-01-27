@@ -122,20 +122,22 @@ func (d *Database) ApplyPParamUpdates(
 	if err != nil {
 		return err
 	}
+	// Store params for the target epoch (epoch) where they take effect
 	return d.metadata.SetPParams(
 		pparamsCbor,
 		slot,
-		uint64(epoch+1),
+		epoch,
 		era,
 		txn.Metadata(),
 	)
 }
 
 // ComputeAndApplyPParamUpdates computes the new protocol parameters by applying
-// pending updates for the given epoch. Unlike ApplyPParamUpdates, this function
-// takes currentPParams as a value and returns the updated parameters without
-// mutating the input. This allows callers to capture the result in a transaction
-// and apply it to in-memory state after the transaction commits.
+// pending updates for the given target epoch. The epoch parameter should be the
+// epoch where updates take effect (currentEpoch + 1 during epoch rollover).
+// This function takes currentPParams as a value and returns the updated parameters
+// without mutating the input. This allows callers to capture the result in a
+// transaction and apply it to in-memory state after the transaction commits.
 func (d *Database) ComputeAndApplyPParamUpdates(
 	slot, epoch uint64,
 	era uint,
@@ -186,10 +188,11 @@ func (d *Database) ComputeAndApplyPParamUpdates(
 	if err != nil {
 		return nil, err
 	}
+	// Store params for the target epoch (epoch) where they take effect
 	err = d.metadata.SetPParams(
 		pparamsCbor,
 		slot,
-		uint64(epoch+1),
+		epoch,
 		era,
 		txn.Metadata(),
 	)
