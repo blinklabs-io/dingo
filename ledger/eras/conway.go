@@ -212,8 +212,9 @@ func ValidateTxConway(
 	}
 	// Build TX script map
 	scripts := make(map[lcommon.ScriptHash]lcommon.Script)
-	for _, refInput := range resolvedRefInputs {
-		tmpScript := refInput.Output.ScriptRef()
+	// Add script refs from all resolved UTxOs (both inputs and reference inputs)
+	for _, utxo := range slices.Concat(resolvedInputs, resolvedRefInputs) {
+		tmpScript := utxo.Output.ScriptRef()
 		if tmpScript == nil {
 			continue
 		}
@@ -226,6 +227,9 @@ func ValidateTxConway(
 		scripts[tmpScript.Hash()] = tmpScript
 	}
 	for _, tmpScript := range tx.Witnesses().PlutusV3Scripts() {
+		scripts[tmpScript.Hash()] = tmpScript
+	}
+	for _, tmpScript := range tx.Witnesses().NativeScripts() {
 		scripts[tmpScript.Hash()] = tmpScript
 	}
 	// Evaluate scripts
@@ -417,8 +421,9 @@ func EvaluateTxConway(
 	}
 	// Build TX script map
 	scripts := make(map[lcommon.ScriptHash]lcommon.Script)
-	for _, refInput := range resolvedRefInputs {
-		tmpScript := refInput.Output.ScriptRef()
+	// Add script refs from all resolved UTxOs (both inputs and reference inputs)
+	for _, utxo := range slices.Concat(resolvedInputs, resolvedRefInputs) {
+		tmpScript := utxo.Output.ScriptRef()
 		if tmpScript == nil {
 			continue
 		}
@@ -431,6 +436,9 @@ func EvaluateTxConway(
 		scripts[tmpScript.Hash()] = tmpScript
 	}
 	for _, tmpScript := range tx.Witnesses().PlutusV3Scripts() {
+		scripts[tmpScript.Hash()] = tmpScript
+	}
+	for _, tmpScript := range tx.Witnesses().NativeScripts() {
 		scripts[tmpScript.Hash()] = tmpScript
 	}
 	// Evaluate scripts
