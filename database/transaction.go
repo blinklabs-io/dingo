@@ -39,18 +39,6 @@ func (d *Database) SetTransaction(
 		defer txn.Rollback() //nolint:errcheck
 	}
 
-	var realIndexMap map[lcommon.Blake2b256]uint32
-	if !tx.IsValid() && tx.CollateralReturn() != nil {
-		realIndexMap = make(map[lcommon.Blake2b256]uint32)
-		for i, out := range tx.Outputs() {
-			if out != nil && i <= int(^uint32(0)) {
-				outputHash := lcommon.NewBlake2b256(out.Cbor())
-				//nolint:gosec // index bounds already checked above
-				realIndexMap[outputHash] = uint32(i)
-			}
-		}
-	}
-
 	blob := txn.DB().Blob()
 	if blob == nil {
 		return types.ErrBlobStoreUnavailable
@@ -60,15 +48,11 @@ func (d *Database) SetTransaction(
 		return types.ErrNilTxn
 	}
 
+	// Store all produced UTxOs - tx.Produced() returns correct indices for both
+	// valid transactions (regular outputs at indices 0, 1, ...) and invalid
+	// transactions (collateral return at index len(Outputs()))
 	for _, utxo := range tx.Produced() {
-		outputIdx := utxo.Id.Index()
-		if realIndexMap != nil {
-			outputHash := lcommon.NewBlake2b256(utxo.Output.Cbor())
-			if realIdx, ok := realIndexMap[outputHash]; ok {
-				outputIdx = realIdx
-			}
-		}
-		if err := blob.SetUtxo(blobTxn, utxo.Id.Id().Bytes(), outputIdx, utxo.Output.Cbor()); err != nil {
+		if err := blob.SetUtxo(blobTxn, utxo.Id.Id().Bytes(), utxo.Id.Index(), utxo.Output.Cbor()); err != nil {
 			return err
 		}
 	}
