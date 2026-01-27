@@ -84,6 +84,34 @@ func PParamsUpdateBabbage(
 	return babbagePParams, nil
 }
 
+// DefaultPlutusV2CostModel contains the default PlutusV2 cost model values.
+// These values are extracted from the Preview testnet protocol parameter update
+// at slot 260306 (epoch 3). They include placeholder values (20000000000) for
+// BLS12-381 and secp256k1 builtins that were not yet measured at the time.
+// This is used as fallback when PlutusV2 cost models are not yet available from
+// on-chain protocol parameter updates (e.g., during Babbage hard fork before
+// the first pparam update is applied).
+var DefaultPlutusV2CostModel = []int64{
+	205665, 812, 1, 1, 1000, 571, 0, 1, 1000, 24177,
+	4, 1, 1000, 32, 117366, 10475, 4, 23000, 100, 23000,
+	100, 23000, 100, 23000, 100, 23000, 100, 23000, 100, 100,
+	100, 23000, 100, 19537, 32, 175354, 32, 46417, 4, 221973,
+	511, 0, 1, 89141, 32, 497525, 14068, 4, 2, 196500,
+	453240, 220, 0, 1, 1, 1000, 28662, 4, 2, 245000,
+	216773, 62, 1, 1060367, 12586, 1, 208512, 421, 1, 187000,
+	1000, 52998, 1, 80436, 32, 43249, 32, 1000, 32, 80556,
+	1, 57667, 4, 1000, 10, 197145, 156, 1, 197145, 156,
+	1, 204924, 473, 1, 208896, 511, 1, 52467, 32, 64832,
+	32, 65493, 32, 22558, 32, 16563, 32, 76511, 32, 196500,
+	453240, 220, 0, 1, 1, 69522, 11687, 0, 1, 60091,
+	32, 196500, 453240, 220, 0, 1, 1, 196500, 453240, 220,
+	0, 1, 1, 1159724, 392670, 0, 2, 806990, 30482, 4,
+	1927926, 82523, 4, 265318, 0, 4, 0, 85931, 32, 205665,
+	812, 1, 1, 41182, 32, 212342, 32, 31220, 32, 32696,
+	32, 43357, 32, 32247, 32, 38314, 32, 20000000000, 20000000000, 9462713,
+	1021, 10, 20000000000, 0, 20000000000,
+}
+
 func HardForkBabbage(
 	nodeConfig *cardano.CardanoNodeConfig,
 	prevPParams lcommon.ProtocolParameters,
@@ -96,6 +124,15 @@ func HardForkBabbage(
 		)
 	}
 	ret := babbage.UpgradePParams(*alonzoPParams)
+	// Add PlutusV2 cost model if not already present
+	// This is needed because the Babbage hard fork happens before the on-chain
+	// protocol parameter update that contains PlutusV2 cost models arrives.
+	if ret.CostModels == nil {
+		ret.CostModels = make(map[uint][]int64)
+	}
+	if _, hasV2 := ret.CostModels[1]; !hasV2 {
+		ret.CostModels[1] = DefaultPlutusV2CostModel
+	}
 	return &ret, nil
 }
 
@@ -197,8 +234,9 @@ func ValidateTxBabbage(
 	}
 	// Build TX script map
 	scripts := make(map[lcommon.ScriptHash]lcommon.Script)
-	for _, refInput := range resolvedRefInputs {
-		tmpScript := refInput.Output.ScriptRef()
+	// Add script refs from all resolved UTxOs (both inputs and reference inputs)
+	for _, utxo := range slices.Concat(resolvedInputs, resolvedRefInputs) {
+		tmpScript := utxo.Output.ScriptRef()
 		if tmpScript == nil {
 			continue
 		}
@@ -208,6 +246,9 @@ func ValidateTxBabbage(
 		scripts[tmpScript.Hash()] = tmpScript
 	}
 	for _, tmpScript := range tx.Witnesses().PlutusV2Scripts() {
+		scripts[tmpScript.Hash()] = tmpScript
+	}
+	for _, tmpScript := range tx.Witnesses().NativeScripts() {
 		scripts[tmpScript.Hash()] = tmpScript
 	}
 	// Evaluate scripts
@@ -407,8 +448,9 @@ func EvaluateTxBabbage(
 	}
 	// Build TX script map
 	scripts := make(map[lcommon.ScriptHash]lcommon.Script)
-	for _, refInput := range resolvedRefInputs {
-		tmpScript := refInput.Output.ScriptRef()
+	// Add script refs from all resolved UTxOs (both inputs and reference inputs)
+	for _, utxo := range slices.Concat(resolvedInputs, resolvedRefInputs) {
+		tmpScript := utxo.Output.ScriptRef()
 		if tmpScript == nil {
 			continue
 		}
@@ -418,6 +460,9 @@ func EvaluateTxBabbage(
 		scripts[tmpScript.Hash()] = tmpScript
 	}
 	for _, tmpScript := range tx.Witnesses().PlutusV2Scripts() {
+		scripts[tmpScript.Hash()] = tmpScript
+	}
+	for _, tmpScript := range tx.Witnesses().NativeScripts() {
 		scripts[tmpScript.Hash()] = tmpScript
 	}
 	// Evaluate scripts

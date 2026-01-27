@@ -211,6 +211,9 @@ func ValidateTxAlonzo(
 	for _, tmpScript := range tx.Witnesses().PlutusV1Scripts() {
 		scripts[tmpScript.Hash()] = tmpScript
 	}
+	for _, tmpScript := range tx.Witnesses().NativeScripts() {
+		scripts[tmpScript.Hash()] = tmpScript
+	}
 	// Evaluate scripts
 	var txInfoV1 script.TxInfo
 	txInfoV1, err = script.NewTxInfoV1FromTransaction(
@@ -343,6 +346,9 @@ func EvaluateTxAlonzo(
 		scripts[tmpScript.Hash()] = tmpScript
 	}
 	for _, tmpScript := range tx.Witnesses().PlutusV1Scripts() {
+		scripts[tmpScript.Hash()] = tmpScript
+	}
+	for _, tmpScript := range tx.Witnesses().NativeScripts() {
 		scripts[tmpScript.Hash()] = tmpScript
 	}
 	// Evaluate scripts
