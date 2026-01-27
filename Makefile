@@ -15,7 +15,7 @@ VERSION ?= $(shell git describe --tags --exact-match 2>/dev/null)
 COMMIT_HASH ?= $(shell git rev-parse --short HEAD)
 GO_LDFLAGS=-ldflags "-s -w -X '$(GOMODULE)/internal/version.Version=$(VERSION)' -X '$(GOMODULE)/internal/version.CommitHash=$(COMMIT_HASH)'"
 
-.PHONY: all build mod-tidy clean format golines test bench test-load test-load-profile
+.PHONY: all build mod-tidy clean format golines test bench test-load test-load-log test-load-profile
 
 # Default target
 all: format test build
@@ -54,6 +54,10 @@ bench: mod-tidy
 test-load: build
 	rm -rf .dingo
 	./dingo load database/immutable/testdata
+
+test-load-log: build
+	rm -rf .dingo dingo.log
+	./dingo load database/immutable/testdata 2>&1 | tee dingo.log
 
 test-load-profile: build
 	rm -rf .dingo
