@@ -250,30 +250,12 @@ func (d *MetadataStoreSqlite) SetTransaction(
 		tmpTx.Metadata = tmpMetadata
 	}
 	collateralReturn := tx.CollateralReturn()
-	// For invalid transactions with collateral returns, fix indices via CBOR matching
-	// since Produced() uses enumerated indices rather than real transaction indices
-	var realIndexMap map[lcommon.Blake2b256]uint32
-	if !tx.IsValid() && collateralReturn != nil {
-		realIndexMap = make(map[lcommon.Blake2b256]uint32)
-		for idx, out := range tx.Outputs() {
-			if out != nil && idx <= int(^uint32(0)) {
-				// Hash CBOR for efficient map key
-				outputHash := lcommon.NewBlake2b256(out.Cbor())
-				//nolint:gosec // G115: idx bounds already checked above
-				realIndexMap[outputHash] = uint32(idx)
-			}
-		}
-	}
+	// Store all produced UTxOs - tx.Produced() returns correct indices for both
+	// valid transactions (regular outputs at indices 0, 1, ...) and invalid
+	// transactions (collateral return at index len(Outputs()))
 	for _, utxo := range tx.Produced() {
 		if collateralReturn != nil && utxo.Output == collateralReturn {
 			m := models.UtxoLedgerToModel(utxo, point.Slot)
-			// Fix collateral return index for invalid transactions
-			if realIndexMap != nil && m.Cbor != nil {
-				outputHash := lcommon.NewBlake2b256(m.Cbor)
-				if realIdx, ok := realIndexMap[outputHash]; ok {
-					m.OutputIdx = realIdx
-				}
-			}
 			tmpTx.CollateralReturn = &m
 			continue
 		}
