@@ -92,6 +92,10 @@ func (u *Uint64) Scan(val any) error {
 		*u = Uint64(v)
 		return nil
 	case []byte:
+		if len(v) == 0 {
+			*u = 0
+			return nil
+		}
 		tmpUint, err := strconv.ParseUint(string(v), 10, 64)
 		if err != nil {
 			return err
@@ -99,6 +103,10 @@ func (u *Uint64) Scan(val any) error {
 		*u = Uint64(tmpUint)
 		return nil
 	case string:
+		if v == "" {
+			*u = 0
+			return nil
+		}
 		tmpUint, err := strconv.ParseUint(v, 10, 64)
 		if err != nil {
 			return err

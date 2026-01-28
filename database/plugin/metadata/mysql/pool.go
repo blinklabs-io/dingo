@@ -65,8 +65,19 @@ func (d *MetadataStoreMysql) GetPool(
 		// If the latest retirement is more recent than the latest registration,
 		// check whether the retirement epoch has passed. A retirement in the
 		// future means the pool is still active until that epoch is reached.
-		if hasRet &&
-			ret.Retirement[0].AddedSlot > ret.Registration[0].AddedSlot {
+		shouldCheckRetirement := false
+		if hasRet && ret.Retirement[0].AddedSlot > ret.Registration[0].AddedSlot {
+			shouldCheckRetirement = true
+		} else if hasRet && ret.Retirement[0].AddedSlot == ret.Registration[0].AddedSlot {
+			regIdx, retIdx, err := fetchPoolCertIndices(db, ret.Registration[0].ID, ret.Retirement[0].ID)
+			if err != nil {
+				return nil, err
+			}
+			if retIdx > regIdx {
+				shouldCheckRetirement = true
+			}
+		}
+		if shouldCheckRetirement {
 			retEpoch := ret.Retirement[0].Epoch
 			// Determine current epoch from tip -> epoch table. If we cannot
 			// determine the current epoch, conservatively treat the pool as active.
@@ -95,6 +106,37 @@ func (d *MetadataStoreMysql) GetPool(
 		}
 	}
 	return ret, nil
+}
+
+func fetchPoolCertIndices(db *gorm.DB, regID uint, retID uint) (uint, uint, error) {
+	type certIndexRow struct {
+		CertificateID uint
+		CertIndex     uint
+	}
+	var rows []certIndexRow
+	if err := db.Model(&models.Certificate{}).
+		Select("certificate_id, cert_index").
+		Where(
+			"(certificate_id = ? AND cert_type = ?) OR (certificate_id = ? AND cert_type = ?)",
+			regID,
+			uint(lcommon.CertificateTypePoolRegistration),
+			retID,
+			uint(lcommon.CertificateTypePoolRetirement),
+		).
+		Find(&rows).Error; err != nil {
+		return 0, 0, err
+	}
+	var regIdx uint
+	var retIdx uint
+	for _, row := range rows {
+		switch row.CertificateID {
+		case regID:
+			regIdx = row.CertIndex
+		case retID:
+			retIdx = row.CertIndex
+		}
+	}
+	return regIdx, retIdx, nil
 }
 
 // GetPoolRegistrations returns pool registration certificates
