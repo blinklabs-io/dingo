@@ -294,6 +294,11 @@ func (d *MetadataStoreMysql) ensureDatabaseExists(dsn string, dbName string) (bo
 	if err != nil {
 		return false, err
 	}
+	sqlAdminDb, err := adminDb.DB()
+	if err != nil {
+		return false, err
+	}
+	defer sqlAdminDb.Close()
 	if result := adminDb.Exec(fmt.Sprintf("CREATE DATABASE IF NOT EXISTS `%s`", dbName)); result.Error != nil {
 		return false, result.Error
 	}
