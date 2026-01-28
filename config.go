@@ -37,6 +37,7 @@ const (
 	runModeServe = "serve"
 	runModeLoad  = "load"
 	runModeDev   = "dev"
+	runModeLeios = "leios"
 )
 
 type Config struct {

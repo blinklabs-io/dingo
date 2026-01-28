@@ -92,12 +92,13 @@ const (
 	RunModeServe RunMode = "serve" // Full node with network connectivity (default)
 	RunModeLoad  RunMode = "load"  // Batch import from ImmutableDB
 	RunModeDev   RunMode = "dev"   // Development mode (isolated, no outbound)
+	RunModeLeios RunMode = "leios" // Full node with experimental Leios capabilities
 )
 
 // Valid returns true if the RunMode is a known valid mode
 func (m RunMode) Valid() bool {
 	switch m {
-	case RunModeServe, RunModeLoad, RunModeDev, "":
+	case RunModeServe, RunModeLoad, RunModeDev, RunModeLeios, "":
 		return true
 	default:
 		return false
@@ -526,7 +527,7 @@ func LoadConfig(configFile string) (*Config, error) {
 	// Validate and default RunMode
 	if !globalConfig.RunMode.Valid() {
 		return nil, fmt.Errorf(
-			"invalid runMode: %q (must be 'serve', 'load', or 'dev')",
+			"invalid runMode: %q (must be 'serve', 'load', 'dev', or 'leios')",
 			globalConfig.RunMode,
 		)
 	}
