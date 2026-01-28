@@ -43,7 +43,7 @@ require (
 )
 
 // XXX: uncomment when testing local changes to gouroboros
-// replace github.com/blinklabs-io/gouroboros => ../gouroboros
+replace github.com/blinklabs-io/gouroboros => ../gouroboros
 
 // XXX: uncomment when testing local changes to plutigo
 // replace github.com/blinklabs-io/plutigo => ../plutigo
