@@ -40,17 +40,34 @@ func (r *Rat) Scan(val any) error {
 	if r.Rat == nil {
 		r.Rat = new(big.Rat)
 	}
-	v, ok := val.(string)
-	if !ok {
+	switch v := val.(type) {
+	case nil:
+		r.Rat.SetInt64(0)
+		return nil
+	case string:
+		if v == "" {
+			r.Rat.SetInt64(0)
+			return nil
+		}
+		if _, ok := r.SetString(v); !ok {
+			return fmt.Errorf("failed to set big.Rat value from string: %s", v)
+		}
+		return nil
+	case []byte:
+		if len(v) == 0 {
+			r.Rat.SetInt64(0)
+			return nil
+		}
+		if _, ok := r.SetString(string(v)); !ok {
+			return fmt.Errorf("failed to set big.Rat value from string: %s", string(v))
+		}
+		return nil
+	default:
 		return fmt.Errorf(
-			"value was not expected type, wanted string, got %T",
+			"value was not expected type, wanted string/[]byte, got %T",
 			val,
 		)
 	}
-	if _, ok := r.SetString(v); !ok {
-		return fmt.Errorf("failed to set big.Rat value from string: %s", v)
-	}
-	return nil
 }
 
 //nolint:recvcheck
