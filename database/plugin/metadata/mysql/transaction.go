@@ -164,7 +164,7 @@ func saveAccount(account *models.Account, db *gorm.DB) error {
 		result := db.Clauses(clause.OnConflict{
 			Columns: []clause.Column{{Name: "staking_key"}},
 			DoUpdates: clause.AssignmentColumns(
-				[]string{"pool", "drep", "active", "certificate_id"},
+				[]string{"pool", "drep", "active", "certificate_id", "added_slot"},
 			),
 		}).Create(account)
 		if result.Error != nil {
@@ -844,8 +844,8 @@ func (d *MetadataStoreMysql) SetTransaction(
 						CertificateID: certIDMap[i],
 					}
 
+					tmpAccount.AddedSlot = point.Slot
 					if tmpAccount.ID == 0 {
-						tmpAccount.AddedSlot = point.Slot
 						tmpAccount.CertificateID = certIDMap[i]
 					}
 					if err := saveAccount(tmpAccount, db); err != nil {
@@ -911,6 +911,7 @@ func (d *MetadataStoreMysql) SetTransaction(
 					}
 
 					tmpAccount.Active = false
+					tmpAccount.AddedSlot = point.Slot
 
 					tmpItem := models.StakeDeregistration{
 						StakingKey:    stakeKey,
@@ -949,6 +950,7 @@ func (d *MetadataStoreMysql) SetTransaction(
 					}
 
 					tmpAccount.Active = false
+					tmpAccount.AddedSlot = point.Slot
 
 					tmpItem := models.Deregistration{
 						StakingKey:    stakeKey,
@@ -975,6 +977,7 @@ func (d *MetadataStoreMysql) SetTransaction(
 					}
 
 					tmpAccount.Pool = c.PoolKeyHash[:]
+					tmpAccount.AddedSlot = point.Slot
 
 					tmpItem := models.StakeDelegation{
 						StakingKey:    stakeKey,
@@ -1001,6 +1004,7 @@ func (d *MetadataStoreMysql) SetTransaction(
 					}
 
 					tmpAccount.Pool = c.PoolKeyHash[:]
+					tmpAccount.AddedSlot = point.Slot
 
 					tmpReg := models.StakeRegistrationDelegation{
 						StakingKey:    stakeKey,
@@ -1029,6 +1033,7 @@ func (d *MetadataStoreMysql) SetTransaction(
 
 					tmpAccount.Pool = c.PoolKeyHash[:]
 					tmpAccount.Drep = c.Drep.Credential[:]
+					tmpAccount.AddedSlot = point.Slot
 
 					tmpItem := models.StakeVoteDelegation{
 						StakingKey:    stakeKey,
@@ -1062,8 +1067,8 @@ func (d *MetadataStoreMysql) SetTransaction(
 						CertificateID: certIDMap[i],
 					}
 
+					tmpAccount.AddedSlot = point.Slot
 					if tmpAccount.ID == 0 {
-						tmpAccount.AddedSlot = point.Slot
 						tmpAccount.CertificateID = certIDMap[i]
 					}
 					if err := saveAccount(tmpAccount, db); err != nil {
@@ -1177,6 +1182,7 @@ func (d *MetadataStoreMysql) SetTransaction(
 
 					tmpAccount.Pool = c.PoolKeyHash[:]
 					tmpAccount.Drep = c.Drep.Credential[:]
+					tmpAccount.AddedSlot = point.Slot
 
 					tmpReg := models.StakeVoteRegistrationDelegation{
 						StakingKey:    stakeKey,
@@ -1205,6 +1211,7 @@ func (d *MetadataStoreMysql) SetTransaction(
 					}
 
 					tmpAccount.Drep = c.Drep.Credential[:]
+					tmpAccount.AddedSlot = point.Slot
 
 					tmpReg := models.VoteRegistrationDelegation{
 						StakingKey:    stakeKey,
@@ -1232,6 +1239,7 @@ func (d *MetadataStoreMysql) SetTransaction(
 					}
 
 					tmpAccount.Drep = c.Drep.Credential[:]
+					tmpAccount.AddedSlot = point.Slot
 
 					tmpItem := models.VoteDelegation{
 						StakingKey:    stakeKey,
