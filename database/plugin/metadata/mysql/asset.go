@@ -83,8 +83,8 @@ func (d *MetadataStoreMysql) GetAssetsByUTxO(
 	}
 
 	// Join with UTxO table to find assets by transaction ID and output index
-	result = query.Joins("INNER JOIN utxos ON assets.utxo_id = utxos.id").
-		Where("utxos.tx_id = ? AND utxos.idx = ?", txId, idx).
+	result = query.Joins("INNER JOIN utxo ON asset.utxo_id = utxo.id").
+		Where("utxo.tx_id = ? AND utxo.output_idx = ?", txId, idx).
 		Find(&assets)
 	if result.Error != nil {
 		return nil, result.Error
