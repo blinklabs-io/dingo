@@ -32,6 +32,8 @@ import (
 	oblockfetch "github.com/blinklabs-io/gouroboros/protocol/blockfetch"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	oleiosfetch "github.com/blinklabs-io/gouroboros/protocol/leiosfetch"
+	oleiosnotify "github.com/blinklabs-io/gouroboros/protocol/leiosnotify"
 	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
 	olocaltxmonitor "github.com/blinklabs-io/gouroboros/protocol/localtxmonitor"
 	olocaltxsubmission "github.com/blinklabs-io/gouroboros/protocol/localtxsubmission"
@@ -198,6 +200,22 @@ func (o *Ouroboros) ConfigureListeners(
 						o.blockfetchServerConnOpts()...,
 					),
 				),
+				ouroboros.WithLeiosFetchConfig(
+					oleiosfetch.NewConfig(
+						slices.Concat(
+							o.leiosfetchClientConnOpts(),
+							o.leiosfetchServerConnOpts(),
+						)...,
+					),
+				),
+				ouroboros.WithLeiosNotifyConfig(
+					oleiosnotify.NewConfig(
+						slices.Concat(
+							o.leiosnotifyClientConnOpts(),
+							o.leiosnotifyServerConnOpts(),
+						)...,
+					),
+				),
 			)
 		}
 		tmpListeners[idx] = l
@@ -241,6 +259,22 @@ func (o *Ouroboros) OutboundConnOpts() []ouroboros.ConnectionOptionFunc {
 				slices.Concat(
 					o.blockfetchClientConnOpts(),
 					o.blockfetchServerConnOpts(),
+				)...,
+			),
+		),
+		ouroboros.WithLeiosFetchConfig(
+			oleiosfetch.NewConfig(
+				slices.Concat(
+					o.leiosfetchClientConnOpts(),
+					o.leiosfetchServerConnOpts(),
+				)...,
+			),
+		),
+		ouroboros.WithLeiosNotifyConfig(
+			oleiosnotify.NewConfig(
+				slices.Concat(
+					o.leiosnotifyClientConnOpts(),
+					o.leiosnotifyServerConnOpts(),
 				)...,
 			),
 		),
