@@ -247,7 +247,6 @@ func (d *MetadataStoreMysql) Start() error {
 		"database", logDatabase,
 	)
 	d.db = metadataDb
-	fmt.Println(d.db)
 	// Configure connection pool
 	sqlDB, err := d.db.DB()
 	if err != nil {
@@ -273,7 +272,6 @@ func (d *MetadataStoreMysql) Start() error {
 			return err
 		}
 	}
-	fmt.Println()
 	return nil
 }
 

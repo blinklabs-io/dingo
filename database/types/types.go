@@ -42,11 +42,11 @@ func (r *Rat) Scan(val any) error {
 	}
 	switch v := val.(type) {
 	case nil:
-		r.Rat.SetInt64(0)
+		r.SetInt64(0)
 		return nil
 	case string:
 		if v == "" {
-			r.Rat.SetInt64(0)
+			r.SetInt64(0)
 			return nil
 		}
 		if _, ok := r.SetString(v); !ok {
@@ -55,7 +55,7 @@ func (r *Rat) Scan(val any) error {
 		return nil
 	case []byte:
 		if len(v) == 0 {
-			r.Rat.SetInt64(0)
+			r.SetInt64(0)
 			return nil
 		}
 		if _, ok := r.SetString(string(v)); !ok {

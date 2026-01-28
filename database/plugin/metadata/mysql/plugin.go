@@ -47,7 +47,7 @@ func initCmdlineOptions() {
 	cmdlineOptions.port = 3306
 	cmdlineOptions.user = "root"
 	cmdlineOptions.password = ""
-	cmdlineOptions.database = "mysql"
+	cmdlineOptions.database = "dingo"
 	cmdlineOptions.sslMode = ""
 	cmdlineOptions.timeZone = "UTC"
 	cmdlineOptions.dsn = ""
@@ -82,6 +82,7 @@ func init() {
 					Type:         plugin.PluginOptionTypeString,
 					Description:  "MySQL host",
 					DefaultValue: "localhost",
+					CustomEnvVar: "MYSQL_HOST",
 					Dest:         &(cmdlineOptions.host),
 				},
 				{
@@ -89,6 +90,7 @@ func init() {
 					Type:         plugin.PluginOptionTypeUint,
 					Description:  "MySQL port",
 					DefaultValue: uint64(3306),
+					CustomEnvVar: "MYSQL_PORT",
 					Dest:         &(cmdlineOptions.port),
 				},
 				{
@@ -96,6 +98,7 @@ func init() {
 					Type:         plugin.PluginOptionTypeString,
 					Description:  "MySQL user",
 					DefaultValue: "root",
+					CustomEnvVar: "MYSQL_USER",
 					Dest:         &(cmdlineOptions.user),
 				},
 				{
@@ -103,13 +106,15 @@ func init() {
 					Type:         plugin.PluginOptionTypeString,
 					Description:  "MySQL password (required)",
 					DefaultValue: "",
+					CustomEnvVar: "MYSQL_PASSWORD",
 					Dest:         &(cmdlineOptions.password),
 				},
 				{
 					Name:         "database",
 					Type:         plugin.PluginOptionTypeString,
 					Description:  "MySQL database name",
-					DefaultValue: "mysql",
+					DefaultValue: "dingo",
+					CustomEnvVar: "MYSQL_DATABASE",
 					Dest:         &(cmdlineOptions.database),
 				},
 				{
@@ -117,6 +122,7 @@ func init() {
 					Type:         plugin.PluginOptionTypeString,
 					Description:  "MySQL TLS mode (mapped to tls= in DSN)",
 					DefaultValue: "",
+					CustomEnvVar: "MYSQL_SSLMODE",
 					Dest:         &(cmdlineOptions.sslMode),
 				},
 				{
@@ -124,6 +130,7 @@ func init() {
 					Type:         plugin.PluginOptionTypeString,
 					Description:  "MySQL time zone location",
 					DefaultValue: "UTC",
+					CustomEnvVar: "MYSQL_TIMEZONE",
 					Dest:         &(cmdlineOptions.timeZone),
 				},
 				{
@@ -131,6 +138,7 @@ func init() {
 					Type:         plugin.PluginOptionTypeString,
 					Description:  "Full MySQL DSN (overrides other options when set)",
 					DefaultValue: "",
+					CustomEnvVar: "MYSQL_DSN",
 					Dest:         &(cmdlineOptions.dsn),
 				},
 			},
