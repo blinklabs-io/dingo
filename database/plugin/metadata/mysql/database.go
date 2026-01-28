@@ -19,7 +19,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -185,28 +184,33 @@ func (d *MetadataStoreMysql) Start() error {
 	logDatabase := d.database
 
 	if dsn == "" {
-		userInfo := d.user
-		if d.password != "" {
-			userInfo = fmt.Sprintf("%s:%s", d.user, d.password)
+		cfg := mysql.Config{
+			User:                 d.user,
+			Passwd:               d.password,
+			Net:                  "tcp",
+			Addr:                 fmt.Sprintf("%s:%s", d.host, strconv.FormatUint(uint64(d.port), 10)),
+			DBName:               d.database,
+			ParseTime:            true,
+			AllowNativePasswords: true,
 		}
-		dsn = fmt.Sprintf(
-			"%s@tcp(%s:%s)/%s",
-			userInfo,
-			d.host,
-			strconv.FormatUint(uint64(d.port), 10),
-			d.database,
-		)
-		params := url.Values{}
-		params.Set("parseTime", "true")
 		if d.timeZone != "" {
-			params.Set("loc", d.timeZone)
+			loc, err := time.LoadLocation(d.timeZone)
+			if err != nil {
+				loc = time.UTC
+			}
+			cfg.Loc = loc
+			if cfg.Params == nil {
+				cfg.Params = map[string]string{}
+			}
+			cfg.Params["loc"] = d.timeZone
 		}
 		if d.sslMode != "" {
-			params.Set("tls", d.sslMode)
+			if cfg.Params == nil {
+				cfg.Params = map[string]string{}
+			}
+			cfg.Params["tls"] = d.sslMode
 		}
-		if encoded := params.Encode(); encoded != "" {
-			dsn = dsn + "?" + encoded
-		}
+		dsn = cfg.FormatDSN()
 	} else if parsedDB, ok := parseMysqlDatabaseFromDSN(dsn); ok {
 		logDatabase = parsedDB
 	}
