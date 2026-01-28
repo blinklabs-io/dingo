@@ -61,19 +61,39 @@ func (u Uint64) Value() (driver.Value, error) {
 }
 
 func (u *Uint64) Scan(val any) error {
-	v, ok := val.(string)
-	if !ok {
+	switch v := val.(type) {
+	case nil:
+		*u = 0
+		return nil
+	case uint64:
+		*u = Uint64(v)
+		return nil
+	case int64:
+		if v < 0 {
+			return fmt.Errorf("invalid negative value for Uint64: %d", v)
+		}
+		*u = Uint64(v)
+		return nil
+	case []byte:
+		tmpUint, err := strconv.ParseUint(string(v), 10, 64)
+		if err != nil {
+			return err
+		}
+		*u = Uint64(tmpUint)
+		return nil
+	case string:
+		tmpUint, err := strconv.ParseUint(v, 10, 64)
+		if err != nil {
+			return err
+		}
+		*u = Uint64(tmpUint)
+		return nil
+	default:
 		return fmt.Errorf(
-			"value was not expected type, wanted string, got %T",
+			"value was not expected type, wanted string/[]byte/uint64/int64, got %T",
 			val,
 		)
 	}
-	tmpUint, err := strconv.ParseUint(v, 10, 64)
-	if err != nil {
-		return err
-	}
-	*u = Uint64(tmpUint)
-	return nil
 }
 
 // ErrBlobKeyNotFound is returned by blob operations when a key is missing
