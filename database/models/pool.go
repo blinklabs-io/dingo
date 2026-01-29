@@ -23,9 +23,10 @@ import (
 
 var ErrPoolNotFound = errors.New("pool not found")
 
+// Error 1170 (42000): BLOB/TEXT column 'staking_key' used in key specification without a key length
 type Pool struct {
 	Margin        *types.Rat
-	PoolKeyHash   []byte `gorm:"uniqueIndex"`
+	PoolKeyHash   []byte `gorm:"uniqueIndex;size:32"`
 	VrfKeyHash    []byte
 	RewardAccount []byte
 	// Owners and Relays are query-only associations (no CASCADE).
@@ -49,7 +50,7 @@ type PoolRegistration struct {
 	Pool          *Pool // Belongs-to relationship; CASCADE is defined on Pool.Registration
 	MetadataUrl   string
 	VrfKeyHash    []byte
-	PoolKeyHash   []byte `gorm:"index"`
+	PoolKeyHash   []byte `gorm:"index;size:32"`
 	RewardAccount []byte
 	MetadataHash  []byte
 	Owners        []PoolRegistrationOwner `gorm:"foreignKey:PoolRegistrationID;constraint:OnDelete:CASCADE"`
@@ -93,7 +94,7 @@ func (PoolRegistrationRelay) TableName() string {
 }
 
 type PoolRetirement struct {
-	PoolKeyHash   []byte `gorm:"index"`
+	PoolKeyHash   []byte `gorm:"index;size:32"`
 	CertificateID uint   `gorm:"index"`
 	ID            uint   `gorm:"primarykey"`
 	PoolID        uint   `gorm:"index"`

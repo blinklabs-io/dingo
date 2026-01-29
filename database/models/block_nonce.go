@@ -15,7 +15,7 @@
 package models
 
 type BlockNonce struct {
-	Hash         []byte `gorm:"index:hash_slot"`
+	Hash         []byte `gorm:"index:hash_slot;size:32"`
 	Nonce        []byte
 	ID           uint   `gorm:"primarykey"`
 	Slot         uint64 `gorm:"index:hash_slot"`

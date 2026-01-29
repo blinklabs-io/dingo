@@ -15,6 +15,7 @@
 package metadata
 
 import (
+	_ "github.com/blinklabs-io/dingo/database/plugin/metadata/mysql"
 	_ "github.com/blinklabs-io/dingo/database/plugin/metadata/postgres"
 	_ "github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
 )

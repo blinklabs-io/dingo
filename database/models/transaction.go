@@ -25,9 +25,9 @@ type Transaction struct {
 	PlutusData       []PlutusData     `gorm:"foreignKey:TransactionID;references:ID;constraint:OnDelete:CASCADE"`
 	Certificates     []Certificate    `gorm:"foreignKey:TransactionID;references:ID;constraint:OnDelete:CASCADE"`
 	Outputs          []Utxo           `gorm:"foreignKey:TransactionID;references:ID;constraint:OnDelete:CASCADE"`
-	Hash             []byte           `gorm:"uniqueIndex"`
+	Hash             []byte           `gorm:"uniqueIndex;size:32"`
 	Collateral       []Utxo           `gorm:"foreignKey:CollateralByTxId;references:Hash"`
-	BlockHash        []byte           `gorm:"index"`
+	BlockHash        []byte           `gorm:"index;size:32"`
 	KeyWitnesses     []KeyWitness     `gorm:"foreignKey:TransactionID;references:ID;constraint:OnDelete:CASCADE"`
 	WitnessScripts   []WitnessScripts `gorm:"foreignKey:TransactionID;references:ID;constraint:OnDelete:CASCADE"`
 	Inputs           []Utxo           `gorm:"foreignKey:SpentAtTxId;references:Hash"`
