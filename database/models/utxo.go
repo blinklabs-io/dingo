@@ -24,14 +24,14 @@ import (
 type Utxo struct {
 	TransactionID           *uint        `gorm:"index"`
 	CollateralReturnForTxID *uint        `gorm:"uniqueIndex"` // Unique: a transaction has at most one collateral return output
-	TxId                    []byte       `gorm:"uniqueIndex:tx_id_output_idx;size:64"`
-	PaymentKey              []byte       `gorm:"index;size:64"`
-	StakingKey              []byte       `gorm:"index;size:64"`
+	TxId                    []byte       `gorm:"uniqueIndex:tx_id_output_idx;size:32"`
+	PaymentKey              []byte       `gorm:"index;size:32"`
+	StakingKey              []byte       `gorm:"index;size:32"`
 	Assets                  []Asset      `gorm:"foreignKey:UtxoID;constraint:OnDelete:CASCADE"`
 	Cbor                    []byte       `gorm:"-"` // This is here for convenience but not represented in the metadata DB
-	SpentAtTxId             []byte       `gorm:"index;size:64"`
-	ReferencedByTxId        []byte       `gorm:"index;size:64"`
-	CollateralByTxId        []byte       `gorm:"index;size:64"`
+	SpentAtTxId             []byte       `gorm:"index;size:32"`
+	ReferencedByTxId        []byte       `gorm:"index;size:32"`
+	CollateralByTxId        []byte       `gorm:"index;size:32"`
 	ID                      uint         `gorm:"primarykey"`
 	AddedSlot               uint64       `gorm:"index"`
 	DeletedSlot             uint64       `gorm:"index"`

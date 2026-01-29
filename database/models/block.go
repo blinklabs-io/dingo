@@ -23,7 +23,7 @@ import (
 var ErrBlockNotFound = errors.New("block not found")
 
 type Block struct {
-	Hash     []byte `gorm:"index:hash_slot;size:64"`
+	Hash     []byte `gorm:"index:hash_slot;size:32"`
 	PrevHash []byte
 	Cbor     []byte
 	ID       uint64 `gorm:"primaryKey"`

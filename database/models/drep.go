@@ -24,7 +24,7 @@ var ErrDrepNotFound = errors.New("drep not found")
 
 type Drep struct {
 	AnchorUrl  string
-	Credential []byte `gorm:"uniqueIndex;size:64"`
+	Credential []byte `gorm:"uniqueIndex;size:32"`
 	AnchorHash []byte
 	ID         uint   `gorm:"primarykey"`
 	AddedSlot  uint64 `gorm:"index"`
@@ -36,7 +36,7 @@ func (d *Drep) TableName() string {
 }
 
 type DeregistrationDrep struct {
-	DrepCredential []byte `gorm:"index;size:64"`
+	DrepCredential []byte `gorm:"index;size:32"`
 	CertificateID  uint   `gorm:"index"`
 	ID             uint   `gorm:"primarykey"`
 	AddedSlot      uint64 `gorm:"index"`
@@ -49,7 +49,7 @@ func (DeregistrationDrep) TableName() string {
 
 type RegistrationDrep struct {
 	AnchorUrl      string
-	DrepCredential []byte `gorm:"index;size:64"`
+	DrepCredential []byte `gorm:"index;size:32"`
 	AnchorHash     []byte
 	CertificateID  uint   `gorm:"index"`
 	ID             uint   `gorm:"primarykey"`
@@ -63,7 +63,7 @@ func (RegistrationDrep) TableName() string {
 
 type UpdateDrep struct {
 	AnchorUrl     string
-	Credential    []byte `gorm:"index;size:64"`
+	Credential    []byte `gorm:"index;size:32"`
 	AnchorHash    []byte
 	CertificateID uint   `gorm:"index"`
 	ID            uint   `gorm:"primarykey"`
