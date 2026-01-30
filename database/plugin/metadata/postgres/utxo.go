@@ -16,12 +16,18 @@ package postgres
 
 import (
 	"errors"
+	"strings"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
+
+// postgresBatchChunkSize is the maximum number of UTXO refs to process in a single SQL statement.
+// Postgres can handle large batches efficiently.
+const postgresBatchChunkSize = 1000
 
 // GetUtxo returns a Utxo by reference
 func (d *MetadataStorePostgres) GetUtxo(
@@ -188,10 +194,20 @@ func (d *MetadataStorePostgres) DeleteUtxos(
 	if err != nil {
 		return err
 	}
-	// Delete each UTxO by tx_id and output_idx. Use a transaction-aware delete.
-	for _, u := range utxos {
-		result := db.Where("tx_id = ? AND output_idx = ?", u.Hash, u.Idx).
-			Delete(&models.Utxo{})
+	// Process in chunks for efficient batch deletion
+	for i := 0; i < len(utxos); i += postgresBatchChunkSize {
+		end := min(i+postgresBatchChunkSize, len(utxos))
+		chunk := utxos[i:end]
+
+		// Build batch delete with OR conditions for this chunk
+		conditions := make([]string, 0, len(chunk))
+		args := make([]any, 0, len(chunk)*2)
+		for _, u := range chunk {
+			conditions = append(conditions, "(tx_id = ? AND output_idx = ?)")
+			args = append(args, u.Hash, u.Idx)
+		}
+		query := strings.Join(conditions, " OR ")
+		result := db.Where(query, args...).Delete(&models.Utxo{})
 		if result.Error != nil {
 			return result.Error
 		}
@@ -220,18 +236,23 @@ func (d *MetadataStorePostgres) AddUtxos(
 	utxos []models.UtxoSlot,
 	txn types.Txn,
 ) error {
+	if len(utxos) == 0 {
+		return nil
+	}
+
 	items := make([]models.Utxo, 0, len(utxos))
 	for _, utxo := range utxos {
-		items = append(
-			items,
-			models.UtxoLedgerToModel(utxo.Utxo, utxo.Slot),
-		)
+		items = append(items, models.UtxoLedgerToModel(utxo.Utxo, utxo.Slot))
 	}
 	db, err := d.resolveDB(txn)
 	if err != nil {
 		return err
 	}
 	result := db.Session(&gorm.Session{FullSaveAssociations: true}).
+		Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "tx_id"}, {Name: "output_idx"}},
+			DoNothing: true,
+		}).
 		CreateInBatches(items, 1000)
 	if result.Error != nil {
 		return result.Error

@@ -39,11 +39,13 @@ func (d *MetadataStoreMysql) GetPool(
 	result := db.
 		Preload(
 			"Registration",
-			func(db *gorm.DB) *gorm.DB { return db.Order("added_slot DESC").Limit(1) },
+			func(db *gorm.DB) *gorm.DB { return db.Order("added_slot DESC, id DESC").Limit(1) },
 		).
+		Preload("Registration.Owners").
+		Preload("Registration.Relays").
 		Preload(
 			"Retirement",
-			func(db *gorm.DB) *gorm.DB { return db.Order("added_slot DESC").Limit(1) },
+			func(db *gorm.DB) *gorm.DB { return db.Order("added_slot DESC, id DESC").Limit(1) },
 		).
 		First(
 			ret,
@@ -428,6 +430,9 @@ func (d *MetadataStoreMysql) RestorePoolStateAtSlot(
 	}
 
 	// Phase 1: Delete pools with no registrations at or before the rollback slot
+	// MySQL doesn't allow referencing the target table in a subquery of DELETE,
+	// so we fetch the IDs first, then delete by those IDs.
+	var poolIDsToDelete []uint
 	poolsWithNoValidRegsSubquery := db.Model(&models.Pool{}).
 		Select("pool.id").
 		Where(
@@ -436,12 +441,14 @@ func (d *MetadataStoreMysql) RestorePoolStateAtSlot(
 				Select("1").
 				Where("pool_registration.pool_id = pool.id AND pool_registration.added_slot <= ?", slot),
 		)
-
-	if result := db.Where(
-		"id IN (?)",
-		poolsWithNoValidRegsSubquery,
-	).Delete(&models.Pool{}); result.Error != nil {
+	if result := poolsWithNoValidRegsSubquery.Pluck("id", &poolIDsToDelete); result.Error != nil {
 		return result.Error
+	}
+
+	if len(poolIDsToDelete) > 0 {
+		if result := db.Where("id IN ?", poolIDsToDelete).Delete(&models.Pool{}); result.Error != nil {
+			return result.Error
+		}
 	}
 
 	// Phase 2: Restore denormalized fields for remaining pools that had any

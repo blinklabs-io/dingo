@@ -251,6 +251,9 @@ func (d *MetadataStoreMysql) RestoreDrepStateAtSlot(
 	// Phase 1: Delete DReps that have no registration certificates at or before
 	// the rollback slot. These DReps were first registered after the rollback
 	// point and should not exist in the restored state.
+	// MySQL doesn't allow referencing the target table in a subquery of DELETE,
+	// so we fetch the IDs first, then delete by those IDs.
+	var drepIDsToDelete []uint
 	drepsWithNoValidRegsSubquery := db.Model(&models.Drep{}).
 		Select("drep.id").
 		Where("added_slot > ?", slot).
@@ -260,12 +263,14 @@ func (d *MetadataStoreMysql) RestoreDrepStateAtSlot(
 				Select("1").
 				Where("registration_drep.drep_credential = drep.credential AND registration_drep.added_slot <= ?", slot),
 		)
-
-	if result := db.Where(
-		"id IN (?)",
-		drepsWithNoValidRegsSubquery,
-	).Delete(&models.Drep{}); result.Error != nil {
+	if result := drepsWithNoValidRegsSubquery.Pluck("id", &drepIDsToDelete); result.Error != nil {
 		return result.Error
+	}
+
+	if len(drepIDsToDelete) > 0 {
+		if result := db.Where("id IN ?", drepIDsToDelete).Delete(&models.Drep{}); result.Error != nil {
+			return result.Error
+		}
 	}
 
 	// Phase 2: Restore state for DReps that have at least one registration

@@ -43,7 +43,8 @@ func (d *MetadataStoreMysql) GetStakeRegistrations(
 		tmpCert = lcommon.StakeRegistrationCertificate{
 			CertType: uint(lcommon.CertificateTypeStakeRegistration),
 			StakeCredential: lcommon.Credential{
-				CredType:   lcommon.CredentialTypeAddrKeyHash,
+				// TODO: determine correct type
+				// CredType: lcommon.CredentialTypeAddrKeyHash,
 				Credential: lcommon.CredentialHash(cert.StakingKey),
 			},
 		}
