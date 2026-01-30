@@ -23,9 +23,9 @@ import (
 
 type Asset struct {
 	Name        []byte       `gorm:"index;size:32"`
-	NameHex     []byte       `gorm:"index;size:32"`
-	PolicyId    []byte       `gorm:"index;size:32"`
-	Fingerprint []byte       `gorm:"index;size:32"`
+	NameHex     []byte       `gorm:"index;size:64"`
+	PolicyId    []byte       `gorm:"index;size:28"`
+	Fingerprint []byte       `gorm:"index;size:48"`
 	ID          uint         `gorm:"primaryKey"`
 	UtxoID      uint         `gorm:"index"`
 	Amount      types.Uint64 `gorm:"index"`
