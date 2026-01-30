@@ -18,7 +18,7 @@ package models
 // This avoids storing duplicate script data when the same script appears
 // in multiple transactions
 type Script struct {
-	Hash        []byte `gorm:"index;unique;size:32"`
+	Hash        []byte `gorm:"index;unique;size:28"`
 	Content     []byte
 	ID          uint `gorm:"primaryKey"`
 	CreatedSlot uint64
