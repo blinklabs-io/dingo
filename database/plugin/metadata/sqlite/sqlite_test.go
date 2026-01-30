@@ -2809,3 +2809,231 @@ func TestCollateralReturnUniqueConstraint(t *testing.T) {
 		},
 	)
 }
+
+// TestPoolStakeSnapshotCRUD tests basic CRUD operations for pool stake snapshots
+func TestPoolStakeSnapshotCRUD(t *testing.T) {
+	sqliteStore, err := New("", nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	if err := sqliteStore.Start(); err != nil {
+		t.Fatalf("unexpected error starting store: %s", err)
+	}
+	defer sqliteStore.Close() //nolint:errcheck
+
+	// Run auto-migration
+	if err := sqliteStore.DB().AutoMigrate(models.MigrateModels...); err != nil {
+		t.Fatalf("failed to auto-migrate: %v", err)
+	}
+
+	poolKeyHash := []byte("pool_key_hash_12345678901234")
+
+	// Test SavePoolStakeSnapshot
+	snapshot := &models.PoolStakeSnapshot{
+		Epoch:          100,
+		SnapshotType:   "go",
+		PoolKeyHash:    poolKeyHash,
+		TotalStake:     1000000000000,
+		DelegatorCount: 500,
+		CapturedSlot:   4320000,
+	}
+	if err := sqliteStore.SavePoolStakeSnapshot(snapshot, nil); err != nil {
+		t.Fatalf("failed to save pool stake snapshot: %v", err)
+	}
+	if snapshot.ID == 0 {
+		t.Error("expected snapshot ID to be set after save")
+	}
+
+	// Test GetPoolStakeSnapshot
+	retrieved, err := sqliteStore.GetPoolStakeSnapshot(100, "go", poolKeyHash, nil)
+	if err != nil {
+		t.Fatalf("failed to get pool stake snapshot: %v", err)
+	}
+	if retrieved == nil {
+		t.Fatal("expected to retrieve snapshot, got nil")
+	}
+	if retrieved.TotalStake != 1000000000000 {
+		t.Errorf("expected TotalStake 1000000000000, got %d", retrieved.TotalStake)
+	}
+	if retrieved.DelegatorCount != 500 {
+		t.Errorf("expected DelegatorCount 500, got %d", retrieved.DelegatorCount)
+	}
+
+	// Test GetPoolStakeSnapshot not found
+	notFound, err := sqliteStore.GetPoolStakeSnapshot(999, "go", poolKeyHash, nil)
+	if err != nil {
+		t.Fatalf("unexpected error for not found: %v", err)
+	}
+	if notFound != nil {
+		t.Error("expected nil for not found snapshot")
+	}
+
+	// Test SavePoolStakeSnapshots (batch)
+	snapshots := []*models.PoolStakeSnapshot{
+		{
+			Epoch:          100,
+			SnapshotType:   "go",
+			PoolKeyHash:    []byte("pool_key_hash_22222222222222"),
+			TotalStake:     500000000000,
+			DelegatorCount: 200,
+			CapturedSlot:   4320000,
+		},
+		{
+			Epoch:          100,
+			SnapshotType:   "go",
+			PoolKeyHash:    []byte("pool_key_hash_33333333333333"),
+			TotalStake:     750000000000,
+			DelegatorCount: 300,
+			CapturedSlot:   4320000,
+		},
+	}
+	if err := sqliteStore.SavePoolStakeSnapshots(snapshots, nil); err != nil {
+		t.Fatalf("failed to save pool stake snapshots batch: %v", err)
+	}
+
+	// Test GetPoolStakeSnapshotsByEpoch
+	allSnapshots, err := sqliteStore.GetPoolStakeSnapshotsByEpoch(100, "go", nil)
+	if err != nil {
+		t.Fatalf("failed to get pool stake snapshots by epoch: %v", err)
+	}
+	if len(allSnapshots) != 3 {
+		t.Errorf("expected 3 snapshots, got %d", len(allSnapshots))
+	}
+
+	// Test GetTotalActiveStake
+	total, err := sqliteStore.GetTotalActiveStake(100, "go", nil)
+	if err != nil {
+		t.Fatalf("failed to get total active stake: %v", err)
+	}
+	// 1000000000000 + 500000000000 + 750000000000 = 2250000000000
+	expected := uint64(2250000000000)
+	if total != expected {
+		t.Errorf("expected total stake %d, got %d", expected, total)
+	}
+}
+
+// TestEpochSummaryCRUD tests basic CRUD operations for epoch summaries
+func TestEpochSummaryCRUD(t *testing.T) {
+	sqliteStore, err := New("", nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	if err := sqliteStore.Start(); err != nil {
+		t.Fatalf("unexpected error starting store: %s", err)
+	}
+	defer sqliteStore.Close() //nolint:errcheck
+
+	// Run auto-migration
+	if err := sqliteStore.DB().AutoMigrate(models.MigrateModels...); err != nil {
+		t.Fatalf("failed to auto-migrate: %v", err)
+	}
+
+	// Test SaveEpochSummary
+	summary := &models.EpochSummary{
+		Epoch:            100,
+		TotalActiveStake: 30000000000000000,
+		TotalPoolCount:   3000,
+		TotalDelegators:  1200000,
+		EpochNonce:       []byte("nonce_123456789012345678901234"),
+		BoundarySlot:     4320000,
+		SnapshotReady:    true,
+	}
+	if err := sqliteStore.SaveEpochSummary(summary, nil); err != nil {
+		t.Fatalf("failed to save epoch summary: %v", err)
+	}
+	if summary.ID == 0 {
+		t.Error("expected summary ID to be set after save")
+	}
+
+	// Test GetEpochSummary
+	retrieved, err := sqliteStore.GetEpochSummary(100, nil)
+	if err != nil {
+		t.Fatalf("failed to get epoch summary: %v", err)
+	}
+	if retrieved == nil {
+		t.Fatal("expected to retrieve summary, got nil")
+	}
+	if retrieved.TotalPoolCount != 3000 {
+		t.Errorf("expected TotalPoolCount 3000, got %d", retrieved.TotalPoolCount)
+	}
+	if !retrieved.SnapshotReady {
+		t.Error("expected SnapshotReady to be true")
+	}
+
+	// Test GetEpochSummary not found
+	notFound, err := sqliteStore.GetEpochSummary(999, nil)
+	if err != nil {
+		t.Fatalf("unexpected error for not found: %v", err)
+	}
+	if notFound != nil {
+		t.Error("expected nil for not found summary")
+	}
+
+	// Add more summaries for GetLatestEpochSummary test
+	summary2 := &models.EpochSummary{
+		Epoch:            101,
+		TotalActiveStake: 31000000000000000,
+		TotalPoolCount:   3050,
+		TotalDelegators:  1210000,
+		BoundarySlot:     4363200,
+		SnapshotReady:    false,
+	}
+	if err := sqliteStore.SaveEpochSummary(summary2, nil); err != nil {
+		t.Fatalf("failed to save epoch summary 2: %v", err)
+	}
+
+	// Test GetLatestEpochSummary
+	latest, err := sqliteStore.GetLatestEpochSummary(nil)
+	if err != nil {
+		t.Fatalf("failed to get latest epoch summary: %v", err)
+	}
+	if latest == nil {
+		t.Fatal("expected to retrieve latest summary, got nil")
+	}
+	if latest.Epoch != 101 {
+		t.Errorf("expected latest epoch 101, got %d", latest.Epoch)
+	}
+}
+
+// TestPoolStakeSnapshotEmptyBatch tests that empty batch save works
+func TestPoolStakeSnapshotEmptyBatch(t *testing.T) {
+	sqliteStore, err := New("", nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	if err := sqliteStore.Start(); err != nil {
+		t.Fatalf("unexpected error starting store: %s", err)
+	}
+	defer sqliteStore.Close() //nolint:errcheck
+
+	// Empty batch should not error
+	if err := sqliteStore.SavePoolStakeSnapshots([]*models.PoolStakeSnapshot{}, nil); err != nil {
+		t.Fatalf("empty batch should not error: %v", err)
+	}
+}
+
+// TestGetTotalActiveStakeEmpty tests GetTotalActiveStake when no snapshots exist
+func TestGetTotalActiveStakeEmpty(t *testing.T) {
+	sqliteStore, err := New("", nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	if err := sqliteStore.Start(); err != nil {
+		t.Fatalf("unexpected error starting store: %s", err)
+	}
+	defer sqliteStore.Close() //nolint:errcheck
+
+	// Run auto-migration
+	if err := sqliteStore.DB().AutoMigrate(models.MigrateModels...); err != nil {
+		t.Fatalf("failed to auto-migrate: %v", err)
+	}
+
+	// GetTotalActiveStake should return 0 when no snapshots exist
+	total, err := sqliteStore.GetTotalActiveStake(999, "go", nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if total != 0 {
+		t.Errorf("expected 0 for empty epoch, got %d", total)
+	}
+}
