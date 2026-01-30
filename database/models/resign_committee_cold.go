@@ -16,7 +16,7 @@ package models
 
 type ResignCommitteeCold struct {
 	AnchorUrl      string
-	ColdCredential []byte `gorm:"index"`
+	ColdCredential []byte `gorm:"index;size:32"`
 	AnchorHash     []byte
 	ID             uint   `gorm:"primarykey"`
 	CertificateID  uint   `gorm:"index"`

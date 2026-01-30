@@ -46,7 +46,7 @@ database:
 
   # Metadata storage plugin configuration
   metadata:
-    # Plugin to use for metadata storage (sqlite, postgres)
+    # Plugin to use for metadata storage (sqlite, postgres, mysql)
     plugin: "sqlite"
     # Configuration options for each plugin
     sqlite:
@@ -70,6 +70,25 @@ database:
       # Postgres TimeZone
       timezone: "UTC"
       # Full Postgres DSN (overrides other options when set)
+      dsn: ""
+    mysql:
+      # NOTE: These are example values for local development only.
+      # Do not use these credentials in production environments.
+      # MySQL host
+      host: "localhost"
+      # MySQL port
+      port: 3306
+      # MySQL user
+      user: "root"
+      # MySQL password (required - no default)
+      password: ""
+      # MySQL database name
+      database: "mysql"
+      # MySQL TLS mode (mapped to tls= in DSN)
+      ssl-mode: ""
+      # MySQL time zone location
+      timezone: "UTC"
+      # Full MySQL DSN (overrides other options when set)
       dsn: ""
 
 # Path to the UNIX domain socket file used by the server

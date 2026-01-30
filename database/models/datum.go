@@ -15,7 +15,7 @@
 package models
 
 type Datum struct {
-	Hash      []byte `gorm:"index;not null;unique"`
+	Hash      []byte `gorm:"index;not null;unique;size:32"`
 	RawDatum  []byte `gorm:"not null"`
 	ID        uint   `gorm:"primarykey"`
 	AddedSlot uint64 `gorm:"index;not null"`

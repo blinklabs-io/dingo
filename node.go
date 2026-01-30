@@ -112,6 +112,14 @@ func (n *Node) Run(ctx context.Context) error {
 	}
 	db, err := database.New(dbConfig)
 	if db == nil {
+		if err != nil {
+			n.config.logger.Error(
+				"failed to create database",
+				"error",
+				err,
+			)
+			return err
+		}
 		n.config.logger.Error(
 			"failed to create database",
 			"error",

@@ -20,7 +20,7 @@ package models
 // All certificate types now have dedicated specialized models. The CertificateID field
 // references the ID of the specific certificate record based on CertType.
 type Certificate struct {
-	BlockHash     []byte `gorm:"index"`
+	BlockHash     []byte `gorm:"index;size:32"`
 	ID            uint   `gorm:"primaryKey"`
 	TransactionID uint   `gorm:"index;uniqueIndex:uniq_tx_cert"`
 	CertificateID uint   `gorm:"index"` // Polymorphic FK to certificate table based on CertType. Not DB-enforced.
