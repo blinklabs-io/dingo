@@ -258,7 +258,7 @@ func (d *MetadataStoreMysql) SetTransaction(
 	result := db.Clauses(clause.OnConflict{
 		Columns: []clause.Column{{Name: "hash"}}, // unique txn hash
 		DoUpdates: clause.AssignmentColumns(
-			[]string{"block_hash", "block_index"},
+			[]string{"block_hash", "block_index", "slot"},
 		),
 	}).Create(tmpTx)
 	if result.Error != nil {
