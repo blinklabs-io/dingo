@@ -48,19 +48,6 @@ type CborCacheConfig struct {
 	BlockLRUEntries int   // Number of blocks in LRU cache
 }
 
-// BlockLRUCache is a placeholder for the block LRU cache that will be
-// implemented separately. For now, it provides stub functionality.
-type BlockLRUCache struct {
-	maxEntries int
-}
-
-// NewBlockLRUCache creates a new BlockLRUCache with the given maximum entries.
-func NewBlockLRUCache(maxEntries int) *BlockLRUCache {
-	return &BlockLRUCache{
-		maxEntries: maxEntries,
-	}
-}
-
 // TieredCborCache orchestrates the tiered cache system for CBOR data resolution.
 // It checks hot caches first, then falls back to block extraction.
 //
