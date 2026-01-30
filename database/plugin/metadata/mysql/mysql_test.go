@@ -173,6 +173,22 @@ func (m *mockTransaction) LeiosHash() lcommon.Blake2b256 {
 	return lcommon.Blake2b256{}
 }
 
+// testHash32 creates a 32-byte test hash from a seed string.
+// Used for block hashes, transaction hashes, and other Blake2b256 values.
+func testHash32(seed string) []byte {
+	hash := make([]byte, 32)
+	copy(hash, []byte(seed))
+	return hash
+}
+
+// testHash28 creates a 28-byte test hash from a seed string.
+// Used for staking keys, credentials, and other Blake2b224 values.
+func testHash28(seed string) []byte {
+	hash := make([]byte, 28)
+	copy(hash, []byte(seed))
+	return hash
+}
+
 // isMysqlConfigured checks if mysql is configured via cmdlineOptions or environment variables.
 // It first checks cmdlineOptions (the plugin's configured state), then falls back to environment variables.
 // Returns true if a password or DSN is configured, false otherwise.
@@ -409,7 +425,7 @@ func TestMysqlUnifiedCertificateCreation(t *testing.T) {
 	// Create a mock transaction with certificates
 	mockTx := &mockTransaction{
 		hash: lcommon.NewBlake2b256(
-			[]byte("test_hash_1234567890123456789012345678901234567890"),
+			[]byte("test_hash"),
 		),
 		isValid: true,
 		certificates: []lcommon.Certificate{
@@ -418,27 +434,27 @@ func TestMysqlUnifiedCertificateCreation(t *testing.T) {
 				StakeCredential: lcommon.Credential{
 					CredType: lcommon.CredentialTypeAddrKeyHash,
 					Credential: lcommon.CredentialHash(
-						[]byte("stake_key_hash_1234567890123456789012345678"),
+						testHash28("stake_key_hash_1"),
 					),
 				},
 			},
 			&lcommon.PoolRegistrationCertificate{
 				CertType: uint(lcommon.CertificateTypePoolRegistration),
 				Operator: lcommon.PoolKeyHash(
-					[]byte("pool_key_hash_1234567890123456789012345678"),
+					testHash28("pool_key_hash_1"),
 				),
 				VrfKeyHash: lcommon.VrfKeyHash(
-					[]byte("vrf_key_hash_12345678901234567890123456789012"),
+					testHash32("vrf_key_hash_1"),
 				),
 				Pledge: 1000000,
 				Cost:   340000000,
 				Margin: cbor.Rat{Rat: big.NewRat(1, 100)},
 				RewardAccount: lcommon.AddrKeyHash(
-					[]byte("reward_account_1234567890123456789012345678"),
+					testHash28("reward_account_1"),
 				),
 				PoolOwners: []lcommon.AddrKeyHash{
 					lcommon.AddrKeyHash(
-						[]byte("owner1_1234567890123456789012345678"),
+						testHash28("owner1"),
 					),
 				},
 			},
@@ -447,13 +463,13 @@ func TestMysqlUnifiedCertificateCreation(t *testing.T) {
 				ColdCredential: lcommon.Credential{
 					CredType: lcommon.CredentialTypeAddrKeyHash,
 					Credential: lcommon.CredentialHash(
-						[]byte("cold_cred_hash_1234567890123456789012345678"),
+						testHash28("cold_cred_hash_1"),
 					),
 				},
 				HotCredential: lcommon.Credential{
 					CredType: lcommon.CredentialTypeAddrKeyHash,
 					Credential: lcommon.CredentialHash(
-						[]byte("hot_cred_hash_1234567890123456789012345678"),
+						testHash28("hot_cred_hash_1"),
 					),
 				},
 			},
@@ -461,7 +477,7 @@ func TestMysqlUnifiedCertificateCreation(t *testing.T) {
 	}
 
 	point := ocommon.Point{
-		Hash: []byte("block_hash_12345678901234567890123456789012"),
+		Hash: testHash32("block_hash_1"),
 		Slot: 1000000,
 	}
 
@@ -587,7 +603,7 @@ func TestMysqlSetAccountPreservesCertificateID(t *testing.T) {
 	pgStore := newTestMysqlStore(t)
 	defer pgStore.Close() //nolint:errcheck
 
-	stakeKey := []byte("test_stake_key_123456789012345678901234567890")
+	stakeKey := testHash28("test_stake_key")
 
 	// First, create an account with a CertificateID via direct DB access
 	account := &models.Account{
@@ -647,12 +663,12 @@ func TestMysqlFeeConversion(t *testing.T) {
 
 	// Test with nil Fee
 	mockTxNilFee := &mockTransactionNilFee{
-		hash:    lcommon.NewBlake2b256([]byte("nil_fee_tx_hash_12345678901234567890")),
+		hash:    lcommon.NewBlake2b256([]byte("nil_fee_tx_hash")),
 		isValid: true,
 	}
 
 	point := ocommon.Point{
-		Hash: []byte("block_hash_nil_fee_test_1234567890123456"),
+		Hash: testHash32("block_hash_nil_fee"),
 		Slot: 2000000,
 	}
 
@@ -813,8 +829,8 @@ func (m *mockTransactionNilFee) LeiosHash() lcommon.Blake2b256 {
 // createTestTransactionMysql is a helper to create a Transaction record for FK constraints in mysql tests
 func createTestTransactionMysql(db *gorm.DB, id uint, slot uint64) error {
 	tx := models.Transaction{
-		Hash:      []byte("tx_hash_" + strconv.FormatUint(uint64(id), 10) + "_123456789012345678901234567890"),
-		BlockHash: []byte("block_hash_" + strconv.FormatUint(slot, 10) + "_12345678901234567890123456789012"),
+		Hash:      testHash32("tx_hash_" + strconv.FormatUint(uint64(id), 10)),
+		BlockHash: testHash32("block_hash_" + strconv.FormatUint(slot, 10)),
 		Slot:      slot,
 		Valid:     true,
 	}
@@ -843,7 +859,7 @@ func TestMysqlDeleteCertificatesAfterSlot(t *testing.T) {
 	// Create certificate at slot 1000
 	cert1 := models.Certificate{
 		Slot:          1000,
-		BlockHash:     []byte("block_hash_1000_12345678901234567890123456789012"),
+		BlockHash:     testHash32("block_hash_1000"),
 		CertType:      uint(lcommon.CertificateTypeStakeDelegation),
 		TransactionID: 1,
 		CertIndex:     0,
@@ -854,8 +870,8 @@ func TestMysqlDeleteCertificatesAfterSlot(t *testing.T) {
 
 	stakeReg1 := models.StakeDelegation{
 		CertificateID: cert1.ID,
-		StakingKey:    []byte("stake_key_1_1234567890123456789012345678"),
-		PoolKeyHash:   []byte("pool_hash_1_12345678901234567890123456789012"),
+		StakingKey:    testHash28("stake_key_1"),
+		PoolKeyHash:   testHash28("pool_hash_1"),
 		AddedSlot:     1000,
 	}
 	if result := pgStore.DB().Create(&stakeReg1); result.Error != nil {
@@ -865,7 +881,7 @@ func TestMysqlDeleteCertificatesAfterSlot(t *testing.T) {
 	// Create certificate at slot 2000
 	cert2 := models.Certificate{
 		Slot:          2000,
-		BlockHash:     []byte("block_hash_2000_12345678901234567890123456789012"),
+		BlockHash:     testHash32("block_hash_2000"),
 		CertType:      uint(lcommon.CertificateTypeStakeDelegation),
 		TransactionID: 2,
 		CertIndex:     0,
@@ -876,8 +892,8 @@ func TestMysqlDeleteCertificatesAfterSlot(t *testing.T) {
 
 	stakeReg2 := models.StakeDelegation{
 		CertificateID: cert2.ID,
-		StakingKey:    []byte("stake_key_2_1234567890123456789012345678"),
-		PoolKeyHash:   []byte("pool_hash_2_12345678901234567890123456789012"),
+		StakingKey:    testHash28("stake_key_2"),
+		PoolKeyHash:   testHash28("pool_hash_2"),
 		AddedSlot:     2000,
 	}
 	if result := pgStore.DB().Create(&stakeReg2); result.Error != nil {
@@ -944,14 +960,14 @@ func TestMysqlRestoreAccountStateAtSlot(t *testing.T) {
 			t.Fatalf("failed to create transaction: %v", err)
 		}
 
-		stakingKey := []byte("staking_key_test_12345678901234567890123456789012")
-		pool1 := []byte("pool1_12345678901234567890123456789012")
-		pool2 := []byte("pool2_12345678901234567890123456789012")
+		stakingKey := testHash28("staking_key_test")
+		pool1 := testHash28("pool1")
+		pool2 := testHash28("pool2")
 
 		// Create registration certificate at slot 1000
 		regCert := models.Certificate{
 			Slot:          1000,
-			BlockHash:     []byte("block_hash_1000_12345678901234567890123456789012"),
+			BlockHash:     testHash32("block_hash_1000"),
 			CertType:      uint(lcommon.CertificateTypeStakeRegistration),
 			TransactionID: 100,
 			CertIndex:     0,
@@ -968,7 +984,7 @@ func TestMysqlRestoreAccountStateAtSlot(t *testing.T) {
 		// Create delegation to pool1 at slot 2000
 		delCert1 := models.Certificate{
 			Slot:          2000,
-			BlockHash:     []byte("block_hash_2000_12345678901234567890123456789012"),
+			BlockHash:     testHash32("block_hash_2000"),
 			CertType:      uint(lcommon.CertificateTypeStakeDelegation),
 			TransactionID: 101,
 			CertIndex:     0,
@@ -986,7 +1002,7 @@ func TestMysqlRestoreAccountStateAtSlot(t *testing.T) {
 		// Create delegation to pool2 at slot 3000
 		delCert2 := models.Certificate{
 			Slot:          3000,
-			BlockHash:     []byte("block_hash_3000_12345678901234567890123456789012"),
+			BlockHash:     testHash32("block_hash_3000"),
 			CertType:      uint(lcommon.CertificateTypeStakeDelegation),
 			TransactionID: 102,
 			CertIndex:     0,
@@ -1037,7 +1053,7 @@ func TestMysqlRestoreAccountStateAtSlot(t *testing.T) {
 		pgStore.DB().Where("1 = 1").Delete(&models.Account{})
 		pgStore.DB().Where("1 = 1").Delete(&models.Transaction{})
 
-		stakingKey := []byte("staking_key_new_12345678901234567890123456789012")
+		stakingKey := testHash28("staking_key_new")
 
 		// Create account registered at slot 2000 (no prior registration)
 		account := models.Account{
@@ -1105,8 +1121,8 @@ func TestMysqlDeleteTransactionsAfterSlot(t *testing.T) {
 	pgStore.DB().Where("1 = 1").Delete(&models.Transaction{})
 
 	// Create transactions at different slots
-	tx1Hash := []byte("tx1_hash_12345678901234567890123456789012345678901234567890")
-	tx2Hash := []byte("tx2_hash_12345678901234567890123456789012345678901234567890")
+	tx1Hash := testHash32("tx1_hash")
+	tx2Hash := testHash32("tx2_hash")
 
 	tx1 := models.Transaction{Hash: tx1Hash, Slot: 1000, Valid: true}
 	tx2 := models.Transaction{Hash: tx2Hash, Slot: 2000, Valid: true}
@@ -1115,7 +1131,7 @@ func TestMysqlDeleteTransactionsAfterSlot(t *testing.T) {
 
 	// Create a UTXO that was spent by tx2
 	utxo := models.Utxo{
-		TxId:        []byte("utxo_txid_123456789012345678901234567890123456789012"),
+		TxId:        testHash32("utxo_txid"),
 		OutputIdx:   0,
 		AddedSlot:   500,
 		SpentAtTxId: tx2Hash,
@@ -1163,7 +1179,7 @@ func TestMysqlRestorePoolStateAtSlot(t *testing.T) {
 		pgStore.DB().Where("1 = 1").Delete(&models.PoolRegistration{})
 		pgStore.DB().Where("1 = 1").Delete(&models.Pool{})
 
-		poolKeyHash := []byte("pool_key_hash_12345678901234567890123456789012")
+		poolKeyHash := testHash28("pool_key_hash")
 
 		// Create pool registered at slot 2000
 		pool := models.Pool{
@@ -1203,7 +1219,7 @@ func TestMysqlRestoreDrepStateAtSlot(t *testing.T) {
 		pgStore.DB().Where("1 = 1").Delete(&models.RegistrationDrep{})
 		pgStore.DB().Where("1 = 1").Delete(&models.Drep{})
 
-		drepCred := []byte("drep_credential_12345678901234567890123456789012")
+		drepCred := testHash28("drep_credential")
 
 		// Create DRep registered at slot 2000
 		drep := models.Drep{
@@ -1238,7 +1254,7 @@ func TestMysqlRestoreDrepStateAtSlot(t *testing.T) {
 		pgStore.DB().Where("1 = 1").Delete(&models.Drep{})
 		pgStore.DB().Where("1 = 1").Delete(&models.Transaction{})
 
-		drepCred := []byte("drep_credential_12345678901234567890123456789012")
+		drepCred := testHash28("drep_credential")
 
 		// Create transactions
 		if err := createTestTransactionMysql(pgStore.DB(), 200, 1000); err != nil {
@@ -1251,7 +1267,7 @@ func TestMysqlRestoreDrepStateAtSlot(t *testing.T) {
 		// Create registration at slot 1000
 		regCert := models.Certificate{
 			Slot:          1000,
-			BlockHash:     []byte("block_hash_1000_12345678901234567890123456789012"),
+			BlockHash:     testHash32("block_hash_1000"),
 			CertType:      uint(lcommon.CertificateTypeRegistrationDrep),
 			TransactionID: 200,
 			CertIndex:     0,
@@ -1262,7 +1278,7 @@ func TestMysqlRestoreDrepStateAtSlot(t *testing.T) {
 			CertificateID:  regCert.ID,
 			DrepCredential: drepCred,
 			AnchorUrl:      "https://example.com/drep1",
-			AnchorHash:     []byte("anchor_hash_1_12345678901234567890123456789012"),
+			AnchorHash:     testHash32("anchor_hash_1"),
 			AddedSlot:      1000,
 		}
 		pgStore.DB().Create(&drepReg)
@@ -1270,7 +1286,7 @@ func TestMysqlRestoreDrepStateAtSlot(t *testing.T) {
 		// Create update at slot 2000 with different anchor
 		updateCert := models.Certificate{
 			Slot:          2000,
-			BlockHash:     []byte("block_hash_2000_12345678901234567890123456789012"),
+			BlockHash:     testHash32("block_hash_2000"),
 			CertType:      uint(lcommon.CertificateTypeUpdateDrep),
 			TransactionID: 201,
 			CertIndex:     0,
@@ -1281,7 +1297,7 @@ func TestMysqlRestoreDrepStateAtSlot(t *testing.T) {
 			CertificateID: updateCert.ID,
 			Credential:    drepCred,
 			AnchorUrl:     "https://example.com/drep2",
-			AnchorHash:    []byte("anchor_hash_2_12345678901234567890123456789012"),
+			AnchorHash:    testHash32("anchor_hash_2"),
 			AddedSlot:     2000,
 		}
 		pgStore.DB().Create(&drepUpdate)
@@ -1290,7 +1306,7 @@ func TestMysqlRestoreDrepStateAtSlot(t *testing.T) {
 		drep := models.Drep{
 			Credential: drepCred,
 			AnchorUrl:  "https://example.com/drep2",
-			AnchorHash: []byte("anchor_hash_2_12345678901234567890123456789012"),
+			AnchorHash: testHash32("anchor_hash_2"),
 			AddedSlot:  2000,
 			Active:     true,
 		}

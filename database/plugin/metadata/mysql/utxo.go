@@ -16,6 +16,7 @@ package mysql
 
 import (
 	"errors"
+	"strings"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
@@ -23,6 +24,10 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
+
+// mysqlBatchChunkSize is the maximum number of UTXO refs to process in a single SQL statement.
+// MySQL doesn't have SQLite's bind variable limits, so we can use larger batches.
+const mysqlBatchChunkSize = 1000
 
 // GetUtxo returns a Utxo by reference
 func (d *MetadataStoreMysql) GetUtxo(
@@ -189,10 +194,20 @@ func (d *MetadataStoreMysql) DeleteUtxos(
 	if err != nil {
 		return err
 	}
-	// Delete each UTxO by tx_id and output_idx. Use a transaction-aware delete.
-	for _, u := range utxos {
-		result := db.Where("tx_id = ? AND output_idx = ?", u.Hash, u.Idx).
-			Delete(&models.Utxo{})
+	// Process in chunks for efficient batch deletion
+	for i := 0; i < len(utxos); i += mysqlBatchChunkSize {
+		end := min(i+mysqlBatchChunkSize, len(utxos))
+		chunk := utxos[i:end]
+
+		// Build batch delete with OR conditions for this chunk
+		conditions := make([]string, 0, len(chunk))
+		args := make([]any, 0, len(chunk)*2)
+		for _, u := range chunk {
+			conditions = append(conditions, "(tx_id = ? AND output_idx = ?)")
+			args = append(args, u.Hash, u.Idx)
+		}
+		query := strings.Join(conditions, " OR ")
+		result := db.Where(query, args...).Delete(&models.Utxo{})
 		if result.Error != nil {
 			return result.Error
 		}

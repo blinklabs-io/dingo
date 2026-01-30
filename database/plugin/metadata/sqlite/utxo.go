@@ -23,6 +23,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // UtxoRef represents a reference to a UTXO by transaction ID and output index
@@ -157,25 +158,29 @@ func (d *MetadataStoreSqlite) GetUtxosByAddress(
 	txn types.Txn,
 ) ([]models.Utxo, error) {
 	var ret []models.Utxo
-	// Build sub-query for address
-	var addrQuery *gorm.DB
 	db, err := d.resolveDB(txn)
 	if err != nil {
 		return nil, err
 	}
-	if addr.PaymentKeyHash() != ledger.NewBlake2b224(nil) {
+
+	hasPaymentKey := addr.PaymentKeyHash() != ledger.NewBlake2b224(nil)
+	hasStakeKey := addr.StakeKeyHash() != ledger.NewBlake2b224(nil)
+
+	// Build sub-query for address
+	var addrQuery *gorm.DB
+	if hasPaymentKey && hasStakeKey {
+		// Base address: both credentials must match (AND)
+		addrQuery = db.Where(
+			"payment_key = ? AND staking_key = ?",
+			addr.PaymentKeyHash().Bytes(),
+			addr.StakeKeyHash().Bytes(),
+		)
+	} else if hasPaymentKey {
 		addrQuery = db.Where("payment_key = ?", addr.PaymentKeyHash().Bytes())
+	} else if hasStakeKey {
+		addrQuery = db.Where("staking_key = ?", addr.StakeKeyHash().Bytes())
 	}
-	if addr.StakeKeyHash() != ledger.NewBlake2b224(nil) {
-		if addrQuery != nil {
-			addrQuery = addrQuery.Or(
-				"staking_key = ?",
-				addr.StakeKeyHash().Bytes(),
-			)
-		} else {
-			addrQuery = db.Where("staking_key = ?", addr.StakeKeyHash().Bytes())
-		}
-	}
+
 	if addrQuery == nil {
 		return ret, nil
 	}
@@ -290,22 +295,24 @@ func (d *MetadataStoreSqlite) AddUtxos(
 	utxos []models.UtxoSlot,
 	txn types.Txn,
 ) error {
+	if len(utxos) == 0 {
+		return nil
+	}
+
 	db, err := d.resolveDB(txn)
 	if err != nil {
 		return err
 	}
 
-	if len(utxos) == 0 {
-		return nil
-	}
-
 	items := make([]models.Utxo, 0, len(utxos))
 	for _, utxo := range utxos {
-		modelUtxo := models.UtxoLedgerToModel(utxo.Utxo, utxo.Slot)
-		items = append(items, modelUtxo)
+		items = append(items, models.UtxoLedgerToModel(utxo.Utxo, utxo.Slot))
 	}
 
-	result := db.Create(&items)
+	result := db.Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "tx_id"}, {Name: "output_idx"}},
+		DoNothing: true,
+	}).Create(&items)
 	return result.Error
 }
 

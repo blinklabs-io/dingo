@@ -39,11 +39,13 @@ func (d *MetadataStorePostgres) GetPool(
 	result := db.
 		Preload(
 			"Registration",
-			func(db *gorm.DB) *gorm.DB { return db.Order("added_slot DESC").Limit(1) },
+			func(db *gorm.DB) *gorm.DB { return db.Order("added_slot DESC, id DESC").Limit(1) },
 		).
+		Preload("Registration.Owners").
+		Preload("Registration.Relays").
 		Preload(
 			"Retirement",
-			func(db *gorm.DB) *gorm.DB { return db.Order("added_slot DESC").Limit(1) },
+			func(db *gorm.DB) *gorm.DB { return db.Order("added_slot DESC, id DESC").Limit(1) },
 		).
 		First(
 			ret,
