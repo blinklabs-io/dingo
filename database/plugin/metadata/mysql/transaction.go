@@ -212,6 +212,7 @@ func (d *MetadataStoreMysql) SetTransaction(
 		Type:       tx.Type(),
 		BlockHash:  point.Hash,
 		BlockIndex: idx,
+		Slot:       point.Slot,
 		Fee:        types.Uint64(feeUint),
 		TTL:        types.Uint64(tx.TTL()),
 		Valid:      tx.IsValid(),
