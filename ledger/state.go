@@ -48,9 +48,8 @@ import (
 )
 
 const (
-	cleanupConsumedUtxosInterval   = 5 * time.Minute
-	cleanupConsumedUtxosSlotWindow = 50000 // TODO: calculate this from params (#395)
-	batchSize                      = 50    // Number of blocks to process in a single DB transaction
+	cleanupConsumedUtxosInterval = 5 * time.Minute
+	batchSize                    = 50 // Number of blocks to process in a single DB transaction
 )
 
 // DatabaseOperation represents an asynchronous database operation
@@ -823,20 +822,25 @@ func (ls *LedgerState) cleanupConsumedUtxos() {
 	// we release the lock, we're working with a consistent snapshot of the slot.
 	ls.RLock()
 	tipSlot := ls.currentTip.Point.Slot
+	eraId := ls.currentEra.Id
 	ls.RUnlock()
+	stabilityWindow := ls.calculateStabilityWindowForEra(eraId)
 
 	// Delete UTxOs that are marked as deleted and older than our slot window
 	ls.config.Logger.Debug(
 		"cleaning up consumed UTxOs",
 		"component", "ledger",
 	)
-	if tipSlot > cleanupConsumedUtxosSlotWindow {
+	if stabilityWindow == 0 {
+		return
+	}
+	if tipSlot > stabilityWindow {
 		for {
 			// No lock needed here - the database handles its own consistency
 			// and we're not accessing any in-memory LedgerState fields.
 			// The tipSlot was captured above with a read lock.
 			count, err := ls.db.UtxosDeleteConsumed(
-				tipSlot-cleanupConsumedUtxosSlotWindow,
+				tipSlot-stabilityWindow,
 				10000,
 				nil,
 			)
