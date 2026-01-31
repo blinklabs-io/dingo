@@ -17,6 +17,8 @@ package database
 import (
 	"testing"
 
+	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -29,7 +31,7 @@ func TestNewTieredCborCache(t *testing.T) {
 		BlockLRUEntries: 100,
 	}
 
-	cache := NewTieredCborCache(config)
+	cache := NewTieredCborCache(config, nil)
 
 	require.NotNil(t, cache)
 	require.NotNil(t, cache.hotUtxo)
@@ -46,7 +48,7 @@ func TestTieredCborCacheHotHitUtxo(t *testing.T) {
 		BlockLRUEntries: 10,
 	}
 
-	cache := NewTieredCborCache(config)
+	cache := NewTieredCborCache(config, nil)
 
 	// Create a test key and CBOR data
 	var txId [32]byte
@@ -78,7 +80,7 @@ func TestTieredCborCacheHotHitTx(t *testing.T) {
 		BlockLRUEntries: 10,
 	}
 
-	cache := NewTieredCborCache(config)
+	cache := NewTieredCborCache(config, nil)
 
 	// Create a test key and CBOR data
 	var txHash [32]byte
@@ -108,18 +110,18 @@ func TestTieredCborCacheHotMissUtxo(t *testing.T) {
 		BlockLRUEntries: 10,
 	}
 
-	cache := NewTieredCborCache(config)
+	cache := NewTieredCborCache(config, nil)
 
 	// Create a test key that is NOT in the cache
 	var txId [32]byte
 	copy(txId[:], []byte("missing-tx-id-0000000000000000"))
 	outputIdx := uint32(5)
 
-	// Resolve should miss the hot cache and return ErrNotImplemented
-	// (since cold path is not wired up yet)
+	// Resolve should miss the hot cache and return ErrBlobStoreUnavailable
+	// (since db is nil)
 	result, err := cache.ResolveUtxoCbor(txId[:], outputIdx)
 
-	assert.ErrorIs(t, err, ErrNotImplemented)
+	assert.ErrorIs(t, err, types.ErrBlobStoreUnavailable)
 	assert.Nil(t, result)
 
 	// Verify metrics show a hot miss
@@ -136,16 +138,17 @@ func TestTieredCborCacheHotMissTx(t *testing.T) {
 		BlockLRUEntries: 10,
 	}
 
-	cache := NewTieredCborCache(config)
+	cache := NewTieredCborCache(config, nil)
 
 	// Create a test key that is NOT in the cache
 	var txHash [32]byte
 	copy(txHash[:], []byte("missing-tx-hash-00000000000000"))
 
-	// Resolve should miss the hot cache and return ErrNotImplemented
+	// Resolve should miss the hot cache and return ErrBlobStoreUnavailable
+	// (since db is nil)
 	result, err := cache.ResolveTxCbor(txHash[:])
 
-	assert.ErrorIs(t, err, ErrNotImplemented)
+	assert.ErrorIs(t, err, types.ErrBlobStoreUnavailable)
 	assert.Nil(t, result)
 
 	// Verify metrics show a hot miss
@@ -162,7 +165,7 @@ func TestTieredCborCacheMetrics(t *testing.T) {
 		BlockLRUEntries: 10,
 	}
 
-	cache := NewTieredCborCache(config)
+	cache := NewTieredCborCache(config, nil)
 
 	// Initial metrics should all be zero
 	metrics := cache.Metrics()
@@ -211,7 +214,7 @@ func TestTieredCborCacheMetrics(t *testing.T) {
 	assert.Equal(t, uint64(2), metrics.TxHotMisses.Load())
 }
 
-func TestTieredCborCacheBatchStub(t *testing.T) {
+func TestTieredCborCacheBatchHotHits(t *testing.T) {
 	config := CborCacheConfig{
 		HotUtxoEntries:  100,
 		HotTxEntries:    100,
@@ -219,19 +222,108 @@ func TestTieredCborCacheBatchStub(t *testing.T) {
 		BlockLRUEntries: 10,
 	}
 
-	cache := NewTieredCborCache(config)
+	cache := NewTieredCborCache(config, nil)
 
-	// Create some test refs
-	refs := []UtxoRef{
-		{TxId: [32]byte{1}, OutputIdx: 0},
-		{TxId: [32]byte{2}, OutputIdx: 1},
-	}
+	// Populate some UTxOs in hot cache
+	ref1 := UtxoRef{TxId: [32]byte{1}, OutputIdx: 0}
+	ref2 := UtxoRef{TxId: [32]byte{2}, OutputIdx: 1}
+	ref3 := UtxoRef{TxId: [32]byte{3}, OutputIdx: 2} // Not in cache
 
-	// Batch resolution returns ErrNotImplemented for now
+	cbor1 := []byte{0x01, 0x02}
+	cbor2 := []byte{0x03, 0x04}
+
+	cache.hotUtxo.Put(makeUtxoKey(ref1.TxId[:], ref1.OutputIdx), cbor1)
+	cache.hotUtxo.Put(makeUtxoKey(ref2.TxId[:], ref2.OutputIdx), cbor2)
+
+	// Batch resolution should return hot cache hits
+	refs := []UtxoRef{ref1, ref2, ref3}
 	result, err := cache.ResolveUtxoCborBatch(refs)
 
-	assert.ErrorIs(t, err, ErrNotImplemented)
-	assert.Nil(t, result)
+	// No error - but ref3 won't be in result since db is nil (can't fetch cold)
+	assert.ErrorIs(t, err, types.ErrBlobStoreUnavailable)
+	assert.Equal(t, cbor1, result[ref1])
+	assert.Equal(t, cbor2, result[ref2])
+	_, hasRef3 := result[ref3]
+	assert.False(t, hasRef3, "ref3 should not be in result (not in cache, no db)")
+
+	// Verify hot hit metrics
+	metrics := cache.Metrics()
+	assert.Equal(t, uint64(2), metrics.UtxoHotHits.Load())
+	assert.Equal(t, uint64(1), metrics.UtxoHotMisses.Load())
+}
+
+func TestTieredCborCacheBatchEmpty(t *testing.T) {
+	config := CborCacheConfig{
+		HotUtxoEntries:  100,
+		HotTxEntries:    100,
+		HotTxMaxBytes:   1024 * 1024,
+		BlockLRUEntries: 10,
+	}
+
+	cache := NewTieredCborCache(config, nil)
+
+	// Batch resolution with empty refs returns empty result
+	result, err := cache.ResolveUtxoCborBatch(nil)
+
+	assert.NoError(t, err)
+	assert.NotNil(t, result)
+	assert.Len(t, result, 0)
+}
+
+func TestTieredCborCacheTxBatchHotHits(t *testing.T) {
+	config := CborCacheConfig{
+		HotUtxoEntries:  100,
+		HotTxEntries:    100,
+		HotTxMaxBytes:   1024 * 1024,
+		BlockLRUEntries: 10,
+	}
+
+	cache := NewTieredCborCache(config, nil)
+
+	// Populate some TXs in hot cache
+	hash1 := [32]byte{1}
+	hash2 := [32]byte{2}
+	hash3 := [32]byte{3} // Not in cache
+
+	cbor1 := []byte{0x01, 0x02}
+	cbor2 := []byte{0x03, 0x04}
+
+	cache.hotTx.Put(hash1[:], cbor1)
+	cache.hotTx.Put(hash2[:], cbor2)
+
+	// Batch resolution should return hot cache hits
+	hashes := [][32]byte{hash1, hash2, hash3}
+	result, err := cache.ResolveTxCborBatch(hashes)
+
+	// No error - but hash3 won't be in result since db is nil (can't fetch cold)
+	assert.ErrorIs(t, err, types.ErrBlobStoreUnavailable)
+	assert.Equal(t, cbor1, result[hash1])
+	assert.Equal(t, cbor2, result[hash2])
+	_, hasHash3 := result[hash3]
+	assert.False(t, hasHash3, "hash3 should not be in result (not in cache, no db)")
+
+	// Verify hot hit metrics
+	metrics := cache.Metrics()
+	assert.Equal(t, uint64(2), metrics.TxHotHits.Load())
+	assert.Equal(t, uint64(1), metrics.TxHotMisses.Load())
+}
+
+func TestTieredCborCacheTxBatchEmpty(t *testing.T) {
+	config := CborCacheConfig{
+		HotUtxoEntries:  100,
+		HotTxEntries:    100,
+		HotTxMaxBytes:   1024 * 1024,
+		BlockLRUEntries: 10,
+	}
+
+	cache := NewTieredCborCache(config, nil)
+
+	// Batch resolution with empty hashes returns empty result
+	result, err := cache.ResolveTxCborBatch(nil)
+
+	assert.NoError(t, err)
+	assert.NotNil(t, result)
+	assert.Len(t, result, 0)
 }
 
 func TestUtxoRefEquality(t *testing.T) {
@@ -282,11 +374,90 @@ func TestCborCacheConfigDefaults(t *testing.T) {
 	// Test with zero config
 	config := CborCacheConfig{}
 
-	cache := NewTieredCborCache(config)
+	cache := NewTieredCborCache(config, nil)
 
 	require.NotNil(t, cache)
 	require.NotNil(t, cache.hotUtxo)
 	require.NotNil(t, cache.hotTx)
 	require.NotNil(t, cache.blockLRU)
 	require.NotNil(t, cache.metrics)
+}
+
+func TestCacheMetricsPrometheus(t *testing.T) {
+	// Create a fresh registry to avoid conflicts
+	registry := prometheus.NewRegistry()
+
+	config := CborCacheConfig{
+		HotUtxoEntries:  100,
+		HotTxEntries:    100,
+		HotTxMaxBytes:   1024 * 1024,
+		BlockLRUEntries: 10,
+	}
+
+	cache := NewTieredCborCache(config, nil)
+
+	// Register Prometheus metrics
+	cache.Metrics().Register(registry)
+
+	// Populate hot caches
+	var txId [32]byte
+	copy(txId[:], []byte("test-tx-id-0000000000000000000"))
+	cache.hotUtxo.Put(makeUtxoKey(txId[:], 0), []byte{0x01})
+
+	var txHash [32]byte
+	copy(txHash[:], []byte("test-tx-hash-000000000000000000"))
+	cache.hotTx.Put(txHash[:], []byte{0x02})
+
+	// Generate some hits
+	_, _ = cache.ResolveUtxoCbor(txId[:], 0)      // UTxO hot hit
+	_, _ = cache.ResolveTxCbor(txHash[:])         // TX hot hit
+	_, _ = cache.ResolveUtxoCbor(txId[:], 99)     // UTxO hot miss (no db)
+	_, _ = cache.ResolveTxCbor([]byte("missing")) // TX hot miss (not impl)
+
+	// Verify atomic counters
+	metrics := cache.Metrics()
+	assert.Equal(t, uint64(1), metrics.UtxoHotHits.Load())
+	assert.Equal(t, uint64(1), metrics.UtxoHotMisses.Load())
+	assert.Equal(t, uint64(1), metrics.TxHotHits.Load())
+	assert.Equal(t, uint64(1), metrics.TxHotMisses.Load())
+
+	// Gather Prometheus metrics
+	mfs, err := registry.Gather()
+	require.NoError(t, err)
+
+	// Check that expected metrics are present
+	metricNames := make(map[string]float64)
+	for _, mf := range mfs {
+		if mf.Metric != nil && len(mf.Metric) > 0 {
+			metricNames[mf.GetName()] = mf.Metric[0].Counter.GetValue()
+		}
+	}
+
+	assert.Equal(t, float64(1), metricNames["dingo_cbor_cache_utxo_hot_hits_total"])
+	assert.Equal(t, float64(1), metricNames["dingo_cbor_cache_utxo_hot_misses_total"])
+	assert.Equal(t, float64(1), metricNames["dingo_cbor_cache_tx_hot_hits_total"])
+	assert.Equal(t, float64(1), metricNames["dingo_cbor_cache_tx_hot_misses_total"])
+}
+
+func TestCacheMetricsRegisterNil(t *testing.T) {
+	// Register with nil registry should not panic
+	metrics := &CacheMetrics{}
+	metrics.Register(nil)
+
+	// Increment methods should still work (just update atomic counters)
+	metrics.IncUtxoHotHit()
+	metrics.IncUtxoHotMiss()
+	metrics.IncTxHotHit()
+	metrics.IncTxHotMiss()
+	metrics.IncBlockLRUHit()
+	metrics.IncBlockLRUMiss()
+	metrics.IncColdExtraction()
+
+	assert.Equal(t, uint64(1), metrics.UtxoHotHits.Load())
+	assert.Equal(t, uint64(1), metrics.UtxoHotMisses.Load())
+	assert.Equal(t, uint64(1), metrics.TxHotHits.Load())
+	assert.Equal(t, uint64(1), metrics.TxHotMisses.Load())
+	assert.Equal(t, uint64(1), metrics.BlockLRUHits.Load())
+	assert.Equal(t, uint64(1), metrics.BlockLRUMisses.Load())
+	assert.Equal(t, uint64(1), metrics.ColdExtractions.Load())
 }

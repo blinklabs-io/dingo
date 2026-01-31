@@ -1,4 +1,4 @@
-// Copyright 2025 Blink Labs Software
+// Copyright 2026 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -24,6 +24,7 @@ const (
 	BlockBlobIndexKeyPrefix    = "bi"
 	BlockBlobMetadataKeySuffix = "_metadata"
 	UtxoBlobKeyPrefix          = "u"
+	TxBlobKeyPrefix            = "t"
 )
 
 func BlockBlobKeyUint64ToBytes(input uint64) []byte {
@@ -60,5 +61,13 @@ func UtxoBlobKey(txId []byte, outputIdx uint32) []byte {
 	idxBytes := make([]byte, 4)
 	binary.BigEndian.PutUint32(idxBytes, outputIdx)
 	key = append(key, idxBytes...)
+	return key
+}
+
+// TxBlobKey creates a key for storing transaction offset data.
+// Key format: 't' + txHash (32 bytes)
+func TxBlobKey(txHash []byte) []byte {
+	key := []byte(TxBlobKeyPrefix)
+	key = append(key, txHash...)
 	return key
 }

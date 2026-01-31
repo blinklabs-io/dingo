@@ -1,4 +1,4 @@
-// Copyright 2025 Blink Labs Software
+// Copyright 2026 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -582,6 +582,94 @@ func (d *BlobStoreGCS) DeleteUtxo(
 		!errors.Is(err, storage.ErrObjectNotExist) {
 		d.logger.Errorf("gcs delete %q failed: %v", string(key), err)
 		return err
+	}
+	return nil
+}
+
+// SetTx stores a transaction's offset data
+func (d *BlobStoreGCS) SetTx(
+	txn types.Txn,
+	txHash []byte,
+	offsetData []byte,
+) error {
+	if err := d.validateTxn(txn); err != nil {
+		return fmt.Errorf("SetTx validateTxn failed: %w", err)
+	}
+	t := txn.(*gcsTxn) // safe after validateTxn
+	if err := t.assertWritable(); err != nil {
+		return fmt.Errorf("SetTx assertWritable failed: %w", err)
+	}
+	ctx, cancel := d.opContext()
+	defer cancel()
+	key := types.TxBlobKey(txHash)
+	w := d.bucket.Object(string(key)).NewWriter(ctx)
+	if _, err := w.Write(offsetData); err != nil {
+		_ = w.Close()
+		wrappedErr := fmt.Errorf("gcs write %q failed: %w", string(key), err)
+		d.logger.Errorf("%v", wrappedErr)
+		return wrappedErr
+	}
+	if err := w.Close(); err != nil {
+		wrappedErr := fmt.Errorf("gcs write close %q failed: %w", string(key), err)
+		d.logger.Errorf("%v", wrappedErr)
+		return wrappedErr
+	}
+	return nil
+}
+
+// GetTx retrieves a transaction's offset data
+func (d *BlobStoreGCS) GetTx(
+	txn types.Txn,
+	txHash []byte,
+) ([]byte, error) {
+	if err := d.validateTxn(txn); err != nil {
+		return nil, fmt.Errorf("GetTx validateTxn failed: %w", err)
+	}
+	ctx, cancel := d.opContext()
+	defer cancel()
+	key := types.TxBlobKey(txHash)
+	r, err := d.bucket.Object(string(key)).NewReader(ctx)
+	if err != nil {
+		if errors.Is(err, storage.ErrObjectNotExist) {
+			return nil, types.ErrBlobKeyNotFound
+		}
+		wrappedErr := fmt.Errorf("gcs read %q failed: %w", string(key), err)
+		d.logger.Errorf("%v", wrappedErr)
+		return nil, wrappedErr
+	}
+	defer r.Close()
+	ciphertext, err := io.ReadAll(r)
+	if err != nil {
+		wrappedErr := fmt.Errorf("gcs read body %q failed: %w", string(key), err)
+		d.logger.Errorf("%v", wrappedErr)
+		return nil, wrappedErr
+	}
+	return ciphertext, nil
+}
+
+// DeleteTx removes a transaction's offset data
+func (d *BlobStoreGCS) DeleteTx(
+	txn types.Txn,
+	txHash []byte,
+) error {
+	if err := d.validateTxn(txn); err != nil {
+		return fmt.Errorf("DeleteTx validateTxn failed: %w", err)
+	}
+	t := txn.(*gcsTxn) // safe after validateTxn
+	if err := t.assertWritable(); err != nil {
+		return fmt.Errorf("DeleteTx assertWritable failed: %w", err)
+	}
+	ctx, cancel := d.opContext()
+	defer cancel()
+	key := types.TxBlobKey(txHash)
+	if err := d.bucket.Object(string(key)).Delete(ctx); err != nil {
+		if errors.Is(err, storage.ErrObjectNotExist) {
+			// Object doesn't exist, treat as success
+			return nil
+		}
+		wrappedErr := fmt.Errorf("gcs delete %q failed: %w", string(key), err)
+		d.logger.Errorf("%v", wrappedErr)
+		return wrappedErr
 	}
 	return nil
 }

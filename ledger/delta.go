@@ -1,4 +1,4 @@
-// Copyright 2025 Blink Labs Software
+// Copyright 2026 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -62,13 +62,15 @@ type LedgerDelta struct {
 	Point        ocommon.Point
 	BlockEraId   uint
 	Transactions []TransactionRecord
-	txSlicePtr   *[]TransactionRecord // store original pointer from pool
+	Offsets      *database.BlockIngestionResult // pre-computed CBOR offsets for this block
+	txSlicePtr   *[]TransactionRecord           // store original pointer from pool
 }
 
 func NewLedgerDelta(point ocommon.Point, blockEraId uint) *LedgerDelta {
 	delta := ledgerDeltaPool.Get().(*LedgerDelta)
 	delta.Point = point
 	delta.BlockEraId = blockEraId
+	delta.Offsets = nil // Reset offsets from previous use
 	slicePtr := transactionRecordSlicePool.Get().(*[]TransactionRecord)
 	delta.Transactions = (*slicePtr)[:0] // Reset slice
 	delta.txSlicePtr = slicePtr          // Store original pointer
@@ -84,6 +86,8 @@ func (d *LedgerDelta) Release() {
 		d.txSlicePtr = nil
 		d.Transactions = nil
 	}
+	// Clear offsets to avoid retaining large memory across blocks
+	d.Offsets = nil
 	// Return the delta to the pool
 	ledgerDeltaPool.Put(d)
 }
@@ -131,6 +135,7 @@ func (d *LedgerDelta) apply(ls *LedgerState, txn *database.Txn) error {
 			updateEpoch,
 			paramUpdates,
 			certDeposits,
+			d.Offsets,
 			txn,
 		)
 		// Return the map to pool

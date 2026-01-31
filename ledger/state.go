@@ -1013,10 +1013,15 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 	var newNonce []byte
 	// Start a transaction
 	err := ls.SubmitAsyncDBTxn(func(txn *database.Txn) error {
-		// Delete rolled-back UTxOs
+		// Delete rolled-back UTxOs (blob offsets and metadata)
 		err := ls.db.UtxosDeleteRolledback(point.Slot, txn)
 		if err != nil {
 			return fmt.Errorf("remove rolled-back UTxOs: %w", err)
+		}
+		// Delete rolled-back transaction offsets and metadata
+		err = ls.db.TransactionsDeleteRolledback(point.Slot, txn)
+		if err != nil {
+			return fmt.Errorf("remove rolled-back transactions: %w", err)
 		}
 		// Restore spent UTxOs
 		err = ls.db.UtxosUnspend(point.Slot, txn)
@@ -1657,6 +1662,34 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 						wantEnableValidation = true
 						shouldValidateBlock = true
 					}
+					// Compute CBOR offsets for this block (required for transaction storage)
+					var blockOffsets *database.BlockIngestionResult
+					blockCbor := next.Cbor()
+					if len(next.Transactions()) > 0 && len(blockCbor) == 0 {
+						deltaBatch.Release()
+						return fmt.Errorf(
+							"block at slot %d hash %x has %d transactions but no CBOR data",
+							tmpPoint.Slot,
+							tmpPoint.Hash,
+							len(next.Transactions()),
+						)
+					}
+					if len(blockCbor) > 0 && len(next.Transactions()) > 0 {
+						indexer := database.NewBlockIndexer(
+							tmpPoint.Slot,
+							tmpPoint.Hash,
+						)
+						var offsetErr error
+						blockOffsets, offsetErr = indexer.ComputeOffsets(blockCbor, next)
+						if offsetErr != nil {
+							deltaBatch.Release()
+							return fmt.Errorf(
+								"compute CBOR offsets for block at slot %d: %w",
+								tmpPoint.Slot,
+								offsetErr,
+							)
+						}
+					}
 					// Process block
 					delta, err = ls.ledgerProcessBlock(
 						txn,
@@ -1664,6 +1697,7 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 						next,
 						shouldValidateBlock,
 						expectedPrevHash,
+						blockOffsets,
 					)
 					if err != nil {
 						deltaBatch.Release()
@@ -1792,6 +1826,7 @@ func (ls *LedgerState) ledgerProcessBlock(
 	block ledger.Block,
 	shouldValidate bool,
 	expectedPrevHash []byte,
+	offsets *database.BlockIngestionResult,
 ) (*LedgerDelta, error) {
 	// Check that we're processing things in order
 	if len(expectedPrevHash) > 0 {
@@ -1815,6 +1850,7 @@ func (ls *LedgerState) ledgerProcessBlock(
 	for i, tx := range block.Transactions() {
 		if delta == nil {
 			delta = NewLedgerDelta(point, uint(block.Era().Id))
+			delta.Offsets = offsets
 		}
 		// Validate transaction
 		if shouldValidate {

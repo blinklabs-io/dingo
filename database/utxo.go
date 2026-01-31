@@ -1,4 +1,4 @@
-// Copyright 2025 Blink Labs Software
+// Copyright 2026 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -21,7 +21,6 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
-	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
 )
 
@@ -83,7 +82,31 @@ func deleteUtxoBlobs(d *Database, utxos []models.Utxo, txn *Txn) error {
 }
 
 func loadCbor(u *models.Utxo, txn *Txn) error {
-	blob := txn.DB().Blob()
+	db := txn.DB()
+	// Use tiered cache if available
+	if db.cborCache != nil {
+		// Pass the blob transaction so we can see uncommitted writes
+		// (important for intra-batch UTxO lookups during validation)
+		blobTxn := txn.Blob()
+		cbor, err := db.cborCache.ResolveUtxoCbor(u.TxId, u.OutputIdx, blobTxn)
+		if err != nil {
+			// Map blob-key-not-found to ErrUtxoNotFound
+			if errors.Is(err, types.ErrBlobKeyNotFound) {
+				return ErrUtxoNotFound
+			}
+			return fmt.Errorf(
+				"resolve UTxO cbor tx=%x idx=%d: %w",
+				u.TxId[:8],
+				u.OutputIdx,
+				err,
+			)
+		}
+		u.Cbor = cbor
+		return nil
+	}
+
+	// Fallback: direct blob access (for tests without cache)
+	blob := db.Blob()
 	if blob == nil {
 		return types.ErrBlobStoreUnavailable
 	}
@@ -93,62 +116,44 @@ func loadCbor(u *models.Utxo, txn *Txn) error {
 		if errors.Is(err, types.ErrBlobKeyNotFound) {
 			return ErrUtxoNotFound
 		}
-		return err
+		return fmt.Errorf(
+			"resolve UTxO cbor tx=%x idx=%d: %w",
+			u.TxId[:8],
+			u.OutputIdx,
+			err,
+		)
 	}
-	u.Cbor = val
-	return nil
-}
 
-func (d *Database) AddUtxos(
-	utxos []models.UtxoSlot,
-	txn *Txn,
-) error {
-	owned := txn == nil
-	if owned {
-		txn = d.Transaction(true)
-		defer func() {
-			if owned {
-				txn.Rollback() //nolint:errcheck
-			}
-		}()
-	}
-	blob := txn.DB().Blob()
-	if blob == nil {
-		return types.ErrBlobStoreUnavailable
-	}
-	blobTxn := txn.Blob()
-	for _, utxoSlot := range utxos {
-		// Add UTxO to blob DB
-		txId := utxoSlot.Utxo.Id.Id().Bytes()
-		outputIdx := utxoSlot.Utxo.Id.Index()
-		utxoCbor := utxoSlot.Utxo.Output.Cbor()
-		// Encode output to CBOR if stored CBOR is empty
-		if len(utxoCbor) == 0 {
-			var err error
-			utxoCbor, err = cbor.Encode(utxoSlot.Utxo.Output)
-			if err != nil {
-				return err
-			}
-		}
-		err := blob.SetUtxo(blobTxn, txId, outputIdx, utxoCbor)
+	// Check if this is offset-based storage
+	if IsUtxoOffsetStorage(val) {
+		// Decode the offset reference
+		offset, err := DecodeUtxoOffset(val)
 		if err != nil {
-			return err
+			return fmt.Errorf("decode utxo offset: %w", err)
 		}
-	}
-	err := d.metadata.AddUtxos(
-		utxos,
-		txn.Metadata(),
-	)
-	if err != nil {
-		return err
-	}
-	if owned {
-		if err := txn.Commit(); err != nil {
-			return err
+
+		// Get the block CBOR from blob store
+		blockCbor, _, err := blob.GetBlock(txn.Blob(), offset.BlockSlot, offset.BlockHash[:])
+		if err != nil {
+			return fmt.Errorf("get block for utxo extraction: %w", err)
 		}
-		owned = false // prevent deferred rollback after successful commit
+
+		// Extract the UTxO CBOR from the block
+		end := uint64(offset.ByteOffset) + uint64(offset.ByteLength)
+		if end > uint64(len(blockCbor)) {
+			return fmt.Errorf(
+				"utxo offset out of bounds: offset=%d, length=%d, block_size=%d",
+				offset.ByteOffset,
+				offset.ByteLength,
+				len(blockCbor),
+			)
+		}
+		u.Cbor = blockCbor[offset.ByteOffset:end]
 		return nil
 	}
+
+	// Legacy format: raw CBOR data
+	u.Cbor = val
 	return nil
 }
 
