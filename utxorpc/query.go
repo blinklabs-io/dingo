@@ -674,7 +674,9 @@ func buildCardanoGenesis(
 	if !slotMillis.IsUint64() || slotMillis.Uint64() > math.MaxUint32 {
 		return nil, fmt.Errorf("slot length out of range: %s", slotMillis)
 	}
-	slotLength := uint32(slotMillis.Uint64()) // #nosec G115 -- bounds checked above
+	slotLength := uint32(
+		slotMillis.Uint64(),
+	) // #nosec G115 -- bounds checked above
 	pparams, err := shelleyGenesisPParams(
 		shelleyGenesis.ProtocolParameters,
 	)
@@ -682,7 +684,10 @@ func buildCardanoGenesis(
 		return nil, fmt.Errorf("shelley protocol params: %w", err)
 	}
 
-	epochLength, err := uint32FromInt(shelleyGenesis.EpochLength, "epoch length")
+	epochLength, err := uint32FromInt(
+		shelleyGenesis.EpochLength,
+		"epoch length",
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -716,10 +721,12 @@ func buildCardanoGenesis(
 	}
 
 	ret := &utxorpcCardano.Genesis{
-		ActiveSlotsCoeff:  activeSlotsCoeff,
-		EpochLength:       epochLength,
-		MaxKesEvolutions:  maxKesEvolutions,
-		MaxLovelaceSupply: lcommon.ToUtxorpcBigInt(shelleyGenesis.MaxLovelaceSupply),
+		ActiveSlotsCoeff: activeSlotsCoeff,
+		EpochLength:      epochLength,
+		MaxKesEvolutions: maxKesEvolutions,
+		MaxLovelaceSupply: lcommon.ToUtxorpcBigInt(
+			shelleyGenesis.MaxLovelaceSupply,
+		),
 		NetworkId:         shelleyGenesis.NetworkId,
 		NetworkMagic:      shelleyGenesis.NetworkMagic,
 		ProtocolParams:    pparams,
@@ -767,37 +774,59 @@ func shelleyGenesisPParams(
 	if err != nil {
 		return nil, err
 	}
-	monetaryExpansion, err := rationalToUtxorpc(params.Rho.Rat, "monetary expansion")
+	monetaryExpansion, err := rationalToUtxorpc(
+		params.Rho.Rat,
+		"monetary expansion",
+	)
 	if err != nil {
 		return nil, err
 	}
-	treasuryExpansion, err := rationalToUtxorpc(params.Tau.Rat, "treasury expansion")
+	treasuryExpansion, err := rationalToUtxorpc(
+		params.Tau.Rat,
+		"treasury expansion",
+	)
 	if err != nil {
 		return nil, err
 	}
-	protocolMajor, err := uint32FromUint(params.ProtocolVersion.Major, "protocol major")
+	protocolMajor, err := uint32FromUint(
+		params.ProtocolVersion.Major,
+		"protocol major",
+	)
 	if err != nil {
 		return nil, err
 	}
-	protocolMinor, err := uint32FromUint(params.ProtocolVersion.Minor, "protocol minor")
+	protocolMinor, err := uint32FromUint(
+		params.ProtocolVersion.Minor,
+		"protocol minor",
+	)
 	if err != nil {
 		return nil, err
 	}
 
 	return &utxorpcCardano.PParams{
-		MaxTxSize:                uint64(params.MaxTxSize),
-		MinFeeCoefficient:        lcommon.ToUtxorpcBigInt(uint64(params.MinFeeA)),
-		MinFeeConstant:           lcommon.ToUtxorpcBigInt(uint64(params.MinFeeB)),
-		MaxBlockBodySize:         uint64(params.MaxBlockBodySize),
-		MaxBlockHeaderSize:       uint64(params.MaxBlockHeaderSize),
-		StakeKeyDeposit:          lcommon.ToUtxorpcBigInt(uint64(params.KeyDeposit)),
-		PoolDeposit:              lcommon.ToUtxorpcBigInt(uint64(params.PoolDeposit)),
+		MaxTxSize: uint64(params.MaxTxSize),
+		MinFeeCoefficient: lcommon.ToUtxorpcBigInt(
+			uint64(params.MinFeeA),
+		),
+		MinFeeConstant: lcommon.ToUtxorpcBigInt(
+			uint64(params.MinFeeB),
+		),
+		MaxBlockBodySize:   uint64(params.MaxBlockBodySize),
+		MaxBlockHeaderSize: uint64(params.MaxBlockHeaderSize),
+		StakeKeyDeposit: lcommon.ToUtxorpcBigInt(
+			uint64(params.KeyDeposit),
+		),
+		PoolDeposit: lcommon.ToUtxorpcBigInt(
+			uint64(params.PoolDeposit),
+		),
 		PoolRetirementEpochBound: uint64(params.MaxEpoch),
 		DesiredNumberOfPools:     uint64(params.NOpt),
 		PoolInfluence:            poolInfluence,
 		MonetaryExpansion:        monetaryExpansion,
 		TreasuryExpansion:        treasuryExpansion,
-		MinPoolCost:              lcommon.ToUtxorpcBigInt(uint64(params.MinPoolCost)),
+		MinPoolCost: lcommon.ToUtxorpcBigInt(
+			uint64(params.MinPoolCost),
+		),
 		ProtocolVersion: &utxorpcCardano.ProtocolVersion{
 			Major: protocolMajor,
 			Minor: protocolMinor,

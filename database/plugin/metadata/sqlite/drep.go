@@ -138,7 +138,8 @@ func batchFetchDrepCerts(
 				addedSlot: r.AddedSlot,
 				certIndex: r.CertIndex,
 			}
-			if !cache.hasDereg[key] || rec.isMoreRecent(cache.deregistration[key]) {
+			if !cache.hasDereg[key] ||
+				rec.isMoreRecent(cache.deregistration[key]) {
 				cache.deregistration[key] = rec
 				cache.hasDereg[key] = true
 			}

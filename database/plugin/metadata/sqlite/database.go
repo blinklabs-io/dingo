@@ -207,7 +207,9 @@ func (d *MetadataStoreSqlite) Start() error {
 		// concurrency is controlled. The production file-based database
 		// uses WAL mode which handles concurrency properly.
 		metadataDb, err = gorm.Open(
-			sqlite.Open("file::memory:?cache=shared&_pragma=busy_timeout(30000)&_pragma=foreign_keys(1)"),
+			sqlite.Open(
+				"file::memory:?cache=shared&_pragma=busy_timeout(30000)&_pragma=foreign_keys(1)",
+			),
 			&gorm.Config{
 				Logger:                 gormlogger.Discard,
 				SkipDefaultTransaction: true,

@@ -150,7 +150,9 @@ func (d *MetadataStoreMysql) GetUtxosByAssets(
 	}
 
 	// Build the asset query
-	assetQuery := db.Table("asset").Select("utxo_id").Where("policy_id = ?", policyId)
+	assetQuery := db.Table("asset").
+		Select("utxo_id").
+		Where("policy_id = ?", policyId)
 	if assetName != nil {
 		assetQuery = assetQuery.Where("name = ?", assetName)
 	}

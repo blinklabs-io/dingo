@@ -199,7 +199,9 @@ func (cs *ChainSelector) RemovePeer(connId ouroboros.ConnectionId) {
 							NewTip:               newPeerTip.Tip,
 							// PreviousTip is zero value since the peer is removed
 							ComparisonResult: ChainABetter,
-							BlockDifference:  safeUint64ToInt64(newPeerTip.Tip.BlockNumber),
+							BlockDifference: safeUint64ToInt64(
+								newPeerTip.Tip.BlockNumber,
+							),
 						},
 					)
 					switchEvent = &evt
@@ -380,7 +382,10 @@ func (cs *ChainSelector) EvaluateAndSwitch() bool {
 				}
 				// Compute comparison result and block difference
 				comparisonResult := CompareChains(newTip, previousTip)
-				blockDiff := safeBlockDiff(newTip.BlockNumber, previousTip.BlockNumber)
+				blockDiff := safeBlockDiff(
+					newTip.BlockNumber,
+					previousTip.BlockNumber,
+				)
 				evt := event.NewEvent(
 					ChainSwitchEventType,
 					ChainSwitchEvent{
@@ -529,7 +534,9 @@ func (cs *ChainSelector) cleanupStalePeers() {
 							NewTip:               newPeerTip.Tip,
 							// PreviousTip is zero value since the peer is removed
 							ComparisonResult: ChainABetter,
-							BlockDifference:  safeUint64ToInt64(newPeerTip.Tip.BlockNumber),
+							BlockDifference: safeUint64ToInt64(
+								newPeerTip.Tip.BlockNumber,
+							),
 						},
 					)
 					switchEvent = &evt

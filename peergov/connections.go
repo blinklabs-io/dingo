@@ -88,7 +88,10 @@ func (p *PeerGovernor) createOutboundConnection(peer *Peer) {
 		}
 		p.mu.Unlock()
 
-		conn, err := p.config.ConnManager.CreateOutboundConn(p.ctx, peer.Address)
+		conn, err := p.config.ConnManager.CreateOutboundConn(
+			p.ctx,
+			peer.Address,
+		)
 		if err == nil {
 			connId := conn.Id()
 			p.mu.Lock()

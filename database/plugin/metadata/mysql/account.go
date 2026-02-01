@@ -283,7 +283,11 @@ func batchFetchStakeRegistrationDelegation(
 	}
 	for _, r := range records {
 		key := string(r.StakingKey)
-		rec := certRecord{pool: r.PoolKeyHash, addedSlot: r.AddedSlot, certIndex: r.CertIndex}
+		rec := certRecord{
+			pool:      r.PoolKeyHash,
+			addedSlot: r.AddedSlot,
+			certIndex: r.CertIndex,
+		}
 		cache.updateReg(key, rec)
 		cache.updatePoolDelegation(key, rec)
 	}
@@ -322,10 +326,22 @@ func batchFetchStakeVoteRegistrationDelegation(
 	}
 	for _, r := range records {
 		key := string(r.StakingKey)
-		rec := certRecord{pool: r.PoolKeyHash, drep: r.Drep, addedSlot: r.AddedSlot, certIndex: r.CertIndex}
+		rec := certRecord{
+			pool:      r.PoolKeyHash,
+			drep:      r.Drep,
+			addedSlot: r.AddedSlot,
+			certIndex: r.CertIndex,
+		}
 		cache.updateReg(key, rec)
 		cache.updatePoolDelegation(key, rec)
-		cache.updateDrepDelegation(key, certRecord{drep: r.Drep, addedSlot: r.AddedSlot, certIndex: r.CertIndex})
+		cache.updateDrepDelegation(
+			key,
+			certRecord{
+				drep:      r.Drep,
+				addedSlot: r.AddedSlot,
+				certIndex: r.CertIndex,
+			},
+		)
 	}
 	return nil
 }
@@ -361,7 +377,11 @@ func batchFetchVoteRegistrationDelegation(
 	}
 	for _, r := range records {
 		key := string(r.StakingKey)
-		rec := certRecord{drep: r.Drep, addedSlot: r.AddedSlot, certIndex: r.CertIndex}
+		rec := certRecord{
+			drep:      r.Drep,
+			addedSlot: r.AddedSlot,
+			certIndex: r.CertIndex,
+		}
 		cache.updateReg(key, rec)
 		cache.updateDrepDelegation(key, rec)
 	}
@@ -511,7 +531,11 @@ func batchFetchStakeDelegation(
 	for _, r := range records {
 		cache.updatePoolDelegation(
 			string(r.StakingKey),
-			certRecord{pool: r.PoolKeyHash, addedSlot: r.AddedSlot, certIndex: r.CertIndex},
+			certRecord{
+				pool:      r.PoolKeyHash,
+				addedSlot: r.AddedSlot,
+				certIndex: r.CertIndex,
+			},
 		)
 	}
 	return nil
@@ -549,8 +573,22 @@ func batchFetchStakeVoteDelegation(
 	}
 	for _, r := range records {
 		key := string(r.StakingKey)
-		cache.updatePoolDelegation(key, certRecord{pool: r.PoolKeyHash, addedSlot: r.AddedSlot, certIndex: r.CertIndex})
-		cache.updateDrepDelegation(key, certRecord{drep: r.Drep, addedSlot: r.AddedSlot, certIndex: r.CertIndex})
+		cache.updatePoolDelegation(
+			key,
+			certRecord{
+				pool:      r.PoolKeyHash,
+				addedSlot: r.AddedSlot,
+				certIndex: r.CertIndex,
+			},
+		)
+		cache.updateDrepDelegation(
+			key,
+			certRecord{
+				drep:      r.Drep,
+				addedSlot: r.AddedSlot,
+				certIndex: r.CertIndex,
+			},
+		)
 	}
 	return nil
 }
@@ -587,7 +625,11 @@ func batchFetchVoteDelegation(
 	for _, r := range records {
 		cache.updateDrepDelegation(
 			string(r.StakingKey),
-			certRecord{drep: r.Drep, addedSlot: r.AddedSlot, certIndex: r.CertIndex},
+			certRecord{
+				drep:      r.Drep,
+				addedSlot: r.AddedSlot,
+				certIndex: r.CertIndex,
+			},
 		)
 	}
 	return nil
@@ -678,10 +720,12 @@ func (d *MetadataStoreMysql) RestoreAccountStateAtSlot(
 			lastModSlot = latestDereg.addedSlot
 		}
 		// Only consider pool/drep slots if they were found in the cache
-		if _, hasPool := cache.poolDelegation[key]; hasPool && poolRec.addedSlot > lastModSlot {
+		if _, hasPool := cache.poolDelegation[key]; hasPool &&
+			poolRec.addedSlot > lastModSlot {
 			lastModSlot = poolRec.addedSlot
 		}
-		if _, hasDrep := cache.drepDelegation[key]; hasDrep && drepRec.addedSlot > lastModSlot {
+		if _, hasDrep := cache.drepDelegation[key]; hasDrep &&
+			drepRec.addedSlot > lastModSlot {
 			lastModSlot = drepRec.addedSlot
 		}
 

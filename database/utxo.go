@@ -222,7 +222,11 @@ func (d *Database) UtxosByAssets(
 		txn = d.Transaction(false)
 		defer txn.Release()
 	}
-	utxos, err := d.metadata.GetUtxosByAssets(policyId, assetName, txn.Metadata())
+	utxos, err := d.metadata.GetUtxosByAssets(
+		policyId,
+		assetName,
+		txn.Metadata(),
+	)
 	if err != nil {
 		return ret, err
 	}
