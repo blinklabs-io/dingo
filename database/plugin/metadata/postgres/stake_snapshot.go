@@ -172,3 +172,47 @@ func (d *MetadataStorePostgres) GetLatestEpochSummary(
 	}
 	return &summary, nil
 }
+
+// Deletion Operations for Rollback Support
+
+// DeletePoolStakeSnapshotsForEpoch deletes all pool stake snapshots for a specific epoch
+func (d *MetadataStorePostgres) DeletePoolStakeSnapshotsForEpoch(
+	epoch uint64,
+	snapshotType string,
+	txn types.Txn,
+) error {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return err
+	}
+	return db.Where(
+		"epoch = ? AND snapshot_type = ?",
+		epoch, snapshotType,
+	).Delete(&models.PoolStakeSnapshot{}).Error
+}
+
+// DeletePoolStakeSnapshotsAfterEpoch deletes all pool stake snapshots after a given epoch.
+// This is used during chain rollbacks.
+func (d *MetadataStorePostgres) DeletePoolStakeSnapshotsAfterEpoch(
+	epoch uint64,
+	txn types.Txn,
+) error {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return err
+	}
+	return db.Where("epoch > ?", epoch).Delete(&models.PoolStakeSnapshot{}).Error
+}
+
+// DeleteEpochSummariesAfterEpoch deletes all epoch summaries after a given epoch.
+// This is used during chain rollbacks.
+func (d *MetadataStorePostgres) DeleteEpochSummariesAfterEpoch(
+	epoch uint64,
+	txn types.Txn,
+) error {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return err
+	}
+	return db.Where("epoch > ?", epoch).Delete(&models.EpochSummary{}).Error
+}
