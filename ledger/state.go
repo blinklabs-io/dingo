@@ -1703,7 +1703,8 @@ func (ls *LedgerState) ledgerProcessBlock(
 						"aux_cbor_hex",
 						auxCborHex,
 					)
-					// return fmt.Errorf("TX validation failure: %w", err)
+					delta.Release()
+					return nil, fmt.Errorf("TX validation failure: %w", err)
 				}
 			}
 		}
