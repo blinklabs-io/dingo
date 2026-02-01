@@ -729,7 +729,6 @@ func (d *BlobStoreS3) GetBlockURL(txn types.Txn, point ocommon.Point) (*url.URL,
 			Key:    &key,
 		},
 		s3.WithPresignExpires(time.Minute))
-
 	if err != nil {
 		return nil, fmt.Errorf("s3: failed to generate presigned url: %w", err)
 	}
