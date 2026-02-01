@@ -1344,6 +1344,30 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 				ls.Scheduler.ChangeInterval(interval)
 			}
 
+			// Emit epoch transition event
+			if rolloverResult != nil && ls.config.EventBus != nil {
+				// Calculate snapshot slot (boundary - 1, or 0 if boundary is 0)
+				snapshotSlot := rolloverResult.NewCurrentEpoch.StartSlot
+				if snapshotSlot > 0 {
+					snapshotSlot--
+				}
+				epochTransitionEvent := event.EpochTransitionEvent{
+					PreviousEpoch:   snapshotEpoch.EpochId,
+					NewEpoch:        rolloverResult.NewCurrentEpoch.EpochId,
+					BoundarySlot:    rolloverResult.NewCurrentEpoch.StartSlot,
+					EpochNonce:      rolloverResult.NewCurrentEpoch.Nonce,
+					ProtocolVersion: rolloverResult.NewCurrentEra.Id,
+					SnapshotSlot:    snapshotSlot,
+				}
+				ls.config.EventBus.Publish(
+					event.EpochTransitionEventType,
+					event.NewEvent(
+						event.EpochTransitionEventType,
+						epochTransitionEvent,
+					),
+				)
+			}
+
 			// Start background cleanup goroutines
 			go ls.cleanupConsumedUtxos()
 
