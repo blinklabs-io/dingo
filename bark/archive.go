@@ -28,7 +28,7 @@ type archiveServiceHandler struct {
 func (a *archiveServiceHandler) FetchBlock(ctx context.Context, req *connect.Request[archivev1alpha1.FetchBlockRequest]) (*connect.Response[archivev1alpha1.FetchBlockResponse], error) {
 	resp := &connect.Response[archivev1alpha1.FetchBlockResponse]{}
 
-	for _, b := range req.Msg.Blocks {
+	for _, b := range req.Msg.GetBlocks() {
 		point := common.NewPoint(b.GetSlot(), []byte(b.GetHash()))
 		u, err := database.BlockURL(a.bark.config.DB, point)
 		if err != nil {
