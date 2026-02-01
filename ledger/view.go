@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"time"
@@ -331,4 +332,66 @@ func (lv *LedgerView) GovActionById(
 func (lv *LedgerView) GovActionExists(id lcommon.GovActionId) bool {
 	// TODO: implement governance action existence check
 	return false
+}
+
+// StakeDistribution represents the stake distribution at an epoch boundary.
+// Used for leader election in Ouroboros Praos.
+type StakeDistribution struct {
+	Epoch      uint64            // Epoch this snapshot is for
+	PoolStakes map[string]uint64 // poolKeyHash (hex) -> total stake
+	TotalStake uint64            // Sum of all pool stakes
+}
+
+// GetStakeDistribution returns the stake distribution for leader election.
+// Uses the "go" snapshot which represents stake from 2 epochs ago.
+func (lv *LedgerView) GetStakeDistribution(epoch uint64) (*StakeDistribution, error) {
+	snapshots, err := lv.ls.db.Metadata().GetPoolStakeSnapshotsByEpoch(
+		epoch,
+		"go",
+		(*lv.txn).Metadata(),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("get pool stake snapshots: %w", err)
+	}
+
+	dist := &StakeDistribution{
+		Epoch:      epoch,
+		PoolStakes: make(map[string]uint64),
+	}
+
+	for _, s := range snapshots {
+		poolKey := hex.EncodeToString(s.PoolKeyHash)
+		stake := uint64(s.TotalStake)
+		dist.PoolStakes[poolKey] = stake
+		dist.TotalStake += stake
+	}
+
+	return dist, nil
+}
+
+// GetPoolStake returns the stake for a specific pool from the "go" snapshot.
+// Returns 0 if the pool has no stake in the snapshot.
+func (lv *LedgerView) GetPoolStake(epoch uint64, poolKeyHash []byte) (uint64, error) {
+	snapshot, err := lv.ls.db.Metadata().GetPoolStakeSnapshot(
+		epoch,
+		"go",
+		poolKeyHash,
+		(*lv.txn).Metadata(),
+	)
+	if err != nil {
+		return 0, fmt.Errorf("get pool stake snapshot: %w", err)
+	}
+	if snapshot == nil {
+		return 0, nil
+	}
+	return uint64(snapshot.TotalStake), nil
+}
+
+// GetTotalActiveStake returns the total active stake from the "go" snapshot.
+func (lv *LedgerView) GetTotalActiveStake(epoch uint64) (uint64, error) {
+	return lv.ls.db.Metadata().GetTotalActiveStake(
+		epoch,
+		"go",
+		(*lv.txn).Metadata(),
+	)
 }
