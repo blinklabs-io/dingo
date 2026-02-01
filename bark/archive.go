@@ -6,18 +6,12 @@ import (
 
 	"connectrpc.com/connect"
 	"github.com/blinklabs-io/bark/proto/v1alpha1/archive"
-	archive "github.com/blinklabs-io/bark/proto/v1alpha1/archive/archivev1alpha1connect"
+	"github.com/blinklabs-io/bark/proto/v1alpha1/archive/archivev1alpha1connect"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
-var _ archive.ArchiveServiceHandler = &archiveServiceHandler{}
-
-func NewArchiveServiceHandler(b *Bark) archive.ArchiveServiceHandler {
-	return &archiveServiceHandler{
-		bark: b,
-	}
-}
+var _ archivev1alpha1connect.ArchiveServiceHandler = &archiveServiceHandler{}
 
 type archiveServiceHandler struct {
 	bark *Bark
