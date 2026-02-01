@@ -11,9 +11,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
-var (
-	_ archive.ArchiveServiceHandler = &archiveServiceHandler{}
-)
+var _ archive.ArchiveServiceHandler = &archiveServiceHandler{}
 
 func NewArchiveServiceHandler(b *Bark) archive.ArchiveServiceHandler {
 	return &archiveServiceHandler{
