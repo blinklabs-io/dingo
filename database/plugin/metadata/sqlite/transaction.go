@@ -338,7 +338,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 	}
 
 	// Add Inputs to Transaction - batch fetch all input UTXOs
-	var inputRefs []UtxoRef
+	inputRefs := make([]UtxoRef, 0, len(tx.Inputs()))
 	for _, input := range tx.Inputs() {
 		inputRefs = append(inputRefs, UtxoRef{
 			TxId:      input.Id().Bytes(),
@@ -369,7 +369,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 	}
 	// Add Collateral to Transaction - batch fetch all collateral UTXOs
 	if len(tx.Collateral()) > 0 {
-		var collateralRefs []UtxoRef
+		collateralRefs := make([]UtxoRef, 0, len(tx.Collateral()))
 		for _, input := range tx.Collateral() {
 			collateralRefs = append(collateralRefs, UtxoRef{
 				TxId:      input.Id().Bytes(),

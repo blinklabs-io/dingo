@@ -522,3 +522,153 @@ func (d *MetadataStoreMysql) RestorePoolStateAtSlot(
 
 	return nil
 }
+
+// GetActivePoolKeyHashes retrieves the key hashes of all currently active pools.
+// A pool is active if it has a registration and either no retirement or
+// the retirement epoch is in the future.
+func (d *MetadataStoreMysql) GetActivePoolKeyHashes(
+	txn types.Txn,
+) ([][]byte, error) {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return nil, fmt.Errorf("GetActivePoolKeyHashes: resolve db: %w", err)
+	}
+
+	// Get the current epoch from the tip
+	var tmpTip models.Tip
+	if res := db.Where("id = ?", tipEntryId).First(&tmpTip); res.Error != nil {
+		if errors.Is(res.Error, gorm.ErrRecordNotFound) {
+			return [][]byte{}, nil
+		}
+		return nil, fmt.Errorf(
+			"GetActivePoolKeyHashes: get tip: %w",
+			res.Error,
+		)
+	}
+
+	var curEpoch models.Epoch
+	if res := db.Where(
+		"start_slot <= ?",
+		tmpTip.Slot,
+	).Order("start_slot DESC").First(&curEpoch); res.Error != nil {
+		if errors.Is(res.Error, gorm.ErrRecordNotFound) {
+			return [][]byte{}, nil
+		}
+		return nil, fmt.Errorf(
+			"GetActivePoolKeyHashes: get epoch: %w",
+			res.Error,
+		)
+	}
+
+	// Query all pools with their registrations and retirements
+	var pools []models.Pool
+	result := db.
+		Preload("Registration", func(db *gorm.DB) *gorm.DB {
+			return db.Order("added_slot DESC, id DESC")
+		}).
+		Preload("Retirement", func(db *gorm.DB) *gorm.DB {
+			return db.Order("added_slot DESC, id DESC")
+		}).
+		Find(&pools)
+	if result.Error != nil {
+		return nil, fmt.Errorf(
+			"GetActivePoolKeyHashes: query pools: %w",
+			result.Error,
+		)
+	}
+
+	// Filter active pools and collect their key hashes
+	poolKeyHashes := make([][]byte, 0, len(pools))
+	for _, pool := range pools {
+		if len(pool.Registration) == 0 {
+			continue
+		}
+
+		latestReg := pool.Registration[0]
+
+		// Check if pool is retired
+		if len(pool.Retirement) > 0 {
+			latestRet := pool.Retirement[0]
+			if latestRet.AddedSlot > latestReg.AddedSlot &&
+				latestRet.Epoch <= curEpoch.EpochId {
+				continue // Pool is retired
+			}
+		}
+
+		// Pool is active
+		poolKeyHashes = append(poolKeyHashes, pool.PoolKeyHash)
+	}
+
+	return poolKeyHashes, nil
+}
+
+// GetStakeByPool returns the total delegated stake and delegator count for a pool.
+func (d *MetadataStoreMysql) GetStakeByPool(
+	poolKeyHash []byte,
+	txn types.Txn,
+) (uint64, uint64, error) {
+	stakes, delegators, err := d.GetStakeByPools([][]byte{poolKeyHash}, txn)
+	if err != nil {
+		return 0, 0, err
+	}
+	return stakes[string(poolKeyHash)], delegators[string(poolKeyHash)], nil
+}
+
+// GetStakeByPools returns delegated stake for multiple pools in a single query.
+func (d *MetadataStoreMysql) GetStakeByPools(
+	poolKeyHashes [][]byte,
+	txn types.Txn,
+) (map[string]uint64, map[string]uint64, error) {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return nil, nil, fmt.Errorf("GetStakeByPools: resolve db: %w", err)
+	}
+
+	// Initialize maps - stakeMap returns zeros since stake calculation
+	// requires UTxO aggregation which is not yet implemented
+	stakeMap := make(map[string]uint64, len(poolKeyHashes))
+	delegatorMap := make(map[string]uint64, len(poolKeyHashes))
+
+	// Initialize all pools with zero
+	for _, hash := range poolKeyHashes {
+		stakeMap[string(hash)] = 0
+		delegatorMap[string(hash)] = 0
+	}
+
+	if len(poolKeyHashes) == 0 {
+		return stakeMap, delegatorMap, nil
+	}
+
+	// Query accounts delegated to these pools and count
+	type poolStakeResult struct {
+		Pool           []byte
+		DelegatorCount int64
+	}
+
+	var results []poolStakeResult
+	if err := db.Model(&models.Account{}).
+		Select("pool, COUNT(*) as delegator_count").
+		Where("pool IN ? AND active = ?", poolKeyHashes, true).
+		Group("pool").
+		Scan(&results).Error; err != nil {
+		return nil, nil, fmt.Errorf(
+			"GetStakeByPools: query accounts: %w",
+			err,
+		)
+	}
+
+	// Update delegator counts from query results
+	for _, r := range results {
+		if r.DelegatorCount >= 0 {
+			delegatorMap[string(r.Pool)] = uint64(r.DelegatorCount)
+		}
+	}
+
+	// TODO: Implement full stake calculation. This requires:
+	// 1. Get all staking_keys for accounts delegated to pools
+	// 2. Query UTxOs by stake credential
+	// 3. Sum values per pool
+	// For now, stakeMap returns zeros - stake values are placeholders.
+
+	return stakeMap, delegatorMap, nil
+}
