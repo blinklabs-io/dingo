@@ -17,7 +17,10 @@ type archiveServiceHandler struct {
 	bark *Bark
 }
 
-func (a *archiveServiceHandler) FetchBlock(ctx context.Context, req *connect.Request[archive.FetchBlockRequest]) (*connect.Response[archive.FetchBlockResponse], error) {
+func (a *archiveServiceHandler) FetchBlock(
+	ctx context.Context,
+	req *connect.Request[archive.FetchBlockRequest],
+) (*connect.Response[archive.FetchBlockResponse], error) {
 	resp := &connect.Response[archive.FetchBlockResponse]{}
 
 	for _, b := range req.Msg.GetBlocks() {
