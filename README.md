@@ -72,6 +72,122 @@ This behavior can be changed via the following environment variables:
     (default: empty)
 - `TLS_KEY_FILE_PATH` - SSL certificate key to use (default: empty)
 
+## Fast Bootstrapping with Mithril
+
+Instead of syncing from genesis (which can take days on mainnet), you can bootstrap Dingo using a Mithril snapshot. [Mithril](https://mithril.network/) provides cryptographically certified snapshots of the Cardano blockchain.
+
+### Prerequisites
+
+Install the `mithril-client` CLI from [Mithril releases](https://github.com/input-output-hk/mithril/releases):
+
+```bash
+# Detect OS and architecture
+OS=$(uname -s)
+ARCH=$(uname -m)
+
+case "$OS" in
+  Linux)
+    case "$ARCH" in
+      x86_64)  MITHRIL_PLATFORM="x64-linux-musl" ;;
+      aarch64|arm64) MITHRIL_PLATFORM="arm64-linux-musl" ;;
+      *) echo "Unsupported architecture: $ARCH"; exit 1 ;;
+    esac
+    ;;
+  Darwin)
+    case "$ARCH" in
+      x86_64)  MITHRIL_PLATFORM="x64-macos" ;;
+      arm64)   MITHRIL_PLATFORM="arm64-macos" ;;
+      *) echo "Unsupported architecture: $ARCH"; exit 1 ;;
+    esac
+    ;;
+  *) echo "Unsupported OS: $OS (see Mithril releases for Windows)"; exit 1 ;;
+esac
+
+curl -L "https://github.com/input-output-hk/mithril/releases/latest/download/mithril-${MITHRIL_PLATFORM}.tar.zst" -o mithril.tar.zst
+tar --zstd -xf mithril.tar.zst
+sudo mv mithril-client /usr/local/bin/
+rm mithril.tar.zst
+```
+
+For Windows, download the appropriate binary from the [Mithril releases page](https://github.com/input-output-hk/mithril/releases).
+
+### Disk Space Requirements
+
+Bootstrapping requires temporary disk space for both the downloaded snapshot and the Dingo database:
+
+| Network | Snapshot Size | Dingo DB | Total Needed |
+|---------|---------------|----------|--------------|
+| mainnet | ~180 GB | ~200+ GB | ~400 GB |
+| preprod | ~60 GB | ~80 GB | ~150 GB |
+| preview | ~15 GB | ~25 GB | ~50 GB |
+
+**Note**: These are approximate values that grow over time. The snapshot can be deleted after import, but you need sufficient space for both during the load process.
+
+### Bootstrap Workflow
+
+**Step 1: Download the snapshot**
+
+Set the aggregator endpoint for your network and download:
+
+```bash
+# For mainnet
+export AGGREGATOR_ENDPOINT=https://aggregator.release-mainnet.api.mithril.network/aggregator
+
+# For preprod
+# export AGGREGATOR_ENDPOINT=https://aggregator.release-preprod.api.mithril.network/aggregator
+
+# For preview
+# export AGGREGATOR_ENDPOINT=https://aggregator.pre-release-preview.api.mithril.network/aggregator
+
+# Download the latest snapshot
+mithril-client cardano-db download --download-dir /path/to/download
+```
+
+**Step 2: Load into Dingo**
+
+```bash
+# Load the immutable DB into Dingo
+./dingo load /path/to/download/db/immutable
+```
+
+The load process will import all blocks from the snapshot. Progress is logged as blocks are processed.
+
+**Step 3: Start Dingo**
+
+After loading completes, start Dingo normally and it will sync the remaining blocks from the network:
+
+```bash
+CARDANO_NETWORK=mainnet ./dingo
+```
+
+**Step 4: Clean up (optional)**
+
+Once Dingo is running and synced, you can delete the downloaded snapshot to reclaim disk space:
+
+```bash
+rm -rf /path/to/download
+```
+
+### Example: Full Bootstrap for Preview
+
+```bash
+# Set network
+export CARDANO_NETWORK=preview
+export AGGREGATOR_ENDPOINT=https://aggregator.pre-release-preview.api.mithril.network/aggregator
+
+# Download snapshot
+mithril-client cardano-db download --download-dir /tmp/mithril-preview
+
+# Load into Dingo
+./dingo load /tmp/mithril-preview/db/immutable
+
+# Clean up
+rm -rf /tmp/mithril-preview
+
+# Run Dingo
+./dingo
+```
+
 ## Database Plugins
 
 Dingo supports pluggable storage backends for both blob storage (blocks, transactions) and metadata storage. This allows you to choose the best storage solution for your use case.
