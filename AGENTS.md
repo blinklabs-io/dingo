@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Concise guide for AI agents working with Dingo. For full details, see `CLAUDE.md`.
+Concise guide for AI agents working with Dingo. For full details, see `ARCHITECTURE.md`.
 
 ## Quick Reference
 
@@ -76,6 +76,12 @@ Order("added_slot DESC, cert_index DESC")
 - UTxOs/TXs stored as 48-byte `CborOffset` (slot + hash + offset + length)
 - `TieredCborCache` resolves: hot cache → block LRU → cold extraction
 
+### Stake Snapshots
+- Mark/Set/Go rotation at epoch boundaries (Ouroboros Praos)
+- `LedgerView.GetStakeDistribution(epoch)` for leader election queries
+- `PoolStakeSnapshot` model stores per-pool stake
+- `EpochSummary` stores network aggregates
+
 ## Key Event Types
 
 | Event | Purpose |
@@ -83,6 +89,7 @@ Order("added_slot DESC, cert_index DESC")
 | `chain.update` | Block added to chain |
 | `chain.fork-detected` | Fork detected |
 | `chainselection.chain_switch` | Active peer changed |
+| `epoch.transition` | Epoch boundary crossed (triggers stake snapshot) |
 | `mempool.add_tx` / `mempool.remove_tx` | Transaction lifecycle |
 | `connmanager.conn-closed` | Connection lifecycle |
 | `peergov.peer-churn` | Peer rotation |

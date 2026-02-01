@@ -15,6 +15,7 @@ Dingo is a high-performance Cardano blockchain node implementation in Go. This d
 - [Peer Governance](#peer-governance)
 - [Transaction Mempool](#transaction-mempool)
 - [Design Patterns](#design-patterns)
+- [Stake Snapshots](#stake-snapshots)
 
 ## Overview
 
@@ -531,3 +532,108 @@ Key configuration areas:
 - Mempool capacity
 - Peer targets and quotas
 - CBOR cache sizing (hot entries, block LRU)
+
+## Stake Snapshots
+
+Stake snapshots capture the stake distribution at epoch boundaries for use in Ouroboros Praos leader election. The block producer must know the stake distribution from 2 epochs ago to determine if they are the slot leader.
+
+### Ouroboros Praos Snapshot Model
+
+```
+Epoch N-2        Epoch N-1        Epoch N (current)
+   |                |                |
+   v                v                v
+[Go Snapshot] <- [Set Snapshot] <- [Mark Snapshot]
+   |                                    |
+   +------------------------------------+
+   Used for leader election             Captured at
+   in current epoch                     epoch boundary
+```
+
+- **Mark Snapshot**: Captured at the end of epoch N, becomes Set at epoch N+1
+- **Set Snapshot**: Previous Mark, becomes Go at epoch N+1
+- **Go Snapshot**: Active snapshot used for leader election (2 epochs old)
+
+### Stake Snapshot Components
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                   STAKE SNAPSHOT DATA FLOW                       │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  Block Processing                                                │
+│       │                                                          │
+│       ▼                                                          │
+│  ┌─────────────┐     ┌──────────────────┐     ┌───────────────┐ │
+│  │ LedgerState │────▶│ Epoch Transition │────▶│ EventBus      │ │
+│  │             │     │ Detection        │     │ (EpochEvent)  │ │
+│  └─────────────┘     └──────────────────┘     └───────┬───────┘ │
+│                                                       │         │
+│                                                       ▼         │
+│                                            ┌──────────────────┐ │
+│                                            │ SnapshotManager  │ │
+│                                            │ (Subscribe)      │ │
+│                                            └────────┬─────────┘ │
+│                                                     │           │
+│            ┌────────────────────────────────────────┼─────┐     │
+│            │                                        │     │     │
+│            ▼                                        ▼     ▼     │
+│  ┌─────────────────┐              ┌─────────────────┐  ┌──────┐ │
+│  │ Calculate Stake │              │ Rotate Snapshots│  │Cleanup│ │
+│  │ Distribution    │              │ Mark→Set→Go     │  │      │ │
+│  └────────┬────────┘              └────────┬────────┘  └──────┘ │
+│           │                                │                    │
+│           ▼                                ▼                    │
+│  ┌─────────────────────────────────────────────────────┐       │
+│  │                   Database                           │       │
+│  │  ┌─────────────────┐  ┌───────────────┐             │       │
+│  │  │PoolStakeSnapshot│  │ EpochSummary  │             │       │
+│  │  └─────────────────┘  └───────────────┘             │       │
+│  └─────────────────────────────────────────────────────┘       │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Database Models
+
+| Model | Purpose |
+|-------|---------|
+| `PoolStakeSnapshot` | Per-pool stake at epoch boundary (epoch, type, pool hash, stake, delegator count) |
+| `EpochSummary` | Network-wide aggregates (total stake, pool count, delegator count, epoch nonce) |
+
+Snapshot types: `"mark"`, `"set"`, `"go"`
+
+### Query Interface
+
+The `LedgerView` provides stake distribution queries:
+
+```go
+// Get full stake distribution for leader election
+dist, err := ledgerView.GetStakeDistribution(epoch)
+
+// Get stake for a specific pool
+poolStake, err := ledgerView.GetPoolStake(epoch, poolKeyHash)
+
+// Get total active stake
+totalStake, err := ledgerView.GetTotalActiveStake(epoch)
+```
+
+### Event-Driven Capture
+
+`EpochTransitionEvent` triggers snapshot capture:
+
+```go
+type EpochTransitionEvent struct {
+    PreviousEpoch     uint64
+    NewEpoch          uint64
+    BoundarySlot      uint64
+    EpochNonce        []byte
+    ProtocolVersion   uint
+    SnapshotSlot      uint64  // Typically boundary - 1
+}
+```
+
+### Rollback Support
+
+On chain rollback past an epoch boundary:
+- Delete snapshots for epochs after rollback point
+- Recalculate affected snapshots on forward replay
