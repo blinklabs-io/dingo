@@ -394,7 +394,7 @@ func (n *Node) Run(ctx context.Context) error {
 	if err := n.bark.Start(n.ctx); err != nil { //nolint:contextcheck
 		return err
 	}
-	started = append(started, func() {
+	started = append(started, func() { //nolint:contextcheck
 		if err := n.bark.Stop(context.Background()); err != nil {
 			n.config.logger.Error("failed to stop bark during cleanup", "error", err)
 		}
