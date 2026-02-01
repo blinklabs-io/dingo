@@ -13,7 +13,7 @@ import (
 	"connectrpc.com/connect"
 	"connectrpc.com/grpchealth"
 	"connectrpc.com/grpcreflect"
-	"github.com/blinklabs-io/bark/proto/v1alpha1/archive/archivev1alpha1connect"
+	archiveconnect "github.com/blinklabs-io/bark/proto/v1alpha1/archive/archivev1alpha1connect"
 	"github.com/blinklabs-io/dingo/database"
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/h2c"
@@ -59,7 +59,7 @@ func (b *Bark) Start(ctx context.Context) error {
 	mux := http.NewServeMux()
 	compress1KB := connect.WithCompressMinBytes(1024)
 
-	archivePath, archiveHandler := archivev1alpha1connect.NewArchiveServiceHandler(
+	archivePath, archiveHandler := archiveconnect.NewArchiveServiceHandler(
 		&archiveServiceHandler{bark: b},
 		compress1KB,
 	)
@@ -67,14 +67,14 @@ func (b *Bark) Start(ctx context.Context) error {
 	mux.Handle(archivePath, archiveHandler)
 	mux.Handle(
 		grpchealth.NewHandler(
-			grpchealth.NewStaticChecker(archivev1alpha1connect.ArchiveServiceName),
+			grpchealth.NewStaticChecker(archiveconnect.ArchiveServiceName),
 			compress1KB,
 		),
 	)
 	mux.Handle(
 		grpcreflect.NewHandlerV1(
 			grpcreflect.NewStaticReflector(
-				archivev1alpha1connect.ArchiveServiceName,
+				archiveconnect.ArchiveServiceName,
 			),
 			compress1KB,
 		),
