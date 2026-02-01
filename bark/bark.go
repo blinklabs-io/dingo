@@ -133,12 +133,13 @@ func (b *Bark) Start(ctx context.Context) error {
 				"context cancelled, shutting down bark gRPC server",
 			)
 
+			//nolint:contextcheck //shutdownCtx is intentionally created from background to allow shutdown to complete even if ctx is cancelled
 			shutdownCtx, cancel := context.WithTimeout(
 				context.Background(),
 				30*time.Second,
 			)
 			defer cancel()
-			if err := b.server.Shutdown(shutdownCtx); err != nil {
+			if err := b.server.Shutdown(shutdownCtx); err != nil { //nolint:contextcheck //shutdownCtx is intentionally created from background to allow shutdown to complete even if ctx is cancelled
 				b.config.Logger.Error(
 					"failed to shutdown bark gRPC server on context cancellation",
 					"error",

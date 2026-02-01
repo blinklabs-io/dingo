@@ -391,7 +391,7 @@ func (n *Node) Run(ctx context.Context) error {
 			Port:   n.config.barkPort,
 		},
 	)
-	if err := n.bark.Start(n.ctx); err != nil {
+	if err := n.bark.Start(n.ctx); err != nil { //nolint:contextcheck
 		return err
 	}
 	started = append(started, func() {
