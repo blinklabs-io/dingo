@@ -111,6 +111,7 @@ type Config struct {
 	PrivatePort        uint    `yaml:"privatePort"                                                   split_words:"true"`
 	RelayPort          uint    `yaml:"relayPort"          envconfig:"port"`
 	UtxorpcPort        uint    `yaml:"utxorpcPort"                                                   split_words:"true"`
+	BarkPort           uint    `yaml:"barkPort"           envconfig:"DINGO_BARK_PORT"`
 	MetricsPort        uint    `yaml:"metricsPort"                                                   split_words:"true"`
 	IntersectTip       bool    `yaml:"intersectTip"                                                  split_words:"true"`
 	ValidateHistorical bool    `yaml:"validateHistorical"                                            split_words:"true"`

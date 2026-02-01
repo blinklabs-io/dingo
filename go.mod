@@ -14,6 +14,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/config v1.32.7
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.95.1
 	github.com/aws/smithy-go v1.24.0
+	github.com/blinklabs-io/bark v0.0.0-20260128142929-ce9fbbf70599
 	github.com/blinklabs-io/gouroboros v0.151.1
 	github.com/blinklabs-io/ouroboros-mock v0.5.1
 	github.com/blinklabs-io/plutigo v0.0.22

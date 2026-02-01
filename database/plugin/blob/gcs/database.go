@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/url"
 	"sort"
 	"strings"
 	"time"
@@ -800,4 +801,8 @@ func (d *BlobStoreGCS) Start() error {
 // Stop implements the plugin.Plugin interface.
 func (d *BlobStoreGCS) Stop() error {
 	return d.Close()
+}
+
+func (d *BlobStoreGCS) GetBlockURL(txn types.Txn, hash []byte, slot uint64) (*url.URL, error) {
+	return nil, errors.New("gcs: GetBlockURL not supported")
 }

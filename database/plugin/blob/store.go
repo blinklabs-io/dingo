@@ -16,6 +16,7 @@ package blob
 
 import (
 	"fmt"
+	"net/url"
 
 	"github.com/blinklabs-io/dingo/database/plugin"
 	"github.com/blinklabs-io/dingo/database/types"
@@ -69,7 +70,7 @@ type BlobStore interface {
 		hash []byte,
 	) ([]byte, types.BlockMetadata, error)
 	DeleteBlock(txn types.Txn, slot uint64, hash []byte, id uint64) error
-
+	GetBlockURL(txn types.Txn, hash []byte, slot uint64) (*url.URL, error)
 	// UTxO operations
 	SetUtxo(txn types.Txn, txId []byte, outputIdx uint32, cbor []byte) error
 	GetUtxo(txn types.Txn, txId []byte, outputIdx uint32) ([]byte, error)

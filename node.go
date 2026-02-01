@@ -21,6 +21,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/blinklabs-io/dingo/bark"
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/chainselection"
 	"github.com/blinklabs-io/dingo/chainsync"
@@ -46,6 +47,7 @@ type Node struct {
 	db             *database.Database
 	ledgerState    *ledger.LedgerState
 	utxorpc        *utxorpc.Utxorpc
+	bark           *bark.Bark
 	ouroboros      *ouroborosPkg.Ouroboros
 	shutdownFuncs  []func(context.Context) error
 	config         Config
@@ -381,6 +383,12 @@ func (n *Node) Run(ctx context.Context) error {
 			n.config.logger.Error("failed to stop utxorpc during cleanup", "error", err)
 		}
 	})
+
+	n.bark = bark.NewBark(
+		bark.BarkConfig{
+			DB: db,
+		},
+	)
 
 	// All components started successfully
 	success = true

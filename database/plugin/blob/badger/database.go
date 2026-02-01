@@ -20,6 +20,7 @@ import (
 	"io"
 	"io/fs"
 	"log/slog"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sync"
@@ -528,4 +529,8 @@ func (d *BlobStoreBadger) DeleteUtxo(
 	}
 	key := types.UtxoBlobKey(txId, outputIdx)
 	return badgerTxn.tx.Delete(key)
+}
+
+func (d *BlobStoreBadger) GetBlockURL(txn types.Txn, hash []byte, slot uint64) (*url.URL, error) {
+	return nil, errors.New("badger: GetBlockURL not supported")
 }

@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/url"
 	"sort"
 	"strings"
 	"time"
@@ -714,4 +715,8 @@ func (d *BlobStoreS3) Start() error {
 func (d *BlobStoreS3) Stop() error {
 	// S3 client doesn't need explicit closing
 	return nil
+}
+
+func (d *BlobStoreS3) GetBlockURL(txn types.Txn, hash []byte, slot uint64) (*url.URL, error) {
+	return nil, errors.New("s3: GetBlockURL not supported")
 }
