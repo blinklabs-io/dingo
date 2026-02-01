@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"errors"
 	"math/big"
+	"net/url"
 	"slices"
 	"strings"
 
@@ -102,6 +103,17 @@ func BlockByHash(db *Database, hash []byte) (models.Block, error) {
 	err := txn.Do(func(txn *Txn) error {
 		var err error
 		ret, err = BlockByHashTxn(txn, hash)
+		return err
+	})
+	return ret, err
+}
+
+func BlockURL(db *Database, point ocommon.Point) (*url.URL, error) {
+	var ret *url.URL
+	txn := db.BlobTxn(false)
+	err := txn.Do(func(txn *Txn) error {
+		var err error
+		ret, err = txn.DB().Blob().GetBlockURL(txn, point)
 		return err
 	})
 	return ret, err

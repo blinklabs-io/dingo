@@ -55,6 +55,7 @@ type Config struct {
 	mempoolCapacity          int64
 	outboundSourcePort       uint
 	utxorpcPort              uint
+	barkPort                 uint
 	networkMagic             uint32
 	intersectTip             bool
 	peerSharing              bool
@@ -348,5 +349,11 @@ func WithActivePeersQuotas(
 		c.activePeersTopologyQuota = topologyQuota
 		c.activePeersGossipQuota = gossipQuota
 		c.activePeersLedgerQuota = ledgerQuota
+	}
+}
+
+func WithBarkPort(port uint) ConfigOptionFunc {
+	return func(c *Config) {
+		c.barkPort = port
 	}
 }
