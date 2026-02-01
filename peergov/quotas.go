@@ -227,8 +227,8 @@ func (p *PeerGovernor) logValencyStatus() {
 	for groupID, gc := range groups {
 		status := "at-target"
 		if gc.Valency > 0 {
-			// Hot counts are always non-negative
-			hotCount := uint(gc.Hot) //nolint:gosec // Hot counts are always >= 0
+			//nolint:gosec // Hot counts are always non-negative
+			hotCount := uint(gc.Hot)
 			if hotCount < gc.Valency {
 				status = "under-valency"
 			} else if hotCount > gc.Valency {
@@ -512,7 +512,9 @@ func (p *PeerGovernor) redistributeUnusedSlots() map[string]int {
 // - TopologyPublicRoot: Demote to warm (keep connection alive)
 // - TopologyBootstrapPeer: Demote to cold (close connection, can be fully churned)
 // - Gossip/Ledger/Inbound: Demote to cold (close connection)
-func (p *PeerGovernor) demotionTarget(source PeerSource) (target PeerState, canDemote bool) {
+func (p *PeerGovernor) demotionTarget(
+	source PeerSource,
+) (target PeerState, canDemote bool) {
 	switch source {
 	case PeerSourceTopologyLocalRoot:
 		// Local roots are never churned - they represent explicit operator configuration

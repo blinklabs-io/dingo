@@ -676,8 +676,12 @@ func (d *MetadataStorePostgres) SetTransaction(
 				}
 				// If the record already existed, we need to fetch its ID
 				if unifiedCert.ID == 0 {
-					result := db.Where("transaction_id = ? AND cert_index = ?", tmpTx.ID, uint(i)). // #nosec G115
-															First(&unifiedCert)
+					certIdx := uint(i) // #nosec G115
+					result := db.Where(
+						"transaction_id = ? AND cert_index = ?",
+						tmpTx.ID,
+						certIdx,
+					).First(&unifiedCert)
 					if result.Error != nil {
 						return fmt.Errorf(
 							"fetch existing unified certificate: %w",
@@ -1312,7 +1316,10 @@ func (d *MetadataStorePostgres) SetTransaction(
 
 				for unifiedID, specializedID := range certIDUpdates {
 					ids = append(ids, unifiedID)
-					whenClauses = append(whenClauses, "WHEN id = ? THEN CAST(? AS bigint)")
+					whenClauses = append(
+						whenClauses,
+						"WHEN id = ? THEN CAST(? AS bigint)",
+					)
 					values = append(values, unifiedID, specializedID)
 				}
 
@@ -1420,19 +1427,28 @@ func (d *MetadataStorePostgres) DeleteTransactionsAfterSlot(
 				"spent_at_tx_id": nil,
 				"deleted_slot":   0,
 			}); result.Error != nil {
-			return fmt.Errorf("clear spent_at_tx_id references: %w", result.Error)
+			return fmt.Errorf(
+				"clear spent_at_tx_id references: %w",
+				result.Error,
+			)
 		}
 
 		if result := db.Model(&models.Utxo{}).
 			Where("collateral_by_tx_id IN ?", txHashes).
 			Update("collateral_by_tx_id", nil); result.Error != nil {
-			return fmt.Errorf("clear collateral_by_tx_id references: %w", result.Error)
+			return fmt.Errorf(
+				"clear collateral_by_tx_id references: %w",
+				result.Error,
+			)
 		}
 
 		if result := db.Model(&models.Utxo{}).
 			Where("referenced_by_tx_id IN ?", txHashes).
 			Update("referenced_by_tx_id", nil); result.Error != nil {
-			return fmt.Errorf("clear referenced_by_tx_id references: %w", result.Error)
+			return fmt.Errorf(
+				"clear referenced_by_tx_id references: %w",
+				result.Error,
+			)
 		}
 	}
 

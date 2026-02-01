@@ -218,7 +218,11 @@ func (n *Node) Run(ctx context.Context) error {
 	)
 	started = append(started, func() { //nolint:contextcheck
 		if err := n.mempool.Stop(context.Background()); err != nil {
-			n.config.logger.Error("failed to stop mempool during cleanup", "error", err)
+			n.config.logger.Error(
+				"failed to stop mempool during cleanup",
+				"error",
+				err,
+			)
 		}
 	})
 	// Set mempool in ledger state for block forging
@@ -317,7 +321,11 @@ func (n *Node) Run(ctx context.Context) error {
 	}
 	started = append(started, func() { //nolint:contextcheck
 		if err := n.connManager.Stop(context.Background()); err != nil {
-			n.config.logger.Error("failed to stop connection manager during cleanup", "error", err)
+			n.config.logger.Error(
+				"failed to stop connection manager during cleanup",
+				"error",
+				err,
+			)
 		}
 	})
 	// Configure peer governor
@@ -378,7 +386,11 @@ func (n *Node) Run(ctx context.Context) error {
 	}
 	started = append(started, func() { //nolint:contextcheck
 		if err := n.utxorpc.Stop(context.Background()); err != nil {
-			n.config.logger.Error("failed to stop utxorpc during cleanup", "error", err)
+			n.config.logger.Error(
+				"failed to stop utxorpc during cleanup",
+				"error",
+				err,
+			)
 		}
 	})
 

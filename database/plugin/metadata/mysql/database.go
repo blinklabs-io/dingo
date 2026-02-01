@@ -185,10 +185,14 @@ func (d *MetadataStoreMysql) Start() error {
 
 	if dsn == "" {
 		cfg := mysql.Config{
-			User:                 d.user,
-			Passwd:               d.password,
-			Net:                  "tcp",
-			Addr:                 fmt.Sprintf("%s:%s", d.host, strconv.FormatUint(uint64(d.port), 10)),
+			User:   d.user,
+			Passwd: d.password,
+			Net:    "tcp",
+			Addr: fmt.Sprintf(
+				"%s:%s",
+				d.host,
+				strconv.FormatUint(uint64(d.port), 10),
+			),
 			DBName:               d.database,
 			ParseTime:            true,
 			AllowNativePasswords: true,
@@ -226,7 +230,8 @@ func (d *MetadataStoreMysql) Start() error {
 	if err != nil {
 		var mysqlErr *mysql.MySQLError
 		if errors.As(err, &mysqlErr) && mysqlErr.Number == 1049 {
-			if created, createErr := d.ensureDatabaseExists(dsn, logDatabase); createErr == nil && created {
+			if created, createErr := d.ensureDatabaseExists(dsn, logDatabase); createErr == nil &&
+				created {
 				metadataDb, err = gorm.Open(
 					gormmysql.Open(dsn),
 					&gorm.Config{
@@ -279,7 +284,10 @@ func (d *MetadataStoreMysql) Start() error {
 	return nil
 }
 
-func (d *MetadataStoreMysql) ensureDatabaseExists(dsn string, dbName string) (bool, error) {
+func (d *MetadataStoreMysql) ensureDatabaseExists(
+	dsn string,
+	dbName string,
+) (bool, error) {
 	if dbName == "" {
 		return false, nil
 	}

@@ -123,7 +123,9 @@ func New(
 }
 
 // NewWithOptions creates a new database with options
-func NewWithOptions(opts ...PostgresOptionFunc) (*MetadataStorePostgres, error) {
+func NewWithOptions(
+	opts ...PostgresOptionFunc,
+) (*MetadataStorePostgres, error) {
 	db := &MetadataStorePostgres{}
 
 	// Apply options

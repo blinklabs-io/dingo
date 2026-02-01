@@ -111,9 +111,15 @@ func TestCompareChainsWithVRF(t *testing.T) {
 		expected        ChainComparisonResult
 	}{
 		{
-			name:            "higher block number wins regardless of VRF",
-			tipA:            ochainsync.Tip{Point: ocommon.Point{Slot: 100}, BlockNumber: 50},
-			tipB:            ochainsync.Tip{Point: ocommon.Point{Slot: 100}, BlockNumber: 40},
+			name: "higher block number wins regardless of VRF",
+			tipA: ochainsync.Tip{
+				Point:       ocommon.Point{Slot: 100},
+				BlockNumber: 50,
+			},
+			tipB: ochainsync.Tip{
+				Point:       ocommon.Point{Slot: 100},
+				BlockNumber: 40,
+			},
 			blocksInWindowA: 100,
 			blocksInWindowB: 100,
 			vrfA:            make64ByteVRF(0xFF), // Higher VRF
@@ -121,9 +127,15 @@ func TestCompareChainsWithVRF(t *testing.T) {
 			expected:        ChainABetter,        // Block number wins over VRF
 		},
 		{
-			name:            "equal block number - higher density wins regardless of VRF",
-			tipA:            ochainsync.Tip{Point: ocommon.Point{Slot: 100}, BlockNumber: 50},
-			tipB:            ochainsync.Tip{Point: ocommon.Point{Slot: 100}, BlockNumber: 50},
+			name: "equal block number - higher density wins regardless of VRF",
+			tipA: ochainsync.Tip{
+				Point:       ocommon.Point{Slot: 100},
+				BlockNumber: 50,
+			},
+			tipB: ochainsync.Tip{
+				Point:       ocommon.Point{Slot: 100},
+				BlockNumber: 50,
+			},
 			blocksInWindowA: 100,                 // Higher density
 			blocksInWindowB: 80,                  // Lower density
 			vrfA:            make64ByteVRF(0xFF), // Higher VRF
@@ -131,9 +143,15 @@ func TestCompareChainsWithVRF(t *testing.T) {
 			expected:        ChainABetter,        // Density wins over VRF
 		},
 		{
-			name:            "equal block number and density - VRF tie-breaker A wins",
-			tipA:            ochainsync.Tip{Point: ocommon.Point{Slot: 100}, BlockNumber: 50},
-			tipB:            ochainsync.Tip{Point: ocommon.Point{Slot: 100}, BlockNumber: 50},
+			name: "equal block number and density - VRF tie-breaker A wins",
+			tipA: ochainsync.Tip{
+				Point:       ocommon.Point{Slot: 100},
+				BlockNumber: 50,
+			},
+			tipB: ochainsync.Tip{
+				Point:       ocommon.Point{Slot: 100},
+				BlockNumber: 50,
+			},
 			blocksInWindowA: 100,
 			blocksInWindowB: 100,
 			vrfA:            make64ByteVRF(0x00), // Lower VRF wins
@@ -141,9 +159,15 @@ func TestCompareChainsWithVRF(t *testing.T) {
 			expected:        ChainABetter,
 		},
 		{
-			name:            "equal block number and density - VRF tie-breaker B wins",
-			tipA:            ochainsync.Tip{Point: ocommon.Point{Slot: 100}, BlockNumber: 50},
-			tipB:            ochainsync.Tip{Point: ocommon.Point{Slot: 100}, BlockNumber: 50},
+			name: "equal block number and density - VRF tie-breaker B wins",
+			tipA: ochainsync.Tip{
+				Point:       ocommon.Point{Slot: 100},
+				BlockNumber: 50,
+			},
+			tipB: ochainsync.Tip{
+				Point:       ocommon.Point{Slot: 100},
+				BlockNumber: 50,
+			},
 			blocksInWindowA: 100,
 			blocksInWindowB: 100,
 			vrfA:            make64ByteVRF(0xFF), // Higher VRF loses
@@ -151,9 +175,15 @@ func TestCompareChainsWithVRF(t *testing.T) {
 			expected:        ChainBBetter,
 		},
 		{
-			name:            "equal VRF - falls back to slot comparison A wins",
-			tipA:            ochainsync.Tip{Point: ocommon.Point{Slot: 90}, BlockNumber: 50},  // Lower slot
-			tipB:            ochainsync.Tip{Point: ocommon.Point{Slot: 100}, BlockNumber: 50}, // Higher slot
+			name: "equal VRF - falls back to slot comparison A wins",
+			tipA: ochainsync.Tip{
+				Point:       ocommon.Point{Slot: 90},
+				BlockNumber: 50,
+			}, // Lower slot
+			tipB: ochainsync.Tip{
+				Point:       ocommon.Point{Slot: 100},
+				BlockNumber: 50,
+			}, // Higher slot
 			blocksInWindowA: 100,
 			blocksInWindowB: 100,
 			vrfA:            make64ByteVRF(0x50),
@@ -161,9 +191,15 @@ func TestCompareChainsWithVRF(t *testing.T) {
 			expected:        ChainABetter,        // Lower slot wins
 		},
 		{
-			name:            "nil VRF - falls back to slot comparison",
-			tipA:            ochainsync.Tip{Point: ocommon.Point{Slot: 90}, BlockNumber: 50},
-			tipB:            ochainsync.Tip{Point: ocommon.Point{Slot: 100}, BlockNumber: 50},
+			name: "nil VRF - falls back to slot comparison",
+			tipA: ochainsync.Tip{
+				Point:       ocommon.Point{Slot: 90},
+				BlockNumber: 50,
+			},
+			tipB: ochainsync.Tip{
+				Point:       ocommon.Point{Slot: 100},
+				BlockNumber: 50,
+			},
 			blocksInWindowA: 100,
 			blocksInWindowB: 100,
 			vrfA:            nil,
@@ -171,9 +207,15 @@ func TestCompareChainsWithVRF(t *testing.T) {
 			expected:        ChainABetter, // Lower slot wins as fallback
 		},
 		{
-			name:            "one nil VRF - falls back to slot comparison",
-			tipA:            ochainsync.Tip{Point: ocommon.Point{Slot: 100}, BlockNumber: 50},
-			tipB:            ochainsync.Tip{Point: ocommon.Point{Slot: 90}, BlockNumber: 50},
+			name: "one nil VRF - falls back to slot comparison",
+			tipA: ochainsync.Tip{
+				Point:       ocommon.Point{Slot: 100},
+				BlockNumber: 50,
+			},
+			tipB: ochainsync.Tip{
+				Point:       ocommon.Point{Slot: 90},
+				BlockNumber: 50,
+			},
 			blocksInWindowA: 100,
 			blocksInWindowB: 100,
 			vrfA:            make64ByteVRF(0x00), // Has VRF but B is nil
@@ -181,9 +223,15 @@ func TestCompareChainsWithVRF(t *testing.T) {
 			expected:        ChainBBetter, // B has lower slot, VRF comparison skipped
 		},
 		{
-			name:            "completely equal chains",
-			tipA:            ochainsync.Tip{Point: ocommon.Point{Slot: 100}, BlockNumber: 50},
-			tipB:            ochainsync.Tip{Point: ocommon.Point{Slot: 100}, BlockNumber: 50},
+			name: "completely equal chains",
+			tipA: ochainsync.Tip{
+				Point:       ocommon.Point{Slot: 100},
+				BlockNumber: 50,
+			},
+			tipB: ochainsync.Tip{
+				Point:       ocommon.Point{Slot: 100},
+				BlockNumber: 50,
+			},
 			blocksInWindowA: 100,
 			blocksInWindowB: 100,
 			vrfA:            make64ByteVRF(0x50),
@@ -207,7 +255,10 @@ func TestCompareChainsWithVRF(t *testing.T) {
 func TestIsBetterChainWithVRF(t *testing.T) {
 	// Test that IsBetterChainWithVRF correctly wraps CompareChainsWithVRF
 	newTip := ochainsync.Tip{Point: ocommon.Point{Slot: 100}, BlockNumber: 50}
-	currentTip := ochainsync.Tip{Point: ocommon.Point{Slot: 100}, BlockNumber: 50}
+	currentTip := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 100},
+		BlockNumber: 50,
+	}
 
 	// New chain has lower VRF - should be better
 	assert.True(t, IsBetterChainWithVRF(

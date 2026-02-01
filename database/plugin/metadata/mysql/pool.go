@@ -68,7 +68,8 @@ func (d *MetadataStoreMysql) GetPool(
 		// check whether the retirement epoch has passed. A retirement in the
 		// future means the pool is still active until that epoch is reached.
 		shouldCheckRetirement := false
-		if hasRet && ret.Retirement[0].AddedSlot > ret.Registration[0].AddedSlot {
+		if hasRet &&
+			ret.Retirement[0].AddedSlot > ret.Registration[0].AddedSlot {
 			shouldCheckRetirement = true
 		} else if hasRet && ret.Retirement[0].AddedSlot == ret.Registration[0].AddedSlot {
 			regIdx, retIdx, err := fetchPoolCertIndices(db, ret.Registration[0].ID, ret.Retirement[0].ID)
@@ -97,7 +98,10 @@ func (d *MetadataStoreMysql) GetPool(
 					// Epoch data not yet available (e.g., initial sync), treat pool as active
 					return ret, nil
 				}
-				return nil, fmt.Errorf("failed to get current epoch: %w", res.Error)
+				return nil, fmt.Errorf(
+					"failed to get current epoch: %w",
+					res.Error,
+				)
 			}
 			if retEpoch > curEpoch.EpochId {
 				// Retirement is in the future -> pool still active
@@ -110,7 +114,11 @@ func (d *MetadataStoreMysql) GetPool(
 	return ret, nil
 }
 
-func fetchPoolCertIndices(db *gorm.DB, regID uint, retID uint) (uint, uint, error) {
+func fetchPoolCertIndices(
+	db *gorm.DB,
+	regID uint,
+	retID uint,
+) (uint, uint, error) {
 	type certIndexRow struct {
 		CertificateID uint
 		CertIndex     uint
@@ -199,7 +207,10 @@ func (d *MetadataStoreMysql) GetPoolRegistrations(
 			// Determine type
 			if relay.Port != 0 {
 				if relay.Port > math.MaxUint32 {
-					return nil, fmt.Errorf("pool relay port out of range: %d", relay.Port)
+					return nil, fmt.Errorf(
+						"pool relay port out of range: %d",
+						relay.Port,
+					)
 				}
 				port := uint32(relay.Port)
 				tmpRelay.Port = &port

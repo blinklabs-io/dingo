@@ -555,7 +555,10 @@ func (ls *LedgerState) RecoverCommitTimestampConflict() error {
 	// This ensures we use the post-rollback tip, not the stale tmpTip.
 	currentTip, err := ls.db.GetTip(nil)
 	if err != nil {
-		return fmt.Errorf("failed to get current tip for orphan cleanup: %w", err)
+		return fmt.Errorf(
+			"failed to get current tip for orphan cleanup: %w",
+			err,
+		)
 	}
 	// Clean up orphaned blobs that may exist beyond the metadata tip.
 	// This handles the case where blob committed but metadata failed.
@@ -1279,7 +1282,9 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 							txn,
 							nextEraId,
 							snapshotEpoch.EpochId,
-							snapshotEpoch.StartSlot+uint64(snapshotEpoch.LengthInSlots),
+							snapshotEpoch.StartSlot+uint64(
+								snapshotEpoch.LengthInSlots,
+							),
 							workingPParams,
 						)
 						if err != nil {
@@ -1695,7 +1700,11 @@ func (ls *LedgerState) ledgerProcessBlock(
 			// correctly - for failed TXs, Produced() returns collateral return at the
 			// correct index (len(Outputs())), while Outputs() returns regular outputs
 			for _, utxo := range tx.Produced() {
-				key := fmt.Sprintf("%s:%d", utxo.Id.Id().String(), utxo.Id.Index())
+				key := fmt.Sprintf(
+					"%s:%d",
+					utxo.Id.Id().String(),
+					utxo.Id.Index(),
+				)
 				intraBlockUtxos[key] = utxo
 			}
 		}

@@ -434,7 +434,12 @@ func TestChainSelectorVRFTiebreakerWithNilVRF(t *testing.T) {
 	require.NotNil(t, bestPeer)
 	// Since VRF comparison returns ChainEqual when one is nil,
 	// it falls back to connection ID comparison
-	assert.Equal(t, connId1, *bestPeer, "should fall back to connection ID ordering when one peer has nil VRF")
+	assert.Equal(
+		t,
+		connId1,
+		*bestPeer,
+		"should fall back to connection ID ordering when one peer has nil VRF",
+	)
 }
 
 func TestChainSelectorVRFDoesNotOverrideBlockNumber(t *testing.T) {
@@ -463,7 +468,12 @@ func TestChainSelectorVRFDoesNotOverrideBlockNumber(t *testing.T) {
 	// Block number takes precedence - peer 2 should win despite higher VRF
 	bestPeer := cs.SelectBestChain()
 	require.NotNil(t, bestPeer)
-	assert.Equal(t, connId2, *bestPeer, "higher block number should win over lower VRF")
+	assert.Equal(
+		t,
+		connId2,
+		*bestPeer,
+		"higher block number should win over lower VRF",
+	)
 }
 
 func TestChainSelectorVRFDoesNotOverrideSlot(t *testing.T) {

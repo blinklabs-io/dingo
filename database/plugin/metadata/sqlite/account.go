@@ -736,10 +736,12 @@ func (d *MetadataStoreSqlite) RestoreAccountStateAtSlot(
 			lastModSlot = latestDereg.addedSlot
 		}
 		// Only consider pool/drep slots if they were found in the cache
-		if _, hasPool := cache.poolDelegation[key]; hasPool && poolRec.addedSlot > lastModSlot {
+		if _, hasPool := cache.poolDelegation[key]; hasPool &&
+			poolRec.addedSlot > lastModSlot {
 			lastModSlot = poolRec.addedSlot
 		}
-		if _, hasDrep := cache.drepDelegation[key]; hasDrep && drepRec.addedSlot > lastModSlot {
+		if _, hasDrep := cache.drepDelegation[key]; hasDrep &&
+			drepRec.addedSlot > lastModSlot {
 			lastModSlot = drepRec.addedSlot
 		}
 

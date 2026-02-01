@@ -481,7 +481,9 @@ func EvaluateTxBabbage(
 	for _, redeemerPair := range txInfoV2.(script.TxInfoV2).Redeemers {
 		purpose := redeemerPair.Key
 		if purpose == nil {
-			return 0, lcommon.ExUnits{}, nil, errors.New("script purpose is nil")
+			return 0, lcommon.ExUnits{}, nil, errors.New(
+				"script purpose is nil",
+			)
 		}
 		redeemer := redeemerPair.Value
 		// Lookup script from redeemer purpose

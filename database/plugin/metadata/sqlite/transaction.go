@@ -299,7 +299,10 @@ func (d *MetadataStoreSqlite) SetTransaction(
 			Select("id").
 			Where("hash = ?", txHash).
 			Take(&existing).Error; err != nil {
-			return fmt.Errorf("failed to fetch transaction ID after upsert: %w", err)
+			return fmt.Errorf(
+				"failed to fetch transaction ID after upsert: %w",
+				err,
+			)
 		}
 		tmpTx.ID = existing.ID
 	}
@@ -1508,19 +1511,28 @@ func (d *MetadataStoreSqlite) DeleteTransactionsAfterSlot(
 				"spent_at_tx_id": nil,
 				"deleted_slot":   0,
 			}); result.Error != nil {
-			return fmt.Errorf("clear spent_at_tx_id references: %w", result.Error)
+			return fmt.Errorf(
+				"clear spent_at_tx_id references: %w",
+				result.Error,
+			)
 		}
 
 		if result := db.Model(&models.Utxo{}).
 			Where("collateral_by_tx_id IN ?", txHashes).
 			Update("collateral_by_tx_id", nil); result.Error != nil {
-			return fmt.Errorf("clear collateral_by_tx_id references: %w", result.Error)
+			return fmt.Errorf(
+				"clear collateral_by_tx_id references: %w",
+				result.Error,
+			)
 		}
 
 		if result := db.Model(&models.Utxo{}).
 			Where("referenced_by_tx_id IN ?", txHashes).
 			Update("referenced_by_tx_id", nil); result.Error != nil {
-			return fmt.Errorf("clear referenced_by_tx_id references: %w", result.Error)
+			return fmt.Errorf(
+				"clear referenced_by_tx_id references: %w",
+				result.Error,
+			)
 		}
 	}
 

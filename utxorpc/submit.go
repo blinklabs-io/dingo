@@ -93,12 +93,18 @@ func (s *submitServiceServer) WaitForTx(
 		func(evt event.Event) {
 			defer func() {
 				if r := recover(); r != nil {
-					s.utxorpc.config.Logger.Error("panic in WaitForTx event handler", "panic", r)
+					s.utxorpc.config.Logger.Error(
+						"panic in WaitForTx event handler",
+						"panic",
+						r,
+					)
 				}
 			}()
 			e, ok := evt.Data.(ledger.BlockfetchEvent)
 			if !ok {
-				s.utxorpc.config.Logger.Warn("unexpected event data type in WaitForTx")
+				s.utxorpc.config.Logger.Warn(
+					"unexpected event data type in WaitForTx",
+				)
 				return
 			}
 			for _, tx := range e.Block.Transactions() {

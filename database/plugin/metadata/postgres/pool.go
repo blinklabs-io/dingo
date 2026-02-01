@@ -86,7 +86,10 @@ func (d *MetadataStorePostgres) GetPool(
 					// Epoch data not yet available (e.g., initial sync), treat pool as active
 					return ret, nil
 				}
-				return nil, fmt.Errorf("failed to get current epoch: %w", res.Error)
+				return nil, fmt.Errorf(
+					"failed to get current epoch: %w",
+					res.Error,
+				)
 			}
 			if retEpoch > curEpoch.EpochId {
 				// Retirement is in the future -> pool still active
@@ -157,7 +160,10 @@ func (d *MetadataStorePostgres) GetPoolRegistrations(
 			// Determine type
 			if relay.Port != 0 {
 				if relay.Port > math.MaxUint32 {
-					return nil, fmt.Errorf("pool relay port out of range: %d", relay.Port)
+					return nil, fmt.Errorf(
+						"pool relay port out of range: %d",
+						relay.Port,
+					)
 				}
 				port := uint32(relay.Port)
 				tmpRelay.Port = &port

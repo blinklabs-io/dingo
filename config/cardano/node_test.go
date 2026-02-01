@@ -156,13 +156,19 @@ func TestCanonicalizeByronGenesisJSON(t *testing.T) {
 	}
 
 	if !bytes.Equal(canonical1, canonical2) {
-		t.Errorf("Canonicalization is not deterministic:\n  canonical1: %s\n  canonical2: %s",
-			string(canonical1), string(canonical2))
+		t.Errorf(
+			"Canonicalization is not deterministic:\n  canonical1: %s\n  canonical2: %s",
+			string(canonical1),
+			string(canonical2),
+		)
 	}
 
 	// Test 2: Verify large numbers stored as strings are preserved
 	if !bytes.Contains(canonical1, []byte(`"18446744073709551615"`)) {
-		t.Errorf("Canonicalization corrupted large string-encoded number: %s", string(canonical1))
+		t.Errorf(
+			"Canonicalization corrupted large string-encoded number: %s",
+			string(canonical1),
+		)
 	}
 
 	// Test 3: Verify hash stability with actual Byron genesis
