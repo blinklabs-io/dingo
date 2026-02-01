@@ -28,6 +28,7 @@ import (
 	"cloud.google.com/go/storage"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/cbor"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/prometheus/client_golang/prometheus"
 	"google.golang.org/api/iterator"
 	"google.golang.org/api/option"
@@ -803,6 +804,6 @@ func (d *BlobStoreGCS) Stop() error {
 	return d.Close()
 }
 
-func (d *BlobStoreGCS) GetBlockURL(txn types.Txn, hash []byte, slot uint64) (*url.URL, error) {
+func (d *BlobStoreGCS) GetBlockURL(txn types.Txn, point ocommon.Point) (*url.URL, error) {
 	return nil, errors.New("gcs: GetBlockURL not supported")
 }

@@ -7,6 +7,8 @@ import (
 	"connectrpc.com/connect"
 	"github.com/blinklabs-io/bark/proto/v1alpha1/archive"
 	archive "github.com/blinklabs-io/bark/proto/v1alpha1/archive/archivev1alpha1connect"
+	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
 var (
@@ -27,10 +29,10 @@ func (a *archiveServiceHandler) FetchBlock(ctx context.Context, req *connect.Req
 	resp := &connect.Response[archivev1alpha1.FetchBlockResponse]{}
 
 	for _, b := range req.Msg.Blocks {
-		txn := a.bark.config.DB.BlobTxn(false)
-		u, err := a.bark.config.DB.Blob().GetBlockURL(txn, []byte(b.GetHash()), b.GetSlot())
+		point := common.NewPoint(b.GetSlot(), []byte(b.GetHash()))
+		u, err := database.BlockURL(a.bark.config.DB, point)
 		if err != nil {
-			return nil, fmt.Errorf("failed getting signed url for block %x: %w", b.GetHash(), err)
+			return nil, fmt.Errorf("failed getting signed url for block %v: %w", point, err)
 		}
 		resp.Msg.Blocks = append(resp.Msg.Blocks, &archivev1alpha1.SignedUrl{
 			Url: u.String(),

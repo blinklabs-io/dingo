@@ -33,6 +33,7 @@ import (
 	"github.com/aws/smithy-go"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/cbor"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -717,6 +718,6 @@ func (d *BlobStoreS3) Stop() error {
 	return nil
 }
 
-func (d *BlobStoreS3) GetBlockURL(txn types.Txn, hash []byte, slot uint64) (*url.URL, error) {
+func (d *BlobStoreS3) GetBlockURL(txn types.Txn, point ocommon.Point) (*url.URL, error) {
 	return nil, errors.New("s3: GetBlockURL not supported")
 }

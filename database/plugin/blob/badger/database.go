@@ -28,6 +28,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/cbor"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	badger "github.com/dgraph-io/badger/v4"
 	"github.com/dgraph-io/badger/v4/options"
 	"github.com/prometheus/client_golang/prometheus"
@@ -531,6 +532,6 @@ func (d *BlobStoreBadger) DeleteUtxo(
 	return badgerTxn.tx.Delete(key)
 }
 
-func (d *BlobStoreBadger) GetBlockURL(txn types.Txn, hash []byte, slot uint64) (*url.URL, error) {
+func (d *BlobStoreBadger) GetBlockURL(txn types.Txn, point ocommon.Point) (*url.URL, error) {
 	return nil, errors.New("badger: GetBlockURL not supported")
 }
