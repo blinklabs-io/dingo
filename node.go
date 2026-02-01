@@ -386,9 +386,19 @@ func (n *Node) Run(ctx context.Context) error {
 
 	n.bark = bark.NewBark(
 		bark.BarkConfig{
-			DB: db,
+			Logger: n.config.logger,
+			DB:     db,
+			Port:   n.config.barkPort,
 		},
 	)
+	if err := n.bark.Start(n.ctx); err != nil {
+		return err
+	}
+	started = append(started, func() {
+		if err := n.bark.Stop(context.Background()); err != nil {
+			n.config.logger.Error("failed to stop bark during cleanup", "error", err)
+		}
+	})
 
 	// All components started successfully
 	success = true
