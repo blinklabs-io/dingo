@@ -719,5 +719,25 @@ func (d *BlobStoreS3) Stop() error {
 }
 
 func (d *BlobStoreS3) GetBlockURL(txn types.Txn, point ocommon.Point) (*url.URL, error) {
-	return nil, errors.New("s3: GetBlockURL not supported")
+	key := d.fullKey((string)(types.BlockBlobKey(point.Slot, point.Hash)))
+
+	presignClient := s3.NewPresignClient(d.client)
+	presignedURL, err := presignClient.PresignGetObject(
+		context.TODO(),
+		&s3.GetObjectInput{
+			Bucket: &d.bucket,
+			Key:    &key,
+		},
+		s3.WithPresignExpires(time.Minute))
+
+	if err != nil {
+		return nil, fmt.Errorf("s3: failed to generate presigned url: %w", err)
+	}
+
+	u, err := url.Parse(presignedURL.URL)
+	if err != nil {
+		return nil, fmt.Errorf("s3: failed to parse presigned url: %w", err)
+	}
+
+	return u, nil
 }
