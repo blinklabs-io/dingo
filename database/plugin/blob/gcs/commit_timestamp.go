@@ -37,6 +37,11 @@ func (b *BlobStoreGCS) GetCommitTimestamp() (int64, error) {
 		return 0, err
 	}
 
+	// If SOPS is not enabled, read plaintext directly
+	if !dingosops.IsEnabled() {
+		return new(big.Int).SetBytes(r).Int64(), nil
+	}
+
 	plaintext, err := dingosops.Decrypt(r)
 	if err != nil {
 		if !json.Valid(r) && len(r) <= 8 {
@@ -88,6 +93,15 @@ func (b *BlobStoreGCS) SetCommitTimestamp(
 		return types.ErrNilTxn
 	}
 	raw := new(big.Int).SetInt64(timestamp).Bytes()
+
+	// If SOPS is not enabled, store plaintext directly
+	if !dingosops.IsEnabled() {
+		if err := b.Set(txn, []byte(commitTimestampBlobKey), raw); err != nil {
+			return err
+		}
+		b.logger.Infof("commit timestamp %d written to GCS (plaintext)", timestamp)
+		return nil
+	}
 
 	ciphertext, err := dingosops.Encrypt(raw)
 	if err != nil {
