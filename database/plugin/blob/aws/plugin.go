@@ -22,9 +22,10 @@ import (
 
 var (
 	cmdlineOptions struct {
-		bucket string
-		region string
-		prefix string
+		endpoint string
+		bucket   string
+		region   string
+		prefix   string
 	}
 	cmdlineOptionsMutex sync.RWMutex
 )
@@ -38,6 +39,13 @@ func init() {
 			Description:        "AWS S3 blob store",
 			NewFromOptionsFunc: NewFromCmdlineOptions,
 			Options: []plugin.PluginOption{
+				{
+					Name:         "endpoint",
+					Type:         plugin.PluginOptionTypeString,
+					Description:  "S3 endpoint",
+					DefaultValue: "",
+					Dest:         &(cmdlineOptions.endpoint),
+				},
 				{
 					Name:         "bucket",
 					Type:         plugin.PluginOptionTypeString,
@@ -66,12 +74,14 @@ func init() {
 
 func NewFromCmdlineOptions() plugin.Plugin {
 	cmdlineOptionsMutex.RLock()
+	endpoint := cmdlineOptions.endpoint
 	bucket := cmdlineOptions.bucket
 	region := cmdlineOptions.region
 	prefix := cmdlineOptions.prefix
 	cmdlineOptionsMutex.RUnlock()
 
 	opts := []BlobStoreS3OptionFunc{
+		WithEndpoint(endpoint),
 		WithBucket(bucket),
 		WithRegion(region),
 		WithPrefix(prefix),
