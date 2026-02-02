@@ -32,17 +32,23 @@ func (b *BlobStoreS3) GetCommitTimestamp() (int64, error) {
 	}
 	defer txn.Rollback() //nolint:errcheck // no-op for this backend
 
-	ciphertext, err := b.Get(txn, []byte(commitTimestampBlobKey))
+	data, err := b.Get(txn, []byte(commitTimestampBlobKey))
 	if err != nil {
 		return 0, err
 	}
-	plaintext, err := dingosops.Decrypt(ciphertext)
+
+	// If SOPS is not enabled, read plaintext directly
+	if !dingosops.IsEnabled() {
+		return new(big.Int).SetBytes(data).Int64(), nil
+	}
+
+	plaintext, err := dingosops.Decrypt(data)
 	if err != nil {
 		// Check if this is legacy plaintext (int64 stored as bytes)
 		// Plaintext timestamps are small byte arrays (<= 8 bytes) containing valid timestamps
-		if len(ciphertext) <= 8 && len(ciphertext) > 0 &&
-			!json.Valid(ciphertext) {
-			ts := new(big.Int).SetBytes(ciphertext).Int64()
+		if len(data) <= 8 && len(data) > 0 &&
+			!json.Valid(data) {
+			ts := new(big.Int).SetBytes(data).Int64()
 			// Validate timestamp is reasonable (post-2000, not in future)
 			now := time.Now().UnixMilli()
 			if ts > 946684800000 && ts <= now { // post-2000, not in future
@@ -88,6 +94,16 @@ func (b *BlobStoreS3) SetCommitTimestamp(
 		return types.ErrNilTxn
 	}
 	raw := new(big.Int).SetInt64(ts).Bytes()
+
+	// If SOPS is not enabled, store plaintext directly
+	if !dingosops.IsEnabled() {
+		if err := b.Set(txn, []byte(commitTimestampBlobKey), raw); err != nil {
+			return err
+		}
+		b.logger.Infof("commit timestamp %d written to S3 (plaintext)", ts)
+		return nil
+	}
+
 	ciphertext, err := dingosops.Encrypt(raw)
 	if err != nil {
 		b.logger.Errorf("failed to encrypt commit timestamp: %v", err)
