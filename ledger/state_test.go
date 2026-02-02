@@ -785,7 +785,12 @@ func TestDatabaseWorkerPoolInFlightOperations(t *testing.T) {
 	wg.Wait()
 
 	// Verify all operations completed
-	assert.Equal(t, int32(5), completedCount.Load(), "not all operations completed before shutdown returned")
+	assert.Equal(
+		t,
+		int32(5),
+		completedCount.Load(),
+		"not all operations completed before shutdown returned",
+	)
 }
 
 // TestDatabaseWorkerPoolShutdownWithErrors tests error handling during shutdown
@@ -828,7 +833,12 @@ func TestDatabaseWorkerPoolShutdownWithErrors(t *testing.T) {
 	pool.Shutdown()
 
 	// Verify all operations completed even with errors
-	assert.Equal(t, int32(3), completedCount.Load(), "not all operations completed")
+	assert.Equal(
+		t,
+		int32(3),
+		completedCount.Load(),
+		"not all operations completed",
+	)
 }
 
 // TestDatabaseWorkerPoolQueueFull tests behavior when queue is full
@@ -1023,8 +1033,14 @@ func TestTransitionToEra_ReturnsResultWithoutMutating(t *testing.T) {
 	}`
 
 	cfg := &cardano.CardanoNodeConfig{}
-	require.NoError(t, cfg.LoadByronGenesisFromReader(strings.NewReader(byronGenesisJSON)))
-	require.NoError(t, cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)))
+	require.NoError(
+		t,
+		cfg.LoadByronGenesisFromReader(strings.NewReader(byronGenesisJSON)),
+	)
+	require.NoError(
+		t,
+		cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)),
+	)
 
 	// Create in-memory database
 	db, err := database.New(&database.Config{
@@ -1071,8 +1087,18 @@ func TestTransitionToEra_ReturnsResultWithoutMutating(t *testing.T) {
 		assert.NotNil(t, result.NewPParams)
 
 		// Verify LedgerState was NOT mutated
-		assert.Equal(t, originalEra.Id, ls.currentEra.Id, "currentEra should not be mutated")
-		assert.Equal(t, originalPParams, ls.currentPParams, "currentPParams should not be mutated")
+		assert.Equal(
+			t,
+			originalEra.Id,
+			ls.currentEra.Id,
+			"currentEra should not be mutated",
+		)
+		assert.Equal(
+			t,
+			originalPParams,
+			ls.currentPParams,
+			"currentPParams should not be mutated",
+		)
 
 		return nil
 	})
@@ -1114,8 +1140,14 @@ func TestTransitionToEra_ChainedTransitions(t *testing.T) {
 	}`
 
 	cfg := &cardano.CardanoNodeConfig{}
-	require.NoError(t, cfg.LoadByronGenesisFromReader(strings.NewReader(byronGenesisJSON)))
-	require.NoError(t, cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)))
+	require.NoError(
+		t,
+		cfg.LoadByronGenesisFromReader(strings.NewReader(byronGenesisJSON)),
+	)
+	require.NoError(
+		t,
+		cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)),
+	)
 
 	db, err := database.New(&database.Config{
 		BlobPlugin:     "badger",
@@ -1141,12 +1173,24 @@ func TestTransitionToEra_ChainedTransitions(t *testing.T) {
 		workingPParams := ls.currentPParams
 
 		// Byron -> Shelley
-		result1, err := ls.transitionToEra(txn, eras.ShelleyEraDesc.Id, 0, 0, workingPParams)
+		result1, err := ls.transitionToEra(
+			txn,
+			eras.ShelleyEraDesc.Id,
+			0,
+			0,
+			workingPParams,
+		)
 		require.NoError(t, err)
 		workingPParams = result1.NewPParams
 
 		// Shelley -> Allegra
-		result2, err := ls.transitionToEra(txn, eras.AllegraEraDesc.Id, 1, 432000, workingPParams)
+		result2, err := ls.transitionToEra(
+			txn,
+			eras.AllegraEraDesc.Id,
+			1,
+			432000,
+			workingPParams,
+		)
 		require.NoError(t, err)
 
 		// Verify final result
@@ -1200,8 +1244,14 @@ func TestEpochRolloverResult_FieldsPopulated(t *testing.T) {
 	cfg := &cardano.CardanoNodeConfig{
 		ShelleyGenesisHash: shelleyGenesisHash,
 	}
-	require.NoError(t, cfg.LoadByronGenesisFromReader(strings.NewReader(byronGenesisJSON)))
-	require.NoError(t, cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)))
+	require.NoError(
+		t,
+		cfg.LoadByronGenesisFromReader(strings.NewReader(byronGenesisJSON)),
+	)
+	require.NoError(
+		t,
+		cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)),
+	)
 
 	db, err := database.New(&database.Config{
 		BlobPlugin:     "badger",
@@ -1239,7 +1289,11 @@ func TestEpochRolloverResult_FieldsPopulated(t *testing.T) {
 
 		// Verify result fields are populated
 		assert.NotNil(t, result)
-		assert.NotEmpty(t, result.NewEpochCache, "NewEpochCache should be populated")
+		assert.NotEmpty(
+			t,
+			result.NewEpochCache,
+			"NewEpochCache should be populated",
+		)
 		assert.Equal(t, uint64(0), result.NewCurrentEpoch.EpochId)
 		assert.Equal(t, false, result.CheckpointWrittenForEpoch)
 
@@ -1292,8 +1346,14 @@ func TestEpochRollover_NoDeadlockDuringTransaction(t *testing.T) {
 	cfg := &cardano.CardanoNodeConfig{
 		ShelleyGenesisHash: shelleyGenesisHash,
 	}
-	require.NoError(t, cfg.LoadByronGenesisFromReader(strings.NewReader(byronGenesisJSON)))
-	require.NoError(t, cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)))
+	require.NoError(
+		t,
+		cfg.LoadByronGenesisFromReader(strings.NewReader(byronGenesisJSON)),
+	)
+	require.NoError(
+		t,
+		cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)),
+	)
 
 	db, err := database.New(&database.Config{
 		BlobPlugin:     "badger",
@@ -1418,8 +1478,14 @@ func TestEpochRollover_ConcurrentReaders(t *testing.T) {
 	cfg := &cardano.CardanoNodeConfig{
 		ShelleyGenesisHash: shelleyGenesisHash,
 	}
-	require.NoError(t, cfg.LoadByronGenesisFromReader(strings.NewReader(byronGenesisJSON)))
-	require.NoError(t, cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)))
+	require.NoError(
+		t,
+		cfg.LoadByronGenesisFromReader(strings.NewReader(byronGenesisJSON)),
+	)
+	require.NoError(
+		t,
+		cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)),
+	)
 
 	db, err := database.New(&database.Config{
 		BlobPlugin:     "badger",
@@ -1538,7 +1604,12 @@ func TestEpochRollover_ConcurrentReaders(t *testing.T) {
 			require.NoError(t, err)
 		default:
 		}
-		assert.Greater(t, readCount.Load(), int32(0), "readers should have been able to read during transaction")
+		assert.Greater(
+			t,
+			readCount.Load(),
+			int32(0),
+			"readers should have been able to read during transaction",
+		)
 	case <-time.After(10 * time.Second):
 		t.Fatal("timeout - possible deadlock with concurrent readers")
 	}

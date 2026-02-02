@@ -172,7 +172,12 @@ func (m *mockTransaction) LeiosHash() lcommon.Blake2b256 {
 // createTestTransaction creates a Transaction record for testing with foreign key constraints.
 func createTestTransaction(db *gorm.DB, id uint, slot uint64) error {
 	tx := models.Transaction{
-		Hash:       []byte{byte(id), byte(id >> 8), byte(id >> 16), byte(id >> 24)},
+		Hash: []byte{
+			byte(id),
+			byte(id >> 8),
+			byte(id >> 16),
+			byte(id >> 24),
+		},
 		Slot:       slot,
 		Valid:      true,
 		Type:       0,
@@ -1337,94 +1342,101 @@ func TestRestorePoolStateAtSlot(t *testing.T) {
 		}
 	})
 
-	t.Run("pool with retirement after rollback has retirement undone", func(t *testing.T) {
-		sqliteStore, err := New("", nil, nil)
-		if err != nil {
-			t.Fatalf("unexpected error: %s", err)
-		}
-		if err := sqliteStore.Start(); err != nil {
-			t.Fatalf("unexpected error starting store: %s", err)
-		}
-		defer sqliteStore.Close() //nolint:errcheck
+	t.Run(
+		"pool with retirement after rollback has retirement undone",
+		func(t *testing.T) {
+			sqliteStore, err := New("", nil, nil)
+			if err != nil {
+				t.Fatalf("unexpected error: %s", err)
+			}
+			if err := sqliteStore.Start(); err != nil {
+				t.Fatalf("unexpected error starting store: %s", err)
+			}
+			defer sqliteStore.Close() //nolint:errcheck
 
-		if err := sqliteStore.DB().AutoMigrate(models.MigrateModels...); err != nil {
-			t.Fatalf("failed to auto-migrate: %v", err)
-		}
+			if err := sqliteStore.DB().AutoMigrate(models.MigrateModels...); err != nil {
+				t.Fatalf("failed to auto-migrate: %v", err)
+			}
 
-		poolHash := []byte("pool_key_hash_1234567890123456789012345678")
+			poolHash := []byte("pool_key_hash_1234567890123456789012345678")
 
-		// Create a pool with registration BEFORE rollback point
-		pool := models.Pool{PoolKeyHash: poolHash}
-		if result := sqliteStore.DB().Create(&pool); result.Error != nil {
-			t.Fatalf("failed to create pool: %v", result.Error)
-		}
+			// Create a pool with registration BEFORE rollback point
+			pool := models.Pool{PoolKeyHash: poolHash}
+			if result := sqliteStore.DB().Create(&pool); result.Error != nil {
+				t.Fatalf("failed to create pool: %v", result.Error)
+			}
 
-		// Registration at slot 1000 (before rollback)
-		poolReg := models.PoolRegistration{
-			PoolID:      pool.ID,
-			PoolKeyHash: poolHash,
-			AddedSlot:   1000,
-		}
-		if result := sqliteStore.DB().Create(&poolReg); result.Error != nil {
-			t.Fatalf("failed to create pool registration: %v", result.Error)
-		}
+			// Registration at slot 1000 (before rollback)
+			poolReg := models.PoolRegistration{
+				PoolID:      pool.ID,
+				PoolKeyHash: poolHash,
+				AddedSlot:   1000,
+			}
+			if result := sqliteStore.DB().Create(&poolReg); result.Error != nil {
+				t.Fatalf("failed to create pool registration: %v", result.Error)
+			}
 
-		// Retirement at slot 2000 (after rollback)
-		poolRetirement := models.PoolRetirement{
-			PoolID:      pool.ID,
-			PoolKeyHash: poolHash,
-			AddedSlot:   2000,
-			Epoch:       100,
-		}
-		if result := sqliteStore.DB().Create(&poolRetirement); result.Error != nil {
-			t.Fatalf("failed to create pool retirement: %v", result.Error)
-		}
+			// Retirement at slot 2000 (after rollback)
+			poolRetirement := models.PoolRetirement{
+				PoolID:      pool.ID,
+				PoolKeyHash: poolHash,
+				AddedSlot:   2000,
+				Epoch:       100,
+			}
+			if result := sqliteStore.DB().Create(&poolRetirement); result.Error != nil {
+				t.Fatalf("failed to create pool retirement: %v", result.Error)
+			}
 
-		// Verify pool has retirement before rollback
-		var retirementCountBefore int64
-		sqliteStore.DB().Model(&models.PoolRetirement{}).Count(&retirementCountBefore)
-		if retirementCountBefore != 1 {
-			t.Fatalf(
-				"expected 1 retirement before rollback, got %d",
-				retirementCountBefore,
-			)
-		}
+			// Verify pool has retirement before rollback
+			var retirementCountBefore int64
+			sqliteStore.DB().
+				Model(&models.PoolRetirement{}).
+				Count(&retirementCountBefore)
+			if retirementCountBefore != 1 {
+				t.Fatalf(
+					"expected 1 retirement before rollback, got %d",
+					retirementCountBefore,
+				)
+			}
 
-		// Delete certificates and restore state
-		if err := sqliteStore.DeleteCertificatesAfterSlot(1500, nil); err != nil {
-			t.Fatalf("failed to delete certificates: %v", err)
-		}
-		if err := sqliteStore.RestorePoolStateAtSlot(1500, nil); err != nil {
-			t.Fatalf("failed to restore pool state: %v", err)
-		}
+			// Delete certificates and restore state
+			if err := sqliteStore.DeleteCertificatesAfterSlot(1500, nil); err != nil {
+				t.Fatalf("failed to delete certificates: %v", err)
+			}
+			if err := sqliteStore.RestorePoolStateAtSlot(1500, nil); err != nil {
+				t.Fatalf("failed to restore pool state: %v", err)
+			}
 
-		// Pool should still exist
-		var count int64
-		sqliteStore.DB().Model(&models.Pool{}).Count(&count)
-		if count != 1 {
-			t.Errorf("expected 1 pool after rollback, got %d", count)
-		}
+			// Pool should still exist
+			var count int64
+			sqliteStore.DB().Model(&models.Pool{}).Count(&count)
+			if count != 1 {
+				t.Errorf("expected 1 pool after rollback, got %d", count)
+			}
 
-		// Retirement should be removed (CASCADE from DeleteCertificatesAfterSlot)
-		var retirementCountAfter int64
-		sqliteStore.DB().Model(&models.PoolRetirement{}).Count(&retirementCountAfter)
-		if retirementCountAfter != 0 {
-			t.Errorf(
-				"expected 0 retirements after rollback, got %d",
-				retirementCountAfter,
-			)
-		}
+			// Retirement should be removed (CASCADE from DeleteCertificatesAfterSlot)
+			var retirementCountAfter int64
+			sqliteStore.DB().
+				Model(&models.PoolRetirement{}).
+				Count(&retirementCountAfter)
+			if retirementCountAfter != 0 {
+				t.Errorf(
+					"expected 0 retirements after rollback, got %d",
+					retirementCountAfter,
+				)
+			}
 
-		// Registration should still exist
-		var regCount int64
-		sqliteStore.DB().Model(&models.PoolRegistration{}).Count(&regCount)
-		if regCount != 1 {
-			t.Errorf(
-				"expected 1 pool registration after rollback, got %d",
-				regCount,
-			)
-		}
-	})
+			// Registration should still exist
+			var regCount int64
+			sqliteStore.DB().Model(&models.PoolRegistration{}).Count(&regCount)
+			if regCount != 1 {
+				t.Errorf(
+					"expected 1 pool registration after rollback, got %d",
+					regCount,
+				)
+			}
+		},
+	)
 }
 
 // TestRestoreDrepStateAtSlot tests that DRep state is correctly restored during rollback
@@ -1900,7 +1912,10 @@ func TestRestoreDrepStateAtSlot(t *testing.T) {
 				t.Fatalf("failed to create certReg: %v", result.Error)
 			}
 
-			txDereg := models.Transaction{Hash: []byte("tx_hash_1000"), Slot: 1000}
+			txDereg := models.Transaction{
+				Hash: []byte("tx_hash_1000"),
+				Slot: 1000,
+			}
 			if result := sqliteStore.DB().Create(&txDereg); result.Error != nil {
 				t.Fatalf("failed to create txDereg: %v", result.Error)
 			}
@@ -1913,7 +1928,10 @@ func TestRestoreDrepStateAtSlot(t *testing.T) {
 				t.Fatalf("failed to create certDereg: %v", result.Error)
 			}
 
-			txUpdate := models.Transaction{Hash: []byte("tx_hash_1200"), Slot: 1200}
+			txUpdate := models.Transaction{
+				Hash: []byte("tx_hash_1200"),
+				Slot: 1200,
+			}
 			if result := sqliteStore.DB().Create(&txUpdate); result.Error != nil {
 				t.Fatalf("failed to create txUpdate: %v", result.Error)
 			}
@@ -2036,7 +2054,10 @@ func TestRestoreDrepStateAtSlot(t *testing.T) {
 				t.Fatalf("failed to create certReg: %v", result.Error)
 			}
 
-			txDereg := models.Transaction{Hash: []byte("tx_hash_600"), Slot: 600}
+			txDereg := models.Transaction{
+				Hash: []byte("tx_hash_600"),
+				Slot: 600,
+			}
 			if result := sqliteStore.DB().Create(&txDereg); result.Error != nil {
 				t.Fatalf("failed to create txDereg: %v", result.Error)
 			}
@@ -2050,7 +2071,10 @@ func TestRestoreDrepStateAtSlot(t *testing.T) {
 			}
 
 			// Update is at slot 700 - the latest event chronologically
-			txUpdate := models.Transaction{Hash: []byte("tx_hash_700"), Slot: 700}
+			txUpdate := models.Transaction{
+				Hash: []byte("tx_hash_700"),
+				Slot: 700,
+			}
 			if result := sqliteStore.DB().Create(&txUpdate); result.Error != nil {
 				t.Fatalf("failed to create txUpdate: %v", result.Error)
 			}
@@ -2845,7 +2869,12 @@ func TestPoolStakeSnapshotCRUD(t *testing.T) {
 	}
 
 	// Test GetPoolStakeSnapshot
-	retrieved, err := sqliteStore.GetPoolStakeSnapshot(100, "go", poolKeyHash, nil)
+	retrieved, err := sqliteStore.GetPoolStakeSnapshot(
+		100,
+		"go",
+		poolKeyHash,
+		nil,
+	)
 	if err != nil {
 		t.Fatalf("failed to get pool stake snapshot: %v", err)
 	}
@@ -2853,14 +2882,25 @@ func TestPoolStakeSnapshotCRUD(t *testing.T) {
 		t.Fatal("expected to retrieve snapshot, got nil")
 	}
 	if retrieved.TotalStake != 1000000000000 {
-		t.Errorf("expected TotalStake 1000000000000, got %d", retrieved.TotalStake)
+		t.Errorf(
+			"expected TotalStake 1000000000000, got %d",
+			retrieved.TotalStake,
+		)
 	}
 	if retrieved.DelegatorCount != 500 {
-		t.Errorf("expected DelegatorCount 500, got %d", retrieved.DelegatorCount)
+		t.Errorf(
+			"expected DelegatorCount 500, got %d",
+			retrieved.DelegatorCount,
+		)
 	}
 
 	// Test GetPoolStakeSnapshot not found
-	notFound, err := sqliteStore.GetPoolStakeSnapshot(999, "go", poolKeyHash, nil)
+	notFound, err := sqliteStore.GetPoolStakeSnapshot(
+		999,
+		"go",
+		poolKeyHash,
+		nil,
+	)
 	if err != nil {
 		t.Fatalf("unexpected error for not found: %v", err)
 	}
@@ -2892,7 +2932,11 @@ func TestPoolStakeSnapshotCRUD(t *testing.T) {
 	}
 
 	// Test GetPoolStakeSnapshotsByEpoch
-	allSnapshots, err := sqliteStore.GetPoolStakeSnapshotsByEpoch(100, "go", nil)
+	allSnapshots, err := sqliteStore.GetPoolStakeSnapshotsByEpoch(
+		100,
+		"go",
+		nil,
+	)
 	if err != nil {
 		t.Fatalf("failed to get pool stake snapshots by epoch: %v", err)
 	}
@@ -2954,7 +2998,10 @@ func TestEpochSummaryCRUD(t *testing.T) {
 		t.Fatal("expected to retrieve summary, got nil")
 	}
 	if retrieved.TotalPoolCount != 3000 {
-		t.Errorf("expected TotalPoolCount 3000, got %d", retrieved.TotalPoolCount)
+		t.Errorf(
+			"expected TotalPoolCount 3000, got %d",
+			retrieved.TotalPoolCount,
+		)
 	}
 	if !retrieved.SnapshotReady {
 		t.Error("expected SnapshotReady to be true")

@@ -177,3 +177,25 @@ activePeersTopologyQuota: 0
 activePeersGossipQuota: 0
 # Active peer slots for ledger sources
 activePeersLedgerQuota: 0
+
+# Cache configuration for tiered CBOR cache system
+# This controls the in-memory caching of UTxO and transaction CBOR data
+cache:
+  # Number of entries in the hot UTxO cache (LFU eviction)
+  # Default: 50000
+  hotUtxoEntries: 50000
+  # Number of entries in the hot transaction cache (LFU eviction)
+  # Default: 10000
+  hotTxEntries: 10000
+  # Maximum memory in bytes for hot transaction cache
+  # Default: 268435456 (256 MB)
+  hotTxMaxBytes: 268435456
+  # Number of blocks to keep in the block LRU cache
+  # Default: 500
+  blockLruEntries: 500
+  # Number of recent blocks to warm up on startup
+  # Default: 1000
+  warmupBlocks: 1000
+  # Wait for cache warmup to complete before serving requests
+  # Default: true
+  warmupSync: true

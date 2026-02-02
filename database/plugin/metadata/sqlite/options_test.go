@@ -73,7 +73,10 @@ func TestWithMaxConnections_DefaultUsed(t *testing.T) {
 	// Don't set maxConnections, leave it at 0
 
 	if m.maxConnections != 0 {
-		t.Errorf("Expected initial maxConnections to be 0, got %d", m.maxConnections)
+		t.Errorf(
+			"Expected initial maxConnections to be 0, got %d",
+			m.maxConnections,
+		)
 	}
 
 	// The default should be applied during Start(), not here
@@ -82,6 +85,10 @@ func TestWithMaxConnections_DefaultUsed(t *testing.T) {
 	option(m)
 
 	if m.maxConnections != DefaultMaxConnections {
-		t.Errorf("Expected maxConnections to be %d, got %d", DefaultMaxConnections, m.maxConnections)
+		t.Errorf(
+			"Expected maxConnections to be %d, got %d",
+			DefaultMaxConnections,
+			m.maxConnections,
+		)
 	}
 }

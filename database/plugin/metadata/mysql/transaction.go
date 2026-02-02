@@ -164,7 +164,13 @@ func saveAccount(account *models.Account, db *gorm.DB) error {
 		result := db.Clauses(clause.OnConflict{
 			Columns: []clause.Column{{Name: "staking_key"}},
 			DoUpdates: clause.AssignmentColumns(
-				[]string{"pool", "drep", "active", "certificate_id", "added_slot"},
+				[]string{
+					"pool",
+					"drep",
+					"active",
+					"certificate_id",
+					"added_slot",
+				},
 			),
 		}).Create(account)
 		if result.Error != nil {
@@ -693,8 +699,12 @@ func (d *MetadataStoreMysql) SetTransaction(
 				}
 				// If the record already existed, we need to fetch its ID
 				if unifiedCert.ID == 0 {
-					result := db.Where("transaction_id = ? AND cert_index = ?", tmpTx.ID, uint(i)). // #nosec G115
-															First(&unifiedCert)
+					certIdx := uint(i) // #nosec G115
+					result := db.Where(
+						"transaction_id = ? AND cert_index = ?",
+						tmpTx.ID,
+						certIdx,
+					).First(&unifiedCert)
 					if result.Error != nil {
 						return fmt.Errorf(
 							"fetch existing unified certificate: %w",
@@ -1445,19 +1455,28 @@ func (d *MetadataStoreMysql) DeleteTransactionsAfterSlot(
 				"spent_at_tx_id": nil,
 				"deleted_slot":   0,
 			}); result.Error != nil {
-			return fmt.Errorf("clear spent_at_tx_id references: %w", result.Error)
+			return fmt.Errorf(
+				"clear spent_at_tx_id references: %w",
+				result.Error,
+			)
 		}
 
 		if result := db.Model(&models.Utxo{}).
 			Where("collateral_by_tx_id IN ?", txHashes).
 			Update("collateral_by_tx_id", nil); result.Error != nil {
-			return fmt.Errorf("clear collateral_by_tx_id references: %w", result.Error)
+			return fmt.Errorf(
+				"clear collateral_by_tx_id references: %w",
+				result.Error,
+			)
 		}
 
 		if result := db.Model(&models.Utxo{}).
 			Where("referenced_by_tx_id IN ?", txHashes).
 			Update("referenced_by_tx_id", nil); result.Error != nil {
-			return fmt.Errorf("clear referenced_by_tx_id references: %w", result.Error)
+			return fmt.Errorf(
+				"clear referenced_by_tx_id references: %w",
+				result.Error,
+			)
 		}
 	}
 

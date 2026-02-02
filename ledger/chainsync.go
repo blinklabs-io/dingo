@@ -492,7 +492,12 @@ func (ls *LedgerState) processEpochRollover(
 		if err != nil {
 			return nil, fmt.Errorf("calculate epoch length: %w", err)
 		}
-		tmpNonce, err := ls.calculateEpochNonce(txn, 0, currentEra, currentEpoch)
+		tmpNonce, err := ls.calculateEpochNonce(
+			txn,
+			0,
+			currentEra,
+			currentEpoch,
+		)
 		if err != nil {
 			return nil, fmt.Errorf("calculate epoch nonce: %w", err)
 		}
@@ -556,7 +561,12 @@ func (ls *LedgerState) processEpochRollover(
 	if err != nil {
 		return nil, fmt.Errorf("calculate epoch length: %w", err)
 	}
-	tmpNonce, err := ls.calculateEpochNonce(txn, epochStartSlot, currentEra, currentEpoch)
+	tmpNonce, err := ls.calculateEpochNonce(
+		txn,
+		epochStartSlot,
+		currentEra,
+		currentEpoch,
+	)
 	if err != nil {
 		return nil, fmt.Errorf("calculate epoch nonce: %w", err)
 	}

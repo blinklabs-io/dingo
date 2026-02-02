@@ -87,6 +87,14 @@ func Encrypt(data []byte) ([]byte, error) {
 	return encrypted, nil
 }
 
+// IsEnabled returns true if SOPS encryption is configured via environment
+// variables. SOPS is enabled when at least one of DINGO_GCP_KMS_RESOURCE_ID
+// or DINGO_AWS_KMS_KEY_ARNS is set.
+func IsEnabled() bool {
+	return os.Getenv("DINGO_GCP_KMS_RESOURCE_ID") != "" ||
+		os.Getenv("DINGO_AWS_KMS_KEY_ARNS") != ""
+}
+
 func getMasterKeyGroupsFromEnv() ([]sopsapi.KeyGroup, error) {
 	keyGroups := []sopsapi.KeyGroup{}
 

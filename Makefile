@@ -70,5 +70,5 @@ $(BINARIES): mod-tidy $(GO_FILES)
 	CGO_ENABLED=0 \
 	go build \
 		$(GO_LDFLAGS) \
-		-o $(@) \
+		-o $(@)$(if $(filter windows,$(GOOS)),.exe,)  \
 		./cmd/$(@)

@@ -367,7 +367,9 @@ func EvaluateTxAlonzo(
 	for _, redeemerPair := range txInfoV1.(script.TxInfoV1).Redeemers {
 		purpose := redeemerPair.Key
 		if purpose == nil {
-			return 0, lcommon.ExUnits{}, nil, errors.New("script purpose is nil")
+			return 0, lcommon.ExUnits{}, nil, errors.New(
+				"script purpose is nil",
+			)
 		}
 		redeemer := redeemerPair.Value
 		// Lookup script from redeemer purpose

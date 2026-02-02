@@ -369,7 +369,12 @@ func TestAcceptLoopBackoffOnError(t *testing.T) {
 	// With exponential backoff, we expect around 3-5 calls in 100ms
 	// Be generous to account for test timing variations
 	assert.Less(t, acceptCount, 20, "backoff should limit accept calls")
-	assert.Greater(t, acceptCount, 0, "accept should have been called at least once")
+	assert.Greater(
+		t,
+		acceptCount,
+		0,
+		"accept should have been called at least once",
+	)
 }
 
 func TestAcceptLoopResetBackoffOnSuccess(t *testing.T) {

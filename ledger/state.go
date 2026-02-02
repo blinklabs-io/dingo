@@ -48,9 +48,8 @@ import (
 )
 
 const (
-	cleanupConsumedUtxosInterval   = 5 * time.Minute
-	cleanupConsumedUtxosSlotWindow = 50000 // TODO: calculate this from params (#395)
-	batchSize                      = 50    // Number of blocks to process in a single DB transaction
+	cleanupConsumedUtxosInterval = 5 * time.Minute
+	batchSize                    = 50 // Number of blocks to process in a single DB transaction
 )
 
 // DatabaseOperation represents an asynchronous database operation
@@ -421,6 +420,7 @@ type LedgerState struct {
 	checkpointWrittenForEpoch  bool
 	closed                     bool
 	inRecovery                 bool // guards against recursive recovery in SubmitAsyncDBTxn
+	validationEnabled          bool
 }
 
 // EraTransitionResult holds computed state from an era transition
@@ -458,10 +458,11 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 		cfg.DatabaseWorkerPoolConfig = DefaultDatabaseWorkerPoolConfig()
 	}
 	ls := &LedgerState{
-		config:         cfg,
-		chainsyncState: InitChainsyncState,
-		db:             cfg.Database,
-		chain:          cfg.ChainManager.PrimaryChain(),
+		config:            cfg,
+		chainsyncState:    InitChainsyncState,
+		db:                cfg.Database,
+		chain:             cfg.ChainManager.PrimaryChain(),
+		validationEnabled: cfg.ValidateHistorical,
 	}
 	return ls, nil
 }
@@ -556,7 +557,10 @@ func (ls *LedgerState) RecoverCommitTimestampConflict() error {
 	// This ensures we use the post-rollback tip, not the stale tmpTip.
 	currentTip, err := ls.db.GetTip(nil)
 	if err != nil {
-		return fmt.Errorf("failed to get current tip for orphan cleanup: %w", err)
+		return fmt.Errorf(
+			"failed to get current tip for orphan cleanup: %w",
+			err,
+		)
 	}
 	// Clean up orphaned blobs that may exist beyond the metadata tip.
 	// This handles the case where blob committed but metadata failed.
@@ -823,20 +827,25 @@ func (ls *LedgerState) cleanupConsumedUtxos() {
 	// we release the lock, we're working with a consistent snapshot of the slot.
 	ls.RLock()
 	tipSlot := ls.currentTip.Point.Slot
+	eraId := ls.currentEra.Id
 	ls.RUnlock()
+	stabilityWindow := ls.calculateStabilityWindowForEra(eraId)
 
 	// Delete UTxOs that are marked as deleted and older than our slot window
 	ls.config.Logger.Debug(
 		"cleaning up consumed UTxOs",
 		"component", "ledger",
 	)
-	if tipSlot > cleanupConsumedUtxosSlotWindow {
+	if stabilityWindow == 0 {
+		return
+	}
+	if tipSlot > stabilityWindow {
 		for {
 			// No lock needed here - the database handles its own consistency
 			// and we're not accessing any in-memory LedgerState fields.
 			// The tipSlot was captured above with a read lock.
 			count, err := ls.db.UtxosDeleteConsumed(
-				tipSlot-cleanupConsumedUtxosSlotWindow,
+				tipSlot-stabilityWindow,
 				10000,
 				nil,
 			)
@@ -1244,7 +1253,6 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 	var nextBatch, cachedNextBatch []ledger.Block
 	var delta *LedgerDelta
 	var deltaBatch *LedgerDeltaBatch
-	shouldValidate := ls.config.ValidateHistorical
 	for {
 		if needsEpochRollover {
 			needsEpochRollover = false
@@ -1275,7 +1283,9 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 							txn,
 							nextEraId,
 							snapshotEpoch.EpochId,
-							snapshotEpoch.StartSlot+uint64(snapshotEpoch.LengthInSlots),
+							snapshotEpoch.StartSlot+uint64(
+								snapshotEpoch.LengthInSlots,
+							),
 							workingPParams,
 						)
 						if err != nil {
@@ -1333,6 +1343,30 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 					rolloverResult.SchedulerIntervalMs,
 				) * time.Millisecond
 				ls.Scheduler.ChangeInterval(interval)
+			}
+
+			// Emit epoch transition event
+			if rolloverResult != nil && ls.config.EventBus != nil {
+				// Calculate snapshot slot (boundary - 1, or 0 if boundary is 0)
+				snapshotSlot := rolloverResult.NewCurrentEpoch.StartSlot
+				if snapshotSlot > 0 {
+					snapshotSlot--
+				}
+				epochTransitionEvent := event.EpochTransitionEvent{
+					PreviousEpoch:   snapshotEpoch.EpochId,
+					NewEpoch:        rolloverResult.NewCurrentEpoch.EpochId,
+					BoundarySlot:    rolloverResult.NewCurrentEpoch.StartSlot,
+					EpochNonce:      rolloverResult.NewCurrentEpoch.Nonce,
+					ProtocolVersion: rolloverResult.NewCurrentEra.Id,
+					SnapshotSlot:    snapshotSlot,
+				}
+				ls.config.EventBus.Publish(
+					event.EpochTransitionEventType,
+					event.NewEvent(
+						event.EpochTransitionEventType,
+						epochTransitionEvent,
+					),
+				)
 			}
 
 			// Start background cleanup goroutines
@@ -1400,11 +1434,23 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 			ls.RLock()
 			snapshotEpoch := ls.currentEpoch
 			snapshotEra := ls.currentEra
-			snapshotTipSlot := ls.currentTip.Point.Slot
 			snapshotTipHash := ls.currentTip.Point.Hash
 			snapshotNonce := ls.currentTipBlockNonce
 			localCheckpointWritten := ls.checkpointWrittenForEpoch
+			snapshotValidationEnabled := ls.validationEnabled
+			snapshotChainsyncState := ls.chainsyncState
+			chainTipSlot := ls.chain.Tip().Point.Slot
 			ls.RUnlock()
+
+			// Compute stability window and cutoff slot outside the callback
+			// to avoid reading ls fields without the lock. Use chain tip slot
+			// (not ledger tip) to prevent enabling validation too early during
+			// historical block sync.
+			stabilityWindow := ls.calculateStabilityWindowForEra(snapshotEra.Id)
+			var cutoffSlot uint64
+			if chainTipSlot >= stabilityWindow {
+				cutoffSlot = chainTipSlot - stabilityWindow
+			}
 
 			// Track pending state changes during transaction
 			var pendingTip ochainsync.Tip
@@ -1413,6 +1459,9 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 			runningNonce := snapshotNonce
 			// Track expected previous hash for batch processing - updated after each block
 			expectedPrevHash := snapshotTipHash
+			// Flag to enable validation after transaction commits (set inside callback,
+			// applied after commit to avoid mutating in-memory state on txn failure)
+			var wantEnableValidation bool
 
 			err = ls.SubmitAsyncDBTxn(func(txn *database.Txn) error {
 				deltaBatch = NewLedgerDeltaBatch()
@@ -1431,28 +1480,23 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 						nextBatch = nil
 						break
 					}
-					// Enable validation using the k-slot window from ShelleyGenesis.
-					// Only recalculate if validation is not already enabled
-					if !shouldValidate && i == 0 {
-						var cutoffSlot uint64
-						stabilityWindow := ls.calculateStabilityWindow()
-						blockSlot := next.SlotNumber()
-						if snapshotTipSlot >= stabilityWindow {
-							cutoffSlot = snapshotTipSlot - stabilityWindow
-						} else {
-							cutoffSlot = 0
-						}
-
-						// Validate blocks within k-slot window, or historical blocks if ValidateHistorical enabled
-						shouldValidate = blockSlot >= cutoffSlot ||
-							ls.config.ValidateHistorical
+					// Determine if this block should be validated
+					// Skip validation of historical blocks when ValidateHistorical=false, as they
+					// were already validated by the network. However, validate blocks within the
+					// k-slot stability window to ensure live blocks near the tip are validated.
+					var shouldValidateBlock bool
+					if snapshotValidationEnabled {
+						shouldValidateBlock = true
+					} else if snapshotChainsyncState == SyncingChainsyncState && next.SlotNumber() >= cutoffSlot {
+						wantEnableValidation = true
+						shouldValidateBlock = true
 					}
 					// Process block
 					delta, err = ls.ledgerProcessBlock(
 						txn,
 						tmpPoint,
 						next,
-						shouldValidate,
+						shouldValidateBlock,
 						expectedPrevHash,
 					)
 					if err != nil {
@@ -1550,6 +1594,9 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 					ls.currentTipBlockNonce = pendingNonce
 				}
 				ls.checkpointWrittenForEpoch = localCheckpointWritten
+				if wantEnableValidation {
+					ls.validationEnabled = true
+				}
 				ls.updateTipMetrics()
 				// Capture tip for logging while holding the lock
 				tipForLog = ls.currentTip
@@ -1670,7 +1717,8 @@ func (ls *LedgerState) ledgerProcessBlock(
 						"aux_cbor_hex",
 						auxCborHex,
 					)
-					// return fmt.Errorf("TX validation failure: %w", err)
+					delta.Release()
+					return nil, fmt.Errorf("TX validation failure: %w", err)
 				}
 			}
 		}
@@ -1691,7 +1739,11 @@ func (ls *LedgerState) ledgerProcessBlock(
 			// correctly - for failed TXs, Produced() returns collateral return at the
 			// correct index (len(Outputs())), while Outputs() returns regular outputs
 			for _, utxo := range tx.Produced() {
-				key := fmt.Sprintf("%s:%d", utxo.Id.Id().String(), utxo.Id.Index())
+				key := fmt.Sprintf(
+					"%s:%d",
+					utxo.Id.Id().String(),
+					utxo.Id.Index(),
+				)
 				intraBlockUtxos[key] = utxo
 			}
 		}

@@ -182,7 +182,10 @@ func New(
 		configCopy.MetadataPlugin,
 	)
 	if err != nil {
-		err = errors.Join(err, blobDb.Close()) // Clean up blob store on metadata failure
+		err = errors.Join(
+			err,
+			blobDb.Close(),
+		) // Clean up blob store on metadata failure
 		return nil, err
 	}
 	db := &Database{
