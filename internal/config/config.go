@@ -160,6 +160,17 @@ type Config struct {
 
 	// Cache configuration for the tiered CBOR cache system
 	Cache CacheConfig `yaml:"cache"`
+
+	// KES (Key Evolving Signature) configuration for block production
+	// SlotsPerKESPeriod is the number of slots in a KES period.
+	// After this many slots, the KES key must be evolved to the next period.
+	// Default: 129600 (mainnet value = 1.5 days at 1 second per slot)
+	SlotsPerKESPeriod uint64 `yaml:"slotsPerKESPeriod" envconfig:"DINGO_SLOTS_PER_KES_PERIOD"`
+	// MaxKESEvolutions is the maximum number of times a KES key can evolve.
+	// For Cardano's KES depth of 6, this is 2^6 - 2 = 62 evolutions.
+	// After this many evolutions, a new operational certificate must be issued.
+	// Default: 62
+	MaxKESEvolutions uint64 `yaml:"maxKESEvolutions" envconfig:"DINGO_MAX_KES_EVOLUTIONS"`
 }
 
 func (c *Config) ParseCmdlineArgs(programName string, args []string) error {
@@ -245,6 +256,9 @@ var globalConfig = &Config{
 	DatabaseQueueSize: 50,
 	// Cache configuration defaults
 	Cache: DefaultCacheConfig(),
+	// KES configuration defaults (mainnet values)
+	SlotsPerKESPeriod: 129600, // 1.5 days at 1 second per slot
+	MaxKESEvolutions:  62,     // 2^6 - 2 for KES depth 6
 }
 
 func LoadConfig(configFile string) (*Config, error) {
