@@ -68,6 +68,25 @@ type MetadataStore interface {
 	// This is used for ledger peer discovery.
 	GetActivePoolRelays(types.Txn) ([]models.PoolRegistrationRelay, error)
 
+	// GetActivePoolKeyHashes retrieves the key hashes of all currently active pools.
+	// A pool is active if it has a registration and either no retirement or
+	// the retirement epoch is in the future.
+	GetActivePoolKeyHashes(types.Txn) ([][]byte, error)
+
+	// GetStakeByPool returns the total delegated stake and delegator count for a pool.
+	// This aggregates all accounts delegated to the pool and sums their UTxO values.
+	GetStakeByPool(
+		[]byte, // poolKeyHash
+		types.Txn,
+	) (uint64, uint64, error) // (totalStake, delegatorCount, error)
+
+	// GetStakeByPools returns delegated stake for multiple pools in a single query.
+	// Returns maps of pool key hash -> total stake and pool key hash -> delegator count.
+	GetStakeByPools(
+		[][]byte, // poolKeyHashes
+		types.Txn,
+	) (map[string]uint64, map[string]uint64, error)
+
 	// GetStakeRegistrations retrieves all stake registration certificates for an account.
 	GetStakeRegistrations(
 		[]byte, // stakeKey
@@ -255,6 +274,18 @@ type MetadataStore interface {
 
 	// Stake snapshot methods
 
+	// SavePoolStakeSnapshot saves a single pool stake snapshot.
+	SavePoolStakeSnapshot(
+		*models.PoolStakeSnapshot,
+		types.Txn,
+	) error
+
+	// SavePoolStakeSnapshots saves multiple pool stake snapshots in batch.
+	SavePoolStakeSnapshots(
+		[]*models.PoolStakeSnapshot,
+		types.Txn,
+	) error
+
 	// GetPoolStakeSnapshot retrieves a specific pool's stake snapshot for an epoch.
 	GetPoolStakeSnapshot(
 		uint64, // epoch
@@ -277,11 +308,39 @@ type MetadataStore interface {
 		types.Txn,
 	) (uint64, error)
 
+	// SaveEpochSummary saves an epoch summary.
+	SaveEpochSummary(
+		*models.EpochSummary,
+		types.Txn,
+	) error
+
 	// GetEpochSummary retrieves the summary for a specific epoch.
 	GetEpochSummary(
 		uint64, // epoch
 		types.Txn,
 	) (*models.EpochSummary, error)
+
+	// GetLatestEpochSummary retrieves the most recent epoch summary.
+	GetLatestEpochSummary(types.Txn) (*models.EpochSummary, error)
+
+	// DeletePoolStakeSnapshotsForEpoch deletes snapshots for a specific epoch and type.
+	DeletePoolStakeSnapshotsForEpoch(
+		uint64, // epoch
+		string, // snapshotType
+		types.Txn,
+	) error
+
+	// DeletePoolStakeSnapshotsAfterEpoch deletes all snapshots after a given epoch.
+	DeletePoolStakeSnapshotsAfterEpoch(uint64, types.Txn) error
+
+	// DeletePoolStakeSnapshotsBeforeEpoch deletes all snapshots before a given epoch.
+	DeletePoolStakeSnapshotsBeforeEpoch(uint64, types.Txn) error
+
+	// DeleteEpochSummariesAfterEpoch deletes all epoch summaries after a given epoch.
+	DeleteEpochSummariesAfterEpoch(uint64, types.Txn) error
+
+	// DeleteEpochSummariesBeforeEpoch deletes all epoch summaries before a given epoch.
+	DeleteEpochSummariesBeforeEpoch(uint64, types.Txn) error
 }
 
 // New creates a new metadata store instance using the specified plugin
