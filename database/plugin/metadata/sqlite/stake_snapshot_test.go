@@ -568,4 +568,3 @@ func TestSnapshotTypesMarkSetGo(t *testing.T) {
 		)
 	}
 }
-

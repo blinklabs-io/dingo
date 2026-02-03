@@ -252,6 +252,36 @@ type MetadataStore interface {
 
 	// SetUtxosNotDeletedAfterSlot marks all UTxOs created after the given slot as not deleted.
 	SetUtxosNotDeletedAfterSlot(uint64, types.Txn) error
+
+	// Stake snapshot methods
+
+	// GetPoolStakeSnapshot retrieves a specific pool's stake snapshot for an epoch.
+	GetPoolStakeSnapshot(
+		uint64, // epoch
+		string, // snapshotType ("mark", "set", or "go")
+		[]byte, // poolKeyHash
+		types.Txn,
+	) (*models.PoolStakeSnapshot, error)
+
+	// GetPoolStakeSnapshotsByEpoch retrieves all pool stake snapshots for an epoch.
+	GetPoolStakeSnapshotsByEpoch(
+		uint64, // epoch
+		string, // snapshotType
+		types.Txn,
+	) ([]*models.PoolStakeSnapshot, error)
+
+	// GetTotalActiveStake returns the sum of all pool stakes for an epoch.
+	GetTotalActiveStake(
+		uint64, // epoch
+		string, // snapshotType
+		types.Txn,
+	) (uint64, error)
+
+	// GetEpochSummary retrieves the summary for a specific epoch.
+	GetEpochSummary(
+		uint64, // epoch
+		types.Txn,
+	) (*models.EpochSummary, error)
 }
 
 // New creates a new metadata store instance using the specified plugin
