@@ -412,6 +412,8 @@ type LedgerState struct {
 	currentTip                         ochainsync.Tip
 	currentEpoch                       models.Epoch
 	dbWorkerPool                       *DatabaseWorkerPool
+	slotClock                          *SlotClock
+	slotTickChan                       <-chan SlotTick
 	ctx                                context.Context
 	sync.RWMutex
 	chainsyncMutex             sync.Mutex
@@ -526,6 +528,11 @@ func (ls *LedgerState) Start(ctx context.Context) error {
 	}
 	// Schedule block forging
 	ls.initForge()
+	// Start slot clock for slot-boundary-aware timing
+	if ls.slotClock != nil {
+		ls.slotClock.Start(ctx)
+		go ls.handleSlotTicks()
+	}
 	// Start goroutine to process new blocks
 	go ls.ledgerProcessBlocks()
 	return nil
@@ -738,6 +745,11 @@ func (ls *LedgerState) Close() error {
 	ls.closed = true
 	ls.Unlock()
 
+	// Stop slot clock
+	if ls.slotClock != nil {
+		ls.slotClock.Stop()
+	}
+
 	// Shutdown database worker pool
 	if ls.dbWorkerPool != nil {
 		ls.dbWorkerPool.Shutdown()
@@ -773,6 +785,33 @@ func (ls *LedgerState) initScheduler() error {
 	ls.Scheduler = NewScheduler(interval)
 	ls.Scheduler.Start()
 
+	// Initialize slot clock for slot-boundary-aware timing
+	slotClockConfig := SlotClockConfig{
+		Logger: ls.config.Logger,
+	}
+	provider := newLedgerStateSlotProvider(ls)
+	ls.slotClock = NewSlotClock(provider, slotClockConfig)
+	ls.slotTickChan = ls.slotClock.Subscribe()
+
+	// Initialize epoch tracking based on stored state.
+	// This prevents re-emitting events for epochs that have already been processed.
+	ls.slotClock.SetLastEmittedEpoch(ls.currentEpoch.EpochId)
+
+	// Log startup epoch info for diagnostics
+	if wallClockEpoch, err := ls.slotClock.CurrentEpoch(); err == nil {
+		if wallClockEpoch.EpochId != ls.currentEpoch.EpochId {
+			ls.config.Logger.Info("startup epoch state",
+				"ledger_epoch", ls.currentEpoch.EpochId,
+				"wall_clock_epoch", wallClockEpoch.EpochId,
+				"epochs_behind", wallClockEpoch.EpochId-ls.currentEpoch.EpochId,
+			)
+		} else {
+			ls.config.Logger.Debug("startup epoch state (synced)",
+				"epoch", ls.currentEpoch.EpochId,
+			)
+		}
+	}
+
 	return nil
 }
 
@@ -801,6 +840,110 @@ func (ls *LedgerState) initForge() {
 					"active_slots_coeff", activeSlotsCoeff.String(),
 				)
 			}
+		}
+	}
+}
+
+// handleSlotTicks processes slot tick notifications from the slot clock.
+// When an epoch boundary is detected via slot timing, it can emit an
+// EpochTransitionEvent for subscribers like snapshot managers and leader election.
+//
+// The slot clock provides proactive epoch detection that doesn't depend on block
+// arrival. This is critical for block production where the node must wake up at
+// slot boundaries for leader election even when no blocks are arriving.
+//
+// Epoch event emission follows these rules:
+//  1. During catch up or load (validationEnabled=false): suppress slot-based events,
+//     let block processing handle epoch transitions for historical data.
+//  2. When synced (validationEnabled=true): emit slot-based events immediately,
+//     using MarkEpochEmitted to coordinate with block-based detection.
+func (ls *LedgerState) handleSlotTicks() {
+	logger := ls.config.Logger.With("component", "ledger")
+
+	for tick := range ls.slotTickChan {
+		if !tick.IsEpochStart {
+			continue
+		}
+
+		// Get current state snapshot
+		ls.RLock()
+		isSynced := ls.validationEnabled
+		currentEpoch := ls.currentEpoch
+		currentEra := ls.currentEra
+		ls.RUnlock()
+
+		// During catch up or load, don't emit slot-based epoch events.
+		// Block processing handles epoch transitions for historical data.
+		// The slot clock is ticking based on wall-clock time which is far ahead
+		// of the blocks being processed.
+		if !isSynced {
+			logger.Debug("slot clock epoch boundary during catch up (suppressed)",
+				"slot_clock_epoch", tick.Epoch,
+				"ledger_epoch", currentEpoch.EpochId,
+				"slot", tick.Slot,
+			)
+			continue
+		}
+
+		// We're synced - emit proactive epoch event for leader election.
+		// Use MarkEpochEmitted to coordinate with block-based detection
+		// and avoid duplicate events.
+		if !ls.slotClock.MarkEpochEmitted(tick.Epoch) {
+			// Already emitted by block processing
+			logger.Debug("slot clock epoch boundary already emitted by block processing",
+				"epoch", tick.Epoch,
+				"slot", tick.Slot,
+			)
+			continue
+		}
+
+		logger.Info("epoch boundary reached via slot clock",
+			"slot", tick.Slot,
+			"epoch", tick.Epoch,
+			"ledger_epoch", currentEpoch.EpochId,
+		)
+
+		// Calculate snapshot slot (boundary - 1, or 0 if boundary is 0)
+		snapshotSlot := tick.Slot
+		if snapshotSlot > 0 {
+			snapshotSlot--
+		}
+
+		// Emit epoch transition event
+		if ls.config.EventBus != nil {
+			// Note: EpochNonce is nil for slot-based events because the new epoch's
+			// nonce is computed from block headers, which aren't available until
+			// block processing runs. Subscribers that need the nonce should wait
+			// for the block-based event or query it later.
+			epochTransitionEvent := event.EpochTransitionEvent{
+				PreviousEpoch:   tick.Epoch - 1,
+				NewEpoch:        tick.Epoch,
+				BoundarySlot:    tick.Slot,
+				EpochNonce:      nil,
+				ProtocolVersion: currentEra.Id,
+				SnapshotSlot:    snapshotSlot,
+			}
+			ls.config.EventBus.Publish(
+				event.EpochTransitionEventType,
+				event.NewEvent(
+					event.EpochTransitionEventType,
+					epochTransitionEvent,
+				),
+			)
+			logger.Debug("emitted slot-based epoch transition event",
+				"epoch", tick.Epoch,
+				"boundary_slot", tick.Slot,
+			)
+		}
+
+		// Log if there's a discrepancy between slot clock epoch and ledger epoch.
+		// This can happen if block processing is slightly behind wall-clock time.
+		if currentEpoch.EpochId != tick.Epoch && currentEpoch.EpochId != tick.Epoch-1 {
+			logger.Warn("epoch discrepancy between slot clock and ledger state",
+				"slot_clock_epoch", tick.Epoch,
+				"ledger_epoch", currentEpoch.EpochId,
+				"slot", tick.Slot,
+			)
 		}
 	}
 }
@@ -1345,28 +1488,51 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 				ls.Scheduler.ChangeInterval(interval)
 			}
 
-			// Emit epoch transition event
+			// Emit epoch transition event (coordinated with slot clock)
 			if rolloverResult != nil && ls.config.EventBus != nil {
-				// Calculate snapshot slot (boundary - 1, or 0 if boundary is 0)
-				snapshotSlot := rolloverResult.NewCurrentEpoch.StartSlot
-				if snapshotSlot > 0 {
-					snapshotSlot--
+				newEpochId := rolloverResult.NewCurrentEpoch.EpochId
+
+				// Use MarkEpochEmitted to coordinate with slot-based detection.
+				// If slot clock already emitted this epoch event (when synced),
+				// we skip emitting again to avoid duplicates.
+				shouldEmit := true
+				if ls.slotClock != nil {
+					shouldEmit = ls.slotClock.MarkEpochEmitted(newEpochId)
+					if !shouldEmit {
+						ls.config.Logger.Debug(
+							"block-based epoch transition skipped (already emitted by slot clock)",
+							"epoch", newEpochId,
+						)
+					}
 				}
-				epochTransitionEvent := event.EpochTransitionEvent{
-					PreviousEpoch:   snapshotEpoch.EpochId,
-					NewEpoch:        rolloverResult.NewCurrentEpoch.EpochId,
-					BoundarySlot:    rolloverResult.NewCurrentEpoch.StartSlot,
-					EpochNonce:      rolloverResult.NewCurrentEpoch.Nonce,
-					ProtocolVersion: rolloverResult.NewCurrentEra.Id,
-					SnapshotSlot:    snapshotSlot,
-				}
-				ls.config.EventBus.Publish(
-					event.EpochTransitionEventType,
-					event.NewEvent(
+
+				if shouldEmit {
+					// Calculate snapshot slot (boundary - 1, or 0 if boundary is 0)
+					snapshotSlot := rolloverResult.NewCurrentEpoch.StartSlot
+					if snapshotSlot > 0 {
+						snapshotSlot--
+					}
+					epochTransitionEvent := event.EpochTransitionEvent{
+						PreviousEpoch:   snapshotEpoch.EpochId,
+						NewEpoch:        newEpochId,
+						BoundarySlot:    rolloverResult.NewCurrentEpoch.StartSlot,
+						EpochNonce:      rolloverResult.NewCurrentEpoch.Nonce,
+						ProtocolVersion: rolloverResult.NewCurrentEra.Id,
+						SnapshotSlot:    snapshotSlot,
+					}
+					ls.config.EventBus.Publish(
 						event.EpochTransitionEventType,
-						epochTransitionEvent,
-					),
-				)
+						event.NewEvent(
+							event.EpochTransitionEventType,
+							epochTransitionEvent,
+						),
+					)
+					ls.config.Logger.Debug(
+						"emitted block-based epoch transition event",
+						"epoch", newEpochId,
+						"boundary_slot", rolloverResult.NewCurrentEpoch.StartSlot,
+					)
+				}
 			}
 
 			// Start background cleanup goroutines

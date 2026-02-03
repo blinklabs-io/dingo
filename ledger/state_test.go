@@ -751,7 +751,7 @@ func TestDatabaseWorkerPoolInFlightOperations(t *testing.T) {
 	var wg sync.WaitGroup
 
 	// Submit multiple operations
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		wg.Add(1)
 		resultChan := make(chan DatabaseResult, 1)
 
@@ -804,7 +804,7 @@ func TestDatabaseWorkerPoolShutdownWithErrors(t *testing.T) {
 	var completedCount atomic.Int32
 
 	// Submit operations, some will error
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		resultChan := make(chan DatabaseResult, 1)
 		operationIndex := i
 
@@ -850,7 +850,7 @@ func TestDatabaseWorkerPoolQueueFull(t *testing.T) {
 	pool := NewDatabaseWorkerPool(nil, config)
 
 	// Submit some operations
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		resultChan := make(chan DatabaseResult, 1)
 		pool.Submit(DatabaseOperation{
 			OpFunc: func(db *database.Database) error {
@@ -911,7 +911,7 @@ func TestDatabaseWorkerPoolConcurrency(t *testing.T) {
 
 	// Submit many operations
 	numOperations := 20
-	for i := 0; i < numOperations; i++ {
+	for range numOperations {
 		resultChan := make(chan DatabaseResult, 1)
 
 		pool.Submit(DatabaseOperation{
@@ -972,7 +972,7 @@ func TestDatabaseWorkerPoolResultChannelFull(t *testing.T) {
 	var completedCount atomic.Int32
 
 	// Submit operations
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		resultChan := make(chan DatabaseResult, 1)
 
 		pool.Submit(DatabaseOperation{
@@ -1564,7 +1564,7 @@ func TestEpochRollover_ConcurrentReaders(t *testing.T) {
 	}()
 
 	// Start multiple reader goroutines that try to read during the transaction
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -1573,7 +1573,7 @@ func TestEpochRollover_ConcurrentReaders(t *testing.T) {
 			<-txnStarted
 
 			// Try to read multiple times during the transaction
-			for j := 0; j < 10; j++ {
+			for range 10 {
 				select {
 				case <-txnDone:
 					return
