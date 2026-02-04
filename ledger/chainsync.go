@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/chain"
+	cardano "github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
@@ -313,13 +314,26 @@ func (ls *LedgerState) processBlockEvents() error {
 	return nil
 }
 
-// GenesisBlockHash is a well-known hash for the synthetic genesis block.
-// This block holds genesis UTxO data and allows offset-based storage.
-var GenesisBlockHash = [32]byte{
-	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-	0x47, 0x45, 0x4e, 0x45, 0x53, 0x49, 0x53, 0x00, // "GENESIS\0"
+// GenesisBlockHash returns the Byron genesis hash from config, which is used
+// as the block hash for the synthetic genesis block that holds genesis UTxO data.
+// This mirrors how the Shelley epoch nonce uses the Shelley genesis hash.
+func GenesisBlockHash(cfg *cardano.CardanoNodeConfig) ([32]byte, error) {
+	if cfg == nil || cfg.ByronGenesisHash == "" {
+		return [32]byte{}, errors.New("byron genesis hash not available in config")
+	}
+	hashBytes, err := hex.DecodeString(cfg.ByronGenesisHash)
+	if err != nil {
+		return [32]byte{}, fmt.Errorf("decode Byron genesis hash: %w", err)
+	}
+	if len(hashBytes) != 32 {
+		return [32]byte{}, fmt.Errorf(
+			"invalid Byron genesis hash length: expected 32 bytes, got %d",
+			len(hashBytes),
+		)
+	}
+	var hash [32]byte
+	copy(hash[:], hashBytes)
+	return hash, nil
 }
 
 func (ls *LedgerState) createGenesisBlock() error {
@@ -327,8 +341,15 @@ func (ls *LedgerState) createGenesisBlock() error {
 		return nil
 	}
 
+	// Get the Byron genesis hash to use as the synthetic block hash.
+	// This mirrors how the Shelley epoch nonce uses the Shelley genesis hash.
+	genesisHash, err := GenesisBlockHash(ls.config.CardanoNodeConfig)
+	if err != nil {
+		return fmt.Errorf("get genesis block hash: %w", err)
+	}
+
 	txn := ls.db.Transaction(true)
-	err := txn.Do(func(txn *database.Txn) error {
+	err = txn.Do(func(txn *database.Txn) error {
 		// Record genesis UTxOs
 		byronGenesis := ls.config.CardanoNodeConfig.ByronGenesis()
 		byronGenesisUtxos, err := byronGenesis.GenesisUtxos()
@@ -411,7 +432,7 @@ func (ls *LedgerState) createGenesisBlock() error {
 
 		// Build the block structure manually to track exact byte offsets
 		// We need to know where each output CBOR starts within the block
-		blockCbor, err := buildGenesisBlockCbor(txHashes, txUtxos, utxoOffsets)
+		blockCbor, err := buildGenesisBlockCbor(txHashes, txUtxos, utxoOffsets, genesisHash)
 		if err != nil {
 			return fmt.Errorf("build genesis block cbor: %w", err)
 		}
@@ -420,7 +441,7 @@ func (ls *LedgerState) createGenesisBlock() error {
 		// We use SetGenesisCbor to avoid creating a block index entry that
 		// would cause the chain iterator to include it (genesis is already
 		// handled separately during initialization).
-		if err := ls.db.SetGenesisCbor(0, GenesisBlockHash[:], blockCbor, txn); err != nil {
+		if err := ls.db.SetGenesisCbor(0, genesisHash[:], blockCbor, txn); err != nil {
 			return fmt.Errorf("store genesis cbor: %w", err)
 		}
 
@@ -428,7 +449,7 @@ func (ls *LedgerState) createGenesisBlock() error {
 		for txHashArray, utxos := range txUtxos {
 			if err := ls.db.SetGenesisTransaction(
 				txHashArray[:],
-				GenesisBlockHash[:],
+				genesisHash[:],
 				utxos,
 				utxoOffsets,
 				txn,
@@ -462,10 +483,12 @@ func (ls *LedgerState) createGenesisBlock() error {
 // It populates utxoOffsets with the byte offset of each output within the block.
 // Unlike a search-based approach, this function tracks exact byte positions during
 // CBOR construction to avoid any possibility of false matches.
+// The blockHash parameter is the Byron genesis hash used as the synthetic block hash.
 func buildGenesisBlockCbor(
 	txHashes [][32]byte,
 	txUtxos map[[32]byte][]lcommon.Utxo,
 	utxoOffsets map[database.UtxoRef]database.CborOffset,
+	blockHash [32]byte,
 ) ([]byte, error) {
 	var buf bytes.Buffer
 
@@ -534,7 +557,7 @@ func buildGenesisBlockCbor(
 			}
 			utxoOffsets[ref] = database.CborOffset{
 				BlockSlot:  0,
-				BlockHash:  GenesisBlockHash,
+				BlockHash:  blockHash,
 				ByteOffset: uint32(offset),    // #nosec G115: bounds checked above
 				ByteLength: uint32(outputLen), // #nosec G115: bounds checked above
 			}

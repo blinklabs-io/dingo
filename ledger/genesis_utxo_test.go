@@ -91,6 +91,10 @@ func TestGenesisUtxoStorageAndRetrieval(t *testing.T) {
 			utxo.Id.Id().Bytes()[:8], utxo.Id.Index(), len(cborData))
 	}
 
+	// Get the Byron genesis hash to use as the synthetic block hash
+	genesisHash, err := GenesisBlockHash(nodeCfg)
+	require.NoError(t, err)
+
 	// Create a transaction to store genesis UTxOs
 	txn := db.Transaction(true)
 	err = txn.Do(func(txn *database.Txn) error {
@@ -129,7 +133,7 @@ func TestGenesisUtxoStorageAndRetrieval(t *testing.T) {
 
 			utxoOffsets[ref] = database.CborOffset{
 				BlockSlot:  0,
-				BlockHash:  GenesisBlockHash,
+				BlockHash:  genesisHash,
 				ByteOffset: offset,
 				ByteLength: uint32(len(outputCbor)),
 			}
@@ -140,7 +144,7 @@ func TestGenesisUtxoStorageAndRetrieval(t *testing.T) {
 
 		// Store the genesis block CBOR
 		t.Logf("Storing genesis block CBOR: %d bytes", len(blockCbor))
-		if err := db.SetGenesisCbor(0, GenesisBlockHash[:], blockCbor, txn); err != nil {
+		if err := db.SetGenesisCbor(0, genesisHash[:], blockCbor, txn); err != nil {
 			return err
 		}
 
