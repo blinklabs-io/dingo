@@ -1,4 +1,4 @@
-// Copyright 2025 Blink Labs Software
+// Copyright 2026 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -17,12 +17,14 @@ package database
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"math/big"
 	"slices"
 	"strings"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/gouroboros/cbor"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
@@ -64,6 +66,55 @@ func (d *Database) BlockCreate(block models.Block, txn *Txn) error {
 	if owned {
 		if err := txn.Commit(); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+// SetGenesisCbor stores synthetic genesis CBOR data without creating a block
+// index entry. This allows the CBOR to be retrieved for offset-based UTxO
+// extraction while preventing the chain iterator from trying to decode it
+// as a real block (which would fail since genesis CBOR is just concatenated
+// UTxO data, not a valid block structure).
+func (d *Database) SetGenesisCbor(slot uint64, hash []byte, cborData []byte, txn *Txn) error {
+	owned := false
+	if txn == nil {
+		txn = d.BlobTxn(true)
+		owned = true
+		defer txn.Rollback() //nolint:errcheck
+	}
+	blobTxn := txn.Blob()
+	if blobTxn == nil {
+		return types.ErrNilTxn
+	}
+	blob := txn.DB().Blob()
+	if blob == nil {
+		return types.ErrBlobStoreUnavailable
+	}
+	// Store CBOR data at the block key (allows GetBlock to find it)
+	// but don't create an index entry (prevents chain iterator from finding it)
+	key := types.BlockBlobKey(slot, hash)
+	if err := blob.Set(blobTxn, key, cborData); err != nil {
+		return fmt.Errorf("SetGenesisCbor: failed to set block CBOR: %w", err)
+	}
+	// Also store metadata (required by GetBlock) with ID=0 to indicate genesis
+	metadataKey := types.BlockBlobMetadataKey(key)
+	tmpMetadata := types.BlockMetadata{
+		ID:       0, // Genesis block has no sequential ID
+		Type:     0, // Genesis/synthetic block type
+		Height:   0,
+		PrevHash: nil,
+	}
+	tmpMetadataBytes, err := cbor.Encode(tmpMetadata)
+	if err != nil {
+		return err
+	}
+	if err := blob.Set(blobTxn, metadataKey, tmpMetadataBytes); err != nil {
+		return fmt.Errorf("SetGenesisCbor: failed to set block metadata: %w", err)
+	}
+	if owned {
+		if err := txn.Commit(); err != nil {
+			return fmt.Errorf("SetGenesisCbor: failed to commit txn: %w", err)
 		}
 	}
 	return nil

@@ -73,7 +73,7 @@ Order("added_slot DESC, cert_index DESC")
 - Use `TransactionEvent.Rollback` field to detect undo operations
 
 ### CBOR Storage
-- UTxOs/TXs stored as 48-byte `CborOffset` (slot + hash + offset + length)
+- UTxOs/TXs stored as 52-byte `CborOffset` (magic "DOFF" + slot + hash + offset + length)
 - `TieredCborCache` resolves: hot cache → block LRU → cold extraction
 
 ### Stake Snapshots

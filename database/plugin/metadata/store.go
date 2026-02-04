@@ -1,4 +1,4 @@
-// Copyright 2025 Blink Labs Software
+// Copyright 2026 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -214,6 +214,15 @@ type MetadataStore interface {
 		types.Txn,
 	) error
 
+	// SetGenesisTransaction stores a genesis transaction record.
+	// Genesis transactions have no inputs, witnesses, or fees - just outputs.
+	SetGenesisTransaction(
+		hash []byte,
+		blockHash []byte,
+		outputs []models.Utxo,
+		txn types.Txn,
+	) error
+
 	// Helper methods
 
 	// DeleteBlockNoncesBeforeSlot removes block nonces older than the given slot.
@@ -341,6 +350,14 @@ type MetadataStore interface {
 
 	// DeleteEpochSummariesBeforeEpoch deletes all epoch summaries before a given epoch.
 	DeleteEpochSummariesBeforeEpoch(uint64, types.Txn) error
+
+	// GetTransactionHashesAfterSlot returns transaction hashes for transactions added after the given slot.
+	// This is used for blob cleanup during rollback/truncation.
+	GetTransactionHashesAfterSlot(uint64, types.Txn) ([][]byte, error)
+
+	// DeleteTransactionsAfterSlot removes transaction records added after the given slot.
+	// Child records are automatically removed via CASCADE constraints.
+	DeleteTransactionsAfterSlot(uint64, types.Txn) error
 }
 
 // New creates a new metadata store instance using the specified plugin

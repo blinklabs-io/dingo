@@ -1,4 +1,4 @@
-// Copyright 2025 Blink Labs Software
+// Copyright 2026 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -528,4 +528,61 @@ func (d *BlobStoreBadger) DeleteUtxo(
 	}
 	key := types.UtxoBlobKey(txId, outputIdx)
 	return badgerTxn.tx.Delete(key)
+}
+
+// SetTx stores a transaction's offset data
+func (d *BlobStoreBadger) SetTx(
+	txn types.Txn,
+	txHash []byte,
+	offsetData []byte,
+) error {
+	badgerTxn, err := d.validateTxn(txn)
+	if err != nil {
+		return fmt.Errorf("SetTx: validate txn: %w", err)
+	}
+	key := types.TxBlobKey(txHash)
+	if err := badgerTxn.tx.Set(key, offsetData); err != nil {
+		return fmt.Errorf("SetTx: set key %x: %w", key, err)
+	}
+	return nil
+}
+
+// GetTx retrieves a transaction's offset data
+func (d *BlobStoreBadger) GetTx(
+	txn types.Txn,
+	txHash []byte,
+) ([]byte, error) {
+	badgerTxn, err := d.validateTxn(txn)
+	if err != nil {
+		return nil, fmt.Errorf("GetTx: validate txn: %w", err)
+	}
+	key := types.TxBlobKey(txHash)
+	val, err := badgerTxn.tx.Get(key)
+	if err != nil {
+		if errors.Is(err, badger.ErrKeyNotFound) {
+			return nil, types.ErrBlobKeyNotFound
+		}
+		return nil, fmt.Errorf("GetTx: get key %x: %w", key, err)
+	}
+	data, err := val.ValueCopy(nil)
+	if err != nil {
+		return nil, fmt.Errorf("GetTx: copy value for key %x: %w", key, err)
+	}
+	return data, nil
+}
+
+// DeleteTx removes a transaction's offset data
+func (d *BlobStoreBadger) DeleteTx(
+	txn types.Txn,
+	txHash []byte,
+) error {
+	badgerTxn, err := d.validateTxn(txn)
+	if err != nil {
+		return fmt.Errorf("DeleteTx: validate txn: %w", err)
+	}
+	key := types.TxBlobKey(txHash)
+	if err := badgerTxn.tx.Delete(key); err != nil {
+		return fmt.Errorf("DeleteTx: delete key %x: %w", key, err)
+	}
+	return nil
 }

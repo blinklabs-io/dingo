@@ -1,4 +1,4 @@
-// Copyright 2025 Blink Labs Software
+// Copyright 2026 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -1347,6 +1347,64 @@ func (d *MetadataStorePostgres) SetTransaction(
 	return nil
 }
 
+// SetGenesisTransaction stores a genesis transaction record.
+// Genesis transactions have no inputs, witnesses, or fees - just outputs.
+func (d *MetadataStorePostgres) SetGenesisTransaction(
+	hash []byte,
+	blockHash []byte,
+	outputs []models.Utxo,
+	txn types.Txn,
+) error {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return err
+	}
+
+	tmpTx := &models.Transaction{
+		Hash:      hash,
+		Type:      0, // Byron era type
+		BlockHash: blockHash,
+		Slot:      0, // Genesis slot
+		Valid:     true,
+	}
+
+	result := db.Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "hash"}},
+		DoNothing: true,
+	}).Create(tmpTx)
+	if result.Error != nil {
+		return fmt.Errorf("create genesis transaction %x: %w", hash, result.Error)
+	}
+
+	// Fetch ID if it was an existing record
+	if tmpTx.ID == 0 {
+		var existing struct{ ID uint }
+		if err := db.Model(&models.Transaction{}).
+			Select("id").
+			Where("hash = ?", hash).
+			Take(&existing).Error; err != nil {
+			return fmt.Errorf("fetch genesis transaction ID: %w", err)
+		}
+		tmpTx.ID = existing.ID
+	}
+
+	// Create UTxO records for genesis outputs
+	for i := range outputs {
+		outputs[i].TransactionID = &tmpTx.ID
+	}
+	if len(outputs) > 0 {
+		result := db.Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "tx_id"}, {Name: "output_idx"}},
+			DoNothing: true,
+		}).Create(&outputs)
+		if result.Error != nil {
+			return fmt.Errorf("create genesis utxos: %w", result.Error)
+		}
+	}
+
+	return nil
+}
+
 // Traverse each utxo and check for inline datum & calls storeDatum
 func (d *MetadataStorePostgres) storeTransactionDatums(
 	tx lcommon.Transaction,
@@ -1394,6 +1452,27 @@ func (d *MetadataStorePostgres) storeDatum(
 	}
 	datumHash := lcommon.Blake2b256Hash(rawDatum)
 	return d.SetDatum(datumHash, rawDatum, slot, txn)
+}
+
+// GetTransactionHashesAfterSlot returns transaction hashes for transactions added after the given slot.
+// This is used for blob cleanup during rollback/truncation.
+func (d *MetadataStorePostgres) GetTransactionHashesAfterSlot(
+	slot uint64,
+	txn types.Txn,
+) ([][]byte, error) {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return nil, err
+	}
+
+	var txHashes [][]byte
+	if result := db.Model(&models.Transaction{}).
+		Where("slot > ?", slot).
+		Pluck("hash", &txHashes); result.Error != nil {
+		return nil, fmt.Errorf("query transaction hashes: %w", result.Error)
+	}
+
+	return txHashes, nil
 }
 
 // DeleteTransactionsAfterSlot removes transaction records added after the given slot.

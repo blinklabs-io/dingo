@@ -26,6 +26,9 @@ import (
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
 
+// ErrNilDecodedOutput is returned when a decoded UTxO output is nil.
+var ErrNilDecodedOutput = errors.New("nil decoded output")
+
 type LedgerView struct {
 	ls  *LedgerState
 	txn *database.Txn
@@ -68,6 +71,14 @@ func (lv *LedgerView) UtxoById(
 	tmpOutput, err := utxo.Decode()
 	if err != nil {
 		return lcommon.Utxo{}, err
+	}
+	if tmpOutput == nil {
+		return lcommon.Utxo{}, fmt.Errorf(
+			"decoded output is nil for utxo %s#%d: %w",
+			utxoId.Id().String(),
+			utxoId.Index(),
+			ErrNilDecodedOutput,
+		)
 	}
 	return lcommon.Utxo{
 		Id:     utxoId,

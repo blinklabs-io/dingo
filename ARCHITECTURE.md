@@ -287,10 +287,11 @@ Instead of storing full CBOR data redundantly, Dingo uses offset-based reference
 
 ### CborOffset Structure
 
-Each CBOR reference is a fixed 48-byte `CborOffset` struct:
+Each CBOR reference is a fixed 52-byte `CborOffset` struct with magic prefix:
 
 | Field | Size | Purpose |
 |-------|------|---------|
+| Magic | 4 bytes | "DOFF" prefix to identify offset storage |
 | BlockSlot | 8 bytes | Block slot number |
 | BlockHash | 32 bytes | Block hash |
 | ByteOffset | 4 bytes | Offset within block CBOR |

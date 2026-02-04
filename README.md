@@ -116,16 +116,16 @@ For Windows, download the appropriate binary from the [Mithril releases page](ht
 Bootstrapping requires temporary disk space for both the downloaded snapshot and the Dingo database:
 
 | Network | Snapshot Size | Dingo DB | Total Needed |
-|---------|---------------|----------|--------------|
-| mainnet | ~180 GB | ~200+ GB | ~400 GB |
-| preprod | ~60 GB | ~80 GB | ~150 GB |
-| preview | ~15 GB | ~25 GB | ~50 GB |
+|---------|--------------|----------|--------------|
+| mainnet |      ~180 GB | ~200+ GB |      ~400 GB |
+| preprod |       ~60 GB |   ~80 GB |      ~150 GB |
+| preview |       ~15 GB |   ~25 GB |       ~50 GB |
 
 **Note**: These are approximate values that grow over time. The snapshot can be deleted after import, but you need sufficient space for both during the load process.
 
 ### Bootstrap Workflow
 
-**Step 1: Download the snapshot**
+#### Step 1: Download the snapshot
 
 Set the aggregator endpoint for your network and download:
 
@@ -143,7 +143,7 @@ export AGGREGATOR_ENDPOINT=https://aggregator.release-mainnet.api.mithril.networ
 mithril-client cardano-db download --download-dir /path/to/download
 ```
 
-**Step 2: Load into Dingo**
+#### Step 2: Load into Dingo
 
 ```bash
 # Load the immutable DB into Dingo
@@ -152,7 +152,7 @@ mithril-client cardano-db download --download-dir /path/to/download
 
 The load process will import all blocks from the snapshot. Progress is logged as blocks are processed.
 
-**Step 3: Start Dingo**
+#### Step 3: Start Dingo
 
 After loading completes, start Dingo normally and it will sync the remaining blocks from the network:
 
@@ -160,7 +160,7 @@ After loading completes, start Dingo normally and it will sync the remaining blo
 CARDANO_NETWORK=mainnet ./dingo
 ```
 
-**Step 4: Clean up (optional)**
+#### Step 4: Clean up (optional)
 
 Once Dingo is running and synced, you can delete the downloaded snapshot to reclaim disk space:
 
