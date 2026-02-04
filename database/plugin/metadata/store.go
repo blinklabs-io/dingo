@@ -73,6 +73,28 @@ type MetadataStore interface {
 	// the retirement epoch is in the future.
 	GetActivePoolKeyHashes(types.Txn) ([][]byte, error)
 
+	// GetActivePoolKeyHashesAtSlot retrieves the key hashes of pools that were
+	// active at the given slot. A pool was active at a slot if:
+	// 1. It had a registration with added_slot <= slot
+	// 2. Either:
+	//    a. No retirement with added_slot <= slot, OR
+	//    b. The most recent retirement was for an epoch that hadn't started yet, OR
+	//    c. A registration occurred AFTER the most recent retirement (re-registration
+	//       cancels a pending retirement)
+	//
+	// When determining order of events in the same slot, block_index (transaction
+	// index within block) and cert_index (certificate index within transaction)
+	// are used as tie-breakers since cert_index resets per transaction. The full
+	// ordering is: added_slot DESC, block_index DESC, cert_index DESC.
+	// This handles cases where registration and retirement occur in different
+	// transactions within the same block.
+	//
+	// This is used for stake snapshot calculations at historical points.
+	//
+	// Returns types.ErrNoEpochData (wrapped) if epoch data has not been synced
+	// for the requested slot. Callers should use errors.Is() to check.
+	GetActivePoolKeyHashesAtSlot(uint64, types.Txn) ([][]byte, error)
+
 	// GetStakeByPool returns the total delegated stake and delegator count for a pool.
 	// This aggregates all accounts delegated to the pool and sums their UTxO values.
 	GetStakeByPool(

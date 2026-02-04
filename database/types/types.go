@@ -136,6 +136,13 @@ var ErrNoStoreAvailable = errors.New("no store available")
 // ErrBlobStoreUnavailable is returned when blob store cannot be accessed
 var ErrBlobStoreUnavailable = errors.New("blob store unavailable")
 
+// ErrNoEpochData is returned when epoch data has not been synced yet for the
+// requested slot. Callers should distinguish this from "no active pools" and
+// handle it appropriately (e.g., retry after sync progresses).
+var ErrNoEpochData = errors.New(
+	"no epoch data available for requested slot",
+)
+
 // ErrPartialCommit is returned when blob commits but metadata fails,
 // leaving the database in an inconsistent state that requires recovery.
 var ErrPartialCommit = errors.New(

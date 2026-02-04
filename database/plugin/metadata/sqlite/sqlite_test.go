@@ -15,17 +15,40 @@
 package sqlite
 
 import (
+	"bytes"
+	"errors"
 	"math/big"
 	"testing"
 	"time"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/utxorpc/go-codegen/utxorpc/v1alpha/cardano"
 	"gorm.io/gorm"
 )
+
+// setupTestDB creates and initializes a test SQLite database.
+// It returns the store and a cleanup function that should be deferred.
+func setupTestDB(t *testing.T) *MetadataStoreSqlite {
+	t.Helper()
+	sqliteStore, err := New("", nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	if err := sqliteStore.Start(); err != nil {
+		t.Fatalf("unexpected error starting store: %s", err)
+	}
+	t.Cleanup(func() {
+		sqliteStore.Close() //nolint:errcheck
+	})
+	if err := sqliteStore.DB().AutoMigrate(models.MigrateModels...); err != nil {
+		t.Fatalf("failed to auto-migrate: %v", err)
+	}
+	return sqliteStore
+}
 
 type TestTable struct {
 	gorm.Model
@@ -277,7 +300,7 @@ func TestUnifiedCertificateCreation(t *testing.T) {
 			&lcommon.PoolRegistrationCertificate{
 				CertType: uint(lcommon.CertificateTypePoolRegistration),
 				Operator: lcommon.PoolKeyHash(
-					[]byte("pool_key_hash_1234567890123456789012345678"),
+					[]byte("pool_key_hash_01234567890123"),
 				),
 				VrfKeyHash: lcommon.VrfKeyHash(
 					[]byte("vrf_key_hash_12345678901234567890123456789012"),
@@ -1241,7 +1264,7 @@ func TestRestorePoolStateAtSlot(t *testing.T) {
 			t.Fatalf("failed to auto-migrate: %v", err)
 		}
 
-		poolHash := []byte("pool_key_hash_1234567890123456789012345678")
+		poolHash := []byte("pool_key_hash_01234567890123")
 
 		// Create a pool with registration after rollback point
 		pool := models.Pool{PoolKeyHash: poolHash}
@@ -1288,7 +1311,7 @@ func TestRestorePoolStateAtSlot(t *testing.T) {
 			t.Fatalf("failed to auto-migrate: %v", err)
 		}
 
-		poolHash := []byte("pool_key_hash_1234567890123456789012345678")
+		poolHash := []byte("pool_key_hash_01234567890123")
 
 		// Create a pool with registration BEFORE rollback point
 		pool := models.Pool{PoolKeyHash: poolHash}
@@ -1358,7 +1381,7 @@ func TestRestorePoolStateAtSlot(t *testing.T) {
 				t.Fatalf("failed to auto-migrate: %v", err)
 			}
 
-			poolHash := []byte("pool_key_hash_1234567890123456789012345678")
+			poolHash := []byte("pool_key_hash_01234567890123")
 
 			// Create a pool with registration BEFORE rollback point
 			pool := models.Pool{PoolKeyHash: poolHash}
@@ -1437,6 +1460,848 @@ func TestRestorePoolStateAtSlot(t *testing.T) {
 			}
 		},
 	)
+}
+
+// TestGetActivePoolKeyHashesAtSlot tests that pools active at a specific slot are returned
+func TestGetActivePoolKeyHashesAtSlot(t *testing.T) {
+	t.Run("returns error when no epoch data", func(t *testing.T) {
+		sqliteStore := setupTestDB(t)
+
+		// No epoch data - should return ErrNoEpochData so callers can
+		// distinguish "no pools" from "data not synced"
+		_, err := sqliteStore.GetActivePoolKeyHashesAtSlot(1000, nil)
+		if err == nil {
+			t.Fatal("expected error when no epoch data, got nil")
+		}
+		if !errors.Is(err, types.ErrNoEpochData) {
+			t.Errorf("expected ErrNoEpochData, got: %v", err)
+		}
+	})
+
+	t.Run("returns error when slot is beyond synced epoch", func(t *testing.T) {
+		sqliteStore := setupTestDB(t)
+
+		// Create epoch 10 starting at slot 0 with length 43200
+		epoch := models.Epoch{
+			EpochId:       10,
+			StartSlot:     0,
+			EraId:         1,
+			SlotLength:    1,
+			LengthInSlots: 43200,
+		}
+		if result := sqliteStore.DB().Create(&epoch); result.Error != nil {
+			t.Fatalf("failed to create epoch: %v", result.Error)
+		}
+
+		// Query a slot beyond the epoch's range - should return
+		// ErrNoEpochData rather than using a stale epoch ID
+		_, err := sqliteStore.GetActivePoolKeyHashesAtSlot(50000, nil)
+		if err == nil {
+			t.Fatal("expected error when slot is beyond synced epoch, got nil")
+		}
+		if !errors.Is(err, types.ErrNoEpochData) {
+			t.Errorf("expected ErrNoEpochData, got: %v", err)
+		}
+	})
+
+	t.Run("returns pool registered before slot", func(t *testing.T) {
+		sqliteStore := setupTestDB(t)
+
+		// Create epoch data
+		epoch := models.Epoch{
+			EpochId:       10,
+			StartSlot:     0,
+			EraId:         1,
+			SlotLength:    1,
+			LengthInSlots: 43200,
+		}
+		if result := sqliteStore.DB().Create(&epoch); result.Error != nil {
+			t.Fatalf("failed to create epoch: %v", result.Error)
+		}
+
+		poolHash := []byte("pool_key_hash_01234567890123")
+
+		// Create a pool with registration at slot 500
+		pool := models.Pool{PoolKeyHash: poolHash}
+		if result := sqliteStore.DB().Create(&pool); result.Error != nil {
+			t.Fatalf("failed to create pool: %v", result.Error)
+		}
+
+		// Create parent transaction and certificate for the registration
+		tx1 := models.Transaction{ID: 1, Slot: 500, Hash: []byte("tx1_hash_12345678901234567890")}
+		if result := sqliteStore.DB().Create(&tx1); result.Error != nil {
+			t.Fatalf("failed to create tx: %v", result.Error)
+		}
+		regCert := models.Certificate{
+			ID:            1,
+			TransactionID: tx1.ID,
+			Slot:          500,
+			CertIndex:     0,
+		}
+		if result := sqliteStore.DB().Create(&regCert); result.Error != nil {
+			t.Fatalf("failed to create cert: %v", result.Error)
+		}
+
+		poolReg := models.PoolRegistration{
+			PoolID:        pool.ID,
+			PoolKeyHash:   poolHash,
+			AddedSlot:     500,
+			CertificateID: regCert.ID,
+		}
+		if result := sqliteStore.DB().Create(&poolReg); result.Error != nil {
+			t.Fatalf("failed to create pool registration: %v", result.Error)
+		}
+
+		// Query at slot 1000 - should return the pool
+		hashes, err := sqliteStore.GetActivePoolKeyHashesAtSlot(1000, nil)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(hashes) != 1 {
+			t.Errorf("expected 1 hash, got %d", len(hashes))
+		}
+		// Verify the returned hash matches the expected pool hash
+		if len(hashes) > 0 && !bytes.Equal(hashes[0], poolHash) {
+			t.Errorf("returned hash does not match expected pool hash")
+		}
+
+		// Query at slot 400 - should not return the pool
+		hashes, err = sqliteStore.GetActivePoolKeyHashesAtSlot(400, nil)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(hashes) != 0 {
+			t.Errorf("expected 0 hashes at slot 400, got %d", len(hashes))
+		}
+	})
+
+	t.Run("excludes pool registered after slot", func(t *testing.T) {
+		sqliteStore := setupTestDB(t)
+
+		// Create epoch data
+		epoch := models.Epoch{
+			EpochId:       10,
+			StartSlot:     0,
+			EraId:         1,
+			SlotLength:    1,
+			LengthInSlots: 43200,
+		}
+		if result := sqliteStore.DB().Create(&epoch); result.Error != nil {
+			t.Fatalf("failed to create epoch: %v", result.Error)
+		}
+
+		poolHash := []byte("pool_key_hash_01234567890123")
+
+		// Create a pool with registration at slot 2000
+		pool := models.Pool{PoolKeyHash: poolHash}
+		if result := sqliteStore.DB().Create(&pool); result.Error != nil {
+			t.Fatalf("failed to create pool: %v", result.Error)
+		}
+
+		// Create parent transaction and certificate for the registration
+		tx1 := models.Transaction{ID: 1, Slot: 2000, Hash: []byte("tx1_hash_12345678901234567890")}
+		if result := sqliteStore.DB().Create(&tx1); result.Error != nil {
+			t.Fatalf("failed to create tx: %v", result.Error)
+		}
+		regCert := models.Certificate{
+			ID:            1,
+			TransactionID: tx1.ID,
+			Slot:          2000,
+			CertIndex:     0,
+		}
+		if result := sqliteStore.DB().Create(&regCert); result.Error != nil {
+			t.Fatalf("failed to create cert: %v", result.Error)
+		}
+
+		poolReg := models.PoolRegistration{
+			PoolID:        pool.ID,
+			PoolKeyHash:   poolHash,
+			AddedSlot:     2000,
+			CertificateID: regCert.ID,
+		}
+		if result := sqliteStore.DB().Create(&poolReg); result.Error != nil {
+			t.Fatalf("failed to create pool registration: %v", result.Error)
+		}
+
+		// Query at slot 1000 - should not return the pool
+		hashes, err := sqliteStore.GetActivePoolKeyHashesAtSlot(1000, nil)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(hashes) != 0 {
+			t.Errorf("expected 0 hashes, got %d", len(hashes))
+		}
+	})
+
+	t.Run("excludes retired pool when retirement epoch has passed", func(t *testing.T) {
+		sqliteStore := setupTestDB(t)
+
+		// Create epoch data for epochs 10 (slots 0-43199) and 11 (slots 43200-86399)
+		epoch10 := models.Epoch{
+			EpochId:       10,
+			StartSlot:     0,
+			EraId:         1,
+			SlotLength:    1,
+			LengthInSlots: 43200,
+		}
+		if result := sqliteStore.DB().Create(&epoch10); result.Error != nil {
+			t.Fatalf("failed to create epoch 10: %v", result.Error)
+		}
+		epoch11 := models.Epoch{
+			EpochId:       11,
+			StartSlot:     43200,
+			EraId:         1,
+			SlotLength:    1,
+			LengthInSlots: 43200,
+		}
+		if result := sqliteStore.DB().Create(&epoch11); result.Error != nil {
+			t.Fatalf("failed to create epoch 11: %v", result.Error)
+		}
+
+		poolHash := []byte("pool_key_hash_01234567890123")
+
+		// Create a pool with registration at slot 500
+		pool := models.Pool{PoolKeyHash: poolHash}
+		if result := sqliteStore.DB().Create(&pool); result.Error != nil {
+			t.Fatalf("failed to create pool: %v", result.Error)
+		}
+
+		// Create parent transaction and certificate for the registration
+		tx1 := models.Transaction{ID: 1, Slot: 500, Hash: []byte("tx1_hash_12345678901234567890")}
+		if result := sqliteStore.DB().Create(&tx1); result.Error != nil {
+			t.Fatalf("failed to create tx1: %v", result.Error)
+		}
+		regCert := models.Certificate{
+			ID:            1,
+			TransactionID: tx1.ID,
+			Slot:          500,
+			CertIndex:     0,
+		}
+		if result := sqliteStore.DB().Create(&regCert); result.Error != nil {
+			t.Fatalf("failed to create reg cert: %v", result.Error)
+		}
+
+		poolReg := models.PoolRegistration{
+			PoolID:        pool.ID,
+			PoolKeyHash:   poolHash,
+			AddedSlot:     500,
+			CertificateID: regCert.ID,
+		}
+		if result := sqliteStore.DB().Create(&poolReg); result.Error != nil {
+			t.Fatalf("failed to create pool registration: %v", result.Error)
+		}
+
+		// Create parent transaction and certificate for the retirement
+		tx2 := models.Transaction{ID: 2, Slot: 1000, Hash: []byte("tx2_hash_12345678901234567890")}
+		if result := sqliteStore.DB().Create(&tx2); result.Error != nil {
+			t.Fatalf("failed to create tx2: %v", result.Error)
+		}
+		retCert := models.Certificate{
+			ID:            2,
+			TransactionID: tx2.ID,
+			Slot:          1000,
+			CertIndex:     0,
+		}
+		if result := sqliteStore.DB().Create(&retCert); result.Error != nil {
+			t.Fatalf("failed to create ret cert: %v", result.Error)
+		}
+
+		// Create retirement at slot 1000, effective epoch 11
+		poolRet := models.PoolRetirement{
+			PoolID:        pool.ID,
+			PoolKeyHash:   poolHash,
+			AddedSlot:     1000,
+			Epoch:         11,
+			CertificateID: retCert.ID,
+		}
+		if result := sqliteStore.DB().Create(&poolRet); result.Error != nil {
+			t.Fatalf("failed to create pool retirement: %v", result.Error)
+		}
+
+		// Query at slot 30000 (epoch 10) - retirement scheduled for epoch 11 hasn't happened
+		// Pool should be active
+		hashes, err := sqliteStore.GetActivePoolKeyHashesAtSlot(30000, nil)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(hashes) != 1 {
+			t.Errorf("expected 1 hash at slot 30000 (epoch 10), got %d", len(hashes))
+		}
+
+		// Query at slot 50000 (epoch 11) - retirement for epoch 11 is now effective
+		// Pool should be retired
+		hashes, err = sqliteStore.GetActivePoolKeyHashesAtSlot(50000, nil)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(hashes) != 0 {
+			t.Errorf("expected 0 hashes at slot 50000 (epoch 11), got %d", len(hashes))
+		}
+	})
+
+	t.Run("includes pool with re-registration after retirement", func(t *testing.T) {
+		sqliteStore := setupTestDB(t)
+
+		// Create epoch data
+		epoch := models.Epoch{
+			EpochId:       10,
+			StartSlot:     0,
+			EraId:         1,
+			SlotLength:    1,
+			LengthInSlots: 43200,
+		}
+		if result := sqliteStore.DB().Create(&epoch); result.Error != nil {
+			t.Fatalf("failed to create epoch: %v", result.Error)
+		}
+
+		poolHash := []byte("pool_key_hash_01234567890123")
+
+		// Create a pool with registration at slot 500
+		pool := models.Pool{PoolKeyHash: poolHash}
+		if result := sqliteStore.DB().Create(&pool); result.Error != nil {
+			t.Fatalf("failed to create pool: %v", result.Error)
+		}
+
+		// Create parent transaction and certificate for registration 1
+		tx1 := models.Transaction{ID: 1, Slot: 500, Hash: []byte("tx1_hash_12345678901234567890")}
+		if result := sqliteStore.DB().Create(&tx1); result.Error != nil {
+			t.Fatalf("failed to create tx1: %v", result.Error)
+		}
+		regCert1 := models.Certificate{
+			ID:            1,
+			TransactionID: tx1.ID,
+			Slot:          500,
+			CertIndex:     0,
+		}
+		if result := sqliteStore.DB().Create(&regCert1); result.Error != nil {
+			t.Fatalf("failed to create reg cert 1: %v", result.Error)
+		}
+
+		poolReg1 := models.PoolRegistration{
+			PoolID:        pool.ID,
+			PoolKeyHash:   poolHash,
+			AddedSlot:     500,
+			CertificateID: regCert1.ID,
+		}
+		if result := sqliteStore.DB().Create(&poolReg1); result.Error != nil {
+			t.Fatalf("failed to create pool registration 1: %v", result.Error)
+		}
+
+		// Create parent transaction and certificate for retirement
+		tx2 := models.Transaction{ID: 2, Slot: 1000, Hash: []byte("tx2_hash_12345678901234567890")}
+		if result := sqliteStore.DB().Create(&tx2); result.Error != nil {
+			t.Fatalf("failed to create tx2: %v", result.Error)
+		}
+		retCert := models.Certificate{
+			ID:            2,
+			TransactionID: tx2.ID,
+			Slot:          1000,
+			CertIndex:     0,
+		}
+		if result := sqliteStore.DB().Create(&retCert); result.Error != nil {
+			t.Fatalf("failed to create ret cert: %v", result.Error)
+		}
+
+		// Create retirement at slot 1000
+		poolRet := models.PoolRetirement{
+			PoolID:        pool.ID,
+			PoolKeyHash:   poolHash,
+			AddedSlot:     1000,
+			Epoch:         10,
+			CertificateID: retCert.ID,
+		}
+		if result := sqliteStore.DB().Create(&poolRet); result.Error != nil {
+			t.Fatalf("failed to create pool retirement: %v", result.Error)
+		}
+
+		// Create parent transaction and certificate for re-registration
+		tx3 := models.Transaction{ID: 3, Slot: 1500, Hash: []byte("tx3_hash_12345678901234567890")}
+		if result := sqliteStore.DB().Create(&tx3); result.Error != nil {
+			t.Fatalf("failed to create tx3: %v", result.Error)
+		}
+		regCert2 := models.Certificate{
+			ID:            3,
+			TransactionID: tx3.ID,
+			Slot:          1500,
+			CertIndex:     0,
+		}
+		if result := sqliteStore.DB().Create(&regCert2); result.Error != nil {
+			t.Fatalf("failed to create reg cert 2: %v", result.Error)
+		}
+
+		// Create re-registration at slot 1500 (after retirement)
+		poolReg2 := models.PoolRegistration{
+			PoolID:        pool.ID,
+			PoolKeyHash:   poolHash,
+			AddedSlot:     1500,
+			CertificateID: regCert2.ID,
+		}
+		if result := sqliteStore.DB().Create(&poolReg2); result.Error != nil {
+			t.Fatalf("failed to create pool registration 2: %v", result.Error)
+		}
+
+		// Query at slot 2000 - pool has re-registered after retirement
+		// Pool should be active
+		hashes, err := sqliteStore.GetActivePoolKeyHashesAtSlot(2000, nil)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(hashes) != 1 {
+			t.Errorf("expected 1 hash at slot 2000, got %d", len(hashes))
+		}
+	})
+
+	t.Run("ignores retirement registered after query slot", func(t *testing.T) {
+		sqliteStore := setupTestDB(t)
+
+		// Create epoch data
+		epoch := models.Epoch{
+			EpochId:       10,
+			StartSlot:     0,
+			EraId:         1,
+			SlotLength:    1,
+			LengthInSlots: 43200,
+		}
+		if result := sqliteStore.DB().Create(&epoch); result.Error != nil {
+			t.Fatalf("failed to create epoch: %v", result.Error)
+		}
+
+		poolHash := []byte("pool_key_hash_01234567890123")
+
+		// Create a pool with registration at slot 500
+		pool := models.Pool{PoolKeyHash: poolHash}
+		if result := sqliteStore.DB().Create(&pool); result.Error != nil {
+			t.Fatalf("failed to create pool: %v", result.Error)
+		}
+
+		// Create parent transaction and certificate for the registration
+		tx1 := models.Transaction{ID: 1, Slot: 500, Hash: []byte("tx1_hash_12345678901234567890")}
+		if result := sqliteStore.DB().Create(&tx1); result.Error != nil {
+			t.Fatalf("failed to create tx1: %v", result.Error)
+		}
+		regCert := models.Certificate{
+			ID:            1,
+			TransactionID: tx1.ID,
+			Slot:          500,
+			CertIndex:     0,
+		}
+		if result := sqliteStore.DB().Create(&regCert); result.Error != nil {
+			t.Fatalf("failed to create reg cert: %v", result.Error)
+		}
+
+		poolReg := models.PoolRegistration{
+			PoolID:        pool.ID,
+			PoolKeyHash:   poolHash,
+			AddedSlot:     500,
+			CertificateID: regCert.ID,
+		}
+		if result := sqliteStore.DB().Create(&poolReg); result.Error != nil {
+			t.Fatalf("failed to create pool registration: %v", result.Error)
+		}
+
+		// Create parent transaction and certificate for the retirement
+		tx2 := models.Transaction{ID: 2, Slot: 2000, Hash: []byte("tx2_hash_12345678901234567890")}
+		if result := sqliteStore.DB().Create(&tx2); result.Error != nil {
+			t.Fatalf("failed to create tx2: %v", result.Error)
+		}
+		retCert := models.Certificate{
+			ID:            2,
+			TransactionID: tx2.ID,
+			Slot:          2000,
+			CertIndex:     0,
+		}
+		if result := sqliteStore.DB().Create(&retCert); result.Error != nil {
+			t.Fatalf("failed to create ret cert: %v", result.Error)
+		}
+
+		// Create retirement at slot 2000 (after query slot)
+		poolRet := models.PoolRetirement{
+			PoolID:        pool.ID,
+			PoolKeyHash:   poolHash,
+			AddedSlot:     2000,
+			Epoch:         10,
+			CertificateID: retCert.ID,
+		}
+		if result := sqliteStore.DB().Create(&poolRet); result.Error != nil {
+			t.Fatalf("failed to create pool retirement: %v", result.Error)
+		}
+
+		// Query at slot 1000 - retirement hasn't been submitted yet
+		// Pool should be active
+		hashes, err := sqliteStore.GetActivePoolKeyHashesAtSlot(1000, nil)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(hashes) != 1 {
+			t.Errorf("expected 1 hash at slot 1000, got %d", len(hashes))
+		}
+	})
+
+	t.Run("same slot registration and retirement uses cert_index as tie-breaker", func(t *testing.T) {
+		// Test case 1: Registration has higher cert_index (came after retirement)
+		// Pool should be active
+		t.Run("registration after retirement in same slot", func(t *testing.T) {
+			sqliteStore := setupTestDB(t)
+
+			// Create epoch data
+			epoch := models.Epoch{
+				EpochId:       10,
+				StartSlot:     0,
+				EraId:         1,
+				SlotLength:    1,
+				LengthInSlots: 43200,
+			}
+			if result := sqliteStore.DB().Create(&epoch); result.Error != nil {
+				t.Fatalf("failed to create epoch: %v", result.Error)
+			}
+
+			poolHash := []byte("pool_key_hash_01234567890123")
+
+			// Create a pool
+			pool := models.Pool{PoolKeyHash: poolHash}
+			if result := sqliteStore.DB().Create(&pool); result.Error != nil {
+				t.Fatalf("failed to create pool: %v", result.Error)
+			}
+
+			// Single transaction containing both certificates (cert_index is
+			// intra-transaction ordering)
+			tx1 := models.Transaction{ID: 1, Slot: 1000, Hash: []byte("tx1_hash_12345678901234567890")}
+			if result := sqliteStore.DB().Create(&tx1); result.Error != nil {
+				t.Fatalf("failed to create tx1: %v", result.Error)
+			}
+
+			// Create certificate records with cert_index for proper ordering
+			// Retirement cert with lower cert_index (came first in transaction)
+			retCert := models.Certificate{
+				ID:            100,
+				TransactionID: tx1.ID,
+				Slot:          1000,
+				CertIndex:     0, // Lower cert_index = came first in transaction
+			}
+			if result := sqliteStore.DB().Create(&retCert); result.Error != nil {
+				t.Fatalf("failed to create retirement cert: %v", result.Error)
+			}
+
+			// Registration cert with higher cert_index (came after in same transaction)
+			regCert := models.Certificate{
+				ID:            200,
+				TransactionID: tx1.ID,
+				Slot:          1000,
+				CertIndex:     1, // Higher cert_index = came later in transaction
+			}
+			if result := sqliteStore.DB().Create(&regCert); result.Error != nil {
+				t.Fatalf("failed to create registration cert: %v", result.Error)
+			}
+
+			// Create retirement at slot 1000 with certificate_id 100 (came first)
+			poolRet := models.PoolRetirement{
+				PoolID:        pool.ID,
+				PoolKeyHash:   poolHash,
+				AddedSlot:     1000,
+				Epoch:         10,
+				CertificateID: 100,
+			}
+			if result := sqliteStore.DB().Create(&poolRet); result.Error != nil {
+				t.Fatalf("failed to create pool retirement: %v", result.Error)
+			}
+
+			// Create registration at same slot 1000 but with higher cert_index (came after)
+			poolReg := models.PoolRegistration{
+				PoolID:        pool.ID,
+				PoolKeyHash:   poolHash,
+				AddedSlot:     1000,
+				CertificateID: 200, // References cert with higher cert_index
+			}
+			if result := sqliteStore.DB().Create(&poolReg); result.Error != nil {
+				t.Fatalf("failed to create pool registration: %v", result.Error)
+			}
+
+			// Query at slot 1000 - registration came after retirement (higher cert_index)
+			// Pool should be active
+			hashes, err := sqliteStore.GetActivePoolKeyHashesAtSlot(1000, nil)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if len(hashes) != 1 {
+				t.Errorf("expected 1 hash (pool active after re-registration in same slot), got %d", len(hashes))
+			}
+		})
+
+		// Test case 2: Retirement has higher cert_index (came after registration)
+		// Pool should be inactive (retirement epoch has passed)
+		t.Run("retirement after registration in same slot", func(t *testing.T) {
+			sqliteStore := setupTestDB(t)
+
+			// Create epoch data - epoch 10 starts at slot 0
+			epoch := models.Epoch{
+				EpochId:       10,
+				StartSlot:     0,
+				EraId:         1,
+				SlotLength:    1,
+				LengthInSlots: 43200,
+			}
+			if result := sqliteStore.DB().Create(&epoch); result.Error != nil {
+				t.Fatalf("failed to create epoch: %v", result.Error)
+			}
+
+			poolHash := []byte("pool_key_hash_01234567890123")
+
+			// Create a pool
+			pool := models.Pool{PoolKeyHash: poolHash}
+			if result := sqliteStore.DB().Create(&pool); result.Error != nil {
+				t.Fatalf("failed to create pool: %v", result.Error)
+			}
+
+			// Single transaction containing both certificates (cert_index is
+			// intra-transaction ordering)
+			tx1 := models.Transaction{ID: 1, Slot: 1000, Hash: []byte("tx1_hash_12345678901234567890")}
+			if result := sqliteStore.DB().Create(&tx1); result.Error != nil {
+				t.Fatalf("failed to create tx1: %v", result.Error)
+			}
+
+			// Create certificate records with cert_index for proper ordering
+			// Registration cert with lower cert_index (came first in transaction)
+			regCert := models.Certificate{
+				ID:            100,
+				TransactionID: tx1.ID,
+				Slot:          1000,
+				CertIndex:     0, // Lower cert_index = came first in transaction
+			}
+			if result := sqliteStore.DB().Create(&regCert); result.Error != nil {
+				t.Fatalf("failed to create registration cert: %v", result.Error)
+			}
+
+			// Retirement cert with higher cert_index (came after in same transaction)
+			retCert := models.Certificate{
+				ID:            200,
+				TransactionID: tx1.ID,
+				Slot:          1000,
+				CertIndex:     1, // Higher cert_index = came later in transaction
+			}
+			if result := sqliteStore.DB().Create(&retCert); result.Error != nil {
+				t.Fatalf("failed to create retirement cert: %v", result.Error)
+			}
+
+			// Create registration at slot 1000 with certificate_id 100 (came first)
+			poolReg := models.PoolRegistration{
+				PoolID:        pool.ID,
+				PoolKeyHash:   poolHash,
+				AddedSlot:     1000,
+				CertificateID: 100,
+			}
+			if result := sqliteStore.DB().Create(&poolReg); result.Error != nil {
+				t.Fatalf("failed to create pool registration: %v", result.Error)
+			}
+
+			// Create retirement at same slot 1000 but with higher cert_index (came after)
+			// Retirement is for epoch 10, which has already started (slot 0)
+			poolRet := models.PoolRetirement{
+				PoolID:        pool.ID,
+				PoolKeyHash:   poolHash,
+				AddedSlot:     1000,
+				Epoch:         10, // Current epoch, so retirement is effective
+				CertificateID: 200, // References cert with higher cert_index
+			}
+			if result := sqliteStore.DB().Create(&poolRet); result.Error != nil {
+				t.Fatalf("failed to create pool retirement: %v", result.Error)
+			}
+
+			// Query at slot 1000 - retirement came after registration (higher cert_index)
+			// and retirement epoch (10) has started, so pool should be inactive
+			hashes, err := sqliteStore.GetActivePoolKeyHashesAtSlot(1000, nil)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if len(hashes) != 0 {
+				t.Errorf("expected 0 hashes (pool retired in same slot with higher cert_index), got %d", len(hashes))
+			}
+		})
+	})
+
+	t.Run("same slot registration and retirement uses block_index as tie-breaker", func(t *testing.T) {
+		// Test case: Registration is in a later transaction (higher block_index)
+		// than retirement, both in the same slot. Pool should be active.
+		t.Run("registration in later transaction than retirement", func(t *testing.T) {
+			sqliteStore := setupTestDB(t)
+
+			// Create epoch data
+			epoch := models.Epoch{
+				EpochId:       10,
+				StartSlot:     0,
+				EraId:         1,
+				SlotLength:    1,
+				LengthInSlots: 43200,
+			}
+			if result := sqliteStore.DB().Create(&epoch); result.Error != nil {
+				t.Fatalf("failed to create epoch: %v", result.Error)
+			}
+
+			poolHash := []byte("pool_key_hash_01234567890123")
+
+			// Create a pool
+			pool := models.Pool{PoolKeyHash: poolHash}
+			if result := sqliteStore.DB().Create(&pool); result.Error != nil {
+				t.Fatalf("failed to create pool: %v", result.Error)
+			}
+
+			// Two transactions in the same slot with different block_index values
+			tx1 := models.Transaction{ID: 1, Slot: 1000, BlockIndex: 0, Hash: []byte("tx1_hash_12345678901234567890")}
+			if result := sqliteStore.DB().Create(&tx1); result.Error != nil {
+				t.Fatalf("failed to create tx1: %v", result.Error)
+			}
+			tx2 := models.Transaction{ID: 2, Slot: 1000, BlockIndex: 1, Hash: []byte("tx2_hash_12345678901234567890")}
+			if result := sqliteStore.DB().Create(&tx2); result.Error != nil {
+				t.Fatalf("failed to create tx2: %v", result.Error)
+			}
+
+			// Retirement cert in first transaction (lower block_index)
+			retCert := models.Certificate{
+				ID:            100,
+				TransactionID: tx1.ID,
+				Slot:          1000,
+				CertIndex:     0,
+			}
+			if result := sqliteStore.DB().Create(&retCert); result.Error != nil {
+				t.Fatalf("failed to create retirement cert: %v", result.Error)
+			}
+
+			// Registration cert in second transaction (higher block_index)
+			regCert := models.Certificate{
+				ID:            200,
+				TransactionID: tx2.ID,
+				Slot:          1000,
+				CertIndex:     0,
+			}
+			if result := sqliteStore.DB().Create(&regCert); result.Error != nil {
+				t.Fatalf("failed to create registration cert: %v", result.Error)
+			}
+
+			// Create retirement in first transaction
+			poolRet := models.PoolRetirement{
+				PoolID:        pool.ID,
+				PoolKeyHash:   poolHash,
+				AddedSlot:     1000,
+				Epoch:         10,
+				CertificateID: 100,
+			}
+			if result := sqliteStore.DB().Create(&poolRet); result.Error != nil {
+				t.Fatalf("failed to create pool retirement: %v", result.Error)
+			}
+
+			// Create registration in second transaction (higher block_index)
+			poolReg := models.PoolRegistration{
+				PoolID:        pool.ID,
+				PoolKeyHash:   poolHash,
+				AddedSlot:     1000,
+				CertificateID: 200,
+			}
+			if result := sqliteStore.DB().Create(&poolReg); result.Error != nil {
+				t.Fatalf("failed to create pool registration: %v", result.Error)
+			}
+
+			// Registration came in a later transaction (higher block_index),
+			// so pool should be active
+			hashes, err := sqliteStore.GetActivePoolKeyHashesAtSlot(1000, nil)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if len(hashes) != 1 {
+				t.Errorf("expected 1 hash (pool active after re-registration in later transaction), got %d", len(hashes))
+			}
+		})
+
+		// Test case: Retirement is in a later transaction (higher block_index)
+		// than registration, both in the same slot. Pool should be inactive.
+		t.Run("retirement in later transaction than registration", func(t *testing.T) {
+			sqliteStore := setupTestDB(t)
+
+			// Create epoch data - epoch 10 starts at slot 0
+			epoch := models.Epoch{
+				EpochId:       10,
+				StartSlot:     0,
+				EraId:         1,
+				SlotLength:    1,
+				LengthInSlots: 43200,
+			}
+			if result := sqliteStore.DB().Create(&epoch); result.Error != nil {
+				t.Fatalf("failed to create epoch: %v", result.Error)
+			}
+
+			poolHash := []byte("pool_key_hash_01234567890123")
+
+			// Create a pool
+			pool := models.Pool{PoolKeyHash: poolHash}
+			if result := sqliteStore.DB().Create(&pool); result.Error != nil {
+				t.Fatalf("failed to create pool: %v", result.Error)
+			}
+
+			// Two transactions in the same slot with different block_index values
+			tx1 := models.Transaction{ID: 1, Slot: 1000, BlockIndex: 0, Hash: []byte("tx1_hash_12345678901234567890")}
+			if result := sqliteStore.DB().Create(&tx1); result.Error != nil {
+				t.Fatalf("failed to create tx1: %v", result.Error)
+			}
+			tx2 := models.Transaction{ID: 2, Slot: 1000, BlockIndex: 1, Hash: []byte("tx2_hash_12345678901234567890")}
+			if result := sqliteStore.DB().Create(&tx2); result.Error != nil {
+				t.Fatalf("failed to create tx2: %v", result.Error)
+			}
+
+			// Registration cert in first transaction (lower block_index)
+			regCert := models.Certificate{
+				ID:            100,
+				TransactionID: tx1.ID,
+				Slot:          1000,
+				CertIndex:     0,
+			}
+			if result := sqliteStore.DB().Create(&regCert); result.Error != nil {
+				t.Fatalf("failed to create registration cert: %v", result.Error)
+			}
+
+			// Retirement cert in second transaction (higher block_index)
+			retCert := models.Certificate{
+				ID:            200,
+				TransactionID: tx2.ID,
+				Slot:          1000,
+				CertIndex:     0,
+			}
+			if result := sqliteStore.DB().Create(&retCert); result.Error != nil {
+				t.Fatalf("failed to create retirement cert: %v", result.Error)
+			}
+
+			// Create registration in first transaction
+			poolReg := models.PoolRegistration{
+				PoolID:        pool.ID,
+				PoolKeyHash:   poolHash,
+				AddedSlot:     1000,
+				CertificateID: 100,
+			}
+			if result := sqliteStore.DB().Create(&poolReg); result.Error != nil {
+				t.Fatalf("failed to create pool registration: %v", result.Error)
+			}
+
+			// Create retirement in second transaction (higher block_index)
+			// Retirement is for epoch 10, which has already started (slot 0)
+			poolRet := models.PoolRetirement{
+				PoolID:        pool.ID,
+				PoolKeyHash:   poolHash,
+				AddedSlot:     1000,
+				Epoch:         10,
+				CertificateID: 200,
+			}
+			if result := sqliteStore.DB().Create(&poolRet); result.Error != nil {
+				t.Fatalf("failed to create pool retirement: %v", result.Error)
+			}
+
+			// Retirement came in a later transaction (higher block_index)
+			// and retirement epoch (10) has started, so pool should be inactive
+			hashes, err := sqliteStore.GetActivePoolKeyHashesAtSlot(1000, nil)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if len(hashes) != 0 {
+				t.Errorf("expected 0 hashes (pool retired in later transaction), got %d", len(hashes))
+			}
+		})
+	})
 }
 
 // TestRestoreDrepStateAtSlot tests that DRep state is correctly restored during rollback
@@ -2161,7 +3026,7 @@ func TestPoolCascadeDelete(t *testing.T) {
 				t.Fatalf("failed to auto-migrate: %v", err)
 			}
 
-			poolHash := []byte("pool_key_hash_1234567890123456789012345678")
+			poolHash := []byte("pool_key_hash_01234567890123")
 
 			// Create a pool
 			pool := models.Pool{PoolKeyHash: poolHash}
@@ -2254,7 +3119,7 @@ func TestPoolCascadeDelete(t *testing.T) {
 				t.Fatalf("failed to auto-migrate: %v", err)
 			}
 
-			poolHash := []byte("pool_key_hash_1234567890123456789012345678")
+			poolHash := []byte("pool_key_hash_01234567890123")
 
 			// Create a pool
 			pool := models.Pool{PoolKeyHash: poolHash}
