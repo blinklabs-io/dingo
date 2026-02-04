@@ -2269,6 +2269,9 @@ func (ls *LedgerState) SetMempool(mempool MempoolProvider) {
 // forgeBlock creates a conway block with transactions from mempool
 // Also adds it to the primary chain
 func (ls *LedgerState) forgeBlock() {
+	// Track timing for latency metric - start at beginning of forging process
+	forgeStartTime := time.Now()
+
 	// Get current chain tip
 	currentTip := ls.chain.Tip()
 
@@ -2549,18 +2552,44 @@ func (ls *LedgerState) forgeBlock() {
 		return
 	}
 
+	// Calculate forging latency
+	forgingLatency := time.Since(forgeStartTime)
+
+	// Update forging metrics
+	ls.metrics.blocksForgedTotal.Inc()
+	ls.metrics.blockForgingLatency.Observe(forgingLatency.Seconds())
+
+	// Publish BlockForgedEvent for observability and monitoring
+	if ls.config.EventBus != nil {
+		ls.config.EventBus.Publish(
+			event.BlockForgedEventType,
+			event.NewEvent(
+				event.BlockForgedEventType,
+				event.BlockForgedEvent{
+					Slot:        ledgerBlock.SlotNumber(),
+					BlockNumber: ledgerBlock.BlockNumber(),
+					BlockHash:   ledgerBlock.Hash().Bytes(),
+					TxCount:     uint(len(transactionBodies)),
+					BlockSize:   uint(len(blockCbor)),
+					Timestamp:   time.Now(),
+				},
+			),
+		)
+	}
+
 	// Log the successful block creation
-	ls.config.Logger.Debug(
+	ls.config.Logger.Info(
 		"successfully forged and added conway block to primary chain",
 		"component", "ledger",
 		"slot", ledgerBlock.SlotNumber(),
 		"hash", ledgerBlock.Hash(),
 		"block_number", ledgerBlock.BlockNumber(),
 		"prev_hash", ledgerBlock.PrevHash(),
-		"block_size", blockSize,
+		"block_size", len(blockCbor),
+		"block_body_size", blockSize,
 		"tx_count", len(transactionBodies),
 		"total_memory", totalExUnits.Memory,
 		"total_steps", totalExUnits.Steps,
-		"block_cbor", hex.EncodeToString(blockCbor),
+		"forging_latency_ms", forgingLatency.Milliseconds(),
 	)
 }
