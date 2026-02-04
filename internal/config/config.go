@@ -171,6 +171,14 @@ type Config struct {
 	// After this many evolutions, a new operational certificate must be issued.
 	// Default: 62
 	MaxKESEvolutions uint64 `yaml:"maxKESEvolutions" envconfig:"DINGO_MAX_KES_EVOLUTIONS"`
+
+	// Block production configuration (SPO mode)
+	// Environment variables match cardano-node naming convention for compatibility
+	// Note: envconfig.Process("cardano", ...) adds "CARDANO_" prefix automatically
+	BlockProducer                 bool   `yaml:"blockProducer"       envconfig:"BLOCK_PRODUCER"`
+	ShelleyVRFKey                 string `yaml:"shelleyVrfKey"       envconfig:"SHELLEY_VRF_KEY"`
+	ShelleyKESKey                 string `yaml:"shelleyKesKey"       envconfig:"SHELLEY_KES_KEY"`
+	ShelleyOperationalCertificate string `yaml:"shelleyOperationalCertificate" envconfig:"SHELLEY_OPERATIONAL_CERTIFICATE"`
 }
 
 func (c *Config) ParseCmdlineArgs(programName string, args []string) error {
@@ -428,6 +436,26 @@ func LoadConfig(configFile string) (*Config, error) {
 	}
 	if globalConfig.RunMode == "" {
 		globalConfig.RunMode = RunModeServe
+	}
+
+	// Validate block producer configuration
+	if globalConfig.BlockProducer {
+		var missing []string
+		if globalConfig.ShelleyVRFKey == "" {
+			missing = append(missing, "shelleyVrfKey")
+		}
+		if globalConfig.ShelleyKESKey == "" {
+			missing = append(missing, "shelleyKesKey")
+		}
+		if globalConfig.ShelleyOperationalCertificate == "" {
+			missing = append(missing, "shelleyOperationalCertificate")
+		}
+		if len(missing) > 0 {
+			return nil, fmt.Errorf(
+				"blockProducer enabled but missing required key paths: %v",
+				missing,
+			)
+		}
 	}
 
 	// Set default CardanoConfig path based on network if not provided by user

@@ -18,6 +18,16 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 )
 
+func (d *Database) GetEpoch(
+	epochId uint64,
+	txn *Txn,
+) (*models.Epoch, error) {
+	if txn == nil {
+		return d.metadata.GetEpoch(epochId, nil)
+	}
+	return txn.db.metadata.GetEpoch(epochId, txn.Metadata())
+}
+
 func (d *Database) GetEpochsByEra(
 	eraId uint,
 	txn *Txn,

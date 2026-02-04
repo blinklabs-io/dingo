@@ -2203,6 +2203,119 @@ func (ls *LedgerState) GetCurrentPParams() lcommon.ProtocolParameters {
 	return ls.currentPParams
 }
 
+// CurrentEpoch returns the current epoch number.
+func (ls *LedgerState) CurrentEpoch() uint64 {
+	ls.RLock()
+	defer ls.RUnlock()
+	return ls.currentEpoch.EpochId
+}
+
+// EpochNonce returns the nonce for the given epoch.
+// The epoch nonce is used for VRF-based leader election.
+// Returns nil if the epoch nonce is not available (e.g., for Byron era).
+func (ls *LedgerState) EpochNonce(epoch uint64) []byte {
+	// Check current epoch under read lock; copy nonce if it matches
+	ls.RLock()
+	if epoch == ls.currentEpoch.EpochId {
+		if len(ls.currentEpoch.Nonce) == 0 {
+			ls.RUnlock()
+			return nil
+		}
+		nonce := make([]byte, len(ls.currentEpoch.Nonce))
+		copy(nonce, ls.currentEpoch.Nonce)
+		ls.RUnlock()
+		return nonce
+	}
+	ls.RUnlock()
+
+	// For historical epochs, look up in database without holding the lock
+	ep, err := ls.db.GetEpoch(epoch, nil)
+	if err != nil {
+		ls.config.Logger.Error(
+			"failed to look up epoch nonce",
+			"epoch", epoch,
+			"error", err,
+		)
+		return nil
+	}
+	if ep == nil || len(ep.Nonce) == 0 {
+		return nil
+	}
+	// Return a defensive copy so callers cannot mutate internal state
+	nonce := make([]byte, len(ep.Nonce))
+	copy(nonce, ep.Nonce)
+	return nonce
+}
+
+// SlotsPerEpoch returns the number of slots in an epoch for the current era.
+func (ls *LedgerState) SlotsPerEpoch() uint64 {
+	ls.RLock()
+	currentEra := ls.currentEra
+	ls.RUnlock()
+
+	if currentEra.EpochLengthFunc == nil {
+		return 0
+	}
+	_, epochLength, err := currentEra.EpochLengthFunc(
+		ls.config.CardanoNodeConfig,
+	)
+	if err != nil {
+		return 0
+	}
+	return uint64(epochLength) // #nosec G115 -- epoch length is always positive
+}
+
+// ActiveSlotCoeff returns the active slot coefficient (f parameter).
+// This is used in the Ouroboros Praos leader election probability.
+func (ls *LedgerState) ActiveSlotCoeff() float64 {
+	shelleyGenesis := ls.config.CardanoNodeConfig.ShelleyGenesis()
+	if shelleyGenesis == nil || shelleyGenesis.ActiveSlotsCoeff.Rat == nil {
+		return 0
+	}
+	rat := shelleyGenesis.ActiveSlotsCoeff.Rat
+	num := rat.Num().Int64()
+	denom := rat.Denom().Int64()
+	if denom == 0 {
+		return 0
+	}
+	return float64(num) / float64(denom)
+}
+
+// Database returns the underlying database for transaction operations.
+func (ls *LedgerState) Database() *database.Database {
+	return ls.db
+}
+
+// SlotsPerKESPeriod returns the number of slots in a KES period.
+func (ls *LedgerState) SlotsPerKESPeriod() uint64 {
+	shelleyGenesis := ls.config.CardanoNodeConfig.ShelleyGenesis()
+	if shelleyGenesis == nil {
+		return 0
+	}
+	slotsPerKESPeriod := shelleyGenesis.SlotsPerKESPeriod
+	if slotsPerKESPeriod < 0 {
+		return 0
+	}
+	return uint64(slotsPerKESPeriod) // #nosec G115 -- validated non-negative above
+}
+
+// CurrentSlot returns the current slot number based on wall-clock time.
+// Delegates to the internal slot clock.
+func (ls *LedgerState) CurrentSlot() (uint64, error) {
+	if ls.slotClock == nil {
+		return 0, errors.New("slot clock not initialized")
+	}
+	return ls.slotClock.CurrentSlot()
+}
+
+// NewView creates a new LedgerView for querying ledger state within a transaction.
+func (ls *LedgerState) NewView(txn *database.Txn) *LedgerView {
+	return &LedgerView{
+		ls:  ls,
+		txn: txn,
+	}
+}
+
 // TransactionByHash returns a transaction record by its hash.
 func (ls *LedgerState) TransactionByHash(
 	hash []byte,

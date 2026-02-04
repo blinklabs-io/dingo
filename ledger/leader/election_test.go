@@ -15,12 +15,12 @@
 package leader
 
 import (
+	"context"
 	"log/slog"
 	"testing"
 	"time"
 
 	"github.com/blinklabs-io/dingo/event"
-	"github.com/blinklabs-io/dingo/ledger/snapshot"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -28,25 +28,15 @@ import (
 
 // mockStakeProvider implements StakeDistributionProvider for testing
 type mockStakeProvider struct {
-	stakeDistribution *snapshot.StakeDistribution
-	poolStakes        map[string]uint64
-	totalStake        uint64
-	err               error
+	poolStakes map[string]uint64
+	totalStake uint64
+	err        error
 }
 
 func newMockStakeProvider() *mockStakeProvider {
 	return &mockStakeProvider{
 		poolStakes: make(map[string]uint64),
 	}
-}
-
-func (m *mockStakeProvider) GetStakeDistribution(
-	epoch uint64,
-) (*snapshot.StakeDistribution, error) {
-	if m.err != nil {
-		return nil, m.err
-	}
-	return m.stakeDistribution, nil
 }
 
 func (m *mockStakeProvider) GetPoolStake(
@@ -144,11 +134,11 @@ func TestElectionStartStop(t *testing.T) {
 	)
 
 	// Start should succeed
-	err := election.Start()
+	err := election.Start(context.Background())
 	require.NoError(t, err)
 
 	// Start again should be idempotent
-	err = election.Start()
+	err = election.Start(context.Background())
 	require.NoError(t, err)
 
 	// Stop should succeed
@@ -182,7 +172,7 @@ func TestElectionScheduleEarlyEpochs(t *testing.T) {
 		slog.Default(),
 	)
 
-	err := election.Start()
+	err := election.Start(context.Background())
 	require.NoError(t, err)
 	defer func() { _ = election.Stop() }()
 
@@ -212,7 +202,7 @@ func TestElectionZeroPoolStake(t *testing.T) {
 		slog.Default(),
 	)
 
-	err := election.Start()
+	err := election.Start(context.Background())
 	require.NoError(t, err)
 	defer func() { _ = election.Stop() }()
 
@@ -242,7 +232,7 @@ func TestElectionShouldProduceBlock(t *testing.T) {
 		slog.Default(),
 	)
 
-	err := election.Start()
+	err := election.Start(context.Background())
 	require.NoError(t, err)
 	defer func() { _ = election.Stop() }()
 
@@ -283,7 +273,7 @@ func TestElectionNextLeaderSlot(t *testing.T) {
 	assert.Equal(t, uint64(0), slot)
 	assert.False(t, found)
 
-	err := election.Start()
+	err := election.Start(context.Background())
 	require.NoError(t, err)
 	defer func() { _ = election.Stop() }()
 
@@ -315,7 +305,7 @@ func TestElectionEpochTransition(t *testing.T) {
 		slog.Default(),
 	)
 
-	err := election.Start()
+	err := election.Start(context.Background())
 	require.NoError(t, err)
 	defer func() { _ = election.Stop() }()
 
@@ -375,7 +365,7 @@ func TestElectionConcurrentAccess(t *testing.T) {
 		slog.Default(),
 	)
 
-	err := election.Start()
+	err := election.Start(context.Background())
 	require.NoError(t, err)
 	defer func() { _ = election.Stop() }()
 

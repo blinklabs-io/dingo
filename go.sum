@@ -126,6 +126,8 @@ github.com/bits-and-blooms/bitset v1.24.4 h1:95H15Og1clikBrKr/DuzMXkQzECs1M6hhoG
 github.com/bits-and-blooms/bitset v1.24.4/go.mod h1:7hO7Gc7Pp1vODcmWvKMRA9BNmbv6a/7QIWpPxHddWR8=
 github.com/blang/semver v3.5.1+incompatible h1:cQNTCjp13qL8KC3Nbxr/y2Bqb63oX6wdnnjpJbkM4JQ=
 github.com/blang/semver v3.5.1+incompatible/go.mod h1:kRBLl5iJ+tD4TcOOxsy/0fnwebNt5EWlYSAyrTnjyyk=
+github.com/blinklabs-io/bursa v0.14.0 h1:e+RFfKty3sU0xcgXStg6dRSEIwiJhIKMENLcRlGOzxg=
+github.com/blinklabs-io/bursa v0.14.0/go.mod h1:T61tWWJCgoQd/fLbpPa1+64x8ANXx+fEc3CjVeAqbM4=
 github.com/blinklabs-io/gouroboros v0.152.2 h1:w2OPBrg+a8bGgk046WvkQNiyn4Yglql7AN5hdurhDFY=
 github.com/blinklabs-io/gouroboros v0.152.2/go.mod h1:BXTv7xGWb0fDpUuRunVLhSvrDrvd+pkSMBpOligo5Ew=
 github.com/blinklabs-io/ouroboros-mock v0.9.0 h1:O4FhgxKt43RcZGcxRQAOV9GMF6F06qtpU76eFeBKWeQ=
@@ -463,6 +465,8 @@ github.com/stretchr/testify v1.11.1 h1:7s2iGBzp5EwR7/aIZr8ao5+dra3wiQyKjjFuvgVKu
 github.com/stretchr/testify v1.11.1/go.mod h1:wZwfW3scLgRK+23gO65QZefKpKQRnfz6sD981Nm4B6U=
 github.com/syndtr/goleveldb v1.0.1-0.20210819022825-2ae1ddf74ef7/go.mod h1:q4W45IWZaF22tdD+VEXcAWRA037jwmWEB5VWYORlTpc=
 github.com/tidwall/pretty v1.0.0/go.mod h1:XNkn88O1ChpSDQmQeStsy+sBenx6DDtFZJxhVysOjyk=
+github.com/tyler-smith/go-bip39 v1.1.0 h1:5eUemwrMargf3BSLRRCalXT93Ns6pQJIjYQN2nyfOP8=
+github.com/tyler-smith/go-bip39 v1.1.0/go.mod h1:gUYDtqQw1JS3ZJ8UWVcGTGqqr6YIN3CWg+kkNaLt55U=
 github.com/urfave/cli v1.22.17 h1:SYzXoiPfQjHBbkYxbew5prZHS1TOLT3ierW8SYLqtVQ=
 github.com/urfave/cli v1.22.17/go.mod h1:b0ht0aqgH/6pBYzzxURyrM4xXNgsoT/n2ZzwQiEhNVo=
 github.com/utxorpc/go-codegen v0.18.1 h1:2eenzXCkqvB2+g8MCq70MBR6koWs9CeTihZ0AqUvLDY=

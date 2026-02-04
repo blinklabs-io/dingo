@@ -16,8 +16,10 @@ package dingo
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -28,12 +30,16 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/ledger"
+	"github.com/blinklabs-io/dingo/ledger/forging"
+	"github.com/blinklabs-io/dingo/ledger/leader"
 	"github.com/blinklabs-io/dingo/ledger/snapshot"
 	"github.com/blinklabs-io/dingo/mempool"
 	ouroborosPkg "github.com/blinklabs-io/dingo/ouroboros"
 	"github.com/blinklabs-io/dingo/peergov"
 	"github.com/blinklabs-io/dingo/utxorpc"
 	ouroboros "github.com/blinklabs-io/gouroboros"
+	gledger "github.com/blinklabs-io/gouroboros/ledger"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
 
 type Node struct {
@@ -49,6 +55,8 @@ type Node struct {
 	snapshotMgr    *snapshot.Manager
 	utxorpc        *utxorpc.Utxorpc
 	ouroboros      *ouroborosPkg.Ouroboros
+	blockForger    *forging.BlockForger
+	leaderElection *leader.Election
 	shutdownFuncs  []func(context.Context) error
 	config         Config
 	ctx            context.Context
@@ -406,6 +414,22 @@ func (n *Node) Run(ctx context.Context) error {
 		}
 	})
 
+	// Initialize block forger if production mode is enabled
+	if n.config.blockProducer {
+		//nolint:contextcheck // n.ctx is the node's lifecycle context, correct parent for forger
+		if err := n.initBlockForger(n.ctx); err != nil {
+			return fmt.Errorf("failed to initialize block forger: %w", err)
+		}
+		started = append(started, func() {
+			if n.blockForger != nil {
+				n.blockForger.Stop()
+			}
+			if n.leaderElection != nil {
+				_ = n.leaderElection.Stop()
+			}
+		})
+	}
+
 	// All components started successfully
 	success = true
 
@@ -440,6 +464,21 @@ func (n *Node) shutdown() error {
 
 	// Phase 1: Stop accepting new work
 	n.config.logger.Debug("shutdown phase 1: stopping new work")
+
+	// Stop block forger first to prevent new blocks
+	if n.blockForger != nil {
+		n.blockForger.Stop()
+	}
+
+	// Stop leader election to clean up resources
+	if n.leaderElection != nil {
+		if stopErr := n.leaderElection.Stop(); stopErr != nil {
+			err = errors.Join(
+				err,
+				fmt.Errorf("leader election shutdown: %w", stopErr),
+			)
+		}
+	}
 
 	if n.chainSelector != nil {
 		n.chainSelector.Stop()
@@ -520,4 +559,252 @@ func (n *Node) shutdown() error {
 
 	n.config.logger.Debug("graceful shutdown complete")
 	return err
+}
+
+// initBlockForger initializes the block forger for production mode.
+// This requires VRF, KES, and OpCert key files to be configured.
+func (n *Node) initBlockForger(ctx context.Context) error {
+	// Load pool credentials from configured key files
+	creds := forging.NewPoolCredentials()
+	if err := creds.LoadFromFiles(
+		n.config.shelleyVRFKey,
+		n.config.shelleyKESKey,
+		n.config.shelleyOperationalCertificate,
+	); err != nil {
+		return fmt.Errorf("failed to load pool credentials: %w", err)
+	}
+
+	// Validate the operational certificate matches the KES key
+	if err := creds.ValidateOpCert(); err != nil {
+		return fmt.Errorf("invalid operational certificate: %w", err)
+	}
+
+	n.config.logger.Info(
+		"loaded pool credentials for block production",
+		"pool_id", creds.GetPoolID().String(),
+		"opcert_expiry_period", creds.OpCertExpiryPeriod(),
+	)
+
+	// Create mempool adapter for the forging package
+	mempoolAdapter := &mempoolAdapter{mempool: n.mempool}
+
+	// Create epoch nonce adapter for the builder
+	epochNonceAdapter := &epochNonceAdapter{ledgerState: n.ledgerState}
+
+	// Create block builder
+	builder, err := forging.NewDefaultBlockBuilder(forging.BlockBuilderConfig{
+		Logger:          n.config.logger,
+		Mempool:         mempoolAdapter,
+		PParamsProvider: n.ledgerState,
+		ChainTip:        n.chainManager.PrimaryChain(),
+		EpochNonce:      epochNonceAdapter,
+		Credentials:     creds,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create block builder: %w", err)
+	}
+
+	// Create block broadcaster (uses the chain manager and event bus)
+	broadcaster := &blockBroadcaster{
+		chain:    n.chainManager.PrimaryChain(),
+		eventBus: n.eventBus,
+		logger:   n.config.logger,
+	}
+
+	// Create the leader election component
+	// Convert pool ID from PoolId to PoolKeyHash (both are [28]byte)
+	poolID := creds.GetPoolID()
+	var poolKeyHash lcommon.PoolKeyHash
+	copy(poolKeyHash[:], poolID[:])
+
+	// Create adapters for the providers that leader.Election needs
+	stakeProvider := &stakeDistributionAdapter{ledgerState: n.ledgerState}
+	epochProvider := &epochInfoAdapter{ledgerState: n.ledgerState}
+
+	// Get VRF secret key from credentials
+	vrfSKey := creds.GetVRFSKey()
+
+	// Create leader election with real stake distribution
+	election := leader.NewElection(
+		poolKeyHash,
+		vrfSKey,
+		stakeProvider,
+		epochProvider,
+		n.eventBus,
+		n.config.logger,
+	)
+
+	// Start leader election (subscribes to epoch transitions)
+	if err := election.Start(ctx); err != nil {
+		return fmt.Errorf("failed to start leader election: %w", err)
+	}
+
+	// Store election for cleanup during shutdown
+	n.leaderElection = election
+
+	// Create slot clock adapter for the forger
+	slotClock := &slotClockAdapter{ledgerState: n.ledgerState}
+
+	// Create the block forger with the real leader election
+	forger, err := forging.NewBlockForger(forging.ForgerConfig{
+		Mode:             forging.ModeProduction,
+		Logger:           n.config.logger,
+		Credentials:      creds,
+		LeaderChecker:    election,
+		BlockBuilder:     builder,
+		BlockBroadcaster: broadcaster,
+		SlotClock:        slotClock,
+	})
+	if err != nil {
+		// Stop election to prevent goroutine leak
+		_ = election.Stop()
+		return fmt.Errorf("failed to create block forger: %w", err)
+	}
+
+	// Start the forger with the passed context
+	if err := forger.Start(ctx); err != nil {
+		// Stop election to prevent goroutine leak
+		_ = election.Stop()
+		return fmt.Errorf("failed to start block forger: %w", err)
+	}
+
+	n.blockForger = forger
+	n.config.logger.Info(
+		"block forger started in production mode with leader election",
+		"pool_id", poolID.String(),
+	)
+
+	return nil
+}
+
+// mempoolAdapter adapts the mempool.Mempool to forging.MempoolProvider.
+type mempoolAdapter struct {
+	mempool *mempool.Mempool
+}
+
+func (a *mempoolAdapter) Transactions() []forging.MempoolTransaction {
+	txs := a.mempool.Transactions()
+	result := make([]forging.MempoolTransaction, len(txs))
+	for i, tx := range txs {
+		result[i] = forging.MempoolTransaction{
+			Hash: tx.Hash,
+			Cbor: tx.Cbor,
+			Type: tx.Type,
+		}
+	}
+	return result
+}
+
+// blockBroadcaster implements forging.BlockBroadcaster using the chain manager.
+type blockBroadcaster struct {
+	chain    *chain.Chain
+	eventBus *event.EventBus
+	logger   *slog.Logger
+}
+
+func (b *blockBroadcaster) AddBlock(
+	block gledger.Block,
+	_ []byte,
+) error {
+	// Add block to the chain (CBOR is stored internally by the block)
+	if err := b.chain.AddBlock(block, nil); err != nil {
+		return fmt.Errorf("failed to add block to chain: %w", err)
+	}
+
+	b.logger.Info(
+		"block added to chain",
+		"slot", block.SlotNumber(),
+		"hash", block.Hash(),
+		"block_number", block.BlockNumber(),
+	)
+
+	// chain.AddBlock already publishes ChainUpdateEventType, so subscribers
+	// (block propagation, ledger updates, etc.) are notified automatically.
+
+	return nil
+}
+
+// stakeDistributionAdapter adapts ledger.LedgerState to leader.StakeDistributionProvider.
+type stakeDistributionAdapter struct {
+	ledgerState *ledger.LedgerState
+}
+
+func (a *stakeDistributionAdapter) GetPoolStake(
+	epoch uint64,
+	poolKeyHash []byte,
+) (uint64, error) {
+	txn := a.ledgerState.Database().Transaction(false)
+	var stake uint64
+	err := txn.Do(func(txn *database.Txn) error {
+		view := a.ledgerState.NewView(txn)
+		dist, err := view.GetStakeDistribution(epoch)
+		if err != nil {
+			return err
+		}
+		stake = dist.PoolStakes[hex.EncodeToString(poolKeyHash)]
+		return nil
+	})
+	return stake, err
+}
+
+func (a *stakeDistributionAdapter) GetTotalActiveStake(epoch uint64) (uint64, error) {
+	txn := a.ledgerState.Database().Transaction(false)
+	var stake uint64
+	err := txn.Do(func(txn *database.Txn) error {
+		view := a.ledgerState.NewView(txn)
+		dist, err := view.GetStakeDistribution(epoch)
+		if err != nil {
+			return err
+		}
+		stake = dist.TotalStake
+		return nil
+	})
+	return stake, err
+}
+
+// epochInfoAdapter adapts ledger.LedgerState to leader.EpochInfoProvider.
+type epochInfoAdapter struct {
+	ledgerState *ledger.LedgerState
+}
+
+func (a *epochInfoAdapter) CurrentEpoch() uint64 {
+	return a.ledgerState.CurrentEpoch()
+}
+
+func (a *epochInfoAdapter) EpochNonce(epoch uint64) []byte {
+	return a.ledgerState.EpochNonce(epoch)
+}
+
+func (a *epochInfoAdapter) SlotsPerEpoch() uint64 {
+	return a.ledgerState.SlotsPerEpoch()
+}
+
+func (a *epochInfoAdapter) ActiveSlotCoeff() float64 {
+	return a.ledgerState.ActiveSlotCoeff()
+}
+
+// slotClockAdapter adapts ledger.LedgerState to forging.SlotClockProvider.
+type slotClockAdapter struct {
+	ledgerState *ledger.LedgerState
+}
+
+func (a *slotClockAdapter) CurrentSlot() (uint64, error) {
+	return a.ledgerState.CurrentSlot()
+}
+
+func (a *slotClockAdapter) SlotsPerKESPeriod() uint64 {
+	return a.ledgerState.SlotsPerKESPeriod()
+}
+
+// epochNonceAdapter adapts ledger.LedgerState to forging.EpochNonceProvider.
+type epochNonceAdapter struct {
+	ledgerState *ledger.LedgerState
+}
+
+func (a *epochNonceAdapter) CurrentEpoch() uint64 {
+	return a.ledgerState.CurrentEpoch()
+}
+
+func (a *epochNonceAdapter) EpochNonce(epoch uint64) []byte {
+	return a.ledgerState.EpochNonce(epoch)
 }

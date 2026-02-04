@@ -15,11 +15,33 @@
 package sqlite
 
 import (
+	"errors"
 	"strconv"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
+	"gorm.io/gorm"
 )
+
+// GetEpoch returns a single epoch by its ID, or nil if not found.
+func (d *MetadataStoreSqlite) GetEpoch(
+	epochId uint64,
+	txn types.Txn,
+) (*models.Epoch, error) {
+	var ret models.Epoch
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return nil, err
+	}
+	result := db.Where("epoch_id = ?", epochId).First(&ret)
+	if result.Error != nil {
+		if errors.Is(result.Error, gorm.ErrRecordNotFound) {
+			return nil, nil
+		}
+		return nil, result.Error
+	}
+	return &ret, nil
+}
 
 // GetEpochsByEra returns the list of epochs by era
 func (d *MetadataStoreSqlite) GetEpochsByEra(

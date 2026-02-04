@@ -38,7 +38,7 @@ var (
 	ErrOpCertNotLoaded  = errors.New("operational certificate not loaded")
 	ErrAlreadyRunning   = errors.New("keystore already running")
 	ErrNotRunning       = errors.New("keystore not running")
-	ErrInsecureFileMode = errors.New("insecure file permissions")
+	ErrInsecureFileMode = errors.New("insecure file mode")
 )
 
 // OpCert represents an operational certificate that binds a KES key to a pool.
@@ -135,22 +135,9 @@ func NewKeyStore(config KeyStoreConfig) *KeyStore {
 
 // LoadFromFiles loads all pool credentials from the configured file paths.
 // Parses cardano-cli format key files.
-// Security: Verifies file permissions are not world-readable.
 func (ks *KeyStore) LoadFromFiles() error {
 	ks.mu.Lock()
 	defer ks.mu.Unlock()
-
-	// Check file permissions for all key files
-	paths := []string{
-		ks.config.VRFSKeyPath,
-		ks.config.KESSKeyPath,
-		ks.config.OpCertPath,
-	}
-	for _, path := range paths {
-		if err := checkKeyFilePermissions(path); err != nil {
-			return fmt.Errorf("security check failed for %s: %w", path, err)
-		}
-	}
 
 	// Load VRF signing key
 	vrfKey, err := loadKeyFromFile(ks.config.VRFSKeyPath)
@@ -186,8 +173,8 @@ func (ks *KeyStore) LoadFromFiles() error {
 	}
 	ks.kesVKey = kesKey.VKey
 
-	// Load operational certificate
-	opCertKey, err := loadKeyFromFile(ks.config.OpCertPath)
+	// Load operational certificate (no permission check - OpCerts are public data)
+	opCertKey, err := loadOpCertFromFile(ks.config.OpCertPath)
 	if err != nil {
 		return fmt.Errorf("failed to load operational certificate: %w", err)
 	}

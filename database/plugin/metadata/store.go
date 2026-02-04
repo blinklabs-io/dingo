@@ -247,6 +247,10 @@ type MetadataStore interface {
 	// GetEpochsByEra retrieves all epochs for a given era.
 	GetEpochsByEra(uint, types.Txn) ([]models.Epoch, error)
 
+	// GetEpoch retrieves a single epoch by its ID.
+	// Returns nil if the epoch is not found.
+	GetEpoch(uint64, types.Txn) (*models.Epoch, error)
+
 	// GetEpochs retrieves all epochs.
 	GetEpochs(types.Txn) ([]models.Epoch, error)
 

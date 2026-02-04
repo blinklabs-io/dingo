@@ -22,20 +22,17 @@ import (
 	"sync"
 
 	"github.com/blinklabs-io/dingo/event"
-	"github.com/blinklabs-io/dingo/ledger/snapshot"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
 
 // StakeDistributionProvider provides stake distribution data for leader election.
 type StakeDistributionProvider interface {
-	// GetStakeDistribution returns the stake distribution for the given epoch.
-	// For leader election, this should return the "Go" snapshot (epoch - 2).
-	GetStakeDistribution(epoch uint64) (*snapshot.StakeDistribution, error)
-
 	// GetPoolStake returns the stake for a specific pool in the given epoch.
+	// For leader election, this should query the "go" snapshot (epoch - 2).
 	GetPoolStake(epoch uint64, poolKeyHash []byte) (uint64, error)
 
 	// GetTotalActiveStake returns the total active stake for the given epoch.
+	// For leader election, this should query the "go" snapshot (epoch - 2).
 	GetTotalActiveStake(epoch uint64) (uint64, error)
 }
 
@@ -69,6 +66,7 @@ type Election struct {
 	schedule       *Schedule
 	running        bool
 	cancel         context.CancelFunc
+	stopCh         chan struct{} // signals the monitoring goroutine to exit
 	subscriptionId event.EventSubscriberId
 }
 
@@ -95,7 +93,9 @@ func NewElection(
 }
 
 // Start begins listening for epoch transitions and maintaining the schedule.
-func (e *Election) Start() error {
+// The provided context controls the election's lifecycle. When the context is
+// canceled, the election will automatically stop and clean up resources.
+func (e *Election) Start(ctx context.Context) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
@@ -103,9 +103,10 @@ func (e *Election) Start() error {
 		return nil
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(ctx)
 	e.cancel = cancel
 	e.running = true
+	e.stopCh = make(chan struct{})
 
 	// Calculate initial schedule
 	if err := e.refreshScheduleUnsafe(ctx); err != nil {
@@ -140,6 +141,18 @@ func (e *Election) Start() error {
 		},
 	)
 
+	// Monitor context cancellation to automatically stop.
+	// The goroutine exits when either the context is canceled or Stop() is called.
+	stopCh := e.stopCh
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = e.Stop()
+		case <-stopCh:
+			// Stop() was called directly, goroutine should exit
+		}
+	}()
+
 	e.logger.Info(
 		"leader election started",
 		"component", "leader",
@@ -158,6 +171,12 @@ func (e *Election) Stop() error {
 		return nil
 	}
 
+	// Signal the monitoring goroutine to exit before canceling context.
+	// This prevents the goroutine from calling Stop() again.
+	if e.stopCh != nil {
+		close(e.stopCh)
+		e.stopCh = nil
+	}
 	if e.cancel != nil {
 		e.cancel()
 	}

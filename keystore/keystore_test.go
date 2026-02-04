@@ -29,6 +29,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func isWindows() bool {
+	return runtime.GOOS == "windows"
+}
+
 // Sample test keys from config/cardano/devnet/keys/
 const (
 	testVRFSKeyJSON = `{
@@ -52,12 +56,6 @@ const (
 
 func setupTestKeys(t *testing.T) (string, string, string) {
 	t.Helper()
-
-	// On Windows, bypass ACL checks since they're not implemented.
-	// Tests verify key loading functionality, not Windows ACL verification.
-	if runtime.GOOS == "windows" {
-		t.Setenv("DINGO_ALLOW_INSECURE_KEY_PERMS", "true")
-	}
 
 	tmpDir := t.TempDir()
 
@@ -241,39 +239,6 @@ func TestOpCertValidation(t *testing.T) {
 
 	remaining = ks.PeriodsRemaining(100)
 	assert.Equal(t, uint64(0), remaining)
-}
-
-func TestSecurityFilePermissions(t *testing.T) {
-	tmpDir := t.TempDir()
-
-	// Create a file with secure permissions (0600)
-	securePath := filepath.Join(tmpDir, "secure.key")
-	require.NoError(t, os.WriteFile(securePath, []byte("test"), 0o600))
-
-	if runtime.GOOS == "windows" {
-		// On Windows, ACL verification is not implemented, so it fails-closed.
-		// Test that it fails by default and passes with the bypass env var.
-		err := checkKeyFilePermissions(securePath)
-		assert.ErrorIs(t, err, ErrInsecureFileMode, "Windows should fail-closed without env var")
-
-		// Test that the bypass env var works
-		t.Setenv("DINGO_ALLOW_INSECURE_KEY_PERMS", "true")
-		err = checkKeyFilePermissions(securePath)
-		assert.NoError(t, err, "Windows should pass with bypass env var")
-		return
-	}
-
-	// Unix permission checks
-	err := checkKeyFilePermissions(securePath)
-	assert.NoError(t, err, "secure file should pass permission check")
-
-	// Create a file with insecure permissions (world-readable)
-	insecurePath := filepath.Join(tmpDir, "insecure.key")
-	require.NoError(t, os.WriteFile(insecurePath, []byte("test"), 0o644))
-
-	err = checkKeyFilePermissions(insecurePath)
-	assert.Error(t, err, "insecure file should fail permission check")
-	assert.ErrorIs(t, err, ErrInsecureFileMode)
 }
 
 // mockSlotClock implements SlotClock for testing.
@@ -466,4 +431,38 @@ func TestExpiryWarningThresholds(t *testing.T) {
 	assert.Equal(t, uint64(3), thresholds.Critical)
 	assert.Equal(t, uint64(7), thresholds.Warning)
 	assert.Equal(t, uint64(14), thresholds.Info)
+}
+
+func TestInsecureFileModeUnix(t *testing.T) {
+	if isWindows() {
+		t.Skip("Unix permission test; see TestInsecureFileModeWindows for Windows DACL test")
+	}
+
+	tmpDir := t.TempDir()
+
+	vrfPath := filepath.Join(tmpDir, "vrf.skey")
+	kesPath := filepath.Join(tmpDir, "kes.skey")
+	opCertPath := filepath.Join(tmpDir, "opcert.cert")
+
+	// Write files first, then explicitly set permissions with os.Chmod
+	// to avoid umask interference with os.WriteFile permissions
+	require.NoError(t, os.WriteFile(vrfPath, []byte(testVRFSKeyJSON), 0o600))
+	require.NoError(t, os.WriteFile(kesPath, []byte(testKESSKeyJSON), 0o600))
+	require.NoError(t, os.WriteFile(opCertPath, []byte(testOpCertJSON), 0o600))
+
+	// Set VRF key to insecure permissions (0644) after creation
+	require.NoError(t, os.Chmod(vrfPath, 0o644))
+	require.NoError(t, os.Chmod(kesPath, 0o600))
+	require.NoError(t, os.Chmod(opCertPath, 0o600))
+
+	config := KeyStoreConfig{
+		VRFSKeyPath: vrfPath,
+		KESSKeyPath: kesPath,
+		OpCertPath:  opCertPath,
+	}
+
+	ks := NewKeyStore(config)
+	err := ks.LoadFromFiles()
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrInsecureFileMode)
 }
