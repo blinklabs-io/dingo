@@ -28,6 +28,7 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/ledger"
+	"github.com/blinklabs-io/dingo/ledger/snapshot"
 	"github.com/blinklabs-io/dingo/mempool"
 	ouroborosPkg "github.com/blinklabs-io/dingo/ouroboros"
 	"github.com/blinklabs-io/dingo/peergov"
@@ -45,6 +46,7 @@ type Node struct {
 	chainManager   *chain.ChainManager
 	db             *database.Database
 	ledgerState    *ledger.LedgerState
+	snapshotMgr    *snapshot.Manager
 	utxorpc        *utxorpc.Utxorpc
 	ouroboros      *ouroborosPkg.Ouroboros
 	shutdownFuncs  []func(context.Context) error
@@ -207,6 +209,16 @@ func (n *Node) Run(ctx context.Context) error {
 		return fmt.Errorf("failed to start ledger: %w", err)
 	}
 	started = append(started, func() { n.ledgerState.Close() })
+	// Initialize and start snapshot manager for stake snapshot capture
+	n.snapshotMgr = snapshot.NewManager(
+		n.db,
+		n.eventBus,
+		n.config.logger,
+	)
+	if err := n.snapshotMgr.Start(); err != nil { //nolint:contextcheck
+		return fmt.Errorf("failed to start snapshot manager: %w", err)
+	}
+	started = append(started, func() { _ = n.snapshotMgr.Stop() })
 	// Initialize mempool
 	n.mempool = mempool.NewMempool(mempool.MempoolConfig{
 		MempoolCapacity: n.config.mempoolCapacity,
@@ -435,6 +447,15 @@ func (n *Node) shutdown() error {
 
 	if n.peerGov != nil {
 		n.peerGov.Stop()
+	}
+
+	if n.snapshotMgr != nil {
+		if stopErr := n.snapshotMgr.Stop(); stopErr != nil {
+			err = errors.Join(
+				err,
+				fmt.Errorf("snapshot manager shutdown: %w", stopErr),
+			)
+		}
 	}
 
 	if n.utxorpc != nil {
