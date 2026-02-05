@@ -66,3 +66,9 @@ func WithTimeout(timeout time.Duration) BlobStoreS3OptionFunc {
 		b.timeout = timeout
 	}
 }
+
+func WithEndpoint(endpoint string) BlobStoreS3OptionFunc {
+	return func(b *BlobStoreS3) {
+		b.endpoint = endpoint
+	}
+}

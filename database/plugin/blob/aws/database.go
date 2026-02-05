@@ -42,6 +42,7 @@ type BlobStoreS3 struct {
 	logger        *S3Logger
 	client        *s3.Client
 	startupCancel context.CancelFunc
+	endpoint      string
 	bucket        string
 	prefix        string
 	region        string
@@ -763,6 +764,10 @@ func (d *BlobStoreS3) Start() error {
 	// Override region if specified
 	if d.region != "" {
 		awsCfg.Region = d.region
+	}
+
+	if d.endpoint != "" {
+		awsCfg.BaseEndpoint = &d.endpoint
 	}
 
 	client := s3.NewFromConfig(awsCfg)

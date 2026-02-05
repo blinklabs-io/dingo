@@ -33,6 +33,8 @@ database:
       # Path prefix within the bucket
       prefix: ""
     s3:
+      # AWS Endpoint
+      endpoint: ""
       # AWS S3 bucket name
       bucket: ""
       # AWS region
