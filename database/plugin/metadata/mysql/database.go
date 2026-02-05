@@ -27,6 +27,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/go-sql-driver/mysql"
+	sloggorm "github.com/orandin/slog-gorm"
 	"github.com/prometheus/client_golang/prometheus"
 	gormmysql "gorm.io/driver/mysql"
 	"gorm.io/gorm"
@@ -173,6 +174,12 @@ func (d *MetadataStoreMysql) init() error {
 	return nil
 }
 
+func (d *MetadataStoreMysql) gormLogger() gormlogger.Interface {
+	return sloggorm.New(
+		sloggorm.WithHandler(d.logger.With("component", "gorm").Handler()),
+	)
+}
+
 // AutoMigrate wraps the gorm AutoMigrate
 func (d *MetadataStoreMysql) AutoMigrate(dst ...any) error {
 	return d.DB().AutoMigrate(dst...)
@@ -222,7 +229,7 @@ func (d *MetadataStoreMysql) Start() error {
 	metadataDb, err := gorm.Open(
 		gormmysql.Open(dsn),
 		&gorm.Config{
-			Logger:                 gormlogger.Discard,
+			Logger:                 d.gormLogger(),
 			SkipDefaultTransaction: true,
 			PrepareStmt:            true,
 		},
@@ -235,7 +242,7 @@ func (d *MetadataStoreMysql) Start() error {
 				metadataDb, err = gorm.Open(
 					gormmysql.Open(dsn),
 					&gorm.Config{
-						Logger:                 gormlogger.Discard,
+						Logger:                 d.gormLogger(),
 						SkipDefaultTransaction: true,
 						PrepareStmt:            true,
 					},
@@ -298,7 +305,7 @@ func (d *MetadataStoreMysql) ensureDatabaseExists(
 	adminDb, err := gorm.Open(
 		gormmysql.Open(adminDsn),
 		&gorm.Config{
-			Logger:                 gormlogger.Discard,
+			Logger:                 d.gormLogger(),
 			SkipDefaultTransaction: true,
 			PrepareStmt:            true,
 		},

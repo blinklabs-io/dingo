@@ -25,6 +25,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
+	sloggorm "github.com/orandin/slog-gorm"
 	"github.com/prometheus/client_golang/prometheus"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
@@ -173,6 +174,12 @@ func (d *MetadataStorePostgres) init() error {
 	return nil
 }
 
+func (d *MetadataStorePostgres) gormLogger() gormlogger.Interface {
+	return sloggorm.New(
+		sloggorm.WithHandler(d.logger.With("component", "gorm").Handler()),
+	)
+}
+
 // AutoMigrate wraps the gorm AutoMigrate
 func (d *MetadataStorePostgres) AutoMigrate(dst ...any) error {
 	return d.DB().AutoMigrate(dst...)
@@ -200,7 +207,7 @@ func (d *MetadataStorePostgres) Start() error {
 	metadataDb, err := gorm.Open(
 		postgres.Open(dsn),
 		&gorm.Config{
-			Logger:                 gormlogger.Discard,
+			Logger:                 d.gormLogger(),
 			SkipDefaultTransaction: true,
 			PrepareStmt:            true,
 		},

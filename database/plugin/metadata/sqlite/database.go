@@ -28,6 +28,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/glebarez/sqlite"
+	sloggorm "github.com/orandin/slog-gorm"
 	"github.com/prometheus/client_golang/prometheus"
 	"gorm.io/gorm"
 	gormlogger "gorm.io/gorm/logger"
@@ -145,6 +146,12 @@ func (d *MetadataStoreSqlite) init() error {
 	return nil
 }
 
+func (d *MetadataStoreSqlite) gormLogger() gormlogger.Interface {
+	return sloggorm.New(
+		sloggorm.WithHandler(d.logger.With("component", "gorm").Handler()),
+	)
+}
+
 func (d *MetadataStoreSqlite) runVacuum() error {
 	d.timerMutex.Lock()
 	closed := d.closed
@@ -211,7 +218,7 @@ func (d *MetadataStoreSqlite) Start() error {
 				"file::memory:?cache=shared&_pragma=busy_timeout(30000)&_pragma=foreign_keys(1)",
 			),
 			&gorm.Config{
-				Logger:                 gormlogger.Discard,
+				Logger:                 d.gormLogger(),
 				SkipDefaultTransaction: true,
 				PrepareStmt:            true,
 			},
@@ -264,7 +271,7 @@ func (d *MetadataStoreSqlite) Start() error {
 		metadataDb, err = gorm.Open(
 			sqlite.Open(connStr),
 			&gorm.Config{
-				Logger:                 gormlogger.Discard,
+				Logger:                 d.gormLogger(),
 				SkipDefaultTransaction: true,
 				PrepareStmt:            true,
 			},
