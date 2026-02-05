@@ -499,6 +499,10 @@ func (ls *LedgerState) Start(ctx context.Context) error {
 			BlockfetchEventType,
 			ls.handleEventBlockfetch,
 		)
+		ls.config.EventBus.SubscribeFunc(
+			chain.ChainUpdateEventType,
+			ls.handleEventChainUpdate,
+		)
 	}
 	// Schedule periodic process to purge consumed UTxOs outside of the rollback window
 	ls.scheduleCleanupConsumedUtxos()
