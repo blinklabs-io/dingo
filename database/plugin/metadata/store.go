@@ -358,6 +358,82 @@ type MetadataStore interface {
 	// DeleteTransactionsAfterSlot removes transaction records added after the given slot.
 	// Child records are automatically removed via CASCADE constraints.
 	DeleteTransactionsAfterSlot(uint64, types.Txn) error
+
+	// Governance methods
+
+	// GetGovernanceProposal retrieves a governance proposal by transaction hash and action index.
+	GetGovernanceProposal(
+		[]byte, // txHash
+		uint32, // actionIndex
+		types.Txn,
+	) (*models.GovernanceProposal, error)
+
+	// GetActiveGovernanceProposals retrieves all governance proposals that haven't expired.
+	GetActiveGovernanceProposals(
+		uint64, // epoch
+		types.Txn,
+	) ([]*models.GovernanceProposal, error)
+
+	// SetGovernanceProposal creates or updates a governance proposal.
+	SetGovernanceProposal(
+		*models.GovernanceProposal,
+		types.Txn,
+	) error
+
+	// GetGovernanceVotes retrieves all votes for a governance proposal.
+	GetGovernanceVotes(
+		uint, // proposalID
+		types.Txn,
+	) ([]*models.GovernanceVote, error)
+
+	// SetGovernanceVote records a vote on a governance proposal.
+	SetGovernanceVote(
+		*models.GovernanceVote,
+		types.Txn,
+	) error
+
+	// Committee methods
+
+	// GetCommitteeMember retrieves a committee member by cold key.
+	GetCommitteeMember(
+		[]byte, // coldKey
+		types.Txn,
+	) (*models.AuthCommitteeHot, error)
+
+	// GetActiveCommitteeMembers retrieves all active committee members.
+	GetActiveCommitteeMembers(types.Txn) ([]*models.AuthCommitteeHot, error)
+
+	// IsCommitteeMemberResigned checks if a committee member has resigned.
+	IsCommitteeMemberResigned(
+		[]byte, // coldKey
+		types.Txn,
+	) (bool, error)
+
+	// Constitution methods
+
+	// GetConstitution retrieves the current constitution.
+	GetConstitution(types.Txn) (*models.Constitution, error)
+
+	// SetConstitution sets the constitution.
+	SetConstitution(
+		*models.Constitution,
+		types.Txn,
+	) error
+
+	// DeleteConstitutionsAfterSlot removes constitutions added after the given slot
+	// and clears deleted_slot for any that were soft-deleted after that slot.
+	// This is used during chain rollbacks.
+	DeleteConstitutionsAfterSlot(uint64, types.Txn) error
+
+	// Governance rollback methods
+
+	// DeleteGovernanceProposalsAfterSlot removes proposals added after the given slot
+	// and clears deleted_slot for any that were soft-deleted after that slot.
+	DeleteGovernanceProposalsAfterSlot(uint64, types.Txn) error
+
+	// DeleteGovernanceVotesAfterSlot removes votes added after the given slot
+	// and clears deleted_slot for any that were soft-deleted after that slot.
+	DeleteGovernanceVotesAfterSlot(uint64, types.Txn) error
 }
 
 // New creates a new metadata store instance using the specified plugin

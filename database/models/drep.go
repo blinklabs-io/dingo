@@ -23,7 +23,7 @@ import (
 var ErrDrepNotFound = errors.New("drep not found")
 
 type Drep struct {
-	AnchorUrl  string
+	AnchorUrl  string `gorm:"size:128"`
 	Credential []byte `gorm:"uniqueIndex;size:28"`
 	AnchorHash []byte
 	ID         uint   `gorm:"primarykey"`
@@ -48,7 +48,7 @@ func (DeregistrationDrep) TableName() string {
 }
 
 type RegistrationDrep struct {
-	AnchorUrl      string
+	AnchorUrl      string `gorm:"size:128"`
 	DrepCredential []byte `gorm:"index;size:28"`
 	AnchorHash     []byte
 	CertificateID  uint   `gorm:"index"`
@@ -62,7 +62,7 @@ func (RegistrationDrep) TableName() string {
 }
 
 type UpdateDrep struct {
-	AnchorUrl     string
+	AnchorUrl     string `gorm:"size:128"`
 	Credential    []byte `gorm:"index;size:28"`
 	AnchorHash    []byte
 	CertificateID uint   `gorm:"index"`
