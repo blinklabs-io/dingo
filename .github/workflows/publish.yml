@@ -81,7 +81,9 @@ jobs:
     steps:
       - name: Set RELEASE_TAG
         run: "echo \"RELEASE_TAG=${GITHUB_REF#refs/tags/}\" >> $GITHUB_ENV"
+        shell: bash
       - run: git config --global --add safe.directory $PWD
+        shell: bash
       - uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0 https://github.com/actions/checkout/releases/tag/v6.0.0
         with:
           fetch-depth: 0
