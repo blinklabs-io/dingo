@@ -49,8 +49,10 @@ func FromContext(ctx context.Context) *Config {
 }
 
 const (
-	DefaultBlobPlugin     = "badger"
-	DefaultMetadataPlugin = "sqlite"
+	DefaultBlobPlugin         = "badger"
+	DefaultMetadataPlugin     = "sqlite"
+	DefaultEvictionWatermark  = 0.90
+	DefaultRejectionWatermark = 0.95
 )
 
 // ErrPluginListRequested is returned when the user requests to list available plugins
@@ -136,6 +138,8 @@ type Config struct {
 	ShutdownTimeout    string  `yaml:"shutdownTimeout"                                               split_words:"true"`
 	Network            string  `yaml:"network"`
 	MempoolCapacity    int64   `yaml:"mempoolCapacity"                                               split_words:"true"`
+	EvictionWatermark  float64 `yaml:"evictionWatermark"  envconfig:"DINGO_MEMPOOL_EVICTION_WATERMARK"`
+	RejectionWatermark float64 `yaml:"rejectionWatermark" envconfig:"DINGO_MEMPOOL_REJECTION_WATERMARK"`
 	PrivatePort        uint    `yaml:"privatePort"                                                   split_words:"true"`
 	RelayPort          uint    `yaml:"relayPort"          envconfig:"port"`
 	UtxorpcPort        uint    `yaml:"utxorpcPort"                                                   split_words:"true"`
@@ -239,6 +243,8 @@ func (c *Config) ParseCmdlineArgs(programName string, args []string) error {
 
 var globalConfig = &Config{
 	MempoolCapacity:    1048576,
+	EvictionWatermark:  DefaultEvictionWatermark,
+	RejectionWatermark: DefaultRejectionWatermark,
 	BindAddr:           "0.0.0.0",
 	CardanoConfig:      "", // Will be set dynamically based on network
 	DatabasePath:       ".dingo",
@@ -456,6 +462,38 @@ func LoadConfig(configFile string) (*Config, error) {
 				missing,
 			)
 		}
+	}
+
+	// Default unset watermarks. In Go, unset float64 fields are 0,
+	// which is indistinguishable from an explicit 0. We default 0 to
+	// the standard value; the subsequent validation rejects any value
+	// that ends up <= 0 after defaulting.
+	if globalConfig.EvictionWatermark == 0 {
+		globalConfig.EvictionWatermark = DefaultEvictionWatermark
+	}
+	if globalConfig.RejectionWatermark == 0 {
+		globalConfig.RejectionWatermark = DefaultRejectionWatermark
+	}
+	if globalConfig.EvictionWatermark <= 0 ||
+		globalConfig.EvictionWatermark >= 1.0 {
+		return nil, fmt.Errorf(
+			"invalid evictionWatermark: %f (must be in range (0, 1))",
+			globalConfig.EvictionWatermark,
+		)
+	}
+	if globalConfig.RejectionWatermark <= 0 ||
+		globalConfig.RejectionWatermark > 1.0 {
+		return nil, fmt.Errorf(
+			"invalid rejectionWatermark: %f (must be in range (0, 1])",
+			globalConfig.RejectionWatermark,
+		)
+	}
+	if globalConfig.EvictionWatermark >= globalConfig.RejectionWatermark {
+		return nil, fmt.Errorf(
+			"evictionWatermark (%f) must be less than rejectionWatermark (%f)",
+			globalConfig.EvictionWatermark,
+			globalConfig.RejectionWatermark,
+		)
 	}
 
 	// Set default CardanoConfig path based on network if not provided by user
