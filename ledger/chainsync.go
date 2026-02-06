@@ -293,11 +293,23 @@ func (ls *LedgerState) processBlockEvents() error {
 		if batchSize <= 0 {
 			break
 		}
+		batch := ls.chainsyncBlockEvents[batchOffset : batchOffset+batchSize]
+		// Verify block header cryptographic proofs (VRF, KES) outside
+		// the lock to avoid blocking other ledger operations during
+		// expensive crypto verification.
+		for _, evt := range batch {
+			if err := ls.verifyBlockHeaderCrypto(evt.Block); err != nil {
+				return fmt.Errorf(
+					"block header crypto verification: %w",
+					err,
+				)
+			}
+		}
 		ls.Lock()
 		// Start a transaction
 		txn := ls.db.BlobTxn(true)
 		err := txn.Do(func(txn *database.Txn) error {
-			for _, evt := range ls.chainsyncBlockEvents[batchOffset : batchOffset+batchSize] {
+			for _, evt := range batch {
 				if err := ls.processBlockEvent(txn, evt); err != nil {
 					return fmt.Errorf("failed processing block event: %w", err)
 				}
@@ -876,6 +888,9 @@ func (ls *LedgerState) processBlockEvent(
 	txn *database.Txn,
 	e BlockfetchEvent,
 ) error {
+	// Note: block header crypto verification (VRF, KES) is performed
+	// outside the lock in processBlockEvents before this is called.
+
 	// Add block to chain
 	if err := ls.chain.AddBlock(e.Block, txn); err != nil {
 		// Ignore and log errors about block not fitting on chain or matching first header
