@@ -18,6 +18,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math/big"
 	"slices"
 
 	"github.com/blinklabs-io/dingo/config/cardano"
@@ -170,6 +171,10 @@ func ValidateTxAlonzo(
 	}
 	if len(errs) > 0 {
 		return errors.Join(errs...)
+	}
+	// Validate transaction size against protocol limit
+	if err = ValidateTxSize(tx, tmpPparams.MaxTxSize); err != nil {
+		return err
 	}
 	// Skip script evaluation if TX is marked as not valid
 	if !tx.IsValid() {
@@ -418,6 +423,22 @@ func EvaluateTxAlonzo(
 			return 0, lcommon.ExUnits{}, nil, fmt.Errorf("unimplemented script type: %T", tmpScript)
 		}
 	}
-	// TODO: calculate fee based on current TX and calculated ExUnits
-	return 0, retTotalExUnits, retRedeemerExUnits, nil
+	// Calculate fee based on TX size and calculated ExUnits
+	txSize := TxBodySize(tx)
+	var pricesMem, pricesSteps *big.Rat
+	if tmpPparams.ExecutionCosts.MemPrice != nil {
+		pricesMem = tmpPparams.ExecutionCosts.MemPrice.ToBigRat()
+	}
+	if tmpPparams.ExecutionCosts.StepPrice != nil {
+		pricesSteps = tmpPparams.ExecutionCosts.StepPrice.ToBigRat()
+	}
+	fee := CalculateMinFee(
+		txSize,
+		retTotalExUnits,
+		tmpPparams.MinFeeA,
+		tmpPparams.MinFeeB,
+		pricesMem,
+		pricesSteps,
+	)
+	return fee, retTotalExUnits, retRedeemerExUnits, nil
 }
