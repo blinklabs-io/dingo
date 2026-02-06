@@ -17,6 +17,7 @@ package aws
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -653,7 +654,11 @@ func (d *BlobStoreS3) listKeys(
 		}
 		for _, obj := range page.Contents {
 			key := strings.TrimPrefix(aws.ToString(obj.Key), d.prefix)
-			keys = append(keys, key)
+			externalKey, err := hex.DecodeString(key)
+			if err != nil {
+				return nil, fmt.Errorf("error decoding s3 key: %w", err)
+			}
+			keys = append(keys, string(externalKey))
 		}
 	}
 	sort.Strings(keys)
@@ -691,7 +696,7 @@ func (d *BlobStoreS3) Bucket() string {
 
 // Returns the S3 key with an optional prefix.
 func (d *BlobStoreS3) fullKey(key string) string {
-	return d.prefix + key
+	return d.prefix + hex.EncodeToString([]byte(key))
 }
 
 func awsString(s string) *string {
