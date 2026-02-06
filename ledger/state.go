@@ -431,6 +431,17 @@ type EraTransitionResult struct {
 	NewEra     eras.EraDesc
 }
 
+// HardForkInfo holds details about a detected hard fork
+// transition, populated when a protocol parameter update at
+// an epoch boundary changes the protocol major version into
+// a new era.
+type HardForkInfo struct {
+	OldVersion ProtocolVersion
+	NewVersion ProtocolVersion
+	FromEra    uint
+	ToEra      uint
+}
+
 // EpochRolloverResult holds computed state from epoch rollover
 type EpochRolloverResult struct {
 	NewEpochCache             []models.Epoch
@@ -440,6 +451,9 @@ type EpochRolloverResult struct {
 	NewEpochNum               float64
 	CheckpointWrittenForEpoch bool
 	SchedulerIntervalMs       uint
+	// HardFork is non-nil when a protocol version change
+	// in the updated pparams triggers an era transition.
+	HardFork *HardForkInfo
 }
 
 func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
@@ -1541,6 +1555,150 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 						"epoch", newEpochId,
 						"boundary_slot", rolloverResult.NewCurrentEpoch.StartSlot,
 					)
+				}
+			}
+
+			// Emit hard fork event if a protocol version
+			// change triggered an era transition.
+			// Track emitted FromEra/ToEra so the
+			// block-era-driven path below can skip
+			// duplicates.
+			var emittedHFFromEra, emittedHFToEra uint
+			emittedHF := false
+			if rolloverResult != nil &&
+				rolloverResult.HardFork != nil &&
+				ls.config.EventBus != nil {
+				hf := rolloverResult.HardFork
+				hfEvent := event.HardForkEvent{
+					Slot: rolloverResult.
+						NewCurrentEpoch.StartSlot,
+					EpochNo: rolloverResult.
+						NewCurrentEpoch.EpochId,
+					FromEra:         hf.FromEra,
+					ToEra:           hf.ToEra,
+					OldMajorVersion: hf.OldVersion.Major,
+					OldMinorVersion: hf.OldVersion.Minor,
+					NewMajorVersion: hf.NewVersion.Major,
+					NewMinorVersion: hf.NewVersion.Minor,
+				}
+				ls.config.EventBus.Publish(
+					event.HardForkEventType,
+					event.NewEvent(
+						event.HardForkEventType,
+						hfEvent,
+					),
+				)
+				emittedHF = true
+				emittedHFFromEra = hf.FromEra
+				emittedHFToEra = hf.ToEra
+				ls.config.Logger.Info(
+					"emitted hard fork event",
+					"from_era", hf.FromEra,
+					"to_era", hf.ToEra,
+					"epoch",
+					rolloverResult.NewCurrentEpoch.EpochId,
+					"slot",
+					rolloverResult.NewCurrentEpoch.StartSlot,
+					"component", "ledger",
+				)
+			}
+
+			// Emit hard fork events for era transitions
+			// triggered by block era changes, skipping
+			// any transition already emitted by the
+			// pparam path above.
+			if len(eraTransitions) > 0 &&
+				ls.config.EventBus != nil {
+				prevEraId := snapshotEra.Id
+				prevPParams := snapshotPParams
+				for _, eraResult := range eraTransitions {
+					// Skip if the pparam-driven path
+					// already emitted this exact
+					// FromEra -> ToEra transition
+					if emittedHF &&
+						prevEraId == emittedHFFromEra &&
+						eraResult.NewEra.Id == emittedHFToEra {
+						ls.config.Logger.Debug(
+							"skipping duplicate "+
+								"hard fork event "+
+								"(already emitted "+
+								"by pparam path)",
+							"from_era", prevEraId,
+							"to_era",
+							eraResult.NewEra.Id,
+							"component", "ledger",
+						)
+						prevEraId = eraResult.NewEra.Id
+						prevPParams = eraResult.NewPParams
+						continue
+					}
+					oldVer, oldErr := GetProtocolVersion(
+						prevPParams,
+					)
+					newVer, newErr := GetProtocolVersion(
+						eraResult.NewPParams,
+					)
+					if oldErr != nil {
+						ls.config.Logger.Warn(
+							"could not extract protocol "+
+								"version from previous "+
+								"era pparams, skipping "+
+								"hard fork event",
+							"error", oldErr,
+							"pparams_type",
+							fmt.Sprintf(
+								"%T", prevPParams,
+							),
+							"component", "ledger",
+						)
+					}
+					if newErr != nil {
+						ls.config.Logger.Warn(
+							"could not extract protocol "+
+								"version from new era "+
+								"pparams, skipping hard "+
+								"fork event",
+							"error", newErr,
+							"pparams_type",
+							fmt.Sprintf(
+								"%T",
+								eraResult.NewPParams,
+							),
+							"component", "ledger",
+						)
+					}
+					if oldErr == nil && newErr == nil {
+						hfEvent := event.HardForkEvent{
+							Slot: snapshotEpoch.StartSlot +
+								uint64(
+									snapshotEpoch.LengthInSlots,
+								),
+							EpochNo:         snapshotEpoch.EpochId + 1,
+							FromEra:         prevEraId,
+							ToEra:           eraResult.NewEra.Id,
+							OldMajorVersion: oldVer.Major,
+							OldMinorVersion: oldVer.Minor,
+							NewMajorVersion: newVer.Major,
+							NewMinorVersion: newVer.Minor,
+						}
+						ls.config.EventBus.Publish(
+							event.HardForkEventType,
+							event.NewEvent(
+								event.HardForkEventType,
+								hfEvent,
+							),
+						)
+						ls.config.Logger.Info(
+							"emitted hard fork event"+
+								" (era transition)",
+							"from_era", prevEraId,
+							"to_era",
+							eraResult.NewEra.Id,
+							"component", "ledger",
+						)
+					}
+					prevEraId = eraResult.NewEra.Id
+					prevPParams = eraResult.NewPParams
 				}
 			}
 
