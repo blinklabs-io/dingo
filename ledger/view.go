@@ -228,33 +228,36 @@ func (lv *LedgerView) TimeToSlot(t time.Time) (uint64, error) {
 	return lv.ls.TimeToSlot(t)
 }
 
-// CalculateRewards calculates rewards for the given stake keys
+// CalculateRewards calculates rewards for the given stake keys.
+// TODO: implement reward calculation. Requires reward formulas from the
+// Cardano Shelley formal specification and integration with stake snapshots.
 func (lv *LedgerView) CalculateRewards(
 	adaPots lcommon.AdaPots,
 	rewardSnapshot lcommon.RewardSnapshot,
 	rewardParams lcommon.RewardParameters,
 ) (*lcommon.RewardCalculationResult, error) {
-	// TODO: implement reward calculation
 	return nil, nil
 }
 
-// GetAdaPots returns the current Ada pots
+// GetAdaPots returns the current Ada pots.
+// TODO: implement Ada pots retrieval. Requires tracking of treasury, reserves,
+// fees, and rewards pots which are not yet stored in the database.
 func (lv *LedgerView) GetAdaPots() lcommon.AdaPots {
-	// TODO: implement Ada pots retrieval
 	return lcommon.AdaPots{}
 }
 
-// GetRewardSnapshot returns the current reward snapshot
+// GetRewardSnapshot returns the current reward snapshot.
+// TODO: implement reward snapshot retrieval. Requires per-stake-credential
+// reward tracking which is not yet stored in the database.
 func (lv *LedgerView) GetRewardSnapshot(
 	epoch uint64,
 ) (lcommon.RewardSnapshot, error) {
-	// TODO: implement reward snapshot retrieval
 	return lcommon.RewardSnapshot{}, nil
 }
 
-// UpdateAdaPots updates the Ada pots
+// UpdateAdaPots updates the Ada pots.
+// TODO: implement Ada pots update. Requires Ada pots storage in the database.
 func (lv *LedgerView) UpdateAdaPots(adaPots lcommon.AdaPots) error {
-	// TODO: implement Ada pots update
 	return nil
 }
 
@@ -277,72 +280,185 @@ func (lv *LedgerView) IsRewardAccountRegistered(
 	return account != nil && account.Active
 }
 
-// RewardAccountBalance returns the current reward balance for a stake credential
+// RewardAccountBalance returns the current reward balance for a stake credential.
+// TODO: implement reward account balance retrieval. Requires per-account reward
+// balance tracking which is not yet stored in the database.
 func (lv *LedgerView) RewardAccountBalance(
 	cred lcommon.Credential,
 ) (*uint64, error) {
-	// TODO: implement reward account balance retrieval
 	return nil, nil
 }
 
-// CostModels returns the Plutus cost models
+// CostModels returns the Plutus cost models.
+// TODO: implement cost models retrieval from protocol parameters.
+// Currently blocked because lcommon.PlutusLanguage and lcommon.CostModel are
+// placeholder empty structs in gouroboros. Once these types are fleshed out with
+// real fields, this method should extract cost models from the current protocol
+// parameters (lv.ls.currentPParams).
 func (lv *LedgerView) CostModels() map[lcommon.PlutusLanguage]lcommon.CostModel {
-	// TODO: implement cost models retrieval from protocol parameters
 	return map[lcommon.PlutusLanguage]lcommon.CostModel{}
 }
 
-// CommitteeMember returns a committee member by cold key
+// CommitteeMember returns a committee member by cold key.
+// Returns nil if the cold key is not an authorized committee member.
 func (lv *LedgerView) CommitteeMember(
 	coldKey lcommon.Blake2b224,
 ) (*lcommon.CommitteeMember, error) {
-	// TODO: implement committee member retrieval
-	return nil, nil
+	member, err := lv.ls.db.GetCommitteeMember(coldKey[:], lv.txn)
+	if err != nil {
+		if errors.Is(err, models.ErrCommitteeMemberNotFound) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("get committee member: %w", err)
+	}
+	resigned, err := lv.ls.db.IsCommitteeMemberResigned(coldKey[:], lv.txn)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"check committee member resignation: %w",
+			err,
+		)
+	}
+	hotKey := lcommon.NewBlake2b224(member.HostCredential)
+	return &lcommon.CommitteeMember{
+		ColdKey:  coldKey,
+		HotKey:   &hotKey,
+		Resigned: resigned,
+	}, nil
 }
 
-// CommitteeMembers returns all committee members
+// CommitteeMembers returns all active (non-resigned) committee members.
 func (lv *LedgerView) CommitteeMembers() ([]lcommon.CommitteeMember, error) {
-	// TODO: implement committee members retrieval
-	return []lcommon.CommitteeMember{}, nil
+	dbMembers, err := lv.ls.db.GetActiveCommitteeMembers(lv.txn)
+	if err != nil {
+		return nil, fmt.Errorf("get active committee members: %w", err)
+	}
+	members := make([]lcommon.CommitteeMember, 0, len(dbMembers))
+	for _, m := range dbMembers {
+		coldKey := lcommon.NewBlake2b224(m.ColdCredential)
+		hotKey := lcommon.NewBlake2b224(m.HostCredential)
+		members = append(members, lcommon.CommitteeMember{
+			ColdKey:  coldKey,
+			HotKey:   &hotKey,
+			Resigned: false, // Active members are not resigned
+		})
+	}
+	return members, nil
 }
 
-// DRepRegistration returns a DRep registration by credential
+// DRepRegistration returns a DRep registration by credential.
+// Returns nil if the credential is not registered as an active DRep.
 func (lv *LedgerView) DRepRegistration(
 	credential lcommon.Blake2b224,
 ) (*lcommon.DRepRegistration, error) {
-	// TODO: implement DRep registration retrieval
-	return nil, nil
+	drep, err := lv.ls.db.GetDrep(credential[:], false, lv.txn)
+	if err != nil {
+		if errors.Is(err, models.ErrDrepNotFound) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("get drep: %w", err)
+	}
+	reg := &lcommon.DRepRegistration{
+		Credential: credential,
+	}
+	if drep.AnchorUrl != "" || len(drep.AnchorHash) > 0 {
+		if len(drep.AnchorHash) != 32 {
+			return nil, fmt.Errorf(
+				"invalid DRep anchor hash length: expected 32, got %d",
+				len(drep.AnchorHash),
+			)
+		}
+		var dataHash [32]byte
+		copy(dataHash[:], drep.AnchorHash)
+		reg.Anchor = &lcommon.GovAnchor{
+			Url:      drep.AnchorUrl,
+			DataHash: dataHash,
+		}
+	}
+	return reg, nil
 }
 
-// DRepRegistrations returns all DRep registrations
+// DRepRegistrations returns all active DRep registrations.
 func (lv *LedgerView) DRepRegistrations() ([]lcommon.DRepRegistration, error) {
-	// TODO: implement DRep registrations retrieval
-	return []lcommon.DRepRegistration{}, nil
+	dreps, err := lv.ls.db.GetActiveDreps(lv.txn)
+	if err != nil {
+		return nil, fmt.Errorf("get active dreps: %w", err)
+	}
+	registrations := make([]lcommon.DRepRegistration, 0, len(dreps))
+	for _, drep := range dreps {
+		reg := lcommon.DRepRegistration{
+			Credential: lcommon.NewBlake2b224(drep.Credential),
+		}
+		if drep.AnchorUrl != "" || len(drep.AnchorHash) > 0 {
+			if len(drep.AnchorHash) != 32 {
+				return nil, fmt.Errorf(
+					"invalid DRep anchor hash length: expected 32, got %d",
+					len(drep.AnchorHash),
+				)
+			}
+			var dataHash [32]byte
+			copy(dataHash[:], drep.AnchorHash)
+			reg.Anchor = &lcommon.GovAnchor{
+				Url:      drep.AnchorUrl,
+				DataHash: dataHash,
+			}
+		}
+		registrations = append(registrations, reg)
+	}
+	return registrations, nil
 }
 
-// Constitution returns the current constitution
+// Constitution returns the current constitution.
+// Returns nil if no constitution has been established on-chain.
 func (lv *LedgerView) Constitution() (*lcommon.Constitution, error) {
-	// TODO: implement constitution retrieval
-	return nil, nil
+	constitution, err := lv.ls.db.GetConstitution(lv.txn)
+	if err != nil {
+		return nil, fmt.Errorf("get constitution: %w", err)
+	}
+	if constitution == nil {
+		return nil, nil
+	}
+	// Constitution in gouroboros is currently an empty placeholder struct.
+	// Return a non-nil pointer to indicate a constitution exists.
+	return &lcommon.Constitution{}, nil
 }
 
-// TreasuryValue returns the current treasury value
+// TreasuryValue returns the current treasury value.
+// TODO: implement treasury value retrieval. Requires Ada pots tracking
+// which is not yet stored in the database. The treasury value is part of
+// the Ada pots (reserves, treasury, fees, rewards).
 func (lv *LedgerView) TreasuryValue() (uint64, error) {
-	// TODO: implement treasury value retrieval
 	return 0, nil
 }
 
-// GovActionById returns a governance action by its ID
+// GovActionById returns a governance action by its ID.
+// Returns nil if the governance action does not exist.
 func (lv *LedgerView) GovActionById(
 	id lcommon.GovActionId,
 ) (*lcommon.GovActionState, error) {
-	// TODO: implement governance action retrieval
-	return nil, nil
+	proposal, err := lv.ls.db.GetGovernanceProposal(
+		id.TransactionId[:],
+		id.GovActionIdx,
+		lv.txn,
+	)
+	if err != nil {
+		if errors.Is(err, models.ErrGovernanceProposalNotFound) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("get governance proposal: %w", err)
+	}
+	return &lcommon.GovActionState{
+		ActionId:   id,
+		ActionType: lcommon.GovActionType(proposal.ActionType),
+	}, nil
 }
 
-// GovActionExists returns whether a governance action exists
+// GovActionExists returns whether a governance action exists.
 func (lv *LedgerView) GovActionExists(id lcommon.GovActionId) bool {
-	// TODO: implement governance action existence check
-	return false
+	action, err := lv.GovActionById(id)
+	if err != nil {
+		return false
+	}
+	return action != nil
 }
 
 // StakeDistribution represents the stake distribution at an epoch boundary.

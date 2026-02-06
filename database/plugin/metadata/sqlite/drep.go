@@ -344,6 +344,21 @@ func (d *MetadataStoreSqlite) RestoreDrepStateAtSlot(
 	return nil
 }
 
+// GetActiveDreps retrieves all active DReps.
+func (d *MetadataStoreSqlite) GetActiveDreps(
+	txn types.Txn,
+) ([]*models.Drep, error) {
+	var dreps []*models.Drep
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return nil, err
+	}
+	if result := db.Where("active = ?", true).Find(&dreps); result.Error != nil {
+		return nil, result.Error
+	}
+	return dreps, nil
+}
+
 // SetDrep saves a drep
 func (d *MetadataStoreSqlite) SetDrep(
 	cred []byte,
