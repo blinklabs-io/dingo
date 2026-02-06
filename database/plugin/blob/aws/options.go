@@ -66,3 +66,11 @@ func WithTimeout(timeout time.Duration) BlobStoreS3OptionFunc {
 		b.timeout = timeout
 	}
 }
+
+// WithEndpoint specifies a custom endpoint for aws s3.  This is generally used for testing
+// against a fake s3 implementation such as minio (https://github.com/minio/minio)
+func WithEndpoint(endpoint string) BlobStoreS3OptionFunc {
+	return func(b *BlobStoreS3) {
+		b.endpoint = endpoint
+	}
+}
