@@ -126,8 +126,15 @@ func TestConnectionManagerConnError(t *testing.T) {
 				tmpConn.Close()
 			}
 		}
-		// TODO: actually wait for shutdown
-		time.Sleep(5 * time.Second)
+		// Wait for clean shutdown using Stop instead of fixed sleep
+		stopCtx, stopCancel := context.WithTimeout(
+			context.Background(),
+			10*time.Second,
+		)
+		defer stopCancel()
+		if err := connManager.Stop(stopCtx); err != nil {
+			t.Logf("warning: connection manager stop returned error: %s", err)
+		}
 		return
 	case <-time.After(10 * time.Second):
 		t.Fatalf("did not receive error within timeout")
@@ -181,8 +188,15 @@ func TestConnectionManagerConnClosed(t *testing.T) {
 	)
 	select {
 	case <-doneChan:
-		// TODO: actually wait for shutdown
-		time.Sleep(5 * time.Second)
+		// Wait for clean shutdown using Stop instead of fixed sleep
+		stopCtx, stopCancel := context.WithTimeout(
+			context.Background(),
+			10*time.Second,
+		)
+		defer stopCancel()
+		if err := connManager.Stop(stopCtx); err != nil {
+			t.Logf("warning: connection manager stop returned error: %s", err)
+		}
 		return
 	case <-time.After(10 * time.Second):
 		t.Fatalf("did not receive error within timeout")

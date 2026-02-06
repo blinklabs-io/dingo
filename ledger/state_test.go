@@ -775,8 +775,10 @@ func TestDatabaseWorkerPoolInFlightOperations(t *testing.T) {
 		}(resultChan)
 	}
 
-	// Give operations time to queue
-	time.Sleep(20 * time.Millisecond)
+	// Wait for at least one operation to start processing
+	require.Eventually(t, func() bool {
+		return completedCount.Load() > 0
+	}, 5*time.Second, 5*time.Millisecond, "at least one operation should start")
 
 	// Shutdown the pool - this should wait for all operations to complete
 	pool.Shutdown()

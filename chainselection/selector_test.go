@@ -251,7 +251,13 @@ func TestChainSelectorStalePeerFiltering(t *testing.T) {
 	}
 
 	cs.UpdatePeerTip(connId1, tip1, nil)
-	time.Sleep(150 * time.Millisecond)
+
+	// Wait for peer1 to become stale (exceed threshold)
+	require.Eventually(t, func() bool {
+		peerTip := cs.GetPeerTip(connId1)
+		return peerTip != nil && peerTip.IsStale(100*time.Millisecond)
+	}, 2*time.Second, 5*time.Millisecond, "peer1 should become stale")
+
 	cs.UpdatePeerTip(connId2, tip2, nil)
 
 	bestPeer := cs.SelectBestChain()
@@ -293,8 +299,12 @@ func TestChainSelectorStalePeerCleanupEmitsChainSwitchEvent(t *testing.T) {
 		<-evtCh
 	}
 
-	// Wait for peer1 to become "very stale" (2x threshold)
-	time.Sleep(110 * time.Millisecond)
+	// Wait for peer1 to become "very stale" (2x threshold = 100ms)
+	// cleanupStalePeers uses 2x StaleTipThreshold for removal
+	require.Eventually(t, func() bool {
+		peerTip := cs.GetPeerTip(connId1)
+		return peerTip != nil && peerTip.IsStale(100*time.Millisecond)
+	}, 2*time.Second, 5*time.Millisecond, "peer1 should become very stale")
 
 	// Keep peer2 fresh
 	cs.UpdatePeerTip(connId2, tip2, nil)
@@ -359,8 +369,10 @@ func TestPeerChainTipIsStale(t *testing.T) {
 	peerTip := NewPeerChainTip(connId, tip, nil)
 	assert.False(t, peerTip.IsStale(100*time.Millisecond))
 
-	time.Sleep(150 * time.Millisecond)
-	assert.True(t, peerTip.IsStale(100*time.Millisecond))
+	// Wait until the peer tip actually becomes stale
+	require.Eventually(t, func() bool {
+		return peerTip.IsStale(100 * time.Millisecond)
+	}, 2*time.Second, 5*time.Millisecond, "peer tip should become stale")
 }
 
 func TestPeerChainTipUpdateTip(t *testing.T) {
@@ -375,8 +387,12 @@ func TestPeerChainTipUpdateTip(t *testing.T) {
 	}
 
 	peerTip := NewPeerChainTip(connId, tip1, nil)
-	time.Sleep(50 * time.Millisecond)
 	oldTime := peerTip.LastUpdated
+
+	// Wait briefly so the next UpdateTip call gets a different timestamp
+	require.Eventually(t, func() bool {
+		return time.Since(oldTime) > 0
+	}, 1*time.Second, time.Millisecond, "time should advance")
 
 	peerTip.UpdateTip(tip2, nil)
 	assert.Equal(t, tip2.BlockNumber, peerTip.Tip.BlockNumber)
