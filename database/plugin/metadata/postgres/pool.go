@@ -207,6 +207,7 @@ func (d *MetadataStorePostgres) GetPoolRegistrations(
 
 // poolRegRecord holds fields from a pool registration for batch processing
 // during pool state restoration.
+// Includes blockIndex, certIndex for deterministic same-slot disambiguation.
 type poolRegRecord struct {
 	pledge        types.Uint64
 	cost          types.Uint64
@@ -214,6 +215,7 @@ type poolRegRecord struct {
 	vrfKeyHash    []byte
 	rewardAccount []byte
 	addedSlot     uint64
+	blockIndex    uint32
 	certIndex     uint32
 }
 
@@ -225,6 +227,7 @@ type poolRegCache struct {
 
 // batchFetchPoolRegs fetches all registrations for the given pool IDs at or
 // before the given slot, returning only the most recent registration per pool.
+// Uses block_index and cert_index for deterministic same-slot ordering.
 func batchFetchPoolRegs(
 	db *gorm.DB,
 	poolIDs []uint,
@@ -243,24 +246,29 @@ func batchFetchPoolRegs(
 		VrfKeyHash    []byte
 		RewardAccount []byte
 		AddedSlot     uint64
+		BlockIndex    uint32
 		CertIndex     uint32
 	}
 	var records []result
 
 	// Use ROW_NUMBER to fetch only the latest registration per pool
+	// Join transaction to get block_index for proper ordering (cert_index resets per tx)
 	query := `
 		WITH ranked AS (
 			SELECT pr.pool_id, pr.pledge, pr.cost, pr.margin,
-				pr.vrf_key_hash, pr.reward_account, pr.added_slot, c.cert_index,
+				pr.vrf_key_hash, pr.reward_account, pr.added_slot,
+				COALESCE(t.block_index, 0) AS block_index,
+				COALESCE(c.cert_index, 0) AS cert_index,
 				ROW_NUMBER() OVER (
 					PARTITION BY pr.pool_id
-					ORDER BY pr.added_slot DESC, c.cert_index DESC
+					ORDER BY pr.added_slot DESC, COALESCE(t.block_index, 0) DESC, COALESCE(c.cert_index, 0) DESC
 				) as rn
 			FROM pool_registration pr
-			INNER JOIN certs c ON c.id = pr.certificate_id
+			LEFT JOIN certs c ON c.id = pr.certificate_id
+			LEFT JOIN transaction t ON t.id = c.transaction_id
 			WHERE pr.pool_id IN ? AND pr.added_slot <= ?
 		)
-		SELECT pool_id, pledge, cost, margin, vrf_key_hash, reward_account, added_slot, cert_index
+		SELECT pool_id, pledge, cost, margin, vrf_key_hash, reward_account, added_slot, block_index, cert_index
 		FROM ranked WHERE rn = 1`
 	if err := db.Raw(query, poolIDs, slot).Scan(&records).Error; err != nil {
 		return nil, err
@@ -274,6 +282,7 @@ func batchFetchPoolRegs(
 			vrfKeyHash:    r.VrfKeyHash,
 			rewardAccount: r.RewardAccount,
 			addedSlot:     r.AddedSlot,
+			blockIndex:    r.BlockIndex,
 			certIndex:     r.CertIndex,
 		}
 		cache.hasReg[r.PoolID] = true
@@ -382,6 +391,10 @@ func (d *MetadataStorePostgres) RestorePoolStateAtSlot(
 // GetActivePoolKeyHashes retrieves the key hashes of all currently active pools.
 // A pool is active if it has a registration and either no retirement or
 // the retirement epoch is in the future.
+//
+// This delegates to GetActivePoolKeyHashesAtSlot using the current tip's slot,
+// ensuring consistent same-slot certificate handling via block_index and cert_index
+// ordering (ORDER BY added_slot DESC, block_index DESC, cert_index DESC).
 func (d *MetadataStorePostgres) GetActivePoolKeyHashes(
 	txn types.Txn,
 ) ([][]byte, error) {
@@ -390,7 +403,7 @@ func (d *MetadataStorePostgres) GetActivePoolKeyHashes(
 		return nil, fmt.Errorf("GetActivePoolKeyHashes: resolve db: %w", err)
 	}
 
-	// Get the current epoch from the tip
+	// Get the current tip slot
 	var tmpTip models.Tip
 	if res := db.Where("id = ?", tipEntryId).First(&tmpTip); res.Error != nil {
 		if errors.Is(res.Error, gorm.ErrRecordNotFound) {
@@ -402,57 +415,132 @@ func (d *MetadataStorePostgres) GetActivePoolKeyHashes(
 		)
 	}
 
-	var curEpoch models.Epoch
+	// Delegate to slot-based query for consistent behavior
+	return d.GetActivePoolKeyHashesAtSlot(tmpTip.Slot, txn)
+}
+
+// GetActivePoolKeyHashesAtSlot retrieves the key hashes of pools that were
+// active at the given slot. A pool was active at a slot if:
+//  1. It had a registration with added_slot <= slot
+//  2. Either no retirement with added_slot <= slot, OR the retirement was
+//     for an epoch that hadn't started by the given slot
+//
+// This implementation uses window functions (ROW_NUMBER) to fetch only the
+// latest registration and retirement per pool directly in the database,
+// avoiding loading all pools and their certificates into memory.
+func (d *MetadataStorePostgres) GetActivePoolKeyHashesAtSlot(
+	slot uint64,
+	txn types.Txn,
+) ([][]byte, error) {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"GetActivePoolKeyHashesAtSlot: resolve db: %w",
+			err,
+		)
+	}
+
+	// Find the epoch that contains the given slot
+	var epochAtSlot models.Epoch
 	if res := db.Where(
 		"start_slot <= ?",
-		tmpTip.Slot,
-	).Order("start_slot DESC").First(&curEpoch); res.Error != nil {
+		slot,
+	).Order("start_slot DESC").First(&epochAtSlot); res.Error != nil {
 		if errors.Is(res.Error, gorm.ErrRecordNotFound) {
-			return [][]byte{}, nil
+			// No epoch data yet - return error so callers can
+			// distinguish "no pools" from "data not synced"
+			return nil, fmt.Errorf(
+				"GetActivePoolKeyHashesAtSlot: %w",
+				types.ErrNoEpochData,
+			)
 		}
 		return nil, fmt.Errorf(
-			"GetActivePoolKeyHashes: get epoch: %w",
+			"GetActivePoolKeyHashesAtSlot: get epoch at slot: %w",
 			res.Error,
 		)
 	}
 
-	// Query all pools with their registrations and retirements
-	var pools []models.Pool
-	result := db.
-		Preload("Registration", func(db *gorm.DB) *gorm.DB {
-			return db.Order("added_slot DESC, id DESC")
-		}).
-		Preload("Retirement", func(db *gorm.DB) *gorm.DB {
-			return db.Order("added_slot DESC, id DESC")
-		}).
-		Find(&pools)
-	if result.Error != nil {
+	// Verify the slot falls within the epoch's duration. If it doesn't,
+	// we only have an older epoch and the requested slot is beyond our
+	// synced data. Using a stale epoch ID could incorrectly treat retired
+	// pools as active.
+	if slot >= epochAtSlot.StartSlot+uint64(epochAtSlot.LengthInSlots) {
 		return nil, fmt.Errorf(
-			"GetActivePoolKeyHashes: query pools: %w",
-			result.Error,
+			"GetActivePoolKeyHashesAtSlot: %w",
+			types.ErrNoEpochData,
 		)
 	}
 
-	// Filter active pools and collect their key hashes
-	poolKeyHashes := make([][]byte, 0, len(pools))
-	for _, pool := range pools {
-		if len(pool.Registration) == 0 {
-			continue
-		}
+	// Use window functions to get only the latest registration and retirement
+	// per pool at or before the given slot, then filter in SQL
+	type poolResult struct {
+		PoolKeyHash []byte
+	}
+	var results []poolResult
 
-		latestReg := pool.Registration[0]
+	// Query explanation:
+	// 1. latest_reg: Gets the most recent registration per pool at or before slot
+	//    JOINs with certs and transaction to get block_index and cert_index for
+	//    on-chain ordering (cert_index resets per transaction)
+	// 2. latest_ret: Gets the most recent retirement per pool at or before slot
+	//    JOINs with certs and transaction to get block_index and cert_index
+	// 3. Join pools with their latest registration (INNER JOIN ensures only pools
+	//    with registrations are included)
+	// 4. LEFT JOIN retirement to handle pools without retirements
+	// 5. Filter: Pool is active if no retirement OR retirement is before registration
+	//    (using slot, block_index, and cert_index for same-slot disambiguation)
+	//    OR retirement epoch hasn't started yet
+	// Note: block_index from transaction provides ordering across transactions,
+	// cert_index from certs provides ordering within a transaction.
+	// COALESCE defaults to 0 when references are NULL (e.g., tests)
+	query := `
+		WITH latest_reg AS (
+			SELECT pr.pool_id, pr.added_slot,
+				COALESCE(t.block_index, 0) as blk_idx,
+				COALESCE(c.cert_index, 0) as cert_idx,
+				ROW_NUMBER() OVER (
+					PARTITION BY pr.pool_id
+					ORDER BY pr.added_slot DESC, COALESCE(t.block_index, 0) DESC, COALESCE(c.cert_index, 0) DESC
+				) as rn
+			FROM pool_registration pr
+			LEFT JOIN certs c ON c.id = pr.certificate_id
+			LEFT JOIN transaction t ON t.id = c.transaction_id
+			WHERE pr.added_slot <= ?
+		),
+		latest_ret AS (
+			SELECT rt.pool_id, rt.added_slot, rt.epoch,
+				COALESCE(t.block_index, 0) as blk_idx,
+				COALESCE(c.cert_index, 0) as cert_idx,
+				ROW_NUMBER() OVER (
+					PARTITION BY rt.pool_id
+					ORDER BY rt.added_slot DESC, COALESCE(t.block_index, 0) DESC, COALESCE(c.cert_index, 0) DESC
+				) as rn
+			FROM pool_retirement rt
+			LEFT JOIN certs c ON c.id = rt.certificate_id
+			LEFT JOIN transaction t ON t.id = c.transaction_id
+			WHERE rt.added_slot <= ?
+		)
+		SELECT p.pool_key_hash
+		FROM pool p
+		INNER JOIN latest_reg lr ON lr.pool_id = p.id AND lr.rn = 1
+		LEFT JOIN latest_ret lrt ON lrt.pool_id = p.id AND lrt.rn = 1
+		WHERE lrt.pool_id IS NULL
+			OR lrt.added_slot < lr.added_slot
+			OR (lrt.added_slot = lr.added_slot AND lrt.blk_idx < lr.blk_idx)
+			OR (lrt.added_slot = lr.added_slot AND lrt.blk_idx = lr.blk_idx AND lrt.cert_idx < lr.cert_idx)
+			OR lrt.epoch > ?`
 
-		// Check if pool is retired
-		if len(pool.Retirement) > 0 {
-			latestRet := pool.Retirement[0]
-			if latestRet.AddedSlot > latestReg.AddedSlot &&
-				latestRet.Epoch <= curEpoch.EpochId {
-				continue // Pool is retired
-			}
-		}
+	if err := db.Raw(query, slot, slot, epochAtSlot.EpochId).Scan(&results).Error; err != nil {
+		return nil, fmt.Errorf(
+			"GetActivePoolKeyHashesAtSlot: query pools: %w",
+			err,
+		)
+	}
 
-		// Pool is active
-		poolKeyHashes = append(poolKeyHashes, pool.PoolKeyHash)
+	// Convert results to [][]byte
+	poolKeyHashes := make([][]byte, len(results))
+	for i, r := range results {
+		poolKeyHashes[i] = r.PoolKeyHash
 	}
 
 	return poolKeyHashes, nil

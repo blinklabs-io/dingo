@@ -17,6 +17,8 @@ package snapshot
 import (
 	"context"
 	"fmt"
+	"io"
+	"log/slog"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
@@ -26,12 +28,17 @@ import (
 
 // Calculator calculates stake distribution from the current ledger state.
 type Calculator struct {
-	db *database.Database
+	db     *database.Database
+	logger *slog.Logger
 }
 
 // NewCalculator creates a new stake calculator.
 func NewCalculator(db *database.Database) *Calculator {
-	return &Calculator{db: db}
+	logger := db.Logger()
+	if logger == nil {
+		logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
+	}
+	return &Calculator{db: db, logger: logger}
 }
 
 // StakeDistribution represents the stake distribution at a point in time.
@@ -46,6 +53,12 @@ type StakeDistribution struct {
 
 // CalculateStakeDistribution calculates the stake distribution at a given slot.
 // This aggregates all delegated stake by pool from the account and UTxO tables.
+//
+// Pool selection is slot-aware: only pools registered at or before the
+// requested slot are included. Stake aggregation currently uses the current
+// ledger state (delegator counts from the accounts table; stake values are
+// zero placeholders). A future slot-aware GetStakeByPoolsAtSlot method is
+// needed for full consensus-grade accuracy; see getBatchPoolsDelegatedStake.
 func (c *Calculator) CalculateStakeDistribution(
 	ctx context.Context,
 	slot uint64,
@@ -56,9 +69,9 @@ func (c *Calculator) CalculateStakeDistribution(
 		DelegatorCount: make(map[lcommon.PoolKeyHash]uint64),
 	}
 
-	// Get all active accounts with their delegations
-	// We query accounts that were active at or before the given slot
-	txn := c.db.Transaction(false) // read-only transaction
+	// Read-only transaction so the entire calculation observes a
+	// consistent database snapshot.
+	txn := c.db.Transaction(false)
 	defer func() { _ = txn.Commit() }()
 
 	err := c.calculateFromAccounts(ctx, txn, slot, dist)
@@ -83,7 +96,8 @@ func (c *Calculator) calculateFromAccounts(
 	meta := c.db.Metadata()
 	metaTxn := (*txn).Metadata()
 
-	// Get all active pools at the given slot
+	// Get all active pools at the given slot.
+	// Returns types.ErrNoEpochData (wrapped) if epoch data is not yet synced.
 	pools, err := c.getActivePoolsAtSlot(ctx, meta, metaTxn, slot)
 	if err != nil {
 		return fmt.Errorf("get active pools: %w", err)
@@ -123,23 +137,16 @@ func (c *Calculator) calculateFromAccounts(
 // getActivePoolsAtSlot returns all pool key hashes that were active at the slot.
 // A pool is active if it has a registration with added_slot <= slot and either
 // no retirement or retirement.epoch > epoch at slot.
-//
-// TODO: The slot parameter is currently unused - this returns the current active
-// pools from meta.GetActivePoolKeyHashes() rather than pools active at the
-// requested slot. For proper snapshot capture (e.g., evt.SnapshotSlot), implement
-// slot-aware filtering by querying historical pool registrations/retirements
-// against the provided slot, or add a GetActivePoolKeyHashesAtSlot method to
-// the MetadataStore interface.
 func (c *Calculator) getActivePoolsAtSlot(
 	_ context.Context,
 	meta metadata.MetadataStore,
 	metaTxn types.Txn,
-	_ uint64, // slot - unused, see TODO above
+	slot uint64,
 ) ([]lcommon.PoolKeyHash, error) {
-	// Query active pool key hashes from the metadata store
-	poolKeyHashBytes, err := meta.GetActivePoolKeyHashes(metaTxn)
+	// Query active pool key hashes at the given slot from the metadata store
+	poolKeyHashBytes, err := meta.GetActivePoolKeyHashesAtSlot(slot, metaTxn)
 	if err != nil {
-		return nil, fmt.Errorf("get active pool key hashes: %w", err)
+		return nil, fmt.Errorf("get active pool key hashes at slot: %w", err)
 	}
 
 	// Convert [][]byte to []lcommon.PoolKeyHash
@@ -157,9 +164,16 @@ func (c *Calculator) getActivePoolsAtSlot(
 	return pools, nil
 }
 
-// getBatchPoolsDelegatedStake calculates stake for all pools in a single batch query.
-// Returns maps of pool hash -> total stake and pool hash -> delegator count.
-// Note: stake values are currently zeros (placeholder) until UTxO aggregation is implemented.
+// getBatchPoolsDelegatedStake returns stake for all pools in a single batch
+// query. Returns maps of pool hash -> total stake and pool hash -> delegator
+// count. Stake values are currently zero (placeholder) until UTxO aggregation
+// is implemented; delegator counts reflect the current ledger state.
+//
+// TODO: Replace GetStakeByPools with a slot-aware GetStakeByPoolsAtSlot that:
+//  1. Filters accounts active at the given slot (added_slot <= slot)
+//  2. Considers delegation certificates at or before the slot
+//  3. Aggregates UTxO values at the slot (created_slot <= slot AND
+//     (spent_slot IS NULL OR spent_slot > slot))
 func (c *Calculator) getBatchPoolsDelegatedStake(
 	_ context.Context,
 	meta metadata.MetadataStore,
