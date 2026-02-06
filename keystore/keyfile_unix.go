@@ -21,23 +21,20 @@ import (
 	"os"
 )
 
-// checkKeyFilePermissions verifies a key file has secure permissions.
-// Returns an error if the file is not exactly 0600 (owner read/write only).
-func checkKeyFilePermissions(path string) error {
-	info, err := os.Stat(path)
+// checkOpenFilePermissions verifies permissions on an already-opened file
+// using fstat to avoid TOCTOU races between permission check and read.
+func checkOpenFilePermissions(f *os.File) error {
+	fi, err := f.Stat()
 	if err != nil {
-		return fmt.Errorf("failed to stat file: %w", err)
+		return fmt.Errorf("failed to stat key file %q: %w", f.Name(), err)
 	}
-
-	mode := info.Mode().Perm()
-	// Enforce exactly 0600: owner read+write only, no group/world/execute
-	if mode != 0o600 {
+	if fi.Mode().Perm()&0o077 != 0 {
 		return fmt.Errorf(
-			"%w: %o (key files must be 0600, owner read/write only)",
+			"key file %q has mode %04o, group/other access not permitted: %w",
+			f.Name(),
+			fi.Mode().Perm(),
 			ErrInsecureFileMode,
-			mode,
 		)
 	}
-
 	return nil
 }

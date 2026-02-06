@@ -72,6 +72,12 @@ type Config struct {
 	activePeersTopologyQuota int
 	activePeersGossipQuota   int
 	activePeersLedgerQuota   int
+	// Block production configuration (SPO mode)
+	// Field names match cardano-node environment variable naming convention
+	blockProducer                 bool
+	shelleyVRFKey                 string
+	shelleyKESKey                 string
+	shelleyOperationalCertificate string
 }
 
 // configPopulateNetworkMagic uses the named network (if specified) to determine the network magic value (if not specified)
@@ -348,5 +354,37 @@ func WithActivePeersQuotas(
 		c.activePeersTopologyQuota = topologyQuota
 		c.activePeersGossipQuota = gossipQuota
 		c.activePeersLedgerQuota = ledgerQuota
+	}
+}
+
+// WithBlockProducer enables block production mode (CARDANO_BLOCK_PRODUCER).
+// When enabled, the node will attempt to produce blocks using the configured credentials.
+func WithBlockProducer(enabled bool) ConfigOptionFunc {
+	return func(c *Config) {
+		c.blockProducer = enabled
+	}
+}
+
+// WithShelleyVRFKey specifies the path to the VRF signing key file (CARDANO_SHELLEY_VRF_KEY).
+// Required for block production.
+func WithShelleyVRFKey(path string) ConfigOptionFunc {
+	return func(c *Config) {
+		c.shelleyVRFKey = path
+	}
+}
+
+// WithShelleyKESKey specifies the path to the KES signing key file (CARDANO_SHELLEY_KES_KEY).
+// Required for block production.
+func WithShelleyKESKey(path string) ConfigOptionFunc {
+	return func(c *Config) {
+		c.shelleyKESKey = path
+	}
+}
+
+// WithShelleyOperationalCertificate specifies the path to the operational certificate file
+// (CARDANO_SHELLEY_OPERATIONAL_CERTIFICATE). Required for block production.
+func WithShelleyOperationalCertificate(path string) ConfigOptionFunc {
+	return func(c *Config) {
+		c.shelleyOperationalCertificate = path
 	}
 }

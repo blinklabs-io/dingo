@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -49,14 +50,54 @@ type loadedKey struct {
 
 // loadKeyFromFile loads a key from a file path (cardano-cli format).
 // Supports VRF, KES, and operational certificates.
+// Returns ErrInsecureFileMode if the file has group or other access.
+//
+// The file is opened first and permissions are checked on the open handle
+// (via fstat on Unix) to avoid a TOCTOU race between the permission check
+// and the read.
 func loadKeyFromFile(path string) (*loadedKey, error) {
-	data, err := os.ReadFile(path)
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open key file %q: %w", path, err)
+	}
+	defer f.Close()
+
+	if err := checkOpenFilePermissions(f); err != nil {
+		return nil, err
+	}
+
+	// Limit read to 1 MiB to guard against accidentally pointing at a
+	// large file. Valid key files are well under this size.
+	const maxKeyFileSize = 1 << 20
+	data, err := io.ReadAll(io.LimitReader(f, maxKeyFileSize))
 	if err != nil {
 		return nil, fmt.Errorf("failed to read key file %q: %w", path, err)
 	}
 	key, err := parseKeyEnvelope(data)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse key file %q: %w", path, err)
+	}
+	return key, nil
+}
+
+// loadOpCertFromFile loads an operational certificate from a file path.
+// Unlike loadKeyFromFile, this does not check file permissions because
+// operational certificates contain only public data (cold vkey, KES vkey,
+// signature) and do not require protection like secret keys.
+func loadOpCertFromFile(path string) (*loadedKey, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read OpCert file %q: %w", path, err)
+	}
+	key, err := parseKeyEnvelope(data)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse OpCert file %q: %w", path, err)
+	}
+	if key.Type != "NodeOperationalCertificate" {
+		return nil, fmt.Errorf(
+			"expected NodeOperationalCertificate, got %s",
+			key.Type,
+		)
 	}
 	return key, nil
 }
