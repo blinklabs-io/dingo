@@ -23,6 +23,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/blinklabs-io/dingo/blockfrost"
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/chainselection"
 	"github.com/blinklabs-io/dingo/chainsync"
@@ -54,6 +55,7 @@ type Node struct {
 	ledgerState    *ledger.LedgerState
 	snapshotMgr    *snapshot.Manager
 	utxorpc        *utxorpc.Utxorpc
+	blockfrostAPI  *blockfrost.Blockfrost
 	ouroboros      *ouroborosPkg.Ouroboros
 	blockForger    *forging.BlockForger
 	leaderElection *leader.Election
@@ -415,6 +417,29 @@ func (n *Node) Run(ctx context.Context) error {
 			)
 		}
 	})
+	// Configure Blockfrost API (if listen address is set)
+	if n.config.blockfrostListenAddress != "" {
+		adapter := blockfrost.NewNodeAdapter(n.ledgerState)
+		n.blockfrostAPI = blockfrost.New(
+			blockfrost.BlockfrostConfig{
+				ListenAddress: n.config.blockfrostListenAddress,
+			},
+			adapter,
+			n.config.logger,
+		)
+		if err := n.blockfrostAPI.Start(n.ctx); err != nil { //nolint:contextcheck
+			return err
+		}
+		started = append(started, func() { //nolint:contextcheck
+			if err := n.blockfrostAPI.Stop(context.Background()); err != nil {
+				n.config.logger.Error(
+					"failed to stop blockfrost API during cleanup",
+					"error",
+					err,
+				)
+			}
+		})
+	}
 
 	// Initialize block forger if production mode is enabled
 	if n.config.blockProducer {
@@ -502,6 +527,15 @@ func (n *Node) shutdown() error {
 	if n.utxorpc != nil {
 		if stopErr := n.utxorpc.Stop(ctx); stopErr != nil {
 			err = errors.Join(err, fmt.Errorf("utxorpc shutdown: %w", stopErr))
+		}
+	}
+
+	if n.blockfrostAPI != nil {
+		if stopErr := n.blockfrostAPI.Stop(ctx); stopErr != nil {
+			err = errors.Join(
+				err,
+				fmt.Errorf("blockfrost API shutdown: %w", stopErr),
+			)
 		}
 	}
 
