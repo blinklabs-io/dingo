@@ -21,6 +21,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
@@ -143,7 +144,81 @@ func (d *LedgerDelta) apply(ls *LedgerState, txn *database.Txn) error {
 		if err != nil {
 			return fmt.Errorf("record transaction: %w", err)
 		}
+
+		// Process governance proposals and votes for valid Conway-era transactions
+		if tr.Tx.IsValid() {
+			if err := d.processGovernance(ls, tr.Tx, txn); err != nil {
+				return fmt.Errorf("process governance: %w", err)
+			}
+		}
 	}
+	return nil
+}
+
+// processGovernance handles governance proposals and votes from a transaction.
+// This is called during delta application for valid Conway-era transactions.
+// Proposals and votes are only present in Conway-era transactions, so this is
+// a no-op for pre-Conway eras.
+func (d *LedgerDelta) processGovernance(
+	ls *LedgerState,
+	tx lcommon.Transaction,
+	txn *database.Txn,
+) error {
+	proposals := tx.ProposalProcedures()
+	votes := tx.VotingProcedures()
+
+	// Early return if no governance data to process
+	if len(proposals) == 0 && len(votes) == 0 {
+		return nil
+	}
+
+	// Determine current epoch and governance action lifetime from protocol params.
+	// These are only available for Conway-era protocol parameters.
+	var currentEpoch uint64
+	var govActionLifetime uint64
+
+	if len(proposals) > 0 {
+		ls.RLock()
+		currentEpoch = ls.currentEpoch.EpochId
+		pparams := ls.currentPParams
+		ls.RUnlock()
+
+		conwayPParams, ok := pparams.(*conway.ConwayProtocolParameters)
+		if !ok {
+			return fmt.Errorf(
+				"governance proposals require Conway protocol parameters, got %T",
+				pparams,
+			)
+		}
+		govActionLifetime = conwayPParams.GovActionValidityPeriod
+	}
+
+	// Process governance proposals
+	if len(proposals) > 0 {
+		if err := processGovernanceProposals(
+			tx,
+			d.Point,
+			currentEpoch,
+			govActionLifetime,
+			ls.db,
+			txn,
+		); err != nil {
+			return fmt.Errorf("process governance proposals: %w", err)
+		}
+	}
+
+	// Process governance votes
+	if len(votes) > 0 {
+		if err := processGovernanceVotes(
+			tx,
+			d.Point,
+			ls.db,
+			txn,
+		); err != nil {
+			return fmt.Errorf("process governance votes: %w", err)
+		}
+	}
+
 	return nil
 }
 
