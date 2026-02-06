@@ -145,3 +145,169 @@ func TestSlotCalc(t *testing.T) {
 		}
 	}
 }
+
+func TestSlotToEpochProjection(t *testing.T) {
+	// Test that SlotToEpoch correctly projects future epochs beyond known epochs
+	testLedgerState := &LedgerState{
+		epochCache: []models.Epoch{
+			{
+				EpochId:       0,
+				StartSlot:     0,
+				SlotLength:    1000,
+				LengthInSlots: 100, // 100 slots per epoch for easier math
+				EraId:         1,
+			},
+			{
+				EpochId:       1,
+				StartSlot:     100,
+				SlotLength:    1000,
+				LengthInSlots: 100,
+				EraId:         1,
+			},
+			{
+				EpochId:       2,
+				StartSlot:     200,
+				SlotLength:    1000,
+				LengthInSlots: 100,
+				EraId:         1,
+			},
+		},
+	}
+
+	testCases := []struct {
+		name          string
+		slot          uint64
+		expectedEpoch uint64
+		expectedStart uint64
+	}{
+		{
+			name:          "within known epoch 0",
+			slot:          50,
+			expectedEpoch: 0,
+			expectedStart: 0,
+		},
+		{
+			name:          "within known epoch 2 (last known)",
+			slot:          250,
+			expectedEpoch: 2,
+			expectedStart: 200,
+		},
+		{
+			name:          "first slot of projected epoch 3",
+			slot:          300,
+			expectedEpoch: 3,
+			expectedStart: 300,
+		},
+		{
+			name:          "middle of projected epoch 3",
+			slot:          350,
+			expectedEpoch: 3,
+			expectedStart: 300,
+		},
+		{
+			name:          "last slot of projected epoch 3",
+			slot:          399,
+			expectedEpoch: 3,
+			expectedStart: 300,
+		},
+		{
+			name:          "first slot of projected epoch 4",
+			slot:          400,
+			expectedEpoch: 4,
+			expectedStart: 400,
+		},
+		{
+			name:          "far future epoch 10",
+			slot:          1050,
+			expectedEpoch: 10,
+			expectedStart: 1000,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			epoch, err := testLedgerState.SlotToEpoch(tc.slot)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if epoch.EpochId != tc.expectedEpoch {
+				t.Errorf(
+					"expected epoch %d, got %d",
+					tc.expectedEpoch,
+					epoch.EpochId,
+				)
+			}
+			if epoch.StartSlot != tc.expectedStart {
+				t.Errorf(
+					"expected start slot %d, got %d",
+					tc.expectedStart,
+					epoch.StartSlot,
+				)
+			}
+			// Verify the slot falls within the returned epoch
+			if tc.slot < epoch.StartSlot ||
+				tc.slot >= epoch.StartSlot+uint64(epoch.LengthInSlots) {
+				t.Errorf(
+					"slot %d not within returned epoch (start=%d, length=%d)",
+					tc.slot,
+					epoch.StartSlot,
+					epoch.LengthInSlots,
+				)
+			}
+		})
+	}
+}
+
+func TestSlotToEpochEmptyCache(t *testing.T) {
+	testLedgerState := &LedgerState{
+		epochCache: []models.Epoch{},
+	}
+
+	_, err := testLedgerState.SlotToEpoch(100)
+	if err == nil {
+		t.Error("expected error for empty epoch cache")
+	}
+	if err.Error() != "no epochs in cache" {
+		t.Errorf("unexpected error message: %s", err.Error())
+	}
+}
+
+func TestSlotToEpochBeforeFirstEpoch(t *testing.T) {
+	// Test that slots before the first known epoch return an error
+	testLedgerState := &LedgerState{
+		epochCache: []models.Epoch{
+			{
+				EpochId:       5, // First known epoch is not epoch 0
+				StartSlot:     500,
+				SlotLength:    1000,
+				LengthInSlots: 100,
+				EraId:         1,
+			},
+			{
+				EpochId:       6,
+				StartSlot:     600,
+				SlotLength:    1000,
+				LengthInSlots: 100,
+				EraId:         1,
+			},
+		},
+	}
+
+	// Slot before first known epoch should error
+	_, err := testLedgerState.SlotToEpoch(100)
+	if err == nil {
+		t.Error("expected error for slot before first known epoch")
+	}
+	if err.Error() != "slot is before the first known epoch" {
+		t.Errorf("unexpected error message: %s", err.Error())
+	}
+
+	// Slot at first epoch boundary should work
+	epoch, err := testLedgerState.SlotToEpoch(500)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if epoch.EpochId != 5 {
+		t.Errorf("expected epoch 5, got %d", epoch.EpochId)
+	}
+}
