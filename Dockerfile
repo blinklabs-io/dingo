@@ -48,17 +48,22 @@ COPY --from=cardano-configs /config/ /opt/cardano/config/
 COPY --from=mithril-client /bin/mithril-client /usr/local/bin/
 COPY --from=nview /bin/nview /usr/local/bin/
 COPY --from=txtop /bin/txtop /usr/local/bin/
+COPY --chmod=0755 bin/entrypoint.sh /bin/entrypoint.sh
 ENV CARDANO_NODE_BINARY=dingo
-ENV CARDANO_CONFIG=/opt/cardano/config/preview/config.json
 ENV CARDANO_NETWORK=preview
 # Create database dir owned by container user
 VOLUME /data/db
 ENV CARDANO_DATABASE_PATH=/data/db
 # Create socket dir owned by container user
 VOLUME /ipc
+ENV DINGO_SOCKET_PATH=/ipc/dingo.socket
 ENV CARDANO_NODE_SOCKET_PATH=/ipc/dingo.socket
 ENV CARDANO_SOCKET_PATH=/ipc/dingo.socket
-ENTRYPOINT ["dingo"]
+EXPOSE 3001 3002 9090 12798
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
+  CMD wget -qO/dev/null http://127.0.0.1:12798/metrics || exit 1
+ENTRYPOINT ["/bin/entrypoint.sh"]
+CMD ["serve"]
 
 FROM dingo AS antithesis
 RUN apt-get update -y && \
