@@ -355,8 +355,13 @@ func TestMempoolConsumer_NextTx_Blocking(t *testing.T) {
 		resultChan <- tx
 	}()
 
-	// Give goroutine time to start blocking
-	time.Sleep(50 * time.Millisecond)
+	// Verify goroutine is blocking (not returning immediately)
+	select {
+	case <-resultChan:
+		t.Fatal("NextTx should be blocking on empty mempool")
+	case <-time.After(50 * time.Millisecond):
+		// Expected: still blocking
+	}
 
 	// Add a transaction - this should unblock the consumer
 	txs := addMockTransactions(t, m, 1)
@@ -1165,15 +1170,12 @@ func TestMempool_BlockingNextTx_WithEmptyMempool(t *testing.T) {
 		resultChan <- tx
 	}()
 
-	// Give it time to start blocking
-	time.Sleep(50 * time.Millisecond)
-
 	// Verify it's still blocking (hasn't returned)
 	select {
 	case <-resultChan:
 		t.Fatal("NextTx should still be blocking")
-	default:
-		// Expected - still blocking
+	case <-time.After(50 * time.Millisecond):
+		// Expected - still blocking after waiting
 	}
 
 	// Now add a transaction and publish event
@@ -1223,15 +1225,12 @@ func TestMempool_BlockingNextTx_UnblocksOnShutdown(t *testing.T) {
 		resultChan <- tx
 	}()
 
-	// Give it time to start blocking
-	time.Sleep(50 * time.Millisecond)
-
 	// Verify it's still blocking (hasn't returned)
 	select {
 	case <-resultChan:
 		t.Fatal("NextTx should still be blocking")
-	default:
-		// Expected - still blocking
+	case <-time.After(50 * time.Millisecond):
+		// Expected - still blocking after waiting
 	}
 
 	// Stop the mempool
@@ -1527,8 +1526,13 @@ func TestMempool_NextTxIdx_RaceCondition(t *testing.T) {
 		resultChan <- received
 	}()
 
-	// Give consumer time to start waiting
-	time.Sleep(50 * time.Millisecond)
+	// Verify consumer is blocking (waiting for transactions)
+	select {
+	case <-resultChan:
+		t.Fatal("consumer should be blocking on empty mempool")
+	case <-time.After(50 * time.Millisecond):
+		// Expected: still blocking
+	}
 
 	// Rapidly add multiple transactions and publish events
 	for i := range 5 {

@@ -18,6 +18,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 )
 
 func TestScheduler_RegistersAndRunsTask(t *testing.T) {
@@ -33,16 +35,12 @@ func TestScheduler_RegistersAndRunsTask(t *testing.T) {
 		atomic.AddInt32(&counter, 1)
 	}, nil)
 
-	// Sleeping for 100ms to allow multiple ticks to occur
-	time.Sleep(100 * time.Millisecond)
-
-	finalCount := atomic.LoadInt32(&counter)
-	if finalCount < 2 {
-		t.Errorf(
-			"Expected task to run at least 2 times, but got %d",
-			finalCount,
-		)
-	}
+	// Wait for task to run at least 2 times (polls instead of fixed sleep)
+	require.Eventually(t, func() bool {
+		return atomic.LoadInt32(&counter) >= 2
+	}, 2*time.Second, 10*time.Millisecond,
+		"expected task to run at least 2 times",
+	)
 }
 
 func TestScheduler_ChangeInterval(t *testing.T) {
@@ -58,20 +56,25 @@ func TestScheduler_ChangeInterval(t *testing.T) {
 		atomic.AddInt32(&counter, 1)
 	}, nil)
 
-	// Waiting 120ms to observe task execution at 50ms interval
-	time.Sleep(120 * time.Millisecond)
+	// Wait for at least 2 executions before changing interval
+	require.Eventually(t, func() bool {
+		return atomic.LoadInt32(&counter) >= 2
+	}, 2*time.Second, 10*time.Millisecond,
+		"expected at least 2 executions before interval change",
+	)
 	beforeChange := atomic.LoadInt32(&counter)
-	if beforeChange < 2 {
-		t.Errorf(
-			"Expected at least 2 executions before interval change, got %d",
-			beforeChange,
-		)
-	}
 
 	// Change interval to 200ms
 	timer.ChangeInterval(200 * time.Millisecond)
 
-	// Sleep for 500ms after interval change to observe behavior
+	// Wait for at least 1 execution after interval change
+	require.Eventually(t, func() bool {
+		return atomic.LoadInt32(&counter)-beforeChange >= 1
+	}, 2*time.Second, 10*time.Millisecond,
+		"expected at least 1 execution after interval change",
+	)
+
+	// Allow enough time for potential additional ticks
 	time.Sleep(500 * time.Millisecond)
 
 	secondCount := atomic.LoadInt32(&counter)
@@ -106,16 +109,12 @@ func TestSchedulerRunFailFunc(t *testing.T) {
 		},
 	)
 
-	// Sleeping for 200ms to allow multiple ticks to occur
-	time.Sleep(200 * time.Millisecond)
-
-	finalCount := atomic.LoadInt32(&failCounter)
-	if finalCount < 3 {
-		t.Errorf(
-			"Expected failure to run task at least 3 times, but got %d",
-			finalCount,
-		)
-	}
+	// Wait for the fail function to be called at least 3 times
+	require.Eventually(t, func() bool {
+		return atomic.LoadInt32(&failCounter) >= 3
+	}, 5*time.Second, 10*time.Millisecond,
+		"expected failure to run task at least 3 times",
+	)
 }
 
 func TestScheduler_Config(t *testing.T) {

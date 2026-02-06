@@ -345,8 +345,12 @@ func TestAcceptLoopBackoffOnError(t *testing.T) {
 	err := cm.Start(context.Background())
 	require.NoError(t, err)
 
-	// Wait for some accept calls - with backoff, should be limited
-	// Without backoff, this would be millions of calls
+	// Wait for at least one accept call before measuring backoff behavior
+	require.Eventually(t, func() bool {
+		return mockLn.AcceptCount() >= 1
+	}, 2*time.Second, 5*time.Millisecond, "accept should be called at least once")
+
+	// Allow some time for backoff to accumulate a few calls
 	// With backoff starting at 10ms, we expect roughly:
 	// - First call: immediate
 	// - Second call: after 10ms (first error)
@@ -364,7 +368,7 @@ func TestAcceptLoopBackoffOnError(t *testing.T) {
 	// Verify backoff worked - should have far fewer than 1000 calls
 	// Without backoff, a tight loop would have many more
 	acceptCount := mockLn.AcceptCount()
-	t.Logf("Accept was called %d times in 100ms", acceptCount)
+	t.Logf("Accept was called %d times", acceptCount)
 
 	// With exponential backoff, we expect around 3-5 calls in 100ms
 	// Be generous to account for test timing variations
@@ -473,7 +477,9 @@ func TestAcceptLoopExitsOnClose(t *testing.T) {
 	require.NoError(t, err)
 
 	// Wait for at least one accept call
-	time.Sleep(20 * time.Millisecond)
+	require.Eventually(t, func() bool {
+		return mockLn.AcceptCount() >= 1
+	}, 2*time.Second, 5*time.Millisecond, "accept should be called at least once")
 
 	// Stop should exit cleanly even during backoff
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)

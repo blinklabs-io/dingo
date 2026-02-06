@@ -31,6 +31,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func newMockEventBus() *event.EventBus {
@@ -819,11 +820,10 @@ func TestPeerGovernor_IsDenied_Expiry(t *testing.T) {
 	// Should be denied initially
 	assert.True(t, pg.IsDenied("127.0.0.1:3001"))
 
-	// Wait for expiry
-	time.Sleep(5 * time.Millisecond)
-
-	// Should no longer be denied
-	assert.False(t, pg.IsDenied("127.0.0.1:3001"))
+	// Wait for expiry using polling instead of fixed sleep
+	require.Eventually(t, func() bool {
+		return !pg.IsDenied("127.0.0.1:3001")
+	}, 1*time.Second, 1*time.Millisecond, "deny entry should expire")
 }
 
 func TestPeerGovernor_AddPeer_Denied(t *testing.T) {
@@ -4000,8 +4000,12 @@ func TestPeerGovernor_EventsPublished(t *testing.T) {
 	// Trigger gossip churn
 	pg.gossipChurn()
 
-	// Wait a moment for async event delivery
-	time.Sleep(50 * time.Millisecond)
+	// Wait for async event delivery
+	require.Eventually(t, func() bool {
+		churnMu.Lock()
+		defer churnMu.Unlock()
+		return len(churnEvents) >= 1
+	}, 2*time.Second, 5*time.Millisecond, "at least one churn event should be published")
 
 	// Verify PeerChurnEvent was published with correct data
 	churnMu.Lock()
@@ -4011,13 +4015,6 @@ func TestPeerGovernor_EventsPublished(t *testing.T) {
 		firstChurn = churnEvents[0]
 	}
 	churnMu.Unlock()
-
-	assert.GreaterOrEqual(
-		t,
-		churnLen,
-		1,
-		"at least one churn event should be published",
-	)
 	if churnLen > 0 {
 		assert.Equal(t, "192.168.1.1:3001", firstChurn.Address)
 		assert.Equal(t, "gossip", firstChurn.Source)
@@ -4059,8 +4056,12 @@ func TestPeerGovernor_EventsPublished(t *testing.T) {
 	// Run reconcile which should publish QuotaStatusEvent
 	pg.reconcile()
 
-	// Wait for event delivery
-	time.Sleep(50 * time.Millisecond)
+	// Wait for async event delivery
+	require.Eventually(t, func() bool {
+		quotaMu.Lock()
+		defer quotaMu.Unlock()
+		return len(quotaEvents) >= 1
+	}, 2*time.Second, 5*time.Millisecond, "quota status event should be published")
 
 	// Verify QuotaStatusEvent was published
 	quotaMu.Lock()
@@ -4070,13 +4071,6 @@ func TestPeerGovernor_EventsPublished(t *testing.T) {
 		lastQuota = quotaEvents[quotaLen-1]
 	}
 	quotaMu.Unlock()
-
-	assert.GreaterOrEqual(
-		t,
-		quotaLen,
-		1,
-		"quota status event should be published",
-	)
 	if quotaLen > 0 {
 		assert.Equal(t, 1, lastQuota.GossipHot, "should have 1 gossip hot peer")
 		assert.Equal(
