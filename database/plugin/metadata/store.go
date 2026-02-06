@@ -122,6 +122,9 @@ type MetadataStore interface {
 		types.Txn,
 	) (*models.Drep, error)
 
+	// GetActiveDreps retrieves all active DReps.
+	GetActiveDreps(types.Txn) ([]*models.Drep, error)
+
 	// GetPParams retrieves protocol parameters for a given epoch.
 	GetPParams(
 		uint64, // epoch

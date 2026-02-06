@@ -37,3 +37,14 @@ func (d *Database) GetDrep(
 	}
 	return ret, nil
 }
+
+// GetActiveDreps returns all active DReps
+func (d *Database) GetActiveDreps(
+	txn *Txn,
+) ([]*models.Drep, error) {
+	if txn == nil {
+		txn = d.MetadataTxn(false)
+		defer txn.Release()
+	}
+	return d.metadata.GetActiveDreps(txn.Metadata())
+}
