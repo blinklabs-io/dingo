@@ -16,6 +16,7 @@ package gcs
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -94,6 +95,26 @@ func NewWithOptions(opts ...BlobStoreGCSOptionFunc) (*BlobStoreGCS, error) {
 	return db, nil
 }
 
+func (d *BlobStoreGCS) fullKey(key string) string {
+	return hex.EncodeToString([]byte(key))
+}
+
+func (d *BlobStoreGCS) externalKey(key string) (string, error) {
+	b, err := hex.DecodeString(key)
+	if err != nil {
+		return "", fmt.Errorf("failed decoding hex key %q: %w", key, err)
+	}
+	return string(b), nil
+}
+
+func (d *BlobStoreGCS) object(key []byte) *storage.ObjectHandle {
+	return d.bucket.Object(d.fullKey(string(key)))
+}
+
+func (d *BlobStoreGCS) objects(ctx context.Context, prefix []byte) *storage.ObjectIterator {
+	return d.bucket.Objects(ctx, &storage.Query{Prefix: d.fullKey(string(prefix))})
+}
+
 func (d *BlobStoreGCS) opContext() (context.Context, context.CancelFunc) {
 	timeout := d.timeout
 	if timeout == 0 {
@@ -148,7 +169,7 @@ func (d *BlobStoreGCS) Get(txn types.Txn, key []byte) ([]byte, error) {
 	}
 	ctx, cancel := d.opContext()
 	defer cancel()
-	r, err := d.bucket.Object(string(key)).NewReader(ctx)
+	r, err := d.object(key).NewReader(ctx)
 	if err != nil {
 		if errors.Is(err, storage.ErrObjectNotExist) {
 			return nil, types.ErrBlobKeyNotFound
@@ -189,7 +210,7 @@ func (d *BlobStoreGCS) Set(txn types.Txn, key, val []byte) error {
 	}
 	ctx, cancel := d.opContext()
 	defer cancel()
-	w := d.bucket.Object(string(key)).NewWriter(ctx)
+	w := d.object(key).NewWriter(ctx)
 	if _, err := w.Write(val); err != nil {
 		_ = w.Close()
 		d.logger.Errorf("failed to write object %q: %v", string(key), err)
@@ -217,7 +238,7 @@ func (d *BlobStoreGCS) Delete(txn types.Txn, key []byte) error {
 	}
 	ctx, cancel := d.opContext()
 	defer cancel()
-	if err := d.bucket.Object(string(key)).Delete(ctx); err != nil {
+	if err := d.object(key).Delete(ctx); err != nil {
 		if errors.Is(err, storage.ErrObjectNotExist) {
 			return types.ErrBlobKeyNotFound
 		}
@@ -282,7 +303,7 @@ func (d *BlobStoreGCS) SetBlock(
 
 	// Block content by point
 	key := types.BlockBlobKey(slot, hash)
-	w := d.bucket.Object(string(key)).NewWriter(ctx)
+	w := d.object(key).NewWriter(ctx)
 	if _, err := w.Write(cborData); err != nil {
 		_ = w.Close()
 		d.logger.Errorf("failed to write object %q: %v", string(key), err)
@@ -296,7 +317,7 @@ func (d *BlobStoreGCS) SetBlock(
 
 	// Block index to point key
 	indexKey := types.BlockBlobIndexKey(id)
-	w = d.bucket.Object(string(indexKey)).NewWriter(ctx)
+	w = d.object(indexKey).NewWriter(ctx)
 	if _, err := w.Write(key); err != nil {
 		_ = w.Close()
 		d.logger.Errorf("failed to write object %q: %v", string(indexKey), err)
@@ -327,7 +348,7 @@ func (d *BlobStoreGCS) SetBlock(
 		d.cleanupObjects(ctx, writtenObjects)
 		return err
 	}
-	w = d.bucket.Object(string(metadataKey)).NewWriter(ctx)
+	w = d.object(metadataKey).NewWriter(ctx)
 	if _, err := w.Write(tmpMetadataBytes); err != nil {
 		_ = w.Close()
 		d.logger.Errorf(
@@ -358,7 +379,7 @@ func (d *BlobStoreGCS) cleanupObjects(
 	objectNames []string,
 ) {
 	for _, objName := range objectNames {
-		if err := d.bucket.Object(objName).Delete(ctx); err != nil {
+		if err := d.object([]byte(objName)).Delete(ctx); err != nil {
 			if !errors.Is(err, storage.ErrObjectNotExist) {
 				d.logger.Warningf(
 					"failed to cleanup orphaned object during SetBlock failure: object=%s error=%v",
@@ -388,7 +409,7 @@ func (d *BlobStoreGCS) GetBlock(
 	ctx, cancel := d.opContext()
 	defer cancel()
 	key := types.BlockBlobKey(slot, hash)
-	r, err := d.bucket.Object(string(key)).NewReader(ctx)
+	r, err := d.object(key).NewReader(ctx)
 	if err != nil {
 		if errors.Is(err, storage.ErrObjectNotExist) {
 			return nil, types.BlockMetadata{}, types.ErrBlobKeyNotFound
@@ -415,7 +436,7 @@ func (d *BlobStoreGCS) GetBlock(
 		return nil, types.BlockMetadata{}, wrappedErr
 	}
 	metadataKey := types.BlockBlobMetadataKey(key)
-	r, err = d.bucket.Object(string(metadataKey)).NewReader(ctx)
+	r, err = d.object(metadataKey).NewReader(ctx)
 	if err != nil {
 		if errors.Is(err, storage.ErrObjectNotExist) {
 			// Block content exists but metadata is missing - this indicates a partial write
@@ -471,19 +492,19 @@ func (d *BlobStoreGCS) DeleteBlock(
 	ctx, cancel := d.opContext()
 	defer cancel()
 	key := types.BlockBlobKey(slot, hash)
-	if err := d.bucket.Object(string(key)).Delete(ctx); err != nil &&
+	if err := d.object(key).Delete(ctx); err != nil &&
 		!errors.Is(err, storage.ErrObjectNotExist) {
 		d.logger.Errorf("gcs delete %q failed: %v", string(key), err)
 		return err
 	}
 	indexKey := types.BlockBlobIndexKey(id)
-	if err := d.bucket.Object(string(indexKey)).Delete(ctx); err != nil &&
+	if err := d.object(indexKey).Delete(ctx); err != nil &&
 		!errors.Is(err, storage.ErrObjectNotExist) {
 		d.logger.Errorf("gcs delete %q failed: %v", string(indexKey), err)
 		return err
 	}
 	metadataKey := types.BlockBlobMetadataKey(key)
-	if err := d.bucket.Object(string(metadataKey)).Delete(ctx); err != nil &&
+	if err := d.object(metadataKey).Delete(ctx); err != nil &&
 		!errors.Is(err, storage.ErrObjectNotExist) {
 		d.logger.Errorf("gcs delete %q failed: %v", string(metadataKey), err)
 		return err
@@ -508,7 +529,7 @@ func (d *BlobStoreGCS) SetUtxo(
 	ctx, cancel := d.opContext()
 	defer cancel()
 	key := types.UtxoBlobKey(txId, outputIdx)
-	w := d.bucket.Object(string(key)).NewWriter(ctx)
+	w := d.object(key).NewWriter(ctx)
 	if _, err := w.Write(cborData); err != nil {
 		_ = w.Close()
 		d.logger.Errorf("failed to write object %q: %v", string(key), err)
@@ -533,7 +554,7 @@ func (d *BlobStoreGCS) GetUtxo(
 	ctx, cancel := d.opContext()
 	defer cancel()
 	key := types.UtxoBlobKey(txId, outputIdx)
-	r, err := d.bucket.Object(string(key)).NewReader(ctx)
+	r, err := d.object(key).NewReader(ctx)
 	if err != nil {
 		if errors.Is(err, storage.ErrObjectNotExist) {
 			return nil, types.ErrBlobKeyNotFound
@@ -578,7 +599,7 @@ func (d *BlobStoreGCS) DeleteUtxo(
 	ctx, cancel := d.opContext()
 	defer cancel()
 	key := types.UtxoBlobKey(txId, outputIdx)
-	if err := d.bucket.Object(string(key)).Delete(ctx); err != nil &&
+	if err := d.object(key).Delete(ctx); err != nil &&
 		!errors.Is(err, storage.ErrObjectNotExist) {
 		d.logger.Errorf("gcs delete %q failed: %v", string(key), err)
 		return err
@@ -602,7 +623,7 @@ func (d *BlobStoreGCS) SetTx(
 	ctx, cancel := d.opContext()
 	defer cancel()
 	key := types.TxBlobKey(txHash)
-	w := d.bucket.Object(string(key)).NewWriter(ctx)
+	w := d.object(key).NewWriter(ctx)
 	if _, err := w.Write(offsetData); err != nil {
 		_ = w.Close()
 		wrappedErr := fmt.Errorf("gcs write %q failed: %w", string(key), err)
@@ -628,7 +649,7 @@ func (d *BlobStoreGCS) GetTx(
 	ctx, cancel := d.opContext()
 	defer cancel()
 	key := types.TxBlobKey(txHash)
-	r, err := d.bucket.Object(string(key)).NewReader(ctx)
+	r, err := d.object(key).NewReader(ctx)
 	if err != nil {
 		if errors.Is(err, storage.ErrObjectNotExist) {
 			return nil, types.ErrBlobKeyNotFound
@@ -662,7 +683,7 @@ func (d *BlobStoreGCS) DeleteTx(
 	ctx, cancel := d.opContext()
 	defer cancel()
 	key := types.TxBlobKey(txHash)
-	if err := d.bucket.Object(string(key)).Delete(ctx); err != nil {
+	if err := d.object(key).Delete(ctx); err != nil {
 		if errors.Is(err, storage.ErrObjectNotExist) {
 			// Object doesn't exist, treat as success
 			return nil
@@ -802,7 +823,7 @@ func (d *BlobStoreGCS) listKeys(
 ) ([]string, error) {
 	ctx, cancel := d.opContext()
 	defer cancel()
-	iter := d.bucket.Objects(ctx, &storage.Query{Prefix: string(opts.Prefix)})
+	iter := d.objects(ctx, opts.Prefix)
 	keys := make([]string, 0)
 	for {
 		objAttrs, err := iter.Next()
@@ -812,7 +833,12 @@ func (d *BlobStoreGCS) listKeys(
 		if err != nil {
 			return nil, err
 		}
-		keys = append(keys, objAttrs.Name)
+
+		externalKey, err := d.externalKey(objAttrs.Name)
+		if err != nil {
+			return nil, err
+		}
+		keys = append(keys, externalKey)
 	}
 	sort.Strings(keys)
 	if opts.Reverse {
