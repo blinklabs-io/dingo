@@ -18,6 +18,7 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/ledger/eras"
+	"github.com/stretchr/testify/assert"
 )
 
 func TestGetEraById(t *testing.T) {
@@ -198,5 +199,176 @@ func TestGetEraById_AllKnownEras(t *testing.T) {
 				)
 			}
 		})
+	}
+}
+
+func TestIsCompatibleEra(t *testing.T) {
+	tests := []struct {
+		name       string
+		txEraId    uint
+		ledgerEra  uint
+		compatible bool
+	}{
+		{
+			name:       "same era: Byron in Byron",
+			txEraId:    eras.ByronEraDesc.Id,
+			ledgerEra:  eras.ByronEraDesc.Id,
+			compatible: true,
+		},
+		{
+			name:       "same era: Conway in Conway",
+			txEraId:    eras.ConwayEraDesc.Id,
+			ledgerEra:  eras.ConwayEraDesc.Id,
+			compatible: true,
+		},
+		{
+			name:       "same era: Babbage in Babbage",
+			txEraId:    eras.BabbageEraDesc.Id,
+			ledgerEra:  eras.BabbageEraDesc.Id,
+			compatible: true,
+		},
+		{
+			name:       "previous era: Babbage TX in Conway ledger",
+			txEraId:    eras.BabbageEraDesc.Id,
+			ledgerEra:  eras.ConwayEraDesc.Id,
+			compatible: true,
+		},
+		{
+			name:       "previous era: Alonzo TX in Babbage ledger",
+			txEraId:    eras.AlonzoEraDesc.Id,
+			ledgerEra:  eras.BabbageEraDesc.Id,
+			compatible: true,
+		},
+		{
+			name:       "previous era: Byron TX in Shelley ledger",
+			txEraId:    eras.ByronEraDesc.Id,
+			ledgerEra:  eras.ShelleyEraDesc.Id,
+			compatible: true,
+		},
+		{
+			name:       "previous era: Shelley TX in Allegra ledger",
+			txEraId:    eras.ShelleyEraDesc.Id,
+			ledgerEra:  eras.AllegraEraDesc.Id,
+			compatible: true,
+		},
+		{
+			name:       "two eras back: Alonzo TX in Conway ledger",
+			txEraId:    eras.AlonzoEraDesc.Id,
+			ledgerEra:  eras.ConwayEraDesc.Id,
+			compatible: false,
+		},
+		{
+			name:       "two eras back: Mary TX in Babbage ledger",
+			txEraId:    eras.MaryEraDesc.Id,
+			ledgerEra:  eras.BabbageEraDesc.Id,
+			compatible: false,
+		},
+		{
+			name:       "future era: Conway TX in Babbage ledger",
+			txEraId:    eras.ConwayEraDesc.Id,
+			ledgerEra:  eras.BabbageEraDesc.Id,
+			compatible: false,
+		},
+		{
+			name:       "future era: Babbage TX in Alonzo ledger",
+			txEraId:    eras.BabbageEraDesc.Id,
+			ledgerEra:  eras.AlonzoEraDesc.Id,
+			compatible: false,
+		},
+		{
+			name:       "no previous era for Byron",
+			txEraId:    999,
+			ledgerEra:  eras.ByronEraDesc.Id,
+			compatible: false,
+		},
+		{
+			name:       "unknown tx era",
+			txEraId:    999,
+			ledgerEra:  eras.ConwayEraDesc.Id,
+			compatible: false,
+		},
+		{
+			name:       "unknown ledger era",
+			txEraId:    eras.ConwayEraDesc.Id,
+			ledgerEra:  999,
+			compatible: false,
+		},
+		{
+			name:       "both unknown but equal",
+			txEraId:    999,
+			ledgerEra:  999,
+			compatible: true,
+		},
+		{
+			name:       "three eras back: Byron TX in Alonzo ledger",
+			txEraId:    eras.ByronEraDesc.Id,
+			ledgerEra:  eras.AlonzoEraDesc.Id,
+			compatible: false,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			result := eras.IsCompatibleEra(
+				tc.txEraId,
+				tc.ledgerEra,
+			)
+			assert.Equal(
+				t,
+				tc.compatible,
+				result,
+				"IsCompatibleEra(%d, %d)",
+				tc.txEraId,
+				tc.ledgerEra,
+			)
+		})
+	}
+}
+
+// TestIsCompatibleEra_AllAdjacentPairs verifies that
+// every consecutive pair of eras is compatible (era-1
+// is accepted in the next era).
+func TestIsCompatibleEra_AllAdjacentPairs(t *testing.T) {
+	for i := 1; i < len(eras.Eras); i++ {
+		prevEra := eras.Eras[i-1]
+		currEra := eras.Eras[i]
+		t.Run(
+			prevEra.Name+" in "+currEra.Name,
+			func(t *testing.T) {
+				// Previous era TX in current era ledger
+				assert.True(
+					t,
+					eras.IsCompatibleEra(
+						prevEra.Id,
+						currEra.Id,
+					),
+					"%s TX should be compatible with %s ledger",
+					prevEra.Name,
+					currEra.Name,
+				)
+				// Current era TX in current era ledger
+				assert.True(
+					t,
+					eras.IsCompatibleEra(
+						currEra.Id,
+						currEra.Id,
+					),
+					"%s TX should be compatible with %s ledger",
+					currEra.Name,
+					currEra.Name,
+				)
+				// Current era TX in previous era ledger
+				// (future era - not compatible)
+				assert.False(
+					t,
+					eras.IsCompatibleEra(
+						currEra.Id,
+						prevEra.Id,
+					),
+					"%s TX should NOT be compatible with %s ledger",
+					currEra.Name,
+					prevEra.Name,
+				)
+			},
+		)
 	}
 }
