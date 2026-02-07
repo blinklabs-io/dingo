@@ -424,6 +424,17 @@ type LedgerState struct {
 	closed                     bool
 	inRecovery                 bool // guards against recursive recovery in SubmitAsyncDBTxn
 	validationEnabled          bool
+
+	// Sync progress reporting (Fix 4)
+	syncProgressLastLog  time.Time     // last time we logged sync progress
+	syncProgressLastSlot uint64        // slot at last progress log (for rate calc)
+	syncUpstreamTipSlot  atomic.Uint64 // upstream peer's tip slot
+
+	// Rate-limiting for non-active connection drop messages (Fix 3)
+	dropEventLastLog    time.Time // last time we logged a drop event
+	dropEventCount      int64     // count of suppressed drop events since last log
+	dropRollbackLastLog time.Time // last time we logged a drop rollback
+	dropRollbackCount   int64     // count of suppressed drop rollbacks since last log
 }
 
 // EraTransitionResult holds computed state from an era transition
@@ -2000,6 +2011,8 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 				"component",
 				"ledger",
 			)
+			// Periodic sync progress reporting
+			ls.logSyncProgress(tipForLog.Point.Slot)
 		}
 	}
 }
