@@ -23,7 +23,10 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/gouroboros/cbor"
+	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
+	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/conway"
 )
 
 // ErrNilDecodedOutput is returned when a decoded UTxO output is nil.
@@ -289,14 +292,86 @@ func (lv *LedgerView) RewardAccountBalance(
 	return nil, nil
 }
 
-// CostModels returns the Plutus cost models.
-// TODO: implement cost models retrieval from protocol parameters.
-// Currently blocked because lcommon.PlutusLanguage and lcommon.CostModel are
-// placeholder empty structs in gouroboros. Once these types are fleshed out with
-// real fields, this method should extract cost models from the current protocol
-// parameters (lv.ls.currentPParams).
+// CostModels returns which Plutus language versions have cost
+// models defined in the current protocol parameters.
+//
+// NOTE: lcommon.CostModel is currently struct{} in gouroboros
+// (a placeholder type). The returned map values carry no cost
+// parameter data -- callers use map membership to check version
+// availability. When gouroboros extends CostModel with real
+// fields, this function should be updated to populate them
+// from the raw []int64 cost parameters.
+//
+// Map keys use PlutusLanguage encoding: PlutusV1=1, PlutusV2=2,
+// PlutusV3=3, corresponding to cost model map keys 0, 1, 2.
 func (lv *LedgerView) CostModels() map[lcommon.PlutusLanguage]lcommon.CostModel {
-	return map[lcommon.PlutusLanguage]lcommon.CostModel{}
+	pp := lv.ls.GetCurrentPParams()
+	if pp == nil {
+		return map[lcommon.PlutusLanguage]lcommon.CostModel{}
+	}
+	return extractCostModelsFromPParams(pp)
+}
+
+// costModelsProvider is an optional interface implemented by
+// era-specific protocol parameter types that expose raw cost
+// model data as map[uint][]int64.
+type costModelsProvider interface {
+	GetCostModels() map[uint][]int64
+}
+
+// extractCostModelsFromPParams returns which Plutus language
+// versions are present in the protocol parameters.
+//
+// It first tries the costModelsProvider interface, then falls
+// back to type-asserting concrete era types. The raw []int64
+// values are not stored in the returned CostModel because the
+// upstream type is currently struct{}. When gouroboros adds
+// fields to CostModel, populate them here from rawModels.
+func extractCostModelsFromPParams(
+	pp lcommon.ProtocolParameters,
+) map[lcommon.PlutusLanguage]lcommon.CostModel {
+	rawModels := extractRawCostModels(pp)
+	if rawModels == nil {
+		return map[lcommon.PlutusLanguage]lcommon.CostModel{}
+	}
+	result := make(
+		map[lcommon.PlutusLanguage]lcommon.CostModel,
+		len(rawModels),
+	)
+	for version := range rawModels {
+		if version > 2 {
+			continue
+		}
+		//nolint:gosec
+		plutusLang := lcommon.PlutusLanguage(version + 1)
+		// TODO: populate CostModel with rawModels[version]
+		// when gouroboros extends the type beyond struct{}.
+		result[plutusLang] = lcommon.CostModel{}
+	}
+	return result
+}
+
+// extractRawCostModels retrieves the raw cost model data from
+// protocol parameters. It tries the costModelsProvider interface
+// first, then falls back to type assertions for known era types.
+func extractRawCostModels(
+	pp lcommon.ProtocolParameters,
+) map[uint][]int64 {
+	// Prefer the interface if the type implements it.
+	if provider, ok := pp.(costModelsProvider); ok {
+		return provider.GetCostModels()
+	}
+	// Fall back to concrete era type assertions.
+	switch p := pp.(type) {
+	case *alonzo.AlonzoProtocolParameters:
+		return p.CostModels
+	case *babbage.BabbageProtocolParameters:
+		return p.CostModels
+	case *conway.ConwayProtocolParameters:
+		return p.CostModels
+	default:
+		return nil
+	}
 }
 
 // CommitteeMember returns a committee member by cold key.
@@ -471,7 +546,9 @@ type StakeDistribution struct {
 
 // GetStakeDistribution returns the stake distribution for leader election.
 // Uses the "go" snapshot which represents stake from 2 epochs ago.
-func (lv *LedgerView) GetStakeDistribution(epoch uint64) (*StakeDistribution, error) {
+func (lv *LedgerView) GetStakeDistribution(
+	epoch uint64,
+) (*StakeDistribution, error) {
 	snapshots, err := lv.ls.db.Metadata().GetPoolStakeSnapshotsByEpoch(
 		epoch,
 		"go",
@@ -498,7 +575,10 @@ func (lv *LedgerView) GetStakeDistribution(epoch uint64) (*StakeDistribution, er
 
 // GetPoolStake returns the stake for a specific pool from the "go" snapshot.
 // Returns 0 if the pool has no stake in the snapshot.
-func (lv *LedgerView) GetPoolStake(epoch uint64, poolKeyHash []byte) (uint64, error) {
+func (lv *LedgerView) GetPoolStake(
+	epoch uint64,
+	poolKeyHash []byte,
+) (uint64, error) {
 	snapshot, err := lv.ls.db.Metadata().GetPoolStakeSnapshot(
 		epoch,
 		"go",

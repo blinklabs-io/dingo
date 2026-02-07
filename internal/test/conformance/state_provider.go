@@ -46,7 +46,8 @@ func (p *DingoStateProvider) NetworkId() uint {
 	return 0
 }
 
-// CostModels returns the current cost models for Plutus scripts
+// CostModels returns which Plutus language versions have cost models
+// defined. CostModel values are empty markers (struct{} upstream).
 func (p *DingoStateProvider) CostModels() map[common.PlutusLanguage]common.CostModel {
 	if p.manager.protocolParams == nil {
 		return make(map[common.PlutusLanguage]common.CostModel)
@@ -345,7 +346,15 @@ func (p *DingoStateProvider) GovActionExists(id common.GovActionId) bool {
 	return state != nil
 }
 
-// extractCostModels extracts cost models from protocol parameters.
+// extractCostModels returns which Plutus language versions are
+// present in the protocol parameters.
+//
+// NOTE: common.CostModel is currently struct{} in gouroboros
+// (a placeholder type). The returned map values carry no cost
+// parameter data -- callers use map membership to check version
+// availability. When gouroboros extends CostModel with real
+// fields, this function should populate them from the raw
+// []int64 cost parameters.
 func extractCostModels(
 	pp common.ProtocolParameters,
 ) map[common.PlutusLanguage]common.CostModel {
@@ -353,7 +362,7 @@ func extractCostModels(
 		return nil
 	}
 
-	// Try to get cost models from the protocol parameters
+	// Try to get cost models from the protocol parameters.
 	type costModelsProvider interface {
 		GetCostModels() map[uint][]int64
 	}
@@ -370,6 +379,8 @@ func extractCostModels(
 			}
 			//nolint:gosec // G115: version is bounds checked above (0-2)
 			plutusLang := common.PlutusLanguage(version + 1)
+			// TODO: populate CostModel with models[version]
+			// when gouroboros extends the type beyond struct{}.
 			result[plutusLang] = common.CostModel{}
 		}
 		return result
