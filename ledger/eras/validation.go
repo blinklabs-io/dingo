@@ -119,3 +119,71 @@ func CalculateMinFee(
 	}
 	return baseFee + scriptFee
 }
+
+// DeclaredExUnits returns the total execution units
+// declared across all redeemers in a transaction's
+// witness set. These are the budgets the transaction
+// builder committed to (not the evaluated actuals).
+func DeclaredExUnits(
+	tx lcommon.Transaction,
+) lcommon.ExUnits {
+	var total lcommon.ExUnits
+	wits := tx.Witnesses()
+	if wits == nil {
+		return total
+	}
+	redeemers := wits.Redeemers()
+	if redeemers == nil {
+		return total
+	}
+	for _, val := range redeemers.Iter() {
+		total.Memory += val.ExUnits.Memory
+		total.Steps += val.ExUnits.Steps
+	}
+	return total
+}
+
+// ValidateTxFee checks that the fee declared in the
+// transaction body is at least the calculated minimum
+// fee, including both the base fee component and the
+// script execution fee component.
+//
+// The minimum fee formula (Alonzo+ eras):
+//
+//	minFee = (minFeeA * txSize) + minFeeB
+//	       + ceil(pricesMem * totalMem)
+//	       + ceil(pricesSteps * totalSteps)
+//
+// Returns nil if the declared fee is sufficient.
+func ValidateTxFee(
+	tx lcommon.Transaction,
+	minFeeA uint,
+	minFeeB uint,
+	pricesMem *big.Rat,
+	pricesSteps *big.Rat,
+) error {
+	txSize := TxBodySize(tx)
+	declaredEU := DeclaredExUnits(tx)
+	minFee := CalculateMinFee(
+		txSize,
+		declaredEU,
+		minFeeA,
+		minFeeB,
+		pricesMem,
+		pricesSteps,
+	)
+	txFee := tx.Fee()
+	if txFee == nil {
+		txFee = new(big.Int)
+	}
+	minFeeBig := new(big.Int).SetUint64(minFee)
+	if txFee.Cmp(minFeeBig) >= 0 {
+		return nil
+	}
+	return fmt.Errorf(
+		"transaction fee %d is less than the calculated "+
+			"minimum fee %d",
+		txFee,
+		minFeeBig,
+	)
+}

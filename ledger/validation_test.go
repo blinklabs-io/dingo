@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"iter"
 	"math/big"
 	"testing"
 
@@ -33,6 +34,99 @@ type mockTransaction struct {
 
 func (m *mockTransaction) Cbor() []byte {
 	return m.cbor
+}
+
+// mockFeeTx extends mockTransaction with Fee() and
+// Witnesses() support for fee validation tests.
+type mockFeeTx struct {
+	lcommon.Transaction
+	cbor      []byte
+	fee       *big.Int
+	witnesses lcommon.TransactionWitnessSet
+}
+
+func (m *mockFeeTx) Cbor() []byte {
+	return m.cbor
+}
+
+func (m *mockFeeTx) Fee() *big.Int {
+	return m.fee
+}
+
+func (m *mockFeeTx) Witnesses() lcommon.TransactionWitnessSet {
+	return m.witnesses
+}
+
+// mockWitnessSet implements TransactionWitnessSet for
+// testing, returning only redeemers.
+type mockWitnessSet struct {
+	redeemers lcommon.TransactionWitnessRedeemers
+}
+
+func (m *mockWitnessSet) Vkey() []lcommon.VkeyWitness {
+	return nil
+}
+
+func (m *mockWitnessSet) NativeScripts() []lcommon.NativeScript {
+	return nil
+}
+
+func (m *mockWitnessSet) Bootstrap() []lcommon.BootstrapWitness {
+	return nil
+}
+
+func (m *mockWitnessSet) PlutusData() []lcommon.Datum {
+	return nil
+}
+
+func (m *mockWitnessSet) PlutusV1Scripts() []lcommon.PlutusV1Script {
+	return nil
+}
+
+func (m *mockWitnessSet) PlutusV2Scripts() []lcommon.PlutusV2Script {
+	return nil
+}
+
+func (m *mockWitnessSet) PlutusV3Scripts() []lcommon.PlutusV3Script {
+	return nil
+}
+
+func (m *mockWitnessSet) Redeemers() lcommon.TransactionWitnessRedeemers {
+	return m.redeemers
+}
+
+// mockRedeemers implements TransactionWitnessRedeemers
+// for testing.
+type mockRedeemers struct {
+	entries []struct {
+		key lcommon.RedeemerKey
+		val lcommon.RedeemerValue
+	}
+}
+
+func (m *mockRedeemers) Indexes(
+	_ lcommon.RedeemerTag,
+) []uint {
+	return nil
+}
+
+func (m *mockRedeemers) Value(
+	_ uint,
+	_ lcommon.RedeemerTag,
+) lcommon.RedeemerValue {
+	return lcommon.RedeemerValue{}
+}
+
+func (m *mockRedeemers) Iter() iter.Seq2[lcommon.RedeemerKey, lcommon.RedeemerValue] {
+	return func(
+		yield func(lcommon.RedeemerKey, lcommon.RedeemerValue) bool,
+	) {
+		for _, e := range m.entries {
+			if !yield(e.key, e.val) {
+				return
+			}
+		}
+	}
 }
 
 func TestTxBodySize(t *testing.T) {
@@ -379,4 +473,146 @@ func TestCalculateMinFee(t *testing.T) {
 			)
 		})
 	}
+}
+
+func TestDeclaredExUnits(t *testing.T) {
+	t.Run("no redeemers", func(t *testing.T) {
+		tx := &mockFeeTx{
+			cbor:      make([]byte, 100),
+			fee:       big.NewInt(200000),
+			witnesses: nil,
+		}
+		eu := DeclaredExUnits(tx)
+		assert.Equal(t, int64(0), eu.Memory)
+		assert.Equal(t, int64(0), eu.Steps)
+	})
+
+	t.Run("two redeemers", func(t *testing.T) {
+		tx := &mockFeeTx{
+			cbor: make([]byte, 100),
+			fee:  big.NewInt(200000),
+			witnesses: &mockWitnessSet{
+				redeemers: &mockRedeemers{
+					entries: []struct {
+						key lcommon.RedeemerKey
+						val lcommon.RedeemerValue
+					}{
+						{
+							val: lcommon.RedeemerValue{
+								ExUnits: lcommon.ExUnits{
+									Memory: 300000,
+									Steps:  50000000,
+								},
+							},
+						},
+						{
+							val: lcommon.RedeemerValue{
+								ExUnits: lcommon.ExUnits{
+									Memory: 200000,
+									Steps:  80000000,
+								},
+							},
+						},
+					},
+				},
+			},
+		}
+		eu := DeclaredExUnits(tx)
+		assert.Equal(t, int64(500000), eu.Memory)
+		assert.Equal(t, int64(130000000), eu.Steps)
+	})
+}
+
+func TestValidateTxFee(t *testing.T) {
+	pricesMem := big.NewRat(577, 10000)
+	pricesSteps := big.NewRat(721, 10000000)
+
+	t.Run("sufficient fee", func(t *testing.T) {
+		tx := &mockFeeTx{
+			cbor:      make([]byte, 300),
+			fee:       big.NewInt(200000),
+			witnesses: nil,
+		}
+		err := ValidateTxFee(
+			tx, 44, 155381, pricesMem, pricesSteps,
+		)
+		require.NoError(t, err)
+	})
+
+	t.Run("insufficient fee", func(t *testing.T) {
+		tx := &mockFeeTx{
+			cbor:      make([]byte, 300),
+			fee:       big.NewInt(100000),
+			witnesses: nil,
+		}
+		err := ValidateTxFee(
+			tx, 44, 155381, pricesMem, pricesSteps,
+		)
+		require.Error(t, err)
+		assert.Contains(
+			t,
+			err.Error(),
+			"less than the calculated minimum fee",
+		)
+	})
+
+	t.Run("exact fee with scripts", func(t *testing.T) {
+		// baseFee = 44*300 + 155381 = 168581
+		// memFee = ceil(577*1000000/10000) = 57700
+		// stepFee = ceil(721*200000000/10000000) = 14420
+		// minFee = 168581 + 57700 + 14420 = 240701
+		tx := &mockFeeTx{
+			cbor: make([]byte, 300),
+			fee:  big.NewInt(240701),
+			witnesses: &mockWitnessSet{
+				redeemers: &mockRedeemers{
+					entries: []struct {
+						key lcommon.RedeemerKey
+						val lcommon.RedeemerValue
+					}{
+						{
+							val: lcommon.RedeemerValue{
+								ExUnits: lcommon.ExUnits{
+									Memory: 1000000,
+									Steps:  200000000,
+								},
+							},
+						},
+					},
+				},
+			},
+		}
+		err := ValidateTxFee(
+			tx, 44, 155381, pricesMem, pricesSteps,
+		)
+		require.NoError(t, err)
+	})
+
+	t.Run("one under with scripts", func(t *testing.T) {
+		tx := &mockFeeTx{
+			cbor: make([]byte, 300),
+			fee:  big.NewInt(240700),
+			witnesses: &mockWitnessSet{
+				redeemers: &mockRedeemers{
+					entries: []struct {
+						key lcommon.RedeemerKey
+						val lcommon.RedeemerValue
+					}{
+						{
+							val: lcommon.RedeemerValue{
+								ExUnits: lcommon.ExUnits{
+									Memory: 1000000,
+									Steps:  200000000,
+								},
+							},
+						},
+					},
+				},
+			},
+		}
+		err := ValidateTxFee(
+			tx, 44, 155381, pricesMem, pricesSteps,
+		)
+		require.Error(t, err)
+	})
 }

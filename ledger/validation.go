@@ -78,3 +78,32 @@ func CalculateMinFee(
 		pricesSteps,
 	)
 }
+
+// DeclaredExUnits returns the total execution units
+// declared across all redeemers in a transaction's
+// witness set.
+func DeclaredExUnits(
+	tx lcommon.Transaction,
+) lcommon.ExUnits {
+	return eras.DeclaredExUnits(tx)
+}
+
+// ValidateTxFee checks that the fee declared in the
+// transaction body is at least the calculated minimum
+// fee, including both the base fee component and the
+// script execution fee component.
+func ValidateTxFee(
+	tx lcommon.Transaction,
+	minFeeA uint,
+	minFeeB uint,
+	pricesMem *big.Rat,
+	pricesSteps *big.Rat,
+) error {
+	return eras.ValidateTxFee(
+		tx,
+		minFeeA,
+		minFeeB,
+		pricesMem,
+		pricesSteps,
+	)
+}
