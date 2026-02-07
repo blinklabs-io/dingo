@@ -186,7 +186,7 @@ func (d *MetadataStoreSqlite) GetDrep(
 	txn types.Txn,
 ) (*models.Drep, error) {
 	var drep models.Drep
-	db, err := d.resolveDB(txn)
+	db, err := d.resolveReadDB(txn)
 	if err != nil {
 		return nil, err
 	}

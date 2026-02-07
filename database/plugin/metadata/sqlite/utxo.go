@@ -39,7 +39,7 @@ func (d *MetadataStoreSqlite) GetUtxo(
 	txn types.Txn,
 ) (*models.Utxo, error) {
 	ret := &models.Utxo{}
-	db, err := d.resolveDB(txn)
+	db, err := d.resolveReadDB(txn)
 	if err != nil {
 		return nil, err
 	}
@@ -70,7 +70,7 @@ func (d *MetadataStoreSqlite) GetUtxosBatch(
 		return make(map[string]*models.Utxo), nil
 	}
 
-	db, err := d.resolveDB(txn)
+	db, err := d.resolveReadDB(txn)
 	if err != nil {
 		return nil, err
 	}
@@ -116,7 +116,7 @@ func (d *MetadataStoreSqlite) GetUtxosAddedAfterSlot(
 	txn types.Txn,
 ) ([]models.Utxo, error) {
 	var ret []models.Utxo
-	db, err := d.resolveDB(txn)
+	db, err := d.resolveReadDB(txn)
 	if err != nil {
 		return nil, err
 	}
@@ -136,7 +136,7 @@ func (d *MetadataStoreSqlite) GetUtxosDeletedBeforeSlot(
 	txn types.Txn,
 ) ([]models.Utxo, error) {
 	var ret []models.Utxo
-	db, err := d.resolveDB(txn)
+	db, err := d.resolveReadDB(txn)
 	if err != nil {
 		return nil, err
 	}
@@ -158,7 +158,7 @@ func (d *MetadataStoreSqlite) GetUtxosByAddress(
 	txn types.Txn,
 ) ([]models.Utxo, error) {
 	var ret []models.Utxo
-	db, err := d.resolveDB(txn)
+	db, err := d.resolveReadDB(txn)
 	if err != nil {
 		return nil, err
 	}
@@ -203,7 +203,7 @@ func (d *MetadataStoreSqlite) GetUtxosByAssets(
 	txn types.Txn,
 ) ([]models.Utxo, error) {
 	var ret []models.Utxo
-	db, err := d.resolveDB(txn)
+	db, err := d.resolveReadDB(txn)
 	if err != nil {
 		return nil, err
 	}

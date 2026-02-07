@@ -31,7 +31,7 @@ func (d *MetadataStoreSqlite) GetGovernanceProposal(
 	txn types.Txn,
 ) (*models.GovernanceProposal, error) {
 	var proposal models.GovernanceProposal
-	db, err := d.resolveDB(txn)
+	db, err := d.resolveReadDB(txn)
 	if err != nil {
 		return nil, err
 	}
@@ -54,7 +54,7 @@ func (d *MetadataStoreSqlite) GetActiveGovernanceProposals(
 	txn types.Txn,
 ) ([]*models.GovernanceProposal, error) {
 	var proposals []*models.GovernanceProposal
-	db, err := d.resolveDB(txn)
+	db, err := d.resolveReadDB(txn)
 	if err != nil {
 		return nil, err
 	}
@@ -114,7 +114,7 @@ func (d *MetadataStoreSqlite) GetGovernanceVotes(
 	txn types.Txn,
 ) ([]*models.GovernanceVote, error) {
 	var votes []*models.GovernanceVote
-	db, err := d.resolveDB(txn)
+	db, err := d.resolveReadDB(txn)
 	if err != nil {
 		return nil, err
 	}

@@ -138,7 +138,7 @@ func (d *MetadataStoreSqlite) GetPool(
 	txn types.Txn,
 ) (*models.Pool, error) {
 	ret := &models.Pool{}
-	db, err := d.resolveDB(txn)
+	db, err := d.resolveReadDB(txn)
 	if err != nil {
 		return nil, err
 	}
@@ -319,7 +319,7 @@ func (d *MetadataStoreSqlite) GetPoolRegistrations(
 ) ([]lcommon.PoolRegistrationCertificate, error) {
 	ret := []lcommon.PoolRegistrationCertificate{}
 	certs := []models.PoolRegistration{}
-	db, err := d.resolveDB(txn)
+	db, err := d.resolveReadDB(txn)
 	if err != nil {
 		return ret, err
 	}
@@ -434,7 +434,7 @@ func (d *MetadataStoreSqlite) GetPoolRegistrations(
 func (d *MetadataStoreSqlite) GetActivePoolRelays(
 	txn types.Txn,
 ) ([]models.PoolRegistrationRelay, error) {
-	db, err := d.resolveDB(txn)
+	db, err := d.resolveReadDB(txn)
 	if err != nil {
 		return nil, err
 	}
@@ -513,7 +513,7 @@ func (d *MetadataStoreSqlite) GetActivePoolRelays(
 func (d *MetadataStoreSqlite) GetActivePoolKeyHashes(
 	txn types.Txn,
 ) ([][]byte, error) {
-	db, err := d.resolveDB(txn)
+	db, err := d.resolveReadDB(txn)
 	if err != nil {
 		return nil, fmt.Errorf("GetActivePoolKeyHashes: resolve db: %w", err)
 	}
@@ -603,7 +603,7 @@ func (d *MetadataStoreSqlite) GetStakeByPools(
 	poolKeyHashes [][]byte,
 	txn types.Txn,
 ) (map[string]uint64, map[string]uint64, error) {
-	db, err := d.resolveDB(txn)
+	db, err := d.resolveReadDB(txn)
 	if err != nil {
 		return nil, nil, fmt.Errorf("GetStakeByPools: resolve db: %w", err)
 	}

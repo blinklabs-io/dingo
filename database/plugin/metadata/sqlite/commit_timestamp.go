@@ -39,7 +39,7 @@ func (CommitTimestamp) TableName() string {
 func (d *MetadataStoreSqlite) GetCommitTimestamp() (int64, error) {
 	// Get value from sqlite
 	var tmpCommitTimestamp CommitTimestamp
-	result := d.DB().First(&tmpCommitTimestamp)
+	result := d.ReadDB().First(&tmpCommitTimestamp)
 	if result.Error != nil {
 		// It's not an error if there's no records found
 		if errors.Is(result.Error, gorm.ErrRecordNotFound) {

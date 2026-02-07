@@ -29,7 +29,7 @@ func (d *MetadataStoreSqlite) GetScript(
 	txn types.Txn,
 ) (*models.Script, error) {
 	ret := &models.Script{}
-	db, err := d.resolveDB(txn)
+	db, err := d.resolveReadDB(txn)
 	if err != nil {
 		return nil, err
 	}

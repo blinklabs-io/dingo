@@ -31,7 +31,7 @@ func (d *MetadataStoreSqlite) GetDatum(
 	txn types.Txn,
 ) (*models.Datum, error) {
 	ret := &models.Datum{}
-	db, err := d.resolveDB(txn)
+	db, err := d.resolveReadDB(txn)
 	if err != nil {
 		return nil, err
 	}

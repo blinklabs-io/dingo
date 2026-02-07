@@ -28,7 +28,7 @@ func (d *MetadataStoreSqlite) GetStakeRegistrations(
 ) ([]lcommon.StakeRegistrationCertificate, error) {
 	ret := []lcommon.StakeRegistrationCertificate{}
 	certs := []models.StakeRegistration{}
-	db, err := d.resolveDB(txn)
+	db, err := d.resolveReadDB(txn)
 	if err != nil {
 		return ret, err
 	}

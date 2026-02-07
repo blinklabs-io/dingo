@@ -60,7 +60,7 @@ func (d *MetadataStoreSqlite) GetPoolStakeSnapshot(
 	txn types.Txn,
 ) (*models.PoolStakeSnapshot, error) {
 	var snapshot models.PoolStakeSnapshot
-	db, err := d.resolveDB(txn)
+	db, err := d.resolveReadDB(txn)
 	if err != nil {
 		return nil, err
 	}
@@ -84,7 +84,7 @@ func (d *MetadataStoreSqlite) GetPoolStakeSnapshotsByEpoch(
 	txn types.Txn,
 ) ([]*models.PoolStakeSnapshot, error) {
 	var snapshots []*models.PoolStakeSnapshot
-	db, err := d.resolveDB(txn)
+	db, err := d.resolveReadDB(txn)
 	if err != nil {
 		return nil, err
 	}
@@ -105,7 +105,7 @@ func (d *MetadataStoreSqlite) GetTotalActiveStake(
 	txn types.Txn,
 ) (uint64, error) {
 	var total uint64
-	db, err := d.resolveDB(txn)
+	db, err := d.resolveReadDB(txn)
 	if err != nil {
 		return 0, err
 	}
@@ -141,7 +141,7 @@ func (d *MetadataStoreSqlite) GetEpochSummary(
 	txn types.Txn,
 ) (*models.EpochSummary, error) {
 	var summary models.EpochSummary
-	db, err := d.resolveDB(txn)
+	db, err := d.resolveReadDB(txn)
 	if err != nil {
 		return nil, err
 	}
@@ -160,7 +160,7 @@ func (d *MetadataStoreSqlite) GetLatestEpochSummary(
 	txn types.Txn,
 ) (*models.EpochSummary, error) {
 	var summary models.EpochSummary
-	db, err := d.resolveDB(txn)
+	db, err := d.resolveReadDB(txn)
 	if err != nil {
 		return nil, err
 	}

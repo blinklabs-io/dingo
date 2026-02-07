@@ -32,7 +32,7 @@ func (d *MetadataStoreSqlite) GetAssetByPolicyAndName(
 	var asset models.Asset
 	var result *gorm.DB
 
-	query, err := d.resolveDB(txn)
+	query, err := d.resolveReadDB(txn)
 	if err != nil {
 		return models.Asset{}, err
 	}
@@ -56,7 +56,7 @@ func (d *MetadataStoreSqlite) GetAssetsByPolicy(
 	var assets []models.Asset
 	var result *gorm.DB
 
-	query, err := d.resolveDB(txn)
+	query, err := d.resolveReadDB(txn)
 	if err != nil {
 		return nil, err
 	}
@@ -77,7 +77,7 @@ func (d *MetadataStoreSqlite) GetAssetsByUTxO(
 	var assets []models.Asset
 	var result *gorm.DB
 
-	query, err := d.resolveDB(txn)
+	query, err := d.resolveReadDB(txn)
 	if err != nil {
 		return nil, err
 	}

@@ -26,7 +26,7 @@ func (d *MetadataStoreSqlite) GetPParams(
 	txn types.Txn,
 ) ([]models.PParams, error) {
 	ret := []models.PParams{}
-	db, err := d.resolveDB(txn)
+	db, err := d.resolveReadDB(txn)
 	if err != nil {
 		return ret, err
 	}
@@ -47,7 +47,7 @@ func (d *MetadataStoreSqlite) GetPParamUpdates(
 	txn types.Txn,
 ) ([]models.PParamUpdate, error) {
 	ret := []models.PParamUpdate{}
-	db, err := d.resolveDB(txn)
+	db, err := d.resolveReadDB(txn)
 	if err != nil {
 		return ret, err
 	}

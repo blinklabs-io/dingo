@@ -27,7 +27,7 @@ func (d *MetadataStoreSqlite) GetEpochsByEra(
 	txn types.Txn,
 ) ([]models.Epoch, error) {
 	var ret []models.Epoch
-	db, err := d.resolveDB(txn)
+	db, err := d.resolveReadDB(txn)
 	if err != nil {
 		return nil, err
 	}
@@ -43,7 +43,7 @@ func (d *MetadataStoreSqlite) GetEpochs(
 	txn types.Txn,
 ) ([]models.Epoch, error) {
 	var ret []models.Epoch
-	db, err := d.resolveDB(txn)
+	db, err := d.resolveReadDB(txn)
 	if err != nil {
 		return nil, err
 	}
