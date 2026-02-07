@@ -29,6 +29,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/ledger/eras"
+	"github.com/blinklabs-io/dingo/ledger/forging"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/byron"
@@ -958,20 +959,87 @@ func (ls *LedgerState) processBlockEvent(
 	// outside the lock in processBlockEvents before this is called.
 
 	// Add block to chain
-	if err := ls.chain.AddBlock(e.Block, txn); err != nil {
+	addBlockErr := ls.chain.AddBlock(e.Block, txn)
+	if addBlockErr != nil {
 		// Ignore and log errors about block not fitting on chain or matching first header
-		if !errors.As(err, &chain.BlockNotFitChainTipError{}) &&
-			!errors.As(err, &chain.BlockNotMatchHeaderError{}) {
-			return fmt.Errorf("add chain block: %w", err)
+		if !errors.As(addBlockErr, &chain.BlockNotFitChainTipError{}) &&
+			!errors.As(addBlockErr, &chain.BlockNotMatchHeaderError{}) {
+			return fmt.Errorf("add chain block: %w", addBlockErr)
 		}
 		ls.config.Logger.Warn(
 			fmt.Sprintf(
 				"ignoring blockfetch block: %s",
-				err,
+				addBlockErr,
 			),
 		)
 	}
+
+	// Detect slot battles: check if an incoming block occupies a
+	// slot for which we forged a block locally
+	ls.checkSlotBattle(e, addBlockErr)
+
 	return nil
+}
+
+// checkSlotBattle checks whether an incoming block from a peer
+// occupies a slot for which the local node has already forged a
+// block. If so, it emits a SlotBattleEvent and logs a warning.
+//
+// The addBlockErr parameter is the error (if any) returned by
+// chain.AddBlock for the incoming block. A nil error means the
+// remote block was accepted onto the chain (remote won); a
+// non-nil error means it was rejected (local won).
+func (ls *LedgerState) checkSlotBattle(
+	e BlockfetchEvent,
+	addBlockErr error,
+) {
+	ls.RLock()
+	checker := ls.config.ForgedBlockChecker
+	ls.RUnlock()
+	if checker == nil {
+		return
+	}
+
+	incomingSlot := e.Point.Slot
+	localHash, forged := checker.WasForgedByUs(incomingSlot)
+	if !forged {
+		return
+	}
+
+	remoteHash := e.Point.Hash
+
+	// Same hash means same block -- not a battle
+	if bytes.Equal(localHash, remoteHash) {
+		return
+	}
+
+	// Determine winner: if the remote block was rejected (addBlockErr
+	// != nil), our local block remains on chain, so we won.
+	localWon := addBlockErr != nil
+
+	ls.config.Logger.Warn(
+		"slot battle detected",
+		"component", "ledger",
+		"slot", incomingSlot,
+		"local_block_hash", hex.EncodeToString(localHash),
+		"remote_block_hash", hex.EncodeToString(remoteHash),
+		"local_won", localWon,
+	)
+
+	if ls.config.EventBus != nil {
+		ls.config.EventBus.Publish(
+			forging.SlotBattleEventType,
+			event.NewEvent(
+				forging.SlotBattleEventType,
+				forging.SlotBattleEvent{
+					Slot:            incomingSlot,
+					LocalBlockHash:  localHash,
+					RemoteBlockHash: remoteHash,
+					Won:             localWon,
+				},
+			),
+		)
+	}
 }
 
 func (ls *LedgerState) blockfetchRequestRangeStart(

@@ -53,6 +53,9 @@ type BlockForger struct {
 	slotClock        SlotClockProvider
 	slotDuration     time.Duration
 
+	// Slot battle detection
+	slotTracker *SlotTracker
+
 	// State
 	mu      sync.RWMutex
 	running bool
@@ -122,6 +125,7 @@ func NewBlockForger(cfg ForgerConfig) (*BlockForger, error) {
 		blockBuilder:     cfg.BlockBuilder,
 		blockBroadcaster: cfg.BlockBroadcaster,
 		slotClock:        cfg.SlotClock,
+		slotTracker:      NewSlotTracker(),
 	}
 
 	if cfg.Mode == ModeProduction {
@@ -269,6 +273,9 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 		return fmt.Errorf("failed to add block: %w", err)
 	}
 
+	// Record the forged block for slot battle detection
+	f.slotTracker.RecordForgedBlock(currentSlot, block.Hash().Bytes())
+
 	f.logger.Info("block produced successfully", "slot", currentSlot)
 	return nil
 }
@@ -314,6 +321,12 @@ func (f *BlockForger) SignBlockHeader(
 	}
 
 	return f.creds.KESSign(kesPeriod, headerBytes)
+}
+
+// SlotTracker returns the forger's slot tracker, which can be used
+// by other components (e.g., chainsync) to detect slot battles.
+func (f *BlockForger) SlotTracker() *SlotTracker {
+	return f.slotTracker
 }
 
 // modeString returns a string representation of the forging mode.

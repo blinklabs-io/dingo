@@ -368,6 +368,16 @@ type FatalErrorFunc func(err error)
 // chainsync connection ID for chain selection purposes.
 type GetActiveConnectionFunc func() *ouroboros.ConnectionId
 
+// ForgedBlockChecker is an interface for checking whether the local
+// node recently forged a block for a given slot. This is used by
+// chainsync to detect slot battles when an incoming block from a
+// peer occupies the same slot as a locally forged block.
+type ForgedBlockChecker interface {
+	// WasForgedByUs returns the block hash and true if the local node
+	// forged a block for the given slot, or nil and false otherwise.
+	WasForgedByUs(slot uint64) (blockHash []byte, ok bool)
+}
+
 type LedgerStateConfig struct {
 	PromRegistry               prometheus.Registerer
 	Logger                     *slog.Logger
@@ -378,6 +388,7 @@ type LedgerStateConfig struct {
 	BlockfetchRequestRangeFunc BlockfetchRequestRangeFunc
 	GetActiveConnectionFunc    GetActiveConnectionFunc
 	FatalErrorFunc             FatalErrorFunc
+	ForgedBlockChecker         ForgedBlockChecker
 	ValidateHistorical         bool
 	ForgeBlocks                bool
 	DatabaseWorkerPoolConfig   DatabaseWorkerPoolConfig
@@ -2712,6 +2723,15 @@ func (ls *LedgerState) EvaluateTx(
 // Sets the mempool for accessing transactions
 func (ls *LedgerState) SetMempool(mempool MempoolProvider) {
 	ls.mempool = mempool
+}
+
+// SetForgedBlockChecker sets the forged block checker used for slot
+// battle detection. This is typically called after the block forger
+// is initialized, since the forger is created after the ledger state.
+func (ls *LedgerState) SetForgedBlockChecker(checker ForgedBlockChecker) {
+	ls.Lock()
+	defer ls.Unlock()
+	ls.config.ForgedBlockChecker = checker
 }
 
 // forgeBlock creates a conway block with transactions from mempool
