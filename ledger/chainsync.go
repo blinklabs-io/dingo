@@ -803,6 +803,66 @@ func (ls *LedgerState) processEpochRollover(
 	}
 	result.NewCurrentPParams = newPParams
 
+	// Check if the protocol version changed in a way that
+	// triggers a hard fork (era transition)
+	oldVer, oldErr := GetProtocolVersion(currentPParams)
+	newVer, newErr := GetProtocolVersion(newPParams)
+	if oldErr != nil {
+		ls.config.Logger.Warn(
+			"could not extract protocol version from "+
+				"current pparams, skipping hard fork "+
+				"detection",
+			"error", oldErr,
+			"pparams_type",
+			fmt.Sprintf("%T", currentPParams),
+			"component", "ledger",
+		)
+	}
+	if newErr != nil {
+		ls.config.Logger.Warn(
+			"could not extract protocol version from "+
+				"new pparams, skipping hard fork "+
+				"detection",
+			"error", newErr,
+			"pparams_type",
+			fmt.Sprintf("%T", newPParams),
+			"component", "ledger",
+		)
+	}
+	if oldErr == nil && newErr == nil {
+		if IsHardForkTransition(oldVer, newVer) {
+			fromEra, _ := EraForVersion(oldVer.Major)
+			toEra, _ := EraForVersion(newVer.Major)
+			result.HardFork = &HardForkInfo{
+				OldVersion: oldVer,
+				NewVersion: newVer,
+				FromEra:    fromEra,
+				ToEra:      toEra,
+			}
+			ls.config.Logger.Info(
+				"hard fork detected via protocol "+
+					"parameter update",
+				"from_era", fromEra,
+				"to_era", toEra,
+				"old_version",
+				fmt.Sprintf(
+					"%d.%d",
+					oldVer.Major,
+					oldVer.Minor,
+				),
+				"new_version",
+				fmt.Sprintf(
+					"%d.%d",
+					newVer.Major,
+					newVer.Minor,
+				),
+				"epoch",
+				currentEpoch.EpochId+1,
+				"component", "ledger",
+			)
+		}
+	}
+
 	// Create next epoch record
 	epochSlotLength, epochLength, err := currentEra.EpochLengthFunc(
 		ls.config.CardanoNodeConfig,
