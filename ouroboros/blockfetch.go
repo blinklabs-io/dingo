@@ -48,10 +48,38 @@ func (o *Ouroboros) blockfetchServerRequestRange(
 	start ocommon.Point,
 	end ocommon.Point,
 ) error {
-	// TODO: check if we have requested block range available and send NoBlocks if not (#397)
+	// Validate that start is not after end (#397)
+	if start.Slot > end.Slot {
+		o.config.Logger.Warn(
+			"blockfetch: requested range has start after end, sending NoBlocks",
+			"connection_id", ctx.ConnectionId.String(),
+			"start_slot", start.Slot,
+			"end_slot", end.Slot,
+		)
+		if err := ctx.Server.NoBlocks(); err != nil {
+			return fmt.Errorf(
+				"blockfetch NoBlocks after invalid range: %w",
+				err,
+			)
+		}
+		return nil
+	}
+	// Validate that the start point exists in our chain (#397)
 	chainIter, err := o.LedgerState.GetChainFromPoint(start, true)
 	if err != nil {
-		return err
+		o.config.Logger.Warn(
+			"blockfetch: start point not found in chain, sending NoBlocks",
+			"connection_id", ctx.ConnectionId.String(),
+			"start_slot", start.Slot,
+			"error", err,
+		)
+		if err := ctx.Server.NoBlocks(); err != nil {
+			return fmt.Errorf(
+				"blockfetch NoBlocks after start point not found: %w",
+				err,
+			)
+		}
+		return nil
 	}
 	// Start async process to send requested block range
 	go func() {
@@ -60,6 +88,11 @@ func (o *Ouroboros) blockfetchServerRequestRange(
 			return
 		}
 		if err := ctx.Server.StartBatch(); err != nil {
+			o.config.Logger.Error(
+				"blockfetch: failed to start batch",
+				"connection_id", ctx.ConnectionId.String(),
+				"error", err,
+			)
 			return
 		}
 	Loop:
@@ -81,7 +114,15 @@ func (o *Ouroboros) blockfetchServerRequestRange(
 					blockBytes,
 				)
 				if err != nil {
-					// TODO: push this error somewhere (#398)
+					// Log the error with context (#398)
+					o.config.Logger.Error(
+						"blockfetch: failed to send block to peer",
+						"connection_id", ctx.ConnectionId.String(),
+						"block_slot", next.Block.Slot,
+						"start_slot", start.Slot,
+						"end_slot", end.Slot,
+						"error", err,
+					)
 					return
 				}
 				if o.metrics != nil {
@@ -96,9 +137,11 @@ func (o *Ouroboros) blockfetchServerRequestRange(
 		// Signal batch completion
 		if err := ctx.Server.BatchDone(); err != nil {
 			o.config.Logger.Error(
-				"failed to signal batch completion",
-				"error",
-				err,
+				"blockfetch: failed to signal batch completion",
+				"connection_id", ctx.ConnectionId.String(),
+				"start_slot", start.Slot,
+				"end_slot", end.Slot,
+				"error", err,
 			)
 		}
 	}()
