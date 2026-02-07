@@ -187,6 +187,23 @@ func ValidateTxConway(
 	if err = ValidateTxSize(tx, tmpPparams.MaxTxSize); err != nil {
 		return err
 	}
+	// Validate fee covers base cost + execution unit prices
+	var pricesMem, pricesSteps *big.Rat
+	if tmpPparams.ExecutionCosts.MemPrice != nil {
+		pricesMem = tmpPparams.ExecutionCosts.MemPrice.ToBigRat()
+	}
+	if tmpPparams.ExecutionCosts.StepPrice != nil {
+		pricesSteps = tmpPparams.ExecutionCosts.StepPrice.ToBigRat()
+	}
+	if err = ValidateTxFee(
+		tx,
+		tmpPparams.MinFeeA,
+		tmpPparams.MinFeeB,
+		pricesMem,
+		pricesSteps,
+	); err != nil {
+		return err
+	}
 	// Skip script evaluation if TX is marked as not valid
 	if !tx.IsValid() {
 		return nil
