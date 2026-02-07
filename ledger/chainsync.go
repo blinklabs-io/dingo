@@ -789,10 +789,16 @@ func (ls *LedgerState) processEpochRollover(
 	}
 	// Apply pending pparam updates using the non-mutating version
 	// Updates target the next epoch, so we pass currentEpoch.EpochId + 1
+	// The quorum threshold comes from shelley-genesis.json updateQuorum
+	updateQuorum := 0
+	if shelleyGenesis := ls.config.CardanoNodeConfig.ShelleyGenesis(); shelleyGenesis != nil {
+		updateQuorum = shelleyGenesis.UpdateQuorum
+	}
 	newPParams, err := ls.db.ComputeAndApplyPParamUpdates(
 		epochStartSlot,
 		currentEpoch.EpochId+1, // Target epoch for updates
 		currentEra.Id,
+		updateQuorum,
 		currentPParams,
 		currentEra.DecodePParamsUpdateFunc,
 		currentEra.PParamsUpdateFunc,
