@@ -221,6 +221,26 @@ func (lv *LedgerView) IsPoolRegistered(pkh lcommon.PoolKeyHash) bool {
 	return reg != nil
 }
 
+// IsVrfKeyInUse checks if a VRF key hash is registered by another pool.
+// Returns (inUse, owningPoolId, error).
+func (lv *LedgerView) IsVrfKeyInUse(
+	vrfKeyHash lcommon.Blake2b256,
+) (bool, lcommon.PoolKeyHash, error) {
+	pool, err := lv.ls.db.GetPoolByVrfKeyHash(
+		vrfKeyHash.Bytes(),
+		lv.txn,
+	)
+	if err != nil {
+		return false, lcommon.PoolKeyHash{}, err
+	}
+	if pool == nil {
+		return false, lcommon.PoolKeyHash{}, nil
+	}
+	return true, lcommon.PoolKeyHash(
+		lcommon.NewBlake2b224(pool.PoolKeyHash),
+	), nil
+}
+
 // SlotToTime returns the current time for a given slot based on known epochs
 func (lv *LedgerView) SlotToTime(slot uint64) (time.Time, error) {
 	return lv.ls.SlotToTime(slot)

@@ -64,6 +64,13 @@ type MetadataStore interface {
 		types.Txn,
 	) (*models.Pool, error)
 
+	// GetPoolByVrfKeyHash retrieves an active pool by its VRF key hash.
+	// Returns nil if no active pool uses this VRF key.
+	GetPoolByVrfKeyHash(
+		[]byte, // vrfKeyHash
+		types.Txn,
+	) (*models.Pool, error)
+
 	// GetActivePoolRelays retrieves all relays from currently active pools.
 	// This is used for ledger peer discovery.
 	GetActivePoolRelays(types.Txn) ([]models.PoolRegistrationRelay, error)
