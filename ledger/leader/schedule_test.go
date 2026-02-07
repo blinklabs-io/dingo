@@ -23,6 +23,18 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// testVRFSeed is a deterministic 32-byte VRF seed for testing.
+var testVRFSeed = []byte("test_vrf_seed_for_leader_sched!!")
+
+// testEpochNonce is a deterministic 32-byte epoch nonce for testing.
+var testEpochNonce = func() []byte {
+	nonce := make([]byte, 32)
+	for i := range nonce {
+		nonce[i] = byte(i)
+	}
+	return nonce
+}()
+
 func TestNewSchedule(t *testing.T) {
 	poolId := lcommon.PoolKeyHash{}
 	copy(poolId[:], []byte("pool1234567890123456"))
@@ -199,33 +211,33 @@ func TestCalculateScheduleZeroTotalStake(t *testing.T) {
 	poolId := lcommon.PoolKeyHash{}
 
 	_, err := calc.CalculateSchedule(
-		10,     // epoch
-		poolId, // pool ID
-		nil,    // VRF key (not used in placeholder)
-		1000,   // pool stake
-		0,      // zero total stake
-		nil,    // epoch nonce
+		10,            // epoch
+		poolId,        // pool ID
+		testVRFSeed,   // VRF key
+		1000,          // pool stake
+		0,             // zero total stake
+		testEpochNonce, // epoch nonce
 	)
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "total stake cannot be zero")
 }
 
-func TestCalculateScheduleReturnsSchedule(t *testing.T) {
-	// Note: With the placeholder isSlotLeader that returns false,
-	// the schedule will have no leader slots. This test verifies
-	// the basic structure is correct.
-	calc := NewCalculator(0.05, 10) // Small epoch for testing
+func TestCalculateSchedulePoolWithStakeGetsSlots(t *testing.T) {
+	// Use a small epoch (20 slots) with high f=0.9 and 100% stake to ensure
+	// we reliably get leader slots. VRF Prove is expensive (~0.2s per call),
+	// so we keep the slot count small.
+	calc := NewCalculator(0.9, 20)
 	poolId := lcommon.PoolKeyHash{}
 	copy(poolId[:], []byte("testpool1234567890123"))
 
 	schedule, err := calc.CalculateSchedule(
-		5,      // epoch
-		poolId, // pool ID
-		nil,    // VRF key
-		1000,   // pool stake
-		10000,  // total stake
-		[]byte("nonce"),
+		5,               // epoch
+		poolId,          // pool ID
+		testVRFSeed,     // VRF key (32-byte seed)
+		1_000_000,       // pool stake = 100% of total
+		1_000_000,       // total stake
+		testEpochNonce,  // epoch nonce (32 bytes)
 	)
 
 	require.NoError(t, err)
@@ -233,12 +245,116 @@ func TestCalculateScheduleReturnsSchedule(t *testing.T) {
 
 	assert.Equal(t, uint64(5), schedule.Epoch)
 	assert.Equal(t, poolId, schedule.PoolId)
-	assert.Equal(t, uint64(1000), schedule.PoolStake)
-	assert.Equal(t, uint64(10000), schedule.TotalStake)
-	assert.Equal(t, []byte("nonce"), schedule.EpochNonce)
+	assert.Equal(t, uint64(1_000_000), schedule.PoolStake)
+	assert.Equal(t, uint64(1_000_000), schedule.TotalStake)
+	assert.Equal(t, testEpochNonce, schedule.EpochNonce)
 
-	// With placeholder returning false, no leader slots
-	assert.Empty(t, schedule.LeaderSlots)
+	// With 100% stake and f=0.9, we expect ~18 leader slots in 20 slots.
+	slotCount := schedule.SlotCount()
+	assert.Greater(t, slotCount, 0,
+		"pool with 100%% stake should be elected for at least some slots")
+}
+
+func TestCalculateScheduleZeroPoolStakeGetsNoSlots(t *testing.T) {
+	calc := NewCalculator(0.9, 20)
+	poolId := lcommon.PoolKeyHash{}
+
+	schedule, err := calc.CalculateSchedule(
+		5,              // epoch
+		poolId,         // pool ID
+		testVRFSeed,    // VRF key
+		0,              // zero pool stake
+		1_000_000,      // total stake
+		testEpochNonce, // epoch nonce
+	)
+
+	require.NoError(t, err)
+	require.NotNil(t, schedule)
+
+	// Zero stake should never produce leader slots
+	assert.Equal(t, 0, schedule.SlotCount(),
+		"pool with zero stake should never be elected leader")
+}
+
+func TestCalculateScheduleFullStakeApproxRate(t *testing.T) {
+	// With f=0.9 and 100% stake, a pool should be leader for ~90% of slots.
+	// Use 20 slots to keep VRF computation fast while having enough samples.
+	const slotsPerEpoch = 20
+	calc := NewCalculator(0.9, slotsPerEpoch)
+	poolId := lcommon.PoolKeyHash{}
+	copy(poolId[:], []byte("testpool1234567890123"))
+
+	schedule, err := calc.CalculateSchedule(
+		3,               // epoch
+		poolId,          // pool ID
+		testVRFSeed,     // VRF key
+		10_000_000,      // pool stake = 100% of total
+		10_000_000,      // total stake
+		testEpochNonce,  // epoch nonce
+	)
+
+	require.NoError(t, err)
+	require.NotNil(t, schedule)
+
+	slotCount := schedule.SlotCount()
+	// Expected ~18 slots (90% of 20). With 20 Bernoulli trials at p=0.9,
+	// getting <=14 is astronomically unlikely (binomial CDF < 0.01%).
+	assert.Greater(t, slotCount, 14,
+		"pool with 100%% stake and f=0.9 should get >70%% leader slots")
+	assert.LessOrEqual(t, slotCount, slotsPerEpoch,
+		"pool should not exceed total slots in epoch")
+
+	t.Logf(
+		"leader slots: %d / %d (%.1f%%)",
+		slotCount,
+		slotsPerEpoch,
+		float64(slotCount)/float64(slotsPerEpoch)*100,
+	)
+}
+
+func TestCalculateScheduleIsDeterministic(t *testing.T) {
+	calc := NewCalculator(0.9, 10)
+	poolId := lcommon.PoolKeyHash{}
+	copy(poolId[:], []byte("testpool1234567890123"))
+
+	schedule1, err := calc.CalculateSchedule(
+		7, poolId, testVRFSeed, 500_000, 1_000_000, testEpochNonce,
+	)
+	require.NoError(t, err)
+
+	schedule2, err := calc.CalculateSchedule(
+		7, poolId, testVRFSeed, 500_000, 1_000_000, testEpochNonce,
+	)
+	require.NoError(t, err)
+
+	// Same inputs must produce identical leader slot lists
+	assert.Equal(t, schedule1.LeaderSlots, schedule2.LeaderSlots,
+		"leader election should be deterministic")
+}
+
+func TestCalculateScheduleInvalidVRFKey(t *testing.T) {
+	calc := NewCalculator(0.9, 10)
+	poolId := lcommon.PoolKeyHash{}
+
+	t.Run("nil key", func(t *testing.T) {
+		// A nil VRF key should cause an error from the VRF signer creation
+		_, err := calc.CalculateSchedule(
+			5, poolId, nil, 1000, 10000, testEpochNonce,
+		)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "create VRF signer")
+	})
+
+	t.Run("too short key", func(t *testing.T) {
+		// A 16-byte key is too short (must be 32 bytes)
+		shortKey := make([]byte, 16)
+		_, err := calc.CalculateSchedule(
+			5, poolId, shortKey, 1000, 10000, testEpochNonce,
+		)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "create VRF signer")
+		assert.Contains(t, err.Error(), "seed must be 32 bytes")
+	})
 }
 
 func TestScheduleConcurrentAccess(t *testing.T) {
