@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/ledger"
@@ -24,9 +25,25 @@ import (
 
 const (
 	BlockfetchEventType  event.EventType = "blockfetch.event"
+	BlockEventType       event.EventType = "ledger.block"
 	ChainsyncEventType   event.EventType = "chainsync.event"
 	LedgerErrorEventType event.EventType = "ledger.error"
 )
+
+// It represents the direction a block is applied to the ledger.
+type BlockAction string
+
+const (
+	BlockActionApply BlockAction = "Apply"
+	BlockActionUndo  BlockAction = "Undo"
+)
+
+// It represents a persisted block apply or rollback action.
+type BlockEvent struct {
+	Action BlockAction
+	Block  models.Block
+	Point  ocommon.Point
+}
 
 // BlockfetchEvent represents either a Block or BatchDone blockfetch event. We use
 // a single event type for both to make synchronization easier.

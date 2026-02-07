@@ -20,12 +20,14 @@ import (
 )
 
 type stateMetrics struct {
-	blockNum    prometheus.Gauge
-	density     prometheus.Gauge
-	epochNum    prometheus.Gauge
-	slotInEpoch prometheus.Gauge
-	slotNum     prometheus.Gauge
-	forks       prometheus.Gauge
+	blockNum            prometheus.Gauge
+	density             prometheus.Gauge
+	epochNum            prometheus.Gauge
+	slotInEpoch         prometheus.Gauge
+	slotNum             prometheus.Gauge
+	forks               prometheus.Gauge
+	blocksForgedTotal   prometheus.Counter
+	blockForgingLatency prometheus.Histogram
 }
 
 func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
@@ -54,5 +56,14 @@ func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
 	m.forks = promautoFactory.NewGauge(prometheus.GaugeOpts{
 		Name: "cardano_node_metrics_forks_int",
 		Help: "number of forks seen",
+	})
+	m.blocksForgedTotal = promautoFactory.NewCounter(prometheus.CounterOpts{
+		Name: "cardano_node_metrics_blocksForgedNum_int",
+		Help: "total number of blocks forged by this node",
+	})
+	m.blockForgingLatency = promautoFactory.NewHistogram(prometheus.HistogramOpts{
+		Name:    "cardano_node_metrics_blockForgingLatency_seconds",
+		Help:    "latency of block forging from slot start to block completion",
+		Buckets: prometheus.ExponentialBuckets(0.001, 2, 15), // 1ms to ~16s
 	})
 }

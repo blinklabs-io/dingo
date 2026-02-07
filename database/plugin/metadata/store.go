@@ -1,4 +1,4 @@
-// Copyright 2025 Blink Labs Software
+// Copyright 2026 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -64,9 +64,57 @@ type MetadataStore interface {
 		types.Txn,
 	) (*models.Pool, error)
 
+	// GetPoolByVrfKeyHash retrieves an active pool by its VRF key hash.
+	// Returns nil if no active pool uses this VRF key.
+	GetPoolByVrfKeyHash(
+		[]byte, // vrfKeyHash
+		types.Txn,
+	) (*models.Pool, error)
+
 	// GetActivePoolRelays retrieves all relays from currently active pools.
 	// This is used for ledger peer discovery.
 	GetActivePoolRelays(types.Txn) ([]models.PoolRegistrationRelay, error)
+
+	// GetActivePoolKeyHashes retrieves the key hashes of all currently active pools.
+	// A pool is active if it has a registration and either no retirement or
+	// the retirement epoch is in the future.
+	GetActivePoolKeyHashes(types.Txn) ([][]byte, error)
+
+	// GetActivePoolKeyHashesAtSlot retrieves the key hashes of pools that were
+	// active at the given slot. A pool was active at a slot if:
+	// 1. It had a registration with added_slot <= slot
+	// 2. Either:
+	//    a. No retirement with added_slot <= slot, OR
+	//    b. The most recent retirement was for an epoch that hadn't started yet, OR
+	//    c. A registration occurred AFTER the most recent retirement (re-registration
+	//       cancels a pending retirement)
+	//
+	// When determining order of events in the same slot, block_index (transaction
+	// index within block) and cert_index (certificate index within transaction)
+	// are used as tie-breakers since cert_index resets per transaction. The full
+	// ordering is: added_slot DESC, block_index DESC, cert_index DESC.
+	// This handles cases where registration and retirement occur in different
+	// transactions within the same block.
+	//
+	// This is used for stake snapshot calculations at historical points.
+	//
+	// Returns types.ErrNoEpochData (wrapped) if epoch data has not been synced
+	// for the requested slot. Callers should use errors.Is() to check.
+	GetActivePoolKeyHashesAtSlot(uint64, types.Txn) ([][]byte, error)
+
+	// GetStakeByPool returns the total delegated stake and delegator count for a pool.
+	// This aggregates all accounts delegated to the pool and sums their UTxO values.
+	GetStakeByPool(
+		[]byte, // poolKeyHash
+		types.Txn,
+	) (uint64, uint64, error) // (totalStake, delegatorCount, error)
+
+	// GetStakeByPools returns delegated stake for multiple pools in a single query.
+	// Returns maps of pool key hash -> total stake and pool key hash -> delegator count.
+	GetStakeByPools(
+		[][]byte, // poolKeyHashes
+		types.Txn,
+	) (map[string]uint64, map[string]uint64, error)
 
 	// GetStakeRegistrations retrieves all stake registration certificates for an account.
 	GetStakeRegistrations(
@@ -102,6 +150,9 @@ type MetadataStore interface {
 		bool, // includeInactive
 		types.Txn,
 	) (*models.Drep, error)
+
+	// GetActiveDreps retrieves all active DReps.
+	GetActiveDreps(types.Txn) ([]*models.Drep, error)
 
 	// GetPParams retrieves protocol parameters for a given epoch.
 	GetPParams(
@@ -195,6 +246,15 @@ type MetadataStore interface {
 		types.Txn,
 	) error
 
+	// SetGenesisTransaction stores a genesis transaction record.
+	// Genesis transactions have no inputs, witnesses, or fees - just outputs.
+	SetGenesisTransaction(
+		hash []byte,
+		blockHash []byte,
+		outputs []models.Utxo,
+		txn types.Txn,
+	) error
+
 	// Helper methods
 
 	// DeleteBlockNoncesBeforeSlot removes block nonces older than the given slot.
@@ -218,6 +278,10 @@ type MetadataStore interface {
 
 	// GetEpochsByEra retrieves all epochs for a given era.
 	GetEpochsByEra(uint, types.Txn) ([]models.Epoch, error)
+
+	// GetEpoch retrieves a single epoch by its ID.
+	// Returns nil if the epoch is not found.
+	GetEpoch(uint64, types.Txn) (*models.Epoch, error)
 
 	// GetEpochs retrieves all epochs.
 	GetEpochs(types.Txn) ([]models.Epoch, error)
@@ -252,6 +316,160 @@ type MetadataStore interface {
 
 	// SetUtxosNotDeletedAfterSlot marks all UTxOs created after the given slot as not deleted.
 	SetUtxosNotDeletedAfterSlot(uint64, types.Txn) error
+
+	// Stake snapshot methods
+
+	// SavePoolStakeSnapshot saves a single pool stake snapshot.
+	SavePoolStakeSnapshot(
+		*models.PoolStakeSnapshot,
+		types.Txn,
+	) error
+
+	// SavePoolStakeSnapshots saves multiple pool stake snapshots in batch.
+	SavePoolStakeSnapshots(
+		[]*models.PoolStakeSnapshot,
+		types.Txn,
+	) error
+
+	// GetPoolStakeSnapshot retrieves a specific pool's stake snapshot for an epoch.
+	GetPoolStakeSnapshot(
+		uint64, // epoch
+		string, // snapshotType ("mark", "set", or "go")
+		[]byte, // poolKeyHash
+		types.Txn,
+	) (*models.PoolStakeSnapshot, error)
+
+	// GetPoolStakeSnapshotsByEpoch retrieves all pool stake snapshots for an epoch.
+	GetPoolStakeSnapshotsByEpoch(
+		uint64, // epoch
+		string, // snapshotType
+		types.Txn,
+	) ([]*models.PoolStakeSnapshot, error)
+
+	// GetTotalActiveStake returns the sum of all pool stakes for an epoch.
+	GetTotalActiveStake(
+		uint64, // epoch
+		string, // snapshotType
+		types.Txn,
+	) (uint64, error)
+
+	// SaveEpochSummary saves an epoch summary.
+	SaveEpochSummary(
+		*models.EpochSummary,
+		types.Txn,
+	) error
+
+	// GetEpochSummary retrieves the summary for a specific epoch.
+	GetEpochSummary(
+		uint64, // epoch
+		types.Txn,
+	) (*models.EpochSummary, error)
+
+	// GetLatestEpochSummary retrieves the most recent epoch summary.
+	GetLatestEpochSummary(types.Txn) (*models.EpochSummary, error)
+
+	// DeletePoolStakeSnapshotsForEpoch deletes snapshots for a specific epoch and type.
+	DeletePoolStakeSnapshotsForEpoch(
+		uint64, // epoch
+		string, // snapshotType
+		types.Txn,
+	) error
+
+	// DeletePoolStakeSnapshotsAfterEpoch deletes all snapshots after a given epoch.
+	DeletePoolStakeSnapshotsAfterEpoch(uint64, types.Txn) error
+
+	// DeletePoolStakeSnapshotsBeforeEpoch deletes all snapshots before a given epoch.
+	DeletePoolStakeSnapshotsBeforeEpoch(uint64, types.Txn) error
+
+	// DeleteEpochSummariesAfterEpoch deletes all epoch summaries after a given epoch.
+	DeleteEpochSummariesAfterEpoch(uint64, types.Txn) error
+
+	// DeleteEpochSummariesBeforeEpoch deletes all epoch summaries before a given epoch.
+	DeleteEpochSummariesBeforeEpoch(uint64, types.Txn) error
+
+	// GetTransactionHashesAfterSlot returns transaction hashes for transactions added after the given slot.
+	// This is used for blob cleanup during rollback/truncation.
+	GetTransactionHashesAfterSlot(uint64, types.Txn) ([][]byte, error)
+
+	// DeleteTransactionsAfterSlot removes transaction records added after the given slot.
+	// Child records are automatically removed via CASCADE constraints.
+	DeleteTransactionsAfterSlot(uint64, types.Txn) error
+
+	// Governance methods
+
+	// GetGovernanceProposal retrieves a governance proposal by transaction hash and action index.
+	GetGovernanceProposal(
+		[]byte, // txHash
+		uint32, // actionIndex
+		types.Txn,
+	) (*models.GovernanceProposal, error)
+
+	// GetActiveGovernanceProposals retrieves all governance proposals that haven't expired.
+	GetActiveGovernanceProposals(
+		uint64, // epoch
+		types.Txn,
+	) ([]*models.GovernanceProposal, error)
+
+	// SetGovernanceProposal creates or updates a governance proposal.
+	SetGovernanceProposal(
+		*models.GovernanceProposal,
+		types.Txn,
+	) error
+
+	// GetGovernanceVotes retrieves all votes for a governance proposal.
+	GetGovernanceVotes(
+		uint, // proposalID
+		types.Txn,
+	) ([]*models.GovernanceVote, error)
+
+	// SetGovernanceVote records a vote on a governance proposal.
+	SetGovernanceVote(
+		*models.GovernanceVote,
+		types.Txn,
+	) error
+
+	// Committee methods
+
+	// GetCommitteeMember retrieves a committee member by cold key.
+	GetCommitteeMember(
+		[]byte, // coldKey
+		types.Txn,
+	) (*models.AuthCommitteeHot, error)
+
+	// GetActiveCommitteeMembers retrieves all active committee members.
+	GetActiveCommitteeMembers(types.Txn) ([]*models.AuthCommitteeHot, error)
+
+	// IsCommitteeMemberResigned checks if a committee member has resigned.
+	IsCommitteeMemberResigned(
+		[]byte, // coldKey
+		types.Txn,
+	) (bool, error)
+
+	// Constitution methods
+
+	// GetConstitution retrieves the current constitution.
+	GetConstitution(types.Txn) (*models.Constitution, error)
+
+	// SetConstitution sets the constitution.
+	SetConstitution(
+		*models.Constitution,
+		types.Txn,
+	) error
+
+	// DeleteConstitutionsAfterSlot removes constitutions added after the given slot
+	// and clears deleted_slot for any that were soft-deleted after that slot.
+	// This is used during chain rollbacks.
+	DeleteConstitutionsAfterSlot(uint64, types.Txn) error
+
+	// Governance rollback methods
+
+	// DeleteGovernanceProposalsAfterSlot removes proposals added after the given slot
+	// and clears deleted_slot for any that were soft-deleted after that slot.
+	DeleteGovernanceProposalsAfterSlot(uint64, types.Txn) error
+
+	// DeleteGovernanceVotesAfterSlot removes votes added after the given slot
+	// and clears deleted_slot for any that were soft-deleted after that slot.
+	DeleteGovernanceVotesAfterSlot(uint64, types.Txn) error
 }
 
 // New creates a new metadata store instance using the specified plugin

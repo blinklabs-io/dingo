@@ -16,6 +16,7 @@ package postgres
 
 import (
 	"errors"
+	"fmt"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
@@ -199,9 +200,41 @@ func (d *MetadataStorePostgres) DeletePoolStakeSnapshotsAfterEpoch(
 ) error {
 	db, err := d.resolveDB(txn)
 	if err != nil {
-		return err
+		return fmt.Errorf(
+			"DeletePoolStakeSnapshotsAfterEpoch: resolve db: %w",
+			err,
+		)
 	}
-	return db.Where("epoch > ?", epoch).Delete(&models.PoolStakeSnapshot{}).Error
+	if err := db.Where("epoch > ?", epoch).Delete(&models.PoolStakeSnapshot{}).Error; err != nil {
+		return fmt.Errorf(
+			"DeletePoolStakeSnapshotsAfterEpoch: failed to delete snapshots after epoch %d: %w",
+			epoch,
+			err,
+		)
+	}
+	return nil
+}
+
+// DeletePoolStakeSnapshotsBeforeEpoch deletes all pool stake snapshots before a given epoch.
+func (d *MetadataStorePostgres) DeletePoolStakeSnapshotsBeforeEpoch(
+	epoch uint64,
+	txn types.Txn,
+) error {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return fmt.Errorf(
+			"DeletePoolStakeSnapshotsBeforeEpoch: resolve db: %w",
+			err,
+		)
+	}
+	if err := db.Where("epoch < ?", epoch).Delete(&models.PoolStakeSnapshot{}).Error; err != nil {
+		return fmt.Errorf(
+			"DeletePoolStakeSnapshotsBeforeEpoch: failed to delete snapshots before epoch %d: %w",
+			epoch,
+			err,
+		)
+	}
+	return nil
 }
 
 // DeleteEpochSummariesAfterEpoch deletes all epoch summaries after a given epoch.
@@ -212,7 +245,39 @@ func (d *MetadataStorePostgres) DeleteEpochSummariesAfterEpoch(
 ) error {
 	db, err := d.resolveDB(txn)
 	if err != nil {
-		return err
+		return fmt.Errorf(
+			"DeleteEpochSummariesAfterEpoch: resolve db: %w",
+			err,
+		)
 	}
-	return db.Where("epoch > ?", epoch).Delete(&models.EpochSummary{}).Error
+	if err := db.Where("epoch > ?", epoch).Delete(&models.EpochSummary{}).Error; err != nil {
+		return fmt.Errorf(
+			"DeleteEpochSummariesAfterEpoch: failed to delete summaries after epoch %d: %w",
+			epoch,
+			err,
+		)
+	}
+	return nil
+}
+
+// DeleteEpochSummariesBeforeEpoch deletes all epoch summaries before a given epoch.
+func (d *MetadataStorePostgres) DeleteEpochSummariesBeforeEpoch(
+	epoch uint64,
+	txn types.Txn,
+) error {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return fmt.Errorf(
+			"DeleteEpochSummariesBeforeEpoch: resolve db: %w",
+			err,
+		)
+	}
+	if err := db.Where("epoch < ?", epoch).Delete(&models.EpochSummary{}).Error; err != nil {
+		return fmt.Errorf(
+			"DeleteEpochSummariesBeforeEpoch: failed to delete summaries before epoch %d: %w",
+			epoch,
+			err,
+		)
+	}
+	return nil
 }

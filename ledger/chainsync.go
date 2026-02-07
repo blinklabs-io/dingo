@@ -15,13 +15,16 @@
 package ledger
 
 import (
+	"bytes"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math"
 	"slices"
 	"time"
 
 	"github.com/blinklabs-io/dingo/chain"
+	cardano "github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
@@ -290,11 +293,23 @@ func (ls *LedgerState) processBlockEvents() error {
 		if batchSize <= 0 {
 			break
 		}
+		batch := ls.chainsyncBlockEvents[batchOffset : batchOffset+batchSize]
+		// Verify block header cryptographic proofs (VRF, KES) outside
+		// the lock to avoid blocking other ledger operations during
+		// expensive crypto verification.
+		for _, evt := range batch {
+			if err := ls.verifyBlockHeaderCrypto(evt.Block); err != nil {
+				return fmt.Errorf(
+					"block header crypto verification: %w",
+					err,
+				)
+			}
+		}
 		ls.Lock()
 		// Start a transaction
 		txn := ls.db.BlobTxn(true)
 		err := txn.Do(func(txn *database.Txn) error {
-			for _, evt := range ls.chainsyncBlockEvents[batchOffset : batchOffset+batchSize] {
+			for _, evt := range batch {
 				if err := ls.processBlockEvent(txn, evt); err != nil {
 					return fmt.Errorf("failed processing block event: %w", err)
 				}
@@ -311,13 +326,42 @@ func (ls *LedgerState) processBlockEvents() error {
 	return nil
 }
 
+// GenesisBlockHash returns the Byron genesis hash from config, which is used
+// as the block hash for the synthetic genesis block that holds genesis UTxO data.
+// This mirrors how the Shelley epoch nonce uses the Shelley genesis hash.
+func GenesisBlockHash(cfg *cardano.CardanoNodeConfig) ([32]byte, error) {
+	if cfg == nil || cfg.ByronGenesisHash == "" {
+		return [32]byte{}, errors.New("byron genesis hash not available in config")
+	}
+	hashBytes, err := hex.DecodeString(cfg.ByronGenesisHash)
+	if err != nil {
+		return [32]byte{}, fmt.Errorf("decode Byron genesis hash: %w", err)
+	}
+	if len(hashBytes) != 32 {
+		return [32]byte{}, fmt.Errorf(
+			"invalid Byron genesis hash length: expected 32 bytes, got %d",
+			len(hashBytes),
+		)
+	}
+	var hash [32]byte
+	copy(hash[:], hashBytes)
+	return hash, nil
+}
+
 func (ls *LedgerState) createGenesisBlock() error {
 	if ls.currentTip.Point.Slot > 0 {
 		return nil
 	}
 
+	// Get the Byron genesis hash to use as the synthetic block hash.
+	// This mirrors how the Shelley epoch nonce uses the Shelley genesis hash.
+	genesisHash, err := GenesisBlockHash(ls.config.CardanoNodeConfig)
+	if err != nil {
+		return fmt.Errorf("get genesis block hash: %w", err)
+	}
+
 	txn := ls.db.Transaction(true)
-	err := txn.Do(func(txn *database.Txn) error {
+	err = txn.Do(func(txn *database.Txn) error {
 		// Record genesis UTxOs
 		byronGenesis := ls.config.CardanoNodeConfig.ByronGenesis()
 		byronGenesisUtxos, err := byronGenesis.GenesisUtxos()
@@ -332,7 +376,7 @@ func (ls *LedgerState) createGenesisBlock() error {
 		if len(byronGenesisUtxos)+len(shelleyGenesisUtxos) == 0 {
 			return errors.New("failed to generate genesis UTxOs")
 		}
-		ls.config.Logger.Debug(
+		ls.config.Logger.Info(
 			fmt.Sprintf("creating %d genesis UTxOs (%d Byron, %d Shelley)",
 				len(byronGenesisUtxos)+len(shelleyGenesisUtxos),
 				len(byronGenesisUtxos),
@@ -341,10 +385,14 @@ func (ls *LedgerState) createGenesisBlock() error {
 			"component", "ledger",
 		)
 
-		// Create genesis UTxOs directly using AddUtxos
+		// Group genesis UTxOs by transaction hash
 		genesisUtxos := slices.Concat(byronGenesisUtxos, shelleyGenesisUtxos)
-		utxoSlots := make([]models.UtxoSlot, len(genesisUtxos))
+		txUtxos := make(map[[32]byte][]lcommon.Utxo)
 		for i := range genesisUtxos {
+			txHash := genesisUtxos[i].Id.Id()
+			var txHashArray [32]byte
+			copy(txHashArray[:], txHash.Bytes())
+
 			// Generate CBOR for genesis UTxO outputs since they don't have original CBOR
 			cborData, err := cbor.Encode(genesisUtxos[i].Output)
 			if err != nil {
@@ -352,7 +400,6 @@ func (ls *LedgerState) createGenesisBlock() error {
 			}
 
 			// Create a new Utxo with CBOR-encoded output
-			// We need to create a new output object with CBOR set
 			var newOutput lcommon.TransactionOutput
 			switch output := genesisUtxos[i].Output.(type) {
 			case byron.ByronTransactionOutput:
@@ -367,22 +414,224 @@ func (ls *LedgerState) createGenesisBlock() error {
 				return fmt.Errorf("unsupported genesis UTxO output type: %T", genesisUtxos[i].Output)
 			}
 
-			utxoSlots[i] = models.UtxoSlot{
-				Utxo: lcommon.Utxo{
-					Id:     genesisUtxos[i].Id,
-					Output: newOutput,
-				},
-				Slot: 0, // genesis slot
+			txUtxos[txHashArray] = append(txUtxos[txHashArray], lcommon.Utxo{
+				Id:     genesisUtxos[i].Id,
+				Output: newOutput,
+			})
+		}
+
+		// Build synthetic genesis block with proper structure:
+		// Block -> Transactions -> Outputs (UTxOs)
+		//
+		// CBOR structure:
+		// [                                    // block: array of transactions
+		//   {0: tx_hash, 1: [output, ...]},    // transaction 1
+		//   {0: tx_hash, 1: [output, ...]},    // transaction 2
+		//   ...
+		// ]
+		//
+		// We track byte offsets for each output within this structure.
+		utxoOffsets := make(map[database.UtxoRef]database.CborOffset)
+
+		// Sort transaction hashes for deterministic ordering
+		txHashes := make([][32]byte, 0, len(txUtxos))
+		for txHash := range txUtxos {
+			txHashes = append(txHashes, txHash)
+		}
+		slices.SortFunc(txHashes, func(a, b [32]byte) int {
+			return bytes.Compare(a[:], b[:])
+		})
+
+		// Build the block structure manually to track exact byte offsets
+		// We need to know where each output CBOR starts within the block
+		blockCbor, err := buildGenesisBlockCbor(txHashes, txUtxos, utxoOffsets, genesisHash)
+		if err != nil {
+			return fmt.Errorf("build genesis block cbor: %w", err)
+		}
+
+		// Store synthetic genesis block CBOR.
+		// We use SetGenesisCbor to avoid creating a block index entry that
+		// would cause the chain iterator to include it (genesis is already
+		// handled separately during initialization).
+		if err := ls.db.SetGenesisCbor(0, genesisHash[:], blockCbor, txn); err != nil {
+			return fmt.Errorf("store genesis cbor: %w", err)
+		}
+
+		// Store each genesis transaction with its UTxOs
+		for txHashArray, utxos := range txUtxos {
+			if err := ls.db.SetGenesisTransaction(
+				txHashArray[:],
+				genesisHash[:],
+				utxos,
+				utxoOffsets,
+				txn,
+			); err != nil {
+				return fmt.Errorf("set genesis transaction %x: %w", txHashArray[:8], err)
 			}
 		}
 
-		if err := ls.db.AddUtxos(utxoSlots, txn); err != nil {
-			return fmt.Errorf("add genesis UTxOs: %w", err)
-		}
+		ls.config.Logger.Info(
+			fmt.Sprintf("stored %d genesis transactions with %d total UTxOs",
+				len(txUtxos),
+				len(genesisUtxos),
+			),
+			"component", "ledger",
+		)
 
 		return nil
 	})
 	return err
+}
+
+// buildGenesisBlockCbor creates a CBOR structure representing a synthetic
+// genesis block containing transactions with outputs. The structure is:
+//
+//	[                                    // block: array of transactions
+//	  {0: tx_hash, 1: [output, ...]},    // transaction 1
+//	  {0: tx_hash, 1: [output, ...]},    // transaction 2
+//	  ...
+//	]
+//
+// It populates utxoOffsets with the byte offset of each output within the block.
+// Unlike a search-based approach, this function tracks exact byte positions during
+// CBOR construction to avoid any possibility of false matches.
+// The blockHash parameter is the Byron genesis hash used as the synthetic block hash.
+func buildGenesisBlockCbor(
+	txHashes [][32]byte,
+	txUtxos map[[32]byte][]lcommon.Utxo,
+	utxoOffsets map[database.UtxoRef]database.CborOffset,
+	blockHash [32]byte,
+) ([]byte, error) {
+	var buf bytes.Buffer
+
+	// Write outer array header for transactions
+	writeCborArrayHeader(&buf, len(txHashes))
+
+	for _, txHash := range txHashes {
+		utxos := txUtxos[txHash]
+
+		// Sort outputs by index for deterministic ordering
+		slices.SortFunc(utxos, func(a, b lcommon.Utxo) int {
+			ai, bi := uint64(a.Id.Index()), uint64(b.Id.Index())
+			if ai < bi {
+				return -1
+			} else if ai > bi {
+				return 1
+			}
+			return 0
+		})
+
+		// Write map header with 2 entries: {0: txhash, 1: outputs}
+		writeCborMapHeader(&buf, 2)
+
+		// Key 0: tx hash
+		writeCborUint(&buf, 0)
+		writeCborBytes(&buf, txHash[:])
+
+		// Key 1: outputs array
+		writeCborUint(&buf, 1)
+		writeCborArrayHeader(&buf, len(utxos))
+
+		// Write each output, tracking offsets
+		for _, utxo := range utxos {
+			outputCbor := utxo.Output.Cbor()
+			if len(outputCbor) == 0 {
+				var err error
+				outputCbor, err = cbor.Encode(utxo.Output)
+				if err != nil {
+					return nil, fmt.Errorf("encode output: %w", err)
+				}
+			}
+
+			// Record offset BEFORE writing the output
+			offset := buf.Len()
+			outputLen := len(outputCbor)
+
+			// Validate sizes fit in uint32 (fail fast instead of silent truncation)
+			if offset > math.MaxUint32 {
+				return nil, fmt.Errorf(
+					"genesis CBOR offset %d exceeds uint32 max",
+					offset,
+				)
+			}
+			if outputLen > math.MaxUint32 {
+				return nil, fmt.Errorf(
+					"genesis output CBOR length %d exceeds uint32 max",
+					outputLen,
+				)
+			}
+
+			buf.Write(outputCbor)
+
+			ref := database.UtxoRef{
+				TxId:      txHash,
+				OutputIdx: utxo.Id.Index(),
+			}
+			utxoOffsets[ref] = database.CborOffset{
+				BlockSlot:  0,
+				BlockHash:  blockHash,
+				ByteOffset: uint32(offset),    // #nosec G115: bounds checked above
+				ByteLength: uint32(outputLen), // #nosec G115: bounds checked above
+			}
+		}
+	}
+
+	return buf.Bytes(), nil
+}
+
+// writeCborArrayHeader writes a CBOR array header for n elements.
+func writeCborArrayHeader(buf *bytes.Buffer, n int) {
+	writeCborMajorType(buf, 4, n) // Major type 4 = array
+}
+
+// writeCborMapHeader writes a CBOR map header for n pairs.
+func writeCborMapHeader(buf *bytes.Buffer, n int) {
+	writeCborMajorType(buf, 5, n) // Major type 5 = map
+}
+
+// writeCborBytes writes a CBOR byte string.
+func writeCborBytes(buf *bytes.Buffer, data []byte) {
+	writeCborMajorType(buf, 2, len(data)) // Major type 2 = byte string
+	buf.Write(data)
+}
+
+// writeCborUint writes a CBOR unsigned integer.
+func writeCborUint(buf *bytes.Buffer, n int) {
+	writeCborMajorType(buf, 0, n) // Major type 0 = unsigned int
+}
+
+// writeCborMajorType writes a CBOR header with the given major type and value.
+func writeCborMajorType(buf *bytes.Buffer, majorType, n int) {
+	header := byte(majorType << 5)
+	switch {
+	case n < 24:
+		buf.WriteByte(header | byte(n))
+	case n < 256:
+		buf.WriteByte(header | 24)
+		buf.WriteByte(byte(n))
+	case n < 65536:
+		buf.WriteByte(header | 25)
+		buf.WriteByte(byte(n >> 8))
+		buf.WriteByte(byte(n))
+	case n < 4294967296:
+		buf.WriteByte(header | 26)
+		buf.WriteByte(byte(n >> 24))
+		buf.WriteByte(byte(n >> 16))
+		buf.WriteByte(byte(n >> 8))
+		buf.WriteByte(byte(n))
+	default:
+		// 8-byte encoding for values >= 2^32
+		buf.WriteByte(header | 27)
+		val := uint64(n)
+		buf.WriteByte(byte(val >> 56))
+		buf.WriteByte(byte(val >> 48))
+		buf.WriteByte(byte(val >> 40))
+		buf.WriteByte(byte(val >> 32))
+		buf.WriteByte(byte(val >> 24))
+		buf.WriteByte(byte(val >> 16))
+		buf.WriteByte(byte(val >> 8))
+		buf.WriteByte(byte(val))
+	}
 }
 
 func (ls *LedgerState) calculateEpochNonce(
@@ -554,6 +803,66 @@ func (ls *LedgerState) processEpochRollover(
 	}
 	result.NewCurrentPParams = newPParams
 
+	// Check if the protocol version changed in a way that
+	// triggers a hard fork (era transition)
+	oldVer, oldErr := GetProtocolVersion(currentPParams)
+	newVer, newErr := GetProtocolVersion(newPParams)
+	if oldErr != nil {
+		ls.config.Logger.Warn(
+			"could not extract protocol version from "+
+				"current pparams, skipping hard fork "+
+				"detection",
+			"error", oldErr,
+			"pparams_type",
+			fmt.Sprintf("%T", currentPParams),
+			"component", "ledger",
+		)
+	}
+	if newErr != nil {
+		ls.config.Logger.Warn(
+			"could not extract protocol version from "+
+				"new pparams, skipping hard fork "+
+				"detection",
+			"error", newErr,
+			"pparams_type",
+			fmt.Sprintf("%T", newPParams),
+			"component", "ledger",
+		)
+	}
+	if oldErr == nil && newErr == nil {
+		if IsHardForkTransition(oldVer, newVer) {
+			fromEra, _ := EraForVersion(oldVer.Major)
+			toEra, _ := EraForVersion(newVer.Major)
+			result.HardFork = &HardForkInfo{
+				OldVersion: oldVer,
+				NewVersion: newVer,
+				FromEra:    fromEra,
+				ToEra:      toEra,
+			}
+			ls.config.Logger.Info(
+				"hard fork detected via protocol "+
+					"parameter update",
+				"from_era", fromEra,
+				"to_era", toEra,
+				"old_version",
+				fmt.Sprintf(
+					"%d.%d",
+					oldVer.Major,
+					oldVer.Minor,
+				),
+				"new_version",
+				fmt.Sprintf(
+					"%d.%d",
+					newVer.Major,
+					newVer.Minor,
+				),
+				"epoch",
+				currentEpoch.EpochId+1,
+				"component", "ledger",
+			)
+		}
+	}
+
 	// Create next epoch record
 	epochSlotLength, epochLength, err := currentEra.EpochLengthFunc(
 		ls.config.CardanoNodeConfig,
@@ -639,6 +948,9 @@ func (ls *LedgerState) processBlockEvent(
 	txn *database.Txn,
 	e BlockfetchEvent,
 ) error {
+	// Note: block header crypto verification (VRF, KES) is performed
+	// outside the lock in processBlockEvents before this is called.
+
 	// Add block to chain
 	if err := ls.chain.AddBlock(e.Block, txn); err != nil {
 		// Ignore and log errors about block not fitting on chain or matching first header

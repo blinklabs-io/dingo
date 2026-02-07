@@ -1,4 +1,4 @@
-// Copyright 2025 Blink Labs Software
+// Copyright 2026 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -17,6 +17,7 @@ package aws
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -439,6 +440,75 @@ func (d *BlobStoreS3) DeleteUtxo(
 	return nil
 }
 
+// SetTx stores a transaction's offset data
+func (d *BlobStoreS3) SetTx(
+	txn types.Txn,
+	txHash []byte,
+	offsetData []byte,
+) error {
+	t, err := d.validateTxn(txn)
+	if err != nil {
+		return fmt.Errorf("SetTx: validate txn: %w", err)
+	}
+	if err := t.assertWritable(); err != nil {
+		return fmt.Errorf("SetTx: assert writable: %w", err)
+	}
+	ctx, cancel := d.opContext()
+	defer cancel()
+	key := types.TxBlobKey(txHash)
+	if err := d.Put(ctx, string(key), offsetData); err != nil {
+		return fmt.Errorf("SetTx: put tx blob %s: %w", key, err)
+	}
+	return nil
+}
+
+// GetTx retrieves a transaction's offset data
+func (d *BlobStoreS3) GetTx(
+	txn types.Txn,
+	txHash []byte,
+) ([]byte, error) {
+	if _, err := d.validateTxn(txn); err != nil {
+		return nil, fmt.Errorf("GetTx: validate txn: %w", err)
+	}
+	ctx, cancel := d.opContext()
+	defer cancel()
+	key := types.TxBlobKey(txHash)
+	data, err := d.getInternal(ctx, string(key))
+	if err != nil {
+		if isS3NotFound(err) {
+			return nil, fmt.Errorf("GetTx: tx blob %s: %w", key, types.ErrBlobKeyNotFound)
+		}
+		return nil, fmt.Errorf("GetTx: get tx blob %s: %w", key, err)
+	}
+	return data, nil
+}
+
+// DeleteTx removes a transaction's offset data
+func (d *BlobStoreS3) DeleteTx(
+	txn types.Txn,
+	txHash []byte,
+) error {
+	t, err := d.validateTxn(txn)
+	if err != nil {
+		return fmt.Errorf("DeleteTx: validate txn: %w", err)
+	}
+	if err := t.assertWritable(); err != nil {
+		return fmt.Errorf("DeleteTx: assert writable: %w", err)
+	}
+	ctx, cancel := d.opContext()
+	defer cancel()
+	key := types.TxBlobKey(txHash)
+	_, err = d.client.DeleteObject(ctx, &s3.DeleteObjectInput{
+		Bucket: aws.String(d.bucket),
+		Key:    awsString(d.fullKey(string(key))),
+	})
+	if err != nil && !isS3NotFound(err) {
+		d.logger.Errorf("s3 delete %q failed: %v", string(key), err)
+		return fmt.Errorf("DeleteTx: delete tx blob %s: %w", key, err)
+	}
+	return nil
+}
+
 func (t *s3Txn) Commit() error {
 	if t.finished {
 		return nil
@@ -586,7 +656,11 @@ func (d *BlobStoreS3) listKeys(
 		}
 		for _, obj := range page.Contents {
 			key := strings.TrimPrefix(aws.ToString(obj.Key), d.prefix)
-			keys = append(keys, key)
+			externalKey, err := hex.DecodeString(key)
+			if err != nil {
+				return nil, fmt.Errorf("error decoding s3 key: %w", err)
+			}
+			keys = append(keys, string(externalKey))
 		}
 	}
 	sort.Strings(keys)
@@ -624,7 +698,7 @@ func (d *BlobStoreS3) Bucket() string {
 
 // Returns the S3 key with an optional prefix.
 func (d *BlobStoreS3) fullKey(key string) string {
-	return d.prefix + key
+	return d.prefix + hex.EncodeToString([]byte(key))
 }
 
 func awsString(s string) *string {

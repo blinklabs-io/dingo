@@ -71,9 +71,10 @@ func newPoolRegCache(capacity int) *poolRegCache {
 }
 
 // batchFetchPoolRegs fetches all relevant registrations for the given pool IDs
-// at or before the given slot. Uses one query with JOIN to get cert_index for
-// same-slot disambiguation. Chunks queries to avoid exceeding SQLite bind
-// variable limits.
+// at or before the given slot. Uses one query with LEFT JOIN to get cert_index
+// for same-slot disambiguation (COALESCE defaults to 0 when certificate
+// reference is NULL). Chunks queries to avoid exceeding SQLite bind variable
+// limits.
 func batchFetchPoolRegs(
 	db *gorm.DB,
 	poolIDs []uint,
@@ -101,9 +102,9 @@ func batchFetchPoolRegs(
 		}
 		var regRecords []regResult
 		if err := db.Table("pool_registration").
-			Select("pool_registration.pool_id, pool_registration.added_slot, pool_registration.pledge, pool_registration.cost, pool_registration.margin, pool_registration.vrf_key_hash, pool_registration.reward_account, certs.cert_index, certs.id AS cert_id, transaction.block_index").
-			Joins("INNER JOIN certs ON certs.id = pool_registration.certificate_id").
-			Joins("INNER JOIN transaction ON transaction.id = certs.transaction_id").
+			Select("pool_registration.pool_id, pool_registration.added_slot, pool_registration.pledge, pool_registration.cost, pool_registration.margin, pool_registration.vrf_key_hash, pool_registration.reward_account, COALESCE(certs.cert_index, 0) AS cert_index, COALESCE(certs.id, 0) AS cert_id, COALESCE(\"transaction\".block_index, 0) AS block_index").
+			Joins("LEFT JOIN certs ON certs.id = pool_registration.certificate_id").
+			Joins("LEFT JOIN \"transaction\" ON \"transaction\".id = certs.transaction_id").
 			Where("pool_registration.pool_id IN ? AND pool_registration.added_slot <= ?", idChunk, slot).
 			Find(&regRecords).Error; err != nil {
 			return nil, err
@@ -206,6 +207,27 @@ func (d *MetadataStoreSqlite) GetPool(
 		}
 	}
 	return ret, nil
+}
+
+// GetPoolByVrfKeyHash retrieves an active pool by its VRF key hash.
+// Returns nil if no active pool uses this VRF key.
+func (d *MetadataStoreSqlite) GetPoolByVrfKeyHash(
+	vrfKeyHash []byte,
+	txn types.Txn,
+) (*models.Pool, error) {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return nil, err
+	}
+	var pool models.Pool
+	result := db.Where("vrf_key_hash = ?", vrfKeyHash).First(&pool)
+	if result.Error != nil {
+		if errors.Is(result.Error, gorm.ErrRecordNotFound) {
+			return nil, nil
+		}
+		return nil, result.Error
+	}
+	return &pool, nil
 }
 
 // RestorePoolStateAtSlot reverts pool state to the given slot.
@@ -464,18 +486,88 @@ func (d *MetadataStoreSqlite) GetActivePoolRelays(
 	// Query all pools with their registrations, retirements, and relays.
 	// We load ALL registrations/retirements per pool and filter in Go because
 	// GORM's Preload with Limit(1) applies globally, not per-parent.
+	// JOINs with certs and transaction tables to use block_index and cert_index
+	// for consistent on-chain certificate ordering (matching GetActivePoolKeyHashesAtSlot).
+	// Note: cert_index resets per transaction, so block_index must come first.
 	var pools []models.Pool
 	result := db.
 		Preload("Registration", func(db *gorm.DB) *gorm.DB {
-			return db.Order("added_slot DESC, id DESC")
+			return db.Select("pool_registration.*").
+				Joins("LEFT JOIN certs ON certs.id = pool_registration.certificate_id").
+				Joins("LEFT JOIN \"transaction\" ON \"transaction\".id = certs.transaction_id").
+				Order("pool_registration.added_slot DESC, COALESCE(\"transaction\".block_index, 0) DESC, COALESCE(certs.cert_index, 0) DESC")
 		}).
 		Preload("Registration.Relays").
 		Preload("Retirement", func(db *gorm.DB) *gorm.DB {
-			return db.Order("added_slot DESC, id DESC")
+			return db.Select("pool_retirement.*").
+				Joins("LEFT JOIN certs ON certs.id = pool_retirement.certificate_id").
+				Joins("LEFT JOIN \"transaction\" ON \"transaction\".id = certs.transaction_id").
+				Order("pool_retirement.added_slot DESC, COALESCE(\"transaction\".block_index, 0) DESC, COALESCE(certs.cert_index, 0) DESC")
 		}).
 		Find(&pools)
 	if result.Error != nil {
 		return nil, result.Error
+	}
+
+	// Collect certificate IDs where same-slot comparison is needed
+	// to look up block_index and cert_index for tie-breaking
+	var certIDs []uint
+	for _, pool := range pools {
+		if len(pool.Registration) == 0 || len(pool.Retirement) == 0 {
+			continue
+		}
+		if pool.Retirement[0].AddedSlot == pool.Registration[0].AddedSlot {
+			certIDs = append(
+				certIDs,
+				pool.Registration[0].CertificateID,
+				pool.Retirement[0].CertificateID,
+			)
+		}
+	}
+
+	// certInfo holds block_index and cert_index for same-slot comparison
+	type certInfo struct {
+		blockIndex uint32
+		certIndex  uint
+	}
+	// Use composite key (cert ID + cert type) to disambiguate when
+	// a registration and retirement share the same CertificateID
+	type certInfoKey struct {
+		certID   uint
+		certType uint
+	}
+	certInfoMap := make(map[certInfoKey]certInfo)
+	if len(certIDs) > 0 {
+		// Fetch cert_type, cert_index and block_index via join with transaction
+		// Chunk to avoid exceeding SQLite bind variable limits
+		type certResult struct {
+			CertID     uint
+			CertType   uint
+			CertIndex  uint
+			BlockIndex uint32
+		}
+		for start := 0; start < len(certIDs); start += sqliteBindVarLimit {
+			end := min(start+sqliteBindVarLimit, len(certIDs))
+			idChunk := certIDs[start:end]
+
+			var certResults []certResult
+			if err := db.Table("certs").
+				Select("certs.id AS cert_id, certs.cert_type, certs.cert_index, COALESCE(\"transaction\".block_index, 0) AS block_index").
+				Joins("LEFT JOIN \"transaction\" ON \"transaction\".id = certs.transaction_id").
+				Where("certs.id IN ?", idChunk).
+				Scan(&certResults).Error; err != nil {
+				return nil, fmt.Errorf(
+					"GetActivePoolRelays: fetch cert indexes: %w",
+					err,
+				)
+			}
+			for _, c := range certResults {
+				certInfoMap[certInfoKey{certID: c.CertID, certType: c.CertType}] = certInfo{
+					blockIndex: c.BlockIndex,
+					certIndex:  c.CertIndex,
+				}
+			}
+		}
 	}
 
 	// Filter active pools and collect relays from the latest registration
@@ -486,16 +578,37 @@ func (d *MetadataStoreSqlite) GetActivePoolRelays(
 			continue
 		}
 
-		// Get the latest registration (already sorted by added_slot DESC)
+		// Get the latest registration (already sorted by added_slot DESC, block_index DESC, cert_index DESC)
 		latestReg := pool.Registration[0]
 
 		// Check if pool is retired
 		if len(pool.Retirement) > 0 {
-			// Get the latest retirement (already sorted by added_slot DESC)
+			// Get the latest retirement (already sorted by added_slot DESC, block_index DESC, cert_index DESC)
 			latestRet := pool.Retirement[0]
-			// If retirement is more recent than registration and epoch has passed
-			if latestRet.AddedSlot > latestReg.AddedSlot &&
-				latestRet.Epoch <= curEpoch.EpochId {
+			// Check if retirement takes precedence over registration
+			shouldCheckRetirement := false
+			if latestRet.AddedSlot > latestReg.AddedSlot {
+				shouldCheckRetirement = true
+			} else if latestRet.AddedSlot == latestReg.AddedSlot {
+				// Same-slot case: use block_index then cert_index for on-chain ordering
+				// Higher block_index/cert_index means it came later in the block
+				// Disambiguate by cert_type to handle potential CertificateID collisions
+				retInfo := certInfoMap[certInfoKey{
+					certID:   latestRet.CertificateID,
+					certType: uint(lcommon.CertificateTypePoolRetirement),
+				}]
+				regInfo := certInfoMap[certInfoKey{
+					certID:   latestReg.CertificateID,
+					certType: uint(lcommon.CertificateTypePoolRegistration),
+				}]
+				if retInfo.blockIndex > regInfo.blockIndex {
+					shouldCheckRetirement = true
+				} else if retInfo.blockIndex == regInfo.blockIndex && retInfo.certIndex > regInfo.certIndex {
+					shouldCheckRetirement = true
+				}
+			}
+			// If retirement takes precedence and epoch has passed, pool is retired
+			if shouldCheckRetirement && latestRet.Epoch <= curEpoch.EpochId {
 				continue // Pool is retired
 			}
 		}
@@ -505,4 +618,236 @@ func (d *MetadataStoreSqlite) GetActivePoolRelays(
 	}
 
 	return relays, nil
+}
+
+// GetActivePoolKeyHashes retrieves the key hashes of all currently active pools.
+// A pool is active if it has a registration and either no retirement or
+// the retirement epoch is in the future.
+//
+// This delegates to GetActivePoolKeyHashesAtSlot using the current tip's slot,
+// ensuring consistent same-slot certificate handling via block_index and cert_index
+// ordering (ORDER BY added_slot DESC, block_index DESC, cert_index DESC).
+func (d *MetadataStoreSqlite) GetActivePoolKeyHashes(
+	txn types.Txn,
+) ([][]byte, error) {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return nil, fmt.Errorf("GetActivePoolKeyHashes: resolve db: %w", err)
+	}
+
+	// Get the current tip slot
+	var tmpTip models.Tip
+	if res := db.Where("id = ?", tipEntryId).First(&tmpTip); res.Error != nil {
+		if errors.Is(res.Error, gorm.ErrRecordNotFound) {
+			return [][]byte{}, nil
+		}
+		return nil, fmt.Errorf(
+			"GetActivePoolKeyHashes: get tip: %w",
+			res.Error,
+		)
+	}
+
+	// Delegate to slot-based query for consistent behavior
+	return d.GetActivePoolKeyHashesAtSlot(tmpTip.Slot, txn)
+}
+
+// GetActivePoolKeyHashesAtSlot retrieves the key hashes of pools that were
+// active at the given slot. A pool was active at a slot if:
+//  1. It had a registration with added_slot <= slot
+//  2. Either no retirement with added_slot <= slot, OR the retirement was
+//     for an epoch that hadn't started by the given slot
+//
+// This implementation only fetches pools that have at least one registration
+// at or before the given slot, avoiding loading all pools for early slot queries.
+// Uses window functions to get the latest registration/retirement per pool
+// directly in SQLite, minimizing memory usage.
+func (d *MetadataStoreSqlite) GetActivePoolKeyHashesAtSlot(
+	slot uint64,
+	txn types.Txn,
+) ([][]byte, error) {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"GetActivePoolKeyHashesAtSlot: resolve db: %w",
+			err,
+		)
+	}
+
+	// Find the epoch that contains the given slot
+	var epochAtSlot models.Epoch
+	if res := db.Where(
+		"start_slot <= ?",
+		slot,
+	).Order("start_slot DESC").First(&epochAtSlot); res.Error != nil {
+		if errors.Is(res.Error, gorm.ErrRecordNotFound) {
+			// No epoch data yet - return error so callers can
+			// distinguish "no pools" from "data not synced"
+			return nil, fmt.Errorf(
+				"GetActivePoolKeyHashesAtSlot: %w",
+				types.ErrNoEpochData,
+			)
+		}
+		return nil, fmt.Errorf(
+			"GetActivePoolKeyHashesAtSlot: get epoch at slot: %w",
+			res.Error,
+		)
+	}
+
+	// Verify the slot falls within the epoch's duration. If it doesn't,
+	// we only have an older epoch and the requested slot is beyond our
+	// synced data. Using a stale epoch ID could incorrectly treat retired
+	// pools as active.
+	if slot >= epochAtSlot.StartSlot+uint64(epochAtSlot.LengthInSlots) {
+		return nil, fmt.Errorf(
+			"GetActivePoolKeyHashesAtSlot: %w",
+			types.ErrNoEpochData,
+		)
+	}
+
+	// Use window functions to get only the latest registration and retirement
+	// per pool at or before the given slot, then filter in SQL.
+	// This avoids loading all pools and their certificates into memory.
+	type poolResult struct {
+		PoolKeyHash []byte
+	}
+	var results []poolResult
+
+	// Query explanation:
+	// 1. latest_reg: Gets the most recent registration per pool at or before slot
+	//    JOINs with certs and transaction to get block_index and cert_index for
+	//    on-chain ordering (cert_index resets per transaction)
+	// 2. latest_ret: Gets the most recent retirement per pool at or before slot
+	//    JOINs with certs and transaction to get block_index and cert_index
+	// 3. Join pools with their latest registration (INNER JOIN ensures only pools
+	//    with registrations at or before slot are included)
+	// 4. LEFT JOIN retirement to handle pools without retirements
+	// 5. Filter: Pool is active if no retirement OR retirement is before registration
+	//    (using slot, block_index, and cert_index for same-slot disambiguation)
+	//    OR retirement epoch hasn't started yet
+	// Note: block_index from transaction provides ordering across transactions,
+	// cert_index from certs provides ordering within a transaction.
+	// COALESCE defaults to 0 when references are NULL (e.g., tests)
+	query := `
+		WITH latest_reg AS (
+			SELECT pr.pool_id, pr.added_slot,
+				COALESCE(t.block_index, 0) as blk_idx,
+				COALESCE(c.cert_index, 0) as cert_idx,
+				ROW_NUMBER() OVER (
+					PARTITION BY pr.pool_id
+					ORDER BY pr.added_slot DESC, COALESCE(t.block_index, 0) DESC, COALESCE(c.cert_index, 0) DESC
+				) as rn
+			FROM pool_registration pr
+			LEFT JOIN certs c ON c.id = pr.certificate_id
+			LEFT JOIN "transaction" t ON t.id = c.transaction_id
+			WHERE pr.added_slot <= ?
+		),
+		latest_ret AS (
+			SELECT rt.pool_id, rt.added_slot, rt.epoch,
+				COALESCE(t.block_index, 0) as blk_idx,
+				COALESCE(c.cert_index, 0) as cert_idx,
+				ROW_NUMBER() OVER (
+					PARTITION BY rt.pool_id
+					ORDER BY rt.added_slot DESC, COALESCE(t.block_index, 0) DESC, COALESCE(c.cert_index, 0) DESC
+				) as rn
+			FROM pool_retirement rt
+			LEFT JOIN certs c ON c.id = rt.certificate_id
+			LEFT JOIN "transaction" t ON t.id = c.transaction_id
+			WHERE rt.added_slot <= ?
+		)
+		SELECT p.pool_key_hash
+		FROM pool p
+		INNER JOIN latest_reg lr ON lr.pool_id = p.id AND lr.rn = 1
+		LEFT JOIN latest_ret lrt ON lrt.pool_id = p.id AND lrt.rn = 1
+		WHERE lrt.pool_id IS NULL
+			OR lrt.added_slot < lr.added_slot
+			OR (lrt.added_slot = lr.added_slot AND lrt.blk_idx < lr.blk_idx)
+			OR (lrt.added_slot = lr.added_slot AND lrt.blk_idx = lr.blk_idx AND lrt.cert_idx < lr.cert_idx)
+			OR lrt.epoch > ?`
+
+	if err := db.Raw(query, slot, slot, epochAtSlot.EpochId).Scan(&results).Error; err != nil {
+		return nil, fmt.Errorf(
+			"GetActivePoolKeyHashesAtSlot: query pools: %w",
+			err,
+		)
+	}
+
+	// Convert results to [][]byte
+	poolKeyHashes := make([][]byte, len(results))
+	for i, r := range results {
+		poolKeyHashes[i] = r.PoolKeyHash
+	}
+
+	return poolKeyHashes, nil
+}
+
+// GetStakeByPool returns the total delegated stake and delegator count for a pool.
+func (d *MetadataStoreSqlite) GetStakeByPool(
+	poolKeyHash []byte,
+	txn types.Txn,
+) (uint64, uint64, error) {
+	stakes, delegators, err := d.GetStakeByPools([][]byte{poolKeyHash}, txn)
+	if err != nil {
+		return 0, 0, err
+	}
+	return stakes[string(poolKeyHash)], delegators[string(poolKeyHash)], nil
+}
+
+// GetStakeByPools returns delegated stake for multiple pools in a single query.
+func (d *MetadataStoreSqlite) GetStakeByPools(
+	poolKeyHashes [][]byte,
+	txn types.Txn,
+) (map[string]uint64, map[string]uint64, error) {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return nil, nil, fmt.Errorf("GetStakeByPools: resolve db: %w", err)
+	}
+
+	// Initialize maps - stakeMap returns zeros since stake calculation
+	// requires UTxO aggregation which is not yet implemented
+	stakeMap := make(map[string]uint64, len(poolKeyHashes))
+	delegatorMap := make(map[string]uint64, len(poolKeyHashes))
+
+	// Initialize all pools with zero
+	for _, hash := range poolKeyHashes {
+		stakeMap[string(hash)] = 0
+		delegatorMap[string(hash)] = 0
+	}
+
+	if len(poolKeyHashes) == 0 {
+		return stakeMap, delegatorMap, nil
+	}
+
+	// Query accounts delegated to these pools and count/sum
+	// The Account table has a Pool field containing the pool key hash
+	type poolStakeResult struct {
+		Pool           []byte
+		DelegatorCount int64
+	}
+
+	var results []poolStakeResult
+	if err := db.Model(&models.Account{}).
+		Select("pool, COUNT(*) as delegator_count").
+		Where("pool IN ? AND active = ?", poolKeyHashes, true).
+		Group("pool").
+		Scan(&results).Error; err != nil {
+		return nil, nil, fmt.Errorf(
+			"GetStakeByPools: query accounts: %w",
+			err,
+		)
+	}
+
+	// Update delegator counts from query results
+	for _, r := range results {
+		if r.DelegatorCount >= 0 {
+			delegatorMap[string(r.Pool)] = uint64(r.DelegatorCount)
+		}
+	}
+
+	// TODO: Implement full stake calculation. This requires:
+	// 1. Get all staking_keys for accounts delegated to pools
+	// 2. Query UTxOs by stake credential
+	// 3. Sum values per pool
+	// For now, stakeMap returns zeros - stake values are placeholders.
+
+	return stakeMap, delegatorMap, nil
 }

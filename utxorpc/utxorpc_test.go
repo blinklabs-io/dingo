@@ -23,6 +23,7 @@ import (
 	"log/slog"
 
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/stretchr/testify/require"
 )
 
 func TestUtxorpc_StartStop(t *testing.T) {
@@ -33,14 +34,13 @@ func TestUtxorpc_StartStop(t *testing.T) {
 		Host:     "127.0.0.1",
 		Port:     0,
 	})
-	if err := u.Start(context.Background()); err != nil {
-		t.Fatalf("failed to start utxorpc: %v", err)
-	}
-	// Brief delay to ensure server is listening
-	time.Sleep(100 * time.Millisecond)
+	err := u.Start(context.Background())
+	require.NoError(t, err, "failed to start utxorpc")
+
+	// Server is already listening after Start returns successfully
+	// (startServer waits internally for startup or error)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	if err := u.Stop(ctx); err != nil {
-		t.Fatalf("failed to stop utxorpc: %v", err)
-	}
+	err = u.Stop(ctx)
+	require.NoError(t, err, "failed to stop utxorpc")
 }

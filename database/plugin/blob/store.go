@@ -1,4 +1,4 @@
-// Copyright 2025 Blink Labs Software
+// Copyright 2026 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -76,6 +76,11 @@ type BlobStore interface {
 	SetUtxo(txn types.Txn, txId []byte, outputIdx uint32, cbor []byte) error
 	GetUtxo(txn types.Txn, txId []byte, outputIdx uint32) ([]byte, error)
 	DeleteUtxo(txn types.Txn, txId []byte, outputIdx uint32) error
+
+	// Transaction operations
+	SetTx(txn types.Txn, txHash []byte, offsetData []byte) error
+	GetTx(txn types.Txn, txHash []byte) ([]byte, error)
+	DeleteTx(txn types.Txn, txHash []byte) error
 }
 
 // New returns the started blob plugin selected by name

@@ -18,12 +18,15 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
 func resetGlobalConfig() {
 	globalConfig = &Config{
 		MempoolCapacity:    1048576,
+		EvictionWatermark:  0.90,
+		RejectionWatermark: 0.95,
 		BindAddr:           "0.0.0.0",
 		CardanoConfig:      "", // Will be set dynamically based on network
 		DatabasePath:       ".dingo",
@@ -81,6 +84,8 @@ tlsKeyFilePath: "key1.pem"
 
 	expected := &Config{
 		MempoolCapacity:    2097152,
+		EvictionWatermark:  0.90,
+		RejectionWatermark: 0.95,
 		BindAddr:           "127.0.0.1",
 		CardanoConfig:      "./cardano/preview/config.json",
 		DatabasePath:       ".dingo",
@@ -130,6 +135,8 @@ func TestLoad_WithoutConfigFile_UsesDefaults(t *testing.T) {
 	// Expected is the updated default values from globalConfig
 	expected := &Config{
 		MempoolCapacity:    1048576,
+		EvictionWatermark:  0.90,
+		RejectionWatermark: 0.95,
 		BindAddr:           "0.0.0.0",
 		CardanoConfig:      "preview/config.json", // Set dynamically based on network
 		DatabasePath:       ".dingo",
@@ -374,6 +381,128 @@ func TestLoadConfig_UnsupportedNetworkWithUserConfig(t *testing.T) {
 			"expected CardanoConfig to be user-provided path, got %q",
 			cfg.CardanoConfig,
 		)
+	}
+}
+
+func TestLoadConfig_WatermarkValidation(t *testing.T) {
+	tests := []struct {
+		name       string
+		eviction   float64
+		rejection  float64
+		wantErr    bool
+		errContain string
+	}{
+		{
+			name:      "defaults when both zero",
+			eviction:  0,
+			rejection: 0,
+			wantErr:   false,
+		},
+		{
+			name:      "default eviction when zero with explicit rejection",
+			eviction:  0,
+			rejection: 0.95,
+			wantErr:   false,
+		},
+		{
+			name:      "default rejection when zero with explicit eviction",
+			eviction:  0.80,
+			rejection: 0,
+			wantErr:   false,
+		},
+		{
+			name:      "valid custom values",
+			eviction:  0.75,
+			rejection: 0.85,
+			wantErr:   false,
+		},
+		{
+			name:      "rejection at exactly 1.0",
+			eviction:  0.90,
+			rejection: 1.0,
+			wantErr:   false,
+		},
+		{
+			name:       "eviction negative",
+			eviction:   -0.1,
+			rejection:  0.95,
+			wantErr:    true,
+			errContain: "invalid evictionWatermark",
+		},
+		{
+			name:       "rejection negative",
+			eviction:   0.90,
+			rejection:  -0.5,
+			wantErr:    true,
+			errContain: "invalid rejectionWatermark",
+		},
+		{
+			name:       "eviction above 1",
+			eviction:   1.5,
+			rejection:  0.95,
+			wantErr:    true,
+			errContain: "invalid evictionWatermark",
+		},
+		{
+			name:       "rejection above 1",
+			eviction:   0.90,
+			rejection:  1.1,
+			wantErr:    true,
+			errContain: "invalid rejectionWatermark",
+		},
+		{
+			name:       "eviction equals rejection",
+			eviction:   0.90,
+			rejection:  0.90,
+			wantErr:    true,
+			errContain: "must be less than",
+		},
+		{
+			name:       "eviction greater than rejection",
+			eviction:   0.95,
+			rejection:  0.90,
+			wantErr:    true,
+			errContain: "must be less than",
+		},
+		{
+			name:       "eviction at exactly 1.0",
+			eviction:   1.0,
+			rejection:  0.95,
+			wantErr:    true,
+			errContain: "invalid evictionWatermark",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resetGlobalConfig()
+			globalConfig.EvictionWatermark = tt.eviction
+			globalConfig.RejectionWatermark = tt.rejection
+			globalConfig.RunMode = RunModeDev
+
+			_, err := LoadConfig("")
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf(
+						"expected error containing %q, got nil",
+						tt.errContain,
+					)
+				}
+				if tt.errContain != "" {
+					if got := err.Error(); !strings.Contains(got, tt.errContain) {
+						t.Errorf(
+							"error %q should contain %q",
+							got,
+							tt.errContain,
+						)
+					}
+				}
+			} else {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+			}
+		})
 	}
 }
 

@@ -355,8 +355,13 @@ func TestMempoolConsumer_NextTx_Blocking(t *testing.T) {
 		resultChan <- tx
 	}()
 
-	// Give goroutine time to start blocking
-	time.Sleep(50 * time.Millisecond)
+	// Verify goroutine is blocking (not returning immediately)
+	select {
+	case <-resultChan:
+		t.Fatal("NextTx should be blocking on empty mempool")
+	case <-time.After(50 * time.Millisecond):
+		// Expected: still blocking
+	}
 
 	// Add a transaction - this should unblock the consumer
 	txs := addMockTransactions(t, m, 1)
@@ -1165,15 +1170,12 @@ func TestMempool_BlockingNextTx_WithEmptyMempool(t *testing.T) {
 		resultChan <- tx
 	}()
 
-	// Give it time to start blocking
-	time.Sleep(50 * time.Millisecond)
-
 	// Verify it's still blocking (hasn't returned)
 	select {
 	case <-resultChan:
 		t.Fatal("NextTx should still be blocking")
-	default:
-		// Expected - still blocking
+	case <-time.After(50 * time.Millisecond):
+		// Expected - still blocking after waiting
 	}
 
 	// Now add a transaction and publish event
@@ -1223,15 +1225,12 @@ func TestMempool_BlockingNextTx_UnblocksOnShutdown(t *testing.T) {
 		resultChan <- tx
 	}()
 
-	// Give it time to start blocking
-	time.Sleep(50 * time.Millisecond)
-
 	// Verify it's still blocking (hasn't returned)
 	select {
 	case <-resultChan:
 		t.Fatal("NextTx should still be blocking")
-	default:
-		// Expected - still blocking
+	case <-time.After(50 * time.Millisecond):
+		// Expected - still blocking after waiting
 	}
 
 	// Stop the mempool
@@ -1527,8 +1526,13 @@ func TestMempool_NextTxIdx_RaceCondition(t *testing.T) {
 		resultChan <- received
 	}()
 
-	// Give consumer time to start waiting
-	time.Sleep(50 * time.Millisecond)
+	// Verify consumer is blocking (waiting for transactions)
+	select {
+	case <-resultChan:
+		t.Fatal("consumer should be blocking on empty mempool")
+	case <-time.After(50 * time.Millisecond):
+		// Expected: still blocking
+	}
 
 	// Rapidly add multiple transactions and publish events
 	for i := range 5 {
@@ -1571,6 +1575,375 @@ func TestMempool_NextTxIdx_RaceCondition(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("timeout - possible deadlock in blocking NextTx")
 	}
+}
+
+// =============================================================================
+// Eviction Tests
+// =============================================================================
+
+// newTestMempoolWithCapacity creates a mempool with the given
+// byte capacity and watermarks for eviction testing.
+func newTestMempoolWithCapacity(
+	t *testing.T,
+	capacity int64,
+	evictionWM float64,
+	rejectionWM float64,
+) *Mempool {
+	t.Helper()
+	return NewMempool(MempoolConfig{
+		Logger: slog.New(
+			slog.NewJSONHandler(io.Discard, nil),
+		),
+		EventBus:           event.NewEventBus(nil, nil),
+		PromRegistry:       prometheus.NewRegistry(),
+		Validator:          newMockValidator(),
+		MempoolCapacity:    capacity,
+		EvictionWatermark:  evictionWM,
+		RejectionWatermark: rejectionWM,
+	})
+}
+
+// addMockTransactionsOfSize adds mock transactions with CBOR
+// data of exactly the given byte size.
+func addMockTransactionsOfSize(
+	t *testing.T,
+	m *Mempool,
+	count int,
+	sizeBytes int,
+) []*MempoolTransaction {
+	t.Helper()
+	txs := make([]*MempoolTransaction, count)
+	m.Lock()
+	m.consumersMutex.Lock()
+	for i := range count {
+		cbor := make([]byte, sizeBytes)
+		tx := &MempoolTransaction{
+			Hash: fmt.Sprintf(
+				"tx-sized-%d", i,
+			),
+			Cbor:     cbor,
+			Type:     uint(conway.EraIdConway),
+			LastSeen: time.Now(),
+		}
+		txs[i] = tx
+		m.transactions = append(m.transactions, tx)
+		m.txByHash[tx.Hash] = tx
+		m.currentSizeBytes += int64(sizeBytes)
+		m.metrics.txsInMempool.Inc()
+		m.metrics.mempoolBytes.Add(
+			float64(sizeBytes),
+		)
+	}
+	m.consumersMutex.Unlock()
+	m.Unlock()
+	return txs
+}
+
+func TestMempool_Eviction_TriggersAtWatermark(t *testing.T) {
+	// Capacity=1000, eviction=0.50, rejection=0.90
+	// Each TX is 100 bytes. Add 5 TXs = 500 bytes (50%).
+	// Adding a 6th TX: newSize = 600 > 500 (eviction).
+	// Eviction target = 500 - 100 = 400 bytes.
+	// Should evict 1 TX (500 -> 400), then add new one.
+	m := newTestMempoolWithCapacity(t, 1000, 0.50, 0.90)
+	defer m.Stop(context.Background())
+
+	addMockTransactionsOfSize(t, m, 5, 100)
+
+	m.RLock()
+	require.Equal(
+		t, 5, len(m.transactions),
+		"should start with 5 TXs",
+	)
+	require.Equal(
+		t, int64(500), m.currentSizeBytes,
+		"should start with 500 bytes",
+	)
+	m.RUnlock()
+
+	// Add a 6th TX of 100 bytes directly to trigger eviction
+	// We add it via internal path to skip CBOR decode
+	m.Lock()
+	m.consumersMutex.Lock()
+	txSize := int64(100)
+	newSize := m.currentSizeBytes + txSize
+	evictionThreshold := int64(
+		float64(m.config.MempoolCapacity) *
+			m.evictionWatermark,
+	)
+	require.Greater(
+		t, newSize, evictionThreshold,
+		"new size should exceed eviction threshold",
+	)
+
+	// Trigger eviction
+	targetBytes := evictionThreshold - txSize
+	m.evictOldest(targetBytes)
+
+	// Verify first TX was evicted
+	require.Equal(
+		t, 4, len(m.transactions),
+		"should have 4 TXs after eviction",
+	)
+	require.Equal(
+		t, int64(400), m.currentSizeBytes,
+		"should have 400 bytes after eviction",
+	)
+	// Oldest TX (tx-sized-0) should be gone
+	_, exists := m.txByHash["tx-sized-0"]
+	require.False(
+		t, exists,
+		"oldest TX should be evicted",
+	)
+	// Second TX should still exist
+	_, exists = m.txByHash["tx-sized-1"]
+	require.True(
+		t, exists,
+		"second TX should still be present",
+	)
+	m.consumersMutex.Unlock()
+	m.Unlock()
+}
+
+func TestMempool_Eviction_OldestTxsEvictedFirst(t *testing.T) {
+	// Capacity=1000, eviction=0.50, rejection=0.90
+	// Add 5 TXs of 100 bytes = 500 bytes (50%).
+	// Evict to targetBytes=200 -> should evict 3 TXs.
+	m := newTestMempoolWithCapacity(t, 1000, 0.50, 0.90)
+	defer m.Stop(context.Background())
+
+	addMockTransactionsOfSize(t, m, 5, 100)
+
+	m.Lock()
+	m.consumersMutex.Lock()
+	m.evictOldest(200)
+
+	// Should have evicted tx-sized-0, tx-sized-1, tx-sized-2
+	require.Equal(
+		t, 2, len(m.transactions),
+		"should have 2 TXs after eviction",
+	)
+	require.Equal(
+		t, int64(200), m.currentSizeBytes,
+		"should have 200 bytes",
+	)
+	// Remaining should be the newest TXs
+	assert.Equal(
+		t, "tx-sized-3", m.transactions[0].Hash,
+	)
+	assert.Equal(
+		t, "tx-sized-4", m.transactions[1].Hash,
+	)
+	m.consumersMutex.Unlock()
+	m.Unlock()
+}
+
+func TestMempool_Rejection_AboveRejectionWatermark(
+	t *testing.T,
+) {
+	// Capacity=1000, eviction=0.50, rejection=0.80
+	// Add 8 TXs of 100 bytes = 800 bytes (80%).
+	// Adding a 9th TX of 100 bytes: newSize = 900 > 800.
+	// 800 = 1000 * 0.80, so the rejection threshold is 800.
+	// newSize 900 > 800 => rejected.
+	m := newTestMempoolWithCapacity(t, 1000, 0.50, 0.80)
+	defer m.Stop(context.Background())
+
+	addMockTransactionsOfSize(t, m, 8, 100)
+
+	// Try to add a TX via the internal path
+	m.Lock()
+	m.consumersMutex.Lock()
+	txSize := int64(100)
+	newSize := m.currentSizeBytes + txSize
+	rejectionThreshold := int64(
+		float64(m.config.MempoolCapacity) *
+			m.rejectionWatermark,
+	)
+	assert.Greater(
+		t, newSize, rejectionThreshold,
+		"new size should exceed rejection threshold",
+	)
+	m.consumersMutex.Unlock()
+	m.Unlock()
+
+	// Verify through AddTransaction with real TX that the
+	// mempool rejects when above rejection watermark.
+	// First, fill to rejection level with appropriately
+	// sized direct adds.
+	// The real test TX is ~171 bytes. With capacity 200
+	// and rejection at 0.80 (160 bytes), a single TX of
+	// 171 bytes already exceeds the threshold.
+	m2 := newTestMempoolWithCapacity(t, 200, 0.50, 0.80)
+	defer m2.Stop(context.Background())
+
+	txBytes := getTestTxBytes(t)
+	err := m2.AddTransaction(
+		uint(conway.EraIdConway), txBytes,
+	)
+	require.Error(
+		t, err,
+		"should reject TX above rejection watermark",
+	)
+	var fullErr *MempoolFullError
+	assert.ErrorAs(
+		t, err, &fullErr,
+		"should be MempoolFullError",
+	)
+}
+
+func TestMempool_Eviction_CounterIncrements(t *testing.T) {
+	m := newTestMempoolWithCapacity(t, 1000, 0.50, 0.90)
+	defer m.Stop(context.Background())
+
+	addMockTransactionsOfSize(t, m, 5, 100)
+
+	// Initial evicted counter should be 0
+	evictedBefore := testutil.ToFloat64(
+		m.metrics.txsEvicted,
+	)
+	assert.Equal(
+		t, float64(0), evictedBefore,
+		"evicted counter should start at 0",
+	)
+
+	// Evict 3 TXs
+	m.Lock()
+	m.consumersMutex.Lock()
+	m.evictOldest(200)
+	m.consumersMutex.Unlock()
+	m.Unlock()
+
+	evictedAfter := testutil.ToFloat64(
+		m.metrics.txsEvicted,
+	)
+	assert.Equal(
+		t, float64(3), evictedAfter,
+		"evicted counter should be 3",
+	)
+}
+
+func TestMempool_DefaultWatermarkValues(t *testing.T) {
+	m := NewMempool(MempoolConfig{
+		Logger: slog.New(
+			slog.NewJSONHandler(io.Discard, nil),
+		),
+		EventBus:        event.NewEventBus(nil, nil),
+		PromRegistry:    prometheus.NewRegistry(),
+		Validator:       newMockValidator(),
+		MempoolCapacity: 1024 * 1024,
+	})
+	defer m.Stop(context.Background())
+
+	assert.Equal(
+		t,
+		DefaultEvictionWatermark,
+		m.evictionWatermark,
+		"default eviction watermark should be 0.90",
+	)
+	assert.Equal(
+		t,
+		DefaultRejectionWatermark,
+		m.rejectionWatermark,
+		"default rejection watermark should be 0.95",
+	)
+}
+
+func TestMempool_CustomWatermarkValues(t *testing.T) {
+	m := NewMempool(MempoolConfig{
+		Logger: slog.New(
+			slog.NewJSONHandler(io.Discard, nil),
+		),
+		EventBus:           event.NewEventBus(nil, nil),
+		PromRegistry:       prometheus.NewRegistry(),
+		Validator:          newMockValidator(),
+		MempoolCapacity:    1024 * 1024,
+		EvictionWatermark:  0.75,
+		RejectionWatermark: 0.85,
+	})
+	defer m.Stop(context.Background())
+
+	assert.Equal(
+		t,
+		0.75,
+		m.evictionWatermark,
+		"custom eviction watermark should be 0.75",
+	)
+	assert.Equal(
+		t,
+		0.85,
+		m.rejectionWatermark,
+		"custom rejection watermark should be 0.85",
+	)
+}
+
+func TestMempool_Eviction_NoEvictionBelowWatermark(
+	t *testing.T,
+) {
+	// Capacity=1000, eviction=0.90, rejection=0.95
+	// Add 5 TXs of 100 bytes = 500 bytes (50%).
+	// This is below eviction watermark, so no eviction.
+	m := newTestMempoolWithCapacity(t, 1000, 0.90, 0.95)
+	defer m.Stop(context.Background())
+
+	addMockTransactionsOfSize(t, m, 5, 100)
+
+	m.RLock()
+	require.Equal(
+		t, 5, len(m.transactions),
+	)
+	m.RUnlock()
+
+	// Adding another 100 byte TX: newSize = 600 bytes.
+	// Eviction threshold = 900 bytes.
+	// 600 < 900, so no eviction should happen.
+	m.Lock()
+	m.consumersMutex.Lock()
+	tx := &MempoolTransaction{
+		Hash:     "tx-no-evict",
+		Cbor:     make([]byte, 100),
+		Type:     uint(conway.EraIdConway),
+		LastSeen: time.Now(),
+	}
+	m.transactions = append(m.transactions, tx)
+	m.txByHash[tx.Hash] = tx
+	m.currentSizeBytes += 100
+	m.consumersMutex.Unlock()
+	m.Unlock()
+
+	m.RLock()
+	assert.Equal(
+		t, 6, len(m.transactions),
+		"all TXs should remain (no eviction needed)",
+	)
+	assert.Equal(
+		t, int64(600), m.currentSizeBytes,
+	)
+	m.RUnlock()
+
+	evicted := testutil.ToFloat64(m.metrics.txsEvicted)
+	assert.Equal(
+		t, float64(0), evicted,
+		"no TXs should have been evicted",
+	)
+}
+
+func TestMempool_Eviction_EmptyMempoolSafe(t *testing.T) {
+	// Calling evictOldest on an empty mempool should not panic
+	m := newTestMempoolWithCapacity(t, 1000, 0.50, 0.90)
+	defer m.Stop(context.Background())
+
+	m.Lock()
+	m.consumersMutex.Lock()
+	m.evictOldest(0)
+	m.consumersMutex.Unlock()
+	m.Unlock()
+
+	m.RLock()
+	assert.Equal(
+		t, 0, len(m.transactions),
+	)
+	m.RUnlock()
 }
 
 // TestMempool_RemoveTransaction_ConsumerIndexAdjustment verifies that consumer

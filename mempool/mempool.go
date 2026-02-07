@@ -34,6 +34,9 @@ import (
 const (
 	AddTransactionEventType    event.EventType = "mempool.add_tx"
 	RemoveTransactionEventType event.EventType = "mempool.remove_tx"
+
+	DefaultEvictionWatermark  = 0.90
+	DefaultRejectionWatermark = 0.95
 )
 
 type AddTransactionEvent struct {
@@ -58,11 +61,13 @@ type TxValidator interface {
 	ValidateTx(tx gledger.Transaction) error
 }
 type MempoolConfig struct {
-	PromRegistry    prometheus.Registerer
-	Validator       TxValidator
-	Logger          *slog.Logger
-	EventBus        *event.EventBus
-	MempoolCapacity int64
+	PromRegistry       prometheus.Registerer
+	Validator          TxValidator
+	Logger             *slog.Logger
+	EventBus           *event.EventBus
+	MempoolCapacity    int64
+	EvictionWatermark  float64
+	RejectionWatermark float64
 }
 
 type Mempool struct {
@@ -70,16 +75,19 @@ type Mempool struct {
 		txsProcessedNum prometheus.Counter
 		txsInMempool    prometheus.Gauge
 		mempoolBytes    prometheus.Gauge
+		txsEvicted      prometheus.Counter
 	}
-	validator        TxValidator
-	logger           *slog.Logger
-	eventBus         *event.EventBus
-	consumers        map[ouroboros.ConnectionId]*MempoolConsumer
-	done             chan struct{}
-	config           MempoolConfig
-	transactions     []*MempoolTransaction
-	txByHash         map[string]*MempoolTransaction // O(1) lookup by hash
-	currentSizeBytes int64                          // Cached total size of all transactions in bytes
+	validator          TxValidator
+	logger             *slog.Logger
+	eventBus           *event.EventBus
+	consumers          map[ouroboros.ConnectionId]*MempoolConsumer
+	done               chan struct{}
+	config             MempoolConfig
+	transactions       []*MempoolTransaction
+	txByHash           map[string]*MempoolTransaction // O(1) lookup by hash
+	currentSizeBytes   int64                          // Cached total size of all transactions in bytes
+	evictionWatermark  float64
+	rejectionWatermark float64
 	sync.RWMutex
 	doneOnce       sync.Once
 	consumersMutex sync.Mutex
@@ -101,18 +109,30 @@ func (e *MempoolFullError) Error() string {
 }
 
 func NewMempool(config MempoolConfig) *Mempool {
+	evictionWatermark := config.EvictionWatermark
+	if evictionWatermark == 0 {
+		evictionWatermark = DefaultEvictionWatermark
+	}
+	rejectionWatermark := config.RejectionWatermark
+	if rejectionWatermark == 0 {
+		rejectionWatermark = DefaultRejectionWatermark
+	}
 	m := &Mempool{
-		eventBus:  config.EventBus,
-		consumers: make(map[ouroboros.ConnectionId]*MempoolConsumer),
-		txByHash:  make(map[string]*MempoolTransaction),
-		validator: config.Validator,
-		config:    config,
-		done:      make(chan struct{}),
+		eventBus:           config.EventBus,
+		consumers:          make(map[ouroboros.ConnectionId]*MempoolConsumer),
+		txByHash:           make(map[string]*MempoolTransaction),
+		validator:          config.Validator,
+		config:             config,
+		done:               make(chan struct{}),
+		evictionWatermark:  evictionWatermark,
+		rejectionWatermark: rejectionWatermark,
 	}
 	if config.Logger == nil {
 		// Create logger to throw away logs
 		// We do this so we don't have to add guards around every log operation
-		m.logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
+		m.logger = slog.New(
+			slog.NewJSONHandler(io.Discard, nil),
+		)
 	} else {
 		m.logger = config.Logger
 	}
@@ -126,14 +146,24 @@ func NewMempool(config MempoolConfig) *Mempool {
 			Help: "total transactions processed",
 		},
 	)
-	m.metrics.txsInMempool = promautoFactory.NewGauge(prometheus.GaugeOpts{
-		Name: "cardano_node_metrics_txsInMempool_int",
-		Help: "current count of mempool transactions",
-	})
-	m.metrics.mempoolBytes = promautoFactory.NewGauge(prometheus.GaugeOpts{
-		Name: "cardano_node_metrics_mempoolBytes_int",
-		Help: "current size of mempool transactions in bytes",
-	})
+	m.metrics.txsInMempool = promautoFactory.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "cardano_node_metrics_txsInMempool_int",
+			Help: "current count of mempool transactions",
+		},
+	)
+	m.metrics.mempoolBytes = promautoFactory.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "cardano_node_metrics_mempoolBytes_int",
+			Help: "current size of mempool transactions in bytes",
+		},
+	)
+	m.metrics.txsEvicted = promautoFactory.NewCounter(
+		prometheus.CounterOpts{
+			Name: "cardano_node_metrics_txsEvictedNum_int",
+			Help: "total transactions evicted from mempool",
+		},
+	)
 	return m
 }
 
@@ -283,14 +313,28 @@ func (m *Mempool) AddTransaction(txType uint, txBytes []byte) error {
 		)
 		return nil
 	}
-	// Enforce mempool capacity
+	// Enforce mempool capacity using watermarks
 	txSize := int64(len(tx.Cbor))
-	if m.currentSizeBytes+txSize > m.config.MempoolCapacity {
+	newSize := m.currentSizeBytes + txSize
+	rejectionThreshold := int64(
+		float64(m.config.MempoolCapacity) * m.rejectionWatermark,
+	)
+	if newSize > rejectionThreshold {
 		return &MempoolFullError{
 			CurrentSize: int(m.currentSizeBytes),
 			TxSize:      int(txSize),
 			Capacity:    m.config.MempoolCapacity,
 		}
+	}
+	evictionThreshold := int64(
+		float64(m.config.MempoolCapacity) * m.evictionWatermark,
+	)
+	if newSize > evictionThreshold {
+		targetBytes := evictionThreshold - txSize
+		if targetBytes < 0 {
+			targetBytes = 0
+		}
+		m.evictOldest(targetBytes)
 	}
 	// Add transaction record
 	m.transactions = append(m.transactions, &tx)
@@ -367,6 +411,18 @@ func (m *Mempool) removeTransaction(txHash string) bool {
 }
 
 func (m *Mempool) removeTransactionByIndex(txIdx int) bool {
+	m.consumersMutex.Lock()
+	result := m.removeTransactionByIndexLocked(txIdx)
+	m.consumersMutex.Unlock()
+	return result
+}
+
+// removeTransactionByIndexLocked removes a transaction by its
+// slice index. The caller must hold both the mempool write lock
+// and consumersMutex.
+func (m *Mempool) removeTransactionByIndexLocked(
+	txIdx int,
+) bool {
 	if txIdx >= len(m.transactions) {
 		return false
 	}
@@ -382,16 +438,13 @@ func (m *Mempool) removeTransactionByIndex(txIdx int) bool {
 	m.metrics.txsInMempool.Dec()
 	m.metrics.mempoolBytes.Sub(float64(txSize))
 	// Update consumer indexes to reflect removed TX
-	m.consumersMutex.Lock()
 	for _, consumer := range m.consumers {
-		// Decrement consumer index if the consumer has reached the removed TX
 		consumer.nextTxIdxMu.Lock()
 		if consumer.nextTxIdx > txIdx {
 			consumer.nextTxIdx--
 		}
 		consumer.nextTxIdxMu.Unlock()
 	}
-	m.consumersMutex.Unlock()
 	// Generate event
 	if m.eventBus != nil {
 		m.eventBus.Publish(
@@ -405,4 +458,70 @@ func (m *Mempool) removeTransactionByIndex(txIdx int) bool {
 		)
 	}
 	return true
+}
+
+// evictOldest removes transactions from the front of the
+// slice (oldest first) until currentSizeBytes is at or below
+// targetBytes. The caller must hold both the mempool write
+// lock and consumersMutex.
+func (m *Mempool) evictOldest(targetBytes int64) {
+	// Calculate how many transactions to evict from the front
+	var evicted int
+	var evictedBytes int64
+	for evicted < len(m.transactions) &&
+		m.currentSizeBytes-evictedBytes > targetBytes {
+		evictedBytes += int64(len(m.transactions[evicted].Cbor))
+		evicted++
+	}
+	if evicted == 0 {
+		return
+	}
+
+	// Clean up hash map, update metrics, and publish events
+	// for each evicted transaction
+	for i := range evicted {
+		tx := m.transactions[i]
+		txSize := int64(len(tx.Cbor))
+		delete(m.txByHash, tx.Hash)
+		m.metrics.txsInMempool.Dec()
+		m.metrics.mempoolBytes.Sub(float64(txSize))
+		if m.eventBus != nil {
+			m.eventBus.Publish(
+				RemoveTransactionEventType,
+				event.NewEvent(
+					RemoveTransactionEventType,
+					RemoveTransactionEvent{
+						Hash: tx.Hash,
+					},
+				),
+			)
+		}
+	}
+
+	// Single batch removal from the front of the slice
+	m.transactions = slices.Delete(
+		m.transactions,
+		0,
+		evicted,
+	)
+	m.currentSizeBytes -= evictedBytes
+
+	// Adjust all consumer indexes in one pass
+	for _, consumer := range m.consumers {
+		consumer.nextTxIdxMu.Lock()
+		if consumer.nextTxIdx > evicted {
+			consumer.nextTxIdx -= evicted
+		} else {
+			consumer.nextTxIdx = 0
+		}
+		consumer.nextTxIdxMu.Unlock()
+	}
+
+	m.metrics.txsEvicted.Add(float64(evicted))
+	m.logger.Debug(
+		"evicted transactions from mempool",
+		"component", "mempool",
+		"evicted_count", evicted,
+		"current_size_bytes", m.currentSizeBytes,
+	)
 }

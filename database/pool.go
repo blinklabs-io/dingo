@@ -39,6 +39,19 @@ func (d *Database) GetPool(
 	return ret, nil
 }
 
+// GetPoolByVrfKeyHash retrieves an active pool by its VRF key hash.
+// Returns nil if no active pool uses this VRF key.
+func (d *Database) GetPoolByVrfKeyHash(
+	vrfKeyHash []byte,
+	txn *Txn,
+) (*models.Pool, error) {
+	if txn == nil {
+		txn = d.Transaction(false)
+		defer txn.Release()
+	}
+	return d.metadata.GetPoolByVrfKeyHash(vrfKeyHash, txn.Metadata())
+}
+
 // GetActivePoolRelays returns all relays from currently active pools.
 // This is used for ledger peer discovery.
 func (d *Database) GetActivePoolRelays(

@@ -53,6 +53,8 @@ type Config struct {
 	intersectPoints          []ocommon.Point
 	listeners                []ListenerConfig
 	mempoolCapacity          int64
+	evictionWatermark        float64
+	rejectionWatermark       float64
 	outboundSourcePort       uint
 	utxorpcPort              uint
 	barkPort                 uint
@@ -73,6 +75,12 @@ type Config struct {
 	activePeersTopologyQuota int
 	activePeersGossipQuota   int
 	activePeersLedgerQuota   int
+	// Block production configuration (SPO mode)
+	// Field names match cardano-node environment variable naming convention
+	blockProducer                 bool
+	shelleyVRFKey                 string
+	shelleyKESKey                 string
+	shelleyOperationalCertificate string
 }
 
 // configPopulateNetworkMagic uses the named network (if specified) to determine the network magic value (if not specified)
@@ -302,6 +310,30 @@ func WithMempoolCapacity(capacity int64) ConfigOptionFunc {
 	}
 }
 
+// WithEvictionWatermark sets the mempool eviction watermark
+// as a fraction of capacity (0.0-1.0). When a new TX would
+// push the mempool past this fraction, oldest TXs are evicted
+// to make room. Default is 0.90 (90%).
+func WithEvictionWatermark(
+	watermark float64,
+) ConfigOptionFunc {
+	return func(c *Config) {
+		c.evictionWatermark = watermark
+	}
+}
+
+// WithRejectionWatermark sets the mempool rejection watermark
+// as a fraction of capacity (0.0-1.0). New TXs are rejected
+// when the mempool would exceed this fraction even after
+// eviction. Default is 0.95 (95%).
+func WithRejectionWatermark(
+	watermark float64,
+) ConfigOptionFunc {
+	return func(c *Config) {
+		c.rejectionWatermark = watermark
+	}
+}
+
 // WithRunMode sets the operational mode ("serve", "load", or "dev").
 // "dev" mode enables development behaviors (forge blocks, disable outbound).
 func WithRunMode(mode string) ConfigOptionFunc {
@@ -349,6 +381,38 @@ func WithActivePeersQuotas(
 		c.activePeersTopologyQuota = topologyQuota
 		c.activePeersGossipQuota = gossipQuota
 		c.activePeersLedgerQuota = ledgerQuota
+	}
+}
+
+// WithBlockProducer enables block production mode (CARDANO_BLOCK_PRODUCER).
+// When enabled, the node will attempt to produce blocks using the configured credentials.
+func WithBlockProducer(enabled bool) ConfigOptionFunc {
+	return func(c *Config) {
+		c.blockProducer = enabled
+	}
+}
+
+// WithShelleyVRFKey specifies the path to the VRF signing key file (CARDANO_SHELLEY_VRF_KEY).
+// Required for block production.
+func WithShelleyVRFKey(path string) ConfigOptionFunc {
+	return func(c *Config) {
+		c.shelleyVRFKey = path
+	}
+}
+
+// WithShelleyKESKey specifies the path to the KES signing key file (CARDANO_SHELLEY_KES_KEY).
+// Required for block production.
+func WithShelleyKESKey(path string) ConfigOptionFunc {
+	return func(c *Config) {
+		c.shelleyKESKey = path
+	}
+}
+
+// WithShelleyOperationalCertificate specifies the path to the operational certificate file
+// (CARDANO_SHELLEY_OPERATIONAL_CERTIFICATE). Required for block production.
+func WithShelleyOperationalCertificate(path string) ConfigOptionFunc {
+	return func(c *Config) {
+		c.shelleyOperationalCertificate = path
 	}
 }
 

@@ -1,4 +1,4 @@
-// Copyright 2025 Blink Labs Software
+// Copyright 2026 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -39,14 +39,16 @@ type Config struct {
 	DataDir        string
 	MetadataPlugin string
 	MaxConnections int // Connection pool size for metadata plugin (should match DatabaseWorkers)
+	CacheConfig    CborCacheConfig
 }
 
 // Database represents our data storage services
 type Database struct {
-	config   *Config
-	logger   *slog.Logger
-	blob     blob.BlobStore
-	metadata metadata.MetadataStore
+	config    *Config
+	logger    *slog.Logger
+	blob      blob.BlobStore
+	metadata  metadata.MetadataStore
+	cborCache *TieredCborCache
 }
 
 // Blob returns the underling blob store instance
@@ -194,9 +196,21 @@ func New(
 		logger:   configCopy.Logger,
 		config:   configCopy,
 	}
+	// Initialize the tiered CBOR cache
+	db.cborCache = NewTieredCborCache(configCopy.CacheConfig, db)
+	// Register cache metrics if prometheus registry is available
+	if configCopy.PromRegistry != nil {
+		db.cborCache.Metrics().Register(configCopy.PromRegistry)
+	}
 	if err := db.init(); err != nil {
 		// Database is available for recovery, so return it with error
 		return db, err
 	}
 	return db, nil
+}
+
+// CborCache returns the tiered CBOR cache for accessing cached CBOR data.
+// This can be used for metrics registration or direct cache access.
+func (d *Database) CborCache() *TieredCborCache {
+	return d.cborCache
 }

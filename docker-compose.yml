@@ -1,15 +1,51 @@
-version: "3.8"
+# Dingo Cardano Node - Docker Compose Configuration
+#
+# Usage:
+#   docker compose up -d                        # Start with defaults (preview network)
+#   CARDANO_NETWORK=mainnet docker compose up -d # Start on mainnet
+#
+# With Mithril snapshot bootstrap (first run only):
+#   RESTORE_SNAPSHOT=1 docker compose up -d
 
 services:
-  localstack:
-    container_name: "${LOCALSTACK_DOCKER_NAME:-localstack-main}"
-    image: localstack/localstack
-    ports:
-      - "127.0.0.1:4566:4566"            # LocalStack Gateway
-      - "127.0.0.1:4510-4559:4510-4559"  # external services port range
+  # --------------------------------------------------------------------------
+  # Basic relay node
+  # --------------------------------------------------------------------------
+  dingo:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ghcr.io/blinklabs-io/dingo:latest
+    restart: unless-stopped
     environment:
-      # LocalStack configuration: https://docs.localstack.cloud/references/configuration/
-      - DEBUG=${DEBUG:-0}
+      - CARDANO_NETWORK=${CARDANO_NETWORK:-preview}
+      - CARDANO_DATABASE_PATH=/data/db
+      - DINGO_SOCKET_PATH=/ipc/dingo.socket
+      # Uncomment to enable debug logging
+      # - DINGO_DEBUG=1
+      # Uncomment to bootstrap from Mithril snapshot on first run
+      # - RESTORE_SNAPSHOT=1
+    ports:
+      # Ouroboros Node-to-Node (relay port)
+      - "3001:3001"
+      # Prometheus metrics (localhost only by default)
+      - "127.0.0.1:12798:12798"
+      # UTxO RPC (gRPC, localhost only by default)
+      - "127.0.0.1:9090:9090"
     volumes:
-      - "${LOCALSTACK_VOLUME_DIR:-./volume}:/var/lib/localstack"
-      - "/var/run/docker.sock:/var/run/docker.sock"
+      # Persistent database storage
+      - dingo-data:/data/db
+      # Unix socket for cardano-cli and other NtC clients
+      - dingo-ipc:/ipc
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:12798/metrics"]
+      interval: 30s
+      timeout: 5s
+      start_period: 60s
+      retries: 3
+
+volumes:
+  dingo-data:
+    driver: local
+  dingo-ipc:
+    driver: local

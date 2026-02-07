@@ -152,13 +152,26 @@ func (ls *LedgerState) TimeToSlot(t time.Time) (uint64, error) {
 	return timeSlot, nil
 }
 
-// SlotToEpoch returns a known epoch by slot number
+// SlotToEpoch returns an epoch by slot number.
+// For slots within known epochs, returns the exact epoch.
+// For slots beyond known epochs, projects forward using the last known epoch's
+// parameters (epoch length, slot length) to calculate the future epoch.
 func (ls *LedgerState) SlotToEpoch(slot uint64) (models.Epoch, error) {
 	// Take a deep copy of epochCache while holding the read lock
 	ls.RLock()
 	epochCacheCopy := make([]models.Epoch, len(ls.epochCache))
 	copy(epochCacheCopy, ls.epochCache)
 	ls.RUnlock()
+
+	if len(epochCacheCopy) == 0 {
+		return models.Epoch{}, errors.New("no epochs in cache")
+	}
+
+	// Guard: reject slots before the first known epoch
+	firstEpoch := epochCacheCopy[0]
+	if slot < firstEpoch.StartSlot {
+		return models.Epoch{}, errors.New("slot is before the first known epoch")
+	}
 
 	for _, epoch := range epochCacheCopy {
 		if slot < epoch.StartSlot {
@@ -168,5 +181,34 @@ func (ls *LedgerState) SlotToEpoch(slot uint64) (models.Epoch, error) {
 			return epoch, nil
 		}
 	}
-	return models.Epoch{}, errors.New("slot not found in known epochs")
+
+	// Project forward for future slots using the last known epoch's parameters
+	lastEpoch := epochCacheCopy[len(epochCacheCopy)-1]
+	lastEpochEndSlot := lastEpoch.StartSlot + uint64(lastEpoch.LengthInSlots)
+
+	// Calculate how many epochs past the last known epoch this slot is
+	slotsPastLastEpoch := slot - lastEpochEndSlot
+	epochsPastLast := slotsPastLastEpoch / uint64(lastEpoch.LengthInSlots)
+	slotInProjectedEpoch := slotsPastLastEpoch % uint64(lastEpoch.LengthInSlots)
+
+	// Build projected epoch info
+	projectedEpochId := lastEpoch.EpochId + 1 + epochsPastLast
+	projectedStartSlot := lastEpochEndSlot + (epochsPastLast * uint64(lastEpoch.LengthInSlots))
+
+	// Verify our calculation is correct (slot should be within the projected epoch)
+	if slot < projectedStartSlot || slot >= projectedStartSlot+uint64(lastEpoch.LengthInSlots) {
+		// This shouldn't happen, but return error if our math is wrong
+		return models.Epoch{}, errors.New("internal error: projected epoch calculation mismatch")
+	}
+	_ = slotInProjectedEpoch // Used only for verification
+
+	return models.Epoch{
+		EpochId:       projectedEpochId,
+		StartSlot:     projectedStartSlot,
+		EraId:         lastEpoch.EraId,
+		SlotLength:    lastEpoch.SlotLength,
+		LengthInSlots: lastEpoch.LengthInSlots,
+		// Nonce is unknown for future epochs
+		Nonce: nil,
+	}, nil
 }

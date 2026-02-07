@@ -14,6 +14,12 @@
 
 package models
 
+import (
+	"errors"
+)
+
+var ErrCommitteeMemberNotFound = errors.New("committee member not found")
+
 type AuthCommitteeHot struct {
 	ColdCredential []byte `gorm:"index;size:28"`
 	HostCredential []byte `gorm:"index;size:28"`
