@@ -15,8 +15,47 @@
 package database
 
 import (
+	"fmt"
+
 	"github.com/blinklabs-io/dingo/database/models"
 )
+
+// RestoreAccountStateAtSlot reverts account delegation state to the given
+// slot. For accounts modified after the slot, this restores their Pool and
+// Drep delegations to the state they had at the given slot, or deletes them
+// if they were registered after that slot.
+func (d *Database) RestoreAccountStateAtSlot(
+	slot uint64,
+	txn *Txn,
+) error {
+	owned := false
+	if txn == nil {
+		txn = d.MetadataTxn(true)
+		owned = true
+		defer func() {
+			if owned {
+				txn.Rollback() //nolint:errcheck
+			}
+		}()
+	}
+	if err := d.metadata.RestoreAccountStateAtSlot(
+		slot,
+		txn.Metadata(),
+	); err != nil {
+		return fmt.Errorf(
+			"failed to restore account state at slot %d: %w",
+			slot,
+			err,
+		)
+	}
+	if owned {
+		if err := txn.Commit(); err != nil {
+			return fmt.Errorf("commit transaction: %w", err)
+		}
+		owned = false
+	}
+	return nil
+}
 
 // GetAccount returns an account by staking key
 func (d *Database) GetAccount(

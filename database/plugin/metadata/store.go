@@ -470,6 +470,38 @@ type MetadataStore interface {
 	// DeleteGovernanceVotesAfterSlot removes votes added after the given slot
 	// and clears deleted_slot for any that were soft-deleted after that slot.
 	DeleteGovernanceVotesAfterSlot(uint64, types.Txn) error
+
+	// State rollback methods
+
+	// DeleteCertificatesAfterSlot removes all certificate records added after
+	// the given slot. This is used during chain rollbacks to undo certificate
+	// state changes.
+	DeleteCertificatesAfterSlot(uint64, types.Txn) error
+
+	// RestoreAccountStateAtSlot reverts account delegation state to the given
+	// slot. For accounts modified after the slot, this restores their Pool and
+	// Drep delegations to the state they had at the given slot, or deletes
+	// them if they were registered after that slot.
+	RestoreAccountStateAtSlot(uint64, types.Txn) error
+
+	// RestorePoolStateAtSlot reverts pool state to the given slot. Pools
+	// registered only after the slot are deleted; remaining pools have their
+	// denormalized fields restored from the most recent registration at or
+	// before the slot.
+	RestorePoolStateAtSlot(uint64, types.Txn) error
+
+	// RestoreDrepStateAtSlot reverts DRep state to the given slot. DReps
+	// registered only after the slot are deleted; remaining DReps have their
+	// anchor and active status restored.
+	RestoreDrepStateAtSlot(uint64, types.Txn) error
+
+	// DeletePParamsAfterSlot removes protocol parameter records added after
+	// the given slot.
+	DeletePParamsAfterSlot(uint64, types.Txn) error
+
+	// DeletePParamUpdatesAfterSlot removes protocol parameter update records
+	// added after the given slot.
+	DeletePParamUpdatesAfterSlot(uint64, types.Txn) error
 }
 
 // New creates a new metadata store instance using the specified plugin
