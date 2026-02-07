@@ -134,6 +134,8 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 			dingo.WithBlobPlugin(cfg.BlobPlugin),
 			dingo.WithMetadataPlugin(cfg.MetadataPlugin),
 			dingo.WithMempoolCapacity(cfg.MempoolCapacity),
+			dingo.WithEvictionWatermark(cfg.EvictionWatermark),
+			dingo.WithRejectionWatermark(cfg.RejectionWatermark),
 			dingo.WithNetwork(cfg.Network),
 			dingo.WithCardanoNodeConfig(nodeCfg),
 			dingo.WithListeners(listeners...),

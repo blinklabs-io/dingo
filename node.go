@@ -229,11 +229,13 @@ func (n *Node) Run(ctx context.Context) error {
 	started = append(started, func() { _ = n.snapshotMgr.Stop() })
 	// Initialize mempool
 	n.mempool = mempool.NewMempool(mempool.MempoolConfig{
-		MempoolCapacity: n.config.mempoolCapacity,
-		Logger:          n.config.logger,
-		EventBus:        n.eventBus,
-		PromRegistry:    n.config.promRegistry,
-		Validator:       n.ledgerState,
+		MempoolCapacity:    n.config.mempoolCapacity,
+		EvictionWatermark:  n.config.evictionWatermark,
+		RejectionWatermark: n.config.rejectionWatermark,
+		Logger:             n.config.logger,
+		EventBus:           n.eventBus,
+		PromRegistry:       n.config.promRegistry,
+		Validator:          n.ledgerState,
 	},
 	)
 	started = append(started, func() { //nolint:contextcheck

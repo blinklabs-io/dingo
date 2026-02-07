@@ -53,6 +53,8 @@ type Config struct {
 	intersectPoints          []ocommon.Point
 	listeners                []ListenerConfig
 	mempoolCapacity          int64
+	evictionWatermark        float64
+	rejectionWatermark       float64
 	outboundSourcePort       uint
 	utxorpcPort              uint
 	networkMagic             uint32
@@ -304,6 +306,30 @@ func WithShutdownTimeout(timeout time.Duration) ConfigOptionFunc {
 func WithMempoolCapacity(capacity int64) ConfigOptionFunc {
 	return func(c *Config) {
 		c.mempoolCapacity = capacity
+	}
+}
+
+// WithEvictionWatermark sets the mempool eviction watermark
+// as a fraction of capacity (0.0-1.0). When a new TX would
+// push the mempool past this fraction, oldest TXs are evicted
+// to make room. Default is 0.90 (90%).
+func WithEvictionWatermark(
+	watermark float64,
+) ConfigOptionFunc {
+	return func(c *Config) {
+		c.evictionWatermark = watermark
+	}
+}
+
+// WithRejectionWatermark sets the mempool rejection watermark
+// as a fraction of capacity (0.0-1.0). New TXs are rejected
+// when the mempool would exceed this fraction even after
+// eviction. Default is 0.95 (95%).
+func WithRejectionWatermark(
+	watermark float64,
+) ConfigOptionFunc {
+	return func(c *Config) {
+		c.rejectionWatermark = watermark
 	}
 }
 
