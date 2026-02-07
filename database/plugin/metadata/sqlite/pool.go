@@ -209,6 +209,27 @@ func (d *MetadataStoreSqlite) GetPool(
 	return ret, nil
 }
 
+// GetPoolByVrfKeyHash retrieves an active pool by its VRF key hash.
+// Returns nil if no active pool uses this VRF key.
+func (d *MetadataStoreSqlite) GetPoolByVrfKeyHash(
+	vrfKeyHash []byte,
+	txn types.Txn,
+) (*models.Pool, error) {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return nil, err
+	}
+	var pool models.Pool
+	result := db.Where("vrf_key_hash = ?", vrfKeyHash).First(&pool)
+	if result.Error != nil {
+		if errors.Is(result.Error, gorm.ErrRecordNotFound) {
+			return nil, nil
+		}
+		return nil, result.Error
+	}
+	return &pool, nil
+}
+
 // RestorePoolStateAtSlot reverts pool state to the given slot.
 //
 // This function handles two cases for pools:

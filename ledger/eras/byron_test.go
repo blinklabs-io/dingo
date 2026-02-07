@@ -358,6 +358,12 @@ func (m *mockLedgerState) IsPoolRegistered(
 	return false
 }
 
+func (m *mockLedgerState) IsVrfKeyInUse(
+	_ lcommon.Blake2b256,
+) (bool, lcommon.PoolKeyHash, error) {
+	return false, lcommon.PoolKeyHash{}, nil
+}
+
 func (m *mockLedgerState) CalculateRewards(
 	_ lcommon.AdaPots,
 	_ lcommon.RewardSnapshot,

@@ -128,8 +128,8 @@ github.com/blang/semver v3.5.1+incompatible h1:cQNTCjp13qL8KC3Nbxr/y2Bqb63oX6wdn
 github.com/blang/semver v3.5.1+incompatible/go.mod h1:kRBLl5iJ+tD4TcOOxsy/0fnwebNt5EWlYSAyrTnjyyk=
 github.com/blinklabs-io/bursa v0.14.0 h1:e+RFfKty3sU0xcgXStg6dRSEIwiJhIKMENLcRlGOzxg=
 github.com/blinklabs-io/bursa v0.14.0/go.mod h1:T61tWWJCgoQd/fLbpPa1+64x8ANXx+fEc3CjVeAqbM4=
-github.com/blinklabs-io/gouroboros v0.152.2 h1:w2OPBrg+a8bGgk046WvkQNiyn4Yglql7AN5hdurhDFY=
-github.com/blinklabs-io/gouroboros v0.152.2/go.mod h1:BXTv7xGWb0fDpUuRunVLhSvrDrvd+pkSMBpOligo5Ew=
+github.com/blinklabs-io/gouroboros v0.153.1 h1:9Jj4hHFrVmmUbFAg4Jg8p8R07Cimb7rXJL5xrimGOi8=
+github.com/blinklabs-io/gouroboros v0.153.1/go.mod h1:MTwq+I/IMtzzWGN2Jd87uuryMfOD+3mQGYNFJn1PSFY=
 github.com/blinklabs-io/ouroboros-mock v0.9.0 h1:O4FhgxKt43RcZGcxRQAOV9GMF6F06qtpU76eFeBKWeQ=
 github.com/blinklabs-io/ouroboros-mock v0.9.0/go.mod h1:piXZP3q8e/E3kkP8xkdc7tkD4mUjf5Ittzww6PCylDo=
 github.com/blinklabs-io/plutigo v0.0.22 h1:4O1+bac3pY2JPsIC9PvwthZWn6eFgkQ3R+z5t1rNeu8=

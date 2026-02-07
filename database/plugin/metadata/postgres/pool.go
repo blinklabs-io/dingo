@@ -205,6 +205,27 @@ func (d *MetadataStorePostgres) GetPoolRegistrations(
 	return ret, nil
 }
 
+// GetPoolByVrfKeyHash retrieves an active pool by its VRF key hash.
+// Returns nil if no active pool uses this VRF key.
+func (d *MetadataStorePostgres) GetPoolByVrfKeyHash(
+	vrfKeyHash []byte,
+	txn types.Txn,
+) (*models.Pool, error) {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return nil, err
+	}
+	var pool models.Pool
+	result := db.Where("vrf_key_hash = ?", vrfKeyHash).First(&pool)
+	if result.Error != nil {
+		if errors.Is(result.Error, gorm.ErrRecordNotFound) {
+			return nil, nil
+		}
+		return nil, result.Error
+	}
+	return &pool, nil
+}
+
 // poolRegRecord holds fields from a pool registration for batch processing
 // during pool state restoration.
 // Includes blockIndex, certIndex for deterministic same-slot disambiguation.

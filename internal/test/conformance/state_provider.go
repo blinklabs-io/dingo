@@ -148,6 +148,14 @@ func (p *DingoStateProvider) IsPoolRegistered(
 	return retiring
 }
 
+// IsVrfKeyInUse checks if a VRF key hash is registered by another pool.
+// Conformance tests don't currently test VRF key uniqueness.
+func (p *DingoStateProvider) IsVrfKeyInUse(
+	vrfKeyHash common.Blake2b256,
+) (bool, common.PoolKeyHash, error) {
+	return false, common.PoolKeyHash{}, nil
+}
+
 // ========== common.RewardState ==========
 
 // CalculateRewards calculates rewards for the given epoch
