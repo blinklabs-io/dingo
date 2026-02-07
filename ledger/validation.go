@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"fmt"
 	"math/big"
 
 	"github.com/blinklabs-io/dingo/ledger/eras"
@@ -106,4 +107,40 @@ func ValidateTxFee(
 		pricesMem,
 		pricesSteps,
 	)
+}
+
+// IsCompatibleEra checks if a transaction era is valid
+// for the current ledger era. Cardano allows transactions
+// from the current era and (current era - 1).
+func IsCompatibleEra(txEraId, ledgerEraId uint) bool {
+	return eras.IsCompatibleEra(txEraId, ledgerEraId)
+}
+
+// ValidateTxEra checks that a transaction's era is
+// compatible with the current ledger era. Returns an
+// error if the transaction era is not the current era
+// or the immediately previous era.
+func ValidateTxEra(
+	tx lcommon.Transaction,
+	ledgerEraId uint,
+) error {
+	txEraId := uint(tx.Type()) // #nosec G115 -- era IDs are non-negative
+	if !eras.IsCompatibleEra(txEraId, ledgerEraId) {
+		txEra := eras.GetEraById(txEraId)
+		ledgerEra := eras.GetEraById(ledgerEraId)
+		txEraName := fmt.Sprintf("unknown(%d)", txEraId)
+		ledgerEraName := fmt.Sprintf("unknown(%d)", ledgerEraId)
+		if txEra != nil {
+			txEraName = txEra.Name
+		}
+		if ledgerEra != nil {
+			ledgerEraName = ledgerEra.Name
+		}
+		return fmt.Errorf(
+			"transaction era %s is not compatible with ledger era %s",
+			txEraName,
+			ledgerEraName,
+		)
+	}
+	return nil
 }
