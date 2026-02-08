@@ -32,6 +32,7 @@ import (
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/ledger/eras"
@@ -1548,6 +1549,32 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 	// Start chain reader goroutine
 	readChainResultCh := make(chan readChainResult)
 	go ls.ledgerReadChain(ls.ctx, readChainResultCh)
+	// Enable bulk-load optimizations when syncing from behind
+	var bulkOptimizer metadata.BulkLoadOptimizer
+	bulkLoadActive := false
+	if !ls.validationEnabled {
+		if opt, ok := ls.db.Metadata().(metadata.BulkLoadOptimizer); ok {
+			if err := opt.SetBulkLoadPragmas(); err != nil {
+				ls.config.Logger.Warn(
+					"failed to set bulk-load pragmas",
+					"error", err,
+				)
+			} else {
+				bulkOptimizer = opt
+				bulkLoadActive = true
+				defer func() {
+					if bulkLoadActive {
+						if restoreErr := bulkOptimizer.RestoreNormalPragmas(); restoreErr != nil {
+							ls.config.Logger.Error(
+								"failed to restore normal pragmas on exit",
+								"error", restoreErr,
+							)
+						}
+					}
+				}()
+			}
+		}
+	}
 	// Process blocks
 	var nextEpochEraId uint
 	var needsEpochRollover bool
@@ -2113,6 +2140,17 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 				// Capture tip for logging while holding the lock
 				tipForLog = ls.currentTip
 				ls.Unlock()
+				// Restore normal DB options outside the lock after validation is enabled
+				if wantEnableValidation && bulkLoadActive {
+					if restoreErr := bulkOptimizer.RestoreNormalPragmas(); restoreErr != nil {
+						ls.config.Logger.Error(
+							"failed to restore normal pragmas",
+							"error", restoreErr,
+						)
+					} else {
+						bulkLoadActive = false
+					}
+				}
 			}
 			if needsEpochRollover {
 				break

@@ -98,6 +98,9 @@ type MetadataStoreMysql struct {
 	sslMode  string
 	timeZone string
 	dsn      string // Data source name (MySQL connection string)
+
+	poolMaxIdle int // saved pool max idle connections
+	poolMaxOpen int // saved pool max open connections
 }
 
 // New creates a new database
@@ -268,8 +271,10 @@ func (d *MetadataStoreMysql) Start() error {
 	if err != nil {
 		return err
 	}
-	sqlDB.SetMaxIdleConns(10)
-	sqlDB.SetMaxOpenConns(100)
+	d.poolMaxIdle = 10
+	d.poolMaxOpen = 100
+	sqlDB.SetMaxOpenConns(d.poolMaxOpen)
+	sqlDB.SetMaxIdleConns(d.poolMaxIdle)
 	sqlDB.SetConnMaxLifetime(time.Hour)
 
 	if err := d.init(); err != nil {
@@ -424,6 +429,83 @@ func (d *MetadataStoreMysql) BeginTxn() (types.Txn, error) {
 		return newFailedMysqlTxn(db.Error), db.Error
 	}
 	return newMysqlTxn(db), nil
+}
+
+// SetBulkLoadPragmas configures MySQL session settings for high-throughput bulk inserts.
+// It pins the connection pool to a single connection so SET statements apply to all queries.
+func (d *MetadataStoreMysql) SetBulkLoadPragmas() error {
+	sqlDB, err := d.db.DB()
+	if err != nil {
+		return fmt.Errorf("failed to get sql.DB handle: %w", err)
+	}
+	// Pin to single connection so session-level SET statements apply to all queries
+	sqlDB.SetMaxOpenConns(1)
+	sqlDB.SetMaxIdleConns(1)
+	for _, stmt := range []string{
+		"SET innodb_flush_log_at_trx_commit = 0",
+		"SET unique_checks = 0",
+		"SET foreign_key_checks = 0",
+	} {
+		if result := d.db.Exec(stmt); result.Error != nil {
+			// Rollback any already-applied pragmas before returning
+			if restoreErr := d.RestoreNormalPragmas(); restoreErr != nil {
+				d.logger.Error(
+					"failed to restore pragmas after partial bulk-load failure",
+					"error", restoreErr,
+				)
+			}
+			return fmt.Errorf(
+				"failed to set bulk-load pragma %q: %w",
+				stmt,
+				result.Error,
+			)
+		}
+	}
+	d.logger.Info("mysql bulk-load pragmas enabled")
+	return nil
+}
+
+// RestoreNormalPragmas restores MySQL session settings to defaults
+// and restores the connection pool size.
+func (d *MetadataStoreMysql) RestoreNormalPragmas() error {
+	var errs []error
+	for _, stmt := range []string{
+		"SET innodb_flush_log_at_trx_commit = DEFAULT",
+		"SET unique_checks = DEFAULT",
+		"SET foreign_key_checks = DEFAULT",
+	} {
+		if result := d.db.Exec(stmt); result.Error != nil {
+			errs = append(
+				errs,
+				fmt.Errorf(
+					"failed to restore normal pragma %q: %w",
+					stmt,
+					result.Error,
+				),
+			)
+		}
+	}
+	// Always restore connection pool settings
+	sqlDB, err := d.db.DB()
+	if err != nil {
+		errs = append(
+			errs,
+			fmt.Errorf("failed to get sql.DB handle: %w", err),
+		)
+		return errors.Join(errs...)
+	}
+	sqlDB.SetMaxOpenConns(d.poolMaxOpen)
+	sqlDB.SetMaxIdleConns(d.poolMaxIdle)
+	if len(errs) > 0 {
+		d.logger.Warn(
+			"mysql normal pragmas partially restored",
+			"error",
+			errors.Join(errs...),
+		)
+	} else {
+		d.logger.Info("mysql normal pragmas restored")
+	}
+	return errors.Join(errs...)
 }
 
 // Where constrains a DB query
