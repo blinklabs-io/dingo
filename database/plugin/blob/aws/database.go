@@ -806,7 +806,6 @@ func (d *BlobStoreS3) GetBlockURL(ctx context.Context, txn types.Txn, point ocom
 			Bucket: &d.bucket,
 			Key:    awsString(d.fullKey(string(key))),
 		})
-
 	if err != nil {
 		return nil, fmt.Errorf("s3 blob: head object %q failed: %w", d.fullKey(string(key)), err)
 	}
