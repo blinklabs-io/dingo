@@ -21,6 +21,8 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
+	"net/url"
 	"sort"
 	"strings"
 	"time"
@@ -28,6 +30,7 @@ import (
 	"cloud.google.com/go/storage"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/cbor"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/prometheus/client_golang/prometheus"
 	"google.golang.org/api/iterator"
 	"google.golang.org/api/option"
@@ -914,4 +917,34 @@ func (d *BlobStoreGCS) Start() error {
 // Stop implements the plugin.Plugin interface.
 func (d *BlobStoreGCS) Stop() error {
 	return d.Close()
+}
+
+func (d *BlobStoreGCS) GetBlockURL(ctx context.Context, txn types.Txn, point ocommon.Point) (*url.URL, error) {
+	key := types.BlockBlobKey(point.Slot, point.Hash)
+
+	_, err := d.object(key).Attrs(ctx)
+	if errors.Is(err, storage.ErrObjectNotExist) {
+		return nil, fmt.Errorf("gcs: block not found: %w", err)
+	}
+
+	opts := &storage.SignedURLOptions{
+		Scheme:  storage.SigningSchemeV4,
+		Method:  http.MethodGet,
+		Expires: time.Now().Add(time.Hour),
+	}
+
+	signedURL, err := d.bucket.SignedURL(
+		d.fullKey(string(key)),
+		opts,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("gcs: failed to sign URL: %w", err)
+	}
+
+	u, err := url.Parse(signedURL)
+	if err != nil {
+		return nil, fmt.Errorf("gcs: failed to parse URL: %w", err)
+	}
+
+	return u, nil
 }

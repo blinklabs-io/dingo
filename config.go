@@ -57,6 +57,7 @@ type Config struct {
 	rejectionWatermark       float64
 	outboundSourcePort       uint
 	utxorpcPort              uint
+	barkPort                 uint
 	networkMagic             uint32
 	intersectTip             bool
 	peerSharing              bool
@@ -412,5 +413,11 @@ func WithShelleyKESKey(path string) ConfigOptionFunc {
 func WithShelleyOperationalCertificate(path string) ConfigOptionFunc {
 	return func(c *Config) {
 		c.shelleyOperationalCertificate = path
+	}
+}
+
+func WithBarkPort(port uint) ConfigOptionFunc {
+	return func(c *Config) {
+		c.barkPort = port
 	}
 }
