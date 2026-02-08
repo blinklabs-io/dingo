@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"net/url"
 	"sort"
 	"strings"
@@ -919,5 +920,31 @@ func (d *BlobStoreGCS) Stop() error {
 }
 
 func (d *BlobStoreGCS) GetBlockURL(ctx context.Context, txn types.Txn, point ocommon.Point) (*url.URL, error) {
-	return nil, errors.New("gcs: GetBlockURL not supported")
+	key := types.BlockBlobKey(point.Slot, point.Hash)
+
+	_, err := d.object(key).Attrs(ctx)
+	if errors.Is(err, storage.ErrObjectNotExist) {
+		return nil, fmt.Errorf("gcs: block not found: %w", err)
+	}
+
+	opts := &storage.SignedURLOptions{
+		Scheme:  storage.SigningSchemeV4,
+		Method:  http.MethodGet,
+		Expires: time.Now().Add(time.Hour),
+	}
+
+	signedURL, err := d.bucket.SignedURL(
+		d.fullKey(string(key)),
+		opts,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("gcs: failed to sign URL: %w", err)
+	}
+
+	u, err := url.Parse(signedURL)
+	if err != nil {
+		return nil, fmt.Errorf("gcs: failed to parse URL: %w", err)
+	}
+
+	return u, nil
 }
