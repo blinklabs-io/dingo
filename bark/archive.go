@@ -21,7 +21,7 @@ func (a *archiveServiceHandler) FetchBlock(
 	ctx context.Context,
 	req *connect.Request[archive.FetchBlockRequest],
 ) (*connect.Response[archive.FetchBlockResponse], error) {
-	resp := &connect.Response[archive.FetchBlockResponse]{}
+	resp := &archive.FetchBlockResponse{}
 
 	for _, b := range req.Msg.GetBlocks() {
 		point := common.NewPoint(b.GetSlot(), []byte(b.GetHash()))
@@ -29,10 +29,10 @@ func (a *archiveServiceHandler) FetchBlock(
 		if err != nil {
 			return nil, fmt.Errorf("failed getting signed url for block %v: %w", point, err)
 		}
-		resp.Msg.Blocks = append(resp.Msg.Blocks, &archive.SignedUrl{
+		resp.Blocks = append(resp.Blocks, &archive.SignedUrl{
 			Url: u.String(),
 		})
 	}
 
-	return connect.NewResponse[archive.FetchBlockResponse](nil), nil
+	return connect.NewResponse(resp), nil
 }
