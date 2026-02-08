@@ -25,9 +25,9 @@ func (a *archiveServiceHandler) FetchBlock(
 
 	for _, b := range req.Msg.GetBlocks() {
 		point := common.NewPoint(b.GetSlot(), []byte(b.GetHash()))
-		u, err := database.BlockURL(a.bark.config.DB, point)
+		u, err := database.BlockURL(ctx, a.bark.config.DB, point)
 		if err != nil {
-			return nil, fmt.Errorf("failed getting signed url for block %v: %w", point, err)
+			return nil, fmt.Errorf("failed getting signed url for block [%d, %s]: %w", point.Slot, point.Hash, err)
 		}
 		resp.Blocks = append(resp.Blocks, &archive.SignedUrl{
 			Url: u.String(),

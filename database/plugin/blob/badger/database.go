@@ -15,6 +15,7 @@
 package badger
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -589,6 +590,6 @@ func (d *BlobStoreBadger) DeleteTx(
 	return nil
 }
 
-func (d *BlobStoreBadger) GetBlockURL(txn types.Txn, point ocommon.Point) (*url.URL, error) {
+func (d *BlobStoreBadger) GetBlockURL(ctx context.Context, txn types.Txn, point ocommon.Point) (*url.URL, error) {
 	return nil, errors.New("badger: GetBlockURL not supported")
 }

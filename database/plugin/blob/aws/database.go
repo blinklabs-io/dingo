@@ -797,15 +797,26 @@ func (d *BlobStoreS3) Stop() error {
 	return nil
 }
 
-func (d *BlobStoreS3) GetBlockURL(txn types.Txn, point ocommon.Point) (*url.URL, error) {
-	key := d.fullKey((string)(types.BlockBlobKey(point.Slot, point.Hash)))
+func (d *BlobStoreS3) GetBlockURL(ctx context.Context, txn types.Txn, point ocommon.Point) (*url.URL, error) {
+	key := types.BlockBlobKey(point.Slot, point.Hash)
+
+	_, err := d.client.HeadObject(
+		ctx,
+		&s3.HeadObjectInput{
+			Bucket: &d.bucket,
+			Key:    awsString(d.fullKey(string(key))),
+		})
+
+	if err != nil {
+		return nil, fmt.Errorf("s3 blob: head object %q failed: %w", d.fullKey(string(key)), err)
+	}
 
 	presignClient := s3.NewPresignClient(d.client)
 	presignedURL, err := presignClient.PresignGetObject(
-		context.TODO(),
+		ctx,
 		&s3.GetObjectInput{
 			Bucket: &d.bucket,
-			Key:    &key,
+			Key:    awsString(d.fullKey(string(key))),
 		},
 		s3.WithPresignExpires(time.Minute))
 	if err != nil {

@@ -918,6 +918,6 @@ func (d *BlobStoreGCS) Stop() error {
 	return d.Close()
 }
 
-func (d *BlobStoreGCS) GetBlockURL(txn types.Txn, point ocommon.Point) (*url.URL, error) {
+func (d *BlobStoreGCS) GetBlockURL(ctx context.Context, txn types.Txn, point ocommon.Point) (*url.URL, error) {
 	return nil, errors.New("gcs: GetBlockURL not supported")
 }
