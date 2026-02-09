@@ -35,10 +35,10 @@ import (
 type tamperOption int
 
 const (
-	tamperNone       tamperOption = iota
-	tamperKESSig                  // Flip bits in the KES signature
-	tamperVRFProof                // Flip bits in the VRF proof
-	tamperOpCertSig               // Flip bits in the OpCert cold-key signature
+	tamperNone      tamperOption = iota
+	tamperKESSig                 // Flip bits in the KES signature
+	tamperVRFProof               // Flip bits in the VRF proof
+	tamperOpCertSig              // Flip bits in the OpCert cold-key signature
 )
 
 // testBlockResult holds a constructed test block and the parameters needed

@@ -364,6 +364,18 @@ func (c *Chain) Rollback(point ocommon.Point) error {
 	return nil
 }
 
+// ClearHeaders removes all queued block headers. This is used when
+// the active peer changes and stale headers from the previous peer's
+// chainsync session no longer fit the current chain tip.
+func (c *Chain) ClearHeaders() {
+	if c == nil {
+		return
+	}
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	c.headers = c.headers[:0]
+}
+
 func (c *Chain) HeaderCount() int {
 	c.mutex.RLock()
 	defer c.mutex.RUnlock()
