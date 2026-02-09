@@ -21,6 +21,9 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
 
@@ -131,6 +134,93 @@ func TestCardanoNodeConfigMissingGenesisHashes(t *testing.T) {
 			expectedCardanoNodeConfig.ConwayGenesisHash,
 		)
 	}
+}
+
+func TestValidateGenesisHashCorrect(t *testing.T) {
+	// Correct hash should pass validation and return the hash
+	data := []byte("test genesis data")
+	expectedHash := lcommon.Blake2b256Hash(data).String()
+
+	hash, err := validateGenesisHash("Test", expectedHash, data)
+	require.NoError(t, err)
+	assert.Equal(t, expectedHash, hash)
+}
+
+func TestValidateGenesisHashWrong(t *testing.T) {
+	// Wrong hash should return an error
+	data := []byte("test genesis data")
+	wrongHash := "0000000000000000000000000000000000000000000000000000000000000000"
+
+	_, err := validateGenesisHash("Test", wrongHash, data)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "Test genesis hash mismatch")
+	assert.Contains(t, err.Error(), wrongHash)
+}
+
+func TestValidateGenesisHashEmpty(t *testing.T) {
+	// Empty expected hash should skip validation and return computed hash
+	data := []byte("test genesis data")
+	expectedHash := lcommon.Blake2b256Hash(data).String()
+
+	hash, err := validateGenesisHash("Test", "", data)
+	require.NoError(t, err)
+	assert.Equal(t, expectedHash, hash)
+}
+
+func TestGenesisHashMismatchFromFile(t *testing.T) {
+	// Config with wrong Byron genesis hash should fail to load
+	cfgBytes := []byte(`{
+  "ByronGenesisFile": "byron-genesis.json",
+  "ByronGenesisHash": "0000000000000000000000000000000000000000000000000000000000000000"
+}`)
+	cfg, err := NewCardanoNodeConfigFromReader(bytes.NewReader(cfgBytes))
+	require.NoError(t, err)
+	cfg.path = testDataDir
+	err = cfg.loadGenesisConfigs()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "Byron genesis hash mismatch")
+}
+
+func TestGenesisHashMismatchShelley(t *testing.T) {
+	// Config with wrong Shelley genesis hash should fail to load
+	cfgBytes := []byte(`{
+  "ShelleyGenesisFile": "shelley-genesis.json",
+  "ShelleyGenesisHash": "0000000000000000000000000000000000000000000000000000000000000000"
+}`)
+	cfg, err := NewCardanoNodeConfigFromReader(bytes.NewReader(cfgBytes))
+	require.NoError(t, err)
+	cfg.path = testDataDir
+	err = cfg.loadGenesisConfigs()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "Shelley genesis hash mismatch")
+}
+
+func TestGenesisHashMismatchAlonzo(t *testing.T) {
+	// Config with wrong Alonzo genesis hash should fail to load
+	cfgBytes := []byte(`{
+  "AlonzoGenesisFile": "alonzo-genesis.json",
+  "AlonzoGenesisHash": "0000000000000000000000000000000000000000000000000000000000000000"
+}`)
+	cfg, err := NewCardanoNodeConfigFromReader(bytes.NewReader(cfgBytes))
+	require.NoError(t, err)
+	cfg.path = testDataDir
+	err = cfg.loadGenesisConfigs()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "Alonzo genesis hash mismatch")
+}
+
+func TestGenesisHashMismatchConway(t *testing.T) {
+	// Config with wrong Conway genesis hash should fail to load
+	cfgBytes := []byte(`{
+  "ConwayGenesisFile": "conway-genesis.json",
+  "ConwayGenesisHash": "0000000000000000000000000000000000000000000000000000000000000000"
+}`)
+	cfg, err := NewCardanoNodeConfigFromReader(bytes.NewReader(cfgBytes))
+	require.NoError(t, err)
+	cfg.path = testDataDir
+	err = cfg.loadGenesisConfigs()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "Conway genesis hash mismatch")
 }
 
 func TestCanonicalizeByronGenesisJSON(t *testing.T) {
