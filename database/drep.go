@@ -15,8 +15,46 @@
 package database
 
 import (
+	"fmt"
+
 	"github.com/blinklabs-io/dingo/database/models"
 )
+
+// RestoreDrepStateAtSlot reverts DRep state to the given slot. DReps
+// registered only after the slot are deleted; remaining DReps have their
+// anchor and active status restored.
+func (d *Database) RestoreDrepStateAtSlot(
+	slot uint64,
+	txn *Txn,
+) error {
+	owned := false
+	if txn == nil {
+		txn = d.MetadataTxn(true)
+		owned = true
+		defer func() {
+			if owned {
+				txn.Rollback() //nolint:errcheck
+			}
+		}()
+	}
+	if err := d.metadata.RestoreDrepStateAtSlot(
+		slot,
+		txn.Metadata(),
+	); err != nil {
+		return fmt.Errorf(
+			"failed to restore DRep state at slot %d: %w",
+			slot,
+			err,
+		)
+	}
+	if owned {
+		if err := txn.Commit(); err != nil {
+			return fmt.Errorf("commit transaction: %w", err)
+		}
+		owned = false
+	}
+	return nil
+}
 
 // GetDrep returns a drep by credential
 func (d *Database) GetDrep(

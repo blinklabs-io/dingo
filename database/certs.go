@@ -15,8 +15,46 @@
 package database
 
 import (
+	"fmt"
+
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
+
+// DeleteCertificatesAfterSlot removes all certificate records added after the
+// given slot. This is used during chain rollbacks to undo certificate state
+// changes.
+func (d *Database) DeleteCertificatesAfterSlot(
+	slot uint64,
+	txn *Txn,
+) error {
+	owned := false
+	if txn == nil {
+		txn = d.MetadataTxn(true)
+		owned = true
+		defer func() {
+			if owned {
+				txn.Rollback() //nolint:errcheck
+			}
+		}()
+	}
+	if err := d.metadata.DeleteCertificatesAfterSlot(
+		slot,
+		txn.Metadata(),
+	); err != nil {
+		return fmt.Errorf(
+			"failed to delete certificates after slot %d: %w",
+			slot,
+			err,
+		)
+	}
+	if owned {
+		if err := txn.Commit(); err != nil {
+			return fmt.Errorf("commit transaction: %w", err)
+		}
+		owned = false
+	}
+	return nil
+}
 
 // GetPoolRegistrations returns a list of pool registration certificates
 func (d *Database) GetPoolRegistrations(

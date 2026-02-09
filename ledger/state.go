@@ -1040,6 +1040,96 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 	var newNonce []byte
 	// Start a transaction
 	err := ls.SubmitAsyncDBTxn(func(txn *database.Txn) error {
+		// Delete certificates first (they reference transactions)
+		if err := ls.db.DeleteCertificatesAfterSlot(
+			point.Slot,
+			txn,
+		); err != nil {
+			return fmt.Errorf(
+				"delete certificates after rollback: %w",
+				err,
+			)
+		}
+		// Restore account delegation state
+		if err := ls.db.RestoreAccountStateAtSlot(
+			point.Slot,
+			txn,
+		); err != nil {
+			return fmt.Errorf(
+				"restore account state after rollback: %w",
+				err,
+			)
+		}
+		// Restore pool state
+		if err := ls.db.RestorePoolStateAtSlot(
+			point.Slot,
+			txn,
+		); err != nil {
+			return fmt.Errorf(
+				"restore pool state after rollback: %w",
+				err,
+			)
+		}
+		// Restore DRep state
+		if err := ls.db.RestoreDrepStateAtSlot(
+			point.Slot,
+			txn,
+		); err != nil {
+			return fmt.Errorf(
+				"restore DRep state after rollback: %w",
+				err,
+			)
+		}
+		// Delete rolled-back protocol parameters
+		if err := ls.db.DeletePParamsAfterSlot(
+			point.Slot,
+			txn,
+		); err != nil {
+			return fmt.Errorf(
+				"delete protocol params after rollback: %w",
+				err,
+			)
+		}
+		// Delete rolled-back protocol parameter updates
+		if err := ls.db.DeletePParamUpdatesAfterSlot(
+			point.Slot,
+			txn,
+		); err != nil {
+			return fmt.Errorf(
+				"delete protocol param updates after rollback: %w",
+				err,
+			)
+		}
+		// Delete rolled-back governance proposals
+		if err := ls.db.DeleteGovernanceProposalsAfterSlot(
+			point.Slot,
+			txn,
+		); err != nil {
+			return fmt.Errorf(
+				"delete governance proposals after rollback: %w",
+				err,
+			)
+		}
+		// Delete rolled-back governance votes
+		if err := ls.db.DeleteGovernanceVotesAfterSlot(
+			point.Slot,
+			txn,
+		); err != nil {
+			return fmt.Errorf(
+				"delete governance votes after rollback: %w",
+				err,
+			)
+		}
+		// Delete rolled-back constitutions
+		if err := ls.db.DeleteConstitutionsAfterSlot(
+			point.Slot,
+			txn,
+		); err != nil {
+			return fmt.Errorf(
+				"delete constitutions after rollback: %w",
+				err,
+			)
+		}
 		// Delete rolled-back UTxOs (blob offsets and metadata)
 		err := ls.db.UtxosDeleteRolledback(point.Slot, txn)
 		if err != nil {
@@ -1082,6 +1172,14 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 	}, true)
 	if err != nil {
 		return err
+	}
+	// Reload protocol parameters to reflect the rolled-back state
+	if err := ls.loadPParams(); err != nil {
+		ls.config.Logger.Warn(
+			"failed to reload protocol params after rollback",
+			"error", err,
+			"component", "ledger",
+		)
 	}
 	// Transaction committed successfully - now update in-memory state.
 	// Brief lock to ensure readers see consistent state.

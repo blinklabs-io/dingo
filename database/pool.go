@@ -15,9 +15,48 @@
 package database
 
 import (
+	"fmt"
+
 	"github.com/blinklabs-io/dingo/database/models"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
+
+// RestorePoolStateAtSlot reverts pool state to the given slot. Pools
+// registered only after the slot are deleted; remaining pools have their
+// denormalized fields restored from the most recent registration at or
+// before the slot.
+func (d *Database) RestorePoolStateAtSlot(
+	slot uint64,
+	txn *Txn,
+) error {
+	owned := false
+	if txn == nil {
+		txn = d.MetadataTxn(true)
+		owned = true
+		defer func() {
+			if owned {
+				txn.Rollback() //nolint:errcheck
+			}
+		}()
+	}
+	if err := d.metadata.RestorePoolStateAtSlot(
+		slot,
+		txn.Metadata(),
+	); err != nil {
+		return fmt.Errorf(
+			"failed to restore pool state at slot %d: %w",
+			slot,
+			err,
+		)
+	}
+	if owned {
+		if err := txn.Commit(); err != nil {
+			return fmt.Errorf("commit transaction: %w", err)
+		}
+		owned = false
+	}
+	return nil
+}
 
 // GetPool returns a pool by its key hash
 func (d *Database) GetPool(

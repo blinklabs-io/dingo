@@ -21,6 +21,78 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 )
 
+// DeleteGovernanceProposalsAfterSlot removes governance proposals added after
+// the given slot and clears deleted_slot for any that were soft-deleted after
+// that slot. This is used during chain rollbacks.
+func (d *Database) DeleteGovernanceProposalsAfterSlot(
+	slot uint64,
+	txn *Txn,
+) error {
+	owned := false
+	if txn == nil {
+		txn = d.MetadataTxn(true)
+		owned = true
+		defer func() {
+			if owned {
+				txn.Rollback() //nolint:errcheck
+			}
+		}()
+	}
+	if err := d.metadata.DeleteGovernanceProposalsAfterSlot(
+		slot,
+		txn.Metadata(),
+	); err != nil {
+		return fmt.Errorf(
+			"failed to delete governance proposals after slot %d: %w",
+			slot,
+			err,
+		)
+	}
+	if owned {
+		if err := txn.Commit(); err != nil {
+			return fmt.Errorf("commit transaction: %w", err)
+		}
+		owned = false
+	}
+	return nil
+}
+
+// DeleteGovernanceVotesAfterSlot removes governance votes added after the
+// given slot and clears deleted_slot for any that were soft-deleted after
+// that slot. This is used during chain rollbacks.
+func (d *Database) DeleteGovernanceVotesAfterSlot(
+	slot uint64,
+	txn *Txn,
+) error {
+	owned := false
+	if txn == nil {
+		txn = d.MetadataTxn(true)
+		owned = true
+		defer func() {
+			if owned {
+				txn.Rollback() //nolint:errcheck
+			}
+		}()
+	}
+	if err := d.metadata.DeleteGovernanceVotesAfterSlot(
+		slot,
+		txn.Metadata(),
+	); err != nil {
+		return fmt.Errorf(
+			"failed to delete governance votes after slot %d: %w",
+			slot,
+			err,
+		)
+	}
+	if owned {
+		if err := txn.Commit(); err != nil {
+			return fmt.Errorf("commit transaction: %w", err)
+		}
+		owned = false
+	}
+	return nil
+}
+
 // GetGovernanceProposal returns a governance proposal by transaction hash and action index
 func (d *Database) GetGovernanceProposal(
 	txHash []byte,
