@@ -402,6 +402,11 @@ type BlockfetchRequestRangeFunc func(ouroboros.ConnectionId, ocommon.Point, ocom
 type MempoolProvider interface {
 	Transactions() []mempool.MempoolTransaction
 }
+type rollbackRecord struct {
+	slot      uint64
+	timestamp time.Time
+}
+
 type LedgerState struct {
 	metrics                            stateMetrics
 	currentEra                         eras.EraDesc
@@ -414,8 +419,6 @@ type LedgerState struct {
 	timerCleanupConsumedUtxos          *time.Timer
 	Scheduler                          *Scheduler
 	chain                              *chain.Chain
-	chainsyncBlockfetchReadyMutex      sync.Mutex
-	chainsyncBlockfetchReadyChan       chan struct{}
 	db                                 *database.Database
 	chainsyncState                     ChainsyncState
 	currentTipBlockNonce               []byte
@@ -446,6 +449,10 @@ type LedgerState struct {
 	dropEventCount      int64     // count of suppressed drop events since last log
 	dropRollbackLastLog time.Time // last time we logged a drop rollback
 	dropRollbackCount   int64     // count of suppressed drop rollbacks since last log
+
+	rollbackHistory []rollbackRecord // recent rollback slot+time pairs for loop detection
+
+	lastActiveConnId *ouroboros.ConnectionId // tracks active connection for switch detection
 }
 
 // EraTransitionResult holds computed state from an era transition
