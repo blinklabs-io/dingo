@@ -422,6 +422,14 @@ func (n *Node) Run(ctx context.Context) error {
 		if err := n.initBlockForger(n.ctx); err != nil {
 			return fmt.Errorf("failed to initialize block forger: %w", err)
 		}
+		// Wire forger's slot tracker into ledger state for slot
+		// battle detection. The forger is created after the ledger
+		// state, so we use the late-binding setter.
+		if n.blockForger != nil {
+			n.ledgerState.SetForgedBlockChecker(
+				n.blockForger.SlotTracker(),
+			)
+		}
 		started = append(started, func() {
 			if n.blockForger != nil {
 				n.blockForger.Stop()
