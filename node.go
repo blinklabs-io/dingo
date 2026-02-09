@@ -157,6 +157,7 @@ func (n *Node) Run(ctx context.Context) error {
 	cm, err := chain.NewManager(
 		n.db,
 		n.eventBus,
+		n.config.promRegistry,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to load chain manager: %w", err)
