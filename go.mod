@@ -18,6 +18,7 @@ require (
 	github.com/blinklabs-io/gouroboros v0.153.1
 	github.com/blinklabs-io/ouroboros-mock v0.9.0
 	github.com/blinklabs-io/plutigo v0.0.23
+	github.com/blockfrost/blockfrost-go v0.3.0
 	github.com/btcsuite/btcd/btcutil v1.1.6
 	github.com/dgraph-io/badger/v4 v4.9.0
 	github.com/getsops/sops/v3 v3.11.0

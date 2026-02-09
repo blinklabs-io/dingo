@@ -80,6 +80,8 @@ type Config struct {
 	shelleyVRFKey                 string
 	shelleyKESKey                 string
 	shelleyOperationalCertificate string
+	// Blockfrost API listen address (empty = disabled)
+	blockfrostListenAddress string
 }
 
 // configPopulateNetworkMagic uses the named network (if specified) to determine the network magic value (if not specified)
@@ -412,5 +414,17 @@ func WithShelleyKESKey(path string) ConfigOptionFunc {
 func WithShelleyOperationalCertificate(path string) ConfigOptionFunc {
 	return func(c *Config) {
 		c.shelleyOperationalCertificate = path
+	}
+}
+
+// WithBlockfrostListenAddress specifies the listen
+// address for the Blockfrost-compatible REST API server.
+// An empty string disables the server. The default is
+// empty (disabled).
+func WithBlockfrostListenAddress(
+	addr string,
+) ConfigOptionFunc {
+	return func(c *Config) {
+		c.blockfrostListenAddress = addr
 	}
 }
