@@ -603,7 +603,7 @@ func (d *MetadataStoreSqlite) GetAccount(
 	txn types.Txn,
 ) (*models.Account, error) {
 	ret := &models.Account{}
-	db, err := d.resolveDB(txn)
+	db, err := d.resolveReadDB(txn)
 	if err != nil {
 		return nil, err
 	}

@@ -30,9 +30,9 @@ func (d *MetadataStoreSqlite) GetConstitution(
 	txn types.Txn,
 ) (*models.Constitution, error) {
 	var constitution models.Constitution
-	db, err := d.resolveDB(txn)
+	db, err := d.resolveReadDB(txn)
 	if err != nil {
-		return nil, fmt.Errorf("resolveDB failed in GetConstitution: %w", err)
+		return nil, fmt.Errorf("resolveReadDB failed in GetConstitution: %w", err)
 	}
 	// Get the most recent non-deleted constitution by added_slot
 	if result := db.Where("deleted_slot IS NULL").Order("added_slot DESC").First(&constitution); result.Error != nil {
