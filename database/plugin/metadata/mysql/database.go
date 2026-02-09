@@ -277,13 +277,19 @@ func (d *MetadataStoreMysql) Start() error {
 		return err
 	}
 	// Create table schemas
-	d.logger.Debug(fmt.Sprintf("creating table: %#v", &CommitTimestamp{}))
+	d.logger.Debug(
+		"creating table",
+		"model", fmt.Sprintf("%T", &CommitTimestamp{}),
+	)
 	if err := d.db.AutoMigrate(&CommitTimestamp{}); err != nil {
 		return err
 	}
 
 	for _, model := range models.MigrateModels {
-		d.logger.Debug(fmt.Sprintf("creating table: %#v", model))
+		d.logger.Debug(
+			"creating table",
+			"model", fmt.Sprintf("%T", model),
+		)
 		if err := d.db.AutoMigrate(model); err != nil {
 			return err
 		}

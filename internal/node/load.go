@@ -54,11 +54,9 @@ func Load(cfg *config.Config, logger *slog.Logger, immutableDir string) error {
 		return err
 	}
 	logger.Debug(
-		fmt.Sprintf(
-			"cardano network config: %+v",
-			nodeCfg,
-		),
+		"cardano network config",
 		"component", "node",
+		"config", nodeCfg,
 	)
 	// Load database
 	dbConfig := &database.Config{
@@ -167,10 +165,8 @@ func Load(cfg *config.Config, logger *slog.Logger, immutableDir string) error {
 		// Add block batch to chain
 		if err := c.AddBlocks(blockBatch); err != nil {
 			logger.Error(
-				fmt.Sprintf(
-					"failed to import block: %s",
-					err,
-				),
+				"failed to import block",
+				"error", err,
 			)
 			return nil
 		}
@@ -178,18 +174,14 @@ func Load(cfg *config.Config, logger *slog.Logger, immutableDir string) error {
 		blockBatch = slices.Delete(blockBatch, 0, len(blockBatch))
 		if blocksCopied > 0 && blocksCopied%10000 == 0 {
 			logger.Info(
-				fmt.Sprintf(
-					"copying blocks from immutable DB (%d blocks copied)",
-					blocksCopied,
-				),
+				"copying blocks from immutable DB",
+				"blocks_copied", blocksCopied,
 			)
 		}
 	}
 	logger.Info(
-		fmt.Sprintf(
-			"finished copying %d blocks from immutable DB",
-			blocksCopied,
-		),
+		"finished copying blocks from immutable DB",
+		"blocks_copied", blocksCopied,
 	)
 	// Wait for ledger to catch up
 	for {
@@ -200,10 +192,8 @@ func Load(cfg *config.Config, logger *slog.Logger, immutableDir string) error {
 		}
 	}
 	logger.Info(
-		fmt.Sprintf(
-			"finished processing %d blocks from immutable DB",
-			blocksCopied,
-		),
+		"finished processing blocks from immutable DB",
+		"blocks_copied", blocksCopied,
 	)
 	return nil
 }
