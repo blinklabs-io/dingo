@@ -91,6 +91,7 @@ func (t *sqliteTxn) Rollback() error {
 type MetadataStoreSqlite struct {
 	promRegistry   prometheus.Registerer
 	db             *gorm.DB
+	readDB         *gorm.DB
 	logger         *slog.Logger
 	timerVacuum    *time.Timer
 	dataDir        string
@@ -138,7 +139,15 @@ func (d *MetadataStoreSqlite) init() error {
 	}
 	// Configure tracing for GORM
 	if err := d.db.Use(tracing.NewPlugin(tracing.WithoutMetrics())); err != nil {
-		return err
+		return fmt.Errorf("failed to configure tracing on write pool: %w", err)
+	}
+	// Add tracing to the read pool when it is a separate instance
+	if d.readDB != nil && d.readDB != d.db {
+		if err := d.readDB.Use(
+			tracing.NewPlugin(tracing.WithoutMetrics()),
+		); err != nil {
+			return fmt.Errorf("failed to configure tracing on read pool: %w", err)
+		}
 	}
 	// Schedule daily database vacuum to free unused space
 	d.scheduleDailyVacuum()
@@ -198,17 +207,20 @@ func (d *MetadataStoreSqlite) Start() error {
 	var err error
 	if d.dataDir == "" {
 		// No dataDir, use in-memory config
-		// In-memory databases require cache=shared to be accessible from
-		// multiple connections. This is needed for tests that verify
-		// concurrent transaction behavior.
+		// In-memory databases require cache=shared to be accessible
+		// from multiple connections. This is needed for tests that
+		// verify concurrent transaction behavior.
 		//
-		// Note: cache=shared can cause SQLITE_LOCKED with concurrent writes,
-		// but in-memory databases are only used for testing where write
-		// concurrency is controlled. The production file-based database
-		// uses WAL mode which handles concurrency properly.
+		// Note: cache=shared can cause SQLITE_LOCKED with concurrent
+		// writes, but in-memory databases are only used for testing
+		// where write concurrency is controlled. The production
+		// file-based database uses WAL mode with separate read/write
+		// pools which handles concurrency properly.
 		metadataDb, err = gorm.Open(
 			sqlite.Open(
-				"file::memory:?cache=shared&_pragma=busy_timeout(30000)&_pragma=foreign_keys(1)",
+				"file::memory:?cache=shared"+
+					"&_pragma=busy_timeout(30000)"+
+					"&_pragma=foreign_keys(1)",
 			),
 			&gorm.Config{
 				Logger:                 gormlogger.Discard,
@@ -217,52 +229,78 @@ func (d *MetadataStoreSqlite) Start() error {
 			},
 		)
 		if err != nil {
-			return err
+			return fmt.Errorf("failed to open in-memory database: %w", err)
 		}
+		// For in-memory mode, read and write share the same handle
+		d.db = metadataDb
+		d.readDB = metadataDb
 	} else {
-		// Make sure that we can read data dir, and create if it doesn't exist
+		// Make sure that we can read data dir, and create if it
+		// doesn't exist
 		if _, err := os.Stat(d.dataDir); err != nil {
 			if !errors.Is(err, fs.ErrNotExist) {
-				return fmt.Errorf("failed to read data dir: %w", err)
+				return fmt.Errorf(
+					"failed to read data dir: %w",
+					err,
+				)
 			}
 			// Create data directory
 			if err := os.MkdirAll(d.dataDir, 0o755); err != nil {
-				return fmt.Errorf("failed to create data dir: %w", err)
+				return fmt.Errorf(
+					"failed to create data dir: %w",
+					err,
+				)
 			}
 		}
-		// Open sqlite DB
+		// Open sqlite DB with separate read and write connections.
+		//
+		// SQLite allows exactly one writer at a time. Using separate
+		// pools prevents SQLITE_BUSY by:
+		//   1. Write pool (1 connection): serializes all writes
+		//      naturally. No contention because only one write
+		//      transaction can be active.
+		//   2. Read pool (N connections): WAL mode allows concurrent
+		//      readers that don't block the writer.
+		//
+		// Without this separation, the Go connection pool hands out
+		// any available connection for any operation. Multiple
+		// goroutines that each begin a write transaction compete for
+		// SQLite's single write lock, causing SQLITE_BUSY even with
+		// busy_timeout because the lock holder may be on a different
+		// pooled connection that is blocked waiting for a connection
+		// back from the pool (deadlock).
 		metadataDbPath := filepath.Join(
 			d.dataDir,
 			"metadata.sqlite",
 		)
-		// Use default settings. Include PRAGMA/query parameters on the DSN
-		// to enable WAL mode, reduce synchronous writes for performance, and
-		// set a larger negative cache size which historically improved
-		// metadata sync and throughput.
-		//
-		// Note: We intentionally do NOT use cache=shared because it causes
-		// SQLITE_LOCKED (error 6) conflicts with connection pooling that
-		// cannot be resolved by busy_timeout. WAL mode provides sufficient
-		// concurrency for our read-heavy workload.
-		//
-		// busy_timeout(30000) tells SQLite to wait up to 30 seconds for locks
-		// instead of immediately returning SQLITE_BUSY. This provides enough
-		// headroom for high-contention scenarios during bulk loading.
-		//
-		// _txlock=immediate starts transactions in IMMEDIATE mode, acquiring
-		// a RESERVED lock immediately instead of waiting until the first write.
-		// This prevents SQLITE_LOCKED (error 6) deadlocks that occur when
-		// multiple DEFERRED transactions try to upgrade from SHARED to RESERVED
-		// locks simultaneously. With IMMEDIATE mode, transactions either
-		// succeed in acquiring the write lock or wait (respecting busy_timeout).
-		//
-		// Keep these parameters in sync with project performance testing.
-		connStr := fmt.Sprintf(
-			"file:%s?_txlock=immediate&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=cache_size(-50000)&_pragma=busy_timeout(30000)&_pragma=foreign_keys(1)",
+		// Common PRAGMA parameters for both read and write pools:
+		// - journal_mode(WAL): Write-Ahead Logging for concurrent
+		//   read/write access
+		// - synchronous(NORMAL): Safe with WAL; only syncs on
+		//   checkpoint, not every commit
+		// - cache_size(-50000): ~50MB page cache per connection
+		// - busy_timeout(30000): Wait up to 30s for locks instead
+		//   of returning SQLITE_BUSY immediately
+		// - foreign_keys(1): Enforce FK constraints
+		// - mmap_size(268435456): Memory-map up to 256MB for
+		//   faster reads
+		commonPragmas := "&_pragma=journal_mode(WAL)" +
+			"&_pragma=synchronous(NORMAL)" +
+			"&_pragma=cache_size(-50000)" +
+			"&_pragma=busy_timeout(30000)" +
+			"&_pragma=foreign_keys(1)" +
+			"&_pragma=mmap_size(268435456)"
+
+		// Write connection: uses _txlock=immediate so that BEGIN
+		// acquires the RESERVED lock immediately. With a single
+		// write connection, this never contends.
+		writeConnStr := fmt.Sprintf(
+			"file:%s?_txlock=immediate%s",
 			metadataDbPath,
+			commonPragmas,
 		)
-		metadataDb, err = gorm.Open(
-			sqlite.Open(connStr),
+		writeDB, err := gorm.Open(
+			sqlite.Open(writeConnStr),
 			&gorm.Config{
 				Logger:                 gormlogger.Discard,
 				SkipDefaultTransaction: true,
@@ -270,42 +308,106 @@ func (d *MetadataStoreSqlite) Start() error {
 			},
 		)
 		if err != nil {
-			return err
+			return fmt.Errorf("failed to open write pool: %w", err)
 		}
+
+		// Read connections: use default DEFERRED transaction mode.
+		// Readers in WAL mode never block writers and vice versa.
+		readConnStr := fmt.Sprintf(
+			"file:%s?mode=ro%s",
+			metadataDbPath,
+			commonPragmas,
+		)
+		readDB, err := gorm.Open(
+			sqlite.Open(readConnStr),
+			&gorm.Config{
+				Logger:                 gormlogger.Discard,
+				SkipDefaultTransaction: true,
+				PrepareStmt:            true,
+			},
+		)
+		if err != nil {
+			// Close the already-opened write pool to avoid
+			// leaking a SQLite connection.
+			if sqlDB, closeErr := writeDB.DB(); closeErr == nil {
+				_ = sqlDB.Close()
+			}
+			return fmt.Errorf("failed to open read pool: %w", err)
+		}
+
+		d.db = writeDB
+		d.readDB = readDB
 	}
-	d.db = metadataDb
-	// Configure connection pool
-	// SQLite is fundamentally single-writer, so we limit connections to avoid
-	// SQLITE_LOCKED (error 6) deadlocks. The connection pool size should match
-	// the DatabaseWorkers configuration. Using more connections than workers
-	// creates contention on SQLite's lock infrastructure.
-	sqlDB, err := d.db.DB()
-	if err != nil {
-		return err
+
+	// Ensure both pools are closed if anything below fails.
+	var success bool
+	defer func() {
+		if !success {
+			_ = d.Close()
+		}
+	}()
+
+	// Configure connection pools
+	if d.dataDir != "" {
+		// Write pool: exactly 1 connection. SQLite only supports a
+		// single writer, so having more than 1 write connection just
+		// creates lock contention. A single connection serializes
+		// writes naturally without any SQLITE_BUSY errors.
+		writeSqlDB, err := d.db.DB()
+		if err != nil {
+			return fmt.Errorf("failed to get write sql.DB: %w", err)
+		}
+		writeSqlDB.SetMaxOpenConns(1)
+		writeSqlDB.SetMaxIdleConns(1)
+		writeSqlDB.SetConnMaxLifetime(0)
+
+		// Read pool: multiple connections for concurrent reads.
+		// WAL mode allows unlimited concurrent readers.
+		maxReadConns := d.maxConnections
+		if maxReadConns <= 0 {
+			maxReadConns = DefaultMaxConnections
+		}
+		readSqlDB, err := d.readDB.DB()
+		if err != nil {
+			return fmt.Errorf("failed to get read sql.DB: %w", err)
+		}
+		readSqlDB.SetMaxOpenConns(maxReadConns)
+		readSqlDB.SetMaxIdleConns(maxReadConns)
+		readSqlDB.SetConnMaxLifetime(0)
+	} else {
+		// In-memory: single shared pool
+		sqlDB, err := d.db.DB()
+		if err != nil {
+			return fmt.Errorf("failed to get sql.DB for in-memory pool: %w", err)
+		}
+		maxConns := d.maxConnections
+		if maxConns <= 0 {
+			maxConns = DefaultMaxConnections
+		}
+		sqlDB.SetMaxIdleConns(maxConns)
+		sqlDB.SetMaxOpenConns(maxConns)
+		sqlDB.SetConnMaxLifetime(0)
 	}
-	maxConns := d.maxConnections
-	if maxConns <= 0 {
-		maxConns = DefaultMaxConnections // Use default if not configured
-	}
-	sqlDB.SetMaxIdleConns(maxConns)
-	sqlDB.SetMaxOpenConns(maxConns)
-	sqlDB.SetConnMaxLifetime(0) // Reuse connections indefinitely
 
 	if err := d.init(); err != nil {
-		// MetadataStoreSqlite is available for recovery, so return error but keep instance
 		return err
 	}
-	// Create table schemas
-	d.logger.Debug(fmt.Sprintf("creating table: %#v", &CommitTimestamp{}))
+	// Create table schemas (uses write connection)
+	d.logger.Debug(
+		fmt.Sprintf("creating table: %#v", &CommitTimestamp{}),
+	)
 	if err := d.db.AutoMigrate(&CommitTimestamp{}); err != nil {
 		return err
 	}
 	for _, model := range models.MigrateModels {
-		d.logger.Debug(fmt.Sprintf("creating table: %#v", model))
+		d.logger.Debug(
+			fmt.Sprintf("creating table: %#v", model),
+		)
 		if err := d.db.AutoMigrate(model); err != nil {
 			return err
 		}
 	}
+	success = true
 	return nil
 }
 
@@ -324,12 +426,28 @@ func (d *MetadataStoreSqlite) Close() error {
 	}
 	d.timerMutex.Unlock()
 
-	// get DB handle from gorm.DB
-	db, err := d.DB().DB()
-	if err != nil {
-		return err
+	var errs []error
+	// Close read pool first (if separate from write pool)
+	if d.readDB != nil && d.readDB != d.db {
+		if readSqlDB, err := d.readDB.DB(); err != nil {
+			errs = append(errs, err)
+		} else {
+			if err := readSqlDB.Close(); err != nil {
+				errs = append(errs, err)
+			}
+		}
 	}
-	return db.Close()
+	// Close write pool
+	if d.db != nil {
+		if db, err := d.DB().DB(); err != nil {
+			errs = append(errs, err)
+		} else {
+			if err := db.Close(); err != nil {
+				errs = append(errs, err)
+			}
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // Create creates a record
@@ -337,8 +455,19 @@ func (d *MetadataStoreSqlite) Create(value any) *gorm.DB {
 	return d.DB().Create(value)
 }
 
-// DB returns the database handle
+// DB returns the write database handle
 func (d *MetadataStoreSqlite) DB() *gorm.DB {
+	return d.db
+}
+
+// ReadDB returns the read-only database handle. For file-based
+// databases this is a separate connection pool optimized for
+// concurrent reads via WAL mode. For in-memory databases this
+// returns the same handle as DB().
+func (d *MetadataStoreSqlite) ReadDB() *gorm.DB {
+	if d.readDB != nil {
+		return d.readDB
+	}
 	return d.db
 }
 

@@ -368,6 +368,16 @@ type FatalErrorFunc func(err error)
 // chainsync connection ID for chain selection purposes.
 type GetActiveConnectionFunc func() *ouroboros.ConnectionId
 
+// ForgedBlockChecker is an interface for checking whether the local
+// node recently forged a block for a given slot. This is used by
+// chainsync to detect slot battles when an incoming block from a
+// peer occupies the same slot as a locally forged block.
+type ForgedBlockChecker interface {
+	// WasForgedByUs returns the block hash and true if the local node
+	// forged a block for the given slot, or nil and false otherwise.
+	WasForgedByUs(slot uint64) (blockHash []byte, ok bool)
+}
+
 type LedgerStateConfig struct {
 	PromRegistry               prometheus.Registerer
 	Logger                     *slog.Logger
@@ -378,6 +388,7 @@ type LedgerStateConfig struct {
 	BlockfetchRequestRangeFunc BlockfetchRequestRangeFunc
 	GetActiveConnectionFunc    GetActiveConnectionFunc
 	FatalErrorFunc             FatalErrorFunc
+	ForgedBlockChecker         ForgedBlockChecker
 	ValidateHistorical         bool
 	ForgeBlocks                bool
 	DatabaseWorkerPoolConfig   DatabaseWorkerPoolConfig
@@ -398,6 +409,7 @@ type LedgerState struct {
 	chainsyncBlockfetchTimeoutTimer    *time.Timer // timeout timer for blockfetch operations
 	chainsyncBlockfetchTimerGeneration uint64      // generation counter to detect stale timer callbacks
 	currentPParams                     lcommon.ProtocolParameters
+	prevEraPParams                     lcommon.ProtocolParameters // pparams from the immediately previous era (for era-1 TX validation)
 	mempool                            MempoolProvider
 	timerCleanupConsumedUtxos          *time.Timer
 	Scheduler                          *Scheduler
@@ -423,6 +435,17 @@ type LedgerState struct {
 	closed                     bool
 	inRecovery                 bool // guards against recursive recovery in SubmitAsyncDBTxn
 	validationEnabled          bool
+
+	// Sync progress reporting (Fix 4)
+	syncProgressLastLog  time.Time     // last time we logged sync progress
+	syncProgressLastSlot uint64        // slot at last progress log (for rate calc)
+	syncUpstreamTipSlot  atomic.Uint64 // upstream peer's tip slot
+
+	// Rate-limiting for non-active connection drop messages (Fix 3)
+	dropEventLastLog    time.Time // last time we logged a drop event
+	dropEventCount      int64     // count of suppressed drop events since last log
+	dropRollbackLastLog time.Time // last time we logged a drop rollback
+	dropRollbackCount   int64     // count of suppressed drop rollbacks since last log
 }
 
 // EraTransitionResult holds computed state from an era transition
@@ -895,10 +918,14 @@ func (ls *LedgerState) handleSlotTicks() {
 		// The slot clock is ticking based on wall-clock time which is far ahead
 		// of the blocks being processed.
 		if !isSynced {
-			logger.Debug("slot clock epoch boundary during catch up (suppressed)",
-				"slot_clock_epoch", tick.Epoch,
-				"ledger_epoch", currentEpoch.EpochId,
-				"slot", tick.Slot,
+			logger.Debug(
+				"slot clock epoch boundary during catch up (suppressed)",
+				"slot_clock_epoch",
+				tick.Epoch,
+				"ledger_epoch",
+				currentEpoch.EpochId,
+				"slot",
+				tick.Slot,
 			)
 			continue
 		}
@@ -908,9 +935,12 @@ func (ls *LedgerState) handleSlotTicks() {
 		// and avoid duplicate events.
 		if !ls.slotClock.MarkEpochEmitted(tick.Epoch) {
 			// Already emitted by block processing
-			logger.Debug("slot clock epoch boundary already emitted by block processing",
-				"epoch", tick.Epoch,
-				"slot", tick.Slot,
+			logger.Debug(
+				"slot clock epoch boundary already emitted by block processing",
+				"epoch",
+				tick.Epoch,
+				"slot",
+				tick.Slot,
 			)
 			continue
 		}
@@ -956,7 +986,8 @@ func (ls *LedgerState) handleSlotTicks() {
 
 		// Log if there's a discrepancy between slot clock epoch and ledger epoch.
 		// This can happen if block processing is slightly behind wall-clock time.
-		if currentEpoch.EpochId != tick.Epoch && currentEpoch.EpochId != tick.Epoch-1 {
+		if currentEpoch.EpochId != tick.Epoch &&
+			currentEpoch.EpochId != tick.Epoch-1 {
 			logger.Warn("epoch discrepancy between slot clock and ledger state",
 				"slot_clock_epoch", tick.Epoch,
 				"ledger_epoch", currentEpoch.EpochId,
@@ -1031,6 +1062,96 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 	var newNonce []byte
 	// Start a transaction
 	err := ls.SubmitAsyncDBTxn(func(txn *database.Txn) error {
+		// Delete certificates first (they reference transactions)
+		if err := ls.db.DeleteCertificatesAfterSlot(
+			point.Slot,
+			txn,
+		); err != nil {
+			return fmt.Errorf(
+				"delete certificates after rollback: %w",
+				err,
+			)
+		}
+		// Restore account delegation state
+		if err := ls.db.RestoreAccountStateAtSlot(
+			point.Slot,
+			txn,
+		); err != nil {
+			return fmt.Errorf(
+				"restore account state after rollback: %w",
+				err,
+			)
+		}
+		// Restore pool state
+		if err := ls.db.RestorePoolStateAtSlot(
+			point.Slot,
+			txn,
+		); err != nil {
+			return fmt.Errorf(
+				"restore pool state after rollback: %w",
+				err,
+			)
+		}
+		// Restore DRep state
+		if err := ls.db.RestoreDrepStateAtSlot(
+			point.Slot,
+			txn,
+		); err != nil {
+			return fmt.Errorf(
+				"restore DRep state after rollback: %w",
+				err,
+			)
+		}
+		// Delete rolled-back protocol parameters
+		if err := ls.db.DeletePParamsAfterSlot(
+			point.Slot,
+			txn,
+		); err != nil {
+			return fmt.Errorf(
+				"delete protocol params after rollback: %w",
+				err,
+			)
+		}
+		// Delete rolled-back protocol parameter updates
+		if err := ls.db.DeletePParamUpdatesAfterSlot(
+			point.Slot,
+			txn,
+		); err != nil {
+			return fmt.Errorf(
+				"delete protocol param updates after rollback: %w",
+				err,
+			)
+		}
+		// Delete rolled-back governance proposals
+		if err := ls.db.DeleteGovernanceProposalsAfterSlot(
+			point.Slot,
+			txn,
+		); err != nil {
+			return fmt.Errorf(
+				"delete governance proposals after rollback: %w",
+				err,
+			)
+		}
+		// Delete rolled-back governance votes
+		if err := ls.db.DeleteGovernanceVotesAfterSlot(
+			point.Slot,
+			txn,
+		); err != nil {
+			return fmt.Errorf(
+				"delete governance votes after rollback: %w",
+				err,
+			)
+		}
+		// Delete rolled-back constitutions
+		if err := ls.db.DeleteConstitutionsAfterSlot(
+			point.Slot,
+			txn,
+		); err != nil {
+			return fmt.Errorf(
+				"delete constitutions after rollback: %w",
+				err,
+			)
+		}
 		// Delete rolled-back UTxOs (blob offsets and metadata)
 		err := ls.db.UtxosDeleteRolledback(point.Slot, txn)
 		if err != nil {
@@ -1073,6 +1194,14 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 	}, true)
 	if err != nil {
 		return err
+	}
+	// Reload protocol parameters to reflect the rolled-back state
+	if err := ls.loadPParams(); err != nil {
+		ls.config.Logger.Warn(
+			"failed to reload protocol params after rollback",
+			"error", err,
+			"component", "ledger",
+		)
 	}
 	// Transaction committed successfully - now update in-memory state.
 	// Brief lock to ensure readers see consistent state.
@@ -1486,6 +1615,8 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 			// Apply in-memory state updates with brief lock after successful commit
 			ls.Lock()
 			for _, eraResult := range eraTransitions {
+				// Preserve the pre-hard-fork pparams for era-1 TX validation
+				ls.prevEraPParams = ls.currentPParams
 				ls.currentPParams = eraResult.NewPParams
 				ls.currentEra = eraResult.NewEra
 			}
@@ -1524,7 +1655,8 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 					if !shouldEmit {
 						ls.config.Logger.Debug(
 							"block-based epoch transition skipped (already emitted by slot clock)",
-							"epoch", newEpochId,
+							"epoch",
+							newEpochId,
 						)
 					}
 				}
@@ -1552,8 +1684,10 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 					)
 					ls.config.Logger.Debug(
 						"emitted block-based epoch transition event",
-						"epoch", newEpochId,
-						"boundary_slot", rolloverResult.NewCurrentEpoch.StartSlot,
+						"epoch",
+						newEpochId,
+						"boundary_slot",
+						rolloverResult.NewCurrentEpoch.StartSlot,
 					)
 				}
 			}
@@ -1767,6 +1901,8 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 			ls.RLock()
 			snapshotEpoch := ls.currentEpoch
 			snapshotEra := ls.currentEra
+			snapshotPParams := ls.currentPParams
+			snapshotPrevEraPParams := ls.prevEraPParams
 			snapshotTipHash := ls.currentTip.Point.Hash
 			snapshotNonce := ls.currentTipBlockNonce
 			localCheckpointWritten := ls.checkpointWrittenForEpoch
@@ -1842,7 +1978,10 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 							tmpPoint.Hash,
 						)
 						var offsetErr error
-						blockOffsets, offsetErr = indexer.ComputeOffsets(blockCbor, next)
+						blockOffsets, offsetErr = indexer.ComputeOffsets(
+							blockCbor,
+							next,
+						)
 						if offsetErr != nil {
 							deltaBatch.Release()
 							return fmt.Errorf(
@@ -1860,6 +1999,9 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 						shouldValidateBlock,
 						expectedPrevHash,
 						blockOffsets,
+						snapshotEra,
+						snapshotPParams,
+						snapshotPrevEraPParams,
 					)
 					if err != nil {
 						deltaBatch.Release()
@@ -1978,6 +2120,8 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 				"component",
 				"ledger",
 			)
+			// Periodic sync progress reporting
+			ls.logSyncProgress(tipForLog.Point.Slot)
 		}
 	}
 }
@@ -1989,6 +2133,9 @@ func (ls *LedgerState) ledgerProcessBlock(
 	shouldValidate bool,
 	expectedPrevHash []byte,
 	offsets *database.BlockIngestionResult,
+	currentEra eras.EraDesc,
+	pparams lcommon.ProtocolParameters,
+	prevEraPParams lcommon.ProtocolParameters,
 ) (*LedgerDelta, error) {
 	// Check that we're processing things in order
 	if len(expectedPrevHash) > 0 {
@@ -2016,17 +2163,33 @@ func (ls *LedgerState) ledgerProcessBlock(
 		}
 		// Validate transaction
 		if shouldValidate {
-			if ls.currentEra.ValidateTxFunc != nil {
+			validationEra, err := resolveValidationEra(
+				tx,
+				currentEra,
+			)
+			if err != nil {
+				delta.Release()
+				return nil, err
+			}
+			if validationEra.ValidateTxFunc != nil {
+				// Use the previous era's protocol
+				// parameters when validating an era-1
+				// transaction.
+				pp := pparams
+				if validationEra.Id != currentEra.Id &&
+					prevEraPParams != nil {
+					pp = prevEraPParams
+				}
 				lv := &LedgerView{
 					txn:             txn,
 					ls:              ls,
 					intraBlockUtxos: intraBlockUtxos,
 				}
-				err := ls.currentEra.ValidateTxFunc(
+				err := validationEra.ValidateTxFunc(
 					tx,
 					point.Slot,
 					lv,
-					ls.currentPParams,
+					pp,
 				)
 				if err != nil {
 					// Attempt to include raw CBOR for diagnostics (if available)
@@ -2140,6 +2303,28 @@ func (ls *LedgerState) loadPParams() error {
 		}
 	}
 	ls.currentPParams = pparams
+
+	// Load previous era's pparams for era-1 TX validation.
+	// Walk the epoch cache backwards to find the last epoch that belonged
+	// to a different (earlier) era, then load its pparams.
+	ls.prevEraPParams = nil
+	for i := len(ls.epochCache) - 1; i >= 0; i-- {
+		ep := ls.epochCache[i]
+		if ep.EraId != ls.currentEra.Id {
+			prevEra := eras.GetEraById(ep.EraId)
+			if prevEra != nil && prevEra.DecodePParamsFunc != nil {
+				prevPP, prevErr := ls.db.GetPParams(
+					ep.EpochId,
+					prevEra.DecodePParamsFunc,
+					nil,
+				)
+				if prevErr == nil && prevPP != nil {
+					ls.prevEraPParams = prevPP
+				}
+			}
+			break
+		}
+	}
 	return nil
 }
 
@@ -2214,6 +2399,8 @@ func (ls *LedgerState) loadEpochs(txn *database.Txn) error {
 			return err
 		}
 		// Apply result immediately during startup
+		// Preserve the pre-hard-fork pparams for era-1 TX validation
+		ls.prevEraPParams = ls.currentPParams
 		ls.currentPParams = result.NewPParams
 		ls.currentEra = result.NewEra
 	}
@@ -2454,7 +2641,9 @@ func (ls *LedgerState) SlotsPerKESPeriod() uint64 {
 	if slotsPerKESPeriod < 0 {
 		return 0
 	}
-	return uint64(slotsPerKESPeriod) // #nosec G115 -- validated non-negative above
+	return uint64(
+		slotsPerKESPeriod,
+	) // #nosec G115 -- validated non-negative above
 }
 
 // CurrentSlot returns the current slot number based on wall-clock time.
@@ -2512,24 +2701,76 @@ func (ls *LedgerState) UtxosByAddress(
 	return ret, nil
 }
 
-// ValidateTx runs ledger validation on the provided transaction
+// resolveValidationEra determines the appropriate era descriptor for
+// validating a transaction. It returns the current era if the transaction
+// matches, the previous era if compatible (era-1), or an error if the
+// transaction era is not compatible with the current ledger era.
+func resolveValidationEra(
+	tx lcommon.Transaction,
+	currentEra eras.EraDesc,
+) (eras.EraDesc, error) {
+	txEraId := uint(tx.Type()) // #nosec G115 -- era IDs are non-negative
+	if txEraId == currentEra.Id {
+		return currentEra, nil
+	}
+	if !eras.IsCompatibleEra(txEraId, currentEra.Id) {
+		return eras.EraDesc{}, fmt.Errorf(
+			"TX %s era %d is not compatible with ledger era %d",
+			tx.Hash(),
+			txEraId,
+			currentEra.Id,
+		)
+	}
+	txEra := eras.GetEraById(txEraId)
+	if txEra == nil {
+		return eras.EraDesc{}, fmt.Errorf(
+			"TX %s era %d not found in era registry",
+			tx.Hash(),
+			txEraId,
+		)
+	}
+	return *txEra, nil
+}
+
+// ValidateTx runs ledger validation on the provided transaction.
+// It accepts transactions from the current era and the immediately
+// previous era (era-1), as Cardano allows during the overlap
+// period after a hard fork.
 func (ls *LedgerState) ValidateTx(
 	tx lcommon.Transaction,
 ) error {
-	if ls.currentEra.ValidateTxFunc != nil {
+	// Snapshot mutable state under read lock to avoid data races
+	// with concurrent writers (e.g., ledgerProcessBlocks)
+	ls.RLock()
+	snapshotEra := ls.currentEra
+	snapshotSlot := ls.currentTip.Point.Slot
+	snapshotPParams := ls.currentPParams
+	snapshotPrevEraPParams := ls.prevEraPParams
+	ls.RUnlock()
+
+	validationEra, err := resolveValidationEra(tx, snapshotEra)
+	if err != nil {
+		return err
+	}
+	if validationEra.ValidateTxFunc != nil {
+		// Use the previous era's protocol parameters when validating
+		// a transaction from the immediately previous era (era-1).
+		pp := snapshotPParams
+		if validationEra.Id != snapshotEra.Id && snapshotPrevEraPParams != nil {
+			pp = snapshotPrevEraPParams
+		}
 		txn := ls.db.Transaction(false)
 		err := txn.Do(func(txn *database.Txn) error {
 			lv := &LedgerView{
 				txn: txn,
 				ls:  ls,
 			}
-			err := ls.currentEra.ValidateTxFunc(
+			return validationEra.ValidateTxFunc(
 				tx,
-				ls.currentTip.Point.Slot,
+				snapshotSlot,
 				lv,
-				ls.currentPParams,
+				pp,
 			)
-			return err
 		})
 		if err != nil {
 			return fmt.Errorf("TX %s failed validation: %w", tx.Hash(), err)
@@ -2543,10 +2784,28 @@ func (ls *LedgerState) ValidateTx(
 func (ls *LedgerState) EvaluateTx(
 	tx lcommon.Transaction,
 ) (uint64, lcommon.ExUnits, map[lcommon.RedeemerKey]lcommon.ExUnits, error) {
+	// Snapshot mutable state under read lock to avoid data races
+	ls.RLock()
+	snapshotEra := ls.currentEra
+	snapshotPParams := ls.currentPParams
+	snapshotPrevEraPParams := ls.prevEraPParams
+	ls.RUnlock()
+
+	validationEra, err := resolveValidationEra(tx, snapshotEra)
+	if err != nil {
+		return 0, lcommon.ExUnits{}, nil, err
+	}
+
 	var fee uint64
 	var totalExUnits lcommon.ExUnits
 	var redeemerExUnits map[lcommon.RedeemerKey]lcommon.ExUnits
-	if ls.currentEra.EvaluateTxFunc != nil {
+	if validationEra.EvaluateTxFunc != nil {
+		// Use the previous era's protocol parameters when evaluating
+		// a transaction from the immediately previous era (era-1).
+		pp := snapshotPParams
+		if validationEra.Id != snapshotEra.Id && snapshotPrevEraPParams != nil {
+			pp = snapshotPrevEraPParams
+		}
 		txn := ls.db.Transaction(false)
 		err := txn.Do(func(txn *database.Txn) error {
 			lv := &LedgerView{
@@ -2554,10 +2813,10 @@ func (ls *LedgerState) EvaluateTx(
 				ls:  ls,
 			}
 			var err error
-			fee, totalExUnits, redeemerExUnits, err = ls.currentEra.EvaluateTxFunc(
+			fee, totalExUnits, redeemerExUnits, err = validationEra.EvaluateTxFunc(
 				tx,
 				lv,
-				ls.currentPParams,
+				pp,
 			)
 			return err
 		})
@@ -2575,6 +2834,15 @@ func (ls *LedgerState) EvaluateTx(
 // Sets the mempool for accessing transactions
 func (ls *LedgerState) SetMempool(mempool MempoolProvider) {
 	ls.mempool = mempool
+}
+
+// SetForgedBlockChecker sets the forged block checker used for slot
+// battle detection. This is typically called after the block forger
+// is initialized, since the forger is created after the ledger state.
+func (ls *LedgerState) SetForgedBlockChecker(checker ForgedBlockChecker) {
+	ls.Lock()
+	defer ls.Unlock()
+	ls.config.ForgedBlockChecker = checker
 }
 
 // forgeBlock creates a conway block with transactions from mempool

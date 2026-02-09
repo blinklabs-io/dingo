@@ -29,7 +29,7 @@ func (d *MetadataStoreSqlite) GetCommitteeMember(
 	txn types.Txn,
 ) (*models.AuthCommitteeHot, error) {
 	var member models.AuthCommitteeHot
-	db, err := d.resolveDB(txn)
+	db, err := d.resolveReadDB(txn)
 	if err != nil {
 		return nil, err
 	}
@@ -52,7 +52,7 @@ func (d *MetadataStoreSqlite) GetActiveCommitteeMembers(
 	txn types.Txn,
 ) ([]*models.AuthCommitteeHot, error) {
 	var members []*models.AuthCommitteeHot
-	db, err := d.resolveDB(txn)
+	db, err := d.resolveReadDB(txn)
 	if err != nil {
 		return nil, err
 	}
@@ -86,7 +86,7 @@ func (d *MetadataStoreSqlite) IsCommitteeMemberResigned(
 	coldKey []byte,
 	txn types.Txn,
 ) (bool, error) {
-	db, err := d.resolveDB(txn)
+	db, err := d.resolveReadDB(txn)
 	if err != nil {
 		return false, err
 	}

@@ -19,6 +19,7 @@ import (
 	"math/big"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/ledger/eras"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -615,4 +616,118 @@ func TestValidateTxFee(t *testing.T) {
 		)
 		require.Error(t, err)
 	})
+}
+
+// mockEraTx extends mockTransaction with an era type.
+type mockEraTx struct {
+	lcommon.Transaction
+	cbor    []byte
+	eraType int
+}
+
+func (m *mockEraTx) Cbor() []byte  { return m.cbor }
+func (m *mockEraTx) Type() int     { return m.eraType }
+func (m *mockEraTx) IsValid() bool { return true }
+
+func TestIsCompatibleEra(t *testing.T) {
+	tests := []struct {
+		name       string
+		txEraId    uint
+		ledgerEra  uint
+		compatible bool
+	}{
+		{
+			name:       "same era is always compatible",
+			txEraId:    eras.ConwayEraDesc.Id,
+			ledgerEra:  eras.ConwayEraDesc.Id,
+			compatible: true,
+		},
+		{
+			name:       "previous era: Babbage in Conway",
+			txEraId:    eras.BabbageEraDesc.Id,
+			ledgerEra:  eras.ConwayEraDesc.Id,
+			compatible: true,
+		},
+		{
+			name:       "two eras back: Alonzo in Conway",
+			txEraId:    eras.AlonzoEraDesc.Id,
+			ledgerEra:  eras.ConwayEraDesc.Id,
+			compatible: false,
+		},
+		{
+			name:       "future era: Conway in Babbage",
+			txEraId:    eras.ConwayEraDesc.Id,
+			ledgerEra:  eras.BabbageEraDesc.Id,
+			compatible: false,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			result := IsCompatibleEra(
+				tc.txEraId,
+				tc.ledgerEra,
+			)
+			assert.Equal(
+				t,
+				tc.compatible,
+				result,
+			)
+		})
+	}
+}
+
+func TestValidateTxEra(t *testing.T) {
+	tests := []struct {
+		name      string
+		txEra     int
+		ledgerEra uint
+		expectErr bool
+		errMsg    string
+	}{
+		{
+			name:      "same era passes",
+			txEra:     int(eras.ConwayEraDesc.Id),
+			ledgerEra: eras.ConwayEraDesc.Id,
+			expectErr: false,
+		},
+		{
+			name:      "previous era passes",
+			txEra:     int(eras.BabbageEraDesc.Id),
+			ledgerEra: eras.ConwayEraDesc.Id,
+			expectErr: false,
+		},
+		{
+			name:      "two eras back fails",
+			txEra:     int(eras.AlonzoEraDesc.Id),
+			ledgerEra: eras.ConwayEraDesc.Id,
+			expectErr: true,
+			errMsg:    "not compatible",
+		},
+		{
+			name:      "future era fails",
+			txEra:     int(eras.ConwayEraDesc.Id),
+			ledgerEra: eras.BabbageEraDesc.Id,
+			expectErr: true,
+			errMsg:    "not compatible",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			tx := &mockEraTx{
+				cbor:    make([]byte, 100),
+				eraType: tc.txEra,
+			}
+			err := ValidateTxEra(tx, tc.ledgerEra)
+			if tc.expectErr {
+				require.Error(t, err)
+				assert.Contains(
+					t,
+					err.Error(),
+					tc.errMsg,
+				)
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
 }

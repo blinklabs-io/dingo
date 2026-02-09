@@ -21,9 +21,11 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"math/big"
 	"slices"
 	"sync"
 
+	"github.com/blinklabs-io/gouroboros/consensus"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
 
@@ -106,6 +108,17 @@ func NewCalculator(activeSlotCoeff float64, slotsPerEpoch uint64) *Calculator {
 	}
 }
 
+// activeSlotCoeffRat converts the float64 ActiveSlotCoeff to a *big.Rat
+// for use with the gouroboros consensus package.
+// SetFloat64 returns nil for Inf/NaN, so we fall back to a zero-value Rat.
+func (c *Calculator) activeSlotCoeffRat() *big.Rat {
+	r := new(big.Rat).SetFloat64(c.ActiveSlotCoeff)
+	if r == nil {
+		return new(big.Rat)
+	}
+	return r
+}
+
 // CalculateSchedule computes which slots a pool leads in the given epoch.
 // This uses the certified VRF to determine leader eligibility per slot.
 //
@@ -127,25 +140,34 @@ func (c *Calculator) CalculateSchedule(
 		return nil, errors.New("total stake cannot be zero")
 	}
 
+	// Create VRF signer from the pool's VRF secret key seed
+	vrfSigner, err := consensus.NewSimpleVRFSigner(poolVrfSkey)
+	if err != nil {
+		return nil, fmt.Errorf("create VRF signer: %w", err)
+	}
+
 	schedule := NewSchedule(epoch, poolId, poolStake, totalStake, epochNonce)
 
 	// Calculate epoch slot range
 	epochStartSlot := epoch * c.SlotsPerEpoch
 	epochEndSlot := epochStartSlot + c.SlotsPerEpoch
 
+	activeSlotCoeff := c.activeSlotCoeffRat()
+
 	// Check each slot in the epoch
 	for slot := epochStartSlot; slot < epochEndSlot; slot++ {
-		isLeader, err := c.isSlotLeader(
+		result, err := consensus.IsSlotLeader(
 			slot,
-			poolVrfSkey,
+			epochNonce,
 			poolStake,
 			totalStake,
-			epochNonce,
+			activeSlotCoeff,
+			vrfSigner,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("check slot %d: %w", slot, err)
 		}
-		if isLeader {
+		if result.Eligible {
 			schedule.AddLeaderSlot(slot)
 		}
 	}
@@ -153,37 +175,11 @@ func (c *Calculator) CalculateSchedule(
 	return schedule, nil
 }
 
-// isSlotLeader determines if the pool is leader for a specific slot.
-// This is a placeholder - the actual implementation requires:
-// 1. VRF computation with the pool's VRF secret key
-// 2. Comparison against the leadership threshold
+// Threshold calculates the leadership threshold for a given stake ratio
+// as a float64 approximation. This is provided for backward compatibility;
+// the actual leader election uses arbitrary-precision arithmetic via
+// consensus.CertifiedNatThreshold.
 //
-// TODO: Integrate with gouroboros consensus.IsSlotLeader() when available
-func (c *Calculator) isSlotLeader(
-	slot uint64,
-	poolVrfSkey []byte,
-	poolStake uint64,
-	totalStake uint64,
-	epochNonce []byte,
-) (bool, error) {
-	// The actual leader check requires:
-	// 1. Compute VRF proof for the slot seed (epochNonce || slot)
-	// 2. Convert VRF output to a value in [0, 1)
-	// 3. Compute threshold for the stake ratio
-	// 4. Pool is leader if VRF output < threshold
-
-	// For now, return false - actual VRF implementation needed
-	// This will be integrated with gouroboros/consensus when ready
-	_ = slot
-	_ = poolVrfSkey
-	_ = poolStake
-	_ = totalStake
-	_ = epochNonce
-
-	return false, nil
-}
-
-// Threshold calculates the leadership threshold for a given stake ratio.
 // threshold(sigma) = 1 - (1-f)^sigma
 // where f is the active slot coefficient and sigma is the relative stake.
 func (c *Calculator) Threshold(stakeRatio float64) float64 {

@@ -72,3 +72,39 @@ func GetEraById(eraId uint) *EraDesc {
 	}
 	return nil
 }
+
+// IsCompatibleEra checks if a transaction era is valid
+// for the current ledger era. Cardano allows transactions
+// from the current era and the immediately previous era
+// (era - 1) after a hard fork. The previous era is
+// determined by the ordering of the Eras slice, not by
+// numeric ID arithmetic.
+//
+// Returns true if txEraId matches the ledgerEraId or if
+// txEraId is the era immediately preceding ledgerEraId
+// in the known era sequence. Returns false for unknown
+// era IDs that don't match, future eras, or eras more
+// than one step back.
+func IsCompatibleEra(txEraId, ledgerEraId uint) bool {
+	if txEraId == ledgerEraId {
+		return true
+	}
+	// Find the ledger era's index in the Eras slice
+	ledgerIdx := -1
+	for i := range Eras {
+		if Eras[i].Id == ledgerEraId {
+			ledgerIdx = i
+			break
+		}
+	}
+	// Unknown ledger era: only exact match is valid
+	// (already handled above)
+	if ledgerIdx < 0 {
+		return false
+	}
+	// Check if txEraId is the immediately previous era
+	if ledgerIdx > 0 && Eras[ledgerIdx-1].Id == txEraId {
+		return true
+	}
+	return false
+}

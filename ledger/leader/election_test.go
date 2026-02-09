@@ -26,6 +26,23 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// electionTestNonce is a 32-byte epoch nonce for election tests.
+var electionTestNonce = func() []byte {
+	nonce := make([]byte, 32)
+	for i := range nonce {
+		nonce[i] = byte(i + 42)
+	}
+	return nonce
+}()
+
+// electionTestVRFSeed is a 32-byte VRF seed for election tests.
+var electionTestVRFSeed = []byte("election_vrf_seed_32_bytes_ok!!!")
+
+// electionSlotsPerEpoch is a small epoch size to keep VRF computation fast
+// in tests. VRF Prove is computationally expensive (~0.2s per call), so we
+// use a small number of slots to keep test execution reasonable.
+const electionSlotsPerEpoch = 10
+
 // mockStakeProvider implements StakeDistributionProvider for testing
 type mockStakeProvider struct {
 	poolStakes map[string]uint64
@@ -67,8 +84,8 @@ type mockEpochProvider struct {
 func newMockEpochProvider() *mockEpochProvider {
 	return &mockEpochProvider{
 		currentEpoch:    10,
-		epochNonce:      []byte("testnonce"),
-		slotsPerEpoch:   432000,
+		epochNonce:      electionTestNonce,
+		slotsPerEpoch:   electionSlotsPerEpoch,
 		activeSlotCoeff: 0.05,
 	}
 }
@@ -92,7 +109,7 @@ func (m *mockEpochProvider) ActiveSlotCoeff() float64 {
 func TestNewElection(t *testing.T) {
 	poolId := lcommon.PoolKeyHash{}
 	copy(poolId[:], []byte("testpool1234567890123"))
-	vrfKey := []byte("vrfsecretkey")
+	vrfKey := electionTestVRFSeed
 
 	stakeProvider := newMockStakeProvider()
 	epochProvider := newMockEpochProvider()
@@ -126,7 +143,7 @@ func TestElectionStartStop(t *testing.T) {
 
 	election := NewElection(
 		poolId,
-		nil,
+		electionTestVRFSeed,
 		stakeProvider,
 		epochProvider,
 		eventBus,
@@ -165,7 +182,7 @@ func TestElectionScheduleEarlyEpochs(t *testing.T) {
 
 	election := NewElection(
 		poolId,
-		nil,
+		electionTestVRFSeed,
 		stakeProvider,
 		epochProvider,
 		eventBus,
@@ -195,7 +212,7 @@ func TestElectionZeroPoolStake(t *testing.T) {
 
 	election := NewElection(
 		poolId,
-		nil,
+		electionTestVRFSeed,
 		stakeProvider,
 		epochProvider,
 		eventBus,
@@ -213,19 +230,21 @@ func TestElectionZeroPoolStake(t *testing.T) {
 func TestElectionShouldProduceBlock(t *testing.T) {
 	poolId := lcommon.PoolKeyHash{}
 	stakeProvider := newMockStakeProvider()
-	stakeProvider.totalStake = 10000
-	stakeProvider.poolStakes[string(poolId[:])] = 1000
+	stakeProvider.totalStake = 1_000_000
+	stakeProvider.poolStakes[string(poolId[:])] = 1_000_000 // 100% stake
 
+	// Use high active slot coefficient (90%) with small epoch to ensure
+	// we reliably get leader slots despite the small sample size.
 	epochProvider := newMockEpochProvider()
 	epochProvider.currentEpoch = 10
-	epochProvider.slotsPerEpoch = 10 // Small for testing
+	epochProvider.activeSlotCoeff = 0.9
 
 	eventBus := event.NewEventBus(nil, nil)
 	defer eventBus.Stop()
 
 	election := NewElection(
 		poolId,
-		nil,
+		electionTestVRFSeed,
 		stakeProvider,
 		epochProvider,
 		eventBus,
@@ -236,32 +255,36 @@ func TestElectionShouldProduceBlock(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = election.Stop() }()
 
-	// With placeholder isSlotLeader returning false, no slots are leader slots
+	// With real VRF, 100% stake, and f=0.9, we should get leader slots
 	schedule := election.CurrentSchedule()
 	require.NotNil(t, schedule)
-	assert.Equal(t, 0, schedule.SlotCount())
+	assert.Greater(t, schedule.SlotCount(), 0,
+		"pool with 100%% stake and f=0.9 should have at least one leader slot")
 
-	// ShouldProduceBlock should return false for all slots
-	assert.False(t, election.ShouldProduceBlock(100))
-	assert.False(t, election.ShouldProduceBlock(101))
+	// Verify ShouldProduceBlock returns true for an actual leader slot
+	if schedule.SlotCount() > 0 {
+		leaderSlot := schedule.LeaderSlots[0]
+		assert.True(t, election.ShouldProduceBlock(leaderSlot),
+			"ShouldProduceBlock should return true for a known leader slot")
+	}
 }
 
 func TestElectionNextLeaderSlot(t *testing.T) {
 	poolId := lcommon.PoolKeyHash{}
 	stakeProvider := newMockStakeProvider()
-	stakeProvider.totalStake = 10000
-	stakeProvider.poolStakes[string(poolId[:])] = 1000
+	stakeProvider.totalStake = 1_000_000
+	stakeProvider.poolStakes[string(poolId[:])] = 1_000_000
 
 	epochProvider := newMockEpochProvider()
 	epochProvider.currentEpoch = 10
-	epochProvider.slotsPerEpoch = 10
+	epochProvider.activeSlotCoeff = 0.9 // High f for reliable election
 
 	eventBus := event.NewEventBus(nil, nil)
 	defer eventBus.Stop()
 
 	election := NewElection(
 		poolId,
-		nil,
+		electionTestVRFSeed,
 		stakeProvider,
 		epochProvider,
 		eventBus,
@@ -277,28 +300,34 @@ func TestElectionNextLeaderSlot(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = election.Stop() }()
 
-	// With placeholder returning no leader slots, should return 0, false
-	slot, found = election.NextLeaderSlot(0)
-	assert.Equal(t, uint64(0), slot)
-	assert.False(t, found)
+	// With real VRF, 100% stake, and high f, NextLeaderSlot should find a slot
+	schedule := election.CurrentSchedule()
+	require.NotNil(t, schedule)
+	require.Greater(t, schedule.SlotCount(), 0,
+		"should have leader slots with 100%% stake and f=0.9")
+
+	epochStart := uint64(10) * electionSlotsPerEpoch
+	slot, found = election.NextLeaderSlot(epochStart)
+	assert.True(t, found, "should find a leader slot in the epoch")
+	assert.GreaterOrEqual(t, slot, epochStart,
+		"leader slot should be at or after epoch start")
 }
 
 func TestElectionEpochTransition(t *testing.T) {
 	poolId := lcommon.PoolKeyHash{}
 	stakeProvider := newMockStakeProvider()
-	stakeProvider.totalStake = 10000
-	stakeProvider.poolStakes[string(poolId[:])] = 1000
+	stakeProvider.totalStake = 1_000_000
+	stakeProvider.poolStakes[string(poolId[:])] = 1_000_000
 
 	epochProvider := newMockEpochProvider()
 	epochProvider.currentEpoch = 10
-	epochProvider.slotsPerEpoch = 10
 
 	eventBus := event.NewEventBus(nil, nil)
 	defer eventBus.Stop()
 
 	election := NewElection(
 		poolId,
-		nil,
+		electionTestVRFSeed,
 		stakeProvider,
 		epochProvider,
 		eventBus,
@@ -326,16 +355,26 @@ func TestElectionEpochTransition(t *testing.T) {
 				PreviousEpoch: 10,
 				NewEpoch:      11,
 				BoundarySlot:  110,
-				EpochNonce:    []byte("newepochnonce"),
+				EpochNonce:    electionTestNonce,
 			},
 		),
 	)
 
-	// Poll for event to be processed with timeout
+	// Poll for event to be processed with generous timeout.
+	// VRF computation is expensive (~0.2s per slot), so with
+	// electionSlotsPerEpoch slots the recalculation takes a few seconds.
+	vrfStart := time.Now()
 	require.Eventually(t, func() bool {
 		schedule := election.CurrentSchedule()
-		return schedule != nil && schedule.Epoch == 11
-	}, 2*time.Second, 10*time.Millisecond, "schedule should update to epoch 11")
+		ready := schedule != nil && schedule.Epoch == 11
+		if ready {
+			t.Logf(
+				"VRF schedule recalculation took %s",
+				time.Since(vrfStart),
+			)
+		}
+		return ready
+	}, 30*time.Second, 100*time.Millisecond, "schedule should update to epoch 11")
 
 	// Schedule should be updated to new epoch
 	schedule = election.CurrentSchedule()
@@ -346,19 +385,18 @@ func TestElectionEpochTransition(t *testing.T) {
 func TestElectionConcurrentAccess(t *testing.T) {
 	poolId := lcommon.PoolKeyHash{}
 	stakeProvider := newMockStakeProvider()
-	stakeProvider.totalStake = 10000
-	stakeProvider.poolStakes[string(poolId[:])] = 1000
+	stakeProvider.totalStake = 1_000_000
+	stakeProvider.poolStakes[string(poolId[:])] = 1_000_000
 
 	epochProvider := newMockEpochProvider()
 	epochProvider.currentEpoch = 10
-	epochProvider.slotsPerEpoch = 10
 
 	eventBus := event.NewEventBus(nil, nil)
 	defer eventBus.Stop()
 
 	election := NewElection(
 		poolId,
-		nil,
+		electionTestVRFSeed,
 		stakeProvider,
 		epochProvider,
 		eventBus,

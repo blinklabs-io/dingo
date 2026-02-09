@@ -2099,7 +2099,7 @@ func TestGetActivePoolKeyHashesAtSlot(t *testing.T) {
 				PoolID:        pool.ID,
 				PoolKeyHash:   poolHash,
 				AddedSlot:     1000,
-				Epoch:         10, // Current epoch, so retirement is effective
+				Epoch:         10,  // Current epoch, so retirement is effective
 				CertificateID: 200, // References cert with higher cert_index
 			}
 			if result := sqliteStore.DB().Create(&poolRet); result.Error != nil {

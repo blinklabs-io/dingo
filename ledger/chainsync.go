@@ -29,6 +29,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/ledger/eras"
+	"github.com/blinklabs-io/dingo/ledger/forging"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/byron"
@@ -47,7 +48,13 @@ const (
 
 	// Timeout for updates on a blockfetch operation. This is based on a 2s BatchStart
 	// and a 2s Block timeout for blockfetch
-	blockfetchBusyTimeout = 5 * time.Second
+	blockfetchBusyTimeout = 30 * time.Second
+
+	// Interval for rate-limiting non-active connection drop messages
+	dropEventLogInterval = 60 * time.Second
+
+	// Interval for periodic sync progress reporting
+	syncProgressLogInterval = 30 * time.Second
 )
 
 func (ls *LedgerState) handleEventChainsync(evt event.Event) {
@@ -158,13 +165,23 @@ func (ls *LedgerState) handleEventChainsyncRollback(e ChainsyncEvent) error {
 			)
 		} else if *activeConnId != e.ConnectionId {
 			// Event is from non-active connection, skip
-			ls.config.Logger.Debug(
-				"dropping rollback from non-active connection",
-				"component", "ledger",
-				"event_connection_id", e.ConnectionId.String(),
-				"active_connection_id", activeConnId.String(),
-				"slot", e.Point.Slot,
-			)
+			// Rate-limit this message to once per dropEventLogInterval
+			now := time.Now()
+			if now.Sub(ls.dropRollbackLastLog) >= dropEventLogInterval {
+				suppressed := ls.dropRollbackCount
+				ls.dropRollbackCount = 0
+				ls.dropRollbackLastLog = now
+				ls.config.Logger.Debug(
+					"dropping rollback from non-active connection",
+					"component", "ledger",
+					"event_connection_id", e.ConnectionId.String(),
+					"active_connection_id", activeConnId.String(),
+					"slot", e.Point.Slot,
+					"suppressed_since_last_log", suppressed,
+				)
+			} else {
+				ls.dropRollbackCount++
+			}
 			return nil
 		}
 	}
@@ -198,15 +215,30 @@ func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 			)
 		} else if *activeConnId != e.ConnectionId {
 			// Event is from non-active connection, skip
-			ls.config.Logger.Debug(
-				"dropping event from non-active connection",
-				"component", "ledger",
-				"event_connection_id", e.ConnectionId.String(),
-				"active_connection_id", activeConnId.String(),
-				"slot", e.Point.Slot,
-			)
+			// Rate-limit this message to once per dropEventLogInterval
+			now := time.Now()
+			if now.Sub(ls.dropEventLastLog) >= dropEventLogInterval {
+				suppressed := ls.dropEventCount
+				ls.dropEventCount = 0
+				ls.dropEventLastLog = now
+				ls.config.Logger.Debug(
+					"dropping event from non-active connection",
+					"component", "ledger",
+					"event_connection_id", e.ConnectionId.String(),
+					"active_connection_id", activeConnId.String(),
+					"slot", e.Point.Slot,
+					"suppressed_since_last_log", suppressed,
+				)
+			} else {
+				ls.dropEventCount++
+			}
 			return nil
 		}
+	}
+
+	// Track upstream tip for sync progress reporting
+	if e.Tip.Point.Slot > ls.syncUpstreamTipSlot.Load() {
+		ls.syncUpstreamTipSlot.Store(e.Tip.Point.Slot)
 	}
 
 	if ls.chainsyncState == RollbackChainsyncState {
@@ -236,6 +268,23 @@ func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 	}
 	// Add header to chain
 	if err := ls.chain.AddBlockHeader(e.BlockHeader); err != nil {
+		var notFitErr chain.BlockNotFitChainTipError
+		if errors.As(err, &notFitErr) {
+			// Header doesn't fit current chain tip. This typically happens
+			// when the active peer changes and the new peer's chainsync
+			// session is at a different chain position. Clear stale queued
+			// headers so subsequent headers are evaluated against the
+			// block tip rather than perpetuating the mismatch.
+			ls.chain.ClearHeaders()
+			ls.config.Logger.Warn(
+				"block header does not fit chain tip, cleared stale headers",
+				"component", "ledger",
+				"slot", e.Point.Slot,
+				"block_prev_hash", notFitErr.BlockPrevHash(),
+				"chain_tip_hash", notFitErr.TipHash(),
+			)
+			return nil
+		}
 		return fmt.Errorf("failed adding chain block header: %w", err)
 	}
 	// Wait for additional block headers before fetching block bodies if we're
@@ -789,10 +838,16 @@ func (ls *LedgerState) processEpochRollover(
 	}
 	// Apply pending pparam updates using the non-mutating version
 	// Updates target the next epoch, so we pass currentEpoch.EpochId + 1
+	// The quorum threshold comes from shelley-genesis.json updateQuorum
+	updateQuorum := 0
+	if shelleyGenesis := ls.config.CardanoNodeConfig.ShelleyGenesis(); shelleyGenesis != nil {
+		updateQuorum = shelleyGenesis.UpdateQuorum
+	}
 	newPParams, err := ls.db.ComputeAndApplyPParamUpdates(
 		epochStartSlot,
 		currentEpoch.EpochId+1, // Target epoch for updates
 		currentEra.Id,
+		updateQuorum,
 		currentPParams,
 		currentEra.DecodePParamsUpdateFunc,
 		currentEra.PParamsUpdateFunc,
@@ -952,20 +1007,87 @@ func (ls *LedgerState) processBlockEvent(
 	// outside the lock in processBlockEvents before this is called.
 
 	// Add block to chain
-	if err := ls.chain.AddBlock(e.Block, txn); err != nil {
+	addBlockErr := ls.chain.AddBlock(e.Block, txn)
+	if addBlockErr != nil {
 		// Ignore and log errors about block not fitting on chain or matching first header
-		if !errors.As(err, &chain.BlockNotFitChainTipError{}) &&
-			!errors.As(err, &chain.BlockNotMatchHeaderError{}) {
-			return fmt.Errorf("add chain block: %w", err)
+		if !errors.As(addBlockErr, &chain.BlockNotFitChainTipError{}) &&
+			!errors.As(addBlockErr, &chain.BlockNotMatchHeaderError{}) {
+			return fmt.Errorf("add chain block: %w", addBlockErr)
 		}
 		ls.config.Logger.Warn(
 			fmt.Sprintf(
 				"ignoring blockfetch block: %s",
-				err,
+				addBlockErr,
 			),
 		)
 	}
+
+	// Detect slot battles: check if an incoming block occupies a
+	// slot for which we forged a block locally
+	ls.checkSlotBattle(e, addBlockErr)
+
 	return nil
+}
+
+// checkSlotBattle checks whether an incoming block from a peer
+// occupies a slot for which the local node has already forged a
+// block. If so, it emits a SlotBattleEvent and logs a warning.
+//
+// The addBlockErr parameter is the error (if any) returned by
+// chain.AddBlock for the incoming block. A nil error means the
+// remote block was accepted onto the chain (remote won); a
+// non-nil error means it was rejected (local won).
+func (ls *LedgerState) checkSlotBattle(
+	e BlockfetchEvent,
+	addBlockErr error,
+) {
+	ls.RLock()
+	checker := ls.config.ForgedBlockChecker
+	ls.RUnlock()
+	if checker == nil {
+		return
+	}
+
+	incomingSlot := e.Point.Slot
+	localHash, forged := checker.WasForgedByUs(incomingSlot)
+	if !forged {
+		return
+	}
+
+	remoteHash := e.Point.Hash
+
+	// Same hash means same block -- not a battle
+	if bytes.Equal(localHash, remoteHash) {
+		return
+	}
+
+	// Determine winner: if the remote block was rejected (addBlockErr
+	// != nil), our local block remains on chain, so we won.
+	localWon := addBlockErr != nil
+
+	ls.config.Logger.Warn(
+		"slot battle detected",
+		"component", "ledger",
+		"slot", incomingSlot,
+		"local_block_hash", hex.EncodeToString(localHash),
+		"remote_block_hash", hex.EncodeToString(remoteHash),
+		"local_won", localWon,
+	)
+
+	if ls.config.EventBus != nil {
+		ls.config.EventBus.Publish(
+			forging.SlotBattleEventType,
+			event.NewEvent(
+				forging.SlotBattleEventType,
+				forging.SlotBattleEvent{
+					Slot:            incomingSlot,
+					LocalBlockHash:  localHash,
+					RemoteBlockHash: remoteHash,
+					Won:             localWon,
+				},
+			),
+		)
+	}
 }
 
 func (ls *LedgerState) blockfetchRequestRangeStart(
@@ -1085,4 +1207,46 @@ func (ls *LedgerState) handleEventBlockfetchBatchDone(e BlockfetchEvent) error {
 	}
 	ls.chainsyncBlockfetchWaiting = false
 	return nil
+}
+
+// logSyncProgress logs periodic sync progress at INFO level.
+// It reports the current slot, upstream tip slot, percentage complete,
+// and sync rate in slots per second. syncUpstreamTipSlot is read
+// atomically since it is written by the chainsync handler goroutine.
+func (ls *LedgerState) logSyncProgress(currentSlot uint64) {
+	now := time.Now()
+	if now.Sub(ls.syncProgressLastLog) < syncProgressLogInterval {
+		return
+	}
+	upstreamTip := ls.syncUpstreamTipSlot.Load()
+	if upstreamTip == 0 {
+		// No upstream tip known yet, skip
+		return
+	}
+	elapsed := now.Sub(ls.syncProgressLastLog).Seconds()
+	var slotsPerSec float64
+	if elapsed > 0 && ls.syncProgressLastSlot > 0 &&
+		currentSlot >= ls.syncProgressLastSlot {
+		slotsDelta := currentSlot - ls.syncProgressLastSlot
+		slotsPerSec = float64(slotsDelta) / elapsed
+	}
+	var pct float64
+	if upstreamTip > 0 {
+		pct = float64(currentSlot) / float64(upstreamTip) * 100
+		if pct > 100 {
+			pct = 100
+		}
+	}
+	ls.config.Logger.Info(
+		fmt.Sprintf(
+			"sync progress: slot %d/%d (%.1f%%), %.0f slots/sec",
+			currentSlot,
+			upstreamTip,
+			pct,
+			slotsPerSec,
+		),
+		"component", "ledger",
+	)
+	ls.syncProgressLastLog = now
+	ls.syncProgressLastSlot = currentSlot
 }

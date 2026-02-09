@@ -35,7 +35,7 @@ func (d *MetadataStoreSqlite) GetTip(
 ) (ocommon.Tip, error) {
 	ret := ocommon.Tip{}
 	tmpTip := models.Tip{}
-	db, err := d.resolveDB(txn)
+	db, err := d.resolveReadDB(txn)
 	if err != nil {
 		return ret, err
 	}

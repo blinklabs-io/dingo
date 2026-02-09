@@ -47,6 +47,18 @@ func NewBlockNotFitChainTipError(
 	}
 }
 
+func (e BlockNotFitChainTipError) BlockHash() string {
+	return e.blockHash
+}
+
+func (e BlockNotFitChainTipError) BlockPrevHash() string {
+	return e.blockPrevHash
+}
+
+func (e BlockNotFitChainTipError) TipHash() string {
+	return e.tipHash
+}
+
 func (e BlockNotFitChainTipError) Error() string {
 	return fmt.Sprintf(
 		"block %s with prev hash %s does not fit on current chain tip %s",

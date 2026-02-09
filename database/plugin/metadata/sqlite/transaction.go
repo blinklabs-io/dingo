@@ -29,7 +29,9 @@ import (
 	"gorm.io/gorm/clause"
 )
 
-// dbFromTxn returns d.DB() only when txn is nil, unwraps known *sqliteTxn or provider.MetadataTxn() when available, and returns nil for unrecognized txn types so callers can detect errors
+// dbFromTxn returns d.DB() only when txn is nil, unwraps known
+// *sqliteTxn or provider.MetadataTxn() when available, and returns
+// nil for unrecognized txn types so callers can detect errors.
 func (d *MetadataStoreSqlite) dbFromTxn(txn types.Txn) *gorm.DB {
 	if txn == nil {
 		return d.DB()
@@ -37,17 +39,24 @@ func (d *MetadataStoreSqlite) dbFromTxn(txn types.Txn) *gorm.DB {
 	if stx, ok := txn.(*sqliteTxn); ok && stx != nil {
 		return stx.db
 	}
-	if provider, ok := txn.(interface{ MetadataTxn() *gorm.DB }); ok {
+	if provider, ok := txn.(interface {
+		MetadataTxn() *gorm.DB
+	}); ok {
 		if db := provider.MetadataTxn(); db != nil {
 			return db
 		}
 	}
-	return nil // Return nil for unrecognized txn types to allow callers to detect errors
+	// Return nil for unrecognized txn types to allow callers to
+	// detect errors
+	return nil
 }
 
-// resolveDB returns the *gorm.DB for the given transaction, or d.DB() if txn is nil.
-// Returns nil, ErrTxnWrongType if txn is non-nil but not the expected type.
-func (d *MetadataStoreSqlite) resolveDB(txn types.Txn) (*gorm.DB, error) {
+// resolveDB returns the *gorm.DB for the given transaction, or
+// d.DB() if txn is nil. Returns nil, ErrTxnWrongType if txn is
+// non-nil but not the expected type.
+func (d *MetadataStoreSqlite) resolveDB(
+	txn types.Txn,
+) (*gorm.DB, error) {
 	if stx, ok := txn.(*sqliteTxn); ok {
 		if stx != nil && stx.beginErr != nil {
 			return nil, stx.beginErr
@@ -63,13 +72,36 @@ func (d *MetadataStoreSqlite) resolveDB(txn types.Txn) (*gorm.DB, error) {
 	return db, nil
 }
 
+// resolveReadDB returns the read-optimized *gorm.DB for the given
+// transaction. When txn is nil, it returns d.ReadDB() which uses
+// the separate read connection pool for file-based databases.
+// When txn is non-nil, it returns the transaction's DB handle
+// (which is always from the write pool).
+func (d *MetadataStoreSqlite) resolveReadDB(
+	txn types.Txn,
+) (*gorm.DB, error) {
+	if stx, ok := txn.(*sqliteTxn); ok {
+		if stx != nil && stx.beginErr != nil {
+			return nil, stx.beginErr
+		}
+	}
+	if txn == nil {
+		return d.ReadDB(), nil
+	}
+	db := d.dbFromTxn(txn)
+	if db == nil {
+		return nil, types.ErrTxnWrongType
+	}
+	return db, nil
+}
+
 // GetTransactionByHash returns a transaction by its hash
 func (d *MetadataStoreSqlite) GetTransactionByHash(
 	hash []byte,
 	txn types.Txn,
 ) (*models.Transaction, error) {
 	ret := &models.Transaction{}
-	db, err := d.resolveDB(txn)
+	db, err := d.resolveReadDB(txn)
 	if err != nil {
 		return nil, err
 	}
@@ -1454,7 +1486,11 @@ func (d *MetadataStoreSqlite) SetGenesisTransaction(
 		DoNothing: true,
 	}).Create(tmpTx)
 	if result.Error != nil {
-		return fmt.Errorf("create genesis transaction %x: %w", hash, result.Error)
+		return fmt.Errorf(
+			"create genesis transaction %x: %w",
+			hash,
+			result.Error,
+		)
 	}
 
 	// Fetch ID if it was an existing record

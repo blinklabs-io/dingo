@@ -57,7 +57,7 @@ func (d *MetadataStoreSqlite) GetBlockNonce(
 	txn types.Txn,
 ) ([]byte, error) {
 	ret := models.BlockNonce{}
-	db, err := d.resolveDB(txn)
+	db, err := d.resolveReadDB(txn)
 	if err != nil {
 		return nil, err
 	}
