@@ -460,7 +460,7 @@ func (lv *LedgerView) DRepRegistration(
 	reg := &lcommon.DRepRegistration{
 		Credential: credential,
 	}
-	if drep.AnchorUrl != "" || len(drep.AnchorHash) > 0 {
+	if drep.AnchorURL != "" || len(drep.AnchorHash) > 0 {
 		if len(drep.AnchorHash) != 32 {
 			return nil, fmt.Errorf(
 				"invalid DRep anchor hash length: expected 32, got %d",
@@ -470,7 +470,7 @@ func (lv *LedgerView) DRepRegistration(
 		var dataHash [32]byte
 		copy(dataHash[:], drep.AnchorHash)
 		reg.Anchor = &lcommon.GovAnchor{
-			Url:      drep.AnchorUrl,
+			Url:      drep.AnchorURL,
 			DataHash: dataHash,
 		}
 	}
@@ -488,7 +488,7 @@ func (lv *LedgerView) DRepRegistrations() ([]lcommon.DRepRegistration, error) {
 		reg := lcommon.DRepRegistration{
 			Credential: lcommon.NewBlake2b224(drep.Credential),
 		}
-		if drep.AnchorUrl != "" || len(drep.AnchorHash) > 0 {
+		if drep.AnchorURL != "" || len(drep.AnchorHash) > 0 {
 			if len(drep.AnchorHash) != 32 {
 				return nil, fmt.Errorf(
 					"invalid DRep anchor hash length: expected 32, got %d",
@@ -498,7 +498,7 @@ func (lv *LedgerView) DRepRegistrations() ([]lcommon.DRepRegistration, error) {
 			var dataHash [32]byte
 			copy(dataHash[:], drep.AnchorHash)
 			reg.Anchor = &lcommon.GovAnchor{
-				Url:      drep.AnchorUrl,
+				Url:      drep.AnchorURL,
 				DataHash: dataHash,
 			}
 		}

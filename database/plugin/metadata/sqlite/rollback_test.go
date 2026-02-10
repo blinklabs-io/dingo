@@ -460,7 +460,7 @@ func TestRollbackDrepState(t *testing.T) {
 	// Create DRep at slot 100
 	drep := &models.Drep{
 		Credential: drepCred,
-		AnchorUrl:  "https://drep.example.com/initial",
+		AnchorURL:  "https://drep.example.com/initial",
 		AnchorHash: bytes.Repeat([]byte{0x40}, 32),
 		Active:     true,
 		AddedSlot:  100,
@@ -481,7 +481,7 @@ func TestRollbackDrepState(t *testing.T) {
 
 	reg1 := models.RegistrationDrep{
 		DrepCredential: drepCred,
-		AnchorUrl:      "https://drep.example.com/initial",
+		AnchorURL:      "https://drep.example.com/initial",
 		AnchorHash:     bytes.Repeat([]byte{0x40}, 32),
 		AddedSlot:      100,
 		CertificateID:  cert1.ID,
@@ -502,7 +502,7 @@ func TestRollbackDrepState(t *testing.T) {
 
 	update := models.UpdateDrep{
 		Credential:    drepCred,
-		AnchorUrl:     "https://drep.example.com/updated",
+		AnchorURL:     "https://drep.example.com/updated",
 		AnchorHash:    bytes.Repeat([]byte{0x50}, 32),
 		AddedSlot:     250,
 		CertificateID: cert2.ID,
@@ -527,7 +527,7 @@ func TestRollbackDrepState(t *testing.T) {
 	require.Equal(
 		t,
 		"https://drep.example.com/initial",
-		restored.AnchorUrl,
+		restored.AnchorURL,
 		"DRep anchor URL should be restored",
 	)
 	require.True(t, restored.Active, "DRep should remain active")
@@ -982,7 +982,7 @@ func TestRollbackGovernanceProposalDeletion(t *testing.T) {
 		ActionType:    1,
 		AddedSlot:     100,
 		ExpiresEpoch:  50,
-		AnchorUrl:     "https://example.com/prop1",
+		AnchorURL:     "https://example.com/prop1",
 		AnchorHash:    bytes.Repeat([]byte{0x92}, 32),
 		ReturnAddress: bytes.Repeat([]byte{0x93}, 29),
 	}
@@ -994,7 +994,7 @@ func TestRollbackGovernanceProposalDeletion(t *testing.T) {
 		ActionType:    2,
 		AddedSlot:     300,
 		ExpiresEpoch:  70,
-		AnchorUrl:     "https://example.com/prop2",
+		AnchorURL:     "https://example.com/prop2",
 		AnchorHash:    bytes.Repeat([]byte{0x94}, 32),
 		ReturnAddress: bytes.Repeat([]byte{0x95}, 29),
 	}

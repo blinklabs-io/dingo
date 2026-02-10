@@ -2368,16 +2368,16 @@ func TestRestoreDrepStateAtSlot(t *testing.T) {
 			drepCredential := []byte(
 				"drep_credential_12345678901234567890123456",
 			)
-			anchorUrl1 := "https://example.com/drep1"
+			anchorURL1 := "https://example.com/drep1"
 			anchorHash1 := []byte("anchor_hash_1_1234567890123456789012345678")
-			anchorUrl2 := "https://example.com/drep2"
+			anchorURL2 := "https://example.com/drep2"
 			anchorHash2 := []byte("anchor_hash_2_1234567890123456789012345678")
 
 			// Create a DRep with current state at slot 2000
 			drep := models.Drep{
 				Credential: drepCredential,
 				Active:     true,
-				AnchorUrl:  anchorUrl2,
+				AnchorURL:  anchorURL2,
 				AnchorHash: anchorHash2,
 				AddedSlot:  2000,
 			}
@@ -2414,7 +2414,7 @@ func TestRestoreDrepStateAtSlot(t *testing.T) {
 			// Registration at slot 1000 (before rollback) with original anchor data
 			reg1 := models.RegistrationDrep{
 				DrepCredential: drepCredential,
-				AnchorUrl:      anchorUrl1,
+				AnchorURL:      anchorURL1,
 				AnchorHash:     anchorHash1,
 				AddedSlot:      1000,
 				CertificateID:  cert1.ID,
@@ -2426,7 +2426,7 @@ func TestRestoreDrepStateAtSlot(t *testing.T) {
 			// Registration at slot 2000 (after rollback) with new anchor data
 			reg2 := models.RegistrationDrep{
 				DrepCredential: drepCredential,
-				AnchorUrl:      anchorUrl2,
+				AnchorURL:      anchorURL2,
 				AnchorHash:     anchorHash2,
 				AddedSlot:      2000,
 				CertificateID:  cert2.ID,
@@ -2448,11 +2448,11 @@ func TestRestoreDrepStateAtSlot(t *testing.T) {
 			if result := sqliteStore.DB().First(&restoredDrep); result.Error != nil {
 				t.Fatalf("failed to query restored DRep: %v", result.Error)
 			}
-			if restoredDrep.AnchorUrl != anchorUrl1 {
+			if restoredDrep.AnchorURL != anchorURL1 {
 				t.Errorf(
 					"expected anchor URL %s, got %s",
-					anchorUrl1,
-					restoredDrep.AnchorUrl,
+					anchorURL1,
+					restoredDrep.AnchorURL,
 				)
 			}
 			if string(restoredDrep.AnchorHash) != string(anchorHash1) {
@@ -2597,18 +2597,18 @@ func TestRestoreDrepStateAtSlot(t *testing.T) {
 			drepCredential := []byte(
 				"drep_credential_12345678901234567890123456",
 			)
-			anchorUrl1 := "https://example.com/drep_initial"
+			anchorURL1 := "https://example.com/drep_initial"
 			anchorHash1 := []byte("anchor_hash_initial_123456789012345678901")
-			anchorUrl2 := "https://example.com/drep_updated"
+			anchorURL2 := "https://example.com/drep_updated"
 			anchorHash2 := []byte("anchor_hash_updated_123456789012345678901")
-			anchorUrl3 := "https://example.com/drep_final"
+			anchorURL3 := "https://example.com/drep_final"
 			anchorHash3 := []byte("anchor_hash_final_12345678901234567890123")
 
 			// DRep currently has final anchor data
 			drep := models.Drep{
 				Credential: drepCredential,
 				Active:     true,
-				AnchorUrl:  anchorUrl3,
+				AnchorURL:  anchorURL3,
 				AnchorHash: anchorHash3,
 				AddedSlot:  2000,
 			}
@@ -2663,7 +2663,7 @@ func TestRestoreDrepStateAtSlot(t *testing.T) {
 			// Registration at slot 500
 			reg := models.RegistrationDrep{
 				DrepCredential: drepCredential,
-				AnchorUrl:      anchorUrl1,
+				AnchorURL:      anchorURL1,
 				AnchorHash:     anchorHash1,
 				AddedSlot:      500,
 				CertificateID:  certReg.ID,
@@ -2675,7 +2675,7 @@ func TestRestoreDrepStateAtSlot(t *testing.T) {
 			// Update at slot 1000 (before rollback)
 			update := models.UpdateDrep{
 				Credential:    drepCredential,
-				AnchorUrl:     anchorUrl2,
+				AnchorURL:     anchorURL2,
 				AnchorHash:    anchorHash2,
 				AddedSlot:     1000,
 				CertificateID: certUpdate1.ID,
@@ -2687,7 +2687,7 @@ func TestRestoreDrepStateAtSlot(t *testing.T) {
 			// Update at slot 2000 (after rollback)
 			update2 := models.UpdateDrep{
 				Credential:    drepCredential,
-				AnchorUrl:     anchorUrl3,
+				AnchorURL:     anchorURL3,
 				AnchorHash:    anchorHash3,
 				AddedSlot:     2000,
 				CertificateID: certUpdate2.ID,
@@ -2709,11 +2709,11 @@ func TestRestoreDrepStateAtSlot(t *testing.T) {
 			if result := sqliteStore.DB().First(&restoredDrep); result.Error != nil {
 				t.Fatalf("failed to query restored DRep: %v", result.Error)
 			}
-			if restoredDrep.AnchorUrl != anchorUrl2 {
+			if restoredDrep.AnchorURL != anchorURL2 {
 				t.Errorf(
 					"expected anchor URL %s, got %s",
-					anchorUrl2,
-					restoredDrep.AnchorUrl,
+					anchorURL2,
+					restoredDrep.AnchorURL,
 				)
 			}
 			if string(restoredDrep.AnchorHash) != string(anchorHash2) {
@@ -2747,16 +2747,16 @@ func TestRestoreDrepStateAtSlot(t *testing.T) {
 			drepCredential := []byte(
 				"drep_credential_12345678901234567890123456",
 			)
-			anchorUrl1 := "https://example.com/drep_reg"
+			anchorURL1 := "https://example.com/drep_reg"
 			anchorHash1 := []byte("anchor_hash_reg_123456789012345678901234")
-			anchorUrl2 := "https://example.com/drep_update"
+			anchorURL2 := "https://example.com/drep_update"
 			anchorHash2 := []byte("anchor_hash_update_1234567890123456789012")
 
 			// DRep currently shows as active at slot 2000 (after rollback point)
 			drep := models.Drep{
 				Credential: drepCredential,
 				Active:     true,
-				AnchorUrl:  anchorUrl2,
+				AnchorURL:  anchorURL2,
 				AnchorHash: anchorHash2,
 				AddedSlot:  2000,
 			}
@@ -2813,7 +2813,7 @@ func TestRestoreDrepStateAtSlot(t *testing.T) {
 			// Registration at slot 500
 			reg := models.RegistrationDrep{
 				DrepCredential: drepCredential,
-				AnchorUrl:      anchorUrl1,
+				AnchorURL:      anchorURL1,
 				AnchorHash:     anchorHash1,
 				AddedSlot:      500,
 				CertificateID:  certReg.ID,
@@ -2835,7 +2835,7 @@ func TestRestoreDrepStateAtSlot(t *testing.T) {
 			// Update at slot 1200 (AFTER deregistration - should be ignored per protocol)
 			update := models.UpdateDrep{
 				Credential:    drepCredential,
-				AnchorUrl:     anchorUrl2,
+				AnchorURL:     anchorURL2,
 				AnchorHash:    anchorHash2,
 				AddedSlot:     1200,
 				CertificateID: certUpdate.ID,
@@ -2889,16 +2889,16 @@ func TestRestoreDrepStateAtSlot(t *testing.T) {
 			drepCredential := []byte(
 				"drep_credential_12345678901234567890123456",
 			)
-			anchorUrl1 := "https://example.com/drep_reg"
+			anchorURL1 := "https://example.com/drep_reg"
 			anchorHash1 := []byte("anchor_hash_reg_123456789012345678901234")
-			anchorUrl2 := "https://example.com/drep_update"
+			anchorURL2 := "https://example.com/drep_update"
 			anchorHash2 := []byte("anchor_hash_update_1234567890123456789012")
 
 			// DRep currently shows as active at slot 2000 (after rollback point)
 			drep := models.Drep{
 				Credential: drepCredential,
 				Active:     true,
-				AnchorUrl:  anchorUrl2,
+				AnchorURL:  anchorURL2,
 				AnchorHash: anchorHash2,
 				AddedSlot:  2000,
 			}
@@ -2956,7 +2956,7 @@ func TestRestoreDrepStateAtSlot(t *testing.T) {
 			// Registration at slot 500
 			reg := models.RegistrationDrep{
 				DrepCredential: drepCredential,
-				AnchorUrl:      anchorUrl1,
+				AnchorURL:      anchorURL1,
 				AnchorHash:     anchorHash1,
 				AddedSlot:      500,
 				CertificateID:  certReg.ID,
@@ -2978,7 +2978,7 @@ func TestRestoreDrepStateAtSlot(t *testing.T) {
 			// Update at slot 700 - the latest event (AFTER deregistration)
 			update := models.UpdateDrep{
 				Credential:    drepCredential,
-				AnchorUrl:     anchorUrl2,
+				AnchorURL:     anchorURL2,
 				AnchorHash:    anchorHash2,
 				AddedSlot:     700,
 				CertificateID: certUpdate.ID,

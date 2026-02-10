@@ -463,7 +463,6 @@ type LedgerState struct {
 	// rollbackWG tracks in-flight rollback event emission goroutines
 	rollbackWG        sync.WaitGroup
 	validationEnabled bool
-
 	// Sync progress reporting (Fix 4)
 	syncProgressLastLog  time.Time     // last time we logged sync progress
 	syncProgressLastSlot uint64        // slot at last progress log (for rate calc)
@@ -1234,6 +1233,16 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 		); err != nil {
 			return fmt.Errorf(
 				"delete epochs after rollback: %w",
+				err,
+			)
+		}
+		// Delete rolled-back network state records
+		if err := ls.db.DeleteNetworkStateAfterSlot(
+			point.Slot,
+			txn,
+		); err != nil {
+			return fmt.Errorf(
+				"delete network state after rollback: %w",
 				err,
 			)
 		}
@@ -2095,10 +2104,11 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 						nextBatch = nil
 						break
 					}
-					// Determine if this block should be validated
-					// Skip validation of historical blocks when ValidateHistorical=false, as they
-					// were already validated by the network. However, validate blocks within the
-					// k-slot stability window to ensure live blocks near the tip are validated.
+					// Determine if this block should be validated.
+					// Skip validation of historical blocks when
+					// ValidateHistorical=false, as they were already
+					// validated by the network. Validate blocks within
+					// the stability window near the tip.
 					var shouldValidateBlock bool
 					if snapshotValidationEnabled {
 						shouldValidateBlock = true
@@ -2327,7 +2337,11 @@ func (ls *LedgerState) ledgerProcessBlock(
 	intraBlockUtxos := make(map[string]lcommon.Utxo)
 	for i, tx := range block.Transactions() {
 		if delta == nil {
-			delta = NewLedgerDelta(point, uint(block.Era().Id), block.BlockNumber())
+			delta = NewLedgerDelta(
+				point,
+				uint(block.Era().Id),
+				block.BlockNumber(),
+			)
 			delta.Offsets = offsets
 		}
 		// Validate transaction

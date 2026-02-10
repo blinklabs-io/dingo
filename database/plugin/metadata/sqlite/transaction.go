@@ -351,7 +351,12 @@ func saveAccount(account *models.Account, db *gorm.DB) error {
 		result := db.Clauses(clause.OnConflict{
 			Columns: []clause.Column{{Name: "staking_key"}},
 			DoUpdates: clause.AssignmentColumns(
-				[]string{"pool", "drep"},
+				[]string{
+					"pool",
+					"drep",
+					"active",
+					"certificate_id",
+				},
 			),
 		}).Create(account)
 		if result.Error != nil {
@@ -1050,10 +1055,73 @@ func (d *MetadataStoreSqlite) SetTransaction(
 						tmpReg.Relays[i].PoolID = tmpPool.ID
 					}
 
-					// Save the registration record
-					result := db.Create(&tmpReg)
+					// Save the registration record.
+					// Use OnConflict to handle two registrations for the same pool
+					// in the same slot (same block). The second certificate updates
+					// the registration fields instead of failing on the unique index.
+					result := db.Clauses(clause.OnConflict{
+						Columns: []clause.Column{
+							{Name: "pool_id"},
+							{Name: "added_slot"},
+						},
+						DoUpdates: clause.AssignmentColumns([]string{
+							"vrf_key_hash", "pledge", "cost", "margin",
+							"reward_account", "certificate_id",
+							"metadata_url", "metadata_hash",
+							"deposit_amount",
+						}),
+					}).Omit("Owners", "Relays").Create(&tmpReg)
 					if result.Error != nil {
 						return fmt.Errorf("process certificate: %w", result.Error)
+					}
+
+					// On conflict, GORM may not populate tmpReg.ID.
+					// Re-fetch if necessary so Owners/Relays get the correct FK.
+					if tmpReg.ID == 0 {
+						var existing models.PoolRegistration
+						if err := db.Where(
+							"pool_id = ? AND added_slot = ?",
+							tmpReg.PoolID, tmpReg.AddedSlot,
+						).First(&existing).Error; err != nil {
+							return fmt.Errorf(
+								"fetching pool registration ID after upsert: %w",
+								err,
+							)
+						}
+						tmpReg.ID = existing.ID
+					}
+
+					// Delete old Owners/Relays for this registration (idempotent on retry
+					// or when a second cert in the same slot updates the registration)
+					if res := db.Where(
+						"pool_registration_id = ?", tmpReg.ID,
+					).Delete(&models.PoolRegistrationOwner{}); res.Error != nil {
+						return fmt.Errorf("delete pool registration owners: %w", res.Error)
+					}
+					if res := db.Where(
+						"pool_registration_id = ?", tmpReg.ID,
+					).Delete(&models.PoolRegistrationRelay{}); res.Error != nil {
+						return fmt.Errorf("delete pool registration relays: %w", res.Error)
+					}
+
+					// Insert Owners and Relays with correct FKs
+					if len(tmpReg.Owners) > 0 {
+						for j := range tmpReg.Owners {
+							tmpReg.Owners[j].PoolRegistrationID = tmpReg.ID
+							tmpReg.Owners[j].PoolID = tmpPool.ID
+						}
+						if res := db.Create(&tmpReg.Owners); res.Error != nil {
+							return fmt.Errorf("create pool registration owners: %w", res.Error)
+						}
+					}
+					if len(tmpReg.Relays) > 0 {
+						for j := range tmpReg.Relays {
+							tmpReg.Relays[j].PoolRegistrationID = tmpReg.ID
+							tmpReg.Relays[j].PoolID = tmpPool.ID
+						}
+						if res := db.Create(&tmpReg.Relays); res.Error != nil {
+							return fmt.Errorf("create pool registration relays: %w", res.Error)
+						}
 					}
 
 					// Collect update for batch processing
@@ -1319,17 +1387,45 @@ func (d *MetadataStoreSqlite) SetTransaction(
 						CertificateID:  certIDMap[i],
 					}
 					if c.Anchor != nil {
-						tmpReg.AnchorUrl = c.Anchor.Url
+						tmpReg.AnchorURL = c.Anchor.Url
 						tmpReg.AnchorHash = c.Anchor.DataHash[:]
 					}
 
 					// Persist DRep anchor and active state
-					if err := d.SetDrep(drepCredential, point.Slot, tmpReg.AnchorUrl, tmpReg.AnchorHash, true, txn); err != nil {
+					if err := d.SetDrep(drepCredential, point.Slot, tmpReg.AnchorURL, tmpReg.AnchorHash, true, txn); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
-					if err := saveCertRecord(&tmpReg, db); err != nil {
-						return fmt.Errorf("process certificate: %w", err)
+					// Use OnConflict to handle two registrations for the same DRep
+					// in the same slot (same block). The second certificate updates
+					// the registration fields instead of failing on the unique index.
+					result := db.Clauses(clause.OnConflict{
+						Columns: []clause.Column{
+							{Name: "drep_credential"},
+							{Name: "added_slot"},
+						},
+						DoUpdates: clause.AssignmentColumns([]string{
+							"anchor_url", "anchor_hash", "certificate_id",
+						}),
+					}).Create(&tmpReg)
+					if result.Error != nil {
+						return fmt.Errorf("process certificate: %w", result.Error)
+					}
+
+					// On conflict, GORM may not populate tmpReg.ID.
+					// Re-fetch if necessary so certIDUpdates gets the correct ID.
+					if tmpReg.ID == 0 {
+						var existing models.RegistrationDrep
+						if err := db.Where(
+							"drep_credential = ? AND added_slot = ?",
+							tmpReg.DrepCredential, tmpReg.AddedSlot,
+						).First(&existing).Error; err != nil {
+							return fmt.Errorf(
+								"fetching drep registration ID after upsert: %w",
+								err,
+							)
+						}
+						tmpReg.ID = existing.ID
 					}
 
 					// Collect update for batch processing
@@ -1374,7 +1470,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 						CertificateID: certIDMap[i],
 					}
 					if c.Anchor != nil {
-						tmpUpdate.AnchorUrl = c.Anchor.Url
+						tmpUpdate.AnchorURL = c.Anchor.Url
 						tmpUpdate.AnchorHash = c.Anchor.DataHash[:]
 					}
 
@@ -1389,7 +1485,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 					if existingDrep == nil {
 						return fmt.Errorf("process certificate: %w", models.ErrDrepNotFound)
 					}
-					if err := d.SetDrep(drepCredential, point.Slot, tmpUpdate.AnchorUrl, tmpUpdate.AnchorHash, true, txn); err != nil {
+					if err := d.SetDrep(drepCredential, point.Slot, tmpUpdate.AnchorURL, tmpUpdate.AnchorHash, true, txn); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
@@ -1510,7 +1606,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 						AddedSlot:      point.Slot,
 					}
 					if c.Anchor != nil {
-						tmpResign.AnchorUrl = c.Anchor.Url
+						tmpResign.AnchorURL = c.Anchor.Url
 						tmpResign.AnchorHash = c.Anchor.DataHash[:]
 					}
 

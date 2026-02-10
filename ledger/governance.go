@@ -79,7 +79,7 @@ func processGovernanceProposals(
 			ActionType:    actionType,
 			ProposedEpoch: currentEpoch,
 			ExpiresEpoch:  currentEpoch + govActionLifetime,
-			AnchorUrl:     anchor.Url,
+			AnchorURL:     anchor.Url,
 			AnchorHash:    anchorHash[:],
 			Deposit:       proposal.Deposit(),
 			ReturnAddress: rewardAddrBytes,
@@ -219,7 +219,7 @@ func processGovernanceVotes(
 			}
 
 			if procedure.Anchor != nil {
-				vote.AnchorUrl = procedure.Anchor.Url
+				vote.AnchorURL = procedure.Anchor.Url
 				vote.AnchorHash = procedure.Anchor.DataHash[:]
 			}
 

@@ -30,9 +30,11 @@ var MigrateModels = []any{
 	&EpochSummary{},
 	&GovernanceProposal{},
 	&GovernanceVote{},
+	&ImportCheckpoint{},
 	&KeyWitness{},
 	&MoveInstantaneousRewards{},
 	&MoveInstantaneousRewardsReward{},
+	&NetworkState{},
 	&Pool{},
 	&PoolRegistration{},
 	&PoolRegistrationOwner{},
@@ -53,6 +55,7 @@ var MigrateModels = []any{
 	&StakeRegistrationDelegation{},
 	&StakeVoteDelegation{},
 	&StakeVoteRegistrationDelegation{},
+	&SyncState{},
 	&Tip{},
 	&Transaction{},
 	&UpdateDrep{},
@@ -60,4 +63,57 @@ var MigrateModels = []any{
 	&VoteDelegation{},
 	&VoteRegistrationDelegation{},
 	&WitnessScripts{},
+}
+
+// ImportCheckpoint tracks the progress of a Mithril snapshot import
+// so that it can be resumed after a failure without re-importing
+// already completed phases.
+type ImportCheckpoint struct {
+	ID        uint   `gorm:"primarykey"`
+	ImportKey string `gorm:"size:255;uniqueIndex;not null"` // "{digest}:{slot}"
+	Phase     string `gorm:"not null"`                      // last completed phase
+}
+
+func (ImportCheckpoint) TableName() string {
+	return "import_checkpoint"
+}
+
+// Import phases in execution order.
+const (
+	ImportPhaseUTxO      = "utxo"
+	ImportPhaseCertState = "certstate"
+	ImportPhaseSnapshots = "snapshots"
+	ImportPhasePParams   = "pparams"
+	ImportPhaseGovState  = "gov_state"
+	ImportPhaseTip       = "tip"
+)
+
+// ImportPhaseOrder defines the sequential order of import phases.
+var ImportPhaseOrder = []string{
+	ImportPhaseUTxO,
+	ImportPhaseCertState,
+	ImportPhaseSnapshots,
+	ImportPhasePParams,
+	ImportPhaseGovState,
+	ImportPhaseTip,
+}
+
+// IsPhaseCompleted returns true if the given phase was completed
+// in a previous import run (i.e., the checkpoint phase is at or
+// past the given phase).
+func IsPhaseCompleted(checkpointPhase, queryPhase string) bool {
+	cpIdx := -1
+	qIdx := -1
+	for i, p := range ImportPhaseOrder {
+		if p == checkpointPhase {
+			cpIdx = i
+		}
+		if p == queryPhase {
+			qIdx = i
+		}
+	}
+	if cpIdx < 0 || qIdx < 0 {
+		return false
+	}
+	return cpIdx >= qIdx
 }

@@ -320,17 +320,13 @@ func (cs *ChainSelector) RemovePeer(connId ouroboros.ConnectionId) {
 				// Emit ChainSwitchEvent so subscribers know to switch connections
 				if cs.config.EventBus != nil {
 					newPeerTip := cs.peerTips[*newBest]
-					// PreviousTip is zero value since the peer is removed
-					// ComparisonResult is ChainABetter since new chain is selected
-					// BlockDifference uses safe conversion of new tip block number
 					evt := event.NewEvent(
 						ChainSwitchEventType,
 						ChainSwitchEvent{
 							PreviousConnectionId: previousBest,
 							NewConnectionId:      *newBest,
 							NewTip:               newPeerTip.Tip,
-							// PreviousTip is zero value since the peer is removed
-							ComparisonResult: ChainABetter,
+							ComparisonResult:     ChainComparisonUnknown,
 							BlockDifference: safeUint64ToInt64(
 								newPeerTip.Tip.BlockNumber,
 							),
@@ -473,11 +469,11 @@ func (cs *ChainSelector) selectBestChainLocked() *ouroboros.ConnectionId {
 					bestConnId = connId
 					bestPeerTip = peerTip
 				}
-			case ChainBBetter:
-				// bestPeerTip has lower VRF, no change needed
+			case ChainBBetter, ChainComparisonUnknown:
+				// bestPeerTip has lower VRF (or unknown); no change
 			}
-		case ChainBBetter:
-			// Current best is better, no change needed
+		case ChainBBetter, ChainComparisonUnknown:
+			// Current best is better (or unknown); no change needed
 		}
 	}
 
@@ -676,17 +672,13 @@ func (cs *ChainSelector) cleanupStalePeers() {
 				// Emit ChainSwitchEvent so subscribers know to switch connections
 				if cs.config.EventBus != nil {
 					newPeerTip := cs.peerTips[*newBest]
-					// PreviousTip is zero value since the peer is removed
-					// ComparisonResult is ChainABetter since new chain is selected
-					// BlockDifference uses safe conversion of new tip block number
 					evt := event.NewEvent(
 						ChainSwitchEventType,
 						ChainSwitchEvent{
 							PreviousConnectionId: *previousBest,
 							NewConnectionId:      *newBest,
 							NewTip:               newPeerTip.Tip,
-							// PreviousTip is zero value since the peer is removed
-							ComparisonResult: ChainABetter,
+							ComparisonResult:     ChainComparisonUnknown,
 							BlockDifference: safeUint64ToInt64(
 								newPeerTip.Tip.BlockNumber,
 							),

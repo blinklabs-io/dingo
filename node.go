@@ -259,7 +259,7 @@ func (n *Node) Run(ctx context.Context) error {
 			"error", err,
 		)
 	}
-	if err := n.snapshotMgr.Start(); err != nil { //nolint:contextcheck
+	if err := n.snapshotMgr.Start(n.ctx); err != nil { //nolint:contextcheck
 		return fmt.Errorf("failed to start snapshot manager: %w", err)
 	}
 	started = append(started, func() { _ = n.snapshotMgr.Stop() })
@@ -406,7 +406,11 @@ func (n *Node) Run(ctx context.Context) error {
 	})
 	// Configure peer governor
 	// Create ledger peer provider for discovering peers from stake pool relays
-	ledgerPeerProvider, err := ledger.NewLedgerPeerProvider(n.ledgerState, n.db, n.eventBus)
+	ledgerPeerProvider, err := ledger.NewLedgerPeerProvider(
+		n.ledgerState,
+		n.db,
+		n.eventBus,
+	)
 	if err != nil {
 		return fmt.Errorf("failed to create ledger peer provider: %w", err)
 	}

@@ -37,11 +37,29 @@ var validNetworkName = regexp.MustCompile(
 	`^[a-zA-Z0-9][a-zA-Z0-9_-]*$`,
 )
 
+// ValidateNetworkName checks that a network name contains only
+// permitted characters and returns an error if it does not.
+func ValidateNetworkName(network string) error {
+	if !validNetworkName.MatchString(network) {
+		return fmt.Errorf(
+			"invalid network name %q: "+
+				"must contain only alphanumeric "+
+				"characters, hyphens, and underscores",
+			network,
+		)
+	}
+	return nil
+}
+
 type ctxKey string
 
 const configContextKey ctxKey = "dingo.config"
 
 const DefaultShutdownTimeout = "30s"
+
+// DefaultLedgerCatchupTimeout is the maximum time LoadWithDB will wait
+// for the ledger to process all blocks before returning an error.
+const DefaultLedgerCatchupTimeout = "30m"
 
 func WithContext(ctx context.Context, cfg *Config) context.Context {
 	return context.WithValue(ctx, configContextKey, cfg)
@@ -62,8 +80,9 @@ const (
 	DefaultRejectionWatermark = 0.95
 )
 
-// ErrPluginListRequested is returned when the user requests to list available plugins
-// This is not an error condition but a successful operation that displays plugin information
+// ErrPluginListRequested is returned when the user requests to list
+// available plugins. This is not an error condition but a successful
+// operation that displays plugin information.
 var ErrPluginListRequested = errors.New("plugin list requested")
 
 // RunMode represents the operational mode of the dingo node
@@ -126,11 +145,14 @@ func DefaultChainsyncConfig() ChainsyncConfig {
 
 // CacheConfig holds configuration for the tiered CBOR cache system.
 type CacheConfig struct {
-	// HotUtxoEntries is the maximum number of UTxO CBOR entries in the hot cache.
+	// HotUtxoEntries is the maximum number of UTxO CBOR entries in the hot
+	// cache.
 	HotUtxoEntries int `yaml:"hotUtxoEntries"  envconfig:"DINGO_CACHE_HOT_UTXO_ENTRIES"`
-	// HotTxEntries is the maximum number of transaction CBOR entries in the hot cache.
+	// HotTxEntries is the maximum number of transaction CBOR entries in the hot
+	// cache.
 	HotTxEntries int `yaml:"hotTxEntries"    envconfig:"DINGO_CACHE_HOT_TX_ENTRIES"`
-	// HotTxMaxBytes is the maximum memory in bytes for the hot transaction cache.
+	// HotTxMaxBytes is the maximum memory in bytes for the hot transaction
+	// cache.
 	HotTxMaxBytes int64 `yaml:"hotTxMaxBytes"   envconfig:"DINGO_CACHE_HOT_TX_MAX_BYTES"`
 	// BlockLRUEntries is the maximum number of blocks in the LRU cache.
 	BlockLRUEntries int `yaml:"blockLruEntries" envconfig:"DINGO_CACHE_BLOCK_LRU_ENTRIES"`
@@ -153,29 +175,30 @@ func DefaultCacheConfig() CacheConfig {
 }
 
 type Config struct {
-	MetadataPlugin     string  `yaml:"metadataPlugin"     envconfig:"DINGO_DATABASE_METADATA_PLUGIN"`
-	TlsKeyFilePath     string  `yaml:"tlsKeyFilePath"     envconfig:"TLS_KEY_FILE_PATH"`
-	Topology           string  `yaml:"topology"`
-	CardanoConfig      string  `yaml:"cardanoConfig"      envconfig:"config"`
-	DatabasePath       string  `yaml:"databasePath"                                                     split_words:"true"`
-	SocketPath         string  `yaml:"socketPath"                                                       split_words:"true"`
-	TlsCertFilePath    string  `yaml:"tlsCertFilePath"    envconfig:"TLS_CERT_FILE_PATH"`
-	BindAddr           string  `yaml:"bindAddr"                                                         split_words:"true"`
-	BlobPlugin         string  `yaml:"blobPlugin"         envconfig:"DINGO_DATABASE_BLOB_PLUGIN"`
-	PrivateBindAddr    string  `yaml:"privateBindAddr"                                                  split_words:"true"`
-	ShutdownTimeout    string  `yaml:"shutdownTimeout"                                                  split_words:"true"`
-	Network            string  `yaml:"network"`
-	MempoolCapacity    int64   `yaml:"mempoolCapacity"                                                  split_words:"true"`
-	EvictionWatermark  float64 `yaml:"evictionWatermark"  envconfig:"DINGO_MEMPOOL_EVICTION_WATERMARK"`
-	RejectionWatermark float64 `yaml:"rejectionWatermark" envconfig:"DINGO_MEMPOOL_REJECTION_WATERMARK"`
-	PrivatePort        uint    `yaml:"privatePort"                                                      split_words:"true"`
-	RelayPort          uint    `yaml:"relayPort"          envconfig:"port"`
-	UtxorpcPort        uint    `yaml:"utxorpcPort"                                                      split_words:"true"`
-	MetricsPort        uint    `yaml:"metricsPort"                                                      split_words:"true"`
-	IntersectTip       bool    `yaml:"intersectTip"                                                     split_words:"true"`
-	ValidateHistorical bool    `yaml:"validateHistorical"                                               split_words:"true"`
-	RunMode            RunMode `yaml:"runMode"            envconfig:"DINGO_RUN_MODE"`
-	ImmutableDbPath    string  `yaml:"immutableDbPath"    envconfig:"DINGO_IMMUTABLE_DB_PATH"`
+	MetadataPlugin       string  `yaml:"metadataPlugin"     envconfig:"DINGO_DATABASE_METADATA_PLUGIN"`
+	TlsKeyFilePath       string  `yaml:"tlsKeyFilePath"     envconfig:"TLS_KEY_FILE_PATH"`
+	Topology             string  `yaml:"topology"`
+	CardanoConfig        string  `yaml:"cardanoConfig"      envconfig:"config"`
+	DatabasePath         string  `yaml:"databasePath"                                                     split_words:"true"`
+	SocketPath           string  `yaml:"socketPath"                                                       split_words:"true"`
+	TlsCertFilePath      string  `yaml:"tlsCertFilePath"    envconfig:"TLS_CERT_FILE_PATH"`
+	BindAddr             string  `yaml:"bindAddr"                                                         split_words:"true"`
+	BlobPlugin           string  `yaml:"blobPlugin"         envconfig:"DINGO_DATABASE_BLOB_PLUGIN"`
+	PrivateBindAddr      string  `yaml:"privateBindAddr"                                                  split_words:"true"`
+	ShutdownTimeout      string  `yaml:"shutdownTimeout"                                                  split_words:"true"`
+	LedgerCatchupTimeout string  `yaml:"ledgerCatchupTimeout"  envconfig:"DINGO_LEDGER_CATCHUP_TIMEOUT"`
+	Network              string  `yaml:"network"`
+	MempoolCapacity      int64   `yaml:"mempoolCapacity"                                                  split_words:"true"`
+	EvictionWatermark    float64 `yaml:"evictionWatermark"  envconfig:"DINGO_MEMPOOL_EVICTION_WATERMARK"`
+	RejectionWatermark   float64 `yaml:"rejectionWatermark" envconfig:"DINGO_MEMPOOL_REJECTION_WATERMARK"`
+	PrivatePort          uint    `yaml:"privatePort"                                                      split_words:"true"`
+	RelayPort            uint    `yaml:"relayPort"          envconfig:"port"`
+	UtxorpcPort          uint    `yaml:"utxorpcPort"                                                      split_words:"true"`
+	MetricsPort          uint    `yaml:"metricsPort"                                                      split_words:"true"`
+	IntersectTip         bool    `yaml:"intersectTip"                                                     split_words:"true"`
+	ValidateHistorical   bool    `yaml:"validateHistorical"                                               split_words:"true"`
+	RunMode              RunMode `yaml:"runMode"            envconfig:"DINGO_RUN_MODE"`
+	ImmutableDbPath      string  `yaml:"immutableDbPath"    envconfig:"DINGO_IMMUTABLE_DB_PATH"`
 	// Database worker pool tuning (worker count and task queue size)
 	DatabaseWorkers   int `yaml:"databaseWorkers"    envconfig:"DINGO_DATABASE_WORKERS"`
 	DatabaseQueueSize int `yaml:"databaseQueueSize"  envconfig:"DINGO_DATABASE_QUEUE_SIZE"`
@@ -217,6 +240,29 @@ type Config struct {
 
 	// Mesh (Coinbase Rosetta) API listen address (empty = disabled)
 	MeshListenAddress string `yaml:"meshListenAddress" envconfig:"DINGO_MESH_LISTEN_ADDRESS"`
+
+	// Mithril snapshot bootstrap configuration
+	Mithril MithrilConfig `yaml:"mithril"`
+}
+
+// MithrilConfig holds configuration for Mithril snapshot bootstrapping.
+type MithrilConfig struct {
+	// Enabled controls whether Mithril integration is available.
+	Enabled bool `yaml:"enabled"            envconfig:"DINGO_MITHRIL_ENABLED"`
+	// AggregatorURL overrides the default aggregator URL for the network.
+	// If empty, the URL is auto-detected from the configured network.
+	AggregatorURL string `yaml:"aggregatorUrl"      envconfig:"DINGO_MITHRIL_AGGREGATOR_URL"`
+	// DownloadDir is the directory where snapshot archives are downloaded.
+	// If empty, a randomized temporary directory is created automatically.
+	DownloadDir string `yaml:"downloadDir"        envconfig:"DINGO_MITHRIL_DOWNLOAD_DIR"`
+	// CleanupAfterLoad controls whether temporary files are removed
+	// after the ImmutableDB has been loaded.
+	CleanupAfterLoad bool `yaml:"cleanupAfterLoad"   envconfig:"DINGO_MITHRIL_CLEANUP"`
+	// VerifyCertificates enables certificate chain verification
+	// during bootstrap. When true, the bootstrap process walks
+	// the Mithril certificate chain from the snapshot back to the
+	// genesis certificate to verify the chain is unbroken.
+	VerifyCertificates bool `yaml:"verifyCertificates" envconfig:"DINGO_MITHRIL_VERIFY_CERTS"`
 }
 
 func (c *Config) ParseCmdlineArgs(programName string, args []string) error {
@@ -276,29 +322,30 @@ func (c *Config) ParseCmdlineArgs(programName string, args []string) error {
 }
 
 var globalConfig = &Config{
-	MempoolCapacity:    1048576,
-	EvictionWatermark:  DefaultEvictionWatermark,
-	RejectionWatermark: DefaultRejectionWatermark,
-	BindAddr:           "0.0.0.0",
-	CardanoConfig:      "", // Will be set dynamically based on network
-	DatabasePath:       ".dingo",
-	SocketPath:         "dingo.socket",
-	IntersectTip:       false,
-	ValidateHistorical: false,
-	Network:            "preview",
-	MetricsPort:        12798,
-	PrivateBindAddr:    "127.0.0.1",
-	PrivatePort:        3002,
-	RelayPort:          3001,
-	UtxorpcPort:        9090,
-	Topology:           "",
-	TlsCertFilePath:    "",
-	TlsKeyFilePath:     "",
-	BlobPlugin:         DefaultBlobPlugin,
-	MetadataPlugin:     DefaultMetadataPlugin,
-	RunMode:            RunModeServe,
-	ImmutableDbPath:    "",
-	ShutdownTimeout:    DefaultShutdownTimeout,
+	MempoolCapacity:      1048576,
+	EvictionWatermark:    DefaultEvictionWatermark,
+	RejectionWatermark:   DefaultRejectionWatermark,
+	BindAddr:             "0.0.0.0",
+	CardanoConfig:        "", // Will be set dynamically based on network
+	DatabasePath:         ".dingo",
+	SocketPath:           "dingo.socket",
+	IntersectTip:         false,
+	ValidateHistorical:   false,
+	Network:              "preview",
+	MetricsPort:          12798,
+	PrivateBindAddr:      "127.0.0.1",
+	PrivatePort:          3002,
+	RelayPort:            3001,
+	UtxorpcPort:          9090,
+	Topology:             "",
+	TlsCertFilePath:      "",
+	TlsKeyFilePath:       "",
+	BlobPlugin:           DefaultBlobPlugin,
+	MetadataPlugin:       DefaultMetadataPlugin,
+	RunMode:              RunModeServe,
+	ImmutableDbPath:      "",
+	ShutdownTimeout:      DefaultShutdownTimeout,
+	LedgerCatchupTimeout: DefaultLedgerCatchupTimeout,
 	// Defaults for database worker pool tuning
 	DatabaseWorkers:   5,
 	DatabaseQueueSize: 50,
@@ -309,6 +356,12 @@ var globalConfig = &Config{
 	// KES configuration defaults (mainnet values)
 	SlotsPerKESPeriod: 129600, // 1.5 days at 1 second per slot
 	MaxKESEvolutions:  62,     // 2^6 - 2 for KES depth 6
+	// Mithril defaults
+	Mithril: MithrilConfig{
+		Enabled:            true,
+		CleanupAfterLoad:   true,
+		VerifyCertificates: true,
+	},
 }
 
 func LoadConfig(configFile string) (*Config, error) {
@@ -356,7 +409,8 @@ func LoadConfig(configFile string) (*Config, error) {
 				return nil, fmt.Errorf("error parsing config section: %w", err)
 			}
 		} else {
-			// Otherwise unmarshal the whole file as main config (backward compatibility)
+			// Otherwise unmarshal the whole file as main config (backward
+			// compatibility)
 			err = yaml.Unmarshal(buf, globalConfig)
 			if err != nil {
 				return nil, fmt.Errorf("error parsing config file: %w", err)
@@ -533,16 +587,8 @@ func LoadConfig(configFile string) (*Config, error) {
 	}
 
 	// Validate network name to prevent path traversal (INT-03).
-	// Only alphanumeric characters, hyphens, and underscores are
-	// permitted. Values containing '/', '\', '..', or other path
-	// separators are rejected outright.
-	if !validNetworkName.MatchString(globalConfig.Network) {
-		return nil, fmt.Errorf(
-			"invalid network name %q: "+
-				"must contain only alphanumeric characters, "+
-				"hyphens, and underscores",
-			globalConfig.Network,
-		)
+	if err := ValidateNetworkName(globalConfig.Network); err != nil {
+		return nil, err
 	}
 
 	// Set default CardanoConfig path based on network if not provided by user
