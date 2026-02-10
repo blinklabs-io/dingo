@@ -28,7 +28,10 @@ type Utxo struct {
 	PaymentKey              []byte       `gorm:"index;size:28"`
 	StakingKey              []byte       `gorm:"index;size:28"`
 	Assets                  []Asset      `gorm:"foreignKey:UtxoID;constraint:OnDelete:CASCADE"`
-	Cbor                    []byte       `gorm:"-"` // This is here for convenience but not represented in the metadata DB
+	Cbor                    []byte       `gorm:"-"`       // This is here for convenience but not represented in the metadata DB
+	DatumHash               []byte       `gorm:"size:32"` // Optional datum hash (32 bytes)
+	Datum                   []byte       `gorm:"-"`       // Inline datum CBOR, not stored in metadata DB
+	ScriptRef               []byte       `gorm:"-"`       // Reference script bytes, not stored in metadata DB
 	SpentAtTxId             []byte       `gorm:"index;size:32"`
 	ReferencedByTxId        []byte       `gorm:"index;size:32"`
 	CollateralByTxId        []byte       `gorm:"index;size:32"`

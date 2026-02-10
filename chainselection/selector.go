@@ -320,17 +320,13 @@ func (cs *ChainSelector) RemovePeer(connId ouroboros.ConnectionId) {
 				// Emit ChainSwitchEvent so subscribers know to switch connections
 				if cs.config.EventBus != nil {
 					newPeerTip := cs.peerTips[*newBest]
-					// PreviousTip is zero value since the peer is removed
-					// ComparisonResult is ChainABetter since new chain is selected
-					// BlockDifference uses safe conversion of new tip block number
 					evt := event.NewEvent(
 						ChainSwitchEventType,
 						ChainSwitchEvent{
 							PreviousConnectionId: previousBest,
 							NewConnectionId:      *newBest,
 							NewTip:               newPeerTip.Tip,
-							// PreviousTip is zero value since the peer is removed
-							ComparisonResult: ChainABetter,
+							ComparisonResult:     ChainABetter,
 							BlockDifference: safeUint64ToInt64(
 								newPeerTip.Tip.BlockNumber,
 							),
@@ -659,17 +655,13 @@ func (cs *ChainSelector) cleanupStalePeers() {
 				// Emit ChainSwitchEvent so subscribers know to switch connections
 				if cs.config.EventBus != nil {
 					newPeerTip := cs.peerTips[*newBest]
-					// PreviousTip is zero value since the peer is removed
-					// ComparisonResult is ChainABetter since new chain is selected
-					// BlockDifference uses safe conversion of new tip block number
 					evt := event.NewEvent(
 						ChainSwitchEventType,
 						ChainSwitchEvent{
 							PreviousConnectionId: *previousBest,
 							NewConnectionId:      *newBest,
 							NewTip:               newPeerTip.Tip,
-							// PreviousTip is zero value since the peer is removed
-							ComparisonResult: ChainABetter,
+							ComparisonResult:     ChainABetter,
 							BlockDifference: safeUint64ToInt64(
 								newPeerTip.Tip.BlockNumber,
 							),

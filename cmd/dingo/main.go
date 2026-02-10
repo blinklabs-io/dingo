@@ -168,17 +168,23 @@ func main() {
 		}
 	}
 	// Reconstruct os.Args with program name (os.Args[0] is never nil in practice, but nilaway doesn't know this)
-	programName := "dingo"
+	progArg := programName
 	if len(os.Args) > 0 {
-		programName = os.Args[0]
+		progArg = os.Args[0]
 	}
-	os.Args = append([]string{programName}, newArgs...)
+	os.Args = append([]string{progArg}, newArgs...)
 
 	// Initialize CPU profiling (starts immediately, stops on exit)
 	if cpuprofile != "" {
 		cpuprofile = filepath.Clean(cpuprofile)
-		fmt.Fprintf(os.Stderr, "Starting CPU profiling to %q\n", cpuprofile) //nolint:gosec // stderr output, no XSS risk
-		f, err := os.Create(cpuprofile)                                      //nolint:gosec // user-specified profiling output path
+		fmt.Fprintf( //nolint:gosec // stderr output, no XSS risk
+			os.Stderr,
+			"Starting CPU profiling to %q\n",
+			cpuprofile,
+		)
+		f, err := os.Create( //nolint:gosec // user-specified profiling output path
+			cpuprofile,
+		)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "could not create CPU profile: %v\n", err)
 			os.Exit(1)
@@ -233,6 +239,8 @@ func main() {
 	rootCmd.PersistentFlags().
 		StringP("metadata", "m", config.DefaultMetadataPlugin, "metadata store plugin to use, 'list' to show available")
 	rootCmd.PersistentFlags().
+		StringP("network", "n", "", "Cardano network name (e.g. preview, preprod, mainnet)")
+	rootCmd.PersistentFlags().
 		Int("db-workers", 5, "database worker pool worker count")
 	rootCmd.PersistentFlags().
 		Int("db-queue-size", 50, "database worker pool task queue size")
@@ -267,6 +275,13 @@ func main() {
 			cfg.MetadataPlugin = metadataPlugin
 		}
 
+		// Override network if flag is provided
+		if cmd.Root().PersistentFlags().Changed("network") {
+			if network, err := cmd.Root().PersistentFlags().GetString("network"); err == nil {
+				cfg.Network = network
+			}
+		}
+
 		// Override database worker pool config if flags are provided
 		if cmd.Root().PersistentFlags().Changed("db-workers") {
 			if workers, err := cmd.Root().PersistentFlags().GetInt("db-workers"); err == nil {
@@ -288,6 +303,8 @@ func main() {
 	rootCmd.AddCommand(loadCommand())
 	rootCmd.AddCommand(listCommand())
 	rootCmd.AddCommand(versionCommand())
+	rootCmd.AddCommand(mithrilCommand())
+	rootCmd.AddCommand(syncCommand())
 
 	// Execute cobra command
 	exitCode := 0
@@ -298,7 +315,9 @@ func main() {
 	// Finalize memory profiling before exit
 	if memprofile != "" {
 		memprofile = filepath.Clean(memprofile)
-		f, err := os.Create(memprofile) //nolint:gosec // user-specified profiling output path
+		f, err := os.Create( //nolint:gosec // user-specified profiling output path
+			memprofile,
+		)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "could not create memory profile: %v\n", err)
 		} else {

@@ -59,8 +59,8 @@ type PoolRegistration struct {
 	Cost          types.Uint64
 	CertificateID uint   `gorm:"index"`
 	ID            uint   `gorm:"primarykey"`
-	PoolID        uint   `gorm:"index"`
-	AddedSlot     uint64 `gorm:"index"`
+	PoolID        uint   `gorm:"uniqueIndex:idx_pool_reg_pool_slot"`
+	AddedSlot     uint64 `gorm:"uniqueIndex:idx_pool_reg_pool_slot"`
 	DepositAmount types.Uint64
 }
 
