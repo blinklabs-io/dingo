@@ -34,7 +34,9 @@ import (
 // handles Allegra as well. If this alias is ever changed to a
 // distinct type, this assignment will fail to compile,
 // reminding us to add an explicit Allegra case.
-var _ *shelley.ShelleyProtocolParameters = (*allegra.AllegraProtocolParameters)(nil)
+var _ *shelley.ShelleyProtocolParameters = (*allegra.AllegraProtocolParameters)(
+	nil,
+)
 
 // ProtocolVersion represents the major and minor protocol
 // version numbers used in Cardano protocol parameters.

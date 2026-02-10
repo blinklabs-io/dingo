@@ -40,7 +40,12 @@ func TestUtxoStorageAndRetrieval(t *testing.T) {
 	require.NoError(t, err)
 	defer os.RemoveAll(tmpDir)
 
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	logger := slog.New(
+		slog.NewTextHandler(
+			os.Stdout,
+			&slog.HandlerOptions{Level: slog.LevelDebug},
+		),
+	)
 
 	// Create database
 	dbConfig := &database.Config{
@@ -122,7 +127,11 @@ func TestUtxoStorageAndRetrieval(t *testing.T) {
 			indexer := database.NewBlockIndexer(point.Slot, point.Hash)
 			offsets, err := indexer.ComputeOffsets(block.Cbor(), block)
 			if err != nil {
-				return fmt.Errorf("compute offsets for block %d: %w", point.Slot, err)
+				return fmt.Errorf(
+					"compute offsets for block %d: %w",
+					point.Slot,
+					err,
+				)
 			}
 
 			// Process each transaction
@@ -171,8 +180,13 @@ func TestUtxoStorageAndRetrieval(t *testing.T) {
 						OutputIdx: outputIdx,
 					}
 					if utxoOff, ok := offsets.UtxoOffsets[ref]; ok {
-						t.Logf("    Output %d offset: slot=%d, offset=%d, length=%d",
-							outputIdx, utxoOff.BlockSlot, utxoOff.ByteOffset, utxoOff.ByteLength)
+						t.Logf(
+							"    Output %d offset: slot=%d, offset=%d, length=%d",
+							outputIdx,
+							utxoOff.BlockSlot,
+							utxoOff.ByteOffset,
+							utxoOff.ByteLength,
+						)
 					} else {
 						return fmt.Errorf("output %d offset not found", outputIdx)
 					}
@@ -196,7 +210,11 @@ func TestUtxoStorageAndRetrieval(t *testing.T) {
 		blocksProcessed++
 	}
 
-	t.Logf("\n=== Stored %d UTxOs from %d blocks ===\n", len(storedUtxos), blocksProcessed)
+	t.Logf(
+		"\n=== Stored %d UTxOs from %d blocks ===\n",
+		len(storedUtxos),
+		blocksProcessed,
+	)
 
 	// Now try to retrieve each stored UTxO
 	var retrievalErrors int
@@ -209,7 +227,8 @@ func TestUtxoStorageAndRetrieval(t *testing.T) {
 
 		// Step 1: Check if metadata exists
 		metaTxn := txn.Metadata()
-		utxoMeta, err := db.Metadata().GetUtxo(utxoRef.txId, utxoRef.outputIdx, metaTxn)
+		utxoMeta, err := db.Metadata().
+			GetUtxo(utxoRef.txId, utxoRef.outputIdx, metaTxn)
 		if err != nil {
 			t.Logf("Metadata error for %s#%d: %v",
 				hex.EncodeToString(utxoRef.txId[:8]), utxoRef.outputIdx, err)
@@ -218,8 +237,14 @@ func TestUtxoStorageAndRetrieval(t *testing.T) {
 			continue
 		}
 		if utxoMeta == nil {
-			t.Logf("Metadata MISSING for %s#%d (slot %d)",
-				hex.EncodeToString(utxoRef.txId[:8]), utxoRef.outputIdx, utxoRef.slot)
+			t.Logf(
+				"Metadata MISSING for %s#%d (slot %d)",
+				hex.EncodeToString(
+					utxoRef.txId[:8],
+				),
+				utxoRef.outputIdx,
+				utxoRef.slot,
+			)
 			metadataErrors++
 			txn.Release()
 			continue
@@ -242,19 +267,34 @@ func TestUtxoStorageAndRetrieval(t *testing.T) {
 			// Decode offset
 			offset, err := database.DecodeUtxoOffset(blobData)
 			if err != nil {
-				t.Logf("Offset decode error for %s#%d: %v",
-					hex.EncodeToString(utxoRef.txId[:8]), utxoRef.outputIdx, err)
+				t.Logf(
+					"Offset decode error for %s#%d: %v",
+					hex.EncodeToString(
+						utxoRef.txId[:8],
+					),
+					utxoRef.outputIdx,
+					err,
+				)
 				blobErrors++
 				txn.Release()
 				continue
 			}
 
 			// Try to get block CBOR
-			blockCbor, _, err := blob.GetBlock(blobTxn, offset.BlockSlot, offset.BlockHash[:])
+			blockCbor, _, err := blob.GetBlock(
+				blobTxn,
+				offset.BlockSlot,
+				offset.BlockHash[:],
+			)
 			if err != nil {
-				t.Logf("Block retrieval error for %s#%d: slot=%d, hash=%x, err=%v",
-					hex.EncodeToString(utxoRef.txId[:8]), utxoRef.outputIdx,
-					offset.BlockSlot, offset.BlockHash[:8], err)
+				t.Logf(
+					"Block retrieval error for %s#%d: slot=%d, hash=%x, err=%v",
+					hex.EncodeToString(utxoRef.txId[:8]),
+					utxoRef.outputIdx,
+					offset.BlockSlot,
+					offset.BlockHash[:8],
+					err,
+				)
 				blobErrors++
 				txn.Release()
 				continue
@@ -263,9 +303,14 @@ func TestUtxoStorageAndRetrieval(t *testing.T) {
 			// Extract UTxO CBOR
 			end := uint64(offset.ByteOffset) + uint64(offset.ByteLength)
 			if end > uint64(len(blockCbor)) {
-				t.Logf("Offset out of bounds for %s#%d: offset=%d, length=%d, block_size=%d",
-					hex.EncodeToString(utxoRef.txId[:8]), utxoRef.outputIdx,
-					offset.ByteOffset, offset.ByteLength, len(blockCbor))
+				t.Logf(
+					"Offset out of bounds for %s#%d: offset=%d, length=%d, block_size=%d",
+					hex.EncodeToString(utxoRef.txId[:8]),
+					utxoRef.outputIdx,
+					offset.ByteOffset,
+					offset.ByteLength,
+					len(blockCbor),
+				)
 				blobErrors++
 				txn.Release()
 				continue
@@ -298,7 +343,12 @@ func TestUtxoStorageAndRetrieval(t *testing.T) {
 
 	// Require all UTxOs to be retrievable
 	require.Equal(t, 0, retrievalErrors, "Some UTxOs could not be retrieved")
-	require.Equal(t, len(storedUtxos), successCount, "Not all UTxOs were retrieved successfully")
+	require.Equal(
+		t,
+		len(storedUtxos),
+		successCount,
+		"Not all UTxOs were retrieved successfully",
+	)
 }
 
 // TestUtxoByRefAfterSetTransaction verifies that UtxoByRef works immediately
@@ -309,7 +359,12 @@ func TestUtxoByRefAfterSetTransaction(t *testing.T) {
 	require.NoError(t, err)
 	defer os.RemoveAll(tmpDir)
 
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	logger := slog.New(
+		slog.NewTextHandler(
+			os.Stdout,
+			&slog.HandlerOptions{Level: slog.LevelDebug},
+		),
+	)
 
 	// Create database
 	dbConfig := &database.Config{
@@ -355,7 +410,11 @@ func TestUtxoByRefAfterSetTransaction(t *testing.T) {
 		Hash: block.Hash().Bytes(),
 	}
 
-	t.Logf("Using block at slot %d with %d transactions", point.Slot, len(block.Transactions()))
+	t.Logf(
+		"Using block at slot %d with %d transactions",
+		point.Slot,
+		len(block.Transactions()),
+	)
 
 	// Store block and verify UTxO retrieval in same transaction
 	txn := db.Transaction(true)

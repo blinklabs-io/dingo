@@ -431,13 +431,14 @@ type LedgerState struct {
 	slotTickChan                       <-chan SlotTick
 	ctx                                context.Context
 	sync.RWMutex
-	chainsyncMutex             sync.Mutex
-	chainsyncBlockfetchMutex   sync.Mutex
-	chainsyncBlockfetchWaiting bool
-	checkpointWrittenForEpoch  bool
-	closed                     bool
-	inRecovery                 bool // guards against recursive recovery in SubmitAsyncDBTxn
-	validationEnabled          bool
+	chainsyncMutex                sync.Mutex
+	chainsyncBlockfetchMutex      sync.Mutex
+	chainsyncBlockfetchReadyMutex sync.Mutex
+	chainsyncBlockfetchReadyChan  chan struct{}
+	checkpointWrittenForEpoch     bool
+	closed                        bool
+	inRecovery                    bool // guards against recursive recovery in SubmitAsyncDBTxn
+	validationEnabled             bool
 
 	// Sync progress reporting (Fix 4)
 	syncProgressLastLog  time.Time     // last time we logged sync progress
