@@ -286,6 +286,8 @@ func main() {
 	rootCmd.AddCommand(loadCommand())
 	rootCmd.AddCommand(listCommand())
 	rootCmd.AddCommand(versionCommand())
+	rootCmd.AddCommand(mithrilCommand())
+	rootCmd.AddCommand(syncCommand())
 
 	// Execute cobra command
 	exitCode := 0

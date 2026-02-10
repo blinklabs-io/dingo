@@ -31,7 +31,8 @@ type Account struct {
 	ID            uint   `gorm:"primarykey"`
 	AddedSlot     uint64 `gorm:"index"`
 	CertificateID uint   `gorm:"index"`
-	Active        bool   `gorm:"default:true"`
+	Reward        types.Uint64
+	Active        bool `gorm:"default:true"`
 }
 
 func (a *Account) TableName() string {

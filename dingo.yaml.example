@@ -201,3 +201,21 @@ cache:
   # Wait for cache warmup to complete before serving requests
   # Default: true
   warmupSync: true
+
+# Mithril snapshot bootstrap configuration
+# Use 'dingo mithril sync' or 'dingo sync --mithril' to bootstrap from a snapshot
+mithril:
+  # Enable Mithril integration (default: true)
+  enabled: true
+  # Override aggregator URL (auto-detected from network if empty)
+  # Supported networks: mainnet, preprod, preview
+  aggregatorUrl: ""
+  # Directory for downloading snapshot archives
+  # If empty, a randomized temporary directory is created automatically
+  # downloadDir: ""
+  # Remove temporary files after loading completes
+  # Default: true
+  cleanupAfterLoad: true
+  # Verify the Mithril certificate chain from snapshot back to genesis
+  # Default: true
+  verifyCertificates: true
