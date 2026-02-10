@@ -55,6 +55,10 @@ const (
 
 	// Interval for periodic sync progress reporting
 	syncProgressLogInterval = 30 * time.Second
+
+	// Rollback loop detection thresholds
+	rollbackLoopThreshold = 3               // number of rollbacks to same slot before breaking loop
+	rollbackLoopWindow    = 5 * time.Minute // time window for rollback loop detection
 )
 
 func (ls *LedgerState) handleEventChainsync(evt event.Event) {
@@ -152,10 +156,38 @@ func (ls *LedgerState) handleEventBlockfetch(evt event.Event) {
 	}
 }
 
+// detectConnectionSwitch checks for an active connection change and logs a
+// summary of dropped events when a switch is detected. It returns the current
+// active connection ID and whether connection filtering is configured. When
+// configured is false, callers should skip all connection-based filtering.
+func (ls *LedgerState) detectConnectionSwitch() (activeConnId *ouroboros.ConnectionId, configured bool) {
+	if ls.config.GetActiveConnectionFunc == nil {
+		return nil, false
+	}
+	activeConnId = ls.config.GetActiveConnectionFunc()
+	if activeConnId != nil &&
+		(ls.lastActiveConnId == nil || *ls.lastActiveConnId != *activeConnId) {
+		if ls.lastActiveConnId != nil {
+			ls.config.Logger.Info(
+				"active connection changed",
+				"component", "ledger",
+				"previous_connection_id", ls.lastActiveConnId.String(),
+				"new_connection_id", activeConnId.String(),
+				"dropped_headers", ls.dropEventCount,
+				"dropped_rollbacks", ls.dropRollbackCount,
+			)
+			ls.dropEventCount = 0
+			ls.dropRollbackCount = 0
+		}
+		ls.lastActiveConnId = activeConnId
+		ls.rollbackHistory = nil
+	}
+	return activeConnId, true
+}
+
 func (ls *LedgerState) handleEventChainsyncRollback(e ChainsyncEvent) error {
 	// Filter events from non-active connections when chain selection is enabled
-	if ls.config.GetActiveConnectionFunc != nil {
-		activeConnId := ls.config.GetActiveConnectionFunc()
+	if activeConnId, configured := ls.detectConnectionSwitch(); configured {
 		if activeConnId == nil {
 			// No active connection set yet, process this event
 			ls.config.Logger.Debug(
@@ -186,6 +218,40 @@ func (ls *LedgerState) handleEventChainsyncRollback(e ChainsyncEvent) error {
 		}
 	}
 
+	// Rollback loop detection: track recent rollbacks and skip if
+	// the same slot appears too frequently within the detection window.
+	now := time.Now()
+	ls.rollbackHistory = append(ls.rollbackHistory, rollbackRecord{
+		slot:      e.Point.Slot,
+		timestamp: now,
+	})
+	// Prune entries older than the detection window
+	cutoff := now.Add(-rollbackLoopWindow)
+	pruned := ls.rollbackHistory[:0]
+	for _, r := range ls.rollbackHistory {
+		if !r.timestamp.Before(cutoff) {
+			pruned = append(pruned, r)
+		}
+	}
+	ls.rollbackHistory = pruned
+	// Count rollbacks to this specific slot
+	var slotCount int
+	for _, r := range ls.rollbackHistory {
+		if r.slot == e.Point.Slot {
+			slotCount++
+		}
+	}
+	if slotCount >= rollbackLoopThreshold {
+		ls.config.Logger.Warn(
+			"rollback loop detected, skipping rollback to break loop",
+			"component", "ledger",
+			"slot", e.Point.Slot,
+			"count", slotCount,
+			"window", rollbackLoopWindow,
+		)
+		return nil
+	}
+
 	if ls.chainsyncState == SyncingChainsyncState {
 		ls.config.Logger.Warn(
 			fmt.Sprintf(
@@ -204,8 +270,7 @@ func (ls *LedgerState) handleEventChainsyncRollback(e ChainsyncEvent) error {
 
 func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 	// Filter events from non-active connections when chain selection is enabled
-	if ls.config.GetActiveConnectionFunc != nil {
-		activeConnId := ls.config.GetActiveConnectionFunc()
+	if activeConnId, configured := ls.detectConnectionSwitch(); configured {
 		if activeConnId == nil {
 			// No active connection set yet, process this event
 			ls.config.Logger.Debug(
@@ -256,16 +321,6 @@ func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 	allowedHeaderCount := blockfetchBatchSize * 4
 	headerCount := ls.chain.HeaderCount()
 
-	// Wait for current blockfetch batch to finish before we collect more block headers
-	if headerCount >= allowedHeaderCount {
-		ls.chainsyncBlockfetchReadyMutex.Lock()
-		tmpChainsyncBlockfetchReadyChan := ls.chainsyncBlockfetchReadyChan
-		ls.chainsyncBlockfetchReadyMutex.Unlock()
-
-		if tmpChainsyncBlockfetchReadyChan != nil {
-			<-tmpChainsyncBlockfetchReadyChan
-		}
-	}
 	// Add header to chain
 	if err := ls.chain.AddBlockHeader(e.BlockHeader); err != nil {
 		var notFitErr chain.BlockNotFitChainTipError
@@ -301,7 +356,7 @@ func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 	ls.chainsyncBlockfetchMutex.Lock()
 	defer ls.chainsyncBlockfetchMutex.Unlock()
 	// Don't start fetch if there's already one in progress
-	if ls.chainsyncBlockfetchReadyChan != nil {
+	if ls.chainsyncBlockfetchTimeoutTimer != nil {
 		ls.chainsyncBlockfetchWaiting = true
 		return nil
 	}
@@ -380,7 +435,9 @@ func (ls *LedgerState) processBlockEvents() error {
 // This mirrors how the Shelley epoch nonce uses the Shelley genesis hash.
 func GenesisBlockHash(cfg *cardano.CardanoNodeConfig) ([32]byte, error) {
 	if cfg == nil || cfg.ByronGenesisHash == "" {
-		return [32]byte{}, errors.New("byron genesis hash not available in config")
+		return [32]byte{}, errors.New(
+			"byron genesis hash not available in config",
+		)
 	}
 	hashBytes, err := hex.DecodeString(cfg.ByronGenesisHash)
 	if err != nil {
@@ -493,7 +550,12 @@ func (ls *LedgerState) createGenesisBlock() error {
 
 		// Build the block structure manually to track exact byte offsets
 		// We need to know where each output CBOR starts within the block
-		blockCbor, err := buildGenesisBlockCbor(txHashes, txUtxos, utxoOffsets, genesisHash)
+		blockCbor, err := buildGenesisBlockCbor(
+			txHashes,
+			txUtxos,
+			utxoOffsets,
+			genesisHash,
+		)
 		if err != nil {
 			return fmt.Errorf("build genesis block cbor: %w", err)
 		}
@@ -515,7 +577,11 @@ func (ls *LedgerState) createGenesisBlock() error {
 				utxoOffsets,
 				txn,
 			); err != nil {
-				return fmt.Errorf("set genesis transaction %x: %w", txHashArray[:8], err)
+				return fmt.Errorf(
+					"set genesis transaction %x: %w",
+					txHashArray[:8],
+					err,
+				)
 			}
 		}
 
@@ -619,8 +685,8 @@ func buildGenesisBlockCbor(
 			utxoOffsets[ref] = database.CborOffset{
 				BlockSlot:  0,
 				BlockHash:  blockHash,
-				ByteOffset: uint32(offset),    // #nosec G115: bounds checked above
-				ByteLength: uint32(outputLen), // #nosec G115: bounds checked above
+				ByteOffset: uint32(offset),    //nolint:gosec // bounds checked above
+				ByteLength: uint32(outputLen), //nolint:gosec // bounds checked above
 			}
 		}
 	}
@@ -1104,11 +1170,6 @@ func (ls *LedgerState) blockfetchRequestRangeStart(
 		return fmt.Errorf("request block range: %w", err)
 	}
 
-	// Create our blockfetch done signal channels
-	ls.chainsyncBlockfetchReadyMutex.Lock()
-	ls.chainsyncBlockfetchReadyChan = make(chan struct{})
-	ls.chainsyncBlockfetchReadyMutex.Unlock()
-
 	// Stop any existing timer before creating a new one
 	if ls.chainsyncBlockfetchTimeoutTimer != nil {
 		ls.chainsyncBlockfetchTimeoutTimer.Stop()
@@ -1159,14 +1220,6 @@ func (ls *LedgerState) blockfetchRequestRangeCleanup(resetFlags bool) {
 		0,
 		len(ls.chainsyncBlockEvents),
 	)
-	// Close our blockfetch done signal channel
-	ls.chainsyncBlockfetchReadyMutex.Lock()
-	defer ls.chainsyncBlockfetchReadyMutex.Unlock()
-	if ls.chainsyncBlockfetchReadyChan != nil {
-		close(ls.chainsyncBlockfetchReadyChan)
-		ls.chainsyncBlockfetchReadyChan = nil
-	}
-
 	// Reset flags
 	if resetFlags {
 		ls.chainsyncBlockfetchWaiting = false

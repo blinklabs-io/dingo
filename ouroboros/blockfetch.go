@@ -38,8 +38,8 @@ func (o *Ouroboros) blockfetchClientConnOpts() []blockfetch.BlockFetchOptionFunc
 	return []blockfetch.BlockFetchOptionFunc{
 		blockfetch.WithBlockFunc(o.blockfetchClientBlock),
 		blockfetch.WithBatchDoneFunc(o.blockfetchClientBatchDone),
-		blockfetch.WithBatchStartTimeout(2 * time.Second),
-		blockfetch.WithBlockTimeout(2 * time.Second),
+		blockfetch.WithBatchStartTimeout(60 * time.Second),
+		blockfetch.WithBlockTimeout(60 * time.Second),
 	}
 }
 
