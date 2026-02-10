@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo"
+	"github.com/blinklabs-io/dingo/chainsync"
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/ledger"
@@ -125,6 +126,20 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 			return fmt.Errorf("invalid shutdown timeout: %w", err)
 		}
 	}
+	// Use the package-level default to avoid drift.
+	chainsyncStallTimeout := chainsync.DefaultStallTimeout
+	if cfg.Chainsync.StallTimeout != "" {
+		var err error
+		chainsyncStallTimeout, err = time.ParseDuration(
+			cfg.Chainsync.StallTimeout,
+		)
+		if err != nil {
+			return fmt.Errorf(
+				"invalid chainsync stall timeout: %w",
+				err,
+			)
+		}
+	}
 
 	d, err := dingo.New(
 		dingo.NewConfig(
@@ -165,6 +180,12 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 				cfg.ActivePeersTopologyQuota,
 				cfg.ActivePeersGossipQuota,
 				cfg.ActivePeersLedgerQuota,
+			),
+			dingo.WithChainsyncMaxClients(
+				cfg.Chainsync.MaxClients,
+			),
+			dingo.WithChainsyncStallTimeout(
+				chainsyncStallTimeout,
 			),
 		),
 	)
