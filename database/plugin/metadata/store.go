@@ -445,6 +445,36 @@ type MetadataStore interface {
 		types.Txn,
 	) (bool, error)
 
+	// GetCommitteeActiveCount returns the number of active (non-resigned)
+	// committee members.
+	GetCommitteeActiveCount(types.Txn) (int, error)
+
+	// DRep voting power and activity methods
+
+	// GetDRepVotingPower calculates the voting power for a DRep by summing
+	// the stake of all accounts delegated to it. Uses the current live
+	// UTxO set (deleted_slot = 0) for the calculation.
+	GetDRepVotingPower(
+		[]byte, // drepCredential
+		types.Txn,
+	) (uint64, error)
+
+	// UpdateDRepActivity updates the DRep's last activity epoch and
+	// recalculates the expiry epoch.
+	UpdateDRepActivity(
+		[]byte, // drepCredential
+		uint64, // activityEpoch
+		uint64, // inactivityPeriod
+		types.Txn,
+	) error
+
+	// GetExpiredDReps retrieves all active DReps whose expiry epoch is at
+	// or before the given epoch.
+	GetExpiredDReps(
+		uint64, // epoch
+		types.Txn,
+	) ([]*models.Drep, error)
+
 	// Constitution methods
 
 	// GetConstitution retrieves the current constitution.

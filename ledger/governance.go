@@ -111,9 +111,14 @@ func processGovernanceProposals(
 // processGovernanceVotes extracts voting procedures from a Conway-era
 // transaction and persists them to the database. Each vote maps a voter
 // (CC member, DRep, or SPO) and a governance action to a vote choice.
+//
+// When a DRep votes, their activity epoch is updated to the current epoch,
+// which resets their expiry countdown based on the dRepInactivityPeriod.
 func processGovernanceVotes(
 	tx lcommon.Transaction,
 	point ocommon.Point,
+	currentEpoch uint64,
+	drepInactivityPeriod uint64,
 	db *database.Database,
 	txn *database.Txn,
 ) error {
@@ -132,6 +137,10 @@ func processGovernanceVotes(
 	}
 	proposalCache := make(map[proposalKey]*models.GovernanceProposal)
 
+	// Track DRep credentials that have already had their activity updated
+	// in this transaction to avoid redundant DB writes.
+	drepActivityUpdated := make(map[string]bool)
+
 	for voter, actionVotes := range votingProcedures {
 		if voter == nil {
 			continue
@@ -144,6 +153,26 @@ func processGovernanceVotes(
 				txHash[:8],
 				err,
 			)
+		}
+
+		// Update DRep activity when a DRep votes (once per DRep per tx)
+		if voterType == models.VoterTypeDRep {
+			credKey := string(voter.Hash[:])
+			if !drepActivityUpdated[credKey] {
+				if err := db.UpdateDRepActivity(
+					voter.Hash[:],
+					currentEpoch,
+					drepInactivityPeriod,
+					txn,
+				); err != nil {
+					return fmt.Errorf(
+						"update drep activity in tx %x: %w",
+						txHash[:8],
+						err,
+					)
+				}
+				drepActivityUpdated[credKey] = true
+			}
 		}
 
 		for actionId, procedure := range actionVotes {

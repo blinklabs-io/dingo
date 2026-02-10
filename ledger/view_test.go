@@ -125,3 +125,98 @@ func TestCostModels_NilPParams(t *testing.T) {
 		"should return empty map, not nil")
 	require.Empty(t, result)
 }
+
+func TestIsCommitteeThresholdMet(t *testing.T) {
+	tests := []struct {
+		name                 string
+		yesVotes             int
+		totalActiveMembers   int
+		thresholdNumerator   uint64
+		thresholdDenominator uint64
+		expected             bool
+	}{
+		{
+			name:                 "no committee - threshold trivially met",
+			yesVotes:             0,
+			totalActiveMembers:   0,
+			thresholdNumerator:   2,
+			thresholdDenominator: 3,
+			expected:             true,
+		},
+		{
+			name:                 "zero threshold - always met",
+			yesVotes:             0,
+			totalActiveMembers:   5,
+			thresholdNumerator:   0,
+			thresholdDenominator: 1,
+			expected:             true,
+		},
+		{
+			name:                 "zero denominator - not met",
+			yesVotes:             5,
+			totalActiveMembers:   5,
+			thresholdNumerator:   1,
+			thresholdDenominator: 0,
+			expected:             false,
+		},
+		{
+			name:                 "2/3 threshold met exactly",
+			yesVotes:             4,
+			totalActiveMembers:   6,
+			thresholdNumerator:   2,
+			thresholdDenominator: 3,
+			expected:             true,
+		},
+		{
+			name:                 "2/3 threshold not met",
+			yesVotes:             3,
+			totalActiveMembers:   6,
+			thresholdNumerator:   2,
+			thresholdDenominator: 3,
+			expected:             false,
+		},
+		{
+			name:                 "simple majority met",
+			yesVotes:             3,
+			totalActiveMembers:   5,
+			thresholdNumerator:   1,
+			thresholdDenominator: 2,
+			expected:             true,
+		},
+		{
+			name:                 "simple majority not met",
+			yesVotes:             2,
+			totalActiveMembers:   5,
+			thresholdNumerator:   1,
+			thresholdDenominator: 2,
+			expected:             false,
+		},
+		{
+			name:                 "unanimous met",
+			yesVotes:             5,
+			totalActiveMembers:   5,
+			thresholdNumerator:   1,
+			thresholdDenominator: 1,
+			expected:             true,
+		},
+		{
+			name:                 "unanimous not met",
+			yesVotes:             4,
+			totalActiveMembers:   5,
+			thresholdNumerator:   1,
+			thresholdDenominator: 1,
+			expected:             false,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			result := IsCommitteeThresholdMet(
+				tc.yesVotes,
+				tc.totalActiveMembers,
+				tc.thresholdNumerator,
+				tc.thresholdDenominator,
+			)
+			assert.Equal(t, tc.expected, result)
+		})
+	}
+}

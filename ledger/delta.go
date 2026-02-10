@@ -172,25 +172,20 @@ func (d *LedgerDelta) processGovernance(
 		return nil
 	}
 
-	// Determine current epoch and governance action lifetime from protocol params.
-	// These are only available for Conway-era protocol parameters.
-	var currentEpoch uint64
-	var govActionLifetime uint64
+	// Determine current epoch and Conway protocol parameters.
+	// These are needed for both proposals (govActionLifetime) and
+	// votes (dRepInactivityPeriod for activity tracking).
+	ls.RLock()
+	currentEpoch := ls.currentEpoch.EpochId
+	pparams := ls.currentPParams
+	ls.RUnlock()
 
-	if len(proposals) > 0 {
-		ls.RLock()
-		currentEpoch = ls.currentEpoch.EpochId
-		pparams := ls.currentPParams
-		ls.RUnlock()
-
-		conwayPParams, ok := pparams.(*conway.ConwayProtocolParameters)
-		if !ok {
-			return fmt.Errorf(
-				"governance proposals require Conway protocol parameters, got %T",
-				pparams,
-			)
-		}
-		govActionLifetime = conwayPParams.GovActionValidityPeriod
+	conwayPParams, ok := pparams.(*conway.ConwayProtocolParameters)
+	if !ok {
+		return fmt.Errorf(
+			"governance requires Conway protocol parameters, got %T",
+			pparams,
+		)
 	}
 
 	// Process governance proposals
@@ -199,7 +194,7 @@ func (d *LedgerDelta) processGovernance(
 			tx,
 			d.Point,
 			currentEpoch,
-			govActionLifetime,
+			conwayPParams.GovActionValidityPeriod,
 			ls.db,
 			txn,
 		); err != nil {
@@ -212,6 +207,8 @@ func (d *LedgerDelta) processGovernance(
 		if err := processGovernanceVotes(
 			tx,
 			d.Point,
+			currentEpoch,
+			conwayPParams.DRepInactivityPeriod,
 			ls.db,
 			txn,
 		); err != nil {
