@@ -47,7 +47,9 @@ func processGovernanceProposals(
 	txHash := tx.Hash().Bytes()
 
 	for i, proposal := range proposals {
-		actionType, parentTxHash, parentActionIdx, policyHash, err := extractGovActionInfo(proposal.GovAction())
+		actionType, parentTxHash, parentActionIdx, policyHash, err := extractGovActionInfo(
+			proposal.GovAction(),
+		)
 		if err != nil {
 			return fmt.Errorf(
 				"proposal %d in tx %x: %w",

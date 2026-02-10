@@ -32,7 +32,10 @@ func (ls *LedgerState) handleEventChainUpdate(evt event.Event) {
 	}
 }
 
-func (ls *LedgerState) publishBlockEvent(action BlockAction, block models.Block) {
+func (ls *LedgerState) publishBlockEvent(
+	action BlockAction,
+	block models.Block,
+) {
 	if ls.config.EventBus == nil {
 		return
 	}

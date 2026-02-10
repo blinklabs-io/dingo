@@ -133,8 +133,20 @@ func TestSlotClockGetEpochForSlot(t *testing.T) {
 	for _, tc := range testCases {
 		epochInfo, err := clock.GetEpochForSlot(tc.slot)
 		require.NoError(t, err)
-		assert.Equal(t, tc.expectedEpoch, epochInfo.EpochId, "epoch mismatch for slot %d", tc.slot)
-		assert.Equal(t, tc.expectedStart, epochInfo.StartSlot, "start slot mismatch for slot %d", tc.slot)
+		assert.Equal(
+			t,
+			tc.expectedEpoch,
+			epochInfo.EpochId,
+			"epoch mismatch for slot %d",
+			tc.slot,
+		)
+		assert.Equal(
+			t,
+			tc.expectedStart,
+			epochInfo.StartSlot,
+			"start slot mismatch for slot %d",
+			tc.slot,
+		)
 	}
 }
 
@@ -205,7 +217,13 @@ func TestSlotClockIsEpochBoundary(t *testing.T) {
 	for _, tc := range testCases {
 		isBoundary, err := clock.IsEpochBoundary(tc.slot)
 		require.NoError(t, err)
-		assert.Equal(t, tc.isBoundary, isBoundary, "boundary check failed for slot %d", tc.slot)
+		assert.Equal(
+			t,
+			tc.isBoundary,
+			isBoundary,
+			"boundary check failed for slot %d",
+			tc.slot,
+		)
 	}
 }
 
@@ -363,14 +381,38 @@ func TestSlotTickSlotsUntilEpoch(t *testing.T) {
 		expectedRemain  uint64
 		expectedIsStart bool
 	}{
-		{slot: 0, expectedRemain: 100, expectedIsStart: true},   // Start of epoch 0
-		{slot: 1, expectedRemain: 99, expectedIsStart: false},   // Near start
-		{slot: 50, expectedRemain: 50, expectedIsStart: false},  // Middle
-		{slot: 99, expectedRemain: 1, expectedIsStart: false},   // Last slot of epoch 0
-		{slot: 100, expectedRemain: 100, expectedIsStart: true}, // Start of epoch 1
-		{slot: 150, expectedRemain: 50, expectedIsStart: false}, // Middle of epoch 1
-		{slot: 199, expectedRemain: 1, expectedIsStart: false},  // Last slot of epoch 1
-		{slot: 200, expectedRemain: 100, expectedIsStart: true}, // Start of epoch 2
+		{
+			slot:            0,
+			expectedRemain:  100,
+			expectedIsStart: true,
+		}, // Start of epoch 0
+		{slot: 1, expectedRemain: 99, expectedIsStart: false},  // Near start
+		{slot: 50, expectedRemain: 50, expectedIsStart: false}, // Middle
+		{
+			slot:            99,
+			expectedRemain:  1,
+			expectedIsStart: false,
+		}, // Last slot of epoch 0
+		{
+			slot:            100,
+			expectedRemain:  100,
+			expectedIsStart: true,
+		}, // Start of epoch 1
+		{
+			slot:            150,
+			expectedRemain:  50,
+			expectedIsStart: false,
+		}, // Middle of epoch 1
+		{
+			slot:            199,
+			expectedRemain:  1,
+			expectedIsStart: false,
+		}, // Last slot of epoch 1
+		{
+			slot:            200,
+			expectedRemain:  100,
+			expectedIsStart: true,
+		}, // Start of epoch 2
 	}
 
 	for _, tc := range testCases {
@@ -378,8 +420,20 @@ func TestSlotTickSlotsUntilEpoch(t *testing.T) {
 			slotTime, _ := provider.SlotToTime(tc.slot)
 			tick, err := clock.buildSlotTick(tc.slot, slotTime)
 			require.NoError(t, err)
-			assert.Equal(t, tc.expectedRemain, tick.SlotsUntilEpoch, "slots until epoch mismatch for slot %d", tc.slot)
-			assert.Equal(t, tc.expectedIsStart, tick.IsEpochStart, "epoch start mismatch for slot %d", tc.slot)
+			assert.Equal(
+				t,
+				tc.expectedRemain,
+				tick.SlotsUntilEpoch,
+				"slots until epoch mismatch for slot %d",
+				tc.slot,
+			)
+			assert.Equal(
+				t,
+				tc.expectedIsStart,
+				tick.IsEpochStart,
+				"epoch start mismatch for slot %d",
+				tc.slot,
+			)
 		})
 	}
 }

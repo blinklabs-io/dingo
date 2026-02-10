@@ -135,8 +135,11 @@ func createTestBlock(
 				copy(k[:], coldPubKey)
 				return k
 			}(),
-			VrfKey:        vrfPk,
-			VrfResult:     lcommon.VrfResult{Output: vrfOutput, Proof: vrfProof},
+			VrfKey: vrfPk,
+			VrfResult: lcommon.VrfResult{
+				Output: vrfOutput,
+				Proof:  vrfProof,
+			},
 			BlockBodySize: 1024,
 			BlockBodyHash: func() lcommon.Blake2b256 {
 				var h lcommon.Blake2b256
