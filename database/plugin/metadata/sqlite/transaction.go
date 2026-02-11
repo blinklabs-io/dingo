@@ -596,7 +596,8 @@ func (d *MetadataStoreSqlite) SetTransaction(
 			}
 			// UTXO was spent by a different transaction - this is a conflict
 			return fmt.Errorf(
-				"UTXO already spent: %x:%d",
+				"%w: %x:%d",
+				types.ErrUtxoConflict,
 				inTxId,
 				inIdx,
 			)
