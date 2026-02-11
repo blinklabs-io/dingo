@@ -26,6 +26,7 @@ import (
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/immutable"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/ledger"
@@ -72,6 +73,26 @@ func Load(cfg *config.Config, logger *slog.Logger, immutableDir string) error {
 		return err
 	}
 	defer db.Close()
+	// Enable bulk-load optimizations if the metadata store supports them
+	if optimizer, ok := db.Metadata().(metadata.BulkLoadOptimizer); ok {
+		if err := optimizer.SetBulkLoadPragmas(); err != nil {
+			logger.Warn(
+				"failed to set bulk-load optimizations",
+				"error",
+				err,
+			)
+		} else {
+			defer func() {
+				if err := optimizer.RestoreNormalPragmas(); err != nil {
+					logger.Error(
+						"failed to restore normal settings",
+						"error",
+						err,
+					)
+				}
+			}()
+		}
+	}
 	// Load chain
 	eventBus := event.NewEventBus(nil, logger)
 	defer eventBus.Stop()
@@ -183,14 +204,26 @@ func Load(cfg *config.Config, logger *slog.Logger, immutableDir string) error {
 		"finished copying blocks from immutable DB",
 		"blocks_copied", blocksCopied,
 	)
-	// Wait for ledger to catch up
+	// Wait for ledger to catch up with tight polling
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+	timeout := time.After(30 * time.Minute)
 	for {
-		time.Sleep(5 * time.Second)
-		tip := ls.Tip()
-		if tip.Point.Slot >= immutableTip.Slot {
-			break
+		select {
+		case <-ticker.C:
+			tip := ls.Tip()
+			if tip.Point.Slot >= immutableTip.Slot {
+				goto done
+			}
+		case <-timeout:
+			return fmt.Errorf(
+				"timed out waiting for ledger to catch up (tip slot %d, target slot %d)",
+				ls.Tip().Point.Slot,
+				immutableTip.Slot,
+			)
 		}
 	}
+done:
 	logger.Info(
 		"finished processing blocks from immutable DB",
 		"blocks_copied", blocksCopied,

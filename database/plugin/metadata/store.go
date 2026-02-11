@@ -504,6 +504,14 @@ type MetadataStore interface {
 	DeletePParamUpdatesAfterSlot(uint64, types.Txn) error
 }
 
+// BulkLoadOptimizer is an optional interface that metadata stores can
+// implement to provide optimized settings for bulk loading operations.
+// The load command checks for this interface and uses it when available.
+type BulkLoadOptimizer interface {
+	SetBulkLoadPragmas() error
+	RestoreNormalPragmas() error
+}
+
 // New creates a new metadata store instance using the specified plugin
 func New(pluginName string) (MetadataStore, error) {
 	// Get and start the plugin

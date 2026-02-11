@@ -524,3 +524,65 @@ func (d *MetadataStoreSqlite) Where(
 ) *gorm.DB {
 	return d.DB().Where(query, args...)
 }
+
+// SetBulkLoadPragmas configures SQLite PRAGMAs optimized for bulk loading.
+// These settings trade crash safety for speed, which is acceptable because
+// immutable chunk data can always be reloaded.
+func (d *MetadataStoreSqlite) SetBulkLoadPragmas() error {
+	pragmas := []string{
+		"PRAGMA synchronous = OFF",
+		"PRAGMA cache_size = -200000", // 200MB cache (4x default)
+		"PRAGMA temp_store = MEMORY",
+		"PRAGMA wal_autocheckpoint = 10000", // Reduce checkpoint frequency
+	}
+	for _, pragma := range pragmas {
+		if result := d.DB().Exec(pragma); result.Error != nil {
+			// Rollback any already-applied pragmas before returning
+			if restoreErr := d.RestoreNormalPragmas(); restoreErr != nil {
+				d.logger.Error(
+					"failed to restore pragmas after partial bulk-load failure",
+					"error", restoreErr,
+				)
+			}
+			return fmt.Errorf("set pragma %q: %w", pragma, result.Error)
+		}
+	}
+	d.logger.Info(
+		"set bulk-load PRAGMAs (synchronous=OFF, cache=200MB, temp=MEMORY)",
+	)
+	return nil
+}
+
+// RestoreNormalPragmas restores SQLite PRAGMAs to production settings
+// after bulk loading is complete.
+func (d *MetadataStoreSqlite) RestoreNormalPragmas() error {
+	pragmas := []string{
+		"PRAGMA synchronous = NORMAL",
+		"PRAGMA cache_size = -50000", // Restore default 50MB
+		"PRAGMA temp_store = DEFAULT",
+		"PRAGMA wal_autocheckpoint = 1000", // Restore default
+	}
+	var errs []error
+	for _, pragma := range pragmas {
+		if result := d.DB().Exec(pragma); result.Error != nil {
+			errs = append(
+				errs,
+				fmt.Errorf(
+					"restore pragma %q: %w",
+					pragma,
+					result.Error,
+				),
+			)
+		}
+	}
+	if len(errs) > 0 {
+		d.logger.Warn(
+			"partially restored normal PRAGMAs",
+			"error",
+			errors.Join(errs...),
+		)
+		return errors.Join(errs...)
+	}
+	d.logger.Info("restored normal PRAGMAs")
+	return nil
+}
