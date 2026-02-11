@@ -97,6 +97,163 @@ func (d *MetadataStoreMysql) SetDrep(
 	return nil
 }
 
+// GetDRepVotingPower calculates the voting power for a DRep by summing the
+// stake of all accounts delegated to it. Uses the current live UTxO set
+// (deleted_slot = 0) for the calculation.
+//
+// TODO: This implementation uses the current live UTxO set as an
+// approximation. A future implementation should accept an epoch
+// parameter and use epoch-based stake snapshots for accurate
+// voting power at a specific point in time.
+func (d *MetadataStoreMysql) GetDRepVotingPower(
+	drepCredential []byte,
+	txn types.Txn,
+) (uint64, error) {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return 0, err
+	}
+	var totalStake uint64
+	if err := db.Raw(`
+		SELECT COALESCE(SUM(CAST(u.amount AS UNSIGNED)), 0)
+		FROM utxo u
+		WHERE u.deleted_slot = 0
+		AND u.staking_key IN (
+			SELECT a.staking_key
+			FROM account a
+			WHERE a.drep = ? AND a.active = 1
+		)
+	`, drepCredential).Scan(&totalStake).Error; err != nil {
+		return 0, fmt.Errorf("get drep voting power: %w", err)
+	}
+	return totalStake, nil
+}
+
+// UpdateDRepActivity updates the DRep's last activity epoch and
+// recalculates the expiry epoch.
+// Returns ErrDrepActivityNotUpdated if no matching DRep record was found.
+//
+// MySQL's RowsAffected returns changed rows (not matched rows) by
+// default. If a DRep votes twice in the same epoch, the second
+// update sets identical values and RowsAffected returns 0. To
+// distinguish "not found" from "no change", we add a WHERE clause
+// that checks the current values differ, then fall back to an
+// existence check when RowsAffected is 0.
+func (d *MetadataStoreMysql) UpdateDRepActivity(
+	drepCredential []byte,
+	activityEpoch uint64,
+	inactivityPeriod uint64,
+	txn types.Txn,
+) error {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return err
+	}
+	expiryEpoch := activityEpoch + inactivityPeriod
+	result := db.Model(&models.Drep{}).
+		Where(
+			"credential = ? AND (last_activity_epoch != ? OR expiry_epoch != ?)",
+			drepCredential,
+			activityEpoch,
+			expiryEpoch,
+		).
+		Updates(map[string]any{
+			"last_activity_epoch": activityEpoch,
+			"expiry_epoch":        expiryEpoch,
+		})
+	if result.Error != nil {
+		return fmt.Errorf("update drep activity: %w", result.Error)
+	}
+	if result.RowsAffected == 0 {
+		// Values already match OR DRep not found.
+		// Check existence to distinguish the two cases.
+		var count int64
+		if err := db.Model(&models.Drep{}).
+			Where("credential = ?", drepCredential).
+			Count(&count).Error; err != nil {
+			return fmt.Errorf(
+				"check drep existence: %w",
+				err,
+			)
+		}
+		if count == 0 {
+			return models.ErrDrepActivityNotUpdated
+		}
+	}
+	return nil
+}
+
+// GetExpiredDReps retrieves all active DReps whose expiry epoch is at
+// or before the given epoch.
+func (d *MetadataStoreMysql) GetExpiredDReps(
+	epoch uint64,
+	txn types.Txn,
+) ([]*models.Drep, error) {
+	var dreps []*models.Drep
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return nil, err
+	}
+	if result := db.Where(
+		"active = ? AND expiry_epoch > 0 AND expiry_epoch <= ?",
+		true,
+		epoch,
+	).Find(&dreps); result.Error != nil {
+		return nil, fmt.Errorf("get expired dreps: %w", result.Error)
+	}
+	return dreps, nil
+}
+
+// GetCommitteeActiveCount returns the number of active (non-resigned)
+// committee members.
+func (d *MetadataStoreMysql) GetCommitteeActiveCount(
+	txn types.Txn,
+) (int, error) {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return 0, err
+	}
+	var count int64
+	if result := db.Raw(`
+		SELECT COUNT(*) FROM (
+			SELECT DISTINCT a.cold_credential
+			FROM auth_committee_hot a
+			INNER JOIN certs c
+				ON c.id = a.certificate_id
+			WHERE NOT EXISTS (
+				SELECT 1
+				FROM auth_committee_hot a2
+				INNER JOIN certs c2
+					ON c2.id = a2.certificate_id
+				WHERE a2.cold_credential = a.cold_credential
+				AND (
+					a2.added_slot > a.added_slot
+					OR (a2.added_slot = a.added_slot
+						AND c2.cert_index > c.cert_index)
+				)
+			)
+			AND NOT EXISTS (
+				SELECT 1
+				FROM resign_committee_cold r
+				INNER JOIN certs cr
+					ON cr.id = r.certificate_id
+				WHERE r.cold_credential = a.cold_credential
+				AND (
+					r.added_slot > a.added_slot
+					OR (r.added_slot = a.added_slot
+						AND cr.cert_index > c.cert_index)
+				)
+			)
+		) active_members
+	`).Scan(&count); result.Error != nil {
+		return 0, fmt.Errorf(
+			"get committee active count: %w",
+			result.Error,
+		)
+	}
+	return int(count), nil
+}
+
 // drepCertRecord holds fields from a DRep certificate for batch processing
 // during DRep state restoration.
 type drepCertRecord struct {
@@ -364,12 +521,17 @@ func (d *MetadataStoreMysql) RestoreDrepStateAtSlot(
 			}
 		}
 
-		// Update the DRep with restored state
+		// Update the DRep with restored state.
+		// Reset LastActivityEpoch and ExpiryEpoch to 0 since we cannot
+		// reliably reconstruct these values from certificate data alone
+		// during rollback. They will be recalculated as new activity occurs.
 		if result := db.Model(&drep).Updates(map[string]any{
-			"anchor_url":  anchorUrl,
-			"anchor_hash": anchorHash,
-			"active":      active,
-			"added_slot":  latestSlot,
+			"anchor_url":          anchorUrl,
+			"anchor_hash":         anchorHash,
+			"active":              active,
+			"added_slot":          latestSlot,
+			"last_activity_epoch": 0,
+			"expiry_epoch":        0,
 		}); result.Error != nil {
 			return result.Error
 		}

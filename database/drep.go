@@ -86,3 +86,71 @@ func (d *Database) GetActiveDreps(
 	}
 	return d.metadata.GetActiveDreps(txn.Metadata())
 }
+
+// GetDRepVotingPower calculates the voting power for a DRep by summing
+// the stake of all accounts delegated to it. Uses the current live
+// UTxO set (deleted_slot = 0) for the calculation.
+func (d *Database) GetDRepVotingPower(
+	drepCredential []byte,
+	txn *Txn,
+) (uint64, error) {
+	if txn == nil {
+		txn = d.MetadataTxn(false)
+		defer txn.Release()
+	}
+	return d.metadata.GetDRepVotingPower(
+		drepCredential,
+		txn.Metadata(),
+	)
+}
+
+// UpdateDRepActivity updates the DRep's last activity epoch and
+// recalculates the expiry epoch.
+func (d *Database) UpdateDRepActivity(
+	drepCredential []byte,
+	activityEpoch uint64,
+	inactivityPeriod uint64,
+	txn *Txn,
+) error {
+	owned := false
+	if txn == nil {
+		txn = d.MetadataTxn(true)
+		owned = true
+		defer func() {
+			if owned {
+				txn.Rollback() //nolint:errcheck
+			}
+		}()
+	}
+	if err := d.metadata.UpdateDRepActivity(
+		drepCredential,
+		activityEpoch,
+		inactivityPeriod,
+		txn.Metadata(),
+	); err != nil {
+		return fmt.Errorf(
+			"failed to update DRep activity: %w",
+			err,
+		)
+	}
+	if owned {
+		if err := txn.Commit(); err != nil {
+			return fmt.Errorf("commit transaction: %w", err)
+		}
+		owned = false
+	}
+	return nil
+}
+
+// GetExpiredDReps returns all active DReps whose expiry epoch is at
+// or before the given epoch.
+func (d *Database) GetExpiredDReps(
+	epoch uint64,
+	txn *Txn,
+) ([]*models.Drep, error) {
+	if txn == nil {
+		txn = d.MetadataTxn(false)
+		defer txn.Release()
+	}
+	return d.metadata.GetExpiredDReps(epoch, txn.Metadata())
+}
