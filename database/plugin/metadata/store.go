@@ -173,11 +173,42 @@ type MetadataStore interface {
 		types.Txn,
 	) (*models.Utxo, error)
 
+	// GetUtxoIncludingSpent retrieves a transaction output by transaction ID
+	// and index, including outputs that have already been consumed (spent).
+	// Unlike GetUtxo, this does not filter on deleted_slot = 0, so it can
+	// resolve inputs that have already been consumed. This is needed for
+	// APIs that must display the source address and amount of spent inputs.
+	GetUtxoIncludingSpent(
+		[]byte, // txId
+		uint32, // idx
+		types.Txn,
+	) (*models.Utxo, error)
+
 	// GetTransactionByHash retrieves a transaction by its hash.
 	GetTransactionByHash(
 		[]byte, // hash
 		types.Txn,
 	) (*models.Transaction, error)
+
+	// GetTransactionsByBlockHash retrieves all transactions for a given
+	// block hash, ordered by block_index (position within the block).
+	// Associations (Inputs, Outputs, Certificates) and nested Assets
+	// are preloaded.
+	GetTransactionsByBlockHash(
+		[]byte, // blockHash
+		types.Txn,
+	) ([]models.Transaction, error)
+
+	// GetTransactionsByAddress retrieves transactions that involve the
+	// given address, either as a sender (input) or receiver (output).
+	// Results are ordered by slot descending, with limit and offset for
+	// pagination.
+	GetTransactionsByAddress(
+		lcommon.Address,
+		int, // limit
+		int, // offset
+		types.Txn,
+	) ([]models.Transaction, error)
 
 	// GetScript retrieves a script by its hash.
 	GetScript(
@@ -291,6 +322,9 @@ type MetadataStore interface {
 
 	// GetUtxosByAddress retrieves all UTxOs for a given address.
 	GetUtxosByAddress(ledger.Address, types.Txn) ([]models.Utxo, error)
+
+	// GetUtxosByAddressAtSlot retrieves all UTxOs for a given address at a specific slot.
+	GetUtxosByAddressAtSlot(lcommon.Address, uint64, types.Txn) ([]models.Utxo, error)
 
 	// GetUtxosByAssets retrieves all UTxOs that contain the specified assets.
 	// Pass nil for assetName to match all assets under the policy, or empty []byte{} to match assets with empty names.

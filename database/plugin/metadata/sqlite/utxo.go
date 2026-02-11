@@ -22,6 +22,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/ledger"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
@@ -44,12 +45,38 @@ func (d *MetadataStoreSqlite) GetUtxo(
 		return nil, err
 	}
 	result := db.Where("deleted_slot = 0").
+		Preload("Assets").
 		First(ret, "tx_id = ? AND output_idx = ?", txId, idx)
 	if result.Error != nil {
 		if errors.Is(result.Error, gorm.ErrRecordNotFound) {
 			return nil, nil
 		}
-		return nil, result.Error
+		return nil, fmt.Errorf("get utxo %x#%d: %w", txId, idx, result.Error)
+	}
+	return ret, nil
+}
+
+// GetUtxoIncludingSpent returns a Utxo by reference, including
+// spent (consumed) UTxOs. Unlike GetUtxo, this does not filter
+// on deleted_slot, making it suitable for resolving transaction
+// inputs that have already been consumed.
+func (d *MetadataStoreSqlite) GetUtxoIncludingSpent(
+	txId []byte,
+	idx uint32,
+	txn types.Txn,
+) (*models.Utxo, error) {
+	ret := &models.Utxo{}
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return nil, err
+	}
+	result := db.Preload("Assets").
+		First(ret, "tx_id = ? AND output_idx = ?", txId, idx)
+	if result.Error != nil {
+		if errors.Is(result.Error, gorm.ErrRecordNotFound) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("get utxo including spent %x#%d: %w", txId, idx, result.Error)
 	}
 	return ret, nil
 }
@@ -95,6 +122,7 @@ func (d *MetadataStoreSqlite) GetUtxosBatch(
 		// Without parens, SQL operator precedence (AND > OR) causes deleted_slot=0
 		// to only apply to the first condition.
 		query := db.Where("deleted_slot = 0").
+			Preload("Assets").
 			Where("("+strings.Join(conditions, " OR ")+")", args...)
 		if queryResult := query.Find(&utxos); queryResult.Error != nil {
 			return nil, queryResult.Error
@@ -187,6 +215,52 @@ func (d *MetadataStoreSqlite) GetUtxosByAddress(
 	result := db.
 		Where("deleted_slot = 0").
 		Where(addrQuery).
+		Preload("Assets").
+		Find(&ret)
+	if result.Error != nil {
+		return nil, result.Error
+	}
+	return ret, nil
+}
+
+// GetUtxosByAddressAtSlot returns UTxOs for an address that existed at a specific slot
+func (d *MetadataStoreSqlite) GetUtxosByAddressAtSlot(
+	addr lcommon.Address,
+	slot uint64,
+	txn types.Txn,
+) ([]models.Utxo, error) {
+	var ret []models.Utxo
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return nil, err
+	}
+
+	hasPaymentKey := addr.PaymentKeyHash() != lcommon.NewBlake2b224(nil)
+	hasStakeKey := addr.StakeKeyHash() != lcommon.NewBlake2b224(nil)
+
+	// Build sub-query for address
+	var addrQuery *gorm.DB
+	if hasPaymentKey && hasStakeKey {
+		// Base address: both credentials must match (AND)
+		addrQuery = db.Where(
+			"payment_key = ? AND staking_key = ?",
+			addr.PaymentKeyHash().Bytes(),
+			addr.StakeKeyHash().Bytes(),
+		)
+	} else if hasPaymentKey {
+		addrQuery = db.Where("payment_key = ?", addr.PaymentKeyHash().Bytes())
+	} else if hasStakeKey {
+		addrQuery = db.Where("staking_key = ?", addr.StakeKeyHash().Bytes())
+	}
+
+	if addrQuery == nil {
+		return ret, nil
+	}
+	result := db.
+		Where("added_slot <= ?", slot).
+		Where("(deleted_slot = 0 OR deleted_slot > ?)", slot).
+		Where(addrQuery).
+		Preload("Assets").
 		Find(&ret)
 	if result.Error != nil {
 		return nil, result.Error

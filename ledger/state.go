@@ -2747,6 +2747,41 @@ func (ls *LedgerState) UtxosByAddress(
 	return ret, nil
 }
 
+func (ls *LedgerState) UtxosByAddressAtSlot(
+	addr lcommon.Address,
+	slot uint64,
+) ([]models.Utxo, error) {
+	return ls.db.UtxosByAddressAtSlot(addr, slot, nil)
+}
+
+// UtxoByRefIncludingSpent returns a UTxO by reference, including
+// spent outputs. This is needed for APIs that must resolve consumed
+// inputs to display source address and amount.
+func (ls *LedgerState) UtxoByRefIncludingSpent(
+	txId []byte,
+	outputIdx uint32,
+) (*models.Utxo, error) {
+	return ls.db.UtxoByRefIncludingSpent(txId, outputIdx, nil)
+}
+
+// GetTransactionsByBlockHash returns all transactions for a given
+// block hash.
+func (ls *LedgerState) GetTransactionsByBlockHash(
+	blockHash []byte,
+) ([]models.Transaction, error) {
+	return ls.db.GetTransactionsByBlockHash(blockHash, nil)
+}
+
+// GetTransactionsByAddress returns transactions involving the given
+// address.
+func (ls *LedgerState) GetTransactionsByAddress(
+	addr lcommon.Address,
+	limit int,
+	offset int,
+) ([]models.Transaction, error) {
+	return ls.db.GetTransactionsByAddress(addr, limit, offset, nil)
+}
+
 // resolveValidationEra determines the appropriate era descriptor for
 // validating a transaction. It returns the current era if the transaction
 // matches, the previous era if compatible (era-1), or an error if the

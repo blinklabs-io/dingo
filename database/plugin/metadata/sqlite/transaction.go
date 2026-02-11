@@ -107,12 +107,113 @@ func (d *MetadataStoreSqlite) GetTransactionByHash(
 	}
 	result := db.
 		Preload(clause.Associations).
+		Preload("Inputs.Assets").
+		Preload("Outputs.Assets").
+		Preload("Collateral.Assets").
+		Preload("ReferenceInputs.Assets").
 		First(ret, "hash = ?", hash)
 	if result.Error != nil {
 		if errors.Is(result.Error, gorm.ErrRecordNotFound) {
 			return nil, nil
 		}
 		return nil, result.Error
+	}
+	return ret, nil
+}
+
+// GetTransactionsByBlockHash returns all transactions for a given
+// block hash, ordered by their position within the block.
+func (d *MetadataStoreSqlite) GetTransactionsByBlockHash(
+	blockHash []byte,
+	txn types.Txn,
+) ([]models.Transaction, error) {
+	var ret []models.Transaction
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return nil, err
+	}
+	result := db.
+		Where("block_hash = ?", blockHash).
+		Order("block_index ASC").
+		Preload(clause.Associations).
+		Preload("Inputs.Assets").
+		Preload("Outputs.Assets").
+		Preload("Collateral.Assets").
+		Preload("ReferenceInputs.Assets").
+		Find(&ret)
+	if result.Error != nil {
+		return nil, fmt.Errorf("get txs by block %x: %w", blockHash, result.Error)
+	}
+	return ret, nil
+}
+
+// GetTransactionsByAddress returns transactions that involve a given
+// address as either a sender (input) or receiver (output). Results
+// are ordered by slot descending with pagination support.
+func (d *MetadataStoreSqlite) GetTransactionsByAddress(
+	addr lcommon.Address,
+	limit int,
+	offset int,
+	txn types.Txn,
+) ([]models.Transaction, error) {
+	var ret []models.Transaction
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return nil, err
+	}
+
+	hasPaymentKey := addr.PaymentKeyHash() != lcommon.NewBlake2b224(nil)
+	hasStakeKey := addr.StakeKeyHash() != lcommon.NewBlake2b224(nil)
+
+	// Build address condition for UTXO matching
+	var addrCondition string
+	var addrArgs []any
+	if hasPaymentKey && hasStakeKey {
+		addrCondition = "u.payment_key = ? AND u.staking_key = ?"
+		addrArgs = []any{
+			addr.PaymentKeyHash().Bytes(),
+			addr.StakeKeyHash().Bytes(),
+		}
+	} else if hasPaymentKey {
+		addrCondition = "u.payment_key = ?"
+		addrArgs = []any{addr.PaymentKeyHash().Bytes()}
+	} else if hasStakeKey {
+		addrCondition = "u.staking_key = ?"
+		addrArgs = []any{addr.StakeKeyHash().Bytes()}
+	} else {
+		return ret, nil
+	}
+
+	// Find transactions that either created or consumed UTxOs
+	// at the given address using a subquery
+	subQuery := fmt.Sprintf(
+		"id IN ("+
+			"SELECT DISTINCT t.id FROM transaction t "+
+			"JOIN utxo u ON (u.transaction_id = t.id OR u.spent_at_tx_id = t.hash) "+
+			"WHERE %s"+
+			")",
+		addrCondition,
+	)
+
+	query := db.
+		Where(subQuery, addrArgs...).
+		Order("slot DESC").
+		Preload(clause.Associations).
+		Preload("Inputs.Assets").
+		Preload("Outputs.Assets").
+		Preload("Collateral.Assets").
+		Preload("ReferenceInputs.Assets")
+
+	if limit > 0 {
+		query = query.Limit(limit)
+	}
+	if offset > 0 {
+		query = query.Offset(offset)
+	}
+
+	result := query.Find(&ret)
+	if result.Error != nil {
+		return nil, fmt.Errorf("get txs by address: %w", result.Error)
 	}
 	return ret, nil
 }
