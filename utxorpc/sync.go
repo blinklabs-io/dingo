@@ -212,10 +212,23 @@ func (s *syncServiceServer) FollowTip(
 		return err
 	}
 
+	defer chainIter.Cancel()
+
 	for {
+		// Check for client disconnection before blocking
+		if ctx.Err() != nil {
+			s.utxorpc.config.Logger.Debug(
+				"FollowTip client disconnected",
+			)
+			return ctx.Err()
+		}
 		// Check for available block
 		next, err := chainIter.Next(true)
 		if err != nil {
+			// Check if it was a context cancellation from the iterator
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
 			s.utxorpc.config.Logger.Error(
 				"failed to iterate chain",
 				"error", err,
@@ -251,6 +264,9 @@ func (s *syncServiceServer) FollowTip(
 			}
 			err = stream.Send(resp)
 			if err != nil {
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
 				s.utxorpc.config.Logger.Error(
 					"failed to send message to client",
 					"error", err,
