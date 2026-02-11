@@ -401,14 +401,16 @@ func (d *MetadataStoreSqlite) Start() error {
 	}
 	// Create table schemas (uses write connection)
 	d.logger.Debug(
-		fmt.Sprintf("creating table: %#v", &CommitTimestamp{}),
+		"creating table",
+		"model", fmt.Sprintf("%T", &CommitTimestamp{}),
 	)
 	if err := d.db.AutoMigrate(&CommitTimestamp{}); err != nil {
 		return err
 	}
 	for _, model := range models.MigrateModels {
 		d.logger.Debug(
-			fmt.Sprintf("creating table: %#v", model),
+			"creating table",
+			"model", fmt.Sprintf("%T", model),
 		)
 		if err := d.db.AutoMigrate(model); err != nil {
 			return err

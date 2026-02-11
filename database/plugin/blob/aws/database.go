@@ -725,7 +725,7 @@ func (d *BlobStoreS3) getInternal(
 		d.logger.Errorf("s3 read %q failed: %v", key, err)
 		return nil, err
 	}
-	d.logger.Infof("s3 get %q ok (%d bytes)", key, len(data))
+	d.logger.Debugf("s3 get %q ok (%d bytes)", key, len(data))
 	return data, nil
 }
 
@@ -740,7 +740,7 @@ func (d *BlobStoreS3) Put(ctx context.Context, key string, value []byte) error {
 		d.logger.Errorf("s3 put %q failed: %v", key, err)
 		return err
 	}
-	d.logger.Infof("s3 put %q ok (%d bytes)", key, len(value))
+	d.logger.Debugf("s3 put %q ok (%d bytes)", key, len(value))
 	return nil
 }
 
