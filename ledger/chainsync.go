@@ -1133,13 +1133,15 @@ func (ls *LedgerState) processBlockEvent(
 // chain.AddBlock for the incoming block. A nil error means the
 // remote block was accepted onto the chain (remote won); a
 // non-nil error means it was rejected (local won).
+//
+// The caller must hold ls.Lock() (write lock). This method must not
+// acquire ls.RLock(), because sync.RWMutex is not reentrant and
+// attempting a read lock while holding the write lock deadlocks.
 func (ls *LedgerState) checkSlotBattle(
 	e BlockfetchEvent,
 	addBlockErr error,
 ) {
-	ls.RLock()
 	checker := ls.config.ForgedBlockChecker
-	ls.RUnlock()
 	if checker == nil {
 		return
 	}
@@ -1171,7 +1173,7 @@ func (ls *LedgerState) checkSlotBattle(
 	)
 
 	if ls.config.EventBus != nil {
-		ls.config.EventBus.Publish(
+		ls.config.EventBus.PublishAsync(
 			forging.SlotBattleEventType,
 			event.NewEvent(
 				forging.SlotBattleEventType,

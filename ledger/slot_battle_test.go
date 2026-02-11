@@ -270,6 +270,68 @@ func TestCheckSlotBattle_NilEventBus(t *testing.T) {
 	ls.checkSlotBattle(e, errors.New("rejected"))
 }
 
+// TestCheckSlotBattle_UnderWriteLock is a regression test for the
+// deadlock where checkSlotBattle was called while holding ls.Lock()
+// (write lock) but internally attempted ls.RLock() on the same
+// non-reentrant sync.RWMutex.
+func TestCheckSlotBattle_UnderWriteLock(t *testing.T) {
+	eventBus := event.NewEventBus(nil, nil)
+	defer eventBus.Stop()
+
+	localHash := []byte{0x01, 0x02, 0x03, 0x04}
+	remoteHash := []byte{0x0A, 0x0B, 0x0C, 0x0D}
+
+	checker := &mockForgedBlockChecker{
+		forgedSlots: map[uint64][]byte{
+			1000: localHash,
+		},
+	}
+
+	ls := &LedgerState{
+		config: LedgerStateConfig{
+			EventBus:           eventBus,
+			ForgedBlockChecker: checker,
+			Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+
+	_, evtCh := eventBus.Subscribe(forging.SlotBattleEventType)
+
+	e := BlockfetchEvent{
+		Point: ocommon.Point{
+			Slot: 1000,
+			Hash: remoteHash,
+		},
+	}
+
+	// Call checkSlotBattle while holding the write lock, exactly
+	// as processBlockEvents does. Before the fix this deadlocked.
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ls.Lock()
+		ls.checkSlotBattle(e, errors.New("block rejected"))
+		ls.Unlock()
+	}()
+
+	select {
+	case <-done:
+		// OK — no deadlock
+	case <-time.After(2 * time.Second):
+		t.Fatal("checkSlotBattle deadlocked under write lock")
+	}
+
+	select {
+	case evt := <-evtCh:
+		battle, ok := evt.Data.(forging.SlotBattleEvent)
+		require.True(t, ok)
+		assert.Equal(t, uint64(1000), battle.Slot)
+		assert.True(t, battle.Won)
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for SlotBattleEvent")
+	}
+}
+
 func TestSetForgedBlockChecker(t *testing.T) {
 	ls := &LedgerState{
 		config: LedgerStateConfig{
