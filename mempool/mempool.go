@@ -37,6 +37,8 @@ const (
 
 	DefaultEvictionWatermark  = 0.90
 	DefaultRejectionWatermark = 0.95
+	DefaultTransactionTTL     = 5 * time.Minute
+	DefaultCleanupInterval    = 1 * time.Minute
 )
 
 type AddTransactionEvent struct {
@@ -66,6 +68,8 @@ type MempoolConfig struct {
 	Logger             *slog.Logger
 	EventBus           *event.EventBus
 	MempoolCapacity    int64
+	TransactionTTL     time.Duration
+	CleanupInterval    time.Duration
 	EvictionWatermark  float64
 	RejectionWatermark float64
 }
@@ -76,6 +80,7 @@ type Mempool struct {
 		txsInMempool    prometheus.Gauge
 		mempoolBytes    prometheus.Gauge
 		txsEvicted      prometheus.Counter
+		txsExpired      prometheus.Counter
 	}
 	validator          TxValidator
 	logger             *slog.Logger
@@ -86,6 +91,8 @@ type Mempool struct {
 	transactions       []*MempoolTransaction
 	txByHash           map[string]*MempoolTransaction // O(1) lookup by hash
 	currentSizeBytes   int64                          // Cached total size of all transactions in bytes
+	transactionTTL     time.Duration
+	cleanupInterval    time.Duration
 	evictionWatermark  float64
 	rejectionWatermark float64
 	sync.RWMutex
@@ -117,6 +124,14 @@ func NewMempool(config MempoolConfig) *Mempool {
 	if rejectionWatermark == 0 {
 		rejectionWatermark = DefaultRejectionWatermark
 	}
+	transactionTTL := config.TransactionTTL
+	if transactionTTL == 0 {
+		transactionTTL = DefaultTransactionTTL
+	}
+	cleanupInterval := config.CleanupInterval
+	if cleanupInterval <= 0 {
+		cleanupInterval = DefaultCleanupInterval
+	}
 	m := &Mempool{
 		eventBus:           config.EventBus,
 		consumers:          make(map[ouroboros.ConnectionId]*MempoolConsumer),
@@ -124,6 +139,8 @@ func NewMempool(config MempoolConfig) *Mempool {
 		validator:          config.Validator,
 		config:             config,
 		done:               make(chan struct{}),
+		transactionTTL:     transactionTTL,
+		cleanupInterval:    cleanupInterval,
 		evictionWatermark:  evictionWatermark,
 		rejectionWatermark: rejectionWatermark,
 	}
@@ -136,9 +153,7 @@ func NewMempool(config MempoolConfig) *Mempool {
 	} else {
 		m.logger = config.Logger
 	}
-	// Subscribe to chain update events
-	go m.processChainEvents()
-	// Init metrics
+	// Init metrics before launching goroutines that reference them
 	promautoFactory := promauto.With(config.PromRegistry)
 	m.metrics.txsProcessedNum = promautoFactory.NewCounter(
 		prometheus.CounterOpts{
@@ -164,6 +179,16 @@ func NewMempool(config MempoolConfig) *Mempool {
 			Help: "total transactions evicted from mempool",
 		},
 	)
+	m.metrics.txsExpired = promautoFactory.NewCounter(
+		prometheus.CounterOpts{
+			Name: "cardano_node_metrics_txsExpiredNum_int",
+			Help: "total transactions expired from mempool by TTL",
+		},
+	)
+	// Subscribe to chain update events
+	go m.processChainEvents()
+	// Start TTL cleanup goroutine
+	go m.expireTransactions()
 	return m
 }
 
@@ -275,6 +300,59 @@ func (m *Mempool) processChainEvents() {
 			}
 		}
 		m.Unlock()
+	}
+}
+
+// expireTransactions periodically removes transactions that have
+// exceeded the configured TTL. It runs every cleanupInterval and
+// stops when the done channel is closed.
+func (m *Mempool) expireTransactions() {
+	if m.cleanupInterval <= 0 {
+		return
+	}
+	ticker := time.NewTicker(m.cleanupInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			m.removeExpiredTransactions()
+		case <-m.done:
+			return
+		}
+	}
+}
+
+// removeExpiredTransactions removes all transactions whose LastSeen
+// is older than the configured TTL. It acquires the mempool write
+// lock and iterates backward to avoid index shifting issues.
+func (m *Mempool) removeExpiredTransactions() {
+	now := time.Now()
+	m.Lock()
+	m.consumersMutex.Lock()
+	var expiredCount int
+	// Iterate backward to safely remove by index
+	for i := len(m.transactions) - 1; i >= 0; i-- {
+		tx := m.transactions[i]
+		if now.Sub(tx.LastSeen) > m.transactionTTL {
+			m.logger.Debug(
+				"removing expired transaction",
+				"component", "mempool",
+				"tx_hash", tx.Hash,
+				"age", now.Sub(tx.LastSeen).String(),
+			)
+			m.removeTransactionByIndexLocked(i)
+			expiredCount++
+		}
+	}
+	m.consumersMutex.Unlock()
+	m.Unlock()
+	if expiredCount > 0 {
+		m.metrics.txsExpired.Add(float64(expiredCount))
+		m.logger.Debug(
+			"expired transactions removed from mempool",
+			"component", "mempool",
+			"expired_count", expiredCount,
+		)
 	}
 }
 
