@@ -19,7 +19,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	_ "net/http/pprof" // #nosec G108
 	"os"
 	"os/signal"
 	"runtime"
@@ -171,23 +170,23 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	// Metrics and debug listener
-	http.Handle("/metrics", promhttp.Handler())
+	// Metrics listener with dedicated mux to avoid exposing
+	// pprof or other handlers registered on DefaultServeMux.
+	metricsMux := http.NewServeMux()
+	metricsMux.Handle("/metrics", promhttp.Handler())
+	metricsAddr := fmt.Sprintf(
+		"%s:%d",
+		cfg.BindAddr,
+		cfg.MetricsPort,
+	)
 	logger.Info(
-		"serving prometheus metrics on "+fmt.Sprintf(
-			"%s:%d",
-			cfg.BindAddr,
-			cfg.MetricsPort,
-		),
+		"serving prometheus metrics on "+metricsAddr,
 		"component",
 		"node",
 	)
 	metricsServer := &http.Server{
-		Addr: fmt.Sprintf(
-			"%s:%d",
-			cfg.BindAddr,
-			cfg.MetricsPort,
-		),
+		Addr:              metricsAddr,
+		Handler:           metricsMux,
 		ReadHeaderTimeout: 60 * time.Second,
 		WriteTimeout:      30 * time.Second,
 		IdleTimeout:       120 * time.Second,
