@@ -119,17 +119,18 @@ func (s *State) RemoveClientConnId(connId ouroboros.ConnectionId) {
 	}
 }
 
-// AddClientConnId adds a connection ID to the set of tracked chainsync clients.
-// If no active client exists, this connection is automatically set as the active
-// client. This ensures there is always an active client when at least one is tracked.
-func (s *State) AddClientConnId(connId ouroboros.ConnectionId) {
-	s.clientConnIdMutex.Lock()
-	defer s.clientConnIdMutex.Unlock()
-	s.trackedClients[connId] = struct{}{}
-	// Set as active if there's no active client
-	if s.activeClientConnId == nil {
-		s.activeClientConnId = &connId
-	}
+// AddClientConnId adds a connection ID to the set of tracked chainsync
+// clients, enforcing the maxClients limit. If no active client exists,
+// this connection is automatically set as the active client. Returns true
+// if the connection was added, false if it was already tracked or the
+// limit was reached.
+//
+// Deprecated: Use TryAddClientConnId instead.
+func (s *State) AddClientConnId(
+	connId ouroboros.ConnectionId,
+	maxClients int,
+) bool {
+	return s.TryAddClientConnId(connId, maxClients)
 }
 
 // HasClientConnId returns true if the connection ID is being tracked.
