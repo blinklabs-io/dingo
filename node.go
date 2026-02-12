@@ -392,6 +392,7 @@ func (n *Node) Run(ctx context.Context) error {
 			ActivePeersTopologyQuota:       n.config.activePeersTopologyQuota,
 			ActivePeersGossipQuota:         n.config.activePeersGossipQuota,
 			ActivePeersLedgerQuota:         n.config.activePeersLedgerQuota,
+			SyncProgressProvider:           n.ledgerState,
 		},
 	)
 	n.ouroboros.PeerGov = n.peerGov
