@@ -35,6 +35,12 @@ type ConnectionManagerConnClosedFunc func(ouroboros.ConnectionId, error)
 const (
 	// metricNamePrefix is the common prefix for all connection manager metrics
 	metricNamePrefix = "cardano_node_metrics_connectionManager_"
+
+	// DefaultMaxInboundConnections is the default maximum number of
+	// simultaneous inbound connections accepted by the connection manager.
+	// This prevents resource exhaustion from malicious or accidental
+	// connection floods.
+	DefaultMaxInboundConnections = 100
 )
 
 type connectionInfo struct {
@@ -50,6 +56,7 @@ type peerConnectionState struct {
 
 type ConnectionManager struct {
 	connections      map[ouroboros.ConnectionId]*connectionInfo
+	inboundReserved  int // slots reserved by tryReserveInboundSlot but not yet added
 	metrics          *connectionManagerMetrics
 	listeners        []net.Listener
 	config           ConnectionManagerConfig
@@ -67,6 +74,7 @@ type ConnectionManagerConfig struct {
 	Listeners          []ListenerConfig
 	OutboundConnOpts   []ouroboros.ConnectionOptionFunc
 	OutboundSourcePort uint
+	MaxInboundConns    int // 0 means use DefaultMaxInboundConnections
 }
 
 type connectionManagerMetrics struct {
@@ -83,6 +91,9 @@ func NewConnectionManager(cfg ConnectionManagerConfig) *ConnectionManager {
 		cfg.Logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
 	}
 	cfg.Logger = cfg.Logger.With("component", "connmanager")
+	if cfg.MaxInboundConns <= 0 {
+		cfg.MaxInboundConns = DefaultMaxInboundConnections
+	}
 	c := &ConnectionManager{
 		config: cfg,
 		connections: make(
@@ -93,6 +104,60 @@ func NewConnectionManager(cfg ConnectionManagerConfig) *ConnectionManager {
 		c.initMetrics()
 	}
 	return c
+}
+
+// inboundCount returns the current number of inbound connections.
+// The caller must hold connectionsMutex.
+func (c *ConnectionManager) inboundCountLocked() int {
+	count := 0
+	for _, info := range c.connections {
+		if info.isInbound {
+			count++
+		}
+	}
+	return count
+}
+
+// InboundCount returns the current number of inbound connections.
+func (c *ConnectionManager) InboundCount() int {
+	c.connectionsMutex.Lock()
+	defer c.connectionsMutex.Unlock()
+	return c.inboundCountLocked()
+}
+
+// tryReserveInboundSlot atomically checks whether an inbound connection
+// can be accepted and, if so, reserves a slot. This prevents a TOCTOU race
+// where multiple concurrent Accept calls could all pass the limit check
+// before any of them calls AddConnection.
+// Returns true if the slot was reserved, false if the limit has been reached.
+// The caller must call releaseInboundSlot when the reservation is no longer
+// needed (i.e. if connection setup fails before AddConnection is called).
+func (c *ConnectionManager) tryReserveInboundSlot() bool {
+	c.connectionsMutex.Lock()
+	defer c.connectionsMutex.Unlock()
+	if c.inboundCountLocked()+c.inboundReserved >= c.config.MaxInboundConns {
+		return false
+	}
+	c.inboundReserved++
+	return true
+}
+
+// releaseInboundSlot releases a previously reserved inbound slot.
+// This must be called if the connection setup fails after a successful
+// tryReserveInboundSlot call and before AddConnection is called.
+func (c *ConnectionManager) releaseInboundSlot() {
+	c.connectionsMutex.Lock()
+	defer c.connectionsMutex.Unlock()
+	c.inboundReserved--
+}
+
+// consumeInboundSlot converts a reserved inbound slot into an actual
+// connection entry via AddConnection. The reservation is consumed
+// (decremented) since the connection itself now occupies the slot.
+func (c *ConnectionManager) consumeInboundSlot() {
+	c.connectionsMutex.Lock()
+	defer c.connectionsMutex.Unlock()
+	c.inboundReserved--
 }
 
 func (c *ConnectionManager) initMetrics() {
