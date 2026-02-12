@@ -187,6 +187,9 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 			dingo.WithChainsyncStallTimeout(
 				chainsyncStallTimeout,
 			),
+			dingo.WithMeshListenAddress(
+				cfg.MeshListenAddress,
+			),
 		),
 	)
 	if err != nil {

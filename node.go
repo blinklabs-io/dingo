@@ -35,6 +35,7 @@ import (
 	"github.com/blinklabs-io/dingo/ledger/leader"
 	"github.com/blinklabs-io/dingo/ledger/snapshot"
 	"github.com/blinklabs-io/dingo/mempool"
+	"github.com/blinklabs-io/dingo/mesh"
 	ouroborosPkg "github.com/blinklabs-io/dingo/ouroboros"
 	"github.com/blinklabs-io/dingo/peergov"
 	"github.com/blinklabs-io/dingo/utxorpc"
@@ -56,6 +57,7 @@ type Node struct {
 	snapshotMgr    *snapshot.Manager
 	utxorpc        *utxorpc.Utxorpc
 	blockfrostAPI  *blockfrost.Blockfrost
+	meshAPI        *mesh.Server
 	ouroboros      *ouroborosPkg.Ouroboros
 	blockForger    *forging.BlockForger
 	leaderElection *leader.Election
@@ -450,6 +452,59 @@ func (n *Node) Run(ctx context.Context) error {
 		})
 	}
 
+	// Configure Mesh API (if listen address is set)
+	if n.config.meshListenAddress != "" {
+		var genesisHash string
+		var genesisStartTimeSec int64
+		if nc := n.config.cardanoNodeConfig; nc != nil {
+			genesisHash = nc.ByronGenesisHash
+			if sg := nc.ShelleyGenesis(); sg != nil {
+				genesisStartTimeSec = sg.SystemStart.Unix()
+			}
+		}
+		if genesisHash == "" || genesisStartTimeSec == 0 {
+			return errors.New(
+				"mesh API requires Cardano node config " +
+					"(Byron genesis hash and Shelley genesis)",
+			)
+		}
+		var meshErr error
+		n.meshAPI, meshErr = mesh.NewServer(
+			mesh.ServerConfig{
+				Logger:      n.config.logger,
+				EventBus:    n.eventBus,
+				LedgerState: n.ledgerState,
+				Database:    n.db,
+				Chain:       n.ledgerState.Chain(),
+				Mempool:     n.mempool,
+				ListenAddress: n.config.
+					meshListenAddress,
+				Network:             n.config.network,
+				NetworkMagic:        n.config.networkMagic,
+				GenesisHash:         genesisHash,
+				GenesisStartTimeSec: genesisStartTimeSec,
+			},
+		)
+		if meshErr != nil {
+			return fmt.Errorf(
+				"create mesh API server: %w",
+				meshErr,
+			)
+		}
+		if err := n.meshAPI.Start(n.ctx); err != nil { //nolint:contextcheck
+			return fmt.Errorf("starting mesh API: %w", err)
+		}
+		started = append(started, func() { //nolint:contextcheck
+			if err := n.meshAPI.Stop(context.Background()); err != nil {
+				n.config.logger.Error(
+					"failed to stop mesh API during cleanup",
+					"error",
+					err,
+				)
+			}
+		})
+	}
+
 	// Initialize block forger if production mode is enabled
 	if n.config.blockProducer {
 		//nolint:contextcheck // n.ctx is the node's lifecycle context, correct parent for forger
@@ -552,6 +607,15 @@ func (n *Node) shutdown() error {
 			err = errors.Join(
 				err,
 				fmt.Errorf("blockfrost API shutdown: %w", stopErr),
+			)
+		}
+	}
+
+	if n.meshAPI != nil {
+		if stopErr := n.meshAPI.Stop(ctx); stopErr != nil {
+			err = errors.Join(
+				err,
+				fmt.Errorf("mesh API shutdown: %w", stopErr),
 			)
 		}
 	}

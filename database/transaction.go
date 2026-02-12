@@ -108,7 +108,12 @@ func (d *Database) SetTransaction(
 		// Store offset reference
 		offsetData := EncodeUtxoOffset(&offset)
 		if err := blob.SetUtxo(blobTxn, txId, outputIdx, offsetData); err != nil {
-			return fmt.Errorf("set utxo offset %x#%d: %w", txId[:8], outputIdx, err)
+			return fmt.Errorf(
+				"set utxo offset %x#%d: %w",
+				txId[:8],
+				outputIdx,
+				err,
+			)
 		}
 	}
 
@@ -175,13 +180,22 @@ func (d *Database) SetGenesisTransaction(
 
 		offset, ok := offsets[ref]
 		if !ok {
-			return fmt.Errorf("missing offset for genesis utxo %x:%d", txId[:8], outputIdx)
+			return fmt.Errorf(
+				"missing offset for genesis utxo %x:%d",
+				txId[:8],
+				outputIdx,
+			)
 		}
 
 		// Store offset reference
 		offsetData := EncodeUtxoOffset(&offset)
 		if err := blob.SetUtxo(blobTxn, txId, outputIdx, offsetData); err != nil {
-			return fmt.Errorf("set genesis utxo offset %x#%d: %w", txId[:8], outputIdx, err)
+			return fmt.Errorf(
+				"set genesis utxo offset %x#%d: %w",
+				txId[:8],
+				outputIdx,
+				err,
+			)
 		}
 
 		// Build model for metadata store
@@ -239,7 +253,9 @@ func (d *Database) GetTransactionsByBlockHash(
 		txn.Metadata(),
 	)
 	if err != nil {
-		return nil, fmt.Errorf("get txs by block %x: %w", blockHash, err)
+		return nil, fmt.Errorf(
+			"get txs by block hash: %w", err,
+		)
 	}
 	return txs, nil
 }
@@ -346,7 +362,10 @@ func (d *Database) TransactionsDeleteRolledback(
 	}
 
 	// Get transaction hashes that will be deleted
-	txHashes, err := d.metadata.GetTransactionHashesAfterSlot(slot, txn.Metadata())
+	txHashes, err := d.metadata.GetTransactionHashesAfterSlot(
+		slot,
+		txn.Metadata(),
+	)
 	if err != nil {
 		return fmt.Errorf(
 			"failed to get transaction hashes after slot %d: %w",

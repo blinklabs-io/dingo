@@ -180,10 +180,8 @@ func (d *Database) UtxoByRef(
 	return utxo, nil
 }
 
-// UtxoByRefIncludingSpent returns a Utxo by reference, including spent
-// (consumed) UTxOs. Unlike UtxoByRef, this does not filter on
-// deleted_slot, making it suitable for resolving transaction inputs
-// that have already been consumed.
+// UtxoByRefIncludingSpent returns a Utxo by reference,
+// including spent (consumed) UTxOs.
 func (d *Database) UtxoByRefIncludingSpent(
 	txId []byte,
 	outputIdx uint32,
