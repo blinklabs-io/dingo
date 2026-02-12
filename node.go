@@ -253,10 +253,18 @@ func (n *Node) Run(ctx context.Context) error {
 	// Set mempool in ledger state for block forging
 	n.ledgerState.SetMempool(n.mempool)
 	n.ouroboros.Mempool = n.mempool
-	// Initialize chainsync state
-	n.chainsyncState = chainsync.NewState(
+	// Initialize chainsync state with multi-client configuration
+	chainsyncCfg := chainsync.DefaultConfig()
+	if n.config.chainsyncMaxClients > 0 {
+		chainsyncCfg.MaxClients = n.config.chainsyncMaxClients
+	}
+	if n.config.chainsyncStallTimeout > 0 {
+		chainsyncCfg.StallTimeout = n.config.chainsyncStallTimeout
+	}
+	n.chainsyncState = chainsync.NewStateWithConfig(
 		n.eventBus,
 		n.ledgerState,
+		chainsyncCfg,
 	)
 	n.ouroboros.ChainsyncState = n.chainsyncState
 	// Initialize chain selector for multi-peer chain selection
@@ -792,7 +800,9 @@ func (a *stakeDistributionAdapter) GetPoolStake(
 	return stake, err
 }
 
-func (a *stakeDistributionAdapter) GetTotalActiveStake(epoch uint64) (uint64, error) {
+func (a *stakeDistributionAdapter) GetTotalActiveStake(
+	epoch uint64,
+) (uint64, error) {
 	txn := a.ledgerState.Database().Transaction(false)
 	var stake uint64
 	err := txn.Do(func(txn *database.Txn) error {

@@ -96,6 +96,27 @@ type databaseConfig struct {
 	Metadata map[string]any `yaml:"metadata,omitempty"`
 }
 
+// ChainsyncConfig holds configuration for the multi-client chainsync
+// subsystem.
+type ChainsyncConfig struct {
+	// MaxClients is the maximum number of concurrent chainsync client
+	// connections. Default: 3.
+	MaxClients int `yaml:"maxClients"   envconfig:"DINGO_CHAINSYNC_MAX_CLIENTS"`
+	// StallTimeout is the duration after which a client with no
+	// activity is considered stalled. Default: "30s".
+	StallTimeout string `yaml:"stallTimeout" envconfig:"DINGO_CHAINSYNC_STALL_TIMEOUT"`
+}
+
+// DefaultChainsyncConfig returns the default chainsync configuration.
+// StallTimeout must match chainsync.DefaultStallTimeout and the
+// fallback in internal/node/node.go.
+func DefaultChainsyncConfig() ChainsyncConfig {
+	return ChainsyncConfig{
+		MaxClients:   3,
+		StallTimeout: "30s",
+	}
+}
+
 // CacheConfig holds configuration for the tiered CBOR cache system.
 type CacheConfig struct {
 	// HotUtxoEntries is the maximum number of UTxO CBOR entries in the hot cache.
@@ -129,23 +150,23 @@ type Config struct {
 	TlsKeyFilePath     string  `yaml:"tlsKeyFilePath"     envconfig:"TLS_KEY_FILE_PATH"`
 	Topology           string  `yaml:"topology"`
 	CardanoConfig      string  `yaml:"cardanoConfig"      envconfig:"config"`
-	DatabasePath       string  `yaml:"databasePath"                                                  split_words:"true"`
-	SocketPath         string  `yaml:"socketPath"                                                    split_words:"true"`
+	DatabasePath       string  `yaml:"databasePath"                                                     split_words:"true"`
+	SocketPath         string  `yaml:"socketPath"                                                       split_words:"true"`
 	TlsCertFilePath    string  `yaml:"tlsCertFilePath"    envconfig:"TLS_CERT_FILE_PATH"`
-	BindAddr           string  `yaml:"bindAddr"                                                      split_words:"true"`
+	BindAddr           string  `yaml:"bindAddr"                                                         split_words:"true"`
 	BlobPlugin         string  `yaml:"blobPlugin"         envconfig:"DINGO_DATABASE_BLOB_PLUGIN"`
-	PrivateBindAddr    string  `yaml:"privateBindAddr"                                               split_words:"true"`
-	ShutdownTimeout    string  `yaml:"shutdownTimeout"                                               split_words:"true"`
+	PrivateBindAddr    string  `yaml:"privateBindAddr"                                                  split_words:"true"`
+	ShutdownTimeout    string  `yaml:"shutdownTimeout"                                                  split_words:"true"`
 	Network            string  `yaml:"network"`
-	MempoolCapacity    int64   `yaml:"mempoolCapacity"                                               split_words:"true"`
+	MempoolCapacity    int64   `yaml:"mempoolCapacity"                                                  split_words:"true"`
 	EvictionWatermark  float64 `yaml:"evictionWatermark"  envconfig:"DINGO_MEMPOOL_EVICTION_WATERMARK"`
 	RejectionWatermark float64 `yaml:"rejectionWatermark" envconfig:"DINGO_MEMPOOL_REJECTION_WATERMARK"`
-	PrivatePort        uint    `yaml:"privatePort"                                                   split_words:"true"`
+	PrivatePort        uint    `yaml:"privatePort"                                                      split_words:"true"`
 	RelayPort          uint    `yaml:"relayPort"          envconfig:"port"`
-	UtxorpcPort        uint    `yaml:"utxorpcPort"                                                   split_words:"true"`
-	MetricsPort        uint    `yaml:"metricsPort"                                                   split_words:"true"`
-	IntersectTip       bool    `yaml:"intersectTip"                                                  split_words:"true"`
-	ValidateHistorical bool    `yaml:"validateHistorical"                                            split_words:"true"`
+	UtxorpcPort        uint    `yaml:"utxorpcPort"                                                      split_words:"true"`
+	MetricsPort        uint    `yaml:"metricsPort"                                                      split_words:"true"`
+	IntersectTip       bool    `yaml:"intersectTip"                                                     split_words:"true"`
+	ValidateHistorical bool    `yaml:"validateHistorical"                                               split_words:"true"`
 	RunMode            RunMode `yaml:"runMode"            envconfig:"DINGO_RUN_MODE"`
 	ImmutableDbPath    string  `yaml:"immutableDbPath"    envconfig:"DINGO_IMMUTABLE_DB_PATH"`
 	// Database worker pool tuning (worker count and task queue size)
@@ -165,6 +186,9 @@ type Config struct {
 	// Cache configuration for the tiered CBOR cache system
 	Cache CacheConfig `yaml:"cache"`
 
+	// Chainsync configuration for multi-client support
+	Chainsync ChainsyncConfig `yaml:"chainsync"`
+
 	// KES (Key Evolving Signature) configuration for block production
 	// SlotsPerKESPeriod is the number of slots in a KES period.
 	// After this many slots, the KES key must be evolved to the next period.
@@ -174,14 +198,14 @@ type Config struct {
 	// For Cardano's KES depth of 6, this is 2^6 - 2 = 62 evolutions.
 	// After this many evolutions, a new operational certificate must be issued.
 	// Default: 62
-	MaxKESEvolutions uint64 `yaml:"maxKESEvolutions" envconfig:"DINGO_MAX_KES_EVOLUTIONS"`
+	MaxKESEvolutions uint64 `yaml:"maxKESEvolutions"  envconfig:"DINGO_MAX_KES_EVOLUTIONS"`
 
 	// Block production configuration (SPO mode)
 	// Environment variables match cardano-node naming convention for compatibility
 	// Note: envconfig.Process("cardano", ...) adds "CARDANO_" prefix automatically
-	BlockProducer                 bool   `yaml:"blockProducer"       envconfig:"BLOCK_PRODUCER"`
-	ShelleyVRFKey                 string `yaml:"shelleyVrfKey"       envconfig:"SHELLEY_VRF_KEY"`
-	ShelleyKESKey                 string `yaml:"shelleyKesKey"       envconfig:"SHELLEY_KES_KEY"`
+	BlockProducer                 bool   `yaml:"blockProducer"                 envconfig:"BLOCK_PRODUCER"`
+	ShelleyVRFKey                 string `yaml:"shelleyVrfKey"                 envconfig:"SHELLEY_VRF_KEY"`
+	ShelleyKESKey                 string `yaml:"shelleyKesKey"                 envconfig:"SHELLEY_KES_KEY"`
 	ShelleyOperationalCertificate string `yaml:"shelleyOperationalCertificate" envconfig:"SHELLEY_OPERATIONAL_CERTIFICATE"`
 }
 
@@ -270,6 +294,8 @@ var globalConfig = &Config{
 	DatabaseQueueSize: 50,
 	// Cache configuration defaults
 	Cache: DefaultCacheConfig(),
+	// Chainsync configuration defaults
+	Chainsync: DefaultChainsyncConfig(),
 	// KES configuration defaults (mainnet values)
 	SlotsPerKESPeriod: 129600, // 1.5 days at 1 second per slot
 	MaxKESEvolutions:  62,     // 2^6 - 2 for KES depth 6

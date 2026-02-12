@@ -41,8 +41,11 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promauto"
 )
 
-// maxChainsyncClients is the maximum number of concurrent chainsync clients.
-const maxChainsyncClients = 10
+// defaultMaxChainsyncClients is the fallback maximum number of
+// concurrent chainsync clients when the ChainsyncState is not
+// available. Uses the same value as chainsync.DefaultMaxClients
+// to keep defaults consistent.
+const defaultMaxChainsyncClients = chainsync.DefaultMaxClients
 
 type Ouroboros struct {
 	ConnManager      *connmanager.ConnectionManager
@@ -304,10 +307,18 @@ func (o *Ouroboros) HandleOutboundConnEvent(evt event.Event) {
 		o.PeerGov.UpdatePeerConnectionStability(connId, 1.0)
 	}
 
-	// Start chainsync client for this connection if not already tracking it
+	// Start chainsync client for this connection if not already tracking it.
+	// If chainsync negotiation fails, we return early and do NOT start
+	// txsubmission -- the connection is unusable if chainsync fails because
+	// the Ouroboros handshake/protocol negotiation has already failed and the
+	// peer will reject further mini-protocol starts on this connection.
 	if o.ChainsyncState != nil {
+		maxClients := defaultMaxChainsyncClients
+		if o.ChainsyncState.MaxClients() > 0 {
+			maxClients = o.ChainsyncState.MaxClients()
+		}
 		// Atomically check and add the client to avoid race conditions
-		if o.ChainsyncState.TryAddClientConnId(connId, maxChainsyncClients) {
+		if o.ChainsyncState.TryAddClientConnId(connId, maxClients) {
 			if err := o.chainsyncClientStart(connId); err != nil {
 				// Roll back the registration on failure
 				o.ChainsyncState.RemoveClientConnId(connId)
