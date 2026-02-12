@@ -16,6 +16,7 @@ package chainselection
 
 import (
 	"fmt"
+	"math"
 	"net"
 	"testing"
 	"time"
@@ -537,4 +538,226 @@ func TestPeerChainTipVRFOutputStored(t *testing.T) {
 	newVRF := []byte{0x05, 0x06, 0x07, 0x08}
 	peerTip.UpdateTip(tip, newVRF)
 	assert.Equal(t, newVRF, peerTip.VRFOutput)
+}
+
+func TestUpdatePeerTipRejectsImplausibleTip(t *testing.T) {
+	cs := NewChainSelector(ChainSelectorConfig{
+		SecurityParam: 2160, // Cardano mainnet k
+	})
+
+	// Set local tip so the plausibility check is active
+	cs.SetLocalTip(ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 100000, Hash: []byte("local")},
+		BlockNumber: 50000,
+	})
+
+	connId := newTestConnectionId(1)
+
+	// A spoofed tip claiming to be far beyond local tip + k
+	spoofedTip := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: math.MaxUint64, Hash: []byte("spoof")},
+		BlockNumber: math.MaxUint64,
+	}
+
+	accepted := cs.UpdatePeerTip(connId, spoofedTip, nil)
+	assert.False(
+		t,
+		accepted,
+		"implausibly high tip should be rejected",
+	)
+	assert.Nil(
+		t,
+		cs.GetPeerTip(connId),
+		"rejected tip should not be tracked",
+	)
+	assert.Equal(t, 0, cs.PeerCount(), "peer count should remain 0")
+}
+
+func TestUpdatePeerTipAcceptsPlausibleTip(t *testing.T) {
+	cs := NewChainSelector(ChainSelectorConfig{
+		SecurityParam: 2160,
+	})
+
+	// Set local tip
+	cs.SetLocalTip(ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 100000, Hash: []byte("local")},
+		BlockNumber: 50000,
+	})
+
+	connId := newTestConnectionId(1)
+
+	// A tip that is ahead but within k blocks (plausible)
+	plausibleTip := ochainsync.Tip{
+		Point: ocommon.Point{
+			Slot: 102000,
+			Hash: []byte("plausible"),
+		},
+		BlockNumber: 51000, // 1000 ahead, well within k=2160
+	}
+
+	accepted := cs.UpdatePeerTip(connId, plausibleTip, nil)
+	assert.True(t, accepted, "plausible tip should be accepted")
+	assert.NotNil(
+		t,
+		cs.GetPeerTip(connId),
+		"accepted tip should be tracked",
+	)
+	assert.Equal(t, 1, cs.PeerCount())
+}
+
+func TestUpdatePeerTipAcceptsTipAtExactBoundary(t *testing.T) {
+	cs := NewChainSelector(ChainSelectorConfig{
+		SecurityParam: 2160,
+	})
+
+	cs.SetLocalTip(ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 100000, Hash: []byte("local")},
+		BlockNumber: 50000,
+	})
+
+	connId := newTestConnectionId(1)
+
+	// Tip exactly at localTip.BlockNumber + securityParam (boundary)
+	boundaryTip := ochainsync.Tip{
+		Point: ocommon.Point{
+			Slot: 104000,
+			Hash: []byte("boundary"),
+		},
+		BlockNumber: 50000 + 2160, // Exactly at the limit
+	}
+
+	accepted := cs.UpdatePeerTip(connId, boundaryTip, nil)
+	assert.True(
+		t,
+		accepted,
+		"tip at exact boundary should be accepted",
+	)
+	assert.NotNil(t, cs.GetPeerTip(connId))
+}
+
+func TestUpdatePeerTipRejectsTipOneOverBoundary(t *testing.T) {
+	cs := NewChainSelector(ChainSelectorConfig{
+		SecurityParam: 2160,
+	})
+
+	cs.SetLocalTip(ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 100000, Hash: []byte("local")},
+		BlockNumber: 50000,
+	})
+
+	connId := newTestConnectionId(1)
+
+	// Tip one block past the boundary
+	overBoundaryTip := ochainsync.Tip{
+		Point: ocommon.Point{
+			Slot: 104001,
+			Hash: []byte("over"),
+		},
+		BlockNumber: 50000 + 2160 + 1,
+	}
+
+	accepted := cs.UpdatePeerTip(connId, overBoundaryTip, nil)
+	assert.False(
+		t,
+		accepted,
+		"tip one past boundary should be rejected",
+	)
+	assert.Nil(t, cs.GetPeerTip(connId))
+}
+
+func TestUpdatePeerTipAcceptsTipWhenSecurityParamZero(t *testing.T) {
+	// During initial sync, securityParam may be 0 (not yet set).
+	// All tips should be accepted in this case.
+	cs := NewChainSelector(ChainSelectorConfig{
+		SecurityParam: 0,
+	})
+
+	// Even with a local tip set, if securityParam is 0,
+	// plausibility check is skipped
+	cs.SetLocalTip(ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 100000, Hash: []byte("local")},
+		BlockNumber: 50000,
+	})
+
+	connId := newTestConnectionId(1)
+
+	highTip := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: math.MaxUint64, Hash: []byte("high")},
+		BlockNumber: math.MaxUint64,
+	}
+
+	accepted := cs.UpdatePeerTip(connId, highTip, nil)
+	assert.True(
+		t,
+		accepted,
+		"all tips should be accepted when securityParam is 0",
+	)
+	assert.NotNil(t, cs.GetPeerTip(connId))
+}
+
+func TestUpdatePeerTipAcceptsTipWhenLocalTipZero(t *testing.T) {
+	// During initial sync, local tip is at block 0.
+	// All tips should be accepted in this case.
+	cs := NewChainSelector(ChainSelectorConfig{
+		SecurityParam: 2160,
+	})
+
+	// Don't set local tip (remains zero value)
+
+	connId := newTestConnectionId(1)
+
+	highTip := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: math.MaxUint64, Hash: []byte("high")},
+		BlockNumber: math.MaxUint64,
+	}
+
+	accepted := cs.UpdatePeerTip(connId, highTip, nil)
+	assert.True(
+		t,
+		accepted,
+		"all tips should be accepted when local tip is at block 0",
+	)
+	assert.NotNil(t, cs.GetPeerTip(connId))
+}
+
+func TestUpdatePeerTipSpoofedPeerDoesNotBecomesBest(t *testing.T) {
+	cs := NewChainSelector(ChainSelectorConfig{
+		SecurityParam: 2160,
+	})
+
+	cs.SetLocalTip(ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 100000, Hash: []byte("local")},
+		BlockNumber: 50000,
+	})
+
+	// Add a legitimate peer first
+	legitimateConn := newTestConnectionId(1)
+	legitimateTip := ochainsync.Tip{
+		Point: ocommon.Point{
+			Slot: 100100,
+			Hash: []byte("legit"),
+		},
+		BlockNumber: 50050,
+	}
+	cs.UpdatePeerTip(legitimateConn, legitimateTip, nil)
+
+	// Now a malicious peer tries to spoof
+	maliciousConn := newTestConnectionId(2)
+	spoofedTip := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: math.MaxUint64, Hash: []byte("evil")},
+		BlockNumber: math.MaxUint64,
+	}
+
+	accepted := cs.UpdatePeerTip(maliciousConn, spoofedTip, nil)
+	assert.False(t, accepted, "spoofed tip should be rejected")
+
+	// The legitimate peer should still be the best
+	bestPeer := cs.GetBestPeer()
+	require.NotNil(t, bestPeer)
+	assert.Equal(
+		t,
+		legitimateConn,
+		*bestPeer,
+		"legitimate peer should remain best peer",
+	)
 }
