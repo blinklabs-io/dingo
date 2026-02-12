@@ -117,16 +117,45 @@ func (cs *ChainSelector) Stop() {
 // evaluation if needed. The vrfOutput parameter is the VRF output from the
 // tip block header, used for tie-breaking when chains have equal block number
 // and slot.
+//
+// Returns true if the tip was accepted, false if it was rejected as
+// implausible. A tip is considered implausible if it claims a block number
+// more than securityParam (k) blocks ahead of the local tip. This check is
+// skipped during initial sync (when securityParam is 0 or localTip is at
+// block 0).
 func (cs *ChainSelector) UpdatePeerTip(
 	connId ouroboros.ConnectionId,
 	tip ochainsync.Tip,
 	vrfOutput []byte,
-) {
+) bool {
 	shouldEvaluate := false
+	accepted := true
 
 	func() {
 		cs.mutex.Lock()
 		defer cs.mutex.Unlock()
+
+		// Reject implausible tips that claim to be too far ahead of our
+		// local chain. This prevents a malicious peer from spoofing an
+		// extremely high block number to hijack chain selection.
+		// Skip the check during initial sync when we have no local tip
+		// or securityParam is not yet set.
+		if cs.securityParam > 0 && cs.localTip.BlockNumber > 0 {
+			maxPlausibleBlock := cs.localTip.BlockNumber +
+				cs.securityParam
+			if tip.BlockNumber > maxPlausibleBlock {
+				cs.config.Logger.Warn(
+					"rejecting implausible peer tip",
+					"connection_id", connId.String(),
+					"claimed_block", tip.BlockNumber,
+					"local_block", cs.localTip.BlockNumber,
+					"security_param", cs.securityParam,
+					"max_plausible_block", maxPlausibleBlock,
+				)
+				accepted = false
+				return
+			}
+		}
 
 		if peerTip, exists := cs.peerTips[connId]; exists {
 			peerTip.UpdateTip(tip, vrfOutput)
@@ -154,9 +183,15 @@ func (cs *ChainSelector) UpdatePeerTip(
 		}
 	}()
 
+	if !accepted {
+		return false
+	}
+
 	if shouldEvaluate {
 		cs.EvaluateAndSwitch()
 	}
+
+	return true
 }
 
 // RemovePeer removes a peer from tracking.
