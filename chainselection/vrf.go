@@ -58,12 +58,14 @@ func GetVRFOutput(header ledger.BlockHeader) []byte {
 // Returns:
 //   - ChainABetter (1) if vrfA is lower (A wins)
 //   - ChainBBetter (-1) if vrfB is lower (B wins)
-//   - ChainEqual (0) if equal or either is nil
+//   - ChainEqual (0) if equal, either is nil, or either has invalid length
 //
 // Per Ouroboros Praos: the chain with the LOWER VRF output wins the tie-break.
+// Both outputs must be exactly VRFOutputSize (64) bytes; outputs of any other
+// length are treated the same as nil to prevent truncated values from winning.
 func CompareVRFOutputs(vrfA, vrfB []byte) ChainComparisonResult {
-	// Can't compare if either is nil
-	if vrfA == nil || vrfB == nil {
+	// Can't compare if either is nil or has invalid length
+	if len(vrfA) != VRFOutputSize || len(vrfB) != VRFOutputSize {
 		return ChainEqual
 	}
 
