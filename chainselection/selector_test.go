@@ -413,8 +413,9 @@ func TestChainSelectorVRFTiebreaker(t *testing.T) {
 	}
 
 	// VRF outputs: lower wins (per Ouroboros Praos)
-	vrfLower := []byte{0x00, 0x00, 0x00, 0x01}
-	vrfHigher := []byte{0x00, 0x00, 0x00, 0x02}
+	// Must be exactly VRFOutputSize (64 bytes) to be valid
+	vrfLower := make64ByteVRF(0x00)
+	vrfHigher := make64ByteVRF(0x01)
 
 	// Add peer with higher VRF first
 	cs.UpdatePeerTip(connId1, tip, vrfHigher)
@@ -440,7 +441,7 @@ func TestChainSelectorVRFTiebreakerWithNilVRF(t *testing.T) {
 	}
 
 	// One peer has VRF, one doesn't
-	vrf := []byte{0x00, 0x01, 0x02, 0x03}
+	vrf := make64ByteVRF(0x01)
 
 	cs.UpdatePeerTip(connId1, tip, vrf)
 	cs.UpdatePeerTip(connId2, tip, nil)
@@ -476,8 +477,8 @@ func TestChainSelectorVRFDoesNotOverrideBlockNumber(t *testing.T) {
 		BlockNumber: 50,
 	}
 
-	vrfLower := []byte{0x00, 0x00, 0x00, 0x01}
-	vrfHigher := []byte{0xFF, 0xFF, 0xFF, 0xFF}
+	vrfLower := make64ByteVRF(0x00)
+	vrfHigher := make64ByteVRF(0xFF)
 
 	cs.UpdatePeerTip(connId1, tip1, vrfLower)
 	cs.UpdatePeerTip(connId2, tip2, vrfHigher)
@@ -511,8 +512,8 @@ func TestChainSelectorVRFDoesNotOverrideSlot(t *testing.T) {
 		BlockNumber: 50,
 	}
 
-	vrfLower := []byte{0x00, 0x00, 0x00, 0x01}
-	vrfHigher := []byte{0xFF, 0xFF, 0xFF, 0xFF}
+	vrfLower := make64ByteVRF(0x00)
+	vrfHigher := make64ByteVRF(0xFF)
 
 	cs.UpdatePeerTip(connId1, tip1, vrfLower)
 	cs.UpdatePeerTip(connId2, tip2, vrfHigher)
