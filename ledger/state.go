@@ -2747,6 +2747,8 @@ func (ls *LedgerState) UtxosByAddress(
 	return ret, nil
 }
 
+// UtxosByAddressAtSlot returns all UTxOs belonging to the
+// specified address that existed at the given slot.
 func (ls *LedgerState) UtxosByAddressAtSlot(
 	addr lcommon.Address,
 	slot uint64,

@@ -173,11 +173,8 @@ type MetadataStore interface {
 		types.Txn,
 	) (*models.Utxo, error)
 
-	// GetUtxoIncludingSpent retrieves a transaction output by transaction ID
-	// and index, including outputs that have already been consumed (spent).
-	// Unlike GetUtxo, this does not filter on deleted_slot = 0, so it can
-	// resolve inputs that have already been consumed. This is needed for
-	// APIs that must display the source address and amount of spent inputs.
+	// GetUtxoIncludingSpent retrieves a transaction output by
+	// transaction ID and index, including spent outputs.
 	GetUtxoIncludingSpent(
 		[]byte, // txId
 		uint32, // idx
@@ -190,19 +187,15 @@ type MetadataStore interface {
 		types.Txn,
 	) (*models.Transaction, error)
 
-	// GetTransactionsByBlockHash retrieves all transactions for a given
-	// block hash, ordered by block_index (position within the block).
-	// Associations (Inputs, Outputs, Certificates) and nested Assets
-	// are preloaded.
+	// GetTransactionsByBlockHash retrieves all transactions
+	// for a given block hash, ordered by block_index.
 	GetTransactionsByBlockHash(
 		[]byte, // blockHash
 		types.Txn,
 	) ([]models.Transaction, error)
 
-	// GetTransactionsByAddress retrieves transactions that involve the
-	// given address, either as a sender (input) or receiver (output).
-	// Results are ordered by slot descending, with limit and offset for
-	// pagination.
+	// GetTransactionsByAddress retrieves transactions involving
+	// the given address, ordered by slot descending.
 	GetTransactionsByAddress(
 		lcommon.Address,
 		int, // limit

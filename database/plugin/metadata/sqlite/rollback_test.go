@@ -23,9 +23,9 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
-	pdata "github.com/blinklabs-io/plutigo/data"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	pdata "github.com/blinklabs-io/plutigo/data"
 	"github.com/stretchr/testify/require"
 	"github.com/utxorpc/go-codegen/utxorpc/v1alpha/cardano"
 )
@@ -977,25 +977,25 @@ func TestRollbackGovernanceProposalDeletion(t *testing.T) {
 	store := setupTestDB(t)
 
 	prop1 := &models.GovernanceProposal{
-		TxHash:       bytes.Repeat([]byte{0x90}, 32),
-		ActionIndex:  0,
-		ActionType:   1,
-		AddedSlot:    100,
-		ExpiresEpoch: 50,
-		AnchorUrl:    "https://example.com/prop1",
-		AnchorHash:   bytes.Repeat([]byte{0x92}, 32),
+		TxHash:        bytes.Repeat([]byte{0x90}, 32),
+		ActionIndex:   0,
+		ActionType:    1,
+		AddedSlot:     100,
+		ExpiresEpoch:  50,
+		AnchorUrl:     "https://example.com/prop1",
+		AnchorHash:    bytes.Repeat([]byte{0x92}, 32),
 		ReturnAddress: bytes.Repeat([]byte{0x93}, 29),
 	}
 	require.NoError(t, store.SetGovernanceProposal(prop1, nil))
 
 	prop2 := &models.GovernanceProposal{
-		TxHash:       bytes.Repeat([]byte{0x91}, 32),
-		ActionIndex:  0,
-		ActionType:   2,
-		AddedSlot:    300,
-		ExpiresEpoch: 70,
-		AnchorUrl:    "https://example.com/prop2",
-		AnchorHash:   bytes.Repeat([]byte{0x94}, 32),
+		TxHash:        bytes.Repeat([]byte{0x91}, 32),
+		ActionIndex:   0,
+		ActionType:    2,
+		AddedSlot:     300,
+		ExpiresEpoch:  70,
+		AnchorUrl:     "https://example.com/prop2",
+		AnchorHash:    bytes.Repeat([]byte{0x94}, 32),
 		ReturnAddress: bytes.Repeat([]byte{0x95}, 29),
 	}
 	require.NoError(t, store.SetGovernanceProposal(prop2, nil))

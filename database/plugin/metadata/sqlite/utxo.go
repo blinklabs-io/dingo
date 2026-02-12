@@ -56,10 +56,8 @@ func (d *MetadataStoreSqlite) GetUtxo(
 	return ret, nil
 }
 
-// GetUtxoIncludingSpent returns a Utxo by reference, including
-// spent (consumed) UTxOs. Unlike GetUtxo, this does not filter
-// on deleted_slot, making it suitable for resolving transaction
-// inputs that have already been consumed.
+// GetUtxoIncludingSpent returns a Utxo by reference,
+// including spent (consumed) UTxOs.
 func (d *MetadataStoreSqlite) GetUtxoIncludingSpent(
 	txId []byte,
 	idx uint32,
@@ -180,6 +178,39 @@ func (d *MetadataStoreSqlite) GetUtxosDeletedBeforeSlot(
 	return ret, nil
 }
 
+// addressWhereClause builds a GORM Where clause for matching
+// UTxOs by payment key, staking key, or both. Returns nil if
+// the address has neither key.
+func addressWhereClause(
+	db *gorm.DB,
+	addr lcommon.Address,
+) *gorm.DB {
+	zeroHash := lcommon.NewBlake2b224(nil)
+	hasPayment := addr.PaymentKeyHash() != zeroHash
+	hasStake := addr.StakeKeyHash() != zeroHash
+
+	switch {
+	case hasPayment && hasStake:
+		return db.Where(
+			"payment_key = ? AND staking_key = ?",
+			addr.PaymentKeyHash().Bytes(),
+			addr.StakeKeyHash().Bytes(),
+		)
+	case hasPayment:
+		return db.Where(
+			"payment_key = ?",
+			addr.PaymentKeyHash().Bytes(),
+		)
+	case hasStake:
+		return db.Where(
+			"staking_key = ?",
+			addr.StakeKeyHash().Bytes(),
+		)
+	default:
+		return nil
+	}
+}
+
 // GetUtxosByAddress returns a list of Utxos
 func (d *MetadataStoreSqlite) GetUtxosByAddress(
 	addr ledger.Address,
@@ -190,25 +221,7 @@ func (d *MetadataStoreSqlite) GetUtxosByAddress(
 	if err != nil {
 		return nil, err
 	}
-
-	hasPaymentKey := addr.PaymentKeyHash() != ledger.NewBlake2b224(nil)
-	hasStakeKey := addr.StakeKeyHash() != ledger.NewBlake2b224(nil)
-
-	// Build sub-query for address
-	var addrQuery *gorm.DB
-	if hasPaymentKey && hasStakeKey {
-		// Base address: both credentials must match (AND)
-		addrQuery = db.Where(
-			"payment_key = ? AND staking_key = ?",
-			addr.PaymentKeyHash().Bytes(),
-			addr.StakeKeyHash().Bytes(),
-		)
-	} else if hasPaymentKey {
-		addrQuery = db.Where("payment_key = ?", addr.PaymentKeyHash().Bytes())
-	} else if hasStakeKey {
-		addrQuery = db.Where("staking_key = ?", addr.StakeKeyHash().Bytes())
-	}
-
+	addrQuery := addressWhereClause(db, addr)
 	if addrQuery == nil {
 		return ret, nil
 	}
@@ -223,7 +236,8 @@ func (d *MetadataStoreSqlite) GetUtxosByAddress(
 	return ret, nil
 }
 
-// GetUtxosByAddressAtSlot returns UTxOs for an address that existed at a specific slot
+// GetUtxosByAddressAtSlot returns UTxOs for an address
+// that existed at a specific slot.
 func (d *MetadataStoreSqlite) GetUtxosByAddressAtSlot(
 	addr lcommon.Address,
 	slot uint64,
@@ -234,25 +248,7 @@ func (d *MetadataStoreSqlite) GetUtxosByAddressAtSlot(
 	if err != nil {
 		return nil, err
 	}
-
-	hasPaymentKey := addr.PaymentKeyHash() != lcommon.NewBlake2b224(nil)
-	hasStakeKey := addr.StakeKeyHash() != lcommon.NewBlake2b224(nil)
-
-	// Build sub-query for address
-	var addrQuery *gorm.DB
-	if hasPaymentKey && hasStakeKey {
-		// Base address: both credentials must match (AND)
-		addrQuery = db.Where(
-			"payment_key = ? AND staking_key = ?",
-			addr.PaymentKeyHash().Bytes(),
-			addr.StakeKeyHash().Bytes(),
-		)
-	} else if hasPaymentKey {
-		addrQuery = db.Where("payment_key = ?", addr.PaymentKeyHash().Bytes())
-	} else if hasStakeKey {
-		addrQuery = db.Where("staking_key = ?", addr.StakeKeyHash().Bytes())
-	}
-
+	addrQuery := addressWhereClause(db, addr)
 	if addrQuery == nil {
 		return ret, nil
 	}

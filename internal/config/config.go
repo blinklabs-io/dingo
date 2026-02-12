@@ -207,6 +207,9 @@ type Config struct {
 	ShelleyVRFKey                 string `yaml:"shelleyVrfKey"                 envconfig:"SHELLEY_VRF_KEY"`
 	ShelleyKESKey                 string `yaml:"shelleyKesKey"                 envconfig:"SHELLEY_KES_KEY"`
 	ShelleyOperationalCertificate string `yaml:"shelleyOperationalCertificate" envconfig:"SHELLEY_OPERATIONAL_CERTIFICATE"`
+
+	// Mesh (Coinbase Rosetta) API listen address (empty = disabled)
+	MeshListenAddress string `yaml:"meshListenAddress" envconfig:"DINGO_MESH_LISTEN_ADDRESS"`
 }
 
 func (c *Config) ParseCmdlineArgs(programName string, args []string) error {

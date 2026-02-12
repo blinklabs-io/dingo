@@ -85,6 +85,8 @@ type Config struct {
 	// Chainsync multi-client configuration
 	chainsyncMaxClients   int
 	chainsyncStallTimeout time.Duration
+	// Mesh API listen address (empty = disabled)
+	meshListenAddress string
 }
 
 // configPopulateNetworkMagic uses the named network (if specified) to determine the network magic value (if not specified)
@@ -450,5 +452,17 @@ func WithChainsyncStallTimeout(
 ) ConfigOptionFunc {
 	return func(c *Config) {
 		c.chainsyncStallTimeout = timeout
+	}
+}
+
+// WithMeshListenAddress specifies the listen address
+// for the Mesh (Coinbase Rosetta) compatible REST API
+// server. An empty string disables the server. The
+// default is empty (disabled).
+func WithMeshListenAddress(
+	addr string,
+) ConfigOptionFunc {
+	return func(c *Config) {
+		c.meshListenAddress = addr
 	}
 }

@@ -63,6 +63,38 @@ func (d *MetadataStoreMysql) resolveDB(txn types.Txn) (*gorm.DB, error) {
 	return db, nil
 }
 
+// addressSQLCondition builds a raw SQL WHERE fragment and
+// bind args for matching UTxO rows by payment/staking key.
+// The prefix is the table alias (e.g. "u"). Returns an
+// empty condition if the address has neither key.
+func addressSQLCondition(
+	addr lcommon.Address,
+	prefix string,
+) (string, []any) {
+	zeroHash := lcommon.NewBlake2b224(nil)
+	hasPayment := addr.PaymentKeyHash() != zeroHash
+	hasStake := addr.StakeKeyHash() != zeroHash
+
+	switch {
+	case hasPayment && hasStake:
+		return fmt.Sprintf(
+				"%s.payment_key = ? AND %s.staking_key = ?",
+				prefix, prefix,
+			), []any{
+				addr.PaymentKeyHash().Bytes(),
+				addr.StakeKeyHash().Bytes(),
+			}
+	case hasPayment:
+		return prefix + ".payment_key = ?",
+			[]any{addr.PaymentKeyHash().Bytes()}
+	case hasStake:
+		return prefix + ".staking_key = ?",
+			[]any{addr.StakeKeyHash().Bytes()}
+	default:
+		return "", nil
+	}
+}
+
 // GetTransactionByHash returns a transaction by its hash
 func (d *MetadataStoreMysql) GetTransactionByHash(
 	hash []byte,
@@ -114,7 +146,8 @@ func (d *MetadataStoreMysql) GetTransactionsByBlockHash(
 	return ret, nil
 }
 
-// GetTransactionsByAddress returns transactions associated with an address
+// GetTransactionsByAddress returns transactions associated
+// with an address.
 func (d *MetadataStoreMysql) GetTransactionsByAddress(
 	addr lcommon.Address,
 	limit int,
@@ -127,38 +160,25 @@ func (d *MetadataStoreMysql) GetTransactionsByAddress(
 		return nil, err
 	}
 
-	hasPaymentKey := addr.PaymentKeyHash() != lcommon.NewBlake2b224(nil)
-	hasStakeKey := addr.StakeKeyHash() != lcommon.NewBlake2b224(nil)
-
-	var addrCondition string
-	var addrArgs []any
-	if hasPaymentKey && hasStakeKey {
-		addrCondition = "u.payment_key = ? AND u.staking_key = ?"
-		addrArgs = []any{
-			addr.PaymentKeyHash().Bytes(),
-			addr.StakeKeyHash().Bytes(),
-		}
-	} else if hasPaymentKey {
-		addrCondition = "u.payment_key = ?"
-		addrArgs = []any{addr.PaymentKeyHash().Bytes()}
-	} else if hasStakeKey {
-		addrCondition = "u.staking_key = ?"
-		addrArgs = []any{addr.StakeKeyHash().Bytes()}
-	} else {
+	cond, args := addressSQLCondition(addr, "u")
+	if cond == "" {
 		return ret, nil
 	}
 
 	subQuery := fmt.Sprintf(
 		"id IN ("+
-			"SELECT DISTINCT t.id FROM `transaction` t "+
-			"JOIN utxo u ON (u.transaction_id = t.id OR u.spent_at_tx_id = t.hash) "+
+			"SELECT DISTINCT t.id "+
+			"FROM `transaction` t "+
+			"JOIN utxo u ON "+
+			"(u.transaction_id = t.id "+
+			"OR u.spent_at_tx_id = t.hash) "+
 			"WHERE %s"+
 			")",
-		addrCondition,
+		cond,
 	)
 
 	query := db.
-		Where(subQuery, addrArgs...).
+		Where(subQuery, args...).
 		Order("slot DESC").
 		Preload(clause.Associations).
 		Preload("Inputs.Assets").
@@ -175,7 +195,9 @@ func (d *MetadataStoreMysql) GetTransactionsByAddress(
 
 	result := query.Find(&ret)
 	if result.Error != nil {
-		return nil, fmt.Errorf("get txs by address: %w", result.Error)
+		return nil, fmt.Errorf(
+			"get txs by address: %w", result.Error,
+		)
 	}
 	return ret, nil
 }
