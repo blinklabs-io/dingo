@@ -24,6 +24,9 @@ var (
 	ErrRollbackBeyondEphemeralChain = errors.New(
 		"cannot rollback ephemeral chain beyond memory buffer",
 	)
+	ErrRollbackExceedsSecurityParam = errors.New(
+		"rollback depth exceeds security parameter K",
+	)
 	ErrIteratorChainTip = errors.New(
 		"chain iterator is at chain tip",
 	)

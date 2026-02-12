@@ -509,6 +509,252 @@ func TestChainFromIntersect(t *testing.T) {
 	}
 }
 
+// mockLedger implements the interface{ SecurityParam() int }
+// interface used by ChainManager.SetLedger.
+type mockLedger struct {
+	securityParam int
+}
+
+func (m *mockLedger) SecurityParam() int {
+	return m.securityParam
+}
+
+// newTestDB creates an isolated database in a temporary
+// directory so that tests do not share in-memory state.
+func newTestDB(t *testing.T) *database.Database {
+	t.Helper()
+	cfg := &database.Config{
+		DataDir:        t.TempDir(),
+		BlobPlugin:     "badger",
+		MetadataPlugin: "sqlite",
+	}
+	db, err := database.New(cfg)
+	if err != nil {
+		t.Fatalf(
+			"unexpected error creating database: %s",
+			err,
+		)
+	}
+	t.Cleanup(func() { db.Close() })
+	return db
+}
+
+func TestChainRollbackExceedsSecurityParam(t *testing.T) {
+	db := newTestDB(t)
+	cm, err := chain.NewManager(db, nil)
+	if err != nil {
+		t.Fatalf(
+			"unexpected error creating chain manager: %s",
+			err,
+		)
+	}
+	// Set security parameter to 2 so that rolling back
+	// 3 blocks (from index 5 to index 2) exceeds it.
+	cm.SetLedger(&mockLedger{securityParam: 2})
+	c := cm.PrimaryChain()
+	for _, testBlock := range testBlocks {
+		if err := c.AddBlock(testBlock, nil); err != nil {
+			t.Fatalf(
+				"unexpected error adding block to chain: %s",
+				err,
+			)
+		}
+	}
+	// Attempt rollback deeper than K (depth=3, K=2)
+	shallowBlock := testBlocks[2]
+	deepRollbackPoint := ocommon.Point{
+		Slot: shallowBlock.SlotNumber(),
+		Hash: shallowBlock.Hash().Bytes(),
+	}
+	err = c.Rollback(deepRollbackPoint)
+	if err == nil {
+		t.Fatal(
+			"expected rollback to be rejected " +
+				"when depth exceeds security param",
+		)
+	}
+	if !errors.Is(err, chain.ErrRollbackExceedsSecurityParam) {
+		t.Fatalf(
+			"expected ErrRollbackExceedsSecurityParam, got: %s",
+			err,
+		)
+	}
+	// Verify the chain tip was NOT modified (rollback
+	// was rejected before any state changes)
+	tip := c.Tip()
+	lastBlock := testBlocks[len(testBlocks)-1]
+	if tip.Point.Slot != lastBlock.SlotNumber() {
+		t.Fatalf(
+			"chain tip should be unchanged after rejected "+
+				"rollback: got slot %d, expected %d",
+			tip.Point.Slot,
+			lastBlock.SlotNumber(),
+		)
+	}
+}
+
+func TestChainRollbackWithinSecurityParam(t *testing.T) {
+	db := newTestDB(t)
+	cm, err := chain.NewManager(db, nil)
+	if err != nil {
+		t.Fatalf(
+			"unexpected error creating chain manager: %s",
+			err,
+		)
+	}
+	// Set security parameter to 3. Rolling back 3 blocks
+	// (from index 5 to index 2) should be allowed since
+	// forkDepth == K is not strictly greater than K.
+	cm.SetLedger(&mockLedger{securityParam: 3})
+	c := cm.PrimaryChain()
+	for _, testBlock := range testBlocks {
+		if err := c.AddBlock(testBlock, nil); err != nil {
+			t.Fatalf(
+				"unexpected error adding block to chain: %s",
+				err,
+			)
+		}
+	}
+	rollbackBlock := testBlocks[2]
+	rollbackPoint := ocommon.Point{
+		Slot: rollbackBlock.SlotNumber(),
+		Hash: rollbackBlock.Hash().Bytes(),
+	}
+	if err := c.Rollback(rollbackPoint); err != nil {
+		t.Fatalf(
+			"rollback within security param should "+
+				"succeed, got: %s",
+			err,
+		)
+	}
+	tip := c.Tip()
+	if tip.Point.Slot != rollbackPoint.Slot ||
+		string(tip.Point.Hash) != string(rollbackPoint.Hash) {
+		t.Fatalf(
+			"chain tip should match rollback point: "+
+				"got %d.%x, wanted %d.%x",
+			tip.Point.Slot,
+			tip.Point.Hash,
+			rollbackPoint.Slot,
+			rollbackPoint.Hash,
+		)
+	}
+}
+
+func TestChainRollbackSecurityParamZeroAllowsAll(t *testing.T) {
+	db := newTestDB(t)
+	cm, err := chain.NewManager(db, nil)
+	if err != nil {
+		t.Fatalf(
+			"unexpected error creating chain manager: %s",
+			err,
+		)
+	}
+	// securityParam defaults to 0 (ledger not initialized).
+	// All rollbacks should be allowed.
+	c := cm.PrimaryChain()
+	for _, testBlock := range testBlocks {
+		if err := c.AddBlock(testBlock, nil); err != nil {
+			t.Fatalf(
+				"unexpected error adding block to chain: %s",
+				err,
+			)
+		}
+	}
+	// Roll back all the way to block index 0
+	rollbackPoint := ocommon.Point{
+		Slot: testBlocks[0].SlotNumber(),
+		Hash: testBlocks[0].Hash().Bytes(),
+	}
+	if err := c.Rollback(rollbackPoint); err != nil {
+		t.Fatalf(
+			"rollback with securityParam=0 should "+
+				"always succeed, got: %s",
+			err,
+		)
+	}
+}
+
+func TestChainRollbackEphemeralChainNotRestricted(
+	t *testing.T,
+) {
+	db := newTestDB(t)
+	cm, err := chain.NewManager(db, nil)
+	if err != nil {
+		t.Fatalf(
+			"unexpected error creating chain manager: %s",
+			err,
+		)
+	}
+	// Set a very small security param
+	cm.SetLedger(&mockLedger{securityParam: 1})
+	c := cm.PrimaryChain()
+	for _, testBlock := range testBlocks {
+		if err := c.AddBlock(testBlock, nil); err != nil {
+			t.Fatalf(
+				"unexpected error adding block to chain: %s",
+				err,
+			)
+		}
+	}
+	// Create an ephemeral (non-persistent) fork chain
+	forkPointIndex := 2
+	forkPoint := ocommon.Point{
+		Hash: decodeHex(
+			testBlocks[forkPointIndex].MockHash,
+		),
+		Slot: testBlocks[forkPointIndex].MockSlot,
+	}
+	forkChain, err := cm.NewChainFromIntersect(
+		[]ocommon.Point{forkPoint},
+	)
+	if err != nil {
+		t.Fatalf(
+			"unexpected error creating fork chain: %s",
+			err,
+		)
+	}
+	// Add blocks to the fork chain, then roll back
+	forkBlocks := []*MockBlock{
+		{
+			MockBlockNumber: 4,
+			MockSlot:        60,
+			MockHash:        testHashPrefix + "00b4",
+			MockPrevHash:    testHashPrefix + "0003",
+		},
+		{
+			MockBlockNumber: 5,
+			MockSlot:        80,
+			MockHash:        testHashPrefix + "00b5",
+			MockPrevHash:    testHashPrefix + "00b4",
+		},
+		{
+			MockBlockNumber: 6,
+			MockSlot:        100,
+			MockHash:        testHashPrefix + "00b6",
+			MockPrevHash:    testHashPrefix + "00b5",
+		},
+	}
+	for _, blk := range forkBlocks {
+		if err := forkChain.AddBlock(blk, nil); err != nil {
+			t.Fatalf(
+				"unexpected error adding block "+
+					"to fork chain: %s",
+				err,
+			)
+		}
+	}
+	// Roll back the ephemeral chain beyond K=1; this
+	// should succeed because ephemeral chains are exempt.
+	if err := forkChain.Rollback(forkPoint); err != nil {
+		t.Fatalf(
+			"ephemeral chain rollback should not be "+
+				"restricted by security param, got: %s",
+			err,
+		)
+	}
+}
+
 func TestChainFork(t *testing.T) {
 	testForkPointIndex := 2
 	testIntersectPoints := []ocommon.Point{
