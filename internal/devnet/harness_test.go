@@ -29,7 +29,7 @@ import (
 func defaultEndpoints() []NodeEndpoint {
 	dingoAddr := os.Getenv("DEVNET_DINGO_ADDR")
 	if dingoAddr == "" {
-		dingoAddr = "localhost:3001"
+		dingoAddr = "localhost:3010"
 	}
 	cardanoAddr := os.Getenv("DEVNET_CARDANO_ADDR")
 	if cardanoAddr == "" {
@@ -77,8 +77,11 @@ func TestHarnessVerifyConsensus(t *testing.T) {
 
 	h.WaitForAllNodesReady(60 * time.Second)
 
-	// Let the chain advance a bit before checking consensus
-	h.WaitForSlot(20, 30*time.Second)
+	// Wait for ALL nodes to reach the target slot before checking
+	// consensus. WaitForSlot returns when ANY node reaches the target,
+	// which can leave slower nodes behind. WaitForAllNodesSlot ensures
+	// every node has caught up before we compare tips.
+	h.WaitForAllNodesSlot(20, 60*time.Second)
 
 	// Allow up to 5 slots of propagation delay
 	h.VerifyChainConsensus(5)

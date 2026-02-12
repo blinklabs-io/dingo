@@ -321,11 +321,22 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 	// this slot (possibly from a peer). Producing another would create
 	// a competing block and fork the chain.
 	if currentSlot <= tipSlot {
-		f.logger.Debug(
-			"forge skip: slot already has block",
-			"current_slot", currentSlot,
-			"tip_slot", tipSlot,
-		)
+		// Detect stale data: if the tip is far ahead of the slot clock,
+		// the database likely contains chain data from a different genesis.
+		if tipSlot > currentSlot+1000 {
+			f.logger.Error(
+				"chain tip is far ahead of slot clock; database may contain data from a different genesis",
+				"current_slot", currentSlot,
+				"tip_slot", tipSlot,
+				"slot_gap", tipSlot-currentSlot,
+			)
+		} else {
+			f.logger.Debug(
+				"forge skip: slot already has block",
+				"current_slot", currentSlot,
+				"tip_slot", tipSlot,
+			)
+		}
 		return nil
 	}
 

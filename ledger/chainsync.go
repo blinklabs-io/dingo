@@ -567,15 +567,26 @@ func GenesisBlockHash(cfg *cardano.CardanoNodeConfig) ([32]byte, error) {
 }
 
 func (ls *LedgerState) createGenesisBlock() error {
-	if ls.currentTip.Point.Slot > 0 {
-		return nil
-	}
-
 	// Get the Byron genesis hash to use as the synthetic block hash.
 	// This mirrors how the Shelley epoch nonce uses the Shelley genesis hash.
 	genesisHash, err := GenesisBlockHash(ls.config.CardanoNodeConfig)
 	if err != nil {
 		return fmt.Errorf("get genesis block hash: %w", err)
+	}
+
+	if ls.currentTip.Point.Slot > 0 {
+		// Validate existing chain data matches the current genesis config.
+		// If the blob store does not contain genesis CBOR at the expected
+		// key, the database was created with a different genesis.
+		if !ls.db.HasGenesisCbor(0, genesisHash[:]) {
+			return fmt.Errorf(
+				"genesis hash mismatch: database contains chain data "+
+					"from a different genesis (expected Byron genesis "+
+					"hash %x); delete the database directory to start fresh",
+				genesisHash,
+			)
+		}
+		return nil
 	}
 
 	txn := ls.db.Transaction(true)

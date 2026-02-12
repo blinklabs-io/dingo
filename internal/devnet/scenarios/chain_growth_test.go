@@ -177,7 +177,7 @@ func TestSustainedConsensus(t *testing.T) {
 		targetSlot := baseSlot + offset
 		t.Logf("checking consensus at slot %d...", targetSlot)
 		timeout := time.Duration(offset)*cfg.SlotDuration() + 30*time.Second
-		h.WaitForSlot(targetSlot, timeout)
+		h.WaitForAllNodesSlot(targetSlot, timeout)
 
 		// Log tips from all nodes
 		for _, ep := range endpoints {

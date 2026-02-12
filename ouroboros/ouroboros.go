@@ -106,6 +106,36 @@ func NewOuroboros(cfg OuroborosConfig) *Ouroboros {
 		cfg.Logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
 	}
 	cfg.Logger = cfg.Logger.With("component", "ouroboros")
+	// TODO: These global StateMap mutations are not goroutine-safe.
+	// They work because we create a single Ouroboros instance, but
+	// should be replaced with per-connection overrides in gouroboros.
+	//
+	// Override the global chainsync StateMap timeouts.
+	// The chainsync server protocol uses the global StateMap directly
+	// without applying config overrides (unlike the client which
+	// copies and modifies it). Increase from the defaults to avoid
+	// false timeouts when callbacks block on lock contention.
+	for state, entry := range ochainsync.StateMap {
+		switch state.Name {
+		case "Intersect":
+			entry.Timeout = 30 * time.Second
+			ochainsync.StateMap[state] = entry
+		case "Idle":
+			entry.Timeout = 300 * time.Second
+			ochainsync.StateMap[state] = entry
+		}
+	}
+	// Override the global TxSubmission StateMap timeouts.
+	// TxIdsBlocking defaults to 60s which is too short when
+	// the mempool is empty (common in DevNets). Increase to
+	// 300s to match the Idle timeout and avoid unnecessary
+	// connection teardowns.
+	for state, entry := range otxsubmission.StateMap {
+		if state.Name == "TxIdsBlocking" {
+			entry.Timeout = 300 * time.Second
+			otxsubmission.StateMap[state] = entry
+		}
+	}
 	o := &Ouroboros{
 		config:           cfg,
 		EventBus:         cfg.EventBus,
@@ -422,7 +452,7 @@ func (o *Ouroboros) HandleInboundConnEvent(evt event.Event) {
 
 	// Only start client protocols if the peer negotiated full duplex
 	_, versionData := conn.ProtocolVersion()
-	if versionData.DiffusionMode() != oprotocol.DiffusionModeInitiatorAndResponder {
+	if versionData == nil || versionData.DiffusionMode() != oprotocol.DiffusionModeInitiatorAndResponder {
 		o.config.Logger.Debug(
 			"inbound connection is not full-duplex, skipping client start",
 			"connection_id", connId.String(),
@@ -445,10 +475,14 @@ func (o *Ouroboros) HandleInboundConnEvent(evt event.Event) {
 			if err := o.chainsyncClientStart(connId); err != nil {
 				o.ChainsyncState.RemoveClientConnId(connId)
 				o.config.Logger.Error(
-					"failed to start chainsync client on inbound connection",
+					"failed to start chainsync client on inbound connection, closing connection",
 					"error", err,
 					"connection_id", connId.String(),
 				)
+				// Close the connection so peergov stops tracking it and
+				// outbound retries are not blocked by a stale inbound.
+				conn.Close()
+				o.ConnManager.RemoveConnection(connId)
 				return
 			}
 			o.config.Logger.Debug(

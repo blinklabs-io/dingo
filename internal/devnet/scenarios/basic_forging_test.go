@@ -29,7 +29,7 @@ import (
 func defaultEndpoints() []devnet.NodeEndpoint {
 	dingoAddr := os.Getenv("DEVNET_DINGO_ADDR")
 	if dingoAddr == "" {
-		dingoAddr = "localhost:3001"
+		dingoAddr = "localhost:3010"
 	}
 	cardanoAddr := os.Getenv("DEVNET_CARDANO_ADDR")
 	if cardanoAddr == "" {

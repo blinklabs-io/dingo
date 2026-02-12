@@ -359,6 +359,26 @@ func (e *Election) computeSchedule(
 		return nil, fmt.Errorf("get pool stake: %w", err)
 	}
 
+	// Fallback: if the target epoch has no data and we're past genesis,
+	// try the genesis snapshot (epoch 0). This handles early epochs
+	// where snapshot rotation hasn't produced a "mark" entry yet.
+	if poolStake == 0 && snapshotEpoch > 0 {
+		genesisStake, genesisErr := e.stakeProvider.GetPoolStake(
+			0, e.poolId[:],
+		)
+		if genesisErr == nil && genesisStake > 0 {
+			e.logger.Warn(
+				"no stake in target snapshot, falling back to genesis",
+				"component", "leader",
+				"epoch", currentEpoch,
+				"snapshot_epoch", snapshotEpoch,
+				"genesis_stake", genesisStake,
+			)
+			poolStake = genesisStake
+			snapshotEpoch = 0
+		}
+	}
+
 	e.logger.Info(
 		"pool stake from Go snapshot",
 		"component", "leader",

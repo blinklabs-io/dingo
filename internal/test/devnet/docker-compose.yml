@@ -64,7 +64,7 @@ services:
       - dingo-producer-data:/data/db
       - dingo-producer-ipc:/ipc
     ports:
-      - "3001:3001"
+      - "3010:3001"
     networks:
       devnet:
         ipv4_address: 172.20.0.10

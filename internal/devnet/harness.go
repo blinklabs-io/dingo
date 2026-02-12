@@ -22,6 +22,7 @@ package devnet
 import (
 	"fmt"
 	"net"
+	"sync"
 	"testing"
 	"time"
 
@@ -53,11 +54,15 @@ type TestHarness struct {
 	t            *testing.T
 	endpoints    []NodeEndpoint
 	networkMagic uint32
+
+	// Persistent connections keyed by endpoint address.
+	mu    sync.Mutex
+	conns map[string]*ouroboros.Connection
 }
 
 // NewTestHarness creates a new test harness for the given endpoints.
 // The default network magic (42) is used unless overridden with
-// WithNetworkMagic.
+// WithNetworkMagic. Call Close() when done to release connections.
 func NewTestHarness(
 	t *testing.T,
 	endpoints []NodeEndpoint,
@@ -68,10 +73,12 @@ func NewTestHarness(
 		t:            t,
 		endpoints:    endpoints,
 		networkMagic: DefaultNetworkMagic,
+		conns:        make(map[string]*ouroboros.Connection),
 	}
 	for _, opt := range opts {
 		opt(h)
 	}
+	t.Cleanup(h.Close)
 	return h
 }
 
@@ -85,19 +92,26 @@ func WithNetworkMagic(magic uint32) HarnessOptionFunc {
 	}
 }
 
-// GetChainTip connects to the specified node using the Ouroboros N2N
-// protocol and retrieves the current chain tip via ChainSync.
-func (h *TestHarness) GetChainTip(
+// getOrCreateConn returns a persistent Ouroboros connection for the
+// endpoint, creating one if it doesn't exist or if the previous one
+// is no longer usable.
+func (h *TestHarness) getOrCreateConn(
 	endpoint NodeEndpoint,
-) (ChainTip, error) {
+) (*ouroboros.Connection, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	if oConn, ok := h.conns[endpoint.Address]; ok {
+		return oConn, nil
+	}
+
 	conn, err := net.DialTimeout("tcp", endpoint.Address, 10*time.Second)
 	if err != nil {
-		return ChainTip{}, fmt.Errorf(
+		return nil, fmt.Errorf(
 			"failed to connect to %s (%s): %w",
 			endpoint.Name, endpoint.Address, err,
 		)
 	}
-	defer conn.Close()
 
 	oConn, err := ouroboros.NewConnection(
 		ouroboros.WithConnection(conn),
@@ -106,15 +120,52 @@ func (h *TestHarness) GetChainTip(
 		ouroboros.WithKeepAlive(true),
 	)
 	if err != nil {
-		return ChainTip{}, fmt.Errorf(
+		conn.Close()
+		return nil, fmt.Errorf(
 			"failed to establish ouroboros connection to %s: %w",
 			endpoint.Name, err,
 		)
 	}
-	defer oConn.Close()
+
+	h.conns[endpoint.Address] = oConn
+	return oConn, nil
+}
+
+// dropConn closes and removes a cached connection so the next call
+// to getOrCreateConn will establish a fresh one.
+func (h *TestHarness) dropConn(endpoint NodeEndpoint) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if oConn, ok := h.conns[endpoint.Address]; ok {
+		oConn.Close()
+		delete(h.conns, endpoint.Address)
+	}
+}
+
+// Close releases all persistent connections.
+func (h *TestHarness) Close() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for addr, oConn := range h.conns {
+		oConn.Close()
+		delete(h.conns, addr)
+	}
+}
+
+// GetChainTip retrieves the current chain tip from the specified node
+// using a persistent Ouroboros N2N connection.
+func (h *TestHarness) GetChainTip(
+	endpoint NodeEndpoint,
+) (ChainTip, error) {
+	oConn, err := h.getOrCreateConn(endpoint)
+	if err != nil {
+		return ChainTip{}, err
+	}
 
 	tip, err := oConn.ChainSync().Client.GetCurrentTip()
 	if err != nil {
+		// Connection may be broken; drop it so we reconnect next time.
+		h.dropConn(endpoint)
 		return ChainTip{}, fmt.Errorf(
 			"failed to get chain tip from %s: %w",
 			endpoint.Name, err,
@@ -156,6 +207,38 @@ func (h *TestHarness) WaitForSlot(
 		return false
 	}, timeout, 200*time.Millisecond,
 		"no node reached slot %d within %s", targetSlot, timeout,
+	)
+}
+
+// WaitForAllNodesSlot polls all endpoints until every node reports a
+// chain tip at or beyond the target slot, or the timeout expires.
+func (h *TestHarness) WaitForAllNodesSlot(
+	targetSlot uint64,
+	timeout time.Duration,
+) {
+	h.t.Helper()
+	require.Eventually(h.t, func() bool {
+		for _, ep := range h.endpoints {
+			tip, err := h.GetChainTip(ep)
+			if err != nil {
+				h.t.Logf(
+					"WaitForAllNodesSlot: error querying %s: %v",
+					ep.Name, err,
+				)
+				return false
+			}
+			h.t.Logf(
+				"WaitForAllNodesSlot: %s at slot %d, block %d",
+				ep.Name, tip.SlotNumber, tip.BlockNumber,
+			)
+			if tip.SlotNumber < targetSlot {
+				return false
+			}
+		}
+		return true
+	}, timeout, 200*time.Millisecond,
+		"not all nodes reached slot %d within %s",
+		targetSlot, timeout,
 	)
 }
 
