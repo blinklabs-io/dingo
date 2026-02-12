@@ -152,18 +152,24 @@ type Subscriber interface {
 }
 
 // channelSubscriber is the in-memory subscriber adapter that preserves the
-// existing channel-based API. Deliver blocks by sending on the underlying
-// channel (preserving current semantics). Close closes the channel so
-// SubscribeFunc goroutines exit.
+// existing channel-based API. Deliver uses a non-blocking send to avoid
+// deadlocks: if the channel buffer is full the event is dropped and a
+// warning is logged. Close closes the channel so SubscribeFunc goroutines
+// exit.
 type channelSubscriber struct {
 	ch     chan Event
+	logger *slog.Logger
 	mu     sync.RWMutex
 	closed bool
 }
 
-func newChannelSubscriber(buffer int) *channelSubscriber {
+func newChannelSubscriber(
+	buffer int,
+	logger *slog.Logger,
+) *channelSubscriber {
 	return &channelSubscriber{
-		ch: make(chan Event, buffer),
+		ch:     make(chan Event, buffer),
+		logger: logger,
 	}
 }
 
@@ -172,22 +178,33 @@ func (c *channelSubscriber) Deliver(evt Event) (err error) {
 	c.mu.RLock()
 	if c.closed {
 		c.mu.RUnlock()
-		// Subscriber already closed; drop the event without returning an error.
 		return nil
 	}
-	// Ensure we release the read lock after the send completes so that Close
-	// will wait for in-flight sends to finish before closing the channel.
 	defer c.mu.RUnlock()
 
-	// Normal send (may block, preserving current semantics). Recover from
-	// unexpected panics just in case a remote Subscriber implementation misbehaves.
+	// Recover from unexpected panics (e.g. if a remote Subscriber
+	// implementation misbehaves).
 	defer func() {
 		if r := recover(); r != nil {
 			err = fmt.Errorf("channel deliver panic: %v", r)
 		}
 	}()
 
-	c.ch <- evt
+	// Non-blocking send. If the channel buffer is full we drop the
+	// event instead of blocking while holding mu.RLock, which would
+	// prevent Close() from ever acquiring mu.Lock (deadlock).
+	select {
+	case c.ch <- evt:
+		// Delivered successfully.
+	default:
+		// Channel buffer full; drop event and warn.
+		if c.logger != nil {
+			c.logger.Warn(
+				"event dropped: subscriber channel full",
+				"type", evt.Type,
+			)
+		}
+	}
 	return nil
 }
 
@@ -210,7 +227,7 @@ func (e *EventBus) subscribeInternal(
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	// Create channel-backed subscriber
-	chSub := newChannelSubscriber(EventQueueSize)
+	chSub := newChannelSubscriber(EventQueueSize, e.Logger)
 	// Increment subscriber ID
 	subId := e.lastSubId + 1
 	e.lastSubId = subId
