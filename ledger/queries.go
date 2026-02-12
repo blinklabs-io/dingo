@@ -70,15 +70,21 @@ func (ls *LedgerState) querySystemStart() (any, error) {
 }
 
 func (ls *LedgerState) queryChainBlockNo() (any, error) {
+	ls.RLock()
+	blockNumber := ls.currentTip.BlockNumber
+	ls.RUnlock()
 	ret := []any{
 		1, // TODO: figure out what this value is (#393)
-		ls.currentTip.BlockNumber,
+		blockNumber,
 	}
 	return ret, nil
 }
 
 func (ls *LedgerState) queryChainPoint() (any, error) {
-	return ls.currentTip.Point, nil
+	ls.RLock()
+	point := ls.currentTip.Point
+	ls.RUnlock()
+	return point, nil
 }
 
 func (ls *LedgerState) queryHardFork(
@@ -86,7 +92,10 @@ func (ls *LedgerState) queryHardFork(
 ) (any, error) {
 	switch q := query.Query.(type) {
 	case *olocalstatequery.HardForkCurrentEraQuery:
-		return ls.currentEra.Id, nil
+		ls.RLock()
+		eraId := ls.currentEra.Id
+		ls.RUnlock()
+		return eraId, nil
 	case *olocalstatequery.HardForkEraHistoryQuery:
 		return ls.queryHardForkEraHistory()
 	default:
@@ -170,9 +179,15 @@ func (ls *LedgerState) queryShelley(
 ) (any, error) {
 	switch q := query.Query.(type) {
 	case *olocalstatequery.ShelleyEpochNoQuery:
-		return []any{ls.currentEpoch.EpochId}, nil
+		ls.RLock()
+		epochId := ls.currentEpoch.EpochId
+		ls.RUnlock()
+		return []any{epochId}, nil
 	case *olocalstatequery.ShelleyCurrentProtocolParamsQuery:
-		return []any{ls.currentPParams}, nil
+		ls.RLock()
+		pparams := ls.currentPParams
+		ls.RUnlock()
+		return []any{pparams}, nil
 	case *olocalstatequery.ShelleyGenesisConfigQuery:
 		return ls.queryShelleyGenesisConfig()
 	case *olocalstatequery.ShelleyUtxoByAddressQuery:
