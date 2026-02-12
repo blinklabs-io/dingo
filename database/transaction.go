@@ -221,6 +221,58 @@ func (d *Database) GetTransactionByHash(
 	return d.metadata.GetTransactionByHash(hash, txn.Metadata())
 }
 
+// GetTransactionsByBlockHash returns all transactions for a given
+// block hash, ordered by their position within the block.
+func (d *Database) GetTransactionsByBlockHash(
+	blockHash []byte,
+	txn *Txn,
+) ([]models.Transaction, error) {
+	if len(blockHash) == 0 {
+		return nil, nil
+	}
+	if txn == nil {
+		txn = d.Transaction(false)
+		defer txn.Release()
+	}
+	txs, err := d.metadata.GetTransactionsByBlockHash(
+		blockHash,
+		txn.Metadata(),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("get txs by block %x: %w", blockHash, err)
+	}
+	return txs, nil
+}
+
+// GetTransactionsByAddress returns transactions that involve a given
+// address as either a sender (input) or receiver (output).
+func (d *Database) GetTransactionsByAddress(
+	addr lcommon.Address,
+	limit int,
+	offset int,
+	txn *Txn,
+) ([]models.Transaction, error) {
+	if txn == nil {
+		txn = d.Transaction(false)
+		defer txn.Release()
+	}
+	txs, err := d.metadata.GetTransactionsByAddress(
+		addr,
+		limit,
+		offset,
+		txn.Metadata(),
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"get txs by address limit=%d offset=%d: %w",
+			limit,
+			offset,
+			err,
+		)
+	}
+	return txs, nil
+}
+
 // deleteTxBlobs attempts to delete blob data for the given transaction hashes.
 // This is a best-effort operation; metadata remains the source of truth. If the
 // provided transaction does not include a blob handle, a temporary blob-only
