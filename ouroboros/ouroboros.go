@@ -62,6 +62,8 @@ type Ouroboros struct {
 	// ChainSync measurement tracking for peer scoring
 	chainsyncStats map[ouroboros.ConnectionId]*chainsyncPeerStats
 	chainsyncMutex sync.Mutex
+	// Per-connection mutex to serialize chainsync restarts
+	restartMu sync.Map // ouroboros.ConnectionId → *sync.Mutex
 	// Per-peer rate limiter for TxSubmission server
 	txSubmissionRateLimiter *txSubmissionRateLimiter
 }
@@ -324,6 +326,8 @@ func (o *Ouroboros) HandleConnClosedEvent(evt event.Event) {
 	o.chainsyncMutex.Lock()
 	delete(o.chainsyncStats, connId)
 	o.chainsyncMutex.Unlock()
+	// Clean up per-connection restart mutex
+	o.restartMu.Delete(connId)
 	// Clean up TxSubmission rate limiter state
 	if o.txSubmissionRateLimiter != nil {
 		o.txSubmissionRateLimiter.RemovePeer(connId)
@@ -435,7 +439,11 @@ func (o *Ouroboros) HandleInboundConnEvent(evt event.Event) {
 		"connection_id", connId.String(),
 	)
 
-	// Start chainsync client on this full-duplex inbound connection
+	// Start chainsync client on this full-duplex inbound connection.
+	// If the chainsync client fails (e.g. intersection not found because
+	// the peer follows a different fork), close the connection so
+	// peergov stops tracking it and outbound retries are not blocked
+	// by a stale inbound.
 	if o.ChainsyncState != nil {
 		maxClients := defaultMaxChainsyncClients
 		if o.ChainsyncState.MaxClients() > 0 {
@@ -460,20 +468,19 @@ func (o *Ouroboros) HandleInboundConnEvent(evt event.Event) {
 				}
 				o.ConnManager.RemoveConnection(connId)
 				return
+			} else {
+				o.config.Logger.Debug(
+					"started chainsync client on inbound connection",
+					"connection_id", connId.String(),
+					"total_clients", o.ChainsyncState.ClientConnCount(),
+				)
 			}
-			o.config.Logger.Debug(
-				"started chainsync client on inbound connection",
-				"connection_id", connId.String(),
-				"total_clients", o.ChainsyncState.ClientConnCount(),
-			)
 		}
 	}
-	// Start txsubmission client
-	if err := o.txsubmissionClientStart(connId); err != nil {
-		o.config.Logger.Error(
-			"failed to start txsubmission client on inbound connection",
-			"error", err,
-			"connection_id", connId.String(),
-		)
-	}
+	// Do NOT start TxSubmission client on inbound connections.
+	// The relay's connection manager may not have started its
+	// responder-direction TxSubmission server yet when we send
+	// Init(), causing a muxer protocol error and connection reset.
+	// TxSubmission client will be started on our own outbound
+	// connection instead.
 }

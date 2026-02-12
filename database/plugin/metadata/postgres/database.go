@@ -15,6 +15,7 @@
 package postgres
 
 import (
+	"database/sql"
 	"errors"
 	"fmt"
 	"io"
@@ -241,6 +242,15 @@ func (d *MetadataStorePostgres) Start() error {
 		// MetadataStorePostgres is available for recovery, so return error but keep instance
 		return err
 	}
+	// Deduplicate pool_stake_snapshot rows before AutoMigrate
+	// creates the unique index idx_pool_stake_epoch_pool.
+	if err := models.DedupePoolStakeSnapshots(
+		d.db, d.logger,
+	); err != nil {
+		return fmt.Errorf(
+			"pool_stake_snapshot dedup failed: %w", err,
+		)
+	}
 	// Create table schemas
 	d.logger.Debug(
 		"creating table",
@@ -306,6 +316,19 @@ func (d *MetadataStorePostgres) Transaction() types.Txn {
 	if db.Error != nil {
 		d.logger.Error(
 			"failed to begin transaction",
+			"error", db.Error,
+		)
+		return newFailedPostgresTxn(db.Error)
+	}
+	return newPostgresTxn(db)
+}
+
+// ReadTransaction creates a read-only transaction.
+func (d *MetadataStorePostgres) ReadTransaction() types.Txn {
+	db := d.DB().Begin(&sql.TxOptions{ReadOnly: true})
+	if db.Error != nil {
+		d.logger.Error(
+			"failed to begin read transaction",
 			"error", db.Error,
 		)
 		return newFailedPostgresTxn(db.Error)

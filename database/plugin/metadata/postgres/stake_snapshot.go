@@ -99,25 +99,48 @@ func (d *MetadataStorePostgres) GetPoolStakeSnapshotsByEpoch(
 	return snapshots, nil
 }
 
-// GetTotalActiveStake returns the sum of all pool stakes for an epoch
+// GetTotalActiveStake returns the total active stake for an epoch.
+// It uses the pre-calculated total from EpochSummary when available,
+// falling back to summing individual pool snapshots.
 func (d *MetadataStorePostgres) GetTotalActiveStake(
 	epoch uint64,
 	snapshotType string,
 	txn types.Txn,
 ) (uint64, error) {
-	var total uint64
-	db, err := d.resolveDB(txn)
+	db, err := d.resolveReadDB(txn)
 	if err != nil {
 		return 0, err
 	}
-	// Use raw SQL to sum the stakes since GORM doesn't handle
-	// types.Uint64 well in aggregates
+	// Prefer the pre-calculated total from EpochSummary to avoid
+	// issues with duplicate snapshot rows inflating the sum.
+	// EpochSummary stores the "mark" snapshot total (the only type
+	// physically saved), so only use the fast path for "mark" queries.
+	if snapshotType == "mark" {
+		var summary models.EpochSummary
+		result := db.Where("epoch = ?", epoch).First(&summary)
+		if result.Error != nil && !errors.Is(result.Error, gorm.ErrRecordNotFound) {
+			return 0, fmt.Errorf(
+				"GetTotalActiveStake: query epoch summary for epoch %d: %w",
+				epoch,
+				result.Error,
+			)
+		}
+		if result.Error == nil && summary.SnapshotReady {
+			return uint64(summary.TotalActiveStake), nil
+		}
+	}
+	// Fall back to summing individual pool snapshots
+	var total uint64
 	result := db.Model(&models.PoolStakeSnapshot{}).
 		Where("epoch = ? AND snapshot_type = ?", epoch, snapshotType).
 		Select("COALESCE(SUM(CAST(total_stake AS BIGINT)), 0)").
 		Scan(&total)
 	if result.Error != nil {
-		return 0, result.Error
+		return 0, fmt.Errorf(
+			"GetTotalActiveStake: aggregate pool snapshots for epoch %d: %w",
+			epoch,
+			result.Error,
+		)
 	}
 	return total, nil
 }

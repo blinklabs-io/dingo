@@ -24,15 +24,17 @@ testnetDomain: devnet
 
 --- # Byron Genesis Override
 protocolConsts:
-  k: 5
+  k: 100
 
 --- # Shelley Genesis Override
-# 1s slots, ~3.3 min epochs, block every ~10s per pool (~5s total)
-# stabilityWindow = 3k/f = 3*5/0.2 = 75 < 200 = epochLength ✓
-epochLength: 200
+# 1s slots, ~13.3 min epochs, block every ~5s per pool (~2.5s total)
+# stabilityWindow = 3k/f = 3*100/0.4 = 750 < 800 = epochLength ✓
+# Partition tolerance: K / per-pool-rate where per-pool-rate = 1-(1-f)^(1/n)
+# With f=0.4, n=2: per-pool-rate ≈ 0.225, so K / per-pool-rate ≈ 100/0.225 ≈ 444s (~7.4 min)
+epochLength: 800
 slotLength: 1
-activeSlotsCoeff: 0.2
-securityParam: 5
+activeSlotsCoeff: 0.4
+securityParam: 100
 maxLovelaceSupply: 2000000000000
 protocolParams:
   decentralisationParam: 0

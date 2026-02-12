@@ -137,12 +137,20 @@ func (b *DefaultBlockBuilder) BuildBlock(
 	// Get current chain tip
 	currentTip := b.chainTip.Tip()
 
-	// Set Hash if empty (Blake2b-256 = 32 bytes)
-	if len(currentTip.Point.Hash) == 0 {
-		currentTip.Point.Hash = lcommon.Blake2b256{}.Bytes()
-	}
+	// Block numbers are 0-indexed in Cardano: the first block after
+	// genesis is BlockNo 0. When the tip is genesis (empty hash), the
+	// chain has no blocks yet so the next block number is 0.
+	isGenesis := len(currentTip.Point.Hash) == 0
 
-	nextBlockNumber := currentTip.BlockNumber + 1
+	var nextBlockNumber uint64
+	if !isGenesis {
+		if currentTip.BlockNumber == math.MaxUint64 {
+			return nil, nil, errors.New(
+				"block number overflow: chain tip is at max uint64",
+			)
+		}
+		nextBlockNumber = currentTip.BlockNumber + 1
+	}
 
 	// Get current protocol parameters for limits
 	pparams := b.pparamsProvider.GetCurrentPParams()
@@ -470,11 +478,24 @@ func (b *DefaultBlockBuilder) BuildBlock(
 	var issuerVKeyArray lcommon.IssuerVkey
 	copy(issuerVKeyArray[:], issuerVKey)
 
-	// Create Babbage block header body
-	headerBody := babbage.BabbageBlockHeaderBody{
+	// Build header body with nullable PrevHash so the first block
+	// after genesis encodes prevHash as CBOR null (required by the
+	// Cardano protocol).
+	var prevHash *lcommon.Blake2b256
+	if !isGenesis {
+		if len(currentTip.Point.Hash) != 32 {
+			return nil, nil, fmt.Errorf(
+				"invalid tip hash length: expected 32 (Blake2b-256), got %d",
+				len(currentTip.Point.Hash),
+			)
+		}
+		h := lcommon.NewBlake2b256(currentTip.Point.Hash)
+		prevHash = &h
+	}
+	headerBody := nullablePrevHashHeaderBody{
 		BlockNumber: nextBlockNumber,
 		Slot:        slot,
-		PrevHash:    lcommon.NewBlake2b256(currentTip.Point.Hash),
+		PrevHash:    prevHash,
 		IssuerVkey:  issuerVKeyArray,
 		VrfKey:      vrfVKey,
 		VrfResult: lcommon.VrfResult{
@@ -485,8 +506,8 @@ func (b *DefaultBlockBuilder) BuildBlock(
 		BlockBodyHash: bodyHash,
 		OpCert:        opCertBody,
 		ProtoVersion: babbage.BabbageProtoVersion{
-			Major: 10, // Conway era protocol version
-			Minor: 0,
+			Major: uint64(conwayPParams.ProtocolVersion.Major),
+			Minor: uint64(conwayPParams.ProtocolVersion.Minor),
 		},
 	}
 
@@ -502,25 +523,24 @@ func (b *DefaultBlockBuilder) BuildBlock(
 		return nil, nil, fmt.Errorf("failed to sign block header: %w", err)
 	}
 
-	// Create Conway block header
-	conwayHeader := &conway.ConwayBlockHeader{
-		BabbageBlockHeader: babbage.BabbageBlockHeader{
-			Body:      headerBody,
-			Signature: signature,
-		},
+	// Build the block CBOR using the pre-encoded header body to
+	// ensure the prevHash encoding (null vs bytes) matches what was
+	// signed. Re-encoding via the gouroboros struct types would
+	// lose the null encoding for genesis blocks.
+	headerCbor, err := cbor.Encode(rawBlockHeader{
+		Body:      cbor.RawMessage(headerBodyCbor),
+		Signature: signature,
+	})
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to encode block header: %w", err)
 	}
-
-	// Create a conway block with transactions
-	conwayBlock := &conway.ConwayBlock{
-		BlockHeader:            conwayHeader,
+	blockCbor, err := cbor.Encode(rawBlock{
+		Header:                 cbor.RawMessage(headerCbor),
 		TransactionBodies:      transactionBodies,
 		TransactionWitnessSets: transactionWitnessSets,
 		TransactionMetadataSet: metadataSet,
 		InvalidTransactions:    []uint{},
-	}
-
-	// Marshal the conway block to CBOR
-	blockCbor, err := cbor.Encode(conwayBlock)
+	})
 	if err != nil {
 		return nil, nil, fmt.Errorf(
 			"failed to marshal forged conway block to CBOR: %w",
@@ -632,4 +652,39 @@ func computeBlockBodyHash(
 	// Final hash of concatenated hashes
 	finalHash := blake2b.Sum256(bodyHashes)
 	return lcommon.NewBlake2b256(finalHash[:]), totalSize, nil
+}
+
+// nullablePrevHashHeaderBody mirrors BabbageBlockHeaderBody but uses a
+// pointer for PrevHash so nil encodes as CBOR null (genesis origin).
+type nullablePrevHashHeaderBody struct {
+	cbor.StructAsArray
+	BlockNumber   uint64
+	Slot          uint64
+	PrevHash      *lcommon.Blake2b256
+	IssuerVkey    lcommon.IssuerVkey
+	VrfKey        []byte
+	VrfResult     lcommon.VrfResult
+	BlockBodySize uint64
+	BlockBodyHash lcommon.Blake2b256
+	OpCert        babbage.BabbageOpCert
+	ProtoVersion  babbage.BabbageProtoVersion
+}
+
+// rawBlockHeader encodes a block header with a pre-encoded body. This
+// preserves the exact CBOR bytes that were KES-signed.
+type rawBlockHeader struct {
+	cbor.StructAsArray
+	Body      cbor.RawMessage
+	Signature []byte
+}
+
+// rawBlock encodes a block with a pre-encoded header. This preserves
+// the genesis prevHash encoding (CBOR null vs bytestring).
+type rawBlock struct {
+	cbor.StructAsArray
+	Header                 cbor.RawMessage
+	TransactionBodies      []conway.ConwayTransactionBody
+	TransactionWitnessSets []conway.ConwayTransactionWitnessSet
+	TransactionMetadataSet lcommon.TransactionMetadataSet
+	InvalidTransactions    []uint
 }

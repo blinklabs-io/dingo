@@ -385,11 +385,6 @@ type SlotBattleRecorder interface {
 	RecordSlotBattle()
 }
 
-// ChainsyncResyncFunc describes a callback function used to trigger a
-// chainsync re-negotiation for the given connection. This is called when
-// the ledger detects a persistent chain fork that prevents syncing.
-type ChainsyncResyncFunc func(ouroboros.ConnectionId)
-
 // ConnectionSwitchFunc is called when the active chainsync connection
 // changes. Implementations should clear any per-connection state such as
 // the header dedup cache so the new connection can re-deliver blocks.
@@ -404,7 +399,6 @@ type LedgerStateConfig struct {
 	CardanoNodeConfig          *cardano.CardanoNodeConfig
 	BlockfetchRequestRangeFunc BlockfetchRequestRangeFunc
 	GetActiveConnectionFunc    GetActiveConnectionFunc
-	ChainsyncResyncFunc        ChainsyncResyncFunc
 	ConnectionSwitchFunc       ConnectionSwitchFunc
 	FatalErrorFunc             FatalErrorFunc
 	ForgedBlockChecker         ForgedBlockChecker

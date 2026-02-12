@@ -65,6 +65,21 @@ func (c *DevNetConfig) ExpectedBlocksPerSlot() float64 {
 	return c.ActiveSlotsCoeff
 }
 
+// ExpectedBlockTime returns the average wall-clock time between blocks.
+// This is slotDuration / activeSlotsCoeff (e.g. 2.5s with 1s slots and f=0.4).
+// Panics if ActiveSlotsCoeff is zero or negative (invalid configuration).
+func (c *DevNetConfig) ExpectedBlockTime() time.Duration {
+	if c.ActiveSlotsCoeff <= 0 {
+		panic(fmt.Sprintf(
+			"DevNetConfig.ExpectedBlockTime: invalid ActiveSlotsCoeff %.4f",
+			c.ActiveSlotsCoeff,
+		))
+	}
+	return time.Duration(
+		float64(c.SlotDuration()) / c.ActiveSlotsCoeff,
+	)
+}
+
 // LoadDevNetConfig reads testnet.yaml and returns the parsed DevNetConfig.
 // The path is taken from the DEVNET_TESTNET_YAML environment variable; if
 // unset, it defaults to defaultTestnetYAMLPath (relative to the test package).

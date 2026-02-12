@@ -64,7 +64,15 @@ func NewTxn(db *Database, readWrite bool) *Txn {
 		t.blobTxn = bs.NewTransaction(readWrite)
 	}
 	if ms := db.Metadata(); ms != nil {
-		t.metadataTxn = ms.Transaction()
+		// Use the read connection pool for read-only transactions to
+		// avoid contending with the SQLite write connection. This
+		// prevents chainsync FindIntersect and snapshot calculations
+		// from blocking on concurrent block processing.
+		if readWrite {
+			t.metadataTxn = ms.Transaction()
+		} else {
+			t.metadataTxn = ms.ReadTransaction()
+		}
 		if t.metadataTxn == nil {
 			db.logger.Warn(
 				"metadata transaction is nil; callers must nil-check txn.Metadata()",
@@ -85,7 +93,11 @@ func NewBlobOnlyTxn(db *Database, readWrite bool) *Txn {
 func NewMetadataOnlyTxn(db *Database, readWrite bool) *Txn {
 	t := &Txn{db: db, readWrite: readWrite}
 	if ms := db.Metadata(); ms != nil {
-		t.metadataTxn = ms.Transaction()
+		if readWrite {
+			t.metadataTxn = ms.Transaction()
+		} else {
+			t.metadataTxn = ms.ReadTransaction()
+		}
 		if t.metadataTxn == nil {
 			db.logger.Warn(
 				"metadata transaction is nil; callers must nil-check txn.Metadata()",

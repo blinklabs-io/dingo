@@ -800,6 +800,11 @@ func (c *Chain) iterNext(
 					return nil, err
 				}
 				iter.nextBlockIndex = tmpBlock.ID + 1
+			} else {
+				// Rolling back to origin: reset to the first
+				// block index so the iterator delivers all
+				// blocks from genesis.
+				iter.nextBlockIndex = initialBlockIndex
 			}
 			c.mutex.Unlock()
 			c.manager.mutex.RUnlock()
