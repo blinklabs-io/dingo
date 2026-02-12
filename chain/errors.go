@@ -19,6 +19,10 @@ import (
 	"fmt"
 )
 
+// DefaultMaxQueuedHeaders is the fallback header queue limit when the
+// security parameter is not yet available (e.g. before ledger is wired).
+const DefaultMaxQueuedHeaders = 10_000
+
 var (
 	ErrIntersectNotFound            = errors.New("chain intersect not found")
 	ErrRollbackBeyondEphemeralChain = errors.New(
@@ -26,6 +30,9 @@ var (
 	)
 	ErrIteratorChainTip = errors.New(
 		"chain iterator is at chain tip",
+	)
+	ErrHeaderQueueFull = errors.New(
+		"header queue at maximum capacity",
 	)
 )
 

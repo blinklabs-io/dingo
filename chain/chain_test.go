@@ -17,6 +17,7 @@ package chain_test
 import (
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"reflect"
 	"slices"
 	"testing"
@@ -467,6 +468,158 @@ func TestChainHeaderRollback(t *testing.T) {
 			headerTip.Point.Hash,
 			testFirstHeaderPoint.Slot,
 			testFirstHeaderPoint.Hash,
+		)
+	}
+}
+
+// mockLedgerState implements the interface expected by ChainManager.SetLedger.
+type mockLedgerState struct {
+	securityParam int
+}
+
+func (m *mockLedgerState) SecurityParam() int {
+	return m.securityParam
+}
+
+// makeLinkedHeaders builds n mock headers that chain together starting
+// from prevHash at the given slot/block number offsets.
+func makeLinkedHeaders(
+	n int,
+	startSlot uint64,
+	startBlockNum uint64,
+	prevHash string,
+) []*MockBlock {
+	headers := make([]*MockBlock, n)
+	for i := range n {
+		hash := fmt.Sprintf(
+			"%s%04x",
+			testHashPrefix,
+			int(startBlockNum)+i,
+		)
+		headers[i] = &MockBlock{
+			MockBlockNumber: startBlockNum + uint64(i),
+			MockSlot:        startSlot + uint64(i)*20,
+			MockHash:        hash,
+			MockPrevHash:    prevHash,
+		}
+		prevHash = hash
+	}
+	return headers
+}
+
+func TestHeaderQueueLimitDefault(t *testing.T) {
+	// Without securityParam the default limit applies
+	cm, err := chain.NewManager(nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected error creating chain manager: %s", err)
+	}
+	c := cm.PrimaryChain()
+
+	limit := chain.DefaultMaxQueuedHeaders
+	// Build enough linked headers to fill the queue exactly
+	headers := makeLinkedHeaders(limit+1, 0, 1, "")
+
+	// Add headers up to the limit
+	for i := range limit {
+		if err := c.AddBlockHeader(headers[i]); err != nil {
+			t.Fatalf(
+				"unexpected error adding header %d: %s",
+				i,
+				err,
+			)
+		}
+	}
+	if c.HeaderCount() != limit {
+		t.Fatalf(
+			"expected %d headers, got %d",
+			limit,
+			c.HeaderCount(),
+		)
+	}
+	// The next header must be rejected
+	err = c.AddBlockHeader(headers[limit])
+	if err == nil {
+		t.Fatal("expected error when header queue is full")
+	}
+	if !errors.Is(err, chain.ErrHeaderQueueFull) {
+		t.Fatalf(
+			"expected ErrHeaderQueueFull, got: %s",
+			err,
+		)
+	}
+}
+
+func TestHeaderQueueLimitFromSecurityParam(t *testing.T) {
+	securityParam := 5
+	expectedLimit := securityParam * 2
+
+	cm, err := chain.NewManager(nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected error creating chain manager: %s", err)
+	}
+	cm.SetLedger(&mockLedgerState{securityParam: securityParam})
+	c := cm.PrimaryChain()
+
+	headers := makeLinkedHeaders(expectedLimit+1, 0, 1, "")
+
+	// Add headers up to the limit
+	for i := range expectedLimit {
+		if err := c.AddBlockHeader(headers[i]); err != nil {
+			t.Fatalf(
+				"unexpected error adding header %d: %s",
+				i,
+				err,
+			)
+		}
+	}
+	if c.HeaderCount() != expectedLimit {
+		t.Fatalf(
+			"expected %d headers, got %d",
+			expectedLimit,
+			c.HeaderCount(),
+		)
+	}
+	// The next header must be rejected
+	err = c.AddBlockHeader(headers[expectedLimit])
+	if err == nil {
+		t.Fatal("expected error when header queue is full")
+	}
+	if !errors.Is(err, chain.ErrHeaderQueueFull) {
+		t.Fatalf(
+			"expected ErrHeaderQueueFull, got: %s",
+			err,
+		)
+	}
+}
+
+func TestHeaderQueueAcceptsWithinLimit(t *testing.T) {
+	securityParam := 10
+	expectedLimit := securityParam * 2
+
+	cm, err := chain.NewManager(nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected error creating chain manager: %s", err)
+	}
+	cm.SetLedger(&mockLedgerState{securityParam: securityParam})
+	c := cm.PrimaryChain()
+
+	// Add fewer headers than the limit -- all should succeed
+	count := expectedLimit - 1
+	headers := makeLinkedHeaders(count, 0, 1, "")
+	for i, h := range headers {
+		if err := c.AddBlockHeader(h); err != nil {
+			t.Fatalf(
+				"unexpected error adding header %d: %s",
+				i,
+				err,
+			)
+		}
+	}
+	if c.HeaderCount() != count {
+		t.Fatalf(
+			"expected %d headers, got %d",
+			count,
+			c.HeaderCount(),
 		)
 	}
 }
