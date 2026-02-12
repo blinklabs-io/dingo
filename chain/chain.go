@@ -81,12 +81,28 @@ func (c *Chain) headerTip() ochainsync.Tip {
 	}
 }
 
+// maxQueuedHeaders returns the maximum number of headers that may be
+// queued. When the security parameter is available (securityParam > 0),
+// the limit is securityParam * 2. Otherwise, DefaultMaxQueuedHeaders is
+// used as a safe fallback.
+func (c *Chain) maxQueuedHeaders() int {
+	if sp := c.manager.securityParam; sp > 0 {
+		return sp * 2
+	}
+	return DefaultMaxQueuedHeaders
+}
+
 func (c *Chain) AddBlockHeader(header ledger.BlockHeader) error {
 	if c == nil {
 		return errors.New("chain is nil")
 	}
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
+	// Reject headers when the queue is at capacity to prevent
+	// unbounded memory growth from a malicious peer.
+	if len(c.headers) >= c.maxQueuedHeaders() {
+		return ErrHeaderQueueFull
+	}
 	// Make sure header fits on chain tip
 	if c.tipBlockIndex >= initialBlockIndex ||
 		len(c.headers) > 0 {
