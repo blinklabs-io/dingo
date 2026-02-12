@@ -286,10 +286,32 @@ func (e *EventBus) SubscribeFunc(
 			if !ok {
 				return
 			}
-			handlerFunc(evt)
+			e.safeHandlerCall(handlerFunc, evt)
 		}
 	}(chSub.ch, handlerFunc)
 	return subId
+}
+
+// safeHandlerCall invokes a SubscribeFunc handler with panic recovery so that
+// a misbehaving handler cannot crash the node.
+func (e *EventBus) safeHandlerCall(
+	handlerFunc EventHandlerFunc,
+	evt Event,
+) {
+	defer func() {
+		if r := recover(); r != nil {
+			logger := e.Logger
+			if logger == nil {
+				logger = slog.Default()
+			}
+			logger.Error(
+				"SubscribeFunc handler panicked",
+				"event_type", evt.Type,
+				"panic", r,
+			)
+		}
+	}()
+	handlerFunc(evt)
 }
 
 // Unsubscribe stops delivery of events for a particular type for an existing subscriber

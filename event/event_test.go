@@ -15,10 +15,12 @@
 package event_test
 
 import (
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/stretchr/testify/require"
 )
 
 func TestEventBusSingleSubscriber(t *testing.T) {
@@ -187,4 +189,33 @@ func TestEventBusStop(t *testing.T) {
 	case <-time.After(100 * time.Millisecond):
 		t.Fatal("new subscriber channel was not closed after second Stop")
 	}
+}
+
+func TestSubscribeFuncPanicRecovery(t *testing.T) {
+	var testEvtType event.EventType = "test.panic"
+	eb := event.NewEventBus(nil, nil)
+	defer eb.Stop()
+
+	var received atomic.Int32
+
+	// Register a handler that panics on the first event, then succeeds
+	eb.SubscribeFunc(testEvtType, func(evt event.Event) {
+		count := received.Add(1)
+		if count == 1 {
+			panic("intentional test panic")
+		}
+	})
+
+	// First event triggers the panic -- the goroutine must survive
+	eb.Publish(testEvtType, event.NewEvent(testEvtType, "panic"))
+
+	// Second event should still be delivered to the same handler
+	eb.Publish(testEvtType, event.NewEvent(testEvtType, "after-panic"))
+
+	// Wait for the handler to process both events
+	require.Eventually(t, func() bool {
+		return received.Load() >= 2
+	}, 2*time.Second, 10*time.Millisecond,
+		"handler should continue processing events after a panic",
+	)
 }
