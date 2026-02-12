@@ -449,7 +449,7 @@ func EvaluateTxAlonzo(
 	if tmpPparams.ExecutionCosts.StepPrice != nil {
 		pricesSteps = tmpPparams.ExecutionCosts.StepPrice.ToBigRat()
 	}
-	fee := CalculateMinFee(
+	fee, err := CalculateMinFee(
 		txSize,
 		retTotalExUnits,
 		tmpPparams.MinFeeA,
@@ -457,5 +457,8 @@ func EvaluateTxAlonzo(
 		pricesMem,
 		pricesSteps,
 	)
+	if err != nil {
+		return 0, lcommon.ExUnits{}, nil, err
+	}
 	return fee, retTotalExUnits, retRedeemerExUnits, nil
 }

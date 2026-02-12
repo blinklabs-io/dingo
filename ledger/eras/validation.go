@@ -74,6 +74,16 @@ func SafeAddExUnits(
 	}, nil
 }
 
+// errFeeOverflow is returned when fee arithmetic
+// overflows uint64.
+var errFeeOverflow = errors.New("fee calculation overflow")
+
+// errZeroDenominator is returned when CeilMul receives
+// a zero denominator.
+var errZeroDenominator = errors.New(
+	"CeilMul: zero denominator",
+)
+
 // TxBodySize returns the CBOR-serialized size of a
 // transaction in bytes.
 func TxBodySize(tx lcommon.Transaction) uint64 {
@@ -123,8 +133,14 @@ func ValidateTxExUnits(
 
 // CeilMul computes ceil(rat * value) using integer
 // arithmetic. The rational is represented as num/denom.
-// This avoids floating-point imprecision.
-func CeilMul(num, denom, value *big.Int) uint64 {
+// This avoids floating-point imprecision. Returns an
+// error if denom is zero.
+func CeilMul(
+	num, denom, value *big.Int,
+) (uint64, error) {
+	if denom.Sign() == 0 {
+		return 0, errZeroDenominator
+	}
 	// product = num * value
 	product := new(big.Int).Mul(num, value)
 	// ceil(product / denom) = (product + denom - 1) / denom
@@ -132,7 +148,10 @@ func CeilMul(num, denom, value *big.Int) uint64 {
 	denomMinusOne := new(big.Int).Sub(denom, one)
 	product.Add(product, denomMinusOne)
 	product.Div(product, denom)
-	return product.Uint64()
+	if !product.IsUint64() {
+		return 0, errFeeOverflow
+	}
+	return product.Uint64(), nil
 }
 
 // CalculateMinFee computes the minimum fee for a
@@ -146,7 +165,8 @@ func CeilMul(num, denom, value *big.Int) uint64 {
 //	          + ceil(pricesSteps * exUnits.Steps)
 //
 // All arithmetic uses integer math (big.Int) to match
-// the Haskell reference implementation.
+// the Haskell reference implementation. Returns an error
+// if any intermediate result overflows uint64.
 func CalculateMinFee(
 	txSize uint64,
 	exUnits lcommon.ExUnits,
@@ -154,23 +174,56 @@ func CalculateMinFee(
 	minFeeB uint,
 	pricesMem *big.Rat,
 	pricesSteps *big.Rat,
-) uint64 {
-	baseFee := uint64(minFeeA)*txSize + uint64(minFeeB)
+) (uint64, error) {
+	// baseFee = minFeeA * txSize + minFeeB
+	a := uint64(minFeeA)
+	product := a * txSize
+	if txSize != 0 && product/txSize != a {
+		return 0, fmt.Errorf(
+			"%w: minFeeA * txSize", errFeeOverflow,
+		)
+	}
+	baseFee := product + uint64(minFeeB)
+	if baseFee < product {
+		return 0, fmt.Errorf(
+			"%w: baseFee + minFeeB", errFeeOverflow,
+		)
+	}
+
 	var scriptFee uint64
 	if pricesMem != nil && pricesSteps != nil {
-		memFee := CeilMul(
+		memFee, err := CeilMul(
 			pricesMem.Num(),
 			pricesMem.Denom(),
 			big.NewInt(exUnits.Memory),
 		)
-		stepFee := CeilMul(
+		if err != nil {
+			return 0, fmt.Errorf("memFee: %w", err)
+		}
+		stepFee, err := CeilMul(
 			pricesSteps.Num(),
 			pricesSteps.Denom(),
 			big.NewInt(exUnits.Steps),
 		)
+		if err != nil {
+			return 0, fmt.Errorf("stepFee: %w", err)
+		}
 		scriptFee = memFee + stepFee
+		if scriptFee < memFee {
+			return 0, fmt.Errorf(
+				"%w: memFee + stepFee",
+				errFeeOverflow,
+			)
+		}
 	}
-	return baseFee + scriptFee
+
+	total := baseFee + scriptFee
+	if total < baseFee {
+		return 0, fmt.Errorf(
+			"%w: baseFee + scriptFee", errFeeOverflow,
+		)
+	}
+	return total, nil
 }
 
 // DeclaredExUnits returns the total execution units
@@ -231,7 +284,7 @@ func ValidateTxFee(
 			err,
 		)
 	}
-	minFee := CalculateMinFee(
+	minFee, err := CalculateMinFee(
 		txSize,
 		declaredEU,
 		minFeeA,
@@ -239,6 +292,11 @@ func ValidateTxFee(
 		pricesMem,
 		pricesSteps,
 	)
+	if err != nil {
+		return fmt.Errorf(
+			"calculating minimum fee: %w", err,
+		)
+	}
 	txFee := tx.Fee()
 	if txFee == nil {
 		txFee = new(big.Int)
