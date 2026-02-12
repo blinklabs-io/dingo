@@ -208,6 +208,12 @@ func (n *Node) Run(ctx context.Context) error {
 	}
 	n.ledgerState = state
 	n.ouroboros.LedgerState = n.ledgerState
+	// If we already have blocks in the database (restart case),
+	// tell the ouroboros layer so the ChainSync server can accept
+	// FindIntersect requests immediately.
+	if tip := n.ledgerState.Tip(); tip.Point.Slot > 0 || tip.BlockNumber > 0 {
+		n.ouroboros.SetHasBlocks()
+	}
 	n.chainManager.SetLedger(n.ledgerState)
 	// Run DB recovery if needed
 	if dbNeedsRecovery {
@@ -388,6 +394,10 @@ func (n *Node) Run(ctx context.Context) error {
 	n.eventBus.SubscribeFunc(
 		peergov.OutboundConnectionEventType,
 		n.ouroboros.HandleOutboundConnEvent,
+	)
+	n.eventBus.SubscribeFunc(
+		connmanager.InboundConnectionEventType,
+		n.ouroboros.HandleInboundConnEvent,
 	)
 	if n.config.topologyConfig != nil {
 		n.peerGov.LoadTopologyConfig(n.config.topologyConfig)

@@ -22,10 +22,12 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"sync"
 
 	"connectrpc.com/connect"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/ledger"
+	"github.com/blinklabs-io/dingo/mempool"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	cardano "github.com/utxorpc/go-codegen/utxorpc/v1alpha/cardano"
@@ -74,7 +76,9 @@ func (s *submitServiceServer) SubmitTx(
 	return connect.NewResponse(resp), nil
 }
 
-// WaitForTx
+// WaitForTx subscribes to block events and streams confirmation responses
+// for the requested transaction hashes. It blocks until all requested
+// transactions are confirmed or the client disconnects.
 func (s *submitServiceServer) WaitForTx(
 	ctx context.Context,
 	req *connect.Request[submit.WaitForTxRequest],
@@ -88,7 +92,29 @@ func (s *submitServiceServer) WaitForTx(
 			len(ref),
 		),
 	)
-	s.utxorpc.config.EventBus.SubscribeFunc(
+
+	if len(ref) == 0 {
+		return nil
+	}
+
+	// Build a set of pending transaction hashes for O(1) lookup
+	var mu sync.Mutex
+	pending := make(map[string][]byte, len(ref))
+	for _, r := range ref {
+		pending[hex.EncodeToString(r)] = r
+	}
+
+	// Channel to signal all transactions have been confirmed
+	doneCh := make(chan struct{}, 1)
+	// Channel to propagate errors from the event handler
+	errCh := make(chan error, 1)
+
+	// Mutex to protect stream.Send which is not goroutine-safe.
+	// The stopped flag prevents sends after the function returns.
+	var streamMu sync.Mutex
+	var stopped bool
+
+	subId := s.utxorpc.config.EventBus.SubscribeFunc(
 		ledger.BlockfetchEventType,
 		func(evt event.Event) {
 			defer func() {
@@ -107,43 +133,93 @@ func (s *submitServiceServer) WaitForTx(
 				)
 				return
 			}
+			// Skip non-block events (e.g. BatchDone) which have
+			// no block data and cannot confirm transactions
+			if e.Block == nil {
+				return
+			}
 			for _, tx := range e.Block.Transactions() {
-				for _, r := range ref {
-					refHash := hex.EncodeToString(r)
-					// Compare our hashes
-					if refHash == tx.Hash().String() {
-						// Send confirmation response
-						err := stream.Send(&submit.WaitForTxResponse{
-							Ref:   r,
-							Stage: submit.Stage_STAGE_CONFIRMED,
-						})
-						if err != nil {
-							if ctx.Err() != nil {
-								s.utxorpc.config.Logger.Warn(
-									"Client disconnected while sending response",
-									"error",
-									ctx.Err(),
-								)
-								return
-							}
-							s.utxorpc.config.Logger.Error(
-								"Error sending response to client",
-								"transaction_hash", tx.Hash(),
-								"error", err,
-							)
-							return
-						}
-						s.utxorpc.config.Logger.Debug(
-							"Confirmation response sent",
-							"transaction_hash", tx.Hash(),
-						)
-						return // Stop processing after confirming the transaction
+				txHash := tx.Hash().String()
+				mu.Lock()
+				refBytes, found := pending[txHash]
+				if !found {
+					mu.Unlock()
+					continue
+				}
+				// Remove from pending before sending
+				delete(pending, txHash)
+				remaining := len(pending)
+				mu.Unlock()
+
+				// Send confirmation response
+				streamMu.Lock()
+				if stopped {
+					streamMu.Unlock()
+					return
+				}
+				err := stream.Send(
+					&submit.WaitForTxResponse{
+						Ref:   refBytes,
+						Stage: submit.Stage_STAGE_CONFIRMED,
+					},
+				)
+				streamMu.Unlock()
+				if err != nil {
+					select {
+					case errCh <- err:
+					default:
 					}
+					return
+				}
+				s.utxorpc.config.Logger.Debug(
+					"Confirmation response sent",
+					"transaction_hash", txHash,
+				)
+				// Signal done when all txs confirmed
+				if remaining == 0 {
+					select {
+					case doneCh <- struct{}{}:
+					default:
+					}
+					return
 				}
 			}
 		},
 	)
-	return nil
+	defer s.utxorpc.config.EventBus.Unsubscribe(
+		ledger.BlockfetchEventType,
+		subId,
+	)
+	// Prevent event handler from calling stream.Send
+	// after this function returns and the stream is torn
+	// down. Registered after the Unsubscribe defer so
+	// LIFO ordering sets stopped=true before Unsubscribe.
+	defer func() {
+		streamMu.Lock()
+		stopped = true
+		streamMu.Unlock()
+	}()
+
+	// Block until all transactions are confirmed, an error
+	// occurs, or the client disconnects
+	select {
+	case <-doneCh:
+		return nil
+	case err := <-errCh:
+		if ctx.Err() != nil {
+			s.utxorpc.config.Logger.Warn(
+				"Client disconnected",
+				"error", ctx.Err(),
+			)
+			return ctx.Err()
+		}
+		return err
+	case <-ctx.Done():
+		s.utxorpc.config.Logger.Debug(
+			"WaitForTx client disconnected",
+		)
+		return ctx.Err()
+	}
 }
 
 // EvalTx
@@ -167,6 +243,9 @@ func (s *submitServiceServer) EvalTx(
 	tx, err := gledger.NewTransactionFromCbor(txType, txRawBytes)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse transaction CBOR: %w", err)
+	}
+	if tx == nil {
+		return nil, errors.New("decoded transaction is nil")
 	}
 	// Evaluate TX
 	fee, totalExUnits, redeemerExUnits, err := s.utxorpc.config.LedgerState.EvaluateTx(
@@ -240,20 +319,22 @@ func (s *submitServiceServer) ReadMempool(
 	resp := &submit.ReadMempoolResponse{}
 
 	txs := s.utxorpc.config.Mempool.Transactions()
-	mempool := make([]*submit.TxInMempool, 0, len(txs))
+	mempoolItems := make([]*submit.TxInMempool, 0, len(txs))
 	for _, tx := range txs {
 		record := &submit.TxInMempool{
 			NativeBytes: tx.Cbor,
 			Stage:       submit.Stage_STAGE_MEMPOOL,
 		}
-		mempool = append(mempool, record)
+		mempoolItems = append(mempoolItems, record)
 	}
-	resp.Items = mempool
+	resp.Items = mempoolItems
 
 	return connect.NewResponse(resp), nil
 }
 
-// WatchMempool
+// WatchMempool subscribes to mempool add-transaction events and streams
+// matching transactions to the client. It blocks until the client
+// disconnects.
 func (s *submitServiceServer) WatchMempool(
 	ctx context.Context,
 	req *connect.Request[submit.WatchMempoolRequest],
@@ -270,22 +351,58 @@ func (s *submitServiceServer) WatchMempool(
 		),
 	)
 
-	// Start our forever loop
-	for {
-		// Match against mempool transactions
-		for _, memTx := range s.utxorpc.config.Mempool.Transactions() {
-			txRawBytes := memTx.Cbor
-			txType, err := gledger.DetermineTransactionType(txRawBytes)
-			if err != nil {
-				return err
+	// Channel to propagate errors from the event handler
+	errCh := make(chan error, 1)
+
+	// Mutex to protect stream.Send which is not goroutine-safe.
+	// The stopped flag prevents sends after the function returns.
+	var streamMu sync.Mutex
+	var stopped bool
+
+	// Subscribe to mempool add-transaction events
+	subId := s.utxorpc.config.EventBus.SubscribeFunc(
+		mempool.AddTransactionEventType,
+		func(evt event.Event) {
+			defer func() {
+				if r := recover(); r != nil {
+					s.utxorpc.config.Logger.Error(
+						"panic in WatchMempool event handler",
+						"panic",
+						r,
+					)
+				}
+			}()
+			addEvt, ok := evt.Data.(mempool.AddTransactionEvent)
+			if !ok {
+				return
 			}
-			tx, err := gledger.NewTransactionFromCbor(txType, txRawBytes)
+			txRawBytes := addEvt.Body
+			txType, err := gledger.DetermineTransactionType(
+				txRawBytes,
+			)
 			if err != nil {
-				return err
+				s.utxorpc.config.Logger.Error(
+					"failed to determine tx type",
+					"error", err,
+				)
+				return
 			}
-			cTx, err := tx.Utxorpc() // *cardano.Tx
+			tx, err := gledger.NewTransactionFromCbor(
+				txType,
+				txRawBytes,
+			)
 			if err != nil {
-				return fmt.Errorf("convert transaction: %w", err)
+				s.utxorpc.config.Logger.Error(
+					"failed to decode tx in WatchMempool",
+					"error", err,
+				)
+				return
+			}
+			if tx == nil {
+				s.utxorpc.config.Logger.Error(
+					"decoded transaction is nil in WatchMempool",
+				)
+				return
 			}
 			resp := &submit.WatchMempoolResponse{}
 			record := &submit.TxInMempool{
@@ -293,178 +410,212 @@ func (s *submitServiceServer) WatchMempool(
 				Stage:       submit.Stage_STAGE_MEMPOOL,
 			}
 			resp.Tx = record
-			if string(record.GetNativeBytes()) == cTx.String() {
-				if predicate == nil {
-					err := stream.Send(resp)
-					if err != nil {
-						return err
+
+			shouldSend := predicate == nil ||
+				s.utxorpc.matchesTxPattern(
+					tx,
+					predicate.GetMatch().GetCardano(),
+				)
+			if !shouldSend {
+				return
+			}
+
+			streamMu.Lock()
+			if stopped {
+				streamMu.Unlock()
+				return
+			}
+			err = stream.Send(resp)
+			streamMu.Unlock()
+			if err != nil {
+				select {
+				case errCh <- err:
+				default:
+				}
+			}
+		},
+	)
+	defer s.utxorpc.config.EventBus.Unsubscribe(
+		mempool.AddTransactionEventType,
+		subId,
+	)
+	// Prevent event handler from calling stream.Send
+	// after this function returns and the stream is torn
+	// down. Registered after the Unsubscribe defer so
+	// LIFO ordering sets stopped=true before Unsubscribe.
+	defer func() {
+		streamMu.Lock()
+		stopped = true
+		streamMu.Unlock()
+	}()
+
+	// Block until client disconnects or an error occurs
+	select {
+	case err := <-errCh:
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return err
+	case <-ctx.Done():
+		s.utxorpc.config.Logger.Debug(
+			"WatchMempool client disconnected",
+		)
+		return ctx.Err()
+	}
+}
+
+// matchesTxPattern checks whether a transaction matches the given
+// TxPattern (address and asset filters). This is shared between
+// WatchMempool (submit) and WatchTx (watch) endpoints.
+func (u *Utxorpc) matchesTxPattern(
+	tx gledger.Transaction,
+	pattern *cardano.TxPattern,
+) bool {
+	addressPattern := pattern.GetHasAddress()
+	mintAssetPattern := pattern.GetMintsAsset()
+	moveAssetPattern := pattern.GetMovesAsset()
+
+	var addresses []gledger.Address
+	if addressPattern != nil {
+		// Handle Exact Address
+		exactAddressBytes := addressPattern.GetExactAddress()
+		if exactAddressBytes != nil {
+			addr, err := lcommon.NewAddressFromBytes(
+				exactAddressBytes,
+			)
+			if err != nil {
+				u.config.Logger.Error(
+					"failed to decode exact address",
+					"error", err,
+				)
+				return false
+			}
+			addresses = append(addresses, addr)
+		}
+
+		// Handle Payment Part
+		paymentPart := addressPattern.GetPaymentPart()
+		if paymentPart != nil {
+			paymentAddr, err := lcommon.NewAddressFromBytes(
+				paymentPart,
+			)
+			if err != nil {
+				u.config.Logger.Error(
+					"failed to decode payment part",
+					"error", err,
+				)
+				return false
+			}
+			addresses = append(addresses, paymentAddr)
+		}
+
+		// Handle Delegation Part
+		delegationPart := addressPattern.GetDelegationPart()
+		if delegationPart != nil {
+			delegationAddr, err := lcommon.NewAddressFromBytes(
+				delegationPart,
+			)
+			if err != nil {
+				u.config.Logger.Error(
+					"failed to decode delegation part",
+					"error", err,
+				)
+				return false
+			}
+			addresses = append(addresses, delegationAddr)
+		}
+	}
+
+	var assetPatterns []*cardano.AssetPattern
+	if mintAssetPattern != nil {
+		assetPatterns = append(assetPatterns, mintAssetPattern)
+	}
+	if moveAssetPattern != nil {
+		assetPatterns = append(assetPatterns, moveAssetPattern)
+	}
+
+	// If no address filter specified, no match via predicate
+	if len(addresses) == 0 {
+		return false
+	}
+
+	// Convert everything to utxos for matching
+	var utxos []gledger.TransactionOutput
+	utxos = append(utxos, tx.Outputs()...)
+	if cr := tx.CollateralReturn(); cr != nil {
+		utxos = append(utxos, cr)
+	}
+	txInputs := tx.Inputs()
+	refInputs := tx.ReferenceInputs()
+	collateral := tx.Collateral()
+	inputs := make(
+		[]gledger.TransactionInput,
+		0,
+		len(txInputs)+len(refInputs)+len(collateral),
+	)
+	inputs = append(inputs, txInputs...)
+	inputs = append(inputs, refInputs...)
+	inputs = append(inputs, collateral...)
+	for _, input := range inputs {
+		utxo, err := u.config.LedgerState.UtxoByRef(
+			input.Id().Bytes(),
+			input.Index(),
+		)
+		if err != nil {
+			u.config.Logger.Error(
+				"failed to look up input for predicate",
+				"error", err,
+			)
+			continue
+		}
+		ret, err := utxo.Decode()
+		if err != nil {
+			u.config.Logger.Error(
+				"failed to decode utxo for predicate",
+				"error", err,
+			)
+			continue
+		}
+		if ret == nil {
+			continue
+		}
+		utxos = append(utxos, ret)
+	}
+
+	// Check UTxOs for matching addresses and assets
+	for _, address := range addresses {
+		for _, utxo := range utxos {
+			if utxo.Address().String() != address.String() {
+				continue
+			}
+			// Address matched; check asset patterns
+			if len(assetPatterns) == 0 {
+				return true
+			}
+			for _, assetPattern := range assetPatterns {
+				if assetPattern == nil {
+					return true
+				}
+				for _, policyId := range utxo.Assets().Policies() {
+					if !bytes.Equal(
+						policyId.Bytes(),
+						assetPattern.GetPolicyId(),
+					) {
+						continue
 					}
-				} else {
-					found := false
-					assetFound := false
-
-					// Check Predicate
-					addressPattern := predicate.GetMatch().GetCardano().GetHasAddress()
-					mintAssetPattern := predicate.GetMatch().GetCardano().GetMintsAsset()
-					moveAssetPattern := predicate.GetMatch().GetCardano().GetMovesAsset()
-
-					var addresses []gledger.Address
-					if addressPattern != nil {
-						// Handle Exact Address
-						exactAddressBytes := addressPattern.GetExactAddress()
-						if exactAddressBytes != nil {
-							var addr lcommon.Address
-							err := addr.UnmarshalCBOR(exactAddressBytes)
-							if err != nil {
-								return fmt.Errorf(
-									"failed to decode exact address: %w",
-									err,
-								)
-							}
-							addresses = append(addresses, addr)
-						}
-
-						// Handle Payment Part
-						paymentPart := addressPattern.GetPaymentPart()
-						if paymentPart != nil {
-							s.utxorpc.config.Logger.Info("PaymentPart is present, decoding...")
-							var paymentAddr lcommon.Address
-							err := paymentAddr.UnmarshalCBOR(paymentPart)
-							if err != nil {
-								return fmt.Errorf("failed to decode payment part: %w", err)
-							}
-							addresses = append(addresses, paymentAddr)
-						}
-
-						// Handle Delegation Part
-						delegationPart := addressPattern.GetDelegationPart()
-						if delegationPart != nil {
-							s.utxorpc.config.Logger.Info(
-								"DelegationPart is present, decoding...",
-							)
-							var delegationAddr lcommon.Address
-							err := delegationAddr.UnmarshalCBOR(delegationPart)
-							if err != nil {
-								return fmt.Errorf(
-									"failed to decode delegation part: %w",
-									err,
-								)
-							}
-							addresses = append(addresses, delegationAddr)
-						}
-					}
-
-					var assetPatterns []*cardano.AssetPattern
-					if mintAssetPattern != nil {
-						assetPatterns = append(assetPatterns, mintAssetPattern)
-					}
-					if moveAssetPattern != nil {
-						assetPatterns = append(assetPatterns, moveAssetPattern)
-					}
-
-					// Convert everything to utxos (gledger.TransactionOutput) for matching
-					var utxos []gledger.TransactionOutput
-					utxos = append(tx.Outputs(), tx.CollateralReturn())
-					var inputs []gledger.TransactionInput
-					inputs = append(tx.Inputs(), tx.ReferenceInputs()...)
-					inputs = append(inputs, tx.Collateral()...)
-					for _, input := range inputs {
-						utxo, err := s.utxorpc.config.LedgerState.UtxoByRef(
-							input.Id().Bytes(),
-							input.Index(),
-						)
-						if err != nil {
-							return fmt.Errorf(
-								"failed to look up input: %w",
-								err,
-							)
-						}
-						ret, err := utxo.Decode() // gledger.TransactionOutput
-						if err != nil {
-							return err
-						}
-						if ret == nil {
-							return errors.New("decode returned empty utxo")
-						}
-						utxos = append(utxos, ret)
-					}
-
-					// Check UTxOs for addresses
-					for _, address := range addresses {
-						if found {
-							break
-						}
-						if assetFound {
-							found = true
-							break
-						}
-						for _, utxo := range utxos {
-							if found {
-								break
-							}
-							if assetFound {
-								found = true
-								break
-							}
-							if utxo.Address().String() == address.String() {
-								if found {
-									break
-								}
-								if assetFound {
-									found = true
-									break
-								}
-								// We matched address, check assetPatterns
-								for _, assetPattern := range assetPatterns {
-									// Address found, no assetPattern
-									if assetPattern == nil {
-										found = true
-										break
-									}
-									// Filter on assetPattern
-									for _, policyId := range utxo.Assets().Policies() {
-										if assetFound {
-											found = true
-											break
-										}
-										if bytes.Equal(
-											policyId.Bytes(),
-											assetPattern.GetPolicyId(),
-										) {
-											for _, asset := range utxo.Assets().Assets(
-												policyId,
-											) {
-												if bytes.Equal(
-													asset,
-													assetPattern.GetAssetName(),
-												) {
-													found = true
-													assetFound = true
-													break
-												}
-											}
-										}
-									}
-								}
-								if found {
-									break
-								}
-								// Asset not found; skip this UTxO
-								if !assetFound {
-									continue
-								}
-								found = true
-							}
-						}
-					}
-					if found {
-						err := stream.Send(resp)
-						if err != nil {
-							return err
+					for _, asset := range utxo.Assets().Assets(
+						policyId,
+					) {
+						if bytes.Equal(
+							asset,
+							assetPattern.GetAssetName(),
+						) {
+							return true
 						}
 					}
 				}
 			}
 		}
 	}
+	return false
 }

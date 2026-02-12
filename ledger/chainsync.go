@@ -439,8 +439,10 @@ func (ls *LedgerState) processBlockEvents() error {
 				)
 			}
 		}
-		ls.Lock()
-		// Start a transaction
+		// The DB transaction and chain.AddBlock() use their own mutexes
+		// (chain.mutex + chain.manager.mutex). Holding ls.Lock() here
+		// would block ALL LedgerState readers for the duration of the
+		// batch I/O (100-1000ms), causing starvation during rapid sync.
 		txn := ls.db.BlobTxn(true)
 		err := txn.Do(func(txn *database.Txn) error {
 			for _, evt := range batch {
@@ -450,7 +452,6 @@ func (ls *LedgerState) processBlockEvents() error {
 			}
 			return nil
 		})
-		ls.Unlock()
 		if err != nil {
 			return err
 		}
@@ -810,23 +811,39 @@ func (ls *LedgerState) calculateEpochNonce(
 	} else {
 		stabilityWindowStartSlot = 0
 	}
-	// Get last block before stability window
+	// Get last block before stability window to find the rolling nonce (ηv).
+	// When the stability window extends before the chain start (common on
+	// DevNets where k=2160 but epochLength=5), no block exists before
+	// slot 0. In that case, ηv is the Shelley genesis hash — the initial
+	// value of the rolling nonce before any block VRF outputs are mixed in.
+	var blockBeforeStabilityWindowNonce []byte
 	blockBeforeStabilityWindow, err := database.BlockBeforeSlotTxn(
 		txn,
 		stabilityWindowStartSlot,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("lookup block before slot: %w", err)
-	}
-	blockBeforeStabilityWindowNonce, err := ls.db.GetBlockNonce(
-		ocommon.Point{
-			Hash: blockBeforeStabilityWindow.Hash,
-			Slot: blockBeforeStabilityWindow.Slot,
-		},
-		txn,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("lookup block nonce: %w", err)
+		if !errors.Is(err, models.ErrBlockNotFound) {
+			return nil, fmt.Errorf("lookup block before slot: %w", err)
+		}
+		// Fall back to the initial rolling nonce (Shelley genesis hash)
+		genesisHashBytes, decErr := hex.DecodeString(
+			ls.config.CardanoNodeConfig.ShelleyGenesisHash,
+		)
+		if decErr != nil {
+			return nil, fmt.Errorf("decode genesis hash: %w", decErr)
+		}
+		blockBeforeStabilityWindowNonce = genesisHashBytes
+	} else {
+		blockBeforeStabilityWindowNonce, err = ls.db.GetBlockNonce(
+			ocommon.Point{
+				Hash: blockBeforeStabilityWindow.Hash,
+				Slot: blockBeforeStabilityWindow.Slot,
+			},
+			txn,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("lookup block nonce: %w", err)
+		}
 	}
 	// Get last block in previous epoch using the snapshot epoch
 	blockLastPrevEpoch, err := database.BlockBeforeSlotTxn(
@@ -838,6 +855,12 @@ func (ls *LedgerState) calculateEpochNonce(
 			return blockBeforeStabilityWindowNonce, nil
 		}
 		return nil, fmt.Errorf("lookup block before slot: %w", err)
+	}
+	// If the previous epoch's last block has no PrevHash (genesis block),
+	// there's no previous hash to incorporate into the nonce. Use the
+	// stability window nonce directly.
+	if len(blockLastPrevEpoch.PrevHash) == 0 {
+		return blockBeforeStabilityWindowNonce, nil
 	}
 	// Calculate nonce from inputs
 	ret, err := lcommon.CalculateEpochNonce(

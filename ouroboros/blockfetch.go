@@ -247,6 +247,9 @@ func (o *Ouroboros) blockfetchClientBlock(
 			)
 		}
 	}
+	// Mark that we have at least one block, enabling the ChainSync
+	// server to accept FindIntersect requests (lock-free check).
+	o.hasBlocks.Store(true)
 	// Generate event
 	o.EventBus.Publish(
 		ledger.BlockfetchEventType,

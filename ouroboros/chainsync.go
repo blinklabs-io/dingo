@@ -50,6 +50,11 @@ func (o *Ouroboros) chainsyncClientConnOpts() []ochainsync.ChainSyncOptionFunc {
 		ochainsync.WithPipelineLimit(50),
 		// Set the recv queue size to 2x our pipeline limit
 		ochainsync.WithRecvQueueSize(100),
+		// Increase the intersect timeout from the 5s default. The
+		// upstream peer may need time to process FindIntersect when
+		// under load (e.g. fast DevNet block production or initial
+		// sync from genesis).
+		ochainsync.WithIntersectTimeout(30 * time.Second),
 	}
 }
 
@@ -104,36 +109,64 @@ func (o *Ouroboros) chainsyncServerFindIntersect(
 	ctx ochainsync.CallbackContext,
 	points []ocommon.Point,
 ) (ocommon.Point, ochainsync.Tip, error) {
-	o.LedgerState.RLock()
-	defer o.LedgerState.RUnlock()
 	var retPoint ocommon.Point
-	var retTip ochainsync.Tip
-	// Find intersection
-	intersectPoint, err := o.LedgerState.GetIntersectPoint(points)
-	if err != nil {
-		return retPoint, retTip, err
+	// If we have no blocks yet, report IntersectNotFound immediately
+	// WITHOUT acquiring any locks. During initial sync the LedgerState
+	// write lock is held almost continuously for block processing,
+	// which starves readers and causes this callback to block long
+	// enough for the remote peer to timeout and reset the connection.
+	if !o.hasBlocks.Load() {
+		return retPoint, ochainsync.Tip{}, ochainsync.ErrIntersectNotFound
 	}
-
-	// Populate return tip
-	retTip = o.LedgerState.Tip()
-
-	if intersectPoint == nil {
-		return retPoint, retTip, ochainsync.ErrIntersectNotFound
+	// Run the intersection lookup with a timeout. During heavy block
+	// processing (e.g. catch-up at 10 blocks/sec), the LedgerState
+	// write lock and chain manager mutex are held almost continuously,
+	// which starves the read-locks needed here. Rather than blocking
+	// indefinitely (causing the remote peer to time out and reset the
+	// connection), we fail fast and let the peer retry.
+	type findResult struct {
+		point *ocommon.Point
+		tip   ochainsync.Tip
+		err   error
 	}
-
-	// Add our client to the chainsync state
-	_, err = o.ChainsyncState.AddClient(
-		ctx.ConnectionId,
-		*intersectPoint,
+	findCtx, findCancel := context.WithTimeout(
+		context.Background(),
+		5*time.Second,
 	)
-	if err != nil {
-		return retPoint, retTip, err
+	defer findCancel()
+	resultCh := make(chan findResult, 1)
+	go func() {
+		intersectPoint, err := o.LedgerState.GetIntersectPoint(points)
+		if err != nil {
+			resultCh <- findResult{err: err}
+			return
+		}
+		tip := o.LedgerState.Tip()
+		resultCh <- findResult{point: intersectPoint, tip: tip}
+	}()
+	select {
+	case <-findCtx.Done():
+		// Timed out waiting for locks; report IntersectNotFound so
+		// the peer can retry on its next connection.
+		return retPoint, ochainsync.Tip{}, ochainsync.ErrIntersectNotFound
+	case res := <-resultCh:
+		if res.err != nil {
+			return retPoint, ochainsync.Tip{}, res.err
+		}
+		if res.point == nil {
+			return retPoint, res.tip, ochainsync.ErrIntersectNotFound
+		}
+		// Add our client to the chainsync state
+		_, err := o.ChainsyncState.AddClient(
+			ctx.ConnectionId,
+			*res.point,
+		)
+		if err != nil {
+			return retPoint, res.tip, err
+		}
+		retPoint = *res.point
+		return retPoint, res.tip, nil
 	}
-
-	// Populate return point
-	retPoint = *intersectPoint
-
-	return retPoint, retTip, nil
 }
 
 func (o *Ouroboros) chainsyncServerRequestNext(

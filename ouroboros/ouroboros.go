@@ -20,6 +20,7 @@ import (
 	"log/slog"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/blinklabs-io/dingo/chainsync"
@@ -32,6 +33,7 @@ import (
 	oblockfetch "github.com/blinklabs-io/gouroboros/protocol/blockfetch"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	oprotocol "github.com/blinklabs-io/gouroboros/protocol"
 	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
 	olocaltxmonitor "github.com/blinklabs-io/gouroboros/protocol/localtxmonitor"
 	olocaltxsubmission "github.com/blinklabs-io/gouroboros/protocol/localtxsubmission"
@@ -58,6 +60,11 @@ type Ouroboros struct {
 	// ChainSync measurement tracking for peer scoring
 	chainsyncStats map[ouroboros.ConnectionId]*chainsyncPeerStats
 	chainsyncMutex sync.Mutex
+	// hasBlocks is set to true once at least one block has been
+	// added to the chain. Used by the ChainSync server to reject
+	// FindIntersect without acquiring any locks when the chain is
+	// empty (prevents reader starvation from continuous writes).
+	hasBlocks atomic.Bool
 }
 
 // chainsyncPeerStats tracks ChainSync performance metrics per peer connection.
@@ -95,6 +102,32 @@ func NewOuroboros(cfg OuroborosConfig) *Ouroboros {
 		cfg.Logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
 	}
 	cfg.Logger = cfg.Logger.With("component", "ouroboros")
+	// Override the global chainsync StateMap timeouts.
+	// The chainsync server protocol uses the global StateMap directly
+	// without applying config overrides (unlike the client which
+	// copies and modifies it). Increase from the defaults to avoid
+	// false timeouts when callbacks block on lock contention.
+	for state, entry := range ochainsync.StateMap {
+		switch state.Name {
+		case "Intersect":
+			entry.Timeout = 30 * time.Second
+			ochainsync.StateMap[state] = entry
+		case "Idle":
+			entry.Timeout = 300 * time.Second
+			ochainsync.StateMap[state] = entry
+		}
+	}
+	// Override the global TxSubmission StateMap timeouts.
+	// TxIdsBlocking defaults to 60s which is too short when
+	// the mempool is empty (common in DevNets). Increase to
+	// 300s to match the Idle timeout and avoid unnecessary
+	// connection teardowns.
+	for state, entry := range otxsubmission.StateMap {
+		if state.Name == "TxIdsBlocking" {
+			entry.Timeout = 300 * time.Second
+			otxsubmission.StateMap[state] = entry
+		}
+	}
 	o := &Ouroboros{
 		config:           cfg,
 		EventBus:         cfg.EventBus,
@@ -106,6 +139,14 @@ func NewOuroboros(cfg OuroborosConfig) *Ouroboros {
 		o.initMetrics()
 	}
 	return o
+}
+
+// SetHasBlocks marks that the chain contains at least one block.
+// Call this after loading an existing database so the ChainSync
+// server can accept FindIntersect immediately instead of waiting
+// for the first blockfetch to arrive.
+func (o *Ouroboros) SetHasBlocks() {
+	o.hasBlocks.Store(true)
 }
 
 func (o *Ouroboros) initMetrics() {
@@ -173,29 +214,46 @@ func (o *Ouroboros) ConfigureListeners(
 				),
 			)
 		} else {
-			// Node-to-node config
+			// Node-to-node config: full duplex with both client and
+			// server handlers, matching cardano-node behavior. This
+			// allows a single inbound TCP connection to carry both
+			// directions of the Ouroboros mini-protocols.
 			l.ConnectionOpts = append(
 				l.ConnectionOpts,
+				ouroboros.WithFullDuplex(true),
+				ouroboros.WithKeepAlive(true),
 				ouroboros.WithPeerSharing(o.config.PeerSharing),
 				ouroboros.WithNetworkMagic(o.config.NetworkMagic),
 				ouroboros.WithPeerSharingConfig(
 					opeersharing.NewConfig(
-						o.peersharingServerConnOpts()...,
+						slices.Concat(
+							o.peersharingClientConnOpts(),
+							o.peersharingServerConnOpts(),
+						)...,
 					),
 				),
 				ouroboros.WithTxSubmissionConfig(
 					otxsubmission.NewConfig(
-						o.txsubmissionServerConnOpts()...,
+						slices.Concat(
+							o.txsubmissionClientConnOpts(),
+							o.txsubmissionServerConnOpts(),
+						)...,
 					),
 				),
 				ouroboros.WithChainSyncConfig(
 					ochainsync.NewConfig(
-						o.chainsyncServerConnOpts()...,
+						slices.Concat(
+							o.chainsyncClientConnOpts(),
+							o.chainsyncServerConnOpts(),
+						)...,
 					),
 				),
 				ouroboros.WithBlockFetchConfig(
 					oblockfetch.NewConfig(
-						o.blockfetchServerConnOpts()...,
+						slices.Concat(
+							o.blockfetchClientConnOpts(),
+							o.blockfetchServerConnOpts(),
+						)...,
 					),
 				),
 			)
@@ -338,5 +396,75 @@ func (o *Ouroboros) HandleOutboundConnEvent(evt event.Event) {
 			err,
 		)
 		return
+	}
+}
+
+// HandleInboundConnEvent starts client-side mini-protocols on full-duplex
+// inbound connections. When the remote peer negotiated InitiatorAndResponder
+// mode, a single TCP connection can carry both directions of the Ouroboros
+// protocols, matching cardano-node's connection manager behavior.
+func (o *Ouroboros) HandleInboundConnEvent(evt event.Event) {
+	e, ok := evt.Data.(connmanager.InboundConnectionEvent)
+	if !ok {
+		o.config.Logger.Warn(
+			"received unexpected event data type for inbound connection event",
+			"expected", "connmanager.InboundConnectionEvent",
+			"got", fmt.Sprintf("%T", evt.Data),
+		)
+		return
+	}
+	connId := e.ConnectionId
+
+	// Look up the connection to check its negotiated diffusion mode
+	conn := o.ConnManager.GetConnectionById(connId)
+	if conn == nil {
+		o.config.Logger.Debug(
+			"inbound connection not found, skipping client start",
+			"connection_id", connId.String(),
+		)
+		return
+	}
+
+	// Only start client protocols if the peer negotiated full duplex
+	_, versionData := conn.ProtocolVersion()
+	if versionData.DiffusionMode() != oprotocol.DiffusionModeInitiatorAndResponder {
+		o.config.Logger.Debug(
+			"inbound connection is not full-duplex, skipping client start",
+			"connection_id", connId.String(),
+		)
+		return
+	}
+
+	o.config.Logger.Info(
+		"full-duplex inbound connection, starting client protocols",
+		"connection_id", connId.String(),
+	)
+
+	// Start chainsync client on this full-duplex inbound connection
+	if o.ChainsyncState != nil {
+		if o.ChainsyncState.TryAddClientConnId(connId, maxChainsyncClients) {
+			if err := o.chainsyncClientStart(connId); err != nil {
+				o.ChainsyncState.RemoveClientConnId(connId)
+				o.config.Logger.Error(
+					"failed to start chainsync client on inbound connection",
+					"error", err,
+					"connection_id", connId.String(),
+				)
+				return
+			}
+			o.config.Logger.Debug(
+				"started chainsync client on inbound connection",
+				"connection_id", connId.String(),
+				"total_clients", o.ChainsyncState.ClientConnCount(),
+			)
+		}
+	}
+	// Start txsubmission client
+	if err := o.txsubmissionClientStart(connId); err != nil {
+		o.config.Logger.Error(
+			"failed to start txsubmission client on inbound connection",
+			"error", err,
+			"connection_id", connId.String(),
+		)
 	}
 }
