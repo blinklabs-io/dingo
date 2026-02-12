@@ -15,11 +15,64 @@
 package eras
 
 import (
+	"errors"
 	"fmt"
+	"math"
 	"math/big"
 
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
+
+// ErrExUnitsOverflow is returned when ExUnits
+// summation would overflow int64.
+var ErrExUnitsOverflow = errors.New(
+	"execution units overflow int64",
+)
+
+// SafeAddExUnits adds two ExUnits values with
+// overflow detection. Returns an error if either
+// the Memory or Steps sum would exceed
+// math.MaxInt64.
+func SafeAddExUnits(
+	a, b lcommon.ExUnits,
+) (lcommon.ExUnits, error) {
+	if a.Memory < 0 || b.Memory < 0 {
+		return lcommon.ExUnits{}, fmt.Errorf(
+			"%w: negative memory %d, %d",
+			ErrExUnitsOverflow,
+			a.Memory,
+			b.Memory,
+		)
+	}
+	if a.Steps < 0 || b.Steps < 0 {
+		return lcommon.ExUnits{}, fmt.Errorf(
+			"%w: negative steps %d, %d",
+			ErrExUnitsOverflow,
+			a.Steps,
+			b.Steps,
+		)
+	}
+	if a.Memory > 0 && b.Memory > math.MaxInt64-a.Memory {
+		return lcommon.ExUnits{}, fmt.Errorf(
+			"%w: memory %d + %d",
+			ErrExUnitsOverflow,
+			a.Memory,
+			b.Memory,
+		)
+	}
+	if a.Steps > 0 && b.Steps > math.MaxInt64-a.Steps {
+		return lcommon.ExUnits{}, fmt.Errorf(
+			"%w: steps %d + %d",
+			ErrExUnitsOverflow,
+			a.Steps,
+			b.Steps,
+		)
+	}
+	return lcommon.ExUnits{
+		Memory: a.Memory + b.Memory,
+		Steps:  a.Steps + b.Steps,
+	}, nil
+}
 
 // TxBodySize returns the CBOR-serialized size of a
 // transaction in bytes.
@@ -124,23 +177,31 @@ func CalculateMinFee(
 // declared across all redeemers in a transaction's
 // witness set. These are the budgets the transaction
 // builder committed to (not the evaluated actuals).
+// Returns an error if the summation would overflow
+// int64.
 func DeclaredExUnits(
 	tx lcommon.Transaction,
-) lcommon.ExUnits {
+) (lcommon.ExUnits, error) {
 	var total lcommon.ExUnits
 	wits := tx.Witnesses()
 	if wits == nil {
-		return total
+		return total, nil
 	}
 	redeemers := wits.Redeemers()
 	if redeemers == nil {
-		return total
+		return total, nil
 	}
 	for _, val := range redeemers.Iter() {
-		total.Memory += val.ExUnits.Memory
-		total.Steps += val.ExUnits.Steps
+		var err error
+		total, err = SafeAddExUnits(total, val.ExUnits)
+		if err != nil {
+			return lcommon.ExUnits{}, fmt.Errorf(
+				"summing redeemer execution units: %w",
+				err,
+			)
+		}
 	}
-	return total
+	return total, nil
 }
 
 // ValidateTxFee checks that the fee declared in the
@@ -163,7 +224,13 @@ func ValidateTxFee(
 	pricesSteps *big.Rat,
 ) error {
 	txSize := TxBodySize(tx)
-	declaredEU := DeclaredExUnits(tx)
+	declaredEU, err := DeclaredExUnits(tx)
+	if err != nil {
+		return fmt.Errorf(
+			"calculating declared execution units: %w",
+			err,
+		)
+	}
 	minFee := CalculateMinFee(
 		txSize,
 		declaredEU,
