@@ -271,6 +271,23 @@ func (c *Chain) Rollback(point ocommon.Point) error {
 	}
 	// Calculate fork depth before deleting blocks
 	forkDepth := c.tipBlockIndex - rollbackBlockIndex
+	// Reject rollbacks that exceed the security parameter K on
+	// the persistent chain. Ephemeral (fork-tracking) chains are
+	// not subject to this limit. The check is skipped when
+	// securityParam is 0, which means the ledger has not been
+	// initialized yet.
+	securityParam := c.manager.securityParam
+	if c.persistent && securityParam > 0 &&
+		forkDepth > uint64(securityParam) { //nolint:gosec
+		slog.Default().Warn(
+			"rejecting rollback that exceeds "+
+				"security parameter K",
+			"fork_depth", forkDepth,
+			"security_param", securityParam,
+			"rollback_slot", point.Slot,
+		)
+		return ErrRollbackExceedsSecurityParam
+	}
 	// Capture old tip for fork event before we modify it
 	oldTip := c.currentTip
 	// Collect and delete rolled-back blocks in a single pass
