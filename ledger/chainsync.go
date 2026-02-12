@@ -253,7 +253,7 @@ func (ls *LedgerState) handleEventChainsyncRollback(e ChainsyncEvent) error {
 	}
 
 	if ls.chainsyncState == SyncingChainsyncState {
-		ls.config.Logger.Warn(
+		ls.config.Logger.Info(
 			fmt.Sprintf(
 				"ledger: rolling back to %d.%s",
 				e.Point.Slot,
@@ -339,7 +339,7 @@ func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 			// headers so subsequent headers are evaluated against the
 			// block tip rather than perpetuating the mismatch.
 			ls.chain.ClearHeaders()
-			ls.config.Logger.Warn(
+			ls.config.Logger.Debug(
 				"block header does not fit chain tip, cleared stale headers",
 				"component", "ledger",
 				"slot", e.Point.Slot,
@@ -712,11 +712,12 @@ func buildGenesisBlockCbor(
 				TxId:      txHash,
 				OutputIdx: utxo.Id.Index(),
 			}
+			//nolint:gosec // uint32 bounds checked above
 			utxoOffsets[ref] = database.CborOffset{
 				BlockSlot:  0,
 				BlockHash:  blockHash,
-				ByteOffset: uint32(offset),    //nolint:gosec // bounds checked above
-				ByteLength: uint32(outputLen), //nolint:gosec // bounds checked above
+				ByteOffset: uint32(offset),
+				ByteLength: uint32(outputLen),
 			}
 		}
 	}
@@ -1225,7 +1226,7 @@ func (ls *LedgerState) blockfetchRequestRangeStart(
 				return
 			}
 			ls.blockfetchRequestRangeCleanup()
-			ls.config.Logger.Warn(
+			ls.config.Logger.Info(
 				fmt.Sprintf(
 					"blockfetch operation timed out after %s",
 					blockfetchBusyTimeout,
@@ -1343,4 +1344,23 @@ func (ls *LedgerState) logSyncProgress(currentSlot uint64) {
 	)
 	ls.syncProgressLastLog = now
 	ls.syncProgressLastSlot = currentSlot
+}
+
+// SyncProgress returns the current sync progress as a value between
+// 0.0 (unknown/just started) and 1.0 (fully synced). This implements
+// the peergov.SyncProgressProvider interface, allowing the peer
+// governor to exit bootstrap mode once sync reaches its threshold.
+func (ls *LedgerState) SyncProgress() float64 {
+	upstreamTip := ls.syncUpstreamTipSlot.Load()
+	if upstreamTip == 0 {
+		return 0
+	}
+	ls.RLock()
+	currentSlot := ls.currentTip.Point.Slot
+	ls.RUnlock()
+	progress := float64(currentSlot) / float64(upstreamTip)
+	if progress > 1.0 {
+		progress = 1.0
+	}
+	return progress
 }

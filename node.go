@@ -382,6 +382,7 @@ func (n *Node) Run(ctx context.Context) error {
 			ActivePeersTopologyQuota:       n.config.activePeersTopologyQuota,
 			ActivePeersGossipQuota:         n.config.activePeersGossipQuota,
 			ActivePeersLedgerQuota:         n.config.activePeersLedgerQuota,
+			SyncProgressProvider:           n.ledgerState,
 		},
 	)
 	n.ouroboros.PeerGov = n.peerGov
@@ -792,7 +793,9 @@ func (a *stakeDistributionAdapter) GetPoolStake(
 	return stake, err
 }
 
-func (a *stakeDistributionAdapter) GetTotalActiveStake(epoch uint64) (uint64, error) {
+func (a *stakeDistributionAdapter) GetTotalActiveStake(
+	epoch uint64,
+) (uint64, error) {
 	txn := a.ledgerState.Database().Transaction(false)
 	var stake uint64
 	err := txn.Do(func(txn *database.Txn) error {
