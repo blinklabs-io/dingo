@@ -213,6 +213,9 @@ func (ls *LedgerState) queryShelleyUtxoByAddress(
 	addrs []ledger.Address,
 ) (any, error) {
 	ret := make(map[olocalstatequery.UtxoId]ledger.TransactionOutput)
+	if len(addrs) == 0 {
+		return []any{ret}, nil
+	}
 	// TODO: support multiple addresses (#391)
 	utxos, err := ls.db.UtxosByAddress(addrs[0], nil)
 	if err != nil {
@@ -236,6 +239,9 @@ func (ls *LedgerState) queryShelleyUtxoByTxIn(
 	txIns []ledger.ShelleyTransactionInput,
 ) (any, error) {
 	ret := make(map[olocalstatequery.UtxoId]ledger.TransactionOutput)
+	if len(txIns) == 0 {
+		return []any{ret}, nil
+	}
 	// TODO: support multiple TxIns (#392)
 	utxo, err := ls.db.UtxoByRef(
 		txIns[0].Id().Bytes(),
