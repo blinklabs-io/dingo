@@ -101,3 +101,85 @@ func TestBlockfetchServerRequestRange_EqualPoints(t *testing.T) {
 		)
 	}, "equal slot range should pass validation and reach LedgerState call")
 }
+
+func TestBlockfetchServerRequestRange_OversizedRange(t *testing.T) {
+	// When the slot range exceeds MaxBlockFetchRange, the server should
+	// log a warning and attempt to send NoBlocks. Since Server is nil,
+	// the NoBlocks call will panic. We verify the correct warning was
+	// logged before the panic, proving the range size check was reached.
+	var logBuf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logBuf, &slog.HandlerOptions{
+		Level: slog.LevelDebug,
+	}))
+	o := NewOuroboros(OuroborosConfig{
+		Logger:   logger,
+		EventBus: event.NewEventBus(nil, logger),
+	})
+
+	start := ocommon.NewPoint(0, []byte{0x01})
+	end := ocommon.NewPoint(MaxBlockFetchRange+1, []byte{0x02})
+	ctx := blockfetch.CallbackContext{
+		ConnectionId: testConnId(),
+	}
+
+	assert.Panics(t, func() {
+		_ = o.blockfetchServerRequestRange(ctx, start, end)
+	}, "expected panic from nil Server.NoBlocks()")
+
+	logOutput := logBuf.String()
+	assert.Contains(
+		t,
+		logOutput,
+		"range exceeds maximum",
+		"expected log message about oversized range",
+	)
+}
+
+func TestBlockfetchServerRequestRange_RangeWithinLimit(t *testing.T) {
+	// A range within MaxBlockFetchRange should pass both validation
+	// checks and proceed to GetChainFromPoint. Since LedgerState is nil,
+	// this will panic at that call, proving the range check did not
+	// reject it.
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	o := NewOuroboros(OuroborosConfig{
+		Logger:   logger,
+		EventBus: event.NewEventBus(nil, logger),
+	})
+
+	start := ocommon.NewPoint(1000, []byte{0x01})
+	end := ocommon.NewPoint(1000+MaxBlockFetchRange-1, []byte{0x02})
+
+	assert.Panics(t, func() {
+		_ = o.blockfetchServerRequestRange(
+			blockfetch.CallbackContext{
+				ConnectionId: testConnId(),
+			},
+			start,
+			end,
+		)
+	}, "range within limit should pass validation and reach LedgerState call")
+}
+
+func TestBlockfetchServerRequestRange_ExactlyAtLimit(t *testing.T) {
+	// A range of exactly MaxBlockFetchRange slots should be accepted
+	// (the check is > not >=). Since LedgerState is nil, this will
+	// panic at GetChainFromPoint, proving the range check passed.
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	o := NewOuroboros(OuroborosConfig{
+		Logger:   logger,
+		EventBus: event.NewEventBus(nil, logger),
+	})
+
+	start := ocommon.NewPoint(1000, []byte{0x01})
+	end := ocommon.NewPoint(1000+MaxBlockFetchRange, []byte{0x02})
+
+	assert.Panics(t, func() {
+		_ = o.blockfetchServerRequestRange(
+			blockfetch.CallbackContext{
+				ConnectionId: testConnId(),
+			},
+			start,
+			end,
+		)
+	}, "range exactly at limit should pass validation and reach LedgerState call")
+}

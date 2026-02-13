@@ -28,6 +28,12 @@ import (
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
+// MaxBlockFetchRange is the maximum slot range allowed for a single block
+// fetch request. This prevents peers from requesting unbounded ranges that
+// would cause the server to iterate the entire chain. The value of 2160
+// corresponds to one mainnet epoch and aligns with the security parameter K.
+const MaxBlockFetchRange = 2160
+
 func (o *Ouroboros) blockfetchServerConnOpts() []blockfetch.BlockFetchOptionFunc {
 	return []blockfetch.BlockFetchOptionFunc{
 		blockfetch.WithRequestRangeFunc(o.blockfetchServerRequestRange),
@@ -59,6 +65,25 @@ func (o *Ouroboros) blockfetchServerRequestRange(
 		if err := ctx.Server.NoBlocks(); err != nil {
 			return fmt.Errorf(
 				"blockfetch NoBlocks after invalid range: %w",
+				err,
+			)
+		}
+		return nil
+	}
+	// Validate that the requested slot range is not too large
+	slotRange := end.Slot - start.Slot
+	if slotRange > MaxBlockFetchRange {
+		o.config.Logger.Warn(
+			"blockfetch: requested range exceeds maximum, sending NoBlocks",
+			"connection_id", ctx.ConnectionId.String(),
+			"start_slot", start.Slot,
+			"end_slot", end.Slot,
+			"slot_range", slotRange,
+			"max_range", MaxBlockFetchRange,
+		)
+		if err := ctx.Server.NoBlocks(); err != nil {
+			return fmt.Errorf(
+				"blockfetch NoBlocks after oversized range: %w",
 				err,
 			)
 		}
