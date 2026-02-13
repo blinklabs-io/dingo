@@ -717,6 +717,7 @@ func (n *Node) initBlockForger(ctx context.Context) error {
 		ChainTip:        n.chainManager.PrimaryChain(),
 		EpochNonce:      epochNonceAdapter,
 		Credentials:     creds,
+		TxValidator:     n.ledgerState,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create block builder: %w", err)
