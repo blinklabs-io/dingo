@@ -173,6 +173,21 @@ func (c *ConnectionManager) startListener(
 			}
 			// Successful accept - reset consecutive error count
 			consecutiveErrors = 0
+			// Atomically check and reserve an inbound slot before any further processing
+			if !c.tryReserveInboundSlot() {
+				c.config.Logger.Warn(
+					fmt.Sprintf(
+						"listener: inbound connection limit reached (%d), rejecting connection from %s",
+						c.config.MaxInboundConns,
+						conn.RemoteAddr(),
+					),
+				)
+				conn.Close()
+				continue
+			}
+			// From here on, we hold a reserved inbound slot.
+			// If setup fails, we must release it.
+
 			// Wrap UNIX connections
 			if uConn, ok := conn.(*net.UnixConn); ok {
 				tmpConn, err := NewUnixConn(uConn)
@@ -181,6 +196,7 @@ func (c *ConnectionManager) startListener(
 						fmt.Sprintf("listener: accept failed: %s", err),
 					)
 					_ = conn.Close()
+					c.releaseInboundSlot()
 					continue
 				}
 				conn = tmpConn
@@ -205,9 +221,13 @@ func (c *ConnectionManager) startListener(
 					),
 				)
 				conn.Close()
+				c.releaseInboundSlot()
 				continue
 			}
-			// Add to connection manager
+			// Consume the reserved slot and add to connection manager.
+			// The reservation is released because AddConnection will
+			// add the actual connection entry to the map.
+			c.consumeInboundSlot()
 			peerAddr := "unknown"
 			if conn.RemoteAddr() != nil {
 				peerAddr = conn.RemoteAddr().String()
