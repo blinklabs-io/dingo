@@ -19,10 +19,11 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/blinklabs-io/dingo/database/models"
 )
 
 func TestBlockCache_BasicOperations(t *testing.T) {

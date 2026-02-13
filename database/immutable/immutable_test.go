@@ -18,8 +18,9 @@ import (
 	"encoding/hex"
 	"testing"
 
-	"github.com/blinklabs-io/dingo/database/immutable"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+
+	"github.com/blinklabs-io/dingo/database/immutable"
 )
 
 const (

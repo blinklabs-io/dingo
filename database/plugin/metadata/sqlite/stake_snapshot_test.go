@@ -17,10 +17,11 @@ package sqlite
 import (
 	"testing"
 
-	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/types"
 )
 
 func setupStakeSnapshotTestStore(t *testing.T) *MetadataStoreSqlite {

@@ -21,11 +21,12 @@ import (
 	"net"
 	"testing"
 
-	"github.com/blinklabs-io/dingo/event"
 	ouroboros_conn "github.com/blinklabs-io/gouroboros/connection"
 	"github.com/blinklabs-io/gouroboros/protocol/blockfetch"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/assert"
+
+	"github.com/blinklabs-io/dingo/event"
 )
 
 // testConnId creates a ConnectionId with valid net.Addr values for testing.

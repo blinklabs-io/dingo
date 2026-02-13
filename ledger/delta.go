@@ -20,6 +20,7 @@ import (
 	"sync"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/event"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -62,15 +63,21 @@ type TransactionRecord struct {
 type LedgerDelta struct {
 	Point        ocommon.Point
 	BlockEraId   uint
+	BlockNumber  uint64
 	Transactions []TransactionRecord
 	Offsets      *database.BlockIngestionResult // pre-computed CBOR offsets for this block
 	txSlicePtr   *[]TransactionRecord           // store original pointer from pool
 }
 
-func NewLedgerDelta(point ocommon.Point, blockEraId uint) *LedgerDelta {
+func NewLedgerDelta(
+	point ocommon.Point,
+	blockEraId uint,
+	blockNumber uint64,
+) *LedgerDelta {
 	delta := ledgerDeltaPool.Get().(*LedgerDelta)
 	delta.Point = point
 	delta.BlockEraId = blockEraId
+	delta.BlockNumber = blockNumber
 	delta.Offsets = nil // Reset offsets from previous use
 	slicePtr := transactionRecordSlicePool.Get().(*[]TransactionRecord)
 	delta.Transactions = (*slicePtr)[:0] // Reset slice
@@ -152,6 +159,28 @@ func (d *LedgerDelta) apply(ls *LedgerState, txn *database.Txn) error {
 			}
 		}
 	}
+
+	// Emit transaction events only after all processing succeeds,
+	// so subscribers never see an "applied" event for a transaction
+	// whose governance processing failed and caused the apply to abort.
+	if ls.config.EventBus != nil {
+		for _, tr := range d.Transactions {
+			ls.config.EventBus.PublishAsync(
+				TransactionEventType,
+				event.NewEvent(
+					TransactionEventType,
+					TransactionEvent{
+						Transaction: tr.Tx,
+						Point:       d.Point,
+						BlockNumber: d.BlockNumber,
+						TxIndex:     uint32(tr.Index), //nolint:gosec
+						Rollback:    false,
+					},
+				),
+			)
+		}
+	}
+
 	return nil
 }
 

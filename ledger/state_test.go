@@ -26,13 +26,14 @@ import (
 	"testing"
 	"time"
 
+	pcommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/ledger/eras"
-	pcommon "github.com/blinklabs-io/gouroboros/protocol/common"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 // TestCalculateStabilityWindow_ByronEra tests the stability window calculation for Byron era

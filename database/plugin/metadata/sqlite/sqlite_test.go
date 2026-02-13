@@ -21,13 +21,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/utxorpc/go-codegen/utxorpc/v1alpha/cardano"
 	"gorm.io/gorm"
+
+	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/types"
 )
 
 // setupTestDB creates and initializes a test SQLite database.

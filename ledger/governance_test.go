@@ -17,10 +17,11 @@ package ledger
 import (
 	"testing"
 
-	"github.com/blinklabs-io/dingo/database/models"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/stretchr/testify/assert"
+
+	"github.com/blinklabs-io/dingo/database/models"
 )
 
 func TestMapVoterType(t *testing.T) {

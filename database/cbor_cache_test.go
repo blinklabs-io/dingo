@@ -17,10 +17,11 @@ package database
 import (
 	"testing"
 
-	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/blinklabs-io/dingo/database/types"
 )
 
 func TestNewTieredCborCache(t *testing.T) {

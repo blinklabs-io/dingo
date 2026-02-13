@@ -18,19 +18,18 @@ import (
 	"context"
 	"errors"
 	"io"
+	"log/slog"
 	"net"
 	"testing"
 	"time"
-
-	"log/slog"
-
-	"github.com/blinklabs-io/dingo/connmanager"
 
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/protocol/keepalive"
 	ouroboros_mock "github.com/blinklabs-io/ouroboros-mock"
 	"github.com/prometheus/client_golang/prometheus"
 	"go.uber.org/goleak"
+
+	"github.com/blinklabs-io/dingo/connmanager"
 )
 
 /*

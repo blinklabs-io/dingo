@@ -24,14 +24,15 @@ import (
 	"testing"
 	"time"
 
-	"github.com/blinklabs-io/dingo/connmanager"
-	"github.com/blinklabs-io/dingo/event"
-	"github.com/blinklabs-io/dingo/topology"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/blinklabs-io/dingo/connmanager"
+	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/topology"
 )
 
 func newMockEventBus() *event.EventBus {

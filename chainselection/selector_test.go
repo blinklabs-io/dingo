@@ -21,12 +21,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/blinklabs-io/dingo/event"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/blinklabs-io/dingo/event"
 )
 
 func newTestConnectionId(n int) ouroboros.ConnectionId {
