@@ -16,14 +16,14 @@ package utxorpc
 
 import (
 	"context"
+	"io"
+	"log/slog"
 	"testing"
 	"time"
 
-	"io"
-	"log/slog"
+	"github.com/stretchr/testify/require"
 
 	"github.com/blinklabs-io/dingo/event"
-	"github.com/stretchr/testify/require"
 )
 
 func TestUtxorpc_StartStop(t *testing.T) {

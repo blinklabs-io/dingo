@@ -20,10 +20,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/blinklabs-io/dingo/event"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/blinklabs-io/dingo/event"
 )
 
 // electionTestNonce is a 32-byte epoch nonce for election tests.

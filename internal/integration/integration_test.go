@@ -23,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"gopkg.in/yaml.v3"
 
 	"github.com/blinklabs-io/dingo"
@@ -32,7 +33,6 @@ import (
 	"github.com/blinklabs-io/dingo/database/plugin/blob/gcs"
 	_ "github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
 	"github.com/blinklabs-io/dingo/internal/config"
-	"github.com/prometheus/client_golang/prometheus"
 )
 
 func TestMain(m *testing.M) {

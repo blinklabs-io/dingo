@@ -28,6 +28,7 @@ const (
 	BlockEventType       event.EventType = "ledger.block"
 	ChainsyncEventType   event.EventType = "chainsync.event"
 	LedgerErrorEventType event.EventType = "ledger.error"
+	TransactionEventType event.EventType = "ledger.tx"
 )
 
 // It represents the direction a block is applied to the ledger.
@@ -72,4 +73,14 @@ type LedgerErrorEvent struct {
 	Error     error         // The actual error that occurred
 	Operation string        // The operation that failed (e.g., "block_header", "rollback")
 	Point     ocommon.Point // Chain point where the error occurred, if applicable
+}
+
+// TransactionEvent is emitted when a transaction is applied or rolled back.
+// Check the Rollback field to determine direction.
+type TransactionEvent struct {
+	Transaction ledger.Transaction
+	Point       ocommon.Point
+	BlockNumber uint64
+	TxIndex     uint32
+	Rollback    bool
 }

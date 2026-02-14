@@ -19,8 +19,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/blinklabs-io/dingo/event"
 	"github.com/stretchr/testify/require"
+
+	"github.com/blinklabs-io/dingo/event"
 )
 
 func TestEventBusSingleSubscriber(t *testing.T) {

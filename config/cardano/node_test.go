@@ -21,10 +21,9 @@ import (
 	"reflect"
 	"testing"
 
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
-	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
 
 const (

@@ -21,12 +21,13 @@ import (
 	"os"
 	"testing"
 
-	"github.com/blinklabs-io/dingo/config/cardano"
-	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/byron"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/stretchr/testify/require"
+
+	"github.com/blinklabs-io/dingo/config/cardano"
+	"github.com/blinklabs-io/dingo/database"
 )
 
 func TestGenesisUtxoStorageAndRetrieval(t *testing.T) {

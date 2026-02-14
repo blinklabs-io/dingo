@@ -17,10 +17,11 @@ package chain
 import (
 	"testing"
 
-	"github.com/blinklabs-io/dingo/event"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/blinklabs-io/dingo/event"
 )
 
 func TestIteratorCancelRemovesFromChain(t *testing.T) {

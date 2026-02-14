@@ -21,9 +21,10 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/blinklabs-io/dingo/database/models"
 )
 
 // setupFileBasedStore creates a file-based MetadataStoreSqlite in a

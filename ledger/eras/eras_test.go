@@ -17,8 +17,9 @@ package eras_test
 import (
 	"testing"
 
-	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/stretchr/testify/assert"
+
+	"github.com/blinklabs-io/dingo/ledger/eras"
 )
 
 func TestGetEraById(t *testing.T) {

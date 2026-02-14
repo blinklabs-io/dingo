@@ -437,9 +437,21 @@ type LedgerState struct {
 	chainsyncBlockfetchReadyMutex sync.Mutex
 	chainsyncBlockfetchReadyChan  chan struct{}
 	checkpointWrittenForEpoch     bool
-	closed                        bool
+	closed                        atomic.Bool
 	inRecovery                    bool // guards against recursive recovery in SubmitAsyncDBTxn
-	validationEnabled             bool
+
+	// Subscription IDs for event bus unsubscribe on close
+	chainsyncSubID   event.EventSubscriberId
+	blockfetchSubID  event.EventSubscriberId
+	chainUpdateSubID event.EventSubscriberId
+
+	// rollbackMu serializes rollbackWG.Add with Close's rollbackWG.Wait
+	// to prevent Add-after-Wait panics from the TOCTOU race between
+	// closed.Load() and Add(1) in handleEventChainUpdate.
+	rollbackMu sync.Mutex
+	// rollbackWG tracks in-flight rollback event emission goroutines
+	rollbackWG        sync.WaitGroup
+	validationEnabled bool
 
 	// Sync progress reporting (Fix 4)
 	syncProgressLastLog  time.Time     // last time we logged sync progress
@@ -537,15 +549,15 @@ func (ls *LedgerState) Start(ctx context.Context) error {
 
 	// Setup event handlers
 	if ls.config.EventBus != nil {
-		ls.config.EventBus.SubscribeFunc(
+		ls.chainsyncSubID = ls.config.EventBus.SubscribeFunc(
 			ChainsyncEventType,
 			ls.handleEventChainsync,
 		)
-		ls.config.EventBus.SubscribeFunc(
+		ls.blockfetchSubID = ls.config.EventBus.SubscribeFunc(
 			BlockfetchEventType,
 			ls.handleEventBlockfetch,
 		)
-		ls.config.EventBus.SubscribeFunc(
+		ls.chainUpdateSubID = ls.config.EventBus.SubscribeFunc(
 			chain.ChainUpdateEventType,
 			ls.handleEventChainUpdate,
 		)
@@ -787,13 +799,32 @@ func (ls *LedgerState) Datum(hash []byte) (*models.Datum, error) {
 }
 
 func (ls *LedgerState) Close() error {
-	ls.Lock()
-	if ls.closed {
-		ls.Unlock()
+	if !ls.closed.CompareAndSwap(false, true) {
 		return nil
 	}
-	ls.closed = true
-	ls.Unlock()
+
+	// Unsubscribe from event bus to stop receiving new events
+	if ls.config.EventBus != nil {
+		ls.config.EventBus.Unsubscribe(
+			ChainsyncEventType,
+			ls.chainsyncSubID,
+		)
+		ls.config.EventBus.Unsubscribe(
+			BlockfetchEventType,
+			ls.blockfetchSubID,
+		)
+		ls.config.EventBus.Unsubscribe(
+			chain.ChainUpdateEventType,
+			ls.chainUpdateSubID,
+		)
+	}
+
+	// Wait for in-flight rollback event emission goroutines.
+	// Hold rollbackMu so no new goroutine can Add(1) between our
+	// closed flag and this Wait.
+	ls.rollbackMu.Lock()
+	ls.rollbackWG.Wait()
+	ls.rollbackMu.Unlock()
 
 	// Stop slot clock
 	if ls.slotClock != nil {
@@ -2210,7 +2241,7 @@ func (ls *LedgerState) ledgerProcessBlock(
 	intraBlockUtxos := make(map[string]lcommon.Utxo)
 	for i, tx := range block.Transactions() {
 		if delta == nil {
-			delta = NewLedgerDelta(point, uint(block.Era().Id))
+			delta = NewLedgerDelta(point, uint(block.Era().Id), block.BlockNumber())
 			delta.Offsets = offsets
 		}
 		// Validate transaction

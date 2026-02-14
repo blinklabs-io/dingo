@@ -18,13 +18,14 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/blinklabs-io/gouroboros/ledger"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/immutable"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/gouroboros/ledger"
-	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
-	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
 // Helper functions for benchmark seeding
