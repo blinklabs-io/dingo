@@ -20,9 +20,10 @@ import (
 )
 
 type eventMetrics struct {
-	eventsTotal    *prometheus.CounterVec
-	subscribers    *prometheus.GaugeVec
-	deliveryErrors *prometheus.CounterVec
+	eventsTotal      *prometheus.CounterVec
+	subscribers      *prometheus.GaugeVec
+	deliveryErrors   *prometheus.CounterVec
+	deliveryTimeouts *prometheus.CounterVec
 }
 
 func (e *EventBus) initMetrics(promRegistry prometheus.Registerer) {
@@ -48,5 +49,12 @@ func (e *EventBus) initMetrics(promRegistry prometheus.Registerer) {
 			Help: "total delivery errors by event type and kind",
 		},
 		[]string{"type", "kind"},
+	)
+	e.metrics.deliveryTimeouts = promautoFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "event_delivery_timeouts_total",
+			Help: "total remote subscriber delivery timeouts by event type",
+		},
+		[]string{"type"},
 	)
 }

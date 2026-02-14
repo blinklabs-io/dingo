@@ -24,10 +24,10 @@ import (
 )
 
 const (
-	EventQueueSize      = 20
-	AsyncQueueSize      = 1000
-	AsyncWorkerPoolSize = 4
-	AsyncPublishTimeout = 5 * time.Second // Timeout for async Publish calls to prevent worker deadlock
+	EventQueueSize       = 20
+	AsyncQueueSize       = 1000
+	AsyncWorkerPoolSize  = 4
+	RemoteDeliverTimeout = 5 * time.Second
 )
 
 type EventType string
@@ -106,39 +106,12 @@ func (e *EventBus) asyncWorker() {
 			if !ok {
 				return
 			}
-			// Use bounded/watched Publish to prevent blocking forever on slow subscribers
-			e.publishWithTimeout(ae.eventType, ae.event)
+			// Publish directly — channelSubscriber.Deliver uses non-blocking
+			// sends so this cannot block forever on in-memory subscribers.
+			// Remote subscribers are time-bounded by deliverWithTimeout in
+			// Publish, so async workers cannot be stalled indefinitely.
+			e.Publish(ae.eventType, ae.event)
 		}
-	}
-}
-
-// publishWithTimeout wraps Publish with a timeout to prevent asyncWorker from
-// blocking forever on slow subscribers. If Publish doesn't complete within
-// AsyncPublishTimeout, the call is abandoned (the goroutine will complete
-// eventually, but the worker proceeds).
-func (e *EventBus) publishWithTimeout(eventType EventType, evt Event) {
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		e.Publish(eventType, evt)
-	}()
-
-	select {
-	case <-done:
-		// Publish completed successfully
-	case <-time.After(AsyncPublishTimeout):
-		// Publish is taking too long, log and continue
-		// The goroutine will complete eventually
-		if e.Logger != nil {
-			e.Logger.Warn(
-				"async publish timeout exceeded",
-				"type", eventType,
-				"timeout", AsyncPublishTimeout,
-			)
-		}
-	case <-e.stopCh:
-		// EventBus is stopping, exit immediately
-		// The goroutine will complete eventually
 	}
 }
 
@@ -342,6 +315,58 @@ func (e *EventBus) Unsubscribe(eventType EventType, subId EventSubscriberId) {
 	}
 }
 
+// deliverWithTimeout calls sub.Deliver with a timeout for non-channel
+// subscribers. channelSubscriber.Deliver is already non-blocking, so it
+// is called directly. For other (e.g. network-backed) implementations,
+// the call is bounded by RemoteDeliverTimeout to prevent worker stalls.
+//
+// Bounded goroutine leak on timeout: when the timeout fires, the
+// goroutine running sub.Deliver remains alive until Deliver returns.
+// Because the done channel is buffered (size 1), the goroutine will
+// not block when it eventually writes its result -- it will complete
+// and be reclaimed. The caller (Publish) unsubscribes the slow
+// subscriber immediately after a timeout, preventing any further
+// goroutine spawns for that subscriber. Therefore at most one
+// goroutine can be outstanding per timed-out subscriber.
+//
+// True cancellation would require adding context support to the
+// Subscriber interface, which is out of scope for this change.
+func (e *EventBus) deliverWithTimeout(
+	sub Subscriber,
+	evt Event,
+) error {
+	// Fast path: in-memory channel subscribers are non-blocking.
+	if _, ok := sub.(*channelSubscriber); ok {
+		return sub.Deliver(evt)
+	}
+
+	// Slow path: bound remote Deliver calls with a timeout.
+	done := make(chan error, 1)
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				done <- fmt.Errorf("subscriber deliver panic: %v", r)
+			}
+		}()
+		done <- sub.Deliver(evt)
+	}()
+
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(RemoteDeliverTimeout):
+		if e.metrics != nil {
+			e.metrics.deliveryTimeouts.WithLabelValues(
+				string(evt.Type),
+			).Inc()
+		}
+		return fmt.Errorf(
+			"subscriber deliver timeout after %s",
+			RemoteDeliverTimeout,
+		)
+	}
+}
+
 // Publish allows a producer to send an event of a particular type to all subscribers
 func (e *EventBus) Publish(eventType EventType, evt Event) {
 	// Build list of channels inside read lock to avoid map race condition
@@ -358,7 +383,8 @@ func (e *EventBus) Publish(eventType EventType, evt Event) {
 		}
 	}
 	e.mu.RUnlock()
-	// Send event on gathered subscribers (preserving per-subscriber blocking semantics)
+	// Send event on gathered subscribers (non-blocking for channel
+	// subscribers, time-bounded for remote subscribers via deliverWithTimeout)
 	for _, item := range subList {
 		// Protect against panics inside subscriber Deliver implementations.
 		var deliverErr error
@@ -368,7 +394,7 @@ func (e *EventBus) Publish(eventType EventType, evt Event) {
 					deliverErr = fmt.Errorf("subscriber deliver panic: %v", r)
 				}
 			}()
-			deliverErr = item.sub.Deliver(evt)
+			deliverErr = e.deliverWithTimeout(item.sub, evt)
 		}()
 
 		if deliverErr != nil {
