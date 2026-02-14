@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"time"
 
 	"github.com/blinklabs-io/dingo/mempool"
 	ouroboros "github.com/blinklabs-io/gouroboros"
@@ -113,6 +114,38 @@ func (o *Ouroboros) txsubmissionServerInit(
 				return
 			}
 			if len(txIds) > 0 {
+				// Check per-peer rate limit before processing
+				if o.txSubmissionRateLimiter != nil &&
+					!o.txSubmissionRateLimiter.Allow(
+						ctx.ConnectionId,
+						len(txIds),
+					) {
+					waitDur := o.txSubmissionRateLimiter.WaitDuration(
+						ctx.ConnectionId,
+						len(txIds),
+					)
+					o.config.Logger.Warn(
+						"tx submission rate limit exceeded, waiting",
+						"component", "network",
+						"protocol", "tx-submission",
+						"role", "server",
+						"connection_id", ctx.ConnectionId.String(),
+						"tx_count", len(txIds),
+						"wait_duration", waitDur,
+					)
+					// Wait for tokens to refill instead of
+					// spinning in a tight loop
+					select {
+					case <-time.After(waitDur):
+						// Consume tokens before proceeding
+						o.txSubmissionRateLimiter.Allow(
+							ctx.ConnectionId,
+							len(txIds),
+						)
+					case <-conn.ErrorChan():
+						return
+					}
+				}
 				// Unwrap inner TxId from TxIdAndSize
 				var requestTxIds []txsubmission.TxId
 				for _, txId := range txIds {

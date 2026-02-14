@@ -61,6 +61,8 @@ type Ouroboros struct {
 	// ChainSync measurement tracking for peer scoring
 	chainsyncStats map[ouroboros.ConnectionId]*chainsyncPeerStats
 	chainsyncMutex sync.Mutex
+	// Per-peer rate limiter for TxSubmission server
+	txSubmissionRateLimiter *txSubmissionRateLimiter
 }
 
 // chainsyncPeerStats tracks ChainSync performance metrics per peer connection.
@@ -78,6 +80,11 @@ type OuroborosConfig struct {
 	PeerSharing     bool
 	IntersectTip    bool
 	PromRegistry    prometheus.Registerer
+	// MaxTxSubmissionsPerSecond is the maximum number of transaction
+	// submissions accepted per peer per second via the TxSubmission
+	// mini-protocol. A value of 0 uses DefaultMaxTxSubmissionsPerSecond.
+	// A negative value disables rate limiting.
+	MaxTxSubmissionsPerSecond int
 }
 
 type blockfetchMetrics struct {
@@ -104,6 +111,19 @@ func NewOuroboros(cfg OuroborosConfig) *Ouroboros {
 		ConnManager:      cfg.ConnManager,
 		blockFetchStarts: make(map[ouroboros.ConnectionId]time.Time),
 		chainsyncStats:   make(map[ouroboros.ConnectionId]*chainsyncPeerStats),
+	}
+	// Initialize per-peer TxSubmission rate limiter
+	txRate := cfg.MaxTxSubmissionsPerSecond
+	if txRate == 0 {
+		txRate = DefaultMaxTxSubmissionsPerSecond
+	}
+	if txRate > 0 {
+		// Burst allows small batches: 2x the per-second rate
+		burst := float64(txRate) * 2
+		o.txSubmissionRateLimiter = newTxSubmissionRateLimiter(
+			float64(txRate),
+			burst,
+		)
 	}
 	if cfg.PromRegistry != nil {
 		o.initMetrics()
@@ -286,6 +306,10 @@ func (o *Ouroboros) HandleConnClosedEvent(evt event.Event) {
 	o.chainsyncMutex.Lock()
 	delete(o.chainsyncStats, connId)
 	o.chainsyncMutex.Unlock()
+	// Clean up TxSubmission rate limiter state
+	if o.txSubmissionRateLimiter != nil {
+		o.txSubmissionRateLimiter.RemovePeer(connId)
+	}
 }
 
 func (o *Ouroboros) HandleOutboundConnEvent(evt event.Event) {
