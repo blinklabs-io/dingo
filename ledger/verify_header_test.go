@@ -16,9 +16,14 @@ package ledger
 
 import (
 	"crypto/ed25519"
+	"io"
+	"log/slog"
 	"math/big"
+	"strings"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/config/cardano"
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/consensus"
 	"github.com/blinklabs-io/gouroboros/kes"
@@ -404,4 +409,376 @@ func (b *realBabbageBlock) Transactions() []lcommon.Transaction {
 
 func (b *realBabbageBlock) Utxorpc() (*utxorpc_cardano.Block, error) {
 	return nil, nil
+}
+
+// --- epochForSlot tests ---
+
+// TestEpochForSlot_EmptyCache verifies that epochForSlot returns an error
+// when the epoch cache is empty.
+func TestEpochForSlot_EmptyCache(t *testing.T) {
+	ls := &LedgerState{
+		epochCache: nil,
+	}
+	_, err := ls.epochForSlot(100)
+	assert.Error(t, err, "should fail with empty epoch cache")
+	assert.Contains(t, err.Error(), "epoch cache is empty")
+}
+
+// TestEpochForSlot_SlotInFirstEpoch verifies that epochForSlot returns
+// the correct epoch when the slot falls within the first epoch.
+func TestEpochForSlot_SlotInFirstEpoch(t *testing.T) {
+	ls := &LedgerState{
+		epochCache: []models.Epoch{
+			{
+				EpochId:       0,
+				StartSlot:     0,
+				LengthInSlots: 432000,
+				Nonce:         []byte{0x01, 0x02},
+			},
+		},
+	}
+	ep, err := ls.epochForSlot(1000)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(0), ep.EpochId)
+	assert.Equal(t, []byte{0x01, 0x02}, ep.Nonce)
+}
+
+// TestEpochForSlot_SlotInSecondEpoch verifies that epochForSlot returns
+// the correct epoch when the slot falls in the second epoch, ensuring
+// epoch-aware lookup works across epoch boundaries.
+func TestEpochForSlot_SlotInSecondEpoch(t *testing.T) {
+	ls := &LedgerState{
+		epochCache: []models.Epoch{
+			{
+				EpochId:       0,
+				StartSlot:     0,
+				LengthInSlots: 432000,
+				Nonce:         []byte{0x01},
+			},
+			{
+				EpochId:       1,
+				StartSlot:     432000,
+				LengthInSlots: 432000,
+				Nonce:         []byte{0x02},
+			},
+		},
+	}
+	// Slot at the very start of epoch 1
+	ep, err := ls.epochForSlot(432000)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(1), ep.EpochId)
+	assert.Equal(t, []byte{0x02}, ep.Nonce)
+
+	// Slot in the middle of epoch 1
+	ep, err = ls.epochForSlot(500000)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(1), ep.EpochId)
+}
+
+// TestEpochForSlot_SlotBeyondKnownEpochs verifies that epochForSlot
+// returns an error when the slot is beyond all known epochs. This is
+// critical for the security fix: blocks from unknown future epochs
+// must be rejected rather than silently skipped.
+func TestEpochForSlot_SlotBeyondKnownEpochs(t *testing.T) {
+	ls := &LedgerState{
+		epochCache: []models.Epoch{
+			{
+				EpochId:       0,
+				StartSlot:     0,
+				LengthInSlots: 432000,
+				Nonce:         []byte{0x01},
+			},
+		},
+	}
+	_, err := ls.epochForSlot(432001)
+	assert.Error(t, err, "should fail for slot beyond known epochs")
+	assert.Contains(t, err.Error(), "not covered by any known epoch")
+}
+
+// TestEpochForSlot_SlotAtEpochBoundary verifies correct behavior at
+// the exact boundary between two epochs. Slot N (last slot of epoch 0)
+// should belong to epoch 0, and slot N+1 (first slot of epoch 1)
+// should belong to epoch 1.
+func TestEpochForSlot_SlotAtEpochBoundary(t *testing.T) {
+	ls := &LedgerState{
+		epochCache: []models.Epoch{
+			{
+				EpochId:       0,
+				StartSlot:     0,
+				LengthInSlots: 1000,
+				Nonce:         []byte{0xAA},
+			},
+			{
+				EpochId:       1,
+				StartSlot:     1000,
+				LengthInSlots: 1000,
+				Nonce:         []byte{0xBB},
+			},
+		},
+	}
+	// Last slot of epoch 0
+	ep, err := ls.epochForSlot(999)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(0), ep.EpochId)
+	assert.Equal(t, []byte{0xAA}, ep.Nonce)
+
+	// First slot of epoch 1
+	ep, err = ls.epochForSlot(1000)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(1), ep.EpochId)
+	assert.Equal(t, []byte{0xBB}, ep.Nonce)
+}
+
+// TestEpochForSlot_SkipsZeroLengthEpochs verifies that epochs with
+// LengthInSlots == 0 are skipped during lookup.
+func TestEpochForSlot_SkipsZeroLengthEpochs(t *testing.T) {
+	ls := &LedgerState{
+		epochCache: []models.Epoch{
+			{
+				EpochId:       0,
+				StartSlot:     0,
+				LengthInSlots: 0, // zero-length, should be skipped
+				Nonce:         []byte{0x01},
+			},
+			{
+				EpochId:       1,
+				StartSlot:     0,
+				LengthInSlots: 1000,
+				Nonce:         []byte{0x02},
+			},
+		},
+	}
+	ep, err := ls.epochForSlot(500)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(1), ep.EpochId)
+}
+
+// --- verifyBlockHeaderCrypto tests ---
+
+// newTestShelleyGenesisCfg creates a CardanoNodeConfig with Shelley genesis
+// loaded for use in verifyBlockHeaderCrypto tests.
+func newTestShelleyGenesisCfg(t *testing.T) *cardano.CardanoNodeConfig {
+	t.Helper()
+	shelleyGenesisJSON := `{
+		"activeSlotsCoeff": 0.05,
+		"securityParam": 432,
+		"slotsPerKESPeriod": 129600,
+		"systemStart": "2022-10-25T00:00:00Z"
+	}`
+	cfg := &cardano.CardanoNodeConfig{}
+	err := cfg.LoadShelleyGenesisFromReader(
+		strings.NewReader(shelleyGenesisJSON),
+	)
+	require.NoError(t, err)
+	return cfg
+}
+
+// TestVerifyBlockHeaderCrypto_ByronSkipped verifies that Byron-era blocks
+// are skipped by the LedgerState-level verification method.
+func TestVerifyBlockHeaderCrypto_ByronSkipped(t *testing.T) {
+	ls := &LedgerState{
+		epochCache: []models.Epoch{
+			{
+				EpochId:       0,
+				StartSlot:     0,
+				LengthInSlots: 432000,
+				Nonce:         []byte{0x01},
+			},
+		},
+		config: LedgerStateConfig{
+			CardanoNodeConfig: newTestShelleyGenesisCfg(t),
+			Logger: slog.New(
+				slog.NewJSONHandler(io.Discard, nil),
+			),
+		},
+	}
+	block := &mockByronBlock{}
+	err := ls.verifyBlockHeaderCrypto(block)
+	assert.NoError(t, err, "Byron blocks should be skipped")
+}
+
+// TestVerifyBlockHeaderCrypto_RejectsBlockOutsideKnownEpochs verifies that
+// a block whose slot is beyond all known epochs is REJECTED rather than
+// silently skipped. This is the core of the LDG-08 security fix.
+func TestVerifyBlockHeaderCrypto_RejectsBlockOutsideKnownEpochs(
+	t *testing.T,
+) {
+	ls := &LedgerState{
+		epochCache: []models.Epoch{
+			{
+				EpochId:       0,
+				StartSlot:     0,
+				LengthInSlots: 1000,
+				Nonce:         []byte{0x01, 0x02, 0x03},
+			},
+		},
+		config: LedgerStateConfig{
+			CardanoNodeConfig: newTestShelleyGenesisCfg(t),
+			Logger: slog.New(
+				slog.NewJSONHandler(io.Discard, nil),
+			),
+		},
+	}
+	// Block at slot 2000, which is beyond epoch 0 (ends at slot 1000)
+	block := &mockBabbageBlock{slot: 2000}
+	err := ls.verifyBlockHeaderCrypto(block)
+	assert.Error(
+		t,
+		err,
+		"block outside known epochs must be rejected, not skipped",
+	)
+	assert.Contains(t, err.Error(), "no epoch data for slot")
+}
+
+// TestVerifyBlockHeaderCrypto_RejectsBlockWithNoNonce verifies that a block
+// in an epoch that has no nonce (e.g., epoch rollover not yet processed)
+// is rejected.
+func TestVerifyBlockHeaderCrypto_RejectsBlockWithNoNonce(t *testing.T) {
+	ls := &LedgerState{
+		epochCache: []models.Epoch{
+			{
+				EpochId:       0,
+				StartSlot:     0,
+				LengthInSlots: 1000,
+				Nonce:         nil, // no nonce
+			},
+		},
+		config: LedgerStateConfig{
+			CardanoNodeConfig: newTestShelleyGenesisCfg(t),
+			Logger: slog.New(
+				slog.NewJSONHandler(io.Discard, nil),
+			),
+		},
+	}
+	block := &mockBabbageBlock{slot: 500}
+	err := ls.verifyBlockHeaderCrypto(block)
+	assert.Error(t, err, "block with missing nonce must be rejected")
+	assert.Contains(t, err.Error(), "has no nonce")
+}
+
+// TestVerifyBlockHeaderCrypto_EpochBoundaryUsesCorrectNonce verifies that
+// when blocks span an epoch boundary, each block is verified against
+// the nonce of its own epoch, not the "current" epoch. This is the
+// epoch-aware lookup that prevents the LDG-08 bypass.
+func TestVerifyBlockHeaderCrypto_EpochBoundaryUsesCorrectNonce(
+	t *testing.T,
+) {
+	epoch0Nonce := make([]byte, 32)
+	epoch1Nonce := make([]byte, 32)
+	for i := range epoch0Nonce {
+		epoch0Nonce[i] = byte(i)     //nolint:gosec
+		epoch1Nonce[i] = byte(i + 1) //nolint:gosec
+	}
+
+	ls := &LedgerState{
+		currentEpoch: models.Epoch{
+			EpochId:       1,
+			StartSlot:     1000,
+			LengthInSlots: 1000,
+			Nonce:         epoch1Nonce,
+		},
+		epochCache: []models.Epoch{
+			{
+				EpochId:       0,
+				StartSlot:     0,
+				LengthInSlots: 1000,
+				Nonce:         epoch0Nonce,
+			},
+			{
+				EpochId:       1,
+				StartSlot:     1000,
+				LengthInSlots: 1000,
+				Nonce:         epoch1Nonce,
+			},
+		},
+		config: LedgerStateConfig{
+			CardanoNodeConfig: newTestShelleyGenesisCfg(t),
+			Logger: slog.New(
+				slog.NewJSONHandler(io.Discard, nil),
+			),
+		},
+	}
+
+	// Create a valid block in epoch 0 (slot < 1000).
+	// The block's VRF proof was generated with epoch0Nonce.
+	tb := createTestBlock(t, [32]byte{10}, 0, tamperNone)
+	// The test block's slot is in [1, 200]. Ensure epoch 0 covers it.
+	require.Less(
+		t,
+		tb.block.slot,
+		uint64(1000),
+		"test block slot must be in epoch 0",
+	)
+
+	// Verify: the epoch-aware lookup should find epoch 0 for this block
+	// and use epoch0Nonce (which matches the block's VRF proof).
+	// tb.epochNonce == epoch0Nonce by construction (nonceSeed=0).
+	err := ls.verifyBlockHeaderCrypto(tb.block)
+	assert.NoError(
+		t,
+		err,
+		"block in epoch 0 should verify with epoch 0 nonce "+
+			"even when currentEpoch is epoch 1",
+	)
+}
+
+// TestVerifyBlockHeaderCrypto_RejectsEmptyEpochCache verifies that
+// verification rejects blocks when the epoch cache is completely empty.
+func TestVerifyBlockHeaderCrypto_RejectsEmptyEpochCache(t *testing.T) {
+	ls := &LedgerState{
+		epochCache: nil,
+		config: LedgerStateConfig{
+			CardanoNodeConfig: newTestShelleyGenesisCfg(t),
+			Logger: slog.New(
+				slog.NewJSONHandler(io.Discard, nil),
+			),
+		},
+	}
+	block := &mockBabbageBlock{slot: 100}
+	err := ls.verifyBlockHeaderCrypto(block)
+	assert.Error(t, err, "should reject with empty epoch cache")
+	assert.Contains(t, err.Error(), "epoch cache is empty")
+}
+
+// TestVerifyBlockHeaderCrypto_WrongNonceFails verifies that a block
+// verified against the wrong epoch's nonce fails cryptographic checks.
+// This demonstrates the attack scenario: an attacker sends a block
+// crafted for epoch 0's nonce, but it arrives during epoch 1. With the
+// fix, the epoch-aware lookup correctly identifies the block's epoch
+// and rejects the mismatched nonce.
+func TestVerifyBlockHeaderCrypto_WrongNonceFails(t *testing.T) {
+	// Create a valid block with nonceSeed=0 (epoch 0 nonce)
+	tb := createTestBlock(t, [32]byte{20}, 0, tamperNone)
+
+	// Set up ledger state where only epoch 1 exists (epoch 0 is gone)
+	// and epoch 1 has a DIFFERENT nonce
+	wrongNonce := make([]byte, 32)
+	for i := range wrongNonce {
+		wrongNonce[i] = 0xFF
+	}
+
+	ls := &LedgerState{
+		epochCache: []models.Epoch{
+			{
+				EpochId:       0,
+				StartSlot:     0,
+				LengthInSlots: 1000,
+				// Different nonce than what the block was built with
+				Nonce: wrongNonce,
+			},
+		},
+		config: LedgerStateConfig{
+			CardanoNodeConfig: newTestShelleyGenesisCfg(t),
+			Logger: slog.New(
+				slog.NewJSONHandler(io.Discard, nil),
+			),
+		},
+	}
+
+	err := ls.verifyBlockHeaderCrypto(tb.block)
+	assert.Error(
+		t,
+		err,
+		"block verified against wrong epoch nonce should fail",
+	)
 }
