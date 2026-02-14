@@ -22,12 +22,19 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"regexp"
 
 	"github.com/blinklabs-io/dingo/database/plugin"
 	"github.com/blinklabs-io/dingo/topology"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/kelseyhightower/envconfig"
 	"gopkg.in/yaml.v3"
+)
+
+// validNetworkName matches names consisting only of alphanumeric
+// characters, hyphens, and underscores.
+var validNetworkName = regexp.MustCompile(
+	`^[a-zA-Z0-9][a-zA-Z0-9_-]*$`,
 )
 
 type ctxKey string
@@ -522,6 +529,19 @@ func LoadConfig(configFile string) (*Config, error) {
 			"evictionWatermark (%f) must be less than rejectionWatermark (%f)",
 			globalConfig.EvictionWatermark,
 			globalConfig.RejectionWatermark,
+		)
+	}
+
+	// Validate network name to prevent path traversal (INT-03).
+	// Only alphanumeric characters, hyphens, and underscores are
+	// permitted. Values containing '/', '\', '..', or other path
+	// separators are rejected outright.
+	if !validNetworkName.MatchString(globalConfig.Network) {
+		return nil, fmt.Errorf(
+			"invalid network name %q: "+
+				"must contain only alphanumeric characters, "+
+				"hyphens, and underscores",
+			globalConfig.Network,
 		)
 	}
 

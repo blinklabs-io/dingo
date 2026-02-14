@@ -489,7 +489,10 @@ func TestLoadConfig_WatermarkValidation(t *testing.T) {
 					)
 				}
 				if tt.errContain != "" {
-					if got := err.Error(); !strings.Contains(got, tt.errContain) {
+					if got := err.Error(); !strings.Contains(
+						got,
+						tt.errContain,
+					) {
 						t.Errorf(
 							"error %q should contain %q",
 							got,
@@ -545,5 +548,137 @@ database:
 			"expected MetadataPlugin to be 'sqlite', got %q",
 			cfg.MetadataPlugin,
 		)
+	}
+}
+
+func TestLoadConfig_NetworkNameValidation(t *testing.T) {
+	validTests := []struct {
+		name           string
+		network        string
+		wantConfigPath string
+	}{
+		{
+			name:           "preview",
+			network:        "preview",
+			wantConfigPath: "preview/config.json",
+		},
+		{
+			name:           "mainnet",
+			network:        "mainnet",
+			wantConfigPath: "/opt/cardano/mainnet/config.json",
+		},
+		{
+			name:           "preprod",
+			network:        "preprod",
+			wantConfigPath: "/opt/cardano/preprod/config.json",
+		},
+		{
+			name:           "hyphenated name",
+			network:        "my-devnet",
+			wantConfigPath: "/opt/cardano/my-devnet/config.json",
+		},
+		{
+			name:           "underscore name",
+			network:        "test_net",
+			wantConfigPath: "/opt/cardano/test_net/config.json",
+		},
+	}
+
+	for _, tt := range validTests {
+		t.Run("valid/"+tt.name, func(t *testing.T) {
+			resetGlobalConfig()
+			globalConfig.Network = tt.network
+			globalConfig.RunMode = RunModeDev
+
+			cfg, err := LoadConfig("")
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			if cfg.Network != tt.network {
+				t.Errorf(
+					"Network = %q, want %q",
+					cfg.Network,
+					tt.network,
+				)
+			}
+
+			if cfg.CardanoConfig != tt.wantConfigPath {
+				t.Errorf(
+					"CardanoConfig = %q, want %q",
+					cfg.CardanoConfig,
+					tt.wantConfigPath,
+				)
+			}
+		})
+	}
+
+	invalidTests := []struct {
+		name    string
+		network string
+	}{
+		{
+			name:    "parent directory traversal",
+			network: "../etc",
+		},
+		{
+			name:    "deep traversal",
+			network: "../../etc",
+		},
+		{
+			name:    "forward slash",
+			network: "foo/bar",
+		},
+		{
+			name:    "bare dot-dot",
+			network: "..",
+		},
+		{
+			name:    "backslash",
+			network: "foo\\bar",
+		},
+		{
+			name:    "absolute path",
+			network: "/etc/passwd",
+		},
+		{
+			name:    "dot prefix",
+			network: ".hidden",
+		},
+		{
+			name:    "empty string",
+			network: "",
+		},
+		{
+			name:    "hyphen prefix",
+			network: "-bad",
+		},
+		{
+			name:    "underscore prefix",
+			network: "_bad",
+		},
+	}
+
+	for _, tt := range invalidTests {
+		t.Run("invalid/"+tt.name, func(t *testing.T) {
+			resetGlobalConfig()
+			globalConfig.Network = tt.network
+			globalConfig.RunMode = RunModeDev
+
+			_, err := LoadConfig("")
+			if err == nil {
+				t.Fatal(
+					"expected error for invalid network name, got nil",
+				)
+			}
+
+			if !strings.Contains(err.Error(), "invalid network name") {
+				t.Errorf(
+					"error %q should contain %q",
+					err.Error(),
+					"invalid network name",
+				)
+			}
+		})
 	}
 }
