@@ -899,9 +899,10 @@ func TestCeilMul_MaxInt64Values(t *testing.T) {
 
 func TestDeclaredExUnits(t *testing.T) {
 	tests := []struct {
-		name     string
-		tx       lcommon.Transaction
-		expected lcommon.ExUnits
+		name      string
+		tx        lcommon.Transaction
+		expected  lcommon.ExUnits
+		expectErr bool
 	}{
 		{
 			name: "no witnesses",
@@ -995,10 +996,323 @@ func TestDeclaredExUnits(t *testing.T) {
 				Steps:  200000000,
 			},
 		},
+		{
+			name: "memory overflow",
+			tx: &mockFeeTx{
+				cbor: make([]byte, 100),
+				fee:  big.NewInt(200000),
+				witnesses: &mockWitnessSet{
+					redeemers: &mockRedeemers{
+						entries: []struct {
+							key lcommon.RedeemerKey
+							val lcommon.RedeemerValue
+						}{
+							{
+								val: lcommon.RedeemerValue{
+									ExUnits: lcommon.ExUnits{
+										Memory: math.MaxInt64,
+										Steps:  100,
+									},
+								},
+							},
+							{
+								val: lcommon.RedeemerValue{
+									ExUnits: lcommon.ExUnits{
+										Memory: 1,
+										Steps:  100,
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			expectErr: true,
+		},
+		{
+			name: "steps overflow",
+			tx: &mockFeeTx{
+				cbor: make([]byte, 100),
+				fee:  big.NewInt(200000),
+				witnesses: &mockWitnessSet{
+					redeemers: &mockRedeemers{
+						entries: []struct {
+							key lcommon.RedeemerKey
+							val lcommon.RedeemerValue
+						}{
+							{
+								val: lcommon.RedeemerValue{
+									ExUnits: lcommon.ExUnits{
+										Memory: 100,
+										Steps:  math.MaxInt64,
+									},
+								},
+							},
+							{
+								val: lcommon.RedeemerValue{
+									ExUnits: lcommon.ExUnits{
+										Memory: 100,
+										Steps:  1,
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			expectErr: true,
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			result := DeclaredExUnits(tc.tx)
+			result, err := DeclaredExUnits(tc.tx)
+			if tc.expectErr {
+				require.Error(t, err)
+				assert.ErrorIs(
+					t,
+					err,
+					ErrExUnitsOverflow,
+				)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(
+				t,
+				tc.expected.Memory,
+				result.Memory,
+			)
+			assert.Equal(
+				t,
+				tc.expected.Steps,
+				result.Steps,
+			)
+		})
+	}
+}
+
+func TestSafeAddExUnits(t *testing.T) {
+	tests := []struct {
+		name      string
+		a         lcommon.ExUnits
+		b         lcommon.ExUnits
+		expected  lcommon.ExUnits
+		expectErr bool
+	}{
+		{
+			name: "normal addition",
+			a: lcommon.ExUnits{
+				Memory: 100,
+				Steps:  200,
+			},
+			b: lcommon.ExUnits{
+				Memory: 300,
+				Steps:  400,
+			},
+			expected: lcommon.ExUnits{
+				Memory: 400,
+				Steps:  600,
+			},
+		},
+		{
+			name: "zero plus values",
+			a:    lcommon.ExUnits{},
+			b: lcommon.ExUnits{
+				Memory: 500,
+				Steps:  1000,
+			},
+			expected: lcommon.ExUnits{
+				Memory: 500,
+				Steps:  1000,
+			},
+		},
+		{
+			name: "both zero",
+			a:    lcommon.ExUnits{},
+			b:    lcommon.ExUnits{},
+			expected: lcommon.ExUnits{
+				Memory: 0,
+				Steps:  0,
+			},
+		},
+		{
+			name: "max int64 values no overflow",
+			a: lcommon.ExUnits{
+				Memory: math.MaxInt64,
+				Steps:  math.MaxInt64,
+			},
+			b: lcommon.ExUnits{
+				Memory: 0,
+				Steps:  0,
+			},
+			expected: lcommon.ExUnits{
+				Memory: math.MaxInt64,
+				Steps:  math.MaxInt64,
+			},
+		},
+		{
+			name: "memory overflow",
+			a: lcommon.ExUnits{
+				Memory: math.MaxInt64,
+				Steps:  100,
+			},
+			b: lcommon.ExUnits{
+				Memory: 1,
+				Steps:  100,
+			},
+			expectErr: true,
+		},
+		{
+			name: "steps overflow",
+			a: lcommon.ExUnits{
+				Memory: 100,
+				Steps:  math.MaxInt64,
+			},
+			b: lcommon.ExUnits{
+				Memory: 100,
+				Steps:  1,
+			},
+			expectErr: true,
+		},
+		{
+			name: "both overflow",
+			a: lcommon.ExUnits{
+				Memory: math.MaxInt64,
+				Steps:  math.MaxInt64,
+			},
+			b: lcommon.ExUnits{
+				Memory: 1,
+				Steps:  1,
+			},
+			expectErr: true,
+		},
+		{
+			name: "large values just under max",
+			a: lcommon.ExUnits{
+				Memory: math.MaxInt64 - 1,
+				Steps:  math.MaxInt64 - 1,
+			},
+			b: lcommon.ExUnits{
+				Memory: 1,
+				Steps:  1,
+			},
+			expected: lcommon.ExUnits{
+				Memory: math.MaxInt64,
+				Steps:  math.MaxInt64,
+			},
+		},
+		{
+			name: "half max values",
+			a: lcommon.ExUnits{
+				Memory: math.MaxInt64 / 2,
+				Steps:  math.MaxInt64 / 2,
+			},
+			b: lcommon.ExUnits{
+				Memory: math.MaxInt64 / 2,
+				Steps:  math.MaxInt64 / 2,
+			},
+			expected: lcommon.ExUnits{
+				Memory: (math.MaxInt64 / 2) * 2,
+				Steps:  (math.MaxInt64 / 2) * 2,
+			},
+		},
+		{
+			name: "negative memory in a",
+			a: lcommon.ExUnits{
+				Memory: -1,
+				Steps:  100,
+			},
+			b: lcommon.ExUnits{
+				Memory: 100,
+				Steps:  100,
+			},
+			expectErr: true,
+		},
+		{
+			name: "negative memory in b",
+			a: lcommon.ExUnits{
+				Memory: 100,
+				Steps:  100,
+			},
+			b: lcommon.ExUnits{
+				Memory: -1,
+				Steps:  100,
+			},
+			expectErr: true,
+		},
+		{
+			name: "negative steps in a",
+			a: lcommon.ExUnits{
+				Memory: 100,
+				Steps:  -1,
+			},
+			b: lcommon.ExUnits{
+				Memory: 100,
+				Steps:  100,
+			},
+			expectErr: true,
+		},
+		{
+			name: "negative steps in b",
+			a: lcommon.ExUnits{
+				Memory: 100,
+				Steps:  100,
+			},
+			b: lcommon.ExUnits{
+				Memory: 100,
+				Steps:  -1,
+			},
+			expectErr: true,
+		},
+		{
+			name: "large negative memory wraparound attempt",
+			a: lcommon.ExUnits{
+				Memory: math.MinInt64,
+				Steps:  0,
+			},
+			b: lcommon.ExUnits{
+				Memory: math.MaxInt64,
+				Steps:  0,
+			},
+			expectErr: true,
+		},
+		{
+			name: "large negative steps wraparound attempt",
+			a: lcommon.ExUnits{
+				Memory: 0,
+				Steps:  math.MinInt64,
+			},
+			b: lcommon.ExUnits{
+				Memory: 0,
+				Steps:  math.MaxInt64,
+			},
+			expectErr: true,
+		},
+		{
+			name: "both negative memory and steps",
+			a: lcommon.ExUnits{
+				Memory: -100,
+				Steps:  -200,
+			},
+			b: lcommon.ExUnits{
+				Memory: 100,
+				Steps:  200,
+			},
+			expectErr: true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			result, err := SafeAddExUnits(tc.a, tc.b)
+			if tc.expectErr {
+				require.Error(t, err)
+				assert.ErrorIs(
+					t,
+					err,
+					ErrExUnitsOverflow,
+				)
+				return
+			}
+			require.NoError(t, err)
 			assert.Equal(
 				t,
 				tc.expected.Memory,

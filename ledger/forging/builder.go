@@ -20,6 +20,7 @@ import (
 	"log/slog"
 	"math"
 
+	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
@@ -271,20 +272,36 @@ func (b *DefaultBlockBuilder) BuildBlock(
 		}
 
 		// Pull ExUnits from redeemers in the witness set
-		var txMemory, txSteps int64
+		var estimatedTxExUnits lcommon.ExUnits
+		var exUnitsErr error
 		for _, redeemer := range fullTx.WitnessSet.Redeemers().Iter() {
-			txMemory += redeemer.ExUnits.Memory
-			txSteps += redeemer.ExUnits.Steps
+			estimatedTxExUnits, exUnitsErr = eras.SafeAddExUnits(
+				estimatedTxExUnits,
+				redeemer.ExUnits,
+			)
+			if exUnitsErr != nil {
+				b.logger.Debug(
+					"skipping transaction - ExUnits overflow",
+					"component", "forging",
+					"error", exUnitsErr,
+				)
+				break
+			}
 		}
-		estimatedTxExUnits := lcommon.ExUnits{
-			Memory: txMemory,
-			Steps:  txSteps,
+		if exUnitsErr != nil {
+			continue
 		}
 
 		// Check MaxExUnits limit - skip this tx but continue trying
-		// smaller ones, matching the MaxTxSize behavior above
-		if totalExUnits.Memory+estimatedTxExUnits.Memory > maxExUnits.Memory ||
-			totalExUnits.Steps+estimatedTxExUnits.Steps > maxExUnits.Steps {
+		// smaller ones, matching the MaxTxSize behavior above.
+		// Use SafeAddExUnits to avoid overflow in the comparison.
+		candidateExUnits, addErr := eras.SafeAddExUnits(
+			totalExUnits,
+			estimatedTxExUnits,
+		)
+		if addErr != nil ||
+			candidateExUnits.Memory > maxExUnits.Memory ||
+			candidateExUnits.Steps > maxExUnits.Steps {
 			b.logger.Debug(
 				"tx exceeds remaining ex units budget, skipping",
 				"component", "forging",
@@ -330,8 +347,10 @@ func (b *DefaultBlockBuilder) BuildBlock(
 			transactionMetadataSet[uint(len(transactionBodies))-1] = metadataCbor
 		}
 		blockSize += txSize
-		totalExUnits.Memory += estimatedTxExUnits.Memory
-		totalExUnits.Steps += estimatedTxExUnits.Steps
+		// Safe to assign: overflow was already checked
+		// via SafeAddExUnits when computing
+		// candidateExUnits above.
+		totalExUnits = candidateExUnits
 
 		// Record consumed inputs so later transactions in this
 		// block cannot spend the same UTxOs.
