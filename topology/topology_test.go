@@ -15,11 +15,15 @@
 package topology_test
 
 import (
+	"bytes"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/topology"
+	"github.com/stretchr/testify/require"
 )
 
 type topologyTestDefinition struct {
@@ -176,4 +180,44 @@ func TestParseTopologyConfig(t *testing.T) {
 			)
 		}
 	}
+}
+
+func TestNewTopologyConfigFromFile_ClosesFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "topology.json")
+	err := os.WriteFile(
+		path,
+		[]byte(topologyTests[0].jsonData),
+		0o600,
+	)
+	require.NoError(t, err)
+
+	cfg, err := topology.NewTopologyConfigFromFile(path)
+	require.NoError(t, err)
+	require.NotNil(t, cfg)
+	require.Equal(
+		t,
+		int64(99532743),
+		cfg.UseLedgerAfterSlot,
+	)
+}
+
+func TestNewTopologyConfigFromFile_NotFound(t *testing.T) {
+	_, err := topology.NewTopologyConfigFromFile(
+		"/nonexistent/topology.json",
+	)
+	require.Error(t, err)
+}
+
+func TestNewTopologyConfigFromReader_OversizedInput(t *testing.T) {
+	// maxTopologySize is 10 MB. Create input that exceeds it.
+	const maxTopologySize = 10 * 1024 * 1024
+	oversized := bytes.NewReader(make([]byte, maxTopologySize+1))
+	_, err := topology.NewTopologyConfigFromReader(oversized)
+	require.Error(t, err)
+	require.Contains(
+		t,
+		err.Error(),
+		"topology file exceeds maximum size",
+	)
 }

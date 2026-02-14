@@ -16,6 +16,7 @@ package topology
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 )
@@ -55,14 +56,25 @@ func NewTopologyConfigFromFile(path string) (*TopologyConfig, error) {
 	if err != nil {
 		return nil, err
 	}
+	defer dataFile.Close()
 	return NewTopologyConfigFromReader(dataFile)
 }
 
+// maxTopologySize is the maximum allowed size for a topology config file
+// (10 MB). This prevents unbounded memory allocation from untrusted readers.
+const maxTopologySize = 10 * 1024 * 1024
+
 func NewTopologyConfigFromReader(r io.Reader) (*TopologyConfig, error) {
 	t := &TopologyConfig{}
-	data, err := io.ReadAll(r)
+	data, err := io.ReadAll(io.LimitReader(r, maxTopologySize+1))
 	if err != nil {
 		return nil, err
+	}
+	if int64(len(data)) > maxTopologySize {
+		return nil, fmt.Errorf(
+			"topology file exceeds maximum size of %d bytes",
+			maxTopologySize,
+		)
 	}
 	if err := json.Unmarshal(data, t); err != nil {
 		return nil, err
