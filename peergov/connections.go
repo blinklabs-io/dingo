@@ -202,6 +202,16 @@ func (p *PeerGovernor) handleInboundConnectionEvent(evt event.Event) {
 	}
 	var tmpPeer *Peer
 	if peerIdx == -1 {
+		// Enforce hard cap on peer list size for inbound peers
+		if p.isAtPeerCapLocked() {
+			p.config.Logger.Debug(
+				"rejecting inbound peer: peer list at capacity",
+				"address", address,
+				"cap", p.maxPeerListSize(),
+				"current", len(p.peers),
+			)
+			return
+		}
 		tmpPeer = &Peer{
 			Address:           address,
 			NormalizedAddress: normalized,
@@ -340,6 +350,11 @@ func (p *PeerGovernor) TestPeer(address string) (bool, error) {
 	// Find or create peer entry
 	var peer *Peer
 	if idx := p.peerIndexByAddress(normalized); idx == -1 {
+		// Enforce hard cap on peer list size
+		if p.isAtPeerCapLocked() {
+			p.mu.Unlock()
+			return false, ErrPeerListFull
+		}
 		// Peer not known yet, create temporary entry to track test result
 		peer = &Peer{
 			Address:           address,

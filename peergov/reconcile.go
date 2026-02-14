@@ -292,7 +292,9 @@ func (p *PeerGovernor) reconcile() {
 	for i := range eligiblePeersCopy {
 		addrs := p.config.PeerRequestFunc(&eligiblePeersCopy[i])
 		for _, addr := range addrs {
-			p.AddPeer(addr, PeerSourceP2PGossip)
+			// Ignore error: reaching the peer list cap during gossip
+			// discovery is expected and not actionable here.
+			_ = p.AddPeer(addr, PeerSourceP2PGossip)
 		}
 	}
 
