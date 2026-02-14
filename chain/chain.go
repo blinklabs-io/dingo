@@ -512,78 +512,83 @@ func (c *Chain) iterNext(
 	iter *ChainIterator,
 	blocking bool,
 ) (*ChainIteratorResult, error) {
-	c.mutex.Lock()
-	// We get a read lock on the manager for the integrity check and initial block lookup
-	c.manager.mutex.RLock()
-	// Verify chain integrity
-	if err := c.reconcile(); err != nil {
-		c.mutex.Unlock()
-		c.manager.mutex.RUnlock()
-		return nil, err
-	}
-	// Check for pending rollback
-	if iter.needsRollback {
-		ret := &ChainIteratorResult{}
-		ret.Point = iter.rollbackPoint
-		ret.Rollback = true
-		iter.lastPoint = iter.rollbackPoint
-		iter.needsRollback = false
-		if iter.rollbackPoint.Slot > 0 {
-			// Lookup block index for rollback point
-			tmpBlock, err := c.manager.blockByPoint(iter.rollbackPoint, nil)
-			if err != nil {
-				c.mutex.Unlock()
-				c.manager.mutex.RUnlock()
-				return nil, err
+	for {
+		c.mutex.Lock()
+		// We get a read lock on the manager for the integrity check and initial block lookup
+		c.manager.mutex.RLock()
+		// Verify chain integrity
+		if err := c.reconcile(); err != nil {
+			c.mutex.Unlock()
+			c.manager.mutex.RUnlock()
+			return nil, err
+		}
+		// Check for pending rollback
+		if iter.needsRollback {
+			ret := &ChainIteratorResult{}
+			ret.Point = iter.rollbackPoint
+			ret.Rollback = true
+			iter.lastPoint = iter.rollbackPoint
+			iter.needsRollback = false
+			if iter.rollbackPoint.Slot > 0 {
+				// Lookup block index for rollback point
+				tmpBlock, err := c.manager.blockByPoint(
+					iter.rollbackPoint,
+					nil,
+				)
+				if err != nil {
+					c.mutex.Unlock()
+					c.manager.mutex.RUnlock()
+					return nil, err
+				}
+				iter.nextBlockIndex = tmpBlock.ID + 1
 			}
-			iter.nextBlockIndex = tmpBlock.ID + 1
+			c.mutex.Unlock()
+			c.manager.mutex.RUnlock()
+			return ret, nil
+		}
+		ret := &ChainIteratorResult{}
+		// Lookup next block in metadata DB
+		tmpBlock, err := c.blockByIndex(iter.nextBlockIndex)
+		// Return immedidately if a block is found
+		if err == nil {
+			ret.Point = ocommon.NewPoint(tmpBlock.Slot, tmpBlock.Hash)
+			ret.Block = tmpBlock
+			iter.nextBlockIndex++
+			iter.lastPoint = ret.Point
+			c.mutex.Unlock()
+			c.manager.mutex.RUnlock()
+			return ret, nil
+		}
+		// Return any actual error
+		if !errors.Is(err, models.ErrBlockNotFound) {
+			c.mutex.Unlock()
+			c.manager.mutex.RUnlock()
+			return ret, err
+		}
+		// Return immediately if we're not blocking
+		if !blocking {
+			c.mutex.Unlock()
+			c.manager.mutex.RUnlock()
+			return nil, ErrIteratorChainTip
 		}
 		c.mutex.Unlock()
 		c.manager.mutex.RUnlock()
-		return ret, nil
-	}
-	ret := &ChainIteratorResult{}
-	// Lookup next block in metadata DB
-	tmpBlock, err := c.blockByIndex(iter.nextBlockIndex)
-	// Return immedidately if a block is found
-	if err == nil {
-		ret.Point = ocommon.NewPoint(tmpBlock.Slot, tmpBlock.Hash)
-		ret.Block = tmpBlock
-		iter.nextBlockIndex++
-		iter.lastPoint = ret.Point
-		c.mutex.Unlock()
-		c.manager.mutex.RUnlock()
-		return ret, nil
-	}
-	// Return any actual error
-	if !errors.Is(err, models.ErrBlockNotFound) {
-		c.mutex.Unlock()
-		c.manager.mutex.RUnlock()
-		return ret, err
-	}
-	// Return immediately if we're not blocking
-	if !blocking {
-		c.mutex.Unlock()
-		c.manager.mutex.RUnlock()
-		return nil, ErrIteratorChainTip
-	}
-	c.mutex.Unlock()
-	c.manager.mutex.RUnlock()
-	// Wait for chain update
-	c.waitingChanMutex.Lock()
-	if c.waitingChan == nil {
-		c.waitingChan = make(chan struct{})
-	}
-	waitChan := c.waitingChan
-	c.waitingChanMutex.Unlock()
+		// Wait for chain update
+		c.waitingChanMutex.Lock()
+		if c.waitingChan == nil {
+			c.waitingChan = make(chan struct{})
+		}
+		waitChan := c.waitingChan
+		c.waitingChanMutex.Unlock()
 
-	select {
-	case <-waitChan:
-		// Call ourselves again now that we should have new data
-		return c.iterNext(iter, blocking)
-	case <-iter.ctx.Done():
-		// Iterator was cancelled
-		return nil, iter.ctx.Err()
+		select {
+		case <-waitChan:
+			// Loop again now that we should have new data
+			continue
+		case <-iter.ctx.Done():
+			// Iterator was cancelled
+			return nil, iter.ctx.Err()
+		}
 	}
 }
 
