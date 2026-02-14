@@ -151,6 +151,36 @@ func TestCachedBlockExtract(t *testing.T) {
 	assert.Nil(t, result)
 }
 
+func TestCachedBlockExtractReturnsCopy(t *testing.T) {
+	original := []byte("ABCDEFGHIJKLMNOP")
+	block := &CachedBlock{
+		RawBytes: make([]byte, len(original)),
+	}
+	copy(block.RawBytes, original)
+
+	// Extract a range from the middle
+	extracted := block.Extract(4, 4)
+	require.Equal(t, []byte("EFGH"), extracted)
+
+	// Mutate the returned slice
+	extracted[0] = 'X'
+	extracted[1] = 'Y'
+	extracted[2] = 'Z'
+	extracted[3] = 'W'
+
+	// Extract the same range again and verify the cached data is unchanged
+	extractedAgain := block.Extract(4, 4)
+	assert.Equal(
+		t,
+		[]byte("EFGH"),
+		extractedAgain,
+		"cached block data must not be corrupted by caller mutations",
+	)
+
+	// Also verify the full RawBytes are intact
+	assert.Equal(t, original, block.RawBytes)
+}
+
 func TestBlockLRUCacheConcurrent(t *testing.T) {
 	cache := NewBlockLRUCache(100)
 	var wg sync.WaitGroup
