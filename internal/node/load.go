@@ -30,10 +30,22 @@ import (
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/ledger"
+	gcbor "github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 )
 
 func Load(cfg *config.Config, logger *slog.Logger, immutableDir string) error {
+	return LoadWithDB(cfg, logger, immutableDir, nil)
+}
+
+// LoadWithDB loads immutable DB blocks into the chain. If db is nil,
+// a new database connection is opened (and closed on return).
+func LoadWithDB(
+	cfg *config.Config,
+	logger *slog.Logger,
+	immutableDir string,
+	db *database.Database,
+) error {
 	// Derive default config path from cfg.Network when cfg.CardanoConfig is empty
 	cardanoConfigPath := cfg.CardanoConfig
 	if cardanoConfigPath == "" {
@@ -52,27 +64,31 @@ func Load(cfg *config.Config, logger *slog.Logger, immutableDir string) error {
 		cardano.EmbeddedConfigPreviewNetworkFS,
 	)
 	if err != nil {
-		return err
+		return fmt.Errorf(
+			"loading cardano node config: %w", err,
+		)
 	}
 	logger.Debug(
 		"cardano network config",
 		"component", "node",
 		"config", nodeCfg,
 	)
-	// Load database
-	dbConfig := &database.Config{
-		DataDir:        cfg.DatabasePath,
-		Logger:         logger,
-		PromRegistry:   nil,
-		BlobPlugin:     cfg.BlobPlugin,
-		MetadataPlugin: cfg.MetadataPlugin,
-		MaxConnections: cfg.DatabaseWorkers,
+	// Load database (open new one if not provided)
+	if db == nil {
+		dbConfig := &database.Config{
+			DataDir:        cfg.DatabasePath,
+			Logger:         logger,
+			PromRegistry:   nil,
+			BlobPlugin:     cfg.BlobPlugin,
+			MetadataPlugin: cfg.MetadataPlugin,
+			MaxConnections: cfg.DatabaseWorkers,
+		}
+		db, err = database.New(dbConfig)
+		if err != nil {
+			return fmt.Errorf("creating database: %w", err)
+		}
+		defer db.Close()
 	}
-	db, err := database.New(dbConfig)
-	if err != nil {
-		return err
-	}
-	defer db.Close()
 	// Enable bulk-load optimizations if the metadata store supports them
 	if optimizer, ok := db.Metadata().(metadata.BulkLoadOptimizer); ok {
 		if err := optimizer.SetBulkLoadPragmas(); err != nil {
@@ -133,25 +149,147 @@ func Load(cfg *config.Config, logger *slog.Logger, immutableDir string) error {
 		return fmt.Errorf("failed to load state: %w", err)
 	}
 	defer ls.Close()
+
+	blocksCopied, immutableTipSlot, err := copyBlocks(
+		logger, immutableDir, c,
+	)
+	if err != nil {
+		return fmt.Errorf("loading blocks: %w", err)
+	}
+
+	// Wait for ledger to catch up with tight polling
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+	timeout := time.After(30 * time.Minute)
+	for {
+		select {
+		case <-ticker.C:
+			tip := ls.Tip()
+			if tip.Point.Slot >= immutableTipSlot {
+				logger.Info(
+					"finished processing blocks from immutable DB",
+					"blocks_copied", blocksCopied,
+				)
+				return nil
+			}
+		case <-timeout:
+			return fmt.Errorf(
+				"timed out waiting for ledger to catch up"+
+					" (tip slot %d, target slot %d)",
+				ls.Tip().Point.Slot,
+				immutableTipSlot,
+			)
+		}
+	}
+}
+
+// LoadBlobsResult contains the result of a blob-only ImmutableDB load.
+type LoadBlobsResult struct {
+	BlocksCopied     int
+	ImmutableTipSlot uint64
+}
+
+// LoadBlobsWithDB copies blocks from an ImmutableDB directory into the blob
+// store without starting the ledger processing pipeline. This is used after
+// a Mithril snapshot import where the ledger state has already been loaded
+// from the snapshot. Returns the number of blocks copied and the immutable
+// tip slot so the caller can update the metadata tip to match.
+func LoadBlobsWithDB(
+	cfg *config.Config,
+	logger *slog.Logger,
+	immutableDir string,
+	db *database.Database,
+) (*LoadBlobsResult, error) {
+	// Load database (open new one if not provided)
+	var err error
+	if db == nil {
+		dbConfig := &database.Config{
+			DataDir:        cfg.DatabasePath,
+			Logger:         logger,
+			PromRegistry:   nil,
+			BlobPlugin:     cfg.BlobPlugin,
+			MetadataPlugin: cfg.MetadataPlugin,
+			MaxConnections: cfg.DatabaseWorkers,
+		}
+		db, err = database.New(dbConfig)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"creating database: %w", err,
+			)
+		}
+		defer db.Close()
+	}
+	// Enable bulk-load optimizations if available
+	if optimizer, ok := db.Metadata().(metadata.BulkLoadOptimizer); ok {
+		if err := optimizer.SetBulkLoadPragmas(); err != nil {
+			logger.Warn(
+				"failed to set bulk-load optimizations",
+				"error", err,
+			)
+		} else {
+			defer func() {
+				if err := optimizer.RestoreNormalPragmas(); err != nil {
+					logger.Error(
+						"failed to restore normal settings",
+						"error", err,
+					)
+				}
+			}()
+		}
+	}
+	// Load chain without event bus (no ledger processing)
+	cm, err := chain.NewManager(db, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load chain manager: %w", err)
+	}
+	c := cm.PrimaryChain()
+	if c == nil {
+		return nil, errors.New("primary chain not available")
+	}
+
+	blocksCopied, immutableTipSlot, err := copyBlocksRaw(
+		logger, immutableDir, c,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("loading blocks: %w", err)
+	}
+
+	return &LoadBlobsResult{
+		BlocksCopied:     blocksCopied,
+		ImmutableTipSlot: immutableTipSlot,
+	}, nil
+}
+
+// copyBlocks reads blocks from an ImmutableDB directory and writes them to
+// the chain's blob store. Returns the number of blocks copied and the
+// immutable tip slot.
+func copyBlocks(
+	logger *slog.Logger,
+	immutableDir string,
+	c *chain.Chain,
+) (int, uint64, error) {
 	// Open immutable DB
 	immutable, err := immutable.New(immutableDir)
 	if err != nil {
-		return fmt.Errorf("failed to read immutable DB: %w", err)
+		return 0, 0, fmt.Errorf("failed to read immutable DB: %w", err)
 	}
 	// Record immutable DB tip
 	immutableTip, err := immutable.GetTip()
 	if err != nil {
-		return fmt.Errorf("failed to read immutable DB tip: %w", err)
+		return 0, 0, fmt.Errorf("failed to read immutable DB tip: %w", err)
 	}
 	if immutableTip == nil {
-		return errors.New("immutable DB tip is nil")
+		return 0, 0, errors.New("immutable DB tip is nil")
 	}
 	// Copy all blocks
 	logger.Info("copying blocks from immutable DB")
 	chainTip := c.Tip()
 	iter, err := immutable.BlocksFromPoint(chainTip.Point)
 	if err != nil {
-		return fmt.Errorf("failed to get immutable DB iterator: %w", err)
+		return 0, 0, fmt.Errorf(
+			"failed to get immutable DB iterator: %w",
+			err,
+		)
 	}
 	defer iter.Close()
 	var blocksCopied int
@@ -160,7 +298,9 @@ func Load(cfg *config.Config, logger *slog.Logger, immutableDir string) error {
 		for {
 			next, err := iter.Next()
 			if err != nil {
-				return err
+				return blocksCopied, immutableTip.Slot, fmt.Errorf(
+					"reading next block: %w", err,
+				)
 			}
 			// No more blocks
 			if next == nil {
@@ -168,7 +308,9 @@ func Load(cfg *config.Config, logger *slog.Logger, immutableDir string) error {
 			}
 			tmpBlock, err := gledger.NewBlockFromCbor(next.Type, next.Cbor)
 			if err != nil {
-				return err
+				return blocksCopied, immutableTip.Slot, fmt.Errorf(
+					"decoding block CBOR: %w", err,
+				)
 			}
 			// Skip first block when continuing a load operation
 			if blocksCopied == 0 &&
@@ -185,11 +327,10 @@ func Load(cfg *config.Config, logger *slog.Logger, immutableDir string) error {
 		}
 		// Add block batch to chain
 		if err := c.AddBlocks(blockBatch); err != nil {
-			logger.Error(
-				"failed to import block",
-				"error", err,
+			return blocksCopied, immutableTip.Slot, fmt.Errorf(
+				"failed to import block: %w",
+				err,
 			)
-			return nil
 		}
 		blocksCopied += len(blockBatch)
 		blockBatch = slices.Delete(blockBatch, 0, len(blockBatch))
@@ -204,29 +345,123 @@ func Load(cfg *config.Config, logger *slog.Logger, immutableDir string) error {
 		"finished copying blocks from immutable DB",
 		"blocks_copied", blocksCopied,
 	)
-	// Wait for ledger to catch up with tight polling
-	ticker := time.NewTicker(500 * time.Millisecond)
-	defer ticker.Stop()
-	timeout := time.After(30 * time.Minute)
+	return blocksCopied, immutableTip.Slot, nil
+}
+
+// copyBlocksRaw is a lightweight variant of copyBlocks that decodes only
+// block headers instead of full blocks. This is significantly faster for
+// bulk loading since it skips decoding transaction bodies and witnesses
+// (which can be 50-90KB per block) while extracting just the ~200-500
+// byte header needed for chain indexing.
+func copyBlocksRaw(
+	logger *slog.Logger,
+	immutableDir string,
+	c *chain.Chain,
+) (int, uint64, error) {
+	imm, err := immutable.New(immutableDir)
+	if err != nil {
+		return 0, 0, fmt.Errorf("failed to read immutable DB: %w", err)
+	}
+	immutableTip, err := imm.GetTip()
+	if err != nil {
+		return 0, 0, fmt.Errorf("failed to read immutable DB tip: %w", err)
+	}
+	if immutableTip == nil {
+		return 0, 0, errors.New("immutable DB tip is nil")
+	}
+	logger.Info("copying blocks from immutable DB (header-only decode)")
+	chainTip := c.Tip()
+	iter, err := imm.BlocksFromPoint(chainTip.Point)
+	if err != nil {
+		return 0, 0, fmt.Errorf(
+			"failed to get immutable DB iterator: %w",
+			err,
+		)
+	}
+	defer iter.Close()
+	var blocksCopied int
+	blockBatch := make([]chain.RawBlock, 0, 500)
 	for {
-		select {
-		case <-ticker.C:
-			tip := ls.Tip()
-			if tip.Point.Slot >= immutableTip.Slot {
-				goto done
+		for {
+			next, err := iter.Next()
+			if err != nil {
+				return blocksCopied, immutableTip.Slot, fmt.Errorf(
+					"reading next block: %w", err,
+				)
 			}
-		case <-timeout:
-			return fmt.Errorf(
-				"timed out waiting for ledger to catch up (tip slot %d, target slot %d)",
-				ls.Tip().Point.Slot,
-				immutableTip.Slot,
+			if next == nil {
+				break
+			}
+			// Skip first block when continuing a load operation
+			if blocksCopied == 0 &&
+				next.Slot == chainTip.Point.Slot {
+				continue
+			}
+			// Extract header CBOR from the block's outer array
+			// (first element for all eras), then decode just the
+			// header — skipping transaction bodies and witnesses.
+			headerCbor, err := extractHeaderCbor(next.Cbor)
+			if err != nil {
+				return blocksCopied, immutableTip.Slot, fmt.Errorf(
+					"extracting block header CBOR: %w", err,
+				)
+			}
+			header, err := gledger.NewBlockHeaderFromCbor(
+				next.Type,
+				headerCbor,
+			)
+			if err != nil {
+				return blocksCopied, immutableTip.Slot, fmt.Errorf(
+					"decoding block header: %w", err,
+				)
+			}
+			blockBatch = append(blockBatch, chain.RawBlock{
+				Slot:        header.SlotNumber(),
+				Hash:        header.Hash().Bytes(),
+				BlockNumber: header.BlockNumber(),
+				Type:        next.Type,
+				PrevHash:    header.PrevHash().Bytes(),
+				Cbor:        next.Cbor,
+			})
+			if len(blockBatch) == cap(blockBatch) {
+				break
+			}
+		}
+		if len(blockBatch) == 0 {
+			break
+		}
+		if err := c.AddRawBlocks(blockBatch); err != nil {
+			return blocksCopied, immutableTip.Slot, fmt.Errorf(
+				"failed to import block: %w",
+				err,
+			)
+		}
+		blocksCopied += len(blockBatch)
+		blockBatch = slices.Delete(blockBatch, 0, len(blockBatch))
+		if blocksCopied > 0 && blocksCopied%10000 == 0 {
+			logger.Info(
+				"copying blocks from immutable DB",
+				"blocks_copied", blocksCopied,
 			)
 		}
 	}
-done:
 	logger.Info(
-		"finished processing blocks from immutable DB",
+		"finished copying blocks from immutable DB",
 		"blocks_copied", blocksCopied,
 	)
-	return nil
+	return blocksCopied, immutableTip.Slot, nil
+}
+
+// extractHeaderCbor extracts the header CBOR from a full block's CBOR.
+// All Cardano block eras encode as a CBOR array where the first element
+// is the block header.
+func extractHeaderCbor(blockCbor []byte) ([]byte, error) {
+	var parts []gcbor.RawMessage
+	if _, err := gcbor.Decode(blockCbor, &parts); err != nil {
+		return nil, fmt.Errorf("decoding block outer array: %w", err)
+	}
+	if len(parts) == 0 {
+		return nil, errors.New("empty block array")
+	}
+	return []byte(parts[0]), nil
 }

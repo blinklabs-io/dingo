@@ -51,6 +51,44 @@ type MetadataStore interface {
 		types.Txn,
 	) error
 
+	// Bulk import methods (ledger state restore from snapshot)
+
+	// ImportUtxos inserts UTxOs in bulk, ignoring duplicates.
+	ImportUtxos([]models.Utxo, types.Txn) error
+
+	// ImportAccount upserts an account (insert or update delegation
+	// fields on conflict).
+	ImportAccount(*models.Account, types.Txn) error
+
+	// ImportPool upserts a pool and creates a registration record.
+	ImportPool(
+		*models.Pool,
+		*models.PoolRegistration,
+		types.Txn,
+	) error
+
+	// ImportDrep upserts a DRep and creates a registration record.
+	ImportDrep(
+		*models.Drep,
+		*models.RegistrationDrep,
+		types.Txn,
+	) error
+
+	// GetImportCheckpoint retrieves the checkpoint for a given
+	// import key (e.g., "{digest}:{slot}"). Returns nil if no
+	// checkpoint exists.
+	GetImportCheckpoint(
+		importKey string,
+		txn types.Txn,
+	) (*models.ImportCheckpoint, error)
+
+	// SetImportCheckpoint creates or updates a checkpoint for
+	// the given import key with the completed phase.
+	SetImportCheckpoint(
+		checkpoint *models.ImportCheckpoint,
+		txn types.Txn,
+	) error
+
 	// GetPoolRegistrations retrieves all registration certificates for a pool.
 	GetPoolRegistrations(
 		lcommon.PoolKeyHash,
@@ -517,6 +555,18 @@ type MetadataStore interface {
 	// and clears deleted_slot for any that were soft-deleted after that slot.
 	// This is used during chain rollbacks.
 	DeleteConstitutionsAfterSlot(uint64, types.Txn) error
+
+	// Network state methods
+
+	// SetNetworkState stores the treasury and reserves balances.
+	SetNetworkState(
+		treasury, reserves uint64,
+		slot uint64,
+		txn types.Txn,
+	) error
+
+	// GetNetworkState retrieves the most recent network state.
+	GetNetworkState(types.Txn) (*models.NetworkState, error)
 
 	// Governance rollback methods
 

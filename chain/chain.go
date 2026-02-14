@@ -17,6 +17,7 @@ package chain
 import (
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"log/slog"
 	"slices"
 	"sync"
@@ -228,6 +229,125 @@ func (c *Chain) AddBlocks(blocks []ledger.Block) error {
 		err := txn.Do(func(txn *database.Txn) error {
 			for _, tmpBlock := range blocks[batchOffset : batchOffset+batchSize] {
 				if err := c.AddBlock(tmpBlock, txn); err != nil {
+					return err
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+		batchOffset += batchSize
+	}
+	return nil
+}
+
+// RawBlock contains pre-extracted block fields for direct storage
+// without requiring a full ledger.Block decode.
+type RawBlock struct {
+	Slot        uint64
+	Hash        []byte
+	BlockNumber uint64
+	Type        uint
+	PrevHash    []byte
+	Cbor        []byte
+}
+
+// AddRawBlock adds a pre-extracted block to the chain without requiring
+// a full ledger.Block interface. This is used for bulk loading where only
+// the block header has been decoded.
+func (c *Chain) AddRawBlock(rb RawBlock, txn *database.Txn) error {
+	if c == nil {
+		return errors.New("chain is nil")
+	}
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	c.manager.mutex.Lock()
+	defer c.manager.mutex.Unlock()
+	if err := c.reconcile(); err != nil {
+		return fmt.Errorf("reconcile: %w", err)
+	}
+	// Check that the new block matches our first header, if any
+	if len(c.headers) > 0 {
+		firstHeader := c.headers[0]
+		if string(rb.Hash) != string(firstHeader.Hash().Bytes()) {
+			return NewBlockNotMatchHeaderError(
+				hex.EncodeToString(rb.Hash),
+				firstHeader.Hash().String(),
+			)
+		}
+	}
+	// Check that this block fits on the current chain tip
+	if c.tipBlockIndex >= initialBlockIndex {
+		if string(rb.PrevHash) != string(c.currentTip.Point.Hash) {
+			return NewBlockNotFitChainTipError(
+				hex.EncodeToString(rb.Hash),
+				hex.EncodeToString(rb.PrevHash),
+				hex.EncodeToString(c.currentTip.Point.Hash),
+			)
+		}
+	}
+	tmpPoint := ocommon.NewPoint(rb.Slot, rb.Hash)
+	newBlockIndex := c.tipBlockIndex + 1
+	tmpBlock := models.Block{
+		ID:       newBlockIndex,
+		Slot:     tmpPoint.Slot,
+		Hash:     tmpPoint.Hash,
+		Number:   rb.BlockNumber,
+		Type:     rb.Type,
+		PrevHash: rb.PrevHash,
+		Cbor:     rb.Cbor,
+	}
+	if err := c.manager.addBlock(tmpBlock, txn, c.persistent); err != nil {
+		return fmt.Errorf("persisting block: %w", err)
+	}
+	if !c.persistent {
+		c.blocks = append(c.blocks, tmpPoint)
+	}
+	if len(c.headers) > 0 {
+		c.headers = slices.Delete(c.headers, 0, 1)
+	}
+	c.currentTip = ochainsync.Tip{
+		Point:       tmpPoint,
+		BlockNumber: rb.BlockNumber,
+	}
+	c.tipBlockIndex = newBlockIndex
+	c.waitingChanMutex.Lock()
+	if c.waitingChan != nil {
+		close(c.waitingChan)
+		c.waitingChan = nil
+	}
+	c.waitingChanMutex.Unlock()
+	if c.eventBus != nil {
+		c.eventBus.Publish(
+			ChainUpdateEventType,
+			event.NewEvent(
+				ChainUpdateEventType,
+				ChainBlockEvent{
+					Point: tmpPoint,
+					Block: tmpBlock,
+				},
+			),
+		)
+	}
+	return nil
+}
+
+// AddRawBlocks adds a batch of pre-extracted blocks to the chain.
+func (c *Chain) AddRawBlocks(blocks []RawBlock) error {
+	if c == nil {
+		return errors.New("chain is nil")
+	}
+	batchOffset := 0
+	for {
+		batchSize := min(50, len(blocks)-batchOffset)
+		if batchSize == 0 {
+			break
+		}
+		txn := c.manager.db.BlobTxn(true)
+		err := txn.Do(func(txn *database.Txn) error {
+			for _, rb := range blocks[batchOffset : batchOffset+batchSize] {
+				if err := c.AddRawBlock(rb, txn); err != nil {
 					return err
 				}
 			}

@@ -55,8 +55,9 @@ const (
 	DefaultRejectionWatermark = 0.95
 )
 
-// ErrPluginListRequested is returned when the user requests to list available plugins
-// This is not an error condition but a successful operation that displays plugin information
+// ErrPluginListRequested is returned when the user requests to list
+// available plugins. This is not an error condition but a successful
+// operation that displays plugin information.
 var ErrPluginListRequested = errors.New("plugin list requested")
 
 // RunMode represents the operational mode of the dingo node
@@ -119,11 +120,14 @@ func DefaultChainsyncConfig() ChainsyncConfig {
 
 // CacheConfig holds configuration for the tiered CBOR cache system.
 type CacheConfig struct {
-	// HotUtxoEntries is the maximum number of UTxO CBOR entries in the hot cache.
+	// HotUtxoEntries is the maximum number of UTxO CBOR entries in the hot
+	// cache.
 	HotUtxoEntries int `yaml:"hotUtxoEntries"  envconfig:"DINGO_CACHE_HOT_UTXO_ENTRIES"`
-	// HotTxEntries is the maximum number of transaction CBOR entries in the hot cache.
+	// HotTxEntries is the maximum number of transaction CBOR entries in the hot
+	// cache.
 	HotTxEntries int `yaml:"hotTxEntries"    envconfig:"DINGO_CACHE_HOT_TX_ENTRIES"`
-	// HotTxMaxBytes is the maximum memory in bytes for the hot transaction cache.
+	// HotTxMaxBytes is the maximum memory in bytes for the hot transaction
+	// cache.
 	HotTxMaxBytes int64 `yaml:"hotTxMaxBytes"   envconfig:"DINGO_CACHE_HOT_TX_MAX_BYTES"`
 	// BlockLRUEntries is the maximum number of blocks in the LRU cache.
 	BlockLRUEntries int `yaml:"blockLruEntries" envconfig:"DINGO_CACHE_BLOCK_LRU_ENTRIES"`
@@ -210,6 +214,29 @@ type Config struct {
 
 	// Mesh (Coinbase Rosetta) API listen address (empty = disabled)
 	MeshListenAddress string `yaml:"meshListenAddress" envconfig:"DINGO_MESH_LISTEN_ADDRESS"`
+
+	// Mithril snapshot bootstrap configuration
+	Mithril MithrilConfig `yaml:"mithril"`
+}
+
+// MithrilConfig holds configuration for Mithril snapshot bootstrapping.
+type MithrilConfig struct {
+	// Enabled controls whether Mithril integration is available.
+	Enabled bool `yaml:"enabled"          envconfig:"DINGO_MITHRIL_ENABLED"`
+	// AggregatorURL overrides the default aggregator URL for the network.
+	// If empty, the URL is auto-detected from the configured network.
+	AggregatorURL string `yaml:"aggregatorUrl"    envconfig:"DINGO_MITHRIL_AGGREGATOR_URL"`
+	// DownloadDir is the directory where snapshot archives are downloaded.
+	// If empty, a randomized temporary directory is created automatically.
+	DownloadDir string `yaml:"downloadDir"      envconfig:"DINGO_MITHRIL_DOWNLOAD_DIR"`
+	// CleanupAfterLoad controls whether temporary files are removed
+	// after the ImmutableDB has been loaded.
+	CleanupAfterLoad bool `yaml:"cleanupAfterLoad" envconfig:"DINGO_MITHRIL_CLEANUP"`
+	// VerifyCertificates enables certificate chain verification
+	// during bootstrap. When true, the bootstrap process walks
+	// the Mithril certificate chain from the snapshot back to the
+	// genesis certificate to verify the chain is unbroken.
+	VerifyCertificates bool `yaml:"verifyCertificates" envconfig:"DINGO_MITHRIL_VERIFY_CERTS"`
 }
 
 func (c *Config) ParseCmdlineArgs(programName string, args []string) error {
@@ -302,6 +329,12 @@ var globalConfig = &Config{
 	// KES configuration defaults (mainnet values)
 	SlotsPerKESPeriod: 129600, // 1.5 days at 1 second per slot
 	MaxKESEvolutions:  62,     // 2^6 - 2 for KES depth 6
+	// Mithril defaults
+	Mithril: MithrilConfig{
+		Enabled:            true,
+		CleanupAfterLoad:   true,
+		VerifyCertificates: true,
+	},
 }
 
 func LoadConfig(configFile string) (*Config, error) {
@@ -349,7 +382,8 @@ func LoadConfig(configFile string) (*Config, error) {
 				return nil, fmt.Errorf("error parsing config section: %w", err)
 			}
 		} else {
-			// Otherwise unmarshal the whole file as main config (backward compatibility)
+			// Otherwise unmarshal the whole file as main config (backward
+			// compatibility)
 			err = yaml.Unmarshal(buf, globalConfig)
 			if err != nil {
 				return nil, fmt.Errorf("error parsing config file: %w", err)
