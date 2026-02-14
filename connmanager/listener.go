@@ -201,6 +201,21 @@ func (c *ConnectionManager) startListener(
 				}
 				conn = tmpConn
 			}
+			// Per-IP rate limiting: reject if this IP has too many
+			// connections already
+			ipKey := ipKeyFromAddr(conn.RemoteAddr())
+			if !c.acquireIPSlot(ipKey) {
+				c.config.Logger.Warn(
+					fmt.Sprintf(
+						"listener: rejected connection from %s: per-IP limit (%d) reached",
+						conn.RemoteAddr(),
+						c.config.MaxConnectionsPerIP,
+					),
+				)
+				conn.Close()
+				c.releaseInboundSlot()
+				continue
+			}
 			c.config.Logger.Info(
 				fmt.Sprintf(
 					"listener: accepted connection from %s",
@@ -220,6 +235,8 @@ func (c *ConnectionManager) startListener(
 						err,
 					),
 				)
+				// Release the IP slot since the connection failed
+				c.releaseIPSlot(ipKey)
 				conn.Close()
 				c.releaseInboundSlot()
 				continue
@@ -232,7 +249,7 @@ func (c *ConnectionManager) startListener(
 			if conn.RemoteAddr() != nil {
 				peerAddr = conn.RemoteAddr().String()
 			}
-			c.AddConnection(oConn, true, peerAddr)
+			c.addConnectionWithIPKey(oConn, true, peerAddr, ipKey)
 			// Generate event
 			if c.config.EventBus != nil {
 				c.config.EventBus.Publish(

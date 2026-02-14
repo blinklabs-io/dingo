@@ -47,6 +47,7 @@ type connectionInfo struct {
 	conn      *ouroboros.Connection
 	peerAddr  string
 	isInbound bool
+	ipKey     string // rate-limit key (IP or /64 prefix for IPv6)
 }
 
 type peerConnectionState struct {
@@ -64,7 +65,13 @@ type ConnectionManager struct {
 	listenersMutex   sync.Mutex
 	closing          bool
 	goroutineWg      sync.WaitGroup // tracks spawned goroutines for clean shutdown
+	ipConns          map[string]int // IP key -> active connection count
+	ipConnsMutex     sync.Mutex
 }
+
+// DefaultMaxConnectionsPerIP is the default maximum number of concurrent
+// connections allowed from a single IP address (or /64 prefix for IPv6).
+const DefaultMaxConnectionsPerIP = 5
 
 type ConnectionManagerConfig struct {
 	PromRegistry       prometheus.Registerer
@@ -75,6 +82,10 @@ type ConnectionManagerConfig struct {
 	OutboundConnOpts   []ouroboros.ConnectionOptionFunc
 	OutboundSourcePort uint
 	MaxInboundConns    int // 0 means use DefaultMaxInboundConnections
+	// MaxConnectionsPerIP limits the number of concurrent inbound
+	// connections from the same IP address. IPv6 addresses are grouped
+	// by /64 prefix. A value of 0 means use DefaultMaxConnectionsPerIP.
+	MaxConnectionsPerIP int
 }
 
 type connectionManagerMetrics struct {
@@ -94,11 +105,15 @@ func NewConnectionManager(cfg ConnectionManagerConfig) *ConnectionManager {
 	if cfg.MaxInboundConns <= 0 {
 		cfg.MaxInboundConns = DefaultMaxInboundConnections
 	}
+	if cfg.MaxConnectionsPerIP <= 0 {
+		cfg.MaxConnectionsPerIP = DefaultMaxConnectionsPerIP
+	}
 	c := &ConnectionManager{
 		config: cfg,
 		connections: make(
 			map[ouroboros.ConnectionId]*connectionInfo,
 		),
+		ipConns: make(map[string]int),
 	}
 	if cfg.PromRegistry != nil {
 		c.initMetrics()
@@ -382,12 +397,22 @@ func (c *ConnectionManager) AddConnection(
 	isInbound bool,
 	peerAddr string,
 ) {
+	c.addConnectionWithIPKey(conn, isInbound, peerAddr, "")
+}
+
+func (c *ConnectionManager) addConnectionWithIPKey(
+	conn *ouroboros.Connection,
+	isInbound bool,
+	peerAddr string,
+	ipKey string,
+) {
 	// Check if shutting down before adding to WaitGroup to prevent panic
 	// during Stop()'s Wait() call. Must hold the same lock used to set closing.
 	c.listenersMutex.Lock()
 	if c.closing {
 		c.listenersMutex.Unlock()
-		// Shutting down - close connection and return
+		// Shutting down - release IP slot and close connection
+		c.releaseIPSlot(ipKey)
 		if conn != nil {
 			conn.Close()
 		}
@@ -402,13 +427,14 @@ func (c *ConnectionManager) AddConnection(
 		conn:      conn,
 		isInbound: isInbound,
 		peerAddr:  peerAddr,
+		ipKey:     ipKey,
 	}
 	c.connectionsMutex.Unlock()
 	c.updateConnectionMetrics()
 	go func() {
 		defer c.goroutineWg.Done()
 		err := <-conn.ErrorChan()
-		// Remove connection
+		// Remove connection (also releases IP slot)
 		c.RemoveConnection(connId)
 		// Generate event
 		if c.config.EventBus != nil {
@@ -432,8 +458,13 @@ func (c *ConnectionManager) AddConnection(
 
 func (c *ConnectionManager) RemoveConnection(connId ouroboros.ConnectionId) {
 	c.connectionsMutex.Lock()
+	info := c.connections[connId]
 	delete(c.connections, connId)
 	c.connectionsMutex.Unlock()
+	// Decrement per-IP counter if the connection had a tracked IP key
+	if info != nil && info.ipKey != "" {
+		c.releaseIPSlot(info.ipKey)
+	}
 	c.updateConnectionMetrics()
 }
 
