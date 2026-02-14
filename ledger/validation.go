@@ -61,7 +61,8 @@ func ValidateTxExUnits(
 //	          + ceil(pricesSteps * exUnits.Steps)
 //
 // All arithmetic uses integer math (big.Int) to match
-// the Haskell reference implementation.
+// the Haskell reference implementation. Returns an error
+// if any intermediate result overflows uint64.
 func CalculateMinFee(
 	txSize uint64,
 	exUnits lcommon.ExUnits,
@@ -69,7 +70,7 @@ func CalculateMinFee(
 	minFeeB uint,
 	pricesMem *big.Rat,
 	pricesSteps *big.Rat,
-) uint64 {
+) (uint64, error) {
 	return eras.CalculateMinFee(
 		txSize,
 		exUnits,
