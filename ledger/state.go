@@ -1674,7 +1674,13 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 				interval := time.Duration(
 					rolloverResult.SchedulerIntervalMs,
 				) * time.Millisecond
-				ls.Scheduler.ChangeInterval(interval)
+				if err := ls.Scheduler.ChangeInterval(interval); err != nil {
+					ls.config.Logger.Warn(
+						"failed to update scheduler interval",
+						"error", err,
+						"interval", interval,
+					)
+				}
 			}
 
 			// Emit epoch transition event (coordinated with slot clock)

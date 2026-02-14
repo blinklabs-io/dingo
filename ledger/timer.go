@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"fmt"
 	"sync"
 	"time"
 )
@@ -192,11 +193,19 @@ func (st *Scheduler) Register(
 }
 
 // ChangeInterval updates the tick interval of the Scheduler at runtime.
-func (st *Scheduler) ChangeInterval(newInterval time.Duration) {
+// It returns an error if newInterval is not positive.
+func (st *Scheduler) ChangeInterval(newInterval time.Duration) error {
+	if newInterval <= 0 {
+		return fmt.Errorf(
+			"scheduler: interval must be positive, got %v",
+			newInterval,
+		)
+	}
 	select {
 	case st.updateIntervalChan <- newInterval:
 	default:
 	}
+	return nil
 }
 
 // Stop the timer (terminates)
