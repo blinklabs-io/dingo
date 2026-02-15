@@ -27,11 +27,10 @@ const (
 	DefaultPaginationPage     = 1
 	DefaultPaginationOrderAsc = "asc"
 	PaginationOrderDesc       = "desc"
-	InvalidPaginationMessage  = "Invalid pagination parameters."
 )
 
 var ErrInvalidPaginationParameters = errors.New(
-	InvalidPaginationMessage,
+	"Invalid pagination parameters",
 )
 
 // PaginationParams contains parsed pagination query values.
