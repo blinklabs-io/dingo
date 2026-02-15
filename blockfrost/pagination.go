@@ -30,7 +30,7 @@ const (
 )
 
 var ErrInvalidPaginationParameters = errors.New(
-	"Invalid pagination parameters",
+	"invalid pagination parameters",
 )
 
 // PaginationParams contains parsed pagination query values.
