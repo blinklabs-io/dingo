@@ -16,16 +16,28 @@ package ledger
 
 import (
 	"errors"
+	"net"
+	"sync"
+	"time"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/peergov"
 )
+
+const defaultRelayCacheTTL = 1 * time.Minute
 
 // LedgerPeerProviderAdapter implements peergov.LedgerPeerProvider using
 // the ledger state and database to discover stake pool relays.
 type LedgerPeerProviderAdapter struct {
 	ledgerState *LedgerState
 	db          *database.Database
+
+	// Cache for pool relays
+	cacheMu      sync.RWMutex
+	cachedRelays []peergov.PoolRelay
+	cacheTime    time.Time
+	cacheTTL     time.Duration
 }
 
 // NewLedgerPeerProvider creates a new LedgerPeerProvider adapter.
@@ -33,6 +45,7 @@ type LedgerPeerProviderAdapter struct {
 func NewLedgerPeerProvider(
 	ledgerState *LedgerState,
 	db *database.Database,
+	eventBus *event.EventBus,
 ) (*LedgerPeerProviderAdapter, error) {
 	if ledgerState == nil {
 		return nil, errors.New("ledgerState cannot be nil")
@@ -40,14 +53,37 @@ func NewLedgerPeerProvider(
 	if db == nil {
 		return nil, errors.New("db cannot be nil")
 	}
-	return &LedgerPeerProviderAdapter{
+	adapter := &LedgerPeerProviderAdapter{
 		ledgerState: ledgerState,
 		db:          db,
-	}, nil
+		cacheTTL:    defaultRelayCacheTTL,
+	}
+	if eventBus != nil {
+		eventBus.SubscribeFunc(
+			PoolStateRestoredEventType,
+			func(_ event.Event) {
+				adapter.InvalidateCache()
+			},
+		)
+	}
+	return adapter, nil
 }
 
 // GetPoolRelays returns all active pool relays from the ledger.
-func (p *LedgerPeerProviderAdapter) GetPoolRelays() ([]peergov.PoolRelay, error) {
+func (p *LedgerPeerProviderAdapter) GetPoolRelays() (
+	[]peergov.PoolRelay,
+	error,
+) {
+	// Check cache first (read lock)
+	p.cacheMu.RLock()
+	if p.cachedRelays != nil && time.Since(p.cacheTime) < p.cacheTTL {
+		result := copyPoolRelays(p.cachedRelays)
+		p.cacheMu.RUnlock()
+		return result, nil
+	}
+	p.cacheMu.RUnlock()
+
+	// Cache miss or expired - fetch from database
 	relays, err := p.db.GetActivePoolRelays(nil)
 	if err != nil {
 		return nil, err
@@ -68,13 +104,53 @@ func (p *LedgerPeerProviderAdapter) GetPoolRelays() ([]peergov.PoolRelay, error)
 		result = append(result, pr)
 	}
 
-	return result, nil
+	// Update cache (double-check under write lock)
+	p.cacheMu.Lock()
+	if p.cachedRelays == nil || time.Since(p.cacheTime) >= p.cacheTTL {
+		p.cachedRelays = result
+		p.cacheTime = time.Now()
+	}
+	p.cacheMu.Unlock()
+
+	return copyPoolRelays(result), nil
+}
+
+// InvalidateCache clears the cached pool relays, forcing the next
+// GetPoolRelays call to fetch fresh data from the database.
+func (p *LedgerPeerProviderAdapter) InvalidateCache() {
+	p.cacheMu.Lock()
+	p.cachedRelays = nil
+	p.cacheTime = time.Time{}
+	p.cacheMu.Unlock()
 }
 
 // CurrentSlot returns the current chain tip slot number.
 func (p *LedgerPeerProviderAdapter) CurrentSlot() uint64 {
 	tip := p.ledgerState.Tip()
 	return tip.Point.Slot
+}
+
+// copyPoolRelays returns a deep copy of the given relay slice so that
+// callers cannot mutate cached state through shared IP pointers.
+func copyPoolRelays(relays []peergov.PoolRelay) []peergov.PoolRelay {
+	result := make([]peergov.PoolRelay, len(relays))
+	for i, r := range relays {
+		result[i] = peergov.PoolRelay{
+			Hostname: r.Hostname,
+			Port:     r.Port,
+		}
+		if r.IPv4 != nil {
+			ipCopy := make(net.IP, len(*r.IPv4))
+			copy(ipCopy, *r.IPv4)
+			result[i].IPv4 = &ipCopy
+		}
+		if r.IPv6 != nil {
+			ipCopy := make(net.IP, len(*r.IPv6))
+			copy(ipCopy, *r.IPv6)
+			result[i].IPv6 = &ipCopy
+		}
+	}
+	return result
 }
 
 // Ensure LedgerPeerProviderAdapter implements LedgerPeerProvider
