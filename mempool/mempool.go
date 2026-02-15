@@ -271,35 +271,56 @@ func (m *Mempool) processChainEvents() {
 			len(chainUpdateChan) > 0 {
 			continue
 		}
-		m.Lock()
-		// Re-validate each TX in mempool
-		// We iterate backward to avoid issues with shifting indexes when deleting
-		for i := len(m.transactions) - 1; i >= 0; i-- {
-			tx := m.transactions[i]
-			// Decode transaction
-			tmpTx, err := gledger.NewTransactionFromCbor(tx.Type, tx.Cbor)
+		// MEM-04 fix: snapshot transactions under lock, validate outside lock,
+		// then re-acquire lock to remove invalids. This avoids holding the write
+		// lock during potentially expensive Plutus script re-validation.
+		type txSnapshot struct {
+			Hash string
+			Type uint
+			Cbor []byte
+		}
+		m.RLock()
+		snapshot := make([]txSnapshot, len(m.transactions))
+		for i, tx := range m.transactions {
+			snapshot[i] = txSnapshot{
+				Hash: tx.Hash,
+				Type: tx.Type,
+				Cbor: tx.Cbor,
+			}
+		}
+		m.RUnlock()
+		// Validate outside any lock
+		var invalidHashes []string
+		for _, snap := range snapshot {
+			tmpTx, err := gledger.NewTransactionFromCbor(
+				snap.Type,
+				snap.Cbor,
+			)
 			if err != nil {
-				m.removeTransactionByIndex(i)
+				invalidHashes = append(invalidHashes, snap.Hash)
 				m.logger.Error(
-					"removed transaction after decode failure",
+					"transaction failed decode during re-validation",
 					"component", "mempool",
-					"tx_hash", tx.Hash,
+					"tx_hash", snap.Hash,
 					"error", err,
 				)
 				continue
 			}
-			// Validate transaction
 			if err := m.validator.ValidateTx(tmpTx); err != nil {
-				m.removeTransactionByIndex(i)
+				invalidHashes = append(invalidHashes, snap.Hash)
 				m.logger.Debug(
-					"removed transaction after re-validation failure",
+					"transaction failed re-validation",
 					"component", "mempool",
-					"tx_hash", tx.Hash,
+					"tx_hash", snap.Hash,
 					"error", err,
 				)
 			}
 		}
-		m.Unlock()
+		// Remove invalid transactions under lock
+		if len(invalidHashes) > 0 {
+			m.removeTransactions(invalidHashes)
+		}
+		lastValidationTime = time.Now()
 	}
 }
 
@@ -323,13 +344,16 @@ func (m *Mempool) expireTransactions() {
 }
 
 // removeExpiredTransactions removes all transactions whose LastSeen
-// is older than the configured TTL. It acquires the mempool write
-// lock and iterates backward to avoid index shifting issues.
+// is older than the configured TTL. The TTL check and removal happen
+// atomically under the write lock to prevent TOCTOU races with
+// AddTransaction refreshing LastSeen. Events are published outside
+// the lock (MEM-03).
 func (m *Mempool) removeExpiredTransactions() {
 	now := time.Now()
+	var events []event.Event
+	var expiredCount int
 	m.Lock()
 	m.consumersMutex.Lock()
-	var expiredCount int
 	// Iterate backward to safely remove by index
 	for i := len(m.transactions) - 1; i >= 0; i-- {
 		tx := m.transactions[i]
@@ -340,12 +364,21 @@ func (m *Mempool) removeExpiredTransactions() {
 				"tx_hash", tx.Hash,
 				"age", now.Sub(tx.LastSeen).String(),
 			)
-			m.removeTransactionByIndexLocked(i)
+			_, evt := m.removeTransactionByIndexLocked(i)
 			expiredCount++
+			if evt != nil {
+				events = append(events, *evt)
+			}
 		}
 	}
 	m.consumersMutex.Unlock()
 	m.Unlock()
+	// MEM-03: Publish events outside locks
+	if m.eventBus != nil {
+		for _, evt := range events {
+			m.eventBus.Publish(RemoveTransactionEventType, evt)
+		}
+	}
 	if expiredCount > 0 {
 		m.metrics.txsExpired.Add(float64(expiredCount))
 		m.logger.Debug(
@@ -360,11 +393,11 @@ func (m *Mempool) AddTransaction(txType uint, txBytes []byte) error {
 	// Decode transaction
 	tmpTx, err := gledger.NewTransactionFromCbor(txType, txBytes)
 	if err != nil {
-		return err
+		return fmt.Errorf("decode transaction: %w", err)
 	}
 	// Validate transaction
 	if err := m.validator.ValidateTx(tmpTx); err != nil {
-		return err
+		return fmt.Errorf("validate transaction: %w", err)
 	}
 	// Build mempool entry
 	txHash := tmpTx.Hash().String()
@@ -374,78 +407,95 @@ func (m *Mempool) AddTransaction(txType uint, txBytes []byte) error {
 		Cbor:     txBytes,
 		LastSeen: time.Now(),
 	}
-	m.Lock()
-	m.consumersMutex.Lock()
-	defer func() {
-		m.consumersMutex.Unlock()
-		m.Unlock()
-	}()
-	// Update last seen for existing TX
-	existingTx := m.getTransaction(tx.Hash)
-	if existingTx != nil {
-		existingTx.LastSeen = time.Now()
+	// Collect events to publish and eviction events inside the lock,
+	// then publish them all after releasing locks (MEM-03 fix).
+	var addEvent *event.Event
+	var evictedEvents []event.Event
+	func() {
+		m.Lock()
+		m.consumersMutex.Lock()
+		defer func() {
+			m.consumersMutex.Unlock()
+			m.Unlock()
+		}()
+		// Update last seen for existing TX
+		existingTx := m.getTransaction(tx.Hash)
+		if existingTx != nil {
+			existingTx.LastSeen = time.Now()
+			m.logger.Debug(
+				"updated last seen for transaction",
+				"component", "mempool",
+				"tx_hash", tx.Hash,
+			)
+			return
+		}
+		// Enforce mempool capacity using watermarks
+		txSize := int64(len(tx.Cbor))
+		newSize := m.currentSizeBytes + txSize
+		rejectionThreshold := int64(
+			float64(m.config.MempoolCapacity) * m.rejectionWatermark,
+		)
+		if newSize > rejectionThreshold {
+			err = &MempoolFullError{
+				CurrentSize: int(m.currentSizeBytes),
+				TxSize:      int(txSize),
+				Capacity:    m.config.MempoolCapacity,
+			}
+			return
+		}
+		evictionThreshold := int64(
+			float64(m.config.MempoolCapacity) * m.evictionWatermark,
+		)
+		if newSize > evictionThreshold {
+			targetBytes := evictionThreshold - txSize
+			if targetBytes < 0 {
+				targetBytes = 0
+			}
+			evictedEvents = m.evictOldestLocked(targetBytes)
+		}
+		// Add transaction record
+		m.transactions = append(m.transactions, &tx)
+		m.txByHash[tx.Hash] = &tx
+		m.currentSizeBytes += txSize
 		m.logger.Debug(
-			"updated last seen for transaction",
+			"added transaction",
 			"component", "mempool",
 			"tx_hash", tx.Hash,
 		)
-		return nil
-	}
-	// Enforce mempool capacity using watermarks
-	txSize := int64(len(tx.Cbor))
-	newSize := m.currentSizeBytes + txSize
-	rejectionThreshold := int64(
-		float64(m.config.MempoolCapacity) * m.rejectionWatermark,
-	)
-	if newSize > rejectionThreshold {
-		return &MempoolFullError{
-			CurrentSize: int(m.currentSizeBytes),
-			TxSize:      int(txSize),
-			Capacity:    m.config.MempoolCapacity,
-		}
-	}
-	evictionThreshold := int64(
-		float64(m.config.MempoolCapacity) * m.evictionWatermark,
-	)
-	if newSize > evictionThreshold {
-		targetBytes := evictionThreshold - txSize
-		if targetBytes < 0 {
-			targetBytes = 0
-		}
-		m.evictOldest(targetBytes)
-	}
-	// Add transaction record
-	m.transactions = append(m.transactions, &tx)
-	m.txByHash[tx.Hash] = &tx
-	m.currentSizeBytes += txSize
-	m.logger.Debug(
-		"added transaction",
-		"component", "mempool",
-		"tx_hash", tx.Hash,
-	)
-	m.metrics.txsProcessedNum.Inc()
-	m.metrics.txsInMempool.Inc()
-	m.metrics.mempoolBytes.Add(float64(len(tx.Cbor)))
-	// Generate event if event bus is configured
-	if m.eventBus != nil {
-		m.eventBus.Publish(
-			AddTransactionEventType,
-			event.NewEvent(
+		m.metrics.txsProcessedNum.Inc()
+		m.metrics.txsInMempool.Inc()
+		m.metrics.mempoolBytes.Add(float64(len(tx.Cbor)))
+		// Prepare event for publishing outside the lock
+		if m.eventBus != nil {
+			evt := event.NewEvent(
 				AddTransactionEventType,
 				AddTransactionEvent{
 					Hash: tx.Hash,
 					Type: tx.Type,
 					Body: tx.Cbor,
 				},
-			),
-		)
+			)
+			addEvent = &evt
+		}
+	}()
+	if err != nil {
+		return err
+	}
+	// MEM-03: Publish events outside all locks
+	if m.eventBus != nil {
+		for _, evt := range evictedEvents {
+			m.eventBus.Publish(RemoveTransactionEventType, evt)
+		}
+		if addEvent != nil {
+			m.eventBus.Publish(AddTransactionEventType, *addEvent)
+		}
 	}
 	return nil
 }
 
 func (m *Mempool) GetTransaction(txHash string) (MempoolTransaction, bool) {
-	m.Lock()
-	defer m.Unlock()
+	m.RLock()
+	defer m.RUnlock()
 	ret := m.getTransaction(txHash)
 	if ret == nil {
 		return MempoolTransaction{}, false
@@ -454,8 +504,8 @@ func (m *Mempool) GetTransaction(txHash string) (MempoolTransaction, bool) {
 }
 
 func (m *Mempool) Transactions() []MempoolTransaction {
-	m.Lock()
-	defer m.Unlock()
+	m.RLock()
+	defer m.RUnlock()
 	ret := make([]MempoolTransaction, len(m.transactions))
 	for i := range m.transactions {
 		ret[i] = *m.transactions[i]
@@ -468,41 +518,92 @@ func (m *Mempool) getTransaction(txHash string) *MempoolTransaction {
 }
 
 func (m *Mempool) RemoveTransaction(txHash string) {
+	var evt *event.Event
 	m.Lock()
-	defer m.Unlock()
-	if m.removeTransaction(txHash) {
+	if m.removeTransaction(txHash, &evt) {
 		m.logger.Debug(
 			"removed transaction",
 			"component", "mempool",
 			"tx_hash", txHash,
 		)
 	}
+	m.Unlock()
+	// MEM-03: Publish event outside the lock
+	if evt != nil && m.eventBus != nil {
+		m.eventBus.Publish(RemoveTransactionEventType, *evt)
+	}
 }
 
-func (m *Mempool) removeTransaction(txHash string) bool {
+func (m *Mempool) removeTransaction(
+	txHash string,
+	evtOut **event.Event,
+) bool {
 	for txIdx, tx := range m.transactions {
 		if tx.Hash == txHash {
-			return m.removeTransactionByIndex(txIdx)
+			ok, evt := m.removeTransactionByIndex(txIdx)
+			if evtOut != nil {
+				*evtOut = evt
+			}
+			return ok
 		}
 	}
 	return false
 }
 
-func (m *Mempool) removeTransactionByIndex(txIdx int) bool {
+// removeTransactions removes multiple transactions by hash. Events
+// are published outside the lock. Returns the number of transactions
+// actually removed.
+func (m *Mempool) removeTransactions(hashes []string) int {
+	hashSet := make(map[string]struct{}, len(hashes))
+	for _, h := range hashes {
+		hashSet[h] = struct{}{}
+	}
+	var events []event.Event
+	var removedCount int
+	m.Lock()
 	m.consumersMutex.Lock()
-	result := m.removeTransactionByIndexLocked(txIdx)
+	// Iterate backward to safely remove by index
+	for i := len(m.transactions) - 1; i >= 0; i-- {
+		tx := m.transactions[i]
+		if _, found := hashSet[tx.Hash]; found {
+			_, evt := m.removeTransactionByIndexLocked(i)
+			removedCount++
+			if evt != nil {
+				events = append(events, *evt)
+			}
+			delete(hashSet, tx.Hash)
+			if len(hashSet) == 0 {
+				break
+			}
+		}
+	}
 	m.consumersMutex.Unlock()
-	return result
+	m.Unlock()
+	// MEM-03: Publish events outside the lock
+	if m.eventBus != nil {
+		for _, evt := range events {
+			m.eventBus.Publish(RemoveTransactionEventType, evt)
+		}
+	}
+	return removedCount
+}
+
+func (m *Mempool) removeTransactionByIndex(txIdx int) (bool, *event.Event) {
+	m.consumersMutex.Lock()
+	result, evt := m.removeTransactionByIndexLocked(txIdx)
+	m.consumersMutex.Unlock()
+	return result, evt
 }
 
 // removeTransactionByIndexLocked removes a transaction by its
 // slice index. The caller must hold both the mempool write lock
-// and consumersMutex.
+// and consumersMutex. Returns the event to publish (if any) --
+// the caller must publish it after releasing locks (MEM-03).
 func (m *Mempool) removeTransactionByIndexLocked(
 	txIdx int,
-) bool {
+) (bool, *event.Event) {
 	if txIdx >= len(m.transactions) {
-		return false
+		return false, nil
 	}
 	tx := m.transactions[txIdx]
 	txSize := int64(len(tx.Cbor))
@@ -523,26 +624,26 @@ func (m *Mempool) removeTransactionByIndexLocked(
 		}
 		consumer.nextTxIdxMu.Unlock()
 	}
-	// Generate event
+	// Collect event for deferred publishing outside lock
+	var evt *event.Event
 	if m.eventBus != nil {
-		m.eventBus.Publish(
+		e := event.NewEvent(
 			RemoveTransactionEventType,
-			event.NewEvent(
-				RemoveTransactionEventType,
-				RemoveTransactionEvent{
-					Hash: tx.Hash,
-				},
-			),
+			RemoveTransactionEvent{
+				Hash: tx.Hash,
+			},
 		)
+		evt = &e
 	}
-	return true
+	return true, evt
 }
 
-// evictOldest removes transactions from the front of the
+// evictOldestLocked removes transactions from the front of the
 // slice (oldest first) until currentSizeBytes is at or below
 // targetBytes. The caller must hold both the mempool write
-// lock and consumersMutex.
-func (m *Mempool) evictOldest(targetBytes int64) {
+// lock and consumersMutex. Returns events to publish after
+// releasing locks (MEM-03).
+func (m *Mempool) evictOldestLocked(targetBytes int64) []event.Event {
 	// Calculate how many transactions to evict from the front
 	var evicted int
 	var evictedBytes int64
@@ -552,11 +653,12 @@ func (m *Mempool) evictOldest(targetBytes int64) {
 		evicted++
 	}
 	if evicted == 0 {
-		return
+		return nil
 	}
 
-	// Clean up hash map, update metrics, and publish events
+	// Clean up hash map, update metrics, and collect events
 	// for each evicted transaction
+	var events []event.Event
 	for i := range evicted {
 		tx := m.transactions[i]
 		txSize := int64(len(tx.Cbor))
@@ -564,15 +666,12 @@ func (m *Mempool) evictOldest(targetBytes int64) {
 		m.metrics.txsInMempool.Dec()
 		m.metrics.mempoolBytes.Sub(float64(txSize))
 		if m.eventBus != nil {
-			m.eventBus.Publish(
+			events = append(events, event.NewEvent(
 				RemoveTransactionEventType,
-				event.NewEvent(
-					RemoveTransactionEventType,
-					RemoveTransactionEvent{
-						Hash: tx.Hash,
-					},
-				),
-			)
+				RemoveTransactionEvent{
+					Hash: tx.Hash,
+				},
+			))
 		}
 	}
 
@@ -602,4 +701,5 @@ func (m *Mempool) evictOldest(targetBytes int64) {
 		"evicted_count", evicted,
 		"current_size_bytes", m.currentSizeBytes,
 	)
+	return events
 }
