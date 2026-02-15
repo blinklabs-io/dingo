@@ -215,6 +215,19 @@ func (s *queryServiceServer) ReadUtxos(
 	s.utxorpc.config.Logger.Info(
 		fmt.Sprintf("Got a ReadUtxos request with keys %v", keys),
 	)
+
+	// Enforce request size limit
+	if len(keys) > s.utxorpc.config.MaxUtxoKeys {
+		return nil, connect.NewError(
+			connect.CodeInvalidArgument,
+			fmt.Errorf(
+				"too many UTxO keys: %d exceeds maximum of %d",
+				len(keys),
+				s.utxorpc.config.MaxUtxoKeys,
+			),
+		)
+	}
+
 	resp := &query.ReadUtxosResponse{}
 
 	// Get UTxOs from ledger
@@ -448,6 +461,19 @@ func (s *queryServiceServer) ReadData(
 			fieldMask,
 		),
 	)
+
+	// Enforce request size limit
+	if len(keys) > s.utxorpc.config.MaxDataKeys {
+		return nil, connect.NewError(
+			connect.CodeInvalidArgument,
+			fmt.Errorf(
+				"too many data keys: %d exceeds maximum of %d",
+				len(keys),
+				s.utxorpc.config.MaxDataKeys,
+			),
+		)
+	}
+
 	resp := &query.ReadDataResponse{}
 
 	for _, key := range keys {
