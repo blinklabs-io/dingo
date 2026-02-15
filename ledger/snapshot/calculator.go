@@ -55,10 +55,8 @@ type StakeDistribution struct {
 // This aggregates all delegated stake by pool from the account and UTxO tables.
 //
 // Pool selection is slot-aware: only pools registered at or before the
-// requested slot are included. Stake aggregation currently uses the current
-// ledger state (delegator counts from the accounts table; stake values are
-// zero placeholders). A future slot-aware GetStakeByPoolsAtSlot method is
-// needed for full consensus-grade accuracy; see getBatchPoolsDelegatedStake.
+// requested slot are included. Stake is computed by joining active accounts
+// with their live UTxOs and summing amounts per pool.
 func (c *Calculator) CalculateStakeDistribution(
 	ctx context.Context,
 	slot uint64,
@@ -166,14 +164,13 @@ func (c *Calculator) getActivePoolsAtSlot(
 
 // getBatchPoolsDelegatedStake returns stake for all pools in a single batch
 // query. Returns maps of pool hash -> total stake and pool hash -> delegator
-// count. Stake values are currently zero (placeholder) until UTxO aggregation
-// is implemented; delegator counts reflect the current ledger state.
+// count. Stake is computed by joining active accounts with their live UTxOs
+// (deleted_slot = 0) and summing the amounts per pool.
 //
-// TODO: Replace GetStakeByPools with a slot-aware GetStakeByPoolsAtSlot that:
-//  1. Filters accounts active at the given slot (added_slot <= slot)
-//  2. Considers delegation certificates at or before the slot
-//  3. Aggregates UTxO values at the slot (created_slot <= slot AND
-//     (spent_slot IS NULL OR spent_slot > slot))
+// NOTE: This currently uses the live UTxO set rather than a historical
+// snapshot. A future slot-aware GetStakeByPoolsAtSlot method could filter
+// by created_slot <= slot AND (deleted_slot = 0 OR deleted_slot > slot)
+// for full consensus-grade accuracy at historical points.
 func (c *Calculator) getBatchPoolsDelegatedStake(
 	_ context.Context,
 	meta metadata.MetadataStore,
