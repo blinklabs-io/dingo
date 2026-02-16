@@ -16,6 +16,7 @@ package sqlite
 
 import (
 	"bytes"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"strings"
@@ -1648,6 +1649,166 @@ func (d *MetadataStoreSqlite) SetGenesisTransaction(
 		}).Create(&outputs)
 		if result.Error != nil {
 			return fmt.Errorf("create genesis utxos: %w", result.Error)
+		}
+	}
+
+	return nil
+}
+
+// SetGenesisStaking stores genesis pool registrations and stake delegations
+// from the shelley-genesis.json staking section. It creates Pool,
+// PoolRegistration, and Account records at slot 0.
+func (d *MetadataStoreSqlite) SetGenesisStaking(
+	pools map[string]lcommon.PoolRegistrationCertificate,
+	stakeDelegations map[string]string,
+	blockHash []byte,
+	txn types.Txn,
+) error {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return err
+	}
+
+	// Batch fetch all existing pools to avoid N+1 queries
+	poolKeyHashes := make([][]byte, 0, len(pools))
+	for _, cert := range pools {
+		poolKeyHashes = append(poolKeyHashes, cert.Operator[:])
+	}
+	var existingPools []models.Pool
+	if len(poolKeyHashes) > 0 {
+		if result := db.Where(
+			"pool_key_hash IN ?",
+			poolKeyHashes,
+		).Find(&existingPools); result.Error != nil {
+			return fmt.Errorf(
+				"batch fetch genesis pools: %w",
+				result.Error,
+			)
+		}
+	}
+	existingPoolMap := make(map[string]*models.Pool, len(existingPools))
+	for i := range existingPools {
+		key := hex.EncodeToString(existingPools[i].PoolKeyHash)
+		existingPoolMap[key] = &existingPools[i]
+	}
+
+	for _, cert := range pools {
+		poolKey := hex.EncodeToString(cert.Operator[:])
+		tmpPool := existingPoolMap[poolKey]
+		if tmpPool == nil {
+			tmpPool = &models.Pool{
+				PoolKeyHash: cert.Operator[:],
+				VrfKeyHash:  cert.VrfKeyHash[:],
+			}
+		}
+		tmpPool.Pledge = types.Uint64(cert.Pledge)
+		tmpPool.Cost = types.Uint64(cert.Cost)
+		tmpPool.Margin = &types.Rat{Rat: cert.Margin.Rat}
+		tmpPool.RewardAccount = cert.RewardAccount[:]
+
+		tmpReg := models.PoolRegistration{
+			PoolKeyHash:   cert.Operator[:],
+			VrfKeyHash:    cert.VrfKeyHash[:],
+			Pledge:        types.Uint64(cert.Pledge),
+			Cost:          types.Uint64(cert.Cost),
+			Margin:        &types.Rat{Rat: cert.Margin.Rat},
+			RewardAccount: cert.RewardAccount[:],
+			AddedSlot:     0,
+		}
+		if cert.PoolMetadata != nil {
+			tmpReg.MetadataUrl = cert.PoolMetadata.Url
+			tmpReg.MetadataHash = cert.PoolMetadata.Hash[:]
+		}
+		for _, owner := range cert.PoolOwners {
+			tmpReg.Owners = append(
+				tmpReg.Owners,
+				models.PoolRegistrationOwner{KeyHash: owner[:]},
+			)
+		}
+		tmpPool.Owners = tmpReg.Owners
+
+		for _, relay := range cert.Relays {
+			tmpRelay := models.PoolRegistrationRelay{
+				Ipv4: relay.Ipv4,
+				Ipv6: relay.Ipv6,
+			}
+			if relay.Port != nil {
+				tmpRelay.Port = uint(*relay.Port)
+			}
+			if relay.Hostname != nil {
+				tmpRelay.Hostname = *relay.Hostname
+			}
+			tmpReg.Relays = append(tmpReg.Relays, tmpRelay)
+		}
+		tmpPool.Relays = tmpReg.Relays
+
+		if tmpPool.ID == 0 {
+			result := db.Omit(clause.Associations).Create(tmpPool)
+			if result.Error != nil {
+				return fmt.Errorf(
+					"create genesis pool: %w",
+					result.Error,
+				)
+			}
+		} else {
+			result := db.Omit(clause.Associations).Save(tmpPool)
+			if result.Error != nil {
+				return fmt.Errorf(
+					"save genesis pool: %w",
+					result.Error,
+				)
+			}
+		}
+		tmpReg.PoolID = tmpPool.ID
+		for i := range tmpReg.Owners {
+			tmpReg.Owners[i].PoolID = tmpPool.ID
+		}
+		for i := range tmpReg.Relays {
+			tmpReg.Relays[i].PoolID = tmpPool.ID
+		}
+
+		result := db.Create(&tmpReg)
+		if result.Error != nil {
+			return fmt.Errorf(
+				"create genesis pool registration: %w",
+				result.Error,
+			)
+		}
+	}
+
+	for stakerHex, poolHex := range stakeDelegations {
+		stakerBytes, err := hex.DecodeString(stakerHex)
+		if err != nil {
+			return fmt.Errorf(
+				"decode staker hash %s: %w",
+				stakerHex,
+				err,
+			)
+		}
+		poolBytes, err := hex.DecodeString(poolHex)
+		if err != nil {
+			return fmt.Errorf(
+				"decode pool hash %s: %w",
+				poolHex,
+				err,
+			)
+		}
+
+		account := &models.Account{
+			StakingKey: stakerBytes,
+			Pool:       poolBytes,
+			Active:     true,
+			AddedSlot:  0,
+		}
+		result := db.Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "staking_key"}},
+			DoNothing: true,
+		}).Create(account)
+		if result.Error != nil {
+			return fmt.Errorf(
+				"create genesis account: %w",
+				result.Error,
+			)
 		}
 	}
 

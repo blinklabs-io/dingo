@@ -1682,3 +1682,13 @@ func (d *MetadataStoreMysql) DeleteTransactionsAfterSlot(
 
 	return nil
 }
+
+// SetGenesisStaking is not implemented for the MySQL metadata plugin.
+func (d *MetadataStoreMysql) SetGenesisStaking(
+	_ map[string]lcommon.PoolRegistrationCertificate,
+	_ map[string]string,
+	_ []byte,
+	_ types.Txn,
+) error {
+	return errors.New("genesis staking not implemented for mysql")
+}

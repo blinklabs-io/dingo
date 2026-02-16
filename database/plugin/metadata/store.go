@@ -279,6 +279,17 @@ type MetadataStore interface {
 		txn types.Txn,
 	) error
 
+	// SetGenesisStaking stores genesis pool registrations and stake
+	// delegations from the shelley-genesis.json staking section.
+	// pools maps pool key hash (hex) to its registration certificate.
+	// stakeDelegations maps staking credential hash (hex) to pool key hash (hex).
+	SetGenesisStaking(
+		pools map[string]lcommon.PoolRegistrationCertificate,
+		stakeDelegations map[string]string,
+		blockHash []byte,
+		txn types.Txn,
+	) error
+
 	// Helper methods
 
 	// DeleteBlockNoncesBeforeSlot removes block nonces older than the given slot.
