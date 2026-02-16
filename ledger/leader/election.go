@@ -117,29 +117,21 @@ func (e *Election) Start(ctx context.Context) error {
 		)
 	}
 
-	// Subscribe to epoch transitions
-	e.subscriptionId = e.eventBus.SubscribeFunc(
+	// Subscribe to epoch transitions using a channel so we can drain
+	// stale events during rapid sync (e.g., devnet with 500ms epochs).
+	var evtCh <-chan event.Event
+	e.subscriptionId, evtCh = e.eventBus.Subscribe(
 		event.EpochTransitionEventType,
-		func(evt event.Event) {
-			epochEvent, ok := evt.Data.(event.EpochTransitionEvent)
-			if !ok {
-				return
-			}
-			e.logger.Info(
-				"epoch transition, refreshing leader schedule",
-				"component", "leader",
-				"new_epoch", epochEvent.NewEpoch,
-			)
-			if err := e.RefreshSchedule(ctx); err != nil {
-				e.logger.Error(
-					"failed to refresh schedule",
-					"component", "leader",
-					"epoch", epochEvent.NewEpoch,
-					"error", err,
-				)
-			}
-		},
 	)
+
+	if evtCh == nil {
+		e.logger.Warn(
+			"event bus not available, epoch transitions will not be tracked",
+			"component", "leader",
+		)
+	} else {
+		go e.epochTransitionLoop(ctx, evtCh)
+	}
 
 	// Monitor context cancellation to automatically stop.
 	// The goroutine exits when either the context is canceled or Stop() is called.
@@ -160,6 +152,58 @@ func (e *Election) Start(ctx context.Context) error {
 	)
 
 	return nil
+}
+
+// epochTransitionLoop reads epoch transition events from the channel,
+// draining any queued stale events so only the latest is processed.
+// This prevents wasted schedule recalculations during rapid sync.
+func (e *Election) epochTransitionLoop(
+	ctx context.Context,
+	evtCh <-chan event.Event,
+) {
+	for evt := range evtCh {
+		// Drain any queued events, keeping only the latest.
+		latest := evt
+	drain:
+		for {
+			select {
+			case newer, ok := <-evtCh:
+				if !ok {
+					return
+				}
+				latest = newer
+			default:
+				break drain
+			}
+		}
+
+		epochEvent, ok := latest.Data.(event.EpochTransitionEvent)
+		if !ok {
+			e.logger.Error(
+				"invalid event data for epoch transition",
+				"component", "leader",
+			)
+			continue
+		}
+
+		e.logger.Info(
+			"epoch transition, refreshing leader schedule",
+			"component", "leader",
+			"new_epoch", epochEvent.NewEpoch,
+		)
+		if err := e.RefreshSchedule(ctx); err != nil {
+			e.logger.Error(
+				"failed to refresh schedule",
+				"component", "leader",
+				"epoch", epochEvent.NewEpoch,
+				"error", err,
+			)
+		}
+
+		if ctx.Err() != nil {
+			return
+		}
+	}
 }
 
 // Stop stops the leader election manager.
