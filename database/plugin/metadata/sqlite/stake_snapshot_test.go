@@ -528,6 +528,133 @@ func TestDeleteEpochSummariesAfterEpoch(t *testing.T) {
 	assert.Equal(t, uint64(101), latest.Epoch)
 }
 
+// TestGetStakeByPoolsAggregatesUtxos tests that GetStakeByPools correctly
+// sums live UTxO amounts per pool by joining accounts with their UTxOs.
+func TestGetStakeByPoolsAggregatesUtxos(t *testing.T) {
+	store := setupStakeSnapshotTestStore(t)
+	defer store.Close() //nolint:errcheck
+
+	db := store.DB()
+
+	// Pool key hashes (28 bytes each)
+	poolA := []byte("pool_A_1234567890123456789012")
+	poolB := []byte("pool_B_1234567890123456789012")
+
+	// Staking keys (28 bytes each)
+	stakeKeyAlice := []byte("alice_stakekey_1234567890123")
+	stakeKeyBob := []byte("bob___stakekey_1234567890123")
+	stakeKeyCarol := []byte("carol_stakekey_1234567890123")
+
+	// Create accounts delegated to pools
+	accounts := []models.Account{
+		{StakingKey: stakeKeyAlice, Pool: poolA, AddedSlot: 100, Active: true},
+		{StakingKey: stakeKeyBob, Pool: poolA, AddedSlot: 100, Active: true},
+		{StakingKey: stakeKeyCarol, Pool: poolB, AddedSlot: 100, Active: true},
+	}
+	for i := range accounts {
+		require.NoError(t, db.Create(&accounts[i]).Error, "create account")
+	}
+
+	// Create live UTxOs for these staking keys (deleted_slot = 0 means unspent)
+	utxos := []models.Utxo{
+		// Alice has 2 UTxOs: 5 ADA + 3 ADA = 8 ADA total
+		{TxId: []byte("tx01_234567890123456789012345678901"), OutputIdx: 0, StakingKey: stakeKeyAlice, Amount: 5000000, AddedSlot: 100, DeletedSlot: 0},
+		{TxId: []byte("tx02_234567890123456789012345678901"), OutputIdx: 0, StakingKey: stakeKeyAlice, Amount: 3000000, AddedSlot: 200, DeletedSlot: 0},
+		// Bob has 1 UTxO: 10 ADA
+		{TxId: []byte("tx03_234567890123456789012345678901"), OutputIdx: 0, StakingKey: stakeKeyBob, Amount: 10000000, AddedSlot: 100, DeletedSlot: 0},
+		// Bob also has a spent UTxO that should NOT be counted
+		{TxId: []byte("tx04_234567890123456789012345678901"), OutputIdx: 0, StakingKey: stakeKeyBob, Amount: 7000000, AddedSlot: 50, DeletedSlot: 150},
+		// Carol has 1 UTxO: 20 ADA
+		{TxId: []byte("tx05_234567890123456789012345678901"), OutputIdx: 0, StakingKey: stakeKeyCarol, Amount: 20000000, AddedSlot: 100, DeletedSlot: 0},
+	}
+	for i := range utxos {
+		require.NoError(t, db.Create(&utxos[i]).Error, "create utxo")
+	}
+
+	// Query stake for both pools
+	stakes, delegators, err := store.GetStakeByPools(
+		[][]byte{poolA, poolB},
+		nil,
+	)
+	require.NoError(t, err, "GetStakeByPools failed")
+
+	// Pool A: Alice (5M + 3M) + Bob (10M) = 18M lovelace
+	require.Equal(t, uint64(18000000), stakes[string(poolA)],
+		"pool A stake should sum live UTxOs for Alice and Bob")
+
+	// Pool B: Carol (20M) = 20M lovelace
+	require.Equal(t, uint64(20000000), stakes[string(poolB)],
+		"pool B stake should sum live UTxOs for Carol")
+
+	// Delegator counts
+	require.Equal(t, uint64(2), delegators[string(poolA)],
+		"pool A should have 2 delegators")
+	require.Equal(t, uint64(1), delegators[string(poolB)],
+		"pool B should have 1 delegator")
+}
+
+// TestGetStakeByPoolsExcludesInactiveAccounts tests that inactive accounts
+// are excluded from stake aggregation.
+func TestGetStakeByPoolsExcludesInactiveAccounts(t *testing.T) {
+	store := setupStakeSnapshotTestStore(t)
+	defer store.Close() //nolint:errcheck
+
+	db := store.DB()
+
+	poolA := []byte("pool_A_1234567890123456789012")
+	stakeActive := []byte("active_stakekey_123456789012")
+	stakeInactive := []byte("inactv_stakekey_123456789012")
+
+	// One active account, one inactive.
+	// Note: GORM's Create skips zero-value fields when the model has
+	// a `default` tag, so Active: false would be stored as true.
+	// Use a map-based update after creation to set Active = false.
+	require.NoError(t, db.Create(&models.Account{
+		StakingKey: stakeActive, Pool: poolA, AddedSlot: 100, Active: true,
+	}).Error)
+	inactiveAccount := models.Account{
+		StakingKey: stakeInactive, Pool: poolA, AddedSlot: 100, Active: true,
+	}
+	require.NoError(t, db.Create(&inactiveAccount).Error)
+	require.NoError(t, db.Model(&inactiveAccount).Update("active", false).Error)
+
+	// Both have UTxOs
+	require.NoError(t, db.Create(&models.Utxo{
+		TxId: []byte("tx01_active_678901234567890123456789"), OutputIdx: 0,
+		StakingKey: stakeActive, Amount: 5000000, AddedSlot: 100,
+	}).Error)
+	require.NoError(t, db.Create(&models.Utxo{
+		TxId: []byte("tx02_inactv_678901234567890123456789"), OutputIdx: 0,
+		StakingKey: stakeInactive, Amount: 9000000, AddedSlot: 100,
+	}).Error)
+
+	stakes, delegators, err := store.GetStakeByPools([][]byte{poolA}, nil)
+	require.NoError(t, err)
+
+	// Only active account's UTxO counted
+	require.Equal(t, uint64(5000000), stakes[string(poolA)],
+		"only active account stake should be counted")
+	require.Equal(t, uint64(1), delegators[string(poolA)],
+		"only active account should be counted as delegator")
+}
+
+// TestGetStakeByPoolsNoDelegators tests that pools with no delegators
+// return zero stake.
+func TestGetStakeByPoolsNoDelegators(t *testing.T) {
+	store := setupStakeSnapshotTestStore(t)
+	defer store.Close() //nolint:errcheck
+
+	poolEmpty := []byte("pool_E_1234567890123456789012")
+
+	stakes, delegators, err := store.GetStakeByPools(
+		[][]byte{poolEmpty},
+		nil,
+	)
+	require.NoError(t, err)
+	require.Equal(t, uint64(0), stakes[string(poolEmpty)])
+	require.Equal(t, uint64(0), delegators[string(poolEmpty)])
+}
+
 // TestSnapshotTypesMarkSetGo tests all three snapshot types
 func TestSnapshotTypesMarkSetGo(t *testing.T) {
 	store := setupStakeSnapshotTestStore(t)

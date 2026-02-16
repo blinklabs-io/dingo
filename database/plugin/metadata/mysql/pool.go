@@ -763,6 +763,8 @@ func (d *MetadataStoreMysql) GetStakeByPool(
 }
 
 // GetStakeByPools returns delegated stake for multiple pools in a single query.
+// Stake is computed by joining active accounts with their live UTxOs
+// (deleted_slot = 0) and summing the UTxO amounts per pool.
 func (d *MetadataStoreMysql) GetStakeByPools(
 	poolKeyHashes [][]byte,
 	txn types.Txn,
@@ -772,8 +774,6 @@ func (d *MetadataStoreMysql) GetStakeByPools(
 		return nil, nil, fmt.Errorf("GetStakeByPools: resolve db: %w", err)
 	}
 
-	// Initialize maps - stakeMap returns zeros since stake calculation
-	// requires UTxO aggregation which is not yet implemented
 	stakeMap := make(map[string]uint64, len(poolKeyHashes))
 	delegatorMap := make(map[string]uint64, len(poolKeyHashes))
 
@@ -787,36 +787,53 @@ func (d *MetadataStoreMysql) GetStakeByPools(
 		return stakeMap, delegatorMap, nil
 	}
 
-	// Query accounts delegated to these pools and count
-	type poolStakeResult struct {
+	// Query delegator counts per pool from active accounts
+	type poolDelegatorResult struct {
 		Pool           []byte
 		DelegatorCount int64
 	}
 
-	var results []poolStakeResult
+	var delegatorResults []poolDelegatorResult
 	if err := db.Model(&models.Account{}).
 		Select("pool, COUNT(*) as delegator_count").
 		Where("pool IN ? AND active = ?", poolKeyHashes, true).
 		Group("pool").
-		Scan(&results).Error; err != nil {
+		Scan(&delegatorResults).Error; err != nil {
 		return nil, nil, fmt.Errorf(
-			"GetStakeByPools: query accounts: %w",
+			"GetStakeByPools: query delegator counts: %w",
 			err,
 		)
 	}
 
-	// Update delegator counts from query results
-	for _, r := range results {
+	for _, r := range delegatorResults {
 		if r.DelegatorCount >= 0 {
 			delegatorMap[string(r.Pool)] = uint64(r.DelegatorCount)
 		}
 	}
 
-	// TODO: Implement full stake calculation. This requires:
-	// 1. Get all staking_keys for accounts delegated to pools
-	// 2. Query UTxOs by stake credential
-	// 3. Sum values per pool
-	// For now, stakeMap returns zeros - stake values are placeholders.
+	// Query total delegated stake per pool by joining accounts with
+	// their live UTxOs (deleted_slot = 0) and summing UTxO amounts.
+	type poolStakeResult struct {
+		Pool       []byte
+		TotalStake uint64
+	}
+
+	var stakeResults []poolStakeResult
+	if err := db.Table("account").
+		Select("account.pool, COALESCE(SUM(utxo.amount), 0) as total_stake").
+		Joins("INNER JOIN utxo ON utxo.staking_key = account.staking_key").
+		Where("account.pool IN ? AND account.active = ? AND utxo.deleted_slot = 0", poolKeyHashes, true).
+		Group("account.pool").
+		Scan(&stakeResults).Error; err != nil {
+		return nil, nil, fmt.Errorf(
+			"GetStakeByPools: query stake: %w",
+			err,
+		)
+	}
+
+	for _, r := range stakeResults {
+		stakeMap[string(r.Pool)] = r.TotalStake
+	}
 
 	return stakeMap, delegatorMap, nil
 }
