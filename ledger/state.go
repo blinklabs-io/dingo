@@ -1235,6 +1235,16 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 	if err != nil {
 		return err
 	}
+	// Notify subscribers that pool state has been restored (e.g., for cache invalidation)
+	if ls.config.EventBus != nil {
+		ls.config.EventBus.PublishAsync(
+			PoolStateRestoredEventType,
+			event.NewEvent(
+				PoolStateRestoredEventType,
+				PoolStateRestoredEvent{Slot: point.Slot},
+			),
+		)
+	}
 	// Reload protocol parameters to reflect the rolled-back state
 	if err := ls.loadPParams(); err != nil {
 		ls.config.Logger.Warn(

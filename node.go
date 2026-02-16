@@ -370,7 +370,7 @@ func (n *Node) Run(ctx context.Context) error {
 	})
 	// Configure peer governor
 	// Create ledger peer provider for discovering peers from stake pool relays
-	ledgerPeerProvider, err := ledger.NewLedgerPeerProvider(n.ledgerState, n.db)
+	ledgerPeerProvider, err := ledger.NewLedgerPeerProvider(n.ledgerState, n.db, n.eventBus)
 	if err != nil {
 		return fmt.Errorf("failed to create ledger peer provider: %w", err)
 	}
