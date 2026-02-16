@@ -15,6 +15,7 @@
 package utxorpc
 
 import (
+	"context"
 	"encoding/hex"
 	"sync"
 	"sync/atomic"
@@ -198,6 +199,55 @@ func TestWatchMempool_EventBusCleanup(t *testing.T) {
 		100*time.Millisecond,
 		10*time.Millisecond,
 		"handler should not be called after unsubscribe",
+	)
+}
+
+// TestStreamContextCancellation_Pattern verifies the pattern used in
+// FollowTip and WatchTx where a goroutine monitors ctx.Done() and
+// calls cancel() to unblock a blocking iterator. This tests the
+// core mechanism without requiring a full chain setup.
+func TestStreamContextCancellation_Pattern(t *testing.T) {
+	// Simulate the chain iterator's blocking pattern: a channel that
+	// blocks until cancelled.
+	iterCtx, iterCancel := context.WithCancel(context.Background())
+	defer iterCancel()
+
+	// Simulate the gRPC stream context
+	streamCtx, streamCancel := context.WithCancel(context.Background())
+
+	// This is the pattern from FollowTip/WatchTx:
+	// When stream context is cancelled, cancel the iterator.
+	go func() {
+		<-streamCtx.Done()
+		iterCancel()
+	}()
+
+	// Simulate the blocking Next() call pattern
+	unblocked := make(chan struct{})
+	go func() {
+		// This simulates chainIter.Next(true) which blocks on
+		// iter.ctx.Done() when no blocks are available
+		<-iterCtx.Done()
+		close(unblocked)
+	}()
+
+	// Cancel the stream context (simulates client disconnect)
+	streamCancel()
+
+	// The iterator should unblock promptly
+	require.Eventually(
+		t,
+		func() bool {
+			select {
+			case <-unblocked:
+				return true
+			default:
+				return false
+			}
+		},
+		2*time.Second,
+		5*time.Millisecond,
+		"iterator should unblock when stream context is cancelled",
 	)
 }
 

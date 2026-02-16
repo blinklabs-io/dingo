@@ -97,19 +97,22 @@ func (s *watchServiceServer) WatchTx(
 
 	defer chainIter.Cancel()
 
+	// Cancel the chain iterator when the gRPC stream context is
+	// done so that blocking Next() calls unblock immediately.
+	go func() {
+		<-ctx.Done()
+		chainIter.Cancel()
+	}()
+
 	for {
-		// Check for client disconnection before blocking
-		if ctx.Err() != nil {
-			s.utxorpc.config.Logger.Debug(
-				"WatchTx client disconnected",
-			)
-			return ctx.Err()
-		}
 		// Check for available block
 		next, err := chainIter.Next(true)
 		if err != nil {
-			// Check if it was a context cancellation from the iterator
+			// Check if it was a context cancellation
 			if ctx.Err() != nil {
+				s.utxorpc.config.Logger.Debug(
+					"WatchTx client disconnected",
+				)
 				return ctx.Err()
 			}
 			s.utxorpc.config.Logger.Error(

@@ -38,6 +38,15 @@ import (
 	"golang.org/x/net/http2/h2c"
 )
 
+// Default request size limits to prevent denial-of-service via
+// unbounded request arrays.
+const (
+	DefaultMaxBlockRefs    = 100
+	DefaultMaxUtxoKeys     = 1000
+	DefaultMaxHistoryItems = 10000
+	DefaultMaxDataKeys     = 1000
+)
+
 type Utxorpc struct {
 	server *http.Server
 	config UtxorpcConfig
@@ -53,6 +62,12 @@ type UtxorpcConfig struct {
 	TlsKeyFilePath  string
 	Host            string
 	Port            uint
+
+	// Request size limits (0 = use default)
+	MaxBlockRefs    int
+	MaxUtxoKeys     int
+	MaxHistoryItems int
+	MaxDataKeys     int
 }
 
 func NewUtxorpc(cfg UtxorpcConfig) *Utxorpc {
@@ -65,6 +80,18 @@ func NewUtxorpc(cfg UtxorpcConfig) *Utxorpc {
 	}
 	if cfg.Port == 0 {
 		cfg.Port = 9090
+	}
+	if cfg.MaxBlockRefs <= 0 {
+		cfg.MaxBlockRefs = DefaultMaxBlockRefs
+	}
+	if cfg.MaxUtxoKeys <= 0 {
+		cfg.MaxUtxoKeys = DefaultMaxUtxoKeys
+	}
+	if cfg.MaxHistoryItems <= 0 {
+		cfg.MaxHistoryItems = DefaultMaxHistoryItems
+	}
+	if cfg.MaxDataKeys <= 0 {
+		cfg.MaxDataKeys = DefaultMaxDataKeys
 	}
 	return &Utxorpc{
 		config: cfg,

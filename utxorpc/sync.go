@@ -49,6 +49,18 @@ func (s *syncServiceServer) FetchBlock(
 	)
 	resp := &sync.FetchBlockResponse{}
 
+	// Enforce request size limit
+	if len(ref) > s.utxorpc.config.MaxBlockRefs {
+		return nil, connect.NewError(
+			connect.CodeInvalidArgument,
+			fmt.Errorf(
+				"too many block refs: %d exceeds maximum of %d",
+				len(ref),
+				s.utxorpc.config.MaxBlockRefs,
+			),
+		)
+	}
+
 	// Get our points
 	var points []ocommon.Point
 	if len(ref) > 0 {
@@ -106,6 +118,19 @@ func (s *syncServiceServer) DumpHistory(
 		),
 	)
 	resp := &sync.DumpHistoryResponse{}
+
+	// Enforce request size limit
+	maxAllowed := uint32(s.utxorpc.config.MaxHistoryItems) // #nosec G115 -- bounded by DefaultMaxHistoryItems (10000)
+	if maxItems > maxAllowed {
+		return nil, connect.NewError(
+			connect.CodeInvalidArgument,
+			fmt.Errorf(
+				"maxItems %d exceeds maximum of %d",
+				maxItems,
+				maxAllowed,
+			),
+		)
+	}
 
 	// Get our points
 	var points []ocommon.Point
@@ -214,19 +239,22 @@ func (s *syncServiceServer) FollowTip(
 
 	defer chainIter.Cancel()
 
+	// Cancel the chain iterator when the gRPC stream context is
+	// done so that blocking Next() calls unblock immediately.
+	go func() {
+		<-ctx.Done()
+		chainIter.Cancel()
+	}()
+
 	for {
-		// Check for client disconnection before blocking
-		if ctx.Err() != nil {
-			s.utxorpc.config.Logger.Debug(
-				"FollowTip client disconnected",
-			)
-			return ctx.Err()
-		}
 		// Check for available block
 		next, err := chainIter.Next(true)
 		if err != nil {
-			// Check if it was a context cancellation from the iterator
+			// Check if it was a context cancellation
 			if ctx.Err() != nil {
+				s.utxorpc.config.Logger.Debug(
+					"FollowTip client disconnected",
+				)
 				return ctx.Err()
 			}
 			s.utxorpc.config.Logger.Error(
