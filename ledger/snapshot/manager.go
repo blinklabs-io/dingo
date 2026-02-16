@@ -79,28 +79,21 @@ func (m *Manager) Start() error {
 	m.cancel = cancel
 	m.running = true
 
-	// Subscribe to epoch transitions
-	m.subscriptionId = m.eventBus.SubscribeFunc(
+	// Subscribe to epoch transitions using a channel so we can drain
+	// stale events during rapid sync (e.g., devnet with 500ms epochs).
+	var evtCh <-chan event.Event
+	m.subscriptionId, evtCh = m.eventBus.Subscribe(
 		event.EpochTransitionEventType,
-		func(evt event.Event) {
-			epochEvent, ok := evt.Data.(event.EpochTransitionEvent)
-			if !ok {
-				m.logger.Error(
-					"invalid event data for epoch transition",
-					"component", "snapshot",
-				)
-				return
-			}
-			if err := m.handleEpochTransition(ctx, epochEvent); err != nil {
-				m.logger.Error(
-					"failed to handle epoch transition",
-					"component", "snapshot",
-					"epoch", epochEvent.NewEpoch,
-					"error", err,
-				)
-			}
-		},
 	)
+
+	if evtCh == nil {
+		m.logger.Warn(
+			"event bus not available, epoch transitions will not be tracked",
+			"component", "snapshot",
+		)
+	} else {
+		go m.epochTransitionLoop(ctx, evtCh)
+	}
 
 	m.logger.Info("snapshot manager started", "component", "snapshot")
 	return nil
@@ -129,6 +122,68 @@ func (m *Manager) Stop() error {
 
 	m.logger.Info("snapshot manager stopped", "component", "snapshot")
 	return nil
+}
+
+// epochTransitionLoop reads epoch transition events from the channel,
+// draining any queued stale events so only the latest is processed.
+// During rapid sync (e.g., devnet with fast epochs), many epoch
+// transitions can queue up while a snapshot is being captured. This
+// loop skips intermediate epochs to avoid wasting work on snapshots
+// that will be immediately superseded.
+func (m *Manager) epochTransitionLoop(
+	ctx context.Context,
+	evtCh <-chan event.Event,
+) {
+	for evt := range evtCh {
+		// Drain any queued events, keeping only the latest.
+		latest := evt
+		drained := false
+	drain:
+		for {
+			select {
+			case newer, ok := <-evtCh:
+				if !ok {
+					return
+				}
+				latest = newer
+				drained = true
+			default:
+				break drain
+			}
+		}
+
+		epochEvent, ok := latest.Data.(event.EpochTransitionEvent)
+		if !ok {
+			m.logger.Error(
+				"invalid event data for epoch transition",
+				"component", "snapshot",
+			)
+			continue
+		}
+
+		if drained {
+			skippedEvt, _ := evt.Data.(event.EpochTransitionEvent)
+			m.logger.Info(
+				"fast-forwarded past intermediate epoch transitions",
+				"component", "snapshot",
+				"from_epoch", skippedEvt.NewEpoch,
+				"to_epoch", epochEvent.NewEpoch,
+			)
+		}
+
+		if err := m.handleEpochTransition(ctx, epochEvent); err != nil {
+			m.logger.Error(
+				"failed to handle epoch transition",
+				"component", "snapshot",
+				"epoch", epochEvent.NewEpoch,
+				"error", err,
+			)
+		}
+
+		if ctx.Err() != nil {
+			return
+		}
+	}
 }
 
 // handleEpochTransition processes an epoch boundary event.
