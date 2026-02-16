@@ -22,11 +22,11 @@ import (
 )
 
 const (
-	DefaultPaginationCount    = 100
-	MaxPaginationCount        = 100
-	DefaultPaginationPage     = 1
-	PaginationOrderAsc        = "asc"
-	PaginationOrderDesc       = "desc"
+	DefaultPaginationCount = 100
+	MaxPaginationCount     = 100
+	DefaultPaginationPage  = 1
+	PaginationOrderAsc     = "asc"
+	PaginationOrderDesc    = "desc"
 )
 
 var ErrInvalidPaginationParameters = errors.New(
