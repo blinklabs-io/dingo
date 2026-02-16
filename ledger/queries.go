@@ -17,6 +17,7 @@ package ledger
 import (
 	"errors"
 	"fmt"
+	"math"
 	"math/big"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -103,6 +104,38 @@ func (ls *LedgerState) queryHardFork(
 	}
 }
 
+// epochPicoseconds computes the duration of an epoch
+// in picoseconds: slotLength * lengthInSlots * 1e9.
+// It uses big.Int arithmetic to prevent overflow when
+// the uint product would exceed math.MaxUint64.
+func epochPicoseconds(
+	slotLength, lengthInSlots uint,
+) *big.Int {
+	result := new(big.Int).SetUint64(uint64(slotLength))
+	result.Mul(
+		result,
+		new(big.Int).SetUint64(uint64(lengthInSlots)),
+	)
+	result.Mul(result, big.NewInt(1_000_000_000))
+	return result
+}
+
+// checkedSlotAdd adds startSlot + length with overflow
+// detection. Returns an error if the result would
+// exceed math.MaxUint64.
+func checkedSlotAdd(
+	startSlot, length uint64,
+) (uint64, error) {
+	if startSlot > math.MaxUint64-length {
+		return 0, fmt.Errorf(
+			"era history overflow: start slot %d + length %d",
+			startSlot,
+			length,
+		)
+	}
+	return startSlot + length, nil
+}
+
 func (ls *LedgerState) queryHardForkEraHistory() (any, error) {
 	retData := []any{}
 	timespan := big.NewInt(0)
@@ -149,17 +182,23 @@ func (ls *LedgerState) queryHardForkEraHistory() (any, error) {
 			// Add epoch length in picoseconds to timespan
 			timespan.Add(
 				timespan,
-				new(big.Int).SetUint64(
-					uint64(
-						tmpEpoch.SlotLength*tmpEpoch.LengthInSlots*1_000_000_000,
-					),
+				epochPicoseconds(
+					tmpEpoch.SlotLength,
+					tmpEpoch.LengthInSlots,
 				),
 			)
 			// Update era end
 			if idx == len(epochs)-1 {
+				endSlot, slotErr := checkedSlotAdd(
+					tmpEpoch.StartSlot,
+					uint64(tmpEpoch.LengthInSlots),
+				)
+				if slotErr != nil {
+					return nil, slotErr
+				}
 				tmpEnd = []any{
 					new(big.Int).Set(timespan),
-					tmpEpoch.StartSlot + uint64(tmpEpoch.LengthInSlots),
+					endSlot,
 					tmpEpoch.EpochId + 1,
 				}
 			}
