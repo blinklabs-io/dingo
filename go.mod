@@ -40,7 +40,7 @@ require (
 	golang.org/x/crypto v0.48.0
 	golang.org/x/net v0.49.0
 	golang.org/x/sys v0.41.0
-	google.golang.org/api v0.265.0
+	google.golang.org/api v0.266.0
 	gopkg.in/yaml.v3 v3.0.1
 	gorm.io/driver/mysql v1.6.0
 	gorm.io/driver/postgres v1.6.0
