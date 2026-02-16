@@ -566,9 +566,6 @@ func makeMinimalTxCbor(t *testing.T, txID byte, padding int) []byte {
 
 	// Conway transaction body: {0: inputs, 2: fee}
 	// Inputs are encoded as a tagged set (tag 258)
-	input := cbor.NewConstructor(0, cbor.IndefLengthList{})
-	_ = input // not used directly; we encode manually below
-
 	bodyMap := map[uint]any{
 		0: cbor.Tag{
 			Number:  258,
