@@ -31,7 +31,7 @@ func TestParsePaginationDefaultValues(t *testing.T) {
 
 	assert.Equal(t, DefaultPaginationCount, params.Count)
 	assert.Equal(t, DefaultPaginationPage, params.Page)
-	assert.Equal(t, DefaultPaginationOrderAsc, params.Order)
+	assert.Equal(t, PaginationOrderAsc, params.Order)
 }
 
 func TestParsePaginationValid(t *testing.T) {
@@ -59,7 +59,7 @@ func TestParsePaginationClampBounds(t *testing.T) {
 
 	assert.Equal(t, MaxPaginationCount, params.Count)
 	assert.Equal(t, 1, params.Page)
-	assert.Equal(t, DefaultPaginationOrderAsc, params.Order)
+	assert.Equal(t, PaginationOrderAsc, params.Order)
 }
 
 func TestParsePaginationInvalid(t *testing.T) {

@@ -25,7 +25,7 @@ const (
 	DefaultPaginationCount    = 100
 	MaxPaginationCount        = 100
 	DefaultPaginationPage     = 1
-	DefaultPaginationOrderAsc = "asc"
+	PaginationOrderAsc        = "asc"
 	PaginationOrderDesc       = "desc"
 )
 
@@ -47,7 +47,7 @@ func ParsePagination(r *http.Request) (PaginationParams, error) {
 	params := PaginationParams{
 		Count: DefaultPaginationCount,
 		Page:  DefaultPaginationPage,
-		Order: DefaultPaginationOrderAsc,
+		Order: PaginationOrderAsc,
 	}
 
 	// Parse params value from the request query
@@ -73,7 +73,7 @@ func ParsePagination(r *http.Request) (PaginationParams, error) {
 	if orderParam := query.Get("order"); orderParam != "" {
 		convertedOrder := strings.ToLower(orderParam)
 		switch convertedOrder {
-		case DefaultPaginationOrderAsc, PaginationOrderDesc:
+		case PaginationOrderAsc, PaginationOrderDesc:
 			params.Order = convertedOrder
 		default:
 			return PaginationParams{},
