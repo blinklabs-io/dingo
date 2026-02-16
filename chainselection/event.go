@@ -24,6 +24,7 @@ const (
 	PeerTipUpdateEventType  event.EventType = "chainselection.peer_tip_update"
 	ChainSwitchEventType    event.EventType = "chainselection.chain_switch"
 	ChainSelectionEventType event.EventType = "chainselection.selection"
+	PeerEvictedEventType    event.EventType = "chainselection.peer_evicted"
 )
 
 // PeerTipUpdateEvent is published when a peer's chain tip is updated via
@@ -59,4 +60,11 @@ type ChainSelectionEvent struct {
 	BestTip          ochainsync.Tip
 	PeerCount        int
 	SwitchOccurred   bool
+}
+
+// PeerEvictedEvent is published when a tracked peer is evicted from the
+// chain selector to make room for a new peer. Subscribers (e.g. connection
+// manager) can use this to close the evicted peer's connection.
+type PeerEvictedEvent struct {
+	ConnectionId ouroboros.ConnectionId
 }
