@@ -17,12 +17,13 @@ package database
 import (
 	"testing"
 
-	"github.com/blinklabs-io/dingo/database/immutable"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/blinklabs-io/dingo/database/immutable"
 )
 
 func TestExtractTransactionOffsets(t *testing.T) {

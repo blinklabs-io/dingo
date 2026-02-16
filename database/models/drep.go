@@ -20,7 +20,14 @@ import (
 	"github.com/blinklabs-io/dingo/database/types"
 )
 
-var ErrDrepNotFound = errors.New("drep not found")
+var (
+	ErrDrepNotFound = errors.New("drep not found")
+	// ErrDrepActivityNotUpdated is returned when an
+	// UpdateDRepActivity call matches no DRep record.
+	ErrDrepActivityNotUpdated = errors.New(
+		"drep activity not updated: no matching record",
+	)
+)
 
 type Drep struct {
 	AnchorUrl  string `gorm:"size:128"`
@@ -28,7 +35,11 @@ type Drep struct {
 	AnchorHash []byte
 	ID         uint   `gorm:"primarykey"`
 	AddedSlot  uint64 `gorm:"index"`
-	Active     bool   `gorm:"default:true"`
+	// Last activity epoch (vote, register, update).
+	LastActivityEpoch uint64 `gorm:"index;default:0"`
+	// Epoch when DRep expires (activity + inactivity).
+	ExpiryEpoch uint64 `gorm:"index;default:0"`
+	Active      bool   `gorm:"default:true"`
 }
 
 func (d *Drep) TableName() string {

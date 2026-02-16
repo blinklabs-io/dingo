@@ -35,12 +35,19 @@ type ConnectionManagerConnClosedFunc func(ouroboros.ConnectionId, error)
 const (
 	// metricNamePrefix is the common prefix for all connection manager metrics
 	metricNamePrefix = "cardano_node_metrics_connectionManager_"
+
+	// DefaultMaxInboundConnections is the default maximum number of
+	// simultaneous inbound connections accepted by the connection manager.
+	// This prevents resource exhaustion from malicious or accidental
+	// connection floods.
+	DefaultMaxInboundConnections = 100
 )
 
 type connectionInfo struct {
 	conn      *ouroboros.Connection
 	peerAddr  string
 	isInbound bool
+	ipKey     string // rate-limit key (IP or /64 prefix for IPv6)
 }
 
 type peerConnectionState struct {
@@ -50,6 +57,7 @@ type peerConnectionState struct {
 
 type ConnectionManager struct {
 	connections      map[ouroboros.ConnectionId]*connectionInfo
+	inboundReserved  int // slots reserved by tryReserveInboundSlot but not yet added
 	metrics          *connectionManagerMetrics
 	listeners        []net.Listener
 	config           ConnectionManagerConfig
@@ -57,7 +65,13 @@ type ConnectionManager struct {
 	listenersMutex   sync.Mutex
 	closing          bool
 	goroutineWg      sync.WaitGroup // tracks spawned goroutines for clean shutdown
+	ipConns          map[string]int // IP key -> active connection count
+	ipConnsMutex     sync.Mutex
 }
+
+// DefaultMaxConnectionsPerIP is the default maximum number of concurrent
+// connections allowed from a single IP address (or /64 prefix for IPv6).
+const DefaultMaxConnectionsPerIP = 5
 
 type ConnectionManagerConfig struct {
 	PromRegistry       prometheus.Registerer
@@ -67,6 +81,11 @@ type ConnectionManagerConfig struct {
 	Listeners          []ListenerConfig
 	OutboundConnOpts   []ouroboros.ConnectionOptionFunc
 	OutboundSourcePort uint
+	MaxInboundConns    int // 0 means use DefaultMaxInboundConnections
+	// MaxConnectionsPerIP limits the number of concurrent inbound
+	// connections from the same IP address. IPv6 addresses are grouped
+	// by /64 prefix. A value of 0 means use DefaultMaxConnectionsPerIP.
+	MaxConnectionsPerIP int
 }
 
 type connectionManagerMetrics struct {
@@ -83,16 +102,77 @@ func NewConnectionManager(cfg ConnectionManagerConfig) *ConnectionManager {
 		cfg.Logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
 	}
 	cfg.Logger = cfg.Logger.With("component", "connmanager")
+	if cfg.MaxInboundConns <= 0 {
+		cfg.MaxInboundConns = DefaultMaxInboundConnections
+	}
+	if cfg.MaxConnectionsPerIP <= 0 {
+		cfg.MaxConnectionsPerIP = DefaultMaxConnectionsPerIP
+	}
 	c := &ConnectionManager{
 		config: cfg,
 		connections: make(
 			map[ouroboros.ConnectionId]*connectionInfo,
 		),
+		ipConns: make(map[string]int),
 	}
 	if cfg.PromRegistry != nil {
 		c.initMetrics()
 	}
 	return c
+}
+
+// inboundCount returns the current number of inbound connections.
+// The caller must hold connectionsMutex.
+func (c *ConnectionManager) inboundCountLocked() int {
+	count := 0
+	for _, info := range c.connections {
+		if info.isInbound {
+			count++
+		}
+	}
+	return count
+}
+
+// InboundCount returns the current number of inbound connections.
+func (c *ConnectionManager) InboundCount() int {
+	c.connectionsMutex.Lock()
+	defer c.connectionsMutex.Unlock()
+	return c.inboundCountLocked()
+}
+
+// tryReserveInboundSlot atomically checks whether an inbound connection
+// can be accepted and, if so, reserves a slot. This prevents a TOCTOU race
+// where multiple concurrent Accept calls could all pass the limit check
+// before any of them calls AddConnection.
+// Returns true if the slot was reserved, false if the limit has been reached.
+// The caller must call releaseInboundSlot when the reservation is no longer
+// needed (i.e. if connection setup fails before AddConnection is called).
+func (c *ConnectionManager) tryReserveInboundSlot() bool {
+	c.connectionsMutex.Lock()
+	defer c.connectionsMutex.Unlock()
+	if c.inboundCountLocked()+c.inboundReserved >= c.config.MaxInboundConns {
+		return false
+	}
+	c.inboundReserved++
+	return true
+}
+
+// releaseInboundSlot releases a previously reserved inbound slot.
+// This must be called if the connection setup fails after a successful
+// tryReserveInboundSlot call and before AddConnection is called.
+func (c *ConnectionManager) releaseInboundSlot() {
+	c.connectionsMutex.Lock()
+	defer c.connectionsMutex.Unlock()
+	c.inboundReserved--
+}
+
+// consumeInboundSlot converts a reserved inbound slot into an actual
+// connection entry via AddConnection. The reservation is consumed
+// (decremented) since the connection itself now occupies the slot.
+func (c *ConnectionManager) consumeInboundSlot() {
+	c.connectionsMutex.Lock()
+	defer c.connectionsMutex.Unlock()
+	c.inboundReserved--
 }
 
 func (c *ConnectionManager) initMetrics() {
@@ -317,12 +397,22 @@ func (c *ConnectionManager) AddConnection(
 	isInbound bool,
 	peerAddr string,
 ) {
+	c.addConnectionWithIPKey(conn, isInbound, peerAddr, "")
+}
+
+func (c *ConnectionManager) addConnectionWithIPKey(
+	conn *ouroboros.Connection,
+	isInbound bool,
+	peerAddr string,
+	ipKey string,
+) {
 	// Check if shutting down before adding to WaitGroup to prevent panic
 	// during Stop()'s Wait() call. Must hold the same lock used to set closing.
 	c.listenersMutex.Lock()
 	if c.closing {
 		c.listenersMutex.Unlock()
-		// Shutting down - close connection and return
+		// Shutting down - release IP slot and close connection
+		c.releaseIPSlot(ipKey)
 		if conn != nil {
 			conn.Close()
 		}
@@ -337,13 +427,14 @@ func (c *ConnectionManager) AddConnection(
 		conn:      conn,
 		isInbound: isInbound,
 		peerAddr:  peerAddr,
+		ipKey:     ipKey,
 	}
 	c.connectionsMutex.Unlock()
 	c.updateConnectionMetrics()
 	go func() {
 		defer c.goroutineWg.Done()
 		err := <-conn.ErrorChan()
-		// Remove connection
+		// Remove connection (also releases IP slot)
 		c.RemoveConnection(connId)
 		// Generate event
 		if c.config.EventBus != nil {
@@ -367,8 +458,13 @@ func (c *ConnectionManager) AddConnection(
 
 func (c *ConnectionManager) RemoveConnection(connId ouroboros.ConnectionId) {
 	c.connectionsMutex.Lock()
+	info := c.connections[connId]
 	delete(c.connections, connId)
 	c.connectionsMutex.Unlock()
+	// Decrement per-IP counter if the connection had a tracked IP key
+	if info != nil && info.ipKey != "" {
+		c.releaseIPSlot(info.ipKey)
+	}
 	c.updateConnectionMetrics()
 }
 

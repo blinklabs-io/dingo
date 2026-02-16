@@ -19,21 +19,25 @@ import (
 	"sync"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 )
 
-// DefaultBlockCacheCapacity is the default maximum number of blocks to cache.
-// At ~20KB per block, 10K blocks uses ~200MB of memory.
+// DefaultBlockCacheCapacity is the default maximum number of
+// blocks to cache. At ~20KB per block, 10K blocks uses ~200MB
+// of memory.
 const DefaultBlockCacheCapacity = 10000
 
 // blockCache is an LRU cache for blocks keyed by block hash.
-// It is used to cache rolled-back blocks that may still be needed by
-// non-primary chains during reconciliation.
+// It is used to cache rolled-back blocks that may still be
+// needed by non-primary chains during reconciliation.
 // All methods are thread-safe.
 type blockCache struct {
-	mu       sync.Mutex
-	capacity int
-	items    map[string]*list.Element
-	order    *list.List // front = most recently used, back = least recently used
+	mu           sync.Mutex
+	capacity     int
+	items        map[string]*list.Element
+	order        *list.List // front = most recent, back = least recent
+	cachedBlocks prometheus.Gauge
 }
 
 type blockCacheEntry struct {
@@ -41,23 +45,52 @@ type blockCacheEntry struct {
 	block models.Block
 }
 
-// newBlockCache creates a new block cache with the given capacity.
-// If capacity is <= 0, DefaultBlockCacheCapacity is used.
-func newBlockCache(capacity int) *blockCache {
+// newBlockCache creates a new block cache with the given
+// capacity. If capacity is <= 0, DefaultBlockCacheCapacity
+// is used.
+func newBlockCache(
+	capacity int,
+	promRegistry prometheus.Registerer,
+) *blockCache {
 	if capacity <= 0 {
 		capacity = DefaultBlockCacheCapacity
 	}
-	return &blockCache{
+	c := &blockCache{
 		capacity: capacity,
 		items:    make(map[string]*list.Element),
 		order:    list.New(),
 	}
+	if promRegistry != nil {
+		c.initMetrics(promRegistry)
+	}
+	return c
+}
+
+func (c *blockCache) initMetrics(
+	promRegistry prometheus.Registerer,
+) {
+	promautoFactory := promauto.With(promRegistry)
+	c.cachedBlocks = promautoFactory.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "dingo_chain_manager_cached_blocks",
+			Help: "current number of cached blocks in the chain manager LRU cache",
+		},
+	)
+}
+
+func (c *blockCache) updateMetrics() {
+	if c.cachedBlocks != nil {
+		c.cachedBlocks.Set(float64(c.order.Len()))
+	}
 }
 
 // Get retrieves a block from the cache by its hash.
-// Returns the block and true if found, or an empty block and false if not found.
-// Accessing a block moves it to the front of the LRU list.
-func (c *blockCache) Get(hash string) (models.Block, bool) {
+// Returns the block and true if found, or an empty block
+// and false if not found. Accessing a block moves it to the
+// front of the LRU list.
+func (c *blockCache) Get(
+	hash string,
+) (models.Block, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if elem, ok := c.items[hash]; ok {
@@ -68,7 +101,8 @@ func (c *blockCache) Get(hash string) (models.Block, bool) {
 }
 
 // Put adds or updates a block in the cache.
-// If the cache is at capacity, the least recently used block is evicted.
+// If the cache is at capacity, the least recently used block
+// is evicted.
 func (c *blockCache) Put(block models.Block) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -93,9 +127,22 @@ func (c *blockCache) Put(block models.Block) {
 	}
 	elem := c.order.PushFront(entry)
 	c.items[hash] = elem
+	c.updateMetrics()
 }
 
-// evictOldest removes the least recently used entry from the cache.
+// Delete removes a block from the cache by its hash.
+func (c *blockCache) Delete(hash string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if elem, ok := c.items[hash]; ok {
+		c.order.Remove(elem)
+		delete(c.items, hash)
+		c.updateMetrics()
+	}
+}
+
+// evictOldest removes the least recently used entry from
+// the cache.
 func (c *blockCache) evictOldest() {
 	if elem := c.order.Back(); elem != nil {
 		c.order.Remove(elem)

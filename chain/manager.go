@@ -26,6 +26,7 @@ import (
 	"github.com/blinklabs-io/dingo/event"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 type ChainId uint64
@@ -47,13 +48,23 @@ type ChainManager struct {
 func NewManager(
 	db *database.Database,
 	eventBus *event.EventBus,
+	promRegistry ...prometheus.Registerer,
 ) (*ChainManager, error) {
+	var registry prometheus.Registerer
+	if len(promRegistry) > 0 {
+		registry = promRegistry[0]
+	}
 	cm := &ChainManager{
-		db:                  db,
-		eventBus:            eventBus,
-		chains:              make(map[ChainId]*Chain),
-		chainRollbackEvents: make(map[ChainId][]uint64),
-		blockCache:          newBlockCache(DefaultBlockCacheCapacity),
+		db:       db,
+		eventBus: eventBus,
+		chains:   make(map[ChainId]*Chain),
+		chainRollbackEvents: make(
+			map[ChainId][]uint64,
+		),
+		blockCache: newBlockCache(
+			DefaultBlockCacheCapacity,
+			registry,
+		),
 	}
 	if err := cm.loadPrimaryChain(); err != nil {
 		return nil, err

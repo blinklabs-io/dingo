@@ -17,15 +17,17 @@ package chain_test
 import (
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"reflect"
 	"slices"
 	"testing"
 
-	"github.com/blinklabs-io/dingo/chain"
-	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+
+	"github.com/blinklabs-io/dingo/chain"
+	"github.com/blinklabs-io/dingo/database"
 )
 
 func decodeHex(hexData string) []byte {
@@ -471,6 +473,158 @@ func TestChainHeaderRollback(t *testing.T) {
 	}
 }
 
+// mockLedgerState implements the interface expected by ChainManager.SetLedger.
+type mockLedgerState struct {
+	securityParam int
+}
+
+func (m *mockLedgerState) SecurityParam() int {
+	return m.securityParam
+}
+
+// makeLinkedHeaders builds n mock headers that chain together starting
+// from prevHash at the given slot/block number offsets.
+func makeLinkedHeaders(
+	n int,
+	startSlot uint64,
+	startBlockNum uint64,
+	prevHash string,
+) []*MockBlock {
+	headers := make([]*MockBlock, n)
+	for i := range n {
+		hash := fmt.Sprintf(
+			"%s%04x",
+			testHashPrefix,
+			int(startBlockNum)+i,
+		)
+		headers[i] = &MockBlock{
+			MockBlockNumber: startBlockNum + uint64(i),
+			MockSlot:        startSlot + uint64(i)*20,
+			MockHash:        hash,
+			MockPrevHash:    prevHash,
+		}
+		prevHash = hash
+	}
+	return headers
+}
+
+func TestHeaderQueueLimitDefault(t *testing.T) {
+	// Without securityParam the default limit applies
+	cm, err := chain.NewManager(nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected error creating chain manager: %s", err)
+	}
+	c := cm.PrimaryChain()
+
+	limit := chain.DefaultMaxQueuedHeaders
+	// Build enough linked headers to fill the queue exactly
+	headers := makeLinkedHeaders(limit+1, 0, 1, "")
+
+	// Add headers up to the limit
+	for i := range limit {
+		if err := c.AddBlockHeader(headers[i]); err != nil {
+			t.Fatalf(
+				"unexpected error adding header %d: %s",
+				i,
+				err,
+			)
+		}
+	}
+	if c.HeaderCount() != limit {
+		t.Fatalf(
+			"expected %d headers, got %d",
+			limit,
+			c.HeaderCount(),
+		)
+	}
+	// The next header must be rejected
+	err = c.AddBlockHeader(headers[limit])
+	if err == nil {
+		t.Fatal("expected error when header queue is full")
+	}
+	if !errors.Is(err, chain.ErrHeaderQueueFull) {
+		t.Fatalf(
+			"expected ErrHeaderQueueFull, got: %s",
+			err,
+		)
+	}
+}
+
+func TestHeaderQueueLimitFromSecurityParam(t *testing.T) {
+	securityParam := 5
+	expectedLimit := securityParam * 2
+
+	cm, err := chain.NewManager(nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected error creating chain manager: %s", err)
+	}
+	cm.SetLedger(&mockLedgerState{securityParam: securityParam})
+	c := cm.PrimaryChain()
+
+	headers := makeLinkedHeaders(expectedLimit+1, 0, 1, "")
+
+	// Add headers up to the limit
+	for i := range expectedLimit {
+		if err := c.AddBlockHeader(headers[i]); err != nil {
+			t.Fatalf(
+				"unexpected error adding header %d: %s",
+				i,
+				err,
+			)
+		}
+	}
+	if c.HeaderCount() != expectedLimit {
+		t.Fatalf(
+			"expected %d headers, got %d",
+			expectedLimit,
+			c.HeaderCount(),
+		)
+	}
+	// The next header must be rejected
+	err = c.AddBlockHeader(headers[expectedLimit])
+	if err == nil {
+		t.Fatal("expected error when header queue is full")
+	}
+	if !errors.Is(err, chain.ErrHeaderQueueFull) {
+		t.Fatalf(
+			"expected ErrHeaderQueueFull, got: %s",
+			err,
+		)
+	}
+}
+
+func TestHeaderQueueAcceptsWithinLimit(t *testing.T) {
+	securityParam := 10
+	expectedLimit := securityParam * 2
+
+	cm, err := chain.NewManager(nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected error creating chain manager: %s", err)
+	}
+	cm.SetLedger(&mockLedgerState{securityParam: securityParam})
+	c := cm.PrimaryChain()
+
+	// Add fewer headers than the limit -- all should succeed
+	count := expectedLimit - 1
+	headers := makeLinkedHeaders(count, 0, 1, "")
+	for i, h := range headers {
+		if err := c.AddBlockHeader(h); err != nil {
+			t.Fatalf(
+				"unexpected error adding header %d: %s",
+				i,
+				err,
+			)
+		}
+	}
+	if c.HeaderCount() != count {
+		t.Fatalf(
+			"expected %d headers, got %d",
+			count,
+			c.HeaderCount(),
+		)
+	}
+}
+
 func TestChainFromIntersect(t *testing.T) {
 	testForkPointIndex := 2
 	testIntersectPoints := []ocommon.Point{
@@ -505,6 +659,252 @@ func TestChainFromIntersect(t *testing.T) {
 			testChainTip.Point.Hash,
 			testIntersectPoints[0].Slot,
 			testIntersectPoints[0].Hash,
+		)
+	}
+}
+
+// mockLedger implements the interface{ SecurityParam() int }
+// interface used by ChainManager.SetLedger.
+type mockLedger struct {
+	securityParam int
+}
+
+func (m *mockLedger) SecurityParam() int {
+	return m.securityParam
+}
+
+// newTestDB creates an isolated database in a temporary
+// directory so that tests do not share in-memory state.
+func newTestDB(t *testing.T) *database.Database {
+	t.Helper()
+	cfg := &database.Config{
+		DataDir:        t.TempDir(),
+		BlobPlugin:     "badger",
+		MetadataPlugin: "sqlite",
+	}
+	db, err := database.New(cfg)
+	if err != nil {
+		t.Fatalf(
+			"unexpected error creating database: %s",
+			err,
+		)
+	}
+	t.Cleanup(func() { db.Close() })
+	return db
+}
+
+func TestChainRollbackExceedsSecurityParam(t *testing.T) {
+	db := newTestDB(t)
+	cm, err := chain.NewManager(db, nil)
+	if err != nil {
+		t.Fatalf(
+			"unexpected error creating chain manager: %s",
+			err,
+		)
+	}
+	// Set security parameter to 2 so that rolling back
+	// 3 blocks (from index 5 to index 2) exceeds it.
+	cm.SetLedger(&mockLedger{securityParam: 2})
+	c := cm.PrimaryChain()
+	for _, testBlock := range testBlocks {
+		if err := c.AddBlock(testBlock, nil); err != nil {
+			t.Fatalf(
+				"unexpected error adding block to chain: %s",
+				err,
+			)
+		}
+	}
+	// Attempt rollback deeper than K (depth=3, K=2)
+	shallowBlock := testBlocks[2]
+	deepRollbackPoint := ocommon.Point{
+		Slot: shallowBlock.SlotNumber(),
+		Hash: shallowBlock.Hash().Bytes(),
+	}
+	err = c.Rollback(deepRollbackPoint)
+	if err == nil {
+		t.Fatal(
+			"expected rollback to be rejected " +
+				"when depth exceeds security param",
+		)
+	}
+	if !errors.Is(err, chain.ErrRollbackExceedsSecurityParam) {
+		t.Fatalf(
+			"expected ErrRollbackExceedsSecurityParam, got: %s",
+			err,
+		)
+	}
+	// Verify the chain tip was NOT modified (rollback
+	// was rejected before any state changes)
+	tip := c.Tip()
+	lastBlock := testBlocks[len(testBlocks)-1]
+	if tip.Point.Slot != lastBlock.SlotNumber() {
+		t.Fatalf(
+			"chain tip should be unchanged after rejected "+
+				"rollback: got slot %d, expected %d",
+			tip.Point.Slot,
+			lastBlock.SlotNumber(),
+		)
+	}
+}
+
+func TestChainRollbackWithinSecurityParam(t *testing.T) {
+	db := newTestDB(t)
+	cm, err := chain.NewManager(db, nil)
+	if err != nil {
+		t.Fatalf(
+			"unexpected error creating chain manager: %s",
+			err,
+		)
+	}
+	// Set security parameter to 3. Rolling back 3 blocks
+	// (from index 5 to index 2) should be allowed since
+	// forkDepth == K is not strictly greater than K.
+	cm.SetLedger(&mockLedger{securityParam: 3})
+	c := cm.PrimaryChain()
+	for _, testBlock := range testBlocks {
+		if err := c.AddBlock(testBlock, nil); err != nil {
+			t.Fatalf(
+				"unexpected error adding block to chain: %s",
+				err,
+			)
+		}
+	}
+	rollbackBlock := testBlocks[2]
+	rollbackPoint := ocommon.Point{
+		Slot: rollbackBlock.SlotNumber(),
+		Hash: rollbackBlock.Hash().Bytes(),
+	}
+	if err := c.Rollback(rollbackPoint); err != nil {
+		t.Fatalf(
+			"rollback within security param should "+
+				"succeed, got: %s",
+			err,
+		)
+	}
+	tip := c.Tip()
+	if tip.Point.Slot != rollbackPoint.Slot ||
+		string(tip.Point.Hash) != string(rollbackPoint.Hash) {
+		t.Fatalf(
+			"chain tip should match rollback point: "+
+				"got %d.%x, wanted %d.%x",
+			tip.Point.Slot,
+			tip.Point.Hash,
+			rollbackPoint.Slot,
+			rollbackPoint.Hash,
+		)
+	}
+}
+
+func TestChainRollbackSecurityParamZeroAllowsAll(t *testing.T) {
+	db := newTestDB(t)
+	cm, err := chain.NewManager(db, nil)
+	if err != nil {
+		t.Fatalf(
+			"unexpected error creating chain manager: %s",
+			err,
+		)
+	}
+	// securityParam defaults to 0 (ledger not initialized).
+	// All rollbacks should be allowed.
+	c := cm.PrimaryChain()
+	for _, testBlock := range testBlocks {
+		if err := c.AddBlock(testBlock, nil); err != nil {
+			t.Fatalf(
+				"unexpected error adding block to chain: %s",
+				err,
+			)
+		}
+	}
+	// Roll back all the way to block index 0
+	rollbackPoint := ocommon.Point{
+		Slot: testBlocks[0].SlotNumber(),
+		Hash: testBlocks[0].Hash().Bytes(),
+	}
+	if err := c.Rollback(rollbackPoint); err != nil {
+		t.Fatalf(
+			"rollback with securityParam=0 should "+
+				"always succeed, got: %s",
+			err,
+		)
+	}
+}
+
+func TestChainRollbackEphemeralChainNotRestricted(
+	t *testing.T,
+) {
+	db := newTestDB(t)
+	cm, err := chain.NewManager(db, nil)
+	if err != nil {
+		t.Fatalf(
+			"unexpected error creating chain manager: %s",
+			err,
+		)
+	}
+	// Set a very small security param
+	cm.SetLedger(&mockLedger{securityParam: 1})
+	c := cm.PrimaryChain()
+	for _, testBlock := range testBlocks {
+		if err := c.AddBlock(testBlock, nil); err != nil {
+			t.Fatalf(
+				"unexpected error adding block to chain: %s",
+				err,
+			)
+		}
+	}
+	// Create an ephemeral (non-persistent) fork chain
+	forkPointIndex := 2
+	forkPoint := ocommon.Point{
+		Hash: decodeHex(
+			testBlocks[forkPointIndex].MockHash,
+		),
+		Slot: testBlocks[forkPointIndex].MockSlot,
+	}
+	forkChain, err := cm.NewChainFromIntersect(
+		[]ocommon.Point{forkPoint},
+	)
+	if err != nil {
+		t.Fatalf(
+			"unexpected error creating fork chain: %s",
+			err,
+		)
+	}
+	// Add blocks to the fork chain, then roll back
+	forkBlocks := []*MockBlock{
+		{
+			MockBlockNumber: 4,
+			MockSlot:        60,
+			MockHash:        testHashPrefix + "00b4",
+			MockPrevHash:    testHashPrefix + "0003",
+		},
+		{
+			MockBlockNumber: 5,
+			MockSlot:        80,
+			MockHash:        testHashPrefix + "00b5",
+			MockPrevHash:    testHashPrefix + "00b4",
+		},
+		{
+			MockBlockNumber: 6,
+			MockSlot:        100,
+			MockHash:        testHashPrefix + "00b6",
+			MockPrevHash:    testHashPrefix + "00b5",
+		},
+	}
+	for _, blk := range forkBlocks {
+		if err := forkChain.AddBlock(blk, nil); err != nil {
+			t.Fatalf(
+				"unexpected error adding block "+
+					"to fork chain: %s",
+				err,
+			)
+		}
+	}
+	// Roll back the ephemeral chain beyond K=1; this
+	// should succeed because ephemeral chains are exempt.
+	if err := forkChain.Rollback(forkPoint); err != nil {
+		t.Fatalf(
+			"ephemeral chain rollback should not be "+
+				"restricted by security param, got: %s",
+			err,
 		)
 	}
 }

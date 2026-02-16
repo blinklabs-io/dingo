@@ -108,7 +108,12 @@ func (d *Database) SetTransaction(
 		// Store offset reference
 		offsetData := EncodeUtxoOffset(&offset)
 		if err := blob.SetUtxo(blobTxn, txId, outputIdx, offsetData); err != nil {
-			return fmt.Errorf("set utxo offset %x#%d: %w", txId[:8], outputIdx, err)
+			return fmt.Errorf(
+				"set utxo offset %x#%d: %w",
+				txId[:8],
+				outputIdx,
+				err,
+			)
 		}
 	}
 
@@ -175,13 +180,22 @@ func (d *Database) SetGenesisTransaction(
 
 		offset, ok := offsets[ref]
 		if !ok {
-			return fmt.Errorf("missing offset for genesis utxo %x:%d", txId[:8], outputIdx)
+			return fmt.Errorf(
+				"missing offset for genesis utxo %x:%d",
+				txId[:8],
+				outputIdx,
+			)
 		}
 
 		// Store offset reference
 		offsetData := EncodeUtxoOffset(&offset)
 		if err := blob.SetUtxo(blobTxn, txId, outputIdx, offsetData); err != nil {
-			return fmt.Errorf("set genesis utxo offset %x#%d: %w", txId[:8], outputIdx, err)
+			return fmt.Errorf(
+				"set genesis utxo offset %x#%d: %w",
+				txId[:8],
+				outputIdx,
+				err,
+			)
 		}
 
 		// Build model for metadata store
@@ -219,6 +233,60 @@ func (d *Database) GetTransactionByHash(
 		defer txn.Release()
 	}
 	return d.metadata.GetTransactionByHash(hash, txn.Metadata())
+}
+
+// GetTransactionsByBlockHash returns all transactions for a given
+// block hash, ordered by their position within the block.
+func (d *Database) GetTransactionsByBlockHash(
+	blockHash []byte,
+	txn *Txn,
+) ([]models.Transaction, error) {
+	if len(blockHash) == 0 {
+		return nil, nil
+	}
+	if txn == nil {
+		txn = d.Transaction(false)
+		defer txn.Release()
+	}
+	txs, err := d.metadata.GetTransactionsByBlockHash(
+		blockHash,
+		txn.Metadata(),
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"get txs by block hash: %w", err,
+		)
+	}
+	return txs, nil
+}
+
+// GetTransactionsByAddress returns transactions that involve a given
+// address as either a sender (input) or receiver (output).
+func (d *Database) GetTransactionsByAddress(
+	addr lcommon.Address,
+	limit int,
+	offset int,
+	txn *Txn,
+) ([]models.Transaction, error) {
+	if txn == nil {
+		txn = d.Transaction(false)
+		defer txn.Release()
+	}
+	txs, err := d.metadata.GetTransactionsByAddress(
+		addr,
+		limit,
+		offset,
+		txn.Metadata(),
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"get txs by address limit=%d offset=%d: %w",
+			limit,
+			offset,
+			err,
+		)
+	}
+	return txs, nil
 }
 
 // deleteTxBlobs attempts to delete blob data for the given transaction hashes.
@@ -294,7 +362,10 @@ func (d *Database) TransactionsDeleteRolledback(
 	}
 
 	// Get transaction hashes that will be deleted
-	txHashes, err := d.metadata.GetTransactionHashesAfterSlot(slot, txn.Metadata())
+	txHashes, err := d.metadata.GetTransactionHashesAfterSlot(
+		slot,
+		txn.Metadata(),
+	)
 	if err != nil {
 		return fmt.Errorf(
 			"failed to get transaction hashes after slot %d: %w",

@@ -32,6 +32,7 @@ import (
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/ledger/eras"
@@ -402,6 +403,11 @@ type BlockfetchRequestRangeFunc func(ouroboros.ConnectionId, ocommon.Point, ocom
 type MempoolProvider interface {
 	Transactions() []mempool.MempoolTransaction
 }
+type rollbackRecord struct {
+	slot      uint64
+	timestamp time.Time
+}
+
 type LedgerState struct {
 	metrics                            stateMetrics
 	currentEra                         eras.EraDesc
@@ -414,8 +420,6 @@ type LedgerState struct {
 	timerCleanupConsumedUtxos          *time.Timer
 	Scheduler                          *Scheduler
 	chain                              *chain.Chain
-	chainsyncBlockfetchReadyMutex      sync.Mutex
-	chainsyncBlockfetchReadyChan       chan struct{}
 	db                                 *database.Database
 	chainsyncState                     ChainsyncState
 	currentTipBlockNonce               []byte
@@ -428,13 +432,26 @@ type LedgerState struct {
 	slotTickChan                       <-chan SlotTick
 	ctx                                context.Context
 	sync.RWMutex
-	chainsyncMutex             sync.Mutex
-	chainsyncBlockfetchMutex   sync.Mutex
-	chainsyncBlockfetchWaiting bool
-	checkpointWrittenForEpoch  bool
-	closed                     bool
-	inRecovery                 bool // guards against recursive recovery in SubmitAsyncDBTxn
-	validationEnabled          bool
+	chainsyncMutex                sync.Mutex
+	chainsyncBlockfetchMutex      sync.Mutex
+	chainsyncBlockfetchReadyMutex sync.Mutex
+	chainsyncBlockfetchReadyChan  chan struct{}
+	checkpointWrittenForEpoch     bool
+	closed                        atomic.Bool
+	inRecovery                    bool // guards against recursive recovery in SubmitAsyncDBTxn
+
+	// Subscription IDs for event bus unsubscribe on close
+	chainsyncSubID   event.EventSubscriberId
+	blockfetchSubID  event.EventSubscriberId
+	chainUpdateSubID event.EventSubscriberId
+
+	// rollbackMu serializes rollbackWG.Add with Close's rollbackWG.Wait
+	// to prevent Add-after-Wait panics from the TOCTOU race between
+	// closed.Load() and Add(1) in handleEventChainUpdate.
+	rollbackMu sync.Mutex
+	// rollbackWG tracks in-flight rollback event emission goroutines
+	rollbackWG        sync.WaitGroup
+	validationEnabled bool
 
 	// Sync progress reporting (Fix 4)
 	syncProgressLastLog  time.Time     // last time we logged sync progress
@@ -446,6 +463,10 @@ type LedgerState struct {
 	dropEventCount      int64     // count of suppressed drop events since last log
 	dropRollbackLastLog time.Time // last time we logged a drop rollback
 	dropRollbackCount   int64     // count of suppressed drop rollbacks since last log
+
+	rollbackHistory []rollbackRecord // recent rollback slot+time pairs for loop detection
+
+	lastActiveConnId *ouroboros.ConnectionId // tracks active connection for switch detection
 }
 
 // EraTransitionResult holds computed state from an era transition
@@ -528,15 +549,15 @@ func (ls *LedgerState) Start(ctx context.Context) error {
 
 	// Setup event handlers
 	if ls.config.EventBus != nil {
-		ls.config.EventBus.SubscribeFunc(
+		ls.chainsyncSubID = ls.config.EventBus.SubscribeFunc(
 			ChainsyncEventType,
 			ls.handleEventChainsync,
 		)
-		ls.config.EventBus.SubscribeFunc(
+		ls.blockfetchSubID = ls.config.EventBus.SubscribeFunc(
 			BlockfetchEventType,
 			ls.handleEventBlockfetch,
 		)
-		ls.config.EventBus.SubscribeFunc(
+		ls.chainUpdateSubID = ls.config.EventBus.SubscribeFunc(
 			chain.ChainUpdateEventType,
 			ls.handleEventChainUpdate,
 		)
@@ -778,13 +799,32 @@ func (ls *LedgerState) Datum(hash []byte) (*models.Datum, error) {
 }
 
 func (ls *LedgerState) Close() error {
-	ls.Lock()
-	if ls.closed {
-		ls.Unlock()
+	if !ls.closed.CompareAndSwap(false, true) {
 		return nil
 	}
-	ls.closed = true
-	ls.Unlock()
+
+	// Unsubscribe from event bus to stop receiving new events
+	if ls.config.EventBus != nil {
+		ls.config.EventBus.Unsubscribe(
+			ChainsyncEventType,
+			ls.chainsyncSubID,
+		)
+		ls.config.EventBus.Unsubscribe(
+			BlockfetchEventType,
+			ls.blockfetchSubID,
+		)
+		ls.config.EventBus.Unsubscribe(
+			chain.ChainUpdateEventType,
+			ls.chainUpdateSubID,
+		)
+	}
+
+	// Wait for in-flight rollback event emission goroutines.
+	// Hold rollbackMu so no new goroutine can Add(1) between our
+	// closed flag and this Wait.
+	ls.rollbackMu.Lock()
+	ls.rollbackWG.Wait()
+	ls.rollbackMu.Unlock()
 
 	// Stop slot clock
 	if ls.slotClock != nil {
@@ -1195,6 +1235,16 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 	if err != nil {
 		return err
 	}
+	// Notify subscribers that pool state has been restored (e.g., for cache invalidation)
+	if ls.config.EventBus != nil {
+		ls.config.EventBus.PublishAsync(
+			PoolStateRestoredEventType,
+			event.NewEvent(
+				PoolStateRestoredEventType,
+				PoolStateRestoredEvent{Slot: point.Slot},
+			),
+		)
+	}
 	// Reload protocol parameters to reflect the rolled-back state
 	if err := ls.loadPParams(); err != nil {
 		ls.config.Logger.Warn(
@@ -1540,6 +1590,32 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 	// Start chain reader goroutine
 	readChainResultCh := make(chan readChainResult)
 	go ls.ledgerReadChain(ls.ctx, readChainResultCh)
+	// Enable bulk-load optimizations when syncing from behind
+	var bulkOptimizer metadata.BulkLoadOptimizer
+	bulkLoadActive := false
+	if !ls.validationEnabled {
+		if opt, ok := ls.db.Metadata().(metadata.BulkLoadOptimizer); ok {
+			if err := opt.SetBulkLoadPragmas(); err != nil {
+				ls.config.Logger.Warn(
+					"failed to set bulk-load pragmas",
+					"error", err,
+				)
+			} else {
+				bulkOptimizer = opt
+				bulkLoadActive = true
+				defer func() {
+					if bulkLoadActive {
+						if restoreErr := bulkOptimizer.RestoreNormalPragmas(); restoreErr != nil {
+							ls.config.Logger.Error(
+								"failed to restore normal pragmas on exit",
+								"error", restoreErr,
+							)
+						}
+					}
+				}()
+			}
+		}
+	}
 	// Process blocks
 	var nextEpochEraId uint
 	var needsEpochRollover bool
@@ -1639,7 +1715,13 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 				interval := time.Duration(
 					rolloverResult.SchedulerIntervalMs,
 				) * time.Millisecond
-				ls.Scheduler.ChangeInterval(interval)
+				if err := ls.Scheduler.ChangeInterval(interval); err != nil {
+					ls.config.Logger.Warn(
+						"failed to update scheduler interval",
+						"error", err,
+						"interval", interval,
+					)
+				}
 			}
 
 			// Emit epoch transition event (coordinated with slot clock)
@@ -2105,6 +2187,17 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 				// Capture tip for logging while holding the lock
 				tipForLog = ls.currentTip
 				ls.Unlock()
+				// Restore normal DB options outside the lock after validation is enabled
+				if wantEnableValidation && bulkLoadActive {
+					if restoreErr := bulkOptimizer.RestoreNormalPragmas(); restoreErr != nil {
+						ls.config.Logger.Error(
+							"failed to restore normal pragmas",
+							"error", restoreErr,
+						)
+					} else {
+						bulkLoadActive = false
+					}
+				}
 			}
 			if needsEpochRollover {
 				break
@@ -2158,7 +2251,7 @@ func (ls *LedgerState) ledgerProcessBlock(
 	intraBlockUtxos := make(map[string]lcommon.Utxo)
 	for i, tx := range block.Transactions() {
 		if delta == nil {
-			delta = NewLedgerDelta(point, uint(block.Era().Id))
+			delta = NewLedgerDelta(point, uint(block.Era().Id), block.BlockNumber())
 			delta.Offsets = offsets
 		}
 		// Validate transaction
@@ -2701,6 +2794,43 @@ func (ls *LedgerState) UtxosByAddress(
 	return ret, nil
 }
 
+// UtxosByAddressAtSlot returns all UTxOs belonging to the
+// specified address that existed at the given slot.
+func (ls *LedgerState) UtxosByAddressAtSlot(
+	addr lcommon.Address,
+	slot uint64,
+) ([]models.Utxo, error) {
+	return ls.db.UtxosByAddressAtSlot(addr, slot, nil)
+}
+
+// UtxoByRefIncludingSpent returns a UTxO by reference, including
+// spent outputs. This is needed for APIs that must resolve consumed
+// inputs to display source address and amount.
+func (ls *LedgerState) UtxoByRefIncludingSpent(
+	txId []byte,
+	outputIdx uint32,
+) (*models.Utxo, error) {
+	return ls.db.UtxoByRefIncludingSpent(txId, outputIdx, nil)
+}
+
+// GetTransactionsByBlockHash returns all transactions for a given
+// block hash.
+func (ls *LedgerState) GetTransactionsByBlockHash(
+	blockHash []byte,
+) ([]models.Transaction, error) {
+	return ls.db.GetTransactionsByBlockHash(blockHash, nil)
+}
+
+// GetTransactionsByAddress returns transactions involving the given
+// address.
+func (ls *LedgerState) GetTransactionsByAddress(
+	addr lcommon.Address,
+	limit int,
+	offset int,
+) ([]models.Transaction, error) {
+	return ls.db.GetTransactionsByAddress(addr, limit, offset, nil)
+}
+
 // resolveValidationEra determines the appropriate era descriptor for
 // validating a transaction. It returns the current era if the transaction
 // matches, the previous era if compatible (era-1), or an error if the
@@ -2960,21 +3090,39 @@ func (ls *LedgerState) forgeBlock() {
 			}
 
 			// Pull ExUnits from redeemers in the witness set
-			var txMemory, txSteps int64
+			var estimatedTxExUnits lcommon.ExUnits
+			var exUnitsErr error
 			for _, redeemer := range fullTx.WitnessSet.Redeemers().Iter() {
-				txMemory += redeemer.ExUnits.Memory
-				txSteps += redeemer.ExUnits.Steps
+				estimatedTxExUnits, exUnitsErr = eras.SafeAddExUnits(
+					estimatedTxExUnits,
+					redeemer.ExUnits,
+				)
+				if exUnitsErr != nil {
+					ls.config.Logger.Debug(
+						"skipping transaction - ExUnits overflow",
+						"component", "ledger",
+						"error", exUnitsErr,
+					)
+					break
+				}
 			}
-			estimatedTxExUnits := lcommon.ExUnits{
-				Memory: txMemory,
-				Steps:  txSteps,
+			if exUnitsErr != nil {
+				continue
 			}
 
-			// Check MaxExUnits limit
-			if totalExUnits.Memory+estimatedTxExUnits.Memory > maxExUnits.Memory ||
-				totalExUnits.Steps+estimatedTxExUnits.Steps > maxExUnits.Steps {
+			// Check MaxExUnits limit - skip this tx but
+			// continue trying smaller ones.
+			// Use SafeAddExUnits to avoid overflow in the
+			// comparison.
+			candidateExUnits, addErr := eras.SafeAddExUnits(
+				totalExUnits,
+				estimatedTxExUnits,
+			)
+			if addErr != nil ||
+				candidateExUnits.Memory > maxExUnits.Memory ||
+				candidateExUnits.Steps > maxExUnits.Steps {
 				ls.config.Logger.Debug(
-					"ex units limit reached",
+					"tx exceeds remaining ex units budget, skipping",
 					"component", "ledger",
 					"current_memory", totalExUnits.Memory,
 					"current_steps", totalExUnits.Steps,
@@ -2983,7 +3131,7 @@ func (ls *LedgerState) forgeBlock() {
 					"max_memory", maxExUnits.Memory,
 					"max_steps", maxExUnits.Steps,
 				)
-				break
+				continue
 			}
 
 			// Handle metadata encoding before adding transaction.
@@ -3024,8 +3172,10 @@ func (ls *LedgerState) forgeBlock() {
 				transactionMetadataSet[uint(len(transactionBodies))-1] = metadataCbor
 			}
 			blockSize += txSize
-			totalExUnits.Memory += estimatedTxExUnits.Memory
-			totalExUnits.Steps += estimatedTxExUnits.Steps
+			// Safe to assign: overflow was already checked
+			// via SafeAddExUnits when computing
+			// candidateExUnits above.
+			totalExUnits = candidateExUnits
 
 			ls.config.Logger.Debug(
 				"added transaction to block candidate lists",

@@ -18,9 +18,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/blinklabs-io/dingo/event"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/blinklabs-io/dingo/event"
 )
 
 func TestEpochTransitionEventType(t *testing.T) {

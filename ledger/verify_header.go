@@ -16,8 +16,10 @@ package ledger
 
 import (
 	"encoding/hex"
+	"errors"
 	"fmt"
 
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/byron"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -98,12 +100,18 @@ func verifyBlockHeader(
 // LedgerState and delegates to verifyBlockHeader for cryptographic
 // verification of a block's VRF proof and KES signature.
 //
-// This is called from the blockfetch path (processBlockEvent) which may
-// receive blocks before the ledger has processed an epoch rollover. If the
-// block's slot falls outside the current epoch range, we skip verification
-// here because the epoch nonce would be stale. The ledger processing
-// pipeline (ledgerProcessBlocks) handles epoch rollover before processing
-// blocks of the new epoch, so header integrity is still assured.
+// This is called from the blockfetch path (processBlockEvents) before
+// blocks are handed to the ledger processing pipeline. It performs
+// epoch-aware parameter lookup: the block's slot is matched against the
+// full epoch cache to find the correct epoch nonce, so blocks that
+// arrive during or after an epoch transition are always verified against
+// the right epoch's parameters.
+//
+// If no epoch with a valid nonce can be found for the block's slot
+// (e.g., the epoch rollover has not yet been processed), the block is
+// rejected rather than silently skipping verification. This prevents
+// an attacker from forging headers that bypass verification by
+// targeting the epoch boundary window.
 func (ls *LedgerState) verifyBlockHeaderCrypto(
 	block ledger.Block,
 ) error {
@@ -112,38 +120,95 @@ func (ls *LedgerState) verifyBlockHeaderCrypto(
 		return nil
 	}
 
-	// Read currentEpoch under RLock since this method is called outside
-	// the main lock in processBlockEvents, and currentEpoch may be updated
-	// concurrently during epoch rollovers.
-	ls.RLock()
-	currentEpoch := ls.currentEpoch
-	ls.RUnlock()
+	blockSlot := block.SlotNumber()
 
-	// Check that the block falls within the current epoch. If the block's
-	// slot is outside the current epoch range, the epoch nonce would be
-	// incorrect:
-	//   - Future epoch: nonce is stale (epoch rollover hasn't happened yet)
-	//   - Past epoch: nonce is for a different epoch (during gap-fill/re-sync)
-	// Skip verification and let ledgerProcessBlocks handle it with the
-	// correct nonce for the block's actual epoch.
-	epochEnd := currentEpoch.StartSlot + uint64(currentEpoch.LengthInSlots)
-	if currentEpoch.LengthInSlots == 0 ||
-		block.SlotNumber() < currentEpoch.StartSlot ||
-		block.SlotNumber() >= epochEnd {
-		return nil
+	// Look up the epoch for this block's slot from the epoch cache.
+	// This is an epoch-aware lookup that searches through all known
+	// epochs rather than only the current one, ensuring that blocks
+	// at epoch boundaries are verified against the correct nonce.
+	epoch, err := ls.epochForSlot(blockSlot)
+	if err != nil {
+		return fmt.Errorf(
+			"block header verification rejected: no epoch data for slot %d: %w",
+			blockSlot,
+			err,
+		)
 	}
 
-	epochNonce := currentEpoch.Nonce
+	// Reject blocks for which we have epoch data but no nonce.
+	// A missing nonce means the epoch rollover has not completed
+	// or the epoch is too far in the future.
+	if len(epoch.Nonce) == 0 {
+		return fmt.Errorf(
+			"block header verification rejected: "+
+				"epoch %d has no nonce for slot %d "+
+				"(epoch rollover may not have been processed yet)",
+			epoch.EpochId,
+			blockSlot,
+		)
+	}
 
 	// Get slotsPerKesPeriod from Shelley genesis configuration
 	shelleyGenesis := ls.config.CardanoNodeConfig.ShelleyGenesis()
 	if shelleyGenesis == nil {
 		return fmt.Errorf(
 			"shelley genesis not available for block header verification at slot %d",
-			block.SlotNumber(),
+			blockSlot,
 		)
 	}
 	slotsPerKesPeriod := uint64(shelleyGenesis.SlotsPerKESPeriod) //nolint:gosec
 
-	return verifyBlockHeader(block, epochNonce, slotsPerKesPeriod)
+	return verifyBlockHeader(block, epoch.Nonce, slotsPerKesPeriod)
+}
+
+// epochForSlot searches the epoch cache for the epoch containing the
+// given slot. It takes a snapshot of the epoch cache under RLock to
+// avoid racing with concurrent epoch rollover updates.
+//
+// Returns the matching epoch or an error if no epoch covers the slot.
+func (ls *LedgerState) epochForSlot(slot uint64) (models.Epoch, error) {
+	ls.RLock()
+	cacheCopy := make([]models.Epoch, len(ls.epochCache))
+	copy(cacheCopy, ls.epochCache)
+	ls.RUnlock()
+
+	if len(cacheCopy) == 0 {
+		return models.Epoch{}, errors.New("epoch cache is empty")
+	}
+
+	for _, ep := range cacheCopy {
+		if ep.LengthInSlots == 0 {
+			continue
+		}
+		epochEnd := ep.StartSlot + uint64(ep.LengthInSlots)
+		if slot >= ep.StartSlot && slot < epochEnd {
+			return ep, nil
+		}
+	}
+
+	// Find the last epoch with a valid (non-zero) length for a
+	// meaningful error message.
+	var lastValidEnd uint64
+	var hasValidEpoch bool
+	for i := len(cacheCopy) - 1; i >= 0; i-- {
+		if cacheCopy[i].LengthInSlots > 0 {
+			lastValidEnd = cacheCopy[i].StartSlot +
+				uint64(cacheCopy[i].LengthInSlots)
+			hasValidEpoch = true
+			break
+		}
+	}
+	if !hasValidEpoch {
+		return models.Epoch{}, fmt.Errorf(
+			"slot %d not covered by any known epoch (cache has %d epochs, all with zero length)",
+			slot,
+			len(cacheCopy),
+		)
+	}
+	return models.Epoch{}, fmt.Errorf(
+		"slot %d not covered by any known epoch (cache has %d epochs, last ends at slot %d)",
+		slot,
+		len(cacheCopy),
+		lastValidEnd,
+	)
 }

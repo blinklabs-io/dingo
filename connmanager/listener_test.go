@@ -25,6 +25,7 @@ import (
 	"testing"
 	"time"
 
+	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -324,6 +325,259 @@ func (c *mockConn) SetDeadline(_ time.Time) error      { return nil }
 func (c *mockConn) SetReadDeadline(_ time.Time) error  { return nil }
 func (c *mockConn) SetWriteDeadline(_ time.Time) error { return nil }
 
+// trackingMockConn is like mockConn but records when Close is called.
+type trackingMockConn struct {
+	mockConn
+	closeCalled atomic.Bool
+}
+
+func newTrackingMockConn(remotePort int) *trackingMockConn {
+	tc := &trackingMockConn{}
+	tc.localAddr = &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 12345}
+	tc.remoteAddr = &net.TCPAddr{
+		IP:   net.ParseIP("127.0.0.2"),
+		Port: remotePort,
+	}
+	// Do NOT pre-close so we can detect the limit-rejection Close call
+	return tc
+}
+
+func (c *trackingMockConn) Close() error {
+	c.closeCalled.Store(true)
+	c.closed.Store(true)
+	return nil
+}
+
+func (c *trackingMockConn) WasClosed() bool {
+	return c.closeCalled.Load()
+}
+
+func TestInboundConnectionLimit_RejectsOverLimit(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	const maxInbound = 3
+
+	mockLn := newToggleMockListener()
+	mockLn.SetErrorEnabled(false) // Will provide connections via channel
+
+	cfg := ConnectionManagerConfig{
+		Logger:          slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		PromRegistry:    prometheus.NewRegistry(),
+		MaxInboundConns: maxInbound,
+		Listeners: []ListenerConfig{
+			{
+				Listener: mockLn,
+			},
+		},
+	}
+
+	cm := NewConnectionManager(cfg)
+
+	// Pre-populate the connections map with fake inbound connections
+	// to simulate being at the limit. We use fake ConnectionIds.
+	cm.connectionsMutex.Lock()
+	for i := range maxInbound {
+		fakeId := ouroboros.ConnectionId{
+			LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3001},
+			RemoteAddr: &net.TCPAddr{IP: net.ParseIP("10.0.0.1"), Port: 40000 + i},
+		}
+		cm.connections[fakeId] = &connectionInfo{
+			conn:      nil,
+			peerAddr:  "192.168.1.1:9999",
+			isInbound: true,
+		}
+	}
+	cm.connectionsMutex.Unlock()
+
+	err := cm.Start(context.Background())
+	require.NoError(t, err)
+
+	// Provide a connection that should be rejected
+	rejected := newTrackingMockConn(60000)
+	mockLn.ProvideConnection(rejected)
+
+	// Wait for the accept loop to process it and return to Accept()
+	entered := mockLn.WaitForAcceptEntered(5 * time.Second)
+	require.True(
+		t,
+		entered,
+		"accept loop should return to Accept() after rejecting connection",
+	)
+
+	// The rejected connection should have been closed
+	require.Eventually(t, func() bool {
+		return rejected.WasClosed()
+	}, 2*time.Second, 5*time.Millisecond,
+		"connection over limit should be closed")
+
+	// The connection should NOT have been added to the connections map
+	cm.connectionsMutex.Lock()
+	connCount := len(cm.connections)
+	cm.connectionsMutex.Unlock()
+	assert.Equal(t, maxInbound, connCount,
+		"no new connection should be added when at the limit")
+
+	// Clean up fake connections before stopping
+	cm.connectionsMutex.Lock()
+	for k := range cm.connections {
+		delete(cm.connections, k)
+	}
+	cm.connectionsMutex.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	err = cm.Stop(ctx)
+	require.NoError(t, err)
+}
+
+func TestInboundConnectionLimit_AcceptsWithinLimit(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	const maxInbound = 5
+
+	mockLn := newToggleMockListener()
+	mockLn.SetErrorEnabled(false)
+
+	cfg := ConnectionManagerConfig{
+		Logger:          slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		PromRegistry:    prometheus.NewRegistry(),
+		MaxInboundConns: maxInbound,
+		Listeners: []ListenerConfig{
+			{
+				Listener: mockLn,
+			},
+		},
+	}
+
+	cm := NewConnectionManager(cfg)
+
+	// Pre-populate with fewer than maxInbound connections
+	cm.connectionsMutex.Lock()
+	fakeId := ouroboros.ConnectionId{
+		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3001},
+		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("10.0.0.1"), Port: 40000},
+	}
+	cm.connections[fakeId] = &connectionInfo{
+		conn:      nil,
+		peerAddr:  "192.168.1.1:9999",
+		isInbound: true,
+	}
+	cm.connectionsMutex.Unlock()
+
+	err := cm.Start(context.Background())
+	require.NoError(t, err)
+
+	// Provide a connection that should be accepted (not rejected by the limit).
+	// The connection is pre-closed so ouroboros.NewConnection will fail,
+	// but it should NOT be rejected by the limit check.
+	accepted := newTrackingMockConn(60001)
+	// Pre-close so Ouroboros setup fails quickly
+	accepted.closed.Store(true)
+	mockLn.ProvideConnection(accepted)
+
+	// Wait for the accept loop to process and return to Accept()
+	entered := mockLn.WaitForAcceptEntered(5 * time.Second)
+	require.True(
+		t,
+		entered,
+		"accept loop should continue after processing connection within limit",
+	)
+
+	// The connection will be closed by the Ouroboros setup failure, not by
+	// the limit check. We verify that the accept loop got past the limit
+	// check by confirming the loop returned to Accept() (which it did above).
+
+	// Clean up fake connections before stopping
+	cm.connectionsMutex.Lock()
+	for k := range cm.connections {
+		delete(cm.connections, k)
+	}
+	cm.connectionsMutex.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	err = cm.Stop(ctx)
+	require.NoError(t, err)
+}
+
+func TestInboundConnectionLimit_DefaultValue(t *testing.T) {
+	// Verify that a zero MaxInboundConns defaults to DefaultMaxInboundConnections
+	cm := NewConnectionManager(ConnectionManagerConfig{})
+	assert.Equal(
+		t,
+		DefaultMaxInboundConnections,
+		cm.config.MaxInboundConns,
+		"zero MaxInboundConns should default to DefaultMaxInboundConnections",
+	)
+}
+
+func TestInboundConnectionLimit_OutboundNotCounted(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	const maxInbound = 2
+
+	mockLn := newToggleMockListener()
+	mockLn.SetErrorEnabled(false)
+
+	cfg := ConnectionManagerConfig{
+		Logger:          slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		PromRegistry:    prometheus.NewRegistry(),
+		MaxInboundConns: maxInbound,
+		Listeners: []ListenerConfig{
+			{
+				Listener: mockLn,
+			},
+		},
+	}
+
+	cm := NewConnectionManager(cfg)
+
+	// Pre-populate with outbound connections (these should NOT count toward inbound limit)
+	cm.connectionsMutex.Lock()
+	for i := range 10 {
+		fakeId := ouroboros.ConnectionId{
+			LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3001},
+			RemoteAddr: &net.TCPAddr{IP: net.ParseIP("10.0.0.1"), Port: 50000 + i},
+		}
+		cm.connections[fakeId] = &connectionInfo{
+			conn:      nil,
+			peerAddr:  "192.168.1.1:9999",
+			isInbound: false, // outbound
+		}
+	}
+	cm.connectionsMutex.Unlock()
+
+	err := cm.Start(context.Background())
+	require.NoError(t, err)
+
+	// Provide a connection - should be accepted because there are 0 inbound
+	// connections despite having 10 outbound ones
+	conn := newTrackingMockConn(60002)
+	conn.closed.Store(true) // pre-close so Ouroboros setup fails quickly
+	mockLn.ProvideConnection(conn)
+
+	// The accept loop should process the connection (past the limit check)
+	// and continue to Accept()
+	entered := mockLn.WaitForAcceptEntered(5 * time.Second)
+	require.True(
+		t,
+		entered,
+		"accept loop should accept connections when inbound count is below limit",
+	)
+
+	// Clean up
+	cm.connectionsMutex.Lock()
+	for k := range cm.connections {
+		delete(cm.connections, k)
+	}
+	cm.connectionsMutex.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	err = cm.Stop(ctx)
+	require.NoError(t, err)
+}
+
 func TestAcceptLoopBackoffOnError(t *testing.T) {
 	defer goleak.VerifyNone(t)
 
@@ -454,6 +708,192 @@ func TestAcceptLoopResetBackoffOnSuccess(t *testing.T) {
 	// 3. The loop continued and returned to Accept() (phase 3)
 	// The backoff reset (consecutiveErrors = 0) is implicitly verified because
 	// the loop continued operating normally after the success.
+}
+
+// concurrentMockListener delivers connections from multiple goroutines
+// simultaneously to exercise the race condition in the inbound limit check.
+type concurrentMockListener struct {
+	mu       sync.Mutex
+	closed   atomic.Bool
+	closeCh  chan struct{}
+	connCh   chan net.Conn
+	accepted atomic.Int32
+}
+
+func newConcurrentMockListener() *concurrentMockListener {
+	return &concurrentMockListener{
+		closeCh: make(chan struct{}),
+		connCh:  make(chan net.Conn, 200),
+	}
+}
+
+func (m *concurrentMockListener) Accept() (net.Conn, error) {
+	if m.closed.Load() {
+		return nil, net.ErrClosed
+	}
+	select {
+	case conn := <-m.connCh:
+		m.accepted.Add(1)
+		return conn, nil
+	case <-m.closeCh:
+		return nil, net.ErrClosed
+	}
+}
+
+func (m *concurrentMockListener) Close() error {
+	if m.closed.Swap(true) {
+		return nil
+	}
+	close(m.closeCh)
+	return nil
+}
+
+func (m *concurrentMockListener) Addr() net.Addr {
+	return &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 12345}
+}
+
+func TestTryReserveInboundSlot_Concurrent(t *testing.T) {
+	// This test verifies that tryReserveInboundSlot is atomic:
+	// many goroutines racing to reserve slots should never exceed
+	// MaxInboundConns total (existing connections + reservations).
+	const maxInbound = 5
+	const goroutines = 50
+
+	cm := NewConnectionManager(ConnectionManagerConfig{
+		Logger:          slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		MaxInboundConns: maxInbound,
+	})
+
+	// Pre-populate with 3 existing inbound connections, leaving 2 slots
+	cm.connectionsMutex.Lock()
+	for i := range 3 {
+		fakeId := ouroboros.ConnectionId{
+			LocalAddr: &net.TCPAddr{
+				IP:   net.ParseIP("127.0.0.1"),
+				Port: 3001,
+			},
+			RemoteAddr: &net.TCPAddr{
+				IP:   net.ParseIP("10.0.0.1"),
+				Port: 40000 + i,
+			},
+		}
+		cm.connections[fakeId] = &connectionInfo{
+			conn:      nil,
+			peerAddr:  "192.168.1.1:9999",
+			isInbound: true,
+		}
+	}
+	cm.connectionsMutex.Unlock()
+
+	// Race: 50 goroutines all try to reserve a slot concurrently.
+	// Only 2 should succeed (maxInbound=5, existing=3).
+	var reserved atomic.Int32
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	wg.Add(goroutines)
+	for range goroutines {
+		go func() {
+			defer wg.Done()
+			<-start // synchronize all goroutines
+			if cm.tryReserveInboundSlot() {
+				reserved.Add(1)
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	assert.Equal(
+		t,
+		int32(2),
+		reserved.Load(),
+		"exactly 2 slots should be reserved (maxInbound=5, existing=3)",
+	)
+
+	// Verify internal state is consistent
+	cm.connectionsMutex.Lock()
+	assert.Equal(t, 2, cm.inboundReserved,
+		"inboundReserved should be 2")
+	cm.connectionsMutex.Unlock()
+
+	// Release the slots and verify they can be re-reserved
+	cm.releaseInboundSlot()
+	cm.releaseInboundSlot()
+
+	cm.connectionsMutex.Lock()
+	assert.Equal(t, 0, cm.inboundReserved,
+		"inboundReserved should be 0 after releasing")
+	cm.connectionsMutex.Unlock()
+
+	// Now 2 more should be reservable again
+	ok1 := cm.tryReserveInboundSlot()
+	ok2 := cm.tryReserveInboundSlot()
+	ok3 := cm.tryReserveInboundSlot()
+	assert.True(t, ok1, "first re-reservation should succeed")
+	assert.True(t, ok2, "second re-reservation should succeed")
+	assert.False(t, ok3, "third re-reservation should fail")
+
+	// Clean up
+	cm.releaseInboundSlot()
+	cm.releaseInboundSlot()
+}
+
+func TestTryReserveInboundSlot_ConsumeAndRelease(t *testing.T) {
+	// Verify that consumeInboundSlot correctly decrements the reservation
+	// counter, allowing the slot to be tracked by the actual connection
+	// in the connections map instead.
+	const maxInbound = 2
+
+	cm := NewConnectionManager(ConnectionManagerConfig{
+		Logger:          slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		MaxInboundConns: maxInbound,
+	})
+
+	// Reserve both slots
+	ok1 := cm.tryReserveInboundSlot()
+	ok2 := cm.tryReserveInboundSlot()
+	ok3 := cm.tryReserveInboundSlot()
+	require.True(t, ok1)
+	require.True(t, ok2)
+	require.False(t, ok3, "should not reserve beyond limit")
+
+	// Consume one slot (simulating successful AddConnection)
+	cm.consumeInboundSlot()
+
+	// Add a fake connection to represent the consumed slot
+	cm.connectionsMutex.Lock()
+	fakeId := ouroboros.ConnectionId{
+		LocalAddr: &net.TCPAddr{
+			IP:   net.ParseIP("127.0.0.1"),
+			Port: 3001,
+		},
+		RemoteAddr: &net.TCPAddr{
+			IP:   net.ParseIP("10.0.0.1"),
+			Port: 40000,
+		},
+	}
+	cm.connections[fakeId] = &connectionInfo{
+		conn:      nil,
+		peerAddr:  "10.0.0.1:40000",
+		isInbound: true,
+	}
+	cm.connectionsMutex.Unlock()
+
+	// Should still not be able to reserve (1 connection + 1 reservation = 2 = max)
+	ok4 := cm.tryReserveInboundSlot()
+	assert.False(t, ok4,
+		"should not reserve when connections + reservations = max")
+
+	// Release the remaining reservation (simulating setup failure)
+	cm.releaseInboundSlot()
+
+	// Now should be able to reserve again (1 connection + 0 reservations < 2)
+	ok5 := cm.tryReserveInboundSlot()
+	assert.True(t, ok5,
+		"should reserve after releasing failed reservation")
+
+	// Clean up
+	cm.releaseInboundSlot()
 }
 
 func TestAcceptLoopExitsOnClose(t *testing.T) {

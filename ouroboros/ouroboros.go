@@ -41,8 +41,11 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promauto"
 )
 
-// maxChainsyncClients is the maximum number of concurrent chainsync clients.
-const maxChainsyncClients = 10
+// defaultMaxChainsyncClients is the fallback maximum number of
+// concurrent chainsync clients when the ChainsyncState is not
+// available. Uses the same value as chainsync.DefaultMaxClients
+// to keep defaults consistent.
+const defaultMaxChainsyncClients = chainsync.DefaultMaxClients
 
 type Ouroboros struct {
 	ConnManager      *connmanager.ConnectionManager
@@ -58,6 +61,8 @@ type Ouroboros struct {
 	// ChainSync measurement tracking for peer scoring
 	chainsyncStats map[ouroboros.ConnectionId]*chainsyncPeerStats
 	chainsyncMutex sync.Mutex
+	// Per-peer rate limiter for TxSubmission server
+	txSubmissionRateLimiter *txSubmissionRateLimiter
 }
 
 // chainsyncPeerStats tracks ChainSync performance metrics per peer connection.
@@ -75,6 +80,11 @@ type OuroborosConfig struct {
 	PeerSharing     bool
 	IntersectTip    bool
 	PromRegistry    prometheus.Registerer
+	// MaxTxSubmissionsPerSecond is the maximum number of transaction
+	// submissions accepted per peer per second via the TxSubmission
+	// mini-protocol. A value of 0 uses DefaultMaxTxSubmissionsPerSecond.
+	// A negative value disables rate limiting.
+	MaxTxSubmissionsPerSecond int
 }
 
 type blockfetchMetrics struct {
@@ -101,6 +111,19 @@ func NewOuroboros(cfg OuroborosConfig) *Ouroboros {
 		ConnManager:      cfg.ConnManager,
 		blockFetchStarts: make(map[ouroboros.ConnectionId]time.Time),
 		chainsyncStats:   make(map[ouroboros.ConnectionId]*chainsyncPeerStats),
+	}
+	// Initialize per-peer TxSubmission rate limiter
+	txRate := cfg.MaxTxSubmissionsPerSecond
+	if txRate == 0 {
+		txRate = DefaultMaxTxSubmissionsPerSecond
+	}
+	if txRate > 0 {
+		// Burst allows small batches: 2x the per-second rate
+		burst := float64(txRate) * 2
+		o.txSubmissionRateLimiter = newTxSubmissionRateLimiter(
+			float64(txRate),
+			burst,
+		)
 	}
 	if cfg.PromRegistry != nil {
 		o.initMetrics()
@@ -283,6 +306,10 @@ func (o *Ouroboros) HandleConnClosedEvent(evt event.Event) {
 	o.chainsyncMutex.Lock()
 	delete(o.chainsyncStats, connId)
 	o.chainsyncMutex.Unlock()
+	// Clean up TxSubmission rate limiter state
+	if o.txSubmissionRateLimiter != nil {
+		o.txSubmissionRateLimiter.RemovePeer(connId)
+	}
 }
 
 func (o *Ouroboros) HandleOutboundConnEvent(evt event.Event) {
@@ -304,10 +331,18 @@ func (o *Ouroboros) HandleOutboundConnEvent(evt event.Event) {
 		o.PeerGov.UpdatePeerConnectionStability(connId, 1.0)
 	}
 
-	// Start chainsync client for this connection if not already tracking it
+	// Start chainsync client for this connection if not already tracking it.
+	// If chainsync negotiation fails, we return early and do NOT start
+	// txsubmission -- the connection is unusable if chainsync fails because
+	// the Ouroboros handshake/protocol negotiation has already failed and the
+	// peer will reject further mini-protocol starts on this connection.
 	if o.ChainsyncState != nil {
+		maxClients := defaultMaxChainsyncClients
+		if o.ChainsyncState.MaxClients() > 0 {
+			maxClients = o.ChainsyncState.MaxClients()
+		}
 		// Atomically check and add the client to avoid race conditions
-		if o.ChainsyncState.TryAddClientConnId(connId, maxChainsyncClients) {
+		if o.ChainsyncState.TryAddClientConnId(connId, maxClients) {
 			if err := o.chainsyncClientStart(connId); err != nil {
 				// Roll back the registration on failure
 				o.ChainsyncState.RemoveClientConnId(connId)

@@ -65,7 +65,8 @@ func TestScheduler_ChangeInterval(t *testing.T) {
 	beforeChange := atomic.LoadInt32(&counter)
 
 	// Change interval to 200ms
-	timer.ChangeInterval(200 * time.Millisecond)
+	err := timer.ChangeInterval(200 * time.Millisecond)
+	require.NoError(t, err)
 
 	// Wait for at least 1 execution after interval change
 	require.Eventually(t, func() bool {
@@ -227,4 +228,28 @@ func TestScheduler_Config(t *testing.T) {
 			cap(mixedScheduler.taskQueue),
 		)
 	}
+}
+
+func TestScheduler_ChangeInterval_RejectsInvalidDuration(t *testing.T) {
+	timer := NewScheduler(50 * time.Millisecond)
+
+	// Validation happens before the channel send, so we do not need
+	// the scheduler running to verify that invalid durations are
+	// rejected.
+
+	// Zero duration must return an error, not panic
+	err := timer.ChangeInterval(0)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "interval must be positive")
+
+	// Negative duration must return an error, not panic
+	err = timer.ChangeInterval(-1 * time.Second)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "interval must be positive")
+
+	// Positive duration must not return an error.
+	// The scheduler is not started, so the send will be dropped by the
+	// default case in the select, but the validation itself succeeds.
+	err = timer.ChangeInterval(100 * time.Millisecond)
+	require.NoError(t, err)
 }

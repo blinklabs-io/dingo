@@ -16,13 +16,15 @@ package ledger
 
 import (
 	"iter"
+	"math"
 	"math/big"
 	"testing"
 
-	"github.com/blinklabs-io/dingo/ledger/eras"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/blinklabs-io/dingo/ledger/eras"
 )
 
 // mockTransaction implements lcommon.Transaction for
@@ -458,7 +460,7 @@ func TestCalculateMinFee(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			fee := CalculateMinFee(
+			fee, err := CalculateMinFee(
 				tc.txSize,
 				tc.exUnits,
 				tc.minFeeA,
@@ -466,6 +468,7 @@ func TestCalculateMinFee(t *testing.T) {
 				tc.pricesMem,
 				tc.pricesSteps,
 			)
+			require.NoError(t, err)
 			assert.Equal(
 				t,
 				tc.expected,
@@ -483,7 +486,8 @@ func TestDeclaredExUnits(t *testing.T) {
 			fee:       big.NewInt(200000),
 			witnesses: nil,
 		}
-		eu := DeclaredExUnits(tx)
+		eu, err := DeclaredExUnits(tx)
+		require.NoError(t, err)
 		assert.Equal(t, int64(0), eu.Memory)
 		assert.Equal(t, int64(0), eu.Steps)
 	})
@@ -518,9 +522,49 @@ func TestDeclaredExUnits(t *testing.T) {
 				},
 			},
 		}
-		eu := DeclaredExUnits(tx)
+		eu, err := DeclaredExUnits(tx)
+		require.NoError(t, err)
 		assert.Equal(t, int64(500000), eu.Memory)
 		assert.Equal(t, int64(130000000), eu.Steps)
+	})
+
+	t.Run("overflow returns error", func(t *testing.T) {
+		tx := &mockFeeTx{
+			cbor: make([]byte, 100),
+			fee:  big.NewInt(200000),
+			witnesses: &mockWitnessSet{
+				redeemers: &mockRedeemers{
+					entries: []struct {
+						key lcommon.RedeemerKey
+						val lcommon.RedeemerValue
+					}{
+						{
+							val: lcommon.RedeemerValue{
+								ExUnits: lcommon.ExUnits{
+									Memory: math.MaxInt64,
+									Steps:  100,
+								},
+							},
+						},
+						{
+							val: lcommon.RedeemerValue{
+								ExUnits: lcommon.ExUnits{
+									Memory: 1,
+									Steps:  100,
+								},
+							},
+						},
+					},
+				},
+			},
+		}
+		_, err := DeclaredExUnits(tx)
+		require.Error(t, err)
+		assert.ErrorIs(
+			t,
+			err,
+			eras.ErrExUnitsOverflow,
+		)
 	})
 }
 

@@ -16,11 +16,13 @@ package mysql
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/ledger"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
@@ -41,12 +43,35 @@ func (d *MetadataStoreMysql) GetUtxo(
 		return nil, err
 	}
 	result := db.Where("deleted_slot = 0").
+		Preload("Assets").
 		First(ret, "tx_id = ? AND output_idx = ?", txId, idx)
 	if result.Error != nil {
 		if errors.Is(result.Error, gorm.ErrRecordNotFound) {
 			return nil, nil
 		}
-		return nil, result.Error
+		return nil, fmt.Errorf("get utxo %x#%d: %w", txId, idx, result.Error)
+	}
+	return ret, nil
+}
+
+// GetUtxoIncludingSpent returns a Utxo by reference, including spent UTxOs
+func (d *MetadataStoreMysql) GetUtxoIncludingSpent(
+	txId []byte,
+	idx uint32,
+	txn types.Txn,
+) (*models.Utxo, error) {
+	ret := &models.Utxo{}
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return nil, err
+	}
+	result := db.Preload("Assets").
+		First(ret, "tx_id = ? AND output_idx = ?", txId, idx)
+	if result.Error != nil {
+		if errors.Is(result.Error, gorm.ErrRecordNotFound) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("get utxo including spent %x#%d: %w", txId, idx, result.Error)
 	}
 	return ret, nil
 }
@@ -93,6 +118,39 @@ func (d *MetadataStoreMysql) GetUtxosDeletedBeforeSlot(
 	return ret, nil
 }
 
+// addressWhereClause builds a GORM Where clause for matching
+// UTxOs by payment key, staking key, or both. Returns nil if
+// the address has neither key.
+func addressWhereClause(
+	db *gorm.DB,
+	addr lcommon.Address,
+) *gorm.DB {
+	zeroHash := lcommon.NewBlake2b224(nil)
+	hasPayment := addr.PaymentKeyHash() != zeroHash
+	hasStake := addr.StakeKeyHash() != zeroHash
+
+	switch {
+	case hasPayment && hasStake:
+		return db.Where(
+			"payment_key = ? AND staking_key = ?",
+			addr.PaymentKeyHash().Bytes(),
+			addr.StakeKeyHash().Bytes(),
+		)
+	case hasPayment:
+		return db.Where(
+			"payment_key = ?",
+			addr.PaymentKeyHash().Bytes(),
+		)
+	case hasStake:
+		return db.Where(
+			"staking_key = ?",
+			addr.StakeKeyHash().Bytes(),
+		)
+	default:
+		return nil
+	}
+}
+
 // GetUtxosByAddress returns a list of Utxos
 func (d *MetadataStoreMysql) GetUtxosByAddress(
 	addr ledger.Address,
@@ -103,31 +161,42 @@ func (d *MetadataStoreMysql) GetUtxosByAddress(
 	if err != nil {
 		return nil, err
 	}
-
-	hasPaymentKey := addr.PaymentKeyHash() != ledger.NewBlake2b224(nil)
-	hasStakeKey := addr.StakeKeyHash() != ledger.NewBlake2b224(nil)
-
-	// Build sub-query for address
-	var addrQuery *gorm.DB
-	if hasPaymentKey && hasStakeKey {
-		// Base address: both credentials must match (AND)
-		addrQuery = db.Where(
-			"payment_key = ? AND staking_key = ?",
-			addr.PaymentKeyHash().Bytes(),
-			addr.StakeKeyHash().Bytes(),
-		)
-	} else if hasPaymentKey {
-		addrQuery = db.Where("payment_key = ?", addr.PaymentKeyHash().Bytes())
-	} else if hasStakeKey {
-		addrQuery = db.Where("staking_key = ?", addr.StakeKeyHash().Bytes())
-	}
-
+	addrQuery := addressWhereClause(db, addr)
 	if addrQuery == nil {
 		return ret, nil
 	}
 	result := db.
 		Where("deleted_slot = 0").
 		Where(addrQuery).
+		Preload("Assets").
+		Find(&ret)
+	if result.Error != nil {
+		return nil, result.Error
+	}
+	return ret, nil
+}
+
+// GetUtxosByAddressAtSlot returns UTxOs for an address
+// that existed at a specific slot.
+func (d *MetadataStoreMysql) GetUtxosByAddressAtSlot(
+	addr lcommon.Address,
+	slot uint64,
+	txn types.Txn,
+) ([]models.Utxo, error) {
+	var ret []models.Utxo
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return nil, err
+	}
+	addrQuery := addressWhereClause(db, addr)
+	if addrQuery == nil {
+		return ret, nil
+	}
+	result := db.
+		Where("added_slot <= ?", slot).
+		Where("(deleted_slot = 0 OR deleted_slot > ?)", slot).
+		Where(addrQuery).
+		Preload("Assets").
 		Find(&ret)
 	if result.Error != nil {
 		return nil, result.Error

@@ -331,11 +331,16 @@ func (d *MetadataStoreSqlite) RestoreDrepStateAtSlot(
 		}
 
 		// Update the DRep record with the restored state.
+		// Reset LastActivityEpoch and ExpiryEpoch to 0 since we cannot
+		// reliably reconstruct these values from certificate data alone
+		// during rollback. They will be recalculated as new activity occurs.
 		if result := db.Model(&drep).Updates(map[string]any{
-			"active":      active,
-			"anchor_url":  anchorUrl,
-			"anchor_hash": anchorHash,
-			"added_slot":  latestSlot,
+			"active":              active,
+			"anchor_url":          anchorUrl,
+			"anchor_hash":         anchorHash,
+			"added_slot":          latestSlot,
+			"last_activity_epoch": 0,
+			"expiry_epoch":        0,
 		}); result.Error != nil {
 			return result.Error
 		}
@@ -349,7 +354,7 @@ func (d *MetadataStoreSqlite) GetActiveDreps(
 	txn types.Txn,
 ) ([]*models.Drep, error) {
 	var dreps []*models.Drep
-	db, err := d.resolveDB(txn)
+	db, err := d.resolveReadDB(txn)
 	if err != nil {
 		return nil, err
 	}
@@ -392,4 +397,151 @@ func (d *MetadataStoreSqlite) SetDrep(
 		return result.Error
 	}
 	return nil
+}
+
+// GetDRepVotingPower calculates the voting power for a DRep by summing the
+// stake of all accounts delegated to it. Uses the current live UTxO set
+// (deleted_slot = 0) for the calculation.
+//
+// TODO: This implementation uses the current live UTxO set as an
+// approximation. A future implementation should accept an epoch
+// parameter and use epoch-based stake snapshots for accurate
+// voting power at a specific point in time.
+//
+// The voting power is computed by:
+// 1. Finding all accounts whose drep field matches the DRep credential
+// 2. Summing those accounts' UTxO values
+//
+// Returns 0 if the DRep has no delegators.
+func (d *MetadataStoreSqlite) GetDRepVotingPower(
+	drepCredential []byte,
+	txn types.Txn,
+) (uint64, error) {
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return 0, err
+	}
+
+	// Sum the stake of all accounts delegated to this DRep.
+	// Each account's stake contribution is approximated by summing
+	// the value of all UTxOs associated with the account's staking key.
+	// This uses a subquery to find staking keys delegated to the DRep,
+	// then sums the UTxO values for those staking keys.
+	var totalStake uint64
+	if err := db.Raw(`
+		SELECT COALESCE(SUM(CAST(u.amount AS INTEGER)), 0)
+		FROM utxo u
+		WHERE u.deleted_slot = 0
+		AND u.staking_key IN (
+			SELECT a.staking_key
+			FROM account a
+			WHERE a.drep = ? AND a.active = 1
+		)
+	`, drepCredential).Scan(&totalStake).Error; err != nil {
+		return 0, fmt.Errorf("get drep voting power: %w", err)
+	}
+
+	return totalStake, nil
+}
+
+// UpdateDRepActivity updates the DRep's last activity epoch and recalculates
+// the expiry epoch. Called when a DRep votes, registers, or updates their
+// registration. The expiryEpoch is set to activityEpoch + inactivityPeriod.
+// Returns ErrDrepActivityNotUpdated if no matching DRep record was found.
+func (d *MetadataStoreSqlite) UpdateDRepActivity(
+	drepCredential []byte,
+	activityEpoch uint64,
+	inactivityPeriod uint64,
+	txn types.Txn,
+) error {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return err
+	}
+	expiryEpoch := activityEpoch + inactivityPeriod
+	result := db.Model(&models.Drep{}).
+		Where("credential = ?", drepCredential).
+		Updates(map[string]any{
+			"last_activity_epoch": activityEpoch,
+			"expiry_epoch":        expiryEpoch,
+		})
+	if result.Error != nil {
+		return fmt.Errorf("update drep activity: %w", result.Error)
+	}
+	if result.RowsAffected == 0 {
+		return models.ErrDrepActivityNotUpdated
+	}
+	return nil
+}
+
+// GetExpiredDReps retrieves all active DReps whose expiry epoch is at or
+// before the given epoch. These DReps have been inactive for longer than
+// the dRepInactivityPeriod and should be considered expired for voting
+// power purposes.
+func (d *MetadataStoreSqlite) GetExpiredDReps(
+	epoch uint64,
+	txn types.Txn,
+) ([]*models.Drep, error) {
+	var dreps []*models.Drep
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return nil, err
+	}
+	// A DRep is expired if active, has a non-zero expiry epoch, and the
+	// expiry epoch is at or before the current epoch.
+	if result := db.Where(
+		"active = ? AND expiry_epoch > 0 AND expiry_epoch <= ?",
+		true,
+		epoch,
+	).Find(&dreps); result.Error != nil {
+		return nil, fmt.Errorf("get expired dreps: %w", result.Error)
+	}
+	return dreps, nil
+}
+
+// GetCommitteeActiveCount returns the total number of active (non-resigned)
+// committee members. This is used for CC threshold calculations.
+func (d *MetadataStoreSqlite) GetCommitteeActiveCount(
+	txn types.Txn,
+) (int, error) {
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return 0, err
+	}
+	var count int64
+	if result := db.Raw(`
+		SELECT COUNT(*) FROM (
+			SELECT DISTINCT a.cold_credential
+			FROM auth_committee_hot a
+			INNER JOIN certs c
+				ON c.id = a.certificate_id
+			WHERE NOT EXISTS (
+				SELECT 1
+				FROM auth_committee_hot a2
+				INNER JOIN certs c2
+					ON c2.id = a2.certificate_id
+				WHERE a2.cold_credential = a.cold_credential
+				AND (
+					a2.added_slot > a.added_slot
+					OR (a2.added_slot = a.added_slot
+						AND c2.cert_index > c.cert_index)
+				)
+			)
+			AND NOT EXISTS (
+				SELECT 1
+				FROM resign_committee_cold r
+				INNER JOIN certs cr
+					ON cr.id = r.certificate_id
+				WHERE r.cold_credential = a.cold_credential
+				AND (
+					r.added_slot > a.added_slot
+					OR (r.added_slot = a.added_slot
+						AND cr.cert_index > c.cert_index)
+				)
+			)
+		) active_members
+	`).Scan(&count); result.Error != nil {
+		return 0, fmt.Errorf("get committee active count: %w", result.Error)
+	}
+	return int(count), nil
 }

@@ -17,6 +17,7 @@ package chain
 import (
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"log/slog"
 	"slices"
 	"sync"
@@ -81,12 +82,28 @@ func (c *Chain) headerTip() ochainsync.Tip {
 	}
 }
 
+// maxQueuedHeaders returns the maximum number of headers that may be
+// queued. When the security parameter is available (securityParam > 0),
+// the limit is securityParam * 2. Otherwise, DefaultMaxQueuedHeaders is
+// used as a safe fallback.
+func (c *Chain) maxQueuedHeaders() int {
+	if sp := c.manager.securityParam; sp > 0 {
+		return sp * 2
+	}
+	return DefaultMaxQueuedHeaders
+}
+
 func (c *Chain) AddBlockHeader(header ledger.BlockHeader) error {
 	if c == nil {
 		return errors.New("chain is nil")
 	}
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
+	// Reject headers when the queue is at capacity to prevent
+	// unbounded memory growth from a malicious peer.
+	if len(c.headers) >= c.maxQueuedHeaders() {
+		return ErrHeaderQueueFull
+	}
 	// Make sure header fits on chain tip
 	if c.tipBlockIndex >= initialBlockIndex ||
 		len(c.headers) > 0 {
@@ -111,6 +128,26 @@ func (c *Chain) AddBlock(
 	if c == nil {
 		return errors.New("chain is nil")
 	}
+	// Perform all state mutations under locks, collect event to publish
+	// outside locks to prevent deadlock if subscribers access chain state.
+	pendingEvent, err := c.addBlockLocked(block, txn)
+	if err != nil {
+		return err
+	}
+	// Publish event outside locks to prevent deadlock if subscribers
+	// call back into chain or manager state
+	if c.eventBus != nil && pendingEvent != nil {
+		c.eventBus.Publish(pendingEvent.Type, *pendingEvent)
+	}
+	return nil
+}
+
+// addBlockLocked performs AddBlock state mutations under locks and returns
+// any event that should be published after locks are released.
+func (c *Chain) addBlockLocked(
+	block ledger.Block,
+	txn *database.Txn,
+) (*event.Event, error) {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 	// We get a write lock on the manager to cover the integrity checks and adding the block below
@@ -118,13 +155,13 @@ func (c *Chain) AddBlock(
 	defer c.manager.mutex.Unlock()
 	// Verify chain integrity
 	if err := c.reconcile(); err != nil {
-		return err
+		return nil, fmt.Errorf("reconcile chain: %w", err)
 	}
 	// Check that the new block matches our first header, if any
 	if len(c.headers) > 0 {
 		firstHeader := c.headers[0]
 		if block.Hash().String() != firstHeader.Hash().String() {
-			return NewBlockNotMatchHeaderError(
+			return nil, NewBlockNotMatchHeaderError(
 				block.Hash().String(),
 				firstHeader.Hash().String(),
 			)
@@ -133,7 +170,7 @@ func (c *Chain) AddBlock(
 	// Check that this block fits on the current chain tip
 	if c.tipBlockIndex >= initialBlockIndex {
 		if string(block.PrevHash().Bytes()) != string(c.currentTip.Point.Hash) {
-			return NewBlockNotFitChainTipError(
+			return nil, NewBlockNotFitChainTipError(
 				block.Hash().String(),
 				block.PrevHash().String(),
 				hex.EncodeToString(c.currentTip.Point.Hash),
@@ -156,7 +193,7 @@ func (c *Chain) AddBlock(
 		Cbor:     block.Cbor(),
 	}
 	if err := c.manager.addBlock(tmpBlock, txn, c.persistent); err != nil {
-		return err
+		return nil, fmt.Errorf("store block: %w", err)
 	}
 	if !c.persistent {
 		c.blocks = append(c.blocks, tmpPoint)
@@ -178,20 +215,18 @@ func (c *Chain) AddBlock(
 		c.waitingChan = nil
 	}
 	c.waitingChanMutex.Unlock()
-	// Generate event
+	// Build event for deferred publication
 	if c.eventBus != nil {
-		c.eventBus.Publish(
+		evt := event.NewEvent(
 			ChainUpdateEventType,
-			event.NewEvent(
-				ChainUpdateEventType,
-				ChainBlockEvent{
-					Point: tmpPoint,
-					Block: tmpBlock,
-				},
-			),
+			ChainBlockEvent{
+				Point: tmpPoint,
+				Block: tmpBlock,
+			},
 		)
+		return &evt, nil
 	}
-	return nil
+	return nil, nil
 }
 
 func (c *Chain) AddBlocks(blocks []ledger.Block) error {
@@ -208,17 +243,34 @@ func (c *Chain) AddBlocks(blocks []ledger.Block) error {
 		if batchSize == 0 {
 			break
 		}
+		// Collect events inside the transaction callback and
+		// publish them only after the transaction commits
+		// successfully. This prevents subscribers from reacting
+		// to events whose underlying data has not yet been
+		// persisted.
+		var pendingEvents []event.Event
 		txn := c.manager.db.BlobTxn(true)
 		err := txn.Do(func(txn *database.Txn) error {
+			pendingEvents = pendingEvents[:0]
 			for _, tmpBlock := range blocks[batchOffset : batchOffset+batchSize] {
-				if err := c.AddBlock(tmpBlock, txn); err != nil {
+				evt, err := c.addBlockLocked(tmpBlock, txn)
+				if err != nil {
 					return err
+				}
+				if evt != nil {
+					pendingEvents = append(pendingEvents, *evt)
 				}
 			}
 			return nil
 		})
 		if err != nil {
 			return err
+		}
+		// Publish events after the transaction has committed
+		if c.eventBus != nil {
+			for _, evt := range pendingEvents {
+				c.eventBus.Publish(evt.Type, evt)
+			}
 		}
 		batchOffset += batchSize
 	}
@@ -229,6 +281,27 @@ func (c *Chain) Rollback(point ocommon.Point) error {
 	if c == nil {
 		return errors.New("chain is nil")
 	}
+	// Perform all state mutations under locks, collect events to publish
+	// outside locks to prevent deadlock if subscribers access chain state.
+	pendingEvents, err := c.rollbackLocked(point)
+	if err != nil {
+		return err
+	}
+	// Publish events outside locks to prevent deadlock if subscribers
+	// call back into chain or manager state
+	if c.eventBus != nil {
+		for _, evt := range pendingEvents {
+			c.eventBus.Publish(evt.Type, evt)
+		}
+	}
+	return nil
+}
+
+// rollbackLocked performs Rollback state mutations under locks and returns
+// any events that should be published after locks are released.
+func (c *Chain) rollbackLocked(
+	point ocommon.Point,
+) ([]event.Event, error) {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 	// We get a write lock on the manager to cover the integrity checks and block deletions
@@ -236,7 +309,7 @@ func (c *Chain) Rollback(point ocommon.Point) error {
 	defer c.manager.mutex.Unlock()
 	// Verify chain integrity
 	if err := c.reconcile(); err != nil {
-		return err
+		return nil, fmt.Errorf("reconcile chain: %w", err)
 	}
 	// Check headers for rollback point
 	if len(c.headers) > 0 {
@@ -251,10 +324,10 @@ func (c *Chain) Rollback(point ocommon.Point) error {
 			}
 			if header.SlotNumber() == point.Slot &&
 				string(header.Hash().Bytes()) == string(point.Hash) {
-				return nil
+				return nil, nil
 			}
 			if header.SlotNumber() < point.Slot {
-				return models.ErrBlockNotFound
+				return nil, models.ErrBlockNotFound
 			}
 		}
 	}
@@ -265,12 +338,39 @@ func (c *Chain) Rollback(point ocommon.Point) error {
 		var err error
 		tmpBlock, err = c.manager.blockByPoint(point, nil)
 		if err != nil {
-			return err
+			return nil, fmt.Errorf(
+				"lookup rollback point: %w", err,
+			)
 		}
 		rollbackBlockIndex = tmpBlock.ID
 	}
+	// Guard against uint64 underflow from corrupt/stale data
+	if rollbackBlockIndex > c.tipBlockIndex {
+		return nil, fmt.Errorf(
+			"rollback block index %d exceeds tip block index %d",
+			rollbackBlockIndex,
+			c.tipBlockIndex,
+		)
+	}
 	// Calculate fork depth before deleting blocks
 	forkDepth := c.tipBlockIndex - rollbackBlockIndex
+	// Reject rollbacks that exceed the security parameter K on
+	// the persistent chain. Ephemeral (fork-tracking) chains are
+	// not subject to this limit. The check is skipped when
+	// securityParam is 0, which means the ledger has not been
+	// initialized yet.
+	securityParam := c.manager.securityParam
+	if c.persistent && securityParam > 0 &&
+		forkDepth > uint64(securityParam) { //nolint:gosec
+		slog.Default().Warn(
+			"rejecting rollback that exceeds "+
+				"security parameter K",
+			"fork_depth", forkDepth,
+			"security_param", securityParam,
+			"rollback_slot", point.Slot,
+		)
+		return nil, ErrRollbackExceedsSecurityParam
+	}
 	// Capture old tip for fork event before we modify it
 	oldTip := c.currentTip
 	// Collect and delete rolled-back blocks in a single pass
@@ -280,7 +380,9 @@ func (c *Chain) Rollback(point ocommon.Point) error {
 			// Remove block from persistent store, returns the removed block
 			block, err := c.manager.removeBlockByIndex(i)
 			if err != nil {
-				return err
+				return nil, fmt.Errorf(
+					"remove block at index %d: %w", i, err,
+				)
 			}
 			if c.eventBus != nil {
 				rolledBackBlocks = append(rolledBackBlocks, block)
@@ -332,11 +434,12 @@ func (c *Chain) Rollback(point ocommon.Point) error {
 			iter.needsRollback = true
 		}
 	}
-	// Generate events
-	if c.eventBus != nil {
-		// Rollback event (existing)
-		c.eventBus.Publish(
-			ChainUpdateEventType,
+	// Build events for deferred publication
+	var pendingEvents []event.Event
+	if c.eventBus != nil && len(rolledBackBlocks) > 0 {
+		// Rollback event — only emit when blocks were actually removed
+		pendingEvents = append(
+			pendingEvents,
 			event.NewEvent(
 				ChainUpdateEventType,
 				ChainRollbackEvent{
@@ -345,10 +448,10 @@ func (c *Chain) Rollback(point ocommon.Point) error {
 				},
 			),
 		)
-		// Fork event (new) - only emit if we actually rolled back blocks
+		// Fork event - only emit if we actually rolled back blocks
 		if forkDepth > 0 {
-			c.eventBus.Publish(
-				ChainForkEventType,
+			pendingEvents = append(
+				pendingEvents,
 				event.NewEvent(
 					ChainForkEventType,
 					ChainForkEvent{
@@ -361,7 +464,7 @@ func (c *Chain) Rollback(point ocommon.Point) error {
 			)
 		}
 	}
-	return nil
+	return pendingEvents, nil
 }
 
 // ClearHeaders removes all queued block headers. This is used when
@@ -479,78 +582,83 @@ func (c *Chain) iterNext(
 	iter *ChainIterator,
 	blocking bool,
 ) (*ChainIteratorResult, error) {
-	c.mutex.Lock()
-	// We get a read lock on the manager for the integrity check and initial block lookup
-	c.manager.mutex.RLock()
-	// Verify chain integrity
-	if err := c.reconcile(); err != nil {
-		c.mutex.Unlock()
-		c.manager.mutex.RUnlock()
-		return nil, err
-	}
-	// Check for pending rollback
-	if iter.needsRollback {
-		ret := &ChainIteratorResult{}
-		ret.Point = iter.rollbackPoint
-		ret.Rollback = true
-		iter.lastPoint = iter.rollbackPoint
-		iter.needsRollback = false
-		if iter.rollbackPoint.Slot > 0 {
-			// Lookup block index for rollback point
-			tmpBlock, err := c.manager.blockByPoint(iter.rollbackPoint, nil)
-			if err != nil {
-				c.mutex.Unlock()
-				c.manager.mutex.RUnlock()
-				return nil, err
+	for {
+		c.mutex.Lock()
+		// We get a read lock on the manager for the integrity check and initial block lookup
+		c.manager.mutex.RLock()
+		// Verify chain integrity
+		if err := c.reconcile(); err != nil {
+			c.mutex.Unlock()
+			c.manager.mutex.RUnlock()
+			return nil, err
+		}
+		// Check for pending rollback
+		if iter.needsRollback {
+			ret := &ChainIteratorResult{}
+			ret.Point = iter.rollbackPoint
+			ret.Rollback = true
+			iter.lastPoint = iter.rollbackPoint
+			iter.needsRollback = false
+			if iter.rollbackPoint.Slot > 0 {
+				// Lookup block index for rollback point
+				tmpBlock, err := c.manager.blockByPoint(
+					iter.rollbackPoint,
+					nil,
+				)
+				if err != nil {
+					c.mutex.Unlock()
+					c.manager.mutex.RUnlock()
+					return nil, err
+				}
+				iter.nextBlockIndex = tmpBlock.ID + 1
 			}
-			iter.nextBlockIndex = tmpBlock.ID + 1
+			c.mutex.Unlock()
+			c.manager.mutex.RUnlock()
+			return ret, nil
+		}
+		ret := &ChainIteratorResult{}
+		// Lookup next block in metadata DB
+		tmpBlock, err := c.blockByIndex(iter.nextBlockIndex)
+		// Return immedidately if a block is found
+		if err == nil {
+			ret.Point = ocommon.NewPoint(tmpBlock.Slot, tmpBlock.Hash)
+			ret.Block = tmpBlock
+			iter.nextBlockIndex++
+			iter.lastPoint = ret.Point
+			c.mutex.Unlock()
+			c.manager.mutex.RUnlock()
+			return ret, nil
+		}
+		// Return any actual error
+		if !errors.Is(err, models.ErrBlockNotFound) {
+			c.mutex.Unlock()
+			c.manager.mutex.RUnlock()
+			return ret, err
+		}
+		// Return immediately if we're not blocking
+		if !blocking {
+			c.mutex.Unlock()
+			c.manager.mutex.RUnlock()
+			return nil, ErrIteratorChainTip
 		}
 		c.mutex.Unlock()
 		c.manager.mutex.RUnlock()
-		return ret, nil
-	}
-	ret := &ChainIteratorResult{}
-	// Lookup next block in metadata DB
-	tmpBlock, err := c.blockByIndex(iter.nextBlockIndex)
-	// Return immedidately if a block is found
-	if err == nil {
-		ret.Point = ocommon.NewPoint(tmpBlock.Slot, tmpBlock.Hash)
-		ret.Block = tmpBlock
-		iter.nextBlockIndex++
-		iter.lastPoint = ret.Point
-		c.mutex.Unlock()
-		c.manager.mutex.RUnlock()
-		return ret, nil
-	}
-	// Return any actual error
-	if !errors.Is(err, models.ErrBlockNotFound) {
-		c.mutex.Unlock()
-		c.manager.mutex.RUnlock()
-		return ret, err
-	}
-	// Return immediately if we're not blocking
-	if !blocking {
-		c.mutex.Unlock()
-		c.manager.mutex.RUnlock()
-		return nil, ErrIteratorChainTip
-	}
-	c.mutex.Unlock()
-	c.manager.mutex.RUnlock()
-	// Wait for chain update
-	c.waitingChanMutex.Lock()
-	if c.waitingChan == nil {
-		c.waitingChan = make(chan struct{})
-	}
-	waitChan := c.waitingChan
-	c.waitingChanMutex.Unlock()
+		// Wait for chain update
+		c.waitingChanMutex.Lock()
+		if c.waitingChan == nil {
+			c.waitingChan = make(chan struct{})
+		}
+		waitChan := c.waitingChan
+		c.waitingChanMutex.Unlock()
 
-	select {
-	case <-waitChan:
-		// Call ourselves again now that we should have new data
-		return c.iterNext(iter, blocking)
-	case <-iter.ctx.Done():
-		// Iterator was cancelled
-		return nil, iter.ctx.Err()
+		select {
+		case <-waitChan:
+			// Loop again now that we should have new data
+			continue
+		case <-iter.ctx.Done():
+			// Iterator was cancelled
+			return nil, iter.ctx.Err()
+		}
 	}
 }
 

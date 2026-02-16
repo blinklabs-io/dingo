@@ -16,11 +16,13 @@ package chain
 
 import (
 	"testing"
+	"time"
 
-	"github.com/blinklabs-io/dingo/event"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/blinklabs-io/dingo/event"
 )
 
 func TestIteratorCancelRemovesFromChain(t *testing.T) {
@@ -123,4 +125,100 @@ func TestIteratorCancelIdempotent(t *testing.T) {
 	c.mutex.RLock()
 	assert.Equal(t, 0, len(c.iterators))
 	c.mutex.RUnlock()
+}
+
+// TestIterNextSpuriousWakeups verifies that the blocking
+// iterator survives many spurious wake-ups (channel closes
+// with no new block available) without stack overflow.
+//
+// Before the fix, iterNext called itself recursively on each
+// wake-up. With thousands of spurious signals, this would
+// overflow the goroutine stack. The iterative loop fix makes
+// this safe regardless of wake-up count.
+func TestIterNextSpuriousWakeups(t *testing.T) {
+	eventBus := event.NewEventBus(nil, nil)
+	cm, err := NewManager(nil, eventBus)
+	require.NoError(t, err)
+
+	c := cm.PrimaryChain()
+	require.NotNil(t, c)
+
+	// Create a blocking iterator from origin
+	iter, err := c.FromPoint(ocommon.Point{}, true)
+	require.NoError(t, err)
+	defer iter.Cancel()
+
+	// Channel to receive the iterator result from the
+	// blocking goroutine.
+	type iterResult struct {
+		result *ChainIteratorResult
+		err    error
+	}
+	resultCh := make(chan iterResult, 1)
+
+	// Start a goroutine that calls Next(blocking=true).
+	// It will block until a block is available.
+	go func() {
+		res, err := iter.Next(true)
+		resultCh <- iterResult{result: res, err: err}
+	}()
+
+	// Fire many spurious wake-ups. Each wake-up closes the
+	// waitingChan without adding a block, forcing the
+	// iterator to loop again. With the old recursive code,
+	// 10 000 wake-ups would overflow the stack.
+	const spuriousCount = 10_000
+	for i := range spuriousCount {
+		// Give the iterator goroutine a moment to register
+		// its wait channel before we close it.
+		require.Eventually(t, func() bool {
+			c.waitingChanMutex.Lock()
+			defer c.waitingChanMutex.Unlock()
+			return c.waitingChan != nil
+		}, 2*time.Second, time.Millisecond,
+			"iterator should create waitingChan "+
+				"(wake-up %d)", i,
+		)
+
+		// Close the waiting channel (spurious wake-up)
+		c.waitingChanMutex.Lock()
+		close(c.waitingChan)
+		c.waitingChan = nil
+		c.waitingChanMutex.Unlock()
+	}
+
+	// Verify the iterator has not returned yet (still
+	// blocking because no block was added).
+	select {
+	case r := <-resultCh:
+		t.Fatalf(
+			"iterator should still be blocking "+
+				"after spurious wake-ups, got: %+v",
+			r,
+		)
+	case <-time.After(50 * time.Millisecond):
+		// Expected: still blocking
+	}
+
+	// Now cancel the iterator to unblock the goroutine.
+	iter.Cancel()
+
+	// The blocked Next() should return a context
+	// cancellation error.
+	require.Eventually(t, func() bool {
+		select {
+		case r := <-resultCh:
+			resultCh <- r // put it back for final assertion
+			return true
+		default:
+			return false
+		}
+	}, 2*time.Second, time.Millisecond,
+		"iterator should return after cancel",
+	)
+
+	r := <-resultCh
+	require.Error(t, r.err,
+		"cancelled iterator should return an error",
+	)
 }

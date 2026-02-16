@@ -15,6 +15,8 @@
 package ledger
 
 import (
+	"fmt"
+
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
@@ -29,10 +31,71 @@ func (ls *LedgerState) handleEventChainUpdate(evt event.Event) {
 		for _, blk := range data.RolledBackBlocks {
 			ls.publishBlockEvent(BlockActionUndo, blk)
 		}
+		// Emit per-transaction rollback events.
+		// Hold rollbackMu so Close cannot start Wait between our
+		// closed check and Add(1).
+		ls.rollbackMu.Lock()
+		if ls.closed.Load() {
+			ls.rollbackMu.Unlock()
+			return
+		}
+		ls.rollbackWG.Add(1)
+		ls.rollbackMu.Unlock()
+		go ls.emitTransactionRollbackEvents(data)
 	}
 }
 
-func (ls *LedgerState) publishBlockEvent(action BlockAction, block models.Block) {
+// emitTransactionRollbackEvents emits TransactionEvent for each transaction
+// in the rolled-back blocks, allowing subscribers to undo any state changes.
+func (ls *LedgerState) emitTransactionRollbackEvents(
+	rollbackEvt chain.ChainRollbackEvent,
+) {
+	defer ls.rollbackWG.Done()
+
+	if ls.config.EventBus == nil {
+		return
+	}
+
+	for _, block := range rollbackEvt.RolledBackBlocks {
+		blk, err := block.Decode()
+		if err != nil {
+			ls.config.Logger.Warn(
+				fmt.Sprintf(
+					"ledger: failed to decode block for undo events: %s",
+					err,
+				),
+			)
+			continue
+		}
+
+		blockPoint := ocommon.Point{
+			Slot: block.Slot,
+			Hash: block.Hash,
+		}
+
+		txs := blk.Transactions()
+		for i := len(txs) - 1; i >= 0; i-- {
+			ls.config.EventBus.PublishAsync(
+				TransactionEventType,
+				event.NewEvent(
+					TransactionEventType,
+					TransactionEvent{
+						Transaction: txs[i],
+						Point:       blockPoint,
+						BlockNumber: block.Number,
+						TxIndex:     uint32(i), //nolint:gosec
+						Rollback:    true,
+					},
+				),
+			)
+		}
+	}
+}
+
+func (ls *LedgerState) publishBlockEvent(
+	action BlockAction,
+	block models.Block,
+) {
 	if ls.config.EventBus == nil {
 		return
 	}

@@ -433,6 +433,72 @@ func TestExpiryWarningThresholds(t *testing.T) {
 	assert.Equal(t, uint64(14), thresholds.Info)
 }
 
+func TestStopZeroesSecretKeyMaterial(t *testing.T) {
+	vrfPath, kesPath, opCertPath := setupTestKeys(t)
+
+	config := KeyStoreConfig{
+		VRFSKeyPath:       vrfPath,
+		KESSKeyPath:       kesPath,
+		OpCertPath:        opCertPath,
+		SlotsPerKESPeriod: 100,
+	}
+
+	ks := NewKeyStore(config)
+	require.NoError(t, ks.LoadFromFiles())
+
+	// Capture references to the underlying byte slices before Stop().
+	// These point to the same backing arrays that the keystore holds.
+	ks.mu.RLock()
+	vrfKeySlice := ks.vrfSKey
+	kesKeySlice := ks.kesSKey.Data
+	ks.mu.RUnlock()
+
+	// Confirm keys are non-zero before stop
+	require.NotEmpty(t, vrfKeySlice, "VRF key should be non-empty before Stop")
+	require.NotEmpty(t, kesKeySlice, "KES key should be non-empty before Stop")
+	assertNotAllZero(t, vrfKeySlice, "VRF key should be non-zero before Stop")
+	assertNotAllZero(t, kesKeySlice, "KES key should be non-zero before Stop")
+
+	// Start and then stop the keystore
+	slotClock := newMockSlotClock(50)
+	ctx := context.Background()
+	require.NoError(t, ks.Start(ctx, slotClock))
+	require.NoError(t, ks.Stop())
+
+	// After Stop(), the captured slices should be zeroed because
+	// zeroize() uses clear() which zeros the backing array in place.
+	assertAllZero(t, vrfKeySlice, "VRF secret key should be zeroed after Stop")
+	assertAllZero(t, kesKeySlice, "KES secret key should be zeroed after Stop")
+
+	// The keystore fields should be nil
+	ks.mu.RLock()
+	assert.Nil(t, ks.vrfSKey, "vrfSKey should be nil after Stop")
+	assert.Nil(t, ks.kesSKey, "kesSKey should be nil after Stop")
+	ks.mu.RUnlock()
+}
+
+// assertAllZero checks that every byte in the slice is 0.
+func assertAllZero(t *testing.T, data []byte, msg string) {
+	t.Helper()
+	for i, b := range data {
+		if b != 0 {
+			t.Errorf("%s: byte %d is %#x, expected 0", msg, i, b)
+			return
+		}
+	}
+}
+
+// assertNotAllZero checks that at least one byte in the slice is non-zero.
+func assertNotAllZero(t *testing.T, data []byte, msg string) {
+	t.Helper()
+	for _, b := range data {
+		if b != 0 {
+			return
+		}
+	}
+	t.Errorf("%s: all bytes are zero", msg)
+}
+
 func TestInsecureFileModeUnix(t *testing.T) {
 	if isWindows() {
 		t.Skip("Unix permission test; see TestInsecureFileModeWindows for Windows DACL test")

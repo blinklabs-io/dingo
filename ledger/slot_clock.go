@@ -103,7 +103,10 @@ type SlotClock struct {
 }
 
 // NewSlotClock creates a new SlotClock with the given provider and configuration
-func NewSlotClock(provider SlotTimeProvider, config SlotClockConfig) *SlotClock {
+func NewSlotClock(
+	provider SlotTimeProvider,
+	config SlotClockConfig,
+) *SlotClock {
 	if config.Logger == nil {
 		config.Logger = slog.Default()
 	}
@@ -331,7 +334,13 @@ func (sc *SlotClock) run() {
 		nextSlot := currentSlot + 1
 		nextSlotTime, err := sc.provider.SlotToTime(nextSlot)
 		if err != nil {
-			logger.Error("failed to get next slot time", "error", err, "slot", nextSlot)
+			logger.Error(
+				"failed to get next slot time",
+				"error",
+				err,
+				"slot",
+				nextSlot,
+			)
 			select {
 			case <-sc.ctx.Done():
 				return
@@ -371,7 +380,13 @@ func (sc *SlotClock) run() {
 		// Emit tick for the slot we're at (might have skipped some if drift is large)
 		tick, err := sc.buildSlotTick(actualSlot, actualNow)
 		if err != nil {
-			logger.Error("failed to build slot tick", "error", err, "slot", actualSlot)
+			logger.Error(
+				"failed to build slot tick",
+				"error",
+				err,
+				"slot",
+				actualSlot,
+			)
 			continue
 		}
 
@@ -380,7 +395,10 @@ func (sc *SlotClock) run() {
 }
 
 // buildSlotTick creates a SlotTick for the given slot
-func (sc *SlotClock) buildSlotTick(slot uint64, slotStart time.Time) (SlotTick, error) {
+func (sc *SlotClock) buildSlotTick(
+	slot uint64,
+	slotStart time.Time,
+) (SlotTick, error) {
 	epochInfo, err := sc.provider.SlotToEpoch(slot)
 	if err != nil {
 		return SlotTick{}, err

@@ -269,8 +269,42 @@ func (o *Ouroboros) chainsyncClientRollForward(
 	case gledger.BlockHeader:
 		blockSlot := v.SlotNumber()
 		blockHash := v.Hash().Bytes()
-		// Extract VRF output from block header for chain selection tie-breaking
+		point := ocommon.NewPoint(blockSlot, blockHash)
+		// Extract VRF output from block header once for chain
+		// selection tie-breaking (used in both dedup and normal
+		// paths below).
 		vrfOutput := chainselection.GetVRFOutput(v)
+		// Update tracked client state and deduplicate headers.
+		// If this header has already been reported by another
+		// client, skip publishing events for it.
+		if o.ChainsyncState != nil {
+			isNew := o.ChainsyncState.UpdateClientTip(
+				ctx.ConnectionId,
+				point,
+				tip,
+			)
+			if !isNew {
+				// Duplicate header already seen from another
+				// client; skip downstream processing but still
+				// refresh peer liveness and update metrics.
+				o.EventBus.Publish(
+					chainselection.PeerTipUpdateEventType,
+					event.NewEvent(
+						chainselection.PeerTipUpdateEventType,
+						chainselection.PeerTipUpdateEvent{
+							ConnectionId: ctx.ConnectionId,
+							Tip:          tip,
+							VRFOutput:    vrfOutput,
+						},
+					),
+				)
+				o.updateChainsyncMetrics(
+					ctx.ConnectionId,
+					tip,
+				)
+				return nil
+			}
+		}
 		// Publish peer tip update for chain selection
 		o.EventBus.Publish(
 			chainselection.PeerTipUpdateEventType,
@@ -290,7 +324,7 @@ func (o *Ouroboros) chainsyncClientRollForward(
 				ledger.ChainsyncEventType,
 				ledger.ChainsyncEvent{
 					ConnectionId: ctx.ConnectionId,
-					Point:        ocommon.NewPoint(blockSlot, blockHash),
+					Point:        point,
 					Type:         blockType,
 					BlockHeader:  v,
 					Tip:          tip,

@@ -59,3 +59,15 @@ func (d *Database) IsCommitteeMemberResigned(
 	}
 	return d.metadata.IsCommitteeMemberResigned(coldKey, txn.Metadata())
 }
+
+// GetCommitteeActiveCount returns the number of active (non-resigned)
+// committee members.
+func (d *Database) GetCommitteeActiveCount(
+	txn *Txn,
+) (int, error) {
+	if txn == nil {
+		txn = d.MetadataTxn(false)
+		defer txn.Release()
+	}
+	return d.metadata.GetCommitteeActiveCount(txn.Metadata())
+}

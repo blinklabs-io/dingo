@@ -95,6 +95,38 @@ func (d *MetadataStoreSqlite) resolveReadDB(
 	return db, nil
 }
 
+// addressSQLCondition builds a raw SQL WHERE fragment and
+// bind args for matching UTxO rows by payment/staking key.
+// The prefix is the table alias (e.g. "u"). Returns an
+// empty condition if the address has neither key.
+func addressSQLCondition(
+	addr lcommon.Address,
+	prefix string,
+) (string, []any) {
+	zeroHash := lcommon.NewBlake2b224(nil)
+	hasPayment := addr.PaymentKeyHash() != zeroHash
+	hasStake := addr.StakeKeyHash() != zeroHash
+
+	switch {
+	case hasPayment && hasStake:
+		return fmt.Sprintf(
+				"%s.payment_key = ? AND %s.staking_key = ?",
+				prefix, prefix,
+			), []any{
+				addr.PaymentKeyHash().Bytes(),
+				addr.StakeKeyHash().Bytes(),
+			}
+	case hasPayment:
+		return prefix + ".payment_key = ?",
+			[]any{addr.PaymentKeyHash().Bytes()}
+	case hasStake:
+		return prefix + ".staking_key = ?",
+			[]any{addr.StakeKeyHash().Bytes()}
+	default:
+		return "", nil
+	}
+}
+
 // GetTransactionByHash returns a transaction by its hash
 func (d *MetadataStoreSqlite) GetTransactionByHash(
 	hash []byte,
@@ -107,12 +139,100 @@ func (d *MetadataStoreSqlite) GetTransactionByHash(
 	}
 	result := db.
 		Preload(clause.Associations).
+		Preload("Inputs.Assets").
+		Preload("Outputs.Assets").
+		Preload("Collateral.Assets").
+		Preload("ReferenceInputs.Assets").
 		First(ret, "hash = ?", hash)
 	if result.Error != nil {
 		if errors.Is(result.Error, gorm.ErrRecordNotFound) {
 			return nil, nil
 		}
 		return nil, result.Error
+	}
+	return ret, nil
+}
+
+// GetTransactionsByBlockHash returns all transactions for a given
+// block hash, ordered by their position within the block.
+func (d *MetadataStoreSqlite) GetTransactionsByBlockHash(
+	blockHash []byte,
+	txn types.Txn,
+) ([]models.Transaction, error) {
+	var ret []models.Transaction
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return nil, err
+	}
+	result := db.
+		Where("block_hash = ?", blockHash).
+		Order("block_index ASC").
+		Preload(clause.Associations).
+		Preload("Inputs.Assets").
+		Preload("Outputs.Assets").
+		Preload("Collateral.Assets").
+		Preload("ReferenceInputs.Assets").
+		Find(&ret)
+	if result.Error != nil {
+		return nil, fmt.Errorf("get txs by block %x: %w", blockHash, result.Error)
+	}
+	return ret, nil
+}
+
+// GetTransactionsByAddress returns transactions that involve
+// a given address as either a sender (input) or receiver
+// (output). Results are ordered by slot descending with
+// pagination support.
+func (d *MetadataStoreSqlite) GetTransactionsByAddress(
+	addr lcommon.Address,
+	limit int,
+	offset int,
+	txn types.Txn,
+) ([]models.Transaction, error) {
+	var ret []models.Transaction
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return nil, err
+	}
+
+	cond, args := addressSQLCondition(addr, "u")
+	if cond == "" {
+		return ret, nil
+	}
+
+	subQuery := fmt.Sprintf(
+		"id IN ("+
+			"SELECT DISTINCT t.id "+
+			"FROM transaction t "+
+			"JOIN utxo u ON "+
+			"(u.transaction_id = t.id "+
+			"OR u.spent_at_tx_id = t.hash) "+
+			"WHERE %s"+
+			")",
+		cond,
+	)
+
+	query := db.
+		Where(subQuery, args...).
+		Order("slot DESC").
+		Preload(clause.Associations).
+		Preload("Inputs.Assets").
+		Preload("Outputs.Assets").
+		Preload("Collateral.Assets").
+		Preload("ReferenceInputs.Assets")
+
+	if limit > 0 {
+		query = query.Limit(limit)
+	}
+	if offset > 0 {
+		query = query.Offset(offset)
+	}
+
+	result := query.Find(&ret)
+	if result.Error != nil {
+		return nil, fmt.Errorf(
+			"get txs by address: %w", result.Error,
+		)
 	}
 	return ret, nil
 }
@@ -596,7 +716,8 @@ func (d *MetadataStoreSqlite) SetTransaction(
 			}
 			// UTXO was spent by a different transaction - this is a conflict
 			return fmt.Errorf(
-				"UTXO already spent: %x:%d",
+				"%w: %x:%d",
+				types.ErrUtxoConflict,
 				inTxId,
 				inIdx,
 			)
@@ -1016,6 +1137,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 					}
 
 					tmpAccount.Active = false
+					tmpAccount.AddedSlot = point.Slot
 
 					tmpItem := models.StakeDeregistration{
 						StakingKey:    stakeKey,
@@ -1054,6 +1176,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 					}
 
 					tmpAccount.Active = false
+					tmpAccount.AddedSlot = point.Slot
 
 					tmpItem := models.Deregistration{
 						StakingKey:    stakeKey,
@@ -1080,6 +1203,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 					}
 
 					tmpAccount.Pool = c.PoolKeyHash[:]
+					tmpAccount.AddedSlot = point.Slot
 
 					tmpItem := models.StakeDelegation{
 						StakingKey:    stakeKey,
@@ -1106,6 +1230,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 					}
 
 					tmpAccount.Pool = c.PoolKeyHash[:]
+					tmpAccount.AddedSlot = point.Slot
 
 					tmpReg := models.StakeRegistrationDelegation{
 						StakingKey:    stakeKey,
@@ -1134,6 +1259,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 
 					tmpAccount.Pool = c.PoolKeyHash[:]
 					tmpAccount.Drep = c.Drep.Credential[:]
+					tmpAccount.AddedSlot = point.Slot
 
 					tmpItem := models.StakeVoteDelegation{
 						StakingKey:    stakeKey,
@@ -1281,6 +1407,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 
 					tmpAccount.Pool = c.PoolKeyHash[:]
 					tmpAccount.Drep = c.Drep.Credential[:]
+					tmpAccount.AddedSlot = point.Slot
 
 					tmpReg := models.StakeVoteRegistrationDelegation{
 						StakingKey:    stakeKey,
@@ -1309,6 +1436,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 					}
 
 					tmpAccount.Drep = c.Drep.Credential[:]
+					tmpAccount.AddedSlot = point.Slot
 
 					tmpReg := models.VoteRegistrationDelegation{
 						StakingKey:    stakeKey,
@@ -1336,6 +1464,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 					}
 
 					tmpAccount.Drep = c.Drep.Credential[:]
+					tmpAccount.AddedSlot = point.Slot
 
 					tmpItem := models.VoteDelegation{
 						StakingKey:    stakeKey,

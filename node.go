@@ -36,6 +36,7 @@ import (
 	"github.com/blinklabs-io/dingo/ledger/leader"
 	"github.com/blinklabs-io/dingo/ledger/snapshot"
 	"github.com/blinklabs-io/dingo/mempool"
+	"github.com/blinklabs-io/dingo/mesh"
 	ouroborosPkg "github.com/blinklabs-io/dingo/ouroboros"
 	"github.com/blinklabs-io/dingo/peergov"
 	"github.com/blinklabs-io/dingo/utxorpc"
@@ -58,6 +59,7 @@ type Node struct {
 	utxorpc        *utxorpc.Utxorpc
 	bark           *bark.Bark
 	blockfrostAPI  *blockfrost.Blockfrost
+	meshAPI        *mesh.Server
 	ouroboros      *ouroborosPkg.Ouroboros
 	blockForger    *forging.BlockForger
 	leaderElection *leader.Election
@@ -159,6 +161,7 @@ func (n *Node) Run(ctx context.Context) error {
 	cm, err := chain.NewManager(
 		n.db,
 		n.eventBus,
+		n.config.promRegistry,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to load chain manager: %w", err)
@@ -254,10 +257,18 @@ func (n *Node) Run(ctx context.Context) error {
 	// Set mempool in ledger state for block forging
 	n.ledgerState.SetMempool(n.mempool)
 	n.ouroboros.Mempool = n.mempool
-	// Initialize chainsync state
-	n.chainsyncState = chainsync.NewState(
+	// Initialize chainsync state with multi-client configuration
+	chainsyncCfg := chainsync.DefaultConfig()
+	if n.config.chainsyncMaxClients > 0 {
+		chainsyncCfg.MaxClients = n.config.chainsyncMaxClients
+	}
+	if n.config.chainsyncStallTimeout > 0 {
+		chainsyncCfg.StallTimeout = n.config.chainsyncStallTimeout
+	}
+	n.chainsyncState = chainsync.NewStateWithConfig(
 		n.eventBus,
 		n.ledgerState,
+		chainsyncCfg,
 	)
 	n.ouroboros.ChainsyncState = n.chainsyncState
 	// Initialize chain selector for multi-peer chain selection
@@ -280,9 +291,14 @@ func (n *Node) Run(ctx context.Context) error {
 			if !ok {
 				return
 			}
+			prevConn := "(none)"
+			if e.PreviousConnectionId.LocalAddr != nil &&
+				e.PreviousConnectionId.RemoteAddr != nil {
+				prevConn = e.PreviousConnectionId.String()
+			}
 			n.config.logger.Info(
 				"chain switch: updating active connection",
-				"previous_connection", e.PreviousConnectionId.String(),
+				"previous_connection", prevConn,
 				"new_connection", e.NewConnectionId.String(),
 				"new_tip_block", e.NewTip.BlockNumber,
 				"new_tip_slot", e.NewTip.Point.Slot,
@@ -356,7 +372,7 @@ func (n *Node) Run(ctx context.Context) error {
 	})
 	// Configure peer governor
 	// Create ledger peer provider for discovering peers from stake pool relays
-	ledgerPeerProvider, err := ledger.NewLedgerPeerProvider(n.ledgerState, n.db)
+	ledgerPeerProvider, err := ledger.NewLedgerPeerProvider(n.ledgerState, n.db, n.eventBus)
 	if err != nil {
 		return fmt.Errorf("failed to create ledger peer provider: %w", err)
 	}
@@ -383,6 +399,7 @@ func (n *Node) Run(ctx context.Context) error {
 			ActivePeersTopologyQuota:       n.config.activePeersTopologyQuota,
 			ActivePeersGossipQuota:         n.config.activePeersGossipQuota,
 			ActivePeersLedgerQuota:         n.config.activePeersLedgerQuota,
+			SyncProgressProvider:           n.ledgerState,
 		},
 	)
 	n.ouroboros.PeerGov = n.peerGov
@@ -459,6 +476,60 @@ func (n *Node) Run(ctx context.Context) error {
 			}
 		})
 	}
+
+	// Configure Mesh API (if listen address is set)
+	if n.config.meshListenAddress != "" {
+		var genesisHash string
+		var genesisStartTimeSec int64
+		if nc := n.config.cardanoNodeConfig; nc != nil {
+			genesisHash = nc.ByronGenesisHash
+			if sg := nc.ShelleyGenesis(); sg != nil {
+				genesisStartTimeSec = sg.SystemStart.Unix()
+			}
+		}
+		if genesisHash == "" || genesisStartTimeSec == 0 {
+			return errors.New(
+				"mesh API requires Cardano node config " +
+					"(Byron genesis hash and Shelley genesis)",
+			)
+		}
+		var meshErr error
+		n.meshAPI, meshErr = mesh.NewServer(
+			mesh.ServerConfig{
+				Logger:      n.config.logger,
+				EventBus:    n.eventBus,
+				LedgerState: n.ledgerState,
+				Database:    n.db,
+				Chain:       n.ledgerState.Chain(),
+				Mempool:     n.mempool,
+				ListenAddress: n.config.
+					meshListenAddress,
+				Network:             n.config.network,
+				NetworkMagic:        n.config.networkMagic,
+				GenesisHash:         genesisHash,
+				GenesisStartTimeSec: genesisStartTimeSec,
+			},
+		)
+		if meshErr != nil {
+			return fmt.Errorf(
+				"create mesh API server: %w",
+				meshErr,
+			)
+		}
+		if err := n.meshAPI.Start(n.ctx); err != nil { //nolint:contextcheck
+			return fmt.Errorf("starting mesh API: %w", err)
+		}
+		started = append(started, func() { //nolint:contextcheck
+			if err := n.meshAPI.Stop(context.Background()); err != nil {
+				n.config.logger.Error(
+					"failed to stop mesh API during cleanup",
+					"error",
+					err,
+				)
+			}
+		})
+	}
+
 	// Initialize block forger if production mode is enabled
 	if n.config.blockProducer {
 		//nolint:contextcheck // n.ctx is the node's lifecycle context, correct parent for forger
@@ -565,6 +636,15 @@ func (n *Node) shutdown() error {
 		}
 	}
 
+	if n.meshAPI != nil {
+		if stopErr := n.meshAPI.Stop(ctx); stopErr != nil {
+			err = errors.Join(
+				err,
+				fmt.Errorf("mesh API shutdown: %w", stopErr),
+			)
+		}
+	}
+
 	// Phase 2: Drain and close connections
 	n.config.logger.Debug("shutdown phase 2: draining connections")
 
@@ -661,6 +741,7 @@ func (n *Node) initBlockForger(ctx context.Context) error {
 		ChainTip:        n.chainManager.PrimaryChain(),
 		EpochNonce:      epochNonceAdapter,
 		Credentials:     creds,
+		TxValidator:     n.ledgerState,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create block builder: %w", err)
@@ -809,7 +890,9 @@ func (a *stakeDistributionAdapter) GetPoolStake(
 	return stake, err
 }
 
-func (a *stakeDistributionAdapter) GetTotalActiveStake(epoch uint64) (uint64, error) {
+func (a *stakeDistributionAdapter) GetTotalActiveStake(
+	epoch uint64,
+) (uint64, error) {
 	txn := a.ledgerState.Database().Transaction(false)
 	var stake uint64
 	err := txn.Do(func(txn *database.Txn) error {

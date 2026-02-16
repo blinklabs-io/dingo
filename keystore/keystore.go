@@ -270,7 +270,8 @@ func (ks *KeyStore) Start(ctx context.Context, slotClock SlotClock) error {
 	return nil
 }
 
-// Stop halts KES evolution monitoring and cleans up resources.
+// Stop halts KES evolution monitoring, zeros secret key material from memory,
+// and cleans up resources.
 func (ks *KeyStore) Stop() error {
 	ks.mu.Lock()
 	if !ks.running {
@@ -286,8 +287,27 @@ func (ks *KeyStore) Stop() error {
 	// Wait for monitoring goroutine to exit
 	ks.wg.Wait()
 
+	// Zero all secret key material from memory
+	ks.mu.Lock()
+	ks.zeroizeUnsafe()
+	ks.mu.Unlock()
+
 	ks.logger.Info("keystore stopped")
 	return nil
+}
+
+// zeroizeUnsafe overwrites all secret key byte slices with zeros so that
+// sensitive material does not linger in process memory after the keystore
+// is stopped. Caller must hold ks.mu (write lock).
+func (ks *KeyStore) zeroizeUnsafe() {
+	if ks.vrfSKey != nil {
+		clear(ks.vrfSKey)
+		ks.vrfSKey = nil
+	}
+	if ks.kesSKey != nil {
+		clear(ks.kesSKey.Data)
+		ks.kesSKey = nil
+	}
 }
 
 // VRFSigner returns a VRF signer for leader election.
@@ -435,7 +455,8 @@ func (ks *KeyStore) evolveKESToUnsafe(targetPeriod uint64) error {
 	}
 
 	for ks.kesSKey.Period < targetPeriod {
-		newKey, err := kes.Update(ks.kesSKey)
+		oldKey := ks.kesSKey
+		newKey, err := kes.Update(oldKey)
 		if err != nil {
 			return fmt.Errorf(
 				"failed to evolve KES key to period %d: %w",
@@ -443,6 +464,8 @@ func (ks *KeyStore) evolveKESToUnsafe(targetPeriod uint64) error {
 				err,
 			)
 		}
+		// Zero the old key data before discarding it
+		clear(oldKey.Data)
 		ks.kesSKey = newKey
 		ks.logger.Debug(
 			"KES key evolved",

@@ -55,6 +55,10 @@ const (
 
 	// Interval for periodic sync progress reporting
 	syncProgressLogInterval = 30 * time.Second
+
+	// Rollback loop detection thresholds
+	rollbackLoopThreshold = 3               // number of rollbacks to same slot before breaking loop
+	rollbackLoopWindow    = 5 * time.Minute // time window for rollback loop detection
 )
 
 func (ls *LedgerState) handleEventChainsync(evt event.Event) {
@@ -152,10 +156,38 @@ func (ls *LedgerState) handleEventBlockfetch(evt event.Event) {
 	}
 }
 
+// detectConnectionSwitch checks for an active connection change and logs a
+// summary of dropped events when a switch is detected. It returns the current
+// active connection ID and whether connection filtering is configured. When
+// configured is false, callers should skip all connection-based filtering.
+func (ls *LedgerState) detectConnectionSwitch() (activeConnId *ouroboros.ConnectionId, configured bool) {
+	if ls.config.GetActiveConnectionFunc == nil {
+		return nil, false
+	}
+	activeConnId = ls.config.GetActiveConnectionFunc()
+	if activeConnId != nil &&
+		(ls.lastActiveConnId == nil || *ls.lastActiveConnId != *activeConnId) {
+		if ls.lastActiveConnId != nil {
+			ls.config.Logger.Info(
+				"active connection changed",
+				"component", "ledger",
+				"previous_connection_id", ls.lastActiveConnId.String(),
+				"new_connection_id", activeConnId.String(),
+				"dropped_headers", ls.dropEventCount,
+				"dropped_rollbacks", ls.dropRollbackCount,
+			)
+			ls.dropEventCount = 0
+			ls.dropRollbackCount = 0
+		}
+		ls.lastActiveConnId = activeConnId
+		ls.rollbackHistory = nil
+	}
+	return activeConnId, true
+}
+
 func (ls *LedgerState) handleEventChainsyncRollback(e ChainsyncEvent) error {
 	// Filter events from non-active connections when chain selection is enabled
-	if ls.config.GetActiveConnectionFunc != nil {
-		activeConnId := ls.config.GetActiveConnectionFunc()
+	if activeConnId, configured := ls.detectConnectionSwitch(); configured {
 		if activeConnId == nil {
 			// No active connection set yet, process this event
 			ls.config.Logger.Debug(
@@ -186,8 +218,42 @@ func (ls *LedgerState) handleEventChainsyncRollback(e ChainsyncEvent) error {
 		}
 	}
 
-	if ls.chainsyncState == SyncingChainsyncState {
+	// Rollback loop detection: track recent rollbacks and skip if
+	// the same slot appears too frequently within the detection window.
+	now := time.Now()
+	ls.rollbackHistory = append(ls.rollbackHistory, rollbackRecord{
+		slot:      e.Point.Slot,
+		timestamp: now,
+	})
+	// Prune entries older than the detection window
+	cutoff := now.Add(-rollbackLoopWindow)
+	pruned := ls.rollbackHistory[:0]
+	for _, r := range ls.rollbackHistory {
+		if !r.timestamp.Before(cutoff) {
+			pruned = append(pruned, r)
+		}
+	}
+	ls.rollbackHistory = pruned
+	// Count rollbacks to this specific slot
+	var slotCount int
+	for _, r := range ls.rollbackHistory {
+		if r.slot == e.Point.Slot {
+			slotCount++
+		}
+	}
+	if slotCount >= rollbackLoopThreshold {
 		ls.config.Logger.Warn(
+			"rollback loop detected, skipping rollback to break loop",
+			"component", "ledger",
+			"slot", e.Point.Slot,
+			"count", slotCount,
+			"window", rollbackLoopWindow,
+		)
+		return nil
+	}
+
+	if ls.chainsyncState == SyncingChainsyncState {
+		ls.config.Logger.Info(
 			fmt.Sprintf(
 				"ledger: rolling back to %d.%s",
 				e.Point.Slot,
@@ -204,8 +270,7 @@ func (ls *LedgerState) handleEventChainsyncRollback(e ChainsyncEvent) error {
 
 func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 	// Filter events from non-active connections when chain selection is enabled
-	if ls.config.GetActiveConnectionFunc != nil {
-		activeConnId := ls.config.GetActiveConnectionFunc()
+	if activeConnId, configured := ls.detectConnectionSwitch(); configured {
 		if activeConnId == nil {
 			// No active connection set yet, process this event
 			ls.config.Logger.Debug(
@@ -256,17 +321,15 @@ func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 	allowedHeaderCount := blockfetchBatchSize * 4
 	headerCount := ls.chain.HeaderCount()
 
-	// Wait for current blockfetch batch to finish before we collect more block headers
-	if headerCount >= allowedHeaderCount {
-		ls.chainsyncBlockfetchReadyMutex.Lock()
-		tmpChainsyncBlockfetchReadyChan := ls.chainsyncBlockfetchReadyChan
-		ls.chainsyncBlockfetchReadyMutex.Unlock()
-
-		if tmpChainsyncBlockfetchReadyChan != nil {
-			<-tmpChainsyncBlockfetchReadyChan
-		}
-	}
 	// Add header to chain
+	ls.config.Logger.Debug(
+		"chainsync header handler entered",
+		"component", "ledger",
+		"slot", e.Point.Slot,
+		"tip_slot", e.Tip.Point.Slot,
+		"header_count", headerCount,
+		"connection_id", e.ConnectionId.String(),
+	)
 	if err := ls.chain.AddBlockHeader(e.BlockHeader); err != nil {
 		var notFitErr chain.BlockNotFitChainTipError
 		if errors.As(err, &notFitErr) {
@@ -276,7 +339,7 @@ func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 			// headers so subsequent headers are evaluated against the
 			// block tip rather than perpetuating the mismatch.
 			ls.chain.ClearHeaders()
-			ls.config.Logger.Warn(
+			ls.config.Logger.Debug(
 				"block header does not fit chain tip, cleared stale headers",
 				"component", "ledger",
 				"slot", e.Point.Slot,
@@ -294,6 +357,14 @@ func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 	if e.Point.Slot < e.Tip.Point.Slot &&
 		(e.Tip.Point.Slot-e.Point.Slot > slotThreshold) &&
 		(headerCount+1) < allowedHeaderCount {
+		ls.config.Logger.Debug(
+			"accumulating headers (far from tip)",
+			"component", "ledger",
+			"slot", e.Point.Slot,
+			"tip_slot", e.Tip.Point.Slot,
+			"threshold", slotThreshold,
+			"header_count", headerCount+1,
+		)
 		return nil
 	}
 	// We use the blockfetch lock to ensure we aren't starting a batch at the same
@@ -302,18 +373,32 @@ func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 	defer ls.chainsyncBlockfetchMutex.Unlock()
 	// Don't start fetch if there's already one in progress
 	if ls.chainsyncBlockfetchReadyChan != nil {
-		ls.chainsyncBlockfetchWaiting = true
+		ls.config.Logger.Debug(
+			"blockfetch in progress, queuing header",
+			"component", "ledger",
+			"slot", e.Point.Slot,
+			"header_count", ls.chain.HeaderCount(),
+		)
 		return nil
 	}
+	// Mark blockfetch as in progress
+	ls.chainsyncBlockfetchReadyChan = make(chan struct{})
 	// Request next bulk range
 	headerStart, headerEnd := ls.chain.HeaderRange(blockfetchBatchSize)
+	ls.config.Logger.Debug(
+		"starting blockfetch",
+		"component", "ledger",
+		"header_start_slot", headerStart.Slot,
+		"header_end_slot", headerEnd.Slot,
+		"header_count", ls.chain.HeaderCount(),
+	)
 	err := ls.blockfetchRequestRangeStart(
 		e.ConnectionId,
 		headerStart,
 		headerEnd,
 	)
 	if err != nil {
-		ls.blockfetchRequestRangeCleanup(true)
+		ls.blockfetchRequestRangeCleanup()
 		return err
 	}
 	return nil
@@ -380,7 +465,9 @@ func (ls *LedgerState) processBlockEvents() error {
 // This mirrors how the Shelley epoch nonce uses the Shelley genesis hash.
 func GenesisBlockHash(cfg *cardano.CardanoNodeConfig) ([32]byte, error) {
 	if cfg == nil || cfg.ByronGenesisHash == "" {
-		return [32]byte{}, errors.New("byron genesis hash not available in config")
+		return [32]byte{}, errors.New(
+			"byron genesis hash not available in config",
+		)
 	}
 	hashBytes, err := hex.DecodeString(cfg.ByronGenesisHash)
 	if err != nil {
@@ -493,7 +580,12 @@ func (ls *LedgerState) createGenesisBlock() error {
 
 		// Build the block structure manually to track exact byte offsets
 		// We need to know where each output CBOR starts within the block
-		blockCbor, err := buildGenesisBlockCbor(txHashes, txUtxos, utxoOffsets, genesisHash)
+		blockCbor, err := buildGenesisBlockCbor(
+			txHashes,
+			txUtxos,
+			utxoOffsets,
+			genesisHash,
+		)
 		if err != nil {
 			return fmt.Errorf("build genesis block cbor: %w", err)
 		}
@@ -515,7 +607,11 @@ func (ls *LedgerState) createGenesisBlock() error {
 				utxoOffsets,
 				txn,
 			); err != nil {
-				return fmt.Errorf("set genesis transaction %x: %w", txHashArray[:8], err)
+				return fmt.Errorf(
+					"set genesis transaction %x: %w",
+					txHashArray[:8],
+					err,
+				)
 			}
 		}
 
@@ -616,11 +712,12 @@ func buildGenesisBlockCbor(
 				TxId:      txHash,
 				OutputIdx: utxo.Id.Index(),
 			}
+			//nolint:gosec // uint32 bounds checked above
 			utxoOffsets[ref] = database.CborOffset{
 				BlockSlot:  0,
 				BlockHash:  blockHash,
-				ByteOffset: uint32(offset),    // #nosec G115: bounds checked above
-				ByteLength: uint32(outputLen), // #nosec G115: bounds checked above
+				ByteOffset: uint32(offset),
+				ByteLength: uint32(outputLen),
 			}
 		}
 	}
@@ -1037,13 +1134,15 @@ func (ls *LedgerState) processBlockEvent(
 // chain.AddBlock for the incoming block. A nil error means the
 // remote block was accepted onto the chain (remote won); a
 // non-nil error means it was rejected (local won).
+//
+// The caller must hold ls.Lock() (write lock). This method must not
+// acquire ls.RLock(), because sync.RWMutex is not reentrant and
+// attempting a read lock while holding the write lock deadlocks.
 func (ls *LedgerState) checkSlotBattle(
 	e BlockfetchEvent,
 	addBlockErr error,
 ) {
-	ls.RLock()
 	checker := ls.config.ForgedBlockChecker
-	ls.RUnlock()
 	if checker == nil {
 		return
 	}
@@ -1075,7 +1174,7 @@ func (ls *LedgerState) checkSlotBattle(
 	)
 
 	if ls.config.EventBus != nil {
-		ls.config.EventBus.Publish(
+		ls.config.EventBus.PublishAsync(
 			forging.SlotBattleEventType,
 			event.NewEvent(
 				forging.SlotBattleEventType,
@@ -1104,11 +1203,6 @@ func (ls *LedgerState) blockfetchRequestRangeStart(
 		return fmt.Errorf("request block range: %w", err)
 	}
 
-	// Create our blockfetch done signal channels
-	ls.chainsyncBlockfetchReadyMutex.Lock()
-	ls.chainsyncBlockfetchReadyChan = make(chan struct{})
-	ls.chainsyncBlockfetchReadyMutex.Unlock()
-
 	// Stop any existing timer before creating a new one
 	if ls.chainsyncBlockfetchTimeoutTimer != nil {
 		ls.chainsyncBlockfetchTimeoutTimer.Stop()
@@ -1131,8 +1225,8 @@ func (ls *LedgerState) blockfetchRequestRangeStart(
 			if ls.chainsyncBlockfetchTimerGeneration != currentGeneration {
 				return
 			}
-			ls.blockfetchRequestRangeCleanup(true)
-			ls.config.Logger.Warn(
+			ls.blockfetchRequestRangeCleanup()
+			ls.config.Logger.Info(
 				fmt.Sprintf(
 					"blockfetch operation timed out after %s",
 					blockfetchBusyTimeout,
@@ -1145,7 +1239,7 @@ func (ls *LedgerState) blockfetchRequestRangeStart(
 	return nil
 }
 
-func (ls *LedgerState) blockfetchRequestRangeCleanup(resetFlags bool) {
+func (ls *LedgerState) blockfetchRequestRangeCleanup() {
 	// Stop the timeout timer if running and invalidate any pending callbacks
 	if ls.chainsyncBlockfetchTimeoutTimer != nil {
 		ls.chainsyncBlockfetchTimeoutTimer.Stop()
@@ -1166,11 +1260,6 @@ func (ls *LedgerState) blockfetchRequestRangeCleanup(resetFlags bool) {
 		close(ls.chainsyncBlockfetchReadyChan)
 		ls.chainsyncBlockfetchReadyChan = nil
 	}
-
-	// Reset flags
-	if resetFlags {
-		ls.chainsyncBlockfetchWaiting = false
-	}
 }
 
 func (ls *LedgerState) handleEventBlockfetchBatchDone(e BlockfetchEvent) error {
@@ -1182,18 +1271,25 @@ func (ls *LedgerState) handleEventBlockfetchBatchDone(e BlockfetchEvent) error {
 	ls.chainsyncBlockfetchTimerGeneration++
 	// Process pending block events
 	if err := ls.processBlockEvents(); err != nil {
-		ls.blockfetchRequestRangeCleanup(true)
+		ls.blockfetchRequestRangeCleanup()
 		return fmt.Errorf("process block events: %w", err)
 	}
-	// Check for pending block range request
-	if !ls.chainsyncBlockfetchWaiting ||
-		ls.chain.HeaderCount() == 0 {
-		// Allow collection of more block headers via chainsync
-		ls.blockfetchRequestRangeCleanup(true)
+	// Continue fetching as long as there are queued headers
+	remainingHeaders := ls.chain.HeaderCount()
+	ls.config.Logger.Debug(
+		"batch done, checking for more headers",
+		"component", "ledger",
+		"remaining_headers", remainingHeaders,
+	)
+	if remainingHeaders == 0 {
+		// No more headers to fetch, allow chainsync to collect more
+		ls.blockfetchRequestRangeCleanup()
 		return nil
 	}
 	// Clean up from blockfetch batch
-	ls.blockfetchRequestRangeCleanup(false)
+	ls.blockfetchRequestRangeCleanup()
+	// Mark blockfetch as in progress for next batch
+	ls.chainsyncBlockfetchReadyChan = make(chan struct{})
 	// Request next waiting bulk range
 	headerStart, headerEnd := ls.chain.HeaderRange(blockfetchBatchSize)
 	err := ls.blockfetchRequestRangeStart(
@@ -1202,10 +1298,9 @@ func (ls *LedgerState) handleEventBlockfetchBatchDone(e BlockfetchEvent) error {
 		headerEnd,
 	)
 	if err != nil {
-		ls.blockfetchRequestRangeCleanup(true)
+		ls.blockfetchRequestRangeCleanup()
 		return err
 	}
-	ls.chainsyncBlockfetchWaiting = false
 	return nil
 }
 
@@ -1249,4 +1344,23 @@ func (ls *LedgerState) logSyncProgress(currentSlot uint64) {
 	)
 	ls.syncProgressLastLog = now
 	ls.syncProgressLastSlot = currentSlot
+}
+
+// SyncProgress returns the current sync progress as a value between
+// 0.0 (unknown/just started) and 1.0 (fully synced). This implements
+// the peergov.SyncProgressProvider interface, allowing the peer
+// governor to exit bootstrap mode once sync reaches its threshold.
+func (ls *LedgerState) SyncProgress() float64 {
+	upstreamTip := ls.syncUpstreamTipSlot.Load()
+	if upstreamTip == 0 {
+		return 0
+	}
+	ls.RLock()
+	currentSlot := ls.currentTip.Point.Slot
+	ls.RUnlock()
+	progress := float64(currentSlot) / float64(upstreamTip)
+	if progress > 1.0 {
+		progress = 1.0
+	}
+	return progress
 }

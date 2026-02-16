@@ -30,6 +30,13 @@ import (
 const (
 	defaultEvaluationInterval = 10 * time.Second
 	defaultStaleTipThreshold  = 60 * time.Second
+
+	// DefaultMaxTrackedPeers is the maximum number of peers tracked by
+	// the ChainSelector. When a new peer is added and the limit is reached,
+	// the least-recently-updated peer is evicted. This bounds memory usage
+	// and CPU cost of chain selection, preventing Sybil-based resource
+	// exhaustion.
+	DefaultMaxTrackedPeers = 200
 )
 
 // safeBlockDiff computes the difference between two block numbers as int64,
@@ -64,19 +71,21 @@ type ChainSelectorConfig struct {
 	EvaluationInterval time.Duration
 	StaleTipThreshold  time.Duration
 	SecurityParam      uint64
+	MaxTrackedPeers    int // 0 means use DefaultMaxTrackedPeers
 }
 
 // ChainSelector tracks chain tips from multiple peers and selects the best
 // chain according to Ouroboros Praos rules.
 type ChainSelector struct {
-	config        ChainSelectorConfig
-	securityParam uint64
-	peerTips      map[ouroboros.ConnectionId]*PeerChainTip
-	bestPeerConn  *ouroboros.ConnectionId
-	localTip      ochainsync.Tip
-	mutex         sync.RWMutex
-	ctx           context.Context
-	cancel        context.CancelFunc
+	config          ChainSelectorConfig
+	securityParam   uint64
+	maxTrackedPeers int
+	peerTips        map[ouroboros.ConnectionId]*PeerChainTip
+	bestPeerConn    *ouroboros.ConnectionId
+	localTip        ochainsync.Tip
+	mutex           sync.RWMutex
+	ctx             context.Context
+	cancel          context.CancelFunc
 }
 
 // NewChainSelector creates a new ChainSelector with the given configuration.
@@ -91,10 +100,15 @@ func NewChainSelector(cfg ChainSelectorConfig) *ChainSelector {
 	if cfg.StaleTipThreshold == 0 {
 		cfg.StaleTipThreshold = defaultStaleTipThreshold
 	}
+	maxPeers := cfg.MaxTrackedPeers
+	if maxPeers <= 0 {
+		maxPeers = DefaultMaxTrackedPeers
+	}
 	return &ChainSelector{
-		config:        cfg,
-		securityParam: cfg.SecurityParam,
-		peerTips:      make(map[ouroboros.ConnectionId]*PeerChainTip),
+		config:          cfg,
+		securityParam:   cfg.SecurityParam,
+		maxTrackedPeers: maxPeers,
+		peerTips:        make(map[ouroboros.ConnectionId]*PeerChainTip),
 	}
 }
 
@@ -117,20 +131,64 @@ func (cs *ChainSelector) Stop() {
 // evaluation if needed. The vrfOutput parameter is the VRF output from the
 // tip block header, used for tie-breaking when chains have equal block number
 // and slot.
+//
+// Returns true if the tip was accepted, false if it was rejected as
+// implausible. A tip is considered implausible if it claims a block number
+// more than securityParam (k) blocks ahead of the local tip. This check is
+// skipped during initial sync (when securityParam is 0 or localTip is at
+// block 0).
 func (cs *ChainSelector) UpdatePeerTip(
 	connId ouroboros.ConnectionId,
 	tip ochainsync.Tip,
 	vrfOutput []byte,
-) {
+) bool {
 	shouldEvaluate := false
+	accepted := true
+	var evictedConn *ouroboros.ConnectionId
 
 	func() {
 		cs.mutex.Lock()
 		defer cs.mutex.Unlock()
 
+		// Reject implausible tips that claim to be too far ahead of our
+		// local chain. This prevents a malicious peer from spoofing an
+		// extremely high block number to hijack chain selection.
+		// Skip the check during initial sync when we have no local tip
+		// or securityParam is not yet set.
+		if cs.securityParam > 0 && cs.localTip.BlockNumber > 0 {
+			maxPlausibleBlock := cs.localTip.BlockNumber +
+				cs.securityParam
+			if tip.BlockNumber > maxPlausibleBlock {
+				cs.config.Logger.Warn(
+					"rejecting implausible peer tip",
+					"connection_id", connId.String(),
+					"claimed_block", tip.BlockNumber,
+					"local_block", cs.localTip.BlockNumber,
+					"security_param", cs.securityParam,
+					"max_plausible_block", maxPlausibleBlock,
+				)
+				accepted = false
+				return
+			}
+		}
+
 		if peerTip, exists := cs.peerTips[connId]; exists {
 			peerTip.UpdateTip(tip, vrfOutput)
 		} else {
+			// Evict the least-recently-updated peer if at capacity
+			if len(cs.peerTips) >= cs.maxTrackedPeers {
+				evictedConn = cs.evictLeastRecentPeerLocked()
+				if evictedConn == nil {
+					cs.config.Logger.Warn(
+						"cannot accept new peer: at capacity and best peer is the only tracked peer",
+						"connection_id", connId.String(),
+						"peer_count", len(cs.peerTips),
+						"max_tracked_peers", cs.maxTrackedPeers,
+					)
+					accepted = false
+					return
+				}
+			}
 			cs.peerTips[connId] = NewPeerChainTip(connId, tip, vrfOutput)
 		}
 
@@ -154,9 +212,83 @@ func (cs *ChainSelector) UpdatePeerTip(
 		}
 	}()
 
+	// Publish eviction event outside the lock to prevent deadlock
+	if evictedConn != nil && cs.config.EventBus != nil {
+		evt := event.NewEvent(
+			PeerEvictedEventType,
+			PeerEvictedEvent{ConnectionId: *evictedConn},
+		)
+		cs.config.EventBus.Publish(PeerEvictedEventType, evt)
+	}
+
+	if !accepted {
+		return false
+	}
+
 	if shouldEvaluate {
 		cs.EvaluateAndSwitch()
 	}
+
+	return true
+}
+
+// evictLeastRecentPeerLocked removes the peer with the oldest LastUpdated
+// timestamp from the peerTips map. It never evicts the current best peer.
+// When multiple peers share the same LastUpdated timestamp (common on
+// Windows where clock resolution is ~15ms), the peer with the lowest
+// block number is evicted first. If block numbers also tie, the
+// connection ID string is used as a final deterministic tie-breaker.
+// Returns a pointer to the evicted connection ID, or nil if no eviction
+// was possible (e.g. the only tracked peer is the best peer).
+// Must be called with cs.mutex held.
+func (cs *ChainSelector) evictLeastRecentPeerLocked() *ouroboros.ConnectionId {
+	var oldestConn ouroboros.ConnectionId
+	var oldestTip *PeerChainTip
+	found := false
+
+	for connId, peerTip := range cs.peerTips {
+		// Never evict the current best peer
+		if cs.bestPeerConn != nil && *cs.bestPeerConn == connId {
+			continue
+		}
+		if !found {
+			oldestConn = connId
+			oldestTip = peerTip
+			found = true
+			continue
+		}
+		// Primary: oldest LastUpdated wins eviction
+		if peerTip.LastUpdated.Before(oldestTip.LastUpdated) {
+			oldestConn = connId
+			oldestTip = peerTip
+		} else if peerTip.LastUpdated.Equal(oldestTip.LastUpdated) {
+			// Tie-break on block number: evict the peer with
+			// the lower block number (less useful chain)
+			if peerTip.Tip.BlockNumber < oldestTip.Tip.BlockNumber {
+				oldestConn = connId
+				oldestTip = peerTip
+			} else if peerTip.Tip.BlockNumber == oldestTip.Tip.BlockNumber {
+				// Final tie-break: deterministic by connection ID
+				if connId.String() < oldestConn.String() {
+					oldestConn = connId
+					oldestTip = peerTip
+				}
+			}
+		}
+	}
+
+	if found {
+		cs.config.Logger.Debug(
+			"evicting least-recent peer due to tracking limit",
+			"connection_id", oldestConn.String(),
+			"last_updated", oldestTip.LastUpdated,
+			"peer_count", len(cs.peerTips),
+			"max_tracked_peers", cs.maxTrackedPeers,
+		)
+		delete(cs.peerTips, oldestConn)
+		return &oldestConn
+	}
+	return nil
 }
 
 // RemovePeer removes a peer from tracking.
@@ -375,10 +507,14 @@ func (cs *ChainSelector) EvaluateAndSwitch() bool {
 				"slot", newTip.Point.Slot,
 			)
 
-			if cs.config.EventBus != nil && previousBest != nil {
+			if cs.config.EventBus != nil {
 				var previousTip ochainsync.Tip
-				if pt, ok := cs.peerTips[*previousBest]; ok {
-					previousTip = pt.Tip
+				var previousConnId ouroboros.ConnectionId
+				if previousBest != nil {
+					previousConnId = *previousBest
+					if pt, ok := cs.peerTips[*previousBest]; ok {
+						previousTip = pt.Tip
+					}
 				}
 				// Compute comparison result and block difference
 				comparisonResult := CompareChains(newTip, previousTip)
@@ -389,7 +525,7 @@ func (cs *ChainSelector) EvaluateAndSwitch() bool {
 				evt := event.NewEvent(
 					ChainSwitchEventType,
 					ChainSwitchEvent{
-						PreviousConnectionId: *previousBest,
+						PreviousConnectionId: previousConnId,
 						NewConnectionId:      *newBest,
 						NewTip:               newTip,
 						PreviousTip:          previousTip,

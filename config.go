@@ -83,6 +83,11 @@ type Config struct {
 	shelleyOperationalCertificate string
 	// Blockfrost API listen address (empty = disabled)
 	blockfrostListenAddress string
+	// Chainsync multi-client configuration
+	chainsyncMaxClients   int
+	chainsyncStallTimeout time.Duration
+	// Mesh API listen address (empty = disabled)
+	meshListenAddress string
 }
 
 // configPopulateNetworkMagic uses the named network (if specified) to determine the network magic value (if not specified)
@@ -433,5 +438,38 @@ func WithBlockfrostListenAddress(
 ) ConfigOptionFunc {
 	return func(c *Config) {
 		c.blockfrostListenAddress = addr
+	}
+}
+
+// WithChainsyncMaxClients specifies the maximum number of
+// concurrent chainsync client connections. Default is 3.
+func WithChainsyncMaxClients(
+	maxClients int,
+) ConfigOptionFunc {
+	return func(c *Config) {
+		c.chainsyncMaxClients = maxClients
+	}
+}
+
+// WithChainsyncStallTimeout specifies the duration after
+// which a chainsync client with no activity is considered
+// stalled. Default is 30 seconds.
+func WithChainsyncStallTimeout(
+	timeout time.Duration,
+) ConfigOptionFunc {
+	return func(c *Config) {
+		c.chainsyncStallTimeout = timeout
+	}
+}
+
+// WithMeshListenAddress specifies the listen address
+// for the Mesh (Coinbase Rosetta) compatible REST API
+// server. An empty string disables the server. The
+// default is empty (disabled).
+func WithMeshListenAddress(
+	addr string,
+) ConfigOptionFunc {
+	return func(c *Config) {
+		c.meshListenAddress = addr
 	}
 }

@@ -17,6 +17,7 @@ package ledger
 import (
 	"errors"
 	"fmt"
+	"math"
 	"math/big"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -70,15 +71,21 @@ func (ls *LedgerState) querySystemStart() (any, error) {
 }
 
 func (ls *LedgerState) queryChainBlockNo() (any, error) {
+	ls.RLock()
+	blockNumber := ls.currentTip.BlockNumber
+	ls.RUnlock()
 	ret := []any{
 		1, // TODO: figure out what this value is (#393)
-		ls.currentTip.BlockNumber,
+		blockNumber,
 	}
 	return ret, nil
 }
 
 func (ls *LedgerState) queryChainPoint() (any, error) {
-	return ls.currentTip.Point, nil
+	ls.RLock()
+	point := ls.currentTip.Point
+	ls.RUnlock()
+	return point, nil
 }
 
 func (ls *LedgerState) queryHardFork(
@@ -86,12 +93,47 @@ func (ls *LedgerState) queryHardFork(
 ) (any, error) {
 	switch q := query.Query.(type) {
 	case *olocalstatequery.HardForkCurrentEraQuery:
-		return ls.currentEra.Id, nil
+		ls.RLock()
+		eraId := ls.currentEra.Id
+		ls.RUnlock()
+		return eraId, nil
 	case *olocalstatequery.HardForkEraHistoryQuery:
 		return ls.queryHardForkEraHistory()
 	default:
 		return nil, fmt.Errorf("unsupported query type: %T", q)
 	}
+}
+
+// epochPicoseconds computes the duration of an epoch
+// in picoseconds: slotLength * lengthInSlots * 1e9.
+// It uses big.Int arithmetic to prevent overflow when
+// the uint product would exceed math.MaxUint64.
+func epochPicoseconds(
+	slotLength, lengthInSlots uint,
+) *big.Int {
+	result := new(big.Int).SetUint64(uint64(slotLength))
+	result.Mul(
+		result,
+		new(big.Int).SetUint64(uint64(lengthInSlots)),
+	)
+	result.Mul(result, big.NewInt(1_000_000_000))
+	return result
+}
+
+// checkedSlotAdd adds startSlot + length with overflow
+// detection. Returns an error if the result would
+// exceed math.MaxUint64.
+func checkedSlotAdd(
+	startSlot, length uint64,
+) (uint64, error) {
+	if startSlot > math.MaxUint64-length {
+		return 0, fmt.Errorf(
+			"era history overflow: start slot %d + length %d",
+			startSlot,
+			length,
+		)
+	}
+	return startSlot + length, nil
 }
 
 func (ls *LedgerState) queryHardForkEraHistory() (any, error) {
@@ -140,17 +182,23 @@ func (ls *LedgerState) queryHardForkEraHistory() (any, error) {
 			// Add epoch length in picoseconds to timespan
 			timespan.Add(
 				timespan,
-				new(big.Int).SetUint64(
-					uint64(
-						tmpEpoch.SlotLength*tmpEpoch.LengthInSlots*1_000_000_000,
-					),
+				epochPicoseconds(
+					tmpEpoch.SlotLength,
+					tmpEpoch.LengthInSlots,
 				),
 			)
 			// Update era end
 			if idx == len(epochs)-1 {
+				endSlot, slotErr := checkedSlotAdd(
+					tmpEpoch.StartSlot,
+					uint64(tmpEpoch.LengthInSlots),
+				)
+				if slotErr != nil {
+					return nil, slotErr
+				}
 				tmpEnd = []any{
 					new(big.Int).Set(timespan),
-					tmpEpoch.StartSlot + uint64(tmpEpoch.LengthInSlots),
+					endSlot,
 					tmpEpoch.EpochId + 1,
 				}
 			}
@@ -170,9 +218,15 @@ func (ls *LedgerState) queryShelley(
 ) (any, error) {
 	switch q := query.Query.(type) {
 	case *olocalstatequery.ShelleyEpochNoQuery:
-		return []any{ls.currentEpoch.EpochId}, nil
+		ls.RLock()
+		epochId := ls.currentEpoch.EpochId
+		ls.RUnlock()
+		return []any{epochId}, nil
 	case *olocalstatequery.ShelleyCurrentProtocolParamsQuery:
-		return []any{ls.currentPParams}, nil
+		ls.RLock()
+		pparams := ls.currentPParams
+		ls.RUnlock()
+		return []any{pparams}, nil
 	case *olocalstatequery.ShelleyGenesisConfigQuery:
 		return ls.queryShelleyGenesisConfig()
 	case *olocalstatequery.ShelleyUtxoByAddressQuery:
@@ -213,6 +267,9 @@ func (ls *LedgerState) queryShelleyUtxoByAddress(
 	addrs []ledger.Address,
 ) (any, error) {
 	ret := make(map[olocalstatequery.UtxoId]ledger.TransactionOutput)
+	if len(addrs) == 0 {
+		return []any{ret}, nil
+	}
 	// TODO: support multiple addresses (#391)
 	utxos, err := ls.db.UtxosByAddress(addrs[0], nil)
 	if err != nil {
@@ -236,6 +293,9 @@ func (ls *LedgerState) queryShelleyUtxoByTxIn(
 	txIns []ledger.ShelleyTransactionInput,
 ) (any, error) {
 	ret := make(map[olocalstatequery.UtxoId]ledger.TransactionOutput)
+	if len(txIns) == 0 {
+		return []any{ret}, nil
+	}
 	// TODO: support multiple TxIns (#392)
 	utxo, err := ls.db.UtxoByRef(
 		txIns[0].Id().Bytes(),

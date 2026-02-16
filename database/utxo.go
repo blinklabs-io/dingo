@@ -22,6 +22,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/ledger"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
 
 var ErrUtxoNotFound = errors.New("utxo not found")
@@ -179,38 +180,77 @@ func (d *Database) UtxoByRef(
 	return utxo, nil
 }
 
+// UtxoByRefIncludingSpent returns a Utxo by reference,
+// including spent (consumed) UTxOs.
+func (d *Database) UtxoByRefIncludingSpent(
+	txId []byte,
+	outputIdx uint32,
+	txn *Txn,
+) (*models.Utxo, error) {
+	if txn == nil {
+		txn = d.Transaction(false)
+		defer txn.Release()
+	}
+	utxo, err := d.metadata.GetUtxoIncludingSpent(
+		txId,
+		outputIdx,
+		txn.Metadata(),
+	)
+	if err != nil {
+		return nil, err
+	}
+	if utxo == nil {
+		return nil, nil
+	}
+	if err := loadCbor(utxo, txn); err != nil {
+		return nil, err
+	}
+	return utxo, nil
+}
+
 func (d *Database) UtxosByAddress(
 	addr ledger.Address,
 	txn *Txn,
 ) ([]models.Utxo, error) {
-	ret := []models.Utxo{}
-	tmpUtxo := models.Utxo{}
 	if txn == nil {
 		txn = d.Transaction(false)
 		defer txn.Release()
 	}
 	utxos, err := d.metadata.GetUtxosByAddress(addr, txn.Metadata())
 	if err != nil {
-		return ret, err
+		return nil, err
 	}
-	for _, utxo := range utxos {
-		tmpUtxo = models.Utxo{
-			ID:          utxo.ID,
-			TxId:        utxo.TxId,
-			OutputIdx:   utxo.OutputIdx,
-			AddedSlot:   utxo.AddedSlot,
-			DeletedSlot: utxo.DeletedSlot,
-			PaymentKey:  utxo.PaymentKey,
-			StakingKey:  utxo.StakingKey,
-			Amount:      utxo.Amount,
-			Assets:      utxo.Assets,
+	for i := range utxos {
+		if err := loadCbor(&utxos[i], txn); err != nil {
+			return nil, err
 		}
-		if err := loadCbor(&tmpUtxo, txn); err != nil {
-			return ret, err
-		}
-		ret = append(ret, tmpUtxo)
 	}
-	return ret, nil
+	return utxos, nil
+}
+
+func (d *Database) UtxosByAddressAtSlot(
+	addr lcommon.Address,
+	slot uint64,
+	txn *Txn,
+) ([]models.Utxo, error) {
+	if txn == nil {
+		txn = d.Transaction(false)
+		defer txn.Release()
+	}
+	utxos, err := d.metadata.GetUtxosByAddressAtSlot(
+		addr,
+		slot,
+		txn.Metadata(),
+	)
+	if err != nil {
+		return nil, err
+	}
+	for i := range utxos {
+		if err := loadCbor(&utxos[i], txn); err != nil {
+			return nil, err
+		}
+	}
+	return utxos, nil
 }
 
 // UtxosByAssets returns UTxOs that contain the specified assets
@@ -221,8 +261,6 @@ func (d *Database) UtxosByAssets(
 	assetName []byte,
 	txn *Txn,
 ) ([]models.Utxo, error) {
-	ret := []models.Utxo{}
-	tmpUtxo := models.Utxo{}
 	if txn == nil {
 		txn = d.Transaction(false)
 		defer txn.Release()
@@ -233,26 +271,14 @@ func (d *Database) UtxosByAssets(
 		txn.Metadata(),
 	)
 	if err != nil {
-		return ret, err
+		return nil, err
 	}
-	for _, utxo := range utxos {
-		tmpUtxo = models.Utxo{
-			ID:          utxo.ID,
-			TxId:        utxo.TxId,
-			OutputIdx:   utxo.OutputIdx,
-			AddedSlot:   utxo.AddedSlot,
-			DeletedSlot: utxo.DeletedSlot,
-			PaymentKey:  utxo.PaymentKey,
-			StakingKey:  utxo.StakingKey,
-			Amount:      utxo.Amount,
-			Assets:      utxo.Assets,
+	for i := range utxos {
+		if err := loadCbor(&utxos[i], txn); err != nil {
+			return nil, err
 		}
-		if err := loadCbor(&tmpUtxo, txn); err != nil {
-			return ret, err
-		}
-		ret = append(ret, tmpUtxo)
 	}
-	return ret, nil
+	return utxos, nil
 }
 
 func (d *Database) UtxosDeleteConsumed(

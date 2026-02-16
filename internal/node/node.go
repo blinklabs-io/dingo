@@ -19,7 +19,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	_ "net/http/pprof" // #nosec G108
 	"os"
 	"os/signal"
 	"runtime"
@@ -27,6 +26,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo"
+	"github.com/blinklabs-io/dingo/chainsync"
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/ledger"
@@ -125,6 +125,20 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 			return fmt.Errorf("invalid shutdown timeout: %w", err)
 		}
 	}
+	// Use the package-level default to avoid drift.
+	chainsyncStallTimeout := chainsync.DefaultStallTimeout
+	if cfg.Chainsync.StallTimeout != "" {
+		var err error
+		chainsyncStallTimeout, err = time.ParseDuration(
+			cfg.Chainsync.StallTimeout,
+		)
+		if err != nil {
+			return fmt.Errorf(
+				"invalid chainsync stall timeout: %w",
+				err,
+			)
+		}
+	}
 
 	d, err := dingo.New(
 		dingo.NewConfig(
@@ -167,28 +181,37 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 				cfg.ActivePeersGossipQuota,
 				cfg.ActivePeersLedgerQuota,
 			),
+			dingo.WithChainsyncMaxClients(
+				cfg.Chainsync.MaxClients,
+			),
+			dingo.WithChainsyncStallTimeout(
+				chainsyncStallTimeout,
+			),
+			dingo.WithMeshListenAddress(
+				cfg.MeshListenAddress,
+			),
 		),
 	)
 	if err != nil {
 		return err
 	}
-	// Metrics and debug listener
-	http.Handle("/metrics", promhttp.Handler())
+	// Metrics listener with dedicated mux to avoid exposing
+	// pprof or other handlers registered on DefaultServeMux.
+	metricsMux := http.NewServeMux()
+	metricsMux.Handle("/metrics", promhttp.Handler())
+	metricsAddr := fmt.Sprintf(
+		"%s:%d",
+		cfg.BindAddr,
+		cfg.MetricsPort,
+	)
 	logger.Info(
-		"serving prometheus metrics on "+fmt.Sprintf(
-			"%s:%d",
-			cfg.BindAddr,
-			cfg.MetricsPort,
-		),
+		"serving prometheus metrics on "+metricsAddr,
 		"component",
 		"node",
 	)
 	metricsServer := &http.Server{
-		Addr: fmt.Sprintf(
-			"%s:%d",
-			cfg.BindAddr,
-			cfg.MetricsPort,
-		),
+		Addr:              metricsAddr,
+		Handler:           metricsMux,
 		ReadHeaderTimeout: 60 * time.Second,
 		WriteTimeout:      30 * time.Second,
 		IdleTimeout:       120 * time.Second,

@@ -17,10 +17,11 @@ package ledger
 import (
 	"testing"
 
-	"github.com/blinklabs-io/dingo/database/models"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/stretchr/testify/assert"
+
+	"github.com/blinklabs-io/dingo/database/models"
 )
 
 func TestMapVoterType(t *testing.T) {
@@ -75,7 +76,9 @@ func TestExtractGovActionInfo_ParameterChange(t *testing.T) {
 		PolicyHash: []byte{0xAB, 0xCD},
 	}
 
-	actionType, parentTxHash, parentActionIdx, policyHash, err := extractGovActionInfo(action)
+	actionType, parentTxHash, parentActionIdx, policyHash, err := extractGovActionInfo(
+		action,
+	)
 	assert.NoError(t, err)
 
 	assert.Equal(
@@ -92,7 +95,9 @@ func TestExtractGovActionInfo_ParameterChange(t *testing.T) {
 func TestExtractGovActionInfo_ParameterChangeNoParent(t *testing.T) {
 	action := &conway.ConwayParameterChangeGovAction{}
 
-	actionType, parentTxHash, parentActionIdx, policyHash, err := extractGovActionInfo(action)
+	actionType, parentTxHash, parentActionIdx, policyHash, err := extractGovActionInfo(
+		action,
+	)
 	assert.NoError(t, err)
 
 	assert.Equal(
@@ -114,7 +119,9 @@ func TestExtractGovActionInfo_HardForkInitiation(t *testing.T) {
 		ActionId: parentId,
 	}
 
-	actionType, parentTxHash, parentActionIdx, _, err := extractGovActionInfo(action)
+	actionType, parentTxHash, parentActionIdx, _, err := extractGovActionInfo(
+		action,
+	)
 	assert.NoError(t, err)
 
 	assert.Equal(
@@ -132,7 +139,9 @@ func TestExtractGovActionInfo_TreasuryWithdrawal(t *testing.T) {
 		PolicyHash: []byte{0x01, 0x02, 0x03},
 	}
 
-	actionType, parentTxHash, parentActionIdx, policyHash, err := extractGovActionInfo(action)
+	actionType, parentTxHash, parentActionIdx, policyHash, err := extractGovActionInfo(
+		action,
+	)
 	assert.NoError(t, err)
 
 	assert.Equal(
@@ -154,7 +163,9 @@ func TestExtractGovActionInfo_NoConfidence(t *testing.T) {
 		ActionId: parentId,
 	}
 
-	actionType, parentTxHash, parentActionIdx, _, err := extractGovActionInfo(action)
+	actionType, parentTxHash, parentActionIdx, _, err := extractGovActionInfo(
+		action,
+	)
 	assert.NoError(t, err)
 
 	assert.Equal(
@@ -170,7 +181,9 @@ func TestExtractGovActionInfo_NoConfidence(t *testing.T) {
 func TestExtractGovActionInfo_UpdateCommittee(t *testing.T) {
 	action := &lcommon.UpdateCommitteeGovAction{}
 
-	actionType, parentTxHash, parentActionIdx, policyHash, err := extractGovActionInfo(action)
+	actionType, parentTxHash, parentActionIdx, policyHash, err := extractGovActionInfo(
+		action,
+	)
 	assert.NoError(t, err)
 
 	assert.Equal(
@@ -192,7 +205,9 @@ func TestExtractGovActionInfo_NewConstitution(t *testing.T) {
 		ActionId: parentId,
 	}
 
-	actionType, parentTxHash, parentActionIdx, _, err := extractGovActionInfo(action)
+	actionType, parentTxHash, parentActionIdx, _, err := extractGovActionInfo(
+		action,
+	)
 	assert.NoError(t, err)
 
 	assert.Equal(
@@ -208,7 +223,9 @@ func TestExtractGovActionInfo_NewConstitution(t *testing.T) {
 func TestExtractGovActionInfo_Info(t *testing.T) {
 	action := &lcommon.InfoGovAction{}
 
-	actionType, parentTxHash, parentActionIdx, policyHash, err := extractGovActionInfo(action)
+	actionType, parentTxHash, parentActionIdx, policyHash, err := extractGovActionInfo(
+		action,
+	)
 	assert.NoError(t, err)
 
 	assert.Equal(t, uint8(lcommon.GovActionTypeInfo), actionType)

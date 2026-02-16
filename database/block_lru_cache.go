@@ -42,8 +42,10 @@ type CachedBlock struct {
 	OutputIndex map[OutputKey]Location
 }
 
-// Extract returns a slice of RawBytes from offset to offset+length.
+// Extract returns a copy of RawBytes from offset to offset+length.
 // Returns nil if the range is out of bounds.
+// The returned slice is a defensive copy so callers may freely modify it
+// without corrupting the cached block data.
 func (cb *CachedBlock) Extract(offset, length uint32) []byte {
 	dataLen := len(cb.RawBytes)
 	// Check offset doesn't exceed data length
@@ -55,7 +57,9 @@ func (cb *CachedBlock) Extract(offset, length uint32) []byte {
 	if end > uint64(dataLen) {
 		return nil
 	}
-	return cb.RawBytes[offset : offset+length]
+	result := make([]byte, length)
+	copy(result, cb.RawBytes[offset:offset+length])
+	return result
 }
 
 // blockKey is the composite key for cache entries.

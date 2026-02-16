@@ -16,10 +16,13 @@ package forging
 
 import (
 	"encoding/hex"
+	"errors"
 	"log/slog"
+	"math"
 	"testing"
 
 	"github.com/blinklabs-io/gouroboros/cbor"
+	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
@@ -563,9 +566,6 @@ func makeMinimalTxCbor(t *testing.T, txID byte, padding int) []byte {
 
 	// Conway transaction body: {0: inputs, 2: fee}
 	// Inputs are encoded as a tagged set (tag 258)
-	input := cbor.NewConstructor(0, cbor.IndefLengthList{})
-	_ = input // not used directly; we encode manually below
-
 	bodyMap := map[uint]any{
 		0: cbor.Tag{
 			Number:  258,
@@ -657,5 +657,998 @@ func TestBuildBlockBlockSizeLimit(t *testing.T) {
 	assert.Equal(
 		t, 2, len(block.Transactions()),
 		"block should include 2 txs and exclude the 3rd due to size limit",
+	)
+}
+
+// mockTxValidator implements TxValidator for testing. It rejects
+// transactions whose hashes appear in the rejectHashes set.
+type mockTxValidator struct {
+	rejectHashes map[string]struct{}
+}
+
+func (v *mockTxValidator) ValidateTx(tx ledger.Transaction) error {
+	if _, reject := v.rejectHashes[tx.Hash().String()]; reject {
+		return errors.New("transaction no longer valid")
+	}
+	return nil
+}
+
+// makeMinimalTxCborWithInput creates a minimal Conway transaction
+// CBOR that spends a specific input (inputHash, inputIndex). This
+// allows tests to construct double-spend scenarios.
+func makeMinimalTxCborWithInput(
+	t *testing.T,
+	inputHash []byte,
+	inputIndex uint64,
+) []byte {
+	t.Helper()
+
+	bodyMap := map[uint]any{
+		0: cbor.Tag{
+			Number:  258,
+			Content: []any{[]any{inputHash, inputIndex}},
+		},
+		2: uint64(200000),
+	}
+
+	txArr := []any{bodyMap, map[uint]any{}, true, nil}
+	txCbor, err := cbor.Encode(txArr)
+	require.NoError(t, err)
+
+	_, err = conway.NewConwayTransactionFromCbor(txCbor)
+	require.NoError(
+		t,
+		err,
+		"generated CBOR must decode as a valid Conway tx",
+	)
+
+	return txCbor
+}
+
+func TestBuildBlockRevalidation(t *testing.T) {
+	creds := setupTestCredentials(t)
+
+	pparams := &conway.ConwayProtocolParameters{
+		MaxTxSize:        16384,
+		MaxBlockBodySize: 90112,
+		MaxBlockExUnits: lcommon.ExUnits{
+			Memory: 62000000,
+			Steps:  20000000000,
+		},
+	}
+	pparamsProvider := &mockPParamsProvider{pparams: pparams}
+
+	chainTip := &mockChainTip{
+		tip: ochainsync.Tip{
+			Point: ocommon.Point{
+				Slot: 1000,
+				Hash: make([]byte, 32),
+			},
+			BlockNumber: 100,
+		},
+	}
+
+	epochNonce := &mockEpochNonceProvider{
+		epoch: 1,
+		nonce: make([]byte, 32),
+	}
+
+	t.Run(
+		"rejects invalid transactions",
+		func(t *testing.T) {
+			txCbor1 := makeMinimalTxCbor(t, 0x01, 0)
+			txCbor2 := makeMinimalTxCbor(t, 0x02, 0)
+			txCbor3 := makeMinimalTxCbor(t, 0x03, 0)
+
+			// Decode tx2 to get its hash for the reject list
+			decodedTx2, err := conway.NewConwayTransactionFromCbor(
+				txCbor2,
+			)
+			require.NoError(t, err)
+			tx2Hash := decodedTx2.Hash().String()
+
+			mempool := &mockMempool{
+				transactions: []MempoolTransaction{
+					{
+						Hash: "tx1",
+						Cbor: txCbor1,
+						Type: conway.TxTypeConway,
+					},
+					{
+						Hash: "tx2",
+						Cbor: txCbor2,
+						Type: conway.TxTypeConway,
+					},
+					{
+						Hash: "tx3",
+						Cbor: txCbor3,
+						Type: conway.TxTypeConway,
+					},
+				},
+			}
+
+			// Validator rejects tx2
+			validator := &mockTxValidator{
+				rejectHashes: map[string]struct{}{
+					tx2Hash: {},
+				},
+			}
+
+			builder, err := NewDefaultBlockBuilder(BlockBuilderConfig{
+				Mempool:         mempool,
+				PParamsProvider: pparamsProvider,
+				ChainTip:        chainTip,
+				EpochNonce:      epochNonce,
+				Credentials:     creds,
+				TxValidator:     validator,
+			})
+			require.NoError(t, err)
+
+			block, _, err := builder.BuildBlock(1001, 0)
+			require.NoError(t, err)
+
+			// tx2 should be excluded; tx1 and tx3 included
+			assert.Equal(
+				t,
+				2,
+				len(block.Transactions()),
+				"block should include 2 txs (tx2 rejected by validator)",
+			)
+		},
+	)
+
+	t.Run(
+		"rejects all invalid transactions",
+		func(t *testing.T) {
+			txCbor1 := makeMinimalTxCbor(t, 0x01, 0)
+			txCbor2 := makeMinimalTxCbor(t, 0x02, 0)
+
+			decodedTx1, err := conway.NewConwayTransactionFromCbor(
+				txCbor1,
+			)
+			require.NoError(t, err)
+			decodedTx2, err := conway.NewConwayTransactionFromCbor(
+				txCbor2,
+			)
+			require.NoError(t, err)
+
+			mempool := &mockMempool{
+				transactions: []MempoolTransaction{
+					{
+						Hash: "tx1",
+						Cbor: txCbor1,
+						Type: conway.TxTypeConway,
+					},
+					{
+						Hash: "tx2",
+						Cbor: txCbor2,
+						Type: conway.TxTypeConway,
+					},
+				},
+			}
+
+			// Reject all
+			validator := &mockTxValidator{
+				rejectHashes: map[string]struct{}{
+					decodedTx1.Hash().String(): {},
+					decodedTx2.Hash().String(): {},
+				},
+			}
+
+			builder, err := NewDefaultBlockBuilder(BlockBuilderConfig{
+				Mempool:         mempool,
+				PParamsProvider: pparamsProvider,
+				ChainTip:        chainTip,
+				EpochNonce:      epochNonce,
+				Credentials:     creds,
+				TxValidator:     validator,
+			})
+			require.NoError(t, err)
+
+			block, _, err := builder.BuildBlock(1001, 0)
+			require.NoError(t, err)
+
+			assert.Equal(
+				t,
+				0,
+				len(block.Transactions()),
+				"block should have no txs when all fail re-validation",
+			)
+		},
+	)
+
+	t.Run(
+		"nil validator skips re-validation",
+		func(t *testing.T) {
+			txCbor1 := makeMinimalTxCbor(t, 0x01, 0)
+
+			mempool := &mockMempool{
+				transactions: []MempoolTransaction{
+					{
+						Hash: "tx1",
+						Cbor: txCbor1,
+						Type: conway.TxTypeConway,
+					},
+				},
+			}
+
+			// No validator - should include all transactions
+			builder, err := NewDefaultBlockBuilder(BlockBuilderConfig{
+				Mempool:         mempool,
+				PParamsProvider: pparamsProvider,
+				ChainTip:        chainTip,
+				EpochNonce:      epochNonce,
+				Credentials:     creds,
+				TxValidator:     nil,
+			})
+			require.NoError(t, err)
+
+			block, _, err := builder.BuildBlock(1001, 0)
+			require.NoError(t, err)
+
+			assert.Equal(
+				t,
+				1,
+				len(block.Transactions()),
+				"block should include tx when no validator is set",
+			)
+		},
+	)
+}
+
+func TestBuildBlockDoubleSpendDetection(t *testing.T) {
+	creds := setupTestCredentials(t)
+
+	pparams := &conway.ConwayProtocolParameters{
+		MaxTxSize:        16384,
+		MaxBlockBodySize: 90112,
+		MaxBlockExUnits: lcommon.ExUnits{
+			Memory: 62000000,
+			Steps:  20000000000,
+		},
+	}
+	pparamsProvider := &mockPParamsProvider{pparams: pparams}
+
+	chainTip := &mockChainTip{
+		tip: ochainsync.Tip{
+			Point: ocommon.Point{
+				Slot: 1000,
+				Hash: make([]byte, 32),
+			},
+			BlockNumber: 100,
+		},
+	}
+
+	epochNonce := &mockEpochNonceProvider{
+		epoch: 1,
+		nonce: make([]byte, 32),
+	}
+
+	t.Run(
+		"detects same input in two transactions",
+		func(t *testing.T) {
+			// Both transactions spend the same UTxO (same input
+			// hash and index). The second should be excluded.
+			sharedInputHash := make([]byte, 32)
+			sharedInputHash[0] = 0xAA
+			txCbor1 := makeMinimalTxCborWithInput(
+				t,
+				sharedInputHash,
+				0,
+			)
+			txCbor2 := makeMinimalTxCborWithInput(
+				t,
+				sharedInputHash,
+				0,
+			)
+
+			mempool := &mockMempool{
+				transactions: []MempoolTransaction{
+					{
+						Hash: "tx1",
+						Cbor: txCbor1,
+						Type: conway.TxTypeConway,
+					},
+					{
+						Hash: "tx2",
+						Cbor: txCbor2,
+						Type: conway.TxTypeConway,
+					},
+				},
+			}
+
+			builder, err := NewDefaultBlockBuilder(BlockBuilderConfig{
+				Mempool:         mempool,
+				PParamsProvider: pparamsProvider,
+				ChainTip:        chainTip,
+				EpochNonce:      epochNonce,
+				Credentials:     creds,
+			})
+			require.NoError(t, err)
+
+			block, _, err := builder.BuildBlock(1001, 0)
+			require.NoError(t, err)
+
+			assert.Equal(
+				t,
+				1,
+				len(block.Transactions()),
+				"block should include only the first tx; second is "+
+					"a double-spend",
+			)
+		},
+	)
+
+	t.Run(
+		"allows different inputs",
+		func(t *testing.T) {
+			// Two transactions spending different UTxOs should
+			// both be included.
+			input1 := make([]byte, 32)
+			input1[0] = 0x01
+			input2 := make([]byte, 32)
+			input2[0] = 0x02
+			txCbor1 := makeMinimalTxCborWithInput(t, input1, 0)
+			txCbor2 := makeMinimalTxCborWithInput(t, input2, 0)
+
+			mempool := &mockMempool{
+				transactions: []MempoolTransaction{
+					{
+						Hash: "tx1",
+						Cbor: txCbor1,
+						Type: conway.TxTypeConway,
+					},
+					{
+						Hash: "tx2",
+						Cbor: txCbor2,
+						Type: conway.TxTypeConway,
+					},
+				},
+			}
+
+			builder, err := NewDefaultBlockBuilder(BlockBuilderConfig{
+				Mempool:         mempool,
+				PParamsProvider: pparamsProvider,
+				ChainTip:        chainTip,
+				EpochNonce:      epochNonce,
+				Credentials:     creds,
+			})
+			require.NoError(t, err)
+
+			block, _, err := builder.BuildBlock(1001, 0)
+			require.NoError(t, err)
+
+			assert.Equal(
+				t,
+				2,
+				len(block.Transactions()),
+				"block should include both txs with different inputs",
+			)
+		},
+	)
+
+	t.Run(
+		"same hash different index is not a double-spend",
+		func(t *testing.T) {
+			// Two transactions spending the same tx hash but
+			// different output indexes are valid.
+			sharedHash := make([]byte, 32)
+			sharedHash[0] = 0xBB
+			txCbor1 := makeMinimalTxCborWithInput(
+				t,
+				sharedHash,
+				0,
+			)
+			txCbor2 := makeMinimalTxCborWithInput(
+				t,
+				sharedHash,
+				1,
+			)
+
+			mempool := &mockMempool{
+				transactions: []MempoolTransaction{
+					{
+						Hash: "tx1",
+						Cbor: txCbor1,
+						Type: conway.TxTypeConway,
+					},
+					{
+						Hash: "tx2",
+						Cbor: txCbor2,
+						Type: conway.TxTypeConway,
+					},
+				},
+			}
+
+			builder, err := NewDefaultBlockBuilder(BlockBuilderConfig{
+				Mempool:         mempool,
+				PParamsProvider: pparamsProvider,
+				ChainTip:        chainTip,
+				EpochNonce:      epochNonce,
+				Credentials:     creds,
+			})
+			require.NoError(t, err)
+
+			block, _, err := builder.BuildBlock(1001, 0)
+			require.NoError(t, err)
+
+			assert.Equal(
+				t,
+				2,
+				len(block.Transactions()),
+				"block should include both txs spending different "+
+					"outputs of the same tx",
+			)
+		},
+	)
+
+	t.Run(
+		"three-way double-spend keeps only first",
+		func(t *testing.T) {
+			// Three transactions all spending the same UTxO.
+			// Only the first should be included.
+			sharedInputHash := make([]byte, 32)
+			sharedInputHash[0] = 0xCC
+			txCbor1 := makeMinimalTxCborWithInput(
+				t,
+				sharedInputHash,
+				0,
+			)
+			txCbor2 := makeMinimalTxCborWithInput(
+				t,
+				sharedInputHash,
+				0,
+			)
+			txCbor3 := makeMinimalTxCborWithInput(
+				t,
+				sharedInputHash,
+				0,
+			)
+
+			mempool := &mockMempool{
+				transactions: []MempoolTransaction{
+					{
+						Hash: "tx1",
+						Cbor: txCbor1,
+						Type: conway.TxTypeConway,
+					},
+					{
+						Hash: "tx2",
+						Cbor: txCbor2,
+						Type: conway.TxTypeConway,
+					},
+					{
+						Hash: "tx3",
+						Cbor: txCbor3,
+						Type: conway.TxTypeConway,
+					},
+				},
+			}
+
+			builder, err := NewDefaultBlockBuilder(BlockBuilderConfig{
+				Mempool:         mempool,
+				PParamsProvider: pparamsProvider,
+				ChainTip:        chainTip,
+				EpochNonce:      epochNonce,
+				Credentials:     creds,
+			})
+			require.NoError(t, err)
+
+			block, _, err := builder.BuildBlock(1001, 0)
+			require.NoError(t, err)
+
+			assert.Equal(
+				t,
+				1,
+				len(block.Transactions()),
+				"block should include only the first tx; second "+
+					"and third are double-spends",
+			)
+		},
+	)
+}
+
+// makeMinimalTxCborWithExUnits creates a minimal valid Conway
+// transaction CBOR that includes a redeemer with the given ExUnits.
+// This allows tests to control the execution units declared in
+// the transaction's witness set.
+func makeMinimalTxCborWithExUnits(
+	t *testing.T,
+	txID byte,
+	memory, steps int64,
+) []byte {
+	t.Helper()
+
+	txHash := make([]byte, 32)
+	txHash[0] = txID
+
+	bodyMap := map[uint]any{
+		0: cbor.Tag{
+			Number:  258,
+			Content: []any{[]any{txHash, uint64(0)}},
+		},
+		2: uint64(200000),
+	}
+
+	// Build the witness set with redeemers using raw CBOR.
+	// Conway redeemers (witness set key 5) use a map format:
+	//   { [tag, index] => [data, [memory, steps]] }
+	// We encode the redeemer key [tag=0, index=0] and value
+	// [data=0x40(empty bytes), [memory, steps]] as CBOR,
+	// then construct the witness set map around it.
+	redeemerKeyCbor, err := cbor.Encode(
+		[]uint64{0, 0},
+	)
+	require.NoError(t, err)
+
+	redeemerValCbor, err := cbor.Encode(
+		[]any{
+			[]byte{},
+			[]any{uint64(memory), uint64(steps)},
+		},
+	)
+	require.NoError(t, err)
+
+	// Build the redeemer map CBOR manually: a1 = map(1)
+	redeemerMapCbor := []byte{0xa1} // CBOR map with 1 entry
+	redeemerMapCbor = append(
+		redeemerMapCbor,
+		redeemerKeyCbor...,
+	)
+	redeemerMapCbor = append(
+		redeemerMapCbor,
+		redeemerValCbor...,
+	)
+
+	// Build the witness set: {5: redeemerMap}
+	// CBOR: a1 (map 1) 05 (key 5) <redeemerMapCbor>
+	witnessSetCbor := []byte{0xa1, 0x05}
+	witnessSetCbor = append(witnessSetCbor, redeemerMapCbor...)
+
+	// Encode the body and combine into full tx array
+	bodyCbor, err := cbor.Encode(bodyMap)
+	require.NoError(t, err)
+
+	// Full Conway tx: [body, witnesses, isValid, auxData]
+	// CBOR: 84 (array 4) <body> <witnesses> F5 (true) F6 (null)
+	txCbor := []byte{0x84}
+	txCbor = append(txCbor, bodyCbor...)
+	txCbor = append(txCbor, witnessSetCbor...)
+	txCbor = append(txCbor, 0xF5) // true (isValid)
+	txCbor = append(txCbor, 0xF6) // null (auxData)
+
+	// Verify it actually decodes and has the expected ExUnits
+	decoded, err := conway.NewConwayTransactionFromCbor(txCbor)
+	require.NoError(t, err, "generated CBOR must decode as a valid Conway tx")
+
+	var totalMem, totalSteps int64
+	for _, redeemer := range decoded.WitnessSet.Redeemers().Iter() {
+		totalMem += redeemer.ExUnits.Memory
+		totalSteps += redeemer.ExUnits.Steps
+	}
+	require.Equal(t, memory, totalMem, "decoded memory should match")
+	require.Equal(t, steps, totalSteps, "decoded steps should match")
+
+	return txCbor
+}
+
+func TestBuildBlockExUnitsLimit(t *testing.T) {
+	creds := setupTestCredentials(t)
+
+	chainTip := &mockChainTip{
+		tip: ochainsync.Tip{
+			Point: ocommon.Point{
+				Slot: 1000,
+				Hash: make([]byte, 32),
+			},
+			BlockNumber: 100,
+		},
+	}
+
+	epochNonce := &mockEpochNonceProvider{
+		epoch: 1,
+		nonce: make([]byte, 32),
+	}
+
+	t.Run(
+		"normal accumulation under limit",
+		func(t *testing.T) {
+			txCbor1 := makeMinimalTxCborWithExUnits(
+				t, 0x01, 1000000, 50000000,
+			)
+			txCbor2 := makeMinimalTxCborWithExUnits(
+				t, 0x02, 2000000, 80000000,
+			)
+
+			mempool := &mockMempool{
+				transactions: []MempoolTransaction{
+					{
+						Hash: "tx1",
+						Cbor: txCbor1,
+						Type: conway.TxTypeConway,
+					},
+					{
+						Hash: "tx2",
+						Cbor: txCbor2,
+						Type: conway.TxTypeConway,
+					},
+				},
+			}
+
+			pparams := &conway.ConwayProtocolParameters{
+				MaxTxSize:        16384,
+				MaxBlockBodySize: 90112,
+				MaxBlockExUnits: lcommon.ExUnits{
+					Memory: 62000000,
+					Steps:  20000000000,
+				},
+			}
+
+			builder, err := NewDefaultBlockBuilder(
+				BlockBuilderConfig{
+					Mempool:         mempool,
+					PParamsProvider: &mockPParamsProvider{pparams: pparams},
+					ChainTip:        chainTip,
+					EpochNonce:      epochNonce,
+					Credentials:     creds,
+				},
+			)
+			require.NoError(t, err)
+
+			block, _, err := builder.BuildBlock(1001, 0)
+			require.NoError(t, err)
+
+			assert.Equal(
+				t,
+				2,
+				len(block.Transactions()),
+				"both txs should be included when under limit",
+			)
+		},
+	)
+
+	t.Run(
+		"overflow memory at int64 boundary",
+		func(t *testing.T) {
+			// First tx uses nearly max int64 memory.
+			// Second tx would overflow int64 if added.
+			txCbor1 := makeMinimalTxCborWithExUnits(
+				t, 0x01, math.MaxInt64-100, 100,
+			)
+			txCbor2 := makeMinimalTxCborWithExUnits(
+				t, 0x02, 200, 100,
+			)
+
+			mempool := &mockMempool{
+				transactions: []MempoolTransaction{
+					{
+						Hash: "tx1",
+						Cbor: txCbor1,
+						Type: conway.TxTypeConway,
+					},
+					{
+						Hash: "tx2",
+						Cbor: txCbor2,
+						Type: conway.TxTypeConway,
+					},
+				},
+			}
+
+			pparams := &conway.ConwayProtocolParameters{
+				MaxTxSize:        16384,
+				MaxBlockBodySize: 90112,
+				MaxBlockExUnits: lcommon.ExUnits{
+					Memory: math.MaxInt64,
+					Steps:  math.MaxInt64,
+				},
+			}
+
+			builder, err := NewDefaultBlockBuilder(
+				BlockBuilderConfig{
+					Mempool:         mempool,
+					PParamsProvider: &mockPParamsProvider{pparams: pparams},
+					ChainTip:        chainTip,
+					EpochNonce:      epochNonce,
+					Credentials:     creds,
+				},
+			)
+			require.NoError(t, err)
+
+			block, _, err := builder.BuildBlock(1001, 0)
+			require.NoError(t, err)
+
+			// tx1 fits (near max), tx2 would overflow so skipped
+			assert.Equal(
+				t,
+				1,
+				len(block.Transactions()),
+				"second tx should be skipped to prevent "+
+					"int64 memory overflow",
+			)
+		},
+	)
+
+	t.Run(
+		"overflow steps at int64 boundary",
+		func(t *testing.T) {
+			txCbor1 := makeMinimalTxCborWithExUnits(
+				t, 0x01, 100, math.MaxInt64-100,
+			)
+			txCbor2 := makeMinimalTxCborWithExUnits(
+				t, 0x02, 100, 200,
+			)
+
+			mempool := &mockMempool{
+				transactions: []MempoolTransaction{
+					{
+						Hash: "tx1",
+						Cbor: txCbor1,
+						Type: conway.TxTypeConway,
+					},
+					{
+						Hash: "tx2",
+						Cbor: txCbor2,
+						Type: conway.TxTypeConway,
+					},
+				},
+			}
+
+			pparams := &conway.ConwayProtocolParameters{
+				MaxTxSize:        16384,
+				MaxBlockBodySize: 90112,
+				MaxBlockExUnits: lcommon.ExUnits{
+					Memory: math.MaxInt64,
+					Steps:  math.MaxInt64,
+				},
+			}
+
+			builder, err := NewDefaultBlockBuilder(
+				BlockBuilderConfig{
+					Mempool:         mempool,
+					PParamsProvider: &mockPParamsProvider{pparams: pparams},
+					ChainTip:        chainTip,
+					EpochNonce:      epochNonce,
+					Credentials:     creds,
+				},
+			)
+			require.NoError(t, err)
+
+			block, _, err := builder.BuildBlock(1001, 0)
+			require.NoError(t, err)
+
+			assert.Equal(
+				t,
+				1,
+				len(block.Transactions()),
+				"second tx should be skipped to prevent "+
+					"int64 steps overflow",
+			)
+		},
+	)
+
+	t.Run(
+		"mixed valid and overflow transactions",
+		func(t *testing.T) {
+			// tx1: normal (included)
+			// tx2: would overflow memory when combined with
+			//      tx1 (skipped)
+			// tx3: normal, fits after skipping tx2 (included)
+			txCbor1 := makeMinimalTxCborWithExUnits(
+				t, 0x01, math.MaxInt64-100, 100,
+			)
+			txCbor2 := makeMinimalTxCborWithExUnits(
+				t, 0x02, 200, 100,
+			)
+			txCbor3 := makeMinimalTxCborWithExUnits(
+				t, 0x03, 50, 100,
+			)
+
+			mempool := &mockMempool{
+				transactions: []MempoolTransaction{
+					{
+						Hash: "tx1",
+						Cbor: txCbor1,
+						Type: conway.TxTypeConway,
+					},
+					{
+						Hash: "tx2",
+						Cbor: txCbor2,
+						Type: conway.TxTypeConway,
+					},
+					{
+						Hash: "tx3",
+						Cbor: txCbor3,
+						Type: conway.TxTypeConway,
+					},
+				},
+			}
+
+			pparams := &conway.ConwayProtocolParameters{
+				MaxTxSize:        16384,
+				MaxBlockBodySize: 90112,
+				MaxBlockExUnits: lcommon.ExUnits{
+					Memory: math.MaxInt64,
+					Steps:  math.MaxInt64,
+				},
+			}
+
+			builder, err := NewDefaultBlockBuilder(
+				BlockBuilderConfig{
+					Mempool:         mempool,
+					PParamsProvider: &mockPParamsProvider{pparams: pparams},
+					ChainTip:        chainTip,
+					EpochNonce:      epochNonce,
+					Credentials:     creds,
+				},
+			)
+			require.NoError(t, err)
+
+			block, _, err := builder.BuildBlock(1001, 0)
+			require.NoError(t, err)
+
+			// tx1 included, tx2 skipped (overflow), tx3
+			// included (fits)
+			assert.Equal(
+				t,
+				2,
+				len(block.Transactions()),
+				"tx2 should be skipped (overflow) but tx3 "+
+					"should still be included",
+			)
+		},
+	)
+
+	t.Run(
+		"exceeds max block ex units limit",
+		func(t *testing.T) {
+			// Two transactions that individually fit but
+			// together exceed the block ExUnits limit.
+			txCbor1 := makeMinimalTxCborWithExUnits(
+				t, 0x01, 40000000, 12000000000,
+			)
+			txCbor2 := makeMinimalTxCborWithExUnits(
+				t, 0x02, 30000000, 10000000000,
+			)
+
+			mempool := &mockMempool{
+				transactions: []MempoolTransaction{
+					{
+						Hash: "tx1",
+						Cbor: txCbor1,
+						Type: conway.TxTypeConway,
+					},
+					{
+						Hash: "tx2",
+						Cbor: txCbor2,
+						Type: conway.TxTypeConway,
+					},
+				},
+			}
+
+			pparams := &conway.ConwayProtocolParameters{
+				MaxTxSize:        16384,
+				MaxBlockBodySize: 90112,
+				MaxBlockExUnits: lcommon.ExUnits{
+					Memory: 62000000,
+					Steps:  20000000000,
+				},
+			}
+
+			builder, err := NewDefaultBlockBuilder(
+				BlockBuilderConfig{
+					Mempool:         mempool,
+					PParamsProvider: &mockPParamsProvider{pparams: pparams},
+					ChainTip:        chainTip,
+					EpochNonce:      epochNonce,
+					Credentials:     creds,
+				},
+			)
+			require.NoError(t, err)
+
+			block, _, err := builder.BuildBlock(1001, 0)
+			require.NoError(t, err)
+
+			// tx1 fits (40M < 62M, 12B < 20B), tx2 would
+			// push total to 70M > 62M max memory
+			assert.Equal(
+				t,
+				1,
+				len(block.Transactions()),
+				"second tx should be skipped because "+
+					"combined ExUnits exceed block limit",
+			)
+		},
+	)
+}
+
+func TestBuildBlockRevalidationAndDoubleSpend(t *testing.T) {
+	creds := setupTestCredentials(t)
+
+	pparams := &conway.ConwayProtocolParameters{
+		MaxTxSize:        16384,
+		MaxBlockBodySize: 90112,
+		MaxBlockExUnits: lcommon.ExUnits{
+			Memory: 62000000,
+			Steps:  20000000000,
+		},
+	}
+	pparamsProvider := &mockPParamsProvider{pparams: pparams}
+
+	chainTip := &mockChainTip{
+		tip: ochainsync.Tip{
+			Point: ocommon.Point{
+				Slot: 1000,
+				Hash: make([]byte, 32),
+			},
+			BlockNumber: 100,
+		},
+	}
+
+	epochNonce := &mockEpochNonceProvider{
+		epoch: 1,
+		nonce: make([]byte, 32),
+	}
+
+	// Scenario: tx1 fails re-validation, tx2 and tx3 share an
+	// input. Expected result: tx1 excluded by validator, tx2
+	// included, tx3 excluded by double-spend detection.
+	sharedInputHash := make([]byte, 32)
+	sharedInputHash[0] = 0xDD
+	differentInputHash := make([]byte, 32)
+	differentInputHash[0] = 0xEE
+
+	txCbor1 := makeMinimalTxCborWithInput(t, differentInputHash, 0)
+	txCbor2 := makeMinimalTxCborWithInput(t, sharedInputHash, 0)
+	txCbor3 := makeMinimalTxCborWithInput(t, sharedInputHash, 0)
+
+	decodedTx1, err := conway.NewConwayTransactionFromCbor(txCbor1)
+	require.NoError(t, err)
+
+	mempool := &mockMempool{
+		transactions: []MempoolTransaction{
+			{
+				Hash: "tx1",
+				Cbor: txCbor1,
+				Type: conway.TxTypeConway,
+			},
+			{
+				Hash: "tx2",
+				Cbor: txCbor2,
+				Type: conway.TxTypeConway,
+			},
+			{
+				Hash: "tx3",
+				Cbor: txCbor3,
+				Type: conway.TxTypeConway,
+			},
+		},
+	}
+
+	validator := &mockTxValidator{
+		rejectHashes: map[string]struct{}{
+			decodedTx1.Hash().String(): {},
+		},
+	}
+
+	builder, err := NewDefaultBlockBuilder(BlockBuilderConfig{
+		Mempool:         mempool,
+		PParamsProvider: pparamsProvider,
+		ChainTip:        chainTip,
+		EpochNonce:      epochNonce,
+		Credentials:     creds,
+		TxValidator:     validator,
+	})
+	require.NoError(t, err)
+
+	block, _, err := builder.BuildBlock(1001, 0)
+	require.NoError(t, err)
+
+	// tx1 rejected by validator, tx3 rejected as double-spend of tx2
+	assert.Equal(
+		t,
+		1,
+		len(block.Transactions()),
+		"block should include only tx2 (tx1 failed validation, "+
+			"tx3 is a double-spend of tx2)",
 	)
 }

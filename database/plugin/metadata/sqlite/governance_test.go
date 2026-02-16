@@ -17,9 +17,10 @@ package sqlite
 import (
 	"testing"
 
-	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/blinklabs-io/dingo/database/models"
 )
 
 func setupTestStore(t *testing.T) *MetadataStoreSqlite {
@@ -389,3 +390,267 @@ func TestGetActiveGovernanceProposals(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, proposals, 2)
 }
+
+func TestUpdateDRepActivity(t *testing.T) {
+	store := setupTestStore(t)
+
+	cred := []byte("drep_credential_1234567890123456789012345a")
+
+	// Create a DRep
+	err := store.SetDrep(cred, 1000, "https://drep.example.com",
+		[]byte("anchor_hash_1234567890123456789012"), true, nil)
+	require.NoError(t, err)
+
+	// Verify initial state (no activity epoch set)
+	drep, err := store.GetDrep(cred, false, nil)
+	require.NoError(t, err)
+	require.NotNil(t, drep)
+	assert.Equal(t, uint64(0), drep.LastActivityEpoch)
+	assert.Equal(t, uint64(0), drep.ExpiryEpoch)
+
+	// Update activity at epoch 100 with inactivity period of 20
+	err = store.UpdateDRepActivity(cred, 100, 20, nil)
+	require.NoError(t, err)
+
+	// Verify activity was updated
+	drep, err = store.GetDrep(cred, false, nil)
+	require.NoError(t, err)
+	require.NotNil(t, drep)
+	assert.Equal(t, uint64(100), drep.LastActivityEpoch)
+	assert.Equal(t, uint64(120), drep.ExpiryEpoch)
+
+	// Update activity again at epoch 110
+	err = store.UpdateDRepActivity(cred, 110, 20, nil)
+	require.NoError(t, err)
+
+	drep, err = store.GetDrep(cred, false, nil)
+	require.NoError(t, err)
+	require.NotNil(t, drep)
+	assert.Equal(t, uint64(110), drep.LastActivityEpoch)
+	assert.Equal(t, uint64(130), drep.ExpiryEpoch)
+
+	// Updating a non-existent DRep should return an error
+	err = store.UpdateDRepActivity(
+		[]byte("nonexistent_credential_1234567890123456"),
+		200,
+		20,
+		nil,
+	)
+	require.ErrorIs(t, err, models.ErrDrepActivityNotUpdated)
+}
+
+func TestGetExpiredDReps(t *testing.T) {
+	store := setupTestStore(t)
+
+	credA := []byte("drep_credential_1234567890123456789012345a")
+	credB := []byte("drep_credential_1234567890123456789012345b")
+	credC := []byte("drep_credential_1234567890123456789012345c")
+
+	// Create three DReps
+	err := store.SetDrep(credA, 1000, "", nil, true, nil)
+	require.NoError(t, err)
+	err = store.SetDrep(credB, 1000, "", nil, true, nil)
+	require.NoError(t, err)
+	err = store.SetDrep(credC, 1000, "", nil, true, nil)
+	require.NoError(t, err)
+
+	// Set activity: A expires at epoch 120, B at 130, C at 150
+	err = store.UpdateDRepActivity(credA, 100, 20, nil)
+	require.NoError(t, err)
+	err = store.UpdateDRepActivity(credB, 110, 20, nil)
+	require.NoError(t, err)
+	err = store.UpdateDRepActivity(credC, 130, 20, nil)
+	require.NoError(t, err)
+
+	// At epoch 119: no DReps expired
+	expired, err := store.GetExpiredDReps(119, nil)
+	require.NoError(t, err)
+	assert.Empty(t, expired)
+
+	// At epoch 120: DRep A expired
+	expired, err = store.GetExpiredDReps(120, nil)
+	require.NoError(t, err)
+	assert.Len(t, expired, 1)
+	assert.Equal(t, credA, expired[0].Credential)
+
+	// At epoch 130: DReps A and B expired
+	expired, err = store.GetExpiredDReps(130, nil)
+	require.NoError(t, err)
+	assert.Len(t, expired, 2)
+
+	// At epoch 200: all three expired
+	expired, err = store.GetExpiredDReps(200, nil)
+	require.NoError(t, err)
+	assert.Len(t, expired, 3)
+}
+
+func TestGetDRepVotingPower(t *testing.T) {
+	store := setupTestStore(t)
+
+	drepCred := []byte("drep_credential_1234567890123456789012345a")
+
+	// Create a DRep
+	err := store.SetDrep(drepCred, 1000, "", nil, true, nil)
+	require.NoError(t, err)
+
+	// No delegators = zero voting power
+	power, err := store.GetDRepVotingPower(drepCred, nil)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(0), power)
+
+	// Create accounts delegated to this DRep
+	stakingKey1 := []byte("staking_key_12345678901234567890")
+	stakingKey2 := []byte("staking_key_22345678901234567890")
+
+	result := store.DB().Create(&models.Account{
+		StakingKey: stakingKey1,
+		Drep:       drepCred,
+		Active:     true,
+		AddedSlot:  1000,
+	})
+	require.NoError(t, result.Error)
+
+	result = store.DB().Create(&models.Account{
+		StakingKey: stakingKey2,
+		Drep:       drepCred,
+		Active:     true,
+		AddedSlot:  1000,
+	})
+	require.NoError(t, result.Error)
+
+	// Create UTxOs for these staking keys
+	result = store.DB().Create(&models.Utxo{
+		TxId:       []byte("tx_id_12345678901234567890123456789012"),
+		StakingKey: stakingKey1,
+		Amount:     5000000,
+		OutputIdx:  0,
+		AddedSlot:  1000,
+	})
+	require.NoError(t, result.Error)
+
+	result = store.DB().Create(&models.Utxo{
+		TxId:       []byte("tx_id_22345678901234567890123456789012"),
+		StakingKey: stakingKey1,
+		Amount:     3000000,
+		OutputIdx:  0,
+		AddedSlot:  1000,
+	})
+	require.NoError(t, result.Error)
+
+	result = store.DB().Create(&models.Utxo{
+		TxId:       []byte("tx_id_32345678901234567890123456789012"),
+		StakingKey: stakingKey2,
+		Amount:     2000000,
+		OutputIdx:  0,
+		AddedSlot:  1000,
+	})
+	require.NoError(t, result.Error)
+
+	// Add a deleted UTxO that should not count
+	result = store.DB().Create(&models.Utxo{
+		TxId:        []byte("tx_id_42345678901234567890123456789012"),
+		StakingKey:  stakingKey2,
+		Amount:      9000000,
+		OutputIdx:   0,
+		AddedSlot:   1000,
+		DeletedSlot: 2000,
+	})
+	require.NoError(t, result.Error)
+
+	// Voting power should be 5M + 3M + 2M = 10M
+	power, err = store.GetDRepVotingPower(drepCred, nil)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(10000000), power)
+}
+
+func TestGetCommitteeActiveCount(t *testing.T) {
+	store := setupTestStore(t)
+
+	// Initially zero
+	count, err := store.GetCommitteeActiveCount(nil)
+	require.NoError(t, err)
+	assert.Equal(t, 0, count)
+
+	// Create transaction records (parent for certificates via FK constraint).
+	result := store.DB().Create(&models.Transaction{
+		ID:   100,
+		Hash: []byte("committee_tx_hash_1234567890123456"),
+		Slot: 1000,
+	})
+	require.NoError(t, result.Error)
+
+	result = store.DB().Create(&models.Transaction{
+		ID:   200,
+		Hash: []byte("committee_tx_hash_2234567890123456"),
+		Slot: 2000,
+	})
+	require.NoError(t, result.Error)
+
+	// Create certificate records that the committee queries join against.
+	// Each certificate needs a unique (TransactionID, CertIndex) pair.
+	result = store.DB().Create(&models.Certificate{
+		ID:            1,
+		TransactionID: 100,
+		CertIndex:     0,
+		Slot:          1000,
+		CertType:      14, // AuthCommitteeHot cert type
+	})
+	require.NoError(t, result.Error)
+
+	result = store.DB().Create(&models.Certificate{
+		ID:            2,
+		TransactionID: 100,
+		CertIndex:     1,
+		Slot:          1000,
+		CertType:      14,
+	})
+	require.NoError(t, result.Error)
+
+	result = store.DB().Create(&models.Certificate{
+		ID:            3,
+		TransactionID: 200,
+		CertIndex:     0,
+		Slot:          2000,
+		CertType:      15, // ResignCommitteeCold cert type
+	})
+	require.NoError(t, result.Error)
+
+	// Add two committee members
+	result = store.DB().Create(&models.AuthCommitteeHot{
+		ColdCredential: []byte("cold_credential_1234567890123456789012345a"),
+		HostCredential: []byte("hot_credential_12345678901234567890123456a"),
+		CertificateID:  1,
+		AddedSlot:      1000,
+	})
+	require.NoError(t, result.Error)
+
+	result = store.DB().Create(&models.AuthCommitteeHot{
+		ColdCredential: []byte("cold_credential_1234567890123456789012345b"),
+		HostCredential: []byte("hot_credential_12345678901234567890123456b"),
+		CertificateID:  2,
+		AddedSlot:      1000,
+	})
+	require.NoError(t, result.Error)
+
+	count, err = store.GetCommitteeActiveCount(nil)
+	require.NoError(t, err)
+	assert.Equal(t, 2, count)
+
+	// Resign one member
+	result = store.DB().Create(&models.ResignCommitteeCold{
+		ColdCredential: []byte("cold_credential_1234567890123456789012345a"),
+		CertificateID:  3,
+		AddedSlot:      2000,
+	})
+	require.NoError(t, result.Error)
+
+	count, err = store.GetCommitteeActiveCount(nil)
+	require.NoError(t, err)
+	assert.Equal(t, 1, count)
+}
+
+// NOTE: IsCommitteeThresholdMet is tested in ledger/view_test.go.
+// It is not duplicated here to avoid maintaining parallel
+// implementations. The sqlite package cannot import ledger
+// (circular dependency), so threshold logic tests live in
+// the ledger package.

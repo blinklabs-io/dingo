@@ -173,11 +173,35 @@ type MetadataStore interface {
 		types.Txn,
 	) (*models.Utxo, error)
 
+	// GetUtxoIncludingSpent retrieves a transaction output by
+	// transaction ID and index, including spent outputs.
+	GetUtxoIncludingSpent(
+		[]byte, // txId
+		uint32, // idx
+		types.Txn,
+	) (*models.Utxo, error)
+
 	// GetTransactionByHash retrieves a transaction by its hash.
 	GetTransactionByHash(
 		[]byte, // hash
 		types.Txn,
 	) (*models.Transaction, error)
+
+	// GetTransactionsByBlockHash retrieves all transactions
+	// for a given block hash, ordered by block_index.
+	GetTransactionsByBlockHash(
+		[]byte, // blockHash
+		types.Txn,
+	) ([]models.Transaction, error)
+
+	// GetTransactionsByAddress retrieves transactions involving
+	// the given address, ordered by slot descending.
+	GetTransactionsByAddress(
+		lcommon.Address,
+		int, // limit
+		int, // offset
+		types.Txn,
+	) ([]models.Transaction, error)
 
 	// GetScript retrieves a script by its hash.
 	GetScript(
@@ -291,6 +315,9 @@ type MetadataStore interface {
 
 	// GetUtxosByAddress retrieves all UTxOs for a given address.
 	GetUtxosByAddress(ledger.Address, types.Txn) ([]models.Utxo, error)
+
+	// GetUtxosByAddressAtSlot retrieves all UTxOs for a given address at a specific slot.
+	GetUtxosByAddressAtSlot(lcommon.Address, uint64, types.Txn) ([]models.Utxo, error)
 
 	// GetUtxosByAssets retrieves all UTxOs that contain the specified assets.
 	// Pass nil for assetName to match all assets under the policy, or empty []byte{} to match assets with empty names.
@@ -445,6 +472,36 @@ type MetadataStore interface {
 		types.Txn,
 	) (bool, error)
 
+	// GetCommitteeActiveCount returns the number of active (non-resigned)
+	// committee members.
+	GetCommitteeActiveCount(types.Txn) (int, error)
+
+	// DRep voting power and activity methods
+
+	// GetDRepVotingPower calculates the voting power for a DRep by summing
+	// the stake of all accounts delegated to it. Uses the current live
+	// UTxO set (deleted_slot = 0) for the calculation.
+	GetDRepVotingPower(
+		[]byte, // drepCredential
+		types.Txn,
+	) (uint64, error)
+
+	// UpdateDRepActivity updates the DRep's last activity epoch and
+	// recalculates the expiry epoch.
+	UpdateDRepActivity(
+		[]byte, // drepCredential
+		uint64, // activityEpoch
+		uint64, // inactivityPeriod
+		types.Txn,
+	) error
+
+	// GetExpiredDReps retrieves all active DReps whose expiry epoch is at
+	// or before the given epoch.
+	GetExpiredDReps(
+		uint64, // epoch
+		types.Txn,
+	) ([]*models.Drep, error)
+
 	// Constitution methods
 
 	// GetConstitution retrieves the current constitution.
@@ -502,6 +559,14 @@ type MetadataStore interface {
 	// DeletePParamUpdatesAfterSlot removes protocol parameter update records
 	// added after the given slot.
 	DeletePParamUpdatesAfterSlot(uint64, types.Txn) error
+}
+
+// BulkLoadOptimizer is an optional interface that metadata stores can
+// implement to provide optimized settings for bulk loading operations.
+// The load command checks for this interface and uses it when available.
+type BulkLoadOptimizer interface {
+	SetBulkLoadPragmas() error
+	RestoreNormalPragmas() error
 }
 
 // New creates a new metadata store instance using the specified plugin

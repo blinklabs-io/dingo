@@ -21,12 +21,13 @@ import (
 	"os"
 	"testing"
 
-	"github.com/blinklabs-io/dingo/config/cardano"
-	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/byron"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/stretchr/testify/require"
+
+	"github.com/blinklabs-io/dingo/config/cardano"
+	"github.com/blinklabs-io/dingo/database"
 )
 
 func TestGenesisUtxoStorageAndRetrieval(t *testing.T) {
@@ -35,7 +36,12 @@ func TestGenesisUtxoStorageAndRetrieval(t *testing.T) {
 	require.NoError(t, err)
 	defer os.RemoveAll(tmpDir)
 
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	logger := slog.New(
+		slog.NewTextHandler(
+			os.Stdout,
+			&slog.HandlerOptions{Level: slog.LevelDebug},
+		),
+	)
 
 	// Create database
 	dbConfig := &database.Config{
@@ -171,7 +177,10 @@ func TestGenesisUtxoStorageAndRetrieval(t *testing.T) {
 
 			// Store the offset
 			offsetData := database.EncodeUtxoOffset(&offset)
-			t.Logf("Storing UTxO offset: %s", hex.EncodeToString(offsetData[:20]))
+			t.Logf(
+				"Storing UTxO offset: %s",
+				hex.EncodeToString(offsetData[:20]),
+			)
 
 			blob := db.Blob()
 			if blob == nil {
@@ -212,8 +221,13 @@ func TestGenesisUtxoStorageAndRetrieval(t *testing.T) {
 			continue
 		}
 
-		t.Logf("Retrieved data for %x#%d: %d bytes, first bytes: %s",
-			txId[:8], outputIdx, len(data), hex.EncodeToString(data[:min(20, len(data))]))
+		t.Logf(
+			"Retrieved data for %x#%d: %d bytes, first bytes: %s",
+			txId[:8],
+			outputIdx,
+			len(data),
+			hex.EncodeToString(data[:min(20, len(data))]),
+		)
 
 		// Check if it's an offset
 		if database.IsUtxoOffsetStorage(data) {
@@ -221,16 +235,35 @@ func TestGenesisUtxoStorageAndRetrieval(t *testing.T) {
 
 			// Decode the offset
 			offset, err := database.DecodeUtxoOffset(data)
-			require.NoError(t, err, "Failed to decode offset for %x#%d", txId[:8], outputIdx)
+			require.NoError(
+				t,
+				err,
+				"Failed to decode offset for %x#%d",
+				txId[:8],
+				outputIdx,
+			)
 
-			t.Logf("Offset: slot=%d, hash=%x, offset=%d, length=%d",
-				offset.BlockSlot, offset.BlockHash[:8], offset.ByteOffset, offset.ByteLength)
+			t.Logf(
+				"Offset: slot=%d, hash=%x, offset=%d, length=%d",
+				offset.BlockSlot,
+				offset.BlockHash[:8],
+				offset.ByteOffset,
+				offset.ByteLength,
+			)
 
 			// Try to get the block
-			blockCbor, _, err := blob.GetBlock(blobTxn, offset.BlockSlot, offset.BlockHash[:])
+			blockCbor, _, err := blob.GetBlock(
+				blobTxn,
+				offset.BlockSlot,
+				offset.BlockHash[:],
+			)
 			if err != nil {
-				t.Errorf("Failed to get block for offset: slot=%d, hash=%x, error=%v",
-					offset.BlockSlot, offset.BlockHash[:8], err)
+				t.Errorf(
+					"Failed to get block for offset: slot=%d, hash=%x, error=%v",
+					offset.BlockSlot,
+					offset.BlockHash[:8],
+					err,
+				)
 				readTxn.Rollback() //nolint:errcheck
 				continue
 			}
@@ -240,8 +273,12 @@ func TestGenesisUtxoStorageAndRetrieval(t *testing.T) {
 			// Extract the UTxO CBOR
 			end := uint64(offset.ByteOffset) + uint64(offset.ByteLength)
 			if end > uint64(len(blockCbor)) {
-				t.Errorf("Offset out of bounds: offset=%d, length=%d, block_size=%d",
-					offset.ByteOffset, offset.ByteLength, len(blockCbor))
+				t.Errorf(
+					"Offset out of bounds: offset=%d, length=%d, block_size=%d",
+					offset.ByteOffset,
+					offset.ByteLength,
+					len(blockCbor),
+				)
 			} else {
 				utxoCbor := blockCbor[offset.ByteOffset:end]
 				t.Logf("Extracted UTxO CBOR: %d bytes, first bytes: %s",

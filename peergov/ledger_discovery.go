@@ -129,6 +129,18 @@ func (p *PeerGovernor) addLedgerPeer(address string) bool {
 		return false
 	}
 
+	// Enforce hard cap on peer list size
+	if p.isAtPeerCapLocked() {
+		p.config.Logger.Debug(
+			"rejecting ledger peer: peer list at capacity",
+			"address", address,
+			"cap", p.maxPeerListSize(),
+			"current", len(p.peers),
+		)
+		p.mu.Unlock()
+		return false
+	}
+
 	// Add as new peer
 	newPeer := &Peer{
 		Address:           address,

@@ -20,6 +20,7 @@ import (
 	"log/slog"
 	"math"
 
+	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
@@ -60,6 +61,15 @@ type EpochNonceProvider interface {
 	EpochNonce(epoch uint64) []byte
 }
 
+// TxValidator re-validates a transaction against the current ledger
+// state at block assembly time. This catches transactions whose
+// inputs have been consumed since they entered the mempool, protocol
+// parameter changes, or other state mutations that invalidate
+// previously-accepted transactions.
+type TxValidator interface {
+	ValidateTx(tx ledger.Transaction) error
+}
+
 // DefaultBlockBuilder implements BlockBuilder using LedgerState components.
 type DefaultBlockBuilder struct {
 	logger          *slog.Logger
@@ -68,6 +78,7 @@ type DefaultBlockBuilder struct {
 	chainTip        ChainTipProvider
 	epochNonce      EpochNonceProvider
 	creds           *PoolCredentials
+	txValidator     TxValidator
 }
 
 // BlockBuilderConfig holds configuration for the DefaultBlockBuilder.
@@ -78,6 +89,11 @@ type BlockBuilderConfig struct {
 	ChainTip        ChainTipProvider
 	EpochNonce      EpochNonceProvider
 	Credentials     *PoolCredentials
+	// TxValidator optionally re-validates each transaction against
+	// the current ledger state before including it in a block.
+	// When nil, ledger-level re-validation is skipped (but
+	// intra-block double-spend detection still applies).
+	TxValidator TxValidator
 }
 
 // NewDefaultBlockBuilder creates a new DefaultBlockBuilder.
@@ -108,6 +124,7 @@ func NewDefaultBlockBuilder(cfg BlockBuilderConfig) (*DefaultBlockBuilder, error
 		chainTip:        cfg.ChainTip,
 		epochNonce:      cfg.EpochNonce,
 		creds:           cfg.Credentials,
+		txValidator:     cfg.TxValidator,
 	}, nil
 }
 
@@ -165,6 +182,11 @@ func (b *DefaultBlockBuilder) BuildBlock(
 		"tx_count", len(mempoolTxs),
 	)
 
+	// Track UTxO inputs consumed by transactions already selected
+	// for this block. This detects intra-block double-spends where
+	// two mempool transactions attempt to spend the same UTxO.
+	consumedInputs := make(map[string]struct{})
+
 	// Iterate through transactions and add them until we hit limits
 	for _, mempoolTx := range mempoolTxs {
 		// Use raw CBOR from the mempool transaction
@@ -205,21 +227,81 @@ func (b *DefaultBlockBuilder) BuildBlock(
 			continue
 		}
 
-		// Pull ExUnits from redeemers in the witness set
-		var txMemory, txSteps int64
-		for _, redeemer := range fullTx.WitnessSet.Redeemers().Iter() {
-			txMemory += redeemer.ExUnits.Memory
-			txSteps += redeemer.ExUnits.Steps
+		// Re-validate the transaction against the current ledger
+		// state. Between mempool admission and block assembly,
+		// UTxOs may have been consumed, protocol parameters may
+		// have changed, or other state mutations may have
+		// invalidated the transaction.
+		if b.txValidator != nil {
+			if err := b.txValidator.ValidateTx(fullTx); err != nil {
+				b.logger.Debug(
+					"skipping transaction - failed re-validation",
+					"component", "forging",
+					"tx_hash", mempoolTx.Hash,
+					"error", err,
+				)
+				continue
+			}
 		}
-		estimatedTxExUnits := lcommon.ExUnits{
-			Memory: txMemory,
-			Steps:  txSteps,
+
+		// Check for intra-block double-spends: if any input of
+		// this transaction was already consumed by an earlier
+		// transaction in this block candidate, skip it.
+		txInputKeys := make([]string, 0, len(fullTx.Inputs()))
+		doubleSpend := false
+		for _, input := range fullTx.Inputs() {
+			key := fmt.Sprintf(
+				"%s:%d",
+				input.Id().String(),
+				input.Index(),
+			)
+			if _, exists := consumedInputs[key]; exists {
+				b.logger.Debug(
+					"skipping transaction - double-spend within block",
+					"component", "forging",
+					"tx_hash", mempoolTx.Hash,
+					"conflicting_input", key,
+				)
+				doubleSpend = true
+				break
+			}
+			txInputKeys = append(txInputKeys, key)
+		}
+		if doubleSpend {
+			continue
+		}
+
+		// Pull ExUnits from redeemers in the witness set
+		var estimatedTxExUnits lcommon.ExUnits
+		var exUnitsErr error
+		for _, redeemer := range fullTx.WitnessSet.Redeemers().Iter() {
+			estimatedTxExUnits, exUnitsErr = eras.SafeAddExUnits(
+				estimatedTxExUnits,
+				redeemer.ExUnits,
+			)
+			if exUnitsErr != nil {
+				b.logger.Debug(
+					"skipping transaction - ExUnits overflow",
+					"component", "forging",
+					"error", exUnitsErr,
+				)
+				break
+			}
+		}
+		if exUnitsErr != nil {
+			continue
 		}
 
 		// Check MaxExUnits limit - skip this tx but continue trying
-		// smaller ones, matching the MaxTxSize behavior above
-		if totalExUnits.Memory+estimatedTxExUnits.Memory > maxExUnits.Memory ||
-			totalExUnits.Steps+estimatedTxExUnits.Steps > maxExUnits.Steps {
+		// smaller ones, matching the MaxTxSize behavior above.
+		// Use SafeAddExUnits to avoid overflow in the comparison.
+		candidateExUnits, addErr := eras.SafeAddExUnits(
+			totalExUnits,
+			estimatedTxExUnits,
+		)
+		if addErr != nil ||
+			candidateExUnits.Memory > maxExUnits.Memory ||
+			candidateExUnits.Steps > maxExUnits.Steps {
 			b.logger.Debug(
 				"tx exceeds remaining ex units budget, skipping",
 				"component", "forging",
@@ -265,8 +347,16 @@ func (b *DefaultBlockBuilder) BuildBlock(
 			transactionMetadataSet[uint(len(transactionBodies))-1] = metadataCbor
 		}
 		blockSize += txSize
-		totalExUnits.Memory += estimatedTxExUnits.Memory
-		totalExUnits.Steps += estimatedTxExUnits.Steps
+		// Safe to assign: overflow was already checked
+		// via SafeAddExUnits when computing
+		// candidateExUnits above.
+		totalExUnits = candidateExUnits
+
+		// Record consumed inputs so later transactions in this
+		// block cannot spend the same UTxOs.
+		for _, key := range txInputKeys {
+			consumedInputs[key] = struct{}{}
+		}
 
 		b.logger.Debug(
 			"added transaction to block candidate lists",

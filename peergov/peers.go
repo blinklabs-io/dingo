@@ -15,6 +15,7 @@
 package peergov
 
 import (
+	"errors"
 	"net"
 	"strings"
 	"time"
@@ -22,6 +23,27 @@ import (
 	"github.com/blinklabs-io/dingo/event"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 )
+
+// defaultMinPeerListCap is the minimum hard cap for the peer list size,
+// used when 2 * TargetNumberOfKnownPeers is smaller.
+const defaultMinPeerListCap = 200
+
+// ErrPeerListFull is returned when a non-topology peer is rejected because
+// the peer list has reached its hard capacity limit.
+var ErrPeerListFull = errors.New("peer list at capacity")
+
+// maxPeerListSize returns the hard cap for the total number of peers.
+// This prevents unbounded growth between reconciliation cycles.
+// The cap is max(2 * TargetNumberOfKnownPeers, defaultMinPeerListCap).
+func (p *PeerGovernor) maxPeerListSize() int {
+	return max(2*p.config.TargetNumberOfKnownPeers, defaultMinPeerListCap)
+}
+
+// isAtPeerCapLocked returns true if the peer list has reached the hard cap.
+// Must be called with p.mu held.
+func (p *PeerGovernor) isAtPeerCapLocked() bool {
+	return len(p.peers) >= p.maxPeerListSize()
+}
 
 func (p *PeerGovernor) GetPeers() []Peer {
 	p.mu.Lock()
@@ -35,7 +57,10 @@ func (p *PeerGovernor) GetPeers() []Peer {
 	return ret
 }
 
-func (p *PeerGovernor) AddPeer(address string, source PeerSource) {
+func (p *PeerGovernor) AddPeer(
+	address string,
+	source PeerSource,
+) error {
 	// Resolve address before acquiring lock to avoid blocking DNS
 	normalized := p.resolveAddress(address)
 	var evt *pendingEvent
@@ -48,14 +73,28 @@ func (p *PeerGovernor) AddPeer(address string, source PeerSource) {
 			"address", address,
 		)
 		p.mu.Unlock()
-		return
+		return nil
 	}
 	// Check if already exists (use normalized address for deduplication)
 	for _, peer := range p.peers {
 		if peer != nil && peer.NormalizedAddress == normalized {
 			p.mu.Unlock()
-			return
+			return nil
 		}
+	}
+	// Enforce hard cap on peer list size to prevent unbounded growth
+	// between reconciliation cycles. Topology peers (operator-configured)
+	// are always accepted regardless of the cap.
+	if p.isAtPeerCapLocked() && !p.isTopologyPeer(source) {
+		p.config.Logger.Debug(
+			"rejecting peer: peer list at capacity",
+			"address", address,
+			"source", source,
+			"cap", p.maxPeerListSize(),
+			"current", len(p.peers),
+		)
+		p.mu.Unlock()
+		return ErrPeerListFull
 	}
 	newPeer := &Peer{
 		Address:           address,
@@ -93,6 +132,7 @@ func (p *PeerGovernor) AddPeer(address string, source PeerSource) {
 
 	// Publish event outside of lock to avoid deadlock
 	p.publishEvent(evt.eventType, evt.data)
+	return nil
 }
 
 // normalizeAddress normalizes an address for deduplication without blocking DNS.

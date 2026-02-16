@@ -149,6 +149,12 @@ var ErrPartialCommit = errors.New(
 	"partial commit: blob committed but metadata failed",
 )
 
+// ErrUtxoConflict is returned when a UTxO spend fails because the UTxO
+// was already consumed by another transaction or restored by a rollback.
+// This sentinel error allows callers to distinguish optimistic locking
+// conflicts from other errors and retry or reject accordingly.
+var ErrUtxoConflict = errors.New("UTxO already spent")
+
 // BlobItem represents a value returned by an iterator
 type BlobItem interface {
 	Key() []byte

@@ -18,6 +18,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math/big"
 	"time"
 
 	"github.com/blinklabs-io/dingo/database"
@@ -138,9 +139,13 @@ func (lv *LedgerView) PoolCurrentState(
 	if len(pool.Registration) > 0 {
 		var latestIdx int
 		var latestSlot uint64
+		var latestCertID uint
 		for i, reg := range pool.Registration {
-			if reg.AddedSlot >= latestSlot {
+			// Use CertificateID for deterministic disambiguation when slots are equal
+			if reg.AddedSlot > latestSlot ||
+				(reg.AddedSlot == latestSlot && reg.CertificateID > latestCertID) {
 				latestSlot = reg.AddedSlot
+				latestCertID = reg.CertificateID
 				latestIdx = i
 			}
 		}
@@ -162,13 +167,13 @@ func (lv *LedgerView) PoolCurrentState(
 		tmp.RewardAccount = lcommon.AddrKeyHash(
 			lcommon.NewBlake2b224(pool.RewardAccount),
 		)
-		for _, owner := range pool.Owners {
+		for _, owner := range reg.Owners {
 			tmp.PoolOwners = append(
 				tmp.PoolOwners,
 				lcommon.AddrKeyHash(lcommon.NewBlake2b224(owner.KeyHash)),
 			)
 		}
-		for _, relay := range pool.Relays {
+		for _, relay := range reg.Relays {
 			r := lcommon.PoolRelay{}
 			if relay.Port != 0 {
 				port := uint32(relay.Port) // #nosec G115
@@ -621,4 +626,98 @@ func (lv *LedgerView) GetTotalActiveStake(epoch uint64) (uint64, error) {
 		"go",
 		(*lv.txn).Metadata(),
 	)
+}
+
+// GetDRepVotingPower returns the voting power for a DRep by summing the
+// stake of all accounts delegated to it. Uses the current live UTxO set.
+//
+// TODO: Accept an epoch parameter and use epoch-based stake snapshots
+// for accurate voting power. The current implementation approximates
+// voting power using the live UTxO set.
+func (lv *LedgerView) GetDRepVotingPower(
+	drepCredential []byte,
+) (uint64, error) {
+	power, err := lv.ls.db.GetDRepVotingPower(drepCredential, lv.txn)
+	if err != nil {
+		return 0, fmt.Errorf("get drep voting power: %w", err)
+	}
+	return power, nil
+}
+
+// GetExpiredDReps returns all active DReps whose expiry epoch is at or
+// before the given epoch.
+func (lv *LedgerView) GetExpiredDReps(
+	epoch uint64,
+) ([]*models.Drep, error) {
+	dreps, err := lv.ls.db.GetExpiredDReps(epoch, lv.txn)
+	if err != nil {
+		return nil, fmt.Errorf("get expired dreps: %w", err)
+	}
+	return dreps, nil
+}
+
+// GetCommitteeActiveCount returns the number of active (non-resigned)
+// committee members.
+func (lv *LedgerView) GetCommitteeActiveCount() (int, error) {
+	count, err := lv.ls.db.GetCommitteeActiveCount(lv.txn)
+	if err != nil {
+		return 0, fmt.Errorf("get committee active count: %w", err)
+	}
+	return count, nil
+}
+
+// IsCommitteeThresholdMet checks whether a committee vote threshold is met.
+// Returns true if yesVotes / totalActiveMembers >= threshold.
+//
+// Edge cases per CIP-1694:
+//   - If yesVotes or totalActiveMembers is negative, returns false
+//   - If totalActiveMembers is 0, the threshold is trivially met (no committee
+//     means no committee can block)
+//   - If threshold numerator is 0, any vote count satisfies it
+//   - If threshold denominator is 0, this is treated as an error condition
+//     and returns false
+func IsCommitteeThresholdMet(
+	yesVotes int,
+	totalActiveMembers int,
+	thresholdNumerator uint64,
+	thresholdDenominator uint64,
+) bool {
+	// Guard against negative inputs
+	if yesVotes < 0 || totalActiveMembers < 0 {
+		return false
+	}
+
+	// No active committee members means the threshold is trivially met.
+	// Per CIP-1694, if the committee is in a no-confidence state (empty),
+	// committee votes are not required.
+	if totalActiveMembers == 0 {
+		return true
+	}
+
+	// Zero threshold is always satisfied
+	if thresholdNumerator == 0 {
+		return true
+	}
+
+	// Invalid threshold (zero denominator) - treat as not met
+	if thresholdDenominator == 0 {
+		return false
+	}
+
+	// Use cross-multiplication to avoid floating point:
+	// yesVotes / totalActiveMembers >= numerator / denominator
+	// is equivalent to:
+	// yesVotes * denominator >= numerator * totalActiveMembers
+	//
+	// Use math/big.Int to avoid uint64 overflow on large values.
+	lhs := new(big.Int).Mul(
+		big.NewInt(int64(yesVotes)),
+		new(big.Int).SetUint64(thresholdDenominator),
+	)
+	rhs := new(big.Int).Mul(
+		new(big.Int).SetUint64(thresholdNumerator),
+		big.NewInt(int64(totalActiveMembers)),
+	)
+
+	return lhs.Cmp(rhs) >= 0
 }

@@ -140,7 +140,13 @@ func TestScheduleStakeRatio(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			schedule := NewSchedule(10, poolId, tt.poolStake, tt.totalStake, nil)
+			schedule := NewSchedule(
+				10,
+				poolId,
+				tt.poolStake,
+				tt.totalStake,
+				nil,
+			)
 			assert.InDelta(t, tt.expected, schedule.StakeRatio(), 0.0001)
 		})
 	}
@@ -211,11 +217,11 @@ func TestCalculateScheduleZeroTotalStake(t *testing.T) {
 	poolId := lcommon.PoolKeyHash{}
 
 	_, err := calc.CalculateSchedule(
-		10,            // epoch
-		poolId,        // pool ID
-		testVRFSeed,   // VRF key
-		1000,          // pool stake
-		0,             // zero total stake
+		10,             // epoch
+		poolId,         // pool ID
+		testVRFSeed,    // VRF key
+		1000,           // pool stake
+		0,              // zero total stake
 		testEpochNonce, // epoch nonce
 	)
 
@@ -232,12 +238,12 @@ func TestCalculateSchedulePoolWithStakeGetsSlots(t *testing.T) {
 	copy(poolId[:], []byte("testpool1234567890123"))
 
 	schedule, err := calc.CalculateSchedule(
-		5,               // epoch
-		poolId,          // pool ID
-		testVRFSeed,     // VRF key (32-byte seed)
-		1_000_000,       // pool stake = 100% of total
-		1_000_000,       // total stake
-		testEpochNonce,  // epoch nonce (32 bytes)
+		5,              // epoch
+		poolId,         // pool ID
+		testVRFSeed,    // VRF key (32-byte seed)
+		1_000_000,      // pool stake = 100% of total
+		1_000_000,      // total stake
+		testEpochNonce, // epoch nonce (32 bytes)
 	)
 
 	require.NoError(t, err)
@@ -285,12 +291,12 @@ func TestCalculateScheduleFullStakeApproxRate(t *testing.T) {
 	copy(poolId[:], []byte("testpool1234567890123"))
 
 	schedule, err := calc.CalculateSchedule(
-		3,               // epoch
-		poolId,          // pool ID
-		testVRFSeed,     // VRF key
-		10_000_000,      // pool stake = 100% of total
-		10_000_000,      // total stake
-		testEpochNonce,  // epoch nonce
+		3,              // epoch
+		poolId,         // pool ID
+		testVRFSeed,    // VRF key
+		10_000_000,     // pool stake = 100% of total
+		10_000_000,     // total stake
+		testEpochNonce, // epoch nonce
 	)
 
 	require.NoError(t, err)

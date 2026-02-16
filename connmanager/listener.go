@@ -173,6 +173,21 @@ func (c *ConnectionManager) startListener(
 			}
 			// Successful accept - reset consecutive error count
 			consecutiveErrors = 0
+			// Atomically check and reserve an inbound slot before any further processing
+			if !c.tryReserveInboundSlot() {
+				c.config.Logger.Warn(
+					fmt.Sprintf(
+						"listener: inbound connection limit reached (%d), rejecting connection from %s",
+						c.config.MaxInboundConns,
+						conn.RemoteAddr(),
+					),
+				)
+				conn.Close()
+				continue
+			}
+			// From here on, we hold a reserved inbound slot.
+			// If setup fails, we must release it.
+
 			// Wrap UNIX connections
 			if uConn, ok := conn.(*net.UnixConn); ok {
 				tmpConn, err := NewUnixConn(uConn)
@@ -181,9 +196,25 @@ func (c *ConnectionManager) startListener(
 						fmt.Sprintf("listener: accept failed: %s", err),
 					)
 					_ = conn.Close()
+					c.releaseInboundSlot()
 					continue
 				}
 				conn = tmpConn
+			}
+			// Per-IP rate limiting: reject if this IP has too many
+			// connections already
+			ipKey := ipKeyFromAddr(conn.RemoteAddr())
+			if !c.acquireIPSlot(ipKey) {
+				c.config.Logger.Warn(
+					fmt.Sprintf(
+						"listener: rejected connection from %s: per-IP limit (%d) reached",
+						conn.RemoteAddr(),
+						c.config.MaxConnectionsPerIP,
+					),
+				)
+				conn.Close()
+				c.releaseInboundSlot()
+				continue
 			}
 			c.config.Logger.Info(
 				fmt.Sprintf(
@@ -204,15 +235,21 @@ func (c *ConnectionManager) startListener(
 						err,
 					),
 				)
+				// Release the IP slot since the connection failed
+				c.releaseIPSlot(ipKey)
 				conn.Close()
+				c.releaseInboundSlot()
 				continue
 			}
-			// Add to connection manager
+			// Consume the reserved slot and add to connection manager.
+			// The reservation is released because AddConnection will
+			// add the actual connection entry to the map.
+			c.consumeInboundSlot()
 			peerAddr := "unknown"
 			if conn.RemoteAddr() != nil {
 				peerAddr = conn.RemoteAddr().String()
 			}
-			c.AddConnection(oConn, true, peerAddr)
+			c.addConnectionWithIPKey(oConn, true, peerAddr, ipKey)
 			// Generate event
 			if c.config.EventBus != nil {
 				c.config.EventBus.Publish(

@@ -30,32 +30,44 @@ func TestCompareVRFOutputs(t *testing.T) {
 		expected ChainComparisonResult
 	}{
 		{
-			name:     "vrfA lower - A wins",
-			vrfA:     []byte{0x00, 0x00, 0x00, 0x01},
-			vrfB:     []byte{0x00, 0x00, 0x00, 0x02},
+			name:     "full 64-byte VRF - A lower wins",
+			vrfA:     make64ByteVRF(0x00),
+			vrfB:     make64ByteVRF(0x01),
 			expected: ChainABetter,
 		},
 		{
-			name:     "vrfB lower - B wins",
-			vrfA:     []byte{0x00, 0x00, 0x00, 0x02},
-			vrfB:     []byte{0x00, 0x00, 0x00, 0x01},
+			name:     "full 64-byte VRF - B lower wins",
+			vrfA:     make64ByteVRF(0x01),
+			vrfB:     make64ByteVRF(0x00),
 			expected: ChainBBetter,
 		},
 		{
-			name:     "equal VRF outputs",
-			vrfA:     []byte{0x01, 0x02, 0x03, 0x04},
-			vrfB:     []byte{0x01, 0x02, 0x03, 0x04},
+			name:     "full 64-byte VRF - equal",
+			vrfA:     make64ByteVRF(0x50),
+			vrfB:     make64ByteVRF(0x50),
 			expected: ChainEqual,
+		},
+		{
+			name:     "64-byte VRF first byte different - A lower wins",
+			vrfA:     make64ByteVRFFirstByte(0x00),
+			vrfB:     make64ByteVRFFirstByte(0xFF),
+			expected: ChainABetter,
+		},
+		{
+			name:     "64-byte VRF first byte different - B lower wins",
+			vrfA:     make64ByteVRFFirstByte(0xFF),
+			vrfB:     make64ByteVRFFirstByte(0x00),
+			expected: ChainBBetter,
 		},
 		{
 			name:     "vrfA nil - equal",
 			vrfA:     nil,
-			vrfB:     []byte{0x01, 0x02, 0x03, 0x04},
+			vrfB:     make64ByteVRF(0x01),
 			expected: ChainEqual,
 		},
 		{
 			name:     "vrfB nil - equal",
-			vrfA:     []byte{0x01, 0x02, 0x03, 0x04},
+			vrfA:     make64ByteVRF(0x01),
 			vrfB:     nil,
 			expected: ChainEqual,
 		},
@@ -64,30 +76,6 @@ func TestCompareVRFOutputs(t *testing.T) {
 			vrfA:     nil,
 			vrfB:     nil,
 			expected: ChainEqual,
-		},
-		{
-			name:     "first byte different - A lower wins",
-			vrfA:     []byte{0x00, 0xFF, 0xFF, 0xFF},
-			vrfB:     []byte{0xFF, 0x00, 0x00, 0x00},
-			expected: ChainABetter,
-		},
-		{
-			name:     "first byte different - B lower wins",
-			vrfA:     []byte{0xFF, 0x00, 0x00, 0x00},
-			vrfB:     []byte{0x00, 0xFF, 0xFF, 0xFF},
-			expected: ChainBBetter,
-		},
-		{
-			name:     "full 64-byte VRF - A lower",
-			vrfA:     make64ByteVRF(0x00),
-			vrfB:     make64ByteVRF(0x01),
-			expected: ChainABetter,
-		},
-		{
-			name:     "full 64-byte VRF - B lower",
-			vrfA:     make64ByteVRF(0x01),
-			vrfB:     make64ByteVRF(0x00),
-			expected: ChainBBetter,
 		},
 	}
 
@@ -275,11 +263,83 @@ func TestIsBetterChainWithVRF(t *testing.T) {
 	))
 }
 
+func TestCompareVRFOutputs_InvalidLength(t *testing.T) {
+	testCases := []struct {
+		name     string
+		vrfA     []byte
+		vrfB     []byte
+		expected ChainComparisonResult
+	}{
+		{
+			name:     "short vrfA should not win despite lower value",
+			vrfA:     []byte{0x00},
+			vrfB:     make64ByteVRF(0x01),
+			expected: ChainEqual,
+		},
+		{
+			name:     "short vrfB should not win despite lower value",
+			vrfA:     make64ByteVRF(0x01),
+			vrfB:     []byte{0x00},
+			expected: ChainEqual,
+		},
+		{
+			name:     "both short - equal",
+			vrfA:     []byte{0x00, 0x00, 0x00, 0x01},
+			vrfB:     []byte{0x00, 0x00, 0x00, 0x02},
+			expected: ChainEqual,
+		},
+		{
+			name:     "empty vrfA - equal",
+			vrfA:     []byte{},
+			vrfB:     make64ByteVRF(0x01),
+			expected: ChainEqual,
+		},
+		{
+			name:     "empty vrfB - equal",
+			vrfA:     make64ByteVRF(0x01),
+			vrfB:     []byte{},
+			expected: ChainEqual,
+		},
+		{
+			name:     "both empty - equal",
+			vrfA:     []byte{},
+			vrfB:     []byte{},
+			expected: ChainEqual,
+		},
+		{
+			name:     "oversized vrfA - equal",
+			vrfA:     make([]byte, VRFOutputSize+1),
+			vrfB:     make64ByteVRF(0xFF),
+			expected: ChainEqual,
+		},
+		{
+			name:     "oversized vrfB - equal",
+			vrfA:     make64ByteVRF(0xFF),
+			vrfB:     make([]byte, VRFOutputSize+1),
+			expected: ChainEqual,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			result := CompareVRFOutputs(tc.vrfA, tc.vrfB)
+			assert.Equal(t, tc.expected, result)
+		})
+	}
+}
+
 // Helper function to create a 64-byte VRF output filled with a specific value
 func make64ByteVRF(fill byte) []byte {
 	vrf := make([]byte, VRFOutputSize)
 	for i := range vrf {
 		vrf[i] = fill
 	}
+	return vrf
+}
+
+// Helper to create a 64-byte VRF with only the first byte set, rest zeros
+func make64ByteVRFFirstByte(first byte) []byte {
+	vrf := make([]byte, VRFOutputSize)
+	vrf[0] = first
 	return vrf
 }

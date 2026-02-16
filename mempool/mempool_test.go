@@ -26,7 +26,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/blinklabs-io/dingo/event"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
@@ -34,6 +33,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/blinklabs-io/dingo/event"
 )
 
 // =============================================================================
@@ -1985,4 +1986,567 @@ func TestMempool_RemoveTransaction_ConsumerIndexAdjustment(t *testing.T) {
 	// No more transactions
 	tx = consumer.NextTx(false)
 	assert.Nil(t, tx)
+}
+
+// =============================================================================
+// TTL/Expiry Tests
+// =============================================================================
+
+// newTestMempoolWithTTL creates a mempool with short TTL/cleanup
+// intervals for testing expiry behavior.
+func newTestMempoolWithTTL(
+	t *testing.T,
+	ttl time.Duration,
+	cleanupInterval time.Duration,
+) *Mempool {
+	t.Helper()
+	return NewMempool(MempoolConfig{
+		Logger: slog.New(
+			slog.NewJSONHandler(io.Discard, nil),
+		),
+		EventBus:        event.NewEventBus(nil, nil),
+		PromRegistry:    prometheus.NewRegistry(),
+		Validator:       newMockValidator(),
+		MempoolCapacity: 1024 * 1024,
+		TransactionTTL:  ttl,
+		CleanupInterval: cleanupInterval,
+	})
+}
+
+func TestMempool_TTL_ExpiredTransactionsRemoved(t *testing.T) {
+	// Use a very short TTL and cleanup interval so the test
+	// completes quickly.
+	m := newTestMempoolWithTTL(t, 50*time.Millisecond, 20*time.Millisecond)
+	defer m.Stop(context.Background())
+
+	// Add transactions with LastSeen in the past (already expired)
+	m.Lock()
+	m.consumersMutex.Lock()
+	for i := range 3 {
+		tx := &MempoolTransaction{
+			Hash:     fmt.Sprintf("expired-tx-%d", i),
+			Cbor:     fmt.Appendf(nil, "cbor-%d", i),
+			Type:     uint(conway.EraIdConway),
+			LastSeen: time.Now().Add(-100 * time.Millisecond), // already expired
+		}
+		m.transactions = append(m.transactions, tx)
+		m.txByHash[tx.Hash] = tx
+		m.currentSizeBytes += int64(len(tx.Cbor))
+		m.metrics.txsInMempool.Inc()
+		m.metrics.mempoolBytes.Add(float64(len(tx.Cbor)))
+	}
+	m.consumersMutex.Unlock()
+	m.Unlock()
+
+	// Verify transactions were added
+	m.RLock()
+	require.Equal(t, 3, len(m.transactions), "should start with 3 TXs")
+	m.RUnlock()
+
+	// Wait for the cleanup goroutine to expire the transactions
+	require.Eventually(t, func() bool {
+		m.RLock()
+		defer m.RUnlock()
+		return len(m.transactions) == 0
+	}, 2*time.Second, 10*time.Millisecond,
+		"expired transactions should be removed",
+	)
+
+	// Verify hash map is also cleaned up
+	m.RLock()
+	assert.Equal(
+		t, 0, len(m.txByHash),
+		"hash map should be empty",
+	)
+	assert.Equal(
+		t, int64(0), m.currentSizeBytes,
+		"current size should be 0",
+	)
+	m.RUnlock()
+}
+
+func TestMempool_TTL_NonExpiredTransactionsRetained(t *testing.T) {
+	m := newTestMempoolWithTTL(t, 5*time.Second, 20*time.Millisecond)
+	defer m.Stop(context.Background())
+
+	// Add fresh transactions (not expired)
+	m.Lock()
+	m.consumersMutex.Lock()
+	for i := range 3 {
+		tx := &MempoolTransaction{
+			Hash:     fmt.Sprintf("fresh-tx-%d", i),
+			Cbor:     fmt.Appendf(nil, "cbor-%d", i),
+			Type:     uint(conway.EraIdConway),
+			LastSeen: time.Now(), // fresh
+		}
+		m.transactions = append(m.transactions, tx)
+		m.txByHash[tx.Hash] = tx
+		m.currentSizeBytes += int64(len(tx.Cbor))
+		m.metrics.txsInMempool.Inc()
+	}
+	m.consumersMutex.Unlock()
+	m.Unlock()
+
+	// Wait for a few cleanup cycles to run
+	time.Sleep(100 * time.Millisecond)
+
+	// Verify transactions are still present
+	m.RLock()
+	assert.Equal(
+		t, 3, len(m.transactions),
+		"fresh transactions should not be removed",
+	)
+	m.RUnlock()
+}
+
+func TestMempool_TTL_MixedExpiryRetainsNonExpired(t *testing.T) {
+	m := newTestMempoolWithTTL(t, 50*time.Millisecond, 20*time.Millisecond)
+	defer m.Stop(context.Background())
+
+	// Add a mix of expired and fresh transactions
+	m.Lock()
+	m.consumersMutex.Lock()
+	// Expired transactions
+	for i := range 2 {
+		tx := &MempoolTransaction{
+			Hash:     fmt.Sprintf("old-tx-%d", i),
+			Cbor:     fmt.Appendf(nil, "old-cbor-%d", i),
+			Type:     uint(conway.EraIdConway),
+			LastSeen: time.Now().Add(-200 * time.Millisecond),
+		}
+		m.transactions = append(m.transactions, tx)
+		m.txByHash[tx.Hash] = tx
+		m.currentSizeBytes += int64(len(tx.Cbor))
+		m.metrics.txsInMempool.Inc()
+		m.metrics.mempoolBytes.Add(float64(len(tx.Cbor)))
+	}
+	// Fresh transactions
+	for i := range 2 {
+		tx := &MempoolTransaction{
+			Hash:     fmt.Sprintf("new-tx-%d", i),
+			Cbor:     fmt.Appendf(nil, "new-cbor-%d", i),
+			Type:     uint(conway.EraIdConway),
+			LastSeen: time.Now(),
+		}
+		m.transactions = append(m.transactions, tx)
+		m.txByHash[tx.Hash] = tx
+		m.currentSizeBytes += int64(len(tx.Cbor))
+		m.metrics.txsInMempool.Inc()
+		m.metrics.mempoolBytes.Add(float64(len(tx.Cbor)))
+	}
+	m.consumersMutex.Unlock()
+	m.Unlock()
+
+	// Wait for cleanup to remove only expired transactions
+	require.Eventually(t, func() bool {
+		m.RLock()
+		defer m.RUnlock()
+		return len(m.transactions) == 2
+	}, 2*time.Second, 10*time.Millisecond,
+		"only expired transactions should be removed",
+	)
+
+	// Verify only fresh transactions remain
+	m.RLock()
+	for _, tx := range m.transactions {
+		assert.Contains(
+			t, tx.Hash, "new-tx-",
+			"only fresh transactions should remain",
+		)
+	}
+	m.RUnlock()
+}
+
+func TestMempool_TTL_CleanupStopsOnShutdown(t *testing.T) {
+	m := newTestMempoolWithTTL(t, 50*time.Millisecond, 20*time.Millisecond)
+
+	// Add expired transactions
+	m.Lock()
+	m.consumersMutex.Lock()
+	for i := range 3 {
+		tx := &MempoolTransaction{
+			Hash:     fmt.Sprintf("shutdown-tx-%d", i),
+			Cbor:     fmt.Appendf(nil, "cbor-%d", i),
+			Type:     uint(conway.EraIdConway),
+			LastSeen: time.Now().Add(-200 * time.Millisecond),
+		}
+		m.transactions = append(m.transactions, tx)
+		m.txByHash[tx.Hash] = tx
+		m.currentSizeBytes += int64(len(tx.Cbor))
+		m.metrics.txsInMempool.Inc()
+	}
+	m.consumersMutex.Unlock()
+	m.Unlock()
+
+	// Stop the mempool immediately (before cleanup can run)
+	err := m.Stop(context.Background())
+	require.NoError(t, err)
+
+	// Verify Stop cleared everything cleanly
+	m.RLock()
+	assert.Equal(
+		t, 0, len(m.transactions),
+		"Stop should clear all transactions",
+	)
+	m.RUnlock()
+
+	// The goroutine should exit cleanly (no panic, no leak).
+	// If it didn't, the race detector or leak checker would flag it.
+}
+
+func TestMempool_TTL_ExpiredMetricUpdated(t *testing.T) {
+	m := newTestMempoolWithTTL(t, 50*time.Millisecond, 20*time.Millisecond)
+	defer m.Stop(context.Background())
+
+	// Initial expired counter should be 0
+	expiredBefore := testutil.ToFloat64(m.metrics.txsExpired)
+	assert.Equal(
+		t, float64(0), expiredBefore,
+		"expired counter should start at 0",
+	)
+
+	// Add expired transactions
+	m.Lock()
+	m.consumersMutex.Lock()
+	for i := range 5 {
+		tx := &MempoolTransaction{
+			Hash:     fmt.Sprintf("metric-tx-%d", i),
+			Cbor:     fmt.Appendf(nil, "cbor-%d", i),
+			Type:     uint(conway.EraIdConway),
+			LastSeen: time.Now().Add(-200 * time.Millisecond),
+		}
+		m.transactions = append(m.transactions, tx)
+		m.txByHash[tx.Hash] = tx
+		m.currentSizeBytes += int64(len(tx.Cbor))
+		m.metrics.txsInMempool.Inc()
+		m.metrics.mempoolBytes.Add(float64(len(tx.Cbor)))
+	}
+	m.consumersMutex.Unlock()
+	m.Unlock()
+
+	// Wait for cleanup to remove all expired transactions
+	require.Eventually(t, func() bool {
+		m.RLock()
+		defer m.RUnlock()
+		return len(m.transactions) == 0
+	}, 2*time.Second, 10*time.Millisecond,
+		"all expired transactions should be removed",
+	)
+
+	// Verify the expired counter was incremented
+	expiredAfter := testutil.ToFloat64(m.metrics.txsExpired)
+	assert.Equal(
+		t, float64(5), expiredAfter,
+		"expired counter should be 5",
+	)
+}
+
+func TestMempool_TTL_ConsumerIndexAdjustedOnExpiry(t *testing.T) {
+	m := newTestMempoolWithTTL(t, 50*time.Millisecond, 20*time.Millisecond)
+	defer m.Stop(context.Background())
+
+	// Add a mix of expired and fresh transactions
+	m.Lock()
+	m.consumersMutex.Lock()
+	// 2 expired
+	for i := range 2 {
+		tx := &MempoolTransaction{
+			Hash:     fmt.Sprintf("expired-%d", i),
+			Cbor:     fmt.Appendf(nil, "expired-cbor-%d", i),
+			Type:     uint(conway.EraIdConway),
+			LastSeen: time.Now().Add(-200 * time.Millisecond),
+		}
+		m.transactions = append(m.transactions, tx)
+		m.txByHash[tx.Hash] = tx
+		m.currentSizeBytes += int64(len(tx.Cbor))
+		m.metrics.txsInMempool.Inc()
+	}
+	// 3 fresh
+	for i := range 3 {
+		tx := &MempoolTransaction{
+			Hash:     fmt.Sprintf("fresh-%d", i),
+			Cbor:     fmt.Appendf(nil, "fresh-cbor-%d", i),
+			Type:     uint(conway.EraIdConway),
+			LastSeen: time.Now(),
+		}
+		m.transactions = append(m.transactions, tx)
+		m.txByHash[tx.Hash] = tx
+		m.currentSizeBytes += int64(len(tx.Cbor))
+		m.metrics.txsInMempool.Inc()
+	}
+	m.consumersMutex.Unlock()
+	m.Unlock()
+
+	// Create a consumer and read some transactions
+	connId := newTestConnectionId(0)
+	consumer := m.AddConsumer(connId)
+	require.NotNil(t, consumer)
+
+	// Consumer reads 3 transactions (nextTxIdx=3)
+	for range 3 {
+		tx := consumer.NextTx(false)
+		require.NotNil(t, tx)
+	}
+
+	// Wait for cleanup to remove expired transactions
+	require.Eventually(t, func() bool {
+		m.RLock()
+		defer m.RUnlock()
+		return len(m.transactions) == 3
+	}, 2*time.Second, 10*time.Millisecond,
+		"expired transactions should be removed",
+	)
+
+	// Consumer should still be able to read remaining
+	// fresh transactions without skipping or panicking
+	remaining := 0
+	for {
+		tx := consumer.NextTx(false)
+		if tx == nil {
+			break
+		}
+		remaining++
+		assert.Contains(
+			t, tx.Hash, "fresh-",
+			"should only get fresh transactions",
+		)
+	}
+
+	// The consumer should have gotten the fresh
+	// transactions that were after its read position
+	t.Logf(
+		"Consumer read %d remaining transactions after expiry",
+		remaining,
+	)
+}
+
+func TestMempool_TTL_DefaultValues(t *testing.T) {
+	m := NewMempool(MempoolConfig{
+		Logger: slog.New(
+			slog.NewJSONHandler(io.Discard, nil),
+		),
+		EventBus:        event.NewEventBus(nil, nil),
+		PromRegistry:    prometheus.NewRegistry(),
+		Validator:       newMockValidator(),
+		MempoolCapacity: 1024 * 1024,
+	})
+	defer m.Stop(context.Background())
+
+	assert.Equal(
+		t, DefaultTransactionTTL, m.transactionTTL,
+		"default TTL should be 5 minutes",
+	)
+	assert.Equal(
+		t, DefaultCleanupInterval, m.cleanupInterval,
+		"default cleanup interval should be 1 minute",
+	)
+}
+
+func TestMempool_TTL_CustomValues(t *testing.T) {
+	m := NewMempool(MempoolConfig{
+		Logger: slog.New(
+			slog.NewJSONHandler(io.Discard, nil),
+		),
+		EventBus:        event.NewEventBus(nil, nil),
+		PromRegistry:    prometheus.NewRegistry(),
+		Validator:       newMockValidator(),
+		MempoolCapacity: 1024 * 1024,
+		TransactionTTL:  10 * time.Minute,
+		CleanupInterval: 30 * time.Second,
+	})
+	defer m.Stop(context.Background())
+
+	assert.Equal(
+		t, 10*time.Minute, m.transactionTTL,
+		"custom TTL should be 10 minutes",
+	)
+	assert.Equal(
+		t, 30*time.Second, m.cleanupInterval,
+		"custom cleanup interval should be 30 seconds",
+	)
+}
+
+func TestMempool_TTL_RemoveExpiredTransactions_EmptyMempool(
+	t *testing.T,
+) {
+	m := newTestMempoolWithTTL(t, 50*time.Millisecond, 20*time.Millisecond)
+	defer m.Stop(context.Background())
+
+	// Directly call removeExpiredTransactions on empty mempool
+	// to verify it doesn't panic
+	m.removeExpiredTransactions()
+
+	m.RLock()
+	assert.Equal(t, 0, len(m.transactions))
+	m.RUnlock()
+}
+
+func TestMempool_TTL_LastSeenUpdatePreventsExpiry(t *testing.T) {
+	// Use a generous TTL (500ms) relative to the total refresh
+	// window (6 × 30ms = 180ms) so the test is not flaky under
+	// CI load.
+	m := newTestMempoolWithTTL(t, 500*time.Millisecond, 20*time.Millisecond)
+	defer m.Stop(context.Background())
+
+	// Add a transaction that will expire soon
+	m.Lock()
+	m.consumersMutex.Lock()
+	tx := &MempoolTransaction{
+		Hash:     "refresh-tx",
+		Cbor:     []byte("refresh-cbor"),
+		Type:     uint(conway.EraIdConway),
+		LastSeen: time.Now(),
+	}
+	m.transactions = append(m.transactions, tx)
+	m.txByHash[tx.Hash] = tx
+	m.currentSizeBytes += int64(len(tx.Cbor))
+	m.metrics.txsInMempool.Inc()
+	m.consumersMutex.Unlock()
+	m.Unlock()
+
+	// Keep refreshing LastSeen so the transaction never expires
+	refreshDone := make(chan struct{})
+	go func() {
+		defer close(refreshDone)
+		for range 6 {
+			time.Sleep(30 * time.Millisecond)
+			m.Lock()
+			if existingTx := m.txByHash["refresh-tx"]; existingTx != nil {
+				existingTx.LastSeen = time.Now()
+			}
+			m.Unlock()
+		}
+	}()
+
+	<-refreshDone
+
+	// The transaction should still be in the mempool because
+	// we kept refreshing it
+	m.RLock()
+	assert.Equal(
+		t, 1, len(m.transactions),
+		"refreshed transaction should still be present",
+	)
+	_, exists := m.txByHash["refresh-tx"]
+	assert.True(t, exists, "refreshed transaction should be in hash map")
+	m.RUnlock()
+}
+
+func TestMempool_TTL_ConcurrentExpiryAndAddition(t *testing.T) {
+	m := newTestMempoolWithTTL(t, 30*time.Millisecond, 10*time.Millisecond)
+	defer m.Stop(context.Background())
+
+	var wg sync.WaitGroup
+	done := make(chan struct{})
+
+	// Goroutine continuously adding transactions
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; ; i++ {
+			select {
+			case <-done:
+				return
+			default:
+				m.Lock()
+				m.consumersMutex.Lock()
+				tx := &MempoolTransaction{
+					Hash:     fmt.Sprintf("concurrent-tx-%d", i),
+					Cbor:     fmt.Appendf(nil, "concurrent-cbor-%d", i),
+					Type:     uint(conway.EraIdConway),
+					LastSeen: time.Now(),
+				}
+				m.transactions = append(m.transactions, tx)
+				m.txByHash[tx.Hash] = tx
+				m.currentSizeBytes += int64(len(tx.Cbor))
+				m.metrics.txsInMempool.Inc()
+				m.consumersMutex.Unlock()
+				m.Unlock()
+				time.Sleep(5 * time.Millisecond)
+			}
+		}
+	}()
+
+	// Goroutine reading transactions via consumer
+	connId := newTestConnectionId(0)
+	consumer := m.AddConsumer(connId)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-done:
+				return
+			default:
+				consumer.NextTx(false)
+				time.Sleep(2 * time.Millisecond)
+			}
+		}
+	}()
+
+	// Let it run with concurrent adds, reads, and expiry
+	time.Sleep(200 * time.Millisecond)
+	close(done)
+
+	waitCh := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(waitCh)
+	}()
+
+	select {
+	case <-waitCh:
+		// Success - no deadlock or race
+		m.RLock()
+		t.Logf(
+			"Final mempool state: %d transactions, %d bytes",
+			len(m.transactions),
+			m.currentSizeBytes,
+		)
+		m.RUnlock()
+	case <-time.After(5 * time.Second):
+		t.Fatal("potential deadlock with concurrent expiry and addition")
+	}
+}
+
+func TestMempool_TTL_RemoveEventsEmittedOnExpiry(t *testing.T) {
+	m := newTestMempoolWithTTL(t, 50*time.Millisecond, 20*time.Millisecond)
+	defer m.Stop(context.Background())
+
+	// Subscribe to remove events
+	subId, removeChan := m.eventBus.Subscribe(
+		RemoveTransactionEventType,
+	)
+	defer m.eventBus.Unsubscribe(RemoveTransactionEventType, subId)
+
+	// Add an expired transaction
+	m.Lock()
+	m.consumersMutex.Lock()
+	tx := &MempoolTransaction{
+		Hash:     "event-tx",
+		Cbor:     []byte("event-cbor"),
+		Type:     uint(conway.EraIdConway),
+		LastSeen: time.Now().Add(-200 * time.Millisecond),
+	}
+	m.transactions = append(m.transactions, tx)
+	m.txByHash[tx.Hash] = tx
+	m.currentSizeBytes += int64(len(tx.Cbor))
+	m.metrics.txsInMempool.Inc()
+	m.consumersMutex.Unlock()
+	m.Unlock()
+
+	// Wait for the remove event
+	select {
+	case evt := <-removeChan:
+		removeEvt, ok := evt.Data.(RemoveTransactionEvent)
+		require.True(t, ok, "event should be RemoveTransactionEvent")
+		assert.Equal(
+			t, "event-tx", removeEvt.Hash,
+			"event should have correct hash",
+		)
+	case <-time.After(2 * time.Second):
+		t.Fatal(
+			"timeout waiting for RemoveTransactionEvent on expiry",
+		)
+	}
 }
