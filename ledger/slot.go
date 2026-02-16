@@ -188,6 +188,12 @@ func (ls *LedgerState) SlotToEpoch(slot uint64) (models.Epoch, error) {
 	lastEpoch := epochCacheCopy[len(epochCacheCopy)-1]
 	lastEpochEndSlot := lastEpoch.StartSlot + uint64(lastEpoch.LengthInSlots)
 
+	if lastEpoch.LengthInSlots == 0 {
+		return models.Epoch{}, errors.New(
+			"cannot project epoch: last known epoch has LengthInSlots=0",
+		)
+	}
+
 	// Calculate how many epochs past the last known epoch this slot is
 	slotsPastLastEpoch := slot - lastEpochEndSlot
 	epochsPastLast := slotsPastLastEpoch / uint64(lastEpoch.LengthInSlots)
