@@ -3080,21 +3080,39 @@ func (ls *LedgerState) forgeBlock() {
 			}
 
 			// Pull ExUnits from redeemers in the witness set
-			var txMemory, txSteps int64
+			var estimatedTxExUnits lcommon.ExUnits
+			var exUnitsErr error
 			for _, redeemer := range fullTx.WitnessSet.Redeemers().Iter() {
-				txMemory += redeemer.ExUnits.Memory
-				txSteps += redeemer.ExUnits.Steps
+				estimatedTxExUnits, exUnitsErr = eras.SafeAddExUnits(
+					estimatedTxExUnits,
+					redeemer.ExUnits,
+				)
+				if exUnitsErr != nil {
+					ls.config.Logger.Debug(
+						"skipping transaction - ExUnits overflow",
+						"component", "ledger",
+						"error", exUnitsErr,
+					)
+					break
+				}
 			}
-			estimatedTxExUnits := lcommon.ExUnits{
-				Memory: txMemory,
-				Steps:  txSteps,
+			if exUnitsErr != nil {
+				continue
 			}
 
-			// Check MaxExUnits limit
-			if totalExUnits.Memory+estimatedTxExUnits.Memory > maxExUnits.Memory ||
-				totalExUnits.Steps+estimatedTxExUnits.Steps > maxExUnits.Steps {
+			// Check MaxExUnits limit - skip this tx but
+			// continue trying smaller ones.
+			// Use SafeAddExUnits to avoid overflow in the
+			// comparison.
+			candidateExUnits, addErr := eras.SafeAddExUnits(
+				totalExUnits,
+				estimatedTxExUnits,
+			)
+			if addErr != nil ||
+				candidateExUnits.Memory > maxExUnits.Memory ||
+				candidateExUnits.Steps > maxExUnits.Steps {
 				ls.config.Logger.Debug(
-					"ex units limit reached",
+					"tx exceeds remaining ex units budget, skipping",
 					"component", "ledger",
 					"current_memory", totalExUnits.Memory,
 					"current_steps", totalExUnits.Steps,
@@ -3103,7 +3121,7 @@ func (ls *LedgerState) forgeBlock() {
 					"max_memory", maxExUnits.Memory,
 					"max_steps", maxExUnits.Steps,
 				)
-				break
+				continue
 			}
 
 			// Handle metadata encoding before adding transaction.
@@ -3144,8 +3162,10 @@ func (ls *LedgerState) forgeBlock() {
 				transactionMetadataSet[uint(len(transactionBodies))-1] = metadataCbor
 			}
 			blockSize += txSize
-			totalExUnits.Memory += estimatedTxExUnits.Memory
-			totalExUnits.Steps += estimatedTxExUnits.Steps
+			// Safe to assign: overflow was already checked
+			// via SafeAddExUnits when computing
+			// candidateExUnits above.
+			totalExUnits = candidateExUnits
 
 			ls.config.Logger.Debug(
 				"added transaction to block candidate lists",
