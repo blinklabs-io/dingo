@@ -410,10 +410,14 @@ func (cs *ChainSelector) EvaluateAndSwitch() bool {
 				"slot", newTip.Point.Slot,
 			)
 
-			if cs.config.EventBus != nil && previousBest != nil {
+			if cs.config.EventBus != nil {
 				var previousTip ochainsync.Tip
-				if pt, ok := cs.peerTips[*previousBest]; ok {
-					previousTip = pt.Tip
+				var previousConnId ouroboros.ConnectionId
+				if previousBest != nil {
+					previousConnId = *previousBest
+					if pt, ok := cs.peerTips[*previousBest]; ok {
+						previousTip = pt.Tip
+					}
 				}
 				// Compute comparison result and block difference
 				comparisonResult := CompareChains(newTip, previousTip)
@@ -424,7 +428,7 @@ func (cs *ChainSelector) EvaluateAndSwitch() bool {
 				evt := event.NewEvent(
 					ChainSwitchEventType,
 					ChainSwitchEvent{
-						PreviousConnectionId: *previousBest,
+						PreviousConnectionId: previousConnId,
 						NewConnectionId:      *newBest,
 						NewTip:               newTip,
 						PreviousTip:          previousTip,

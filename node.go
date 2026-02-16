@@ -289,9 +289,14 @@ func (n *Node) Run(ctx context.Context) error {
 			if !ok {
 				return
 			}
+			prevConn := "(none)"
+			if e.PreviousConnectionId.LocalAddr != nil &&
+				e.PreviousConnectionId.RemoteAddr != nil {
+				prevConn = e.PreviousConnectionId.String()
+			}
 			n.config.logger.Info(
 				"chain switch: updating active connection",
-				"previous_connection", e.PreviousConnectionId.String(),
+				"previous_connection", prevConn,
 				"new_connection", e.NewConnectionId.String(),
 				"new_tip_block", e.NewTip.BlockNumber,
 				"new_tip_slot", e.NewTip.Point.Slot,
