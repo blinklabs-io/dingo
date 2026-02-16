@@ -623,6 +623,31 @@ func (ls *LedgerState) createGenesisBlock() error {
 			"component", "ledger",
 		)
 
+		// Load genesis staking data (pool registrations + delegations)
+		genesisPools, _, err := shelleyGenesis.InitialPools()
+		if err != nil {
+			return fmt.Errorf("parse genesis staking: %w", err)
+		}
+		if len(genesisPools) > 0 ||
+			len(shelleyGenesis.Staking.Stake) > 0 {
+			ls.config.Logger.Info(
+				fmt.Sprintf(
+					"loading genesis staking: %d pools, %d delegations",
+					len(genesisPools),
+					len(shelleyGenesis.Staking.Stake),
+				),
+				"component", "ledger",
+			)
+			if err := ls.db.SetGenesisStaking(
+				genesisPools,
+				shelleyGenesis.Staking.Stake,
+				genesisHash[:],
+				txn,
+			); err != nil {
+				return fmt.Errorf("set genesis staking: %w", err)
+			}
+		}
+
 		return nil
 	})
 	return err

@@ -1660,3 +1660,13 @@ func (d *MetadataStorePostgres) DeleteTransactionsAfterSlot(
 
 	return nil
 }
+
+// SetGenesisStaking is not implemented for the PostgreSQL metadata plugin.
+func (d *MetadataStorePostgres) SetGenesisStaking(
+	_ map[string]lcommon.PoolRegistrationCertificate,
+	_ map[string]string,
+	_ []byte,
+	_ types.Txn,
+) error {
+	return errors.New("genesis staking not implemented for postgres")
+}
