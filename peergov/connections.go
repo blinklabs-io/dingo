@@ -88,6 +88,20 @@ func (p *PeerGovernor) createOutboundConnection(peer *Peer) {
 		}
 		p.mu.Unlock()
 
+		// Skip outbound if the peer already has a full-duplex inbound
+		// connection. When the remote peer negotiated
+		// InitiatorAndResponder mode, a single TCP connection carries
+		// both directions of the Ouroboros protocols, making a separate
+		// outbound connection unnecessary.
+		if p.config.ConnManager != nil &&
+			p.config.ConnManager.HasFullDuplexInbound(peer.Address) {
+			p.config.Logger.Info(
+				"outbound: full-duplex inbound exists, skipping",
+				"address", peer.Address,
+			)
+			return
+		}
+
 		conn, err := p.config.ConnManager.CreateOutboundConn(
 			p.ctx,
 			peer.Address,

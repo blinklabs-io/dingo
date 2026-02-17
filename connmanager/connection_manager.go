@@ -468,6 +468,30 @@ func (c *ConnectionManager) RemoveConnection(connId ouroboros.ConnectionId) {
 	c.updateConnectionMetrics()
 }
 
+// HasFullDuplexInbound returns true if there is already an inbound connection
+// from peerAddr that negotiated InitiatorAndResponder mode. This indicates the
+// connection carries both client and server mini-protocols, making a separate
+// outbound connection unnecessary.
+func (c *ConnectionManager) HasFullDuplexInbound(
+	peerAddr string,
+) bool {
+	c.connectionsMutex.Lock()
+	defer c.connectionsMutex.Unlock()
+	for _, info := range c.connections {
+		if !info.isInbound || info.conn == nil {
+			continue
+		}
+		if info.peerAddr != peerAddr {
+			continue
+		}
+		_, versionData := info.conn.ProtocolVersion()
+		if versionData.DiffusionMode() == oprotocol.DiffusionModeInitiatorAndResponder {
+			return true
+		}
+	}
+	return false
+}
+
 func (c *ConnectionManager) GetConnectionById(
 	connId ouroboros.ConnectionId,
 ) *ouroboros.Connection {
