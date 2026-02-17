@@ -1728,22 +1728,16 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 			if rolloverResult != nil && ls.config.EventBus != nil {
 				newEpochId := rolloverResult.NewCurrentEpoch.EpochId
 
-				// Use MarkEpochEmitted to coordinate with slot-based detection.
-				// If slot clock already emitted this epoch event (when synced),
-				// we skip emitting again to avoid duplicates.
-				shouldEmit := true
+				// Always emit block-based epoch transitions. Even if the
+				// slot clock already emitted an event for this epoch, the
+				// block-based event is needed because it fires AFTER the
+				// epoch nonce has been computed. Subscribers (leader
+				// election, snapshot manager) use drain logic to handle
+				// duplicates, keeping only the latest event.
 				if ls.slotClock != nil {
-					shouldEmit = ls.slotClock.MarkEpochEmitted(newEpochId)
-					if !shouldEmit {
-						ls.config.Logger.Debug(
-							"block-based epoch transition skipped (already emitted by slot clock)",
-							"epoch",
-							newEpochId,
-						)
-					}
+					ls.slotClock.MarkEpochEmitted(newEpochId)
 				}
-
-				if shouldEmit {
+				{
 					// Calculate snapshot slot (boundary - 1, or 0 if boundary is 0)
 					snapshotSlot := rolloverResult.NewCurrentEpoch.StartSlot
 					if snapshotSlot > 0 {
