@@ -125,29 +125,28 @@ func (c *Chain) AddBlock(
 	block ledger.Block,
 	txn *database.Txn,
 ) error {
-	if c == nil {
-		return errors.New("chain is nil")
-	}
-	// Perform all state mutations under locks, collect event to publish
-	// outside locks to prevent deadlock if subscribers access chain state.
-	pendingEvent, err := c.addBlockLocked(block, txn)
+	evt, err := c.addBlockInternal(block, txn)
 	if err != nil {
 		return err
 	}
-	// Publish event outside locks to prevent deadlock if subscribers
-	// call back into chain or manager state
-	if c.eventBus != nil && pendingEvent != nil {
-		c.eventBus.Publish(pendingEvent.Type, *pendingEvent)
+	// Publish event immediately for standalone (non-batched) calls
+	if c.eventBus != nil {
+		c.eventBus.Publish(ChainUpdateEventType, evt)
 	}
 	return nil
 }
 
-// addBlockLocked performs AddBlock state mutations under locks and returns
-// any event that should be published after locks are released.
-func (c *Chain) addBlockLocked(
+// addBlockInternal performs all block-adding logic but returns the event
+// instead of publishing it. This allows AddBlocks to defer event
+// publication until the entire batch transaction has committed, preventing
+// subscribers from observing data that may be rolled back.
+func (c *Chain) addBlockInternal(
 	block ledger.Block,
 	txn *database.Txn,
-) (*event.Event, error) {
+) (event.Event, error) {
+	if c == nil {
+		return event.Event{}, errors.New("chain is nil")
+	}
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 	// We get a write lock on the manager to cover the integrity checks and adding the block below
@@ -155,13 +154,13 @@ func (c *Chain) addBlockLocked(
 	defer c.manager.mutex.Unlock()
 	// Verify chain integrity
 	if err := c.reconcile(); err != nil {
-		return nil, fmt.Errorf("reconcile chain: %w", err)
+		return event.Event{}, fmt.Errorf("reconcile chain: %w", err)
 	}
 	// Check that the new block matches our first header, if any
 	if len(c.headers) > 0 {
 		firstHeader := c.headers[0]
 		if block.Hash().String() != firstHeader.Hash().String() {
-			return nil, NewBlockNotMatchHeaderError(
+			return event.Event{}, NewBlockNotMatchHeaderError(
 				block.Hash().String(),
 				firstHeader.Hash().String(),
 			)
@@ -170,7 +169,7 @@ func (c *Chain) addBlockLocked(
 	// Check that this block fits on the current chain tip
 	if c.tipBlockIndex >= initialBlockIndex {
 		if string(block.PrevHash().Bytes()) != string(c.currentTip.Point.Hash) {
-			return nil, NewBlockNotFitChainTipError(
+			return event.Event{}, NewBlockNotFitChainTipError(
 				block.Hash().String(),
 				block.PrevHash().String(),
 				hex.EncodeToString(c.currentTip.Point.Hash),
@@ -193,7 +192,7 @@ func (c *Chain) addBlockLocked(
 		Cbor:     block.Cbor(),
 	}
 	if err := c.manager.addBlock(tmpBlock, txn, c.persistent); err != nil {
-		return nil, fmt.Errorf("store block: %w", err)
+		return event.Event{}, fmt.Errorf("store block: %w", err)
 	}
 	if !c.persistent {
 		c.blocks = append(c.blocks, tmpPoint)
@@ -215,18 +214,15 @@ func (c *Chain) addBlockLocked(
 		c.waitingChan = nil
 	}
 	c.waitingChanMutex.Unlock()
-	// Build event for deferred publication
-	if c.eventBus != nil {
-		evt := event.NewEvent(
-			ChainUpdateEventType,
-			ChainBlockEvent{
-				Point: tmpPoint,
-				Block: tmpBlock,
-			},
-		)
-		return &evt, nil
-	}
-	return nil, nil
+	// Build event for caller to publish after transaction commit
+	evt := event.NewEvent(
+		ChainUpdateEventType,
+		ChainBlockEvent{
+			Point: tmpPoint,
+			Block: tmpBlock,
+		},
+	)
+	return evt, nil
 }
 
 func (c *Chain) AddBlocks(blocks []ledger.Block) error {
@@ -243,33 +239,30 @@ func (c *Chain) AddBlocks(blocks []ledger.Block) error {
 		if batchSize == 0 {
 			break
 		}
-		// Collect events inside the transaction callback and
-		// publish them only after the transaction commits
-		// successfully. This prevents subscribers from reacting
-		// to events whose underlying data has not yet been
-		// persisted.
+		// Collect events during the transaction so they can be
+		// published only after the transaction commits successfully.
+		// This prevents subscribers from observing rolled-back data
+		// when a later block in the batch fails.
 		var pendingEvents []event.Event
 		txn := c.manager.db.BlobTxn(true)
 		err := txn.Do(func(txn *database.Txn) error {
 			pendingEvents = pendingEvents[:0]
 			for _, tmpBlock := range blocks[batchOffset : batchOffset+batchSize] {
-				evt, err := c.addBlockLocked(tmpBlock, txn)
+				evt, err := c.addBlockInternal(tmpBlock, txn)
 				if err != nil {
 					return err
 				}
-				if evt != nil {
-					pendingEvents = append(pendingEvents, *evt)
-				}
+				pendingEvents = append(pendingEvents, evt)
 			}
 			return nil
 		})
 		if err != nil {
 			return err
 		}
-		// Publish events after the transaction has committed
+		// Transaction committed successfully; publish all events
 		if c.eventBus != nil {
 			for _, evt := range pendingEvents {
-				c.eventBus.Publish(evt.Type, evt)
+				c.eventBus.Publish(ChainUpdateEventType, evt)
 			}
 		}
 		batchOffset += batchSize
@@ -281,14 +274,12 @@ func (c *Chain) Rollback(point ocommon.Point) error {
 	if c == nil {
 		return errors.New("chain is nil")
 	}
-	// Perform all state mutations under locks, collect events to publish
-	// outside locks to prevent deadlock if subscribers access chain state.
 	pendingEvents, err := c.rollbackLocked(point)
 	if err != nil {
 		return err
 	}
-	// Publish events outside locks to prevent deadlock if subscribers
-	// call back into chain or manager state
+	// Publish events after locks are released to prevent deadlocks
+	// when subscribers call back into chain/manager state.
 	if c.eventBus != nil {
 		for _, evt := range pendingEvents {
 			c.eventBus.Publish(evt.Type, evt)
@@ -297,8 +288,8 @@ func (c *Chain) Rollback(point ocommon.Point) error {
 	return nil
 }
 
-// rollbackLocked performs Rollback state mutations under locks and returns
-// any events that should be published after locks are released.
+// rollbackLocked performs all rollback logic under locks and returns
+// events to be published by the caller after locks are released.
 func (c *Chain) rollbackLocked(
 	point ocommon.Point,
 ) ([]event.Event, error) {
@@ -343,14 +334,6 @@ func (c *Chain) rollbackLocked(
 			)
 		}
 		rollbackBlockIndex = tmpBlock.ID
-	}
-	// Guard against uint64 underflow from corrupt/stale data
-	if rollbackBlockIndex > c.tipBlockIndex {
-		return nil, fmt.Errorf(
-			"rollback block index %d exceeds tip block index %d",
-			rollbackBlockIndex,
-			c.tipBlockIndex,
-		)
 	}
 	// Calculate fork depth before deleting blocks
 	forkDepth := c.tipBlockIndex - rollbackBlockIndex
@@ -434,10 +417,10 @@ func (c *Chain) rollbackLocked(
 			iter.needsRollback = true
 		}
 	}
-	// Build events for deferred publication
+	// Build events for caller to publish after locks are released
 	var pendingEvents []event.Event
-	if c.eventBus != nil && len(rolledBackBlocks) > 0 {
-		// Rollback event — only emit when blocks were actually removed
+	if len(rolledBackBlocks) > 0 {
+		// Rollback event - only emit when blocks were actually removed
 		pendingEvents = append(
 			pendingEvents,
 			event.NewEvent(
