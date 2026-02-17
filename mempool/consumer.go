@@ -24,12 +24,23 @@ type MempoolConsumer struct {
 	nextTxIdx   int
 	cacheMutex  sync.Mutex
 	nextTxIdxMu sync.Mutex
+	done        chan struct{}
+	doneOnce    sync.Once
 }
 
 func newConsumer(mempool *Mempool) *MempoolConsumer {
 	return &MempoolConsumer{
 		mempool: mempool,
 		cache:   make(map[string]*MempoolTransaction),
+		done:    make(chan struct{}),
+	}
+}
+
+// Close signals any goroutines blocked on NextTx to exit.
+// Safe to call multiple times.
+func (m *MempoolConsumer) Close() {
+	if m != nil {
+		m.doneOnce.Do(func() { close(m.done) })
 	}
 }
 
@@ -93,6 +104,10 @@ func (m *MempoolConsumer) NextTx(blocking bool) *MempoolTransaction {
 			// This naturally handles the case of multiple rapid additions
 		case <-m.mempool.done:
 			// Mempool is shutting down, unsubscribe and exit
+			m.mempool.eventBus.Unsubscribe(AddTransactionEventType, addTxSubId)
+			return nil
+		case <-m.done:
+			// Consumer removed (connection closed), unsubscribe and exit
 			m.mempool.eventBus.Unsubscribe(AddTransactionEventType, addTxSubId)
 			return nil
 		}

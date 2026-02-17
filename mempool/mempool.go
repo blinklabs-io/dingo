@@ -203,8 +203,13 @@ func (m *Mempool) AddConsumer(connId ouroboros.ConnectionId) *MempoolConsumer {
 
 func (m *Mempool) RemoveConsumer(connId ouroboros.ConnectionId) {
 	m.consumersMutex.Lock()
+	consumer := m.consumers[connId]
 	delete(m.consumers, connId)
 	m.consumersMutex.Unlock()
+	// Signal any goroutines blocked on NextTx to exit
+	if consumer != nil {
+		consumer.Close()
+	}
 }
 
 func (m *Mempool) Stop(ctx context.Context) error {
@@ -218,6 +223,7 @@ func (m *Mempool) Stop(ctx context.Context) error {
 	m.consumersMutex.Lock()
 	for _, consumer := range m.consumers {
 		if consumer != nil {
+			consumer.Close()
 			consumer.ClearCache()
 		}
 	}

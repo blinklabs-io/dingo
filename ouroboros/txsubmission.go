@@ -30,6 +30,13 @@ import (
 
 const (
 	txsubmissionRequestTxIdsCount = 10 // Number of TxIds to request from peer at one time
+
+	// txsubmissionBlockingTimeout is how long we wait for a transaction
+	// from the mempool before returning an empty response. This must be
+	// well under gouroboros' 120-second protocol timeout to keep the
+	// tx-submission state machine alive during initial sync when the
+	// mempool is empty.
+	txsubmissionBlockingTimeout = 90 * time.Second
 )
 
 func (o *Ouroboros) txsubmissionServerConnOpts() []txsubmission.TxSubmissionOptionFunc {
@@ -240,12 +247,41 @@ func (o *Ouroboros) txsubmissionClientRequestTxIds(
 			break
 		}
 		if blocking && len(tmpTxs) == 0 {
-			// Wait until we see a TX
-			tmpTx := consumer.NextTx(true)
-			if tmpTx == nil {
-				break
+			// Wait until we see a TX, but with a timeout to prevent
+			// blocking forever when the mempool is empty (e.g. during
+			// initial sync). Without this, the protocol's 120s hard
+			// timeout fires and kills the peer connection.
+			type nextTxResult struct {
+				tx *mempool.MempoolTransaction
 			}
-			tmpTxs = append(tmpTxs, tmpTx)
+			resultCh := make(chan nextTxResult, 1)
+			// Goroutine is safe: consumer.Close() (called on
+			// connection teardown) closes the done channel,
+			// unblocking NextTx(true).
+			go func() {
+				resultCh <- nextTxResult{tx: consumer.NextTx(true)}
+			}()
+			select {
+			case r := <-resultCh:
+				if r.tx == nil {
+					break
+				}
+				tmpTxs = append(tmpTxs, r.tx)
+				continue
+			case <-time.After(txsubmissionBlockingTimeout):
+				o.config.Logger.Info(
+					"tx-submission blocking request timed out, returning empty",
+					"component", "network",
+					"protocol", "tx-submission",
+					"role", "client",
+					"connection_id", connId.String(),
+					"timeout", txsubmissionBlockingTimeout.String(),
+				)
+				// Return empty to keep the protocol state machine alive.
+				// The goroutine reading NextTx will eventually complete
+				// when a transaction arrives or the mempool shuts down.
+			}
+			break
 		} else {
 			// Return immediately if no TX is available
 			tmpTx := consumer.NextTx(false)

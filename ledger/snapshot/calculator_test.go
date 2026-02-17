@@ -58,7 +58,7 @@ func seedPoolAndDelegations(
 	sqliteStore *sqlite.MetadataStoreSqlite,
 	poolKeyHash []byte,
 	delegations []struct {
-		stakingKey []byte
+		stakingKey  []byte
 		utxoAmounts []types.Uint64
 	},
 	slot uint64,
@@ -325,7 +325,7 @@ func TestCalculateStakeDistribution_InactiveAccountsExcluded(t *testing.T) {
 		StakingKey: activeKey, Pool: poolHash, AddedSlot: 100, Active: true,
 	}).Error)
 	require.NoError(t, gormDB.Create(&models.Utxo{
-		TxId: []byte("tx_activ_567890123456789012345678901234"),
+		TxId:      []byte("tx_activ_567890123456789012345678901234"),
 		OutputIdx: 0, StakingKey: activeKey,
 		Amount: 7000000, AddedSlot: 100,
 	}).Error)
@@ -340,7 +340,7 @@ func TestCalculateStakeDistribution_InactiveAccountsExcluded(t *testing.T) {
 	require.NoError(t, gormDB.Create(&inactiveAcct).Error)
 	require.NoError(t, gormDB.Model(&inactiveAcct).Update("active", false).Error)
 	require.NoError(t, gormDB.Create(&models.Utxo{
-		TxId: []byte("tx_inact_567890123456789012345678901234"),
+		TxId:      []byte("tx_inact_567890123456789012345678901234"),
 		OutputIdx: 0, StakingKey: inactiveKey,
 		Amount: 15000000, AddedSlot: 100,
 	}).Error)
