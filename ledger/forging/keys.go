@@ -18,12 +18,12 @@ package forging
 import (
 	"bytes"
 	"crypto/ed25519"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"sync"
 
 	"github.com/blinklabs-io/bursa"
-	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/kes"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/vrf"
@@ -290,7 +290,9 @@ func (pc *PoolCredentials) ValidateOpCert() error {
 		return errors.New("KES verification key mismatch: loaded key does not match OpCert.KESVKey")
 	}
 
-	// Verify cold key signature over [KES vkey, issue number, KES period]
+	// Verify cold key signature over the raw signable representation:
+	//   KES vkey (32 bytes) || issue number (8 bytes BE) || KES period (8 bytes BE)
+	// See: cardano-ledger OCertSignable.getSignableRepresentation
 	if len(pc.opCert.ColdVKey) != ed25519.PublicKeySize {
 		return fmt.Errorf(
 			"invalid cold verification key size: expected %d, got %d",
@@ -298,12 +300,11 @@ func (pc *PoolCredentials) ValidateOpCert() error {
 			len(pc.opCert.ColdVKey),
 		)
 	}
-	certBody := []any{pc.opCert.KESVKey, pc.opCert.IssueNumber, pc.opCert.KESPeriod}
-	certCbor, err := cbor.Encode(certBody)
-	if err != nil {
-		return fmt.Errorf("failed to encode OpCert body for signature verification: %w", err)
-	}
-	if !ed25519.Verify(pc.opCert.ColdVKey, certCbor, pc.opCert.Signature) {
+	var certBody [48]byte
+	copy(certBody[:32], pc.opCert.KESVKey)
+	binary.BigEndian.PutUint64(certBody[32:40], pc.opCert.IssueNumber)
+	binary.BigEndian.PutUint64(certBody[40:48], pc.opCert.KESPeriod)
+	if !ed25519.Verify(pc.opCert.ColdVKey, certBody[:], pc.opCert.Signature) {
 		return errors.New("OpCert signature verification failed: cold key signature is invalid")
 	}
 
