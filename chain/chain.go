@@ -479,6 +479,48 @@ func (c *Chain) ClearHeaders() {
 	c.headers = c.headers[:0]
 }
 
+// RecentPoints returns up to count recent chain points in descending
+// order (most recent first) using the in-memory chain state. This
+// includes the current tip and, for non-persistent chains, any blocks
+// stored in the in-memory buffer. For persistent chains, it walks
+// backwards through the database using block indices.
+//
+// This method is useful for building intersection point lists that
+// remain accurate even when the blob store has not yet been fully
+// flushed, since the chain's in-memory tip is always up-to-date.
+func (c *Chain) RecentPoints(count int) []ocommon.Point {
+	if c == nil || count <= 0 {
+		return nil
+	}
+	c.mutex.RLock()
+	defer c.mutex.RUnlock()
+	// If the chain has no blocks yet, return nothing
+	if c.tipBlockIndex < initialBlockIndex {
+		return nil
+	}
+	var points []ocommon.Point
+	// Always include the current tip
+	tip := c.currentTip.Point
+	if tip.Slot > 0 || len(tip.Hash) > 0 {
+		points = append(points, tip)
+	}
+	if len(points) >= count {
+		return points[:count]
+	}
+	// Walk backwards through block indices to gather more points
+	for idx := c.tipBlockIndex - 1; idx >= initialBlockIndex && len(points) < count; idx-- {
+		blk, err := c.blockByIndex(idx)
+		if err != nil {
+			break
+		}
+		points = append(
+			points,
+			ocommon.NewPoint(blk.Slot, blk.Hash),
+		)
+	}
+	return points
+}
+
 func (c *Chain) HeaderCount() int {
 	c.mutex.RLock()
 	defer c.mutex.RUnlock()

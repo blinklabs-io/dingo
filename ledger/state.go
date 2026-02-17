@@ -2552,22 +2552,63 @@ func (ls *LedgerState) GetBlock(point ocommon.Point) (models.Block, error) {
 	return ret, nil
 }
 
-// RecentChainPoints returns the requested count of recent chain points in descending order. This is used mostly
-// for building a set of intersect points when acting as a chainsync client
-func (ls *LedgerState) RecentChainPoints(count int) ([]ocommon.Point, error) {
-	tmpBlocks, err := database.BlocksRecent(ls.db, count)
-	if err != nil {
-		return nil, err
+// RecentChainPoints returns the requested count of recent chain
+// points in descending order. This is used mostly for building a set
+// of intersect points when acting as a chainsync client.
+//
+// Points are first collected from the in-memory chain state, which is
+// always up-to-date even when the blob store has not yet flushed
+// recent writes. Database points are then appended to fill the
+// requested count, with duplicates removed.
+func (ls *LedgerState) RecentChainPoints(
+	count int,
+) ([]ocommon.Point, error) {
+	var points []ocommon.Point
+	// Collect points from the in-memory chain first. The chain's
+	// tip and recent blocks are always current, even when the
+	// underlying blob store has pending writes that are not yet
+	// visible to new read transactions.
+	if ls.chain != nil {
+		points = ls.chain.RecentPoints(count)
 	}
-	ret := make([]ocommon.Point, 0, len(tmpBlocks))
-	var tmpBlock models.Block
-	for _, tmpBlock = range tmpBlocks {
-		ret = append(
-			ret,
-			ocommon.NewPoint(tmpBlock.Slot, tmpBlock.Hash),
+	// Supplement with database points for deeper history
+	if len(points) < count {
+		remaining := count - len(points)
+		tmpBlocks, err := database.BlocksRecent(
+			ls.db, remaining,
 		)
+		if err != nil {
+			// If we already have in-memory points, a database
+			// error is non-fatal: return what we have.
+			if len(points) > 0 {
+				return points, nil
+			}
+			return nil, err
+		}
+		// Build a set of existing points for deduplication
+		seen := make(map[string]struct{}, len(points))
+		for _, p := range points {
+			seen[pointKey(p)] = struct{}{}
+		}
+		for _, blk := range tmpBlocks {
+			p := ocommon.NewPoint(blk.Slot, blk.Hash)
+			key := pointKey(p)
+			if _, exists := seen[key]; exists {
+				continue
+			}
+			seen[key] = struct{}{}
+			points = append(points, p)
+			if len(points) >= count {
+				break
+			}
+		}
 	}
-	return ret, nil
+	return points, nil
+}
+
+// pointKey returns a string key for deduplication of chain points.
+func pointKey(p ocommon.Point) string {
+	return fmt.Sprintf("%d:%x", p.Slot, p.Hash)
 }
 
 // GetIntersectPoint returns the intersect between the specified points and the current chain
