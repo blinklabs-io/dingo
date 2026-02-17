@@ -563,6 +563,20 @@ func computeBlockBodyHash(
 	metadataSet lcommon.TransactionMetadataSet,
 	invalidTxs []uint,
 ) (lcommon.Blake2b256, uint64, error) {
+	// Normalize nil slices to empty so CBOR encodes as 0x80 (empty
+	// array) rather than 0xf6 (null). This must match the encoding
+	// in ConwayBlock.MarshalCBOR, which applies the same
+	// normalization before serializing the block.
+	if txBodies == nil {
+		txBodies = []conway.ConwayTransactionBody{}
+	}
+	if witnessSets == nil {
+		witnessSets = []conway.ConwayTransactionWitnessSet{}
+	}
+	if invalidTxs == nil {
+		invalidTxs = []uint{}
+	}
+
 	var bodyHashes []byte
 	var totalSize uint64
 
