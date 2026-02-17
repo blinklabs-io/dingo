@@ -21,6 +21,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // Pool Stake Snapshot Operations
@@ -132,7 +133,10 @@ func (d *MetadataStoreSqlite) SaveEpochSummary(
 	if err != nil {
 		return err
 	}
-	return db.Create(summary).Error
+	// Use ON CONFLICT DO NOTHING so duplicate epoch events (from both
+	// slot-clock and block-based transitions) are idempotent.
+	return db.Clauses(clause.OnConflict{DoNothing: true}).
+		Create(summary).Error
 }
 
 // GetEpochSummary retrieves an epoch summary by epoch number
