@@ -663,6 +663,148 @@ func TestChainFromIntersect(t *testing.T) {
 	}
 }
 
+func TestRecentPointsNoDatabase(t *testing.T) {
+	// Create a chain manager with no database. Blocks are stored
+	// in memory only. RecentPoints must return the in-memory
+	// chain points even though there is no blob store.
+	cm, err := chain.NewManager(nil, nil)
+	if err != nil {
+		t.Fatalf(
+			"unexpected error creating chain manager: %s",
+			err,
+		)
+	}
+	c := cm.PrimaryChain()
+
+	// Empty chain should return no points
+	points := c.RecentPoints(10)
+	if len(points) != 0 {
+		t.Fatalf(
+			"expected 0 points on empty chain, got %d",
+			len(points),
+		)
+	}
+
+	// Add all test blocks
+	for _, testBlock := range testBlocks {
+		if err := c.AddBlock(testBlock, nil); err != nil {
+			t.Fatalf(
+				"unexpected error adding block to chain: %s",
+				err,
+			)
+		}
+	}
+
+	// Request more points than exist; should get all blocks
+	points = c.RecentPoints(100)
+	if len(points) != len(testBlocks) {
+		t.Fatalf(
+			"expected %d points, got %d",
+			len(testBlocks),
+			len(points),
+		)
+	}
+
+	// Points should be in descending order (most recent first)
+	for i, p := range points {
+		expectedBlock := testBlocks[len(testBlocks)-1-i]
+		expectedHash := decodeHex(expectedBlock.MockHash)
+		if p.Slot != expectedBlock.MockSlot {
+			t.Fatalf(
+				"point %d: expected slot %d, got %d",
+				i,
+				expectedBlock.MockSlot,
+				p.Slot,
+			)
+		}
+		if string(p.Hash) != string(expectedHash) {
+			t.Fatalf(
+				"point %d: expected hash %x, got %x",
+				i,
+				expectedHash,
+				p.Hash,
+			)
+		}
+	}
+
+	// Request fewer points than exist; should get exactly the
+	// requested count, starting from the tip
+	points = c.RecentPoints(2)
+	if len(points) != 2 {
+		t.Fatalf("expected 2 points, got %d", len(points))
+	}
+	lastBlock := testBlocks[len(testBlocks)-1]
+	if points[0].Slot != lastBlock.MockSlot {
+		t.Fatalf(
+			"first point should be tip: expected slot %d, got %d",
+			lastBlock.MockSlot,
+			points[0].Slot,
+		)
+	}
+	secondLastBlock := testBlocks[len(testBlocks)-2]
+	if points[1].Slot != secondLastBlock.MockSlot {
+		t.Fatalf(
+			"second point should be tip-1: expected slot %d, got %d",
+			secondLastBlock.MockSlot,
+			points[1].Slot,
+		)
+	}
+}
+
+func TestRecentPointsWithDatabase(t *testing.T) {
+	// Create a chain manager with a real database. RecentPoints
+	// should still return the correct in-memory tip even though
+	// block storage goes through the blob store.
+	db := newTestDB(t)
+	cm, err := chain.NewManager(db, nil)
+	if err != nil {
+		t.Fatalf(
+			"unexpected error creating chain manager: %s",
+			err,
+		)
+	}
+	c := cm.PrimaryChain()
+
+	// Add all test blocks
+	for _, testBlock := range testBlocks {
+		if err := c.AddBlock(testBlock, nil); err != nil {
+			t.Fatalf(
+				"unexpected error adding block to chain: %s",
+				err,
+			)
+		}
+	}
+
+	// RecentPoints should return points in descending order
+	points := c.RecentPoints(3)
+	if len(points) != 3 {
+		t.Fatalf("expected 3 points, got %d", len(points))
+	}
+
+	// Verify descending order by slot
+	for i := range len(points) - 1 {
+		if points[i].Slot <= points[i+1].Slot {
+			t.Fatalf(
+				"points not in descending order: "+
+					"point %d (slot %d) <= point %d (slot %d)",
+				i, points[i].Slot,
+				i+1, points[i+1].Slot,
+			)
+		}
+	}
+
+	// Tip should be the first point
+	tip := c.Tip()
+	if points[0].Slot != tip.Point.Slot ||
+		string(points[0].Hash) != string(tip.Point.Hash) {
+		t.Fatalf(
+			"first point should match tip: got %d.%x, wanted %d.%x",
+			points[0].Slot, points[0].Hash,
+			tip.Point.Slot, tip.Point.Hash,
+		)
+	}
+}
+
 // mockLedger implements the interface{ SecurityParam() int }
 // interface used by ChainManager.SetLedger.
 type mockLedger struct {
