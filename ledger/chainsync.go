@@ -772,6 +772,8 @@ func writeCborUint(buf *bytes.Buffer, n int) {
 }
 
 // writeCborMajorType writes a CBOR header with the given major type and value.
+//
+//nolint:gosec // Intentional byte truncation for CBOR encoding of individual octets.
 func writeCborMajorType(buf *bytes.Buffer, majorType, n int) {
 	header := byte(majorType << 5)
 	switch {
