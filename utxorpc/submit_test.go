@@ -22,11 +22,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stretchr/testify/require"
-
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/mempool"
+	"github.com/stretchr/testify/require"
 )
 
 // TestWaitForTx_PendingSetTracking verifies the pending transaction tracking
