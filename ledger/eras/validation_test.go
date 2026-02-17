@@ -415,15 +415,22 @@ func TestCeilMul(t *testing.T) {
 			value:    big.NewInt(14000001),
 			expected: 807801,
 		},
+		{
+			// Result exceeds uint64 range: saturate at MaxUint64.
+			name:     "overflow saturates at MaxUint64",
+			num:      new(big.Int).SetUint64(math.MaxUint64),
+			denom:    big.NewInt(1),
+			value:    big.NewInt(2),
+			expected: math.MaxUint64,
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			result, err := CeilMul(
+			result := CeilMul(
 				tc.num,
 				tc.denom,
 				tc.value,
 			)
-			require.NoError(t, err)
 			assert.Equal(
 				t,
 				tc.expected,
@@ -686,7 +693,7 @@ func TestCalculateMinFee(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			fee, err := CalculateMinFee(
+			fee := CalculateMinFee(
 				tc.txSize,
 				tc.exUnits,
 				tc.minFeeA,
@@ -694,7 +701,6 @@ func TestCalculateMinFee(t *testing.T) {
 				tc.pricesMem,
 				tc.pricesSteps,
 			)
-			require.NoError(t, err)
 			assert.Equal(
 				t,
 				tc.expected,
@@ -715,7 +721,7 @@ func TestCalculateMinFee_ScriptFeeAddsCorrectly(t *testing.T) {
 	pricesSteps := big.NewRat(721, 10000000)
 
 	// Fee with no scripts
-	feeNoScripts, err := CalculateMinFee(
+	feeNoScripts := CalculateMinFee(
 		txSize,
 		lcommon.ExUnits{Memory: 0, Steps: 0},
 		minFeeA,
@@ -723,10 +729,9 @@ func TestCalculateMinFee_ScriptFeeAddsCorrectly(t *testing.T) {
 		pricesMem,
 		pricesSteps,
 	)
-	require.NoError(t, err)
 
 	// Fee with scripts
-	feeWithScripts, err := CalculateMinFee(
+	feeWithScripts := CalculateMinFee(
 		txSize,
 		lcommon.ExUnits{
 			Memory: 1000000,
@@ -737,7 +742,6 @@ func TestCalculateMinFee_ScriptFeeAddsCorrectly(t *testing.T) {
 		pricesMem,
 		pricesSteps,
 	)
-	require.NoError(t, err)
 
 	assert.Greater(
 		t,
@@ -785,7 +789,7 @@ func TestCalculateMinFee_MultipleScriptsSum(t *testing.T) {
 	require.Equal(t, int64(600000), totalExUnits.Memory)
 	require.Equal(t, int64(200000000), totalExUnits.Steps)
 
-	fee, err := CalculateMinFee(
+	fee := CalculateMinFee(
 		txSize,
 		totalExUnits,
 		minFeeA,
@@ -793,7 +797,6 @@ func TestCalculateMinFee_MultipleScriptsSum(t *testing.T) {
 		pricesMem,
 		pricesSteps,
 	)
-	require.NoError(t, err)
 
 	// baseFee = 44*400 + 155381 = 172981
 	// memFee = ceil(577*600000/10000) = 34620
@@ -806,7 +809,7 @@ func TestCalculateMinFee_NilPricesIgnoresExUnits(t *testing.T) {
 	// When prices are nil, even non-zero ExUnits should
 	// not contribute to the fee. This can happen in
 	// pre-Alonzo eras where there are no execution costs.
-	fee, err := CalculateMinFee(
+	fee := CalculateMinFee(
 		200,
 		lcommon.ExUnits{
 			Memory: 1000000,
@@ -817,7 +820,6 @@ func TestCalculateMinFee_NilPricesIgnoresExUnits(t *testing.T) {
 		nil,
 		nil,
 	)
-	require.NoError(t, err)
 	baseFee := uint64(44*200 + 155381)
 	assert.Equal(
 		t,
@@ -830,7 +832,7 @@ func TestCalculateMinFee_NilPricesIgnoresExUnits(t *testing.T) {
 func TestCalculateMinFee_OnePriceNilIgnoresExUnits(t *testing.T) {
 	// When only one price is nil, both should be
 	// ignored (the function requires both to be non-nil).
-	fee1, err := CalculateMinFee(
+	fee1 := CalculateMinFee(
 		200,
 		lcommon.ExUnits{
 			Memory: 1000000,
@@ -841,8 +843,7 @@ func TestCalculateMinFee_OnePriceNilIgnoresExUnits(t *testing.T) {
 		big.NewRat(577, 10000),
 		nil,
 	)
-	require.NoError(t, err)
-	fee2, err := CalculateMinFee(
+	fee2 := CalculateMinFee(
 		200,
 		lcommon.ExUnits{
 			Memory: 1000000,
@@ -853,7 +854,6 @@ func TestCalculateMinFee_OnePriceNilIgnoresExUnits(t *testing.T) {
 		nil,
 		big.NewRat(721, 10000000),
 	)
-	require.NoError(t, err)
 	baseFee := uint64(44*200 + 155381)
 	assert.Equal(t, baseFee, fee1,
 		"nil step price should ignore script fees",
@@ -866,12 +866,11 @@ func TestCalculateMinFee_OnePriceNilIgnoresExUnits(t *testing.T) {
 func TestCeilMul_ExactMultiples(t *testing.T) {
 	// When num*value is exactly divisible by denom,
 	// ceiling should equal the exact quotient.
-	result, err := CeilMul(
+	result := CeilMul(
 		big.NewInt(3),
 		big.NewInt(1),
 		big.NewInt(5),
 	)
-	require.NoError(t, err)
 	assert.Equal(t, uint64(15), result)
 }
 
@@ -879,20 +878,18 @@ func TestCeilMul_LargeValues(t *testing.T) {
 	// Test with values near the practical maximum for
 	// Cardano mainnet. Max memory is 14M, max steps
 	// is 10B. Price rationals are small fractions.
-	memResult, err := CeilMul(
+	memResult := CeilMul(
 		big.NewInt(577),
 		big.NewInt(10000),
 		big.NewInt(14000000),
 	)
-	require.NoError(t, err)
 	assert.Equal(t, uint64(807800), memResult)
 
-	stepResult, err := CeilMul(
+	stepResult := CeilMul(
 		big.NewInt(721),
 		big.NewInt(10000000),
 		big.NewInt(10000000000),
 	)
-	require.NoError(t, err)
 	assert.Equal(t, uint64(721000), stepResult)
 }
 
@@ -900,13 +897,22 @@ func TestCeilMul_MaxInt64Values(t *testing.T) {
 	// Test with max int64 to ensure no overflow in
 	// big.Int arithmetic.
 	maxVal := big.NewInt(math.MaxInt64)
-	result, err := CeilMul(
+	result := CeilMul(
 		big.NewInt(1),
 		big.NewInt(1),
 		maxVal,
 	)
-	require.NoError(t, err)
 	assert.Equal(t, uint64(math.MaxInt64), result)
+}
+
+func TestCeilMul_ZeroDenomPanics(t *testing.T) {
+	assert.Panics(t, func() {
+		CeilMul(
+			big.NewInt(1),
+			big.NewInt(0),
+			big.NewInt(1),
+		)
+	}, "CeilMul should panic on zero denominator")
 }
 
 func TestDeclaredExUnits(t *testing.T) {
@@ -1648,120 +1654,11 @@ func TestValidateTxFee_ErrorMessageIncludesFees(
 	assert.Contains(t, err.Error(), "168581")
 }
 
-func TestCeilMul_ZeroDenominator(t *testing.T) {
-	// A zero denominator must return an error instead
-	// of panicking with a division-by-zero.
-	_, err := CeilMul(
-		big.NewInt(577),
-		big.NewInt(0),
-		big.NewInt(1000000),
-	)
-	require.Error(t, err)
-	assert.ErrorIs(t, err, errZeroDenominator)
-}
-
-func TestCeilMul_OverflowUint64(t *testing.T) {
-	// When the result exceeds MaxUint64, CeilMul must
-	// return errFeeOverflow instead of silently
-	// truncating via big.Int.Uint64().
-	maxU64 := new(big.Int).SetUint64(math.MaxUint64)
-	_, err := CeilMul(
-		new(big.Int).Mul(maxU64, big.NewInt(2)),
-		big.NewInt(1),
-		big.NewInt(1),
-	)
-	require.Error(t, err)
-	assert.ErrorIs(t, err, errFeeOverflow)
-}
-
-func TestCalculateMinFee_OverflowMultiplication(
-	t *testing.T,
-) {
-	// minFeeA * txSize overflows uint64 when both
-	// values are large.
-	_, err := CalculateMinFee(
-		math.MaxUint64,
-		lcommon.ExUnits{},
-		2,
-		0,
-		nil,
-		nil,
-	)
-	require.Error(t, err)
-	assert.ErrorIs(t, err, errFeeOverflow)
-}
-
-func TestCalculateMinFee_OverflowBaseFeeAddition(
-	t *testing.T,
-) {
-	// baseFee = (minFeeA * txSize) + minFeeB overflows
-	// when the product is near MaxUint64.
-	// Use txSize (uint64) to drive overflow portably across
-	// 32-bit and 64-bit platforms.
-	_, err := CalculateMinFee(
-		math.MaxUint64,
-		lcommon.ExUnits{},
-		1,
-		1,
-		nil,
-		nil,
-	)
-	require.Error(t, err)
-	assert.ErrorIs(t, err, errFeeOverflow)
-}
-
-func TestCalculateMinFee_OverflowScriptFeeAddition(
-	t *testing.T,
-) {
-	// memFee + stepFee overflows when both are large.
-	// Use prices that produce near-max uint64 values.
-	// pricesMem = MaxUint64/1 applied to mem=1
-	//   => memFee = MaxUint64
-	// pricesSteps = 1/1 applied to steps=1
-	//   => stepFee = 1
-	// memFee + stepFee wraps around.
-	bigNum := new(big.Int).SetUint64(math.MaxUint64)
-	_, err := CalculateMinFee(
-		0,
-		lcommon.ExUnits{
-			Memory: 1,
-			Steps:  1,
-		},
-		0,
-		0,
-		new(big.Rat).SetFrac(bigNum, big.NewInt(1)),
-		big.NewRat(1, 1),
-	)
-	require.Error(t, err)
-	assert.ErrorIs(t, err, errFeeOverflow)
-}
-
-func TestCalculateMinFee_OverflowTotalAddition(
-	t *testing.T,
-) {
-	// baseFee + scriptFee overflows when both are near
-	// MaxUint64. Use txSize to produce a large baseFee
-	// portably across 32-bit and 64-bit platforms.
-	_, err := CalculateMinFee(
-		math.MaxUint64,
-		lcommon.ExUnits{
-			Memory: 1,
-			Steps:  0,
-		},
-		1,
-		0,
-		big.NewRat(1, 1),
-		big.NewRat(1, 1),
-	)
-	require.Error(t, err)
-	assert.ErrorIs(t, err, errFeeOverflow)
-}
-
 func TestCalculateMinFee_NormalValuesNoOverflow(
 	t *testing.T,
 ) {
 	// Mainnet-like parameters should still work.
-	fee, err := CalculateMinFee(
+	fee := CalculateMinFee(
 		300,
 		lcommon.ExUnits{
 			Memory: 1000000,
@@ -1772,6 +1669,23 @@ func TestCalculateMinFee_NormalValuesNoOverflow(
 		big.NewRat(577, 10000),
 		big.NewRat(721, 10000000),
 	)
-	require.NoError(t, err)
 	assert.Equal(t, uint64(240701), fee)
+}
+
+func TestCalculateMinFee_OverflowSaturates(t *testing.T) {
+	// Force an overflow: huge num/denom ratio with large ExUnits.
+	fee := CalculateMinFee(
+		math.MaxUint64,
+		lcommon.ExUnits{
+			Memory: math.MaxInt64,
+			Steps:  math.MaxInt64,
+		},
+		44,
+		155381,
+		big.NewRat(math.MaxInt64, 1),
+		big.NewRat(math.MaxInt64, 1),
+	)
+	assert.Equal(t, uint64(math.MaxUint64), fee,
+		"overflow should saturate at MaxUint64",
+	)
 }

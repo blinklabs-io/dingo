@@ -460,7 +460,7 @@ func TestCalculateMinFee(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			fee, err := CalculateMinFee(
+			fee := CalculateMinFee(
 				tc.txSize,
 				tc.exUnits,
 				tc.minFeeA,
@@ -468,7 +468,6 @@ func TestCalculateMinFee(t *testing.T) {
 				tc.pricesMem,
 				tc.pricesSteps,
 			)
-			require.NoError(t, err)
 			assert.Equal(
 				t,
 				tc.expected,
