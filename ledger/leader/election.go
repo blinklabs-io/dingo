@@ -140,7 +140,7 @@ func (e *Election) Start(ctx context.Context) error {
 	} else {
 		go e.epochTransitionLoop(ctx, evtCh)
 	}
-	go e.scheduleComputeLoop(ctx)
+	go e.scheduleComputeLoop(ctx, e.computeCh)
 
 	// Kick off initial schedule computation for the current epoch.
 	// The next epoch's schedule cannot be pre-computed because
@@ -231,12 +231,15 @@ func (e *Election) epochTransitionLoop(
 // When ShouldProduceBlock detects a missing schedule for a slot's epoch,
 // it sends the epoch number to computeCh. This goroutine picks it up and
 // computes the schedule without blocking the forger's hot path.
-func (e *Election) scheduleComputeLoop(ctx context.Context) {
+func (e *Election) scheduleComputeLoop(
+	ctx context.Context,
+	computeCh <-chan uint64,
+) {
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case epoch := <-e.computeCh:
+		case epoch := <-computeCh:
 			// Skip if schedule already exists
 			e.mu.RLock()
 			_, exists := e.schedules[epoch]
@@ -280,6 +283,8 @@ func (e *Election) Stop() error {
 		close(e.stopCh)
 		e.stopCh = nil
 	}
+	// Nil out computeCh so ShouldProduceBlock cannot send after Stop.
+	e.computeCh = nil
 	if e.cancel != nil {
 		e.cancel()
 	}
@@ -310,6 +315,13 @@ func (e *Election) RefreshScheduleForEpoch(
 	ctx context.Context,
 	epoch uint64,
 ) error {
+	e.mu.RLock()
+	running := e.running
+	e.mu.RUnlock()
+	if !running {
+		return nil
+	}
+
 	schedule, err := e.computeSchedule(ctx, epoch)
 	if err != nil {
 		return err
@@ -418,8 +430,8 @@ func (e *Election) storeSchedule(epoch uint64, schedule *Schedule) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	if e.schedules == nil {
-		e.schedules = make(map[uint64]*Schedule)
+	if !e.running {
+		return
 	}
 	e.schedules[epoch] = schedule
 
@@ -505,14 +517,24 @@ func (e *Election) NextLeaderSlot(fromSlot uint64) (uint64, bool) {
 
 	epoch := fromSlot / slotsPerEpoch
 	schedule := e.schedules[epoch]
-	if schedule == nil {
-		return 0, false
-	}
-
-	for _, slot := range schedule.LeaderSlots {
-		if slot >= fromSlot {
-			return slot, true
+	if schedule != nil {
+		for _, slot := range schedule.LeaderSlots {
+			if slot >= fromSlot {
+				return slot, true
+			}
 		}
 	}
+
+	// No leader slot found in the current epoch; check the next epoch's
+	// cached schedule in case we are near an epoch boundary.
+	nextSchedule := e.schedules[epoch+1]
+	if nextSchedule != nil {
+		for _, slot := range nextSchedule.LeaderSlots {
+			if slot >= fromSlot {
+				return slot, true
+			}
+		}
+	}
+
 	return 0, false
 }
