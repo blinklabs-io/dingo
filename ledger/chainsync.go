@@ -81,6 +81,19 @@ func (ls *LedgerState) handleEventChainsync(evt event.Event) {
 		}
 	} else if e.BlockHeader != nil {
 		if err := ls.handleEventChainsyncBlockHeader(e); err != nil {
+			// Header queue full is expected during bulk sync when
+			// pipelined headers arrive faster than blockfetch can
+			// drain them. Log at DEBUG to avoid log spam.
+			if errors.Is(err, chain.ErrHeaderQueueFull) {
+				ls.config.Logger.Debug(
+					"failed to handle block header",
+					"component", "ledger",
+					"error", err,
+					"slot", e.Point.Slot,
+					"hash", hex.EncodeToString(e.Point.Hash),
+				)
+				return
+			}
 			ls.config.Logger.Error(
 				"failed to handle block header",
 				"component", "ledger",
