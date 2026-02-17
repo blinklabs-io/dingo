@@ -107,6 +107,23 @@ func (m *mockEpochProvider) ActiveSlotCoeff() float64 {
 	return m.activeSlotCoeff
 }
 
+// waitForSchedule polls until CurrentSchedule returns non-nil, or fails
+// the test after timeout. VRF computation is expensive (~0.2s per slot),
+// so we use a generous timeout.
+func waitForSchedule(
+	t *testing.T,
+	election *Election,
+	timeout time.Duration,
+) *Schedule {
+	t.Helper()
+	var schedule *Schedule
+	require.Eventually(t, func() bool {
+		schedule = election.CurrentSchedule()
+		return schedule != nil
+	}, timeout, 50*time.Millisecond, "schedule should be computed")
+	return schedule
+}
+
 func TestNewElection(t *testing.T) {
 	poolId := lcommon.PoolKeyHash{}
 	copy(poolId[:], []byte("testpool1234567890123"))
@@ -169,14 +186,15 @@ func TestElectionStartStop(t *testing.T) {
 }
 
 func TestElectionScheduleEarlyEpochs(t *testing.T) {
-	// Test behavior when epoch < 2 (no Go snapshot available)
+	// Epochs 0 and 1 use the genesis snapshot (epoch 0) for leader
+	// election, matching the Cardano spec.
 	poolId := lcommon.PoolKeyHash{}
 	stakeProvider := newMockStakeProvider()
 	stakeProvider.totalStake = 10000
 	stakeProvider.poolStakes[string(poolId[:])] = 1000
 
 	epochProvider := newMockEpochProvider()
-	epochProvider.currentEpoch = 1 // Too early for Go snapshot
+	epochProvider.currentEpoch = 1
 
 	eventBus := event.NewEventBus(nil, nil)
 	defer eventBus.Stop()
@@ -194,9 +212,9 @@ func TestElectionScheduleEarlyEpochs(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = election.Stop() }()
 
-	// Schedule should be nil for early epochs
-	assert.Nil(t, election.CurrentSchedule())
-	assert.False(t, election.ShouldProduceBlock(100))
+	// Schedule is computed asynchronously; wait for it.
+	schedule := waitForSchedule(t, election, 30*time.Second)
+	assert.Equal(t, uint64(1), schedule.Epoch)
 }
 
 func TestElectionZeroPoolStake(t *testing.T) {
@@ -224,8 +242,13 @@ func TestElectionZeroPoolStake(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = election.Stop() }()
 
-	// Schedule should be nil when pool has no stake
-	assert.Nil(t, election.CurrentSchedule())
+	// With zero pool stake, computeSchedule returns nil (no VRF needed).
+	// Verify the schedule stays nil after the background goroutine has
+	// time to process the request.
+	assert.Never(t, func() bool {
+		return election.CurrentSchedule() != nil
+	}, 500*time.Millisecond, 50*time.Millisecond,
+		"schedule should remain nil with zero pool stake")
 }
 
 func TestElectionShouldProduceBlock(t *testing.T) {
@@ -256,9 +279,8 @@ func TestElectionShouldProduceBlock(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = election.Stop() }()
 
-	// With real VRF, 100% stake, and f=0.9, we should get leader slots
-	schedule := election.CurrentSchedule()
-	require.NotNil(t, schedule)
+	// Schedule is computed asynchronously; wait for it.
+	schedule := waitForSchedule(t, election, 30*time.Second)
 	assert.Greater(t, schedule.SlotCount(), 0,
 		"pool with 100%% stake and f=0.9 should have at least one leader slot")
 
@@ -301,9 +323,8 @@ func TestElectionNextLeaderSlot(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = election.Stop() }()
 
-	// With real VRF, 100% stake, and high f, NextLeaderSlot should find a slot
-	schedule := election.CurrentSchedule()
-	require.NotNil(t, schedule)
+	// Schedule is computed asynchronously; wait for it.
+	schedule := waitForSchedule(t, election, 30*time.Second)
 	require.Greater(t, schedule.SlotCount(), 0,
 		"should have leader slots with 100%% stake and f=0.9")
 
@@ -339,9 +360,8 @@ func TestElectionEpochTransition(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = election.Stop() }()
 
-	// Verify initial schedule
-	schedule := election.CurrentSchedule()
-	require.NotNil(t, schedule)
+	// Initial schedule is computed asynchronously; wait for it.
+	schedule := waitForSchedule(t, election, 30*time.Second)
 	assert.Equal(t, uint64(10), schedule.Epoch)
 
 	// Simulate epoch transition by updating provider and sending event

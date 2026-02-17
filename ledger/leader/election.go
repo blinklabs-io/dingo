@@ -51,8 +51,18 @@ type EpochInfoProvider interface {
 	ActiveSlotCoeff() float64
 }
 
+// maxCachedSchedules is the number of epoch schedules to keep in memory.
+// We keep the current and previous epoch to handle slots near boundaries.
+const maxCachedSchedules = 3
+
 // Election manages leader election for a stake pool.
-// It maintains the current epoch's schedule and refreshes it on epoch transitions.
+// It maintains schedules for recent epochs and refreshes them on epoch
+// transitions (from block processing events) or on demand when the
+// slot clock advances into an epoch without a cached schedule.
+//
+// Schedule computation (VRF for every slot in an epoch) is expensive and
+// runs without holding the election lock so that ShouldProduceBlock remains
+// a fast, lock-free lookup on the forger's hot path.
 type Election struct {
 	poolId      lcommon.PoolKeyHash
 	poolVrfSkey []byte
@@ -63,10 +73,11 @@ type Election struct {
 	logger        *slog.Logger
 
 	mu             sync.RWMutex
-	schedule       *Schedule
+	schedules      map[uint64]*Schedule // epoch -> schedule
 	running        bool
 	cancel         context.CancelFunc
 	stopCh         chan struct{} // signals the monitoring goroutine to exit
+	computeCh      chan uint64   // requests background schedule computation
 	subscriptionId event.EventSubscriberId
 }
 
@@ -95,6 +106,10 @@ func NewElection(
 // Start begins listening for epoch transitions and maintaining the schedule.
 // The provided context controls the election's lifecycle. When the context is
 // canceled, the election will automatically stop and clean up resources.
+//
+// The initial schedule for the current epoch is computed asynchronously in
+// the background so Start returns immediately and the forger can begin its
+// slot-aligned loop without delay.
 func (e *Election) Start(ctx context.Context) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -107,15 +122,8 @@ func (e *Election) Start(ctx context.Context) error {
 	e.cancel = cancel
 	e.running = true
 	e.stopCh = make(chan struct{})
-
-	// Calculate initial schedule
-	if err := e.refreshScheduleUnsafe(ctx); err != nil {
-		e.logger.Warn(
-			"failed to calculate initial schedule",
-			"component", "leader",
-			"error", err,
-		)
-	}
+	e.schedules = make(map[uint64]*Schedule)
+	e.computeCh = make(chan uint64, 4)
 
 	// Subscribe to epoch transitions using a channel so we can drain
 	// stale events during rapid sync (e.g., devnet with 500ms epochs).
@@ -131,6 +139,16 @@ func (e *Election) Start(ctx context.Context) error {
 		)
 	} else {
 		go e.epochTransitionLoop(ctx, evtCh)
+	}
+	go e.scheduleComputeLoop(ctx)
+
+	// Kick off initial schedule computation for the current epoch.
+	// The next epoch's schedule cannot be pre-computed because
+	// its nonce depends on the stability window passing first.
+	currentEpoch := e.epochProvider.CurrentEpoch()
+	select {
+	case e.computeCh <- currentEpoch:
+	default:
 	}
 
 	// Monitor context cancellation to automatically stop.
@@ -177,6 +195,10 @@ func (e *Election) epochTransitionLoop(
 			}
 		}
 
+		if ctx.Err() != nil {
+			return
+		}
+
 		epochEvent, ok := latest.Data.(event.EpochTransitionEvent)
 		if !ok {
 			e.logger.Error(
@@ -191,7 +213,10 @@ func (e *Election) epochTransitionLoop(
 			"component", "leader",
 			"new_epoch", epochEvent.NewEpoch,
 		)
-		if err := e.RefreshSchedule(ctx); err != nil {
+		if err := e.RefreshScheduleForEpoch(
+			ctx,
+			epochEvent.NewEpoch,
+		); err != nil {
 			e.logger.Error(
 				"failed to refresh schedule",
 				"component", "leader",
@@ -199,9 +224,43 @@ func (e *Election) epochTransitionLoop(
 				"error", err,
 			)
 		}
+	}
+}
 
-		if ctx.Err() != nil {
+// scheduleComputeLoop processes background schedule computation requests.
+// When ShouldProduceBlock detects a missing schedule for a slot's epoch,
+// it sends the epoch number to computeCh. This goroutine picks it up and
+// computes the schedule without blocking the forger's hot path.
+func (e *Election) scheduleComputeLoop(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
 			return
+		case epoch := <-e.computeCh:
+			// Skip if schedule already exists
+			e.mu.RLock()
+			_, exists := e.schedules[epoch]
+			e.mu.RUnlock()
+			if exists {
+				continue
+			}
+
+			e.logger.Info(
+				"computing leader schedule",
+				"component", "leader",
+				"epoch", epoch,
+			)
+			if err := e.RefreshScheduleForEpoch(
+				ctx,
+				epoch,
+			); err != nil {
+				e.logger.Warn(
+					"background schedule compute failed",
+					"component", "leader",
+					"epoch", epoch,
+					"error", err,
+				)
+			}
 		}
 	}
 }
@@ -232,7 +291,7 @@ func (e *Election) Stop() error {
 		e.subscriptionId = 0
 	}
 	e.running = false
-	e.schedule = nil
+	e.schedules = nil
 
 	e.logger.Info("leader election stopped", "component", "leader")
 	return nil
@@ -240,38 +299,52 @@ func (e *Election) Stop() error {
 
 // RefreshSchedule recalculates the leader schedule for the current epoch.
 func (e *Election) RefreshSchedule(ctx context.Context) error {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	return e.refreshScheduleUnsafe(ctx)
+	return e.RefreshScheduleForEpoch(ctx, e.epochProvider.CurrentEpoch())
 }
 
-// refreshScheduleUnsafe recalculates the schedule without locking.
-// Caller must hold e.mu.
-func (e *Election) refreshScheduleUnsafe(ctx context.Context) error {
-	// Check for context cancellation
+// RefreshScheduleForEpoch computes the leader schedule for the given epoch.
+// The expensive VRF computation runs WITHOUT holding the election lock so
+// that ShouldProduceBlock callers are never blocked. The lock is only held
+// briefly to store the result.
+func (e *Election) RefreshScheduleForEpoch(
+	ctx context.Context,
+	epoch uint64,
+) error {
+	schedule, err := e.computeSchedule(ctx, epoch)
+	if err != nil {
+		return err
+	}
+	if schedule == nil {
+		return nil // no stake or nonce not available
+	}
+	e.storeSchedule(epoch, schedule)
+	return nil
+}
+
+// computeSchedule gathers stake data, epoch nonce, and runs VRF for every
+// slot in the epoch. This is the expensive operation (~70ms per slot) and
+// does NOT hold any lock.
+func (e *Election) computeSchedule(
+	ctx context.Context,
+	currentEpoch uint64,
+) (*Schedule, error) {
 	if ctx.Err() != nil {
-		return ctx.Err()
+		return nil, ctx.Err()
 	}
 
-	currentEpoch := e.epochProvider.CurrentEpoch()
-
-	// Leader election uses the Go snapshot (epoch - 2)
-	if currentEpoch < 2 {
-		e.logger.Debug(
-			"no Go snapshot available yet",
-			"component", "leader",
-			"epoch", currentEpoch,
-		)
-		e.schedule = nil
-		return nil
+	// Leader election uses the Go snapshot (epoch - 2).
+	// For genesis epochs (0 and 1), use the genesis snapshot directly.
+	// The Cardano spec uses genesis staking for leader election until
+	// the first Mark→Set→Go rotation completes at epoch 2.
+	var snapshotEpoch uint64
+	if currentEpoch >= 2 {
+		snapshotEpoch = currentEpoch - 2
 	}
-
-	snapshotEpoch := currentEpoch - 2
 
 	// Get pool stake from Go snapshot
 	poolStake, err := e.stakeProvider.GetPoolStake(snapshotEpoch, e.poolId[:])
 	if err != nil {
-		return fmt.Errorf("get pool stake: %w", err)
+		return nil, fmt.Errorf("get pool stake: %w", err)
 	}
 
 	if poolStake == 0 {
@@ -281,30 +354,39 @@ func (e *Election) refreshScheduleUnsafe(ctx context.Context) error {
 			"epoch", currentEpoch,
 			"snapshot_epoch", snapshotEpoch,
 		)
-		e.schedule = nil
-		return nil
+		return nil, nil
 	}
 
 	// Get total stake from Go snapshot
 	totalStake, err := e.stakeProvider.GetTotalActiveStake(snapshotEpoch)
 	if err != nil {
-		return fmt.Errorf("get total stake: %w", err)
+		return nil, fmt.Errorf("get total stake: %w", err)
 	}
 
 	if totalStake == 0 {
-		return fmt.Errorf("total stake is zero for epoch %d", snapshotEpoch)
+		return nil, fmt.Errorf(
+			"total stake is zero for epoch %d", snapshotEpoch,
+		)
 	}
 
-	// Get epoch nonce
+	// Get epoch nonce. The nonce may not be available yet if the slot clock
+	// fired the epoch transition before block processing computed the nonce.
+	// In that case, skip this schedule — the next epoch transition will retry.
 	epochNonce := e.epochProvider.EpochNonce(currentEpoch)
+	if len(epochNonce) == 0 {
+		e.logger.Info(
+			"epoch nonce not yet available, skipping schedule",
+			"component", "leader",
+			"epoch", currentEpoch,
+		)
+		return nil, nil
+	}
 
-	// Create calculator with protocol parameters
 	calc := NewCalculator(
 		e.epochProvider.ActiveSlotCoeff(),
 		e.epochProvider.SlotsPerEpoch(),
 	)
 
-	// Calculate schedule
 	schedule, err := calc.CalculateSchedule(
 		currentEpoch,
 		e.poolId,
@@ -314,10 +396,8 @@ func (e *Election) refreshScheduleUnsafe(ctx context.Context) error {
 		epochNonce,
 	)
 	if err != nil {
-		return fmt.Errorf("calculate schedule: %w", err)
+		return nil, fmt.Errorf("calculate schedule: %w", err)
 	}
-
-	e.schedule = schedule
 
 	e.logger.Info(
 		"leader schedule calculated",
@@ -329,25 +409,83 @@ func (e *Election) refreshScheduleUnsafe(ctx context.Context) error {
 		"leader_slots", schedule.SlotCount(),
 	)
 
-	return nil
+	return schedule, nil
 }
 
-// ShouldProduceBlock returns true if this pool should produce a block for the slot.
-func (e *Election) ShouldProduceBlock(slot uint64) bool {
-	e.mu.RLock()
-	defer e.mu.RUnlock()
+// storeSchedule saves a computed schedule under a brief write lock and
+// prunes old epochs from the cache.
+func (e *Election) storeSchedule(epoch uint64, schedule *Schedule) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
 
-	if e.schedule == nil {
+	if e.schedules == nil {
+		e.schedules = make(map[uint64]*Schedule)
+	}
+	e.schedules[epoch] = schedule
+
+	// Prune old schedules to bound memory usage
+	for ep := range e.schedules {
+		if epoch >= maxCachedSchedules &&
+			ep < epoch-maxCachedSchedules+1 {
+			delete(e.schedules, ep)
+		}
+	}
+}
+
+// ShouldProduceBlock returns true if this pool should produce a block for the
+// slot. This is a pure lookup with no database access — it checks the cached
+// schedule for the slot's epoch. If no schedule is cached, it requests a
+// background computation and returns false.
+func (e *Election) ShouldProduceBlock(slot uint64) bool {
+	slotsPerEpoch := e.epochProvider.SlotsPerEpoch()
+	if slotsPerEpoch == 0 {
 		return false
 	}
-	return e.schedule.IsLeaderForSlot(slot)
+	slotEpoch := slot / slotsPerEpoch
+
+	e.mu.RLock()
+	var schedule *Schedule
+	if e.schedules != nil {
+		schedule = e.schedules[slotEpoch]
+	}
+	computeCh := e.computeCh
+	e.mu.RUnlock()
+
+	if schedule == nil {
+		// Schedule not yet computed for this epoch.
+		// Request background computation (non-blocking).
+		if computeCh != nil {
+			select {
+			case computeCh <- slotEpoch:
+			default:
+				// Request already pending
+			}
+		}
+		return false
+	}
+	return schedule.IsLeaderForSlot(slot)
 }
 
-// CurrentSchedule returns the current leader schedule, or nil if not available.
+// CurrentSchedule returns the leader schedule for the current epoch, or nil.
 func (e *Election) CurrentSchedule() *Schedule {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
-	return e.schedule
+	if e.schedules == nil {
+		return nil
+	}
+	epoch := e.epochProvider.CurrentEpoch()
+	return e.schedules[epoch]
+}
+
+// ScheduleForEpoch returns the cached leader schedule for a specific epoch,
+// or nil if not computed.
+func (e *Election) ScheduleForEpoch(epoch uint64) *Schedule {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	if e.schedules == nil {
+		return nil
+	}
+	return e.schedules[epoch]
 }
 
 // NextLeaderSlot returns the next slot where this pool is leader, starting from
@@ -356,11 +494,22 @@ func (e *Election) NextLeaderSlot(fromSlot uint64) (uint64, bool) {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 
-	if e.schedule == nil {
+	if e.schedules == nil {
 		return 0, false
 	}
 
-	for _, slot := range e.schedule.LeaderSlots {
+	slotsPerEpoch := e.epochProvider.SlotsPerEpoch()
+	if slotsPerEpoch == 0 {
+		return 0, false
+	}
+
+	epoch := fromSlot / slotsPerEpoch
+	schedule := e.schedules[epoch]
+	if schedule == nil {
+		return 0, false
+	}
+
+	for _, slot := range schedule.LeaderSlots {
 		if slot >= fromSlot {
 			return slot, true
 		}
