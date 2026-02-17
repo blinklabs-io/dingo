@@ -405,6 +405,10 @@ func (n *Node) Run(ctx context.Context) error {
 		peergov.OutboundConnectionEventType,
 		n.ouroboros.HandleOutboundConnEvent,
 	)
+	n.eventBus.SubscribeFunc(
+		connmanager.InboundConnectionEventType,
+		n.ouroboros.HandleInboundConnEvent,
+	)
 	if n.config.topologyConfig != nil {
 		n.peerGov.LoadTopologyConfig(n.config.topologyConfig)
 	}
