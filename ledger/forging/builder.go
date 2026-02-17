@@ -157,8 +157,11 @@ func (b *DefaultBlockBuilder) BuildBlock(
 	}
 
 	var (
-		transactionBodies      []conway.ConwayTransactionBody
-		transactionWitnessSets []conway.ConwayTransactionWitnessSet
+		// Initialize as non-nil empty slices so CBOR encoding
+		// produces empty arrays (0x80) rather than null (0xF6).
+		// Haskell's CDDL requires arrays here, not null.
+		transactionBodies      = []conway.ConwayTransactionBody{}
+		transactionWitnessSets = []conway.ConwayTransactionWitnessSet{}
 		transactionMetadataSet = make(map[uint]cbor.RawMessage)
 		blockSize              uint64
 		totalExUnits           lcommon.ExUnits
@@ -369,23 +372,21 @@ func (b *DefaultBlockBuilder) BuildBlock(
 		)
 	}
 
-	// Process transaction metadata set
+	// Encode the transaction metadata set (always non-nil, initialized above).
+	metadataCbor, err := cbor.Encode(transactionMetadataSet)
+	if err != nil {
+		return nil, nil, fmt.Errorf(
+			"failed to encode transaction metadata set: %w",
+			err,
+		)
+	}
 	var metadataSet lcommon.TransactionMetadataSet
-	if len(transactionMetadataSet) > 0 {
-		metadataCbor, err := cbor.Encode(transactionMetadataSet)
-		if err != nil {
-			return nil, nil, fmt.Errorf(
-				"failed to encode transaction metadata set: %w",
-				err,
-			)
-		}
-		err = metadataSet.UnmarshalCBOR(metadataCbor)
-		if err != nil {
-			return nil, nil, fmt.Errorf(
-				"failed to unmarshal transaction metadata set: %w",
-				err,
-			)
-		}
+	err = metadataSet.UnmarshalCBOR(metadataCbor)
+	if err != nil {
+		return nil, nil, fmt.Errorf(
+			"failed to unmarshal transaction metadata set: %w",
+			err,
+		)
 	}
 
 	// Compute block body hash: blake2b_256(hash_tx || hash_wit || hash_aux || hash_invalid)
