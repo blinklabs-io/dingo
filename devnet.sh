@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# Copyright 2025 Blink Labs Software
+# Copyright 2026 Blink Labs Software
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -21,11 +21,11 @@ export CARDANO_DEV_MODE=true
 
 DEBUG=${DEBUG:-false}
 
-conf=$(dirname $CARDANO_CONFIG)
+conf="$(dirname "$CARDANO_CONFIG")"
 now=$(date -u +%s)
-echo setting start time in $conf to $now
-sed -i -e "s/startTime\": .*,/startTime\": $now,/" $conf/byron-genesis.json
-sed -i -e "s/systemStart\": .*,/systemStart\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ --date=@$now)\",/" $conf/shelley-genesis.json
+echo "setting start time in $conf to $now"
+sed -i -e "s/startTime\": .*,/startTime\": $now,/" "$conf/byron-genesis.json"
+sed -i -e "s/systemStart\": .*,/systemStart\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ --date=@$now)\",/" "$conf/shelley-genesis.json"
 
 echo resetting .devnet
 rm -rf .devnet/*

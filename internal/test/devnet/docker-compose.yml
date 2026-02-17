@@ -1,0 +1,174 @@
+# Copyright 2026 Blink Labs Software
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# DevNet Docker Compose configuration
+#
+# Runs a private Cardano DevNet with:
+#   - configurator:     Generates unique pool keys and genesis files
+#   - dingo-producer:   Dingo node forging with pool 1 keys
+#   - cardano-producer: Official cardano-node forging with pool 2 keys
+#   - cardano-relay:    Relay connecting both producers (no block production)
+#
+# Usage:
+#   docker compose up -d       # Start all services
+#   docker compose down -v     # Stop and remove volumes
+#
+# The configurator service runs first (via depends_on) to generate unique
+# key sets and genesis files for each pool from testnet.yaml.
+
+services:
+  configurator:
+    build:
+      context: .
+      dockerfile: Dockerfile.configurator
+    container_name: devnet-configurator
+    volumes:
+      - ./testnet.yaml:/testnet.yaml
+      - p1-configs:/configs/1
+      - p2-configs:/configs/2
+
+  dingo-producer:
+    build:
+      context: ../../..
+      dockerfile: Dockerfile
+    container_name: dingo-producer
+    depends_on:
+      configurator:
+        condition: service_completed_successfully
+    environment:
+      CARDANO_NETWORK: devnet
+      CARDANO_CONFIG: /configs/configs/config.json
+      CARDANO_TOPOLOGY: /topology/topology.json
+      CARDANO_DATABASE_PATH: /data/db
+      CARDANO_NODE_SOCKET_PATH: /ipc/dingo.socket
+      DINGO_DEBUG: "1"
+      # Block production credentials (pool 1)
+      CARDANO_BLOCK_PRODUCER: "true"
+      CARDANO_SHELLEY_VRF_KEY: /configs/keys/vrf.skey
+      CARDANO_SHELLEY_KES_KEY: /configs/keys/kes.skey
+      CARDANO_SHELLEY_OPERATIONAL_CERTIFICATE: /configs/keys/opcert.cert
+    volumes:
+      - p1-configs:/configs:ro
+      - ./topology/dingo-producer.json:/topology/topology.json:ro
+      - dingo-producer-data:/data/db
+      - dingo-producer-ipc:/ipc
+    ports:
+      - "3001:3001"
+    networks:
+      devnet:
+        ipv4_address: 172.20.0.10
+    healthcheck:
+      test: ["CMD-SHELL", "test -S /ipc/dingo.socket || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 10s
+
+  cardano-producer:
+    image: ghcr.io/blinklabs-io/cardano-node:10.5.4
+    container_name: cardano-producer
+    depends_on:
+      configurator:
+        condition: service_completed_successfully
+    environment:
+      CARDANO_BLOCK_PRODUCER: "true"
+      RESTORE_SNAPSHOT: "false"
+    command:
+      - "run"
+      - "--config"
+      - "/configs/configs/config.json"
+      - "--topology"
+      - "/topology/topology.json"
+      - "--database-path"
+      - "/data/db"
+      - "--socket-path"
+      - "/ipc/node.socket"
+      - "--shelley-kes-key"
+      - "/configs/keys/kes.skey"
+      - "--shelley-vrf-key"
+      - "/configs/keys/vrf.skey"
+      - "--shelley-operational-certificate"
+      - "/configs/keys/opcert.cert"
+      - "--port"
+      - "3001"
+    volumes:
+      - p2-configs:/configs:ro
+      - ./topology/cardano-producer.json:/topology/topology.json:ro
+      - cardano-producer-data:/data/db
+      - cardano-producer-ipc:/ipc
+    ports:
+      - "3011:3001"
+    networks:
+      devnet:
+        ipv4_address: 172.20.0.11
+    healthcheck:
+      test: ["CMD-SHELL", "test -S /ipc/node.socket || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 10s
+
+  cardano-relay:
+    image: ghcr.io/blinklabs-io/cardano-node:10.5.4
+    container_name: cardano-relay
+    depends_on:
+      configurator:
+        condition: service_completed_successfully
+    environment:
+      RESTORE_SNAPSHOT: "false"
+    command:
+      - "run"
+      - "--config"
+      - "/configs/configs/config.json"
+      - "--topology"
+      - "/topology/topology.json"
+      - "--database-path"
+      - "/data/db"
+      - "--socket-path"
+      - "/ipc/node.socket"
+      - "--port"
+      - "3001"
+    volumes:
+      - p1-configs:/configs:ro
+      - ./topology/relay.json:/topology/topology.json:ro
+      - cardano-relay-data:/data/db
+      - cardano-relay-ipc:/ipc
+    ports:
+      - "3012:3001"
+    networks:
+      devnet:
+        ipv4_address: 172.20.0.12
+    healthcheck:
+      test: ["CMD-SHELL", "test -S /ipc/node.socket || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 10s
+
+networks:
+  devnet:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/24
+
+volumes:
+  p1-configs:
+  p2-configs:
+  dingo-producer-data:
+  dingo-producer-ipc:
+  cardano-producer-data:
+  cardano-producer-ipc:
+  cardano-relay-data:
+  cardano-relay-ipc:
