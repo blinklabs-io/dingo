@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"runtime/pprof"
 	"strings"
 
@@ -84,7 +85,7 @@ func listPlugins(
 		buf.WriteString("Available blob plugins:\n")
 		blobPlugins := plugin.GetPlugins(plugin.PluginTypeBlob)
 		for _, p := range blobPlugins {
-			buf.WriteString(fmt.Sprintf("  %s: %s\n", p.Name, p.Description))
+			fmt.Fprintf(&buf, "  %s: %s\n", p.Name, p.Description)
 		}
 		listed = true
 	}
@@ -96,7 +97,7 @@ func listPlugins(
 		buf.WriteString("Available metadata plugins:\n")
 		metadataPlugins := plugin.GetPlugins(plugin.PluginTypeMetadata)
 		for _, p := range metadataPlugins {
-			buf.WriteString(fmt.Sprintf("  %s: %s\n", p.Name, p.Description))
+			fmt.Fprintf(&buf, "  %s: %s\n", p.Name, p.Description)
 		}
 		listed = true
 	}
@@ -114,13 +115,13 @@ func listAllPlugins() string {
 	buf.WriteString("Blob Storage Plugins:\n")
 	blobPlugins := plugin.GetPlugins(plugin.PluginTypeBlob)
 	for _, p := range blobPlugins {
-		buf.WriteString(fmt.Sprintf("  %s: %s\n", p.Name, p.Description))
+		fmt.Fprintf(&buf, "  %s: %s\n", p.Name, p.Description)
 	}
 
 	buf.WriteString("\nMetadata Storage Plugins:\n")
 	metadataPlugins := plugin.GetPlugins(plugin.PluginTypeMetadata)
 	for _, p := range metadataPlugins {
-		buf.WriteString(fmt.Sprintf("  %s: %s\n", p.Name, p.Description))
+		fmt.Fprintf(&buf, "  %s: %s\n", p.Name, p.Description)
 	}
 
 	return buf.String()
@@ -175,8 +176,9 @@ func main() {
 
 	// Initialize CPU profiling (starts immediately, stops on exit)
 	if cpuprofile != "" {
-		fmt.Fprintf(os.Stderr, "Starting CPU profiling to %s\n", cpuprofile)
-		f, err := os.Create(cpuprofile)
+		cpuprofile = filepath.Clean(cpuprofile)
+		fmt.Fprintf(os.Stderr, "Starting CPU profiling to %q\n", cpuprofile) //nolint:gosec // stderr output, no XSS risk
+		f, err := os.Create(cpuprofile)                                      //nolint:gosec // user-specified profiling output path
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "could not create CPU profile: %v\n", err)
 			os.Exit(1)
@@ -295,7 +297,8 @@ func main() {
 
 	// Finalize memory profiling before exit
 	if memprofile != "" {
-		f, err := os.Create(memprofile)
+		memprofile = filepath.Clean(memprofile)
+		f, err := os.Create(memprofile) //nolint:gosec // user-specified profiling output path
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "could not create memory profile: %v\n", err)
 		} else {

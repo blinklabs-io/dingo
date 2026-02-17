@@ -844,7 +844,7 @@ func (d *MetadataStoreSqlite) GetStakeByPools(
 
 	for _, r := range delegatorResults {
 		if r.DelegatorCount >= 0 {
-			delegatorMap[string(r.Pool)] = uint64(r.DelegatorCount)
+			delegatorMap[string(r.Pool)] = uint64(r.DelegatorCount) //nolint:gosec // guarded by >= 0 check
 		}
 	}
 
