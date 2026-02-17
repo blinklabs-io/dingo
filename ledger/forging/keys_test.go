@@ -17,6 +17,7 @@ package forging
 import (
 	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/binary"
 	"encoding/hex"
 	"os"
 	"path/filepath"
@@ -238,11 +239,13 @@ func TestOpCertValidation(t *testing.T) {
 	issueNumber := uint64(0)
 	kesPeriod := uint64(0)
 
-	// Sign the cert body with the cold private key
-	certBody := []any{kesVKey, issueNumber, kesPeriod}
-	certCbor, err := cbor.Encode(certBody)
-	require.NoError(t, err)
-	signature := ed25519.Sign(coldPrivKey, certCbor)
+	// Sign the raw signable representation:
+	//   KES vkey (32 bytes) || issue number (8 bytes BE) || KES period (8 bytes BE)
+	var certBody [48]byte
+	copy(certBody[:32], kesVKey)
+	binary.BigEndian.PutUint64(certBody[32:40], issueNumber)
+	binary.BigEndian.PutUint64(certBody[40:48], kesPeriod)
+	signature := ed25519.Sign(coldPrivKey, certBody[:])
 
 	pc.kesVKey = kesVKey
 	pc.opCert = &OpCert{
