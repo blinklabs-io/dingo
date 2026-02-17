@@ -17,6 +17,7 @@ package leader
 import (
 	"context"
 	"log/slog"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -76,23 +77,24 @@ func (m *mockStakeProvider) GetTotalActiveStake(epoch uint64) (uint64, error) {
 
 // mockEpochProvider implements EpochInfoProvider for testing
 type mockEpochProvider struct {
-	currentEpoch    uint64
+	currentEpoch    atomic.Uint64
 	epochNonce      []byte
 	slotsPerEpoch   uint64
 	activeSlotCoeff float64
 }
 
 func newMockEpochProvider() *mockEpochProvider {
-	return &mockEpochProvider{
-		currentEpoch:    10,
+	m := &mockEpochProvider{
 		epochNonce:      electionTestNonce,
 		slotsPerEpoch:   electionSlotsPerEpoch,
 		activeSlotCoeff: 0.05,
 	}
+	m.currentEpoch.Store(10)
+	return m
 }
 
 func (m *mockEpochProvider) CurrentEpoch() uint64 {
-	return m.currentEpoch
+	return m.currentEpoch.Load()
 }
 
 func (m *mockEpochProvider) EpochNonce(epoch uint64) []byte {
@@ -194,7 +196,7 @@ func TestElectionScheduleEarlyEpochs(t *testing.T) {
 	stakeProvider.poolStakes[string(poolId[:])] = 1000
 
 	epochProvider := newMockEpochProvider()
-	epochProvider.currentEpoch = 1
+	epochProvider.currentEpoch.Store(1)
 
 	eventBus := event.NewEventBus(nil, nil)
 	defer eventBus.Stop()
@@ -224,7 +226,7 @@ func TestElectionZeroPoolStake(t *testing.T) {
 	// No pool stake set (zero)
 
 	epochProvider := newMockEpochProvider()
-	epochProvider.currentEpoch = 10
+	epochProvider.currentEpoch.Store(10)
 
 	eventBus := event.NewEventBus(nil, nil)
 	defer eventBus.Stop()
@@ -260,7 +262,7 @@ func TestElectionShouldProduceBlock(t *testing.T) {
 	// Use high active slot coefficient (90%) with small epoch to ensure
 	// we reliably get leader slots despite the small sample size.
 	epochProvider := newMockEpochProvider()
-	epochProvider.currentEpoch = 10
+	epochProvider.currentEpoch.Store(10)
 	epochProvider.activeSlotCoeff = 0.9
 
 	eventBus := event.NewEventBus(nil, nil)
@@ -299,7 +301,7 @@ func TestElectionNextLeaderSlot(t *testing.T) {
 	stakeProvider.poolStakes[string(poolId[:])] = 1_000_000
 
 	epochProvider := newMockEpochProvider()
-	epochProvider.currentEpoch = 10
+	epochProvider.currentEpoch.Store(10)
 	epochProvider.activeSlotCoeff = 0.9 // High f for reliable election
 
 	eventBus := event.NewEventBus(nil, nil)
@@ -342,7 +344,7 @@ func TestElectionEpochTransition(t *testing.T) {
 	stakeProvider.poolStakes[string(poolId[:])] = 1_000_000
 
 	epochProvider := newMockEpochProvider()
-	epochProvider.currentEpoch = 10
+	epochProvider.currentEpoch.Store(10)
 
 	eventBus := event.NewEventBus(nil, nil)
 	defer eventBus.Stop()
@@ -365,7 +367,7 @@ func TestElectionEpochTransition(t *testing.T) {
 	assert.Equal(t, uint64(10), schedule.Epoch)
 
 	// Simulate epoch transition by updating provider and sending event
-	epochProvider.currentEpoch = 11
+	epochProvider.currentEpoch.Store(11)
 
 	// Publish epoch transition event
 	eventBus.Publish(
@@ -410,7 +412,7 @@ func TestElectionConcurrentAccess(t *testing.T) {
 	stakeProvider.poolStakes[string(poolId[:])] = 1_000_000
 
 	epochProvider := newMockEpochProvider()
-	epochProvider.currentEpoch = 10
+	epochProvider.currentEpoch.Store(10)
 
 	eventBus := event.NewEventBus(nil, nil)
 	defer eventBus.Stop()
@@ -427,6 +429,13 @@ func TestElectionConcurrentAccess(t *testing.T) {
 	err := election.Start(context.Background())
 	require.NoError(t, err)
 	defer func() { _ = election.Stop() }()
+
+	// Wait for initial schedule so concurrent goroutines exercise
+	// both cache-hit and cache-miss paths.
+	require.Eventually(t, func() bool {
+		return election.CurrentSchedule() != nil
+	}, 30*time.Second, 50*time.Millisecond,
+		"initial schedule should be computed before concurrent access")
 
 	// Concurrent reads and operations
 	done := make(chan bool)
