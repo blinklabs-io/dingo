@@ -2577,6 +2577,13 @@ func (ls *LedgerState) GetIntersectPoint(
 	ls.RLock()
 	tip := ls.currentTip
 	ls.RUnlock()
+	// When the chain is empty (tip at origin), origin is the only
+	// valid intersect regardless of what points the peer sends.
+	// This allows peers to start chainsync before we have blocks.
+	if tip.Point.Slot == 0 && len(tip.Point.Hash) == 0 {
+		var ret ocommon.Point
+		return &ret, nil
+	}
 	var ret ocommon.Point
 	var tmpBlock models.Block
 	var err error
