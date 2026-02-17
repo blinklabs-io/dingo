@@ -46,10 +46,14 @@ func (o *Ouroboros) chainsyncClientConnOpts() []ochainsync.ChainSyncOptionFunc {
 	return []ochainsync.ChainSyncOptionFunc{
 		ochainsync.WithRollForwardFunc(o.chainsyncClientRollForward),
 		ochainsync.WithRollBackwardFunc(o.chainsyncClientRollBackward),
-		// Enable pipelining of RequestNext messages to speed up chainsync
-		ochainsync.WithPipelineLimit(50),
-		// Set the recv queue size to 2x our pipeline limit
-		ochainsync.WithRecvQueueSize(100),
+		// Pipeline enough headers to keep one blockfetch batch (500
+		// blocks) ready while the previous batch processes. A depth
+		// of 10 is sufficient; higher values flood the header queue
+		// and waste CPU parsing headers that are immediately dropped.
+		ochainsync.WithPipelineLimit(10),
+		// Recv queue at 2x pipeline limit to absorb bursts without
+		// blocking the protocol goroutine.
+		ochainsync.WithRecvQueueSize(20),
 	}
 }
 
