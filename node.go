@@ -16,7 +16,6 @@ package dingo
 
 import (
 	"context"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -849,6 +848,8 @@ func (b *blockBroadcaster) AddBlock(
 }
 
 // stakeDistributionAdapter adapts ledger.LedgerState to leader.StakeDistributionProvider.
+// It queries the metadata store directly with a nil transaction so the SQLite
+// read pool is used, avoiding contention with block-processing write locks.
 type stakeDistributionAdapter struct {
 	ledgerState *ledger.LedgerState
 }
@@ -857,35 +858,24 @@ func (a *stakeDistributionAdapter) GetPoolStake(
 	epoch uint64,
 	poolKeyHash []byte,
 ) (uint64, error) {
-	txn := a.ledgerState.Database().Transaction(false)
-	var stake uint64
-	err := txn.Do(func(txn *database.Txn) error {
-		view := a.ledgerState.NewView(txn)
-		dist, err := view.GetStakeDistribution(epoch)
-		if err != nil {
-			return err
-		}
-		stake = dist.PoolStakes[hex.EncodeToString(poolKeyHash)]
-		return nil
-	})
-	return stake, err
+	snapshot, err := a.ledgerState.Database().Metadata().GetPoolStakeSnapshot(
+		epoch, "mark", poolKeyHash, nil,
+	)
+	if err != nil {
+		return 0, err
+	}
+	if snapshot == nil {
+		return 0, nil
+	}
+	return uint64(snapshot.TotalStake), nil
 }
 
 func (a *stakeDistributionAdapter) GetTotalActiveStake(
 	epoch uint64,
 ) (uint64, error) {
-	txn := a.ledgerState.Database().Transaction(false)
-	var stake uint64
-	err := txn.Do(func(txn *database.Txn) error {
-		view := a.ledgerState.NewView(txn)
-		dist, err := view.GetStakeDistribution(epoch)
-		if err != nil {
-			return err
-		}
-		stake = dist.TotalStake
-		return nil
-	})
-	return stake, err
+	return a.ledgerState.Database().Metadata().GetTotalActiveStake(
+		epoch, "mark", nil,
+	)
 }
 
 // epochInfoAdapter adapts ledger.LedgerState to leader.EpochInfoProvider.
