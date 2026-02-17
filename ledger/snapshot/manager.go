@@ -25,6 +25,7 @@ import (
 	"sync"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
 )
 
@@ -137,7 +138,7 @@ func (m *Manager) epochTransitionLoop(
 	for evt := range evtCh {
 		// Drain any queued events, keeping only the latest.
 		latest := evt
-		drained := false
+		skipped := false
 	drain:
 		for {
 			select {
@@ -146,7 +147,7 @@ func (m *Manager) epochTransitionLoop(
 					return
 				}
 				latest = newer
-				drained = true
+				skipped = true
 			default:
 				break drain
 			}
@@ -161,7 +162,8 @@ func (m *Manager) epochTransitionLoop(
 			continue
 		}
 
-		if drained {
+		if skipped {
+			// We skipped intermediate events
 			skippedEvt, _ := evt.Data.(event.EpochTransitionEvent)
 			m.logger.Info(
 				"fast-forwarded past intermediate epoch transitions",
@@ -172,14 +174,23 @@ func (m *Manager) epochTransitionLoop(
 		}
 
 		if err := m.handleEpochTransition(ctx, epochEvent); err != nil {
-			m.logger.Error(
-				"failed to handle epoch transition",
-				"component", "snapshot",
-				"epoch", epochEvent.NewEpoch,
-				"error", err,
-			)
+			if errors.Is(err, types.ErrNoEpochData) {
+				m.logger.Debug(
+					"skipping snapshot: epoch data not yet synced",
+					"component", "snapshot",
+					"epoch", epochEvent.NewEpoch,
+				)
+			} else {
+				m.logger.Error(
+					"failed to handle epoch transition",
+					"component", "snapshot",
+					"epoch", epochEvent.NewEpoch,
+					"error", err,
+				)
+			}
 		}
 
+		// Check for context cancellation between events
 		if ctx.Err() != nil {
 			return
 		}
@@ -257,5 +268,43 @@ func (m *Manager) captureMarkSnapshot(
 		"total_stake", distribution.TotalStake,
 	)
 
+	return nil
+}
+
+// CaptureGenesisSnapshot captures the initial stake distribution from genesis
+// as a mark snapshot for epoch 0. This ensures the "Go" snapshot is available
+// at epoch 2 for leader election, matching the Cardano spec which uses the
+// genesis stake distribution for the first two epochs.
+func (m *Manager) CaptureGenesisSnapshot(ctx context.Context) error {
+	calculator := NewCalculator(m.db)
+
+	distribution, err := calculator.CalculateStakeDistribution(ctx, 0)
+	if err != nil {
+		return fmt.Errorf("calculate genesis distribution: %w", err)
+	}
+
+	if distribution.TotalPools == 0 {
+		m.logger.Debug(
+			"no genesis pools, skipping genesis snapshot",
+			"component", "snapshot",
+		)
+		return nil
+	}
+
+	evt := event.EpochTransitionEvent{
+		NewEpoch:     0,
+		BoundarySlot: 0,
+		SnapshotSlot: 0,
+	}
+	if err := m.saveSnapshot(ctx, 0, "mark", distribution, evt); err != nil {
+		return fmt.Errorf("save genesis snapshot: %w", err)
+	}
+
+	m.logger.Info(
+		"captured genesis snapshot",
+		"component", "snapshot",
+		"total_pools", distribution.TotalPools,
+		"total_stake", distribution.TotalStake,
+	)
 	return nil
 }
