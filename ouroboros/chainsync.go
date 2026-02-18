@@ -54,6 +54,11 @@ func (o *Ouroboros) chainsyncClientConnOpts() []ochainsync.ChainSyncOptionFunc {
 		// Recv queue at 2x pipeline limit to absorb bursts without
 		// blocking the protocol goroutine.
 		ochainsync.WithRecvQueueSize(20),
+		// Increase the intersect timeout from the 5s default. The
+		// upstream peer may need time to process FindIntersect when
+		// under load (e.g. fast DevNet block production or initial
+		// sync from genesis).
+		ochainsync.WithIntersectTimeout(30 * time.Second),
 	}
 }
 
@@ -108,36 +113,30 @@ func (o *Ouroboros) chainsyncServerFindIntersect(
 	ctx ochainsync.CallbackContext,
 	points []ocommon.Point,
 ) (ocommon.Point, ochainsync.Tip, error) {
-	o.LedgerState.RLock()
-	defer o.LedgerState.RUnlock()
 	var retPoint ocommon.Point
-	var retTip ochainsync.Tip
-	// Find intersection
+	tip := o.LedgerState.Tip()
 	intersectPoint, err := o.LedgerState.GetIntersectPoint(points)
 	if err != nil {
-		return retPoint, retTip, err
+		return retPoint, tip, err
 	}
-
-	// Populate return tip
-	retTip = o.LedgerState.Tip()
-
 	if intersectPoint == nil {
-		return retPoint, retTip, ochainsync.ErrIntersectNotFound
+		return retPoint, tip, ochainsync.ErrIntersectNotFound
 	}
-
 	// Add our client to the chainsync state
 	_, err = o.ChainsyncState.AddClient(
 		ctx.ConnectionId,
 		*intersectPoint,
 	)
 	if err != nil {
-		return retPoint, retTip, err
+		o.config.Logger.Debug(
+			"chainsync server: AddClient failed",
+			"connection_id", ctx.ConnectionId.String(),
+			"error", err,
+		)
+		return retPoint, tip, err
 	}
-
-	// Populate return point
 	retPoint = *intersectPoint
-
-	return retPoint, retTip, nil
+	return retPoint, tip, nil
 }
 
 func (o *Ouroboros) chainsyncServerRequestNext(
@@ -150,9 +149,19 @@ func (o *Ouroboros) chainsyncServerRequestNext(
 		tip.Point,
 	)
 	if err != nil {
+		o.config.Logger.Debug(
+			"chainsync server: AddClient failed",
+			"connection_id", ctx.ConnectionId.String(),
+			"error", err,
+		)
 		return err
 	}
 	if clientState.NeedsInitialRollback {
+		o.config.Logger.Debug(
+			"chainsync server: initial rollback",
+			"connection_id", ctx.ConnectionId.String(),
+			"cursor_slot", clientState.Cursor.Slot,
+		)
 		err := ctx.Server.RollBackward(
 			clientState.Cursor,
 			tip,
@@ -186,6 +195,11 @@ func (o *Ouroboros) chainsyncServerRequestNext(
 		return err
 	}
 	// Send AwaitReply
+	o.config.Logger.Debug(
+		"chainsync server: sending AwaitReply",
+		"connection_id", ctx.ConnectionId.String(),
+		"tip_slot", tip.Point.Slot,
+	)
 	if err := ctx.Server.AwaitReply(); err != nil {
 		return err
 	}
@@ -195,26 +209,39 @@ func (o *Ouroboros) chainsyncServerRequestNext(
 		return fmt.Errorf("connection %s not found", ctx.ConnectionId.String())
 	}
 	go func() {
-		// Monitor connection and cancel iterator if connection fails
+		// Wait for next block in a separate goroutine so we can
+		// also monitor the connection for errors. This avoids
+		// leaking the monitor goroutine when Next returns first.
+		done := make(chan struct{})
+		var next *chain.ChainIteratorResult
+		var nextErr error
 		go func() {
-			<-conn.ErrorChan()
-			clientState.ChainIter.Cancel()
+			defer close(done)
+			next, nextErr = clientState.ChainIter.Next(true)
 		}()
-
-		// Wait for next block from iterator
-		next, err := clientState.ChainIter.Next(true)
-		if err != nil {
-			// Don't log context.Canceled errors as they're expected during connection closure
-			if !errors.Is(err, context.Canceled) {
+		select {
+		case <-done:
+			// Iterator returned
+		case <-conn.ErrorChan():
+			clientState.ChainIter.Cancel()
+			return
+		}
+		if nextErr != nil {
+			// Don't log context.Canceled errors as they're
+			// expected during connection closure.
+			if !errors.Is(nextErr, context.Canceled) {
 				o.config.Logger.Debug(
 					"failed to get next block from chain iterator",
-					"error",
-					err,
+					"error", nextErr,
 				)
 			}
 			return
 		}
 		if next == nil {
+			o.config.Logger.Debug(
+				"chainsync server: goroutine got nil block",
+				"connection_id", ctx.ConnectionId.String(),
+			)
 			return
 		}
 		tip := o.LedgerState.Tip()
@@ -225,8 +252,7 @@ func (o *Ouroboros) chainsyncServerRequestNext(
 			); err != nil {
 				o.config.Logger.Debug(
 					"failed to roll backward",
-					"error",
-					err,
+					"error", err,
 				)
 			}
 		} else {
@@ -235,7 +261,10 @@ func (o *Ouroboros) chainsyncServerRequestNext(
 				next.Block.Cbor,
 				tip,
 			); err != nil {
-				o.config.Logger.Debug("failed to roll forward", "error", err)
+				o.config.Logger.Debug(
+					"failed to roll forward",
+					"error", err,
+				)
 			}
 		}
 	}()
