@@ -60,9 +60,9 @@ func ValidateTxExUnits(
 //	scriptFee = ceil(pricesMem * exUnits.Memory)
 //	          + ceil(pricesSteps * exUnits.Steps)
 //
-// All arithmetic uses integer math (big.Int) to match
-// the Haskell reference implementation. Returns an error
-// if any intermediate result overflows uint64.
+// All arithmetic uses big.Int to match the Haskell
+// reference implementation. Overflow is impossible
+// with Cardano protocol parameters.
 func CalculateMinFee(
 	txSize uint64,
 	exUnits lcommon.ExUnits,
@@ -70,7 +70,7 @@ func CalculateMinFee(
 	minFeeB uint,
 	pricesMem *big.Rat,
 	pricesSteps *big.Rat,
-) (uint64, error) {
+) uint64 {
 	return eras.CalculateMinFee(
 		txSize,
 		exUnits,
