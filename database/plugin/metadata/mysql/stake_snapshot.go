@@ -21,6 +21,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // Pool Stake Snapshot Operations
@@ -49,7 +50,7 @@ func (d *MetadataStoreMysql) SavePoolStakeSnapshots(
 	if err != nil {
 		return err
 	}
-	return db.Create(snapshots).Error
+	return db.Clauses(clause.OnConflict{DoNothing: true}).Create(snapshots).Error
 }
 
 // GetPoolStakeSnapshot retrieves a specific pool's stake snapshot
@@ -132,7 +133,7 @@ func (d *MetadataStoreMysql) SaveEpochSummary(
 	if err != nil {
 		return err
 	}
-	return db.Create(summary).Error
+	return db.Clauses(clause.OnConflict{DoNothing: true}).Create(summary).Error
 }
 
 // GetEpochSummary retrieves an epoch summary by epoch number
