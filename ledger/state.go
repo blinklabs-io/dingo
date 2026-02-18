@@ -379,6 +379,16 @@ type ForgedBlockChecker interface {
 	WasForgedByUs(slot uint64) (blockHash []byte, ok bool)
 }
 
+// ChainsyncResyncFunc describes a callback function used to trigger a
+// chainsync re-negotiation for the given connection. This is called when
+// the ledger detects a persistent chain fork that prevents syncing.
+type ChainsyncResyncFunc func(ouroboros.ConnectionId)
+
+// ConnectionSwitchFunc is called when the active chainsync connection
+// changes. Implementations should clear any per-connection state such as
+// the header dedup cache so the new connection can re-deliver blocks.
+type ConnectionSwitchFunc func()
+
 type LedgerStateConfig struct {
 	PromRegistry               prometheus.Registerer
 	Logger                     *slog.Logger
@@ -388,6 +398,8 @@ type LedgerStateConfig struct {
 	CardanoNodeConfig          *cardano.CardanoNodeConfig
 	BlockfetchRequestRangeFunc BlockfetchRequestRangeFunc
 	GetActiveConnectionFunc    GetActiveConnectionFunc
+	ChainsyncResyncFunc        ChainsyncResyncFunc
+	ConnectionSwitchFunc       ConnectionSwitchFunc
 	FatalErrorFunc             FatalErrorFunc
 	ForgedBlockChecker         ForgedBlockChecker
 	ValidateHistorical         bool
@@ -423,7 +435,6 @@ type LedgerState struct {
 	db                                 *database.Database
 	chainsyncState                     ChainsyncState
 	currentTipBlockNonce               []byte
-	chainsyncBlockEvents               []BlockfetchEvent
 	epochCache                         []models.Epoch
 	currentTip                         ochainsync.Tip
 	currentEpoch                       models.Epoch
@@ -467,6 +478,9 @@ type LedgerState struct {
 	rollbackHistory []rollbackRecord // recent rollback slot+time pairs for loop detection
 
 	lastActiveConnId *ouroboros.ConnectionId // tracks active connection for switch detection
+
+	// Header mismatch tracking for fork detection and re-sync
+	headerMismatchCount int // consecutive header mismatch count
 }
 
 // EraTransitionResult holds computed state from an era transition
@@ -948,16 +962,16 @@ func (ls *LedgerState) handleSlotTicks() {
 
 		// Get current state snapshot
 		ls.RLock()
-		isSynced := ls.validationEnabled
 		currentEpoch := ls.currentEpoch
 		currentEra := ls.currentEra
+		tipSlot := ls.currentTip.Point.Slot
 		ls.RUnlock()
 
-		// During catch up or load, don't emit slot-based epoch events.
-		// Block processing handles epoch transitions for historical data.
-		// The slot clock is ticking based on wall-clock time which is far ahead
-		// of the blocks being processed.
-		if !isSynced {
+		// During catch up, don't emit slot-based epoch events. Block
+		// processing handles epoch transitions for historical data. We
+		// consider the node "near tip" when the ledger tip is within 95%
+		// of the upstream peer's tip slot.
+		if !ls.isNearTip(tipSlot) {
 			logger.Debug(
 				"slot clock epoch boundary during catch up (suppressed)",
 				"slot_clock_epoch",
@@ -1035,6 +1049,21 @@ func (ls *LedgerState) handleSlotTicks() {
 			)
 		}
 	}
+}
+
+// isNearTip returns true when the given slot is within 95% of the
+// upstream peer's tip. This is used to decide whether to emit
+// slot-clock epoch events. During initial catch-up the node is far
+// behind the tip and these checks are skipped; once the node is close
+// to the tip they are always on. Returns false when no upstream tip is
+// known yet (no peer connected), since we can't determine proximity.
+func (ls *LedgerState) isNearTip(slot uint64) bool {
+	upstreamTip := ls.syncUpstreamTipSlot.Load()
+	if upstreamTip == 0 {
+		return false
+	}
+	// 95% threshold using division to avoid uint64 overflow.
+	return slot >= upstreamTip-upstreamTip/20
 }
 
 func (ls *LedgerState) scheduleCleanupConsumedUtxos() {
@@ -1965,6 +1994,7 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 		}
 		// Process batch in groups of batchSize to stay under DB txn limits
 		var tipForLog ochainsync.Tip
+		var checker ForgedBlockChecker
 		for i = 0; i < len(nextBatch); i += batchSize {
 			end = min(
 				len(nextBatch),
@@ -2180,6 +2210,7 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 				ls.updateTipMetrics()
 				// Capture tip for logging while holding the lock
 				tipForLog = ls.currentTip
+				checker = ls.config.ForgedBlockChecker
 				ls.Unlock()
 				// Restore normal DB options outside the lock after validation is enabled
 				if wantEnableValidation && bulkLoadActive {
@@ -2198,6 +2229,15 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 			}
 		}
 		if len(nextBatch) > 0 {
+			// Determine block source for observability
+			source := "chainsync"
+			if checker != nil {
+				if _, forged := checker.WasForgedByUs(
+					tipForLog.Point.Slot,
+				); forged {
+					source = "forged"
+				}
+			}
 			ls.config.Logger.Info(
 				fmt.Sprintf(
 					"chain extended, new tip: %x at slot %d",
@@ -2206,6 +2246,8 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 				),
 				"component",
 				"ledger",
+				"source",
+				source,
 			)
 			// Periodic sync progress reporting
 			ls.logSyncProgress(tipForLog.Point.Slot)
@@ -2707,8 +2749,8 @@ func (ls *LedgerState) CurrentEpoch() uint64 {
 // The epoch nonce is used for VRF-based leader election.
 // Returns nil if the epoch nonce is not available (e.g., for Byron era).
 func (ls *LedgerState) EpochNonce(epoch uint64) []byte {
-	// Check current epoch under read lock; copy nonce if it matches
 	ls.RLock()
+	// Check current epoch under read lock; copy nonce if it matches
 	if epoch == ls.currentEpoch.EpochId {
 		if len(ls.currentEpoch.Nonce) == 0 {
 			ls.RUnlock()
@@ -2718,6 +2760,16 @@ func (ls *LedgerState) EpochNonce(epoch uint64) []byte {
 		copy(nonce, ls.currentEpoch.Nonce)
 		ls.RUnlock()
 		return nonce
+	}
+	// If the requested epoch is ahead of the ledger state (slot clock
+	// fired an epoch transition before block processing caught up),
+	// return nil. Each epoch has a distinct nonce (candidateNonce XOR
+	// lastBlockHash), so returning the previous epoch's nonce would
+	// produce incorrect VRF proofs. Callers should retry after block
+	// processing catches up and computes the correct nonce.
+	if epoch > ls.currentEpoch.EpochId {
+		ls.RUnlock()
+		return nil
 	}
 	ls.RUnlock()
 
@@ -3343,6 +3395,10 @@ func (ls *LedgerState) forgeBlock() {
 		)
 		return
 	}
+
+	// Wake chainsync server iterators so connected peers discover
+	// the newly forged block immediately.
+	ls.chain.NotifyIterators()
 
 	// Calculate forging latency
 	forgingLatency := time.Since(forgeStartTime)

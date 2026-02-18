@@ -195,6 +195,31 @@ func (n *Node) Run(ctx context.Context) error {
 				}
 				return nil
 			},
+			ChainsyncResyncFunc: func(connId ouroboros.ConnectionId) {
+				conn := n.connManager.GetConnectionById(connId)
+				if conn != nil {
+					n.config.logger.Info(
+						"closing connection for chainsync re-sync",
+						"connection_id", connId.String(),
+					)
+					conn.Close()
+				}
+				// ClearSeenHeaders is also called by ConnectionSwitchFunc
+				// when the new connection is detected, but we clear here
+				// too in case the connection ID doesn't change (same peer).
+				if n.chainsyncState != nil {
+					n.chainsyncState.ClearSeenHeaders()
+				}
+			},
+			ConnectionSwitchFunc: func() {
+				// Clear the header dedup cache so the new connection
+				// can re-deliver blocks from the intersection without
+				// them being filtered as duplicates from the old
+				// connection.
+				if n.chainsyncState != nil {
+					n.chainsyncState.ClearSeenHeaders()
+				}
+			},
 			FatalErrorFunc: func(err error) {
 				n.config.logger.Error(
 					"fatal ledger error, initiating shutdown",
@@ -840,7 +865,9 @@ func (b *blockBroadcaster) AddBlock(
 	block gledger.Block,
 	_ []byte,
 ) error {
-	// Add block to the chain (CBOR is stored internally by the block)
+	// Add block to the chain (CBOR is stored internally by the block).
+	// addBlockInternal notifies iterators after storing the block,
+	// so no separate NotifyIterators call is needed.
 	if err := b.chain.AddBlock(block, nil); err != nil {
 		return fmt.Errorf("failed to add block to chain: %w", err)
 	}
@@ -851,9 +878,6 @@ func (b *blockBroadcaster) AddBlock(
 		"hash", block.Hash(),
 		"block_number", block.BlockNumber(),
 	)
-
-	// chain.AddBlock already publishes ChainUpdateEventType, so subscribers
-	// (block propagation, ledger updates, etc.) are notified automatically.
 
 	return nil
 }
