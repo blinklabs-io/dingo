@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"sync"
 	"time"
@@ -320,6 +321,37 @@ func (sc *SlotClock) run() {
 		now := sc.nowFunc()
 		currentSlot, err := sc.provider.TimeToSlot(now)
 		if err != nil {
+			if errors.Is(err, ErrBeforeGenesis) {
+				// Genesis hasn't started yet — sleep until slot 0
+				genesisTime, slotErr := sc.provider.SlotToTime(0)
+				if slotErr != nil {
+					logger.Error(
+						"failed to get genesis time",
+						"error", slotErr,
+					)
+					select {
+					case <-sc.ctx.Done():
+						return
+					case <-time.After(time.Second):
+						continue
+					}
+				}
+				waitDur := time.Until(genesisTime)
+				if waitDur <= 0 {
+					continue
+				}
+				logger.Info(
+					"waiting for genesis",
+					"genesis_time", genesisTime.Format(time.RFC3339),
+					"wait", waitDur.Round(time.Second),
+				)
+				select {
+				case <-sc.ctx.Done():
+					return
+				case <-time.After(waitDur):
+					continue
+				}
+			}
 			logger.Error("failed to get current slot", "error", err)
 			// Sleep briefly and retry
 			select {
