@@ -3,7 +3,7 @@
 # Generates unique key sets and genesis files for each pool.
 # Used by the configurator service in docker-compose.yml.
 #
-# Format: 6 YAML documents separated by ---
+# Format: 6 YAML documents (see below)
 #   1. Required testnet parameters
 #   2. Byron genesis overrides
 #   3. Shelley genesis overrides

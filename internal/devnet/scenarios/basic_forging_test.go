@@ -51,12 +51,24 @@ func defaultEndpoints() []devnet.NodeEndpoint {
 //
 // This test:
 //  1. Connects to all 3 nodes (dingo-producer, cardano-producer, cardano-relay)
-//  2. Waits for slot 20 (~2 seconds with 0.1s slots)
+//  2. Waits for slot 20 (~20 seconds with 1s slots and activeSlotsCoeff=0.2)
 //  3. Verifies that Dingo forged at least one block (chain tip advances)
 //  4. Verifies that all nodes agree on the chain tip within tolerance
 func TestBasicBlockForging(t *testing.T) {
+	cfg, err := devnet.LoadDevNetConfig()
+	require.NoError(t, err, "failed to load devnet config from testnet.yaml")
+	t.Logf(
+		"devnet config: activeSlotsCoeff=%.2f slotLength=%.1fs"+
+			" epochLength=%d securityParam=%d networkMagic=%d",
+		cfg.ActiveSlotsCoeff, cfg.SlotLength,
+		cfg.EpochLength, cfg.SecurityParam, cfg.NetworkMagic,
+	)
+
 	endpoints := defaultEndpoints()
-	h := devnet.NewTestHarness(t, endpoints)
+	h := devnet.NewTestHarness(
+		t, endpoints,
+		devnet.WithNetworkMagic(cfg.NetworkMagic),
+	)
 
 	// Step 1: Wait for all nodes to become reachable
 	t.Log("waiting for all DevNet nodes to become ready...")
@@ -72,10 +84,14 @@ func TestBasicBlockForging(t *testing.T) {
 		initialTip.SlotNumber, initialTip.BlockNumber,
 	)
 
-	// Step 3: Wait for slot 20 (with 0.1s slots, this is ~2 seconds of chain time)
-	t.Log("waiting for chain to advance to slot 20...")
-	h.WaitForSlot(20, 30*time.Second)
-	t.Log("chain has reached slot 20")
+	// Step 3: Wait for at least 10 slots beyond the initial tip.
+	// This ensures the chain actually advances regardless of what slot
+	// the chain is currently at (the chain may already be well past genesis
+	// when the tests run).
+	targetSlot := initialTip.SlotNumber + 10
+	t.Logf("waiting for chain to advance to slot %d...", targetSlot)
+	h.WaitForSlot(targetSlot, 30*time.Second)
+	t.Logf("chain has reached slot %d", targetSlot)
 
 	// Step 4: Verify Dingo forged at least one block
 	dingoTip, err := h.GetChainTip(dingoEndpoint)
@@ -98,8 +114,14 @@ func TestBasicBlockForging(t *testing.T) {
 // TestDingoChainAdvances is a simpler test that just verifies
 // the Dingo node's chain is advancing (forging blocks).
 func TestDingoChainAdvances(t *testing.T) {
+	cfg, err := devnet.LoadDevNetConfig()
+	require.NoError(t, err, "failed to load devnet config from testnet.yaml")
+
 	endpoints := defaultEndpoints()
-	h := devnet.NewTestHarness(t, endpoints)
+	h := devnet.NewTestHarness(
+		t, endpoints,
+		devnet.WithNetworkMagic(cfg.NetworkMagic),
+	)
 
 	dingoEndpoint := endpoints[0]
 
@@ -110,7 +132,8 @@ func TestDingoChainAdvances(t *testing.T) {
 	initialTip, err := h.GetChainTip(dingoEndpoint)
 	require.NoError(t, err, "failed to get initial tip")
 
-	// Wait for the chain to advance by at least 10 slots
+	// Wait for the chain to advance by at least 10 slots.
+	// At 1s/slot this takes ~10 seconds; allow 30s for margin.
 	targetSlot := initialTip.SlotNumber + 10
 	h.WaitForNodeSlot(dingoEndpoint, targetSlot, 30*time.Second)
 

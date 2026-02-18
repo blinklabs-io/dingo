@@ -113,12 +113,12 @@ EOF
 }
 
 compute_start_time() {
-    # Compute the system start time once (rounded to 2-minute boundary).
-    # Sets SYSTEM_START_ISO and SYSTEM_START_UNIX for use by set_start_time.
-    # TODO: the rounding is no longer needed
-    SYSTEM_START=$(date -d "@$(( ( $(date +%s) / 120 ) * 120 ))" +%Y-%m-%dT%H:%M:00Z)
-    SYSTEM_START_UNIX=$(date -d "${SYSTEM_START}" +%s)
-    SYSTEM_START_ISO="$(date -d @${SYSTEM_START_UNIX} '+%Y-%m-%dT%H:%M:00Z')"
+    # Set system start to now + 30s to give Docker time to start node
+    # containers after the configurator exits.
+    # genesis-cli.py's systemStartDelay (5s) is too short because key
+    # generation takes 30+ seconds, so we override after generation.
+    SYSTEM_START_UNIX=$(( $(date +%s) + 30 ))
+    SYSTEM_START_ISO="$(date -d @${SYSTEM_START_UNIX} -u '+%Y-%m-%dT%H:%M:%SZ')"
 }
 
 set_start_time() {
@@ -157,11 +157,15 @@ echo "number_of_pools: $number_of_pools"
 # Generate ring topology for all pools (writes all files in one pass)
 config_topology_json "$number_of_pools"
 
-# Compute start time once for all pools
+# Override system start time AFTER key generation completes.
+# genesis-cli.py's systemStartDelay (5s) is too short because key generation
+# takes 30+ seconds. Set genesis to now + 30s to give Docker time to start
+# the node containers after the configurator exits.
 compute_start_time
+echo "system start: ${SYSTEM_START_ISO} (unix: ${SYSTEM_START_UNIX})"
 
 for pool in $pools; do
   echo "pool: $pool"
-  config_config_json "$pool"
   set_start_time "$pool"
+  config_config_json "$pool"
 done
