@@ -23,6 +23,10 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 )
 
+// ErrBeforeGenesis is returned by TimeToSlot when the given time is before
+// the chain's genesis start. The caller should wait until genesis.
+var ErrBeforeGenesis = errors.New("time is before genesis start")
+
 // SlotToTime returns the current time for a given slot based on known epochs
 func (ls *LedgerState) SlotToTime(slot uint64) (time.Time, error) {
 	if slot > math.MaxInt64 {
@@ -127,6 +131,10 @@ func (ls *LedgerState) TimeToSlot(t time.Time) (uint64, error) {
 		timeSlot += uint64(epoch.LengthInSlots)
 	}
 	if !foundTime {
+		// Before genesis: the chain hasn't started yet
+		if t.Before(shelleyGenesis.SystemStart) {
+			return 0, ErrBeforeGenesis
+		}
 		// Special case for current time
 		// This is mostly useful at chain genesis
 		if time.Since(t) < (5 * time.Second) {
