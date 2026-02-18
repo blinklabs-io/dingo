@@ -2678,6 +2678,19 @@ func (ls *LedgerState) Tip() ochainsync.Tip {
 	return ls.currentTip
 }
 
+// ChainTipSlot returns the slot number of the current chain tip.
+func (ls *LedgerState) ChainTipSlot() uint64 {
+	ls.RLock()
+	defer ls.RUnlock()
+	return ls.currentTip.Point.Slot
+}
+
+// UpstreamTipSlot returns the latest known tip slot from upstream peers.
+// Returns 0 if no upstream tip is known yet.
+func (ls *LedgerState) UpstreamTipSlot() uint64 {
+	return ls.syncUpstreamTipSlot.Load()
+}
+
 // GetCurrentPParams returns the currentPParams value
 func (ls *LedgerState) GetCurrentPParams() lcommon.ProtocolParameters {
 	return ls.currentPParams
@@ -2788,6 +2801,14 @@ func (ls *LedgerState) CurrentSlot() (uint64, error) {
 		return 0, errors.New("slot clock not initialized")
 	}
 	return ls.slotClock.CurrentSlot()
+}
+
+// NextSlotTime returns the wall-clock time when the next slot begins.
+func (ls *LedgerState) NextSlotTime() (time.Time, error) {
+	if ls.slotClock == nil {
+		return time.Time{}, errors.New("slot clock not initialized")
+	}
+	return ls.slotClock.NextSlotTime()
 }
 
 // NewView creates a new LedgerView for querying ledger state within a transaction.

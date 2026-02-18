@@ -227,6 +227,13 @@ func (n *Node) Run(ctx context.Context) error {
 		n.eventBus,
 		n.config.logger,
 	)
+	// Capture genesis stake snapshot (epoch 0) so leader election works at epoch 2
+	if err := n.snapshotMgr.CaptureGenesisSnapshot(ctx); err != nil {
+		n.config.logger.Warn(
+			"failed to capture genesis snapshot",
+			"error", err,
+		)
+	}
 	if err := n.snapshotMgr.Start(); err != nil { //nolint:contextcheck
 		return fmt.Errorf("failed to start snapshot manager: %w", err)
 	}
@@ -914,6 +921,18 @@ func (a *slotClockAdapter) CurrentSlot() (uint64, error) {
 
 func (a *slotClockAdapter) SlotsPerKESPeriod() uint64 {
 	return a.ledgerState.SlotsPerKESPeriod()
+}
+
+func (a *slotClockAdapter) ChainTipSlot() uint64 {
+	return a.ledgerState.ChainTipSlot()
+}
+
+func (a *slotClockAdapter) NextSlotTime() (time.Time, error) {
+	return a.ledgerState.NextSlotTime()
+}
+
+func (a *slotClockAdapter) UpstreamTipSlot() uint64 {
+	return a.ledgerState.UpstreamTipSlot()
 }
 
 // epochNonceAdapter adapts ledger.LedgerState to forging.EpochNonceProvider.

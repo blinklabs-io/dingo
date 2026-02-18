@@ -189,6 +189,13 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 			dingo.WithMeshListenAddress(
 				cfg.MeshListenAddress,
 			),
+			// Block production (SPO mode)
+			dingo.WithBlockProducer(cfg.BlockProducer),
+			dingo.WithShelleyVRFKey(cfg.ShelleyVRFKey),
+			dingo.WithShelleyKESKey(cfg.ShelleyKESKey),
+			dingo.WithShelleyOperationalCertificate(
+				cfg.ShelleyOperationalCertificate,
+			),
 		),
 	)
 	if err != nil {

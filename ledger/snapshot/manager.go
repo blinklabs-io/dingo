@@ -284,12 +284,19 @@ func (m *Manager) CaptureGenesisSnapshot(ctx context.Context) error {
 	}
 
 	if distribution.TotalPools == 0 {
-		m.logger.Debug(
-			"no genesis pools, skipping genesis snapshot",
+		m.logger.Warn(
+			"no pools found in genesis stake distribution; leader election will not produce blocks until pool stake is registered",
 			"component", "snapshot",
 		)
 		return nil
 	}
+
+	m.logger.Info(
+		"genesis stake distribution calculated",
+		"component", "snapshot",
+		"total_pools", distribution.TotalPools,
+		"total_stake", distribution.TotalStake,
+	)
 
 	evt := event.EpochTransitionEvent{
 		NewEpoch:     0,
