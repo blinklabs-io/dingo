@@ -67,6 +67,7 @@ const (
 	initialReconnectDelay  = 1 * time.Second
 	maxReconnectDelay      = 128 * time.Second
 	reconnectBackoffFactor = 2
+	inboundCheckDelay      = 30 * time.Second
 )
 
 // Peer source priority values for removal decisions.

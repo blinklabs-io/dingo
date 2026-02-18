@@ -468,24 +468,46 @@ func (c *ConnectionManager) RemoveConnection(connId ouroboros.ConnectionId) {
 	c.updateConnectionMetrics()
 }
 
-// HasFullDuplexInbound returns true if there is already an inbound connection
-// from peerAddr that negotiated InitiatorAndResponder mode. This indicates the
-// connection carries both client and server mini-protocols, making a separate
-// outbound connection unnecessary.
-func (c *ConnectionManager) HasFullDuplexInbound(
+// HasInboundFromHost returns true if there is already an inbound connection
+// from the same host (IP) as peerAddr, regardless of port or DiffusionMode.
+// When OutboundSourcePort is set (listen port reuse), an outbound connection
+// to the same host would create an identical TCP 4-tuple and fail with
+// EADDRINUSE. The existing inbound connection serves as the bidirectional
+// link between the two nodes.
+func (c *ConnectionManager) HasInboundFromHost(
 	peerAddr string,
 ) bool {
+	// Only relevant when listen port reuse is enabled. With ephemeral
+	// source ports, an outbound connection uses a different 4-tuple and
+	// cannot collide with any inbound connection.
+	if c.config.OutboundSourcePort == 0 {
+		return false
+	}
+	targetHost, _, err := net.SplitHostPort(peerAddr)
+	if err != nil {
+		// If peerAddr has no port, treat the whole string as the host
+		targetHost = peerAddr
+	}
+	targetIP := net.ParseIP(targetHost)
 	c.connectionsMutex.Lock()
 	defer c.connectionsMutex.Unlock()
 	for _, info := range c.connections {
 		if !info.isInbound || info.conn == nil {
 			continue
 		}
-		if info.peerAddr != peerAddr {
-			continue
+		connHost, _, err := net.SplitHostPort(info.peerAddr)
+		if err != nil {
+			connHost = info.peerAddr
 		}
-		_, versionData := info.conn.ProtocolVersion()
-		if versionData.DiffusionMode() == oprotocol.DiffusionModeInitiatorAndResponder {
+		// Use canonical IP comparison when both are valid IPs to handle
+		// equivalent IPv6 representations (e.g. ::ffff:192.0.2.1 vs
+		// ::ffff:c000:201). Fall back to string comparison for hostnames.
+		connIP := net.ParseIP(connHost)
+		if connIP != nil && targetIP != nil {
+			if connIP.Equal(targetIP) {
+				return true
+			}
+		} else if connHost == targetHost {
 			return true
 		}
 	}
