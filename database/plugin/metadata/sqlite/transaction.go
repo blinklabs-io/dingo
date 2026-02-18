@@ -1767,7 +1767,7 @@ func (d *MetadataStoreSqlite) SetGenesisStaking(
 			tmpReg.Relays[i].PoolID = tmpPool.ID
 		}
 
-		result := db.Create(&tmpReg)
+		result := db.Clauses(clause.OnConflict{DoNothing: true}).Create(&tmpReg)
 		if result.Error != nil {
 			return fmt.Errorf(
 				"create genesis pool registration: %w",
@@ -1802,7 +1802,7 @@ func (d *MetadataStoreSqlite) SetGenesisStaking(
 		}
 		result := db.Clauses(clause.OnConflict{
 			Columns:   []clause.Column{{Name: "staking_key"}},
-			DoNothing: true,
+			DoUpdates: clause.AssignmentColumns([]string{"pool", "active"}),
 		}).Create(account)
 		if result.Error != nil {
 			return fmt.Errorf(

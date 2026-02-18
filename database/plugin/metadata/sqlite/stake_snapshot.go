@@ -50,7 +50,7 @@ func (d *MetadataStoreSqlite) SavePoolStakeSnapshots(
 	if err != nil {
 		return err
 	}
-	return db.Create(snapshots).Error
+	return db.Clauses(clause.OnConflict{DoNothing: true}).Create(snapshots).Error
 }
 
 // GetPoolStakeSnapshot retrieves a specific pool's stake snapshot
