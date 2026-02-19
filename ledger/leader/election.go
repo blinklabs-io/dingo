@@ -359,9 +359,16 @@ func (e *Election) computeSchedule(
 		return nil, fmt.Errorf("get pool stake: %w", err)
 	}
 
+	e.logger.Info(
+		"pool stake from Go snapshot",
+		"component", "leader",
+		"epoch", currentEpoch,
+		"snapshot_epoch", snapshotEpoch,
+		"pool_stake", poolStake,
+	)
 	if poolStake == 0 {
-		e.logger.Debug(
-			"pool has no stake in Go snapshot",
+		e.logger.Info(
+			"pool has no stake in Go snapshot, skipping schedule computation",
 			"component", "leader",
 			"epoch", currentEpoch,
 			"snapshot_epoch", snapshotEpoch,
@@ -375,6 +382,13 @@ func (e *Election) computeSchedule(
 		return nil, fmt.Errorf("get total stake: %w", err)
 	}
 
+	e.logger.Info(
+		"total active stake from Go snapshot",
+		"component", "leader",
+		"epoch", currentEpoch,
+		"snapshot_epoch", snapshotEpoch,
+		"total_stake", totalStake,
+	)
 	if totalStake == 0 {
 		return nil, fmt.Errorf(
 			"total stake is zero for epoch %d", snapshotEpoch,
@@ -466,6 +480,12 @@ func (e *Election) ShouldProduceBlock(slot uint64) bool {
 	if schedule == nil {
 		// Schedule not yet computed for this epoch.
 		// Request background computation (non-blocking).
+		e.logger.Debug(
+			"no leader schedule for epoch, requesting computation",
+			"component", "leader",
+			"slot", slot,
+			"epoch", slotEpoch,
+		)
 		if computeCh != nil {
 			select {
 			case computeCh <- slotEpoch:

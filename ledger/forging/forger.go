@@ -16,6 +16,7 @@ package forging
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -90,6 +91,13 @@ type SlotClockProvider interface {
 	CurrentSlot() (uint64, error)
 	// SlotsPerKESPeriod returns the number of slots in a KES period.
 	SlotsPerKESPeriod() uint64
+	// ChainTipSlot returns the slot number of the current chain tip.
+	ChainTipSlot() uint64
+	// NextSlotTime returns the wall-clock time when the next slot begins.
+	NextSlotTime() (time.Time, error)
+	// UpstreamTipSlot returns the latest known tip slot from upstream peers.
+	// Returns 0 if no upstream tip is known.
+	UpstreamTipSlot() uint64
 }
 
 // ForgerConfig holds configuration for the block forger.
@@ -206,6 +214,48 @@ func (f *BlockForger) runLoop(ctx context.Context) {
 		f.mu.Unlock()
 	}()
 
+	if f.mode == ModeProduction {
+		f.runLoopSlotAligned(ctx)
+	} else {
+		f.runLoopTicker(ctx)
+	}
+}
+
+// runLoopSlotAligned wakes at each slot boundary so the forger can
+// produce before peer blocks arrive.
+func (f *BlockForger) runLoopSlotAligned(ctx context.Context) {
+	for {
+		nextSlot, err := f.slotClock.NextSlotTime()
+		if err != nil {
+			// Slot clock not ready yet; retry shortly
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(100 * time.Millisecond):
+				continue
+			}
+		}
+
+		sleepDur := time.Until(nextSlot)
+		if sleepDur <= 0 {
+			sleepDur = 0
+		}
+
+		timer := time.NewTimer(sleepDur)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+			if err := f.checkAndForge(ctx); err != nil {
+				f.logger.Error("forge check failed", "error", err)
+			}
+		}
+	}
+}
+
+// runLoopTicker uses a fixed interval ticker for dev mode.
+func (f *BlockForger) runLoopTicker(ctx context.Context) {
 	ticker := time.NewTicker(f.slotDuration)
 	defer ticker.Stop()
 
@@ -242,8 +292,53 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 		return fmt.Errorf("failed to get current slot: %w", err)
 	}
 
+	tipSlot := f.slotClock.ChainTipSlot()
+
+	// Skip if a block already exists at the current slot.
+	// When tipSlot >= currentSlot, the chain already has a block at
+	// this slot (possibly from a peer). Producing another would create
+	// a competing block and fork the chain.
+	if currentSlot <= tipSlot {
+		f.logger.Debug(
+			"forge skip: slot already has block",
+			"current_slot", currentSlot,
+			"tip_slot", tipSlot,
+		)
+		return nil
+	}
+
+	// Skip if the chain is still syncing from a peer.
+	// Compare against the upstream peer tip rather than the wall clock.
+	// Forging while syncing creates blocks that conflict with the peer's
+	// chain, causing persistent header mismatches and resync loops.
+	// The tolerance of 100 slots accommodates block processing latency
+	// and VRF schedule computation time on fast slot networks (e.g.
+	// 100ms devnet slots) while still catching bulk sync.
+	upstreamTip := f.slotClock.UpstreamTipSlot()
+	if upstreamTip > 0 && tipSlot+100 < upstreamTip {
+		f.logger.Debug(
+			"chain syncing from peer, skipping forge",
+			"current_slot", currentSlot,
+			"tip_slot", tipSlot,
+			"upstream_tip", upstreamTip,
+		)
+		return nil
+	}
+
 	// Check if we're the leader for this slot
-	if !f.leaderChecker.ShouldProduceBlock(currentSlot) {
+	isLeader := f.leaderChecker.ShouldProduceBlock(currentSlot)
+	f.logger.Debug(
+		"forge check",
+		"current_slot", currentSlot,
+		"tip_slot", tipSlot,
+		"is_leader", isLeader,
+	)
+	if !isLeader {
+		f.logger.Debug(
+			"forge check: not leader for slot",
+			"current_slot", currentSlot,
+			"tip_slot", tipSlot,
+		)
 		return nil
 	}
 
@@ -276,7 +371,10 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 	// Record the forged block for slot battle detection
 	f.slotTracker.RecordForgedBlock(currentSlot, block.Hash().Bytes())
 
-	f.logger.Info("block produced successfully", "slot", currentSlot)
+	f.logger.Info("block produced successfully",
+		"slot", currentSlot,
+		"hash", hex.EncodeToString(block.Hash().Bytes()),
+	)
 	return nil
 }
 
