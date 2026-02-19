@@ -103,7 +103,7 @@ services:
       - "--port"
       - "3001"
     volumes:
-      - p2-configs:/configs:ro
+      - p2-configs:/configs
       - ./topology/cardano-producer.json:/topology/topology.json:ro
       - cardano-producer-data:/data/db
       - cardano-producer-ipc:/ipc
@@ -140,7 +140,7 @@ services:
       - "--port"
       - "3001"
     volumes:
-      - p1-configs:/configs:ro
+      - p1-configs:/configs
       - ./topology/relay.json:/topology/topology.json:ro
       - cardano-relay-data:/data/db
       - cardano-relay-ipc:/ipc

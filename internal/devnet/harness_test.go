@@ -67,7 +67,7 @@ func TestHarnessWaitForSlot(t *testing.T) {
 
 	h.WaitForAllNodesReady(60 * time.Second)
 
-	// With 0.1s slots, slot 10 should be reached within a few seconds
+	// With 1s slots, slot 10 should be reached within ~50s (f=0.2)
 	h.WaitForSlot(10, 30*time.Second)
 }
 
