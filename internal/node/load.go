@@ -208,12 +208,13 @@ func Load(cfg *config.Config, logger *slog.Logger, immutableDir string) error {
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 	timeout := time.After(30 * time.Minute)
+waitLoop:
 	for {
 		select {
 		case <-ticker.C:
 			tip := ls.Tip()
 			if tip.Point.Slot >= immutableTip.Slot {
-				goto done
+				break waitLoop
 			}
 		case <-timeout:
 			return fmt.Errorf(
@@ -223,7 +224,6 @@ func Load(cfg *config.Config, logger *slog.Logger, immutableDir string) error {
 			)
 		}
 	}
-done:
 	logger.Info(
 		"finished processing blocks from immutable DB",
 		"blocks_copied", blocksCopied,
