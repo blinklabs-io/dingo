@@ -395,6 +395,9 @@ func (sc *SlotClock) run() {
 		actualNow := sc.nowFunc()
 		actualSlot, err := sc.provider.TimeToSlot(actualNow)
 		if err != nil {
+			if errors.Is(err, ErrBeforeGenesis) {
+				continue
+			}
 			logger.Error("failed to verify slot after wake", "error", err)
 			continue
 		}
