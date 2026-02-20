@@ -132,6 +132,53 @@ func batchFetchPoolRegs(
 	return cache, nil
 }
 
+// certOrderInfo holds block_index and cert_index for same-slot comparison.
+type certOrderInfo struct {
+	blockIndex uint32
+	certIndex  uint
+}
+
+// fetchPoolCertOrderInfo fetches block_index and cert_index for pool certificates
+// to enable deterministic same-slot comparison. Returns (regInfo, retInfo, error).
+func fetchPoolCertOrderInfo(
+	db *gorm.DB,
+	regID uint,
+	retID uint,
+) (certOrderInfo, certOrderInfo, error) {
+	type certRow struct {
+		CertType   uint
+		CertIndex  uint
+		BlockIndex uint32
+	}
+	var rows []certRow
+	// Join with transaction to get block_index
+	if err := db.Table("certs").
+		Select("certs.cert_type, certs.cert_index, COALESCE(\"transaction\".block_index, 0) AS block_index").
+		Joins("LEFT JOIN \"transaction\" ON \"transaction\".id = certs.transaction_id").
+		Where(
+			"(certs.certificate_id = ? AND certs.cert_type = ?) OR (certs.certificate_id = ? AND certs.cert_type = ?)",
+			regID,
+			uint(lcommon.CertificateTypePoolRegistration),
+			retID,
+			uint(lcommon.CertificateTypePoolRetirement),
+		).
+		Find(&rows).Error; err != nil {
+		return certOrderInfo{}, certOrderInfo{}, fmt.Errorf(
+			"fetchPoolCertOrderInfo: query certs: %w", err,
+		)
+	}
+	var regInfo, retInfo certOrderInfo
+	for _, row := range rows {
+		switch row.CertType {
+		case uint(lcommon.CertificateTypePoolRegistration):
+			regInfo = certOrderInfo{blockIndex: row.BlockIndex, certIndex: row.CertIndex}
+		case uint(lcommon.CertificateTypePoolRetirement):
+			retInfo = certOrderInfo{blockIndex: row.BlockIndex, certIndex: row.CertIndex}
+		}
+	}
+	return regInfo, retInfo, nil
+}
+
 // GetPool gets a pool
 func (d *MetadataStoreSqlite) GetPool(
 	pkh lcommon.PoolKeyHash,
@@ -144,16 +191,22 @@ func (d *MetadataStoreSqlite) GetPool(
 		return nil, err
 	}
 	result := db.
-		Preload(
-			"Registration",
-			func(db *gorm.DB) *gorm.DB { return db.Order("added_slot DESC, id DESC").Limit(1) },
-		).
+		Preload("Registration", func(db *gorm.DB) *gorm.DB {
+			return db.Select("pool_registration.*").
+				Joins("LEFT JOIN certs ON certs.id = pool_registration.certificate_id").
+				Joins("LEFT JOIN \"transaction\" ON \"transaction\".id = certs.transaction_id").
+				Order("pool_registration.added_slot DESC, COALESCE(\"transaction\".block_index, 0) DESC, COALESCE(certs.cert_index, 0) DESC").
+				Limit(1)
+		}).
 		Preload("Registration.Owners").
 		Preload("Registration.Relays").
-		Preload(
-			"Retirement",
-			func(db *gorm.DB) *gorm.DB { return db.Order("added_slot DESC, id DESC").Limit(1) },
-		).
+		Preload("Retirement", func(db *gorm.DB) *gorm.DB {
+			return db.Select("pool_retirement.*").
+				Joins("LEFT JOIN certs ON certs.id = pool_retirement.certificate_id").
+				Joins("LEFT JOIN \"transaction\" ON \"transaction\".id = certs.transaction_id").
+				Order("pool_retirement.added_slot DESC, COALESCE(\"transaction\".block_index, 0) DESC, COALESCE(certs.cert_index, 0) DESC").
+				Limit(1)
+		}).
 		First(
 			ret,
 			"pool_key_hash = ?",
@@ -174,8 +227,23 @@ func (d *MetadataStoreSqlite) GetPool(
 		// If the latest retirement is more recent than the latest registration,
 		// check whether the retirement epoch has passed. A retirement in the
 		// future means the pool is still active until that epoch is reached.
+		shouldCheckRetirement := false
 		if hasRet &&
 			ret.Retirement[0].AddedSlot > ret.Registration[0].AddedSlot {
+			shouldCheckRetirement = true
+		} else if hasRet && ret.Retirement[0].AddedSlot == ret.Registration[0].AddedSlot {
+			regInfo, retInfo, err := fetchPoolCertOrderInfo(db, ret.Registration[0].ID, ret.Retirement[0].ID)
+			if err != nil {
+				return nil, err
+			}
+			// Compare block_index first, then cert_index (cert_index resets per tx)
+			if retInfo.blockIndex > regInfo.blockIndex {
+				shouldCheckRetirement = true
+			} else if retInfo.blockIndex == regInfo.blockIndex && retInfo.certIndex > regInfo.certIndex {
+				shouldCheckRetirement = true
+			}
+		}
+		if shouldCheckRetirement {
 			retEpoch := ret.Retirement[0].Epoch
 			// Determine current epoch from tip -> epoch table. If we cannot
 			// determine the current epoch, conservatively treat the pool as active.
@@ -458,7 +526,9 @@ func (d *MetadataStoreSqlite) GetActivePoolRelays(
 ) ([]models.PoolRegistrationRelay, error) {
 	db, err := d.resolveReadDB(txn)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf(
+			"GetActivePoolRelays: resolve db: %w", err,
+		)
 	}
 
 	// Get the current epoch from the tip
@@ -468,7 +538,9 @@ func (d *MetadataStoreSqlite) GetActivePoolRelays(
 		if errors.Is(res.Error, gorm.ErrRecordNotFound) {
 			return []models.PoolRegistrationRelay{}, nil
 		}
-		return nil, res.Error
+		return nil, fmt.Errorf(
+			"GetActivePoolRelays: get tip: %w", res.Error,
+		)
 	}
 
 	var curEpoch models.Epoch
@@ -480,7 +552,10 @@ func (d *MetadataStoreSqlite) GetActivePoolRelays(
 		if errors.Is(res.Error, gorm.ErrRecordNotFound) {
 			return []models.PoolRegistrationRelay{}, nil
 		}
-		return nil, res.Error
+		return nil, fmt.Errorf(
+			"GetActivePoolRelays: get current epoch: %w",
+			res.Error,
+		)
 	}
 
 	// Query all pools with their registrations, retirements, and relays.
@@ -506,7 +581,10 @@ func (d *MetadataStoreSqlite) GetActivePoolRelays(
 		}).
 		Find(&pools)
 	if result.Error != nil {
-		return nil, result.Error
+		return nil, fmt.Errorf(
+			"GetActivePoolRelays: query pools: %w",
+			result.Error,
+		)
 	}
 
 	// Collect certificate IDs where same-slot comparison is needed
