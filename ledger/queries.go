@@ -194,7 +194,13 @@ func (ls *LedgerState) queryHardForkEraHistory() (any, error) {
 					uint64(tmpEpoch.LengthInSlots),
 				)
 				if slotErr != nil {
-					return nil, slotErr
+					return nil, fmt.Errorf(
+						"epoch %d (start=%d, length=%d): %w",
+						tmpEpoch.EpochId,
+						tmpEpoch.StartSlot,
+						tmpEpoch.LengthInSlots,
+						slotErr,
+					)
 				}
 				tmpEnd = []any{
 					new(big.Int).Set(timespan),
