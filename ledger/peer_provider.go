@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"errors"
+	"fmt"
 	"net"
 	"sync"
 	"time"
@@ -38,6 +39,7 @@ type LedgerPeerProviderAdapter struct {
 	cachedRelays []peergov.PoolRelay
 	cacheTime    time.Time
 	cacheTTL     time.Duration
+	cacheGen     uint64
 }
 
 // NewLedgerPeerProvider creates a new LedgerPeerProvider adapter.
@@ -81,12 +83,13 @@ func (p *LedgerPeerProviderAdapter) GetPoolRelays() (
 		p.cacheMu.RUnlock()
 		return result, nil
 	}
+	genBefore := p.cacheGen
 	p.cacheMu.RUnlock()
 
 	// Cache miss or expired - fetch from database
 	relays, err := p.db.GetActivePoolRelays(nil)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("GetActivePoolRelays: fetch relays: %w", err)
 	}
 
 	result := make([]peergov.PoolRelay, 0, len(relays))
@@ -106,7 +109,8 @@ func (p *LedgerPeerProviderAdapter) GetPoolRelays() (
 
 	// Update cache (double-check under write lock)
 	p.cacheMu.Lock()
-	if p.cachedRelays == nil || time.Since(p.cacheTime) >= p.cacheTTL {
+	if p.cacheGen == genBefore &&
+		(p.cachedRelays == nil || time.Since(p.cacheTime) >= p.cacheTTL) {
 		p.cachedRelays = result
 		p.cacheTime = time.Now()
 	}
@@ -121,6 +125,7 @@ func (p *LedgerPeerProviderAdapter) InvalidateCache() {
 	p.cacheMu.Lock()
 	p.cachedRelays = nil
 	p.cacheTime = time.Time{}
+	p.cacheGen++
 	p.cacheMu.Unlock()
 }
 
