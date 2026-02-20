@@ -687,6 +687,18 @@ func (c *Chain) iterNext(
 	}
 }
 
+// NotifyIterators wakes all blocked iterators waiting for new blocks.
+// Call this after a DB transaction that adds blocks has been committed
+// to ensure iterators see the newly visible data.
+func (c *Chain) NotifyIterators() {
+	c.waitingChanMutex.Lock()
+	if c.waitingChan != nil {
+		close(c.waitingChan)
+		c.waitingChan = nil
+	}
+	c.waitingChanMutex.Unlock()
+}
+
 func (c *Chain) reconcile() error {
 	securityParam := c.manager.securityParam
 	// We reconcile against the primary/persistent chain, so no need to check if we are that chain
