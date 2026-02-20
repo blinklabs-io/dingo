@@ -39,6 +39,13 @@ const (
 	// ModeProduction uses real VRF leader election and KES signing.
 	// Requires loaded pool credentials.
 	ModeProduction
+
+	// forgeSyncToleranceSlots is the number of slots the chain tip may lag
+	// behind the upstream peer tip before the forger skips block production.
+	// This accommodates block processing latency and VRF schedule computation
+	// time on fast-slot networks (e.g. 100ms devnet slots) while still
+	// catching bulk sync.
+	forgeSyncToleranceSlots = 100
 )
 
 // BlockForger coordinates block production for a stake pool.
@@ -224,17 +231,32 @@ func (f *BlockForger) runLoop(ctx context.Context) {
 // runLoopSlotAligned wakes at each slot boundary so the forger can
 // produce before peer blocks arrive.
 func (f *BlockForger) runLoopSlotAligned(ctx context.Context) {
+	retries := 0
 	for {
 		nextSlot, err := f.slotClock.NextSlotTime()
 		if err != nil {
-			// Slot clock not ready yet; retry shortly
+			retries++
+			// Log warning periodically so operators see why forger is stuck
+			if retries%50 == 1 {
+				f.logger.Warn(
+					"slot clock not ready, retrying",
+					"error", err,
+					"retries", retries,
+				)
+			}
+			// Exponential backoff: 100ms, 200ms, 400ms, ... capped at 5s
+			backoff := time.Duration(100<<min(retries-1, 5)) * time.Millisecond
+			if backoff > 5*time.Second {
+				backoff = 5 * time.Second
+			}
 			select {
 			case <-ctx.Done():
 				return
-			case <-time.After(100 * time.Millisecond):
+			case <-time.After(backoff):
 				continue
 			}
 		}
+		retries = 0
 
 		sleepDur := time.Until(nextSlot)
 		if sleepDur <= 0 {
@@ -311,11 +333,9 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 	// Compare against the upstream peer tip rather than the wall clock.
 	// Forging while syncing creates blocks that conflict with the peer's
 	// chain, causing persistent header mismatches and resync loops.
-	// The tolerance of 100 slots accommodates block processing latency
-	// and VRF schedule computation time on fast slot networks (e.g.
-	// 100ms devnet slots) while still catching bulk sync.
+	// See forgeSyncToleranceSlots for the tolerance rationale.
 	upstreamTip := f.slotClock.UpstreamTipSlot()
-	if upstreamTip > 0 && tipSlot+100 < upstreamTip {
+	if upstreamTip > 0 && tipSlot+forgeSyncToleranceSlots < upstreamTip {
 		f.logger.Debug(
 			"chain syncing from peer, skipping forge",
 			"current_slot", currentSlot,
@@ -327,12 +347,6 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 
 	// Check if we're the leader for this slot
 	isLeader := f.leaderChecker.ShouldProduceBlock(currentSlot)
-	f.logger.Debug(
-		"forge check",
-		"current_slot", currentSlot,
-		"tip_slot", tipSlot,
-		"is_leader", isLeader,
-	)
 	if !isLeader {
 		f.logger.Debug(
 			"forge check: not leader for slot",
