@@ -117,7 +117,7 @@ func (o *Ouroboros) chainsyncServerFindIntersect(
 	tip := o.LedgerState.Tip()
 	intersectPoint, err := o.LedgerState.GetIntersectPoint(points)
 	if err != nil {
-		return retPoint, tip, err
+		return retPoint, tip, fmt.Errorf("get intersect point: %w", err)
 	}
 	if intersectPoint == nil {
 		return retPoint, tip, ochainsync.ErrIntersectNotFound
@@ -128,12 +128,11 @@ func (o *Ouroboros) chainsyncServerFindIntersect(
 		*intersectPoint,
 	)
 	if err != nil {
-		o.config.Logger.Debug(
-			"chainsync server: AddClient failed",
-			"connection_id", ctx.ConnectionId.String(),
-			"error", err,
+		return retPoint, tip, fmt.Errorf(
+			"add chainsync client for connection %s: %w",
+			ctx.ConnectionId.String(),
+			err,
 		)
-		return retPoint, tip, err
 	}
 	retPoint = *intersectPoint
 	return retPoint, tip, nil
@@ -149,12 +148,11 @@ func (o *Ouroboros) chainsyncServerRequestNext(
 		tip.Point,
 	)
 	if err != nil {
-		o.config.Logger.Debug(
-			"chainsync server: AddClient failed",
-			"connection_id", ctx.ConnectionId.String(),
-			"error", err,
+		return fmt.Errorf(
+			"add chainsync client for connection %s: %w",
+			ctx.ConnectionId.String(),
+			err,
 		)
-		return err
 	}
 	if clientState.NeedsInitialRollback {
 		o.config.Logger.Debug(
@@ -250,7 +248,7 @@ func (o *Ouroboros) chainsyncServerRequestNext(
 				next.Point,
 				tip,
 			); err != nil {
-				o.config.Logger.Debug(
+				o.config.Logger.Error(
 					"failed to roll backward",
 					"error", err,
 				)
@@ -261,7 +259,7 @@ func (o *Ouroboros) chainsyncServerRequestNext(
 				next.Block.Cbor,
 				tip,
 			); err != nil {
-				o.config.Logger.Debug(
+				o.config.Logger.Error(
 					"failed to roll forward",
 					"error", err,
 				)
