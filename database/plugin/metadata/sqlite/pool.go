@@ -283,7 +283,7 @@ func (d *MetadataStoreSqlite) GetPoolByVrfKeyHash(
 	vrfKeyHash []byte,
 	txn types.Txn,
 ) (*models.Pool, error) {
-	db, err := d.resolveDB(txn)
+	db, err := d.resolveReadDB(txn)
 	if err != nil {
 		return nil, err
 	}
@@ -743,7 +743,7 @@ func (d *MetadataStoreSqlite) GetActivePoolKeyHashesAtSlot(
 	slot uint64,
 	txn types.Txn,
 ) ([][]byte, error) {
-	db, err := d.resolveDB(txn)
+	db, err := d.resolveReadDB(txn)
 	if err != nil {
 		return nil, fmt.Errorf(
 			"GetActivePoolKeyHashesAtSlot: resolve db: %w",
