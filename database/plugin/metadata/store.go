@@ -321,6 +321,11 @@ type MetadataStore interface {
 	// GetEpochs retrieves all epochs.
 	GetEpochs(types.Txn) ([]models.Epoch, error)
 
+	// DeleteEpochsAfterSlot removes all epoch entries whose start slot
+	// is after the given slot. Used during chain rollback to discard
+	// epoch nonces that were computed from rolled-back blocks.
+	DeleteEpochsAfterSlot(uint64, types.Txn) error
+
 	// GetUtxosAddedAfterSlot retrieves all UTxOs added after the given slot.
 	GetUtxosAddedAfterSlot(uint64, types.Txn) ([]models.Utxo, error)
 

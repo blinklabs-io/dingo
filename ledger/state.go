@@ -1221,6 +1221,19 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 				err,
 			)
 		}
+		// Delete epoch entries whose nonces were computed from
+		// rolled-back blocks. Epochs starting after the rollback
+		// slot used blocks that no longer exist, so their nonces
+		// are stale and must be recomputed during re-sync.
+		if err := ls.db.DeleteEpochsAfterSlot(
+			point.Slot,
+			txn,
+		); err != nil {
+			return fmt.Errorf(
+				"delete epochs after rollback: %w",
+				err,
+			)
+		}
 		// Delete rolled-back UTxOs (blob offsets and metadata)
 		err := ls.db.UtxosDeleteRolledback(point.Slot, txn)
 		if err != nil {
@@ -1282,12 +1295,36 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 			"component", "ledger",
 		)
 	}
+	// Reload epoch cache to discard stale nonces from rolled-back epochs.
+	// The deleted epoch entries will be recreated with correct nonces when
+	// the chain replays past those epoch boundaries during re-sync.
+	epochs, err := ls.db.GetEpochs(nil)
+	if err != nil {
+		ls.config.Logger.Warn(
+			"failed to reload epochs after rollback",
+			"error", err,
+			"component", "ledger",
+		)
+	}
 	// Transaction committed successfully - now update in-memory state.
 	// Brief lock to ensure readers see consistent state.
 	ls.Lock()
 	ls.currentTip = newTip
 	// Always update nonce - clear it on genesis rollback, set it otherwise
 	ls.currentTipBlockNonce = newNonce
+	if epochs != nil {
+		ls.epochCache = epochs
+		// Reset currentEpoch to the last remaining epoch so that
+		// ledgerProcessBlocks correctly detects the next epoch
+		// boundary and EpochNonce() returns the right nonce.
+		if len(epochs) > 0 {
+			ls.currentEpoch = epochs[len(epochs)-1]
+			eraDesc := eras.GetEraById(ls.currentEpoch.EraId)
+			if eraDesc != nil {
+				ls.currentEra = *eraDesc
+			}
+		}
+	}
 	ls.updateTipMetrics()
 	ls.Unlock()
 	var hash string
