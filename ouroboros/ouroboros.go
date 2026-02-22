@@ -422,7 +422,7 @@ func (o *Ouroboros) HandleInboundConnEvent(evt event.Event) {
 
 	// Only start client protocols if the peer negotiated full duplex
 	_, versionData := conn.ProtocolVersion()
-	if versionData.DiffusionMode() != oprotocol.DiffusionModeInitiatorAndResponder {
+	if versionData == nil || versionData.DiffusionMode() != oprotocol.DiffusionModeInitiatorAndResponder {
 		o.config.Logger.Debug(
 			"inbound connection is not full-duplex, skipping client start",
 			"connection_id", connId.String(),
