@@ -445,10 +445,20 @@ func (o *Ouroboros) HandleInboundConnEvent(evt event.Event) {
 			if err := o.chainsyncClientStart(connId); err != nil {
 				o.ChainsyncState.RemoveClientConnId(connId)
 				o.config.Logger.Error(
-					"failed to start chainsync client on inbound connection",
+					"failed to start inbound chainsync client, closing",
 					"error", err,
 					"connection_id", connId.String(),
 				)
+				// Close the connection so peergov stops tracking it and
+				// outbound retries are not blocked by a stale inbound.
+				if closeErr := conn.Close(); closeErr != nil {
+					o.config.Logger.Warn(
+						"failed to close connection",
+						"error", closeErr,
+						"connection_id", connId.String(),
+					)
+				}
+				o.ConnManager.RemoveConnection(connId)
 				return
 			}
 			o.config.Logger.Debug(
