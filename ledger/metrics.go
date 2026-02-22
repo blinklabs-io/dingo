@@ -28,6 +28,8 @@ type stateMetrics struct {
 	forks               prometheus.Gauge
 	blocksForgedTotal   prometheus.Counter
 	blockForgingLatency prometheus.Histogram
+	forgingEnabled      prometheus.Gauge
+	nodeStartTime       prometheus.Gauge
 }
 
 func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
@@ -66,6 +68,18 @@ func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
 			Name:    "cardano_node_metrics_blockForgingLatency_seconds",
 			Help:    "latency of block forging from slot start to block completion",
 			Buckets: prometheus.ExponentialBuckets(0.001, 2, 15), // 1ms to ~16s
+		},
+	)
+	m.forgingEnabled = promautoFactory.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "cardano_node_metrics_forging_enabled",
+			Help: "whether block forging is enabled (0 or 1)",
+		},
+	)
+	m.nodeStartTime = promautoFactory.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "cardano_node_metrics_nodeStartTime_int",
+			Help: "unix timestamp when the node started",
 		},
 	)
 }

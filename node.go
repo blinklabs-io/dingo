@@ -559,6 +559,7 @@ func (n *Node) Run(ctx context.Context) error {
 			n.ledgerState.SetForgedBlockChecker(
 				n.blockForger.SlotTracker(),
 			)
+			n.ledgerState.SetForgingEnabled(true)
 		}
 		started = append(started, func() {
 			if n.blockForger != nil {
