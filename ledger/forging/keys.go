@@ -265,6 +265,17 @@ func (pc *PoolCredentials) GetOpCert() *OpCert {
 	}
 }
 
+// GetKESPeriod returns the current KES period of the loaded key.
+// Returns 0 if the KES key is not loaded.
+func (pc *PoolCredentials) GetKESPeriod() uint64 {
+	pc.mu.RLock()
+	defer pc.mu.RUnlock()
+	if pc.kesSKey == nil {
+		return 0
+	}
+	return pc.kesSKey.Period
+}
+
 // IsLoaded returns true if all credentials have been loaded.
 func (pc *PoolCredentials) IsLoaded() bool {
 	pc.mu.RLock()

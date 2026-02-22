@@ -1336,6 +1336,11 @@ func (ls *LedgerState) checkSlotBattle(
 		"local_won", localWon,
 	)
 
+	// Increment slot battle metric
+	if ls.config.SlotBattleRecorder != nil {
+		ls.config.SlotBattleRecorder.RecordSlotBattle()
+	}
+
 	if ls.config.EventBus != nil {
 		ls.config.EventBus.PublishAsync(
 			forging.SlotBattleEventType,

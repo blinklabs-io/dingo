@@ -26,6 +26,7 @@ import (
 
 	"github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/vrf"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 // Mode represents the forging mode.
@@ -63,6 +64,9 @@ type BlockForger struct {
 
 	// Slot battle detection
 	slotTracker *SlotTracker
+
+	// Prometheus metrics
+	metrics *forgingMetrics
 
 	// State
 	mu      sync.RWMutex
@@ -119,6 +123,9 @@ type ForgerConfig struct {
 	BlockBuilder     BlockBuilder
 	BlockBroadcaster BlockBroadcaster
 	SlotClock        SlotClockProvider
+
+	// Prometheus metrics registry (optional)
+	PromRegistry prometheus.Registerer
 }
 
 // NewBlockForger creates a new block forger.
@@ -158,6 +165,26 @@ func NewBlockForger(cfg ForgerConfig) (*BlockForger, error) {
 		}
 		if cfg.SlotClock == nil {
 			return nil, errors.New("production mode requires slot clock")
+		}
+	}
+
+	if cfg.PromRegistry != nil {
+		f.metrics = initForgingMetrics(cfg.PromRegistry)
+	}
+
+	// Set static OpCert gauges immediately so SPO dashboards show
+	// certificate info without waiting for the first forged block.
+	// Dynamic gauges (currentKESPeriod, remainingKESPeriods) are
+	// updated on every slot-win in updateKESMetrics().
+	if f.metrics != nil && f.creds != nil {
+		opCert := f.creds.GetOpCert()
+		if opCert != nil {
+			f.metrics.opCertStartKES.Set(
+				float64(opCert.KESPeriod),
+			)
+			f.metrics.opCertExpiryKES.Set(
+				float64(f.creds.OpCertExpiryPeriod()),
+			)
 		}
 	}
 
@@ -320,6 +347,12 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 	// When tipSlot >= currentSlot, the chain already has a block at
 	// this slot (possibly from a peer). Producing another would create
 	// a competing block and fork the chain.
+	// Count every slot check (matches cardano-node
+	// Forge.about_to_lead)
+	if f.metrics != nil {
+		f.metrics.forgeAboutToLead.Inc()
+	}
+
 	if currentSlot <= tipSlot {
 		f.logger.Debug(
 			"forge skip: slot already has block",
@@ -330,12 +363,14 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 	}
 
 	// Skip if the chain is still syncing from a peer.
-	// Compare against the upstream peer tip rather than the wall clock.
-	// Forging while syncing creates blocks that conflict with the peer's
-	// chain, causing persistent header mismatches and resync loops.
+	// Compare against the upstream peer tip rather than the wall
+	// clock. Forging while syncing creates blocks that conflict
+	// with the peer's chain, causing persistent header mismatches
+	// and resync loops.
 	// See forgeSyncToleranceSlots for the tolerance rationale.
 	upstreamTip := f.slotClock.UpstreamTipSlot()
-	if upstreamTip > 0 && tipSlot+forgeSyncToleranceSlots < upstreamTip {
+	if upstreamTip > 0 &&
+		tipSlot+forgeSyncToleranceSlots < upstreamTip {
 		f.logger.Debug(
 			"chain syncing from peer, skipping forge",
 			"current_slot", currentSlot,
@@ -353,7 +388,15 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 			"current_slot", currentSlot,
 			"tip_slot", tipSlot,
 		)
+		if f.metrics != nil {
+			f.metrics.forgeNotLeader.Inc()
+		}
 		return nil
+	}
+
+	// We are the slot leader
+	if f.metrics != nil {
+		f.metrics.forgeNodeIsLeader.Inc()
 	}
 
 	f.logger.Info("producing block", "slot", currentSlot)
@@ -371,25 +414,93 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 		return fmt.Errorf("failed to update KES period: %w", err)
 	}
 
+	// Update KES metrics after successful evolution
+	f.updateKESMetrics(kesPeriod)
+
 	// Build the block
-	block, blockCbor, err := f.blockBuilder.BuildBlock(currentSlot, kesPeriod)
+	block, blockCbor, err := f.blockBuilder.BuildBlock(
+		currentSlot,
+		kesPeriod,
+	)
 	if err != nil {
+		f.incCouldNotForge()
 		return fmt.Errorf("failed to build block: %w", err)
 	}
 
+	// Block forged successfully
+	if f.metrics != nil {
+		f.metrics.forgeForged.Inc()
+		f.metrics.blockSizeBytes.Observe(
+			float64(len(blockCbor)),
+		)
+		f.metrics.blockTxCount.Observe(
+			float64(len(block.Transactions())),
+		)
+	}
+
 	// Add block to chain and broadcast
-	if err := f.blockBroadcaster.AddBlock(block, blockCbor); err != nil {
+	if err := f.blockBroadcaster.AddBlock(
+		block, blockCbor,
+	); err != nil {
+		f.incCouldNotForge()
 		return fmt.Errorf("failed to add block: %w", err)
 	}
 
+	// Block adopted onto chain
+	if f.metrics != nil {
+		f.metrics.forgeAdopted.Inc()
+	}
+
 	// Record the forged block for slot battle detection
-	f.slotTracker.RecordForgedBlock(currentSlot, block.Hash().Bytes())
+	f.slotTracker.RecordForgedBlock(
+		currentSlot, block.Hash().Bytes(),
+	)
 
 	f.logger.Info("block produced successfully",
 		"slot", currentSlot,
 		"hash", hex.EncodeToString(block.Hash().Bytes()),
 	)
 	return nil
+}
+
+// incCouldNotForge increments Forge_could_not_forge. Safe to call
+// when metrics are nil.
+func (f *BlockForger) incCouldNotForge() {
+	if f.metrics != nil {
+		f.metrics.forgeCouldNot.Inc()
+	}
+}
+
+// updateKESMetrics updates KES gauges after a successful KES
+// period update. Safe to call when metrics are nil.
+func (f *BlockForger) updateKESMetrics(
+	currentPeriod uint64,
+) {
+	if f.metrics == nil {
+		return
+	}
+	f.metrics.currentKESPeriod.Set(float64(currentPeriod))
+	f.metrics.remainingKESPeriods.Set(
+		float64(f.creds.PeriodsRemaining(currentPeriod)),
+	)
+	opCert := f.creds.GetOpCert()
+	if opCert != nil {
+		f.metrics.opCertStartKES.Set(
+			float64(opCert.KESPeriod),
+		)
+		f.metrics.opCertExpiryKES.Set(
+			float64(f.creds.OpCertExpiryPeriod()),
+		)
+	}
+}
+
+// RecordSlotBattle increments the slot battles counter. This is
+// called from external components (e.g., LedgerState) when a slot
+// battle is detected.
+func (f *BlockForger) RecordSlotBattle() {
+	if f.metrics != nil {
+		f.metrics.slotBattlesTotal.Inc()
+	}
 }
 
 // VRFProofForSlot generates a VRF proof for leader election at the given slot.

@@ -379,6 +379,12 @@ type ForgedBlockChecker interface {
 	WasForgedByUs(slot uint64) (blockHash []byte, ok bool)
 }
 
+// SlotBattleRecorder records slot battle events for metrics.
+type SlotBattleRecorder interface {
+	// RecordSlotBattle increments the slot battle counter.
+	RecordSlotBattle()
+}
+
 // ChainsyncResyncFunc describes a callback function used to trigger a
 // chainsync re-negotiation for the given connection. This is called when
 // the ledger detects a persistent chain fork that prevents syncing.
@@ -402,6 +408,7 @@ type LedgerStateConfig struct {
 	ConnectionSwitchFunc       ConnectionSwitchFunc
 	FatalErrorFunc             FatalErrorFunc
 	ForgedBlockChecker         ForgedBlockChecker
+	SlotBattleRecorder         SlotBattleRecorder
 	ValidateHistorical         bool
 	ForgeBlocks                bool
 	DatabaseWorkerPoolConfig   DatabaseWorkerPoolConfig
@@ -3138,6 +3145,17 @@ func (ls *LedgerState) SetForgedBlockChecker(checker ForgedBlockChecker) {
 	ls.Lock()
 	defer ls.Unlock()
 	ls.config.ForgedBlockChecker = checker
+}
+
+// SetSlotBattleRecorder sets the recorder used to increment the
+// slot battle metric. This is typically called after the block
+// forger is initialized.
+func (ls *LedgerState) SetSlotBattleRecorder(
+	recorder SlotBattleRecorder,
+) {
+	ls.Lock()
+	defer ls.Unlock()
+	ls.config.SlotBattleRecorder = recorder
 }
 
 // forgeBlock creates a conway block with transactions from mempool
