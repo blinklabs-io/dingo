@@ -76,6 +76,20 @@ func (d *MetadataStoreMysql) GetEpochs(
 	return ret, nil
 }
 
+// DeleteEpochsAfterSlot removes all epoch entries whose start slot
+// is after the given slot.
+func (d *MetadataStoreMysql) DeleteEpochsAfterSlot(
+	slot uint64,
+	txn types.Txn,
+) error {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return err
+	}
+	result := db.Where("start_slot > ?", slot).Delete(&models.Epoch{})
+	return result.Error
+}
+
 // SetEpoch saves an epoch
 func (d *MetadataStoreMysql) SetEpoch(
 	slot, epoch uint64,
