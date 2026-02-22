@@ -381,10 +381,15 @@ func (n *Node) Run(ctx context.Context) error {
 		},
 	)
 	n.ouroboros.ConnManager = n.connManager
-	// Subscribe to connection closed events
+	// Subscribe to connection events BEFORE starting listeners so that
+	// inbound connections from peers that connect immediately are not lost.
 	n.eventBus.SubscribeFunc(
 		connmanager.ConnectionClosedEventType,
 		n.ouroboros.HandleConnClosedEvent,
+	)
+	n.eventBus.SubscribeFunc(
+		connmanager.InboundConnectionEventType,
+		n.ouroboros.HandleInboundConnEvent,
 	)
 	// Start listeners
 	if err := n.connManager.Start(n.ctx); err != nil { //nolint:contextcheck
@@ -435,10 +440,6 @@ func (n *Node) Run(ctx context.Context) error {
 	n.eventBus.SubscribeFunc(
 		peergov.OutboundConnectionEventType,
 		n.ouroboros.HandleOutboundConnEvent,
-	)
-	n.eventBus.SubscribeFunc(
-		connmanager.InboundConnectionEventType,
-		n.ouroboros.HandleInboundConnEvent,
 	)
 	if n.config.topologyConfig != nil {
 		n.peerGov.LoadTopologyConfig(n.config.topologyConfig)
@@ -871,6 +872,10 @@ func (b *blockBroadcaster) AddBlock(
 	if err := b.chain.AddBlock(block, nil); err != nil {
 		return fmt.Errorf("failed to add block to chain: %w", err)
 	}
+
+	// Wake chainsync server iterators so connected peers discover
+	// the newly forged block immediately.
+	b.chain.NotifyIterators()
 
 	b.logger.Info(
 		"block added to chain",
