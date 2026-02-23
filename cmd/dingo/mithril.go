@@ -317,6 +317,7 @@ func runMithrilSync(
 		BlobPlugin:     cfg.BlobPlugin,
 		MetadataPlugin: cfg.MetadataPlugin,
 		MaxConnections: cfg.DatabaseWorkers,
+		StorageMode:    cfg.StorageMode,
 	})
 	if err != nil {
 		return fmt.Errorf("opening database: %w", err)

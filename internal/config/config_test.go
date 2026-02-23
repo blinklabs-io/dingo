@@ -38,7 +38,7 @@ func resetGlobalConfig() {
 		PrivateBindAddr:    "127.0.0.1",
 		PrivatePort:        3002,
 		RelayPort:          3001,
-		UtxorpcPort:        9090,
+		UtxorpcPort:        0,
 		Topology:           "",
 		TlsCertFilePath:    "",
 		TlsKeyFilePath:     "",
@@ -103,7 +103,7 @@ tlsKeyFilePath: "key1.pem"
 		PrivateBindAddr:    "127.0.0.1",
 		PrivatePort:        8000,
 		RelayPort:          4000,
-		UtxorpcPort:        9940,
+		UtxorpcPort:        9940, // explicit override from YAML
 		Topology:           "",
 		TlsCertFilePath:    "cert1.pem",
 		TlsKeyFilePath:     "key1.pem",
@@ -160,7 +160,7 @@ func TestLoad_WithoutConfigFile_UsesDefaults(t *testing.T) {
 		PrivateBindAddr:    "127.0.0.1",
 		PrivatePort:        3002,
 		RelayPort:          3001,
-		UtxorpcPort:        9090,
+		UtxorpcPort:        0,
 		Topology:           "",
 		TlsCertFilePath:    "",
 		TlsKeyFilePath:     "",
@@ -698,5 +698,115 @@ func TestLoadConfig_NetworkNameValidation(t *testing.T) {
 				)
 			}
 		})
+	}
+}
+
+func TestLoad_APIPorts(t *testing.T) {
+	resetGlobalConfig()
+	yamlContent := `
+blockfrostPort: 8080
+utxorpcPort: 9090
+meshPort: 8081
+network: "preview"
+`
+
+	tmpDir := t.TempDir()
+	tmpFile := filepath.Join(tmpDir, "test-api-ports.yaml")
+
+	err := os.WriteFile(tmpFile, []byte(yamlContent), 0644)
+	if err != nil {
+		t.Fatalf("failed to write config file: %v", err)
+	}
+
+	cfg, err := LoadConfig(tmpFile)
+	if err != nil {
+		t.Fatalf("failed to load config: %v", err)
+	}
+
+	if cfg.BlockfrostPort != 8080 {
+		t.Errorf(
+			"expected BlockfrostPort to be 8080, got %d",
+			cfg.BlockfrostPort,
+		)
+	}
+	if cfg.UtxorpcPort != 9090 {
+		t.Errorf(
+			"expected UtxorpcPort to be 9090, got %d",
+			cfg.UtxorpcPort,
+		)
+	}
+	if cfg.MeshPort != 8081 {
+		t.Errorf(
+			"expected MeshPort to be 8081, got %d",
+			cfg.MeshPort,
+		)
+	}
+}
+
+func TestLoad_APIPortsDefault(t *testing.T) {
+	resetGlobalConfig()
+	globalConfig.RunMode = RunModeDev
+
+	cfg, err := LoadConfig("")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if cfg.BlockfrostPort != 0 {
+		t.Errorf(
+			"expected BlockfrostPort default to be 0, got %d",
+			cfg.BlockfrostPort,
+		)
+	}
+	if cfg.UtxorpcPort != 0 {
+		t.Errorf(
+			"expected UtxorpcPort default to be 0, got %d",
+			cfg.UtxorpcPort,
+		)
+	}
+	if cfg.MeshPort != 0 {
+		t.Errorf(
+			"expected MeshPort default to be 0, got %d",
+			cfg.MeshPort,
+		)
+	}
+}
+
+func TestLoad_StorageMode(t *testing.T) {
+	resetGlobalConfig()
+	yamlContent := `
+storageMode: "api"
+network: "preview"
+`
+
+	tmpDir := t.TempDir()
+	tmpFile := filepath.Join(tmpDir, "test-storage-mode.yaml")
+
+	err := os.WriteFile(tmpFile, []byte(yamlContent), 0644)
+	if err != nil {
+		t.Fatalf("failed to write config file: %v", err)
+	}
+
+	cfg, err := LoadConfig(tmpFile)
+	if err != nil {
+		t.Fatalf("failed to load config: %v", err)
+	}
+
+	if cfg.StorageMode != "api" {
+		t.Errorf("expected StorageMode to be 'api', got %q", cfg.StorageMode)
+	}
+}
+
+func TestLoad_StorageModeDefault(t *testing.T) {
+	resetGlobalConfig()
+	globalConfig.RunMode = RunModeDev
+
+	cfg, err := LoadConfig("")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if cfg.StorageMode != "" {
+		t.Errorf("expected StorageMode default to be empty, got %q", cfg.StorageMode)
 	}
 }

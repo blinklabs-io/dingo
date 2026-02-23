@@ -16,6 +16,7 @@ package mysql
 
 import (
 	"log/slog"
+	"strings"
 
 	"github.com/prometheus/client_golang/prometheus"
 )
@@ -92,5 +93,13 @@ func WithTimeZone(timeZone string) MysqlOptionFunc {
 func WithDSN(dsn string) MysqlOptionFunc {
 	return func(m *MetadataStoreMysql) {
 		m.dsn = dsn
+	}
+}
+
+// WithStorageMode specifies the storage tier.
+// "core" = consensus only, "api" = full tx metadata.
+func WithStorageMode(mode string) MysqlOptionFunc {
+	return func(m *MetadataStoreMysql) {
+		m.storageMode = strings.ToLower(mode)
 	}
 }

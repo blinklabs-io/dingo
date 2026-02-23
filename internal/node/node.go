@@ -140,6 +140,38 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 		}
 	}
 
+	// Validate storage mode
+	storageMode := dingo.StorageMode(cfg.StorageMode)
+	if storageMode == "" {
+		storageMode = dingo.StorageModeCore
+	}
+	if !storageMode.Valid() {
+		return fmt.Errorf(
+			"invalid storage mode %q: must be %q or %q",
+			cfg.StorageMode,
+			dingo.StorageModeCore,
+			dingo.StorageModeAPI,
+		)
+	}
+	// APIs require "api" storage mode
+	anyAPIEnabled := cfg.BlockfrostPort > 0 ||
+		cfg.MeshPort > 0 ||
+		cfg.UtxorpcPort > 0
+	if anyAPIEnabled && !storageMode.IsAPI() {
+		return fmt.Errorf(
+			"storage mode is %q but one or more APIs are enabled; "+
+				"set storageMode to %q or disable all APIs",
+			storageMode,
+			dingo.StorageModeAPI,
+		)
+	}
+	logger.Info("storage mode",
+		"mode", string(storageMode),
+		"blockfrost", cfg.BlockfrostPort > 0,
+		"utxorpc", cfg.UtxorpcPort > 0,
+		"mesh", cfg.MeshPort > 0,
+	)
+
 	d, err := dingo.New(
 		dingo.NewConfig(
 			dingo.WithIntersectTip(cfg.IntersectTip),
@@ -186,9 +218,10 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 			dingo.WithChainsyncStallTimeout(
 				chainsyncStallTimeout,
 			),
-			dingo.WithMeshListenAddress(
-				cfg.MeshListenAddress,
-			),
+			dingo.WithBindAddr(cfg.BindAddr),
+			dingo.WithBlockfrostPort(cfg.BlockfrostPort),
+			dingo.WithMeshPort(cfg.MeshPort),
+			dingo.WithStorageMode(storageMode),
 			// Block production (SPO mode)
 			dingo.WithBlockProducer(cfg.BlockProducer),
 			dingo.WithShelleyVRFKey(cfg.ShelleyVRFKey),

@@ -16,6 +16,7 @@ package sqlite
 
 import (
 	"log/slog"
+	"strings"
 
 	"github.com/prometheus/client_golang/prometheus"
 )
@@ -51,5 +52,13 @@ func WithDataDir(dataDir string) SqliteOptionFunc {
 func WithMaxConnections(maxConnections int) SqliteOptionFunc {
 	return func(m *MetadataStoreSqlite) {
 		m.maxConnections = maxConnections
+	}
+}
+
+// WithStorageMode specifies the storage tier.
+// "core" = consensus only, "api" = full tx metadata.
+func WithStorageMode(mode string) SqliteOptionFunc {
+	return func(m *MetadataStoreSqlite) {
+		m.storageMode = strings.ToLower(mode)
 	}
 }

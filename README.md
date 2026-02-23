@@ -67,8 +67,8 @@ In addition to the configuration file, Dingo's behavior can be changed via the f
   - This socket speaks Ouroboros NtC and is used by client software
 - `CARDANO_TOPOLOGY`
   - Full path to the Cardano node topology (default: "")
-- `CARDANO_UTXORPC_PORT`
-  - TCP port to bind for listening for UTxO RPC (default: `9090`)
+- `DINGO_UTXORPC_PORT`
+  - TCP port to bind for listening for UTxO RPC (default: `0`, disabled)
 - `TLS_CERT_FILE_PATH` - SSL certificate to use, requires `TLS_KEY_FILE_PATH`
     (default: empty)
 - `TLS_KEY_FILE_PATH` - SSL certificate key to use (default: empty)

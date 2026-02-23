@@ -39,12 +39,41 @@ const (
 	runModeDev   = "dev"
 )
 
+// StorageMode controls how much data the metadata store persists.
+type StorageMode string
+
+const (
+	// StorageModeCore stores only consensus and chain state data.
+	// Witnesses, scripts, datums, redeemers, and tx metadata CBOR
+	// are skipped. Suitable for block producers with no APIs.
+	StorageModeCore StorageMode = "core"
+	// StorageModeAPI stores everything needed for API queries
+	// (blockfrost, utxorpc, mesh) in addition to core data.
+	StorageModeAPI StorageMode = "api"
+)
+
+// Valid returns true if the storage mode is a recognized value.
+func (m StorageMode) Valid() bool {
+	switch m {
+	case StorageModeCore, StorageModeAPI:
+		return true
+	default:
+		return false
+	}
+}
+
+// IsAPI returns true if the storage mode includes API data.
+func (m StorageMode) IsAPI() bool {
+	return m == StorageModeAPI
+}
+
 type Config struct {
 	promRegistry             prometheus.Registerer
 	topologyConfig           *topology.TopologyConfig
 	logger                   *slog.Logger
 	cardanoNodeConfig        *cardano.CardanoNodeConfig
 	dataDir                  string
+	bindAddr                 string
 	blobPlugin               string
 	metadataPlugin           string
 	network                  string
@@ -80,13 +109,15 @@ type Config struct {
 	shelleyVRFKey                 string
 	shelleyKESKey                 string
 	shelleyOperationalCertificate string
-	// Blockfrost API listen address (empty = disabled)
-	blockfrostListenAddress string
+	// Blockfrost API port (0 = disabled)
+	blockfrostPort uint
 	// Chainsync multi-client configuration
 	chainsyncMaxClients   int
 	chainsyncStallTimeout time.Duration
-	// Mesh API listen address (empty = disabled)
-	meshListenAddress string
+	// Mesh API port (0 = disabled)
+	meshPort uint
+	// Storage mode: "core" or "api"
+	storageMode StorageMode
 }
 
 // configPopulateNetworkMagic uses the named network (if specified) to determine the network magic value (if not specified)
@@ -109,6 +140,34 @@ func (c *Config) isDevMode() bool {
 }
 
 func (n *Node) configValidate() error {
+	// Default storageMode to "core" when unset, and validate.
+	if n.config.storageMode == "" {
+		n.config.storageMode = StorageModeCore
+	}
+	if !n.config.storageMode.Valid() {
+		return fmt.Errorf(
+			"invalid storage mode %q: must be %q or %q",
+			n.config.storageMode,
+			StorageModeCore,
+			StorageModeAPI,
+		)
+	}
+	// Default bindAddr used for API listeners.
+	if n.config.bindAddr == "" {
+		n.config.bindAddr = "0.0.0.0"
+	}
+	// APIs require "api" storage mode.
+	anyAPIEnabled := n.config.utxorpcPort > 0 ||
+		n.config.blockfrostPort > 0 ||
+		n.config.meshPort > 0
+	if anyAPIEnabled && !n.config.storageMode.IsAPI() {
+		return fmt.Errorf(
+			"storage mode is %q but one or more API ports are enabled; "+
+				"set storage mode to %q or disable all API ports",
+			n.config.storageMode,
+			StorageModeAPI,
+		)
+	}
 	if n.config.networkMagic == 0 {
 		return fmt.Errorf(
 			"invalid network magic value: %d",
@@ -169,6 +228,14 @@ func WithCardanoNodeConfig(
 ) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cardanoNodeConfig = cardanoNodeConfig
+	}
+}
+
+// WithBindAddr specifies the IP address used for API listeners
+// (Blockfrost, Mesh, UTxO RPC). The default is "0.0.0.0" (all interfaces).
+func WithBindAddr(addr string) ConfigOptionFunc {
+	return func(c *Config) {
+		c.bindAddr = addr
 	}
 }
 
@@ -256,7 +323,7 @@ func WithUtxorpcTlsKeyFilePath(path string) ConfigOptionFunc {
 	}
 }
 
-// WithUtxorpcPort specifies the port to use for the gRPC API listener. This defaults to port 9090
+// WithUtxorpcPort specifies the port to use for the gRPC API listener. 0 disables the server (default)
 func WithUtxorpcPort(port uint) ConfigOptionFunc {
 	return func(c *Config) {
 		c.utxorpcPort = port
@@ -422,15 +489,13 @@ func WithShelleyOperationalCertificate(path string) ConfigOptionFunc {
 	}
 }
 
-// WithBlockfrostListenAddress specifies the listen
-// address for the Blockfrost-compatible REST API server.
-// An empty string disables the server. The default is
-// empty (disabled).
-func WithBlockfrostListenAddress(
-	addr string,
-) ConfigOptionFunc {
+// WithBlockfrostPort specifies the port for the
+// Blockfrost-compatible REST API server. The server binds
+// to the node's bindAddr on this port. 0 disables the
+// server (default).
+func WithBlockfrostPort(port uint) ConfigOptionFunc {
 	return func(c *Config) {
-		c.blockfrostListenAddress = addr
+		c.blockfrostPort = port
 	}
 }
 
@@ -455,14 +520,21 @@ func WithChainsyncStallTimeout(
 	}
 }
 
-// WithMeshListenAddress specifies the listen address
-// for the Mesh (Coinbase Rosetta) compatible REST API
-// server. An empty string disables the server. The
-// default is empty (disabled).
-func WithMeshListenAddress(
-	addr string,
-) ConfigOptionFunc {
+// WithMeshPort specifies the port for the Mesh (Coinbase
+// Rosetta) compatible REST API server. The server binds
+// to the node's bindAddr on this port. 0 disables the
+// server (default).
+func WithMeshPort(port uint) ConfigOptionFunc {
 	return func(c *Config) {
-		c.meshListenAddress = addr
+		c.meshPort = port
+	}
+}
+
+// WithStorageMode specifies the storage mode. StorageModeCore
+// stores only consensus data; StorageModeAPI adds full
+// transaction metadata for API queries.
+func WithStorageMode(mode StorageMode) ConfigOptionFunc {
+	return func(c *Config) {
+		c.storageMode = mode
 	}
 }
