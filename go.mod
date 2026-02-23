@@ -14,7 +14,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/config v1.32.9
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.96.0
 	github.com/aws/smithy-go v1.24.0
-	github.com/blinklabs-io/bursa v0.14.0
+	github.com/blinklabs-io/bursa v0.15.0
 	github.com/blinklabs-io/gouroboros v0.158.2
 	github.com/blinklabs-io/ouroboros-mock v0.9.0
 	github.com/blinklabs-io/plutigo v0.0.25
@@ -103,6 +103,7 @@ require (
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/bits-and-blooms/bitset v1.24.4 // indirect
 	github.com/blang/semver v3.5.1+incompatible // indirect
+	github.com/blinklabs-io/go-bip39 v0.2.0 // indirect
 	github.com/btcsuite/btcd/btcec/v2 v2.3.6 // indirect
 	github.com/btcsuite/btcd/chaincfg/chainhash v1.1.0 // indirect
 	github.com/cenkalti/backoff/v4 v4.3.0 // indirect
@@ -187,7 +188,6 @@ require (
 	github.com/shopspring/decimal v1.4.0 // indirect
 	github.com/sirupsen/logrus v1.9.3 // indirect
 	github.com/spiffe/go-spiffe/v2 v2.6.0 // indirect
-	github.com/tyler-smith/go-bip39 v1.1.0 // indirect
 	github.com/urfave/cli v1.22.17 // indirect
 	github.com/x448/float16 v0.8.4 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
