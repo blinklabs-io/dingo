@@ -262,10 +262,40 @@ func (d *Database) GetTransactionsByBlockHash(
 
 // GetTransactionsByAddress returns transactions that involve a given
 // address as either a sender (input) or receiver (output).
+// Results are returned in descending on-chain order.
 func (d *Database) GetTransactionsByAddress(
 	addr lcommon.Address,
 	limit int,
 	offset int,
+	txn *Txn,
+) ([]models.Transaction, error) {
+	zeroHash := lcommon.NewBlake2b224(nil)
+	var paymentKey []byte
+	var stakingKey []byte
+	if pkh := addr.PaymentKeyHash(); pkh != zeroHash {
+		paymentKey = pkh.Bytes()
+	}
+	if skh := addr.StakeKeyHash(); skh != zeroHash {
+		stakingKey = skh.Bytes()
+	}
+	return d.GetTransactionsByAddressKeys(
+		paymentKey,
+		stakingKey,
+		limit,
+		offset,
+		"desc",
+		txn,
+	)
+}
+
+// GetTransactionsByAddressKeys returns transactions for a payment/staking key
+// tuple with pagination and explicit order (asc|desc).
+func (d *Database) GetTransactionsByAddressKeys(
+	paymentKey []byte,
+	stakingKey []byte,
+	limit int,
+	offset int,
+	order string,
 	txn *Txn,
 ) ([]models.Transaction, error) {
 	if txn == nil {
@@ -273,20 +303,54 @@ func (d *Database) GetTransactionsByAddress(
 		defer txn.Release()
 	}
 	txs, err := d.metadata.GetTransactionsByAddress(
-		addr,
+		paymentKey,
+		stakingKey,
+		limit,
+		offset,
+		order,
+		txn.Metadata(),
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"get txs by address payment=%x staking=%x limit=%d offset=%d order=%s: %w",
+			paymentKey,
+			stakingKey,
+			limit,
+			offset,
+			order,
+			err,
+		)
+	}
+	return txs, nil
+}
+
+// GetAddressesByStakingKey returns distinct address mappings for a staking key.
+func (d *Database) GetAddressesByStakingKey(
+	stakingKey []byte,
+	limit int,
+	offset int,
+	txn *Txn,
+) ([]models.AddressTransaction, error) {
+	if txn == nil {
+		txn = d.Transaction(false)
+		defer txn.Release()
+	}
+	addresses, err := d.metadata.GetAddressesByStakingKey(
+		stakingKey,
 		limit,
 		offset,
 		txn.Metadata(),
 	)
 	if err != nil {
 		return nil, fmt.Errorf(
-			"get txs by address limit=%d offset=%d: %w",
+			"get addresses by staking key=%x limit=%d offset=%d: %w",
+			stakingKey,
 			limit,
 			offset,
 			err,
 		)
 	}
-	return txs, nil
+	return addresses, nil
 }
 
 // deleteTxBlobs attempts to delete blob data for the given transaction hashes.
@@ -378,6 +442,14 @@ func (d *Database) TransactionsDeleteRolledback(
 	_ = deleteTxBlobs(d, txHashes, txn)
 
 	// Then delete metadata (source of truth)
+	if err := d.metadata.DeleteAddressTransactionsAfterSlot(slot, txn.Metadata()); err != nil {
+		return fmt.Errorf(
+			"failed to delete address transaction mappings after slot %d: %w",
+			slot,
+			err,
+		)
+	}
+
 	err = d.metadata.DeleteTransactionsAfterSlot(slot, txn.Metadata())
 	if err != nil {
 		return fmt.Errorf(

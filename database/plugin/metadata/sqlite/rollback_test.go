@@ -73,6 +73,10 @@ func (m *mockTransactionWithInputs) Consumed() []lcommon.TransactionInput {
 	return result
 }
 
+func (m *mockTransactionWithInputs) Inputs() []lcommon.TransactionInput {
+	return m.Consumed()
+}
+
 // --- Optimistic UTxO locking tests ---
 
 // TestOptimisticLockingConflictDetection verifies that the optimistic
@@ -229,6 +233,59 @@ func TestOptimisticLockingMissingUtxo(t *testing.T) {
 		err,
 		"spending missing UTxO should not error (warn only)",
 	)
+}
+
+// Validates AddressTransaction populates the data from transaction(input/output) participant
+// Validates whether it inserts a record per unique address (payment & staking key pair)
+func TestSetTransactionIndexesAddressTransactions(t *testing.T) {
+	store := setupTestDB(t)
+
+	utxoTxId := bytes.Repeat([]byte{0xA1}, 32)
+	paymentKey := bytes.Repeat([]byte{0x11}, 28)
+	stakingKey := bytes.Repeat([]byte{0x22}, 28)
+	utxo := models.Utxo{
+		TxId:       utxoTxId,
+		OutputIdx:  0,
+		AddedSlot:  100,
+		PaymentKey: paymentKey,
+		StakingKey: stakingKey,
+		Amount:     types.Uint64(5000000),
+	}
+	require.NoError(t, store.DB().Create(&utxo).Error)
+
+	txHash := lcommon.NewBlake2b256(bytes.Repeat([]byte{0xB1}, 32))
+	tx := &mockTransactionWithInputs{
+		mockTransaction: mockTransaction{
+			hash:    txHash,
+			isValid: true,
+		},
+		consumed: []mockInput{
+			{txId: utxoTxId, index: 0},
+			{txId: utxoTxId, index: 0}, // duplicate input reference
+		},
+	}
+	point := ocommon.Point{
+		Hash: bytes.Repeat([]byte{0xC1}, 32),
+		Slot: 200,
+	}
+	require.NoError(t, store.SetTransaction(tx, point, 3, nil, nil))
+
+	var dbTx models.Transaction
+	require.NoError(
+		t,
+		store.DB().Where("hash = ?", txHash.Bytes()).First(&dbTx).Error,
+	)
+
+	var rows []models.AddressTransaction
+	require.NoError(
+		t,
+		store.DB().Where("transaction_id = ?", dbTx.ID).Find(&rows).Error,
+	)
+	require.Len(t, rows, 1, "duplicate addresses in one tx should be deduplicated")
+	require.Equal(t, paymentKey, rows[0].PaymentKey)
+	require.Equal(t, stakingKey, rows[0].StakingKey)
+	require.Equal(t, point.Slot, rows[0].Slot)
+	require.Equal(t, uint32(3), rows[0].TxIndex)
 }
 
 // --- Rollback state restoration tests ---

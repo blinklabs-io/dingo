@@ -219,6 +219,113 @@ func createTestTransaction(db *gorm.DB, id uint, slot uint64) error {
 	).Error
 }
 
+func TestGetTransactionsByAddressIndex(t *testing.T) {
+	store := setupTestDB(t)
+
+	if err := createTestTransaction(store.DB(), 1, 100); err != nil {
+		t.Fatalf("failed to create tx1: %v", err)
+	}
+	if err := createTestTransaction(store.DB(), 2, 200); err != nil {
+		t.Fatalf("failed to create tx2: %v", err)
+	}
+	if err := createTestTransaction(store.DB(), 3, 300); err != nil {
+		t.Fatalf("failed to create tx3: %v", err)
+	}
+
+	payment1 := bytes.Repeat([]byte{0x11}, 28)
+	payment2 := bytes.Repeat([]byte{0x12}, 28)
+	stake1 := bytes.Repeat([]byte{0x22}, 28)
+	rows := []models.AddressTransaction{
+		{PaymentKey: payment1, StakingKey: stake1, TransactionID: 1, Slot: 100, TxIndex: 0},
+		{PaymentKey: payment1, StakingKey: stake1, TransactionID: 2, Slot: 200, TxIndex: 0},
+		{PaymentKey: payment2, StakingKey: stake1, TransactionID: 3, Slot: 300, TxIndex: 0},
+	}
+	if err := store.DB().Create(&rows).Error; err != nil {
+		t.Fatalf("failed to create address_tx rows: %v", err)
+	}
+
+	desc, err := store.GetTransactionsByAddress(payment1, stake1, 10, 0, "desc", nil)
+	if err != nil {
+		t.Fatalf("GetTransactionsByAddress desc failed: %v", err)
+	}
+	if len(desc) != 2 || desc[0].ID != 2 || desc[1].ID != 1 {
+		t.Fatalf("unexpected desc order: %+v", desc)
+	}
+
+	asc, err := store.GetTransactionsByAddress(payment1, stake1, 10, 0, "asc", nil)
+	if err != nil {
+		t.Fatalf("GetTransactionsByAddress asc failed: %v", err)
+	}
+	if len(asc) != 2 || asc[0].ID != 1 || asc[1].ID != 2 {
+		t.Fatalf("unexpected asc order: %+v", asc)
+	}
+
+	page, err := store.GetTransactionsByAddress(payment1, stake1, 1, 1, "desc", nil)
+	if err != nil {
+		t.Fatalf("GetTransactionsByAddress pagination failed: %v", err)
+	}
+	if len(page) != 1 || page[0].ID != 1 {
+		t.Fatalf("unexpected pagination result: %+v", page)
+	}
+}
+
+func TestGetAddressesByStakingKey(t *testing.T) {
+	store := setupTestDB(t)
+
+	stake := bytes.Repeat([]byte{0x55}, 28)
+	paymentA := bytes.Repeat([]byte{0x66}, 28)
+	paymentB := bytes.Repeat([]byte{0x77}, 28)
+	rows := []models.AddressTransaction{
+		{PaymentKey: paymentA, StakingKey: stake, TransactionID: 1, Slot: 100, TxIndex: 0},
+		{PaymentKey: paymentA, StakingKey: stake, TransactionID: 2, Slot: 200, TxIndex: 0},
+		{PaymentKey: paymentB, StakingKey: stake, TransactionID: 3, Slot: 300, TxIndex: 0},
+	}
+	if err := store.DB().Create(&rows).Error; err != nil {
+		t.Fatalf("failed to create address_tx rows: %v", err)
+	}
+
+	addrs, err := store.GetAddressesByStakingKey(stake, 10, 0, nil)
+	if err != nil {
+		t.Fatalf("GetAddressesByStakingKey failed: %v", err)
+	}
+	if len(addrs) != 2 {
+		t.Fatalf("expected 2 distinct addresses, got %d", len(addrs))
+	}
+
+	page, err := store.GetAddressesByStakingKey(stake, 1, 1, nil)
+	if err != nil {
+		t.Fatalf("GetAddressesByStakingKey pagination failed: %v", err)
+	}
+	if len(page) != 1 {
+		t.Fatalf("expected 1 address in page, got %d", len(page))
+	}
+}
+
+func TestDeleteAddressTransactionsAfterSlot(t *testing.T) {
+	store := setupTestDB(t)
+
+	rows := []models.AddressTransaction{
+		{PaymentKey: bytes.Repeat([]byte{0x01}, 28), StakingKey: bytes.Repeat([]byte{0x11}, 28), TransactionID: 1, Slot: 100, TxIndex: 0},
+		{PaymentKey: bytes.Repeat([]byte{0x02}, 28), StakingKey: bytes.Repeat([]byte{0x11}, 28), TransactionID: 2, Slot: 200, TxIndex: 0},
+		{PaymentKey: bytes.Repeat([]byte{0x03}, 28), StakingKey: bytes.Repeat([]byte{0x11}, 28), TransactionID: 3, Slot: 300, TxIndex: 0},
+	}
+	if err := store.DB().Create(&rows).Error; err != nil {
+		t.Fatalf("failed to create address_tx rows: %v", err)
+	}
+
+	if err := store.DeleteAddressTransactionsAfterSlot(150, nil); err != nil {
+		t.Fatalf("DeleteAddressTransactionsAfterSlot failed: %v", err)
+	}
+
+	var remaining []models.AddressTransaction
+	if err := store.DB().Order("slot ASC").Find(&remaining).Error; err != nil {
+		t.Fatalf("failed to query rows: %v", err)
+	}
+	if len(remaining) != 1 || remaining[0].Slot != 100 {
+		t.Fatalf("unexpected remaining rows after delete: %+v", remaining)
+	}
+}
+
 // TestInMemorySqliteMultipleTransaction tests that our sqlite connection allows multiple
 // concurrent transactions when using in-memory mode. This requires special URI flags, and
 // this is mostly making sure that we don't lose them
