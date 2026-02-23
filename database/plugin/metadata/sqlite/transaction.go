@@ -100,33 +100,33 @@ func (d *MetadataStoreSqlite) resolveReadDB(
 // bind args for matching UTxO rows by payment/staking key.
 // The prefix is the table alias (e.g. "u"). Returns an
 // empty condition if the address has neither key.
-func addressSQLCondition(
-	addr lcommon.Address,
-	prefix string,
-) (string, []any) {
-	zeroHash := lcommon.NewBlake2b224(nil)
-	hasPayment := addr.PaymentKeyHash() != zeroHash
-	hasStake := addr.StakeKeyHash() != zeroHash
+// func addressSQLCondition(
+// 	addr lcommon.Address,
+// 	prefix string,
+// ) (string, []any) {
+// 	zeroHash := lcommon.NewBlake2b224(nil)
+// 	hasPayment := addr.PaymentKeyHash() != zeroHash
+// 	hasStake := addr.StakeKeyHash() != zeroHash
 
-	switch {
-	case hasPayment && hasStake:
-		return fmt.Sprintf(
-				"%s.payment_key = ? AND %s.staking_key = ?",
-				prefix, prefix,
-			), []any{
-				addr.PaymentKeyHash().Bytes(),
-				addr.StakeKeyHash().Bytes(),
-			}
-	case hasPayment:
-		return prefix + ".payment_key = ?",
-			[]any{addr.PaymentKeyHash().Bytes()}
-	case hasStake:
-		return prefix + ".staking_key = ?",
-			[]any{addr.StakeKeyHash().Bytes()}
-	default:
-		return "", nil
-	}
-}
+// 	switch {
+// 	case hasPayment && hasStake:
+// 		return fmt.Sprintf(
+// 				"%s.payment_key = ? AND %s.staking_key = ?",
+// 				prefix, prefix,
+// 			), []any{
+// 				addr.PaymentKeyHash().Bytes(),
+// 				addr.StakeKeyHash().Bytes(),
+// 			}
+// 	case hasPayment:
+// 		return prefix + ".payment_key = ?",
+// 			[]any{addr.PaymentKeyHash().Bytes()}
+// 	case hasStake:
+// 		return prefix + ".staking_key = ?",
+// 			[]any{addr.StakeKeyHash().Bytes()}
+// 	default:
+// 		return "", nil
+// 	}
+// }
 
 // GetTransactionByHash returns a transaction by its hash
 func (d *MetadataStoreSqlite) GetTransactionByHash(
