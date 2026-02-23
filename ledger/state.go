@@ -545,6 +545,9 @@ func (ls *LedgerState) Start(ctx context.Context) error {
 	ls.ctx = ctx
 	// Init metrics
 	ls.metrics.init(ls.config.PromRegistry)
+	ls.metrics.nodeStartTime.Set(
+		float64(time.Now().Unix()),
+	)
 
 	// Initialize database worker pool for async operations
 	if !ls.config.DatabaseWorkerPoolConfig.Disabled {
@@ -3116,6 +3119,16 @@ func (ls *LedgerState) EvaluateTx(
 // Sets the mempool for accessing transactions
 func (ls *LedgerState) SetMempool(mempool MempoolProvider) {
 	ls.mempool = mempool
+}
+
+// SetForgingEnabled sets the forging_enabled metric gauge. Call with
+// true after the block forger has been initialised successfully.
+func (ls *LedgerState) SetForgingEnabled(enabled bool) {
+	if enabled {
+		ls.metrics.forgingEnabled.Set(1)
+	} else {
+		ls.metrics.forgingEnabled.Set(0)
+	}
 }
 
 // SetForgedBlockChecker sets the forged block checker used for slot
