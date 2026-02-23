@@ -39,6 +39,15 @@ func (o *Ouroboros) chainsyncServerConnOpts() []ochainsync.ChainSyncOptionFunc {
 	return []ochainsync.ChainSyncOptionFunc{
 		ochainsync.WithFindIntersectFunc(o.chainsyncServerFindIntersect),
 		ochainsync.WithRequestNextFunc(o.chainsyncServerRequestNext),
+		// Increase intersect timeout from the 10s default. Downstream
+		// peers may send FindIntersect with many points during initial
+		// sync, and processing can be slow under load.
+		ochainsync.WithIntersectTimeout(30 * time.Second),
+		// Set idle timeout to 1 hour. The spec default (3673s per
+		// Table 3.8) is similar, but we set it explicitly to keep
+		// server connections alive during periods of low block
+		// production (e.g. DevNets with low activeSlotsCoeff).
+		ochainsync.WithIdleTimeout(1 * time.Hour),
 	}
 }
 
