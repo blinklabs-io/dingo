@@ -798,9 +798,10 @@ func (d *MetadataStoreSqlite) SetTransaction(
 	addressUtxos := make(
 		[]models.Utxo,
 		0,
-		len(tmpTx.Inputs)+len(tmpTx.Outputs)+1,
+		len(tmpTx.Inputs)+len(tmpTx.Collateral)+len(tmpTx.Outputs)+1,
 	)
 	addressUtxos = append(addressUtxos, tmpTx.Inputs...)
+	addressUtxos = append(addressUtxos, tmpTx.Collateral...)
 	addressUtxos = append(addressUtxos, tmpTx.Outputs...)
 	if tmpTx.CollateralReturn != nil {
 		addressUtxos = append(addressUtxos, *tmpTx.CollateralReturn)
