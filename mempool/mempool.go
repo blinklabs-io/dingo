@@ -153,6 +153,14 @@ func NewMempool(config MempoolConfig) *Mempool {
 	} else {
 		m.logger = config.Logger
 	}
+	if config.MempoolCapacity <= 0 {
+		m.logger.Warn(
+			"mempool capacity is zero or negative; "+
+				"all transactions will be rejected",
+			"component", "mempool",
+			"capacity", config.MempoolCapacity,
+		)
+	}
 	// Init metrics before launching goroutines that reference them
 	promautoFactory := promauto.With(config.PromRegistry)
 	m.metrics.txsProcessedNum = promautoFactory.NewCounter(

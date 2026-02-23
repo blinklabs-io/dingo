@@ -373,22 +373,39 @@ func (cs *ChainSelector) GetBestPeer() *ouroboros.ConnectionId {
 	return cs.bestPeerConn
 }
 
-// GetPeerTip returns the chain tip for a specific peer.
+// GetPeerTip returns a deep copy of the chain tip for a specific peer.
+// Returns nil if the peer is not tracked.
 func (cs *ChainSelector) GetPeerTip(
 	connId ouroboros.ConnectionId,
 ) *PeerChainTip {
 	cs.mutex.RLock()
 	defer cs.mutex.RUnlock()
-	return cs.peerTips[connId]
+	pt := cs.peerTips[connId]
+	if pt == nil {
+		return nil
+	}
+	tipCopy := *pt
+	if pt.VRFOutput != nil {
+		tipCopy.VRFOutput = make([]byte, len(pt.VRFOutput))
+		copy(tipCopy.VRFOutput, pt.VRFOutput)
+	}
+	return &tipCopy
 }
 
-// GetAllPeerTips returns a copy of all tracked peer tips.
+// GetAllPeerTips returns a deep copy of all tracked peer tips.
 func (cs *ChainSelector) GetAllPeerTips() map[ouroboros.ConnectionId]*PeerChainTip {
 	cs.mutex.RLock()
 	defer cs.mutex.RUnlock()
-	result := make(map[ouroboros.ConnectionId]*PeerChainTip, len(cs.peerTips))
+	result := make(
+		map[ouroboros.ConnectionId]*PeerChainTip,
+		len(cs.peerTips),
+	)
 	for k, v := range cs.peerTips {
 		tipCopy := *v
+		if v.VRFOutput != nil {
+			tipCopy.VRFOutput = make([]byte, len(v.VRFOutput))
+			copy(tipCopy.VRFOutput, v.VRFOutput)
+		}
 		result[k] = &tipCopy
 	}
 	return result
