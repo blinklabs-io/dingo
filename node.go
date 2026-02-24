@@ -565,6 +565,9 @@ func (n *Node) Run(ctx context.Context) error {
 				n.blockForger.SlotTracker(),
 			)
 			n.ledgerState.SetForgingEnabled(true)
+			n.ledgerState.SetSlotBattleRecorder(
+				n.blockForger,
+			)
 		}
 		started = append(started, func() {
 			if n.blockForger != nil {
@@ -819,6 +822,7 @@ func (n *Node) initBlockForger(ctx context.Context) error {
 		BlockBuilder:     builder,
 		BlockBroadcaster: broadcaster,
 		SlotClock:        slotClock,
+		PromRegistry:     n.config.promRegistry,
 	})
 	if err != nil {
 		// Stop election to prevent goroutine leak
