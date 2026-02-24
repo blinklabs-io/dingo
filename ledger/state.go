@@ -1306,17 +1306,30 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 			),
 		)
 	}
-	// Reload protocol parameters to reflect the rolled-back state
-	if err := ls.loadPParams(); err != nil {
-		ls.config.Logger.Warn(
-			"failed to reload protocol params after rollback",
-			"error", err,
-			"component", "ledger",
-		)
-	}
-	// Reload epoch cache to discard stale nonces from rolled-back epochs.
-	// The deleted epoch entries will be recreated with correct nonces when
-	// the chain replays past those epoch boundaries during re-sync.
+	// Reload epoch cache into locals to discard stale nonces from
+	// rolled-back epochs. The deleted epoch entries will be recreated
+	// with correct nonces when the chain replays past those epoch
+	// boundaries during re-sync.
+	//
+	// All shared state (epochCache, currentEpoch, currentEra,
+	// currentPParams, prevEraPParams, currentTip,
+	// currentTipBlockNonce) is computed into local variables first,
+	// then applied atomically under a single Lock to avoid data
+	// races with concurrent readers.
+	var (
+		newEpochs       []models.Epoch
+		newCurrentEpoch models.Epoch
+		newCurrentEra   eras.EraDesc
+		newPParams      lcommon.ProtocolParameters
+		newPrevPParams  lcommon.ProtocolParameters
+		eraResolved     bool
+	)
+	// Snapshot current era under read lock for fallback
+	ls.RLock()
+	newCurrentEra = ls.currentEra
+	newCurrentEpoch = ls.currentEpoch
+	ls.RUnlock()
+
 	epochs, err := ls.db.GetEpochs(nil)
 	if err != nil {
 		ls.config.Logger.Warn(
@@ -1325,25 +1338,94 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 			"component", "ledger",
 		)
 	}
-	// Transaction committed successfully - now update in-memory state.
-	// Brief lock to ensure readers see consistent state.
-	ls.Lock()
-	ls.currentTip = newTip
-	// Always update nonce - clear it on genesis rollback, set it otherwise
-	ls.currentTipBlockNonce = newNonce
 	if epochs != nil {
-		ls.epochCache = epochs
-		// Reset currentEpoch to the last remaining epoch so that
-		// ledgerProcessBlocks correctly detects the next epoch
-		// boundary and EpochNonce() returns the right nonce.
+		newEpochs = epochs
+		// Reset currentEpoch to the last remaining epoch so
+		// that ledgerProcessBlocks correctly detects the next
+		// epoch boundary and EpochNonce() returns the right
+		// nonce.
 		if len(epochs) > 0 {
-			ls.currentEpoch = epochs[len(epochs)-1]
-			eraDesc := eras.GetEraById(ls.currentEpoch.EraId)
+			newCurrentEpoch = epochs[len(epochs)-1]
+			eraDesc := eras.GetEraById(
+				newCurrentEpoch.EraId,
+			)
 			if eraDesc != nil {
-				ls.currentEra = *eraDesc
+				newCurrentEra = *eraDesc
+				eraResolved = true
+			} else {
+				ls.config.Logger.Warn(
+					"unknown era ID after rollback, "+
+						"currentEra may be stale",
+					"era_id",
+					newCurrentEpoch.EraId,
+					"component", "ledger",
+				)
 			}
 		}
 	}
+	// Reload protocol parameters into locals to reflect the
+	// rolled-back state. Skip if era lookup failed (nil) since
+	// the DecodePParamsFunc would be wrong. Recompute when:
+	//   - eraResolved: era was successfully resolved so
+	//     computePParams can use the correct DecodePParamsFunc
+	//   - newEpochs == nil: DB error, fall back to stale snapshot
+	// Do NOT recompute when len(newEpochs) == 0 (genesis rollback):
+	// the genesis rollback branch explicitly clears pparams to nil,
+	// and computing them here with the stale pre-rollback era would
+	// produce non-nil pparams that overwrite the intentional nil.
+	if eraResolved || newEpochs == nil {
+		pp, prevPP, ppErr := ls.computePParams(
+			newCurrentEpoch,
+			newCurrentEra,
+			newEpochs,
+		)
+		if ppErr != nil {
+			ls.config.Logger.Warn(
+				"failed to reload protocol params "+
+					"after rollback",
+				"error", ppErr,
+				"component", "ledger",
+			)
+		} else {
+			newPParams = pp
+			newPrevPParams = prevPP
+		}
+	}
+	// Transaction committed successfully - now update all
+	// in-memory state atomically so readers see a consistent
+	// snapshot.
+	ls.Lock()
+	if newEpochs != nil {
+		ls.epochCache = newEpochs
+		if len(newEpochs) > 0 {
+			ls.currentEpoch = newCurrentEpoch
+			// Only update currentEra when we successfully
+			// resolved it. Writing a stale era alongside a
+			// new epoch would leave currentEra inconsistent
+			// with currentEpoch.
+			if eraResolved {
+				ls.currentEra = newCurrentEra
+			}
+		} else {
+			// Genesis rollback: all epochs deleted, reset
+			// to zero-value so epoch boundary detection
+			// triggers correctly on re-sync. Zero currentEra
+			// and pparams too so they stay consistent with
+			// the zeroed epoch.
+			ls.currentEpoch = models.Epoch{}
+			ls.currentEra = eras.EraDesc{}
+			ls.currentPParams = nil
+			ls.prevEraPParams = nil
+		}
+	}
+	if newPParams != nil {
+		ls.currentPParams = newPParams
+		ls.prevEraPParams = newPrevPParams
+	}
+	ls.currentTip = newTip
+	// Always update nonce - clear it on genesis rollback, set
+	// it otherwise
+	ls.currentTipBlockNonce = newNonce
 	ls.updateTipMetrics()
 	ls.Unlock()
 	var hash string
@@ -2477,69 +2559,146 @@ func (ls *LedgerState) updateTipMetrics() {
 	)
 }
 
+// loadPParams reads currentEpoch, currentEra, and epochCache and writes
+// currentPParams and prevEraPParams without holding a lock. This is safe
+// because it is only called from Start() during single-threaded initialization.
 func (ls *LedgerState) loadPParams() error {
-	pparams, err := ls.db.GetPParams(
-		ls.currentEpoch.EpochId,
-		ls.currentEra.DecodePParamsFunc,
-		nil,
+	pp, prevPP, err := ls.computePParams(
+		ls.currentEpoch,
+		ls.currentEra,
+		ls.epochCache,
 	)
 	if err != nil {
 		return err
 	}
-	if pparams == nil {
-		pparams, err = ls.loadGenesisProtocolParameters()
+	ls.currentPParams = pp
+	ls.prevEraPParams = prevPP
+	return nil
+}
+
+// computePParams loads protocol parameters for the given epoch/era
+// without writing to any shared LedgerState fields. This allows
+// callers to compute pparams into local variables and then apply
+// them atomically under a lock.
+func (ls *LedgerState) computePParams(
+	epoch models.Epoch,
+	era eras.EraDesc,
+	epochCache []models.Epoch,
+) (
+	lcommon.ProtocolParameters,
+	lcommon.ProtocolParameters,
+	error,
+) {
+	// Only query stored pparams when the era has a decode function.
+	// Byron has nil DecodePParamsFunc and never stores pparams, so
+	// we skip straight to the genesis fallback for Byron.
+	var pparams lcommon.ProtocolParameters
+	if era.DecodePParamsFunc != nil {
+		var err error
+		pparams, err = ls.db.GetPParams(
+			epoch.EpochId,
+			era.DecodePParamsFunc,
+			nil,
+		)
 		if err != nil {
-			return fmt.Errorf("bootstrap genesis protocol parameters: %w", err)
+			return nil, nil, fmt.Errorf(
+				"computePParams: GetPParams epoch %d: %w",
+				epoch.EpochId,
+				err,
+			)
 		}
 	}
-	ls.currentPParams = pparams
+	if pparams == nil {
+		var err error
+		pparams, err = ls.computeGenesisProtocolParameters(era)
+		if err != nil {
+			return nil, nil, fmt.Errorf(
+				"bootstrap genesis protocol parameters: %w",
+				err,
+			)
+		}
+	}
 
 	// Load previous era's pparams for era-1 TX validation.
-	// Walk the epoch cache backwards to find the last epoch that belonged
-	// to a different (earlier) era, then load its pparams.
-	ls.prevEraPParams = nil
-	for i := len(ls.epochCache) - 1; i >= 0; i-- {
-		ep := ls.epochCache[i]
-		if ep.EraId != ls.currentEra.Id {
+	// Walk the epoch cache backwards to find the last epoch
+	// that belonged to a different (earlier) era, then load
+	// its pparams.
+	var prevEraPParams lcommon.ProtocolParameters
+	for i := len(epochCache) - 1; i >= 0; i-- {
+		ep := epochCache[i]
+		if ep.EraId != era.Id {
 			prevEra := eras.GetEraById(ep.EraId)
-			if prevEra != nil && prevEra.DecodePParamsFunc != nil {
+			if prevEra != nil &&
+				prevEra.DecodePParamsFunc != nil {
 				prevPP, prevErr := ls.db.GetPParams(
 					ep.EpochId,
 					prevEra.DecodePParamsFunc,
 					nil,
 				)
-				if prevErr == nil && prevPP != nil {
-					ls.prevEraPParams = prevPP
+				if prevErr != nil {
+					ls.config.Logger.Warn(
+						"failed to load previous-era pparams",
+						"epoch", ep.EpochId,
+						"era", ep.EraId,
+						"error", prevErr,
+					)
+				} else if prevPP != nil {
+					prevEraPParams = prevPP
 				}
 			}
 			break
 		}
 	}
-	return nil
+	return pparams, prevEraPParams, nil
 }
 
-func (ls *LedgerState) loadGenesisProtocolParameters() (lcommon.ProtocolParameters, error) {
-	// Start with Shelley parameters as the base for all eras (Byron also uses Shelley as base)
-	pparams, err := eras.HardForkShelley(ls.config.CardanoNodeConfig, nil)
+// computeGenesisProtocolParameters bootstraps protocol parameters
+// from genesis config for the given era without reading any shared
+// LedgerState fields.
+func (ls *LedgerState) computeGenesisProtocolParameters(
+	era eras.EraDesc,
+) (lcommon.ProtocolParameters, error) {
+	// Start with Shelley parameters as the base for all eras
+	// (Byron also uses Shelley as base)
+	pparams, err := eras.HardForkShelley(
+		ls.config.CardanoNodeConfig,
+		nil,
+	)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf(
+			"failed to get protocol parameters from HardForkShelley: %w",
+			err,
+		)
 	}
 
-	// If target era is Byron or Shelley, return the Shelley parameters
-	if ls.currentEra.Id <= eras.ShelleyEraDesc.Id {
+	// If target era is Byron or Shelley, return the Shelley
+	// parameters
+	if era.Id <= eras.ShelleyEraDesc.Id {
 		return pparams, nil
 	}
 
 	// Chain through each era up to the target era
-	for eraId := eras.AllegraEraDesc.Id; eraId <= ls.currentEra.Id; eraId++ {
-		era := eras.GetEraById(eraId)
-		if era == nil {
-			return nil, fmt.Errorf("unknown era ID %d", eraId)
+	for eraId := eras.AllegraEraDesc.Id; eraId <= era.Id; eraId++ {
+		eraStep := eras.GetEraById(eraId)
+		if eraStep == nil {
+			return nil, fmt.Errorf(
+				"unknown era ID %d",
+				eraId,
+			)
 		}
 
-		pparams, err = era.HardForkFunc(ls.config.CardanoNodeConfig, pparams)
-		if err != nil {
-			return nil, fmt.Errorf("era %s transition: %w", era.Name, err)
+		if eraStep.HardForkFunc != nil {
+			pparams, err = eraStep.HardForkFunc(
+				ls.config.CardanoNodeConfig,
+				pparams,
+			)
+			if err != nil {
+				return nil, fmt.Errorf(
+					"era %s transition: %w",
+					eraStep.Name,
+					err,
+				)
+			}
 		}
 	}
 
@@ -2809,6 +2968,12 @@ func (ls *LedgerState) CurrentEpoch() uint64 {
 // EpochNonce returns the nonce for the given epoch.
 // The epoch nonce is used for VRF-based leader election.
 // Returns nil if the epoch nonce is not available (e.g., for Byron era).
+//
+// When the slot clock fires an epoch transition before block processing
+// crosses the boundary, the nonce for the next epoch (currentEpoch+1) is
+// computed speculatively from the current epoch's data. This eliminates
+// the forging gap at epoch boundaries where the leader schedule would
+// otherwise be unavailable until a peer's block triggers epoch rollover.
 func (ls *LedgerState) EpochNonce(epoch uint64) []byte {
 	ls.RLock()
 	// Check current epoch under read lock; copy nonce if it matches
@@ -2824,11 +2989,16 @@ func (ls *LedgerState) EpochNonce(epoch uint64) []byte {
 	}
 	// If the requested epoch is ahead of the ledger state (slot clock
 	// fired an epoch transition before block processing caught up),
-	// return nil. Each epoch has a distinct nonce (candidateNonce XOR
-	// lastBlockHash), so returning the previous epoch's nonce would
-	// produce incorrect VRF proofs. Callers should retry after block
-	// processing catches up and computes the correct nonce.
+	// try to compute the nonce speculatively for the immediate next
+	// epoch. The nonce depends only on data from the current (ending)
+	// epoch, so it is computable before block processing catches up.
 	if epoch > ls.currentEpoch.EpochId {
+		if epoch == ls.currentEpoch.EpochId+1 {
+			currentEpoch := ls.currentEpoch
+			currentEra := ls.currentEra
+			ls.RUnlock()
+			return ls.computeNextEpochNonce(currentEpoch, currentEra)
+		}
 		ls.RUnlock()
 		return nil
 	}
@@ -2851,6 +3021,105 @@ func (ls *LedgerState) EpochNonce(epoch uint64) []byte {
 	nonce := make([]byte, len(ep.Nonce))
 	copy(nonce, ep.Nonce)
 	return nonce
+}
+
+// computeNextEpochNonce speculatively computes the epoch nonce for the
+// next epoch (currentEpoch.EpochId + 1) using data from the current epoch.
+// This mirrors the logic in calculateEpochNonce but uses non-transactional
+// DB reads so it can be called from EpochNonce without a DB transaction.
+//
+// Returns nil if the nonce cannot be computed (e.g., missing block data,
+// Byron era, or missing genesis config).
+func (ls *LedgerState) computeNextEpochNonce(
+	currentEpoch models.Epoch,
+	currentEra eras.EraDesc,
+) []byte {
+	// No epoch nonce in Byron
+	if currentEra.Id == 0 {
+		return nil
+	}
+	// Need the Shelley genesis hash for nonce computation
+	if ls.config.CardanoNodeConfig == nil ||
+		ls.config.CardanoNodeConfig.ShelleyGenesisHash == "" {
+		return nil
+	}
+	genesisHashBytes, err := hex.DecodeString(
+		ls.config.CardanoNodeConfig.ShelleyGenesisHash,
+	)
+	if err != nil {
+		return nil
+	}
+
+	// If the current epoch has no nonce (initial epoch), the next epoch's
+	// nonce is the Shelley genesis hash.
+	if len(currentEpoch.Nonce) == 0 {
+		return genesisHashBytes
+	}
+
+	epochStartSlot := currentEpoch.StartSlot + uint64(
+		currentEpoch.LengthInSlots,
+	)
+
+	// Calculate stability window: 3k/f slots
+	stabilityWindow := ls.calculateStabilityWindowForEra(currentEra.Id)
+	var stabilityWindowStartSlot uint64
+	if epochStartSlot > stabilityWindow {
+		stabilityWindowStartSlot = epochStartSlot - stabilityWindow
+	}
+
+	// Determine the candidate nonce.
+	var candidateNonce []byte
+	if stabilityWindowStartSlot < currentEpoch.StartSlot {
+		// Stability window extends before this epoch — use genesis hash.
+		candidateNonce = genesisHashBytes
+	} else {
+		blockBeforeStability, lookupErr := database.BlockBeforeSlot(
+			ls.db, stabilityWindowStartSlot,
+		)
+		if lookupErr != nil {
+			candidateNonce = genesisHashBytes
+		} else {
+			candidateNonce, err = ls.db.GetBlockNonce(
+				ocommon.Point{
+					Hash: blockBeforeStability.Hash,
+					Slot: blockBeforeStability.Slot,
+				},
+				nil,
+			)
+			if err != nil || len(candidateNonce) == 0 {
+				candidateNonce = genesisHashBytes
+			}
+		}
+	}
+
+	// Determine the last epoch block nonce (hash of last block before
+	// the new epoch's start slot).
+	blockLastPrevEpoch, err := database.BlockBeforeSlot(
+		ls.db, epochStartSlot,
+	)
+	if err != nil || len(blockLastPrevEpoch.Hash) == 0 {
+		// No block before this epoch — equivalent to NeutralNonce.
+		return candidateNonce
+	}
+
+	// XOR candidateNonce with lastEpochBlockNonce
+	if len(candidateNonce) < 32 || len(blockLastPrevEpoch.Hash) < 32 {
+		return nil
+	}
+	result := make([]byte, 32)
+	for i := 0; i < 32; i++ {
+		result[i] = candidateNonce[i] ^ blockLastPrevEpoch.Hash[i]
+	}
+	ls.config.Logger.Debug(
+		"speculative epoch nonce computed for next epoch",
+		"component", "ledger",
+		"next_epoch", currentEpoch.EpochId+1,
+		"epoch_start_slot", epochStartSlot,
+		"candidate_nonce", hex.EncodeToString(candidateNonce),
+		"last_block_hash", hex.EncodeToString(blockLastPrevEpoch.Hash),
+		"epoch_nonce", hex.EncodeToString(result),
+	)
+	return result
 }
 
 // SlotsPerEpoch returns the number of slots in an epoch for the current era.
