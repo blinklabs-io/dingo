@@ -22,9 +22,10 @@ import (
 type ChainComparisonResult int
 
 const (
-	ChainEqual   ChainComparisonResult = 0
-	ChainABetter ChainComparisonResult = 1
-	ChainBBetter ChainComparisonResult = -1
+	ChainEqual             ChainComparisonResult = 0
+	ChainABetter           ChainComparisonResult = 1
+	ChainBBetter           ChainComparisonResult = -1
+	ChainComparisonUnknown ChainComparisonResult = 2
 )
 
 // CompareChains compares two chain tips according to Ouroboros Praos rules:

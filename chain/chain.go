@@ -270,6 +270,170 @@ func (c *Chain) AddBlocks(blocks []ledger.Block) error {
 	return nil
 }
 
+// RawBlock contains pre-extracted block fields for direct storage
+// without requiring a full ledger.Block decode.
+type RawBlock struct {
+	Slot        uint64
+	Hash        []byte
+	BlockNumber uint64
+	Type        uint
+	PrevHash    []byte
+	Cbor        []byte
+}
+
+// addRawBlock adds a pre-extracted block to the chain without requiring
+// a full ledger.Block interface. This is used for bulk loading where only
+// the block header has been decoded.
+//
+// The caller must notify waitingChan after the enclosing transaction
+// commits. See AddRawBlocks for the complete flow.
+func (c *Chain) addRawBlock(
+	rb RawBlock, txn *database.Txn,
+) (*event.Event, error) {
+	if c == nil {
+		return nil, errors.New("chain is nil")
+	}
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	c.manager.mutex.Lock()
+	defer c.manager.mutex.Unlock()
+	if err := c.reconcile(); err != nil {
+		return nil, fmt.Errorf("reconcile: %w", err)
+	}
+	// Validate hash fields before any comparisons
+	if len(rb.Hash) == 0 {
+		return nil, errors.New(
+			"invalid raw block: empty Hash",
+		)
+	}
+	// Validate PrevHash only when tipBlockIndex >= initialBlockIndex. When tipBlockIndex < initialBlockIndex
+	// but headers are queued, we may be inserting the genesis/first block which legitimately has no PrevHash.
+	// The narrower check ensures we only enforce PrevHash presence once the chain is beyond the initial block.
+	if c.tipBlockIndex >= initialBlockIndex &&
+		len(rb.PrevHash) == 0 {
+		return nil, errors.New(
+			"invalid raw block: empty PrevHash",
+		)
+	}
+	// Check that the new block matches our first header, if any
+	if len(c.headers) > 0 {
+		firstHeader := c.headers[0]
+		if string(rb.Hash) != string(firstHeader.Hash().Bytes()) {
+			return nil, NewBlockNotMatchHeaderError(
+				hex.EncodeToString(rb.Hash),
+				firstHeader.Hash().String(),
+			)
+		}
+	}
+	// Check that this block fits on the current chain tip
+	if c.tipBlockIndex >= initialBlockIndex {
+		if string(rb.PrevHash) != string(c.currentTip.Point.Hash) {
+			return nil, NewBlockNotFitChainTipError(
+				hex.EncodeToString(rb.Hash),
+				hex.EncodeToString(rb.PrevHash),
+				hex.EncodeToString(c.currentTip.Point.Hash),
+			)
+		}
+	}
+	tmpPoint := ocommon.NewPoint(rb.Slot, rb.Hash)
+	newBlockIndex := c.tipBlockIndex + 1
+	tmpBlock := models.Block{
+		ID:       newBlockIndex,
+		Slot:     tmpPoint.Slot,
+		Hash:     tmpPoint.Hash,
+		Number:   rb.BlockNumber,
+		Type:     rb.Type,
+		PrevHash: rb.PrevHash,
+		Cbor:     rb.Cbor,
+	}
+	if err := c.manager.addBlock(tmpBlock, txn, c.persistent); err != nil {
+		return nil, fmt.Errorf("persisting block: %w", err)
+	}
+	if !c.persistent {
+		c.blocks = append(c.blocks, tmpPoint)
+	}
+	if len(c.headers) > 0 {
+		c.headers = slices.Delete(c.headers, 0, 1)
+	}
+	c.currentTip = ochainsync.Tip{
+		Point:       tmpPoint,
+		BlockNumber: rb.BlockNumber,
+	}
+	c.tipBlockIndex = newBlockIndex
+	// NOTE: Do NOT close waitingChan here. AddRawBlocks notifies
+	// waiters once per batch after the transaction commits,
+	// reducing lock contention for large bulk loads.
+	//
+	// Build event for deferred publication (same pattern as
+	// addBlockLocked — publish after the transaction commits).
+	if c.eventBus != nil {
+		evt := event.NewEvent(
+			ChainUpdateEventType,
+			ChainBlockEvent{
+				Point: tmpPoint,
+				Block: tmpBlock,
+			},
+		)
+		return &evt, nil
+	}
+	return nil, nil
+}
+
+// AddRawBlocks adds a batch of pre-extracted blocks to the chain.
+func (c *Chain) AddRawBlocks(blocks []RawBlock) error {
+	if c == nil {
+		return errors.New("chain is nil")
+	}
+	batchOffset := 0
+	for {
+		batchSize := min(50, len(blocks)-batchOffset)
+		if batchSize == 0 {
+			break
+		}
+		// Collect events inside the transaction callback and
+		// publish them only after the transaction commits
+		// successfully.
+		var pendingEvents []event.Event
+		txn := c.manager.db.BlobTxn(true)
+		err := txn.Do(func(txn *database.Txn) error {
+			pendingEvents = pendingEvents[:0]
+			for _, rb := range blocks[batchOffset : batchOffset+batchSize] {
+				evt, err := c.addRawBlock(rb, txn)
+				if err != nil {
+					return err
+				}
+				if evt != nil {
+					pendingEvents = append(
+						pendingEvents, *evt,
+					)
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			return fmt.Errorf("add raw block batch: %w", err)
+		}
+		// Notify waiting iterators after the transaction has
+		// committed successfully.
+		c.waitingChanMutex.Lock()
+		if c.waitingChan != nil {
+			close(c.waitingChan)
+			c.waitingChan = nil
+		}
+		c.waitingChanMutex.Unlock()
+		// Publish events (only when eventBus is set).
+		if c.eventBus != nil {
+			for _, evt := range pendingEvents {
+				c.eventBus.Publish(
+					ChainUpdateEventType, evt,
+				)
+			}
+		}
+		batchOffset += batchSize
+	}
+	return nil
+}
+
 func (c *Chain) Rollback(point ocommon.Point) error {
 	if c == nil {
 		return errors.New("chain is nil")

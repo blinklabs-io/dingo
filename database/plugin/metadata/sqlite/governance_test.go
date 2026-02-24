@@ -45,7 +45,7 @@ func TestGetConstitution(t *testing.T) {
 
 	// Add a constitution
 	err = store.SetConstitution(&models.Constitution{
-		AnchorUrl:  "https://example.com/constitution.json",
+		AnchorURL:  "https://example.com/constitution.json",
 		AnchorHash: []byte("hash123456789012345678901234567"),
 		PolicyHash: []byte("policy12345678901234567890"),
 		AddedSlot:  1000,
@@ -59,7 +59,7 @@ func TestGetConstitution(t *testing.T) {
 	assert.Equal(
 		t,
 		"https://example.com/constitution.json",
-		constitution.AnchorUrl,
+		constitution.AnchorURL,
 	)
 	assert.Equal(
 		t,
@@ -79,7 +79,7 @@ func TestGetConstitutionDeletedSlot(t *testing.T) {
 
 	// Add a constitution
 	err := store.SetConstitution(&models.Constitution{
-		AnchorUrl:  "https://example.com/constitution.json",
+		AnchorURL:  "https://example.com/constitution.json",
 		AnchorHash: []byte("hash123456789012345678901234567"),
 		AddedSlot:  1000,
 	}, nil)
@@ -251,7 +251,7 @@ func TestGetActiveDreps(t *testing.T) {
 		dreps[0].Credential,
 	)
 	assert.True(t, dreps[0].Active)
-	assert.Equal(t, "https://drep1.example.com", dreps[0].AnchorUrl)
+	assert.Equal(t, "https://drep1.example.com", dreps[0].AnchorURL)
 }
 
 func TestGetDrep(t *testing.T) {
@@ -280,7 +280,7 @@ func TestGetDrep(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, drep)
 	assert.Equal(t, cred, drep.Credential)
-	assert.Equal(t, "https://drep.example.com", drep.AnchorUrl)
+	assert.Equal(t, "https://drep.example.com", drep.AnchorURL)
 	assert.True(t, drep.Active)
 
 	// Deactivate via direct DB update
@@ -324,7 +324,7 @@ func TestGetGovernanceProposal(t *testing.T) {
 		ActionType:    uint8(6), // Info action
 		ProposedEpoch: 100,
 		ExpiresEpoch:  200,
-		AnchorUrl:     "https://proposal.example.com",
+		AnchorURL:     "https://proposal.example.com",
 		AnchorHash:    []byte("anchor_hash_1234567890123456789012"),
 		Deposit:       500000000,
 		ReturnAddress: []byte("return_addr_1234567890123456789"),
@@ -356,7 +356,7 @@ func TestGetActiveGovernanceProposals(t *testing.T) {
 		ActionType:    uint8(6),
 		ProposedEpoch: 100,
 		ExpiresEpoch:  200,
-		AnchorUrl:     "https://active.example.com",
+		AnchorURL:     "https://active.example.com",
 		AnchorHash:    []byte("anchor_hash_1234567890123456789012"),
 		Deposit:       500000000,
 		ReturnAddress: []byte("return_addr_1234567890123456789"),
@@ -371,7 +371,7 @@ func TestGetActiveGovernanceProposals(t *testing.T) {
 		ActionType:    uint8(6),
 		ProposedEpoch: 30,
 		ExpiresEpoch:  50,
-		AnchorUrl:     "https://expired.example.com",
+		AnchorURL:     "https://expired.example.com",
 		AnchorHash:    []byte("anchor_hash_2234567890123456789012"),
 		Deposit:       500000000,
 		ReturnAddress: []byte("return_addr_2234567890123456789"),
@@ -383,7 +383,7 @@ func TestGetActiveGovernanceProposals(t *testing.T) {
 	proposals, err := store.GetActiveGovernanceProposals(100, nil)
 	require.NoError(t, err)
 	assert.Len(t, proposals, 1)
-	assert.Equal(t, "https://active.example.com", proposals[0].AnchorUrl)
+	assert.Equal(t, "https://active.example.com", proposals[0].AnchorURL)
 
 	// Query at epoch 30 - both should be returned
 	proposals, err = store.GetActiveGovernanceProposals(30, nil)

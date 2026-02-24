@@ -1327,7 +1327,7 @@ func TestMysqlRestoreDrepStateAtSlot(t *testing.T) {
 			drepReg := models.RegistrationDrep{
 				CertificateID:  regCert.ID,
 				DrepCredential: drepCred,
-				AnchorUrl:      "https://example.com/drep1",
+				AnchorURL:      "https://example.com/drep1",
 				AnchorHash:     testHash32("anchor_hash_1"),
 				AddedSlot:      1000,
 			}
@@ -1346,7 +1346,7 @@ func TestMysqlRestoreDrepStateAtSlot(t *testing.T) {
 			drepUpdate := models.UpdateDrep{
 				CertificateID: updateCert.ID,
 				Credential:    drepCred,
-				AnchorUrl:     "https://example.com/drep2",
+				AnchorURL:     "https://example.com/drep2",
 				AnchorHash:    testHash32("anchor_hash_2"),
 				AddedSlot:     2000,
 			}
@@ -1355,7 +1355,7 @@ func TestMysqlRestoreDrepStateAtSlot(t *testing.T) {
 			// Create DRep with current state (from update at slot 2000)
 			drep := models.Drep{
 				Credential: drepCred,
-				AnchorUrl:  "https://example.com/drep2",
+				AnchorURL:  "https://example.com/drep2",
 				AnchorHash: testHash32("anchor_hash_2"),
 				AddedSlot:  2000,
 				Active:     true,
@@ -1371,10 +1371,10 @@ func TestMysqlRestoreDrepStateAtSlot(t *testing.T) {
 			var restoredDrep models.Drep
 			pgStore.DB().First(&restoredDrep, "credential = ?", drepCred)
 
-			if restoredDrep.AnchorUrl != "https://example.com/drep1" {
+			if restoredDrep.AnchorURL != "https://example.com/drep1" {
 				t.Errorf(
 					"expected anchor URL to be restored to drep1, got %s",
-					restoredDrep.AnchorUrl,
+					restoredDrep.AnchorURL,
 				)
 			}
 			if !restoredDrep.Active {

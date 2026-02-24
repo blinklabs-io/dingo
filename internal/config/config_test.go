@@ -46,9 +46,15 @@ func resetGlobalConfig() {
 		MetadataPlugin:     DefaultMetadataPlugin,
 		RunMode:            RunModeServe,
 		ImmutableDbPath:    "",
-		ShutdownTimeout:    DefaultShutdownTimeout,
-		DatabaseWorkers:    5,
-		DatabaseQueueSize:  50,
+		ShutdownTimeout:       DefaultShutdownTimeout,
+		LedgerCatchupTimeout:  DefaultLedgerCatchupTimeout,
+		DatabaseWorkers:       5,
+		DatabaseQueueSize:     50,
+		Mithril: MithrilConfig{
+			Enabled:            true,
+			CleanupAfterLoad:   true,
+			VerifyCertificates: true,
+		},
 	}
 }
 
@@ -101,13 +107,19 @@ tlsKeyFilePath: "key1.pem"
 		Topology:           "",
 		TlsCertFilePath:    "cert1.pem",
 		TlsKeyFilePath:     "key1.pem",
-		BlobPlugin:         DefaultBlobPlugin,
-		MetadataPlugin:     DefaultMetadataPlugin,
-		RunMode:            RunModeServe,
-		ImmutableDbPath:    "",
-		ShutdownTimeout:    DefaultShutdownTimeout,
-		DatabaseWorkers:    5,
-		DatabaseQueueSize:  50,
+		BlobPlugin:           DefaultBlobPlugin,
+		MetadataPlugin:       DefaultMetadataPlugin,
+		RunMode:              RunModeServe,
+		ImmutableDbPath:      "",
+		ShutdownTimeout:      DefaultShutdownTimeout,
+		LedgerCatchupTimeout: DefaultLedgerCatchupTimeout,
+		DatabaseWorkers:      5,
+		DatabaseQueueSize:    50,
+		Mithril: MithrilConfig{
+			Enabled:            true,
+			CleanupAfterLoad:   true,
+			VerifyCertificates: true,
+		},
 	}
 
 	actual, err := LoadConfig(tmpFile)
@@ -152,13 +164,19 @@ func TestLoad_WithoutConfigFile_UsesDefaults(t *testing.T) {
 		Topology:           "",
 		TlsCertFilePath:    "",
 		TlsKeyFilePath:     "",
-		BlobPlugin:         DefaultBlobPlugin,
-		MetadataPlugin:     DefaultMetadataPlugin,
-		RunMode:            RunModeServe,
-		ImmutableDbPath:    "",
-		ShutdownTimeout:    DefaultShutdownTimeout,
-		DatabaseWorkers:    5,
-		DatabaseQueueSize:  50,
+		BlobPlugin:           DefaultBlobPlugin,
+		MetadataPlugin:       DefaultMetadataPlugin,
+		RunMode:              RunModeServe,
+		ImmutableDbPath:      "",
+		ShutdownTimeout:      DefaultShutdownTimeout,
+		LedgerCatchupTimeout: DefaultLedgerCatchupTimeout,
+		DatabaseWorkers:      5,
+		DatabaseQueueSize:    50,
+		Mithril: MithrilConfig{
+			Enabled:            true,
+			CleanupAfterLoad:   true,
+			VerifyCertificates: true,
+		},
 	}
 
 	if !reflect.DeepEqual(cfg, expected) {

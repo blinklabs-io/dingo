@@ -168,11 +168,11 @@ func main() {
 		}
 	}
 	// Reconstruct os.Args with program name (os.Args[0] is never nil in practice, but nilaway doesn't know this)
-	programName := "dingo"
+	progArg := programName
 	if len(os.Args) > 0 {
-		programName = os.Args[0]
+		progArg = os.Args[0]
 	}
-	os.Args = append([]string{programName}, newArgs...)
+	os.Args = append([]string{progArg}, newArgs...)
 
 	// Initialize CPU profiling (starts immediately, stops on exit)
 	if cpuprofile != "" {
@@ -212,7 +212,7 @@ func main() {
 					)
 					os.Exit(1)
 				}
-				loadRun(cmd, []string{cfg.ImmutableDbPath}, cfg)
+				loadRun(cmd.Context(), []string{cfg.ImmutableDbPath}, cfg)
 			case config.RunModeServe, config.RunModeDev:
 				// serve and dev modes both run the server
 				serveRun(cmd, args, cfg)
@@ -232,6 +232,8 @@ func main() {
 		StringP("blob", "b", config.DefaultBlobPlugin, "blob store plugin to use, 'list' to show available")
 	rootCmd.PersistentFlags().
 		StringP("metadata", "m", config.DefaultMetadataPlugin, "metadata store plugin to use, 'list' to show available")
+	rootCmd.PersistentFlags().
+		StringP("network", "n", "", "Cardano network name (e.g. preview, preprod, mainnet)")
 	rootCmd.PersistentFlags().
 		Int("db-workers", 5, "database worker pool worker count")
 	rootCmd.PersistentFlags().
@@ -267,6 +269,23 @@ func main() {
 			cfg.MetadataPlugin = metadataPlugin
 		}
 
+		// Override network if flag is provided
+		if cmd.Root().PersistentFlags().Changed("network") {
+			network, err := cmd.Root().PersistentFlags().GetString("network")
+			if err != nil {
+				return fmt.Errorf(
+					"reading network flag: %w", err,
+				)
+			}
+			if err := config.ValidateNetworkName(network); err != nil {
+				return fmt.Errorf(
+					"validating network flag %q: %w",
+					network, err,
+				)
+			}
+			cfg.Network = network
+		}
+
 		// Override database worker pool config if flags are provided
 		if cmd.Root().PersistentFlags().Changed("db-workers") {
 			if workers, err := cmd.Root().PersistentFlags().GetInt("db-workers"); err == nil {
@@ -288,6 +307,8 @@ func main() {
 	rootCmd.AddCommand(loadCommand())
 	rootCmd.AddCommand(listCommand())
 	rootCmd.AddCommand(versionCommand())
+	rootCmd.AddCommand(mithrilCommand())
+	rootCmd.AddCommand(syncCommand())
 
 	// Execute cobra command
 	exitCode := 0

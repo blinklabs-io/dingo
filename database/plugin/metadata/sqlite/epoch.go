@@ -16,11 +16,13 @@ package sqlite
 
 import (
 	"errors"
+	"fmt"
 	"strconv"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // GetEpoch returns a single epoch by its ID, or nil if not found.
@@ -29,16 +31,20 @@ func (d *MetadataStoreSqlite) GetEpoch(
 	txn types.Txn,
 ) (*models.Epoch, error) {
 	var ret models.Epoch
-	db, err := d.resolveDB(txn)
+	db, err := d.resolveReadDB(txn)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf(
+			"GetEpoch: resolve db: %w", err,
+		)
 	}
 	result := db.Where("epoch_id = ?", epochId).First(&ret)
 	if result.Error != nil {
 		if errors.Is(result.Error, gorm.ErrRecordNotFound) {
 			return nil, nil
 		}
-		return nil, result.Error
+		return nil, fmt.Errorf(
+			"GetEpoch: query: %w", result.Error,
+		)
 	}
 	return &ret, nil
 }
@@ -51,11 +57,15 @@ func (d *MetadataStoreSqlite) GetEpochsByEra(
 	var ret []models.Epoch
 	db, err := d.resolveReadDB(txn)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf(
+			"GetEpochsByEra: resolve db: %w", err,
+		)
 	}
 	result := db.Where("era_id = ?", eraId).Order("epoch_id").Find(&ret)
 	if result.Error != nil {
-		return nil, result.Error
+		return nil, fmt.Errorf(
+			"GetEpochsByEra: query: %w", result.Error,
+		)
 	}
 	return ret, nil
 }
@@ -67,11 +77,15 @@ func (d *MetadataStoreSqlite) GetEpochs(
 	var ret []models.Epoch
 	db, err := d.resolveReadDB(txn)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf(
+			"GetEpochs: resolve db: %w", err,
+		)
 	}
 	result := db.Order("epoch_id").Find(&ret)
 	if result.Error != nil {
-		return nil, result.Error
+		return nil, fmt.Errorf(
+			"GetEpochs: query: %w", result.Error,
+		)
 	}
 	return ret, nil
 }
@@ -84,10 +98,18 @@ func (d *MetadataStoreSqlite) DeleteEpochsAfterSlot(
 ) error {
 	db, err := d.resolveDB(txn)
 	if err != nil {
-		return err
+		return fmt.Errorf(
+			"DeleteEpochsAfterSlot: resolve db: %w", err,
+		)
 	}
 	result := db.Where("start_slot > ?", slot).Delete(&models.Epoch{})
-	return result.Error
+	if result.Error != nil {
+		return fmt.Errorf(
+			"DeleteEpochsAfterSlot: delete: %w",
+			result.Error,
+		)
+	}
+	return nil
 }
 
 // SetEpoch saves an epoch
@@ -107,10 +129,22 @@ func (d *MetadataStoreSqlite) SetEpoch(
 	}
 	db, err := d.resolveDB(txn)
 	if err != nil {
-		return err
+		return fmt.Errorf("SetEpoch: resolve db: %w", err)
 	}
-	if result := db.Create(&tmpItem); result.Error != nil {
-		return result.Error
+	if result := db.Clauses(clause.OnConflict{
+		Columns: []clause.Column{{Name: "epoch_id"}},
+		DoUpdates: clause.AssignmentColumns([]string{
+			"start_slot",
+			"nonce",
+			"era_id",
+			"slot_length",
+			"length_in_slots",
+		}),
+	}).Create(&tmpItem); result.Error != nil {
+		return fmt.Errorf(
+			"SetEpoch: create epoch: %w",
+			result.Error,
+		)
 	}
 	// Run a vacuum only when not in a transaction, on error only log
 	// (VACUUM during transaction causes lock contention)

@@ -30,7 +30,7 @@ var (
 )
 
 type Drep struct {
-	AnchorUrl  string `gorm:"size:128"`
+	AnchorURL  string `gorm:"column:anchor_url;size:128"`
 	Credential []byte `gorm:"uniqueIndex;size:28"`
 	AnchorHash []byte
 	ID         uint   `gorm:"primarykey"`
@@ -59,12 +59,12 @@ func (DeregistrationDrep) TableName() string {
 }
 
 type RegistrationDrep struct {
-	AnchorUrl      string `gorm:"size:128"`
-	DrepCredential []byte `gorm:"index;size:28"`
+	AnchorURL      string `gorm:"column:anchor_url;size:128"`
+	DrepCredential []byte `gorm:"uniqueIndex:idx_drep_reg_cred_slot;size:28"`
 	AnchorHash     []byte
 	CertificateID  uint   `gorm:"index"`
 	ID             uint   `gorm:"primarykey"`
-	AddedSlot      uint64 `gorm:"index"`
+	AddedSlot      uint64 `gorm:"uniqueIndex:idx_drep_reg_cred_slot"`
 	DepositAmount  types.Uint64
 }
 
@@ -73,7 +73,7 @@ func (RegistrationDrep) TableName() string {
 }
 
 type UpdateDrep struct {
-	AnchorUrl     string `gorm:"size:128"`
+	AnchorURL     string `gorm:"column:anchor_url;size:128"`
 	Credential    []byte `gorm:"index;size:28"`
 	AnchorHash    []byte
 	CertificateID uint   `gorm:"index"`

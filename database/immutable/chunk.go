@@ -154,10 +154,11 @@ func (c *chunk) Next() (*Block, error) {
 			return nil, err
 		}
 		ret := &Block{
-			Type: blkType,
-			Slot: c.currentEntry.BlockOrEbb,
-			Hash: c.currentEntry.HeaderHash[:],
-			Cbor: blkBytes,
+			Type:  blkType,
+			Slot:  c.currentEntry.BlockOrEbb,
+			Hash:  c.currentEntry.HeaderHash[:],
+			IsEbb: c.currentEntry.IsEbb,
+			Cbor:  blkBytes,
 		}
 		c.currentEntry = c.nextEntry
 		nextEntry, err := c.secondary.Next()
