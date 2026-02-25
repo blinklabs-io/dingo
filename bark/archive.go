@@ -2,6 +2,7 @@ package bark
 
 import (
 	"context"
+	"encoding/hex"
 	"fmt"
 
 	"connectrpc.com/connect"
@@ -9,6 +10,8 @@ import (
 	archiveconnect "github.com/blinklabs-io/bark/proto/v1alpha1/archive/archivev1alpha1connect"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/gouroboros/protocol/common"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 var _ archiveconnect.ArchiveServiceHandler = &archiveServiceHandler{}
@@ -25,12 +28,22 @@ func (a *archiveServiceHandler) FetchBlock(
 
 	for _, b := range req.Msg.GetBlocks() {
 		point := common.NewPoint(b.GetSlot(), []byte(b.GetHash()))
-		u, err := database.BlockURL(ctx, a.bark.config.DB, point)
+		signedURL, metadata, err := database.BlockURL(ctx, a.bark.config.DB, point)
 		if err != nil {
 			return nil, fmt.Errorf("failed getting signed url for block [%d, %s]: %w", point.Slot, point.Hash, err)
 		}
 		resp.Blocks = append(resp.Blocks, &archive.SignedUrl{
-			Url: u.String(),
+			Block: &archive.BlockRef{
+				Hash:   b.Hash,
+				Slot:   b.Slot,
+				Height: proto.Uint64(metadata.Height),
+			},
+			Url:       signedURL.URL.String(),
+			ExpiresAt: timestamppb.New(signedURL.Expires),
+			Meta: &archive.BlockMeta{
+				Type:     (archive.BlockType)(metadata.Type).Enum(),
+				PrevHash: proto.String(hex.EncodeToString(metadata.PrevHash)),
+			},
 		})
 	}
 

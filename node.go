@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"sync"
 	"time"
 
@@ -213,6 +214,17 @@ func (n *Node) Run(ctx context.Context) error {
 	n.ledgerState = state
 	n.ouroboros.LedgerState = n.ledgerState
 	n.chainManager.SetLedger(n.ledgerState)
+
+	if n.config.barkBaseUrl != "" {
+		n.db.SetBlobStore(bark.NewBarkBlobStore(bark.BlobStoreBarkConfig{
+			BaseUrl:        n.config.barkBaseUrl,
+			SecurityWindow: n.config.barkSecurityWindow,
+			HTTPClient:     http.DefaultClient,
+			LedgerState:    state,
+			Logger:         n.config.logger,
+		}, n.db.Blob()))
+	}
+
 	// Run DB recovery if needed
 	if dbNeedsRecovery {
 		if err := n.ledgerState.RecoverCommitTimestampConflict(); err != nil {

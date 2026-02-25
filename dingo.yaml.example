@@ -126,6 +126,15 @@ privatePort: 3002
 # Can be overridden with the port environment variable
 relayPort: 3001
 
+# base url of bark archive server
+barkBaseUrl: ""
+
+# window where blocks will not be found in the bark archive
+barkSecurityWindow: 10000
+
+# TCP port bind for listening for bark RPC calls
+barkPort: 9091
+
 # TCP port to bind for listening for UTxO RPC
 utxorpcPort: 9090
 

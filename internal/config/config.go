@@ -171,6 +171,8 @@ type Config struct {
 	PrivatePort        uint    `yaml:"privatePort"                                                      split_words:"true"`
 	RelayPort          uint    `yaml:"relayPort"          envconfig:"port"`
 	UtxorpcPort        uint    `yaml:"utxorpcPort"                                                      split_words:"true"`
+	BarkBaseUrl        string  `yaml:"barkBaseUrl"        envconfig:"DINGO_BARK_BASE_URL"`
+	BarkSecurityWindow uint64  `yaml:"barkSecurityWindow" envconfig:"DINGO_BARK_SECURITY_WINDOW"`
 	BarkPort           uint    `yaml:"barkPort"           envconfig:"DINGO_BARK_PORT"`
 	MetricsPort        uint    `yaml:"metricsPort"                                                      split_words:"true"`
 	IntersectTip       bool    `yaml:"intersectTip"                                                     split_words:"true"`
@@ -291,6 +293,9 @@ var globalConfig = &Config{
 	PrivateBindAddr:    "127.0.0.1",
 	PrivatePort:        3002,
 	RelayPort:          3001,
+	BarkBaseUrl:        "",
+	BarkSecurityWindow: 10000,
+	BarkPort:           9091,
 	UtxorpcPort:        9090,
 	Topology:           "",
 	TlsCertFilePath:    "",

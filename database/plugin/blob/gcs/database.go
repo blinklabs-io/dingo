@@ -919,12 +919,55 @@ func (d *BlobStoreGCS) Stop() error {
 	return d.Close()
 }
 
-func (d *BlobStoreGCS) GetBlockURL(ctx context.Context, txn types.Txn, point ocommon.Point) (*url.URL, error) {
+func (d *BlobStoreGCS) GetBlockURL(
+	ctx context.Context,
+	txn types.Txn,
+	point ocommon.Point,
+) (types.SignedURL, types.BlockMetadata, error) {
 	key := types.BlockBlobKey(point.Slot, point.Hash)
 
-	_, err := d.object(key).Attrs(ctx)
+	metadataKey := types.BlockBlobMetadataKey(key)
+	r, err := d.object(metadataKey).NewReader(ctx)
+	if err != nil {
+		if errors.Is(err, storage.ErrObjectNotExist) {
+			// Block content exists but metadata is missing - this indicates a partial write
+			d.logger.Warningf(
+				"block content exists but metadata is missing, possible partial write: key=%s metadataKey=%s",
+				string(key),
+				string(metadataKey),
+			)
+			return types.SignedURL{}, types.BlockMetadata{}, types.ErrBlobKeyNotFound
+		}
+		wrappedErr := fmt.Errorf(
+			"read object %q from bucket %q: %w",
+			string(metadataKey),
+			d.bucketName,
+			err,
+		)
+		d.logger.Errorf("%v", wrappedErr)
+		return types.SignedURL{}, types.BlockMetadata{}, wrappedErr
+	}
+	defer r.Close()
+	metadataBytes, err := io.ReadAll(r)
+	if err != nil {
+		wrappedErr := fmt.Errorf(
+			"read object %q from bucket %q: %w",
+			string(metadataKey),
+			d.bucketName,
+			err,
+		)
+		d.logger.Errorf("%v", wrappedErr)
+		return types.SignedURL{}, types.BlockMetadata{}, wrappedErr
+	}
+	var tmpMetadata types.BlockMetadata
+	if _, err := cbor.Decode(metadataBytes, &tmpMetadata); err != nil {
+		return types.SignedURL{}, types.BlockMetadata{}, err
+	}
+
+	_, err = d.object(key).Attrs(ctx)
 	if errors.Is(err, storage.ErrObjectNotExist) {
-		return nil, fmt.Errorf("gcs: block not found: %w", err)
+		return types.SignedURL{}, types.BlockMetadata{},
+			fmt.Errorf("gcs: block not found: %w", err)
 	}
 
 	opts := &storage.SignedURLOptions{
@@ -933,18 +976,31 @@ func (d *BlobStoreGCS) GetBlockURL(ctx context.Context, txn types.Txn, point oco
 		Expires: time.Now().Add(time.Hour),
 	}
 
-	signedURL, err := d.bucket.SignedURL(
+	presignedURL, err := d.bucket.SignedURL(
 		d.fullKey(string(key)),
 		opts,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("gcs: failed to sign URL: %w", err)
+		return types.SignedURL{}, types.BlockMetadata{},
+			fmt.Errorf("gcs: failed to sign URL: %w", err)
 	}
 
-	u, err := url.Parse(signedURL)
+	u, err := url.Parse(presignedURL)
 	if err != nil {
-		return nil, fmt.Errorf("gcs: failed to parse URL: %w", err)
+		return types.SignedURL{}, types.BlockMetadata{},
+			fmt.Errorf("gcs: failed to parse URL: %w", err)
 	}
 
-	return u, nil
+	signedURL := types.SignedURL{
+		URL:     u,
+		Expires: time.Now().Add(time.Hour),
+	}
+
+	metadata := types.BlockMetadata{
+		Type:     tmpMetadata.Type,
+		Height:   tmpMetadata.Height,
+		PrevHash: tmpMetadata.PrevHash,
+	}
+
+	return signedURL, metadata, nil
 }

@@ -157,6 +157,8 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 			dingo.WithUtxorpcPort(cfg.UtxorpcPort),
 			dingo.WithUtxorpcTlsCertFilePath(cfg.TlsCertFilePath),
 			dingo.WithUtxorpcTlsKeyFilePath(cfg.TlsKeyFilePath),
+			dingo.WithBarkBaseUrl(cfg.BarkBaseUrl),
+			dingo.WithBarkSecurityWindow(cfg.BarkSecurityWindow),
 			dingo.WithBarkPort(cfg.BarkPort),
 			dingo.WithValidateHistorical(cfg.ValidateHistorical),
 			dingo.WithRunMode(string(cfg.RunMode)),

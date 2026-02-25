@@ -126,9 +126,11 @@ github.com/bits-and-blooms/bitset v1.24.4 h1:95H15Og1clikBrKr/DuzMXkQzECs1M6hhoG
 github.com/bits-and-blooms/bitset v1.24.4/go.mod h1:7hO7Gc7Pp1vODcmWvKMRA9BNmbv6a/7QIWpPxHddWR8=
 github.com/blang/semver v3.5.1+incompatible h1:cQNTCjp13qL8KC3Nbxr/y2Bqb63oX6wdnnjpJbkM4JQ=
 github.com/blang/semver v3.5.1+incompatible/go.mod h1:kRBLl5iJ+tD4TcOOxsy/0fnwebNt5EWlYSAyrTnjyyk=
-github.com/blinklabs-io/bursa v0.14.0 h1:e+RFfKty3sU0xcgXStg6dRSEIwiJhIKMENLcRlGOzxg=
 github.com/blinklabs-io/bark v0.0.0-20260128142929-ce9fbbf70599 h1:rcWC8IfPV+0Lm3KVErDR5N1XFJnKEx269A3lT5HfEKw=
 github.com/blinklabs-io/bark v0.0.0-20260128142929-ce9fbbf70599/go.mod h1:+ufcuLfDoj8yXktYHQSffle/gaCJnJWqL/31PnAP3dc=
+github.com/blinklabs-io/bark v0.0.2 h1:YcwhDfKu8QuPGjKcaV9/J4Vq+0kYMWMo8C08FW2akeI=
+github.com/blinklabs-io/bark v0.0.2/go.mod h1:+ufcuLfDoj8yXktYHQSffle/gaCJnJWqL/31PnAP3dc=
+github.com/blinklabs-io/bursa v0.14.0 h1:e+RFfKty3sU0xcgXStg6dRSEIwiJhIKMENLcRlGOzxg=
 github.com/blinklabs-io/bursa v0.14.0/go.mod h1:T61tWWJCgoQd/fLbpPa1+64x8ANXx+fEc3CjVeAqbM4=
 github.com/blinklabs-io/gouroboros v0.157.0 h1:UNDo9OCvpb39goH7Ag8IvLmAA4Jf05hkj7g2dbmfEFg=
 github.com/blinklabs-io/gouroboros v0.157.0/go.mod h1:oD41po6mrWc4GkUta5TupkLLdUOA14ovLebuZHEKzt8=

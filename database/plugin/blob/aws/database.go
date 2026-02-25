@@ -797,17 +797,36 @@ func (d *BlobStoreS3) Stop() error {
 	return nil
 }
 
-func (d *BlobStoreS3) GetBlockURL(ctx context.Context, txn types.Txn, point ocommon.Point) (*url.URL, error) {
+func (d *BlobStoreS3) GetBlockURL(
+	ctx context.Context,
+	txn types.Txn,
+	point ocommon.Point,
+) (types.SignedURL, types.BlockMetadata, error) {
 	key := types.BlockBlobKey(point.Slot, point.Hash)
 
-	_, err := d.client.HeadObject(
+	metadataKey := types.BlockBlobMetadataKey(key)
+	metadataBytes, err := d.getInternal(ctx, string(metadataKey))
+	if err != nil {
+		if isS3NotFound(err) {
+			return types.SignedURL{}, types.BlockMetadata{}, types.ErrBlobKeyNotFound
+		}
+		return types.SignedURL{}, types.BlockMetadata{}, err
+	}
+	var tmpMetadata types.BlockMetadata
+	if _, err := cbor.Decode(metadataBytes, &tmpMetadata); err != nil {
+		return types.SignedURL{}, types.BlockMetadata{}, err
+	}
+
+	_, err = d.client.HeadObject(
 		ctx,
 		&s3.HeadObjectInput{
 			Bucket: &d.bucket,
 			Key:    awsString(d.fullKey(string(key))),
 		})
 	if err != nil {
-		return nil, fmt.Errorf("s3 blob: head object %q failed: %w", d.fullKey(string(key)), err)
+		return types.SignedURL{}, types.BlockMetadata{},
+			fmt.Errorf("s3 blob: head object %q failed: %w",
+				d.fullKey(string(key)), err)
 	}
 
 	presignClient := s3.NewPresignClient(d.client)
@@ -817,15 +836,28 @@ func (d *BlobStoreS3) GetBlockURL(ctx context.Context, txn types.Txn, point ocom
 			Bucket: &d.bucket,
 			Key:    awsString(d.fullKey(string(key))),
 		},
-		s3.WithPresignExpires(time.Minute))
+		s3.WithPresignExpires(time.Hour))
 	if err != nil {
-		return nil, fmt.Errorf("s3: failed to generate presigned url: %w", err)
+		return types.SignedURL{}, types.BlockMetadata{},
+			fmt.Errorf("s3: failed to generate presigned url: %w", err)
 	}
 
 	u, err := url.Parse(presignedURL.URL)
 	if err != nil {
-		return nil, fmt.Errorf("s3: failed to parse presigned url: %w", err)
+		return types.SignedURL{}, types.BlockMetadata{},
+			fmt.Errorf("s3: failed to parse presigned url: %w", err)
 	}
 
-	return u, nil
+	signedURL := types.SignedURL{
+		URL:     u,
+		Expires: time.Now().Add(time.Hour),
+	}
+
+	metadata := types.BlockMetadata{
+		Type:     tmpMetadata.Type,
+		Height:   tmpMetadata.Height,
+		PrevHash: tmpMetadata.PrevHash,
+	}
+
+	return signedURL, metadata, nil
 }

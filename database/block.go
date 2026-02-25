@@ -20,7 +20,6 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
-	"net/url"
 	"slices"
 	"strings"
 
@@ -160,15 +159,22 @@ func BlockByHash(db *Database, hash []byte) (models.Block, error) {
 	return ret, err
 }
 
-func BlockURL(ctx context.Context, db *Database, point ocommon.Point) (*url.URL, error) {
-	var ret *url.URL
+func BlockURL(
+	ctx context.Context,
+	db *Database,
+	point ocommon.Point,
+) (types.SignedURL, types.BlockMetadata, error) {
+	var (
+		ret      types.SignedURL
+		metadata types.BlockMetadata
+	)
 	txn := db.BlobTxn(false)
 	err := txn.Do(func(txn *Txn) error {
 		var err error
-		ret, err = txn.DB().Blob().GetBlockURL(ctx, txn, point)
+		ret, metadata, err = txn.DB().Blob().GetBlockURL(ctx, txn, point)
 		return err
 	})
-	return ret, err
+	return ret, metadata, err
 }
 
 func blockByKey(txn *Txn, blockKey []byte) (models.Block, error) {
