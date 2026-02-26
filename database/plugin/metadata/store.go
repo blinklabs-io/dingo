@@ -203,6 +203,16 @@ type MetadataStore interface {
 		types.Txn,
 	) ([]models.Transaction, error)
 
+	// GetTransactionsByMetadataLabel retrieves transactions that include
+	// metadata for the given label.
+	GetTransactionsByMetadataLabel(
+		uint64, // label
+		int, // limit
+		int, // offset
+		string, // order: asc|desc
+		types.Txn,
+	) ([]models.Transaction, error)
+
 	// GetScript retrieves a script by its hash.
 	GetScript(
 		lcommon.ScriptHash,
@@ -437,6 +447,10 @@ type MetadataStore interface {
 	// DeleteTransactionsAfterSlot removes transaction records added after the given slot.
 	// Child records are automatically removed via CASCADE constraints.
 	DeleteTransactionsAfterSlot(uint64, types.Txn) error
+
+	// DeleteTransactionMetadataLabelsAfterSlot removes transaction metadata
+	// label index records added after the given slot.
+	DeleteTransactionMetadataLabelsAfterSlot(uint64, types.Txn) error
 
 	// Governance methods
 
