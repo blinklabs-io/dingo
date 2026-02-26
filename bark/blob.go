@@ -3,7 +3,6 @@ package bark
 import (
 	"context"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -200,8 +199,7 @@ func (b *BlobStoreBark) GetBlockURL(
 	txn types.Txn,
 	point ocommon.Point,
 ) (types.SignedURL, types.BlockMetadata, error) {
-	return types.SignedURL{}, types.BlockMetadata{},
-		errors.New("not implemented")
+	return b.upstream.GetBlockURL(ctx, txn, point)
 }
 
 func (b *BlobStoreBark) SetUtxo(
