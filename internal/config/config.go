@@ -353,7 +353,7 @@ var globalConfig = &Config{
 	RelayPort:            3001,
 	BarkBaseUrl:          "",
 	BarkSecurityWindow:   10000,
-	BarkPort:             9091,
+	BarkPort:             0,
 	UtxorpcPort:          0,
 	Topology:             "",
 	TlsCertFilePath:      "",

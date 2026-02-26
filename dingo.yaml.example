@@ -149,6 +149,15 @@ blockfrostPort: 0
 # Can be overridden with DINGO_MESH_PORT
 meshPort: 0
 
+# base url of bark archive server
+barkBaseUrl: ""
+
+# window where blocks will not be found in the bark archive
+barkSecurityWindow: 10000
+
+# TCP port bind for listening for bark RPC calls
+barkPort: 0
+
 # ---
 # Deployment pattern examples (uncomment one block):
 #
@@ -171,18 +180,6 @@ meshPort: 0
 # Dev mode (isolated, forge blocks, no outbound):
 #   runMode: "dev"
 # ---
-
-# base url of bark archive server
-barkBaseUrl: ""
-
-# window where blocks will not be found in the bark archive
-barkSecurityWindow: 10000
-
-# TCP port bind for listening for bark RPC calls
-barkPort: 9091
-
-# TCP port to bind for listening for UTxO RPC
-utxorpcPort: 9090
 
 # Ignore prior chain history and start from current tip (default: false)
 # This is experimental and may break — use with caution

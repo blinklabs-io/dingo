@@ -189,7 +189,8 @@ func BlockURL(
 		ret, metadata, err = txn.DB().Blob().GetBlockURL(ctx, txn.Blob(), point)
 		return err
 	})
-	return ret, metadata, err
+
+	return ret, metadata, fmt.Errorf("failed getting block url: %w", err)
 }
 
 func blockByKey(txn *Txn, blockKey []byte) (models.Block, error) {
