@@ -17,6 +17,7 @@ package labelcodec
 import (
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 
@@ -121,7 +122,7 @@ func decodeMetadataLabelMap(
 		}
 		return ret, nil
 	}
-	return nil, fmt.Errorf("metadata is not an integer-keyed map")
+	return nil, errors.New("metadata is not an integer-keyed map")
 }
 
 func metadatumRawToJSON(raw cbor.RawMessage) (string, error) {
@@ -156,7 +157,7 @@ func extractFromMetadatum(
 ) ([]Entry, error) {
 	tmpMap, ok := txMetadata.(lcommon.MetaMap)
 	if !ok {
-		return nil, fmt.Errorf("metadata is not an integer-keyed map")
+		return nil, errors.New("metadata is not an integer-keyed map")
 	}
 	ret := make([]Entry, 0, len(tmpMap.Pairs))
 	for _, pair := range tmpMap.Pairs {
