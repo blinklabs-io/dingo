@@ -29,7 +29,7 @@ import (
 type drepCertRecord struct {
 	addedSlot  uint64
 	certIndex  uint32
-	anchorUrl  string
+	anchorURL  string
 	anchorHash []byte
 }
 
@@ -93,7 +93,7 @@ func batchFetchDrepCerts(
 			DrepCredential []byte
 			AddedSlot      uint64
 			CertIndex      uint32
-			AnchorUrl      string
+			AnchorURL      string `gorm:"column:anchor_url"`
 			AnchorHash     []byte
 		}
 		var regRecords []regResult
@@ -109,7 +109,7 @@ func batchFetchDrepCerts(
 			rec := drepCertRecord{
 				addedSlot:  r.AddedSlot,
 				certIndex:  r.CertIndex,
-				anchorUrl:  r.AnchorUrl,
+				anchorURL:  r.AnchorURL,
 				anchorHash: r.AnchorHash,
 			}
 			if !cache.hasReg[key] || rec.isMoreRecent(cache.registration[key]) {
@@ -150,7 +150,7 @@ func batchFetchDrepCerts(
 			Credential []byte
 			AddedSlot  uint64
 			CertIndex  uint32
-			AnchorUrl  string
+			AnchorURL  string `gorm:"column:anchor_url"`
 			AnchorHash []byte
 		}
 		var updateRecords []updateResult
@@ -166,7 +166,7 @@ func batchFetchDrepCerts(
 			rec := drepCertRecord{
 				addedSlot:  r.AddedSlot,
 				certIndex:  r.CertIndex,
-				anchorUrl:  r.AnchorUrl,
+				anchorURL:  r.AnchorURL,
 				anchorHash: r.AnchorHash,
 			}
 			if !cache.hasUpdate[key] || rec.isMoreRecent(cache.update[key]) {
@@ -295,7 +295,7 @@ func (d *MetadataStoreSqlite) RestoreDrepStateAtSlot(
 		// Determine the correct state by processing certificates in order.
 		// Start with registration state (DRep is active with registration's anchor data)
 		active := true
-		anchorUrl := lastReg.anchorUrl
+		anchorURL := lastReg.anchorURL
 		anchorHash := lastReg.anchorHash
 		latestSlot := lastReg.addedSlot
 		latestCertIndex := lastReg.certIndex
@@ -309,7 +309,7 @@ func (d *MetadataStoreSqlite) RestoreDrepStateAtSlot(
 				active = false
 				latestSlot = lastDereg.addedSlot
 				latestCertIndex = lastDereg.certIndex
-				anchorUrl = ""
+				anchorURL = ""
 				anchorHash = nil
 				latestWasDereg = true
 			}
@@ -324,7 +324,7 @@ func (d *MetadataStoreSqlite) RestoreDrepStateAtSlot(
 			lastUpdate := cache.update[key]
 			if lastUpdate.addedSlot > latestSlot ||
 				(lastUpdate.addedSlot == latestSlot && lastUpdate.certIndex > latestCertIndex) {
-				anchorUrl = lastUpdate.anchorUrl
+				anchorURL = lastUpdate.anchorURL
 				anchorHash = lastUpdate.anchorHash
 				latestSlot = lastUpdate.addedSlot
 			}
@@ -336,7 +336,7 @@ func (d *MetadataStoreSqlite) RestoreDrepStateAtSlot(
 		// during rollback. They will be recalculated as new activity occurs.
 		if result := db.Model(&drep).Updates(map[string]any{
 			"active":              active,
-			"anchor_url":          anchorUrl,
+			"anchor_url":          anchorURL,
 			"anchor_hash":         anchorHash,
 			"added_slot":          latestSlot,
 			"last_activity_epoch": 0,
@@ -376,7 +376,7 @@ func (d *MetadataStoreSqlite) SetDrep(
 	tmpItem := models.Drep{
 		Credential: cred,
 		AddedSlot:  slot,
-		AnchorUrl:  url,
+		AnchorURL:  url,
 		AnchorHash: hash,
 		Active:     active,
 	}

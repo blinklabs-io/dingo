@@ -46,7 +46,7 @@ func NewUnixConn(conn net.Conn) (*UnixConn, error) {
 	}
 	err = rawConn.Control(
 		func(fd uintptr) {
-			fdNum = int(fd)
+			fdNum = int(fd) //nolint:gosec // fd fits in int on all supported platforms
 		},
 	)
 	if err != nil {

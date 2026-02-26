@@ -1,0 +1,61 @@
+# Antithesis configurator specification for DevNet.
+#
+# Generates unique key sets and genesis files for each pool.
+# Used by the configurator service in docker-compose.yml.
+#
+# Format: 6 YAML documents (see below)
+#   1. Required testnet parameters
+#   2. Byron genesis overrides
+#   3. Shelley genesis overrides
+#   4. Alonzo genesis overrides
+#   5. Conway genesis overrides
+#   6. Node config (config.json) overrides
+
+--- # Required Testnet Parameters
+poolCount: 2
+poolCost: 0
+poolMargin: 0.0
+poolPledge: 0
+delegatedSupply: 2000000000000
+systemStart: 'now'
+systemStartDelay: 5
+networkMagic: 42
+testnetDomain: devnet
+
+--- # Byron Genesis Override
+protocolConsts:
+  k: 100
+
+--- # Shelley Genesis Override
+# 1s slots, ~13.3 min epochs, block every ~5s per pool (~2.5s total)
+# stabilityWindow = 3k/f = 3*100/0.4 = 750 < 800 = epochLength ✓
+# Partition tolerance: K / per-pool-rate where per-pool-rate = 1-(1-f)^(1/n)
+# With f=0.4, n=2: per-pool-rate ≈ 0.225, so K / per-pool-rate ≈ 100/0.225 ≈ 444s (~7.4 min)
+epochLength: 800
+slotLength: 1
+activeSlotsCoeff: 0.4
+securityParam: 100
+maxLovelaceSupply: 2000000000000
+protocolParams:
+  decentralisationParam: 0
+  protocolVersion:
+    major: 10
+    minor: 0
+
+--- # Alonzo Genesis Override
+
+--- # Conway Genesis Override
+
+--- # Node Config Override
+TestShelleyHardForkAtEpoch: 0
+TestAllegraHardForkAtEpoch: 0
+TestMaryHardForkAtEpoch: 0
+TestAlonzoHardForkAtEpoch: 0
+TestBabbageHardForkAtEpoch: 0
+TestConwayHardForkAtEpoch: 0
+ExperimentalHardForksEnabled: true
+ExperimentalProtocolsEnabled: true
+TraceForge: true
+TraceChainDb: true
+TraceMempool: true
+TurnOnLogging: true

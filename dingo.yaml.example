@@ -126,6 +126,52 @@ privatePort: 3002
 # Can be overridden with the port environment variable
 relayPort: 3001
 
+# Storage mode controls how much data is persisted.
+# - "core": Only consensus data (UTxOs, certs, pools, pparams). Suitable for
+#   block producers and relay nodes with no APIs enabled.
+# - "api": Core data plus full transaction metadata (witnesses, scripts, datums,
+#   redeemers). Required when any API is enabled.
+# APIs will refuse to start if storage mode is not "api".
+#
+# Can be overridden with DINGO_STORAGE_MODE
+storageMode: "core"
+
+# API ports (0 = disabled, default)
+# All APIs require storageMode: "api"
+#
+# UTxO RPC gRPC API port
+# Can be overridden with DINGO_UTXORPC_PORT
+utxorpcPort: 0
+# Blockfrost-compatible REST API port
+# Can be overridden with DINGO_BLOCKFROST_PORT
+blockfrostPort: 0
+# Mesh (Coinbase Rosetta) REST API port
+# Can be overridden with DINGO_MESH_PORT
+meshPort: 0
+
+# ---
+# Deployment pattern examples (uncomment one block):
+#
+# Relay node (core storage, no APIs):
+#   storageMode: "core"
+#   blockProducer: false
+#
+# Data node (API storage, one or more API ports enabled):
+#   storageMode: "api"
+#   utxorpcPort: 9090
+#   blockfrostPort: 3100
+#
+# Validator / block producer (core storage, no APIs):
+#   storageMode: "core"
+#   blockProducer: true
+#   shelleyVrfKey: "/keys/vrf.skey"
+#   shelleyKesKey: "/keys/kes.skey"
+#   shelleyOperationalCertificate: "/keys/opcert.cert"
+#
+# Dev mode (isolated, forge blocks, no outbound):
+#   runMode: "dev"
+# ---
+
 # base url of bark archive server
 barkBaseUrl: ""
 
@@ -210,3 +256,21 @@ cache:
   # Wait for cache warmup to complete before serving requests
   # Default: true
   warmupSync: true
+
+# Mithril snapshot bootstrap configuration
+# Use 'dingo mithril sync' or 'dingo sync --mithril' to bootstrap from a snapshot
+mithril:
+  # Enable Mithril integration (default: true)
+  enabled: true
+  # Override aggregator URL (auto-detected from network if empty)
+  # Supported networks: mainnet, preprod, preview
+  aggregatorUrl: ""
+  # Directory for downloading snapshot archives
+  # If empty, a randomized temporary directory is created automatically
+  # downloadDir: ""
+  # Remove temporary files after loading completes
+  # Default: true
+  cleanupAfterLoad: true
+  # Verify the Mithril certificate chain from snapshot back to genesis
+  # Default: true
+  verifyCertificates: true

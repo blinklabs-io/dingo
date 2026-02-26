@@ -25,6 +25,53 @@ import (
 	"gorm.io/gorm"
 )
 
+// certOrderInfo holds block_index and cert_index for same-slot comparison.
+type certOrderInfo struct {
+	blockIndex uint32
+	certIndex  uint
+}
+
+// fetchPoolCertOrderInfo fetches block_index and cert_index for pool certificates
+// to enable deterministic same-slot comparison. Returns (regInfo, retInfo, error).
+func fetchPoolCertOrderInfo(
+	db *gorm.DB,
+	regID uint,
+	retID uint,
+) (certOrderInfo, certOrderInfo, error) {
+	type certRow struct {
+		CertType   uint
+		CertIndex  uint
+		BlockIndex uint32
+	}
+	var rows []certRow
+	// Join with transaction to get block_index
+	if err := db.Table("certs").
+		Select("certs.cert_type, certs.cert_index, COALESCE(\"transaction\".block_index, 0) AS block_index").
+		Joins("LEFT JOIN \"transaction\" ON \"transaction\".id = certs.transaction_id").
+		Where(
+			"(certs.certificate_id = ? AND certs.cert_type = ?) OR (certs.certificate_id = ? AND certs.cert_type = ?)",
+			regID,
+			uint(lcommon.CertificateTypePoolRegistration),
+			retID,
+			uint(lcommon.CertificateTypePoolRetirement),
+		).
+		Find(&rows).Error; err != nil {
+		return certOrderInfo{}, certOrderInfo{}, fmt.Errorf(
+			"fetchPoolCertOrderInfo: query certs: %w", err,
+		)
+	}
+	var regInfo, retInfo certOrderInfo
+	for _, row := range rows {
+		switch row.CertType {
+		case uint(lcommon.CertificateTypePoolRegistration):
+			regInfo = certOrderInfo{blockIndex: row.BlockIndex, certIndex: row.CertIndex}
+		case uint(lcommon.CertificateTypePoolRetirement):
+			retInfo = certOrderInfo{blockIndex: row.BlockIndex, certIndex: row.CertIndex}
+		}
+	}
+	return regInfo, retInfo, nil
+}
+
 // GetPool gets a pool
 func (d *MetadataStorePostgres) GetPool(
 	pkh lcommon.PoolKeyHash,
@@ -37,16 +84,22 @@ func (d *MetadataStorePostgres) GetPool(
 		return nil, err
 	}
 	result := db.
-		Preload(
-			"Registration",
-			func(db *gorm.DB) *gorm.DB { return db.Order("added_slot DESC, id DESC").Limit(1) },
-		).
+		Preload("Registration", func(db *gorm.DB) *gorm.DB {
+			return db.Select("pool_registration.*").
+				Joins("LEFT JOIN certs ON certs.id = pool_registration.certificate_id").
+				Joins("LEFT JOIN \"transaction\" ON \"transaction\".id = certs.transaction_id").
+				Order("pool_registration.added_slot DESC, COALESCE(\"transaction\".block_index, 0) DESC, COALESCE(certs.cert_index, 0) DESC").
+				Limit(1)
+		}).
 		Preload("Registration.Owners").
 		Preload("Registration.Relays").
-		Preload(
-			"Retirement",
-			func(db *gorm.DB) *gorm.DB { return db.Order("added_slot DESC, id DESC").Limit(1) },
-		).
+		Preload("Retirement", func(db *gorm.DB) *gorm.DB {
+			return db.Select("pool_retirement.*").
+				Joins("LEFT JOIN certs ON certs.id = pool_retirement.certificate_id").
+				Joins("LEFT JOIN \"transaction\" ON \"transaction\".id = certs.transaction_id").
+				Order("pool_retirement.added_slot DESC, COALESCE(\"transaction\".block_index, 0) DESC, COALESCE(certs.cert_index, 0) DESC").
+				Limit(1)
+		}).
 		First(
 			ret,
 			"pool_key_hash = ?",
@@ -67,8 +120,23 @@ func (d *MetadataStorePostgres) GetPool(
 		// If the latest retirement is more recent than the latest registration,
 		// check whether the retirement epoch has passed. A retirement in the
 		// future means the pool is still active until that epoch is reached.
+		shouldCheckRetirement := false
 		if hasRet &&
 			ret.Retirement[0].AddedSlot > ret.Registration[0].AddedSlot {
+			shouldCheckRetirement = true
+		} else if hasRet && ret.Retirement[0].AddedSlot == ret.Registration[0].AddedSlot {
+			regInfo, retInfo, err := fetchPoolCertOrderInfo(db, ret.Registration[0].ID, ret.Retirement[0].ID)
+			if err != nil {
+				return nil, err
+			}
+			// Compare block_index first, then cert_index (cert_index resets per tx)
+			if retInfo.blockIndex > regInfo.blockIndex {
+				shouldCheckRetirement = true
+			} else if retInfo.blockIndex == regInfo.blockIndex && retInfo.certIndex > regInfo.certIndex {
+				shouldCheckRetirement = true
+			}
+		}
+		if shouldCheckRetirement {
 			retEpoch := ret.Retirement[0].Epoch
 			// Determine current epoch from tip -> epoch table. If we cannot
 			// determine the current epoch, conservatively treat the pool as active.
@@ -567,6 +635,193 @@ func (d *MetadataStorePostgres) GetActivePoolKeyHashesAtSlot(
 	return poolKeyHashes, nil
 }
 
+// GetActivePoolRelays returns all relays from currently active pools.
+// A pool is considered active if it has a registration and either:
+// - No retirement, or
+// - The retirement epoch is in the future
+//
+// Implementation note: This function loads all registrations and retirements
+// per pool and filters in Go rather than using complex SQL JOINs. This approach
+// is necessary because:
+//  1. GORM's Preload with Limit(1) applies the limit globally, not per-parent
+//  2. Determining the "latest" registration/retirement requires comparing
+//     added_slot values which is cumbersome in a single query
+//  3. The filtering logic (retirement epoch vs current epoch) is clearer in Go
+//
+// For networks with thousands of pools, this may use significant memory.
+// Future optimization could use raw SQL with window functions (ROW_NUMBER)
+// or batch processing if memory becomes a concern.
+func (d *MetadataStorePostgres) GetActivePoolRelays(
+	txn types.Txn,
+) ([]models.PoolRegistrationRelay, error) {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"GetActivePoolRelays: resolve db: %w", err,
+		)
+	}
+
+	// Get the current epoch from the tip
+	var tmpTip models.Tip
+	if res := db.Where("id = ?", tipEntryId).First(&tmpTip); res.Error != nil {
+		// If we can't get the tip, return empty (no relays)
+		if errors.Is(res.Error, gorm.ErrRecordNotFound) {
+			return []models.PoolRegistrationRelay{}, nil
+		}
+		return nil, fmt.Errorf(
+			"GetActivePoolRelays: get tip: %w", res.Error,
+		)
+	}
+
+	var curEpoch models.Epoch
+	if res := db.Where(
+		"start_slot <= ?",
+		tmpTip.Slot,
+	).Order("start_slot DESC").First(&curEpoch); res.Error != nil {
+		// If we can't determine current epoch, return empty
+		if errors.Is(res.Error, gorm.ErrRecordNotFound) {
+			return []models.PoolRegistrationRelay{}, nil
+		}
+		return nil, fmt.Errorf(
+			"GetActivePoolRelays: get current epoch: %w",
+			res.Error,
+		)
+	}
+
+	// Query all pools with their registrations, retirements, and relays.
+	// We load ALL registrations/retirements per pool and filter in Go because
+	// GORM's Preload with Limit(1) applies globally, not per-parent.
+	// JOINs with certs and transaction tables to use block_index and cert_index
+	// for consistent on-chain certificate ordering (matching GetActivePoolKeyHashesAtSlot).
+	// Note: cert_index resets per transaction, so block_index must come first.
+	var pools []models.Pool
+	result := db.
+		Preload("Registration", func(db *gorm.DB) *gorm.DB {
+			return db.Select("pool_registration.*").
+				Joins("LEFT JOIN certs ON certs.id = pool_registration.certificate_id").
+				Joins("LEFT JOIN \"transaction\" ON \"transaction\".id = certs.transaction_id").
+				Order("pool_registration.added_slot DESC, COALESCE(\"transaction\".block_index, 0) DESC, COALESCE(certs.cert_index, 0) DESC")
+		}).
+		Preload("Registration.Relays").
+		Preload("Retirement", func(db *gorm.DB) *gorm.DB {
+			return db.Select("pool_retirement.*").
+				Joins("LEFT JOIN certs ON certs.id = pool_retirement.certificate_id").
+				Joins("LEFT JOIN \"transaction\" ON \"transaction\".id = certs.transaction_id").
+				Order("pool_retirement.added_slot DESC, COALESCE(\"transaction\".block_index, 0) DESC, COALESCE(certs.cert_index, 0) DESC")
+		}).
+		Find(&pools)
+	if result.Error != nil {
+		return nil, fmt.Errorf(
+			"GetActivePoolRelays: query pools: %w",
+			result.Error,
+		)
+	}
+
+	// Collect certificate IDs where same-slot comparison is needed
+	// to look up block_index and cert_index for tie-breaking
+	var certIDs []uint
+	for _, pool := range pools {
+		if len(pool.Registration) == 0 || len(pool.Retirement) == 0 {
+			continue
+		}
+		if pool.Retirement[0].AddedSlot == pool.Registration[0].AddedSlot {
+			certIDs = append(
+				certIDs,
+				pool.Registration[0].CertificateID,
+				pool.Retirement[0].CertificateID,
+			)
+		}
+	}
+
+	// certInfo holds block_index and cert_index for same-slot comparison
+	type certInfo struct {
+		blockIndex uint32
+		certIndex  uint
+	}
+	// Use composite key (cert ID + cert type) to disambiguate when
+	// a registration and retirement share the same CertificateID
+	type certInfoKey struct {
+		certID   uint
+		certType uint
+	}
+	certInfoMap := make(map[certInfoKey]certInfo)
+	if len(certIDs) > 0 {
+		// Fetch cert_type, cert_index and block_index via join with transaction
+		type certResult struct {
+			CertID     uint
+			CertType   uint
+			CertIndex  uint
+			BlockIndex uint32
+		}
+		var certResults []certResult
+		if err := db.Table("certs").
+			Select("certs.id AS cert_id, certs.cert_type, certs.cert_index, COALESCE(\"transaction\".block_index, 0) AS block_index").
+			Joins("LEFT JOIN \"transaction\" ON \"transaction\".id = certs.transaction_id").
+			Where("certs.id IN ?", certIDs).
+			Scan(&certResults).Error; err != nil {
+			return nil, fmt.Errorf(
+				"GetActivePoolRelays: fetch cert indexes: %w",
+				err,
+			)
+		}
+		for _, c := range certResults {
+			certInfoMap[certInfoKey{certID: c.CertID, certType: c.CertType}] = certInfo{
+				blockIndex: c.BlockIndex,
+				certIndex:  c.CertIndex,
+			}
+		}
+	}
+
+	// Filter active pools and collect relays from the latest registration
+	var relays []models.PoolRegistrationRelay
+	for _, pool := range pools {
+		// Skip pools without registrations
+		if len(pool.Registration) == 0 {
+			continue
+		}
+
+		// Get the latest registration (already sorted by added_slot DESC, block_index DESC, cert_index DESC)
+		latestReg := pool.Registration[0]
+
+		// Check if pool is retired
+		if len(pool.Retirement) > 0 {
+			// Get the latest retirement (already sorted by added_slot DESC, block_index DESC, cert_index DESC)
+			latestRet := pool.Retirement[0]
+			// Check if retirement takes precedence over registration
+			shouldCheckRetirement := false
+			if latestRet.AddedSlot > latestReg.AddedSlot {
+				shouldCheckRetirement = true
+			} else if latestRet.AddedSlot == latestReg.AddedSlot {
+				// Same-slot case: use block_index then cert_index for on-chain ordering
+				// Higher block_index/cert_index means it came later in the block
+				// Disambiguate by cert_type to handle potential CertificateID collisions
+				retInfo := certInfoMap[certInfoKey{
+					certID:   latestRet.CertificateID,
+					certType: uint(lcommon.CertificateTypePoolRetirement),
+				}]
+				regInfo := certInfoMap[certInfoKey{
+					certID:   latestReg.CertificateID,
+					certType: uint(lcommon.CertificateTypePoolRegistration),
+				}]
+				if retInfo.blockIndex > regInfo.blockIndex {
+					shouldCheckRetirement = true
+				} else if retInfo.blockIndex == regInfo.blockIndex && retInfo.certIndex > regInfo.certIndex {
+					shouldCheckRetirement = true
+				}
+			}
+			// If retirement takes precedence and epoch has passed, pool is retired
+			if shouldCheckRetirement && latestRet.Epoch <= curEpoch.EpochId {
+				continue // Pool is retired
+			}
+		}
+
+		// Pool is active, add relays from the latest registration
+		relays = append(relays, latestReg.Relays...)
+	}
+
+	return relays, nil
+}
+
 // GetStakeByPool returns the total delegated stake and delegator count for a pool.
 func (d *MetadataStorePostgres) GetStakeByPool(
 	poolKeyHash []byte,
@@ -624,7 +879,7 @@ func (d *MetadataStorePostgres) GetStakeByPools(
 
 	for _, r := range delegatorResults {
 		if r.DelegatorCount >= 0 {
-			delegatorMap[string(r.Pool)] = uint64(r.DelegatorCount)
+			delegatorMap[string(r.Pool)] = uint64(r.DelegatorCount) //nolint:gosec // guarded by >= 0 check
 		}
 	}
 

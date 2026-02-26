@@ -616,7 +616,7 @@ func EvaluateTxConway(
 	if tmpPparams.ExecutionCosts.StepPrice != nil {
 		pricesSteps = tmpPparams.ExecutionCosts.StepPrice.ToBigRat()
 	}
-	fee, err := CalculateMinFee(
+	fee := CalculateMinFee(
 		txSize,
 		retTotalExUnits,
 		tmpPparams.MinFeeA,
@@ -624,8 +624,5 @@ func EvaluateTxConway(
 		pricesMem,
 		pricesSteps,
 	)
-	if err != nil {
-		return 0, lcommon.ExUnits{}, nil, err
-	}
 	return fee, retTotalExUnits, retRedeemerExUnits, nil
 }

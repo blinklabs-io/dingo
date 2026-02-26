@@ -45,6 +45,19 @@ func (d *Database) GetEpochs(txn *Txn) ([]models.Epoch, error) {
 	return txn.db.metadata.GetEpochs(txn.Metadata())
 }
 
+func (d *Database) DeleteEpochsAfterSlot(
+	slot uint64,
+	txn *Txn,
+) error {
+	if txn == nil {
+		return d.metadata.DeleteEpochsAfterSlot(slot, nil)
+	}
+	return txn.db.metadata.DeleteEpochsAfterSlot(
+		slot,
+		txn.Metadata(),
+	)
+}
+
 func (d *Database) SetEpoch(
 	slot, epoch uint64,
 	nonce []byte,

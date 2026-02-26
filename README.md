@@ -32,8 +32,9 @@ Note: On Windows systems, named pipes are used instead of Unix sockets for node-
 Dingo supports configuration via both a YAML config file (`dingo.yaml`) and uses environment
 variables to modify its own behavior.
 
-A sample configuration file is provided at `dingo.yaml.example`.You can copy and edit this file to configure Dingo for your local or production environment:
-This behavior can be changed via the following environment variables:
+A sample configuration file is provided at `dingo.yaml.example`. You can copy and edit this file to configure Dingo for your local or production environment.
+
+In addition to the configuration file, Dingo's behavior can be changed via the following environment variables:
 
 - `CARDANO_BIND_ADDR`
   - IP address to bind for listening (default: `0.0.0.0`)
@@ -66,17 +67,70 @@ This behavior can be changed via the following environment variables:
   - This socket speaks Ouroboros NtC and is used by client software
 - `CARDANO_TOPOLOGY`
   - Full path to the Cardano node topology (default: "")
-- `CARDANO_UTXORPC_PORT`
-  - TCP port to bind for listening for UTxO RPC (default: `9090`)
+- `DINGO_UTXORPC_PORT`
+  - TCP port to bind for listening for UTxO RPC (default: `0`, disabled)
 - `TLS_CERT_FILE_PATH` - SSL certificate to use, requires `TLS_KEY_FILE_PATH`
     (default: empty)
 - `TLS_KEY_FILE_PATH` - SSL certificate key to use (default: empty)
 
 ## Fast Bootstrapping with Mithril
 
-Instead of syncing from genesis (which can take days on mainnet), you can bootstrap Dingo using a Mithril snapshot. [Mithril](https://mithril.network/) provides cryptographically certified snapshots of the Cardano blockchain.
+Instead of syncing from genesis (which can take days on mainnet), you can bootstrap Dingo using a [Mithril](https://mithril.network/) snapshot. There are two approaches depending on your use case:
 
-### Prerequisites
+| Approach | Command | Use Case | Data Available |
+|----------|---------|----------|---------------|
+| **`dingo sync`** | `dingo sync --mithril` | Consensus nodes, relays | Current ledger state + all blocks |
+| **`mithril-client` + `dingo load`** | Manual download + load | Indexers, API nodes | Full historical transaction/certificate data |
+
+### Option 1: `dingo sync --mithril` (Recommended for Consensus)
+
+Dingo has a built-in Mithril client that handles download, extraction, and import automatically. This is the fastest way to get a node running.
+
+```bash
+# Bootstrap from Mithril and start syncing
+./dingo -n preview sync --mithril
+
+# Then start the node
+./dingo -n preview serve
+```
+
+Or use the subcommand form for more control:
+
+```bash
+# List available snapshots
+./dingo -n preview mithril list
+
+# Show snapshot details
+./dingo -n preview mithril show <digest>
+
+# Download and import
+./dingo -n preview mithril sync
+```
+
+This imports:
+- All blocks from genesis (stored in blob store for serving peers)
+- Current UTxO set, stake accounts, pool registrations, DRep registrations
+- Stake snapshots (mark/set/go) for leader election
+- Protocol parameters, governance state, treasury/reserves
+- Complete epoch history for slot-to-time calculations
+
+**What's NOT included**: Individual transaction records, certificate history, witness/script/datum storage, and governance vote records for blocks before the snapshot. These aren't needed for consensus, block production, or serving blocks to peers. New blocks processed after bootstrap will have full metadata.
+
+**Performance** (preview network, ~4M blocks):
+
+| Phase | Time |
+|-------|------|
+| Download snapshot (~2.6 GB) | ~1-2 min |
+| Extract + download ancillary | ~1 min |
+| Import ledger state (UTxOs, accounts, pools, DReps, epochs) | ~12 min |
+| Load blocks into blob store | ~36 min |
+| **Total** | **~50 min** |
+
+### Option 2: `mithril-client` + `dingo load` (For Indexers/API Nodes)
+
+If you need full historical data (transaction lookups, certificate queries, datum/script resolution), use the external `mithril-client` to download the snapshot and then load it with `dingo load`, which processes every block through the full indexing pipeline.
+
+#### Prerequisites
 
 Install the `mithril-client` CLI from [Mithril releases](https://github.com/input-output-hk/mithril/releases):
 
@@ -103,13 +157,40 @@ case "$OS" in
   *) echo "Unsupported OS: $OS (see Mithril releases for Windows)"; exit 1 ;;
 esac
 
-curl -L "https://github.com/input-output-hk/mithril/releases/latest/download/mithril-${MITHRIL_PLATFORM}.tar.zst" -o mithril.tar.zst
-tar --zstd -xf mithril.tar.zst
+MITHRIL_VERSION="2506.0"
+curl -L "https://github.com/input-output-hk/mithril/releases/download/${MITHRIL_VERSION}/mithril-${MITHRIL_VERSION}-${MITHRIL_PLATFORM}.tar.gz" -o mithril.tar.gz
+tar -xzf mithril.tar.gz
 sudo mv mithril-client /usr/local/bin/
-rm mithril.tar.zst
+rm mithril.tar.gz
 ```
 
 For Windows, download the appropriate binary from the [Mithril releases page](https://github.com/input-output-hk/mithril/releases).
+
+#### Bootstrap Workflow
+
+```bash
+# Set network (CARDANO_NETWORK is used by dingo, not mithril-client)
+export CARDANO_NETWORK=preview
+# AGGREGATOR_ENDPOINT is used by mithril-client
+export AGGREGATOR_ENDPOINT=https://aggregator.pre-release-preview.api.mithril.network/aggregator
+
+# For mainnet:
+# export AGGREGATOR_ENDPOINT=https://aggregator.release-mainnet.api.mithril.network/aggregator
+
+# Download snapshot (uses AGGREGATOR_ENDPOINT)
+mithril-client cardano-db download --download-dir /tmp/mithril-snapshot
+
+# Load into Dingo (uses CARDANO_NETWORK for chain config)
+./dingo load /tmp/mithril-snapshot/db/immutable
+
+# Clean up snapshot
+rm -rf /tmp/mithril-snapshot
+
+# Start Dingo
+./dingo -n preview serve
+```
+
+This creates full historical data including transaction records, certificate history, witness data, scripts, datums, and governance votes — everything needed for rich query APIs.
 
 ### Disk Space Requirements
 
@@ -122,71 +203,6 @@ Bootstrapping requires temporary disk space for both the downloaded snapshot and
 | preview |       ~15 GB |   ~25 GB |       ~50 GB |
 
 **Note**: These are approximate values that grow over time. The snapshot can be deleted after import, but you need sufficient space for both during the load process.
-
-### Bootstrap Workflow
-
-#### Step 1: Download the snapshot
-
-Set the aggregator endpoint for your network and download:
-
-```bash
-# For mainnet
-export AGGREGATOR_ENDPOINT=https://aggregator.release-mainnet.api.mithril.network/aggregator
-
-# For preprod
-# export AGGREGATOR_ENDPOINT=https://aggregator.release-preprod.api.mithril.network/aggregator
-
-# For preview
-# export AGGREGATOR_ENDPOINT=https://aggregator.pre-release-preview.api.mithril.network/aggregator
-
-# Download the latest snapshot
-mithril-client cardano-db download --download-dir /path/to/download
-```
-
-#### Step 2: Load into Dingo
-
-```bash
-# Load the immutable DB into Dingo
-./dingo load /path/to/download/db/immutable
-```
-
-The load process will import all blocks from the snapshot. Progress is logged as blocks are processed.
-
-#### Step 3: Start Dingo
-
-After loading completes, start Dingo normally and it will sync the remaining blocks from the network:
-
-```bash
-CARDANO_NETWORK=mainnet ./dingo
-```
-
-#### Step 4: Clean up (optional)
-
-Once Dingo is running and synced, you can delete the downloaded snapshot to reclaim disk space:
-
-```bash
-rm -rf /path/to/download
-```
-
-### Example: Full Bootstrap for Preview
-
-```bash
-# Set network
-export CARDANO_NETWORK=preview
-export AGGREGATOR_ENDPOINT=https://aggregator.pre-release-preview.api.mithril.network/aggregator
-
-# Download snapshot
-mithril-client cardano-db download --download-dir /tmp/mithril-preview
-
-# Load into Dingo
-./dingo load /tmp/mithril-preview/db/immutable
-
-# Clean up
-rm -rf /tmp/mithril-preview
-
-# Run Dingo
-./dingo
-```
 
 ## Database Plugins
 

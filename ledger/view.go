@@ -460,7 +460,7 @@ func (lv *LedgerView) DRepRegistration(
 	reg := &lcommon.DRepRegistration{
 		Credential: credential,
 	}
-	if drep.AnchorUrl != "" || len(drep.AnchorHash) > 0 {
+	if drep.AnchorURL != "" || len(drep.AnchorHash) > 0 {
 		if len(drep.AnchorHash) != 32 {
 			return nil, fmt.Errorf(
 				"invalid DRep anchor hash length: expected 32, got %d",
@@ -470,7 +470,7 @@ func (lv *LedgerView) DRepRegistration(
 		var dataHash [32]byte
 		copy(dataHash[:], drep.AnchorHash)
 		reg.Anchor = &lcommon.GovAnchor{
-			Url:      drep.AnchorUrl,
+			Url:      drep.AnchorURL,
 			DataHash: dataHash,
 		}
 	}
@@ -488,7 +488,7 @@ func (lv *LedgerView) DRepRegistrations() ([]lcommon.DRepRegistration, error) {
 		reg := lcommon.DRepRegistration{
 			Credential: lcommon.NewBlake2b224(drep.Credential),
 		}
-		if drep.AnchorUrl != "" || len(drep.AnchorHash) > 0 {
+		if drep.AnchorURL != "" || len(drep.AnchorHash) > 0 {
 			if len(drep.AnchorHash) != 32 {
 				return nil, fmt.Errorf(
 					"invalid DRep anchor hash length: expected 32, got %d",
@@ -498,7 +498,7 @@ func (lv *LedgerView) DRepRegistrations() ([]lcommon.DRepRegistration, error) {
 			var dataHash [32]byte
 			copy(dataHash[:], drep.AnchorHash)
 			reg.Anchor = &lcommon.GovAnchor{
-				Url:      drep.AnchorUrl,
+				Url:      drep.AnchorURL,
 				DataHash: dataHash,
 			}
 		}
@@ -570,13 +570,14 @@ type StakeDistribution struct {
 }
 
 // GetStakeDistribution returns the stake distribution for leader election.
-// Uses the "go" snapshot which represents stake from 2 epochs ago.
+// Uses the "mark" snapshot at the given epoch. Callers pass currentEpoch-2
+// so the epoch offset already accounts for the Mark→Set→Go rotation.
 func (lv *LedgerView) GetStakeDistribution(
 	epoch uint64,
 ) (*StakeDistribution, error) {
 	snapshots, err := lv.ls.db.Metadata().GetPoolStakeSnapshotsByEpoch(
 		epoch,
-		"go",
+		"mark",
 		(*lv.txn).Metadata(),
 	)
 	if err != nil {
@@ -598,15 +599,16 @@ func (lv *LedgerView) GetStakeDistribution(
 	return dist, nil
 }
 
-// GetPoolStake returns the stake for a specific pool from the "go" snapshot.
-// Returns 0 if the pool has no stake in the snapshot.
+// GetPoolStake returns the stake for a specific pool from the snapshot.
+// Returns 0 if the pool has no stake in the snapshot. Callers pass
+// currentEpoch-2 so the epoch offset accounts for Mark→Set→Go rotation.
 func (lv *LedgerView) GetPoolStake(
 	epoch uint64,
 	poolKeyHash []byte,
 ) (uint64, error) {
 	snapshot, err := lv.ls.db.Metadata().GetPoolStakeSnapshot(
 		epoch,
-		"go",
+		"mark",
 		poolKeyHash,
 		(*lv.txn).Metadata(),
 	)
@@ -619,11 +621,12 @@ func (lv *LedgerView) GetPoolStake(
 	return uint64(snapshot.TotalStake), nil
 }
 
-// GetTotalActiveStake returns the total active stake from the "go" snapshot.
+// GetTotalActiveStake returns the total active stake from the snapshot.
+// Callers pass currentEpoch-2 so the epoch offset accounts for rotation.
 func (lv *LedgerView) GetTotalActiveStake(epoch uint64) (uint64, error) {
 	return lv.ls.db.Metadata().GetTotalActiveStake(
 		epoch,
-		"go",
+		"mark",
 		(*lv.txn).Metadata(),
 	)
 }

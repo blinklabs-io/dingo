@@ -74,7 +74,7 @@ func (d *MetadataStoreMysql) SetDrep(
 	tmpItem := models.Drep{
 		Credential: cred,
 		AddedSlot:  slot,
-		AnchorUrl:  url,
+		AnchorURL:  url,
 		AnchorHash: hash,
 		Active:     active,
 	}
@@ -257,7 +257,7 @@ func (d *MetadataStoreMysql) GetCommitteeActiveCount(
 // drepCertRecord holds fields from a DRep certificate for batch processing
 // during DRep state restoration.
 type drepCertRecord struct {
-	anchorUrl  string
+	anchorURL  string
 	anchorHash []byte
 	addedSlot  uint64
 	certIndex  uint32
@@ -293,7 +293,7 @@ func batchFetchDrepCerts(
 	{
 		type result struct {
 			DrepCredential []byte
-			AnchorUrl      string
+			AnchorURL      string `gorm:"column:anchor_url"`
 			AnchorHash     []byte
 			AddedSlot      uint64
 			CertIndex      uint32
@@ -318,7 +318,7 @@ func batchFetchDrepCerts(
 		for _, r := range records {
 			key := string(r.DrepCredential)
 			cache.registration[key] = drepCertRecord{
-				anchorUrl:  r.AnchorUrl,
+				anchorURL:  r.AnchorURL,
 				anchorHash: r.AnchorHash,
 				addedSlot:  r.AddedSlot,
 				certIndex:  r.CertIndex,
@@ -365,7 +365,7 @@ func batchFetchDrepCerts(
 	{
 		type result struct {
 			Credential []byte
-			AnchorUrl  string
+			AnchorURL  string `gorm:"column:anchor_url"`
 			AnchorHash []byte
 			AddedSlot  uint64
 			CertIndex  uint32
@@ -390,7 +390,7 @@ func batchFetchDrepCerts(
 		for _, r := range records {
 			key := string(r.Credential)
 			cache.update[key] = drepCertRecord{
-				anchorUrl:  r.AnchorUrl,
+				anchorURL:  r.AnchorURL,
 				anchorHash: r.AnchorHash,
 				addedSlot:  r.AddedSlot,
 				certIndex:  r.CertIndex,
@@ -487,7 +487,7 @@ func (d *MetadataStoreMysql) RestoreDrepStateAtSlot(
 		// Determine the correct state by processing certificates in order.
 		// Start with registration state (DRep is active with registration's anchor data)
 		active := true
-		anchorUrl := lastReg.anchorUrl
+		anchorURL := lastReg.anchorURL
 		anchorHash := lastReg.anchorHash
 		latestSlot := lastReg.addedSlot
 		latestCertIndex := lastReg.certIndex
@@ -501,7 +501,7 @@ func (d *MetadataStoreMysql) RestoreDrepStateAtSlot(
 				active = false
 				latestSlot = lastDereg.addedSlot
 				latestCertIndex = lastDereg.certIndex
-				anchorUrl = ""
+				anchorURL = ""
 				anchorHash = nil
 				latestWasDereg = true
 			}
@@ -515,7 +515,7 @@ func (d *MetadataStoreMysql) RestoreDrepStateAtSlot(
 			lastUpdate := cache.update[key]
 			if lastUpdate.addedSlot > latestSlot ||
 				(lastUpdate.addedSlot == latestSlot && lastUpdate.certIndex > latestCertIndex) {
-				anchorUrl = lastUpdate.anchorUrl
+				anchorURL = lastUpdate.anchorURL
 				anchorHash = lastUpdate.anchorHash
 				latestSlot = lastUpdate.addedSlot
 			}
@@ -526,7 +526,7 @@ func (d *MetadataStoreMysql) RestoreDrepStateAtSlot(
 		// reliably reconstruct these values from certificate data alone
 		// during rollback. They will be recalculated as new activity occurs.
 		if result := db.Model(&drep).Updates(map[string]any{
-			"anchor_url":          anchorUrl,
+			"anchor_url":          anchorURL,
 			"anchor_hash":         anchorHash,
 			"active":              active,
 			"added_slot":          latestSlot,

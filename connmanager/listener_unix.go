@@ -29,7 +29,7 @@ func socketControl(network, address string, c syscall.RawConn) error {
 	var innerErr error
 	err := c.Control(func(fd uintptr) {
 		err := unix.SetsockoptInt(
-			int(fd),
+			int(fd), //nolint:gosec // fd fits in int on all supported platforms
 			unix.SOL_SOCKET,
 			unix.SO_REUSEADDR,
 			1,
@@ -39,7 +39,7 @@ func socketControl(network, address string, c syscall.RawConn) error {
 			return
 		}
 		err = unix.SetsockoptInt(
-			int(fd),
+			int(fd), //nolint:gosec // fd fits in int on all supported platforms
 			unix.SOL_SOCKET,
 			unix.SO_REUSEPORT,
 			1,

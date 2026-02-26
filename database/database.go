@@ -16,12 +16,14 @@ package database
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 
 	"github.com/blinklabs-io/dingo/database/plugin"
 	"github.com/blinklabs-io/dingo/database/plugin/blob"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
+	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -38,7 +40,8 @@ type Config struct {
 	BlobPlugin     string
 	DataDir        string
 	MetadataPlugin string
-	MaxConnections int // Connection pool size for metadata plugin (should match DatabaseWorkers)
+	MaxConnections int    // Connection pool size for metadata plugin (should match DatabaseWorkers)
+	StorageMode    string // "core" or "api"
 	CacheConfig    CborCacheConfig
 }
 
@@ -137,6 +140,9 @@ func New(
 	if configCopy.MetadataPlugin == "" {
 		configCopy.MetadataPlugin = DefaultConfig.MetadataPlugin
 	}
+	if configCopy.StorageMode == "" {
+		configCopy.StorageMode = types.StorageModeCore
+	}
 	// Handle DataDir configuration for plugins:
 	// - nil config → DefaultConfig.DataDir (".dingo" for persistence)
 	// - empty DataDir → in-memory storage
@@ -174,6 +180,20 @@ func New(
 			return nil, err
 		}
 	}
+	// Set storage-mode for metadata plugin
+	err = plugin.SetPluginOption(
+		plugin.PluginTypeMetadata,
+		configCopy.MetadataPlugin,
+		"storage-mode",
+		configCopy.StorageMode,
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"setting storage-mode for metadata plugin %q: %w",
+			configCopy.MetadataPlugin,
+			err,
+		)
+	}
 	blobDb, err := blob.New(
 		configCopy.BlobPlugin,
 	)
@@ -207,6 +227,11 @@ func New(
 		return db, err
 	}
 	return db, nil
+}
+
+// StorageMode returns the configured storage mode ("core" or "api").
+func (d *Database) StorageMode() string {
+	return d.config.StorageMode
 }
 
 // CborCache returns the tiered CBOR cache for accessing cached CBOR data.

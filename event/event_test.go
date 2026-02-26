@@ -20,9 +20,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stretchr/testify/require"
-
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/stretchr/testify/require"
 )
 
 func TestEventBusSingleSubscriber(t *testing.T) {
@@ -236,20 +235,21 @@ func TestPublishNoGoroutineLeak(t *testing.T) {
 
 	// Allow the runtime to settle (async workers, etc.)
 	runtime.GC()
-	time.Sleep(50 * time.Millisecond)
+	runtime.Gosched()
 	goroutinesBefore := runtime.NumGoroutine()
 
-	// Publish many more events than the channel buffer can hold (buffer = 20).
-	// With the old publishWithTimeout approach, each publish beyond the buffer
-	// would spawn a goroutine that could never complete.
-	const eventCount = 200
+	// Publish many more events than the channel buffer can hold
+	// (buffer = EventQueueSize). With the old publishWithTimeout
+	// approach, each publish beyond the buffer would spawn a
+	// goroutine that could never complete.
+	const eventCount = event.EventQueueSize + 10
 	for i := range eventCount {
 		eb.Publish(testEvtType, event.NewEvent(testEvtType, i))
 	}
 
 	// Give any hypothetical leaked goroutines a moment to accumulate
 	runtime.GC()
-	time.Sleep(50 * time.Millisecond)
+	runtime.Gosched()
 	goroutinesAfter := runtime.NumGoroutine()
 
 	// With the fix, Publish returns immediately via non-blocking send.
@@ -259,7 +259,9 @@ func TestPublishNoGoroutineLeak(t *testing.T) {
 		goroutinesBefore,
 		goroutinesAfter,
 		5,
-		"goroutine count should not grow significantly after publishing to a blocked subscriber (before=%d, after=%d)",
+		"goroutine count should not grow significantly after "+
+			"publishing to a blocked subscriber "+
+			"(before=%d, after=%d)",
 		goroutinesBefore,
 		goroutinesAfter,
 	)
@@ -278,24 +280,35 @@ func TestPublishAsyncNoGoroutineLeak(t *testing.T) {
 
 	// Allow the runtime to settle
 	runtime.GC()
-	time.Sleep(50 * time.Millisecond)
+	runtime.Gosched()
 	goroutinesBefore := runtime.NumGoroutine()
 
 	// PublishAsync many events; async workers will attempt to deliver them
 	// to the blocked subscriber via Publish -> Deliver.
-	const eventCount = 200
+	const eventCount = event.EventQueueSize + 10
 	for i := range eventCount {
 		eb.PublishAsync(testEvtType, event.NewEvent(testEvtType, i))
 	}
 
-	// Wait for async workers to process the queued events
+	// Wait for async workers to process the queued events.
+	// We probe by attempting a single PublishAsync; a successful
+	// enqueue means the workers have drained at least one slot.
+	// The flag ensures we stop probing after the first success
+	// so the callback is side-effect-free on subsequent calls.
+	probed := false
 	require.Eventually(t, func() bool {
-		// Publish one more and check if the queue has capacity (workers drained it)
-		return eb.PublishAsync(testEvtType, event.NewEvent(testEvtType, -1))
+		if probed {
+			return true
+		}
+		if eb.PublishAsync(testEvtType, event.NewEvent(testEvtType, -1)) {
+			probed = true
+			return true
+		}
+		return false
 	}, 5*time.Second, 10*time.Millisecond, "async workers should drain the queue")
 
 	runtime.GC()
-	time.Sleep(50 * time.Millisecond)
+	runtime.Gosched()
 	goroutinesAfter := runtime.NumGoroutine()
 
 	require.InDelta(
@@ -303,7 +316,9 @@ func TestPublishAsyncNoGoroutineLeak(t *testing.T) {
 		goroutinesBefore,
 		goroutinesAfter,
 		5,
-		"goroutine count should not grow after async publishing to a blocked subscriber (before=%d, after=%d)",
+		"goroutine count should not grow after async "+
+			"publishing to a blocked subscriber "+
+			"(before=%d, after=%d)",
 		goroutinesBefore,
 		goroutinesAfter,
 	)
@@ -319,7 +334,7 @@ func TestPublishDropsEventsOnFullBuffer(t *testing.T) {
 	// Subscribe but never consume events.
 	_, subCh := eb.Subscribe(testEvtType)
 
-	// Fill the buffer (EventQueueSize = 20)
+	// Fill the buffer (EventQueueSize = 1000)
 	for i := range event.EventQueueSize {
 		eb.Publish(testEvtType, event.NewEvent(testEvtType, i))
 	}

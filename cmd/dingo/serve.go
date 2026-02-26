@@ -15,9 +15,11 @@
 package main
 
 import (
+	"fmt"
 	"log/slog"
 	"os"
 
+	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/internal/node"
 	"github.com/spf13/cobra"
@@ -25,11 +27,52 @@ import (
 
 func serveRun(_ *cobra.Command, _ []string, cfg *config.Config) {
 	logger := commonRun()
+
+	// Check for an in-progress sync. If the "sync_status" key in
+	// the sync_state table holds a non-empty value, a previous sync
+	// did not complete. The user must finish (or re-run) the sync
+	// before starting the node.
+	if err := checkSyncState(cfg, logger); err != nil {
+		slog.Error(err.Error())
+		os.Exit(1)
+	}
+
 	// Run node
 	if err := node.Run(cfg, logger); err != nil {
 		slog.Error(err.Error())
 		os.Exit(1)
 	}
+}
+
+func checkSyncState(
+	cfg *config.Config,
+	logger *slog.Logger,
+) error {
+	db, err := database.New(&database.Config{
+		DataDir:        cfg.DatabasePath,
+		Logger:         logger,
+		BlobPlugin:     cfg.BlobPlugin,
+		MetadataPlugin: cfg.MetadataPlugin,
+		MaxConnections: 1,
+	})
+	if err != nil {
+		return fmt.Errorf("opening database: %w", err)
+	}
+	defer db.Close()
+
+	val, err := db.GetSyncState("sync_status", nil)
+	if err != nil {
+		return fmt.Errorf("checking sync state: %w", err)
+	}
+	if val == "" {
+		return nil
+	}
+	return fmt.Errorf(
+		"incomplete sync detected (sync_status=%q). "+
+			"Run 'dingo sync' (or 'dingo sync --mithril' for "+
+			"Mithril bootstrap) to resume before starting the node",
+		val,
+	)
 }
 
 func serveCommand() *cobra.Command {

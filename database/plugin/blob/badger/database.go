@@ -201,7 +201,7 @@ func New(opts ...BlobStoreBadgerOptionFunc) (*BlobStoreBadger, error) {
 				return nil, fmt.Errorf("failed to read data dir: %w", err)
 			}
 			// Create data directory
-			if err := os.MkdirAll(db.dataDir, 0o755); err != nil {
+			if err := os.MkdirAll(db.dataDir, 0o700); err != nil {
 				return nil, fmt.Errorf("failed to create data dir: %w", err)
 			}
 		}

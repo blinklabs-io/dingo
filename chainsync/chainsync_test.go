@@ -20,14 +20,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/chainsync"
+	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
-
-	"github.com/blinklabs-io/dingo/chainsync"
-	"github.com/blinklabs-io/dingo/event"
-	"github.com/blinklabs-io/dingo/internal/test/testutil"
 )
 
 // newTestConnId creates a unique ConnectionId for testing by

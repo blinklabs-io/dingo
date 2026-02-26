@@ -40,8 +40,16 @@ type MetadataStore interface {
 	// the transaction is the final parameter.
 	SetCommitTimestamp(int64, types.Txn) error
 
-	// Transaction creates a new metadata transaction.
+	// Transaction creates a new metadata transaction on the write
+	// connection pool. Use ReadTransaction for read-only access to
+	// avoid contending with writers.
 	Transaction() types.Txn
+
+	// ReadTransaction creates a read-only metadata transaction using
+	// the read connection pool (when available). This avoids blocking
+	// on the write connection, which is critical for operations like
+	// FindIntersect that must complete within protocol timeouts.
+	ReadTransaction() types.Txn
 
 	// Ledger state methods
 
@@ -49,6 +57,44 @@ type MetadataStore interface {
 	AddUtxos(
 		[]models.UtxoSlot,
 		types.Txn,
+	) error
+
+	// Bulk import methods (ledger state restore from snapshot)
+
+	// ImportUtxos inserts UTxOs in bulk, ignoring duplicates.
+	ImportUtxos([]models.Utxo, types.Txn) error
+
+	// ImportAccount upserts an account (insert or update delegation
+	// fields on conflict).
+	ImportAccount(*models.Account, types.Txn) error
+
+	// ImportPool upserts a pool and creates a registration record.
+	ImportPool(
+		*models.Pool,
+		*models.PoolRegistration,
+		types.Txn,
+	) error
+
+	// ImportDrep upserts a DRep and creates a registration record.
+	ImportDrep(
+		*models.Drep,
+		*models.RegistrationDrep,
+		types.Txn,
+	) error
+
+	// GetImportCheckpoint retrieves the checkpoint for a given
+	// import key (e.g., "{digest}:{slot}"). Returns nil if no
+	// checkpoint exists.
+	GetImportCheckpoint(
+		importKey string,
+		txn types.Txn,
+	) (*models.ImportCheckpoint, error)
+
+	// SetImportCheckpoint creates or updates a checkpoint for
+	// the given import key with the completed phase.
+	SetImportCheckpoint(
+		checkpoint *models.ImportCheckpoint,
+		txn types.Txn,
 	) error
 
 	// GetPoolRegistrations retrieves all registration certificates for a pool.
@@ -279,6 +325,17 @@ type MetadataStore interface {
 		txn types.Txn,
 	) error
 
+	// SetGenesisStaking stores genesis pool registrations and stake
+	// delegations from the shelley-genesis.json staking section.
+	// pools maps pool key hash (hex) to its registration certificate.
+	// stakeDelegations maps staking credential hash (hex) to pool key hash (hex).
+	SetGenesisStaking(
+		pools map[string]lcommon.PoolRegistrationCertificate,
+		stakeDelegations map[string]string,
+		blockHash []byte,
+		txn types.Txn,
+	) error
+
 	// Helper methods
 
 	// DeleteBlockNoncesBeforeSlot removes block nonces older than the given slot.
@@ -310,6 +367,11 @@ type MetadataStore interface {
 	// GetEpochs retrieves all epochs.
 	GetEpochs(types.Txn) ([]models.Epoch, error)
 
+	// DeleteEpochsAfterSlot removes all epoch entries whose start slot
+	// is after the given slot. Used during chain rollback to discard
+	// epoch nonces that were computed from rolled-back blocks.
+	DeleteEpochsAfterSlot(uint64, types.Txn) error
+
 	// GetUtxosAddedAfterSlot retrieves all UTxOs added after the given slot.
 	GetUtxosAddedAfterSlot(uint64, types.Txn) ([]models.Utxo, error)
 
@@ -317,7 +379,11 @@ type MetadataStore interface {
 	GetUtxosByAddress(ledger.Address, types.Txn) ([]models.Utxo, error)
 
 	// GetUtxosByAddressAtSlot retrieves all UTxOs for a given address at a specific slot.
-	GetUtxosByAddressAtSlot(lcommon.Address, uint64, types.Txn) ([]models.Utxo, error)
+	GetUtxosByAddressAtSlot(
+		lcommon.Address,
+		uint64,
+		types.Txn,
+	) ([]models.Utxo, error)
 
 	// GetUtxosByAssets retrieves all UTxOs that contain the specified assets.
 	// Pass nil for assetName to match all assets under the policy, or empty []byte{} to match assets with empty names.
@@ -518,6 +584,23 @@ type MetadataStore interface {
 	// This is used during chain rollbacks.
 	DeleteConstitutionsAfterSlot(uint64, types.Txn) error
 
+	// Network state methods
+
+	// SetNetworkState stores the treasury and reserves balances.
+	SetNetworkState(
+		treasury, reserves uint64,
+		slot uint64,
+		txn types.Txn,
+	) error
+
+	// GetNetworkState retrieves the most recent network state.
+	GetNetworkState(types.Txn) (*models.NetworkState, error)
+
+	// DeleteNetworkStateAfterSlot removes network state records
+	// added after the given slot. This is used during chain
+	// rollbacks.
+	DeleteNetworkStateAfterSlot(uint64, types.Txn) error
+
 	// Governance rollback methods
 
 	// DeleteGovernanceProposalsAfterSlot removes proposals added after the given slot
@@ -559,6 +642,21 @@ type MetadataStore interface {
 	// DeletePParamUpdatesAfterSlot removes protocol parameter update records
 	// added after the given slot.
 	DeletePParamUpdatesAfterSlot(uint64, types.Txn) error
+
+	// Sync state methods (ephemeral key-value for one-time operations)
+
+	// GetSyncState retrieves a sync state value by key.
+	// Returns empty string if the key does not exist.
+	GetSyncState(string, types.Txn) (string, error)
+
+	// SetSyncState stores or updates a sync state value.
+	SetSyncState(string, string, types.Txn) error
+
+	// DeleteSyncState removes a sync state key.
+	DeleteSyncState(string, types.Txn) error
+
+	// ClearSyncState removes all sync state entries.
+	ClearSyncState(types.Txn) error
 }
 
 // BulkLoadOptimizer is an optional interface that metadata stores can

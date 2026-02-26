@@ -34,6 +34,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/event"
 )
 
@@ -1679,7 +1680,7 @@ func TestMempool_Eviction_TriggersAtWatermark(t *testing.T) {
 
 	// Trigger eviction
 	targetBytes := evictionThreshold - txSize
-	m.evictOldest(targetBytes)
+	m.evictOldestLocked(targetBytes)
 
 	// Verify first TX was evicted
 	require.Equal(
@@ -1717,7 +1718,7 @@ func TestMempool_Eviction_OldestTxsEvictedFirst(t *testing.T) {
 
 	m.Lock()
 	m.consumersMutex.Lock()
-	m.evictOldest(200)
+	m.evictOldestLocked(200)
 
 	// Should have evicted tx-sized-0, tx-sized-1, tx-sized-2
 	require.Equal(
@@ -1811,7 +1812,7 @@ func TestMempool_Eviction_CounterIncrements(t *testing.T) {
 	// Evict 3 TXs
 	m.Lock()
 	m.consumersMutex.Lock()
-	m.evictOldest(200)
+	m.evictOldestLocked(200)
 	m.consumersMutex.Unlock()
 	m.Unlock()
 
@@ -1930,13 +1931,13 @@ func TestMempool_Eviction_NoEvictionBelowWatermark(
 }
 
 func TestMempool_Eviction_EmptyMempoolSafe(t *testing.T) {
-	// Calling evictOldest on an empty mempool should not panic
+	// Calling evictOldestLocked on an empty mempool should not panic
 	m := newTestMempoolWithCapacity(t, 1000, 0.50, 0.90)
 	defer m.Stop(context.Background())
 
 	m.Lock()
 	m.consumersMutex.Lock()
-	m.evictOldest(0)
+	m.evictOldestLocked(0)
 	m.consumersMutex.Unlock()
 	m.Unlock()
 
@@ -2547,6 +2548,294 @@ func TestMempool_TTL_RemoveEventsEmittedOnExpiry(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal(
 			"timeout waiting for RemoveTransactionEvent on expiry",
+		)
+	}
+}
+
+// =============================================================================
+// MEM-03/MEM-04 Deadlock Prevention Tests
+// =============================================================================
+
+// TestMempool_MEM03_SubscriberAccessesMempoolDuringAdd verifies that an
+// event subscriber can safely read the mempool when a Publish is triggered
+// by AddTransaction. Before the MEM-03 fix, Publish was called while holding
+// the mempool write lock, so any subscriber that tried to read the mempool
+// would deadlock.
+func TestMempool_MEM03_SubscriberAccessesMempoolDuringAdd(
+	t *testing.T,
+) {
+	validator := newMockValidator()
+	m := newTestMempoolWithValidator(t, validator)
+	defer m.Stop(context.Background())
+
+	// Subscribe and have the handler read the mempool (requires RLock)
+	var subscriberSawTx atomic.Int32
+	m.eventBus.SubscribeFunc(
+		AddTransactionEventType,
+		func(evt event.Event) {
+			// This would deadlock under the old code because
+			// AddTransaction held the write lock during Publish.
+			txs := m.Transactions()
+			if len(txs) > 0 {
+				subscriberSawTx.Add(1)
+			}
+		},
+	)
+
+	// Add a real transaction
+	txBytes := getTestTxBytes(t)
+	err := m.AddTransaction(uint(conway.EraIdConway), txBytes)
+	require.NoError(t, err)
+
+	// Wait for subscriber to process the event
+	require.Eventually(t, func() bool {
+		return subscriberSawTx.Load() >= 1
+	}, 2*time.Second, 10*time.Millisecond,
+		"subscriber should have seen the transaction",
+	)
+}
+
+// TestMempool_MEM03_SubscriberAccessesMempoolDuringRemove verifies that
+// an event subscriber can safely read the mempool when a Publish is
+// triggered by RemoveTransaction.
+func TestMempool_MEM03_SubscriberAccessesMempoolDuringRemove(
+	t *testing.T,
+) {
+	m := newTestMempool(t)
+	defer m.Stop(context.Background())
+
+	// Add some transactions
+	addMockTransactions(t, m, 3)
+
+	// Subscribe and have the handler read the mempool
+	var subscriberCalled atomic.Int32
+	m.eventBus.SubscribeFunc(
+		RemoveTransactionEventType,
+		func(evt event.Event) {
+			// This would deadlock under the old code because
+			// removeTransactionByIndexLocked held both locks during Publish.
+			txs := m.Transactions()
+			_ = txs
+			subscriberCalled.Add(1)
+		},
+	)
+
+	// Remove a transaction
+	m.RemoveTransaction("tx-hash-1")
+
+	// Wait for subscriber to process the event
+	require.Eventually(t, func() bool {
+		return subscriberCalled.Load() >= 1
+	}, 2*time.Second, 10*time.Millisecond,
+		"subscriber should have been called",
+	)
+}
+
+// TestMempool_MEM04_ConcurrentAccessDuringRevalidation verifies that
+// other goroutines can read/write the mempool while processChainEvents
+// is re-validating transactions. Before the MEM-04 fix, the write lock
+// was held during the entire re-validation loop.
+func TestMempool_MEM04_ConcurrentAccessDuringRevalidation(
+	t *testing.T,
+) {
+	validator := newMockValidator()
+	m := newTestMempoolWithValidator(t, validator)
+	defer m.Stop(context.Background())
+
+	// Add transactions
+	addMockTransactions(t, m, 10)
+
+	// Start concurrent readers/writers
+	var wg sync.WaitGroup
+	done := make(chan struct{})
+	var readsCompleted atomic.Int32
+
+	// Reader goroutine: continuously reads mempool
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-done:
+				return
+			default:
+				txs := m.Transactions()
+				_ = txs
+				readsCompleted.Add(1)
+			}
+		}
+	}()
+
+	// Writer goroutine: continuously adds/removes
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; ; i++ {
+			select {
+			case <-done:
+				return
+			default:
+				m.Lock()
+				tx := &MempoolTransaction{
+					Hash:     fmt.Sprintf("revalidation-tx-%d", i),
+					Cbor:     fmt.Appendf(nil, "cbor-%d", i),
+					Type:     uint(conway.EraIdConway),
+					LastSeen: time.Now(),
+				}
+				m.transactions = append(m.transactions, tx)
+				m.txByHash[tx.Hash] = tx
+				m.Unlock()
+				time.Sleep(time.Millisecond)
+			}
+		}
+	}()
+
+	// Trigger chain update events to cause re-validation
+	for range 5 {
+		m.eventBus.Publish(
+			chain.ChainUpdateEventType,
+			event.NewEvent(chain.ChainUpdateEventType, nil),
+		)
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// Let things run concurrently
+	time.Sleep(100 * time.Millisecond)
+	close(done)
+
+	waitCh := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(waitCh)
+	}()
+
+	select {
+	case <-waitCh:
+		t.Logf(
+			"Reads completed during re-validation: %d",
+			readsCompleted.Load(),
+		)
+		// Under the old code with write lock held during validation,
+		// reads would be blocked. With the fix, reads should proceed.
+		assert.Greater(
+			t, readsCompleted.Load(), int32(0),
+			"reads should complete during re-validation",
+		)
+	case <-time.After(5 * time.Second):
+		t.Fatal("deadlock: concurrent access blocked during re-validation")
+	}
+}
+
+// TestMempool_MEM03_NoDeadlockOnConcurrentPublish exercises the scenario
+// where multiple goroutines trigger event publishing concurrently to ensure
+// no deadlock arises from the deferred-publish pattern.
+func TestMempool_MEM03_NoDeadlockOnConcurrentPublish(
+	t *testing.T,
+) {
+	m := newTestMempool(t)
+	defer m.Stop(context.Background())
+
+	// Subscribe to both event types with handlers that access the mempool
+	var addEvents atomic.Int32
+	var removeEvents atomic.Int32
+
+	m.eventBus.SubscribeFunc(
+		AddTransactionEventType,
+		func(evt event.Event) {
+			// Access mempool during event handling
+			_, _ = m.GetTransaction("any")
+			addEvents.Add(1)
+		},
+	)
+	m.eventBus.SubscribeFunc(
+		RemoveTransactionEventType,
+		func(evt event.Event) {
+			// Access mempool during event handling
+			_ = m.Transactions()
+			removeEvents.Add(1)
+		},
+	)
+
+	var wg sync.WaitGroup
+	done := make(chan struct{})
+
+	// Goroutines adding transactions via direct mock injection
+	for i := range 3 {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			for j := 0; ; j++ {
+				select {
+				case <-done:
+					return
+				default:
+					hash := fmt.Sprintf("pub-tx-%d-%d", id, j)
+					m.Lock()
+					m.consumersMutex.Lock()
+					tx := &MempoolTransaction{
+						Hash:     hash,
+						Cbor:     []byte(hash),
+						Type:     uint(conway.EraIdConway),
+						LastSeen: time.Now(),
+					}
+					m.transactions = append(m.transactions, tx)
+					m.txByHash[tx.Hash] = tx
+					m.currentSizeBytes += int64(len(tx.Cbor))
+					m.metrics.txsInMempool.Inc()
+					m.consumersMutex.Unlock()
+					m.Unlock()
+					// Publish add event outside locks
+					m.eventBus.Publish(
+						AddTransactionEventType,
+						event.NewEvent(
+							AddTransactionEventType,
+							AddTransactionEvent{Hash: hash},
+						),
+					)
+					time.Sleep(time.Millisecond)
+				}
+			}
+		}(i)
+	}
+
+	// Goroutines removing transactions
+	for i := range 2 {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			for j := 0; ; j++ {
+				select {
+				case <-done:
+					return
+				default:
+					hash := fmt.Sprintf("pub-tx-%d-%d", id, j)
+					m.RemoveTransaction(hash)
+					time.Sleep(2 * time.Millisecond)
+				}
+			}
+		}(i)
+	}
+
+	// Run for 200ms
+	time.Sleep(200 * time.Millisecond)
+	close(done)
+
+	waitCh := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(waitCh)
+	}()
+
+	select {
+	case <-waitCh:
+		t.Logf(
+			"Add events: %d, Remove events: %d",
+			addEvents.Load(),
+			removeEvents.Load(),
+		)
+	case <-time.After(5 * time.Second):
+		t.Fatal(
+			"deadlock detected during concurrent publish operations",
 		)
 	}
 }

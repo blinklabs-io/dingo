@@ -16,11 +16,12 @@ package dingo
 
 import (
 	"context"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
+	"strconv"
 	"sync"
 	"time"
 
@@ -126,6 +127,7 @@ func (n *Node) Run(ctx context.Context) error {
 		BlobPlugin:     n.config.blobPlugin,
 		MetadataPlugin: n.config.metadataPlugin,
 		MaxConnections: n.config.DatabaseWorkerPoolConfig.WorkerPoolSize,
+		StorageMode:    string(n.config.storageMode),
 	}
 	db, err := database.New(dbConfig)
 	if db == nil {
@@ -178,6 +180,7 @@ func (n *Node) Run(ctx context.Context) error {
 		IntersectTip:    n.config.intersectTip,
 		IntersectPoints: n.config.intersectPoints,
 		PromRegistry:    n.config.promRegistry,
+		EnableLeios:     n.config.runMode == runModeLeios,
 	})
 	// Load state
 	state, err := ledger.NewLedgerState(
@@ -198,6 +201,15 @@ func (n *Node) Run(ctx context.Context) error {
 					return n.chainsyncState.GetClientConnId()
 				}
 				return nil
+			},
+			ConnectionSwitchFunc: func() {
+				// Clear the header dedup cache so the new connection
+				// can re-deliver blocks from the intersection without
+				// them being filtered as duplicates from the old
+				// connection.
+				if n.chainsyncState != nil {
+					n.chainsyncState.ClearSeenHeaders()
+				}
 			},
 			FatalErrorFunc: func(err error) {
 				n.config.logger.Error(
@@ -242,7 +254,14 @@ func (n *Node) Run(ctx context.Context) error {
 		n.eventBus,
 		n.config.logger,
 	)
-	if err := n.snapshotMgr.Start(); err != nil { //nolint:contextcheck
+	// Capture genesis stake snapshot (epoch 0) so leader election works at epoch 2
+	if err := n.snapshotMgr.CaptureGenesisSnapshot(ctx); err != nil {
+		n.config.logger.Warn(
+			"failed to capture genesis snapshot",
+			"error", err,
+		)
+	}
+	if err := n.snapshotMgr.Start(n.ctx); err != nil { //nolint:contextcheck
 		return fmt.Errorf("failed to start snapshot manager: %w", err)
 	}
 	started = append(started, func() { _ = n.snapshotMgr.Stop() })
@@ -364,10 +383,21 @@ func (n *Node) Run(ctx context.Context) error {
 		},
 	)
 	n.ouroboros.ConnManager = n.connManager
-	// Subscribe to connection closed events
+	// Subscribe ouroboros to chainsync resync events from the
+	// ledger. This replaces the previous ChainsyncResyncFunc
+	// closure so all stop/restart orchestration lives in the
+	// ouroboros/chainsync component. Registered after ConnManager
+	// is wired so the handler can look up connections.
+	n.ouroboros.SubscribeChainsyncResync(n.ctx) //nolint:contextcheck
+	// Subscribe to connection events BEFORE starting listeners so that
+	// inbound connections from peers that connect immediately are not lost.
 	n.eventBus.SubscribeFunc(
 		connmanager.ConnectionClosedEventType,
 		n.ouroboros.HandleConnClosedEvent,
+	)
+	n.eventBus.SubscribeFunc(
+		connmanager.InboundConnectionEventType,
+		n.ouroboros.HandleInboundConnEvent,
 	)
 	// Start listeners
 	if err := n.connManager.Start(n.ctx); err != nil { //nolint:contextcheck
@@ -384,7 +414,11 @@ func (n *Node) Run(ctx context.Context) error {
 	})
 	// Configure peer governor
 	// Create ledger peer provider for discovering peers from stake pool relays
-	ledgerPeerProvider, err := ledger.NewLedgerPeerProvider(n.ledgerState, n.db, n.eventBus)
+	ledgerPeerProvider, err := ledger.NewLedgerPeerProvider(
+		n.ledgerState,
+		n.db,
+		n.eventBus,
+	)
 	if err != nil {
 		return fmt.Errorf("failed to create ledger peer provider: %w", err)
 	}
@@ -426,28 +460,33 @@ func (n *Node) Run(ctx context.Context) error {
 		return err
 	}
 	started = append(started, func() { n.peerGov.Stop() })
-	// Configure UTxO RPC
-	n.utxorpc = utxorpc.NewUtxorpc(
-		utxorpc.UtxorpcConfig{
-			Logger:      n.config.logger,
-			EventBus:    n.eventBus,
-			LedgerState: n.ledgerState,
-			Mempool:     n.mempool,
-			Port:        n.config.utxorpcPort,
-		},
-	)
-	if err := n.utxorpc.Start(n.ctx); err != nil { //nolint:contextcheck
-		return err
-	}
-	started = append(started, func() { //nolint:contextcheck
-		if err := n.utxorpc.Stop(context.Background()); err != nil {
-			n.config.logger.Error(
-				"failed to stop utxorpc during cleanup",
-				"error",
-				err,
-			)
+	// Configure UTxO RPC (only when port is configured)
+	if n.config.utxorpcPort > 0 {
+		n.utxorpc = utxorpc.NewUtxorpc(
+			utxorpc.UtxorpcConfig{
+				Logger:          n.config.logger,
+				EventBus:        n.eventBus,
+				LedgerState:     n.ledgerState,
+				Mempool:         n.mempool,
+				Host:            n.config.bindAddr,
+				Port:            n.config.utxorpcPort,
+				TlsCertFilePath: n.config.tlsCertFilePath,
+				TlsKeyFilePath:  n.config.tlsKeyFilePath,
+			},
+		)
+		if err := n.utxorpc.Start(n.ctx); err != nil { //nolint:contextcheck
+			return fmt.Errorf("starting utxorpc: %w", err)
 		}
-	})
+		started = append(started, func() { //nolint:contextcheck
+			if err := n.utxorpc.Stop(context.Background()); err != nil {
+				n.config.logger.Error(
+					"failed to stop utxorpc during cleanup",
+					"error",
+					err,
+				)
+			}
+		})
+	}
 
 	n.bark = bark.NewBark(
 		bark.BarkConfig{
@@ -465,18 +504,22 @@ func (n *Node) Run(ctx context.Context) error {
 		}
 	})
 
-	// Configure Blockfrost API (if listen address is set)
-	if n.config.blockfrostListenAddress != "" {
+	// Configure Blockfrost API (if port is set)
+	if n.config.blockfrostPort > 0 {
+		listenAddr := net.JoinHostPort(
+			n.config.bindAddr,
+			strconv.FormatUint(uint64(n.config.blockfrostPort), 10),
+		)
 		adapter := blockfrost.NewNodeAdapter(n.ledgerState)
 		n.blockfrostAPI = blockfrost.New(
 			blockfrost.BlockfrostConfig{
-				ListenAddress: n.config.blockfrostListenAddress,
+				ListenAddress: listenAddr,
 			},
 			adapter,
 			n.config.logger,
 		)
 		if err := n.blockfrostAPI.Start(n.ctx); err != nil { //nolint:contextcheck
-			return err
+			return fmt.Errorf("starting blockfrost API: %w", err)
 		}
 		started = append(started, func() { //nolint:contextcheck
 			if err := n.blockfrostAPI.Stop(context.Background()); err != nil {
@@ -489,8 +532,8 @@ func (n *Node) Run(ctx context.Context) error {
 		})
 	}
 
-	// Configure Mesh API (if listen address is set)
-	if n.config.meshListenAddress != "" {
+	// Configure Mesh API (if port is set)
+	if n.config.meshPort > 0 {
 		var genesisHash string
 		var genesisStartTimeSec int64
 		if nc := n.config.cardanoNodeConfig; nc != nil {
@@ -505,17 +548,20 @@ func (n *Node) Run(ctx context.Context) error {
 					"(Byron genesis hash and Shelley genesis)",
 			)
 		}
+		listenAddr := net.JoinHostPort(
+			n.config.bindAddr,
+			strconv.FormatUint(uint64(n.config.meshPort), 10),
+		)
 		var meshErr error
 		n.meshAPI, meshErr = mesh.NewServer(
 			mesh.ServerConfig{
-				Logger:      n.config.logger,
-				EventBus:    n.eventBus,
-				LedgerState: n.ledgerState,
-				Database:    n.db,
-				Chain:       n.ledgerState.Chain(),
-				Mempool:     n.mempool,
-				ListenAddress: n.config.
-					meshListenAddress,
+				Logger:              n.config.logger,
+				EventBus:            n.eventBus,
+				LedgerState:         n.ledgerState,
+				Database:            n.db,
+				Chain:               n.ledgerState.Chain(),
+				Mempool:             n.mempool,
+				ListenAddress:       listenAddr,
 				Network:             n.config.network,
 				NetworkMagic:        n.config.networkMagic,
 				GenesisHash:         genesisHash,
@@ -554,6 +600,10 @@ func (n *Node) Run(ctx context.Context) error {
 		if n.blockForger != nil {
 			n.ledgerState.SetForgedBlockChecker(
 				n.blockForger.SlotTracker(),
+			)
+			n.ledgerState.SetForgingEnabled(true)
+			n.ledgerState.SetSlotBattleRecorder(
+				n.blockForger,
 			)
 		}
 		started = append(started, func() {
@@ -809,6 +859,7 @@ func (n *Node) initBlockForger(ctx context.Context) error {
 		BlockBuilder:     builder,
 		BlockBroadcaster: broadcaster,
 		SlotClock:        slotClock,
+		PromRegistry:     n.config.promRegistry,
 	})
 	if err != nil {
 		// Stop election to prevent goroutine leak
@@ -861,7 +912,8 @@ func (b *blockBroadcaster) AddBlock(
 	block gledger.Block,
 	_ []byte,
 ) error {
-	// Add block to the chain (CBOR is stored internally by the block)
+	// Add block to the chain (CBOR is stored internally by the block).
+	// addBlockInternal notifies iterators after storing the block.
 	if err := b.chain.AddBlock(block, nil); err != nil {
 		return fmt.Errorf("failed to add block to chain: %w", err)
 	}
@@ -873,13 +925,12 @@ func (b *blockBroadcaster) AddBlock(
 		"block_number", block.BlockNumber(),
 	)
 
-	// chain.AddBlock already publishes ChainUpdateEventType, so subscribers
-	// (block propagation, ledger updates, etc.) are notified automatically.
-
 	return nil
 }
 
 // stakeDistributionAdapter adapts ledger.LedgerState to leader.StakeDistributionProvider.
+// It queries the metadata store directly with a nil transaction so the SQLite
+// read pool is used, avoiding contention with block-processing write locks.
 type stakeDistributionAdapter struct {
 	ledgerState *ledger.LedgerState
 }
@@ -888,35 +939,24 @@ func (a *stakeDistributionAdapter) GetPoolStake(
 	epoch uint64,
 	poolKeyHash []byte,
 ) (uint64, error) {
-	txn := a.ledgerState.Database().Transaction(false)
-	var stake uint64
-	err := txn.Do(func(txn *database.Txn) error {
-		view := a.ledgerState.NewView(txn)
-		dist, err := view.GetStakeDistribution(epoch)
-		if err != nil {
-			return err
-		}
-		stake = dist.PoolStakes[hex.EncodeToString(poolKeyHash)]
-		return nil
-	})
-	return stake, err
+	snapshot, err := a.ledgerState.Database().Metadata().GetPoolStakeSnapshot(
+		epoch, "mark", poolKeyHash, nil,
+	)
+	if err != nil {
+		return 0, err
+	}
+	if snapshot == nil {
+		return 0, nil
+	}
+	return uint64(snapshot.TotalStake), nil
 }
 
 func (a *stakeDistributionAdapter) GetTotalActiveStake(
 	epoch uint64,
 ) (uint64, error) {
-	txn := a.ledgerState.Database().Transaction(false)
-	var stake uint64
-	err := txn.Do(func(txn *database.Txn) error {
-		view := a.ledgerState.NewView(txn)
-		dist, err := view.GetStakeDistribution(epoch)
-		if err != nil {
-			return err
-		}
-		stake = dist.TotalStake
-		return nil
-	})
-	return stake, err
+	return a.ledgerState.Database().Metadata().GetTotalActiveStake(
+		epoch, "mark", nil,
+	)
 }
 
 // epochInfoAdapter adapts ledger.LedgerState to leader.EpochInfoProvider.
@@ -951,6 +991,18 @@ func (a *slotClockAdapter) CurrentSlot() (uint64, error) {
 
 func (a *slotClockAdapter) SlotsPerKESPeriod() uint64 {
 	return a.ledgerState.SlotsPerKESPeriod()
+}
+
+func (a *slotClockAdapter) ChainTipSlot() uint64 {
+	return a.ledgerState.ChainTipSlot()
+}
+
+func (a *slotClockAdapter) NextSlotTime() (time.Time, error) {
+	return a.ledgerState.NextSlotTime()
+}
+
+func (a *slotClockAdapter) UpstreamTipSlot() uint64 {
+	return a.ledgerState.UpstreamTipSlot()
 }
 
 // epochNonceAdapter adapts ledger.LedgerState to forging.EpochNonceProvider.

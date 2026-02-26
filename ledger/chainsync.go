@@ -59,6 +59,13 @@ const (
 	// Rollback loop detection thresholds
 	rollbackLoopThreshold = 3               // number of rollbacks to same slot before breaking loop
 	rollbackLoopWindow    = 5 * time.Minute // time window for rollback loop detection
+
+	// Number of consecutive header mismatches before triggering
+	// a chainsync re-sync to recover from persistent forks.
+	// A higher threshold gives tryResolveFork more chances to
+	// find the common ancestor and reduces disruptive resyncs
+	// in multi-producer networks where short forks are expected.
+	headerMismatchResyncThreshold = 20
 )
 
 func (ls *LedgerState) handleEventChainsync(evt event.Event) {
@@ -81,6 +88,19 @@ func (ls *LedgerState) handleEventChainsync(evt event.Event) {
 		}
 	} else if e.BlockHeader != nil {
 		if err := ls.handleEventChainsyncBlockHeader(e); err != nil {
+			// Header queue full is expected during bulk sync when
+			// pipelined headers arrive faster than blockfetch can
+			// drain them. Log at DEBUG to avoid log spam.
+			if errors.Is(err, chain.ErrHeaderQueueFull) {
+				ls.config.Logger.Debug(
+					"failed to handle block header",
+					"component", "ledger",
+					"error", err,
+					"slot", e.Point.Slot,
+					"hash", hex.EncodeToString(e.Point.Hash),
+				)
+				return
+			}
 			ls.config.Logger.Error(
 				"failed to handle block header",
 				"component", "ledger",
@@ -178,6 +198,13 @@ func (ls *LedgerState) detectConnectionSwitch() (activeConnId *ouroboros.Connect
 			)
 			ls.dropEventCount = 0
 			ls.dropRollbackCount = 0
+			ls.headerMismatchCount = 0
+			// Clear per-connection state (e.g., header dedup cache)
+			// so the new connection can re-deliver blocks from the
+			// intersection without them being filtered as duplicates.
+			if ls.config.ConnectionSwitchFunc != nil {
+				ls.config.ConnectionSwitchFunc()
+			}
 		}
 		ls.lastActiveConnId = activeConnId
 		ls.rollbackHistory = nil
@@ -263,6 +290,41 @@ func (ls *LedgerState) handleEventChainsyncRollback(e ChainsyncEvent) error {
 		ls.chainsyncState = RollbackChainsyncState
 	}
 	if err := ls.chain.Rollback(e.Point); err != nil {
+		if errors.Is(err, chain.ErrRollbackExceedsSecurityParam) {
+			// The peer's chain has diverged beyond K blocks from
+			// ours. This is a security violation — we must not
+			// follow a chain that requires rolling back more than
+			// K blocks. Trigger a chainsync re-sync so the peer
+			// governance can reconnect and negotiate a fresh
+			// intersection rather than waiting for a protocol
+			// timeout.
+			ls.config.Logger.Error(
+				"chainsync rollback exceeds security "+
+					"parameter K, rejecting peer chain",
+				"component", "ledger",
+				"slot", e.Point.Slot,
+				"hash", hex.EncodeToString(e.Point.Hash),
+				"connection_id", e.ConnectionId.String(),
+			)
+			// Restore state: no rollback actually occurred, so
+			// we are still syncing. Leaving RollbackChainsyncState
+			// would cause a spurious "switched to fork" log and
+			// fork metric increment on the next block header.
+			ls.chainsyncState = SyncingChainsyncState
+			if ls.config.EventBus != nil {
+				ls.config.EventBus.Publish(
+					event.ChainsyncResyncEventType,
+					event.NewEvent(
+						event.ChainsyncResyncEventType,
+						event.ChainsyncResyncEvent{
+							ConnectionId: e.ConnectionId,
+							Reason:       "rollback exceeds security parameter K",
+						},
+					),
+				)
+			}
+			return nil
+		}
 		return fmt.Errorf("chain rollback failed: %w", err)
 	}
 	return nil
@@ -333,23 +395,60 @@ func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 	if err := ls.chain.AddBlockHeader(e.BlockHeader); err != nil {
 		var notFitErr chain.BlockNotFitChainTipError
 		if errors.As(err, &notFitErr) {
-			// Header doesn't fit current chain tip. This typically happens
-			// when the active peer changes and the new peer's chainsync
-			// session is at a different chain position. Clear stale queued
+			// Header doesn't fit current chain tip. Clear stale queued
 			// headers so subsequent headers are evaluated against the
 			// block tip rather than perpetuating the mismatch.
 			ls.chain.ClearHeaders()
+			ls.headerMismatchCount++
 			ls.config.Logger.Debug(
-				"block header does not fit chain tip, cleared stale headers",
+				"block header does not fit chain tip",
 				"component", "ledger",
 				"slot", e.Point.Slot,
 				"block_prev_hash", notFitErr.BlockPrevHash(),
 				"chain_tip_hash", notFitErr.TipHash(),
+				"consecutive_mismatches", ls.headerMismatchCount,
 			)
+			// The incoming header's prevHash is the block it extends
+			// from — the common ancestor. If that block exists on our
+			// chain and the peer's chain is ahead, we roll back to
+			// the common ancestor so chainsync can continue.
+			if resolved := ls.tryResolveFork(
+				e, notFitErr,
+			); resolved {
+				return nil
+			}
+			// Fallback: after several consecutive mismatches where
+			// we couldn't find the common ancestor, trigger a
+			// chainsync re-sync by closing the connection so the
+			// peer governance reconnects and negotiates a fresh
+			// intersection.
+			if ls.headerMismatchCount >= headerMismatchResyncThreshold &&
+				ls.config.EventBus != nil {
+				ls.config.Logger.Info(
+					"persistent chain fork detected, triggering chainsync re-sync",
+					"component", "ledger",
+					"connection_id", e.ConnectionId.String(),
+					"consecutive_mismatches", ls.headerMismatchCount,
+				)
+				ls.headerMismatchCount = 0
+				ls.rollbackHistory = nil
+				ls.config.EventBus.Publish(
+					event.ChainsyncResyncEventType,
+					event.NewEvent(
+						event.ChainsyncResyncEventType,
+						event.ChainsyncResyncEvent{
+							ConnectionId: e.ConnectionId,
+							Reason:       "persistent chain fork",
+						},
+					),
+				)
+			}
 			return nil
 		}
 		return fmt.Errorf("failed adding chain block header: %w", err)
 	}
+	// Reset mismatch counter on successful header addition
+	ls.headerMismatchCount = 0
 	// Wait for additional block headers before fetching block bodies if we're
 	// far enough out from upstream tip
 	// Use security window as slot threshold if available
@@ -404,59 +503,264 @@ func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 	return nil
 }
 
+// tryResolveFork attempts to resolve a chain fork when an incoming header
+// doesn't fit the local chain tip. The incoming header's prevHash identifies
+// the common ancestor. If that block exists on our chain and the peer's
+// chain is ahead, we roll back to the common ancestor so chainsync can
+// continue on the network's canonical chain.
+//
+// Returns true if the fork was resolved (chain rolled back), false if the
+// common ancestor was not found or the rollback could not be performed.
+func (ls *LedgerState) tryResolveFork(
+	e ChainsyncEvent,
+	notFitErr chain.BlockNotFitChainTipError,
+) bool {
+	// Only resolve forks when the peer is ahead of us.
+	localTip := ls.chain.Tip()
+	if e.Tip.Point.Slot <= localTip.Point.Slot {
+		return false
+	}
+
+	// The incoming header's prevHash is the common ancestor hash.
+	// Look it up in the database to get its slot for the rollback
+	// point.
+	prevHashBytes, err := hex.DecodeString(notFitErr.BlockPrevHash())
+	if err != nil {
+		ls.config.Logger.Warn(
+			"failed to decode block prev hash for fork resolution",
+			"component", "ledger",
+			"error", err,
+			"block_prev_hash", notFitErr.BlockPrevHash(),
+		)
+		return false
+	}
+	ancestorBlock, err := database.BlockByHash(ls.db, prevHashBytes)
+	if err != nil {
+		if errors.Is(err, models.ErrBlockNotFound) {
+			// Common ancestor not found in our database — can't resolve.
+			ls.config.Logger.Debug(
+				"common ancestor not found in database, "+
+					"falling back to mismatch counting",
+				"component", "ledger",
+				"block_prev_hash", notFitErr.BlockPrevHash(),
+			)
+			return false
+		}
+		ls.config.Logger.Error(
+			"unexpected error looking up common ancestor",
+			"component", "ledger",
+			"error", err,
+			"block_prev_hash", notFitErr.BlockPrevHash(),
+		)
+		return false
+	}
+
+	rollbackPoint := ocommon.NewPoint(
+		ancestorBlock.Slot, ancestorBlock.Hash,
+	)
+	ls.config.Logger.Info(
+		"fork detected: rolling back to common ancestor",
+		"component", "ledger",
+		"local_tip_slot", localTip.Point.Slot,
+		"peer_tip_slot", e.Tip.Point.Slot,
+		"ancestor_slot", ancestorBlock.Slot,
+		"ancestor_hash", hex.EncodeToString(ancestorBlock.Hash),
+		"connection_id", e.ConnectionId.String(),
+	)
+
+	if err := ls.chain.Rollback(rollbackPoint); err != nil {
+		if errors.Is(err, chain.ErrRollbackExceedsSecurityParam) {
+			// Fork exceeds security parameter K. We must not
+			// follow a chain that requires rolling back more
+			// than K blocks — this is a fundamental Ouroboros
+			// security guarantee. Trigger a chainsync re-sync
+			// immediately rather than waiting for
+			// headerMismatchResyncThreshold retries.
+			ls.config.Logger.Error(
+				"fork exceeds security parameter K, "+
+					"rejecting fork resolution",
+				"component", "ledger",
+				"ancestor_slot", ancestorBlock.Slot,
+				"local_tip_slot",
+				ls.chain.Tip().Point.Slot,
+				"peer_tip_slot", e.Tip.Point.Slot,
+			)
+			// Reset mismatch state so the fallback path in the
+			// caller does not fire a duplicate resync event.
+			ls.headerMismatchCount = 0
+			ls.rollbackHistory = nil
+			if ls.config.EventBus != nil {
+				ls.config.EventBus.Publish(
+					event.ChainsyncResyncEventType,
+					event.NewEvent(
+						event.ChainsyncResyncEventType,
+						event.ChainsyncResyncEvent{
+							ConnectionId: e.ConnectionId,
+							Reason:       "fork resolution exceeds security parameter K",
+						},
+					),
+				)
+			}
+		} else {
+			ls.config.Logger.Error(
+				"failed to roll back to common ancestor",
+				"component", "ledger",
+				"error", err,
+				"ancestor_slot", ancestorBlock.Slot,
+			)
+		}
+		return false
+	}
+
+	// Mark state as rollback so the next block header event logs
+	// "switched to fork" and increments the fork metric.
+	ls.chainsyncState = RollbackChainsyncState
+
+	// Invalidate epoch cache entries for epochs that started after
+	// the rollback point. These epochs have nonces computed from the
+	// old fork's blocks and would cause VRF verification failures on
+	// blocks from the new fork. The ledger-level rollback (which
+	// recomputes nonces) is asynchronous, so we must prune the cache
+	// here to prevent stale nonce lookups in handleEventBlockfetchBlock.
+	ls.Lock()
+	newCache := make([]models.Epoch, 0, len(ls.epochCache))
+	for _, ep := range ls.epochCache {
+		if ep.StartSlot <= rollbackPoint.Slot {
+			newCache = append(newCache, ep)
+		}
+	}
+	ls.epochCache = newCache
+	if len(newCache) > 0 {
+		ls.currentEpoch = newCache[len(newCache)-1]
+		eraDesc := eras.GetEraById(ls.currentEpoch.EraId)
+		if eraDesc != nil {
+			ls.currentEra = *eraDesc
+		} else {
+			ls.config.Logger.Warn(
+				"unknown era ID after fork rollback epoch prune, currentEra may be stale",
+				"era_id", ls.currentEpoch.EraId,
+				"component", "ledger",
+			)
+		}
+	} else {
+		ls.currentEpoch = models.Epoch{}
+		ls.currentEra = eras.EraDesc{}
+	}
+	ls.Unlock()
+
+	// Rollback succeeded — re-add the header that triggered fork
+	// detection. Only reset mismatch tracking on successful header
+	// placement so that a failed re-add does not mask the fork and
+	// cause endless rollback loops.
+	if err := ls.chain.AddBlockHeader(
+		e.BlockHeader,
+	); err != nil {
+		ls.config.Logger.Warn(
+			"failed to add header after fork rollback",
+			"component", "ledger",
+			"error", err,
+			"slot", e.Point.Slot,
+		)
+		// Do not reset mismatch state — let the caller know the
+		// resolution failed so subsequent mismatch tracking proceeds.
+		return false
+	}
+	ls.headerMismatchCount = 0
+	ls.rollbackHistory = nil
+	return true
+}
+
 //nolint:unparam
 func (ls *LedgerState) handleEventBlockfetchBlock(e BlockfetchEvent) error {
-	ls.chainsyncBlockEvents = append(
-		ls.chainsyncBlockEvents,
-		e,
-	)
+	// Process each block immediately as it arrives rather than
+	// buffering until BatchDone. This ensures blocks appear on the
+	// chain promptly, allowing server-side chain iterators (serving
+	// downstream peers via ChainSync) to deliver blocks without
+	// waiting for the entire blockfetch batch to complete. Without
+	// this, a 500-block batch can take 10+ seconds to receive,
+	// exceeding the downstream peer's ChainSync idle timeout.
+
+	// Verify block header cryptographic proofs (VRF, KES).
+	// Only verify when the epoch cache has data for this block's slot.
+	// The epoch cache is populated asynchronously by ledgerProcessBlocks
+	// epoch rollovers, which may lag behind blockfetch delivery. Blocks
+	// whose slots fall outside the current epoch cache are skipped here
+	// and will be validated during ledger processing when the epoch data
+	// becomes available.
+	//
+	// When the node is close to the upstream tip (within the stability
+	// window), verification failures are fatal — we reject the block.
+	// During initial sync (far behind the tip), failures are logged as
+	// warnings to mirror the Haskell node's behavior of skipping
+	// VRF/KES checks during fast sync.
+	if _, err := ls.epochForSlot(e.Point.Slot); err == nil {
+		if err := ls.verifyBlockHeaderCrypto(e.Block); err != nil {
+			upstreamTip := ls.syncUpstreamTipSlot.Load()
+			syncThreshold := ls.calculateStabilityWindow()
+			// Use subtraction to avoid uint64 overflow when
+			// e.Point.Slot + syncThreshold would wrap.
+			nearTip := upstreamTip > 0 &&
+				(e.Point.Slot >= upstreamTip ||
+					upstreamTip-e.Point.Slot <= syncThreshold)
+			if nearTip {
+				return fmt.Errorf(
+					"block header crypto verification failed: %w",
+					err,
+				)
+			}
+			// During bulk sync, VRF verification may fail when the
+			// local stake distribution snapshot doesn't match (e.g.
+			// multi-pool DevNet where the other pool's VRF key hash
+			// isn't in our ledger state yet). Log as warning only.
+			ls.config.Logger.Warn(
+				fmt.Sprintf(
+					"block header crypto verification failed (non-fatal): %s",
+					err,
+				),
+				"component", "ledger",
+				"slot", e.Point.Slot,
+			)
+		}
+	}
+	// Add block to chain with its own transaction so it becomes
+	// visible to iterators immediately after commit.
+	var addBlockErr error
+	txn := ls.db.BlobTxn(true)
+	if err := txn.Do(func(txn *database.Txn) error {
+		addBlockErr = ls.chain.AddBlock(e.Block, txn)
+		if addBlockErr != nil {
+			if !errors.As(addBlockErr, &chain.BlockNotFitChainTipError{}) &&
+				!errors.As(addBlockErr, &chain.BlockNotMatchHeaderError{}) {
+				return fmt.Errorf("add chain block: %w", addBlockErr)
+			}
+			ls.config.Logger.Warn(
+				fmt.Sprintf(
+					"ignoring blockfetch block: %s",
+					addBlockErr,
+				),
+			)
+			if errors.As(addBlockErr, &chain.BlockNotMatchHeaderError{}) {
+				ls.chain.ClearHeaders()
+			}
+		}
+		return nil
+	}); err != nil {
+		return fmt.Errorf("failed processing block event: %w", err)
+	}
+	// Slot-battle check after commit — keeps ls.Lock() outside
+	// any open transaction, preserving consistent lock ordering.
+	ls.Lock()
+	ls.checkSlotBattle(e, addBlockErr)
+	ls.Unlock()
+	// Notify chain iterators now that the transaction has committed
+	// and the block is visible to readers. The notification inside
+	// AddBlock fires before commit, so iterators that wake up from
+	// that signal may not yet see the block.
+	ls.chain.NotifyIterators()
 	// Reset timeout timer since we received a block
 	if ls.chainsyncBlockfetchTimeoutTimer != nil {
 		ls.chainsyncBlockfetchTimeoutTimer.Reset(blockfetchBusyTimeout)
 	}
-	return nil
-}
-
-func (ls *LedgerState) processBlockEvents() error {
-	batchOffset := 0
-	for {
-		batchSize := min(
-			10, // Chosen to stay well under badger transaction size limit
-			len(ls.chainsyncBlockEvents)-batchOffset,
-		)
-		if batchSize <= 0 {
-			break
-		}
-		batch := ls.chainsyncBlockEvents[batchOffset : batchOffset+batchSize]
-		// Verify block header cryptographic proofs (VRF, KES) outside
-		// the lock to avoid blocking other ledger operations during
-		// expensive crypto verification.
-		for _, evt := range batch {
-			if err := ls.verifyBlockHeaderCrypto(evt.Block); err != nil {
-				return fmt.Errorf(
-					"block header crypto verification: %w",
-					err,
-				)
-			}
-		}
-		ls.Lock()
-		// Start a transaction
-		txn := ls.db.BlobTxn(true)
-		err := txn.Do(func(txn *database.Txn) error {
-			for _, evt := range batch {
-				if err := ls.processBlockEvent(txn, evt); err != nil {
-					return fmt.Errorf("failed processing block event: %w", err)
-				}
-			}
-			return nil
-		})
-		ls.Unlock()
-		if err != nil {
-			return err
-		}
-		batchOffset += batchSize
-	}
-	ls.chainsyncBlockEvents = nil
 	return nil
 }
 
@@ -485,15 +789,26 @@ func GenesisBlockHash(cfg *cardano.CardanoNodeConfig) ([32]byte, error) {
 }
 
 func (ls *LedgerState) createGenesisBlock() error {
-	if ls.currentTip.Point.Slot > 0 {
-		return nil
-	}
-
 	// Get the Byron genesis hash to use as the synthetic block hash.
 	// This mirrors how the Shelley epoch nonce uses the Shelley genesis hash.
 	genesisHash, err := GenesisBlockHash(ls.config.CardanoNodeConfig)
 	if err != nil {
 		return fmt.Errorf("get genesis block hash: %w", err)
+	}
+
+	if ls.currentTip.Point.Slot > 0 {
+		// Validate existing chain data matches the current genesis config.
+		// If the blob store does not contain genesis CBOR at the expected
+		// key, the database was created with a different genesis.
+		if !ls.db.HasGenesisCbor(0, genesisHash[:]) {
+			return fmt.Errorf(
+				"genesis hash mismatch: database contains chain data "+
+					"from a different genesis (expected Byron genesis "+
+					"hash %x); delete the database directory to start fresh",
+				genesisHash,
+			)
+		}
+		return nil
 	}
 
 	txn := ls.db.Transaction(true)
@@ -623,6 +938,31 @@ func (ls *LedgerState) createGenesisBlock() error {
 			"component", "ledger",
 		)
 
+		// Load genesis staking data (pool registrations + delegations)
+		genesisPools, _, err := shelleyGenesis.InitialPools()
+		if err != nil {
+			return fmt.Errorf("parse genesis staking: %w", err)
+		}
+		if len(genesisPools) > 0 ||
+			len(shelleyGenesis.Staking.Stake) > 0 {
+			ls.config.Logger.Info(
+				fmt.Sprintf(
+					"loading genesis staking: %d pools, %d delegations",
+					len(genesisPools),
+					len(shelleyGenesis.Staking.Stake),
+				),
+				"component", "ledger",
+			)
+			if err := ls.db.SetGenesisStaking(
+				genesisPools,
+				shelleyGenesis.Staking.Stake,
+				genesisHash[:],
+				txn,
+			); err != nil {
+				return fmt.Errorf("set genesis staking: %w", err)
+			}
+		}
+
 		return nil
 	})
 	return err
@@ -747,6 +1087,8 @@ func writeCborUint(buf *bytes.Buffer, n int) {
 }
 
 // writeCborMajorType writes a CBOR header with the given major type and value.
+//
+//nolint:gosec // Intentional byte truncation for CBOR encoding of individual octets.
 func writeCborMajorType(buf *bytes.Buffer, majorType, n int) {
 	header := byte(majorType << 5)
 	switch {
@@ -803,7 +1145,7 @@ func (ls *LedgerState) calculateEpochNonce(
 		}
 		return genesisHashBytes, nil
 	}
-	// Calculate stability window using the snapshot era
+	// Calculate stability window: 3k/f slots
 	stabilityWindow := ls.calculateStabilityWindowForEra(currentEra.Id)
 	var stabilityWindowStartSlot uint64
 	if epochStartSlot > stabilityWindow {
@@ -811,42 +1153,115 @@ func (ls *LedgerState) calculateEpochNonce(
 	} else {
 		stabilityWindowStartSlot = 0
 	}
-	// Get last block before stability window
-	blockBeforeStabilityWindow, err := database.BlockBeforeSlotTxn(
-		txn,
-		stabilityWindowStartSlot,
+
+	// Determine the candidate nonce (first input to epoch nonce).
+	//
+	// In Ouroboros Praos, the candidate nonce is the evolving nonce
+	// frozen at the stability window point within the epoch. It is
+	// only updated when slot + stabilityWindow < firstSlotNextEpoch.
+	//
+	// When the stability window >= epoch length (common on DevNets),
+	// that condition is never met, so the candidate nonce stays at
+	// its initial value (the Shelley genesis hash) forever. We detect
+	// this by checking whether the stability point falls before the
+	// current epoch's start.
+	genesisHashBytes, err := hex.DecodeString(
+		ls.config.CardanoNodeConfig.ShelleyGenesisHash,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("lookup block before slot: %w", err)
+		return nil, fmt.Errorf("decode genesis hash: %w", err)
 	}
-	blockBeforeStabilityWindowNonce, err := ls.db.GetBlockNonce(
-		ocommon.Point{
-			Hash: blockBeforeStabilityWindow.Hash,
-			Slot: blockBeforeStabilityWindow.Slot,
-		},
-		txn,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("lookup block nonce: %w", err)
+
+	var candidateNonce []byte
+	if stabilityWindowStartSlot < currentEpoch.StartSlot {
+		// Stability window extends before this epoch — candidate nonce
+		// was never updated during the epoch. Use the genesis hash
+		// (the initial Praos candidate nonce value).
+		candidateNonce = genesisHashBytes
+	} else {
+		// Normal case: look up the rolling nonce at the stability point
+		blockBeforeStabilityWindow, lookupErr := database.BlockBeforeSlotTxn(
+			txn,
+			stabilityWindowStartSlot,
+		)
+		if lookupErr != nil {
+			if !errors.Is(lookupErr, models.ErrBlockNotFound) {
+				return nil, fmt.Errorf(
+					"lookup block before slot: %w",
+					lookupErr,
+				)
+			}
+			candidateNonce = genesisHashBytes
+		} else {
+			candidateNonce, err = ls.db.GetBlockNonce(
+				ocommon.Point{
+					Hash: blockBeforeStabilityWindow.Hash,
+					Slot: blockBeforeStabilityWindow.Slot,
+				},
+				txn,
+			)
+			if err != nil {
+				return nil, fmt.Errorf("lookup block nonce: %w", err)
+			}
+			if len(candidateNonce) == 0 {
+				candidateNonce = genesisHashBytes
+			}
+		}
 	}
-	// Get last block in previous epoch using the snapshot epoch
+
+	// Determine the last epoch block nonce (second input).
+	//
+	// In Praos, this is the prevHash from the last block of the
+	// previous epoch. It matches the Haskell lastEpochBlockNonce
+	// which is set at each epoch tick to labNonce (= prevHash of
+	// the last processed block).
+	//
+	// We use epochStartSlot (the start of the NEW epoch) because
+	// we need the last block of the ENDING epoch — i.e., the last
+	// block before the new epoch begins.
 	blockLastPrevEpoch, err := database.BlockBeforeSlotTxn(
 		txn,
-		currentEpoch.StartSlot,
+		epochStartSlot,
 	)
 	if err != nil {
 		if errors.Is(err, models.ErrBlockNotFound) {
-			return blockBeforeStabilityWindowNonce, nil
+			// No block before this epoch (first epoch transition).
+			// This is equivalent to NeutralNonce in Haskell:
+			// candidateNonce XOR NeutralNonce = candidateNonce.
+			return candidateNonce, nil
 		}
 		return nil, fmt.Errorf("lookup block before slot: %w", err)
 	}
-	// Calculate nonce from inputs
-	ret, err := lcommon.CalculateEpochNonce(
-		blockBeforeStabilityWindowNonce,
-		blockLastPrevEpoch.PrevHash,
-		nil,
+	if len(blockLastPrevEpoch.Hash) == 0 {
+		return candidateNonce, nil
+	}
+
+	// Combine candidateNonce and lastEpochBlockNonce using XOR
+	// (Praos epoch nonce = candidateNonce XOR blockLastPrevEpoch).
+	// The Haskell Nonce Semigroup uses XOR for combining nonces.
+	// lastEpochBlockNonce = prevHashToNonce(lastAppliedHash lab)
+	// in Haskell — the hash of the last block of the prev epoch.
+	if len(candidateNonce) < 32 || len(blockLastPrevEpoch.Hash) < 32 {
+		return nil, fmt.Errorf(
+			"nonce XOR requires 32-byte inputs: candidateNonce=%d, blockHash=%d",
+			len(candidateNonce), len(blockLastPrevEpoch.Hash),
+		)
+	}
+	result := make([]byte, 32)
+	for i := 0; i < 32; i++ {
+		result[i] = candidateNonce[i] ^ blockLastPrevEpoch.Hash[i]
+	}
+	ls.config.Logger.Debug(
+		"epoch nonce computed",
+		"component", "ledger",
+		"epoch_start_slot", epochStartSlot,
+		"stability_window_slot", stabilityWindowStartSlot,
+		"candidate_nonce", hex.EncodeToString(candidateNonce),
+		"last_block_hash", hex.EncodeToString(blockLastPrevEpoch.Hash),
+		"last_block_slot", blockLastPrevEpoch.Slot,
+		"epoch_nonce", hex.EncodeToString(result),
 	)
-	return ret.Bytes(), err
+	return result, nil
 }
 
 // processEpochRollover processes an epoch rollover and returns the result without
@@ -1096,36 +1511,6 @@ func (ls *LedgerState) cleanupBlockNoncesBefore(startSlot uint64) {
 	}
 }
 
-func (ls *LedgerState) processBlockEvent(
-	txn *database.Txn,
-	e BlockfetchEvent,
-) error {
-	// Note: block header crypto verification (VRF, KES) is performed
-	// outside the lock in processBlockEvents before this is called.
-
-	// Add block to chain
-	addBlockErr := ls.chain.AddBlock(e.Block, txn)
-	if addBlockErr != nil {
-		// Ignore and log errors about block not fitting on chain or matching first header
-		if !errors.As(addBlockErr, &chain.BlockNotFitChainTipError{}) &&
-			!errors.As(addBlockErr, &chain.BlockNotMatchHeaderError{}) {
-			return fmt.Errorf("add chain block: %w", addBlockErr)
-		}
-		ls.config.Logger.Warn(
-			fmt.Sprintf(
-				"ignoring blockfetch block: %s",
-				addBlockErr,
-			),
-		)
-	}
-
-	// Detect slot battles: check if an incoming block occupies a
-	// slot for which we forged a block locally
-	ls.checkSlotBattle(e, addBlockErr)
-
-	return nil
-}
-
 // checkSlotBattle checks whether an incoming block from a peer
 // occupies a slot for which the local node has already forged a
 // block. If so, it emits a SlotBattleEvent and logs a warning.
@@ -1172,6 +1557,11 @@ func (ls *LedgerState) checkSlotBattle(
 		"remote_block_hash", hex.EncodeToString(remoteHash),
 		"local_won", localWon,
 	)
+
+	// Increment slot battle metric
+	if ls.config.SlotBattleRecorder != nil {
+		ls.config.SlotBattleRecorder.RecordSlotBattle()
+	}
 
 	if ls.config.EventBus != nil {
 		ls.config.EventBus.PublishAsync(
@@ -1247,12 +1637,6 @@ func (ls *LedgerState) blockfetchRequestRangeCleanup() {
 	}
 	// Increment generation to ensure any pending timer callbacks are ignored
 	ls.chainsyncBlockfetchTimerGeneration++
-	// Reset buffer
-	ls.chainsyncBlockEvents = slices.Delete(
-		ls.chainsyncBlockEvents,
-		0,
-		len(ls.chainsyncBlockEvents),
-	)
 	// Close our blockfetch done signal channel
 	ls.chainsyncBlockfetchReadyMutex.Lock()
 	defer ls.chainsyncBlockfetchReadyMutex.Unlock()
@@ -1269,11 +1653,8 @@ func (ls *LedgerState) handleEventBlockfetchBatchDone(e BlockfetchEvent) error {
 		ls.chainsyncBlockfetchTimeoutTimer = nil
 	}
 	ls.chainsyncBlockfetchTimerGeneration++
-	// Process pending block events
-	if err := ls.processBlockEvents(); err != nil {
-		ls.blockfetchRequestRangeCleanup()
-		return fmt.Errorf("process block events: %w", err)
-	}
+	// Blocks are already processed incrementally in handleEventBlockfetchBlock,
+	// so no batch processing is needed here.
 	// Continue fetching as long as there are queued headers
 	remainingHeaders := ls.chain.HeaderCount()
 	ls.config.Logger.Debug(

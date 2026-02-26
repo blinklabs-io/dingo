@@ -379,6 +379,17 @@ type ForgedBlockChecker interface {
 	WasForgedByUs(slot uint64) (blockHash []byte, ok bool)
 }
 
+// SlotBattleRecorder records slot battle events for metrics.
+type SlotBattleRecorder interface {
+	// RecordSlotBattle increments the slot battle counter.
+	RecordSlotBattle()
+}
+
+// ConnectionSwitchFunc is called when the active chainsync connection
+// changes. Implementations should clear any per-connection state such as
+// the header dedup cache so the new connection can re-deliver blocks.
+type ConnectionSwitchFunc func()
+
 type LedgerStateConfig struct {
 	PromRegistry               prometheus.Registerer
 	Logger                     *slog.Logger
@@ -388,8 +399,10 @@ type LedgerStateConfig struct {
 	CardanoNodeConfig          *cardano.CardanoNodeConfig
 	BlockfetchRequestRangeFunc BlockfetchRequestRangeFunc
 	GetActiveConnectionFunc    GetActiveConnectionFunc
+	ConnectionSwitchFunc       ConnectionSwitchFunc
 	FatalErrorFunc             FatalErrorFunc
 	ForgedBlockChecker         ForgedBlockChecker
+	SlotBattleRecorder         SlotBattleRecorder
 	ValidateHistorical         bool
 	ForgeBlocks                bool
 	DatabaseWorkerPoolConfig   DatabaseWorkerPoolConfig
@@ -423,7 +436,6 @@ type LedgerState struct {
 	db                                 *database.Database
 	chainsyncState                     ChainsyncState
 	currentTipBlockNonce               []byte
-	chainsyncBlockEvents               []BlockfetchEvent
 	epochCache                         []models.Epoch
 	currentTip                         ochainsync.Tip
 	currentEpoch                       models.Epoch
@@ -452,7 +464,6 @@ type LedgerState struct {
 	// rollbackWG tracks in-flight rollback event emission goroutines
 	rollbackWG        sync.WaitGroup
 	validationEnabled bool
-
 	// Sync progress reporting (Fix 4)
 	syncProgressLastLog  time.Time     // last time we logged sync progress
 	syncProgressLastSlot uint64        // slot at last progress log (for rate calc)
@@ -467,6 +478,9 @@ type LedgerState struct {
 	rollbackHistory []rollbackRecord // recent rollback slot+time pairs for loop detection
 
 	lastActiveConnId *ouroboros.ConnectionId // tracks active connection for switch detection
+
+	// Header mismatch tracking for fork detection and re-sync
+	headerMismatchCount int // consecutive header mismatch count
 }
 
 // EraTransitionResult holds computed state from an era transition
@@ -531,6 +545,9 @@ func (ls *LedgerState) Start(ctx context.Context) error {
 	ls.ctx = ctx
 	// Init metrics
 	ls.metrics.init(ls.config.PromRegistry)
+	ls.metrics.nodeStartTime.Set(
+		float64(time.Now().Unix()),
+	)
 
 	// Initialize database worker pool for async operations
 	if !ls.config.DatabaseWorkerPoolConfig.Disabled {
@@ -948,16 +965,16 @@ func (ls *LedgerState) handleSlotTicks() {
 
 		// Get current state snapshot
 		ls.RLock()
-		isSynced := ls.validationEnabled
 		currentEpoch := ls.currentEpoch
 		currentEra := ls.currentEra
+		tipSlot := ls.currentTip.Point.Slot
 		ls.RUnlock()
 
-		// During catch up or load, don't emit slot-based epoch events.
-		// Block processing handles epoch transitions for historical data.
-		// The slot clock is ticking based on wall-clock time which is far ahead
-		// of the blocks being processed.
-		if !isSynced {
+		// During catch up, don't emit slot-based epoch events. Block
+		// processing handles epoch transitions for historical data. We
+		// consider the node "near tip" when the ledger tip is within 95%
+		// of the upstream peer's tip slot.
+		if !ls.isNearTip(tipSlot) {
 			logger.Debug(
 				"slot clock epoch boundary during catch up (suppressed)",
 				"slot_clock_epoch",
@@ -1035,6 +1052,21 @@ func (ls *LedgerState) handleSlotTicks() {
 			)
 		}
 	}
+}
+
+// isNearTip returns true when the given slot is within 95% of the
+// upstream peer's tip. This is used to decide whether to emit
+// slot-clock epoch events. During initial catch-up the node is far
+// behind the tip and these checks are skipped; once the node is close
+// to the tip they are always on. Returns false when no upstream tip is
+// known yet (no peer connected), since we can't determine proximity.
+func (ls *LedgerState) isNearTip(slot uint64) bool {
+	upstreamTip := ls.syncUpstreamTipSlot.Load()
+	if upstreamTip == 0 {
+		return false
+	}
+	// 95% threshold using division to avoid uint64 overflow.
+	return slot >= upstreamTip-upstreamTip/20
 }
 
 func (ls *LedgerState) scheduleCleanupConsumedUtxos() {
@@ -1192,6 +1224,29 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 				err,
 			)
 		}
+		// Delete epoch entries whose nonces were computed from
+		// rolled-back blocks. Epochs starting after the rollback
+		// slot used blocks that no longer exist, so their nonces
+		// are stale and must be recomputed during re-sync.
+		if err := ls.db.DeleteEpochsAfterSlot(
+			point.Slot,
+			txn,
+		); err != nil {
+			return fmt.Errorf(
+				"delete epochs after rollback: %w",
+				err,
+			)
+		}
+		// Delete rolled-back network state records
+		if err := ls.db.DeleteNetworkStateAfterSlot(
+			point.Slot,
+			txn,
+		); err != nil {
+			return fmt.Errorf(
+				"delete network state after rollback: %w",
+				err,
+			)
+		}
 		// Delete rolled-back UTxOs (blob offsets and metadata)
 		err := ls.db.UtxosDeleteRolledback(point.Slot, txn)
 		if err != nil {
@@ -1245,19 +1300,125 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 			),
 		)
 	}
-	// Reload protocol parameters to reflect the rolled-back state
-	if err := ls.loadPParams(); err != nil {
+	// Reload epoch cache into locals to discard stale nonces from
+	// rolled-back epochs. The deleted epoch entries will be recreated
+	// with correct nonces when the chain replays past those epoch
+	// boundaries during re-sync.
+	//
+	// All shared state (epochCache, currentEpoch, currentEra,
+	// currentPParams, prevEraPParams, currentTip,
+	// currentTipBlockNonce) is computed into local variables first,
+	// then applied atomically under a single Lock to avoid data
+	// races with concurrent readers.
+	var (
+		newEpochs       []models.Epoch
+		newCurrentEpoch models.Epoch
+		newCurrentEra   eras.EraDesc
+		newPParams      lcommon.ProtocolParameters
+		newPrevPParams  lcommon.ProtocolParameters
+		eraResolved     bool
+	)
+	// Snapshot current era under read lock for fallback
+	ls.RLock()
+	newCurrentEra = ls.currentEra
+	newCurrentEpoch = ls.currentEpoch
+	ls.RUnlock()
+
+	epochs, err := ls.db.GetEpochs(nil)
+	if err != nil {
 		ls.config.Logger.Warn(
-			"failed to reload protocol params after rollback",
+			"failed to reload epochs after rollback",
 			"error", err,
 			"component", "ledger",
 		)
 	}
-	// Transaction committed successfully - now update in-memory state.
-	// Brief lock to ensure readers see consistent state.
+	if epochs != nil {
+		newEpochs = epochs
+		// Reset currentEpoch to the last remaining epoch so
+		// that ledgerProcessBlocks correctly detects the next
+		// epoch boundary and EpochNonce() returns the right
+		// nonce.
+		if len(epochs) > 0 {
+			newCurrentEpoch = epochs[len(epochs)-1]
+			eraDesc := eras.GetEraById(
+				newCurrentEpoch.EraId,
+			)
+			if eraDesc != nil {
+				newCurrentEra = *eraDesc
+				eraResolved = true
+			} else {
+				ls.config.Logger.Warn(
+					"unknown era ID after rollback, "+
+						"currentEra may be stale",
+					"era_id",
+					newCurrentEpoch.EraId,
+					"component", "ledger",
+				)
+			}
+		}
+	}
+	// Reload protocol parameters into locals to reflect the
+	// rolled-back state. Skip if era lookup failed (nil) since
+	// the DecodePParamsFunc would be wrong. Recompute when:
+	//   - eraResolved: era was successfully resolved so
+	//     computePParams can use the correct DecodePParamsFunc
+	//   - newEpochs == nil: DB error, fall back to stale snapshot
+	// Do NOT recompute when len(newEpochs) == 0 (genesis rollback):
+	// the genesis rollback branch explicitly clears pparams to nil,
+	// and computing them here with the stale pre-rollback era would
+	// produce non-nil pparams that overwrite the intentional nil.
+	if eraResolved || newEpochs == nil {
+		pp, prevPP, ppErr := ls.computePParams(
+			newCurrentEpoch,
+			newCurrentEra,
+			newEpochs,
+		)
+		if ppErr != nil {
+			ls.config.Logger.Warn(
+				"failed to reload protocol params "+
+					"after rollback",
+				"error", ppErr,
+				"component", "ledger",
+			)
+		} else {
+			newPParams = pp
+			newPrevPParams = prevPP
+		}
+	}
+	// Transaction committed successfully - now update all
+	// in-memory state atomically so readers see a consistent
+	// snapshot.
 	ls.Lock()
+	if newEpochs != nil {
+		ls.epochCache = newEpochs
+		if len(newEpochs) > 0 {
+			ls.currentEpoch = newCurrentEpoch
+			// Only update currentEra when we successfully
+			// resolved it. Writing a stale era alongside a
+			// new epoch would leave currentEra inconsistent
+			// with currentEpoch.
+			if eraResolved {
+				ls.currentEra = newCurrentEra
+			}
+		} else {
+			// Genesis rollback: all epochs deleted, reset
+			// to zero-value so epoch boundary detection
+			// triggers correctly on re-sync. Zero currentEra
+			// and pparams too so they stay consistent with
+			// the zeroed epoch.
+			ls.currentEpoch = models.Epoch{}
+			ls.currentEra = eras.EraDesc{}
+			ls.currentPParams = nil
+			ls.prevEraPParams = nil
+		}
+	}
+	if newPParams != nil {
+		ls.currentPParams = newPParams
+		ls.prevEraPParams = newPrevPParams
+	}
 	ls.currentTip = newTip
-	// Always update nonce - clear it on genesis rollback, set it otherwise
+	// Always update nonce - clear it on genesis rollback, set
+	// it otherwise
 	ls.currentTipBlockNonce = newNonce
 	ls.updateTipMetrics()
 	ls.Unlock()
@@ -1728,22 +1889,16 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 			if rolloverResult != nil && ls.config.EventBus != nil {
 				newEpochId := rolloverResult.NewCurrentEpoch.EpochId
 
-				// Use MarkEpochEmitted to coordinate with slot-based detection.
-				// If slot clock already emitted this epoch event (when synced),
-				// we skip emitting again to avoid duplicates.
-				shouldEmit := true
+				// Always emit block-based epoch transitions. Even if the
+				// slot clock already emitted an event for this epoch, the
+				// block-based event is needed because it fires AFTER the
+				// epoch nonce has been computed. Subscribers (leader
+				// election, snapshot manager) use drain logic to handle
+				// duplicates, keeping only the latest event.
 				if ls.slotClock != nil {
-					shouldEmit = ls.slotClock.MarkEpochEmitted(newEpochId)
-					if !shouldEmit {
-						ls.config.Logger.Debug(
-							"block-based epoch transition skipped (already emitted by slot clock)",
-							"epoch",
-							newEpochId,
-						)
-					}
+					ls.slotClock.MarkEpochEmitted(newEpochId)
 				}
-
-				if shouldEmit {
+				{
 					// Calculate snapshot slot (boundary - 1, or 0 if boundary is 0)
 					snapshotSlot := rolloverResult.NewCurrentEpoch.StartSlot
 					if snapshotSlot > 0 {
@@ -1971,6 +2126,7 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 		}
 		// Process batch in groups of batchSize to stay under DB txn limits
 		var tipForLog ochainsync.Tip
+		var checker ForgedBlockChecker
 		for i = 0; i < len(nextBatch); i += batchSize {
 			end = min(
 				len(nextBatch),
@@ -2031,10 +2187,11 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 						nextBatch = nil
 						break
 					}
-					// Determine if this block should be validated
-					// Skip validation of historical blocks when ValidateHistorical=false, as they
-					// were already validated by the network. However, validate blocks within the
-					// k-slot stability window to ensure live blocks near the tip are validated.
+					// Determine if this block should be validated.
+					// Skip validation of historical blocks when
+					// ValidateHistorical=false, as they were already
+					// validated by the network. Validate blocks within
+					// the stability window near the tip.
 					var shouldValidateBlock bool
 					if snapshotValidationEnabled {
 						shouldValidateBlock = true
@@ -2186,6 +2343,7 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 				ls.updateTipMetrics()
 				// Capture tip for logging while holding the lock
 				tipForLog = ls.currentTip
+				checker = ls.config.ForgedBlockChecker
 				ls.Unlock()
 				// Restore normal DB options outside the lock after validation is enabled
 				if wantEnableValidation && bulkLoadActive {
@@ -2204,6 +2362,15 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 			}
 		}
 		if len(nextBatch) > 0 {
+			// Determine block source for observability
+			source := "chainsync"
+			if checker != nil {
+				if _, forged := checker.WasForgedByUs(
+					tipForLog.Point.Slot,
+				); forged {
+					source = "forged"
+				}
+			}
 			ls.config.Logger.Info(
 				fmt.Sprintf(
 					"chain extended, new tip: %x at slot %d",
@@ -2212,6 +2379,8 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 				),
 				"component",
 				"ledger",
+				"source",
+				source,
 			)
 			// Periodic sync progress reporting
 			ls.logSyncProgress(tipForLog.Point.Slot)
@@ -2251,7 +2420,11 @@ func (ls *LedgerState) ledgerProcessBlock(
 	intraBlockUtxos := make(map[string]lcommon.Utxo)
 	for i, tx := range block.Transactions() {
 		if delta == nil {
-			delta = NewLedgerDelta(point, uint(block.Era().Id), block.BlockNumber())
+			delta = NewLedgerDelta(
+				point,
+				uint(block.Era().Id),
+				block.BlockNumber(),
+			)
 			delta.Offsets = offsets
 		}
 		// Validate transaction
@@ -2380,69 +2553,146 @@ func (ls *LedgerState) updateTipMetrics() {
 	)
 }
 
+// loadPParams reads currentEpoch, currentEra, and epochCache and writes
+// currentPParams and prevEraPParams without holding a lock. This is safe
+// because it is only called from Start() during single-threaded initialization.
 func (ls *LedgerState) loadPParams() error {
-	pparams, err := ls.db.GetPParams(
-		ls.currentEpoch.EpochId,
-		ls.currentEra.DecodePParamsFunc,
-		nil,
+	pp, prevPP, err := ls.computePParams(
+		ls.currentEpoch,
+		ls.currentEra,
+		ls.epochCache,
 	)
 	if err != nil {
 		return err
 	}
-	if pparams == nil {
-		pparams, err = ls.loadGenesisProtocolParameters()
+	ls.currentPParams = pp
+	ls.prevEraPParams = prevPP
+	return nil
+}
+
+// computePParams loads protocol parameters for the given epoch/era
+// without writing to any shared LedgerState fields. This allows
+// callers to compute pparams into local variables and then apply
+// them atomically under a lock.
+func (ls *LedgerState) computePParams(
+	epoch models.Epoch,
+	era eras.EraDesc,
+	epochCache []models.Epoch,
+) (
+	lcommon.ProtocolParameters,
+	lcommon.ProtocolParameters,
+	error,
+) {
+	// Only query stored pparams when the era has a decode function.
+	// Byron has nil DecodePParamsFunc and never stores pparams, so
+	// we skip straight to the genesis fallback for Byron.
+	var pparams lcommon.ProtocolParameters
+	if era.DecodePParamsFunc != nil {
+		var err error
+		pparams, err = ls.db.GetPParams(
+			epoch.EpochId,
+			era.DecodePParamsFunc,
+			nil,
+		)
 		if err != nil {
-			return fmt.Errorf("bootstrap genesis protocol parameters: %w", err)
+			return nil, nil, fmt.Errorf(
+				"computePParams: GetPParams epoch %d: %w",
+				epoch.EpochId,
+				err,
+			)
 		}
 	}
-	ls.currentPParams = pparams
+	if pparams == nil {
+		var err error
+		pparams, err = ls.computeGenesisProtocolParameters(era)
+		if err != nil {
+			return nil, nil, fmt.Errorf(
+				"bootstrap genesis protocol parameters: %w",
+				err,
+			)
+		}
+	}
 
 	// Load previous era's pparams for era-1 TX validation.
-	// Walk the epoch cache backwards to find the last epoch that belonged
-	// to a different (earlier) era, then load its pparams.
-	ls.prevEraPParams = nil
-	for i := len(ls.epochCache) - 1; i >= 0; i-- {
-		ep := ls.epochCache[i]
-		if ep.EraId != ls.currentEra.Id {
+	// Walk the epoch cache backwards to find the last epoch
+	// that belonged to a different (earlier) era, then load
+	// its pparams.
+	var prevEraPParams lcommon.ProtocolParameters
+	for i := len(epochCache) - 1; i >= 0; i-- {
+		ep := epochCache[i]
+		if ep.EraId != era.Id {
 			prevEra := eras.GetEraById(ep.EraId)
-			if prevEra != nil && prevEra.DecodePParamsFunc != nil {
+			if prevEra != nil &&
+				prevEra.DecodePParamsFunc != nil {
 				prevPP, prevErr := ls.db.GetPParams(
 					ep.EpochId,
 					prevEra.DecodePParamsFunc,
 					nil,
 				)
-				if prevErr == nil && prevPP != nil {
-					ls.prevEraPParams = prevPP
+				if prevErr != nil {
+					ls.config.Logger.Warn(
+						"failed to load previous-era pparams",
+						"epoch", ep.EpochId,
+						"era", ep.EraId,
+						"error", prevErr,
+					)
+				} else if prevPP != nil {
+					prevEraPParams = prevPP
 				}
 			}
 			break
 		}
 	}
-	return nil
+	return pparams, prevEraPParams, nil
 }
 
-func (ls *LedgerState) loadGenesisProtocolParameters() (lcommon.ProtocolParameters, error) {
-	// Start with Shelley parameters as the base for all eras (Byron also uses Shelley as base)
-	pparams, err := eras.HardForkShelley(ls.config.CardanoNodeConfig, nil)
+// computeGenesisProtocolParameters bootstraps protocol parameters
+// from genesis config for the given era without reading any shared
+// LedgerState fields.
+func (ls *LedgerState) computeGenesisProtocolParameters(
+	era eras.EraDesc,
+) (lcommon.ProtocolParameters, error) {
+	// Start with Shelley parameters as the base for all eras
+	// (Byron also uses Shelley as base)
+	pparams, err := eras.HardForkShelley(
+		ls.config.CardanoNodeConfig,
+		nil,
+	)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf(
+			"failed to get protocol parameters from HardForkShelley: %w",
+			err,
+		)
 	}
 
-	// If target era is Byron or Shelley, return the Shelley parameters
-	if ls.currentEra.Id <= eras.ShelleyEraDesc.Id {
+	// If target era is Byron or Shelley, return the Shelley
+	// parameters
+	if era.Id <= eras.ShelleyEraDesc.Id {
 		return pparams, nil
 	}
 
 	// Chain through each era up to the target era
-	for eraId := eras.AllegraEraDesc.Id; eraId <= ls.currentEra.Id; eraId++ {
-		era := eras.GetEraById(eraId)
-		if era == nil {
-			return nil, fmt.Errorf("unknown era ID %d", eraId)
+	for eraId := eras.AllegraEraDesc.Id; eraId <= era.Id; eraId++ {
+		eraStep := eras.GetEraById(eraId)
+		if eraStep == nil {
+			return nil, fmt.Errorf(
+				"unknown era ID %d",
+				eraId,
+			)
 		}
 
-		pparams, err = era.HardForkFunc(ls.config.CardanoNodeConfig, pparams)
-		if err != nil {
-			return nil, fmt.Errorf("era %s transition: %w", era.Name, err)
+		if eraStep.HardForkFunc != nil {
+			pparams, err = eraStep.HardForkFunc(
+				ls.config.CardanoNodeConfig,
+				pparams,
+			)
+			if err != nil {
+				return nil, fmt.Errorf(
+					"era %s transition: %w",
+					eraStep.Name,
+					err,
+				)
+			}
 		}
 	}
 
@@ -2552,22 +2802,63 @@ func (ls *LedgerState) GetBlock(point ocommon.Point) (models.Block, error) {
 	return ret, nil
 }
 
-// RecentChainPoints returns the requested count of recent chain points in descending order. This is used mostly
-// for building a set of intersect points when acting as a chainsync client
-func (ls *LedgerState) RecentChainPoints(count int) ([]ocommon.Point, error) {
-	tmpBlocks, err := database.BlocksRecent(ls.db, count)
-	if err != nil {
-		return nil, err
+// RecentChainPoints returns the requested count of recent chain
+// points in descending order. This is used mostly for building a set
+// of intersect points when acting as a chainsync client.
+//
+// Points are first collected from the in-memory chain state, which is
+// always up-to-date even when the blob store has not yet flushed
+// recent writes. Database points are then appended to fill the
+// requested count, with duplicates removed.
+func (ls *LedgerState) RecentChainPoints(
+	count int,
+) ([]ocommon.Point, error) {
+	var points []ocommon.Point
+	// Collect points from the in-memory chain first. The chain's
+	// tip and recent blocks are always current, even when the
+	// underlying blob store has pending writes that are not yet
+	// visible to new read transactions.
+	if ls.chain != nil {
+		points = ls.chain.RecentPoints(count)
 	}
-	ret := make([]ocommon.Point, 0, len(tmpBlocks))
-	var tmpBlock models.Block
-	for _, tmpBlock = range tmpBlocks {
-		ret = append(
-			ret,
-			ocommon.NewPoint(tmpBlock.Slot, tmpBlock.Hash),
+	// Supplement with database points for deeper history
+	if len(points) < count {
+		remaining := count - len(points)
+		tmpBlocks, err := database.BlocksRecent(
+			ls.db, remaining,
 		)
+		if err != nil {
+			// If we already have in-memory points, a database
+			// error is non-fatal: return what we have.
+			if len(points) > 0 {
+				return points, nil
+			}
+			return nil, err
+		}
+		// Build a set of existing points for deduplication
+		seen := make(map[string]struct{}, len(points))
+		for _, p := range points {
+			seen[pointKey(p)] = struct{}{}
+		}
+		for _, blk := range tmpBlocks {
+			p := ocommon.NewPoint(blk.Slot, blk.Hash)
+			key := pointKey(p)
+			if _, exists := seen[key]; exists {
+				continue
+			}
+			seen[key] = struct{}{}
+			points = append(points, p)
+			if len(points) >= count {
+				break
+			}
+		}
 	}
-	return ret, nil
+	return points, nil
+}
+
+// pointKey returns a string key for deduplication of chain points.
+func pointKey(p ocommon.Point) string {
+	return fmt.Sprintf("%d:%x", p.Slot, p.Hash)
 }
 
 // GetIntersectPoint returns the intersect between the specified points and the current chain
@@ -2577,6 +2868,13 @@ func (ls *LedgerState) GetIntersectPoint(
 	ls.RLock()
 	tip := ls.currentTip
 	ls.RUnlock()
+	// When the chain is empty (tip at origin), origin is the only
+	// valid intersect regardless of what points the peer sends.
+	// This allows peers to start chainsync before we have blocks.
+	if tip.Point.Slot == 0 && len(tip.Point.Hash) == 0 {
+		var ret ocommon.Point
+		return &ret, nil
+	}
 	var ret ocommon.Point
 	var tmpBlock models.Block
 	var err error
@@ -2636,6 +2934,19 @@ func (ls *LedgerState) Tip() ochainsync.Tip {
 	return ls.currentTip
 }
 
+// ChainTipSlot returns the slot number of the current chain tip.
+func (ls *LedgerState) ChainTipSlot() uint64 {
+	ls.RLock()
+	defer ls.RUnlock()
+	return ls.currentTip.Point.Slot
+}
+
+// UpstreamTipSlot returns the latest known tip slot from upstream peers.
+// Returns 0 if no upstream tip is known yet.
+func (ls *LedgerState) UpstreamTipSlot() uint64 {
+	return ls.syncUpstreamTipSlot.Load()
+}
+
 // GetCurrentPParams returns the currentPParams value
 func (ls *LedgerState) GetCurrentPParams() lcommon.ProtocolParameters {
 	return ls.currentPParams
@@ -2651,9 +2962,15 @@ func (ls *LedgerState) CurrentEpoch() uint64 {
 // EpochNonce returns the nonce for the given epoch.
 // The epoch nonce is used for VRF-based leader election.
 // Returns nil if the epoch nonce is not available (e.g., for Byron era).
+//
+// When the slot clock fires an epoch transition before block processing
+// crosses the boundary, the nonce for the next epoch (currentEpoch+1) is
+// computed speculatively from the current epoch's data. This eliminates
+// the forging gap at epoch boundaries where the leader schedule would
+// otherwise be unavailable until a peer's block triggers epoch rollover.
 func (ls *LedgerState) EpochNonce(epoch uint64) []byte {
-	// Check current epoch under read lock; copy nonce if it matches
 	ls.RLock()
+	// Check current epoch under read lock; copy nonce if it matches
 	if epoch == ls.currentEpoch.EpochId {
 		if len(ls.currentEpoch.Nonce) == 0 {
 			ls.RUnlock()
@@ -2663,6 +2980,21 @@ func (ls *LedgerState) EpochNonce(epoch uint64) []byte {
 		copy(nonce, ls.currentEpoch.Nonce)
 		ls.RUnlock()
 		return nonce
+	}
+	// If the requested epoch is ahead of the ledger state (slot clock
+	// fired an epoch transition before block processing caught up),
+	// try to compute the nonce speculatively for the immediate next
+	// epoch. The nonce depends only on data from the current (ending)
+	// epoch, so it is computable before block processing catches up.
+	if epoch > ls.currentEpoch.EpochId {
+		if epoch == ls.currentEpoch.EpochId+1 {
+			currentEpoch := ls.currentEpoch
+			currentEra := ls.currentEra
+			ls.RUnlock()
+			return ls.computeNextEpochNonce(currentEpoch, currentEra)
+		}
+		ls.RUnlock()
+		return nil
 	}
 	ls.RUnlock()
 
@@ -2683,6 +3015,105 @@ func (ls *LedgerState) EpochNonce(epoch uint64) []byte {
 	nonce := make([]byte, len(ep.Nonce))
 	copy(nonce, ep.Nonce)
 	return nonce
+}
+
+// computeNextEpochNonce speculatively computes the epoch nonce for the
+// next epoch (currentEpoch.EpochId + 1) using data from the current epoch.
+// This mirrors the logic in calculateEpochNonce but uses non-transactional
+// DB reads so it can be called from EpochNonce without a DB transaction.
+//
+// Returns nil if the nonce cannot be computed (e.g., missing block data,
+// Byron era, or missing genesis config).
+func (ls *LedgerState) computeNextEpochNonce(
+	currentEpoch models.Epoch,
+	currentEra eras.EraDesc,
+) []byte {
+	// No epoch nonce in Byron
+	if currentEra.Id == 0 {
+		return nil
+	}
+	// Need the Shelley genesis hash for nonce computation
+	if ls.config.CardanoNodeConfig == nil ||
+		ls.config.CardanoNodeConfig.ShelleyGenesisHash == "" {
+		return nil
+	}
+	genesisHashBytes, err := hex.DecodeString(
+		ls.config.CardanoNodeConfig.ShelleyGenesisHash,
+	)
+	if err != nil {
+		return nil
+	}
+
+	// If the current epoch has no nonce (initial epoch), the next epoch's
+	// nonce is the Shelley genesis hash.
+	if len(currentEpoch.Nonce) == 0 {
+		return genesisHashBytes
+	}
+
+	epochStartSlot := currentEpoch.StartSlot + uint64(
+		currentEpoch.LengthInSlots,
+	)
+
+	// Calculate stability window: 3k/f slots
+	stabilityWindow := ls.calculateStabilityWindowForEra(currentEra.Id)
+	var stabilityWindowStartSlot uint64
+	if epochStartSlot > stabilityWindow {
+		stabilityWindowStartSlot = epochStartSlot - stabilityWindow
+	}
+
+	// Determine the candidate nonce.
+	var candidateNonce []byte
+	if stabilityWindowStartSlot < currentEpoch.StartSlot {
+		// Stability window extends before this epoch — use genesis hash.
+		candidateNonce = genesisHashBytes
+	} else {
+		blockBeforeStability, lookupErr := database.BlockBeforeSlot(
+			ls.db, stabilityWindowStartSlot,
+		)
+		if lookupErr != nil {
+			candidateNonce = genesisHashBytes
+		} else {
+			candidateNonce, err = ls.db.GetBlockNonce(
+				ocommon.Point{
+					Hash: blockBeforeStability.Hash,
+					Slot: blockBeforeStability.Slot,
+				},
+				nil,
+			)
+			if err != nil || len(candidateNonce) == 0 {
+				candidateNonce = genesisHashBytes
+			}
+		}
+	}
+
+	// Determine the last epoch block nonce (hash of last block before
+	// the new epoch's start slot).
+	blockLastPrevEpoch, err := database.BlockBeforeSlot(
+		ls.db, epochStartSlot,
+	)
+	if err != nil || len(blockLastPrevEpoch.Hash) == 0 {
+		// No block before this epoch — equivalent to NeutralNonce.
+		return candidateNonce
+	}
+
+	// XOR candidateNonce with lastEpochBlockNonce
+	if len(candidateNonce) < 32 || len(blockLastPrevEpoch.Hash) < 32 {
+		return nil
+	}
+	result := make([]byte, 32)
+	for i := 0; i < 32; i++ {
+		result[i] = candidateNonce[i] ^ blockLastPrevEpoch.Hash[i]
+	}
+	ls.config.Logger.Debug(
+		"speculative epoch nonce computed for next epoch",
+		"component", "ledger",
+		"next_epoch", currentEpoch.EpochId+1,
+		"epoch_start_slot", epochStartSlot,
+		"candidate_nonce", hex.EncodeToString(candidateNonce),
+		"last_block_hash", hex.EncodeToString(blockLastPrevEpoch.Hash),
+		"epoch_nonce", hex.EncodeToString(result),
+	)
+	return result
 }
 
 // SlotsPerEpoch returns the number of slots in an epoch for the current era.
@@ -2746,6 +3177,14 @@ func (ls *LedgerState) CurrentSlot() (uint64, error) {
 		return 0, errors.New("slot clock not initialized")
 	}
 	return ls.slotClock.CurrentSlot()
+}
+
+// NextSlotTime returns the wall-clock time when the next slot begins.
+func (ls *LedgerState) NextSlotTime() (time.Time, error) {
+	if ls.slotClock == nil {
+		return time.Time{}, errors.New("slot clock not initialized")
+	}
+	return ls.slotClock.NextSlotTime()
 }
 
 // NewView creates a new LedgerView for querying ledger state within a transaction.
@@ -2966,6 +3405,16 @@ func (ls *LedgerState) SetMempool(mempool MempoolProvider) {
 	ls.mempool = mempool
 }
 
+// SetForgingEnabled sets the forging_enabled metric gauge. Call with
+// true after the block forger has been initialised successfully.
+func (ls *LedgerState) SetForgingEnabled(enabled bool) {
+	if enabled {
+		ls.metrics.forgingEnabled.Set(1)
+	} else {
+		ls.metrics.forgingEnabled.Set(0)
+	}
+}
+
 // SetForgedBlockChecker sets the forged block checker used for slot
 // battle detection. This is typically called after the block forger
 // is initialized, since the forger is created after the ledger state.
@@ -2973,6 +3422,17 @@ func (ls *LedgerState) SetForgedBlockChecker(checker ForgedBlockChecker) {
 	ls.Lock()
 	defer ls.Unlock()
 	ls.config.ForgedBlockChecker = checker
+}
+
+// SetSlotBattleRecorder sets the recorder used to increment the
+// slot battle metric. This is typically called after the block
+// forger is initialized.
+func (ls *LedgerState) SetSlotBattleRecorder(
+	recorder SlotBattleRecorder,
+) {
+	ls.Lock()
+	defer ls.Unlock()
+	ls.config.SlotBattleRecorder = recorder
 }
 
 // forgeBlock creates a conway block with transactions from mempool
@@ -3280,6 +3740,10 @@ func (ls *LedgerState) forgeBlock() {
 		)
 		return
 	}
+
+	// Wake chainsync server iterators so connected peers discover
+	// the newly forged block immediately.
+	ls.chain.NotifyIterators()
 
 	// Calculate forging latency
 	forgingLatency := time.Since(forgeStartTime)

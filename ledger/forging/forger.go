@@ -16,6 +16,7 @@ package forging
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -25,6 +26,7 @@ import (
 
 	"github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/vrf"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 // Mode represents the forging mode.
@@ -38,6 +40,18 @@ const (
 	// ModeProduction uses real VRF leader election and KES signing.
 	// Requires loaded pool credentials.
 	ModeProduction
+
+	// forgeSyncToleranceSlots is the number of slots the chain tip may lag
+	// behind the upstream peer tip before the forger skips block production.
+	// This accommodates block processing latency and VRF schedule computation
+	// time on fast-slot networks (e.g. 100ms devnet slots) while still
+	// catching bulk sync.
+	forgeSyncToleranceSlots = 100
+
+	// forgeStaleGapThresholdSlots is the slot gap between the chain tip
+	// and the slot clock above which the forger logs an error suggesting
+	// the database contains data from a different genesis.
+	forgeStaleGapThresholdSlots = 1000
 )
 
 // BlockForger coordinates block production for a stake pool.
@@ -55,6 +69,9 @@ type BlockForger struct {
 
 	// Slot battle detection
 	slotTracker *SlotTracker
+
+	// Prometheus metrics
+	metrics *forgingMetrics
 
 	// State
 	mu      sync.RWMutex
@@ -90,6 +107,13 @@ type SlotClockProvider interface {
 	CurrentSlot() (uint64, error)
 	// SlotsPerKESPeriod returns the number of slots in a KES period.
 	SlotsPerKESPeriod() uint64
+	// ChainTipSlot returns the slot number of the current chain tip.
+	ChainTipSlot() uint64
+	// NextSlotTime returns the wall-clock time when the next slot begins.
+	NextSlotTime() (time.Time, error)
+	// UpstreamTipSlot returns the latest known tip slot from upstream peers.
+	// Returns 0 if no upstream tip is known.
+	UpstreamTipSlot() uint64
 }
 
 // ForgerConfig holds configuration for the block forger.
@@ -104,6 +128,9 @@ type ForgerConfig struct {
 	BlockBuilder     BlockBuilder
 	BlockBroadcaster BlockBroadcaster
 	SlotClock        SlotClockProvider
+
+	// Prometheus metrics registry (optional)
+	PromRegistry prometheus.Registerer
 }
 
 // NewBlockForger creates a new block forger.
@@ -143,6 +170,26 @@ func NewBlockForger(cfg ForgerConfig) (*BlockForger, error) {
 		}
 		if cfg.SlotClock == nil {
 			return nil, errors.New("production mode requires slot clock")
+		}
+	}
+
+	if cfg.PromRegistry != nil {
+		f.metrics = initForgingMetrics(cfg.PromRegistry)
+	}
+
+	// Set static OpCert gauges immediately so SPO dashboards show
+	// certificate info without waiting for the first forged block.
+	// Dynamic gauges (currentKESPeriod, remainingKESPeriods) are
+	// updated on every slot-win in updateKESMetrics().
+	if f.metrics != nil && f.creds != nil {
+		opCert := f.creds.GetOpCert()
+		if opCert != nil {
+			f.metrics.opCertStartKES.Set(
+				float64(opCert.KESPeriod),
+			)
+			f.metrics.opCertExpiryKES.Set(
+				float64(f.creds.OpCertExpiryPeriod()),
+			)
 		}
 	}
 
@@ -206,6 +253,63 @@ func (f *BlockForger) runLoop(ctx context.Context) {
 		f.mu.Unlock()
 	}()
 
+	if f.mode == ModeProduction {
+		f.runLoopSlotAligned(ctx)
+	} else {
+		f.runLoopTicker(ctx)
+	}
+}
+
+// runLoopSlotAligned wakes at each slot boundary so the forger can
+// produce before peer blocks arrive.
+func (f *BlockForger) runLoopSlotAligned(ctx context.Context) {
+	retries := 0
+	for {
+		nextSlot, err := f.slotClock.NextSlotTime()
+		if err != nil {
+			retries++
+			// Log warning periodically so operators see why forger is stuck
+			if retries%50 == 1 {
+				f.logger.Warn(
+					"slot clock not ready, retrying",
+					"error", err,
+					"retries", retries,
+				)
+			}
+			// Exponential backoff: 100ms, 200ms, 400ms, ... capped at 5s
+			backoff := time.Duration(100<<min(retries-1, 5)) * time.Millisecond
+			if backoff > 5*time.Second {
+				backoff = 5 * time.Second
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(backoff):
+				continue
+			}
+		}
+		retries = 0
+
+		sleepDur := time.Until(nextSlot)
+		if sleepDur <= 0 {
+			sleepDur = 0
+		}
+
+		timer := time.NewTimer(sleepDur)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+			if err := f.checkAndForge(ctx); err != nil {
+				f.logger.Error("forge check failed", "error", err)
+			}
+		}
+	}
+}
+
+// runLoopTicker uses a fixed interval ticker for dev mode.
+func (f *BlockForger) runLoopTicker(ctx context.Context) {
 	ticker := time.NewTicker(f.slotDuration)
 	defer ticker.Stop()
 
@@ -242,9 +346,77 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 		return fmt.Errorf("failed to get current slot: %w", err)
 	}
 
-	// Check if we're the leader for this slot
-	if !f.leaderChecker.ShouldProduceBlock(currentSlot) {
+	tipSlot := f.slotClock.ChainTipSlot()
+
+	// Skip if a block already exists at the current slot.
+	// When tipSlot >= currentSlot, the chain already has a block at
+	// this slot (possibly from a peer). Producing another would create
+	// a competing block and fork the chain.
+	// Count every slot check (matches cardano-node
+	// Forge.about_to_lead)
+	if f.metrics != nil {
+		f.metrics.forgeAboutToLead.Inc()
+	}
+
+	if currentSlot <= tipSlot {
+		// Detect stale data: if the tip is far ahead of the slot clock,
+		// the database likely contains chain data from a different genesis.
+		// Use subtraction (safe here since tipSlot >= currentSlot from
+		// the outer check) to avoid uint64 overflow on the addition.
+		gap := tipSlot - currentSlot
+		if gap > forgeStaleGapThresholdSlots {
+			f.logger.Error(
+				"chain tip is far ahead of slot clock; database may contain data from a different genesis",
+				"current_slot", currentSlot,
+				"tip_slot", tipSlot,
+				"slot_gap", gap,
+			)
+		} else {
+			f.logger.Debug(
+				"forge skip: slot already has block",
+				"current_slot", currentSlot,
+				"tip_slot", tipSlot,
+			)
+		}
 		return nil
+	}
+
+	// Skip if the chain is still syncing from a peer.
+	// Compare against the upstream peer tip rather than the wall
+	// clock. Forging while syncing creates blocks that conflict
+	// with the peer's chain, causing persistent header mismatches
+	// and resync loops.
+	// See forgeSyncToleranceSlots for the tolerance rationale.
+	upstreamTip := f.slotClock.UpstreamTipSlot()
+	if upstreamTip > 0 &&
+		upstreamTip > tipSlot &&
+		upstreamTip-tipSlot > forgeSyncToleranceSlots {
+		f.logger.Debug(
+			"chain syncing from peer, skipping forge",
+			"current_slot", currentSlot,
+			"tip_slot", tipSlot,
+			"upstream_tip", upstreamTip,
+		)
+		return nil
+	}
+
+	// Check if we're the leader for this slot
+	isLeader := f.leaderChecker.ShouldProduceBlock(currentSlot)
+	if !isLeader {
+		f.logger.Debug(
+			"forge check: not leader for slot",
+			"current_slot", currentSlot,
+			"tip_slot", tipSlot,
+		)
+		if f.metrics != nil {
+			f.metrics.forgeNotLeader.Inc()
+		}
+		return nil
+	}
+
+	// We are the slot leader
+	if f.metrics != nil {
+		f.metrics.forgeNodeIsLeader.Inc()
 	}
 
 	f.logger.Info("producing block", "slot", currentSlot)
@@ -262,22 +434,93 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 		return fmt.Errorf("failed to update KES period: %w", err)
 	}
 
+	// Update KES metrics after successful evolution
+	f.updateKESMetrics(kesPeriod)
+
 	// Build the block
-	block, blockCbor, err := f.blockBuilder.BuildBlock(currentSlot, kesPeriod)
+	block, blockCbor, err := f.blockBuilder.BuildBlock(
+		currentSlot,
+		kesPeriod,
+	)
 	if err != nil {
+		f.incCouldNotForge()
 		return fmt.Errorf("failed to build block: %w", err)
 	}
 
+	// Block forged successfully
+	if f.metrics != nil {
+		f.metrics.forgeForged.Inc()
+		f.metrics.blockSizeBytes.Observe(
+			float64(len(blockCbor)),
+		)
+		f.metrics.blockTxCount.Observe(
+			float64(len(block.Transactions())),
+		)
+	}
+
 	// Add block to chain and broadcast
-	if err := f.blockBroadcaster.AddBlock(block, blockCbor); err != nil {
+	if err := f.blockBroadcaster.AddBlock(
+		block, blockCbor,
+	); err != nil {
+		f.incCouldNotForge()
 		return fmt.Errorf("failed to add block: %w", err)
 	}
 
-	// Record the forged block for slot battle detection
-	f.slotTracker.RecordForgedBlock(currentSlot, block.Hash().Bytes())
+	// Block adopted onto chain
+	if f.metrics != nil {
+		f.metrics.forgeAdopted.Inc()
+	}
 
-	f.logger.Info("block produced successfully", "slot", currentSlot)
+	// Record the forged block for slot battle detection
+	f.slotTracker.RecordForgedBlock(
+		currentSlot, block.Hash().Bytes(),
+	)
+
+	f.logger.Info("block produced successfully",
+		"slot", currentSlot,
+		"hash", hex.EncodeToString(block.Hash().Bytes()),
+	)
 	return nil
+}
+
+// incCouldNotForge increments Forge_could_not_forge. Safe to call
+// when metrics are nil.
+func (f *BlockForger) incCouldNotForge() {
+	if f.metrics != nil {
+		f.metrics.forgeCouldNot.Inc()
+	}
+}
+
+// updateKESMetrics updates KES gauges after a successful KES
+// period update. Safe to call when metrics are nil.
+func (f *BlockForger) updateKESMetrics(
+	currentPeriod uint64,
+) {
+	if f.metrics == nil {
+		return
+	}
+	f.metrics.currentKESPeriod.Set(float64(currentPeriod))
+	f.metrics.remainingKESPeriods.Set(
+		float64(f.creds.PeriodsRemaining(currentPeriod)),
+	)
+	opCert := f.creds.GetOpCert()
+	if opCert != nil {
+		f.metrics.opCertStartKES.Set(
+			float64(opCert.KESPeriod),
+		)
+		f.metrics.opCertExpiryKES.Set(
+			float64(f.creds.OpCertExpiryPeriod()),
+		)
+	}
+}
+
+// RecordSlotBattle increments the slot battles counter. This is
+// called from external components (e.g., LedgerState) when a slot
+// battle is detected.
+func (f *BlockForger) RecordSlotBattle() {
+	if f.metrics != nil {
+		f.metrics.slotBattlesTotal.Inc()
+	}
 }
 
 // VRFProofForSlot generates a VRF proof for leader election at the given slot.

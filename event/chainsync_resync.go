@@ -1,4 +1,4 @@
-// Copyright 2025 Blink Labs Software
+// Copyright 2026 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,17 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package models
+package event
 
-type ResignCommitteeCold struct {
-	AnchorUrl      string `gorm:"size:128"`
-	ColdCredential []byte `gorm:"index;size:28"`
-	AnchorHash     []byte
-	ID             uint   `gorm:"primarykey"`
-	CertificateID  uint   `gorm:"index"`
-	AddedSlot      uint64 `gorm:"index"`
-}
+import ouroboros "github.com/blinklabs-io/gouroboros"
 
-func (ResignCommitteeCold) TableName() string {
-	return "resign_committee_cold"
+// ChainsyncResyncEventType is the event type emitted when a
+// chainsync re-sync is required (e.g. persistent fork detected
+// or rollback exceeds the security parameter).
+const ChainsyncResyncEventType = EventType("chainsync.resync")
+
+// ChainsyncResyncEvent carries the connection ID that should
+// be re-synced.
+type ChainsyncResyncEvent struct {
+	ConnectionId ouroboros.ConnectionId
+	Reason       string
 }

@@ -221,6 +221,36 @@ func (d *Database) SetGenesisTransaction(
 	return nil
 }
 
+// SetGenesisStaking stores genesis pool registrations and stake
+// delegations. This is metadata-only (no blob operations needed).
+func (d *Database) SetGenesisStaking(
+	pools map[string]lcommon.PoolRegistrationCertificate,
+	stakeDelegations map[string]string,
+	blockHash []byte,
+	txn *Txn,
+) error {
+	if txn == nil {
+		if err := d.metadata.SetGenesisStaking(
+			pools,
+			stakeDelegations,
+			blockHash,
+			nil,
+		); err != nil {
+			return fmt.Errorf("set genesis staking: %w", err)
+		}
+		return nil
+	}
+	if err := d.metadata.SetGenesisStaking(
+		pools,
+		stakeDelegations,
+		blockHash,
+		txn.Metadata(),
+	); err != nil {
+		return fmt.Errorf("set genesis staking: %w", err)
+	}
+	return nil
+}
+
 func (d *Database) GetTransactionByHash(
 	hash []byte,
 	txn *Txn,

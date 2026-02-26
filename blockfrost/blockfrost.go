@@ -91,9 +91,14 @@ func (b *Blockfrost) Start(
 		b.handleNetwork,
 	)
 
+	// Wrap handler with a request body size limit (1 MB)
+	// as defense-in-depth against oversized payloads.
+	const maxRequestBodyBytes int64 = 1 << 20 // 1 MB
+	handler := http.MaxBytesHandler(mux, maxRequestBodyBytes)
+
 	server := &http.Server{
 		Addr:              b.config.ListenAddress,
-		Handler:           mux,
+		Handler:           handler,
 		ReadHeaderTimeout: 60 * time.Second,
 	}
 	b.httpServer = server

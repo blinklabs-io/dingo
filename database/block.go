@@ -121,6 +121,21 @@ func (d *Database) SetGenesisCbor(slot uint64, hash []byte, cborData []byte, txn
 	return nil
 }
 
+// HasGenesisCbor checks whether genesis CBOR data exists at the expected
+// blob key for the given slot and hash. This is used to validate that
+// existing chain data matches the current genesis configuration.
+func (d *Database) HasGenesisCbor(slot uint64, hash []byte) bool {
+	blob := d.Blob()
+	if blob == nil {
+		return false
+	}
+	txn := d.BlobTxn(false)
+	defer txn.Rollback() //nolint:errcheck
+	key := types.BlockBlobKey(slot, hash)
+	_, err := blob.Get(txn.Blob(), key)
+	return err == nil
+}
+
 func BlockDeleteTxn(txn *Txn, block models.Block) error {
 	if txn == nil {
 		return types.ErrNilTxn

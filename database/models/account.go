@@ -31,7 +31,14 @@ type Account struct {
 	ID            uint   `gorm:"primarykey"`
 	AddedSlot     uint64 `gorm:"index"`
 	CertificateID uint   `gorm:"index"`
-	Active        bool   `gorm:"default:true"`
+	Reward        types.Uint64
+	// DrepType is the CBOR-encoded DRep delegation type:
+	//   0 = key credential, 1 = script credential,
+	//   2 = AlwaysAbstain, 3 = AlwaysNoConfidence.
+	// A zero value (0) means either "key credential" or "no delegation set",
+	// disambiguated by whether Drep is nil.
+	DrepType uint64 `gorm:"default:0"`
+	Active   bool   `gorm:"default:true"`
 }
 
 func (a *Account) TableName() string {

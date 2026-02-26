@@ -67,6 +67,17 @@ func TestWithMaxConnections(t *testing.T) {
 	}
 }
 
+func TestWithStorageMode(t *testing.T) {
+	m := &MetadataStoreSqlite{}
+	option := WithStorageMode("api")
+
+	option(m)
+
+	if m.storageMode != "api" {
+		t.Errorf("Expected storageMode to be 'api', got %q", m.storageMode)
+	}
+}
+
 func TestWithMaxConnections_DefaultUsed(t *testing.T) {
 	// Test that DefaultMaxConnections is used when maxConnections is 0
 	m := &MetadataStoreSqlite{}

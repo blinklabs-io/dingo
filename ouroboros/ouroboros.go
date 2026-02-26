@@ -29,9 +29,12 @@ import (
 	"github.com/blinklabs-io/dingo/mempool"
 	"github.com/blinklabs-io/dingo/peergov"
 	ouroboros "github.com/blinklabs-io/gouroboros"
+	oprotocol "github.com/blinklabs-io/gouroboros/protocol"
 	oblockfetch "github.com/blinklabs-io/gouroboros/protocol/blockfetch"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	oleiosfetch "github.com/blinklabs-io/gouroboros/protocol/leiosfetch"
+	oleiosnotify "github.com/blinklabs-io/gouroboros/protocol/leiosnotify"
 	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
 	olocaltxmonitor "github.com/blinklabs-io/gouroboros/protocol/localtxmonitor"
 	olocaltxsubmission "github.com/blinklabs-io/gouroboros/protocol/localtxsubmission"
@@ -61,6 +64,8 @@ type Ouroboros struct {
 	// ChainSync measurement tracking for peer scoring
 	chainsyncStats map[ouroboros.ConnectionId]*chainsyncPeerStats
 	chainsyncMutex sync.Mutex
+	// Per-connection mutex to serialize chainsync restarts
+	restartMu sync.Map // ouroboros.ConnectionId → *sync.Mutex
 	// Per-peer rate limiter for TxSubmission server
 	txSubmissionRateLimiter *txSubmissionRateLimiter
 }
@@ -85,6 +90,8 @@ type OuroborosConfig struct {
 	// mini-protocol. A value of 0 uses DefaultMaxTxSubmissionsPerSecond.
 	// A negative value disables rate limiting.
 	MaxTxSubmissionsPerSecond int
+	// Enable experimental Leios protocol support
+	EnableLeios bool
 }
 
 type blockfetchMetrics struct {
@@ -196,29 +203,62 @@ func (o *Ouroboros) ConfigureListeners(
 				),
 			)
 		} else {
-			// Node-to-node config
+			// Node-to-node config: full duplex with both client and
+			// server handlers, matching cardano-node behavior. This
+			// allows a single inbound TCP connection to carry both
+			// directions of the Ouroboros mini-protocols.
 			l.ConnectionOpts = append(
 				l.ConnectionOpts,
+				ouroboros.WithFullDuplex(true),
+				ouroboros.WithKeepAlive(true),
 				ouroboros.WithPeerSharing(o.config.PeerSharing),
 				ouroboros.WithNetworkMagic(o.config.NetworkMagic),
 				ouroboros.WithPeerSharingConfig(
 					opeersharing.NewConfig(
-						o.peersharingServerConnOpts()...,
+						slices.Concat(
+							o.peersharingClientConnOpts(),
+							o.peersharingServerConnOpts(),
+						)...,
 					),
 				),
 				ouroboros.WithTxSubmissionConfig(
 					otxsubmission.NewConfig(
-						o.txsubmissionServerConnOpts()...,
+						slices.Concat(
+							o.txsubmissionClientConnOpts(),
+							o.txsubmissionServerConnOpts(),
+						)...,
 					),
 				),
 				ouroboros.WithChainSyncConfig(
 					ochainsync.NewConfig(
-						o.chainsyncServerConnOpts()...,
+						slices.Concat(
+							o.chainsyncClientConnOpts(),
+							o.chainsyncServerConnOpts(),
+						)...,
 					),
 				),
 				ouroboros.WithBlockFetchConfig(
 					oblockfetch.NewConfig(
-						o.blockfetchServerConnOpts()...,
+						slices.Concat(
+							o.blockfetchClientConnOpts(),
+							o.blockfetchServerConnOpts(),
+						)...,
+					),
+				),
+				ouroboros.WithLeiosFetchConfig(
+					oleiosfetch.NewConfig(
+						slices.Concat(
+							o.leiosfetchClientConnOpts(),
+							o.leiosfetchServerConnOpts(),
+						)...,
+					),
+				),
+				ouroboros.WithLeiosNotifyConfig(
+					oleiosnotify.NewConfig(
+						slices.Concat(
+							o.leiosnotifyClientConnOpts(),
+							o.leiosnotifyServerConnOpts(),
+						)...,
 					),
 				),
 			)
@@ -267,6 +307,22 @@ func (o *Ouroboros) OutboundConnOpts() []ouroboros.ConnectionOptionFunc {
 				)...,
 			),
 		),
+		ouroboros.WithLeiosFetchConfig(
+			oleiosfetch.NewConfig(
+				slices.Concat(
+					o.leiosfetchClientConnOpts(),
+					o.leiosfetchServerConnOpts(),
+				)...,
+			),
+		),
+		ouroboros.WithLeiosNotifyConfig(
+			oleiosnotify.NewConfig(
+				slices.Concat(
+					o.leiosnotifyClientConnOpts(),
+					o.leiosnotifyServerConnOpts(),
+				)...,
+			),
+		),
 	}
 }
 
@@ -306,6 +362,8 @@ func (o *Ouroboros) HandleConnClosedEvent(evt event.Event) {
 	o.chainsyncMutex.Lock()
 	delete(o.chainsyncStats, connId)
 	o.chainsyncMutex.Unlock()
+	// Clean up per-connection restart mutex
+	o.restartMu.Delete(connId)
 	// Clean up TxSubmission rate limiter state
 	if o.txSubmissionRateLimiter != nil {
 		o.txSubmissionRateLimiter.RemovePeer(connId)
@@ -374,4 +432,102 @@ func (o *Ouroboros) HandleOutboundConnEvent(evt event.Event) {
 		)
 		return
 	}
+	// Start leiosnotify client
+	if o.config.EnableLeios {
+		if err := o.leiosnotifyClientStart(connId); err != nil {
+			o.config.Logger.Error(
+				"failed to start leiosnotify client",
+				"error",
+				err,
+			)
+			return
+		}
+	}
+}
+
+// HandleInboundConnEvent starts client-side mini-protocols on full-duplex
+// inbound connections. When the remote peer negotiated InitiatorAndResponder
+// mode, a single TCP connection can carry both directions of the Ouroboros
+// protocols, matching cardano-node's connection manager behavior.
+func (o *Ouroboros) HandleInboundConnEvent(evt event.Event) {
+	e, ok := evt.Data.(connmanager.InboundConnectionEvent)
+	if !ok {
+		o.config.Logger.Warn(
+			"received unexpected event data type for inbound connection event",
+			"expected", "connmanager.InboundConnectionEvent",
+			"got", fmt.Sprintf("%T", evt.Data),
+		)
+		return
+	}
+	connId := e.ConnectionId
+
+	// Look up the connection to check its negotiated diffusion mode
+	conn := o.ConnManager.GetConnectionById(connId)
+	if conn == nil {
+		o.config.Logger.Debug(
+			"inbound connection not found, skipping client start",
+			"connection_id", connId.String(),
+		)
+		return
+	}
+
+	// Only start client protocols if the peer negotiated full duplex
+	_, versionData := conn.ProtocolVersion()
+	if versionData == nil || versionData.DiffusionMode() != oprotocol.DiffusionModeInitiatorAndResponder {
+		o.config.Logger.Debug(
+			"inbound connection is not full-duplex, skipping client start",
+			"connection_id", connId.String(),
+		)
+		return
+	}
+
+	o.config.Logger.Info(
+		"full-duplex inbound connection, starting client protocols",
+		"connection_id", connId.String(),
+	)
+
+	// Start chainsync client on this full-duplex inbound connection.
+	// If the chainsync client fails (e.g. intersection not found because
+	// the peer follows a different fork), close the connection so
+	// peergov stops tracking it and outbound retries are not blocked
+	// by a stale inbound.
+	if o.ChainsyncState != nil {
+		maxClients := defaultMaxChainsyncClients
+		if o.ChainsyncState.MaxClients() > 0 {
+			maxClients = o.ChainsyncState.MaxClients()
+		}
+		if o.ChainsyncState.TryAddClientConnId(connId, maxClients) {
+			if err := o.chainsyncClientStart(connId); err != nil {
+				o.ChainsyncState.RemoveClientConnId(connId)
+				o.config.Logger.Error(
+					"failed to start inbound chainsync client, closing",
+					"error", err,
+					"connection_id", connId.String(),
+				)
+				// Close the connection so peergov stops tracking it and
+				// outbound retries are not blocked by a stale inbound.
+				if closeErr := conn.Close(); closeErr != nil {
+					o.config.Logger.Warn(
+						"failed to close connection",
+						"error", closeErr,
+						"connection_id", connId.String(),
+					)
+				}
+				o.ConnManager.RemoveConnection(connId)
+				return
+			} else {
+				o.config.Logger.Debug(
+					"started chainsync client on inbound connection",
+					"connection_id", connId.String(),
+					"total_clients", o.ChainsyncState.ClientConnCount(),
+				)
+			}
+		}
+	}
+	// Do NOT start TxSubmission client on inbound connections.
+	// The relay's connection manager may not have started its
+	// responder-direction TxSubmission server yet when we send
+	// Init(), causing a muxer protocol error and connection reset.
+	// TxSubmission client will be started on our own outbound
+	// connection instead.
 }

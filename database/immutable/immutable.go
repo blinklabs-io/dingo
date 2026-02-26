@@ -15,6 +15,7 @@
 package immutable
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -73,22 +74,20 @@ func (i *ImmutableDb) getChunkNamesFromPoint(
 	if err != nil {
 		return nil, err
 	}
+	if len(chunkNames) == 0 {
+		return nil, errors.New(
+			"immutable DB: no chunk files found in data directory",
+		)
+	}
 	// Return all chunks for the origin
 	if point.Slot == 0 {
 		return chunkNames, nil
 	}
 	lowerBound := 0
-	upperBound := len(chunkNames)
+	upperBound := len(chunkNames) - 1
 	for lowerBound <= upperBound {
 		// Get chunk in the middle of the current bounds
 		middlePoint := (lowerBound + upperBound) / 2
-		if middlePoint < 0 || middlePoint >= len(chunkNames) {
-			return nil, fmt.Errorf(
-				"immutable DB: middlePoint %d out of bounds (chunkNames len=%d)",
-				middlePoint,
-				len(chunkNames),
-			)
-		}
 		middleChunkName := chunkNames[middlePoint]
 		middleSecondary, err := i.getChunkSecondaryIndex(middleChunkName)
 		if err != nil {
@@ -125,6 +124,12 @@ func (i *ImmutableDb) getChunkNamesFromPoint(
 			// We found the chunk that (probably) has the requested point
 			break
 		}
+	}
+	if lowerBound >= len(chunkNames) {
+		return nil, fmt.Errorf(
+			"immutable DB: slot %d is beyond the last chunk",
+			point.Slot,
+		)
 	}
 	return chunkNames[lowerBound:], nil
 }
@@ -318,7 +323,9 @@ func (b *BlockIterator) Next() (*Block, error) {
 	for {
 		tmpBlock, err = b.chunk.Next()
 		if err != nil {
-			return nil, err
+			closeErr := b.chunk.Close()
+			b.chunk = nil
+			return nil, errors.Join(err, closeErr)
 		}
 		if tmpBlock == nil {
 			// We've reached the end of the current chunk
