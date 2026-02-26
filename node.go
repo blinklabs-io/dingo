@@ -488,21 +488,23 @@ func (n *Node) Run(ctx context.Context) error {
 		})
 	}
 
-	n.bark = bark.NewBark(
-		bark.BarkConfig{
-			Logger: n.config.logger,
-			DB:     db,
-			Port:   n.config.barkPort,
-		},
-	)
-	if err := n.bark.Start(n.ctx); err != nil { //nolint:contextcheck
-		return err
-	}
-	started = append(started, func() { //nolint:contextcheck
-		if err := n.bark.Stop(context.Background()); err != nil {
-			n.config.logger.Error("failed to stop bark during cleanup", "error", err)
+	if n.config.barkPort > 0 {
+		n.bark = bark.NewBark(
+			bark.BarkConfig{
+				Logger: n.config.logger,
+				DB:     db,
+				Port:   n.config.barkPort,
+			},
+		)
+		if err := n.bark.Start(n.ctx); err != nil { //nolint:contextcheck
+			return fmt.Errorf("failed to start bark server: %w", err)
 		}
-	})
+		started = append(started, func() { //nolint:contextcheck
+			if err := n.bark.Stop(context.Background()); err != nil {
+				n.config.logger.Error("failed to stop bark during cleanup", "error", err)
+			}
+		})
+	}
 
 	// Configure Blockfrost API (if port is set)
 	if n.config.blockfrostPort > 0 {
