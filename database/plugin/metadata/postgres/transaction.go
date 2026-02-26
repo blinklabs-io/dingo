@@ -393,7 +393,7 @@ func (d *MetadataStorePostgres) SetTransaction(
 		TTL:        types.Uint64(tx.TTL()),
 		Valid:      tx.IsValid(),
 	}
-	if tx.Metadata() != nil {
+	if tx.Metadata() != nil && d.storageMode == types.StorageModeAPI {
 		tmpMetadata, err := cbor.Encode(tx.Metadata())
 		if err != nil {
 			return fmt.Errorf("failed to encode metadata: %w", err)
@@ -637,125 +637,186 @@ func (d *MetadataStorePostgres) SetTransaction(
 			return result.Error
 		}
 	}
-	// Index unique addresses participating in this transaction.
-	// It checks both transaction input & output.
-	addressUtxos := make(
-		[]models.Utxo,
-		0,
-		len(tmpTx.Inputs)+len(tmpTx.Collateral)+len(tmpTx.Outputs)+1,
-	)
-	addressUtxos = append(addressUtxos, tmpTx.Inputs...)
-	addressUtxos = append(addressUtxos, tmpTx.Collateral...)
-	addressUtxos = append(addressUtxos, tmpTx.Outputs...)
-	if tmpTx.CollateralReturn != nil {
-		addressUtxos = append(addressUtxos, *tmpTx.CollateralReturn)
-	}
-	addressTxs := collectAddressTransactions(
-		tmpTx.ID,
-		point.Slot,
-		idx,
-		addressUtxos,
-	)
-	if result := db.Where("transaction_id = ?", tmpTx.ID).
-		Delete(&models.AddressTransaction{}); result.Error != nil {
-		return fmt.Errorf("delete existing address transactions: %w", result.Error)
-	}
-	if len(addressTxs) > 0 {
-		if result := db.Create(&addressTxs); result.Error != nil {
-			return fmt.Errorf("create address transactions: %w", result.Error)
+	// Address indexing, witnesses, scripts, redeemers, and plutus data only stored in API mode
+	if d.storageMode == types.StorageModeAPI {
+		// Index unique addresses participating in this transaction.
+		// It checks both transaction input & output.
+		addressUtxos := make(
+			[]models.Utxo,
+			0,
+			len(tmpTx.Inputs)+len(tmpTx.Collateral)+len(tmpTx.Outputs)+1,
+		)
+		addressUtxos = append(addressUtxos, tmpTx.Inputs...)
+		addressUtxos = append(addressUtxos, tmpTx.Collateral...)
+		addressUtxos = append(addressUtxos, tmpTx.Outputs...)
+		if tmpTx.CollateralReturn != nil {
+			addressUtxos = append(addressUtxos, *tmpTx.CollateralReturn)
 		}
-	}
-	// Extract and save witness set data
-	// Delete existing witness records to ensure idempotency on retry
-	if result := db.Where("transaction_id = ?", tmpTx.ID).Delete(&models.KeyWitness{}); result.Error != nil {
-		return fmt.Errorf("delete existing key witnesses: %w", result.Error)
-	}
-	if result := db.Where("transaction_id = ?", tmpTx.ID).Delete(&models.WitnessScripts{}); result.Error != nil {
-		return fmt.Errorf("delete existing witness scripts: %w", result.Error)
-	}
-	if result := db.Where("transaction_id = ?", tmpTx.ID).Delete(&models.Redeemer{}); result.Error != nil {
-		return fmt.Errorf("delete existing redeemers: %w", result.Error)
-	}
-	if result := db.Where("transaction_id = ?", tmpTx.ID).Delete(&models.PlutusData{}); result.Error != nil {
-		return fmt.Errorf("delete existing plutus data: %w", result.Error)
-	}
-	ws := tx.Witnesses()
-	if ws != nil {
-		// Add Vkey Witnesses
-		for _, vkey := range ws.Vkey() {
-			keyWitness := models.KeyWitness{
-				TransactionID: tmpTx.ID,
-				Type:          models.KeyWitnessTypeVkey,
-				Vkey:          vkey.Vkey,
-				Signature:     vkey.Signature,
-			}
-			if result := db.Create(&keyWitness); result.Error != nil {
-				return fmt.Errorf("create vkey witness: %w", result.Error)
+		addressTxs := collectAddressTransactions(
+			tmpTx.ID,
+			point.Slot,
+			idx,
+			addressUtxos,
+		)
+		if result := db.Where("transaction_id = ?", tmpTx.ID).
+			Delete(&models.AddressTransaction{}); result.Error != nil {
+			return fmt.Errorf("delete existing address transactions: %w", result.Error)
+		}
+		if len(addressTxs) > 0 {
+			if result := db.Create(&addressTxs); result.Error != nil {
+				return fmt.Errorf("create address transactions: %w", result.Error)
 			}
 		}
-
-		// Add Bootstrap Witnesses
-		for _, bootstrap := range ws.Bootstrap() {
-			keyWitness := models.KeyWitness{
-				TransactionID: tmpTx.ID,
-				Type:          models.KeyWitnessTypeBootstrap,
-				PublicKey:     bootstrap.PublicKey,
-				Signature:     bootstrap.Signature,
-				ChainCode:     bootstrap.ChainCode,
-				Attributes:    bootstrap.Attributes,
-			}
-			if result := db.Create(&keyWitness); result.Error != nil {
-				return fmt.Errorf("create bootstrap witness: %w", result.Error)
-			}
+		// Extract and save witness set data
+		// Delete existing witness records to ensure idempotency on retry
+		result := db.Where(
+			"transaction_id = ?", tmpTx.ID,
+		).Delete(&models.KeyWitness{})
+		if result.Error != nil {
+			return fmt.Errorf(
+				"delete existing key witnesses: %w",
+				result.Error,
+			)
 		}
-
-		// Process all script types using the generic helper
-		if err := processScripts(db, tmpTx.ID, uint8(lcommon.ScriptRefTypeNativeScript), ws.NativeScripts(), point); err != nil {
-			return err
+		result = db.Where(
+			"transaction_id = ?", tmpTx.ID,
+		).Delete(&models.WitnessScripts{})
+		if result.Error != nil {
+			return fmt.Errorf(
+				"delete existing witness scripts: %w",
+				result.Error,
+			)
 		}
-		if err := processScripts(db, tmpTx.ID, uint8(lcommon.ScriptRefTypePlutusV1), ws.PlutusV1Scripts(), point); err != nil {
-			return err
+		result = db.Where(
+			"transaction_id = ?", tmpTx.ID,
+		).Delete(&models.Redeemer{})
+		if result.Error != nil {
+			return fmt.Errorf(
+				"delete existing redeemers: %w",
+				result.Error,
+			)
 		}
-		if err := processScripts(db, tmpTx.ID, uint8(lcommon.ScriptRefTypePlutusV2), ws.PlutusV2Scripts(), point); err != nil {
-			return err
+		result = db.Where(
+			"transaction_id = ?", tmpTx.ID,
+		).Delete(&models.PlutusData{})
+		if result.Error != nil {
+			return fmt.Errorf(
+				"delete existing plutus data: %w",
+				result.Error,
+			)
 		}
-		if err := processScripts(db, tmpTx.ID, uint8(lcommon.ScriptRefTypePlutusV3), ws.PlutusV3Scripts(), point); err != nil {
-			return err
-		}
-
-		// Add PlutusData (Datums)
-		for _, datum := range ws.PlutusData() {
-			plutusData := models.PlutusData{
-				TransactionID: tmpTx.ID,
-				Data:          datum.Cbor(),
-			}
-			if result := db.Create(&plutusData); result.Error != nil {
-				return fmt.Errorf("create plutus data: %w", result.Error)
-			}
-		}
-
-		// Add Redeemers
-		if ws.Redeemers() != nil {
-			for key, value := range ws.Redeemers().Iter() {
-				//nolint:gosec
-				redeemer := models.Redeemer{
+		ws := tx.Witnesses()
+		if ws != nil {
+			// Add Vkey Witnesses
+			for _, vkey := range ws.Vkey() {
+				keyWitness := models.KeyWitness{
 					TransactionID: tmpTx.ID,
-					Tag:           uint8(key.Tag),
-					Index:         key.Index,
-					Data:          value.Data.Cbor(),
-					ExUnitsMemory: uint64(
-						max(0, value.ExUnits.Memory),
-					),
-					ExUnitsCPU: uint64(
-						max(0, value.ExUnits.Steps),
-					),
+					Type:          models.KeyWitnessTypeVkey,
+					Vkey:          vkey.Vkey,
+					Signature:     vkey.Signature,
 				}
-				if result := db.Create(&redeemer); result.Error != nil {
-					return fmt.Errorf("create redeemer: %w", result.Error)
+				if result := db.Create(&keyWitness); result.Error != nil {
+					return fmt.Errorf("create vkey witness: %w", result.Error)
+				}
+			}
+
+			// Add Bootstrap Witnesses
+			for _, bootstrap := range ws.Bootstrap() {
+				keyWitness := models.KeyWitness{
+					TransactionID: tmpTx.ID,
+					Type:          models.KeyWitnessTypeBootstrap,
+					PublicKey:     bootstrap.PublicKey,
+					Signature:     bootstrap.Signature,
+					ChainCode:     bootstrap.ChainCode,
+					Attributes:    bootstrap.Attributes,
+				}
+				if result := db.Create(&keyWitness); result.Error != nil {
+					return fmt.Errorf("create bootstrap witness: %w", result.Error)
+				}
+			}
+
+			// Process all script types using the generic helper
+			if err := processScripts(
+				db, tmpTx.ID,
+				uint8(lcommon.ScriptRefTypeNativeScript),
+				ws.NativeScripts(), point,
+			); err != nil {
+				return fmt.Errorf(
+					"process NativeScript scripts for tx %d at slot %d: %w",
+					tmpTx.ID, point.Slot, err,
+				)
+			}
+			if err := processScripts(
+				db, tmpTx.ID,
+				uint8(lcommon.ScriptRefTypePlutusV1),
+				ws.PlutusV1Scripts(), point,
+			); err != nil {
+				return fmt.Errorf(
+					"process PlutusV1 scripts for tx %d at slot %d: %w",
+					tmpTx.ID, point.Slot, err,
+				)
+			}
+			if err := processScripts(
+				db, tmpTx.ID,
+				uint8(lcommon.ScriptRefTypePlutusV2),
+				ws.PlutusV2Scripts(), point,
+			); err != nil {
+				return fmt.Errorf(
+					"process PlutusV2 scripts for tx %d at slot %d: %w",
+					tmpTx.ID, point.Slot, err,
+				)
+			}
+			if err := processScripts(
+				db, tmpTx.ID,
+				uint8(lcommon.ScriptRefTypePlutusV3),
+				ws.PlutusV3Scripts(), point,
+			); err != nil {
+				return fmt.Errorf(
+					"process PlutusV3 scripts for tx %d at slot %d: %w",
+					tmpTx.ID, point.Slot, err,
+				)
+			}
+
+			// Add PlutusData (Datums) — only for valid transactions,
+			// matching storeTransactionDatums which hash-indexes them.
+			if tx.IsValid() {
+				for _, datum := range ws.PlutusData() {
+					plutusData := models.PlutusData{
+						TransactionID: tmpTx.ID,
+						Data:          datum.Cbor(),
+					}
+					if result := db.Create(&plutusData); result.Error != nil {
+						return fmt.Errorf(
+							"create plutus data: %w",
+							result.Error,
+						)
+					}
+				}
+			}
+
+			// Add Redeemers
+			if ws.Redeemers() != nil {
+				for key, value := range ws.Redeemers().Iter() {
+					//nolint:gosec
+					redeemer := models.Redeemer{
+						TransactionID: tmpTx.ID,
+						Tag:           uint8(key.Tag),
+						Index:         key.Index,
+						Data:          value.Data.Cbor(),
+						ExUnitsMemory: uint64(
+							max(0, value.ExUnits.Memory),
+						),
+						ExUnitsCPU: uint64(
+							max(0, value.ExUnits.Steps),
+						),
+					}
+					if result := db.Create(&redeemer); result.Error != nil {
+						return fmt.Errorf("create redeemer: %w", result.Error)
+					}
 				}
 			}
 		}
-	}
+	} // end storageMode == types.StorageModeAPI
 
 	// Avoid updating associations
 	result = db.Omit(clause.Associations).Save(tmpTx)
@@ -1618,8 +1679,10 @@ func (d *MetadataStorePostgres) SetTransaction(
 			}
 		}
 
-		if err := d.storeTransactionDatums(tx, point.Slot, txn); err != nil {
-			return fmt.Errorf("store datums failed: %w", err)
+		if d.storageMode == types.StorageModeAPI {
+			if err := d.storeTransactionDatums(tx, point.Slot, txn); err != nil {
+				return fmt.Errorf("store datums failed: %w", err)
+			}
 		}
 	}
 

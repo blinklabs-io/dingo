@@ -121,6 +121,14 @@ func (u *Uint64) Scan(val any) error {
 	}
 }
 
+// Storage mode constants shared by the metadata plugins.
+const (
+	// StorageModeCore stores only consensus and chain state data.
+	StorageModeCore = "core"
+	// StorageModeAPI stores everything needed for API queries.
+	StorageModeAPI = "api"
+)
+
 // ErrBlobKeyNotFound is returned by blob operations when a key is missing
 var ErrBlobKeyNotFound = errors.New("blob key not found")
 

@@ -193,7 +193,7 @@ type Config struct {
 	RejectionWatermark   float64 `yaml:"rejectionWatermark" envconfig:"DINGO_MEMPOOL_REJECTION_WATERMARK"`
 	PrivatePort          uint    `yaml:"privatePort"                                                      split_words:"true"`
 	RelayPort            uint    `yaml:"relayPort"          envconfig:"port"`
-	UtxorpcPort          uint    `yaml:"utxorpcPort"                                                      split_words:"true"`
+	UtxorpcPort          uint    `yaml:"utxorpcPort"        envconfig:"DINGO_UTXORPC_PORT"`
 	MetricsPort          uint    `yaml:"metricsPort"                                                      split_words:"true"`
 	IntersectTip         bool    `yaml:"intersectTip"                                                     split_words:"true"`
 	ValidateHistorical   bool    `yaml:"validateHistorical"                                               split_words:"true"`
@@ -238,8 +238,19 @@ type Config struct {
 	ShelleyKESKey                 string `yaml:"shelleyKesKey"                 envconfig:"SHELLEY_KES_KEY"`
 	ShelleyOperationalCertificate string `yaml:"shelleyOperationalCertificate" envconfig:"SHELLEY_OPERATIONAL_CERTIFICATE"`
 
-	// Mesh (Coinbase Rosetta) API listen address (empty = disabled)
-	MeshListenAddress string `yaml:"meshListenAddress" envconfig:"DINGO_MESH_LISTEN_ADDRESS"`
+	// Blockfrost REST API port (0 = disabled)
+	BlockfrostPort uint `yaml:"blockfrostPort" envconfig:"DINGO_BLOCKFROST_PORT"`
+	// Mesh (Coinbase Rosetta) API port (0 = disabled)
+	MeshPort uint `yaml:"meshPort" envconfig:"DINGO_MESH_PORT"`
+
+	// Storage mode: "core" (default) or "api".
+	// "core" stores only consensus data
+	// (UTxOs, certs, pools, pparams).
+	// "api" additionally stores witnesses, scripts,
+	// datums, redeemers, and tx metadata.
+	// APIs (blockfrost, utxorpc, mesh) require
+	// "api" mode.
+	StorageMode string `yaml:"storageMode" envconfig:"DINGO_STORAGE_MODE"`
 
 	// Mithril snapshot bootstrap configuration
 	Mithril MithrilConfig `yaml:"mithril"`
@@ -336,12 +347,13 @@ var globalConfig = &Config{
 	PrivateBindAddr:      "127.0.0.1",
 	PrivatePort:          3002,
 	RelayPort:            3001,
-	UtxorpcPort:          9090,
+	UtxorpcPort:          0,
 	Topology:             "",
 	TlsCertFilePath:      "",
 	TlsKeyFilePath:       "",
 	BlobPlugin:           DefaultBlobPlugin,
 	MetadataPlugin:       DefaultMetadataPlugin,
+	StorageMode:          "core",
 	RunMode:              RunModeServe,
 	ImmutableDbPath:      "",
 	ShutdownTimeout:      DefaultShutdownTimeout,

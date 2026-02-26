@@ -28,6 +28,7 @@ var (
 	cmdlineOptions struct {
 		dataDir        string
 		maxConnections int
+		storageMode    string
 	}
 	cmdlineOptionsMutex sync.RWMutex
 )
@@ -38,6 +39,7 @@ func initCmdlineOptions() {
 	defer cmdlineOptionsMutex.Unlock()
 	cmdlineOptions.dataDir = ".dingo"
 	cmdlineOptions.maxConnections = DefaultMaxConnections
+	cmdlineOptions.storageMode = "core"
 }
 
 // Register plugin
@@ -64,6 +66,13 @@ func init() {
 					DefaultValue: DefaultMaxConnections,
 					Dest:         &(cmdlineOptions.maxConnections),
 				},
+				{
+					Name:         "storage-mode",
+					Type:         plugin.PluginOptionTypeString,
+					Description:  "Storage tier: core or api",
+					DefaultValue: "core",
+					Dest:         &(cmdlineOptions.storageMode),
+				},
 			},
 		},
 	)
@@ -73,11 +82,13 @@ func NewFromCmdlineOptions() plugin.Plugin {
 	cmdlineOptionsMutex.RLock()
 	dataDir := cmdlineOptions.dataDir
 	maxConnections := cmdlineOptions.maxConnections
+	storageMode := cmdlineOptions.storageMode
 	cmdlineOptionsMutex.RUnlock()
 
 	opts := []SqliteOptionFunc{
 		WithDataDir(dataDir),
 		WithMaxConnections(maxConnections),
+		WithStorageMode(storageMode),
 		// Logger and promRegistry will use defaults if nil
 	}
 	p, err := NewWithOptions(opts...)
