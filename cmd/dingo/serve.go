@@ -15,17 +15,22 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"os"
 
+	dingo "github.com/blinklabs-io/dingo"
+	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/internal/node"
 	"github.com/spf13/cobra"
 )
 
-func serveRun(_ *cobra.Command, _ []string, cfg *config.Config) {
+func serveRun(
+	cmd *cobra.Command, _ []string, cfg *config.Config,
+) {
 	logger := commonRun()
 
 	// Check for an in-progress sync. If the "sync_status" key in
@@ -35,6 +40,19 @@ func serveRun(_ *cobra.Command, _ []string, cfg *config.Config) {
 	if err := checkSyncState(cfg, logger); err != nil {
 		slog.Error(err.Error())
 		os.Exit(1)
+	}
+
+	// Resume incomplete metadata backfill if interrupted
+	if dingo.StorageMode(cfg.StorageMode).IsAPI() {
+		if err := resumeBackfill(
+			cmd.Context(), cfg, logger,
+		); err != nil {
+			slog.Error(
+				"backfill resume failed",
+				"error", err,
+			)
+			os.Exit(1)
+		}
 	}
 
 	// Run node
@@ -73,6 +91,66 @@ func checkSyncState(
 			"Mithril bootstrap) to resume before starting the node",
 		val,
 	)
+}
+
+// resumeBackfill checks for an incomplete metadata backfill and
+// runs it to completion before the node starts serving.
+func resumeBackfill(
+	ctx context.Context,
+	cfg *config.Config,
+	logger *slog.Logger,
+) error {
+	// Load Cardano node config for pparams and nonce
+	// computation during backfill.
+	nodeCfg, nodeCfgErr := cardano.LoadCardanoNodeConfigWithFallback(
+		cfg.CardanoConfig,
+		cfg.Network,
+		cardano.EmbeddedConfigPreviewNetworkFS,
+	)
+	if nodeCfgErr != nil {
+		logger.Warn(
+			"could not load cardano node config, "+
+				"backfill will skip pparams seeding "+
+				"and nonce computation",
+			"component", "backfill",
+			"error", nodeCfgErr,
+		)
+	}
+
+	db, err := database.New(&database.Config{
+		DataDir:        cfg.DatabasePath,
+		Logger:         logger,
+		BlobPlugin:     cfg.BlobPlugin,
+		MetadataPlugin: cfg.MetadataPlugin,
+		MaxConnections: cfg.DatabaseWorkers,
+		StorageMode:    cfg.StorageMode,
+	})
+	if err != nil {
+		return fmt.Errorf("opening database: %w", err)
+	}
+	defer db.Close()
+
+	bf := node.NewBackfill(db, nodeCfg, logger)
+	needed, err := bf.NeedsBackfill()
+	if err != nil {
+		return fmt.Errorf("checking backfill state: %w", err)
+	}
+	if !needed {
+		return nil
+	}
+
+	// Enable bulk-load optimizations for the backfill
+	cleanup := node.WithBulkLoadPragmas(db, logger)
+	defer cleanup()
+
+	logger.Info(
+		"resuming incomplete metadata backfill",
+		"component", "backfill",
+	)
+	if err := bf.Run(ctx); err != nil {
+		return fmt.Errorf("backfill: %w", err)
+	}
+	return nil
 }
 
 func serveCommand() *cobra.Command {
