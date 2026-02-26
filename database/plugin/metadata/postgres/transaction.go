@@ -21,8 +21,8 @@ import (
 	"strings"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata/internal/labelcodec"
 	"github.com/blinklabs-io/dingo/database/types"
-	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"gorm.io/gorm"
@@ -213,6 +213,57 @@ func (d *MetadataStorePostgres) GetTransactionsByAddress(
 	return ret, nil
 }
 
+// GetTransactionsByMetadataLabel returns transactions containing a metadata
+// entry for the requested label.
+func (d *MetadataStorePostgres) GetTransactionsByMetadataLabel(
+	label uint64,
+	limit int,
+	offset int,
+	order string,
+	txn types.Txn,
+) ([]models.Transaction, error) {
+	var ret []models.Transaction
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return nil, err
+	}
+
+	orderClause := "slot ASC, block_index ASC"
+	if strings.EqualFold(order, "desc") {
+		orderClause = "slot DESC, block_index DESC"
+	}
+
+	subQuery := db.Model(&models.TransactionMetadataLabel{}).
+		Select("transaction_id").
+		Where("label = ?", label)
+
+	query := db.
+		Where("id IN (?)", subQuery).
+		Order(orderClause).
+		Preload(clause.Associations).
+		Preload("Inputs.Assets").
+		Preload("Outputs.Assets").
+		Preload("Collateral.Assets").
+		Preload("ReferenceInputs.Assets")
+
+	if limit > 0 {
+		query = query.Limit(limit)
+	}
+	if offset > 0 {
+		query = query.Offset(offset)
+	}
+
+	if result := query.Find(&ret); result.Error != nil {
+		return nil, fmt.Errorf(
+			"get txs by metadata label %d: %w",
+			label,
+			result.Error,
+		)
+	}
+
+	return ret, nil
+}
+
 // processScripts is a generic helper to process any script type
 func processScripts[T lcommon.Script](
 	db *gorm.DB,
@@ -352,12 +403,19 @@ func (d *MetadataStorePostgres) SetTransaction(
 		TTL:        types.Uint64(tx.TTL()),
 		Valid:      tx.IsValid(),
 	}
+	var metadataLabels []labelcodec.Entry
 	if tx.Metadata() != nil {
-		tmpMetadata, err := cbor.Encode(tx.Metadata())
+		tmpMetadata, tmpLabels, err := labelcodec.EncodeAndExtract(
+			tx.Metadata(),
+		)
 		if err != nil {
-			return fmt.Errorf("failed to encode metadata: %w", err)
+			return fmt.Errorf(
+				"failed to extract metadata labels: %w",
+				err,
+			)
 		}
 		tmpTx.Metadata = tmpMetadata
+		metadataLabels = tmpLabels
 	}
 	collateralReturn := tx.CollateralReturn()
 	// Store all produced UTxOs - tx.Produced() returns correct indices for both
@@ -404,6 +462,37 @@ func (d *MetadataStorePostgres) SetTransaction(
 			return fmt.Errorf("transaction not found after upsert: %x", txHash)
 		}
 		tmpTx.ID = existingTx.ID
+	}
+	if len(metadataLabels) > 0 {
+		labelRecords := make(
+			[]models.TransactionMetadataLabel,
+			0,
+			len(metadataLabels),
+		)
+		for _, tmpLabel := range metadataLabels {
+			labelRecords = append(labelRecords, models.TransactionMetadataLabel{
+				TransactionID: tmpTx.ID,
+				Label:         tmpLabel.Label,
+				Slot:          point.Slot,
+				CborValue:     tmpLabel.CborValue,
+				JsonValue:     tmpLabel.JsonValue,
+			})
+		}
+		if result := db.Clauses(clause.OnConflict{
+			Columns: []clause.Column{
+				{Name: "transaction_id"},
+				{Name: "label"},
+			},
+			DoUpdates: clause.AssignmentColumns(
+				[]string{"slot", "cbor_value", "json_value"},
+			),
+		}).Create(&labelRecords); result.Error != nil {
+			return fmt.Errorf(
+				"create metadata labels for tx %x: %w",
+				txHash,
+				result.Error,
+			)
+		}
 	}
 	// Add Inputs to Transaction
 	for _, input := range tx.Inputs() {
@@ -1745,6 +1834,28 @@ func (d *MetadataStorePostgres) DeleteTransactionsAfterSlot(
 		return result.Error
 	}
 
+	return nil
+}
+
+// DeleteTransactionMetadataLabelsAfterSlot removes transaction metadata label
+// index records added after the given slot.
+func (d *MetadataStorePostgres) DeleteTransactionMetadataLabelsAfterSlot(
+	slot uint64,
+	txn types.Txn,
+) error {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return err
+	}
+	if result := db.
+		Where("slot > ?", slot).
+		Delete(&models.TransactionMetadataLabel{}); result.Error != nil {
+		return fmt.Errorf(
+			"delete transaction metadata labels after slot %d: %w",
+			slot,
+			result.Error,
+		)
+	}
 	return nil
 }
 
