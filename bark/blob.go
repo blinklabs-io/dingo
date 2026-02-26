@@ -173,8 +173,14 @@ func (b *BlobStoreBark) GetBlock(
 			fmt.Errorf("failed decoding previous hash: %w", err)
 	}
 
+	blockType := block.GetMeta().GetType()
+	if blockType < 0 {
+		return nil, types.BlockMetadata{},
+			fmt.Errorf("invalid block type: %d", blockType)
+	}
+
 	return blockBody, types.BlockMetadata{
-		Type:     (uint)(block.GetMeta().GetType()),
+		Type:     (uint)(blockType),
 		Height:   block.GetBlock().GetHeight(),
 		PrevHash: prevHash,
 	}, nil

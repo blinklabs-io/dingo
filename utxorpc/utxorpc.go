@@ -284,7 +284,8 @@ func (u *Utxorpc) startServer(server *http.Server) error {
 		if u.config.TlsCertFilePath != "" && u.config.TlsKeyFilePath != "" {
 			serverType = "TLS"
 		}
-		return fmt.Errorf("failed to start utxorpc gRPC %s server: %w", serverType, err)
+		return fmt.Errorf("failed to start utxorpc gRPC %s server: %w",
+			serverType, err)
 	case <-time.After(100 * time.Millisecond):
 		// Assume startup succeeded if no error within 100ms
 	}

@@ -178,7 +178,7 @@ func (b *Bark) startServer(server *http.Server) error {
 		} else {
 			err = server.ListenAndServe()
 		}
-		if err != nil && err != http.ErrServerClosed {
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			select {
 			case startErr <- err:
 			default:
