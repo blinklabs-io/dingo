@@ -97,6 +97,7 @@ type MetadataStoreSqlite struct {
 	timerVacuum    *time.Timer
 	dataDir        string
 	maxConnections int
+	storageMode    string
 	timerMutex     sync.Mutex
 	closed         bool
 }
@@ -126,6 +127,22 @@ func NewWithOptions(opts ...SqliteOptionFunc) (*MetadataStoreSqlite, error) {
 	// Set defaults after options are applied (no side effects)
 	if db.logger == nil {
 		db.logger = slog.New(slog.NewTextHandler(os.Stderr, nil))
+	}
+
+	// Default and validate storageMode
+	if db.storageMode == "" {
+		db.storageMode = types.StorageModeCore
+	}
+	switch db.storageMode {
+	case types.StorageModeCore, types.StorageModeAPI:
+		// valid
+	default:
+		return nil, fmt.Errorf(
+			"invalid storage mode %q: must be %q or %q",
+			db.storageMode,
+			types.StorageModeCore,
+			types.StorageModeAPI,
+		)
 	}
 
 	// Note: Database initialization moved to Start()

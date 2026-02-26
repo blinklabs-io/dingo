@@ -19,6 +19,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
+	"strconv"
 	"sync"
 	"time"
 
@@ -122,6 +124,7 @@ func (n *Node) Run(ctx context.Context) error {
 		BlobPlugin:     n.config.blobPlugin,
 		MetadataPlugin: n.config.metadataPlugin,
 		MaxConnections: n.config.DatabaseWorkerPoolConfig.WorkerPoolSize,
+		StorageMode:    string(n.config.storageMode),
 	}
 	db, err := database.New(dbConfig)
 	if db == nil {
@@ -452,40 +455,49 @@ func (n *Node) Run(ctx context.Context) error {
 		return err
 	}
 	started = append(started, func() { n.peerGov.Stop() })
-	// Configure UTxO RPC
-	n.utxorpc = utxorpc.NewUtxorpc(
-		utxorpc.UtxorpcConfig{
-			Logger:      n.config.logger,
-			EventBus:    n.eventBus,
-			LedgerState: n.ledgerState,
-			Mempool:     n.mempool,
-			Port:        n.config.utxorpcPort,
-		},
-	)
-	if err := n.utxorpc.Start(n.ctx); err != nil { //nolint:contextcheck
-		return err
-	}
-	started = append(started, func() { //nolint:contextcheck
-		if err := n.utxorpc.Stop(context.Background()); err != nil {
-			n.config.logger.Error(
-				"failed to stop utxorpc during cleanup",
-				"error",
-				err,
-			)
+	// Configure UTxO RPC (only when port is configured)
+	if n.config.utxorpcPort > 0 {
+		n.utxorpc = utxorpc.NewUtxorpc(
+			utxorpc.UtxorpcConfig{
+				Logger:          n.config.logger,
+				EventBus:        n.eventBus,
+				LedgerState:     n.ledgerState,
+				Mempool:         n.mempool,
+				Host:            n.config.bindAddr,
+				Port:            n.config.utxorpcPort,
+				TlsCertFilePath: n.config.tlsCertFilePath,
+				TlsKeyFilePath:  n.config.tlsKeyFilePath,
+			},
+		)
+		if err := n.utxorpc.Start(n.ctx); err != nil { //nolint:contextcheck
+			return fmt.Errorf("starting utxorpc: %w", err)
 		}
-	})
-	// Configure Blockfrost API (if listen address is set)
-	if n.config.blockfrostListenAddress != "" {
+		started = append(started, func() { //nolint:contextcheck
+			if err := n.utxorpc.Stop(context.Background()); err != nil {
+				n.config.logger.Error(
+					"failed to stop utxorpc during cleanup",
+					"error",
+					err,
+				)
+			}
+		})
+	}
+	// Configure Blockfrost API (if port is set)
+	if n.config.blockfrostPort > 0 {
+		listenAddr := net.JoinHostPort(
+			n.config.bindAddr,
+			strconv.FormatUint(uint64(n.config.blockfrostPort), 10),
+		)
 		adapter := blockfrost.NewNodeAdapter(n.ledgerState)
 		n.blockfrostAPI = blockfrost.New(
 			blockfrost.BlockfrostConfig{
-				ListenAddress: n.config.blockfrostListenAddress,
+				ListenAddress: listenAddr,
 			},
 			adapter,
 			n.config.logger,
 		)
 		if err := n.blockfrostAPI.Start(n.ctx); err != nil { //nolint:contextcheck
-			return err
+			return fmt.Errorf("starting blockfrost API: %w", err)
 		}
 		started = append(started, func() { //nolint:contextcheck
 			if err := n.blockfrostAPI.Stop(context.Background()); err != nil {
@@ -498,8 +510,8 @@ func (n *Node) Run(ctx context.Context) error {
 		})
 	}
 
-	// Configure Mesh API (if listen address is set)
-	if n.config.meshListenAddress != "" {
+	// Configure Mesh API (if port is set)
+	if n.config.meshPort > 0 {
 		var genesisHash string
 		var genesisStartTimeSec int64
 		if nc := n.config.cardanoNodeConfig; nc != nil {
@@ -514,17 +526,20 @@ func (n *Node) Run(ctx context.Context) error {
 					"(Byron genesis hash and Shelley genesis)",
 			)
 		}
+		listenAddr := net.JoinHostPort(
+			n.config.bindAddr,
+			strconv.FormatUint(uint64(n.config.meshPort), 10),
+		)
 		var meshErr error
 		n.meshAPI, meshErr = mesh.NewServer(
 			mesh.ServerConfig{
-				Logger:      n.config.logger,
-				EventBus:    n.eventBus,
-				LedgerState: n.ledgerState,
-				Database:    n.db,
-				Chain:       n.ledgerState.Chain(),
-				Mempool:     n.mempool,
-				ListenAddress: n.config.
-					meshListenAddress,
+				Logger:              n.config.logger,
+				EventBus:            n.eventBus,
+				LedgerState:         n.ledgerState,
+				Database:            n.db,
+				Chain:               n.ledgerState.Chain(),
+				Mempool:             n.mempool,
+				ListenAddress:       listenAddr,
 				Network:             n.config.network,
 				NetworkMagic:        n.config.networkMagic,
 				GenesisHash:         genesisHash,

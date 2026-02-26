@@ -22,14 +22,15 @@ import (
 
 var (
 	cmdlineOptions struct {
-		host     string
-		port     uint64
-		user     string
-		password string
-		database string
-		sslMode  string
-		timeZone string
-		dsn      string
+		host        string
+		port        uint64
+		user        string
+		password    string
+		database    string
+		sslMode     string
+		timeZone    string
+		dsn         string
+		storageMode string
 	}
 	cmdlineOptionsMutex sync.RWMutex
 )
@@ -47,6 +48,7 @@ func initCmdlineOptions() {
 	cmdlineOptions.sslMode = "disable"
 	cmdlineOptions.timeZone = "UTC"
 	cmdlineOptions.dsn = ""
+	cmdlineOptions.storageMode = "core"
 }
 
 // Register plugin
@@ -115,6 +117,13 @@ func init() {
 					DefaultValue: "",
 					Dest:         &(cmdlineOptions.dsn),
 				},
+				{
+					Name:         "storage-mode",
+					Type:         plugin.PluginOptionTypeString,
+					Description:  "Storage tier: core or api",
+					DefaultValue: "core",
+					Dest:         &(cmdlineOptions.storageMode),
+				},
 			},
 		},
 	)
@@ -130,6 +139,7 @@ func NewFromCmdlineOptions() plugin.Plugin {
 	sslMode := cmdlineOptions.sslMode
 	timeZone := cmdlineOptions.timeZone
 	dsn := cmdlineOptions.dsn
+	storageMode := cmdlineOptions.storageMode
 	cmdlineOptionsMutex.RUnlock()
 
 	opts := []PostgresOptionFunc{
@@ -141,6 +151,7 @@ func NewFromCmdlineOptions() plugin.Plugin {
 		WithSSLMode(sslMode),
 		WithTimeZone(timeZone),
 		WithDSN(dsn),
+		WithStorageMode(storageMode),
 		// Logger and promRegistry will use defaults if nil
 	}
 	p, err := NewWithOptions(opts...)

@@ -90,14 +90,15 @@ type MetadataStoreMysql struct {
 	db           *gorm.DB
 	logger       *slog.Logger
 
-	host     string
-	port     uint
-	user     string
-	password string
-	database string
-	sslMode  string
-	timeZone string
-	dsn      string // Data source name (MySQL connection string)
+	host        string
+	port        uint
+	user        string
+	password    string
+	database    string
+	sslMode     string
+	timeZone    string
+	dsn         string // Data source name (MySQL connection string)
+	storageMode string
 
 	poolMaxIdle int // saved pool max idle connections
 	poolMaxOpen int // saved pool max open connections
@@ -158,6 +159,22 @@ func NewWithOptions(opts ...MysqlOptionFunc) (*MetadataStoreMysql, error) {
 	}
 	if db.logger == nil {
 		db.logger = slog.New(slog.NewTextHandler(os.Stderr, nil))
+	}
+
+	// Default and validate storageMode
+	if db.storageMode == "" {
+		db.storageMode = types.StorageModeCore
+	}
+	switch db.storageMode {
+	case types.StorageModeCore, types.StorageModeAPI:
+		// valid
+	default:
+		return nil, fmt.Errorf(
+			"invalid storage mode %q: must be %q or %q",
+			db.storageMode,
+			types.StorageModeCore,
+			types.StorageModeAPI,
+		)
 	}
 
 	// Note: Database initialization moved to Start()

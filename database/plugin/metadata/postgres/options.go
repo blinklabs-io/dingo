@@ -16,6 +16,7 @@ package postgres
 
 import (
 	"log/slog"
+	"strings"
 
 	"github.com/prometheus/client_golang/prometheus"
 )
@@ -92,5 +93,13 @@ func WithTimeZone(timeZone string) PostgresOptionFunc {
 func WithDSN(dsn string) PostgresOptionFunc {
 	return func(m *MetadataStorePostgres) {
 		m.dsn = dsn
+	}
+}
+
+// WithStorageMode specifies the storage tier.
+// "core" = consensus only, "api" = full tx metadata.
+func WithStorageMode(mode string) PostgresOptionFunc {
+	return func(m *MetadataStorePostgres) {
+		m.storageMode = strings.ToLower(mode)
 	}
 }
