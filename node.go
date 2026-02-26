@@ -231,9 +231,11 @@ func (n *Node) Run(ctx context.Context) error {
 		n.db.SetBlobStore(bark.NewBarkBlobStore(bark.BlobStoreBarkConfig{
 			BaseUrl:        n.config.barkBaseUrl,
 			SecurityWindow: n.config.barkSecurityWindow,
-			HTTPClient:     http.DefaultClient,
-			LedgerState:    state,
-			Logger:         n.config.logger,
+			HTTPClient: &http.Client{
+				Timeout: 30 * time.Second,
+			},
+			LedgerState: state,
+			Logger:      n.config.logger,
 		}, n.db.Blob()))
 	}
 
