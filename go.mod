@@ -15,8 +15,8 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.96.0
 	github.com/aws/smithy-go v1.24.1
 	github.com/blinklabs-io/bursa v0.15.0
-	github.com/blinklabs-io/gouroboros v0.158.2
-	github.com/blinklabs-io/ouroboros-mock v0.9.0
+	github.com/blinklabs-io/gouroboros v0.159.0
+	github.com/blinklabs-io/ouroboros-mock v0.9.1
 	github.com/blinklabs-io/plutigo v0.0.25
 	github.com/blockfrost/blockfrost-go v0.3.0
 	github.com/btcsuite/btcd/btcutil v1.1.6
@@ -70,7 +70,7 @@ require (
 	cloud.google.com/go/longrunning v0.8.0 // indirect
 	cloud.google.com/go/monitoring v1.24.3 // indirect
 	filippo.io/age v1.2.1 // indirect
-	filippo.io/edwards25519 v1.1.1 // indirect
+	filippo.io/edwards25519 v1.2.0 // indirect
 	github.com/Azure/azure-sdk-for-go/sdk/azcore v1.19.1 // indirect
 	github.com/Azure/azure-sdk-for-go/sdk/azidentity v1.12.0 // indirect
 	github.com/Azure/azure-sdk-for-go/sdk/internal v1.11.2 // indirect

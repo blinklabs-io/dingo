@@ -33,6 +33,8 @@ import (
 	oblockfetch "github.com/blinklabs-io/gouroboros/protocol/blockfetch"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	oleiosfetch "github.com/blinklabs-io/gouroboros/protocol/leiosfetch"
+	oleiosnotify "github.com/blinklabs-io/gouroboros/protocol/leiosnotify"
 	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
 	olocaltxmonitor "github.com/blinklabs-io/gouroboros/protocol/localtxmonitor"
 	olocaltxsubmission "github.com/blinklabs-io/gouroboros/protocol/localtxsubmission"
@@ -88,6 +90,8 @@ type OuroborosConfig struct {
 	// mini-protocol. A value of 0 uses DefaultMaxTxSubmissionsPerSecond.
 	// A negative value disables rate limiting.
 	MaxTxSubmissionsPerSecond int
+	// Enable experimental Leios protocol support
+	EnableLeios bool
 }
 
 type blockfetchMetrics struct {
@@ -241,6 +245,22 @@ func (o *Ouroboros) ConfigureListeners(
 						)...,
 					),
 				),
+				ouroboros.WithLeiosFetchConfig(
+					oleiosfetch.NewConfig(
+						slices.Concat(
+							o.leiosfetchClientConnOpts(),
+							o.leiosfetchServerConnOpts(),
+						)...,
+					),
+				),
+				ouroboros.WithLeiosNotifyConfig(
+					oleiosnotify.NewConfig(
+						slices.Concat(
+							o.leiosnotifyClientConnOpts(),
+							o.leiosnotifyServerConnOpts(),
+						)...,
+					),
+				),
 			)
 		}
 		tmpListeners[idx] = l
@@ -284,6 +304,22 @@ func (o *Ouroboros) OutboundConnOpts() []ouroboros.ConnectionOptionFunc {
 				slices.Concat(
 					o.blockfetchClientConnOpts(),
 					o.blockfetchServerConnOpts(),
+				)...,
+			),
+		),
+		ouroboros.WithLeiosFetchConfig(
+			oleiosfetch.NewConfig(
+				slices.Concat(
+					o.leiosfetchClientConnOpts(),
+					o.leiosfetchServerConnOpts(),
+				)...,
+			),
+		),
+		ouroboros.WithLeiosNotifyConfig(
+			oleiosnotify.NewConfig(
+				slices.Concat(
+					o.leiosnotifyClientConnOpts(),
+					o.leiosnotifyServerConnOpts(),
 				)...,
 			),
 		),
@@ -395,6 +431,17 @@ func (o *Ouroboros) HandleOutboundConnEvent(evt event.Event) {
 			err,
 		)
 		return
+	}
+	// Start leiosnotify client
+	if o.config.EnableLeios {
+		if err := o.leiosnotifyClientStart(connId); err != nil {
+			o.config.Logger.Error(
+				"failed to start leiosnotify client",
+				"error",
+				err,
+			)
+			return
+		}
 	}
 }
 

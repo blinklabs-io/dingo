@@ -177,6 +177,7 @@ func (n *Node) Run(ctx context.Context) error {
 		IntersectTip:    n.config.intersectTip,
 		IntersectPoints: n.config.intersectPoints,
 		PromRegistry:    n.config.promRegistry,
+		EnableLeios:     n.config.runMode == runModeLeios,
 	})
 	// Load state
 	state, err := ledger.NewLedgerState(

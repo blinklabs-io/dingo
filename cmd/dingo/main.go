@@ -213,8 +213,8 @@ func main() {
 					os.Exit(1)
 				}
 				loadRun(cmd.Context(), []string{cfg.ImmutableDbPath}, cfg)
-			case config.RunModeServe, config.RunModeDev:
-				// serve and dev modes both run the server
+			case config.RunModeServe, config.RunModeDev, config.RunModeLeios:
+				// serve, dev, and leios modes all run the server
 				serveRun(cmd, args, cfg)
 			default:
 				// Empty or unrecognized RunMode defaults to serve mode

@@ -37,6 +37,7 @@ const (
 	runModeServe = "serve"
 	runModeLoad  = "load"
 	runModeDev   = "dev"
+	runModeLeios = "leios"
 )
 
 // StorageMode controls how much data the metadata store persists.
