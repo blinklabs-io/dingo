@@ -207,7 +207,10 @@ func (d *MetadataStoreSqlite) GetTransactionsByAddress(
 			stakingKey,
 		)
 	case len(paymentKey) > 0:
-		addrQuery = addrQuery.Where("payment_key = ?", paymentKey)
+		addrQuery = addrQuery.Where(
+			"payment_key = ? AND (staking_key IS NULL OR LENGTH(staking_key) = 0)",
+			paymentKey,
+		)
 	default:
 		addrQuery = addrQuery.Where("staking_key = ?", stakingKey)
 	}
