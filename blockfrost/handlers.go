@@ -16,13 +16,16 @@ package blockfrost
 
 import (
 	"encoding/json"
+	"log/slog"
 	"net/http"
 )
 
 const apiVersion = "0.1.0"
 
 // writeJSON writes a JSON response with the given status
-// code.
+// code. If encoding fails, it logs the error for
+// diagnostics (the status code cannot be changed since
+// headers have already been sent).
 func writeJSON(
 	w http.ResponseWriter,
 	status int,
@@ -30,8 +33,16 @@ func writeJSON(
 ) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	//nolint:errcheck,errchkjson
-	json.NewEncoder(w).Encode(v)
+	if err := json.NewEncoder(w).Encode(v); err != nil {
+		// Header is already sent so we cannot change the
+		// status code, but we log the failure for
+		// diagnostics.
+		slog.Error(
+			"failed to encode JSON response",
+			"component", "blockfrost",
+			"error", err,
+		)
+	}
 }
 
 // writeError writes a Blockfrost-format error response.

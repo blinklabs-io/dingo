@@ -161,14 +161,14 @@ func (c *ConnectionManager) startListener(
 						consecutiveErrors,
 					),
 				)
-				// Sleep with cancellation awareness
-				c.listenersMutex.Lock()
-				isClosing = c.closing
-				c.listenersMutex.Unlock()
-				if isClosing {
+				// Backoff with cancellation awareness
+				timer := time.NewTimer(backoff)
+				select {
+				case <-timer.C:
+				case <-ctx.Done():
+					timer.Stop()
 					return
 				}
-				time.Sleep(backoff)
 				continue
 			}
 			// Successful accept - reset consecutive error count

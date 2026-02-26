@@ -28,7 +28,10 @@ type Utxo struct {
 	PaymentKey              []byte       `gorm:"index;size:28"`
 	StakingKey              []byte       `gorm:"index;size:28"`
 	Assets                  []Asset      `gorm:"foreignKey:UtxoID;constraint:OnDelete:CASCADE"`
-	Cbor                    []byte       `gorm:"-"` // This is here for convenience but not represented in the metadata DB
+	Cbor                    []byte       `gorm:"-"`       // This is here for convenience but not represented in the metadata DB
+	DatumHash               []byte       `gorm:"size:32"` // Optional datum hash (32 bytes)
+	Datum                   []byte       `gorm:"-"`       // Inline datum CBOR, not stored in metadata DB
+	ScriptRef               []byte       `gorm:"-"`       // Reference script bytes, not stored in metadata DB
 	SpentAtTxId             []byte       `gorm:"index;size:32"`
 	ReferencedByTxId        []byte       `gorm:"index;size:32"`
 	CollateralByTxId        []byte       `gorm:"index;size:32"`
@@ -59,13 +62,17 @@ func UtxoLedgerToModel(
 		Amount:    types.Uint64(utxo.Output.Amount().Uint64()),
 		OutputIdx: utxo.Id.Index(),
 	}
+	var zeroHash ledger.Blake2b224
 	pkh := outAddr.PaymentKeyHash()
-	if pkh != ledger.NewBlake2b224(nil) {
+	if pkh != zeroHash {
 		ret.PaymentKey = pkh.Bytes()
 	}
 	skh := outAddr.StakeKeyHash()
-	if skh != ledger.NewBlake2b224(nil) {
+	if skh != zeroHash {
 		ret.StakingKey = skh.Bytes()
+	}
+	if dh := utxo.Output.DatumHash(); dh != nil {
+		ret.DatumHash = dh.Bytes()
 	}
 	if multiAssetOutput, ok := utxo.Output.(interface {
 		MultiAsset() *lcommon.MultiAsset[lcommon.MultiAssetTypeOutput]

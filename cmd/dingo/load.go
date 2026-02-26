@@ -15,6 +15,7 @@
 package main
 
 import (
+	"context"
 	"log/slog"
 	"os"
 
@@ -23,7 +24,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-func loadRun(_ *cobra.Command, args []string, cfg *config.Config) {
+func loadRun(ctx context.Context, args []string, cfg *config.Config) {
 	var immutablePath string
 
 	// CLI argument takes priority over config
@@ -39,7 +40,7 @@ func loadRun(_ *cobra.Command, args []string, cfg *config.Config) {
 	}
 
 	logger := commonRun()
-	if err := node.Load(cfg, logger, immutablePath); err != nil {
+	if err := node.Load(ctx, cfg, logger, immutablePath); err != nil {
 		slog.Error(err.Error())
 		os.Exit(1)
 	}
@@ -55,7 +56,7 @@ func loadCommand() *cobra.Command {
 				slog.Error("no config found in context")
 				os.Exit(1)
 			}
-			loadRun(cmd, args, cfg)
+			loadRun(cmd.Context(), args, cfg)
 		},
 	}
 	return cmd

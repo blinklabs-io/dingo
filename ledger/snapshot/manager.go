@@ -39,8 +39,10 @@ type Manager struct {
 
 	mu             sync.RWMutex
 	running        bool
+	stopping       bool
 	cancel         context.CancelFunc
 	subscriptionId event.EventSubscriberId
+	loopWg         sync.WaitGroup
 }
 
 // NewManager creates a new snapshot manager.
@@ -59,16 +61,29 @@ func NewManager(
 	}
 }
 
-// Start begins listening for epoch transitions and capturing snapshots.
-func (m *Manager) Start() error {
+// Start begins listening for epoch transitions and capturing
+// snapshots. The provided context is used as the parent for the
+// manager's internal context; cancelling it will stop all
+// snapshot operations.
+func (m *Manager) Start(ctx context.Context) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	if m.running {
 		return nil
 	}
+	if m.stopping {
+		return errors.New(
+			"snapshot manager: Stop in progress, cannot Start",
+		)
+	}
 
 	// Guard against nil dependencies to avoid panics
+	if ctx == nil {
+		return errors.New(
+			"snapshot manager: nil context",
+		)
+	}
 	if m.db == nil {
 		return errors.New("snapshot manager: nil database")
 	}
@@ -76,7 +91,13 @@ func (m *Manager) Start() error {
 		return errors.New("snapshot manager: nil event bus")
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
+	// Reject an already-cancelled context so we don't mark the manager as
+	// running while the event loop would exit immediately.
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("snapshot manager: parent context already done: %w", err)
+	}
+
+	childCtx, cancel := context.WithCancel(ctx)
 	m.cancel = cancel
 	m.running = true
 
@@ -93,7 +114,32 @@ func (m *Manager) Start() error {
 			"component", "snapshot",
 		)
 	} else {
-		go m.epochTransitionLoop(ctx, evtCh)
+		m.loopWg.Add(1)
+		go func() {
+			defer m.loopWg.Done()
+			m.epochTransitionLoop(childCtx, evtCh)
+			// If the goroutine exits because the parent
+			// context was cancelled (not via Stop), reset
+			// running and unsubscribe so Start can be
+			// called again without leaking a stale
+			// subscriber.
+			m.mu.Lock()
+			if !m.stopping {
+				m.running = false
+				if m.cancel != nil {
+					m.cancel()
+					m.cancel = nil
+				}
+				if m.subscriptionId != 0 {
+					m.eventBus.Unsubscribe(
+						event.EpochTransitionEventType,
+						m.subscriptionId,
+					)
+					m.subscriptionId = 0
+				}
+			}
+			m.mu.Unlock()
+		}()
 	}
 
 	m.logger.Info("snapshot manager started", "component", "snapshot")
@@ -103,12 +149,12 @@ func (m *Manager) Start() error {
 // Stop stops the snapshot manager.
 func (m *Manager) Stop() error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	if !m.running {
+		m.mu.Unlock()
 		return nil
 	}
 
+	m.stopping = true
 	if m.cancel != nil {
 		m.cancel()
 	}
@@ -120,8 +166,22 @@ func (m *Manager) Stop() error {
 		m.subscriptionId = 0
 	}
 	m.running = false
+	m.mu.Unlock()
 
-	m.logger.Info("snapshot manager stopped", "component", "snapshot")
+	// Wait outside the lock — Stop releases m.mu before Wait so
+	// the goroutine's cleanup path can re-acquire it.
+	m.loopWg.Wait()
+
+	// Clear transient state so Start can be called again.
+	m.mu.Lock()
+	m.stopping = false
+	m.cancel = nil
+	m.mu.Unlock()
+
+	m.logger.Info(
+		"snapshot manager stopped",
+		"component", "snapshot",
+	)
 	return nil
 }
 
@@ -135,15 +195,27 @@ func (m *Manager) epochTransitionLoop(
 	ctx context.Context,
 	evtCh <-chan event.Event,
 ) {
-	for evt := range evtCh {
+	for {
+		var evt event.Event
+		var ok bool
+		select {
+		case <-ctx.Done():
+			return
+		case evt, ok = <-evtCh:
+			if !ok {
+				return
+			}
+		}
 		// Drain any queued events, keeping only the latest.
 		latest := evt
 		skipped := false
 	drain:
 		for {
 			select {
-			case newer, ok := <-evtCh:
-				if !ok {
+			case <-ctx.Done():
+				return
+			case newer, chOk := <-evtCh:
+				if !chOk {
 					return
 				}
 				latest = newer
@@ -164,13 +236,15 @@ func (m *Manager) epochTransitionLoop(
 
 		if skipped {
 			// We skipped intermediate events
-			skippedEvt, _ := evt.Data.(event.EpochTransitionEvent)
-			m.logger.Info(
-				"fast-forwarded past intermediate epoch transitions",
-				"component", "snapshot",
-				"from_epoch", skippedEvt.NewEpoch,
-				"to_epoch", epochEvent.NewEpoch,
-			)
+			skippedEvt, ok := evt.Data.(event.EpochTransitionEvent)
+			if ok {
+				m.logger.Info(
+					"fast-forwarded past intermediate epoch transitions",
+					"component", "snapshot",
+					"from_epoch", skippedEvt.NewEpoch,
+					"to_epoch", epochEvent.NewEpoch,
+				)
+			}
 		}
 
 		if err := m.handleEpochTransition(ctx, epochEvent); err != nil {
@@ -188,11 +262,6 @@ func (m *Manager) epochTransitionLoop(
 					"error", err,
 				)
 			}
-		}
-
-		// Check for context cancellation between events
-		if ctx.Err() != nil {
-			return
 		}
 	}
 }
@@ -285,7 +354,8 @@ func (m *Manager) CaptureGenesisSnapshot(ctx context.Context) error {
 
 	if distribution.TotalPools == 0 {
 		m.logger.Warn(
-			"no pools found in genesis stake distribution; leader election will not produce blocks until pool stake is registered",
+			"no genesis pools; leader election disabled"+
+				" until pool stake is registered",
 			"component", "snapshot",
 		)
 		return nil
