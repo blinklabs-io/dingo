@@ -240,6 +240,6 @@ func (d *Database) CborCache() *TieredCborCache {
 	return d.cborCache
 }
 
-func (d *Database) SetBlobStore(blob blob.BlobStore) {
-	d.blob = blob
+func (d *Database) SetBlobStore(b blob.BlobStore) {
+	d.blob = b
 }

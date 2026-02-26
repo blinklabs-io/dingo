@@ -186,7 +186,7 @@ func BlockURL(
 	txn := db.BlobTxn(false)
 	err := txn.Do(func(txn *Txn) error {
 		var err error
-		ret, metadata, err = txn.DB().Blob().GetBlockURL(ctx, txn, point)
+		ret, metadata, err = txn.DB().Blob().GetBlockURL(ctx, txn.Blob(), point)
 		return err
 	})
 	return ret, metadata, err
