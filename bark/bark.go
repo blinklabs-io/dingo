@@ -56,6 +56,11 @@ func (b *Bark) Start(ctx context.Context) error {
 		return errors.New("server already started")
 	}
 
+	if b.config.DB == nil {
+		b.mu.Unlock()
+		return errors.New("database not configured")
+	}
+
 	mux := http.NewServeMux()
 	compress1KB := connect.WithCompressMinBytes(1024)
 
@@ -158,6 +163,13 @@ func (b *Bark) startServer(server *http.Server) error {
 	startErr := make(chan error, 1)
 	go func() {
 		var err error
+
+		if b.config.TlsCertFilePath != "" && b.config.TlsKeyFilePath == "" ||
+			b.config.TlsCertFilePath == "" && b.config.TlsKeyFilePath != "" {
+			err = errors.New("both tls cert and key must be specified")
+			return
+		}
+
 		if b.config.TlsCertFilePath != "" && b.config.TlsKeyFilePath != "" {
 			err = server.ListenAndServeTLS(
 				b.config.TlsCertFilePath,

@@ -44,11 +44,13 @@ func NewBarkBlobStore(
 	}
 
 	return &BlobStoreBark{
+		config: config,
 		archiveClient: archiveconnect.NewArchiveServiceClient(
 			httpClient,
 			config.BaseUrl,
 		),
-		upstream: upstream,
+		httpClient: httpClient,
+		upstream:   upstream,
 	}
 }
 
@@ -114,7 +116,8 @@ func (b *BlobStoreBark) GetBlock(
 
 	// if the requested slot is still within the security window, defer to the
 	// upstream blob storage to retrieve the block
-	if slot >= currentSlot-b.config.SecurityWindow {
+	if b.config.SecurityWindow > currentSlot ||
+		slot >= currentSlot-b.config.SecurityWindow {
 		return b.upstream.GetBlock(txn, slot, hash)
 	}
 
@@ -125,7 +128,7 @@ func (b *BlobStoreBark) GetBlock(
 				Blocks: []*archivev1alpha1.BlockRef{
 					{
 						Slot: proto.Uint64(slot),
-						Hash: proto.String(string(hash)),
+						Hash: proto.String(hex.EncodeToString(hash)),
 					},
 				},
 			},
@@ -151,6 +154,12 @@ func (b *BlobStoreBark) GetBlock(
 			fmt.Errorf("failed downloading block from bark supplied url: %w", err)
 	}
 	defer blockResp.Body.Close()
+
+	if blockResp.StatusCode != http.StatusOK {
+		return nil, types.BlockMetadata{},
+			fmt.Errorf("bark supplied url returned non-ok: %d",
+				blockResp.StatusCode)
+	}
 
 	blockBody, err := io.ReadAll(blockResp.Body)
 	if err != nil {

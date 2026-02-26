@@ -969,6 +969,10 @@ func (d *BlobStoreGCS) GetBlockURL(
 		return types.SignedURL{}, types.BlockMetadata{},
 			fmt.Errorf("gcs: block not found: %w", err)
 	}
+	if err != nil {
+		return types.SignedURL{}, types.BlockMetadata{},
+			fmt.Errorf("gcs: failed getting object attributes: %w", err)
+	}
 
 	opts := &storage.SignedURLOptions{
 		Scheme:  storage.SigningSchemeV4,
