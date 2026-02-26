@@ -528,7 +528,6 @@ func (d *MetadataStorePostgres) SetTransaction(
 				"failed to extract metadata labels: %w",
 				err,
 			)
-		}
 		tmpTx.Metadata = tmpMetadata
 		metadataLabels = tmpLabels
 	}

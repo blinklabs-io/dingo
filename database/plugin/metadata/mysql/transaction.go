@@ -517,7 +517,7 @@ func (d *MetadataStoreMysql) SetTransaction(
 		Valid:      tx.IsValid(),
 	}
 	var metadataLabels []labelcodec.Entry
-	if tx.Metadata() != nil {
+	if tx.Metadata() != nil && d.storageMode == types.StorageModeAPI{
 		tmpMetadata, tmpLabels, err := labelcodec.EncodeAndExtract(
 			tx.Metadata(),
 		)
@@ -526,7 +526,6 @@ func (d *MetadataStoreMysql) SetTransaction(
 				"failed to extract metadata labels: %w",
 				err,
 			)
-		}
 		tmpTx.Metadata = tmpMetadata
 		metadataLabels = tmpLabels
 	}
