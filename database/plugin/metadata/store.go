@@ -40,8 +40,16 @@ type MetadataStore interface {
 	// the transaction is the final parameter.
 	SetCommitTimestamp(int64, types.Txn) error
 
-	// Transaction creates a new metadata transaction.
+	// Transaction creates a new metadata transaction on the write
+	// connection pool. Use ReadTransaction for read-only access to
+	// avoid contending with writers.
 	Transaction() types.Txn
+
+	// ReadTransaction creates a read-only metadata transaction using
+	// the read connection pool (when available). This avoids blocking
+	// on the write connection, which is critical for operations like
+	// FindIntersect that must complete within protocol timeouts.
+	ReadTransaction() types.Txn
 
 	// Ledger state methods
 

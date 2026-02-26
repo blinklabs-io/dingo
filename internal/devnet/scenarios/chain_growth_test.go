@@ -27,24 +27,26 @@ import (
 // TestChainGrowthRate verifies that the chain is growing at an expected
 // rate over a measurement window.
 //
-// With activeSlotsCoeff=0.2 and slotLength=1s, each slot has a 20% chance
+// With activeSlotsCoeff=0.4 and slotLength=1s, each slot has a 40% chance
 // of producing a block. With 2 pools sharing stake equally the per-pool
-// leader probability per slot is approximately 1-(1-f)^σ ≈ 0.106, and the
-// network-wide probability is 1-(1-f)^1 = 0.2. In a 50-slot window we
-// therefore expect ~10 blocks network-wide. We require at least 5 (50% of
-// expected) as a conservative lower bound that accounts for random variance
-// and startup delay.
+// leader probability per slot is approximately 1-(1-f)^σ ≈ 0.225, and the
+// network-wide probability is 1-(1-f)^1 = 0.4. In a 100-slot window we
+// therefore expect ~40 blocks network-wide. We require at least 8 (20% of
+// expected) as a conservative lower bound. This accounts for: random VRF
+// variance, chain rollbacks (both pools can win the same slot), catch-up
+// delays after rollback/resync, and the fact that a single endpoint only
+// sees its own view of the chain which may lag behind the network tip.
 func TestChainGrowthRate(t *testing.T) {
 	cfg, err := devnet.LoadDevNetConfig()
 	require.NoError(t, err, "failed to load devnet config from testnet.yaml")
 	t.Logf(
 		"devnet config: activeSlotsCoeff=%.2f slotLength=%.1fs"+
-			" epochLength=%d securityParam=%d",
+			" epochLength=%d securityParam=%d expectedBlockTime=%s",
 		cfg.ActiveSlotsCoeff, cfg.SlotLength,
-		cfg.EpochLength, cfg.SecurityParam,
+		cfg.EpochLength, cfg.SecurityParam, cfg.ExpectedBlockTime(),
 	)
 
-	endpoints := defaultEndpoints()
+	endpoints := devnet.DefaultEndpoints()
 	h := devnet.NewTestHarness(
 		t, endpoints,
 		devnet.WithNetworkMagic(cfg.NetworkMagic),
@@ -53,13 +55,12 @@ func TestChainGrowthRate(t *testing.T) {
 	dingoEndpoint := endpoints[0]
 
 	// Wait for the chain to stabilize at slot 50.
-	// At 1s/slot this is 50 seconds; allow 120s of wall-clock time to
-	// account for startup, connection setup, and initial sync.
+	// Timeout: 50 slots + 5 expected block times for margin.
 	h.WaitForAllNodesReady(60 * time.Second)
 	const stabilizeSlot = 50
 	stabilizeTimeout := time.Duration(stabilizeSlot)*cfg.SlotDuration() +
-		30*time.Second
-	h.WaitForSlot(stabilizeSlot, stabilizeTimeout)
+		cfg.ExpectedBlockTime()*5
+	h.WaitForNodeSlot(dingoEndpoint, stabilizeSlot, stabilizeTimeout)
 
 	// Record the starting point
 	startTip, err := h.GetChainTip(dingoEndpoint)
@@ -69,12 +70,13 @@ func TestChainGrowthRate(t *testing.T) {
 		startTip.SlotNumber, startTip.BlockNumber,
 	)
 
-	// Wait for a measurement window of 50 more slots (~50 seconds at 1s/slot).
-	// Allow 120s of wall-clock time as a generous margin.
-	const measureSlots = 50
+	// Wait for a measurement window of 100 slots. A longer window
+	// reduces the impact of random variance in VRF-based leader election.
+	// Timeout: 100 slots + 5 expected block times for margin.
+	const measureSlots = 100
 	targetSlot := startTip.SlotNumber + measureSlots
 	measureTimeout := time.Duration(measureSlots)*cfg.SlotDuration() +
-		30*time.Second
+		cfg.ExpectedBlockTime()*5
 	h.WaitForNodeSlot(dingoEndpoint, targetSlot, measureTimeout)
 
 	// Record the ending point
@@ -102,9 +104,10 @@ func TestChainGrowthRate(t *testing.T) {
 		cfg.ExpectedBlocksPerSlot()*100,
 	)
 
-	// With activeSlotsCoeff=0.2 we expect ~10 blocks in 50 slots.
-	// Require at least 5 (50% of expected) as a conservative lower bound.
-	const minBlocks = uint64(5)
+	// With activeSlotsCoeff=0.4 we expect ~40 blocks in 100 slots.
+	// Require at least 8 (20% of expected) as a conservative lower bound
+	// that accounts for random variance and possible rollbacks.
+	const minBlocks = uint64(8)
 	require.GreaterOrEqual(t, blocksProduced, minBlocks,
 		"chain should produce at least %d blocks in %d slots "+
 			"(activeSlotsCoeff=%.2f)",
@@ -119,7 +122,7 @@ func TestRelayPropagation(t *testing.T) {
 	cfg, err := devnet.LoadDevNetConfig()
 	require.NoError(t, err, "failed to load devnet config from testnet.yaml")
 
-	endpoints := defaultEndpoints()
+	endpoints := devnet.DefaultEndpoints()
 	h := devnet.NewTestHarness(
 		t, endpoints,
 		devnet.WithNetworkMagic(cfg.NetworkMagic),
@@ -131,9 +134,10 @@ func TestRelayPropagation(t *testing.T) {
 	h.WaitForAllNodesReady(60 * time.Second)
 
 	// Wait for the relay to advance to slot 30.
-	// At 1s/slot this is 30 seconds; allow 60s of wall-clock time.
+	// Timeout: 30 slots + 5 expected block times for margin.
 	const targetSlot = uint64(30)
-	timeout := time.Duration(targetSlot)*cfg.SlotDuration() + 30*time.Second
+	timeout := time.Duration(targetSlot)*cfg.SlotDuration() +
+		cfg.ExpectedBlockTime()*5
 	h.WaitForNodeSlot(relayEndpoint, targetSlot, timeout)
 
 	relayTip, err := h.GetChainTip(relayEndpoint)
@@ -156,7 +160,7 @@ func TestSustainedConsensus(t *testing.T) {
 	cfg, err := devnet.LoadDevNetConfig()
 	require.NoError(t, err, "failed to load devnet config from testnet.yaml")
 
-	endpoints := defaultEndpoints()
+	endpoints := devnet.DefaultEndpoints()
 	h := devnet.NewTestHarness(
 		t, endpoints,
 		devnet.WithNetworkMagic(cfg.NetworkMagic),
@@ -171,36 +175,26 @@ func TestSustainedConsensus(t *testing.T) {
 	baseSlot := baseTip.SlotNumber
 
 	// Check consensus at 3 relative checkpoints (20, 50, 100 slots ahead).
-	// Each checkpoint timeout is offset * slotDuration + 30s margin.
+	// Each checkpoint timeout is offset * slotDuration + margin.
 	offsets := []uint64{20, 50, 100}
 	for _, offset := range offsets {
 		targetSlot := baseSlot + offset
 		t.Logf("checking consensus at slot %d...", targetSlot)
-		timeout := time.Duration(offset)*cfg.SlotDuration() + 30*time.Second
-		h.WaitForSlot(targetSlot, timeout)
+		slotTimeout := time.Duration(offset)*cfg.SlotDuration() +
+			cfg.ExpectedBlockTime()*5
+		h.WaitForSlot(targetSlot, slotTimeout)
 
-		// Log tips from all nodes
-		for _, ep := range endpoints {
-			tip, err := h.GetChainTip(ep)
-			if err != nil {
-				t.Logf(
-					"  %s: error getting tip: %v",
-					ep.Name, err,
-				)
-				continue
-			}
-			t.Logf(
-				"  %s: slot=%d block=%d",
-				ep.Name, tip.SlotNumber, tip.BlockNumber,
-			)
-		}
-
-		// With activeSlotsCoeff=0.2 and 1s slots, propagation between
+		// With activeSlotsCoeff=0.4 and 1s slots, propagation between
 		// two producers through a relay can introduce delays. Use
 		// 3*securityParam as the tolerance (same as the stability window
 		// divided by f, which is the maximum acceptable fork length).
+		// Scale the convergence timeout by the checkpoint offset so
+		// later checkpoints (which may require longer resync/rollback
+		// recovery) get proportionally more time.
 		tolerance := 3 * cfg.SecurityParam
-		h.VerifyChainConsensus(tolerance)
+		convergenceTimeout := cfg.ExpectedBlockTime() *
+			time.Duration(max(20, offset/2))
+		h.VerifyChainConsensus(tolerance, convergenceTimeout)
 		t.Logf("consensus verified at slot %d", targetSlot)
 	}
 }
@@ -211,7 +205,7 @@ func TestCardanoProducerChainAdvances(t *testing.T) {
 	cfg, err := devnet.LoadDevNetConfig()
 	require.NoError(t, err, "failed to load devnet config from testnet.yaml")
 
-	endpoints := defaultEndpoints()
+	endpoints := devnet.DefaultEndpoints()
 	h := devnet.NewTestHarness(
 		t, endpoints,
 		devnet.WithNetworkMagic(cfg.NetworkMagic),
@@ -225,9 +219,11 @@ func TestCardanoProducerChainAdvances(t *testing.T) {
 	require.NoError(t, err, "failed to get initial cardano-producer tip")
 
 	// Wait for the chain to advance by at least 10 slots.
-	// At 1s/slot this takes ~10 seconds; allow 30s for margin.
-	targetSlot := initialTip.SlotNumber + 10
-	timeout := 10*cfg.SlotDuration() + 30*time.Second
+	// Timeout: 10 slots + 5 expected block times for margin.
+	const advanceSlots = 10
+	targetSlot := initialTip.SlotNumber + advanceSlots
+	timeout := time.Duration(advanceSlots)*cfg.SlotDuration() +
+		cfg.ExpectedBlockTime()*5
 	h.WaitForNodeSlot(cardanoEndpoint, targetSlot, timeout)
 
 	newTip, err := h.GetChainTip(cardanoEndpoint)

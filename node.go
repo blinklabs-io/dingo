@@ -198,22 +198,6 @@ func (n *Node) Run(ctx context.Context) error {
 				}
 				return nil
 			},
-			ChainsyncResyncFunc: func(connId ouroboros.ConnectionId) {
-				conn := n.connManager.GetConnectionById(connId)
-				if conn != nil {
-					n.config.logger.Info(
-						"closing connection for chainsync re-sync",
-						"connection_id", connId.String(),
-					)
-					conn.Close()
-				}
-				// ClearSeenHeaders is also called by ConnectionSwitchFunc
-				// when the new connection is detected, but we clear here
-				// too in case the connection ID doesn't change (same peer).
-				if n.chainsyncState != nil {
-					n.chainsyncState.ClearSeenHeaders()
-				}
-			},
 			ConnectionSwitchFunc: func() {
 				// Clear the header dedup cache so the new connection
 				// can re-deliver blocks from the intersection without
@@ -384,6 +368,12 @@ func (n *Node) Run(ctx context.Context) error {
 		},
 	)
 	n.ouroboros.ConnManager = n.connManager
+	// Subscribe ouroboros to chainsync resync events from the
+	// ledger. This replaces the previous ChainsyncResyncFunc
+	// closure so all stop/restart orchestration lives in the
+	// ouroboros/chainsync component. Registered after ConnManager
+	// is wired so the handler can look up connections.
+	n.ouroboros.SubscribeChainsyncResync(n.ctx) //nolint:contextcheck
 	// Subscribe to connection events BEFORE starting listeners so that
 	// inbound connections from peers that connect immediately are not lost.
 	n.eventBus.SubscribeFunc(
@@ -891,15 +881,10 @@ func (b *blockBroadcaster) AddBlock(
 	_ []byte,
 ) error {
 	// Add block to the chain (CBOR is stored internally by the block).
-	// addBlockInternal notifies iterators after storing the block,
-	// so no separate NotifyIterators call is needed.
+	// addBlockInternal notifies iterators after storing the block.
 	if err := b.chain.AddBlock(block, nil); err != nil {
 		return fmt.Errorf("failed to add block to chain: %w", err)
 	}
-
-	// Wake chainsync server iterators so connected peers discover
-	// the newly forged block immediately.
-	b.chain.NotifyIterators()
 
 	b.logger.Info(
 		"block added to chain",

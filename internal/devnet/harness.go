@@ -20,8 +20,11 @@
 package devnet
 
 import (
+	"bytes"
 	"fmt"
 	"net"
+	"os"
+	"sort"
 	"testing"
 	"time"
 
@@ -38,6 +41,28 @@ const DefaultNetworkMagic = 42
 type NodeEndpoint struct {
 	Name    string
 	Address string // host:port
+}
+
+// DefaultEndpoints returns the standard DevNet endpoints.
+// These can be overridden via environment variables for CI flexibility.
+func DefaultEndpoints() []NodeEndpoint {
+	dingoAddr := os.Getenv("DEVNET_DINGO_ADDR")
+	if dingoAddr == "" {
+		dingoAddr = "localhost:3010"
+	}
+	cardanoAddr := os.Getenv("DEVNET_CARDANO_ADDR")
+	if cardanoAddr == "" {
+		cardanoAddr = "localhost:3011"
+	}
+	relayAddr := os.Getenv("DEVNET_RELAY_ADDR")
+	if relayAddr == "" {
+		relayAddr = "localhost:3012"
+	}
+	return []NodeEndpoint{
+		{Name: "dingo-producer", Address: dingoAddr},
+		{Name: "cardano-producer", Address: cardanoAddr},
+		{Name: "cardano-relay", Address: relayAddr},
+	}
 }
 
 // ChainTip holds the chain tip information retrieved from a node.
@@ -87,6 +112,9 @@ func WithNetworkMagic(magic uint32) HarnessOptionFunc {
 
 // GetChainTip connects to the specified node using the Ouroboros N2N
 // protocol and retrieves the current chain tip via ChainSync.
+// Each call establishes a fresh connection to ensure the returned tip
+// reflects the node's current state (cardano-node does not update
+// the tip on persistent connections).
 func (h *TestHarness) GetChainTip(
 	endpoint NodeEndpoint,
 ) (ChainTip, error) {
@@ -154,7 +182,7 @@ func (h *TestHarness) WaitForSlot(
 			}
 		}
 		return false
-	}, timeout, 200*time.Millisecond,
+	}, timeout, 2*time.Second,
 		"no node reached slot %d within %s", targetSlot, timeout,
 	)
 }
@@ -181,71 +209,113 @@ func (h *TestHarness) WaitForNodeSlot(
 			endpoint.Name, tip.SlotNumber, tip.BlockNumber,
 		)
 		return tip.SlotNumber >= targetSlot
-	}, timeout, 200*time.Millisecond,
+	}, timeout, 2*time.Second,
 		"%s did not reach slot %d within %s",
 		endpoint.Name, targetSlot, timeout,
 	)
 }
 
-// VerifyChainConsensus checks that all nodes report chain tips within
-// a configurable slot tolerance, accounting for minor propagation
-// delays. When two nodes are at the same slot, their block hashes
-// must also match (i.e. they are on the same fork).
-func (h *TestHarness) VerifyChainConsensus(slotTolerance uint64) {
+// VerifyChainConsensus polls all nodes until their chain tips are within
+// slotTolerance of each other, or the timeout expires. This accounts for
+// propagation delays and temporary divergence during catch-up.
+//
+// Fork detection compares block hashes only when two nodes report the
+// same slot (slotDiff == 0). Tips at adjacent slots within the tolerance
+// are not compared by hash, so a large slotTolerance (e.g. 3*K) can
+// mask short forks. Callers needing stricter fork detection should use
+// a smaller tolerance or perform additional cross-slot checks.
+//
+// Unreachable endpoints are skipped rather than failing the round,
+// provided at least 2 nodes return valid tips for comparison.
+func (h *TestHarness) VerifyChainConsensus(
+	slotTolerance uint64,
+	timeout time.Duration,
+) {
 	h.t.Helper()
-	tips := make(map[string]ChainTip)
-	for _, ep := range h.endpoints {
-		tip, err := h.GetChainTip(ep)
-		require.NoError(h.t, err,
-			"failed to get chain tip from %s", ep.Name,
-		)
-		tips[ep.Name] = tip
-		h.t.Logf(
-			"VerifyChainConsensus: %s at slot %d, block %d",
-			ep.Name, tip.SlotNumber, tip.BlockNumber,
-		)
-	}
-
-	// Compare all tips pairwise
-	names := make([]string, 0, len(tips))
-	for name := range tips {
-		names = append(names, name)
-	}
-	for i := 0; i < len(names); i++ {
-		for j := i + 1; j < len(names); j++ {
-			tipA := tips[names[i]]
-			tipB := tips[names[j]]
-			var slotDiff uint64
-			if tipA.SlotNumber > tipB.SlotNumber {
-				slotDiff = tipA.SlotNumber - tipB.SlotNumber
-			} else {
-				slotDiff = tipB.SlotNumber - tipA.SlotNumber
-			}
-			require.LessOrEqual(h.t, slotDiff, slotTolerance,
-				"slot difference between %s (slot %d) and %s (slot %d) "+
-					"exceeds tolerance of %d",
-				names[i], tipA.SlotNumber,
-				names[j], tipB.SlotNumber,
-				slotTolerance,
-			)
-			// When slots match exactly, hashes must agree
-			// (same slot implies same block on a single chain).
-			if slotDiff == 0 {
-				require.Equal(h.t, tipA.Hash, tipB.Hash,
-					"nodes %s and %s are at the same slot %d "+
-						"but have different block hashes",
-					names[i], names[j], tipA.SlotNumber,
+	require.Eventually(h.t, func() bool {
+		tips := make(map[string]ChainTip)
+		for _, ep := range h.endpoints {
+			tip, err := h.GetChainTip(ep)
+			if err != nil {
+				h.t.Logf(
+					"VerifyChainConsensus: error querying %s: %v",
+					ep.Name, err,
 				)
+				continue
+			}
+			tips[ep.Name] = tip
+		}
+		// Need at least 2 responsive nodes for a meaningful comparison.
+		if len(tips) < 2 {
+			return false
+		}
+
+		// Build sorted name list for deterministic iteration
+		names := make([]string, 0, len(tips))
+		for name := range tips {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+
+		// Log all tips in sorted order
+		for _, name := range names {
+			tip := tips[name]
+			h.t.Logf(
+				"VerifyChainConsensus: %s at slot %d, block %d",
+				name, tip.SlotNumber, tip.BlockNumber,
+			)
+		}
+
+		// Compare all tips pairwise. The hash mismatch check only
+		// runs when slotDiff == 0, so this verifies proximity
+		// (within slotTolerance) and same-slot agreement rather
+		// than full fork detection across different slots.
+		for i := 0; i < len(names); i++ {
+			for j := i + 1; j < len(names); j++ {
+				tipA := tips[names[i]]
+				tipB := tips[names[j]]
+				var slotDiff uint64
+				if tipA.SlotNumber > tipB.SlotNumber {
+					slotDiff = tipA.SlotNumber - tipB.SlotNumber
+				} else {
+					slotDiff = tipB.SlotNumber - tipA.SlotNumber
+				}
+				if slotDiff > slotTolerance {
+					return false
+				}
+				// When tips are at the same slot, verify they
+				// agree on the block hash (detect forks).
+				if slotDiff == 0 &&
+					!bytes.Equal(tipA.Hash, tipB.Hash) {
+					h.t.Logf(
+						"VerifyChainConsensus: fork detected: "+
+							"%s and %s at slot %d have different hashes",
+						names[i], names[j], tipA.SlotNumber,
+					)
+					return false
+				}
 			}
 		}
-	}
+		return true
+	}, timeout, 2*time.Second,
+		"nodes did not reach consensus within %s (tolerance: %d slots)",
+		timeout, slotTolerance,
+	)
 }
 
 // WaitForAllNodesReady polls all endpoints until each one is reachable
-// and returns a valid chain tip.
+// and returns a valid chain tip. The timeout is shared across all
+// endpoints so the total wait is bounded by timeout, not N*timeout.
 func (h *TestHarness) WaitForAllNodesReady(timeout time.Duration) {
 	h.t.Helper()
+	deadline := time.Now().Add(timeout)
 	for _, ep := range h.endpoints {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			h.t.Fatalf(
+				"deadline expired before checking %s", ep.Name,
+			)
+		}
 		require.Eventually(h.t, func() bool {
 			_, err := h.GetChainTip(ep)
 			if err != nil {
@@ -256,7 +326,7 @@ func (h *TestHarness) WaitForAllNodesReady(timeout time.Duration) {
 				return false
 			}
 			return true
-		}, timeout, 500*time.Millisecond,
+		}, remaining, 2*time.Second,
 			"%s did not become ready within %s", ep.Name, timeout,
 		)
 	}

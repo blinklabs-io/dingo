@@ -62,10 +62,19 @@ func (ls *LedgerState) querySystemStart() (any, error) {
 			"unable to get shelley era genesis for system start",
 		)
 	}
+	// Picoseconds is the total elapsed time since midnight (start of the
+	// day) in picoseconds.  time.Time.Nanosecond() returns only the
+	// sub-second component, so we must include hours, minutes, and seconds.
+	utc := shelleyGenesis.SystemStart.UTC()
+	h, m, sec := utc.Clock()
+	dayPicoseconds := (int64(h)*3600+
+		int64(m)*60+
+		int64(sec))*1_000_000_000_000 +
+		int64(utc.Nanosecond())*1000
 	ret := olocalstatequery.SystemStartResult{
-		Year:        *big.NewInt(int64(shelleyGenesis.SystemStart.Year())),
-		Day:         shelleyGenesis.SystemStart.YearDay(),
-		Picoseconds: *big.NewInt(int64(shelleyGenesis.SystemStart.Nanosecond() * 1000)),
+		Year:        *big.NewInt(int64(utc.Year())),
+		Day:         utc.YearDay(),
+		Picoseconds: *big.NewInt(dayPicoseconds),
 	}
 	return ret, nil
 }

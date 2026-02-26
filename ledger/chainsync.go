@@ -60,14 +60,12 @@ const (
 	rollbackLoopThreshold = 3               // number of rollbacks to same slot before breaking loop
 	rollbackLoopWindow    = 5 * time.Minute // time window for rollback loop detection
 
-	// Number of slots behind the upstream tip before VRF/KES
-	// verification failures are treated as non-fatal during
-	// initial sync
-	syncThresholdSlots = 100
-
 	// Number of consecutive header mismatches before triggering
-	// a chainsync re-sync to recover from persistent forks
-	headerMismatchResyncThreshold = 5
+	// a chainsync re-sync to recover from persistent forks.
+	// A higher threshold gives tryResolveFork more chances to
+	// find the common ancestor and reduces disruptive resyncs
+	// in multi-producer networks where short forks are expected.
+	headerMismatchResyncThreshold = 20
 )
 
 func (ls *LedgerState) handleEventChainsync(evt event.Event) {
@@ -292,6 +290,41 @@ func (ls *LedgerState) handleEventChainsyncRollback(e ChainsyncEvent) error {
 		ls.chainsyncState = RollbackChainsyncState
 	}
 	if err := ls.chain.Rollback(e.Point); err != nil {
+		if errors.Is(err, chain.ErrRollbackExceedsSecurityParam) {
+			// The peer's chain has diverged beyond K blocks from
+			// ours. This is a security violation — we must not
+			// follow a chain that requires rolling back more than
+			// K blocks. Trigger a chainsync re-sync so the peer
+			// governance can reconnect and negotiate a fresh
+			// intersection rather than waiting for a protocol
+			// timeout.
+			ls.config.Logger.Error(
+				"chainsync rollback exceeds security "+
+					"parameter K, rejecting peer chain",
+				"component", "ledger",
+				"slot", e.Point.Slot,
+				"hash", hex.EncodeToString(e.Point.Hash),
+				"connection_id", e.ConnectionId.String(),
+			)
+			// Restore state: no rollback actually occurred, so
+			// we are still syncing. Leaving RollbackChainsyncState
+			// would cause a spurious "switched to fork" log and
+			// fork metric increment on the next block header.
+			ls.chainsyncState = SyncingChainsyncState
+			if ls.config.EventBus != nil {
+				ls.config.EventBus.Publish(
+					event.ChainsyncResyncEventType,
+					event.NewEvent(
+						event.ChainsyncResyncEventType,
+						event.ChainsyncResyncEvent{
+							ConnectionId: e.ConnectionId,
+							Reason:       "rollback exceeds security parameter K",
+						},
+					),
+				)
+			}
+			return nil
+		}
 		return fmt.Errorf("chain rollback failed: %w", err)
 	}
 	return nil
@@ -368,21 +401,29 @@ func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 			ls.chain.ClearHeaders()
 			ls.headerMismatchCount++
 			ls.config.Logger.Debug(
-				"block header does not fit chain tip, cleared stale headers",
+				"block header does not fit chain tip",
 				"component", "ledger",
 				"slot", e.Point.Slot,
 				"block_prev_hash", notFitErr.BlockPrevHash(),
 				"chain_tip_hash", notFitErr.TipHash(),
 				"consecutive_mismatches", ls.headerMismatchCount,
 			)
-			// After a few consecutive mismatches, the upstream peer
-			// is on a different fork. Trigger a chainsync re-sync by
-			// closing the connection so the peer governance reconnects
-			// and negotiates a fresh intersection. A low threshold (5)
-			// ensures fast recovery when a locally-forged block is not
-			// adopted by the network.
+			// The incoming header's prevHash is the block it extends
+			// from — the common ancestor. If that block exists on our
+			// chain and the peer's chain is ahead, we roll back to
+			// the common ancestor so chainsync can continue.
+			if resolved := ls.tryResolveFork(
+				e, notFitErr,
+			); resolved {
+				return nil
+			}
+			// Fallback: after several consecutive mismatches where
+			// we couldn't find the common ancestor, trigger a
+			// chainsync re-sync by closing the connection so the
+			// peer governance reconnects and negotiates a fresh
+			// intersection.
 			if ls.headerMismatchCount >= headerMismatchResyncThreshold &&
-				ls.config.ChainsyncResyncFunc != nil {
+				ls.config.EventBus != nil {
 				ls.config.Logger.Info(
 					"persistent chain fork detected, triggering chainsync re-sync",
 					"component", "ledger",
@@ -391,7 +432,16 @@ func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 				)
 				ls.headerMismatchCount = 0
 				ls.rollbackHistory = nil
-				ls.config.ChainsyncResyncFunc(e.ConnectionId)
+				ls.config.EventBus.Publish(
+					event.ChainsyncResyncEventType,
+					event.NewEvent(
+						event.ChainsyncResyncEventType,
+						event.ChainsyncResyncEvent{
+							ConnectionId: e.ConnectionId,
+							Reason:       "persistent chain fork",
+						},
+					),
+				)
 			}
 			return nil
 		}
@@ -453,6 +503,173 @@ func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 	return nil
 }
 
+// tryResolveFork attempts to resolve a chain fork when an incoming header
+// doesn't fit the local chain tip. The incoming header's prevHash identifies
+// the common ancestor. If that block exists on our chain and the peer's
+// chain is ahead, we roll back to the common ancestor so chainsync can
+// continue on the network's canonical chain.
+//
+// Returns true if the fork was resolved (chain rolled back), false if the
+// common ancestor was not found or the rollback could not be performed.
+func (ls *LedgerState) tryResolveFork(
+	e ChainsyncEvent,
+	notFitErr chain.BlockNotFitChainTipError,
+) bool {
+	// Only resolve forks when the peer is ahead of us.
+	localTip := ls.chain.Tip()
+	if e.Tip.Point.Slot <= localTip.Point.Slot {
+		return false
+	}
+
+	// The incoming header's prevHash is the common ancestor hash.
+	// Look it up in the database to get its slot for the rollback
+	// point.
+	prevHashBytes, err := hex.DecodeString(notFitErr.BlockPrevHash())
+	if err != nil {
+		ls.config.Logger.Warn(
+			"failed to decode block prev hash for fork resolution",
+			"component", "ledger",
+			"error", err,
+			"block_prev_hash", notFitErr.BlockPrevHash(),
+		)
+		return false
+	}
+	ancestorBlock, err := database.BlockByHash(ls.db, prevHashBytes)
+	if err != nil {
+		if errors.Is(err, models.ErrBlockNotFound) {
+			// Common ancestor not found in our database — can't resolve.
+			ls.config.Logger.Debug(
+				"common ancestor not found in database, "+
+					"falling back to mismatch counting",
+				"component", "ledger",
+				"block_prev_hash", notFitErr.BlockPrevHash(),
+			)
+			return false
+		}
+		ls.config.Logger.Error(
+			"unexpected error looking up common ancestor",
+			"component", "ledger",
+			"error", err,
+			"block_prev_hash", notFitErr.BlockPrevHash(),
+		)
+		return false
+	}
+
+	rollbackPoint := ocommon.NewPoint(
+		ancestorBlock.Slot, ancestorBlock.Hash,
+	)
+	ls.config.Logger.Info(
+		"fork detected: rolling back to common ancestor",
+		"component", "ledger",
+		"local_tip_slot", localTip.Point.Slot,
+		"peer_tip_slot", e.Tip.Point.Slot,
+		"ancestor_slot", ancestorBlock.Slot,
+		"ancestor_hash", hex.EncodeToString(ancestorBlock.Hash),
+		"connection_id", e.ConnectionId.String(),
+	)
+
+	if err := ls.chain.Rollback(rollbackPoint); err != nil {
+		if errors.Is(err, chain.ErrRollbackExceedsSecurityParam) {
+			// Fork exceeds security parameter K. We must not
+			// follow a chain that requires rolling back more
+			// than K blocks — this is a fundamental Ouroboros
+			// security guarantee. Trigger a chainsync re-sync
+			// immediately rather than waiting for
+			// headerMismatchResyncThreshold retries.
+			ls.config.Logger.Error(
+				"fork exceeds security parameter K, "+
+					"rejecting fork resolution",
+				"component", "ledger",
+				"ancestor_slot", ancestorBlock.Slot,
+				"local_tip_slot",
+				ls.chain.Tip().Point.Slot,
+				"peer_tip_slot", e.Tip.Point.Slot,
+			)
+			// Reset mismatch state so the fallback path in the
+			// caller does not fire a duplicate resync event.
+			ls.headerMismatchCount = 0
+			ls.rollbackHistory = nil
+			if ls.config.EventBus != nil {
+				ls.config.EventBus.Publish(
+					event.ChainsyncResyncEventType,
+					event.NewEvent(
+						event.ChainsyncResyncEventType,
+						event.ChainsyncResyncEvent{
+							ConnectionId: e.ConnectionId,
+							Reason:       "fork resolution exceeds security parameter K",
+						},
+					),
+				)
+			}
+		} else {
+			ls.config.Logger.Error(
+				"failed to roll back to common ancestor",
+				"component", "ledger",
+				"error", err,
+				"ancestor_slot", ancestorBlock.Slot,
+			)
+		}
+		return false
+	}
+
+	// Mark state as rollback so the next block header event logs
+	// "switched to fork" and increments the fork metric.
+	ls.chainsyncState = RollbackChainsyncState
+
+	// Invalidate epoch cache entries for epochs that started after
+	// the rollback point. These epochs have nonces computed from the
+	// old fork's blocks and would cause VRF verification failures on
+	// blocks from the new fork. The ledger-level rollback (which
+	// recomputes nonces) is asynchronous, so we must prune the cache
+	// here to prevent stale nonce lookups in handleEventBlockfetchBlock.
+	ls.Lock()
+	newCache := make([]models.Epoch, 0, len(ls.epochCache))
+	for _, ep := range ls.epochCache {
+		if ep.StartSlot <= rollbackPoint.Slot {
+			newCache = append(newCache, ep)
+		}
+	}
+	ls.epochCache = newCache
+	if len(newCache) > 0 {
+		ls.currentEpoch = newCache[len(newCache)-1]
+		eraDesc := eras.GetEraById(ls.currentEpoch.EraId)
+		if eraDesc != nil {
+			ls.currentEra = *eraDesc
+		} else {
+			ls.config.Logger.Warn(
+				"unknown era ID after fork rollback epoch prune, currentEra may be stale",
+				"era_id", ls.currentEpoch.EraId,
+				"component", "ledger",
+			)
+		}
+	} else {
+		ls.currentEpoch = models.Epoch{}
+		ls.currentEra = eras.EraDesc{}
+	}
+	ls.Unlock()
+
+	// Rollback succeeded — re-add the header that triggered fork
+	// detection. Only reset mismatch tracking on successful header
+	// placement so that a failed re-add does not mask the fork and
+	// cause endless rollback loops.
+	if err := ls.chain.AddBlockHeader(
+		e.BlockHeader,
+	); err != nil {
+		ls.config.Logger.Warn(
+			"failed to add header after fork rollback",
+			"component", "ledger",
+			"error", err,
+			"slot", e.Point.Slot,
+		)
+		// Do not reset mismatch state — let the caller know the
+		// resolution failed so subsequent mismatch tracking proceeds.
+		return false
+	}
+	ls.headerMismatchCount = 0
+	ls.rollbackHistory = nil
+	return true
+}
+
 //nolint:unparam
 func (ls *LedgerState) handleEventBlockfetchBlock(e BlockfetchEvent) error {
 	// Process each block immediately as it arrives rather than
@@ -471,33 +688,38 @@ func (ls *LedgerState) handleEventBlockfetchBlock(e BlockfetchEvent) error {
 	// and will be validated during ledger processing when the epoch data
 	// becomes available.
 	//
-	// During initial sync (when the block is far behind the upstream
-	// tip), verification failures are logged as warnings rather than
-	// blocking block processing. This mirrors the Haskell node's
-	// behavior of skipping VRF/KES checks during fast sync.
+	// When the node is close to the upstream tip (within the stability
+	// window), verification failures are fatal — we reject the block.
+	// During initial sync (far behind the tip), failures are logged as
+	// warnings to mirror the Haskell node's behavior of skipping
+	// VRF/KES checks during fast sync.
 	if _, err := ls.epochForSlot(e.Point.Slot); err == nil {
 		if err := ls.verifyBlockHeaderCrypto(e.Block); err != nil {
 			upstreamTip := ls.syncUpstreamTipSlot.Load()
-			ls.RLock()
-			tipSlot := ls.currentTip.Point.Slot
-			ls.RUnlock()
-			isSyncing := upstreamTip == 0 ||
-				tipSlot+syncThresholdSlots < upstreamTip
-			if isSyncing {
-				ls.config.Logger.Warn(
-					fmt.Sprintf(
-						"block header crypto verification failed during sync (non-fatal): %s",
-						err,
-					),
-					"component", "ledger",
-					"slot", e.Point.Slot,
-				)
-			} else {
+			syncThreshold := ls.calculateStabilityWindow()
+			// Use subtraction to avoid uint64 overflow when
+			// e.Point.Slot + syncThreshold would wrap.
+			nearTip := upstreamTip > 0 &&
+				(e.Point.Slot >= upstreamTip ||
+					upstreamTip-e.Point.Slot <= syncThreshold)
+			if nearTip {
 				return fmt.Errorf(
-					"block header crypto verification: %w",
+					"block header crypto verification failed: %w",
 					err,
 				)
 			}
+			// During bulk sync, VRF verification may fail when the
+			// local stake distribution snapshot doesn't match (e.g.
+			// multi-pool DevNet where the other pool's VRF key hash
+			// isn't in our ledger state yet). Log as warning only.
+			ls.config.Logger.Warn(
+				fmt.Sprintf(
+					"block header crypto verification failed (non-fatal): %s",
+					err,
+				),
+				"component", "ledger",
+				"slot", e.Point.Slot,
+			)
 		}
 	}
 	// Add block to chain with its own transaction so it becomes

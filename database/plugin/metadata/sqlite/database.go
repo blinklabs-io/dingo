@@ -416,6 +416,15 @@ func (d *MetadataStoreSqlite) Start() error {
 	if err := d.init(); err != nil {
 		return err
 	}
+	// Deduplicate pool_stake_snapshot rows before AutoMigrate
+	// creates the unique index idx_pool_stake_epoch_pool.
+	if err := models.DedupePoolStakeSnapshots(
+		d.db, d.logger,
+	); err != nil {
+		return fmt.Errorf(
+			"pool_stake_snapshot dedup failed: %w", err,
+		)
+	}
 	// Create table schemas (uses write connection)
 	d.logger.Debug(
 		"creating table",
@@ -513,6 +522,22 @@ func (d *MetadataStoreSqlite) Transaction() types.Txn {
 	if db.Error != nil {
 		d.logger.Error(
 			"failed to begin transaction",
+			"error", db.Error,
+		)
+		return newFailedSqliteTxn(db.Error)
+	}
+	return newSqliteTxn(db)
+}
+
+// ReadTransaction creates a read-only transaction using the read
+// connection pool. For file-based databases this avoids contending
+// with the write connection; for in-memory databases it falls back
+// to the write connection.
+func (d *MetadataStoreSqlite) ReadTransaction() types.Txn {
+	db := d.ReadDB().Begin()
+	if db.Error != nil {
+		d.logger.Error(
+			"failed to begin read transaction",
 			"error", db.Error,
 		)
 		return newFailedSqliteTxn(db.Error)

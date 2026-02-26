@@ -26,6 +26,7 @@
 #   ./run-tests.sh                    # Run all devnet tests
 #   ./run-tests.sh -run TestBasic     # Run specific test pattern
 #   ./run-tests.sh --keep-up          # Don't tear down on success (for debugging)
+#   ./run-tests.sh --keep-volumes     # Don't delete volumes on teardown
 
 set -euo pipefail
 
@@ -35,13 +36,21 @@ COMPOSE_FILE="${SCRIPT_DIR}/docker-compose.yml"
 
 # Parse arguments
 KEEP_UP=false
+KEEP_VOLUMES=false
 TEST_ARGS=()
 for arg in "$@"; do
   case "${arg}" in
-    --keep-up) KEEP_UP=true ;;
-    *)         TEST_ARGS+=("${arg}") ;;
+    --keep-up)      KEEP_UP=true ;;
+    --keep-volumes) KEEP_VOLUMES=true ;;
+    *)              TEST_ARGS+=("${arg}") ;;
   esac
 done
+
+# Build the volume flag for docker compose down
+DOWN_ARGS=()
+if [[ "${KEEP_VOLUMES}" != "true" ]]; then
+  DOWN_ARGS+=("-v")
+fi
 
 # --------------------------------------------------------------------------- #
 # Logging
@@ -59,15 +68,15 @@ cleanup() {
   local exit_code=$?
   if [[ "${KEEP_UP}" == "true" ]] && [[ ${exit_code} -eq 0 ]]; then
     log "Tests passed. DevNet left running (--keep-up)."
-    log "To stop:  docker compose -f ${COMPOSE_FILE} down -v"
+    log "To stop:  docker compose -f ${COMPOSE_FILE} down ${DOWN_ARGS[*]+${DOWN_ARGS[*]}}"
     return
   fi
   if [[ ${exit_code} -ne 0 ]]; then
     log "Collecting logs before teardown..."
-    docker compose -f "${COMPOSE_FILE}" logs --tail=100 2>/dev/null || true
+    docker compose -f "${COMPOSE_FILE}" logs --tail=500 2>/dev/null || true
   fi
   log "Tearing down DevNet..."
-  docker compose -f "${COMPOSE_FILE}" down -v 2>/dev/null || true
+  docker compose -f "${COMPOSE_FILE}" down ${DOWN_ARGS[@]+"${DOWN_ARGS[@]}"} 2>/dev/null || true
 }
 trap cleanup EXIT
 
@@ -86,6 +95,11 @@ fi
 # --------------------------------------------------------------------------- #
 # Start DevNet
 # --------------------------------------------------------------------------- #
+
+# Always remove volumes on initial cleanup to ensure a clean slate.
+# KEEP_VOLUMES only affects the final teardown (for debugging).
+log "Cleaning up any previous DevNet state..."
+docker compose -f "${COMPOSE_FILE}" down -v 2>/dev/null || true
 
 log "Building Dingo Docker image..."
 docker compose -f "${COMPOSE_FILE}" build dingo-producer
@@ -142,7 +156,7 @@ go test \
   -tags devnet \
   -count=1 \
   -v \
-  -timeout 5m \
+  -timeout 10m \
   ${TEST_ARGS[@]+"${TEST_ARGS[@]}"} \
   ./internal/devnet/...
 TEST_EXIT=$?

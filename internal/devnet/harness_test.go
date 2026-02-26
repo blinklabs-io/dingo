@@ -17,38 +17,17 @@
 package devnet
 
 import (
-	"os"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 )
 
-// defaultEndpoints returns the standard DevNet endpoints.
-// These can be overridden via environment variables for CI flexibility.
-func defaultEndpoints() []NodeEndpoint {
-	dingoAddr := os.Getenv("DEVNET_DINGO_ADDR")
-	if dingoAddr == "" {
-		dingoAddr = "localhost:3001"
-	}
-	cardanoAddr := os.Getenv("DEVNET_CARDANO_ADDR")
-	if cardanoAddr == "" {
-		cardanoAddr = "localhost:3011"
-	}
-	relayAddr := os.Getenv("DEVNET_RELAY_ADDR")
-	if relayAddr == "" {
-		relayAddr = "localhost:3012"
-	}
-	return []NodeEndpoint{
-		{Name: "dingo-producer", Address: dingoAddr},
-		{Name: "cardano-producer", Address: cardanoAddr},
-		{Name: "cardano-relay", Address: relayAddr},
-	}
-}
-
 func TestHarnessGetChainTip(t *testing.T) {
-	endpoints := defaultEndpoints()
-	h := NewTestHarness(t, endpoints)
+	endpoints := DefaultEndpoints()
+	h := NewTestHarness(t, endpoints,
+		WithNetworkMagic(DefaultNetworkMagic),
+	)
 
 	// Wait for all nodes to become reachable
 	h.WaitForAllNodesReady(60 * time.Second)
@@ -62,24 +41,49 @@ func TestHarnessGetChainTip(t *testing.T) {
 }
 
 func TestHarnessWaitForSlot(t *testing.T) {
-	endpoints := defaultEndpoints()
-	h := NewTestHarness(t, endpoints)
+	// Set path relative to this package (internal/devnet/)
+	t.Setenv("DEVNET_TESTNET_YAML", "../test/devnet/testnet.yaml")
+	cfg, err := LoadDevNetConfig()
+	require.NoError(t, err, "failed to load devnet config")
+
+	endpoints := DefaultEndpoints()
+	h := NewTestHarness(t, endpoints,
+		WithNetworkMagic(cfg.NetworkMagic),
+	)
 
 	h.WaitForAllNodesReady(60 * time.Second)
 
-	// With 1s slots, slot 10 should be reached within ~50s (f=0.2)
-	h.WaitForSlot(10, 30*time.Second)
+	// Wait for slot 10. Timeout: 10 slots worth of wall-clock time
+	// plus margin for startup variance.
+	const targetSlot = 10
+	timeout := time.Duration(targetSlot)*cfg.SlotDuration() +
+		cfg.ExpectedBlockTime()*5
+	h.WaitForSlot(targetSlot, timeout)
 }
 
 func TestHarnessVerifyConsensus(t *testing.T) {
-	endpoints := defaultEndpoints()
-	h := NewTestHarness(t, endpoints)
+	// Set path relative to this package (internal/devnet/)
+	t.Setenv("DEVNET_TESTNET_YAML", "../test/devnet/testnet.yaml")
+	cfg, err := LoadDevNetConfig()
+	require.NoError(t, err, "failed to load devnet config")
+
+	endpoints := DefaultEndpoints()
+	h := NewTestHarness(t, endpoints,
+		WithNetworkMagic(cfg.NetworkMagic),
+	)
 
 	h.WaitForAllNodesReady(60 * time.Second)
 
-	// Let the chain advance a bit before checking consensus
-	h.WaitForSlot(20, 30*time.Second)
+	// Let the chain advance to slot 20
+	const targetSlot = 20
+	slotTimeout := time.Duration(targetSlot)*cfg.SlotDuration() +
+		cfg.ExpectedBlockTime()*5
+	h.WaitForSlot(targetSlot, slotTimeout)
 
-	// Allow up to 5 slots of propagation delay
-	h.VerifyChainConsensus(5)
+	// Wait for nodes to converge. Use 3*securityParam as the tolerance
+	// (same as the scenario tests) since early chain lifecycle has higher
+	// divergence as nodes bootstrap and connect. Allow 20 expected block
+	// times for convergence.
+	tolerance := 3 * cfg.SecurityParam
+	h.VerifyChainConsensus(tolerance, cfg.ExpectedBlockTime()*20)
 }

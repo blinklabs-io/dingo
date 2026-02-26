@@ -55,6 +55,56 @@ func (p *PeerGovernor) createOutboundConnection(peer *Peer) {
 	if peer == nil {
 		return
 	}
+	// Guard against multiple goroutines reconnecting to the same peer.
+	// This can happen when an inbound connection to a topology peer
+	// closes while an outbound retry loop is already running.
+	p.mu.Lock()
+	idx := p.peerIndexByAddress(peer.NormalizedAddress)
+	if idx == -1 {
+		p.mu.Unlock()
+		return
+	}
+	currentPeer := p.peers[idx]
+	if currentPeer.Reconnecting {
+		p.mu.Unlock()
+		p.config.Logger.Debug(
+			"outbound: reconnect goroutine already active, skipping",
+			"address", peer.Address,
+		)
+		return
+	}
+	currentPeer.Reconnecting = true
+	// Read any pre-existing reconnect delay set by
+	// handleConnectionClosedEvent for short-lived connections.
+	preDelay := currentPeer.ReconnectDelay
+	// Zero the stored delay after consuming it so the retry
+	// loop's backoff starts cleanly from the intended rung
+	// and does not double-apply the pre-delay.
+	currentPeer.ReconnectDelay = 0
+	p.mu.Unlock()
+	// Ensure Reconnecting is cleared when this goroutine exits
+	defer func() {
+		p.mu.Lock()
+		idx := p.peerIndexByAddress(peer.NormalizedAddress)
+		if idx != -1 {
+			p.peers[idx].Reconnecting = false
+		}
+		p.mu.Unlock()
+	}()
+	if preDelay > 0 {
+		p.config.Logger.Info(
+			fmt.Sprintf(
+				"outbound: delaying %s before reconnecting to %s (connection instability backoff)",
+				preDelay,
+				peer.Address,
+			),
+		)
+		select {
+		case <-p.stopCh:
+			return
+		case <-time.After(preDelay):
+		}
+	}
 	for {
 		// Check if PeerGovernor is stopping
 		select {
@@ -131,8 +181,7 @@ func (p *PeerGovernor) createOutboundConnection(peer *Peer) {
 			}
 			// Use the peer from the slice in case the pointer changed
 			currentPeer := p.peers[peerIdx]
-			currentPeer.ReconnectCount = 0
-			currentPeer.ReconnectDelay = 0
+			currentPeer.ConnectedAt = time.Now()
 			currentPeer.setConnection(conn, true)
 			currentPeer.State = PeerStateWarm
 			p.updatePeerMetrics()
@@ -167,6 +216,9 @@ func (p *PeerGovernor) createOutboundConnection(peer *Peer) {
 			currentPeer.ReconnectDelay = initialReconnectDelay
 		} else if currentPeer.ReconnectDelay < maxReconnectDelay {
 			currentPeer.ReconnectDelay *= reconnectBackoffFactor
+			if currentPeer.ReconnectDelay > maxReconnectDelay {
+				currentPeer.ReconnectDelay = maxReconnectDelay
+			}
 		}
 		currentPeer.ReconnectCount++
 		// Copy values while holding lock for use after unlock
@@ -262,6 +314,14 @@ func (p *PeerGovernor) handleInboundConnectionEvent(evt event.Event) {
 			}
 		}
 	}
+	// Reset outbound backoff when an inbound connection from a
+	// topology peer succeeds. The inbound proves the peer is
+	// reachable, so if it drops later, the outbound should retry
+	// immediately rather than waiting on accumulated backoff.
+	if tmpPeer.Source != PeerSourceInboundConn {
+		tmpPeer.ReconnectDelay = 0
+		tmpPeer.ReconnectCount = 0
+	}
 	p.updatePeerMetrics()
 }
 
@@ -298,7 +358,41 @@ func (p *PeerGovernor) handleConnectionClosedEvent(evt event.Event) {
 		// Only reconnect for outbound peers that are not on the deny list
 		if peer.Source != PeerSourceInboundConn &&
 			!p.isDeniedLocked(peer.NormalizedAddress) {
-			go p.createOutboundConnection(peer)
+			// Apply backoff for short-lived connections to prevent
+			// rapid reconnection cycles that exhaust ephemeral ports.
+			// Only reset backoff when connection proved stable.
+			connDur := time.Since(peer.ConnectedAt)
+			if !peer.ConnectedAt.IsZero() &&
+				connDur >= minStableConnectionDuration {
+				// Connection was stable, reset backoff
+				peer.ReconnectCount = 0
+				peer.ReconnectDelay = 0
+			} else if !peer.ConnectedAt.IsZero() {
+				// Short-lived connection: apply exponential backoff
+				if peer.ReconnectDelay == 0 {
+					peer.ReconnectDelay = initialReconnectDelay
+				} else if peer.ReconnectDelay < maxReconnectDelay {
+					peer.ReconnectDelay *= reconnectBackoffFactor
+					if peer.ReconnectDelay > maxReconnectDelay {
+						peer.ReconnectDelay = maxReconnectDelay
+					}
+				}
+				p.config.Logger.Warn(
+					"short-lived connection detected, applying backoff",
+					"address", peer.Address,
+					"connection_duration", connDur,
+					"next_delay", peer.ReconnectDelay,
+				)
+			}
+			peer.ConnectedAt = time.Time{} // Reset for next connection
+			// Only spawn a new reconnect goroutine if one is not
+			// already running. The active goroutine's defer
+			// cleanup in createOutboundConnection will clear
+			// Reconnecting when it exits.
+			if !peer.Reconnecting {
+				peer.Reconnecting = true
+				go p.createOutboundConnection(peer)
+			}
 		}
 	}
 }

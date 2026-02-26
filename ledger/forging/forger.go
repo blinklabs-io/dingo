@@ -47,6 +47,11 @@ const (
 	// time on fast-slot networks (e.g. 100ms devnet slots) while still
 	// catching bulk sync.
 	forgeSyncToleranceSlots = 100
+
+	// forgeStaleGapThresholdSlots is the slot gap between the chain tip
+	// and the slot clock above which the forger logs an error suggesting
+	// the database contains data from a different genesis.
+	forgeStaleGapThresholdSlots = 1000
 )
 
 // BlockForger coordinates block production for a stake pool.
@@ -354,11 +359,25 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 	}
 
 	if currentSlot <= tipSlot {
-		f.logger.Debug(
-			"forge skip: slot already has block",
-			"current_slot", currentSlot,
-			"tip_slot", tipSlot,
-		)
+		// Detect stale data: if the tip is far ahead of the slot clock,
+		// the database likely contains chain data from a different genesis.
+		// Use subtraction (safe here since tipSlot >= currentSlot from
+		// the outer check) to avoid uint64 overflow on the addition.
+		gap := tipSlot - currentSlot
+		if gap > forgeStaleGapThresholdSlots {
+			f.logger.Error(
+				"chain tip is far ahead of slot clock; database may contain data from a different genesis",
+				"current_slot", currentSlot,
+				"tip_slot", tipSlot,
+				"slot_gap", gap,
+			)
+		} else {
+			f.logger.Debug(
+				"forge skip: slot already has block",
+				"current_slot", currentSlot,
+				"tip_slot", tipSlot,
+			)
+		}
 		return nil
 	}
 
@@ -370,7 +389,8 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 	// See forgeSyncToleranceSlots for the tolerance rationale.
 	upstreamTip := f.slotClock.UpstreamTipSlot()
 	if upstreamTip > 0 &&
-		tipSlot+forgeSyncToleranceSlots < upstreamTip {
+		upstreamTip > tipSlot &&
+		upstreamTip-tipSlot > forgeSyncToleranceSlots {
 		f.logger.Debug(
 			"chain syncing from peer, skipping forge",
 			"current_slot", currentSlot,
