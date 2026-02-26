@@ -152,7 +152,8 @@ meshPort: 0
 # base url of bark archive server
 barkBaseUrl: ""
 
-# window where blocks will not be found in the bark archive
+# number of slots from tip within which blocks
+# will not be found in the bark archive
 barkSecurityWindow: 10000
 
 # TCP port bind for listening for bark RPC calls
