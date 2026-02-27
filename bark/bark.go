@@ -167,16 +167,17 @@ func (b *Bark) startServer(server *http.Server) error {
 		if b.config.TlsCertFilePath != "" && b.config.TlsKeyFilePath == "" ||
 			b.config.TlsCertFilePath == "" && b.config.TlsKeyFilePath != "" {
 			err = errors.New("both tls cert and key must be specified")
-			return
 		}
 
-		if b.config.TlsCertFilePath != "" && b.config.TlsKeyFilePath != "" {
-			err = server.ListenAndServeTLS(
-				b.config.TlsCertFilePath,
-				b.config.TlsKeyFilePath,
-			)
-		} else {
-			err = server.ListenAndServe()
+		if err != nil {
+			if b.config.TlsCertFilePath != "" && b.config.TlsKeyFilePath != "" {
+				err = server.ListenAndServeTLS(
+					b.config.TlsCertFilePath,
+					b.config.TlsKeyFilePath,
+				)
+			} else {
+				err = server.ListenAndServe()
+			}
 		}
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			select {

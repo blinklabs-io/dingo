@@ -32,6 +32,12 @@ func (a *archiveServiceHandler) FetchBlock(
 		if err != nil {
 			return nil, fmt.Errorf("failed getting signed url for block [%d, %s]: %w", point.Slot, point.Hash, err)
 		}
+
+		blockType := metadata.Type
+		if blockType < 0 {
+			return nil, fmt.Errorf("invalid block type: %d", blockType)
+		}
+
 		resp.Blocks = append(resp.Blocks, &archive.SignedUrl{
 			Block: &archive.BlockRef{
 				Hash:   b.Hash,
@@ -41,7 +47,7 @@ func (a *archiveServiceHandler) FetchBlock(
 			Url:       signedURL.URL.String(),
 			ExpiresAt: timestamppb.New(signedURL.Expires),
 			Meta: &archive.BlockMeta{
-				Type:     (archive.BlockType)(metadata.Type).Enum(),
+				Type:     (archive.BlockType)(blockType).Enum(),
 				PrevHash: proto.String(hex.EncodeToString(metadata.PrevHash)),
 			},
 		})
