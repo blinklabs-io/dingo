@@ -21,7 +21,6 @@ import (
 	"io"
 	"io/fs"
 	"log/slog"
-	"net/url"
 	"os"
 	"path/filepath"
 	"sync"
@@ -595,5 +594,6 @@ func (d *BlobStoreBadger) GetBlockURL(
 	txn types.Txn,
 	point ocommon.Point,
 ) (types.SignedURL, types.BlockMetadata, error) {
-	return types.SignedURL{}, types.BlockMetadata{}, errors.New("badger: GetBlockURL not supported")
+	return types.SignedURL{}, types.BlockMetadata{},
+		errors.New("badger: GetBlockURL not supported")
 }

@@ -802,6 +802,11 @@ func (d *BlobStoreS3) GetBlockURL(
 	txn types.Txn,
 	point ocommon.Point,
 ) (types.SignedURL, types.BlockMetadata, error) {
+	if _, err := d.validateTxn(txn); err != nil {
+		return types.SignedURL{}, types.BlockMetadata{},
+			fmt.Errorf("s3: invalid transaction: %w", err)
+	}
+
 	key := types.BlockBlobKey(point.Slot, point.Hash)
 
 	metadataKey := types.BlockBlobMetadataKey(key)
@@ -810,11 +815,13 @@ func (d *BlobStoreS3) GetBlockURL(
 		if isS3NotFound(err) {
 			return types.SignedURL{}, types.BlockMetadata{}, types.ErrBlobKeyNotFound
 		}
-		return types.SignedURL{}, types.BlockMetadata{}, err
+		return types.SignedURL{}, types.BlockMetadata{},
+			fmt.Errorf("s3: failed getting block metadata: %w", err)
 	}
 	var tmpMetadata types.BlockMetadata
 	if _, err := cbor.Decode(metadataBytes, &tmpMetadata); err != nil {
-		return types.SignedURL{}, types.BlockMetadata{}, err
+		return types.SignedURL{}, types.BlockMetadata{},
+			fmt.Errorf("s3: failed decoding block metadata: %w", err)
 	}
 
 	_, err = d.client.HeadObject(
