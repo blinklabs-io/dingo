@@ -966,7 +966,8 @@ func (d *BlobStoreGCS) GetBlockURL(
 	}
 	var tmpMetadata types.BlockMetadata
 	if _, err := cbor.Decode(metadataBytes, &tmpMetadata); err != nil {
-		return types.SignedURL{}, types.BlockMetadata{}, err
+		return types.SignedURL{}, types.BlockMetadata{},
+			fmt.Errorf("gcs: failed decoding metadata: %w", err)
 	}
 
 	_, err = d.object(key).Attrs(ctx)
