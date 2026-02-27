@@ -131,7 +131,7 @@ func (b *Bark) Start(ctx context.Context) error {
 	go func() {
 		<-ctx.Done()
 		b.mu.Lock()
-		if b.server != nil {
+		if b.server == server {
 			b.config.Logger.Debug(
 				"context cancelled, shutting down bark gRPC server",
 			)
@@ -142,7 +142,7 @@ func (b *Bark) Start(ctx context.Context) error {
 				30*time.Second,
 			)
 			defer cancel()
-			if err := b.server.Shutdown(shutdownCtx); err != nil { //nolint:contextcheck //shutdownCtx is intentionally created from background to allow shutdown to complete even if ctx is cancelled
+			if err := server.Shutdown(shutdownCtx); err != nil { //nolint:contextcheck //shutdownCtx is intentionally created from background to allow shutdown to complete even if ctx is cancelled
 				b.config.Logger.Error(
 					"failed to shutdown bark gRPC server on context cancellation",
 					"error",
