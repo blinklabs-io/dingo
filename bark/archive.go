@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/hex"
 	"fmt"
+	"math"
 
 	"connectrpc.com/connect"
 	archive "github.com/blinklabs-io/bark/proto/v1alpha1/archive"
@@ -34,7 +35,7 @@ func (a *archiveServiceHandler) FetchBlock(
 		}
 
 		blockType := metadata.Type
-		if blockType < 0 {
+		if blockType >= math.MaxInt32 {
 			return nil, fmt.Errorf("invalid block type: %d", blockType)
 		}
 
