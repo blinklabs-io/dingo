@@ -924,6 +924,12 @@ func (d *BlobStoreGCS) GetBlockURL(
 	txn types.Txn,
 	point ocommon.Point,
 ) (types.SignedURL, types.BlockMetadata, error) {
+
+	if err := d.validateTxn(txn); err != nil {
+		return types.SignedURL{}, types.BlockMetadata{},
+			fmt.Errorf("gcs: invalid transaction: %w", err)
+	}
+
 	key := types.BlockBlobKey(point.Slot, point.Hash)
 
 	metadataKey := types.BlockBlobMetadataKey(key)
