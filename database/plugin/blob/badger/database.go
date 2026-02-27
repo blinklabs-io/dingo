@@ -594,6 +594,6 @@ func (d *BlobStoreBadger) GetBlockURL(
 	ctx context.Context,
 	txn types.Txn,
 	point ocommon.Point,
-) (*url.URL, types.BlockMetadata, error) {
-	return nil, types.BlockMetadata{}, errors.New("badger: GetBlockURL not supported")
+) (types.SignedURL, types.BlockMetadata, error) {
+	return types.SignedURL{}, types.BlockMetadata{}, errors.New("badger: GetBlockURL not supported")
 }
