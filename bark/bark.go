@@ -44,6 +44,9 @@ func NewBark(cfg BarkConfig) *Bark {
 	if cfg.Port == 0 {
 		cfg.Port = 9091
 	}
+	if cfg.DB == nil {
+		panic("db is required")
+	}
 	return &Bark{
 		config: cfg,
 	}
@@ -54,11 +57,6 @@ func (b *Bark) Start(ctx context.Context) error {
 	if b.server != nil {
 		b.mu.Unlock()
 		return errors.New("server already started")
-	}
-
-	if b.config.DB == nil {
-		b.mu.Unlock()
-		return errors.New("database not configured")
 	}
 
 	mux := http.NewServeMux()
