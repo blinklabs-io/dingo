@@ -973,7 +973,7 @@ func (d *BlobStoreGCS) GetBlockURL(
 	_, err = d.object(key).Attrs(ctx)
 	if errors.Is(err, storage.ErrObjectNotExist) {
 		return types.SignedURL{}, types.BlockMetadata{},
-			fmt.Errorf("gcs: block not found: %w", err)
+			fmt.Errorf("gcs: block not found: %w", types.ErrBlobKeyNotFound)
 	}
 	if err != nil {
 		return types.SignedURL{}, types.BlockMetadata{},
