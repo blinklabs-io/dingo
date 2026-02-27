@@ -24,6 +24,11 @@
 #   docker compose up -d       # Start all services
 #   docker compose down -v     # Stop and remove volumes
 #
+# Host port overrides (set in environment or .env file):
+#   DEVNET_DINGO_PORT     - Dingo producer host port    (default: 3010)
+#   DEVNET_CARDANO_PORT   - Cardano producer host port  (default: 3011)
+#   DEVNET_RELAY_PORT     - Cardano relay host port     (default: 3012)
+#
 # The configurator service runs first (via depends_on) to generate unique
 # key sets and genesis files for each pool from testnet.yaml.
 
@@ -64,7 +69,7 @@ services:
       - dingo-producer-data:/data/db
       - dingo-producer-ipc:/ipc
     ports:
-      - "3010:3001"
+      - "${DEVNET_DINGO_PORT:-3010}:3001"
     networks:
       devnet:
         ipv4_address: 172.20.0.10
@@ -108,7 +113,7 @@ services:
       - cardano-producer-data:/data/db
       - cardano-producer-ipc:/ipc
     ports:
-      - "3011:3001"
+      - "${DEVNET_CARDANO_PORT:-3011}:3001"
     networks:
       devnet:
         ipv4_address: 172.20.0.11
@@ -145,7 +150,7 @@ services:
       - cardano-relay-data:/data/db
       - cardano-relay-ipc:/ipc
     ports:
-      - "3012:3001"
+      - "${DEVNET_RELAY_PORT:-3012}:3001"
     networks:
       devnet:
         ipv4_address: 172.20.0.12

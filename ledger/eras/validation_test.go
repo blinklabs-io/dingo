@@ -26,14 +26,19 @@ import (
 )
 
 // mockTransaction implements lcommon.Transaction for
-// testing. Only the Cbor() method is needed.
+// testing.
 type mockTransaction struct {
 	lcommon.Transaction
-	cbor []byte
+	cbor   []byte
+	txType int
 }
 
 func (m *mockTransaction) Cbor() []byte {
 	return m.cbor
+}
+
+func (m *mockTransaction) Type() int {
+	return m.txType
 }
 
 // mockFeeTx extends mockTransaction with Fee() and
@@ -41,12 +46,17 @@ func (m *mockTransaction) Cbor() []byte {
 type mockFeeTx struct {
 	lcommon.Transaction
 	cbor      []byte
+	txType    int
 	fee       *big.Int
 	witnesses lcommon.TransactionWitnessSet
 }
 
 func (m *mockFeeTx) Cbor() []byte {
 	return m.cbor
+}
+
+func (m *mockFeeTx) Type() int {
+	return m.txType
 }
 
 func (m *mockFeeTx) Fee() *big.Int {
@@ -129,9 +139,10 @@ func (m *mockRedeemers) Iter() iter.Seq2[lcommon.RedeemerKey, lcommon.RedeemerVa
 	}
 }
 
-func TestTxBodySize(t *testing.T) {
+func TestTxSizeForFee(t *testing.T) {
 	tests := []struct {
 		name     string
+		txType   int
 		cbor     []byte
 		expected uint64
 	}{
@@ -141,30 +152,48 @@ func TestTxBodySize(t *testing.T) {
 			expected: 0,
 		},
 		{
-			name:     "single byte",
-			cbor:     []byte{0x00},
-			expected: 1,
-		},
-		{
-			name:     "small transaction",
+			// Pre-Alonzo: no IsValid byte, full size
+			// returned unchanged.
+			name:     "pre-alonzo full size",
+			txType:   1, // Shelley
 			cbor:     make([]byte, 256),
 			expected: 256,
 		},
 		{
-			name:     "typical transaction",
-			cbor:     make([]byte, 4096),
-			expected: 4096,
+			// Alonzo+ 4-element TX: fee size excludes the
+			// 1-byte IsValid boolean.
+			name:     "alonzo subtracts isvalid byte",
+			txType:   4, // Alonzo
+			cbor:     make([]byte, 256),
+			expected: 255,
 		},
 		{
-			name:     "large transaction",
+			name:     "typical alonzo transaction",
+			txType:   4,
+			cbor:     make([]byte, 4096),
+			expected: 4095,
+		},
+		{
+			name:     "large alonzo transaction",
+			txType:   4,
 			cbor:     make([]byte, 16384),
-			expected: 16384,
+			expected: 16383,
+		},
+		{
+			// Mary (pre-Alonzo) TX: no subtraction.
+			name:     "mary transaction full size",
+			txType:   3, // Mary
+			cbor:     make([]byte, 4096),
+			expected: 4096,
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			tx := &mockTransaction{cbor: tc.cbor}
-			size := TxBodySize(tx)
+			tx := &mockTransaction{
+				cbor:   tc.cbor,
+				txType: tc.txType,
+			}
+			size := TxSizeForFee(tx)
 			assert.Equal(t, tc.expected, size)
 		})
 	}
@@ -174,6 +203,7 @@ func TestValidateTxSize(t *testing.T) {
 	tests := []struct {
 		name      string
 		txSize    int
+		txType    int
 		maxSize   uint
 		expectErr bool
 	}{
@@ -190,8 +220,10 @@ func TestValidateTxSize(t *testing.T) {
 			expectErr: false,
 		},
 		{
+			// Fee-relevant size = 16386 - 1 = 16385 > 16384
 			name:      "one byte over limit",
-			txSize:    16385,
+			txSize:    16386,
+			txType:    txTypeAlonzo,
 			maxSize:   16384,
 			expectErr: true,
 		},
@@ -208,8 +240,10 @@ func TestValidateTxSize(t *testing.T) {
 			expectErr: false,
 		},
 		{
+			// Fee-relevant size = 2 - 1 = 1 > 0
 			name:      "zero max size with non-zero tx",
-			txSize:    1,
+			txSize:    2,
+			txType:    txTypeAlonzo,
 			maxSize:   0,
 			expectErr: true,
 		},
@@ -217,7 +251,8 @@ func TestValidateTxSize(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			tx := &mockTransaction{
-				cbor: make([]byte, tc.txSize),
+				cbor:   make([]byte, tc.txSize),
+				txType: tc.txType,
 			}
 			err := ValidateTxSize(tx, tc.maxSize)
 			if tc.expectErr {
@@ -335,111 +370,6 @@ func TestValidateTxExUnits(t *testing.T) {
 	}
 }
 
-func TestCeilMul(t *testing.T) {
-	tests := []struct {
-		name     string
-		num      *big.Int
-		denom    *big.Int
-		value    *big.Int
-		expected uint64
-	}{
-		{
-			name:     "exact division",
-			num:      big.NewInt(1),
-			denom:    big.NewInt(2),
-			value:    big.NewInt(10),
-			expected: 5,
-		},
-		{
-			name:     "ceiling rounds up",
-			num:      big.NewInt(1),
-			denom:    big.NewInt(3),
-			value:    big.NewInt(1),
-			expected: 1,
-		},
-		{
-			name:     "zero value",
-			num:      big.NewInt(577),
-			denom:    big.NewInt(10000),
-			value:    big.NewInt(0),
-			expected: 0,
-		},
-		{
-			name:     "zero numerator",
-			num:      big.NewInt(0),
-			denom:    big.NewInt(10000),
-			value:    big.NewInt(1000000),
-			expected: 0,
-		},
-		{
-			name:     "mainnet memory price",
-			num:      big.NewInt(577),
-			denom:    big.NewInt(10000),
-			value:    big.NewInt(1000000),
-			expected: 57700,
-		},
-		{
-			name:     "mainnet step price",
-			num:      big.NewInt(721),
-			denom:    big.NewInt(10000000),
-			value:    big.NewInt(200000000),
-			expected: 14420,
-		},
-		{
-			name:     "ceiling with remainder 1",
-			num:      big.NewInt(1),
-			denom:    big.NewInt(3),
-			value:    big.NewInt(2),
-			expected: 1,
-		},
-		{
-			name:     "ceiling with remainder 2",
-			num:      big.NewInt(1),
-			denom:    big.NewInt(3),
-			value:    big.NewInt(4),
-			expected: 2,
-		},
-		{
-			name:     "large values",
-			num:      big.NewInt(577),
-			denom:    big.NewInt(10000),
-			value:    big.NewInt(14000000),
-			expected: 807800,
-		},
-		{
-			// ceil(577/10000 * 14000001)
-			// = ceil(8078005777/10000) = ceil(807800.5777) = 807801
-			name:     "large values with ceiling",
-			num:      big.NewInt(577),
-			denom:    big.NewInt(10000),
-			value:    big.NewInt(14000001),
-			expected: 807801,
-		},
-		{
-			// Result exceeds uint64 range: saturate at MaxUint64.
-			name:     "overflow saturates at MaxUint64",
-			num:      new(big.Int).SetUint64(math.MaxUint64),
-			denom:    big.NewInt(1),
-			value:    big.NewInt(2),
-			expected: math.MaxUint64,
-		},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			result := CeilMul(
-				tc.num,
-				tc.denom,
-				tc.value,
-			)
-			assert.Equal(
-				t,
-				tc.expected,
-				result,
-			)
-		})
-	}
-}
-
 func TestCalculateMinFee(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -540,10 +470,12 @@ func TestCalculateMinFee(t *testing.T) {
 			expected:    222021,
 		},
 		{
-			// Ceiling behavior: fractions round up.
-			// pricesMem=1/3, mem=1 => ceil(1/3) = 1
-			// pricesSteps=1/3, steps=1 => ceil(1/3) = 1
-			// scriptFee = 1 + 1 = 2
+			// Ceiling behavior: single ceiling over sum.
+			// Per Alonzo spec: scriptFee = ceil(prMem*mem + prSteps*steps)
+			// pricesMem=1/3, mem=1 => 1/3
+			// pricesSteps=1/3, steps=1 => 1/3
+			// sum = 1/3 + 1/3 = 2/3
+			// scriptFee = ceil(2/3) = 1
 			name:   "ceiling rounding",
 			txSize: 0,
 			exUnits: lcommon.ExUnits{
@@ -554,7 +486,7 @@ func TestCalculateMinFee(t *testing.T) {
 			minFeeB:     0,
 			pricesMem:   big.NewRat(1, 3),
 			pricesSteps: big.NewRat(1, 3),
-			expected:    2,
+			expected:    1,
 		},
 		{
 			// Exact division: no ceiling needed.
@@ -861,58 +793,6 @@ func TestCalculateMinFee_OnePriceNilIgnoresExUnits(t *testing.T) {
 	assert.Equal(t, baseFee, fee2,
 		"nil mem price should ignore script fees",
 	)
-}
-
-func TestCeilMul_ExactMultiples(t *testing.T) {
-	// When num*value is exactly divisible by denom,
-	// ceiling should equal the exact quotient.
-	result := CeilMul(
-		big.NewInt(3),
-		big.NewInt(1),
-		big.NewInt(5),
-	)
-	assert.Equal(t, uint64(15), result)
-}
-
-func TestCeilMul_LargeValues(t *testing.T) {
-	// Test with values near the practical maximum for
-	// Cardano mainnet. Max memory is 14M, max steps
-	// is 10B. Price rationals are small fractions.
-	memResult := CeilMul(
-		big.NewInt(577),
-		big.NewInt(10000),
-		big.NewInt(14000000),
-	)
-	assert.Equal(t, uint64(807800), memResult)
-
-	stepResult := CeilMul(
-		big.NewInt(721),
-		big.NewInt(10000000),
-		big.NewInt(10000000000),
-	)
-	assert.Equal(t, uint64(721000), stepResult)
-}
-
-func TestCeilMul_MaxInt64Values(t *testing.T) {
-	// Test with max int64 to ensure no overflow in
-	// big.Int arithmetic.
-	maxVal := big.NewInt(math.MaxInt64)
-	result := CeilMul(
-		big.NewInt(1),
-		big.NewInt(1),
-		maxVal,
-	)
-	assert.Equal(t, uint64(math.MaxInt64), result)
-}
-
-func TestCeilMul_ZeroDenomPanics(t *testing.T) {
-	assert.Panics(t, func() {
-		CeilMul(
-			big.NewInt(1),
-			big.NewInt(0),
-			big.NewInt(1),
-		)
-	}, "CeilMul should panic on zero denominator")
 }
 
 func TestDeclaredExUnits(t *testing.T) {
@@ -1359,11 +1239,13 @@ func TestValidateTxFee(t *testing.T) {
 		expectErr bool
 	}{
 		{
-			// No scripts: baseFee = 44*300 + 155381 = 168581
+			// Fee-relevant size = 301 - 1 = 300
+			// baseFee = 44*300 + 155381 = 168581
 			// Fee = 200000 >= 168581 => valid
 			name: "sufficient fee no scripts",
 			tx: &mockFeeTx{
-				cbor:      make([]byte, 300),
+				cbor:      make([]byte, 301),
+				txType:    txTypeAlonzo,
 				fee:       big.NewInt(200000),
 				witnesses: nil,
 			},
@@ -1374,11 +1256,13 @@ func TestValidateTxFee(t *testing.T) {
 			expectErr: false,
 		},
 		{
+			// Fee-relevant size = 301 - 1 = 300
 			// baseFee = 44*300 + 155381 = 168581
 			// Fee = 168581 (exact) => valid
 			name: "exact minimum fee no scripts",
 			tx: &mockFeeTx{
-				cbor:      make([]byte, 300),
+				cbor:      make([]byte, 301),
+				txType:    txTypeAlonzo,
 				fee:       big.NewInt(168581),
 				witnesses: nil,
 			},
@@ -1389,11 +1273,13 @@ func TestValidateTxFee(t *testing.T) {
 			expectErr: false,
 		},
 		{
+			// Fee-relevant size = 301 - 1 = 300
 			// baseFee = 44*300 + 155381 = 168581
 			// Fee = 168580 < 168581 => invalid
 			name: "one lovelace under minimum no scripts",
 			tx: &mockFeeTx{
-				cbor:      make([]byte, 300),
+				cbor:      make([]byte, 301),
+				txType:    txTypeAlonzo,
 				fee:       big.NewInt(168580),
 				witnesses: nil,
 			},
@@ -1404,15 +1290,17 @@ func TestValidateTxFee(t *testing.T) {
 			expectErr: true,
 		},
 		{
+			// Fee-relevant size = 301 - 1 = 300
 			// baseFee = 44*300 + 155381 = 168581
-			// memFee = ceil(577*1000000/10000) = 57700
-			// stepFee = ceil(721*200000000/10000000) = 14420
-			// minFee = 168581 + 57700 + 14420 = 240701
+			// scriptFee = ceil(577/10000*1000000 +
+			//   721/10000000*200000000) = 72120
+			// minFee = 168581 + 72120 = 240701
 			// Fee = 240701 (exact) => valid
 			name: "exact minimum fee with scripts",
 			tx: &mockFeeTx{
-				cbor: make([]byte, 300),
-				fee:  big.NewInt(240701),
+				cbor:   make([]byte, 301),
+				txType: txTypeAlonzo,
+				fee:    big.NewInt(240701),
 				witnesses: &mockWitnessSet{
 					redeemers: &mockRedeemers{
 						entries: []struct {
@@ -1438,11 +1326,14 @@ func TestValidateTxFee(t *testing.T) {
 			expectErr: false,
 		},
 		{
-			// Same as above but fee = 240700 < 240701
+			// Fee-relevant size = 301 - 1 = 300
+			// minFee = 44*300 + 155381 + 72120 = 240701
+			// Fee = 240700 < 240701 => invalid
 			name: "one lovelace under minimum with scripts",
 			tx: &mockFeeTx{
-				cbor: make([]byte, 300),
-				fee:  big.NewInt(240700),
+				cbor:   make([]byte, 301),
+				txType: txTypeAlonzo,
+				fee:    big.NewInt(240700),
 				witnesses: &mockWitnessSet{
 					redeemers: &mockRedeemers{
 						entries: []struct {
@@ -1471,8 +1362,9 @@ func TestValidateTxFee(t *testing.T) {
 			// Overpaying is fine
 			name: "overpaying fee with scripts",
 			tx: &mockFeeTx{
-				cbor: make([]byte, 300),
-				fee:  big.NewInt(500000),
+				cbor:   make([]byte, 301),
+				txType: txTypeAlonzo,
+				fee:    big.NewInt(500000),
 				witnesses: &mockWitnessSet{
 					redeemers: &mockRedeemers{
 						entries: []struct {
@@ -1498,16 +1390,16 @@ func TestValidateTxFee(t *testing.T) {
 			expectErr: false,
 		},
 		{
-			// Three scripts summed:
-			// mem=600000, steps=200000000
+			// Fee-relevant size = 401 - 1 = 400
 			// baseFee = 44*400 + 155381 = 172981
-			// memFee = ceil(577*600000/10000) = 34620
-			// stepFee = ceil(721*200000000/10000000) = 14420
-			// minFee = 172981 + 34620 + 14420 = 222021
+			// scriptFee = ceil(577/10000*600000 +
+			//   721/10000000*200000000) = 49040
+			// minFee = 172981 + 49040 = 222021
 			name: "multiple redeemers exact fee",
 			tx: &mockFeeTx{
-				cbor: make([]byte, 400),
-				fee:  big.NewInt(222021),
+				cbor:   make([]byte, 401),
+				txType: txTypeAlonzo,
+				fee:    big.NewInt(222021),
 				witnesses: &mockWitnessSet{
 					redeemers: &mockRedeemers{
 						entries: []struct {
@@ -1552,7 +1444,8 @@ func TestValidateTxFee(t *testing.T) {
 			// nil fee defaults to 0, should fail
 			name: "nil fee fails",
 			tx: &mockFeeTx{
-				cbor:      make([]byte, 300),
+				cbor:      make([]byte, 301),
+				txType:    txTypeAlonzo,
 				fee:       nil,
 				witnesses: nil,
 			},
@@ -1564,11 +1457,13 @@ func TestValidateTxFee(t *testing.T) {
 		},
 		{
 			// nil prices: no script fee component
+			// Fee-relevant size = 301 - 1 = 300
 			// baseFee = 44*300 + 155381 = 168581
 			name: "nil prices no script fee",
 			tx: &mockFeeTx{
-				cbor: make([]byte, 300),
-				fee:  big.NewInt(168581),
+				cbor:   make([]byte, 301),
+				txType: txTypeAlonzo,
+				fee:    big.NewInt(168581),
 				witnesses: &mockWitnessSet{
 					redeemers: &mockRedeemers{
 						entries: []struct {
@@ -1637,7 +1532,8 @@ func TestValidateTxFee_ErrorMessageIncludesFees(
 	// Verify the error message contains both the
 	// provided fee and the calculated minimum.
 	tx := &mockFeeTx{
-		cbor:      make([]byte, 300),
+		cbor:      make([]byte, 301),
+		txType:    txTypeAlonzo,
 		fee:       big.NewInt(100000),
 		witnesses: nil,
 	}
@@ -1649,7 +1545,9 @@ func TestValidateTxFee_ErrorMessageIncludesFees(
 		big.NewRat(721, 10000000),
 	)
 	require.Error(t, err)
-	// Should mention both the provided fee and the min
+	// Should mention both the provided fee and the min.
+	// Fee-relevant TX size = 301 - 1 = 300 (excludes IsValid byte).
+	// minFee = 44*300 + 155381 = 168581
 	assert.Contains(t, err.Error(), "100000")
 	assert.Contains(t, err.Error(), "168581")
 }

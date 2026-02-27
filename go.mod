@@ -15,7 +15,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.96.0
 	github.com/aws/smithy-go v1.24.1
 	github.com/blinklabs-io/bursa v0.15.0
-	github.com/blinklabs-io/gouroboros v0.159.0
+	github.com/blinklabs-io/gouroboros v0.159.2
 	github.com/blinklabs-io/ouroboros-mock v0.9.1
 	github.com/blinklabs-io/plutigo v0.0.25
 	github.com/blockfrost/blockfrost-go v0.3.0

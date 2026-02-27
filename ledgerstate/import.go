@@ -77,6 +77,11 @@ type RawLedgerState struct {
 	// used for VRF leader election. It is a 32-byte Blake2b hash,
 	// or nil if the nonce is neutral.
 	EpochNonce []byte
+	// EvolvingNonce is the rolling nonce (eta_v) from the consensus
+	// state, updated with each block's VRF output. Stored as the
+	// tip block nonce so that subsequent block processing computes
+	// correct rolling nonces after a mithril snapshot restore.
+	EvolvingNonce []byte
 	// EraBoundsWarning holds a non-fatal error from era bounds
 	// extraction. When set, epoch generation falls back to
 	// the single-epoch path.
@@ -1199,6 +1204,39 @@ func importTip(ctx context.Context, cfg ImportConfig) error {
 
 	if err := store.SetTip(oTip, txn.Metadata()); err != nil {
 		return fmt.Errorf("setting tip: %w", err)
+	}
+
+	// Store evolving nonce as the tip block nonce so that
+	// subsequent block processing starts from the correct rolling
+	// nonce. Without this, the node falls back to the Shelley
+	// genesis hash, producing wrong block nonces and eventually a
+	// wrong epoch nonce that causes VRF verification to fail.
+	if len(cfg.State.EvolvingNonce) > 0 {
+		if len(cfg.State.EvolvingNonce) != 32 {
+			return fmt.Errorf(
+				"invalid evolving nonce length %d, expected 32",
+				len(cfg.State.EvolvingNonce),
+			)
+		}
+		if err := store.SetBlockNonce(
+			tip.BlockHash,
+			tip.Slot,
+			cfg.State.EvolvingNonce,
+			true, // checkpoint
+			txn.Metadata(),
+		); err != nil {
+			return fmt.Errorf(
+				"setting tip block nonce: %w", err,
+			)
+		}
+		cfg.Logger.Info(
+			"stored evolving nonce for tip block",
+			"component", "ledgerstate",
+			"slot", tip.Slot,
+			"nonce", hex.EncodeToString(
+				cfg.State.EvolvingNonce,
+			),
+		)
 	}
 
 	// Store treasury and reserves balances

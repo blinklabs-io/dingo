@@ -109,14 +109,29 @@ func NewCalculator(activeSlotCoeff float64, slotsPerEpoch uint64) *Calculator {
 }
 
 // activeSlotCoeffRat converts the float64 ActiveSlotCoeff to a *big.Rat
-// for use with the gouroboros consensus package.
-// SetFloat64 returns nil for Inf/NaN, so we fall back to a zero-value Rat.
-func (c *Calculator) activeSlotCoeffRat() *big.Rat {
+// for use with the gouroboros consensus package. Returns an error if the
+// coefficient is not a finite value in the range (0, 1].
+func (c *Calculator) activeSlotCoeffRat() (*big.Rat, error) {
+	if math.IsNaN(c.ActiveSlotCoeff) || math.IsInf(c.ActiveSlotCoeff, 0) {
+		return nil, fmt.Errorf(
+			"active slot coefficient is not finite: %v",
+			c.ActiveSlotCoeff,
+		)
+	}
+	if c.ActiveSlotCoeff <= 0 || c.ActiveSlotCoeff > 1 {
+		return nil, fmt.Errorf(
+			"active slot coefficient must be in (0, 1], got %v",
+			c.ActiveSlotCoeff,
+		)
+	}
 	r := new(big.Rat).SetFloat64(c.ActiveSlotCoeff)
 	if r == nil {
-		return new(big.Rat)
+		return nil, fmt.Errorf(
+			"failed to convert active slot coefficient %v to rational",
+			c.ActiveSlotCoeff,
+		)
 	}
-	return r
+	return r, nil
 }
 
 // CalculateSchedule computes which slots a pool leads in the given epoch.
@@ -152,7 +167,10 @@ func (c *Calculator) CalculateSchedule(
 	epochStartSlot := epoch * c.SlotsPerEpoch
 	epochEndSlot := epochStartSlot + c.SlotsPerEpoch
 
-	activeSlotCoeff := c.activeSlotCoeffRat()
+	activeSlotCoeff, err := c.activeSlotCoeffRat()
+	if err != nil {
+		return nil, fmt.Errorf("invalid active slot coefficient: %w", err)
+	}
 
 	// Check each slot in the epoch
 	for slot := epochStartSlot; slot < epochEndSlot; slot++ {
@@ -182,13 +200,21 @@ func (c *Calculator) CalculateSchedule(
 //
 // threshold(sigma) = 1 - (1-f)^sigma
 // where f is the active slot coefficient and sigma is the relative stake.
+// Returns 0 if any input is invalid (NaN, Inf, out of range).
 func (c *Calculator) Threshold(stakeRatio float64) float64 {
+	if math.IsNaN(stakeRatio) || math.IsInf(stakeRatio, 0) {
+		return 0
+	}
 	if stakeRatio <= 0 {
 		return 0
 	}
+	f := c.ActiveSlotCoeff
+	if math.IsNaN(f) || math.IsInf(f, 0) || f <= 0 || f > 1 {
+		return 0
+	}
 	if stakeRatio >= 1 {
-		return c.ActiveSlotCoeff
+		return f
 	}
 	// threshold(sigma) = 1 - (1-f)^sigma
-	return 1 - math.Pow(1-c.ActiveSlotCoeff, stakeRatio)
+	return 1 - math.Pow(1-f, stakeRatio)
 }
