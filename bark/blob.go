@@ -133,7 +133,6 @@ func (b *BlobStoreBark) GetBlock(
 			},
 		),
 	)
-
 	if err != nil {
 		return nil, types.BlockMetadata{},
 			fmt.Errorf("failed getting signed url from bark archive service: %w", err)
