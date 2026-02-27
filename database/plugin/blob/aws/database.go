@@ -833,7 +833,7 @@ func (d *BlobStoreS3) GetBlockURL(
 	if err != nil {
 		return types.SignedURL{}, types.BlockMetadata{},
 			fmt.Errorf("s3 blob: head object %q failed: %w",
-				d.fullKey(string(key)), err)
+				d.fullKey(string(key)), types.ErrBlobKeyNotFound)
 	}
 
 	presignClient := s3.NewPresignClient(d.client)
