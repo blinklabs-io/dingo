@@ -1002,7 +1002,7 @@ func (d *BlobStoreGCS) GetBlockURL(
 	}
 
 	signedURL := types.SignedURL{
-		URL:     u,
+		URL:     *u,
 		Expires: time.Now().Add(time.Hour),
 	}
 

@@ -217,6 +217,6 @@ type BlockMetadata struct {
 
 // SignedURL is a url that has been pre-signed and has an expiration time
 type SignedURL struct {
-	URL     *url.URL
+	URL     url.URL
 	Expires time.Time
 }

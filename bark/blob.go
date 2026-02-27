@@ -37,6 +37,11 @@ func NewBarkBlobStore(
 	config BlobStoreBarkConfig,
 	upstream blob.BlobStore,
 ) *BlobStoreBark {
+
+	if config.LedgerState == nil {
+		panic("bark: ledger state is required")
+	}
+
 	httpClient := config.HTTPClient
 	if httpClient == nil {
 		httpClient = http.DefaultClient
