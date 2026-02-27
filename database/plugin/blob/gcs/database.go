@@ -931,6 +931,16 @@ func (d *BlobStoreGCS) GetBlockURL(
 
 	key := types.BlockBlobKey(point.Slot, point.Hash)
 
+	_, err := d.object(key).Attrs(ctx)
+	if errors.Is(err, storage.ErrObjectNotExist) {
+		return types.SignedURL{}, types.BlockMetadata{},
+			fmt.Errorf("gcs: block not found: %w", types.ErrBlobKeyNotFound)
+	}
+	if err != nil {
+		return types.SignedURL{}, types.BlockMetadata{},
+			fmt.Errorf("gcs: failed getting object attributes: %w", err)
+	}
+
 	metadataKey := types.BlockBlobMetadataKey(key)
 	r, err := d.object(metadataKey).NewReader(ctx)
 	if err != nil {
@@ -970,20 +980,11 @@ func (d *BlobStoreGCS) GetBlockURL(
 			fmt.Errorf("gcs: failed decoding metadata: %w", err)
 	}
 
-	_, err = d.object(key).Attrs(ctx)
-	if errors.Is(err, storage.ErrObjectNotExist) {
-		return types.SignedURL{}, types.BlockMetadata{},
-			fmt.Errorf("gcs: block not found: %w", types.ErrBlobKeyNotFound)
-	}
-	if err != nil {
-		return types.SignedURL{}, types.BlockMetadata{},
-			fmt.Errorf("gcs: failed getting object attributes: %w", err)
-	}
-
+	expires := time.Now().Add(time.Hour)
 	opts := &storage.SignedURLOptions{
 		Scheme:  storage.SigningSchemeV4,
 		Method:  http.MethodGet,
-		Expires: time.Now().Add(time.Hour),
+		Expires: expires,
 	}
 
 	presignedURL, err := d.bucket.SignedURL(
@@ -1003,7 +1004,7 @@ func (d *BlobStoreGCS) GetBlockURL(
 
 	signedURL := types.SignedURL{
 		URL:     *u,
-		Expires: time.Now().Add(time.Hour),
+		Expires: expires,
 	}
 
 	metadata := types.BlockMetadata{
