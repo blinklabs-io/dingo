@@ -135,6 +135,45 @@ func (d *Database) HasGenesisCbor(slot uint64, hash []byte) bool {
 	return err == nil
 }
 
+// HasAnyGenesisCbor checks whether any genesis CBOR data exists at the
+// given slot, regardless of hash. This is used to distinguish between
+// "no genesis CBOR" (e.g., after Mithril bootstrap) and "genesis CBOR
+// exists but with a different hash" (true network mismatch).
+func (d *Database) HasAnyGenesisCbor(slot uint64) bool {
+	blob := d.Blob()
+	if blob == nil {
+		return false
+	}
+	txn := d.BlobTxn(false)
+	defer txn.Rollback() //nolint:errcheck
+	prefix := slices.Concat(
+		[]byte(types.BlockBlobKeyPrefix),
+		types.BlockBlobKeyUint64ToBytes(slot),
+	)
+	opts := types.BlobIteratorOptions{Prefix: prefix}
+	it := blob.NewIterator(txn.Blob(), opts)
+	if it == nil {
+		return false
+	}
+	defer it.Close()
+	for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
+		item := it.Item()
+		if item == nil {
+			continue
+		}
+		key := item.Key()
+		if key == nil {
+			continue
+		}
+		// Skip the metadata key
+		if strings.HasSuffix(string(key), types.BlockBlobMetadataKeySuffix) {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
 func BlockDeleteTxn(txn *Txn, block models.Block) error {
 	if txn == nil {
 		return types.ErrNilTxn

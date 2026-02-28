@@ -389,8 +389,11 @@ func (p *PeerGovernor) handleConnectionClosedEvent(evt event.Event) {
 			// already running. The active goroutine's defer
 			// cleanup in createOutboundConnection will clear
 			// Reconnecting when it exits.
+			// Do NOT set Reconnecting here — createOutboundConnection
+			// sets it itself after acquiring the lock. Setting it
+			// here would cause the goroutine to see it as already
+			// active and immediately return.
 			if !peer.Reconnecting {
-				peer.Reconnecting = true
 				go p.createOutboundConnection(peer)
 			}
 		}

@@ -379,8 +379,12 @@ func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 		ls.metrics.forks.Add(1)
 	}
 	ls.chainsyncState = SyncingChainsyncState
-	// Allow us to build up a few blockfetch batches worth of headers
-	allowedHeaderCount := blockfetchBatchSize * 4
+	// Allow us to build up a few blockfetch batches worth of headers,
+	// but never exceed the chain's actual header queue capacity.
+	allowedHeaderCount := min(
+		blockfetchBatchSize*4,
+		ls.chain.MaxQueuedHeaders(),
+	)
 	headerCount := ls.chain.HeaderCount()
 
 	// Add header to chain
@@ -798,17 +802,30 @@ func (ls *LedgerState) createGenesisBlock() error {
 
 	if ls.currentTip.Point.Slot > 0 {
 		// Validate existing chain data matches the current genesis config.
-		// If the blob store does not contain genesis CBOR at the expected
-		// key, the database was created with a different genesis.
-		if !ls.db.HasGenesisCbor(0, genesisHash[:]) {
+		// If genesis CBOR exists in the blob store with the expected hash,
+		// the database was created with a matching genesis — nothing to do.
+		if ls.db.HasGenesisCbor(0, genesisHash[:]) {
+			return nil
+		}
+		// Check if genesis CBOR exists but with a different hash.
+		// This indicates the database was created for a different
+		// network (e.g., mainnet DB with preview config) — fail fast.
+		if ls.db.HasAnyGenesisCbor(0) {
 			return fmt.Errorf(
-				"genesis hash mismatch: database contains chain data "+
-					"from a different genesis (expected Byron genesis "+
-					"hash %x); delete the database directory to start fresh",
+				"genesis hash mismatch: database contains "+
+					"genesis data from a different network "+
+					"(expected Byron genesis hash %x)",
 				genesisHash,
 			)
 		}
-		return nil
+		// Genesis CBOR missing (e.g., after Mithril bootstrap which
+		// imports ledger state and ImmutableDB blocks but does not
+		// create the synthetic genesis block). Fall through to
+		// create it now. All storage operations are idempotent.
+		ls.config.Logger.Info(
+			"genesis block CBOR missing, creating it now",
+			"component", "ledger",
+		)
 	}
 
 	txn := ls.db.Transaction(true)
@@ -1132,136 +1149,87 @@ func (ls *LedgerState) calculateEpochNonce(
 	if currentEra.Id == 0 {
 		return nil, nil
 	}
-	// Use Shelley genesis hash for initial epoch nonce
-	if len(currentEpoch.Nonce) == 0 {
-		if ls.config.CardanoNodeConfig.ShelleyGenesisHash == "" {
-			return nil, errors.New("could not get Shelley genesis hash")
-		}
-		genesisHashBytes, err := hex.DecodeString(
-			ls.config.CardanoNodeConfig.ShelleyGenesisHash,
-		)
-		if err != nil {
-			return nil, fmt.Errorf("decode genesis hash: %w", err)
-		}
-		return genesisHashBytes, nil
+	if ls.config.CardanoNodeConfig == nil {
+		return nil, errors.New("CardanoNodeConfig is nil")
 	}
-	// Calculate stability window: 3k/f slots
-	stabilityWindow := ls.calculateStabilityWindowForEra(currentEra.Id)
-	var stabilityWindowStartSlot uint64
-	if epochStartSlot > stabilityWindow {
-		stabilityWindowStartSlot = epochStartSlot - stabilityWindow
-	} else {
-		stabilityWindowStartSlot = 0
+	if ls.config.CardanoNodeConfig.ShelleyGenesisHash == "" {
+		return nil, errors.New("could not get Shelley genesis hash")
 	}
-
-	// Determine the candidate nonce (first input to epoch nonce).
-	//
-	// In Ouroboros Praos, the candidate nonce is the evolving nonce
-	// frozen at the stability window point within the epoch. It is
-	// only updated when slot + stabilityWindow < firstSlotNextEpoch.
-	//
-	// When the stability window >= epoch length (common on DevNets),
-	// that condition is never met, so the candidate nonce stays at
-	// its initial value (the Shelley genesis hash) forever. We detect
-	// this by checking whether the stability point falls before the
-	// current epoch's start.
 	genesisHashBytes, err := hex.DecodeString(
 		ls.config.CardanoNodeConfig.ShelleyGenesisHash,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("decode genesis hash: %w", err)
 	}
-
-	var candidateNonce []byte
-	if stabilityWindowStartSlot < currentEpoch.StartSlot {
-		// Stability window extends before this epoch — candidate nonce
-		// was never updated during the epoch. Use the genesis hash
-		// (the initial Praos candidate nonce value).
-		candidateNonce = genesisHashBytes
-	} else {
-		// Normal case: look up the rolling nonce at the stability point
-		blockBeforeStabilityWindow, lookupErr := database.BlockBeforeSlotTxn(
-			txn,
-			stabilityWindowStartSlot,
-		)
-		if lookupErr != nil {
-			if !errors.Is(lookupErr, models.ErrBlockNotFound) {
-				return nil, fmt.Errorf(
-					"lookup block before slot: %w",
-					lookupErr,
-				)
-			}
-			candidateNonce = genesisHashBytes
-		} else {
-			candidateNonce, err = ls.db.GetBlockNonce(
-				ocommon.Point{
-					Hash: blockBeforeStabilityWindow.Hash,
-					Slot: blockBeforeStabilityWindow.Slot,
-				},
-				txn,
-			)
-			if err != nil {
-				return nil, fmt.Errorf("lookup block nonce: %w", err)
-			}
-			if len(candidateNonce) == 0 {
-				candidateNonce = genesisHashBytes
-			}
-		}
+	// For the first Shelley epoch (or when no previous nonce exists),
+	// the epoch nonce is the Shelley genesis hash. This matches
+	// cardano-node where the initial epochNonce and candidateNonce
+	// are both set to the genesis hash, and with NeutralNonce as
+	// lastEpochBlockNonce the identity operation yields genesis hash.
+	if len(currentEpoch.Nonce) == 0 || currentEpoch.EpochId == 0 {
+		return genesisHashBytes, nil
 	}
 
-	// Determine the last epoch block nonce (second input).
-	//
-	// In Praos, this is the prevHash from the last block of the
-	// previous epoch. It matches the Haskell lastEpochBlockNonce
-	// which is set at each epoch tick to labNonce (= prevHash of
-	// the last processed block).
-	//
-	// We use epochStartSlot (the start of the NEW epoch) because
-	// we need the last block of the ENDING epoch — i.e., the last
-	// block before the new epoch begins.
+	// In Ouroboros Praos, the candidate nonce is the Shelley genesis
+	// hash. Empirically confirmed: cardano-node reports the genesis
+	// hash as candidateNonce at every epoch. The UPDN state resets
+	// at epoch boundaries so the candidate nonce never diverges from
+	// its initial value.
+	candidateNonce := genesisHashBytes
+
+	// The lastEpochBlockNonce used here is the labNonce captured at
+	// the PREVIOUS epoch boundary (not the current one). In Haskell:
+	//   newState.epochNonce = oldState.candidateNonce <> oldState.lastEpochBlockNonce
+	//   newState.lastEpochBlockNonce = oldState.labNonce
+	// So epoch N's nonce uses lastEpochBlockNonce from before the
+	// N-1→N transition. We look up the last block before the CURRENT
+	// epoch's start slot (last block of the epoch BEFORE the current
+	// one), and use its PrevHash (matching Haskell's labNonce =
+	// hashToNonce(prevHash)).
 	blockLastPrevEpoch, err := database.BlockBeforeSlotTxn(
 		txn,
-		epochStartSlot,
+		currentEpoch.StartSlot,
 	)
 	if err != nil {
 		if errors.Is(err, models.ErrBlockNotFound) {
-			// No block before this epoch (first epoch transition).
-			// This is equivalent to NeutralNonce in Haskell:
-			// candidateNonce XOR NeutralNonce = candidateNonce.
+			// No block before this epoch - equivalent to NeutralNonce,
+			// which acts as identity, so return candidateNonce.
 			return candidateNonce, nil
 		}
 		return nil, fmt.Errorf("lookup block before slot: %w", err)
 	}
-	if len(blockLastPrevEpoch.Hash) == 0 {
+	if len(blockLastPrevEpoch.PrevHash) == 0 {
 		return candidateNonce, nil
 	}
 
-	// Combine candidateNonce and lastEpochBlockNonce using XOR
-	// (Praos epoch nonce = candidateNonce XOR blockLastPrevEpoch).
-	// The Haskell Nonce Semigroup uses XOR for combining nonces.
-	// lastEpochBlockNonce = prevHashToNonce(lastAppliedHash lab)
-	// in Haskell — the hash of the last block of the prev epoch.
-	if len(candidateNonce) < 32 || len(blockLastPrevEpoch.Hash) < 32 {
+	// Combine candidateNonce and lastEpochBlockNonce using
+	// blake2b_256(candidateNonce || lastEpochBlockNonce).
+	// The lastEpochBlockNonce is the PrevHash of the boundary block,
+	// matching Haskell's labNonce = hashToNonce(prevHash(block)).
+	if len(candidateNonce) < 32 || len(blockLastPrevEpoch.PrevHash) < 32 {
 		return nil, fmt.Errorf(
-			"nonce XOR requires 32-byte inputs: candidateNonce=%d, blockHash=%d",
-			len(candidateNonce), len(blockLastPrevEpoch.Hash),
+			"epoch nonce requires 32-byte inputs: candidateNonce=%d, prevHash=%d",
+			len(candidateNonce), len(blockLastPrevEpoch.PrevHash),
 		)
 	}
-	result := make([]byte, 32)
-	for i := 0; i < 32; i++ {
-		result[i] = candidateNonce[i] ^ blockLastPrevEpoch.Hash[i]
+	result, err := lcommon.CalculateEpochNonce(
+		candidateNonce,
+		blockLastPrevEpoch.PrevHash,
+		nil,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("calculate epoch nonce: %w", err)
 	}
 	ls.config.Logger.Debug(
 		"epoch nonce computed",
 		"component", "ledger",
 		"epoch_start_slot", epochStartSlot,
-		"stability_window_slot", stabilityWindowStartSlot,
 		"candidate_nonce", hex.EncodeToString(candidateNonce),
-		"last_block_hash", hex.EncodeToString(blockLastPrevEpoch.Hash),
-		"last_block_slot", blockLastPrevEpoch.Slot,
-		"epoch_nonce", hex.EncodeToString(result),
+		"lab_nonce", hex.EncodeToString(blockLastPrevEpoch.PrevHash),
+		"boundary_block_slot", blockLastPrevEpoch.Slot,
+		"epoch_nonce", hex.EncodeToString(result.Bytes()),
 	)
-	return result, nil
+	return result.Bytes(), nil
 }
 
 // processEpochRollover processes an epoch rollover and returns the result without

@@ -114,11 +114,12 @@ func TestPeerGovernor_AddPeer(t *testing.T) {
 	})
 
 	// Test adding a gossip peer (should be sharable)
-	pg.AddPeer("127.0.0.1:3001", PeerSourceP2PGossip)
+	// Use a routable IP — gossip peers with non-routable IPs are rejected.
+	pg.AddPeer("44.0.0.1:3001", PeerSourceP2PGossip)
 
 	peers := pg.GetPeers()
 	assert.Len(t, peers, 1)
-	assert.Equal(t, "127.0.0.1:3001", peers[0].Address)
+	assert.Equal(t, "44.0.0.1:3001", peers[0].Address)
 	assert.EqualValues(t, PeerSourceP2PGossip, peers[0].Source)
 	assert.Equal(t, PeerStateCold, peers[0].State)
 	assert.True(
@@ -128,18 +129,19 @@ func TestPeerGovernor_AddPeer(t *testing.T) {
 	)
 
 	// Test adding duplicate peer (should not add)
-	pg.AddPeer("127.0.0.1:3001", PeerSourceP2PGossip)
+	pg.AddPeer("44.0.0.1:3001", PeerSourceP2PGossip)
 	peers = pg.GetPeers()
 	assert.Len(t, peers, 1)
 
 	// Test adding a non-gossip peer (should not be sharable by default)
-	pg.AddPeer("127.0.0.1:3002", PeerSourceUnknown)
+	// Use a topology source so private IPs are accepted.
+	pg.AddPeer("44.0.0.1:3002", PeerSourceTopologyLocalRoot)
 	peers = pg.GetPeers()
 	assert.Len(t, peers, 2)
 	// Find the non-gossip peer
 	var nonGossipPeer *Peer
 	for _, p := range peers {
-		if p.Address == "127.0.0.1:3002" {
+		if p.Address == "44.0.0.1:3002" {
 			nonGossipPeer = &p
 			break
 		}
@@ -159,12 +161,12 @@ func TestPeerGovernor_LoadTopologyConfig(t *testing.T) {
 
 	topologyConfig := &topology.TopologyConfig{
 		BootstrapPeers: []topology.TopologyConfigP2PBootstrapPeer{
-			{Address: "127.0.0.1", Port: 3001},
+			{Address: "44.0.0.1", Port: 3001},
 		},
 		LocalRoots: []topology.TopologyConfigP2PLocalRoot{
 			{
 				AccessPoints: []topology.TopologyConfigP2PAccessPoint{
-					{Address: "127.0.0.2", Port: 3002},
+					{Address: "44.0.0.2", Port: 3002},
 				},
 				Advertise: true,
 			},
@@ -172,7 +174,7 @@ func TestPeerGovernor_LoadTopologyConfig(t *testing.T) {
 		PublicRoots: []topology.TopologyConfigP2PPublicRoot{
 			{
 				AccessPoints: []topology.TopologyConfigP2PAccessPoint{
-					{Address: "127.0.0.3", Port: 3003},
+					{Address: "44.0.0.3", Port: 3003},
 				},
 				Advertise: false,
 			},
@@ -185,16 +187,16 @@ func TestPeerGovernor_LoadTopologyConfig(t *testing.T) {
 	assert.Len(t, peers, 3)
 
 	// Check bootstrap peer
-	assert.Equal(t, "127.0.0.1:3001", peers[0].Address)
+	assert.Equal(t, "44.0.0.1:3001", peers[0].Address)
 	assert.EqualValues(t, PeerSourceTopologyBootstrapPeer, peers[0].Source)
 
 	// Check local root peer
-	assert.Equal(t, "127.0.0.2:3002", peers[1].Address)
+	assert.Equal(t, "44.0.0.2:3002", peers[1].Address)
 	assert.EqualValues(t, PeerSourceTopologyLocalRoot, peers[1].Source)
 	assert.True(t, peers[1].Sharable)
 
 	// Check public root peer
-	assert.Equal(t, "127.0.0.3:3003", peers[2].Address)
+	assert.Equal(t, "44.0.0.3:3003", peers[2].Address)
 	assert.EqualValues(t, PeerSourceTopologyPublicRoot, peers[2].Source)
 	assert.False(t, peers[2].Sharable)
 }
@@ -211,8 +213,8 @@ func TestPeerGovernor_Reconcile_Promotions(t *testing.T) {
 	})
 
 	// Add peers with different states
-	pg.AddPeer("127.0.0.1:3001", PeerSourceP2PGossip)
-	pg.AddPeer("127.0.0.1:3002", PeerSourceP2PGossip)
+	pg.AddPeer("44.0.0.1:3001", PeerSourceP2PGossip)
+	pg.AddPeer("44.0.0.1:3002", PeerSourceP2PGossip)
 
 	// Manually set one peer to warm with connection (should promote to hot)
 	pg.mu.Lock()
@@ -240,7 +242,7 @@ func TestPeerGovernor_Reconcile_Demotions(t *testing.T) {
 	})
 
 	// Add peer and set to hot
-	pg.AddPeer("127.0.0.1:3001", PeerSourceP2PGossip)
+	pg.AddPeer("44.0.0.1:3001", PeerSourceP2PGossip)
 
 	pg.mu.Lock()
 	pg.peers[0].State = PeerStateHot
@@ -270,7 +272,7 @@ func TestPeerGovernor_Reconcile_Removal(t *testing.T) {
 	})
 
 	// Add peer and set excessive failures
-	pg.AddPeer("127.0.0.1:3001", PeerSourceP2PGossip)
+	pg.AddPeer("44.0.0.1:3001", PeerSourceP2PGossip)
 
 	pg.mu.Lock()
 	pg.peers[0].ReconnectCount = 5 // Exceeds MaxReconnectFailures
@@ -296,9 +298,9 @@ func TestPeerGovernor_Reconcile_MinimumHotPeers(t *testing.T) {
 	})
 
 	// Add 3 warm peers with connections
-	pg.AddPeer("127.0.0.1:3001", PeerSourceP2PGossip)
-	pg.AddPeer("127.0.0.1:3002", PeerSourceP2PGossip)
-	pg.AddPeer("127.0.0.1:3003", PeerSourceP2PGossip)
+	pg.AddPeer("44.0.0.1:3001", PeerSourceP2PGossip)
+	pg.AddPeer("44.0.0.1:3002", PeerSourceP2PGossip)
+	pg.AddPeer("44.0.0.1:3003", PeerSourceP2PGossip)
 
 	pg.mu.Lock()
 	for i := range pg.peers {
@@ -334,8 +336,8 @@ func TestPeerGovernor_Metrics(t *testing.T) {
 	})
 
 	// Add some peers
-	pg.AddPeer("127.0.0.1:3001", PeerSourceP2PGossip)
-	pg.AddPeer("127.0.0.1:3002", PeerSourceP2PGossip)
+	pg.AddPeer("44.0.0.1:3001", PeerSourceP2PGossip)
+	pg.AddPeer("44.0.0.1:3002", PeerSourceP2PGossip)
 
 	pg.mu.Lock()
 	pg.peers[0].State = PeerStateWarm
@@ -377,8 +379,8 @@ func TestPeerGovernor_PeerSharing(t *testing.T) {
 	})
 
 	// Add hot peers with connections
-	pg.AddPeer("127.0.0.1:3001", PeerSourceP2PGossip)
-	pg.AddPeer("127.0.0.1:3002", PeerSourceP2PGossip)
+	pg.AddPeer("44.0.0.1:3001", PeerSourceP2PGossip)
+	pg.AddPeer("44.0.0.1:3002", PeerSourceP2PGossip)
 
 	pg.mu.Lock()
 	for i := range pg.peers {
@@ -403,11 +405,11 @@ func TestPeerGovernor_SetPeerHotByConnId(t *testing.T) {
 	})
 
 	// Add peer
-	pg.AddPeer("127.0.0.1:3001", PeerSourceP2PGossip)
+	pg.AddPeer("44.0.0.1:3001", PeerSourceP2PGossip)
 
 	// Mock connection ID - use proper ConnectionId construction
-	localAddr, _ := net.ResolveTCPAddr("tcp", "127.0.0.1:3001")
-	remoteAddr, _ := net.ResolveTCPAddr("tcp", "127.0.0.1:3002")
+	localAddr, _ := net.ResolveTCPAddr("tcp", "44.0.0.1:3001")
+	remoteAddr, _ := net.ResolveTCPAddr("tcp", "44.0.0.1:3002")
 	connId := ouroboros.ConnectionId{
 		LocalAddr:  localAddr,
 		RemoteAddr: remoteAddr,
@@ -437,8 +439,8 @@ func TestPeerGovernor_HandleInboundConnection(t *testing.T) {
 	})
 
 	// Create a mock inbound connection event
-	localAddr, _ := net.ResolveTCPAddr("tcp", "127.0.0.1:3001")
-	remoteAddr, _ := net.ResolveTCPAddr("tcp", "127.0.0.1:3002")
+	localAddr, _ := net.ResolveTCPAddr("tcp", "44.0.0.1:3001")
+	remoteAddr, _ := net.ResolveTCPAddr("tcp", "44.0.0.1:3002")
 	connId := ouroboros.ConnectionId{
 		LocalAddr:  localAddr,
 		RemoteAddr: remoteAddr,
@@ -467,7 +469,7 @@ func TestPeerGovernor_HandleInboundConnection(t *testing.T) {
 	peers = pg.GetPeers()
 	assert.Len(t, peers, 1)
 	if len(peers) > 0 {
-		assert.Equal(t, "127.0.0.1:3002", peers[0].Address)
+		assert.Equal(t, "44.0.0.1:3002", peers[0].Address)
 		assert.Equal(t, PeerSource(PeerSourceInboundConn), peers[0].Source)
 		assert.Equal(
 			t,
@@ -488,9 +490,9 @@ func TestPeerGovernor_HandleConnectionClosed(t *testing.T) {
 	})
 
 	// Add peer with connection
-	pg.AddPeer("127.0.0.1:3001", PeerSourceP2PGossip)
-	localAddr, _ := net.ResolveTCPAddr("tcp", "127.0.0.1:3001")
-	remoteAddr, _ := net.ResolveTCPAddr("tcp", "127.0.0.1:3002")
+	pg.AddPeer("44.0.0.1:3001", PeerSourceP2PGossip)
+	localAddr, _ := net.ResolveTCPAddr("tcp", "44.0.0.1:3001")
+	remoteAddr, _ := net.ResolveTCPAddr("tcp", "44.0.0.1:3002")
 	connId := ouroboros.ConnectionId{
 		LocalAddr:  localAddr,
 		RemoteAddr: remoteAddr,
@@ -526,16 +528,16 @@ func TestPeer_IndexByAddress(t *testing.T) {
 		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 	})
 
-	pg.AddPeer("127.0.0.1:3001", PeerSourceP2PGossip)
-	pg.AddPeer("127.0.0.1:3002", PeerSourceP2PGossip)
+	pg.AddPeer("44.0.0.1:3001", PeerSourceP2PGossip)
+	pg.AddPeer("44.0.0.1:3002", PeerSourceP2PGossip)
 
-	idx := pg.peerIndexByAddress("127.0.0.1:3001")
+	idx := pg.peerIndexByAddress("44.0.0.1:3001")
 	assert.Equal(t, 0, idx)
 
-	idx = pg.peerIndexByAddress("127.0.0.1:3002")
+	idx = pg.peerIndexByAddress("44.0.0.1:3002")
 	assert.Equal(t, 1, idx)
 
-	idx = pg.peerIndexByAddress("127.0.0.1:3003")
+	idx = pg.peerIndexByAddress("44.0.0.1:3003")
 	assert.Equal(t, -1, idx)
 }
 
@@ -580,9 +582,9 @@ func TestPeerGovernor_IndexByConnId(t *testing.T) {
 		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 	})
 
-	pg.AddPeer("127.0.0.1:3001", PeerSourceP2PGossip)
-	localAddr, _ := net.ResolveTCPAddr("tcp", "127.0.0.1:3001")
-	remoteAddr, _ := net.ResolveTCPAddr("tcp", "127.0.0.1:3002")
+	pg.AddPeer("44.0.0.1:3001", PeerSourceP2PGossip)
+	localAddr, _ := net.ResolveTCPAddr("tcp", "44.0.0.1:3001")
+	remoteAddr, _ := net.ResolveTCPAddr("tcp", "44.0.0.1:3002")
 	connId := ouroboros.ConnectionId{
 		LocalAddr:  localAddr,
 		RemoteAddr: remoteAddr,
@@ -596,8 +598,8 @@ func TestPeerGovernor_IndexByConnId(t *testing.T) {
 	assert.Equal(t, 0, idx)
 
 	// Test with different connection ID
-	localAddr2, _ := net.ResolveTCPAddr("tcp", "127.0.0.1:3003")
-	remoteAddr2, _ := net.ResolveTCPAddr("tcp", "127.0.0.1:3004")
+	localAddr2, _ := net.ResolveTCPAddr("tcp", "44.0.0.1:3003")
+	remoteAddr2, _ := net.ResolveTCPAddr("tcp", "44.0.0.1:3004")
 	connId2 := ouroboros.ConnectionId{
 		LocalAddr:  localAddr2,
 		RemoteAddr: remoteAddr2,
@@ -608,12 +610,12 @@ func TestPeerGovernor_IndexByConnId(t *testing.T) {
 
 func TestPeer_SetConnection(t *testing.T) {
 	peer := &Peer{
-		Address: "127.0.0.1:3001",
+		Address: "44.0.0.1:3001",
 	}
 
 	// Create a proper connection structure manually for testing
-	localAddr, _ := net.ResolveTCPAddr("tcp", "127.0.0.1:3001")
-	remoteAddr, _ := net.ResolveTCPAddr("tcp", "127.0.0.1:3002")
+	localAddr, _ := net.ResolveTCPAddr("tcp", "44.0.0.1:3001")
+	remoteAddr, _ := net.ResolveTCPAddr("tcp", "44.0.0.1:3002")
 	connId := ouroboros.ConnectionId{
 		LocalAddr:  localAddr,
 		RemoteAddr: remoteAddr,
@@ -686,13 +688,13 @@ func TestPeerGovernor_TestPeer_CachedResult(t *testing.T) {
 	})
 
 	// First test should call the function
-	result, err := pg.TestPeer("127.0.0.1:3001")
+	result, err := pg.TestPeer("44.0.0.1:3001")
 	assert.True(t, result)
 	assert.NoError(t, err)
 	assert.Equal(t, 1, callCount)
 
 	// Second test should use cached result
-	result, err = pg.TestPeer("127.0.0.1:3001")
+	result, err = pg.TestPeer("44.0.0.1:3001")
 	assert.True(t, result)
 	assert.NoError(t, err)
 	assert.Equal(t, 1, callCount) // Should not have called again
@@ -710,13 +712,13 @@ func TestPeerGovernor_TestPeer_CachedFailure(t *testing.T) {
 	})
 
 	// First test should fail
-	result, err := pg.TestPeer("127.0.0.1:3001")
+	result, err := pg.TestPeer("44.0.0.1:3001")
 	assert.False(t, result)
 	assert.Error(t, err)
 	assert.Equal(t, 1, callCount)
 
 	// Second test should return cached failure
-	result, err = pg.TestPeer("127.0.0.1:3001")
+	result, err = pg.TestPeer("44.0.0.1:3001")
 	assert.False(t, result)
 	assert.Error(t, err)
 	assert.Equal(t, 1, callCount) // Should not have called again
@@ -731,10 +733,10 @@ func TestPeerGovernor_TestPeer_ExistingPeer(t *testing.T) {
 	})
 
 	// Add peer first
-	pg.AddPeer("127.0.0.1:3001", PeerSourceP2PGossip)
+	pg.AddPeer("44.0.0.1:3001", PeerSourceP2PGossip)
 
 	// Test should update existing peer
-	result, err := pg.TestPeer("127.0.0.1:3001")
+	result, err := pg.TestPeer("44.0.0.1:3001")
 	assert.True(t, result)
 	assert.NoError(t, err)
 
@@ -752,7 +754,7 @@ func TestPeerGovernor_TestPeer_NoConnManager(t *testing.T) {
 	})
 
 	// Should fail with appropriate error
-	result, err := pg.TestPeer("127.0.0.1:3001")
+	result, err := pg.TestPeer("44.0.0.1:3001")
 	assert.False(t, result)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "no test function or connection manager")
@@ -765,14 +767,14 @@ func TestPeerGovernor_DenyPeer(t *testing.T) {
 	})
 
 	// Deny a peer
-	pg.DenyPeer("127.0.0.1:3001", 0) // Use default duration
+	pg.DenyPeer("44.0.0.1:3001", 0) // Use default duration
 
 	// Verify peer is denied
-	assert.True(t, pg.IsDenied("127.0.0.1:3001"))
+	assert.True(t, pg.IsDenied("44.0.0.1:3001"))
 
 	// Deny another peer with custom duration
-	pg.DenyPeer("127.0.0.1:3002", 30*time.Minute)
-	assert.True(t, pg.IsDenied("127.0.0.1:3002"))
+	pg.DenyPeer("44.0.0.1:3002", 30*time.Minute)
+	assert.True(t, pg.IsDenied("44.0.0.1:3002"))
 
 	// Verify deny list size
 	pg.mu.Lock()
@@ -816,14 +818,14 @@ func TestPeerGovernor_IsDenied_Expiry(t *testing.T) {
 	})
 
 	// Deny a peer with very short duration
-	pg.DenyPeer("127.0.0.1:3001", 1*time.Millisecond)
+	pg.DenyPeer("44.0.0.1:3001", 1*time.Millisecond)
 
 	// Should be denied initially
-	assert.True(t, pg.IsDenied("127.0.0.1:3001"))
+	assert.True(t, pg.IsDenied("44.0.0.1:3001"))
 
 	// Wait for expiry using polling instead of fixed sleep
 	require.Eventually(t, func() bool {
-		return !pg.IsDenied("127.0.0.1:3001")
+		return !pg.IsDenied("44.0.0.1:3001")
 	}, 1*time.Second, 1*time.Millisecond, "deny entry should expire")
 }
 
@@ -834,20 +836,20 @@ func TestPeerGovernor_AddPeer_Denied(t *testing.T) {
 	})
 
 	// Deny a peer first
-	pg.DenyPeer("127.0.0.1:3001", 0)
+	pg.DenyPeer("44.0.0.1:3001", 0)
 
 	// Try to add the denied peer
-	pg.AddPeer("127.0.0.1:3001", PeerSourceP2PGossip)
+	pg.AddPeer("44.0.0.1:3001", PeerSourceP2PGossip)
 
 	// Should not be added
 	peers := pg.GetPeers()
 	assert.Empty(t, peers)
 
 	// Add a non-denied peer
-	pg.AddPeer("127.0.0.1:3002", PeerSourceP2PGossip)
+	pg.AddPeer("44.0.0.1:3002", PeerSourceP2PGossip)
 	peers = pg.GetPeers()
 	assert.Len(t, peers, 1)
-	assert.Equal(t, "127.0.0.1:3002", peers[0].Address)
+	assert.Equal(t, "44.0.0.1:3002", peers[0].Address)
 }
 
 func TestPeerGovernor_TestPeer_DeniesOnFailure(t *testing.T) {
@@ -860,16 +862,16 @@ func TestPeerGovernor_TestPeer_DeniesOnFailure(t *testing.T) {
 	})
 
 	// Test peer (will fail)
-	result, err := pg.TestPeer("127.0.0.1:3001")
+	result, err := pg.TestPeer("44.0.0.1:3001")
 	assert.False(t, result)
 	assert.Error(t, err)
 
 	// Peer should now be denied
-	assert.True(t, pg.IsDenied("127.0.0.1:3001"))
+	assert.True(t, pg.IsDenied("44.0.0.1:3001"))
 
 	// Verify deny list has entry
 	pg.mu.Lock()
-	_, exists := pg.denyList["127.0.0.1:3001"]
+	_, exists := pg.denyList["44.0.0.1:3001"]
 	pg.mu.Unlock()
 	assert.True(t, exists)
 }
@@ -883,13 +885,13 @@ func TestPeerGovernor_Reconcile_CleanupDenyList(t *testing.T) {
 
 	// Add expired entries directly
 	pg.mu.Lock()
-	pg.denyList["127.0.0.1:3001"] = time.Now().
+	pg.denyList["44.0.0.1:3001"] = time.Now().
 		Add(-1 * time.Hour)
 		// Already expired
-	pg.denyList["127.0.0.1:3002"] = time.Now().
+	pg.denyList["44.0.0.1:3002"] = time.Now().
 		Add(-1 * time.Hour)
 		// Already expired
-	pg.denyList["127.0.0.1:3003"] = time.Now().
+	pg.denyList["44.0.0.1:3003"] = time.Now().
 		Add(1 * time.Hour)
 		// Not expired
 	pg.mu.Unlock()
@@ -900,7 +902,7 @@ func TestPeerGovernor_Reconcile_CleanupDenyList(t *testing.T) {
 	// Check deny list - only non-expired entry should remain
 	pg.mu.Lock()
 	assert.Len(t, pg.denyList, 1)
-	_, exists := pg.denyList["127.0.0.1:3003"]
+	_, exists := pg.denyList["44.0.0.1:3003"]
 	pg.mu.Unlock()
 	assert.True(t, exists)
 }
@@ -960,7 +962,7 @@ func TestPeerGovernor_DiscoverLedgerPeers_SlotNotReached(t *testing.T) {
 }
 
 func TestPeerGovernor_DiscoverLedgerPeers_Success(t *testing.T) {
-	ipv4 := net.ParseIP("192.168.1.1")
+	ipv4 := net.ParseIP("44.0.0.1")
 	ipv6 := net.ParseIP("2001:db8::1")
 
 	pg := NewPeerGovernor(PeerGovernorConfig{
@@ -4142,7 +4144,7 @@ func TestPeerGovernor_ShouldExitBootstrap_SlotThreshold(t *testing.T) {
 	// Add a bootstrap peer
 	pg.mu.Lock()
 	pg.peers = append(pg.peers, &Peer{
-		Address: "127.0.0.1:3001",
+		Address: "44.0.0.1:3001",
 		Source:  PeerSourceTopologyBootstrapPeer,
 		State:   PeerStateWarm,
 	})
@@ -4170,7 +4172,7 @@ func TestPeerGovernor_ShouldExitBootstrap_SlotThreshold_NotReached(
 	// Add a bootstrap peer
 	pg.mu.Lock()
 	pg.peers = append(pg.peers, &Peer{
-		Address: "127.0.0.1:3001",
+		Address: "44.0.0.1:3001",
 		Source:  PeerSourceTopologyBootstrapPeer,
 		State:   PeerStateWarm,
 	})
@@ -4194,7 +4196,7 @@ func TestPeerGovernor_ShouldExitBootstrap_LedgerPeerCount(t *testing.T) {
 	// Add a bootstrap peer
 	pg.mu.Lock()
 	pg.peers = append(pg.peers, &Peer{
-		Address: "127.0.0.1:3001",
+		Address: "44.0.0.1:3001",
 		Source:  PeerSourceTopologyBootstrapPeer,
 		State:   PeerStateWarm,
 	})
@@ -4230,7 +4232,7 @@ func TestPeerGovernor_ShouldExitBootstrap_LedgerPeerCount_ColdNotCounted(
 	// Add a bootstrap peer
 	pg.mu.Lock()
 	pg.peers = append(pg.peers, &Peer{
-		Address: "127.0.0.1:3001",
+		Address: "44.0.0.1:3001",
 		Source:  PeerSourceTopologyBootstrapPeer,
 		State:   PeerStateWarm,
 	})
@@ -4268,7 +4270,7 @@ func TestPeerGovernor_ShouldExitBootstrap_SyncProgress(t *testing.T) {
 	// Add a bootstrap peer
 	pg.mu.Lock()
 	pg.peers = append(pg.peers, &Peer{
-		Address: "127.0.0.1:3001",
+		Address: "44.0.0.1:3001",
 		Source:  PeerSourceTopologyBootstrapPeer,
 		State:   PeerStateWarm,
 	})
@@ -4300,7 +4302,7 @@ func TestPeerGovernor_ShouldExitBootstrap_SyncProgress_NotReached(
 	// Add a bootstrap peer
 	pg.mu.Lock()
 	pg.peers = append(pg.peers, &Peer{
-		Address: "127.0.0.1:3001",
+		Address: "44.0.0.1:3001",
 		Source:  PeerSourceTopologyBootstrapPeer,
 		State:   PeerStateWarm,
 	})
@@ -4329,7 +4331,7 @@ func TestPeerGovernor_ShouldExitBootstrap_NoBootstrapPeers(t *testing.T) {
 	// No bootstrap peers, only gossip peers
 	pg.mu.Lock()
 	pg.peers = append(pg.peers, &Peer{
-		Address: "127.0.0.1:3001",
+		Address: "44.0.0.1:3001",
 		Source:  PeerSourceP2PGossip,
 		State:   PeerStateWarm,
 	})
@@ -4358,7 +4360,7 @@ func TestPeerGovernor_ShouldExitBootstrap_AlreadyExited(t *testing.T) {
 	// Add bootstrap peer and mark as already exited
 	pg.mu.Lock()
 	pg.peers = append(pg.peers, &Peer{
-		Address: "127.0.0.1:3001",
+		Address: "44.0.0.1:3001",
 		Source:  PeerSourceTopologyBootstrapPeer,
 		State:   PeerStateCold,
 	})
@@ -4381,17 +4383,17 @@ func TestPeerGovernor_ExitBootstrap_DemotesPeers(t *testing.T) {
 	// Add bootstrap peers in different states
 	pg.mu.Lock()
 	pg.peers = append(pg.peers, &Peer{
-		Address: "127.0.0.1:3001",
+		Address: "44.0.0.1:3001",
 		Source:  PeerSourceTopologyBootstrapPeer,
 		State:   PeerStateHot,
 	})
 	pg.peers = append(pg.peers, &Peer{
-		Address: "127.0.0.1:3002",
+		Address: "44.0.0.1:3002",
 		Source:  PeerSourceTopologyBootstrapPeer,
 		State:   PeerStateWarm,
 	})
 	pg.peers = append(pg.peers, &Peer{
-		Address: "127.0.0.1:3003",
+		Address: "44.0.0.1:3003",
 		Source:  PeerSourceTopologyBootstrapPeer,
 		State:   PeerStateCold, // Already cold, shouldn't be demoted
 	})
@@ -4441,7 +4443,7 @@ func TestPeerGovernor_ExitBootstrap_PreventsPromotion(t *testing.T) {
 
 	// Add warm bootstrap peer with connection
 	pg.peers = append(pg.peers, &Peer{
-		Address:    "127.0.0.1:3001",
+		Address:    "44.0.0.1:3001",
 		Source:     PeerSourceTopologyBootstrapPeer,
 		State:      PeerStateWarm,
 		Connection: &PeerConnection{},
@@ -4476,7 +4478,7 @@ func TestPeerGovernor_BootstrapRecovery(t *testing.T) {
 
 	// Add bootstrap peer that's cold
 	pg.peers = append(pg.peers, &Peer{
-		Address: "127.0.0.1:3001",
+		Address: "44.0.0.1:3001",
 		Source:  PeerSourceTopologyBootstrapPeer,
 		State:   PeerStateCold,
 	})
@@ -4514,7 +4516,7 @@ func TestPeerGovernor_BootstrapRecovery_NotNeededWithWarmCandidates(
 
 	// Add bootstrap peer that's cold
 	pg.peers = append(pg.peers, &Peer{
-		Address: "127.0.0.1:3001",
+		Address: "44.0.0.1:3001",
 		Source:  PeerSourceTopologyBootstrapPeer,
 		State:   PeerStateCold,
 	})
@@ -4553,7 +4555,7 @@ func TestPeerGovernor_BootstrapRecovery_NotNeededWithEnoughHotPeers(
 
 	// Add bootstrap peer that's cold
 	pg.peers = append(pg.peers, &Peer{
-		Address: "127.0.0.1:3001",
+		Address: "44.0.0.1:3001",
 		Source:  PeerSourceTopologyBootstrapPeer,
 		State:   PeerStateCold,
 	})
@@ -4597,7 +4599,7 @@ func TestPeerGovernor_Reconcile_ExitsBootstrap(t *testing.T) {
 	// Add bootstrap peer
 	pg.mu.Lock()
 	pg.peers = append(pg.peers, &Peer{
-		Address: "127.0.0.1:3001",
+		Address: "44.0.0.1:3001",
 		Source:  PeerSourceTopologyBootstrapPeer,
 		State:   PeerStateWarm,
 	})
@@ -4646,7 +4648,7 @@ func TestPeerGovernor_Reconcile_SkipsBootstrapPromotionAfterExit(t *testing.T) {
 
 	// Add warm bootstrap peer with connection (would normally be promoted)
 	pg.peers = append(pg.peers, &Peer{
-		Address:    "127.0.0.1:3001",
+		Address:    "44.0.0.1:3001",
 		Source:     PeerSourceTopologyBootstrapPeer,
 		State:      PeerStateWarm,
 		Connection: &PeerConnection{},
@@ -4750,4 +4752,132 @@ func TestPeerGovernor_CanPromoteBootstrapPeer(t *testing.T) {
 	assert.False(t, pg.canPromoteBootstrapPeer(),
 		"should not be able to promote bootstrap peers after exit")
 	pg.mu.Unlock()
+}
+
+func TestIsRoutableAddr(t *testing.T) {
+	tests := []struct {
+		name     string
+		address  string
+		routable bool
+	}{
+		// Routable addresses
+		{"public IPv4", "44.0.0.1:3001", true},
+		{"public IPv4 no port", "44.0.0.1", true},
+		{"public IPv6", "[2001:db8::1]:3001", true},
+		{"hostname", "relay.example.com:3001", true},
+		{"bare hostname", "relay.example.com", true},
+
+		// Private (RFC 1918)
+		{"private 10.x", "10.0.0.1:3001", false},
+		{"private 172.16.x", "172.16.0.1:3001", false},
+		{"private 192.168.x", "192.168.1.1:3001", false},
+
+		// Loopback
+		{"loopback IPv4", "127.0.0.1:3001", false},
+		{"loopback IPv6", "[::1]:3001", false},
+
+		// Link-local
+		{"link-local IPv4", "169.254.1.1:3001", false},
+		{"link-local IPv6", "[fe80::1]:3001", false},
+
+		// Multicast
+		{"multicast IPv4", "224.0.0.1:3001", false},
+		{"multicast IPv6", "[ff02::1]:3001", false},
+
+		// Unspecified
+		{"unspecified IPv4", "0.0.0.0:3001", false},
+		{"unspecified IPv6", "[::]:3001", false},
+
+		// Private IPv6 (fc00::/7)
+		{"private IPv6", "[fd00::1]:3001", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.routable, isRoutableAddr(tt.address))
+		})
+	}
+}
+
+func TestAddPeer_RejectsNonRoutableGossipPeer(t *testing.T) {
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+	})
+
+	// Private IP from gossip should be rejected
+	err := pg.AddPeer("10.0.0.1:3001", PeerSourceP2PGossip)
+	assert.ErrorIs(t, err, ErrUnroutableAddress)
+	assert.Empty(t, pg.GetPeers())
+
+	// Loopback from gossip should be rejected
+	err = pg.AddPeer("127.0.0.1:3001", PeerSourceP2PGossip)
+	assert.ErrorIs(t, err, ErrUnroutableAddress)
+	assert.Empty(t, pg.GetPeers())
+}
+
+func TestAddPeer_RejectsNonRoutableLedgerPeer(t *testing.T) {
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+	})
+
+	err := pg.AddPeer("192.168.1.1:3001", PeerSourceP2PLedger)
+	assert.ErrorIs(t, err, ErrUnroutableAddress)
+	assert.Empty(t, pg.GetPeers())
+}
+
+func TestAddPeer_AllowsTopologyWithPrivateIP(t *testing.T) {
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+	})
+
+	// Topology peers with private IPs should be accepted
+	err := pg.AddPeer("10.0.0.1:3001", PeerSourceTopologyLocalRoot)
+	require.NoError(t, err)
+
+	err = pg.AddPeer("172.16.0.1:3001", PeerSourceTopologyPublicRoot)
+	require.NoError(t, err)
+
+	err = pg.AddPeer(
+		"192.168.1.1:3001",
+		PeerSourceTopologyBootstrapPeer,
+	)
+	require.NoError(t, err)
+
+	assert.Len(t, pg.GetPeers(), 3)
+}
+
+func TestAddPeer_AllowsInboundWithPrivateIP(t *testing.T) {
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+	})
+
+	// Inbound connections with private IPs should be accepted
+	err := pg.AddPeer("192.168.1.1:3001", PeerSourceInboundConn)
+	require.NoError(t, err)
+	assert.Len(t, pg.GetPeers(), 1)
+}
+
+func TestAddLedgerPeer_RejectsNonRoutable(t *testing.T) {
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+	})
+
+	// Private IPs from ledger discovery should be rejected
+	added := pg.addLedgerPeer("10.0.0.1:3001")
+	assert.False(t, added)
+
+	added = pg.addLedgerPeer("127.0.0.1:3001")
+	assert.False(t, added)
+
+	assert.Empty(t, pg.GetPeers())
+}
+
+func TestAddLedgerPeer_AcceptsRoutable(t *testing.T) {
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+	})
+
+	added := pg.addLedgerPeer("44.0.0.1:3001")
+	assert.True(t, added)
+	assert.Len(t, pg.GetPeers(), 1)
 }
