@@ -219,7 +219,7 @@ func (d *LedgerDelta) processGovernance(
 
 	// Process governance proposals
 	if len(proposals) > 0 {
-		if err := processGovernanceProposals(
+		if err := ProcessGovernanceProposals(
 			tx,
 			d.Point,
 			currentEpoch,
@@ -233,7 +233,7 @@ func (d *LedgerDelta) processGovernance(
 
 	// Process governance votes
 	if len(votes) > 0 {
-		if err := processGovernanceVotes(
+		if err := ProcessGovernanceVotes(
 			tx,
 			d.Point,
 			currentEpoch,

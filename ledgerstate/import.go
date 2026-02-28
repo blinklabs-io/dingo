@@ -1564,9 +1564,8 @@ func importPParams(
 	return nil
 }
 
-// importGovState imports governance state (constitution and
-// proposals) from the snapshot. Committee members are parsed
-// for validation but not yet persisted to the metadata store.
+// importGovState imports governance state (constitution, committee
+// members, and proposals) from the snapshot.
 func importGovState(
 	ctx context.Context,
 	cfg ImportConfig,
@@ -1635,12 +1634,49 @@ func importGovState(
 		)
 	}
 
-	// Log committee members (parsed for validation but not
-	// yet persisted — requires committee model support)
+	// Import committee members
 	if len(govState.Committee) > 0 {
+		if err := func() error {
+			txn := cfg.Database.MetadataTxn(true)
+			defer txn.Release()
+			members := make(
+				[]*models.CommitteeMember,
+				len(govState.Committee),
+			)
+			for i, cm := range govState.Committee {
+				if len(cm.ColdCredential.Hash) != 28 {
+					return fmt.Errorf(
+						"committee member %d: credential hash is %d bytes, expected 28",
+						i, len(cm.ColdCredential.Hash),
+					)
+				}
+				members[i] = &models.CommitteeMember{
+					ColdCredHash: cm.ColdCredential.Hash,
+					ExpiresEpoch: cm.ExpiresEpoch,
+					AddedSlot:    slot,
+				}
+			}
+			if err := store.SetCommitteeMembers(
+				members, txn.Metadata(),
+			); err != nil {
+				return fmt.Errorf(
+					"importing committee members: %w", err,
+				)
+			}
+			if err := txn.Commit(); err != nil {
+				return fmt.Errorf(
+					"committing committee members transaction: %w",
+					err,
+				)
+			}
+			return nil
+		}(); err != nil {
+			return fmt.Errorf(
+				"saving committee members: %w", err,
+			)
+		}
 		cfg.Logger.Info(
-			"parsed committee members "+
-				"(not yet persisted to metadata store)",
+			"imported committee members",
 			"component", "ledgerstate",
 			"count", len(govState.Committee),
 		)

@@ -542,6 +542,25 @@ type MetadataStore interface {
 	// committee members.
 	GetCommitteeActiveCount(types.Txn) (int, error)
 
+	// Snapshot-imported committee member methods
+
+	// SetCommitteeMembers upserts committee members imported from a
+	// Mithril snapshot. On conflict (same cold_cred_hash), the
+	// expires_epoch and added_slot are updated.
+	SetCommitteeMembers(
+		[]*models.CommitteeMember,
+		types.Txn,
+	) error
+
+	// GetCommitteeMembers retrieves all active (non-deleted)
+	// snapshot-imported committee members.
+	GetCommitteeMembers(types.Txn) ([]*models.CommitteeMember, error)
+
+	// DeleteCommitteeMembersAfterSlot removes committee members added
+	// after the given slot and clears deleted_slot for any that were
+	// soft-deleted after that slot. Used during chain rollbacks.
+	DeleteCommitteeMembersAfterSlot(uint64, types.Txn) error
+
 	// DRep voting power and activity methods
 
 	// GetDRepVotingPower calculates the voting power for a DRep by summing
@@ -657,6 +676,22 @@ type MetadataStore interface {
 
 	// ClearSyncState removes all sync state entries.
 	ClearSyncState(types.Txn) error
+
+	// Backfill checkpoint methods
+
+	// GetBackfillCheckpoint retrieves a backfill checkpoint by phase.
+	// Returns nil (not error) if no checkpoint exists for the phase.
+	GetBackfillCheckpoint(
+		phase string,
+		txn types.Txn,
+	) (*models.BackfillCheckpoint, error)
+
+	// SetBackfillCheckpoint creates or updates a backfill checkpoint,
+	// upserting on the Phase column.
+	SetBackfillCheckpoint(
+		checkpoint *models.BackfillCheckpoint,
+		txn types.Txn,
+	) error
 }
 
 // BulkLoadOptimizer is an optional interface that metadata stores can
