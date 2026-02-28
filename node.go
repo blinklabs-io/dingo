@@ -20,10 +20,12 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/http"
 	"strconv"
 	"sync"
 	"time"
 
+	"github.com/blinklabs-io/dingo/bark"
 	"github.com/blinklabs-io/dingo/blockfrost"
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/chainselection"
@@ -57,6 +59,7 @@ type Node struct {
 	ledgerState    *ledger.LedgerState
 	snapshotMgr    *snapshot.Manager
 	utxorpc        *utxorpc.Utxorpc
+	bark           *bark.Bark
 	blockfrostAPI  *blockfrost.Blockfrost
 	meshAPI        *mesh.Server
 	ouroboros      *ouroborosPkg.Ouroboros
@@ -223,6 +226,19 @@ func (n *Node) Run(ctx context.Context) error {
 	n.ledgerState = state
 	n.ouroboros.LedgerState = n.ledgerState
 	n.chainManager.SetLedger(n.ledgerState)
+
+	if n.config.barkBaseUrl != "" {
+		n.db.SetBlobStore(bark.NewBarkBlobStore(bark.BlobStoreBarkConfig{
+			BaseUrl:        n.config.barkBaseUrl,
+			SecurityWindow: n.config.barkSecurityWindow,
+			HTTPClient: &http.Client{
+				Timeout: 30 * time.Second,
+			},
+			LedgerState: state,
+			Logger:      n.config.logger,
+		}, n.db.Blob()))
+	}
+
 	// Run DB recovery if needed
 	if dbNeedsRecovery {
 		if err := n.ledgerState.RecoverCommitTimestampConflict(); err != nil {
@@ -473,6 +489,25 @@ func (n *Node) Run(ctx context.Context) error {
 			}
 		})
 	}
+
+	if n.config.barkPort > 0 {
+		n.bark = bark.NewBark(
+			bark.BarkConfig{
+				Logger: n.config.logger,
+				DB:     db,
+				Port:   n.config.barkPort,
+			},
+		)
+		if err := n.bark.Start(n.ctx); err != nil { //nolint:contextcheck
+			return fmt.Errorf("failed to start bark server: %w", err)
+		}
+		started = append(started, func() { //nolint:contextcheck
+			if err := n.bark.Stop(context.Background()); err != nil {
+				n.config.logger.Error("failed to stop bark during cleanup", "error", err)
+			}
+		})
+	}
+
 	// Configure Blockfrost API (if port is set)
 	if n.config.blockfrostPort > 0 {
 		listenAddr := net.JoinHostPort(

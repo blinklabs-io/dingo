@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/url"
 	"sort"
 	"strings"
 	"time"
@@ -33,6 +34,7 @@ import (
 	"github.com/aws/smithy-go"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/cbor"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -793,4 +795,76 @@ func (d *BlobStoreS3) Start() error {
 func (d *BlobStoreS3) Stop() error {
 	// S3 client doesn't need explicit closing
 	return nil
+}
+
+func (d *BlobStoreS3) GetBlockURL(
+	ctx context.Context,
+	txn types.Txn,
+	point ocommon.Point,
+) (types.SignedURL, types.BlockMetadata, error) {
+	if _, err := d.validateTxn(txn); err != nil {
+		return types.SignedURL{}, types.BlockMetadata{},
+			fmt.Errorf("s3: invalid transaction: %w", err)
+	}
+
+	key := types.BlockBlobKey(point.Slot, point.Hash)
+
+	metadataKey := types.BlockBlobMetadataKey(key)
+	metadataBytes, err := d.getInternal(ctx, string(metadataKey))
+	if err != nil {
+		if isS3NotFound(err) {
+			return types.SignedURL{}, types.BlockMetadata{}, types.ErrBlobKeyNotFound
+		}
+		return types.SignedURL{}, types.BlockMetadata{},
+			fmt.Errorf("s3: failed getting block metadata: %w", err)
+	}
+	var tmpMetadata types.BlockMetadata
+	if _, err := cbor.Decode(metadataBytes, &tmpMetadata); err != nil {
+		return types.SignedURL{}, types.BlockMetadata{},
+			fmt.Errorf("s3: failed decoding block metadata: %w", err)
+	}
+
+	_, err = d.client.HeadObject(
+		ctx,
+		&s3.HeadObjectInput{
+			Bucket: &d.bucket,
+			Key:    awsString(d.fullKey(string(key))),
+		})
+	if err != nil {
+		return types.SignedURL{}, types.BlockMetadata{},
+			fmt.Errorf("s3 blob: head object %q failed: %w",
+				d.fullKey(string(key)), types.ErrBlobKeyNotFound)
+	}
+
+	presignClient := s3.NewPresignClient(d.client)
+	presignedURL, err := presignClient.PresignGetObject(
+		ctx,
+		&s3.GetObjectInput{
+			Bucket: &d.bucket,
+			Key:    awsString(d.fullKey(string(key))),
+		},
+		s3.WithPresignExpires(time.Hour))
+	if err != nil {
+		return types.SignedURL{}, types.BlockMetadata{},
+			fmt.Errorf("s3: failed to generate presigned url: %w", err)
+	}
+
+	u, err := url.Parse(presignedURL.URL)
+	if err != nil {
+		return types.SignedURL{}, types.BlockMetadata{},
+			fmt.Errorf("s3: failed to parse presigned url: %w", err)
+	}
+
+	signedURL := types.SignedURL{
+		URL:     *u,
+		Expires: time.Now().Add(time.Hour),
+	}
+
+	metadata := types.BlockMetadata{
+		Type:     tmpMetadata.Type,
+		Height:   tmpMetadata.Height,
+		PrevHash: tmpMetadata.PrevHash,
+	}
+
+	return signedURL, metadata, nil
 }

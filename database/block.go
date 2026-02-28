@@ -16,6 +16,7 @@ package database
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"math/big"
@@ -210,6 +211,25 @@ func BlockByHash(db *Database, hash []byte) (models.Block, error) {
 		return err
 	})
 	return ret, err
+}
+
+func BlockURL(
+	ctx context.Context,
+	db *Database,
+	point ocommon.Point,
+) (types.SignedURL, types.BlockMetadata, error) {
+	var (
+		ret      types.SignedURL
+		metadata types.BlockMetadata
+	)
+	txn := db.BlobTxn(false)
+	err := txn.Do(func(txn *Txn) error {
+		var err error
+		ret, metadata, err = txn.DB().Blob().GetBlockURL(ctx, txn.Blob(), point)
+		return err
+	})
+
+	return ret, metadata, fmt.Errorf("failed getting block url: %w", err)
 }
 
 func blockByKey(txn *Txn, blockKey []byte) (models.Block, error) {

@@ -163,7 +163,7 @@ func (u *Utxorpc) Start(ctx context.Context) error {
 	if u.config.TlsCertFilePath != "" && u.config.TlsKeyFilePath != "" {
 		u.config.Logger.Info(
 			fmt.Sprintf(
-				"starting gRPC TLS listener on %s:%d",
+				"starting utxorpc gRPC TLS listener on %s:%d",
 				u.config.Host,
 				u.config.Port,
 			),
@@ -180,7 +180,7 @@ func (u *Utxorpc) Start(ctx context.Context) error {
 	} else {
 		u.config.Logger.Info(
 			fmt.Sprintf(
-				"starting gRPC listener on %s:%d",
+				"starting utxorpc gRPC listener on %s:%d",
 				u.config.Host,
 				u.config.Port,
 			),
@@ -213,7 +213,7 @@ func (u *Utxorpc) Start(ctx context.Context) error {
 		u.mu.Lock()
 		if u.server != nil {
 			u.config.Logger.Debug(
-				"context cancelled, shutting down gRPC server",
+				"context cancelled, shutting down utxorpc gRPC server",
 			)
 			//nolint:contextcheck // shutdownCtx is intentionally created from background to allow shutdown to complete even if ctx is cancelled
 			shutdownCtx, cancel := context.WithTimeout(
@@ -223,7 +223,7 @@ func (u *Utxorpc) Start(ctx context.Context) error {
 			defer cancel()
 			if err := u.server.Shutdown(shutdownCtx); err != nil { //nolint:contextcheck // shutdownCtx is intentionally created from background to allow shutdown to complete even if ctx is cancelled
 				u.config.Logger.Error(
-					"failed to shutdown gRPC server on context cancellation",
+					"failed to shutdown utxorpc gRPC server on context cancellation",
 					"error",
 					err,
 				)
@@ -241,9 +241,9 @@ func (u *Utxorpc) Stop(ctx context.Context) error {
 	defer u.mu.Unlock()
 
 	if u.server != nil {
-		u.config.Logger.Debug("shutting down gRPC server")
+		u.config.Logger.Debug("shutting down utxorpc gRPC server")
 		if err := u.server.Shutdown(ctx); err != nil {
-			return fmt.Errorf("failed to shutdown gRPC server: %w", err)
+			return fmt.Errorf("failed to shutdown utxorpc gRPC server: %w", err)
 		}
 		u.server = nil
 	}
@@ -268,7 +268,7 @@ func (u *Utxorpc) startServer(server *http.Server) error {
 			case startErr <- err:
 			default:
 				u.config.Logger.Error(
-					"gRPC server error",
+					"utxorpc gRPC server error",
 					"error", err,
 				)
 			}
@@ -284,7 +284,8 @@ func (u *Utxorpc) startServer(server *http.Server) error {
 		if u.config.TlsCertFilePath != "" && u.config.TlsKeyFilePath != "" {
 			serverType = "TLS"
 		}
-		return fmt.Errorf("failed to start gRPC %s server: %w", serverType, err)
+		return fmt.Errorf("failed to start utxorpc gRPC %s server: %w",
+			serverType, err)
 	case <-time.After(100 * time.Millisecond):
 		// Assume startup succeeded if no error within 100ms
 	}

@@ -87,6 +87,9 @@ type Config struct {
 	rejectionWatermark       float64
 	outboundSourcePort       uint
 	utxorpcPort              uint
+	barkBaseUrl              string
+	barkSecurityWindow       uint64
+	barkPort                 uint
 	networkMagic             uint32
 	intersectTip             bool
 	peerSharing              bool
@@ -497,6 +500,24 @@ func WithShelleyOperationalCertificate(path string) ConfigOptionFunc {
 func WithBlockfrostPort(port uint) ConfigOptionFunc {
 	return func(c *Config) {
 		c.blockfrostPort = port
+	}
+}
+
+func WithBarkBaseUrl(baseUrl string) ConfigOptionFunc {
+	return func(c *Config) {
+		c.barkBaseUrl = baseUrl
+	}
+}
+
+func WithBarkSecurityWindow(window uint64) ConfigOptionFunc {
+	return func(c *Config) {
+		c.barkSecurityWindow = window
+	}
+}
+
+func WithBarkPort(port uint) ConfigOptionFunc {
+	return func(c *Config) {
+		c.barkPort = port
 	}
 }
 

@@ -15,6 +15,7 @@
 package badger
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -27,6 +28,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/cbor"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	badger "github.com/dgraph-io/badger/v4"
 	"github.com/dgraph-io/badger/v4/options"
 	"github.com/prometheus/client_golang/prometheus"
@@ -585,4 +587,13 @@ func (d *BlobStoreBadger) DeleteTx(
 		return fmt.Errorf("DeleteTx: delete key %x: %w", key, err)
 	}
 	return nil
+}
+
+func (d *BlobStoreBadger) GetBlockURL(
+	ctx context.Context,
+	txn types.Txn,
+	point ocommon.Point,
+) (types.SignedURL, types.BlockMetadata, error) {
+	return types.SignedURL{}, types.BlockMetadata{},
+		errors.New("badger: GetBlockURL not supported")
 }

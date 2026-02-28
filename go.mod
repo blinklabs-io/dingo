@@ -14,6 +14,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/config v1.32.9
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.96.0
 	github.com/aws/smithy-go v1.24.1
+	github.com/blinklabs-io/bark v0.0.2
 	github.com/blinklabs-io/bursa v0.15.0
 	github.com/blinklabs-io/gouroboros v0.159.2
 	github.com/blinklabs-io/ouroboros-mock v0.9.1
@@ -43,6 +44,7 @@ require (
 	golang.org/x/sync v0.19.0
 	golang.org/x/sys v0.41.0
 	google.golang.org/api v0.266.0
+	google.golang.org/protobuf v1.36.11
 	gopkg.in/yaml.v3 v3.0.1
 	gorm.io/driver/mysql v1.6.0
 	gorm.io/driver/postgres v1.6.0
@@ -210,7 +212,6 @@ require (
 	google.golang.org/genproto/googleapis/api v0.0.0-20260203192932-546029d2fa20 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260203192932-546029d2fa20 // indirect
 	google.golang.org/grpc v1.78.0 // indirect
-	google.golang.org/protobuf v1.36.11 // indirect
 	gopkg.in/ini.v1 v1.67.0 // indirect
 	gorm.io/driver/clickhouse v0.7.0 // indirect
 	modernc.org/libc v1.22.5 // indirect
