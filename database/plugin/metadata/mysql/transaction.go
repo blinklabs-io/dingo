@@ -403,27 +403,17 @@ func (d *MetadataStoreMysql) SetTransaction(
 	}
 	var metadataLabels []labelcodec.Entry
 	if tx.Metadata() != nil {
-		var tmpMetadata []byte
-		if d.storageMode == types.StorageModeAPI {
-			tmpMetadataTmp, tmpLabelsTmp, err := labelcodec.EncodeAndExtract(
-				tx.Metadata(),
+		tmpMetadata, tmpLabels, err := labelcodec.EncodeAndExtract(
+			tx.Metadata(),
+		)
+		if err != nil {
+			return fmt.Errorf(
+				"failed to extract metadata labels: %w",
+				err,
 			)
-			if err != nil {
-				return fmt.Errorf(
-					"failed to extract metadata labels: %w",
-					err,
-				)
-			}
-			tmpMetadata = tmpMetadataTmp
-			metadataLabels = tmpLabelsTmp
-		} else {
-			var err error
-			tmpMetadata, err = cbor.Encode(tx.Metadata())
-			if err != nil {
-				return fmt.Errorf("failed to encode metadata: %w", err)
-			}
 		}
 		tmpTx.Metadata = tmpMetadata
+		metadataLabels = tmpLabels
 	}
 	collateralReturn := tx.CollateralReturn()
 	// For invalid transactions with collateral returns, fix indices via CBOR matching
