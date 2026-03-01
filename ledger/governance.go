@@ -24,14 +24,14 @@ import (
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
-// processGovernanceProposals extracts governance proposals from a Conway-era
+// ProcessGovernanceProposals extracts governance proposals from a Conway-era
 // transaction and persists them to the database. Each proposal procedure in the
 // transaction body is mapped to a GovernanceProposal model with the appropriate
 // action type, parent action, anchor, and deposit information.
 //
 // The govActionLifetime parameter determines how many epochs a proposal remains
 // active before expiring.
-func processGovernanceProposals(
+func ProcessGovernanceProposals(
 	tx lcommon.Transaction,
 	point ocommon.Point,
 	currentEpoch uint64,
@@ -108,13 +108,13 @@ func processGovernanceProposals(
 	return nil
 }
 
-// processGovernanceVotes extracts voting procedures from a Conway-era
+// ProcessGovernanceVotes extracts voting procedures from a Conway-era
 // transaction and persists them to the database. Each vote maps a voter
 // (CC member, DRep, or SPO) and a governance action to a vote choice.
 //
 // When a DRep votes, their activity epoch is updated to the current epoch,
 // which resets their expiry countdown based on the dRepInactivityPeriod.
-func processGovernanceVotes(
+func ProcessGovernanceVotes(
 	tx lcommon.Transaction,
 	point ocommon.Point,
 	currentEpoch uint64,

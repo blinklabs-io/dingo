@@ -28,6 +28,7 @@ import (
 	"sync"
 	"time"
 
+	dingo "github.com/blinklabs-io/dingo"
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/immutable"
@@ -448,6 +449,20 @@ func runMithrilSync(
 			"component", "mithril",
 			"count", len(gapBlocks),
 		)
+	}
+
+	// Backfill historical metadata if storage mode is API.
+	// This replays all stored blocks to populate transaction
+	// records needed for API queries (Blockfrost, UTxO RPC).
+	if dingo.StorageMode(cfg.StorageMode).IsAPI() {
+		logger.Info(
+			"backfilling historical metadata for API mode",
+			"component", "mithril",
+		)
+		bf := node.NewBackfill(db, nodeCfg, logger)
+		if err := bf.Run(ctx); err != nil {
+			return fmt.Errorf("backfill: %w", err)
+		}
 	}
 
 	// Set the metadata tip to the latest block in the blob store.
