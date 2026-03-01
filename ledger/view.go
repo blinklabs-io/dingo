@@ -355,6 +355,9 @@ type costModelsProvider interface {
 func extractCostModelsFromPParams(
 	pp lcommon.ProtocolParameters,
 ) map[lcommon.PlutusLanguage]lcommon.CostModel {
+	if pp == nil {
+		return map[lcommon.PlutusLanguage]lcommon.CostModel{}
+	}
 	rawModels := extractRawCostModels(pp)
 	if rawModels == nil {
 		return map[lcommon.PlutusLanguage]lcommon.CostModel{}
