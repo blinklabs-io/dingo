@@ -640,7 +640,7 @@ func (d *MetadataStorePostgres) SetTransaction(
 	// Address indexing, witnesses, scripts, redeemers, and plutus data only stored in API mode
 	if d.storageMode == types.StorageModeAPI {
 		// Index unique addresses participating in this transaction.
-		// It checks both transaction input & output.
+		// Includes inputs, collateral inputs, outputs, and collateral return.
 		addressUtxos := make(
 			[]models.Utxo,
 			0,
