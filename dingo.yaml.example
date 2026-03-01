@@ -167,6 +167,9 @@ meshPort: 0
 #   shelleyVrfKey: "/keys/vrf.skey"
 #   shelleyKesKey: "/keys/kes.skey"
 #   shelleyOperationalCertificate: "/keys/opcert.cert"
+#   # Optional forging tolerances (0 = defaults)
+#   forgeSyncToleranceSlots: 100
+#   forgeStaleGapThresholdSlots: 1000
 #
 # Dev mode (isolated, forge blocks, no outbound):
 #   runMode: "dev"
@@ -180,6 +183,13 @@ intersectTip: false
 # Transactions exceeding this limit will be rejected.
 # Default: 1048576 (1 MB)
 mempoolCapacity: 1048576
+
+# Forging tolerances (0 = defaults)
+# forgeSyncToleranceSlots controls how far the local chain can lag the upstream
+# tip before forging is skipped. forgeStaleGapThresholdSlots controls when to
+# log an error if the chain tip is far ahead of the slot clock.
+forgeSyncToleranceSlots: 0
+forgeStaleGapThresholdSlots: 0
 
 # Operational mode: "serve" (default), "load", or "dev"
 # - serve: Full node with network connectivity (default)

@@ -559,6 +559,9 @@ func (n *Node) Run(ctx context.Context) error {
 
 	// Initialize block forger if production mode is enabled
 	if n.config.blockProducer {
+		if err := n.validateBlockProducerStartup(); err != nil {
+			return fmt.Errorf("block producer startup validation failed: %w", err)
+		}
 		//nolint:contextcheck // n.ctx is the node's lifecycle context, correct parent for forger
 		if err := n.initBlockForger(n.ctx); err != nil {
 			return fmt.Errorf("failed to initialize block forger: %w", err)
@@ -734,6 +737,26 @@ func (n *Node) shutdown() error {
 	return err
 }
 
+func (n *Node) validateBlockProducerStartup() error {
+	creds := forging.NewPoolCredentials()
+	if err := creds.LoadFromFiles(
+		n.config.shelleyVRFKey,
+		n.config.shelleyKESKey,
+		n.config.shelleyOperationalCertificate,
+	); err != nil {
+		return fmt.Errorf("load pool credentials: %w", err)
+	}
+	if err := creds.ValidateOpCert(); err != nil {
+		return fmt.Errorf("validate operational certificate: %w", err)
+	}
+	n.config.logger.Info(
+		"block producer credentials validated",
+		"pool_id", creds.GetPoolID().String(),
+		"opcert_expiry_period", creds.OpCertExpiryPeriod(),
+	)
+	return nil
+}
+
 // initBlockForger initializes the block forger for production mode.
 // This requires VRF, KES, and OpCert key files to be configured.
 func (n *Node) initBlockForger(ctx context.Context) error {
@@ -821,14 +844,16 @@ func (n *Node) initBlockForger(ctx context.Context) error {
 
 	// Create the block forger with the real leader election
 	forger, err := forging.NewBlockForger(forging.ForgerConfig{
-		Mode:             forging.ModeProduction,
-		Logger:           n.config.logger,
-		Credentials:      creds,
-		LeaderChecker:    election,
-		BlockBuilder:     builder,
-		BlockBroadcaster: broadcaster,
-		SlotClock:        slotClock,
-		PromRegistry:     n.config.promRegistry,
+		Mode:                        forging.ModeProduction,
+		Logger:                      n.config.logger,
+		Credentials:                 creds,
+		LeaderChecker:               election,
+		BlockBuilder:                builder,
+		BlockBroadcaster:            broadcaster,
+		SlotClock:                   slotClock,
+		ForgeSyncToleranceSlots:     n.config.forgeSyncToleranceSlots,
+		ForgeStaleGapThresholdSlots: n.config.forgeStaleGapThresholdSlots,
+		PromRegistry:                n.config.promRegistry,
 	})
 	if err != nil {
 		// Stop election to prevent goroutine leak

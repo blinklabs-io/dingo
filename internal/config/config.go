@@ -74,10 +74,12 @@ func FromContext(ctx context.Context) *Config {
 }
 
 const (
-	DefaultBlobPlugin         = "badger"
-	DefaultMetadataPlugin     = "sqlite"
-	DefaultEvictionWatermark  = 0.90
-	DefaultRejectionWatermark = 0.95
+	DefaultBlobPlugin                  = "badger"
+	DefaultMetadataPlugin              = "sqlite"
+	DefaultEvictionWatermark           = 0.90
+	DefaultRejectionWatermark          = 0.95
+	DefaultForgeSyncToleranceSlots     = 100
+	DefaultForgeStaleGapThresholdSlots = 1000
 )
 
 // ErrPluginListRequested is returned when the user requests to list
@@ -238,6 +240,8 @@ type Config struct {
 	ShelleyVRFKey                 string `yaml:"shelleyVrfKey"                 envconfig:"SHELLEY_VRF_KEY"`
 	ShelleyKESKey                 string `yaml:"shelleyKesKey"                 envconfig:"SHELLEY_KES_KEY"`
 	ShelleyOperationalCertificate string `yaml:"shelleyOperationalCertificate" envconfig:"SHELLEY_OPERATIONAL_CERTIFICATE"`
+	ForgeSyncToleranceSlots       uint64 `yaml:"forgeSyncToleranceSlots"       envconfig:"DINGO_FORGE_SYNC_TOLERANCE_SLOTS"`
+	ForgeStaleGapThresholdSlots   uint64 `yaml:"forgeStaleGapThresholdSlots"   envconfig:"DINGO_FORGE_STALE_GAP_THRESHOLD_SLOTS"`
 
 	// Blockfrost REST API port (0 = disabled)
 	BlockfrostPort uint `yaml:"blockfrostPort" envconfig:"DINGO_BLOCKFROST_PORT"`
@@ -375,6 +379,9 @@ var globalConfig = &Config{
 		CleanupAfterLoad:   true,
 		VerifyCertificates: true,
 	},
+	// Forging defaults
+	ForgeSyncToleranceSlots:     DefaultForgeSyncToleranceSlots,
+	ForgeStaleGapThresholdSlots: DefaultForgeStaleGapThresholdSlots,
 }
 
 func LoadConfig(configFile string) (*Config, error) {
@@ -597,6 +604,12 @@ func LoadConfig(configFile string) (*Config, error) {
 			globalConfig.EvictionWatermark,
 			globalConfig.RejectionWatermark,
 		)
+	}
+	if globalConfig.ForgeSyncToleranceSlots == 0 {
+		globalConfig.ForgeSyncToleranceSlots = DefaultForgeSyncToleranceSlots
+	}
+	if globalConfig.ForgeStaleGapThresholdSlots == 0 {
+		globalConfig.ForgeStaleGapThresholdSlots = DefaultForgeStaleGapThresholdSlots
 	}
 
 	// Validate network name to prevent path traversal (INT-03).

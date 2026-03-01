@@ -110,6 +110,9 @@ type Config struct {
 	shelleyVRFKey                 string
 	shelleyKESKey                 string
 	shelleyOperationalCertificate string
+	// Forging tolerances (0 = use defaults)
+	forgeSyncToleranceSlots     uint64
+	forgeStaleGapThresholdSlots uint64
 	// Blockfrost API port (0 = disabled)
 	blockfrostPort uint
 	// Chainsync multi-client configuration
@@ -487,6 +490,22 @@ func WithShelleyKESKey(path string) ConfigOptionFunc {
 func WithShelleyOperationalCertificate(path string) ConfigOptionFunc {
 	return func(c *Config) {
 		c.shelleyOperationalCertificate = path
+	}
+}
+
+// WithForgeSyncToleranceSlots sets the slot gap tolerated before forging is skipped.
+// Use 0 to fall back to the built-in default.
+func WithForgeSyncToleranceSlots(slots uint64) ConfigOptionFunc {
+	return func(c *Config) {
+		c.forgeSyncToleranceSlots = slots
+	}
+}
+
+// WithForgeStaleGapThresholdSlots sets the slot gap threshold for stale database warnings.
+// Use 0 to fall back to the built-in default.
+func WithForgeStaleGapThresholdSlots(slots uint64) ConfigOptionFunc {
+	return func(c *Config) {
+		c.forgeStaleGapThresholdSlots = slots
 	}
 }
 
