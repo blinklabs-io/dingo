@@ -241,13 +241,23 @@ type MetadataStore interface {
 	) ([]models.Transaction, error)
 
 	// GetTransactionsByAddress retrieves transactions involving
-	// the given address, ordered by slot descending.
+	// the provided payment/staking key pair with pagination and ordering.
 	GetTransactionsByAddress(
-		lcommon.Address,
+		[]byte, // paymentKey
+		[]byte, // stakingKey
+		int, // limit
+		int, // offset
+		string, // order (asc|desc)
+		types.Txn,
+	) ([]models.Transaction, error)
+
+	// GetAddressesByStakingKey retrieves distinct address mappings for a staking key.
+	GetAddressesByStakingKey(
+		[]byte, // stakingKey
 		int, // limit
 		int, // offset
 		types.Txn,
-	) ([]models.Transaction, error)
+	) ([]models.AddressTransaction, error)
 
 	// GetScript retrieves a script by its hash.
 	GetScript(
@@ -487,6 +497,10 @@ type MetadataStore interface {
 	// DeleteTransactionsAfterSlot removes transaction records added after the given slot.
 	// Child records are automatically removed via CASCADE constraints.
 	DeleteTransactionsAfterSlot(uint64, types.Txn) error
+
+	// DeleteAddressTransactionsAfterSlot removes address-transaction mappings
+	// for transactions added after the given slot.
+	DeleteAddressTransactionsAfterSlot(uint64, types.Txn) error
 
 	// Governance methods
 
