@@ -74,6 +74,9 @@ func (ls *LedgerState) emitTransactionRollbackEvents(
 		}
 
 		txs := blk.Transactions()
+		if txs == nil {
+			continue
+		}
 		for i := len(txs) - 1; i >= 0; i-- {
 			ls.config.EventBus.PublishAsync(
 				TransactionEventType,

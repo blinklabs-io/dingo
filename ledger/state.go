@@ -1765,7 +1765,7 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 				bulkOptimizer = opt
 				bulkLoadActive = true
 				defer func() {
-					if bulkLoadActive {
+					if bulkLoadActive && bulkOptimizer != nil {
 						if restoreErr := bulkOptimizer.RestoreNormalPragmas(); restoreErr != nil {
 							ls.config.Logger.Error(
 								"failed to restore normal pragmas on exit",
@@ -2350,7 +2350,7 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 				checker = ls.config.ForgedBlockChecker
 				ls.Unlock()
 				// Restore normal DB options outside the lock after validation is enabled
-				if wantEnableValidation && bulkLoadActive {
+				if wantEnableValidation && bulkLoadActive && bulkOptimizer != nil {
 					if restoreErr := bulkOptimizer.RestoreNormalPragmas(); restoreErr != nil {
 						ls.config.Logger.Error(
 							"failed to restore normal pragmas",

@@ -73,6 +73,10 @@ type BlockForger struct {
 	// Prometheus metrics
 	metrics *forgingMetrics
 
+	// Configurable forging tolerances
+	forgeSyncToleranceSlots     uint64
+	forgeStaleGapThresholdSlots uint64
+
 	// State
 	mu      sync.RWMutex
 	running bool
@@ -129,6 +133,13 @@ type ForgerConfig struct {
 	BlockBroadcaster BlockBroadcaster
 	SlotClock        SlotClockProvider
 
+	// ForgeSyncToleranceSlots controls how far the local chain can lag the
+	// upstream tip before forging is skipped. Zero uses the default.
+	ForgeSyncToleranceSlots uint64
+	// ForgeStaleGapThresholdSlots controls when to log an error if the
+	// chain tip is far ahead of the slot clock. Zero uses the default.
+	ForgeStaleGapThresholdSlots uint64
+
 	// Prometheus metrics registry (optional)
 	PromRegistry prometheus.Registerer
 }
@@ -154,6 +165,14 @@ func NewBlockForger(cfg ForgerConfig) (*BlockForger, error) {
 		slotClock:        cfg.SlotClock,
 		slotTracker:      NewSlotTracker(),
 	}
+	if cfg.ForgeSyncToleranceSlots == 0 {
+		cfg.ForgeSyncToleranceSlots = forgeSyncToleranceSlots
+	}
+	if cfg.ForgeStaleGapThresholdSlots == 0 {
+		cfg.ForgeStaleGapThresholdSlots = forgeStaleGapThresholdSlots
+	}
+	f.forgeSyncToleranceSlots = cfg.ForgeSyncToleranceSlots
+	f.forgeStaleGapThresholdSlots = cfg.ForgeStaleGapThresholdSlots
 
 	if cfg.Mode == ModeProduction {
 		if cfg.Credentials == nil || !cfg.Credentials.IsLoaded() {
@@ -268,6 +287,9 @@ func (f *BlockForger) runLoopSlotAligned(ctx context.Context) {
 		nextSlot, err := f.slotClock.NextSlotTime()
 		if err != nil {
 			retries++
+			if f.metrics != nil {
+				f.metrics.slotClockErrors.Inc()
+			}
 			// Log warning periodically so operators see why forger is stuck
 			if retries%50 == 1 {
 				f.logger.Warn(
@@ -364,7 +386,10 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 		// Use subtraction (safe here since tipSlot >= currentSlot from
 		// the outer check) to avoid uint64 overflow on the addition.
 		gap := tipSlot - currentSlot
-		if gap > forgeStaleGapThresholdSlots {
+		if f.metrics != nil {
+			f.metrics.tipGapSlots.Set(float64(gap))
+		}
+		if gap > f.forgeStaleGapThresholdSlots {
 			f.logger.Error(
 				"chain tip is far ahead of slot clock; database may contain data from a different genesis",
 				"current_slot", currentSlot,
@@ -390,7 +415,13 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 	upstreamTip := f.slotClock.UpstreamTipSlot()
 	if upstreamTip > 0 &&
 		upstreamTip > tipSlot &&
-		upstreamTip-tipSlot > forgeSyncToleranceSlots {
+		upstreamTip-tipSlot > f.forgeSyncToleranceSlots {
+		if f.metrics != nil {
+			f.metrics.forgeSyncSkip.Inc()
+			f.metrics.tipGapSlots.Set(
+				float64(upstreamTip - tipSlot),
+			)
+		}
 		f.logger.Debug(
 			"chain syncing from peer, skipping forge",
 			"current_slot", currentSlot,

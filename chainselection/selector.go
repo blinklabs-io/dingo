@@ -247,6 +247,9 @@ func (cs *ChainSelector) evictLeastRecentPeerLocked() *ouroboros.ConnectionId {
 	found := false
 
 	for connId, peerTip := range cs.peerTips {
+		if peerTip == nil {
+			continue
+		}
 		// Never evict the current best peer
 		if cs.bestPeerConn != nil && *cs.bestPeerConn == connId {
 			continue

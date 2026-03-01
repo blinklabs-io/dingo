@@ -42,6 +42,9 @@ type forgingMetrics struct {
 	slotBattlesTotal prometheus.Counter
 	blockSizeBytes   prometheus.Histogram
 	blockTxCount     prometheus.Histogram
+	forgeSyncSkip    prometheus.Counter
+	slotClockErrors  prometheus.Counter
+	tipGapSlots      prometheus.Gauge
 }
 
 // initForgingMetrics initializes all forging metrics using the
@@ -139,6 +142,24 @@ func initForgingMetrics(
 			Buckets: prometheus.LinearBuckets(
 				0, 10, 20,
 			), // 0, 10, 20, ..., 190
+		},
+	)
+	m.forgeSyncSkip = factory.NewCounter(
+		prometheus.CounterOpts{
+			Name: "dingo_forge_sync_skip_total",
+			Help: "forging attempts skipped because upstream tip is ahead",
+		},
+	)
+	m.slotClockErrors = factory.NewCounter(
+		prometheus.CounterOpts{
+			Name: "dingo_forge_slot_clock_errors_total",
+			Help: "errors reading slot clock for forging",
+		},
+	)
+	m.tipGapSlots = factory.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "dingo_forge_tip_gap_slots",
+			Help: "latest observed tip gap in slots",
 		},
 	)
 
