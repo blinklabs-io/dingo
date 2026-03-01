@@ -237,7 +237,7 @@ func TestOptimisticLockingMissingUtxo(t *testing.T) {
 // Validates AddressTransaction populates the data from transaction(input/output) participant
 // Validates whether it inserts a record per unique address (payment & staking key pair)
 func TestSetTransactionIndexesAddressTransactions(t *testing.T) {
-	store := setupTestDB(t)
+	store := setupTestDBWithMode(t, types.StorageModeAPI)
 
 	utxoTxId := bytes.Repeat([]byte{0xA1}, 32)
 	paymentKey := bytes.Repeat([]byte{0x11}, 28)
