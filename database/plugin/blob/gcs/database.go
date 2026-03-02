@@ -21,6 +21,8 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
+	"net/url"
 	"sort"
 	"strings"
 	"time"
@@ -28,6 +30,7 @@ import (
 	"cloud.google.com/go/storage"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/cbor"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/prometheus/client_golang/prometheus"
 	"google.golang.org/api/iterator"
 	"google.golang.org/api/option"
@@ -914,4 +917,101 @@ func (d *BlobStoreGCS) Start() error {
 // Stop implements the plugin.Plugin interface.
 func (d *BlobStoreGCS) Stop() error {
 	return d.Close()
+}
+
+func (d *BlobStoreGCS) GetBlockURL(
+	ctx context.Context,
+	txn types.Txn,
+	point ocommon.Point,
+) (types.SignedURL, types.BlockMetadata, error) {
+	if err := d.validateTxn(txn); err != nil {
+		return types.SignedURL{}, types.BlockMetadata{},
+			fmt.Errorf("gcs: invalid transaction: %w", err)
+	}
+
+	key := types.BlockBlobKey(point.Slot, point.Hash)
+
+	_, err := d.object(key).Attrs(ctx)
+	if errors.Is(err, storage.ErrObjectNotExist) {
+		return types.SignedURL{}, types.BlockMetadata{},
+			fmt.Errorf("gcs: block not found: %w", types.ErrBlobKeyNotFound)
+	}
+	if err != nil {
+		return types.SignedURL{}, types.BlockMetadata{},
+			fmt.Errorf("gcs: failed getting object attributes: %w", err)
+	}
+
+	metadataKey := types.BlockBlobMetadataKey(key)
+	r, err := d.object(metadataKey).NewReader(ctx)
+	if err != nil {
+		if errors.Is(err, storage.ErrObjectNotExist) {
+			// Block content exists but metadata is missing - this indicates a partial write
+			d.logger.Warningf(
+				"block content exists but metadata is missing, possible partial write: key=%s metadataKey=%s",
+				string(key),
+				string(metadataKey),
+			)
+			return types.SignedURL{}, types.BlockMetadata{}, types.ErrBlobKeyNotFound
+		}
+		wrappedErr := fmt.Errorf(
+			"read object %q from bucket %q: %w",
+			string(metadataKey),
+			d.bucketName,
+			err,
+		)
+		d.logger.Errorf("%v", wrappedErr)
+		return types.SignedURL{}, types.BlockMetadata{}, wrappedErr
+	}
+	defer r.Close()
+	metadataBytes, err := io.ReadAll(r)
+	if err != nil {
+		wrappedErr := fmt.Errorf(
+			"read object %q from bucket %q: %w",
+			string(metadataKey),
+			d.bucketName,
+			err,
+		)
+		d.logger.Errorf("%v", wrappedErr)
+		return types.SignedURL{}, types.BlockMetadata{}, wrappedErr
+	}
+	var tmpMetadata types.BlockMetadata
+	if _, err := cbor.Decode(metadataBytes, &tmpMetadata); err != nil {
+		return types.SignedURL{}, types.BlockMetadata{},
+			fmt.Errorf("gcs: failed decoding metadata: %w", err)
+	}
+
+	expires := time.Now().Add(time.Hour)
+	opts := &storage.SignedURLOptions{
+		Scheme:  storage.SigningSchemeV4,
+		Method:  http.MethodGet,
+		Expires: expires,
+	}
+
+	presignedURL, err := d.bucket.SignedURL(
+		d.fullKey(string(key)),
+		opts,
+	)
+	if err != nil {
+		return types.SignedURL{}, types.BlockMetadata{},
+			fmt.Errorf("gcs: failed to sign URL: %w", err)
+	}
+
+	u, err := url.Parse(presignedURL)
+	if err != nil {
+		return types.SignedURL{}, types.BlockMetadata{},
+			fmt.Errorf("gcs: failed to parse URL: %w", err)
+	}
+
+	signedURL := types.SignedURL{
+		URL:     *u,
+		Expires: expires,
+	}
+
+	metadata := types.BlockMetadata{
+		Type:     tmpMetadata.Type,
+		Height:   tmpMetadata.Height,
+		PrevHash: tmpMetadata.PrevHash,
+	}
+
+	return signedURL, metadata, nil
 }

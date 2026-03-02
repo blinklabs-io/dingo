@@ -239,3 +239,7 @@ func (d *Database) StorageMode() string {
 func (d *Database) CborCache() *TieredCborCache {
 	return d.cborCache
 }
+
+func (d *Database) SetBlobStore(b blob.BlobStore) {
+	d.blob = b
+}

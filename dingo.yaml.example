@@ -149,6 +149,16 @@ blockfrostPort: 0
 # Can be overridden with DINGO_MESH_PORT
 meshPort: 0
 
+# base url of bark archive server
+barkBaseUrl: ""
+
+# number of slots from tip within which blocks
+# will not be found in the bark archive
+barkSecurityWindow: 10000
+
+# TCP port bind for listening for bark RPC calls
+barkPort: 0
+
 # ---
 # Deployment pattern examples (uncomment one block):
 #
