@@ -28,7 +28,6 @@ func (a *archiveServiceHandler) FetchBlock(
 	resp := &archive.FetchBlockResponse{}
 
 	for _, b := range req.Msg.GetBlocks() {
-
 		hash, err := hex.DecodeString(b.GetHash())
 		if err != nil {
 			return nil,
