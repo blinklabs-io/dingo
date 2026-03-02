@@ -228,7 +228,6 @@ func BlockURL(
 		ret, metadata, err = txn.DB().Blob().GetBlockURL(ctx, txn.Blob(), point)
 		return err
 	})
-
 	if err != nil {
 		return types.SignedURL{}, types.BlockMetadata{},
 			fmt.Errorf("failed getting block url: %w", err)
