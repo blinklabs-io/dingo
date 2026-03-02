@@ -493,9 +493,11 @@ func (n *Node) Run(ctx context.Context) error {
 	if n.config.barkPort > 0 {
 		n.bark = bark.NewBark(
 			bark.BarkConfig{
-				Logger: n.config.logger,
-				DB:     db,
-				Port:   n.config.barkPort,
+				Logger:          n.config.logger,
+				DB:              db,
+				TlsCertFilePath: n.config.tlsCertFilePath,
+				TlsKeyFilePath:  n.config.tlsKeyFilePath,
+				Port:            n.config.barkPort,
 			},
 		)
 		if err := n.bark.Start(n.ctx); err != nil { //nolint:contextcheck

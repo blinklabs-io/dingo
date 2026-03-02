@@ -813,7 +813,8 @@ func (d *BlobStoreS3) GetBlockURL(
 	metadataBytes, err := d.getInternal(ctx, string(metadataKey))
 	if err != nil {
 		if isS3NotFound(err) {
-			return types.SignedURL{}, types.BlockMetadata{}, types.ErrBlobKeyNotFound
+			return types.SignedURL{}, types.BlockMetadata{},
+				errors.Join(err, types.ErrBlobKeyNotFound)
 		}
 		return types.SignedURL{}, types.BlockMetadata{},
 			fmt.Errorf("s3: failed getting block metadata: %w", err)

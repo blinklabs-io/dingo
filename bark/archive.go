@@ -28,7 +28,14 @@ func (a *archiveServiceHandler) FetchBlock(
 	resp := &archive.FetchBlockResponse{}
 
 	for _, b := range req.Msg.GetBlocks() {
-		point := common.NewPoint(b.GetSlot(), []byte(b.GetHash()))
+
+		hash, err := hex.DecodeString(b.GetHash())
+		if err != nil {
+			return nil,
+				fmt.Errorf("failed decoding hash %q: %w", b.GetHash(), err)
+		}
+
+		point := common.NewPoint(b.GetSlot(), hash)
 		signedURL, metadata, err := database.BlockURL(ctx, a.bark.config.DB, point)
 		if err != nil {
 			return nil, fmt.Errorf("failed getting signed url for block [%d, %s]: %w", point.Slot, point.Hash, err)

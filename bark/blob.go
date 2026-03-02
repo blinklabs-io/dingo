@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"connectrpc.com/connect"
 	archivev1alpha1 "github.com/blinklabs-io/bark/proto/v1alpha1/archive"
@@ -43,7 +44,9 @@ func NewBarkBlobStore(
 
 	httpClient := config.HTTPClient
 	if httpClient == nil {
-		httpClient = http.DefaultClient
+		httpClient = &http.Client{
+			Timeout: 30 * time.Second,
+		}
 	}
 
 	return &BlobStoreBark{
