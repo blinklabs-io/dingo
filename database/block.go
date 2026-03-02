@@ -17,9 +17,9 @@ package database
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
-	"math/big"
 	"slices"
 	"strings"
 
@@ -136,6 +136,45 @@ func (d *Database) HasGenesisCbor(slot uint64, hash []byte) bool {
 	return err == nil
 }
 
+// HasAnyGenesisCbor checks whether any genesis CBOR data exists at the
+// given slot, regardless of hash. This is used to distinguish between
+// "no genesis CBOR" (e.g., after Mithril bootstrap) and "genesis CBOR
+// exists but with a different hash" (true network mismatch).
+func (d *Database) HasAnyGenesisCbor(slot uint64) bool {
+	blob := d.Blob()
+	if blob == nil {
+		return false
+	}
+	txn := d.BlobTxn(false)
+	defer txn.Rollback() //nolint:errcheck
+	prefix := slices.Concat(
+		[]byte(types.BlockBlobKeyPrefix),
+		types.BlockBlobKeyUint64ToBytes(slot),
+	)
+	opts := types.BlobIteratorOptions{Prefix: prefix}
+	it := blob.NewIterator(txn.Blob(), opts)
+	if it == nil {
+		return false
+	}
+	defer it.Close()
+	for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
+		item := it.Item()
+		if item == nil {
+			continue
+		}
+		key := item.Key()
+		if key == nil {
+			continue
+		}
+		// Skip the metadata key
+		if strings.HasSuffix(string(key), types.BlockBlobMetadataKeySuffix) {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
 func BlockDeleteTxn(txn *Txn, block models.Block) error {
 	if txn == nil {
 		return types.ErrNilTxn
@@ -205,7 +244,12 @@ func blockByKey(txn *Txn, blockKey []byte) (models.Block, error) {
 	if txn.Blob() == nil {
 		return models.Block{}, types.ErrNilTxn
 	}
-	point := blockBlobKeyToPoint(blockKey)
+	point, err := BlockBlobKeyToPoint(blockKey)
+	if err != nil {
+		return models.Block{}, fmt.Errorf(
+			"parsing block key: %w", err,
+		)
+	}
 	blob := txn.DB().Blob()
 	if blob == nil {
 		return models.Block{}, types.ErrBlobStoreUnavailable
@@ -500,11 +544,24 @@ func BlocksAfterSlotTxn(txn *Txn, slotNumber uint64) ([]models.Block, error) {
 	return ret, nil
 }
 
-func blockBlobKeyToPoint(key []byte) ocommon.Point {
-	slotBytes := make([]byte, 8)
-	copy(slotBytes, key[2:2+8])
+// BlockBlobKeyToPoint extracts slot and hash from a block blob key.
+// Key format: "bp" (2 bytes) + slot (8 bytes big-endian) + hash (32 bytes).
+func BlockBlobKeyToPoint(key []byte) (ocommon.Point, error) {
+	const keyLen = 2 + 8 + 32 // prefix + slot + hash
+	if len(key) != keyLen {
+		return ocommon.Point{}, fmt.Errorf(
+			"blob key length %d, expected %d",
+			len(key), keyLen,
+		)
+	}
+	if string(key[:2]) != types.BlockBlobKeyPrefix {
+		return ocommon.Point{}, fmt.Errorf(
+			"blob key has wrong prefix: %q, expected %q",
+			key[:2], types.BlockBlobKeyPrefix,
+		)
+	}
+	slot := binary.BigEndian.Uint64(key[2:10])
 	hash := make([]byte, 32)
 	copy(hash, key[10:10+32])
-	slot := new(big.Int).SetBytes(slotBytes).Uint64()
-	return ocommon.NewPoint(slot, hash)
+	return ocommon.NewPoint(slot, hash), nil
 }

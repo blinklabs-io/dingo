@@ -441,7 +441,7 @@ func EvaluateTxAlonzo(
 		}
 	}
 	// Calculate fee based on TX size and calculated ExUnits
-	txSize := TxBodySize(tx)
+	txSize := TxSizeForFee(tx)
 	var pricesMem, pricesSteps *big.Rat
 	if tmpPparams.ExecutionCosts.MemPrice != nil {
 		pricesMem = tmpPparams.ExecutionCosts.MemPrice.ToBigRat()

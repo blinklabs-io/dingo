@@ -28,15 +28,19 @@ import (
 )
 
 // mockTransaction implements lcommon.Transaction for
-// testing. Only the Cbor() method is needed for our
-// validation functions.
+// testing.
 type mockTransaction struct {
 	lcommon.Transaction
-	cbor []byte
+	cbor   []byte
+	txType int
 }
 
 func (m *mockTransaction) Cbor() []byte {
 	return m.cbor
+}
+
+func (m *mockTransaction) Type() int {
+	return m.txType
 }
 
 // mockFeeTx extends mockTransaction with Fee() and
@@ -44,12 +48,17 @@ func (m *mockTransaction) Cbor() []byte {
 type mockFeeTx struct {
 	lcommon.Transaction
 	cbor      []byte
+	txType    int
 	fee       *big.Int
 	witnesses lcommon.TransactionWitnessSet
 }
 
 func (m *mockFeeTx) Cbor() []byte {
 	return m.cbor
+}
+
+func (m *mockFeeTx) Type() int {
+	return m.txType
 }
 
 func (m *mockFeeTx) Fee() *big.Int {
@@ -132,9 +141,10 @@ func (m *mockRedeemers) Iter() iter.Seq2[lcommon.RedeemerKey, lcommon.RedeemerVa
 	}
 }
 
-func TestTxBodySize(t *testing.T) {
+func TestTxSizeForFee(t *testing.T) {
 	tests := []struct {
 		name     string
+		txType   int
 		cbor     []byte
 		expected uint64
 	}{
@@ -144,25 +154,48 @@ func TestTxBodySize(t *testing.T) {
 			expected: 0,
 		},
 		{
-			name:     "small transaction",
+			// Pre-Alonzo: no IsValid byte, full size
+			// returned unchanged.
+			name:     "pre-alonzo full size",
+			txType:   1, // Shelley
 			cbor:     make([]byte, 256),
 			expected: 256,
 		},
 		{
-			name:     "typical transaction",
-			cbor:     make([]byte, 4096),
-			expected: 4096,
+			// Alonzo+ 4-element TX: fee size excludes
+			// the 1-byte IsValid boolean.
+			name:     "alonzo subtracts isvalid byte",
+			txType:   4, // Alonzo
+			cbor:     make([]byte, 256),
+			expected: 255,
 		},
 		{
-			name:     "large transaction",
+			name:     "typical alonzo transaction",
+			txType:   4,
+			cbor:     make([]byte, 4096),
+			expected: 4095,
+		},
+		{
+			name:     "large alonzo transaction",
+			txType:   4,
 			cbor:     make([]byte, 16384),
-			expected: 16384,
+			expected: 16383,
+		},
+		{
+			// Mary (pre-Alonzo) TX: no subtraction.
+			name:     "mary transaction full size",
+			txType:   3, // Mary
+			cbor:     make([]byte, 4096),
+			expected: 4096,
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			tx := &mockTransaction{cbor: tc.cbor}
-			size := TxBodySize(tx)
+			tx := &mockTransaction{
+				cbor:   tc.cbor,
+				txType: tc.txType,
+			}
+			size := TxSizeForFee(tx)
 			assert.Equal(
 				t,
 				tc.expected,
@@ -176,6 +209,7 @@ func TestValidateTxSize(t *testing.T) {
 	tests := []struct {
 		name      string
 		txSize    int
+		txType    int
 		maxSize   uint
 		expectErr bool
 	}{
@@ -192,8 +226,10 @@ func TestValidateTxSize(t *testing.T) {
 			expectErr: false,
 		},
 		{
+			// Fee-relevant size = 16386 - 1 = 16385 > 16384
 			name:      "one byte over limit",
-			txSize:    16385,
+			txSize:    16386,
+			txType:    4, // Alonzo
 			maxSize:   16384,
 			expectErr: true,
 		},
@@ -210,8 +246,10 @@ func TestValidateTxSize(t *testing.T) {
 			expectErr: false,
 		},
 		{
-			name:      "zero max size",
-			txSize:    1,
+			// Fee-relevant size = 2 - 1 = 1 > 0
+			name:      "zero max size with non-zero tx",
+			txSize:    2,
+			txType:    4, // Alonzo
 			maxSize:   0,
 			expectErr: true,
 		},
@@ -219,7 +257,8 @@ func TestValidateTxSize(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			tx := &mockTransaction{
-				cbor: make([]byte, tc.txSize),
+				cbor:   make([]byte, tc.txSize),
+				txType: tc.txType,
 			}
 			err := ValidateTxSize(tx, tc.maxSize)
 			if tc.expectErr {
@@ -407,8 +446,12 @@ func TestCalculateMinFee(t *testing.T) {
 			// pricesSteps = 1/3, steps = 1
 			// ceil(1/3 * 1) = ceil(1/3) = 1
 			// scriptFee = 1 + 1 = 2
+			// Ceiling behavior: single ceiling over sum.
+			// Per Alonzo spec: scriptFee = ceil(prMem*mem + prSteps*steps)
+			// sum = 1/3 + 1/3 = 2/3
+			// scriptFee = ceil(2/3) = 1
 			// baseFee = 0*0 + 0 = 0
-			// total = 2
+			// total = 1
 			name:   "ceiling rounding",
 			txSize: 0,
 			exUnits: lcommon.ExUnits{
@@ -419,7 +462,7 @@ func TestCalculateMinFee(t *testing.T) {
 			minFeeB:     0,
 			pricesMem:   big.NewRat(1, 3),
 			pricesSteps: big.NewRat(1, 3),
-			expected:    2,
+			expected:    1,
 		},
 		{
 			// Exact division, no ceiling needed:
@@ -633,9 +676,12 @@ func TestValidateTxFee(t *testing.T) {
 	})
 
 	t.Run("one under with scripts", func(t *testing.T) {
+		// txType=4 (Alonzo): fee-relevant size = 300-1 = 299
+		// minFee = 44*299+155381+72120 = 240657
 		tx := &mockFeeTx{
-			cbor: make([]byte, 300),
-			fee:  big.NewInt(240700),
+			cbor:   make([]byte, 300),
+			txType: 4, // Alonzo
+			fee:    big.NewInt(240656),
 			witnesses: &mockWitnessSet{
 				redeemers: &mockRedeemers{
 					entries: []struct {

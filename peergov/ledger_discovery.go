@@ -102,6 +102,11 @@ func (p *PeerGovernor) addLedgerPeer(address string) bool {
 	// Resolve address (with DNS lookup) before acquiring lock to avoid
 	// blocking while holding the mutex
 	normalized := p.resolveAddress(address)
+
+	// Reject non-routable IPs (private, loopback, link-local, etc.)
+	if !isRoutableAddr(normalized) {
+		return false
+	}
 	var evt *pendingEvent
 	added := false
 
@@ -158,6 +163,9 @@ func (p *PeerGovernor) addLedgerPeer(address string) bool {
 		p.metrics.increasedKnownPeers.Inc()
 	}
 
+	// Check if the governor is running (stopCh is set by Start)
+	// and outbound connections are enabled before spawning.
+	shouldConnect := p.stopCh != nil && !p.config.DisableOutbound
 	evt = &pendingEvent{
 		PeerAddedEventType,
 		PeerStateChangeEvent{Address: address, Reason: "ledger"},
@@ -167,6 +175,13 @@ func (p *PeerGovernor) addLedgerPeer(address string) bool {
 
 	// Publish event outside of lock to avoid deadlock
 	p.publishEvent(evt.eventType, evt.data)
+
+	// Spawn an outbound connection goroutine for the new peer.
+	// Without this, ledger peers stay cold indefinitely since
+	// startOutboundConnections only runs once at startup.
+	if shouldConnect {
+		go p.createOutboundConnection(newPeer)
+	}
 
 	return added
 }

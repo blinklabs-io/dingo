@@ -36,14 +36,14 @@ func TestAddPeer_RejectsGossipPeersAtCap(t *testing.T) {
 
 	// Fill peer list to exactly the cap with gossip peers
 	for i := range cap {
-		addr := fmt.Sprintf("10.0.%d.%d:%d", i/256, i%256, 3000)
+		addr := fmt.Sprintf("44.0.%d.%d:%d", i/256, i%256, 3000)
 		err := pg.AddPeer(addr, PeerSourceP2PGossip)
 		require.NoError(t, err, "peer %d should be accepted", i)
 	}
 	require.Len(t, pg.GetPeers(), cap)
 
 	// The next gossip peer should be rejected
-	err := pg.AddPeer("10.99.99.99:3000", PeerSourceP2PGossip)
+	err := pg.AddPeer("44.99.99.99:3000", PeerSourceP2PGossip)
 	assert.ErrorIs(t, err, ErrPeerListFull)
 
 	// Peer count should not have increased
@@ -59,13 +59,13 @@ func TestAddPeer_RejectsLedgerPeersAtCap(t *testing.T) {
 
 	// Fill peer list to the cap
 	for i := range cap {
-		addr := fmt.Sprintf("10.0.%d.%d:%d", i/256, i%256, 3000)
+		addr := fmt.Sprintf("44.0.%d.%d:%d", i/256, i%256, 3000)
 		err := pg.AddPeer(addr, PeerSourceP2PGossip)
 		require.NoError(t, err)
 	}
 
 	// Ledger peers should also be rejected at cap
-	err := pg.AddPeer("10.99.99.99:3000", PeerSourceP2PLedger)
+	err := pg.AddPeer("44.99.99.99:3000", PeerSourceP2PLedger)
 	assert.ErrorIs(t, err, ErrPeerListFull)
 	assert.Len(t, pg.GetPeers(), cap)
 }
@@ -79,7 +79,7 @@ func TestAddPeer_AcceptsTopologyPeersAtCap(t *testing.T) {
 
 	// Fill peer list to the cap
 	for i := range cap {
-		addr := fmt.Sprintf("10.0.%d.%d:%d", i/256, i%256, 3000)
+		addr := fmt.Sprintf("44.0.%d.%d:%d", i/256, i%256, 3000)
 		err := pg.AddPeer(addr, PeerSourceP2PGossip)
 		require.NoError(t, err)
 	}
@@ -110,13 +110,15 @@ func TestAddPeer_NormalOperationWithinCap(t *testing.T) {
 		TargetNumberOfKnownPeers: 5,
 	})
 
-	// Add a mix of peer sources, well under cap
+	// Add a mix of peer sources, well under cap.
+	// Gossip and ledger peers use routable IPs; inbound and topology
+	// peers may use private IPs since they are exempt from routing checks.
 	sources := []struct {
 		addr   string
 		source PeerSource
 	}{
-		{"10.0.0.1:3000", PeerSourceP2PGossip},
-		{"10.0.0.2:3000", PeerSourceP2PLedger},
+		{"44.0.0.1:3000", PeerSourceP2PGossip},
+		{"44.0.0.2:3000", PeerSourceP2PLedger},
 		{"10.0.0.3:3000", PeerSourceInboundConn},
 		{"10.0.0.4:3000", PeerSourceTopologyLocalRoot},
 		{"10.0.0.5:3000", PeerSourceTopologyPublicRoot},
@@ -154,13 +156,13 @@ func TestAddPeer_InboundRejectedAtCap(t *testing.T) {
 
 	// Fill peer list to the cap
 	for i := range cap {
-		addr := fmt.Sprintf("10.0.%d.%d:%d", i/256, i%256, 3000)
+		addr := fmt.Sprintf("44.0.%d.%d:%d", i/256, i%256, 3000)
 		err := pg.AddPeer(addr, PeerSourceP2PGossip)
 		require.NoError(t, err)
 	}
 
 	// Inbound connection peer should also be rejected at cap
-	err := pg.AddPeer("10.99.99.99:3000", PeerSourceInboundConn)
+	err := pg.AddPeer("44.99.99.99:3000", PeerSourceInboundConn)
 	assert.ErrorIs(t, err, ErrPeerListFull)
 	assert.Len(t, pg.GetPeers(), cap)
 }
@@ -174,13 +176,13 @@ func TestAddLedgerPeer_RejectedAtCap(t *testing.T) {
 
 	// Fill peer list to the cap via AddPeer
 	for i := range cap {
-		addr := fmt.Sprintf("10.0.%d.%d:%d", i/256, i%256, 3000)
+		addr := fmt.Sprintf("44.0.%d.%d:%d", i/256, i%256, 3000)
 		err := pg.AddPeer(addr, PeerSourceP2PGossip)
 		require.NoError(t, err)
 	}
 
 	// addLedgerPeer should return false when at cap
-	added := pg.addLedgerPeer("10.99.99.99:3000")
+	added := pg.addLedgerPeer("44.99.99.99:3000")
 	assert.False(t, added, "ledger peer should be rejected at cap")
 	assert.Len(t, pg.GetPeers(), cap)
 }

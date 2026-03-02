@@ -338,16 +338,17 @@ func parseSnapshotData(data []byte) (*RawLedgerState, error) {
 	result.EraBounds = eraBounds
 	result.EraBoundsWarning = boundsWarning
 
-	// Extract epoch nonce from the HeaderState (outer[1]).
+	// Extract nonces from the HeaderState (outer[1]).
 	// HeaderState = [WithOrigin AnnTip, ChainDepState telescope]
-	epochNonce, nonceErr := parseEpochNonce(outer[1])
+	nonces, nonceErr := parsePraosNonces(outer[1])
 	if nonceErr != nil {
 		slog.Debug(
-			"epoch nonce extraction failed (non-fatal)",
+			"nonce extraction failed (non-fatal)",
 			"error", nonceErr,
 		)
-	} else if epochNonce != nil {
-		result.EpochNonce = epochNonce
+	} else if nonces != nil {
+		result.EpochNonce = nonces.EpochNonce
+		result.EvolvingNonce = nonces.EvolvingNonce
 	}
 
 	return result, nil
@@ -694,7 +695,20 @@ func parseBound(data []byte) (uint64, uint64, error) {
 	return slot, epoch, nil
 }
 
-// parseEpochNonce extracts the epoch nonce from the HeaderState CBOR.
+// praosNonces holds the nonces extracted from the PraosState in the
+// HeaderState's ChainDepState telescope.
+type praosNonces struct {
+	// EvolvingNonce is the rolling nonce (eta_v) updated with each
+	// block's VRF output. This is needed as the starting nonce for
+	// block processing after a mithril snapshot restore.
+	EvolvingNonce []byte
+	// EpochNonce is the epoch nonce (eta_0) used for VRF leader
+	// election in the current epoch.
+	EpochNonce []byte
+}
+
+// parsePraosNonces extracts the evolving nonce and epoch nonce from
+// the HeaderState CBOR.
 //
 // HeaderState = [WithOrigin AnnTip, HardForkState ChainDepState]
 //
@@ -705,7 +719,7 @@ func parseBound(data []byte) (uint64, uint64, error) {
 //	 epochNonce, labNonce, lastEpochBlockNonce]
 //
 // Nonce encoding: [0] = NeutralNonce, [1, hash] = Nonce(hash)
-func parseEpochNonce(headerStateData []byte) ([]byte, error) {
+func parsePraosNonces(headerStateData []byte) (*praosNonces, error) {
 	hs, err := decodeRawArray(headerStateData)
 	if err != nil {
 		return nil, fmt.Errorf(
@@ -755,8 +769,12 @@ func parseEpochNonce(headerStateData []byte) ([]byte, error) {
 		)
 	}
 
-	// Peel version wrapper(s). Cap iterations to guard
-	// against pathological nesting in malformed input.
+	// Peel version wrapper(s). The wrapped format is
+	// [version, [inner...]] where the second element is an
+	// array. The flat format is [lastSlot, ocertCounters,
+	// nonces...] where lastSlot is also an integer, so we
+	// distinguish them by checking whether the second element
+	// decodes as an array.
 	const maxPraosVersionLayers = 5
 	for versionDepth := 0; len(praosState) >= 2 &&
 		versionDepth < maxPraosVersionLayers; versionDepth++ {
@@ -766,23 +784,15 @@ func parseEpochNonce(headerStateData []byte) ([]byte, error) {
 		); decErr != nil {
 			break // First element is not an integer
 		}
-		if len(praosState) == 2 {
-			// Wrapped: [version, [inner...]]
-			inner, innerErr := decodeRawArray(praosState[1])
-			if innerErr != nil {
-				return nil, fmt.Errorf(
-					"decoding PraosState "+
-						"inner (v%d): %w",
-					ver,
-					innerErr,
-				)
-			}
-			praosState = inner
-			continue
+		// Try to decode the second element as an array. If it
+		// succeeds, the format is [version, [inner...]] and we
+		// unwrap. If it fails, the first integer is lastSlot
+		// (flat format) and we must not drop it.
+		inner, innerErr := decodeRawArray(praosState[1])
+		if innerErr != nil {
+			break // Flat format — first element is lastSlot
 		}
-		// Flat: [version, lastSlot, ocertCounters, nonces...]
-		praosState = praosState[1:]
-		break
+		praosState = inner
 	}
 
 	// PraosState = [lastSlot, ocertCounters, evolvingNonce,
@@ -795,7 +805,39 @@ func parseEpochNonce(headerStateData []byte) ([]byte, error) {
 		)
 	}
 
-	return decodeNonce(praosState[4])
+	result := &praosNonces{}
+
+	// Extract evolving nonce (index 2)
+	evolvingNonce, err := decodeNonce(praosState[2])
+	if err != nil {
+		return nil, fmt.Errorf(
+			"decoding evolving nonce: %w", err,
+		)
+	}
+	if evolvingNonce != nil && len(evolvingNonce) != 32 {
+		return nil, fmt.Errorf(
+			"invalid evolving nonce length %d, expected 32",
+			len(evolvingNonce),
+		)
+	}
+	result.EvolvingNonce = evolvingNonce
+
+	// Extract epoch nonce (index 4)
+	epochNonce, err := decodeNonce(praosState[4])
+	if err != nil {
+		return nil, fmt.Errorf(
+			"decoding epoch nonce: %w", err,
+		)
+	}
+	if epochNonce != nil && len(epochNonce) != 32 {
+		return nil, fmt.Errorf(
+			"invalid epoch nonce length %d, expected 32",
+			len(epochNonce),
+		)
+	}
+	result.EpochNonce = epochNonce
+
+	return result, nil
 }
 
 // decodeNonce decodes a Cardano Nonce CBOR value.

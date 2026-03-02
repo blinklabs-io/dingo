@@ -17,6 +17,7 @@ package database
 import (
 	"errors"
 	"fmt"
+	"runtime/debug"
 	"sync"
 	"time"
 
@@ -131,6 +132,7 @@ func (t *Txn) Do(fn func(*Txn) error) error {
 			t.db.logger.Error(
 				"panic in transaction function, ensuring rollback",
 				"panic", fmt.Sprintf("%v", r),
+				"stack", string(debug.Stack()),
 			)
 			// Attempt rollback to ensure transaction is cleaned up
 			if err := t.Rollback(); err != nil {

@@ -241,13 +241,23 @@ type MetadataStore interface {
 	) ([]models.Transaction, error)
 
 	// GetTransactionsByAddress retrieves transactions involving
-	// the given address, ordered by slot descending.
+	// the provided payment/staking key pair with pagination and ordering.
 	GetTransactionsByAddress(
-		lcommon.Address,
+		[]byte, // paymentKey
+		[]byte, // stakingKey
+		int, // limit
+		int, // offset
+		string, // order (asc|desc)
+		types.Txn,
+	) ([]models.Transaction, error)
+
+	// GetAddressesByStakingKey retrieves distinct address mappings for a staking key.
+	GetAddressesByStakingKey(
+		[]byte, // stakingKey
 		int, // limit
 		int, // offset
 		types.Txn,
-	) ([]models.Transaction, error)
+	) ([]models.AddressTransaction, error)
 
 	// GetScript retrieves a script by its hash.
 	GetScript(
@@ -488,6 +498,10 @@ type MetadataStore interface {
 	// Child records are automatically removed via CASCADE constraints.
 	DeleteTransactionsAfterSlot(uint64, types.Txn) error
 
+	// DeleteAddressTransactionsAfterSlot removes address-transaction mappings
+	// for transactions added after the given slot.
+	DeleteAddressTransactionsAfterSlot(uint64, types.Txn) error
+
 	// Governance methods
 
 	// GetGovernanceProposal retrieves a governance proposal by transaction hash and action index.
@@ -541,6 +555,25 @@ type MetadataStore interface {
 	// GetCommitteeActiveCount returns the number of active (non-resigned)
 	// committee members.
 	GetCommitteeActiveCount(types.Txn) (int, error)
+
+	// Snapshot-imported committee member methods
+
+	// SetCommitteeMembers upserts committee members imported from a
+	// Mithril snapshot. On conflict (same cold_cred_hash), the
+	// expires_epoch and added_slot are updated.
+	SetCommitteeMembers(
+		[]*models.CommitteeMember,
+		types.Txn,
+	) error
+
+	// GetCommitteeMembers retrieves all active (non-deleted)
+	// snapshot-imported committee members.
+	GetCommitteeMembers(types.Txn) ([]*models.CommitteeMember, error)
+
+	// DeleteCommitteeMembersAfterSlot removes committee members added
+	// after the given slot and clears deleted_slot for any that were
+	// soft-deleted after that slot. Used during chain rollbacks.
+	DeleteCommitteeMembersAfterSlot(uint64, types.Txn) error
 
 	// DRep voting power and activity methods
 
@@ -657,6 +690,22 @@ type MetadataStore interface {
 
 	// ClearSyncState removes all sync state entries.
 	ClearSyncState(types.Txn) error
+
+	// Backfill checkpoint methods
+
+	// GetBackfillCheckpoint retrieves a backfill checkpoint by phase.
+	// Returns nil (not error) if no checkpoint exists for the phase.
+	GetBackfillCheckpoint(
+		phase string,
+		txn types.Txn,
+	) (*models.BackfillCheckpoint, error)
+
+	// SetBackfillCheckpoint creates or updates a backfill checkpoint,
+	// upserting on the Phase column.
+	SetBackfillCheckpoint(
+		checkpoint *models.BackfillCheckpoint,
+		txn types.Txn,
+	) error
 }
 
 // BulkLoadOptimizer is an optional interface that metadata stores can

@@ -74,10 +74,27 @@ func SafeAddExUnits(
 	}, nil
 }
 
-// TxBodySize returns the CBOR-serialized size of a
-// transaction in bytes.
-func TxBodySize(tx lcommon.Transaction) uint64 {
-	return uint64(len(tx.Cbor()))
+// txTypeAlonzo is the first era whose on-wire CBOR
+// includes the 1-byte IsValid boolean field.
+const txTypeAlonzo = 4
+
+// TxSizeForFee computes the transaction size used in the
+// Cardano fee formula. Per the Haskell ledger's
+// toCBORForSizeComputation, this is the 3-element CBOR
+// encoding [body, witnesses, auxiliary_data] — the
+// IsValid boolean is excluded for backward compatibility
+// with Mary-era transaction sizes. Since both 0x83 and
+// 0x84 are 1-byte CBOR headers, the difference from the
+// on-wire 4-element format is exactly the 1-byte IsValid
+// field. Pre-Alonzo transactions (Byron through Mary) do
+// not contain an IsValid byte, so their full CBOR length
+// is the fee-relevant size.
+func TxSizeForFee(tx lcommon.Transaction) uint64 {
+	fullSize := uint64(len(tx.Cbor()))
+	if fullSize > 0 && tx.Type() >= txTypeAlonzo {
+		return fullSize - 1
+	}
+	return fullSize
 }
 
 // ValidateTxSize checks that the transaction size does
@@ -86,7 +103,7 @@ func ValidateTxSize(
 	tx lcommon.Transaction,
 	maxTxSize uint,
 ) error {
-	size := TxBodySize(tx)
+	size := TxSizeForFee(tx)
 	if size > uint64(maxTxSize) {
 		return fmt.Errorf(
 			"transaction size %d exceeds maximum %d",
@@ -121,43 +138,19 @@ func ValidateTxExUnits(
 	return nil
 }
 
-// CeilMul computes ceil(rat * value) using integer
-// arithmetic. The rational is represented as num/denom.
-// This avoids floating-point imprecision. If the result
-// exceeds uint64, it saturates at math.MaxUint64.
-// Panics if denom is zero.
-func CeilMul(
-	num, denom, value *big.Int,
-) uint64 {
-	if denom.Sign() == 0 {
-		panic("CeilMul: zero denominator")
-	}
-	// product = num * value
-	product := new(big.Int).Mul(num, value)
-	// ceil(product / denom) = (product + denom - 1) / denom
-	one := big.NewInt(1)
-	denomMinusOne := new(big.Int).Sub(denom, one)
-	product.Add(product, denomMinusOne)
-	product.Div(product, denom)
-	if !product.IsUint64() {
-		return math.MaxUint64
-	}
-	return product.Uint64()
-}
-
 // CalculateMinFee computes the minimum fee for a
 // transaction using the Cardano fee formula:
 //
 //	fee = (minFeeA * txSize) + minFeeB + scriptFee
 //
-// where:
+// where (per Alonzo spec txscriptfee):
 //
-//	scriptFee = ceil(pricesMem * exUnits.Memory)
-//	          + ceil(pricesSteps * exUnits.Steps)
+//	scriptFee = ceil(pricesMem * mem + pricesSteps * steps)
 //
-// Script fee arithmetic uses big.Int to prevent
-// overflow on large ExUnit products. All uint64
-// additions and multiplications saturate at MaxUint64.
+// Note: a single ceiling is applied over the sum of
+// both components, NOT ceil of each added together.
+// Script fee arithmetic uses big.Rat to prevent
+// overflow and preserve exact rational arithmetic.
 func CalculateMinFee(
 	txSize uint64,
 	exUnits lcommon.ExUnits,
@@ -178,20 +171,32 @@ func CalculateMinFee(
 
 	var scriptFee uint64
 	if pricesMem != nil && pricesSteps != nil {
-		memFee := CeilMul(
-			pricesMem.Num(),
-			pricesMem.Denom(),
-			big.NewInt(exUnits.Memory),
+		// Compute exact rational sum:
+		// sum = pricesMem * mem + pricesSteps * steps
+		memCost := new(big.Rat).Mul(
+			pricesMem,
+			new(big.Rat).SetInt64(exUnits.Memory),
 		)
-		stepFee := CeilMul(
-			pricesSteps.Num(),
-			pricesSteps.Denom(),
-			big.NewInt(exUnits.Steps),
+		stepCost := new(big.Rat).Mul(
+			pricesSteps,
+			new(big.Rat).SetInt64(exUnits.Steps),
 		)
-		if stepFee > math.MaxUint64-memFee {
+		sum := new(big.Rat).Add(memCost, stepCost)
+		// ceil(sum) using integer arithmetic
+		num := sum.Num()
+		denom := sum.Denom()
+		q, r := new(big.Int).DivMod(
+			num,
+			denom,
+			new(big.Int),
+		)
+		if r.Sign() > 0 {
+			q.Add(q, big.NewInt(1))
+		}
+		if !q.IsUint64() {
 			scriptFee = math.MaxUint64
 		} else {
-			scriptFee = memFee + stepFee
+			scriptFee = q.Uint64()
 		}
 	}
 
@@ -238,11 +243,15 @@ func DeclaredExUnits(
 // fee, including both the base fee component and the
 // script execution fee component.
 //
-// The minimum fee formula (Alonzo+ eras):
+// The minimum fee formula (Alonzo+ eras), computed by
+// CalculateMinFee:
 //
 //	minFee = (minFeeA * txSize) + minFeeB
-//	       + ceil(pricesMem * totalMem)
-//	       + ceil(pricesSteps * totalSteps)
+//	       + ceil(pricesMem * totalMem
+//	            + pricesSteps * totalSteps)
+//
+// Note: a single ceiling is applied over the combined
+// script cost sum, not per-component.
 //
 // Returns nil if the declared fee is sufficient.
 func ValidateTxFee(
@@ -252,7 +261,7 @@ func ValidateTxFee(
 	pricesMem *big.Rat,
 	pricesSteps *big.Rat,
 ) error {
-	txSize := TxBodySize(tx)
+	txSize := TxSizeForFee(tx)
 	declaredEU, err := DeclaredExUnits(tx)
 	if err != nil {
 		return fmt.Errorf(

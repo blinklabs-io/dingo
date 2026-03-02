@@ -57,12 +57,56 @@ func (p *PeerGovernor) GetPeers() []Peer {
 	return ret
 }
 
+// ErrUnroutableAddress is returned when a peer address resolves to a
+// non-routable IP (private, loopback, link-local, multicast, or
+// unspecified).
+var ErrUnroutableAddress = errors.New("unroutable peer address")
+
+// isRoutableAddr checks whether the host portion of an address is a
+// publicly-routable unicast IP. It returns false for private (RFC 1918 /
+// RFC 4193), loopback, link-local, multicast, and unspecified addresses.
+// If the host is not a valid IP (e.g. unresolved hostname), it is
+// considered routable so that DNS-based topology peers still work.
+func isRoutableAddr(address string) bool {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		// Bare host or malformed — treat as routable to be safe
+		host = address
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		// Not an IP literal (hostname) — allow it
+		return true
+	}
+	if ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast() ||
+		ip.IsLinkLocalMulticast() || ip.IsMulticast() ||
+		ip.IsUnspecified() {
+		return false
+	}
+	return true
+}
+
 func (p *PeerGovernor) AddPeer(
 	address string,
 	source PeerSource,
 ) error {
 	// Resolve address before acquiring lock to avoid blocking DNS
 	normalized := p.resolveAddress(address)
+
+	// Reject non-routable IPs early — topology peers bypass this check
+	// so operators can use private addresses for local relays. Inbound
+	// connections are also exempt since they are already established.
+	if !p.isTopologyPeer(source) &&
+		source != PeerSourceInboundConn &&
+		!isRoutableAddr(normalized) {
+		p.config.Logger.Debug(
+			"rejecting non-routable peer address",
+			"address", address,
+			"resolved", normalized,
+			"source", source,
+		)
+		return ErrUnroutableAddress
+	}
 	var evt *pendingEvent
 
 	p.mu.Lock()
@@ -124,6 +168,12 @@ func (p *PeerGovernor) AddPeer(
 	case PeerSourceInboundConn:
 		reason = "inbound connection"
 	}
+	// Check if the governor is running and outbound connections
+	// are enabled before spawning. Topology peers added before
+	// Start() are covered by startOutboundConnections(); this
+	// handles peers added at runtime (e.g., gossip).
+	shouldConnect := p.stopCh != nil && !p.config.DisableOutbound &&
+		source != PeerSourceInboundConn
 	evt = &pendingEvent{
 		PeerAddedEventType,
 		PeerStateChangeEvent{Address: address, Reason: reason},
@@ -132,6 +182,13 @@ func (p *PeerGovernor) AddPeer(
 
 	// Publish event outside of lock to avoid deadlock
 	p.publishEvent(evt.eventType, evt.data)
+
+	// Spawn an outbound connection goroutine for the new peer.
+	// Without this, peers added after startup stay cold
+	// indefinitely.
+	if shouldConnect {
+		go p.createOutboundConnection(newPeer)
+	}
 	return nil
 }
 

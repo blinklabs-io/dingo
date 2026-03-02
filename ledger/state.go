@@ -2257,7 +2257,11 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 						BlockNumber: next.BlockNumber(),
 					}
 					blocksProcessed++
-					// Calculate block rolling nonce
+					// Calculate block rolling nonce (evolving nonce η_v).
+					// The evolving nonce is ALWAYS computed for every block.
+					// The candidate nonce (used in epoch nonce calc) is
+					// determined by looking up the stored nonce at the
+					// stability window point in calculateEpochNonce().
 					var blockNonce []byte
 					if snapshotEra.CalculateEtaVFunc != nil {
 						tmpEra := eras.Eras[next.Era().Id]
@@ -3044,9 +3048,9 @@ func (ls *LedgerState) computeNextEpochNonce(
 		return nil
 	}
 
-	// If the current epoch has no nonce (initial epoch), the next epoch's
-	// nonce is the Shelley genesis hash.
-	if len(currentEpoch.Nonce) == 0 {
+	// For the first Shelley epoch (or when no previous nonce exists),
+	// the next epoch's nonce is the Shelley genesis hash.
+	if len(currentEpoch.Nonce) == 0 || currentEpoch.EpochId == 0 {
 		return genesisHashBytes
 	}
 
@@ -3054,55 +3058,49 @@ func (ls *LedgerState) computeNextEpochNonce(
 		currentEpoch.LengthInSlots,
 	)
 
-	// Calculate stability window: 3k/f slots
-	stabilityWindow := ls.calculateStabilityWindowForEra(currentEra.Id)
-	var stabilityWindowStartSlot uint64
-	if epochStartSlot > stabilityWindow {
-		stabilityWindowStartSlot = epochStartSlot - stabilityWindow
-	}
+	// In Ouroboros Praos, the candidate nonce is the Shelley genesis
+	// hash (confirmed empirically against cardano-node).
+	candidateNonce := genesisHashBytes
 
-	// Determine the candidate nonce.
-	var candidateNonce []byte
-	if stabilityWindowStartSlot < currentEpoch.StartSlot {
-		// Stability window extends before this epoch — use genesis hash.
-		candidateNonce = genesisHashBytes
-	} else {
-		blockBeforeStability, lookupErr := database.BlockBeforeSlot(
-			ls.db, stabilityWindowStartSlot,
-		)
-		if lookupErr != nil {
-			candidateNonce = genesisHashBytes
-		} else {
-			candidateNonce, err = ls.db.GetBlockNonce(
-				ocommon.Point{
-					Hash: blockBeforeStability.Hash,
-					Slot: blockBeforeStability.Slot,
-				},
-				nil,
-			)
-			if err != nil || len(candidateNonce) == 0 {
-				candidateNonce = genesisHashBytes
-			}
-		}
-	}
-
-	// Determine the last epoch block nonce (hash of last block before
-	// the new epoch's start slot).
+	// The lastEpochBlockNonce is the labNonce captured at the PREVIOUS
+	// epoch boundary. We look up the last block before the CURRENT
+	// epoch's start slot (last block of the epoch before the current
+	// one) and use its PrevHash, matching Haskell's labNonce semantics.
 	blockLastPrevEpoch, err := database.BlockBeforeSlot(
-		ls.db, epochStartSlot,
+		ls.db, currentEpoch.StartSlot,
 	)
-	if err != nil || len(blockLastPrevEpoch.Hash) == 0 {
-		// No block before this epoch — equivalent to NeutralNonce.
+	if err != nil {
+		ls.config.Logger.Warn(
+			"failed to query block before epoch start",
+			"component", "ledger",
+			"queried_slot", currentEpoch.StartSlot,
+			"error", err,
+		)
+		return candidateNonce
+	}
+	if len(blockLastPrevEpoch.PrevHash) == 0 {
+		// No block before this epoch - equivalent to NeutralNonce.
 		return candidateNonce
 	}
 
-	// XOR candidateNonce with lastEpochBlockNonce
-	if len(candidateNonce) < 32 || len(blockLastPrevEpoch.Hash) < 32 {
+	// Combine using blake2b_256(candidateNonce || lastEpochBlockNonce).
+	// The lastEpochBlockNonce is the PrevHash of the boundary block,
+	// matching Haskell's labNonce = hashToNonce(prevHash(block)).
+	if len(candidateNonce) < 32 || len(blockLastPrevEpoch.PrevHash) < 32 {
 		return nil
 	}
-	result := make([]byte, 32)
-	for i := 0; i < 32; i++ {
-		result[i] = candidateNonce[i] ^ blockLastPrevEpoch.Hash[i]
+	result, calcErr := lcommon.CalculateEpochNonce(
+		candidateNonce,
+		blockLastPrevEpoch.PrevHash,
+		nil,
+	)
+	if calcErr != nil {
+		ls.config.Logger.Warn(
+			"failed to calculate epoch nonce",
+			"component", "ledger",
+			"error", calcErr,
+		)
+		return nil
 	}
 	ls.config.Logger.Debug(
 		"speculative epoch nonce computed for next epoch",
@@ -3110,10 +3108,10 @@ func (ls *LedgerState) computeNextEpochNonce(
 		"next_epoch", currentEpoch.EpochId+1,
 		"epoch_start_slot", epochStartSlot,
 		"candidate_nonce", hex.EncodeToString(candidateNonce),
-		"last_block_hash", hex.EncodeToString(blockLastPrevEpoch.Hash),
-		"epoch_nonce", hex.EncodeToString(result),
+		"lab_nonce", hex.EncodeToString(blockLastPrevEpoch.PrevHash),
+		"epoch_nonce", hex.EncodeToString(result.Bytes()),
 	)
-	return result
+	return result.Bytes()
 }
 
 // SlotsPerEpoch returns the number of slots in an epoch for the current era.

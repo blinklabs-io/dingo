@@ -212,6 +212,99 @@ func TestCalculatorThreshold(t *testing.T) {
 	}
 }
 
+func TestCalculatorThresholdInvalidInputs(t *testing.T) {
+	tests := []struct {
+		name            string
+		activeSlotCoeff float64
+		stakeRatio      float64
+		expected        float64
+	}{
+		{
+			name:            "NaN active slot coeff",
+			activeSlotCoeff: math.NaN(),
+			stakeRatio:      0.5,
+			expected:        0,
+		},
+		{
+			name:            "Inf active slot coeff",
+			activeSlotCoeff: math.Inf(1),
+			stakeRatio:      0.5,
+			expected:        0,
+		},
+		{
+			name:            "negative Inf active slot coeff",
+			activeSlotCoeff: math.Inf(-1),
+			stakeRatio:      0.5,
+			expected:        0,
+		},
+		{
+			name:            "zero active slot coeff",
+			activeSlotCoeff: 0,
+			stakeRatio:      0.5,
+			expected:        0,
+		},
+		{
+			name:            "negative active slot coeff",
+			activeSlotCoeff: -0.05,
+			stakeRatio:      0.5,
+			expected:        0,
+		},
+		{
+			name:            "active slot coeff > 1",
+			activeSlotCoeff: 1.5,
+			stakeRatio:      0.5,
+			expected:        0,
+		},
+		{
+			name:            "NaN stake ratio",
+			activeSlotCoeff: 0.05,
+			stakeRatio:      math.NaN(),
+			expected:        0,
+		},
+		{
+			name:            "Inf stake ratio",
+			activeSlotCoeff: 0.05,
+			stakeRatio:      math.Inf(1),
+			expected:        0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			calc := NewCalculator(tt.activeSlotCoeff, 432000)
+			result := calc.Threshold(tt.stakeRatio)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
+func TestCalculateScheduleInvalidActiveSlotCoeff(t *testing.T) {
+	poolId := lcommon.PoolKeyHash{}
+
+	tests := []struct {
+		name            string
+		activeSlotCoeff float64
+	}{
+		{"NaN", math.NaN()},
+		{"positive Inf", math.Inf(1)},
+		{"negative Inf", math.Inf(-1)},
+		{"zero", 0},
+		{"negative", -0.05},
+		{"greater than 1", 1.5},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			calc := NewCalculator(tt.activeSlotCoeff, 20)
+			_, err := calc.CalculateSchedule(
+				5, poolId, testVRFSeed, 1000, 10000, testEpochNonce,
+			)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "active slot coefficient")
+		})
+	}
+}
+
 func TestCalculateScheduleZeroTotalStake(t *testing.T) {
 	calc := NewCalculator(0.05, 432000)
 	poolId := lcommon.PoolKeyHash{}

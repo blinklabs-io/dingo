@@ -22,10 +22,15 @@ import (
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
 
-// TxBodySize returns the CBOR-serialized size of a
-// transaction in bytes.
+// TxSizeForFee computes the transaction size used in
+// the Cardano fee formula. See eras.TxSizeForFee.
+func TxSizeForFee(tx lcommon.Transaction) uint64 {
+	return eras.TxSizeForFee(tx)
+}
+
+// TxBodySize is a deprecated alias for TxSizeForFee.
 func TxBodySize(tx lcommon.Transaction) uint64 {
-	return eras.TxBodySize(tx)
+	return eras.TxSizeForFee(tx)
 }
 
 // ValidateTxSize checks that the transaction size does
