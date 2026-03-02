@@ -190,7 +190,12 @@ func BlockURL(
 		return err
 	})
 
-	return ret, metadata, fmt.Errorf("failed getting block url: %w", err)
+	if err != nil {
+		return types.SignedURL{}, types.BlockMetadata{},
+			fmt.Errorf("failed getting block url: %w", err)
+	}
+
+	return ret, metadata, nil
 }
 
 func blockByKey(txn *Txn, blockKey []byte) (models.Block, error) {
