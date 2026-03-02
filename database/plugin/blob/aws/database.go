@@ -814,7 +814,8 @@ func (d *BlobStoreS3) GetBlockURL(
 	if err != nil {
 		if isS3NotFound(err) {
 			return types.SignedURL{}, types.BlockMetadata{},
-				errors.Join(err, types.ErrBlobKeyNotFound)
+				fmt.Errorf("s3: block metadata not found for key: %w",
+					errors.Join(err, types.ErrBlobKeyNotFound))
 		}
 		return types.SignedURL{}, types.BlockMetadata{},
 			fmt.Errorf("s3: failed getting block metadata: %w", err)
@@ -834,7 +835,8 @@ func (d *BlobStoreS3) GetBlockURL(
 	if err != nil {
 		return types.SignedURL{}, types.BlockMetadata{},
 			fmt.Errorf("s3 blob: head object %q failed: %w",
-				d.fullKey(string(key)), types.ErrBlobKeyNotFound)
+				d.fullKey(string(key)),
+				errors.Join(err, types.ErrBlobKeyNotFound))
 	}
 
 	presignClient := s3.NewPresignClient(d.client)
