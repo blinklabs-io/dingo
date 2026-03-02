@@ -832,11 +832,16 @@ func (d *BlobStoreS3) GetBlockURL(
 			Bucket: &d.bucket,
 			Key:    awsString(d.fullKey(string(key))),
 		})
+	if isS3NotFound(err) {
+		return types.SignedURL{}, types.BlockMetadata{},
+			fmt.Errorf("s3 blob: object %q not found: %w",
+				d.fullKey(string(key)),
+				errors.Join(err, types.ErrBlobKeyNotFound))
+	}
 	if err != nil {
 		return types.SignedURL{}, types.BlockMetadata{},
 			fmt.Errorf("s3 blob: head object %q failed: %w",
-				d.fullKey(string(key)),
-				errors.Join(err, types.ErrBlobKeyNotFound))
+				d.fullKey(string(key)), err)
 	}
 
 	presignClient := s3.NewPresignClient(d.client)
