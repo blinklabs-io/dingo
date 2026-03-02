@@ -229,6 +229,12 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 			dingo.WithShelleyOperationalCertificate(
 				cfg.ShelleyOperationalCertificate,
 			),
+			dingo.WithForgeSyncToleranceSlots(
+				cfg.ForgeSyncToleranceSlots,
+			),
+			dingo.WithForgeStaleGapThresholdSlots(
+				cfg.ForgeStaleGapThresholdSlots,
+			),
 		),
 	)
 	if err != nil {
