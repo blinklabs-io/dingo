@@ -24,32 +24,34 @@ import (
 
 func resetGlobalConfig() {
 	globalConfig = &Config{
-		MempoolCapacity:      1048576,
-		EvictionWatermark:    0.90,
-		RejectionWatermark:   0.95,
-		BindAddr:             "0.0.0.0",
-		CardanoConfig:        "", // Will be set dynamically based on network
-		DatabasePath:         ".dingo",
-		SocketPath:           "dingo.socket",
-		IntersectTip:         false,
-		ValidateHistorical:   false,
-		Network:              "preview",
-		MetricsPort:          12798,
-		PrivateBindAddr:      "127.0.0.1",
-		PrivatePort:          3002,
-		RelayPort:            3001,
-		UtxorpcPort:          0,
-		Topology:             "",
-		TlsCertFilePath:      "",
-		TlsKeyFilePath:       "",
-		BlobPlugin:           DefaultBlobPlugin,
-		MetadataPlugin:       DefaultMetadataPlugin,
-		RunMode:              RunModeServe,
-		ImmutableDbPath:      "",
-		ShutdownTimeout:      DefaultShutdownTimeout,
-		LedgerCatchupTimeout: DefaultLedgerCatchupTimeout,
-		DatabaseWorkers:      5,
-		DatabaseQueueSize:    50,
+		MempoolCapacity:             1048576,
+		EvictionWatermark:           0.90,
+		RejectionWatermark:          0.95,
+		BindAddr:                    "0.0.0.0",
+		CardanoConfig:               "", // Will be set dynamically based on network
+		DatabasePath:                ".dingo",
+		SocketPath:                  "dingo.socket",
+		IntersectTip:                false,
+		ValidateHistorical:          false,
+		Network:                     "preview",
+		MetricsPort:                 12798,
+		PrivateBindAddr:             "127.0.0.1",
+		PrivatePort:                 3002,
+		RelayPort:                   3001,
+		UtxorpcPort:                 0,
+		Topology:                    "",
+		TlsCertFilePath:             "",
+		TlsKeyFilePath:              "",
+		BlobPlugin:                  DefaultBlobPlugin,
+		MetadataPlugin:              DefaultMetadataPlugin,
+		RunMode:                     RunModeServe,
+		ImmutableDbPath:             "",
+		ShutdownTimeout:             DefaultShutdownTimeout,
+		LedgerCatchupTimeout:        DefaultLedgerCatchupTimeout,
+		DatabaseWorkers:             5,
+		DatabaseQueueSize:           50,
+		ForgeSyncToleranceSlots:     DefaultForgeSyncToleranceSlots,
+		ForgeStaleGapThresholdSlots: DefaultForgeStaleGapThresholdSlots,
 		Mithril: MithrilConfig{
 			Enabled:            true,
 			CleanupAfterLoad:   true,
@@ -74,13 +76,27 @@ privateBindAddr: "127.0.0.1"
 privatePort: 8000
 relayPort: 4000
 utxorpcPort: 9940
+databaseWorkers: 11
+databaseQueueSize: 77
+immutableDbPath: "/tmp/immutable"
+shutdownTimeout: "45s"
+ledgerCatchupTimeout: "90m"
 topology: ""
 tlsCertFilePath: "cert1.pem"
 tlsKeyFilePath: "key1.pem"
+mithril:
+  enabled: false
+  aggregatorUrl: "https://mithril.example.net"
+  downloadDir: "/tmp/mithril"
+  cleanupAfterLoad: false
+  verifyCertificates: false
 `
 
 	tmpDir := t.TempDir()
 	tmpFile := filepath.Join(tmpDir, "test-dingo.yaml")
+
+	t.Setenv("DINGO_FORGE_SYNC_TOLERANCE_SLOTS", "321")
+	t.Setenv("DINGO_FORGE_STALE_GAP_THRESHOLD_SLOTS", "654")
 
 	err := os.WriteFile(tmpFile, []byte(yamlContent), 0644)
 	if err != nil {
@@ -89,36 +105,40 @@ tlsKeyFilePath: "key1.pem"
 	defer os.Remove(tmpFile)
 
 	expected := &Config{
-		MempoolCapacity:      2097152,
-		EvictionWatermark:    0.90,
-		RejectionWatermark:   0.95,
-		BindAddr:             "127.0.0.1",
-		CardanoConfig:        "./cardano/preview/config.json",
-		DatabasePath:         ".dingo",
-		SocketPath:           "env.socket",
-		IntersectTip:         true,
-		ValidateHistorical:   false,
-		Network:              "preview",
-		MetricsPort:          8088,
-		PrivateBindAddr:      "127.0.0.1",
-		PrivatePort:          8000,
-		RelayPort:            4000,
-		UtxorpcPort:          9940, // explicit override from YAML
-		Topology:             "",
-		TlsCertFilePath:      "cert1.pem",
-		TlsKeyFilePath:       "key1.pem",
-		BlobPlugin:           DefaultBlobPlugin,
-		MetadataPlugin:       DefaultMetadataPlugin,
-		RunMode:              RunModeServe,
-		ImmutableDbPath:      "",
-		ShutdownTimeout:      DefaultShutdownTimeout,
-		LedgerCatchupTimeout: DefaultLedgerCatchupTimeout,
-		DatabaseWorkers:      5,
-		DatabaseQueueSize:    50,
+		MempoolCapacity:             2097152,
+		EvictionWatermark:           0.90,
+		RejectionWatermark:          0.95,
+		BindAddr:                    "127.0.0.1",
+		CardanoConfig:               "./cardano/preview/config.json",
+		DatabasePath:                ".dingo",
+		SocketPath:                  "env.socket",
+		IntersectTip:                true,
+		ValidateHistorical:          false,
+		Network:                     "preview",
+		MetricsPort:                 8088,
+		PrivateBindAddr:             "127.0.0.1",
+		PrivatePort:                 8000,
+		RelayPort:                   4000,
+		UtxorpcPort:                 9940, // explicit override from YAML
+		Topology:                    "",
+		TlsCertFilePath:             "cert1.pem",
+		TlsKeyFilePath:              "key1.pem",
+		BlobPlugin:                  DefaultBlobPlugin,
+		MetadataPlugin:              DefaultMetadataPlugin,
+		RunMode:                     RunModeServe,
+		ImmutableDbPath:             "/tmp/immutable",
+		ShutdownTimeout:             "45s",
+		LedgerCatchupTimeout:        "90m",
+		DatabaseWorkers:             11,
+		DatabaseQueueSize:           77,
+		ForgeSyncToleranceSlots:     321,
+		ForgeStaleGapThresholdSlots: 654,
 		Mithril: MithrilConfig{
-			Enabled:            true,
-			CleanupAfterLoad:   true,
-			VerifyCertificates: true,
+			Enabled:            false,
+			AggregatorURL:      "https://mithril.example.net",
+			DownloadDir:        "/tmp/mithril",
+			CleanupAfterLoad:   false,
+			VerifyCertificates: false,
 		},
 	}
 
@@ -146,32 +166,34 @@ func TestLoad_WithoutConfigFile_UsesDefaults(t *testing.T) {
 
 	// Expected is the updated default values from globalConfig
 	expected := &Config{
-		MempoolCapacity:      1048576,
-		EvictionWatermark:    0.90,
-		RejectionWatermark:   0.95,
-		BindAddr:             "0.0.0.0",
-		CardanoConfig:        "preview/config.json", // Set dynamically based on network
-		DatabasePath:         ".dingo",
-		SocketPath:           "dingo.socket",
-		IntersectTip:         false,
-		ValidateHistorical:   false,
-		Network:              "preview",
-		MetricsPort:          12798,
-		PrivateBindAddr:      "127.0.0.1",
-		PrivatePort:          3002,
-		RelayPort:            3001,
-		UtxorpcPort:          0,
-		Topology:             "",
-		TlsCertFilePath:      "",
-		TlsKeyFilePath:       "",
-		BlobPlugin:           DefaultBlobPlugin,
-		MetadataPlugin:       DefaultMetadataPlugin,
-		RunMode:              RunModeServe,
-		ImmutableDbPath:      "",
-		ShutdownTimeout:      DefaultShutdownTimeout,
-		LedgerCatchupTimeout: DefaultLedgerCatchupTimeout,
-		DatabaseWorkers:      5,
-		DatabaseQueueSize:    50,
+		MempoolCapacity:             1048576,
+		EvictionWatermark:           0.90,
+		RejectionWatermark:          0.95,
+		BindAddr:                    "0.0.0.0",
+		CardanoConfig:               "preview/config.json", // Set dynamically based on network
+		DatabasePath:                ".dingo",
+		SocketPath:                  "dingo.socket",
+		IntersectTip:                false,
+		ValidateHistorical:          false,
+		Network:                     "preview",
+		MetricsPort:                 12798,
+		PrivateBindAddr:             "127.0.0.1",
+		PrivatePort:                 3002,
+		RelayPort:                   3001,
+		UtxorpcPort:                 0,
+		Topology:                    "",
+		TlsCertFilePath:             "",
+		TlsKeyFilePath:              "",
+		BlobPlugin:                  DefaultBlobPlugin,
+		MetadataPlugin:              DefaultMetadataPlugin,
+		RunMode:                     RunModeServe,
+		ImmutableDbPath:             "",
+		ShutdownTimeout:             DefaultShutdownTimeout,
+		LedgerCatchupTimeout:        DefaultLedgerCatchupTimeout,
+		DatabaseWorkers:             5,
+		DatabaseQueueSize:           50,
+		ForgeSyncToleranceSlots:     DefaultForgeSyncToleranceSlots,
+		ForgeStaleGapThresholdSlots: DefaultForgeStaleGapThresholdSlots,
 		Mithril: MithrilConfig{
 			Enabled:            true,
 			CleanupAfterLoad:   true,

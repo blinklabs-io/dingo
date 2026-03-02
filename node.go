@@ -596,8 +596,12 @@ func (n *Node) Run(ctx context.Context) error {
 
 	// Initialize block forger if production mode is enabled
 	if n.config.blockProducer {
+		creds, err := n.validateBlockProducerStartup()
+		if err != nil {
+			return fmt.Errorf("block producer startup validation failed: %w", err)
+		}
 		//nolint:contextcheck // n.ctx is the node's lifecycle context, correct parent for forger
-		if err := n.initBlockForger(n.ctx); err != nil {
+		if err := n.initBlockForger(n.ctx, creds); err != nil {
 			return fmt.Errorf("failed to initialize block forger: %w", err)
 		}
 		// Wire forger's slot tracker into ledger state for slot
@@ -777,30 +781,35 @@ func (n *Node) shutdown() error {
 	return err
 }
 
-// initBlockForger initializes the block forger for production mode.
-// This requires VRF, KES, and OpCert key files to be configured.
-func (n *Node) initBlockForger(ctx context.Context) error {
-	// Load pool credentials from configured key files
+func (n *Node) validateBlockProducerStartup() (*forging.PoolCredentials, error) {
 	creds := forging.NewPoolCredentials()
 	if err := creds.LoadFromFiles(
 		n.config.shelleyVRFKey,
 		n.config.shelleyKESKey,
 		n.config.shelleyOperationalCertificate,
 	); err != nil {
-		return fmt.Errorf("failed to load pool credentials: %w", err)
+		return nil, fmt.Errorf("load pool credentials: %w", err)
 	}
-
-	// Validate the operational certificate matches the KES key
 	if err := creds.ValidateOpCert(); err != nil {
-		return fmt.Errorf("invalid operational certificate: %w", err)
+		return nil, fmt.Errorf("validate operational certificate: %w", err)
 	}
-
 	n.config.logger.Info(
-		"loaded pool credentials for block production",
+		"block producer credentials validated",
 		"pool_id", creds.GetPoolID().String(),
 		"opcert_expiry_period", creds.OpCertExpiryPeriod(),
 	)
+	return creds, nil
+}
 
+// initBlockForger initializes the block forger for production mode.
+// This requires VRF, KES, and OpCert key files to be configured.
+func (n *Node) initBlockForger(
+	ctx context.Context,
+	creds *forging.PoolCredentials,
+) error {
+	if creds == nil {
+		return errors.New("nil pool credentials")
+	}
 	// Create mempool adapter for the forging package
 	mempoolAdapter := &mempoolAdapter{mempool: n.mempool}
 
@@ -864,14 +873,16 @@ func (n *Node) initBlockForger(ctx context.Context) error {
 
 	// Create the block forger with the real leader election
 	forger, err := forging.NewBlockForger(forging.ForgerConfig{
-		Mode:             forging.ModeProduction,
-		Logger:           n.config.logger,
-		Credentials:      creds,
-		LeaderChecker:    election,
-		BlockBuilder:     builder,
-		BlockBroadcaster: broadcaster,
-		SlotClock:        slotClock,
-		PromRegistry:     n.config.promRegistry,
+		Mode:                        forging.ModeProduction,
+		Logger:                      n.config.logger,
+		Credentials:                 creds,
+		LeaderChecker:               election,
+		BlockBuilder:                builder,
+		BlockBroadcaster:            broadcaster,
+		SlotClock:                   slotClock,
+		ForgeSyncToleranceSlots:     n.config.forgeSyncToleranceSlots,
+		ForgeStaleGapThresholdSlots: n.config.forgeStaleGapThresholdSlots,
+		PromRegistry:                n.config.promRegistry,
 	})
 	if err != nil {
 		// Stop election to prevent goroutine leak
