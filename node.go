@@ -695,6 +695,12 @@ func (n *Node) shutdown() error {
 		}
 	}
 
+	if n.bark != nil {
+		if stopErr := n.bark.Stop(ctx); stopErr != nil {
+			err = errors.Join(err, fmt.Errorf("bark shutdown: %w", stopErr))
+		}
+	}
+
 	if n.blockfrostAPI != nil {
 		if stopErr := n.blockfrostAPI.Stop(ctx); stopErr != nil {
 			err = errors.Join(
