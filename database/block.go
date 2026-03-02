@@ -222,10 +222,24 @@ func BlockURL(
 		ret      types.SignedURL
 		metadata types.BlockMetadata
 	)
+
 	txn := db.BlobTxn(false)
+	if txn == nil {
+		return types.SignedURL{}, types.BlockMetadata{}, types.ErrNilTxn
+	}
+
 	err := txn.Do(func(txn *Txn) error {
 		var err error
-		ret, metadata, err = txn.DB().Blob().GetBlockURL(ctx, txn.Blob(), point)
+		if txn == nil {
+			return types.ErrNilTxn
+		}
+
+		blob := txn.DB().Blob()
+		if blob == nil {
+			return types.ErrBlobStoreUnavailable
+		}
+
+		ret, metadata, err = blob.GetBlockURL(ctx, txn.Blob(), point)
 		return err
 	})
 	if err != nil {
