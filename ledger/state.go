@@ -2622,6 +2622,9 @@ func (ls *LedgerState) computePParams(
 	// that belonged to a different (earlier) era, then load
 	// its pparams.
 	var prevEraPParams lcommon.ProtocolParameters
+	if len(epochCache) == 0 {
+		return pparams, prevEraPParams, nil
+	}
 	for i := len(epochCache) - 1; i >= 0; i-- {
 		ep := epochCache[i]
 		if ep.EraId != era.Id {

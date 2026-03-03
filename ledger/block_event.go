@@ -74,7 +74,7 @@ func (ls *LedgerState) emitTransactionRollbackEvents(
 		}
 
 		txs := blk.Transactions()
-		if txs == nil {
+		if len(txs) == 0 {
 			continue
 		}
 		for i := len(txs) - 1; i >= 0; i-- {
