@@ -417,6 +417,99 @@ func saveCertRecord(record any, db *gorm.DB) error {
 	return result.Error
 }
 
+// SetGapBlockTransaction stores a transaction record and its produced
+// outputs without looking up or consuming input UTxOs. Gap blocks
+// from mithril sync have their UTxO state already reflected in the
+// snapshot, so input processing must be skipped entirely.
+func (d *MetadataStoreSqlite) SetGapBlockTransaction(
+	tx lcommon.Transaction,
+	point ocommon.Point,
+	idx uint32,
+	txn types.Txn,
+) error {
+	txHash := tx.Hash().Bytes()
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return err
+	}
+	tmpTx := &models.Transaction{
+		Hash:       txHash,
+		Type:       tx.Type(),
+		BlockHash:  point.Hash,
+		BlockIndex: idx,
+		Slot:       point.Slot,
+		Fee:        types.Uint64(tx.Fee().Uint64()),
+		TTL:        types.Uint64(tx.TTL()),
+		Valid:      tx.IsValid(),
+	}
+	// Store produced outputs only (no input lookup or consumption)
+	collateralReturn := tx.CollateralReturn()
+	for _, utxo := range tx.Produced() {
+		if collateralReturn != nil && utxo.Output == collateralReturn {
+			m := models.UtxoLedgerToModel(utxo, point.Slot)
+			tmpTx.CollateralReturn = &m
+			continue
+		}
+		m := models.UtxoLedgerToModel(utxo, point.Slot)
+		tmpTx.Outputs = append(tmpTx.Outputs, m)
+	}
+	outputsToCreate := tmpTx.Outputs
+	tmpTx.Outputs = nil
+	result := db.Clauses(clause.OnConflict{
+		Columns: []clause.Column{{Name: "hash"}},
+		DoUpdates: clause.AssignmentColumns(
+			[]string{"block_hash", "block_index", "slot"},
+		),
+	}).Create(tmpTx)
+	tmpTx.Outputs = outputsToCreate
+	if result.Error != nil {
+		return fmt.Errorf(
+			"create gap block transaction at slot %d: %w",
+			point.Slot,
+			result.Error,
+		)
+	}
+	if tmpTx.ID == 0 {
+		var existing struct{ ID uint }
+		if err := db.Model(&models.Transaction{}).
+			Select("id").
+			Where("hash = ?", txHash).
+			Take(&existing).Error; err != nil {
+			return fmt.Errorf(
+				"fetch transaction ID after upsert: %w", err,
+			)
+		}
+		tmpTx.ID = existing.ID
+	}
+	for i := range tmpTx.Outputs {
+		tmpTx.Outputs[i].ID = 0
+		tmpTx.Outputs[i].TransactionID = &tmpTx.ID
+		result := db.Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "tx_id"}, {Name: "output_idx"}},
+			DoNothing: true,
+		}).Create(&tmpTx.Outputs[i])
+		if result.Error != nil {
+			return fmt.Errorf(
+				"create gap block utxo output %d for tx %x: %w",
+				i, txHash, result.Error,
+			)
+		}
+	}
+	if tmpTx.CollateralReturn != nil {
+		tmpTx.CollateralReturn.CollateralReturnForTxID = &tmpTx.ID
+		if result := db.Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "tx_id"}, {Name: "output_idx"}},
+			DoNothing: true,
+		}).Create(tmpTx.CollateralReturn); result.Error != nil {
+			return fmt.Errorf(
+				"create gap block collateral return: %w",
+				result.Error,
+			)
+		}
+	}
+	return nil
+}
+
 // SetTransaction adds a new transaction to the database and processes all certificates
 func (d *MetadataStoreSqlite) SetTransaction(
 	tx lcommon.Transaction,

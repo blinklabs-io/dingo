@@ -287,6 +287,9 @@ type MetadataStore interface {
 		uint64, // slot
 		uint64, // epoch
 		[]byte, // nonce
+		[]byte, // evolvingNonce
+		[]byte, // candidateNonce
+		[]byte, // lastEpochBlockNonce
 		uint, // era
 		uint, // slotLength
 		uint, // lengthInSlots
@@ -323,6 +326,17 @@ type MetadataStore interface {
 		ocommon.Point,
 		uint32, // idx
 		map[int]uint64, // certDeposits: indexed by certificate position in tx.Certificates(); absent keys are treated as zero/no deposit
+		types.Txn,
+	) error
+
+	// SetGapBlockTransaction stores a transaction record and its
+	// produced outputs without looking up or consuming input UTxOs.
+	// This is used for mithril gap blocks where the snapshot's UTxO
+	// set already reflects the correct spent/unspent state.
+	SetGapBlockTransaction(
+		lcommon.Transaction,
+		ocommon.Point,
+		uint32, // idx
 		types.Txn,
 	) error
 

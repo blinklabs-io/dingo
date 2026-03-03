@@ -30,16 +30,24 @@ const (
 	testDataDir = "testdata"
 )
 
+func ptrBool(v bool) *bool       { return &v }
+func ptrUint64(v uint64) *uint64 { return &v }
+
 var expectedCardanoNodeConfig = &CardanoNodeConfig{
-	path:               testDataDir,
-	AlonzoGenesisFile:  "alonzo-genesis.json",
-	AlonzoGenesisHash:  "7e94a15f55d1e82d10f09203fa1d40f8eede58fd8066542cf6566008068ed874",
-	ByronGenesisFile:   "byron-genesis.json",
-	ByronGenesisHash:   "83de1d7302569ad56cf9139a41e2e11346d4cb4a31c00142557b6ab3fa550761",
-	ConwayGenesisFile:  "conway-genesis.json",
-	ConwayGenesisHash:  "9cc5084f02e27210eacba47af0872e3dba8946ad9460b6072d793e1d2f3987ef",
-	ShelleyGenesisFile: "shelley-genesis.json",
-	ShelleyGenesisHash: "363498d1024f84bb39d3fa9593ce391483cb40d479b87233f868d6e57c3a400d",
+	path:                         testDataDir,
+	AlonzoGenesisFile:            "alonzo-genesis.json",
+	AlonzoGenesisHash:            "7e94a15f55d1e82d10f09203fa1d40f8eede58fd8066542cf6566008068ed874",
+	ByronGenesisFile:             "byron-genesis.json",
+	ByronGenesisHash:             "83de1d7302569ad56cf9139a41e2e11346d4cb4a31c00142557b6ab3fa550761",
+	ConwayGenesisFile:            "conway-genesis.json",
+	ConwayGenesisHash:            "9cc5084f02e27210eacba47af0872e3dba8946ad9460b6072d793e1d2f3987ef",
+	ShelleyGenesisFile:           "shelley-genesis.json",
+	ShelleyGenesisHash:           "363498d1024f84bb39d3fa9593ce391483cb40d479b87233f868d6e57c3a400d",
+	ExperimentalHardForksEnabled: ptrBool(false),
+	TestShelleyHardForkAtEpoch:   ptrUint64(0),
+	TestAllegraHardForkAtEpoch:   ptrUint64(0),
+	TestMaryHardForkAtEpoch:      ptrUint64(0),
+	TestAlonzoHardForkAtEpoch:    ptrUint64(0),
 }
 
 func TestCardanoNodeConfig(t *testing.T) {
@@ -220,6 +228,82 @@ func TestGenesisHashMismatchConway(t *testing.T) {
 	err = cfg.loadGenesisConfigs()
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "Conway genesis hash mismatch")
+}
+
+func TestHardForkEpoch(t *testing.T) {
+	t.Run("enabled with all eras at epoch 0", func(t *testing.T) {
+		cfg := &CardanoNodeConfig{
+			ExperimentalHardForksEnabled: ptrBool(true),
+			TestShelleyHardForkAtEpoch:   ptrUint64(0),
+			TestAllegraHardForkAtEpoch:   ptrUint64(0),
+			TestMaryHardForkAtEpoch:      ptrUint64(0),
+			TestAlonzoHardForkAtEpoch:    ptrUint64(0),
+			TestBabbageHardForkAtEpoch:   ptrUint64(0),
+			TestConwayHardForkAtEpoch:    ptrUint64(0),
+		}
+		for _, era := range []string{
+			"shelley", "allegra", "mary",
+			"alonzo", "babbage", "conway",
+		} {
+			epoch, ok := cfg.HardForkEpoch(era)
+			assert.True(t, ok, "era %s should be configured", era)
+			assert.Equal(
+				t, uint64(0), epoch,
+				"era %s should fork at epoch 0", era,
+			)
+		}
+	})
+
+	t.Run("disabled ignores all epochs", func(t *testing.T) {
+		cfg := &CardanoNodeConfig{
+			ExperimentalHardForksEnabled: ptrBool(false),
+			TestShelleyHardForkAtEpoch:   ptrUint64(0),
+			TestConwayHardForkAtEpoch:    ptrUint64(0),
+		}
+		_, ok := cfg.HardForkEpoch("shelley")
+		assert.False(t, ok,
+			"should not report configured when disabled")
+	})
+
+	t.Run("nil flag ignores all epochs", func(t *testing.T) {
+		cfg := &CardanoNodeConfig{
+			TestShelleyHardForkAtEpoch: ptrUint64(0),
+		}
+		_, ok := cfg.HardForkEpoch("shelley")
+		assert.False(t, ok,
+			"should not report configured when flag is nil")
+	})
+
+	t.Run("partial configuration", func(t *testing.T) {
+		cfg := &CardanoNodeConfig{
+			ExperimentalHardForksEnabled: ptrBool(true),
+			TestShelleyHardForkAtEpoch:   ptrUint64(0),
+			// Conway not set
+		}
+		_, shelleyOk := cfg.HardForkEpoch("shelley")
+		assert.True(t, shelleyOk, "shelley should be configured")
+
+		_, conwayOk := cfg.HardForkEpoch("conway")
+		assert.False(t, conwayOk, "conway should not be configured")
+	})
+
+	t.Run("unknown era", func(t *testing.T) {
+		cfg := &CardanoNodeConfig{
+			ExperimentalHardForksEnabled: ptrBool(true),
+		}
+		_, ok := cfg.HardForkEpoch("unknown")
+		assert.False(t, ok, "unknown era should not be configured")
+	})
+
+	t.Run("non-zero epoch", func(t *testing.T) {
+		cfg := &CardanoNodeConfig{
+			ExperimentalHardForksEnabled: ptrBool(true),
+			TestConwayHardForkAtEpoch:    ptrUint64(5),
+		}
+		epoch, ok := cfg.HardForkEpoch("conway")
+		assert.True(t, ok)
+		assert.Equal(t, uint64(5), epoch)
+	})
 }
 
 func TestCanonicalizeByronGenesisJSON(t *testing.T) {

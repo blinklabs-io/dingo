@@ -22,6 +22,29 @@ import (
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
 
+// praosVRFNonceValue computes the nonce contribution from a Praos
+// (Babbage/Conway) block's VRF output. In Praos, the VRF output
+// is NOT used raw — it goes through domain separation and double
+// hashing matching the Haskell vrfNonceValue function:
+//
+//	hashVRF SVRFNonce cert = blake2b_256("N" || rawVrfOutput)
+//	vrfNonceValue = blake2b_256(hashVRF result)
+//
+// This differs from TPraos (Shelley–Alonzo) which uses the raw
+// 64-byte NonceVrf output directly via coerce.
+//
+// Ref: Ouroboros.Consensus.Protocol.Praos.VRF (vrfNonceValue, hashVRF)
+func praosVRFNonceValue(vrfOutput []byte) []byte {
+	// Step 1: range extension with domain separator "N"
+	tagged := make([]byte, 1+len(vrfOutput))
+	tagged[0] = 'N'
+	copy(tagged[1:], vrfOutput)
+	rangeExtended := lcommon.Blake2b256Hash(tagged)
+	// Step 2: nonce generation
+	nonceValue := lcommon.Blake2b256Hash(rangeExtended.Bytes())
+	return nonceValue.Bytes()
+}
+
 var ErrIncompatibleProtocolParams = errors.New("pparams are not expected type")
 
 type EraDesc struct {

@@ -299,10 +299,10 @@ func (f *BlockForger) runLoopSlotAligned(ctx context.Context) {
 				)
 			}
 			// Exponential backoff: 100ms, 200ms, 400ms, ... capped at 5s
-			backoff := time.Duration(100<<min(retries-1, 5)) * time.Millisecond
-			if backoff > 5*time.Second {
-				backoff = 5 * time.Second
-			}
+			backoff := min(
+				time.Duration(100<<min(retries-1, 5))*time.Millisecond,
+				5*time.Second,
+			)
 			select {
 			case <-ctx.Done():
 				return
@@ -312,10 +312,7 @@ func (f *BlockForger) runLoopSlotAligned(ctx context.Context) {
 		}
 		retries = 0
 
-		sleepDur := time.Until(nextSlot)
-		if sleepDur <= 0 {
-			sleepDur = 0
-		}
+		sleepDur := max(time.Until(nextSlot), 0)
 
 		timer := time.NewTimer(sleepDur)
 		select {

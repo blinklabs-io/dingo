@@ -330,7 +330,7 @@ func findNthCborOccurrence(data, target []byte, n int) int {
 	count := 0
 	for i := 0; i <= len(data)-len(target); i++ {
 		match := true
-		for j := 0; j < len(target); j++ {
+		for j := range len(target) {
 			if data[i+j] != target[j] {
 				match = false
 				break

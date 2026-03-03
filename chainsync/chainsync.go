@@ -17,6 +17,7 @@ package chainsync
 import (
 	"bytes"
 	"fmt"
+	"slices"
 	"sync"
 	"time"
 
@@ -536,14 +537,11 @@ func (s *State) CheckStalledClients() []ouroboros.ConnectionId {
 	}
 
 	// Check if the primary client was stalled
-	if len(stalled) > 0 && s.activeClientConnId != nil {
-		for _, id := range stalled {
-			if *s.activeClientConnId == id {
-				s.activeClientConnId = nil
-				s.promoteBestClientLocked()
-				break
-			}
-		}
+	if len(stalled) > 0 &&
+		s.activeClientConnId != nil &&
+		slices.Contains(stalled, *s.activeClientConnId) {
+		s.activeClientConnId = nil
+		s.promoteBestClientLocked()
 	}
 
 	return stalled

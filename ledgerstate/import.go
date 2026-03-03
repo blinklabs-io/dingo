@@ -1323,6 +1323,9 @@ func generateAndSaveEpochs(
 			epochStartSlot,
 			cfg.State.Epoch,
 			cfg.State.EpochNonce,
+			nil, // evolvingNonce: mid-epoch snapshot value would cause double-accumulation
+			nil, // candidateNonce not available from import
+			nil, // lastEpochBlockNonce not available from import
 			uint(cfg.State.EraIndex),
 			slotLength,
 			lengthInSlots,
@@ -1376,6 +1379,9 @@ func generateAndSaveEpochs(
 				startSlot,
 				e,
 				nil, // historical epochs don't need nonce
+				nil, // evolvingNonce not available from import
+				nil, // candidateNonce not available from import
+				nil, // lastEpochBlockNonce not available from import
 				eraId,
 				slotLength,
 				epochLength,
@@ -1437,6 +1443,9 @@ func generateAndSaveEpochs(
 			startSlot,
 			e,
 			nonce,
+			nil, // evolvingNonce: mid-epoch snapshot value would cause double-accumulation
+			nil, // candidateNonce not available from import
+			nil, // lastEpochBlockNonce not available from import
 			currentEraId,
 			slotLength,
 			epochLength,

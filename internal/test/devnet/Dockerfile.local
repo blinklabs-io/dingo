@@ -1,0 +1,40 @@
+# Dockerfile for DevNet with pre-built local binary.
+# Build context: dingo/ root directory.
+# Usage: build the binary first with `make build`, then use this Dockerfile.
+
+FROM ghcr.io/blinklabs-io/cardano-cli:10.14.0.0-1 AS cardano-cli
+FROM ghcr.io/blinklabs-io/cardano-configs:20251128-1 AS cardano-configs
+FROM ghcr.io/blinklabs-io/mithril-client:0.12.38-1 AS mithril-client
+
+FROM debian:bookworm-slim AS dingo
+RUN apt-get update -y && \
+  apt-get install -y \
+    ca-certificates \
+    liblmdb0 \
+    libssl3 \
+    sqlite3 \
+    wget && \
+  rm -rf /var/lib/apt/lists/*
+ENV LD_LIBRARY_PATH="/usr/local/lib:$LD_LIBRARY_PATH"
+ENV PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:$PKG_CONFIG_PATH"
+COPY dingo/dingo /bin/
+COPY dingo/bin/entrypoint.sh /bin/entrypoint.sh
+COPY --from=cardano-cli /usr/local/bin/cardano-cli /usr/local/bin/
+COPY --from=cardano-cli /usr/local/include/ /usr/local/include/
+COPY --from=cardano-cli /usr/local/lib/ /usr/local/lib/
+COPY --from=cardano-configs /config/ /opt/cardano/config/
+COPY --from=mithril-client /bin/mithril-client /usr/local/bin/
+RUN chmod 0755 /bin/entrypoint.sh
+ENV CARDANO_NODE_BINARY=dingo
+ENV CARDANO_NETWORK=preview
+VOLUME /data/db
+ENV CARDANO_DATABASE_PATH=/data/db
+VOLUME /ipc
+ENV DINGO_SOCKET_PATH=/ipc/dingo.socket
+ENV CARDANO_NODE_SOCKET_PATH=/ipc/dingo.socket
+ENV CARDANO_SOCKET_PATH=/ipc/dingo.socket
+EXPOSE 3001 3002 9090 12798
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
+  CMD wget -qO/dev/null http://127.0.0.1:12798/metrics || exit 1
+ENTRYPOINT ["/bin/entrypoint.sh"]
+CMD ["serve"]

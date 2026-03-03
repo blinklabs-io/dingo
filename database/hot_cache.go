@@ -214,10 +214,7 @@ func (c *HotCache) maybeEvict() {
 		// Only computed when maxSize > 0; otherwise size-based eviction is disabled
 		var targetSize int
 		if c.maxSize > 0 {
-			targetSize = c.maxSize * 3 / 4
-			if targetSize < 1 {
-				targetSize = 1
-			}
+			targetSize = max(1, c.maxSize*3/4)
 		}
 
 		var targetBytes int64
