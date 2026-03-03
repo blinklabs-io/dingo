@@ -300,7 +300,7 @@ func (f *BlockForger) runLoopSlotAligned(ctx context.Context) {
 			}
 			// Exponential backoff: 100ms, 200ms, 400ms, ... capped at 5s
 			backoff := min(
-				time.Duration(100<<min(retries-1, 5))*time.Millisecond,
+				time.Duration(100<<min(retries-1, 6))*time.Millisecond,
 				5*time.Second,
 			)
 			select {
