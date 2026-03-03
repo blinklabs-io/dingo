@@ -359,6 +359,80 @@ func saveCertRecord(record any, db *gorm.DB) error {
 	return result.Error
 }
 
+// SetGapBlockTransaction stores a transaction record and its produced
+// outputs without looking up or consuming input UTxOs. Gap blocks
+// from mithril sync have their UTxO state already reflected in the
+// snapshot, so input processing must be skipped entirely.
+func (d *MetadataStoreMysql) SetGapBlockTransaction(
+	tx lcommon.Transaction,
+	point ocommon.Point,
+	idx uint32,
+	txn types.Txn,
+) error {
+	txHash := tx.Hash().Bytes()
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return err
+	}
+	var feeUint uint64
+	if txFee := tx.Fee(); txFee != nil {
+		if txFee.BitLen() > 64 {
+			feeUint = math.MaxUint64
+		} else {
+			feeUint = txFee.Uint64()
+		}
+	}
+	tmpTx := &models.Transaction{
+		Hash:       txHash,
+		Type:       tx.Type(),
+		BlockHash:  point.Hash,
+		BlockIndex: idx,
+		Slot:       point.Slot,
+		Fee:        types.Uint64(feeUint),
+		TTL:        types.Uint64(tx.TTL()),
+		Valid:      tx.IsValid(),
+	}
+	collateralReturn := tx.CollateralReturn()
+	for _, utxo := range tx.Produced() {
+		if collateralReturn != nil && utxo.Output == collateralReturn {
+			m := models.UtxoLedgerToModel(utxo, point.Slot)
+			tmpTx.CollateralReturn = &m
+			continue
+		}
+		m := models.UtxoLedgerToModel(utxo, point.Slot)
+		tmpTx.Outputs = append(tmpTx.Outputs, m)
+	}
+	result := db.Clauses(clause.OnConflict{
+		Columns: []clause.Column{{Name: "hash"}},
+		DoUpdates: clause.AssignmentColumns(
+			[]string{"block_hash", "block_index", "slot"},
+		),
+	}).Create(tmpTx)
+	if result.Error != nil {
+		return fmt.Errorf(
+			"create gap block transaction at slot %d: %w",
+			point.Slot,
+			result.Error,
+		)
+	}
+	if tmpTx.ID == 0 {
+		existingTx, err := d.GetTransactionByHash(txHash, txn)
+		if err != nil {
+			return fmt.Errorf(
+				"fetch transaction ID after upsert: %w", err,
+			)
+		}
+		if existingTx == nil {
+			return fmt.Errorf(
+				"transaction not found after upsert: %x",
+				txHash,
+			)
+		}
+		tmpTx.ID = existingTx.ID
+	}
+	return nil
+}
+
 // SetTransaction adds a new transaction to the database and processes all certificates
 func (d *MetadataStoreMysql) SetTransaction(
 	tx lcommon.Transaction,

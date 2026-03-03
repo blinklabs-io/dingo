@@ -949,17 +949,14 @@ func processGapBlocks(
 			txn := db.Transaction(true)
 			defer txn.Release()
 			// Gap blocks are already reflected in the Mithril
-			// snapshot's ledger state, so cert deposits are not
-			// needed. Pass an empty (non-nil) map to avoid the
-			// nil-certDeposits hard error in SetTransaction —
-			// deposit-bearing certs will store deposit=0 which
-			// is acceptable since the snapshot state is
-			// authoritative.
-			emptyDeposits := map[int]uint64{}
+			// snapshot's UTxO set, so input UTxOs are already
+			// consumed. Use SetGapBlockTransaction which stores
+			// only blob offsets and the TX record without
+			// attempting to look up or consume inputs.
 			for i, tx := range txs {
-				if err := db.SetTransaction(
+				if err := db.SetGapBlockTransaction(
 					tx, point, uint32(i), // #nosec G115 -- tx index within a block
-					0, nil, emptyDeposits, offsets, txn,
+					offsets, txn,
 				); err != nil {
 					return fmt.Errorf(
 						"storing TX: %w", err,
