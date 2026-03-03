@@ -49,6 +49,19 @@ type CardanoNodeConfig struct {
 	ConwayGenesisHash  string `yaml:"ConwayGenesisHash"`
 	ShelleyGenesisFile string `yaml:"ShelleyGenesisFile"`
 	ShelleyGenesisHash string `yaml:"ShelleyGenesisHash"`
+
+	// Hard fork epoch configuration. Pointer types distinguish
+	// "not set" (nil) from "set to 0" (*0), which is critical
+	// because setting these to 0 instructs the node to perform
+	// the hard fork at genesis (epoch 0), starting directly in
+	// that era. This is used by devnets and testnets.
+	ExperimentalHardForksEnabled *bool   `yaml:"ExperimentalHardForksEnabled"`
+	TestShelleyHardForkAtEpoch   *uint64 `yaml:"TestShelleyHardForkAtEpoch"`
+	TestAllegraHardForkAtEpoch   *uint64 `yaml:"TestAllegraHardForkAtEpoch"`
+	TestMaryHardForkAtEpoch      *uint64 `yaml:"TestMaryHardForkAtEpoch"`
+	TestAlonzoHardForkAtEpoch    *uint64 `yaml:"TestAlonzoHardForkAtEpoch"`
+	TestBabbageHardForkAtEpoch   *uint64 `yaml:"TestBabbageHardForkAtEpoch"`
+	TestConwayHardForkAtEpoch    *uint64 `yaml:"TestConwayHardForkAtEpoch"`
 }
 
 func NewCardanoNodeConfigFromReader(r io.Reader) (*CardanoNodeConfig, error) {
@@ -433,6 +446,38 @@ func (c *CardanoNodeConfig) LoadConwayGenesisFromReader(r io.Reader) error {
 	}
 	c.conwayGenesis = &conwayGenesis
 	return nil
+}
+
+// HardForkEpoch returns the epoch at which the named era's hard fork
+// is configured to occur, and whether the setting was present. When
+// ExperimentalHardForksEnabled is not explicitly set to true, all
+// hard fork epochs are treated as unconfigured.
+func (c *CardanoNodeConfig) HardForkEpoch(era string) (uint64, bool) {
+	if c.ExperimentalHardForksEnabled == nil ||
+		!*c.ExperimentalHardForksEnabled {
+		return 0, false
+	}
+	var p *uint64
+	switch era {
+	case "shelley":
+		p = c.TestShelleyHardForkAtEpoch
+	case "allegra":
+		p = c.TestAllegraHardForkAtEpoch
+	case "mary":
+		p = c.TestMaryHardForkAtEpoch
+	case "alonzo":
+		p = c.TestAlonzoHardForkAtEpoch
+	case "babbage":
+		p = c.TestBabbageHardForkAtEpoch
+	case "conway":
+		p = c.TestConwayHardForkAtEpoch
+	default:
+		return 0, false
+	}
+	if p == nil {
+		return 0, false
+	}
+	return *p, true
 }
 
 func validateGenesisHash(
