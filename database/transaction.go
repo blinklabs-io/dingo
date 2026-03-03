@@ -138,6 +138,101 @@ func (d *Database) SetTransaction(
 	return nil
 }
 
+// SetGapBlockTransaction stores a transaction from a mithril gap block.
+// It records blob offsets (TX and UTxO) for CBOR resolution and creates
+// a minimal metadata record, but does NOT look up or consume input
+// UTxOs because the mithril snapshot already reflects the correct
+// spent/unspent state.
+func (d *Database) SetGapBlockTransaction(
+	tx lcommon.Transaction,
+	point ocommon.Point,
+	idx uint32,
+	offsets *BlockIngestionResult,
+	txn *Txn,
+) error {
+	owned := false
+	if txn == nil {
+		txn = d.Transaction(true)
+		owned = true
+		defer txn.Rollback() //nolint:errcheck
+	}
+
+	blob := txn.DB().Blob()
+	if blob == nil {
+		return types.ErrBlobStoreUnavailable
+	}
+	blobTxn := txn.Blob()
+	if blobTxn == nil {
+		return types.ErrNilTxn
+	}
+
+	txHash := tx.Hash()
+	var txHashArray [32]byte
+	copy(txHashArray[:], txHash.Bytes())
+
+	if offsets == nil {
+		return fmt.Errorf(
+			"missing offsets for gap block transaction %s at slot %d",
+			hex.EncodeToString(txHash.Bytes()[:8]),
+			point.Slot,
+		)
+	}
+	txOffset, ok := offsets.TxOffsets[txHashArray]
+	if !ok {
+		return fmt.Errorf(
+			"missing TX offset for gap block %s at slot %d",
+			hex.EncodeToString(txHash.Bytes()[:8]),
+			point.Slot,
+		)
+	}
+	offsetData := EncodeTxOffset(&txOffset)
+	if err := blob.SetTx(blobTxn, txHash.Bytes(), offsetData); err != nil {
+		return fmt.Errorf("set gap block tx offset: %w", err)
+	}
+
+	// Store UTxO offsets for produced outputs
+	for _, utxo := range tx.Produced() {
+		txId := utxo.Id.Id().Bytes()
+		outputIdx := utxo.Id.Index()
+		ref := UtxoRef{
+			TxId:      txHashArray,
+			OutputIdx: outputIdx,
+		}
+		offset, ok := offsets.UtxoOffsets[ref]
+		if !ok {
+			return fmt.Errorf(
+				"missing UTxO offset for gap block %s#%d at slot %d",
+				hex.EncodeToString(txId[:8]),
+				outputIdx,
+				point.Slot,
+			)
+		}
+		offsetData := EncodeUtxoOffset(&offset)
+		if err := blob.SetUtxo(blobTxn, txId, outputIdx, offsetData); err != nil {
+			return fmt.Errorf(
+				"set gap block utxo offset %x#%d: %w",
+				txId[:8], outputIdx, err,
+			)
+		}
+	}
+
+	if err := d.metadata.SetGapBlockTransaction(
+		tx, point, idx, txn.Metadata(),
+	); err != nil {
+		return fmt.Errorf(
+			"set gap block transaction metadata: %w", err,
+		)
+	}
+
+	if owned {
+		if err := txn.Commit(); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
 // SetGenesisTransaction stores a genesis transaction with its UTxO outputs.
 // Genesis transactions have no inputs, witnesses, or fees - just outputs.
 // The offsets map contains pre-computed byte offsets into the synthetic genesis block.

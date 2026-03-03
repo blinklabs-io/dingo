@@ -326,6 +326,17 @@ type MetadataStore interface {
 		types.Txn,
 	) error
 
+	// SetGapBlockTransaction stores a transaction record and its
+	// produced outputs without looking up or consuming input UTxOs.
+	// This is used for mithril gap blocks where the snapshot's UTxO
+	// set already reflects the correct spent/unspent state.
+	SetGapBlockTransaction(
+		lcommon.Transaction,
+		ocommon.Point,
+		uint32, // idx
+		types.Txn,
+	) error
+
 	// SetGenesisTransaction stores a genesis transaction record.
 	// Genesis transactions have no inputs, witnesses, or fees - just outputs.
 	SetGenesisTransaction(
