@@ -160,6 +160,7 @@ func TestCachedBlockExtractReturnsCopy(t *testing.T) {
 
 	// Extract a range from the middle
 	extracted := block.Extract(4, 4)
+	require.NotNil(t, extracted)
 	require.Equal(t, []byte("EFGH"), extracted)
 
 	// Mutate the returned slice
@@ -170,6 +171,7 @@ func TestCachedBlockExtractReturnsCopy(t *testing.T) {
 
 	// Extract the same range again and verify the cached data is unchanged
 	extractedAgain := block.Extract(4, 4)
+	require.NotNil(t, extractedAgain)
 	assert.Equal(
 		t,
 		[]byte("EFGH"),

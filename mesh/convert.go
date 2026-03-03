@@ -16,6 +16,7 @@ package mesh
 
 import (
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"math/big"
 	"slices"
@@ -370,6 +371,12 @@ func decodeTxCbor(
 		return nil, wrapErr(
 			ErrInvalidTransaction,
 			fmt.Errorf("decode tx: %w", err),
+		)
+	}
+	if tx == nil {
+		return nil, wrapErr(
+			ErrInvalidTransaction,
+			errors.New("decoded transaction is nil"),
 		)
 	}
 	return tx, nil

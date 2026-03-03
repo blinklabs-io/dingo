@@ -243,7 +243,8 @@ func (cs *ChainSelector) UpdatePeerTip(
 // Must be called with cs.mutex held.
 func (cs *ChainSelector) evictLeastRecentPeerLocked() *ouroboros.ConnectionId {
 	var oldestConn ouroboros.ConnectionId
-	var oldestTip *PeerChainTip
+	var oldestUpdated time.Time
+	var oldestBlockNumber uint64
 	found := false
 
 	for connId, peerTip := range cs.peerTips {
@@ -256,25 +257,29 @@ func (cs *ChainSelector) evictLeastRecentPeerLocked() *ouroboros.ConnectionId {
 		}
 		if !found {
 			oldestConn = connId
-			oldestTip = peerTip
+			oldestUpdated = peerTip.LastUpdated
+			oldestBlockNumber = peerTip.Tip.BlockNumber
 			found = true
 			continue
 		}
 		// Primary: oldest LastUpdated wins eviction
-		if peerTip.LastUpdated.Before(oldestTip.LastUpdated) {
+		if peerTip.LastUpdated.Before(oldestUpdated) {
 			oldestConn = connId
-			oldestTip = peerTip
-		} else if peerTip.LastUpdated.Equal(oldestTip.LastUpdated) {
+			oldestUpdated = peerTip.LastUpdated
+			oldestBlockNumber = peerTip.Tip.BlockNumber
+		} else if peerTip.LastUpdated.Equal(oldestUpdated) {
 			// Tie-break on block number: evict the peer with
 			// the lower block number (less useful chain)
-			if peerTip.Tip.BlockNumber < oldestTip.Tip.BlockNumber {
+			if peerTip.Tip.BlockNumber < oldestBlockNumber {
 				oldestConn = connId
-				oldestTip = peerTip
-			} else if peerTip.Tip.BlockNumber == oldestTip.Tip.BlockNumber {
+				oldestUpdated = peerTip.LastUpdated
+				oldestBlockNumber = peerTip.Tip.BlockNumber
+			} else if peerTip.Tip.BlockNumber == oldestBlockNumber {
 				// Final tie-break: deterministic by connection ID
 				if connId.String() < oldestConn.String() {
 					oldestConn = connId
-					oldestTip = peerTip
+					oldestUpdated = peerTip.LastUpdated
+					oldestBlockNumber = peerTip.Tip.BlockNumber
 				}
 			}
 		}
@@ -284,7 +289,7 @@ func (cs *ChainSelector) evictLeastRecentPeerLocked() *ouroboros.ConnectionId {
 		cs.config.Logger.Debug(
 			"evicting least-recent peer due to tracking limit",
 			"connection_id", oldestConn.String(),
-			"last_updated", oldestTip.LastUpdated,
+			"last_updated", oldestUpdated,
 			"peer_count", len(cs.peerTips),
 			"max_tracked_peers", cs.maxTrackedPeers,
 		)
