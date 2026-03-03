@@ -153,9 +153,12 @@ func CalculateEtaVBabbage(
 	if !ok {
 		return nil, errors.New("unexpected block type")
 	}
+	// Praos (Babbage+) uses domain separation + double hash,
+	// unlike TPraos which uses the raw VRF output directly.
+	vrfNonce := praosVRFNonceValue(h.Body.VrfResult.Output)
 	tmpNonce, err := lcommon.CalculateRollingNonce(
 		prevBlockNonce,
-		h.Body.VrfResult.Output,
+		vrfNonce,
 	)
 	if err != nil {
 		return nil, err
