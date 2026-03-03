@@ -364,8 +364,8 @@ func (d *MetadataStoreMysql) ensureDatabaseExists(
 
 func parseMysqlDatabaseFromDSN(dsn string) (string, bool) {
 	base := dsn
-	if idx := strings.Index(base, "?"); idx >= 0 {
-		base = base[:idx]
+	if before, _, found := strings.Cut(base, "?"); found {
+		base = before
 	}
 	slash := strings.LastIndex(base, "/")
 	if slash < 0 || slash == len(base)-1 {
@@ -377,9 +377,9 @@ func parseMysqlDatabaseFromDSN(dsn string) (string, bool) {
 func stripDatabaseFromDSN(dsn string) (string, bool) {
 	base := dsn
 	params := ""
-	if idx := strings.Index(dsn, "?"); idx >= 0 {
-		base = dsn[:idx]
-		params = dsn[idx+1:]
+	if before, after, found := strings.Cut(dsn, "?"); found {
+		base = before
+		params = after
 	}
 	slash := strings.LastIndex(base, "/")
 	if slash < 0 {

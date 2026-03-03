@@ -455,10 +455,7 @@ func (m *Mempool) AddTransaction(txType uint, txBytes []byte) error {
 			float64(m.config.MempoolCapacity) * m.evictionWatermark,
 		)
 		if newSize > evictionThreshold {
-			targetBytes := evictionThreshold - txSize
-			if targetBytes < 0 {
-				targetBytes = 0
-			}
+			targetBytes := max(int64(0), evictionThreshold-txSize)
 			evictedEvents = m.evictOldestLocked(targetBytes)
 		}
 		// Add transaction record
