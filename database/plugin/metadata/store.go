@@ -287,6 +287,9 @@ type MetadataStore interface {
 		uint64, // slot
 		uint64, // epoch
 		[]byte, // nonce
+		[]byte, // evolvingNonce
+		[]byte, // candidateNonce
+		[]byte, // lastEpochBlockNonce
 		uint, // era
 		uint, // slotLength
 		uint, // lengthInSlots

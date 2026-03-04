@@ -66,7 +66,7 @@ func TestCalculateEpochNonce_ByronEra(t *testing.T) {
 	}
 
 	// Byron era should return nil nonce
-	nonce, err := ls.calculateEpochNonce(nil, 0, ls.currentEra, ls.currentEpoch)
+	nonce, _, _, _, err := ls.calculateEpochNonce(nil, 0, ls.currentEra, ls.currentEpoch)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -114,7 +114,7 @@ func TestCalculateEpochNonce_InitialEpochWithoutNonce(t *testing.T) {
 	}
 
 	// Initial epoch should return genesis hash
-	nonce, err := ls.calculateEpochNonce(nil, 0, ls.currentEra, ls.currentEpoch)
+	nonce, _, _, _, err := ls.calculateEpochNonce(nil, 0, ls.currentEra, ls.currentEpoch)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -181,7 +181,7 @@ func TestCalculateEpochNonce_InvalidGenesisHash(t *testing.T) {
 		},
 	}
 
-	_, err := ls.calculateEpochNonce(nil, 0, ls.currentEra, ls.currentEpoch)
+	_, _, _, _, err := ls.calculateEpochNonce(nil, 0, ls.currentEra, ls.currentEpoch)
 	if err == nil {
 		t.Fatal("expected error for invalid genesis hash, got nil")
 	}
@@ -204,7 +204,7 @@ func TestCalculateEpochNonce_MissingShelleyGenesis(t *testing.T) {
 		},
 	}
 
-	_, err := ls.calculateEpochNonce(nil, 86400, ls.currentEra, ls.currentEpoch)
+	_, _, _, _, err := ls.calculateEpochNonce(nil, 86400, ls.currentEra, ls.currentEpoch)
 	if err == nil {
 		t.Fatal("expected error for missing Shelley genesis, got nil")
 	}
@@ -248,7 +248,7 @@ func TestCalculateEpochNonce_NegativeSecurityParam(t *testing.T) {
 
 	// Test will depend on whether the genesis loads successfully
 	// If it loads, we expect an error about negative k
-	_, err := ls.calculateEpochNonce(nil, 86400, ls.currentEra, ls.currentEpoch)
+	_, _, _, _, err := ls.calculateEpochNonce(nil, 86400, ls.currentEra, ls.currentEpoch)
 	// Either genesis loading fails or calculateEpochNonce catches negative k
 	if err == nil {
 		t.Log("Note: negative k may be caught during genesis loading")
@@ -323,7 +323,7 @@ func TestCalculateEpochNonce_ShelleyEraDifferentParams(t *testing.T) {
 			}
 
 			// Initial epoch should return genesis hash
-			nonce, err := ls.calculateEpochNonce(
+			nonce, _, _, _, err := ls.calculateEpochNonce(
 				nil,
 				0,
 				ls.currentEra,
@@ -454,7 +454,7 @@ func TestCalculateEpochNonce_StabilityWindowCalculation(t *testing.T) {
 
 			// Test for Byron era - should return nil
 			if tc.era.Id == 0 {
-				nonce, err := ls.calculateEpochNonce(
+				nonce, _, _, _, err := ls.calculateEpochNonce(
 					nil,
 					0,
 					ls.currentEra,
@@ -473,7 +473,7 @@ func TestCalculateEpochNonce_StabilityWindowCalculation(t *testing.T) {
 			}
 
 			// For non-Byron eras, test initial epoch returns genesis hash
-			nonce, err := ls.calculateEpochNonce(
+			nonce, _, _, _, err := ls.calculateEpochNonce(
 				nil,
 				0,
 				ls.currentEra,
@@ -529,7 +529,7 @@ func TestCalculateEpochNonce_IntegerArithmeticPrecision(t *testing.T) {
 	}
 
 	// Should handle fractional coefficients correctly using integer arithmetic
-	nonce, err := ls.calculateEpochNonce(nil, 0, ls.currentEra, ls.currentEpoch)
+	nonce, _, _, _, err := ls.calculateEpochNonce(nil, 0, ls.currentEra, ls.currentEpoch)
 	if err != nil {
 		t.Fatalf("unexpected error with fractional coefficient: %v", err)
 	}
@@ -677,7 +677,7 @@ func TestCalculateEpochNonce_AllEras(t *testing.T) {
 				},
 			}
 
-			nonce, err := ls.calculateEpochNonce(
+			nonce, _, _, _, err := ls.calculateEpochNonce(
 				nil,
 				0,
 				ls.currentEra,
@@ -733,7 +733,7 @@ func TestCalculateEpochNonce_MissingByronGenesisInByronEra(t *testing.T) {
 	}
 
 	// Byron era returns nil nonce immediately without genesis validation
-	nonce, err := ls.calculateEpochNonce(
+	nonce, _, _, _, err := ls.calculateEpochNonce(
 		nil,
 		86400,
 		ls.currentEra,

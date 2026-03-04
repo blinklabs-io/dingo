@@ -685,46 +685,17 @@ func (ls *LedgerState) handleEventBlockfetchBlock(e BlockfetchEvent) error {
 	// exceeding the downstream peer's ChainSync idle timeout.
 
 	// Verify block header cryptographic proofs (VRF, KES).
-	// Only verify when the epoch cache has data for this block's slot.
-	// The epoch cache is populated asynchronously by ledgerProcessBlocks
-	// epoch rollovers, which may lag behind blockfetch delivery. Blocks
-	// whose slots fall outside the current epoch cache are skipped here
-	// and will be validated during ledger processing when the epoch data
-	// becomes available.
-	//
-	// When the node is close to the upstream tip (within the stability
-	// window), verification failures are fatal — we reject the block.
-	// During initial sync (far behind the tip), failures are logged as
-	// warnings to mirror the Haskell node's behavior of skipping
-	// VRF/KES checks during fast sync.
-	if _, err := ls.epochForSlot(e.Point.Slot); err == nil {
-		if err := ls.verifyBlockHeaderCrypto(e.Block); err != nil {
-			upstreamTip := ls.syncUpstreamTipSlot.Load()
-			syncThreshold := ls.calculateStabilityWindow()
-			// Use subtraction to avoid uint64 overflow when
-			// e.Point.Slot + syncThreshold would wrap.
-			nearTip := upstreamTip > 0 &&
-				(e.Point.Slot >= upstreamTip ||
-					upstreamTip-e.Point.Slot <= syncThreshold)
-			if nearTip {
-				return fmt.Errorf(
-					"block header crypto verification failed: %w",
-					err,
-				)
-			}
-			// During bulk sync, VRF verification may fail when the
-			// local stake distribution snapshot doesn't match (e.g.
-			// multi-pool DevNet where the other pool's VRF key hash
-			// isn't in our ledger state yet). Log as warning only.
-			ls.config.Logger.Warn(
-				fmt.Sprintf(
-					"block header crypto verification failed (non-fatal): %s",
-					err,
-				),
-				"component", "ledger",
-				"slot", e.Point.Slot,
-			)
-		}
+	// Verification is always fatal — invalid blocks are rejected
+	// regardless of sync position. The epoch cache is populated at
+	// startup by loadEpochs, so epoch data is available for all
+	// blocks in the current epoch. Epoch transitions are processed
+	// synchronously during ledger block processing, which runs
+	// ahead of blockfetch delivery.
+	if err := ls.verifyBlockHeaderCrypto(e.Block); err != nil {
+		return fmt.Errorf(
+			"block header crypto verification failed: %w",
+			err,
+		)
 	}
 	// Add block to chain with its own transaction so it becomes
 	// visible to iterators immediately after commit.
@@ -1139,97 +1110,182 @@ func writeCborMajorType(buf *bytes.Buffer, majorType, n int) {
 	}
 }
 
+// calculateEpochNonce computes the epoch nonce for epoch N+1, the
+// end-of-epoch evolving nonce, and the labNonce to save for epoch
+// N+2's computation.
+//
+// The Ouroboros Praos formula is:
+//
+//	epochNonce(N+1) = candidateNonce(N) ⭒ lastEpochBlockNonce(N)
+//
+// where lastEpochBlockNonce(N) was saved at the N-1→N transition
+// (it's the prevHash of the last block of epoch N-1). This value
+// is stored in currentEpoch.LastEpochBlockNonce.
+//
+// The ⭒ operator has NeutralNonce as identity:
+//
+//	x ⭒ NeutralNonce = x
+//
+// For the very first epoch transition (0→1), lastEpochBlockNonce
+// is nil (NeutralNonce), so epochNonce = candidateNonce.
+//
+// Returns (epochNonce, evolvingNonce, candidateNonce, labNonce, error).
+// The caller must store candidateNonce as the new epoch's CandidateNonce
+// and labNonce as the new epoch's LastEpochBlockNonce so the next
+// transition can use them.
 func (ls *LedgerState) calculateEpochNonce(
 	txn *database.Txn,
 	epochStartSlot uint64,
 	currentEra eras.EraDesc,
 	currentEpoch models.Epoch,
-) ([]byte, error) {
+) ([]byte, []byte, []byte, []byte, error) {
 	// No epoch nonce in Byron
 	if currentEra.Id == 0 {
-		return nil, nil
+		return nil, nil, nil, nil, nil
 	}
 	if ls.config.CardanoNodeConfig == nil {
-		return nil, errors.New("CardanoNodeConfig is nil")
+		return nil, nil, nil, nil, errors.New("CardanoNodeConfig is nil")
 	}
 	if ls.config.CardanoNodeConfig.ShelleyGenesisHash == "" {
-		return nil, errors.New("could not get Shelley genesis hash")
+		return nil, nil, nil, nil, errors.New(
+			"could not get Shelley genesis hash",
+		)
 	}
 	genesisHashBytes, err := hex.DecodeString(
 		ls.config.CardanoNodeConfig.ShelleyGenesisHash,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("decode genesis hash: %w", err)
-	}
-	// For the first Shelley epoch (or when no previous nonce exists),
-	// the epoch nonce is the Shelley genesis hash. This matches
-	// cardano-node where the initial epochNonce and candidateNonce
-	// are both set to the genesis hash, and with NeutralNonce as
-	// lastEpochBlockNonce the identity operation yields genesis hash.
-	if len(currentEpoch.Nonce) == 0 || currentEpoch.EpochId == 0 {
-		return genesisHashBytes, nil
+		return nil, nil, nil, nil, fmt.Errorf(
+			"decode genesis hash: %w", err,
+		)
 	}
 
-	// In Ouroboros Praos, the candidate nonce is the Shelley genesis
-	// hash. Empirically confirmed: cardano-node reports the genesis
-	// hash as candidateNonce at every epoch. The UPDN state resets
-	// at epoch boundaries so the candidate nonce never diverges from
-	// its initial value.
-	candidateNonce := genesisHashBytes
+	// For the initial epoch creation (no blocks yet), the epoch
+	// nonce and initial evolving nonce are both the genesis hash.
+	// This matches cardano-node where the initial state sets
+	// epochNonce, candidateNonce, and evolvingNonce all to the
+	// genesis hash. lastEpochBlockNonce is nil (NeutralNonce).
+	if len(currentEpoch.Nonce) == 0 {
+		return genesisHashBytes, genesisHashBytes, genesisHashBytes, nil, nil
+	}
 
-	// The lastEpochBlockNonce used here is the labNonce captured at
-	// the PREVIOUS epoch boundary (not the current one). In Haskell:
-	//   newState.epochNonce = oldState.candidateNonce <> oldState.lastEpochBlockNonce
-	//   newState.lastEpochBlockNonce = oldState.labNonce
-	// So epoch N's nonce uses lastEpochBlockNonce from before the
-	// N-1→N transition. We look up the last block before the CURRENT
-	// epoch's start slot (last block of the epoch BEFORE the current
-	// one), and use its PrevHash (matching Haskell's labNonce =
-	// hashToNonce(prevHash)).
-	blockLastPrevEpoch, err := database.BlockBeforeSlotTxn(
+	// In Ouroboros Praos, the evolving nonce carries across epoch
+	// boundaries without resetting (PrtclState is never reset).
+	// For migration compatibility (epochs stored before this
+	// field existed), fall back to genesis hash.
+	prevEvolvingNonce := currentEpoch.EvolvingNonce
+	if len(prevEvolvingNonce) == 0 {
+		prevEvolvingNonce = genesisHashBytes
+	}
+
+	// The candidate nonce also carries across epochs independently
+	// of the evolving nonce. When 4k/f >= epochLength (e.g., short
+	// devnet epochs), the candidate is never updated by any block
+	// and stays at its carried value. Fall back to genesis hash
+	// for epochs stored before this field existed.
+	prevCandidateNonce := currentEpoch.CandidateNonce
+	if len(prevCandidateNonce) == 0 {
+		prevCandidateNonce = genesisHashBytes
+	}
+
+	// Compute candidateNonce (frozen at stability window cutoff)
+	// and evolvingNonce (after all blocks) from blocks in the
+	// current epoch. Each block's VRF output is accumulated via
+	// the Nonce semigroup (⭒) starting from prevEvolvingNonce.
+	candidateNonce, evolvingNonce, err := ls.computeCandidateNonce(
 		txn,
+		prevEvolvingNonce,
+		prevCandidateNonce,
 		currentEpoch.StartSlot,
+		uint64(currentEpoch.LengthInSlots),
 	)
 	if err != nil {
-		if errors.Is(err, models.ErrBlockNotFound) {
-			// No block before this epoch - equivalent to NeutralNonce,
-			// which acts as identity, so return candidateNonce.
-			return candidateNonce, nil
-		}
-		return nil, fmt.Errorf("lookup block before slot: %w", err)
-	}
-	if len(blockLastPrevEpoch.PrevHash) == 0 {
-		return candidateNonce, nil
+		return nil, nil, nil, nil, fmt.Errorf(
+			"compute candidate nonce: %w", err,
+		)
 	}
 
-	// Combine candidateNonce and lastEpochBlockNonce using
-	// blake2b_256(candidateNonce || lastEpochBlockNonce).
-	// The lastEpochBlockNonce is the PrevHash of the boundary block,
-	// matching Haskell's labNonce = hashToNonce(prevHash(block)).
-	if len(candidateNonce) < 32 || len(blockLastPrevEpoch.PrevHash) < 32 {
-		return nil, fmt.Errorf(
-			"epoch nonce requires 32-byte inputs: candidateNonce=%d, prevHash=%d",
-			len(candidateNonce), len(blockLastPrevEpoch.PrevHash),
+	// Compute the labNonce to SAVE for epoch N+2's computation.
+	// This is prevHashToNonce(prevHash of last block of current
+	// epoch N). It will be stored as LastEpochBlockNonce on the
+	// new epoch record.
+	epochEndSlot := currentEpoch.StartSlot +
+		uint64(currentEpoch.LengthInSlots)
+	var labNonceToSave []byte
+	blockLastCurrentEpoch, err := database.BlockBeforeSlotTxn(
+		txn,
+		epochEndSlot,
+	)
+	if err != nil {
+		if !errors.Is(err, models.ErrBlockNotFound) {
+			return nil, nil, nil, nil, fmt.Errorf(
+				"lookup block before slot: %w", err,
+			)
+		}
+		// No block — labNonceToSave stays nil (NeutralNonce)
+	} else if len(blockLastCurrentEpoch.PrevHash) > 0 {
+		labNonceToSave = blockLastCurrentEpoch.PrevHash
+	}
+
+	// Use the LAGGED lastEpochBlockNonce from the current epoch
+	// record (set at the PREVIOUS transition) in the formula.
+	// If nil/empty, it's NeutralNonce (identity): result is
+	// just candidateNonce.
+	lastEpochBlockNonce := currentEpoch.LastEpochBlockNonce
+	if len(lastEpochBlockNonce) == 0 {
+		// NeutralNonce is the identity element of ⭒:
+		//   candidateNonce ⭒ NeutralNonce = candidateNonce
+		// So the epoch nonce is just the candidate nonce.
+		ls.config.Logger.Debug(
+			"epoch nonce computed (NeutralNonce, using candidateNonce)",
+			"component", "ledger",
+			"epoch_start_slot", epochStartSlot,
+			"candidate_nonce",
+			hex.EncodeToString(candidateNonce),
+			"lab_nonce_to_save",
+			hex.EncodeToString(labNonceToSave),
+			"epoch_nonce",
+			hex.EncodeToString(candidateNonce),
+			"evolving_nonce",
+			hex.EncodeToString(evolvingNonce),
+		)
+		return candidateNonce, evolvingNonce, candidateNonce, labNonceToSave, nil
+	}
+
+	// candidateNonce ⭒ lastEpochBlockNonce
+	// = blake2b_256(candidateNonce || lastEpochBlockNonce)
+	if len(candidateNonce) < 32 ||
+		len(lastEpochBlockNonce) < 32 {
+		return nil, nil, nil, nil, fmt.Errorf(
+			"epoch nonce requires 32-byte inputs: "+
+				"candidateNonce=%d, lastEpochBlockNonce=%d",
+			len(candidateNonce),
+			len(lastEpochBlockNonce),
 		)
 	}
 	result, err := lcommon.CalculateEpochNonce(
 		candidateNonce,
-		blockLastPrevEpoch.PrevHash,
+		lastEpochBlockNonce,
 		nil,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("calculate epoch nonce: %w", err)
+		return nil, nil, nil, nil, fmt.Errorf(
+			"calculate epoch nonce: %w", err,
+		)
 	}
 	ls.config.Logger.Debug(
 		"epoch nonce computed",
 		"component", "ledger",
 		"epoch_start_slot", epochStartSlot,
 		"candidate_nonce", hex.EncodeToString(candidateNonce),
-		"lab_nonce", hex.EncodeToString(blockLastPrevEpoch.PrevHash),
-		"boundary_block_slot", blockLastPrevEpoch.Slot,
+		"last_epoch_block_nonce",
+		hex.EncodeToString(lastEpochBlockNonce),
+		"lab_nonce_to_save",
+		hex.EncodeToString(labNonceToSave),
 		"epoch_nonce", hex.EncodeToString(result.Bytes()),
+		"evolving_nonce", hex.EncodeToString(evolvingNonce),
 	)
-	return result.Bytes(), nil
+	return result.Bytes(), evolvingNonce, candidateNonce, labNonceToSave, nil
 }
 
 // processEpochRollover processes an epoch rollover and returns the result without
@@ -1270,7 +1326,7 @@ func (ls *LedgerState) processEpochRollover(
 		if err != nil {
 			return nil, fmt.Errorf("calculate epoch length: %w", err)
 		}
-		tmpNonce, err := ls.calculateEpochNonce(
+		tmpNonce, tmpEvolvingNonce, tmpCandidateNonce, tmpLabNonce, err := ls.calculateEpochNonce(
 			txn,
 			0,
 			currentEra,
@@ -1283,6 +1339,9 @@ func (ls *LedgerState) processEpochRollover(
 			epochStartSlot,
 			0, // epoch
 			tmpNonce,
+			tmpEvolvingNonce,
+			tmpCandidateNonce,
+			tmpLabNonce,
 			currentEra.Id,
 			epochSlotLength,
 			epochLength,
@@ -1405,7 +1464,7 @@ func (ls *LedgerState) processEpochRollover(
 	if err != nil {
 		return nil, fmt.Errorf("calculate epoch length: %w", err)
 	}
-	tmpNonce, err := ls.calculateEpochNonce(
+	tmpNonce, tmpEvolvingNonce, tmpCandidateNonce, tmpLabNonce, err := ls.calculateEpochNonce(
 		txn,
 		epochStartSlot,
 		currentEra,
@@ -1418,6 +1477,9 @@ func (ls *LedgerState) processEpochRollover(
 		epochStartSlot,
 		currentEpoch.EpochId+1,
 		tmpNonce,
+		tmpEvolvingNonce,
+		tmpCandidateNonce,
+		tmpLabNonce,
 		currentEra.Id,
 		epochSlotLength,
 		epochLength,

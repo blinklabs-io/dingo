@@ -115,17 +115,20 @@ func (d *MetadataStoreSqlite) DeleteEpochsAfterSlot(
 // SetEpoch saves an epoch
 func (d *MetadataStoreSqlite) SetEpoch(
 	slot, epoch uint64,
-	nonce []byte,
+	nonce, evolvingNonce, candidateNonce, lastEpochBlockNonce []byte,
 	era, slotLength, lengthInSlots uint,
 	txn types.Txn,
 ) error {
 	tmpItem := models.Epoch{
-		EpochId:       epoch,
-		StartSlot:     slot,
-		Nonce:         nonce,
-		EraId:         era,
-		SlotLength:    slotLength,
-		LengthInSlots: lengthInSlots,
+		EpochId:             epoch,
+		StartSlot:           slot,
+		Nonce:               nonce,
+		EvolvingNonce:       evolvingNonce,
+		CandidateNonce:      candidateNonce,
+		LastEpochBlockNonce: lastEpochBlockNonce,
+		EraId:               era,
+		SlotLength:          slotLength,
+		LengthInSlots:       lengthInSlots,
 	}
 	db, err := d.resolveDB(txn)
 	if err != nil {
@@ -136,6 +139,9 @@ func (d *MetadataStoreSqlite) SetEpoch(
 		DoUpdates: clause.AssignmentColumns([]string{
 			"start_slot",
 			"nonce",
+			"evolving_nonce",
+			"candidate_nonce",
+			"last_epoch_block_nonce",
 			"era_id",
 			"slot_length",
 			"length_in_slots",
