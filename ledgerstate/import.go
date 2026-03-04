@@ -1318,11 +1318,18 @@ func generateAndSaveEpochs(
 			epochStartSlot = cfg.State.EraBoundSlot +
 				epochsSinceBound*uint64(lengthInSlots)
 		}
+		// NOTE: cfg.State.EvolvingNonce is the tip-time value, which
+		// may be mid-epoch. This is the best available seed at import
+		// time. The first full epoch rollover (processEpochRollover)
+		// will recompute and store the correct end-of-epoch value.
 		// #nosec G115
 		if err := store.SetEpoch(
 			epochStartSlot,
 			cfg.State.Epoch,
 			cfg.State.EpochNonce,
+			cfg.State.EvolvingNonce,
+			nil, // candidateNonce not available from import
+			nil, // lastEpochBlockNonce not available from import
 			uint(cfg.State.EraIndex),
 			slotLength,
 			lengthInSlots,
@@ -1376,6 +1383,9 @@ func generateAndSaveEpochs(
 				startSlot,
 				e,
 				nil, // historical epochs don't need nonce
+				nil, // evolvingNonce not available from import
+				nil, // candidateNonce not available from import
+				nil, // lastEpochBlockNonce not available from import
 				eraId,
 				slotLength,
 				epochLength,
@@ -1429,14 +1439,21 @@ func generateAndSaveEpochs(
 			(e-lastBound.Epoch)*uint64(epochLength)
 
 		var nonce []byte
+		var evolvingNonce []byte
 		if e == cfg.State.Epoch {
 			nonce = cfg.State.EpochNonce
+			// NOTE: tip-time EvolvingNonce (may be mid-epoch).
+			// Corrected by the first full epoch rollover.
+			evolvingNonce = cfg.State.EvolvingNonce
 		}
 
 		if err := store.SetEpoch(
 			startSlot,
 			e,
 			nonce,
+			evolvingNonce,
+			nil, // candidateNonce not available from import
+			nil, // lastEpochBlockNonce not available from import
 			currentEraId,
 			slotLength,
 			epochLength,

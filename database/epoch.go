@@ -60,7 +60,7 @@ func (d *Database) DeleteEpochsAfterSlot(
 
 func (d *Database) SetEpoch(
 	slot, epoch uint64,
-	nonce []byte,
+	nonce, evolvingNonce, candidateNonce, lastEpochBlockNonce []byte,
 	era, slotLength, lengthInSlots uint,
 	txn *Txn,
 ) error {
@@ -69,6 +69,9 @@ func (d *Database) SetEpoch(
 			slot,
 			epoch,
 			nonce,
+			evolvingNonce,
+			candidateNonce,
+			lastEpochBlockNonce,
 			era,
 			slotLength,
 			lengthInSlots,
@@ -79,6 +82,9 @@ func (d *Database) SetEpoch(
 		slot,
 		epoch,
 		nonce,
+		evolvingNonce,
+		candidateNonce,
+		lastEpochBlockNonce,
 		era,
 		slotLength,
 		lengthInSlots,
