@@ -66,6 +66,10 @@ const (
 	// find the common ancestor and reduces disruptive resyncs
 	// in multi-producer networks where short forks are expected.
 	headerMismatchResyncThreshold = 20
+
+	// Chainsync re-sync reasons
+	resyncReasonRollbackAhead    = "rollback point ahead of local tip"
+	resyncReasonRollbackNotFound = "rollback point not found"
 )
 
 func (ls *LedgerState) handleEventChainsync(evt event.Event) {
@@ -279,6 +283,35 @@ func (ls *LedgerState) handleEventChainsyncRollback(e ChainsyncEvent) error {
 		return nil
 	}
 
+	// A rollback point ahead of our local tip is invalid for the
+	// current chain view and typically indicates intersect drift.
+	// Trigger a chainsync re-sync instead of failing hard.
+	localTip := ls.chain.HeaderTip()
+	if e.Point.Slot > localTip.Point.Slot {
+		ls.config.Logger.Warn(
+			"received rollback point ahead of local tip, triggering chainsync re-sync",
+			"component", "ledger",
+			"rollback_slot", e.Point.Slot,
+			"local_tip_slot", localTip.Point.Slot,
+			"connection_id", e.ConnectionId.String(),
+		)
+		ls.resetChainsyncResyncState()
+		ls.chainsyncState = SyncingChainsyncState
+		if ls.config.EventBus != nil {
+			ls.config.EventBus.Publish(
+				event.ChainsyncResyncEventType,
+				event.NewEvent(
+					event.ChainsyncResyncEventType,
+					event.ChainsyncResyncEvent{
+						ConnectionId: e.ConnectionId,
+						Reason:       resyncReasonRollbackAhead,
+					},
+				),
+			)
+		}
+		return nil
+	}
+
 	if ls.chainsyncState == SyncingChainsyncState {
 		ls.config.Logger.Info(
 			fmt.Sprintf(
@@ -290,6 +323,32 @@ func (ls *LedgerState) handleEventChainsyncRollback(e ChainsyncEvent) error {
 		ls.chainsyncState = RollbackChainsyncState
 	}
 	if err := ls.chain.Rollback(e.Point); err != nil {
+		if errors.Is(err, models.ErrBlockNotFound) {
+			// Missing rollback point can happen when local state and peer
+			// chainsync cursor drift. Recover by forcing re-intersect.
+			ls.config.Logger.Warn(
+				"rollback point not found locally, triggering chainsync re-sync",
+				"component", "ledger",
+				"slot", e.Point.Slot,
+				"hash", hex.EncodeToString(e.Point.Hash),
+				"connection_id", e.ConnectionId.String(),
+			)
+			ls.resetChainsyncResyncState()
+			ls.chainsyncState = SyncingChainsyncState
+			if ls.config.EventBus != nil {
+				ls.config.EventBus.Publish(
+					event.ChainsyncResyncEventType,
+					event.NewEvent(
+						event.ChainsyncResyncEventType,
+						event.ChainsyncResyncEvent{
+							ConnectionId: e.ConnectionId,
+							Reason:       resyncReasonRollbackNotFound,
+						},
+					),
+				)
+			}
+			return nil
+		}
 		if errors.Is(err, chain.ErrRollbackExceedsSecurityParam) {
 			// The peer's chain has diverged beyond K blocks from
 			// ours. This is a security violation — we must not
@@ -328,6 +387,21 @@ func (ls *LedgerState) handleEventChainsyncRollback(e ChainsyncEvent) error {
 		return fmt.Errorf("chain rollback failed: %w", err)
 	}
 	return nil
+}
+
+// resetChainsyncResyncState clears chainsync-local recovery state before a
+// re-sync. It mutates rollbackHistory, headerMismatchCount, and queued
+// chain/blockfetch state by calling chain.ClearHeaders and
+// blockfetchRequestRangeCleanup (while holding chainsyncBlockfetchMutex).
+// Callers must hold chainsyncMutex before invoking this method to avoid races
+// with other chainsync operations.
+func (ls *LedgerState) resetChainsyncResyncState() {
+	ls.rollbackHistory = nil
+	ls.headerMismatchCount = 0
+	ls.chain.ClearHeaders()
+	ls.chainsyncBlockfetchMutex.Lock()
+	ls.blockfetchRequestRangeCleanup()
+	ls.chainsyncBlockfetchMutex.Unlock()
 }
 
 func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {

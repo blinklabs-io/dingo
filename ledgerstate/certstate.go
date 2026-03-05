@@ -473,17 +473,13 @@ func parseCredentialMap(
 
 		// StakePool delegation (index 1): pool key hash
 		if len(elem) > 1 {
-			var poolHash []byte
-			if _, err := cbor.Decode(
-				elem[1], &poolHash,
-			); err != nil {
-				partial = true
-			} else if len(poolHash) == 28 {
+			poolHash, ok := parsePoolDelegation(elem[1])
+			if ok && len(poolHash) == 28 {
 				acct.PoolKeyHash = poolHash
-			} else if len(poolHash) > 0 {
+			} else if !ok || len(poolHash) > 0 {
 				partial = true
 			}
-			// len(poolHash) == 0 means CBOR null — valid "no delegation"
+			// len(poolHash) == 0 means no delegation.
 		}
 
 		// DRep delegation (index 2): key/script credential or
@@ -534,6 +530,40 @@ func parseCredentialMap(
 		)
 	}
 	return accounts, warning
+}
+
+// parsePoolDelegation decodes stake pool delegation values from UMElem.
+// This supports both plain hash encoding and credential-like wrappers.
+func parsePoolDelegation(data []byte) ([]byte, bool) {
+	if len(data) == 0 || data[0] == 0xf6 {
+		return nil, true
+	}
+
+	// Common case: raw 28-byte pool key hash.
+	var poolHash []byte
+	if _, err := cbor.Decode(data, &poolHash); err == nil {
+		if len(poolHash) == 0 || len(poolHash) == 28 {
+			return poolHash, true
+		}
+	}
+
+	// Fallback: credential-like [type, hash] encoding.
+	if cred, err := parseCredential(data); err == nil && len(cred.Hash) == 28 {
+		return cred.Hash, true
+	}
+
+	// Fallback: generic 2-element array with hash at index 1.
+	var parts []cbor.RawMessage
+	if _, err := cbor.Decode(data, &parts); err == nil && len(parts) > 1 {
+		var wrapped []byte
+		if _, err := cbor.Decode(parts[1], &wrapped); err == nil {
+			if len(wrapped) == 0 || len(wrapped) == 28 {
+				return wrapped, true
+			}
+		}
+	}
+
+	return nil, false
 }
 
 // parsePState decodes the pool state.

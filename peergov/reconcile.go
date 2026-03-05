@@ -108,7 +108,13 @@ func (p *PeerGovernor) reconcile() {
 						PeerStateChangeEvent{Address: peer.Address, Reason: "connection established"},
 					})
 				}
-			} else if peer.ReconnectCount > p.config.MaxReconnectFailures {
+			} else if peer.ReconnectCount >
+				p.config.MaxReconnectFailureThreshold {
+				if p.isTopologyPeer(peer.Source) {
+					continue
+				}
+				p.denyList[peer.NormalizedAddress] = time.Now().
+					Add(p.config.DenyDuration)
 				knownRemoved++
 				p.config.Logger.Info(
 					"removing failed peer",

@@ -87,6 +87,7 @@ func New(cfg Config) (*Node, error) {
 	return n, nil
 }
 
+//nolint:contextcheck // Run is the lifecycle boundary and derives n.ctx from the caller context.
 func (n *Node) Run(ctx context.Context) error {
 	// Configure tracing
 	if n.config.tracing {
@@ -304,6 +305,10 @@ func (n *Node) Run(ctx context.Context) error {
 		chainsyncCfg,
 	)
 	n.ouroboros.ChainsyncState = n.chainsyncState
+	n.eventBus.SubscribeFunc(
+		chainsync.ClientRemoveRequestedEventType,
+		n.chainsyncState.HandleClientRemoveRequestedEvent,
+	)
 	// Initialize chain selector for multi-peer chain selection
 	n.chainSelector = chainselection.NewChainSelector(
 		chainselection.ChainSelectorConfig{
@@ -384,6 +389,10 @@ func (n *Node) Run(ctx context.Context) error {
 			PromRegistry:       n.config.promRegistry,
 		},
 	)
+	n.eventBus.SubscribeFunc(
+		connmanager.ConnectionRecycleRequestedEventType,
+		n.connManager.HandleConnectionRecycleRequestedEvent,
+	)
 	n.ouroboros.ConnManager = n.connManager
 	// Subscribe ouroboros to chainsync resync events from the
 	// ledger. This replaces the previous ChainsyncResyncFunc
@@ -414,6 +423,124 @@ func (n *Node) Run(ctx context.Context) error {
 			)
 		}
 	})
+	// Detect stalled chainsync clients and recycle truly stuck connections.
+	// Use a grace period + cooldown to avoid flapping healthy but quiet peers.
+	stallCheckInterval := max(chainsyncCfg.StallTimeout/2, 10*time.Second)
+	if stallCheckInterval > 30*time.Second {
+		stallCheckInterval = 30 * time.Second
+	}
+	stallRecoveryGrace := max(chainsyncCfg.StallTimeout, 30*time.Second)
+	stallRecycleCooldown := max(2*chainsyncCfg.StallTimeout, 2*time.Minute)
+	recyclerCtx, recyclerCancel := context.WithCancel(n.ctx)
+	started = append(started, recyclerCancel)
+	go func(interval, grace, cooldown time.Duration) {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		recycleAt := make(map[string]time.Time)
+		lastRecycled := make(map[string]time.Time)
+		for {
+			select {
+			case <-recyclerCtx.Done():
+				return
+			case <-ticker.C:
+				now := time.Now()
+				n.chainsyncState.CheckStalledClients()
+				trackedClients := n.chainsyncState.GetTrackedClients()
+				trackedByID := make(
+					map[string]chainsync.TrackedClient,
+					len(trackedClients),
+				)
+				for _, conn := range trackedClients {
+					connKey := conn.ConnId.String()
+					trackedByID[connKey] = conn
+					if conn.Status != chainsync.ClientStatusStalled {
+						delete(recycleAt, connKey)
+					}
+				}
+				// Prune expired cooldown entries so this map does
+				// not grow without bound over long runtimes.
+				for connKey, last := range lastRecycled {
+					if now.Sub(last) >= cooldown {
+						delete(lastRecycled, connKey)
+					}
+				}
+				for _, conn := range trackedClients {
+					if conn.Status != chainsync.ClientStatusStalled {
+						continue
+					}
+					connKey := conn.ConnId.String()
+					dueAt, exists := recycleAt[connKey]
+					if !exists || dueAt.Before(now) {
+						recycleAt[connKey] = now.Add(grace)
+						n.config.logger.Info(
+							"chainsync client stalled, scheduling guarded recycle",
+							"connection_id", connKey,
+							"stall_timeout", chainsyncCfg.StallTimeout,
+							"grace_period", grace,
+						)
+					}
+				}
+				for connKey, dueAt := range recycleAt {
+					if now.Before(dueAt) {
+						continue
+					}
+					tracked, ok := trackedByID[connKey]
+					if !ok || tracked.Status != chainsync.ClientStatusStalled {
+						delete(recycleAt, connKey)
+						continue
+					}
+					connId := tracked.ConnId
+					if last, ok := lastRecycled[connKey]; ok &&
+						now.Sub(last) < cooldown {
+						recycleAt[connKey] = now.Add(cooldown - now.Sub(last))
+						continue
+					}
+					active := n.chainsyncState.GetClientConnId()
+					if active == nil {
+						// No active chainsync connection is selected yet.
+						// Skip recycle and re-check on the next tick.
+						continue
+					}
+					if active.String() != connKey {
+						// Don't recycle non-primary stalled clients. Keep state clean.
+						n.eventBus.PublishAsync(
+							chainsync.ClientRemoveRequestedEventType,
+							event.NewEvent(
+								chainsync.ClientRemoveRequestedEventType,
+								chainsync.ClientRemoveRequestedEvent{
+									ConnId:  connId,
+									ConnKey: connKey,
+									Reason:  "stalled_non_primary_connection",
+								},
+							),
+						)
+						delete(recycleAt, connKey)
+						continue
+					}
+					n.config.logger.Warn(
+						"chainsync client stalled, recycling active connection",
+						"connection_id", connKey,
+						"stall_timeout", chainsyncCfg.StallTimeout,
+						"grace_period", grace,
+						"recycle_cooldown", cooldown,
+					)
+					n.eventBus.PublishAsync(
+						connmanager.ConnectionRecycleRequestedEventType,
+						event.NewEvent(
+							connmanager.ConnectionRecycleRequestedEventType,
+							connmanager.ConnectionRecycleRequestedEvent{
+								ConnectionId: connId,
+								ConnKey:      connKey,
+								Reason:       "stalled_active_connection",
+							},
+						),
+					)
+					delete(recycleAt, connKey)
+					lastRecycled[connKey] = now
+				}
+			}
+		}
+	}(stallCheckInterval, stallRecoveryGrace, stallRecycleCooldown)
 	// Configure peer governor
 	// Create ledger peer provider for discovering peers from stake pool relays
 	ledgerPeerProvider, err := ledger.NewLedgerPeerProvider(

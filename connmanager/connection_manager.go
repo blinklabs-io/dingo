@@ -524,3 +524,29 @@ func (c *ConnectionManager) GetConnectionById(
 	}
 	return nil // nil indicates connection not found
 }
+
+// HandleConnectionRecycleRequestedEvent closes a connection when
+// a recycle request event is received.
+func (c *ConnectionManager) HandleConnectionRecycleRequestedEvent(
+	evt event.Event,
+) {
+	e, ok := evt.Data.(ConnectionRecycleRequestedEvent)
+	if !ok {
+		return
+	}
+	conn := c.GetConnectionById(e.ConnectionId)
+	if conn != nil {
+		c.config.Logger.Info(
+			"recycling connection on request",
+			"connection_id", e.ConnectionId.String(),
+			"reason", e.Reason,
+		)
+		if err := conn.Close(); err != nil {
+			c.config.Logger.Debug(
+				"failed to close recycled connection",
+				"connection_id", e.ConnectionId.String(),
+				"error", err,
+			)
+		}
+	}
+}

@@ -15,13 +15,63 @@
 package peergov
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"io"
+	"net"
+	"strings"
+	"syscall"
 	"time"
 
 	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/event"
 )
+
+func isConnectionCancellationError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) ||
+		errors.Is(err, net.ErrClosed) {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "operation was canceled") ||
+		strings.Contains(msg, "context canceled") ||
+		strings.Contains(msg, "use of closed network connection")
+}
+
+func isExpectedNetworkDialError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "no such host") ||
+		strings.Contains(msg, "server misbehaving") ||
+		strings.Contains(msg, "connect: connection refused") ||
+		strings.Contains(msg, "no route to host") ||
+		strings.Contains(msg, "i/o timeout") ||
+		strings.Contains(msg, "cannot assign requested address") ||
+		strings.Contains(msg, "version data mismatch") ||
+		strings.Contains(msg, "timeout waiting on transition")
+}
+
+func isExpectedConnectionCloseError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, io.EOF) ||
+		errors.Is(err, syscall.EPIPE) ||
+		errors.Is(err, syscall.ECONNRESET) ||
+		errors.Is(err, syscall.ECONNABORTED) {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "connection reset by peer") ||
+		strings.Contains(msg, "broken pipe") ||
+		msg == "eof"
+}
 
 func (p *PeerGovernor) startOutboundConnections() {
 	// Skip outbound connections if disabled
@@ -74,6 +124,7 @@ func (p *PeerGovernor) createOutboundConnection(peer *Peer) {
 		return
 	}
 	currentPeer.Reconnecting = true
+	reconnectPeer := currentPeer
 	// Read any pre-existing reconnect delay set by
 	// handleConnectionClosedEvent for short-lived connections.
 	preDelay := currentPeer.ReconnectDelay
@@ -85,8 +136,8 @@ func (p *PeerGovernor) createOutboundConnection(peer *Peer) {
 	// Ensure Reconnecting is cleared when this goroutine exits
 	defer func() {
 		p.mu.Lock()
-		idx := p.peerIndexByAddress(peer.NormalizedAddress)
-		if idx != -1 {
+		idx := p.peerIndexByAddress(reconnectPeer.NormalizedAddress)
+		if idx != -1 && p.peers[idx] == reconnectPeer {
 			p.peers[idx].Reconnecting = false
 		}
 		p.mu.Unlock()
@@ -193,13 +244,67 @@ func (p *PeerGovernor) createOutboundConnection(peer *Peer) {
 			)
 			return
 		}
-		p.config.Logger.Error(
-			fmt.Sprintf(
-				"outbound: failed to establish connection to %s: %s",
-				peer.Address,
-				err,
-			),
+		if isConnectionCancellationError(err) {
+			select {
+			case <-p.stopCh:
+				p.config.Logger.Debug(
+					"outbound: connection attempt canceled during shutdown",
+					"address", peer.Address,
+				)
+				return
+			default:
+			}
+			if p.ctx.Err() != nil {
+				p.config.Logger.Debug(
+					"outbound: connection attempt canceled, governor context done",
+					"address", peer.Address,
+				)
+				return
+			}
+			p.mu.Lock()
+			peerIdx = p.peerIndexByAddress(peer.NormalizedAddress)
+			if peerIdx == -1 {
+				p.mu.Unlock()
+				p.config.Logger.Debug(
+					"outbound: peer removed during canceled connection attempt",
+					"address", peer.Address,
+				)
+				return
+			}
+			currentPeer := p.peers[peerIdx]
+			if currentPeer.ReconnectDelay == 0 {
+				currentPeer.ReconnectDelay = initialReconnectDelay
+			} else if currentPeer.ReconnectDelay < maxReconnectDelay {
+				currentPeer.ReconnectDelay *= reconnectBackoffFactor
+				if currentPeer.ReconnectDelay > maxReconnectDelay {
+					currentPeer.ReconnectDelay = maxReconnectDelay
+				}
+			}
+			reconnectDelay := currentPeer.ReconnectDelay
+			p.mu.Unlock()
+			p.config.Logger.Debug(
+				"outbound: connection attempt canceled, retrying with backoff",
+				"address", peer.Address,
+				"error", err,
+				"delay", reconnectDelay,
+			)
+			select {
+			case <-p.stopCh:
+				return
+			case <-time.After(reconnectDelay):
+			}
+			continue
+		}
+		failMsg := fmt.Sprintf(
+			"outbound: failed to establish connection to %s: %s",
+			peer.Address,
+			err,
 		)
+		if isExpectedNetworkDialError(err) {
+			p.config.Logger.Info(failMsg)
+		} else {
+			p.config.Logger.Error(failMsg)
+		}
 		p.mu.Lock()
 		// Re-lookup peer to avoid stale pointer if slice was rebuilt
 		peerIdx = p.peerIndexByAddress(peer.NormalizedAddress)
@@ -224,7 +329,45 @@ func (p *PeerGovernor) createOutboundConnection(peer *Peer) {
 		// Copy values while holding lock for use after unlock
 		reconnectDelay := currentPeer.ReconnectDelay
 		reconnectCount := currentPeer.ReconnectCount
+		peerSource := currentPeer.Source
+		peerAddress := currentPeer.Address
+		peerNormalizedAddress := currentPeer.NormalizedAddress
+		if !p.isTopologyPeer(peerSource) &&
+			reconnectCount > p.config.MaxReconnectFailureThreshold {
+			// Fail fast for non-topology peers. Waiting for the long
+			// reconcile interval causes large reconnect storms.
+			p.denyList[peerNormalizedAddress] = time.Now().Add(
+				p.config.DenyDuration,
+			)
+			p.peers = append(p.peers[:peerIdx], p.peers[peerIdx+1:]...)
+			p.updatePeerMetrics()
+			p.mu.Unlock()
+			p.config.Logger.Info(
+				"outbound: removing peer after repeated connection failures",
+				"address", peerAddress,
+				"source", peerSource.String(),
+				"retry_count", reconnectCount,
+				"deny_duration", p.config.DenyDuration,
+			)
+			p.publishEvent(
+				PeerRemovedEventType,
+				PeerStateChangeEvent{
+					Address: peerAddress,
+					Reason:  "excessive outbound connection failures",
+				},
+			)
+			return
+		}
 		p.mu.Unlock()
+		select {
+		case <-p.stopCh:
+			p.config.Logger.Debug(
+				"outbound: stopping connection attempts due to shutdown",
+				"address", peer.Address,
+			)
+			return
+		default:
+		}
 		p.config.Logger.Info(
 			fmt.Sprintf(
 				"outbound: delaying %s (retry %d) before reconnecting to %s",
@@ -337,13 +480,21 @@ func (p *PeerGovernor) handleConnectionClosedEvent(evt event.Event) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if e.Error != nil {
-		p.config.Logger.Error(
-			fmt.Sprintf(
-				"unexpected connection failure: %s",
-				e.Error,
-			),
-			"connection_id", e.ConnectionId.String(),
+		closeMsg := fmt.Sprintf(
+			"unexpected connection failure: %s",
+			e.Error,
 		)
+		if isExpectedConnectionCloseError(e.Error) {
+			p.config.Logger.Info(
+				closeMsg,
+				"connection_id", e.ConnectionId.String(),
+			)
+		} else {
+			p.config.Logger.Error(
+				closeMsg,
+				"connection_id", e.ConnectionId.String(),
+			)
+		}
 	} else {
 		p.config.Logger.Info("connection closed",
 			"connection_id", e.ConnectionId.String(),

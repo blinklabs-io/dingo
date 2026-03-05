@@ -40,6 +40,10 @@ const (
 	// ForkDetectedEventType is emitted when two clients report
 	// different block hashes for the same slot.
 	ForkDetectedEventType event.EventType = "chainsync.fork_detected"
+
+	// ClientRemoveRequestedEventType is emitted when another
+	// component requests chainsync to remove a tracked client.
+	ClientRemoveRequestedEventType event.EventType = "chainsync.client_remove_requested"
 )
 
 // ClientAddedEvent contains details about a newly registered
@@ -80,4 +84,12 @@ type ForkDetectedEvent struct {
 	ConnIdA ouroboros.ConnectionId
 	ConnIdB ouroboros.ConnectionId
 	Point   ocommon.Point
+}
+
+// ClientRemoveRequestedEvent contains the connection details for
+// a requested tracked-client removal.
+type ClientRemoveRequestedEvent struct {
+	ConnId  ouroboros.ConnectionId
+	ConnKey string
+	Reason  string
 }

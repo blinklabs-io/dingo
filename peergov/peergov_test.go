@@ -58,10 +58,11 @@ func TestNewPeerGovernor(t *testing.T) {
 				Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 			},
 			expected: PeerGovernorConfig{
-				ReconcileInterval:    defaultReconcileInterval,
-				MaxReconnectFailures: defaultMaxReconnectFailures,
-				MinHotPeers:          defaultMinHotPeers,
-				InactivityTimeout:    defaultInactivityTimeout,
+				ReconcileInterval:            defaultReconcileInterval,
+				MaxReconnectFailureThreshold: defaultMaxReconnectFailureThreshold,
+				MinHotPeers:                  defaultMinHotPeers,
+				InactivityTimeout:            defaultInactivityTimeout,
+				BootstrapRecoveryCooldown:    defaultBootstrapRecoveryCooldown,
 			},
 		},
 		{
@@ -70,14 +71,15 @@ func TestNewPeerGovernor(t *testing.T) {
 				Logger: slog.New(
 					slog.NewJSONHandler(io.Discard, nil),
 				),
-				ReconcileInterval:    10 * time.Minute,
-				MaxReconnectFailures: 10,
-				MinHotPeers:          5,
+				ReconcileInterval:            10 * time.Minute,
+				MaxReconnectFailureThreshold: 10,
+				MinHotPeers:                  5,
 			},
 			expected: PeerGovernorConfig{
-				ReconcileInterval:    10 * time.Minute,
-				MaxReconnectFailures: 10,
-				MinHotPeers:          5,
+				ReconcileInterval:            10 * time.Minute,
+				MaxReconnectFailureThreshold: 10,
+				MinHotPeers:                  5,
+				BootstrapRecoveryCooldown:    defaultBootstrapRecoveryCooldown,
 			},
 		},
 	}
@@ -94,10 +96,15 @@ func TestNewPeerGovernor(t *testing.T) {
 			)
 			assert.Equal(
 				t,
-				tt.expected.MaxReconnectFailures,
-				pg.config.MaxReconnectFailures,
+				tt.expected.MaxReconnectFailureThreshold,
+				pg.config.MaxReconnectFailureThreshold,
 			)
 			assert.Equal(t, tt.expected.MinHotPeers, pg.config.MinHotPeers)
+			assert.Equal(
+				t,
+				tt.expected.BootstrapRecoveryCooldown,
+				pg.config.BootstrapRecoveryCooldown,
+			)
 			assert.NotNil(t, pg.config.Logger)
 		})
 	}
@@ -265,17 +272,17 @@ func TestPeerGovernor_Reconcile_Removal(t *testing.T) {
 	reg := prometheus.NewRegistry()
 
 	pg := NewPeerGovernor(PeerGovernorConfig{
-		Logger:               slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		EventBus:             eventBus,
-		PromRegistry:         reg,
-		MaxReconnectFailures: 3,
+		Logger:                       slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		EventBus:                     eventBus,
+		PromRegistry:                 reg,
+		MaxReconnectFailureThreshold: 3,
 	})
 
 	// Add peer and set excessive failures
 	pg.AddPeer("44.0.0.1:3001", PeerSourceP2PGossip)
 
 	pg.mu.Lock()
-	pg.peers[0].ReconnectCount = 5 // Exceeds MaxReconnectFailures
+	pg.peers[0].ReconnectCount = 5 // Exceeds MaxReconnectFailureThreshold
 	pg.mu.Unlock()
 
 	pg.reconcile()
@@ -284,6 +291,29 @@ func TestPeerGovernor_Reconcile_Removal(t *testing.T) {
 	assert.Len(t, peers, 0)
 
 	// Event publishing is tested indirectly
+}
+
+func TestPeerGovernor_Reconcile_RemovalThresholdBoundary(t *testing.T) {
+	eventBus := newMockEventBus()
+	reg := prometheus.NewRegistry()
+
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:                       slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		EventBus:                     eventBus,
+		PromRegistry:                 reg,
+		MaxReconnectFailureThreshold: 3,
+	})
+
+	pg.AddPeer("44.0.0.1:3001", PeerSourceP2PGossip)
+
+	pg.mu.Lock()
+	pg.peers[0].ReconnectCount = pg.config.MaxReconnectFailureThreshold
+	pg.mu.Unlock()
+
+	pg.reconcile()
+
+	peers := pg.GetPeers()
+	assert.Len(t, peers, 1)
 }
 
 func TestPeerGovernor_Reconcile_MinimumHotPeers(t *testing.T) {

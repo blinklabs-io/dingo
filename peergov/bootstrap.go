@@ -14,7 +14,10 @@
 
 package peergov
 
-import "fmt"
+import (
+	"fmt"
+	"time"
+)
 
 // shouldExitBootstrap checks if conditions are met to exit bootstrap mode.
 // Returns true if ANY of these conditions are met:
@@ -149,6 +152,7 @@ func (p *PeerGovernor) exitBootstrapLocked(reason string) []pendingEvent {
 	}
 
 	p.bootstrapExited = true
+	p.lastBootstrapExit = time.Now()
 	p.config.Logger.Info(
 		"exited bootstrap mode",
 		"reason", reason,
@@ -193,10 +197,28 @@ func (p *PeerGovernor) checkBootstrapRecoveryLocked() []pendingEvent {
 		return events
 	}
 
+	// Avoid immediate exit/recovery flapping right after bootstrap exit.
+	if !p.lastBootstrapExit.IsZero() &&
+		time.Since(p.lastBootstrapExit) < p.config.BootstrapRecoveryCooldown {
+		remaining := p.config.BootstrapRecoveryCooldown -
+			time.Since(p.lastBootstrapExit)
+		if remaining < 0 {
+			remaining = 0
+		}
+		p.config.Logger.Debug(
+			"bootstrap recovery skipped: cooldown active",
+			"remaining", remaining,
+		)
+		return events
+	}
+
 	// Check if auto-recovery is enabled
 	// nil = use default (true), explicit false disables
 	if p.config.AutoBootstrapRecovery != nil &&
 		!*p.config.AutoBootstrapRecovery {
+		p.config.Logger.Debug(
+			"bootstrap recovery skipped: auto recovery disabled",
+		)
 		return events
 	}
 
@@ -210,6 +232,11 @@ func (p *PeerGovernor) checkBootstrapRecoveryLocked() []pendingEvent {
 
 	// Only recover if we're below minimum hot peers
 	if hotCount >= p.config.MinHotPeers {
+		p.config.Logger.Debug(
+			"bootstrap recovery skipped: enough hot peers",
+			"hot_count", hotCount,
+			"min_hot_peers", p.config.MinHotPeers,
+		)
 		return events
 	}
 
@@ -230,6 +257,9 @@ func (p *PeerGovernor) checkBootstrapRecoveryLocked() []pendingEvent {
 
 	// If we have warm candidates from gossip/ledger, don't recover bootstrap
 	if hasWarmCandidates {
+		p.config.Logger.Debug(
+			"bootstrap recovery skipped: warm gossip/ledger candidates available",
+		)
 		return events
 	}
 
