@@ -28,13 +28,13 @@ import (
 )
 
 const (
-	defaultReconcileInterval         = 30 * time.Minute
-	defaultMaxReconnectFailures      = 3
-	defaultMinHotPeers               = 3
-	defaultInactivityTimeout         = 10 * time.Minute
-	defaultTestCooldown              = 5 * time.Minute
-	defaultDenyDuration              = 30 * time.Minute
-	defaultLedgerPeerRefreshInterval = 1 * time.Hour
+	defaultReconcileInterval            = 30 * time.Minute
+	defaultMaxReconnectFailureThreshold = 3
+	defaultMinHotPeers                  = 3
+	defaultInactivityTimeout            = 10 * time.Minute
+	defaultTestCooldown                 = 5 * time.Minute
+	defaultDenyDuration                 = 30 * time.Minute
+	defaultLedgerPeerRefreshInterval    = 1 * time.Hour
 
 	// Default peer targets (applied when config value is 0)
 	defaultTargetNumberOfKnownPeers       = 150
@@ -59,8 +59,9 @@ const (
 	defaultInboundMinTenure         = 10 * time.Minute
 
 	// Default bootstrap exit configuration
-	defaultMinLedgerPeersForExit = 5
-	defaultSyncProgressForExit   = 0.95 // 95%
+	defaultMinLedgerPeersForExit     = 5
+	defaultSyncProgressForExit       = 0.95 // 95%
+	defaultBootstrapRecoveryCooldown = 2 * time.Minute
 )
 
 const (
@@ -93,23 +94,24 @@ type PeerGovernor struct {
 	config                PeerGovernorConfig
 	lastLedgerPeerRefresh atomic.Int64 // UnixNano timestamp of last ledger peer discovery
 	bootstrapExited       bool         // Whether bootstrap peers have been exited
+	lastBootstrapExit     time.Time    // Timestamp of most recent bootstrap exit
 	mu                    sync.Mutex
 }
 
 type PeerGovernorConfig struct {
-	PromRegistry         prometheus.Registerer
-	Logger               *slog.Logger
-	EventBus             *event.EventBus
-	ConnManager          *connmanager.ConnectionManager
-	PeerRequestFunc      func(peer *Peer) []string
-	PeerTestFunc         func(address string) error // Custom peer test function
-	ReconcileInterval    time.Duration
-	MaxReconnectFailures int
-	MinHotPeers          int
-	InactivityTimeout    time.Duration
-	TestCooldown         time.Duration // Min time between suitability tests
-	DenyDuration         time.Duration // How long to deny failed peers
-	DisableOutbound      bool
+	PromRegistry                 prometheus.Registerer
+	Logger                       *slog.Logger
+	EventBus                     *event.EventBus
+	ConnManager                  *connmanager.ConnectionManager
+	PeerRequestFunc              func(peer *Peer) []string
+	PeerTestFunc                 func(address string) error // Custom peer test function
+	ReconcileInterval            time.Duration
+	MaxReconnectFailureThreshold int
+	MinHotPeers                  int
+	InactivityTimeout            time.Duration
+	TestCooldown                 time.Duration // Min time between suitability tests
+	DenyDuration                 time.Duration // How long to deny failed peers
+	DisableOutbound              bool
 
 	// Ledger peer discovery configuration
 	LedgerPeerProvider        LedgerPeerProvider // Provider for ledger peer information
@@ -153,10 +155,11 @@ type PeerGovernorConfig struct {
 	// Bootstrap peer exit configuration
 	// Bootstrap peers are used during initial sync but should be exited once
 	// the node has established sufficient ledger peers or reached sync progress.
-	MinLedgerPeersForExit int                  // Min ledger peers to exit bootstrap (0 = default 5)
-	SyncProgressForExit   float64              // Sync progress threshold to exit (0 = default 0.95)
-	AutoBootstrapRecovery *bool                // Re-enable bootstrap if hot peers drop too low (nil = default true)
-	SyncProgressProvider  SyncProgressProvider // Provider for current sync progress
+	MinLedgerPeersForExit     int                  // Min ledger peers to exit bootstrap (0 = default 5)
+	SyncProgressForExit       float64              // Sync progress threshold to exit (0 = default 0.95)
+	AutoBootstrapRecovery     *bool                // Re-enable bootstrap if hot peers drop too low (nil = default true)
+	BootstrapRecoveryCooldown time.Duration        // Minimum time to wait after bootstrap exit before recovery
+	SyncProgressProvider      SyncProgressProvider // Provider for current sync progress
 }
 
 // pendingEvent holds an event to publish after releasing locks.
@@ -172,8 +175,8 @@ func NewPeerGovernor(cfg PeerGovernorConfig) *PeerGovernor {
 	if cfg.ReconcileInterval == 0 {
 		cfg.ReconcileInterval = defaultReconcileInterval
 	}
-	if cfg.MaxReconnectFailures == 0 {
-		cfg.MaxReconnectFailures = defaultMaxReconnectFailures
+	if cfg.MaxReconnectFailureThreshold <= 0 {
+		cfg.MaxReconnectFailureThreshold = defaultMaxReconnectFailureThreshold
 	}
 	if cfg.MinHotPeers == 0 {
 		cfg.MinHotPeers = defaultMinHotPeers
@@ -252,6 +255,9 @@ func NewPeerGovernor(cfg PeerGovernorConfig) *PeerGovernor {
 		cfg.SyncProgressForExit = defaultSyncProgressForExit
 	}
 	// AutoBootstrapRecovery: nil means use default (true), explicit false disables
+	if cfg.BootstrapRecoveryCooldown <= 0 {
+		cfg.BootstrapRecoveryCooldown = defaultBootstrapRecoveryCooldown
+	}
 	cfg.Logger = cfg.Logger.With("component", "peergov")
 	p := &PeerGovernor{
 		config:   cfg,

@@ -266,6 +266,16 @@ func (s *State) RemoveClientConnId(
 	}
 }
 
+// HandleClientRemoveRequestedEvent removes a tracked client when
+// a component publishes a client removal request event.
+func (s *State) HandleClientRemoveRequestedEvent(evt event.Event) {
+	e, ok := evt.Data.(ClientRemoveRequestedEvent)
+	if !ok {
+		return
+	}
+	s.RemoveClientConnId(e.ConnId)
+}
+
 // promoteBestClientLocked selects the tracked client with the
 // highest tip slot as the new active client. Only healthy
 // (syncing or synced) clients are considered. If no healthy
