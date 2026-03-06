@@ -250,7 +250,7 @@ type MetadataStore interface {
 		string, // order (asc|desc)
 		types.Txn,
 	) ([]models.Transaction, error)
-  
+
 	// GetAddressesByStakingKey retrieves distinct address mappings for a staking key.
 	GetAddressesByStakingKey(
 		[]byte, // stakingKey
@@ -258,8 +258,8 @@ type MetadataStore interface {
 		int, // offset
 		types.Txn,
 	) ([]models.AddressTransaction, error)
-  
-  // GetTransactionsByMetadataLabel retrieves transactions that include
+
+	// GetTransactionsByMetadataLabel retrieves transactions that include
 	// metadata for the given label.
 	GetTransactionsByMetadataLabel(
 		uint64, // label
@@ -529,7 +529,6 @@ type MetadataStore interface {
 	// DeleteAddressTransactionsAfterSlot removes address-transaction mappings
 	// for transactions added after the given slot.
 	DeleteAddressTransactionsAfterSlot(uint64, types.Txn) error
-
 
 	// Governance methods
 
