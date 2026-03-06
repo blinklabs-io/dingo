@@ -19,7 +19,9 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"net/url"
 	"strconv"
+	"time"
 
 	"github.com/blinklabs-io/gouroboros/cbor"
 )
@@ -211,4 +213,10 @@ type BlockMetadata struct {
 	Type     uint
 	Height   uint64
 	PrevHash []byte
+}
+
+// SignedURL is a url that has been pre-signed and has an expiration time
+type SignedURL struct {
+	URL     url.URL
+	Expires time.Time
 }

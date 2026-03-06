@@ -20,10 +20,12 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/http"
 	"strconv"
 	"sync"
 	"time"
 
+	"github.com/blinklabs-io/dingo/bark"
 	"github.com/blinklabs-io/dingo/blockfrost"
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/chainselection"
@@ -57,6 +59,7 @@ type Node struct {
 	ledgerState    *ledger.LedgerState
 	snapshotMgr    *snapshot.Manager
 	utxorpc        *utxorpc.Utxorpc
+	bark           *bark.Bark
 	blockfrostAPI  *blockfrost.Blockfrost
 	meshAPI        *mesh.Server
 	ouroboros      *ouroborosPkg.Ouroboros
@@ -84,6 +87,7 @@ func New(cfg Config) (*Node, error) {
 	return n, nil
 }
 
+//nolint:contextcheck // Run is the lifecycle boundary and derives n.ctx from the caller context.
 func (n *Node) Run(ctx context.Context) error {
 	// Configure tracing
 	if n.config.tracing {
@@ -223,6 +227,19 @@ func (n *Node) Run(ctx context.Context) error {
 	n.ledgerState = state
 	n.ouroboros.LedgerState = n.ledgerState
 	n.chainManager.SetLedger(n.ledgerState)
+
+	if n.config.barkBaseUrl != "" {
+		n.db.SetBlobStore(bark.NewBarkBlobStore(bark.BlobStoreBarkConfig{
+			BaseUrl:        n.config.barkBaseUrl,
+			SecurityWindow: n.config.barkSecurityWindow,
+			HTTPClient: &http.Client{
+				Timeout: 30 * time.Second,
+			},
+			LedgerState: state,
+			Logger:      n.config.logger,
+		}, n.db.Blob()))
+	}
+
 	// Run DB recovery if needed
 	if dbNeedsRecovery {
 		if err := n.ledgerState.RecoverCommitTimestampConflict(); err != nil {
@@ -288,6 +305,10 @@ func (n *Node) Run(ctx context.Context) error {
 		chainsyncCfg,
 	)
 	n.ouroboros.ChainsyncState = n.chainsyncState
+	n.eventBus.SubscribeFunc(
+		chainsync.ClientRemoveRequestedEventType,
+		n.chainsyncState.HandleClientRemoveRequestedEvent,
+	)
 	// Initialize chain selector for multi-peer chain selection
 	n.chainSelector = chainselection.NewChainSelector(
 		chainselection.ChainSelectorConfig{
@@ -368,6 +389,10 @@ func (n *Node) Run(ctx context.Context) error {
 			PromRegistry:       n.config.promRegistry,
 		},
 	)
+	n.eventBus.SubscribeFunc(
+		connmanager.ConnectionRecycleRequestedEventType,
+		n.connManager.HandleConnectionRecycleRequestedEvent,
+	)
 	n.ouroboros.ConnManager = n.connManager
 	// Subscribe ouroboros to chainsync resync events from the
 	// ledger. This replaces the previous ChainsyncResyncFunc
@@ -398,6 +423,124 @@ func (n *Node) Run(ctx context.Context) error {
 			)
 		}
 	})
+	// Detect stalled chainsync clients and recycle truly stuck connections.
+	// Use a grace period + cooldown to avoid flapping healthy but quiet peers.
+	stallCheckInterval := max(chainsyncCfg.StallTimeout/2, 10*time.Second)
+	if stallCheckInterval > 30*time.Second {
+		stallCheckInterval = 30 * time.Second
+	}
+	stallRecoveryGrace := max(chainsyncCfg.StallTimeout, 30*time.Second)
+	stallRecycleCooldown := max(2*chainsyncCfg.StallTimeout, 2*time.Minute)
+	recyclerCtx, recyclerCancel := context.WithCancel(n.ctx)
+	started = append(started, recyclerCancel)
+	go func(interval, grace, cooldown time.Duration) {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		recycleAt := make(map[string]time.Time)
+		lastRecycled := make(map[string]time.Time)
+		for {
+			select {
+			case <-recyclerCtx.Done():
+				return
+			case <-ticker.C:
+				now := time.Now()
+				n.chainsyncState.CheckStalledClients()
+				trackedClients := n.chainsyncState.GetTrackedClients()
+				trackedByID := make(
+					map[string]chainsync.TrackedClient,
+					len(trackedClients),
+				)
+				for _, conn := range trackedClients {
+					connKey := conn.ConnId.String()
+					trackedByID[connKey] = conn
+					if conn.Status != chainsync.ClientStatusStalled {
+						delete(recycleAt, connKey)
+					}
+				}
+				// Prune expired cooldown entries so this map does
+				// not grow without bound over long runtimes.
+				for connKey, last := range lastRecycled {
+					if now.Sub(last) >= cooldown {
+						delete(lastRecycled, connKey)
+					}
+				}
+				for _, conn := range trackedClients {
+					if conn.Status != chainsync.ClientStatusStalled {
+						continue
+					}
+					connKey := conn.ConnId.String()
+					dueAt, exists := recycleAt[connKey]
+					if !exists || dueAt.Before(now) {
+						recycleAt[connKey] = now.Add(grace)
+						n.config.logger.Info(
+							"chainsync client stalled, scheduling guarded recycle",
+							"connection_id", connKey,
+							"stall_timeout", chainsyncCfg.StallTimeout,
+							"grace_period", grace,
+						)
+					}
+				}
+				for connKey, dueAt := range recycleAt {
+					if now.Before(dueAt) {
+						continue
+					}
+					tracked, ok := trackedByID[connKey]
+					if !ok || tracked.Status != chainsync.ClientStatusStalled {
+						delete(recycleAt, connKey)
+						continue
+					}
+					connId := tracked.ConnId
+					if last, ok := lastRecycled[connKey]; ok &&
+						now.Sub(last) < cooldown {
+						recycleAt[connKey] = now.Add(cooldown - now.Sub(last))
+						continue
+					}
+					active := n.chainsyncState.GetClientConnId()
+					if active == nil {
+						// No active chainsync connection is selected yet.
+						// Skip recycle and re-check on the next tick.
+						continue
+					}
+					if active.String() != connKey {
+						// Don't recycle non-primary stalled clients. Keep state clean.
+						n.eventBus.PublishAsync(
+							chainsync.ClientRemoveRequestedEventType,
+							event.NewEvent(
+								chainsync.ClientRemoveRequestedEventType,
+								chainsync.ClientRemoveRequestedEvent{
+									ConnId:  connId,
+									ConnKey: connKey,
+									Reason:  "stalled_non_primary_connection",
+								},
+							),
+						)
+						delete(recycleAt, connKey)
+						continue
+					}
+					n.config.logger.Warn(
+						"chainsync client stalled, recycling active connection",
+						"connection_id", connKey,
+						"stall_timeout", chainsyncCfg.StallTimeout,
+						"grace_period", grace,
+						"recycle_cooldown", cooldown,
+					)
+					n.eventBus.PublishAsync(
+						connmanager.ConnectionRecycleRequestedEventType,
+						event.NewEvent(
+							connmanager.ConnectionRecycleRequestedEventType,
+							connmanager.ConnectionRecycleRequestedEvent{
+								ConnectionId: connId,
+								ConnKey:      connKey,
+								Reason:       "stalled_active_connection",
+							},
+						),
+					)
+					delete(recycleAt, connKey)
+					lastRecycled[connKey] = now
+				}
+			}
+		}
+	}(stallCheckInterval, stallRecoveryGrace, stallRecycleCooldown)
 	// Configure peer governor
 	// Create ledger peer provider for discovering peers from stake pool relays
 	ledgerPeerProvider, err := ledger.NewLedgerPeerProvider(
@@ -473,6 +616,27 @@ func (n *Node) Run(ctx context.Context) error {
 			}
 		})
 	}
+
+	if n.config.barkPort > 0 {
+		n.bark = bark.NewBark(
+			bark.BarkConfig{
+				Logger:          n.config.logger,
+				DB:              db,
+				TlsCertFilePath: n.config.tlsCertFilePath,
+				TlsKeyFilePath:  n.config.tlsKeyFilePath,
+				Port:            n.config.barkPort,
+			},
+		)
+		if err := n.bark.Start(n.ctx); err != nil { //nolint:contextcheck
+			return fmt.Errorf("failed to start bark server: %w", err)
+		}
+		started = append(started, func() { //nolint:contextcheck
+			if err := n.bark.Stop(context.Background()); err != nil {
+				n.config.logger.Error("failed to stop bark during cleanup", "error", err)
+			}
+		})
+	}
+
 	// Configure Blockfrost API (if port is set)
 	if n.config.blockfrostPort > 0 {
 		listenAddr := net.JoinHostPort(
@@ -559,8 +723,12 @@ func (n *Node) Run(ctx context.Context) error {
 
 	// Initialize block forger if production mode is enabled
 	if n.config.blockProducer {
+		creds, err := n.validateBlockProducerStartup()
+		if err != nil {
+			return fmt.Errorf("block producer startup validation failed: %w", err)
+		}
 		//nolint:contextcheck // n.ctx is the node's lifecycle context, correct parent for forger
-		if err := n.initBlockForger(n.ctx); err != nil {
+		if err := n.initBlockForger(n.ctx, creds); err != nil {
 			return fmt.Errorf("failed to initialize block forger: %w", err)
 		}
 		// Wire forger's slot tracker into ledger state for slot
@@ -658,6 +826,12 @@ func (n *Node) shutdown() error {
 		}
 	}
 
+	if n.bark != nil {
+		if stopErr := n.bark.Stop(ctx); stopErr != nil {
+			err = errors.Join(err, fmt.Errorf("bark shutdown: %w", stopErr))
+		}
+	}
+
 	if n.blockfrostAPI != nil {
 		if stopErr := n.blockfrostAPI.Stop(ctx); stopErr != nil {
 			err = errors.Join(
@@ -734,30 +908,35 @@ func (n *Node) shutdown() error {
 	return err
 }
 
-// initBlockForger initializes the block forger for production mode.
-// This requires VRF, KES, and OpCert key files to be configured.
-func (n *Node) initBlockForger(ctx context.Context) error {
-	// Load pool credentials from configured key files
+func (n *Node) validateBlockProducerStartup() (*forging.PoolCredentials, error) {
 	creds := forging.NewPoolCredentials()
 	if err := creds.LoadFromFiles(
 		n.config.shelleyVRFKey,
 		n.config.shelleyKESKey,
 		n.config.shelleyOperationalCertificate,
 	); err != nil {
-		return fmt.Errorf("failed to load pool credentials: %w", err)
+		return nil, fmt.Errorf("load pool credentials: %w", err)
 	}
-
-	// Validate the operational certificate matches the KES key
 	if err := creds.ValidateOpCert(); err != nil {
-		return fmt.Errorf("invalid operational certificate: %w", err)
+		return nil, fmt.Errorf("validate operational certificate: %w", err)
 	}
-
 	n.config.logger.Info(
-		"loaded pool credentials for block production",
+		"block producer credentials validated",
 		"pool_id", creds.GetPoolID().String(),
 		"opcert_expiry_period", creds.OpCertExpiryPeriod(),
 	)
+	return creds, nil
+}
 
+// initBlockForger initializes the block forger for production mode.
+// This requires VRF, KES, and OpCert key files to be configured.
+func (n *Node) initBlockForger(
+	ctx context.Context,
+	creds *forging.PoolCredentials,
+) error {
+	if creds == nil {
+		return errors.New("nil pool credentials")
+	}
 	// Create mempool adapter for the forging package
 	mempoolAdapter := &mempoolAdapter{mempool: n.mempool}
 
@@ -821,14 +1000,16 @@ func (n *Node) initBlockForger(ctx context.Context) error {
 
 	// Create the block forger with the real leader election
 	forger, err := forging.NewBlockForger(forging.ForgerConfig{
-		Mode:             forging.ModeProduction,
-		Logger:           n.config.logger,
-		Credentials:      creds,
-		LeaderChecker:    election,
-		BlockBuilder:     builder,
-		BlockBroadcaster: broadcaster,
-		SlotClock:        slotClock,
-		PromRegistry:     n.config.promRegistry,
+		Mode:                        forging.ModeProduction,
+		Logger:                      n.config.logger,
+		Credentials:                 creds,
+		LeaderChecker:               election,
+		BlockBuilder:                builder,
+		BlockBroadcaster:            broadcaster,
+		SlotClock:                   slotClock,
+		ForgeSyncToleranceSlots:     n.config.forgeSyncToleranceSlots,
+		ForgeStaleGapThresholdSlots: n.config.forgeStaleGapThresholdSlots,
+		PromRegistry:                n.config.promRegistry,
 	})
 	if err != nil {
 		// Stop election to prevent goroutine leak

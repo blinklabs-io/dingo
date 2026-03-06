@@ -21,8 +21,9 @@ import (
 )
 
 const (
-	InboundConnectionEventType = "connmanager.inbound-conn"
-	ConnectionClosedEventType  = "connmanager.conn-closed"
+	InboundConnectionEventType          = "connmanager.inbound-conn"
+	ConnectionClosedEventType           = "connmanager.conn-closed"
+	ConnectionRecycleRequestedEventType = "connmanager.connection-recycle-requested"
 )
 
 type InboundConnectionEvent struct {
@@ -34,4 +35,12 @@ type InboundConnectionEvent struct {
 type ConnectionClosedEvent struct {
 	ConnectionId ouroboros.ConnectionId
 	Error        error
+}
+
+// ConnectionRecycleRequestedEvent requests that a specific
+// connection be recycled.
+type ConnectionRecycleRequestedEvent struct {
+	ConnectionId ouroboros.ConnectionId
+	ConnKey      string
+	Reason       string
 }

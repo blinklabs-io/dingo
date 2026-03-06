@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/byron"
@@ -128,11 +129,18 @@ func (ls *LedgerState) verifyBlockHeaderCrypto(
 	// at epoch boundaries are verified against the correct nonce.
 	epoch, err := ls.epochForSlot(blockSlot)
 	if err != nil {
-		return fmt.Errorf(
-			"block header verification rejected: no epoch data for slot %d: %w",
-			blockSlot,
-			err,
-		)
+		// Epoch cache doesn't cover this slot yet. Blockfetch can
+		// deliver blocks past the epoch boundary before the ledger
+		// processing goroutine runs the full epoch rollover. Eagerly
+		// compute the next epoch(s) so verification can proceed.
+		epoch, err = ls.ensureEpochForSlot(blockSlot)
+		if err != nil {
+			return fmt.Errorf(
+				"block header verification rejected: no epoch data for slot %d: %w",
+				blockSlot,
+				err,
+			)
+		}
 	}
 
 	// Reject blocks for which we have epoch data but no nonce.
@@ -211,4 +219,223 @@ func (ls *LedgerState) epochForSlot(slot uint64) (models.Epoch, error) {
 		len(cacheCopy),
 		lastValidEnd,
 	)
+}
+
+// ensureEpochForSlot advances the epoch cache until it covers the target
+// slot, then returns the epoch. This handles the case where blockfetch
+// delivers blocks past an epoch boundary before the ledger processing
+// goroutine has run the full epoch rollover. The epoch nonce is computed
+// from chain data (the last block before the boundary), which is available
+// because blockfetch delivers blocks in order.
+func (ls *LedgerState) ensureEpochForSlot(
+	targetSlot uint64,
+) (models.Epoch, error) {
+	const maxAdvance = 5 // Safety limit against runaway loops
+	for range maxAdvance {
+		if err := ls.advanceEpochCache(); err != nil {
+			return models.Epoch{}, fmt.Errorf(
+				"advance epoch cache: %w",
+				err,
+			)
+		}
+		epoch, err := ls.epochForSlot(targetSlot)
+		if err == nil {
+			return epoch, nil
+		}
+	}
+	return models.Epoch{}, fmt.Errorf(
+		"could not advance epoch cache to cover slot %d after %d advances",
+		targetSlot,
+		maxAdvance,
+	)
+}
+
+// advanceEpochCache computes the next epoch's parameters and nonce from
+// chain data and appends it to the in-memory epoch cache. This is a
+// lightweight alternative to the full processEpochRollover — it only
+// populates the nonce and epoch boundaries needed for header verification,
+// without running pparam updates, snapshot rotation, or DB writes.
+// The full rollover will run later in ledgerProcessBlocks and replace
+// the cache with the authoritative DB-backed version.
+func (ls *LedgerState) advanceEpochCache() error {
+	// Read last epoch under read lock
+	ls.RLock()
+	if len(ls.epochCache) == 0 {
+		ls.RUnlock()
+		return errors.New("epoch cache is empty")
+	}
+	lastEpoch := ls.epochCache[len(ls.epochCache)-1]
+	ls.RUnlock()
+
+	if lastEpoch.LengthInSlots == 0 {
+		return errors.New("last epoch has zero length")
+	}
+
+	newStartSlot := lastEpoch.StartSlot + uint64(lastEpoch.LengthInSlots)
+
+	// Compute epoch nonce (requires DB access, done outside lock)
+	nonce, evolvingNonce, candidateNonce, labNonce, err := ls.computeEpochNonceForSlot(newStartSlot, lastEpoch)
+	if err != nil {
+		return fmt.Errorf(
+			"compute epoch nonce for epoch %d: %w",
+			lastEpoch.EpochId+1,
+			err,
+		)
+	}
+
+	newEpoch := models.Epoch{
+		EpochId:             lastEpoch.EpochId + 1,
+		StartSlot:           newStartSlot,
+		LengthInSlots:       lastEpoch.LengthInSlots,
+		SlotLength:          lastEpoch.SlotLength,
+		EraId:               lastEpoch.EraId,
+		Nonce:               nonce,
+		EvolvingNonce:       evolvingNonce,
+		CandidateNonce:      candidateNonce,
+		LastEpochBlockNonce: labNonce,
+	}
+
+	// Update cache under write lock, checking for concurrent advance
+	ls.Lock()
+	lastCached := ls.epochCache[len(ls.epochCache)-1]
+	if lastCached.EpochId >= newEpoch.EpochId {
+		// Another goroutine or ledger processing already advanced
+		ls.Unlock()
+		return nil
+	}
+	ls.epochCache = append(ls.epochCache, newEpoch)
+	ls.Unlock()
+
+	ls.config.Logger.Debug(
+		"eagerly advanced epoch cache for header verification",
+		"new_epoch", newEpoch.EpochId,
+		"start_slot", newEpoch.StartSlot,
+		"nonce", hex.EncodeToString(newEpoch.Nonce),
+		"prev_epoch_id", lastEpoch.EpochId,
+		"prev_epoch_nonce", hex.EncodeToString(lastEpoch.Nonce),
+		"component", "ledger",
+	)
+
+	return nil
+}
+
+// computeEpochNonceForSlot computes the epoch nonce, evolving nonce,
+// and labNonce for a new epoch starting at epochStartSlot. This
+// mirrors calculateEpochNonce but uses non-transactional DB lookups
+// since we're not inside the ledger processing pipeline.
+//
+// Returns (epochNonce, evolvingNonce, candidateNonce, labNonce, error).
+func (ls *LedgerState) computeEpochNonceForSlot(
+	epochStartSlot uint64,
+	prevEpoch models.Epoch,
+) ([]byte, []byte, []byte, []byte, error) {
+	if ls.config.CardanoNodeConfig == nil {
+		return nil, nil, nil, nil, errors.New("CardanoNodeConfig is nil")
+	}
+	genesisHashHex := ls.config.CardanoNodeConfig.ShelleyGenesisHash
+	if genesisHashHex == "" {
+		return nil, nil, nil, nil, errors.New(
+			"shelley genesis hash not available",
+		)
+	}
+	genesisHash, err := hex.DecodeString(genesisHashHex)
+	if err != nil {
+		return nil, nil, nil, nil, fmt.Errorf(
+			"decode genesis hash: %w", err,
+		)
+	}
+
+	// For the initial epoch (no nonce yet), return genesis hash
+	// for both epoch nonce and initial evolving nonce.
+	if len(prevEpoch.Nonce) == 0 {
+		return genesisHash, genesisHash, genesisHash, nil, nil
+	}
+
+	prevEvolvingNonce := prevEpoch.EvolvingNonce
+	if len(prevEvolvingNonce) == 0 {
+		prevEvolvingNonce = genesisHash
+	}
+
+	// The candidate nonce carries across epochs independently of the
+	// evolving nonce. Fall back to genesis hash when not stored (e.g.,
+	// epochs created before this field existed).
+	prevCandidateNonce := prevEpoch.CandidateNonce
+	if len(prevCandidateNonce) == 0 {
+		prevCandidateNonce = genesisHash
+	}
+
+	candidateNonce, evolvingNonce, err := ls.computeCandidateNonce(
+		nil, // non-transactional
+		prevEvolvingNonce,
+		prevCandidateNonce,
+		prevEpoch.StartSlot,
+		uint64(prevEpoch.LengthInSlots),
+	)
+	if err != nil {
+		return nil, nil, nil, nil, fmt.Errorf(
+			"compute candidate nonce: %w", err,
+		)
+	}
+
+	// Compute the labNonce to SAVE for the next epoch's formula.
+	prevEpochEndSlot := prevEpoch.StartSlot +
+		uint64(prevEpoch.LengthInSlots)
+	var labNonceToSave []byte
+	boundaryBlock, err := database.BlockBeforeSlot(
+		ls.db,
+		prevEpochEndSlot,
+	)
+	if err != nil {
+		if !errors.Is(err, models.ErrBlockNotFound) {
+			return nil, nil, nil, nil, fmt.Errorf(
+				"lookup boundary block: %w", err,
+			)
+		}
+	} else if len(boundaryBlock.PrevHash) > 0 {
+		labNonceToSave = boundaryBlock.PrevHash
+	}
+
+	// Use the LAGGED lastEpochBlockNonce in the formula.
+	lastEpochBlockNonce := prevEpoch.LastEpochBlockNonce
+	if len(lastEpochBlockNonce) == 0 {
+		// NeutralNonce is the identity element of ⭒:
+		//   candidateNonce ⭒ NeutralNonce = candidateNonce
+		ls.config.Logger.Debug(
+			"computed epoch nonce for cache advance "+
+				"(NeutralNonce, using candidateNonce)",
+			"new_epoch_start_slot", epochStartSlot,
+			"prev_epoch_id", prevEpoch.EpochId,
+			"candidate_nonce",
+			hex.EncodeToString(candidateNonce),
+			"epoch_nonce",
+			hex.EncodeToString(candidateNonce),
+			"component", "ledger",
+		)
+		return candidateNonce, evolvingNonce, candidateNonce, labNonceToSave, nil
+	}
+
+	result, err := lcommon.CalculateEpochNonce(
+		candidateNonce,
+		lastEpochBlockNonce,
+		nil,
+	)
+	if err != nil {
+		return nil, nil, nil, nil, fmt.Errorf(
+			"calculate epoch nonce: %w", err,
+		)
+	}
+
+	ls.config.Logger.Debug(
+		"computed epoch nonce for cache advance",
+		"new_epoch_start_slot", epochStartSlot,
+		"prev_epoch_id", prevEpoch.EpochId,
+		"last_epoch_block_nonce",
+		hex.EncodeToString(lastEpochBlockNonce),
+		"candidate_nonce", hex.EncodeToString(candidateNonce),
+		"evolving_nonce", hex.EncodeToString(evolvingNonce),
+		"epoch_nonce", hex.EncodeToString(result.Bytes()),
+		"component", "ledger",
+	)
+
+	return result.Bytes(), evolvingNonce, candidateNonce, labNonceToSave, nil
 }

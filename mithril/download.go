@@ -138,11 +138,10 @@ func parseContentRangeTotal(header string) int64 {
 	if !found {
 		return -1
 	}
-	slashIdx := strings.IndexByte(after, '/')
-	if slashIdx < 0 {
+	_, totalStr, found := strings.Cut(after, "/")
+	if !found {
 		return -1
 	}
-	totalStr := after[slashIdx+1:]
 	if totalStr == "*" || totalStr == "" {
 		return -1
 	}

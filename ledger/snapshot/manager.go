@@ -353,7 +353,7 @@ func (m *Manager) CaptureGenesisSnapshot(ctx context.Context) error {
 	}
 
 	if distribution.TotalPools == 0 {
-		m.logger.Warn(
+		m.logger.Info(
 			"no genesis pools; leader election disabled"+
 				" until pool stake is registered",
 			"component", "snapshot",

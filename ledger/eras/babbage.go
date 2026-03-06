@@ -153,9 +153,12 @@ func CalculateEtaVBabbage(
 	if !ok {
 		return nil, errors.New("unexpected block type")
 	}
+	// Praos (Babbage+) uses domain separation + double hash,
+	// unlike TPraos which uses the raw VRF output directly.
+	vrfNonce := praosVRFNonceValue(h.Body.VrfResult.Output)
 	tmpNonce, err := lcommon.CalculateRollingNonce(
 		prevBlockNonce,
-		h.Body.VrfResult.Output,
+		vrfNonce,
 	)
 	if err != nil {
 		return nil, err
@@ -205,27 +208,9 @@ func ValidateTxBabbage(
 	if len(errs) > 0 {
 		return errors.Join(errs...)
 	}
-	// Validate transaction size against protocol limit
-	if err = ValidateTxSize(tx, tmpPparams.MaxTxSize); err != nil {
-		return err
-	}
-	// Validate fee covers base cost + execution unit prices
-	var pricesMem, pricesSteps *big.Rat
-	if tmpPparams.ExecutionCosts.MemPrice != nil {
-		pricesMem = tmpPparams.ExecutionCosts.MemPrice.ToBigRat()
-	}
-	if tmpPparams.ExecutionCosts.StepPrice != nil {
-		pricesSteps = tmpPparams.ExecutionCosts.StepPrice.ToBigRat()
-	}
-	if err = ValidateTxFee(
-		tx,
-		tmpPparams.MinFeeA,
-		tmpPparams.MinFeeB,
-		pricesMem,
-		pricesSteps,
-	); err != nil {
-		return err
-	}
+	// Core Babbage transaction validity checks (fees/size/etc.) are covered
+	// by babbage.UtxoValidationRules. Keep additional local validation scoped
+	// to script execution compatibility.
 	// Skip script evaluation if TX is marked as not valid
 	if !tx.IsValid() {
 		return nil

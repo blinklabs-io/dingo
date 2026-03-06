@@ -138,6 +138,101 @@ func (d *Database) SetTransaction(
 	return nil
 }
 
+// SetGapBlockTransaction stores a transaction from a mithril gap block.
+// It records blob offsets (TX and UTxO) for CBOR resolution and creates
+// a minimal metadata record, but does NOT look up or consume input
+// UTxOs because the mithril snapshot already reflects the correct
+// spent/unspent state.
+func (d *Database) SetGapBlockTransaction(
+	tx lcommon.Transaction,
+	point ocommon.Point,
+	idx uint32,
+	offsets *BlockIngestionResult,
+	txn *Txn,
+) error {
+	owned := false
+	if txn == nil {
+		txn = d.Transaction(true)
+		owned = true
+		defer txn.Rollback() //nolint:errcheck
+	}
+
+	blob := txn.DB().Blob()
+	if blob == nil {
+		return types.ErrBlobStoreUnavailable
+	}
+	blobTxn := txn.Blob()
+	if blobTxn == nil {
+		return types.ErrNilTxn
+	}
+
+	txHash := tx.Hash()
+	var txHashArray [32]byte
+	copy(txHashArray[:], txHash.Bytes())
+
+	if offsets == nil {
+		return fmt.Errorf(
+			"missing offsets for gap block transaction %s at slot %d",
+			hex.EncodeToString(txHash.Bytes()[:8]),
+			point.Slot,
+		)
+	}
+	txOffset, ok := offsets.TxOffsets[txHashArray]
+	if !ok {
+		return fmt.Errorf(
+			"missing TX offset for gap block %s at slot %d",
+			hex.EncodeToString(txHash.Bytes()[:8]),
+			point.Slot,
+		)
+	}
+	offsetData := EncodeTxOffset(&txOffset)
+	if err := blob.SetTx(blobTxn, txHash.Bytes(), offsetData); err != nil {
+		return fmt.Errorf("set gap block tx offset: %w", err)
+	}
+
+	// Store UTxO offsets for produced outputs
+	for _, utxo := range tx.Produced() {
+		txId := utxo.Id.Id().Bytes()
+		outputIdx := utxo.Id.Index()
+		ref := UtxoRef{
+			TxId:      txHashArray,
+			OutputIdx: outputIdx,
+		}
+		offset, ok := offsets.UtxoOffsets[ref]
+		if !ok {
+			return fmt.Errorf(
+				"missing UTxO offset for gap block %s#%d at slot %d",
+				hex.EncodeToString(txId[:8]),
+				outputIdx,
+				point.Slot,
+			)
+		}
+		offsetData := EncodeUtxoOffset(&offset)
+		if err := blob.SetUtxo(blobTxn, txId, outputIdx, offsetData); err != nil {
+			return fmt.Errorf(
+				"set gap block utxo offset %x#%d: %w",
+				txId[:8], outputIdx, err,
+			)
+		}
+	}
+
+	if err := d.metadata.SetGapBlockTransaction(
+		tx, point, idx, txn.Metadata(),
+	); err != nil {
+		return fmt.Errorf(
+			"set gap block transaction metadata: %w", err,
+		)
+	}
+
+	if owned {
+		if err := txn.Commit(); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
 // SetGenesisTransaction stores a genesis transaction with its UTxO outputs.
 // Genesis transactions have no inputs, witnesses, or fees - just outputs.
 // The offsets map contains pre-computed byte offsets into the synthetic genesis block.
@@ -292,10 +387,40 @@ func (d *Database) GetTransactionsByBlockHash(
 
 // GetTransactionsByAddress returns transactions that involve a given
 // address as either a sender (input) or receiver (output).
+// Results are returned in descending on-chain order.
 func (d *Database) GetTransactionsByAddress(
 	addr lcommon.Address,
 	limit int,
 	offset int,
+	txn *Txn,
+) ([]models.Transaction, error) {
+	zeroHash := lcommon.NewBlake2b224(nil)
+	var paymentKey []byte
+	var stakingKey []byte
+	if pkh := addr.PaymentKeyHash(); pkh != zeroHash {
+		paymentKey = pkh.Bytes()
+	}
+	if skh := addr.StakeKeyHash(); skh != zeroHash {
+		stakingKey = skh.Bytes()
+	}
+	return d.GetTransactionsByAddressKeys(
+		paymentKey,
+		stakingKey,
+		limit,
+		offset,
+		"desc",
+		txn,
+	)
+}
+
+// GetTransactionsByAddressKeys returns transactions for a payment/staking key
+// tuple with pagination and explicit order (asc|desc).
+func (d *Database) GetTransactionsByAddressKeys(
+	paymentKey []byte,
+	stakingKey []byte,
+	limit int,
+	offset int,
+	order string,
 	txn *Txn,
 ) ([]models.Transaction, error) {
 	if txn == nil {
@@ -303,20 +428,54 @@ func (d *Database) GetTransactionsByAddress(
 		defer txn.Release()
 	}
 	txs, err := d.metadata.GetTransactionsByAddress(
-		addr,
+		paymentKey,
+		stakingKey,
+		limit,
+		offset,
+		order,
+		txn.Metadata(),
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"get txs by address payment=%x staking=%x limit=%d offset=%d order=%s: %w",
+			paymentKey,
+			stakingKey,
+			limit,
+			offset,
+			order,
+			err,
+		)
+	}
+	return txs, nil
+}
+
+// GetAddressesByStakingKey returns distinct address mappings for a staking key.
+func (d *Database) GetAddressesByStakingKey(
+	stakingKey []byte,
+	limit int,
+	offset int,
+	txn *Txn,
+) ([]models.AddressTransaction, error) {
+	if txn == nil {
+		txn = d.Transaction(false)
+		defer txn.Release()
+	}
+	addresses, err := d.metadata.GetAddressesByStakingKey(
+		stakingKey,
 		limit,
 		offset,
 		txn.Metadata(),
 	)
 	if err != nil {
 		return nil, fmt.Errorf(
-			"get txs by address limit=%d offset=%d: %w",
+			"get addresses by staking key=%x limit=%d offset=%d: %w",
+			stakingKey,
 			limit,
 			offset,
 			err,
 		)
 	}
-	return txs, nil
+	return addresses, nil
 }
 
 // GetTransactionsByMetadataLabel returns transactions that include metadata
@@ -478,6 +637,14 @@ func (d *Database) TransactionsDeleteRolledback(
 	}
 
 	// Then delete metadata (source of truth)
+	if err := d.metadata.DeleteAddressTransactionsAfterSlot(slot, txn.Metadata()); err != nil {
+		return fmt.Errorf(
+			"failed to delete address transaction mappings after slot %d: %w",
+			slot,
+			err,
+		)
+	}
+
 	err = d.metadata.DeleteTransactionsAfterSlot(slot, txn.Metadata())
 	if err != nil {
 		return fmt.Errorf(

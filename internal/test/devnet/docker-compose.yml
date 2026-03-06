@@ -46,7 +46,6 @@ services:
   dingo-producer:
     build:
       context: ../../..
-      dockerfile: Dockerfile
     container_name: dingo-producer
     depends_on:
       configurator:

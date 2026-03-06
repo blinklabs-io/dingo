@@ -167,6 +167,10 @@ func createTestBlock(
 		if encErr != nil {
 			continue
 		}
+		// Store the CBOR on the header body so that
+		// VerifyBlock's extractOriginalBodyCbor can retrieve it
+		// for KES signature verification.
+		headerBody.SetCbor(headerBodyCbor)
 
 		kesSig, signErr := kes.Sign(kesSk, 0, headerBodyCbor)
 		if signErr != nil {

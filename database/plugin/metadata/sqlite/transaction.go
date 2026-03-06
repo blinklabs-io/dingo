@@ -96,38 +96,6 @@ func (d *MetadataStoreSqlite) resolveReadDB(
 	return db, nil
 }
 
-// addressSQLCondition builds a raw SQL WHERE fragment and
-// bind args for matching UTxO rows by payment/staking key.
-// The prefix is the table alias (e.g. "u"). Returns an
-// empty condition if the address has neither key.
-func addressSQLCondition(
-	addr lcommon.Address,
-	prefix string,
-) (string, []any) {
-	zeroHash := lcommon.NewBlake2b224(nil)
-	hasPayment := addr.PaymentKeyHash() != zeroHash
-	hasStake := addr.StakeKeyHash() != zeroHash
-
-	switch {
-	case hasPayment && hasStake:
-		return fmt.Sprintf(
-				"%s.payment_key = ? AND %s.staking_key = ?",
-				prefix, prefix,
-			), []any{
-				addr.PaymentKeyHash().Bytes(),
-				addr.StakeKeyHash().Bytes(),
-			}
-	case hasPayment:
-		return prefix + ".payment_key = ?",
-			[]any{addr.PaymentKeyHash().Bytes()}
-	case hasStake:
-		return prefix + ".staking_key = ?",
-			[]any{addr.StakeKeyHash().Bytes()}
-	default:
-		return "", nil
-	}
-}
-
 // GetTransactionByHash returns a transaction by its hash
 func (d *MetadataStoreSqlite) GetTransactionByHash(
 	hash []byte,
@@ -180,14 +148,44 @@ func (d *MetadataStoreSqlite) GetTransactionsByBlockHash(
 	return ret, nil
 }
 
+// It builds AddressTransaction rows for a single transaction.
+// deduplication by (payment_key, staking_key) within the tx.
+func collectAddressTransactions(
+	transactionID uint,
+	slot uint64,
+	txIndex uint32,
+	utxos []models.Utxo,
+) []models.AddressTransaction {
+	ret := make([]models.AddressTransaction, 0, len(utxos))
+	seen := make(map[string]struct{}, len(utxos))
+	for _, utxo := range utxos {
+		if len(utxo.PaymentKey) == 0 && len(utxo.StakingKey) == 0 {
+			continue
+		}
+		key := fmt.Sprintf("%x|%x", utxo.PaymentKey, utxo.StakingKey)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		ret = append(ret, models.AddressTransaction{
+			PaymentKey:    bytes.Clone(utxo.PaymentKey),
+			StakingKey:    bytes.Clone(utxo.StakingKey),
+			TransactionID: transactionID,
+			Slot:          slot,
+			TxIndex:       txIndex,
+		})
+	}
+	return ret
+}
+
 // GetTransactionsByAddress returns transactions that involve
-// a given address as either a sender (input) or receiver
-// (output). Results are ordered by slot descending with
-// pagination support.
+// the given payment/staking key with pagination support.
 func (d *MetadataStoreSqlite) GetTransactionsByAddress(
-	addr lcommon.Address,
+	paymentKey []byte,
+	stakingKey []byte,
 	limit int,
 	offset int,
+	order string,
 	txn types.Txn,
 ) ([]models.Transaction, error) {
 	var ret []models.Transaction
@@ -196,26 +194,35 @@ func (d *MetadataStoreSqlite) GetTransactionsByAddress(
 		return nil, err
 	}
 
-	cond, args := addressSQLCondition(addr, "u")
-	if cond == "" {
+	if len(paymentKey) == 0 && len(stakingKey) == 0 {
 		return ret, nil
 	}
 
-	subQuery := fmt.Sprintf(
-		"id IN ("+
-			"SELECT DISTINCT t.id "+
-			"FROM transaction t "+
-			"JOIN utxo u ON "+
-			"(u.transaction_id = t.id "+
-			"OR u.spent_at_tx_id = t.hash) "+
-			"WHERE %s"+
-			")",
-		cond,
-	)
+	addrQuery := db.Model(&models.AddressTransaction{})
+	switch {
+	case len(paymentKey) > 0 && len(stakingKey) > 0:
+		addrQuery = addrQuery.Where(
+			"payment_key = ? AND staking_key = ?",
+			paymentKey,
+			stakingKey,
+		)
+	case len(paymentKey) > 0:
+		addrQuery = addrQuery.Where(
+			"payment_key = ? AND (staking_key IS NULL OR LENGTH(staking_key) = 0)",
+			paymentKey,
+		)
+	default:
+		addrQuery = addrQuery.Where("staking_key = ?", stakingKey)
+	}
 
+	subQuery := addrQuery.Select("DISTINCT transaction_id")
+	direction := "DESC"
+	if strings.EqualFold(order, "asc") {
+		direction = "ASC"
+	}
 	query := db.
-		Where(subQuery, args...).
-		Order("slot DESC").
+		Where("id IN (?)", subQuery).
+		Order(fmt.Sprintf("slot %s, block_index %s, id %s", direction, direction, direction)).
 		Preload(clause.Associations).
 		Preload("Inputs.Assets").
 		Preload("Outputs.Assets").
@@ -234,6 +241,38 @@ func (d *MetadataStoreSqlite) GetTransactionsByAddress(
 		return nil, fmt.Errorf(
 			"get txs by address: %w", result.Error,
 		)
+	}
+	return ret, nil
+}
+
+// GetAddressesByStakingKey returns distinct addresses mapped to a staking key.
+func (d *MetadataStoreMysql) GetAddressesByStakingKey(
+	stakingKey []byte,
+	limit int,
+	offset int,
+	txn types.Txn,
+) ([]models.AddressTransaction, error) {
+	var ret []models.AddressTransaction
+	if len(stakingKey) == 0 {
+		return ret, nil
+	}
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return nil, err
+	}
+	query := db.Model(&models.AddressTransaction{}).
+		Select("MIN(id) AS id, payment_key, staking_key").
+		Where("staking_key = ?", stakingKey).
+		Group("payment_key, staking_key").
+		Order("payment_key ASC")
+	if limit > 0 {
+		query = query.Limit(limit)
+	}
+	if offset > 0 {
+		query = query.Offset(offset)
+	}
+	if result := query.Find(&ret); result.Error != nil {
+		return nil, fmt.Errorf("get addresses by staking key: %w", result.Error)
 	}
 	return ret, nil
 }
@@ -426,6 +465,99 @@ func saveAccount(account *models.Account, db *gorm.DB) error {
 func saveCertRecord(record any, db *gorm.DB) error {
 	result := db.Create(record)
 	return result.Error
+}
+
+// SetGapBlockTransaction stores a transaction record and its produced
+// outputs without looking up or consuming input UTxOs. Gap blocks
+// from mithril sync have their UTxO state already reflected in the
+// snapshot, so input processing must be skipped entirely.
+func (d *MetadataStoreSqlite) SetGapBlockTransaction(
+	tx lcommon.Transaction,
+	point ocommon.Point,
+	idx uint32,
+	txn types.Txn,
+) error {
+	txHash := tx.Hash().Bytes()
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return err
+	}
+	tmpTx := &models.Transaction{
+		Hash:       txHash,
+		Type:       tx.Type(),
+		BlockHash:  point.Hash,
+		BlockIndex: idx,
+		Slot:       point.Slot,
+		Fee:        types.Uint64(tx.Fee().Uint64()),
+		TTL:        types.Uint64(tx.TTL()),
+		Valid:      tx.IsValid(),
+	}
+	// Store produced outputs only (no input lookup or consumption)
+	collateralReturn := tx.CollateralReturn()
+	for _, utxo := range tx.Produced() {
+		if collateralReturn != nil && utxo.Output == collateralReturn {
+			m := models.UtxoLedgerToModel(utxo, point.Slot)
+			tmpTx.CollateralReturn = &m
+			continue
+		}
+		m := models.UtxoLedgerToModel(utxo, point.Slot)
+		tmpTx.Outputs = append(tmpTx.Outputs, m)
+	}
+	outputsToCreate := tmpTx.Outputs
+	tmpTx.Outputs = nil
+	result := db.Clauses(clause.OnConflict{
+		Columns: []clause.Column{{Name: "hash"}},
+		DoUpdates: clause.AssignmentColumns(
+			[]string{"block_hash", "block_index", "slot"},
+		),
+	}).Create(tmpTx)
+	tmpTx.Outputs = outputsToCreate
+	if result.Error != nil {
+		return fmt.Errorf(
+			"create gap block transaction at slot %d: %w",
+			point.Slot,
+			result.Error,
+		)
+	}
+	if tmpTx.ID == 0 {
+		var existing struct{ ID uint }
+		if err := db.Model(&models.Transaction{}).
+			Select("id").
+			Where("hash = ?", txHash).
+			Take(&existing).Error; err != nil {
+			return fmt.Errorf(
+				"fetch transaction ID after upsert: %w", err,
+			)
+		}
+		tmpTx.ID = existing.ID
+	}
+	for i := range tmpTx.Outputs {
+		tmpTx.Outputs[i].ID = 0
+		tmpTx.Outputs[i].TransactionID = &tmpTx.ID
+		result := db.Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "tx_id"}, {Name: "output_idx"}},
+			DoNothing: true,
+		}).Create(&tmpTx.Outputs[i])
+		if result.Error != nil {
+			return fmt.Errorf(
+				"create gap block utxo output %d for tx %x: %w",
+				i, txHash, result.Error,
+			)
+		}
+	}
+	if tmpTx.CollateralReturn != nil {
+		tmpTx.CollateralReturn.CollateralReturnForTxID = &tmpTx.ID
+		if result := db.Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "tx_id"}, {Name: "output_idx"}},
+			DoNothing: true,
+		}).Create(tmpTx.CollateralReturn); result.Error != nil {
+			return fmt.Errorf(
+				"create gap block collateral return: %w",
+				result.Error,
+			)
+		}
+	}
+	return nil
 }
 
 // SetTransaction adds a new transaction to the database and processes all certificates
@@ -819,8 +951,36 @@ func (d *MetadataStoreSqlite) SetTransaction(
 			)
 		}
 	}
-	// Witnesses, scripts, redeemers, and plutus data only stored in API mode
+	// Address indexing, witnesses, scripts, redeemers, and plutus data only stored in API mode
 	if d.storageMode == types.StorageModeAPI {
+		// Index unique addresses participating in this transaction.
+		// Includes inputs, collateral inputs, outputs, and collateral return.
+		addressUtxos := make(
+			[]models.Utxo,
+			0,
+			len(tmpTx.Inputs)+len(tmpTx.Collateral)+len(tmpTx.Outputs)+1,
+		)
+		addressUtxos = append(addressUtxos, tmpTx.Inputs...)
+		addressUtxos = append(addressUtxos, tmpTx.Collateral...)
+		addressUtxos = append(addressUtxos, tmpTx.Outputs...)
+		if tmpTx.CollateralReturn != nil {
+			addressUtxos = append(addressUtxos, *tmpTx.CollateralReturn)
+		}
+		addressTxs := collectAddressTransactions(
+			tmpTx.ID,
+			point.Slot,
+			idx,
+			addressUtxos,
+		)
+		if result := db.Where("transaction_id = ?", tmpTx.ID).
+			Delete(&models.AddressTransaction{}); result.Error != nil {
+			return fmt.Errorf("delete existing address transactions: %w", result.Error)
+		}
+		if len(addressTxs) > 0 {
+			if result := db.Create(&addressTxs); result.Error != nil {
+				return fmt.Errorf("create address transactions: %w", result.Error)
+			}
+		}
 		// Extract and save witness set data
 		// Delete existing witness records to ensure idempotency on retry.
 		// Note: Caller's transaction (via txn parameter) already provides atomicity,
@@ -2199,6 +2359,24 @@ func (d *MetadataStoreSqlite) DeleteTransactionsAfterSlot(
 
 	return nil
 }
+
+// DeleteAddressTransactionsAfterSlot removes address-transaction mapping records
+// added after the given slot.
+func (d *MetadataStoreMysql) DeleteAddressTransactionsAfterSlot(
+	slot uint64,
+	txn types.Txn,
+) error {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return err
+	}
+	if result := db.Where("slot > ?", slot).
+		Delete(&models.AddressTransaction{}); result.Error != nil {
+		return fmt.Errorf("delete address transactions after slot: %w", result.Error)
+	}
+	return nil
+}
+
 
 // DeleteTransactionMetadataLabelsAfterSlot removes transaction metadata label
 // index records added after the given slot.

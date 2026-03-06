@@ -22,6 +22,7 @@ import (
 	"log/slog"
 	"math/big"
 	"net"
+	"sort"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
@@ -331,19 +332,24 @@ func ImportLedgerState(
 	}
 
 	// Import cert state (accounts, pools, DReps)
+	certStatePoolsImported := false
+	certStatePhaseRan := false
 	if !models.IsPhaseCompleted(
 		completedPhase,
 		models.ImportPhaseCertState,
 	) {
+		certStatePhaseRan = true
 		if cfg.State.CertStateData != nil {
-			if err := importCertState(
+			poolsImported, err := importCertState(
 				ctx, cfg, slot, progress,
-			); err != nil {
+			)
+			if err != nil {
 				return fmt.Errorf(
 					"importing cert state: %w",
 					err,
 				)
 			}
+			certStatePoolsImported = poolsImported > 0
 		}
 		if err := setCheckpoint(
 			cfg, models.ImportPhaseCertState,
@@ -363,8 +369,24 @@ func ImportLedgerState(
 		models.ImportPhaseSnapshots,
 	) {
 		if cfg.State.SnapShotsData != nil {
+			allowSnapshotPoolFallback := certStatePhaseRan &&
+				!certStatePoolsImported
+			if !allowSnapshotPoolFallback && !certStatePhaseRan &&
+				!certStatePoolsImported {
+				// On resume, cert-state may have completed in a prior run.
+				// Allow snapshot fallback only when no active pools exist
+				// in the database.
+				hasActivePools, err := hasActivePoolsInDatabase(cfg)
+				if err != nil {
+					return fmt.Errorf(
+						"checking existing pools before snapshot fallback: %w",
+						err,
+					)
+				}
+				allowSnapshotPoolFallback = !hasActivePools
+			}
 			if err := importSnapShots(
-				ctx, cfg, slot, progress,
+				ctx, cfg, slot, progress, allowSnapshotPoolFallback,
 			); err != nil {
 				return fmt.Errorf(
 					"importing stake snapshots: %w",
@@ -459,6 +481,17 @@ func ImportLedgerState(
 	)
 
 	return nil
+}
+
+func hasActivePoolsInDatabase(cfg ImportConfig) (bool, error) {
+	txn := cfg.Database.MetadataTxn(false)
+	defer txn.Release()
+	store := cfg.Database.Metadata()
+	pools, err := store.GetActivePoolKeyHashes(txn.Metadata())
+	if err != nil {
+		return false, err
+	}
+	return len(pools) > 0, nil
 }
 
 // setCheckpoint persists the completed phase if resume tracking
@@ -623,7 +656,7 @@ func importCertState(
 	cfg ImportConfig,
 	slot uint64,
 	progress func(ImportProgress),
-) error {
+) (int, error) {
 	cfg.Logger.Info(
 		"parsing cert state",
 		"component", "ledgerstate",
@@ -632,7 +665,7 @@ func importCertState(
 	certState, err := ParseCertState(cfg.State.CertStateData)
 	if err != nil {
 		if certState == nil {
-			return fmt.Errorf(
+			return 0, fmt.Errorf(
 				"parsing cert state: %w", err,
 			)
 		}
@@ -648,7 +681,7 @@ func importCertState(
 		if err := importAccounts(
 			ctx, cfg, certState.Accounts, slot,
 		); err != nil {
-			return fmt.Errorf(
+			return 0, fmt.Errorf(
 				"importing accounts: %w",
 				err,
 			)
@@ -665,12 +698,14 @@ func importCertState(
 	}
 
 	// Import pools
+	importedPools := 0
 	if len(certState.Pools) > 0 {
 		if err := importPools(
 			ctx, cfg, certState.Pools, slot,
 		); err != nil {
-			return fmt.Errorf("importing pools: %w", err)
+			return 0, fmt.Errorf("importing pools: %w", err)
 		}
+		importedPools = len(certState.Pools)
 		progress(ImportProgress{
 			Stage:   "pools",
 			Current: len(certState.Pools),
@@ -687,7 +722,7 @@ func importCertState(
 		if err := importDReps(
 			ctx, cfg, certState.DReps, slot,
 		); err != nil {
-			return fmt.Errorf("importing DReps: %w", err)
+			return 0, fmt.Errorf("importing DReps: %w", err)
 		}
 		progress(ImportProgress{
 			Stage:   "dreps",
@@ -700,7 +735,7 @@ func importCertState(
 		})
 	}
 
-	return nil
+	return importedPools, nil
 }
 
 // importAccounts imports parsed accounts into the metadata store.
@@ -1003,6 +1038,7 @@ func importSnapShots(
 	cfg ImportConfig,
 	slot uint64,
 	progress func(ImportProgress),
+	allowPoolFallback bool,
 ) error {
 	cfg.Logger.Info(
 		"parsing stake snapshots",
@@ -1123,6 +1159,29 @@ func importSnapShots(
 		})
 	}
 
+	if allowPoolFallback {
+		// Fallback pool import path:
+		// Snapshot data includes pool parameters and remains reliable when
+		// cert-state pool data is unavailable.
+		snapshotPools := collectPoolsFromSnapshots(snapshots)
+		if len(snapshotPools) > 0 {
+			if err := importPools(ctx, cfg, snapshotPools, slot); err != nil {
+				return fmt.Errorf(
+					"importing pools from snapshots: %w",
+					err,
+				)
+			}
+			progress(ImportProgress{
+				Stage:   "pools",
+				Current: len(snapshotPools),
+				Description: fmt.Sprintf(
+					"%d pools imported from snapshots",
+					len(snapshotPools),
+				),
+			})
+		}
+	}
+
 	// Save epoch summary using the "go" snapshot computed above
 	var totalStake uint64
 	var totalDelegators uint64
@@ -1173,6 +1232,36 @@ func importSnapShots(
 		)
 	}
 	return nil
+}
+
+func collectPoolsFromSnapshots(
+	snapshots *ParsedSnapShots,
+) []ParsedPool {
+	type poolMap map[string]*ParsedPool
+	seen := make(map[string]ParsedPool)
+	for _, pm := range []poolMap{
+		snapshots.Mark.PoolParams,
+		snapshots.Set.PoolParams,
+		snapshots.Go.PoolParams,
+	} {
+		for _, pool := range pm {
+			if pool == nil || len(pool.PoolKeyHash) != 28 {
+				continue
+			}
+			hexKey := hex.EncodeToString(pool.PoolKeyHash)
+			seen[hexKey] = *pool
+		}
+	}
+	ret := make([]ParsedPool, 0, len(seen))
+	keys := make([]string, 0, len(seen))
+	for hexKey := range seen {
+		keys = append(keys, hexKey)
+	}
+	sort.Strings(keys)
+	for _, hexKey := range keys {
+		ret = append(ret, seen[hexKey])
+	}
+	return ret
 }
 
 // importTip sets the chain tip to the snapshot's tip and generates
@@ -1318,11 +1407,18 @@ func generateAndSaveEpochs(
 			epochStartSlot = cfg.State.EraBoundSlot +
 				epochsSinceBound*uint64(lengthInSlots)
 		}
+		// NOTE: cfg.State.EvolvingNonce is the tip-time value, which
+		// may be mid-epoch. This is the best available seed at import
+		// time. The first full epoch rollover (processEpochRollover)
+		// will recompute and store the correct end-of-epoch value.
 		// #nosec G115
 		if err := store.SetEpoch(
 			epochStartSlot,
 			cfg.State.Epoch,
 			cfg.State.EpochNonce,
+			cfg.State.EvolvingNonce,
+			nil, // candidateNonce not available from import
+			nil, // lastEpochBlockNonce not available from import
 			uint(cfg.State.EraIndex),
 			slotLength,
 			lengthInSlots,
@@ -1376,6 +1472,9 @@ func generateAndSaveEpochs(
 				startSlot,
 				e,
 				nil, // historical epochs don't need nonce
+				nil, // evolvingNonce not available from import
+				nil, // candidateNonce not available from import
+				nil, // lastEpochBlockNonce not available from import
 				eraId,
 				slotLength,
 				epochLength,
@@ -1429,14 +1528,21 @@ func generateAndSaveEpochs(
 			(e-lastBound.Epoch)*uint64(epochLength)
 
 		var nonce []byte
+		var evolvingNonce []byte
 		if e == cfg.State.Epoch {
 			nonce = cfg.State.EpochNonce
+			// NOTE: tip-time EvolvingNonce (may be mid-epoch).
+			// Corrected by the first full epoch rollover.
+			evolvingNonce = cfg.State.EvolvingNonce
 		}
 
 		if err := store.SetEpoch(
 			startSlot,
 			e,
 			nonce,
+			evolvingNonce,
+			nil, // candidateNonce not available from import
+			nil, // lastEpochBlockNonce not available from import
 			currentEraId,
 			slotLength,
 			epochLength,

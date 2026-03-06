@@ -74,10 +74,12 @@ func FromContext(ctx context.Context) *Config {
 }
 
 const (
-	DefaultBlobPlugin         = "badger"
-	DefaultMetadataPlugin     = "sqlite"
-	DefaultEvictionWatermark  = 0.90
-	DefaultRejectionWatermark = 0.95
+	DefaultBlobPlugin                  = "badger"
+	DefaultMetadataPlugin              = "sqlite"
+	DefaultEvictionWatermark           = 0.90
+	DefaultRejectionWatermark          = 0.95
+	DefaultForgeSyncToleranceSlots     = 100
+	DefaultForgeStaleGapThresholdSlots = 1000
 )
 
 // ErrPluginListRequested is returned when the user requests to list
@@ -194,6 +196,9 @@ type Config struct {
 	RejectionWatermark   float64 `yaml:"rejectionWatermark" envconfig:"DINGO_MEMPOOL_REJECTION_WATERMARK"`
 	PrivatePort          uint    `yaml:"privatePort"                                                      split_words:"true"`
 	RelayPort            uint    `yaml:"relayPort"          envconfig:"port"`
+	BarkBaseUrl          string  `yaml:"barkBaseUrl"        envconfig:"DINGO_BARK_BASE_URL"`
+	BarkSecurityWindow   uint64  `yaml:"barkSecurityWindow" envconfig:"DINGO_BARK_SECURITY_WINDOW"`
+	BarkPort             uint    `yaml:"barkPort"           envconfig:"DINGO_BARK_PORT"`
 	UtxorpcPort          uint    `yaml:"utxorpcPort"        envconfig:"DINGO_UTXORPC_PORT"`
 	MetricsPort          uint    `yaml:"metricsPort"                                                      split_words:"true"`
 	IntersectTip         bool    `yaml:"intersectTip"                                                     split_words:"true"`
@@ -238,6 +243,8 @@ type Config struct {
 	ShelleyVRFKey                 string `yaml:"shelleyVrfKey"                 envconfig:"SHELLEY_VRF_KEY"`
 	ShelleyKESKey                 string `yaml:"shelleyKesKey"                 envconfig:"SHELLEY_KES_KEY"`
 	ShelleyOperationalCertificate string `yaml:"shelleyOperationalCertificate" envconfig:"SHELLEY_OPERATIONAL_CERTIFICATE"`
+	ForgeSyncToleranceSlots       uint64 `yaml:"forgeSyncToleranceSlots"       envconfig:"DINGO_FORGE_SYNC_TOLERANCE_SLOTS"`
+	ForgeStaleGapThresholdSlots   uint64 `yaml:"forgeStaleGapThresholdSlots"   envconfig:"DINGO_FORGE_STALE_GAP_THRESHOLD_SLOTS"`
 
 	// Blockfrost REST API port (0 = disabled)
 	BlockfrostPort uint `yaml:"blockfrostPort" envconfig:"DINGO_BLOCKFROST_PORT"`
@@ -348,6 +355,9 @@ var globalConfig = &Config{
 	PrivateBindAddr:      "127.0.0.1",
 	PrivatePort:          3002,
 	RelayPort:            3001,
+	BarkBaseUrl:          "",
+	BarkSecurityWindow:   10000,
+	BarkPort:             0,
 	UtxorpcPort:          0,
 	Topology:             "",
 	TlsCertFilePath:      "",
@@ -375,6 +385,9 @@ var globalConfig = &Config{
 		CleanupAfterLoad:   true,
 		VerifyCertificates: true,
 	},
+	// Forging defaults
+	ForgeSyncToleranceSlots:     DefaultForgeSyncToleranceSlots,
+	ForgeStaleGapThresholdSlots: DefaultForgeStaleGapThresholdSlots,
 }
 
 func LoadConfig(configFile string) (*Config, error) {
@@ -597,6 +610,12 @@ func LoadConfig(configFile string) (*Config, error) {
 			globalConfig.EvictionWatermark,
 			globalConfig.RejectionWatermark,
 		)
+	}
+	if globalConfig.ForgeSyncToleranceSlots == 0 {
+		globalConfig.ForgeSyncToleranceSlots = DefaultForgeSyncToleranceSlots
+	}
+	if globalConfig.ForgeStaleGapThresholdSlots == 0 {
+		globalConfig.ForgeStaleGapThresholdSlots = DefaultForgeStaleGapThresholdSlots
 	}
 
 	// Validate network name to prevent path traversal (INT-03).

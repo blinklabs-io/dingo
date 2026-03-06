@@ -241,15 +241,25 @@ type MetadataStore interface {
 	) ([]models.Transaction, error)
 
 	// GetTransactionsByAddress retrieves transactions involving
-	// the given address, ordered by slot descending.
+	// the provided payment/staking key pair with pagination and ordering.
 	GetTransactionsByAddress(
-		lcommon.Address,
+		[]byte, // paymentKey
+		[]byte, // stakingKey
+		int, // limit
+		int, // offset
+		string, // order (asc|desc)
+		types.Txn,
+	) ([]models.Transaction, error)
+  
+	// GetAddressesByStakingKey retrieves distinct address mappings for a staking key.
+	GetAddressesByStakingKey(
+		[]byte, // stakingKey
 		int, // limit
 		int, // offset
 		types.Txn,
-	) ([]models.Transaction, error)
-
-	// GetTransactionsByMetadataLabel retrieves transactions that include
+	) ([]models.AddressTransaction, error)
+  
+  // GetTransactionsByMetadataLabel retrieves transactions that include
 	// metadata for the given label.
 	GetTransactionsByMetadataLabel(
 		uint64, // label
@@ -287,6 +297,9 @@ type MetadataStore interface {
 		uint64, // slot
 		uint64, // epoch
 		[]byte, // nonce
+		[]byte, // evolvingNonce
+		[]byte, // candidateNonce
+		[]byte, // lastEpochBlockNonce
 		uint, // era
 		uint, // slotLength
 		uint, // lengthInSlots
@@ -323,6 +336,17 @@ type MetadataStore interface {
 		ocommon.Point,
 		uint32, // idx
 		map[int]uint64, // certDeposits: indexed by certificate position in tx.Certificates(); absent keys are treated as zero/no deposit
+		types.Txn,
+	) error
+
+	// SetGapBlockTransaction stores a transaction record and its
+	// produced outputs without looking up or consuming input UTxOs.
+	// This is used for mithril gap blocks where the snapshot's UTxO
+	// set already reflects the correct spent/unspent state.
+	SetGapBlockTransaction(
+		lcommon.Transaction,
+		ocommon.Point,
+		uint32, // idx
 		types.Txn,
 	) error
 
@@ -501,6 +525,11 @@ type MetadataStore interface {
 	// DeleteTransactionMetadataLabelsAfterSlot removes transaction metadata
 	// label index records added after the given slot.
 	DeleteTransactionMetadataLabelsAfterSlot(uint64, types.Txn) error
+
+	// DeleteAddressTransactionsAfterSlot removes address-transaction mappings
+	// for transactions added after the given slot.
+	DeleteAddressTransactionsAfterSlot(uint64, types.Txn) error
+
 
 	// Governance methods
 

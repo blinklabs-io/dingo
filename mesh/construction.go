@@ -137,6 +137,13 @@ func (s *Server) handleConstructionHash(
 		writeError(w, meshErr)
 		return
 	}
+	if tx == nil {
+		writeError(w, wrapErr(
+			ErrInvalidTransaction,
+			errors.New("decoded transaction is nil"),
+		))
+		return
+	}
 
 	writeJSON(
 		w,
@@ -179,6 +186,13 @@ func (s *Server) parseSignedTransaction(
 	tx, meshErr := decodeTxCbor(txHex)
 	if meshErr != nil {
 		writeError(w, meshErr)
+		return
+	}
+	if tx == nil {
+		writeError(w, wrapErr(
+			ErrInvalidTransaction,
+			errors.New("decoded transaction is nil"),
+		))
 		return
 	}
 
