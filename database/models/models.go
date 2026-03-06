@@ -61,6 +61,7 @@ var MigrateModels = []any{
 	&SyncState{},
 	&Tip{},
 	&Transaction{},
+	&TransactionMetadataLabel{},
 	&UpdateDrep{},
 	&Utxo{},
 	&VoteDelegation{},
