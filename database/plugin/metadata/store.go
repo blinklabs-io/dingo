@@ -536,6 +536,7 @@ type MetadataStore interface {
 	// DeleteAddressTransactionsAfterSlot removes address-transaction mappings
 	// for transactions added after the given slot.
 	DeleteAddressTransactionsAfterSlot(uint64, types.Txn) error
+
 	// DeleteTransactionMetadataLabelsAfterSlot removes transaction metadata
 	// label index records added after the given slot.
 	DeleteTransactionMetadataLabelsAfterSlot(uint64, types.Txn) error
