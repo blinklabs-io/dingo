@@ -246,7 +246,7 @@ func (d *MetadataStoreSqlite) GetTransactionsByAddress(
 }
 
 // GetAddressesByStakingKey returns distinct addresses mapped to a staking key.
-func (d *MetadataStoreMysql) GetAddressesByStakingKey(
+func (d *MetadataStoreSqlite) GetAddressesByStakingKey(
 	stakingKey []byte,
 	limit int,
 	offset int,
@@ -2362,7 +2362,7 @@ func (d *MetadataStoreSqlite) DeleteTransactionsAfterSlot(
 
 // DeleteAddressTransactionsAfterSlot removes address-transaction mapping records
 // added after the given slot.
-func (d *MetadataStoreMysql) DeleteAddressTransactionsAfterSlot(
+func (d *MetadataStoreSqlite) DeleteAddressTransactionsAfterSlot(
 	slot uint64,
 	txn types.Txn,
 ) error {
@@ -2376,7 +2376,6 @@ func (d *MetadataStoreMysql) DeleteAddressTransactionsAfterSlot(
 	}
 	return nil
 }
-
 
 // DeleteTransactionMetadataLabelsAfterSlot removes transaction metadata label
 // index records added after the given slot.
