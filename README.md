@@ -85,7 +85,7 @@ The following environment variables modify Dingo's behavior:
   - `api` additionally stores witnesses, scripts, datums, redeemers, and tx metadata
   - API servers (Blockfrost, UTxO RPC, Mesh) require `api` mode
 - `DINGO_RUN_MODE`
-  - Run mode: empty (default) or `leios` (experimental Leios protocol support)
+  - Run mode: `serve` (full node, default), `load` (batch import), `dev` (development mode), or `leios` (experimental Leios protocol support)
 - `TLS_CERT_FILE_PATH` - SSL certificate to use, requires `TLS_KEY_FILE_PATH`
     (default: empty)
 - `TLS_KEY_FILE_PATH` - SSL certificate key to use (default: empty)
