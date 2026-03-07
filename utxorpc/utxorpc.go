@@ -208,7 +208,7 @@ func (u *Utxorpc) Start(ctx context.Context) error {
 	}
 
 	// Monitor context for cancellation and shutdown server
-	go func() {
+	go func() { //nolint:gosec // G118: goroutine intentionally outlives ctx to perform graceful shutdown
 		<-ctx.Done()
 		u.mu.Lock()
 		if u.server != nil {
