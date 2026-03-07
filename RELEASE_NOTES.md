@@ -6,7 +6,7 @@ title: Release notes
 
 ## v0.22.0 (March 7, 2026)
 
-Hi folks! We’re excited to share what’s included in v0.22.0.
+Hi folks! We're excited to share what's included in v0.22.0.
 
 ### ✨ What's New
 
@@ -44,4 +44,4 @@ Hi folks! We’re excited to share what’s included in v0.22.0.
 
 ### 🙏 Thank You
 
-Thank you for trying Dingo—let us know what you think!
+Thank you for trying Dingo - let us know what you think!
