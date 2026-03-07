@@ -301,10 +301,13 @@ PostgreSQL Options:
 MySQL Options:
 - `host` - MySQL server hostname
 - `port` - MySQL server port
-- `username` - Database user
+- `user` - Database user
 - `password` - Database password
 - `database` - Database name
-
+- `ssl-mode` - MySQL TLS mode (mapped to tls= in DSN)
+- `timezone` - MySQL time zone location (default: UTC)
+- `dsn` - Full MySQL DSN (overrides other options when set)
+- `storage-mode` - Storage tier: core or api (default: core)
 ### Listing Available Plugins
 
 You can see all available plugins and their descriptions:
