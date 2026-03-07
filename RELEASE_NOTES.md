@@ -6,7 +6,7 @@ title: Release notes
 
 ## Dingo v0.22.0: faster bootstrap, optional APIs, and block production
 
-**Date:** March 7, 2026  \
+**Date:** March 7, 2026  
 **Version:** v0.22.0
 
 Hi folks! Let’s dive in—this release makes it easier to spin up Dingo, run optional APIs, and produce blocks.
@@ -29,7 +29,7 @@ Hi folks! Let’s dive in—this release makes it easier to spin up Dingo, run o
 - **More accurate stake snapshots**: Get more accurate stake snapshots and stake distribution queries for better scheduling and API responses.
 - **More reliable leader scheduling**: Make leader election and epoch/slot tracking more reliable across epoch boundaries and snapshot/import scenarios.
 - **Tighter peer controls**: Harden network and peer management with stricter validation, caps, connection limits, and improved node-to-node links.
-- **More predictable transaction pool behavior**: Keep the transaction pool more predictable under pressure with eviction watermarks, TTL cleanup, and deadlock-resistant validation.
+- **More predictable transaction pool behavior**: Keep the transaction pool more predictable under pressure with eviction watermarks, automatic cleanup, and deadlock-resistant validation.
 - **Better observability**: Beef up observability with additional Prometheus metrics, forging metrics, and cleaner structured logging.
 - **Expanded docs**: Expand docs and operational guidance to make setup and architecture easier to understand.
 
