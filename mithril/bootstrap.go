@@ -567,7 +567,10 @@ func VerifyCertificateChain(
 		return errors.New("certificate hash is empty")
 	}
 
-	const maxDepth = 100
+	// Certificate chains on long-lived networks can exceed hundreds
+	// of links; keep a high bound to prevent runaway loops while
+	// allowing normal operation.
+	const maxDepth = 10000
 
 	currentHash := certificateHash
 	seen := make(map[string]bool)
