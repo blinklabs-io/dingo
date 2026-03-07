@@ -19,6 +19,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -386,4 +387,59 @@ func TestFindImmutableDir(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestVerifyCertificateChainAllowsDeepChains(t *testing.T) {
+	const chainDepth = 150
+	const snapshotDigest = "snapshot-digest-123"
+
+	certs := make(map[string]Certificate, chainDepth+1)
+	for i := 0; i <= chainDepth; i++ {
+		hash := fmt.Sprintf("cert-%03d", i)
+		prev := fmt.Sprintf("cert-%03d", i+1)
+		if i == chainDepth {
+			prev = hash
+		}
+		cert := Certificate{
+			Hash:         hash,
+			PreviousHash: prev,
+			ProtocolMessage: ProtocolMessage{
+				MessageParts: map[string]string{},
+			},
+		}
+		if i == 0 {
+			cert.ProtocolMessage.MessageParts["snapshot_digest"] =
+				snapshotDigest
+		}
+		certs[hash] = cert
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(
+		w http.ResponseWriter,
+		r *http.Request,
+	) {
+		var hash string
+		_, err := fmt.Sscanf(r.URL.Path, "/certificate/%s", &hash)
+		if err != nil {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		cert, ok := certs[hash]
+		if !ok {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(cert)
+	}))
+	t.Cleanup(server.Close)
+
+	client := NewClient(server.URL)
+	err := VerifyCertificateChain(
+		context.Background(),
+		client,
+		"cert-000",
+		snapshotDigest,
+	)
+	require.NoError(t, err)
 }
