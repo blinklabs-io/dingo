@@ -21,9 +21,9 @@ import (
 )
 
 const (
-	InboundConnectionEventType          = "connmanager.inbound-conn"
-	ConnectionClosedEventType           = "connmanager.conn-closed"
-	ConnectionRecycleRequestedEventType = "connmanager.connection-recycle-requested"
+	InboundConnectionEventType          = "connmanager.inbound_conn"
+	ConnectionClosedEventType           = "connmanager.conn_closed"
+	ConnectionRecycleRequestedEventType = "connmanager.connection_recycle_requested"
 )
 
 type InboundConnectionEvent struct {

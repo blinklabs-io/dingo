@@ -24,11 +24,11 @@ import (
 )
 
 const (
-	BlockfetchEventType        event.EventType = "blockfetch.event"
+	BlockfetchEventType        event.EventType = "ledger.blockfetch"
 	BlockEventType             event.EventType = "ledger.block"
-	ChainsyncEventType         event.EventType = "chainsync.event"
+	ChainsyncEventType         event.EventType = "ledger.chainsync"
 	LedgerErrorEventType       event.EventType = "ledger.error"
-	PoolStateRestoredEventType event.EventType = "ledger.pool.restored"
+	PoolStateRestoredEventType event.EventType = "ledger.pool_restored"
 	TransactionEventType       event.EventType = "ledger.tx"
 )
 

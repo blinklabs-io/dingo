@@ -21,7 +21,7 @@ import (
 
 const (
 	ChainUpdateEventType = "chain.update"
-	ChainForkEventType   = "chain.fork-detected"
+	ChainForkEventType   = "chain.fork_detected"
 )
 
 type ChainBlockEvent struct {
