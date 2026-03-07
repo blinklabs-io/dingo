@@ -11,15 +11,18 @@
 
 # Dingo
 
-⚠️ This is a work in progress and is currently under heavy development
-
 A high-performance Cardano blockchain node implementation in Go by Blink Labs. Dingo provides:
 - Full chain synchronization and validation via Ouroboros consensus protocol
-- UTxO tracking with 41 UTXO validation rules and Plutus smart contract execution
+- UTxO tracking with 41 UTXO validation rules and Plutus V1/V2/V3 smart contract execution
+- Block production with VRF leader election and stake snapshots
+- Multi-peer chain selection with density comparison and VRF tie-breaking
 - Client connectivity for wallets and applications
-- Pluggable storage backends (Badger, SQLite, PostgreSQL, GCS, S3)
-- Peer governance with dynamic peer selection and topology support
+- Pluggable storage backends (Badger, SQLite, PostgreSQL, MySQL, GCS, S3)
+- Tiered storage modes ("core" for consensus, "api" for full indexing)
+- Peer governance with dynamic peer selection, ledger peers, and topology support
 - Chain rollback support for handling forks with automatic state restoration
+- Fast bootstrapping via built-in Mithril client
+- Multiple API servers: UTxO RPC, Blockfrost-compatible REST, Mesh (Coinbase Rosetta)
 
 Note: On Windows systems, named pipes are used instead of Unix sockets for node-to-client communication.
 
@@ -29,12 +32,13 @@ Note: On Windows systems, named pipes are used instead of Unix sockets for node-
 
 ## Running
 
-Dingo supports configuration via both a YAML config file (`dingo.yaml`) and uses environment
-variables to modify its own behavior.
+Dingo supports configuration via a YAML config file (`dingo.yaml`), environment variables, and command-line flags. Priority: CLI flags > environment variables > YAML config > defaults.
 
 A sample configuration file is provided at `dingo.yaml.example`. You can copy and edit this file to configure Dingo for your local or production environment.
 
-In addition to the configuration file, Dingo's behavior can be changed via the following environment variables:
+### Environment Variables
+
+The following environment variables modify Dingo's behavior:
 
 - `CARDANO_BIND_ADDR`
   - IP address to bind for listening (default: `0.0.0.0`)
@@ -69,9 +73,31 @@ In addition to the configuration file, Dingo's behavior can be changed via the f
   - Full path to the Cardano node topology (default: "")
 - `DINGO_UTXORPC_PORT`
   - TCP port to bind for listening for UTxO RPC (default: `0`, disabled)
+- `DINGO_BLOCKFROST_PORT`
+  - TCP port for the Blockfrost-compatible REST API (default: `0`, disabled)
+- `DINGO_MESH_PORT`
+  - TCP port for the Mesh (Coinbase Rosetta) API (default: `0`, disabled)
+- `DINGO_BARK_PORT`
+  - TCP port for the Bark block archive API (default: `0`, disabled)
+- `DINGO_STORAGE_MODE`
+  - Storage mode: `core` (default) or `api`
+  - `core` stores only consensus data (UTxOs, certs, pools, protocol params)
+  - `api` additionally stores witnesses, scripts, datums, redeemers, and tx metadata
+  - API servers (Blockfrost, UTxO RPC, Mesh) require `api` mode
+- `DINGO_RUN_MODE`
+  - Run mode: `serve` (full node, default), `load` (batch import), `dev` (development mode), or `leios` (experimental Leios protocol support)
 - `TLS_CERT_FILE_PATH` - SSL certificate to use, requires `TLS_KEY_FILE_PATH`
     (default: empty)
 - `TLS_KEY_FILE_PATH` - SSL certificate key to use (default: empty)
+
+### Block Production (SPO Mode)
+
+To run Dingo as a stake pool operator producing blocks:
+
+- `CARDANO_BLOCK_PRODUCER` - Enable block production (default: `false`)
+- `CARDANO_SHELLEY_VRF_KEY` - Path to VRF signing key file
+- `CARDANO_SHELLEY_KES_KEY` - Path to KES signing key file
+- `CARDANO_SHELLEY_OPERATIONAL_CERTIFICATE` - Path to operational certificate file
 
 ## Fast Bootstrapping with Mithril
 
@@ -79,8 +105,8 @@ Instead of syncing from genesis (which can take days on mainnet), you can bootst
 
 | Approach | Command | Use Case | Data Available |
 |----------|---------|----------|---------------|
-| **`dingo sync`** | `dingo sync --mithril` | Consensus nodes, relays | Current ledger state + all blocks |
-| **`mithril-client` + `dingo load`** | Manual download + load | Indexers, API nodes | Full historical transaction/certificate data |
+| `dingo sync --mithril` | `dingo sync --mithril` | Consensus nodes, relays | Current ledger state + all blocks |
+| `mithril-client` + `dingo load` | Manual download + load | Indexers, API nodes | Full historical transaction/certificate data |
 
 ### Option 1: `dingo sync --mithril` (Recommended for Consensus)
 
@@ -114,9 +140,9 @@ This imports:
 - Protocol parameters, governance state, treasury/reserves
 - Complete epoch history for slot-to-time calculations
 
-**What's NOT included**: Individual transaction records, certificate history, witness/script/datum storage, and governance vote records for blocks before the snapshot. These aren't needed for consensus, block production, or serving blocks to peers. New blocks processed after bootstrap will have full metadata.
+What is NOT included: Individual transaction records, certificate history, witness/script/datum storage, and governance vote records for blocks before the snapshot. These are not needed for consensus, block production, or serving blocks to peers. New blocks processed after bootstrap will have full metadata.
 
-**Performance** (preview network, ~4M blocks):
+Performance (preview network, ~4M blocks):
 
 | Phase | Time |
 |-------|------|
@@ -124,7 +150,7 @@ This imports:
 | Extract + download ancillary | ~1 min |
 | Import ledger state (UTxOs, accounts, pools, DReps, epochs) | ~12 min |
 | Load blocks into blob store | ~36 min |
-| **Total** | **~50 min** |
+| Total | ~50 min |
 
 ### Option 2: `mithril-client` + `dingo load` (For Indexers/API Nodes)
 
@@ -190,7 +216,7 @@ rm -rf /tmp/mithril-snapshot
 ./dingo -n preview serve
 ```
 
-This creates full historical data including transaction records, certificate history, witness data, scripts, datums, and governance votes — everything needed for rich query APIs.
+This creates full historical data including transaction records, certificate history, witness data, scripts, datums, and governance votes -- everything needed for rich query APIs.
 
 ### Disk Space Requirements
 
@@ -202,7 +228,7 @@ Bootstrapping requires temporary disk space for both the downloaded snapshot and
 | preprod |       ~60 GB |   ~80 GB |      ~150 GB |
 | preview |       ~15 GB |   ~25 GB |       ~50 GB |
 
-**Note**: These are approximate values that grow over time. The snapshot can be deleted after import, but you need sufficient space for both during the load process.
+These are approximate values that grow over time. The snapshot can be deleted after import, but you need sufficient space for both during the load process.
 
 ## Database Plugins
 
@@ -210,14 +236,15 @@ Dingo supports pluggable storage backends for both blob storage (blocks, transac
 
 ### Available Plugins
 
-**Blob Storage Plugins:**
+Blob Storage Plugins:
 - `badger` - BadgerDB local key-value store (default)
 - `gcs` - Google Cloud Storage blob store
 - `s3` - AWS S3 blob store
 
-**Metadata Storage Plugins:**
+Metadata Storage Plugins:
 - `sqlite` - SQLite relational database (default)
 - `postgres` - PostgreSQL relational database
+- `mysql` - MySQL relational database
 
 ### Plugin Selection
 
@@ -243,34 +270,44 @@ database:
 
 Each plugin supports specific configuration options. See `dingo.yaml.example` for detailed configuration examples.
 
-**BadgerDB Options:**
+BadgerDB Options:
 - `data-dir` - Directory for database files
 - `block-cache-size` - Block cache size in bytes
 - `index-cache-size` - Index cache size in bytes
 - `gc` - Enable garbage collection
 
-**Google Cloud Storage Options:**
+Google Cloud Storage Options:
 - `bucket` - GCS bucket name
 - `project-id` - Google Cloud project ID
 - `prefix` - Path prefix within bucket
 
-**AWS S3 Options:**
+AWS S3 Options:
 - `bucket` - S3 bucket name
 - `region` - AWS region
 - `prefix` - Path prefix within bucket
 - `access-key-id` - AWS access key ID (optional - uses default credential chain if not provided)
 - `secret-access-key` - AWS secret access key (optional - uses default credential chain if not provided)
 
-**SQLite Options:**
+SQLite Options:
 - `data-dir` - Path to SQLite database file
 
-**PostgreSQL Options:**
+PostgreSQL Options:
 - `host` - PostgreSQL server hostname
 - `port` - PostgreSQL server port
 - `username` - Database user
 - `password` - Database password
 - `database` - Database name
 
+MySQL Options:
+- `host` - MySQL server hostname
+- `port` - MySQL server port
+- `user` - Database user
+- `password` - Database password
+- `database` - Database name
+- `ssl-mode` - MySQL TLS mode (mapped to tls= in DSN)
+- `timezone` - MySQL time zone location (default: UTC)
+- `dsn` - Full MySQL DSN (overrides other options when set)
+- `storage-mode` - Storage tier: core or api (default: core)
 ### Listing Available Plugins
 
 You can see all available plugins and their descriptions:
@@ -285,7 +322,7 @@ For information on developing custom storage plugins, see [PLUGIN_DEVELOPMENT.md
 
 ### Example
 
-Running on mainnet (:sweat_smile:):
+Running on mainnet:
 
 ```bash
 CARDANO_NETWORK=mainnet CARDANO_CONFIG=path/to/cardano/configs/mainnet/config.json ./dingo
@@ -332,35 +369,55 @@ testing, so success/failure reports are very welcome and encouraged!
   - [x] UTxO tracking
   - [x] Protocol parameters
   - [x] Genesis validation
+  - [x] Block header validation (VRF/KES/OpCert cryptographic verification)
   - [ ] Certificates
     - [x] Pool registration
     - [x] Stake registration/delegation
     - [x] Account registration checks
+    - [x] DRep registration
     - [ ] Governance
   - [ ] Transaction validation
     - [ ] Phase 1 validation
       - [x] UTxO rules
+      - [x] Fee validation (full fee calculation with script costs)
+      - [x] Transaction size and ExUnit budget validation
       - [ ] Witnesses
       - [ ] Block body
       - [ ] Certificates
       - [ ] Delegation/pools
       - [ ] Governance
-    - [ ] Phase 2 validation
-      - [ ] Smart contracts
+    - [x] Phase 2 validation
+      - [x] Plutus V1 smart contract execution
+      - [x] Plutus V2 smart contract execution
+      - [x] Plutus V3 smart contract execution
+- [x] Block production
+  - [x] VRF leader election with stake snapshots
+  - [x] Block forging with KES/OpCert signing
+  - [x] Slot battle detection
 - [x] Mempool
   - [x] Accept transactions from local clients
   - [x] Distribute transactions to other nodes
   - [x] Validation of transaction on add
   - [x] Consumer tracking
   - [x] Transaction purging on chain update
+  - [x] Watermark-based eviction and rejection
 - [x] Database Recovery
-  - [x] Chain rollback support (SQLite and PostgreSQL plugins)
+  - [x] Chain rollback support (SQLite, PostgreSQL, and MySQL plugins)
   - [x] State restoration on rollback
   - [x] WAL mode for crash recovery
   - [x] Automatic rollback on transaction error
-- [x] Plutus Validation
-  - [x] Plutus V3 smart contract validation
-  - [ ] Plutus V1/V2 smart contract validation
+- [x] Stake Snapshots
+  - [x] Mark/Set/Go rotation at epoch boundaries
+  - [x] Genesis snapshot capture
+- [x] API Servers
+  - [x] UTxO RPC (gRPC)
+  - [x] Blockfrost-compatible REST API
+  - [x] Mesh (Coinbase Rosetta) API
+  - [x] Bark block archive API
+- [x] Mithril Bootstrap
+  - [x] Built-in Mithril client
+  - [x] Ledger state import (UTxOs, accounts, pools, DReps, epochs)
+  - [x] Block loading from ImmutableDB
 
 Additional planned features can be found in our issue tracker and project boards.
 
@@ -372,7 +429,7 @@ especially as there is functionality which has not yet been developed.
 
 ## Development / Building
 
-This requires Go 1.23 or better is installed. You also need `make`.
+This requires Go 1.24 or later. You also need `make`.
 
 ```bash
 # Build
