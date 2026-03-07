@@ -19,17 +19,17 @@ import (
 )
 
 const (
-	OutboundConnectionEventType = "peergov.outbound-conn"
-	PeerDemotedEventType        = "peergov.peer-demoted"
-	PeerPromotedEventType       = "peergov.peer-promoted"
-	PeerRemovedEventType        = "peergov.peer-removed"
-	PeerAddedEventType          = "peergov.peer-added"
+	OutboundConnectionEventType = "peergov.outbound_conn"
+	PeerDemotedEventType        = "peergov.peer_demoted"
+	PeerPromotedEventType       = "peergov.peer_promoted"
+	PeerRemovedEventType        = "peergov.peer_removed"
+	PeerAddedEventType          = "peergov.peer_added"
 	// Phase 7: Enhanced Observability event types
-	PeerChurnEventType   = "peergov.peer-churn"
-	QuotaStatusEventType = "peergov.quota-status"
+	PeerChurnEventType   = "peergov.peer_churn"
+	QuotaStatusEventType = "peergov.quota_status"
 	// Phase 5: Bootstrap Peer Lifecycle event types
-	BootstrapExitedEventType   = "peergov.bootstrap-exited"
-	BootstrapRecoveryEventType = "peergov.bootstrap-recovery"
+	BootstrapExitedEventType   = "peergov.bootstrap_exited"
+	BootstrapRecoveryEventType = "peergov.bootstrap_recovery"
 )
 
 type OutboundConnectionEvent struct {
