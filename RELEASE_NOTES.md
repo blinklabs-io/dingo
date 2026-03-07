@@ -6,22 +6,22 @@ title: Release notes
 
 ## v0.22.0 (March 7, 2026)
 
-Hi folks! Here’s what’s included in v0.22.0.
+Hi folks! We’re excited to share what’s included in v0.22.0.
 
 ### ✨ What's New
 
-- **Built-in HTTP APIs**: You can now run Dingo with built-in HTTP APIs so external services can query chain and ledger data without custom integrations.
-- **More complete Mithril bootstrapping**: You can now bootstrap a node from Mithril snapshots more completely, reducing the time and work required to get a usable node from existing network state.
+- **Built-in HTTP APIs**: We rolled out built-in HTTP APIs so external services can query chain and ledger data without custom integrations.
+- **More complete Mithril bootstrapping**: You can now bootstrap a node from Mithril snapshots more completely, cutting down the time and work needed to get a usable node from existing network state.
 - **Signed-URL block archive path**: You can now use a new archive path to fetch blocks via signed URLs, which helps when blocks are stored remotely and need controlled access.
 - **Leios run mode (experimental)**: You can now enable a new Leios execution mode to start experimenting with early Leios protocol plumbing.
-- **Docker-based Cardano DevNet**: You can now run and test against a reproducible Cardano DevNet setup, making end-to-end testing easier and more consistent.
+- **Docker-based Cardano DevNet**: You can now spin up a reproducible Cardano DevNet setup, making end-to-end testing easier and more consistent.
 
 ### 💪 Improvements
 
-- **Faster, more reliable chainsync**: Syncing is now faster and more reliable, especially during catch-up and fork scenarios.
+- **Faster, more reliable chainsync**: Syncing is now blazing fast and more reliable, especially during catch-up and fork scenarios.
 - **More efficient near-tip validation**: Ledger validation during initial sync is now more efficient so you can reach a usable tip sooner.
 - **More production-ready forging**: Block production is now easier to operate, improving correctness and observability when forging is enabled.
-- **Storage and query performance**: Storage and query performance improved, especially for CBOR-heavy data paths and larger metadata workloads.
+- **Storage and query performance**: Storage and query performance improved, streamlining CBOR-heavy data paths and larger metadata workloads.
 - **More complete governance and stake tracking**: Governance and stake tracking are now more complete, improving ledger-driven governance and pool/stake insights.
 - **More predictable networking and peer management**: Networking and peer management behavior is now more predictable under load, improving stability when many peers connect.
 - **Safer, more actionable events and metrics**: Events and observability are now safer and more actionable so you can integrate listeners without risking deadlocks.
@@ -44,4 +44,4 @@ Hi folks! Here’s what’s included in v0.22.0.
 
 ### 🙏 Thank You
 
-Thank you for trying Dingo and for sharing issues, ideas, and improvements—keep it coming.
+Thank you for trying Dingo—let us know what you think!
