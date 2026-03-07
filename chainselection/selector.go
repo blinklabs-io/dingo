@@ -439,6 +439,20 @@ func (cs *ChainSelector) selectBestChainLocked() *ouroboros.ConnectionId {
 	var bestPeerTip *PeerChainTip
 
 	for connId, peerTip := range cs.peerTips {
+		// Don't consider peers that are implausibly far behind local tip.
+		// This prevents switching to stale or cross-network peers when
+		// local tip and k are known.
+		if cs.securityParam > 0 && cs.localTip.BlockNumber > 0 &&
+			peerTip.Tip.BlockNumber+cs.securityParam < cs.localTip.BlockNumber {
+			cs.config.Logger.Debug(
+				"skipping implausibly-behind peer",
+				"connection_id", connId.String(),
+				"peer_block_number", peerTip.Tip.BlockNumber,
+				"local_block_number", cs.localTip.BlockNumber,
+				"security_param", cs.securityParam,
+			)
+			continue
+		}
 		if peerTip.IsStale(cs.config.StaleTipThreshold) {
 			cs.config.Logger.Debug(
 				"skipping stale peer",

@@ -220,9 +220,21 @@ func (ls *LedgerState) handleEventChainsyncRollback(e ChainsyncEvent) error {
 	// Filter events from non-active connections when chain selection is enabled
 	if activeConnId, configured := ls.detectConnectionSwitch(); configured {
 		if activeConnId == nil {
-			// No active connection set yet, process this event
+			// If we already have local chain progress, avoid applying
+			// rollback/header events until an active connection is
+			// selected. This prevents transient "active=nil" races from
+			// accepting deep rollback signals from non-authoritative peers.
+			if ls.chain.Tip().Point.Slot > 0 {
+				ls.config.Logger.Debug(
+					"no active connection, dropping rollback event",
+					"connection_id", e.ConnectionId.String(),
+					"slot", e.Point.Slot,
+					"local_tip_slot", ls.chain.Tip().Point.Slot,
+				)
+				return nil
+			}
 			ls.config.Logger.Debug(
-				"no active connection, processing rollback event",
+				"no active connection at origin, processing rollback event",
 				"connection_id", e.ConnectionId.String(),
 				"slot", e.Point.Slot,
 			)
@@ -408,9 +420,19 @@ func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 	// Filter events from non-active connections when chain selection is enabled
 	if activeConnId, configured := ls.detectConnectionSwitch(); configured {
 		if activeConnId == nil {
-			// No active connection set yet, process this event
+			// If we already have local chain progress, avoid applying
+			// events until an active connection is selected.
+			if ls.chain.Tip().Point.Slot > 0 {
+				ls.config.Logger.Debug(
+					"no active connection, dropping event",
+					"connection_id", e.ConnectionId.String(),
+					"slot", e.Point.Slot,
+					"local_tip_slot", ls.chain.Tip().Point.Slot,
+				)
+				return nil
+			}
 			ls.config.Logger.Debug(
-				"no active connection, processing event",
+				"no active connection at origin, processing event",
 				"connection_id", e.ConnectionId.String(),
 				"slot", e.Point.Slot,
 			)
