@@ -118,7 +118,7 @@ func (b *Blockfrost) Start(
 	)
 
 	// Monitor context for cancellation
-	go func() {
+	go func() { //nolint:gosec // G118: goroutine intentionally outlives ctx to perform graceful shutdown
 		<-ctx.Done()
 		b.mu.Lock()
 		srv := b.httpServer

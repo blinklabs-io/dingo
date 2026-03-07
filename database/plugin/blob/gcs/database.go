@@ -123,7 +123,7 @@ func (d *BlobStoreGCS) opContext() (context.Context, context.CancelFunc) {
 	if timeout == 0 {
 		timeout = 60 * time.Second
 	}
-	return context.WithTimeout(context.Background(), timeout)
+	return context.WithTimeout(context.Background(), timeout) //nolint:gosec // G118: cancel func is returned to caller
 }
 
 // Close closes the GCS client.
