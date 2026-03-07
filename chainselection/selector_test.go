@@ -1139,3 +1139,46 @@ func TestChainSelectorNormalOperationWithinLimit(t *testing.T) {
 		)
 	}
 }
+
+func TestSelectBestChainSkipsImplausiblyBehindPeer(t *testing.T) {
+	cs := NewChainSelector(ChainSelectorConfig{
+		SecurityParam: 2160,
+	})
+
+	cs.SetLocalTip(ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 100000, Hash: []byte("local")},
+		BlockNumber: 50000,
+	})
+
+	behindConn := newTestConnectionId(1)
+	behindTip := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 70000, Hash: []byte("behind")},
+		BlockNumber: 47000, // 3000 behind (>k)
+	}
+	cs.UpdatePeerTip(behindConn, behindTip, nil)
+
+	bestPeer := cs.SelectBestChain()
+	assert.Nil(t, bestPeer, "implausibly-behind peer should not be selected")
+}
+
+func TestSelectBestChainAllowsPlausiblyBehindPeer(t *testing.T) {
+	cs := NewChainSelector(ChainSelectorConfig{
+		SecurityParam: 2160,
+	})
+
+	cs.SetLocalTip(ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 100000, Hash: []byte("local")},
+		BlockNumber: 50000,
+	})
+
+	behindConn := newTestConnectionId(1)
+	behindTip := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 98000, Hash: []byte("behind-ok")},
+		BlockNumber: 49000, // 1000 behind (<=k)
+	}
+	cs.UpdatePeerTip(behindConn, behindTip, nil)
+
+	bestPeer := cs.SelectBestChain()
+	require.NotNil(t, bestPeer)
+	assert.Equal(t, behindConn, *bestPeer)
+}

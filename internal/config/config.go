@@ -132,7 +132,7 @@ type ChainsyncConfig struct {
 	// connections. Default: 3.
 	MaxClients int `yaml:"maxClients"   envconfig:"DINGO_CHAINSYNC_MAX_CLIENTS"`
 	// StallTimeout is the duration after which a client with no
-	// activity is considered stalled. Default: "30s".
+	// activity is considered stalled. Default: "2m".
 	StallTimeout string `yaml:"stallTimeout" envconfig:"DINGO_CHAINSYNC_STALL_TIMEOUT"`
 }
 
@@ -142,7 +142,7 @@ type ChainsyncConfig struct {
 func DefaultChainsyncConfig() ChainsyncConfig {
 	return ChainsyncConfig{
 		MaxClients:   3,
-		StallTimeout: "30s",
+		StallTimeout: "2m",
 	}
 }
 
