@@ -2150,13 +2150,18 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 			ls.RUnlock()
 
 			// Compute stability window and cutoff slot outside the callback
-			// to avoid reading ls fields without the lock. Use chain tip slot
-			// (not ledger tip) to prevent enabling validation too early during
-			// historical block sync.
+			// to avoid reading ls fields without the lock. Use the wall-clock
+			// slot as a reference when it exceeds the local chain tip. When
+			// syncing from genesis the local chain tip starts at 0, which
+			// would make cutoffSlot 0 and validate ALL historical blocks.
 			stabilityWindow := ls.calculateStabilityWindowForEra(snapshotEra.Id)
+			referenceSlot := chainTipSlot
+			if wallSlot, err := ls.CurrentSlot(); err == nil && wallSlot > referenceSlot {
+				referenceSlot = wallSlot
+			}
 			var cutoffSlot uint64
-			if chainTipSlot >= stabilityWindow {
-				cutoffSlot = chainTipSlot - stabilityWindow
+			if referenceSlot >= stabilityWindow {
+				cutoffSlot = referenceSlot - stabilityWindow
 			}
 
 			// Track pending state changes during transaction
@@ -2198,6 +2203,17 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 					} else if snapshotChainsyncState == SyncingChainsyncState && next.SlotNumber() >= cutoffSlot {
 						wantEnableValidation = true
 						shouldValidateBlock = true
+					}
+					// Flush accumulated deltas before the first validated
+					// block so that UTxOs created by earlier non-validated
+					// blocks are visible during validation lookups.
+					if shouldValidateBlock && len(deltaBatch.deltas) > 0 {
+						if err := deltaBatch.apply(ls, txn); err != nil {
+							deltaBatch.Release()
+							return err
+						}
+						deltaBatch.Release()
+						deltaBatch = NewLedgerDeltaBatch()
 					}
 					// Compute CBOR offsets for this block (required for transaction storage)
 					var blockOffsets *database.BlockIngestionResult
