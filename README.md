@@ -429,7 +429,7 @@ especially as there is functionality which has not yet been developed.
 
 ## Development / Building
 
-This requires Go 1.24 or better is installed. You also need `make`.
+This requires Go 1.24 or later. You also need `make`.
 
 ```bash
 # Build
