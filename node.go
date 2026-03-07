@@ -431,7 +431,7 @@ func (n *Node) Run(ctx context.Context) error {
 	}
 	stallRecoveryGrace := max(chainsyncCfg.StallTimeout, 30*time.Second)
 	stallRecycleCooldown := max(2*chainsyncCfg.StallTimeout, 2*time.Minute)
-	recyclerCtx, recyclerCancel := context.WithCancel(n.ctx)
+	recyclerCtx, recyclerCancel := context.WithCancel(n.ctx) //nolint:gosec // G118: cancel func stored in started slice
 	started = append(started, recyclerCancel)
 	go func(interval, grace, cooldown time.Duration) {
 		ticker := time.NewTicker(interval)

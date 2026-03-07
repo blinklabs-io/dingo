@@ -142,7 +142,7 @@ func (b *Bark) Start(ctx context.Context) error {
 		return err
 	}
 
-	go func() {
+	go func() { //nolint:gosec // G118: goroutine intentionally outlives ctx to perform graceful shutdown
 		<-ctx.Done()
 		b.mu.Lock()
 		if b.server == server {

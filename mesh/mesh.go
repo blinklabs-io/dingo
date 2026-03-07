@@ -189,7 +189,7 @@ func (s *Server) Start(ctx context.Context) error {
 	// Launch context monitor before unlocking so there
 	// is no window where Stop() could race with the
 	// goroutine not yet existing.
-	go func() {
+	go func() { //nolint:gosec // G118: goroutine intentionally outlives ctx to perform graceful shutdown
 		<-ctx.Done()
 		s.mu.Lock()
 		srv := s.httpServer
