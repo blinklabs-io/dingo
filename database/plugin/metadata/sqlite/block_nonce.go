@@ -72,6 +72,27 @@ func (d *MetadataStoreSqlite) GetBlockNonce(
 	return ret.Nonce, nil
 }
 
+// GetBlockNoncesInSlotRange retrieves all block nonces where slot >= startSlot and slot < endSlot.
+func (d *MetadataStoreSqlite) GetBlockNoncesInSlotRange(
+	startSlot uint64,
+	endSlot uint64,
+	txn types.Txn,
+) ([]models.BlockNonce, error) {
+	var results []models.BlockNonce
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return nil, err
+	}
+	result := db.
+		Where("slot >= ? AND slot < ?", startSlot, endSlot).
+		Order("slot ASC").
+		Find(&results)
+	if result.Error != nil {
+		return nil, result.Error
+	}
+	return results, nil
+}
+
 // DeleteBlockNoncesBeforeSlot deletes block_nonce records with slot less than the specified value
 func (d *MetadataStoreSqlite) DeleteBlockNoncesBeforeSlot(
 	slotNumber uint64,

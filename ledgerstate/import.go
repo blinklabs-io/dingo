@@ -83,6 +83,13 @@ type RawLedgerState struct {
 	// tip block nonce so that subsequent block processing computes
 	// correct rolling nonces after a mithril snapshot restore.
 	EvolvingNonce []byte
+	// CandidateNonce is the Praos candidate nonce as of the imported
+	// tip. This is required to correctly continue nonce accumulation
+	// from snapshot tip to epoch boundary.
+	CandidateNonce []byte
+	// LastEpochBlockNonce is the lagged lab nonce from consensus
+	// state (used in epoch nonce calculation).
+	LastEpochBlockNonce []byte
 	// EraBoundsWarning holds a non-fatal error from era bounds
 	// extraction. When set, epoch generation falls back to
 	// the single-epoch path.
@@ -1417,8 +1424,8 @@ func generateAndSaveEpochs(
 			cfg.State.Epoch,
 			cfg.State.EpochNonce,
 			cfg.State.EvolvingNonce,
-			nil, // candidateNonce not available from import
-			nil, // lastEpochBlockNonce not available from import
+			cfg.State.CandidateNonce,
+			cfg.State.LastEpochBlockNonce,
 			uint(cfg.State.EraIndex),
 			slotLength,
 			lengthInSlots,
@@ -1529,11 +1536,15 @@ func generateAndSaveEpochs(
 
 		var nonce []byte
 		var evolvingNonce []byte
+		var candidateNonce []byte
+		var lastEpochBlockNonce []byte
 		if e == cfg.State.Epoch {
 			nonce = cfg.State.EpochNonce
 			// NOTE: tip-time EvolvingNonce (may be mid-epoch).
 			// Corrected by the first full epoch rollover.
 			evolvingNonce = cfg.State.EvolvingNonce
+			candidateNonce = cfg.State.CandidateNonce
+			lastEpochBlockNonce = cfg.State.LastEpochBlockNonce
 		}
 
 		if err := store.SetEpoch(
@@ -1541,8 +1552,8 @@ func generateAndSaveEpochs(
 			e,
 			nonce,
 			evolvingNonce,
-			nil, // candidateNonce not available from import
-			nil, // lastEpochBlockNonce not available from import
+			candidateNonce,
+			lastEpochBlockNonce,
 			currentEraId,
 			slotLength,
 			epochLength,

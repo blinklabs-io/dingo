@@ -16,6 +16,7 @@ package mysql
 
 import (
 	"errors"
+	"fmt"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
@@ -70,6 +71,27 @@ func (d *MetadataStoreMysql) GetBlockNonce(
 		return nil, nil // Record not found
 	}
 	return ret.Nonce, nil
+}
+
+// GetBlockNoncesInSlotRange retrieves all block nonces where slot >= startSlot and slot < endSlot.
+func (d *MetadataStoreMysql) GetBlockNoncesInSlotRange(
+	startSlot uint64,
+	endSlot uint64,
+	txn types.Txn,
+) ([]models.BlockNonce, error) {
+	var results []models.BlockNonce
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return nil, fmt.Errorf("resolveDB failed for slot range [%d,%d): %w", startSlot, endSlot, err)
+	}
+	result := db.
+		Where("slot >= ? AND slot < ?", startSlot, endSlot).
+		Order("slot ASC").
+		Find(&results)
+	if result.Error != nil {
+		return nil, fmt.Errorf("query failed for slot range [%d,%d): %w", startSlot, endSlot, result.Error)
+	}
+	return results, nil
 }
 
 // DeleteBlockNoncesBeforeSlot deletes block_nonce records with slot less than the specified value
