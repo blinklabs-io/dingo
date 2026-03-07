@@ -24,7 +24,36 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/byron"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	utxorpc "github.com/utxorpc/go-codegen/utxorpc/v1alpha/cardano"
 )
+
+// headerOnlyBlock adapts a block header to the Block interface so we can
+// run strict VRF/KES verification at chainsync-header time.
+type headerOnlyBlock struct {
+	header ledger.BlockHeader
+}
+
+func (b headerOnlyBlock) Header() ledger.BlockHeader { return b.header }
+func (b headerOnlyBlock) Type() int                  { return 0 }
+func (b headerOnlyBlock) Transactions() []lcommon.Transaction {
+	return nil
+}
+func (b headerOnlyBlock) Utxorpc() (*utxorpc.Block, error) { return nil, nil }
+func (b headerOnlyBlock) Hash() lcommon.Blake2b256         { return b.header.Hash() }
+func (b headerOnlyBlock) PrevHash() lcommon.Blake2b256     { return b.header.PrevHash() }
+func (b headerOnlyBlock) BlockNumber() uint64              { return b.header.BlockNumber() }
+func (b headerOnlyBlock) SlotNumber() uint64               { return b.header.SlotNumber() }
+func (b headerOnlyBlock) IssuerVkey() lcommon.IssuerVkey   { return b.header.IssuerVkey() }
+func (b headerOnlyBlock) BlockBodySize() uint64            { return b.header.BlockBodySize() }
+func (b headerOnlyBlock) Era() lcommon.Era                 { return b.header.Era() }
+func (b headerOnlyBlock) Cbor() []byte                     { return b.header.Cbor() }
+func (b headerOnlyBlock) BlockBodyHash() lcommon.Blake2b256 {
+	return b.header.BlockBodyHash()
+}
+
+func (ls *LedgerState) verifyBlockHeaderOnlyCrypto(header ledger.BlockHeader) error {
+	return ls.verifyBlockHeaderCrypto(headerOnlyBlock{header: header})
+}
 
 // verifyBlockHeader performs cryptographic verification of a block header.
 // This includes VRF proof verification and KES signature verification.

@@ -21,9 +21,11 @@ import (
 	"fmt"
 	"math"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/blinklabs-io/dingo/chain"
+	"github.com/blinklabs-io/dingo/connmanager"
 	cardano "github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
@@ -156,6 +158,28 @@ func (ls *LedgerState) handleEventBlockfetch(evt event.Event) {
 		}
 	} else if e.Block != nil {
 		if err := ls.handleEventBlockfetchBlock(e); err != nil {
+			if strings.Contains(
+				err.Error(),
+				"block header crypto verification failed",
+			) && ls.config.EventBus != nil {
+				ls.config.Logger.Warn(
+					"recycling connection after header verification failure",
+					"component", "ledger",
+					"connection_id", e.ConnectionId.String(),
+					"slot", e.Point.Slot,
+					"hash", hex.EncodeToString(e.Point.Hash),
+				)
+				ls.config.EventBus.Publish(
+					connmanager.ConnectionRecycleRequestedEventType,
+					event.NewEvent(
+						connmanager.ConnectionRecycleRequestedEventType,
+						connmanager.ConnectionRecycleRequestedEvent{
+							ConnectionId: e.ConnectionId,
+							Reason:       "block_header_verification_failure",
+						},
+					),
+				)
+			}
 			ls.config.Logger.Error(
 				"failed to handle block",
 				"component", "ledger",
@@ -440,6 +464,38 @@ func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 	// Track upstream tip for sync progress reporting
 	if e.Tip.Point.Slot > ls.syncUpstreamTipSlot.Load() {
 		ls.syncUpstreamTipSlot.Store(e.Tip.Point.Slot)
+	}
+
+	// Verify header crypto before accepting it into the header queue.
+	// Skip during historical sync (validationEnabled=false) because
+	// historical blocks were already validated by the network and the
+	// epoch nonce may not be fully computed yet (e.g. Byron→Shelley).
+	if ls.validationEnabled {
+		if err := ls.verifyBlockHeaderOnlyCrypto(e.BlockHeader); err != nil {
+			if ls.config.EventBus != nil {
+				ls.config.Logger.Warn(
+					"recycling connection after header verification failure",
+					"component", "ledger",
+					"connection_id", e.ConnectionId.String(),
+					"slot", e.Point.Slot,
+					"hash", hex.EncodeToString(e.Point.Hash),
+				)
+				ls.config.EventBus.Publish(
+					connmanager.ConnectionRecycleRequestedEventType,
+					event.NewEvent(
+						connmanager.ConnectionRecycleRequestedEventType,
+						connmanager.ConnectionRecycleRequestedEvent{
+							ConnectionId: e.ConnectionId,
+							Reason:       "header_verification_failure",
+						},
+					),
+				)
+			}
+			return fmt.Errorf(
+				"block header crypto verification failed: %w",
+				err,
+			)
+		}
 	}
 
 	if ls.chainsyncState == RollbackChainsyncState {
@@ -759,17 +815,15 @@ func (ls *LedgerState) handleEventBlockfetchBlock(e BlockfetchEvent) error {
 	// exceeding the downstream peer's ChainSync idle timeout.
 
 	// Verify block header cryptographic proofs (VRF, KES).
-	// Verification is always fatal — invalid blocks are rejected
-	// regardless of sync position. The epoch cache is populated at
-	// startup by loadEpochs, so epoch data is available for all
-	// blocks in the current epoch. Epoch transitions are processed
-	// synchronously during ledger block processing, which runs
-	// ahead of blockfetch delivery.
-	if err := ls.verifyBlockHeaderCrypto(e.Block); err != nil {
-		return fmt.Errorf(
-			"block header crypto verification failed: %w",
-			err,
-		)
+	// Skip during historical sync (validationEnabled=false) because
+	// historical blocks were already validated by the network.
+	if ls.validationEnabled {
+		if err := ls.verifyBlockHeaderCrypto(e.Block); err != nil {
+			return fmt.Errorf(
+				"block header crypto verification failed: %w",
+				err,
+			)
+		}
 	}
 	// Add block to chain with its own transaction so it becomes
 	// visible to iterators immediately after commit.
