@@ -8,7 +8,7 @@
 
 **Version:** v0.22.0
 
-Hi folks! Here’s what’s included in v0.22.0.
+Hi folks! Here’s what we shipped in v0.22.0.
 
 ### ✨ What's New
 
@@ -47,6 +47,6 @@ Hi folks! Here’s what’s included in v0.22.0.
 
 ### 🙏 Thank You
 
-Thank you for trying Dingo—your feedback helps us keep improving.
+Thank you for trying!
 
 ---
