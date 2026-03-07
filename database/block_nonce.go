@@ -15,6 +15,7 @@
 package database
 
 import (
+	"github.com/blinklabs-io/dingo/database/models"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
@@ -27,6 +28,26 @@ func (d *Database) GetBlockNonce(
 		return d.metadata.GetBlockNonce(point, nil)
 	}
 	return d.metadata.GetBlockNonce(point, txn.Metadata())
+}
+
+// GetBlockNoncesInSlotRange fetches all block nonces in [startSlot, endSlot).
+func (d *Database) GetBlockNoncesInSlotRange(
+	startSlot uint64,
+	endSlot uint64,
+	txn *Txn,
+) ([]models.BlockNonce, error) {
+	if txn == nil {
+		return d.metadata.GetBlockNoncesInSlotRange(
+			startSlot,
+			endSlot,
+			nil,
+		)
+	}
+	return d.metadata.GetBlockNoncesInSlotRange(
+		startSlot,
+		endSlot,
+		txn.Metadata(),
+	)
 }
 
 // DeleteBlockNoncesBeforeSlot removes all block_nonces older than the given slot number

@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"bytes"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -213,7 +214,10 @@ func (ls *LedgerState) epochForSlot(slot uint64) (models.Epoch, error) {
 		return models.Epoch{}, errors.New("epoch cache is empty")
 	}
 
-	for _, ep := range cacheCopy {
+	// Search newest-to-oldest so that if cache entries overlap
+	// (e.g., after rollback/rebuild), we use the most recent epoch data.
+	for i := len(cacheCopy) - 1; i >= 0; i-- {
+		ep := cacheCopy[i]
 		if ep.LengthInSlots == 0 {
 			continue
 		}
@@ -393,12 +397,80 @@ func (ls *LedgerState) computeEpochNonceForSlot(
 		prevCandidateNonce = genesisHash
 	}
 
+	computeStartSlot := prevEpoch.StartSlot
+	computeEpochLength := uint64(prevEpoch.LengthInSlots)
+	prevEpochEndSlot := prevEpoch.StartSlot +
+		uint64(prevEpoch.LengthInSlots)
+	// When resuming from a snapshot, prevEpoch can carry nonce state
+	// already advanced to the imported tip slot. Continue from the next
+	// slot in that case instead of replaying from epoch start.
+	ls.RLock()
+	currentTipSlot := ls.currentTip.Point.Slot
+	currentTipBlockNonce := append(
+		[]byte(nil),
+		ls.currentTipBlockNonce...,
+	)
+	ls.RUnlock()
+	if currentTipSlot >= prevEpoch.StartSlot &&
+		currentTipSlot < prevEpochEndSlot &&
+		len(prevEpoch.CandidateNonce) == 32 &&
+		len(prevEpoch.EvolvingNonce) == 32 &&
+		len(currentTipBlockNonce) == 32 &&
+		bytes.Equal(prevEpoch.EvolvingNonce, currentTipBlockNonce) {
+		if nextSlot := currentTipSlot + 1; nextSlot < prevEpochEndSlot {
+			computeStartSlot = nextSlot
+			computeEpochLength = prevEpochEndSlot - nextSlot
+		} else {
+			// Tip already at/after epoch end: no additional blocks to fold.
+			computeEpochLength = 0
+		}
+	} else if len(prevEpoch.EvolvingNonce) == 32 {
+		// Resume fallback: when epoch nonce state was checkpointed at an
+		// earlier slot, detect that anchor by matching block nonces in this
+		// epoch range. If found, continue from the following slot instead of
+		// replaying from epoch start.
+		nonceRows, nonceErr := ls.db.GetBlockNoncesInSlotRange(
+			prevEpoch.StartSlot,
+			prevEpochEndSlot,
+			nil,
+		)
+		if nonceErr != nil {
+			return nil, nil, nil, nil, fmt.Errorf(
+				"fetch block nonces in epoch range: %w",
+				nonceErr,
+			)
+		}
+		var anchorSlot uint64
+		var foundAnchor bool
+		for _, row := range nonceRows {
+			if len(row.Nonce) == 32 &&
+				bytes.Equal(prevEpoch.EvolvingNonce, row.Nonce) {
+				anchorSlot = row.Slot
+				foundAnchor = true
+				break
+			}
+		}
+		if !foundAnchor {
+			return nil, nil, nil, nil, fmt.Errorf(
+				"cannot resume epoch nonce: stored evolving nonce has no matching anchor block in epoch range [%d, %d)",
+				prevEpoch.StartSlot,
+				prevEpochEndSlot,
+			)
+		}
+		if anchorSlot+1 < prevEpochEndSlot {
+			computeStartSlot = anchorSlot + 1
+			computeEpochLength = prevEpochEndSlot - computeStartSlot
+		} else {
+			computeEpochLength = 0
+		}
+	}
+
 	candidateNonce, evolvingNonce, err := ls.computeCandidateNonce(
 		nil, // non-transactional
 		prevEvolvingNonce,
 		prevCandidateNonce,
-		prevEpoch.StartSlot,
-		uint64(prevEpoch.LengthInSlots),
+		computeStartSlot,
+		computeEpochLength,
 	)
 	if err != nil {
 		return nil, nil, nil, nil, fmt.Errorf(
@@ -407,8 +479,6 @@ func (ls *LedgerState) computeEpochNonceForSlot(
 	}
 
 	// Compute the labNonce to SAVE for the next epoch's formula.
-	prevEpochEndSlot := prevEpoch.StartSlot +
-		uint64(prevEpoch.LengthInSlots)
 	var labNonceToSave []byte
 	boundaryBlock, err := database.BlockBeforeSlot(
 		ls.db,

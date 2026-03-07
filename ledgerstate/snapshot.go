@@ -349,6 +349,8 @@ func parseSnapshotData(data []byte) (*RawLedgerState, error) {
 	} else if nonces != nil {
 		result.EpochNonce = nonces.EpochNonce
 		result.EvolvingNonce = nonces.EvolvingNonce
+		result.CandidateNonce = nonces.CandidateNonce
+		result.LastEpochBlockNonce = nonces.LastEpochBlockNonce
 	}
 
 	return result, nil
@@ -705,6 +707,12 @@ type praosNonces struct {
 	// EpochNonce is the epoch nonce (eta_0) used for VRF leader
 	// election in the current epoch.
 	EpochNonce []byte
+	// CandidateNonce is the current Praos candidate nonce (eta_c)
+	// at the imported tip.
+	CandidateNonce []byte
+	// LastEpochBlockNonce is the lagged lab nonce used in epoch
+	// nonce calculation.
+	LastEpochBlockNonce []byte
 }
 
 // parsePraosNonces extracts the evolving nonce and epoch nonce from
@@ -836,6 +844,39 @@ func parsePraosNonces(headerStateData []byte) (*praosNonces, error) {
 		)
 	}
 	result.EpochNonce = epochNonce
+
+	// Extract candidate nonce (index 3)
+	candidateNonce, err := decodeNonce(praosState[3])
+	if err != nil {
+		return nil, fmt.Errorf(
+			"decoding candidate nonce: %w", err,
+		)
+	}
+	if candidateNonce != nil && len(candidateNonce) != 32 {
+		return nil, fmt.Errorf(
+			"invalid candidate nonce length %d, expected 32",
+			len(candidateNonce),
+		)
+	}
+	result.CandidateNonce = candidateNonce
+
+	// Extract lastEpochBlockNonce (index 6) when present.
+	// Older eras/encodings may not include this field.
+	if len(praosState) > 6 {
+		lastEpochBlockNonce, err := decodeNonce(praosState[6])
+		if err != nil {
+			return nil, fmt.Errorf(
+				"decoding last epoch block nonce: %w", err,
+			)
+		}
+		if lastEpochBlockNonce != nil && len(lastEpochBlockNonce) != 32 {
+			return nil, fmt.Errorf(
+				"invalid last epoch block nonce length %d, expected 32",
+				len(lastEpochBlockNonce),
+			)
+		}
+		result.LastEpochBlockNonce = lastEpochBlockNonce
+	}
 
 	return result, nil
 }
