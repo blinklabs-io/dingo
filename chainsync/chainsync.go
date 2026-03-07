@@ -38,7 +38,7 @@ const DefaultMaxClients = 3
 // client with no activity is considered stalled. This value
 // must stay in sync with config.DefaultChainsyncConfig() and
 // the fallback in internal/node/node.go.
-const DefaultStallTimeout = 30 * time.Second
+const DefaultStallTimeout = 2 * time.Minute
 
 // ClientStatus represents the sync status of a chainsync client.
 type ClientStatus int

@@ -367,6 +367,13 @@ func (o *Ouroboros) chainsyncClientRollBackward(
 	point ocommon.Point,
 	tip ochainsync.Tip,
 ) error {
+	// Only feed ledger from the currently selected chainsync connection.
+	if o.ChainsyncState != nil {
+		if active := o.ChainsyncState.GetClientConnId(); active != nil &&
+			*active != ctx.ConnectionId {
+			return nil
+		}
+	}
 	// Generate event
 	o.EventBus.Publish(
 		ledger.ChainsyncEventType,
@@ -441,20 +448,39 @@ func (o *Ouroboros) chainsyncClientRollForward(
 				},
 			),
 		)
-		// Publish chainsync event for ledger processing
-		o.EventBus.Publish(
-			ledger.ChainsyncEventType,
-			event.NewEvent(
+		// Only feed ledger from the currently selected chainsync
+		// connection to avoid overloading the ledger subscriber
+		// queue with non-active peer traffic.
+		if o.ChainsyncState == nil {
+			o.EventBus.Publish(
 				ledger.ChainsyncEventType,
-				ledger.ChainsyncEvent{
-					ConnectionId: ctx.ConnectionId,
-					Point:        point,
-					Type:         blockType,
-					BlockHeader:  v,
-					Tip:          tip,
-				},
-			),
-		)
+				event.NewEvent(
+					ledger.ChainsyncEventType,
+					ledger.ChainsyncEvent{
+						ConnectionId: ctx.ConnectionId,
+						Point:        point,
+						Type:         blockType,
+						BlockHeader:  v,
+						Tip:          tip,
+					},
+				),
+			)
+		} else if active := o.ChainsyncState.GetClientConnId(); active == nil ||
+			*active == ctx.ConnectionId {
+			o.EventBus.Publish(
+				ledger.ChainsyncEventType,
+				event.NewEvent(
+					ledger.ChainsyncEventType,
+					ledger.ChainsyncEvent{
+						ConnectionId: ctx.ConnectionId,
+						Point:        point,
+						Type:         blockType,
+						BlockHeader:  v,
+						Tip:          tip,
+					},
+				),
+			)
+		}
 		// Update ChainSync performance metrics for peer scoring
 		o.updateChainsyncMetrics(ctx.ConnectionId, tip)
 	default:
