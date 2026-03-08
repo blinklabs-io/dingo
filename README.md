@@ -9,7 +9,7 @@
   <a href="https://discord.gg/5fPRZnX4qW"><img src="https://img.shields.io/badge/Discord-7289DA?style=flat&logo=discord&logoColor=white" alt="Discord"></a>
 </div>
 
-# Dingo
+> ⚠️ **WARNING: Dingo is under heavy active development and is not yet ready for production use. It should only be used on testnets (preview, preprod) and devnets. Do not use Dingo on mainnet with real funds.**
 
 A high-performance Cardano blockchain node implementation in Go by Blink Labs. Dingo provides:
 - Full chain synchronization and validation via Ouroboros consensus protocol
@@ -98,6 +98,118 @@ To run Dingo as a stake pool operator producing blocks:
 - `CARDANO_SHELLEY_VRF_KEY` - Path to VRF signing key file
 - `CARDANO_SHELLEY_KES_KEY` - Path to KES signing key file
 - `CARDANO_SHELLEY_OPERATIONAL_CERTIFICATE` - Path to operational certificate file
+
+### Quick Start
+
+```bash
+# Preview network (default)
+./dingo
+
+# Mainnet
+CARDANO_NETWORK=mainnet ./dingo
+
+# Or with explicit config path
+CARDANO_NETWORK=mainnet CARDANO_CONFIG=path/to/mainnet/config.json ./dingo
+```
+
+Dingo creates a `dingo.socket` file that speaks Ouroboros node-to-client and is compatible with `cardano-cli`, `adder`, `kupo`, and other Cardano client tools.
+
+Cardano configuration files are bundled in the Docker image. For local builds, you can find them at [docker-cardano-configs](https://github.com/blinklabs-io/docker-cardano-configs/tree/main/config).
+
+## Docker
+
+```bash
+# Run on preview (default)
+docker run -p 3001:3001 ghcr.io/blinklabs-io/dingo
+
+# Run on mainnet with persistent storage
+docker run -p 3001:3001 \
+  -e CARDANO_NETWORK=mainnet \
+  -v dingo-data:/data/db \
+  -v dingo-ipc:/ipc \
+  ghcr.io/blinklabs-io/dingo
+```
+
+The image is based on Debian bookworm-slim and includes `cardano-cli`, `mithril-client`, `nview`, and `txtop`. The Dockerfile sets `CARDANO_DATABASE_PATH=/data/db` and `CARDANO_SOCKET_PATH=/ipc/dingo.socket`, overriding the local defaults of `.dingo` and `dingo.socket` — the volume mounts above map to these container paths.
+
+| Port | Service |
+|------|---------|
+| 3001 | Ouroboros NtN (node-to-node) |
+| 3002 | Ouroboros NtC over TCP |
+| 12798 | Prometheus metrics |
+
+## Storage Modes
+
+Dingo has two storage modes that control how much data is persisted:
+
+| Mode | What's Stored | Use Case |
+|------|---------------|----------|
+| `core` (default) | UTxOs, certificates, pools, protocol parameters | Relays, block producers |
+| `api` | Core data + witnesses, scripts, datums, redeemers, tx metadata | Nodes serving API queries |
+
+```bash
+# Relay or block producer (default)
+./dingo
+
+# API node
+DINGO_STORAGE_MODE=api ./dingo
+```
+
+Or in `dingo.yaml`:
+
+```yaml
+storageMode: "api"
+```
+
+## API Servers
+
+Dingo includes four API servers, all disabled by default. Enable them by setting a non-zero port. All API servers except Bark require `storageMode: "api"`.
+
+| API | Port Env Var | Default | Protocol |
+|-----|-------------|---------|----------|
+| UTxO RPC | `DINGO_UTXORPC_PORT` | disabled | gRPC |
+| Blockfrost | `DINGO_BLOCKFROST_PORT` | disabled | REST |
+| Mesh (Rosetta) | `DINGO_MESH_PORT` | disabled | REST |
+| Bark | `DINGO_BARK_PORT` | disabled | RPC |
+
+```bash
+# Enable Blockfrost API on port 3100 and UTxO RPC on port 9090
+DINGO_STORAGE_MODE=api \
+  DINGO_BLOCKFROST_PORT=3100 \
+  DINGO_UTXORPC_PORT=9090 \
+  ./dingo
+```
+
+Or in `dingo.yaml`:
+
+```yaml
+storageMode: "api"
+blockfrostPort: 3100
+utxorpcPort: 9090
+```
+
+### Deployment Patterns
+
+**Relay node** (consensus only, no APIs):
+```bash
+./dingo
+```
+
+**API / data node** (full indexing, one or more APIs):
+```bash
+DINGO_STORAGE_MODE=api DINGO_BLOCKFROST_PORT=3100 ./dingo
+```
+
+**Block producer** (consensus only, with SPO keys):
+```bash
+CARDANO_BLOCK_PRODUCER=true \
+  CARDANO_SHELLEY_VRF_KEY=/keys/vrf.skey \
+  CARDANO_SHELLEY_KES_KEY=/keys/kes.skey \
+  CARDANO_SHELLEY_OPERATIONAL_CERTIFICATE=/keys/opcert.cert \
+  ./dingo
+```
+
+See `dingo.yaml.example` for the full set of configuration options.
 
 ## Fast Bootstrapping with Mithril
 
@@ -308,6 +420,7 @@ MySQL Options:
 - `timezone` - MySQL time zone location (default: UTC)
 - `dsn` - Full MySQL DSN (overrides other options when set)
 - `storage-mode` - Storage tier: core or api (default: core)
+
 ### Listing Available Plugins
 
 You can see all available plugins and their descriptions:
@@ -319,21 +432,6 @@ You can see all available plugins and their descriptions:
 ## Plugin Development
 
 For information on developing custom storage plugins, see [PLUGIN_DEVELOPMENT.md](PLUGIN_DEVELOPMENT.md).
-
-### Example
-
-Running on mainnet:
-
-```bash
-CARDANO_NETWORK=mainnet CARDANO_CONFIG=path/to/cardano/configs/mainnet/config.json ./dingo
-```
-
-Note: you can find cardano configuration files at
-<https://github.com/blinklabs-io/docker-cardano-configs/tree/main/config>
-
-Dingo will drop a `dingo.socket` file which can be used by other clients, such
-as `cardano-cli` or software like `adder` or `kupo`. This has only had limited
-testing, so success/failure reports are very welcome and encouraged!
 
 ## Features
 
@@ -432,14 +530,114 @@ especially as there is functionality which has not yet been developed.
 This requires Go 1.24 or later. You also need `make`.
 
 ```bash
-# Build
+# Format, test, and build (default target)
 make
+
+# Build only
+make build
+
 # Run
 ./dingo
-```
 
-You can also run the code without building a binary, first
-
-```bash
+# Run without building a binary
 go run ./cmd/dingo/
 ```
+
+### Testing
+
+```bash
+make test                                    # All tests with race detection
+go test -v -race -run TestName ./package/    # Single test
+make bench                                   # Benchmarks
+```
+
+### Profiling
+
+```bash
+# Load testdata with CPU and memory profiling
+make test-load-profile
+
+# Analyze
+go tool pprof cpu.prof
+go tool pprof mem.prof
+```
+
+## DevNet
+
+The DevNet runs a private Cardano network with Dingo and `cardano-node` producing blocks side by side. It validates that Dingo forges blocks, maintains consensus, and interoperates with the reference node.
+
+### Architecture
+
+The DevNet uses Docker Compose to run 3 containers on a bridge network:
+
+| Container | Role | Host Port |
+|-----------|------|-----------|
+| `dingo-producer` | Dingo block producer (pool 1) | 3010 |
+| `cardano-producer` | cardano-node block producer (pool 2) | 3011 |
+| `cardano-relay` | Relay node (no block production) | 3012 |
+
+A `configurator` init container generates fresh pool keys and genesis files before nodes start.
+
+### Prerequisites
+
+- Docker with the Compose plugin (`docker compose`)
+- Go 1.24+
+
+### Running the Automated Tests
+
+The test suite builds the Dingo Docker image, starts all containers, waits for health checks, and runs Go integration tests tagged with `//go:build devnet`:
+
+```bash
+cd internal/test/devnet/
+
+# Run all devnet tests
+./run-tests.sh
+
+# Run a specific test
+./run-tests.sh -run TestBasicBlockForging
+
+# Keep containers running after tests pass (for inspection)
+./run-tests.sh --keep-up
+```
+
+Override host ports if needed:
+
+```bash
+DEVNET_DINGO_PORT=4010 DEVNET_CARDANO_PORT=4011 DEVNET_RELAY_PORT=4012 ./run-tests.sh
+```
+
+### Running the DevNet Manually
+
+For longer-running manual tests (soak testing, observing behavior over multiple epochs, debugging):
+
+```bash
+cd internal/test/devnet/
+
+# Start all containers
+./start.sh
+
+# Watch logs
+docker compose -f docker-compose.yml logs -f
+
+# Watch a specific node
+docker compose -f docker-compose.yml logs -f dingo-producer
+
+# Stop and clean up
+./stop.sh
+```
+
+Containers remain running until you stop them. The DevNet parameters (in `testnet.yaml`) use 1-second slots and 1500-slot epochs (~25 minutes per epoch), so you can observe epoch transitions, leader election, and stake snapshot rotation relatively quickly.
+
+### Local DevNet (Without Docker)
+
+For quick iteration without Docker, `devmode.sh` runs Dingo directly against a local devnet genesis. It resets state and updates genesis timestamps on each run:
+
+```bash
+# Run in devnet mode
+./devmode.sh
+
+# With debug logging
+DEBUG=true ./devmode.sh
+```
+
+This stores state in `.devnet/` and uses genesis configs from `config/cardano/devnet/`. It runs a single Dingo node (no cardano-node counterpart), which is useful for testing startup, epoch transitions, and block production in isolation.
