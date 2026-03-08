@@ -331,6 +331,10 @@ func (ls *LedgerState) advanceEpochCache() error {
 	// Update cache under write lock, checking for concurrent advance
 	// or rollback that may have changed the cache since we read it.
 	ls.Lock()
+	if len(ls.epochCache) == 0 {
+		ls.Unlock()
+		return nil
+	}
 	lastCached := ls.epochCache[len(ls.epochCache)-1]
 	if lastCached.EpochId >= newEpoch.EpochId {
 		// Another goroutine or ledger processing already advanced
