@@ -8,7 +8,7 @@
 
 **Version:** v0.22.1
 
-Quick update: here’s what we rolled out in v0.22.1.
+Hi folks! Here’s what we shipped in v0.22.1.
 
 ### ✨ What's New
 
