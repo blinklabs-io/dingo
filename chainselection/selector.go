@@ -27,6 +27,14 @@ import (
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 )
 
+// safeAddUint64 returns a + b, clamped to math.MaxUint64 on overflow.
+func safeAddUint64(a, b uint64) uint64 {
+	if a > math.MaxUint64-b {
+		return math.MaxUint64
+	}
+	return a + b
+}
+
 const (
 	defaultEvaluationInterval = 10 * time.Second
 	defaultStaleTipThreshold  = 60 * time.Second
@@ -134,9 +142,10 @@ func (cs *ChainSelector) Stop() {
 //
 // Returns true if the tip was accepted, false if it was rejected as
 // implausible. A tip is considered implausible if it claims a block number
-// more than securityParam (k) blocks ahead of the local tip. This check is
-// skipped during initial sync (when securityParam is 0 or localTip is at
-// block 0).
+// more than securityParam (k) blocks ahead of a reference point. For known
+// peers, the reference is the peer's own previous tip; for new peers, the
+// reference is the best known peer tip. This avoids rejecting legitimate
+// peers during sync (where the local tip is far behind).
 func (cs *ChainSelector) UpdatePeerTip(
 	connId ouroboros.ConnectionId,
 	tip ochainsync.Tip,
@@ -150,22 +159,44 @@ func (cs *ChainSelector) UpdatePeerTip(
 		cs.mutex.Lock()
 		defer cs.mutex.Unlock()
 
-		// Reject implausible tips that claim to be too far ahead of our
-		// local chain. This prevents a malicious peer from spoofing an
-		// extremely high block number to hijack chain selection.
-		// Skip the check during initial sync when we have no local tip
-		// or securityParam is not yet set.
-		if cs.securityParam > 0 && cs.localTip.BlockNumber > 0 {
-			maxPlausibleBlock := cs.localTip.BlockNumber +
-				cs.securityParam
-			if tip.BlockNumber > maxPlausibleBlock {
+		// Reject implausible tips that claim to be too far ahead of
+		// a reference point. Three cases:
+		//  1. Known peer: compare against the peer's own previous
+		//     tip — chainsync advances incrementally so the delta
+		//     is always small. Always checked (even if prev == 0).
+		//  2. New peer with existing peers: compare against the
+		//     best known peer tip to prevent a malicious newcomer
+		//     from spoofing an extremely high block number.
+		//  3. First peer ever: no reference exists, accept to
+		//     allow bootstrap.
+		if cs.securityParam > 0 {
+			rejectTip := false
+			var referenceBlock uint64
+			if prevTip, exists := cs.peerTips[connId]; exists {
+				// Case 1: known peer — always check
+				referenceBlock = prevTip.Tip.BlockNumber
+				rejectTip = tip.BlockNumber >
+					safeAddUint64(referenceBlock, cs.securityParam)
+			} else if len(cs.peerTips) > 0 {
+				// Case 2: new peer — check against best known
+				for _, pt := range cs.peerTips {
+					if pt.Tip.BlockNumber > referenceBlock {
+						referenceBlock = pt.Tip.BlockNumber
+					}
+				}
+				rejectTip = tip.BlockNumber >
+					safeAddUint64(referenceBlock, cs.securityParam)
+			}
+			// Case 3: len(peerTips)==0 && peer not known → bootstrap
+			if rejectTip {
 				cs.config.Logger.Warn(
 					"rejecting implausible peer tip",
 					"connection_id", connId.String(),
 					"claimed_block", tip.BlockNumber,
-					"local_block", cs.localTip.BlockNumber,
+					"reference_block", referenceBlock,
 					"security_param", cs.securityParam,
-					"max_plausible_block", maxPlausibleBlock,
+					"max_plausible_block",
+					safeAddUint64(referenceBlock, cs.securityParam),
 				)
 				accepted = false
 				return
@@ -443,7 +474,7 @@ func (cs *ChainSelector) selectBestChainLocked() *ouroboros.ConnectionId {
 		// This prevents switching to stale or cross-network peers when
 		// local tip and k are known.
 		if cs.securityParam > 0 && cs.localTip.BlockNumber > 0 &&
-			peerTip.Tip.BlockNumber+cs.securityParam < cs.localTip.BlockNumber {
+			safeAddUint64(peerTip.Tip.BlockNumber, cs.securityParam) < cs.localTip.BlockNumber {
 			cs.config.Logger.Debug(
 				"skipping implausibly-behind peer",
 				"connection_id", connId.String(),
