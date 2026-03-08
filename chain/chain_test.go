@@ -551,7 +551,9 @@ func TestHeaderQueueLimitDefault(t *testing.T) {
 }
 
 func TestHeaderQueueLimitFromSecurityParam(t *testing.T) {
-	securityParam := 5
+	// securityParam must be large enough that sp*2 exceeds
+	// DefaultMaxQueuedHeaders, otherwise the default floor applies.
+	securityParam := chain.DefaultMaxQueuedHeaders/2 + 1
 	expectedLimit := securityParam * 2
 
 	cm, err := chain.NewManager(nil, nil)
