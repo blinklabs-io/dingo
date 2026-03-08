@@ -83,15 +83,18 @@ func (c *Chain) headerTip() ochainsync.Tip {
 }
 
 // MaxQueuedHeaders returns the maximum number of headers that may be
-// queued. When the security parameter is available (securityParam > 0),
-// the limit is securityParam * 2. Otherwise, DefaultMaxQueuedHeaders is
-// used as a safe fallback.
+// queued. The limit is the larger of securityParam * 2 and
+// DefaultMaxQueuedHeaders. Using the default as a floor ensures the
+// queue is large enough for the chainsync/blockfetch pipeline: headers
+// arrive much faster than blocks, so the queue must accommodate several
+// blockfetch batches worth of headers beyond the accumulation threshold
+// to avoid drops that break the header chain.
 func (c *Chain) MaxQueuedHeaders() int {
 	if c == nil || c.manager == nil {
 		return DefaultMaxQueuedHeaders
 	}
 	if sp := c.manager.securityParam; sp > 0 {
-		return sp * 2
+		return max(sp*2, DefaultMaxQueuedHeaders)
 	}
 	return DefaultMaxQueuedHeaders
 }
