@@ -1,5 +1,47 @@
 # Release Notes
 
+## v0.22.1 (March 8, 2026)
+
+**Title:** Stability updates and polish
+
+**Date:** March 8, 2026
+
+**Version:** v0.22.1
+
+Quick update: here’s what we rolled out in v0.22.1.
+
+### ✨ What's New
+
+```json
+{
+  "✨ What's New": [
+    "Release notes for version 0.22.0 were added so you can see a clear summary of changes in one place. The v0.22.0 notes were appended to `RELEASE_NOTES.md` based on the existing knowledge base entry."
+  ],
+  "💪 Improvements": [
+    "Transaction validation is now more consistent so that invalid transactions are still checked for important correctness rules. Conway UTxO validation now runs even when a transaction is marked invalid, and only script evaluation is skipped for those transactions.",
+    "The system can recover more gracefully when historical anchor information is missing during epoch processing. Epoch nonce recomputation now falls back to recomputing from epoch start when an anchor block nonce is not found, instead of failing.",
+    "Queue handling is more resilient under high load to reduce backpressure and dropped work. The main event queue size constant was increased from 1,000 to 10,000, and the header queue size is now clamped to at least the default even when derived from the security parameter.",
+    "Arithmetic and reference handling in implausible-tip checks is now safer and more robust across edge cases. The implausible-tip logic was updated to use peer-based reference blocks with overflow-safe arithmetic, and the test suite was updated to match."
+  ],
+  "📋 What You Need to Know": [
+    "Configuration validation will no longer silently substitute a default API bind address, which may require you to set it explicitly. The automatic default of `0.0.0.0` for the API bind address was removed during config validation, so missing values will remain unset rather than being auto-filled."
+  ],
+  "🔧 Fixes": [
+    "Epoch cache operations are safer during concurrent rollback scenarios to avoid crashes. An empty-epoch-cache guard was added in `advanceEpochCache`, and a concurrency-safe validation of the epoch-cache tail was added before appending a new epoch.",
+    "Test timing is less flaky on slower machines and CI runners. `TestSchedulerRunFailFunc` timing parameters were relaxed to be more tolerant of slower execution."
+  ]
+}
+
+```
+
+### 💪 Improvements
+
+### 🔧 Fixes
+
+### 📋 What You Need to Know
+
+### 🙏 Thank You
+
 ## v0.22.0 (March 7, 2026)
 
 **Title:** Mithril bootstrap, built-in APIs, and block production
