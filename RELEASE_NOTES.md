@@ -8,11 +8,11 @@
 
 **Version:** v0.22.1
 
-Quick update: Here’s what we rolled out in v0.22.1.
+Hi folks! Here’s what we shipped in v0.22.1.
 
 ### ✨ What's New
 
-- **Patch release:** This update focuses on rock-solid reliability and performance tweaks rather than introducing new features.
+- **Patch release:** This patch focuses on reliability and performance improvements rather than introducing new features.
 
 ### 💪 Improvements
 
