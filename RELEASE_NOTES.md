@@ -8,7 +8,7 @@
 
 **Version:** v0.22.1
 
-Quick update: Here’s what we rolled out in v0.22.1.
+Quick update: Here’s what we shipped in v0.22.1.
 
 ### ✨ What's New
 
@@ -16,16 +16,16 @@ Quick update: Here’s what we rolled out in v0.22.1.
 
 ### 💪 Improvements
 
-- **Epoch nonce recomputation:** The node now recovers more gracefully by recomputing from the epoch start when an anchor block nonce is missing.
+- **Epoch nonce recomputation:** The node now recovers more gracefully by recomputing epoch randomness from the epoch start when an anchor block nonce is missing.
 - **Main event queue capacity:** Bursty workloads are handled more smoothly by increasing the main event queue size from 1,000 to 10,000.
-- **Header queue sizing:** Header processing is less likely to stall by guaranteeing the header queue is at least the default size even when derived from the security parameter.
+- **Header queue sizing:** Header processing is less likely to stall by guaranteeing the header queue is at least the default size even when derived from the security parameter (k).
 - **Conway UTxO validation:** Validation is more consistent by still running Conway UTxO checks for transactions marked invalid while skipping only script evaluation.
 
 ### 🔧 Fixes
 
 - **Tip validation:** Implausible-tip checks are now more reliable by using peer-based reference blocks with overflow-safe arithmetic.
-- **Test stability:** TestSchedulerRunFailFunc is less flaky on slower runners by using more tolerant timing parameters.
-- **Rollback concurrency:** Concurrent rollbacks are less likely to panic because advanceEpochCache now guards against an empty epoch cache.
+- **Test stability:** Scheduler tests are less flaky on slower runners by using more tolerant timing parameters.
+- **Rollback concurrency:** Concurrent rollbacks are less likely to panic by guarding against an empty epoch cache during rollback.
 - **Epoch cache safety:** Concurrent epoch cache updates are safer by validating the epoch cache tail before appending a new epoch.
 - **API bind validation:** Config validation no longer defaults the API bind address to 0.0.0.0, avoiding unintended network exposure.
 
