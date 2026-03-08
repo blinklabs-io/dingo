@@ -159,10 +159,6 @@ func (n *Node) configValidate() error {
 			StorageModeAPI,
 		)
 	}
-	// Default bindAddr used for API listeners.
-	if n.config.bindAddr == "" {
-		n.config.bindAddr = "0.0.0.0"
-	}
 	// APIs require "api" storage mode.
 	anyAPIEnabled := n.config.utxorpcPort > 0 ||
 		n.config.blockfrostPort > 0 ||
