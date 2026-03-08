@@ -1365,8 +1365,12 @@ func (ls *LedgerState) calculateEpochNonce(
 		}
 	} else if len(currentEpoch.EvolvingNonce) == 32 {
 		// Resume fallback: if epoch nonce state was checkpointed at an
-		// earlier slot, locate that anchor by matching stored block nonces
-		// and continue from the following slot.
+		// earlier slot (snapshot import), locate that anchor by matching
+		// stored block nonces and continue from the following slot.
+		// If no anchor is found, fall through to the defaults which
+		// compute from epoch start — this is always correct (just
+		// slower) and handles genesis sync where the epoch's
+		// EvolvingNonce was set at creation and never updated.
 		nonceRows, nonceErr := ls.db.GetBlockNoncesInSlotRange(
 			currentEpoch.StartSlot,
 			epochEndSlot,
@@ -1378,28 +1382,18 @@ func (ls *LedgerState) calculateEpochNonce(
 				nonceErr,
 			)
 		}
-		var anchorSlot uint64
-		var foundAnchor bool
 		for _, row := range nonceRows {
 			if len(row.Nonce) == 32 &&
 				bytes.Equal(currentEpoch.EvolvingNonce, row.Nonce) {
-				anchorSlot = row.Slot
-				foundAnchor = true
+				if row.Slot+1 < epochEndSlot {
+					computeStartSlot = row.Slot + 1
+					computeEpochLength = epochEndSlot -
+						computeStartSlot
+				} else {
+					computeEpochLength = 0
+				}
 				break
 			}
-		}
-		if !foundAnchor {
-			return nil, nil, nil, nil, fmt.Errorf(
-				"cannot resume epoch nonce: stored evolving nonce has no matching anchor block in epoch range [%d, %d)",
-				currentEpoch.StartSlot,
-				epochEndSlot,
-			)
-		}
-		if anchorSlot+1 < epochEndSlot {
-			computeStartSlot = anchorSlot + 1
-			computeEpochLength = epochEndSlot - computeStartSlot
-		} else {
-			computeEpochLength = 0
 		}
 	}
 
