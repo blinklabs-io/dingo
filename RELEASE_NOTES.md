@@ -1,5 +1,56 @@
 # Release Notes
 
+## v0.22.1 (March 8, 2026)
+
+**Title:** v0.22.1 patch release
+
+**Date:** March 8, 2026
+
+**Version:** v0.22.1
+
+Quick update: Here’s what we rolled out in v0.22.1.
+
+### ✨ What's New
+
+- Notes to be categorized and formatted from the source update below.
+
+```json
+{
+  "💪 Improvements": [
+    "The system can now recover more gracefully when a required reference value is missing, instead of stopping the process. Specifically, epoch nonce recomputation now falls back to recomputing from the epoch start when an anchor block nonce is unavailable.",
+    "The platform can now handle heavier workloads without falling behind as quickly. Specifically, the main event queue size constant was increased from 1,000 to 10,000 to reduce backpressure under bursty conditions.",
+    "The system now keeps a safer minimum capacity for queued header work to avoid slowdowns during high activity. Specifically, the header queue size is now guaranteed to be at least the default even when it is derived from the security parameter, and the related tests were updated.",
+    "Transaction checks now run more consistently so users get the expected validation behavior even when a transaction is flagged as invalid. Specifically, Conway UTxO validation now still executes for invalid-marked transactions, while only script evaluation is skipped for those transactions."
+  ],
+  "🔧 Fixes": [
+    "Tip-validation is now more reliable and less likely to behave incorrectly in edge-case block layouts. Specifically, the implausible-tip checks were updated to use peer-based reference blocks with overflow-safe arithmetic, and the associated tests were adjusted.",
+    "Automated tests are now less flaky on slower machines and more consistent across environments. Specifically, the timing parameters in TestSchedulerRunFailFunc were relaxed to better tolerate slower runners.",
+    "Rollback-related concurrency is now safer and less likely to crash under rare timing conditions. Specifically, advanceEpochCache now guards against an empty epoch cache to prevent panics during concurrent rollbacks.",
+    "Epoch cache updates are now safer under concurrent activity and less likely to corrupt state. Specifically, a concurrency-safe validation of the epoch cache tail was added before appending a new epoch.",
+    "Configuration validation now avoids silently picking a network bind setting that may not match what you intended. Specifically, the automatic default of 0.0.0.0 for the API bind address was removed during config validation."
+  ]
+}
+
+```
+
+### 💪 Improvements
+
+- Notes to be categorized and formatted from the source update above.
+
+### 🔧 Fixes
+
+- Notes to be categorized and formatted from the source update above.
+
+### 📋 What You Need to Know
+
+- Notes to be categorized and formatted from the source update above.
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
 ## v0.22.0 (March 7, 2026)
 
 **Title:** Mithril bootstrap, built-in APIs, and block production
