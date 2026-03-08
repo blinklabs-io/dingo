@@ -170,13 +170,9 @@ func ValidateTxConway(
 	if _, ok := pp.(*conway.ConwayProtocolParameters); !ok {
 		return ErrIncompatibleProtocolParams
 	}
-	// Conway invalid transactions are expected to fail script validation on-chain.
-	// Skip local UTxO validation for these txs so block replay follows consensus
-	// handling of collateral/produced outputs rather than rejecting the block.
-	if !tx.IsValid() {
-		return nil
-	}
-	// Validate TX through ledger validation rules
+	// Validate TX through ledger validation rules (Phase-1).
+	// These must run even for isValid=false transactions, which still
+	// require valid structure, fees, and UTxO references for collateral.
 	errs := []error{}
 	var err error
 	for idx, validationFunc := range conway.UtxoValidationRules {
@@ -191,9 +187,12 @@ func ValidateTxConway(
 	if len(errs) > 0 {
 		return errors.Join(errs...)
 	}
-	// Core Conway transaction validity checks (fees/size/scripts/etc.) are
-	// covered by conway.UtxoValidationRules. Avoid duplicate local checks
-	// that can drift from upstream consensus behavior.
+	// Skip script evaluation (Phase-2) if TX is marked as not valid.
+	// These transactions failed script validation on-chain; collateral
+	// is consumed instead of regular inputs.
+	if !tx.IsValid() {
+		return nil
+	}
 	return nil
 }
 
