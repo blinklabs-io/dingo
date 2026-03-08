@@ -18,7 +18,7 @@ Quick update: here’s what we rolled out in v0.22.1.
 
 - **Transaction validation:** Transaction validation is more consistent because Conway UTxO validation now runs even when a transaction is marked invalid (script evaluation is still skipped).
 - **Epoch processing:** Epoch processing recovers more gracefully because nonce recomputation falls back to recomputing from epoch start when an anchor block nonce is missing.
-- **Queue handling:** Queue handling is more resilient under load because the main event queue size increased from 1,000 to 10,000 and the header queue size is now clamped to at least the default.
+- **Queue handling:** Queue handling is more solid under load because the main event queue size increased from 1,000 to 10,000 and the header queue size is now clamped to at least the default.
 - **Implausible-tip checks:** Implausible-tip checks are safer across edge cases because the logic now uses peer-based reference blocks with overflow-safe arithmetic.
 
 ### 🔧 Fixes
