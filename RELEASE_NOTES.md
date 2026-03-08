@@ -15,20 +15,20 @@ Quick update: here’s what we rolled out in v0.22.1.
 ```json
 {
   "✨ What's New": [
-    "Release notes for version 0.22.0 were added so you can see a clear summary of changes in one place. The v0.22.0 notes were appended to `RELEASE_NOTES.md` based on the existing knowledge base entry."
+    "Release notes: We added v0.22.0 release notes to `RELEASE_NOTES.md` so you can scan changes in one place."
   ],
   "💪 Improvements": [
-    "Transaction validation is now more consistent so that invalid transactions are still checked for important correctness rules. Conway UTxO validation now runs even when a transaction is marked invalid, and only script evaluation is skipped for those transactions.",
-    "The system can recover more gracefully when historical anchor information is missing during epoch processing. Epoch nonce recomputation now falls back to recomputing from epoch start when an anchor block nonce is not found, instead of failing.",
-    "Queue handling is more resilient under high load to reduce backpressure and dropped work. The main event queue size constant was increased from 1,000 to 10,000, and the header queue size is now clamped to at least the default even when derived from the security parameter.",
-    "Arithmetic and reference handling in implausible-tip checks is now safer and more robust across edge cases. The implausible-tip logic was updated to use peer-based reference blocks with overflow-safe arithmetic, and the test suite was updated to match."
+    "Transaction validation is more consistent because Conway UTxO validation now runs even when a transaction is marked invalid (script evaluation is still skipped).",
+    "Epoch processing recovers more gracefully because nonce recomputation falls back to recomputing from epoch start when an anchor block nonce is missing.",
+    "Queue handling is more resilient under load because the main event queue size increased from 1,000 to 10,000 and the header queue size is now clamped to at least the default.",
+    "Implausible-tip checks are safer across edge cases because the logic now uses peer-based reference blocks with overflow-safe arithmetic."
   ],
   "📋 What You Need to Know": [
-    "Configuration validation will no longer silently substitute a default API bind address, which may require you to set it explicitly. The automatic default of `0.0.0.0` for the API bind address was removed during config validation, so missing values will remain unset rather than being auto-filled."
+    "Config validation no longer defaults the API bind address to `0.0.0.0`, so set it explicitly if you need it."
   ],
   "🔧 Fixes": [
-    "Epoch cache operations are safer during concurrent rollback scenarios to avoid crashes. An empty-epoch-cache guard was added in `advanceEpochCache`, and a concurrency-safe validation of the epoch-cache tail was added before appending a new epoch.",
-    "Test timing is less flaky on slower machines and CI runners. `TestSchedulerRunFailFunc` timing parameters were relaxed to be more tolerant of slower execution."
+    "Epoch cache handling is safer during concurrent rollbacks because `advanceEpochCache` now guards against empty caches and validates the tail before appending a new epoch.",
+    "Tests are less flaky on slower machines because `TestSchedulerRunFailFunc` timing parameters were relaxed."
   ]
 }
 
