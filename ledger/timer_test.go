@@ -92,17 +92,20 @@ func TestScheduler_ChangeInterval(t *testing.T) {
 func TestSchedulerRunFailFunc(t *testing.T) {
 	var failCounter int32
 
-	// Create a Scheduler with 10ms tick interval
-	timer := NewScheduler(10 * time.Millisecond)
+	// Create a Scheduler with 50ms tick interval
+	timer := NewScheduler(50 * time.Millisecond)
 	timer.Start()
 	defer timer.Stop()
 
-	// Registering task to execute every 3 ticks
+	// Registering task to execute every 2 ticks (100ms).
+	// The task sleeps 500ms, so multiple tick intervals pass
+	// while it holds its lock — generating fail calls even on
+	// slow CI runners (macOS/Windows).
 	timer.Register(
-		3,
+		2,
 		// Task func
 		func() {
-			time.Sleep(100 * time.Millisecond)
+			time.Sleep(500 * time.Millisecond)
 		},
 		// Run fail func
 		func() {
@@ -113,7 +116,7 @@ func TestSchedulerRunFailFunc(t *testing.T) {
 	// Wait for the fail function to be called at least 3 times
 	require.Eventually(t, func() bool {
 		return atomic.LoadInt32(&failCounter) >= 3
-	}, 5*time.Second, 10*time.Millisecond,
+	}, 10*time.Second, 50*time.Millisecond,
 		"expected failure to run task at least 3 times",
 	)
 }
