@@ -10,25 +10,14 @@
 
 Hi folks! Here’s what we shipped in v0.22.1.
 
-### ✨ What's New
+```json
+{
+  "💪 Improvements": [
+    "Our automated build and release pipelines were updated to use newer, more secure container tooling. Specifically, the GitHub Actions workflows now use `docker/build-push-action@v7.0.0` (up from `v6.19.2`) and `docker/metadata-action@v6.0.0` pinned to a commit SHA for reproducible builds."
+  ]
+}
 
-- **Release notes:** We added v0.22.0 release notes to `RELEASE_NOTES.md` so you can scan changes in one place.
-
-### 💪 Improvements
-
-- **Transaction validation:** Transaction validation is more consistent because Conway UTxO validation now runs even when a transaction is marked invalid (script evaluation is still skipped).
-- **Epoch processing:** Epoch processing recovers more gracefully because nonce recomputation falls back to recomputing from epoch start when an anchor block nonce is missing.
-- **Queue handling:** Queue handling is more solid under load because the main event queue size increased from 1,000 to 10,000 and the header queue size is now clamped to at least the default.
-- **Implausible-tip checks:** Implausible-tip checks are safer across edge cases because the logic now uses peer-based reference blocks with overflow-safe arithmetic.
-
-### 🔧 Fixes
-
-- **Epoch cache rollbacks:** Epoch cache handling is safer during concurrent rollbacks because `advanceEpochCache` now guards against empty caches and validates the tail before appending a new epoch.
-- **Test timing:** Tests are less flaky on slower machines because `TestSchedulerRunFailFunc` timing parameters were relaxed.
-
-### 📋 What You Need to Know
-
-- **API bind address:** Config validation no longer defaults the API bind address to `0.0.0.0`, so set it explicitly if you need it.
+```
 
 ### 🙏 Thank You
 
