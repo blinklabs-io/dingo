@@ -19,7 +19,7 @@ Hi folks! Here’s what we shipped in v0.22.1.
 
 - **Epoch processing:** Epoch processing recovers more gracefully because it can recompute the epoch nonce from the start of the epoch when an anchor block is missing that value.
 - **Queue handling:** Queue handling holds up better under load because the main event queue grew from 1,000 to 10,000 and the header queue now has a safe minimum size.
-- **CI automation:** Build and release automation is more consistent because GitHub Actions workflows were refreshed to newer tooling.
+- **CI automation:** Build and release automation is more solid because GitHub Actions workflows were refreshed to newer tooling.
 - **Dependencies:** Dependency hygiene is improved because aws-sdk-go-v2 was updated from 1.41.2 to 1.41.3.
 - **Test stability:** Tests are less flaky on slower machines because scheduler timing tolerances are now more forgiving.
 - **Transaction validation:** Transaction validation is more consistent because Conway-era UTxO (ledger) validation now runs even for transactions marked invalid while script evaluation is still skipped.
