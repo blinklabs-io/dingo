@@ -10,25 +10,36 @@
 
 Hi folks! Here’s what we shipped in v0.22.1.
 
-### ✨ What's New
+<!--
+The structured source data below is injected automatically.
 
-- **Release notes:** We added v0.22.0 release notes to `RELEASE_NOTES.md` so you can scan changes in one place.
+We keep it briefly so we can format it consistently with the rest of this file.
+-->
 
-### 💪 Improvements
+{
+  "✨ What's New": [
+    "You can now rely on an updated, more complete guide when getting started and planning how to run the project. The README now includes detailed usage, deployment, and DevNet documentation, and it also adds a prominent warning that the project is not intended for production use.",
+    "You now have an in-repo record of what changed across recent versions, making upgrades easier to track. The project added and updated the documented release notes sections for v0.22.0 and v0.22.1 in `RELEASE_NOTES.md`."
+  ],
+  "💪 Improvements": [
+    "The system can handle larger bursts of activity with fewer slowdowns under load. The main event queue size constant was increased from 1,000 to 10,000.",
+    "Queue sizing is now more predictable when derived from security parameters, helping avoid under-provisioning. The header queue size is now forced to be at least the default value even when calculated from the security parameter, and the related test was updated.",
+    "Some timing-sensitive tests are now less likely to fail on slower machines and CI runners. The timing parameters in `TestSchedulerRunFailFunc` were relaxed to be more tolerant of slower execution environments.",
+    "Implausible-tip detection is now more robust, reducing the chance of incorrect results due to arithmetic edge cases. The implausible-tip checks were updated to use peer-based reference blocks with overflow-safe arithmetic, and the tests were adjusted accordingly.",
+    "Build and release automation is now more up to date and reproducible, improving CI reliability. GitHub Actions workflows were updated to use newer Docker actions (including `docker/build-push-action` v7, `docker/setup-buildx-action` v4, and `docker/metadata-action` v6 pinned by SHA) and `actions/setup-node` v6.3.0.",
+    "The AWS client stack is now on the latest patch level, which can include small fixes and compatibility improvements. The `aws-sdk-go-v2` core dependency was updated from 1.41.2 to 1.41.3."
+  ],
+  "📋 What You Need to Know": [
+    "If you relied on the API automatically binding to all interfaces by default, you may need to explicitly set a bind address in your configuration. Configuration validation no longer auto-defaults the API bind address to `0.0.0.0`, so you must provide the intended address explicitly when required."
+  ],
+  "🔧 Fixes": [
+    "The system is less likely to crash during edge-case rollback scenarios, improving stability. An empty-epoch-cache guard was added in `advanceEpochCache` to avoid panics during concurrent rollbacks.",
+    "Epoch processing is now more resilient when expected anchor data is missing, preventing avoidable failures. The node now allows epoch nonce recomputation from epoch start when an anchor block nonce cannot be found instead of failing.",
+    "Validation behavior is now more consistent so you get clearer, safer outcomes even when a transaction is flagged as invalid. Conway UTxO validation now runs even for transactions marked invalid, and only script evaluation is skipped for those transactions.",
+    "Epoch cache updates are safer under concurrency, reducing the risk of race conditions and corrupted state. The code now performs concurrency-safe validation of the epoch cache tail before appending a new epoch."
+  ]
+}
 
-- **Transaction validation:** Transaction validation is more consistent because Conway UTxO validation now runs even when a transaction is marked invalid (script evaluation is still skipped).
-- **Epoch processing:** Epoch processing recovers more gracefully because nonce recomputation falls back to recomputing from epoch start when an anchor block nonce is missing.
-- **Queue handling:** Queue handling is more solid under load because the main event queue size increased from 1,000 to 10,000 and the header queue size is now clamped to at least the default.
-- **Implausible-tip checks:** Implausible-tip checks are safer across edge cases because the logic now uses peer-based reference blocks with overflow-safe arithmetic.
-
-### 🔧 Fixes
-
-- **Epoch cache rollbacks:** Epoch cache handling is safer during concurrent rollbacks because `advanceEpochCache` now guards against empty caches and validates the tail before appending a new epoch.
-- **Test timing:** Tests are less flaky on slower machines because `TestSchedulerRunFailFunc` timing parameters were relaxed.
-
-### 📋 What You Need to Know
-
-- **API bind address:** Config validation no longer defaults the API bind address to `0.0.0.0`, so set it explicitly if you need it.
 
 ### 🙏 Thank You
 
