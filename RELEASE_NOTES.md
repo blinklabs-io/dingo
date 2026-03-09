@@ -18,7 +18,7 @@ Hi folks! Here’s what we shipped in v0.22.1.
 
 - **Event throughput:** The system can now handle higher event throughput with fewer slowdowns under load.
 - **Queue sizing:** Queue sizing is now more consistent so performance doesn’t degrade due to undersized configuration defaults.
-- **Tip plausibility checks:** Implausible-tip detection is now more accurate and safer around edge-case arithmetic.
+- **Tip plausibility checks:** Implausible-tip detection is now more solid and safer around edge-case arithmetic.
 - **Test stability:** Automated tests are now less flaky on slower machines and CI runners.
 
 ### 🔧 Fixes
