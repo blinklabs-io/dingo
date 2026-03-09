@@ -12,24 +12,24 @@ Hi folks! Here’s what we shipped in v0.22.1.
 
 {
   "✨ What's New": [
-    "The documentation now makes it easier to understand how to use and deploy the project, and it clearly warns against using it in production environments. Specifically, the README was expanded with detailed usage, deployment, and DevNet guidance and adds a prominent non-production warning."
+    "The documentation now makes it easier to understand how to use and deploy the project, and it clearly warns against using it in production environments."
   ],
   "💪 Improvements": [
-    "The system can now handle higher event throughput with fewer slowdowns under load. Specifically, the main event queue size constant was increased from 1,000 to 10,000 to better absorb spikes.",
-    "Queue sizing is now more consistent so performance doesn’t degrade due to undersized configuration defaults. Specifically, the header queue size is now clamped to at least the default even when derived from the security parameter, and the related test was updated.",
-    "Implausible-tip detection is now more accurate and safer around edge-case arithmetic. Specifically, the implausible-tip checks were updated to use peer-based reference blocks with overflow-safe arithmetic and the tests were adjusted accordingly.",
-    "Automated tests are now less flaky on slower machines and CI runners. Specifically, timing parameters in `TestSchedulerRunFailFunc` were relaxed to be more tolerant of slow scheduling and execution."
+    "The system can now handle higher event throughput with fewer slowdowns under load.",
+    "Queue sizing is now more consistent so performance doesn’t degrade due to undersized configuration defaults.",
+    "Implausible-tip detection is now more accurate and safer around edge-case arithmetic.",
+    "Automated tests are now less flaky on slower machines and CI runners."
   ],
   "📋 What You Need to Know": [
-    "You may need to explicitly set the API bind address in your configuration instead of relying on an implicit default. Specifically, config validation no longer auto-defaults the API bind address to `0.0.0.0`.",
-    "Release packaging and CI builds are now using updated, pinned tooling for better supply-chain safety and reproducibility. Specifically, GitHub workflows were updated to newer Docker actions (with `docker/metadata-action` pinned by commit SHA) and `actions/setup-node` was bumped, and `aws-sdk-go-v2` core was updated from 1.41.2 to 1.41.3.",
-    "Release documentation has been updated so you can review what changed in the latest versions. Specifically, `RELEASE_NOTES.md` was updated to include entries for v0.22.0 and v0.22.1."
+    "You may need to explicitly set the API bind address in your configuration instead of relying on an implicit default.",
+    "Release packaging and CI builds are now using updated, pinned tooling for better supply-chain safety and reproducibility.",
+    "Release documentation has been updated so you can review what changed in the latest versions."
   ],
   "🔧 Fixes": [
-    "Epoch processing is now more resilient so it can recover rather than stopping when some reference data is missing. Specifically, epoch nonce recomputation can now restart from the epoch start when an anchor block nonce is not found instead of failing.",
-    "Concurrent rollbacks are now less likely to crash the process. Specifically, `advanceEpochCache` now includes an empty-epoch-cache guard to prevent panics during rollback races.",
-    "Epoch cache updates are now safer under concurrency to reduce the risk of corrupted state. Specifically, the epoch cache tail is now validated in a concurrency-safe way before appending a new epoch.",
-    "Transaction validation is now more consistent so invalid transactions still get the expected ledger checks. Specifically, Conway UTxO validation now runs even for transactions marked invalid, and only script evaluation is skipped for those transactions."
+    "Epoch processing is now more resilient so it can recover rather than stopping when some reference data is missing.",
+    "Concurrent rollbacks are now less likely to crash the process.",
+    "Epoch cache updates are now safer under concurrency to reduce the risk of corrupted state.",
+    "Transaction validation is now more consistent so invalid transactions still get the expected ledger checks."
   ]
 }
 
