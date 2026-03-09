@@ -16,7 +16,7 @@ Hi folks! Here’s what we shipped in v0.22.1.
 
 ### 💪 Improvements
 
-- **CI workflows:** Automated releases are more reliable because build-and-publish workflows were refreshed.
+- **CI workflows:** Automated releases are more solid because build-and-publish workflows were refreshed.
 
 ### 🔧 Fixes
 
