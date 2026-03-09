@@ -20,8 +20,8 @@ Hi folks! Here’s what we shipped in v0.22.1.
 - **Epoch processing:** Epoch processing recovers more gracefully because nonce recomputation falls back to recomputing from epoch start when an anchor block nonce is missing.
 - **Queue handling:** Queue handling is more solid under load because the main event queue size increased from 1,000 to 10,000 and the header queue size is now clamped to at least the default.
 - **Implausible-tip checks:** Implausible-tip checks are safer across edge cases because the logic now uses peer-based reference blocks with overflow-safe arithmetic.
-- **Publish workflow login:** Publishing is more rock-solid because we tweaked the publish workflow to log in using `docker/login-action@v4`.
-- **Publish workflow runtime:** Automation stays more up to date because we rolled out Node.js `24.x` for the publish workflow.
+- **Publish workflow login:** Publishing is more rock-solid because the publish workflow was tweaked to log in using `docker/login-action@v4`.
+- **Publish workflow runtime:** Automation stays more up to date because Node.js `24.x` was rolled out for the publish workflow.
 
 ### 🔧 Fixes
 
