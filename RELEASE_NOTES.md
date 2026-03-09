@@ -10,29 +10,29 @@
 
 Hi folks! Here’s what we shipped in v0.22.1.
 
-### ✨ What's New
+{
+  "✨ What's New": [
+    "The documentation now makes it easier to understand how to use and deploy the project, and it clearly warns against using it in production environments. Specifically, the README was expanded with detailed usage, deployment, and DevNet guidance and adds a prominent non-production warning."
+  ],
+  "💪 Improvements": [
+    "The system can now handle higher event throughput with fewer slowdowns under load. Specifically, the main event queue size constant was increased from 1,000 to 10,000 to better absorb spikes.",
+    "Queue sizing is now more consistent so performance doesn’t degrade due to undersized configuration defaults. Specifically, the header queue size is now clamped to at least the default even when derived from the security parameter, and the related test was updated.",
+    "Implausible-tip detection is now more accurate and safer around edge-case arithmetic. Specifically, the implausible-tip checks were updated to use peer-based reference blocks with overflow-safe arithmetic and the tests were adjusted accordingly.",
+    "Automated tests are now less flaky on slower machines and CI runners. Specifically, timing parameters in `TestSchedulerRunFailFunc` were relaxed to be more tolerant of slow scheduling and execution."
+  ],
+  "📋 What You Need to Know": [
+    "You may need to explicitly set the API bind address in your configuration instead of relying on an implicit default. Specifically, config validation no longer auto-defaults the API bind address to `0.0.0.0`.",
+    "Release packaging and CI builds are now using updated, pinned tooling for better supply-chain safety and reproducibility. Specifically, GitHub workflows were updated to newer Docker actions (with `docker/metadata-action` pinned by commit SHA) and `actions/setup-node` was bumped, and `aws-sdk-go-v2` core was updated from 1.41.2 to 1.41.3.",
+    "Release documentation has been updated so you can review what changed in the latest versions. Specifically, `RELEASE_NOTES.md` was updated to include entries for v0.22.0 and v0.22.1."
+  ],
+  "🔧 Fixes": [
+    "Epoch processing is now more resilient so it can recover rather than stopping when some reference data is missing. Specifically, epoch nonce recomputation can now restart from the epoch start when an anchor block nonce is not found instead of failing.",
+    "Concurrent rollbacks are now less likely to crash the process. Specifically, `advanceEpochCache` now includes an empty-epoch-cache guard to prevent panics during rollback races.",
+    "Epoch cache updates are now safer under concurrency to reduce the risk of corrupted state. Specifically, the epoch cache tail is now validated in a concurrency-safe way before appending a new epoch.",
+    "Transaction validation is now more consistent so invalid transactions still get the expected ledger checks. Specifically, Conway UTxO validation now runs even for transactions marked invalid, and only script evaluation is skipped for those transactions."
+  ]
+}
 
-- **Release notes:** We added v0.22.0 release notes to `RELEASE_NOTES.md` so you can scan changes in one place.
-
-### 💪 Improvements
-
-- **Transaction validation:** Transaction validation is more consistent because Conway UTxO validation now runs even when a transaction is marked invalid (script evaluation is still skipped).
-- **Epoch processing:** Epoch processing recovers more gracefully because nonce recomputation falls back to recomputing from epoch start when an anchor block nonce is missing.
-- **Queue handling:** Queue handling is more solid under load because the main event queue size increased from 1,000 to 10,000 and the header queue size is now clamped to at least the default.
-- **Implausible-tip checks:** Implausible-tip checks are safer across edge cases because the logic now uses peer-based reference blocks with overflow-safe arithmetic.
-
-### 🔧 Fixes
-
-- **Epoch cache rollbacks:** Epoch cache handling is safer during concurrent rollbacks because `advanceEpochCache` now guards against empty caches and validates the tail before appending a new epoch.
-- **Test timing:** Tests are less flaky on slower machines because `TestSchedulerRunFailFunc` timing parameters were relaxed.
-
-### 📋 What You Need to Know
-
-- **API bind address:** Config validation no longer defaults the API bind address to `0.0.0.0`, so set it explicitly if you need it.
-
-### 🙏 Thank You
-
-Thank you for trying!
 
 ---
 
