@@ -13,7 +13,7 @@ Hi folks! Here’s what we shipped in v0.22.1.
 ```json
 {
   "💪 Improvements": [
-    "Our automated build and release pipelines were updated to use newer, more secure container tooling. Specifically, the GitHub Actions workflows now use `docker/build-push-action@v7.0.0` (up from `v6.19.2`) and `docker/metadata-action@v6.0.0` pinned to a commit SHA for reproducible builds."
+    "Our automated build and release pipelines were updated to use newer, more secure container tooling."
   ]
 }
 
