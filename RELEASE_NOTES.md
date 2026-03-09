@@ -12,13 +12,19 @@ Hi folks! Here’s what we shipped in v0.22.1.
 
 ### ✨ What's New
 
+- **New features:** No new features in this patch release.
+
 ### 💪 Improvements
 
 - **Build and release pipelines:** Builds are more solid and secure because our GitHub Actions workflows now use `docker/build-push-action@v7.0.0` and a commit-pinned `docker/metadata-action@v6.0.0`.
 
 ### 🔧 Fixes
 
+- **User-facing fixes:** No user-facing fixes in this patch release.
+
 ### 📋 What You Need to Know
+
+- **Required action:** No action is required for this release.
 
 ### 🙏 Thank You
 
