@@ -10,21 +10,6 @@
 
 Hi folks! Here’s what we shipped in v0.22.1.
 
-<!--
-BEGIN_GENERATED_NOTES v0.22.1
-{
-  "💪 Improvements": [
-    "The release process now uses a newer Docker login step to keep publishing more reliable and up to date. Specifically, the publish workflow was updated to use `docker/login-action@v4` instead of `@v3`.",
-    "The publish pipeline now runs on a newer Node.js version to align with the latest runtime used in automation. Specifically, the publish workflow was updated to use Node.js `24.x` instead of `23.x`."
-  ],
-  "📋 What You Need to Know": [
-    "If you maintain custom publishing or CI scripts, verify they remain compatible with the updated workflow environment. The publish workflow now depends on Node.js `24.x` and uses `docker/login-action@v4`, which may affect pinned versions or action inputs in downstream reuse."
-  ]
-}
-
-END_GENERATED_NOTES
--->
-
 ### ✨ What's New
 
 - **Release notes:** We added v0.22.0 release notes to `RELEASE_NOTES.md` so you can scan changes in one place.
@@ -35,6 +20,8 @@ END_GENERATED_NOTES
 - **Epoch processing:** Epoch processing recovers more gracefully because nonce recomputation falls back to recomputing from epoch start when an anchor block nonce is missing.
 - **Queue handling:** Queue handling is more solid under load because the main event queue size increased from 1,000 to 10,000 and the header queue size is now clamped to at least the default.
 - **Implausible-tip checks:** Implausible-tip checks are safer across edge cases because the logic now uses peer-based reference blocks with overflow-safe arithmetic.
+- **Publish workflow auth:** Publishing is more reliable because the publish workflow now uses `docker/login-action@v4`.
+- **Publish workflow runtime:** Automation is more up to date because the publish workflow now runs on Node.js `24.x`.
 
 ### 🔧 Fixes
 
@@ -44,6 +31,7 @@ END_GENERATED_NOTES
 ### 📋 What You Need to Know
 
 - **API bind address:** Config validation no longer defaults the API bind address to `0.0.0.0`, so set it explicitly if you need it.
+- **CI and publishing scripts:** If you maintain custom publishing or CI scripts, double-check compatibility with the publish workflow now using Node.js `24.x` and `docker/login-action@v4`.
 
 ### 🙏 Thank You
 
