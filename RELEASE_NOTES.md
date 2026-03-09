@@ -2,37 +2,22 @@
 
 ## v0.22.1 (March 8, 2026)
 
-**Title:** Stability updates and polish
+{
+  "💪 Improvements": [
+    "Transaction validation is now more consistent, even when a transaction is ultimately rejected. Specifically, Conway UTxO validation now runs for transactions marked invalid, and only the script evaluation phase is skipped for those transactions.",
+    "Chain synchronization now has a more resilient fallback when expected data is missing. Specifically, the epoch nonce can be recomputed from the epoch start when an anchor block nonce cannot be found, instead of failing.",
+    "Event processing can now handle larger bursts of work without backing up as easily. Specifically, the main event queue size constant was increased from 1,000 to 10,000 entries.",
+    "Queue sizing is now more predictable in security-parameter-driven configurations. Specifically, the header queue size is clamped so it is at least the default value even when derived from the security parameter, and the related tests were updated.",
+    "Consensus and chain-quality checks are now safer and more accurate under edge conditions. Specifically, the implausible-tip checks were updated to use peer-based reference blocks with overflow-safe arithmetic, and the tests were adjusted accordingly.",
+    "The API configuration validation now avoids silently choosing a potentially unsafe default. Specifically, config validation no longer automatically defaults the API bind address to 0.0.0.0."
+  ],
+  "🔧 Fixes": [
+    "Epoch cache handling is now safer during concurrent state changes. Specifically, an empty-epoch-cache guard was added to `advanceEpochCache` to prevent panics during concurrent rollbacks.",
+    "Epoch cache updates are now more robust under concurrency. Specifically, the epoch cache tail is now validated in a concurrency-safe way before appending a new epoch.",
+    "Test runs are now less flaky on slower machines and CI environments. Specifically, the timing parameters in `TestSchedulerRunFailFunc` were relaxed to better tolerate slower runners."
+  ]
+}
 
-**Date:** March 8, 2026
-
-**Version:** v0.22.1
-
-Hi folks! Here’s what we shipped in v0.22.1.
-
-### ✨ What's New
-
-- **Release notes:** We added v0.22.0 release notes to `RELEASE_NOTES.md` so you can scan changes in one place.
-
-### 💪 Improvements
-
-- **Transaction validation:** Transaction validation is more consistent because Conway UTxO validation now runs even when a transaction is marked invalid (script evaluation is still skipped).
-- **Epoch processing:** Epoch processing recovers more gracefully because nonce recomputation falls back to recomputing from epoch start when an anchor block nonce is missing.
-- **Queue handling:** Queue handling is more solid under load because the main event queue size increased from 1,000 to 10,000 and the header queue size is now clamped to at least the default.
-- **Implausible-tip checks:** Implausible-tip checks are safer across edge cases because the logic now uses peer-based reference blocks with overflow-safe arithmetic.
-
-### 🔧 Fixes
-
-- **Epoch cache rollbacks:** Epoch cache handling is safer during concurrent rollbacks because `advanceEpochCache` now guards against empty caches and validates the tail before appending a new epoch.
-- **Test timing:** Tests are less flaky on slower machines because `TestSchedulerRunFailFunc` timing parameters were relaxed.
-
-### 📋 What You Need to Know
-
-- **API bind address:** Config validation no longer defaults the API bind address to `0.0.0.0`, so set it explicitly if you need it.
-
-### 🙏 Thank You
-
-Thank you for trying!
 
 ---
 
