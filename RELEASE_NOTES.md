@@ -4,17 +4,17 @@
 
 {
   "💪 Improvements": [
-    "Transaction validation is now more consistent, even when a transaction is ultimately rejected. Specifically, Conway UTxO validation now runs for transactions marked invalid, and only the script evaluation phase is skipped for those transactions.",
-    "Chain synchronization now has a more resilient fallback when expected data is missing. Specifically, the epoch nonce can be recomputed from the epoch start when an anchor block nonce cannot be found, instead of failing.",
-    "Event processing can now handle larger bursts of work without backing up as easily. Specifically, the main event queue size constant was increased from 1,000 to 10,000 entries.",
-    "Queue sizing is now more predictable in security-parameter-driven configurations. Specifically, the header queue size is clamped so it is at least the default value even when derived from the security parameter, and the related tests were updated.",
-    "Consensus and chain-quality checks are now safer and more accurate under edge conditions. Specifically, the implausible-tip checks were updated to use peer-based reference blocks with overflow-safe arithmetic, and the tests were adjusted accordingly.",
-    "The API configuration validation now avoids silently choosing a potentially unsafe default. Specifically, config validation no longer automatically defaults the API bind address to 0.0.0.0."
+    "Transaction validation is now more consistent, even when a transaction is ultimately rejected.",
+    "Chain synchronization now has a more resilient fallback when expected data is missing.",
+    "Event processing can now handle larger bursts of work without backing up as easily.",
+    "Queue sizing is now more predictable in security-parameter-driven configurations.",
+    "Consensus and chain-quality checks are now safer and more accurate under edge conditions.",
+    "The API configuration validation now avoids silently choosing a potentially unsafe default."
   ],
   "🔧 Fixes": [
-    "Epoch cache handling is now safer during concurrent state changes. Specifically, an empty-epoch-cache guard was added to `advanceEpochCache` to prevent panics during concurrent rollbacks.",
-    "Epoch cache updates are now more robust under concurrency. Specifically, the epoch cache tail is now validated in a concurrency-safe way before appending a new epoch.",
-    "Test runs are now less flaky on slower machines and CI environments. Specifically, the timing parameters in `TestSchedulerRunFailFunc` were relaxed to better tolerate slower runners."
+    "Epoch cache handling is now safer during concurrent state changes.",
+    "Epoch cache updates are now more robust under concurrency.",
+    "Test runs are now less flaky on slower machines and CI environments."
   ]
 }
 
