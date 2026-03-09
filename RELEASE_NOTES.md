@@ -10,6 +10,21 @@
 
 Hi folks! Here’s what we shipped in v0.22.1.
 
+<!--
+BEGIN_GENERATED_NOTES v0.22.1
+{
+  "💪 Improvements": [
+    "The release process now uses a newer Docker login step to keep publishing more reliable and up to date. Specifically, the publish workflow was updated to use `docker/login-action@v4` instead of `@v3`.",
+    "The publish pipeline now runs on a newer Node.js version to align with the latest runtime used in automation. Specifically, the publish workflow was updated to use Node.js `24.x` instead of `23.x`."
+  ],
+  "📋 What You Need to Know": [
+    "If you maintain custom publishing or CI scripts, verify they remain compatible with the updated workflow environment. The publish workflow now depends on Node.js `24.x` and uses `docker/login-action@v4`, which may affect pinned versions or action inputs in downstream reuse."
+  ]
+}
+
+END_GENERATED_NOTES
+-->
+
 ### ✨ What's New
 
 - **Release notes:** We added v0.22.0 release notes to `RELEASE_NOTES.md` so you can scan changes in one place.
