@@ -34,6 +34,10 @@ Hi folks! Here’s what we shipped in v0.22.1.
 - **Release tooling:** Release packaging and CI builds are now using updated, pinned tooling for better supply-chain safety and reproducibility.
 - **Release notes:** Release documentation has been updated so you can review what changed in the latest versions.
 
+### 🙏 Thank You
+
+Thank you for trying!
+
 
 ---
 
