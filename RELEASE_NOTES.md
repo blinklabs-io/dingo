@@ -12,7 +12,7 @@ Hi folks! Here’s what we shipped in v0.22.1.
 
 ### ✨ What's New
 
-- **No new features:** No new user-facing features shipped in this patch release.
+- **No new features:** This patch release does not include new user-facing features.
 
 ### 💪 Improvements
 
@@ -20,7 +20,7 @@ Hi folks! Here’s what we shipped in v0.22.1.
 
 ### 🔧 Fixes
 
-- **No user-facing fixes:** No user-facing fixes shipped in this patch release.
+- **No user-facing fixes:** This patch release does not include user-facing fixes.
 
 ### 📋 What You Need to Know
 
