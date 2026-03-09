@@ -28,7 +28,9 @@ import (
 
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
@@ -65,6 +67,14 @@ func (v *mockValidator) ValidateTx(tx gledger.Transaction) error {
 		return fmt.Errorf("validation failed for %s", tx.Hash())
 	}
 	return nil
+}
+
+func (v *mockValidator) ValidateTxWithOverlay(
+	tx gledger.Transaction,
+	_ map[string]struct{},
+	_ map[string]lcommon.Utxo,
+) error {
+	return v.ValidateTx(tx)
 }
 
 func (v *mockValidator) setFailHash(hash string, fail bool) {
@@ -167,6 +177,7 @@ func TestMempool_Stop(t *testing.T) {
 		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		EventBus:     event.NewEventBus(nil, nil),
 		PromRegistry: prometheus.NewRegistry(),
+		Validator:    newMockValidator(),
 	})
 
 	// Add a consumer to test cleanup
@@ -2838,4 +2849,290 @@ func TestMempool_MEM03_NoDeadlockOnConcurrentPublish(
 			"deadlock detected during concurrent publish operations",
 		)
 	}
+}
+
+// =============================================================================
+// UTxO Overlay Tests
+// =============================================================================
+
+// overlayValidator validates transactions using the UTxO overlay.
+// It checks that all inputs exist (in overlay created or base UTxOs)
+// and none are in the consumed set.
+type overlayValidator struct {
+	baseUtxos map[string]lcommon.Utxo // simulated database UTxOs
+	mu        sync.Mutex
+}
+
+func newOverlayValidator(
+	utxos map[string]lcommon.Utxo,
+) *overlayValidator {
+	return &overlayValidator{baseUtxos: utxos}
+}
+
+func (v *overlayValidator) ValidateTx(
+	tx gledger.Transaction,
+) error {
+	return v.ValidateTxWithOverlay(tx, nil, nil)
+}
+
+func (v *overlayValidator) ValidateTxWithOverlay(
+	tx gledger.Transaction,
+	consumedUtxos map[string]struct{},
+	createdUtxos map[string]lcommon.Utxo,
+) error {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	for _, input := range tx.Inputs() {
+		key := fmt.Sprintf(
+			"%s:%d",
+			input.Id().String(),
+			input.Index(),
+		)
+		// Check consumed first (double-spend)
+		if consumedUtxos != nil {
+			if _, spent := consumedUtxos[key]; spent {
+				return fmt.Errorf("UTxO %s already consumed", key)
+			}
+		}
+		// Check overlay created
+		if createdUtxos != nil {
+			if _, ok := createdUtxos[key]; ok {
+				continue
+			}
+		}
+		// Check base UTxOs
+		if _, ok := v.baseUtxos[key]; ok {
+			continue
+		}
+		return fmt.Errorf("UTxO %s not found", key)
+	}
+	return nil
+}
+
+// removeBaseUtxo simulates a UTxO being consumed by a confirmed block.
+func (v *overlayValidator) removeBaseUtxo(key string) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	delete(v.baseUtxos, key)
+}
+
+// hexToBlake2b256 converts a hex string to a Blake2b256 hash.
+func hexToBlake2b256(t *testing.T, h string) lcommon.Blake2b256 {
+	t.Helper()
+	var hash lcommon.Blake2b256
+	b, err := hex.DecodeString(h)
+	require.NoError(t, err)
+	copy(hash[:], b)
+	return hash
+}
+
+// buildMockTx builds a mock transaction with the given inputs and outputs.
+// It uses ouroboros-mock internally.
+func buildMockTx(
+	t *testing.T,
+	txHashHex string,
+	inputs []lcommon.TransactionInput,
+	outputs []lcommon.TransactionOutput,
+) lcommon.Transaction {
+	t.Helper()
+	txIdBytes, err := hex.DecodeString(txHashHex)
+	require.NoError(t, err)
+	builder := mockledger.NewTransactionBuilder().
+		WithId(txIdBytes).
+		WithFee(100000).
+		WithValid(true)
+	for _, inp := range inputs {
+		builder = builder.WithInputs(inp)
+	}
+	for _, out := range outputs {
+		builder = builder.WithOutputs(out)
+	}
+	tx, err := builder.Build()
+	require.NoError(t, err)
+	return tx
+}
+
+// buildMockInput builds a mock transaction input.
+func buildMockInput(
+	t *testing.T,
+	txHashHex string,
+	index uint32,
+) lcommon.TransactionInput {
+	t.Helper()
+	b, err := hex.DecodeString(txHashHex)
+	require.NoError(t, err)
+	inp, err := mockledger.NewSimpleTransactionInput(b, index)
+	require.NoError(t, err)
+	return inp
+}
+
+// buildMockOutput builds a mock transaction output with a valid testnet address.
+func buildMockOutput(
+	t *testing.T,
+	lovelace uint64,
+) lcommon.TransactionOutput {
+	t.Helper()
+	// Use the real testnet address from the test transaction
+	out, err := mockledger.NewSimpleTransactionOutput(
+		"addr_test1qpe6s9amgfwtu9u6lqj998vke6uncswr4dg88qqft5d7f67kfjf77qy57hqhnefcqyy7hmhsygj9j38rj984hn9r57fswc4wg0",
+		lovelace,
+	)
+	require.NoError(t, err)
+	return out
+}
+
+func TestOverlayDoubleSpendRejection(t *testing.T) {
+	// Setup: one UTxO in the "database"
+	inputHash := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	utxoKey := inputHash + ":0"
+
+	sharedInput := buildMockInput(t, inputHash, 0)
+	baseOutput := buildMockOutput(t, 1000000)
+
+	baseUtxos := map[string]lcommon.Utxo{
+		utxoKey: {Id: sharedInput, Output: baseOutput},
+	}
+	v := newOverlayValidator(baseUtxos)
+
+	// Create a fresh overlay
+	overlay := newUtxoOverlay()
+
+	// TX-A consumes the UTxO — should succeed
+	txA := buildMockTx(
+		t,
+		"1111111111111111111111111111111111111111111111111111111111111111",
+		[]lcommon.TransactionInput{sharedInput},
+		[]lcommon.TransactionOutput{buildMockOutput(t, 900000)},
+	)
+	err := v.ValidateTxWithOverlay(txA, overlay.consumed, overlay.created)
+	require.NoError(t, err, "TX-A should pass overlay validation")
+
+	// Apply TX-A to the overlay
+	overlay.applyTx(txA.Hash().String(), 0, nil, txA)
+
+	// Verify input is now consumed
+	_, consumed := overlay.consumed[utxoKey]
+	assert.True(t, consumed, "input should be in consumed set")
+
+	// TX-B consumes the same UTxO — should be rejected (double-spend)
+	txB := buildMockTx(
+		t,
+		"2222222222222222222222222222222222222222222222222222222222222222",
+		[]lcommon.TransactionInput{sharedInput},
+		[]lcommon.TransactionOutput{buildMockOutput(t, 900000)},
+	)
+	err = v.ValidateTxWithOverlay(txB, overlay.consumed, overlay.created)
+	require.Error(t, err, "TX-B should be rejected (double-spend)")
+	assert.Contains(t, err.Error(), "already consumed")
+}
+
+func TestOverlayDependentTxChaining(t *testing.T) {
+	// Setup: one UTxO in the "database"
+	inputHash := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	utxoKey := inputHash + ":0"
+
+	baseInput := buildMockInput(t, inputHash, 0)
+	baseOutput := buildMockOutput(t, 2000000)
+
+	baseUtxos := map[string]lcommon.Utxo{
+		utxoKey: {Id: baseInput, Output: baseOutput},
+	}
+	v := newOverlayValidator(baseUtxos)
+
+	overlay := newUtxoOverlay()
+
+	// TX-A consumes base UTxO, creates new output
+	txHashA := "1111111111111111111111111111111111111111111111111111111111111111"
+	txA := buildMockTx(
+		t,
+		txHashA,
+		[]lcommon.TransactionInput{baseInput},
+		[]lcommon.TransactionOutput{buildMockOutput(t, 1800000)},
+	)
+	err := v.ValidateTxWithOverlay(txA, overlay.consumed, overlay.created)
+	require.NoError(t, err, "TX-A should pass")
+	overlay.applyTx(txA.Hash().String(), 0, nil, txA)
+
+	// Verify TX-A's output is in the overlay created set
+	txAOutputKey := txHashA + ":0"
+	_, created := overlay.created[txAOutputKey]
+	assert.True(t, created, "TX-A output should be in created set")
+
+	// TX-B consumes TX-A's output (which only exists in overlay, not DB)
+	inputFromA := buildMockInput(t, txHashA, 0)
+	txB := buildMockTx(
+		t,
+		"2222222222222222222222222222222222222222222222222222222222222222",
+		[]lcommon.TransactionInput{inputFromA},
+		[]lcommon.TransactionOutput{buildMockOutput(t, 1600000)},
+	)
+	err = v.ValidateTxWithOverlay(txB, overlay.consumed, overlay.created)
+	require.NoError(t, err, "TX-B should pass (spends TX-A output from overlay)")
+	overlay.applyTx(txB.Hash().String(), 0, nil, txB)
+
+	// Verify both TXs are tracked
+	assert.Len(t, overlay.applied, 2)
+
+	// TX-C with input not in DB or overlay should fail
+	unknownInput := buildMockInput(
+		t,
+		"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		0,
+	)
+	txC := buildMockTx(
+		t,
+		"3333333333333333333333333333333333333333333333333333333333333333",
+		[]lcommon.TransactionInput{unknownInput},
+		[]lcommon.TransactionOutput{buildMockOutput(t, 500000)},
+	)
+	err = v.ValidateTxWithOverlay(txC, overlay.consumed, overlay.created)
+	require.Error(t, err, "TX-C should fail (input not found)")
+	assert.Contains(t, err.Error(), "not found")
+}
+
+func TestOverlayRebuildOnChainUpdate(t *testing.T) {
+	// This test uses the real test transaction CBOR because rebuildOverlay
+	// re-decodes transactions from their stored CBOR bytes.
+	//
+	// The real TX has input: 0c07395aed88bdddc6de0518d1462dd0ec7e52e1e3a53599f7cdb24dc80237f8:1
+
+	realInputHash := "0c07395aed88bdddc6de0518d1462dd0ec7e52e1e3a53599f7cdb24dc80237f8"
+	realInputKey := realInputHash + ":1"
+
+	// Create a base UTxO set containing the real TX's input
+	realInput := buildMockInput(t, realInputHash, 1)
+	realOutput := buildMockOutput(t, 50000000)
+	baseUtxos := map[string]lcommon.Utxo{
+		realInputKey: {Id: realInput, Output: realOutput},
+	}
+	v := newOverlayValidator(baseUtxos)
+	m := newTestMempoolWithValidator(t, v)
+	defer func() {
+		require.NoError(t, m.Stop(context.Background()))
+	}()
+
+	// Add the real TX via AddTransaction
+	txBytes := getTestTxBytes(t)
+	err := m.AddTransaction(uint(conway.EraIdConway), txBytes)
+	require.NoError(t, err, "real TX should be accepted")
+
+	// Verify TX is in mempool
+	m.RLock()
+	assert.Len(t, m.transactions, 1, "mempool should have 1 TX")
+	m.RUnlock()
+
+	// Simulate chain update: a confirmed block consumed the same UTxO
+	v.removeBaseUtxo(realInputKey)
+
+	// Rebuild overlay (simulates what processChainEvents does)
+	m.rebuildOverlay()
+
+	// TX should be evicted because its input is no longer in base UTxOs
+	m.RLock()
+	assert.Empty(
+		t,
+		m.transactions,
+		"TX should be removed after its input was consumed by a confirmed block",
+	)
+	m.RUnlock()
 }
