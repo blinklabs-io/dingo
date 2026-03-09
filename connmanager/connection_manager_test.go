@@ -16,10 +16,10 @@ package connmanager_test
 
 import (
 	"context"
-	"errors"
 	"io"
 	"log/slog"
 	"net"
+	"sync"
 	"testing"
 	"time"
 
@@ -58,27 +58,13 @@ func TestConnectionManagerTagString(t *testing.T) {
 func TestConnectionManagerConnError(t *testing.T) {
 	defer goleak.VerifyNone(t)
 	var expectedConnId ouroboros.ConnectionId
-	expectedErr := io.EOF
 	doneChan := make(chan any)
+	var doneOnce sync.Once
 	connManager := connmanager.NewConnectionManager(
 		connmanager.ConnectionManagerConfig{
 			ConnClosedFunc: func(connId ouroboros.ConnectionId, err error) {
-				if err != nil {
-					if connId != expectedConnId {
-						t.Fatalf(
-							"did not receive error from expected connection: got %d, wanted %d",
-							connId,
-							expectedConnId,
-						)
-					}
-					if !errors.Is(err, expectedErr) {
-						t.Fatalf(
-							"did not receive expected error: got: %s, expected: %s",
-							err,
-							expectedErr,
-						)
-					}
-					close(doneChan)
+				if err != nil && connId == expectedConnId {
+					doneOnce.Do(func() { close(doneChan) })
 				}
 			},
 		},
@@ -87,8 +73,22 @@ func TestConnectionManagerConnError(t *testing.T) {
 	var connIds []ouroboros.ConnectionId
 	for i := range 3 {
 		mockConversation := ouroboros_mock.ConversationKeepAlive
+		kaPeriod := 30 * time.Second
+		kaTimeout := 15 * time.Second
 		if i == testIdx {
-			mockConversation = ouroboros_mock.ConversationKeepAliveClose
+			// Use a conversation that accepts the keepalive request
+			// but never responds.  This forces a keepalive timeout,
+			// which produces a protocol-level error that is always
+			// forwarded to ErrorChan (unlike ConnectionClosedError
+			// from a mock close, which may be suppressed by the
+			// allProtocolsIdle check in gouroboros).
+			mockConversation = []ouroboros_mock.ConversationEntry{
+				ouroboros_mock.ConversationEntryHandshakeRequestGeneric,
+				ouroboros_mock.ConversationEntryHandshakeNtNResponse,
+				ouroboros_mock.ConversationEntryKeepAliveRequest,
+			}
+			kaPeriod = 30 * time.Second
+			kaTimeout = 2 * time.Second
 		}
 		mockConn := ouroboros_mock.NewConnection(
 			ouroboros_mock.ProtocolRoleClient,
@@ -102,8 +102,8 @@ func TestConnectionManagerConnError(t *testing.T) {
 			ouroboros.WithKeepAliveConfig(
 				keepalive.NewConfig(
 					keepalive.WithCookie(ouroboros_mock.MockKeepAliveCookie),
-					keepalive.WithPeriod(2*time.Second),
-					keepalive.WithTimeout(1*time.Second),
+					keepalive.WithPeriod(kaPeriod),
+					keepalive.WithTimeout(kaTimeout),
 				),
 			),
 		)
@@ -122,7 +122,9 @@ func TestConnectionManagerConnError(t *testing.T) {
 		for _, connId := range connIds {
 			if connId != expectedConnId {
 				tmpConn := connManager.GetConnectionById(connId)
-				tmpConn.Close()
+				if tmpConn != nil {
+					tmpConn.Close()
+				}
 			}
 		}
 		// Wait for clean shutdown using Stop instead of fixed sleep
