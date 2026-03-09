@@ -12,7 +12,7 @@ permissions:
   contents: read
 
 jobs:
-  # Linux job with Postgres and MySQL services for integration tests
+  # Linux job with Postgres, MySQL and MinIO (fake s3) services for integration tests
   go-test-linux:
     name: go-test (Linux)
     strategy:
@@ -47,6 +47,15 @@ jobs:
           --health-retries 5
         ports:
           - 3306:3306
+      minio:
+        image: minio/minio
+        options: >-
+          --health-cmd "curl localhost:9000"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 9001:9001
     env:
       POSTGRES_HOST: localhost
       POSTGRES_PORT: '5432'
@@ -58,6 +67,9 @@ jobs:
       MYSQL_USER: mysql
       MYSQL_PASSWORD: mysql
       MYSQL_DATABASE: dingo_test
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+      AWS_ENDPOINT: "http://localhost:9000/"
     steps:
       - uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0 https://github.com/actions/checkout/releases/tag/v6.0.0
       - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0 https://github.com/actions/setup-go/releases/tag/v6.3.0
