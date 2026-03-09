@@ -2,21 +2,28 @@
 
 ## v0.22.1 (March 8, 2026)
 
-{
-  "💪 Improvements": [
-    "Transaction validation is now more consistent, even when a transaction is ultimately rejected.",
-    "Chain synchronization now has a more resilient fallback when expected data is missing.",
-    "Event processing can now handle larger bursts of work without backing up as easily.",
-    "Queue sizing is now more predictable in security-parameter-driven configurations.",
-    "Consensus and chain-quality checks are now safer and more accurate under edge conditions.",
-    "The API configuration validation now avoids silently choosing a potentially unsafe default."
-  ],
-  "🔧 Fixes": [
-    "Epoch cache handling is now safer during concurrent state changes.",
-    "Epoch cache updates are now more robust under concurrency.",
-    "Test runs are now less flaky on slower machines and CI environments."
-  ]
-}
+**Title:** Stability updates and polish
+
+**Date:** March 8, 2026
+
+**Version:** v0.22.1
+
+Hi folks! Here’s what we shipped in v0.22.1.
+
+### 💪 Improvements
+
+- **Transaction validation:** Transaction validation is now more consistent, even when a transaction is ultimately rejected.
+- **Chain sync fallback:** Chain synchronization now has a more resilient fallback when expected data is missing.
+- **Main event queue:** Event processing can now handle larger bursts of work without backing up as easily.
+- **Header queue sizing:** Queue sizing is now more predictable in security-parameter-driven configurations.
+- **Implausible-tip checks:** Consensus and chain-quality checks are now safer and more accurate under edge conditions.
+- **API bind address validation:** The API configuration validation now avoids silently choosing a potentially unsafe default.
+
+### 🔧 Fixes
+
+- **Epoch cache rollbacks:** Epoch cache handling is now safer during concurrent state changes.
+- **Epoch cache updates:** Epoch cache updates are now more robust under concurrency.
+- **Test timing:** Test runs are now less flaky on slower machines and CI environments.
 
 
 ---
