@@ -10,28 +10,29 @@
 
 Hi folks! Here’s what we shipped in v0.22.1.
 
-{
-  "✨ What's New": [
-    "The documentation now makes it easier to understand how to use and deploy the project, and it clearly warns against using it in production environments."
-  ],
-  "💪 Improvements": [
-    "The system can now handle higher event throughput with fewer slowdowns under load.",
-    "Queue sizing is now more consistent so performance doesn’t degrade due to undersized configuration defaults.",
-    "Implausible-tip detection is now more accurate and safer around edge-case arithmetic.",
-    "Automated tests are now less flaky on slower machines and CI runners."
-  ],
-  "📋 What You Need to Know": [
-    "You may need to explicitly set the API bind address in your configuration instead of relying on an implicit default.",
-    "Release packaging and CI builds are now using updated, pinned tooling for better supply-chain safety and reproducibility.",
-    "Release documentation has been updated so you can review what changed in the latest versions."
-  ],
-  "🔧 Fixes": [
-    "Epoch processing is now more resilient so it can recover rather than stopping when some reference data is missing.",
-    "Concurrent rollbacks are now less likely to crash the process.",
-    "Epoch cache updates are now safer under concurrency to reduce the risk of corrupted state.",
-    "Transaction validation is now more consistent so invalid transactions still get the expected ledger checks."
-  ]
-}
+### ✨ What's New
+
+- **Docs refresh:** The documentation now makes it easier to understand how to use and deploy the project, and it clearly warns against using it in production environments.
+
+### 💪 Improvements
+
+- **Event throughput:** The system can now handle higher event throughput with fewer slowdowns under load.
+- **Queue sizing:** Queue sizing is now more consistent so performance doesn’t degrade due to undersized configuration defaults.
+- **Tip plausibility checks:** Implausible-tip detection is now more accurate and safer around edge-case arithmetic.
+- **Test stability:** Automated tests are now less flaky on slower machines and CI runners.
+
+### 🔧 Fixes
+
+- **Epoch processing:** Epoch processing is now more resilient so it can recover rather than stopping when some reference data is missing.
+- **Rollback safety:** Concurrent rollbacks are now less likely to crash the process.
+- **Epoch cache safety:** Epoch cache updates are now safer under concurrency to reduce the risk of corrupted state.
+- **Transaction validation:** Transaction validation is now more consistent so invalid transactions still get the expected ledger checks.
+
+### 📋 What You Need to Know
+
+- **API bind address:** You may need to explicitly set the API bind address in your configuration instead of relying on an implicit default.
+- **Release tooling:** Release packaging and CI builds are now using updated, pinned tooling for better supply-chain safety and reproducibility.
+- **Release notes:** Release documentation has been updated so you can review what changed in the latest versions.
 
 
 ---
