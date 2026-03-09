@@ -10,17 +10,25 @@
 
 Hi folks! Here’s what we shipped in v0.22.1.
 
-```json
-{
-  "💪 Improvements": [
-    "Build and publish pipelines were refreshed to keep your automated releases current and reliable."
-  ],
-  "📋 What You Need to Know": [
-    "No action is required on your side; this is an internal workflow maintenance update that does not change runtime behavior of the product."
-  ]
-}
+### ✨ What's New
 
-```
+- **No new features:** No new user-facing features shipped in this patch release.
+
+### 💪 Improvements
+
+- **CI workflows:** Automated releases are more reliable because build-and-publish workflows were refreshed.
+
+### 🔧 Fixes
+
+- **No user-facing fixes:** No user-facing fixes shipped in this patch release.
+
+### 📋 What You Need to Know
+
+- **No action required:** No action is required on your side because this is internal workflow maintenance that does not change runtime behavior.
+
+### 🙏 Thank You
+
+Thank you for trying!
 
 ---
 
