@@ -13,10 +13,10 @@ Hi folks! Here’s what we shipped in v0.22.1.
 ```json
 {
   "💪 Improvements": [
-    "Build and publish pipelines were refreshed to keep your automated releases current and reliable. The GitHub Actions workflows now use `docker/build-push-action` v7.0.0 (up from v6.19.2) and update `docker/metadata-action` to v6.0.0 pinned by commit SHA for more reproducible CI runs."
+    "Build and publish pipelines were refreshed to keep your automated releases current and reliable."
   ],
   "📋 What You Need to Know": [
-    "No action is required on your side; this is an internal workflow maintenance update that does not change runtime behavior of the product. If you maintain forks or custom CI, ensure your workflows reference the same updated actions (`docker/build-push-action@v7` and `docker/metadata-action` pinned to the intended SHA) to stay aligned."
+    "No action is required on your side; this is an internal workflow maintenance update that does not change runtime behavior of the product."
   ]
 }
 
