@@ -10,21 +10,29 @@
 
 Hi folks! Here’s what we shipped in v0.22.1.
 
+### ✨ What's New
+
+- **Release notes:** You can now scan v0.22.0 changes in one place because its release notes are now in `RELEASE_NOTES.md`.
+
 ### 💪 Improvements
 
-- **Transaction validation:** Transaction validation is now more consistent, even when a transaction is ultimately rejected.
-- **Chain sync fallback:** Chain synchronization now has a more resilient fallback when expected data is missing.
-- **Main event queue:** Event processing can now handle larger bursts of work without backing up as easily.
-- **Header queue sizing:** Queue sizing is now more predictable in security-parameter-driven configurations.
-- **Implausible-tip checks:** Consensus and chain-quality checks are now safer and more accurate under edge conditions.
-- **API bind address validation:** The API configuration validation now avoids silently choosing a potentially unsafe default.
+- **Transaction validation:** Transaction validation is more consistent because Conway UTxO validation now runs even when a transaction is marked invalid (script evaluation is still skipped).
+- **Epoch processing:** Epoch processing recovers more gracefully because nonce recomputation falls back to recomputing from epoch start when an anchor block nonce is missing.
+- **Queue handling:** Queue handling is more solid under load because the main event queue size increased from 1,000 to 10,000 and the header queue size is now clamped to at least the default.
+- **Implausible-tip checks:** Implausible-tip checks are safer across edge cases because the logic now uses peer-based reference blocks with overflow-safe arithmetic.
 
 ### 🔧 Fixes
 
-- **Epoch cache rollbacks:** Epoch cache handling is now safer during concurrent state changes.
-- **Epoch cache updates:** Epoch cache updates are now more robust under concurrency.
-- **Test timing:** Test runs are now less flaky on slower machines and CI environments.
+- **Epoch cache rollbacks:** Epoch cache handling is safer during concurrent rollbacks because `advanceEpochCache` now guards against empty caches and validates the tail before appending a new epoch.
+- **Test timing:** Tests are less flaky on slower machines because `TestSchedulerRunFailFunc` timing parameters were relaxed.
 
+### 📋 What You Need to Know
+
+- **API bind address:** Config validation no longer defaults the API bind address to `0.0.0.0`, so set it explicitly if you need it.
+
+### 🙏 Thank You
+
+Thank you for trying!
 
 ---
 
