@@ -12,21 +12,21 @@ Hi folks! Here’s what we shipped in v0.22.1.
 
 ### ✨ What's New
 
-- **Documentation:** Getting started is simpler and safer because the README was expanded with usage, deployment, DevNet documentation, and a prominent non-production warning.
+- **Documentation:** Getting started is simpler and safer because the README now includes clearer usage, deployment, and DevNet guidance, plus a prominent non-production warning.
 - **Release notes:** Release notes are easier to scan because `RELEASE_NOTES.md` now includes dedicated sections for v0.22.0 and v0.22.1.
 
 ### 💪 Improvements
 
-- **Epoch processing:** Epoch processing is more solid because it now recomputes the epoch nonce from epoch start when an anchor block nonce is missing.
-- **Queue handling:** Queue handling holds up better under load because the main event queue grew from 1,000 to 10,000 and the header queue is clamped to at least the default.
-- **CI automation:** Build and release automation is more consistent because GitHub Actions workflows were updated to newer docker actions and actions/setup-node v6.3.0.
+- **Epoch processing:** Epoch processing recovers more gracefully because it can recompute the epoch nonce from the start of the epoch when an anchor block is missing that value.
+- **Queue handling:** Queue handling holds up better under load because the main event queue grew from 1,000 to 10,000 and the header queue now has a safe minimum size.
+- **CI automation:** Build and release automation is more consistent because GitHub Actions workflows were refreshed to newer tooling.
 - **Dependencies:** Dependency hygiene is improved because aws-sdk-go-v2 was updated from 1.41.2 to 1.41.3.
-- **Test stability:** Tests are less flaky because `TestSchedulerRunFailFunc` timing parameters are now more tolerant of slow execution.
-- **Transaction validation:** Transaction validation is more consistent because Conway UTxO validation now runs even for transactions marked invalid while script evaluation is still skipped.
+- **Test stability:** Tests are less flaky on slower machines because scheduler timing tolerances are now more forgiving.
+- **Transaction validation:** Transaction validation is more consistent because Conway-era UTxO (ledger) validation now runs even for transactions marked invalid while script evaluation is still skipped.
 
 ### 🔧 Fixes
 
-- **Epoch cache rollbacks:** Epoch cache handling is safer during concurrent rollbacks because `advanceEpochCache` now guards against empty caches and validates the tail before appending a new epoch.
+- **Epoch cache rollbacks:** Epoch cache handling is safer during concurrent rollbacks because it now guards against empty caches and validates the tail before appending a new epoch.
 - **Implausible-tip checks:** Implausible-tip checks are more reliable because the logic now uses peer-based reference blocks with overflow-safe arithmetic.
 
 ### 📋 What You Need to Know
