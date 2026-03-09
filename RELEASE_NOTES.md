@@ -10,35 +10,32 @@
 
 Hi folks! Here’s what we shipped in v0.22.1.
 
-<!-- BEGIN GENERATED RELEASE NOTES (v0.22.1) -->
+### ✨ What's New
 
-```json
-{
-  "✨ What's New": [
-    "Documentation now includes clearer, more complete guidance for getting started and using the project safely, with an expanded README covering usage, deployment, DevNet documentation, and a prominent non-production warning.",
-    "Release documentation is now easier to scan because RELEASE_NOTES.md now includes a dedicated section documenting v0.22.1."
-  ],
-  "💪 Improvements": [
-    "Epoch processing recovers more gracefully by recomputing the epoch nonce from epoch start when an anchor block nonce is missing.",
-    "The node handles higher throughput by increasing the main event queue size constant from 1,000 to 10,000.",
-    "Queue sizing is more robust because the header queue size is clamped to at least the default even when derived from the security parameter.",
-    "CI automation is more consistent with updated GitHub Actions docker workflows (metadata-action v6 pinned by SHA, build-push-action v7, setup-buildx-action v4) and actions/setup-node v6.3.0.",
-    "Dependencies are more current with aws-sdk-go-v2 updated from 1.41.2 to 1.41.3.",
-    "Automated tests are less flaky because TestSchedulerRunFailFunc timing parameters are now more tolerant of slow execution.",
-    "Transaction validation is more consistent because Conway UTxO validation now runs even for transactions marked invalid while script evaluation is still skipped.",
-    "Config validation is stricter because it no longer defaults the API bind address to 0.0.0.0.",
-    "Release notes are easier to scan because RELEASE_NOTES.md now includes the v0.22.0 section."
-  ],
-  "🔧 Fixes": [
-    "Epoch cache handling is safer during concurrent rollbacks because advanceEpochCache now guards against empty caches.",
-    "Epoch cache updates are safer under concurrency because the epoch cache tail is validated before appending a new epoch.",
-    "Implausible-tip checks are more reliable because the logic now uses peer-based reference blocks with overflow-safe arithmetic."
-  ]
-}
+- **Documentation:** Getting started is simpler and safer because the README was expanded with usage, deployment, DevNet documentation, and a prominent non-production warning.
+- **Release notes:** Release notes are easier to scan because `RELEASE_NOTES.md` now includes dedicated sections for v0.22.0 and v0.22.1.
 
-```
+### 💪 Improvements
 
-<!-- END GENERATED RELEASE NOTES (v0.22.1) -->
+- **Epoch processing:** Epoch processing is more solid because it now recomputes the epoch nonce from epoch start when an anchor block nonce is missing.
+- **Queue handling:** Queue handling holds up better under load because the main event queue grew from 1,000 to 10,000 and the header queue is clamped to at least the default.
+- **CI automation:** Build and release automation is more consistent because GitHub Actions workflows were updated to newer docker actions and actions/setup-node v6.3.0.
+- **Dependencies:** Dependency hygiene is improved because aws-sdk-go-v2 was updated from 1.41.2 to 1.41.3.
+- **Test stability:** Tests are less flaky because `TestSchedulerRunFailFunc` timing parameters are now more tolerant of slow execution.
+- **Transaction validation:** Transaction validation is more consistent because Conway UTxO validation now runs even for transactions marked invalid while script evaluation is still skipped.
+
+### 🔧 Fixes
+
+- **Epoch cache rollbacks:** Epoch cache handling is safer during concurrent rollbacks because `advanceEpochCache` now guards against empty caches and validates the tail before appending a new epoch.
+- **Implausible-tip checks:** Implausible-tip checks are more reliable because the logic now uses peer-based reference blocks with overflow-safe arithmetic.
+
+### 📋 What You Need to Know
+
+- **API bind address:** Config validation no longer defaults the API bind address to `0.0.0.0`, so set it explicitly if you need it.
+
+### 🙏 Thank You
+
+Thank you for trying!
 
 ---
 
