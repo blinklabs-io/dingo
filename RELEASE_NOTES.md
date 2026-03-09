@@ -35,7 +35,6 @@ Hi folks! Here’s what we shipped in v0.22.1.
 
 - **API bind address:** If you need the API to bind to all interfaces, set it explicitly because config validation no longer defaults the bind address to `0.0.0.0`.
 
-
 ### 🙏 Thank You
 
 Thank you for trying!
