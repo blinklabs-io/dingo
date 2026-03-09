@@ -12,16 +12,16 @@ Hi folks! Here’s what we shipped in v0.22.1.
 
 ### ✨ What's New
 
-- **README updates:** Getting started is easier because `README.md` now includes usage, deployment, and DevNet documentation and clearly warns that the project is not intended for production use.
+- **README updates:** Getting started is easier because we beefed up `README.md` with usage, deployment, and DevNet documentation and a clear warning that the project is not intended for production use.
 - **Release notes:** Upgrades are easier to track because `RELEASE_NOTES.md` now includes updated entries for v0.22.0 and v0.22.1.
 
 ### 💪 Improvements
 
-- **Main event queue:** Performance under load is more solid because the main event queue size increased from 1,000 to 10,000.
-- **Header queue sizing:** Header processing is more predictable because the header queue size is now clamped to at least the default when derived from the security parameter.
-- **TestSchedulerRunFailFunc:** CI runs are less flaky because `TestSchedulerRunFailFunc` timing parameters were relaxed.
+- **Main event queue:** Performance under load is more rock-solid because the main event queue size increased from 1,000 to 10,000.
+- **Header queue sizing:** Header processing is more predictable because we refined header queue sizing to clamp to at least the default when derived from the security parameter.
+- **TestSchedulerRunFailFunc:** CI runs are less flaky because we tweaked `TestSchedulerRunFailFunc` timing parameters to be more tolerant.
 - **Implausible-tip checks:** Implausible-tip detection is safer because checks now use peer-based reference blocks with overflow-safe arithmetic.
-- **CI workflows:** Builds are more reproducible because GitHub Actions now uses updated Docker actions (pinned by SHA) and `actions/setup-node` v6.3.0.
+- **CI workflows:** Builds are more reproducible because we rolled out updated GitHub Actions Docker actions (pinned by SHA) and `actions/setup-node` v6.3.0.
 - **AWS SDK:** AWS integrations are more up to date because `aws-sdk-go-v2` was bumped from 1.41.2 to 1.41.3.
 
 ### 🔧 Fixes
