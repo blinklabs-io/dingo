@@ -10,35 +10,30 @@
 
 Hi folks! Here’s what we shipped in v0.22.1.
 
-<!--
-The structured source data below is injected automatically.
+### ✨ What's New
 
-We keep it briefly so we can format it consistently with the rest of this file.
--->
+- **README updates:** Getting started is easier because `README.md` now includes usage, deployment, and DevNet documentation and clearly warns that the project is not intended for production use.
+- **Release notes:** Upgrades are easier to track because `RELEASE_NOTES.md` now includes updated entries for v0.22.0 and v0.22.1.
 
-{
-  "✨ What's New": [
-    "You can now rely on an updated, more complete guide when getting started and planning how to run the project.",
-    "You now have an in-repo record of what changed across recent versions, making upgrades easier to track."
-  ],
-  "💪 Improvements": [
-    "The system can handle larger bursts of activity with fewer slowdowns under load.",
-    "Queue sizing is now more predictable when derived from security parameters, helping avoid under-provisioning.",
-    "Some timing-sensitive tests are now less likely to fail on slower machines and CI runners.",
-    "Implausible-tip detection is now more robust, reducing the chance of incorrect results due to arithmetic edge cases.",
-    "Build and release automation is now more up to date and reproducible, improving CI reliability.",
-    "The AWS client stack is now on the latest patch level, which can include small fixes and compatibility improvements."
-  ],
-  "📋 What You Need to Know": [
-    "If you relied on the API automatically binding to all interfaces by default, you may need to explicitly set a bind address in your configuration."
-  ],
-  "🔧 Fixes": [
-    "The system is less likely to crash during edge-case rollback scenarios, improving stability.",
-    "Epoch processing is now more resilient when expected anchor data is missing, preventing avoidable failures.",
-    "Validation behavior is now more consistent so you get clearer, safer outcomes even when a transaction is flagged as invalid.",
-    "Epoch cache updates are safer under concurrency, reducing the risk of race conditions and corrupted state."
-  ]
-}
+### 💪 Improvements
+
+- **Main event queue:** Performance under load is more solid because the main event queue size increased from 1,000 to 10,000.
+- **Header queue sizing:** Header processing is more predictable because the header queue size is now clamped to at least the default when derived from the security parameter.
+- **TestSchedulerRunFailFunc:** CI runs are less flaky because `TestSchedulerRunFailFunc` timing parameters were relaxed.
+- **Implausible-tip checks:** Implausible-tip detection is safer because checks now use peer-based reference blocks with overflow-safe arithmetic.
+- **CI workflows:** Builds are more reproducible because GitHub Actions now uses updated Docker actions (pinned by SHA) and `actions/setup-node` v6.3.0.
+- **AWS SDK:** AWS integrations are more up to date because `aws-sdk-go-v2` was bumped from 1.41.2 to 1.41.3.
+
+### 🔧 Fixes
+
+- **Epoch cache rollbacks:** Concurrent rollbacks are less likely to panic because `advanceEpochCache` now guards against empty epoch caches.
+- **Epoch nonce recomputation:** Epoch processing is more resilient because nonce recomputation can fall back to recomputing from epoch start when an anchor block nonce is missing.
+- **Conway UTxO validation:** Validation results are more consistent because Conway UTxO validation now runs even when a transaction is marked invalid (with script evaluation still skipped).
+- **Epoch cache tail validation:** Epoch cache updates are safer because the epoch cache tail is validated before appending a new epoch.
+
+### 📋 What You Need to Know
+
+- **API bind address:** If you need the API to bind to all interfaces, set it explicitly because config validation no longer defaults the bind address to `0.0.0.0`.
 
 
 ### 🙏 Thank You
