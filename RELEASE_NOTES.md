@@ -11,22 +11,6 @@
 Hi folks! Here’s what we shipped in v0.23.1.
 
 <!--
-{
-  "✨ What's New": [
-    "You can now validate transactions correctly even when they depend on other unconfirmed transactions, which helps avoid accepting transactions that won’t actually work once everything is applied."
-  ],
-  "💪 Improvements": [
-    "It’s easier to understand how to run and deploy this project safely, so you can get started faster and avoid accidental production usage.",
-    "Build and publish automation is more up to date, which improves long-term maintainability and compatibility with current tooling.",
-    "Dependency updates reduce the risk of incompatibilities and keep the codebase aligned with upstream improvements.",
-    "Release documentation is clearer and easier to follow, so you can quickly understand what changed in the version you’re using."
-  ],
-  "🔧 Fixes": [
-    "Network connection testing is more reliable and cleanup is safer, which reduces flaky failures and unexpected resource leaks during development and CI runs.",
-    "You’re less likely to hit confusing runtime errors during VRF-related operations, improving stability in scenarios that depend on VRF inputs.",
-    "Development mode now behaves more predictably, preventing misconfiguration that can lead to confusing storage behavior."
-  ]
-}
 
 -->
 
