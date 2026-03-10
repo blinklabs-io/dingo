@@ -10,29 +10,6 @@
 
 Hi folks! Here’s what we shipped in v0.23.1.
 
-<!--
-SOURCE_NOTES (do not edit by hand):
-
-{
-  "✨ What's New": [
-    "Documentation now makes it easier to understand how to use and deploy the project safely. The README was expanded with detailed usage, deployment, and DevNet guidance and now includes a prominent warning that the project is not intended for production use.",
-    "Transaction validation now better reflects the full set of in-flight changes, which helps prevent invalid transactions from slipping through. The ledger and mempool now perform UTxO overlay-aware validation with descendant pruning, and this behavior is covered by new tests."
-  ],
-  "💪 Improvements": [
-    "Development runs are now more predictable by ensuring they use the intended storage behavior. Dev mode now forces the storage mode to API and emits a log message when it overrides the configured value.",
-    "Publishing and CI workflows now use newer tooling to improve consistency and keep dependencies current. The GitHub Actions publish workflow was updated to Node.js 24.x, upgraded Docker actions (login-action v4, metadata-action v6 pinned by SHA, build-push-action v7, setup-buildx-action v4), and refreshed actions/setup-node to v6.3.0 and aws-sdk-go-v2 core to 1.41.3.",
-    "Dependencies were refreshed to incorporate upstream improvements and maintain compatibility. The project updated gouroboros to v0.160.1 (with added error handling around vrf.MkInputVrf calls) and upgraded github.com/blinklabs-io/bursa from v0.15.0 to v0.16.0.",
-    "Release documentation is now clearer and easier to reference when tracking what changed across versions. RELEASE_NOTES.md was updated to add and refine the v0.22.1 entry, including clearer transaction validation wording and notes about publish workflow and CI tooling updates."
-  ],
-  "🔧 Fixes": [
-    "Connection stability tests are now less flaky and cleanup behavior is safer during failures. The connection manager error test now relies on a deterministic keepalive timeout, and channel closing plus connection cleanup were made more robust."
-  ]
-}
-
-
-END SOURCE_NOTES
--->
-
 ### ✨ What's New
 
 - **Docs:** Docs are easier to follow because the README was expanded with usage, deployment, and DevNet guidance plus a clear “not for production use” warning.
