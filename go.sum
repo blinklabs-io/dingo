@@ -132,8 +132,8 @@ github.com/blang/semver v3.5.1+incompatible h1:cQNTCjp13qL8KC3Nbxr/y2Bqb63oX6wdn
 github.com/blang/semver v3.5.1+incompatible/go.mod h1:kRBLl5iJ+tD4TcOOxsy/0fnwebNt5EWlYSAyrTnjyyk=
 github.com/blinklabs-io/bark v0.0.2 h1:YcwhDfKu8QuPGjKcaV9/J4Vq+0kYMWMo8C08FW2akeI=
 github.com/blinklabs-io/bark v0.0.2/go.mod h1:+ufcuLfDoj8yXktYHQSffle/gaCJnJWqL/31PnAP3dc=
-github.com/blinklabs-io/bursa v0.15.0 h1:kRgoX+i9duRVXDHEDJXbrEHiLeLRA4TyqatAOfo4bvU=
-github.com/blinklabs-io/bursa v0.15.0/go.mod h1:84ZHhG8pjOjjN6mGveeDrQHhRhDkbixdvR3mZ2BOr/k=
+github.com/blinklabs-io/bursa v0.16.0 h1:EyiEJIvRo5u2nxYQAILUNaCpubUuBrCgnWxIHI1YnoU=
+github.com/blinklabs-io/bursa v0.16.0/go.mod h1:QushjySLaOipI158YageIEIRksjCxGpAwtM1WbYx4Qo=
 github.com/blinklabs-io/go-bip39 v0.2.0 h1:rHYih+JzqaFVuP+UfvByKTAdJPeYtlvZu49yUGrZUk8=
 github.com/blinklabs-io/go-bip39 v0.2.0/go.mod h1:9Bp7a+XDc/KTPOqNnS7T/v1vH2lDXpmjM0GArwvOQL4=
 github.com/blinklabs-io/gouroboros v0.160.0 h1:E+8y59xcBqEZHLfjxpgCEwOBWOJcQ2ijmJyi8D39sus=
