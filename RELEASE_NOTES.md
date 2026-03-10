@@ -2,7 +2,7 @@
 
 ## v0.23.1 (March 10, 2026)
 
-**Title:** Updates and fixes
+**Title:** Safer dependent transaction validation
 
 **Date:** March 10, 2026
 
