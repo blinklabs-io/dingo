@@ -573,7 +573,10 @@ func (f *BlockForger) VRFProofForSlot(
 	}
 
 	// Create VRF input: MkInputVrf(slot, epochNonce)
-	alpha := vrf.MkInputVrf(int64(slot), epochNonce) // #nosec G115 -- validated above
+	alpha, err := vrf.MkInputVrf(int64(slot), epochNonce) // #nosec G115 -- validated above
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to create VRF input: %w", err)
+	}
 
 	return f.creds.VRFProve(alpha)
 }
