@@ -2,7 +2,7 @@
 
 ## v0.23.1 (March 10, 2026)
 
-**Title:** Maintenance updates and polish
+**Title:** Solid maintenance updates and polish
 
 **Date:** March 10, 2026
 
