@@ -214,7 +214,7 @@ func (cm *ChainManager) blockByPoint(
 	txn *database.Txn,
 ) (models.Block, error) {
 	// Check in-memory cache
-	if blk, ok := cm.blockCache.Get(string(point.Hash)); ok {
+	if blk, ok := cm.blockCache.Get(point.Hash); ok {
 		if blk.Slot == point.Slot {
 			return blk, nil
 		}
@@ -245,7 +245,7 @@ func (cm *ChainManager) blockByHash(
 	cm.mutex.RLock()
 	defer cm.mutex.RUnlock()
 	// Check in-memory cache
-	if blk, ok := cm.blockCache.Get(string(blockHash)); ok {
+	if blk, ok := cm.blockCache.Get(blockHash); ok {
 		return blk, nil
 	}
 	return models.Block{}, models.ErrBlockNotFound
