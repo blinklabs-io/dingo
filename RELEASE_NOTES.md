@@ -12,12 +12,12 @@ Hi folks! Here’s what we shipped in v0.23.0.
 
 ### ✨ What's New
 
-- **Overlay-aware validation:** Transaction validation is more accurate because ledger and mempool checks now account for pending, in-flight changes with a temporary UTxO overlay.
+- **Transaction validation:** Transaction validation is more accurate because ledger and mempool checks now account for pending, in-flight changes with a temporary UTxO overlay.
 
 ### 💪 Improvements
 
-- **Docs refresh:** Setup is easier because `README.md` now includes expanded usage, deployment, and DevNet guidance plus a clear “not for production” warning.
-- **Publishing pipeline:** Publishing is more rock-solid because the release workflow now targets Node.js `24.x` and pins key GitHub Actions versions.
+- **Docs:** Setup is easier because `README.md` now includes expanded usage, deployment, and DevNet guidance plus a clear “not for production” warning.
+- **Publish workflow:** Publishing is more rock-solid because the release workflow now targets Node.js `24.x` and pins key GitHub Actions versions.
 - **Release notes:** Release notes are easier to scan because `RELEASE_NOTES.md` now includes v0.22.1 and tightens up transaction validation wording.
 
 ### 🔧 Fixes
@@ -26,7 +26,7 @@ Hi folks! Here’s what we shipped in v0.23.0.
 
 ### 📋 What You Need to Know
 
-- **Dev mode storage override:** If you run dev mode, Dingo will automatically switch the storage mode to API, so check logs if you expected a different mode.
+- **Dev mode:** If you run dev mode, Dingo will automatically switch the storage mode to API, so check logs if you expected a different mode.
 
 ### 🙏 Thank You
 
