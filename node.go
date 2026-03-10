@@ -126,6 +126,7 @@ func (n *Node) Run(ctx context.Context) error {
 		Logger:         n.config.logger,
 		PromRegistry:   n.config.promRegistry,
 		BlobPlugin:     n.config.blobPlugin,
+		RunMode:        n.config.runMode,
 		MetadataPlugin: n.config.metadataPlugin,
 		MaxConnections: n.config.DatabaseWorkerPoolConfig.WorkerPoolSize,
 		StorageMode:    string(n.config.storageMode),

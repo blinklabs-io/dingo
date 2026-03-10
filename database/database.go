@@ -39,6 +39,7 @@ type Config struct {
 	Logger         *slog.Logger
 	BlobPlugin     string
 	DataDir        string
+	RunMode        string
 	MetadataPlugin string
 	MaxConnections int    // Connection pool size for metadata plugin (should match DatabaseWorkers)
 	StorageMode    string // "core" or "api"
@@ -160,6 +161,24 @@ func New(
 		return nil, err
 	}
 	err = plugin.SetPluginOption(
+		plugin.PluginTypeBlob,
+		configCopy.BlobPlugin,
+		"run-mode",
+		configCopy.RunMode,
+	)
+	if err != nil {
+		return nil, err
+	}
+	err = plugin.SetPluginOption(
+		plugin.PluginTypeBlob,
+		configCopy.BlobPlugin,
+		"storage-mode",
+		configCopy.StorageMode,
+	)
+	if err != nil {
+		return nil, err
+	}
+	err = plugin.SetPluginOption(
 		plugin.PluginTypeMetadata,
 		configCopy.MetadataPlugin,
 		"data-dir",
@@ -194,21 +213,81 @@ func New(
 			err,
 		)
 	}
-	blobDb, err := blob.New(
+	// Start blob plugin with logger injected before Start() so that
+	// startup logging (Badger GC, cache init) uses the configured logger.
+	blobPlugin := plugin.GetPlugin(
+		plugin.PluginTypeBlob,
 		configCopy.BlobPlugin,
 	)
-	if err != nil {
-		return nil, err
+	if blobPlugin == nil {
+		return nil, fmt.Errorf(
+			"blob plugin %q not found",
+			configCopy.BlobPlugin,
+		)
 	}
-	metadataDb, err := metadata.New(
+	if loggerSetter, ok := blobPlugin.(plugin.LoggerSetter); ok {
+		loggerSetter.SetLogger(configCopy.Logger)
+	}
+	if err := blobPlugin.Start(); err != nil {
+		return nil, fmt.Errorf(
+			"starting blob plugin %q: %w",
+			configCopy.BlobPlugin,
+			err,
+		)
+	}
+	blobDb, ok := blobPlugin.(blob.BlobStore)
+	if !ok {
+		stopErr := blobPlugin.Stop()
+		return nil, errors.Join(
+			fmt.Errorf(
+				"plugin %q does not implement BlobStore interface",
+				configCopy.BlobPlugin,
+			),
+			stopErr,
+		)
+	}
+	// Start metadata plugin with logger injected before Start() so that
+	// startup logging (GORM migrations) uses the configured logger.
+	metadataPlugin := plugin.GetPlugin(
+		plugin.PluginTypeMetadata,
 		configCopy.MetadataPlugin,
 	)
-	if err != nil {
-		err = errors.Join(
-			err,
-			blobDb.Close(),
-		) // Clean up blob store on metadata failure
-		return nil, err
+	if metadataPlugin == nil {
+		closeErr := blobDb.Close()
+		return nil, errors.Join(
+			fmt.Errorf(
+				"metadata plugin %q not found",
+				configCopy.MetadataPlugin,
+			),
+			closeErr,
+		)
+	}
+	if loggerSetter, ok := metadataPlugin.(plugin.LoggerSetter); ok {
+		loggerSetter.SetLogger(configCopy.Logger)
+	}
+	if err := metadataPlugin.Start(); err != nil {
+		closeErr := blobDb.Close()
+		return nil, errors.Join(
+			fmt.Errorf(
+				"starting metadata plugin %q: %w",
+				configCopy.MetadataPlugin,
+				err,
+			),
+			closeErr,
+		)
+	}
+	metadataDb, ok := metadataPlugin.(metadata.MetadataStore)
+	if !ok {
+		stopErr := metadataPlugin.Stop()
+		closeErr := blobDb.Close()
+		return nil, errors.Join(
+			fmt.Errorf(
+				"plugin %q does not implement MetadataStore interface",
+				configCopy.MetadataPlugin,
+			),
+			stopErr,
+			closeErr,
+		)
 	}
 	db := &Database{
 		blob:     blobDb,

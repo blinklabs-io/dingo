@@ -30,9 +30,25 @@ const (
 	DefaultValueThreshold   = 1048576    // 1MB (keep small values in LSM, large blobs in value log)
 )
 
+type Profile string
+
+const (
+	ProfileCore Profile = "core"
+	ProfileAPI  Profile = "api"
+	ProfileLoad Profile = "load"
+)
+
+type ProfileSettings struct {
+	BlockCacheSize uint64
+	IndexCacheSize uint64
+	MemTableSize   uint64
+}
+
 var (
 	cmdlineOptions struct {
 		dataDir          string
+		runMode          string
+		storageMode      string
 		blockCacheSize   uint64
 		indexCacheSize   uint64
 		valueLogFileSize uint64
@@ -43,6 +59,60 @@ var (
 	cmdlineOptionsMutex sync.RWMutex
 )
 
+func profileSettings(profile Profile) ProfileSettings {
+	switch profile {
+	case ProfileLoad:
+		return ProfileSettings{
+			BlockCacheSize: 268435456, // 256MB
+			IndexCacheSize: 67108864,  // 64MB
+			MemTableSize:   67108864,  // 64MB
+		}
+	case ProfileCore:
+		return ProfileSettings{
+			BlockCacheSize: 536870912, // 512MB
+			IndexCacheSize: 134217728, // 128MB
+			MemTableSize:   67108864,  // 64MB
+		}
+	case ProfileAPI:
+		fallthrough
+	default:
+		return ProfileSettings{
+			BlockCacheSize: DefaultBlockCacheSize,
+			IndexCacheSize: DefaultIndexCacheSize,
+			MemTableSize:   DefaultMemTableSize,
+		}
+	}
+}
+
+func resolveProfile(runMode, storageMode string) Profile {
+	if runMode == string(ProfileLoad) {
+		return ProfileLoad
+	}
+	if storageMode == string(ProfileAPI) {
+		return ProfileAPI
+	}
+	return ProfileCore
+}
+
+func applyOperationalDefaults(
+	runMode string,
+	storageMode string,
+	blockCacheSize *uint64,
+	indexCacheSize *uint64,
+	memTableSize *uint64,
+) {
+	settings := profileSettings(resolveProfile(runMode, storageMode))
+	if *blockCacheSize == DefaultBlockCacheSize {
+		*blockCacheSize = settings.BlockCacheSize
+	}
+	if *indexCacheSize == DefaultIndexCacheSize {
+		*indexCacheSize = settings.IndexCacheSize
+	}
+	if *memTableSize == DefaultMemTableSize {
+		*memTableSize = settings.MemTableSize
+	}
+}
+
 // initCmdlineOptions sets default values for cmdlineOptions
 func initCmdlineOptions() {
 	cmdlineOptionsMutex.Lock()
@@ -52,6 +122,8 @@ func initCmdlineOptions() {
 	cmdlineOptions.valueLogFileSize = DefaultValueLogFileSize
 	cmdlineOptions.memTableSize = DefaultMemTableSize
 	cmdlineOptions.valueThreshold = DefaultValueThreshold
+	cmdlineOptions.runMode = ""
+	cmdlineOptions.storageMode = "core"
 	cmdlineOptions.gcEnabled = true
 	cmdlineOptions.dataDir = ".dingo"
 }
@@ -72,6 +144,20 @@ func init() {
 					Description:  "Data directory for badger storage",
 					DefaultValue: ".dingo",
 					Dest:         &(cmdlineOptions.dataDir),
+				},
+				{
+					Name:         "run-mode",
+					Type:         plugin.PluginOptionTypeString,
+					Description:  "Operational run mode",
+					DefaultValue: "",
+					Dest:         &(cmdlineOptions.runMode),
+				},
+				{
+					Name:         "storage-mode",
+					Type:         plugin.PluginOptionTypeString,
+					Description:  "Storage tier: core or api",
+					DefaultValue: "core",
+					Dest:         &(cmdlineOptions.storageMode),
 				},
 				{
 					Name:         "block-cache-size",
@@ -121,12 +207,24 @@ func init() {
 }
 
 func NewFromCmdlineOptions() plugin.Plugin {
-	cmdlineOptionsMutex.RLock()
+	cmdlineOptionsMutex.Lock()
+	// Copy cmdline values to locals so applyOperationalDefaults does not
+	// mutate the shared cmdlineOptions struct.
+	blockCacheSize := cmdlineOptions.blockCacheSize
+	indexCacheSize := cmdlineOptions.indexCacheSize
+	memTableSize := cmdlineOptions.memTableSize
+	applyOperationalDefaults(
+		cmdlineOptions.runMode,
+		cmdlineOptions.storageMode,
+		&blockCacheSize,
+		&indexCacheSize,
+		&memTableSize,
+	)
 	// Safe conversion from uint64 to int64 with bounds checking
 	valueLogFileSize := min(cmdlineOptions.valueLogFileSize,
 		// Cap at max int64
 		uint64(math.MaxInt64))
-	memTableSize := min(cmdlineOptions.memTableSize,
+	memTableSizeCapped := min(memTableSize,
 		// Cap at max int64
 		uint64(math.MaxInt64))
 	valueThreshold := min(cmdlineOptions.valueThreshold,
@@ -135,20 +233,21 @@ func NewFromCmdlineOptions() plugin.Plugin {
 	// #nosec G115
 	opts := []BlobStoreBadgerOptionFunc{
 		WithDataDir(cmdlineOptions.dataDir),
-		WithBlockCacheSize(cmdlineOptions.blockCacheSize),
-		WithIndexCacheSize(cmdlineOptions.indexCacheSize),
+		WithBlockCacheSize(blockCacheSize),
+		WithIndexCacheSize(indexCacheSize),
 		WithValueLogFileSize(
 			int64(valueLogFileSize),
 		),
 		WithMemTableSize(
-			int64(memTableSize),
+			int64(memTableSizeCapped),
 		),
 		WithValueThreshold(
 			int64(valueThreshold),
 		),
 		WithGc(cmdlineOptions.gcEnabled),
+		WithDeferOpen(),
 	}
-	cmdlineOptionsMutex.RUnlock()
+	cmdlineOptionsMutex.Unlock()
 	p, err := New(opts...)
 	if err != nil {
 		// Return a plugin that defers the error to Start()

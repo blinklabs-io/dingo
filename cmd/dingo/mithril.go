@@ -334,6 +334,7 @@ func runMithrilSync(
 		DataDir:        cfg.DatabasePath,
 		Logger:         logger,
 		BlobPlugin:     cfg.BlobPlugin,
+		RunMode:        string(cfg.RunMode),
 		MetadataPlugin: cfg.MetadataPlugin,
 		MaxConnections: cfg.DatabaseWorkers,
 		StorageMode:    cfg.StorageMode,

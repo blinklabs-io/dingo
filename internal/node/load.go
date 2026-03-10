@@ -62,6 +62,7 @@ func ensureDB(
 		Logger:         logger,
 		PromRegistry:   nil,
 		BlobPlugin:     cfg.BlobPlugin,
+		RunMode:        string(cfg.RunMode),
 		MetadataPlugin: cfg.MetadataPlugin,
 		MaxConnections: cfg.DatabaseWorkers,
 	}
