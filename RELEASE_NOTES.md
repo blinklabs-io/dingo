@@ -2,7 +2,7 @@
 
 ## v0.23.0 (March 10, 2026)
 
-**Title:** Updates and reliability tweaks
+**Title:** Overlay-aware validation and smoother dev mode
 
 **Date:** March 10, 2026
 
@@ -12,29 +12,21 @@ Hi folks! Here’s what we shipped in v0.23.0.
 
 ### ✨ What's New
 
-<!-- {
-  "✨ What's New": [
-    "Transaction checks now account for pending, in-flight changes so you get more accurate validation before anything is finalized."
-  ],
-  "💪 Improvements": [
-    "Project documentation is clearer and more complete so it is easier to understand how to use and deploy the software safely.",
-    "Publishing and CI workflows are more up to date so builds and container publishing are more reliable and easier to maintain.",
-    "Release notes are easier to follow so you can quickly understand what changed in the latest version."
-  ],
-  "📋 What You Need to Know": [
-    "If you run the software in development mode, it will automatically choose the correct storage configuration so you do not need to adjust settings manually."
-  ],
-  "🔧 Fixes": [
-    "Connection-related tests and cleanup are more predictable so intermittent failures are less likely."
-  ]
-}
- -->
+- **Overlay-aware validation:** Transaction validation is more accurate because ledger and mempool checks now account for pending, in-flight changes with a temporary UTxO overlay.
 
 ### 💪 Improvements
 
+- **Docs refresh:** Setup is easier because `README.md` now includes expanded usage, deployment, and DevNet guidance plus a clear “not for production” warning.
+- **Publishing pipeline:** Publishing is more reliable because the release workflow now targets Node.js `24.x` and pins key GitHub Actions versions.
+- **Release notes:** Release notes are easier to scan because `RELEASE_NOTES.md` now includes v0.22.1 and tightens up transaction validation wording.
+
 ### 🔧 Fixes
 
+- **Connection cleanup:** Connection-related tests are less flaky because keepalive timeouts are deterministic and connection cleanup is safer.
+
 ### 📋 What You Need to Know
+
+- **Dev mode storage override:** If you run dev mode, Dingo will automatically switch the storage mode to API, so check logs if you expected a different mode.
 
 ### 🙏 Thank You
 
