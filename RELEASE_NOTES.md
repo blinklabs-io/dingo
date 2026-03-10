@@ -1,5 +1,37 @@
 # Release Notes
 
+## v0.23.1 (March 10, 2026)
+
+**Title:** Updates and fixes
+
+**Date:** March 10, 2026
+
+**Version:** v0.23.1
+
+Hi folks! Here’s what we shipped in v0.23.1.
+
+<!--
+{
+  "✨ What's New": [
+    "You can now validate transactions correctly even when they depend on other unconfirmed transactions, which helps avoid accepting transactions that won’t actually work once everything is applied. Specifically, the ledger and mempool now perform UTxO overlay-aware validation, including descendant pruning and new automated tests to cover these dependency scenarios."
+  ],
+  "💪 Improvements": [
+    "It’s easier to understand how to run and deploy this project safely, so you can get started faster and avoid accidental production usage. The README was expanded with detailed usage, deployment, and DevNet documentation, and it now includes a prominent non-production warning.",
+    "Build and publish automation is more up to date, which improves long-term maintainability and compatibility with current tooling. The publish workflow and related CI now use Node.js 24.x, actions/setup-node v6.3.0, docker/login-action v4, docker/metadata-action v6.0.0 (pinned by commit SHA), docker/build-push-action v7.0.0, and docker/setup-buildx-action v4.0.0.",
+    "Dependency updates reduce the risk of incompatibilities and keep the codebase aligned with upstream improvements. This update bumps gouroboros to v0.160.1, upgrades github.com/blinklabs-io/bursa from v0.15.0 to v0.16.0, and updates aws-sdk-go-v2 core from 1.41.2 to 1.41.3.",
+    "Release documentation is clearer and easier to follow, so you can quickly understand what changed in the version you’re using. RELEASE_NOTES.md now includes a documented v0.22.1 section, with clearer transaction-validation wording and additional notes covering the publish workflow and CI tooling updates."
+  ],
+  "🔧 Fixes": [
+    "Network connection testing is more reliable and cleanup is safer, which reduces flaky failures and unexpected resource leaks during development and CI runs. The connection manager error test now uses a deterministic keepalive timeout, with safer channel closing and connection cleanup behavior.",
+    "You’re less likely to hit confusing runtime errors during VRF-related operations, improving stability in scenarios that depend on VRF inputs. The code now adds explicit error handling around vrf.MkInputVrf calls alongside the gouroboros v0.160.1 update.",
+    "Development mode now behaves more predictably, preventing misconfiguration that can lead to confusing storage behavior. When dev mode is enabled, the system forces storage mode to API and emits a log message indicating the override."
+  ]
+}
+
+-->
+
+---
+
 ## v0.22.1 (March 8, 2026)
 
 **Title:** Stability updates and polish
