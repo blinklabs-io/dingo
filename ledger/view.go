@@ -33,12 +33,18 @@ import (
 // ErrNilDecodedOutput is returned when a decoded UTxO output is nil.
 var ErrNilDecodedOutput = errors.New("nil decoded output")
 
+// ErrUtxoAlreadyConsumed is returned when a UTxO has been consumed by a pending transaction.
+var ErrUtxoAlreadyConsumed = errors.New("UTxO already consumed")
+
 type LedgerView struct {
 	ls  *LedgerState
 	txn *database.Txn
 	// intraBlockUtxos tracks outputs created by earlier transactions in the same block.
 	// Key format: hex(txId) + ":" + outputIdx
 	intraBlockUtxos map[string]lcommon.Utxo
+	// consumedUtxos tracks inputs consumed by pending mempool transactions.
+	// Key format: hex(txId) + ":" + outputIdx
+	consumedUtxos map[string]struct{}
 }
 
 func (lv *LedgerView) NetworkId() uint {
@@ -57,9 +63,19 @@ func (lv *LedgerView) NetworkId() uint {
 func (lv *LedgerView) UtxoById(
 	utxoId lcommon.TransactionInput,
 ) (lcommon.Utxo, error) {
-	// Check intra-block UTxOs first (outputs from earlier txs in same block)
+	key := fmt.Sprintf("%s:%d", utxoId.Id().String(), utxoId.Index())
+	// Check consumed UTxOs first (spent by pending mempool TX)
+	if lv.consumedUtxos != nil {
+		if _, ok := lv.consumedUtxos[key]; ok {
+			return lcommon.Utxo{}, fmt.Errorf(
+				"utxo %s: %w",
+				key,
+				ErrUtxoAlreadyConsumed,
+			)
+		}
+	}
+	// Check intra-block/overlay UTxOs (outputs from earlier txs)
 	if lv.intraBlockUtxos != nil {
-		key := fmt.Sprintf("%s:%d", utxoId.Id().String(), utxoId.Index())
 		if utxo, ok := lv.intraBlockUtxos[key]; ok {
 			return utxo, nil
 		}

@@ -3316,15 +3316,14 @@ func resolveValidationEra(
 	return *txEra, nil
 }
 
-// ValidateTx runs ledger validation on the provided transaction.
-// It accepts transactions from the current era and the immediately
-// previous era (era-1), as Cardano allows during the overlap
-// period after a hard fork.
-func (ls *LedgerState) ValidateTx(
+// validateTxCore is the shared validation flow for ValidateTx and
+// ValidateTxWithOverlay. It snapshots ledger state, resolves the
+// validation era, opens a DB transaction, and invokes the era's
+// ValidateTxFunc with a LedgerView built by the provided callback.
+func (ls *LedgerState) validateTxCore(
 	tx lcommon.Transaction,
+	buildLV func(txn *database.Txn) *LedgerView,
 ) error {
-	// Snapshot mutable state under read lock to avoid data races
-	// with concurrent writers (e.g., ledgerProcessBlocks)
 	ls.RLock()
 	snapshotEra := ls.currentEra
 	snapshotSlot := ls.currentTip.Point.Slot
@@ -3337,22 +3336,16 @@ func (ls *LedgerState) ValidateTx(
 		return err
 	}
 	if validationEra.ValidateTxFunc != nil {
-		// Use the previous era's protocol parameters when validating
-		// a transaction from the immediately previous era (era-1).
 		pp := snapshotPParams
 		if validationEra.Id != snapshotEra.Id && snapshotPrevEraPParams != nil {
 			pp = snapshotPrevEraPParams
 		}
 		txn := ls.db.Transaction(false)
 		err := txn.Do(func(txn *database.Txn) error {
-			lv := &LedgerView{
-				txn: txn,
-				ls:  ls,
-			}
 			return validationEra.ValidateTxFunc(
 				tx,
 				snapshotSlot,
-				lv,
+				buildLV(txn),
 				pp,
 			)
 		})
@@ -3361,6 +3354,37 @@ func (ls *LedgerState) ValidateTx(
 		}
 	}
 	return nil
+}
+
+// ValidateTx runs ledger validation on the provided transaction.
+// It accepts transactions from the current era and the immediately
+// previous era (era-1), as Cardano allows during the overlap
+// period after a hard fork.
+func (ls *LedgerState) ValidateTx(
+	tx lcommon.Transaction,
+) error {
+	return ls.validateTxCore(tx, func(txn *database.Txn) *LedgerView {
+		return &LedgerView{txn: txn, ls: ls}
+	})
+}
+
+// ValidateTxWithOverlay runs ledger validation with a UTxO overlay from pending
+// mempool transactions. consumedUtxos contains inputs already spent by pending TXs
+// (double-spend check), createdUtxos contains outputs created by pending TXs
+// (dependent TX chaining). Both may be nil for no overlay.
+func (ls *LedgerState) ValidateTxWithOverlay(
+	tx lcommon.Transaction,
+	consumedUtxos map[string]struct{},
+	createdUtxos map[string]lcommon.Utxo,
+) error {
+	return ls.validateTxCore(tx, func(txn *database.Txn) *LedgerView {
+		return &LedgerView{
+			txn:             txn,
+			ls:              ls,
+			intraBlockUtxos: createdUtxos,
+			consumedUtxos:   consumedUtxos,
+		}
+	})
 }
 
 // EvaluateTx evaluates the scripts in the provided transaction and returns the calculated
