@@ -10,10 +10,6 @@
 
 Hi folks! Here’s what we shipped in v0.23.1.
 
-<!--
-
--->
-
 ### ✨ What's New
 
 - **Dependent transaction validation:** Transaction validation is safer because the node now validates transactions against unconfirmed dependencies before accepting them.
