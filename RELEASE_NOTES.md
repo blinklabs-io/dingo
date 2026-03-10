@@ -1,5 +1,47 @@
 # Release Notes
 
+## v0.23.0 (March 10, 2026)
+
+**Title:** Updates and reliability tweaks
+
+**Date:** March 10, 2026
+
+**Version:** v0.23.0
+
+Hi folks! Here’s what we shipped in v0.23.0.
+
+### ✨ What's New
+
+<!-- {
+  "✨ What's New": [
+    "Transaction checks now account for pending, in-flight changes so you get more accurate validation before anything is finalized. Specifically, ledger and mempool validation now understands the UTxO overlay, prunes descendant transactions when a dependency is removed, and includes new tests to cover the overlay-aware behavior."
+  ],
+  "💪 Improvements": [
+    "Project documentation is clearer and more complete so it is easier to understand how to use and deploy the software safely. Specifically, the README now includes expanded usage, deployment, and DevNet documentation along with a prominent warning that the project is not intended for production use.",
+    "Publishing and CI workflows are more up to date so builds and container publishing are more reliable and easier to maintain. Specifically, the publish pipeline now targets Node.js 24.x and updates/pins several GitHub Actions (docker/login-action v4, docker/metadata-action v6 pinned by SHA, docker/build-push-action v7, docker/setup-buildx-action v4, and actions/setup-node v6.3.0) and bumps aws-sdk-go-v2 core from 1.41.2 to 1.41.3.",
+    "Release notes are easier to follow so you can quickly understand what changed in the latest version. Specifically, RELEASE_NOTES.md now includes a documented section for v0.22.1 and clarifies transaction validation wording while also noting publish workflow and CI tooling updates."
+  ],
+  "📋 What You Need to Know": [
+    "If you run the software in development mode, it will automatically choose the correct storage configuration so you do not need to adjust settings manually. Specifically, dev mode now forces the storage mode to API and logs a message when it overrides another configured storage mode."
+  ],
+  "🔧 Fixes": [
+    "Connection-related tests and cleanup are more predictable so intermittent failures are less likely. Specifically, the connection manager error test now uses a deterministic keepalive timeout, and channel closing plus connection cleanup were hardened to be safer."
+  ]
+}
+ -->
+
+### 💪 Improvements
+
+### 🔧 Fixes
+
+### 📋 What You Need to Know
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
 ## v0.22.1 (March 8, 2026)
 
 **Title:** Stability updates and polish
