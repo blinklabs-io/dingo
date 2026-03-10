@@ -35,15 +35,15 @@ END SOURCE_NOTES
 
 ### ✨ What's New
 
-- **Docs:** Docs are easier to follow because the README was expanded with usage, deployment, and DevNet guidance and a clear not-for-production warning.
-- **Transaction validation:** Transaction validation is safer because the ledger and mempool now perform UTxO overlay-aware validation with descendant pruning and new tests.
+- **Docs:** Docs are easier to follow because the README was expanded with usage, deployment, and DevNet guidance plus a clear “not for production use” warning.
+- **Transaction validation:** Transaction validation is safer because the ledger and mempool now perform UTxO overlay-aware validation with descendant pruning, covered by new tests.
 
 ### 💪 Improvements
 
 - **Dev mode:** Dev mode runs are more predictable because it now forces storage mode to API and logs when it overrides your configured value.
 - **Publishing workflow:** Publishing and CI are more consistent because the GitHub Actions publish workflow now uses Node.js `24.x` and upgraded Docker and Node setup actions.
 - **Dependencies:** Compatibility is more solid because gouroboros was updated to v0.160.1 (including additional `vrf.MkInputVrf` error handling) and bursa was upgraded to v0.16.0.
-- **Release notes:** Release documentation is easier to scan because `RELEASE_NOTES.md` now includes a refined v0.22.1 entry with clearer validation wording and CI/publish tooling notes.
+- **Release notes:** Release documentation is easier to scan because `RELEASE_NOTES.md` now includes a refined v0.22.1 entry with clearer transaction validation wording and CI/publish tooling notes.
 
 ### 🔧 Fixes
 
