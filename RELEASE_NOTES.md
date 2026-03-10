@@ -2,7 +2,7 @@
 
 ## v0.23.0 (March 10, 2026)
 
-**Title:** Overlay-aware validation and smoother dev mode
+**Title:** Overlay-aware validation and a smoother dev mode
 
 **Date:** March 10, 2026
 
@@ -17,7 +17,7 @@ Hi folks! Here’s what we shipped in v0.23.0.
 ### 💪 Improvements
 
 - **Docs refresh:** Setup is easier because `README.md` now includes expanded usage, deployment, and DevNet guidance plus a clear “not for production” warning.
-- **Publishing pipeline:** Publishing is more reliable because the release workflow now targets Node.js `24.x` and pins key GitHub Actions versions.
+- **Publishing pipeline:** Publishing is more rock-solid because the release workflow now targets Node.js `24.x` and pins key GitHub Actions versions.
 - **Release notes:** Release notes are easier to scan because `RELEASE_NOTES.md` now includes v0.22.1 and tightens up transaction validation wording.
 
 ### 🔧 Fixes
