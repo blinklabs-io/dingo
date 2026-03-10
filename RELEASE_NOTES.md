@@ -30,6 +30,32 @@ Hi folks! Here’s what we shipped in v0.23.1.
 
 -->
 
+### ✨ What's New
+
+- **Dependent transaction validation:** Transaction validation is safer because the node now validates transactions against unconfirmed dependencies before accepting them.
+
+### 💪 Improvements
+
+- **Docs and safety messaging:** Getting started is easy because the README now includes clearer usage, deployment, and DevNet guidance plus a prominent non-production warning.
+- **CI and publishing automation:** Automation is more rock-solid because the publish workflow and related CI were refreshed to Node.js `24.x` and updated Docker actions.
+- **Dependency updates:** Compatibility is more solid because key networking and infrastructure dependencies were updated.
+- **Release notes:** Release notes are easier to scan because v0.22.1 now has a documented entry in `RELEASE_NOTES.md`.
+
+### 🔧 Fixes
+
+- **Connection manager tests:** Connection testing is more solid because keepalive timeouts are deterministic and cleanup is safer.
+- **VRF error handling:** Verifiable random function (VRF) operations fail more gracefully because VRF input creation now has explicit error handling.
+- **Dev mode storage:** Dev mode is less surprising because enabling it now forces API storage mode and logs the override.
+
+### 📋 What You Need to Know
+
+- **Custom CI scripts:** If you maintain custom CI or publishing scripts, double-check compatibility with Node.js `24.x` and updated Docker actions.
+- **Dev mode:** If you rely on non-API storage while in dev mode, note that it will now be overridden to API mode.
+
+### 🙏 Thank You
+
+Thank you for trying!
+
 ---
 
 ## v0.22.1 (March 8, 2026)
