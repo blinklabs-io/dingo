@@ -1,5 +1,135 @@
 # Release Notes
 
+## v0.23.0 (March 10, 2026)
+
+**Title:** {
+  "✨ What's New": [
+    "Ledger and mempool validation now accounts for pending UTxO changes so transactions are checked the way they will actually land on-chain. This adds UTxO overlay-aware validation with descendant pruning in the ledger/mempool pipeline, plus new test coverage to confirm the behavior."
+  ],
+  "💪 Improvements": [
+    "Project documentation is clearer about how to use and deploy the project, and it more explicitly sets expectations for safe usage. The README now includes expanded usage, deployment, and DevNet documentation along with a prominent non-production warning.",
+    "Development mode now behaves more predictably by enforcing the correct storage setting automatically. When dev mode is enabled, the system forces storage mode to API, logs that it is overriding the configuration, and proceeds with the API-backed storage path.",
+    "Release documentation is easier to follow and better reflects what actually shipped in the latest patch. The v0.22.1 entry in RELEASE_NOTES.md was added/updated with clearer transaction-validation wording and additional notes covering the publish workflow and CI tooling changes.",
+    "Publishing and CI workflows were refreshed to align with newer supported tooling versions and improve reproducibility. The publish workflow now targets Node.js 24.x, upgrades docker/login-action to v4, moves docker/metadata-action to v6 pinned by SHA, and updates docker/build-push-action to v7.0.0 and docker/setup-buildx-action to v4.0.0, alongside bumping actions/setup-node to v6.3.0."
+  ],
+  "📋 What You Need to Know": [
+    "If you rely on the GitHub publish workflow, make sure your environment and any pinned actions assumptions are compatible with the newer toolchain versions. The pipeline now uses Node.js 24.x and updated Docker GitHub Actions (including docker/metadata-action v6 pinned by commit SHA), which may affect downstream forks that pin older versions.",
+    "If you run in dev mode, be aware that your configured storage mode may be overridden automatically. Dev mode forces storage mode to API and emits a log message indicating the override so you can spot it during local runs."
+  ],
+  "🔧 Fixes": [
+    "Connection-related tests are now more stable and cleanup is less likely to leave resources behind. The connection manager error test now uses a deterministic keepalive timeout, and channel closing plus connection cleanup were made safer to reduce flakiness."
+  ]
+}
+
+
+**Date:** March 10, 2026
+
+**Version:** v0.23.0
+
+Hi folks! Here’s what we shipped in v0.23.0.
+
+### ✨ What's New
+
+```json
+{
+  "✨ What's New": [
+    "Ledger and mempool validation now accounts for pending UTxO changes so transactions are checked the way they will actually land on-chain. This adds UTxO overlay-aware validation with descendant pruning in the ledger/mempool pipeline, plus new test coverage to confirm the behavior."
+  ],
+  "💪 Improvements": [
+    "Project documentation is clearer about how to use and deploy the project, and it more explicitly sets expectations for safe usage. The README now includes expanded usage, deployment, and DevNet documentation along with a prominent non-production warning.",
+    "Development mode now behaves more predictably by enforcing the correct storage setting automatically. When dev mode is enabled, the system forces storage mode to API, logs that it is overriding the configuration, and proceeds with the API-backed storage path.",
+    "Release documentation is easier to follow and better reflects what actually shipped in the latest patch. The v0.22.1 entry in RELEASE_NOTES.md was added/updated with clearer transaction-validation wording and additional notes covering the publish workflow and CI tooling changes.",
+    "Publishing and CI workflows were refreshed to align with newer supported tooling versions and improve reproducibility. The publish workflow now targets Node.js 24.x, upgrades docker/login-action to v4, moves docker/metadata-action to v6 pinned by SHA, and updates docker/build-push-action to v7.0.0 and docker/setup-buildx-action to v4.0.0, alongside bumping actions/setup-node to v6.3.0."
+  ],
+  "📋 What You Need to Know": [
+    "If you rely on the GitHub publish workflow, make sure your environment and any pinned actions assumptions are compatible with the newer toolchain versions. The pipeline now uses Node.js 24.x and updated Docker GitHub Actions (including docker/metadata-action v6 pinned by commit SHA), which may affect downstream forks that pin older versions.",
+    "If you run in dev mode, be aware that your configured storage mode may be overridden automatically. Dev mode forces storage mode to API and emits a log message indicating the override so you can spot it during local runs."
+  ],
+  "🔧 Fixes": [
+    "Connection-related tests are now more stable and cleanup is less likely to leave resources behind. The connection manager error test now uses a deterministic keepalive timeout, and channel closing plus connection cleanup were made safer to reduce flakiness."
+  ]
+}
+
+```
+
+### 💪 Improvements
+
+```json
+{
+  "✨ What's New": [
+    "Ledger and mempool validation now accounts for pending UTxO changes so transactions are checked the way they will actually land on-chain. This adds UTxO overlay-aware validation with descendant pruning in the ledger/mempool pipeline, plus new test coverage to confirm the behavior."
+  ],
+  "💪 Improvements": [
+    "Project documentation is clearer about how to use and deploy the project, and it more explicitly sets expectations for safe usage. The README now includes expanded usage, deployment, and DevNet documentation along with a prominent non-production warning.",
+    "Development mode now behaves more predictably by enforcing the correct storage setting automatically. When dev mode is enabled, the system forces storage mode to API, logs that it is overriding the configuration, and proceeds with the API-backed storage path.",
+    "Release documentation is easier to follow and better reflects what actually shipped in the latest patch. The v0.22.1 entry in RELEASE_NOTES.md was added/updated with clearer transaction-validation wording and additional notes covering the publish workflow and CI tooling changes.",
+    "Publishing and CI workflows were refreshed to align with newer supported tooling versions and improve reproducibility. The publish workflow now targets Node.js 24.x, upgrades docker/login-action to v4, moves docker/metadata-action to v6 pinned by SHA, and updates docker/build-push-action to v7.0.0 and docker/setup-buildx-action to v4.0.0, alongside bumping actions/setup-node to v6.3.0."
+  ],
+  "📋 What You Need to Know": [
+    "If you rely on the GitHub publish workflow, make sure your environment and any pinned actions assumptions are compatible with the newer toolchain versions. The pipeline now uses Node.js 24.x and updated Docker GitHub Actions (including docker/metadata-action v6 pinned by commit SHA), which may affect downstream forks that pin older versions.",
+    "If you run in dev mode, be aware that your configured storage mode may be overridden automatically. Dev mode forces storage mode to API and emits a log message indicating the override so you can spot it during local runs."
+  ],
+  "🔧 Fixes": [
+    "Connection-related tests are now more stable and cleanup is less likely to leave resources behind. The connection manager error test now uses a deterministic keepalive timeout, and channel closing plus connection cleanup were made safer to reduce flakiness."
+  ]
+}
+
+```
+
+### 🔧 Fixes
+
+```json
+{
+  "✨ What's New": [
+    "Ledger and mempool validation now accounts for pending UTxO changes so transactions are checked the way they will actually land on-chain. This adds UTxO overlay-aware validation with descendant pruning in the ledger/mempool pipeline, plus new test coverage to confirm the behavior."
+  ],
+  "💪 Improvements": [
+    "Project documentation is clearer about how to use and deploy the project, and it more explicitly sets expectations for safe usage. The README now includes expanded usage, deployment, and DevNet documentation along with a prominent non-production warning.",
+    "Development mode now behaves more predictably by enforcing the correct storage setting automatically. When dev mode is enabled, the system forces storage mode to API, logs that it is overriding the configuration, and proceeds with the API-backed storage path.",
+    "Release documentation is easier to follow and better reflects what actually shipped in the latest patch. The v0.22.1 entry in RELEASE_NOTES.md was added/updated with clearer transaction-validation wording and additional notes covering the publish workflow and CI tooling changes.",
+    "Publishing and CI workflows were refreshed to align with newer supported tooling versions and improve reproducibility. The publish workflow now targets Node.js 24.x, upgrades docker/login-action to v4, moves docker/metadata-action to v6 pinned by SHA, and updates docker/build-push-action to v7.0.0 and docker/setup-buildx-action to v4.0.0, alongside bumping actions/setup-node to v6.3.0."
+  ],
+  "📋 What You Need to Know": [
+    "If you rely on the GitHub publish workflow, make sure your environment and any pinned actions assumptions are compatible with the newer toolchain versions. The pipeline now uses Node.js 24.x and updated Docker GitHub Actions (including docker/metadata-action v6 pinned by commit SHA), which may affect downstream forks that pin older versions.",
+    "If you run in dev mode, be aware that your configured storage mode may be overridden automatically. Dev mode forces storage mode to API and emits a log message indicating the override so you can spot it during local runs."
+  ],
+  "🔧 Fixes": [
+    "Connection-related tests are now more stable and cleanup is less likely to leave resources behind. The connection manager error test now uses a deterministic keepalive timeout, and channel closing plus connection cleanup were made safer to reduce flakiness."
+  ]
+}
+
+```
+
+### 📋 What You Need to Know
+
+```json
+{
+  "✨ What's New": [
+    "Ledger and mempool validation now accounts for pending UTxO changes so transactions are checked the way they will actually land on-chain. This adds UTxO overlay-aware validation with descendant pruning in the ledger/mempool pipeline, plus new test coverage to confirm the behavior."
+  ],
+  "💪 Improvements": [
+    "Project documentation is clearer about how to use and deploy the project, and it more explicitly sets expectations for safe usage. The README now includes expanded usage, deployment, and DevNet documentation along with a prominent non-production warning.",
+    "Development mode now behaves more predictably by enforcing the correct storage setting automatically. When dev mode is enabled, the system forces storage mode to API, logs that it is overriding the configuration, and proceeds with the API-backed storage path.",
+    "Release documentation is easier to follow and better reflects what actually shipped in the latest patch. The v0.22.1 entry in RELEASE_NOTES.md was added/updated with clearer transaction-validation wording and additional notes covering the publish workflow and CI tooling changes.",
+    "Publishing and CI workflows were refreshed to align with newer supported tooling versions and improve reproducibility. The publish workflow now targets Node.js 24.x, upgrades docker/login-action to v4, moves docker/metadata-action to v6 pinned by SHA, and updates docker/build-push-action to v7.0.0 and docker/setup-buildx-action to v4.0.0, alongside bumping actions/setup-node to v6.3.0."
+  ],
+  "📋 What You Need to Know": [
+    "If you rely on the GitHub publish workflow, make sure your environment and any pinned actions assumptions are compatible with the newer toolchain versions. The pipeline now uses Node.js 24.x and updated Docker GitHub Actions (including docker/metadata-action v6 pinned by commit SHA), which may affect downstream forks that pin older versions.",
+    "If you run in dev mode, be aware that your configured storage mode may be overridden automatically. Dev mode forces storage mode to API and emits a log message indicating the override so you can spot it during local runs."
+  ],
+  "🔧 Fixes": [
+    "Connection-related tests are now more stable and cleanup is less likely to leave resources behind. The connection manager error test now uses a deterministic keepalive timeout, and channel closing plus connection cleanup were made safer to reduce flakiness."
+  ]
+}
+
+```
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
 ## v0.22.1 (March 8, 2026)
 
 **Title:** Stability updates and polish
