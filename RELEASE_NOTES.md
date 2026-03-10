@@ -2,7 +2,7 @@
 
 ## v0.23.0 (March 10, 2026)
 
-**Title:** Smarter validation and smoother workflows
+**Title:** Smarter validation and slicker workflows
 
 **Date:** March 10, 2026
 
