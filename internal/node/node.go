@@ -153,6 +153,14 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 			dingo.StorageModeAPI,
 		)
 	}
+	// Dev mode always uses API storage for full transaction metadata
+	if cfg.RunMode.IsDevMode() && !storageMode.IsAPI() {
+		logger.Info(
+			"dev mode: overriding storage mode to api",
+			"previous", string(storageMode),
+		)
+		storageMode = dingo.StorageModeAPI
+	}
 	// APIs require "api" storage mode
 	anyAPIEnabled := cfg.BlockfrostPort > 0 ||
 		cfg.MeshPort > 0 ||
