@@ -117,7 +117,8 @@ func TestVRFProve(t *testing.T) {
 
 	// Generate VRF proof for a sample slot
 	epochNonce := make([]byte, 32) // All zeros for test
-	alpha := vrf.MkInputVrf(1000, epochNonce)
+	alpha, err := vrf.MkInputVrf(1000, epochNonce)
+	require.NoError(t, err)
 
 	proof, output, err := pc.VRFProve(alpha)
 	require.NoError(t, err)

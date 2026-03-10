@@ -106,7 +106,10 @@ func createTestBlock(
 
 	var result *realBabbageBlock
 	for slot := uint64(1); slot <= 200; slot++ {
-		vrfInput := vrf.MkInputVrf(int64(slot), epochNonce) //nolint:gosec
+		vrfInput, vrfInputErr := vrf.MkInputVrf(int64(slot), epochNonce) //nolint:gosec
+		if vrfInputErr != nil {
+			continue
+		}
 		vrfProof, vrfOutput, proveErr := vrf.Prove(vrfSk, vrfInput)
 		if proveErr != nil {
 			continue
