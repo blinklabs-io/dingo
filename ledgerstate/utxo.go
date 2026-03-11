@@ -165,6 +165,14 @@ const utxoBatchSize = 10000
 // streaming decode.
 type UTxOCallback func(batch []ParsedUTxO) error
 
+type UTxOParseProgress struct {
+	EntriesProcessed int
+	TotalEntries     int
+	BytesProcessed   int
+	TotalBytes       int
+	Percent          float64
+}
+
 // utxoIterFunc returns the next key/value CBOR pair from a UTxO
 // map. It returns done=true when no more entries remain. Callers
 // must not call the function again after done=true is returned.
@@ -175,13 +183,14 @@ type utxoIterFunc func() (
 	err error,
 )
 
-// processBatchedUTxOs reads key/value pairs from next, parses each
-// entry, and delivers them to the callback in batches of
-// utxoBatchSize. This is the shared core for both definite-length
-// and indefinite-length UTxO map parsing.
-func processBatchedUTxOs(
+// processBatchedUTxOsWithProgress reads key/value pairs from next,
+// parses each entry, and delivers them to the callback in batches
+// of utxoBatchSize. An optional progress function is called after
+// each batch with the running total of processed entries.
+func processBatchedUTxOsWithProgress(
 	next utxoIterFunc,
 	callback UTxOCallback,
+	progress func(int),
 ) (int, error) {
 	if callback == nil {
 		return 0, errors.New("nil UTxO callback")
@@ -218,6 +227,9 @@ func processBatchedUTxOs(
 					err,
 				)
 			}
+			if progress != nil {
+				progress(totalCount)
+			}
 			batch = make([]ParsedUTxO, 0, utxoBatchSize)
 		}
 	}
@@ -229,6 +241,9 @@ func processBatchedUTxOs(
 				"UTxO callback error at final batch: %w",
 				err,
 			)
+		}
+		if progress != nil {
+			progress(totalCount)
 		}
 	}
 
@@ -243,11 +258,21 @@ func ParseUTxOsStreaming(
 	data cbor.RawMessage,
 	callback UTxOCallback,
 ) (int, error) {
+	return parseUTxOsStreamingWithProgress(data, callback, nil)
+}
+
+func parseUTxOsStreamingWithProgress(
+	data cbor.RawMessage,
+	callback UTxOCallback,
+	progress func(UTxOParseProgress),
+) (int, error) {
 	// Handle indefinite-length map (0xbf header) by delegating to
 	// the dedicated parser. DecodeMapHeader does not support
 	// indefinite-length maps and would return a confusing error.
 	if len(data) > 0 && data[0] == 0xbf {
-		return parseIndefiniteUTxOMap(data, callback)
+		return parseIndefiniteUTxOMapWithProgress(
+			data, callback, progress,
+		)
 	}
 
 	// The UTxO data is a CBOR map: map[TxIn]TxOut
@@ -296,7 +321,26 @@ func ParseUTxOsStreaming(
 		return keyRaw, valRaw, false, nil
 	}
 
-	return processBatchedUTxOs(next, callback)
+	return processBatchedUTxOsWithProgress(
+		next,
+		callback,
+		func(processed int) {
+			if progress == nil {
+				return
+			}
+			percent := 0.0
+			if count > 0 {
+				percent = float64(processed) / float64(count) * 100
+			}
+			progress(UTxOParseProgress{
+				EntriesProcessed: processed,
+				TotalEntries:     count,
+				BytesProcessed:   decoder.Position(),
+				TotalBytes:       len(data),
+				Percent:          percent,
+			})
+		},
+	)
 }
 
 // parseUTxOEntry decodes a single TxIn -> TxOut entry from the
@@ -505,6 +549,14 @@ func ParseUTxOsFromFile(
 	path string,
 	callback UTxOCallback,
 ) (int, error) {
+	return parseUTxOsFromFileWithProgress(path, callback, nil)
+}
+
+func parseUTxOsFromFileWithProgress(
+	path string,
+	callback UTxOCallback,
+	progress func(UTxOParseProgress),
+) (int, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return 0, fmt.Errorf("reading tvar file: %w", err)
@@ -539,21 +591,27 @@ func ParseUTxOsFromFile(
 
 	// Check for indefinite-length map (0xbf)
 	if len(mapData) > 0 && mapData[0] == 0xbf {
-		return parseIndefiniteUTxOMap(mapData, callback)
+		return parseIndefiniteUTxOMapWithProgress(
+			mapData, callback, progress,
+		)
 	}
 
 	// Definite-length map - use existing streaming parser
-	return ParseUTxOsStreaming(
-		cbor.RawMessage(mapData), callback,
+	return parseUTxOsStreamingWithProgress(
+		cbor.RawMessage(mapData),
+		callback,
+		progress,
 	)
 }
 
-// parseIndefiniteUTxOMap streams UTxO entries from an
+// parseIndefiniteUTxOMapWithProgress streams UTxO entries from an
 // indefinite-length CBOR map (0xbf ... 0xff). Each entry is a
 // TxIn key and TxOut value decoded using the existing parsers.
-func parseIndefiniteUTxOMap(
+// An optional progress callback receives byte-level progress.
+func parseIndefiniteUTxOMapWithProgress(
 	data []byte,
 	callback UTxOCallback,
+	progress func(UTxOParseProgress),
 ) (int, error) {
 	if len(data) < 2 || data[0] != 0xbf {
 		return 0, errors.New("expected indefinite map (0xbf)")
@@ -569,6 +627,7 @@ func parseIndefiniteUTxOMap(
 	}
 
 	entryIndex := 0
+	mapComplete := false
 	next := func() (cbor.RawMessage, cbor.RawMessage, bool, error) {
 		// Check for break byte (0xff) at current position.
 		// The decoder operates on data[1:] (after the 0xbf
@@ -582,6 +641,7 @@ func parseIndefiniteUTxOMap(
 			)
 		}
 		if data[absPos] == 0xff {
+			mapComplete = true
 			return nil, nil, true, nil
 		}
 
@@ -607,7 +667,32 @@ func parseIndefiniteUTxOMap(
 		return keyRaw, valRaw, false, nil
 	}
 
-	return processBatchedUTxOs(next, callback)
+	return processBatchedUTxOsWithProgress(
+		next,
+		callback,
+		func(processed int) {
+			if progress == nil {
+				return
+			}
+			// Account for the 0xbf header (1 byte) + decoder
+			// position. When the 0xff break byte has been reached,
+			// report len(data) so percent reaches exactly 100%.
+			bytesProcessed := min(1+decoder.Position(), len(data))
+			if mapComplete {
+				bytesProcessed = len(data)
+			}
+			percent := 0.0
+			if len(data) > 0 {
+				percent = float64(bytesProcessed) / float64(len(data)) * 100
+			}
+			progress(UTxOParseProgress{
+				EntriesProcessed: processed,
+				BytesProcessed:   bytesProcessed,
+				TotalBytes:       len(data),
+				Percent:          percent,
+			})
+		},
+	)
 }
 
 // UTxOToModel converts a ParsedUTxO to a Dingo database Utxo model.

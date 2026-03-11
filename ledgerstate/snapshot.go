@@ -556,22 +556,17 @@ func parseCurrentEra(
 	// GovState (index 3 in UTxOState)
 	if len(utxoState) > 3 {
 		result.GovStateData = utxoState[3]
-
-		// Extract current protocol parameters from GovState.
-		// Conway: [proposals, committee, constitution,
-		//          cur_pparams, prev_pparams, ...]
-		// Shelley-Babbage: [cur_proposals, future_proposals,
-		//                   cur_pparams, prev_pparams, ...]
-		govFields, govErr := decodeRawArray(utxoState[3])
-		if govErr == nil {
-			pparamsIdx := 2 // Shelley through Babbage
-			if eraIndex >= EraConway {
-				pparamsIdx = 3
-			}
-			if len(govFields) > pparamsIdx {
-				result.PParamsData = govFields[pparamsIdx]
-			}
+		pparamsData, pparamsErr := extractPParamsData(
+			eraIndex,
+			utxoState[3],
+		)
+		if pparamsErr != nil {
+			return nil, fmt.Errorf(
+				"extracting protocol parameters: %w",
+				pparamsErr,
+			)
 		}
+		result.PParamsData = pparamsData
 	}
 
 	return result, nil
