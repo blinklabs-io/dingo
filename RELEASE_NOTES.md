@@ -1,5 +1,38 @@
 # Release Notes
 
+
+## v0.23.1 (March 11, 2026)
+
+**Title:** Clearer release notes and rock-solid Docker publishing
+
+**Date:** March 11, 2026
+
+**Version:** v0.23.1
+
+Hi folks! Here’s what we shipped in v0.23.1.
+
+### ✨ What's New
+
+- **Release notes:** Release notes are easier to scan because `RELEASE_NOTES.md` now includes a complete set of notes for v0.23.0.
+
+### 💪 Improvements
+
+- **Docker publishing (Antithesis image):** Publishing is more consistent because the build pipeline now builds, tags, pushes, and generates an attestation for a Linux amd64-only Antithesis Docker image variant.
+
+### 🔧 Fixes
+
+- **No fixes:** No user-facing fixes shipped in this patch.
+
+### 📋 What You Need to Know
+
+- **Upgrade:** You’re all set—no required configuration changes for this release.
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
 ## v0.23.0 (March 10, 2026)
 
 **Title:** Overlay-aware validation and a smoother dev mode
