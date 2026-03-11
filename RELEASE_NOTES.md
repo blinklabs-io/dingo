@@ -13,56 +13,37 @@ Hi folks! Here’s what we shipped in v0.24.0.
 
 ### ✨ What's New
 
-- **Generated release notes:** See the generated notes data in the details block below.
+- **Peer sharing controls:** You can now control whether your node shares peers, which makes it easier to run in environments with strict networking rules.
+- **CLI help text:** You now get clearer, more guided command-line help so it’s easier to understand how to run the tool and what each mode does.
+- **Import progress reporting:** You can now track long-running data setup steps more easily with progress updates that make large imports feel less like a black box.
+- **Benchmark suite:** You can now measure performance more consistently and spot regressions earlier when evaluating ingestion and storage behavior.
 
 ### 💪 Improvements
 
-- **Generated release notes:** See the generated notes data in the details block below.
+- **Docs:** Documentation is clearer and safer to follow, so it’s easier to evaluate the project without accidentally treating it as production-ready.
+- **Dev mode:** Development runs behave more predictably, reducing confusion when local settings don’t match what the system actually supports.
+- **Connection manager:** Connections are more resilient and logs are less noisy, so transient network edge cases are less likely to look like failures.
+- **Storage tuning and logging:** Storage behavior is more transparent and better tuned out of the box, which helps with troubleshooting and performance tuning.
+- **Era-aware validation:** Validation and ingestion are more accurate across eras and more informative during big imports, reducing surprises when moving between protocol versions.
+- **Overlay-aware acceptance:** Transaction acceptance is more consistent when recent changes haven’t been fully committed yet, which helps avoid confusing “valid vs invalid” flips during active processing.
+- **CI and publishing:** Build and publish automation is more up to date and repeatable, which helps keep releases reliable.
+- **Dependencies:** Project dependencies are current, which improves compatibility with newer environments and upstream fixes.
+- **Go toolchain:** The toolchain now targets a newer Go baseline so builds and CI better match modern Go ecosystems.
+- **Release notes:** Release documentation is more complete, so it’s easier to understand what changed between versions.
 
 ### 🔧 Fixes
 
-- **Generated release notes:** See the generated notes data in the details block below.
+- **Connection cleanup tests:** Network-related tests are less flaky and shutdown behavior is safer, reducing false failures in CI and local runs.
+- **Block caching and reconciliation:** Block handling is more reliable under caching and reconciliation, which helps avoid subtle mismatches during synchronization.
 
 ### 📋 What You Need to Know
 
-- **Generated release notes:** See the generated notes data in the details block below.
+- **Go version:** If you build from source, you’ll need Go 1.25 or newer.
+- **Dev mode:** If you run dev mode, Dingo will force storage mode to the API option.
 
 ### 🙏 Thank You
 
 Thank you for trying!
-
-<details>
-<summary>Generated notes data (internal)</summary>
-
-```json
-{
-  "✨ What's New": [
-    "You can now control whether your node shares peers, which makes it easier to run in environments with strict networking rules. A new configuration flag is passed through node initialization to enable or disable peer sharing explicitly.",
-    "You now get clearer, more guided command-line help so it’s easier to understand how to run the tool and what each mode does. The root CLI command includes expanded Short and Long help text to improve discoverability and self-service usage.",
-    "You can now track long-running data setup steps more easily, with progress updates that make large imports feel less like a black box. The system adds structured, rate-limited progress reporting for Mithril download and extraction, ledger and UTxO import, UTxO offset post-processing, and block copying, along with supporting helpers and tests.",
-    "You can now measure performance more consistently and spot regressions earlier when evaluating ingestion and storage behavior. The tooling introduces a benchmark baseline plus detailed block and storage-mode ingestion benchmarks with improved benchmark utilities."
-  ],
-  "💪 Improvements": [
-    "Documentation is clearer and safer to follow, so it’s easier to evaluate the project without accidentally treating it as production-ready. The README now includes expanded usage, deployment, and DevNet documentation along with a prominent non-production warning.",
-    "Development runs behave more predictably, reducing confusion when local settings don’t match what the system actually supports. Dev mode now forces storage mode to the API option and logs when it overrides the configured value.",
-    "Connections are more resilient and logs are less noisy, so transient network edge cases are less likely to look like failures. The connection manager treats existing inbound connections as the bidirectional link, does not count outbound address-in-use dial failures as peer failures, and classifies protocol transition timeouts as expected close events while keeping inbound connections open if chainsync client startup fails (with a warning-level log).",
-    "Storage behavior is more transparent and better tuned out of the box, which helps with troubleshooting and performance tuning. Badger DB cache defaults were reset and the blob store now logs configured cache sizes on open, alongside profile-based Badger tuning, fixed 8-byte commit timestamp encoding, and several batched/optimized SQLite metadata operations with optional extended block offsets and rate-limited warnings.",
-    "Validation and ingestion are more accurate across eras and more informative during big imports, reducing surprises when moving between protocol versions. The node now performs era-aware protocol parameter extraction and validation, improves UTxO import progress reporting, and updates governance-state decoding to use raw-element parsing.",
-    "Transaction acceptance is more consistent when recent changes haven’t been fully committed yet, which helps avoid confusing “valid vs invalid” flips during active processing. The ledger and mempool now perform UTxO overlay-aware validation with descendant pruning and accompanying tests.",
-    "Build and publish automation is more up to date and repeatable, which helps keep releases reliable. CI and publish workflows now use Node.js 24.x, newer Docker GitHub Actions (including docker/login-action v4 and pinned docker/metadata-action v6), updated buildx/build-push actions, updated actions/setup-node, and an additional pipeline that builds, tags, pushes, and attests an amd64-only antithesis image variant.",
-    "Project dependencies are current, which improves compatibility with newer environments and upstream fixes. Updates include OpenTelemetry Go 1.42.0, golang.org/x/sys v0.42.0, golang.org/x/net v0.51.0, aws-sdk-go-v2 core 1.41.3, github.com/blinklabs-io/bursa v0.16.0, and gouroboros v0.160.1 with added error handling around vrf.MkInputVrf.",
-    "The toolchain now targets a newer Go baseline so builds and CI better match modern Go ecosystems. The minimum Go version was raised to 1.25 and CI matrices and related tooling were updated accordingly.",
-    "Release documentation is more complete, so it’s easier to understand what changed between versions. RELEASE_NOTES.md now includes expanded entries for v0.22.1, v0.23.0, and v0.23.1, with clearer wording and additional notes about workflow and CI tooling updates."
-  ],
-  "🔧 Fixes": [
-    "Network-related tests are less flaky and shutdown behavior is safer, reducing false failures in CI and local runs. The connection manager error test now relies on a deterministic keepalive timeout and improves channel closing and connection cleanup safety.",
-    "Block handling is more reliable under caching and reconciliation, which helps avoid subtle mismatches during synchronization. Block caching was refactored to use fixed-size typed hash keys, and chain block-addition and reconciliation now compare hashes via bytes.Equal using shared locked helpers while centralizing iterator notifications and updating tests accordingly."
-  ]
-}
-
-```
-
-</details>
 
 ---
 
