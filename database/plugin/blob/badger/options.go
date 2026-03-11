@@ -86,3 +86,12 @@ func WithValueThreshold(threshold int64) BlobStoreBadgerOptionFunc {
 		b.valueThreshold = threshold
 	}
 }
+
+// WithDeferOpen defers opening Badger until Start() is called.
+// This allows a logger to be injected via SetLogger before Badger
+// emits any startup logs.
+func WithDeferOpen() BlobStoreBadgerOptionFunc {
+	return func(b *BlobStoreBadger) {
+		b.deferOpen = true
+	}
+}

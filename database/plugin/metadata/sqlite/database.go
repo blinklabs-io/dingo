@@ -94,6 +94,7 @@ type MetadataStoreSqlite struct {
 	db             *gorm.DB
 	readDB         *gorm.DB
 	logger         *slog.Logger
+	warnLimiter    *repeatedWarnLimiter
 	timerVacuum    *time.Timer
 	dataDir        string
 	maxConnections int
@@ -127,6 +128,9 @@ func NewWithOptions(opts ...SqliteOptionFunc) (*MetadataStoreSqlite, error) {
 	// Set defaults after options are applied (no side effects)
 	if db.logger == nil {
 		db.logger = slog.New(slog.NewTextHandler(os.Stderr, nil))
+	}
+	if db.warnLimiter == nil {
+		db.warnLimiter = newRepeatedWarnLimiter()
 	}
 
 	// Default and validate storageMode
@@ -176,6 +180,14 @@ func (d *MetadataStoreSqlite) gormLogger() gormlogger.Interface {
 	return sloggorm.New(
 		sloggorm.WithHandler(d.logger.With("component", "gorm").Handler()),
 	)
+}
+
+func (d *MetadataStoreSqlite) SetLogger(logger *slog.Logger) {
+	if logger == nil {
+		d.logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
+		return
+	}
+	d.logger = logger
 }
 
 func (d *MetadataStoreSqlite) runVacuum() error {
