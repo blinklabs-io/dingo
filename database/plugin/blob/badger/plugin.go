@@ -21,13 +21,21 @@ import (
 	"github.com/blinklabs-io/dingo/database/plugin"
 )
 
-// Default cache sizes for BadgerDB (in bytes)
+// Default cache sizes for BadgerDB (in bytes).
+//
+// Block cache is needed because we use Snappy compression. Badger's
+// own default is 256 MB block cache and 0 (unlimited) index cache.
+// Setting IndexCacheSize to 0 lets Badger memory-map the full index
+// without eviction, which is preferable to capping it.
+//
+// Operators can override via block-cache-size / index-cache-size CLI
+// flags or YAML config.
 const (
-	DefaultBlockCacheSize   = 1610612736 // 1.5GB (increased from 768MB)
-	DefaultIndexCacheSize   = 536870912  // 512MB (increased from 256MB)
-	DefaultValueLogFileSize = 1073741824 // 1GB (keep large values on disk, write amplification reduction)
-	DefaultMemTableSize     = 134217728  // 128MB (increased from 64MB for better write buffering)
-	DefaultValueThreshold   = 1048576    // 1MB (keep small values in LSM, large blobs in value log)
+	DefaultBlockCacheSize   = 268435456  // 256 MB — Badger's own default; sufficient for core nodes
+	DefaultIndexCacheSize   = 0          // 0 = unlimited; Badger memory-maps the full index
+	DefaultValueLogFileSize = 1073741824 // 1 GB
+	DefaultMemTableSize     = 134217728  // 128 MB
+	DefaultValueThreshold   = 1048576    // 1 MB
 )
 
 type Profile string
