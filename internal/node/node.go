@@ -194,6 +194,7 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 			dingo.WithCardanoNodeConfig(nodeCfg),
 			dingo.WithListeners(listeners...),
 			dingo.WithOutboundSourcePort(cfg.RelayPort),
+			dingo.WithPeerSharing(cfg.PeerSharing),
 			dingo.WithUtxorpcPort(cfg.UtxorpcPort),
 			dingo.WithUtxorpcTlsCertFilePath(cfg.TlsCertFilePath),
 			dingo.WithUtxorpcTlsKeyFilePath(cfg.TlsKeyFilePath),
