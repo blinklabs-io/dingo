@@ -57,6 +57,20 @@ func isExpectedNetworkDialError(err error) bool {
 		strings.Contains(msg, "timeout waiting on transition")
 }
 
+// isAddrInUseError returns true if the error is a "cannot assign
+// requested address" or EADDRINUSE, indicating a TCP 4-tuple collision.
+func isAddrInUseError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, syscall.EADDRNOTAVAIL) ||
+		errors.Is(err, syscall.EADDRINUSE) {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "cannot assign requested address")
+}
+
 func isExpectedConnectionCloseError(err error) bool {
 	if err == nil {
 		return false
@@ -187,6 +201,17 @@ func (p *PeerGovernor) createOutboundConnection(peer *Peer) {
 			)
 			return
 		}
+		// If an inbound connection already upgraded this peer to warm,
+		// the outbound dial is unnecessary — the inbound serves as the
+		// bidirectional link for both client and server protocols.
+		if currentPeer := p.peers[peerIdx]; currentPeer.Connection != nil {
+			p.mu.Unlock()
+			p.config.Logger.Info(
+				"outbound: peer already connected via inbound, stopping outbound attempts",
+				"address", peer.Address,
+			)
+			return
+		}
 		p.mu.Unlock()
 
 		// Skip outbound if the peer already has an inbound connection
@@ -304,6 +329,18 @@ func (p *PeerGovernor) createOutboundConnection(peer *Peer) {
 			p.config.Logger.Info(failMsg)
 		} else {
 			p.config.Logger.Error(failMsg)
+		}
+		// When the dial fails because an inbound connection already
+		// occupies the TCP 4-tuple, don't count it as a peer failure.
+		// Loop back to the HasInboundFromHost check instead.
+		if isAddrInUseError(err) &&
+			p.config.ConnManager != nil &&
+			p.config.ConnManager.HasInboundFromHost(peer.Address) {
+			p.config.Logger.Info(
+				"outbound: dial failed due to existing inbound, waiting",
+				"address", peer.Address,
+			)
+			continue
 		}
 		p.mu.Lock()
 		// Re-lookup peer to avoid stale pointer if slice was rebuilt
