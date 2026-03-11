@@ -15,11 +15,17 @@
 # limitations under the License.
 
 # Script to generate benchmark results for Dingo ledger and database with historical tracking
-# Usage: ./generate_benchmarks.sh [output_file] [--write]
+# Usage: ./generate_benchmarks.sh [output_file] [--write] [--bench regex] [--packages pkg1,pkg2] [--benchtime duration] [--title title] [--scope scope] [--data-source source]
 #   --write: Write results to file (default: display only)
 
 WRITE_TO_FILE=false
 OUTPUT_FILE="benchmark_results.md"
+BENCH_REGEX="."
+BENCH_PACKAGES="./..."
+REPORT_TITLE="Dingo Ledger & Database Benchmark Results"
+REPORT_SCOPE=""
+REPORT_DATA_SOURCE="Real Cardano preview testnet data (40k+ blocks, slots 0-863,996)"
+BENCH_TIME=""
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -28,9 +34,39 @@ while [[ $# -gt 0 ]]; do
             WRITE_TO_FILE=true
             shift
             ;;
+        --bench)
+            [[ -z "${2:-}" || "$2" == -* ]] && { echo "Error: --bench requires a value"; exit 1; }
+            BENCH_REGEX="$2"
+            shift 2
+            ;;
+        --packages)
+            [[ -z "${2:-}" || "$2" == -* ]] && { echo "Error: --packages requires a value"; exit 1; }
+            BENCH_PACKAGES="$2"
+            shift 2
+            ;;
+        --benchtime)
+            [[ -z "${2:-}" || "$2" == -* ]] && { echo "Error: --benchtime requires a value"; exit 1; }
+            BENCH_TIME="$2"
+            shift 2
+            ;;
+        --title)
+            [[ -z "${2:-}" || "$2" == -* ]] && { echo "Error: --title requires a value"; exit 1; }
+            REPORT_TITLE="$2"
+            shift 2
+            ;;
+        --scope)
+            [[ -z "${2:-}" || "$2" == -* ]] && { echo "Error: --scope requires a value"; exit 1; }
+            REPORT_SCOPE="$2"
+            shift 2
+            ;;
+        --data-source)
+            [[ -z "${2:-}" || "$2" == -* ]] && { echo "Error: --data-source requires a value"; exit 1; }
+            REPORT_DATA_SOURCE="$2"
+            shift 2
+            ;;
         -*)
             echo "Unknown option: $1"
-            echo "Usage: $0 [output_file] [--write]"
+            echo "Usage: $0 [output_file] [--write] [--bench regex] [--packages pkg1,pkg2] [--benchtime duration] [--title title] [--scope scope] [--data-source source]"
             exit 1
             ;;
         *)
@@ -39,7 +75,7 @@ while [[ $# -gt 0 ]]; do
                 OUTPUT_FILE="$1"
                 OUTPUT_FILE_SET=true
             else
-                echo "Too many arguments. Usage: $0 [output_file] [--write]"
+                echo "Too many arguments. Usage: $0 [output_file] [--write] [--bench regex] [--packages pkg1,pkg2] [--benchtime duration] [--title title] [--scope scope] [--data-source source]"
                 exit 1
             fi
             shift
@@ -55,7 +91,7 @@ OS=$(uname -s)
 ARCH=$(uname -m)
 CPU_CORES=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo "unknown")
 
-echo "Running all Dingo benchmarks..."
+echo "Running Dingo benchmarks..."
 echo "==============================="
 
 # Run benchmarks with progress output first
@@ -65,12 +101,17 @@ echo "Executing benchmarks (this may take a few minutes)..."
 set -o pipefail
 
 # Run go test once, capture output while showing progress
-BENCHMARK_OUTPUT=$(go test -bench=. -benchmem ./... -run=^$ 2>&1)
+IFS=',' read -r -a BENCHMARK_PACKAGE_ARGS <<< "$BENCH_PACKAGES"
+BENCHMARK_ARGS=(-bench="$BENCH_REGEX" -benchmem -run=^$)
+if [[ -n "$BENCH_TIME" ]]; then
+    BENCHMARK_ARGS+=("-benchtime=$BENCH_TIME")
+fi
+BENCHMARK_OUTPUT=$(go test "${BENCHMARK_ARGS[@]}" "${BENCHMARK_PACKAGE_ARGS[@]}" 2>&1)
 GO_TEST_EXIT_CODE=$?
 
 # Show progress by parsing benchmark names from output
 echo "$BENCHMARK_OUTPUT" | grep "^Benchmark" | sed 's/Benchmark//' | sed 's/-[0-9]*$//' | while read -r name rest; do
-    echo "Running: $name-128"
+    echo "Running: $name"
 done
 
 # Check if go test succeeded
@@ -90,18 +131,52 @@ parse_benchmark() {
     local line="$1"
     local name
     name=$(echo "$line" | awk '{print $1}' | sed 's/Benchmark//' | sed 's/-[0-9]*$//')
-    local ops_sec
-    ops_sec=$(echo "$line" | awk '{print $2}' | sed 's/,//g')
+    local iterations
+    iterations=$(echo "$line" | awk '{print $2}' | sed 's/,//g')
     local time_val
     time_val=$(echo "$line" | awk '{print $3}')
     local time_unit
     time_unit=$(echo "$line" | awk '{print $4}')
-    local mem_val
-    mem_val=$(echo "$line" | awk '{print $5}')
-    local mem_unit
-    mem_unit=$(echo "$line" | awk '{print $6}')
-    local allocs_op
-    allocs_op=$(echo "$line" | awk '{print $7}')
+
+    local extra_metrics=""
+    local mem_op="N/A"
+    local allocs_op="N/A"
+    local idx=5
+    local token_count
+    token_count=$(echo "$line" | awk '{print NF}')
+
+    while [[ $idx -le $token_count ]]; do
+        local metric_val
+        metric_val=$(echo "$line" | awk -v i="$idx" '{print $i}')
+        local metric_unit
+        metric_unit=$(echo "$line" | awk -v i="$((idx + 1))" '{print $i}')
+
+        if [[ -z "$metric_val" || -z "$metric_unit" ]]; then
+            break
+        fi
+
+        case "$metric_unit" in
+            "B/op")
+                if [[ "$metric_val" =~ ^[0-9]+$ && $metric_val -gt 1000 ]]; then
+                    mem_kb=$((metric_val / 1000))
+                    mem_op="${mem_kb}KB"
+                else
+                    mem_op="${metric_val}B"
+                fi
+                ;;
+            "allocs/op")
+                allocs_op="$metric_val"
+                ;;
+            *)
+                if [[ -n "$extra_metrics" ]]; then
+                    extra_metrics="${extra_metrics}, "
+                fi
+                extra_metrics="${extra_metrics}${metric_val} ${metric_unit}"
+                ;;
+        esac
+
+        idx=$((idx + 2))
+    done
 
     # Format time
     if [[ "$time_unit" == "ns/op" ]]; then
@@ -116,62 +191,74 @@ parse_benchmark() {
         time_op="${time_val}${time_unit}"
     fi
 
-    # Format memory
-    if [[ "$mem_unit" == "B/op" ]]; then
-        if [[ $mem_val -gt 1000 ]]; then
-            mem_kb=$((mem_val / 1000))
-            mem_op="${mem_kb}KB"
-        else
-            mem_op="${mem_val}B"
-        fi
-    else
-        mem_op="${mem_val}${mem_unit}"
+    if [[ -z "$extra_metrics" ]]; then
+        extra_metrics="-"
     fi
 
     # Format benchmark name nicely
     formatted_name=$(echo "$name" | sed 's/\([A-Z]\)/ \1/g' | sed 's/^ //' | sed 's/NoData$/ (No Data)/' | sed 's/RealData$/ (Real Data)/')
 
-    echo "$formatted_name|$ops_sec|$time_op|$mem_op|$allocs_op"
+    echo "$formatted_name|$iterations|$time_op|$extra_metrics|$mem_op|$allocs_op"
 }
 
-# Parse current results into temporary file
+# Parse current results into temporary file, tracking current package
+# go test outputs "pkg: <import-path>" before each package's benchmarks
 CURRENT_RESULTS_FILE=$(mktemp "${TMPDIR:-/tmp}/dingo_bench_XXXXXX")
+current_pkg=""
 while IFS= read -r line; do
-    if [[ "$line" =~ ^Benchmark ]]; then
+    if [[ "$line" =~ ^pkg:[[:space:]]+(.+)$ ]]; then
+        current_pkg="${BASH_REMATCH[1]}"
+    elif [[ "$line" =~ ^ok[[:space:]] || "$line" =~ ^FAIL[[:space:]] ]]; then
+        current_pkg=""
+    elif [[ "$line" =~ ^Benchmark ]]; then
         parsed=$(parse_benchmark "$line")
         name=$(echo "$parsed" | cut -d'|' -f1)
         data=$(echo "$parsed" | cut -d'|' -f2-)
-        echo "$name|$data" >> "$CURRENT_RESULTS_FILE"
+        if [[ -n "$current_pkg" ]]; then
+            pkg_short=$(basename "$current_pkg")
+            echo "${pkg_short}:${name}|$data" >> "$CURRENT_RESULTS_FILE"
+        else
+            echo "$name|$data" >> "$CURRENT_RESULTS_FILE"
+        fi
     fi
 done <<< "$BENCHMARK_OUTPUT"
 
-# Deduplicate benchmark names
+# Deduplicate benchmark names (composite key: package+benchmark)
 sort -t'|' -k1,1 -u "$CURRENT_RESULTS_FILE" > "$CURRENT_RESULTS_FILE.tmp" && mv "$CURRENT_RESULTS_FILE.tmp" "$CURRENT_RESULTS_FILE"
 
 # Display current results summary
 echo "Current Benchmark Summary"
 echo "-------------------------"
-echo "Fastest benchmarks (>100k ops/sec):"
-echo "$BENCHMARK_OUTPUT" | grep "^Benchmark" | sort -k2 -nr | head -3 | while read -r line; do
-    name=$(echo "$line" | awk '{print $1}' | sed 's/Benchmark//' | sed 's/-128$//')
-    ops=$(echo "$line" | awk '{print $2}' | sed 's/,//g')
-    echo "  - $name: ${ops} ops/sec"
+echo "Most iterations (>100k iters):"
+sort -t'|' -k2,2nr "$CURRENT_RESULTS_FILE" | head -3 | while IFS='|' read -r name iterations _; do
+    echo "  - $name: ${iterations} iterations"
 done
 
 echo ""
-echo "Slowest benchmarks (<1k ops/sec):"
-echo "$BENCHMARK_OUTPUT" | grep "^Benchmark" | awk '$2 < 1000' | while read -r line; do
-    name=$(echo "$line" | awk '{print $1}' | sed 's/Benchmark//' | sed 's/-128$//')
-    ops=$(echo "$line" | awk '{print $2}' | sed 's/,//g')
-    echo "  - $name: ${ops} ops/sec"
+echo "Fewest iterations (<1k iters):"
+awk -F'|' '$2 < 1000 {print $1 "|" $2}' "$CURRENT_RESULTS_FILE" | while IFS='|' read -r name iterations; do
+    echo "  - $name: ${iterations} iterations"
 done
 
 echo ""
 echo "Memory usage:"
-echo "$BENCHMARK_OUTPUT" | grep "^Benchmark" | sort -k5 -nr | head -3 | while read -r line; do
-    name=$(echo "$line" | awk '{print $1}' | sed 's/Benchmark//' | sed 's/-128$//')
-    mem=$(echo "$line" | awk '{print $5}')
-    echo "  - $name: ${mem}B per op"
+awk -F'|' '
+function mem_bytes(v) {
+    if (v ~ /KB$/) {
+        sub(/KB$/, "", v)
+        return v + 0
+    }
+    if (v ~ /B$/) {
+        sub(/B$/, "", v)
+        return (v + 0) / 1000
+    }
+    return -1
+}
+{
+    print mem_bytes($5) "|" $1 "|" $5
+}
+' "$CURRENT_RESULTS_FILE" | sort -t'|' -k1,1nr | head -3 | while IFS='|' read -r _ name mem; do
+    echo "  - $name: ${mem} per op"
 done
 
 # Read previous results if file exists and we're comparing
@@ -193,19 +280,39 @@ if [[ -f "$OUTPUT_FILE" && "$WRITE_TO_FILE" == "true" ]]; then
         if [[ "$line" == "## Performance Changes" || "$line" == "## Historical Results" ]]; then
             break
         fi
-        if [[ "$line" == "| Benchmark | Operations/sec | Time/op | Memory/op | Allocs/op |" ]]; then
+        if [[ "$line" == "| Benchmark | Operations/sec | Time/op | Memory/op | Allocs/op |" ||
+              "$line" == "| Benchmark | Iterations | Time/op | Extra Metrics | Memory/op | Allocs/op |" ]]; then
             in_table=true
             continue
         fi
-        if [[ "$in_table" == true && "$line" =~ ^\|.*\|.*\|.*\|.*\|.*\|$ && "$line" != "|-----------|*" ]]; then
+        # Skip separator rows (e.g. |---|---|...)
+        if [[ "$line" =~ ^\|[-[:space:]\|]+\|$ ]]; then
+            continue
+        fi
+        if [[ "$in_table" == true && "$line" =~ ^\|.*\|.*\|.*\|.*\|.*\|$ ]]; then
             # Parse table row
             benchmark=$(echo "$line" | sed 's/^| //' | cut -d'|' -f1 | sed 's/ *$//')
-            ops_sec=$(echo "$line" | sed 's/^| //' | cut -d'|' -f2 | sed 's/ //g' | sed 's/,//g')
-            time_op=$(echo "$line" | sed 's/^| //' | cut -d'|' -f3 | sed 's/ //g')
-            mem_op=$(echo "$line" | sed 's/^| //' | cut -d'|' -f4 | sed 's/ //g')
-            allocs_op=$(echo "$line" | sed 's/^| //' | cut -d'|' -f5 | sed 's/ //g')
-            if [[ -n "$benchmark" && -n "$ops_sec" ]]; then
-                echo "$benchmark|$ops_sec|$time_op|$mem_op|$allocs_op" >> "$PREVIOUS_RESULTS_FILE"
+            # Count fields to detect 5-column vs 6-column format
+            field_count=$(echo "$line" | awk -F'|' '{print NF - 2}')
+
+            if [[ "$field_count" -le 5 ]]; then
+                # Old 5-column format: Benchmark | Operations/sec | Time/op | Memory/op | Allocs/op
+                iterations="-"
+                time_op=$(echo "$line" | sed 's/^| //' | cut -d'|' -f3 | sed 's/ //g')
+                extra_metrics=$(echo "$line" | sed 's/^| //' | cut -d'|' -f2 | sed 's/^ *//' | sed 's/ *$//')
+                mem_op=$(echo "$line" | sed 's/^| //' | cut -d'|' -f4 | sed 's/ //g')
+                allocs_op=$(echo "$line" | sed 's/^| //' | cut -d'|' -f5 | sed 's/ //g')
+            else
+                # Current 6-column format
+                iterations=$(echo "$line" | sed 's/^| //' | cut -d'|' -f2 | sed 's/ //g' | sed 's/,//g')
+                time_op=$(echo "$line" | sed 's/^| //' | cut -d'|' -f3 | sed 's/ //g')
+                extra_metrics=$(echo "$line" | sed 's/^| //' | cut -d'|' -f4 | sed 's/^ *//' | sed 's/ *$//')
+                mem_op=$(echo "$line" | sed 's/^| //' | cut -d'|' -f5 | sed 's/ //g')
+                allocs_op=$(echo "$line" | sed 's/^| //' | cut -d'|' -f6 | sed 's/ //g')
+            fi
+
+            if [[ -n "$benchmark" && -n "$time_op" ]]; then
+                echo "$benchmark|$iterations|$time_op|$extra_metrics|$mem_op|$allocs_op" >> "$PREVIOUS_RESULTS_FILE"
             fi
         fi
         if [[ "$in_table" == true && "$line" == "" ]]; then
@@ -251,16 +358,16 @@ if [[ -n "$previous_date" && "$WRITE_TO_FILE" == "true" ]]; then
             current_data=$(get_current_data "$benchmark")
             previous_data=$(get_previous_data "$benchmark")
 
-            current_ops=$(echo "$current_data" | cut -d'|' -f1)
-            previous_ops=$(echo "$previous_data" | cut -d'|' -f1)
+            current_iters=$(echo "$current_data" | cut -d'|' -f1)
+            previous_iters=$(echo "$previous_data" | cut -d'|' -f1)
 
-            if [[ "$current_ops" =~ ^[0-9]+$ && "$previous_ops" =~ ^[0-9]+$ && $previous_ops -gt 0 ]]; then
-                change=$(( (current_ops - previous_ops) * 100 / previous_ops ))
+            if [[ "$current_iters" =~ ^[0-9]+$ && "$previous_iters" =~ ^[0-9]+$ && $previous_iters -gt 0 ]]; then
+                change=$(( (current_iters - previous_iters) * 100 / previous_iters ))
                 if [[ $change -gt 10 ]]; then
                     faster_benchmarks="$faster_benchmarks
 $benchmark (+${change}%)"
                 elif [[ $change -lt -10 ]]; then
-                    change_abs=$(( (previous_ops - current_ops) * 100 / previous_ops ))
+                    change_abs=$(( (previous_iters - current_iters) * 100 / previous_iters ))
                     slower_benchmarks="$slower_benchmarks
 $benchmark (-${change_abs}%)"
                     MAJOR_CHANGES=true
@@ -333,16 +440,16 @@ if [[ "$WRITE_TO_FILE" == "true" ]]; then
                     current_data=$(get_current_data "$benchmark")
                     previous_data=$(get_previous_data "$benchmark")
 
-                    current_ops=$(echo "$current_data" | cut -d'|' -f1)
-                    previous_ops=$(echo "$previous_data" | cut -d'|' -f1)
+                    current_iters=$(echo "$current_data" | cut -d'|' -f1)
+                    previous_iters=$(echo "$previous_data" | cut -d'|' -f1)
 
-                    if [[ "$current_ops" =~ ^[0-9]+$ && "$previous_ops" =~ ^[0-9]+$ && $previous_ops -gt 0 ]]; then
-                        if [[ $current_ops -gt $previous_ops ]]; then
-                            change=$(( (current_ops - previous_ops) * 100 / previous_ops ))
+                    if [[ "$current_iters" =~ ^[0-9]+$ && "$previous_iters" =~ ^[0-9]+$ && $previous_iters -gt 0 ]]; then
+                        if [[ $current_iters -gt $previous_iters ]]; then
+                            change=$(( (current_iters - previous_iters) * 100 / previous_iters ))
                             faster_benchmarks="$faster_benchmarks
 $benchmark (+${change}%)"
-                        elif [[ $current_ops -lt $previous_ops ]]; then
-                            change=$(( (previous_ops - current_ops) * 100 / previous_ops ))
+                        elif [[ $current_iters -lt $previous_iters ]]; then
+                            change=$(( (previous_iters - current_iters) * 100 / previous_iters ))
                             slower_benchmarks="$slower_benchmarks
 $benchmark (-${change}%)"
                         fi
@@ -401,7 +508,7 @@ $benchmark"
 
         # Create the markdown file
         cat > "$OUTPUT_FILE.tmp" << EOF
-# Dingo Ledger & Database Benchmark Results
+# $REPORT_TITLE
 
 ## Latest Results
 
@@ -411,24 +518,34 @@ $benchmark"
 - **OS**: $OS
 - **Architecture**: $ARCH
 - **CPU Cores**: $CPU_CORES
-- **Data Source**: Real Cardano preview testnet data (40k+ blocks, slots 0-863,996)
+- **Data Source**: $REPORT_DATA_SOURCE
+EOF
+
+        if [[ -n "$REPORT_SCOPE" ]]; then
+            cat >> "$OUTPUT_FILE.tmp" << EOF
+- **Scope**: $REPORT_SCOPE
+EOF
+        fi
+
+        cat >> "$OUTPUT_FILE.tmp" << EOF
 
 ### Benchmark Results
 
-All benchmarks run with \`-benchmem\` flag showing memory allocations and operation counts.
+All benchmarks run with \`-benchmem\` flag. Iterations are Go benchmark iteration counts; benchmark-specific throughput metrics (for example \`blocks/sec\`) are reported separately.
 
-| Benchmark | Operations/sec | Time/op | Memory/op | Allocs/op |
-|-----------|----------------|---------|-----------|-----------|
+| Benchmark | Iterations | Time/op | Extra Metrics | Memory/op | Allocs/op |
+|-----------|------------|---------|---------------|-----------|-----------|
 EOF
 
         # Add current results to table
         while IFS= read -r benchmark; do
             data=$(get_current_data "$benchmark")
-            ops_sec=$(echo "$data" | cut -d'|' -f1)
+            iterations=$(echo "$data" | cut -d'|' -f1)
             time_op=$(echo "$data" | cut -d'|' -f2)
-            mem_op=$(echo "$data" | cut -d'|' -f3)
-            allocs_op=$(echo "$data" | cut -d'|' -f4)
-            echo "| $benchmark | $ops_sec | $time_op | $mem_op | $allocs_op |" >> "$OUTPUT_FILE.tmp"
+            extra_metrics=$(echo "$data" | cut -d'|' -f3)
+            mem_op=$(echo "$data" | cut -d'|' -f4)
+            allocs_op=$(echo "$data" | cut -d'|' -f5)
+            echo "| $benchmark | $iterations | $time_op | $extra_metrics | $mem_op | $allocs_op |" >> "$OUTPUT_FILE.tmp"
         done < <(list_current_benchmarks)
 
         # Add comparison section
@@ -441,17 +558,18 @@ EOF
             echo "" >> "$OUTPUT_FILE.tmp"
             echo "### $previous_date" >> "$OUTPUT_FILE.tmp"
             echo "" >> "$OUTPUT_FILE.tmp"
-            echo "| Benchmark | Operations/sec | Time/op | Memory/op | Allocs/op |" >> "$OUTPUT_FILE.tmp"
-            echo "|-----------|----------------|---------|-----------|-----------|" >> "$OUTPUT_FILE.tmp"
+            echo "| Benchmark | Iterations | Time/op | Extra Metrics | Memory/op | Allocs/op |" >> "$OUTPUT_FILE.tmp"
+            echo "|-----------|------------|---------|---------------|-----------|-----------|" >> "$OUTPUT_FILE.tmp"
 
             # Add previous results
             while IFS= read -r benchmark; do
                 data=$(get_previous_data "$benchmark")
-                ops_sec=$(echo "$data" | cut -d'|' -f1)
+                iterations=$(echo "$data" | cut -d'|' -f1)
                 time_op=$(echo "$data" | cut -d'|' -f2)
-                mem_op=$(echo "$data" | cut -d'|' -f3)
-                allocs_op=$(echo "$data" | cut -d'|' -f4)
-                echo "| $benchmark | $ops_sec | $time_op | $mem_op | $allocs_op |" >> "$OUTPUT_FILE.tmp"
+                extra_metrics=$(echo "$data" | cut -d'|' -f3)
+                mem_op=$(echo "$data" | cut -d'|' -f4)
+                allocs_op=$(echo "$data" | cut -d'|' -f5)
+                echo "| $benchmark | $iterations | $time_op | $extra_metrics | $mem_op | $allocs_op |" >> "$OUTPUT_FILE.tmp"
             done < <(list_previous_benchmarks)
         fi
 
