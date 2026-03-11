@@ -199,6 +199,51 @@ jobs:
           subject-name: ghcr.io/${{ github.repository }}
           subject-digest: ${{ steps.push.outputs.digest }}
           push-to-registry: true
+      # Antithesis instrumented image (amd64 only, reuses build cache)
+      - id: antithesis-meta
+        if: matrix.arch == 'amd64'
+        uses: docker/metadata-action@030e881283bb7a6894de51c315a6bfe6a94e05cf # v6.0.0 https://github.com/docker/metadata-action/releases/tag/v6.0.0
+        with:
+          images: |
+            blinklabs/dingo
+            ghcr.io/${{ github.repository }}
+          flavor: |
+            latest=false
+            suffix=-antithesis
+          tags: |
+            # Only version, no revision
+            type=match,pattern=v(.*)-(.*),group=1
+            # branch
+            type=ref,event=branch
+            # semver
+            type=semver,pattern={{version}}
+      - name: Build and push antithesis image
+        if: matrix.arch == 'amd64'
+        id: antithesis-push
+        uses: docker/build-push-action@d08e5c354a6adb9ed34480a06d141179aa583294 # v7.0.0 https://github.com/docker/build-push-action/releases/tag/v7.0.0
+        with:
+          outputs: "type=registry,push=true"
+          platforms: linux/amd64
+          target: antithesis
+          tags: ${{ steps.antithesis-meta.outputs.tags }}
+          labels: ${{ steps.antithesis-meta.outputs.labels }}
+          build-args: |
+            VERSION=${{ github.ref_type == 'tag' && github.ref_name || '' }}
+            COMMIT_HASH=${{ github.sha }}
+      - name: Attest antithesis Docker Hub image
+        if: matrix.arch == 'amd64'
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0 https://github.com/actions/attest-build-provenance/releases/tag/v4.1.0
+        with:
+          subject-name: index.docker.io/blinklabs/dingo
+          subject-digest: ${{ steps.antithesis-push.outputs.digest }}
+          push-to-registry: true
+      - name: Attest antithesis GHCR image
+        if: matrix.arch == 'amd64'
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0 https://github.com/actions/attest-build-provenance/releases/tag/v4.1.0
+        with:
+          subject-name: ghcr.io/${{ github.repository }}
+          subject-digest: ${{ steps.antithesis-push.outputs.digest }}
+          push-to-registry: true
 
   build-image-manifest:
     needs: [build-images]

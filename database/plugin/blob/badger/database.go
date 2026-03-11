@@ -101,6 +101,14 @@ func (t *badgerTxn) Rollback() error {
 	return nil
 }
 
+func (d *BlobStoreBadger) SetLogger(logger *slog.Logger) {
+	if logger == nil {
+		d.logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
+		return
+	}
+	d.logger = logger
+}
+
 type badgerIterator struct {
 	iter *badger.Iterator
 }
@@ -161,9 +169,12 @@ type BlobStoreBadger struct {
 	memTableSize     int64
 	valueThreshold   int64
 	gcEnabled        bool
+	deferOpen        bool // when true, Badger is opened in Start() not New()
 }
 
-// New creates a new database
+// New creates a new database. When deferOpen is set (via WithDeferOpen),
+// Badger is not opened until Start() is called, allowing an injected
+// logger (via SetLogger) to be used for Badger's startup logging.
 func New(opts ...BlobStoreBadgerOptionFunc) (*BlobStoreBadger, error) {
 	db := &BlobStoreBadger{
 		// Set defaults
@@ -178,6 +189,17 @@ func New(opts ...BlobStoreBadgerOptionFunc) (*BlobStoreBadger, error) {
 		opt(db)
 	}
 
+	if db.deferOpen {
+		return db, nil
+	}
+	if err := db.open(); err != nil {
+		return nil, fmt.Errorf("badger open: %w", err)
+	}
+	return db, nil
+}
+
+// open initializes and opens the Badger database using the configured options.
+func (db *BlobStoreBadger) open() error {
 	var blobDb *badger.DB
 	var err error
 
@@ -191,17 +213,17 @@ func New(opts ...BlobStoreBadgerOptionFunc) (*BlobStoreBadger, error) {
 			WithValueThreshold(db.valueThreshold)
 		blobDb, err = badger.Open(badgerOpts)
 		if err != nil {
-			return nil, err
+			return fmt.Errorf("badger open in-memory: %w", err)
 		}
 	} else {
 		// Make sure that we can read data dir, and create if it doesn't exist
 		if _, err := os.Stat(db.dataDir); err != nil {
 			if !errors.Is(err, fs.ErrNotExist) {
-				return nil, fmt.Errorf("failed to read data dir: %w", err)
+				return fmt.Errorf("failed to read data dir: %w", err)
 			}
 			// Create data directory
 			if err := os.MkdirAll(db.dataDir, 0o700); err != nil {
-				return nil, fmt.Errorf("failed to create data dir: %w", err)
+				return fmt.Errorf("failed to create data dir: %w", err)
 			}
 		}
 		blobDir := filepath.Join(
@@ -219,14 +241,23 @@ func New(opts ...BlobStoreBadgerOptionFunc) (*BlobStoreBadger, error) {
 			WithCompression(options.Snappy)
 		blobDb, err = badger.Open(badgerOpts)
 		if err != nil {
-			return nil, err
+			return fmt.Errorf("badger open on-disk: %w", err)
 		}
 	}
 	db.db = blobDb
 	if err := db.init(); err != nil {
-		return db, err
+		return err
 	}
-	return db, nil
+	if db.dataDir != "" {
+		db.logger.Info(
+			"badger blob store opened",
+			"component", "database",
+			"block_cache_size_mb", db.blockCacheSize/(1024*1024),
+			"index_cache_size_mb", db.indexCacheSize/(1024*1024),
+			"data_dir", db.dataDir,
+		)
+	}
+	return nil
 }
 
 func (d *BlobStoreBadger) init() error {
@@ -274,9 +305,15 @@ func (d *BlobStoreBadger) blobGc(t *time.Ticker, stop <-chan struct{}) {
 	}
 }
 
-// Start implements the plugin.Plugin interface
+// Start implements the plugin.Plugin interface. When the database was
+// created with WithDeferOpen, Start opens Badger using the logger that
+// was injected via SetLogger after construction.
 func (d *BlobStoreBadger) Start() error {
-	// Database is already started in New(), so this is a no-op
+	if d.deferOpen && d.db == nil {
+		if err := d.open(); err != nil {
+			return fmt.Errorf("badger deferred start: %w", err)
+		}
+	}
 	return nil
 }
 
@@ -299,6 +336,9 @@ func (d *BlobStoreBadger) Close() error {
 		d.gcTicker = nil
 	}
 	db := d.DB()
+	if db == nil {
+		return nil
+	}
 	return db.Close()
 }
 

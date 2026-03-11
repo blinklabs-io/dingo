@@ -277,8 +277,24 @@ func runMithrilSync(
 			CleanupAfterLoad:       cfg.Mithril.CleanupAfterLoad,
 			VerifyCertificateChain: cfg.Mithril.VerifyCertificates,
 			Logger:                 logger,
-			OnProgress: func(p mithril.DownloadProgress) {
-				if p.TotalBytes > 0 {
+			OnProgress: func() func(mithril.DownloadProgress) {
+				const progressLogInterval = 10 * time.Second
+				const progressLogPercentStep = 5.0
+
+				lastLogTime := time.Time{}
+				lastLoggedPercent := -progressLogPercentStep
+
+				return func(p mithril.DownloadProgress) {
+					if p.TotalBytes <= 0 {
+						return
+					}
+					now := time.Now()
+					if !lastLogTime.IsZero() &&
+						now.Sub(lastLogTime) < progressLogInterval &&
+						p.Percent < 100 &&
+						(p.Percent-lastLoggedPercent) < progressLogPercentStep {
+						return
+					}
 					logger.Info(
 						fmt.Sprintf(
 							"download progress: %.1f%% (%s / %s) at %s/s",
@@ -289,8 +305,10 @@ func runMithrilSync(
 						),
 						"component", "mithril",
 					)
+					lastLogTime = now
+					lastLoggedPercent = p.Percent
 				}
-			},
+			}(),
 		},
 	)
 	if err != nil {
@@ -316,6 +334,7 @@ func runMithrilSync(
 		DataDir:        cfg.DatabasePath,
 		Logger:         logger,
 		BlobPlugin:     cfg.BlobPlugin,
+		RunMode:        string(cfg.RunMode),
 		MetadataPlugin: cfg.MetadataPlugin,
 		MaxConnections: cfg.DatabaseWorkers,
 		StorageMode:    cfg.StorageMode,
@@ -688,11 +707,26 @@ func importLedgerState(
 				nodeCfg,
 			),
 			OnProgress: func(p ledgerstate.ImportProgress) {
-				logger.Info(
-					p.Description,
+				attrs := []any{
 					"component", "mithril",
 					"stage", p.Stage,
-				)
+				}
+				msg := p.Description
+				if p.Total > 0 {
+					pct := float64(p.Current) / float64(p.Total) * 100
+					attrs = append(
+						attrs,
+						"progress",
+						fmt.Sprintf("%.1f%%", pct),
+						"current",
+						p.Current,
+						"total",
+						p.Total,
+					)
+				} else if p.Current > 0 {
+					attrs = append(attrs, "current", p.Current)
+				}
+				logger.Info(msg, attrs...)
 			},
 		},
 	); err != nil {
@@ -1013,6 +1047,15 @@ func postProcessUtxoOffsets(
 			"opening immutable DB: %w", err,
 		)
 	}
+	immutableTip, err := imm.GetTip()
+	if err != nil {
+		return fmt.Errorf(
+			"getting immutable DB tip: %w", err,
+		)
+	}
+	if immutableTip == nil {
+		return errors.New("immutable DB tip is nil")
+	}
 
 	iter, err := imm.BlocksFromPoint(ocommon.Point{})
 	if err != nil {
@@ -1022,14 +1065,35 @@ func postProcessUtxoOffsets(
 	}
 	defer iter.Close()
 
-	const batchBlocks = 100
+	const batchBlocks = 50
+	const batchUtxoOffsets = 10000
 	var processedBlocks, totalUtxos int
+	startTime := time.Now()
+	lastProgressLog := time.Time{}
+	lastProgressSlot := uint64(0)
 	txn := db.BlobTxn(true)
 	blocksInBatch := 0
+	utxosInBatch := 0
 	// Deferred rollback ensures the active transaction is cleaned
 	// up if the loop body panics. Rollback after Commit is a no-op
 	// in Badger, so this is safe on the normal path.
 	defer func() { txn.Rollback() }() //nolint:errcheck
+
+	flushTxn := func() error {
+		if err := txn.Commit(); err != nil {
+			return fmt.Errorf(
+				"committing UTxO offsets: %w",
+				err,
+			)
+		}
+		blocksInBatch = 0
+		utxosInBatch = 0
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("cancelled: %w", err)
+		}
+		txn = db.BlobTxn(true)
+		return nil
+	}
 
 	for {
 		if err := ctx.Err(); err != nil {
@@ -1107,6 +1171,13 @@ func postProcessUtxoOffsets(
 						)
 					}
 					totalUtxos++
+					utxosInBatch++
+					if utxosInBatch >= batchUtxoOffsets {
+						if err := flushTxn(); err != nil {
+							return err
+						}
+						blobTxn = txn.Blob()
+					}
 				}
 			}
 		} else {
@@ -1195,42 +1266,41 @@ func postProcessUtxoOffsets(
 						)
 					}
 					totalUtxos++
+					utxosInBatch++
+					if utxosInBatch >= batchUtxoOffsets {
+						if err := flushTxn(); err != nil {
+							return err
+						}
+						blobTxn = txn.Blob()
+					}
 				}
 			}
 		}
 
 		processedBlocks++
+		lastProgressSlot = next.Slot
 		blocksInBatch++
 
 		if blocksInBatch >= batchBlocks {
-			if err := txn.Commit(); err != nil {
-				return fmt.Errorf(
-					"committing UTxO offsets: %w",
-					err,
-				)
+			if err := flushTxn(); err != nil {
+				return err
 			}
-			blocksInBatch = 0
-			// Check for cancellation between batches, before
-			// opening a new transaction that would leak.
-			if err := ctx.Err(); err != nil {
-				return fmt.Errorf("cancelled: %w", err)
-			}
-			txn = db.BlobTxn(true)
 		}
 
-		if processedBlocks > 0 && processedBlocks%50000 == 0 {
-			logger.Info(
-				"UTxO offset progress",
-				"component", "mithril",
-				"blocks", processedBlocks,
-				"utxos", totalUtxos,
-			)
-		}
+		maybeLogUtxoOffsetProgress(
+			logger,
+			processedBlocks,
+			totalUtxos,
+			lastProgressSlot,
+			immutableTip.Slot,
+			startTime,
+			&lastProgressLog,
+		)
 	}
 
 	// Commit remaining batch; the deferred rollback handles
 	// cleanup when there is nothing to commit.
-	if blocksInBatch > 0 {
+	if blocksInBatch > 0 || utxosInBatch > 0 {
 		if err := txn.Commit(); err != nil {
 			return fmt.Errorf(
 				"committing final UTxO offsets: %w",
@@ -1247,6 +1317,45 @@ func postProcessUtxoOffsets(
 	)
 
 	return nil
+}
+
+func maybeLogUtxoOffsetProgress(
+	logger *slog.Logger,
+	processedBlocks int,
+	totalUtxos int,
+	currentSlot uint64,
+	tipSlot uint64,
+	startTime time.Time,
+	lastLogTime *time.Time,
+) {
+	now := time.Now()
+	if !lastLogTime.IsZero() && now.Sub(*lastLogTime) < 10*time.Second {
+		return
+	}
+	*lastLogTime = now
+
+	elapsed := now.Sub(startTime)
+	attrs := []any{
+		"component", "mithril",
+		"blocks", processedBlocks,
+		"utxos", totalUtxos,
+		"slot", currentSlot,
+	}
+	if elapsed > 0 {
+		attrs = append(
+			attrs,
+			"blocks_per_sec",
+			fmt.Sprintf("%.0f", float64(processedBlocks)/elapsed.Seconds()),
+		)
+	}
+	if tipSlot > 0 {
+		attrs = append(
+			attrs,
+			"progress",
+			fmt.Sprintf("%.1f%%", float64(currentSlot)/float64(tipSlot)*100),
+		)
+	}
+	logger.Info("UTxO offset progress", attrs...)
 }
 
 // findNthOccurrence returns the byte offset of the nth (0-indexed)

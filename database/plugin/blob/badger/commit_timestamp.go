@@ -15,6 +15,8 @@
 package badger
 
 import (
+	"encoding/binary"
+	"fmt"
 	"math/big"
 
 	"github.com/blinklabs-io/dingo/database/types"
@@ -30,7 +32,10 @@ func (b *BlobStoreBadger) GetCommitTimestamp() (int64, error) {
 
 	val, err := b.Get(txn, []byte(commitTimestampBlobKey))
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("failed to read commit timestamp: %w", err)
+	}
+	if len(val) == 8 {
+		return int64(binary.BigEndian.Uint64(val)), nil //nolint:gosec // Unix timestamps are always positive and within int64 range
 	}
 	return new(big.Int).SetBytes(val).Int64(), nil
 }
@@ -43,9 +48,10 @@ func (b *BlobStoreBadger) SetCommitTimestamp(
 		return types.ErrNilTxn
 	}
 	// Update badger
-	tmpTimestamp := new(big.Int).SetInt64(timestamp)
-	if err := b.Set(txn, []byte(commitTimestampBlobKey), tmpTimestamp.Bytes()); err != nil {
-		return err
+	var tmpTimestamp [8]byte
+	binary.BigEndian.PutUint64(tmpTimestamp[:], uint64(timestamp)) //nolint:gosec // Unix timestamps are always positive
+	if err := b.Set(txn, []byte(commitTimestampBlobKey), tmpTimestamp[:]); err != nil {
+		return fmt.Errorf("failed to write commit timestamp: %w", err)
 	}
 	return nil
 }

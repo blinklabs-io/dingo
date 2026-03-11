@@ -66,8 +66,10 @@ type BlockIngestionResult struct {
 // BlockIndexer computes byte offsets for all items within a block.
 // It uses gouroboros's ExtractTransactionOffsets for efficient offset extraction.
 type BlockIndexer struct {
-	blockSlot uint64
-	blockHash [32]byte
+	blockSlot             uint64
+	blockHash             [32]byte
+	includeTxParts        bool
+	includeWitnessOffsets bool
 }
 
 // NewBlockIndexer creates a new BlockIndexer for the given block.
@@ -79,8 +81,23 @@ func NewBlockIndexer(slot uint64, hash []byte) *BlockIndexer {
 	return bi
 }
 
+// WithExtendedOffsets enables additional transaction-part and witness offset
+// extraction. When not called, ComputeOffsets returns a BlockIngestionResult
+// where TxParts, DatumOffsets, RedeemerOffsets, and ScriptOffsets are nil.
+// Callers must check for nil before accessing these fields.
+func (bi *BlockIndexer) WithExtendedOffsets() *BlockIndexer {
+	bi.includeTxParts = true
+	bi.includeWitnessOffsets = true
+	return bi
+}
+
 // ComputeOffsets extracts byte offsets for all transactions, UTxOs, datums,
 // redeemers, and scripts within the block CBOR.
+//
+// TxOffsets and UtxoOffsets are always populated. TxParts is only populated
+// when WithExtendedOffsets was called (nil otherwise). DatumOffsets,
+// RedeemerOffsets, and ScriptOffsets are likewise nil by default and only
+// allocated when WithExtendedOffsets was called.
 func (bi *BlockIndexer) ComputeOffsets(
 	blockCbor []byte,
 	block ledger.Block,
@@ -90,12 +107,18 @@ func (bi *BlockIndexer) ComputeOffsets(
 	}
 
 	result := &BlockIngestionResult{
-		TxOffsets:       make(map[[32]byte]CborOffset),
-		TxParts:         make(map[[32]byte]TxCborParts),
-		UtxoOffsets:     make(map[UtxoRef]CborOffset),
-		DatumOffsets:    make(map[[32]byte]CborOffset),
-		RedeemerOffsets: make(map[common.RedeemerKey]CborOffset),
-		ScriptOffsets:   make(map[[32]byte]CborOffset),
+		TxOffsets:   make(map[[32]byte]CborOffset),
+		UtxoOffsets: make(map[UtxoRef]CborOffset),
+	}
+	// TxParts, DatumOffsets, RedeemerOffsets, and ScriptOffsets remain nil
+	// unless extended offsets are requested.
+	if bi.includeTxParts {
+		result.TxParts = make(map[[32]byte]TxCborParts)
+	}
+	if bi.includeWitnessOffsets {
+		result.DatumOffsets = make(map[[32]byte]CborOffset)
+		result.RedeemerOffsets = make(map[common.RedeemerKey]CborOffset)
+		result.ScriptOffsets = make(map[[32]byte]CborOffset)
 	}
 
 	// Extract transaction-level offsets from block CBOR
@@ -141,16 +164,18 @@ func (bi *BlockIndexer) ComputeOffsets(
 		// TxParts stores offsets for each component so they can be extracted
 		// from the block and reassembled into a complete standalone transaction
 		// CBOR: [body, witness, is_valid, aux_data]
-		result.TxParts[txHashArray] = TxCborParts{
-			BlockSlot:      bi.blockSlot,
-			BlockHash:      bi.blockHash,
-			BodyOffset:     txLoc.Body.Offset,
-			BodyLength:     txLoc.Body.Length,
-			WitnessOffset:  txLoc.Witness.Offset,
-			WitnessLength:  txLoc.Witness.Length,
-			MetadataOffset: txLoc.Metadata.Offset,
-			MetadataLength: txLoc.Metadata.Length,
-			IsValid:        tx.IsValid(),
+		if bi.includeTxParts {
+			result.TxParts[txHashArray] = TxCborParts{
+				BlockSlot:      bi.blockSlot,
+				BlockHash:      bi.blockHash,
+				BodyOffset:     txLoc.Body.Offset,
+				BodyLength:     txLoc.Body.Length,
+				WitnessOffset:  txLoc.Witness.Offset,
+				WitnessLength:  txLoc.Witness.Length,
+				MetadataOffset: txLoc.Metadata.Offset,
+				MetadataLength: txLoc.Metadata.Length,
+				IsValid:        tx.IsValid(),
+			}
 		}
 
 		// Extract UTxO output offsets from transaction body
@@ -159,36 +184,38 @@ func (bi *BlockIndexer) ComputeOffsets(
 		}
 
 		// Store datum offsets from witness set
-		for datumHash, loc := range txLoc.Datums {
-			var hashArray [32]byte
-			copy(hashArray[:], datumHash[:])
-			result.DatumOffsets[hashArray] = CborOffset{
-				BlockSlot:  bi.blockSlot,
-				BlockHash:  bi.blockHash,
-				ByteOffset: loc.Offset,
-				ByteLength: loc.Length,
+		if bi.includeWitnessOffsets {
+			for datumHash, loc := range txLoc.Datums {
+				var hashArray [32]byte
+				copy(hashArray[:], datumHash[:])
+				result.DatumOffsets[hashArray] = CborOffset{
+					BlockSlot:  bi.blockSlot,
+					BlockHash:  bi.blockHash,
+					ByteOffset: loc.Offset,
+					ByteLength: loc.Length,
+				}
 			}
-		}
 
-		// Store redeemer offsets from witness set
-		for redeemerKey, loc := range txLoc.Redeemers {
-			result.RedeemerOffsets[redeemerKey] = CborOffset{
-				BlockSlot:  bi.blockSlot,
-				BlockHash:  bi.blockHash,
-				ByteOffset: loc.Offset,
-				ByteLength: loc.Length,
+			// Store redeemer offsets from witness set
+			for redeemerKey, loc := range txLoc.Redeemers {
+				result.RedeemerOffsets[redeemerKey] = CborOffset{
+					BlockSlot:  bi.blockSlot,
+					BlockHash:  bi.blockHash,
+					ByteOffset: loc.Offset,
+					ByteLength: loc.Length,
+				}
 			}
-		}
 
-		// Store script offsets from witness set
-		for scriptHash, loc := range txLoc.Scripts {
-			var hashArray [32]byte
-			copy(hashArray[:], scriptHash[:])
-			result.ScriptOffsets[hashArray] = CborOffset{
-				BlockSlot:  bi.blockSlot,
-				BlockHash:  bi.blockHash,
-				ByteOffset: loc.Offset,
-				ByteLength: loc.Length,
+			// Store script offsets from witness set
+			for scriptHash, loc := range txLoc.Scripts {
+				var hashArray [32]byte
+				copy(hashArray[:], scriptHash[:])
+				result.ScriptOffsets[hashArray] = CborOffset{
+					BlockSlot:  bi.blockSlot,
+					BlockHash:  bi.blockHash,
+					ByteOffset: loc.Offset,
+					ByteLength: loc.Length,
+				}
 			}
 		}
 	}

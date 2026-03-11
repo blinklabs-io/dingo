@@ -14,6 +14,8 @@
 
 package plugin
 
+import "log/slog"
+
 // Logger provides a logging interface for plugins.
 type Logger interface {
 	Info(string, ...any)
@@ -24,4 +26,10 @@ type Logger interface {
 	// Deprecated
 	// Fatal(string, ...any) in favor of Error
 	// With slog Fatal is replaced with Error and os.Exit(1)
+}
+
+// LoggerSetter is implemented by plugins that can accept a logger after
+// construction.
+type LoggerSetter interface {
+	SetLogger(*slog.Logger)
 }
