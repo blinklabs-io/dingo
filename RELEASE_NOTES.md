@@ -2,7 +2,7 @@
 
 ## v0.23.1 (March 11, 2026)
 
-**Title:** Patch updates and stability tweaks
+**Title:** Clearer release notes and steadier Docker publishing
 
 **Date:** March 11, 2026
 
@@ -16,15 +16,15 @@ Hi folks! Here’s what we shipped in v0.23.1.
 
 ### 💪 Improvements
 
-- **CI (Antithesis image):** Builds are more consistent because CI now builds, tags, pushes, and generates an attestation for a Linux amd64-only Antithesis Docker image variant.
+- **Docker publishing (Antithesis image):** Publishing is more consistent because the build pipeline now builds, tags, pushes, and generates an attestation for a Linux amd64-only Antithesis Docker image variant.
 
 ### 🔧 Fixes
 
-- **No fixes noted:** No user-facing fixes were noted in this release.
+- **Fixes:** Nothing to call out this time.
 
 ### 📋 What You Need to Know
 
-- **No action required:** You’re all set—there are no required configuration changes for this release.
+- **No action needed:** You’re all set—no required configuration changes for this release.
 
 ### 🙏 Thank You
 
