@@ -2,7 +2,7 @@
 
 ## v0.23.1 (March 11, 2026)
 
-**Title:** Clearer release notes and steadier Docker publishing
+**Title:** Clearer release notes and rock-solid Docker publishing
 
 **Date:** March 11, 2026
 
@@ -20,11 +20,11 @@ Hi folks! Here’s what we shipped in v0.23.1.
 
 ### 🔧 Fixes
 
-- **Fixes:** Nothing to call out this time.
+- **Fixes:** No user-facing fixes shipped in this patch.
 
 ### 📋 What You Need to Know
 
-- **No action needed:** You’re all set—no required configuration changes for this release.
+- **Upgrade:** You’re all set—no required configuration changes for this release.
 
 ### 🙏 Thank You
 
