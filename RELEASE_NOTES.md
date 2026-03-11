@@ -1,5 +1,39 @@
 # Release Notes
 
+## v0.23.0 (March 10, 2026)
+
+**Title:** Overlay-aware validation and a smoother dev mode
+
+**Date:** March 10, 2026
+
+**Version:** v0.23.0
+
+Hi folks! Here’s what we shipped in v0.23.0.
+
+### ✨ What's New
+
+- **Transaction validation:** Transaction validation is more accurate because ledger and mempool checks now account for pending, in-flight changes with a temporary UTxO overlay.
+
+### 💪 Improvements
+
+- **Docs:** Setup is easier because `README.md` now includes expanded usage, deployment, and DevNet guidance plus a clear “not for production” warning.
+- **Publish workflow:** Publishing is more rock-solid because the release workflow now targets Node.js `24.x` and pins key GitHub Actions versions.
+- **Release notes:** Release notes are easier to scan because `RELEASE_NOTES.md` now includes v0.22.1 and tightens up transaction validation wording.
+
+### 🔧 Fixes
+
+- **Connection cleanup:** Connection-related tests are less flaky because keepalive timeouts are deterministic and connection cleanup is safer.
+
+### 📋 What You Need to Know
+
+- **Dev mode:** If you run dev mode, Dingo will automatically switch the storage mode to API, so check logs if you expected a different mode.
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
 ## v0.22.1 (March 8, 2026)
 
 **Title:** Stability updates and polish
