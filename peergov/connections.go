@@ -70,6 +70,7 @@ func isExpectedConnectionCloseError(err error) bool {
 	msg := strings.ToLower(err.Error())
 	return strings.Contains(msg, "connection reset by peer") ||
 		strings.Contains(msg, "broken pipe") ||
+		strings.Contains(msg, "timeout waiting on transition") ||
 		msg == "eof"
 }
 
