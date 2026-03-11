@@ -1,35 +1,32 @@
 # Release Notes
 
-## v0.23.1 (March 10, 2026)
+## v0.23.0 (March 10, 2026)
 
-**Title:** Solid maintenance updates and polish
+**Title:** Overlay-aware validation and a smoother dev mode
 
 **Date:** March 10, 2026
 
-**Version:** v0.23.1
+**Version:** v0.23.0
 
-Hi folks! Here’s what we shipped in v0.23.1.
+Hi folks! Here’s what we shipped in v0.23.0.
 
 ### ✨ What's New
 
-- **Docs:** Docs are easier to follow because the README was expanded with usage, deployment, and DevNet guidance plus a clear “not for production use” warning.
-- **Transaction validation:** Transaction validation is safer because the ledger and mempool now perform UTxO overlay-aware validation with descendant pruning, covered by new tests.
+- **Transaction validation:** Transaction validation is more accurate because ledger and mempool checks now account for pending, in-flight changes with a temporary UTxO overlay.
 
 ### 💪 Improvements
 
-- **Dev mode:** Dev mode runs are more predictable because it now forces storage mode to API and logs when it overrides your configured value.
-- **Publishing workflow:** Publishing and CI are more consistent because the GitHub Actions publish workflow now uses Node.js `24.x` and upgraded Docker and Node setup actions.
-- **Dependencies:** Compatibility is more solid because gouroboros was updated to v0.160.1 (including additional `vrf.MkInputVrf` error handling) and bursa was upgraded to v0.16.0.
-- **Release notes:** Release documentation is easier to scan because `RELEASE_NOTES.md` now includes a refined v0.22.1 entry with clearer transaction validation wording and CI/publish tooling notes.
+- **Docs:** Setup is easier because `README.md` now includes expanded usage, deployment, and DevNet guidance plus a clear “not for production” warning.
+- **Publish workflow:** Publishing is more rock-solid because the release workflow now targets Node.js `24.x` and pins key GitHub Actions versions.
+- **Release notes:** Release notes are easier to scan because `RELEASE_NOTES.md` now includes v0.22.1 and tightens up transaction validation wording.
 
 ### 🔧 Fixes
 
-- **Connmanager tests:** Connection stability tests are less flaky because the connection manager error test now uses a deterministic keepalive timeout and cleanup is more robust.
+- **Connection cleanup:** Connection-related tests are less flaky because keepalive timeouts are deterministic and connection cleanup is safer.
 
 ### 📋 What You Need to Know
 
-- **Dev mode override:** If you run with dev mode enabled, Dingo will override storage mode to API and log the change.
-- **Not for production:** If you’re evaluating Dingo, note that the README now calls out that the project is not intended for production use.
+- **Dev mode:** If you run dev mode, Dingo will automatically switch the storage mode to API, so check logs if you expected a different mode.
 
 ### 🙏 Thank You
 
