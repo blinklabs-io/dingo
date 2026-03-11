@@ -1247,7 +1247,7 @@ func ParseGovState(
 		return nil, nil
 	}
 
-	fields, err := decodeRawArray(data)
+	fields, err := decodeRawElements(data)
 	if err != nil {
 		return nil, fmt.Errorf(
 			"decoding GovState: %w", err,

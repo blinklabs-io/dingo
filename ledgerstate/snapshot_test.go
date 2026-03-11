@@ -19,10 +19,15 @@ import (
 	"encoding/hex"
 	"fmt"
 	"hash/crc32"
+	"math/big"
 	"os"
 	"path/filepath"
 	"testing"
 
+	"github.com/blinklabs-io/gouroboros/cbor"
+	lbabbage "github.com/blinklabs-io/gouroboros/ledger/babbage"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	lconway "github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/stretchr/testify/require"
 )
 
@@ -257,6 +262,166 @@ func TestVerifyChecksumFileMismatch(t *testing.T) {
 
 	err = VerifyChecksumFile(lstatePath)
 	require.ErrorContains(t, err, "mismatch")
+}
+
+func TestExtractPParamsDataBabbageGovState(t *testing.T) {
+	pparams := testBabbagePParams()
+	pparamsData, err := cbor.Encode(pparams)
+	require.NoError(t, err)
+
+	govStateData, err := cbor.Encode([]any{
+		uint64(1),
+		uint64(2),
+		cbor.RawMessage(pparamsData),
+		uint64(4),
+	})
+	require.NoError(t, err)
+
+	got, err := extractPParamsData(EraBabbage, govStateData)
+	require.NoError(t, err)
+	require.Equal(t, pparamsData, []byte(got))
+}
+
+func TestExtractPParamsDataConwayGovStateMap(t *testing.T) {
+	pparams := testConwayPParams()
+	pparamsData, err := cbor.Encode(pparams)
+	require.NoError(t, err)
+
+	govStateData, err := cbor.Encode(map[uint64]any{
+		0: uint64(1),
+		1: uint64(2),
+		2: uint64(3),
+		3: cbor.RawMessage(pparamsData),
+		4: uint64(5),
+	})
+	require.NoError(t, err)
+
+	got, err := extractPParamsData(EraConway, govStateData)
+	require.NoError(t, err)
+	require.Equal(t, pparamsData, []byte(got))
+}
+
+func TestExtractPParamsDataDetectsEraSpecificType(t *testing.T) {
+	alonzoData, err := cbor.Encode(testBabbagePParams())
+	require.NoError(t, err)
+	conwayData, err := cbor.Encode(testConwayPParams())
+	require.NoError(t, err)
+
+	govStateData, err := cbor.Encode([]any{
+		uint64(1),
+		uint64(2),
+		cbor.RawMessage(alonzoData),
+		cbor.RawMessage(conwayData),
+	})
+	require.NoError(t, err)
+
+	got, err := extractPParamsData(EraConway, govStateData)
+	require.NoError(t, err)
+	require.Equal(t, conwayData, []byte(got))
+}
+
+func testBabbagePParams() *lbabbage.BabbageProtocolParameters {
+	return &lbabbage.BabbageProtocolParameters{
+		MinFeeA:            44,
+		MinFeeB:            155381,
+		MaxBlockBodySize:   65536,
+		MaxTxSize:          16384,
+		MaxBlockHeaderSize: 1100,
+		KeyDeposit:         2000000,
+		PoolDeposit:        500000000,
+		MaxEpoch:           18,
+		NOpt:               500,
+		A0:                 &cbor.Rat{Rat: big.NewRat(3, 10)},
+		Rho:                &cbor.Rat{Rat: big.NewRat(3, 1000)},
+		Tau:                &cbor.Rat{Rat: big.NewRat(1, 5)},
+		ProtocolMajor:      8,
+		ProtocolMinor:      0,
+		MinPoolCost:        340000000,
+		AdaPerUtxoByte:     4310,
+		CostModels:         map[uint][]int64{1: []int64{0}},
+		ExecutionCosts: lcommon.ExUnitPrice{
+			MemPrice:  &cbor.Rat{Rat: big.NewRat(577, 10000)},
+			StepPrice: &cbor.Rat{Rat: big.NewRat(721, 10000000)},
+		},
+		MaxTxExUnits: lcommon.ExUnits{
+			Memory: 10000000,
+			Steps:  10000000000,
+		},
+		MaxBlockExUnits: lcommon.ExUnits{
+			Memory: 50000000,
+			Steps:  40000000000,
+		},
+		MaxValueSize:         5000,
+		CollateralPercentage: 150,
+		MaxCollateralInputs:  3,
+	}
+}
+
+func testConwayPParams() *lconway.ConwayProtocolParameters {
+	return &lconway.ConwayProtocolParameters{
+		MinFeeA:            44,
+		MinFeeB:            155381,
+		MaxBlockBodySize:   65536,
+		MaxTxSize:          16384,
+		MaxBlockHeaderSize: 1100,
+		KeyDeposit:         2000000,
+		PoolDeposit:        500000000,
+		MaxEpoch:           18,
+		NOpt:               500,
+		A0:                 &cbor.Rat{Rat: big.NewRat(3, 10)},
+		Rho:                &cbor.Rat{Rat: big.NewRat(3, 1000)},
+		Tau:                &cbor.Rat{Rat: big.NewRat(1, 5)},
+		ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
+			Major: 10,
+			Minor: 0,
+		},
+		MinPoolCost:    340000000,
+		AdaPerUtxoByte: 4310,
+		CostModels:     map[uint][]int64{1: []int64{0}},
+		ExecutionCosts: lcommon.ExUnitPrice{
+			MemPrice:  &cbor.Rat{Rat: big.NewRat(577, 10000)},
+			StepPrice: &cbor.Rat{Rat: big.NewRat(721, 10000000)},
+		},
+		MaxTxExUnits: lcommon.ExUnits{
+			Memory: 10000000,
+			Steps:  10000000000,
+		},
+		MaxBlockExUnits: lcommon.ExUnits{
+			Memory: 50000000,
+			Steps:  40000000000,
+		},
+		MaxValueSize:         5000,
+		CollateralPercentage: 150,
+		MaxCollateralInputs:  3,
+		PoolVotingThresholds: lconway.PoolVotingThresholds{
+			MotionNoConfidence:    cbor.Rat{Rat: big.NewRat(1, 2)},
+			CommitteeNormal:       cbor.Rat{Rat: big.NewRat(1, 2)},
+			CommitteeNoConfidence: cbor.Rat{Rat: big.NewRat(1, 2)},
+			HardForkInitiation:    cbor.Rat{Rat: big.NewRat(1, 2)},
+			PpSecurityGroup:       cbor.Rat{Rat: big.NewRat(1, 2)},
+		},
+		DRepVotingThresholds: lconway.DRepVotingThresholds{
+			MotionNoConfidence:    cbor.Rat{Rat: big.NewRat(1, 2)},
+			CommitteeNormal:       cbor.Rat{Rat: big.NewRat(1, 2)},
+			CommitteeNoConfidence: cbor.Rat{Rat: big.NewRat(1, 2)},
+			UpdateToConstitution:  cbor.Rat{Rat: big.NewRat(1, 2)},
+			HardForkInitiation:    cbor.Rat{Rat: big.NewRat(1, 2)},
+			PpNetworkGroup:        cbor.Rat{Rat: big.NewRat(1, 2)},
+			PpEconomicGroup:       cbor.Rat{Rat: big.NewRat(1, 2)},
+			PpTechnicalGroup:      cbor.Rat{Rat: big.NewRat(1, 2)},
+			PpGovGroup:            cbor.Rat{Rat: big.NewRat(1, 2)},
+			TreasuryWithdrawal:    cbor.Rat{Rat: big.NewRat(1, 2)},
+		},
+		MinCommitteeSize:        5,
+		CommitteeTermLimit:      146,
+		GovActionValidityPeriod: 20,
+		GovActionDeposit:        100000000000,
+		DRepDeposit:             500000000,
+		DRepInactivityPeriod:    20,
+		MinFeeRefScriptCostPerByte: &cbor.Rat{
+			Rat: big.NewRat(1, 1),
+		},
+	}
 }
 
 func TestVerifyChecksumFileWrongLength(t *testing.T) {
