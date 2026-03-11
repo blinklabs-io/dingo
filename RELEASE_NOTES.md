@@ -22,7 +22,7 @@ Hi folks! Here’s what we shipped in v0.24.0.
 
 - **Docs:** Documentation is clearer and safer to follow, so it’s easier to evaluate the project without accidentally treating it as production-ready.
 - **Dev mode:** Development runs behave more predictably, reducing confusion when local settings don’t match what the system actually supports.
-- **Connection manager:** Connections are more resilient and logs are less noisy, so transient network edge cases are less likely to look like failures.
+- **Connection manager:** Connections are more rock-solid and logs are less noisy, so transient network edge cases are less likely to look like failures.
 - **Storage tuning and logging:** Storage behavior is more transparent and better tuned out of the box, which helps with troubleshooting and performance tuning.
 - **Era-aware validation:** Validation and ingestion are more accurate across eras and more informative during big imports, reducing surprises when moving between protocol versions.
 - **Overlay-aware acceptance:** Transaction acceptance is more consistent when recent changes haven’t been fully committed yet, which helps avoid confusing “valid vs invalid” flips during active processing.
