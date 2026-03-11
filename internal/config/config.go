@@ -251,6 +251,12 @@ type Config struct {
 	// Mesh (Coinbase Rosetta) API port (0 = disabled)
 	MeshPort uint `yaml:"meshPort" envconfig:"DINGO_MESH_PORT"`
 
+	// PeerSharing enables the peer sharing protocol, allowing this node
+	// to advertise known peers to other nodes on request. Defaults to
+	// false; should remain disabled on block producers to avoid leaking
+	// topology information.
+	PeerSharing bool `yaml:"peerSharing" envconfig:"DINGO_PEER_SHARING"`
+
 	// Storage mode: "core" (default) or "api".
 	// "core" stores only consensus data
 	// (UTxOs, certs, pools, pparams).
