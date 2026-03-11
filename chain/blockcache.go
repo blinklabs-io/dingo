@@ -16,6 +16,9 @@ package chain
 
 import (
 	"container/list"
+	"fmt"
+	"io"
+	"log/slog"
 	"sync"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -35,14 +38,25 @@ const DefaultBlockCacheCapacity = 10000
 type blockCache struct {
 	mu           sync.Mutex
 	capacity     int
-	items        map[string]*list.Element
+	items        map[[32]byte]*list.Element
 	order        *list.List // front = most recent, back = least recent
+	logger       *slog.Logger
 	cachedBlocks prometheus.Gauge
 }
 
 type blockCacheEntry struct {
-	hash  string
+	hash  [32]byte
 	block models.Block
+}
+
+func blockCacheKey(hash []byte) ([32]byte, error) {
+	if len(hash) != 32 {
+		return [32]byte{}, fmt.Errorf(
+			"blockCacheKey: expected 32-byte hash, got %d bytes",
+			len(hash),
+		)
+	}
+	return [32]byte(hash), nil
 }
 
 // newBlockCache creates a new block cache with the given
@@ -57,8 +71,9 @@ func newBlockCache(
 	}
 	c := &blockCache{
 		capacity: capacity,
-		items:    make(map[string]*list.Element),
+		items:    make(map[[32]byte]*list.Element),
 		order:    list.New(),
+		logger:   slog.New(slog.NewJSONHandler(io.Discard, nil)),
 	}
 	if promRegistry != nil {
 		c.initMetrics(promRegistry)
@@ -89,11 +104,15 @@ func (c *blockCache) updateMetrics() {
 // and false if not found. Accessing a block moves it to the
 // front of the LRU list.
 func (c *blockCache) Get(
-	hash string,
+	hash []byte,
 ) (models.Block, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if elem, ok := c.items[hash]; ok {
+	key, err := blockCacheKey(hash)
+	if err != nil {
+		return models.Block{}, false
+	}
+	if elem, ok := c.items[key]; ok {
 		c.order.MoveToFront(elem)
 		return elem.Value.(*blockCacheEntry).block, true
 	}
@@ -106,7 +125,16 @@ func (c *blockCache) Get(
 func (c *blockCache) Put(block models.Block) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	hash := string(block.Hash)
+	hash, err := blockCacheKey(block.Hash)
+	if err != nil {
+		c.logger.Warn(
+			"block cache: skipping block with invalid hash length",
+			"hash_len", len(block.Hash),
+			"block_id", block.ID,
+			"error", err,
+		)
+		return
+	}
 
 	// If already in cache, update and move to front
 	if elem, ok := c.items[hash]; ok {
@@ -131,12 +159,16 @@ func (c *blockCache) Put(block models.Block) {
 }
 
 // Delete removes a block from the cache by its hash.
-func (c *blockCache) Delete(hash string) {
+func (c *blockCache) Delete(hash []byte) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if elem, ok := c.items[hash]; ok {
+	key, err := blockCacheKey(hash)
+	if err != nil {
+		return
+	}
+	if elem, ok := c.items[key]; ok {
 		c.order.Remove(elem)
-		delete(c.items, hash)
+		delete(c.items, key)
 		c.updateMetrics()
 	}
 }

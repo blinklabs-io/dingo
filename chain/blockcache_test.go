@@ -15,6 +15,7 @@
 package chain
 
 import (
+	"crypto/sha256"
 	"fmt"
 	"sync"
 	"testing"
@@ -26,24 +27,30 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 )
 
+// testHash returns a deterministic 32-byte hash derived from a label.
+func testHash(label string) []byte {
+	h := sha256.Sum256([]byte(label))
+	return h[:]
+}
+
 func TestBlockCache_BasicOperations(t *testing.T) {
 	cache := newBlockCache(3, nil)
 
 	// Test empty cache
-	_, ok := cache.Get("nonexistent")
+	_, ok := cache.Get(testHash("nonexistent"))
 	assert.False(t, ok)
 	assert.Equal(t, 0, cache.Len())
 
 	// Add a block
 	block1 := models.Block{
-		Hash: []byte("hash1"),
+		Hash: testHash("hash1"),
 		Slot: 100,
 	}
 	cache.Put(block1)
 	assert.Equal(t, 1, cache.Len())
 
 	// Retrieve it
-	got, ok := cache.Get("hash1")
+	got, ok := cache.Get(testHash("hash1"))
 	assert.True(t, ok)
 	assert.Equal(t, uint64(100), got.Slot)
 }
@@ -53,15 +60,15 @@ func TestBlockCache_LRUEviction(t *testing.T) {
 
 	// Add 3 blocks
 	block1 := models.Block{
-		Hash: []byte("hash1"),
+		Hash: testHash("hash1"),
 		Slot: 1,
 	}
 	block2 := models.Block{
-		Hash: []byte("hash2"),
+		Hash: testHash("hash2"),
 		Slot: 2,
 	}
 	block3 := models.Block{
-		Hash: []byte("hash3"),
+		Hash: testHash("hash3"),
 		Slot: 3,
 	}
 
@@ -71,9 +78,9 @@ func TestBlockCache_LRUEviction(t *testing.T) {
 	assert.Equal(t, 3, cache.Len())
 
 	// All should be present
-	_, ok1 := cache.Get("hash1")
-	_, ok2 := cache.Get("hash2")
-	_, ok3 := cache.Get("hash3")
+	_, ok1 := cache.Get(testHash("hash1"))
+	_, ok2 := cache.Get(testHash("hash2"))
+	_, ok3 := cache.Get(testHash("hash3"))
 	assert.True(t, ok1)
 	assert.True(t, ok2)
 	assert.True(t, ok3)
@@ -82,20 +89,20 @@ func TestBlockCache_LRUEviction(t *testing.T) {
 	// used). After the Gets above, order is hash3, hash2,
 	// hash1 (most to least recent), so hash1 is evicted.
 	block4 := models.Block{
-		Hash: []byte("hash4"),
+		Hash: testHash("hash4"),
 		Slot: 4,
 	}
 	cache.Put(block4)
 	assert.Equal(t, 3, cache.Len())
 
 	// hash1 should be evicted
-	_, ok1 = cache.Get("hash1")
+	_, ok1 = cache.Get(testHash("hash1"))
 	assert.False(t, ok1)
 
 	// Others should still be present
-	_, ok2 = cache.Get("hash2")
-	_, ok3 = cache.Get("hash3")
-	_, ok4 := cache.Get("hash4")
+	_, ok2 = cache.Get(testHash("hash2"))
+	_, ok3 = cache.Get(testHash("hash3"))
+	_, ok4 := cache.Get(testHash("hash4"))
 	assert.True(t, ok2)
 	assert.True(t, ok3)
 	assert.True(t, ok4)
@@ -106,14 +113,14 @@ func TestBlockCache_UpdateExisting(t *testing.T) {
 
 	// Add a block
 	block1 := models.Block{
-		Hash: []byte("hash1"),
+		Hash: testHash("hash1"),
 		Slot: 100,
 	}
 	cache.Put(block1)
 
 	// Update it
 	block1Updated := models.Block{
-		Hash: []byte("hash1"),
+		Hash: testHash("hash1"),
 		Slot: 200,
 	}
 	cache.Put(block1Updated)
@@ -122,7 +129,7 @@ func TestBlockCache_UpdateExisting(t *testing.T) {
 	assert.Equal(t, 1, cache.Len())
 
 	// Should have updated slot
-	got, ok := cache.Get("hash1")
+	got, ok := cache.Get(testHash("hash1"))
 	assert.True(t, ok)
 	assert.Equal(t, uint64(200), got.Slot)
 }
@@ -132,15 +139,15 @@ func TestBlockCache_AccessMovesToFront(t *testing.T) {
 
 	// Add 3 blocks in order
 	block1 := models.Block{
-		Hash: []byte("hash1"),
+		Hash: testHash("hash1"),
 		Slot: 1,
 	}
 	block2 := models.Block{
-		Hash: []byte("hash2"),
+		Hash: testHash("hash2"),
 		Slot: 2,
 	}
 	block3 := models.Block{
-		Hash: []byte("hash3"),
+		Hash: testHash("hash3"),
 		Slot: 3,
 	}
 
@@ -149,27 +156,27 @@ func TestBlockCache_AccessMovesToFront(t *testing.T) {
 	cache.Put(block3)
 
 	// Access hash1, moving it to front
-	cache.Get("hash1")
+	cache.Get(testHash("hash1"))
 
 	// Add block4 - should evict hash2 (now least recently
 	// used)
 	block4 := models.Block{
-		Hash: []byte("hash4"),
+		Hash: testHash("hash4"),
 		Slot: 4,
 	}
 	cache.Put(block4)
 
 	// hash1 should still be present (was accessed)
-	_, ok1 := cache.Get("hash1")
+	_, ok1 := cache.Get(testHash("hash1"))
 	assert.True(t, ok1)
 
 	// hash2 should be evicted
-	_, ok2 := cache.Get("hash2")
+	_, ok2 := cache.Get(testHash("hash2"))
 	assert.False(t, ok2)
 
 	// hash3 and hash4 should be present
-	_, ok3 := cache.Get("hash3")
-	_, ok4 := cache.Get("hash4")
+	_, ok3 := cache.Get(testHash("hash3"))
+	_, ok4 := cache.Get(testHash("hash4"))
 	assert.True(t, ok3)
 	assert.True(t, ok4)
 }
@@ -197,15 +204,15 @@ func TestBlockCache_Delete(t *testing.T) {
 
 	// Add blocks
 	block1 := models.Block{
-		Hash: []byte("hash1"),
+		Hash: testHash("hash1"),
 		Slot: 1,
 	}
 	block2 := models.Block{
-		Hash: []byte("hash2"),
+		Hash: testHash("hash2"),
 		Slot: 2,
 	}
 	block3 := models.Block{
-		Hash: []byte("hash3"),
+		Hash: testHash("hash3"),
 		Slot: 3,
 	}
 	cache.Put(block1)
@@ -214,21 +221,21 @@ func TestBlockCache_Delete(t *testing.T) {
 	assert.Equal(t, 3, cache.Len())
 
 	// Delete middle block
-	cache.Delete("hash2")
+	cache.Delete(testHash("hash2"))
 	assert.Equal(t, 2, cache.Len())
 
 	// Deleted block should not be found
-	_, ok := cache.Get("hash2")
+	_, ok := cache.Get(testHash("hash2"))
 	assert.False(t, ok)
 
 	// Other blocks should still be present
-	_, ok1 := cache.Get("hash1")
-	_, ok3 := cache.Get("hash3")
+	_, ok1 := cache.Get(testHash("hash1"))
+	_, ok3 := cache.Get(testHash("hash3"))
 	assert.True(t, ok1)
 	assert.True(t, ok3)
 
 	// Deleting a non-existent key should be a no-op
-	cache.Delete("nonexistent")
+	cache.Delete(testHash("nonexistent"))
 	assert.Equal(t, 2, cache.Len())
 }
 
@@ -245,13 +252,13 @@ func TestBlockCache_ConcurrentAccess(t *testing.T) {
 		go func(id int) {
 			defer wg.Done()
 			for i := range opsPerGoroutine {
-				hash := fmt.Sprintf(
+				hash := testHash(fmt.Sprintf(
 					"hash-%d-%d",
 					id,
 					i,
-				)
+				))
 				block := models.Block{
-					Hash: []byte(hash),
+					Hash: hash,
 					Slot: uint64(
 						id*opsPerGoroutine + i,
 					),
@@ -266,11 +273,11 @@ func TestBlockCache_ConcurrentAccess(t *testing.T) {
 		go func(id int) {
 			defer wg.Done()
 			for i := range opsPerGoroutine {
-				hash := fmt.Sprintf(
+				hash := testHash(fmt.Sprintf(
 					"hash-%d-%d",
 					id,
 					i,
-				)
+				))
 				cache.Get(hash)
 			}
 		}(g)
@@ -281,11 +288,11 @@ func TestBlockCache_ConcurrentAccess(t *testing.T) {
 		go func(id int) {
 			defer wg.Done()
 			for i := range opsPerGoroutine {
-				hash := fmt.Sprintf(
+				hash := testHash(fmt.Sprintf(
 					"hash-%d-%d",
 					id,
 					i,
-				)
+				))
 				cache.Delete(hash)
 			}
 		}(g)
@@ -305,11 +312,11 @@ func TestBlockCache_PrometheusMetric(t *testing.T) {
 
 	// Add blocks and verify metric is registered
 	block1 := models.Block{
-		Hash: []byte("hash1"),
+		Hash: testHash("hash1"),
 		Slot: 1,
 	}
 	block2 := models.Block{
-		Hash: []byte("hash2"),
+		Hash: testHash("hash2"),
 		Slot: 2,
 	}
 	cache.Put(block1)
@@ -339,7 +346,7 @@ func TestBlockCache_PrometheusMetric(t *testing.T) {
 	)
 
 	// Delete a block and verify metric updates
-	cache.Delete("hash1")
+	cache.Delete(testHash("hash1"))
 	metrics, err = registry.Gather()
 	require.NoError(t, err)
 	for _, mf := range metrics {
