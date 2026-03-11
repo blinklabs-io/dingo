@@ -849,6 +849,7 @@ func (n *Node) Stop() error {
 }
 
 func (n *Node) shutdown() error {
+	shutdownStart := time.Now()
 	// Create shutdown context with timeout (default 30s if not configured)
 	shutdownTimeout := 30 * time.Second
 	if n.config.shutdownTimeout > 0 {
@@ -862,10 +863,13 @@ func (n *Node) shutdown() error {
 
 	var err error
 
-	n.config.logger.Debug("starting graceful shutdown")
+	n.config.logger.Info(
+		"starting graceful shutdown",
+		"timeout", shutdownTimeout,
+	)
 
 	// Phase 1: Stop accepting new work
-	n.config.logger.Debug("shutdown phase 1: stopping new work")
+	n.config.logger.Info("shutdown phase 1: stopping new work")
 
 	// Stop block forger first to prevent new blocks
 	if n.blockForger != nil {
@@ -929,8 +933,14 @@ func (n *Node) shutdown() error {
 		}
 	}
 
+	n.config.logger.Info(
+		"shutdown phase 1 complete",
+		"elapsed", time.Since(shutdownStart).Round(time.Millisecond),
+	)
+
 	// Phase 2: Drain and close connections
-	n.config.logger.Debug("shutdown phase 2: draining connections")
+	n.config.logger.Info("shutdown phase 2: draining connections")
+	phase2Start := time.Now()
 
 	if n.mempool != nil {
 		if stopErr := n.mempool.Stop(ctx); stopErr != nil {
@@ -947,29 +957,52 @@ func (n *Node) shutdown() error {
 		}
 	}
 
+	n.config.logger.Info(
+		"shutdown phase 2 complete",
+		"elapsed", time.Since(phase2Start).Round(time.Millisecond),
+	)
+
 	// Phase 3: Flush state and close database
-	n.config.logger.Debug("shutdown phase 3: flushing state")
+	n.config.logger.Info("shutdown phase 3: flushing state")
+	phase3Start := time.Now()
 
 	if n.ledgerState != nil {
+		n.config.logger.Info("closing ledger state")
+		t := time.Now()
 		if closeErr := n.ledgerState.Close(); closeErr != nil {
 			err = errors.Join(
 				err,
 				fmt.Errorf("ledger state close: %w", closeErr),
 			)
 		}
+		n.config.logger.Info(
+			"ledger state closed",
+			"elapsed", time.Since(t).Round(time.Millisecond),
+		)
 	}
 
 	if n.db != nil {
+		n.config.logger.Info("closing database")
+		t := time.Now()
 		if closeErr := n.db.Close(); closeErr != nil {
 			err = errors.Join(
 				err,
 				fmt.Errorf("database close: %w", closeErr),
 			)
 		}
+		n.config.logger.Info(
+			"database closed",
+			"elapsed", time.Since(t).Round(time.Millisecond),
+		)
 	}
 
+	n.config.logger.Info(
+		"shutdown phase 3 complete",
+		"elapsed", time.Since(phase3Start).Round(time.Millisecond),
+	)
+
 	// Phase 4: Cleanup resources
-	n.config.logger.Debug("shutdown phase 4: cleanup resources")
+	n.config.logger.Info("shutdown phase 4: cleanup resources")
 
 	// Call registered shutdown functions
 	for _, fn := range n.shutdownFuncs {
@@ -983,7 +1016,10 @@ func (n *Node) shutdown() error {
 		n.eventBus.Stop()
 	}
 
-	n.config.logger.Debug("graceful shutdown complete")
+	n.config.logger.Info(
+		"graceful shutdown complete",
+		"total_elapsed", time.Since(shutdownStart).Round(time.Millisecond),
+	)
 	return err
 }
 

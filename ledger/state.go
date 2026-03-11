@@ -839,18 +839,56 @@ func (ls *LedgerState) Close() error {
 	// Wait for in-flight rollback event emission goroutines.
 	// Hold rollbackMu so no new goroutine can Add(1) between our
 	// closed flag and this Wait.
+	ls.config.Logger.Info("waiting for in-flight rollback goroutines")
+	rollbackStart := time.Now()
 	ls.rollbackMu.Lock()
-	ls.rollbackWG.Wait()
+	rollbackDone := make(chan struct{})
+	go func() {
+		ls.rollbackWG.Wait()
+		close(rollbackDone)
+	}()
+	select {
+	case <-rollbackDone:
+		ls.config.Logger.Info(
+			"rollback goroutines finished",
+			"elapsed", time.Since(rollbackStart).Round(time.Millisecond),
+		)
+	case <-time.After(10 * time.Second):
+		ls.config.Logger.Warn(
+			"timed out waiting for rollback goroutines",
+			"elapsed", time.Since(rollbackStart).Round(time.Millisecond),
+		)
+	}
 	ls.rollbackMu.Unlock()
 
 	// Stop slot clock
 	if ls.slotClock != nil {
+		ls.config.Logger.Info("stopping slot clock")
 		ls.slotClock.Stop()
+		ls.config.Logger.Info("slot clock stopped")
 	}
 
 	// Shutdown database worker pool
 	if ls.dbWorkerPool != nil {
-		ls.dbWorkerPool.Shutdown()
+		ls.config.Logger.Info("shutting down database worker pool")
+		poolStart := time.Now()
+		poolDone := make(chan struct{})
+		go func() {
+			ls.dbWorkerPool.Shutdown()
+			close(poolDone)
+		}()
+		select {
+		case <-poolDone:
+			ls.config.Logger.Info(
+				"database worker pool shut down",
+				"elapsed", time.Since(poolStart).Round(time.Millisecond),
+			)
+		case <-time.After(15 * time.Second):
+			ls.config.Logger.Warn(
+				"timed out waiting for database worker pool shutdown",
+				"elapsed", time.Since(poolStart).Round(time.Millisecond),
+			)
+		}
 	}
 
 	// Note: We don't close the database here because LedgerState doesn't own it.
