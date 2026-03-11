@@ -1,5 +1,41 @@
 # Release Notes
 
+## v0.23.1 (March 11, 2026)
+
+**Title:** Patch updates and stability tweaks
+
+**Date:** March 11, 2026
+
+**Version:** v0.23.1
+
+Hi folks! Here’s what we shipped in v0.23.1.
+
+### ✨ What's New
+
+```json
+{
+  "✨ What's New": [
+    "The project now includes a complete set of release notes for version 0.23.0 so it’s easier to understand what changed in that release. Specifically, detailed v0.23.0 notes were added to `RELEASE_NOTES.md` to provide a single, organized reference."
+  ],
+  "💪 Improvements": [
+    "The CI pipeline was expanded to automate producing a Linux amd64-only Docker image variant, making builds more consistent and repeatable. In particular, CI now builds, tags, pushes, and generates an attestation for the amd64-only Antithesis image variant."
+  ]
+}
+
+```
+
+### 💪 Improvements
+
+### 🔧 Fixes
+
+### 📋 What You Need to Know
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
 ## v0.23.0 (March 10, 2026)
 
 **Title:** Overlay-aware validation and a smoother dev mode
