@@ -12,23 +12,19 @@ Hi folks! Here’s what we shipped in v0.23.1.
 
 ### ✨ What's New
 
-```json
-{
-  "✨ What's New": [
-    "The project now includes a complete set of release notes for v0.23.0 so it’s easier to understand what changed in that release."
-  ],
-  "💪 Improvements": [
-    "The CI pipeline now automates producing a Linux amd64-only Docker image variant, making builds more consistent and repeatable."
-  ]
-}
-
-```
+- **Release notes:** Release notes are easier to scan because `RELEASE_NOTES.md` now includes a complete set of notes for v0.23.0.
 
 ### 💪 Improvements
 
+- **CI (Antithesis image):** Builds are more consistent because CI now builds, tags, pushes, and generates an attestation for a Linux amd64-only Antithesis Docker image variant.
+
 ### 🔧 Fixes
 
+- **No fixes noted:** No user-facing fixes were noted in this release.
+
 ### 📋 What You Need to Know
+
+- **No action required:** You’re all set—there are no required configuration changes for this release.
 
 ### 🙏 Thank You
 
