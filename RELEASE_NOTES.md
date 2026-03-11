@@ -1,6 +1,52 @@
 # Release Notes
 
 
+## v0.24.0 (March 11, 2026)
+
+**Title:** Peer sharing controls and import visibility
+
+**Date:** March 11, 2026
+
+**Version:** v0.24.0
+
+Hi folks! Here’s what we shipped in v0.24.0.
+
+### ✨ What's New
+
+- **Peer sharing controls:** Networking is easier to lock down because you can now explicitly enable or disable peer sharing.
+- **CLI help text:** Running the tool is easier because the root command now includes clearer Short and Long help text.
+- **Import progress reporting:** Large data setup runs feel less like a black box because Mithril and ledger/UTxO imports now emit rate-limited progress updates.
+- **Benchmark suite:** Performance testing is more consistent because the benchmark tooling now includes a baseline and detailed ingestion benchmarks.
+
+### 💪 Improvements
+
+- **Docs:** Evaluating Dingo is safer because the README now includes expanded usage, deployment, and DevNet guidance plus a clear “not for production” warning.
+- **Dev mode:** Local runs are less surprising because dev mode now forces storage mode to API and logs when it overrides your configured value.
+- **Connection manager:** Peer connectivity is more rock-solid because inbound connections are treated as the bidirectional link and expected transition timeouts are handled without tearing down peers.
+- **Storage tuning and logging:** Troubleshooting storage is easier because cache defaults were reset and configured cache sizes are now logged on open, with additional Badger and SQLite tuning.
+- **Era-aware validation:** Cross-era validation is more accurate because protocol parameter extraction is now era-aware and governance-state decoding uses raw-element parsing.
+- **Overlay-aware acceptance:** Transaction validity is more consistent because ledger and mempool validation now uses a temporary UTxO overlay with descendant pruning.
+- **CI and publishing:** Releases are more repeatable because CI and publishing workflows were refreshed with Node.js 24.x and newer pinned Docker and GitHub Actions.
+- **Dependencies:** Compatibility is better because key dependencies were updated, including OpenTelemetry Go and gouroboros.
+- **Go toolchain:** Builds are more up to date because the minimum Go version is now 1.25 and CI was updated to match.
+- **Release notes:** Scanning changes is easier because release notes were expanded for recent versions.
+
+### 🔧 Fixes
+
+- **Connection cleanup tests:** Network tests are less flaky because keepalive timeouts are deterministic and connection cleanup is safer.
+- **Block caching and reconciliation:** Sync is more reliable because block caching now uses fixed-size typed hash keys and reconciliation compares hashes consistently.
+
+### 📋 What You Need to Know
+
+- **Go version:** If you build from source, you’ll need Go 1.25 or newer.
+- **Dev mode:** If you run dev mode, Dingo will force storage mode to the API option.
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
 ## v0.23.1 (March 11, 2026)
 
 **Title:** Clearer release notes and rock-solid Docker publishing
