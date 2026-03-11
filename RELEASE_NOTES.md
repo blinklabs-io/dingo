@@ -20,7 +20,7 @@ Hi folks! Here’s what we shipped in v0.23.1.
 
 ### 🔧 Fixes
 
-- **Fixes:** No user-facing fixes shipped in this patch.
+- **No fixes:** No user-facing fixes shipped in this patch.
 
 ### 📋 What You Need to Know
 
