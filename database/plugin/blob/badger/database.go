@@ -248,6 +248,15 @@ func (db *BlobStoreBadger) open() error {
 	if err := db.init(); err != nil {
 		return err
 	}
+	if db.dataDir != "" {
+		db.logger.Info(
+			"badger blob store opened",
+			"component", "database",
+			"block_cache_size_mb", db.blockCacheSize/(1024*1024),
+			"index_cache_size_mb", db.indexCacheSize/(1024*1024),
+			"data_dir", db.dataDir,
+		)
+	}
 	return nil
 }
 
