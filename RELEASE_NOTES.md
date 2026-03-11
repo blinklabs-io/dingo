@@ -3,7 +3,7 @@
 
 ## v0.24.0 (March 11, 2026)
 
-**Title:** Release updates
+**Title:** Peer sharing controls and import visibility
 
 **Date:** March 11, 2026
 
