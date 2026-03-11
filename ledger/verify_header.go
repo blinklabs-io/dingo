@@ -343,9 +343,11 @@ func (ls *LedgerState) advanceEpochCache() error {
 	}
 	// Verify the base epoch we used for computation is still the cache
 	// tail. A concurrent rollback could have pruned the cache, making
-	// our computed newEpoch stale.
+	// our computed newEpoch stale (e.g. after a hard fork or rollback).
 	if lastCached.EpochId != lastEpoch.EpochId ||
-		lastCached.StartSlot != lastEpoch.StartSlot {
+		lastCached.StartSlot != lastEpoch.StartSlot ||
+		lastCached.LengthInSlots != lastEpoch.LengthInSlots ||
+		!bytes.Equal(lastCached.Nonce, lastEpoch.Nonce) {
 		ls.Unlock()
 		return nil
 	}
