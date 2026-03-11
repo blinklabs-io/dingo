@@ -15,10 +15,10 @@ Hi folks! Here’s what we shipped in v0.23.1.
 ```json
 {
   "✨ What's New": [
-    "The project now includes a complete set of release notes for version 0.23.0 so it’s easier to understand what changed in that release. Specifically, detailed v0.23.0 notes were added to `RELEASE_NOTES.md` to provide a single, organized reference."
+    "The project now includes a complete set of release notes for v0.23.0 so it’s easier to understand what changed in that release."
   ],
   "💪 Improvements": [
-    "The CI pipeline was expanded to automate producing a Linux amd64-only Docker image variant, making builds more consistent and repeatable. In particular, CI now builds, tags, pushes, and generates an attestation for the amd64-only Antithesis image variant."
+    "The CI pipeline now automates producing a Linux amd64-only Docker image variant, making builds more consistent and repeatable."
   ]
 }
 
