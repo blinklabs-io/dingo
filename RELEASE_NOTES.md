@@ -13,28 +13,28 @@ Hi folks! Here’s what we shipped in v0.24.0.
 
 ### ✨ What's New
 
-- **Peer sharing controls:** You can now control whether your node shares peers, which makes it easier to run in environments with strict networking rules.
-- **CLI help text:** You now get clearer, more guided command-line help so it’s easier to understand how to run the tool and what each mode does.
-- **Import progress reporting:** You can now track long-running data setup steps more easily with progress updates that make large imports feel less like a black box.
-- **Benchmark suite:** You can now measure performance more consistently and spot regressions earlier when evaluating ingestion and storage behavior.
+- **Peer sharing controls:** Networking is easier to lock down because you can now explicitly enable or disable peer sharing.
+- **CLI help text:** Running the tool is easier because the root command now includes clearer Short and Long help text.
+- **Import progress reporting:** Large data setup runs feel less like a black box because Mithril and ledger/UTxO imports now emit rate-limited progress updates.
+- **Benchmark suite:** Performance testing is more consistent because the benchmark tooling now includes a baseline and detailed ingestion benchmarks.
 
 ### 💪 Improvements
 
-- **Docs:** Documentation is clearer and safer to follow, so it’s easier to evaluate the project without accidentally treating it as production-ready.
-- **Dev mode:** Development runs behave more predictably, reducing confusion when local settings don’t match what the system actually supports.
-- **Connection manager:** Connections are more rock-solid and logs are less noisy, so transient network edge cases are less likely to look like failures.
-- **Storage tuning and logging:** Storage behavior is more transparent and better tuned out of the box, which helps with troubleshooting and performance tuning.
-- **Era-aware validation:** Validation and ingestion are more accurate across eras and more informative during big imports, reducing surprises when moving between protocol versions.
-- **Overlay-aware acceptance:** Transaction acceptance is more consistent when recent changes haven’t been fully committed yet, which helps avoid confusing “valid vs invalid” flips during active processing.
-- **CI and publishing:** Build and publish automation is more up to date and repeatable, which helps keep releases reliable.
-- **Dependencies:** Project dependencies are current, which improves compatibility with newer environments and upstream fixes.
-- **Go toolchain:** The toolchain now targets a newer Go baseline so builds and CI better match modern Go ecosystems.
-- **Release notes:** Release documentation is more complete, so it’s easier to understand what changed between versions.
+- **Docs:** Evaluating Dingo is safer because the README now includes expanded usage, deployment, and DevNet guidance plus a clear “not for production” warning.
+- **Dev mode:** Local runs are less surprising because dev mode now forces storage mode to API and logs when it overrides your configured value.
+- **Connection manager:** Peer connectivity is more rock-solid because inbound connections are treated as the bidirectional link and expected transition timeouts are handled without tearing down peers.
+- **Storage tuning and logging:** Troubleshooting storage is easier because cache defaults were reset and configured cache sizes are now logged on open, with additional Badger and SQLite tuning.
+- **Era-aware validation:** Cross-era validation is more accurate because protocol parameter extraction is now era-aware and governance-state decoding uses raw-element parsing.
+- **Overlay-aware acceptance:** Transaction validity is more consistent because ledger and mempool validation now uses a temporary UTxO overlay with descendant pruning.
+- **CI and publishing:** Releases are more repeatable because CI and publishing workflows were refreshed with Node.js 24.x and newer pinned Docker and GitHub Actions.
+- **Dependencies:** Compatibility is better because key dependencies were updated, including OpenTelemetry Go and gouroboros.
+- **Go toolchain:** Builds are more up to date because the minimum Go version is now 1.25 and CI was updated to match.
+- **Release notes:** Scanning changes is easier because release notes were expanded for recent versions.
 
 ### 🔧 Fixes
 
-- **Connection cleanup tests:** Network-related tests are less flaky and shutdown behavior is safer, reducing false failures in CI and local runs.
-- **Block caching and reconciliation:** Block handling is more reliable under caching and reconciliation, which helps avoid subtle mismatches during synchronization.
+- **Connection cleanup tests:** Network tests are less flaky because keepalive timeouts are deterministic and connection cleanup is safer.
+- **Block caching and reconciliation:** Sync is more reliable because block caching now uses fixed-size typed hash keys and reconciliation compares hashes consistently.
 
 ### 📋 What You Need to Know
 
