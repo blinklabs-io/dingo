@@ -34,6 +34,7 @@ import (
 	"github.com/blinklabs-io/dingo/ledger/forging"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/cbor"
+	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/byron"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
@@ -44,6 +45,10 @@ const (
 	// Max number of blocks to fetch in a single blockfetch call
 	// This prevents us exceeding the configured recv queue size in the block-fetch protocol
 	blockfetchBatchSize = 500
+
+	// Number of received blockfetch blocks to buffer before committing them.
+	// Keep this small so downstream iterators still see fresh blocks promptly.
+	blockfetchCommitBatchSize = 8
 
 	// Default/fallback slot threshold for blockfetch batches
 	blockfetchBatchSlotThresholdDefault = 2500 * 20
@@ -828,13 +833,10 @@ func (ls *LedgerState) tryResolveFork(
 
 //nolint:unparam
 func (ls *LedgerState) handleEventBlockfetchBlock(e BlockfetchEvent) error {
-	// Process each block immediately as it arrives rather than
-	// buffering until BatchDone. This ensures blocks appear on the
-	// chain promptly, allowing server-side chain iterators (serving
-	// downstream peers via ChainSync) to deliver blocks without
-	// waiting for the entire blockfetch batch to complete. Without
-	// this, a 500-block batch can take 10+ seconds to receive,
-	// exceeding the downstream peer's ChainSync idle timeout.
+	// Process blocks in small commit batches so they appear on the
+	// chain promptly without paying a full blob transaction cost for
+	// every single block. We still flush well before BatchDone to
+	// avoid downstream ChainSync idle timeouts.
 
 	// Verify block header cryptographic proofs (VRF, KES).
 	// Skip during historical sync (validationEnabled=false) because
@@ -847,24 +849,59 @@ func (ls *LedgerState) handleEventBlockfetchBlock(e BlockfetchEvent) error {
 			)
 		}
 	}
-	// Add block to chain with its own transaction so it becomes
-	// visible to iterators immediately after commit.
-	var addBlockErr error
+	ls.pendingBlockfetchEvents = append(ls.pendingBlockfetchEvents, e)
+	if len(ls.pendingBlockfetchEvents) >= blockfetchCommitBatchSize {
+		if err := ls.flushPendingBlockfetchBlocks(); err != nil {
+			return err
+		}
+	}
+	// Reset timeout timer since we received a block
+	if ls.chainsyncBlockfetchTimeoutTimer != nil {
+		ls.chainsyncBlockfetchTimeoutTimer.Reset(blockfetchBusyTimeout)
+	}
+	return nil
+}
+
+func (ls *LedgerState) flushPendingBlockfetchBlocks() error {
+	if len(ls.pendingBlockfetchEvents) == 0 {
+		return nil
+	}
+	pending := slices.Clone(ls.pendingBlockfetchEvents)
+	ls.pendingBlockfetchEvents = ls.pendingBlockfetchEvents[:0]
+	blocks := make([]gledger.Block, 0, len(pending))
+	for _, pendingEvent := range pending {
+		blocks = append(blocks, pendingEvent.Block)
+	}
+	if err := ls.chain.AddBlocks(blocks); err == nil {
+		ls.Lock()
+		for _, pendingEvent := range pending {
+			ls.checkSlotBattle(pendingEvent, nil)
+		}
+		ls.Unlock()
+		return nil
+	}
+	addBlockErrs := make([]error, len(pending))
 	txn := ls.db.BlobTxn(true)
 	if err := txn.Do(func(txn *database.Txn) error {
-		addBlockErr = ls.chain.AddBlock(e.Block, txn)
-		if addBlockErr != nil {
-			if !errors.As(addBlockErr, &chain.BlockNotFitChainTipError{}) &&
-				!errors.As(addBlockErr, &chain.BlockNotMatchHeaderError{}) {
-				return fmt.Errorf("add chain block: %w", addBlockErr)
+		for idx, pendingEvent := range pending {
+			addBlockErrs[idx] = ls.chain.AddBlock(pendingEvent.Block, txn)
+			if addBlockErrs[idx] == nil {
+				continue
+			}
+			if !errors.As(addBlockErrs[idx], &chain.BlockNotFitChainTipError{}) &&
+				!errors.As(addBlockErrs[idx], &chain.BlockNotMatchHeaderError{}) {
+				return fmt.Errorf(
+					"add chain block: %w",
+					addBlockErrs[idx],
+				)
 			}
 			ls.config.Logger.Warn(
 				fmt.Sprintf(
 					"ignoring blockfetch block: %s",
-					addBlockErr,
+					addBlockErrs[idx],
 				),
 			)
-			if errors.As(addBlockErr, &chain.BlockNotMatchHeaderError{}) {
+			if errors.As(addBlockErrs[idx], &chain.BlockNotMatchHeaderError{}) {
 				ls.chain.ClearHeaders()
 			}
 		}
@@ -872,20 +909,12 @@ func (ls *LedgerState) handleEventBlockfetchBlock(e BlockfetchEvent) error {
 	}); err != nil {
 		return fmt.Errorf("failed processing block event: %w", err)
 	}
-	// Slot-battle check after commit — keeps ls.Lock() outside
-	// any open transaction, preserving consistent lock ordering.
 	ls.Lock()
-	ls.checkSlotBattle(e, addBlockErr)
-	ls.Unlock()
-	// Notify chain iterators now that the transaction has committed
-	// and the block is visible to readers. The notification inside
-	// AddBlock fires before commit, so iterators that wake up from
-	// that signal may not yet see the block.
-	ls.chain.NotifyIterators()
-	// Reset timeout timer since we received a block
-	if ls.chainsyncBlockfetchTimeoutTimer != nil {
-		ls.chainsyncBlockfetchTimeoutTimer.Reset(blockfetchBusyTimeout)
+	for idx, pendingEvent := range pending {
+		ls.checkSlotBattle(pendingEvent, addBlockErrs[idx])
 	}
+	ls.Unlock()
+	ls.chain.NotifyIterators()
 	return nil
 }
 
@@ -1881,6 +1910,7 @@ func (ls *LedgerState) blockfetchRequestRangeCleanup() {
 		close(ls.chainsyncBlockfetchReadyChan)
 		ls.chainsyncBlockfetchReadyChan = nil
 	}
+	ls.pendingBlockfetchEvents = ls.pendingBlockfetchEvents[:0]
 }
 
 func (ls *LedgerState) handleEventBlockfetchBatchDone(e BlockfetchEvent) error {
@@ -1890,8 +1920,9 @@ func (ls *LedgerState) handleEventBlockfetchBatchDone(e BlockfetchEvent) error {
 		ls.chainsyncBlockfetchTimeoutTimer = nil
 	}
 	ls.chainsyncBlockfetchTimerGeneration++
-	// Blocks are already processed incrementally in handleEventBlockfetchBlock,
-	// so no batch processing is needed here.
+	if err := ls.flushPendingBlockfetchBlocks(); err != nil {
+		return err
+	}
 	// Continue fetching as long as there are queued headers
 	remainingHeaders := ls.chain.HeaderCount()
 	ls.config.Logger.Debug(

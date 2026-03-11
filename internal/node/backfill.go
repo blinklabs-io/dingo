@@ -649,7 +649,9 @@ func (b *Backfill) Run(ctx context.Context) error {
 		var blockTxCount int
 
 		parsedBlock, parseErr := gledger.NewBlockFromCbor(
-			blk.BlockType, blk.Cbor,
+			blk.BlockType,
+			blk.Cbor,
+			lcommon.VerifyConfig{SkipBodyHashValidation: true},
 		)
 		if parseErr != nil {
 			b.logger.Warn(
