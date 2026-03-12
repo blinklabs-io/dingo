@@ -1,6 +1,36 @@
 # Release Notes
 
 
+## v0.25.0 (March 12, 2026)
+
+**Title:** Updates and refinements
+
+**Date:** March 12, 2026
+
+**Version:** v0.25.0
+
+Hi folks! Here’s what we shipped in v0.25.0.
+
+```json
+{
+  "✨ What's New": [
+    "Your node can now verify the chain from a trusted, immutable replay path, which improves confidence when starting up or recovering. Under the hood, this adds a trusted immutable replay pipeline plus micro-batched BlockFetch commits, along with supporting ledger refactors to keep state transitions consistent."
+  ],
+  "💪 Improvements": [
+    "Network connections that are strictly between a node and its local client are now tracked separately so peer limits and metrics better reflect real peer connectivity. Technically, node-to-client (NtC) connections are explicitly marked and excluded from peer-limit accounting/metrics and node-to-node (N2N) handling, while per-source active-peer quotas are relaxed but the global active-peer cap remains enforced."
+  ],
+  "📋 What You Need to Know": [
+    "If you rely on peer-count metrics or peer-limit tuning, expect node-to-client connections to no longer be included in those counts. Concretely, peer metrics/limits now exclude NtC connections and only apply to N2N peers, with per-source quotas loosened but the global active-peer cap still enforced."
+  ],
+  "🔧 Fixes": [
+    "Docker deployments now pick up the correct Mithril genesis verification key automatically when you don’t provide one, reducing configuration mistakes. Specifically, the entrypoint auto-loads the Mithril genesis verification key from a network-specific file whenever an explicit key is not set."
+  ]
+}
+
+```
+
+---
+
 ## v0.24.1 (March 12, 2026)
 
 **Title:** Stability and polish
