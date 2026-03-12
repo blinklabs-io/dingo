@@ -1341,10 +1341,53 @@ func TestPeerGovernor_PeerTargets_DefaultValues(t *testing.T) {
 	assert.Equal(t, 50, pg.config.TargetNumberOfEstablishedPeers)
 	assert.Equal(t, 20, pg.config.TargetNumberOfActivePeers)
 	assert.Equal(t, 60, pg.config.TargetNumberOfRootPeers)
-	// Per-source quotas
-	assert.Equal(t, 3, pg.config.ActivePeersTopologyQuota)
-	assert.Equal(t, 12, pg.config.ActivePeersGossipQuota)
-	assert.Equal(t, 5, pg.config.ActivePeersLedgerQuota)
+	// Per-source quotas (ceilings, not reservations)
+	assert.Equal(t, 10, pg.config.ActivePeersTopologyQuota)
+	assert.Equal(t, 10, pg.config.ActivePeersGossipQuota)
+	assert.Equal(t, 10, pg.config.ActivePeersLedgerQuota)
+}
+
+// TestPeerGovernor_QuotaSumExceedsTarget verifies that the global
+// TargetNumberOfActivePeers caps total hot peers even when per-source
+// quotas sum to more than the target (10+10+10=30 > 20).
+func TestPeerGovernor_QuotaSumExceedsTarget(t *testing.T) {
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+	})
+
+	// Simulate 30 hot peers across 3 sources (10 each)
+	for i := 0; i < 10; i++ {
+		pg.peers = append(pg.peers, &Peer{
+			Address: fmt.Sprintf("gossip-%d:3001", i),
+			Source:  PeerSourceP2PGossip,
+			State:   PeerStateHot,
+		})
+		pg.peers = append(pg.peers, &Peer{
+			Address: fmt.Sprintf("ledger-%d:3001", i),
+			Source:  PeerSourceP2PLedger,
+			State:   PeerStateHot,
+		})
+		pg.peers = append(pg.peers, &Peer{
+			Address: fmt.Sprintf("topo-%d:3001", i),
+			Source:  PeerSourceTopologyPublicRoot,
+			State:   PeerStateHot,
+		})
+	}
+
+	// enforcePeerLimits should demote excess beyond target
+	var removedCount int
+	pg.enforcePeerLimits(&removedCount)
+
+	hotCount := 0
+	for _, p := range pg.peers {
+		if p != nil && p.State == PeerStateHot {
+			hotCount++
+		}
+	}
+	assert.LessOrEqual(
+		t, hotCount, pg.config.TargetNumberOfActivePeers,
+		"total hot peers must not exceed TargetNumberOfActivePeers",
+	)
 }
 
 func TestPeerGovernor_PeerTargets_CustomValues(t *testing.T) {

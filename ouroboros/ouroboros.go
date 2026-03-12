@@ -459,6 +459,11 @@ func (o *Ouroboros) HandleInboundConnEvent(evt event.Event) {
 		)
 		return
 	}
+	// Skip node-to-client connections — N2N mini-protocols don't
+	// apply to local client connections.
+	if e.IsNtC {
+		return
+	}
 	connId := e.ConnectionId
 
 	// Look up the connection to check its negotiated diffusion mode

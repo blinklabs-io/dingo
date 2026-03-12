@@ -30,6 +30,7 @@ type InboundConnectionEvent struct {
 	ConnectionId ouroboros.ConnectionId
 	LocalAddr    net.Addr
 	RemoteAddr   net.Addr
+	IsNtC        bool // true for node-to-client (local) connections
 }
 
 type ConnectionClosedEvent struct {

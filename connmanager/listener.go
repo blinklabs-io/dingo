@@ -173,7 +173,70 @@ func (c *ConnectionManager) startListener(
 			}
 			// Successful accept - reset consecutive error count
 			consecutiveErrors = 0
-			// Atomically check and reserve an inbound slot before any further processing
+
+			// NtC (node-to-client) connections bypass the inbound
+			// slot budget and per-IP rate limiting — they are local
+			// clients (wallets, tools), not network peers.
+			if l.UseNtC {
+				// Wrap UNIX connections
+				if uConn, ok := conn.(*net.UnixConn); ok {
+					tmpConn, err := NewUnixConn(uConn)
+					if err != nil {
+						c.config.Logger.Error(
+							fmt.Sprintf("listener: accept failed: %s", err),
+						)
+						_ = conn.Close()
+						continue
+					}
+					conn = tmpConn
+				}
+				c.config.Logger.Info(
+					fmt.Sprintf(
+						"listener: accepted NtC connection from %s",
+						conn.RemoteAddr(),
+					),
+				)
+				connOpts := append(
+					defaultConnOpts,
+					ouroboros.WithConnection(conn),
+				)
+				oConn, err := ouroboros.NewConnection(connOpts...)
+				if err != nil {
+					c.config.Logger.Error(
+						fmt.Sprintf(
+							"listener: failed to setup NtC connection: %s",
+							err,
+						),
+					)
+					conn.Close()
+					continue
+				}
+				peerAddr := "unknown"
+				if conn.RemoteAddr() != nil {
+					peerAddr = conn.RemoteAddr().String()
+				}
+				c.addNtCConnectionWithIPKey(
+					oConn, true, peerAddr, "",
+				)
+				// Generate event
+				if c.config.EventBus != nil {
+					c.config.EventBus.Publish(
+						InboundConnectionEventType,
+						event.NewEvent(
+							InboundConnectionEventType,
+							InboundConnectionEvent{
+								ConnectionId: oConn.Id(),
+								LocalAddr:    conn.LocalAddr(),
+								RemoteAddr:   conn.RemoteAddr(),
+								IsNtC:        true,
+							},
+						),
+					)
+				}
+				continue
+			}
+
+			// N2N path: reserve an inbound slot before further processing
 			if !c.tryReserveInboundSlot() {
 				c.config.Logger.Warn(
 					fmt.Sprintf(
@@ -260,6 +323,7 @@ func (c *ConnectionManager) startListener(
 							ConnectionId: oConn.Id(),
 							LocalAddr:    conn.LocalAddr(),
 							RemoteAddr:   conn.RemoteAddr(),
+							IsNtC:        l.UseNtC,
 						},
 					),
 				)
