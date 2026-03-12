@@ -1,6 +1,32 @@
 # Release Notes
 
 
+## v0.24.1 (March 12, 2026)
+
+**Title:** Maintenance fixes and polish
+
+**Date:** March 12, 2026
+
+**Version:** v0.24.1
+
+Hi folks! Here’s what we shipped in v0.24.1.
+
+```json
+{
+  "💪 Improvements": [
+    "Rollbacks are now safer and more predictable when the chain is short, and nodes can scan farther back for missing blocks when needed. Specifically, deep rollbacks are only permitted once the chain length exceeds a configurable threshold (K), and the maximum block fetch slot range has been increased to 129,600 slots.",
+    "Node and ledger shutdowns are now easier to observe and less likely to hang during stop or restart operations. The shutdown paths now include timing and progress logs plus explicit timeouts, so you can see shutdown duration and avoid indefinite waits.",
+    "Epoch cache checks now catch more subtle inconsistencies so issues can be detected earlier and diagnosed faster. The consistency validation now compares `LengthInSlots` and `Nonce` in addition to `EpochId` and `StartSlot`."
+  ],
+  "📋 What You Need to Know": [
+    "If you operate tooling that relies on aggressive rollback behavior during early chain growth, be aware that deep rollbacks may now be deferred until the chain passes the K threshold. This behavior is now gated by chain length (K), so validate any rollback-related assumptions in your automation and monitoring."
+  ]
+}
+
+```
+
+---
+
 ## v0.24.0 (March 11, 2026)
 
 **Title:** Peer sharing controls and import visibility
