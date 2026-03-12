@@ -13,7 +13,7 @@ Hi folks! Here’s what we shipped in v0.24.1.
 
 ### 💪 Improvements
 
-- **Deeper rollback scanning:** Syncing is more rock-solid because deep rollbacks are only enabled when needed, and block fetch can scan a wider window to find the data it needs.
+- **Deeper rollback scanning:** Sync is more rock-solid because deep rollbacks are only enabled when needed, and block fetch can scan a wider window to find the data it needs.
 
 ### 🔧 Fixes
 
