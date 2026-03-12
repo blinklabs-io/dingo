@@ -11,21 +11,22 @@
 
 Hi folks! Here’s what we shipped in v0.24.1.
 
-```json
-{
-  "💪 Improvements": [
-    "You can now roll back farther only when it’s actually needed, and sync operations can scan a wider window to find the data they need."
-  ],
-  "📋 What You Need to Know": [
-    "Release notes for v0.24.0 are now available so you can quickly understand what changed and why it matters."
-  ],
-  "🔧 Fixes": [
-    "Node and ledger shutdowns are less likely to hang, and you can now see how long shutdown takes when it does occur.",
-    "Epoch cache validation is stricter so inconsistencies are caught earlier and diagnosed more easily."
-  ]
-}
+### 💪 Improvements
 
-```
+- **Deeper rollback scanning:** Syncing is smoother because deep rollbacks are only enabled when needed, and block fetch can scan a wider window to find the data it needs.
+
+### 🔧 Fixes
+
+- **Shutdown reliability:** Shutdowns are more rock-solid because node and ledger shutdown paths are less likely to hang, and logs now show how long shutdown took.
+- **Epoch cache consistency checks:** Diagnosing cache issues is easier because epoch cache validation is stricter and catches inconsistencies earlier.
+
+### 📋 What You Need to Know
+
+- **Release notes:** Release notes are easier to scan because v0.24.0 notes are now included in `RELEASE_NOTES.md`.
+
+### 🙏 Thank You
+
+Thank you for trying!
 
 ---
 
