@@ -527,10 +527,12 @@ func (c *Chain) rollbackLocked(
 	// Reject rollbacks that exceed the security parameter K on
 	// the persistent chain. Ephemeral (fork-tracking) chains are
 	// not subject to this limit. The check is skipped when
-	// securityParam is 0, which means the ledger has not been
-	// initialized yet.
+	// securityParam is 0 (ledger not yet initialized) or when
+	// the chain is shorter than K blocks (initial sync), since
+	// the entire chain can be safely replaced during sync.
 	securityParam := c.manager.securityParam
 	if c.persistent && securityParam > 0 &&
+		c.tipBlockIndex >= uint64(securityParam) && //nolint:gosec
 		forkDepth > uint64(securityParam) { //nolint:gosec
 		slog.Default().Warn(
 			"rejecting rollback that exceeds "+
