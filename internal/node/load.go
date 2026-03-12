@@ -26,11 +26,11 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/immutable"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
-	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/ledger"
 	gcbor "github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	fxcbor "github.com/fxamacker/cbor/v2"
 )
 
@@ -143,12 +143,11 @@ func LoadWithDB(
 	defer closeDB()
 	// Enable bulk-load optimizations if the metadata store supports them
 	defer WithBulkLoadPragmas(db, logger)()
-	// Load chain
-	eventBus := event.NewEventBus(nil, logger)
-	defer eventBus.Stop()
+	// Immutable load replays trusted block batches directly into the ledger, so
+	// it does not need the event-driven reread path here.
 	cm, err := chain.NewManager(
 		db,
-		eventBus,
+		nil,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to load chain manager: %w", err)
@@ -160,12 +159,13 @@ func LoadWithDB(
 	// Load state
 	ls, err := ledger.NewLedgerState(
 		ledger.LedgerStateConfig{
-			Database:           db,
-			ChainManager:       cm,
-			Logger:             logger,
-			CardanoNodeConfig:  nodeCfg,
-			EventBus:           eventBus,
-			ValidateHistorical: cfg.ValidateHistorical,
+			Database:              db,
+			ChainManager:          cm,
+			Logger:                logger,
+			CardanoNodeConfig:     nodeCfg,
+			ValidateHistorical:    cfg.ValidateHistorical,
+			TrustedReplay:         true,
+			ManualBlockProcessing: true,
 			DatabaseWorkerPoolConfig: ledger.DatabaseWorkerPoolConfig{
 				WorkerPoolSize: cfg.DatabaseWorkers,
 				TaskQueueSize:  cfg.DatabaseQueueSize,
@@ -181,59 +181,42 @@ func LoadWithDB(
 	}
 	defer ls.Close()
 
-	blocksCopied, immutableTipSlot, err := copyBlocks(
-		ctx, logger, immutableDir, c,
+	replayCtx, cancelReplay := context.WithCancel(ctx)
+	defer cancelReplay()
+	replayBatches := make(chan []gledger.Block, 1)
+	replayErrCh := make(chan error, 1)
+	go func() {
+		err := ls.ProcessTrustedBlockBatches(
+			replayCtx,
+			replayBatches,
+		)
+		if err != nil && !errors.Is(err, context.Canceled) {
+			// Cancel immediately so copyBlocksDirect and the
+			// forwarding goroutine inside ProcessTrustedBlockBatches
+			// unblock via ctx.Done() instead of deadlocking.
+			cancelReplay()
+		}
+		replayErrCh <- err
+	}()
+
+	blocksCopied, immutableTipSlot, err := copyBlocksDirect(
+		replayCtx, logger, immutableDir, c, replayBatches,
 	)
+	close(replayBatches)
 	if err != nil {
+		cancelReplay()
+		<-replayErrCh
 		return fmt.Errorf("loading blocks: %w", err)
 	}
-
-	// Wait for ledger to catch up with tight polling
-	ticker := time.NewTicker(500 * time.Millisecond)
-	defer ticker.Stop()
-	catchupTimeout := 30 * time.Minute
-	if cfg.LedgerCatchupTimeout != "" {
-		if parsed, pErr := time.ParseDuration(
-			cfg.LedgerCatchupTimeout,
-		); pErr == nil {
-			catchupTimeout = parsed
-		} else {
-			logger.Warn(
-				"invalid ledgerCatchupTimeout, using default",
-				"value", cfg.LedgerCatchupTimeout,
-				"error", pErr,
-			)
-		}
+	if err := <-replayErrCh; err != nil && !errors.Is(err, context.Canceled) {
+		return fmt.Errorf("processing trusted block batches: %w", err)
 	}
-	timeout := time.After(catchupTimeout)
-	for {
-		select {
-		case <-ctx.Done():
-			return fmt.Errorf(
-				"cancelled waiting for ledger to catch up"+
-					" (tip slot %d, target slot %d): %w",
-				ls.Tip().Point.Slot,
-				immutableTipSlot,
-				ctx.Err(),
-			)
-		case <-ticker.C:
-			tip := ls.Tip()
-			if tip.Point.Slot >= immutableTipSlot {
-				logger.Info(
-					"finished processing blocks from immutable DB",
-					"blocks_copied", blocksCopied,
-				)
-				return nil
-			}
-		case <-timeout:
-			return fmt.Errorf(
-				"timed out waiting for ledger to catch up"+
-					" (tip slot %d, target slot %d)",
-				ls.Tip().Point.Slot,
-				immutableTipSlot,
-			)
-		}
-	}
+	logger.Info(
+		"finished processing blocks from immutable DB",
+		"blocks_copied", blocksCopied,
+		"tip_slot", immutableTipSlot,
+	)
+	return nil
 }
 
 // LoadBlobsResult contains the result of a blob-only ImmutableDB load.
@@ -291,21 +274,19 @@ func LoadBlobsWithDB(
 	}, nil
 }
 
-// copyBlocks reads blocks from an ImmutableDB directory and writes them to
-// the chain's blob store. Returns the number of blocks copied and the
-// immutable tip slot.
-func copyBlocks(
+// copyBlocksDirect reads immutable blocks once, persists them to the chain,
+// and streams the decoded batches to the trusted ledger replay path.
+func copyBlocksDirect(
 	ctx context.Context,
 	logger *slog.Logger,
 	immutableDir string,
 	c *chain.Chain,
+	replayBatches chan<- []gledger.Block,
 ) (int, uint64, error) {
-	// Open immutable DB
 	immutable, err := immutable.New(immutableDir)
 	if err != nil {
 		return 0, 0, fmt.Errorf("failed to read immutable DB: %w", err)
 	}
-	// Record immutable DB tip
 	immutableTip, err := immutable.GetTip()
 	if err != nil {
 		return 0, 0, fmt.Errorf("failed to read immutable DB tip: %w", err)
@@ -313,7 +294,6 @@ func copyBlocks(
 	if immutableTip == nil {
 		return 0, 0, errors.New("immutable DB tip is nil")
 	}
-	// Copy all blocks
 	logger.Info("copying blocks from immutable DB")
 	chainTip := c.Tip()
 	iter, err := immutable.BlocksFromPoint(chainTip.Point)
@@ -327,8 +307,11 @@ func copyBlocks(
 	var blocksCopied int
 	startTime := time.Now()
 	lastProgressLog := time.Time{}
-	lastProgressSlot := chainTip.Point.Slot
+	var lastProgressSlot uint64
 	blockBatch := make([]gledger.Block, 0, loadBlockBatchSize)
+	verifyCfg := lcommon.VerifyConfig{
+		SkipBodyHashValidation: true,
+	}
 	for {
 		for {
 			next, err := iter.Next()
@@ -337,17 +320,19 @@ func copyBlocks(
 					"reading next block: %w", err,
 				)
 			}
-			// No more blocks
 			if next == nil {
 				break
 			}
-			tmpBlock, err := gledger.NewBlockFromCbor(next.Type, next.Cbor)
+			tmpBlock, err := gledger.NewBlockFromCbor(
+				next.Type,
+				next.Cbor,
+				verifyCfg,
+			)
 			if err != nil {
 				return blocksCopied, immutableTip.Slot, fmt.Errorf(
 					"decoding block CBOR: %w", err,
 				)
 			}
-			// Skip first block when continuing a load operation
 			if blocksCopied == 0 &&
 				tmpBlock.SlotNumber() == chainTip.Point.Slot {
 				continue
@@ -360,17 +345,26 @@ func copyBlocks(
 		if len(blockBatch) == 0 {
 			break
 		}
-		// Add block batch to chain
 		if err := c.AddBlocks(blockBatch); err != nil {
 			return blocksCopied, immutableTip.Slot, fmt.Errorf(
 				"failed to import block: %w",
 				err,
 			)
 		}
-		blocksCopied += len(blockBatch)
-		if tmpLen := len(blockBatch); tmpLen > 0 {
-			lastProgressSlot = blockBatch[tmpLen-1].SlotNumber()
+		replayBatch := append(
+			make([]gledger.Block, 0, len(blockBatch)),
+			blockBatch...,
+		)
+		select {
+		case replayBatches <- replayBatch:
+		case <-ctx.Done():
+			return blocksCopied, immutableTip.Slot, fmt.Errorf(
+				"loading blocks: %w",
+				ctx.Err(),
+			)
 		}
+		blocksCopied += len(blockBatch)
+		lastProgressSlot = replayBatch[len(replayBatch)-1].SlotNumber()
 		blockBatch = blockBatch[:0]
 		maybeLogBlockCopyProgress(
 			logger,
@@ -381,16 +375,11 @@ func copyBlocks(
 			startTime,
 			&lastProgressLog,
 		)
-		// Check for cancellation after each batch
 		if err := ctx.Err(); err != nil {
 			return blocksCopied, immutableTip.Slot,
 				fmt.Errorf("loading blocks: %w", err)
 		}
 	}
-	logger.Info(
-		"finished copying blocks from immutable DB",
-		"blocks_copied", blocksCopied,
-	)
 	return blocksCopied, immutableTip.Slot, nil
 }
 
