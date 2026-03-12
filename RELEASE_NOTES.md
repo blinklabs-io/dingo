@@ -1,6 +1,38 @@
 # Release Notes
 
 
+## v0.25.0 (March 12, 2026)
+
+**Title:** Trusted replay verification and peer counts
+
+**Date:** March 12, 2026
+
+**Version:** v0.25.0
+
+Hi folks! Here’s what we shipped in v0.25.0.
+
+### ✨ What's New
+
+- **Trusted chain verification:** Startup and recovery runs are more rock-solid because your node can now verify the chain from a trusted, immutable replay path.
+
+### 💪 Improvements
+
+- **Peer metrics accuracy:** Peer limits and metrics are more accurate because local client connections are now tracked separately.
+
+### 🔧 Fixes
+
+- **Mithril key defaults (Docker):** Docker deployments are less error-prone because the correct Mithril genesis verification key is now picked up automatically when you don’t provide one.
+
+### 📋 What You Need to Know
+
+- **Peer counts:** If you rely on peer-count metrics or peer-limit tuning, expect local client connections to no longer be included in those counts.
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
 ## v0.24.1 (March 12, 2026)
 
 **Title:** Stability and polish
