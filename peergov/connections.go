@@ -436,6 +436,11 @@ func (p *PeerGovernor) handleInboundConnectionEvent(evt event.Event) {
 		)
 		return
 	}
+	// Skip node-to-client connections — they are local clients
+	// (wallets, tools), not network peers.
+	if e.IsNtC {
+		return
+	}
 	address := e.RemoteAddr.String()
 	// Resolve address before acquiring lock to avoid blocking DNS
 	normalized := p.resolveAddress(address)

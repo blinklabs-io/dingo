@@ -47,6 +47,7 @@ type connectionInfo struct {
 	conn      *ouroboros.Connection
 	peerAddr  string
 	isInbound bool
+	isNtC     bool   // true for node-to-client (local) connections
 	ipKey     string // rate-limit key (IP or /64 prefix for IPv6)
 }
 
@@ -121,12 +122,14 @@ func NewConnectionManager(cfg ConnectionManagerConfig) *ConnectionManager {
 	return c
 }
 
-// inboundCount returns the current number of inbound connections.
+// inboundCountLocked returns the current number of inbound N2N connections.
+// Node-to-client connections are excluded because they are local clients
+// (wallets, tools) and should not count against the peer connection budget.
 // The caller must hold connectionsMutex.
 func (c *ConnectionManager) inboundCountLocked() int {
 	count := 0
 	for _, info := range c.connections {
-		if info.isInbound {
+		if info.isInbound && !info.isNtC {
 			count++
 		}
 	}
@@ -224,8 +227,13 @@ func (c *ConnectionManager) updateConnectionMetrics() {
 		map[string]*peerConnectionState,
 	) // peerAddr -> connection state
 
-	// Count connections and track peer connectivity in a single pass
+	// Count connections and track peer connectivity in a single pass.
+	// N2C (node-to-client) connections are excluded from peer metrics
+	// because they are local clients, not network peers.
 	for _, info := range c.connections {
+		if info.isNtC {
+			continue
+		}
 		if info.isInbound {
 			incomingCount++
 		} else {
@@ -242,8 +250,11 @@ func (c *ConnectionManager) updateConnectionMetrics() {
 		}
 	}
 
-	// Count full-duplex and prunable connections
+	// Count full-duplex and prunable connections (N2C excluded above)
 	for _, info := range c.connections {
+		if info.isNtC {
+			continue
+		}
 		// Full-duplex: inbound connections that support bidirectional protocols
 		if info.isInbound && info.conn != nil {
 			_, versionData := info.conn.ProtocolVersion()
@@ -397,12 +408,31 @@ func (c *ConnectionManager) AddConnection(
 	isInbound bool,
 	peerAddr string,
 ) {
-	c.addConnectionWithIPKey(conn, isInbound, peerAddr, "")
+	c.addConnectionImpl(conn, isInbound, false, peerAddr, "")
 }
 
 func (c *ConnectionManager) addConnectionWithIPKey(
 	conn *ouroboros.Connection,
 	isInbound bool,
+	peerAddr string,
+	ipKey string,
+) {
+	c.addConnectionImpl(conn, isInbound, false, peerAddr, ipKey)
+}
+
+func (c *ConnectionManager) addNtCConnectionWithIPKey(
+	conn *ouroboros.Connection,
+	isInbound bool,
+	peerAddr string,
+	ipKey string,
+) {
+	c.addConnectionImpl(conn, isInbound, true, peerAddr, ipKey)
+}
+
+func (c *ConnectionManager) addConnectionImpl(
+	conn *ouroboros.Connection,
+	isInbound bool,
+	isNtC bool,
 	peerAddr string,
 	ipKey string,
 ) {
@@ -426,6 +456,7 @@ func (c *ConnectionManager) addConnectionWithIPKey(
 	c.connections[connId] = &connectionInfo{
 		conn:      conn,
 		isInbound: isInbound,
+		isNtC:     isNtC,
 		peerAddr:  peerAddr,
 		ipKey:     ipKey,
 	}

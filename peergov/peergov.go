@@ -42,10 +42,12 @@ const (
 	defaultTargetNumberOfActivePeers      = 20
 	defaultTargetNumberOfRootPeers        = 60
 
-	// Default per-source quotas for active peers
-	defaultActivePeersTopologyQuota = 3
-	defaultActivePeersGossipQuota   = 12
-	defaultActivePeersLedgerQuota   = 5
+	// Default per-source quotas for active peers.
+	// Each quota is a ceiling, not a reservation. The global
+	// TargetNumberOfActivePeers (default 20) still applies.
+	defaultActivePeersTopologyQuota = 10
+	defaultActivePeersGossipQuota   = 10
+	defaultActivePeersLedgerQuota   = 10
 
 	// Default churn configuration
 	defaultGossipChurnInterval     = 5 * time.Minute
