@@ -632,19 +632,6 @@ func isS3NotFound(err error) bool {
 	return errors.As(err, &noSuchKey)
 }
 
-func isS3BucketAlreadyExists(err error) bool {
-	var bucketAlreadyOwned = &s3types.BucketAlreadyOwnedByYou{}
-	if errors.As(err, &bucketAlreadyOwned) {
-		return true
-	}
-
-	var bucketAlreadyExists = &s3types.BucketAlreadyExists{}
-	if errors.As(err, &bucketAlreadyExists) {
-		return true
-	}
-	return false
-}
-
 func (d *BlobStoreS3) listKeys(
 	opts types.BlobIteratorOptions,
 ) ([]string, error) {
@@ -791,18 +778,6 @@ func (d *BlobStoreS3) Start() error {
 	}
 
 	client := s3.NewFromConfig(awsCfg)
-
-	// attempt to create bucket if it doesn't already exist
-	_, err = client.CreateBucket(ctx, &s3.CreateBucketInput{
-		Bucket: aws.String(d.bucket),
-		CreateBucketConfiguration: &s3types.CreateBucketConfiguration{
-			LocationConstraint: s3types.BucketLocationConstraint(d.region),
-		},
-	})
-	if err != nil && !isS3BucketAlreadyExists(err) {
-		cancel()
-		return fmt.Errorf("failed creating s3 bucket: %w", err)
-	}
 
 	d.client = client
 	d.startupCtx = ctx
