@@ -13,7 +13,7 @@ Hi folks! Here’s what we shipped in v0.25.0.
 
 ### ✨ What's New
 
-- **Trusted block replay:** Resuming and validating chain history is more reliable because there’s now a safer, more flexible block replay path.
+- **Trusted block replay:** Resuming and validating chain history is more rock-solid because there’s now a safer, more flexible block replay path.
 
 ### 💪 Improvements
 
