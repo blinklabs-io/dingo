@@ -3,7 +3,7 @@
 
 ## v0.25.0 (March 12, 2026)
 
-**Title:** Updates and refinements
+**Title:** Trusted replay and smarter peer limits
 
 **Date:** March 12, 2026
 
@@ -11,20 +11,25 @@
 
 Hi folks! Here’s what we shipped in v0.25.0.
 
-```json
-{
-  "✨ What's New": [
-    "Added a safer and more flexible block replay path so nodes can resume and validate chain history more reliably."
-  ],
-  "💪 Improvements": [
-    "Improved how node-to-client connections are classified so operational limits and monitoring better reflect real peer-to-peer behavior."
-  ],
-  "📋 What You Need to Know": [
-    "Simplified Mithril setup in containerized deployments by reducing the amount of required configuration at startup."
-  ]
-}
+### ✨ What's New
 
-```
+- **Trusted block replay:** Resuming and validating chain history is more reliable because there’s now a safer, more flexible block replay path.
+
+### 💪 Improvements
+
+- **Node-to-client classification:** Peer limits and monitoring are more accurate because node-to-client connections are now classified separately from node-to-node peers.
+
+### 🔧 Fixes
+
+- **No fixes:** No user-facing fixes shipped in this release.
+
+### 📋 What You Need to Know
+
+- **Mithril Docker setup:** Containerized Mithril setups are simpler because the entrypoint can auto-load the Mithril genesis verification key when you don’t provide one.
+
+### 🙏 Thank You
+
+Thank you for trying!
 
 ---
 
