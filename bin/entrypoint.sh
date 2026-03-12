@@ -23,13 +23,14 @@
 #   - Debug mode with verbose logging
 #
 # Environment variables:
-#   CARDANO_NETWORK       - Named network: mainnet, preprod, preview, devnet (default: preview)
-#   CARDANO_CONFIG        - Path to cardano node config.json (auto-set from network)
-#   CARDANO_DATABASE_PATH - Database storage location (default: /data/db)
-#   DINGO_SOCKET_PATH     - Unix socket path for NtC (default: /ipc/dingo.socket)
-#   DINGO_DEBUG           - Set to any value to enable debug logging and set -x
-#   RESTORE_SNAPSHOT      - Set to any value to bootstrap from Mithril snapshot on first run
-#   GENESIS_VERIFICATION_KEY - Mithril genesis verification key (required when RESTORE_SNAPSHOT is set)
+#   CARDANO_NETWORK               - Named network: mainnet, preprod, preview, devnet (default: preview)
+#   CARDANO_CONFIG                - Path to cardano node config.json (auto-set from network)
+#   CARDANO_DATABASE_PATH         - Database storage location (default: /data/db)
+#   DINGO_SOCKET_PATH             - Unix socket path for NtC (default: /ipc/dingo.socket)
+#   DINGO_DEBUG                   - Set to any value to enable debug logging and set -x
+#   RESTORE_SNAPSHOT              - Set to any value to bootstrap from Mithril snapshot on first run
+#   GENESIS_VERIFICATION_KEY      - Mithril genesis verification key (auto-loaded from bundled config)
+#   GENESIS_VERIFICATION_KEY_PATH - Path to genesis verification key file (default: auto from network)
 
 set -euo pipefail
 
@@ -138,6 +139,19 @@ aggregator_endpoint_for_network() {
     *)       echo "" ;;
   esac
 }
+
+# --------------------------------------------------------------------------- #
+# Auto-load Mithril verification keys from bundled config files
+# --------------------------------------------------------------------------- #
+
+CARDANO_CONFIG_BASE="${CARDANO_CONFIG_BASE:-/opt/cardano/config}"
+GENESIS_VERIFICATION_KEY_PATH="${GENESIS_VERIFICATION_KEY_PATH:-${CARDANO_CONFIG_BASE}/${CARDANO_NETWORK}/genesis.vkey}"
+
+if [[ -z "${GENESIS_VERIFICATION_KEY:-}" ]] && [[ -f "${GENESIS_VERIFICATION_KEY_PATH}" ]]; then
+  GENESIS_VERIFICATION_KEY="$(<"${GENESIS_VERIFICATION_KEY_PATH}")"
+  log "Loaded GENESIS_VERIFICATION_KEY from ${GENESIS_VERIFICATION_KEY_PATH}"
+fi
+export GENESIS_VERIFICATION_KEY="${GENESIS_VERIFICATION_KEY:-}"
 
 # --------------------------------------------------------------------------- #
 # First-run detection and Mithril snapshot bootstrap
