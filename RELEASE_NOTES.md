@@ -14,14 +14,14 @@ Hi folks! Here’s what we shipped in v0.24.1.
 ```json
 {
   "💪 Improvements": [
-    "You can now roll back farther only when it’s actually needed, and sync operations can scan a wider window to find the data they need. Specifically, deep rollbacks are allowed only once the rollback chain length exceeds K, and the maximum block fetch slot range has been increased to 129600 slots."
+    "You can now roll back farther only when it’s actually needed, and sync operations can scan a wider window to find the data they need."
   ],
   "📋 What You Need to Know": [
-    "Release notes for v0.24.0 are now available so you can quickly understand what changed and why it matters. The file RELEASE_NOTES.md has been updated with a detailed entry for version v0.24.0."
+    "Release notes for v0.24.0 are now available so you can quickly understand what changed and why it matters."
   ],
   "🔧 Fixes": [
-    "Node and ledger shutdowns are less likely to hang, and you can now see how long shutdown takes when it does occur. The shutdown paths now include additional timing/progress logs plus explicit timeouts for both node and ledger shutdown flows.",
-    "Epoch cache validation is stricter so inconsistencies are caught earlier and diagnosed more easily. The consistency check now compares LengthInSlots and Nonce in addition to EpochId and StartSlot."
+    "Node and ledger shutdowns are less likely to hang, and you can now see how long shutdown takes when it does occur.",
+    "Epoch cache validation is stricter so inconsistencies are caught earlier and diagnosed more easily."
   ]
 }
 
