@@ -30,9 +30,9 @@ import (
 
 // MaxBlockFetchRange is the maximum slot range allowed for a single block
 // fetch request. This prevents peers from requesting unbounded ranges that
-// would cause the server to iterate the entire chain. The value of 2160
-// corresponds to one mainnet epoch and aligns with the security parameter K.
-const MaxBlockFetchRange = 2160
+// would cause the server to iterate the entire chain. The value of 129600
+// corresponds to the stability window (3k/f) on mainnet (k=2160, f=0.05).
+const MaxBlockFetchRange = 129600
 
 func (o *Ouroboros) blockfetchServerConnOpts() []blockfetch.BlockFetchOptionFunc {
 	return []blockfetch.BlockFetchOptionFunc{
