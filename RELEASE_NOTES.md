@@ -13,11 +13,11 @@ Hi folks! Here’s what we shipped in v0.25.0.
 
 ### ✨ What's New
 
-- **Trusted block replay:** Resuming and validating chain history is more rock-solid because there’s now a safer, more flexible block replay path.
+- **Trusted block replay:** Resuming and validating chain history is more rock-solid because we rolled out a safer, more flexible block replay path.
 
 ### 💪 Improvements
 
-- **Node-to-client classification:** Peer limits and monitoring are more accurate because node-to-client connections are now classified separately from node-to-node peers.
+- **Node-to-client classification:** Peer limits and monitoring are more accurate because we refined how node-to-client connections are classified separately from node-to-node peers.
 
 ### 🔧 Fixes
 
@@ -25,7 +25,7 @@ Hi folks! Here’s what we shipped in v0.25.0.
 
 ### 📋 What You Need to Know
 
-- **Mithril Docker setup:** Containerized Mithril setups are simpler because the entrypoint can auto-load the Mithril genesis verification key when you don’t provide one.
+- **Mithril Docker setup:** Containerized Mithril setups are easy because the entrypoint can auto-load the Mithril genesis verification key when you don’t provide one.
 
 ### 🙏 Thank You
 
