@@ -20,12 +20,16 @@ import (
 	"log/slog"
 	"net"
 	"testing"
+	"time"
 
 	ouroboros_conn "github.com/blinklabs-io/gouroboros/connection"
+	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/protocol/blockfetch"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 
+	"github.com/blinklabs-io/dingo/database/immutable"
 	"github.com/blinklabs-io/dingo/event"
 )
 
@@ -183,4 +187,64 @@ func TestBlockfetchServerRequestRange_ExactlyAtLimit(t *testing.T) {
 			end,
 		)
 	}, "range exactly at limit should pass validation and reach LedgerState call")
+}
+
+func BenchmarkBlockfetchClientBlockMetrics(b *testing.B) {
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	eventBus := event.NewEventBus(nil, logger)
+	o := NewOuroboros(OuroborosConfig{
+		Logger:       logger,
+		EventBus:     eventBus,
+		PromRegistry: prometheus.NewRegistry(),
+	})
+
+	immDb, err := immutable.New("../database/immutable/testdata")
+	if err != nil {
+		b.Fatal(err)
+	}
+	iterator, err := immDb.BlocksFromPoint(ocommon.NewPoint(0, nil))
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer iterator.Close()
+
+	const blockCount = 100
+	blocks := make([]gledger.Block, 0, blockCount)
+	for len(blocks) < blockCount {
+		block, err := iterator.Next()
+		if err != nil {
+			b.Fatal(err)
+		}
+		if block == nil {
+			break
+		}
+		decoded, err := gledger.NewBlockFromCbor(block.Type, block.Cbor)
+		if err != nil {
+			continue
+		}
+		blocks = append(blocks, decoded)
+	}
+	if len(blocks) == 0 {
+		b.Skip("no decoded blocks available")
+	}
+
+	connId := testConnId()
+	ctx := blockfetch.CallbackContext{ConnectionId: connId}
+	o.blockFetchMutex.Lock()
+	o.blockFetchStarts[connId] = time.Now().Add(-50 * time.Millisecond)
+	o.blockFetchMutex.Unlock()
+
+	b.ResetTimer()
+	for i := 0; b.Loop(); i++ {
+		// Reset fetch start each iteration so delaySeconds is
+		// consistent across all iterations.
+		o.blockFetchMutex.Lock()
+		o.blockFetchStarts[connId] = time.Now().Add(-50 * time.Millisecond)
+		o.blockFetchMutex.Unlock()
+
+		block := blocks[i%len(blocks)]
+		if err := o.blockfetchClientBlock(ctx, uint(block.Type()), block); err != nil {
+			b.Fatal(err)
+		}
+	}
 }

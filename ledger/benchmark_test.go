@@ -2053,6 +2053,64 @@ func BenchmarkBlockProcessingThroughput(b *testing.B) {
 	b.ReportMetric(float64(processedBlocks)/b.Elapsed().Seconds(), "blocks/sec")
 }
 
+// BenchmarkBlockfetchNearTipThroughput measures the live blockfetch handler
+// when we are effectively at tip, so each received block is flushed
+// immediately instead of waiting for a multi-block commit batch.
+func BenchmarkBlockfetchNearTipThroughput(b *testing.B) {
+	seedModels, blocks := loadBlockProcessingFixture(b)
+	db, ledgerState := newBlockProcessingBenchmarkLedgerState(
+		b,
+		seedModels,
+	)
+	b.Cleanup(func() { db.Close() })
+
+	b.Logf("Loaded %d blocks for near-tip blockfetch testing", len(blocks))
+
+	b.ResetTimer()
+
+	processedBlocks := 0
+	blockIdx := 0
+	for i := 0; b.Loop(); i++ {
+		if blockIdx == len(blocks) {
+			b.StopTimer()
+			if err := db.Close(); err != nil {
+				b.Fatal(err)
+			}
+			db, ledgerState = newBlockProcessingBenchmarkLedgerState(
+				b,
+				seedModels,
+			)
+			blockIdx = 0
+			b.StartTimer()
+		}
+		block := blocks[blockIdx]
+		blockIdx++
+
+		ledgerBlock, err := ledger.NewBlockFromCbor(block.Type, block.Cbor)
+		if err != nil {
+			b.Fatalf("NewBlockFromCbor failed: %v", err)
+		}
+		evt := BlockfetchEvent{
+			Block: ledgerBlock,
+			Point: ocommon.NewPoint(block.Slot, block.Hash),
+			Type:  block.Type,
+		}
+
+		if err := ledgerState.handleEventBlockfetchBlock(evt); err != nil {
+			b.Fatalf("handleEventBlockfetchBlock failed: %v", err)
+		}
+		// Flush after each block to simulate near-tip behavior where
+		// blocks are committed individually rather than batched.
+		if err := ledgerState.flushPendingBlockfetchBlocks(); err != nil {
+			b.Fatalf("flushPendingBlockfetchBlocks failed: %v", err)
+		}
+
+		processedBlocks++
+	}
+
+	b.ReportMetric(float64(processedBlocks)/b.Elapsed().Seconds(), "blocks/sec")
+}
+
 // BenchmarkBlockProcessingThroughputPredecoded measures block-processing
 // throughput with block CBOR decoding removed from the timed region.
 func BenchmarkBlockProcessingThroughputPredecoded(b *testing.B) {
