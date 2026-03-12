@@ -25,7 +25,6 @@ RUN --mount=type=cache,target=/gomod-cache --mount=type=cache,target=/go-cache m
 
 FROM ghcr.io/blinklabs-io/cardano-cli:10.14.0.0-1 AS cardano-cli
 FROM ghcr.io/blinklabs-io/cardano-configs:20251128-1 AS cardano-configs
-FROM ghcr.io/blinklabs-io/mithril-client:0.12.38-1 AS mithril-client
 FROM ghcr.io/blinklabs-io/nview:0.13.0 AS nview
 FROM ghcr.io/blinklabs-io/txtop:0.14.0 AS txtop
 
@@ -45,7 +44,6 @@ COPY --from=cardano-cli /usr/local/bin/cardano-cli /usr/local/bin/
 COPY --from=cardano-cli /usr/local/include/ /usr/local/include/
 COPY --from=cardano-cli /usr/local/lib/ /usr/local/lib/
 COPY --from=cardano-configs /config/ /opt/cardano/config/
-COPY --from=mithril-client /bin/mithril-client /usr/local/bin/
 COPY --from=nview /bin/nview /usr/local/bin/
 COPY --from=txtop /bin/txtop /usr/local/bin/
 COPY --chmod=0755 bin/entrypoint.sh /bin/entrypoint.sh

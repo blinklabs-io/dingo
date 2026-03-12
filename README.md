@@ -130,7 +130,7 @@ docker run -p 3001:3001 \
   ghcr.io/blinklabs-io/dingo
 ```
 
-The image is based on Debian bookworm-slim and includes `cardano-cli`, `mithril-client`, `nview`, and `txtop`. The Dockerfile sets `CARDANO_DATABASE_PATH=/data/db` and `CARDANO_SOCKET_PATH=/ipc/dingo.socket`, overriding the local defaults of `.dingo` and `dingo.socket` — the volume mounts above map to these container paths.
+The image is based on Debian bookworm-slim and includes `cardano-cli`, `nview`, and `txtop`. Mithril snapshot support is built into dingo natively (`dingo mithril sync`). The Dockerfile sets `CARDANO_DATABASE_PATH=/data/db` and `CARDANO_SOCKET_PATH=/ipc/dingo.socket`, overriding the local defaults of `.dingo` and `dingo.socket` — the volume mounts above map to these container paths.
 
 | Port | Service |
 |------|---------|
@@ -213,16 +213,7 @@ See `dingo.yaml.example` for the full set of configuration options.
 
 ## Fast Bootstrapping with Mithril
 
-Instead of syncing from genesis (which can take days on mainnet), you can bootstrap Dingo using a [Mithril](https://mithril.network/) snapshot. There are two approaches depending on your use case:
-
-| Approach | Command | Use Case | Data Available |
-|----------|---------|----------|---------------|
-| `dingo sync --mithril` | `dingo sync --mithril` | Consensus nodes, relays | Current ledger state + all blocks |
-| `mithril-client` + `dingo load` | Manual download + load | Indexers, API nodes | Full historical transaction/certificate data |
-
-### Option 1: `dingo sync --mithril` (Recommended for Consensus)
-
-Dingo has a built-in Mithril client that handles download, extraction, and import automatically. This is the fastest way to get a node running.
+Instead of syncing from genesis (which can take days on mainnet), you can bootstrap Dingo using a [Mithril](https://mithril.network/) snapshot. Dingo has a built-in Mithril client that handles download, extraction, and import automatically. This is the fastest way to get a node running.
 
 ```bash
 # Bootstrap from Mithril and start syncing
@@ -264,71 +255,7 @@ Performance (preview network, ~4M blocks):
 | Load blocks into blob store | ~36 min |
 | Total | ~50 min |
 
-### Option 2: `mithril-client` + `dingo load` (For Indexers/API Nodes)
-
-If you need full historical data (transaction lookups, certificate queries, datum/script resolution), use the external `mithril-client` to download the snapshot and then load it with `dingo load`, which processes every block through the full indexing pipeline.
-
-#### Prerequisites
-
-Install the `mithril-client` CLI from [Mithril releases](https://github.com/input-output-hk/mithril/releases):
-
-```bash
-# Detect OS and architecture
-OS=$(uname -s)
-ARCH=$(uname -m)
-
-case "$OS" in
-  Linux)
-    case "$ARCH" in
-      x86_64)  MITHRIL_PLATFORM="x64-linux-musl" ;;
-      aarch64|arm64) MITHRIL_PLATFORM="arm64-linux-musl" ;;
-      *) echo "Unsupported architecture: $ARCH"; exit 1 ;;
-    esac
-    ;;
-  Darwin)
-    case "$ARCH" in
-      x86_64)  MITHRIL_PLATFORM="x64-macos" ;;
-      arm64)   MITHRIL_PLATFORM="arm64-macos" ;;
-      *) echo "Unsupported architecture: $ARCH"; exit 1 ;;
-    esac
-    ;;
-  *) echo "Unsupported OS: $OS (see Mithril releases for Windows)"; exit 1 ;;
-esac
-
-MITHRIL_VERSION="2506.0"
-curl -L "https://github.com/input-output-hk/mithril/releases/download/${MITHRIL_VERSION}/mithril-${MITHRIL_VERSION}-${MITHRIL_PLATFORM}.tar.gz" -o mithril.tar.gz
-tar -xzf mithril.tar.gz
-sudo mv mithril-client /usr/local/bin/
-rm mithril.tar.gz
-```
-
-For Windows, download the appropriate binary from the [Mithril releases page](https://github.com/input-output-hk/mithril/releases).
-
-#### Bootstrap Workflow
-
-```bash
-# Set network (CARDANO_NETWORK is used by dingo, not mithril-client)
-export CARDANO_NETWORK=preview
-# AGGREGATOR_ENDPOINT is used by mithril-client
-export AGGREGATOR_ENDPOINT=https://aggregator.pre-release-preview.api.mithril.network/aggregator
-
-# For mainnet:
-# export AGGREGATOR_ENDPOINT=https://aggregator.release-mainnet.api.mithril.network/aggregator
-
-# Download snapshot (uses AGGREGATOR_ENDPOINT)
-mithril-client cardano-db download --download-dir /tmp/mithril-snapshot
-
-# Load into Dingo (uses CARDANO_NETWORK for chain config)
-./dingo load /tmp/mithril-snapshot/db/immutable
-
-# Clean up snapshot
-rm -rf /tmp/mithril-snapshot
-
-# Start Dingo
-./dingo -n preview serve
-```
-
-This creates full historical data including transaction records, certificate history, witness data, scripts, datums, and governance votes -- everything needed for rich query APIs.
+For indexers and API nodes that need full historical data (transaction lookups, certificate queries, datum/script resolution), configure the storage mode to `api` and `dingo mithril sync` will automatically backfill historical metadata after loading the snapshot.
 
 ### Disk Space Requirements
 
