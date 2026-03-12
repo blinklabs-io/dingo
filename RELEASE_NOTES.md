@@ -1,6 +1,34 @@
 # Release Notes
 
 
+## v0.25.0 (March 12, 2026)
+
+**Title:** Updates and refinements
+
+**Date:** March 12, 2026
+
+**Version:** v0.25.0
+
+Hi folks! Here’s what we shipped in v0.25.0.
+
+```json
+{
+  "✨ What's New": [
+    "Added a safer and more flexible block replay path so nodes can resume and validate chain history more reliably. Concretely, this introduces a trusted immutable replay pipeline plus micro-batched BlockFetch commit handling, along with supporting ledger refactors to accommodate the new replay/ingestion flow."
+  ],
+  "💪 Improvements": [
+    "Improved how node-to-client connections are classified so operational limits and monitoring better reflect real peer-to-peer behavior. Specifically, node-to-client links are now explicitly marked and excluded from peer limits/metrics and N2N handling, per-source active peer quotas are relaxed, and the global active-peer cap remains enforced."
+  ],
+  "📋 What You Need to Know": [
+    "Simplified Mithril setup in containerized deployments by reducing the amount of required configuration at startup. In the Docker entrypoint, the Mithril genesis verification key is now auto-loaded from a network-specific file when it is not provided explicitly."
+  ]
+}
+
+```
+
+---
+
+
 ## v0.24.1 (March 12, 2026)
 
 **Title:** Stability and polish
