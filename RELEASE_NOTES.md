@@ -13,7 +13,7 @@ Hi folks! Here’s what we shipped in v0.25.0.
 
 ### ✨ What's New
 
-- **Trusted chain verification:** Starting up or recovering is more confidence-inspiring because your node can now verify the chain from a trusted, immutable replay path.
+- **Trusted chain verification:** Startups and recoveries feel more rock-solid because your node can now verify the chain from a trusted, immutable replay path.
 
 ### 💪 Improvements
 
