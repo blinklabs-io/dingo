@@ -13,12 +13,12 @@ Hi folks! Here’s what we shipped in v0.24.1.
 
 ### ✨ What's New
 
-- **No new features:** No new user-facing features rolled out in this patch.
+- **No new features:** No new user-facing features shipped in this patch.
 
 ### 💪 Improvements
 
-- **Rollback safety:** Rollbacks are safer and more rock-solid when the chain is short because deep rollbacks are now only permitted once the chain length exceeds a configurable threshold (K) and the maximum block fetch slot range has been increased to 129,600 slots.
-- **Shutdown observability:** Node and ledger shutdowns are more rock-solid and easier to observe because shutdown paths now include timing and progress logs plus explicit timeouts.
+- **Rollback safety:** Rollbacks are safer and more predictable when the chain is short because deep rollbacks are now only permitted once the chain length exceeds a configurable threshold (K) and the maximum block fetch slot range has been increased to 129,600 slots.
+- **Shutdown observability:** Node and ledger shutdowns are easier to observe and less likely to hang because shutdown paths now include timing and progress logs plus explicit timeouts.
 - **Epoch cache consistency checks:** Epoch cache checks catch more subtle inconsistencies earlier because consistency validation now compares `LengthInSlots` and `Nonce` in addition to `EpochId` and `StartSlot`.
 
 ### 🔧 Fixes
