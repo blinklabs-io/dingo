@@ -3,7 +3,7 @@
 
 ## v0.24.1 (March 12, 2026)
 
-**Title:** Maintenance fixes and polish
+**Title:** Rollback safety and smoother shutdowns
 
 **Date:** March 12, 2026
 
