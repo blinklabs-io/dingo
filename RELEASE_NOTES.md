@@ -11,23 +11,25 @@
 
 Hi folks! Here’s what we shipped in v0.25.0.
 
-```json
-{
-  "✨ What's New": [
-    "Your node can now verify the chain from a trusted, immutable replay path, which improves confidence when starting up or recovering."
-  ],
-  "💪 Improvements": [
-    "Network connections that are strictly between a node and its local client are now tracked separately so peer limits and metrics better reflect real peer connectivity."
-  ],
-  "📋 What You Need to Know": [
-    "If you rely on peer-count metrics or peer-limit tuning, expect node-to-client connections to no longer be included in those counts."
-  ],
-  "🔧 Fixes": [
-    "Docker deployments now pick up the correct Mithril genesis verification key automatically when you don’t provide one, reducing configuration mistakes."
-  ]
-}
+### ✨ What's New
 
-```
+- **Trusted chain verification:** Starting up or recovering is more confidence-inspiring because your node can now verify the chain from a trusted, immutable replay path.
+
+### 💪 Improvements
+
+- **Peer metrics accuracy:** Peer limits and metrics better reflect real peer connectivity because node-to-client connections are now tracked separately.
+
+### 🔧 Fixes
+
+- **Mithril key defaults (Docker):** Docker deployments are less error-prone because the correct Mithril genesis verification key is now picked up automatically when you don’t provide one.
+
+### 📋 What You Need to Know
+
+- **Peer counts:** If you rely on peer-count metrics or peer-limit tuning, expect node-to-client connections to no longer be included in those counts.
+
+### 🙏 Thank You
+
+Thank you for trying!
 
 ---
 
