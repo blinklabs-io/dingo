@@ -3,7 +3,7 @@
 
 ## v0.25.0 (March 12, 2026)
 
-**Title:** Updates and refinements
+**Title:** Trusted replay verification and peer counts
 
 **Date:** March 12, 2026
 
@@ -13,11 +13,11 @@ Hi folks! Here’s what we shipped in v0.25.0.
 
 ### ✨ What's New
 
-- **Trusted chain verification:** Startups and recoveries feel more rock-solid because your node can now verify the chain from a trusted, immutable replay path.
+- **Trusted chain verification:** Startup and recovery runs are more rock-solid because your node can now verify the chain from a trusted, immutable replay path.
 
 ### 💪 Improvements
 
-- **Peer metrics accuracy:** Peer limits and metrics better reflect real peer connectivity because node-to-client connections are now tracked separately.
+- **Peer metrics accuracy:** Peer limits and metrics are more accurate because local client connections are now tracked separately.
 
 ### 🔧 Fixes
 
@@ -25,7 +25,7 @@ Hi folks! Here’s what we shipped in v0.25.0.
 
 ### 📋 What You Need to Know
 
-- **Peer counts:** If you rely on peer-count metrics or peer-limit tuning, expect node-to-client connections to no longer be included in those counts.
+- **Peer counts:** If you rely on peer-count metrics or peer-limit tuning, expect local client connections to no longer be included in those counts.
 
 ### 🙏 Thank You
 
