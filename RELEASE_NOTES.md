@@ -1,6 +1,35 @@
 # Release Notes
 
 
+## v0.24.1 (March 12, 2026)
+
+**Title:** Stability and polish
+
+**Date:** March 12, 2026
+
+**Version:** v0.24.1
+
+Hi folks! Here’s what we shipped in v0.24.1.
+
+### 💪 Improvements
+
+- **Deeper rollback scanning:** Sync is more rock-solid because deep rollbacks are only enabled when needed, and block fetch can scan a wider window to find the data it needs.
+
+### 🔧 Fixes
+
+- **Shutdown reliability:** Shutdowns are more rock-solid because node and ledger shutdown paths are less likely to hang, and logs now show how long shutdown took.
+- **Epoch cache consistency checks:** Diagnosing cache issues is easier because epoch cache validation is stricter and catches inconsistencies earlier.
+
+### 📋 What You Need to Know
+
+- **Release notes:** Release notes are easier to scan because v0.24.0 notes are now included in `RELEASE_NOTES.md`.
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
 ## v0.24.0 (March 11, 2026)
 
 **Title:** Peer sharing controls and import visibility
