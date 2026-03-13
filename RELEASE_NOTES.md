@@ -11,28 +11,30 @@
 
 Hi folks! Here’s what we shipped in v0.25.1.
 
-```json
-{
-  "✨ What's New": [
-    "You can now choose where the service stores its working files, making it easier to run multiple setups and manage disk usage.",
-    "Starting up the Docker image is now simpler because it no longer depends on an external sync helper as a separate component.",
-    "It’s now easier to understand how the system is put together so teams can onboard and troubleshoot faster."
-  ],
-  "💪 Improvements": [
-    "Connections are more resilient during network changes so long-running processes keep progressing more reliably.",
-    "Operational metrics are now more accurate and easier to interpret when monitoring performance over time.",
-    "Blockfetch performance tracking is now clearer and less resource-intensive for deployments that don’t use event streaming.",
-    "Dependency management is more predictable, reducing surprises during builds and upgrades."
-  ],
-  "📋 What You Need to Know": [
-    "If you previously configured an external Mithril client in your container workflow, you may need to update your deployment steps."
-  ],
-  "🔧 Fixes": [
-    "Idle connections are less likely to drop unexpectedly, improving stability in quieter environments."
-  ]
-}
+### ✨ What's New
 
-```
+- **Configurable data directory:** Running multiple setups is easier because you can now choose where Dingo stores its working files.
+- **Docker uses native Mithril sync:** Container startup is simpler because the Docker image no longer depends on an external sync helper.
+- **Expanded architecture docs:** Onboarding and troubleshooting are easier because `ARCHITECTURE.md` now has more detail.
+
+### 💪 Improvements
+
+- **More resilient sync connections:** Long-running sync is more reliable because chainsync and blockfetch handle connection switches more smoothly.
+- **Clearer operational metrics:** Monitoring is easier because block delay and density metrics were refined.
+- **Lower-overhead blockfetch metrics:** Observing blockfetch performance is leaner because metrics work is reduced when nobody is subscribed.
+- **Dependency updates:** Builds are more predictable because dependencies were refreshed.
+
+### 🔧 Fixes
+
+- **Idle connection stability:** Quiet deployments are more rock-solid because the LeiosNotify client no longer times out idle connections.
+
+### 📋 What You Need to Know
+
+- **Mithril in Docker:** If you previously configured an external Mithril client in your container workflow, you may need to update your deployment steps.
+
+### 🙏 Thank You
+
+Thank you for trying!
 
 ---
 
