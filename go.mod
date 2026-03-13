@@ -16,12 +16,13 @@ require (
 	github.com/aws/smithy-go v1.24.2
 	github.com/blinklabs-io/bark v0.0.2
 	github.com/blinklabs-io/bursa v0.16.0
-	github.com/blinklabs-io/gouroboros v0.160.1
+	github.com/blinklabs-io/gouroboros v0.160.2
 	github.com/blinklabs-io/ouroboros-mock v0.9.1
 	github.com/blinklabs-io/plutigo v0.0.26
 	github.com/blockfrost/blockfrost-go v0.3.0
 	github.com/btcsuite/btcd/btcutil v1.1.6
 	github.com/dgraph-io/badger/v4 v4.9.1
+	github.com/fxamacker/cbor/v2 v2.9.0
 	github.com/getsops/sops/v3 v3.12.1
 	github.com/glebarez/sqlite v1.11.0
 	github.com/go-sql-driver/mysql v1.9.3
@@ -128,7 +129,6 @@ require (
 	github.com/ethereum/go-ethereum v1.17.0 // indirect
 	github.com/fatih/color v1.18.0 // indirect
 	github.com/felixge/httpsnoop v1.0.4 // indirect
-	github.com/fxamacker/cbor/v2 v2.9.0 // indirect
 	github.com/getsops/gopgagent v0.0.0-20241224165529-7044f28e491e // indirect
 	github.com/glebarez/go-sqlite v1.21.2 // indirect
 	github.com/go-faster/city v1.0.1 // indirect
