@@ -20,7 +20,7 @@ Hi folks! Here’s what we shipped in v0.25.1.
 ### 💪 Improvements
 
 - **More resilient sync connections:** Long-running sync is more reliable because chainsync and blockfetch handle connection switches more smoothly.
-- **Clearer operational metrics:** Monitoring is easier because block delay and density metrics were refined.
+- **Refined operational metrics:** Monitoring is easier because block delay and density metrics were refined.
 - **Lower-overhead blockfetch metrics:** Observing blockfetch performance is leaner because metrics work is reduced when nobody is subscribed.
 - **Dependency updates:** Builds are more predictable because dependencies were refreshed.
 
