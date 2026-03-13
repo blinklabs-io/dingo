@@ -3,7 +3,7 @@
 
 ## v0.25.1 (March 13, 2026)
 
-**Title:** Maintenance update
+**Title:** Configurable storage and smoother sync
 
 **Date:** March 13, 2026
 
@@ -38,7 +38,6 @@ Hi folks! Here’s what we shipped in v0.25.1.
 Thank you for trying!
 
 ---
-
 
 ## v0.25.0 (March 12, 2026)
 
