@@ -5,6 +5,12 @@ Dingo is a high-performance Cardano blockchain node implementation in Go. This d
 ## Table of Contents
 
 - [Overview](#overview)
+- [Architecture Diagrams](#architecture-diagrams)
+  - [Component Interactions](#component-interactions)
+  - [Package Dependency Tree](#package-dependency-tree)
+  - [Data Flow](#data-flow)
+  - [Peer-to-Peer Networking](#peer-to-peer-networking)
+  - [Block Forging](#block-forging)
 - [Directory Structure](#directory-structure)
 - [Core Node Structure](#core-node-structure)
 - [Event-Driven Communication](#event-driven-communication)
@@ -33,6 +39,318 @@ Dingo's architecture is built on several key principles:
 5. Multi-peer chain synchronization with Ouroboros Praos chain selection
 6. Block production with VRF leader election and stake snapshots
 7. Graceful shutdown with phased resource cleanup
+
+## Architecture Diagrams
+
+### Component Interactions
+
+How the Node orchestrator wires components together. Solid arrows are direct method calls; dashed arrows are asynchronous EventBus messages.
+
+```mermaid
+graph TB
+    Node["<b>Node</b><br/><i>node.go</i>"]
+
+    subgraph Networking
+        CM["ConnectionManager<br/><i>connmanager/</i>"]
+        PG["PeerGovernor<br/><i>peergov/</i>"]
+        OB["Ouroboros<br/><i>ouroboros/</i>"]
+    end
+
+    subgraph "Chain State"
+        ChM["ChainManager<br/><i>chain/</i>"]
+        CS["ChainsyncState<br/><i>chainsync/</i>"]
+        CSel["ChainSelector<br/><i>chainselection/</i>"]
+    end
+
+    subgraph "Ledger & Validation"
+        LS["LedgerState<br/><i>ledger/</i>"]
+        SM["SnapshotManager<br/><i>ledger/snapshot/</i>"]
+        MP["Mempool<br/><i>mempool/</i>"]
+    end
+
+    subgraph "Block Production"
+        BF["BlockForger<br/><i>ledger/forging/</i>"]
+        LE["LeaderElection<br/><i>ledger/leader/</i>"]
+    end
+
+    subgraph Storage
+        DB["Database<br/><i>database/</i>"]
+        Blob["BlobStore<br/>badger / s3 / gcs"]
+        Meta["MetadataStore<br/>sqlite / postgres / mysql"]
+    end
+
+    subgraph "API Servers"
+        URPC["UTxO RPC<br/><i>utxorpc/</i>"]
+        BFA["Blockfrost API<br/><i>blockfrost/</i>"]
+        Mesh["Mesh API<br/><i>mesh/</i>"]
+        Bark["Bark<br/><i>bark/</i>"]
+    end
+
+    EB["EventBus<br/><i>event/</i>"]
+
+    Node --> CM & PG & OB & ChM & LS & MP & DB & EB
+    Node -.->|"optional"| BF & LE & URPC & BFA & Mesh & Bark
+
+    PG -->|"outbound conn requests"| CM
+    CM -->|"connections"| OB
+    OB -->|"chainsync / blockfetch"| LS
+    OB -->|"tx submission"| MP
+    LS --> ChM & DB
+    LS -->|"validate txs"| MP
+    ChM --> DB
+    DB --> Blob & Meta
+    BF --> LE & MP & ChM
+    SM -->|"stake snapshots"| DB
+    CSel -->|"switch active peer"| CS
+    CS -->|"stall detection"| CM
+
+    EB -.->|"events"| LS & ChM & CS & CSel & PG & SM & OB & MP
+    URPC & BFA & Mesh -.-> LS & DB
+    Bark -.-> DB
+```
+
+### Package Dependency Tree
+
+Internal import relationships between dingo packages. External dependencies are omitted.
+
+```mermaid
+graph LR
+    root["<b>dingo</b> (root)"]
+    cmd["cmd/dingo"]
+    chain["chain"]
+    chainsync["chainsync"]
+    chainsel["chainselection"]
+    connmgr["connmanager"]
+    db["database"]
+    db_models["database/models"]
+    db_types["database/types"]
+    db_plugin["database/plugin"]
+    db_blob["database/plugin/blob/*"]
+    db_meta["database/plugin/metadata/*"]
+    db_immutable["database/immutable"]
+    ev["event"]
+    ledger["ledger"]
+    ledger_eras["ledger/eras"]
+    ledger_forging["ledger/forging"]
+    ledger_leader["ledger/leader"]
+    ledger_snapshot["ledger/snapshot"]
+    ledgerstate["ledgerstate"]
+    mempool["mempool"]
+    ouroboros["ouroboros"]
+    peergov["peergov"]
+    topology["topology"]
+    intcfg["internal/config"]
+    intnode["internal/node"]
+    utxorpc["utxorpc"]
+    blockfrost["blockfrost"]
+    mesh["mesh"]
+    bark["bark"]
+    mithril["mithril"]
+    keystore["keystore"]
+
+    root --> chain & chainsync & chainsel & connmgr & db & ev
+    root --> ledger & ledger_forging & ledger_leader & ledger_snapshot
+    root --> mempool & ouroboros & peergov & topology
+    root --> utxorpc & blockfrost & mesh & bark
+
+    cmd --> intcfg & intnode & mithril
+
+    chain --> db & db_models & ev
+    chainsync --> chain & ev & ledger
+    chainsel --> ev
+    connmgr --> ev
+    peergov --> connmgr & ev & topology
+
+    ouroboros --> chain & chainsel & chainsync & connmgr
+    ouroboros --> db_immutable & ev & ledger & mempool & peergov
+
+    ledger --> chain & db & db_models & db_meta & db_types & ev
+    ledger --> ledger_eras & ledger_forging & ledger_leader & ledger_snapshot
+    ledger --> mempool & peergov
+    ledger_eras --> db_models
+    ledger_forging --> chain & ev
+    ledger_snapshot --> db & db_models & ev
+
+    mempool --> chain & ev
+
+    db --> db_plugin & db_types & db_models
+    db_plugin --> db_blob & db_meta & intcfg
+    db_blob --> db_plugin & db_types
+    db_meta --> db_models & db_types & db_plugin
+    db_models --> db_types
+
+    intnode --> chain & chainsync & db & db_immutable & db_models & db_meta
+    intnode --> ledger & ledger_eras & intcfg
+
+    ledgerstate --> db & db_models & db_types & ledger_eras
+    mithril --> db & db_immutable & db_models & ledgerstate & ledger_eras
+
+    utxorpc --> db & db_models & ev & ledger & ledger_eras & mempool
+    mesh --> chain & db & db_models & ev & ledger & mempool
+    blockfrost --> ledger
+    bark --> db & db_types & ledger
+```
+
+### Data Flow
+
+How blocks flow from the network through validation and into storage.
+
+```mermaid
+sequenceDiagram
+    participant Peer
+    participant OB as Ouroboros
+    participant EB as EventBus
+    participant LS as LedgerState
+    participant ChM as ChainManager
+    participant DB as Database
+
+    Note over Peer,DB: Stage 1 — Header Discovery (ChainSync)
+    Peer->>OB: RollForward(header, tip)
+    OB->>EB: publish ChainsyncEvent(header)
+    EB->>LS: handleEventChainsyncBlockHeader()
+    LS->>LS: verify header crypto (VRF/KES/OpCert)
+    LS->>ChM: enqueue header in chain.headers[]
+
+    Note over Peer,DB: Stage 2 — Full Block Retrieval (BlockFetch)
+    LS->>OB: blockfetchClientBlockRange(start, end)
+    OB->>Peer: RequestRange(start, end)
+    Peer->>OB: Block(type, cbor) × N
+    OB->>EB: publish BlockfetchEvent(block)
+    EB->>LS: handleEventBlockfetchBlock()
+    LS->>LS: decode CBOR, match to queued header
+
+    Note over Peer,DB: Stage 3 — Block Processing
+    OB->>EB: publish BlockfetchEvent(batchDone)
+    EB->>LS: handleEventBlockfetchBatchDone()
+    LS->>LS: validate transactions (Phase 1 + Phase 2)
+    LS->>LS: update UTXO set, process certs & governance
+    LS->>LS: compute epoch nonce contributions
+
+    Note over Peer,DB: Stage 4 — Persistence
+    LS->>ChM: chain.AddBlocks(batch) — 50 blocks max
+    ChM->>DB: blob.SetBlock(slot, hash, cbor)
+    ChM->>DB: metadata: UTxOs, txs, certs, governance
+    ChM->>EB: publish ChainUpdateEvent
+    LS->>EB: publish BlockEvent, TransactionEvent per tx
+
+    Note over Peer,DB: Rollback Path
+    Peer->>OB: RollBackward(point)
+    OB->>EB: publish ChainsyncEvent(rollback)
+    EB->>LS: handleEventChainsyncRollback()
+    LS->>ChM: chain.Rollback(point)
+    ChM->>DB: delete blocks/txs after point
+    ChM->>DB: restore account/pool/DRep state
+    LS->>EB: publish TransactionEvent(rollback: true) per tx
+```
+
+### Peer-to-Peer Networking
+
+Connection lifecycle, protocol multiplexing, and peer governance.
+
+```mermaid
+graph TB
+    subgraph "Peer Governor"
+        PG["PeerGovernor"]
+        Topo["Topology Config"]
+        Gossip["PeerSharing<br/>(gossip)"]
+        LedgerPeers["Ledger Peers<br/>(SPO relays)"]
+        Score["Peer Scoring"]
+    end
+
+    subgraph "Connection Manager"
+        Listeners["TCP Listeners<br/>N2N :3001 / N2C"]
+        Outbound["Outbound Dialer"]
+        ConnTrack["Connection Tracking<br/>per-IP limits, rate limiting"]
+        Recycle["Stall Recycler"]
+    end
+
+    subgraph "Ouroboros Multiplexer"
+        direction TB
+        subgraph "Node-to-Node (N2N)"
+            CSc["ChainSync<br/>client + server"]
+            BFc["BlockFetch<br/>client + server"]
+            TXs["TxSubmission2<br/>bidirectional"]
+            KA["KeepAlive"]
+            PS["PeerSharing<br/>client + server"]
+            Leios["LeiosFetch / Notify<br/>(experimental)"]
+        end
+        subgraph "Node-to-Client (N2C)"
+            CSn2c["ChainSync<br/>server"]
+            LSQ["LocalStateQuery<br/>server"]
+            LTM["LocalTxMonitor<br/>server"]
+            LTS["LocalTxSubmission<br/>server"]
+        end
+    end
+
+    subgraph "Chain Selection"
+        CSel["ChainSelector"]
+        Tips["Peer Tip Tracker"]
+    end
+
+    Topo --> PG
+    Gossip --> PG
+    LedgerPeers --> PG
+    PG -->|"connect request"| Outbound
+    Score -->|"promote / demote"| PG
+
+    Outbound -->|"TCP dial"| ConnTrack
+    Listeners -->|"TCP accept"| ConnTrack
+
+    ConnTrack -->|"handshake"| CSc & BFc & TXs & KA & PS
+    ConnTrack -->|"N2C handshake"| CSn2c & LSQ & LTM & LTS
+
+    CSc -->|"headers"| CSel
+    CSel -->|"best peer"| Tips
+    Tips -->|"switch chain"| CSc
+
+    Recycle -->|"force reconnect"| ConnTrack
+```
+
+### Block Forging
+
+The block production pipeline from leader election through broadcast.
+
+```mermaid
+sequenceDiagram
+    participant SC as SlotClock
+    participant LE as LeaderElection
+    participant BF as BlockForger
+    participant BB as BlockBuilder
+    participant MP as Mempool
+    participant LS as LedgerState
+    participant ChM as ChainManager
+    participant EB as EventBus
+
+    Note over SC,EB: Epoch Preparation
+    EB->>LE: EpochTransitionEvent(newEpoch)
+    LE->>LS: GetStakeDistribution("go" snapshot, epoch-2)
+    LE->>LE: compute VRF schedule for new epoch
+
+    Note over SC,EB: Per-Slot Forging Loop
+    SC->>BF: slot tick
+    BF->>LE: ShouldProduceBlock(slot)?
+    alt not leader
+        LE-->>BF: false
+        Note over BF: skip slot
+    else is leader
+        LE-->>BF: true (vrfProof, vrfOutput)
+        BF->>BF: check sync tolerance (tip not stale)
+        BF->>BB: BuildBlock(slot, kesPeriod)
+        BB->>MP: drain eligible transactions
+        BB->>LS: validate each tx against current state
+        BB->>BB: assemble block body + header
+        BB->>BB: sign with KES key, attach VRF proof
+        BB-->>BF: block + CBOR
+        BF->>ChM: AddBlock(forgedBlock)
+        ChM->>EB: publish ChainUpdateEvent
+        BF->>EB: publish BlockForgedEvent
+    end
+
+    Note over SC,EB: Slot Battle Detection
+    EB->>BF: ChainUpdateEvent(externalBlock at same slot)
+    BF->>BF: SlotTracker detects competing block
+    BF->>EB: publish SlotBattleEvent
+```
 
 ## Directory Structure
 
