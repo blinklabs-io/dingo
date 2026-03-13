@@ -13,24 +13,25 @@ Hi folks! Here’s what we shipped in v0.25.1.
 
 ### ✨ What's New
 
-- **Configurable data directory:** Running in different environments is easier because you can now choose where the node stores its data on disk.
-- **Built-in Mithril bootstrap:** Containerized bootstrapping is simpler because Dingo can now synchronize with Mithril without an external client.
-- **Expanded architecture docs:** Understanding the system is easier because documentation now includes clearer diagrams and explanations.
+- **Configurable data directory:** Running in different environments is easier because you can now choose where the node stores its data on disk with `--data-dir`.
+- **Built-in Mithril bootstrap:** Containerized bootstrapping is simpler because Dingo can now spin up Mithril sync without an external client.
+- **Expanded architecture docs:** Understanding the system is easier because `ARCHITECTURE.md` now includes clearer diagrams and explanations.
 
 ### 💪 Improvements
 
 - **Idle connection stability:** Long-running connections are more rock-solid because idle sessions are less likely to be dropped unexpectedly.
-- **Resilient sync across reconnections:** Sync stays smoother because chainsync and blockfetch handle connection switches more reliably.
+- **Resilient sync across reconnections:** Sync is more rock-solid because chainsync and blockfetch handle connection switches more reliably.
 - **Blockfetch overhead:** Observability is sleeker because blockfetch avoids extra work when no one is listening for events.
-- **Dependencies:** Builds are more predictable because dependencies were refreshed for consistency.
+- **Dependencies:** Builds are more solid because dependencies were refreshed for consistency.
 
 ### 🔧 Fixes
 
-- **Release notes alignment:** Tracking changes is less confusing because release documentation now matches shipped content.
+- **Release notes alignment:** Tracking changes is easier because release documentation now matches shipped content.
 
 ### 📋 What You Need to Know
 
 - **Upgrade:** You’re all set—no required configuration changes for this release.
+- **Custom storage path:** If you want to store node data somewhere else, pass `--data-dir <path>` at startup.
 
 ### 🙏 Thank You
 
