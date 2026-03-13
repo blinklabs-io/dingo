@@ -50,6 +50,16 @@ func NewEvent(eventType EventType, eventData any) Event {
 	}
 }
 
+func (e *EventBus) HasSubscribers(eventType EventType) bool {
+	if e == nil {
+		return false
+	}
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	subs, ok := e.subscribers[eventType]
+	return ok && len(subs) > 0
+}
+
 // asyncEvent wraps an event with its type for the async queue
 type asyncEvent struct {
 	eventType EventType
