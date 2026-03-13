@@ -21,7 +21,7 @@ Hi folks! Here’s what we shipped in v0.25.1.
 
 - **Idle connection stability:** Long-running connections are more rock-solid because idle sessions are less likely to be dropped unexpectedly.
 - **Resilient sync across reconnections:** Sync stays smoother because chainsync and blockfetch handle connection switches more reliably.
-- **Blockfetch overhead:** Observability is sleeker because blockfetch avoids extra work when no one is subscribed to events.
+- **Blockfetch overhead:** Observability is sleeker because blockfetch avoids extra work when no one is listening for events.
 - **Dependencies:** Builds are more predictable because dependencies were refreshed for consistency.
 
 ### 🔧 Fixes
