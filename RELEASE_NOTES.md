@@ -14,21 +14,21 @@ Hi folks! Here’s what we shipped in v0.25.1.
 ```json
 {
   "✨ What's New": [
-    "You can now choose where the service stores its working files, making it easier to run multiple setups and manage disk usage. This adds a new **`--data-dir`** flag so you can explicitly set the data directory instead of relying on defaults.",
-    "Starting up the Docker image is now simpler because it no longer depends on an external sync helper as a separate component. The Docker image and startup flow now use **dingo’s native Mithril sync** instead of an external **mithril-client**, and the documentation was updated to match.",
-    "It’s now easier to understand how the system is put together so teams can onboard and troubleshoot faster. The **ARCHITECTURE.md** documentation now includes expanded sections and more detailed architecture diagrams."
+    "You can now choose where the service stores its working files, making it easier to run multiple setups and manage disk usage.",
+    "Starting up the Docker image is now simpler because it no longer depends on an external sync helper as a separate component.",
+    "It’s now easier to understand how the system is put together so teams can onboard and troubleshoot faster."
   ],
   "💪 Improvements": [
-    "Connections are more resilient during network changes so long-running processes keep progressing more reliably. Chainsync and blockfetch were hardened across connection switches, with higher **per-source peer quotas** to improve redundancy and throughput.",
-    "Operational metrics are now more accurate and easier to interpret when monitoring performance over time. Block delay and density metrics were gated and refined, **tip-reached** signaling was introduced, and **epoch nonce hex** values are cached to reduce repeated work.",
-    "Blockfetch performance tracking is now clearer and less resource-intensive for deployments that don’t use event streaming. A **blockfetch metrics benchmark** was added, blockfetch delay metric updates were optimized, and blockfetch events are no longer published when there are no subscribers.",
-    "Dependency management is more predictable, reducing surprises during builds and upgrades. **gouroboros** was updated to **v0.160.2**, and **fxamacker/cbor** is now a direct dependency."
+    "Connections are more resilient during network changes so long-running processes keep progressing more reliably.",
+    "Operational metrics are now more accurate and easier to interpret when monitoring performance over time.",
+    "Blockfetch performance tracking is now clearer and less resource-intensive for deployments that don’t use event streaming.",
+    "Dependency management is more predictable, reducing surprises during builds and upgrades."
   ],
   "📋 What You Need to Know": [
-    "If you previously configured an external Mithril client in your container workflow, you may need to update your deployment steps. The Docker startup flow now assumes **native Mithril sync** and the docs reflect the new configuration path."
+    "If you previously configured an external Mithril client in your container workflow, you may need to update your deployment steps."
   ],
   "🔧 Fixes": [
-    "Idle connections are less likely to drop unexpectedly, improving stability in quieter environments. The LeiosNotify client timeout was disabled for idle connections."
+    "Idle connections are less likely to drop unexpectedly, improving stability in quieter environments."
   ]
 }
 
