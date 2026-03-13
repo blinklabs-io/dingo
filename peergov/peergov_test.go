@@ -1342,9 +1342,9 @@ func TestPeerGovernor_PeerTargets_DefaultValues(t *testing.T) {
 	assert.Equal(t, 20, pg.config.TargetNumberOfActivePeers)
 	assert.Equal(t, 60, pg.config.TargetNumberOfRootPeers)
 	// Per-source quotas (ceilings, not reservations)
-	assert.Equal(t, 10, pg.config.ActivePeersTopologyQuota)
-	assert.Equal(t, 10, pg.config.ActivePeersGossipQuota)
-	assert.Equal(t, 10, pg.config.ActivePeersLedgerQuota)
+	assert.Equal(t, 20, pg.config.ActivePeersTopologyQuota)
+	assert.Equal(t, 20, pg.config.ActivePeersGossipQuota)
+	assert.Equal(t, 20, pg.config.ActivePeersLedgerQuota)
 }
 
 // TestPeerGovernor_QuotaSumExceedsTarget verifies that the global

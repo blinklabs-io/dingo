@@ -225,21 +225,20 @@ func (o *Ouroboros) blockfetchClientBlock(
 	o.blockFetchMutex.Unlock()
 	if exists {
 		fetchDuration := time.Since(startTime)
-		fetchSeconds := fetchDuration.Seconds()
 
-		// Calculate block delay as wallclock time minus block slot time (cardano-node compatible)
-		var delaySeconds float64
-		if o.LedgerState != nil {
+		// Only publish block delay metrics after reaching tip once.
+		// During catch-up all blocks are naturally "late" relative to
+		// wall-clock time, which permanently poisons the CDF.
+		atTip := o.LedgerState != nil && o.LedgerState.IsAtTip()
+		if atTip && o.metrics != nil {
+			// Calculate block delay as wallclock time minus block slot time (cardano-node compatible)
+			var delaySeconds float64
 			if blockSlotTime, err := o.LedgerState.SlotToTime(block.SlotNumber()); err == nil {
 				delaySeconds = time.Since(blockSlotTime).Seconds()
 			} else {
-				delaySeconds = fetchSeconds
+				delaySeconds = fetchDuration.Seconds()
 			}
-		} else {
-			delaySeconds = fetchSeconds
-		}
 
-		if o.metrics != nil {
 			o.metrics.blockDelay.Set(delaySeconds)
 			total := atomic.AddInt64(&o.metrics.totalBlocksFetched, 1)
 			// Cumulative CDF buckets: each counter includes all
