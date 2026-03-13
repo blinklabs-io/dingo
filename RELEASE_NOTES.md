@@ -14,7 +14,7 @@ Hi folks! Here’s what we shipped in v0.25.1.
 ### ✨ What's New
 
 - **Configurable data directory:** Running multiple setups is easier because you can now choose where Dingo stores its working files.
-- **Docker uses native Mithril sync:** Container startup is simpler because the Docker image no longer depends on an external sync helper.
+- **Native Mithril sync (Docker):** Container startup is simpler because the Docker image no longer depends on an external sync helper.
 - **Expanded architecture docs:** Onboarding and troubleshooting are easier because `ARCHITECTURE.md` now has more detail.
 
 ### 💪 Improvements
