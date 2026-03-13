@@ -232,6 +232,14 @@ func (ls *LedgerState) detectConnectionSwitch() (activeConnId *ouroboros.Connect
 			ls.dropEventCount = 0
 			ls.dropRollbackCount = 0
 			ls.headerMismatchCount = 0
+			// Clear header queue and blockfetch state from old
+			// connection so stale headers don't block the new
+			// connection's blockfetch pipeline.
+			ls.chain.ClearHeaders()
+			ls.chainsyncBlockfetchMutex.Lock()
+			ls.blockfetchRequestRangeCleanup()
+			ls.activeBlockfetchConnId = ouroboros.ConnectionId{}
+			ls.chainsyncBlockfetchMutex.Unlock()
 			// Clear per-connection state (e.g., header dedup cache)
 			// so the new connection can re-deliver blocks from the
 			// intersection without them being filtered as duplicates.
@@ -643,6 +651,7 @@ func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 	}
 	// Mark blockfetch as in progress
 	ls.chainsyncBlockfetchReadyChan = make(chan struct{})
+	ls.activeBlockfetchConnId = e.ConnectionId
 	// Request next bulk range
 	headerStart, headerEnd := ls.chain.HeaderRange(blockfetchBatchSize)
 	ls.config.Logger.Debug(
@@ -833,6 +842,10 @@ func (ls *LedgerState) tryResolveFork(
 
 //nolint:unparam
 func (ls *LedgerState) handleEventBlockfetchBlock(e BlockfetchEvent) error {
+	// Drop blocks from a stale connection (e.g., after connection switch)
+	if e.ConnectionId != ls.activeBlockfetchConnId {
+		return nil
+	}
 	// Process blocks in small commit batches so they appear on the
 	// chain promptly without paying a full blob transaction cost for
 	// every single block. We still flush well before BatchDone to
@@ -866,8 +879,42 @@ func (ls *LedgerState) flushPendingBlockfetchBlocks() error {
 	if len(ls.pendingBlockfetchEvents) == 0 {
 		return nil
 	}
-	pending := slices.Clone(ls.pendingBlockfetchEvents)
+	pending := ls.pendingBlockfetchEvents
 	ls.pendingBlockfetchEvents = ls.pendingBlockfetchEvents[:0]
+	if len(pending) == 1 {
+		pendingEvent := pending[0]
+		var addBlockErr error
+		txn := ls.db.BlobTxn(true)
+		if err := txn.Do(func(txn *database.Txn) error {
+			addBlockErr = ls.chain.AddBlock(pendingEvent.Block, txn)
+			if addBlockErr == nil {
+				return nil
+			}
+			var notFitErr chain.BlockNotFitChainTipError
+			var notMatchErr chain.BlockNotMatchHeaderError
+			if errors.As(addBlockErr, &notFitErr) ||
+				errors.As(addBlockErr, &notMatchErr) {
+				ls.config.Logger.Warn(
+					fmt.Sprintf(
+						"ignoring blockfetch block: %s",
+						addBlockErr,
+					),
+				)
+				if errors.As(addBlockErr, &notMatchErr) {
+					ls.chain.ClearHeaders()
+				}
+				return nil
+			}
+			return fmt.Errorf("add chain block: %w", addBlockErr)
+		}); err != nil {
+			return fmt.Errorf("failed processing block event: %w", err)
+		}
+		ls.Lock()
+		ls.checkSlotBattle(pendingEvent, addBlockErr)
+		ls.Unlock()
+		ls.chain.NotifyIterators()
+		return nil
+	}
 	blocks := make([]gledger.Block, 0, len(pending))
 	for _, pendingEvent := range pending {
 		blocks = append(blocks, pendingEvent.Block)
@@ -1914,6 +1961,10 @@ func (ls *LedgerState) blockfetchRequestRangeCleanup() {
 }
 
 func (ls *LedgerState) handleEventBlockfetchBatchDone(e BlockfetchEvent) error {
+	// Drop batch-done from a stale connection (e.g., after connection switch)
+	if e.ConnectionId != ls.activeBlockfetchConnId {
+		return nil
+	}
 	// Stop the blockfetch timeout timer and invalidate any pending callbacks
 	if ls.chainsyncBlockfetchTimeoutTimer != nil {
 		ls.chainsyncBlockfetchTimeoutTimer.Stop()
@@ -1925,11 +1976,13 @@ func (ls *LedgerState) handleEventBlockfetchBatchDone(e BlockfetchEvent) error {
 	}
 	// Continue fetching as long as there are queued headers
 	remainingHeaders := ls.chain.HeaderCount()
-	ls.config.Logger.Debug(
-		"batch done, checking for more headers",
-		"component", "ledger",
-		"remaining_headers", remainingHeaders,
-	)
+	if remainingHeaders > 0 {
+		ls.config.Logger.Debug(
+			"batch done, checking for more headers",
+			"component", "ledger",
+			"remaining_headers", remainingHeaders,
+		)
+	}
 	if remainingHeaders == 0 {
 		// No more headers to fetch, allow chainsync to collect more
 		ls.blockfetchRequestRangeCleanup()
@@ -1939,10 +1992,10 @@ func (ls *LedgerState) handleEventBlockfetchBatchDone(e BlockfetchEvent) error {
 	ls.blockfetchRequestRangeCleanup()
 	// Mark blockfetch as in progress for next batch
 	ls.chainsyncBlockfetchReadyChan = make(chan struct{})
-	// Request next waiting bulk range
+	// Request next waiting bulk range using the active connection
 	headerStart, headerEnd := ls.chain.HeaderRange(blockfetchBatchSize)
 	err := ls.blockfetchRequestRangeStart(
-		e.ConnectionId,
+		ls.activeBlockfetchConnId,
 		headerStart,
 		headerEnd,
 	)

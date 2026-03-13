@@ -232,6 +232,16 @@ func (f *BlockForger) Start(ctx context.Context) error {
 
 	f.logger.Info("block forger started", "mode", f.modeString())
 
+	// Set initial KES period metrics so dashboards show correct values
+	// immediately rather than waiting for the first block production.
+	if f.metrics != nil && f.slotClock != nil && f.creds != nil {
+		if slotsPerKES := f.slotClock.SlotsPerKESPeriod(); slotsPerKES > 0 {
+			if currentSlot, err := f.slotClock.CurrentSlot(); err == nil {
+				f.updateKESMetrics(currentSlot / slotsPerKES)
+			}
+		}
+	}
+
 	go f.runLoop(ctx)
 	return nil
 }

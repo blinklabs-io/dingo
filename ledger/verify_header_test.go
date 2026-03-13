@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"crypto/ed25519"
+	"encoding/hex"
 	"io"
 	"log/slog"
 	"math/big"
@@ -27,6 +28,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/consensus"
 	"github.com/blinklabs-io/gouroboros/kes"
+	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	"github.com/blinklabs-io/gouroboros/ledger/byron"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -35,6 +37,20 @@ import (
 	"github.com/stretchr/testify/require"
 	utxorpc_cardano "github.com/utxorpc/go-codegen/utxorpc/v1alpha/cardano"
 )
+
+// verifyBlockHeader is a test helper that wraps verifyBlockHeaderHex,
+// accepting raw epoch nonce bytes for convenience.
+func verifyBlockHeader(
+	block gledger.Block,
+	epochNonce []byte,
+	slotsPerKesPeriod uint64,
+) error {
+	return verifyBlockHeaderHex(
+		block,
+		hex.EncodeToString(epochNonce),
+		slotsPerKesPeriod,
+	)
+}
 
 // tamperOption controls which part of a test block to corrupt.
 type tamperOption int

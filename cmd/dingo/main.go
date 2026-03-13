@@ -276,6 +276,8 @@ DSN Override:
 		Int("db-workers", 5, "database worker pool worker count")
 	rootCmd.PersistentFlags().
 		Int("db-queue-size", 50, "database worker pool task queue size")
+	rootCmd.PersistentFlags().
+		String("data-dir", "", "data directory for all storage plugins (overrides CARDANO_DATABASE_PATH)")
 
 	// Add plugin-specific flags
 	if err := plugin.PopulateCmdlineOptions(rootCmd.PersistentFlags()); err != nil {
@@ -322,6 +324,17 @@ DSN Override:
 				)
 			}
 			cfg.Network = network
+		}
+
+		// Override data directory if flag is provided
+		if cmd.Root().PersistentFlags().Changed("data-dir") {
+			dataDir, err := cmd.Root().PersistentFlags().GetString("data-dir")
+			if err != nil {
+				return fmt.Errorf(
+					"reading data-dir flag: %w", err,
+				)
+			}
+			cfg.DatabasePath = dataDir
 		}
 
 		// Override database worker pool config if flags are provided

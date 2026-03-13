@@ -312,7 +312,9 @@ func (c *ConnectionManager) startListener(
 			if conn.RemoteAddr() != nil {
 				peerAddr = conn.RemoteAddr().String()
 			}
-			c.addConnectionWithIPKey(oConn, true, peerAddr, ipKey)
+			c.addConnectionWithIPKey(
+				oConn, true, peerAddr, ipKey,
+			)
 			// Generate event
 			if c.config.EventBus != nil {
 				c.config.EventBus.Publish(

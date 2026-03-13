@@ -439,6 +439,8 @@ type LedgerState struct {
 	chainsyncState                     ChainsyncState
 	currentTipBlockNonce               []byte
 	epochCache                         []models.Epoch
+	epochNonceHexCache                 map[uint64]string
+	reachedTip                         bool
 	currentTip                         ochainsync.Tip
 	currentEpoch                       models.Epoch
 	dbWorkerPool                       *DatabaseWorkerPool
@@ -450,6 +452,7 @@ type LedgerState struct {
 	chainsyncBlockfetchMutex      sync.Mutex
 	chainsyncBlockfetchReadyMutex sync.Mutex
 	chainsyncBlockfetchReadyChan  chan struct{}
+	activeBlockfetchConnId        ouroboros.ConnectionId // connection used for current blockfetch pipeline
 	pendingBlockfetchEvents       []BlockfetchEvent
 	checkpointWrittenForEpoch     bool
 	closed                        atomic.Bool
@@ -535,11 +538,12 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 		cfg.DatabaseWorkerPoolConfig = DefaultDatabaseWorkerPoolConfig()
 	}
 	ls := &LedgerState{
-		config:            cfg,
-		chainsyncState:    InitChainsyncState,
-		db:                cfg.Database,
-		chain:             cfg.ChainManager.PrimaryChain(),
-		validationEnabled: cfg.ValidateHistorical,
+		config:             cfg,
+		chainsyncState:     InitChainsyncState,
+		db:                 cfg.Database,
+		chain:              cfg.ChainManager.PrimaryChain(),
+		epochNonceHexCache: make(map[uint64]string),
+		validationEnabled:  cfg.ValidateHistorical,
 	}
 	return ls, nil
 }
@@ -1435,6 +1439,7 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 	ls.Lock()
 	if newEpochs != nil {
 		ls.epochCache = newEpochs
+
 		if len(newEpochs) > 0 {
 			ls.currentEpoch = newCurrentEpoch
 			// Only update currentEra when we successfully
@@ -1540,6 +1545,17 @@ func (ls *LedgerState) transitionToEra(
 		}
 	}
 	return result, nil
+}
+
+// IsAtTip reports whether the node has caught up to the chain tip at least
+// once since boot. This is used to gate metrics that are only meaningful
+// when processing live blocks (e.g., block delay CDF). Unlike
+// validationEnabled (which starts true when ValidateHistorical is set),
+// reachedTip only flips when the node actually reaches the stability window.
+func (ls *LedgerState) IsAtTip() bool {
+	ls.RLock()
+	defer ls.RUnlock()
+	return ls.reachedTip
 }
 
 // calculateStabilityWindow returns the stability window based on the current era.
@@ -1943,6 +1959,7 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 			}
 			if rolloverResult != nil {
 				ls.epochCache = rolloverResult.NewEpochCache
+
 				ls.currentEpoch = rolloverResult.NewCurrentEpoch
 				ls.currentEra = rolloverResult.NewCurrentEra
 				ls.currentPParams = rolloverResult.NewCurrentPParams
@@ -2285,6 +2302,15 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 					var shouldValidateBlock bool
 					if snapshotValidationEnabled {
 						shouldValidateBlock = true
+						// When validation was already enabled from
+						// config (ValidateHistorical), we still need
+						// to detect reaching the chain tip for
+						// metrics gating (IsAtTip).
+						if !wantEnableValidation &&
+							snapshotChainsyncState == SyncingChainsyncState &&
+							next.SlotNumber() >= cutoffSlot {
+							wantEnableValidation = true
+						}
 					} else if !ls.config.TrustedReplay &&
 						snapshotChainsyncState == SyncingChainsyncState &&
 						next.SlotNumber() >= cutoffSlot {
@@ -2437,6 +2463,7 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 				ls.checkpointWrittenForEpoch = localCheckpointWritten
 				if wantEnableValidation {
 					ls.validationEnabled = true
+					ls.reachedTip = true
 				}
 				ls.updateTipMetrics()
 				// Capture tip for logging while holding the lock
@@ -2655,6 +2682,15 @@ func (ls *LedgerState) updateTipMetrics() {
 	ls.metrics.slotInEpoch.Set(
 		float64(ls.currentTip.Point.Slot - ls.currentEpoch.StartSlot),
 	)
+	// Chain density = blocks / slots (0.0 to 1.0)
+	if ls.currentTip.Point.Slot > 0 {
+		ls.metrics.density.Set(
+			float64(ls.currentTip.BlockNumber) /
+				float64(ls.currentTip.Point.Slot),
+		)
+	} else {
+		ls.metrics.density.Set(0)
+	}
 }
 
 // loadPParams reads currentEpoch, currentEra, and epochCache and writes
@@ -2813,6 +2849,7 @@ func (ls *LedgerState) loadEpochs(txn *database.Txn) error {
 		return err
 	}
 	ls.epochCache = epochs
+	clear(ls.epochNonceHexCache)
 	if len(epochs) > 0 {
 		// Set current epoch and era
 		ls.currentEpoch = epochs[len(epochs)-1]
@@ -2866,6 +2903,7 @@ func (ls *LedgerState) loadEpochs(txn *database.Txn) error {
 	}
 	// Apply result immediately during startup
 	ls.epochCache = rolloverResult.NewEpochCache
+	clear(ls.epochNonceHexCache)
 	ls.currentEpoch = rolloverResult.NewCurrentEpoch
 	ls.currentEra = rolloverResult.NewCurrentEra
 	ls.currentPParams = rolloverResult.NewCurrentPParams

@@ -68,9 +68,9 @@ func (ls *LedgerState) verifyBlockHeaderOnlyCrypto(header ledger.BlockHeader) er
 //
 // Returns an error if verification fails, nil if the block passes
 // verification or is a Byron-era block.
-func verifyBlockHeader(
+func verifyBlockHeaderHex(
 	block ledger.Block,
-	epochNonce []byte,
+	epochNonceHex string,
 	slotsPerKesPeriod uint64,
 ) error {
 	// Skip Byron-era blocks - they use PBFT consensus, not Praos,
@@ -80,14 +80,12 @@ func verifyBlockHeader(
 	}
 
 	// Epoch nonce is required for post-Byron blocks
-	if len(epochNonce) == 0 {
+	if epochNonceHex == "" {
 		return fmt.Errorf(
 			"epoch nonce not available for block at slot %d",
 			block.SlotNumber(),
 		)
 	}
-
-	eta0Hex := hex.EncodeToString(epochNonce)
 
 	// Use gouroboros VerifyBlock for VRF + KES verification.
 	// We skip body hash validation, transaction validation, and stake
@@ -106,7 +104,7 @@ func verifyBlockHeader(
 
 	isValid, _, _, _, err := ledger.VerifyBlock(
 		block,
-		eta0Hex,
+		epochNonceHex,
 		slotsPerKesPeriod,
 		config,
 	)
@@ -196,7 +194,28 @@ func (ls *LedgerState) verifyBlockHeaderCrypto(
 	}
 	slotsPerKesPeriod := uint64(shelleyGenesis.SlotsPerKESPeriod) //nolint:gosec
 
-	return verifyBlockHeader(block, epoch.Nonce, slotsPerKesPeriod)
+	return verifyBlockHeaderHex(
+		block,
+		ls.epochNonceHex(epoch.EpochId, epoch.Nonce),
+		slotsPerKesPeriod,
+	)
+}
+
+func (ls *LedgerState) epochNonceHex(epochId uint64, nonce []byte) string {
+	nonceHex := hex.EncodeToString(nonce)
+	ls.RLock()
+	cachedNonce, ok := ls.epochNonceHexCache[epochId]
+	ls.RUnlock()
+	if ok && cachedNonce == nonceHex {
+		return cachedNonce
+	}
+	ls.Lock()
+	defer ls.Unlock()
+	if ls.epochNonceHexCache == nil {
+		ls.epochNonceHexCache = make(map[uint64]string)
+	}
+	ls.epochNonceHexCache[epochId] = nonceHex
+	return nonceHex
 }
 
 // epochForSlot searches the epoch cache for the epoch containing the
@@ -206,18 +225,16 @@ func (ls *LedgerState) verifyBlockHeaderCrypto(
 // Returns the matching epoch or an error if no epoch covers the slot.
 func (ls *LedgerState) epochForSlot(slot uint64) (models.Epoch, error) {
 	ls.RLock()
-	cacheCopy := make([]models.Epoch, len(ls.epochCache))
-	copy(cacheCopy, ls.epochCache)
-	ls.RUnlock()
+	defer ls.RUnlock()
 
-	if len(cacheCopy) == 0 {
+	if len(ls.epochCache) == 0 {
 		return models.Epoch{}, errors.New("epoch cache is empty")
 	}
 
 	// Search newest-to-oldest so that if cache entries overlap
 	// (e.g., after rollback/rebuild), we use the most recent epoch data.
-	for i := len(cacheCopy) - 1; i >= 0; i-- {
-		ep := cacheCopy[i]
+	for i := len(ls.epochCache) - 1; i >= 0; i-- {
+		ep := ls.epochCache[i]
 		if ep.LengthInSlots == 0 {
 			continue
 		}
@@ -231,10 +248,10 @@ func (ls *LedgerState) epochForSlot(slot uint64) (models.Epoch, error) {
 	// meaningful error message.
 	var lastValidEnd uint64
 	var hasValidEpoch bool
-	for i := len(cacheCopy) - 1; i >= 0; i-- {
-		if cacheCopy[i].LengthInSlots > 0 {
-			lastValidEnd = cacheCopy[i].StartSlot +
-				uint64(cacheCopy[i].LengthInSlots)
+	for i := len(ls.epochCache) - 1; i >= 0; i-- {
+		if ls.epochCache[i].LengthInSlots > 0 {
+			lastValidEnd = ls.epochCache[i].StartSlot +
+				uint64(ls.epochCache[i].LengthInSlots)
 			hasValidEpoch = true
 			break
 		}
@@ -243,13 +260,13 @@ func (ls *LedgerState) epochForSlot(slot uint64) (models.Epoch, error) {
 		return models.Epoch{}, fmt.Errorf(
 			"slot %d not covered by any known epoch (cache has %d epochs, all with zero length)",
 			slot,
-			len(cacheCopy),
+			len(ls.epochCache),
 		)
 	}
 	return models.Epoch{}, fmt.Errorf(
 		"slot %d not covered by any known epoch (cache has %d epochs, last ends at slot %d)",
 		slot,
-		len(cacheCopy),
+		len(ls.epochCache),
 		lastValidEnd,
 	)
 }
