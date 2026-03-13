@@ -14,18 +14,18 @@ Hi folks! Here’s what we shipped in v0.25.1.
 ```json
 {
   "✨ What's New": [
-    "You can now choose where the node stores its data on disk, making it easier to run in different environments and to manage storage. This adds a `--data-dir` flag and updates startup logic to respect that directory for persisted state.",
-    "You can now bootstrap using Dingo’s built-in Mithril synchronization instead of relying on an external client, simplifying containerized deployments. The Docker image and startup flow were switched from an external `mithril-client` to native Mithril sync, and the related documentation was updated.",
-    "Documentation now includes clearer diagrams and explanations so it’s easier to understand how the system is put together. `ARCHITECTURE.md` was expanded with detailed architecture diagrams and additional sections."
+    "You can now choose where the node stores its data on disk, making it easier to run in different environments and manage storage.",
+    "You can now bootstrap using Dingo’s built-in Mithril synchronization instead of relying on an external client, simplifying containerized deployments.",
+    "Documentation now includes clearer diagrams and explanations so it’s easier to understand how the system is put together."
   ],
   "💪 Improvements": [
-    "Connections that sit idle for long periods are less likely to be dropped unexpectedly, improving stability for long-running processes. The LeiosNotify client timeout was disabled for idle connections.",
-    "Synchronization is more resilient when the underlying network connection changes, helping the node continue operating smoothly. Chainsync and blockfetch were hardened across connection switches, with updated peer-source quotas and refinement of block delay/density metrics plus additions like `tip-reached` and epoch nonce hex caching.",
-    "Performance and observability around block fetching are improved, with less overhead when no one is listening for events. A blockfetch metrics benchmark was added, delay-metric updates were optimized, and blockfetch events are no longer published when there are no subscribers.",
-    "Dependency management is more consistent and up to date, reducing friction when building and integrating. The `gouroboros` dependency was updated to v0.160.2 and `fxamacker/cbor` was made a direct dependency."
+    "Connections that sit idle for long periods are less likely to be dropped unexpectedly, improving stability for long-running processes.",
+    "Synchronization is more resilient when the underlying network connection changes, helping the node continue operating smoothly.",
+    "Performance and observability around block fetching are improved, with less overhead when no one is listening for events.",
+    "Dependency management is more consistent and up to date, reducing friction when building and integrating."
   ],
   "🔧 Fixes": [
-    "Release documentation is now aligned with the shipped content, reducing confusion when tracking changes across versions. A v0.25.0 entry was added to `RELEASE_NOTES.md` to reflect the current release notes set."
+    "Release documentation is now aligned with the shipped content, reducing confusion when tracking changes across versions."
   ]
 }
 
