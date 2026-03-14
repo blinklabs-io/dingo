@@ -1,6 +1,5 @@
 # Release Notes
 
-
 ## v0.26.0 (March 14, 2026)
 
 **Title:** Stronger Mithril verification and peer tuning
@@ -32,7 +31,6 @@ Hi folks! Here’s what we shipped in v0.26.0.
 Thank you for trying!
 
 ---
-
 
 ## v0.25.1 (March 13, 2026)
 
