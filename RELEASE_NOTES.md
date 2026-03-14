@@ -11,20 +11,25 @@
 
 Hi folks! Here’s what we shipped in v0.26.0.
 
-```json
-{
-  "✨ What's New": [
-    "You can now validate Mithril data end-to-end so you can trust what you download and use. This adds full Mithril certificate-chain verification plus STM signature verification using genesis keys loaded from the Cardano configuration, and extends the Mithril client/types to support stake distributions and hashing while wiring the CLI and config loader to use these capabilities."
-  ],
-  "💪 Improvements": [
-    "You can now tune peer behavior more precisely to better match your network conditions and stability goals. This introduces configurable peer-governor tuning, adjusts hot-peer promotion behavior, and updates the default parameters used for promotion decisions."
-  ],
-  "📋 What You Need to Know": [
-    "Release documentation has been updated so you can find the changes for this version in one place. The project’s RELEASE_NOTES.md now includes an entry for v0.25.1."
-  ]
-}
+### ✨ What's New
 
-```
+- **End-to-end Mithril verification:** Mithril downloads are more trustworthy because Dingo now verifies the full certificate chain and signatures using genesis keys from your Cardano configuration.
+
+### 💪 Improvements
+
+- **Peer governor tuning:** Peer behavior is easier to refine because you can now tune peer-governor settings, including hot-peer promotion and promotion defaults.
+
+### 🔧 Fixes
+
+- **No fixes:** No user-facing fixes shipped in this release.
+
+### 📋 What You Need to Know
+
+- **Release notes:** Release notes are easier to scan because `RELEASE_NOTES.md` now includes an entry for v0.25.1.
+
+### 🙏 Thank You
+
+Thank you for trying!
 
 ---
 
