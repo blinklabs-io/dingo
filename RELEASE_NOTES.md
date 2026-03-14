@@ -33,7 +33,6 @@ Thank you for trying!
 
 ---
 
-
 ## v0.25.1 (March 13, 2026)
 
 **Title:** Configurable storage and smoother sync
