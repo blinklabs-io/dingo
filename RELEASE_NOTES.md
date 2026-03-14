@@ -3,7 +3,7 @@
 
 ## v0.26.0 (March 14, 2026)
 
-**Title:** Smoother node experience
+**Title:** Trusted Mithril downloads and tuned peers
 
 **Date:** March 14, 2026
 
@@ -17,7 +17,7 @@ Hi folks! Here’s what we shipped in v0.26.0.
 
 ### 💪 Improvements
 
-- **Peer governor tuning:** Peer behavior is easier to refine because you can now tune peer-governor settings, including hot-peer promotion and promotion defaults.
+- **Peer governor tuning:** Peer connectivity is easier to tune because you can now adjust peer-governor settings, including hot-peer promotion behavior and its defaults.
 
 ### 🔧 Fixes
 
