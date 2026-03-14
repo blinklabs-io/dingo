@@ -13,7 +13,7 @@ Hi folks! Here’s what we shipped in v0.26.0.
 
 ### ✨ What's New
 
-- **End-to-end Mithril verification:** Mithril downloads are more trustworthy because Dingo now verifies the full certificate chain and signatures using genesis keys from your Cardano configuration.
+- **End-to-end Mithril verification:** Mithril downloads are more rock-solid because Dingo now verifies the full certificate chain and signatures using genesis keys from your Cardano configuration.
 
 ### 💪 Improvements
 
