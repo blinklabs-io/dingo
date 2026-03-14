@@ -17,7 +17,7 @@ Hi folks! Here’s what we shipped in v0.26.0.
 
 ### 💪 Improvements
 
-- **Peer selection tuning:** Connections can be more rock-solid because you can now tweak peer selection settings to match your network conditions.
+- **Peer selection tuning:** Connections can be more rock-solid because you can now refine peer selection settings to match your network conditions.
 
 ### 🔧 Fixes
 
