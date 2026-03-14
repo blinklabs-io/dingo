@@ -382,12 +382,14 @@ func (n *Node) Run(ctx context.Context) error {
 	tmpListeners := n.ouroboros.ConfigureListeners(n.config.listeners)
 	n.connManager = connmanager.NewConnectionManager(
 		connmanager.ConnectionManagerConfig{
-			Logger:             n.config.logger,
-			EventBus:           n.eventBus,
-			Listeners:          tmpListeners,
-			OutboundSourcePort: n.config.outboundSourcePort,
-			OutboundConnOpts:   n.ouroboros.OutboundConnOpts(),
-			PromRegistry:       n.config.promRegistry,
+			Logger:              n.config.logger,
+			EventBus:            n.eventBus,
+			Listeners:           tmpListeners,
+			OutboundSourcePort:  n.config.outboundSourcePort,
+			OutboundConnOpts:    n.ouroboros.OutboundConnOpts(),
+			PromRegistry:        n.config.promRegistry,
+			MaxConnectionsPerIP: n.config.maxConnectionsPerIP,
+			MaxInboundConns:     n.config.maxInboundConns,
 		},
 	)
 	n.eventBus.SubscribeFunc(
@@ -653,6 +655,9 @@ func (n *Node) Run(ctx context.Context) error {
 			ActivePeersTopologyQuota:       n.config.activePeersTopologyQuota,
 			ActivePeersGossipQuota:         n.config.activePeersGossipQuota,
 			ActivePeersLedgerQuota:         n.config.activePeersLedgerQuota,
+			MinHotPeers:                    n.config.minHotPeers,
+			ReconcileInterval:              n.config.reconcileInterval,
+			InactivityTimeout:              n.config.inactivityTimeout,
 			SyncProgressProvider:           n.ledgerState,
 		},
 	)
