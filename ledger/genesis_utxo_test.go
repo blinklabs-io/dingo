@@ -58,7 +58,7 @@ func TestGenesisUtxoStorageAndRetrieval(t *testing.T) {
 	nodeCfg, err := cardano.LoadCardanoNodeConfigWithFallback(
 		"preview/config.json",
 		"preview",
-		cardano.EmbeddedConfigPreviewNetworkFS,
+		cardano.EmbeddedConfigFS,
 	)
 	require.NoError(t, err)
 

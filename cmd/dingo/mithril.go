@@ -258,7 +258,7 @@ func runMithrilSync(
 	nodeCfg, err := cardano.LoadCardanoNodeConfigWithFallback(
 		cardanoConfigPath,
 		network,
-		cardano.EmbeddedConfigPreviewNetworkFS,
+		cardano.EmbeddedConfigFS,
 	)
 	if err != nil {
 		return fmt.Errorf("loading cardano node config: %w", err)

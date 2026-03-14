@@ -103,10 +103,18 @@ func resumeBackfill(
 ) error {
 	// Load Cardano node config for pparams and nonce
 	// computation during backfill.
+	cardanoConfigPath := cfg.CardanoConfig
+	network := cfg.Network
+	if cardanoConfigPath == "" {
+		if network == "" {
+			network = "preview"
+		}
+		cardanoConfigPath = network + "/config.json"
+	}
 	nodeCfg, nodeCfgErr := cardano.LoadCardanoNodeConfigWithFallback(
-		cfg.CardanoConfig,
-		cfg.Network,
-		cardano.EmbeddedConfigPreviewNetworkFS,
+		cardanoConfigPath,
+		network,
+		cardano.EmbeddedConfigFS,
 	)
 	if nodeCfgErr != nil {
 		logger.Warn(

@@ -112,8 +112,8 @@ func LoadWithDB(
 ) error {
 	// Derive default config path from cfg.Network when cfg.CardanoConfig is empty
 	cardanoConfigPath := cfg.CardanoConfig
+	network := cfg.Network
 	if cardanoConfigPath == "" {
-		network := cfg.Network
 		if network == "" {
 			network = "preview"
 		}
@@ -122,8 +122,8 @@ func LoadWithDB(
 
 	nodeCfg, err := cardano.LoadCardanoNodeConfigWithFallback(
 		cardanoConfigPath,
-		cfg.Network,
-		cardano.EmbeddedConfigPreviewNetworkFS,
+		network,
+		cardano.EmbeddedConfigFS,
 	)
 	if err != nil {
 		return fmt.Errorf(

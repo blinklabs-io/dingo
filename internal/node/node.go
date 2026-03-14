@@ -48,8 +48,8 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 	}
 	// Derive default config path from cfg.Network when cfg.CardanoConfig is empty
 	cardanoConfigPath := cfg.CardanoConfig
+	network := cfg.Network
 	if cardanoConfigPath == "" {
-		network := cfg.Network
 		if network == "" {
 			network = "preview"
 		}
@@ -60,8 +60,8 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 	var err error
 	nodeCfg, err = cardano.LoadCardanoNodeConfigWithFallback(
 		cardanoConfigPath,
-		cfg.Network,
-		cardano.EmbeddedConfigPreviewNetworkFS,
+		network,
+		cardano.EmbeddedConfigFS,
 	)
 	if err != nil {
 		return err
