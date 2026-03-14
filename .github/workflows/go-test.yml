@@ -70,7 +70,7 @@ jobs:
       MYSQL_DATABASE: dingo_test
       AWS_ACCESS_KEY_ID: minioadmin
       AWS_SECRET_ACCESS_KEY: minioadmin
-      AWS_ENDPOINT: "http://localhost:9000/"
+      AWS_ENDPOINT: "http://127.0.0.1:9000/"
       AWS_REGION: us-east-1
       DINGO_TEST_S3_BUCKET: dingo-test
     steps:
