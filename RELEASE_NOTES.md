@@ -3,7 +3,7 @@
 
 ## v0.26.0 (March 14, 2026)
 
-**Title:** Latest updates in v0.26.0
+**Title:** Stronger Mithril verification and peer tuning
 
 **Date:** March 14, 2026
 
@@ -11,17 +11,25 @@
 
 Hi folks! Here’s what we shipped in v0.26.0.
 
-```json
-{
-  "✨ What's New": [
-    "You can now rely on stronger end-to-end verification when working with Mithril data, which improves confidence that what you fetch is authentic and matches the chain’s trust roots."
-  ],
-  "💪 Improvements": [
-    "You can tune peer selection behavior to better match your network conditions, which can improve connectivity stability and performance under load."
-  ]
-}
+### ✨ What's New
 
-```
+- **Mithril data verification:** Mithril sync is more rock-solid because downloads now get stronger end-to-end verification.
+
+### 💪 Improvements
+
+- **Peer selection tuning:** Connections can be more rock-solid because you can now tweak peer selection settings to match your network conditions.
+
+### 🔧 Fixes
+
+- **No fixes:** No user-facing fixes shipped in this release.
+
+### 📋 What You Need to Know
+
+- **Upgrade:** You’re all set—no required configuration changes for this release.
+
+### 🙏 Thank You
+
+Thank you for trying!
 
 ---
 
