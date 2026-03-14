@@ -14,10 +14,10 @@ Hi folks! Here’s what we shipped in v0.26.0.
 ```json
 {
   "✨ What's New": [
-    "You can now rely on stronger end-to-end verification when working with Mithril data, which improves confidence that what you fetch is authentic and matches the chain’s trust roots. The Mithril client now performs full certificate-chain validation plus STM signature verification using genesis verification keys loaded from the Cardano configuration, and it extends client/types support for stake distributions and hashing while wiring these through the CLI and Cardano config loader."
+    "You can now rely on stronger end-to-end verification when working with Mithril data, which improves confidence that what you fetch is authentic and matches the chain’s trust roots."
   ],
   "💪 Improvements": [
-    "You can tune peer selection behavior to better match your network conditions, which can improve connectivity stability and performance under load. The peer-governor now supports configurable tuning parameters, and the hot-peer promotion behavior and its defaults have been adjusted to reflect the new configuration surface."
+    "You can tune peer selection behavior to better match your network conditions, which can improve connectivity stability and performance under load."
   ]
 }
 
