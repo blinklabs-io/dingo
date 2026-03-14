@@ -762,7 +762,7 @@ func (d *BlobStoreS3) Start() error {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 
 	// Load AWS config
-	awsCfg, err := config.LoadDefaultConfig(ctx)
+	awsCfg, err := config.LoadDefaultConfig(ctx, config.WithClientLogMode(aws.LogRequestWithBody))
 	if err != nil {
 		cancel()
 		return fmt.Errorf("s3 blob: load default AWS config: %w", err)
