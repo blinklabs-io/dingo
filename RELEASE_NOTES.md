@@ -1,6 +1,38 @@
 # Release Notes
 
 
+## v0.26.0 (March 14, 2026)
+
+**Title:** Trusted Mithril downloads and tuned peers
+
+**Date:** March 14, 2026
+
+**Version:** v0.26.0
+
+Hi folks! Here’s what we shipped in v0.26.0.
+
+### ✨ What's New
+
+- **End-to-end Mithril verification:** Mithril downloads are more rock-solid because Dingo now verifies the full certificate chain and signatures using genesis keys from your Cardano configuration.
+
+### 💪 Improvements
+
+- **Peer governor tuning:** Peer connectivity is easier to tune because you can now adjust peer-governor settings, including hot-peer promotion behavior and its defaults.
+
+### 🔧 Fixes
+
+- **No fixes:** No user-facing fixes shipped in this release.
+
+### 📋 What You Need to Know
+
+- **Release notes:** Release notes are easier to scan because `RELEASE_NOTES.md` now includes an entry for v0.25.1.
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
 ## v0.25.1 (March 13, 2026)
 
 **Title:** Configurable storage and smoother sync
