@@ -21,6 +21,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/database/plugin"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 
 	"github.com/blinklabs-io/dingo/database"
@@ -115,8 +116,12 @@ func canCreateDatabase(config *database.Config) bool {
 	return true
 }
 
+type namer interface {
+	Name() string
+}
+
 // getTestBackends returns a slice of test backends for benchmarking
-func getTestBackends(b *testing.B, diskDataDir string) []struct {
+func getTestBackends(b namer, diskDataDir string) []struct {
 	config *database.Config
 	name   string
 } {
@@ -178,6 +183,34 @@ func getTestBackends(b *testing.B, diskDataDir string) []struct {
 			DataDir:        "s3://" + testBucket + "/" + testPrefix,
 			MetadataPlugin: "sqlite",
 		}
+
+		plugin.SetPluginOption(
+			plugin.PluginTypeBlob,
+			"s3",
+			"bucket",
+			testBucket,
+		)
+
+		region := os.Getenv("AWS_REGION")
+		if region == "" {
+			region = "us-east-1"
+		}
+		plugin.SetPluginOption(
+			plugin.PluginTypeBlob,
+			"s3",
+			"region",
+			region,
+		)
+
+		if endpoint := os.Getenv("AWS_ENDPOINT"); endpoint != "" {
+			plugin.SetPluginOption(
+				plugin.PluginTypeBlob,
+				"s3",
+				"endpoint",
+				os.Getenv("AWS_ENDPOINT"),
+			)
+		}
+
 		if canCreateDatabase(s3Config) {
 			backends = append(backends, struct {
 				config *database.Config
