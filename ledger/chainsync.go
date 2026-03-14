@@ -855,11 +855,17 @@ func (ls *LedgerState) handleEventBlockfetchBlock(e BlockfetchEvent) error {
 	// Skip during historical sync (validationEnabled=false) because
 	// historical blocks were already validated by the network.
 	if ls.validationEnabled {
-		if err := ls.verifyBlockHeaderCrypto(e.Block); err != nil {
-			return fmt.Errorf(
-				"block header crypto verification failed: %w",
-				err,
-			)
+		// Chainsync already verified the queued header before blockfetch started.
+		// When the fetched block matches that first queued header by point, a
+		// second VRF/KES verification is redundant. Chain insertion still checks
+		// that the block matches the queued header hash before accepting it.
+		if !ls.chain.FirstHeaderMatchesPoint(e.Point) {
+			if err := ls.verifyBlockHeaderCrypto(e.Block); err != nil {
+				return fmt.Errorf(
+					"block header crypto verification failed: %w",
+					err,
+				)
+			}
 		}
 	}
 	ls.pendingBlockfetchEvents = append(ls.pendingBlockfetchEvents, e)
@@ -883,35 +889,49 @@ func (ls *LedgerState) flushPendingBlockfetchBlocks() error {
 	ls.pendingBlockfetchEvents = ls.pendingBlockfetchEvents[:0]
 	if len(pending) == 1 {
 		pendingEvent := pending[0]
-		var addBlockErr error
 		txn := ls.db.BlobTxn(true)
-		if err := txn.Do(func(txn *database.Txn) error {
-			addBlockErr = ls.chain.AddBlock(pendingEvent.Block, txn)
-			if addBlockErr == nil {
-				return nil
-			}
+		// Avoid Txn.Do in the normal one-block hot path. Near tip we hit this
+		// path for almost every block, and blob-only transactions can commit or
+		// roll back directly without the callback/defer overhead.
+		addBlockErr := ls.chain.AddBlockWithPoint(
+			pendingEvent.Block,
+			pendingEvent.Point,
+			txn,
+		)
+		if addBlockErr != nil {
 			var notFitErr chain.BlockNotFitChainTipError
 			var notMatchErr chain.BlockNotMatchHeaderError
-			if errors.As(addBlockErr, &notFitErr) ||
-				errors.As(addBlockErr, &notMatchErr) {
-				ls.config.Logger.Warn(
-					fmt.Sprintf(
-						"ignoring blockfetch block: %s",
-						addBlockErr,
-					),
+			ignored := errors.As(addBlockErr, &notFitErr) ||
+				errors.As(addBlockErr, &notMatchErr)
+			if rollbackErr := txn.Rollback(); rollbackErr != nil {
+				return fmt.Errorf(
+					"failed rolling back block transaction: %w",
+					rollbackErr,
 				)
-				if errors.As(addBlockErr, &notMatchErr) {
-					ls.chain.ClearHeaders()
-				}
-				return nil
 			}
-			return fmt.Errorf("add chain block: %w", addBlockErr)
-		}); err != nil {
-			return fmt.Errorf("failed processing block event: %w", err)
+			if !ignored {
+				return fmt.Errorf(
+					"failed processing block event: add chain block: %w",
+					addBlockErr,
+				)
+			}
+			ls.config.Logger.Warn(
+				fmt.Sprintf(
+					"ignoring blockfetch block: %s",
+					addBlockErr,
+				),
+			)
+			if errors.As(addBlockErr, &notMatchErr) {
+				ls.chain.ClearHeaders()
+			}
+		} else if err := txn.Commit(); err != nil {
+			_ = txn.Rollback()
+			return fmt.Errorf(
+				"failed processing block event: commit block transaction: %w",
+				err,
+			)
 		}
-		ls.Lock()
 		ls.checkSlotBattle(pendingEvent, addBlockErr)
-		ls.Unlock()
 		ls.chain.NotifyIterators()
 		return nil
 	}
@@ -931,7 +951,11 @@ func (ls *LedgerState) flushPendingBlockfetchBlocks() error {
 	txn := ls.db.BlobTxn(true)
 	if err := txn.Do(func(txn *database.Txn) error {
 		for idx, pendingEvent := range pending {
-			addBlockErrs[idx] = ls.chain.AddBlock(pendingEvent.Block, txn)
+			addBlockErrs[idx] = ls.chain.AddBlockWithPoint(
+				pendingEvent.Block,
+				pendingEvent.Point,
+				txn,
+			)
 			if addBlockErrs[idx] == nil {
 				continue
 			}
@@ -956,11 +980,9 @@ func (ls *LedgerState) flushPendingBlockfetchBlocks() error {
 	}); err != nil {
 		return fmt.Errorf("failed processing block event: %w", err)
 	}
-	ls.Lock()
 	for idx, pendingEvent := range pending {
 		ls.checkSlotBattle(pendingEvent, addBlockErrs[idx])
 	}
-	ls.Unlock()
 	ls.chain.NotifyIterators()
 	return nil
 }
@@ -1840,7 +1862,7 @@ func (ls *LedgerState) checkSlotBattle(
 	e BlockfetchEvent,
 	addBlockErr error,
 ) {
-	checker := ls.config.ForgedBlockChecker
+	checker := ls.loadForgedBlockChecker()
 	if checker == nil {
 		return
 	}
@@ -1872,8 +1894,8 @@ func (ls *LedgerState) checkSlotBattle(
 	)
 
 	// Increment slot battle metric
-	if ls.config.SlotBattleRecorder != nil {
-		ls.config.SlotBattleRecorder.RecordSlotBattle()
+	if recorder := ls.loadSlotBattleRecorder(); recorder != nil {
+		recorder.RecordSlotBattle()
 	}
 
 	if ls.config.EventBus != nil {

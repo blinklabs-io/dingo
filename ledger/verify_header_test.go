@@ -75,7 +75,7 @@ type testBlockResult struct {
 // one component. The seed parameter must be exactly 32 bytes and should
 // differ between tests to avoid key collisions.
 func createTestBlock(
-	t *testing.T,
+	t testing.TB,
 	seed [32]byte,
 	nonceSeed byte,
 	tamper tamperOption,
@@ -580,7 +580,7 @@ func TestEpochForSlot_SkipsZeroLengthEpochs(t *testing.T) {
 
 // newTestShelleyGenesisCfg creates a CardanoNodeConfig with Shelley genesis
 // loaded for use in verifyBlockHeaderCrypto tests.
-func newTestShelleyGenesisCfg(t *testing.T) *cardano.CardanoNodeConfig {
+func newTestShelleyGenesisCfg(t testing.TB) *cardano.CardanoNodeConfig {
 	t.Helper()
 	shelleyGenesisJSON := `{
 		"activeSlotsCoeff": 0.05,

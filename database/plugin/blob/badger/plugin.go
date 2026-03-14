@@ -47,9 +47,10 @@ const (
 )
 
 type ProfileSettings struct {
-	BlockCacheSize uint64
-	IndexCacheSize uint64
-	MemTableSize   uint64
+	BlockCacheSize       uint64
+	IndexCacheSize       uint64
+	MemTableSize         uint64
+	CompactBlockMetadata bool
 }
 
 var (
@@ -71,23 +72,26 @@ func profileSettings(profile Profile) ProfileSettings {
 	switch profile {
 	case ProfileLoad:
 		return ProfileSettings{
-			BlockCacheSize: 268435456, // 256MB
-			IndexCacheSize: 67108864,  // 64MB
-			MemTableSize:   67108864,  // 64MB
+			BlockCacheSize:       268435456, // 256MB
+			IndexCacheSize:       67108864,  // 64MB
+			MemTableSize:         67108864,  // 64MB
+			CompactBlockMetadata: false,
 		}
 	case ProfileCore:
 		return ProfileSettings{
-			BlockCacheSize: 536870912, // 512MB
-			IndexCacheSize: 134217728, // 128MB
-			MemTableSize:   67108864,  // 64MB
+			BlockCacheSize:       536870912, // 512MB
+			IndexCacheSize:       134217728, // 128MB
+			MemTableSize:         67108864,  // 64MB
+			CompactBlockMetadata: false,
 		}
 	case ProfileAPI:
 		fallthrough
 	default:
 		return ProfileSettings{
-			BlockCacheSize: DefaultBlockCacheSize,
-			IndexCacheSize: DefaultIndexCacheSize,
-			MemTableSize:   DefaultMemTableSize,
+			BlockCacheSize:       DefaultBlockCacheSize,
+			IndexCacheSize:       DefaultIndexCacheSize,
+			MemTableSize:         DefaultMemTableSize,
+			CompactBlockMetadata: false,
 		}
 	}
 }
@@ -119,6 +123,11 @@ func applyOperationalDefaults(
 	if *memTableSize == DefaultMemTableSize {
 		*memTableSize = settings.MemTableSize
 	}
+}
+
+func useCompactBlockMetadata(runMode, storageMode string) bool {
+	return (runMode == "serve" || runMode == "leios") &&
+		storageMode == string(ProfileCore)
 }
 
 // initCmdlineOptions sets default values for cmdlineOptions
@@ -221,6 +230,8 @@ func NewFromCmdlineOptions() plugin.Plugin {
 	blockCacheSize := cmdlineOptions.blockCacheSize
 	indexCacheSize := cmdlineOptions.indexCacheSize
 	memTableSize := cmdlineOptions.memTableSize
+	profile := resolveProfile(cmdlineOptions.runMode, cmdlineOptions.storageMode)
+	settings := profileSettings(profile)
 	applyOperationalDefaults(
 		cmdlineOptions.runMode,
 		cmdlineOptions.storageMode,
@@ -248,6 +259,13 @@ func NewFromCmdlineOptions() plugin.Plugin {
 		),
 		WithMemTableSize(
 			int64(memTableSizeCapped),
+		),
+		WithCompactBlockMetadata(
+			settings.CompactBlockMetadata ||
+				useCompactBlockMetadata(
+					cmdlineOptions.runMode,
+					cmdlineOptions.storageMode,
+				),
 		),
 		WithValueThreshold(
 			int64(valueThreshold),

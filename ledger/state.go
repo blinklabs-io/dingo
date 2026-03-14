@@ -423,6 +423,14 @@ type rollbackRecord struct {
 	timestamp time.Time
 }
 
+type forgedBlockCheckerHolder struct {
+	checker ForgedBlockChecker
+}
+
+type slotBattleRecorderHolder struct {
+	recorder SlotBattleRecorder
+}
+
 type LedgerState struct {
 	metrics                            stateMetrics
 	currentEra                         eras.EraDesc
@@ -440,6 +448,9 @@ type LedgerState struct {
 	currentTipBlockNonce               []byte
 	epochCache                         []models.Epoch
 	epochNonceHexCache                 map[uint64]string
+	slotsPerKESPeriod                  atomic.Uint64
+	forgedBlockChecker                 atomic.Pointer[forgedBlockCheckerHolder]
+	slotBattleRecorder                 atomic.Pointer[slotBattleRecorderHolder]
 	reachedTip                         bool
 	currentTip                         ochainsync.Tip
 	currentEpoch                       models.Epoch
@@ -545,6 +556,9 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 		epochNonceHexCache: make(map[uint64]string),
 		validationEnabled:  cfg.ValidateHistorical,
 	}
+	ls.slotsPerKESPeriod.Store(ls.loadSlotsPerKESPeriod())
+	ls.storeForgedBlockChecker(cfg.ForgedBlockChecker)
+	ls.storeSlotBattleRecorder(cfg.SlotBattleRecorder)
 	return ls, nil
 }
 
@@ -3294,6 +3308,21 @@ func (ls *LedgerState) Database() *database.Database {
 
 // SlotsPerKESPeriod returns the number of slots in a KES period.
 func (ls *LedgerState) SlotsPerKESPeriod() uint64 {
+	if slotsPerKESPeriod := ls.slotsPerKESPeriod.Load(); slotsPerKESPeriod != 0 {
+		return slotsPerKESPeriod
+	}
+	slotsPerKESPeriod := ls.loadSlotsPerKESPeriod()
+	if slotsPerKESPeriod == 0 {
+		return 0
+	}
+	ls.slotsPerKESPeriod.Store(slotsPerKESPeriod)
+	return slotsPerKESPeriod
+}
+
+func (ls *LedgerState) loadSlotsPerKESPeriod() uint64 {
+	if ls.config.CardanoNodeConfig == nil {
+		return 0
+	}
 	shelleyGenesis := ls.config.CardanoNodeConfig.ShelleyGenesis()
 	if shelleyGenesis == nil {
 		return 0
@@ -3583,6 +3612,7 @@ func (ls *LedgerState) SetForgedBlockChecker(checker ForgedBlockChecker) {
 	ls.Lock()
 	defer ls.Unlock()
 	ls.config.ForgedBlockChecker = checker
+	ls.storeForgedBlockChecker(checker)
 }
 
 // SetSlotBattleRecorder sets the recorder used to increment the
@@ -3594,6 +3624,49 @@ func (ls *LedgerState) SetSlotBattleRecorder(
 	ls.Lock()
 	defer ls.Unlock()
 	ls.config.SlotBattleRecorder = recorder
+	ls.storeSlotBattleRecorder(recorder)
+}
+
+func (ls *LedgerState) storeForgedBlockChecker(checker ForgedBlockChecker) {
+	if checker == nil {
+		ls.forgedBlockChecker.Store(nil)
+		return
+	}
+	ls.forgedBlockChecker.Store(
+		&forgedBlockCheckerHolder{checker: checker},
+	)
+}
+
+func (ls *LedgerState) loadForgedBlockChecker() ForgedBlockChecker {
+	checker := ls.forgedBlockChecker.Load()
+	if checker == nil {
+		// Support direct test fixtures that construct LedgerState without
+		// going through NewLedgerState/SetForgedBlockChecker.
+		return ls.config.ForgedBlockChecker
+	}
+	return checker.checker
+}
+
+func (ls *LedgerState) storeSlotBattleRecorder(
+	recorder SlotBattleRecorder,
+) {
+	if recorder == nil {
+		ls.slotBattleRecorder.Store(nil)
+		return
+	}
+	ls.slotBattleRecorder.Store(
+		&slotBattleRecorderHolder{recorder: recorder},
+	)
+}
+
+func (ls *LedgerState) loadSlotBattleRecorder() SlotBattleRecorder {
+	recorder := ls.slotBattleRecorder.Load()
+	if recorder == nil {
+		// Support direct test fixtures that construct LedgerState without
+		// going through NewLedgerState/SetSlotBattleRecorder.
+		return ls.config.SlotBattleRecorder
+	}
+	return recorder.recorder
 }
 
 // forgeBlock creates a conway block with transactions from mempool
