@@ -28,6 +28,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/klauspost/compress/zstd"
@@ -47,12 +48,12 @@ type ProgressFunc func(DownloadProgress)
 
 type countingReader struct {
 	reader io.Reader
-	read   int64
+	read   atomic.Int64
 }
 
 func (cr *countingReader) Read(p []byte) (int, error) {
 	n, err := cr.reader.Read(p)
-	cr.read += int64(n)
+	cr.read.Add(int64(n))
 	return n, err
 }
 
@@ -706,7 +707,8 @@ func ExtractArchive(
 			}
 			filesExtracted++
 			if fileInfo.Size() > 0 {
-				percent := float64(countingFile.read) / float64(fileInfo.Size()) * 100
+				archiveRead := countingFile.read.Load()
+				percent := float64(archiveRead) / float64(fileInfo.Size()) * 100
 				now := time.Now()
 				if lastProgressLog.IsZero() ||
 					now.Sub(lastProgressLog) >= 10*time.Second ||
@@ -717,9 +719,9 @@ func ExtractArchive(
 						"progress",
 						fmt.Sprintf("%.1f%%", percent),
 						"archive_bytes_read",
-						humanBytes(countingFile.read),
+						HumanBytes(archiveRead),
 						"archive_size",
-						humanBytes(fileInfo.Size()),
+						HumanBytes(fileInfo.Size()),
 						"files_extracted",
 						filesExtracted,
 					)
@@ -738,14 +740,15 @@ func ExtractArchive(
 		"component", "mithril",
 		"files_extracted", filesExtracted,
 		"progress", "100.0%",
-		"archive_size", humanBytes(fileInfo.Size()),
+		"archive_size", HumanBytes(fileInfo.Size()),
 		"destination", destDir,
 	)
 
 	return destDir, nil
 }
 
-func humanBytes(b int64) string {
+// HumanBytes formats a byte count in a human-readable form.
+func HumanBytes(b int64) string {
 	const (
 		kb = 1024
 		mb = 1024 * kb

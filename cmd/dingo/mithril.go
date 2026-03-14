@@ -137,7 +137,7 @@ func mithrilListCommand() *cobra.Command {
 					digest,
 					s.Beacon.Epoch,
 					s.Beacon.ImmutableFileNumber,
-					humanBytes(s.Size),
+					mithril.HumanBytes(s.Size),
 					created,
 				)
 			}
@@ -190,7 +190,7 @@ func mithrilShowCommand() *cobra.Command {
 				"Immutable File Number: %d\n",
 				snapshot.Beacon.ImmutableFileNumber,
 			)
-			fmt.Printf("Size:                  %s\n", humanBytes(snapshot.Size))
+			fmt.Printf("Size:                  %s\n", mithril.HumanBytes(snapshot.Size))
 			fmt.Printf(
 				"Certificate Hash:      %s\n",
 				snapshot.CertificateHash,
@@ -251,6 +251,19 @@ func runMithrilSync(
 	logger *slog.Logger,
 	network string,
 ) error {
+	cardanoConfigPath := cfg.CardanoConfig
+	if cardanoConfigPath == "" {
+		cardanoConfigPath = filepath.Join(network, "config.json")
+	}
+	nodeCfg, err := cardano.LoadCardanoNodeConfigWithFallback(
+		cardanoConfigPath,
+		network,
+		cardano.EmbeddedConfigPreviewNetworkFS,
+	)
+	if err != nil {
+		return fmt.Errorf("loading cardano node config: %w", err)
+	}
+
 	aggregatorURL, err := resolveAggregatorURL(
 		cfg.Mithril.AggregatorURL, network,
 	)
@@ -276,7 +289,10 @@ func runMithrilSync(
 			DownloadDir:            downloadDir,
 			CleanupAfterLoad:       cfg.Mithril.CleanupAfterLoad,
 			VerifyCertificateChain: cfg.Mithril.VerifyCertificates,
-			Logger:                 logger,
+			GenesisVerificationKey: nodeCfg.MithrilGenesisVerificationKey,
+			AncillaryVerificationKey: nodeCfg.
+				MithrilGenesisAncillaryVerificationKey,
+			Logger: logger,
 			OnProgress: func() func(mithril.DownloadProgress) {
 				const progressLogInterval = 10 * time.Second
 				const progressLogPercentStep = 5.0
@@ -299,9 +315,9 @@ func runMithrilSync(
 						fmt.Sprintf(
 							"download progress: %.1f%% (%s / %s) at %s/s",
 							p.Percent,
-							humanBytes(p.BytesDownloaded),
-							humanBytes(p.TotalBytes),
-							humanBytes(int64(p.BytesPerSecond)),
+							mithril.HumanBytes(p.BytesDownloaded),
+							mithril.HumanBytes(p.TotalBytes),
+							mithril.HumanBytes(int64(p.BytesPerSecond)),
 						),
 						"component", "mithril",
 					)
@@ -313,20 +329,6 @@ func runMithrilSync(
 	)
 	if err != nil {
 		return fmt.Errorf("mithril bootstrap failed: %w", err)
-	}
-
-	// Load Cardano node config for epoch parameter resolution
-	cardanoConfigPath := cfg.CardanoConfig
-	if cardanoConfigPath == "" {
-		cardanoConfigPath = network + "/config.json"
-	}
-	nodeCfg, err := cardano.LoadCardanoNodeConfigWithFallback(
-		cardanoConfigPath,
-		network,
-		cardano.EmbeddedConfigPreviewNetworkFS,
-	)
-	if err != nil {
-		return fmt.Errorf("loading cardano node config: %w", err)
 	}
 
 	// Open database once and reuse for both import and ImmutableDB load
@@ -542,25 +544,6 @@ func runMithrilSync(
 	return nil
 }
 
-// humanBytes formats a byte count in a human-readable form.
-func humanBytes(b int64) string {
-	const (
-		kb = 1024
-		mb = 1024 * kb
-		gb = 1024 * mb
-	)
-	switch {
-	case b >= gb:
-		return fmt.Sprintf("%.1f GB", float64(b)/float64(gb))
-	case b >= mb:
-		return fmt.Sprintf("%.1f MB", float64(b)/float64(mb))
-	case b >= kb:
-		return fmt.Sprintf("%.1f KB", float64(b)/float64(kb))
-	default:
-		return fmt.Sprintf("%d B", b)
-	}
-}
-
 // syncCommand creates the "sync" command with --mithril flag at the
 // root level for convenience.
 func syncCommand() *cobra.Command {
@@ -712,19 +695,31 @@ func importLedgerState(
 					"stage", p.Stage,
 				}
 				msg := p.Description
-				if p.Total > 0 {
-					pct := float64(p.Current) / float64(p.Total) * 100
+				var pct float64
+				switch {
+				case p.Percent > 0:
+					pct = p.Percent
+				case p.Total > 0:
+					pct = float64(p.Current) /
+						float64(p.Total) * 100
+				}
+				if pct > 0 {
 					attrs = append(
 						attrs,
 						"progress",
 						fmt.Sprintf("%.1f%%", pct),
-						"current",
-						p.Current,
-						"total",
-						p.Total,
+					)
+				}
+				if p.Total > 0 {
+					attrs = append(
+						attrs,
+						"current", p.Current,
+						"total", p.Total,
 					)
 				} else if p.Current > 0 {
-					attrs = append(attrs, "current", p.Current)
+					attrs = append(
+						attrs, "current", p.Current,
+					)
 				}
 				logger.Info(msg, attrs...)
 			},
@@ -953,8 +948,13 @@ func processGapBlocks(
 		if err := ctx.Err(); err != nil {
 			return fmt.Errorf("cancelled: %w", err)
 		}
+		// Gap blocks were already parsed and body-hash validated by the
+		// blockfetch client when fetched from the relay. We only need a
+		// second decode here to extract transactions and offsets.
 		parsedBlock, err := gledger.NewBlockFromCbor(
-			block.Type, block.Cbor,
+			block.Type,
+			block.Cbor,
+			lcommon.VerifyConfig{SkipBodyHashValidation: true},
 		)
 		if err != nil {
 			return fmt.Errorf(

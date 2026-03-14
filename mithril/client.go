@@ -17,10 +17,16 @@ package mithril
 import (
 	"cmp"
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"slices"
@@ -33,6 +39,14 @@ import (
 type Beacon struct {
 	Epoch               uint64 `json:"epoch"`
 	ImmutableFileNumber uint64 `json:"immutable_file_number"`
+}
+
+// CardanoTransactionsBeacon represents a Cardano chain position at a
+// specific epoch and block number, used by the CardanoTransactions
+// signed entity type.
+type CardanoTransactionsBeacon struct {
+	Epoch       uint64 `json:"epoch"`
+	BlockNumber uint64 `json:"block_number"`
 }
 
 // SnapshotBase contains the fields shared by both the list and
@@ -70,6 +84,74 @@ type SnapshotListItem struct {
 	SnapshotBase
 }
 
+// MithrilStakeDistributionListItem represents a Mithril stake distribution
+// artifact entry returned by the aggregator.
+type MithrilStakeDistributionListItem struct {
+	Hash                 string   `json:"hash"`
+	CertificateHash      string   `json:"certificate_hash"`
+	CreatedAt            string   `json:"created_at"`
+	Locations            []string `json:"locations"`
+	CompressionAlgorithm string   `json:"compression_algorithm"`
+	Epoch                uint64   `json:"epoch"`
+}
+
+// MithrilStakeDistributionParty represents a Mithril signer and its associated
+// stake and verification key in the certified stake distribution.
+type MithrilStakeDistributionParty struct {
+	PartyID         string `json:"party_id"`
+	Stake           uint64 `json:"stake"`
+	VerificationKey string `json:"verification_key"`
+}
+
+// VerificationKeyBytes decodes the signer's verification key from its encoded
+// string representation.
+func (p *MithrilStakeDistributionParty) VerificationKeyBytes() ([]byte, error) {
+	if p == nil || p.VerificationKey == "" {
+		return nil, errors.New("verification key is empty")
+	}
+	ret, ok := decodePrimaryEncodedBytes(p.VerificationKey)
+	if !ok {
+		return nil, errors.New("could not decode signer verification key")
+	}
+	return ret, nil
+}
+
+// MithrilStakeDistribution represents a downloaded Mithril stake distribution
+// artifact.
+type MithrilStakeDistribution struct {
+	Hash            string                          `json:"hash"`
+	CertificateHash string                          `json:"certificate_hash"`
+	Epoch           uint64                          `json:"epoch"`
+	Signers         []MithrilStakeDistributionParty `json:"signers"`
+}
+
+// CardanoStakeDistributionListItem represents a Cardano stake distribution
+// artifact entry returned by the aggregator.
+type CardanoStakeDistributionListItem struct {
+	Hash                 string   `json:"hash"`
+	CertificateHash      string   `json:"certificate_hash"`
+	CreatedAt            string   `json:"created_at"`
+	Locations            []string `json:"locations"`
+	CompressionAlgorithm string   `json:"compression_algorithm"`
+	Epoch                uint64   `json:"epoch"`
+}
+
+// CardanoStakeDistributionParty represents a stake pool and stake value in a
+// certified Cardano stake distribution artifact.
+type CardanoStakeDistributionParty struct {
+	PoolID string `json:"pool_id"`
+	Stake  uint64 `json:"stake"`
+}
+
+// CardanoStakeDistribution represents a downloaded Cardano stake distribution
+// artifact.
+type CardanoStakeDistribution struct {
+	Hash            string                          `json:"hash"`
+	CertificateHash string                          `json:"certificate_hash"`
+	Epoch           uint64                          `json:"epoch"`
+	Pools           []CardanoStakeDistributionParty `json:"pools"`
+}
+
 // ProtocolParameters represents the Mithril protocol parameters
 // used during signing.
 type ProtocolParameters struct {
@@ -78,11 +160,30 @@ type ProtocolParameters struct {
 	PhiF float64 `json:"phi_f"`
 }
 
+// ComputeHash matches the upstream Mithril protocol-parameters hash.
+func (p ProtocolParameters) ComputeHash() string {
+	hasher := sha256.New()
+	hasher.Write(uint64ToBigEndianBytes(p.K))
+	hasher.Write(uint64ToBigEndianBytes(p.M))
+	phiFixed := uint32(math.Round(p.PhiF * float64(uint64(1)<<24)))
+	hasher.Write(uint32ToBigEndianBytes(phiFixed))
+	return hex.EncodeToString(hasher.Sum(nil))
+}
+
 // StakeDistributionParty represents a signer in the certificate
 // metadata with their party ID and stake.
 type StakeDistributionParty struct {
 	PartyID string `json:"party_id"`
 	Stake   uint64 `json:"stake"`
+}
+
+// ComputeHash matches the upstream Mithril signer hash used in certificate
+// metadata hashing.
+func (p StakeDistributionParty) ComputeHash() string {
+	hasher := sha256.New()
+	hasher.Write([]byte(p.PartyID))
+	hasher.Write(uint64ToBigEndianBytes(p.Stake))
+	return hex.EncodeToString(hasher.Sum(nil))
 }
 
 // CertificateMetadata holds the metadata section of a certificate.
@@ -95,10 +196,73 @@ type CertificateMetadata struct {
 	Signers     []StakeDistributionParty `json:"signers"`
 }
 
+// ComputeHash matches the upstream Mithril certificate-metadata hash.
+func (m CertificateMetadata) ComputeHash() (string, error) {
+	hasher := sha256.New()
+	hasher.Write([]byte(m.Network))
+	hasher.Write([]byte(m.Version))
+	hasher.Write([]byte(m.Parameters.ComputeHash()))
+	initiatedAt, err := time.Parse(time.RFC3339Nano, m.InitiatedAt)
+	if err != nil {
+		return "", fmt.Errorf("parsing initiated_at: %w", err)
+	}
+	sealedAt, err := time.Parse(time.RFC3339Nano, m.SealedAt)
+	if err != nil {
+		return "", fmt.Errorf("parsing sealed_at: %w", err)
+	}
+	hasher.Write(int64ToBigEndianBytes(initiatedAt.UnixNano()))
+	hasher.Write(int64ToBigEndianBytes(sealedAt.UnixNano()))
+	for _, signer := range m.Signers {
+		hasher.Write([]byte(signer.ComputeHash()))
+	}
+	return hex.EncodeToString(hasher.Sum(nil)), nil
+}
+
 // ProtocolMessage represents the protocol message included in a
 // certificate.
 type ProtocolMessage struct {
 	MessageParts map[string]string `json:"message_parts"`
+}
+
+// ComputeHash matches the upstream Mithril protocol-message hash.
+func (p ProtocolMessage) ComputeHash() string {
+	hasher := sha256.New()
+	seenKeys := make(map[string]struct{}, len(p.MessageParts))
+	for _, key := range protocolMessageHashOrder {
+		value, ok := p.MessageParts[key]
+		if !ok {
+			continue
+		}
+		hasher.Write([]byte(key))
+		hasher.Write([]byte(value))
+		seenKeys[key] = struct{}{}
+	}
+	remainingKeys := make([]string, 0, len(p.MessageParts)-len(seenKeys))
+	for key := range p.MessageParts {
+		if _, ok := seenKeys[key]; ok {
+			continue
+		}
+		remainingKeys = append(remainingKeys, key)
+	}
+	slices.Sort(remainingKeys)
+	for _, key := range remainingKeys {
+		hasher.Write([]byte(key))
+		hasher.Write([]byte(p.MessageParts[key]))
+	}
+	return hex.EncodeToString(hasher.Sum(nil))
+}
+
+var protocolMessageHashOrder = []string{
+	"snapshot_digest",
+	"cardano_transactions_merkle_root",
+	"cardano_blocks_transactions_merkle_root",
+	"next_aggregate_verification_key",
+	"next_protocol_parameters",
+	"current_epoch",
+	"latest_block_number",
+	"cardano_stake_distribution_epoch",
+	"cardano_stake_distribution_merkle_root",
+	"cardano_database_merkle_root",
 }
 
 // SignedEntityType represents the type and parameters of the signed
@@ -107,6 +271,13 @@ type ProtocolMessage struct {
 type SignedEntityType struct {
 	raw json.RawMessage
 }
+
+const (
+	signedEntityTypeMithrilStakeDistribution  = "MithrilStakeDistribution"
+	signedEntityTypeCardanoStakeDistribution  = "CardanoStakeDistribution"
+	signedEntityTypeCardanoImmutableFilesFull = "CardanoImmutableFilesFull"
+	signedEntityTypeCardanoTransactions       = "CardanoTransactions"
+)
 
 // UnmarshalJSON implements json.Unmarshaler for SignedEntityType.
 func (s *SignedEntityType) UnmarshalJSON(data []byte) error {
@@ -128,21 +299,160 @@ func (s *SignedEntityType) Raw() json.RawMessage {
 	return s.raw
 }
 
-// CardanoImmutableFilesFull attempts to parse the signed entity
-// as a CardanoImmutableFilesFull beacon. Returns nil if the entity
-// type does not match.
-func (s *SignedEntityType) CardanoImmutableFilesFull() *Beacon {
-	if s.raw == nil {
+// Kind returns the tagged union key for the signed entity type.
+func (s *SignedEntityType) Kind() (string, error) {
+	if s == nil || s.raw == nil {
+		return "", errors.New("signed entity type is nil")
+	}
+	var parsed map[string]json.RawMessage
+	if err := json.Unmarshal(s.raw, &parsed); err != nil {
+		return "", fmt.Errorf("parsing signed entity type: %w", err)
+	}
+	if len(parsed) != 1 {
+		return "", fmt.Errorf(
+			"signed entity type must contain exactly one key, got %d",
+			len(parsed),
+		)
+	}
+	var key string
+	for k := range parsed {
+		key = k
+	}
+	return key, nil
+}
+
+func (s *SignedEntityType) beaconForType(typeName string) *Beacon {
+	if s == nil || s.raw == nil {
 		return nil
 	}
 	var parsed map[string]Beacon
 	if err := json.Unmarshal(s.raw, &parsed); err != nil {
 		return nil
 	}
-	if b, ok := parsed["CardanoImmutableFilesFull"]; ok {
-		return &b
+	beacon, ok := parsed[typeName]
+	if !ok {
+		return nil
+	}
+	return &beacon
+}
+
+func (s *SignedEntityType) epochBeaconForType(typeName string) *Beacon {
+	if s == nil || s.raw == nil {
+		return nil
+	}
+	var parsed map[string]uint64
+	if err := json.Unmarshal(s.raw, &parsed); err != nil {
+		return nil
+	}
+	epoch, ok := parsed[typeName]
+	if !ok {
+		return nil
+	}
+	return &Beacon{Epoch: epoch}
+}
+
+func (s *SignedEntityType) feedHash(hasher hash.Hash) error {
+	if s == nil {
+		return errors.New("signed entity type is nil")
+	}
+	kind, err := s.Kind()
+	if err != nil {
+		return err
+	}
+	switch kind {
+	case signedEntityTypeMithrilStakeDistribution:
+		beacon := s.MithrilStakeDistribution()
+		if beacon == nil {
+			return fmt.Errorf("cannot parse beacon for %s", kind)
+		}
+		hasher.Write(uint64ToBigEndianBytes(beacon.Epoch))
+	case signedEntityTypeCardanoStakeDistribution:
+		beacon := s.CardanoStakeDistribution()
+		if beacon == nil {
+			return fmt.Errorf("cannot parse beacon for %s", kind)
+		}
+		hasher.Write(uint64ToBigEndianBytes(beacon.Epoch))
+	case signedEntityTypeCardanoImmutableFilesFull:
+		beacon := s.CardanoImmutableFilesFull()
+		if beacon == nil {
+			return fmt.Errorf("cannot parse beacon for %s", kind)
+		}
+		hasher.Write(uint64ToBigEndianBytes(beacon.Epoch))
+		hasher.Write(uint64ToBigEndianBytes(beacon.ImmutableFileNumber))
+	case signedEntityTypeCardanoTransactions:
+		beacon := s.CardanoTransactions()
+		if beacon == nil {
+			return fmt.Errorf("cannot parse beacon for %s", kind)
+		}
+		hasher.Write(uint64ToBigEndianBytes(beacon.Epoch))
+		hasher.Write(uint64ToBigEndianBytes(beacon.BlockNumber))
+	default:
+		return fmt.Errorf("unsupported signed entity type: %s", kind)
 	}
 	return nil
+}
+
+func uint64ToBigEndianBytes(v uint64) []byte {
+	b := make([]byte, 8)
+	binary.BigEndian.PutUint64(b, v)
+	return b
+}
+
+func uint32ToBigEndianBytes(v uint32) []byte {
+	b := make([]byte, 4)
+	binary.BigEndian.PutUint32(b, v)
+	return b
+}
+
+func int64ToBigEndianBytes(v int64) []byte {
+	b := make([]byte, 8)
+	binary.BigEndian.PutUint64(b, uint64(v)) //nolint:gosec // intentional bit-pattern reinterpretation for serialization
+	return b
+}
+
+// CardanoImmutableFilesFull attempts to parse the signed entity
+// as a CardanoImmutableFilesFull beacon. Returns nil if the entity
+// type does not match.
+func (s *SignedEntityType) CardanoImmutableFilesFull() *Beacon {
+	return s.beaconForType(signedEntityTypeCardanoImmutableFilesFull)
+}
+
+// MithrilStakeDistribution attempts to parse the signed entity as a
+// MithrilStakeDistribution beacon. Returns nil if the entity type does not
+// match.
+func (s *SignedEntityType) MithrilStakeDistribution() *Beacon {
+	if beacon := s.epochBeaconForType(signedEntityTypeMithrilStakeDistribution); beacon != nil {
+		return beacon
+	}
+	return s.beaconForType(signedEntityTypeMithrilStakeDistribution)
+}
+
+// CardanoStakeDistribution attempts to parse the signed entity as a
+// CardanoStakeDistribution beacon. Returns nil if the entity type does not
+// match.
+func (s *SignedEntityType) CardanoStakeDistribution() *Beacon {
+	if beacon := s.epochBeaconForType(signedEntityTypeCardanoStakeDistribution); beacon != nil {
+		return beacon
+	}
+	return s.beaconForType(signedEntityTypeCardanoStakeDistribution)
+}
+
+// CardanoTransactions attempts to parse the signed entity as a
+// CardanoTransactions beacon containing epoch and block_number.
+// Returns nil if the entity type does not match.
+func (s *SignedEntityType) CardanoTransactions() *CardanoTransactionsBeacon {
+	if s == nil || s.raw == nil {
+		return nil
+	}
+	var parsed map[string]CardanoTransactionsBeacon
+	if err := json.Unmarshal(s.raw, &parsed); err != nil {
+		return nil
+	}
+	beacon, ok := parsed[signedEntityTypeCardanoTransactions]
+	if !ok {
+		return nil
+	}
+	return &beacon
 }
 
 // Certificate represents a Mithril certificate as returned by the
@@ -174,24 +484,128 @@ func (c *Certificate) IsChainingToItself() bool {
 	return c.Hash != "" && c.Hash == c.PreviousHash
 }
 
-// Default aggregator URLs for each supported Cardano network.
-var DefaultAggregatorURLs = map[string]string{
-	"mainnet": "https://aggregator.release-mainnet.api.mithril.network/aggregator",
-	"preprod": "https://aggregator.release-preprod.api.mithril.network/aggregator",
-	"preview": "https://aggregator.pre-release-preview.api.mithril.network/aggregator",
+// AggregateVerificationKeyBytes decodes the aggregate verification key from
+// its encoded string representation.
+func (c *Certificate) AggregateVerificationKeyBytes() ([]byte, error) {
+	if c == nil || c.AggregateVerificationKey == "" {
+		return nil, errors.New("aggregate verification key is empty")
+	}
+	ret, ok := decodePrimaryEncodedBytes(c.AggregateVerificationKey)
+	if !ok {
+		return nil, errors.New("could not decode aggregate verification key")
+	}
+	return ret, nil
+}
+
+// MultiSignatureBytes decodes the multi-signature from its encoded string
+// representation.
+func (c *Certificate) MultiSignatureBytes() ([]byte, error) {
+	if c == nil || c.MultiSignature == "" {
+		return nil, errors.New("multi-signature is empty")
+	}
+	ret, ok := decodePrimaryEncodedBytes(c.MultiSignature)
+	if !ok {
+		return nil, errors.New("could not decode multi-signature")
+	}
+	return ret, nil
+}
+
+// ComputeHash matches the upstream Mithril certificate hash.
+func (c *Certificate) ComputeHash() (string, error) {
+	if c == nil {
+		return "", errors.New("certificate is nil")
+	}
+	metadataHash, err := c.Metadata.ComputeHash()
+	if err != nil {
+		return "", fmt.Errorf("computing certificate metadata hash: %w", err)
+	}
+	hasher := sha256.New()
+	hasher.Write([]byte(c.PreviousHash))
+	hasher.Write(uint64ToBigEndianBytes(c.Epoch))
+	hasher.Write([]byte(metadataHash))
+	hasher.Write([]byte(c.ProtocolMessage.ComputeHash()))
+	hasher.Write([]byte(c.SignedMessage))
+	hasher.Write([]byte(c.AggregateVerificationKey))
+	if c.IsGenesis() {
+		hasher.Write([]byte(c.GenesisSignature))
+	} else {
+		if err := c.SignedEntityType.feedHash(hasher); err != nil {
+			return "", fmt.Errorf("hashing signed entity type: %w", err)
+		}
+		hasher.Write([]byte(c.MultiSignature))
+	}
+	return hex.EncodeToString(hasher.Sum(nil)), nil
+}
+
+// NetworkConfig describes the Mithril trust endpoints for a specific Cardano
+// network.
+type NetworkConfig struct {
+	AggregatorURL               string
+	GenesisVerificationKeyURL   string
+	AncillaryVerificationKeyURL string
+}
+
+// Default network configuration for each supported Cardano network. The
+// verification key URLs follow the official Mithril network configurations.
+var defaultNetworkConfigs = map[string]NetworkConfig{
+	"mainnet": {
+		AggregatorURL:               "https://aggregator.release-mainnet.api.mithril.network/aggregator",
+		GenesisVerificationKeyURL:   "https://raw.githubusercontent.com/input-output-hk/mithril/main/mithril-infra/configuration/data/network-config/mainnet/genesis.vkey",
+		AncillaryVerificationKeyURL: "https://raw.githubusercontent.com/input-output-hk/mithril/main/mithril-infra/configuration/data/network-config/mainnet/genesis-ancillary.vkey",
+	},
+	"preprod": {
+		AggregatorURL:               "https://aggregator.release-preprod.api.mithril.network/aggregator",
+		GenesisVerificationKeyURL:   "https://raw.githubusercontent.com/input-output-hk/mithril/main/mithril-infra/configuration/data/network-config/preprod/genesis.vkey",
+		AncillaryVerificationKeyURL: "https://raw.githubusercontent.com/input-output-hk/mithril/main/mithril-infra/configuration/data/network-config/preprod/genesis-ancillary.vkey",
+	},
+	"preview": {
+		AggregatorURL:               "https://aggregator.pre-release-preview.api.mithril.network/aggregator",
+		GenesisVerificationKeyURL:   "https://raw.githubusercontent.com/input-output-hk/mithril/main/mithril-infra/configuration/data/network-config/preview/genesis.vkey",
+		AncillaryVerificationKeyURL: "https://raw.githubusercontent.com/input-output-hk/mithril/main/mithril-infra/configuration/data/network-config/preview/genesis-ancillary.vkey",
+	},
+}
+
+// NetworkConfigForNetwork returns the default Mithril network configuration
+// for the given network name, or an error if the network is not recognized.
+func NetworkConfigForNetwork(network string) (NetworkConfig, error) {
+	cfg, ok := defaultNetworkConfigs[network]
+	if !ok {
+		return NetworkConfig{}, fmt.Errorf(
+			"no default Mithril network config for network %q",
+			network,
+		)
+	}
+	return cfg, nil
 }
 
 // AggregatorURLForNetwork returns the default aggregator URL for the
 // given network name, or an error if the network is not recognized.
 func AggregatorURLForNetwork(network string) (string, error) {
-	aggregatorURL, ok := DefaultAggregatorURLs[network]
-	if !ok {
-		return "", fmt.Errorf(
-			"no default Mithril aggregator URL for network %q",
-			network,
-		)
+	cfg, err := NetworkConfigForNetwork(network)
+	if err != nil {
+		return "", err
 	}
-	return aggregatorURL, nil
+	return cfg.AggregatorURL, nil
+}
+
+// GenesisVerificationKeyURLForNetwork returns the default Mithril genesis
+// verification key URL for the given network.
+func GenesisVerificationKeyURLForNetwork(network string) (string, error) {
+	cfg, err := NetworkConfigForNetwork(network)
+	if err != nil {
+		return "", err
+	}
+	return cfg.GenesisVerificationKeyURL, nil
+}
+
+// AncillaryVerificationKeyURLForNetwork returns the default Mithril ancillary
+// verification key URL for the given network.
+func AncillaryVerificationKeyURLForNetwork(network string) (string, error) {
+	cfg, err := NetworkConfigForNetwork(network)
+	if err != nil {
+		return "", err
+	}
+	return cfg.AncillaryVerificationKeyURL, nil
 }
 
 // Client is an HTTP client for the Mithril aggregator REST API.
@@ -307,6 +721,113 @@ func (c *Client) GetSnapshot(
 	return &snapshot, nil
 }
 
+// ListMithrilStakeDistributions retrieves available Mithril stake
+// distributions from the aggregator.
+func (c *Client) ListMithrilStakeDistributions(
+	ctx context.Context,
+) ([]MithrilStakeDistributionListItem, error) {
+	reqURL := c.aggregatorURL + "/artifact/mithril-stake-distributions"
+	body, err := c.doGet(ctx, reqURL)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"listing Mithril stake distributions: %w",
+			err,
+		)
+	}
+	defer body.Close()
+
+	var ret []MithrilStakeDistributionListItem
+	if err := json.NewDecoder(body).Decode(&ret); err != nil {
+		return nil, fmt.Errorf(
+			"decoding Mithril stake distribution list: %w",
+			err,
+		)
+	}
+	return ret, nil
+}
+
+// GetMithrilStakeDistribution retrieves a Mithril stake distribution by hash.
+func (c *Client) GetMithrilStakeDistribution(
+	ctx context.Context,
+	hash string,
+) (*MithrilStakeDistribution, error) {
+	reqURL := c.aggregatorURL + "/artifact/mithril-stake-distribution/" +
+		url.PathEscape(hash)
+	body, err := c.doGet(ctx, reqURL)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"getting Mithril stake distribution %s: %w",
+			hash,
+			err,
+		)
+	}
+	defer body.Close()
+
+	var ret MithrilStakeDistribution
+	if err := json.NewDecoder(body).Decode(&ret); err != nil {
+		return nil, fmt.Errorf(
+			"decoding Mithril stake distribution %s: %w",
+			hash,
+			err,
+		)
+	}
+	return &ret, nil
+}
+
+// ListCardanoStakeDistributions retrieves available Cardano stake
+// distributions from the aggregator.
+func (c *Client) ListCardanoStakeDistributions(
+	ctx context.Context,
+) ([]CardanoStakeDistributionListItem, error) {
+	reqURL := c.aggregatorURL + "/artifact/cardano-stake-distributions"
+	body, err := c.doGet(ctx, reqURL)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"listing Cardano stake distributions: %w",
+			err,
+		)
+	}
+	defer body.Close()
+
+	var ret []CardanoStakeDistributionListItem
+	if err := json.NewDecoder(body).Decode(&ret); err != nil {
+		return nil, fmt.Errorf(
+			"decoding Cardano stake distribution list: %w",
+			err,
+		)
+	}
+	return ret, nil
+}
+
+// GetCardanoStakeDistribution retrieves a Cardano stake distribution by hash
+// or unique identifier.
+func (c *Client) GetCardanoStakeDistribution(
+	ctx context.Context,
+	identifier string,
+) (*CardanoStakeDistribution, error) {
+	reqURL := c.aggregatorURL + "/artifact/cardano-stake-distribution/" +
+		url.PathEscape(identifier)
+	body, err := c.doGet(ctx, reqURL)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"getting Cardano stake distribution %s: %w",
+			identifier,
+			err,
+		)
+	}
+	defer body.Close()
+
+	var ret CardanoStakeDistribution
+	if err := json.NewDecoder(body).Decode(&ret); err != nil {
+		return nil, fmt.Errorf(
+			"decoding Cardano stake distribution %s: %w",
+			identifier,
+			err,
+		)
+	}
+	return &ret, nil
+}
+
 // GetCertificate retrieves a certificate by its hash.
 // Corresponds to GET /certificate/{hash}.
 func (c *Client) GetCertificate(
@@ -403,6 +924,25 @@ func (c *Client) doGet(
 		Reader: io.LimitReader(resp.Body, maxResponseBytes),
 		Closer: resp.Body,
 	}, nil
+}
+
+func decodePrimaryEncodedBytes(data string) ([]byte, bool) {
+	if decoded, err := decodeHexString(data); err == nil {
+		return decoded, true
+	}
+	if decoded, err := base64.StdEncoding.DecodeString(data); err == nil {
+		return decoded, true
+	}
+	if decoded, err := base64.RawStdEncoding.DecodeString(data); err == nil {
+		return decoded, true
+	}
+	if decoded, err := base64.URLEncoding.DecodeString(data); err == nil {
+		return decoded, true
+	}
+	if decoded, err := base64.RawURLEncoding.DecodeString(data); err == nil {
+		return decoded, true
+	}
+	return nil, false
 }
 
 // maxResponseBytes limits JSON API responses to 10 MiB to prevent

@@ -35,20 +35,24 @@ import (
 // CardanoNodeConfig represents the config.json/yaml file used by cardano-node.
 type CardanoNodeConfig struct {
 	// Embedded filesystem for loading genesis files
-	embedFS            embed.FS
-	alonzoGenesis      *alonzo.AlonzoGenesis
-	byronGenesis       *byron.ByronGenesis
-	conwayGenesis      *conway.ConwayGenesis
-	shelleyGenesis     *shelley.ShelleyGenesis
-	path               string
-	AlonzoGenesisFile  string `yaml:"AlonzoGenesisFile"`
-	AlonzoGenesisHash  string `yaml:"AlonzoGenesisHash"`
-	ByronGenesisFile   string `yaml:"ByronGenesisFile"`
-	ByronGenesisHash   string `yaml:"ByronGenesisHash"`
-	ConwayGenesisFile  string `yaml:"ConwayGenesisFile"`
-	ConwayGenesisHash  string `yaml:"ConwayGenesisHash"`
-	ShelleyGenesisFile string `yaml:"ShelleyGenesisFile"`
-	ShelleyGenesisHash string `yaml:"ShelleyGenesisHash"`
+	embedFS                                    embed.FS
+	alonzoGenesis                              *alonzo.AlonzoGenesis
+	byronGenesis                               *byron.ByronGenesis
+	conwayGenesis                              *conway.ConwayGenesis
+	shelleyGenesis                             *shelley.ShelleyGenesis
+	path                                       string
+	AlonzoGenesisFile                          string `yaml:"AlonzoGenesisFile"`
+	AlonzoGenesisHash                          string `yaml:"AlonzoGenesisHash"`
+	ByronGenesisFile                           string `yaml:"ByronGenesisFile"`
+	ByronGenesisHash                           string `yaml:"ByronGenesisHash"`
+	ConwayGenesisFile                          string `yaml:"ConwayGenesisFile"`
+	ConwayGenesisHash                          string `yaml:"ConwayGenesisHash"`
+	MithrilGenesisVerificationKey              string `yaml:"MithrilGenesisVerificationKey"`
+	MithrilGenesisVerificationKeyFile          string `yaml:"MithrilGenesisVerificationKeyFile"`
+	MithrilGenesisAncillaryVerificationKey     string `yaml:"MithrilGenesisAncillaryVerificationKey"`
+	MithrilGenesisAncillaryVerificationKeyFile string `yaml:"MithrilGenesisAncillaryVerificationKeyFile"`
+	ShelleyGenesisFile                         string `yaml:"ShelleyGenesisFile"`
+	ShelleyGenesisHash                         string `yaml:"ShelleyGenesisHash"`
 
 	// Hard fork epoch configuration. Pointer types distinguish
 	// "not set" (nil) from "set to 0" (*0), which is critical
@@ -64,6 +68,11 @@ type CardanoNodeConfig struct {
 	TestConwayHardForkAtEpoch    *uint64 `yaml:"TestConwayHardForkAtEpoch"`
 }
 
+const (
+	defaultMithrilGenesisVerificationKeyFile          = "genesis.vkey"
+	defaultMithrilGenesisAncillaryVerificationKeyFile = "ancillary.vkey"
+)
+
 func NewCardanoNodeConfigFromReader(r io.Reader) (*CardanoNodeConfig, error) {
 	var ret CardanoNodeConfig
 	dec := yaml.NewDecoder(r)
@@ -78,11 +87,12 @@ func NewCardanoNodeConfigFromFile(file string) (*CardanoNodeConfig, error) {
 	if err != nil {
 		return nil, err
 	}
+	defer f.Close()
 	c, err := NewCardanoNodeConfigFromReader(f)
 	if err != nil {
 		return nil, err
 	}
-	c.path = path.Dir(file)
+	c.path = filepath.Dir(file)
 	if err := c.loadGenesisConfigs(); err != nil {
 		return nil, err
 	}
@@ -119,7 +129,7 @@ func (c *CardanoNodeConfig) loadGenesisConfigs() error {
 	if c.ByronGenesisFile != "" {
 		byronGenesisPath := c.ByronGenesisFile
 		if !filepath.IsAbs(byronGenesisPath) {
-			byronGenesisPath = path.Join(c.path, byronGenesisPath)
+			byronGenesisPath = filepath.Join(c.path, byronGenesisPath)
 		}
 		byronGenesisBytes, err := os.ReadFile(byronGenesisPath)
 		if err != nil {
@@ -151,7 +161,7 @@ func (c *CardanoNodeConfig) loadGenesisConfigs() error {
 	if c.ShelleyGenesisFile != "" {
 		shelleyGenesisPath := c.ShelleyGenesisFile
 		if !filepath.IsAbs(shelleyGenesisPath) {
-			shelleyGenesisPath = path.Join(c.path, shelleyGenesisPath)
+			shelleyGenesisPath = filepath.Join(c.path, shelleyGenesisPath)
 		}
 		shelleyGenesisBytes, err := os.ReadFile(shelleyGenesisPath)
 		if err != nil {
@@ -181,7 +191,7 @@ func (c *CardanoNodeConfig) loadGenesisConfigs() error {
 	if c.AlonzoGenesisFile != "" {
 		alonzoGenesisPath := c.AlonzoGenesisFile
 		if !filepath.IsAbs(alonzoGenesisPath) {
-			alonzoGenesisPath = path.Join(c.path, alonzoGenesisPath)
+			alonzoGenesisPath = filepath.Join(c.path, alonzoGenesisPath)
 		}
 		alonzoGenesisBytes, err := os.ReadFile(alonzoGenesisPath)
 		if err != nil {
@@ -209,7 +219,7 @@ func (c *CardanoNodeConfig) loadGenesisConfigs() error {
 	if c.ConwayGenesisFile != "" {
 		conwayGenesisPath := c.ConwayGenesisFile
 		if !filepath.IsAbs(conwayGenesisPath) {
-			conwayGenesisPath = path.Join(c.path, conwayGenesisPath)
+			conwayGenesisPath = filepath.Join(c.path, conwayGenesisPath)
 		}
 		conwayGenesisBytes, err := os.ReadFile(conwayGenesisPath)
 		if err != nil {
@@ -233,6 +243,80 @@ func (c *CardanoNodeConfig) loadGenesisConfigs() error {
 		}
 		c.conwayGenesis = &conwayGenesis
 	}
+	if err := c.loadMithrilVerificationKeysFromDisk(); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (c *CardanoNodeConfig) loadOptionalConfigFile(
+	filename string,
+) ([]byte, error) {
+	if filename == "" {
+		return nil, nil
+	}
+	filePath := filename
+	if !filepath.IsAbs(filePath) {
+		filePath = filepath.Join(c.path, filePath)
+	}
+	ret, err := os.ReadFile(filePath)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"reading config file %q: %w", filePath, err,
+		)
+	}
+	return ret, nil
+}
+
+func (c *CardanoNodeConfig) resolveOptionalConfigFile(
+	configuredFilename string,
+	defaultFilename string,
+) string {
+	if configuredFilename != "" {
+		return configuredFilename
+	}
+	if defaultFilename == "" {
+		return ""
+	}
+	filePath := defaultFilename
+	if !filepath.IsAbs(filePath) {
+		filePath = filepath.Join(c.path, filePath)
+	}
+	if _, err := os.Stat(filePath); err == nil {
+		return defaultFilename
+	}
+	return ""
+}
+
+func (c *CardanoNodeConfig) loadMithrilVerificationKeysFromDisk() error {
+	c.MithrilGenesisVerificationKeyFile = c.resolveOptionalConfigFile(
+		c.MithrilGenesisVerificationKeyFile,
+		defaultMithrilGenesisVerificationKeyFile,
+	)
+	if c.MithrilGenesisVerificationKeyFile != "" &&
+		c.MithrilGenesisVerificationKey == "" {
+		keyBytes, err := c.loadOptionalConfigFile(
+			c.MithrilGenesisVerificationKeyFile,
+		)
+		if err != nil {
+			return err
+		}
+		c.MithrilGenesisVerificationKey = string(keyBytes)
+	}
+	c.MithrilGenesisAncillaryVerificationKeyFile = c.resolveOptionalConfigFile(
+		c.MithrilGenesisAncillaryVerificationKeyFile,
+		defaultMithrilGenesisAncillaryVerificationKeyFile,
+	)
+	if c.MithrilGenesisAncillaryVerificationKeyFile != "" &&
+		c.MithrilGenesisAncillaryVerificationKey == "" {
+		keyBytes, err := c.loadOptionalConfigFile(
+			c.MithrilGenesisAncillaryVerificationKeyFile,
+		)
+		if err != nil {
+			return err
+		}
+		c.MithrilGenesisAncillaryVerificationKey = string(keyBytes)
+	}
 	return nil
 }
 
@@ -253,6 +337,43 @@ func (c *CardanoNodeConfig) loadGenesisFromEmbedFS(
 		return nil, err
 	}
 	return f, nil
+}
+
+func (c *CardanoNodeConfig) loadOptionalConfigFileFromEmbedFS(
+	filename string,
+) ([]byte, error) {
+	if filename == "" {
+		return nil, nil
+	}
+	filePath := path.Join(c.path, filename)
+	f, err := c.embedFS.Open(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("open %s: %w", filePath, err)
+	}
+	defer f.Close()
+	ret, err := io.ReadAll(f)
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", filePath, err)
+	}
+	return ret, nil
+}
+
+func (c *CardanoNodeConfig) resolveOptionalConfigFileFromEmbedFS(
+	configuredFilename string,
+	defaultFilename string,
+) string {
+	if configuredFilename != "" {
+		return configuredFilename
+	}
+	if defaultFilename == "" {
+		return ""
+	}
+	filePath := path.Join(c.path, defaultFilename)
+	if f, err := c.embedFS.Open(filePath); err == nil {
+		f.Close()
+		return defaultFilename
+	}
+	return ""
 }
 
 // loadGenesisConfigsFromEmbed loads all genesis configuration files from the embedded filesystem.
@@ -379,6 +500,34 @@ func (c *CardanoNodeConfig) loadGenesisConfigsFromEmbed() error {
 			return err
 		}
 		c.conwayGenesis = &conwayGenesis
+	}
+	c.MithrilGenesisVerificationKeyFile = c.resolveOptionalConfigFileFromEmbedFS(
+		c.MithrilGenesisVerificationKeyFile,
+		defaultMithrilGenesisVerificationKeyFile,
+	)
+	if c.MithrilGenesisVerificationKey == "" &&
+		c.MithrilGenesisVerificationKeyFile != "" {
+		keyBytes, err := c.loadOptionalConfigFileFromEmbedFS(
+			c.MithrilGenesisVerificationKeyFile,
+		)
+		if err != nil {
+			return err
+		}
+		c.MithrilGenesisVerificationKey = string(keyBytes)
+	}
+	c.MithrilGenesisAncillaryVerificationKeyFile = c.resolveOptionalConfigFileFromEmbedFS(
+		c.MithrilGenesisAncillaryVerificationKeyFile,
+		defaultMithrilGenesisAncillaryVerificationKeyFile,
+	)
+	if c.MithrilGenesisAncillaryVerificationKey == "" &&
+		c.MithrilGenesisAncillaryVerificationKeyFile != "" {
+		keyBytes, err := c.loadOptionalConfigFileFromEmbedFS(
+			c.MithrilGenesisAncillaryVerificationKeyFile,
+		)
+		if err != nil {
+			return err
+		}
+		c.MithrilGenesisAncillaryVerificationKey = string(keyBytes)
 	}
 
 	return nil
