@@ -224,6 +224,11 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 				cfg.ActivePeersGossipQuota,
 				cfg.ActivePeersLedgerQuota,
 			),
+			dingo.WithMinHotPeers(cfg.MinHotPeers),
+			dingo.WithReconcileInterval(cfg.ReconcileInterval),
+			dingo.WithInactivityTimeout(cfg.InactivityTimeout),
+			dingo.WithMaxConnectionsPerIP(cfg.MaxConnectionsPerIP),
+			dingo.WithMaxInboundConns(cfg.MaxInboundConns),
 			dingo.WithChainsyncMaxClients(
 				cfg.Chainsync.MaxClients,
 			),

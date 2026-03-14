@@ -320,11 +320,15 @@ func TestPeerGovernor_Reconcile_MinimumHotPeers(t *testing.T) {
 	eventBus := newMockEventBus()
 	reg := prometheus.NewRegistry()
 
+	// MinHotPeers=2 with unlimited active target (-1 → 0 internally).
+	// The promotion target should fall back to MinHotPeers so only 2
+	// of the 3 warm peers are promoted to hot.
 	pg := NewPeerGovernor(PeerGovernorConfig{
-		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		EventBus:     eventBus,
-		PromRegistry: reg,
-		MinHotPeers:  2,
+		Logger:                    slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		EventBus:                  eventBus,
+		PromRegistry:              reg,
+		MinHotPeers:               2,
+		TargetNumberOfActivePeers: -1, // unlimited
 	})
 
 	// Add 3 warm peers with connections
@@ -352,7 +356,7 @@ func TestPeerGovernor_Reconcile_MinimumHotPeers(t *testing.T) {
 		t,
 		2,
 		hotCount,
-	) // Only MinHotPeers warm peers should be promoted to hot (score-based selection)
+	) // Only MinHotPeers warm peers should be promoted when target is unlimited
 
 	// Event publishing is tested indirectly
 }
@@ -1336,7 +1340,7 @@ func TestPeerGovernor_PeerTargets_DefaultValues(t *testing.T) {
 		// TargetNumberOf* not set (0)
 	})
 
-	// Should use default values
+	// Should use default values (match cardano-node config.json)
 	assert.Equal(t, 150, pg.config.TargetNumberOfKnownPeers)
 	assert.Equal(t, 50, pg.config.TargetNumberOfEstablishedPeers)
 	assert.Equal(t, 20, pg.config.TargetNumberOfActivePeers)
