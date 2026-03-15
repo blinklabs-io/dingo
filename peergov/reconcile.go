@@ -154,7 +154,7 @@ func (p *PeerGovernor) reconcile() {
 		candidates := []*Peer{}
 		for _, peer := range p.peers {
 			if peer != nil && peer.State == PeerStateWarm &&
-				peer.Connection != nil {
+				peer.hasClientConnection() {
 				// Skip bootstrap peers if bootstrap has been exited
 				if p.isBootstrapPeer(peer) && !p.canPromoteBootstrapPeer() {
 					continue

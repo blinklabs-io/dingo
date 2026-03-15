@@ -226,7 +226,7 @@ func TestPeerGovernor_Reconcile_Promotions(t *testing.T) {
 	// Manually set one peer to warm with connection (should promote to hot)
 	pg.mu.Lock()
 	pg.peers[0].State = PeerStateWarm
-	pg.peers[0].Connection = &PeerConnection{} // Mock connection
+	pg.peers[0].Connection = &PeerConnection{IsClient: true}
 	pg.mu.Unlock()
 
 	pg.reconcile()
@@ -236,6 +236,30 @@ func TestPeerGovernor_Reconcile_Promotions(t *testing.T) {
 	assert.Equal(t, PeerStateCold, peers[1].State)
 
 	// Event publishing is tested indirectly
+}
+
+func TestPeerGovernor_Reconcile_SkipsResponderOnlyWarmPromotion(t *testing.T) {
+	eventBus := newMockEventBus()
+	reg := prometheus.NewRegistry()
+
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		EventBus:     eventBus,
+		PromRegistry: reg,
+		MinHotPeers:  1,
+	})
+
+	pg.AddPeer("44.0.0.1:3001", PeerSourceP2PGossip)
+
+	pg.mu.Lock()
+	pg.peers[0].State = PeerStateWarm
+	pg.peers[0].Connection = &PeerConnection{IsClient: false}
+	pg.mu.Unlock()
+
+	pg.reconcile()
+
+	peers := pg.GetPeers()
+	assert.Equal(t, PeerStateWarm, peers[0].State)
 }
 
 func TestPeerGovernor_Reconcile_Demotions(t *testing.T) {
@@ -339,7 +363,7 @@ func TestPeerGovernor_Reconcile_MinimumHotPeers(t *testing.T) {
 	pg.mu.Lock()
 	for i := range pg.peers {
 		pg.peers[i].State = PeerStateWarm
-		pg.peers[i].Connection = &PeerConnection{} // Mock connection
+		pg.peers[i].Connection = &PeerConnection{IsClient: true}
 	}
 	pg.mu.Unlock()
 
@@ -375,9 +399,9 @@ func TestPeerGovernor_Metrics(t *testing.T) {
 
 	pg.mu.Lock()
 	pg.peers[0].State = PeerStateWarm
-	pg.peers[0].Connection = &PeerConnection{}
+	pg.peers[0].Connection = &PeerConnection{IsClient: true}
 	pg.peers[1].State = PeerStateHot
-	pg.peers[1].Connection = &PeerConnection{}
+	pg.peers[1].Connection = &PeerConnection{IsClient: true}
 	pg.mu.Unlock()
 
 	// Force metrics update
@@ -419,7 +443,7 @@ func TestPeerGovernor_PeerSharing(t *testing.T) {
 	pg.mu.Lock()
 	for i := range pg.peers {
 		pg.peers[i].State = PeerStateHot
-		pg.peers[i].Connection = &PeerConnection{}
+		pg.peers[i].Connection = &PeerConnection{IsClient: true}
 	}
 	pg.mu.Unlock()
 
@@ -3336,7 +3360,7 @@ func TestPeerGovernor_ReconcilePromotion_ValencyAware(t *testing.T) {
 			GroupID:          "public-root-0",
 			Valency:          2,
 			PerformanceScore: 0.6,
-			Connection:       &PeerConnection{},
+			Connection:       &PeerConnection{IsClient: true},
 		},
 		{
 			Address:          "public2:3001",
@@ -3345,7 +3369,7 @@ func TestPeerGovernor_ReconcilePromotion_ValencyAware(t *testing.T) {
 			GroupID:          "public-root-0",
 			Valency:          2,
 			PerformanceScore: 0.7,
-			Connection:       &PeerConnection{},
+			Connection:       &PeerConnection{IsClient: true},
 		},
 		// Warm peer for group2 (at valency) - lower priority
 		{
@@ -3355,7 +3379,7 @@ func TestPeerGovernor_ReconcilePromotion_ValencyAware(t *testing.T) {
 			GroupID:          "public-root-1",
 			Valency:          1,
 			PerformanceScore: 0.9,
-			Connection:       &PeerConnection{},
+			Connection:       &PeerConnection{IsClient: true},
 		},
 	}
 
@@ -3475,7 +3499,7 @@ func TestPeerGovernor_InboundPeer_TenureRequirement(t *testing.T) {
 			Address:          "192.168.1.1:3001",
 			Source:           PeerSourceInboundConn,
 			State:            PeerStateWarm,
-			Connection:       &PeerConnection{},
+			Connection:       &PeerConnection{IsClient: true},
 			PerformanceScore: 0.8,        // Above threshold
 			FirstSeen:        time.Now(), // Just seen, not enough tenure
 		},
@@ -3515,7 +3539,7 @@ func TestPeerGovernor_InboundPeer_HigherScoreThreshold(t *testing.T) {
 			Address:          "192.168.1.1:3001",
 			Source:           PeerSourceInboundConn,
 			State:            PeerStateWarm,
-			Connection:       &PeerConnection{},
+			Connection:       &PeerConnection{IsClient: true},
 			PerformanceScore: 0.4, // Above normal 0.3, below inbound 0.6
 			FirstSeen: time.Now().
 				Add(-5 * time.Minute),
@@ -3558,7 +3582,7 @@ func TestPeerGovernor_InboundPeer_BothRequirementsMet(t *testing.T) {
 			Address:    "192.168.1.1:3001",
 			Source:     PeerSourceInboundConn,
 			State:      PeerStateWarm,
-			Connection: &PeerConnection{},
+			Connection: &PeerConnection{IsClient: true},
 			FirstSeen: time.Now().
 				Add(-10 * time.Minute),
 			// Sufficient tenure (>= 5min)
@@ -3611,7 +3635,7 @@ func TestPeerGovernor_NonInboundPeer_UsesNormalThreshold(t *testing.T) {
 			Address:          "192.168.1.1:3001",
 			Source:           PeerSourceP2PGossip,
 			State:            PeerStateWarm,
-			Connection:       &PeerConnection{},
+			Connection:       &PeerConnection{IsClient: true},
 			PerformanceScore: 0.4,        // Above normal 0.3, below inbound 0.6
 			FirstSeen:        time.Now(), // Just seen (would fail inbound tenure)
 		},
@@ -3780,7 +3804,7 @@ func TestPeerGovernor_InboundPeer_MixedPeerPromotion(t *testing.T) {
 			Address:          "192.168.1.1:3001",
 			Source:           PeerSourceInboundConn,
 			State:            PeerStateWarm,
-			Connection:       &PeerConnection{},
+			Connection:       &PeerConnection{IsClient: true},
 			PerformanceScore: 0.9,        // High score but...
 			FirstSeen:        time.Now(), // Insufficient tenure
 		},
@@ -3788,7 +3812,7 @@ func TestPeerGovernor_InboundPeer_MixedPeerPromotion(t *testing.T) {
 			Address:          "192.168.1.2:3001",
 			Source:           PeerSourceP2PGossip,
 			State:            PeerStateWarm,
-			Connection:       &PeerConnection{},
+			Connection:       &PeerConnection{IsClient: true},
 			PerformanceScore: 0.5, // Lower score
 			FirstSeen:        time.Now(),
 		},
@@ -3796,7 +3820,7 @@ func TestPeerGovernor_InboundPeer_MixedPeerPromotion(t *testing.T) {
 			Address:          "192.168.1.3:3001",
 			Source:           PeerSourceP2PGossip,
 			State:            PeerStateWarm,
-			Connection:       &PeerConnection{},
+			Connection:       &PeerConnection{IsClient: true},
 			PerformanceScore: 0.4, // Even lower score
 			FirstSeen:        time.Now(),
 		},
@@ -3847,7 +3871,7 @@ func TestPeerGovernor_PerSourceMetrics(t *testing.T) {
 			Address:    "192.168.1.1:3001",
 			Source:     PeerSourceP2PGossip,
 			State:      PeerStateHot,
-			Connection: &PeerConnection{},
+			Connection: &PeerConnection{IsClient: true},
 		},
 		{
 			Address: "192.168.1.2:3001",
@@ -3863,7 +3887,7 @@ func TestPeerGovernor_PerSourceMetrics(t *testing.T) {
 			Address:    "192.168.1.4:3001",
 			Source:     PeerSourceTopologyPublicRoot,
 			State:      PeerStateHot,
-			Connection: &PeerConnection{},
+			Connection: &PeerConnection{IsClient: true},
 		},
 		{
 			Address: "192.168.1.5:3001",
@@ -3959,14 +3983,14 @@ func TestPeerGovernor_ChurnMetricsBySource(t *testing.T) {
 			Address:          "192.168.1.1:3001",
 			Source:           PeerSourceP2PGossip,
 			State:            PeerStateHot,
-			Connection:       &PeerConnection{},
+			Connection:       &PeerConnection{IsClient: true},
 			PerformanceScore: 0.5,
 		},
 		{
 			Address:          "192.168.1.2:3001",
 			Source:           PeerSourceP2PLedger,
 			State:            PeerStateHot,
-			Connection:       &PeerConnection{},
+			Connection:       &PeerConnection{IsClient: true},
 			PerformanceScore: 0.4,
 		},
 		// Warm peers to be promoted
@@ -3974,7 +3998,7 @@ func TestPeerGovernor_ChurnMetricsBySource(t *testing.T) {
 			Address:          "192.168.1.3:3001",
 			Source:           PeerSourceP2PGossip,
 			State:            PeerStateWarm,
-			Connection:       &PeerConnection{},
+			Connection:       &PeerConnection{IsClient: true},
 			PerformanceScore: 0.8,
 		},
 	}
@@ -4071,7 +4095,7 @@ func TestPeerGovernor_EventsPublished(t *testing.T) {
 			Address:          "192.168.1.1:3001",
 			Source:           PeerSourceP2PGossip,
 			State:            PeerStateHot,
-			Connection:       &PeerConnection{},
+			Connection:       &PeerConnection{IsClient: true},
 			PerformanceScore: 0.5,
 		},
 	}
@@ -4111,19 +4135,19 @@ func TestPeerGovernor_EventsPublished(t *testing.T) {
 			Address:    "192.168.1.1:3001",
 			Source:     PeerSourceP2PGossip,
 			State:      PeerStateHot,
-			Connection: &PeerConnection{},
+			Connection: &PeerConnection{IsClient: true},
 		},
 		{
 			Address:    "192.168.1.2:3001",
 			Source:     PeerSourceTopologyPublicRoot,
 			State:      PeerStateHot,
-			Connection: &PeerConnection{},
+			Connection: &PeerConnection{IsClient: true},
 		},
 		{
 			Address:    "192.168.1.3:3001",
 			Source:     PeerSourceP2PLedger,
 			State:      PeerStateHot,
-			Connection: &PeerConnection{},
+			Connection: &PeerConnection{IsClient: true},
 		},
 	}
 	pg.mu.Unlock()
@@ -4281,9 +4305,10 @@ func TestPeerGovernor_ShouldExitBootstrap_LedgerPeerCount(t *testing.T) {
 	// Add ledger peers (warm/hot count towards exit)
 	for i := range 3 {
 		pg.peers = append(pg.peers, &Peer{
-			Address: fmt.Sprintf("192.168.1.%d:3001", i+1),
-			Source:  PeerSourceP2PLedger,
-			State:   PeerStateWarm,
+			Address:    fmt.Sprintf("192.168.1.%d:3001", i+1),
+			Source:     PeerSourceP2PLedger,
+			State:      PeerStateWarm,
+			Connection: &PeerConnection{IsClient: true},
 		})
 	}
 
@@ -4330,6 +4355,74 @@ func TestPeerGovernor_ShouldExitBootstrap_LedgerPeerCount_ColdNotCounted(
 		t,
 		shouldExit,
 		"should not exit bootstrap when ledger peers are cold",
+	)
+}
+
+func TestPeerGovernor_ShouldExitBootstrap_LedgerPeerCount_ResponderOnlyWarmNotCounted(
+	t *testing.T,
+) {
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:                slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		MinLedgerPeersForExit: 3,
+	})
+
+	pg.mu.Lock()
+	pg.peers = append(pg.peers, &Peer{
+		Address: "44.0.0.1:3001",
+		Source:  PeerSourceTopologyBootstrapPeer,
+		State:   PeerStateWarm,
+	})
+
+	for i := range 3 {
+		pg.peers = append(pg.peers, &Peer{
+			Address:    fmt.Sprintf("192.168.1.%d:3001", i+1),
+			Source:     PeerSourceP2PLedger,
+			State:      PeerStateWarm,
+			Connection: &PeerConnection{IsClient: false},
+		})
+	}
+
+	shouldExit, _ := pg.shouldExitBootstrap()
+	pg.mu.Unlock()
+
+	assert.False(
+		t,
+		shouldExit,
+		"should not exit bootstrap when warm ledger peers are responder-only",
+	)
+}
+
+func TestPeerGovernor_ShouldExitBootstrap_LedgerPeerCount_ResponderOnlyHotNotCounted(
+	t *testing.T,
+) {
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:                slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		MinLedgerPeersForExit: 3,
+	})
+
+	pg.mu.Lock()
+	pg.peers = append(pg.peers, &Peer{
+		Address: "44.0.0.1:3001",
+		Source:  PeerSourceTopologyBootstrapPeer,
+		State:   PeerStateWarm,
+	})
+
+	for i := range 3 {
+		pg.peers = append(pg.peers, &Peer{
+			Address:    fmt.Sprintf("192.168.1.%d:3001", i+1),
+			Source:     PeerSourceP2PLedger,
+			State:      PeerStateHot,
+			Connection: &PeerConnection{IsClient: false},
+		})
+	}
+
+	shouldExit, _ := pg.shouldExitBootstrap()
+	pg.mu.Unlock()
+
+	assert.False(
+		t,
+		shouldExit,
+		"should not exit bootstrap when hot ledger peers are responder-only",
 	)
 }
 
@@ -4603,7 +4696,7 @@ func TestPeerGovernor_BootstrapRecovery_NotNeededWithWarmCandidates(
 		Address:    "192.168.1.1:3001",
 		Source:     PeerSourceP2PGossip,
 		State:      PeerStateWarm,
-		Connection: &PeerConnection{}, // Has connection
+		Connection: &PeerConnection{IsClient: true},
 	})
 
 	_ = pg.checkBootstrapRecoveryLocked()
@@ -4613,6 +4706,39 @@ func TestPeerGovernor_BootstrapRecovery_NotNeededWithWarmCandidates(
 		t,
 		pg.bootstrapExited,
 		"bootstrapExited should remain true with warm candidates",
+	)
+	pg.mu.Unlock()
+}
+
+func TestPeerGovernor_BootstrapRecovery_IgnoresResponderOnlyWarmCandidates(
+	t *testing.T,
+) {
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:                slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		MinHotPeers:           3,
+		AutoBootstrapRecovery: boolPtr(true),
+	})
+
+	pg.mu.Lock()
+	pg.bootstrapExited = true
+	pg.peers = append(pg.peers, &Peer{
+		Address: "44.0.0.1:3001",
+		Source:  PeerSourceTopologyBootstrapPeer,
+		State:   PeerStateCold,
+	})
+	pg.peers = append(pg.peers, &Peer{
+		Address:    "192.168.1.1:3001",
+		Source:     PeerSourceP2PGossip,
+		State:      PeerStateWarm,
+		Connection: &PeerConnection{IsClient: false},
+	})
+
+	_ = pg.checkBootstrapRecoveryLocked()
+
+	assert.False(
+		t,
+		pg.bootstrapExited,
+		"bootstrap should recover when only responder-only warm peers exist",
 	)
 	pg.mu.Unlock()
 }
@@ -4639,14 +4765,16 @@ func TestPeerGovernor_BootstrapRecovery_NotNeededWithEnoughHotPeers(
 
 	// Add enough hot peers (>= MinHotPeers)
 	pg.peers = append(pg.peers, &Peer{
-		Address: "192.168.1.1:3001",
-		Source:  PeerSourceP2PGossip,
-		State:   PeerStateHot,
+		Address:    "192.168.1.1:3001",
+		Source:     PeerSourceP2PGossip,
+		State:      PeerStateHot,
+		Connection: &PeerConnection{IsClient: true},
 	})
 	pg.peers = append(pg.peers, &Peer{
-		Address: "192.168.1.2:3001",
-		Source:  PeerSourceP2PGossip,
-		State:   PeerStateHot,
+		Address:    "192.168.1.2:3001",
+		Source:     PeerSourceP2PGossip,
+		State:      PeerStateHot,
+		Connection: &PeerConnection{IsClient: true},
 	})
 
 	_ = pg.checkBootstrapRecoveryLocked()
@@ -4685,7 +4813,7 @@ func TestPeerGovernor_Reconcile_ExitsBootstrap(t *testing.T) {
 		Address:    "192.168.1.1:3001",
 		Source:     PeerSourceP2PGossip,
 		State:      PeerStateHot,
-		Connection: &PeerConnection{},
+		Connection: &PeerConnection{IsClient: true},
 	})
 	pg.mu.Unlock()
 
@@ -4728,7 +4856,7 @@ func TestPeerGovernor_Reconcile_SkipsBootstrapPromotionAfterExit(t *testing.T) {
 		Address:    "44.0.0.1:3001",
 		Source:     PeerSourceTopologyBootstrapPeer,
 		State:      PeerStateWarm,
-		Connection: &PeerConnection{},
+		Connection: &PeerConnection{IsClient: true},
 	})
 
 	// Add warm gossip peer with connection (should be promoted)
@@ -4736,7 +4864,7 @@ func TestPeerGovernor_Reconcile_SkipsBootstrapPromotionAfterExit(t *testing.T) {
 		Address:    "192.168.1.1:3001",
 		Source:     PeerSourceP2PGossip,
 		State:      PeerStateWarm,
-		Connection: &PeerConnection{},
+		Connection: &PeerConnection{IsClient: true},
 	})
 	pg.mu.Unlock()
 
