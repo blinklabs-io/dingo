@@ -185,12 +185,11 @@ func (m *Manager) Stop() error {
 	return nil
 }
 
-// epochTransitionLoop reads epoch transition events from the channel,
-// draining any queued stale events so only the latest is processed.
-// During rapid sync (e.g., devnet with fast epochs), many epoch
-// transitions can queue up while a snapshot is being captured. This
-// loop skips intermediate epochs to avoid wasting work on snapshots
-// that will be immediately superseded.
+// epochTransitionLoop reads epoch transition events from the channel
+// and processes each one. Every epoch transition must be handled so
+// that stake snapshots exist for the full Mark/Set/Go rotation window.
+// Skipping intermediate events would leave gaps that break leader
+// election (pool_stake=0 for the missing "Go" epoch).
 func (m *Manager) epochTransitionLoop(
 	ctx context.Context,
 	evtCh <-chan event.Event,
@@ -206,45 +205,14 @@ func (m *Manager) epochTransitionLoop(
 				return
 			}
 		}
-		// Drain any queued events, keeping only the latest.
-		latest := evt
-		skipped := false
-	drain:
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case newer, chOk := <-evtCh:
-				if !chOk {
-					return
-				}
-				latest = newer
-				skipped = true
-			default:
-				break drain
-			}
-		}
 
-		epochEvent, ok := latest.Data.(event.EpochTransitionEvent)
+		epochEvent, ok := evt.Data.(event.EpochTransitionEvent)
 		if !ok {
 			m.logger.Error(
 				"invalid event data for epoch transition",
 				"component", "snapshot",
 			)
 			continue
-		}
-
-		if skipped {
-			// We skipped intermediate events
-			skippedEvt, ok := evt.Data.(event.EpochTransitionEvent)
-			if ok {
-				m.logger.Info(
-					"fast-forwarded past intermediate epoch transitions",
-					"component", "snapshot",
-					"from_epoch", skippedEvt.NewEpoch,
-					"to_epoch", epochEvent.NewEpoch,
-				)
-			}
 		}
 
 		if err := m.handleEpochTransition(ctx, epochEvent); err != nil {
