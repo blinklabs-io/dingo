@@ -1,6 +1,55 @@
 # Release Notes
 
 
+## v0.27.0 (March 15, 2026)
+
+**Title:** Updates and stability improvements
+
+**Date:** March 15, 2026
+
+**Version:** v0.27.0
+
+Hi folks! Here’s what we shipped in v0.27.0.
+
+### ✨ What's New
+
+```json
+{
+  "✨ What's New": [
+    "You can now run the test suite against an S3-compatible object store in continuous integration, making it easier to validate cloud-style storage behavior before you ship. This adds a MinIO-backed S3 service and bucket provisioning in CI, wires S3-related test configuration, enables AWS SDK client request logging, and introduces coverage that exercises all storage backends including S3.",
+    "You can now rely on consistent built-in network configuration files across supported Cardano environments, which simplifies setup and reduces manual config handling. This embeds preview, preprod, mainnet, and devnet configs behind a unified `EmbeddedConfigFS` and updates config loading to use it with sensible default paths."
+  ],
+  "💪 Improvements": [
+    "Snapshots now stay correct across rapid network changes by processing every transition event instead of skipping ahead. This updates the snapshot manager to handle all epoch transition events in sequence rather than ignoring intermediate transitions.",
+    "Syncing near the chain tip is now more efficient by avoiding repeated work when fetching and inserting blocks. This optimizes near-tip blockfetch and block insertion by reusing queued header data and caller-supplied points, and it extends benchmarks and tests to cover these fast paths.",
+    "Block metadata storage can now be more compact, which can help reduce on-disk overhead for supported configurations. This introduces an optional compact binary block metadata format stored in Badger, including configuration wiring plus benchmark and test coverage for the new format."
+  ],
+  "📋 What You Need to Know": [
+    "If you run CI or integration tests in your own environment, you may need to provide or update S3-related settings so the new S3 backend tests can run successfully. The test suite now expects S3 options to be configurable (alongside the existing backends) and may emit additional AWS client request logs when S3 testing is enabled."
+  ]
+}
+
+```
+
+### 💪 Improvements
+
+_See the structured notes above._
+
+### 🔧 Fixes
+
+_See the structured notes above._
+
+### 📋 What You Need to Know
+
+_See the structured notes above._
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
+
 ## v0.26.0 (March 14, 2026)
 
 **Title:** Trusted Mithril downloads and tuned peers
