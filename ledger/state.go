@@ -3015,6 +3015,22 @@ func (ls *LedgerState) RecentChainPoints(
 	return points, nil
 }
 
+// IntersectPoints returns chainsync FindIntersect candidates ordered from
+// newest to oldest. The point list stays dense near the tip and spreads out
+// deeper in history so lagging peers intersect recent chain state instead of
+// falling back to origin after only a small tip gap.
+func (ls *LedgerState) IntersectPoints(
+	count int,
+) ([]ocommon.Point, error) {
+	if count <= 0 {
+		return nil, nil
+	}
+	if ls.chain != nil {
+		return ls.chain.IntersectPoints(count), nil
+	}
+	return ls.RecentChainPoints(count)
+}
+
 // pointKey returns a string key for deduplication of chain points.
 func pointKey(p ocommon.Point) string {
 	return fmt.Sprintf("%d:%x", p.Slot, p.Hash)

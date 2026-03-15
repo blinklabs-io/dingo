@@ -331,6 +331,80 @@ func TestEpochSummaryGetLatestEmpty(t *testing.T) {
 	assert.Nil(t, latest, "expected nil for empty table")
 }
 
+func TestSavePoolStakeSnapshotsUpsertsExistingRows(t *testing.T) {
+	store := setupStakeSnapshotTestStore(t)
+	defer store.Close() //nolint:errcheck
+
+	poolKeyHash := []byte("pool_key_hash_12345678901234")
+	initial := []*models.PoolStakeSnapshot{
+		{
+			Epoch:          100,
+			SnapshotType:   "mark",
+			PoolKeyHash:    poolKeyHash,
+			TotalStake:     1,
+			DelegatorCount: 1,
+			CapturedSlot:   100,
+		},
+	}
+	require.NoError(t, store.SavePoolStakeSnapshots(initial, nil))
+
+	updated := []*models.PoolStakeSnapshot{
+		{
+			Epoch:          100,
+			SnapshotType:   "mark",
+			PoolKeyHash:    poolKeyHash,
+			TotalStake:     999,
+			DelegatorCount: 9,
+			CapturedSlot:   200,
+		},
+	}
+	require.NoError(t, store.SavePoolStakeSnapshots(updated, nil))
+
+	retrieved, err := store.GetPoolStakeSnapshot(100, "mark", poolKeyHash, nil)
+	require.NoError(t, err)
+	require.NotNil(t, retrieved)
+	assert.Equal(t, uint64(999), uint64(retrieved.TotalStake))
+	assert.Equal(t, uint64(9), retrieved.DelegatorCount)
+	assert.Equal(t, uint64(200), retrieved.CapturedSlot)
+}
+
+func TestSaveEpochSummaryUpsertsExistingRow(t *testing.T) {
+	store := setupStakeSnapshotTestStore(t)
+	defer store.Close() //nolint:errcheck
+
+	initial := &models.EpochSummary{
+		Epoch:            100,
+		TotalActiveStake: 1,
+		TotalPoolCount:   1,
+		TotalDelegators:  1,
+		EpochNonce:       []byte("old_nonce_1234567890123456789012"),
+		BoundarySlot:     100,
+		SnapshotReady:    false,
+	}
+	require.NoError(t, store.SaveEpochSummary(initial, nil))
+
+	updated := &models.EpochSummary{
+		Epoch:            100,
+		TotalActiveStake: 999,
+		TotalPoolCount:   9,
+		TotalDelegators:  99,
+		EpochNonce:       []byte("new_nonce_1234567890123456789012"),
+		BoundarySlot:     200,
+		SnapshotReady:    true,
+	}
+	require.NoError(t, store.SaveEpochSummary(updated, nil))
+
+	retrieved, err := store.GetEpochSummary(100, nil)
+	require.NoError(t, err)
+	require.NotNil(t, retrieved)
+	assert.Equal(t, uint64(999), uint64(retrieved.TotalActiveStake))
+	assert.Equal(t, uint64(9), retrieved.TotalPoolCount)
+	assert.Equal(t, uint64(99), retrieved.TotalDelegators)
+	assert.Equal(t, uint64(200), retrieved.BoundarySlot)
+	assert.True(t, retrieved.SnapshotReady)
+	assert.Equal(t, updated.EpochNonce, retrieved.EpochNonce)
+}
+
 // TestDeletePoolStakeSnapshotsForEpoch tests deleting snapshots for a specific epoch
 func TestDeletePoolStakeSnapshotsForEpoch(t *testing.T) {
 	store := setupStakeSnapshotTestStore(t)

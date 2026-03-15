@@ -50,7 +50,26 @@ func (d *MetadataStoreSqlite) SavePoolStakeSnapshots(
 	if err != nil {
 		return err
 	}
-	return db.Clauses(clause.OnConflict{DoNothing: true}).Create(snapshots).Error
+	if err := db.Clauses(
+		clause.OnConflict{
+			Columns: []clause.Column{
+				{Name: "epoch"},
+				{Name: "snapshot_type"},
+				{Name: "pool_key_hash"},
+			},
+			DoUpdates: clause.AssignmentColumns([]string{
+				"total_stake",
+				"delegator_count",
+				"captured_slot",
+			}),
+		},
+	).Create(snapshots).Error; err != nil {
+		return fmt.Errorf(
+			"failed to save pool stake snapshots: %w",
+			err,
+		)
+	}
+	return nil
 }
 
 // GetPoolStakeSnapshot retrieves a specific pool's stake snapshot
@@ -156,10 +175,31 @@ func (d *MetadataStoreSqlite) SaveEpochSummary(
 	if err != nil {
 		return err
 	}
-	// Use ON CONFLICT DO NOTHING so duplicate epoch events (from both
-	// slot-clock and block-based transitions) are idempotent.
-	return db.Clauses(clause.OnConflict{DoNothing: true}).
-		Create(summary).Error
+	// Duplicate epoch events can arrive first from the slot clock and later
+	// from block processing with more complete snapshot data. Upsert so the
+	// later event repairs any partial/empty summary instead of being ignored.
+	if err := db.Clauses(
+		clause.OnConflict{
+			Columns: []clause.Column{{Name: "epoch"}},
+			DoUpdates: append(
+				clause.AssignmentColumns([]string{
+					"total_active_stake",
+					"total_pool_count",
+					"total_delegators",
+					"epoch_nonce",
+					"boundary_slot",
+				}),
+				clause.Assignment{
+					Column: clause.Column{Name: "snapshot_ready"},
+					Value:  clause.Expr{SQL: "snapshot_ready OR excluded.snapshot_ready"},
+				},
+			),
+		},
+	).
+		Create(summary).Error; err != nil {
+		return fmt.Errorf("failed to save epoch summary: %w", err)
+	}
+	return nil
 }
 
 // GetEpochSummary retrieves an epoch summary by epoch number

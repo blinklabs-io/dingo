@@ -363,22 +363,23 @@ func parseCertPoolParamsMap(data []byte) ([]ParsedPool, error) {
 }
 
 // parseDState decodes the delegation state.
-// DState contains:
-//   - rewards: map[Credential]Coin
-//   - delegations: map[Credential]PoolKeyHash
-//   - ptrs: map[Ptr]Credential (legacy, skipped)
-//   - various other fields
+// Modern ledger snapshots encode DState as:
+//
+//	[Accounts, FutureGenDelegs, GenDelegs, InstantaneousRewards]
+//
+// where Accounts is era-specific:
+//   - Shelley-family eras: [credentialMap, ptrMap]
+//   - Conway-era: direct credentialMap
+//
+// Historical snapshots may still surface the older unified-map
+// layout, so the downstream credential parser accepts all of the
+// known account encodings.
 func parseDState(data []byte) ([]ParsedAccount, error) {
 	ds, err := decodeRawElements(data)
 	if err != nil {
 		return nil, fmt.Errorf("decoding DState: %w", err)
 	}
 
-	// The DState structure has evolved across eras. In Conway:
-	// DState = [dsUnified, dsFutureGenDelegs, dsGenDelegs, dsIRewards]
-	// dsUnified = UMap = [credentials, ptrs]
-	// credentials encodes as map of:
-	//   credential -> UMElem = [rdPair, stakePool, drepDelegation, ...]
 	if len(ds) < 1 {
 		return nil, fmt.Errorf(
 			"DState has %d elements, expected at least 1",
@@ -386,16 +387,14 @@ func parseDState(data []byte) ([]ParsedAccount, error) {
 		)
 	}
 
-	// Parse the unified map (UMap)
+	// Parse the accounts/unified map payload.
 	return parseUMap(ds[0])
 }
 
-// parseUMap decodes the unified map containing rewards and
-// delegations.
-// UMap = [<credential-map>, <ptr-map>]
-// credential-map: map[Credential]UMElem
-// UMElem = [<RDPair>, <StakePool>, <DRep>, ...]
-// RDPair = [<reward>, <deposit>]
+// parseUMap decodes the era-specific account payload:
+//   - Shelley-family eras: [credentialMap, ptrMap]
+//   - Conway-era: direct credentialMap
+//   - Historical snapshots: unified-map-like account payloads
 func parseUMap(data []byte) ([]ParsedAccount, error) {
 	umapArr, err := decodeRawArray(data)
 	if err != nil {
@@ -410,9 +409,13 @@ func parseUMap(data []byte) ([]ParsedAccount, error) {
 	return parseCredentialMap(umapArr[0])
 }
 
-// parseCredentialMap decodes the credential -> UMElem map using
-// decodeMapEntries to handle indefinite-length maps (0xbf) and
-// non-comparable array keys.
+// parseCredentialMap decodes the credential -> account-state map
+// using decodeMapEntries to handle indefinite-length maps (0xbf)
+// and non-comparable array keys. Snapshot imports have surfaced
+// multiple account-state encodings over time:
+//   - ConwayAccountState = [balance, deposit, pool?, drep?]
+//   - ShelleyAccountState = [ptr, balance, deposit, pool?]
+//   - Legacy UMElem = [rdPair, pool?, drep?, ...]
 func parseCredentialMap(
 	data []byte,
 ) ([]ParsedAccount, error) {
@@ -439,10 +442,9 @@ func parseCredentialMap(
 			Active:     true,
 		}
 
-		// Decode UMElem = [RDPair, StakePool, DRep, ...].
-		// If the entire UMElem fails to decode, the account
-		// cannot be reconstructed (no reward, no delegation,
-		// no DRep), so skip the entry entirely.
+		// Decode the account-state payload. If the shape is
+		// unknown, the account cannot be reconstructed, so skip
+		// the entry entirely.
 		var elem []cbor.RawMessage
 		if _, err := cbor.Decode(
 			entry.ValueRaw, &elem,
@@ -451,50 +453,10 @@ func parseCredentialMap(
 			continue
 		}
 
-		// Track whether any sub-fields failed to decode.
-		// The account is still added but operators should
-		// know some fields defaulted to zero values.
-		partial := false
-
-		// RDPair (index 0): [reward, deposit]
-		if len(elem) > 0 {
-			var rdPair []uint64
-			if _, err := cbor.Decode(
-				elem[0], &rdPair,
-			); err == nil && len(rdPair) > 0 {
-				acct.Reward = rdPair[0]
-				if len(rdPair) > 1 {
-					acct.Deposit = rdPair[1]
-				}
-			} else {
-				partial = true
-			}
-		}
-
-		// StakePool delegation (index 1): pool key hash
-		if len(elem) > 1 {
-			poolHash, ok := parsePoolDelegation(elem[1])
-			if ok && len(poolHash) == 28 {
-				acct.PoolKeyHash = poolHash
-			} else if !ok || len(poolHash) > 0 {
-				partial = true
-			}
-			// len(poolHash) == 0 means no delegation.
-		}
-
-		// DRep delegation (index 2): key/script credential or
-		// AlwaysAbstain/AlwaysNoConfidence pseudo-DRep.
-		// DRep is supplementary: a decode failure is non-fatal
-		// because the account's reward, deposit, and pool
-		// delegation are still valid without it.
-		// CBOR null (0xf6) means "no DRep delegation" — valid.
-		if len(elem) > 2 && len(elem[2]) > 0 && elem[2][0] != 0xf6 {
-			drepCred, err := parseDRepDelegation(elem[2])
-			if err == nil {
-				acct.DRepCred = drepCred
-			} else {
-				partial = true
-			}
+		partial, ok := parseAccountState(elem, &acct)
+		if !ok {
+			decodeErrors++
+			continue
 		}
 
 		if partial {
@@ -530,6 +492,137 @@ func parseCredentialMap(
 		)
 	}
 	return accounts, warning
+}
+
+func parseAccountState(
+	elem []cbor.RawMessage,
+	acct *ParsedAccount,
+) (bool, bool) {
+	if partial, ok := parseConwayAccountState(elem, acct); ok {
+		return partial, true
+	}
+	if partial, ok := parseShelleyAccountState(elem, acct); ok {
+		return partial, true
+	}
+	if partial, ok := parseLegacyUMElem(elem, acct); ok {
+		return partial, true
+	}
+	return false, false
+}
+
+func parseConwayAccountState(
+	elem []cbor.RawMessage,
+	acct *ParsedAccount,
+) (bool, bool) {
+	if len(elem) < 2 {
+		return false, false
+	}
+
+	reward, ok := parseUint64(elem[0])
+	if !ok {
+		return false, false
+	}
+	deposit, ok := parseUint64(elem[1])
+	if !ok {
+		return false, false
+	}
+
+	acct.Reward = reward
+	acct.Deposit = deposit
+
+	partial := false
+	if len(elem) > 2 {
+		poolHash, ok := parsePoolDelegation(elem[2])
+		if ok {
+			acct.PoolKeyHash = poolHash
+		} else {
+			partial = true
+		}
+	}
+	if len(elem) > 3 && len(elem[3]) > 0 && elem[3][0] != 0xf6 {
+		drepCred, err := parseDRepDelegation(elem[3])
+		if err == nil {
+			acct.DRepCred = drepCred
+		} else {
+			partial = true
+		}
+	}
+	return partial, true
+}
+
+func parseShelleyAccountState(
+	elem []cbor.RawMessage,
+	acct *ParsedAccount,
+) (bool, bool) {
+	if len(elem) < 4 {
+		return false, false
+	}
+
+	reward, ok := parseUint64(elem[1])
+	if !ok {
+		return false, false
+	}
+	deposit, ok := parseUint64(elem[2])
+	if !ok {
+		return false, false
+	}
+
+	acct.Reward = reward
+	acct.Deposit = deposit
+
+	poolHash, ok := parsePoolDelegation(elem[3])
+	if ok {
+		acct.PoolKeyHash = poolHash
+		return false, true
+	}
+	return true, true
+}
+
+func parseLegacyUMElem(
+	elem []cbor.RawMessage,
+	acct *ParsedAccount,
+) (bool, bool) {
+	if len(elem) < 1 {
+		return false, false
+	}
+
+	var rdPair []uint64
+	if _, err := cbor.Decode(elem[0], &rdPair); err != nil ||
+		len(rdPair) == 0 {
+		return false, false
+	}
+
+	acct.Reward = rdPair[0]
+	if len(rdPair) > 1 {
+		acct.Deposit = rdPair[1]
+	}
+
+	partial := false
+	if len(elem) > 1 {
+		poolHash, ok := parsePoolDelegation(elem[1])
+		if ok {
+			acct.PoolKeyHash = poolHash
+		} else {
+			partial = true
+		}
+	}
+	if len(elem) > 2 && len(elem[2]) > 0 && elem[2][0] != 0xf6 {
+		drepCred, err := parseDRepDelegation(elem[2])
+		if err == nil {
+			acct.DRepCred = drepCred
+		} else {
+			partial = true
+		}
+	}
+	return partial, true
+}
+
+func parseUint64(data []byte) (uint64, bool) {
+	var value uint64
+	if _, err := cbor.Decode(data, &value); err != nil {
+		return 0, false
+	}
+	return value, true
 }
 
 // parsePoolDelegation decodes stake pool delegation values from UMElem.
