@@ -3,7 +3,7 @@
 
 ## v0.27.0 (March 15, 2026)
 
-**Title:** Release updates
+**Title:** S3-backed CI tests and embedded network configs
 
 **Date:** March 15, 2026
 
@@ -11,22 +11,27 @@
 
 Hi folks! Here’s what we shipped in v0.27.0.
 
-```json
-{
-  "✨ What's New": [
-    "You can now run automated tests against an S3-compatible storage service during continuous integration, making storage testing closer to real-world deployments.",
-    "You can now use built-in network configuration files across supported Cardano networks without manually managing separate config bundles."
-  ],
-  "💪 Improvements": [
-    "Snapshot handling is now more reliable during rapid chain progress, so you don’t miss important state updates when multiple epoch changes happen close together.",
-    "Sync and ingestion performance near the chain tip is improved, reducing redundant work and improving throughput under load."
-  ],
-  "📋 What You Need to Know": [
-    "If you want smaller on-disk metadata and potentially faster lookups, you can opt into the new compact block metadata format."
-  ]
-}
+### ✨ What's New
 
-```
+- **S3-backed CI storage tests:** Storage testing is more rock-solid because CI now spins up a MinIO S3-compatible service and runs coverage across all supported storage backends, including S3.
+- **Embedded network config bundles:** Getting started is easier because preview, preprod, mainnet, and devnet network configs are now embedded and loaded via `EmbeddedConfigFS`.
+
+### 💪 Improvements
+
+- **Snapshot epoch transitions:** Snapshot handling is more reliable because the snapshot manager now processes every epoch transition event during rapid chain progress.
+- **Tip ingestion fast paths:** Sync near the chain tip is speedier because blockfetch and block insertion reuse queued header data and caller-supplied points to cut redundant work.
+
+### 🔧 Fixes
+
+- **No fixes:** No user-facing fixes shipped in this release.
+
+### 📋 What You Need to Know
+
+- **Compact block metadata format (Badger):** Disk usage can be smaller because you can opt into an optional Badger setting that stores block metadata in a compact binary format.
+
+### 🙏 Thank You
+
+Thank you for trying!
 
 ---
 
