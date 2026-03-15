@@ -13,35 +13,22 @@ Hi folks! Here’s what we shipped in v0.27.0.
 
 ### ✨ What's New
 
-```json
-{
-  "✨ What's New": [
-    "You can now run the test suite against an S3-compatible object store in continuous integration, making it easier to validate cloud-style storage behavior before you ship. This adds a MinIO-backed S3 service and bucket provisioning in CI, wires S3-related test configuration, enables AWS SDK client request logging, and introduces coverage that exercises all storage backends including S3.",
-    "You can now rely on consistent built-in network configuration files across supported Cardano environments, which simplifies setup and reduces manual config handling. This embeds preview, preprod, mainnet, and devnet configs behind a unified `EmbeddedConfigFS` and updates config loading to use it with sensible default paths."
-  ],
-  "💪 Improvements": [
-    "Snapshots now stay correct across rapid network changes by processing every transition event instead of skipping ahead. This updates the snapshot manager to handle all epoch transition events in sequence rather than ignoring intermediate transitions.",
-    "Syncing near the chain tip is now more efficient by avoiding repeated work when fetching and inserting blocks. This optimizes near-tip blockfetch and block insertion by reusing queued header data and caller-supplied points, and it extends benchmarks and tests to cover these fast paths.",
-    "Block metadata storage can now be more compact, which can help reduce on-disk overhead for supported configurations. This introduces an optional compact binary block metadata format stored in Badger, including configuration wiring plus benchmark and test coverage for the new format."
-  ],
-  "📋 What You Need to Know": [
-    "If you run CI or integration tests in your own environment, you may need to provide or update S3-related settings so the new S3 backend tests can run successfully. The test suite now expects S3 options to be configurable (alongside the existing backends) and may emit additional AWS client request logs when S3 testing is enabled."
-  ]
-}
-
-```
+- **S3-backed CI storage tests:** Validating object-store behavior is easier because CI can now run the test suite against an S3-compatible backend using a MinIO service.
+- **Embedded Cardano network configs:** Setup is simpler because preview, preprod, mainnet, and devnet configs are now embedded and loaded through a unified `EmbeddedConfigFS` with sensible defaults.
 
 ### 💪 Improvements
 
-_See the structured notes above._
+- **Snapshot manager transitions:** Snapshot correctness is more rock-solid because epoch transition events are now processed in sequence rather than skipping intermediate transitions.
+- **Near-tip blockfetch and insertion:** Syncing near the chain tip is more efficient because blockfetch and block insertion reuse queued header data and caller-supplied points.
+- **Compact block metadata (optional):** On-disk overhead can be lower because block metadata can now be stored in an optional compact binary format in Badger.
 
 ### 🔧 Fixes
 
-_See the structured notes above._
+- **No fixes:** No user-facing fixes shipped in this release.
 
 ### 📋 What You Need to Know
 
-_See the structured notes above._
+- **S3 test configuration:** If you run CI or integration tests yourself, you may need to set or update S3 test settings (and expect extra AWS client request logs) when enabling the S3 backend.
 
 ### 🙏 Thank You
 
