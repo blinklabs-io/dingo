@@ -14,15 +14,15 @@ Hi folks! Here’s what we shipped in v0.27.0.
 ```json
 {
   "✨ What's New": [
-    "You can now run automated tests against an S3-compatible storage service during continuous integration, making storage testing closer to real-world deployments. The CI pipeline now provisions a MinIO-backed S3 service and bucket, wires S3-related test configuration, enables AWS client request logging, and adds tests that exercise all supported storage backends including S3.",
-    "You can now use built-in network configuration files across supported Cardano networks without manually managing separate config bundles. The release embeds preview, preprod, mainnet, and devnet configs behind a unified `EmbeddedConfigFS` and updates config loading to use it with sensible default paths."
+    "You can now run automated tests against an S3-compatible storage service during continuous integration, making storage testing closer to real-world deployments.",
+    "You can now use built-in network configuration files across supported Cardano networks without manually managing separate config bundles."
   ],
   "💪 Improvements": [
-    "Snapshot handling is now more reliable during rapid chain progress, so you don’t miss important state updates when multiple epoch changes happen close together. The snapshot manager now processes every epoch transition event instead of skipping intermediate transitions.",
-    "Sync and ingestion performance near the chain tip is improved, reducing redundant work and improving throughput under load. The blockfetch and block insertion paths now reuse queued header data and caller-supplied points, add optional compact binary block-metadata storage in Badger with config wiring, and extend benchmarks/tests to cover the fast paths and the new metadata format."
+    "Snapshot handling is now more reliable during rapid chain progress, so you don’t miss important state updates when multiple epoch changes happen close together.",
+    "Sync and ingestion performance near the chain tip is improved, reducing redundant work and improving throughput under load."
   ],
   "📋 What You Need to Know": [
-    "If you want smaller on-disk metadata and potentially faster lookups, you can opt into the new compact block metadata format. This is exposed as an optional Badger configuration that enables compact binary block metadata storage, and the updated benchmarks/tests validate the behavior of the new format."
+    "If you want smaller on-disk metadata and potentially faster lookups, you can opt into the new compact block metadata format."
   ]
 }
 
