@@ -3,7 +3,7 @@
 
 ## v0.27.0 (March 15, 2026)
 
-**Title:** Updates and stability improvements
+**Title:** Embedded configs and storage testing
 
 **Date:** March 15, 2026
 
