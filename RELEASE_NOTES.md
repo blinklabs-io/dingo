@@ -1,6 +1,40 @@
 # Release Notes
 
 
+## v0.27.0 (March 15, 2026)
+
+**Title:** S3-backed CI tests and embedded network configs
+
+**Date:** March 15, 2026
+
+**Version:** v0.27.0
+
+Hi folks! Here’s what we shipped in v0.27.0.
+
+### ✨ What's New
+
+- **S3-backed CI storage tests:** Storage testing is more rock-solid because CI now spins up a MinIO S3-compatible service and runs coverage across all supported storage backends, including S3.
+- **Embedded network config bundles:** Getting started is easier because preview, preprod, mainnet, and devnet network configs are now embedded and loaded via `EmbeddedConfigFS`.
+
+### 💪 Improvements
+
+- **Snapshot epoch transitions:** Snapshot handling is more reliable because the snapshot manager now processes every epoch transition event during rapid chain progress.
+- **Tip ingestion fast paths:** Sync near the chain tip is sleeker because blockfetch and block insertion reuse queued header data and caller-supplied points to cut redundant work.
+
+### 🔧 Fixes
+
+- **No fixes:** No user-facing fixes shipped in this release.
+
+### 📋 What You Need to Know
+
+- **Compact block metadata format (Badger):** Disk usage can be smaller because you can opt into an optional Badger setting that stores block metadata in a compact binary format.
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
 ## v0.26.0 (March 14, 2026)
 
 **Title:** Trusted Mithril downloads and tuned peers
