@@ -184,15 +184,13 @@ func (ls *LedgerState) verifyBlockHeaderCrypto(
 		)
 	}
 
-	// Get slotsPerKesPeriod from Shelley genesis configuration
-	shelleyGenesis := ls.config.CardanoNodeConfig.ShelleyGenesis()
-	if shelleyGenesis == nil {
+	slotsPerKesPeriod := ls.SlotsPerKESPeriod()
+	if slotsPerKesPeriod == 0 {
 		return fmt.Errorf(
 			"shelley genesis not available for block header verification at slot %d",
 			blockSlot,
 		)
 	}
-	slotsPerKesPeriod := uint64(shelleyGenesis.SlotsPerKESPeriod) //nolint:gosec
 
 	return verifyBlockHeaderHex(
 		block,
@@ -202,17 +200,20 @@ func (ls *LedgerState) verifyBlockHeaderCrypto(
 }
 
 func (ls *LedgerState) epochNonceHex(epochId uint64, nonce []byte) string {
-	nonceHex := hex.EncodeToString(nonce)
 	ls.RLock()
 	cachedNonce, ok := ls.epochNonceHexCache[epochId]
 	ls.RUnlock()
-	if ok && cachedNonce == nonceHex {
+	if ok {
 		return cachedNonce
 	}
+	nonceHex := hex.EncodeToString(nonce)
 	ls.Lock()
 	defer ls.Unlock()
 	if ls.epochNonceHexCache == nil {
 		ls.epochNonceHexCache = make(map[uint64]string)
+	}
+	if cachedNonce, ok := ls.epochNonceHexCache[epochId]; ok {
+		return cachedNonce
 	}
 	ls.epochNonceHexCache[epochId] = nonceHex
 	return nonceHex

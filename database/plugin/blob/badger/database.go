@@ -15,7 +15,9 @@
 package badger
 
 import (
+	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -146,6 +148,78 @@ type badgerItem struct {
 	item *badger.Item
 }
 
+var blockMetadataBinaryMagic = [4]byte{'D', 'B', 'M', '1'}
+
+const blockMetadataPrevHashMaxLen = 32
+
+func buildBlockBlobKey(dst []byte, slot uint64, hash []byte) {
+	copy(dst, types.BlockBlobKeyPrefix)
+	binary.BigEndian.PutUint64(
+		dst[len(types.BlockBlobKeyPrefix):len(types.BlockBlobKeyPrefix)+8],
+		slot,
+	)
+	copy(dst[len(types.BlockBlobKeyPrefix)+8:], hash)
+}
+
+func buildBlockBlobIndexKey(dst []byte, blockNumber uint64) {
+	copy(dst, types.BlockBlobIndexKeyPrefix)
+	binary.BigEndian.PutUint64(
+		dst[len(types.BlockBlobIndexKeyPrefix):],
+		blockNumber,
+	)
+}
+
+func buildBlockBlobMetadataKey(dst []byte, baseKey []byte) {
+	copy(dst, baseKey)
+	copy(dst[len(baseKey):], types.BlockBlobMetadataKeySuffix)
+}
+
+func marshalBlockMetadataInto(
+	dst []byte,
+	metadata types.BlockMetadata,
+) {
+	prevHashLen := len(metadata.PrevHash)
+	if prevHashLen > blockMetadataPrevHashMaxLen {
+		panic("invalid block metadata prev hash length")
+	}
+	copy(dst[:4], blockMetadataBinaryMagic[:])
+	binary.BigEndian.PutUint64(dst[4:12], metadata.ID)
+	binary.BigEndian.PutUint64(dst[12:20], uint64(metadata.Type))
+	binary.BigEndian.PutUint64(dst[20:28], metadata.Height)
+	binary.BigEndian.PutUint32(
+		dst[28:32],
+		uint32(prevHashLen),
+	)
+	copy(dst[32:], metadata.PrevHash)
+}
+
+func unmarshalBlockMetadata(data []byte) (types.BlockMetadata, error) {
+	if len(data) >= 32 && bytes.Equal(data[:4], blockMetadataBinaryMagic[:]) {
+		prevHashLen := binary.BigEndian.Uint32(data[28:32])
+		expectedLen := 32 + int(prevHashLen)
+		if len(data) != expectedLen {
+			return types.BlockMetadata{}, fmt.Errorf(
+				"invalid block metadata length: got %d, want %d",
+				len(data),
+				expectedLen,
+			)
+		}
+		prevHash := make([]byte, prevHashLen)
+		copy(prevHash, data[32:])
+		return types.BlockMetadata{
+			ID:       binary.BigEndian.Uint64(data[4:12]),
+			Type:     uint(binary.BigEndian.Uint64(data[12:20])),
+			Height:   binary.BigEndian.Uint64(data[20:28]),
+			PrevHash: prevHash,
+		}, nil
+	}
+	var metadata types.BlockMetadata
+	if _, err := cbor.Decode(data, &metadata); err != nil {
+		return types.BlockMetadata{}, err
+	}
+	return metadata, nil
+}
+
 func (i *badgerItem) Key() []byte {
 	return i.item.KeyCopy(nil)
 }
@@ -156,20 +230,21 @@ func (i *badgerItem) ValueCopy(dst []byte) ([]byte, error) {
 
 // BlobStoreBadger stores all data in badger. Data may not be persisted
 type BlobStoreBadger struct {
-	promRegistry     prometheus.Registerer
-	db               *badger.DB
-	logger           *slog.Logger
-	gcTicker         *time.Ticker
-	gcStopCh         chan struct{}
-	dataDir          string
-	gcWg             sync.WaitGroup
-	blockCacheSize   uint64
-	indexCacheSize   uint64
-	valueLogFileSize int64
-	memTableSize     int64
-	valueThreshold   int64
-	gcEnabled        bool
-	deferOpen        bool // when true, Badger is opened in Start() not New()
+	promRegistry         prometheus.Registerer
+	db                   *badger.DB
+	logger               *slog.Logger
+	gcTicker             *time.Ticker
+	gcStopCh             chan struct{}
+	dataDir              string
+	gcWg                 sync.WaitGroup
+	blockCacheSize       uint64
+	indexCacheSize       uint64
+	valueLogFileSize     int64
+	memTableSize         int64
+	valueThreshold       int64
+	compactBlockMetadata bool
+	gcEnabled            bool
+	deferOpen            bool // when true, Badger is opened in Start() not New()
 }
 
 // New creates a new database. When deferOpen is set (via WithDeferOpen),
@@ -427,27 +502,47 @@ func (d *BlobStoreBadger) SetBlock(
 	if err != nil {
 		return err
 	}
-	// Block content by point
-	key := types.BlockBlobKey(slot, hash)
-	if err := badgerTxn.tx.Set(key, cborData); err != nil {
-		return err
-	}
-	// Block index to point key
-	indexKey := types.BlockBlobIndexKey(id)
-	if err := badgerTxn.tx.Set(indexKey, key); err != nil {
-		return err
-	}
-	// Block metadata by point
-	metadataKey := types.BlockBlobMetadataKey(key)
 	tmpMetadata := types.BlockMetadata{
 		ID:       id,
 		Type:     blockType,
 		Height:   height,
 		PrevHash: prevHash,
 	}
-	tmpMetadataBytes, err := cbor.Encode(tmpMetadata)
-	if err != nil {
+	keyLen := len(types.BlockBlobKeyPrefix) + 8 + len(hash)
+	indexKeyLen := len(types.BlockBlobIndexKeyPrefix) + 8
+	metadataKeyLen := keyLen + len(types.BlockBlobMetadataKeySuffix)
+	packedLen := keyLen + indexKeyLen + metadataKeyLen
+	if d.compactBlockMetadata {
+		packedLen += 32 + len(prevHash)
+	}
+	packed := make([]byte, packedLen)
+	key := packed[:keyLen]
+	buildBlockBlobKey(key, slot, hash)
+	if err := badgerTxn.tx.Set(key, cborData); err != nil {
 		return err
+	}
+	// Block index to point key
+	indexKeyStart := keyLen
+	indexKeyEnd := indexKeyStart + indexKeyLen
+	indexKey := packed[indexKeyStart:indexKeyEnd]
+	buildBlockBlobIndexKey(indexKey, id)
+	if err := badgerTxn.tx.Set(indexKey, key); err != nil {
+		return err
+	}
+	// Block metadata by point
+	metadataKeyStart := indexKeyEnd
+	metadataKeyEnd := metadataKeyStart + metadataKeyLen
+	metadataKey := packed[metadataKeyStart:metadataKeyEnd]
+	buildBlockBlobMetadataKey(metadataKey, key)
+	var tmpMetadataBytes []byte
+	if d.compactBlockMetadata {
+		tmpMetadataBytes = packed[metadataKeyEnd:]
+		marshalBlockMetadataInto(tmpMetadataBytes, tmpMetadata)
+	} else {
+		tmpMetadataBytes, err = cbor.Encode(tmpMetadata)
+		if err != nil {
+			return err
+		}
 	}
 	if err := badgerTxn.tx.Set(metadataKey, tmpMetadataBytes); err != nil {
 		return err
@@ -489,8 +584,8 @@ func (d *BlobStoreBadger) GetBlock(
 	if err != nil {
 		return nil, types.BlockMetadata{}, err
 	}
-	var tmpMetadata types.BlockMetadata
-	if _, err := cbor.Decode(metadataBytes, &tmpMetadata); err != nil {
+	tmpMetadata, err := unmarshalBlockMetadata(metadataBytes)
+	if err != nil {
 		return nil, types.BlockMetadata{}, err
 	}
 	return cborData, tmpMetadata, nil

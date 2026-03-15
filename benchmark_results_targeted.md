@@ -1,15 +1,15 @@
-# Dingo Targeted Performance Baseline
+# Targeted Runtime Baseline
 
 ## Latest Results
 
 ### Test Environment
-- **Date**: March 10, 2026
+- **Date**: March 14, 2026
 - **Go Version**: 1.25.8
 - **OS**: Linux
 - **Architecture**: aarch64
 - **CPU Cores**: 128
-- **Data Source**: Real immutable testdata blocks from database/immutable/testdata
-- **Scope**: Current optimization baseline for core/api ingest, block processing, and batched load paths
+- **Data Source**: database/immutable/testdata
+- **Scope**: BP runtime path
 
 ### Benchmark Results
 
@@ -17,47 +17,51 @@ All benchmarks run with `-benchmem` flag. Iterations are Go benchmark iteration 
 
 | Benchmark | Iterations | Time/op | Extra Metrics | Memory/op | Allocs/op |
 |-----------|------------|---------|---------------|-----------|-----------|
-| Block Batch Processing Throughput | 3 | 592689ns | 84361 blocks/sec | 91KB | 2088 |
-| Block Processing Throughput | 3 | 214857ns | 4654 blocks/sec | 26KB | 137 |
-| Block Processing Throughput Predecoded | 3 | 60121ns | 16633 blocks/sec | 2KB | 58 |
-| Raw Block Batch Processing Throughput | 3 | 515408ns | 97011 blocks/sec | 81KB | 1938 |
-| Storage Mode Ingest Steady State/api | 3 | 375174723ns | 479.8 blocks_ingested/sec, 533.1 txs_ingested/sec | 15761KB | 186666 |
-| Storage Mode Ingest Steady State/core | 3 | 152858484ns | 1178 blocks_ingested/sec, 1308 txs_ingested/sec | 7234KB | 94403 |
-| Storage Mode Ingest/api | 3 | 362809147ns | 496.1 blocks_ingested/sec, 551.3 txs_ingested/sec | 15935KB | 193665 |
-| Storage Mode Ingest/core | 3 | 235819272ns | 763.3 blocks_ingested/sec, 848.1 txs_ingested/sec | 7514KB | 101522 |
+| ledger:Block Processing Throughput | 13000 | 96796ns | 10331 blocks/sec | 25KB | 133 |
+| ledger:Block Processing Throughput Predecoded | 27357 | 41209ns | 24267 blocks/sec | 2KB | 52 |
+| ledger:Blockfetch Near Tip Queued Header Predecoded | 29880 | 39553ns | 25283 blocks/sec | 2KB | 52 |
+| ledger:Blockfetch Near Tip Throughput | 14515 | 86009ns | 11627 blocks/sec | 25KB | 128 |
+| ledger:Blockfetch Near Tip Throughput Predecoded | 33068 | 38485ns | 25984 blocks/sec | 2KB | 50 |
+| ledger:Blockfetch Verified Header Dispatch | 31767780 | 37.72ns | - | 0B | 0 |
+| ledger:Storage Mode Ingest/api | 3 | 337822776ns | 532.8 blocks_ingested/sec, 592.0 txs_ingested/sec | 15884KB | 192682 |
+| ledger:Storage Mode Ingest/core | 5 | 240989770ns | 746.9 blocks_ingested/sec, 829.9 txs_ingested/sec | 7550KB | 100660 |
+| ledger:Verify Block Header/direct | 1122 | 1047255ns | - | 2KB | 29 |
+| ledger:Verify Block Header/ledger_state | 1122 | 1047068ns | - | 2KB | 29 |
 ## Performance Changes
 
-Changes since **March 10, 2026** (initial baseline):
+Changes since **March 13, 2026**:
 
 ### Summary
-- **Faster benchmarks**: 4
-  - Block Batch Processing Throughput (+32%)
-  - Block Processing Throughput Predecoded (+91%)
-  - Storage Mode Ingest Steady State/api (+8%)
-  - Storage Mode Ingest Steady State/core (+55%)
-- **Slower benchmarks**: 4
-  - Block Processing Throughput (-56%)
-  - Raw Block Batch Processing Throughput (-17%)
-  - Storage Mode Ingest/api (-18%)
-  - Storage Mode Ingest/core (-37%)
+- **Faster benchmarks**: 6
+- **Slower benchmarks**: 2
 - **New benchmarks**: 0
 - **Removed benchmarks**: 0
 
-> **Note**: These are two runs from the same session establishing the baseline.
-> Variance is expected; treat this as a single baseline snapshot, not a regression.
+### Top Improvements
+- ledger:Verify Block Header/ledger_state (+1%)
+- ledger:Blockfetch Verified Header Dispatch (+21%)
+- ledger:Blockfetch Near Tip Throughput Predecoded (+8%)
+- ledger:Blockfetch Near Tip Throughput (+2%)
+- ledger:Block Processing Throughput Predecoded (+0%)
+
+### Performance Regressions
+- ledger:Blockfetch Near Tip Queued Header Predecoded (-1%)
+- ledger:Verify Block Header/direct (-2%)
 
 
 ## Historical Results
 
-### March 10, 2026
+### March 13, 2026
 
 | Benchmark | Iterations | Time/op | Extra Metrics | Memory/op | Allocs/op |
 |-----------|------------|---------|---------------|-----------|-----------|
-| Block Batch Processing Throughput | 3 | 781159ns | 64007 blocks/sec | 99KB | 2138 |
-| Block Processing Throughput | 3 | 93495ns | 10696 blocks/sec | 26KB | 138 |
-| Block Processing Throughput Predecoded | 3 | 114562ns | 8729 blocks/sec | 2KB | 60 |
-| Raw Block Batch Processing Throughput | 3 | 427847ns | 116864 blocks/sec | 81KB | 1938 |
-| Storage Mode Ingest Steady State/api | 3 | 406074114ns | 443.3 blocks_ingested/sec, 492.5 txs_ingested/sec | 15743KB | 186725 |
-| Storage Mode Ingest Steady State/core | 3 | 236358805ns | 761.6 blocks_ingested/sec, 846.2 txs_ingested/sec | 7245KB | 94503 |
-| Storage Mode Ingest/api | 3 | 298992974ns | 602.0 blocks_ingested/sec, 668.9 txs_ingested/sec | 15861KB | 193541 |
-| Storage Mode Ingest/core | 3 | 148714628ns | 1210 blocks_ingested/sec, 1345 txs_ingested/sec | 7449KB | 101364 |
+| ledger:Block Processing Throughput | 11126 | 108824ns | 9189 blocks/sec | 25KB | 133 |
+| ledger:Block Processing Throughput Predecoded | 27195 | 41884ns | 23876 blocks/sec | 2KB | 52 |
+| ledger:Blockfetch Near Tip Queued Header Predecoded | 30206 | 38792ns | 25779 blocks/sec | 2KB | 51 |
+| ledger:Blockfetch Near Tip Throughput | 14179 | 88029ns | 11360 blocks/sec | 25KB | 128 |
+| ledger:Blockfetch Near Tip Throughput Predecoded | 30481 | 39802ns | 25125 blocks/sec | 2KB | 50 |
+| ledger:Blockfetch Verified Header Dispatch | 26182030 | 45.85ns | - | 0B | 0 |
+| ledger:Storage Mode Ingest/api | 3 | 367883050ns | 489.3 blocks_ingested/sec, 543.7 txs_ingested/sec | 15919KB | 192784 |
+| ledger:Storage Mode Ingest/core | 5 | 204910867ns | 878.4 blocks_ingested/sec, 976.0 txs_ingested/sec | 7505KB | 100573 |
+| ledger:Verify Block Header/direct | 1154 | 1028815ns | - | 2KB | 29 |
+| ledger:Verify Block Header/ledger_state | 1110 | 1052555ns | - | 2KB | 29 |

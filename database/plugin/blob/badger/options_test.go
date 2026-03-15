@@ -185,6 +185,28 @@ func TestResolveProfilePrefersLoadRunMode(t *testing.T) {
 	}
 }
 
+func TestUseCompactBlockMetadata(t *testing.T) {
+	tests := []struct {
+		name        string
+		runMode     string
+		storageMode string
+		expected    bool
+	}{
+		{name: "serve core", runMode: "serve", storageMode: string(ProfileCore), expected: true},
+		{name: "leios core", runMode: "leios", storageMode: string(ProfileCore), expected: true},
+		{name: "load core", runMode: string(ProfileLoad), storageMode: string(ProfileCore), expected: false},
+		{name: "serve api", runMode: "serve", storageMode: string(ProfileAPI), expected: false},
+		{name: "empty run mode", runMode: "", storageMode: string(ProfileCore), expected: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := useCompactBlockMetadata(test.runMode, test.storageMode); got != test.expected {
+				t.Fatalf("expected %v, got %v", test.expected, got)
+			}
+		})
+	}
+}
+
 func TestApplyOperationalDefaultsPreservesExplicitEqualToDefault(t *testing.T) {
 	// An explicit override that happens to equal the API-profile default
 	// must NOT be overwritten when a different profile is resolved.

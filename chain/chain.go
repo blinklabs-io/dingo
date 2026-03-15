@@ -43,7 +43,7 @@ type Chain struct {
 	eventBus             *event.EventBus
 	manager              *ChainManager
 	waitingChan          chan struct{}
-	headers              []ledger.BlockHeader
+	headers              []queuedHeader
 	blocks               []ocommon.Point
 	iterators            []*ChainIterator
 	currentTip           ochainsync.Tip
@@ -53,6 +53,13 @@ type Chain struct {
 	mutex                sync.RWMutex
 	waitingChanMutex     sync.Mutex
 	persistent           bool
+}
+
+type queuedHeader struct {
+	header      ledger.BlockHeader
+	point       ocommon.Point
+	prevHash    []byte
+	blockNumber uint64
 }
 
 func (c *Chain) Tip() ochainsync.Tip {
@@ -79,11 +86,8 @@ func (c *Chain) headerTip() ochainsync.Tip {
 	}
 	lastHeader := c.headers[len(c.headers)-1]
 	return ochainsync.Tip{
-		Point: ocommon.Point{
-			Slot: lastHeader.SlotNumber(),
-			Hash: lastHeader.Hash().Bytes(),
-		},
-		BlockNumber: lastHeader.BlockNumber(),
+		Point:       lastHeader.point,
+		BlockNumber: lastHeader.blockNumber,
 	}
 }
 
@@ -110,7 +114,15 @@ func (c *Chain) AddBlockHeader(header ledger.BlockHeader) error {
 	}
 	headerHash := header.Hash()
 	headerPrevHash := header.PrevHash()
-	headerPrevHashBytes := headerPrevHash.Bytes()
+	queued := queuedHeader{
+		header: header,
+		point: ocommon.Point{
+			Slot: header.SlotNumber(),
+			Hash: headerHash.Bytes(),
+		},
+		prevHash:    headerPrevHash.Bytes(),
+		blockNumber: header.BlockNumber(),
+	}
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 	// Reject headers when the queue is at capacity to prevent
@@ -122,7 +134,7 @@ func (c *Chain) AddBlockHeader(header ledger.BlockHeader) error {
 	if c.tipBlockIndex >= initialBlockIndex ||
 		len(c.headers) > 0 {
 		headerTip := c.headerTip()
-		if !bytes.Equal(headerPrevHashBytes, headerTip.Point.Hash) {
+		if !bytes.Equal(queued.prevHash, headerTip.Point.Hash) {
 			return NewBlockNotFitChainTipError(
 				headerHash.String(),
 				headerPrevHash.String(),
@@ -131,7 +143,7 @@ func (c *Chain) AddBlockHeader(header ledger.BlockHeader) error {
 		}
 	}
 	// Add header
-	c.headers = append(c.headers, header)
+	c.headers = append(c.headers, queued)
 	return nil
 }
 
@@ -139,11 +151,29 @@ func (c *Chain) AddBlock(
 	block ledger.Block,
 	txn *database.Txn,
 ) error {
-	evt, err := c.addBlockInternal(block, txn, true)
+	evt, err := c.addBlockInternal(block, ocommon.Point{}, txn, true)
 	if err != nil {
 		return err
 	}
 	// Publish event immediately for standalone (non-batched) calls
+	if c.eventBus != nil && evt.Type != "" {
+		c.eventBus.Publish(ChainUpdateEventType, evt)
+	}
+	return nil
+}
+
+// AddBlockWithPoint adds a block using a caller-supplied point. This avoids
+// recomputing the block hash when the caller already has the canonical slot/hash
+// pair from a validated upstream source such as blockfetch.
+func (c *Chain) AddBlockWithPoint(
+	block ledger.Block,
+	point ocommon.Point,
+	txn *database.Txn,
+) error {
+	evt, err := c.addBlockInternal(block, point, txn, true)
+	if err != nil {
+		return err
+	}
 	if c.eventBus != nil && evt.Type != "" {
 		c.eventBus.Publish(ChainUpdateEventType, evt)
 	}
@@ -156,6 +186,7 @@ func (c *Chain) AddBlock(
 // subscribers from observing data that may be rolled back.
 func (c *Chain) addBlockInternal(
 	block ledger.Block,
+	point ocommon.Point,
 	txn *database.Txn,
 	notifyWaiters bool,
 ) (event.Event, error) {
@@ -171,49 +202,55 @@ func (c *Chain) addBlockInternal(
 	if err := c.reconcile(); err != nil {
 		return event.Event{}, fmt.Errorf("reconcile chain: %w", err)
 	}
-	return c.addBlockLocked(block, txn, notifyWaiters)
+	return c.addBlockLocked(block, point, txn, notifyWaiters)
 }
 
 func (c *Chain) addBlockLocked(
 	block ledger.Block,
+	point ocommon.Point,
 	txn *database.Txn,
 	notifyWaiters bool,
 ) (event.Event, error) {
-	blockHash := block.Hash()
-	blockHashBytes := blockHash.Bytes()
-	blockPrevHash := block.PrevHash()
-	blockPrevHashBytes := blockPrevHash.Bytes()
+	blockHashBytes := point.Hash
+	if len(blockHashBytes) == 0 {
+		blockHashBytes = block.Hash().Bytes()
+		point = ocommon.NewPoint(block.SlotNumber(), blockHashBytes)
+	}
+	blockPrevHashBytes := []byte(nil)
+	blockNumber := block.BlockNumber()
 	// Check that the new block matches our first header, if any
 	if len(c.headers) > 0 {
 		firstHeader := c.headers[0]
-		if !bytes.Equal(blockHashBytes, firstHeader.Hash().Bytes()) {
+		if !bytes.Equal(blockHashBytes, firstHeader.point.Hash) {
 			return event.Event{}, NewBlockNotMatchHeaderError(
-				blockHash.String(),
-				firstHeader.Hash().String(),
+				hex.EncodeToString(blockHashBytes),
+				firstHeader.header.Hash().String(),
 			)
 		}
+		blockPrevHashBytes = firstHeader.prevHash
+		blockNumber = firstHeader.blockNumber
+	}
+	if len(blockPrevHashBytes) == 0 {
+		blockPrevHashBytes = block.PrevHash().Bytes()
 	}
 	// Check that this block fits on the current chain tip
 	if c.tipBlockIndex >= initialBlockIndex {
 		if !bytes.Equal(blockPrevHashBytes, c.currentTip.Point.Hash) {
 			return event.Event{}, NewBlockNotFitChainTipError(
-				blockHash.String(),
-				blockPrevHash.String(),
+				hex.EncodeToString(blockHashBytes),
+				hex.EncodeToString(blockPrevHashBytes),
 				hex.EncodeToString(c.currentTip.Point.Hash),
 			)
 		}
 	}
 	// Build new block record
-	tmpPoint := ocommon.NewPoint(
-		block.SlotNumber(),
-		blockHashBytes,
-	)
+	tmpPoint := point
 	newBlockIndex := c.tipBlockIndex + 1
 	tmpBlock := models.Block{
 		ID:       newBlockIndex,
 		Slot:     tmpPoint.Slot,
 		Hash:     tmpPoint.Hash,
-		Number:   block.BlockNumber(),
+		Number:   blockNumber,
 		Type:     uint(block.Type()), //nolint:gosec
 		PrevHash: blockPrevHashBytes,
 		Cbor:     block.Cbor(),
@@ -231,7 +268,7 @@ func (c *Chain) addBlockLocked(
 	// Update tip
 	c.currentTip = ochainsync.Tip{
 		Point:       tmpPoint,
-		BlockNumber: block.BlockNumber(),
+		BlockNumber: blockNumber,
 	}
 	c.tipBlockIndex = newBlockIndex
 	if notifyWaiters {
@@ -280,7 +317,12 @@ func (c *Chain) AddBlocks(blocks []ledger.Block) error {
 				return fmt.Errorf("reconcile chain: %w", err)
 			}
 			for _, tmpBlock := range blocks[batchOffset : batchOffset+batchSize] {
-				evt, err := c.addBlockLocked(tmpBlock, txn, false)
+				evt, err := c.addBlockLocked(
+					tmpBlock,
+					ocommon.Point{},
+					txn,
+					false,
+				)
 				if err != nil {
 					return err
 				}
@@ -338,10 +380,10 @@ func (c *Chain) addRawBlockLocked(
 	// Check that the new block matches our first header, if any
 	if len(c.headers) > 0 {
 		firstHeader := c.headers[0]
-		if !bytes.Equal(rb.Hash, firstHeader.Hash().Bytes()) {
+		if !bytes.Equal(rb.Hash, firstHeader.point.Hash) {
 			return event.Event{}, NewBlockNotMatchHeaderError(
 				hex.EncodeToString(rb.Hash),
-				firstHeader.Hash().String(),
+				firstHeader.header.Hash().String(),
 			)
 		}
 	}
@@ -492,19 +534,19 @@ func (c *Chain) rollbackLocked(
 	// Check headers for rollback point
 	if len(c.headers) > 0 {
 		// Iterate backwards to make deletion safe
-		var header ledger.BlockHeader
+		var header queuedHeader
 		for i := len(c.headers) - 1; i >= 0; i-- {
 			header = c.headers[i]
 			// Remove headers after rollback slot
-			if header.SlotNumber() > point.Slot {
+			if header.point.Slot > point.Slot {
 				c.headers = slices.Delete(c.headers, i, i+1)
 				continue
 			}
-			if header.SlotNumber() == point.Slot &&
-				bytes.Equal(header.Hash().Bytes(), point.Hash) {
+			if header.point.Slot == point.Slot &&
+				bytes.Equal(header.point.Hash, point.Hash) {
 				return nil, nil
 			}
-			if header.SlotNumber() < point.Slot {
+			if header.point.Slot < point.Slot {
 				return nil, models.ErrBlockNotFound
 			}
 		}
@@ -699,6 +741,22 @@ func (c *Chain) HeaderCount() int {
 	return len(c.headers)
 }
 
+func (c *Chain) FirstHeaderMatchesPoint(point ocommon.Point) bool {
+	if c == nil {
+		return false
+	}
+	c.mutex.RLock()
+	defer c.mutex.RUnlock()
+	if len(c.headers) == 0 {
+		return false
+	}
+	header := c.headers[0]
+	if header.point.Slot != point.Slot {
+		return false
+	}
+	return bytes.Equal(header.point.Hash, point.Hash)
+}
+
 func (c *Chain) HeaderRange(count int) (ocommon.Point, ocommon.Point) {
 	if c == nil {
 		return ocommon.Point{}, ocommon.Point{}
@@ -708,16 +766,10 @@ func (c *Chain) HeaderRange(count int) (ocommon.Point, ocommon.Point) {
 	var startPoint, endPoint ocommon.Point
 	if len(c.headers) > 0 {
 		firstHeader := c.headers[0]
-		startPoint = ocommon.Point{
-			Slot: firstHeader.SlotNumber(),
-			Hash: firstHeader.Hash().Bytes(),
-		}
+		startPoint = firstHeader.point
 		lastHeaderIdx := min(count, len(c.headers)) - 1
 		lastHeader := c.headers[lastHeaderIdx]
-		endPoint = ocommon.Point{
-			Slot: lastHeader.SlotNumber(),
-			Hash: lastHeader.Hash().Bytes(),
-		}
+		endPoint = lastHeader.point
 	}
 	return startPoint, endPoint
 }
