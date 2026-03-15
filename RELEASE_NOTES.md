@@ -19,7 +19,7 @@ Hi folks! Here’s what we shipped in v0.27.0.
 ### 💪 Improvements
 
 - **Snapshot manager epoch transitions:** Snapshot accuracy is more consistent because the snapshot manager now processes every epoch transition event.
-- **Near-tip sync fast paths:** Catching up near the tip is faster because blockfetch and ingestion reuse queued header data and support an optional compact block-metadata format.
+- **Near-tip sync fast paths:** Catching up near the tip is blazing fast because blockfetch and ingestion reuse queued header data and support an optional compact block-metadata format.
 
 ### 🔧 Fixes
 
