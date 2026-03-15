@@ -137,7 +137,7 @@ func mithrilListCommand() *cobra.Command {
 					digest,
 					s.Beacon.Epoch,
 					s.Beacon.ImmutableFileNumber,
-					humanBytes(s.Size),
+					mithril.HumanBytes(s.Size),
 					created,
 				)
 			}
@@ -190,7 +190,7 @@ func mithrilShowCommand() *cobra.Command {
 				"Immutable File Number: %d\n",
 				snapshot.Beacon.ImmutableFileNumber,
 			)
-			fmt.Printf("Size:                  %s\n", humanBytes(snapshot.Size))
+			fmt.Printf("Size:                  %s\n", mithril.HumanBytes(snapshot.Size))
 			fmt.Printf(
 				"Certificate Hash:      %s\n",
 				snapshot.CertificateHash,
@@ -251,6 +251,19 @@ func runMithrilSync(
 	logger *slog.Logger,
 	network string,
 ) error {
+	cardanoConfigPath := cfg.CardanoConfig
+	if cardanoConfigPath == "" {
+		cardanoConfigPath = filepath.Join(network, "config.json")
+	}
+	nodeCfg, err := cardano.LoadCardanoNodeConfigWithFallback(
+		cardanoConfigPath,
+		network,
+		cardano.EmbeddedConfigFS,
+	)
+	if err != nil {
+		return fmt.Errorf("loading cardano node config: %w", err)
+	}
+
 	aggregatorURL, err := resolveAggregatorURL(
 		cfg.Mithril.AggregatorURL, network,
 	)
@@ -276,39 +289,46 @@ func runMithrilSync(
 			DownloadDir:            downloadDir,
 			CleanupAfterLoad:       cfg.Mithril.CleanupAfterLoad,
 			VerifyCertificateChain: cfg.Mithril.VerifyCertificates,
-			Logger:                 logger,
-			OnProgress: func(p mithril.DownloadProgress) {
-				if p.TotalBytes > 0 {
+			GenesisVerificationKey: nodeCfg.MithrilGenesisVerificationKey,
+			AncillaryVerificationKey: nodeCfg.
+				MithrilGenesisAncillaryVerificationKey,
+			Logger: logger,
+			OnProgress: func() func(mithril.DownloadProgress) {
+				const progressLogInterval = 10 * time.Second
+				const progressLogPercentStep = 5.0
+
+				lastLogTime := time.Time{}
+				lastLoggedPercent := -progressLogPercentStep
+
+				return func(p mithril.DownloadProgress) {
+					if p.TotalBytes <= 0 {
+						return
+					}
+					now := time.Now()
+					if !lastLogTime.IsZero() &&
+						now.Sub(lastLogTime) < progressLogInterval &&
+						p.Percent < 100 &&
+						(p.Percent-lastLoggedPercent) < progressLogPercentStep {
+						return
+					}
 					logger.Info(
 						fmt.Sprintf(
 							"download progress: %.1f%% (%s / %s) at %s/s",
 							p.Percent,
-							humanBytes(p.BytesDownloaded),
-							humanBytes(p.TotalBytes),
-							humanBytes(int64(p.BytesPerSecond)),
+							mithril.HumanBytes(p.BytesDownloaded),
+							mithril.HumanBytes(p.TotalBytes),
+							mithril.HumanBytes(int64(p.BytesPerSecond)),
 						),
 						"component", "mithril",
 					)
+					lastLogTime = now
+					lastLoggedPercent = p.Percent
 				}
-			},
+			}(),
 		},
 	)
 	if err != nil {
 		return fmt.Errorf("mithril bootstrap failed: %w", err)
-	}
-
-	// Load Cardano node config for epoch parameter resolution
-	cardanoConfigPath := cfg.CardanoConfig
-	if cardanoConfigPath == "" {
-		cardanoConfigPath = network + "/config.json"
-	}
-	nodeCfg, err := cardano.LoadCardanoNodeConfigWithFallback(
-		cardanoConfigPath,
-		network,
-		cardano.EmbeddedConfigPreviewNetworkFS,
-	)
-	if err != nil {
-		return fmt.Errorf("loading cardano node config: %w", err)
 	}
 
 	// Open database once and reuse for both import and ImmutableDB load
@@ -316,6 +336,7 @@ func runMithrilSync(
 		DataDir:        cfg.DatabasePath,
 		Logger:         logger,
 		BlobPlugin:     cfg.BlobPlugin,
+		RunMode:        string(cfg.RunMode),
 		MetadataPlugin: cfg.MetadataPlugin,
 		MaxConnections: cfg.DatabaseWorkers,
 		StorageMode:    cfg.StorageMode,
@@ -523,25 +544,6 @@ func runMithrilSync(
 	return nil
 }
 
-// humanBytes formats a byte count in a human-readable form.
-func humanBytes(b int64) string {
-	const (
-		kb = 1024
-		mb = 1024 * kb
-		gb = 1024 * mb
-	)
-	switch {
-	case b >= gb:
-		return fmt.Sprintf("%.1f GB", float64(b)/float64(gb))
-	case b >= mb:
-		return fmt.Sprintf("%.1f MB", float64(b)/float64(mb))
-	case b >= kb:
-		return fmt.Sprintf("%.1f KB", float64(b)/float64(kb))
-	default:
-		return fmt.Sprintf("%d B", b)
-	}
-}
-
 // syncCommand creates the "sync" command with --mithril flag at the
 // root level for convenience.
 func syncCommand() *cobra.Command {
@@ -688,11 +690,38 @@ func importLedgerState(
 				nodeCfg,
 			),
 			OnProgress: func(p ledgerstate.ImportProgress) {
-				logger.Info(
-					p.Description,
+				attrs := []any{
 					"component", "mithril",
 					"stage", p.Stage,
-				)
+				}
+				msg := p.Description
+				var pct float64
+				switch {
+				case p.Percent > 0:
+					pct = p.Percent
+				case p.Total > 0:
+					pct = float64(p.Current) /
+						float64(p.Total) * 100
+				}
+				if pct > 0 {
+					attrs = append(
+						attrs,
+						"progress",
+						fmt.Sprintf("%.1f%%", pct),
+					)
+				}
+				if p.Total > 0 {
+					attrs = append(
+						attrs,
+						"current", p.Current,
+						"total", p.Total,
+					)
+				} else if p.Current > 0 {
+					attrs = append(
+						attrs, "current", p.Current,
+					)
+				}
+				logger.Info(msg, attrs...)
 			},
 		},
 	); err != nil {
@@ -919,8 +948,13 @@ func processGapBlocks(
 		if err := ctx.Err(); err != nil {
 			return fmt.Errorf("cancelled: %w", err)
 		}
+		// Gap blocks were already parsed and body-hash validated by the
+		// blockfetch client when fetched from the relay. We only need a
+		// second decode here to extract transactions and offsets.
 		parsedBlock, err := gledger.NewBlockFromCbor(
-			block.Type, block.Cbor,
+			block.Type,
+			block.Cbor,
+			lcommon.VerifyConfig{SkipBodyHashValidation: true},
 		)
 		if err != nil {
 			return fmt.Errorf(
@@ -1013,6 +1047,15 @@ func postProcessUtxoOffsets(
 			"opening immutable DB: %w", err,
 		)
 	}
+	immutableTip, err := imm.GetTip()
+	if err != nil {
+		return fmt.Errorf(
+			"getting immutable DB tip: %w", err,
+		)
+	}
+	if immutableTip == nil {
+		return errors.New("immutable DB tip is nil")
+	}
 
 	iter, err := imm.BlocksFromPoint(ocommon.Point{})
 	if err != nil {
@@ -1022,14 +1065,35 @@ func postProcessUtxoOffsets(
 	}
 	defer iter.Close()
 
-	const batchBlocks = 100
+	const batchBlocks = 50
+	const batchUtxoOffsets = 10000
 	var processedBlocks, totalUtxos int
+	startTime := time.Now()
+	lastProgressLog := time.Time{}
+	lastProgressSlot := uint64(0)
 	txn := db.BlobTxn(true)
 	blocksInBatch := 0
+	utxosInBatch := 0
 	// Deferred rollback ensures the active transaction is cleaned
 	// up if the loop body panics. Rollback after Commit is a no-op
 	// in Badger, so this is safe on the normal path.
 	defer func() { txn.Rollback() }() //nolint:errcheck
+
+	flushTxn := func() error {
+		if err := txn.Commit(); err != nil {
+			return fmt.Errorf(
+				"committing UTxO offsets: %w",
+				err,
+			)
+		}
+		blocksInBatch = 0
+		utxosInBatch = 0
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("cancelled: %w", err)
+		}
+		txn = db.BlobTxn(true)
+		return nil
+	}
 
 	for {
 		if err := ctx.Err(); err != nil {
@@ -1107,6 +1171,13 @@ func postProcessUtxoOffsets(
 						)
 					}
 					totalUtxos++
+					utxosInBatch++
+					if utxosInBatch >= batchUtxoOffsets {
+						if err := flushTxn(); err != nil {
+							return err
+						}
+						blobTxn = txn.Blob()
+					}
 				}
 			}
 		} else {
@@ -1195,42 +1266,41 @@ func postProcessUtxoOffsets(
 						)
 					}
 					totalUtxos++
+					utxosInBatch++
+					if utxosInBatch >= batchUtxoOffsets {
+						if err := flushTxn(); err != nil {
+							return err
+						}
+						blobTxn = txn.Blob()
+					}
 				}
 			}
 		}
 
 		processedBlocks++
+		lastProgressSlot = next.Slot
 		blocksInBatch++
 
 		if blocksInBatch >= batchBlocks {
-			if err := txn.Commit(); err != nil {
-				return fmt.Errorf(
-					"committing UTxO offsets: %w",
-					err,
-				)
+			if err := flushTxn(); err != nil {
+				return err
 			}
-			blocksInBatch = 0
-			// Check for cancellation between batches, before
-			// opening a new transaction that would leak.
-			if err := ctx.Err(); err != nil {
-				return fmt.Errorf("cancelled: %w", err)
-			}
-			txn = db.BlobTxn(true)
 		}
 
-		if processedBlocks > 0 && processedBlocks%50000 == 0 {
-			logger.Info(
-				"UTxO offset progress",
-				"component", "mithril",
-				"blocks", processedBlocks,
-				"utxos", totalUtxos,
-			)
-		}
+		maybeLogUtxoOffsetProgress(
+			logger,
+			processedBlocks,
+			totalUtxos,
+			lastProgressSlot,
+			immutableTip.Slot,
+			startTime,
+			&lastProgressLog,
+		)
 	}
 
 	// Commit remaining batch; the deferred rollback handles
 	// cleanup when there is nothing to commit.
-	if blocksInBatch > 0 {
+	if blocksInBatch > 0 || utxosInBatch > 0 {
 		if err := txn.Commit(); err != nil {
 			return fmt.Errorf(
 				"committing final UTxO offsets: %w",
@@ -1247,6 +1317,45 @@ func postProcessUtxoOffsets(
 	)
 
 	return nil
+}
+
+func maybeLogUtxoOffsetProgress(
+	logger *slog.Logger,
+	processedBlocks int,
+	totalUtxos int,
+	currentSlot uint64,
+	tipSlot uint64,
+	startTime time.Time,
+	lastLogTime *time.Time,
+) {
+	now := time.Now()
+	if !lastLogTime.IsZero() && now.Sub(*lastLogTime) < 10*time.Second {
+		return
+	}
+	*lastLogTime = now
+
+	elapsed := now.Sub(startTime)
+	attrs := []any{
+		"component", "mithril",
+		"blocks", processedBlocks,
+		"utxos", totalUtxos,
+		"slot", currentSlot,
+	}
+	if elapsed > 0 {
+		attrs = append(
+			attrs,
+			"blocks_per_sec",
+			fmt.Sprintf("%.0f", float64(processedBlocks)/elapsed.Seconds()),
+		)
+	}
+	if tipSlot > 0 {
+		attrs = append(
+			attrs,
+			"progress",
+			fmt.Sprintf("%.1f%%", float64(currentSlot)/float64(tipSlot)*100),
+		)
+	}
+	logger.Info("UTxO offset progress", attrs...)
 }
 
 // findNthOccurrence returns the byte offset of the nth (0-indexed)

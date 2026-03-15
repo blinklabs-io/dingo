@@ -28,11 +28,16 @@ import (
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
+// blockfetchMetricsCdfUpdateInterval controls how often CDF metrics are
+// recomputed. Updating on every block is wasteful; every 32 blocks (or
+// on late blocks) is sufficient for dashboard accuracy.
+const blockfetchMetricsCdfUpdateInterval = 32
+
 // MaxBlockFetchRange is the maximum slot range allowed for a single block
 // fetch request. This prevents peers from requesting unbounded ranges that
-// would cause the server to iterate the entire chain. The value of 2160
-// corresponds to one mainnet epoch and aligns with the security parameter K.
-const MaxBlockFetchRange = 2160
+// would cause the server to iterate the entire chain. The value of 129600
+// corresponds to the stability window (3k/f) on mainnet (k=2160, f=0.05).
+const MaxBlockFetchRange = 129600
 
 func (o *Ouroboros) blockfetchServerConnOpts() []blockfetch.BlockFetchOptionFunc {
 	return []blockfetch.BlockFetchOptionFunc{
@@ -220,34 +225,38 @@ func (o *Ouroboros) blockfetchClientBlock(
 	o.blockFetchMutex.Unlock()
 	if exists {
 		fetchDuration := time.Since(startTime)
-		fetchSeconds := fetchDuration.Seconds()
 
-		// Calculate block delay as wallclock time minus block slot time (cardano-node compatible)
-		var delaySeconds float64
-		if o.LedgerState != nil {
+		// Only publish block delay metrics after reaching tip once.
+		// During catch-up all blocks are naturally "late" relative to
+		// wall-clock time, which permanently poisons the CDF.
+		atTip := o.LedgerState != nil && o.LedgerState.IsAtTip()
+		if atTip && o.metrics != nil {
+			// Calculate block delay as wallclock time minus block slot time (cardano-node compatible)
+			var delaySeconds float64
 			if blockSlotTime, err := o.LedgerState.SlotToTime(block.SlotNumber()); err == nil {
 				delaySeconds = time.Since(blockSlotTime).Seconds()
 			} else {
-				delaySeconds = fetchSeconds
+				delaySeconds = fetchDuration.Seconds()
 			}
-		} else {
-			delaySeconds = fetchSeconds
-		}
 
-		if o.metrics != nil {
 			o.metrics.blockDelay.Set(delaySeconds)
-			atomic.AddInt64(&o.metrics.totalBlocksFetched, 1)
+			total := atomic.AddInt64(&o.metrics.totalBlocksFetched, 1)
+			// Cumulative CDF buckets: each counter includes all
+			// blocks at or below its threshold.
 			if delaySeconds < 1.0 {
 				atomic.AddInt64(&o.metrics.blocksUnder1s, 1)
-			} else if delaySeconds < 3.0 {
+			}
+			if delaySeconds < 3.0 {
 				atomic.AddInt64(&o.metrics.blocksUnder3s, 1)
-			} else if delaySeconds < 5.0 {
+			}
+			if delaySeconds < 5.0 {
 				atomic.AddInt64(&o.metrics.blocksUnder5s, 1)
 			} else {
 				o.metrics.lateBlocks.Inc()
 			}
-			total := atomic.LoadInt64(&o.metrics.totalBlocksFetched)
-			if total > 0 {
+			if total == 1 ||
+				total%blockfetchMetricsCdfUpdateInterval == 0 ||
+				delaySeconds >= 5.0 {
 				under1 := atomic.LoadInt64(&o.metrics.blocksUnder1s)
 				under3 := atomic.LoadInt64(&o.metrics.blocksUnder3s)
 				under5 := atomic.LoadInt64(&o.metrics.blocksUnder5s)
@@ -272,22 +281,23 @@ func (o *Ouroboros) blockfetchClientBlock(
 			)
 		}
 	}
-	// Generate event
-	o.EventBus.Publish(
-		ledger.BlockfetchEventType,
-		event.NewEvent(
+	if o.EventBus != nil && o.EventBus.HasSubscribers(ledger.BlockfetchEventType) {
+		o.EventBus.Publish(
 			ledger.BlockfetchEventType,
-			ledger.BlockfetchEvent{
-				ConnectionId: ctx.ConnectionId,
-				Point: ocommon.NewPoint(
-					block.SlotNumber(),
-					block.Hash().Bytes(),
-				),
-				Type:  blockType,
-				Block: block,
-			},
-		),
-	)
+			event.NewEvent(
+				ledger.BlockfetchEventType,
+				ledger.BlockfetchEvent{
+					ConnectionId: ctx.ConnectionId,
+					Point: ocommon.NewPoint(
+						block.SlotNumber(),
+						block.Hash().Bytes(),
+					),
+					Type:  blockType,
+					Block: block,
+				},
+			),
+		)
+	}
 	return nil
 }
 
@@ -298,16 +308,17 @@ func (o *Ouroboros) blockfetchClientBatchDone(
 	o.blockFetchMutex.Lock()
 	delete(o.blockFetchStarts, ctx.ConnectionId)
 	o.blockFetchMutex.Unlock()
-	// Generate event
-	o.EventBus.Publish(
-		ledger.BlockfetchEventType,
-		event.NewEvent(
+	if o.EventBus != nil && o.EventBus.HasSubscribers(ledger.BlockfetchEventType) {
+		o.EventBus.Publish(
 			ledger.BlockfetchEventType,
-			ledger.BlockfetchEvent{
-				ConnectionId: ctx.ConnectionId,
-				BatchDone:    true,
-			},
-		),
-	)
+			event.NewEvent(
+				ledger.BlockfetchEventType,
+				ledger.BlockfetchEvent{
+					ConnectionId: ctx.ConnectionId,
+					BatchDone:    true,
+				},
+			),
+		)
+	}
 	return nil
 }

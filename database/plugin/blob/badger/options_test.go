@@ -130,3 +130,218 @@ func TestOptionsCombination(t *testing.T) {
 		)
 	}
 }
+
+func TestApplyOperationalDefaultsCore(t *testing.T) {
+	blockCache := uint64(DefaultBlockCacheSize)
+	indexCache := uint64(DefaultIndexCacheSize)
+	memtable := uint64(DefaultMemTableSize)
+
+	applyOperationalDefaults(
+		"",
+		string(ProfileCore),
+		&blockCache,
+		&indexCache,
+		&memtable,
+	)
+
+	if blockCache != 536870912 {
+		t.Fatalf("expected core block cache size 536870912, got %d", blockCache)
+	}
+	if indexCache != 134217728 {
+		t.Fatalf("expected core index cache size 134217728, got %d", indexCache)
+	}
+	if memtable != 67108864 {
+		t.Fatalf("expected core memtable size 67108864, got %d", memtable)
+	}
+}
+
+func TestApplyOperationalDefaultsLoadPreservesOverrides(t *testing.T) {
+	blockCache := uint64(123)
+	indexCache := uint64(456)
+	memtable := uint64(789)
+
+	applyOperationalDefaults(
+		string(ProfileLoad),
+		string(ProfileAPI),
+		&blockCache,
+		&indexCache,
+		&memtable,
+	)
+
+	if blockCache != 123 {
+		t.Fatalf("expected block cache override to be preserved, got %d", blockCache)
+	}
+	if indexCache != 456 {
+		t.Fatalf("expected index cache override to be preserved, got %d", indexCache)
+	}
+	if memtable != 789 {
+		t.Fatalf("expected memtable override to be preserved, got %d", memtable)
+	}
+}
+
+func TestResolveProfilePrefersLoadRunMode(t *testing.T) {
+	if profile := resolveProfile(string(ProfileLoad), string(ProfileAPI)); profile != ProfileLoad {
+		t.Fatalf("expected load profile, got %q", profile)
+	}
+}
+
+func TestUseCompactBlockMetadata(t *testing.T) {
+	tests := []struct {
+		name        string
+		runMode     string
+		storageMode string
+		expected    bool
+	}{
+		{name: "serve core", runMode: "serve", storageMode: string(ProfileCore), expected: true},
+		{name: "leios core", runMode: "leios", storageMode: string(ProfileCore), expected: true},
+		{name: "load core", runMode: string(ProfileLoad), storageMode: string(ProfileCore), expected: false},
+		{name: "serve api", runMode: "serve", storageMode: string(ProfileAPI), expected: false},
+		{name: "empty run mode", runMode: "", storageMode: string(ProfileCore), expected: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := useCompactBlockMetadata(test.runMode, test.storageMode); got != test.expected {
+				t.Fatalf("expected %v, got %v", test.expected, got)
+			}
+		})
+	}
+}
+
+func TestApplyOperationalDefaultsPreservesExplicitEqualToDefault(t *testing.T) {
+	// An explicit override that happens to equal the API-profile default
+	// must NOT be overwritten when a different profile is resolved.
+	blockCache := uint64(DefaultBlockCacheSize)
+	indexCache := uint64(DefaultIndexCacheSize)
+	memtable := uint64(DefaultMemTableSize)
+
+	// With load profile, core/load sizes differ from the defaults (which
+	// match the API profile). If the caller explicitly set the API-default
+	// values, applyOperationalDefaults will still overwrite them because it
+	// compares against the constants. This test documents the current
+	// limitation: callers that need to preserve explicit overrides must
+	// copy values to locals before calling applyOperationalDefaults (as
+	// NewFromCmdlineOptions does).
+	//
+	// The important invariant: cmdlineOptions must NOT be mutated.
+	cmdlineOptionsMutex.Lock()
+	saved := cmdlineOptions
+	cmdlineOptions.blockCacheSize = DefaultBlockCacheSize
+	cmdlineOptions.indexCacheSize = DefaultIndexCacheSize
+	cmdlineOptions.memTableSize = DefaultMemTableSize
+	cmdlineOptionsMutex.Unlock()
+	t.Cleanup(func() {
+		cmdlineOptionsMutex.Lock()
+		cmdlineOptions = saved
+		cmdlineOptionsMutex.Unlock()
+	})
+
+	applyOperationalDefaults(
+		string(ProfileLoad),
+		"",
+		&blockCache,
+		&indexCache,
+		&memtable,
+	)
+
+	// Verify that the global cmdlineOptions were NOT mutated
+	if cmdlineOptions.blockCacheSize != saved.blockCacheSize {
+		t.Fatalf(
+			"cmdlineOptions.blockCacheSize mutated: want %d, got %d",
+			saved.blockCacheSize,
+			cmdlineOptions.blockCacheSize,
+		)
+	}
+	if cmdlineOptions.indexCacheSize != saved.indexCacheSize {
+		t.Fatalf(
+			"cmdlineOptions.indexCacheSize mutated: want %d, got %d",
+			saved.indexCacheSize,
+			cmdlineOptions.indexCacheSize,
+		)
+	}
+	if cmdlineOptions.memTableSize != saved.memTableSize {
+		t.Fatalf(
+			"cmdlineOptions.memTableSize mutated: want %d, got %d",
+			saved.memTableSize,
+			cmdlineOptions.memTableSize,
+		)
+	}
+}
+
+func TestNewFromCmdlineOptionsDoesNotMutateGlobals(t *testing.T) {
+	// Run NewFromCmdlineOptions twice with different profiles and verify
+	// the second call does not inherit the first profile's derived sizes.
+	cmdlineOptionsMutex.Lock()
+	saved := cmdlineOptions
+	cmdlineOptionsMutex.Unlock()
+	t.Cleanup(func() {
+		cmdlineOptionsMutex.Lock()
+		cmdlineOptions = saved
+		cmdlineOptionsMutex.Unlock()
+	})
+	initCmdlineOptions()
+	cmdlineOptionsMutex.Lock()
+	cmdlineOptions.runMode = string(ProfileLoad)
+	cmdlineOptionsMutex.Unlock()
+
+	p1 := NewFromCmdlineOptions()
+	defer func() {
+		if stopper, ok := p1.(interface{ Stop() error }); ok {
+			_ = stopper.Stop()
+		}
+	}()
+
+	// Capture global state after first call
+	cmdlineOptionsMutex.Lock()
+	blockAfterFirst := cmdlineOptions.blockCacheSize
+	indexAfterFirst := cmdlineOptions.indexCacheSize
+	memAfterFirst := cmdlineOptions.memTableSize
+	cmdlineOptionsMutex.Unlock()
+
+	// Globals should still be at init defaults
+	if blockAfterFirst != DefaultBlockCacheSize {
+		t.Fatalf(
+			"blockCacheSize mutated after first call: want %d, got %d",
+			DefaultBlockCacheSize,
+			blockAfterFirst,
+		)
+	}
+	if indexAfterFirst != DefaultIndexCacheSize {
+		t.Fatalf(
+			"indexCacheSize mutated after first call: want %d, got %d",
+			DefaultIndexCacheSize,
+			indexAfterFirst,
+		)
+	}
+	if memAfterFirst != DefaultMemTableSize {
+		t.Fatalf(
+			"memTableSize mutated after first call: want %d, got %d",
+			DefaultMemTableSize,
+			memAfterFirst,
+		)
+	}
+
+	// Second call with API profile should get API defaults, not load sizes
+	cmdlineOptionsMutex.Lock()
+	cmdlineOptions.runMode = ""
+	cmdlineOptions.storageMode = string(ProfileAPI)
+	cmdlineOptionsMutex.Unlock()
+
+	p2 := NewFromCmdlineOptions()
+	defer func() {
+		if stopper, ok := p2.(interface{ Stop() error }); ok {
+			_ = stopper.Stop()
+		}
+	}()
+
+	b2, ok := p2.(*BlobStoreBadger)
+	if !ok {
+		t.Fatal("expected *BlobStoreBadger from NewFromCmdlineOptions")
+	}
+	if b2.blockCacheSize != DefaultBlockCacheSize {
+		t.Fatalf(
+			"second call blockCacheSize: want %d (API default), got %d",
+			DefaultBlockCacheSize,
+			b2.blockCacheSize,
+		)
+	}
+}

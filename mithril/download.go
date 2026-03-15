@@ -28,6 +28,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/klauspost/compress/zstd"
@@ -44,6 +45,17 @@ type DownloadProgress struct {
 // ProgressFunc is a callback invoked periodically during download
 // to report progress.
 type ProgressFunc func(DownloadProgress)
+
+type countingReader struct {
+	reader io.Reader
+	read   atomic.Int64
+}
+
+func (cr *countingReader) Read(p []byte) (int, error) {
+	n, err := cr.reader.Read(p)
+	cr.read.Add(int64(n))
+	return n, err
+}
 
 // DownloadConfig holds configuration for downloading a snapshot
 // archive.
@@ -534,8 +546,17 @@ func ExtractArchive(
 	}
 	defer file.Close()
 
+	fileInfo, err := file.Stat()
+	if err != nil {
+		return "", fmt.Errorf(
+			"stating archive: %w",
+			err,
+		)
+	}
+	countingFile := &countingReader{reader: file}
+
 	// Create zstd reader
-	zr, err := zstd.NewReader(file)
+	zr, err := zstd.NewReader(countingFile)
 	if err != nil {
 		return "", fmt.Errorf(
 			"creating zstd reader: %w",
@@ -549,6 +570,8 @@ func ExtractArchive(
 
 	var filesExtracted int
 	var totalExtracted int64
+	lastProgressLog := time.Time{}
+	lastLoggedPercent := -5.0
 	for {
 		if err := ctx.Err(); err != nil {
 			return "", fmt.Errorf(
@@ -683,13 +706,28 @@ func ExtractArchive(
 				)
 			}
 			filesExtracted++
-
-			if filesExtracted%1000 == 0 {
-				logger.Info(
-					"extracting archive",
-					"component", "mithril",
-					"files_extracted", filesExtracted,
-				)
+			if fileInfo.Size() > 0 {
+				archiveRead := countingFile.read.Load()
+				percent := float64(archiveRead) / float64(fileInfo.Size()) * 100
+				now := time.Now()
+				if lastProgressLog.IsZero() ||
+					now.Sub(lastProgressLog) >= 10*time.Second ||
+					percent-lastLoggedPercent >= 5.0 {
+					logger.Info(
+						"extracting archive",
+						"component", "mithril",
+						"progress",
+						fmt.Sprintf("%.1f%%", percent),
+						"archive_bytes_read",
+						HumanBytes(archiveRead),
+						"archive_size",
+						HumanBytes(fileInfo.Size()),
+						"files_extracted",
+						filesExtracted,
+					)
+					lastProgressLog = now
+					lastLoggedPercent = percent
+				}
 			}
 		default:
 			// Skip symlinks and other types for security
@@ -701,10 +739,31 @@ func ExtractArchive(
 		"extraction complete",
 		"component", "mithril",
 		"files_extracted", filesExtracted,
+		"progress", "100.0%",
+		"archive_size", HumanBytes(fileInfo.Size()),
 		"destination", destDir,
 	)
 
 	return destDir, nil
+}
+
+// HumanBytes formats a byte count in a human-readable form.
+func HumanBytes(b int64) string {
+	const (
+		kb = 1024
+		mb = 1024 * kb
+		gb = 1024 * mb
+	)
+	switch {
+	case b >= gb:
+		return fmt.Sprintf("%.1f GB", float64(b)/float64(gb))
+	case b >= mb:
+		return fmt.Sprintf("%.1f MB", float64(b)/float64(mb))
+	case b >= kb:
+		return fmt.Sprintf("%.1f KB", float64(b)/float64(kb))
+	default:
+		return fmt.Sprintf("%d B", b)
+	}
 }
 
 // validRelPath checks that a path is a valid relative path and does

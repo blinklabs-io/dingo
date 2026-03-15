@@ -15,7 +15,12 @@
 package ledger
 
 import (
+	"encoding/hex"
 	"errors"
+	"fmt"
+	"io"
+	"log/slog"
+	"slices"
 	"testing"
 
 	"github.com/blinklabs-io/gouroboros/ledger"
@@ -26,7 +31,15 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/immutable"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/types"
 )
+
+var benchmarkDiscardLogger = slog.New(slog.NewTextHandler(io.Discard, nil))
+
+const storageModeBenchmarkStartSlot = 10000
+const storageModeBenchmarkSkippedInputHash = "e3ca57e8f323265742a8f4e79ff9af884c9ff8719bd4f7788adaea4c33ba07b6"
+const storageModeBenchmarkSkippedInputIndex = 3
+const blockProcessingBenchmarkFixtureBlockCount = 4096
 
 // Helper functions for benchmark seeding
 
@@ -1985,82 +1998,34 @@ func BenchmarkTransactionValidation(b *testing.B) {
 // BenchmarkBlockProcessingThroughput measures blocks/second processing throughput
 // using real Cardano testnet data in a continuous processing loop
 func BenchmarkBlockProcessingThroughput(b *testing.B) {
-	// Set up in-memory database
-	config := &database.Config{
-		DataDir: "", // in-memory
-	}
-	db, err := database.New(config)
-	if err != nil {
-		b.Fatal(err)
-	}
-	defer db.Close()
-
-	// Open the immutable database with real Cardano preview testnet data
-	immDb := openImmutableTestDB(b)
-
-	// Seed database with initial blocks for chain state
-	seeded := seedBlocksFromSlots(
+	seedModels, blocks := loadBlockProcessingFixture(b)
+	db, ledgerState := newBlockProcessingBenchmarkLedgerState(
 		b,
-		db,
-		immDb,
-		[]uint64{0, 1, 2, 3, 4},
-	) // Genesis + first few blocks
-	b.Logf("Seeded %d initial blocks for chain sync", seeded)
-
-	// Create chain manager
-	chainManager, err := chain.NewManager(db, nil)
-	if err != nil {
-		b.Fatal(err)
-	}
-
-	// Create ledger state for validation
-	ledgerCfg := LedgerStateConfig{
-		Database:     db,
-		ChainManager: chainManager,
-	}
-	ledgerState, err := NewLedgerState(ledgerCfg)
-	if err != nil {
-		b.Fatal(err)
-	}
-
-	// Get iterator for continuous block processing (start from slot 5)
-	startPoint := ocommon.NewPoint(5, nil)
-	iterator, err := immDb.BlocksFromPoint(startPoint)
-	if err != nil {
-		b.Fatal(err)
-	}
-	defer iterator.Close()
-
-	// Pre-load a batch of blocks for throughput testing
-	var blocks []*immutable.Block
-	blockCount := 0
-	maxBlocks := 100 // Process up to 100 blocks for throughput measurement
-
-	for blockCount < maxBlocks {
-		block, err := iterator.Next()
-		if err != nil {
-			break // End of available blocks
-		}
-		if block == nil {
-			break
-		}
-		blocks = append(blocks, block)
-		blockCount++
-	}
-
-	if len(blocks) == 0 {
-		b.Skip("No blocks available for throughput benchmarking")
-	}
+		seedModels,
+	)
+	b.Cleanup(func() { db.Close() })
 
 	b.Logf("Loaded %d blocks for throughput testing", len(blocks))
 
-	// Reset timer after setup
 	b.ResetTimer()
 
-	// Benchmark continuous block processing throughput
 	processedBlocks := 0
+	blockIdx := 0
 	for i := 0; b.Loop(); i++ {
-		block := blocks[i%len(blocks)]
+		if blockIdx == len(blocks) {
+			b.StopTimer()
+			if err := db.Close(); err != nil {
+				b.Fatal(err)
+			}
+			db, ledgerState = newBlockProcessingBenchmarkLedgerState(
+				b,
+				seedModels,
+			)
+			blockIdx = 0
+			b.StartTimer()
+		}
+		block := blocks[blockIdx]
+		blockIdx++
 
 		// Convert to ledger block
 		ledgerBlock, err := ledger.NewBlockFromCbor(block.Type, block.Cbor)
@@ -2068,14 +2033,13 @@ func BenchmarkBlockProcessingThroughput(b *testing.B) {
 			b.Fatalf("NewBlockFromCbor failed: %v", err)
 		}
 
-		// Create database transaction for block addition
-		txn := db.Transaction(true)
+		// Live blockfetch uses a blob-only txn for chain insertion.
+		txn := db.BlobTxn(true)
 
 		// Add block to chain (this includes transaction validation and state updates)
 		if err := ledgerState.Chain().AddBlock(ledgerBlock, txn); err != nil {
-			// Some blocks may fail validation due to missing context, but we measure throughput anyway
 			_ = txn.Rollback()
-			continue
+			b.Fatalf("AddBlock failed: %v", err)
 		}
 
 		// Commit transaction to finalize DB resources for this iteration
@@ -2089,6 +2053,640 @@ func BenchmarkBlockProcessingThroughput(b *testing.B) {
 
 	// Report blocks per second
 	b.ReportMetric(float64(processedBlocks)/b.Elapsed().Seconds(), "blocks/sec")
+}
+
+// BenchmarkBlockfetchNearTipThroughput measures the live blockfetch handler
+// when we are effectively at tip, so each received block is flushed
+// immediately instead of waiting for a multi-block commit batch.
+func BenchmarkBlockfetchNearTipThroughput(b *testing.B) {
+	seedModels, blocks := loadBlockProcessingFixture(b)
+	db, ledgerState := newBlockProcessingBenchmarkLedgerState(
+		b,
+		seedModels,
+	)
+	b.Cleanup(func() { db.Close() })
+
+	b.Logf("Loaded %d blocks for near-tip blockfetch testing", len(blocks))
+
+	b.ResetTimer()
+
+	processedBlocks := 0
+	blockIdx := 0
+	for i := 0; b.Loop(); i++ {
+		if blockIdx == len(blocks) {
+			b.StopTimer()
+			if err := db.Close(); err != nil {
+				b.Fatal(err)
+			}
+			db, ledgerState = newBlockProcessingBenchmarkLedgerState(
+				b,
+				seedModels,
+			)
+			blockIdx = 0
+			b.StartTimer()
+		}
+		block := blocks[blockIdx]
+		blockIdx++
+
+		ledgerBlock, err := ledger.NewBlockFromCbor(block.Type, block.Cbor)
+		if err != nil {
+			b.Fatalf("NewBlockFromCbor failed: %v", err)
+		}
+		evt := BlockfetchEvent{
+			Block: ledgerBlock,
+			Point: ocommon.NewPoint(block.Slot, block.Hash),
+			Type:  block.Type,
+		}
+
+		if err := ledgerState.handleEventBlockfetchBlock(evt); err != nil {
+			b.Fatalf("handleEventBlockfetchBlock failed: %v", err)
+		}
+		// Flush after each block to simulate near-tip behavior where
+		// blocks are committed individually rather than batched.
+		if err := ledgerState.flushPendingBlockfetchBlocks(); err != nil {
+			b.Fatalf("flushPendingBlockfetchBlocks failed: %v", err)
+		}
+
+		processedBlocks++
+	}
+
+	b.ReportMetric(float64(processedBlocks)/b.Elapsed().Seconds(), "blocks/sec")
+}
+
+// BenchmarkBlockfetchNearTipThroughputPredecoded measures the live
+// blockfetch near-tip path with block decoding removed from the timed region.
+func BenchmarkBlockfetchNearTipThroughputPredecoded(b *testing.B) {
+	seedModels, rawBlocks := loadBlockProcessingFixture(b)
+	blocks := make([]ledger.Block, 0, len(rawBlocks))
+	points := make([]ocommon.Point, 0, len(rawBlocks))
+	for _, block := range rawBlocks {
+		ledgerBlock, err := ledger.NewBlockFromCbor(block.Type, block.Cbor)
+		if err != nil {
+			b.Fatalf("predecode block: %v", err)
+		}
+		blocks = append(blocks, ledgerBlock)
+		points = append(points, ocommon.NewPoint(block.Slot, block.Hash))
+	}
+
+	db, ledgerState := newBlockProcessingBenchmarkLedgerState(
+		b,
+		seedModels,
+	)
+	b.Cleanup(func() { db.Close() })
+
+	b.Logf(
+		"Loaded %d predecoded blocks for near-tip blockfetch testing",
+		len(blocks),
+	)
+
+	b.ResetTimer()
+
+	processedBlocks := 0
+	blockIdx := 0
+	for i := 0; b.Loop(); i++ {
+		if blockIdx == len(blocks) {
+			b.StopTimer()
+			if err := db.Close(); err != nil {
+				b.Fatal(err)
+			}
+			db, ledgerState = newBlockProcessingBenchmarkLedgerState(
+				b,
+				seedModels,
+			)
+			blockIdx = 0
+			b.StartTimer()
+		}
+		evt := BlockfetchEvent{
+			Block: blocks[blockIdx],
+			Point: points[blockIdx],
+			Type:  uint(blocks[blockIdx].Type()),
+		}
+		blockIdx++
+
+		if err := ledgerState.handleEventBlockfetchBlock(evt); err != nil {
+			b.Fatalf("handleEventBlockfetchBlock failed: %v", err)
+		}
+		if err := ledgerState.flushPendingBlockfetchBlocks(); err != nil {
+			b.Fatalf("flushPendingBlockfetchBlocks failed: %v", err)
+		}
+
+		processedBlocks++
+	}
+
+	b.ReportMetric(float64(processedBlocks)/b.Elapsed().Seconds(), "blocks/sec")
+}
+
+// BenchmarkBlockfetchNearTipQueuedHeaderPredecoded measures the near-tip
+// blockfetch path when the matching header has already been queued, which is
+// the common live-sync case before full block arrival.
+func BenchmarkBlockfetchNearTipQueuedHeaderPredecoded(b *testing.B) {
+	seedModels, rawBlocks := loadBlockProcessingFixture(b)
+	blocks := make([]ledger.Block, 0, len(rawBlocks))
+	points := make([]ocommon.Point, 0, len(rawBlocks))
+	for _, block := range rawBlocks {
+		ledgerBlock, err := ledger.NewBlockFromCbor(block.Type, block.Cbor)
+		if err != nil {
+			b.Fatalf("predecode block: %v", err)
+		}
+		blocks = append(blocks, ledgerBlock)
+		points = append(points, ocommon.NewPoint(block.Slot, block.Hash))
+	}
+
+	db, ledgerState := newBlockProcessingBenchmarkLedgerState(
+		b,
+		seedModels,
+	)
+	b.Cleanup(func() { db.Close() })
+
+	b.Logf(
+		"Loaded %d predecoded blocks for queued-header near-tip testing",
+		len(blocks),
+	)
+
+	b.ResetTimer()
+
+	processedBlocks := 0
+	blockIdx := 0
+	for i := 0; b.Loop(); i++ {
+		if blockIdx == len(blocks) {
+			b.StopTimer()
+			if err := db.Close(); err != nil {
+				b.Fatal(err)
+			}
+			db, ledgerState = newBlockProcessingBenchmarkLedgerState(
+				b,
+				seedModels,
+			)
+			blockIdx = 0
+			b.StartTimer()
+		}
+		block := blocks[blockIdx]
+		point := points[blockIdx]
+		blockIdx++
+
+		if err := ledgerState.chain.AddBlockHeader(block.Header()); err != nil {
+			b.Fatalf("AddBlockHeader failed: %v", err)
+		}
+
+		evt := BlockfetchEvent{
+			Block: block,
+			Point: point,
+			Type:  uint(block.Type()),
+		}
+
+		if err := ledgerState.handleEventBlockfetchBlock(evt); err != nil {
+			b.Fatalf("handleEventBlockfetchBlock failed: %v", err)
+		}
+		if err := ledgerState.flushPendingBlockfetchBlocks(); err != nil {
+			b.Fatalf("flushPendingBlockfetchBlocks failed: %v", err)
+		}
+
+		processedBlocks++
+	}
+
+	b.ReportMetric(float64(processedBlocks)/b.Elapsed().Seconds(), "blocks/sec")
+}
+
+// BenchmarkVerifyBlockHeader isolates the cryptographic header
+// verification path used by blockfetch near tip.
+func BenchmarkVerifyBlockHeader(b *testing.B) {
+	const blockCount = 32
+
+	testBlocks := make([]*testBlockResult, 0, blockCount)
+	for i := range blockCount {
+		var seed [32]byte
+		seed[0] = byte(i + 1)
+		testBlocks = append(testBlocks, createTestBlock(b, seed, 0, tamperNone))
+	}
+
+	epoch := models.Epoch{
+		EpochId:       0,
+		StartSlot:     0,
+		LengthInSlots: 1000,
+		Nonce:         slices.Clone(testBlocks[0].epochNonce),
+	}
+	epochNonceHex := hex.EncodeToString(testBlocks[0].epochNonce)
+
+	b.Run("direct", func(b *testing.B) {
+		b.ReportAllocs()
+		b.ResetTimer()
+
+		for i := 0; b.Loop(); i++ {
+			if err := verifyBlockHeaderHex(
+				testBlocks[i%len(testBlocks)].block,
+				epochNonceHex,
+				testBlocks[0].slotsPerKesPeriod,
+			); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+
+	b.Run("ledger_state", func(b *testing.B) {
+		ledgerState := &LedgerState{
+			epochCache: []models.Epoch{epoch},
+			currentEpoch: models.Epoch{
+				EpochId:       epoch.EpochId,
+				StartSlot:     epoch.StartSlot,
+				LengthInSlots: epoch.LengthInSlots,
+				Nonce:         slices.Clone(epoch.Nonce),
+			},
+			config: LedgerStateConfig{
+				CardanoNodeConfig: newTestShelleyGenesisCfg(b),
+				Logger:            benchmarkDiscardLogger,
+			},
+			epochNonceHexCache: make(map[uint64]string),
+		}
+
+		b.ReportAllocs()
+		b.ResetTimer()
+
+		for i := 0; b.Loop(); i++ {
+			if err := ledgerState.verifyBlockHeaderCrypto(
+				testBlocks[i%len(testBlocks)].block,
+			); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+}
+
+// BenchmarkBlockfetchVerifiedHeaderDispatch measures the near-tip blockfetch
+// handler when the fetched block matches a header that chainsync already
+// verified and queued. This is the common BP path where duplicate VRF/KES
+// verification should be avoidable.
+func BenchmarkBlockfetchVerifiedHeaderDispatch(b *testing.B) {
+	testBlock := createTestBlock(b, [32]byte{0x42}, 0, tamperNone)
+
+	db, err := database.New(&database.Config{
+		DataDir: "",
+		Logger:  benchmarkDiscardLogger,
+		RunMode: "serve",
+	})
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.Cleanup(func() { _ = db.Close() })
+
+	chainManager, err := chain.NewManager(db, nil)
+	if err != nil {
+		b.Fatal(err)
+	}
+	ledgerState, err := NewLedgerState(LedgerStateConfig{
+		Database:           db,
+		ChainManager:       chainManager,
+		CardanoNodeConfig:  newTestShelleyGenesisCfg(b),
+		ValidateHistorical: true,
+		Logger:             benchmarkDiscardLogger,
+	})
+	if err != nil {
+		b.Fatal(err)
+	}
+	epoch := models.Epoch{
+		EpochId:       0,
+		StartSlot:     0,
+		LengthInSlots: 1000,
+		Nonce:         slices.Clone(testBlock.epochNonce),
+	}
+	ledgerState.currentEpoch = epoch
+	ledgerState.epochCache = []models.Epoch{epoch}
+
+	if err := ledgerState.chain.AddBlockHeader(testBlock.block.Header()); err != nil {
+		b.Fatalf("seed header queue: %v", err)
+	}
+
+	evt := BlockfetchEvent{
+		Block: testBlock.block,
+		Point: ocommon.NewPoint(
+			testBlock.block.SlotNumber(),
+			testBlock.block.Header().Hash().Bytes(),
+		),
+		Type: uint(testBlock.block.Type()),
+	}
+	if testBlock.block.Header().SlotNumber() != evt.Point.Slot ||
+		!slices.Equal(testBlock.block.Header().Hash().Bytes(), evt.Point.Hash) {
+		b.Fatal("seeded header does not match benchmark block point")
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+
+	for b.Loop() {
+		if err := ledgerState.handleEventBlockfetchBlock(evt); err != nil {
+			b.Fatal(err)
+		}
+		ledgerState.pendingBlockfetchEvents = ledgerState.pendingBlockfetchEvents[:0]
+	}
+}
+
+// BenchmarkBlockProcessingThroughputPredecoded measures block-processing
+// throughput with block CBOR decoding removed from the timed region.
+func BenchmarkBlockProcessingThroughputPredecoded(b *testing.B) {
+	seedModels, rawBlocks := loadBlockProcessingFixture(b)
+	blocks := make([]ledger.Block, 0, len(rawBlocks))
+	for _, block := range rawBlocks {
+		ledgerBlock, err := ledger.NewBlockFromCbor(block.Type, block.Cbor)
+		if err != nil {
+			b.Fatalf("predecode block: %v", err)
+		}
+		blocks = append(blocks, ledgerBlock)
+	}
+
+	db, ledgerState := newBlockProcessingBenchmarkLedgerState(
+		b,
+		seedModels,
+	)
+	b.Cleanup(func() { db.Close() })
+
+	b.Logf("Loaded %d predecoded blocks for throughput testing", len(blocks))
+
+	b.ResetTimer()
+
+	processedBlocks := 0
+	blockIdx := 0
+	for i := 0; b.Loop(); i++ {
+		if blockIdx == len(blocks) {
+			b.StopTimer()
+			if err := db.Close(); err != nil {
+				b.Fatal(err)
+			}
+			db, ledgerState = newBlockProcessingBenchmarkLedgerState(
+				b,
+				seedModels,
+			)
+			blockIdx = 0
+			b.StartTimer()
+		}
+		block := blocks[blockIdx]
+		blockIdx++
+		txn := db.BlobTxn(true)
+
+		if err := ledgerState.Chain().AddBlock(block, txn); err != nil {
+			_ = txn.Rollback()
+			b.Fatalf("AddBlock failed: %v", err)
+		}
+		if err := txn.Commit(); err != nil {
+			_ = txn.Rollback()
+			b.Fatalf("Failed to commit transaction: %v", err)
+		}
+
+		processedBlocks++
+	}
+
+	b.ReportMetric(float64(processedBlocks)/b.Elapsed().Seconds(), "blocks/sec")
+}
+
+// BenchmarkBlockBatchProcessingThroughput measures batched block-processing
+// throughput using Chain.AddBlocks, which matches the normal immutable-load
+// path more closely than per-block AddBlock.
+func BenchmarkBlockBatchProcessingThroughput(b *testing.B) {
+	seedModels, batchBlocks, _, batchSize := loadBatchProcessingFixture(b)
+
+	b.ResetTimer()
+
+	processedBlocks := 0
+	for b.Loop() {
+		b.StopTimer()
+		db, ledgerState := newBatchBenchmarkLedgerState(b, seedModels)
+		b.StartTimer()
+		if err := ledgerState.Chain().AddBlocks(batchBlocks); err != nil {
+			_ = db.Close()
+			b.Fatal(err)
+		}
+		b.StopTimer()
+		if err := db.Close(); err != nil {
+			b.Fatal(err)
+		}
+		b.StartTimer()
+		processedBlocks += batchSize
+	}
+
+	b.ReportMetric(float64(processedBlocks)/b.Elapsed().Seconds(), "blocks/sec")
+}
+
+// BenchmarkRawBlockBatchProcessingThroughput measures batched header-only
+// processing throughput using Chain.AddRawBlocks, matching the optimized
+// load path used during immutable imports.
+func BenchmarkRawBlockBatchProcessingThroughput(b *testing.B) {
+	seedModels, _, rawBlocks, batchSize := loadBatchProcessingFixture(b)
+
+	b.ResetTimer()
+
+	processedBlocks := 0
+	for b.Loop() {
+		b.StopTimer()
+		db, ledgerState := newBatchBenchmarkLedgerState(b, seedModels)
+		b.StartTimer()
+		if err := ledgerState.Chain().AddRawBlocks(rawBlocks); err != nil {
+			_ = db.Close()
+			b.Fatal(err)
+		}
+		b.StopTimer()
+		if err := db.Close(); err != nil {
+			b.Fatal(err)
+		}
+		b.StartTimer()
+		processedBlocks += batchSize
+	}
+
+	b.ReportMetric(float64(processedBlocks)/b.Elapsed().Seconds(), "blocks/sec")
+}
+
+func loadBatchProcessingFixture(
+	b *testing.B,
+) ([]models.Block, []ledger.Block, []chain.RawBlock, int) {
+	b.Helper()
+
+	immDb := openImmutableTestDB(b)
+	iterator, err := immDb.BlocksFromPoint(ocommon.NewPoint(0, nil))
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer iterator.Close()
+
+	const seedCount = 5
+	const batchSize = 50
+
+	seedModels := make([]models.Block, 0, seedCount)
+	for len(seedModels) < seedCount {
+		block, err := iterator.Next()
+		if err != nil {
+			b.Fatal(err)
+		}
+		if block == nil {
+			b.Skip("insufficient blocks available for batch benchmark seed")
+		}
+		ledgerBlock, err := ledger.NewBlockFromCbor(block.Type, block.Cbor)
+		if err != nil {
+			continue
+		}
+		seedModels = append(seedModels, models.Block{
+			ID:       uint64(len(seedModels) + 1),
+			Slot:     block.Slot,
+			Hash:     slices.Clone(block.Hash),
+			Number:   0,
+			Type:     uint(ledgerBlock.Type()),
+			PrevHash: ledgerBlock.PrevHash().Bytes(),
+			Cbor:     slices.Clone(block.Cbor),
+		})
+	}
+
+	batchBlocks := make([]ledger.Block, 0, batchSize)
+	rawBlocks := make([]chain.RawBlock, 0, batchSize)
+	for len(batchBlocks) < batchSize {
+		block, err := iterator.Next()
+		if err != nil {
+			b.Fatal(err)
+		}
+		if block == nil {
+			b.Skip("insufficient blocks available for batch benchmark")
+		}
+		ledgerBlock, err := ledger.NewBlockFromCbor(block.Type, block.Cbor)
+		if err != nil {
+			continue
+		}
+		batchBlocks = append(batchBlocks, ledgerBlock)
+		rawBlocks = append(rawBlocks, chain.RawBlock{
+			Slot:        ledgerBlock.SlotNumber(),
+			Hash:        slices.Clone(block.Hash),
+			BlockNumber: ledgerBlock.BlockNumber(),
+			Type:        uint(block.Type),
+			PrevHash:    ledgerBlock.PrevHash().Bytes(),
+			Cbor:        slices.Clone(block.Cbor),
+		})
+	}
+
+	return seedModels, batchBlocks, rawBlocks, batchSize
+}
+
+func loadBlockProcessingFixture(
+	b *testing.B,
+) ([]models.Block, []*immutable.Block) {
+	b.Helper()
+
+	immDb := openImmutableTestDB(b)
+	iterator, err := immDb.BlocksFromPoint(ocommon.NewPoint(0, nil))
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer iterator.Close()
+
+	const seedCount = 5
+	const blockCount = blockProcessingBenchmarkFixtureBlockCount
+
+	seedModels := make([]models.Block, 0, seedCount)
+	for len(seedModels) < seedCount {
+		block, err := iterator.Next()
+		if err != nil {
+			b.Fatal(err)
+		}
+		if block == nil {
+			b.Skip("insufficient blocks available for throughput benchmark seed")
+		}
+		ledgerBlock, err := ledger.NewBlockFromCbor(block.Type, block.Cbor)
+		if err != nil {
+			continue
+		}
+		seedModels = append(seedModels, models.Block{
+			ID:       uint64(len(seedModels) + 1),
+			Slot:     block.Slot,
+			Hash:     slices.Clone(block.Hash),
+			Number:   0,
+			Type:     uint(ledgerBlock.Type()),
+			PrevHash: ledgerBlock.PrevHash().Bytes(),
+			Cbor:     slices.Clone(block.Cbor),
+		})
+	}
+
+	blocks := make([]*immutable.Block, 0, blockCount)
+	for len(blocks) < blockCount {
+		block, err := iterator.Next()
+		if err != nil {
+			b.Fatal(err)
+		}
+		if block == nil {
+			b.Skip("insufficient blocks available for throughput benchmark")
+		}
+		tmpBlock := &immutable.Block{
+			Slot: block.Slot,
+			Type: block.Type,
+			Cbor: slices.Clone(block.Cbor),
+			Hash: slices.Clone(block.Hash),
+		}
+		blocks = append(blocks, tmpBlock)
+	}
+
+	return seedModels, blocks
+}
+
+func newBatchBenchmarkLedgerState(
+	b *testing.B,
+	seedModels []models.Block,
+) (*database.Database, *LedgerState) {
+	b.Helper()
+
+	db, err := database.New(&database.Config{DataDir: ""})
+	if err != nil {
+		b.Fatal(err)
+	}
+	for _, blockModel := range seedModels {
+		tmpModel := blockModel
+		if err := db.BlockCreate(tmpModel, nil); err != nil {
+			_ = db.Close()
+			b.Fatalf("seed batch benchmark block: %v", err)
+		}
+	}
+	chainManager, err := chain.NewManager(db, nil)
+	if err != nil {
+		_ = db.Close()
+		b.Fatal(err)
+	}
+	ledgerState, err := NewLedgerState(LedgerStateConfig{
+		Database:     db,
+		ChainManager: chainManager,
+	})
+	if err != nil {
+		_ = db.Close()
+		b.Fatal(err)
+	}
+	return db, ledgerState
+}
+
+func newBlockProcessingBenchmarkLedgerState(
+	b *testing.B,
+	seedModels []models.Block,
+) (*database.Database, *LedgerState) {
+	b.Helper()
+
+	db, err := database.New(&database.Config{
+		DataDir: "",
+		Logger:  benchmarkDiscardLogger,
+		RunMode: "serve",
+	})
+	if err != nil {
+		b.Fatal(err)
+	}
+	for _, blockModel := range seedModels {
+		tmpModel := blockModel
+		if err := db.BlockCreate(tmpModel, nil); err != nil {
+			_ = db.Close()
+			b.Fatalf("seed block processing benchmark block: %v", err)
+		}
+	}
+	chainManager, err := chain.NewManager(db, nil)
+	if err != nil {
+		_ = db.Close()
+		b.Fatal(err)
+	}
+	ledgerState, err := NewLedgerState(LedgerStateConfig{
+		Database:     db,
+		ChainManager: chainManager,
+	})
+	if err != nil {
+		_ = db.Close()
+		b.Fatal(err)
+	}
+	return db, ledgerState
 }
 
 // BenchmarkConcurrentQueries measures database performance under concurrent query load
@@ -2176,4 +2774,415 @@ func BenchmarkConcurrentQueries(b *testing.B) {
 
 	// Report queries per second
 	b.ReportMetric(float64(b.N)/b.Elapsed().Seconds(), "queries/sec")
+}
+
+type storageModeBenchmarkBlock struct {
+	block        ledger.Block
+	point        ocommon.Point
+	model        models.Block
+	offsets      *database.BlockIngestionResult
+	transactions []storageModeBenchmarkTx
+	txCount      int
+}
+
+type storageModeBenchmarkTx struct {
+	tx           lcommon.Transaction
+	updateEpoch  uint64
+	paramUpdates map[lcommon.Blake2b224]lcommon.ProtocolParameterUpdate
+	certDeposits map[int]uint64
+}
+
+type storageModeBenchmarkFixture struct {
+	seedBlocks    []storageModeBenchmarkBlock
+	measureBlocks []storageModeBenchmarkBlock
+}
+
+func storageModeBenchmarkCanIngestBlock(
+	db *database.Database,
+	block storageModeBenchmarkBlock,
+) (bool, error) {
+	for _, tx := range block.block.Transactions() {
+		skipInputs := func(inputs []lcommon.TransactionInput) bool {
+			for _, input := range inputs {
+				if input.Id().String() == storageModeBenchmarkSkippedInputHash &&
+					input.Index() == storageModeBenchmarkSkippedInputIndex {
+					return true
+				}
+			}
+			return false
+		}
+
+		if skipInputs(tx.Inputs()) ||
+			skipInputs(tx.Collateral()) ||
+			skipInputs(tx.ReferenceInputs()) ||
+			skipInputs(tx.Consumed()) {
+			return false, nil
+		}
+
+		checkInputs := func(
+			inputs []lcommon.TransactionInput,
+			includeSpent bool,
+		) (bool, error) {
+			for _, input := range inputs {
+				var err error
+				if includeSpent {
+					_, err = db.UtxoByRefIncludingSpent(
+						input.Id().Bytes(),
+						input.Index(),
+						nil,
+					)
+				} else {
+					_, err = db.UtxoByRef(input.Id().Bytes(), input.Index(), nil)
+				}
+				if err == nil {
+					continue
+				}
+				if errors.Is(err, database.ErrUtxoNotFound) {
+					return false, nil
+				}
+				return false, err
+			}
+			return true, nil
+		}
+
+		ok, err := checkInputs(tx.Inputs(), false)
+		if !ok || err != nil {
+			return ok, err
+		}
+		ok, err = checkInputs(tx.Collateral(), false)
+		if !ok || err != nil {
+			return ok, err
+		}
+		ok, err = checkInputs(tx.ReferenceInputs(), false)
+		if !ok || err != nil {
+			return ok, err
+		}
+		ok, err = checkInputs(tx.Consumed(), true)
+		if !ok || err != nil {
+			return ok, err
+		}
+	}
+	return true, nil
+}
+
+func loadStorageModeBenchmarkFixture(
+	b *testing.B,
+	maxBlocks int,
+	seedTargetTxs int,
+	measureTargetTxs int,
+) storageModeBenchmarkFixture {
+	b.Helper()
+
+	immDb := openImmutableTestDB(b)
+	iterator, err := immDb.BlocksFromPoint(
+		ocommon.NewPoint(storageModeBenchmarkStartSlot, nil),
+	)
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer iterator.Close()
+
+	ret := storageModeBenchmarkFixture{
+		seedBlocks:    make([]storageModeBenchmarkBlock, 0, maxBlocks),
+		measureBlocks: make([]storageModeBenchmarkBlock, 0, maxBlocks),
+	}
+	fixtureDb, err := database.New(&database.Config{
+		DataDir:     "",
+		Logger:      benchmarkDiscardLogger,
+		StorageMode: types.StorageModeCore,
+	})
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer fixtureDb.Close()
+	seededTxs := 0
+	measuredTxs := 0
+	for len(ret.seedBlocks)+len(ret.measureBlocks) < maxBlocks &&
+		measuredTxs < measureTargetTxs {
+		immBlock, err := iterator.Next()
+		if err != nil {
+			b.Fatal(err)
+		}
+		if immBlock == nil {
+			break
+		}
+
+		ledgerBlock, err := ledger.NewBlockFromCbor(
+			immBlock.Type,
+			immBlock.Cbor,
+		)
+		if err != nil {
+			continue
+		}
+		point := ocommon.NewPoint(immBlock.Slot, immBlock.Hash)
+		indexer := database.NewBlockIndexer(point.Slot, point.Hash)
+		offsets, err := indexer.ComputeOffsets(immBlock.Cbor, ledgerBlock)
+		if err != nil {
+			b.Fatalf("compute offsets for slot %d: %v", point.Slot, err)
+		}
+
+		txs := ledgerBlock.Transactions()
+		txCount := len(txs)
+		if txCount == 0 {
+			continue
+		}
+		benchmarkTxs := make([]storageModeBenchmarkTx, 0, txCount)
+		for _, tx := range txs {
+			updateEpoch, paramUpdates := tx.ProtocolParameterUpdates()
+			certs := tx.Certificates()
+			var certDeposits map[int]uint64
+			if len(certs) > 0 {
+				certDeposits = make(map[int]uint64, len(certs))
+				for i := range certs {
+					certDeposits[i] = 0
+				}
+			}
+			benchmarkTxs = append(benchmarkTxs, storageModeBenchmarkTx{
+				tx:           tx,
+				updateEpoch:  updateEpoch,
+				paramUpdates: paramUpdates,
+				certDeposits: certDeposits,
+			})
+		}
+		blockData := storageModeBenchmarkBlock{
+			block: ledgerBlock,
+			point: point,
+			model: models.Block{
+				ID:       uint64(len(ret.seedBlocks) + len(ret.measureBlocks) + 1),
+				Slot:     point.Slot,
+				Hash:     point.Hash,
+				Number:   ledgerBlock.BlockNumber(),
+				Type:     uint(ledgerBlock.Type()),
+				PrevHash: ledgerBlock.PrevHash().Bytes(),
+				Cbor:     ledgerBlock.Cbor(),
+			},
+			offsets:      offsets,
+			transactions: benchmarkTxs,
+			txCount:      txCount,
+		}
+
+		if seededTxs < seedTargetTxs {
+			ret.seedBlocks = append(ret.seedBlocks, blockData)
+			seededTxs += txCount
+			if _, err := ingestStorageModeBenchmarkBlocks(
+				fixtureDb,
+				[]storageModeBenchmarkBlock{blockData},
+			); err != nil {
+				b.Fatalf(
+					"seed storage mode fixture block at slot %d: %v",
+					point.Slot,
+					err,
+				)
+			}
+			continue
+		}
+		ok, err := storageModeBenchmarkCanIngestBlock(fixtureDb, blockData)
+		if err != nil {
+			b.Fatalf(
+				"preflight storage mode fixture block at slot %d: %v",
+				point.Slot,
+				err,
+			)
+		}
+		if !ok {
+			continue
+		}
+		ret.measureBlocks = append(ret.measureBlocks, blockData)
+		measuredTxs += txCount
+		if _, err := ingestStorageModeBenchmarkBlocks(
+			fixtureDb,
+			[]storageModeBenchmarkBlock{blockData},
+		); err != nil {
+			b.Fatalf(
+				"ingest storage mode fixture block at slot %d: %v",
+				point.Slot,
+				err,
+			)
+		}
+	}
+	if len(ret.measureBlocks) == 0 {
+		b.Skip("no blocks available for storage mode benchmark")
+	}
+	return ret
+}
+
+func ingestStorageModeBenchmarkBlocks(
+	db *database.Database,
+	blocks []storageModeBenchmarkBlock,
+) (int, error) {
+	txn := db.Transaction(true)
+	defer txn.Rollback() //nolint:errcheck
+
+	totalTxs := 0
+	for _, blockData := range blocks {
+		if err := db.BlockCreate(blockData.model, txn); err != nil {
+			return totalTxs, fmt.Errorf(
+				"BlockCreate slot %d: %w", blockData.point.Slot, err,
+			)
+		}
+		for txIdx, txData := range blockData.transactions {
+			if err := db.SetTransaction(
+				txData.tx,
+				blockData.point,
+				uint32(txIdx),
+				txData.updateEpoch,
+				txData.paramUpdates,
+				txData.certDeposits,
+				blockData.offsets,
+				txn,
+			); err != nil {
+				return totalTxs, fmt.Errorf(
+					"SetTransaction slot %d tx %d: %w",
+					blockData.point.Slot, txIdx, err,
+				)
+			}
+			totalTxs++
+		}
+	}
+
+	if err := txn.Commit(); err != nil {
+		return totalTxs, fmt.Errorf(
+			"Commit after %d txs: %w", totalTxs, err,
+		)
+	}
+	return totalTxs, nil
+}
+
+// BenchmarkStorageModeIngest compares real block ingestion in core and api
+// storage modes using the same block batch and offset computation path.
+func BenchmarkStorageModeIngest(b *testing.B) {
+	fixture := loadStorageModeBenchmarkFixture(b, 300, 500, 200)
+	modeNames := []string{types.StorageModeCore, types.StorageModeAPI}
+
+	for _, mode := range modeNames {
+		b.Run(mode, func(b *testing.B) {
+			b.ReportAllocs()
+
+			totalBlocks := 0
+			totalTxs := 0
+			for b.Loop() {
+				b.StopTimer()
+				db, err := database.New(&database.Config{
+					DataDir:     "",
+					Logger:      benchmarkDiscardLogger,
+					StorageMode: mode,
+				})
+				if err != nil {
+					b.Fatal(err)
+				}
+				if _, err := ingestStorageModeBenchmarkBlocks(
+					db,
+					fixture.seedBlocks,
+				); err != nil {
+					_ = db.Close()
+					b.Fatalf("seed storage mode benchmark blocks: %v", err)
+				}
+
+				b.StartTimer()
+				txCount, err := ingestStorageModeBenchmarkBlocks(
+					db,
+					fixture.measureBlocks,
+				)
+
+				b.StopTimer()
+				closeErr := db.Close()
+				if err != nil {
+					b.Fatal(err)
+				}
+				if closeErr != nil {
+					b.Fatal(closeErr)
+				}
+				b.StartTimer()
+
+				totalBlocks += len(fixture.measureBlocks)
+				totalTxs += txCount
+			}
+
+			b.ReportMetric(
+				float64(totalBlocks)/b.Elapsed().Seconds(),
+				"blocks_ingested/sec",
+			)
+			b.ReportMetric(
+				float64(totalTxs)/b.Elapsed().Seconds(),
+				"txs_ingested/sec",
+			)
+		})
+	}
+}
+
+// BenchmarkStorageModeIngestSteadyState isolates ingest cost from DB-open and
+// initial seeding overhead by reusing a single database per sub-benchmark and
+// resetting state between iterations with a transaction rollback.
+func BenchmarkStorageModeIngestSteadyState(b *testing.B) {
+	fixture := loadStorageModeBenchmarkFixture(b, 300, 500, 200)
+	modeNames := []string{types.StorageModeCore, types.StorageModeAPI}
+
+	for _, mode := range modeNames {
+		b.Run(mode, func(b *testing.B) {
+			b.ReportAllocs()
+
+			db, err := database.New(&database.Config{
+				DataDir:     "",
+				Logger:      benchmarkDiscardLogger,
+				StorageMode: mode,
+			})
+			if err != nil {
+				b.Fatal(err)
+			}
+			defer db.Close()
+
+			if _, err := ingestStorageModeBenchmarkBlocks(db, fixture.seedBlocks); err != nil {
+				b.Fatalf("seed steady-state storage mode benchmark blocks: %v", err)
+			}
+
+			totalBlocks := 0
+			totalTxs := 0
+			for b.Loop() {
+				txn := db.Transaction(true)
+				if txn == nil {
+					b.Fatal("nil transaction")
+				}
+
+				txCount := 0
+				for _, blockData := range fixture.measureBlocks {
+					if err := db.BlockCreate(blockData.model, txn); err != nil {
+						_ = txn.Rollback()
+						b.Fatal(err)
+					}
+					for txIdx, txData := range blockData.transactions {
+						if err := db.SetTransaction(
+							txData.tx,
+							blockData.point,
+							uint32(txIdx),
+							txData.updateEpoch,
+							txData.paramUpdates,
+							txData.certDeposits,
+							blockData.offsets,
+							txn,
+						); err != nil {
+							_ = txn.Rollback()
+							b.Fatal(err)
+						}
+						txCount++
+					}
+				}
+				b.StopTimer()
+				if err := txn.Rollback(); err != nil {
+					b.Fatal(err)
+				}
+				b.StartTimer()
+				totalBlocks += len(fixture.measureBlocks)
+				totalTxs += txCount
+			}
+
+			b.ReportMetric(
+				float64(totalBlocks)/b.Elapsed().Seconds(),
+				"blocks_ingested/sec",
+			)
+			b.ReportMetric(
+				float64(totalTxs)/b.Elapsed().Seconds(),
+				"txs_ingested/sec",
+			)
+		})
+	}
 }

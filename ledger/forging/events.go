@@ -33,7 +33,7 @@ package forging
 import "github.com/blinklabs-io/dingo/event"
 
 // SlotBattleEventType is the event type for slot battles (competing blocks)
-const SlotBattleEventType = event.EventType("forging.slot-battle")
+const SlotBattleEventType = event.EventType("forging.slot_battle")
 
 // SlotBattleEvent is emitted when the node detects competing blocks for the
 // same slot, either from receiving an external block while preparing to forge

@@ -48,8 +48,8 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 	}
 	// Derive default config path from cfg.Network when cfg.CardanoConfig is empty
 	cardanoConfigPath := cfg.CardanoConfig
+	network := cfg.Network
 	if cardanoConfigPath == "" {
-		network := cfg.Network
 		if network == "" {
 			network = "preview"
 		}
@@ -60,8 +60,8 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 	var err error
 	nodeCfg, err = cardano.LoadCardanoNodeConfigWithFallback(
 		cardanoConfigPath,
-		cfg.Network,
-		cardano.EmbeddedConfigPreviewNetworkFS,
+		network,
+		cardano.EmbeddedConfigFS,
 	)
 	if err != nil {
 		return err
@@ -153,6 +153,14 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 			dingo.StorageModeAPI,
 		)
 	}
+	// Dev mode always uses API storage for full transaction metadata
+	if cfg.RunMode.IsDevMode() && !storageMode.IsAPI() {
+		logger.Info(
+			"dev mode: overriding storage mode to api",
+			"previous", string(storageMode),
+		)
+		storageMode = dingo.StorageModeAPI
+	}
 	// APIs require "api" storage mode
 	anyAPIEnabled := cfg.BlockfrostPort > 0 ||
 		cfg.MeshPort > 0 ||
@@ -186,6 +194,7 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 			dingo.WithCardanoNodeConfig(nodeCfg),
 			dingo.WithListeners(listeners...),
 			dingo.WithOutboundSourcePort(cfg.RelayPort),
+			dingo.WithPeerSharing(cfg.PeerSharing),
 			dingo.WithUtxorpcPort(cfg.UtxorpcPort),
 			dingo.WithUtxorpcTlsCertFilePath(cfg.TlsCertFilePath),
 			dingo.WithUtxorpcTlsKeyFilePath(cfg.TlsKeyFilePath),
@@ -215,6 +224,11 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 				cfg.ActivePeersGossipQuota,
 				cfg.ActivePeersLedgerQuota,
 			),
+			dingo.WithMinHotPeers(cfg.MinHotPeers),
+			dingo.WithReconcileInterval(cfg.ReconcileInterval),
+			dingo.WithInactivityTimeout(cfg.InactivityTimeout),
+			dingo.WithMaxConnectionsPerIP(cfg.MaxConnectionsPerIP),
+			dingo.WithMaxInboundConns(cfg.MaxInboundConns),
 			dingo.WithChainsyncMaxClients(
 				cfg.Chainsync.MaxClients,
 			),

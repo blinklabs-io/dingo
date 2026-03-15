@@ -21,7 +21,7 @@ import (
 func TestNewCardanoNodeConfigFromEmbedFS(t *testing.T) {
 	// Test loading config from embedded filesystem
 	cfg, err := NewCardanoNodeConfigFromEmbedFS(
-		EmbeddedConfigPreviewNetworkFS,
+		EmbeddedConfigFS,
 		"preview/config.json",
 	)
 	if err != nil {
@@ -54,7 +54,7 @@ func TestNewCardanoNodeConfigFromEmbedFS(t *testing.T) {
 func TestNewCardanoNodeConfigFromEmbedFS_InvalidPath(t *testing.T) {
 	// Test loading config from embedded filesystem with invalid path
 	_, err := NewCardanoNodeConfigFromEmbedFS(
-		EmbeddedConfigPreviewNetworkFS,
+		EmbeddedConfigFS,
 		"nonexistent/config.json",
 	)
 	if err == nil {
@@ -64,7 +64,7 @@ func TestNewCardanoNodeConfigFromEmbedFS_InvalidPath(t *testing.T) {
 
 func TestEmbedFS_ListFiles(t *testing.T) {
 	// Test that embedded FS contains expected files in preview directory
-	previewEntries, err := EmbeddedConfigPreviewNetworkFS.ReadDir("preview")
+	previewEntries, err := EmbeddedConfigFS.ReadDir("preview")
 	if err != nil {
 		t.Fatalf("failed to read preview directory: %v", err)
 	}
@@ -90,5 +90,55 @@ func TestEmbedFS_ListFiles(t *testing.T) {
 		if !foundFiles[expectedFile] {
 			t.Errorf("expected to find %s in preview directory", expectedFile)
 		}
+	}
+}
+
+func TestEmbedFS_AllNetworks(t *testing.T) {
+	networks := []string{"preview", "preprod", "mainnet", "devnet"}
+	expectedFiles := []string{
+		"config.json",
+		"byron-genesis.json",
+		"shelley-genesis.json",
+		"alonzo-genesis.json",
+		"conway-genesis.json",
+	}
+
+	for _, network := range networks {
+		t.Run(network, func(t *testing.T) {
+			t.Parallel()
+			entries, err := EmbeddedConfigFS.ReadDir(network)
+			if err != nil {
+				t.Fatalf("failed to read %s directory: %v", network, err)
+			}
+			if len(entries) == 0 {
+				t.Fatalf("expected %s directory to contain files", network)
+			}
+			foundFiles := make(map[string]bool)
+			for _, entry := range entries {
+				foundFiles[entry.Name()] = true
+			}
+			for _, expectedFile := range expectedFiles {
+				if !foundFiles[expectedFile] {
+					t.Errorf("expected to find %s in %s directory", expectedFile, network)
+				}
+			}
+			// Verify config can be loaded
+			cfg, err := NewCardanoNodeConfigFromEmbedFS(
+				EmbeddedConfigFS,
+				network+"/config.json",
+			)
+			if err != nil {
+				t.Fatalf("failed to load %s config: %v", network, err)
+			}
+			if cfg == nil {
+				t.Fatalf("expected non-nil config for %s", network)
+			}
+			if cfg.ShelleyGenesis() == nil {
+				t.Errorf("expected ShelleyGenesis to be loaded for %s", network)
+			}
+			if cfg.ByronGenesis() == nil {
+				t.Errorf("expected ByronGenesis to be loaded for %s", network)
+			}
+		})
 	}
 }

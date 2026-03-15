@@ -23,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/database"
 	"github.com/prometheus/client_golang/prometheus"
 	"gopkg.in/yaml.v3"
 
@@ -388,10 +389,16 @@ func TestCloudPluginS3(t *testing.T) {
 		testBucket = "dingo-test-bucket"
 	}
 
-	// Create S3 plugin directly with test configuration
-	s3Plugin, err := aws.NewWithOptions(
+	opts := []aws.BlobStoreS3OptionFunc{
 		aws.WithBucket(testBucket),
-	)
+	}
+
+	if os.Getenv("AWS_ENDPOINT") != "" {
+		opts = append(opts, aws.WithEndpoint(os.Getenv("AWS_ENDPOINT")))
+	}
+
+	// Create S3 plugin directly with test configuration
+	s3Plugin, err := aws.NewWithOptions(opts...)
 	if err != nil {
 		t.Fatalf("failed to create S3 plugin: %v", err)
 	}
@@ -509,4 +516,47 @@ func TestNodeShutdownIntegration(t *testing.T) {
 	}
 
 	t.Log("node shutdown integration test passed")
+}
+
+func TestStorageBackends(t *testing.T) {
+	backends := getTestBackends(t, t.TempDir())
+	for _, backend := range backends {
+		t.Run(backend.name, func(t *testing.T) {
+			testStorageBackend(t, backend.config)
+		})
+	}
+}
+
+func testStorageBackend(t *testing.T, config *database.Config) {
+	// Create database with the specified backend
+	db, err := database.New(config)
+	if err != nil {
+		t.Fatalf(
+			"failed to create database with: %v",
+			err,
+		)
+	}
+	defer db.Close()
+
+	blocks, err := loadBlockData(10)
+	if err != nil {
+		t.Fatalf("failed to load block data: %v", err)
+	}
+
+	for i := range 10 {
+		txn := db.Transaction(true)
+		key := fmt.Appendf(nil, "block-%d", i)
+		blob := txn.DB().Blob()
+		if blob == nil || txn.Blob() == nil {
+			txn.Rollback()
+			t.Fatalf("blob store/txn not available")
+		}
+		if err := blob.Set(txn.Blob(), key, blocks[i]); err != nil {
+			txn.Rollback()
+			t.Fatalf("failed to set block %d: %v", i, err)
+		}
+		if err := txn.Commit(); err != nil {
+			t.Fatalf("failed to commit block %d: %v", i, err)
+		}
+	}
 }

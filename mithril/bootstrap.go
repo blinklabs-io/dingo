@@ -21,6 +21,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 )
 
@@ -44,10 +45,40 @@ type BootstrapConfig struct {
 	// walks the certificate chain from the snapshot back to the
 	// genesis certificate to verify the chain is unbroken.
 	VerifyCertificateChain bool
+	// GenesisVerificationKey is the Mithril genesis verification key loaded
+	// from Cardano network config. It is validated for parseability now and
+	// will be used by full STM verification.
+	GenesisVerificationKey string
+	// AncillaryVerificationKey is the Mithril ancillary verification key loaded
+	// from Cardano network config. It is validated for parseability now and
+	// will be used when ancillary artifacts are verified cryptographically.
+	AncillaryVerificationKey string
 	// Logger is used for structured logging.
 	Logger *slog.Logger
 	// OnProgress is called during download with progress updates.
 	OnProgress ProgressFunc
+}
+
+// VerificationMode selects the level of Mithril certificate verification.
+type VerificationMode uint8
+
+const (
+	// VerificationModeStructural verifies certificate chain linkage and leaf
+	// binding to the requested snapshot digest.
+	VerificationModeStructural VerificationMode = iota + 1
+	// VerificationModeSTM verifies the structural certificate chain and the
+	// aggregate multi-signature of each non-genesis certificate.
+	VerificationModeSTM
+)
+
+// CertificateChainVerificationResult captures the parsed certificate chain and
+// derived leaf/root metadata that higher verification modes can build on.
+type CertificateChainVerificationResult struct {
+	Certificates       []*Certificate
+	LeafCertificate    *Certificate
+	GenesisCertificate *Certificate
+	SignedEntityKind   string
+	SnapshotDigest     string
 }
 
 // BootstrapResult contains the result of a bootstrap operation.
@@ -91,6 +122,24 @@ func Bootstrap(
 ) (*BootstrapResult, error) {
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
+	}
+	if cfg.VerifyCertificateChain {
+		if cfg.GenesisVerificationKey != "" {
+			if _, err := ParseVerificationKey(cfg.GenesisVerificationKey); err != nil {
+				return nil, fmt.Errorf(
+					"parsing Mithril genesis verification key: %w",
+					err,
+				)
+			}
+		}
+		if cfg.AncillaryVerificationKey != "" {
+			if _, err := ParseVerificationKey(cfg.AncillaryVerificationKey); err != nil {
+				return nil, fmt.Errorf(
+					"parsing Mithril ancillary verification key: %w",
+					err,
+				)
+			}
+		}
 	}
 
 	// Resolve aggregator URL
@@ -153,14 +202,85 @@ func Bootstrap(
 			"component", "mithril",
 			"certificate_hash", snapshot.CertificateHash,
 		)
-		if err := VerifyCertificateChain(
-			ctx, client, snapshot.CertificateHash,
+		verificationMode := VerificationModeStructural
+		if cfg.GenesisVerificationKey != "" {
+			verificationMode = VerificationModeSTM
+		}
+		verificationResult, err := VerifyCertificateChainWithMode(
+			ctx,
+			client,
+			snapshot.CertificateHash,
 			snapshot.Digest,
-		); err != nil {
+			verificationMode,
+		)
+		if err != nil {
 			return nil, fmt.Errorf(
 				"certificate chain verification failed: %w",
 				err,
 			)
+		}
+		if cfg.GenesisVerificationKey != "" {
+			if verificationResult == nil ||
+				verificationResult.GenesisCertificate == nil {
+				return nil, errors.New(
+					"genesis verification key provided but no genesis certificate found in chain",
+				)
+			}
+			if err := VerifyGenesisCertificateSignature(
+				verificationResult.GenesisCertificate,
+				cfg.GenesisVerificationKey,
+			); err != nil {
+				return nil, fmt.Errorf(
+					"genesis certificate verification failed: %w",
+					err,
+				)
+			}
+		}
+		verificationMaterial, err := BuildVerificationMaterial(
+			ctx,
+			client,
+			verificationResult,
+		)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"building verification material failed: %w",
+				err,
+			)
+		}
+		if err := ValidateVerificationMaterial(verificationMaterial); err != nil {
+			return nil, fmt.Errorf(
+				"verification material validation failed: %w",
+				err,
+			)
+		}
+		if verificationResult.SignedEntityKind !=
+			signedEntityTypeCardanoImmutableFilesFull {
+			return nil, fmt.Errorf(
+				"unexpected signed entity kind for snapshot bootstrap: %s",
+				verificationResult.SignedEntityKind,
+			)
+		}
+		if snapshot.Network != "" &&
+			(verificationResult.LeafCertificate.Metadata.Network == "" ||
+				verificationResult.LeafCertificate.Metadata.Network != snapshot.Network) {
+			return nil, fmt.Errorf(
+				"certificate network mismatch: certificate=%s snapshot=%s",
+				verificationResult.LeafCertificate.Metadata.Network,
+				snapshot.Network,
+			)
+		}
+		if beacon := verificationResult.LeafCertificate.SignedEntityType.
+			CardanoImmutableFilesFull(); beacon != nil {
+			if beacon.Epoch != snapshot.Beacon.Epoch ||
+				beacon.ImmutableFileNumber != snapshot.Beacon.ImmutableFileNumber {
+				return nil, fmt.Errorf(
+					"signed entity beacon mismatch: certificate=(epoch=%d, immutable=%d) snapshot=(epoch=%d, immutable=%d)",
+					beacon.Epoch,
+					beacon.ImmutableFileNumber,
+					snapshot.Beacon.Epoch,
+					snapshot.Beacon.ImmutableFileNumber,
+				)
+			}
 		}
 		cfg.Logger.Info(
 			"certificate chain verified",
@@ -560,22 +680,54 @@ func VerifyCertificateChain(
 	certificateHash string,
 	snapshotDigest string,
 ) error {
+	_, err := VerifyCertificateChainWithMode(
+		ctx,
+		client,
+		certificateHash,
+		snapshotDigest,
+		VerificationModeStructural,
+	)
+	return err
+}
+
+// VerifyCertificateChainWithMode verifies the Mithril certificate chain using
+// the requested verification mode.
+func VerifyCertificateChainWithMode(
+	ctx context.Context,
+	client *Client,
+	certificateHash string,
+	snapshotDigest string,
+	mode VerificationMode,
+) (*CertificateChainVerificationResult, error) {
+	if mode == 0 {
+		mode = VerificationModeStructural
+	}
+	if mode != VerificationModeStructural && mode != VerificationModeSTM {
+		return nil, fmt.Errorf("unsupported verification mode: %d", mode)
+	}
 	if client == nil {
-		return errors.New("mithril client is nil")
+		return nil, errors.New("mithril client is nil")
 	}
 	if certificateHash == "" {
-		return errors.New("certificate hash is empty")
+		return nil, errors.New("certificate hash is empty")
 	}
 
-	const maxDepth = 100
+	// Certificate chains on long-lived networks can exceed hundreds
+	// of links; keep a high bound to prevent runaway loops while
+	// allowing normal operation.
+	const maxDepth = 10000
 
 	currentHash := certificateHash
 	seen := make(map[string]bool)
 	isLeaf := true
+	var childCert *Certificate
+	result := &CertificateChainVerificationResult{
+		SnapshotDigest: snapshotDigest,
+	}
 
 	for range maxDepth {
 		if seen[currentHash] {
-			return fmt.Errorf(
+			return nil, fmt.Errorf(
 				"certificate chain cycle detected at %s",
 				currentHash,
 			)
@@ -584,43 +736,147 @@ func VerifyCertificateChain(
 
 		cert, err := client.GetCertificate(ctx, currentHash)
 		if err != nil {
-			return fmt.Errorf(
+			return nil, fmt.Errorf(
 				"fetching certificate %s: %w",
 				currentHash,
 				err,
 			)
 		}
-
-		// Verify the leaf certificate binds to the snapshot
-		if isLeaf && snapshotDigest != "" {
-			certDigest := cert.ProtocolMessage.
-				MessageParts["snapshot_digest"]
-			if certDigest == "" {
-				return fmt.Errorf(
-					"leaf certificate %s is missing "+
-						"snapshot_digest",
+		if cert.Hash != currentHash {
+			return nil, fmt.Errorf(
+				"certificate hash mismatch: requested %s, got %s",
+				currentHash,
+				cert.Hash,
+			)
+		}
+		if cert.ProtocolMessage.ComputeHash() != cert.SignedMessage {
+			return nil, fmt.Errorf(
+				"certificate %s signed_message mismatch",
+				currentHash,
+			)
+		}
+		expectedHash, err := cert.ComputeHash()
+		if err != nil {
+			return nil, fmt.Errorf(
+				"computing certificate hash for %s: %w",
+				currentHash,
+				err,
+			)
+		}
+		if expectedHash != cert.Hash {
+			return nil, fmt.Errorf(
+				"certificate %s content hash mismatch",
+				currentHash,
+			)
+		}
+		currentEpoch, ok := cert.ProtocolMessage.MessageParts["current_epoch"]
+		expectedEpoch := strconv.FormatUint(cert.Epoch, 10)
+		if !ok || currentEpoch != expectedEpoch {
+			return nil, fmt.Errorf(
+				"certificate %s current_epoch mismatch: got %q, expected %s",
+				currentHash,
+				currentEpoch,
+				expectedEpoch,
+			)
+		}
+		if mode == VerificationModeSTM {
+			if err := verifySTMCertificate(cert); err != nil {
+				return nil, fmt.Errorf(
+					"STM verification failed for certificate %s: %w",
 					currentHash,
+					err,
 				)
 			}
-			if certDigest != snapshotDigest {
-				return fmt.Errorf(
-					"certificate snapshot_digest "+
-						"mismatch: cert has %q, "+
-						"expected %q",
-					certDigest,
-					snapshotDigest,
+		}
+		if childCert != nil {
+			if childCert.PreviousHash != cert.Hash {
+				return nil, fmt.Errorf(
+					"certificate chain previous hash mismatch: child=%s previous=%s parent=%s",
+					childCert.Hash,
+					childCert.PreviousHash,
+					cert.Hash,
 				)
+			}
+			if childCert.Epoch != cert.Epoch && childCert.Epoch != cert.Epoch+1 {
+				return nil, fmt.Errorf(
+					"certificate chain missing epoch between child=%d and parent=%d",
+					childCert.Epoch,
+					cert.Epoch,
+				)
+			}
+			if childCert.Epoch == cert.Epoch {
+				if childCert.AggregateVerificationKey != cert.AggregateVerificationKey {
+					return nil, errors.New(
+						"certificate chain aggregate verification key mismatch within epoch",
+					)
+				}
+				if childCert.Metadata.Parameters != cert.Metadata.Parameters {
+					return nil, errors.New(
+						"certificate chain protocol parameters mismatch within epoch",
+					)
+				}
+			} else {
+				nextAVK, ok := cert.ProtocolMessage.MessageParts["next_aggregate_verification_key"]
+				if !ok || nextAVK != childCert.AggregateVerificationKey {
+					return nil, errors.New(
+						"certificate chain aggregate verification key mismatch across epoch",
+					)
+				}
+				nextProtocolParameters, ok := cert.ProtocolMessage.MessageParts["next_protocol_parameters"]
+				if !ok || nextProtocolParameters != childCert.Metadata.Parameters.ComputeHash() {
+					return nil, errors.New(
+						"certificate chain protocol parameters mismatch across epoch",
+					)
+				}
+			}
+		}
+		result.Certificates = append(result.Certificates, cert)
+
+		// Verify the leaf certificate binds to the snapshot
+		if isLeaf {
+			result.LeafCertificate = cert
+			if !cert.IsGenesis() {
+				entityKind, err := cert.SignedEntityType.Kind()
+				if err != nil {
+					return nil, fmt.Errorf(
+						"certificate %s has invalid signed entity type: %w",
+						currentHash, err,
+					)
+				}
+				result.SignedEntityKind = entityKind
+			}
+			if snapshotDigest != "" {
+				certDigest := cert.ProtocolMessage.
+					MessageParts["snapshot_digest"]
+				if certDigest == "" {
+					return nil, fmt.Errorf(
+						"leaf certificate %s is missing "+
+							"snapshot_digest",
+						currentHash,
+					)
+				}
+				if certDigest != snapshotDigest {
+					return nil, fmt.Errorf(
+						"certificate snapshot_digest "+
+							"mismatch: cert has %q, "+
+							"expected %q",
+						certDigest,
+						snapshotDigest,
+					)
+				}
 			}
 		}
 		isLeaf = false
+		childCert = cert
 
 		// Genesis certificate terminates the chain
 		if cert.IsGenesis() || cert.IsChainingToItself() {
-			return nil
+			result.GenesisCertificate = cert
+			return result, nil
 		}
 
 		if cert.PreviousHash == "" {
-			return fmt.Errorf(
+			return nil, fmt.Errorf(
 				"certificate %s has empty previous_hash "+
 					"but is not genesis",
 				currentHash,
@@ -630,7 +886,7 @@ func VerifyCertificateChain(
 		currentHash = cert.PreviousHash
 	}
 
-	return fmt.Errorf(
+	return nil, fmt.Errorf(
 		"certificate chain exceeded maximum depth of %d",
 		maxDepth,
 	)

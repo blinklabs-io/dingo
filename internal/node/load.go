@@ -19,7 +19,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"slices"
 	"time"
 
 	"github.com/blinklabs-io/dingo/chain"
@@ -27,11 +26,20 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/immutable"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
-	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/ledger"
 	gcbor "github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	fxcbor "github.com/fxamacker/cbor/v2"
+)
+
+// Mainnet full blocks can overflow practical Badger transaction limits with
+// larger import batches, so keep the runtime load batch size aligned with the
+// chain import batch cap.
+const (
+	loadBlockBatchSize  = 50
+	progressLogInterval = 10 * time.Second
 )
 
 func Load(ctx context.Context, cfg *config.Config, logger *slog.Logger, immutableDir string) error {
@@ -54,6 +62,7 @@ func ensureDB(
 		Logger:         logger,
 		PromRegistry:   nil,
 		BlobPlugin:     cfg.BlobPlugin,
+		RunMode:        string(cfg.RunMode),
 		MetadataPlugin: cfg.MetadataPlugin,
 		MaxConnections: cfg.DatabaseWorkers,
 	}
@@ -103,8 +112,8 @@ func LoadWithDB(
 ) error {
 	// Derive default config path from cfg.Network when cfg.CardanoConfig is empty
 	cardanoConfigPath := cfg.CardanoConfig
+	network := cfg.Network
 	if cardanoConfigPath == "" {
-		network := cfg.Network
 		if network == "" {
 			network = "preview"
 		}
@@ -113,8 +122,8 @@ func LoadWithDB(
 
 	nodeCfg, err := cardano.LoadCardanoNodeConfigWithFallback(
 		cardanoConfigPath,
-		cfg.Network,
-		cardano.EmbeddedConfigPreviewNetworkFS,
+		network,
+		cardano.EmbeddedConfigFS,
 	)
 	if err != nil {
 		return fmt.Errorf(
@@ -134,12 +143,11 @@ func LoadWithDB(
 	defer closeDB()
 	// Enable bulk-load optimizations if the metadata store supports them
 	defer WithBulkLoadPragmas(db, logger)()
-	// Load chain
-	eventBus := event.NewEventBus(nil, logger)
-	defer eventBus.Stop()
+	// Immutable load replays trusted block batches directly into the ledger, so
+	// it does not need the event-driven reread path here.
 	cm, err := chain.NewManager(
 		db,
-		eventBus,
+		nil,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to load chain manager: %w", err)
@@ -151,12 +159,13 @@ func LoadWithDB(
 	// Load state
 	ls, err := ledger.NewLedgerState(
 		ledger.LedgerStateConfig{
-			Database:           db,
-			ChainManager:       cm,
-			Logger:             logger,
-			CardanoNodeConfig:  nodeCfg,
-			EventBus:           eventBus,
-			ValidateHistorical: cfg.ValidateHistorical,
+			Database:              db,
+			ChainManager:          cm,
+			Logger:                logger,
+			CardanoNodeConfig:     nodeCfg,
+			ValidateHistorical:    cfg.ValidateHistorical,
+			TrustedReplay:         true,
+			ManualBlockProcessing: true,
 			DatabaseWorkerPoolConfig: ledger.DatabaseWorkerPoolConfig{
 				WorkerPoolSize: cfg.DatabaseWorkers,
 				TaskQueueSize:  cfg.DatabaseQueueSize,
@@ -172,59 +181,42 @@ func LoadWithDB(
 	}
 	defer ls.Close()
 
-	blocksCopied, immutableTipSlot, err := copyBlocks(
-		ctx, logger, immutableDir, c,
+	replayCtx, cancelReplay := context.WithCancel(ctx)
+	defer cancelReplay()
+	replayBatches := make(chan []gledger.Block, 1)
+	replayErrCh := make(chan error, 1)
+	go func() {
+		err := ls.ProcessTrustedBlockBatches(
+			replayCtx,
+			replayBatches,
+		)
+		if err != nil && !errors.Is(err, context.Canceled) {
+			// Cancel immediately so copyBlocksDirect and the
+			// forwarding goroutine inside ProcessTrustedBlockBatches
+			// unblock via ctx.Done() instead of deadlocking.
+			cancelReplay()
+		}
+		replayErrCh <- err
+	}()
+
+	blocksCopied, immutableTipSlot, err := copyBlocksDirect(
+		replayCtx, logger, immutableDir, c, replayBatches,
 	)
+	close(replayBatches)
 	if err != nil {
+		cancelReplay()
+		<-replayErrCh
 		return fmt.Errorf("loading blocks: %w", err)
 	}
-
-	// Wait for ledger to catch up with tight polling
-	ticker := time.NewTicker(500 * time.Millisecond)
-	defer ticker.Stop()
-	catchupTimeout := 30 * time.Minute
-	if cfg.LedgerCatchupTimeout != "" {
-		if parsed, pErr := time.ParseDuration(
-			cfg.LedgerCatchupTimeout,
-		); pErr == nil {
-			catchupTimeout = parsed
-		} else {
-			logger.Warn(
-				"invalid ledgerCatchupTimeout, using default",
-				"value", cfg.LedgerCatchupTimeout,
-				"error", pErr,
-			)
-		}
+	if err := <-replayErrCh; err != nil && !errors.Is(err, context.Canceled) {
+		return fmt.Errorf("processing trusted block batches: %w", err)
 	}
-	timeout := time.After(catchupTimeout)
-	for {
-		select {
-		case <-ctx.Done():
-			return fmt.Errorf(
-				"cancelled waiting for ledger to catch up"+
-					" (tip slot %d, target slot %d): %w",
-				ls.Tip().Point.Slot,
-				immutableTipSlot,
-				ctx.Err(),
-			)
-		case <-ticker.C:
-			tip := ls.Tip()
-			if tip.Point.Slot >= immutableTipSlot {
-				logger.Info(
-					"finished processing blocks from immutable DB",
-					"blocks_copied", blocksCopied,
-				)
-				return nil
-			}
-		case <-timeout:
-			return fmt.Errorf(
-				"timed out waiting for ledger to catch up"+
-					" (tip slot %d, target slot %d)",
-				ls.Tip().Point.Slot,
-				immutableTipSlot,
-			)
-		}
-	}
+	logger.Info(
+		"finished processing blocks from immutable DB",
+		"blocks_copied", blocksCopied,
+		"tip_slot", immutableTipSlot,
+	)
+	return nil
 }
 
 // LoadBlobsResult contains the result of a blob-only ImmutableDB load.
@@ -282,21 +274,19 @@ func LoadBlobsWithDB(
 	}, nil
 }
 
-// copyBlocks reads blocks from an ImmutableDB directory and writes them to
-// the chain's blob store. Returns the number of blocks copied and the
-// immutable tip slot.
-func copyBlocks(
+// copyBlocksDirect reads immutable blocks once, persists them to the chain,
+// and streams the decoded batches to the trusted ledger replay path.
+func copyBlocksDirect(
 	ctx context.Context,
 	logger *slog.Logger,
 	immutableDir string,
 	c *chain.Chain,
+	replayBatches chan<- []gledger.Block,
 ) (int, uint64, error) {
-	// Open immutable DB
 	immutable, err := immutable.New(immutableDir)
 	if err != nil {
 		return 0, 0, fmt.Errorf("failed to read immutable DB: %w", err)
 	}
-	// Record immutable DB tip
 	immutableTip, err := immutable.GetTip()
 	if err != nil {
 		return 0, 0, fmt.Errorf("failed to read immutable DB tip: %w", err)
@@ -304,7 +294,6 @@ func copyBlocks(
 	if immutableTip == nil {
 		return 0, 0, errors.New("immutable DB tip is nil")
 	}
-	// Copy all blocks
 	logger.Info("copying blocks from immutable DB")
 	chainTip := c.Tip()
 	iter, err := immutable.BlocksFromPoint(chainTip.Point)
@@ -316,7 +305,13 @@ func copyBlocks(
 	}
 	defer iter.Close()
 	var blocksCopied int
-	blockBatch := make([]gledger.Block, 0, 50)
+	startTime := time.Now()
+	lastProgressLog := time.Time{}
+	var lastProgressSlot uint64
+	blockBatch := make([]gledger.Block, 0, loadBlockBatchSize)
+	verifyCfg := lcommon.VerifyConfig{
+		SkipBodyHashValidation: true,
+	}
 	for {
 		for {
 			next, err := iter.Next()
@@ -325,17 +320,19 @@ func copyBlocks(
 					"reading next block: %w", err,
 				)
 			}
-			// No more blocks
 			if next == nil {
 				break
 			}
-			tmpBlock, err := gledger.NewBlockFromCbor(next.Type, next.Cbor)
+			tmpBlock, err := gledger.NewBlockFromCbor(
+				next.Type,
+				next.Cbor,
+				verifyCfg,
+			)
 			if err != nil {
 				return blocksCopied, immutableTip.Slot, fmt.Errorf(
 					"decoding block CBOR: %w", err,
 				)
 			}
-			// Skip first block when continuing a load operation
 			if blocksCopied == 0 &&
 				tmpBlock.SlotNumber() == chainTip.Point.Slot {
 				continue
@@ -348,31 +345,41 @@ func copyBlocks(
 		if len(blockBatch) == 0 {
 			break
 		}
-		// Add block batch to chain
 		if err := c.AddBlocks(blockBatch); err != nil {
 			return blocksCopied, immutableTip.Slot, fmt.Errorf(
 				"failed to import block: %w",
 				err,
 			)
 		}
-		blocksCopied += len(blockBatch)
-		blockBatch = slices.Delete(blockBatch, 0, len(blockBatch))
-		if blocksCopied > 0 && blocksCopied%10000 == 0 {
-			logger.Info(
-				"copying blocks from immutable DB",
-				"blocks_copied", blocksCopied,
+		replayBatch := append(
+			make([]gledger.Block, 0, len(blockBatch)),
+			blockBatch...,
+		)
+		select {
+		case replayBatches <- replayBatch:
+		case <-ctx.Done():
+			return blocksCopied, immutableTip.Slot, fmt.Errorf(
+				"loading blocks: %w",
+				ctx.Err(),
 			)
 		}
-		// Check for cancellation after each batch
+		blocksCopied += len(blockBatch)
+		lastProgressSlot = replayBatch[len(replayBatch)-1].SlotNumber()
+		blockBatch = blockBatch[:0]
+		maybeLogBlockCopyProgress(
+			logger,
+			"copying blocks from immutable DB",
+			blocksCopied,
+			lastProgressSlot,
+			immutableTip.Slot,
+			startTime,
+			&lastProgressLog,
+		)
 		if err := ctx.Err(); err != nil {
 			return blocksCopied, immutableTip.Slot,
 				fmt.Errorf("loading blocks: %w", err)
 		}
 	}
-	logger.Info(
-		"finished copying blocks from immutable DB",
-		"blocks_copied", blocksCopied,
-	)
 	return blocksCopied, immutableTip.Slot, nil
 }
 
@@ -409,7 +416,10 @@ func copyBlocksRaw(
 	}
 	defer iter.Close()
 	var blocksCopied int
-	blockBatch := make([]chain.RawBlock, 0, 50)
+	startTime := time.Now()
+	lastProgressLog := time.Time{}
+	lastProgressSlot := chainTip.Point.Slot
+	blockBatch := make([]chain.RawBlock, 0, loadBlockBatchSize)
 	for {
 		for {
 			next, err := iter.Next()
@@ -476,13 +486,19 @@ func copyBlocksRaw(
 			)
 		}
 		blocksCopied += len(blockBatch)
-		blockBatch = slices.Delete(blockBatch, 0, len(blockBatch))
-		if blocksCopied > 0 && blocksCopied%10000 == 0 {
-			logger.Info(
-				"copying blocks from immutable DB",
-				"blocks_copied", blocksCopied,
-			)
+		if tmpLen := len(blockBatch); tmpLen > 0 {
+			lastProgressSlot = blockBatch[tmpLen-1].Slot
 		}
+		blockBatch = blockBatch[:0]
+		maybeLogBlockCopyProgress(
+			logger,
+			"copying blocks from immutable DB",
+			blocksCopied,
+			lastProgressSlot,
+			immutableTip.Slot,
+			startTime,
+			&lastProgressLog,
+		)
 		// Check for cancellation after each batch
 		if err := ctx.Err(); err != nil {
 			return blocksCopied, immutableTip.Slot,
@@ -496,16 +512,96 @@ func copyBlocksRaw(
 	return blocksCopied, immutableTip.Slot, nil
 }
 
+func maybeLogBlockCopyProgress(
+	logger *slog.Logger,
+	msg string,
+	blocksCopied int,
+	currentSlot uint64,
+	tipSlot uint64,
+	startTime time.Time,
+	lastLogTime *time.Time,
+) {
+	now := time.Now()
+	if !lastLogTime.IsZero() && now.Sub(*lastLogTime) < progressLogInterval {
+		return
+	}
+	*lastLogTime = now
+
+	elapsed := now.Sub(startTime)
+	attrs := []any{
+		"blocks_copied", blocksCopied,
+		"slot", currentSlot,
+	}
+	if elapsed > 0 {
+		attrs = append(
+			attrs,
+			"blocks_per_sec",
+			fmt.Sprintf("%.0f", float64(blocksCopied)/elapsed.Seconds()),
+		)
+	}
+	if tipSlot > 0 {
+		attrs = append(
+			attrs,
+			"progress",
+			fmt.Sprintf("%.1f%%", float64(currentSlot)/float64(tipSlot)*100),
+		)
+	}
+	logger.Info(msg, attrs...)
+}
+
 // extractHeaderCbor extracts the header CBOR from a full block's CBOR.
 // All Cardano block eras encode as a CBOR array where the first element
 // is the block header.
 func extractHeaderCbor(blockCbor []byte) ([]byte, error) {
-	var parts []gcbor.RawMessage
-	if _, err := gcbor.Decode(blockCbor, &parts); err != nil {
-		return nil, fmt.Errorf("decoding block outer array: %w", err)
+	headerLen, err := cborArrayHeaderLen(blockCbor)
+	if err != nil {
+		return nil, err
 	}
-	if len(parts) == 0 {
-		return nil, errors.New("empty block array")
+	var headerCbor gcbor.RawMessage
+	if _, err := fxcbor.UnmarshalFirst(blockCbor[headerLen:], &headerCbor); err != nil {
+		return nil, fmt.Errorf("decoding block header CBOR: %w", err)
 	}
-	return []byte(parts[0]), nil
+	if len(headerCbor) == 0 {
+		return nil, errors.New("empty block header")
+	}
+	return []byte(headerCbor), nil
+}
+
+func cborArrayHeaderLen(data []byte) (int, error) {
+	if len(data) == 0 {
+		return 0, errors.New("empty CBOR data")
+	}
+	majorType := data[0] & gcbor.CborTypeMask
+	if majorType != gcbor.CborTypeArray {
+		return 0, errors.New("block CBOR is not an array")
+	}
+	additional := data[0] &^ gcbor.CborTypeMask
+	switch {
+	case additional <= gcbor.CborMaxUintSimple:
+		return 1, nil
+	case additional == 24:
+		if len(data) < 2 {
+			return 0, errors.New("truncated CBOR array header")
+		}
+		return 2, nil
+	case additional == 25:
+		if len(data) < 3 {
+			return 0, errors.New("truncated CBOR array header")
+		}
+		return 3, nil
+	case additional == 26:
+		if len(data) < 5 {
+			return 0, errors.New("truncated CBOR array header")
+		}
+		return 5, nil
+	case additional == 27:
+		if len(data) < 9 {
+			return 0, errors.New("truncated CBOR array header")
+		}
+		return 9, nil
+	case additional == 31:
+		return 1, nil
+	default:
+		return 0, fmt.Errorf("unsupported CBOR array additional info: %d", additional)
+	}
 }

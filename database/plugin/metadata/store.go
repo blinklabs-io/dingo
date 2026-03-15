@@ -184,6 +184,13 @@ type MetadataStore interface {
 		types.Txn,
 	) ([]byte, error)
 
+	// GetBlockNoncesInSlotRange retrieves all block nonces in [startSlot, endSlot).
+	GetBlockNoncesInSlotRange(
+		startSlot uint64,
+		endSlot uint64,
+		txn types.Txn,
+	) ([]models.BlockNonce, error)
+
 	// GetDatum retrieves a datum by its hash, returning nil if not found.
 	GetDatum(
 		lcommon.Blake2b256,

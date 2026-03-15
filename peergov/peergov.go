@@ -28,24 +28,27 @@ import (
 )
 
 const (
-	defaultReconcileInterval            = 30 * time.Minute
+	defaultReconcileInterval            = 5 * time.Minute
 	defaultMaxReconnectFailureThreshold = 3
-	defaultMinHotPeers                  = 3
+	defaultMinHotPeers                  = 10
 	defaultInactivityTimeout            = 10 * time.Minute
 	defaultTestCooldown                 = 5 * time.Minute
 	defaultDenyDuration                 = 30 * time.Minute
 	defaultLedgerPeerRefreshInterval    = 1 * time.Hour
 
-	// Default peer targets (applied when config value is 0)
+	// Default peer targets match cardano-node config.json defaults.
 	defaultTargetNumberOfKnownPeers       = 150
 	defaultTargetNumberOfEstablishedPeers = 50
 	defaultTargetNumberOfActivePeers      = 20
 	defaultTargetNumberOfRootPeers        = 60
 
-	// Default per-source quotas for active peers
-	defaultActivePeersTopologyQuota = 3
-	defaultActivePeersGossipQuota   = 12
-	defaultActivePeersLedgerQuota   = 5
+	// Default per-source quotas for active peers.
+	// Each quota is a ceiling, not a reservation. Set equal to
+	// TargetNumberOfActivePeers so no single source is artificially
+	// constrained — the global target still caps the total.
+	defaultActivePeersTopologyQuota = 20
+	defaultActivePeersGossipQuota   = 20
+	defaultActivePeersLedgerQuota   = 20
 
 	// Default churn configuration
 	defaultGossipChurnInterval     = 5 * time.Minute
@@ -172,16 +175,16 @@ func NewPeerGovernor(cfg PeerGovernorConfig) *PeerGovernor {
 	if cfg.Logger == nil {
 		cfg.Logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
 	}
-	if cfg.ReconcileInterval == 0 {
+	if cfg.ReconcileInterval <= 0 {
 		cfg.ReconcileInterval = defaultReconcileInterval
 	}
 	if cfg.MaxReconnectFailureThreshold <= 0 {
 		cfg.MaxReconnectFailureThreshold = defaultMaxReconnectFailureThreshold
 	}
-	if cfg.MinHotPeers == 0 {
+	if cfg.MinHotPeers <= 0 {
 		cfg.MinHotPeers = defaultMinHotPeers
 	}
-	if cfg.InactivityTimeout == 0 {
+	if cfg.InactivityTimeout <= 0 {
 		cfg.InactivityTimeout = defaultInactivityTimeout
 	}
 	if cfg.TestCooldown == 0 {
@@ -213,6 +216,13 @@ func NewPeerGovernor(cfg PeerGovernorConfig) *PeerGovernor {
 		cfg.TargetNumberOfRootPeers = defaultTargetNumberOfRootPeers
 	} else if cfg.TargetNumberOfRootPeers < 0 {
 		cfg.TargetNumberOfRootPeers = 0
+	}
+	// Clamp MinHotPeers so it never exceeds the active target.
+	// Otherwise bootstrap recovery would keep re-triggering on nodes
+	// configured with a small active-peer target.
+	if cfg.TargetNumberOfActivePeers > 0 &&
+		cfg.MinHotPeers > cfg.TargetNumberOfActivePeers {
+		cfg.MinHotPeers = cfg.TargetNumberOfActivePeers
 	}
 	// Per-source quotas: 0 means use default
 	if cfg.ActivePeersTopologyQuota == 0 {

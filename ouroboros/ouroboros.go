@@ -459,6 +459,11 @@ func (o *Ouroboros) HandleInboundConnEvent(evt event.Event) {
 		)
 		return
 	}
+	// Skip node-to-client connections — N2N mini-protocols don't
+	// apply to local client connections.
+	if e.IsNtC {
+		return
+	}
 	connId := e.ConnectionId
 
 	// Look up the connection to check its negotiated diffusion mode
@@ -499,22 +504,15 @@ func (o *Ouroboros) HandleInboundConnEvent(evt event.Event) {
 		if o.ChainsyncState.TryAddClientConnId(connId, maxClients) {
 			if err := o.chainsyncClientStart(connId); err != nil {
 				o.ChainsyncState.RemoveClientConnId(connId)
-				o.config.Logger.Error(
-					"failed to start inbound chainsync client, closing",
+				o.config.Logger.Warn(
+					"chainsync client failed on inbound connection, keeping alive for other protocols",
 					"error", err,
 					"connection_id", connId.String(),
 				)
-				// Close the connection so peergov stops tracking it and
-				// outbound retries are not blocked by a stale inbound.
-				if closeErr := conn.Close(); closeErr != nil {
-					o.config.Logger.Warn(
-						"failed to close connection",
-						"error", closeErr,
-						"connection_id", connId.String(),
-					)
-				}
-				o.ConnManager.RemoveConnection(connId)
-				return
+				// Don't close the connection — the peer may still be
+				// useful for keep-alive, peer-sharing, or other
+				// mini-protocols (e.g. cardano-cli ping or partial
+				// full-duplex peers).
 			} else {
 				o.config.Logger.Debug(
 					"started chainsync client on inbound connection",

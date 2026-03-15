@@ -336,27 +336,33 @@ func processScripts[T lcommon.Script](
 	scripts []T,
 	point ocommon.Point,
 ) error {
+	if len(scripts) == 0 {
+		return nil
+	}
+
+	witnessScripts := make([]models.WitnessScripts, 0, len(scripts))
+	scriptContents := make([]models.Script, 0, len(scripts))
 	for _, script := range scripts {
-		witnessScript := models.WitnessScripts{
+		witnessScripts = append(witnessScripts, models.WitnessScripts{
 			TransactionID: transactionID,
 			Type:          scriptType,
 			ScriptHash:    script.Hash().Bytes(),
-		}
-		if result := db.Create(&witnessScript); result.Error != nil {
-			return fmt.Errorf("create witness script: %w", result.Error)
-		}
-		scriptContent := models.Script{
+		})
+		scriptContents = append(scriptContents, models.Script{
 			Hash:        script.Hash().Bytes(),
 			Type:        scriptType,
 			Content:     script.RawScriptBytes(),
 			CreatedSlot: point.Slot,
-		}
-		if result := db.Clauses(clause.OnConflict{
-			Columns:   []clause.Column{{Name: "hash"}},
-			DoNothing: true,
-		}).Create(&scriptContent); result.Error != nil {
-			return fmt.Errorf("create script content: %w", result.Error)
-		}
+		})
+	}
+	if result := db.Create(&witnessScripts); result.Error != nil {
+		return fmt.Errorf("create witness scripts: %w", result.Error)
+	}
+	if result := db.Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "hash"}},
+		DoNothing: true,
+	}).Create(&scriptContents); result.Error != nil {
+		return fmt.Errorf("create script contents: %w", result.Error)
 	}
 	return nil
 }
@@ -403,9 +409,6 @@ func (d *MetadataStoreSqlite) getOrCreateAccount(
 		return nil, result.Error
 	}
 
-	// Account doesn't exist - try to create with OnConflict to handle races.
-	// If another goroutine creates the same account concurrently, this will
-	// do nothing and we'll fetch the existing record below.
 	tmpAccount := &models.Account{
 		StakingKey: stakeKey,
 		Active:     true,
@@ -598,10 +601,12 @@ func (d *MetadataStoreSqlite) SetTransaction(
 		metadataLabels = tmpLabels
 	}
 	collateralReturn := tx.CollateralReturn()
+	produced := tx.Produced()
+	tmpTx.Outputs = make([]models.Utxo, 0, len(produced))
 	// Store all produced UTxOs - tx.Produced() returns correct indices for both
 	// valid transactions (regular outputs at indices 0, 1, ...) and invalid
 	// transactions (collateral return at index len(Outputs()))
-	for _, utxo := range tx.Produced() {
+	for _, utxo := range produced {
 		if collateralReturn != nil && utxo.Output == collateralReturn {
 			m := models.UtxoLedgerToModel(utxo, point.Slot)
 			tmpTx.CollateralReturn = &m
@@ -622,6 +627,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 			[]string{"block_hash", "block_index", "slot"},
 		),
 	}).Create(tmpTx)
+	needsIdFetch := tmpTx.ID == 0
 
 	// Restore outputs for later explicit creation
 	tmpTx.Outputs = outputsToCreate
@@ -641,7 +647,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 	// the conflict path is taken (no insert occurs). We need to fetch the ID
 	// explicitly so we can associate witness records with the correct transaction.
 	// Only fetch the ID column to avoid expensive association preloads.
-	if tmpTx.ID == 0 {
+	if needsIdFetch {
 		var existing struct{ ID uint }
 		if err := db.Model(&models.Transaction{}).
 			Select("id").
@@ -687,22 +693,18 @@ func (d *MetadataStoreSqlite) SetTransaction(
 		}
 	}
 
-	// Create UTxO records for outputs
-	// OnConflict doesn't process associations, so we create them explicitly
+	// Create UTxO records for outputs in a single statement per transaction.
 	for i := range tmpTx.Outputs {
 		tmpTx.Outputs[i].ID = 0 // Reset ID to let GORM auto-increment
 		tmpTx.Outputs[i].TransactionID = &tmpTx.ID
+	}
+	if len(tmpTx.Outputs) > 0 {
 		result := db.Clauses(clause.OnConflict{
 			Columns:   []clause.Column{{Name: "tx_id"}, {Name: "output_idx"}},
 			DoNothing: true,
-		}).Create(&tmpTx.Outputs[i])
+		}).Create(&tmpTx.Outputs)
 		if result.Error != nil {
-			return fmt.Errorf(
-				"create utxo output %d for tx %x: %w",
-				i,
-				txHash,
-				result.Error,
-			)
+			return fmt.Errorf("create utxo outputs for tx %x: %w", txHash, result.Error)
 		}
 	}
 	// Create CollateralReturn UTxO if present
@@ -717,211 +719,61 @@ func (d *MetadataStoreSqlite) SetTransaction(
 		}
 	}
 
-	// Add Inputs to Transaction - batch fetch all input UTXOs
-	inputRefs := make([]UtxoRef, 0, len(tx.Inputs()))
-	for _, input := range tx.Inputs() {
-		inputRefs = append(inputRefs, UtxoRef{
-			TxId:      input.Id().Bytes(),
-			OutputIdx: input.Index(),
-		})
-	}
-	inputUtxos, err := d.GetUtxosBatch(inputRefs, txn)
-	if err != nil {
-		return fmt.Errorf("failed to batch fetch input UTXOs: %w", err)
-	}
-	for _, input := range tx.Inputs() {
-		key := fmt.Sprintf("%x:%d", input.Id().Bytes(), input.Index())
-		utxo := inputUtxos[key]
-		if utxo == nil {
-			d.logger.Warn(
-				"Skipping missing input UTxO",
-				"hash",
-				input.Id().String(),
-				"index",
-				input.Index(),
-			)
-			continue
-		}
-		tmpTx.Inputs = append(
-			tmpTx.Inputs,
-			*utxo,
-		)
-	}
-	// Add Collateral to Transaction - batch fetch all collateral UTXOs
-	if len(tx.Collateral()) > 0 {
-		collateralRefs := make([]UtxoRef, 0, len(tx.Collateral()))
-		for _, input := range tx.Collateral() {
-			collateralRefs = append(collateralRefs, UtxoRef{
+	if d.storageMode == types.StorageModeAPI {
+		inputRefs := make([]UtxoRef, 0, len(tx.Inputs()))
+		for _, input := range tx.Inputs() {
+			inputRefs = append(inputRefs, UtxoRef{
 				TxId:      input.Id().Bytes(),
 				OutputIdx: input.Index(),
 			})
 		}
-		collateralUtxos, err := d.GetUtxosBatch(collateralRefs, txn)
+		inputUtxos, err := d.GetUtxosBatch(inputRefs, txn)
 		if err != nil {
-			return fmt.Errorf("failed to batch fetch collateral UTXOs: %w", err)
+			return fmt.Errorf("failed to batch fetch input UTXOs: %w", err)
 		}
-
-		var caseClauses []string
-		var whereConditions []string
-		var caseArgs []any
-		var whereArgs []any
-
-		for _, input := range tx.Collateral() {
-			inTxId := input.Id().Bytes()
-			inIdx := input.Index()
-			key := fmt.Sprintf("%x:%d", inTxId, inIdx)
-			utxo := collateralUtxos[key]
+		for _, input := range tx.Inputs() {
+			key := fmt.Sprintf("%x:%d", input.Id().Bytes(), input.Index())
+			utxo := inputUtxos[key]
 			if utxo == nil {
-				d.logger.Warn(
-					"Skipping missing collateral UTxO",
+				d.warnLimiter.warn(
+					d.logger,
+					"missing-input-utxo",
+					"Skipping missing input UTxO",
 					"hash",
 					input.Id().String(),
 					"index",
-					inIdx,
+					input.Index(),
 				)
 				continue
 			}
-			// Found the Utxo, add it to the SQL UPDATE list
-			// First, add it to the CASE statement so it's selected
-			caseClauses = append(
-				caseClauses,
-				"WHEN tx_id = ? AND output_idx = ? THEN ?",
-			)
-			caseArgs = append(caseArgs, inTxId, inIdx, txHash)
-			// Also add it to the WHERE clause in the SQL UPDATE
-			whereConditions = append(
-				whereConditions,
-				"(tx_id = ? AND output_idx = ?)",
-			)
-			whereArgs = append(whereArgs, inTxId, inIdx)
-			// Add it to the Transaction
-			tmpTx.Collateral = append(
-				tmpTx.Collateral,
-				*utxo,
-			)
+			tmpTx.Inputs = append(tmpTx.Inputs, *utxo)
 		}
-		// Update reference where this Utxo was used as collateral in a Transaction
-		if len(caseClauses) > 0 {
-			args := append(caseArgs, whereArgs...)
-			sql := fmt.Sprintf(
-				"UPDATE utxo SET collateral_by_tx_id = CASE %s ELSE collateral_by_tx_id END WHERE %s",
-				strings.Join(caseClauses, " "),
-				strings.Join(whereConditions, " OR "),
-			)
-			result = db.Exec(sql, args...)
-			if result.Error != nil {
-				return fmt.Errorf("batch update collateral: %w", result.Error)
+		if len(tx.Collateral()) > 0 {
+			collateralRefs := make([]UtxoRef, 0, len(tx.Collateral()))
+			for _, input := range tx.Collateral() {
+				collateralRefs = append(collateralRefs, UtxoRef{
+					TxId:      input.Id().Bytes(),
+					OutputIdx: input.Index(),
+				})
 			}
-		}
-	}
-	// Add ReferenceInputs to Transaction - batch fetch all reference input UTXOs
-	if len(tx.ReferenceInputs()) > 0 {
-		var refInputRefs []UtxoRef
-		for _, input := range tx.ReferenceInputs() {
-			refInputRefs = append(refInputRefs, UtxoRef{
-				TxId:      input.Id().Bytes(),
-				OutputIdx: input.Index(),
-			})
-		}
-		refInputUtxos, err := d.GetUtxosBatch(refInputRefs, txn)
-		if err != nil {
-			return fmt.Errorf(
-				"failed to batch fetch reference input UTXOs: %w",
-				err,
-			)
-		}
-
-		var caseClauses []string
-		var whereConditions []string
-		var caseArgs []any
-		var whereArgs []any
-
-		for _, input := range tx.ReferenceInputs() {
-			inTxId := input.Id().Bytes()
-			inIdx := input.Index()
-			key := fmt.Sprintf("%x:%d", inTxId, inIdx)
-			utxo := refInputUtxos[key]
-			if utxo == nil {
-				d.logger.Warn(
-					"Skipping missing reference input UTxO",
-					"hash",
-					input.Id().String(),
-					"index",
-					inIdx,
-				)
-				continue
+			collateralUtxos, err := d.GetUtxosBatch(collateralRefs, txn)
+			if err != nil {
+				return fmt.Errorf("failed to batch fetch collateral UTXOs: %w", err)
 			}
-			// Found the Utxo, add it to the SQL UPDATE list
-			// First, add it to the CASE statement so it's selected
-			caseClauses = append(
-				caseClauses,
-				"WHEN tx_id = ? AND output_idx = ? THEN ?",
-			)
-			caseArgs = append(caseArgs, inTxId, inIdx, txHash)
-			// Also add it to the WHERE clause in the SQL UPDATE
-			whereConditions = append(
-				whereConditions,
-				"(tx_id = ? AND output_idx = ?)",
-			)
-			whereArgs = append(whereArgs, inTxId, inIdx)
-			// Add it to the Transaction
-			tmpTx.ReferenceInputs = append(
-				tmpTx.ReferenceInputs,
-				*utxo,
-			)
-		}
-		// Update reference where this Utxo was used as a reference input in a Transaction
-		if len(caseClauses) > 0 {
-			args := append(caseArgs, whereArgs...)
-			sql := fmt.Sprintf(
-				"UPDATE utxo SET referenced_by_tx_id = CASE %s ELSE referenced_by_tx_id END WHERE %s",
-				strings.Join(caseClauses, " "),
-				strings.Join(whereConditions, " OR "),
-			)
-			result = db.Exec(sql, args...)
-			if result.Error != nil {
-				return fmt.Errorf(
-					"batch update reference inputs: %w",
-					result.Error,
-				)
-			}
-		}
-	}
-
-	// Consume UTxOs using optimistic locking to prevent race conditions.
-	// The atomic update ensures only one transaction can successfully mark a UTXO as spent.
-	for _, input := range tx.Consumed() {
-		inTxId := input.Id().Bytes()
-		inIdx := input.Index()
-
-		// Use atomic check-and-update: only update if UTXO is still unspent.
-		// This prevents TOCTOU race where:
-		// 1. GetUtxo reads UTXO with deleted_slot=0
-		// 2. Another transaction marks it spent
-		// 3. First transaction commits spend anyway
-		result = db.Model(&models.Utxo{}).
-			Where("tx_id = ? AND output_idx = ?", inTxId, inIdx).
-			Where("deleted_slot = 0").       // Only update if still unspent
-			Where("spent_at_tx_id IS NULL"). // Require NULL for first spend
-			Updates(map[string]any{
-				"deleted_slot":   point.Slot,
-				"spent_at_tx_id": txHash,
-			})
-		if result.Error != nil {
-			return result.Error
-		}
-
-		// Check if update succeeded - if no rows affected, the UTXO was already spent
-		// or doesn't exist
-		if result.RowsAffected == 0 {
-			// Check if UTXO exists at all (may be missing or already spent)
-			var existingUtxo models.Utxo
-			checkResult := db.Where("tx_id = ? AND output_idx = ?", inTxId, inIdx).
-				First(&existingUtxo)
-			if checkResult.Error != nil {
-				if errors.Is(checkResult.Error, gorm.ErrRecordNotFound) {
-					d.logger.Warn(
-						"input UTxO not found",
+			var caseClauses []string
+			var whereConditions []string
+			var caseArgs []any
+			var whereArgs []any
+			for _, input := range tx.Collateral() {
+				inTxId := input.Id().Bytes()
+				inIdx := input.Index()
+				key := fmt.Sprintf("%x:%d", inTxId, inIdx)
+				utxo := collateralUtxos[key]
+				if utxo == nil {
+					d.warnLimiter.warn(
+						d.logger,
+						"missing-collateral-utxo",
+						"Skipping missing collateral UTxO",
 						"hash",
 						input.Id().String(),
 						"index",
@@ -929,26 +781,191 @@ func (d *MetadataStoreSqlite) SetTransaction(
 					)
 					continue
 				}
+				caseClauses = append(
+					caseClauses,
+					"WHEN tx_id = ? AND output_idx = ? THEN ?",
+				)
+				caseArgs = append(caseArgs, inTxId, inIdx, txHash)
+				whereConditions = append(
+					whereConditions,
+					"(tx_id = ? AND output_idx = ?)",
+				)
+				whereArgs = append(whereArgs, inTxId, inIdx)
+				tmpTx.Collateral = append(tmpTx.Collateral, *utxo)
+			}
+			if len(caseClauses) > 0 {
+				args := append(caseArgs, whereArgs...)
+				sql := fmt.Sprintf(
+					"UPDATE utxo SET collateral_by_tx_id = CASE %s ELSE collateral_by_tx_id END WHERE %s",
+					strings.Join(caseClauses, " "),
+					strings.Join(whereConditions, " OR "),
+				)
+				result = db.Exec(sql, args...)
+				if result.Error != nil {
+					return fmt.Errorf("batch update collateral: %w", result.Error)
+				}
+			}
+		}
+		if len(tx.ReferenceInputs()) > 0 {
+			var refInputRefs []UtxoRef
+			for _, input := range tx.ReferenceInputs() {
+				refInputRefs = append(refInputRefs, UtxoRef{
+					TxId:      input.Id().Bytes(),
+					OutputIdx: input.Index(),
+				})
+			}
+			refInputUtxos, err := d.GetUtxosBatch(refInputRefs, txn)
+			if err != nil {
 				return fmt.Errorf(
-					"failed to check UTXO %x#%d: %w",
-					inTxId,
-					inIdx,
-					checkResult.Error,
+					"failed to batch fetch reference input UTXOs: %w",
+					err,
 				)
 			}
-			// UTXO exists but was already spent - check if by the same transaction (idempotent retry)
-			if existingUtxo.SpentAtTxId != nil &&
-				bytes.Equal(existingUtxo.SpentAtTxId, txHash) {
-				// Same transaction, this is an idempotent retry - OK to continue
+			var caseClauses []string
+			var whereConditions []string
+			var caseArgs []any
+			var whereArgs []any
+			for _, input := range tx.ReferenceInputs() {
+				inTxId := input.Id().Bytes()
+				inIdx := input.Index()
+				key := fmt.Sprintf("%x:%d", inTxId, inIdx)
+				utxo := refInputUtxos[key]
+				if utxo == nil {
+					d.warnLimiter.warn(
+						d.logger,
+						"missing-reference-input-utxo",
+						"Skipping missing reference input UTxO",
+						"hash",
+						input.Id().String(),
+						"index",
+						inIdx,
+					)
+					continue
+				}
+				caseClauses = append(
+					caseClauses,
+					"WHEN tx_id = ? AND output_idx = ? THEN ?",
+				)
+				caseArgs = append(caseArgs, inTxId, inIdx, txHash)
+				whereConditions = append(
+					whereConditions,
+					"(tx_id = ? AND output_idx = ?)",
+				)
+				whereArgs = append(whereArgs, inTxId, inIdx)
+				tmpTx.ReferenceInputs = append(tmpTx.ReferenceInputs, *utxo)
+			}
+			if len(caseClauses) > 0 {
+				args := append(caseArgs, whereArgs...)
+				sql := fmt.Sprintf(
+					"UPDATE utxo SET referenced_by_tx_id = CASE %s ELSE referenced_by_tx_id END WHERE %s",
+					strings.Join(caseClauses, " "),
+					strings.Join(whereConditions, " OR "),
+				)
+				result = db.Exec(sql, args...)
+				if result.Error != nil {
+					return fmt.Errorf("batch update reference inputs: %w", result.Error)
+				}
+			}
+		}
+	}
+
+	// Consume UTxOs using optimistic locking to prevent race conditions.
+	// The atomic update ensures only one transaction can successfully mark a UTXO as spent.
+	if len(tx.Consumed()) > 0 {
+		type consumedUtxoRef struct {
+			txID []byte
+			idx  uint32
+			hash string
+		}
+		consumedRefs := make([]consumedUtxoRef, 0, len(tx.Consumed()))
+		for _, input := range tx.Consumed() {
+			inTxID := input.Id().Bytes()
+			inIdx := input.Index()
+			duplicate := false
+			for i := range consumedRefs {
+				if consumedRefs[i].idx == inIdx &&
+					bytes.Equal(consumedRefs[i].txID, inTxID) {
+					duplicate = true
+					break
+				}
+			}
+			if duplicate {
 				continue
 			}
-			// UTXO was spent by a different transaction - this is a conflict
-			return fmt.Errorf(
-				"%w: %x:%d",
-				types.ErrUtxoConflict,
-				inTxId,
-				inIdx,
+			consumedRefs = append(consumedRefs, consumedUtxoRef{
+				txID: inTxID,
+				idx:  inIdx,
+				hash: input.Id().String(),
+			})
+		}
+		if len(consumedRefs) > 0 {
+			whereConditions := make([]string, 0, len(consumedRefs))
+			updateArgs := make([]any, 0, 2+(len(consumedRefs)*2))
+			updateArgs = append(updateArgs, point.Slot, txHash)
+			for _, ref := range consumedRefs {
+				whereConditions = append(
+					whereConditions,
+					"(tx_id = ? AND output_idx = ?)",
+				)
+				updateArgs = append(updateArgs, ref.txID, ref.idx)
+			}
+			sql := fmt.Sprintf(
+				"UPDATE utxo SET deleted_slot = ?, spent_at_tx_id = ? "+
+					"WHERE deleted_slot = 0 AND spent_at_tx_id IS NULL AND (%s)",
+				strings.Join(whereConditions, " OR "),
 			)
+			result = db.Exec(sql, updateArgs...)
+			if result.Error != nil {
+				return fmt.Errorf("batch consume utxos: %w", result.Error)
+			}
+			if result.RowsAffected != int64(len(consumedRefs)) {
+				for _, ref := range consumedRefs {
+					var existingUtxo models.Utxo
+					checkResult := db.Where(
+						"tx_id = ? AND output_idx = ?",
+						ref.txID,
+						ref.idx,
+					).First(&existingUtxo)
+					if checkResult.Error != nil {
+						if errors.Is(checkResult.Error, gorm.ErrRecordNotFound) {
+							d.warnLimiter.warn(
+								d.logger,
+								"input-utxo-not-found",
+								"input UTxO not found",
+								"hash",
+								ref.hash,
+								"index",
+								ref.idx,
+							)
+							continue
+						}
+						return fmt.Errorf(
+							"failed to check UTXO %x#%d: %w",
+							ref.txID,
+							ref.idx,
+							checkResult.Error,
+						)
+					}
+					if existingUtxo.SpentAtTxId != nil &&
+						bytes.Equal(existingUtxo.SpentAtTxId, txHash) {
+						continue
+					}
+					if existingUtxo.DeletedSlot == 0 &&
+						existingUtxo.SpentAtTxId == nil {
+						return fmt.Errorf(
+							"batch consume did not update UTXO %x#%d",
+							ref.txID,
+							ref.idx,
+						)
+					}
+					return fmt.Errorf(
+						"%w: %x:%d",
+						types.ErrUtxoConflict,
+						ref.txID,
+						ref.idx,
+					)
+				}
+			}
 		}
 	}
 	// Address indexing, witnesses, scripts, redeemers, and plutus data only stored in API mode
@@ -972,9 +989,11 @@ func (d *MetadataStoreSqlite) SetTransaction(
 			idx,
 			addressUtxos,
 		)
-		if result := db.Where("transaction_id = ?", tmpTx.ID).
-			Delete(&models.AddressTransaction{}); result.Error != nil {
-			return fmt.Errorf("delete existing address transactions: %w", result.Error)
+		if needsIdFetch {
+			if result := db.Where("transaction_id = ?", tmpTx.ID).
+				Delete(&models.AddressTransaction{}); result.Error != nil {
+				return fmt.Errorf("delete existing address transactions: %w", result.Error)
+			}
 		}
 		if len(addressTxs) > 0 {
 			if result := db.Create(&addressTxs); result.Error != nil {
@@ -985,69 +1004,72 @@ func (d *MetadataStoreSqlite) SetTransaction(
 		// Delete existing witness records to ensure idempotency on retry.
 		// Note: Caller's transaction (via txn parameter) already provides atomicity,
 		// so we don't need a nested db.Transaction() which would create an unnecessary savepoint.
-		result := db.Where(
-			"transaction_id = ?", tmpTx.ID,
-		).Delete(&models.KeyWitness{})
-		if result.Error != nil {
-			return fmt.Errorf(
-				"failed to delete key witnesses: %w",
-				result.Error,
-			)
-		}
-		result = db.Where(
-			"transaction_id = ?", tmpTx.ID,
-		).Delete(&models.WitnessScripts{})
-		if result.Error != nil {
-			return fmt.Errorf(
-				"failed to delete witness scripts: %w",
-				result.Error,
-			)
-		}
-		result = db.Where(
-			"transaction_id = ?", tmpTx.ID,
-		).Delete(&models.Redeemer{})
-		if result.Error != nil {
-			return fmt.Errorf(
-				"failed to delete redeemers: %w",
-				result.Error,
-			)
-		}
-		result = db.Where(
-			"transaction_id = ?", tmpTx.ID,
-		).Delete(&models.PlutusData{})
-		if result.Error != nil {
-			return fmt.Errorf(
-				"failed to delete plutus data: %w",
-				result.Error,
-			)
+		if needsIdFetch {
+			result := db.Where(
+				"transaction_id = ?", tmpTx.ID,
+			).Delete(&models.KeyWitness{})
+			if result.Error != nil {
+				return fmt.Errorf(
+					"failed to delete key witnesses: %w",
+					result.Error,
+				)
+			}
+			result = db.Where(
+				"transaction_id = ?", tmpTx.ID,
+			).Delete(&models.WitnessScripts{})
+			if result.Error != nil {
+				return fmt.Errorf(
+					"failed to delete witness scripts: %w",
+					result.Error,
+				)
+			}
+			result = db.Where(
+				"transaction_id = ?", tmpTx.ID,
+			).Delete(&models.Redeemer{})
+			if result.Error != nil {
+				return fmt.Errorf(
+					"failed to delete redeemers: %w",
+					result.Error,
+				)
+			}
+			result = db.Where(
+				"transaction_id = ?", tmpTx.ID,
+			).Delete(&models.PlutusData{})
+			if result.Error != nil {
+				return fmt.Errorf(
+					"failed to delete plutus data: %w",
+					result.Error,
+				)
+			}
 		}
 		ws := tx.Witnesses()
 		if ws != nil {
+			keyWitnesses := make([]models.KeyWitness, 0, len(ws.Vkey())+len(ws.Bootstrap()))
+
 			// Add Vkey Witnesses
 			for _, vkey := range ws.Vkey() {
-				keyWitness := models.KeyWitness{
+				keyWitnesses = append(keyWitnesses, models.KeyWitness{
 					TransactionID: tmpTx.ID,
 					Type:          models.KeyWitnessTypeVkey,
 					Vkey:          vkey.Vkey,
 					Signature:     vkey.Signature,
-				}
-				if result := db.Create(&keyWitness); result.Error != nil {
-					return fmt.Errorf("create vkey witness: %w", result.Error)
-				}
+				})
 			}
 
 			// Add Bootstrap Witnesses
 			for _, bootstrap := range ws.Bootstrap() {
-				keyWitness := models.KeyWitness{
+				keyWitnesses = append(keyWitnesses, models.KeyWitness{
 					TransactionID: tmpTx.ID,
 					Type:          models.KeyWitnessTypeBootstrap,
 					PublicKey:     bootstrap.PublicKey,
 					Signature:     bootstrap.Signature,
 					ChainCode:     bootstrap.ChainCode,
 					Attributes:    bootstrap.Attributes,
-				}
-				if result := db.Create(&keyWitness); result.Error != nil {
-					return fmt.Errorf("create bootstrap witness: %w", result.Error)
+				})
+			}
+			if len(keyWitnesses) > 0 {
+				if result := db.Create(&keyWitnesses); result.Error != nil {
+					return fmt.Errorf("create key witnesses: %w", result.Error)
 				}
 			}
 
@@ -1096,25 +1118,26 @@ func (d *MetadataStoreSqlite) SetTransaction(
 			// Add PlutusData (Datums) — only for valid transactions,
 			// matching storeTransactionDatums which hash-indexes them.
 			if tx.IsValid() {
+				plutusDataRows := make([]models.PlutusData, 0, len(ws.PlutusData()))
 				for _, datum := range ws.PlutusData() {
-					plutusData := models.PlutusData{
+					plutusDataRows = append(plutusDataRows, models.PlutusData{
 						TransactionID: tmpTx.ID,
 						Data:          datum.Cbor(),
-					}
-					if result := db.Create(&plutusData); result.Error != nil {
-						return fmt.Errorf(
-							"create plutus data: %w",
-							result.Error,
-						)
+					})
+				}
+				if len(plutusDataRows) > 0 {
+					if result := db.Create(&plutusDataRows); result.Error != nil {
+						return fmt.Errorf("create plutus data: %w", result.Error)
 					}
 				}
 			}
 
 			// Add Redeemers
 			if ws.Redeemers() != nil {
+				redeemers := make([]models.Redeemer, 0)
 				for key, value := range ws.Redeemers().Iter() {
 					//nolint:gosec
-					redeemer := models.Redeemer{
+					redeemers = append(redeemers, models.Redeemer{
 						TransactionID: tmpTx.ID,
 						Tag:           uint8(key.Tag),
 						Index:         key.Index,
@@ -1125,20 +1148,16 @@ func (d *MetadataStoreSqlite) SetTransaction(
 						ExUnitsCPU: uint64(
 							max(0, value.ExUnits.Steps),
 						),
-					}
-					if result := db.Create(&redeemer); result.Error != nil {
-						return fmt.Errorf("create redeemer: %w", result.Error)
+					})
+				}
+				if len(redeemers) > 0 {
+					if result := db.Create(&redeemers); result.Error != nil {
+						return fmt.Errorf("create redeemers: %w", result.Error)
 					}
 				}
 			}
 		}
 	} // end storageMode == types.StorageModeAPI
-
-	// Avoid updating associations
-	result = db.Omit(clause.Associations).Save(tmpTx)
-	if result.Error != nil {
-		return result.Error
-	}
 
 	// Process certificates - all certificate types are handled here in a consolidated manner
 	// This centralizes certificate processing logic within the metadata layer following DRY principles

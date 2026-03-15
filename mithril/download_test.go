@@ -40,7 +40,7 @@ func TestDownloadSnapshot(t *testing.T) {
 			_, _ = w.Write(content)
 		}),
 	)
-	defer server.Close()
+	t.Cleanup(server.Close)
 
 	destDir := t.TempDir()
 	var progressCalled atomic.Int32
@@ -99,7 +99,7 @@ func TestDownloadSnapshotResume(t *testing.T) {
 			}
 		}),
 	)
-	defer server.Close()
+	t.Cleanup(server.Close)
 
 	destDir := t.TempDir()
 	destPath := filepath.Join(destDir, "resume-test.tar.zst")
@@ -134,7 +134,7 @@ func TestDownloadSnapshotContextCancel(t *testing.T) {
 			// Write nothing, just hang
 		}),
 	)
-	defer server.Close()
+	t.Cleanup(server.Close)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // Cancel immediately
@@ -157,7 +157,7 @@ func TestDownloadSnapshotServerError(t *testing.T) {
 			)
 		}),
 	)
-	defer server.Close()
+	t.Cleanup(server.Close)
 
 	destDir := t.TempDir()
 	_, err := DownloadSnapshot(context.Background(), DownloadConfig{
@@ -176,7 +176,7 @@ func TestDownloadSnapshotSizeVerification(t *testing.T) {
 			_, _ = w.Write(content)
 		}),
 	)
-	defer server.Close()
+	t.Cleanup(server.Close)
 
 	destDir := t.TempDir()
 
@@ -205,7 +205,7 @@ func TestDownloadSnapshotSizeMismatch(t *testing.T) {
 			_, _ = w.Write(content)
 		}),
 	)
-	defer server.Close()
+	t.Cleanup(server.Close)
 
 	destDir := t.TempDir()
 
@@ -229,7 +229,7 @@ func TestDownloadSnapshotDefaultFilename(t *testing.T) {
 			_, _ = w.Write([]byte("data"))
 		}),
 	)
-	defer server.Close()
+	t.Cleanup(server.Close)
 
 	destDir := t.TempDir()
 	path, err := DownloadSnapshot(context.Background(), DownloadConfig{
@@ -337,7 +337,7 @@ func TestDownloadSnapshotResumeContentRangeMismatch(t *testing.T) {
 			_, _ = w.Write(fullContent)
 		}),
 	)
-	defer server.Close()
+	t.Cleanup(server.Close)
 
 	destDir := t.TempDir()
 	destPath := filepath.Join(destDir, "mismatch-test.tar.zst")
@@ -392,7 +392,7 @@ func TestDownloadSnapshotResumeMissingContentRange(t *testing.T) {
 			_, _ = w.Write(fullContent)
 		}),
 	)
-	defer server.Close()
+	t.Cleanup(server.Close)
 
 	destDir := t.TempDir()
 	destPath := filepath.Join(destDir, "no-range.tar.zst")

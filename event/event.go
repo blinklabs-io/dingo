@@ -24,7 +24,7 @@ import (
 )
 
 const (
-	EventQueueSize       = 1000
+	EventQueueSize       = 10000
 	AsyncQueueSize       = 1000
 	AsyncWorkerPoolSize  = 4
 	RemoteDeliverTimeout = 5 * time.Second
@@ -48,6 +48,16 @@ func NewEvent(eventType EventType, eventData any) Event {
 		Timestamp: time.Now(),
 		Data:      eventData,
 	}
+}
+
+func (e *EventBus) HasSubscribers(eventType EventType) bool {
+	if e == nil {
+		return false
+	}
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	subs, ok := e.subscribers[eventType]
+	return ok && len(subs) > 0
 }
 
 // asyncEvent wraps an event with its type for the async queue

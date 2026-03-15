@@ -17,8 +17,8 @@
 #
 # This script handles:
 #   - Environment variable configuration and validation
-#   - First-run detection and Mithril snapshot bootstrapping
-#   - Resumable dingo load operations
+#   - First-run detection and Mithril snapshot bootstrapping via dingo's
+#     built-in mithril sync (no external mithril-client needed)
 #   - Signal forwarding for graceful shutdown
 #   - Debug mode with verbose logging
 #
@@ -29,7 +29,6 @@
 #   DINGO_SOCKET_PATH     - Unix socket path for NtC (default: /ipc/dingo.socket)
 #   DINGO_DEBUG           - Set to any value to enable debug logging and set -x
 #   RESTORE_SNAPSHOT      - Set to any value to bootstrap from Mithril snapshot on first run
-#   GENESIS_VERIFICATION_KEY - Mithril genesis verification key (required when RESTORE_SNAPSHOT is set)
 
 set -euo pipefail
 
@@ -127,27 +126,8 @@ validate_config_network_match() {
 validate_config_network_match
 
 # --------------------------------------------------------------------------- #
-# Mithril aggregator endpoints for known networks
-# --------------------------------------------------------------------------- #
-
-aggregator_endpoint_for_network() {
-  case "$1" in
-    mainnet) echo "https://aggregator.release-mainnet.api.mithril.network/aggregator" ;;
-    preprod) echo "https://aggregator.release-preprod.api.mithril.network/aggregator" ;;
-    preview) echo "https://aggregator.pre-release-preview.api.mithril.network/aggregator" ;;
-    *)       echo "" ;;
-  esac
-}
-
-# --------------------------------------------------------------------------- #
 # First-run detection and Mithril snapshot bootstrap
 # --------------------------------------------------------------------------- #
-
-# Marker file to track load completion. If this file does not exist but the
-# snapshot download directory does, we know a previous load was interrupted
-# and should be resumed.
-LOAD_COMPLETE_MARKER="${CARDANO_DATABASE_PATH}/.load_complete"
-SNAPSHOT_DIR="${CARDANO_DATABASE_PATH}/.mithril_snapshot"
 
 is_first_run() {
   # Database is considered empty if the data directory does not exist or
@@ -165,83 +145,21 @@ is_first_run() {
   return 1
 }
 
-needs_load_resume() {
-  # A load needs resuming if the snapshot directory exists but the completion
-  # marker is absent (i.e., a previous dingo load was interrupted).
-  [[ -d "${SNAPSHOT_DIR}" ]] && [[ ! -f "${LOAD_COMPLETE_MARKER}" ]]
-}
-
-download_mithril_snapshot() {
-  local network="${CARDANO_NETWORK}"
-  local endpoint
-
-  endpoint="$(aggregator_endpoint_for_network "${network}")"
-  if [[ -z "${endpoint}" ]]; then
-    die "Mithril snapshot bootstrap is not supported for network '${network}'"
-  fi
-
-  # Check that mithril-client is available
-  if ! command -v mithril-client &>/dev/null; then
-    die "mithril-client is not installed but RESTORE_SNAPSHOT is set"
-  fi
-
-  if [[ -z "${GENESIS_VERIFICATION_KEY:-}" ]]; then
-    die "GENESIS_VERIFICATION_KEY must be set when RESTORE_SNAPSHOT is enabled"
-  fi
-
-  log "Downloading Mithril snapshot for '${network}'..."
-  mkdir -p "${SNAPSHOT_DIR}"
-
-  AGGREGATOR_ENDPOINT="${endpoint}" \
-    mithril-client cardano-db download \
-      --genesis-verification-key "${GENESIS_VERIFICATION_KEY}" \
-      --download-dir "${SNAPSHOT_DIR}" \
-      latest
-
-  log "Mithril snapshot download complete"
-}
-
-load_snapshot() {
-  local immutable_path="${SNAPSHOT_DIR}/db/immutable"
-
-  if [[ ! -d "${immutable_path}" ]]; then
-    die "Snapshot immutable directory not found: ${immutable_path}"
-  fi
-
-  log "Loading snapshot into Dingo database..."
-
-  # Build dingo load arguments
-  local load_args=("load")
-  if [[ -n "${DINGO_DEBUG:-}" ]]; then
-    load_args=("--debug" "load")
-  fi
-  load_args+=("${immutable_path}")
-
-  dingo "${load_args[@]}"
-
-  # Mark load as complete
-  touch "${LOAD_COMPLETE_MARKER}"
-  log "Snapshot load complete"
-
-  # Clean up snapshot data to reclaim disk space
-  log "Cleaning up snapshot download..."
-  rm -rf "${SNAPSHOT_DIR}"
-  log "Snapshot cleanup complete"
-}
-
 bootstrap_if_needed() {
-  # Resume an interrupted load if detected
-  if needs_load_resume; then
-    warn "Detected incomplete snapshot load, resuming..."
-    load_snapshot
-    return 0
-  fi
-
   # Only bootstrap on first run when RESTORE_SNAPSHOT is set
   if [[ -n "${RESTORE_SNAPSHOT:-}" ]] && is_first_run; then
     log "First run detected with RESTORE_SNAPSHOT set, bootstrapping from Mithril..."
-    download_mithril_snapshot
-    load_snapshot
+
+    # Build dingo mithril sync arguments
+    local sync_args=()
+    if [[ -n "${DINGO_DEBUG:-}" ]]; then
+      sync_args+=("--debug")
+    fi
+    sync_args+=("mithril" "sync")
+
+    dingo "${sync_args[@]}"
+
+    log "Mithril bootstrap complete"
     return 0
   fi
 

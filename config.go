@@ -107,6 +107,12 @@ type Config struct {
 	activePeersTopologyQuota int
 	activePeersGossipQuota   int
 	activePeersLedgerQuota   int
+	// Peer governor tuning (0 = use default)
+	minHotPeers         int
+	reconcileInterval   time.Duration
+	inactivityTimeout   time.Duration
+	maxConnectionsPerIP int
+	maxInboundConns     int
 	// Block production configuration (SPO mode)
 	// Field names match cardano-node environment variable naming convention
 	blockProducer                 bool
@@ -158,10 +164,6 @@ func (n *Node) configValidate() error {
 			StorageModeCore,
 			StorageModeAPI,
 		)
-	}
-	// Default bindAddr used for API listeners.
-	if n.config.bindAddr == "" {
-		n.config.bindAddr = "0.0.0.0"
 	}
 	// APIs require "api" storage mode.
 	anyAPIEnabled := n.config.utxorpcPort > 0 ||
@@ -453,7 +455,7 @@ func WithPeerTargets(
 
 // WithActivePeersQuotas specifies the per-source quotas for active peers.
 // Use 0 to use the default quota, or a negative value to disable enforcement.
-// Default quotas: topology=3, gossip=12, ledger=5
+// Default quotas: topology=20, gossip=20, ledger=20
 func WithActivePeersQuotas(
 	topologyQuota, gossipQuota, ledgerQuota int,
 ) ConfigOptionFunc {
@@ -461,6 +463,56 @@ func WithActivePeersQuotas(
 		c.activePeersTopologyQuota = topologyQuota
 		c.activePeersGossipQuota = gossipQuota
 		c.activePeersLedgerQuota = ledgerQuota
+	}
+}
+
+// WithMinHotPeers specifies the minimum number of hot peers before aggressive
+// promotion is triggered. Non-positive values are ignored. Default: 10.
+func WithMinHotPeers(n int) ConfigOptionFunc {
+	return func(c *Config) {
+		if n > 0 {
+			c.minHotPeers = n
+		}
+	}
+}
+
+// WithReconcileInterval specifies how often the peer governor runs its
+// reconciliation loop. Non-positive values are ignored. Default: 5m.
+func WithReconcileInterval(d time.Duration) ConfigOptionFunc {
+	return func(c *Config) {
+		if d > 0 {
+			c.reconcileInterval = d
+		}
+	}
+}
+
+// WithInactivityTimeout specifies how long a hot peer can be inactive
+// before being demoted to warm. Non-positive values are ignored. Default: 10m.
+func WithInactivityTimeout(d time.Duration) ConfigOptionFunc {
+	return func(c *Config) {
+		if d > 0 {
+			c.inactivityTimeout = d
+		}
+	}
+}
+
+// WithMaxConnectionsPerIP specifies the maximum number of concurrent
+// inbound connections from a single IP. Non-positive values are ignored. Default: 5.
+func WithMaxConnectionsPerIP(n int) ConfigOptionFunc {
+	return func(c *Config) {
+		if n > 0 {
+			c.maxConnectionsPerIP = n
+		}
+	}
+}
+
+// WithMaxInboundConns specifies the maximum number of inbound connections.
+// Non-positive values are ignored. Default: 100.
+func WithMaxInboundConns(n int) ConfigOptionFunc {
+	return func(c *Config) {
+		if n > 0 {
+			c.maxInboundConns = n
+		}
 	}
 }
 

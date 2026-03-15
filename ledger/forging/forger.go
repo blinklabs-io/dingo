@@ -232,6 +232,16 @@ func (f *BlockForger) Start(ctx context.Context) error {
 
 	f.logger.Info("block forger started", "mode", f.modeString())
 
+	// Set initial KES period metrics so dashboards show correct values
+	// immediately rather than waiting for the first block production.
+	if f.metrics != nil && f.slotClock != nil && f.creds != nil {
+		if slotsPerKES := f.slotClock.SlotsPerKESPeriod(); slotsPerKES > 0 {
+			if currentSlot, err := f.slotClock.CurrentSlot(); err == nil {
+				f.updateKESMetrics(currentSlot / slotsPerKES)
+			}
+		}
+	}
+
 	go f.runLoop(ctx)
 	return nil
 }
@@ -573,7 +583,10 @@ func (f *BlockForger) VRFProofForSlot(
 	}
 
 	// Create VRF input: MkInputVrf(slot, epochNonce)
-	alpha := vrf.MkInputVrf(int64(slot), epochNonce) // #nosec G115 -- validated above
+	alpha, err := vrf.MkInputVrf(int64(slot), epochNonce) // #nosec G115 -- validated above
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to create VRF input: %w", err)
+	}
 
 	return f.creds.VRFProve(alpha)
 }

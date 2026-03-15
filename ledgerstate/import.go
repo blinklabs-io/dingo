@@ -23,6 +23,7 @@ import (
 	"math/big"
 	"net"
 	"sort"
+	"time"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
@@ -83,6 +84,13 @@ type RawLedgerState struct {
 	// tip block nonce so that subsequent block processing computes
 	// correct rolling nonces after a mithril snapshot restore.
 	EvolvingNonce []byte
+	// CandidateNonce is the Praos candidate nonce as of the imported
+	// tip. This is required to correctly continue nonce accumulation
+	// from snapshot tip to epoch boundary.
+	CandidateNonce []byte
+	// LastEpochBlockNonce is the lagged lab nonce from consensus
+	// state (used in epoch nonce calculation).
+	LastEpochBlockNonce []byte
 	// EraBoundsWarning holds a non-fatal error from era bounds
 	// extraction. When set, epoch generation falls back to
 	// the single-epoch path.
@@ -219,6 +227,7 @@ type ImportProgress struct {
 	Stage       string
 	Current     int
 	Total       int
+	Percent     float64
 	Description string
 }
 
@@ -554,6 +563,8 @@ func importUTxOs(
 
 	store := cfg.Database.Metadata()
 	totalImported := 0
+	lastProgressLog := time.Time{}
+	lastLoggedPercent := -5.0
 
 	batchCallback := func(batch []ParsedUTxO) error {
 		select {
@@ -591,35 +602,37 @@ func importUTxOs(
 			)
 		}
 
-		prevTotal := totalImported
 		totalImported += len(batch)
 
-		if totalImported/100000 > prevTotal/100000 {
-			cfg.Logger.Info(
-				"UTxO import progress",
-				"component", "ledgerstate",
-				"count", totalImported,
-			)
-		}
-
-		progress(ImportProgress{
-			Stage:   "utxo",
-			Current: totalImported,
-			Description: fmt.Sprintf(
-				"%d UTxOs imported",
-				totalImported,
-			),
-		})
-
 		return nil
+	}
+
+	reportProgress := func(p UTxOParseProgress) {
+		now := time.Now()
+		if !lastProgressLog.IsZero() &&
+			now.Sub(lastProgressLog) < 10*time.Second &&
+			p.Percent < 100 &&
+			p.Percent-lastLoggedPercent < 5.0 {
+			return
+		}
+		lastProgressLog = now
+		lastLoggedPercent = p.Percent
+		progress(ImportProgress{
+			Stage:       "utxo",
+			Current:     p.EntriesProcessed,
+			Total:       p.TotalEntries,
+			Percent:     p.Percent,
+			Description: "UTxO import progress",
+		})
 	}
 
 	var err error
 	if cfg.State.UTxOTablePath != "" {
 		// UTxO-HD format: stream from tvar file
-		_, err = ParseUTxOsFromFile(
+		_, err = parseUTxOsFromFileWithProgress(
 			cfg.State.UTxOTablePath,
 			batchCallback,
+			reportProgress,
 		)
 		if err != nil {
 			return fmt.Errorf(
@@ -629,9 +642,10 @@ func importUTxOs(
 		}
 	} else {
 		// Legacy format: decode from inline CBOR
-		_, err = ParseUTxOsStreaming(
+		_, err = parseUTxOsStreamingWithProgress(
 			cfg.State.UTxOData,
 			batchCallback,
+			reportProgress,
 		)
 		if err != nil {
 			return fmt.Errorf(
@@ -690,6 +704,7 @@ func importCertState(
 			Stage:   "accounts",
 			Current: len(certState.Accounts),
 			Total:   len(certState.Accounts),
+			Percent: 100,
 			Description: fmt.Sprintf(
 				"%d accounts imported",
 				len(certState.Accounts),
@@ -710,6 +725,7 @@ func importCertState(
 			Stage:   "pools",
 			Current: len(certState.Pools),
 			Total:   len(certState.Pools),
+			Percent: 100,
 			Description: fmt.Sprintf(
 				"%d pools imported",
 				len(certState.Pools),
@@ -728,6 +744,7 @@ func importCertState(
 			Stage:   "dreps",
 			Current: len(certState.DReps),
 			Total:   len(certState.DReps),
+			Percent: 100,
 			Description: fmt.Sprintf(
 				"%d DReps imported",
 				len(certState.DReps),
@@ -1151,6 +1168,8 @@ func importSnapShots(
 		progress(ImportProgress{
 			Stage:   "snapshots",
 			Current: len(poolSnapshots),
+			Total:   len(poolSnapshots),
+			Percent: 100,
 			Description: fmt.Sprintf(
 				"%s: %d pools",
 				st.name,
@@ -1174,6 +1193,8 @@ func importSnapShots(
 			progress(ImportProgress{
 				Stage:   "pools",
 				Current: len(snapshotPools),
+				Total:   len(snapshotPools),
+				Percent: 100,
 				Description: fmt.Sprintf(
 					"%d pools imported from snapshots",
 					len(snapshotPools),
@@ -1417,8 +1438,8 @@ func generateAndSaveEpochs(
 			cfg.State.Epoch,
 			cfg.State.EpochNonce,
 			cfg.State.EvolvingNonce,
-			nil, // candidateNonce not available from import
-			nil, // lastEpochBlockNonce not available from import
+			cfg.State.CandidateNonce,
+			cfg.State.LastEpochBlockNonce,
 			uint(cfg.State.EraIndex),
 			slotLength,
 			lengthInSlots,
@@ -1529,11 +1550,15 @@ func generateAndSaveEpochs(
 
 		var nonce []byte
 		var evolvingNonce []byte
+		var candidateNonce []byte
+		var lastEpochBlockNonce []byte
 		if e == cfg.State.Epoch {
 			nonce = cfg.State.EpochNonce
 			// NOTE: tip-time EvolvingNonce (may be mid-epoch).
 			// Corrected by the first full epoch rollover.
 			evolvingNonce = cfg.State.EvolvingNonce
+			candidateNonce = cfg.State.CandidateNonce
+			lastEpochBlockNonce = cfg.State.LastEpochBlockNonce
 		}
 
 		if err := store.SetEpoch(
@@ -1541,8 +1566,8 @@ func generateAndSaveEpochs(
 			e,
 			nonce,
 			evolvingNonce,
-			nil, // candidateNonce not available from import
-			nil, // lastEpochBlockNonce not available from import
+			candidateNonce,
+			lastEpochBlockNonce,
 			currentEraId,
 			slotLength,
 			epochLength,
@@ -1642,6 +1667,15 @@ func importPParams(
 	)
 
 	pparamsCbor := []byte(cfg.State.PParamsData)
+	if err := validatePParamsData(
+		cfg.State.EraIndex,
+		pparamsCbor,
+	); err != nil {
+		return fmt.Errorf(
+			"validating protocol parameters: %w",
+			err,
+		)
+	}
 
 	store := cfg.Database.Metadata()
 	txn := cfg.Database.MetadataTxn(true)
@@ -1845,6 +1879,7 @@ func importGovState(
 
 	progress(ImportProgress{
 		Stage:       "governance",
+		Percent:     100,
 		Description: "governance state imported",
 	})
 

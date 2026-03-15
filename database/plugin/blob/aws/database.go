@@ -124,7 +124,7 @@ func (d *BlobStoreS3) opContext() (context.Context, context.CancelFunc) {
 	if timeout == 0 {
 		timeout = 60 * time.Second
 	}
-	return context.WithTimeout(context.Background(), timeout)
+	return context.WithTimeout(context.Background(), timeout) //nolint:gosec // G118: cancel func is returned to caller
 }
 
 // Close implements the BlobStore interface.
@@ -762,7 +762,7 @@ func (d *BlobStoreS3) Start() error {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 
 	// Load AWS config
-	awsCfg, err := config.LoadDefaultConfig(ctx)
+	awsCfg, err := config.LoadDefaultConfig(ctx, config.WithClientLogMode(aws.LogRequestWithBody))
 	if err != nil {
 		cancel()
 		return fmt.Errorf("s3 blob: load default AWS config: %w", err)

@@ -16,6 +16,7 @@ package ouroboros
 
 import (
 	"fmt"
+	"time"
 
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/protocol"
@@ -32,6 +33,11 @@ func (o *Ouroboros) leiosnotifyServerConnOpts() []oleiosnotify.LeiosNotifyOption
 func (o *Ouroboros) leiosnotifyClientConnOpts() []oleiosnotify.LeiosNotifyOptionFunc {
 	return []oleiosnotify.LeiosNotifyOptionFunc{
 		oleiosnotify.WithNotificationFunc(o.leiosnotifyClientNotification),
+		// Disable the Busy-state timeout. LeiosNotify is a push-based
+		// notification protocol where the server only sends when it has
+		// something to announce. Idle waits of arbitrary length are
+		// normal and should not kill the connection.
+		oleiosnotify.WithTimeout(time.Duration(0)),
 	}
 }
 

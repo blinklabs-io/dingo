@@ -435,7 +435,10 @@ func (b *DefaultBlockBuilder) BuildBlock(
 	}
 
 	// Generate VRF proof using MkInputVrf(slot, epochNonce)
-	alpha := vrf.MkInputVrf(int64(slot), epochNonce) // #nosec G115 -- validated above
+	alpha, err := vrf.MkInputVrf(int64(slot), epochNonce) // #nosec G115 -- validated above
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to create VRF input: %w", err)
+	}
 	vrfProof, vrfOutput, err := b.creds.VRFProve(alpha)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to generate VRF proof: %w", err)

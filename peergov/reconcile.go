@@ -73,7 +73,7 @@ func (p *PeerGovernor) reconcile() {
 			// Do not promote warm peers here; collect them and perform
 			// score-based promotion later. This avoids unconditional
 			// promotion and lets the scoring policy decide which warm
-			// peers to promote when ensuring MinHotPeers.
+			// peers to promote when ensuring the promotion target.
 			// Note: warm peers remain warm unless promoted in scoring block below.
 		case PeerStateCold:
 			// Promote to warm if connection exists
@@ -140,9 +140,17 @@ func (p *PeerGovernor) reconcile() {
 			hotCount++
 		}
 	}
+	// Trigger promotion when hot peers drop below the low-water mark
+	// (MinHotPeers), then refill up to TargetNumberOfActivePeers.
+	// When TargetNumberOfActivePeers is 0 (unlimited), fall back to
+	// MinHotPeers as the refill goal.
 	if hotCount < p.config.MinHotPeers {
+		refillTarget := p.config.TargetNumberOfActivePeers
+		if refillTarget <= 0 {
+			refillTarget = p.config.MinHotPeers
+		}
 		// Score-based selection: collect warm peers with connections, compute scores,
-		// sort by valency priority then score, and promote top N required to reach MinHotPeers.
+		// sort by valency priority then score, and promote top N to reach the refill target.
 		candidates := []*Peer{}
 		for _, peer := range p.peers {
 			if peer != nil && peer.State == PeerStateWarm &&
@@ -159,22 +167,23 @@ func (p *PeerGovernor) reconcile() {
 		// Get group counts for valency-aware sorting
 		groups := p.countPeersByGroup()
 
-		// Sort candidates: 1) under-valency groups first, 2) by score descending
-		slices.SortFunc(candidates, func(a, b *Peer) int {
+		// Comparator: under-valency groups first, then by score descending
+		rankCandidates := func(a, b *Peer) int {
 			aUnder := p.isGroupUnderHotValency(a, groups)
 			bUnder := p.isGroupUnderHotValency(b, groups)
-			// Under-valency peers come first
 			if aUnder && !bUnder {
 				return -1
 			}
 			if !aUnder && bUnder {
 				return 1
 			}
-			// Same valency status: sort by score descending
 			return cmp.Compare(b.PerformanceScore, a.PerformanceScore)
-		})
+		}
 
-		needed := p.config.MinHotPeers - hotCount
+		// Initial sort
+		slices.SortFunc(candidates, rankCandidates)
+
+		needed := refillTarget - hotCount
 		promoted := 0
 		for i := 0; i < len(candidates) && promoted < needed; i++ {
 			peer := candidates[i]
@@ -205,8 +214,13 @@ func (p *PeerGovernor) reconcile() {
 				gc.Hot++
 				gc.Warm--
 			}
+			// Re-sort remaining candidates so valency changes
+			// from this promotion are reflected in the next pick.
+			if i+1 < len(candidates) {
+				slices.SortFunc(candidates[i+1:], rankCandidates)
+			}
 			p.config.Logger.Info(
-				"promoted peer to hot to meet minimum (score-based)",
+				"promoted peer to hot (score-based)",
 				"address", peer.Address,
 				"score", peer.PerformanceScore,
 				"group", peer.GroupID,
@@ -215,7 +229,7 @@ func (p *PeerGovernor) reconcile() {
 				PeerPromotedEventType,
 				PeerStateChangeEvent{
 					Address: peer.Address,
-					Reason:  "minimum hot peers (score)",
+					Reason:  "target active peers (score)",
 				},
 			})
 			hotCount++
@@ -266,7 +280,7 @@ func (p *PeerGovernor) reconcile() {
 	if p.config.PeerRequestFunc != nil {
 		for _, peer := range p.peers {
 			if peer != nil && peer.State == PeerStateHot &&
-				peer.Connection != nil && peer.Source != PeerSourceTopologyLocalRoot {
+				peer.Connection != nil {
 				eligiblePeersCopy = append(eligiblePeersCopy, *peer)
 			}
 		}

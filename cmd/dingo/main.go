@@ -195,7 +195,45 @@ func main() {
 	}
 
 	rootCmd := &cobra.Command{
-		Use: programName,
+		Use:   programName,
+		Short: "Dingo - a Go Cardano node",
+		Long: `Dingo - a Go Cardano node by Blink Labs.
+
+Configuration Precedence (highest to lowest):
+  1. CLI flags          (e.g. --network preview)
+  2. Environment vars   (e.g. CARDANO_NETWORK=preview)
+  3. Config file        (dingo.yaml or --config path)
+  4. Built-in defaults
+
+Data Directory:
+  The CARDANO_DATABASE_PATH env var (or databasePath in config) sets the
+  data directory for both blob and metadata storage plugins. Plugin-specific
+  flags override this global setting:
+
+    --blob-badger-data-dir      overrides the blob plugin data directory
+    --metadata-sqlite-data-dir  overrides the metadata plugin data directory
+
+  For example, to store metadata separately from block data:
+    dingo --blob-badger-data-dir /fast-ssd/blocks \
+          --metadata-sqlite-data-dir /nvme/indexes
+
+Storage Mode:
+  --blob-badger-storage-mode and --metadata-*-storage-mode override the
+  global storageMode config. Use "core" for minimal validation data or
+  "api" for full indexing (witnesses, scripts, datums, redeemers).
+
+Network:
+  --network sets the Cardano network name and automatically derives the
+  path to the corresponding Cardano node config files (genesis, topology).
+  This overrides the CARDANO_NETWORK env var and the network config field.
+
+Database Workers:
+  --db-workers controls the worker pool size. When using SQLite, set
+  --metadata-sqlite-max-connections to match (both default to 5).
+
+DSN Override:
+  --metadata-mysql-dsn and --metadata-postgres-dsn override all individual
+  connection flags (host, port, user, password, database) when set.`,
 		Run: func(cmd *cobra.Command, args []string) {
 			cfg := config.FromContext(cmd.Context())
 			if cfg == nil {
@@ -238,6 +276,8 @@ func main() {
 		Int("db-workers", 5, "database worker pool worker count")
 	rootCmd.PersistentFlags().
 		Int("db-queue-size", 50, "database worker pool task queue size")
+	rootCmd.PersistentFlags().
+		String("data-dir", "", "data directory for all storage plugins (overrides CARDANO_DATABASE_PATH)")
 
 	// Add plugin-specific flags
 	if err := plugin.PopulateCmdlineOptions(rootCmd.PersistentFlags()); err != nil {
@@ -284,6 +324,17 @@ func main() {
 				)
 			}
 			cfg.Network = network
+		}
+
+		// Override data directory if flag is provided
+		if cmd.Root().PersistentFlags().Changed("data-dir") {
+			dataDir, err := cmd.Root().PersistentFlags().GetString("data-dir")
+			if err != nil {
+				return fmt.Errorf(
+					"reading data-dir flag: %w", err,
+				)
+			}
+			cfg.DatabasePath = dataDir
 		}
 
 		// Override database worker pool config if flags are provided

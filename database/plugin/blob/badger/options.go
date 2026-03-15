@@ -86,3 +86,19 @@ func WithValueThreshold(threshold int64) BlobStoreBadgerOptionFunc {
 		b.valueThreshold = threshold
 	}
 }
+
+// WithCompactBlockMetadata enables a compact binary metadata format for blocks.
+func WithCompactBlockMetadata(enabled bool) BlobStoreBadgerOptionFunc {
+	return func(b *BlobStoreBadger) {
+		b.compactBlockMetadata = enabled
+	}
+}
+
+// WithDeferOpen defers opening Badger until Start() is called.
+// This allows a logger to be injected via SetLogger before Badger
+// emits any startup logs.
+func WithDeferOpen() BlobStoreBadgerOptionFunc {
+	return func(b *BlobStoreBadger) {
+		b.deferOpen = true
+	}
+}

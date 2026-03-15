@@ -17,7 +17,7 @@ package cardano
 import (
 	"bytes"
 	"os"
-	"path"
+	"path/filepath"
 	"reflect"
 	"testing"
 
@@ -34,24 +34,28 @@ func ptrBool(v bool) *bool       { return &v }
 func ptrUint64(v uint64) *uint64 { return &v }
 
 var expectedCardanoNodeConfig = &CardanoNodeConfig{
-	path:                         testDataDir,
-	AlonzoGenesisFile:            "alonzo-genesis.json",
-	AlonzoGenesisHash:            "7e94a15f55d1e82d10f09203fa1d40f8eede58fd8066542cf6566008068ed874",
-	ByronGenesisFile:             "byron-genesis.json",
-	ByronGenesisHash:             "83de1d7302569ad56cf9139a41e2e11346d4cb4a31c00142557b6ab3fa550761",
-	ConwayGenesisFile:            "conway-genesis.json",
-	ConwayGenesisHash:            "9cc5084f02e27210eacba47af0872e3dba8946ad9460b6072d793e1d2f3987ef",
-	ShelleyGenesisFile:           "shelley-genesis.json",
-	ShelleyGenesisHash:           "363498d1024f84bb39d3fa9593ce391483cb40d479b87233f868d6e57c3a400d",
-	ExperimentalHardForksEnabled: ptrBool(false),
-	TestShelleyHardForkAtEpoch:   ptrUint64(0),
-	TestAllegraHardForkAtEpoch:   ptrUint64(0),
-	TestMaryHardForkAtEpoch:      ptrUint64(0),
-	TestAlonzoHardForkAtEpoch:    ptrUint64(0),
+	path:              testDataDir,
+	AlonzoGenesisFile: "alonzo-genesis.json",
+	AlonzoGenesisHash: "7e94a15f55d1e82d10f09203fa1d40f8eede58fd8066542cf6566008068ed874",
+	ByronGenesisFile:  "byron-genesis.json",
+	ByronGenesisHash:  "83de1d7302569ad56cf9139a41e2e11346d4cb4a31c00142557b6ab3fa550761",
+	ConwayGenesisFile: "conway-genesis.json",
+	ConwayGenesisHash: "9cc5084f02e27210eacba47af0872e3dba8946ad9460b6072d793e1d2f3987ef",
+	MithrilGenesisVerificationKey:              "5b3132372c37332c3132342c3136312c362c3133372c3133312c3231332c3230372c3131372c3139382c38352c3137362c3139392c3136322c3234312c36382c3132332c3131392c3134352c31332c3233322c3234332c34392c3232392c322c3234392c3230352c3230352c33392c3233352c34345d",
+	MithrilGenesisVerificationKeyFile:           "genesis.vkey",
+	MithrilGenesisAncillaryVerificationKey:      "5b3138392c3139322c3231362c3135302c3131342c3231362c3233372c3231302c34352c31382c32312c3139362c3230382c3234362c3134362c322c3235322c3234332c3235312c3139372c32382c3135372c3230342c3134352c33302c31342c3232382c3136382c3132392c38332c3133362c33365d",
+	MithrilGenesisAncillaryVerificationKeyFile:  "ancillary.vkey",
+	ShelleyGenesisFile:                          "shelley-genesis.json",
+	ShelleyGenesisHash:                          "363498d1024f84bb39d3fa9593ce391483cb40d479b87233f868d6e57c3a400d",
+	ExperimentalHardForksEnabled:                ptrBool(false),
+	TestShelleyHardForkAtEpoch:                  ptrUint64(0),
+	TestAllegraHardForkAtEpoch:                  ptrUint64(0),
+	TestMaryHardForkAtEpoch:                     ptrUint64(0),
+	TestAlonzoHardForkAtEpoch:                   ptrUint64(0),
 }
 
 func TestCardanoNodeConfig(t *testing.T) {
-	tmpPath := path.Join(
+	tmpPath := filepath.Join(
 		testDataDir,
 		"config.json",
 	)
@@ -141,6 +145,86 @@ func TestCardanoNodeConfigMissingGenesisHashes(t *testing.T) {
 			expectedCardanoNodeConfig.ConwayGenesisHash,
 		)
 	}
+}
+
+func TestCardanoNodeConfigLoadsMithrilVerificationKeysFromDisk(t *testing.T) {
+	tmpDir := t.TempDir()
+	genesisKey := "genesis-vkey-data\n"
+	ancillaryKey := "ancillary-vkey-data\n"
+	require.NoError(
+		t,
+		os.WriteFile(
+			filepath.Join(tmpDir, "genesis.vkey"),
+			[]byte(genesisKey),
+			0o600,
+		),
+	)
+	require.NoError(
+		t,
+		os.WriteFile(
+			filepath.Join(tmpDir, "ancillary.vkey"),
+			[]byte(ancillaryKey),
+			0o600,
+		),
+	)
+
+	cfgBytes := []byte(`{
+  "MithrilGenesisVerificationKeyFile": "genesis.vkey",
+  "MithrilGenesisAncillaryVerificationKeyFile": "ancillary.vkey"
+}`)
+	cfg, err := NewCardanoNodeConfigFromReader(bytes.NewReader(cfgBytes))
+	require.NoError(t, err)
+	cfg.path = tmpDir
+	require.NoError(t, cfg.loadGenesisConfigs())
+	require.Equal(t, genesisKey, cfg.MithrilGenesisVerificationKey)
+	require.Equal(
+		t,
+		ancillaryKey,
+		cfg.MithrilGenesisAncillaryVerificationKey,
+	)
+}
+
+func TestCardanoNodeConfigAutoDiscoversMithrilVerificationKeys(t *testing.T) {
+	tmpDir := t.TempDir()
+	genesisKey := "genesis-vkey-data\n"
+	ancillaryKey := "ancillary-vkey-data\n"
+	require.NoError(
+		t,
+		os.WriteFile(
+			filepath.Join(tmpDir, "genesis.vkey"),
+			[]byte(genesisKey),
+			0o600,
+		),
+	)
+	require.NoError(
+		t,
+		os.WriteFile(
+			filepath.Join(tmpDir, "ancillary.vkey"),
+			[]byte(ancillaryKey),
+			0o600,
+		),
+	)
+
+	cfg, err := NewCardanoNodeConfigFromReader(bytes.NewReader([]byte(`{}`)))
+	require.NoError(t, err)
+	cfg.path = tmpDir
+	require.NoError(t, cfg.loadGenesisConfigs())
+	require.Equal(
+		t,
+		defaultMithrilGenesisVerificationKeyFile,
+		cfg.MithrilGenesisVerificationKeyFile,
+	)
+	require.Equal(
+		t,
+		defaultMithrilGenesisAncillaryVerificationKeyFile,
+		cfg.MithrilGenesisAncillaryVerificationKeyFile,
+	)
+	require.Equal(t, genesisKey, cfg.MithrilGenesisVerificationKey)
+	require.Equal(
+		t,
+		ancillaryKey,
+		cfg.MithrilGenesisAncillaryVerificationKey,
+	)
 }
 
 func TestValidateGenesisHashCorrect(t *testing.T) {

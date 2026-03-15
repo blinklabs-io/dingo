@@ -126,6 +126,7 @@ func (n *Node) Run(ctx context.Context) error {
 		Logger:         n.config.logger,
 		PromRegistry:   n.config.promRegistry,
 		BlobPlugin:     n.config.blobPlugin,
+		RunMode:        n.config.runMode,
 		MetadataPlugin: n.config.metadataPlugin,
 		MaxConnections: n.config.DatabaseWorkerPoolConfig.WorkerPoolSize,
 		StorageMode:    string(n.config.storageMode),
@@ -381,12 +382,14 @@ func (n *Node) Run(ctx context.Context) error {
 	tmpListeners := n.ouroboros.ConfigureListeners(n.config.listeners)
 	n.connManager = connmanager.NewConnectionManager(
 		connmanager.ConnectionManagerConfig{
-			Logger:             n.config.logger,
-			EventBus:           n.eventBus,
-			Listeners:          tmpListeners,
-			OutboundSourcePort: n.config.outboundSourcePort,
-			OutboundConnOpts:   n.ouroboros.OutboundConnOpts(),
-			PromRegistry:       n.config.promRegistry,
+			Logger:              n.config.logger,
+			EventBus:            n.eventBus,
+			Listeners:           tmpListeners,
+			OutboundSourcePort:  n.config.outboundSourcePort,
+			OutboundConnOpts:    n.ouroboros.OutboundConnOpts(),
+			PromRegistry:        n.config.promRegistry,
+			MaxConnectionsPerIP: n.config.maxConnectionsPerIP,
+			MaxInboundConns:     n.config.maxInboundConns,
 		},
 	)
 	n.eventBus.SubscribeFunc(
@@ -431,19 +434,36 @@ func (n *Node) Run(ctx context.Context) error {
 	}
 	stallRecoveryGrace := max(chainsyncCfg.StallTimeout, 30*time.Second)
 	stallRecycleCooldown := max(2*chainsyncCfg.StallTimeout, 2*time.Minute)
-	recyclerCtx, recyclerCancel := context.WithCancel(n.ctx)
+	recyclerCtx, recyclerCancel := context.WithCancel(n.ctx) //nolint:gosec // G118: cancel func stored in started slice
 	started = append(started, recyclerCancel)
 	go func(interval, grace, cooldown time.Duration) {
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 		recycleAt := make(map[string]time.Time)
 		lastRecycled := make(map[string]time.Time)
+		lastProgressSlot := n.chainManager.PrimaryChain().Tip().Point.Slot
+		lastProgressAt := time.Now()
+		// Trigger plateau recovery before the hard 10m SLO so
+		// recycle + reconnect time does not breach the budget.
+		const plateauThreshold = 8 * time.Minute
 		for {
 			select {
 			case <-recyclerCtx.Done():
 				return
 			case <-ticker.C:
 				now := time.Now()
+				localTip := n.chainManager.PrimaryChain().Tip()
+				localTipSlot := localTip.Point.Slot
+				if n.chainSelector != nil {
+					n.chainSelector.SetLocalTip(localTip)
+					if k := n.ledgerState.SecurityParam(); k > 0 {
+						n.chainSelector.SetSecurityParam(uint64(k)) //nolint:gosec
+					}
+				}
+				if localTipSlot > lastProgressSlot {
+					lastProgressSlot = localTipSlot
+					lastProgressAt = now
+				}
 				n.chainsyncState.CheckStalledClients()
 				trackedClients := n.chainsyncState.GetTrackedClients()
 				trackedByID := make(
@@ -464,13 +484,53 @@ func (n *Node) Run(ctx context.Context) error {
 						delete(lastRecycled, connKey)
 					}
 				}
+				// Safety net: if local tip has not moved for a long time
+				// while peers are ahead, recycle the selected chainsync
+				// connection even if it is not marked stalled.
+				if now.Sub(lastProgressAt) > plateauThreshold &&
+					n.chainSelector != nil {
+					if bestPeer := n.chainSelector.GetBestPeer(); bestPeer != nil {
+						if bestPeerTip := n.chainSelector.GetPeerTip(*bestPeer); bestPeerTip != nil &&
+							bestPeerTip.Tip.Point.Slot > localTipSlot {
+							targetConn := n.chainsyncState.GetClientConnId()
+							if targetConn == nil {
+								targetCopy := *bestPeer
+								targetConn = &targetCopy
+							}
+							connKey := targetConn.String()
+							if last, ok := lastRecycled[connKey]; !ok ||
+								now.Sub(last) >= cooldown {
+								n.config.logger.Warn(
+									"local tip plateau detected, recycling chainsync connection",
+									"connection_id", connKey,
+									"local_tip_slot", localTipSlot,
+									"best_peer_tip_slot", bestPeerTip.Tip.Point.Slot,
+									"plateau_duration", now.Sub(lastProgressAt),
+								)
+								n.eventBus.PublishAsync(
+									connmanager.ConnectionRecycleRequestedEventType,
+									event.NewEvent(
+										connmanager.ConnectionRecycleRequestedEventType,
+										connmanager.ConnectionRecycleRequestedEvent{
+											ConnectionId: *targetConn,
+											ConnKey:      connKey,
+											Reason:       "local_tip_plateau",
+										},
+									),
+								)
+								delete(recycleAt, connKey)
+								lastRecycled[connKey] = now
+								lastProgressAt = now
+							}
+						}
+					}
+				}
 				for _, conn := range trackedClients {
 					if conn.Status != chainsync.ClientStatusStalled {
 						continue
 					}
 					connKey := conn.ConnId.String()
-					dueAt, exists := recycleAt[connKey]
-					if !exists || dueAt.Before(now) {
+					if _, exists := recycleAt[connKey]; !exists {
 						recycleAt[connKey] = now.Add(grace)
 						n.config.logger.Info(
 							"chainsync client stalled, scheduling guarded recycle",
@@ -497,8 +557,29 @@ func (n *Node) Run(ctx context.Context) error {
 					}
 					active := n.chainsyncState.GetClientConnId()
 					if active == nil {
-						// No active chainsync connection is selected yet.
-						// Skip recycle and re-check on the next tick.
+						// If no active client is selected and this client
+						// is overdue + stalled, recycle to force a fresh
+						// connection attempt and avoid indefinite stalls.
+						n.config.logger.Warn(
+							"chainsync client stalled with no active selection, recycling connection",
+							"connection_id", connKey,
+							"stall_timeout", chainsyncCfg.StallTimeout,
+							"grace_period", grace,
+							"recycle_cooldown", cooldown,
+						)
+						n.eventBus.PublishAsync(
+							connmanager.ConnectionRecycleRequestedEventType,
+							event.NewEvent(
+								connmanager.ConnectionRecycleRequestedEventType,
+								connmanager.ConnectionRecycleRequestedEvent{
+									ConnectionId: connId,
+									ConnKey:      connKey,
+									Reason:       "stalled_connection_no_active_selection",
+								},
+							),
+						)
+						delete(recycleAt, connKey)
+						lastRecycled[connKey] = now
 						continue
 					}
 					if active.String() != connKey {
@@ -574,6 +655,9 @@ func (n *Node) Run(ctx context.Context) error {
 			ActivePeersTopologyQuota:       n.config.activePeersTopologyQuota,
 			ActivePeersGossipQuota:         n.config.activePeersGossipQuota,
 			ActivePeersLedgerQuota:         n.config.activePeersLedgerQuota,
+			MinHotPeers:                    n.config.minHotPeers,
+			ReconcileInterval:              n.config.reconcileInterval,
+			InactivityTimeout:              n.config.inactivityTimeout,
 			SyncProgressProvider:           n.ledgerState,
 		},
 	)
@@ -770,6 +854,7 @@ func (n *Node) Stop() error {
 }
 
 func (n *Node) shutdown() error {
+	shutdownStart := time.Now()
 	// Create shutdown context with timeout (default 30s if not configured)
 	shutdownTimeout := 30 * time.Second
 	if n.config.shutdownTimeout > 0 {
@@ -783,10 +868,13 @@ func (n *Node) shutdown() error {
 
 	var err error
 
-	n.config.logger.Debug("starting graceful shutdown")
+	n.config.logger.Info(
+		"starting graceful shutdown",
+		"timeout", shutdownTimeout,
+	)
 
 	// Phase 1: Stop accepting new work
-	n.config.logger.Debug("shutdown phase 1: stopping new work")
+	n.config.logger.Info("shutdown phase 1: stopping new work")
 
 	// Stop block forger first to prevent new blocks
 	if n.blockForger != nil {
@@ -850,8 +938,14 @@ func (n *Node) shutdown() error {
 		}
 	}
 
+	n.config.logger.Info(
+		"shutdown phase 1 complete",
+		"elapsed", time.Since(shutdownStart).Round(time.Millisecond),
+	)
+
 	// Phase 2: Drain and close connections
-	n.config.logger.Debug("shutdown phase 2: draining connections")
+	n.config.logger.Info("shutdown phase 2: draining connections")
+	phase2Start := time.Now()
 
 	if n.mempool != nil {
 		if stopErr := n.mempool.Stop(ctx); stopErr != nil {
@@ -868,29 +962,52 @@ func (n *Node) shutdown() error {
 		}
 	}
 
+	n.config.logger.Info(
+		"shutdown phase 2 complete",
+		"elapsed", time.Since(phase2Start).Round(time.Millisecond),
+	)
+
 	// Phase 3: Flush state and close database
-	n.config.logger.Debug("shutdown phase 3: flushing state")
+	n.config.logger.Info("shutdown phase 3: flushing state")
+	phase3Start := time.Now()
 
 	if n.ledgerState != nil {
+		n.config.logger.Info("closing ledger state")
+		t := time.Now()
 		if closeErr := n.ledgerState.Close(); closeErr != nil {
 			err = errors.Join(
 				err,
 				fmt.Errorf("ledger state close: %w", closeErr),
 			)
 		}
+		n.config.logger.Info(
+			"ledger state closed",
+			"elapsed", time.Since(t).Round(time.Millisecond),
+		)
 	}
 
 	if n.db != nil {
+		n.config.logger.Info("closing database")
+		t := time.Now()
 		if closeErr := n.db.Close(); closeErr != nil {
 			err = errors.Join(
 				err,
 				fmt.Errorf("database close: %w", closeErr),
 			)
 		}
+		n.config.logger.Info(
+			"database closed",
+			"elapsed", time.Since(t).Round(time.Millisecond),
+		)
 	}
 
+	n.config.logger.Info(
+		"shutdown phase 3 complete",
+		"elapsed", time.Since(phase3Start).Round(time.Millisecond),
+	)
+
 	// Phase 4: Cleanup resources
-	n.config.logger.Debug("shutdown phase 4: cleanup resources")
+	n.config.logger.Info("shutdown phase 4: cleanup resources")
 
 	// Call registered shutdown functions
 	for _, fn := range n.shutdownFuncs {
@@ -904,7 +1021,10 @@ func (n *Node) shutdown() error {
 		n.eventBus.Stop()
 	}
 
-	n.config.logger.Debug("graceful shutdown complete")
+	n.config.logger.Info(
+		"graceful shutdown complete",
+		"total_elapsed", time.Since(shutdownStart).Round(time.Millisecond),
+	)
 	return err
 }
 

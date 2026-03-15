@@ -404,6 +404,8 @@ type LedgerStateConfig struct {
 	ForgedBlockChecker         ForgedBlockChecker
 	SlotBattleRecorder         SlotBattleRecorder
 	ValidateHistorical         bool
+	TrustedReplay              bool
+	ManualBlockProcessing      bool
 	ForgeBlocks                bool
 	DatabaseWorkerPoolConfig   DatabaseWorkerPoolConfig
 }
@@ -419,6 +421,14 @@ type MempoolProvider interface {
 type rollbackRecord struct {
 	slot      uint64
 	timestamp time.Time
+}
+
+type forgedBlockCheckerHolder struct {
+	checker ForgedBlockChecker
+}
+
+type slotBattleRecorderHolder struct {
+	recorder SlotBattleRecorder
 }
 
 type LedgerState struct {
@@ -437,6 +447,11 @@ type LedgerState struct {
 	chainsyncState                     ChainsyncState
 	currentTipBlockNonce               []byte
 	epochCache                         []models.Epoch
+	epochNonceHexCache                 map[uint64]string
+	slotsPerKESPeriod                  atomic.Uint64
+	forgedBlockChecker                 atomic.Pointer[forgedBlockCheckerHolder]
+	slotBattleRecorder                 atomic.Pointer[slotBattleRecorderHolder]
+	reachedTip                         bool
 	currentTip                         ochainsync.Tip
 	currentEpoch                       models.Epoch
 	dbWorkerPool                       *DatabaseWorkerPool
@@ -448,6 +463,8 @@ type LedgerState struct {
 	chainsyncBlockfetchMutex      sync.Mutex
 	chainsyncBlockfetchReadyMutex sync.Mutex
 	chainsyncBlockfetchReadyChan  chan struct{}
+	activeBlockfetchConnId        ouroboros.ConnectionId // connection used for current blockfetch pipeline
+	pendingBlockfetchEvents       []BlockfetchEvent
 	checkpointWrittenForEpoch     bool
 	closed                        atomic.Bool
 	inRecovery                    bool // guards against recursive recovery in SubmitAsyncDBTxn
@@ -532,12 +549,16 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 		cfg.DatabaseWorkerPoolConfig = DefaultDatabaseWorkerPoolConfig()
 	}
 	ls := &LedgerState{
-		config:            cfg,
-		chainsyncState:    InitChainsyncState,
-		db:                cfg.Database,
-		chain:             cfg.ChainManager.PrimaryChain(),
-		validationEnabled: cfg.ValidateHistorical,
+		config:             cfg,
+		chainsyncState:     InitChainsyncState,
+		db:                 cfg.Database,
+		chain:              cfg.ChainManager.PrimaryChain(),
+		epochNonceHexCache: make(map[uint64]string),
+		validationEnabled:  cfg.ValidateHistorical,
 	}
+	ls.slotsPerKESPeriod.Store(ls.loadSlotsPerKESPeriod())
+	ls.storeForgedBlockChecker(cfg.ForgedBlockChecker)
+	ls.storeSlotBattleRecorder(cfg.SlotBattleRecorder)
 	return ls, nil
 }
 
@@ -612,8 +633,11 @@ func (ls *LedgerState) Start(ctx context.Context) error {
 		ls.slotClock.Start(ctx)
 		go ls.handleSlotTicks()
 	}
-	// Start goroutine to process new blocks
-	go ls.ledgerProcessBlocks()
+	// Start goroutine to process new blocks unless the caller will feed trusted
+	// batches directly into the replay loop.
+	if !ls.config.ManualBlockProcessing {
+		go ls.ledgerProcessBlocks()
+	}
 	return nil
 }
 
@@ -839,18 +863,56 @@ func (ls *LedgerState) Close() error {
 	// Wait for in-flight rollback event emission goroutines.
 	// Hold rollbackMu so no new goroutine can Add(1) between our
 	// closed flag and this Wait.
+	ls.config.Logger.Info("waiting for in-flight rollback goroutines")
+	rollbackStart := time.Now()
 	ls.rollbackMu.Lock()
-	ls.rollbackWG.Wait()
+	rollbackDone := make(chan struct{})
+	go func() {
+		ls.rollbackWG.Wait()
+		close(rollbackDone)
+	}()
+	select {
+	case <-rollbackDone:
+		ls.config.Logger.Info(
+			"rollback goroutines finished",
+			"elapsed", time.Since(rollbackStart).Round(time.Millisecond),
+		)
+	case <-time.After(10 * time.Second):
+		ls.config.Logger.Warn(
+			"timed out waiting for rollback goroutines",
+			"elapsed", time.Since(rollbackStart).Round(time.Millisecond),
+		)
+	}
 	ls.rollbackMu.Unlock()
 
 	// Stop slot clock
 	if ls.slotClock != nil {
+		ls.config.Logger.Info("stopping slot clock")
 		ls.slotClock.Stop()
+		ls.config.Logger.Info("slot clock stopped")
 	}
 
 	// Shutdown database worker pool
 	if ls.dbWorkerPool != nil {
-		ls.dbWorkerPool.Shutdown()
+		ls.config.Logger.Info("shutting down database worker pool")
+		poolStart := time.Now()
+		poolDone := make(chan struct{})
+		go func() {
+			ls.dbWorkerPool.Shutdown()
+			close(poolDone)
+		}()
+		select {
+		case <-poolDone:
+			ls.config.Logger.Info(
+				"database worker pool shut down",
+				"elapsed", time.Since(poolStart).Round(time.Millisecond),
+			)
+		case <-time.After(15 * time.Second):
+			ls.config.Logger.Warn(
+				"timed out waiting for database worker pool shutdown",
+				"elapsed", time.Since(poolStart).Round(time.Millisecond),
+			)
+		}
 	}
 
 	// Note: We don't close the database here because LedgerState doesn't own it.
@@ -1391,6 +1453,7 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 	ls.Lock()
 	if newEpochs != nil {
 		ls.epochCache = newEpochs
+
 		if len(newEpochs) > 0 {
 			ls.currentEpoch = newCurrentEpoch
 			// Only update currentEra when we successfully
@@ -1496,6 +1559,17 @@ func (ls *LedgerState) transitionToEra(
 		}
 	}
 	return result, nil
+}
+
+// IsAtTip reports whether the node has caught up to the chain tip at least
+// once since boot. This is used to gate metrics that are only meaningful
+// when processing live blocks (e.g., block delay CDF). Unlike
+// validationEnabled (which starts true when ValidateHistorical is set),
+// reachedTip only flips when the node actually reaches the stability window.
+func (ls *LedgerState) IsAtTip() bool {
+	ls.RLock()
+	defer ls.RUnlock()
+	return ls.reachedTip
 }
 
 // calculateStabilityWindow returns the stability window based on the current era.
@@ -1751,6 +1825,49 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 	// Start chain reader goroutine
 	readChainResultCh := make(chan readChainResult)
 	go ls.ledgerReadChain(ls.ctx, readChainResultCh)
+	if err := ls.ledgerProcessBlocksFromSource(ls.ctx, readChainResultCh); err != nil {
+		ls.config.Logger.Error(
+			"failed to process blocks",
+			"error", err,
+		)
+	}
+}
+
+// ProcessTrustedBlockBatches processes already-decoded trusted block batches
+// synchronously. This is used by immutable load so blocks can be replayed
+// directly without first being reread from the chain store.
+func (ls *LedgerState) ProcessTrustedBlockBatches(
+	ctx context.Context,
+	batches <-chan []ledger.Block,
+) error {
+	// Buffer of 1 so the forwarding goroutine can deposit one result
+	// and exit even if ledgerProcessBlocksFromSource has already returned.
+	readChainResultCh := make(chan readChainResult, 1)
+	go func() {
+		defer close(readChainResultCh)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case batch, ok := <-batches:
+				if !ok {
+					return
+				}
+				select {
+				case readChainResultCh <- readChainResult{blocks: batch}:
+				case <-ctx.Done():
+					return
+				}
+			}
+		}
+	}()
+	return ls.ledgerProcessBlocksFromSource(ctx, readChainResultCh)
+}
+
+func (ls *LedgerState) ledgerProcessBlocksFromSource(
+	ctx context.Context,
+	readChainResultCh <-chan readChainResult,
+) error {
 	// Enable bulk-load optimizations when syncing from behind
 	var bulkOptimizer metadata.BulkLoadOptimizer
 	bulkLoadActive := false
@@ -1843,10 +1960,7 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 				return nil
 			}, true)
 			if err != nil {
-				ls.config.Logger.Error(
-					"failed to process epoch rollover: " + err.Error(),
-				)
-				return
+				return fmt.Errorf("process epoch rollover: %w", err)
 			}
 
 			// Apply in-memory state updates with brief lock after successful commit
@@ -1859,6 +1973,7 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 			}
 			if rolloverResult != nil {
 				ls.epochCache = rolloverResult.NewEpochCache
+
 				ls.currentEpoch = rolloverResult.NewCurrentEpoch
 				ls.currentEra = rolloverResult.NewCurrentEra
 				ls.currentPParams = rolloverResult.NewCurrentPParams
@@ -1962,16 +2077,18 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 				emittedHF = true
 				emittedHFFromEra = hf.FromEra
 				emittedHFToEra = hf.ToEra
-				ls.config.Logger.Info(
-					"emitted hard fork event",
-					"from_era", hf.FromEra,
-					"to_era", hf.ToEra,
-					"epoch",
-					rolloverResult.NewCurrentEpoch.EpochId,
-					"slot",
-					rolloverResult.NewCurrentEpoch.StartSlot,
-					"component", "ledger",
-				)
+				if !ls.config.TrustedReplay {
+					ls.config.Logger.Info(
+						"emitted hard fork event",
+						"from_era", hf.FromEra,
+						"to_era", hf.ToEra,
+						"epoch",
+						rolloverResult.NewCurrentEpoch.EpochId,
+						"slot",
+						rolloverResult.NewCurrentEpoch.StartSlot,
+						"component", "ledger",
+					)
+				}
 			}
 
 			// Emit hard fork events for era transitions
@@ -2059,14 +2176,16 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 								hfEvent,
 							),
 						)
-						ls.config.Logger.Info(
-							"emitted hard fork event"+
-								" (era transition)",
-							"from_era", prevEraId,
-							"to_era",
-							eraResult.NewEra.Id,
-							"component", "ledger",
-						)
+						if !ls.config.TrustedReplay {
+							ls.config.Logger.Info(
+								"emitted hard fork event"+
+									" (era transition)",
+								"from_era", prevEraId,
+								"to_era",
+								eraResult.NewEra.Id,
+								"component", "ledger",
+							)
+						}
 					}
 					prevEraId = eraResult.NewEra.Id
 					prevPParams = eraResult.NewPParams
@@ -2103,7 +2222,7 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 			select {
 			case result, ok := <-readChainResultCh:
 				if !ok {
-					return
+					return nil
 				}
 				nextBatch = result.blocks
 				// Process rollback
@@ -2113,15 +2232,12 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 				// method handles its own locking for in-memory state updates.
 				if result.rollback {
 					if err = ls.rollback(result.rollbackPoint); err != nil {
-						ls.config.Logger.Error(
-							"failed to process rollback: " + err.Error(),
-						)
-						return
+						return fmt.Errorf("process rollback: %w", err)
 					}
 					continue
 				}
-			case <-ls.ctx.Done():
-				return
+			case <-ctx.Done():
+				return ctx.Err()
 			}
 		}
 		// Process batch in groups of batchSize to stay under DB txn limits
@@ -2150,13 +2266,18 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 			ls.RUnlock()
 
 			// Compute stability window and cutoff slot outside the callback
-			// to avoid reading ls fields without the lock. Use chain tip slot
-			// (not ledger tip) to prevent enabling validation too early during
-			// historical block sync.
+			// to avoid reading ls fields without the lock. Use the wall-clock
+			// slot as a reference when it exceeds the local chain tip. When
+			// syncing from genesis the local chain tip starts at 0, which
+			// would make cutoffSlot 0 and validate ALL historical blocks.
 			stabilityWindow := ls.calculateStabilityWindowForEra(snapshotEra.Id)
+			referenceSlot := chainTipSlot
+			if wallSlot, err := ls.CurrentSlot(); err == nil && wallSlot > referenceSlot {
+				referenceSlot = wallSlot
+			}
 			var cutoffSlot uint64
-			if chainTipSlot >= stabilityWindow {
-				cutoffSlot = chainTipSlot - stabilityWindow
+			if referenceSlot >= stabilityWindow {
+				cutoffSlot = referenceSlot - stabilityWindow
 			}
 
 			// Track pending state changes during transaction
@@ -2195,9 +2316,31 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 					var shouldValidateBlock bool
 					if snapshotValidationEnabled {
 						shouldValidateBlock = true
-					} else if snapshotChainsyncState == SyncingChainsyncState && next.SlotNumber() >= cutoffSlot {
+						// When validation was already enabled from
+						// config (ValidateHistorical), we still need
+						// to detect reaching the chain tip for
+						// metrics gating (IsAtTip).
+						if !wantEnableValidation &&
+							snapshotChainsyncState == SyncingChainsyncState &&
+							next.SlotNumber() >= cutoffSlot {
+							wantEnableValidation = true
+						}
+					} else if !ls.config.TrustedReplay &&
+						snapshotChainsyncState == SyncingChainsyncState &&
+						next.SlotNumber() >= cutoffSlot {
 						wantEnableValidation = true
 						shouldValidateBlock = true
+					}
+					// Flush accumulated deltas before the first validated
+					// block so that UTxOs created by earlier non-validated
+					// blocks are visible during validation lookups.
+					if shouldValidateBlock && len(deltaBatch.deltas) > 0 {
+						if err := deltaBatch.apply(ls, txn); err != nil {
+							deltaBatch.Release()
+							return err
+						}
+						deltaBatch.Release()
+						deltaBatch = NewLedgerDeltaBatch()
 					}
 					// Compute CBOR offsets for this block (required for transaction storage)
 					var blockOffsets *database.BlockIngestionResult
@@ -2279,18 +2422,12 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 							runningNonce = tmpNonce
 						}
 					}
-					// TODO: batch this
-					// Determine epoch for this slot
-					tmpEpoch, err := ls.SlotToEpoch(tmpPoint.Slot)
-					if err != nil {
-						deltaBatch.Release()
-						return fmt.Errorf("slot->epoch: %w", err)
-					}
-
-					// First block we persist in the current epoch becomes the checkpoint
+					// The loop exits before processing blocks from the next
+					// epoch, so every block that reaches this point belongs
+					// to snapshotEpoch.
+					// First block we persist in the current epoch becomes the checkpoint.
 					isCheckpoint := false
-					if tmpEpoch.EpochId == snapshotEpoch.EpochId &&
-						!localCheckpointWritten {
+					if !localCheckpointWritten {
 						isCheckpoint = true
 						localCheckpointWritten = true
 					}
@@ -2326,10 +2463,7 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 				return nil
 			}, true)
 			if err != nil {
-				ls.config.Logger.Error(
-					"failed to process block: " + err.Error(),
-				)
-				return
+				return fmt.Errorf("process block batch: %w", err)
 			}
 			// Transaction committed successfully - now update in-memory state.
 			// Only update if blocks were actually processed to avoid resetting tip to zero.
@@ -2343,6 +2477,7 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 				ls.checkpointWrittenForEpoch = localCheckpointWritten
 				if wantEnableValidation {
 					ls.validationEnabled = true
+					ls.reachedTip = true
 				}
 				ls.updateTipMetrics()
 				// Capture tip for logging while holding the lock
@@ -2366,26 +2501,28 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 			}
 		}
 		if len(nextBatch) > 0 {
-			// Determine block source for observability
-			source := "chainsync"
-			if checker != nil {
-				if _, forged := checker.WasForgedByUs(
-					tipForLog.Point.Slot,
-				); forged {
-					source = "forged"
+			if !ls.config.TrustedReplay {
+				// Determine block source for observability
+				source := "chainsync"
+				if checker != nil {
+					if _, forged := checker.WasForgedByUs(
+						tipForLog.Point.Slot,
+					); forged {
+						source = "forged"
+					}
 				}
+				ls.config.Logger.Info(
+					fmt.Sprintf(
+						"chain extended, new tip: %x at slot %d",
+						tipForLog.Point.Hash,
+						tipForLog.Point.Slot,
+					),
+					"component",
+					"ledger",
+					"source",
+					source,
+				)
 			}
-			ls.config.Logger.Info(
-				fmt.Sprintf(
-					"chain extended, new tip: %x at slot %d",
-					tipForLog.Point.Hash,
-					tipForLog.Point.Slot,
-				),
-				"component",
-				"ledger",
-				"source",
-				source,
-			)
 			// Periodic sync progress reporting
 			ls.logSyncProgress(tipForLog.Point.Slot)
 		}
@@ -2420,8 +2557,12 @@ func (ls *LedgerState) ledgerProcessBlock(
 	}
 	// Process transactions
 	var delta *LedgerDelta
-	// Track outputs from earlier transactions in this block for intra-block dependencies
-	intraBlockUtxos := make(map[string]lcommon.Utxo)
+	// Track outputs from earlier transactions in this block for intra-block
+	// dependencies only when TX validation is enabled.
+	var intraBlockUtxos map[string]lcommon.Utxo
+	if shouldValidate {
+		intraBlockUtxos = make(map[string]lcommon.Utxo)
+	}
 	for i, tx := range block.Transactions() {
 		if delta == nil {
 			delta = NewLedgerDelta(
@@ -2555,6 +2696,15 @@ func (ls *LedgerState) updateTipMetrics() {
 	ls.metrics.slotInEpoch.Set(
 		float64(ls.currentTip.Point.Slot - ls.currentEpoch.StartSlot),
 	)
+	// Chain density = blocks / slots (0.0 to 1.0)
+	if ls.currentTip.Point.Slot > 0 {
+		ls.metrics.density.Set(
+			float64(ls.currentTip.BlockNumber) /
+				float64(ls.currentTip.Point.Slot),
+		)
+	} else {
+		ls.metrics.density.Set(0)
+	}
 }
 
 // loadPParams reads currentEpoch, currentEra, and epochCache and writes
@@ -2713,6 +2863,7 @@ func (ls *LedgerState) loadEpochs(txn *database.Txn) error {
 		return err
 	}
 	ls.epochCache = epochs
+	clear(ls.epochNonceHexCache)
 	if len(epochs) > 0 {
 		// Set current epoch and era
 		ls.currentEpoch = epochs[len(epochs)-1]
@@ -2766,6 +2917,7 @@ func (ls *LedgerState) loadEpochs(txn *database.Txn) error {
 	}
 	// Apply result immediately during startup
 	ls.epochCache = rolloverResult.NewEpochCache
+	clear(ls.epochNonceHexCache)
 	ls.currentEpoch = rolloverResult.NewCurrentEpoch
 	ls.currentEra = rolloverResult.NewCurrentEra
 	ls.currentPParams = rolloverResult.NewCurrentPParams
@@ -3156,6 +3308,21 @@ func (ls *LedgerState) Database() *database.Database {
 
 // SlotsPerKESPeriod returns the number of slots in a KES period.
 func (ls *LedgerState) SlotsPerKESPeriod() uint64 {
+	if slotsPerKESPeriod := ls.slotsPerKESPeriod.Load(); slotsPerKESPeriod != 0 {
+		return slotsPerKESPeriod
+	}
+	slotsPerKESPeriod := ls.loadSlotsPerKESPeriod()
+	if slotsPerKESPeriod == 0 {
+		return 0
+	}
+	ls.slotsPerKESPeriod.Store(slotsPerKESPeriod)
+	return slotsPerKESPeriod
+}
+
+func (ls *LedgerState) loadSlotsPerKESPeriod() uint64 {
+	if ls.config.CardanoNodeConfig == nil {
+		return 0
+	}
 	shelleyGenesis := ls.config.CardanoNodeConfig.ShelleyGenesis()
 	if shelleyGenesis == nil {
 		return 0
@@ -3300,15 +3467,14 @@ func resolveValidationEra(
 	return *txEra, nil
 }
 
-// ValidateTx runs ledger validation on the provided transaction.
-// It accepts transactions from the current era and the immediately
-// previous era (era-1), as Cardano allows during the overlap
-// period after a hard fork.
-func (ls *LedgerState) ValidateTx(
+// validateTxCore is the shared validation flow for ValidateTx and
+// ValidateTxWithOverlay. It snapshots ledger state, resolves the
+// validation era, opens a DB transaction, and invokes the era's
+// ValidateTxFunc with a LedgerView built by the provided callback.
+func (ls *LedgerState) validateTxCore(
 	tx lcommon.Transaction,
+	buildLV func(txn *database.Txn) *LedgerView,
 ) error {
-	// Snapshot mutable state under read lock to avoid data races
-	// with concurrent writers (e.g., ledgerProcessBlocks)
 	ls.RLock()
 	snapshotEra := ls.currentEra
 	snapshotSlot := ls.currentTip.Point.Slot
@@ -3321,22 +3487,16 @@ func (ls *LedgerState) ValidateTx(
 		return err
 	}
 	if validationEra.ValidateTxFunc != nil {
-		// Use the previous era's protocol parameters when validating
-		// a transaction from the immediately previous era (era-1).
 		pp := snapshotPParams
 		if validationEra.Id != snapshotEra.Id && snapshotPrevEraPParams != nil {
 			pp = snapshotPrevEraPParams
 		}
 		txn := ls.db.Transaction(false)
 		err := txn.Do(func(txn *database.Txn) error {
-			lv := &LedgerView{
-				txn: txn,
-				ls:  ls,
-			}
 			return validationEra.ValidateTxFunc(
 				tx,
 				snapshotSlot,
-				lv,
+				buildLV(txn),
 				pp,
 			)
 		})
@@ -3345,6 +3505,37 @@ func (ls *LedgerState) ValidateTx(
 		}
 	}
 	return nil
+}
+
+// ValidateTx runs ledger validation on the provided transaction.
+// It accepts transactions from the current era and the immediately
+// previous era (era-1), as Cardano allows during the overlap
+// period after a hard fork.
+func (ls *LedgerState) ValidateTx(
+	tx lcommon.Transaction,
+) error {
+	return ls.validateTxCore(tx, func(txn *database.Txn) *LedgerView {
+		return &LedgerView{txn: txn, ls: ls}
+	})
+}
+
+// ValidateTxWithOverlay runs ledger validation with a UTxO overlay from pending
+// mempool transactions. consumedUtxos contains inputs already spent by pending TXs
+// (double-spend check), createdUtxos contains outputs created by pending TXs
+// (dependent TX chaining). Both may be nil for no overlay.
+func (ls *LedgerState) ValidateTxWithOverlay(
+	tx lcommon.Transaction,
+	consumedUtxos map[string]struct{},
+	createdUtxos map[string]lcommon.Utxo,
+) error {
+	return ls.validateTxCore(tx, func(txn *database.Txn) *LedgerView {
+		return &LedgerView{
+			txn:             txn,
+			ls:              ls,
+			intraBlockUtxos: createdUtxos,
+			consumedUtxos:   consumedUtxos,
+		}
+	})
 }
 
 // EvaluateTx evaluates the scripts in the provided transaction and returns the calculated
@@ -3421,6 +3612,7 @@ func (ls *LedgerState) SetForgedBlockChecker(checker ForgedBlockChecker) {
 	ls.Lock()
 	defer ls.Unlock()
 	ls.config.ForgedBlockChecker = checker
+	ls.storeForgedBlockChecker(checker)
 }
 
 // SetSlotBattleRecorder sets the recorder used to increment the
@@ -3432,6 +3624,49 @@ func (ls *LedgerState) SetSlotBattleRecorder(
 	ls.Lock()
 	defer ls.Unlock()
 	ls.config.SlotBattleRecorder = recorder
+	ls.storeSlotBattleRecorder(recorder)
+}
+
+func (ls *LedgerState) storeForgedBlockChecker(checker ForgedBlockChecker) {
+	if checker == nil {
+		ls.forgedBlockChecker.Store(nil)
+		return
+	}
+	ls.forgedBlockChecker.Store(
+		&forgedBlockCheckerHolder{checker: checker},
+	)
+}
+
+func (ls *LedgerState) loadForgedBlockChecker() ForgedBlockChecker {
+	checker := ls.forgedBlockChecker.Load()
+	if checker == nil {
+		// Support direct test fixtures that construct LedgerState without
+		// going through NewLedgerState/SetForgedBlockChecker.
+		return ls.config.ForgedBlockChecker
+	}
+	return checker.checker
+}
+
+func (ls *LedgerState) storeSlotBattleRecorder(
+	recorder SlotBattleRecorder,
+) {
+	if recorder == nil {
+		ls.slotBattleRecorder.Store(nil)
+		return
+	}
+	ls.slotBattleRecorder.Store(
+		&slotBattleRecorderHolder{recorder: recorder},
+	)
+}
+
+func (ls *LedgerState) loadSlotBattleRecorder() SlotBattleRecorder {
+	recorder := ls.slotBattleRecorder.Load()
+	if recorder == nil {
+		// Support direct test fixtures that construct LedgerState without
+		// going through NewLedgerState/SetSlotBattleRecorder.
+		return ls.config.SlotBattleRecorder
+	}
+	return recorder.recorder
 }
 
 // forgeBlock creates a conway block with transactions from mempool

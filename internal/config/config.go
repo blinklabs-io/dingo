@@ -23,6 +23,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"time"
 
 	"github.com/blinklabs-io/dingo/database/plugin"
 	"github.com/blinklabs-io/dingo/topology"
@@ -132,7 +133,7 @@ type ChainsyncConfig struct {
 	// connections. Default: 3.
 	MaxClients int `yaml:"maxClients"   envconfig:"DINGO_CHAINSYNC_MAX_CLIENTS"`
 	// StallTimeout is the duration after which a client with no
-	// activity is considered stalled. Default: "30s".
+	// activity is considered stalled. Default: "2m".
 	StallTimeout string `yaml:"stallTimeout" envconfig:"DINGO_CHAINSYNC_STALL_TIMEOUT"`
 }
 
@@ -142,7 +143,7 @@ type ChainsyncConfig struct {
 func DefaultChainsyncConfig() ChainsyncConfig {
 	return ChainsyncConfig{
 		MaxClients:   3,
-		StallTimeout: "30s",
+		StallTimeout: "2m",
 	}
 }
 
@@ -219,6 +220,13 @@ type Config struct {
 	ActivePeersGossipQuota   int `yaml:"activePeersGossipQuota"   envconfig:"DINGO_ACTIVE_PEERS_GOSSIP_QUOTA"`
 	ActivePeersLedgerQuota   int `yaml:"activePeersLedgerQuota"   envconfig:"DINGO_ACTIVE_PEERS_LEDGER_QUOTA"`
 
+	// Peer governor tuning (0 = use default)
+	MinHotPeers         int           `yaml:"minHotPeers"         envconfig:"DINGO_MIN_HOT_PEERS"`
+	ReconcileInterval   time.Duration `yaml:"reconcileInterval"   envconfig:"DINGO_RECONCILE_INTERVAL"`
+	InactivityTimeout   time.Duration `yaml:"inactivityTimeout"   envconfig:"DINGO_INACTIVITY_TIMEOUT"`
+	MaxConnectionsPerIP int           `yaml:"maxConnectionsPerIP" envconfig:"DINGO_MAX_CONNECTIONS_PER_IP"`
+	MaxInboundConns     int           `yaml:"maxInboundConns"     envconfig:"DINGO_MAX_INBOUND_CONNS"`
+
 	// Cache configuration for the tiered CBOR cache system
 	Cache CacheConfig `yaml:"cache"`
 
@@ -250,6 +258,12 @@ type Config struct {
 	BlockfrostPort uint `yaml:"blockfrostPort" envconfig:"DINGO_BLOCKFROST_PORT"`
 	// Mesh (Coinbase Rosetta) API port (0 = disabled)
 	MeshPort uint `yaml:"meshPort" envconfig:"DINGO_MESH_PORT"`
+
+	// PeerSharing enables the peer sharing protocol, allowing this node
+	// to advertise known peers to other nodes on request. Defaults to
+	// false; should remain disabled on block producers to avoid leaking
+	// topology information.
+	PeerSharing bool `yaml:"peerSharing" envconfig:"DINGO_PEER_SHARING"`
 
 	// Storage mode: "core" (default) or "api".
 	// "core" stores only consensus data

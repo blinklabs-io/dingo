@@ -15,6 +15,7 @@
 package chain
 
 import (
+	"bytes"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -32,13 +33,17 @@ import (
 
 const (
 	initialBlockIndex uint64 = 1
+	// Mainnet full blocks can make larger batches exceed practical Badger
+	// transaction limits during import, so keep the runtime batch size
+	// conservative even if smaller benchmark fixtures tolerate more.
+	blockImportBatchSize = 50
 )
 
 type Chain struct {
 	eventBus             *event.EventBus
 	manager              *ChainManager
 	waitingChan          chan struct{}
-	headers              []ledger.BlockHeader
+	headers              []queuedHeader
 	blocks               []ocommon.Point
 	iterators            []*ChainIterator
 	currentTip           ochainsync.Tip
@@ -48,6 +53,13 @@ type Chain struct {
 	mutex                sync.RWMutex
 	waitingChanMutex     sync.Mutex
 	persistent           bool
+}
+
+type queuedHeader struct {
+	header      ledger.BlockHeader
+	point       ocommon.Point
+	prevHash    []byte
+	blockNumber uint64
 }
 
 func (c *Chain) Tip() ochainsync.Tip {
@@ -74,24 +86,24 @@ func (c *Chain) headerTip() ochainsync.Tip {
 	}
 	lastHeader := c.headers[len(c.headers)-1]
 	return ochainsync.Tip{
-		Point: ocommon.Point{
-			Slot: lastHeader.SlotNumber(),
-			Hash: lastHeader.Hash().Bytes(),
-		},
-		BlockNumber: lastHeader.BlockNumber(),
+		Point:       lastHeader.point,
+		BlockNumber: lastHeader.blockNumber,
 	}
 }
 
 // MaxQueuedHeaders returns the maximum number of headers that may be
-// queued. When the security parameter is available (securityParam > 0),
-// the limit is securityParam * 2. Otherwise, DefaultMaxQueuedHeaders is
-// used as a safe fallback.
+// queued. The limit is the larger of securityParam * 2 and
+// DefaultMaxQueuedHeaders. Using the default as a floor ensures the
+// queue is large enough for the chainsync/blockfetch pipeline: headers
+// arrive much faster than blocks, so the queue must accommodate several
+// blockfetch batches worth of headers beyond the accumulation threshold
+// to avoid drops that break the header chain.
 func (c *Chain) MaxQueuedHeaders() int {
 	if c == nil || c.manager == nil {
 		return DefaultMaxQueuedHeaders
 	}
 	if sp := c.manager.securityParam; sp > 0 {
-		return sp * 2
+		return max(sp*2, DefaultMaxQueuedHeaders)
 	}
 	return DefaultMaxQueuedHeaders
 }
@@ -99,6 +111,17 @@ func (c *Chain) MaxQueuedHeaders() int {
 func (c *Chain) AddBlockHeader(header ledger.BlockHeader) error {
 	if c == nil {
 		return errors.New("chain is nil")
+	}
+	headerHash := header.Hash()
+	headerPrevHash := header.PrevHash()
+	queued := queuedHeader{
+		header: header,
+		point: ocommon.Point{
+			Slot: header.SlotNumber(),
+			Hash: headerHash.Bytes(),
+		},
+		prevHash:    headerPrevHash.Bytes(),
+		blockNumber: header.BlockNumber(),
 	}
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
@@ -111,16 +134,16 @@ func (c *Chain) AddBlockHeader(header ledger.BlockHeader) error {
 	if c.tipBlockIndex >= initialBlockIndex ||
 		len(c.headers) > 0 {
 		headerTip := c.headerTip()
-		if string(header.PrevHash().Bytes()) != string(headerTip.Point.Hash) {
+		if !bytes.Equal(queued.prevHash, headerTip.Point.Hash) {
 			return NewBlockNotFitChainTipError(
-				header.Hash().String(),
-				header.PrevHash().String(),
+				headerHash.String(),
+				headerPrevHash.String(),
 				hex.EncodeToString(headerTip.Point.Hash),
 			)
 		}
 	}
 	// Add header
-	c.headers = append(c.headers, header)
+	c.headers = append(c.headers, queued)
 	return nil
 }
 
@@ -128,12 +151,30 @@ func (c *Chain) AddBlock(
 	block ledger.Block,
 	txn *database.Txn,
 ) error {
-	evt, err := c.addBlockInternal(block, txn)
+	evt, err := c.addBlockInternal(block, ocommon.Point{}, txn, true)
 	if err != nil {
 		return err
 	}
 	// Publish event immediately for standalone (non-batched) calls
-	if c.eventBus != nil {
+	if c.eventBus != nil && evt.Type != "" {
+		c.eventBus.Publish(ChainUpdateEventType, evt)
+	}
+	return nil
+}
+
+// AddBlockWithPoint adds a block using a caller-supplied point. This avoids
+// recomputing the block hash when the caller already has the canonical slot/hash
+// pair from a validated upstream source such as blockfetch.
+func (c *Chain) AddBlockWithPoint(
+	block ledger.Block,
+	point ocommon.Point,
+	txn *database.Txn,
+) error {
+	evt, err := c.addBlockInternal(block, point, txn, true)
+	if err != nil {
+		return err
+	}
+	if c.eventBus != nil && evt.Type != "" {
 		c.eventBus.Publish(ChainUpdateEventType, evt)
 	}
 	return nil
@@ -145,7 +186,9 @@ func (c *Chain) AddBlock(
 // subscribers from observing data that may be rolled back.
 func (c *Chain) addBlockInternal(
 	block ledger.Block,
+	point ocommon.Point,
 	txn *database.Txn,
+	notifyWaiters bool,
 ) (event.Event, error) {
 	if c == nil {
 		return event.Event{}, errors.New("chain is nil")
@@ -159,39 +202,57 @@ func (c *Chain) addBlockInternal(
 	if err := c.reconcile(); err != nil {
 		return event.Event{}, fmt.Errorf("reconcile chain: %w", err)
 	}
+	return c.addBlockLocked(block, point, txn, notifyWaiters)
+}
+
+func (c *Chain) addBlockLocked(
+	block ledger.Block,
+	point ocommon.Point,
+	txn *database.Txn,
+	notifyWaiters bool,
+) (event.Event, error) {
+	blockHashBytes := point.Hash
+	if len(blockHashBytes) == 0 {
+		blockHashBytes = block.Hash().Bytes()
+		point = ocommon.NewPoint(block.SlotNumber(), blockHashBytes)
+	}
+	blockPrevHashBytes := []byte(nil)
+	blockNumber := block.BlockNumber()
 	// Check that the new block matches our first header, if any
 	if len(c.headers) > 0 {
 		firstHeader := c.headers[0]
-		if block.Hash().String() != firstHeader.Hash().String() {
+		if !bytes.Equal(blockHashBytes, firstHeader.point.Hash) {
 			return event.Event{}, NewBlockNotMatchHeaderError(
-				block.Hash().String(),
-				firstHeader.Hash().String(),
+				hex.EncodeToString(blockHashBytes),
+				firstHeader.header.Hash().String(),
 			)
 		}
+		blockPrevHashBytes = firstHeader.prevHash
+		blockNumber = firstHeader.blockNumber
+	}
+	if len(blockPrevHashBytes) == 0 {
+		blockPrevHashBytes = block.PrevHash().Bytes()
 	}
 	// Check that this block fits on the current chain tip
 	if c.tipBlockIndex >= initialBlockIndex {
-		if string(block.PrevHash().Bytes()) != string(c.currentTip.Point.Hash) {
+		if !bytes.Equal(blockPrevHashBytes, c.currentTip.Point.Hash) {
 			return event.Event{}, NewBlockNotFitChainTipError(
-				block.Hash().String(),
-				block.PrevHash().String(),
+				hex.EncodeToString(blockHashBytes),
+				hex.EncodeToString(blockPrevHashBytes),
 				hex.EncodeToString(c.currentTip.Point.Hash),
 			)
 		}
 	}
 	// Build new block record
-	tmpPoint := ocommon.NewPoint(
-		block.SlotNumber(),
-		block.Hash().Bytes(),
-	)
+	tmpPoint := point
 	newBlockIndex := c.tipBlockIndex + 1
 	tmpBlock := models.Block{
 		ID:       newBlockIndex,
 		Slot:     tmpPoint.Slot,
 		Hash:     tmpPoint.Hash,
-		Number:   block.BlockNumber(),
+		Number:   blockNumber,
 		Type:     uint(block.Type()), //nolint:gosec
-		PrevHash: block.PrevHash().Bytes(),
+		PrevHash: blockPrevHashBytes,
 		Cbor:     block.Cbor(),
 	}
 	if err := c.manager.addBlock(tmpBlock, txn, c.persistent); err != nil {
@@ -207,16 +268,15 @@ func (c *Chain) addBlockInternal(
 	// Update tip
 	c.currentTip = ochainsync.Tip{
 		Point:       tmpPoint,
-		BlockNumber: block.BlockNumber(),
+		BlockNumber: blockNumber,
 	}
 	c.tipBlockIndex = newBlockIndex
-	// Notify waiting iterators
-	c.waitingChanMutex.Lock()
-	if c.waitingChan != nil {
-		close(c.waitingChan)
-		c.waitingChan = nil
+	if notifyWaiters {
+		c.notifyWaitingIterators()
 	}
-	c.waitingChanMutex.Unlock()
+	if c.eventBus == nil {
+		return event.Event{}, nil
+	}
 	// Build event for caller to publish after transaction commit
 	evt := event.NewEvent(
 		ChainUpdateEventType,
@@ -236,7 +296,7 @@ func (c *Chain) AddBlocks(blocks []ledger.Block) error {
 	batchSize := 0
 	for {
 		batchSize = min(
-			50,
+			blockImportBatchSize,
 			len(blocks)-batchOffset,
 		)
 		if batchSize == 0 {
@@ -246,22 +306,36 @@ func (c *Chain) AddBlocks(blocks []ledger.Block) error {
 		// published only after the transaction commits successfully.
 		// This prevents subscribers from observing rolled-back data
 		// when a later block in the batch fails.
-		var pendingEvents []event.Event
+		pendingEvents := make([]event.Event, 0, batchSize)
 		txn := c.manager.db.BlobTxn(true)
 		err := txn.Do(func(txn *database.Txn) error {
-			pendingEvents = pendingEvents[:0]
+			c.mutex.Lock()
+			defer c.mutex.Unlock()
+			c.manager.mutex.Lock()
+			defer c.manager.mutex.Unlock()
+			if err := c.reconcile(); err != nil {
+				return fmt.Errorf("reconcile chain: %w", err)
+			}
 			for _, tmpBlock := range blocks[batchOffset : batchOffset+batchSize] {
-				evt, err := c.addBlockInternal(tmpBlock, txn)
+				evt, err := c.addBlockLocked(
+					tmpBlock,
+					ocommon.Point{},
+					txn,
+					false,
+				)
 				if err != nil {
 					return err
 				}
-				pendingEvents = append(pendingEvents, evt)
+				if evt.Type != "" {
+					pendingEvents = append(pendingEvents, evt)
+				}
 			}
 			return nil
 		})
 		if err != nil {
 			return err
 		}
+		c.notifyWaitingIterators()
 		// Transaction committed successfully; publish all events
 		if c.eventBus != nil {
 			for _, evt := range pendingEvents {
@@ -284,28 +358,13 @@ type RawBlock struct {
 	Cbor        []byte
 }
 
-// addRawBlock adds a pre-extracted block to the chain without requiring
-// a full ledger.Block interface. This is used for bulk loading where only
-// the block header has been decoded.
-//
-// The caller must notify waitingChan after the enclosing transaction
-// commits. See AddRawBlocks for the complete flow.
-func (c *Chain) addRawBlock(
-	rb RawBlock, txn *database.Txn,
-) (*event.Event, error) {
-	if c == nil {
-		return nil, errors.New("chain is nil")
-	}
-	c.mutex.Lock()
-	defer c.mutex.Unlock()
-	c.manager.mutex.Lock()
-	defer c.manager.mutex.Unlock()
-	if err := c.reconcile(); err != nil {
-		return nil, fmt.Errorf("reconcile: %w", err)
-	}
+func (c *Chain) addRawBlockLocked(
+	rb RawBlock,
+	txn *database.Txn,
+) (event.Event, error) {
 	// Validate hash fields before any comparisons
 	if len(rb.Hash) == 0 {
-		return nil, errors.New(
+		return event.Event{}, errors.New(
 			"invalid raw block: empty Hash",
 		)
 	}
@@ -314,24 +373,24 @@ func (c *Chain) addRawBlock(
 	// The narrower check ensures we only enforce PrevHash presence once the chain is beyond the initial block.
 	if c.tipBlockIndex >= initialBlockIndex &&
 		len(rb.PrevHash) == 0 {
-		return nil, errors.New(
+		return event.Event{}, errors.New(
 			"invalid raw block: empty PrevHash",
 		)
 	}
 	// Check that the new block matches our first header, if any
 	if len(c.headers) > 0 {
 		firstHeader := c.headers[0]
-		if string(rb.Hash) != string(firstHeader.Hash().Bytes()) {
-			return nil, NewBlockNotMatchHeaderError(
+		if !bytes.Equal(rb.Hash, firstHeader.point.Hash) {
+			return event.Event{}, NewBlockNotMatchHeaderError(
 				hex.EncodeToString(rb.Hash),
-				firstHeader.Hash().String(),
+				firstHeader.header.Hash().String(),
 			)
 		}
 	}
 	// Check that this block fits on the current chain tip
 	if c.tipBlockIndex >= initialBlockIndex {
-		if string(rb.PrevHash) != string(c.currentTip.Point.Hash) {
-			return nil, NewBlockNotFitChainTipError(
+		if !bytes.Equal(rb.PrevHash, c.currentTip.Point.Hash) {
+			return event.Event{}, NewBlockNotFitChainTipError(
 				hex.EncodeToString(rb.Hash),
 				hex.EncodeToString(rb.PrevHash),
 				hex.EncodeToString(c.currentTip.Point.Hash),
@@ -350,7 +409,7 @@ func (c *Chain) addRawBlock(
 		Cbor:     rb.Cbor,
 	}
 	if err := c.manager.addBlock(tmpBlock, txn, c.persistent); err != nil {
-		return nil, fmt.Errorf("persisting block: %w", err)
+		return event.Event{}, fmt.Errorf("persisting block: %w", err)
 	}
 	if !c.persistent {
 		c.blocks = append(c.blocks, tmpPoint)
@@ -363,23 +422,18 @@ func (c *Chain) addRawBlock(
 		BlockNumber: rb.BlockNumber,
 	}
 	c.tipBlockIndex = newBlockIndex
-	// NOTE: Do NOT close waitingChan here. AddRawBlocks notifies
-	// waiters once per batch after the transaction commits,
-	// reducing lock contention for large bulk loads.
-	//
 	// Build event for deferred publication (same pattern as
 	// addBlockLocked — publish after the transaction commits).
 	if c.eventBus != nil {
-		evt := event.NewEvent(
+		return event.NewEvent(
 			ChainUpdateEventType,
 			ChainBlockEvent{
 				Point: tmpPoint,
 				Block: tmpBlock,
 			},
-		)
-		return &evt, nil
+		), nil
 	}
-	return nil, nil
+	return event.Event{}, nil
 }
 
 // AddRawBlocks adds a batch of pre-extracted blocks to the chain.
@@ -389,25 +443,31 @@ func (c *Chain) AddRawBlocks(blocks []RawBlock) error {
 	}
 	batchOffset := 0
 	for {
-		batchSize := min(50, len(blocks)-batchOffset)
+		batchSize := min(blockImportBatchSize, len(blocks)-batchOffset)
 		if batchSize == 0 {
 			break
 		}
 		// Collect events inside the transaction callback and
 		// publish them only after the transaction commits
 		// successfully.
-		var pendingEvents []event.Event
+		pendingEvents := make([]event.Event, 0, batchSize)
 		txn := c.manager.db.BlobTxn(true)
 		err := txn.Do(func(txn *database.Txn) error {
-			pendingEvents = pendingEvents[:0]
+			c.mutex.Lock()
+			defer c.mutex.Unlock()
+			c.manager.mutex.Lock()
+			defer c.manager.mutex.Unlock()
+			if err := c.reconcile(); err != nil {
+				return fmt.Errorf("reconcile: %w", err)
+			}
 			for _, rb := range blocks[batchOffset : batchOffset+batchSize] {
-				evt, err := c.addRawBlock(rb, txn)
+				evt, err := c.addRawBlockLocked(rb, txn)
 				if err != nil {
 					return err
 				}
-				if evt != nil {
+				if evt.Type != "" {
 					pendingEvents = append(
-						pendingEvents, *evt,
+						pendingEvents, evt,
 					)
 				}
 			}
@@ -416,14 +476,7 @@ func (c *Chain) AddRawBlocks(blocks []RawBlock) error {
 		if err != nil {
 			return fmt.Errorf("add raw block batch: %w", err)
 		}
-		// Notify waiting iterators after the transaction has
-		// committed successfully.
-		c.waitingChanMutex.Lock()
-		if c.waitingChan != nil {
-			close(c.waitingChan)
-			c.waitingChan = nil
-		}
-		c.waitingChanMutex.Unlock()
+		c.notifyWaitingIterators()
 		// Publish events (only when eventBus is set).
 		if c.eventBus != nil {
 			for _, evt := range pendingEvents {
@@ -435,6 +488,15 @@ func (c *Chain) AddRawBlocks(blocks []RawBlock) error {
 		batchOffset += batchSize
 	}
 	return nil
+}
+
+func (c *Chain) notifyWaitingIterators() {
+	c.waitingChanMutex.Lock()
+	defer c.waitingChanMutex.Unlock()
+	if c.waitingChan != nil {
+		close(c.waitingChan)
+		c.waitingChan = nil
+	}
 }
 
 func (c *Chain) Rollback(point ocommon.Point) error {
@@ -472,19 +534,19 @@ func (c *Chain) rollbackLocked(
 	// Check headers for rollback point
 	if len(c.headers) > 0 {
 		// Iterate backwards to make deletion safe
-		var header ledger.BlockHeader
+		var header queuedHeader
 		for i := len(c.headers) - 1; i >= 0; i-- {
 			header = c.headers[i]
 			// Remove headers after rollback slot
-			if header.SlotNumber() > point.Slot {
+			if header.point.Slot > point.Slot {
 				c.headers = slices.Delete(c.headers, i, i+1)
 				continue
 			}
-			if header.SlotNumber() == point.Slot &&
-				string(header.Hash().Bytes()) == string(point.Hash) {
+			if header.point.Slot == point.Slot &&
+				bytes.Equal(header.point.Hash, point.Hash) {
 				return nil, nil
 			}
-			if header.SlotNumber() < point.Slot {
+			if header.point.Slot < point.Slot {
 				return nil, models.ErrBlockNotFound
 			}
 		}
@@ -507,10 +569,12 @@ func (c *Chain) rollbackLocked(
 	// Reject rollbacks that exceed the security parameter K on
 	// the persistent chain. Ephemeral (fork-tracking) chains are
 	// not subject to this limit. The check is skipped when
-	// securityParam is 0, which means the ledger has not been
-	// initialized yet.
+	// securityParam is 0 (ledger not yet initialized) or when
+	// the chain is shorter than K blocks (initial sync), since
+	// the entire chain can be safely replaced during sync.
 	securityParam := c.manager.securityParam
 	if c.persistent && securityParam > 0 &&
+		c.tipBlockIndex >= uint64(securityParam) && //nolint:gosec
 		forkDepth > uint64(securityParam) { //nolint:gosec
 		slog.Default().Warn(
 			"rejecting rollback that exceeds "+
@@ -677,6 +741,22 @@ func (c *Chain) HeaderCount() int {
 	return len(c.headers)
 }
 
+func (c *Chain) FirstHeaderMatchesPoint(point ocommon.Point) bool {
+	if c == nil {
+		return false
+	}
+	c.mutex.RLock()
+	defer c.mutex.RUnlock()
+	if len(c.headers) == 0 {
+		return false
+	}
+	header := c.headers[0]
+	if header.point.Slot != point.Slot {
+		return false
+	}
+	return bytes.Equal(header.point.Hash, point.Hash)
+}
+
 func (c *Chain) HeaderRange(count int) (ocommon.Point, ocommon.Point) {
 	if c == nil {
 		return ocommon.Point{}, ocommon.Point{}
@@ -686,16 +766,10 @@ func (c *Chain) HeaderRange(count int) (ocommon.Point, ocommon.Point) {
 	var startPoint, endPoint ocommon.Point
 	if len(c.headers) > 0 {
 		firstHeader := c.headers[0]
-		startPoint = ocommon.Point{
-			Slot: firstHeader.SlotNumber(),
-			Hash: firstHeader.Hash().Bytes(),
-		}
+		startPoint = firstHeader.point
 		lastHeaderIdx := min(count, len(c.headers)) - 1
 		lastHeader := c.headers[lastHeaderIdx]
-		endPoint = ocommon.Point{
-			Slot: lastHeader.SlotNumber(),
-			Hash: lastHeader.Hash().Bytes(),
-		}
+		endPoint = lastHeader.point
 	}
 	return startPoint, endPoint
 }
@@ -863,12 +937,7 @@ func (c *Chain) iterNext(
 // Call this after a DB transaction that adds blocks has been committed
 // to ensure iterators see the newly visible data.
 func (c *Chain) NotifyIterators() {
-	c.waitingChanMutex.Lock()
-	if c.waitingChan != nil {
-		close(c.waitingChan)
-		c.waitingChan = nil
-	}
-	c.waitingChanMutex.Unlock()
+	c.notifyWaitingIterators()
 }
 
 func (c *Chain) reconcile() error {
@@ -900,7 +969,7 @@ func (c *Chain) reconcile() error {
 		if c.blocks[i].Slot != tmpBlock.Slot {
 			continue
 		}
-		if string(c.blocks[i].Hash) != string(tmpBlock.Hash) {
+		if !bytes.Equal(c.blocks[i].Hash, tmpBlock.Hash) {
 			continue
 		}
 		// Adjust our chain-local blocks and offset point from primary chain
@@ -942,7 +1011,7 @@ func (c *Chain) reconcile() error {
 		}
 		// Update last common block index and return when we find a matching block on the primary chain
 		if tmpBlock.Slot == primaryBlock.Slot &&
-			string(tmpBlock.Hash) == string(primaryBlock.Hash) {
+			bytes.Equal(tmpBlock.Hash, primaryBlock.Hash) {
 			c.lastCommonBlockIndex = tmpBlock.ID
 			break
 		}

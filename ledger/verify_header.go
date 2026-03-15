@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"bytes"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -24,7 +25,36 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/byron"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	utxorpc "github.com/utxorpc/go-codegen/utxorpc/v1alpha/cardano"
 )
+
+// headerOnlyBlock adapts a block header to the Block interface so we can
+// run strict VRF/KES verification at chainsync-header time.
+type headerOnlyBlock struct {
+	header ledger.BlockHeader
+}
+
+func (b headerOnlyBlock) Header() ledger.BlockHeader { return b.header }
+func (b headerOnlyBlock) Type() int                  { return 0 }
+func (b headerOnlyBlock) Transactions() []lcommon.Transaction {
+	return nil
+}
+func (b headerOnlyBlock) Utxorpc() (*utxorpc.Block, error) { return nil, nil }
+func (b headerOnlyBlock) Hash() lcommon.Blake2b256         { return b.header.Hash() }
+func (b headerOnlyBlock) PrevHash() lcommon.Blake2b256     { return b.header.PrevHash() }
+func (b headerOnlyBlock) BlockNumber() uint64              { return b.header.BlockNumber() }
+func (b headerOnlyBlock) SlotNumber() uint64               { return b.header.SlotNumber() }
+func (b headerOnlyBlock) IssuerVkey() lcommon.IssuerVkey   { return b.header.IssuerVkey() }
+func (b headerOnlyBlock) BlockBodySize() uint64            { return b.header.BlockBodySize() }
+func (b headerOnlyBlock) Era() lcommon.Era                 { return b.header.Era() }
+func (b headerOnlyBlock) Cbor() []byte                     { return b.header.Cbor() }
+func (b headerOnlyBlock) BlockBodyHash() lcommon.Blake2b256 {
+	return b.header.BlockBodyHash()
+}
+
+func (ls *LedgerState) verifyBlockHeaderOnlyCrypto(header ledger.BlockHeader) error {
+	return ls.verifyBlockHeaderCrypto(headerOnlyBlock{header: header})
+}
 
 // verifyBlockHeader performs cryptographic verification of a block header.
 // This includes VRF proof verification and KES signature verification.
@@ -38,9 +68,9 @@ import (
 //
 // Returns an error if verification fails, nil if the block passes
 // verification or is a Byron-era block.
-func verifyBlockHeader(
+func verifyBlockHeaderHex(
 	block ledger.Block,
-	epochNonce []byte,
+	epochNonceHex string,
 	slotsPerKesPeriod uint64,
 ) error {
 	// Skip Byron-era blocks - they use PBFT consensus, not Praos,
@@ -50,14 +80,12 @@ func verifyBlockHeader(
 	}
 
 	// Epoch nonce is required for post-Byron blocks
-	if len(epochNonce) == 0 {
+	if epochNonceHex == "" {
 		return fmt.Errorf(
 			"epoch nonce not available for block at slot %d",
 			block.SlotNumber(),
 		)
 	}
-
-	eta0Hex := hex.EncodeToString(epochNonce)
 
 	// Use gouroboros VerifyBlock for VRF + KES verification.
 	// We skip body hash validation, transaction validation, and stake
@@ -76,7 +104,7 @@ func verifyBlockHeader(
 
 	isValid, _, _, _, err := ledger.VerifyBlock(
 		block,
-		eta0Hex,
+		epochNonceHex,
 		slotsPerKesPeriod,
 		config,
 	)
@@ -156,17 +184,39 @@ func (ls *LedgerState) verifyBlockHeaderCrypto(
 		)
 	}
 
-	// Get slotsPerKesPeriod from Shelley genesis configuration
-	shelleyGenesis := ls.config.CardanoNodeConfig.ShelleyGenesis()
-	if shelleyGenesis == nil {
+	slotsPerKesPeriod := ls.SlotsPerKESPeriod()
+	if slotsPerKesPeriod == 0 {
 		return fmt.Errorf(
 			"shelley genesis not available for block header verification at slot %d",
 			blockSlot,
 		)
 	}
-	slotsPerKesPeriod := uint64(shelleyGenesis.SlotsPerKESPeriod) //nolint:gosec
 
-	return verifyBlockHeader(block, epoch.Nonce, slotsPerKesPeriod)
+	return verifyBlockHeaderHex(
+		block,
+		ls.epochNonceHex(epoch.EpochId, epoch.Nonce),
+		slotsPerKesPeriod,
+	)
+}
+
+func (ls *LedgerState) epochNonceHex(epochId uint64, nonce []byte) string {
+	ls.RLock()
+	cachedNonce, ok := ls.epochNonceHexCache[epochId]
+	ls.RUnlock()
+	if ok {
+		return cachedNonce
+	}
+	nonceHex := hex.EncodeToString(nonce)
+	ls.Lock()
+	defer ls.Unlock()
+	if ls.epochNonceHexCache == nil {
+		ls.epochNonceHexCache = make(map[uint64]string)
+	}
+	if cachedNonce, ok := ls.epochNonceHexCache[epochId]; ok {
+		return cachedNonce
+	}
+	ls.epochNonceHexCache[epochId] = nonceHex
+	return nonceHex
 }
 
 // epochForSlot searches the epoch cache for the epoch containing the
@@ -176,15 +226,16 @@ func (ls *LedgerState) verifyBlockHeaderCrypto(
 // Returns the matching epoch or an error if no epoch covers the slot.
 func (ls *LedgerState) epochForSlot(slot uint64) (models.Epoch, error) {
 	ls.RLock()
-	cacheCopy := make([]models.Epoch, len(ls.epochCache))
-	copy(cacheCopy, ls.epochCache)
-	ls.RUnlock()
+	defer ls.RUnlock()
 
-	if len(cacheCopy) == 0 {
+	if len(ls.epochCache) == 0 {
 		return models.Epoch{}, errors.New("epoch cache is empty")
 	}
 
-	for _, ep := range cacheCopy {
+	// Search newest-to-oldest so that if cache entries overlap
+	// (e.g., after rollback/rebuild), we use the most recent epoch data.
+	for i := len(ls.epochCache) - 1; i >= 0; i-- {
+		ep := ls.epochCache[i]
 		if ep.LengthInSlots == 0 {
 			continue
 		}
@@ -198,10 +249,10 @@ func (ls *LedgerState) epochForSlot(slot uint64) (models.Epoch, error) {
 	// meaningful error message.
 	var lastValidEnd uint64
 	var hasValidEpoch bool
-	for i := len(cacheCopy) - 1; i >= 0; i-- {
-		if cacheCopy[i].LengthInSlots > 0 {
-			lastValidEnd = cacheCopy[i].StartSlot +
-				uint64(cacheCopy[i].LengthInSlots)
+	for i := len(ls.epochCache) - 1; i >= 0; i-- {
+		if ls.epochCache[i].LengthInSlots > 0 {
+			lastValidEnd = ls.epochCache[i].StartSlot +
+				uint64(ls.epochCache[i].LengthInSlots)
 			hasValidEpoch = true
 			break
 		}
@@ -210,13 +261,13 @@ func (ls *LedgerState) epochForSlot(slot uint64) (models.Epoch, error) {
 		return models.Epoch{}, fmt.Errorf(
 			"slot %d not covered by any known epoch (cache has %d epochs, all with zero length)",
 			slot,
-			len(cacheCopy),
+			len(ls.epochCache),
 		)
 	}
 	return models.Epoch{}, fmt.Errorf(
 		"slot %d not covered by any known epoch (cache has %d epochs, last ends at slot %d)",
 		slot,
-		len(cacheCopy),
+		len(ls.epochCache),
 		lastValidEnd,
 	)
 }
@@ -296,10 +347,25 @@ func (ls *LedgerState) advanceEpochCache() error {
 	}
 
 	// Update cache under write lock, checking for concurrent advance
+	// or rollback that may have changed the cache since we read it.
 	ls.Lock()
+	if len(ls.epochCache) == 0 {
+		ls.Unlock()
+		return nil
+	}
 	lastCached := ls.epochCache[len(ls.epochCache)-1]
 	if lastCached.EpochId >= newEpoch.EpochId {
 		// Another goroutine or ledger processing already advanced
+		ls.Unlock()
+		return nil
+	}
+	// Verify the base epoch we used for computation is still the cache
+	// tail. A concurrent rollback could have pruned the cache, making
+	// our computed newEpoch stale (e.g. after a hard fork or rollback).
+	if lastCached.EpochId != lastEpoch.EpochId ||
+		lastCached.StartSlot != lastEpoch.StartSlot ||
+		lastCached.LengthInSlots != lastEpoch.LengthInSlots ||
+		!bytes.Equal(lastCached.Nonce, lastEpoch.Nonce) {
 		ls.Unlock()
 		return nil
 	}
@@ -364,12 +430,72 @@ func (ls *LedgerState) computeEpochNonceForSlot(
 		prevCandidateNonce = genesisHash
 	}
 
+	computeStartSlot := prevEpoch.StartSlot
+	computeEpochLength := uint64(prevEpoch.LengthInSlots)
+	prevEpochEndSlot := prevEpoch.StartSlot +
+		uint64(prevEpoch.LengthInSlots)
+	// When resuming from a snapshot, prevEpoch can carry nonce state
+	// already advanced to the imported tip slot. Continue from the next
+	// slot in that case instead of replaying from epoch start.
+	ls.RLock()
+	currentTipSlot := ls.currentTip.Point.Slot
+	currentTipBlockNonce := append(
+		[]byte(nil),
+		ls.currentTipBlockNonce...,
+	)
+	ls.RUnlock()
+	if currentTipSlot >= prevEpoch.StartSlot &&
+		currentTipSlot < prevEpochEndSlot &&
+		len(prevEpoch.CandidateNonce) == 32 &&
+		len(prevEpoch.EvolvingNonce) == 32 &&
+		len(currentTipBlockNonce) == 32 &&
+		bytes.Equal(prevEpoch.EvolvingNonce, currentTipBlockNonce) {
+		if nextSlot := currentTipSlot + 1; nextSlot < prevEpochEndSlot {
+			computeStartSlot = nextSlot
+			computeEpochLength = prevEpochEndSlot - nextSlot
+		} else {
+			// Tip already at/after epoch end: no additional blocks to fold.
+			computeEpochLength = 0
+		}
+	} else if len(prevEpoch.EvolvingNonce) == 32 {
+		// Resume fallback: when epoch nonce state was checkpointed at an
+		// earlier slot (snapshot import), detect that anchor by matching
+		// block nonces in this epoch range. If found, continue from the
+		// following slot instead of replaying from epoch start.
+		// If no anchor is found, fall through to defaults (compute from
+		// epoch start) — handles genesis sync gracefully.
+		nonceRows, nonceErr := ls.db.GetBlockNoncesInSlotRange(
+			prevEpoch.StartSlot,
+			prevEpochEndSlot,
+			nil,
+		)
+		if nonceErr != nil {
+			return nil, nil, nil, nil, fmt.Errorf(
+				"fetch block nonces in epoch range: %w",
+				nonceErr,
+			)
+		}
+		for _, row := range nonceRows {
+			if len(row.Nonce) == 32 &&
+				bytes.Equal(prevEpoch.EvolvingNonce, row.Nonce) {
+				if row.Slot+1 < prevEpochEndSlot {
+					computeStartSlot = row.Slot + 1
+					computeEpochLength = prevEpochEndSlot -
+						computeStartSlot
+				} else {
+					computeEpochLength = 0
+				}
+				break
+			}
+		}
+	}
+
 	candidateNonce, evolvingNonce, err := ls.computeCandidateNonce(
 		nil, // non-transactional
 		prevEvolvingNonce,
 		prevCandidateNonce,
-		prevEpoch.StartSlot,
-		uint64(prevEpoch.LengthInSlots),
+		computeStartSlot,
+		computeEpochLength,
 	)
 	if err != nil {
 		return nil, nil, nil, nil, fmt.Errorf(
@@ -378,8 +504,6 @@ func (ls *LedgerState) computeEpochNonceForSlot(
 	}
 
 	// Compute the labNonce to SAVE for the next epoch's formula.
-	prevEpochEndSlot := prevEpoch.StartSlot +
-		uint64(prevEpoch.LengthInSlots)
 	var labNonceToSave []byte
 	boundaryBlock, err := database.BlockBeforeSlot(
 		ls.db,

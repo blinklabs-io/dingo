@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"crypto/ed25519"
+	"encoding/hex"
 	"io"
 	"log/slog"
 	"math/big"
@@ -27,6 +28,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/consensus"
 	"github.com/blinklabs-io/gouroboros/kes"
+	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	"github.com/blinklabs-io/gouroboros/ledger/byron"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -35,6 +37,20 @@ import (
 	"github.com/stretchr/testify/require"
 	utxorpc_cardano "github.com/utxorpc/go-codegen/utxorpc/v1alpha/cardano"
 )
+
+// verifyBlockHeader is a test helper that wraps verifyBlockHeaderHex,
+// accepting raw epoch nonce bytes for convenience.
+func verifyBlockHeader(
+	block gledger.Block,
+	epochNonce []byte,
+	slotsPerKesPeriod uint64,
+) error {
+	return verifyBlockHeaderHex(
+		block,
+		hex.EncodeToString(epochNonce),
+		slotsPerKesPeriod,
+	)
+}
 
 // tamperOption controls which part of a test block to corrupt.
 type tamperOption int
@@ -59,7 +75,7 @@ type testBlockResult struct {
 // one component. The seed parameter must be exactly 32 bytes and should
 // differ between tests to avoid key collisions.
 func createTestBlock(
-	t *testing.T,
+	t testing.TB,
 	seed [32]byte,
 	nonceSeed byte,
 	tamper tamperOption,
@@ -106,7 +122,10 @@ func createTestBlock(
 
 	var result *realBabbageBlock
 	for slot := uint64(1); slot <= 200; slot++ {
-		vrfInput := vrf.MkInputVrf(int64(slot), epochNonce) //nolint:gosec
+		vrfInput, vrfInputErr := vrf.MkInputVrf(int64(slot), epochNonce) //nolint:gosec
+		if vrfInputErr != nil {
+			continue
+		}
 		vrfProof, vrfOutput, proveErr := vrf.Prove(vrfSk, vrfInput)
 		if proveErr != nil {
 			continue
@@ -561,7 +580,7 @@ func TestEpochForSlot_SkipsZeroLengthEpochs(t *testing.T) {
 
 // newTestShelleyGenesisCfg creates a CardanoNodeConfig with Shelley genesis
 // loaded for use in verifyBlockHeaderCrypto tests.
-func newTestShelleyGenesisCfg(t *testing.T) *cardano.CardanoNodeConfig {
+func newTestShelleyGenesisCfg(t testing.TB) *cardano.CardanoNodeConfig {
 	t.Helper()
 	shelleyGenesisJSON := `{
 		"activeSlotsCoeff": 0.05,

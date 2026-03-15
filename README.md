@@ -9,17 +9,20 @@
   <a href="https://discord.gg/5fPRZnX4qW"><img src="https://img.shields.io/badge/Discord-7289DA?style=flat&logo=discord&logoColor=white" alt="Discord"></a>
 </div>
 
-# Dingo
-
-⚠️ This is a work in progress and is currently under heavy development
+> ⚠️ **WARNING: Dingo is under heavy active development and is not yet ready for production use. It should only be used on testnets (preview, preprod) and devnets. Do not use Dingo on mainnet with real funds.**
 
 A high-performance Cardano blockchain node implementation in Go by Blink Labs. Dingo provides:
 - Full chain synchronization and validation via Ouroboros consensus protocol
-- UTxO tracking with 41 UTXO validation rules and Plutus smart contract execution
+- UTxO tracking with 41 UTXO validation rules and Plutus V1/V2/V3 smart contract execution
+- Block production with VRF leader election and stake snapshots
+- Multi-peer chain selection with density comparison and VRF tie-breaking
 - Client connectivity for wallets and applications
-- Pluggable storage backends (Badger, SQLite, PostgreSQL, GCS, S3)
-- Peer governance with dynamic peer selection and topology support
+- Pluggable storage backends (Badger, SQLite, PostgreSQL, MySQL, GCS, S3)
+- Tiered storage modes ("core" for consensus, "api" for full indexing)
+- Peer governance with dynamic peer selection, ledger peers, and topology support
 - Chain rollback support for handling forks with automatic state restoration
+- Fast bootstrapping via built-in Mithril client
+- Multiple API servers: UTxO RPC, Blockfrost-compatible REST, Mesh (Coinbase Rosetta)
 
 Note: On Windows systems, named pipes are used instead of Unix sockets for node-to-client communication.
 
@@ -29,12 +32,13 @@ Note: On Windows systems, named pipes are used instead of Unix sockets for node-
 
 ## Running
 
-Dingo supports configuration via both a YAML config file (`dingo.yaml`) and uses environment
-variables to modify its own behavior.
+Dingo supports configuration via a YAML config file (`dingo.yaml`), environment variables, and command-line flags. Priority: CLI flags > environment variables > YAML config > defaults.
 
 A sample configuration file is provided at `dingo.yaml.example`. You can copy and edit this file to configure Dingo for your local or production environment.
 
-In addition to the configuration file, Dingo's behavior can be changed via the following environment variables:
+### Environment Variables
+
+The following environment variables modify Dingo's behavior:
 
 - `CARDANO_BIND_ADDR`
   - IP address to bind for listening (default: `0.0.0.0`)
@@ -69,22 +73,147 @@ In addition to the configuration file, Dingo's behavior can be changed via the f
   - Full path to the Cardano node topology (default: "")
 - `DINGO_UTXORPC_PORT`
   - TCP port to bind for listening for UTxO RPC (default: `0`, disabled)
+- `DINGO_BLOCKFROST_PORT`
+  - TCP port for the Blockfrost-compatible REST API (default: `0`, disabled)
+- `DINGO_MESH_PORT`
+  - TCP port for the Mesh (Coinbase Rosetta) API (default: `0`, disabled)
+- `DINGO_BARK_PORT`
+  - TCP port for the Bark block archive API (default: `0`, disabled)
+- `DINGO_STORAGE_MODE`
+  - Storage mode: `core` (default) or `api`
+  - `core` stores only consensus data (UTxOs, certs, pools, protocol params)
+  - `api` additionally stores witnesses, scripts, datums, redeemers, and tx metadata
+  - API servers (Blockfrost, UTxO RPC, Mesh) require `api` mode
+- `DINGO_RUN_MODE`
+  - Run mode: `serve` (full node, default), `load` (batch import), `dev` (development mode), or `leios` (experimental Leios protocol support)
 - `TLS_CERT_FILE_PATH` - SSL certificate to use, requires `TLS_KEY_FILE_PATH`
     (default: empty)
 - `TLS_KEY_FILE_PATH` - SSL certificate key to use (default: empty)
 
+### Block Production (SPO Mode)
+
+To run Dingo as a stake pool operator producing blocks:
+
+- `CARDANO_BLOCK_PRODUCER` - Enable block production (default: `false`)
+- `CARDANO_SHELLEY_VRF_KEY` - Path to VRF signing key file
+- `CARDANO_SHELLEY_KES_KEY` - Path to KES signing key file
+- `CARDANO_SHELLEY_OPERATIONAL_CERTIFICATE` - Path to operational certificate file
+
+### Quick Start
+
+```bash
+# Preview network (default)
+./dingo
+
+# Mainnet
+CARDANO_NETWORK=mainnet ./dingo
+
+# Or with explicit config path
+CARDANO_NETWORK=mainnet CARDANO_CONFIG=path/to/mainnet/config.json ./dingo
+```
+
+Dingo creates a `dingo.socket` file that speaks Ouroboros node-to-client and is compatible with `cardano-cli`, `adder`, `kupo`, and other Cardano client tools.
+
+Cardano configuration files are bundled in the Docker image. For local builds, you can find them at [docker-cardano-configs](https://github.com/blinklabs-io/docker-cardano-configs/tree/main/config).
+
+## Docker
+
+```bash
+# Run on preview (default)
+docker run -p 3001:3001 ghcr.io/blinklabs-io/dingo
+
+# Run on mainnet with persistent storage
+docker run -p 3001:3001 \
+  -e CARDANO_NETWORK=mainnet \
+  -v dingo-data:/data/db \
+  -v dingo-ipc:/ipc \
+  ghcr.io/blinklabs-io/dingo
+```
+
+The image is based on Debian bookworm-slim and includes `cardano-cli`, `nview`, and `txtop`. Mithril snapshot support is built into dingo natively (`dingo mithril sync`). The Dockerfile sets `CARDANO_DATABASE_PATH=/data/db` and `CARDANO_SOCKET_PATH=/ipc/dingo.socket`, overriding the local defaults of `.dingo` and `dingo.socket` — the volume mounts above map to these container paths.
+
+| Port | Service |
+|------|---------|
+| 3001 | Ouroboros NtN (node-to-node) |
+| 3002 | Ouroboros NtC over TCP |
+| 12798 | Prometheus metrics |
+
+## Storage Modes
+
+Dingo has two storage modes that control how much data is persisted:
+
+| Mode | What's Stored | Use Case |
+|------|---------------|----------|
+| `core` (default) | UTxOs, certificates, pools, protocol parameters | Relays, block producers |
+| `api` | Core data + witnesses, scripts, datums, redeemers, tx metadata | Nodes serving API queries |
+
+```bash
+# Relay or block producer (default)
+./dingo
+
+# API node
+DINGO_STORAGE_MODE=api ./dingo
+```
+
+Or in `dingo.yaml`:
+
+```yaml
+storageMode: "api"
+```
+
+## API Servers
+
+Dingo includes four API servers, all disabled by default. Enable them by setting a non-zero port. All API servers except Bark require `storageMode: "api"`.
+
+| API | Port Env Var | Default | Protocol |
+|-----|-------------|---------|----------|
+| UTxO RPC | `DINGO_UTXORPC_PORT` | disabled | gRPC |
+| Blockfrost | `DINGO_BLOCKFROST_PORT` | disabled | REST |
+| Mesh (Rosetta) | `DINGO_MESH_PORT` | disabled | REST |
+| Bark | `DINGO_BARK_PORT` | disabled | RPC |
+
+```bash
+# Enable Blockfrost API on port 3100 and UTxO RPC on port 9090
+DINGO_STORAGE_MODE=api \
+  DINGO_BLOCKFROST_PORT=3100 \
+  DINGO_UTXORPC_PORT=9090 \
+  ./dingo
+```
+
+Or in `dingo.yaml`:
+
+```yaml
+storageMode: "api"
+blockfrostPort: 3100
+utxorpcPort: 9090
+```
+
+### Deployment Patterns
+
+**Relay node** (consensus only, no APIs):
+```bash
+./dingo
+```
+
+**API / data node** (full indexing, one or more APIs):
+```bash
+DINGO_STORAGE_MODE=api DINGO_BLOCKFROST_PORT=3100 ./dingo
+```
+
+**Block producer** (consensus only, with SPO keys):
+```bash
+CARDANO_BLOCK_PRODUCER=true \
+  CARDANO_SHELLEY_VRF_KEY=/keys/vrf.skey \
+  CARDANO_SHELLEY_KES_KEY=/keys/kes.skey \
+  CARDANO_SHELLEY_OPERATIONAL_CERTIFICATE=/keys/opcert.cert \
+  ./dingo
+```
+
+See `dingo.yaml.example` for the full set of configuration options.
+
 ## Fast Bootstrapping with Mithril
 
-Instead of syncing from genesis (which can take days on mainnet), you can bootstrap Dingo using a [Mithril](https://mithril.network/) snapshot. There are two approaches depending on your use case:
-
-| Approach | Command | Use Case | Data Available |
-|----------|---------|----------|---------------|
-| **`dingo sync`** | `dingo sync --mithril` | Consensus nodes, relays | Current ledger state + all blocks |
-| **`mithril-client` + `dingo load`** | Manual download + load | Indexers, API nodes | Full historical transaction/certificate data |
-
-### Option 1: `dingo sync --mithril` (Recommended for Consensus)
-
-Dingo has a built-in Mithril client that handles download, extraction, and import automatically. This is the fastest way to get a node running.
+Instead of syncing from genesis (which can take days on mainnet), you can bootstrap Dingo using a [Mithril](https://mithril.network/) snapshot. Dingo has a built-in Mithril client that handles download, extraction, and import automatically. This is the fastest way to get a node running.
 
 ```bash
 # Bootstrap from Mithril and start syncing
@@ -114,9 +243,9 @@ This imports:
 - Protocol parameters, governance state, treasury/reserves
 - Complete epoch history for slot-to-time calculations
 
-**What's NOT included**: Individual transaction records, certificate history, witness/script/datum storage, and governance vote records for blocks before the snapshot. These aren't needed for consensus, block production, or serving blocks to peers. New blocks processed after bootstrap will have full metadata.
+What is NOT included: Individual transaction records, certificate history, witness/script/datum storage, and governance vote records for blocks before the snapshot. These are not needed for consensus, block production, or serving blocks to peers. New blocks processed after bootstrap will have full metadata.
 
-**Performance** (preview network, ~4M blocks):
+Performance (preview network, ~4M blocks):
 
 | Phase | Time |
 |-------|------|
@@ -124,73 +253,9 @@ This imports:
 | Extract + download ancillary | ~1 min |
 | Import ledger state (UTxOs, accounts, pools, DReps, epochs) | ~12 min |
 | Load blocks into blob store | ~36 min |
-| **Total** | **~50 min** |
+| Total | ~50 min |
 
-### Option 2: `mithril-client` + `dingo load` (For Indexers/API Nodes)
-
-If you need full historical data (transaction lookups, certificate queries, datum/script resolution), use the external `mithril-client` to download the snapshot and then load it with `dingo load`, which processes every block through the full indexing pipeline.
-
-#### Prerequisites
-
-Install the `mithril-client` CLI from [Mithril releases](https://github.com/input-output-hk/mithril/releases):
-
-```bash
-# Detect OS and architecture
-OS=$(uname -s)
-ARCH=$(uname -m)
-
-case "$OS" in
-  Linux)
-    case "$ARCH" in
-      x86_64)  MITHRIL_PLATFORM="x64-linux-musl" ;;
-      aarch64|arm64) MITHRIL_PLATFORM="arm64-linux-musl" ;;
-      *) echo "Unsupported architecture: $ARCH"; exit 1 ;;
-    esac
-    ;;
-  Darwin)
-    case "$ARCH" in
-      x86_64)  MITHRIL_PLATFORM="x64-macos" ;;
-      arm64)   MITHRIL_PLATFORM="arm64-macos" ;;
-      *) echo "Unsupported architecture: $ARCH"; exit 1 ;;
-    esac
-    ;;
-  *) echo "Unsupported OS: $OS (see Mithril releases for Windows)"; exit 1 ;;
-esac
-
-MITHRIL_VERSION="2506.0"
-curl -L "https://github.com/input-output-hk/mithril/releases/download/${MITHRIL_VERSION}/mithril-${MITHRIL_VERSION}-${MITHRIL_PLATFORM}.tar.gz" -o mithril.tar.gz
-tar -xzf mithril.tar.gz
-sudo mv mithril-client /usr/local/bin/
-rm mithril.tar.gz
-```
-
-For Windows, download the appropriate binary from the [Mithril releases page](https://github.com/input-output-hk/mithril/releases).
-
-#### Bootstrap Workflow
-
-```bash
-# Set network (CARDANO_NETWORK is used by dingo, not mithril-client)
-export CARDANO_NETWORK=preview
-# AGGREGATOR_ENDPOINT is used by mithril-client
-export AGGREGATOR_ENDPOINT=https://aggregator.pre-release-preview.api.mithril.network/aggregator
-
-# For mainnet:
-# export AGGREGATOR_ENDPOINT=https://aggregator.release-mainnet.api.mithril.network/aggregator
-
-# Download snapshot (uses AGGREGATOR_ENDPOINT)
-mithril-client cardano-db download --download-dir /tmp/mithril-snapshot
-
-# Load into Dingo (uses CARDANO_NETWORK for chain config)
-./dingo load /tmp/mithril-snapshot/db/immutable
-
-# Clean up snapshot
-rm -rf /tmp/mithril-snapshot
-
-# Start Dingo
-./dingo -n preview serve
-```
-
-This creates full historical data including transaction records, certificate history, witness data, scripts, datums, and governance votes — everything needed for rich query APIs.
+For indexers and API nodes that need full historical data (transaction lookups, certificate queries, datum/script resolution), configure the storage mode to `api` and `dingo mithril sync` will automatically backfill historical metadata after loading the snapshot.
 
 ### Disk Space Requirements
 
@@ -202,7 +267,7 @@ Bootstrapping requires temporary disk space for both the downloaded snapshot and
 | preprod |       ~60 GB |   ~80 GB |      ~150 GB |
 | preview |       ~15 GB |   ~25 GB |       ~50 GB |
 
-**Note**: These are approximate values that grow over time. The snapshot can be deleted after import, but you need sufficient space for both during the load process.
+These are approximate values that grow over time. The snapshot can be deleted after import, but you need sufficient space for both during the load process.
 
 ## Database Plugins
 
@@ -210,14 +275,15 @@ Dingo supports pluggable storage backends for both blob storage (blocks, transac
 
 ### Available Plugins
 
-**Blob Storage Plugins:**
+Blob Storage Plugins:
 - `badger` - BadgerDB local key-value store (default)
 - `gcs` - Google Cloud Storage blob store
 - `s3` - AWS S3 blob store
 
-**Metadata Storage Plugins:**
+Metadata Storage Plugins:
 - `sqlite` - SQLite relational database (default)
 - `postgres` - PostgreSQL relational database
+- `mysql` - MySQL relational database
 
 ### Plugin Selection
 
@@ -243,33 +309,44 @@ database:
 
 Each plugin supports specific configuration options. See `dingo.yaml.example` for detailed configuration examples.
 
-**BadgerDB Options:**
+BadgerDB Options:
 - `data-dir` - Directory for database files
 - `block-cache-size` - Block cache size in bytes
 - `index-cache-size` - Index cache size in bytes
 - `gc` - Enable garbage collection
 
-**Google Cloud Storage Options:**
+Google Cloud Storage Options:
 - `bucket` - GCS bucket name
 - `project-id` - Google Cloud project ID
 - `prefix` - Path prefix within bucket
 
-**AWS S3 Options:**
+AWS S3 Options:
 - `bucket` - S3 bucket name
 - `region` - AWS region
 - `prefix` - Path prefix within bucket
 - `access-key-id` - AWS access key ID (optional - uses default credential chain if not provided)
 - `secret-access-key` - AWS secret access key (optional - uses default credential chain if not provided)
 
-**SQLite Options:**
+SQLite Options:
 - `data-dir` - Path to SQLite database file
 
-**PostgreSQL Options:**
+PostgreSQL Options:
 - `host` - PostgreSQL server hostname
 - `port` - PostgreSQL server port
 - `username` - Database user
 - `password` - Database password
 - `database` - Database name
+
+MySQL Options:
+- `host` - MySQL server hostname
+- `port` - MySQL server port
+- `user` - Database user
+- `password` - Database password
+- `database` - Database name
+- `ssl-mode` - MySQL TLS mode (mapped to tls= in DSN)
+- `timezone` - MySQL time zone location (default: UTC)
+- `dsn` - Full MySQL DSN (overrides other options when set)
+- `storage-mode` - Storage tier: core or api (default: core)
 
 ### Listing Available Plugins
 
@@ -282,21 +359,6 @@ You can see all available plugins and their descriptions:
 ## Plugin Development
 
 For information on developing custom storage plugins, see [PLUGIN_DEVELOPMENT.md](PLUGIN_DEVELOPMENT.md).
-
-### Example
-
-Running on mainnet (:sweat_smile:):
-
-```bash
-CARDANO_NETWORK=mainnet CARDANO_CONFIG=path/to/cardano/configs/mainnet/config.json ./dingo
-```
-
-Note: you can find cardano configuration files at
-<https://github.com/blinklabs-io/docker-cardano-configs/tree/main/config>
-
-Dingo will drop a `dingo.socket` file which can be used by other clients, such
-as `cardano-cli` or software like `adder` or `kupo`. This has only had limited
-testing, so success/failure reports are very welcome and encouraged!
 
 ## Features
 
@@ -332,35 +394,55 @@ testing, so success/failure reports are very welcome and encouraged!
   - [x] UTxO tracking
   - [x] Protocol parameters
   - [x] Genesis validation
+  - [x] Block header validation (VRF/KES/OpCert cryptographic verification)
   - [ ] Certificates
     - [x] Pool registration
     - [x] Stake registration/delegation
     - [x] Account registration checks
+    - [x] DRep registration
     - [ ] Governance
   - [ ] Transaction validation
     - [ ] Phase 1 validation
       - [x] UTxO rules
+      - [x] Fee validation (full fee calculation with script costs)
+      - [x] Transaction size and ExUnit budget validation
       - [ ] Witnesses
       - [ ] Block body
       - [ ] Certificates
       - [ ] Delegation/pools
       - [ ] Governance
-    - [ ] Phase 2 validation
-      - [ ] Smart contracts
+    - [x] Phase 2 validation
+      - [x] Plutus V1 smart contract execution
+      - [x] Plutus V2 smart contract execution
+      - [x] Plutus V3 smart contract execution
+- [x] Block production
+  - [x] VRF leader election with stake snapshots
+  - [x] Block forging with KES/OpCert signing
+  - [x] Slot battle detection
 - [x] Mempool
   - [x] Accept transactions from local clients
   - [x] Distribute transactions to other nodes
   - [x] Validation of transaction on add
   - [x] Consumer tracking
   - [x] Transaction purging on chain update
+  - [x] Watermark-based eviction and rejection
 - [x] Database Recovery
-  - [x] Chain rollback support (SQLite and PostgreSQL plugins)
+  - [x] Chain rollback support (SQLite, PostgreSQL, and MySQL plugins)
   - [x] State restoration on rollback
   - [x] WAL mode for crash recovery
   - [x] Automatic rollback on transaction error
-- [x] Plutus Validation
-  - [x] Plutus V3 smart contract validation
-  - [ ] Plutus V1/V2 smart contract validation
+- [x] Stake Snapshots
+  - [x] Mark/Set/Go rotation at epoch boundaries
+  - [x] Genesis snapshot capture
+- [x] API Servers
+  - [x] UTxO RPC (gRPC)
+  - [x] Blockfrost-compatible REST API
+  - [x] Mesh (Coinbase Rosetta) API
+  - [x] Bark block archive API
+- [x] Mithril Bootstrap
+  - [x] Built-in Mithril client
+  - [x] Ledger state import (UTxOs, accounts, pools, DReps, epochs)
+  - [x] Block loading from ImmutableDB
 
 Additional planned features can be found in our issue tracker and project boards.
 
@@ -372,17 +454,117 @@ especially as there is functionality which has not yet been developed.
 
 ## Development / Building
 
-This requires Go 1.23 or better is installed. You also need `make`.
+This requires Go 1.25 or later. You also need `make`.
 
 ```bash
-# Build
+# Format, test, and build (default target)
 make
+
+# Build only
+make build
+
 # Run
 ./dingo
-```
 
-You can also run the code without building a binary, first
-
-```bash
+# Run without building a binary
 go run ./cmd/dingo/
 ```
+
+### Testing
+
+```bash
+make test                                    # All tests with race detection
+go test -v -race -run TestName ./package/    # Single test
+make bench                                   # Benchmarks
+```
+
+### Profiling
+
+```bash
+# Load testdata with CPU and memory profiling
+make test-load-profile
+
+# Analyze
+go tool pprof cpu.prof
+go tool pprof mem.prof
+```
+
+## DevNet
+
+The DevNet runs a private Cardano network with Dingo and `cardano-node` producing blocks side by side. It validates that Dingo forges blocks, maintains consensus, and interoperates with the reference node.
+
+### Architecture
+
+The DevNet uses Docker Compose to run 3 containers on a bridge network:
+
+| Container | Role | Host Port |
+|-----------|------|-----------|
+| `dingo-producer` | Dingo block producer (pool 1) | 3010 |
+| `cardano-producer` | cardano-node block producer (pool 2) | 3011 |
+| `cardano-relay` | Relay node (no block production) | 3012 |
+
+A `configurator` init container generates fresh pool keys and genesis files before nodes start.
+
+### Prerequisites
+
+- Docker with the Compose plugin (`docker compose`)
+- Go 1.24+
+
+### Running the Automated Tests
+
+The test suite builds the Dingo Docker image, starts all containers, waits for health checks, and runs Go integration tests tagged with `//go:build devnet`:
+
+```bash
+cd internal/test/devnet/
+
+# Run all devnet tests
+./run-tests.sh
+
+# Run a specific test
+./run-tests.sh -run TestBasicBlockForging
+
+# Keep containers running after tests pass (for inspection)
+./run-tests.sh --keep-up
+```
+
+Override host ports if needed:
+
+```bash
+DEVNET_DINGO_PORT=4010 DEVNET_CARDANO_PORT=4011 DEVNET_RELAY_PORT=4012 ./run-tests.sh
+```
+
+### Running the DevNet Manually
+
+For longer-running manual tests (soak testing, observing behavior over multiple epochs, debugging):
+
+```bash
+cd internal/test/devnet/
+
+# Start all containers
+./start.sh
+
+# Watch logs
+docker compose -f docker-compose.yml logs -f
+
+# Watch a specific node
+docker compose -f docker-compose.yml logs -f dingo-producer
+
+# Stop and clean up
+./stop.sh
+```
+
+Containers remain running until you stop them. The DevNet parameters (in `testnet.yaml`) use 1-second slots and 1500-slot epochs (~25 minutes per epoch), so you can observe epoch transitions, leader election, and stake snapshot rotation relatively quickly.
+
+### Local DevNet (Without Docker)
+
+For quick iteration without Docker, `devmode.sh` runs Dingo directly against a local devnet genesis. It resets state and updates genesis timestamps on each run:
+
+```bash
+# Run in devnet mode
+./devmode.sh
+
+# With debug logging
+DEBUG=true ./devmode.sh
+```
+
+This stores state in `.devnet/` and uses genesis configs from `config/cardano/devnet/`. It runs a single Dingo node (no cardano-node counterpart), which is useful for testing startup, epoch transitions, and block production in isolation.

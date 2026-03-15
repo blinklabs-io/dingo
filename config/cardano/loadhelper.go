@@ -20,7 +20,8 @@ import (
 	"os"
 )
 
-// LoadCardanoNodeConfigWithFallback tries to load config from file, then falls back to embed FS for preview network.
+// LoadCardanoNodeConfigWithFallback tries to load config from file,
+// then falls back to the embedded FS for supported networks.
 func LoadCardanoNodeConfigWithFallback(
 	cfgPath, network string,
 	embedFS embed.FS,
@@ -37,13 +38,15 @@ func LoadCardanoNodeConfigWithFallback(
 		)
 	}
 
-	// File doesn't exist, try embedded config for preview network
-	if network == "preview" {
-		return NewCardanoNodeConfigFromEmbedFS(embedFS, cfgPath)
+	// File doesn't exist, try embedded config
+	cfg, embedErr := NewCardanoNodeConfigFromEmbedFS(embedFS, cfgPath)
+	if embedErr != nil {
+		return nil, fmt.Errorf(
+			"config file %q not found and no embedded config available for network %q: %w",
+			cfgPath,
+			network,
+			embedErr,
+		)
 	}
-	return nil, fmt.Errorf(
-		"config file %q not found and no embedded config available for network %q",
-		cfgPath,
-		network,
-	)
+	return cfg, nil
 }
