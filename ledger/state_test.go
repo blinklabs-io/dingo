@@ -32,9 +32,11 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	dbtypes "github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 )
@@ -2132,4 +2134,28 @@ func TestCleanupOrphanedBlobs_SlotZero(t *testing.T) {
 	// Verify block at slot 1 was deleted
 	_, err = database.BlockByPoint(db, makeTestPoint(block))
 	assert.Error(t, err, "block at slot 1 should be deleted")
+}
+
+func TestIntersectPointsReturnsStorageErrorWhenSampledListIsEmpty(t *testing.T) {
+	db := newTestDB(t)
+	cm, err := chain.NewManager(db, nil)
+	require.NoError(t, err)
+	txn := db.BlobTxn(true)
+	err = txn.Do(func(txn *database.Txn) error {
+		return db.Blob().Set(
+			txn.Blob(),
+			dbtypes.BlockBlobIndexKey(1),
+			[]byte("bad"),
+		)
+	})
+	require.NoError(t, err)
+
+	ls := &LedgerState{
+		db:    db,
+		chain: cm.PrimaryChain(),
+	}
+
+	points, err := ls.IntersectPoints(4)
+	require.Error(t, err)
+	assert.Nil(t, points)
 }

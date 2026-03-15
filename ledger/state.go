@@ -3092,7 +3092,10 @@ func (ls *LedgerState) IntersectPoints(
 		return nil, nil
 	}
 	if ls.chain != nil {
-		return ls.chain.IntersectPoints(count), nil
+		points := ls.chain.IntersectPoints(count)
+		if len(points) > 0 {
+			return points, nil
+		}
 	}
 	return ls.RecentChainPoints(count)
 }

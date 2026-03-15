@@ -753,28 +753,44 @@ func (c *Chain) IntersectPoints(count int) []ocommon.Point {
 		return nil
 	}
 	points := make([]ocommon.Point, 0, count)
-	seen := make(map[uint64]struct{}, count)
-	appendPoint := func(blockIndex uint64) bool {
+	seen := make(map[string]struct{}, count)
+	appendPoint := func(point ocommon.Point) bool {
 		if len(points) >= count {
 			return false
 		}
-		if _, ok := seen[blockIndex]; ok {
+		key := fmt.Sprintf("%d:%x", point.Slot, point.Hash)
+		if _, ok := seen[key]; ok {
 			return true
+		}
+		points = append(points, point)
+		seen[key] = struct{}{}
+		return true
+	}
+	appendBlockPoint := func(blockIndex uint64) bool {
+		if len(points) >= count {
+			return false
 		}
 		blk, err := c.blockByIndex(blockIndex)
 		if err != nil {
 			return false
 		}
-		points = append(
-			points,
+		return appendPoint(
 			ocommon.NewPoint(blk.Slot, blk.Hash),
 		)
-		seen[blockIndex] = struct{}{}
-		return true
+	}
+	denseStartIndex := c.tipBlockIndex
+	tip := c.currentTip.Point
+	if tip.Slot > 0 || len(tip.Hash) > 0 {
+		appendPoint(tip)
+		if denseStartIndex > initialBlockIndex {
+			denseStartIndex--
+		} else {
+			denseStartIndex = 0
+		}
 	}
 	denseCount := min(count, intersectDensePointCount)
-	for idx := c.tipBlockIndex; idx >= initialBlockIndex && len(points) < denseCount; idx-- {
-		if !appendPoint(idx) {
+	for idx := denseStartIndex; idx >= initialBlockIndex && len(points) < denseCount; idx-- {
+		if !appendBlockPoint(idx) {
 			break
 		}
 	}
@@ -788,12 +804,12 @@ func (c *Chain) IntersectPoints(count int) []ocommon.Point {
 		if offset == 0 || offset >= c.tipBlockIndex {
 			break
 		}
-		if !appendPoint(c.tipBlockIndex - offset) {
+		if !appendBlockPoint(c.tipBlockIndex - offset) {
 			break
 		}
 	}
 	if len(points) < count {
-		_ = appendPoint(initialBlockIndex)
+		_ = appendBlockPoint(initialBlockIndex)
 	}
 	return points
 }
