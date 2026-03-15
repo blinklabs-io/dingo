@@ -522,10 +522,31 @@ func (o *Ouroboros) HandleInboundConnEvent(evt event.Event) {
 			}
 		}
 	}
-	// Do NOT start TxSubmission client on inbound connections.
-	// The relay's connection manager may not have started its
-	// responder-direction TxSubmission server yet when we send
-	// Init(), causing a muxer protocol error and connection reset.
-	// TxSubmission client will be started on our own outbound
-	// connection instead.
+	// Start TxSubmission client on full-duplex inbound connections.
+	// This registers a mempool consumer and sends Init() so we can
+	// offer our transactions to the peer. Without this, peers that
+	// connect TO us (and whose inbound suppresses our outbound dial)
+	// would never receive our mempool transactions.
+	//
+	// The remote peer's TxSubmission server is guaranteed to be ready
+	// because the Ouroboros handshake completed bilaterally before
+	// either side starts mini-protocol messages — the remote's
+	// NewConnection() has finished and all protocol handlers are
+	// registered by the time our InboundConnectionEvent fires.
+	if o.Mempool != nil {
+		if err := o.txsubmissionClientStart(connId); err != nil {
+			o.config.Logger.Warn(
+				"txsubmission client failed on inbound connection",
+				"error", err,
+				"connection_id", connId.String(),
+			)
+			// Non-fatal: the connection is still useful for
+			// chainsync, keep-alive, and peer-sharing.
+		} else {
+			o.config.Logger.Debug(
+				"started txsubmission client on inbound connection",
+				"connection_id", connId.String(),
+			)
+		}
+	}
 }

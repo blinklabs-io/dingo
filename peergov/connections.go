@@ -202,30 +202,33 @@ func (p *PeerGovernor) createOutboundConnection(peer *Peer) {
 			)
 			return
 		}
-		// If an inbound connection already upgraded this peer to warm,
-		// the outbound dial is unnecessary — the inbound serves as the
-		// bidirectional link for both client and server protocols.
-		if currentPeer := p.peers[peerIdx]; currentPeer.Connection != nil {
+		// Only a client-capable connection can replace the outbound dial.
+		// This matches ouroboros-network's duplex-connection reuse: an
+		// existing inbound responder-only connection is not enough to
+		// satisfy the local initiator side.
+		if currentPeer := p.peers[peerIdx]; currentPeer.hasClientConnection() {
 			p.mu.Unlock()
 			p.config.Logger.Info(
-				"outbound: peer already connected via inbound, stopping outbound attempts",
+				"outbound: peer already connected via reusable duplex connection, stopping outbound attempts",
 				"address", peer.Address,
 			)
 			return
 		}
+		currentPeerConnKnown := p.peers[peerIdx].Connection != nil
 		p.mu.Unlock()
 
-		// Skip outbound if the peer already has an inbound connection
-		// from the same host. When both nodes reuse their listen port
-		// for outbound (OutboundSourcePort), a separate outbound would
-		// create an identical TCP 4-tuple and fail with EADDRINUSE.
-		// The existing inbound connection serves both directions.
-		// Poll periodically rather than returning so that when the
-		// inbound drops the outbound attempt proceeds naturally.
-		if p.config.ConnManager != nil &&
-			p.config.ConnManager.HasInboundFromHost(peer.Address) {
+		// Skip outbound if there is already an inbound connection from the
+		// same exact remote peer address. Matching on the full remote
+		// address avoids suppressing valid outbound dials to peers that
+		// happen to share a host but use a different source port.
+		//
+		// We only wait here while the peer connection state is not yet known.
+		// Once the inbound side has finished negotiating, only a client-capable
+		// duplex connection should suppress the outbound dial.
+		if !currentPeerConnKnown && p.config.ConnManager != nil &&
+			p.config.ConnManager.HasInboundPeerAddress(peer.NormalizedAddress) {
 			p.config.Logger.Info(
-				"outbound: inbound from same host exists, waiting",
+				"outbound: inbound from same peer address exists before negotiation completes, waiting",
 				"address", peer.Address,
 			)
 			select {
@@ -333,15 +336,24 @@ func (p *PeerGovernor) createOutboundConnection(peer *Peer) {
 		}
 		// When the dial fails because an inbound connection already
 		// occupies the TCP 4-tuple, don't count it as a peer failure.
-		// Loop back to the HasInboundFromHost check instead.
-		if isAddrInUseError(err) &&
-			p.config.ConnManager != nil &&
-			p.config.ConnManager.HasInboundFromHost(peer.Address) {
-			p.config.Logger.Info(
-				"outbound: dial failed due to existing inbound, waiting",
-				"address", peer.Address,
-			)
-			continue
+		// Loop back to the exact inbound peer-address check instead.
+		if isAddrInUseError(err) {
+			p.mu.Lock()
+			peerIdx := p.peerIndexByAddress(peer.NormalizedAddress)
+			currentPeerConnKnown := false
+			if peerIdx != -1 {
+				currentPeerConnKnown = p.peers[peerIdx].Connection != nil
+			}
+			p.mu.Unlock()
+			if !currentPeerConnKnown &&
+				p.config.ConnManager != nil &&
+				p.config.ConnManager.HasInboundPeerAddress(peer.NormalizedAddress) {
+				p.config.Logger.Info(
+					"outbound: dial failed while exact inbound peer address is still negotiating, waiting",
+					"address", peer.Address,
+				)
+				continue
+			}
 		}
 		p.mu.Lock()
 		// Re-lookup peer to avoid stale pointer if slice was rebuilt

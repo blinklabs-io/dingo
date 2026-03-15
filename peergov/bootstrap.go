@@ -58,7 +58,8 @@ func (p *PeerGovernor) shouldExitBootstrap() (bool, string) {
 		ledgerPeerCount := 0
 		for _, peer := range p.peers {
 			if peer != nil && peer.Source == PeerSourceP2PLedger &&
-				(peer.State == PeerStateWarm || peer.State == PeerStateHot) {
+				peer.hasClientConnection() &&
+				(peer.State == PeerStateHot || peer.State == PeerStateWarm) {
 				ledgerPeerCount++
 			}
 		}
@@ -225,7 +226,8 @@ func (p *PeerGovernor) checkBootstrapRecoveryLocked() []pendingEvent {
 	// Count hot peers
 	hotCount := 0
 	for _, peer := range p.peers {
-		if peer != nil && peer.State == PeerStateHot {
+		if peer != nil && peer.State == PeerStateHot &&
+			peer.hasClientConnection() {
 			hotCount++
 		}
 	}
@@ -246,7 +248,7 @@ func (p *PeerGovernor) checkBootstrapRecoveryLocked() []pendingEvent {
 		if peer == nil {
 			continue
 		}
-		if peer.State == PeerStateWarm && peer.Connection != nil {
+		if peer.State == PeerStateWarm && peer.hasClientConnection() {
 			if peer.Source == PeerSourceP2PGossip ||
 				peer.Source == PeerSourceP2PLedger {
 				hasWarmCandidates = true

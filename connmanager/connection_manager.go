@@ -20,6 +20,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"strings"
 	"sync"
 
 	"github.com/blinklabs-io/dingo/event"
@@ -499,13 +500,19 @@ func (c *ConnectionManager) RemoveConnection(connId ouroboros.ConnectionId) {
 	c.updateConnectionMetrics()
 }
 
-// HasInboundFromHost returns true if there is already an inbound connection
-// from the same host (IP) as peerAddr, regardless of port or DiffusionMode.
-// When OutboundSourcePort is set (listen port reuse), an outbound connection
-// to the same host would create an identical TCP 4-tuple and fail with
-// EADDRINUSE. The existing inbound connection serves as the bidirectional
-// link between the two nodes.
-func (c *ConnectionManager) HasInboundFromHost(
+// HasInboundPeerAddress returns true if there is already an inbound connection
+// from the same remote peer address as peerAddr.
+//
+// This intentionally matches on the full remote address, not just the host.
+// TCP collisions require the same 4-tuple, so a connection from the same host
+// but a different source port must not suppress a valid outbound dial.
+//
+// When OutboundSourcePort is set (listen-port reuse), an outbound connection
+// to the same remote peer address may collide with an existing inbound
+// connection if the peer also connected from its listening port. In that case
+// the existing inbound connection should be treated as the reusable duplex
+// connection, matching ouroboros-network's exact-address connection tracking.
+func (c *ConnectionManager) HasInboundPeerAddress(
 	peerAddr string,
 ) bool {
 	// Only relevant when listen port reuse is enabled. With ephemeral
@@ -514,35 +521,32 @@ func (c *ConnectionManager) HasInboundFromHost(
 	if c.config.OutboundSourcePort == 0 {
 		return false
 	}
-	targetHost, _, err := net.SplitHostPort(peerAddr)
-	if err != nil {
-		// If peerAddr has no port, treat the whole string as the host
-		targetHost = peerAddr
+	targetAddr := normalizePeerAddr(peerAddr)
+	if targetAddr == "" {
+		return false
 	}
-	targetIP := net.ParseIP(targetHost)
 	c.connectionsMutex.Lock()
 	defer c.connectionsMutex.Unlock()
 	for _, info := range c.connections {
-		if !info.isInbound || info.conn == nil {
+		if !info.isInbound || info.isNtC || info.conn == nil {
 			continue
 		}
-		connHost, _, err := net.SplitHostPort(info.peerAddr)
-		if err != nil {
-			connHost = info.peerAddr
-		}
-		// Use canonical IP comparison when both are valid IPs to handle
-		// equivalent IPv6 representations (e.g. ::ffff:192.0.2.1 vs
-		// ::ffff:c000:201). Fall back to string comparison for hostnames.
-		connIP := net.ParseIP(connHost)
-		if connIP != nil && targetIP != nil {
-			if connIP.Equal(targetIP) {
-				return true
-			}
-		} else if connHost == targetHost {
+		if normalizePeerAddr(info.peerAddr) == targetAddr {
 			return true
 		}
 	}
 	return false
+}
+
+func normalizePeerAddr(peerAddr string) string {
+	host, port, err := net.SplitHostPort(peerAddr)
+	if err != nil {
+		return strings.ToLower(peerAddr)
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return net.JoinHostPort(ip.String(), port)
+	}
+	return net.JoinHostPort(strings.ToLower(host), port)
 }
 
 func (c *ConnectionManager) GetConnectionById(
