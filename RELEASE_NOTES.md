@@ -35,7 +35,6 @@ Thank you for trying!
 
 ---
 
-
 ## v0.26.0 (March 14, 2026)
 
 **Title:** Trusted Mithril downloads and tuned peers
