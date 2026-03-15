@@ -18,7 +18,7 @@ Hi folks! Here’s what we shipped in v0.27.0.
 
 ### 💪 Improvements
 
-- **Snapshot manager transitions:** Snapshot correctness is more rock-solid because epoch transition events are now processed in sequence rather than skipping intermediate transitions.
+- **Snapshot manager transitions:** Snapshot correctness is more rock-solid because epoch transition events are now handled in sequence rather than skipping intermediate transitions.
 - **Near-tip blockfetch and insertion:** Syncing near the chain tip is more efficient because blockfetch and block insertion reuse queued header data and caller-supplied points.
 - **Compact block metadata (optional):** On-disk overhead can be lower because block metadata can now be stored in an optional compact binary format in Badger.
 
