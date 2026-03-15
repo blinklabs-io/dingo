@@ -3,7 +3,7 @@
 
 ## v0.27.0 (March 15, 2026)
 
-**Title:** Fresh updates and polish
+**Title:** Embedded configs and S3-backed testing
 
 **Date:** March 15, 2026
 
@@ -13,7 +13,7 @@ Hi folks! Here’s what we shipped in v0.27.0.
 
 ### ✨ What's New
 
-- **S3-backed storage tests in CI:** Validating cloud-style storage behavior is easier because CI now spins up a MinIO S3 service and runs the full storage-backend test suite.
+- **S3-backed storage tests in CI:** Cloud-style storage validation is easier because CI now spins up a MinIO S3 service and runs the full storage-backend test suite.
 - **Embedded network config bundles:** Setup is simpler because Dingo now ships built-in config bundles for preview, preprod, mainnet, and devnet.
 
 ### 💪 Improvements
