@@ -16,9 +16,10 @@ package cardano
 
 import "embed"
 
-// EmbeddedConfigPreviewNetworkFS contains the embedded Cardano configuration files
-// for the preview network. This includes config.json and all genesis files required
-// for preview network operation when no external config files are available.
+// EmbeddedConfigFS contains the embedded Cardano configuration files
+// for all supported networks (preview, preprod, mainnet, devnet). This includes
+// config.json and all genesis files required for network operation when
+// no external config files are available.
 //
-//go:embed preview
-var EmbeddedConfigPreviewNetworkFS embed.FS
+//go:embed preview mainnet preprod devnet
+var EmbeddedConfigFS embed.FS
