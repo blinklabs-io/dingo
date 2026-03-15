@@ -19,7 +19,7 @@ Hi folks! Here’s what we shipped in v0.27.0.
 ### 💪 Improvements
 
 - **Snapshot epoch transitions:** Snapshot handling is more reliable because the snapshot manager now processes every epoch transition event during rapid chain progress.
-- **Tip ingestion fast paths:** Sync near the chain tip is speedier because blockfetch and block insertion reuse queued header data and caller-supplied points to cut redundant work.
+- **Tip ingestion fast paths:** Sync near the chain tip is sleeker because blockfetch and block insertion reuse queued header data and caller-supplied points to cut redundant work.
 
 ### 🔧 Fixes
 
