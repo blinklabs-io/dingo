@@ -1,6 +1,35 @@
 # Release Notes
 
 
+## v0.27.0 (March 15, 2026)
+
+**Title:** Fresh updates and polish
+
+**Date:** March 15, 2026
+
+**Version:** v0.27.0
+
+Hi folks! Here’s what we shipped in v0.27.0.
+
+```json
+{
+  "✨ What's New": [
+    "Test runs can now use an S3-compatible storage service automatically, which makes it easier to validate cloud-style storage behavior before you ship. CI now provisions a MinIO S3 service and bucket, wires S3 options into the test configuration, enables AWS client request logging, and adds tests that exercise every supported storage backend including S3.",
+    "You can now use built-in network configuration bundles for common Cardano environments, which reduces setup time and avoids mismatched config files. The release embeds configs for preview, preprod, mainnet, and devnet behind a unified EmbeddedConfigFS and updates config loading to use it with correct default paths."
+  ],
+  "💪 Improvements": [
+    "Chain synchronization is now more consistent around epoch boundaries, so snapshots stay accurate even when multiple transitions occur close together. The snapshot manager now processes every epoch transition event rather than skipping intermediate events.",
+    "Sync and ingestion performance is improved near the chain tip, which can reduce latency when new blocks arrive. The system reuses queued header data and caller-supplied points for near-tip blockfetch and block insertion, adds an optional compact binary block-metadata format in Badger with configuration wiring, and expands benchmarks/tests to cover the new fast paths and metadata format."
+  ],
+  "📋 What You Need to Know": [
+    "Storage testing in CI now depends on an S3-compatible service being available, so you may see additional S3-related configuration and logs during test runs. The pipeline provisions MinIO automatically, but environments that override CI or run tests locally may need equivalent S3 settings (endpoint, bucket, and credentials) to run the full storage-backend test suite."
+  ]
+}
+
+```
+
+---
+
 ## v0.26.0 (March 14, 2026)
 
 **Title:** Trusted Mithril downloads and tuned peers
