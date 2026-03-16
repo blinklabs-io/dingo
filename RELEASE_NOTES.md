@@ -18,7 +18,7 @@ Hi folks! Here’s what we shipped in v0.27.1.
 ### 💪 Improvements
 
 - **Peer reuse rules:** Connections behave more predictably under load because inbound peer reuse now relies on normalized, exact-match addresses.
-- **Chainsync and delegation state:** Sync is more rock-solid because chainsync and delegation parsing handle edge cases more safely.
+- **Chainsync and delegation state:** Sync is more rock-solid because chainsync and delegation state parsing handle edge cases more safely.
 - **Dependencies:** Compatibility is more solid because key Go dependencies were refreshed.
 
 ### 🔧 Fixes
