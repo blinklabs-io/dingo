@@ -114,6 +114,8 @@ func (b *Bark) Start(ctx context.Context) error {
 			),
 			Handler:           mux,
 			ReadHeaderTimeout: 60 * time.Second,
+			WriteTimeout:      30 * time.Second,
+			IdleTimeout:       120 * time.Second,
 		}
 	} else {
 		b.config.Logger.Info(
@@ -130,6 +132,8 @@ func (b *Bark) Start(ctx context.Context) error {
 			),
 			Handler:           h2c.NewHandler(mux, &http2.Server{}),
 			ReadHeaderTimeout: 60 * time.Second,
+			WriteTimeout:      30 * time.Second,
+			IdleTimeout:       120 * time.Second,
 		}
 	}
 	b.server = server

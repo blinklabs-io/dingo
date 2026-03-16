@@ -100,6 +100,8 @@ func (b *Blockfrost) Start(
 		Addr:              b.config.ListenAddress,
 		Handler:           handler,
 		ReadHeaderTimeout: 60 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 	b.httpServer = server
 	b.mu.Unlock()
