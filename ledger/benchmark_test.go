@@ -2176,6 +2176,69 @@ func BenchmarkBlockfetchNearTipThroughputPredecoded(b *testing.B) {
 	b.ReportMetric(float64(processedBlocks)/b.Elapsed().Seconds(), "blocks/sec")
 }
 
+// BenchmarkBlockfetchNearTipFlushOnlyPredecoded isolates the one-block near-tip
+// flush path after blockfetch has already validated and queued the block.
+func BenchmarkBlockfetchNearTipFlushOnlyPredecoded(b *testing.B) {
+	seedModels, rawBlocks := loadBlockProcessingFixture(b)
+	blocks := make([]ledger.Block, 0, len(rawBlocks))
+	points := make([]ocommon.Point, 0, len(rawBlocks))
+	for _, block := range rawBlocks {
+		ledgerBlock, err := ledger.NewBlockFromCbor(block.Type, block.Cbor)
+		if err != nil {
+			b.Fatalf("predecode block: %v", err)
+		}
+		blocks = append(blocks, ledgerBlock)
+		points = append(points, ocommon.NewPoint(block.Slot, block.Hash))
+	}
+
+	db, ledgerState := newBlockProcessingBenchmarkLedgerState(
+		b,
+		seedModels,
+	)
+	b.Cleanup(func() { db.Close() })
+
+	b.Logf(
+		"Loaded %d predecoded blocks for near-tip flush-only testing",
+		len(blocks),
+	)
+
+	b.ResetTimer()
+
+	processedBlocks := 0
+	blockIdx := 0
+	for i := 0; b.Loop(); i++ {
+		if blockIdx == len(blocks) {
+			b.StopTimer()
+			if err := db.Close(); err != nil {
+				b.Fatal(err)
+			}
+			db, ledgerState = newBlockProcessingBenchmarkLedgerState(
+				b,
+				seedModels,
+			)
+			blockIdx = 0
+			b.StartTimer()
+		}
+		ledgerState.pendingBlockfetchEvents = append(
+			ledgerState.pendingBlockfetchEvents[:0],
+			BlockfetchEvent{
+				Block: blocks[blockIdx],
+				Point: points[blockIdx],
+				Type:  uint(blocks[blockIdx].Type()),
+			},
+		)
+		blockIdx++
+
+		if err := ledgerState.flushPendingBlockfetchBlocks(); err != nil {
+			b.Fatalf("flushPendingBlockfetchBlocks failed: %v", err)
+		}
+
+		processedBlocks++
+	}
+
+	b.ReportMetric(float64(processedBlocks)/b.Elapsed().Seconds(), "blocks/sec")
+}
+
 // BenchmarkBlockfetchNearTipQueuedHeaderPredecoded measures the near-tip
 // blockfetch path when the matching header has already been queued, which is
 // the common live-sync case before full block arrival.

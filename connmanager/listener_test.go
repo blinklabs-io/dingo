@@ -386,6 +386,7 @@ func TestInboundConnectionLimit_RejectsOverLimit(t *testing.T) {
 			peerAddr:  "192.168.1.1:9999",
 			isInbound: true,
 		}
+		cm.inboundCount++
 	}
 	cm.connectionsMutex.Unlock()
 
@@ -422,6 +423,7 @@ func TestInboundConnectionLimit_RejectsOverLimit(t *testing.T) {
 	for k := range cm.connections {
 		delete(cm.connections, k)
 	}
+	cm.inboundCount = 0
 	cm.connectionsMutex.Unlock()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -462,6 +464,7 @@ func TestInboundConnectionLimit_AcceptsWithinLimit(t *testing.T) {
 		peerAddr:  "192.168.1.1:9999",
 		isInbound: true,
 	}
+	cm.inboundCount++
 	cm.connectionsMutex.Unlock()
 
 	err := cm.Start(context.Background())
@@ -492,6 +495,7 @@ func TestInboundConnectionLimit_AcceptsWithinLimit(t *testing.T) {
 	for k := range cm.connections {
 		delete(cm.connections, k)
 	}
+	cm.inboundCount = 0
 	cm.connectionsMutex.Unlock()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -782,6 +786,7 @@ func TestTryReserveInboundSlot_Concurrent(t *testing.T) {
 			peerAddr:  "192.168.1.1:9999",
 			isInbound: true,
 		}
+		cm.inboundCount++
 	}
 	cm.connectionsMutex.Unlock()
 
@@ -877,6 +882,7 @@ func TestTryReserveInboundSlot_ConsumeAndRelease(t *testing.T) {
 		peerAddr:  "10.0.0.1:40000",
 		isInbound: true,
 	}
+	cm.inboundCount++
 	cm.connectionsMutex.Unlock()
 
 	// Should still not be able to reserve (1 connection + 1 reservation = 2 = max)

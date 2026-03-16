@@ -192,6 +192,56 @@ func TestEventBusStop(t *testing.T) {
 	}
 }
 
+func TestEventBusClose(t *testing.T) {
+	var testEvtType event.EventType = "test.close"
+	eb := event.NewEventBus(nil, nil)
+	t.Cleanup(eb.Close)
+
+	_, subCh := eb.Subscribe(testEvtType)
+	doneCh := make(chan bool, 1)
+	eb.SubscribeFunc(testEvtType, func(evt event.Event) {
+		doneCh <- true
+	})
+
+	eb.Publish(testEvtType, event.NewEvent(testEvtType, "before"))
+	select {
+	case <-doneCh:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("SubscribeFunc did not receive event before Close")
+	}
+
+	eb.Close()
+
+	channelClosed := false
+	timeout := time.After(100 * time.Millisecond)
+	for !channelClosed {
+		select {
+		case _, ok := <-subCh:
+			if !ok {
+				channelClosed = true
+			}
+		case <-timeout:
+			t.Fatal("subscriber channel was not closed after Close")
+		}
+	}
+
+	if subId, ch := eb.Subscribe(testEvtType); subId != 0 || ch != nil {
+		t.Fatal("Subscribe should fail after Close")
+	}
+	if subId := eb.SubscribeFunc(testEvtType, func(event.Event) {}); subId != 0 {
+		t.Fatal("SubscribeFunc should fail after Close")
+	}
+	if ok := eb.PublishAsync(
+		testEvtType,
+		event.NewEvent(testEvtType, "after-close"),
+	); ok {
+		t.Fatal("PublishAsync should fail after Close")
+	}
+
+	// Close should be idempotent and must not restart the worker pool.
+	eb.Close()
+}
+
 func TestSubscribeFuncPanicRecovery(t *testing.T) {
 	var testEvtType event.EventType = "test.panic"
 	eb := event.NewEventBus(nil, nil)
