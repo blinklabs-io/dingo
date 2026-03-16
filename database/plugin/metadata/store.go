@@ -537,10 +537,6 @@ type MetadataStore interface {
 	// for transactions added after the given slot.
 	DeleteAddressTransactionsAfterSlot(uint64, types.Txn) error
 
-	// DeleteTransactionMetadataLabelsAfterSlot removes transaction metadata
-	// label index records added after the given slot.
-	DeleteTransactionMetadataLabelsAfterSlot(uint64, types.Txn) error
-
 	// Governance methods
 
 	// GetGovernanceProposal retrieves a governance proposal by transaction hash and action index.
