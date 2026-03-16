@@ -16,12 +16,12 @@ Hi folks! Here’s what we shipped in v0.27.1.
 ```json
 {
   "💪 Improvements": [
-    "Networking reuse decisions are now more consistent, which helps connections behave more predictably under load. The peer-governance logic now normalizes and exact-matches peer addresses for inbound reuse, only treats client-capable connections as eligible/reusable, and starts `TxSubmission` on duplex inbound connections, with updated and new tests.",
-    "Chain sync and delegation state handling are now more robust and efficient, reducing the chances of stalled sync or confusing state edge cases. The chainsync intersect point set is now denser/wider, stake snapshots and epoch summaries are upserted across DB backends with improved error reporting, and delegation state parsing now supports multiple account encodings with test coverage.",
-    "Dependency updates improve compatibility and reduce exposure to upstream bugs in third-party libraries. Go module versions were bumped for AWS SDK v2 (including S3 modules), `golang.org/x/net` and related `x/*` libraries, `google.golang.org/api` (and related libraries), plus `plutigo` v0.0.27 and `go-ethereum` v1.17.1 via `go.mod`/`go.sum` updates."
+    "Networking reuse decisions are now more consistent, which helps connections behave more predictably under load.",
+    "Chain sync and delegation state handling are now more robust and efficient, reducing the chances of stalled sync or confusing state edge cases.",
+    "Dependency updates improve compatibility and reduce exposure to upstream bugs in third-party libraries."
   ],
   "📋 What You Need to Know": [
-    "The project’s release notes documentation has been updated so it’s easier to track what shipped in the latest release. A new section for v0.27.0 was added to `RELEASE_NOTES.md`."
+    "The project’s release notes documentation has been updated so it’s easier to track what shipped in the latest release."
   ]
 }
 
