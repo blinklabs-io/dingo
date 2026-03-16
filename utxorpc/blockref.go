@@ -21,4 +21,3 @@ func blockRefFromModel(b models.Block) blockRef {
 		Height: b.Number,
 	}
 }
-

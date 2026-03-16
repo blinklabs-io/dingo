@@ -381,7 +381,7 @@ func (s *syncServiceServer) ReadTip(
 		err error
 	)
 	var model models.Block
-	model, err = s.utxorpc.config.LedgerState.BlockByHash(point.Hash)
+	model, err = s.utxorpc.config.LedgerState.GetBlock(point)
 	if err != nil {
 		s.utxorpc.config.Logger.Warn(
 			"failed to look up tip block for height; using height=0",
