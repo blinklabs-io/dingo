@@ -1,6 +1,40 @@
 # Release Notes
 
 
+## v0.27.1 (March 16, 2026)
+
+**Title:** Smoother reconnects and safer chain-sync
+
+**Date:** March 16, 2026
+
+**Version:** v0.27.1
+
+Hi folks! Here’s what we shipped in v0.27.1.
+
+### ✨ What's New
+
+- **Better chain-sync intersection:** Resuming sync is easier and faster because chain-sync uses a denser, wider set of intersect points to improve `ChainSync` intersection behavior.
+
+### 💪 Improvements
+
+- **Inbound connection reuse and `TxSubmission`:** Networking is more rock-solid on reconnect because peer reuse and governance now normalize exact peer addresses, require client-capable connections for reuse, and start `TxSubmission` on duplex inbound connections.
+- **Stake snapshot and epoch summary upserts:** Data storage is more consistent across supported databases because write paths now upsert across DB backends and report errors more clearly.
+- **More robust delegation parsing:** Delegation reads are more reliable because parsing now handles multiple account encodings with expanded tests.
+
+### 🔧 Fixes
+
+- **Dependency refresh:** Upgrades are less error-prone because Go modules were refreshed (including AWS SDK v2/S3, `golang.org/x/*`, `plutigo` v0.0.27, `go-ethereum` v1.17.1, and `google.golang.org/api` v0.271.0).
+
+### 📋 What You Need to Know
+
+- **Go module sync (some builds):** You’re all set for most setups, but if you vendor dependencies or run reproducible builds you may need to re-sync Go modules (update `go.mod`/`go.sum`) to pick up refreshed versions.
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
 ## v0.27.0 (March 15, 2026)
 
 **Title:** S3-backed CI tests and embedded network configs
