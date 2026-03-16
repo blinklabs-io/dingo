@@ -82,7 +82,11 @@ const (
 func (ls *LedgerState) handleEventChainsync(evt event.Event) {
 	ls.chainsyncMutex.Lock()
 	defer ls.chainsyncMutex.Unlock()
-	e := evt.Data.(ChainsyncEvent)
+	e, ok := evt.Data.(ChainsyncEvent)
+	if !ok {
+		ls.logUnexpectedChainsyncEventData("ChainsyncEvent", evt)
+		return
+	}
 	if e.Rollback {
 		if err := ls.handleEventChainsyncRollback(e); err != nil {
 			ls.config.Logger.Error(
@@ -140,7 +144,11 @@ func (ls *LedgerState) handleEventChainsync(evt event.Event) {
 func (ls *LedgerState) handleEventBlockfetch(evt event.Event) {
 	ls.chainsyncBlockfetchMutex.Lock()
 	defer ls.chainsyncBlockfetchMutex.Unlock()
-	e := evt.Data.(BlockfetchEvent)
+	e, ok := evt.Data.(BlockfetchEvent)
+	if !ok {
+		ls.logUnexpectedChainsyncEventData("BlockfetchEvent", evt)
+		return
+	}
 	if e.BatchDone {
 		if err := ls.handleEventBlockfetchBatchDone(e); err != nil {
 			ls.config.Logger.Error(
@@ -207,6 +215,21 @@ func (ls *LedgerState) handleEventBlockfetch(evt event.Event) {
 			}
 		}
 	}
+}
+
+func (ls *LedgerState) logUnexpectedChainsyncEventData(
+	expectedType string,
+	evt event.Event,
+) {
+	ls.config.Logger.Warn(
+		"received unexpected event data type",
+		"component", "ledger",
+		"expected", expectedType,
+		"data_type", fmt.Sprintf("%T", evt.Data),
+		"event_type", evt.Type,
+		"event_timestamp", evt.Timestamp,
+		"event", evt,
+	)
 }
 
 // detectConnectionSwitch checks for an active connection change and logs a
