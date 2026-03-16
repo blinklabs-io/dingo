@@ -190,7 +190,7 @@ jobs:
       - name: Attest Docker Hub image
         uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0 https://github.com/actions/attest/releases/tag/v4.1.0
         with:
-          subject-name: index.docker.io/blinklabs/dingo
+          subject-name: docker.io/blinklabs/dingo
           subject-digest: ${{ steps.push.outputs.digest }}
           push-to-registry: true
       - name: Attest GHCR image
@@ -234,7 +234,7 @@ jobs:
         if: matrix.arch == 'amd64'
         uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0 https://github.com/actions/attest/releases/tag/v4.1.0
         with:
-          subject-name: index.docker.io/blinklabs/dingo
+          subject-name: docker.io/blinklabs/dingo
           subject-digest: ${{ steps.antithesis-push.outputs.digest }}
           push-to-registry: true
       - name: Attest antithesis GHCR image
