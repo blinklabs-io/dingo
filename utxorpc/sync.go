@@ -94,6 +94,7 @@ func (s *syncServiceServer) FetchBlock(
 			Cardano: tmpBlock,
 		}
 		acb.Chain = &acbc
+		acb.NativeBytes = block.Cbor
 		resp.Block = append(resp.Block, &acb)
 	}
 
@@ -172,6 +173,7 @@ func (s *syncServiceServer) DumpHistory(
 			Cardano: tmpBlock,
 		}
 		acb.Chain = &acbc
+		acb.NativeBytes = block.Cbor
 		resp.Block = append(resp.Block, &acb)
 	}
 
@@ -285,6 +287,7 @@ func (s *syncServiceServer) FollowTip(
 				Cardano: tmpBlock,
 			}
 			acb.Chain = &acbc
+			acb.NativeBytes = next.Block.Cbor
 			resp := &sync.FollowTipResponse{
 				Action: &sync.FollowTipResponse_Apply{
 					Apply: &acb,
