@@ -79,6 +79,14 @@ func (cm *ChainManager) SetLedger(
 }
 
 func (cm *ChainManager) PrimaryChain() *Chain {
+	cm.mutex.RLock()
+	defer cm.mutex.RUnlock()
+	return cm.primaryChainLocked()
+}
+
+// primaryChainLocked returns the primary chain without acquiring the mutex.
+// The caller must already hold cm.mutex (read or write).
+func (cm *ChainManager) primaryChainLocked() *Chain {
 	if cm.chains == nil {
 		return nil
 	}
@@ -86,6 +94,8 @@ func (cm *ChainManager) PrimaryChain() *Chain {
 }
 
 func (cm *ChainManager) Chain(id ChainId) *Chain {
+	cm.mutex.RLock()
+	defer cm.mutex.RUnlock()
 	return cm.chains[id]
 }
 
@@ -93,7 +103,7 @@ func (cm *ChainManager) Chain(id ChainId) *Chain {
 func (cm *ChainManager) NewChain(point ocommon.Point) (*Chain, error) {
 	cm.mutex.Lock()
 	defer cm.mutex.Unlock()
-	primaryChain := cm.PrimaryChain()
+	primaryChain := cm.primaryChainLocked()
 	if primaryChain == nil {
 		return nil, errors.New("primary chain not available")
 	}
@@ -131,7 +141,7 @@ func (cm *ChainManager) NewChainFromIntersect(
 ) (*Chain, error) {
 	cm.mutex.Lock()
 	defer cm.mutex.Unlock()
-	primaryChain := cm.PrimaryChain()
+	primaryChain := cm.primaryChainLocked()
 	if primaryChain == nil {
 		return nil, errors.New("primary chain not available")
 	}

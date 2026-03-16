@@ -1014,7 +1014,7 @@ func (c *Chain) reconcile() error {
 		return nil
 	}
 	// Check our blocks against primary chain until we find a match
-	primaryChain := c.manager.PrimaryChain()
+	primaryChain := c.manager.primaryChainLocked()
 	if primaryChain == nil {
 		return models.ErrBlockNotFound
 	}
