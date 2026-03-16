@@ -125,13 +125,17 @@ func (p *PeerGovernor) LoadTopologyConfig(
 	p.peers = tmpPeers
 	// Add topology bootstrap peers
 	now := time.Now()
+	var bootstrapSource PeerSource = PeerSourceTopologyBootstrapPeer
+	if p.bootstrapExited {
+		bootstrapSource = PeerSourceTopologyPublicRoot
+	}
 	for _, resolved := range bootstrapResolved {
 		p.peers = append(
 			p.peers,
 			&Peer{
 				Address:           resolved.address,
 				NormalizedAddress: resolved.normalized,
-				Source:            PeerSourceTopologyBootstrapPeer,
+				Source:            bootstrapSource,
 				State:             PeerStateCold,
 				EMAAlpha:          p.config.EMAAlpha,
 				FirstSeen:         now,

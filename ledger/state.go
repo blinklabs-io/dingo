@@ -485,6 +485,7 @@ type LedgerState struct {
 	syncProgressLastLog  time.Time     // last time we logged sync progress
 	syncProgressLastSlot uint64        // slot at last progress log (for rate calc)
 	syncUpstreamTipSlot  atomic.Uint64 // upstream peer's tip slot
+	nextNonceReadyEpoch  atomic.Uint64 // last ready epoch emitted for next-epoch nonce stability
 
 	// Rate-limiting for non-active connection drop messages (Fix 3)
 	dropEventLastLog    time.Time // last time we logged a drop event
@@ -1005,8 +1006,9 @@ func (ls *LedgerState) initForge() {
 }
 
 // handleSlotTicks processes slot tick notifications from the slot clock.
-// When an epoch boundary is detected via slot timing, it can emit an
-// EpochTransitionEvent for subscribers like snapshot managers and leader election.
+// When the current epoch crosses the nonce stability cutoff or reaches an
+// epoch boundary, it emits events for subscribers like snapshot managers and
+// leader election.
 //
 // The slot clock provides proactive epoch detection that doesn't depend on block
 // arrival. This is critical for block production where the node must wake up at
@@ -1021,10 +1023,6 @@ func (ls *LedgerState) handleSlotTicks() {
 	logger := ls.config.Logger.With("component", "ledger")
 
 	for tick := range ls.slotTickChan {
-		if !tick.IsEpochStart {
-			continue
-		}
-
 		// Get current state snapshot
 		ls.RLock()
 		currentEpoch := ls.currentEpoch
@@ -1037,15 +1035,28 @@ func (ls *LedgerState) handleSlotTicks() {
 		// consider the node "near tip" when the ledger tip is within 95%
 		// of the upstream peer's tip slot.
 		if !ls.isNearTip(tipSlot) {
-			logger.Debug(
-				"slot clock epoch boundary during catch up (suppressed)",
-				"slot_clock_epoch",
-				tick.Epoch,
-				"ledger_epoch",
-				currentEpoch.EpochId,
-				"slot",
-				tick.Slot,
-			)
+			if tick.IsEpochStart {
+				logger.Debug(
+					"slot clock epoch boundary during catch up (suppressed)",
+					"slot_clock_epoch",
+					tick.Epoch,
+					"ledger_epoch",
+					currentEpoch.EpochId,
+					"slot",
+					tick.Slot,
+				)
+			}
+			continue
+		}
+
+		ls.emitNextEpochNonceReady(
+			logger,
+			tick,
+			currentEpoch,
+			currentEra,
+		)
+
+		if !tick.IsEpochStart {
 			continue
 		}
 
@@ -1114,6 +1125,49 @@ func (ls *LedgerState) handleSlotTicks() {
 			)
 		}
 	}
+}
+
+func (ls *LedgerState) emitNextEpochNonceReady(
+	logger *slog.Logger,
+	tick SlotTick,
+	currentEpoch models.Epoch,
+	currentEra eras.EraDesc,
+) {
+	if ls.config.EventBus == nil || currentEra.Id == 0 {
+		return
+	}
+	// Only publish when wall-clock and ledger agree on the current epoch.
+	if tick.Epoch != currentEpoch.EpochId {
+		return
+	}
+
+	cutoffSlot, ready := ls.nextEpochNonceReadyCutoffSlot(currentEpoch)
+	if !ready || tick.Slot < cutoffSlot {
+		return
+	}
+
+	readyEpoch := currentEpoch.EpochId + 1
+	if ls.nextNonceReadyEpoch.Load() == readyEpoch {
+		return
+	}
+	ls.nextNonceReadyEpoch.Store(readyEpoch)
+
+	readyEvent := event.EpochNonceReadyEvent{
+		CurrentEpoch: currentEpoch.EpochId,
+		ReadyEpoch:   readyEpoch,
+		CutoffSlot:   cutoffSlot,
+	}
+	ls.config.EventBus.Publish(
+		event.EpochNonceReadyEventType,
+		event.NewEvent(event.EpochNonceReadyEventType, readyEvent),
+	)
+	logger.Info(
+		"next epoch nonce is stable, leader schedule can be precomputed",
+		"current_epoch", currentEpoch.EpochId,
+		"ready_epoch", readyEpoch,
+		"cutoff_slot", cutoffSlot,
+		"slot", tick.Slot,
+	)
 }
 
 // isNearTip returns true when the given slot is within 95% of the
@@ -3136,6 +3190,47 @@ func (ls *LedgerState) CurrentEpoch() uint64 {
 	return ls.currentEpoch.EpochId
 }
 
+// NextEpochNonceReadyEpoch reports the upcoming epoch when the current
+// epoch has already crossed the nonce stability cutoff and the next leader
+// schedule can be precomputed immediately.
+func (ls *LedgerState) NextEpochNonceReadyEpoch() (uint64, bool) {
+	ls.RLock()
+	currentEpoch := ls.currentEpoch
+	currentEra := ls.currentEra
+	tipSlot := ls.currentTip.Point.Slot
+	ls.RUnlock()
+
+	if currentEra.Id == 0 {
+		return 0, false
+	}
+
+	currentSlot, err := ls.CurrentSlot()
+	if err != nil {
+		return 0, false
+	}
+
+	epochLength := uint64(currentEpoch.LengthInSlots)
+	if epochLength == 0 {
+		return 0, false
+	}
+	epochEndSlot := currentEpoch.StartSlot + epochLength
+	if currentSlot < currentEpoch.StartSlot || currentSlot >= epochEndSlot {
+		return 0, false
+	}
+
+	cutoffSlot, ready := ls.nextEpochNonceReadyCutoffSlot(currentEpoch)
+	if !ready || currentSlot < cutoffSlot || tipSlot < cutoffSlot {
+		return 0, false
+	}
+
+	readyEpoch := currentEpoch.EpochId + 1
+	if len(ls.EpochNonce(readyEpoch)) == 0 {
+		return 0, false
+	}
+
+	return readyEpoch, true
+}
+
 // EpochNonce returns the nonce for the given epoch.
 // The epoch nonce is used for VRF-based leader election.
 // Returns nil if the epoch nonce is not available (e.g., for Byron era).
@@ -3192,6 +3287,23 @@ func (ls *LedgerState) EpochNonce(epoch uint64) []byte {
 	nonce := make([]byte, len(ep.Nonce))
 	copy(nonce, ep.Nonce)
 	return nonce
+}
+
+// nextEpochNonceReadyCutoffSlot returns the slot at which the current epoch's
+// candidate nonce stops changing, which is when the next epoch's nonce is
+// stable and the next leader schedule can be precomputed.
+func (ls *LedgerState) nextEpochNonceReadyCutoffSlot(
+	currentEpoch models.Epoch,
+) (uint64, bool) {
+	epochLength := uint64(currentEpoch.LengthInSlots)
+	if epochLength == 0 {
+		return 0, false
+	}
+	stabilityWindow := ls.nonceStabilityWindow()
+	if stabilityWindow >= epochLength {
+		return currentEpoch.StartSlot, true
+	}
+	return currentEpoch.StartSlot + epochLength - stabilityWindow, true
 }
 
 // computeNextEpochNonce speculatively computes the epoch nonce for the

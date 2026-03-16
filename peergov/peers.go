@@ -303,6 +303,43 @@ func (p *PeerGovernor) SetPeerHotByConnId(connId ouroboros.ConnectionId) {
 	}
 }
 
+func (p *PeerGovernor) IsChainSelectionEligible(
+	connId ouroboros.ConnectionId,
+) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	peerIdx := p.peerIndexByConnId(connId)
+	if peerIdx == -1 || p.peers[peerIdx] == nil {
+		return false
+	}
+	return p.peers[peerIdx].Source != PeerSourceInboundConn
+}
+
+func (p *PeerGovernor) ChainSelectionPriority(
+	connId ouroboros.ConnectionId,
+) int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	peerIdx := p.peerIndexByConnId(connId)
+	if peerIdx == -1 || p.peers[peerIdx] == nil {
+		return 0
+	}
+	switch p.peers[peerIdx].Source {
+	case PeerSourceTopologyLocalRoot:
+		return 50
+	case PeerSourceTopologyBootstrapPeer:
+		return 40
+	case PeerSourceTopologyPublicRoot:
+		return 30
+	case PeerSourceP2PGossip:
+		return 20
+	case PeerSourceP2PLedger:
+		return 10
+	default:
+		return 0
+	}
+}
+
 func (p *PeerGovernor) UpdatePeerBlockFetchObservation(
 	connId ouroboros.ConnectionId,
 	latencyMs float64,

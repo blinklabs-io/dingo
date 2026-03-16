@@ -206,6 +206,53 @@ func TestKESEvolution(t *testing.T) {
 	assert.Equal(t, uint64(3), ks.CurrentKESPeriod())
 }
 
+func TestKESEvolutionUsesOpCertStartPeriod(t *testing.T) {
+	vrfPath, kesPath, opCertPath := setupTestKeys(t)
+
+	config := KeyStoreConfig{
+		VRFSKeyPath: vrfPath,
+		KESSKeyPath: kesPath,
+		OpCertPath:  opCertPath,
+	}
+
+	ks := NewKeyStore(config)
+	require.NoError(t, ks.LoadFromFiles())
+
+	ks.opCert.KESPeriod = 100
+
+	require.NoError(t, ks.EvolveKESTo(105))
+	assert.Equal(t, uint64(5), ks.CurrentKESPeriod())
+
+	kesSigner := ks.KESSigner()
+	require.NotNil(t, kesSigner)
+	message := []byte("shifted opcert KES sign")
+	signature, err := kesSigner.Sign(105, message)
+	require.NoError(t, err)
+
+	ok := kes.VerifySignedKES(kesSigner.VKey(), 5, message, signature)
+	assert.True(t, ok, "KES signature verification failed at relative period 5")
+}
+
+func TestKESEvolutionRejectsBeforeOpCertStart(t *testing.T) {
+	vrfPath, kesPath, opCertPath := setupTestKeys(t)
+
+	config := KeyStoreConfig{
+		VRFSKeyPath: vrfPath,
+		KESSKeyPath: kesPath,
+		OpCertPath:  opCertPath,
+	}
+
+	ks := NewKeyStore(config)
+	require.NoError(t, ks.LoadFromFiles())
+
+	ks.opCert.KESPeriod = 100
+
+	err := ks.EvolveKESTo(99)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "before opcert start")
+	assert.Equal(t, uint64(0), ks.CurrentKESPeriod())
+}
+
 func TestOpCertValidation(t *testing.T) {
 	vrfPath, kesPath, opCertPath := setupTestKeys(t)
 

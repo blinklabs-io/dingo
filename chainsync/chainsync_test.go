@@ -815,6 +815,43 @@ func TestPruneSeenHeaders(t *testing.T) {
 	require.False(t, isNew)
 }
 
+func TestClearSeenHeadersFrom(t *testing.T) {
+	bus := newTestEventBus(t)
+	s := newTestState(t, bus, chainsync.DefaultConfig())
+
+	connA := newTestConnId(1)
+	connB := newTestConnId(2)
+	s.AddClientConnId(connA)
+	s.AddClientConnId(connB)
+
+	s.UpdateClientTip(connA,
+		ocommon.NewPoint(50, []byte("old")),
+		ochainsync.Tip{Point: ocommon.NewPoint(50, []byte("old"))})
+	s.UpdateClientTip(connA,
+		ocommon.NewPoint(100, []byte("keep")),
+		ochainsync.Tip{Point: ocommon.NewPoint(100, []byte("keep"))})
+	s.UpdateClientTip(connA,
+		ocommon.NewPoint(150, []byte("replay")),
+		ochainsync.Tip{Point: ocommon.NewPoint(150, []byte("replay"))})
+
+	s.ClearSeenHeadersFrom(100)
+
+	isNew := s.UpdateClientTip(connB,
+		ocommon.NewPoint(50, []byte("old")),
+		ochainsync.Tip{Point: ocommon.NewPoint(50, []byte("old"))})
+	require.False(t, isNew)
+
+	isNew = s.UpdateClientTip(connB,
+		ocommon.NewPoint(100, []byte("keep")),
+		ochainsync.Tip{Point: ocommon.NewPoint(100, []byte("keep"))})
+	require.True(t, isNew)
+
+	isNew = s.UpdateClientTip(connB,
+		ocommon.NewPoint(150, []byte("replay")),
+		ochainsync.Tip{Point: ocommon.NewPoint(150, []byte("replay"))})
+	require.True(t, isNew)
+}
+
 // --- Config tests ---
 
 func TestDefaultConfig(t *testing.T) {

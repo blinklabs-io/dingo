@@ -232,10 +232,10 @@ func (ls *LedgerState) detectConnectionSwitch() (activeConnId *ouroboros.Connect
 			ls.dropEventCount = 0
 			ls.dropRollbackCount = 0
 			ls.headerMismatchCount = 0
-			// Clear header queue and blockfetch state from old
-			// connection so stale headers don't block the new
-			// connection's blockfetch pipeline.
-			ls.chain.ClearHeaders()
+			// Reset blockfetch state, but preserve queued headers. Valid
+			// headers remain valid across peer switches, and clearing them
+			// forces the sync pipeline to restart from scratch on every
+			// selector churn event.
 			ls.chainsyncBlockfetchMutex.Lock()
 			ls.blockfetchRequestRangeCleanup()
 			ls.activeBlockfetchConnId = ouroboros.ConnectionId{}
@@ -842,10 +842,6 @@ func (ls *LedgerState) tryResolveFork(
 
 //nolint:unparam
 func (ls *LedgerState) handleEventBlockfetchBlock(e BlockfetchEvent) error {
-	// Drop blocks from a stale connection (e.g., after connection switch)
-	if e.ConnectionId != ls.activeBlockfetchConnId {
-		return nil
-	}
 	// Process blocks in small commit batches so they appear on the
 	// chain promptly without paying a full blob transaction cost for
 	// every single block. We still flush well before BatchDone to

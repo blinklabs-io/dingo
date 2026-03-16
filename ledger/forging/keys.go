@@ -134,9 +134,26 @@ func (pc *PoolCredentials) LoadFromFiles(
 	return nil
 }
 
-// UpdateKESPeriod updates the KES key to the specified absolute period.
-// The absolute period is converted to a relative period using the opcert
-// start KES period before evolving.
+func (pc *PoolCredentials) relativeKESPeriodUnsafe(
+	absolutePeriod uint64,
+) (uint64, error) {
+	if pc.opCert == nil {
+		return absolutePeriod, nil
+	}
+	if absolutePeriod < pc.opCert.KESPeriod {
+		return 0, fmt.Errorf(
+			"current KES period %d is before opcert start period %d",
+			absolutePeriod,
+			pc.opCert.KESPeriod,
+		)
+	}
+	return absolutePeriod - pc.opCert.KESPeriod, nil
+}
+
+// UpdateKESPeriod evolves the KES key to the specified ABSOLUTE period.
+// The secret key itself tracks the relative period within the opcert window,
+// so we translate chain KES periods by subtracting the opcert start period
+// when an opcert is loaded.
 func (pc *PoolCredentials) UpdateKESPeriod(period uint64) error {
 	pc.mu.Lock()
 	defer pc.mu.Unlock()
@@ -145,24 +162,16 @@ func (pc *PoolCredentials) UpdateKESPeriod(period uint64) error {
 		return errors.New("KES key not loaded")
 	}
 
-	// Convert absolute KES period to relative (0-based from opcert start)
-	relativePeriod := period
-	if pc.opCert != nil {
-		if period < pc.opCert.KESPeriod {
-			return fmt.Errorf(
-				"absolute KES period %d is before opcert start period %d",
-				period,
-				pc.opCert.KESPeriod,
-			)
-		}
-		relativePeriod = period - pc.opCert.KESPeriod
+	targetPeriod, err := pc.relativeKESPeriodUnsafe(period)
+	if err != nil {
+		return err
 	}
 
-	if relativePeriod < pc.kesSKey.Period {
+	if targetPeriod < pc.kesSKey.Period {
 		return fmt.Errorf(
 			"cannot evolve KES key backward: current period %d, requested %d (absolute %d)",
 			pc.kesSKey.Period,
-			relativePeriod,
+			targetPeriod,
 			period,
 		)
 	}
@@ -170,12 +179,12 @@ func (pc *PoolCredentials) UpdateKESPeriod(period uint64) error {
 	// Evolve KES key to the target period. kes.Update returns a new SecretKey
 	// with a deep copy of the data, so pc.kesSKey is only replaced on success.
 	evolvedKey := pc.kesSKey
-	for evolvedKey.Period < relativePeriod {
+	for evolvedKey.Period < targetPeriod {
 		newKey, err := kes.Update(evolvedKey)
 		if err != nil {
 			return fmt.Errorf(
 				"failed to update KES key to period %d (absolute %d): %w",
-				relativePeriod,
+				targetPeriod,
 				period,
 				err,
 			)
@@ -204,9 +213,12 @@ func (pc *PoolCredentials) VRFProve(alpha []byte) ([]byte, []byte, error) {
 	return proof, output, nil
 }
 
-// KESSign signs a message with the KES key at the specified absolute period.
-// The absolute period is converted to a relative period using the opcert
-// start KES period before signing.
+// KESSign signs a message with the KES key at the specified ABSOLUTE period.
+//
+// IMPORTANT: Callers must ensure UpdateKESPeriod(period) was called before KESSign
+// to evolve the key to the correct period. The kes.Sign function expects the key
+// to already be at the relative period within the opcert window when an opcert
+// is loaded.
 func (pc *PoolCredentials) KESSign(period uint64, message []byte) ([]byte, error) {
 	pc.mu.RLock()
 	defer pc.mu.RUnlock()
@@ -215,22 +227,19 @@ func (pc *PoolCredentials) KESSign(period uint64, message []byte) ([]byte, error
 		return nil, errors.New("KES key not loaded")
 	}
 
-	// Convert absolute KES period to relative (0-based from opcert start)
-	relativePeriod := period
-	if pc.opCert != nil {
-		if period < pc.opCert.KESPeriod {
-			return nil, fmt.Errorf(
-				"absolute KES period %d is before opcert start period %d",
-				period,
-				pc.opCert.KESPeriod,
-			)
-		}
-		relativePeriod = period - pc.opCert.KESPeriod
+	relativePeriod, err := pc.relativeKESPeriodUnsafe(period)
+	if err != nil {
+		return nil, err
 	}
 
 	sig, err := kes.Sign(pc.kesSKey, relativePeriod, message)
 	if err != nil {
-		return nil, fmt.Errorf("KESSign period %d (relative %d): %w", period, relativePeriod, err)
+		return nil, fmt.Errorf(
+			"KESSign relative period %d (absolute %d): %w",
+			relativePeriod,
+			period,
+			err,
+		)
 	}
 	return sig, nil
 }

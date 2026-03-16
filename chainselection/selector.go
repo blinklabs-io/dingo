@@ -79,6 +79,8 @@ type ChainSelectorConfig struct {
 	EvaluationInterval time.Duration
 	StaleTipThreshold  time.Duration
 	SecurityParam      uint64
+	ConnectionEligible func(ouroboros.ConnectionId) bool
+	ConnectionPriority func(ouroboros.ConnectionId) int
 	MaxTrackedPeers    int // 0 means use DefaultMaxTrackedPeers
 }
 
@@ -233,7 +235,11 @@ func (cs *ChainSelector) UpdatePeerTip(
 		// Check if this peer's tip is better than the current best peer's tip
 		if cs.bestPeerConn != nil {
 			if bestPeerTip, ok := cs.peerTips[*cs.bestPeerConn]; ok {
-				if IsBetterChain(tip, bestPeerTip.Tip) {
+				comparison := CompareChains(tip, bestPeerTip.Tip)
+				if comparison == ChainABetter ||
+					(comparison == ChainEqual &&
+						cs.connectionPriority(connId) >
+							cs.connectionPriority(*cs.bestPeerConn)) {
 					shouldEvaluate = true
 				}
 			}
@@ -470,6 +476,13 @@ func (cs *ChainSelector) selectBestChainLocked() *ouroboros.ConnectionId {
 	var bestPeerTip *PeerChainTip
 
 	for connId, peerTip := range cs.peerTips {
+		if !cs.isConnectionEligible(connId) {
+			cs.config.Logger.Debug(
+				"skipping ineligible peer",
+				"connection_id", connId.String(),
+			)
+			continue
+		}
 		// Don't consider peers that are implausibly far behind local tip.
 		// This prevents switching to stale or cross-network peers when
 		// local tip and k are known.
@@ -505,6 +518,16 @@ func (cs *ChainSelector) selectBestChainLocked() *ouroboros.ConnectionId {
 			bestConnId = connId
 			bestPeerTip = peerTip
 		case ChainEqual:
+			newPriority := cs.connectionPriority(connId)
+			bestPriority := cs.connectionPriority(bestConnId)
+			if newPriority > bestPriority {
+				bestConnId = connId
+				bestPeerTip = peerTip
+				continue
+			}
+			if newPriority < bestPriority {
+				continue
+			}
 			// VRF tiebreaker: lower VRF output wins (per Ouroboros Praos)
 			vrfComparison := CompareVRFOutputs(
 				peerTip.VRFOutput,
@@ -536,6 +559,24 @@ func (cs *ChainSelector) selectBestChainLocked() *ouroboros.ConnectionId {
 	return &bestConnId
 }
 
+func (cs *ChainSelector) isConnectionEligible(
+	connId ouroboros.ConnectionId,
+) bool {
+	if cs.config.ConnectionEligible == nil {
+		return true
+	}
+	return cs.config.ConnectionEligible(connId)
+}
+
+func (cs *ChainSelector) connectionPriority(
+	connId ouroboros.ConnectionId,
+) int {
+	if cs.config.ConnectionPriority == nil {
+		return 0
+	}
+	return cs.config.ConnectionPriority(connId)
+}
+
 // EvaluateAndSwitch evaluates all peer tips and switches to the best chain if
 // it differs from the current best. Returns true if a switch occurred.
 func (cs *ChainSelector) EvaluateAndSwitch() bool {
@@ -556,6 +597,28 @@ func (cs *ChainSelector) EvaluateAndSwitch() bool {
 		}
 
 		previousBest := cs.bestPeerConn
+		if previousBest != nil && *previousBest != *newBest {
+			previousPeerTip, ok := cs.peerTips[*previousBest]
+			if ok {
+				newPeerTip, ok := cs.peerTips[*newBest]
+				if !ok {
+					return
+				}
+				// Preserve the incumbent unless the challenger is strictly ahead.
+				// This avoids pointless peer churn on equal-height forks, which
+				// tears down the downstream sync pipeline without improving chain
+				// progress.
+				if newPeerTip.Tip.BlockNumber <
+					previousPeerTip.Tip.BlockNumber {
+					newBest = previousBest
+				} else if newPeerTip.Tip.BlockNumber ==
+					previousPeerTip.Tip.BlockNumber &&
+					cs.connectionPriority(*newBest) <=
+						cs.connectionPriority(*previousBest) {
+					newBest = previousBest
+				}
+			}
+		}
 
 		if previousBest == nil || *previousBest != *newBest {
 			newPeerTip, ok := cs.peerTips[*newBest]

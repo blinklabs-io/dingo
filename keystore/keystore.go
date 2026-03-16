@@ -442,7 +442,23 @@ func (ks *KeyStore) CurrentKESPeriod() uint64 {
 	return ks.kesSKey.Period
 }
 
-// EvolveKESTo evolves the KES key to the specified period.
+func (ks *KeyStore) relativeKESPeriodUnsafe(
+	absolutePeriod uint64,
+) (uint64, error) {
+	if ks.opCert == nil {
+		return 0, ErrOpCertNotLoaded
+	}
+	if absolutePeriod < ks.opCert.KESPeriod {
+		return 0, fmt.Errorf(
+			"current KES period %d is before opcert start %d",
+			absolutePeriod,
+			ks.opCert.KESPeriod,
+		)
+	}
+	return absolutePeriod - ks.opCert.KESPeriod, nil
+}
+
+// EvolveKESTo evolves the KES key to the specified ABSOLUTE period.
 func (ks *KeyStore) EvolveKESTo(targetPeriod uint64) error {
 	ks.mu.Lock()
 	defer ks.mu.Unlock()
@@ -454,12 +470,18 @@ func (ks *KeyStore) evolveKESToUnsafe(targetPeriod uint64) error {
 		return ErrKESKeyNotLoaded
 	}
 
-	for ks.kesSKey.Period < targetPeriod {
+	relativeTarget, err := ks.relativeKESPeriodUnsafe(targetPeriod)
+	if err != nil {
+		return err
+	}
+
+	for ks.kesSKey.Period < relativeTarget {
 		oldKey := ks.kesSKey
 		newKey, err := kes.Update(oldKey)
 		if err != nil {
 			return fmt.Errorf(
-				"failed to evolve KES key to period %d: %w",
+				"failed to evolve KES key to period %d (absolute %d): %w",
+				relativeTarget,
 				targetPeriod,
 				err,
 			)
@@ -605,7 +627,12 @@ func (k *kesSignerImpl) Sign(period uint64, message []byte) ([]byte, error) {
 		return nil, ErrKESKeyNotLoaded
 	}
 
-	return kes.Sign(k.ks.kesSKey, period, message)
+	relativePeriod, err := k.ks.relativeKESPeriodUnsafe(period)
+	if err != nil {
+		return nil, err
+	}
+
+	return kes.Sign(k.ks.kesSKey, relativePeriod, message)
 }
 
 func (k *kesSignerImpl) VKey() []byte {

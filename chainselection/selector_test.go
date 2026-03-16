@@ -235,6 +235,162 @@ func TestChainSelectorEvaluateAndSwitch(t *testing.T) {
 	assert.False(t, switched)
 }
 
+func TestIncumbentAdvantageNoSwitchAtEqualBlockNumber(t *testing.T) {
+	cs := NewChainSelector(ChainSelectorConfig{})
+
+	connId1 := newTestConnectionId(1)
+	connId2 := newTestConnectionId(2)
+
+	cs.UpdatePeerTip(connId1, ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 100, Hash: []byte("tip1")},
+		BlockNumber: 50,
+	}, nil)
+	require.NotNil(t, cs.GetBestPeer())
+	assert.Equal(t, connId1, *cs.GetBestPeer())
+
+	cs.UpdatePeerTip(connId2, ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 101, Hash: []byte("tip2")},
+		BlockNumber: 50,
+	}, nil)
+	require.NotNil(t, cs.GetBestPeer())
+	assert.Equal(t, connId1, *cs.GetBestPeer())
+}
+
+func TestIncumbentAdvantageSwitchesWhenBehind(t *testing.T) {
+	cs := NewChainSelector(ChainSelectorConfig{})
+
+	connId1 := newTestConnectionId(1)
+	connId2 := newTestConnectionId(2)
+
+	cs.UpdatePeerTip(connId1, ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 100, Hash: []byte("tip1")},
+		BlockNumber: 50,
+	}, nil)
+	require.NotNil(t, cs.GetBestPeer())
+	assert.Equal(t, connId1, *cs.GetBestPeer())
+
+	cs.UpdatePeerTip(connId2, ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 101, Hash: []byte("tip2")},
+		BlockNumber: 51,
+	}, nil)
+	require.NotNil(t, cs.GetBestPeer())
+	assert.Equal(t, connId2, *cs.GetBestPeer())
+}
+
+func TestNoOscillationWithMultiplePeersAtSameTip(t *testing.T) {
+	cs := NewChainSelector(ChainSelectorConfig{})
+
+	connId1 := newTestConnectionId(1)
+	connId2 := newTestConnectionId(2)
+	connId3 := newTestConnectionId(3)
+
+	for _, peer := range []struct {
+		conn ouroboros.ConnectionId
+		slot uint64
+		hash []byte
+	}{
+		{conn: connId1, slot: 100, hash: []byte("tip1")},
+		{conn: connId2, slot: 101, hash: []byte("tip2")},
+		{conn: connId3, slot: 102, hash: []byte("tip3")},
+	} {
+		cs.UpdatePeerTip(peer.conn, ochainsync.Tip{
+			Point:       ocommon.Point{Slot: peer.slot, Hash: peer.hash},
+			BlockNumber: 50,
+		}, nil)
+	}
+
+	require.NotNil(t, cs.GetBestPeer())
+	assert.Equal(t, connId1, *cs.GetBestPeer())
+
+	cs.UpdatePeerTip(connId2, ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 103, Hash: []byte("tip2b")},
+		BlockNumber: 50,
+	}, nil)
+	require.NotNil(t, cs.GetBestPeer())
+	assert.Equal(t, connId1, *cs.GetBestPeer())
+}
+
+func TestChainSelectorSkipsIneligiblePeers(t *testing.T) {
+	ineligibleConn := newTestConnectionId(1)
+	eligibleConn := newTestConnectionId(2)
+	cs := NewChainSelector(ChainSelectorConfig{
+		ConnectionEligible: func(connId ouroboros.ConnectionId) bool {
+			return connId != ineligibleConn
+		},
+	})
+
+	cs.UpdatePeerTip(ineligibleConn, ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 120, Hash: []byte("tip1")},
+		BlockNumber: 60,
+	}, nil)
+	assert.Nil(t, cs.GetBestPeer())
+
+	cs.UpdatePeerTip(eligibleConn, ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 110, Hash: []byte("tip2")},
+		BlockNumber: 50,
+	}, nil)
+	require.NotNil(t, cs.GetBestPeer())
+	assert.Equal(t, eligibleConn, *cs.GetBestPeer())
+
+	bestPeer := cs.SelectBestChain()
+	require.NotNil(t, bestPeer)
+	assert.Equal(t, eligibleConn, *bestPeer)
+}
+
+func TestChainSelectorDoesNotSwitchToIneligiblePeerAfterDisconnect(t *testing.T) {
+	eligibleConn := newTestConnectionId(1)
+	ineligibleConn := newTestConnectionId(2)
+	cs := NewChainSelector(ChainSelectorConfig{
+		ConnectionEligible: func(connId ouroboros.ConnectionId) bool {
+			return connId != ineligibleConn
+		},
+	})
+
+	cs.UpdatePeerTip(eligibleConn, ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 100, Hash: []byte("tip1")},
+		BlockNumber: 50,
+	}, nil)
+	cs.UpdatePeerTip(ineligibleConn, ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 110, Hash: []byte("tip2")},
+		BlockNumber: 60,
+	}, nil)
+	require.NotNil(t, cs.GetBestPeer())
+	assert.Equal(t, eligibleConn, *cs.GetBestPeer())
+
+	cs.RemovePeer(eligibleConn)
+	assert.Nil(t, cs.GetBestPeer())
+}
+
+func TestChainSelectorPrefersHigherPriorityPeerAtEqualTip(t *testing.T) {
+	publicRootConn := newTestConnectionId(1)
+	localRootConn := newTestConnectionId(2)
+	cs := NewChainSelector(ChainSelectorConfig{
+		ConnectionPriority: func(connId ouroboros.ConnectionId) int {
+			switch connId {
+			case localRootConn:
+				return 20
+			case publicRootConn:
+				return 10
+			default:
+				return 0
+			}
+		},
+	})
+
+	equalTip := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 120, Hash: []byte("equal-tip")},
+		BlockNumber: 60,
+	}
+
+	cs.UpdatePeerTip(publicRootConn, equalTip, nil)
+	require.NotNil(t, cs.GetBestPeer())
+	assert.Equal(t, publicRootConn, *cs.GetBestPeer())
+
+	cs.UpdatePeerTip(localRootConn, equalTip, nil)
+	require.NotNil(t, cs.GetBestPeer())
+	assert.Equal(t, localRootConn, *cs.GetBestPeer())
+}
+
 func TestChainSelectorStalePeerFiltering(t *testing.T) {
 	cs := NewChainSelector(ChainSelectorConfig{
 		StaleTipThreshold: 100 * time.Millisecond,

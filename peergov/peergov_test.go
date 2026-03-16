@@ -485,6 +485,43 @@ func TestPeerGovernor_SetPeerHotByConnId(t *testing.T) {
 	assert.True(t, peers[0].LastActivity.After(time.Now().Add(-1*time.Second)))
 }
 
+func TestPeerGovernor_IsChainSelectionEligible(t *testing.T) {
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+	})
+
+	pg.AddPeer("44.0.0.1:3001", PeerSourceP2PGossip)
+	pg.AddPeer("44.0.0.1:3002", PeerSourceInboundConn)
+
+	outboundLocalAddr, _ := net.ResolveTCPAddr("tcp", "44.0.0.1:3001")
+	outboundRemoteAddr, _ := net.ResolveTCPAddr("tcp", "44.0.0.1:3003")
+	outboundConnId := ouroboros.ConnectionId{
+		LocalAddr:  outboundLocalAddr,
+		RemoteAddr: outboundRemoteAddr,
+	}
+	inboundLocalAddr, _ := net.ResolveTCPAddr("tcp", "44.0.0.1:3001")
+	inboundRemoteAddr, _ := net.ResolveTCPAddr("tcp", "44.0.0.1:3004")
+	inboundConnId := ouroboros.ConnectionId{
+		LocalAddr:  inboundLocalAddr,
+		RemoteAddr: inboundRemoteAddr,
+	}
+
+	pg.mu.Lock()
+	pg.peers[0].Connection = &PeerConnection{Id: outboundConnId}
+	pg.peers[1].Connection = &PeerConnection{Id: inboundConnId}
+	pg.mu.Unlock()
+
+	assert.True(t, pg.IsChainSelectionEligible(outboundConnId))
+	assert.False(t, pg.IsChainSelectionEligible(inboundConnId))
+	missingLocalAddr, _ := net.ResolveTCPAddr("tcp", "44.0.0.1:3001")
+	missingRemoteAddr, _ := net.ResolveTCPAddr("tcp", "44.0.0.1:3099")
+	missingConnId := ouroboros.ConnectionId{
+		LocalAddr:  missingLocalAddr,
+		RemoteAddr: missingRemoteAddr,
+	}
+	assert.False(t, pg.IsChainSelectionEligible(missingConnId))
+}
+
 func TestPeerGovernor_HandleInboundConnection(t *testing.T) {
 	eventBus := newMockEventBus()
 	reg := prometheus.NewRegistry()
@@ -2021,6 +2058,27 @@ func TestPeerGovernor_LoadTopologyConfig_ValencyStored(t *testing.T) {
 		}
 	}
 	assert.Equal(t, 1, publicRootCount, "should have 1 public root peer")
+}
+
+func TestPeerGovernor_LoadTopologyConfig_ExitedBootstrapUsesPublicRoots(
+	t *testing.T,
+) {
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+	})
+	pg.bootstrapExited = true
+
+	topologyConfig := &topology.TopologyConfig{
+		BootstrapPeers: []topology.TopologyConfigP2PBootstrapPeer{
+			{Address: "bootstrap1.example.com", Port: 3001},
+		},
+	}
+
+	pg.LoadTopologyConfig(topologyConfig)
+
+	require.Len(t, pg.peers, 1)
+	assert.EqualValues(t, PeerSourceTopologyPublicRoot, pg.peers[0].Source)
+	assert.Equal(t, "bootstrap1.example.com:3001", pg.peers[0].Address)
 }
 
 // Tests for churn system (Phase 3)
@@ -4542,7 +4600,7 @@ func TestPeerGovernor_ShouldExitBootstrap_AlreadyExited(t *testing.T) {
 	assert.False(t, shouldExit, "should not exit bootstrap when already exited")
 }
 
-func TestPeerGovernor_ExitBootstrap_DemotesPeers(t *testing.T) {
+func TestPeerGovernor_ExitBootstrap_ReclassifiesPeers(t *testing.T) {
 	eventBus := newMockEventBus()
 
 	pg := NewPeerGovernor(PeerGovernorConfig{
@@ -4576,13 +4634,16 @@ func TestPeerGovernor_ExitBootstrap_DemotesPeers(t *testing.T) {
 
 	_ = pg.exitBootstrapLocked("test reason")
 
-	// Verify all bootstrap peers are cold
+	// Verify bootstrap peers were reclassified as public roots and kept their state
+	publicRootStates := make(map[string]PeerState)
 	for _, peer := range pg.peers {
-		if peer.Source == PeerSourceTopologyBootstrapPeer {
-			assert.Equal(t, PeerStateCold, peer.State,
-				"bootstrap peer %s should be cold after exit", peer.Address)
+		if peer.Source == PeerSourceTopologyPublicRoot {
+			publicRootStates[peer.Address] = peer.State
 		}
 	}
+	assert.Equal(t, PeerStateHot, publicRootStates["44.0.0.1:3001"])
+	assert.Equal(t, PeerStateWarm, publicRootStates["44.0.0.1:3002"])
+	assert.Equal(t, PeerStateCold, publicRootStates["44.0.0.1:3003"])
 
 	// Verify non-bootstrap peer is unaffected
 	var gossipPeer *Peer
@@ -4827,17 +4888,19 @@ func TestPeerGovernor_Reconcile_ExitsBootstrap(t *testing.T) {
 		pg.bootstrapExited,
 		"bootstrap should be exited after reconcile",
 	)
-	// Find the bootstrap peer
+	// Find the reclassified peer
 	var bootstrapPeer *Peer
 	for _, peer := range pg.peers {
-		if peer.Source == PeerSourceTopologyBootstrapPeer {
+		if peer.Address == "44.0.0.1:3001" {
 			bootstrapPeer = peer
 			break
 		}
 	}
 	assert.NotNil(t, bootstrapPeer)
-	assert.Equal(t, PeerStateCold, bootstrapPeer.State,
-		"bootstrap peer should be cold after reconcile")
+	assert.EqualValues(t, PeerSourceTopologyPublicRoot, bootstrapPeer.Source,
+		"bootstrap peer should be reclassified as a public root after reconcile")
+	assert.Equal(t, PeerStateWarm, bootstrapPeer.State,
+		"bootstrap peer should keep its state after reconcile")
 	pg.mu.Unlock()
 }
 

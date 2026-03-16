@@ -315,6 +315,18 @@ func (n *Node) Run(ctx context.Context) error {
 		chainselection.ChainSelectorConfig{
 			Logger:   n.config.logger,
 			EventBus: n.eventBus,
+			ConnectionEligible: func(connId ouroboros.ConnectionId) bool {
+				if n.peerGov == nil {
+					return false
+				}
+				return n.peerGov.IsChainSelectionEligible(connId)
+			},
+			ConnectionPriority: func(connId ouroboros.ConnectionId) int {
+				if n.peerGov == nil {
+					return 0
+				}
+				return n.peerGov.ChainSelectionPriority(connId)
+			},
 		},
 	)
 	// Subscribe chain selector to peer tip update events
@@ -343,6 +355,10 @@ func (n *Node) Run(ctx context.Context) error {
 				"new_tip_slot", e.NewTip.Point.Slot,
 			)
 			n.chainsyncState.SetClientConnId(e.NewConnectionId)
+			n.ouroboros.ResumeChainsyncOnPeerSwitch(
+				ctx,
+				e.NewConnectionId,
+			)
 		},
 	)
 	// Subscribe to chain fork events for monitoring
@@ -413,6 +429,58 @@ func (n *Node) Run(ctx context.Context) error {
 		connmanager.InboundConnectionEventType,
 		n.ouroboros.HandleInboundConnEvent,
 	)
+	// Configure peer governor before opening listeners so topology-driven
+	// outbound connections start first and do not lose the race to inbounds.
+	// Create ledger peer provider for discovering peers from stake pool relays.
+	ledgerPeerProvider, err := ledger.NewLedgerPeerProvider(
+		n.ledgerState,
+		n.db,
+		n.eventBus,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to create ledger peer provider: %w", err)
+	}
+
+	// Get UseLedgerAfterSlot from topology config (defaults to -1 = disabled).
+	var useLedgerAfterSlot int64 = -1
+	if n.config.topologyConfig != nil {
+		useLedgerAfterSlot = n.config.topologyConfig.UseLedgerAfterSlot
+	}
+
+	n.peerGov = peergov.NewPeerGovernor(
+		peergov.PeerGovernorConfig{
+			Logger:                         n.config.logger,
+			EventBus:                       n.eventBus,
+			ConnManager:                    n.connManager,
+			DisableOutbound:                n.config.isDevMode(),
+			PromRegistry:                   n.config.promRegistry,
+			PeerRequestFunc:                n.ouroboros.RequestPeersFromPeer,
+			LedgerPeerProvider:             ledgerPeerProvider,
+			UseLedgerAfterSlot:             useLedgerAfterSlot,
+			TargetNumberOfKnownPeers:       n.config.targetNumberOfKnownPeers,
+			TargetNumberOfEstablishedPeers: n.config.targetNumberOfEstablishedPeers,
+			TargetNumberOfActivePeers:      n.config.targetNumberOfActivePeers,
+			ActivePeersTopologyQuota:       n.config.activePeersTopologyQuota,
+			ActivePeersGossipQuota:         n.config.activePeersGossipQuota,
+			ActivePeersLedgerQuota:         n.config.activePeersLedgerQuota,
+			MinHotPeers:                    n.config.minHotPeers,
+			ReconcileInterval:              n.config.reconcileInterval,
+			InactivityTimeout:              n.config.inactivityTimeout,
+			SyncProgressProvider:           n.ledgerState,
+		},
+	)
+	n.ouroboros.PeerGov = n.peerGov
+	n.eventBus.SubscribeFunc(
+		peergov.OutboundConnectionEventType,
+		n.ouroboros.HandleOutboundConnEvent,
+	)
+	if n.config.topologyConfig != nil {
+		n.peerGov.LoadTopologyConfig(n.config.topologyConfig)
+	}
+	if err := n.peerGov.Start(n.ctx); err != nil { //nolint:contextcheck
+		return err
+	}
+	started = append(started, func() { n.peerGov.Stop() })
 	// Start listeners
 	if err := n.connManager.Start(n.ctx); err != nil { //nolint:contextcheck
 		return err
@@ -622,57 +690,6 @@ func (n *Node) Run(ctx context.Context) error {
 			}
 		}
 	}(stallCheckInterval, stallRecoveryGrace, stallRecycleCooldown)
-	// Configure peer governor
-	// Create ledger peer provider for discovering peers from stake pool relays
-	ledgerPeerProvider, err := ledger.NewLedgerPeerProvider(
-		n.ledgerState,
-		n.db,
-		n.eventBus,
-	)
-	if err != nil {
-		return fmt.Errorf("failed to create ledger peer provider: %w", err)
-	}
-
-	// Get UseLedgerAfterSlot from topology config (defaults to -1 = disabled)
-	var useLedgerAfterSlot int64 = -1
-	if n.config.topologyConfig != nil {
-		useLedgerAfterSlot = n.config.topologyConfig.UseLedgerAfterSlot
-	}
-
-	n.peerGov = peergov.NewPeerGovernor(
-		peergov.PeerGovernorConfig{
-			Logger:                         n.config.logger,
-			EventBus:                       n.eventBus,
-			ConnManager:                    n.connManager,
-			DisableOutbound:                n.config.isDevMode(),
-			PromRegistry:                   n.config.promRegistry,
-			PeerRequestFunc:                n.ouroboros.RequestPeersFromPeer,
-			LedgerPeerProvider:             ledgerPeerProvider,
-			UseLedgerAfterSlot:             useLedgerAfterSlot,
-			TargetNumberOfKnownPeers:       n.config.targetNumberOfKnownPeers,
-			TargetNumberOfEstablishedPeers: n.config.targetNumberOfEstablishedPeers,
-			TargetNumberOfActivePeers:      n.config.targetNumberOfActivePeers,
-			ActivePeersTopologyQuota:       n.config.activePeersTopologyQuota,
-			ActivePeersGossipQuota:         n.config.activePeersGossipQuota,
-			ActivePeersLedgerQuota:         n.config.activePeersLedgerQuota,
-			MinHotPeers:                    n.config.minHotPeers,
-			ReconcileInterval:              n.config.reconcileInterval,
-			InactivityTimeout:              n.config.inactivityTimeout,
-			SyncProgressProvider:           n.ledgerState,
-		},
-	)
-	n.ouroboros.PeerGov = n.peerGov
-	n.eventBus.SubscribeFunc(
-		peergov.OutboundConnectionEventType,
-		n.ouroboros.HandleOutboundConnEvent,
-	)
-	if n.config.topologyConfig != nil {
-		n.peerGov.LoadTopologyConfig(n.config.topologyConfig)
-	}
-	if err := n.peerGov.Start(n.ctx); err != nil { //nolint:contextcheck
-		return err
-	}
-	started = append(started, func() { n.peerGov.Stop() })
 	// Configure UTxO RPC (only when port is configured)
 	if n.config.utxorpcPort > 0 {
 		n.utxorpc = utxorpc.NewUtxorpc(
@@ -1106,6 +1123,9 @@ func (n *Node) initBlockForger(
 		n.eventBus,
 		n.config.logger,
 	)
+	if scheduleStore := newLeaderScheduleStore(n.db); scheduleStore != nil {
+		election.SetScheduleStore(scheduleStore)
+	}
 
 	// Start leader election (subscribes to epoch transitions)
 	if err := election.Start(ctx); err != nil {
@@ -1240,6 +1260,10 @@ func (a *epochInfoAdapter) CurrentEpoch() uint64 {
 
 func (a *epochInfoAdapter) EpochNonce(epoch uint64) []byte {
 	return a.ledgerState.EpochNonce(epoch)
+}
+
+func (a *epochInfoAdapter) NextEpochNonceReadyEpoch() (uint64, bool) {
+	return a.ledgerState.NextEpochNonceReadyEpoch()
 }
 
 func (a *epochInfoAdapter) SlotsPerEpoch() uint64 {
