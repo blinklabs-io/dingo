@@ -28,14 +28,13 @@ Hi folks! Here’s what we shipped in v0.27.1.
 ### 📋 What You Need to Know
 
 - **Upgrade:** You’re all set—no required configuration changes for this release.
-- **Release notes:** Release notes are easier to scan because the release notes documentation was updated.
+- **Release notes:** Release notes are easier to scan because `RELEASE_NOTES.md` was refreshed.
 
 ### 🙏 Thank You
 
 Thank you for trying!
 
 ---
-
 
 ## v0.27.0 (March 15, 2026)
 
