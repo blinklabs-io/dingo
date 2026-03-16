@@ -31,7 +31,9 @@ func TestMarshalBlockMetadataRoundTrip(t *testing.T) {
 	}
 
 	encoded := make([]byte, 32+len(expected.PrevHash))
-	marshalBlockMetadataInto(encoded, expected)
+	if err := marshalBlockMetadataInto(encoded, expected); err != nil {
+		t.Fatalf("marshalBlockMetadataInto failed: %v", err)
+	}
 	if len(encoded) != 64 {
 		t.Fatalf("expected encoded length 64, got %d", len(encoded))
 	}
