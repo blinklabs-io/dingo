@@ -1,6 +1,38 @@
 # Release Notes
 
 
+## v0.27.1 (March 16, 2026)
+
+**Title:** Stability and polish
+
+**Date:** March 16, 2026
+
+**Version:** v0.27.1
+
+Hi folks! Here’s what we shipped in v0.27.1.
+
+```json
+{
+  "✨ What's New": [
+    "It’s now easier and faster to find a safe place to resume syncing, reducing the chance of reconnecting at an unhelpful point. The chain-sync logic now uses a denser, wider set of intersect points to improve `ChainSync` intersection behavior."
+  ],
+  "💪 Improvements": [
+    "Connections are now reused more reliably, improving networking efficiency when peers reconnect. The inbound peer-reuse and governance logic now normalizes and matches exact peer addresses, only treats client-capable connections as eligible for reuse, and starts `TxSubmission` on duplex inbound connections, with tests updated and expanded.",
+    "Stake snapshot and epoch summary data is now stored more consistently across supported databases, with clearer diagnostics when something goes wrong. The system now upserts stake snapshots and epoch summaries across DB backends and improves error reporting for those write paths.",
+    "Delegation state is now interpreted more robustly, reducing the chance of incorrect reads across varied inputs. Delegation parsing has been extended to handle multiple account encodings, with additional test coverage."
+  ],
+  "📋 What You Need to Know": [
+    "No manual steps are required for most users, and these changes should take effect automatically after updating. If you vendor dependencies or run reproducible builds, you may need to re-run your Go module sync (for example, updating `go.mod`/`go.sum`) to pick up the refreshed dependency versions."
+  ],
+  "🔧 Fixes": [
+    "Dependency updates reduce exposure to known issues and keep the project compatible with upstream changes. The Go module set was refreshed, including newer versions of AWS SDK v2 (S3 modules), `golang.org/x/net` and related `x/*` libraries, `plutigo` v0.0.27, `go-ethereum` v1.17.1, and `google.golang.org/api` v0.271.0 (with related libraries)."
+  ]
+}
+
+```
+
+---
+
 ## v0.27.0 (March 15, 2026)
 
 **Title:** S3-backed CI tests and embedded network configs
