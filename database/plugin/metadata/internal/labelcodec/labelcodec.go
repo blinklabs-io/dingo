@@ -162,8 +162,11 @@ func extractFromMetadatum(
 	ret := make([]Entry, 0, len(tmpMap.Pairs))
 	for _, pair := range tmpMap.Pairs {
 		keyInt, ok := pair.Key.(lcommon.MetaInt)
-		if !ok || keyInt.Value == nil {
-			continue
+		if !ok {
+			return nil, errors.New("metadata is not an integer-keyed map")
+		}
+		if keyInt.Value == nil {
+			return nil, errors.New("invalid metadata label: nil integer value")
 		}
 		if keyInt.Value.Sign() < 0 || !keyInt.Value.IsUint64() {
 			return nil, fmt.Errorf("invalid metadata label: %s", keyInt.Value.String())
