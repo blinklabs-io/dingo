@@ -177,10 +177,13 @@ func buildBlockBlobMetadataKey(dst []byte, baseKey []byte) {
 func marshalBlockMetadataInto(
 	dst []byte,
 	metadata types.BlockMetadata,
-) {
+) error {
 	prevHashLen := len(metadata.PrevHash)
 	if prevHashLen > blockMetadataPrevHashMaxLen {
-		panic("invalid block metadata prev hash length")
+		return fmt.Errorf(
+			"invalid block metadata prev hash length: %d",
+			prevHashLen,
+		)
 	}
 	copy(dst[:4], blockMetadataBinaryMagic[:])
 	binary.BigEndian.PutUint64(dst[4:12], metadata.ID)
@@ -191,6 +194,7 @@ func marshalBlockMetadataInto(
 		uint32(prevHashLen),
 	)
 	copy(dst[32:], metadata.PrevHash)
+	return nil
 }
 
 func unmarshalBlockMetadata(data []byte) (types.BlockMetadata, error) {
@@ -537,7 +541,9 @@ func (d *BlobStoreBadger) SetBlock(
 	var tmpMetadataBytes []byte
 	if d.compactBlockMetadata {
 		tmpMetadataBytes = packed[metadataKeyEnd:]
-		marshalBlockMetadataInto(tmpMetadataBytes, tmpMetadata)
+		if err := marshalBlockMetadataInto(tmpMetadataBytes, tmpMetadata); err != nil {
+			return err
+		}
 	} else {
 		tmpMetadataBytes, err = cbor.Encode(tmpMetadata)
 		if err != nil {
