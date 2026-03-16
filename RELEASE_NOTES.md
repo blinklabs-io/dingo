@@ -11,25 +11,27 @@
 
 Hi folks! Here’s what we shipped in v0.27.1.
 
-```json
-{
-  "✨ What's New": [
-    "It’s now easier and faster to find a safe place to resume syncing because chain-sync uses a denser, wider set of intersect points to improve `ChainSync` intersection behavior."
-  ],
-  "💪 Improvements": [
-    "Connections are reused more reliably when peers reconnect because peer reuse and governance now normalize exact peer addresses, require client-capable connections for reuse, and start `TxSubmission` on duplex inbound connections.",
-    "Stake snapshot and epoch summary data is stored more consistently across supported databases because write paths now upsert across DB backends and report errors more clearly.",
-    "Delegation state is interpreted more robustly because delegation parsing now handles multiple account encodings with expanded tests."
-  ],
-  "📋 What You Need to Know": [
-    "No manual steps are required for most users, but if you vendor dependencies or run reproducible builds you may need to re-sync Go modules (update `go.mod`/`go.sum`) to pick up refreshed versions."
-  ],
-  "🔧 Fixes": [
-    "Dependency updates reduce exposure to known issues and keep compatibility with upstream changes by refreshing Go modules (AWS SDK v2/S3, `golang.org/x/*`, `plutigo` v0.0.27, `go-ethereum` v1.17.1, and `google.golang.org/api` v0.271.0)."
-  ]
-}
+### ✨ What's New
 
-```
+- **Better chain-sync intersection:** Resuming sync is easier and faster because chain-sync uses a denser, wider set of intersect points to improve `ChainSync` intersection behavior.
+
+### 💪 Improvements
+
+- **Inbound connection reuse and `TxSubmission`:** Networking is more solid on reconnect because peer reuse and governance now normalize exact peer addresses, require client-capable connections for reuse, and start `TxSubmission` on duplex inbound connections.
+- **Stake snapshot and epoch summary upserts:** Data storage is more consistent across supported databases because write paths now upsert across DB backends and report errors more clearly.
+- **More robust delegation parsing:** Delegation reads are more reliable because parsing now handles multiple account encodings with expanded tests.
+
+### 🔧 Fixes
+
+- **Dependency refresh:** Upgrades are less error-prone because Go modules were refreshed (including AWS SDK v2/S3, `golang.org/x/*`, `plutigo` v0.0.27, `go-ethereum` v1.17.1, and `google.golang.org/api` v0.271.0).
+
+### 📋 What You Need to Know
+
+- **Go module sync (some builds):** You’re all set for most setups, but if you vendor dependencies or run reproducible builds you may need to re-sync Go modules (update `go.mod`/`go.sum`) to pick up refreshed versions.
+
+### 🙏 Thank You
+
+Thank you for trying!
 
 ---
 
