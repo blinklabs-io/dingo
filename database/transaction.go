@@ -518,7 +518,7 @@ func (d *Database) DeleteTransactionMetadataLabelsAfterSlot(
 	txn *Txn,
 ) error {
 	if txn == nil {
-		txn = d.Transaction(true)
+		txn = d.MetadataTxn(true)
 		defer txn.Rollback() //nolint:errcheck
 		if err := d.metadata.DeleteTransactionMetadataLabelsAfterSlot(slot, txn.Metadata()); err != nil {
 			return fmt.Errorf(
