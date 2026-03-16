@@ -3124,6 +3124,8 @@ func (ls *LedgerState) UpstreamTipSlot() uint64 {
 
 // GetCurrentPParams returns the currentPParams value
 func (ls *LedgerState) GetCurrentPParams() lcommon.ProtocolParameters {
+	ls.RLock()
+	defer ls.RUnlock()
 	return ls.currentPParams
 }
 
