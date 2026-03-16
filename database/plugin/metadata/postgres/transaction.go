@@ -269,9 +269,9 @@ func (d *MetadataStorePostgres) GetTransactionsByMetadataLabel(
 		return nil, err
 	}
 
-	orderClause := "slot ASC, block_index ASC"
+	orderClause := "slot ASC, block_index ASC, id ASC"
 	if strings.EqualFold(order, "desc") {
-		orderClause = "slot DESC, block_index DESC"
+		orderClause = "slot DESC, block_index DESC, id DESC"
 	}
 
 	subQuery := db.Model(&models.TransactionMetadataLabel{}).
