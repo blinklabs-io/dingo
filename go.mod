@@ -18,7 +18,7 @@ require (
 	github.com/blinklabs-io/bursa v0.16.0
 	github.com/blinklabs-io/gouroboros v0.160.2
 	github.com/blinklabs-io/ouroboros-mock v0.9.1
-	github.com/blinklabs-io/plutigo v0.0.26
+	github.com/blinklabs-io/plutigo v0.0.27
 	github.com/blockfrost/blockfrost-go v0.3.0
 	github.com/btcsuite/btcd/btcutil v1.1.6
 	github.com/consensys/gnark-crypto v0.19.2
@@ -126,7 +126,7 @@ require (
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/envoyproxy/go-control-plane/envoy v1.36.0 // indirect
 	github.com/envoyproxy/protoc-gen-validate v1.3.0 // indirect
-	github.com/ethereum/go-ethereum v1.17.0 // indirect
+	github.com/ethereum/go-ethereum v1.17.1 // indirect
 	github.com/fatih/color v1.18.0 // indirect
 	github.com/felixge/httpsnoop v1.0.4 // indirect
 	github.com/getsops/gopgagent v0.0.0-20241224165529-7044f28e491e // indirect
