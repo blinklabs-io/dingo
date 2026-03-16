@@ -176,6 +176,10 @@ func (u *Utxorpc) Start(ctx context.Context) error {
 			),
 			Handler:           mux,
 			ReadHeaderTimeout: 60 * time.Second,
+			ReadTimeout:       60 * time.Second,
+			IdleTimeout:       120 * time.Second,
+			// WriteTimeout deliberately 0 for gRPC streaming
+			// endpoints (FollowTip, WatchTx, WaitForTx).
 		}
 	} else {
 		u.config.Logger.Info(
@@ -194,6 +198,10 @@ func (u *Utxorpc) Start(ctx context.Context) error {
 			// Use h2c so we can serve HTTP/2 without TLS
 			Handler:           h2c.NewHandler(mux, &http2.Server{}),
 			ReadHeaderTimeout: 60 * time.Second,
+			ReadTimeout:       60 * time.Second,
+			IdleTimeout:       120 * time.Second,
+			// WriteTimeout deliberately 0 for gRPC streaming
+			// endpoints (FollowTip, WatchTx, WaitForTx).
 		}
 	}
 	u.server = server
