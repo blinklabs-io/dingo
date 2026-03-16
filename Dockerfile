@@ -60,10 +60,14 @@ ENV CARDANO_SOCKET_PATH=/ipc/dingo.socket
 EXPOSE 3001 3002 9090 12798
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
   CMD wget -qO/dev/null http://127.0.0.1:12798/metrics || exit 1
+RUN addgroup --system dingo && adduser --system --no-create-home --ingroup dingo dingo
+RUN mkdir -p /data/db /ipc && chown -R dingo:dingo /data/db /ipc
+USER dingo
 ENTRYPOINT ["/bin/entrypoint.sh"]
 CMD ["serve"]
 
 FROM dingo AS antithesis
+USER root
 RUN apt-get update -y && \
   apt-get install -y \
     curl \
