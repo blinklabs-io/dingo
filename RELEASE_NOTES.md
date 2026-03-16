@@ -14,18 +14,18 @@ Hi folks! Here’s what we shipped in v0.27.1.
 ```json
 {
   "✨ What's New": [
-    "It’s now easier and faster to find a safe place to resume syncing, reducing the chance of reconnecting at an unhelpful point. The chain-sync logic now uses a denser, wider set of intersect points to improve `ChainSync` intersection behavior."
+    "It’s now easier and faster to find a safe place to resume syncing because chain-sync uses a denser, wider set of intersect points to improve `ChainSync` intersection behavior."
   ],
   "💪 Improvements": [
-    "Connections are now reused more reliably, improving networking efficiency when peers reconnect. The inbound peer-reuse and governance logic now normalizes and matches exact peer addresses, only treats client-capable connections as eligible for reuse, and starts `TxSubmission` on duplex inbound connections, with tests updated and expanded.",
-    "Stake snapshot and epoch summary data is now stored more consistently across supported databases, with clearer diagnostics when something goes wrong. The system now upserts stake snapshots and epoch summaries across DB backends and improves error reporting for those write paths.",
-    "Delegation state is now interpreted more robustly, reducing the chance of incorrect reads across varied inputs. Delegation parsing has been extended to handle multiple account encodings, with additional test coverage."
+    "Connections are reused more reliably when peers reconnect because peer reuse and governance now normalize exact peer addresses, require client-capable connections for reuse, and start `TxSubmission` on duplex inbound connections.",
+    "Stake snapshot and epoch summary data is stored more consistently across supported databases because write paths now upsert across DB backends and report errors more clearly.",
+    "Delegation state is interpreted more robustly because delegation parsing now handles multiple account encodings with expanded tests."
   ],
   "📋 What You Need to Know": [
-    "No manual steps are required for most users, and these changes should take effect automatically after updating. If you vendor dependencies or run reproducible builds, you may need to re-run your Go module sync (for example, updating `go.mod`/`go.sum`) to pick up the refreshed dependency versions."
+    "No manual steps are required for most users, but if you vendor dependencies or run reproducible builds you may need to re-sync Go modules (update `go.mod`/`go.sum`) to pick up refreshed versions."
   ],
   "🔧 Fixes": [
-    "Dependency updates reduce exposure to known issues and keep the project compatible with upstream changes. The Go module set was refreshed, including newer versions of AWS SDK v2 (S3 modules), `golang.org/x/net` and related `x/*` libraries, `plutigo` v0.0.27, `go-ethereum` v1.17.1, and `google.golang.org/api` v0.271.0 (with related libraries)."
+    "Dependency updates reduce exposure to known issues and keep compatibility with upstream changes by refreshing Go modules (AWS SDK v2/S3, `golang.org/x/*`, `plutigo` v0.0.27, `go-ethereum` v1.17.1, and `google.golang.org/api` v0.271.0)."
   ]
 }
 
