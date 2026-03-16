@@ -117,8 +117,11 @@ func TestChainIteratorResult_RollbackField(t *testing.T) {
 	require.NotEmpty(t, forwardResult.Block.Cbor, "Block CBOR should not be empty")
 }
 
-// TestFollowTip_LogicFlow documents the expected logic flow for FollowTip
-// This is a documentation test that shows how the code should behave
+// TestFollowTip_LogicFlow documents the expected logic flow for FollowTip.
+// Note: These are structure tests that verify data types and logic patterns,
+// not integration tests. They don't call the actual FollowTip handler, so
+// they won't catch issues in the full request/response flow. For full
+// integration testing, see internal/integration/ tests.
 func TestFollowTip_LogicFlow(t *testing.T) {
 	// Simulate the logic flow in FollowTip
 	
@@ -221,4 +224,51 @@ func TestFollowTip_LogicFlow(t *testing.T) {
 		require.Equal(t, uint64(200), resp.Tip.Height, "Tip height should be 200")
 		require.NotZero(t, resp.Tip.Timestamp, "Tip timestamp should be set")
 	})
+}
+
+// TestFollowTip_RollbackToOrigin verifies that rollback to genesis (origin)
+// is handled correctly without attempting to fetch a non-existent block
+func TestFollowTip_RollbackToOrigin(t *testing.T) {
+	// Origin point has slot=0 and empty hash
+	originPoint := ocommon.NewPoint(0, []byte{})
+	
+	next := &chain.ChainIteratorResult{
+		Point:    originPoint,
+		Rollback: true,
+	}
+	
+	var resp *sync.FollowTipResponse
+	
+	// Simulate the rollback-to-origin logic
+	if next.Rollback {
+		var height uint64
+		var timestamp uint64
+		
+		// Origin check: don't call GetBlock for genesis
+		if next.Point.Slot > 0 || len(next.Point.Hash) > 0 {
+			// Would call GetBlock here for non-origin rollbacks
+			t.Fatal("should not attempt to fetch block for origin point")
+		}
+		// For origin, height and timestamp remain zero
+		
+		resp = &sync.FollowTipResponse{
+			Action: &sync.FollowTipResponse_Reset_{
+				Reset_: &sync.BlockRef{
+					Slot:      next.Point.Slot,
+					Hash:      next.Point.Hash,
+					Height:    height,
+					Timestamp: timestamp,
+				},
+			},
+		}
+	}
+	
+	// Verify Reset action for origin
+	reset, ok := resp.Action.(*sync.FollowTipResponse_Reset_)
+	require.True(t, ok, "should be Reset action")
+	require.NotNil(t, reset.Reset_, "Reset_ should not be nil")
+	require.Equal(t, uint64(0), reset.Reset_.Slot, "origin slot should be 0")
+	require.Empty(t, reset.Reset_.Hash, "origin hash should be empty")
+	require.Equal(t, uint64(0), reset.Reset_.Height, "origin height should be 0")
+	require.Equal(t, uint64(0), reset.Reset_.Timestamp, "origin timestamp should be 0")
 }

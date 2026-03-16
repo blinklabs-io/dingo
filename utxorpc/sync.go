@@ -270,30 +270,35 @@ func (s *syncServiceServer) FollowTip(
 
 			if next.Rollback {
 				// Chain rolled back - emit Reset action
-				// Lookup block metadata for height and timestamp
-				rollbackBlock, err := s.utxorpc.config.LedgerState.GetBlock(
-					next.Point,
-				)
-				if err != nil {
-					s.utxorpc.config.Logger.Error(
-						"failed to get rollback block",
-						"error", err,
-					)
-					return err
-				}
-				// Convert slot to timestamp (milliseconds)
+				var height uint64
 				var timestamp uint64
-				if slotTime, err := s.utxorpc.config.LedgerState.SlotToTime(
-					next.Point.Slot,
-				); err == nil {
-					timestamp = uint64(slotTime.UnixMilli())
+				// Handle rollback-to-origin (genesis) separately
+				// Origin point has slot=0 and empty hash, no block to fetch
+				if next.Point.Slot > 0 || len(next.Point.Hash) > 0 {
+					rollbackBlock, err := s.utxorpc.config.LedgerState.GetBlock(
+						next.Point,
+					)
+					if err != nil {
+						s.utxorpc.config.Logger.Error(
+							"failed to get rollback block",
+							"error", err,
+						)
+						return err
+					}
+					height = rollbackBlock.Number
+					// Convert slot to timestamp (milliseconds)
+					if slotTime, err := s.utxorpc.config.LedgerState.SlotToTime(
+						next.Point.Slot,
+					); err == nil {
+						timestamp = uint64(slotTime.UnixMilli())
+					}
 				}
 				resp = &sync.FollowTipResponse{
 					Action: &sync.FollowTipResponse_Reset_{
 						Reset_: &sync.BlockRef{
 							Slot:      next.Point.Slot,
 							Hash:      next.Point.Hash,
-							Height:    rollbackBlock.Number,
+							Height:    height,
 							Timestamp: timestamp,
 						},
 					},
