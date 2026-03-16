@@ -14,23 +14,23 @@ Hi folks! Here’s what we shipped in v0.27.2.
 ```json
 {
   "✨ What's New": [
-    "We added new performance and sizing benchmarks so you can measure node behavior more consistently across environments. This introduces targeted benchmark suites and produces sizing reports, alongside related documentation updates for v0.27.1 in RELEASE_NOTES.md."
+    "We added new performance and sizing benchmarks so you can measure node behavior more consistently across environments."
   ],
   "💪 Improvements": [
-    "We improved the system’s safety under concurrent access so it behaves more predictably under load. This adds read locks around primary chain access and current protocol parameter reads, and enables the Go race detector in the Linux CI job to catch data races earlier.",
-    "We improved server resilience during slow or stalled connections so requests fail fast instead of consuming resources indefinitely. This adds HTTP write/read/idle timeouts to the Bark, Blockfrost, and UTxO RPC servers.",
-    "We improved networking and peer management efficiency so connection handling and governance work faster at scale. This makes connection-manager inbound-host checks and metrics incremental, refines event bus publishing plus async shutdown (including a new Close API and snapshot-based fan-out), and optimizes peer governor reconcile/quota enforcement while moving some logs to debug.",
-    "We improved cryptographic period handling so operator certificates and KES operations stay consistent across offsets and upgrades. This converts absolute KES periods to opcert-relative periods in UpdateKESPeriod and KESSign, and adds validation plus tests for offset handling and edge cases.",
-    "We improved supply-chain metadata handling so attestations line up with current GitHub Actions and publishing expectations. This switches workflow attest steps to actions/attest and updates the Docker Hub subject names used by the pipeline."
+    "We improved the system’s safety under concurrent access so it behaves more predictably under load.",
+    "We improved server resilience during slow or stalled connections so requests fail fast instead of consuming resources indefinitely.",
+    "We improved networking and peer management efficiency so connection handling and governance work faster at scale.",
+    "We improved cryptographic period handling so operator certificates and KES operations stay consistent across offsets and upgrades.",
+    "We improved supply-chain metadata handling so attestations line up with current GitHub Actions and publishing expectations."
   ],
   "📋 What You Need to Know": [
-    "Timeout behavior is now enforced on several HTTP/RPC surfaces, which may surface misconfigured clients that relied on very long-lived idle connections. Specifically, Bark, Blockfrost, and UTxO RPC servers now apply write/read/idle timeouts that can require client-side retry or keep-alive tuning.",
-    "Some errors that previously manifested as process panics are now returned as explicit failures that callers must handle. In particular, block metadata marshaling will return an error when PrevHash length is invalid, so downstream code should propagate or log that error instead of assuming the operation cannot fail."
+    "Timeout behavior is now enforced on several HTTP/RPC surfaces, which may surface misconfigured clients that relied on very long-lived idle connections.",
+    "Some errors that previously manifested as process panics are now returned as explicit failures that callers must handle."
   ],
   "🔧 Fixes": [
-    "We fixed a crash path in block metadata handling so invalid data is reported cleanly instead of taking down the process. This changes block metadata marshaling to return an error on invalid PrevHash length (rather than panicking) and updates callers and tests accordingly.",
-    "We fixed nonce cache reuse so stale entries do not get applied when the expected nonce has changed. This validates epoch nonce cache entries against the currently provided nonce before reuse.",
-    "We fixed database maintenance so storage compaction actually runs when requested rather than being left pending. This ensures SQLite VACUUM is executed instead of only being prepared."
+    "We fixed a crash path in block metadata handling so invalid data is reported cleanly instead of taking down the process.",
+    "We fixed nonce cache reuse so stale entries do not get applied when the expected nonce has changed.",
+    "We fixed database maintenance so storage compaction actually runs when requested rather than being left pending."
   ]
 }
 
