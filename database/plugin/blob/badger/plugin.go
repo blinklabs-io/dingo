@@ -78,10 +78,15 @@ func profileSettings(profile Profile) ProfileSettings {
 			CompactBlockMetadata: false,
 		}
 	case ProfileCore:
+		// Core mode intentionally cuts caches to 128MB block cache, 32MB
+		// index cache, and 32MB memtables, roughly 2-4x below load/api
+		// defaults, to fit smaller BP/relay hosts. Monitor Badger cache
+		// hit rates and read latencies after deployment to confirm the
+		// lower footprint is not hiding an I/O regression.
 		return ProfileSettings{
-			BlockCacheSize:       536870912, // 512MB
-			IndexCacheSize:       134217728, // 128MB
-			MemTableSize:         67108864,  // 64MB
+			BlockCacheSize:       134217728, // 128MB
+			IndexCacheSize:       33554432,  // 32MB
+			MemTableSize:         33554432,  // 32MB
 			CompactBlockMetadata: false,
 		}
 	case ProfileAPI:

@@ -52,14 +52,12 @@ type connectionInfo struct {
 	ipKey     string // rate-limit key (IP or /64 prefix for IPv6)
 }
 
-type peerConnectionState struct {
-	hasIncoming bool
-	hasOutgoing bool
-}
-
 type ConnectionManager struct {
 	connections      map[ouroboros.ConnectionId]*connectionInfo
+	inboundCount     int // active inbound N2N connections; maintained under connectionsMutex
 	inboundReserved  int // slots reserved by tryReserveInboundSlot but not yet added
+	inboundPeerAddrs map[string]int
+	peerConnectivity map[string]peerConnectionSummary
 	metrics          *connectionManagerMetrics
 	listeners        []net.Listener
 	config           ConnectionManagerConfig
@@ -69,6 +67,12 @@ type ConnectionManager struct {
 	goroutineWg      sync.WaitGroup // tracks spawned goroutines for clean shutdown
 	ipConns          map[string]int // IP key -> active connection count
 	ipConnsMutex     sync.Mutex
+	outboundCount    int
+	fullDuplexCount  int
+	unidirectional   int
+	duplexPeers      int
+	prunableConns    int
+	trackedConnCount int
 }
 
 // DefaultMaxConnectionsPerIP is the default maximum number of concurrent
@@ -99,6 +103,41 @@ type connectionManagerMetrics struct {
 	prunableConns       prometheus.Gauge
 }
 
+type peerConnectionSummary struct {
+	inboundCount int
+	hasOutbound  bool
+}
+
+func (s peerConnectionSummary) hasInbound() bool {
+	return s.inboundCount > 0
+}
+
+func (s peerConnectionSummary) withInbound() peerConnectionSummary {
+	s.inboundCount++
+	return s
+}
+
+func (s peerConnectionSummary) withOutbound() peerConnectionSummary {
+	s.hasOutbound = true
+	return s
+}
+
+func (s peerConnectionSummary) withoutInbound() peerConnectionSummary {
+	if s.inboundCount > 0 {
+		s.inboundCount--
+	}
+	return s
+}
+
+func (s peerConnectionSummary) withoutOutbound() peerConnectionSummary {
+	s.hasOutbound = false
+	return s
+}
+
+func (s peerConnectionSummary) empty() bool {
+	return s.inboundCount == 0 && !s.hasOutbound
+}
+
 func NewConnectionManager(cfg ConnectionManagerConfig) *ConnectionManager {
 	if cfg.Logger == nil {
 		cfg.Logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
@@ -115,7 +154,9 @@ func NewConnectionManager(cfg ConnectionManagerConfig) *ConnectionManager {
 		connections: make(
 			map[ouroboros.ConnectionId]*connectionInfo,
 		),
-		ipConns: make(map[string]int),
+		inboundPeerAddrs: make(map[string]int),
+		peerConnectivity: make(map[string]peerConnectionSummary),
+		ipConns:          make(map[string]int),
 	}
 	if cfg.PromRegistry != nil {
 		c.initMetrics()
@@ -124,17 +165,9 @@ func NewConnectionManager(cfg ConnectionManagerConfig) *ConnectionManager {
 }
 
 // inboundCountLocked returns the current number of inbound N2N connections.
-// Node-to-client connections are excluded because they are local clients
-// (wallets, tools) and should not count against the peer connection budget.
 // The caller must hold connectionsMutex.
 func (c *ConnectionManager) inboundCountLocked() int {
-	count := 0
-	for _, info := range c.connections {
-		if info.isInbound && !info.isNtC {
-			count++
-		}
-	}
-	return count
+	return c.inboundCount
 }
 
 // InboundCount returns the current number of inbound connections.
@@ -218,70 +251,16 @@ func (c *ConnectionManager) updateConnectionMetrics() {
 		return
 	}
 	c.connectionsMutex.Lock()
-	defer c.connectionsMutex.Unlock()
-
-	incomingCount := 0
-	outgoingCount := 0
-	fullDuplexCount := 0
-	prunableCount := 0
-	peerConnectivity := make(
-		map[string]*peerConnectionState,
-	) // peerAddr -> connection state
-
-	// Count connections and track peer connectivity in a single pass.
-	// N2C (node-to-client) connections are excluded from peer metrics
-	// because they are local clients, not network peers.
-	for _, info := range c.connections {
-		if info.isNtC {
-			continue
-		}
-		if info.isInbound {
-			incomingCount++
-		} else {
-			outgoingCount++
-		}
-
-		if peerConnectivity[info.peerAddr] == nil {
-			peerConnectivity[info.peerAddr] = &peerConnectionState{}
-		}
-		if info.isInbound {
-			peerConnectivity[info.peerAddr].hasIncoming = true
-		} else {
-			peerConnectivity[info.peerAddr].hasOutgoing = true
-		}
+	if c.trackedConnCount != len(c.connections) {
+		c.rebuildConnectionMetricsLocked()
 	}
-
-	// Count full-duplex and prunable connections (N2C excluded above)
-	for _, info := range c.connections {
-		if info.isNtC {
-			continue
-		}
-		// Full-duplex: inbound connections that support bidirectional protocols
-		if info.isInbound && info.conn != nil {
-			_, versionData := info.conn.ProtocolVersion()
-			if versionData.DiffusionMode() == oprotocol.DiffusionModeInitiatorAndResponder {
-				fullDuplexCount++
-			}
-		}
-
-		// Prunable: inbound connections from peers we don't have outgoing connections to
-		// These are lower priority and candidates for pruning under resource pressure
-		if info.isInbound && peerConnectivity[info.peerAddr] != nil &&
-			!peerConnectivity[info.peerAddr].hasOutgoing {
-			prunableCount++
-		}
-	}
-
-	// Count duplex and unidirectional connections
-	duplexCount := 0
-	unidirectionalCount := 0
-	for _, state := range peerConnectivity {
-		if state.hasIncoming && state.hasOutgoing {
-			duplexCount++
-		} else if state.hasIncoming || state.hasOutgoing {
-			unidirectionalCount++
-		}
-	}
+	incomingCount := c.inboundCount
+	outgoingCount := c.outboundCount
+	fullDuplexCount := c.fullDuplexCount
+	unidirectionalCount := c.unidirectional
+	duplexCount := c.duplexPeers
+	prunableCount := c.prunableConns
+	c.connectionsMutex.Unlock()
 
 	if c.metrics.incomingConns != nil {
 		c.metrics.incomingConns.Set(float64(incomingCount))
@@ -301,6 +280,128 @@ func (c *ConnectionManager) updateConnectionMetrics() {
 	if c.metrics.prunableConns != nil {
 		c.metrics.prunableConns.Set(float64(prunableCount))
 	}
+}
+
+func connectionSummaryTotals(summary peerConnectionSummary) (int, int, int) {
+	duplexCount := 0
+	unidirectionalCount := 0
+	prunableCount := 0
+	if summary.hasInbound() && summary.hasOutbound {
+		duplexCount = 1
+	} else if summary.hasInbound() || summary.hasOutbound {
+		unidirectionalCount = 1
+	}
+	if !summary.hasOutbound {
+		prunableCount = summary.inboundCount
+	}
+	return duplexCount, unidirectionalCount, prunableCount
+}
+
+func (c *ConnectionManager) hasFullDuplex(info *connectionInfo) bool {
+	if info == nil || !info.isInbound || info.isNtC || info.conn == nil {
+		return false
+	}
+	_, versionData := info.conn.ProtocolVersion()
+	if versionData == nil {
+		return false
+	}
+	return versionData.DiffusionMode() ==
+		oprotocol.DiffusionModeInitiatorAndResponder
+}
+
+func (c *ConnectionManager) tracksInboundPeerAddresses() bool {
+	return c != nil && c.config.OutboundSourcePort != 0
+}
+
+func (c *ConnectionManager) updatePeerConnectivityLocked(
+	peerAddr string,
+	isInbound bool,
+	add bool,
+) {
+	if peerAddr == "" {
+		return
+	}
+	peerKey := normalizePeerAddr(peerAddr)
+	before := c.peerConnectivity[peerKey]
+	after := before
+	if add {
+		if isInbound {
+			after = after.withInbound()
+		} else {
+			after = after.withOutbound()
+		}
+	} else if isInbound {
+		after = after.withoutInbound()
+	} else {
+		after = after.withoutOutbound()
+	}
+	beforeDuplex, beforeUnidirectional, beforePrunable := connectionSummaryTotals(before)
+	afterDuplex, afterUnidirectional, afterPrunable := connectionSummaryTotals(after)
+	c.duplexPeers += afterDuplex - beforeDuplex
+	c.unidirectional += afterUnidirectional - beforeUnidirectional
+	c.prunableConns += afterPrunable - beforePrunable
+	if after.empty() {
+		delete(c.peerConnectivity, peerKey)
+		return
+	}
+	c.peerConnectivity[peerKey] = after
+}
+
+func (c *ConnectionManager) updateConnectionMetricsLocked(
+	info *connectionInfo,
+	add bool,
+) {
+	if info == nil || info.isNtC {
+		c.trackedConnCount = len(c.connections)
+		return
+	}
+	if add {
+		if info.isInbound {
+			c.inboundCount++
+			if c.hasFullDuplex(info) {
+				c.fullDuplexCount++
+			}
+		} else {
+			c.outboundCount++
+		}
+		c.updatePeerConnectivityLocked(info.peerAddr, info.isInbound, true)
+	} else {
+		if info.isInbound {
+			c.inboundCount--
+			if c.hasFullDuplex(info) {
+				c.fullDuplexCount--
+			}
+		} else {
+			c.outboundCount--
+		}
+		c.updatePeerConnectivityLocked(info.peerAddr, info.isInbound, false)
+	}
+	c.trackedConnCount = len(c.connections)
+}
+
+func (c *ConnectionManager) rebuildConnectionMetricsLocked() {
+	c.inboundCount = 0
+	c.outboundCount = 0
+	c.fullDuplexCount = 0
+	c.unidirectional = 0
+	c.duplexPeers = 0
+	c.prunableConns = 0
+	clear(c.peerConnectivity)
+	for _, info := range c.connections {
+		if info == nil || info.isNtC {
+			continue
+		}
+		if info.isInbound {
+			c.inboundCount++
+			if c.hasFullDuplex(info) {
+				c.fullDuplexCount++
+			}
+		} else {
+			c.outboundCount++
+		}
+		c.updatePeerConnectivityLocked(info.peerAddr, info.isInbound, true)
+	}
+	c.trackedConnCount = len(c.connections)
 }
 
 func (c *ConnectionManager) Start(ctx context.Context) error {
@@ -461,6 +562,13 @@ func (c *ConnectionManager) addConnectionImpl(
 		peerAddr:  peerAddr,
 		ipKey:     ipKey,
 	}
+	info := c.connections[connId]
+	if isInbound && !isNtC && c.tracksInboundPeerAddresses() {
+		if peerKey := normalizePeerAddr(peerAddr); peerKey != "" {
+			c.inboundPeerAddrs[peerKey]++
+		}
+	}
+	c.updateConnectionMetricsLocked(info, true)
 	c.connectionsMutex.Unlock()
 	c.updateConnectionMetrics()
 	go func() {
@@ -492,6 +600,18 @@ func (c *ConnectionManager) RemoveConnection(connId ouroboros.ConnectionId) {
 	c.connectionsMutex.Lock()
 	info := c.connections[connId]
 	delete(c.connections, connId)
+	if info != nil &&
+		info.isInbound &&
+		!info.isNtC &&
+		c.tracksInboundPeerAddresses() {
+		if peerKey := normalizePeerAddr(info.peerAddr); peerKey != "" {
+			c.inboundPeerAddrs[peerKey]--
+			if c.inboundPeerAddrs[peerKey] <= 0 {
+				delete(c.inboundPeerAddrs, peerKey)
+			}
+		}
+	}
+	c.updateConnectionMetricsLocked(info, false)
 	c.connectionsMutex.Unlock()
 	// Decrement per-IP counter if the connection had a tracked IP key
 	if info != nil && info.ipKey != "" {
@@ -518,7 +638,7 @@ func (c *ConnectionManager) HasInboundPeerAddress(
 	// Only relevant when listen port reuse is enabled. With ephemeral
 	// source ports, an outbound connection uses a different 4-tuple and
 	// cannot collide with any inbound connection.
-	if c.config.OutboundSourcePort == 0 {
+	if !c.tracksInboundPeerAddresses() {
 		return false
 	}
 	targetAddr := normalizePeerAddr(peerAddr)
@@ -527,15 +647,7 @@ func (c *ConnectionManager) HasInboundPeerAddress(
 	}
 	c.connectionsMutex.Lock()
 	defer c.connectionsMutex.Unlock()
-	for _, info := range c.connections {
-		if !info.isInbound || info.isNtC || info.conn == nil {
-			continue
-		}
-		if normalizePeerAddr(info.peerAddr) == targetAddr {
-			return true
-		}
-	}
-	return false
+	return c.inboundPeerAddrs[targetAddr] > 0
 }
 
 func normalizePeerAddr(peerAddr string) string {

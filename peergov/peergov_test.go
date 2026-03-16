@@ -229,7 +229,7 @@ func TestPeerGovernor_Reconcile_Promotions(t *testing.T) {
 	pg.peers[0].Connection = &PeerConnection{IsClient: true}
 	pg.mu.Unlock()
 
-	pg.reconcile()
+	pg.reconcile(t.Context())
 
 	peers := pg.GetPeers()
 	assert.Equal(t, PeerStateHot, peers[0].State)
@@ -256,7 +256,7 @@ func TestPeerGovernor_Reconcile_SkipsResponderOnlyWarmPromotion(t *testing.T) {
 	pg.peers[0].Connection = &PeerConnection{IsClient: false}
 	pg.mu.Unlock()
 
-	pg.reconcile()
+	pg.reconcile(t.Context())
 
 	peers := pg.GetPeers()
 	assert.Equal(t, PeerStateWarm, peers[0].State)
@@ -283,7 +283,7 @@ func TestPeerGovernor_Reconcile_Demotions(t *testing.T) {
 		// Make it inactive
 	pg.mu.Unlock()
 
-	pg.reconcile()
+	pg.reconcile(t.Context())
 
 	peers := pg.GetPeers()
 	assert.Equal(t, PeerStateWarm, peers[0].State)
@@ -309,7 +309,7 @@ func TestPeerGovernor_Reconcile_Removal(t *testing.T) {
 	pg.peers[0].ReconnectCount = 5 // Exceeds MaxReconnectFailureThreshold
 	pg.mu.Unlock()
 
-	pg.reconcile()
+	pg.reconcile(t.Context())
 
 	peers := pg.GetPeers()
 	assert.Len(t, peers, 0)
@@ -334,7 +334,7 @@ func TestPeerGovernor_Reconcile_RemovalThresholdBoundary(t *testing.T) {
 	pg.peers[0].ReconnectCount = pg.config.MaxReconnectFailureThreshold
 	pg.mu.Unlock()
 
-	pg.reconcile()
+	pg.reconcile(t.Context())
 
 	peers := pg.GetPeers()
 	assert.Len(t, peers, 1)
@@ -367,7 +367,7 @@ func TestPeerGovernor_Reconcile_MinimumHotPeers(t *testing.T) {
 	}
 	pg.mu.Unlock()
 
-	pg.reconcile()
+	pg.reconcile(t.Context())
 
 	peers := pg.GetPeers()
 	hotCount := 0
@@ -447,7 +447,7 @@ func TestPeerGovernor_PeerSharing(t *testing.T) {
 	}
 	pg.mu.Unlock()
 
-	pg.reconcile()
+	pg.reconcile(t.Context())
 
 	// Should have requested peers from both hot peers
 	assert.Equal(t, 2, peerRequestCount)
@@ -955,7 +955,7 @@ func TestPeerGovernor_Reconcile_CleanupDenyList(t *testing.T) {
 	pg.mu.Unlock()
 
 	// Run reconcile to trigger cleanup
-	pg.reconcile()
+	pg.reconcile(t.Context())
 
 	// Check deny list - only non-expired entry should remain
 	pg.mu.Lock()
@@ -1476,7 +1476,7 @@ func TestPeerGovernor_EnforcePeerTargets_ColdPeers(t *testing.T) {
 	assert.Len(t, pg.peers, 5)
 
 	// Run reconcile to enforce limits
-	pg.reconcile()
+	pg.reconcile(t.Context())
 
 	// Should have removed 2 peers (down to 3)
 	assert.Len(t, pg.peers, 3)
@@ -1522,7 +1522,7 @@ func TestPeerGovernor_EnforcePeerTargets_TopologyPeersNeverRemoved(
 	assert.Len(t, pg.peers, 5)
 
 	// Run reconcile to enforce limits
-	pg.reconcile()
+	pg.reconcile(t.Context())
 
 	// All topology peers should be kept (3) even though limit is 2
 	// Only ledger peers should be removed
@@ -1560,7 +1560,7 @@ func TestPeerGovernor_EnforcePeerTargets_Unlimited(t *testing.T) {
 	assert.Len(t, pg.peers, 10)
 
 	// Run reconcile - should not remove any peers when unlimited
-	pg.reconcile()
+	pg.reconcile(t.Context())
 
 	assert.Len(t, pg.peers, 10)
 }
@@ -3383,7 +3383,7 @@ func TestPeerGovernor_ReconcilePromotion_ValencyAware(t *testing.T) {
 		},
 	}
 
-	pg.reconcile()
+	pg.reconcile(t.Context())
 
 	// With MinHotPeers=3, we need 2 more hot peers
 	// Group1 is under valency, so public1 and public2 should be promoted first
@@ -3506,7 +3506,7 @@ func TestPeerGovernor_InboundPeer_TenureRequirement(t *testing.T) {
 	}
 	pg.mu.Unlock()
 
-	pg.reconcile()
+	pg.reconcile(t.Context())
 
 	peers := pg.GetPeers()
 	// Should still be warm because tenure requirement is not met
@@ -3548,7 +3548,7 @@ func TestPeerGovernor_InboundPeer_HigherScoreThreshold(t *testing.T) {
 	}
 	pg.mu.Unlock()
 
-	pg.reconcile()
+	pg.reconcile(t.Context())
 
 	peers := pg.GetPeers()
 	// Should still be warm because score is below inbound threshold
@@ -3600,7 +3600,7 @@ func TestPeerGovernor_InboundPeer_BothRequirementsMet(t *testing.T) {
 	}
 	pg.mu.Unlock()
 
-	pg.reconcile()
+	pg.reconcile(t.Context())
 
 	peers := pg.GetPeers()
 	// Should be hot because both requirements are met
@@ -3642,7 +3642,7 @@ func TestPeerGovernor_NonInboundPeer_UsesNormalThreshold(t *testing.T) {
 	}
 	pg.mu.Unlock()
 
-	pg.reconcile()
+	pg.reconcile(t.Context())
 
 	peers := pg.GetPeers()
 	// Should be hot because gossip peers use normal threshold, not inbound threshold
@@ -3827,7 +3827,7 @@ func TestPeerGovernor_InboundPeer_MixedPeerPromotion(t *testing.T) {
 	}
 	pg.mu.Unlock()
 
-	pg.reconcile()
+	pg.reconcile(t.Context())
 
 	peers := pg.GetPeers()
 	var inboundState, gossip1State, gossip2State PeerState
@@ -4158,7 +4158,7 @@ func TestPeerGovernor_EventsPublished(t *testing.T) {
 	quotaMu.Unlock()
 
 	// Run reconcile which should publish QuotaStatusEvent
-	pg.reconcile()
+	pg.reconcile(t.Context())
 
 	// Wait for async event delivery
 	require.Eventually(t, func() bool {
@@ -4818,7 +4818,7 @@ func TestPeerGovernor_Reconcile_ExitsBootstrap(t *testing.T) {
 	pg.mu.Unlock()
 
 	// Run reconcile
-	pg.reconcile()
+	pg.reconcile(t.Context())
 
 	// Verify bootstrap was exited
 	pg.mu.Lock()
@@ -4869,7 +4869,7 @@ func TestPeerGovernor_Reconcile_SkipsBootstrapPromotionAfterExit(t *testing.T) {
 	pg.mu.Unlock()
 
 	// Run reconcile
-	pg.reconcile()
+	pg.reconcile(t.Context())
 
 	// Check results
 	pg.mu.Lock()

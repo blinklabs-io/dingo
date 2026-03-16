@@ -56,7 +56,7 @@ func (e *EventBus) HasSubscribers(eventType EventType) bool {
 	}
 	e.mu.RLock()
 	defer e.mu.RUnlock()
-	subs, ok := e.subscribers[eventType]
+	subs, ok := e.subscriberSnapshots[eventType]
 	return ok && len(subs) > 0
 }
 
@@ -66,18 +66,27 @@ type asyncEvent struct {
 	event     Event
 }
 
+type subscriberEntry struct {
+	id         EventSubscriberId
+	sub        Subscriber
+	channelSub *channelSubscriber
+	kind       string
+}
+
 type EventBus struct {
-	subscribers  map[EventType]map[EventSubscriberId]Subscriber
-	metrics      *eventMetrics
-	lastSubId    EventSubscriberId
-	mu           sync.RWMutex
-	Logger       *slog.Logger
-	subscriberWg sync.WaitGroup // Tracks SubscribeFunc goroutines
+	subscribers         map[EventType]map[EventSubscriberId]Subscriber
+	subscriberSnapshots map[EventType][]subscriberEntry
+	metrics             *eventMetrics
+	lastSubId           EventSubscriberId
+	mu                  sync.RWMutex
+	Logger              *slog.Logger
+	subscriberWg        sync.WaitGroup // Tracks SubscribeFunc goroutines
 
 	// Async publishing infrastructure
 	asyncQueue chan asyncEvent
 	asyncWg    sync.WaitGroup
 	stopCh     chan struct{}
+	closed     bool
 	stopped    bool
 	stopMu     sync.RWMutex
 	stopOpMu   sync.Mutex // Serializes Stop() calls to prevent duplicate worker pools
@@ -89,10 +98,11 @@ func NewEventBus(
 	logger *slog.Logger,
 ) *EventBus {
 	e := &EventBus{
-		subscribers: make(map[EventType]map[EventSubscriberId]Subscriber),
-		Logger:      logger,
-		asyncQueue:  make(chan asyncEvent, AsyncQueueSize),
-		stopCh:      make(chan struct{}),
+		subscribers:         make(map[EventType]map[EventSubscriberId]Subscriber),
+		subscriberSnapshots: make(map[EventType][]subscriberEntry),
+		Logger:              logger,
+		asyncQueue:          make(chan asyncEvent, AsyncQueueSize),
+		stopCh:              make(chan struct{}),
 	}
 	if promRegistry != nil {
 		e.initMetrics(promRegistry)
@@ -109,12 +119,26 @@ func NewEventBus(
 func (e *EventBus) asyncWorker() {
 	defer e.asyncWg.Done()
 	for {
+		// Prioritize shutdown before attempting to receive queued async work.
+		select {
+		case <-e.stopCh:
+			return
+		default:
+		}
+
 		select {
 		case <-e.stopCh:
 			return
 		case ae, ok := <-e.asyncQueue:
 			if !ok {
 				return
+			}
+			// Drop queued work if shutdown began after the dequeue but before
+			// Publish ran so Stop/Close do not deliver buffered async events.
+			select {
+			case <-e.stopCh:
+				return
+			default:
 			}
 			// Publish directly — channelSubscriber.Deliver uses non-blocking
 			// sends so this cannot block forever on in-memory subscribers.
@@ -220,6 +244,7 @@ func (e *EventBus) subscribeInternal(
 	}
 	evtTypeSubs := e.subscribers[eventType]
 	evtTypeSubs[subId] = chSub
+	e.refreshSubscriberSnapshotLocked(eventType)
 	if e.metrics != nil {
 		e.metrics.subscribers.WithLabelValues(string(eventType), "in-memory").
 			Inc()
@@ -228,12 +253,12 @@ func (e *EventBus) subscribeInternal(
 }
 
 // Subscribe allows a consumer to receive events of a particular type via a channel.
-// Returns (0, nil) if the EventBus is stopped.
+// Returns (0, nil) if the EventBus is stopped or closed.
 func (e *EventBus) Subscribe(
 	eventType EventType,
 ) (EventSubscriberId, <-chan Event) {
 	e.stopMu.RLock()
-	if e.stopped {
+	if e.stopped || e.closed {
 		e.stopMu.RUnlock()
 		return 0, nil
 	}
@@ -243,7 +268,7 @@ func (e *EventBus) Subscribe(
 }
 
 // SubscribeFunc allows a consumer to receive events of a particular type via a callback function.
-// Returns 0 if the EventBus is stopped.
+// Returns 0 if the EventBus is stopped or closed.
 func (e *EventBus) SubscribeFunc(
 	eventType EventType,
 	handlerFunc EventHandlerFunc,
@@ -254,7 +279,7 @@ func (e *EventBus) SubscribeFunc(
 	// 2. SubscribeFunc() calls Add(1) after Wait() started with counter=0
 	// Which would cause a panic or leave the goroutine blocked forever.
 	e.stopMu.RLock()
-	if e.stopped {
+	if e.stopped || e.closed {
 		e.stopMu.RUnlock()
 		return 0
 	}
@@ -307,6 +332,9 @@ func (e *EventBus) Unsubscribe(eventType EventType, subId EventSubscriberId) {
 			delete(evtTypeSubs, subId)
 			if len(evtTypeSubs) == 0 {
 				delete(e.subscribers, eventType)
+				delete(e.subscriberSnapshots, eventType)
+			} else {
+				e.refreshSubscriberSnapshotLocked(eventType)
 			}
 			if e.metrics != nil {
 				kind := "remote"
@@ -379,47 +407,29 @@ func (e *EventBus) deliverWithTimeout(
 
 // Publish allows a producer to send an event of a particular type to all subscribers
 func (e *EventBus) Publish(eventType EventType, evt Event) {
-	// Build list of channels inside read lock to avoid map race condition
 	e.mu.RLock()
-	subs, ok := e.subscribers[eventType]
-	type subItem struct {
-		id  EventSubscriberId
-		sub Subscriber
-	}
-	subList := make([]subItem, 0, len(subs))
-	if ok {
-		for id, sub := range subs {
-			subList = append(subList, subItem{id: id, sub: sub})
-		}
-	}
+	subList := e.subscriberSnapshots[eventType]
 	e.mu.RUnlock()
-	// Send event on gathered subscribers (non-blocking for channel
-	// subscribers, time-bounded for remote subscribers via deliverWithTimeout)
+	if len(subList) == 0 {
+		if e.metrics != nil {
+			e.metrics.eventsTotal.WithLabelValues(string(eventType)).Inc()
+		}
+		return
+	}
 	for _, item := range subList {
-		// Protect against panics inside subscriber Deliver implementations.
 		var deliverErr error
-		func() {
-			defer func() {
-				if r := recover(); r != nil {
-					deliverErr = fmt.Errorf("subscriber deliver panic: %v", r)
-				}
-			}()
+		if item.channelSub != nil {
+			deliverErr = item.channelSub.Deliver(evt)
+		} else {
 			deliverErr = e.deliverWithTimeout(item.sub, evt)
-		}()
+		}
 
 		if deliverErr != nil {
-			// Unregister the failing subscriber
 			e.Unsubscribe(eventType, item.id)
-			// Record metric if available
 			if e.metrics != nil {
-				kind := "remote"
-				if _, ok := item.sub.(*channelSubscriber); ok {
-					kind = "in-memory"
-				}
-				e.metrics.deliveryErrors.WithLabelValues(string(eventType), kind).
+				e.metrics.deliveryErrors.WithLabelValues(string(eventType), item.kind).
 					Inc()
 			}
-			// Log the delivery error/panic for observability using provided logger if present
 			if e.Logger != nil {
 				e.Logger.Debug(
 					"event delivery error",
@@ -429,7 +439,13 @@ func (e *EventBus) Publish(eventType EventType, evt Event) {
 					deliverErr,
 				)
 			} else {
-				slog.Default().Debug("event delivery error", "type", eventType, "err", deliverErr)
+				slog.Default().Debug(
+					"event delivery error",
+					"type",
+					eventType,
+					"err",
+					deliverErr,
+				)
 			}
 		}
 	}
@@ -441,11 +457,11 @@ func (e *EventBus) Publish(eventType EventType, evt Event) {
 // PublishAsync enqueues an event for asynchronous delivery to all subscribers.
 // This method returns immediately without blocking on subscriber delivery.
 // Use this for non-critical events where immediate delivery is not required.
-// Returns false if the EventBus is stopped or the async queue is full.
+// Returns false if the EventBus is stopped, closed, or the async queue is full.
 func (e *EventBus) PublishAsync(eventType EventType, evt Event) bool {
 	// Capture asyncQueue under lock to protect against concurrent reassignment in Stop()
 	e.stopMu.RLock()
-	if e.stopped {
+	if e.stopped || e.closed {
 		e.stopMu.RUnlock()
 		return false
 	}
@@ -474,13 +490,13 @@ func (e *EventBus) PublishAsync(eventType EventType, evt Event) bool {
 
 // RegisterSubscriber allows external adapters (e.g., network-backed subscribers)
 // to register with the EventBus. It returns the assigned subscriber id.
-// Returns 0 if the EventBus is stopped.
+// Returns 0 if the EventBus is stopped or closed.
 func (e *EventBus) RegisterSubscriber(
 	eventType EventType,
 	sub Subscriber,
 ) EventSubscriberId {
 	e.stopMu.RLock()
-	if e.stopped {
+	if e.stopped || e.closed {
 		e.stopMu.RUnlock()
 		return 0
 	}
@@ -494,6 +510,7 @@ func (e *EventBus) RegisterSubscriber(
 		e.subscribers[eventType] = make(map[EventSubscriberId]Subscriber)
 	}
 	e.subscribers[eventType][subId] = sub
+	e.refreshSubscriberSnapshotLocked(eventType)
 	if e.metrics != nil {
 		e.metrics.subscribers.WithLabelValues(string(eventType), "remote").Inc()
 	}
@@ -504,14 +521,33 @@ func (e *EventBus) RegisterSubscriber(
 // This ensures that SubscribeFunc goroutines exit cleanly during shutdown.
 // The EventBus can still be reused after Stop() is called.
 func (e *EventBus) Stop() {
+	e.shutdown(true)
+}
+
+// Close permanently shuts down the EventBus and its worker pool.
+// Unlike Stop, Close does not restart async workers, so the EventBus
+// cannot be reused.
+func (e *EventBus) Close() {
+	e.shutdown(false)
+}
+
+func (e *EventBus) shutdown(restart bool) {
+	if e == nil {
+		return
+	}
 	// Serialize Stop() calls to prevent race conditions that could spawn
 	// duplicate worker pools when called concurrently
 	e.stopOpMu.Lock()
 	defer e.stopOpMu.Unlock()
 
-	// Mark as stopped to prevent new async publishes during shutdown
+	// Mark as stopped to prevent new async publishes during shutdown.
+	// Close permanently marks the bus as closed so future Stop() calls
+	// cannot restart the worker pool.
 	e.stopMu.Lock()
 	wasAlreadyStopped := e.stopped
+	if !restart {
+		e.closed = true
+	}
 	e.stopped = true
 	e.stopMu.Unlock()
 
@@ -525,6 +561,7 @@ func (e *EventBus) Stop() {
 	// Copy and clear subscribers
 	subsCopy := e.subscribers
 	e.subscribers = make(map[EventType]map[EventSubscriberId]Subscriber)
+	e.subscriberSnapshots = make(map[EventType][]subscriberEntry)
 	e.mu.Unlock()
 
 	// Close subscribers outside of lock
@@ -542,8 +579,16 @@ func (e *EventBus) Stop() {
 		e.metrics.subscribers.Reset()
 	}
 
+	if !restart {
+		return
+	}
+
 	// Reinitialize async infrastructure to allow continued use
 	e.stopMu.Lock()
+	if e.closed {
+		e.stopMu.Unlock()
+		return
+	}
 	e.asyncQueue = make(chan asyncEvent, AsyncQueueSize)
 	e.stopCh = make(chan struct{})
 	e.stopped = false
@@ -554,4 +599,26 @@ func (e *EventBus) Stop() {
 		e.asyncWg.Add(1)
 		go e.asyncWorker()
 	}
+}
+
+func (e *EventBus) refreshSubscriberSnapshotLocked(eventType EventType) {
+	subs, ok := e.subscribers[eventType]
+	if !ok || len(subs) == 0 {
+		delete(e.subscriberSnapshots, eventType)
+		return
+	}
+	snapshot := make([]subscriberEntry, 0, len(subs))
+	for id, sub := range subs {
+		entry := subscriberEntry{
+			id:   id,
+			sub:  sub,
+			kind: "remote",
+		}
+		if channelSub, ok := sub.(*channelSubscriber); ok {
+			entry.channelSub = channelSub
+			entry.kind = "in-memory"
+		}
+		snapshot = append(snapshot, entry)
+	}
+	e.subscriberSnapshots[eventType] = snapshot
 }

@@ -16,12 +16,19 @@ package peergov
 
 import (
 	"cmp"
+	"context"
+	"log/slog"
 	"slices"
 	"time"
 )
 
-func (p *PeerGovernor) reconcile() {
+func (p *PeerGovernor) reconcile(ctx context.Context) {
 	p.mu.Lock()
+	now := time.Now()
+	debugEnabled := p.config.Logger.Enabled(
+		ctx,
+		slog.LevelDebug,
+	)
 
 	p.config.Logger.Debug("starting peer reconcile")
 
@@ -52,11 +59,11 @@ func (p *PeerGovernor) reconcile() {
 		case PeerStateHot:
 			// Demote if inactive (no connection or last activity > timeout)
 			if peer.Connection == nil ||
-				time.Since(peer.LastActivity) > p.config.InactivityTimeout {
+				now.Sub(peer.LastActivity) > p.config.InactivityTimeout {
 				p.peers[i].State = PeerStateWarm
 				warmDemotions++
 				activeDecreased++
-				p.config.Logger.Info(
+				p.config.Logger.Debug(
 					"demoted peer to warm due to inactivity",
 					"address",
 					peer.Address,
@@ -98,7 +105,7 @@ func (p *PeerGovernor) reconcile() {
 				} else {
 					p.peers[i].State = PeerStateWarm
 					coldPromotions++
-					p.config.Logger.Info(
+					p.config.Logger.Debug(
 						"promoted peer to warm",
 						"address",
 						peer.Address,
@@ -113,10 +120,10 @@ func (p *PeerGovernor) reconcile() {
 				if p.isTopologyPeer(peer.Source) {
 					continue
 				}
-				p.denyList[peer.NormalizedAddress] = time.Now().
+				p.denyList[peer.NormalizedAddress] = now.
 					Add(p.config.DenyDuration)
 				knownRemoved++
-				p.config.Logger.Info(
+				p.config.Logger.Debug(
 					"removing failed peer",
 					"address",
 					peer.Address,
@@ -151,7 +158,11 @@ func (p *PeerGovernor) reconcile() {
 		}
 		// Score-based selection: collect warm peers with connections, compute scores,
 		// sort by valency priority then score, and promote top N to reach the refill target.
-		candidates := []*Peer{}
+		type promotionCandidate struct {
+			peer         *Peer
+			underValency bool
+		}
+		candidates := make([]promotionCandidate, 0, len(p.peers))
 		for _, peer := range p.peers {
 			if peer != nil && peer.State == PeerStateWarm &&
 				peer.hasClientConnection() {
@@ -160,24 +171,31 @@ func (p *PeerGovernor) reconcile() {
 					continue
 				}
 				peer.UpdatePeerScore()
-				candidates = append(candidates, peer)
+				candidates = append(candidates, promotionCandidate{peer: peer})
 			}
 		}
 
 		// Get group counts for valency-aware sorting
 		groups := p.countPeersByGroup()
+		for i := range candidates {
+			candidates[i].underValency = p.isGroupUnderHotValency(
+				candidates[i].peer,
+				groups,
+			)
+		}
 
 		// Comparator: under-valency groups first, then by score descending
-		rankCandidates := func(a, b *Peer) int {
-			aUnder := p.isGroupUnderHotValency(a, groups)
-			bUnder := p.isGroupUnderHotValency(b, groups)
-			if aUnder && !bUnder {
+		rankCandidates := func(a, b promotionCandidate) int {
+			if a.underValency && !b.underValency {
 				return -1
 			}
-			if !aUnder && bUnder {
+			if !a.underValency && b.underValency {
 				return 1
 			}
-			return cmp.Compare(b.PerformanceScore, a.PerformanceScore)
+			return cmp.Compare(
+				b.peer.PerformanceScore,
+				a.peer.PerformanceScore,
+			)
 		}
 
 		// Initial sort
@@ -186,7 +204,7 @@ func (p *PeerGovernor) reconcile() {
 		needed := refillTarget - hotCount
 		promoted := 0
 		for i := 0; i < len(candidates) && promoted < needed; i++ {
-			peer := candidates[i]
+			peer := candidates[i].peer
 			// Check inbound peer eligibility (score threshold and tenure)
 			if !p.isInboundEligibleForHot(peer) {
 				p.config.Logger.Debug(
@@ -205,7 +223,7 @@ func (p *PeerGovernor) reconcile() {
 				continue
 			}
 			peer.State = PeerStateHot
-			peer.LastActivity = time.Now()
+			peer.LastActivity = now
 			warmPromotions++
 			activeIncreased++
 			promoted++
@@ -214,12 +232,20 @@ func (p *PeerGovernor) reconcile() {
 				gc.Hot++
 				gc.Warm--
 			}
-			// Re-sort remaining candidates so valency changes
-			// from this promotion are reflected in the next pick.
+			// Recompute valency priority only for the affected group, then
+			// resort the remaining candidates for the next pick.
 			if i+1 < len(candidates) {
+				for j := i + 1; j < len(candidates); j++ {
+					if candidates[j].peer.GroupID == peer.GroupID {
+						candidates[j].underValency = p.isGroupUnderHotValency(
+							candidates[j].peer,
+							groups,
+						)
+					}
+				}
 				slices.SortFunc(candidates[i+1:], rankCandidates)
 			}
-			p.config.Logger.Info(
+			p.config.Logger.Debug(
 				"promoted peer to hot (score-based)",
 				"address", peer.Address,
 				"score", peer.PerformanceScore,
@@ -268,7 +294,9 @@ func (p *PeerGovernor) reconcile() {
 	)
 
 	// Log valency status for topology groups
-	p.logValencyStatus()
+	if debugEnabled {
+		p.logValencyStatus()
+	}
 
 	// Enforce overall peer targets by removing excess peers
 	// Priority order (highest to lowest): Topology > Gossip > Ledger > Inbound > Unknown
@@ -369,80 +397,102 @@ func (p *PeerGovernor) enforceStateLimit(
 ) []pendingEvent {
 	var events []pendingEvent
 
-	// Collect peers in this state
-	var peersInState []*Peer
-	for _, peer := range p.peers {
-		if peer != nil && peer.State == state {
-			peersInState = append(peersInState, peer)
+	type removalCandidate struct {
+		idx      int
+		peer     *Peer
+		priority int
+	}
+
+	stateCount := 0
+	candidates := make([]removalCandidate, 0, len(p.peers))
+	for idx, peer := range p.peers {
+		if peer == nil || peer.State != state {
+			continue
 		}
+		stateCount++
+		if p.isTopologyPeer(peer.Source) {
+			continue
+		}
+		candidates = append(candidates, removalCandidate{
+			idx:      idx,
+			peer:     peer,
+			priority: p.peerSourcePriority(peer.Source),
+		})
 	}
 
 	// Check if we're over the limit
-	excess := len(peersInState) - limit
+	excess := stateCount - limit
 	if excess <= 0 {
 		return events
 	}
 
-	// Sort peers by removal priority (lowest priority first)
+	removeCount := min(excess, len(candidates))
+	if removeCount <= 0 {
+		return events
+	}
+
+	// Sort removable peers by removal priority (lowest priority first)
 	// Priority order (highest to lowest):
 	// - Topology peers (LocalRoot, PublicRoot, Bootstrap) - never remove
 	// - Gossip peers
 	// - Ledger peers
 	// - Inbound peers
 	// - Unknown peers
-	slices.SortFunc(peersInState, func(a, b *Peer) int {
+	slices.SortFunc(candidates, func(a, b removalCandidate) int {
 		// First compare by source priority (lower priority = remove first)
-		aPriority := p.peerSourcePriority(a.Source)
-		bPriority := p.peerSourcePriority(b.Source)
-		if aPriority != bPriority {
-			return cmp.Compare(aPriority, bPriority)
+		if a.priority != b.priority {
+			return cmp.Compare(a.priority, b.priority)
 		}
 		// Same priority: lower score = remove first
-		return cmp.Compare(a.PerformanceScore, b.PerformanceScore)
+		return cmp.Compare(
+			a.peer.PerformanceScore,
+			b.peer.PerformanceScore,
+		)
 	})
 
-	// Remove excess peers (they're sorted lowest priority first)
+	removeIdx := make([]bool, len(p.peers))
 	removed := 0
-	for i := 0; i < len(peersInState) && removed < excess; i++ {
-		peer := peersInState[i]
-
-		// Never remove topology peers
-		if p.isTopologyPeer(peer.Source) {
-			continue
-		}
-
-		// Find and remove from main peer list
-		for j := len(p.peers) - 1; j >= 0; j-- {
-			if p.peers[j] == peer {
-				p.config.Logger.Info(
-					"removing peer due to limit exceeded",
-					"address", peer.Address,
-					"state", state,
-					"source", peer.Source,
-					"limit", limit,
-				)
-				// Close connection if peer has one (for warm/hot peers)
-				if peer.Connection != nil && p.config.ConnManager != nil {
-					conn := p.config.ConnManager.GetConnectionById(
-						peer.Connection.Id,
-					)
-					if conn != nil {
-						conn.Close()
-					}
-				}
-				events = append(events, pendingEvent{
-					PeerRemovedEventType,
-					PeerStateChangeEvent{
-						Address: peer.Address,
-						Reason:  "limit exceeded",
-					},
-				})
-				p.peers = slices.Delete(p.peers, j, j+1)
-				removed++
-				*removedCount++
-				break
+	for i := 0; i < removeCount; i++ {
+		candidate := candidates[i]
+		peer := candidate.peer
+		p.config.Logger.Debug(
+			"removing peer due to limit exceeded",
+			"address", peer.Address,
+			"state", state,
+			"source", peer.Source,
+			"limit", limit,
+		)
+		if peer.Connection != nil && p.config.ConnManager != nil {
+			conn := p.config.ConnManager.GetConnectionById(peer.Connection.Id)
+			if conn != nil {
+				conn.Close()
 			}
 		}
+		events = append(events, pendingEvent{
+			PeerRemovedEventType,
+			PeerStateChangeEvent{
+				Address: peer.Address,
+				Reason:  "limit exceeded",
+			},
+		})
+		removeIdx[candidate.idx] = true
+		removed++
+		*removedCount++
+	}
+
+	if removed > 0 {
+		originalPeers := p.peers
+		kept := originalPeers[:0]
+		for idx, peer := range originalPeers {
+			if removeIdx[idx] {
+				continue
+			}
+			kept = append(kept, peer)
+		}
+		for idx := len(kept); idx < len(originalPeers); idx++ {
+			originalPeers[idx] = nil
+		}
+		p.peers = kept
 	}
 
 	if removed > 0 {

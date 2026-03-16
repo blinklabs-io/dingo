@@ -144,14 +144,14 @@ func TestApplyOperationalDefaultsCore(t *testing.T) {
 		&memtable,
 	)
 
-	if blockCache != 536870912 {
-		t.Fatalf("expected core block cache size 536870912, got %d", blockCache)
+	if blockCache != 134217728 {
+		t.Fatalf("expected core block cache size 134217728, got %d", blockCache)
 	}
-	if indexCache != 134217728 {
-		t.Fatalf("expected core index cache size 134217728, got %d", indexCache)
+	if indexCache != 33554432 {
+		t.Fatalf("expected core index cache size 33554432, got %d", indexCache)
 	}
-	if memtable != 67108864 {
-		t.Fatalf("expected core memtable size 67108864, got %d", memtable)
+	if memtable != 33554432 {
+		t.Fatalf("expected core memtable size 33554432, got %d", memtable)
 	}
 }
 

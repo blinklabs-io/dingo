@@ -314,7 +314,7 @@ func (p *PeerGovernor) Start(ctx context.Context) error {
 		for {
 			select {
 			case <-t.C:
-				p.reconcile()
+				p.reconcile(ctx)
 			case <-stop:
 				return
 			case <-ctx.Done():

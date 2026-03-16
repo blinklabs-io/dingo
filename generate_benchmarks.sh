@@ -549,6 +549,7 @@ EOF
         done < <(list_current_benchmarks)
 
         # Add comparison section
+        echo "" >> "$OUTPUT_FILE.tmp"
         generate_comparison >> "$OUTPUT_FILE.tmp"
 
         # Add historical section if previous results exist

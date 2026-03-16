@@ -199,7 +199,7 @@ func (p *PeerGovernor) enforceTopologyQuota(currentCount int) []pendingEvent {
 		peer := candidates[i]
 		peer.State = PeerStateWarm // Demote to warm, not cold
 		demoted++
-		p.config.Logger.Info(
+		p.config.Logger.Debug(
 			"demoted public root to warm due to topology quota",
 			"address", peer.Address,
 			"score", peer.PerformanceScore,
@@ -291,7 +291,7 @@ func (p *PeerGovernor) enforceGroupValency() []pendingEvent {
 			peer := candidates[i]
 			peer.State = PeerStateWarm
 			demoted++
-			p.config.Logger.Info(
+			p.config.Logger.Debug(
 				"demoted peer to warm due to group valency",
 				"address", peer.Address,
 				"group", groupID,
@@ -348,7 +348,7 @@ func (p *PeerGovernor) enforceSourceQuota(
 		peer := candidates[i]
 		peer.State = PeerStateWarm
 		demoted++
-		p.config.Logger.Info(
+		p.config.Logger.Debug(
 			"demoted peer to warm due to source quota",
 			"address", peer.Address,
 			"category", category,
