@@ -197,7 +197,7 @@ func (d *MetadataStoreSqlite) runVacuum() error {
 	if d.dataDir == "" || closed {
 		return nil
 	}
-	if result := d.DB().Raw("VACUUM"); result.Error != nil {
+	if result := d.DB().Exec("VACUUM"); result.Error != nil {
 		return result.Error
 	}
 	return nil
