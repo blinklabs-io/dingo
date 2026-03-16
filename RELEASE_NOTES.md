@@ -17,7 +17,7 @@ Hi folks! Here’s what we shipped in v0.27.1.
 
 ### 💪 Improvements
 
-- **Inbound connection reuse and `TxSubmission`:** Networking is more solid on reconnect because peer reuse and governance now normalize exact peer addresses, require client-capable connections for reuse, and start `TxSubmission` on duplex inbound connections.
+- **Inbound connection reuse and `TxSubmission`:** Networking is more rock-solid on reconnect because peer reuse and governance now normalize exact peer addresses, require client-capable connections for reuse, and start `TxSubmission` on duplex inbound connections.
 - **Stake snapshot and epoch summary upserts:** Data storage is more consistent across supported databases because write paths now upsert across DB backends and report errors more clearly.
 - **More robust delegation parsing:** Delegation reads are more reliable because parsing now handles multiple account encodings with expanded tests.
 
