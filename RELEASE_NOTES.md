@@ -3,7 +3,7 @@
 
 ## v0.27.1 (March 16, 2026)
 
-**Title:** Stability and polish
+**Title:** Smoother reconnects and safer chain-sync
 
 **Date:** March 16, 2026
 
