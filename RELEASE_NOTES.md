@@ -3,7 +3,7 @@
 
 ## v0.27.2 (March 16, 2026)
 
-**Title:** Release updates
+**Title:** Safer concurrency and sturdier APIs
 
 **Date:** March 16, 2026
 
@@ -11,30 +11,32 @@
 
 Hi folks! Here’s what we shipped in v0.27.2.
 
-```json
-{
-  "✨ What's New": [
-    "We added new performance and sizing benchmarks so you can measure node behavior more consistently across environments."
-  ],
-  "💪 Improvements": [
-    "We improved the system’s safety under concurrent access so it behaves more predictably under load.",
-    "We improved server resilience during slow or stalled connections so requests fail fast instead of consuming resources indefinitely.",
-    "We improved networking and peer management efficiency so connection handling and governance work faster at scale.",
-    "We improved cryptographic period handling so operator certificates and KES operations stay consistent across offsets and upgrades.",
-    "We improved supply-chain metadata handling so attestations line up with current GitHub Actions and publishing expectations."
-  ],
-  "📋 What You Need to Know": [
-    "Timeout behavior is now enforced on several HTTP/RPC surfaces, which may surface misconfigured clients that relied on very long-lived idle connections.",
-    "Some errors that previously manifested as process panics are now returned as explicit failures that callers must handle."
-  ],
-  "🔧 Fixes": [
-    "We fixed a crash path in block metadata handling so invalid data is reported cleanly instead of taking down the process.",
-    "We fixed nonce cache reuse so stale entries do not get applied when the expected nonce has changed.",
-    "We fixed database maintenance so storage compaction actually runs when requested rather than being left pending."
-  ]
-}
+### ✨ What's New
 
-```
+- **Sizing and performance benchmarks:** Capacity planning is easier because we added targeted benchmark suites and sizing reports.
+
+### 💪 Improvements
+
+- **Race-safety around chain reads:** Running under load is more predictable because primary-chain access and current protocol parameter reads now use read locks and Linux CI now runs the Go race detector.
+- **HTTP/RPC timeouts:** Stalled requests are less likely to tie up resources because Bark, Blockfrost, and UTxO RPC servers now enforce write, read, and idle timeouts.
+- **Peer governance and event fan-out:** Larger peer sets are easier to handle because connection-manager checks and metrics are incremental, peer governor reconciliation and quota enforcement are optimized, and event publishing/shutdown now uses a snapshot-based fan-out with an async `Close` API.
+- **KES period offsets:** Operator certificate operations are more consistent because KES periods are now handled relative to the opcert and offset edge cases are validated with tests.
+- **Attestation workflow metadata:** Supply-chain metadata is more consistent because the pipeline now uses `actions/attest` and updated Docker Hub subject names.
+
+### 🔧 Fixes
+
+- **Block metadata marshaling errors:** Crashes are less likely because invalid `PrevHash` lengths now return an error instead of panicking.
+- **Epoch nonce cache validation:** Consensus state is more reliable because cached epoch nonces are only reused when they match the nonce you provide.
+- **SQLite VACUUM execution:** Database maintenance is more reliable because SQLite compaction now runs when requested.
+
+### 📋 What You Need to Know
+
+- **Client timeout expectations:** Some clients may need retry or keep-alive tuning because Bark, Blockfrost, and UTxO RPC now enforce write, read, and idle timeouts.
+- **Error handling instead of panics:** Some call paths may now fail explicitly because block metadata marshaling can return an error for invalid `PrevHash` lengths.
+
+### 🙏 Thank You
+
+Thank you for trying!
 
 ---
 
