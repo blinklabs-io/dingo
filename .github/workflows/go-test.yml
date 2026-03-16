@@ -95,7 +95,7 @@ jobs:
       - name: go-build
         run: go build ./cmd/dingo
       - name: go-test
-        run: go test ./...
+        run: go test -race ./...
 
   # macOS and Windows jobs without Postgres service
   go-test-other:
