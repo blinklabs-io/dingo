@@ -266,33 +266,83 @@ func (s *syncServiceServer) FollowTip(
 			return err
 		}
 		if next != nil {
-			// Send block response
-			block, err := ledger.NewBlockFromCbor(
-				next.Block.Type,
-				next.Block.Cbor,
-			)
-			if err != nil {
-				s.utxorpc.config.Logger.Error(
-					"failed to get block",
-					"error", err,
+			var resp *sync.FollowTipResponse
+
+			if next.Rollback {
+				// Chain rolled back - emit Reset action
+				// Lookup block metadata for height and timestamp
+				rollbackBlock, err := s.utxorpc.config.LedgerState.GetBlock(
+					next.Point,
 				)
-				return err
+				if err != nil {
+					s.utxorpc.config.Logger.Error(
+						"failed to get rollback block",
+						"error", err,
+					)
+					return err
+				}
+				// Convert slot to timestamp (milliseconds)
+				var timestamp uint64
+				if slotTime, err := s.utxorpc.config.LedgerState.SlotToTime(
+					next.Point.Slot,
+				); err == nil {
+					timestamp = uint64(slotTime.UnixMilli())
+				}
+				resp = &sync.FollowTipResponse{
+					Action: &sync.FollowTipResponse_Reset_{
+						Reset_: &sync.BlockRef{
+							Slot:      next.Point.Slot,
+							Hash:      next.Point.Hash,
+							Height:    rollbackBlock.Number,
+							Timestamp: timestamp,
+						},
+					},
+				}
+			} else {
+				// Forward block - emit Apply action
+				block, err := ledger.NewBlockFromCbor(
+					next.Block.Type,
+					next.Block.Cbor,
+				)
+				if err != nil {
+					s.utxorpc.config.Logger.Error(
+						"failed to get block",
+						"error", err,
+					)
+					return err
+				}
+				tmpBlock, err := block.Utxorpc()
+				if err != nil {
+					return fmt.Errorf("convert block: %w", err)
+				}
+				var acb sync.AnyChainBlock
+				acbc := sync.AnyChainBlock_Cardano{
+					Cardano: tmpBlock,
+				}
+				acb.Chain = &acbc
+				acb.NativeBytes = next.Block.Cbor
+				resp = &sync.FollowTipResponse{
+					Action: &sync.FollowTipResponse_Apply{
+						Apply: &acb,
+					},
+				}
 			}
-			tmpBlock, err := block.Utxorpc()
-			if err != nil {
-				return fmt.Errorf("convert block: %w", err)
+
+			// Populate Tip field with current chain tip
+			tip := s.utxorpc.config.LedgerState.Tip()
+			var tipTimestamp uint64
+			if tipTime, err := s.utxorpc.config.LedgerState.SlotToTime(
+				tip.Point.Slot,
+			); err == nil {
+				tipTimestamp = uint64(tipTime.UnixMilli())
 			}
-			var acb sync.AnyChainBlock
-			acbc := sync.AnyChainBlock_Cardano{
-				Cardano: tmpBlock,
+			resp.Tip = &sync.BlockRef{
+				Slot:      tip.Point.Slot,
+				Hash:      tip.Point.Hash,
+				Height:    tip.BlockNumber,
+				Timestamp: tipTimestamp,
 			}
-			acb.Chain = &acbc
-			acb.NativeBytes = next.Block.Cbor
-			resp := &sync.FollowTipResponse{
-				Action: &sync.FollowTipResponse_Apply{
-					Apply: &acb,
-				},
-			}
+
 			err = stream.Send(resp)
 			if err != nil {
 				if ctx.Err() != nil {
