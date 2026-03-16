@@ -1485,6 +1485,26 @@ func TestDeleteTransactionsAfterSlot(t *testing.T) {
 	if result := sqliteStore.DB().Create(&pd2); result.Error != nil {
 		t.Fatalf("failed to create plutus data for tx2: %v", result.Error)
 	}
+	label1 := models.TransactionMetadataLabel{
+		TransactionID: tx1.ID,
+		Label:         674,
+		Slot:          tx1.Slot,
+		CborValue:     []byte{0x01},
+		JsonValue:     `"tx1"`,
+	}
+	if result := sqliteStore.DB().Create(&label1); result.Error != nil {
+		t.Fatalf("failed to create metadata label for tx1: %v", result.Error)
+	}
+	label2 := models.TransactionMetadataLabel{
+		TransactionID: tx2.ID,
+		Label:         721,
+		Slot:          tx2.Slot,
+		CborValue:     []byte{0x02},
+		JsonValue:     `"tx2"`,
+	}
+	if result := sqliteStore.DB().Create(&label2); result.Error != nil {
+		t.Fatalf("failed to create metadata label for tx2: %v", result.Error)
+	}
 
 	// Verify we have 2 transactions and their child records
 	var txCountBefore int64
@@ -1544,6 +1564,28 @@ func TestDeleteTransactionsAfterSlot(t *testing.T) {
 	sqliteStore.DB().Model(&models.PlutusData{}).Count(&pdCountAfter)
 	if pdCountAfter != 0 {
 		t.Errorf("expected 0 plutus data after rollback, got %d", pdCountAfter)
+	}
+
+	var metadataLabelCountAfter int64
+	sqliteStore.DB().
+		Model(&models.TransactionMetadataLabel{}).
+		Count(&metadataLabelCountAfter)
+	if metadataLabelCountAfter != 1 {
+		t.Errorf(
+			"expected 1 metadata label after rollback, got %d",
+			metadataLabelCountAfter,
+		)
+	}
+
+	var remainingLabel models.TransactionMetadataLabel
+	if err := sqliteStore.DB().First(&remainingLabel).Error; err != nil {
+		t.Fatalf("failed to query remaining metadata label: %v", err)
+	}
+	if remainingLabel.TransactionID != tx1.ID {
+		t.Errorf(
+			"expected remaining metadata label to belong to tx1, got tx id %d",
+			remainingLabel.TransactionID,
+		)
 	}
 }
 

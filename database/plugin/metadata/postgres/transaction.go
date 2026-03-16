@@ -2040,6 +2040,15 @@ func (d *MetadataStorePostgres) DeleteTransactionsAfterSlot(
 		}
 	}
 
+	if result := db.Where("slot > ?", slot).
+		Delete(&models.TransactionMetadataLabel{}); result.Error != nil {
+		return fmt.Errorf(
+			"delete transaction metadata labels after slot %d: %w",
+			slot,
+			result.Error,
+		)
+	}
+
 	if result := db.Where("slot > ?", slot).Delete(&models.Transaction{}); result.Error != nil {
 		return result.Error
 	}
