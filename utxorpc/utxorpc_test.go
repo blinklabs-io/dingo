@@ -23,6 +23,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
 	sync "github.com/utxorpc/go-codegen/utxorpc/v1alpha/sync"
 )
@@ -144,4 +145,18 @@ func TestAnyChainBlockNativeBytes_NonNil(t *testing.T) {
 
 	require.NotNil(t, acb.NativeBytes)
 	require.Equal(t, raw, acb.NativeBytes)
+}
+
+func TestBlockRefFromModel(t *testing.T) {
+	block := models.Block{
+		Hash:   []byte{0xde, 0xad, 0xbe, 0xef},
+		Slot:   42,
+		Number: 100,
+	}
+
+	br := blockRefFromModel(block)
+
+	require.Equal(t, block.Slot, br.Slot)
+	require.Equal(t, block.Hash, br.Hash)
+	require.Equal(t, block.Number, br.Height)
 }

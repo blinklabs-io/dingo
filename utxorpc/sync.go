@@ -20,6 +20,7 @@ import (
 	"fmt"
 
 	"connectrpc.com/connect"
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	sync "github.com/utxorpc/go-codegen/utxorpc/v1alpha/sync"
@@ -372,7 +373,34 @@ func (s *syncServiceServer) ReadTip(
 	resp := &sync.ReadTipResponse{}
 
 	point := s.utxorpc.config.LedgerState.Tip().Point
-	resp.Tip = &sync.BlockRef{Slot: point.Slot, Hash: point.Hash}
+
+	// Populate height from the database when available, but fall back to
+	// height = 0 if the lookup fails to preserve compatibility.
+	var (
+		br  blockRef
+		err error
+	)
+	var model models.Block
+	model, err = s.utxorpc.config.LedgerState.BlockByHash(point.Hash)
+	if err != nil {
+		s.utxorpc.config.Logger.Warn(
+			"failed to look up tip block for height; using height=0",
+			"error", err,
+		)
+		br = blockRef{
+			Slot:   point.Slot,
+			Hash:   point.Hash,
+			Height: 0,
+		}
+	} else {
+		br = blockRefFromModel(model)
+	}
+
+	resp.Tip = &sync.BlockRef{
+		Slot:   br.Slot,
+		Hash:   br.Hash,
+		Height: br.Height,
+	}
 
 	return connect.NewResponse(resp), nil
 }
