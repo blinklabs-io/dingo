@@ -196,7 +196,7 @@ func (m *mockTransaction) LeiosHash() lcommon.Blake2b256 {
 }
 
 func TestTransactionMetadataLabelsIndexAndQuery(t *testing.T) {
-	sqliteStore := setupTestDB(t)
+	sqliteStore := setupTestDBWithMode(t, types.StorageModeAPI)
 
 	makeMetadata := func(labels map[uint64]lcommon.TransactionMetadatum) lcommon.TransactionMetadatum {
 		pairs := make([]lcommon.MetaPair, 0, len(labels))
@@ -321,7 +321,7 @@ func TestTransactionMetadataLabelsIndexAndQuery(t *testing.T) {
 }
 
 func TestDeleteTransactionMetadataLabelsAfterSlot(t *testing.T) {
-	sqliteStore := setupTestDB(t)
+	sqliteStore := setupTestDBWithMode(t, types.StorageModeAPI)
 
 	makeMetadata := func(label uint64, value string) lcommon.TransactionMetadatum {
 		return lcommon.MetaMap{
