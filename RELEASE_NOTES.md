@@ -1,6 +1,51 @@
 # Release Notes
 
 
+## v0.27.1 (March 16, 2026)
+
+**Title:** Patch updates and stability tweaks
+
+**Date:** March 16, 2026
+
+**Version:** v0.27.1
+
+Hi folks! Here’s what we shipped in v0.27.1.
+
+### ✨ What's New
+
+```json
+{
+  "💪 Improvements": [
+    "Networking reuse decisions are now more consistent, which helps connections behave more predictably under load. The peer-governance logic now normalizes and exact-matches peer addresses for inbound reuse, only treats client-capable connections as eligible/reusable, and starts `TxSubmission` on duplex inbound connections, with updated and new tests.",
+    "Chain sync and delegation state handling are now more robust and efficient, reducing the chances of stalled sync or confusing state edge cases. The chainsync intersect point set is now denser/wider, stake snapshots and epoch summaries are upserted across DB backends with improved error reporting, and delegation state parsing now supports multiple account encodings with test coverage.",
+    "Dependency updates improve compatibility and reduce exposure to upstream bugs in third-party libraries. Go module versions were bumped for AWS SDK v2 (including S3 modules), `golang.org/x/net` and related `x/*` libraries, `google.golang.org/api` (and related libraries), plus `plutigo` v0.0.27 and `go-ethereum` v1.17.1 via `go.mod`/`go.sum` updates."
+  ],
+  "📋 What You Need to Know": [
+    "The project’s release notes documentation has been updated so it’s easier to track what shipped in the latest release. A new section for v0.27.0 was added to `RELEASE_NOTES.md`."
+  ]
+}
+
+```
+
+### 💪 Improvements
+
+- **No improvements:** No user-facing improvements shipped in this patch.
+
+### 🔧 Fixes
+
+- **No fixes:** No user-facing fixes shipped in this patch.
+
+### 📋 What You Need to Know
+
+- **Upgrade:** You’re all set—no required configuration changes for this release.
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
+
 ## v0.27.0 (March 15, 2026)
 
 **Title:** S3-backed CI tests and embedded network configs
