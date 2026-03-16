@@ -645,6 +645,16 @@ func (d *Database) TransactionsDeleteRolledback(
 			err,
 		)
 	}
+	if err := d.metadata.DeleteTransactionMetadataLabelsAfterSlot(
+		slot,
+		txn.Metadata(),
+	); err != nil {
+		return fmt.Errorf(
+			"failed to delete transaction metadata labels after slot %d: %w",
+			slot,
+			err,
+		)
+	}
 
 	err = d.metadata.DeleteTransactionsAfterSlot(slot, txn.Metadata())
 	if err != nil {
