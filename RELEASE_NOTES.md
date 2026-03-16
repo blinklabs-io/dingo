@@ -3,7 +3,7 @@
 
 ## v0.27.1 (March 16, 2026)
 
-**Title:** Patch updates and stability tweaks
+**Title:** More predictable networking and smoother sync
 
 **Date:** March 16, 2026
 
@@ -13,23 +13,13 @@ Hi folks! Here’s what we shipped in v0.27.1.
 
 ### ✨ What's New
 
-```json
-{
-  "💪 Improvements": [
-    "Networking reuse decisions are now more consistent, which helps connections behave more predictably under load.",
-    "Chain sync and delegation state handling are now more robust and efficient, reducing the chances of stalled sync or confusing state edge cases.",
-    "Dependency updates improve compatibility and reduce exposure to upstream bugs in third-party libraries."
-  ],
-  "📋 What You Need to Know": [
-    "The project’s release notes documentation has been updated so it’s easier to track what shipped in the latest release."
-  ]
-}
-
-```
+- **No new features:** No user-facing features shipped in this patch.
 
 ### 💪 Improvements
 
-- **No improvements:** No user-facing improvements shipped in this patch.
+- **Peer reuse rules:** Connections behave more predictably under load because inbound peer reuse now relies on normalized, exact-match addresses.
+- **Chainsync and delegation state:** Sync is more rock-solid because chainsync and delegation parsing handle edge cases more safely.
+- **Dependencies:** Compatibility is more solid because key Go dependencies were refreshed.
 
 ### 🔧 Fixes
 
@@ -38,6 +28,7 @@ Hi folks! Here’s what we shipped in v0.27.1.
 ### 📋 What You Need to Know
 
 - **Upgrade:** You’re all set—no required configuration changes for this release.
+- **Release notes:** Release notes are easier to scan because the release notes documentation was updated.
 
 ### 🙏 Thank You
 
