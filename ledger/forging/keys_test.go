@@ -427,3 +427,97 @@ func TestOpCertValidationMismatchedKESKey(t *testing.T) {
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "KES verification key mismatch")
 }
+
+func TestKESSignWithOpCertOffset(t *testing.T) {
+	vrfPath, kesPath, opCertPath := createTestKeys(t)
+
+	pc := NewPoolCredentials()
+	require.NoError(t, pc.LoadFromFiles(vrfPath, kesPath, opCertPath))
+
+	// The test opCert has KESPeriod=0. Override it to 795 to simulate
+	// a real-world opcert with a non-zero start KES period.
+	pc.opCert.KESPeriod = 795
+
+	// Evolve to absolute period 825 (relative period = 825 - 795 = 30)
+	require.NoError(t, pc.UpdateKESPeriod(825))
+
+	// Sign at absolute period 825. KESSign should convert to relative
+	// period 30 internally, which is within the valid range (0-63).
+	message := []byte("test block header at absolute period 825")
+	signature, err := pc.KESSign(825, message)
+	require.NoError(t, err)
+	assert.Equal(t, kes.CardanoKesSignatureSize, len(signature))
+
+	// Verify signature at relative period 30
+	ok := kes.VerifySignedKES(pc.kesVKey, 30, message, signature)
+	assert.True(t, ok, "KES signature should verify at relative period 30")
+}
+
+func TestKESSignWithoutOpCert(t *testing.T) {
+	vrfPath, kesPath, opCertPath := createTestKeys(t)
+
+	pc := NewPoolCredentials()
+	require.NoError(t, pc.LoadFromFiles(vrfPath, kesPath, opCertPath))
+
+	// Remove the opCert to test backwards compatibility — when opCert
+	// is nil, KESSign should use the period as-is (no offset).
+	pc.opCert = nil
+
+	// Evolve to period 5, then sign at period 5 — without opCert,
+	// the period should be used directly (no offset subtraction).
+	require.NoError(t, pc.UpdateKESPeriod(5))
+	message := []byte("test block header without opcert")
+	signature, err := pc.KESSign(5, message)
+	require.NoError(t, err)
+	assert.Equal(t, kes.CardanoKesSignatureSize, len(signature))
+
+	// Verify at period 5
+	ok := kes.VerifySignedKES(pc.kesVKey, 5, message, signature)
+	assert.True(t, ok, "KES signature should verify at period 5 without opcert")
+}
+
+func TestUpdateKESPeriodWithOpCertOffset(t *testing.T) {
+	vrfPath, kesPath, opCertPath := createTestKeys(t)
+
+	pc := NewPoolCredentials()
+	require.NoError(t, pc.LoadFromFiles(vrfPath, kesPath, opCertPath))
+
+	// Override opcert start KES period to 795
+	pc.opCert.KESPeriod = 795
+
+	// UpdateKESPeriod(825) should evolve to relative period 30
+	// (825 - 795 = 30)
+	err := pc.UpdateKESPeriod(825)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(30), pc.kesSKey.Period,
+		"KES key should be at relative period 30")
+}
+
+func TestUpdateKESPeriodExhaustedWithOffset(t *testing.T) {
+	vrfPath, kesPath, opCertPath := createTestKeys(t)
+
+	pc := NewPoolCredentials()
+	require.NoError(t, pc.LoadFromFiles(vrfPath, kesPath, opCertPath))
+
+	// Set opcert start to 100. For depth 6, max relative period is 63.
+	// Absolute period 164 maps to relative 64 (164 - 100 = 64), which
+	// exceeds the maximum.
+	pc.opCert.KESPeriod = 100
+	err := pc.UpdateKESPeriod(164)
+	assert.Error(t, err, "should fail when relative period exceeds max for depth 6")
+	assert.Contains(t, err.Error(), "failed to update KES key to period 64 (absolute 164)")
+}
+
+func TestUpdateKESPeriodBeforeOpCertStart(t *testing.T) {
+	vrfPath, kesPath, opCertPath := createTestKeys(t)
+
+	pc := NewPoolCredentials()
+	require.NoError(t, pc.LoadFromFiles(vrfPath, kesPath, opCertPath))
+
+	// Opcert start = 795. Absolute period 700 is before start — should
+	// error, not underflow.
+	pc.opCert.KESPeriod = 795
+	err := pc.UpdateKESPeriod(700)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "before opcert start period")
+}
