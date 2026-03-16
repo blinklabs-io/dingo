@@ -1,4 +1,4 @@
-// Copyright 2025 Blink Labs Software
+// Copyright 2026 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -16,6 +16,7 @@ package node
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -33,6 +34,72 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
+
+func waitForSignalOrError(
+	signalCtx context.Context,
+	errChan <-chan error,
+) (error, bool) {
+	select {
+	case err := <-errChan:
+		return err, false
+	case <-signalCtx.Done():
+		// Prefer a queued component error over treating shutdown as a clean
+		// signal-driven exit when both happen at roughly the same time.
+		select {
+		case err := <-errChan:
+			return err, false
+		default:
+		}
+		return nil, true
+	}
+}
+
+func gracefulShutdown(
+	logger *slog.Logger,
+	metricsServer *http.Server,
+	d *dingo.Node,
+	timeout time.Duration,
+) error {
+	shutdownErr := shutdownNodeResources(
+		metricsServer.Shutdown,
+		d.Stop,
+		timeout,
+	)
+	if shutdownErr != nil {
+		logger.Error(
+			"graceful shutdown failed",
+			"error",
+			shutdownErr,
+		)
+	}
+	return shutdownErr
+}
+
+func shutdownNodeResources(
+	metricsServerShutdown func(context.Context) error,
+	nodeStop func() error,
+	timeout time.Duration,
+) error {
+	shutdownCtx, cancel := context.WithTimeout(
+		context.Background(),
+		timeout,
+	)
+	defer cancel()
+	var err error
+	if shutdownErr := metricsServerShutdown(shutdownCtx); shutdownErr != nil {
+		err = errors.Join(
+			err,
+			fmt.Errorf("metrics server shutdown: %w", shutdownErr),
+		)
+	}
+	if stopErr := nodeStop(); stopErr != nil {
+		err = errors.Join(
+			err,
+			fmt.Errorf("node stop: %w", stopErr),
+		)
+	}
+	return err
+}
 
 func Run(cfg *config.Config, logger *slog.Logger) error {
 	logger.Debug(fmt.Sprintf("config: %+v", cfg), "component", "node")
@@ -278,16 +345,6 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 		WriteTimeout:      30 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}
-	go func() {
-		if err := metricsServer.ListenAndServe(); err != nil &&
-			err != http.ErrServerClosed {
-			logger.Error(
-				fmt.Sprintf("failed to start metrics listener: %s", err),
-				"component", "node",
-			)
-			os.Exit(1)
-		}
-	}()
 	// Wait for interrupt/termination signal
 	signalCtx, signalCtxStop := signal.NotifyContext(
 		context.Background(),
@@ -296,11 +353,24 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 	)
 	defer signalCtxStop()
 
-	// Run node in goroutine
-	errChan := make(chan error, 1)
+	// Error channel for both node and metrics goroutines
+	errChan := make(chan error, 2)
+	go func() {
+		if err := metricsServer.ListenAndServe(); err != nil &&
+			err != http.ErrServerClosed {
+			logger.Error(
+				fmt.Sprintf("failed to start metrics listener: %s", err),
+				"component", "node",
+			)
+			errChan <- fmt.Errorf("metrics server: %w", err)
+		}
+	}()
 	go func() {
 		//nolint:contextcheck
 		err := d.Run(signalCtx)
+		if errors.Is(err, context.Canceled) {
+			return
+		}
 		select {
 		case errChan <- err:
 		case <-signalCtx.Done():
@@ -308,68 +378,53 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 	}()
 
 	// Wait for signal or error
-	select {
-	case <-signalCtx.Done():
+	err, signaled := waitForSignalOrError(signalCtx, errChan)
+	if signaled {
 		logger.Info("signal received, initiating graceful shutdown")
 
-		// Shutdown metrics server
-		shutdownCtx, cancel := context.WithTimeout(
-			context.Background(),
+		if err := gracefulShutdown(
+			logger,
+			metricsServer,
+			d,
 			shutdownTimeout,
-		)
-		defer cancel()
-		if err := metricsServer.Shutdown(shutdownCtx); err != nil {
-			logger.Error("metrics server shutdown error", "error", err)
-		}
-
-		// Shutdown node
-		if err := d.Stop(); err != nil {
-			logger.Error("shutdown errors occurred", "error", err)
+		); err != nil {
 			return err
 		}
 		logger.Info("shutdown complete")
 		return nil
-
-	case err := <-errChan:
-		if err == nil {
-			logger.Info("node stopped")
-			// Graceful cleanup
-			shutdownCtx, cancel := context.WithTimeout(
-				context.Background(),
-				shutdownTimeout,
-			)
-			defer cancel()
-			if err := metricsServer.Shutdown(shutdownCtx); err != nil {
-				logger.Error("metrics server shutdown error", "error", err)
-			}
-			if err := d.Stop(); err != nil {
-				logger.Error("shutdown errors occurred", "error", err)
-				return err
-			}
-			return nil
-		}
-		logger.Error("node error", "error", err)
-		signalCtxStop()
-
-		// Shutdown node resources
-		if stopErr := d.Stop(); stopErr != nil {
-			logger.Error(
-				"shutdown errors occurred during error cleanup",
-				"error",
-				stopErr,
-			)
-		}
-
-		// Cleanup on error
-		shutdownCtx, cancel := context.WithTimeout(
-			context.Background(),
-			shutdownTimeout,
-		)
-		defer cancel()
-		if shutdownErr := metricsServer.Shutdown(shutdownCtx); shutdownErr != nil {
-			logger.Error("metrics server shutdown error", "error", shutdownErr)
-		}
-
-		return err
 	}
+
+	if err == nil {
+		logger.Info("node stopped")
+		if err := gracefulShutdown(
+			logger,
+			metricsServer,
+			d,
+			shutdownTimeout,
+		); err != nil {
+			return err
+		}
+		return nil
+	}
+
+	logger.Error("node error", "error", err)
+	signalCtxStop()
+
+	cleanupErr := shutdownNodeResources(
+		metricsServer.Shutdown,
+		d.Stop,
+		shutdownTimeout,
+	)
+	if cleanupErr != nil {
+		logger.Error(
+			"error cleanup failed",
+			"error",
+			cleanupErr,
+			"node_error",
+			err,
+		)
+		return errors.Join(err, cleanupErr)
+	}
+
+	return err
 }
