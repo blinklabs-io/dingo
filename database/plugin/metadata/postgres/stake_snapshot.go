@@ -35,7 +35,13 @@ func (d *MetadataStorePostgres) SavePoolStakeSnapshot(
 	if err != nil {
 		return err
 	}
-	return db.Create(snapshot).Error
+	if err := db.Create(snapshot).Error; err != nil {
+		return fmt.Errorf(
+			"stake_snapshot.SavePoolStakeSnapshot: failed to create snapshot: %w",
+			err,
+		)
+	}
+	return nil
 }
 
 // SavePoolStakeSnapshots saves multiple pool stake snapshots in batch
@@ -50,7 +56,26 @@ func (d *MetadataStorePostgres) SavePoolStakeSnapshots(
 	if err != nil {
 		return err
 	}
-	return db.Clauses(clause.OnConflict{DoNothing: true}).Create(snapshots).Error
+	if err := db.Clauses(
+		clause.OnConflict{
+			Columns: []clause.Column{
+				{Name: "epoch"},
+				{Name: "snapshot_type"},
+				{Name: "pool_key_hash"},
+			},
+			DoUpdates: clause.AssignmentColumns([]string{
+				"total_stake",
+				"delegator_count",
+				"captured_slot",
+			}),
+		},
+	).Create(snapshots).Error; err != nil {
+		return fmt.Errorf(
+			"stake_snapshot.SavePoolStakeSnapshots: failed to create snapshots: %w",
+			err,
+		)
+	}
+	return nil
 }
 
 // GetPoolStakeSnapshot retrieves a specific pool's stake snapshot
@@ -156,7 +181,30 @@ func (d *MetadataStorePostgres) SaveEpochSummary(
 	if err != nil {
 		return err
 	}
-	return db.Clauses(clause.OnConflict{DoNothing: true}).Create(summary).Error
+	if err := db.Clauses(
+		clause.OnConflict{
+			Columns: []clause.Column{{Name: "epoch"}},
+			DoUpdates: append(
+				clause.AssignmentColumns([]string{
+					"total_active_stake",
+					"total_pool_count",
+					"total_delegators",
+					"epoch_nonce",
+					"boundary_slot",
+				}),
+				clause.Assignment{
+					Column: clause.Column{Name: "snapshot_ready"},
+					Value:  clause.Expr{SQL: "snapshot_ready OR excluded.snapshot_ready"},
+				},
+			),
+		},
+	).Create(summary).Error; err != nil {
+		return fmt.Errorf(
+			"stake_snapshot.SaveEpochSummary: failed to upsert epoch summary: %w",
+			err,
+		)
+	}
+	return nil
 }
 
 // GetEpochSummary retrieves an epoch summary by epoch number
@@ -210,10 +258,16 @@ func (d *MetadataStorePostgres) DeletePoolStakeSnapshotsForEpoch(
 	if err != nil {
 		return err
 	}
-	return db.Where(
+	if err := db.Where(
 		"epoch = ? AND snapshot_type = ?",
 		epoch, snapshotType,
-	).Delete(&models.PoolStakeSnapshot{}).Error
+	).Delete(&models.PoolStakeSnapshot{}).Error; err != nil {
+		return fmt.Errorf(
+			"stake_snapshot.DeletePoolStakeSnapshotsForEpoch: failed to delete snapshots: %w",
+			err,
+		)
+	}
+	return nil
 }
 
 // DeletePoolStakeSnapshotsAfterEpoch deletes all pool stake snapshots after a given epoch.

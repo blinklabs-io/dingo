@@ -37,6 +37,10 @@ const (
 	// transaction limits during import, so keep the runtime batch size
 	// conservative even if smaller benchmark fixtures tolerate more.
 	blockImportBatchSize = 50
+	// Keep a dense window near the tip so short peer gaps intersect on a
+	// recent block, then fall back to exponentially older points to avoid
+	// origin intersects when the peer lags by more than a few dozen blocks.
+	intersectDensePointCount = 32
 )
 
 type Chain struct {
@@ -731,6 +735,65 @@ func (c *Chain) RecentPoints(count int) []ocommon.Point {
 			points,
 			ocommon.NewPoint(blk.Slot, blk.Hash),
 		)
+	}
+	return points
+}
+
+// IntersectPoints returns up to count points in descending order for
+// chainsync FindIntersect. It keeps a dense window near the tip and
+// then samples exponentially older blocks so lagging peers can still
+// find a recent common point without falling all the way back to origin.
+func (c *Chain) IntersectPoints(count int) []ocommon.Point {
+	if c == nil || count <= 0 {
+		return nil
+	}
+	c.mutex.RLock()
+	defer c.mutex.RUnlock()
+	if c.tipBlockIndex < initialBlockIndex {
+		return nil
+	}
+	points := make([]ocommon.Point, 0, count)
+	seen := make(map[uint64]struct{}, count)
+	appendPoint := func(blockIndex uint64) bool {
+		if len(points) >= count {
+			return false
+		}
+		if _, ok := seen[blockIndex]; ok {
+			return true
+		}
+		blk, err := c.blockByIndex(blockIndex)
+		if err != nil {
+			return false
+		}
+		points = append(
+			points,
+			ocommon.NewPoint(blk.Slot, blk.Hash),
+		)
+		seen[blockIndex] = struct{}{}
+		return true
+	}
+	denseCount := min(count, intersectDensePointCount)
+	for idx := c.tipBlockIndex; idx >= initialBlockIndex && len(points) < denseCount; idx-- {
+		if !appendPoint(idx) {
+			break
+		}
+	}
+	if len(points) >= count {
+		return points
+	}
+	if c.tipBlockIndex <= initialBlockIndex {
+		return points
+	}
+	for offset := uint64(denseCount); len(points) < count; offset *= 2 {
+		if offset == 0 || offset >= c.tipBlockIndex {
+			break
+		}
+		if !appendPoint(c.tipBlockIndex - offset) {
+			break
+		}
+	}
+	if len(points) < count {
+		_ = appendPoint(initialBlockIndex)
 	}
 	return points
 }

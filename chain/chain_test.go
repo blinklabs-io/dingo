@@ -807,6 +807,73 @@ func TestRecentPointsWithDatabase(t *testing.T) {
 	}
 }
 
+func TestIntersectPointsIncludesOlderSamples(t *testing.T) {
+	db := newTestDB(t)
+	cm, err := chain.NewManager(db, nil)
+	if err != nil {
+		t.Fatalf(
+			"unexpected error creating chain manager: %s",
+			err,
+		)
+	}
+	c := cm.PrimaryChain()
+	headers := makeLinkedHeaders(80, 0, 1, "")
+	for _, header := range headers {
+		if err := c.AddBlock(header, nil); err != nil {
+			t.Fatalf(
+				"unexpected error adding block to chain: %s",
+				err,
+			)
+		}
+	}
+
+	points := c.IntersectPoints(40)
+	if len(points) != 35 {
+		t.Fatalf("expected 35 points, got %d", len(points))
+	}
+
+	for i := range 32 {
+		expected := headers[len(headers)-1-i]
+		if points[i].Slot != expected.MockSlot {
+			t.Fatalf(
+				"dense point %d: expected slot %d, got %d",
+				i,
+				expected.MockSlot,
+				points[i].Slot,
+			)
+		}
+	}
+
+	expectedOlder := []struct {
+		pointIdx  int
+		headerIdx int
+	}{
+		{pointIdx: 32, headerIdx: 47},
+		{pointIdx: 33, headerIdx: 15},
+		{pointIdx: 34, headerIdx: 0},
+	}
+	for _, expected := range expectedOlder {
+		header := headers[expected.headerIdx]
+		point := points[expected.pointIdx]
+		if point.Slot != header.MockSlot {
+			t.Fatalf(
+				"older point %d: expected slot %d, got %d",
+				expected.pointIdx,
+				header.MockSlot,
+				point.Slot,
+			)
+		}
+		if string(point.Hash) != string(decodeHex(header.MockHash)) {
+			t.Fatalf(
+				"older point %d: expected hash %x, got %x",
+				expected.pointIdx,
+				decodeHex(header.MockHash),
+				point.Hash,
+			)
+		}
+	}
+}
+
 // mockLedger implements the interface{ SecurityParam() int }
 // interface used by ChainManager.SetLedger.
 type mockLedger struct {

@@ -123,7 +123,7 @@ func (o *Ouroboros) chainsyncClientStart(connId ouroboros.ConnectionId) error {
 			connId.String(),
 		)
 	}
-	intersectPoints, err := o.LedgerState.RecentChainPoints(
+	intersectPoints, err := o.LedgerState.IntersectPoints(
 		chainsyncIntersectPointCount,
 	)
 	if err != nil {
