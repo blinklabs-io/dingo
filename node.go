@@ -1210,8 +1210,12 @@ func (n *Node) initBlockForger(
 		n.eventBus,
 		n.config.logger,
 	)
-	if scheduleStore := newLeaderScheduleStore(n.db); scheduleStore != nil {
-		election.SetScheduleStore(scheduleStore)
+	if n.db != nil {
+		if scheduleStore := leader.NewSyncStateScheduleStore(
+			n.db.Metadata(),
+		); scheduleStore != nil {
+			election.SetScheduleStore(scheduleStore)
+		}
 	}
 
 	// Start leader election (subscribes to epoch transitions)

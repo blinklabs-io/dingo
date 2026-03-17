@@ -12,21 +12,25 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package dingo
+package leader
 
 import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 
-	"github.com/blinklabs-io/dingo/database"
-	"github.com/blinklabs-io/dingo/ledger/leader"
+	"github.com/blinklabs-io/dingo/database/types"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
 
-const leaderScheduleSyncStatePrefix = "leader_schedule"
+const syncStateSchedulePrefix = "leader_schedule"
 
-type leaderScheduleRecord struct {
+type syncStateStore interface {
+	GetSyncState(key string, txn types.Txn) (string, error)
+	SetSyncState(key, value string, txn types.Txn) error
+}
+
+type syncStateScheduleRecord struct {
 	Epoch       uint64   `json:"epoch"`
 	PoolID      string   `json:"pool_id"`
 	PoolStake   uint64   `json:"pool_stake"`
@@ -35,26 +39,29 @@ type leaderScheduleRecord struct {
 	LeaderSlots []uint64 `json:"leader_slots"`
 }
 
-type leaderScheduleStore struct {
-	db *database.Database
+// syncStateScheduleStore persists schedules in metadata sync state.
+type syncStateScheduleStore struct {
+	store syncStateStore
 }
 
-func newLeaderScheduleStore(db *database.Database) *leaderScheduleStore {
-	if db == nil {
+// NewSyncStateScheduleStore creates a ScheduleStore backed by sync state.
+func NewSyncStateScheduleStore(store syncStateStore) ScheduleStore {
+	if store == nil {
 		return nil
 	}
-	return &leaderScheduleStore{db: db}
+	return &syncStateScheduleStore{store: store}
 }
 
-func (s *leaderScheduleStore) LoadSchedule(
+// LoadSchedule returns a previously persisted leader schedule, if present.
+func (s *syncStateScheduleStore) LoadSchedule(
 	epoch uint64,
 	poolId lcommon.PoolKeyHash,
-) (*leader.Schedule, error) {
-	if s == nil || s.db == nil {
+) (*Schedule, error) {
+	if s == nil || s.store == nil {
 		return nil, nil
 	}
-	key := leaderScheduleStoreKey(epoch, poolId)
-	raw, err := s.db.GetSyncState(key, nil)
+	key := syncStateScheduleKey(epoch, poolId)
+	raw, err := s.store.GetSyncState(key, nil)
 	if err != nil {
 		return nil, fmt.Errorf("load schedule %q: %w", key, err)
 	}
@@ -62,7 +69,7 @@ func (s *leaderScheduleStore) LoadSchedule(
 		return nil, nil
 	}
 
-	var record leaderScheduleRecord
+	var record syncStateScheduleRecord
 	if err := json.Unmarshal([]byte(raw), &record); err != nil {
 		return nil, fmt.Errorf("decode schedule %q: %w", key, err)
 	}
@@ -87,7 +94,7 @@ func (s *leaderScheduleStore) LoadSchedule(
 	if err != nil {
 		return nil, fmt.Errorf("decode epoch nonce for %q: %w", key, err)
 	}
-	schedule := leader.NewSchedule(
+	schedule := NewSchedule(
 		record.Epoch,
 		poolId,
 		record.PoolStake,
@@ -100,13 +107,12 @@ func (s *leaderScheduleStore) LoadSchedule(
 	return schedule, nil
 }
 
-func (s *leaderScheduleStore) SaveSchedule(
-	schedule *leader.Schedule,
-) error {
-	if s == nil || s.db == nil || schedule == nil {
+// SaveSchedule persists a computed leader schedule.
+func (s *syncStateScheduleStore) SaveSchedule(schedule *Schedule) error {
+	if s == nil || s.store == nil || schedule == nil {
 		return nil
 	}
-	record := leaderScheduleRecord{
+	record := syncStateScheduleRecord{
 		Epoch:       schedule.Epoch,
 		PoolID:      hex.EncodeToString(schedule.PoolId[:]),
 		PoolStake:   schedule.PoolStake,
@@ -122,20 +128,20 @@ func (s *leaderScheduleStore) SaveSchedule(
 			err,
 		)
 	}
-	key := leaderScheduleStoreKey(schedule.Epoch, schedule.PoolId)
-	if err := s.db.SetSyncState(key, string(payload), nil); err != nil {
+	key := syncStateScheduleKey(schedule.Epoch, schedule.PoolId)
+	if err := s.store.SetSyncState(key, string(payload), nil); err != nil {
 		return fmt.Errorf("save schedule %q: %w", key, err)
 	}
 	return nil
 }
 
-func leaderScheduleStoreKey(
+func syncStateScheduleKey(
 	epoch uint64,
 	poolId lcommon.PoolKeyHash,
 ) string {
 	return fmt.Sprintf(
 		"%s:%s:%d",
-		leaderScheduleSyncStatePrefix,
+		syncStateSchedulePrefix,
 		hex.EncodeToString(poolId[:]),
 		epoch,
 	)

@@ -1054,6 +1054,7 @@ func (ls *LedgerState) handleSlotTicks() {
 			tick,
 			currentEpoch,
 			currentEra,
+			tipSlot,
 		)
 
 		if !tick.IsEpochStart {
@@ -1132,6 +1133,7 @@ func (ls *LedgerState) emitNextEpochNonceReady(
 	tick SlotTick,
 	currentEpoch models.Epoch,
 	currentEra eras.EraDesc,
+	tipSlot uint64,
 ) {
 	if ls.config.EventBus == nil || currentEra.Id == 0 {
 		return
@@ -1142,11 +1144,14 @@ func (ls *LedgerState) emitNextEpochNonceReady(
 	}
 
 	cutoffSlot, ready := ls.nextEpochNonceReadyCutoffSlot(currentEpoch)
-	if !ready || tick.Slot < cutoffSlot {
+	if !ready || tick.Slot < cutoffSlot || tipSlot < cutoffSlot {
 		return
 	}
 
 	readyEpoch := currentEpoch.EpochId + 1
+	if len(ls.EpochNonce(readyEpoch)) == 0 {
+		return
+	}
 	if ls.nextNonceReadyEpoch.Load() == readyEpoch {
 		return
 	}
@@ -1168,6 +1173,10 @@ func (ls *LedgerState) emitNextEpochNonceReady(
 		"cutoff_slot", cutoffSlot,
 		"slot", tick.Slot,
 	)
+}
+
+func (ls *LedgerState) resetNextEpochNonceReady() {
+	ls.nextNonceReadyEpoch.Store(0)
 }
 
 // isNearTip returns true when the given slot is within 95% of the
@@ -1537,6 +1546,9 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 	// Always update nonce - clear it on genesis rollback, set
 	// it otherwise
 	ls.currentTipBlockNonce = newNonce
+	// Allow the nonce-ready event to be emitted again if replay crosses
+	// the cutoff on a different fork after rollback.
+	ls.resetNextEpochNonceReady()
 	ls.updateTipMetrics()
 	ls.Unlock()
 	var hash string
