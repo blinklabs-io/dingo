@@ -73,6 +73,31 @@ type Node struct {
 	shutdownOnce   sync.Once
 }
 
+func plateauThreshold(stallTimeout time.Duration) time.Duration {
+	return max(2*stallTimeout, 4*time.Minute)
+}
+
+func shouldRecycleLocalTipPlateau(
+	now time.Time,
+	lastProgressAt time.Time,
+	localTipSlot uint64,
+	bestPeerTipSlot uint64,
+	lastRecycledAt *time.Time,
+	cooldown time.Duration,
+	threshold time.Duration,
+) bool {
+	if bestPeerTipSlot <= localTipSlot {
+		return false
+	}
+	if now.Sub(lastProgressAt) <= threshold {
+		return false
+	}
+	if lastRecycledAt != nil && now.Sub(*lastRecycledAt) < cooldown {
+		return false
+	}
+	return true
+}
+
 func (n *Node) handleChainSwitchEvent(evt event.Event) {
 	e, ok := evt.Data.(chainselection.ChainSwitchEvent)
 	if !ok {
@@ -516,11 +541,14 @@ func (n *Node) Run(ctx context.Context) error {
 				defer ticker.Stop()
 				recycleAt := make(map[string]time.Time)
 				lastRecycled := make(map[string]time.Time)
-				lastProgressSlot := n.chainManager.PrimaryChain().Tip().Point.Slot
+				lastProgressSlot := n.ledgerState.Tip().Point.Slot
 				lastProgressAt := time.Now()
-				// Trigger plateau recovery before the hard 10m SLO so
-				// recycle + reconnect time does not breach the budget.
-				const plateauThreshold = 8 * time.Minute
+				// Trigger plateau recovery before the node drifts too far
+				// behind tip, but only after waiting at least long enough to
+				// treat the active connection as genuinely stale.
+				plateauRecoveryThreshold := plateauThreshold(
+					chainsyncCfg.StallTimeout,
+				)
 				for {
 					select {
 					case <-recyclerCtx.Done():
@@ -528,7 +556,7 @@ func (n *Node) Run(ctx context.Context) error {
 					case <-ticker.C:
 						n.runStallCheckerTick(func() {
 							now := time.Now()
-							localTip := n.chainManager.PrimaryChain().Tip()
+							localTip := n.ledgerState.Tip()
 							localTipSlot := localTip.Point.Slot
 							if n.chainSelector != nil {
 								n.chainSelector.SetLocalTip(localTip)
@@ -563,41 +591,52 @@ func (n *Node) Run(ctx context.Context) error {
 							// Safety net: if local tip has not moved for a long time
 							// while peers are ahead, recycle the selected chainsync
 							// connection even if it is not marked stalled.
-							if now.Sub(lastProgressAt) > plateauThreshold &&
-								n.chainSelector != nil {
+							if n.chainSelector != nil {
 								if bestPeer := n.chainSelector.GetBestPeer(); bestPeer != nil {
-									if bestPeerTip := n.chainSelector.GetPeerTip(*bestPeer); bestPeerTip != nil &&
-										bestPeerTip.Tip.Point.Slot > localTipSlot {
+									if bestPeerTip := n.chainSelector.GetPeerTip(*bestPeer); bestPeerTip != nil {
 										targetConn := n.chainsyncState.GetClientConnId()
 										if targetConn == nil {
 											targetCopy := *bestPeer
 											targetConn = &targetCopy
 										}
 										connKey := targetConn.String()
-										if last, ok := lastRecycled[connKey]; !ok ||
-											now.Sub(last) >= cooldown {
-											n.config.logger.Warn(
-												"local tip plateau detected, recycling chainsync connection",
-												"connection_id", connKey,
-												"local_tip_slot", localTipSlot,
-												"best_peer_tip_slot", bestPeerTip.Tip.Point.Slot,
-												"plateau_duration", now.Sub(lastProgressAt),
-											)
-											n.eventBus.PublishAsync(
-												connmanager.ConnectionRecycleRequestedEventType,
-												event.NewEvent(
-													connmanager.ConnectionRecycleRequestedEventType,
-													connmanager.ConnectionRecycleRequestedEvent{
-														ConnectionId: *targetConn,
-														ConnKey:      connKey,
-														Reason:       "local_tip_plateau",
-													},
-												),
-											)
-											delete(recycleAt, connKey)
-											lastRecycled[connKey] = now
-											lastProgressAt = now
+										var lastRecycledAt *time.Time
+										if last, ok := lastRecycled[connKey]; ok {
+											lastCopy := last
+											lastRecycledAt = &lastCopy
 										}
+										if !shouldRecycleLocalTipPlateau(
+											now,
+											lastProgressAt,
+											localTipSlot,
+											bestPeerTip.Tip.Point.Slot,
+											lastRecycledAt,
+											cooldown,
+											plateauRecoveryThreshold,
+										) {
+											return
+										}
+										n.config.logger.Warn(
+											"local tip plateau detected, recycling chainsync connection",
+											"connection_id", connKey,
+											"local_tip_slot", localTipSlot,
+											"best_peer_tip_slot", bestPeerTip.Tip.Point.Slot,
+											"plateau_duration", now.Sub(lastProgressAt),
+										)
+										n.eventBus.PublishAsync(
+											connmanager.ConnectionRecycleRequestedEventType,
+											event.NewEvent(
+												connmanager.ConnectionRecycleRequestedEventType,
+												connmanager.ConnectionRecycleRequestedEvent{
+													ConnectionId: *targetConn,
+													ConnKey:      connKey,
+													Reason:       "local_tip_plateau",
+												},
+											),
+										)
+										delete(recycleAt, connKey)
+										lastRecycled[connKey] = now
+										lastProgressAt = now
 									}
 								}
 							}

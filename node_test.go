@@ -20,6 +20,7 @@ import (
 	"net"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/blinklabs-io/dingo/chainselection"
 	"github.com/blinklabs-io/dingo/chainsync"
@@ -88,6 +89,59 @@ func TestHandleChainSwitchEventUpdatesActiveConnection(t *testing.T) {
 	assert.Equal(t, pointB, state.GetTrackedClient(connB).Cursor)
 	assert.Equal(t, uint64(1), state.GetTrackedClient(connA).HeadersRecv)
 	assert.Equal(t, uint64(1), state.GetTrackedClient(connB).HeadersRecv)
+}
+
+func TestPlateauThreshold(t *testing.T) {
+	assert.Equal(t, 4*time.Minute, plateauThreshold(2*time.Minute))
+	assert.Equal(t, 6*time.Minute, plateauThreshold(3*time.Minute))
+}
+
+func TestShouldRecycleLocalTipPlateau(t *testing.T) {
+	now := time.Unix(1_000, 0)
+	lastProgressAt := now.Add(-5 * time.Minute)
+	threshold := 4 * time.Minute
+	cooldown := 2 * time.Minute
+
+	assert.True(t, shouldRecycleLocalTipPlateau(
+		now,
+		lastProgressAt,
+		100,
+		120,
+		nil,
+		cooldown,
+		threshold,
+	))
+
+	assert.False(t, shouldRecycleLocalTipPlateau(
+		now,
+		now.Add(-3*time.Minute),
+		100,
+		120,
+		nil,
+		cooldown,
+		threshold,
+	))
+
+	lastRecycledAt := now.Add(-1 * time.Minute)
+	assert.False(t, shouldRecycleLocalTipPlateau(
+		now,
+		lastProgressAt,
+		100,
+		120,
+		&lastRecycledAt,
+		cooldown,
+		threshold,
+	))
+
+	assert.False(t, shouldRecycleLocalTipPlateau(
+		now,
+		lastProgressAt,
+		120,
+		120,
+		nil,
+		cooldown,
+		threshold,
+	))
 }
 
 func TestRunStallCheckerTickRecoversAndAllowsFutureTicks(t *testing.T) {

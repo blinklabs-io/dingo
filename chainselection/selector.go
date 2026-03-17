@@ -38,6 +38,7 @@ func safeAddUint64(a, b uint64) uint64 {
 const (
 	defaultEvaluationInterval = 10 * time.Second
 	defaultStaleTipThreshold  = 60 * time.Second
+	defaultMinSwitchBlockDiff = 2
 
 	// DefaultMaxTrackedPeers is the maximum number of peers tracked by
 	// the ChainSelector. When a new peer is added and the limit is reached,
@@ -78,6 +79,7 @@ type ChainSelectorConfig struct {
 	EventBus           *event.EventBus
 	EvaluationInterval time.Duration
 	StaleTipThreshold  time.Duration
+	MinSwitchBlockDiff uint64
 	SecurityParam      uint64
 	ConnectionEligible func(ouroboros.ConnectionId) bool
 	ConnectionPriority func(ouroboros.ConnectionId) int
@@ -109,6 +111,9 @@ func NewChainSelector(cfg ChainSelectorConfig) *ChainSelector {
 	}
 	if cfg.StaleTipThreshold == 0 {
 		cfg.StaleTipThreshold = defaultStaleTipThreshold
+	}
+	if cfg.MinSwitchBlockDiff == 0 {
+		cfg.MinSwitchBlockDiff = defaultMinSwitchBlockDiff
 	}
 	maxPeers := cfg.MaxTrackedPeers
 	if maxPeers <= 0 {
@@ -610,6 +615,14 @@ func (cs *ChainSelector) EvaluateAndSwitch() bool {
 				// progress.
 				if newPeerTip.Tip.BlockNumber <
 					previousPeerTip.Tip.BlockNumber {
+					newBest = previousBest
+				} else if newPeerTip.Tip.BlockNumber >
+					previousPeerTip.Tip.BlockNumber &&
+					!IsSignificantlyBetter(
+						newPeerTip.Tip,
+						previousPeerTip.Tip,
+						cs.config.MinSwitchBlockDiff,
+					) {
 					newBest = previousBest
 				} else if newPeerTip.Tip.BlockNumber ==
 					previousPeerTip.Tip.BlockNumber &&

@@ -271,10 +271,31 @@ func TestIncumbentAdvantageSwitchesWhenBehind(t *testing.T) {
 
 	cs.UpdatePeerTip(connId2, ochainsync.Tip{
 		Point:       ocommon.Point{Slot: 101, Hash: []byte("tip2")},
-		BlockNumber: 51,
+		BlockNumber: 52,
 	}, nil)
 	require.NotNil(t, cs.GetBestPeer())
 	assert.Equal(t, connId2, *cs.GetBestPeer())
+}
+
+func TestIncumbentAdvantageKeepsPeerOnMarginalLead(t *testing.T) {
+	cs := NewChainSelector(ChainSelectorConfig{})
+
+	connId1 := newTestConnectionId(1)
+	connId2 := newTestConnectionId(2)
+
+	cs.UpdatePeerTip(connId1, ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 100, Hash: []byte("tip1")},
+		BlockNumber: 50,
+	}, nil)
+	require.NotNil(t, cs.GetBestPeer())
+	assert.Equal(t, connId1, *cs.GetBestPeer())
+
+	cs.UpdatePeerTip(connId2, ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 101, Hash: []byte("tip2")},
+		BlockNumber: 51,
+	}, nil)
+	require.NotNil(t, cs.GetBestPeer())
+	assert.Equal(t, connId1, *cs.GetBestPeer())
 }
 
 func TestNoOscillationWithMultiplePeersAtSameTip(t *testing.T) {
