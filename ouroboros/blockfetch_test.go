@@ -16,6 +16,7 @@ package ouroboros
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"log/slog"
 	"net"
@@ -29,6 +30,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 
+	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database/immutable"
 	"github.com/blinklabs-io/dingo/event"
 )
@@ -39,6 +41,69 @@ func testConnId() ouroboros_conn.ConnectionId {
 		LocalAddr:  &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 3001},
 		RemoteAddr: &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 3002},
 	}
+}
+
+type stubBlockfetchBatchServer struct {
+	startBatchCalls int
+	blockCalls      int
+	batchDoneCalls  int
+	startBatchErr   error
+	blockErr        error
+	batchDoneErr    error
+}
+
+func (s *stubBlockfetchBatchServer) StartBatch() error {
+	s.startBatchCalls++
+	return s.startBatchErr
+}
+
+func (s *stubBlockfetchBatchServer) Block(_ uint, _ []byte) error {
+	s.blockCalls++
+	return s.blockErr
+}
+
+func (s *stubBlockfetchBatchServer) BatchDone() error {
+	s.batchDoneCalls++
+	return s.batchDoneErr
+}
+
+type blockfetchIteratorStep struct {
+	result *chain.ChainIteratorResult
+	err    error
+}
+
+type stubBlockfetchIterator struct {
+	steps       []blockfetchIteratorStep
+	nextCalls   int
+	cancelCalls int
+}
+
+func (i *stubBlockfetchIterator) Next(bool) (*chain.ChainIteratorResult, error) {
+	if i.nextCalls >= len(i.steps) {
+		return nil, chain.ErrIteratorChainTip
+	}
+	step := i.steps[i.nextCalls]
+	i.nextCalls++
+	return step.result, step.err
+}
+
+func (i *stubBlockfetchIterator) Cancel() {
+	i.cancelCalls++
+}
+
+type stubBlockfetchConnection struct {
+	errChan    chan error
+	closeCalls int
+	closeErr   error
+}
+
+func (c *stubBlockfetchConnection) ErrorChan() chan error {
+	return c.errChan
+}
+
+func (c *stubBlockfetchConnection) Close() error {
+	c.closeCalls++
+	return c.closeErr
 }
 
 func TestBlockfetchServerRequestRange_StartAfterEnd(t *testing.T) {
@@ -187,6 +252,70 @@ func TestBlockfetchServerRequestRange_ExactlyAtLimit(t *testing.T) {
 			end,
 		)
 	}, "range exactly at limit should pass validation and reach LedgerState call")
+}
+
+func TestBlockfetchServerSendBatch_ClosesConnectionOnIteratorError(
+	t *testing.T,
+) {
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	o := NewOuroboros(OuroborosConfig{
+		Logger:   logger,
+		EventBus: event.NewEventBus(nil, logger),
+	})
+	iter := &stubBlockfetchIterator{
+		steps: []blockfetchIteratorStep{
+			{err: errors.New("iterator exploded")},
+		},
+	}
+	server := &stubBlockfetchBatchServer{}
+	conn := &stubBlockfetchConnection{
+		errChan: make(chan error),
+	}
+	start := ocommon.NewPoint(100, []byte{0x01})
+	end := ocommon.NewPoint(200, []byte{0x02})
+
+	o.blockfetchServerSendBatch(
+		testConnId().String(),
+		start,
+		end,
+		iter,
+		server,
+		conn,
+	)
+
+	assert.Equal(t, 1, server.startBatchCalls)
+	assert.Equal(t, 0, server.batchDoneCalls)
+	assert.Equal(t, 1, conn.closeCalls)
+	assert.Equal(t, 1, iter.cancelCalls)
+}
+
+func TestBlockfetchServerSendBatch_BatchDoneAtChainTip(t *testing.T) {
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	o := NewOuroboros(OuroborosConfig{
+		Logger:   logger,
+		EventBus: event.NewEventBus(nil, logger),
+	})
+	iter := &stubBlockfetchIterator{}
+	server := &stubBlockfetchBatchServer{}
+	conn := &stubBlockfetchConnection{
+		errChan: make(chan error),
+	}
+	start := ocommon.NewPoint(100, []byte{0x01})
+	end := ocommon.NewPoint(200, []byte{0x02})
+
+	o.blockfetchServerSendBatch(
+		testConnId().String(),
+		start,
+		end,
+		iter,
+		server,
+		conn,
+	)
+
+	assert.Equal(t, 1, server.startBatchCalls)
+	assert.Equal(t, 1, server.batchDoneCalls)
+	assert.Equal(t, 0, conn.closeCalls)
+	assert.Equal(t, 1, iter.cancelCalls)
 }
 
 func BenchmarkBlockfetchClientBlockMetrics(b *testing.B) {

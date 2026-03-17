@@ -49,8 +49,7 @@ func (o *Ouroboros) txsubmissionClientStart(
 	connId ouroboros.ConnectionId,
 ) error {
 	// Register mempool consumer
-	// We don't bother capturing the consumer because we can easily look it up later by connection ID
-	_ = o.Mempool.AddConsumer(connId)
+	o.Mempool.AddConsumer(connId)
 	// Start TxSubmission loop
 	conn := o.ConnManager.GetConnectionById(connId)
 	if conn == nil {
@@ -227,6 +226,12 @@ func (o *Ouroboros) txsubmissionClientRequestTxIds(
 	connId := ctx.ConnectionId
 	ret := []txsubmission.TxIdAndSize{}
 	consumer := o.Mempool.Consumer(connId)
+	if consumer == nil {
+		return nil, fmt.Errorf(
+			"no mempool consumer for connection: %s",
+			connId.String(),
+		)
+	}
 	// Clear TX cache
 	if ack > 0 {
 		consumer.ClearCache()
@@ -295,6 +300,12 @@ func (o *Ouroboros) txsubmissionClientRequestTxs(
 	connId := ctx.ConnectionId
 	ret := []txsubmission.TxBody{}
 	consumer := o.Mempool.Consumer(connId)
+	if consumer == nil {
+		return nil, fmt.Errorf(
+			"no mempool consumer for connection: %s",
+			connId.String(),
+		)
+	}
 	for _, txId := range txIds {
 		txHash := hex.EncodeToString(txId.TxId[:])
 		tx := consumer.GetTxFromCache(txHash)
