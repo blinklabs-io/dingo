@@ -1083,14 +1083,25 @@ func importSnapShots(
 
 	// Import each snapshot type, saving the "go" result for the
 	// epoch summary to avoid recomputing it.
+	//
+	// Dingo's leader election always queries (epoch, "mark") using an
+	// epoch offset of currentEpoch-2. So we store each snapshot under
+	// the epoch it logically represents as a "mark" snapshot:
+	//   mark  → (epoch,   "mark") — stake at end of this epoch
+	//   set   → (epoch-1, "mark") — stake at end of the previous epoch
+	//   go    → (epoch-2, "mark") — stake two epochs back
+	// This ensures GetPoolStake(currentEpoch-2, "mark") finds the
+	// correct data after a mithril bootstrap.
 	var goSnapshots []*models.PoolStakeSnapshot
 	for _, st := range []struct {
-		name string
-		snap *ParsedSnapShot
+		name     string
+		snap     *ParsedSnapShot
+		dbEpoch  uint64
+		dbType   string
 	}{
-		{"mark", &snapshots.Mark},
-		{"set", &snapshots.Set},
-		{"go", &snapshots.Go},
+		{"mark", &snapshots.Mark, epoch, "mark"},
+		{"set", &snapshots.Set, epoch - 1, "mark"},
+		{"go", &snapshots.Go, epoch - 2, "mark"},
 	} {
 		select {
 		case <-ctx.Done():
@@ -1101,7 +1112,7 @@ func importSnapShots(
 		}
 
 		poolSnapshots := AggregatePoolStake(
-			st.snap, epoch, st.name, slot,
+			st.snap, st.dbEpoch, st.dbType, slot,
 		)
 
 		if st.name == "go" {
@@ -1118,7 +1129,7 @@ func importSnapShots(
 			metaTxn := txn.Metadata()
 
 			if err := store.DeletePoolStakeSnapshotsForEpoch(
-				epoch, st.name, metaTxn,
+				st.dbEpoch, st.dbType, metaTxn,
 			); err != nil {
 				return fmt.Errorf(
 					"deleting existing %s snapshots: %w",
