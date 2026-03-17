@@ -622,7 +622,6 @@ func (s *queryServiceServer) ReadGenesis(
 	req *connect.Request[query.ReadGenesisRequest],
 ) (*connect.Response[query.ReadGenesisResponse], error) {
 	fieldMask := req.Msg.GetFieldMask()
-
 	s.utxorpc.config.Logger.Info(
 		fmt.Sprintf("Got a ReadGenesis request with fieldMask %v", fieldMask),
 	)
@@ -642,6 +641,7 @@ func (s *queryServiceServer) ReadGenesis(
 		Config: &query.ReadGenesisResponse_Cardano{
 			Cardano: cardanoGenesis,
 		},
+		Caip2: caip2FromNetworkMagic(cardanoGenesis.NetworkMagic),
 	}
 
 	// Decode the hex if shelley genesis hash is configured
@@ -654,6 +654,25 @@ func (s *queryServiceServer) ReadGenesis(
 	}
 
 	return connect.NewResponse(resp), nil
+}
+
+const (
+	cardanoMainnetNetworkMagic uint32 = 764824073
+	cardanoPreprodNetworkMagic uint32 = 1
+	cardanoPreviewNetworkMagic uint32 = 2
+)
+
+func caip2FromNetworkMagic(networkMagic uint32) string {
+	switch networkMagic {
+	case cardanoMainnetNetworkMagic:
+		return "cardano:mainnet"
+	case cardanoPreprodNetworkMagic:
+		return "cardano:preprod"
+	case cardanoPreviewNetworkMagic:
+		return "cardano:preview"
+	default:
+		return fmt.Sprintf("cardano:%d", networkMagic)
+	}
 }
 
 func buildCardanoGenesis(
