@@ -73,6 +73,215 @@ type Node struct {
 	shutdownOnce   sync.Once
 }
 
+func plateauThreshold(stallTimeout time.Duration) time.Duration {
+	return max(2*stallTimeout, 4*time.Minute)
+}
+
+func shouldRecycleLocalTipPlateau(
+	now time.Time,
+	lastProgressAt time.Time,
+	localTipSlot uint64,
+	bestPeerTipSlot uint64,
+	lastRecycledAt *time.Time,
+	cooldown time.Duration,
+	threshold time.Duration,
+) bool {
+	if bestPeerTipSlot <= localTipSlot {
+		return false
+	}
+	if now.Sub(lastProgressAt) <= threshold {
+		return false
+	}
+	if lastRecycledAt != nil && now.Sub(*lastRecycledAt) < cooldown {
+		return false
+	}
+	return true
+}
+
+func (n *Node) processChainsyncRecyclerTick(
+	now time.Time,
+	localTipSlot uint64,
+	chainsyncCfg chainsync.Config,
+	recycleAt map[string]time.Time,
+	lastRecycled map[string]time.Time,
+	lastProgressSlot *uint64,
+	lastProgressAt *time.Time,
+	plateauRecoveryThreshold time.Duration,
+	grace time.Duration,
+	cooldown time.Duration,
+) {
+	if localTipSlot > *lastProgressSlot {
+		*lastProgressSlot = localTipSlot
+		*lastProgressAt = now
+	}
+	n.chainsyncState.CheckStalledClients()
+	trackedClients := n.chainsyncState.GetTrackedClients()
+	trackedByID := make(
+		map[string]chainsync.TrackedClient,
+		len(trackedClients),
+	)
+	for _, conn := range trackedClients {
+		connKey := conn.ConnId.String()
+		trackedByID[connKey] = conn
+		if conn.Status != chainsync.ClientStatusStalled {
+			delete(recycleAt, connKey)
+		}
+	}
+	// Prune expired cooldown entries so this map does
+	// not grow without bound over long runtimes.
+	for connKey, last := range lastRecycled {
+		if now.Sub(last) >= cooldown {
+			delete(lastRecycled, connKey)
+		}
+	}
+	// Safety net: if local tip has not moved for a long time
+	// while peers are ahead, recycle the selected chainsync
+	// connection even if it is not marked stalled.
+	if n.chainSelector != nil {
+		if bestPeer := n.chainSelector.GetBestPeer(); bestPeer != nil {
+			if bestPeerTip := n.chainSelector.GetPeerTip(*bestPeer); bestPeerTip != nil &&
+				bestPeerTip.Tip.Point.Slot > localTipSlot {
+				targetConn := n.chainsyncState.GetClientConnId()
+				if targetConn == nil {
+					targetCopy := *bestPeer
+					targetConn = &targetCopy
+				}
+				connKey := targetConn.String()
+				var lastRecycledAt *time.Time
+				if last, ok := lastRecycled[connKey]; ok {
+					lastCopy := last
+					lastRecycledAt = &lastCopy
+				}
+				if shouldRecycleLocalTipPlateau(
+					now,
+					*lastProgressAt,
+					localTipSlot,
+					bestPeerTip.Tip.Point.Slot,
+					lastRecycledAt,
+					cooldown,
+					plateauRecoveryThreshold,
+				) {
+					n.config.logger.Warn(
+						"local tip plateau detected, recycling chainsync connection",
+						"connection_id", connKey,
+						"local_tip_slot", localTipSlot,
+						"best_peer_tip_slot", bestPeerTip.Tip.Point.Slot,
+						"plateau_duration", now.Sub(*lastProgressAt),
+					)
+					n.eventBus.PublishAsync(
+						connmanager.ConnectionRecycleRequestedEventType,
+						event.NewEvent(
+							connmanager.ConnectionRecycleRequestedEventType,
+							connmanager.ConnectionRecycleRequestedEvent{
+								ConnectionId: *targetConn,
+								ConnKey:      connKey,
+								Reason:       "local_tip_plateau",
+							},
+						),
+					)
+					delete(recycleAt, connKey)
+					lastRecycled[connKey] = now
+					*lastProgressAt = now
+				}
+			}
+		}
+	}
+	for _, conn := range trackedClients {
+		if conn.Status != chainsync.ClientStatusStalled {
+			continue
+		}
+		connKey := conn.ConnId.String()
+		if _, exists := recycleAt[connKey]; !exists {
+			recycleAt[connKey] = now.Add(grace)
+			n.config.logger.Info(
+				"chainsync client stalled, scheduling guarded recycle",
+				"connection_id", connKey,
+				"stall_timeout", chainsyncCfg.StallTimeout,
+				"grace_period", grace,
+			)
+		}
+	}
+	for connKey, dueAt := range recycleAt {
+		if now.Before(dueAt) {
+			continue
+		}
+		tracked, ok := trackedByID[connKey]
+		if !ok || tracked.Status != chainsync.ClientStatusStalled {
+			delete(recycleAt, connKey)
+			continue
+		}
+		connId := tracked.ConnId
+		if last, ok := lastRecycled[connKey]; ok &&
+			now.Sub(last) < cooldown {
+			recycleAt[connKey] = now.Add(cooldown - now.Sub(last))
+			continue
+		}
+		active := n.chainsyncState.GetClientConnId()
+		if active == nil {
+			// If no active client is selected and this client
+			// is overdue + stalled, recycle to force a fresh
+			// connection attempt and avoid indefinite stalls.
+			n.config.logger.Warn(
+				"chainsync client stalled with no active selection, recycling connection",
+				"connection_id", connKey,
+				"stall_timeout", chainsyncCfg.StallTimeout,
+				"grace_period", grace,
+				"recycle_cooldown", cooldown,
+			)
+			n.eventBus.PublishAsync(
+				connmanager.ConnectionRecycleRequestedEventType,
+				event.NewEvent(
+					connmanager.ConnectionRecycleRequestedEventType,
+					connmanager.ConnectionRecycleRequestedEvent{
+						ConnectionId: connId,
+						ConnKey:      connKey,
+						Reason:       "stalled_connection_no_active_selection",
+					},
+				),
+			)
+			delete(recycleAt, connKey)
+			lastRecycled[connKey] = now
+			continue
+		}
+		if active.String() != connKey {
+			// Don't recycle non-primary stalled clients. Keep state clean.
+			n.eventBus.PublishAsync(
+				chainsync.ClientRemoveRequestedEventType,
+				event.NewEvent(
+					chainsync.ClientRemoveRequestedEventType,
+					chainsync.ClientRemoveRequestedEvent{
+						ConnId:  connId,
+						ConnKey: connKey,
+						Reason:  "stalled_non_primary_connection",
+					},
+				),
+			)
+			delete(recycleAt, connKey)
+			continue
+		}
+		n.config.logger.Warn(
+			"chainsync client stalled, recycling active connection",
+			"connection_id", connKey,
+			"stall_timeout", chainsyncCfg.StallTimeout,
+			"grace_period", grace,
+			"recycle_cooldown", cooldown,
+		)
+		n.eventBus.PublishAsync(
+			connmanager.ConnectionRecycleRequestedEventType,
+			event.NewEvent(
+				connmanager.ConnectionRecycleRequestedEventType,
+				connmanager.ConnectionRecycleRequestedEvent{
+					ConnectionId: connId,
+					ConnKey:      connKey,
+					Reason:       "stalled_active_connection",
+				},
+			),
+		)
+		delete(recycleAt, connKey)
+		lastRecycled[connKey] = now
+	}
+}
+
 func (n *Node) handleChainSwitchEvent(evt event.Event) {
 	e, ok := evt.Data.(chainselection.ChainSwitchEvent)
 	if !ok {
@@ -506,11 +715,11 @@ func (n *Node) Run(ctx context.Context) error {
 				defer ticker.Stop()
 				recycleAt := make(map[string]time.Time)
 				lastRecycled := make(map[string]time.Time)
-				lastProgressSlot := n.chainManager.PrimaryChain().Tip().Point.Slot
+				lastProgressSlot := n.ledgerState.Tip().Point.Slot
 				lastProgressAt := time.Now()
-				// Trigger plateau recovery before the hard 10m SLO so
-				// recycle + reconnect time does not breach the budget.
-				const plateauThreshold = 8 * time.Minute
+				plateauRecoveryThreshold := plateauThreshold(
+					chainsyncCfg.StallTimeout,
+				)
 				for {
 					select {
 					case <-recyclerCtx.Done():
@@ -518,7 +727,7 @@ func (n *Node) Run(ctx context.Context) error {
 					case <-ticker.C:
 						n.runStallCheckerTick(func() {
 							now := time.Now()
-							localTip := n.chainManager.PrimaryChain().Tip()
+							localTip := n.ledgerState.Tip()
 							localTipSlot := localTip.Point.Slot
 							if n.chainSelector != nil {
 								n.chainSelector.SetLocalTip(localTip)
@@ -526,165 +735,18 @@ func (n *Node) Run(ctx context.Context) error {
 									n.chainSelector.SetSecurityParam(uint64(k)) //nolint:gosec
 								}
 							}
-							if localTipSlot > lastProgressSlot {
-								lastProgressSlot = localTipSlot
-								lastProgressAt = now
-							}
-							n.chainsyncState.CheckStalledClients()
-							trackedClients := n.chainsyncState.GetTrackedClients()
-							trackedByID := make(
-								map[string]chainsync.TrackedClient,
-								len(trackedClients),
+							n.processChainsyncRecyclerTick(
+								now,
+								localTipSlot,
+								chainsyncCfg,
+								recycleAt,
+								lastRecycled,
+								&lastProgressSlot,
+								&lastProgressAt,
+								plateauRecoveryThreshold,
+								grace,
+								cooldown,
 							)
-							for _, conn := range trackedClients {
-								connKey := conn.ConnId.String()
-								trackedByID[connKey] = conn
-								if conn.Status != chainsync.ClientStatusStalled {
-									delete(recycleAt, connKey)
-								}
-							}
-							// Prune expired cooldown entries so this map does
-							// not grow without bound over long runtimes.
-							for connKey, last := range lastRecycled {
-								if now.Sub(last) >= cooldown {
-									delete(lastRecycled, connKey)
-								}
-							}
-							// Safety net: if local tip has not moved for a long time
-							// while peers are ahead, recycle the selected chainsync
-							// connection even if it is not marked stalled.
-							if now.Sub(lastProgressAt) > plateauThreshold &&
-								n.chainSelector != nil {
-								if bestPeer := n.chainSelector.GetBestPeer(); bestPeer != nil {
-									if bestPeerTip := n.chainSelector.GetPeerTip(*bestPeer); bestPeerTip != nil &&
-										bestPeerTip.Tip.Point.Slot > localTipSlot {
-										targetConn := n.chainsyncState.GetClientConnId()
-										if targetConn == nil {
-											targetCopy := *bestPeer
-											targetConn = &targetCopy
-										}
-										connKey := targetConn.String()
-										if last, ok := lastRecycled[connKey]; !ok ||
-											now.Sub(last) >= cooldown {
-											n.config.logger.Warn(
-												"local tip plateau detected, recycling chainsync connection",
-												"connection_id", connKey,
-												"local_tip_slot", localTipSlot,
-												"best_peer_tip_slot", bestPeerTip.Tip.Point.Slot,
-												"plateau_duration", now.Sub(lastProgressAt),
-											)
-											n.eventBus.PublishAsync(
-												connmanager.ConnectionRecycleRequestedEventType,
-												event.NewEvent(
-													connmanager.ConnectionRecycleRequestedEventType,
-													connmanager.ConnectionRecycleRequestedEvent{
-														ConnectionId: *targetConn,
-														ConnKey:      connKey,
-														Reason:       "local_tip_plateau",
-													},
-												),
-											)
-											delete(recycleAt, connKey)
-											lastRecycled[connKey] = now
-											lastProgressAt = now
-										}
-									}
-								}
-							}
-							for _, conn := range trackedClients {
-								if conn.Status != chainsync.ClientStatusStalled {
-									continue
-								}
-								connKey := conn.ConnId.String()
-								if _, exists := recycleAt[connKey]; !exists {
-									recycleAt[connKey] = now.Add(grace)
-									n.config.logger.Info(
-										"chainsync client stalled, scheduling guarded recycle",
-										"connection_id", connKey,
-										"stall_timeout", chainsyncCfg.StallTimeout,
-										"grace_period", grace,
-									)
-								}
-							}
-							for connKey, dueAt := range recycleAt {
-								if now.Before(dueAt) {
-									continue
-								}
-								tracked, ok := trackedByID[connKey]
-								if !ok || tracked.Status != chainsync.ClientStatusStalled {
-									delete(recycleAt, connKey)
-									continue
-								}
-								connId := tracked.ConnId
-								if last, ok := lastRecycled[connKey]; ok &&
-									now.Sub(last) < cooldown {
-									recycleAt[connKey] = now.Add(cooldown - now.Sub(last))
-									continue
-								}
-								active := n.chainsyncState.GetClientConnId()
-								if active == nil {
-									// If no active client is selected and this client
-									// is overdue + stalled, recycle to force a fresh
-									// connection attempt and avoid indefinite stalls.
-									n.config.logger.Warn(
-										"chainsync client stalled with no active selection, recycling connection",
-										"connection_id", connKey,
-										"stall_timeout", chainsyncCfg.StallTimeout,
-										"grace_period", grace,
-										"recycle_cooldown", cooldown,
-									)
-									n.eventBus.PublishAsync(
-										connmanager.ConnectionRecycleRequestedEventType,
-										event.NewEvent(
-											connmanager.ConnectionRecycleRequestedEventType,
-											connmanager.ConnectionRecycleRequestedEvent{
-												ConnectionId: connId,
-												ConnKey:      connKey,
-												Reason:       "stalled_connection_no_active_selection",
-											},
-										),
-									)
-									delete(recycleAt, connKey)
-									lastRecycled[connKey] = now
-									continue
-								}
-								if active.String() != connKey {
-									// Don't recycle non-primary stalled clients. Keep state clean.
-									n.eventBus.PublishAsync(
-										chainsync.ClientRemoveRequestedEventType,
-										event.NewEvent(
-											chainsync.ClientRemoveRequestedEventType,
-											chainsync.ClientRemoveRequestedEvent{
-												ConnId:  connId,
-												ConnKey: connKey,
-												Reason:  "stalled_non_primary_connection",
-											},
-										),
-									)
-									delete(recycleAt, connKey)
-									continue
-								}
-								n.config.logger.Warn(
-									"chainsync client stalled, recycling active connection",
-									"connection_id", connKey,
-									"stall_timeout", chainsyncCfg.StallTimeout,
-									"grace_period", grace,
-									"recycle_cooldown", cooldown,
-								)
-								n.eventBus.PublishAsync(
-									connmanager.ConnectionRecycleRequestedEventType,
-									event.NewEvent(
-										connmanager.ConnectionRecycleRequestedEventType,
-										connmanager.ConnectionRecycleRequestedEvent{
-											ConnectionId: connId,
-											ConnKey:      connKey,
-											Reason:       "stalled_active_connection",
-										},
-									),
-								)
-								delete(recycleAt, connKey)
-								lastRecycled[connKey] = now
-							}
 						})
 					}
 				}

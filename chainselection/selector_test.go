@@ -301,10 +301,31 @@ func TestIncumbentAdvantageSwitchesWhenBehind(t *testing.T) {
 
 	cs.UpdatePeerTip(connId2, ochainsync.Tip{
 		Point:       ocommon.Point{Slot: 101, Hash: []byte("tip2")},
-		BlockNumber: 51,
+		BlockNumber: 52,
 	}, nil)
 	require.NotNil(t, cs.GetBestPeer())
 	assert.Equal(t, connId2, *cs.GetBestPeer())
+}
+
+func TestIncumbentAdvantageKeepsPeerOnMarginalLead(t *testing.T) {
+	cs := NewChainSelector(ChainSelectorConfig{})
+
+	connId1 := newTestConnectionId(1)
+	connId2 := newTestConnectionId(2)
+
+	cs.UpdatePeerTip(connId1, ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 100, Hash: []byte("tip1")},
+		BlockNumber: 50,
+	}, nil)
+	require.NotNil(t, cs.GetBestPeer())
+	assert.Equal(t, connId1, *cs.GetBestPeer())
+
+	cs.UpdatePeerTip(connId2, ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 101, Hash: []byte("tip2")},
+		BlockNumber: 51,
+	}, nil)
+	require.NotNil(t, cs.GetBestPeer())
+	assert.Equal(t, connId1, *cs.GetBestPeer())
 }
 
 func TestNoOscillationWithMultiplePeersAtSameTip(t *testing.T) {
@@ -581,6 +602,33 @@ func TestChainSelectorSwitchesImmediatelyOnPriorityEvent(t *testing.T) {
 		bestPeer := cs.GetBestPeer()
 		return bestPeer != nil && *bestPeer == challengerConn
 	}, time.Second, 5*time.Millisecond)
+}
+
+func TestChainSelectorDoesNotPreserveImplausiblyBehindIncumbent(t *testing.T) {
+	connId1 := newTestConnectionId(1)
+	connId2 := newTestConnectionId(2)
+	cs := NewChainSelector(ChainSelectorConfig{
+		SecurityParam: 2,
+	})
+
+	cs.UpdatePeerTip(connId1, ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 98, Hash: []byte("tip1")},
+		BlockNumber: 98,
+	}, nil)
+	require.NotNil(t, cs.GetBestPeer())
+	assert.Equal(t, connId1, *cs.GetBestPeer())
+
+	cs.SetLocalTip(ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 101, Hash: []byte("local")},
+		BlockNumber: 101,
+	})
+
+	cs.UpdatePeerTip(connId2, ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 99, Hash: []byte("tip2")},
+		BlockNumber: 99,
+	}, nil)
+	require.NotNil(t, cs.GetBestPeer())
+	assert.Equal(t, connId2, *cs.GetBestPeer())
 }
 
 func TestChainSelectorKeepsChallengerWhenItWinsFullTieBreak(t *testing.T) {
