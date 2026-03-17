@@ -15,6 +15,7 @@
 package ouroboros
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -24,6 +25,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/chainselection"
+	dchainsync "github.com/blinklabs-io/dingo/chainsync"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/ledger"
 	ouroboros "github.com/blinklabs-io/gouroboros"
@@ -77,6 +79,122 @@ func (o *Ouroboros) chainsyncClientConnOpts() []ochainsync.ChainSyncOptionFunc {
 	}
 }
 
+func normalizeIntersectPoints(points []ocommon.Point) []ocommon.Point {
+	if len(points) == 0 {
+		return nil
+	}
+	result := make([]ocommon.Point, 0, len(points))
+	seen := make(map[string]struct{}, len(points))
+	for _, point := range points {
+		key := fmt.Sprintf("%d:%x", point.Slot, point.Hash)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		result = append(result, point)
+	}
+	return result
+}
+
+func isOriginPoint(point ocommon.Point) bool {
+	return point.Slot == 0 && len(point.Hash) == 0
+}
+
+func shouldRestartChainsyncOnSwitch(
+	localTip ocommon.Point,
+	trackedClient *dchainsync.TrackedClient,
+) bool {
+	if trackedClient == nil || isOriginPoint(localTip) {
+		return false
+	}
+	if trackedClient.Cursor.Slot > localTip.Slot {
+		return true
+	}
+	return trackedClient.Cursor.Slot == localTip.Slot &&
+		!bytes.Equal(trackedClient.Cursor.Hash, localTip.Hash)
+}
+
+func (o *Ouroboros) buildDefaultChainsyncIntersectPoints(
+	connId ouroboros.ConnectionId,
+) ([]ocommon.Point, error) {
+	if o.LedgerState == nil {
+		return nil, errors.New("ledger state not available")
+	}
+	conn := o.ConnManager.GetConnectionById(connId)
+	if conn == nil {
+		return nil, fmt.Errorf("failed to lookup connection ID: %s", connId.String())
+	}
+	if conn.ChainSync() == nil || conn.ChainSync().Client == nil {
+		return nil, fmt.Errorf(
+			"ChainSync client not available on connection: %s",
+			connId.String(),
+		)
+	}
+	intersectPoints, err := o.LedgerState.IntersectPoints(
+		chainsyncIntersectPointCount,
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"LedgerState.IntersectPoints failed: %w",
+			err,
+		)
+	}
+	// Determine start point if we have no stored chain points
+	if len(intersectPoints) == 0 {
+		if o.config.IntersectTip {
+			// Start initial chainsync from current chain tip
+			tip, err := conn.ChainSync().Client.GetCurrentTip()
+			if err != nil {
+				return nil, fmt.Errorf(
+					"ChainSync.Client.GetCurrentTip failed: %w",
+					err,
+				)
+			}
+			intersectPoints = append(intersectPoints, tip.Point)
+		} else if len(o.config.IntersectPoints) > 0 {
+			// Start initial chainsync at specific point(s)
+			intersectPoints = append(
+				intersectPoints,
+				o.config.IntersectPoints...,
+			)
+		}
+	}
+	intersectPoints = normalizeIntersectPoints(intersectPoints)
+	// Always include origin as the last intersect point. This
+	// ensures FindIntersect succeeds even when the peer follows
+	// a different fork (e.g. multi-producer DevNet). Without
+	// origin, peers on divergent chains have no common point.
+	if len(intersectPoints) == 0 ||
+		!isOriginPoint(intersectPoints[len(intersectPoints)-1]) {
+		intersectPoints = append(intersectPoints, ocommon.NewPointOrigin())
+	}
+	return intersectPoints, nil
+}
+
+func (o *Ouroboros) syncChainsyncClient(
+	connId ouroboros.ConnectionId,
+	intersectPoints []ocommon.Point,
+) error {
+	conn := o.ConnManager.GetConnectionById(connId)
+	if conn == nil {
+		return fmt.Errorf("failed to lookup connection ID: %s", connId.String())
+	}
+	if conn.ChainSync() == nil || conn.ChainSync().Client == nil {
+		return fmt.Errorf(
+			"ChainSync client not available on connection: %s",
+			connId.String(),
+		)
+	}
+	intersectPoints = normalizeIntersectPoints(intersectPoints)
+	if len(intersectPoints) == 0 {
+		intersectPoints = []ocommon.Point{ocommon.NewPointOrigin()}
+	}
+	if o.PeerGov != nil {
+		o.PeerGov.SetPeerHotByConnId(connId)
+	}
+	return conn.ChainSync().Client.Sync(intersectPoints)
+}
+
 // RestartChainsyncClient restarts the chainsync client on an existing
 // connection without closing the TCP connection. This avoids disrupting
 // other mini-protocols (blockfetch, txsubmission, keepalive) and
@@ -88,6 +206,22 @@ func (o *Ouroboros) chainsyncClientConnOpts() []ochainsync.ChainSyncOptionFunc {
 // the intersection point is behind the client's current position, which
 // triggers the normal rollback handler.
 func (o *Ouroboros) RestartChainsyncClient(connId ouroboros.ConnectionId) error {
+	intersectPoints, err := o.buildDefaultChainsyncIntersectPoints(connId)
+	if err != nil {
+		return fmt.Errorf(
+			"build default chainsync intersect points: %w",
+			err,
+		)
+	}
+	return o.RestartChainsyncClientWithPoints(connId, intersectPoints)
+}
+
+// RestartChainsyncClientWithPoints restarts the chainsync client on an
+// existing connection and begins syncing from the specified intersect point(s).
+func (o *Ouroboros) RestartChainsyncClientWithPoints(
+	connId ouroboros.ConnectionId,
+	intersectPoints []ocommon.Point,
+) error {
 	conn := o.ConnManager.GetConnectionById(connId)
 	if conn == nil {
 		return fmt.Errorf("connection not found: %s", connId.String())
@@ -102,8 +236,7 @@ func (o *Ouroboros) RestartChainsyncClient(connId ouroboros.ConnectionId) error 
 	// Start re-registers the protocol with the muxer (handles
 	// stopped→starting→running transition internally).
 	cs.Client.Start()
-	// Re-negotiate intersection using the same logic as initial start.
-	if err := o.chainsyncClientStart(connId); err != nil {
+	if err := o.syncChainsyncClient(connId, intersectPoints); err != nil {
 		return fmt.Errorf(
 			"chainsync restart failed for conn %v: %w",
 			connId, err,
@@ -113,56 +246,17 @@ func (o *Ouroboros) RestartChainsyncClient(connId ouroboros.ConnectionId) error 
 }
 
 func (o *Ouroboros) chainsyncClientStart(connId ouroboros.ConnectionId) error {
-	conn := o.ConnManager.GetConnectionById(connId)
-	if conn == nil {
-		return fmt.Errorf("failed to lookup connection ID: %s", connId.String())
-	}
-	if conn.ChainSync() == nil {
+	intersectPoints, err := o.buildDefaultChainsyncIntersectPoints(connId)
+	if err != nil {
 		return fmt.Errorf(
-			"ChainSync protocol not available on connection: %s",
-			connId.String(),
+			"build default chainsync intersect points for start: %w",
+			err,
 		)
 	}
-	intersectPoints, err := o.LedgerState.IntersectPoints(
-		chainsyncIntersectPointCount,
-	)
-	if err != nil {
-		return err
+	if err := o.syncChainsyncClient(connId, intersectPoints); err != nil {
+		return fmt.Errorf("sync chainsync client: %w", err)
 	}
-	// Determine start point if we have no stored chain points
-	if len(intersectPoints) == 0 {
-		if o.config.IntersectTip {
-			// Start initial chainsync from current chain tip
-			tip, err := conn.ChainSync().Client.GetCurrentTip()
-			if err != nil {
-				return err
-			}
-			intersectPoints = append(
-				intersectPoints,
-				tip.Point,
-				ocommon.NewPointOrigin(),
-			)
-			if o.PeerGov != nil {
-				o.PeerGov.SetPeerHotByConnId(connId)
-			}
-			return conn.ChainSync().Client.Sync(intersectPoints)
-		} else if len(o.config.IntersectPoints) > 0 {
-			// Start initial chainsync at specific point(s)
-			intersectPoints = append(
-				intersectPoints,
-				o.config.IntersectPoints...,
-			)
-		}
-	}
-	// Always include origin as the last intersect point. This
-	// ensures FindIntersect succeeds even when the peer follows
-	// a different fork (e.g. multi-producer DevNet). Without
-	// origin, peers on divergent chains have no common point.
-	intersectPoints = append(intersectPoints, ocommon.NewPointOrigin())
-	if o.PeerGov != nil {
-		o.PeerGov.SetPeerHotByConnId(connId)
-	}
-	return conn.ChainSync().Client.Sync(intersectPoints)
+	return nil
 }
 
 func (o *Ouroboros) chainsyncServerFindIntersect(
@@ -559,6 +653,141 @@ func (o *Ouroboros) updateChainsyncMetrics(
 	o.PeerGov.UpdatePeerChainSyncObservation(connId, headerRate, tipDelta)
 }
 
+func (o *Ouroboros) restartChainsyncClientAsync(
+	ctx context.Context,
+	connId ouroboros.ConnectionId,
+	reason string,
+	restartFn func() error,
+) {
+	conn := o.ConnManager.GetConnectionById(connId)
+	if conn == nil {
+		return
+	}
+	go func() {
+		// Serialize restarts for the same connection to prevent
+		// overlapping stop/restart goroutines.
+		muVal, _ := o.restartMu.LoadOrStore(
+			connId, &sync.Mutex{},
+		)
+		mu := muVal.(*sync.Mutex)
+		mu.Lock()
+
+		o.config.Logger.Info(
+			"restarting chainsync client",
+			"connection_id", connId.String(),
+			"reason", reason,
+		)
+		var closeOnce sync.Once
+		closeConn := func() {
+			closeOnce.Do(func() { conn.Close() })
+		}
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			if err := restartFn(); err != nil {
+				o.config.Logger.Warn(
+					"chainsync restart failed, closing connection",
+					"error", err,
+					"connection_id", connId.String(),
+					"reason", reason,
+				)
+				closeConn()
+			}
+		}()
+		select {
+		case <-done:
+		case <-ctx.Done():
+			o.config.Logger.Info(
+				"node shutting down, aborting chainsync restart",
+				"connection_id", connId.String(),
+				"reason", reason,
+			)
+			closeConn()
+			<-done
+		case <-time.After(chainsyncRestartTimeout):
+			o.config.Logger.Warn(
+				"chainsync restart timed out, closing connection",
+				"connection_id", connId.String(),
+				"reason", reason,
+			)
+			closeConn()
+			<-done
+		}
+		mu.Unlock()
+	}()
+}
+
+func (o *Ouroboros) ResumeChainsyncOnPeerSwitch(
+	ctx context.Context,
+	connId ouroboros.ConnectionId,
+) {
+	if o == nil ||
+		o.ConnManager == nil ||
+		o.ChainsyncState == nil ||
+		o.LedgerState == nil {
+		return
+	}
+	localTip := o.LedgerState.Tip()
+	trackedClient := o.ChainsyncState.GetTrackedClient(connId)
+	if !shouldRestartChainsyncOnSwitch(localTip.Point, trackedClient) {
+		return
+	}
+	localPoint := localTip.Point
+	reason := "active peer switch exact intersect"
+	o.restartChainsyncClientAsync(
+		ctx,
+		connId,
+		reason,
+		func() error {
+			conn := o.ConnManager.GetConnectionById(connId)
+			if conn == nil {
+				return fmt.Errorf("connection not found: %s", connId.String())
+			}
+			cs := conn.ChainSync()
+			if cs == nil || cs.Client == nil {
+				return fmt.Errorf(
+					"chainsync client not available: %s",
+					connId.String(),
+				)
+			}
+			if err := cs.Client.Stop(); err != nil {
+				return fmt.Errorf("stop chainsync client: %w", err)
+			}
+			o.ChainsyncState.ClearSeenHeadersFrom(localPoint.Slot)
+			err := o.RestartChainsyncClientWithPoints(
+				connId,
+				[]ocommon.Point{localPoint},
+			)
+			if err == nil {
+				o.config.Logger.Info(
+					"restarted switched peer chainsync from local tip",
+					"connection_id", connId.String(),
+					"local_tip_slot", localPoint.Slot,
+					"tracked_cursor_slot", trackedClient.Cursor.Slot,
+				)
+				return nil
+			}
+			if !errors.Is(err, ochainsync.ErrIntersectNotFound) {
+				return err
+			}
+			o.config.Logger.Info(
+				"exact local-tip intersect unavailable on switched peer, falling back",
+				"connection_id", connId.String(),
+				"local_tip_slot", localPoint.Slot,
+				"tracked_cursor_slot", trackedClient.Cursor.Slot,
+			)
+			if err := cs.Client.Stop(); err != nil {
+				return fmt.Errorf(
+					"stop chainsync client after intersect fallback: %w",
+					err,
+				)
+			}
+			o.ChainsyncState.ClearSeenHeaders()
+			return o.RestartChainsyncClient(connId)
+		},
+	)
+}
+
 // SubscribeChainsyncResync registers an EventBus subscriber that
 // handles chainsync re-sync events. When a resync is requested
 // (e.g. because the ledger detected a persistent fork), this
@@ -579,52 +808,27 @@ func (o *Ouroboros) SubscribeChainsyncResync(ctx context.Context) {
 				return
 			}
 			connId := e.ConnectionId
-			conn := o.ConnManager.GetConnectionById(connId)
-			if conn == nil {
-				return
-			}
-
-			// Run stop + clear + restart asynchronously.
-			// cs.Client.Stop() can block waiting for the
-			// protocol to drain, and Sync() waits for a
-			// FindIntersect response delivered via the
-			// chainsync callback which needs the chainsync
-			// mutex held by our caller. Doing either
-			// synchronously would block the EventBus or
-			// deadlock.
-			go func() {
-				// Serialize restarts for the same connection
-				// to prevent overlapping stop/restart goroutines.
-				muVal, _ := o.restartMu.LoadOrStore(
-					connId, &sync.Mutex{},
-				)
-				mu := muVal.(*sync.Mutex)
-				mu.Lock()
-
-				o.config.Logger.Info(
-					"restarting chainsync for re-sync",
-					"connection_id", connId.String(),
-					"reason", e.Reason,
-				)
-				var closeOnce sync.Once
-				closeConn := func() {
-					closeOnce.Do(func() { conn.Close() })
-				}
-				done := make(chan struct{})
-				go func() {
-					defer close(done)
+			o.restartChainsyncClientAsync(
+				ctx,
+				connId,
+				e.Reason,
+				func() error {
+					conn := o.ConnManager.GetConnectionById(connId)
+					if conn == nil {
+						return fmt.Errorf(
+							"connection not found: %s",
+							connId.String(),
+						)
+					}
 					// Stop the chainsync client to halt
 					// mismatching headers.
 					cs := conn.ChainSync()
 					if cs != nil && cs.Client != nil {
 						if err := cs.Client.Stop(); err != nil {
-							o.config.Logger.Warn(
-								"chainsync stop failed, closing connection",
-								"error", err,
-								"connection_id", connId.String(),
+							return fmt.Errorf(
+								"stop chainsync client: %w",
+								err,
 							)
-							closeConn()
-							return
 						}
 					}
 					// Clear the header dedup cache so the
@@ -633,40 +837,9 @@ func (o *Ouroboros) SubscribeChainsyncResync(ctx context.Context) {
 					if o.ChainsyncState != nil {
 						o.ChainsyncState.ClearSeenHeaders()
 					}
-					if err := o.RestartChainsyncClient(
-						connId,
-					); err != nil {
-						o.config.Logger.Warn(
-							"chainsync restart failed, closing connection",
-							"error", err,
-							"connection_id", connId.String(),
-						)
-						closeConn()
-					}
-				}()
-				// Hold the mutex until the restart worker
-				// completes to prevent overlapping restarts.
-				// On timeout or shutdown, close the connection
-				// but still wait for done before releasing.
-				select {
-				case <-done:
-				case <-ctx.Done():
-					o.config.Logger.Info(
-						"node shutting down, aborting chainsync restart",
-						"connection_id", connId.String(),
-					)
-					closeConn()
-					<-done
-				case <-time.After(chainsyncRestartTimeout):
-					o.config.Logger.Warn(
-						"chainsync restart timed out, closing connection",
-						"connection_id", connId.String(),
-					)
-					closeConn()
-					<-done
-				}
-				mu.Unlock()
-			}()
+					return o.RestartChainsyncClient(connId)
+				},
+			)
 		},
 	)
 }

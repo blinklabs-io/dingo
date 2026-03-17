@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/chain"
+	"github.com/blinklabs-io/dingo/chainselection"
 	cardano "github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/database"
@@ -232,6 +233,28 @@ func (ls *LedgerState) logUnexpectedChainsyncEventData(
 	)
 }
 
+func (ls *LedgerState) handleChainSwitchEvent(evt event.Event) {
+	e, ok := evt.Data.(chainselection.ChainSwitchEvent)
+	if !ok {
+		return
+	}
+	ls.chainsyncBlockfetchMutex.Lock()
+	defer ls.chainsyncBlockfetchMutex.Unlock()
+	ls.selectedBlockfetchConnId = e.NewConnectionId
+}
+
+func (ls *LedgerState) handleConnectionClosedEvent(evt event.Event) {
+	e, ok := evt.Data.(connmanager.ConnectionClosedEvent)
+	if !ok {
+		return
+	}
+	ls.chainsyncBlockfetchMutex.Lock()
+	defer ls.chainsyncBlockfetchMutex.Unlock()
+	if ls.selectedBlockfetchConnId == e.ConnectionId {
+		ls.selectedBlockfetchConnId = ouroboros.ConnectionId{}
+	}
+}
+
 // detectConnectionSwitch checks for an active connection change and logs a
 // summary of dropped events when a switch is detected. It returns the current
 // active connection ID and whether connection filtering is configured. When
@@ -255,13 +278,22 @@ func (ls *LedgerState) detectConnectionSwitch() (activeConnId *ouroboros.Connect
 			ls.dropEventCount = 0
 			ls.dropRollbackCount = 0
 			ls.headerMismatchCount = 0
-			// Clear header queue and blockfetch state from old
-			// connection so stale headers don't block the new
-			// connection's blockfetch pipeline.
-			ls.chain.ClearHeaders()
+			// Reset blockfetch state, but preserve queued headers. Valid
+			// headers remain valid across peer switches, and clearing them
+			// forces the sync pipeline to restart from scratch on every
+			// selector churn event.
 			ls.chainsyncBlockfetchMutex.Lock()
-			ls.blockfetchRequestRangeCleanup()
-			ls.activeBlockfetchConnId = ouroboros.ConnectionId{}
+			if ls.chainsyncBlockfetchReadyChan == nil {
+				ls.blockfetchRequestRangeCleanup()
+				ls.activeBlockfetchConnId = ouroboros.ConnectionId{}
+			} else {
+				ls.config.Logger.Debug(
+					"preserving in-flight blockfetch batch across connection switch",
+					"component", "ledger",
+					"blockfetch_connection_id",
+					ls.activeBlockfetchConnId.String(),
+				)
+			}
 			ls.chainsyncBlockfetchMutex.Unlock()
 			// Clear per-connection state (e.g., header dedup cache)
 			// so the new connection can re-deliver blocks from the
@@ -473,6 +505,7 @@ func (ls *LedgerState) resetChainsyncResyncState() {
 	ls.chain.ClearHeaders()
 	ls.chainsyncBlockfetchMutex.Lock()
 	ls.blockfetchRequestRangeCleanup()
+	ls.activeBlockfetchConnId = ouroboros.ConnectionId{}
 	ls.chainsyncBlockfetchMutex.Unlock()
 }
 
@@ -675,6 +708,7 @@ func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 	// Mark blockfetch as in progress
 	ls.chainsyncBlockfetchReadyChan = make(chan struct{})
 	ls.activeBlockfetchConnId = e.ConnectionId
+	ls.selectedBlockfetchConnId = e.ConnectionId
 	// Request next bulk range
 	headerStart, headerEnd := ls.chain.HeaderRange(blockfetchBatchSize)
 	ls.config.Logger.Debug(
@@ -691,6 +725,7 @@ func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 	)
 	if err != nil {
 		ls.blockfetchRequestRangeCleanup()
+		ls.activeBlockfetchConnId = ouroboros.ConnectionId{}
 		return err
 	}
 	return nil
@@ -865,14 +900,14 @@ func (ls *LedgerState) tryResolveFork(
 
 //nolint:unparam
 func (ls *LedgerState) handleEventBlockfetchBlock(e BlockfetchEvent) error {
-	// Drop blocks from a stale connection (e.g., after connection switch)
-	if e.ConnectionId != ls.activeBlockfetchConnId {
-		return nil
-	}
 	// Process blocks in small commit batches so they appear on the
 	// chain promptly without paying a full blob transaction cost for
 	// every single block. We still flush well before BatchDone to
 	// avoid downstream ChainSync idle timeouts.
+	if ls.chainsyncBlockfetchReadyChan == nil ||
+		e.ConnectionId != ls.activeBlockfetchConnId {
+		return nil
+	}
 
 	// Verify block header cryptographic proofs (VRF, KES).
 	// Skip during historical sync (validationEnabled=false) because
@@ -902,6 +937,16 @@ func (ls *LedgerState) handleEventBlockfetchBlock(e BlockfetchEvent) error {
 		ls.chainsyncBlockfetchTimeoutTimer.Reset(blockfetchBusyTimeout)
 	}
 	return nil
+}
+
+func (ls *LedgerState) nextBlockfetchConnId() (ouroboros.ConnectionId, bool) {
+	if ls.selectedBlockfetchConnId != (ouroboros.ConnectionId{}) {
+		return ls.selectedBlockfetchConnId, true
+	}
+	if ls.activeBlockfetchConnId == (ouroboros.ConnectionId{}) {
+		return ouroboros.ConnectionId{}, false
+	}
+	return ls.activeBlockfetchConnId, true
 }
 
 func (ls *LedgerState) flushPendingBlockfetchBlocks() error {
@@ -1974,6 +2019,7 @@ func (ls *LedgerState) blockfetchRequestRangeStart(
 				return
 			}
 			ls.blockfetchRequestRangeCleanup()
+			ls.activeBlockfetchConnId = ouroboros.ConnectionId{}
 			ls.config.Logger.Info(
 				fmt.Sprintf(
 					"blockfetch operation timed out after %s",
@@ -2007,7 +2053,8 @@ func (ls *LedgerState) blockfetchRequestRangeCleanup() {
 
 func (ls *LedgerState) handleEventBlockfetchBatchDone(e BlockfetchEvent) error {
 	// Drop batch-done from a stale connection (e.g., after connection switch)
-	if e.ConnectionId != ls.activeBlockfetchConnId {
+	if ls.chainsyncBlockfetchReadyChan == nil ||
+		e.ConnectionId != ls.activeBlockfetchConnId {
 		return nil
 	}
 	// Stop the blockfetch timeout timer and invalidate any pending callbacks
@@ -2031,21 +2078,36 @@ func (ls *LedgerState) handleEventBlockfetchBatchDone(e BlockfetchEvent) error {
 	if remainingHeaders == 0 {
 		// No more headers to fetch, allow chainsync to collect more
 		ls.blockfetchRequestRangeCleanup()
+		ls.activeBlockfetchConnId = ouroboros.ConnectionId{}
 		return nil
 	}
 	// Clean up from blockfetch batch
 	ls.blockfetchRequestRangeCleanup()
+	nextConnId, ok := ls.nextBlockfetchConnId()
+	if !ok {
+		ls.config.Logger.Debug(
+			"headers pending but no next blockfetch connection is available",
+			"component", "ledger",
+			"remaining_headers", remainingHeaders,
+			"active_blockfetch_connection_id",
+			ls.activeBlockfetchConnId.String(),
+		)
+		ls.activeBlockfetchConnId = ouroboros.ConnectionId{}
+		return nil
+	}
 	// Mark blockfetch as in progress for next batch
 	ls.chainsyncBlockfetchReadyChan = make(chan struct{})
+	ls.activeBlockfetchConnId = nextConnId
 	// Request next waiting bulk range using the active connection
 	headerStart, headerEnd := ls.chain.HeaderRange(blockfetchBatchSize)
 	err := ls.blockfetchRequestRangeStart(
-		ls.activeBlockfetchConnId,
+		nextConnId,
 		headerStart,
 		headerEnd,
 	)
 	if err != nil {
 		ls.blockfetchRequestRangeCleanup()
+		ls.activeBlockfetchConnId = ouroboros.ConnectionId{}
 		return err
 	}
 	return nil

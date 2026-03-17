@@ -69,6 +69,8 @@ func (p *PeerGovernor) gossipChurn() {
 		if !canDemote {
 			continue // Never demote this peer (e.g., local roots)
 		}
+		oldSource := peer.Source
+		oldConn := clonePeerConnection(peer.Connection)
 		peer.State = targetState
 
 		// Close connection when demoting to cold
@@ -87,6 +89,13 @@ func (p *PeerGovernor) gossipChurn() {
 				"address", peer.Address,
 			)
 		}
+		events = p.appendChainSelectionEventsLocked(
+			events,
+			p.bootstrapExited,
+			oldSource,
+			oldConn,
+			peer,
+		)
 
 		demoted++
 		p.config.Logger.Debug(

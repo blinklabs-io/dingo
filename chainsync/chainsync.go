@@ -607,6 +607,20 @@ func (s *State) ClearSeenHeaders() {
 	s.seenHeaders = make(map[uint64][]headerRecord)
 }
 
+// ClearSeenHeadersFrom removes entries from the header deduplication cache
+// above the specified slot. This allows a restarted chainsync client
+// to replay headers beyond a known-good intersect point after an active-peer
+// switch without discarding older fork-detection history.
+func (s *State) ClearSeenHeadersFrom(fromSlot uint64) {
+	s.seenHeadersMutex.Lock()
+	defer s.seenHeadersMutex.Unlock()
+	for slot := range s.seenHeaders {
+		if slot > fromSlot {
+			delete(s.seenHeaders, slot)
+		}
+	}
+}
+
 // cloneBytes returns a copy of the byte slice, or nil if the
 // input is nil.
 func cloneBytes(b []byte) []byte {

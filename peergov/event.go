@@ -19,11 +19,13 @@ import (
 )
 
 const (
-	OutboundConnectionEventType = "peergov.outbound_conn"
-	PeerDemotedEventType        = "peergov.peer_demoted"
-	PeerPromotedEventType       = "peergov.peer_promoted"
-	PeerRemovedEventType        = "peergov.peer_removed"
-	PeerAddedEventType          = "peergov.peer_added"
+	OutboundConnectionEventType     = "peergov.outbound_conn"
+	PeerDemotedEventType            = "peergov.peer_demoted"
+	PeerPromotedEventType           = "peergov.peer_promoted"
+	PeerRemovedEventType            = "peergov.peer_removed"
+	PeerAddedEventType              = "peergov.peer_added"
+	PeerEligibilityChangedEventType = "peergov.peer_eligibility_changed"
+	PeerPriorityChangedEventType    = "peergov.peer_priority_changed"
 	// Phase 7: Enhanced Observability event types
 	PeerChurnEventType   = "peergov.peer_churn"
 	QuotaStatusEventType = "peergov.quota_status"
@@ -39,6 +41,16 @@ type OutboundConnectionEvent struct {
 type PeerStateChangeEvent struct {
 	Address string
 	Reason  string
+}
+
+type PeerEligibilityChangedEvent struct {
+	ConnectionId ouroboros.ConnectionId
+	Eligible     bool
+}
+
+type PeerPriorityChangedEvent struct {
+	ConnectionId ouroboros.ConnectionId
+	Priority     int
 }
 
 // PeerChurnEvent provides detailed information about a peer state change

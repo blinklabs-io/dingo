@@ -29,7 +29,9 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/chain"
+	"github.com/blinklabs-io/dingo/chainselection"
 	"github.com/blinklabs-io/dingo/config/cardano"
+	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
@@ -464,6 +466,7 @@ type LedgerState struct {
 	chainsyncBlockfetchReadyMutex sync.Mutex
 	chainsyncBlockfetchReadyChan  chan struct{}
 	activeBlockfetchConnId        ouroboros.ConnectionId // connection used for current blockfetch pipeline
+	selectedBlockfetchConnId      ouroboros.ConnectionId // latest selected chainsync connection for the next batch
 	pendingBlockfetchEvents       []BlockfetchEvent
 	checkpointWrittenForEpoch     bool
 	closed                        atomic.Bool
@@ -473,6 +476,8 @@ type LedgerState struct {
 	chainsyncSubID   event.EventSubscriberId
 	blockfetchSubID  event.EventSubscriberId
 	chainUpdateSubID event.EventSubscriberId
+	chainSwitchSubID event.EventSubscriberId
+	connClosedSubID  event.EventSubscriberId
 
 	// rollbackMu serializes rollbackWG.Add with Close's rollbackWG.Wait
 	// to prevent Add-after-Wait panics from the TOCTOU race between
@@ -599,6 +604,14 @@ func (ls *LedgerState) Start(ctx context.Context) error {
 		ls.chainUpdateSubID = ls.config.EventBus.SubscribeFunc(
 			chain.ChainUpdateEventType,
 			ls.handleEventChainUpdate,
+		)
+		ls.chainSwitchSubID = ls.config.EventBus.SubscribeFunc(
+			chainselection.ChainSwitchEventType,
+			ls.handleChainSwitchEvent,
+		)
+		ls.connClosedSubID = ls.config.EventBus.SubscribeFunc(
+			connmanager.ConnectionClosedEventType,
+			ls.handleConnectionClosedEvent,
 		)
 	}
 	// Schedule periodic process to purge consumed UTxOs outside of the rollback window
@@ -858,6 +871,14 @@ func (ls *LedgerState) Close() error {
 		ls.config.EventBus.Unsubscribe(
 			chain.ChainUpdateEventType,
 			ls.chainUpdateSubID,
+		)
+		ls.config.EventBus.Unsubscribe(
+			chainselection.ChainSwitchEventType,
+			ls.chainSwitchSubID,
+		)
+		ls.config.EventBus.Unsubscribe(
+			connmanager.ConnectionClosedEventType,
+			ls.connClosedSubID,
 		)
 	}
 

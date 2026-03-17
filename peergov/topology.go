@@ -107,122 +107,179 @@ func (p *PeerGovernor) LoadTopologyConfig(
 		})
 	}
 
+	var events []pendingEvent
 	p.mu.Lock()
-	defer p.mu.Unlock()
-	// Remove peers originally sourced from the topology
-	tmpPeers := []*Peer{}
+	isTopologySource := func(source PeerSource) bool {
+		return source == PeerSourceTopologyBootstrapPeer ||
+			source == PeerSourceTopologyLocalRoot ||
+			source == PeerSourceTopologyPublicRoot
+	}
+	topologySnapshot := make(map[string]*Peer)
+	// Remove peers originally sourced from the topology, but keep a snapshot
+	// so we can reuse any still-present entries and preserve connection state.
+	tmpPeers := make([]*Peer, 0, len(p.peers))
 	for _, tmpPeer := range p.peers {
 		if tmpPeer == nil {
 			continue
 		}
-		if tmpPeer.Source == PeerSourceTopologyBootstrapPeer ||
-			tmpPeer.Source == PeerSourceTopologyLocalRoot ||
-			tmpPeer.Source == PeerSourceTopologyPublicRoot {
+		if isTopologySource(tmpPeer.Source) {
+			topologySnapshot[tmpPeer.NormalizedAddress] = tmpPeer
 			continue
 		}
 		tmpPeers = append(tmpPeers, tmpPeer)
 	}
 	p.peers = tmpPeers
-	// Add topology bootstrap peers
 	now := time.Now()
-	for _, resolved := range bootstrapResolved {
-		p.peers = append(
-			p.peers,
-			&Peer{
-				Address:           resolved.address,
-				NormalizedAddress: resolved.normalized,
-				Source:            PeerSourceTopologyBootstrapPeer,
+	upsertTopologyPeer := func(
+		address string,
+		normalized string,
+		source PeerSource,
+		sharable bool,
+		valency uint,
+		warmValency uint,
+		groupID string,
+	) {
+		newPeer := func() *Peer {
+			return &Peer{
+				Address:           address,
+				NormalizedAddress: normalized,
+				Source:            source,
 				State:             PeerStateCold,
+				Sharable:          sharable,
 				EMAAlpha:          p.config.EMAAlpha,
+				Valency:           valency,
+				WarmValency:       warmValency,
+				GroupID:           groupID,
 				FirstSeen:         now,
-			},
+			}
+		}
+		updatePeer := func(peer *Peer) *Peer {
+			if peer.FirstSeen.IsZero() {
+				peer.FirstSeen = now
+			}
+			peer.Address = address
+			peer.NormalizedAddress = normalized
+			peer.Source = source
+			peer.Sharable = sharable
+			peer.EMAAlpha = p.config.EMAAlpha
+			peer.Valency = valency
+			peer.WarmValency = warmValency
+			peer.GroupID = groupID
+			return peer
+		}
+		existingPeerIdx := -1
+		for i, existingPeer := range p.peers {
+			if existingPeer != nil &&
+				existingPeer.NormalizedAddress == normalized {
+				existingPeerIdx = i
+				break
+			}
+		}
+		if existingPeerIdx >= 0 {
+			existingPeer := p.peers[existingPeerIdx]
+			oldSource := existingPeer.Source
+			oldConn := clonePeerConnection(existingPeer.Connection)
+			p.peers = slices.Delete(
+				p.peers,
+				existingPeerIdx,
+				existingPeerIdx+1,
+			)
+			p.peers = append(p.peers, updatePeer(existingPeer))
+			events = p.appendChainSelectionEventsLocked(
+				events,
+				p.bootstrapExited,
+				oldSource,
+				oldConn,
+				existingPeer,
+			)
+			return
+		}
+		if existingPeer, ok := topologySnapshot[normalized]; ok {
+			delete(topologySnapshot, normalized)
+			oldSource := existingPeer.Source
+			oldConn := clonePeerConnection(existingPeer.Connection)
+			p.peers = append(p.peers, updatePeer(existingPeer))
+			events = p.appendChainSelectionEventsLocked(
+				events,
+				p.bootstrapExited,
+				oldSource,
+				oldConn,
+				existingPeer,
+			)
+			return
+		}
+		p.peers = append(p.peers, newPeer())
+	}
+	// Add topology bootstrap peers
+	for _, resolved := range bootstrapResolved {
+		upsertTopologyPeer(
+			resolved.address,
+			resolved.normalized,
+			PeerSourceTopologyBootstrapPeer,
+			false,
+			0,
+			0,
+			"",
 		)
 	}
 	// Add topology local roots
 	for groupIdx, localRoot := range localRootsResolved {
 		groupID := fmt.Sprintf("local-root-%d", groupIdx)
 		for _, resolved := range localRoot.peers {
-			tmpPeer := &Peer{
-				Address:           resolved.address,
-				NormalizedAddress: resolved.normalized,
-				Source:            PeerSourceTopologyLocalRoot,
-				State:             PeerStateCold,
-				Sharable:          localRoot.advertise,
-				EMAAlpha:          p.config.EMAAlpha,
-				Valency:           localRoot.valency,
-				WarmValency:       localRoot.warmValency,
-				GroupID:           groupID,
-				FirstSeen:         now,
-			}
-			// Check for existing peer with this address
-			existingPeerIdx := -1
-			for i, existingPeer := range p.peers {
-				if existingPeer != nil &&
-					existingPeer.NormalizedAddress == resolved.normalized {
-					existingPeerIdx = i
-					break
-				}
-			}
-			if existingPeerIdx >= 0 {
-				existingPeer := p.peers[existingPeerIdx]
-				// Preserve active connection state for any peer with a connection
-				if existingPeer.Connection != nil {
-					tmpPeer.Connection = existingPeer.Connection
-					tmpPeer.State = existingPeer.State
-					tmpPeer.ReconnectCount = existingPeer.ReconnectCount
-					tmpPeer.ReconnectDelay = existingPeer.ReconnectDelay
-					tmpPeer.Sharable = existingPeer.Sharable
-				}
-				// Remove the existing peer
-				p.peers = slices.Delete(
-					p.peers, existingPeerIdx,
-					existingPeerIdx+1)
-			}
-			p.peers = append(p.peers, tmpPeer)
+			upsertTopologyPeer(
+				resolved.address,
+				resolved.normalized,
+				PeerSourceTopologyLocalRoot,
+				localRoot.advertise,
+				localRoot.valency,
+				localRoot.warmValency,
+				groupID,
+			)
 		}
 	}
 	// Add topology public roots
 	for groupIdx, publicRoot := range publicRootsResolved {
 		groupID := fmt.Sprintf("public-root-%d", groupIdx)
 		for _, resolved := range publicRoot.peers {
-			tmpPeer := &Peer{
-				Address:           resolved.address,
-				NormalizedAddress: resolved.normalized,
-				Source:            PeerSourceTopologyPublicRoot,
-				State:             PeerStateCold,
-				Sharable:          publicRoot.advertise,
-				EMAAlpha:          p.config.EMAAlpha,
-				Valency:           publicRoot.valency,
-				WarmValency:       publicRoot.warmValency,
-				GroupID:           groupID,
-				FirstSeen:         now,
+			upsertTopologyPeer(
+				resolved.address,
+				resolved.normalized,
+				PeerSourceTopologyPublicRoot,
+				publicRoot.advertise,
+				publicRoot.valency,
+				publicRoot.warmValency,
+				groupID,
+			)
+		}
+	}
+	for _, orphanPeer := range topologySnapshot {
+		if orphanPeer == nil {
+			continue
+		}
+		events = p.appendChainSelectionEventsLocked(
+			events,
+			p.bootstrapExited,
+			orphanPeer.Source,
+			clonePeerConnection(orphanPeer.Connection),
+			nil,
+		)
+		events = append(events, pendingEvent{
+			PeerRemovedEventType,
+			PeerStateChangeEvent{
+				Address: orphanPeer.Address,
+				Reason:  "topology removed",
+			},
+		})
+		if orphanPeer.Connection != nil && p.config.ConnManager != nil {
+			if conn := p.config.ConnManager.GetConnectionById(
+				orphanPeer.Connection.Id,
+			); conn != nil {
+				conn.Close()
 			}
-			// Check for existing peer with this address
-			existingPeerIdx := -1
-			for i, existingPeer := range p.peers {
-				if existingPeer != nil &&
-					existingPeer.NormalizedAddress == resolved.normalized {
-					existingPeerIdx = i
-					break
-				}
-			}
-			if existingPeerIdx >= 0 {
-				existingPeer := p.peers[existingPeerIdx]
-				// Preserve active connection state for any peer with a connection
-				if existingPeer.Connection != nil {
-					tmpPeer.Connection = existingPeer.Connection
-					tmpPeer.State = existingPeer.State
-					tmpPeer.ReconnectCount = existingPeer.ReconnectCount
-					tmpPeer.ReconnectDelay = existingPeer.ReconnectDelay
-					tmpPeer.Sharable = existingPeer.Sharable
-				}
-				// Remove the existing peer
-				p.peers = slices.Delete(
-					p.peers, existingPeerIdx,
-					existingPeerIdx+1)
-			}
-			p.peers = append(p.peers, tmpPeer)
 		}
 	}
 	p.updatePeerMetrics()
+	p.mu.Unlock()
+
+	p.publishPendingEvents(events)
 }
