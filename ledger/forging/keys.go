@@ -164,7 +164,11 @@ func (pc *PoolCredentials) UpdateKESPeriod(period uint64) error {
 
 	targetPeriod, err := pc.relativeKESPeriodUnsafe(period)
 	if err != nil {
-		return err
+		return fmt.Errorf(
+			"failed to compute target KES period for absolute period %d: %w",
+			period,
+			err,
+		)
 	}
 
 	if targetPeriod < pc.kesSKey.Period {
@@ -229,7 +233,11 @@ func (pc *PoolCredentials) KESSign(period uint64, message []byte) ([]byte, error
 
 	relativePeriod, err := pc.relativeKESPeriodUnsafe(period)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf(
+			"failed to compute signing KES period for absolute period %d: %w",
+			period,
+			err,
+		)
 	}
 
 	sig, err := kes.Sign(pc.kesSKey, relativePeriod, message)
