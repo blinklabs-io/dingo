@@ -641,7 +641,7 @@ func (s *queryServiceServer) ReadGenesis(
 		Config: &query.ReadGenesisResponse_Cardano{
 			Cardano: cardanoGenesis,
 		},
-		Caip2: caip2FromNetworkMagic(cardanoGenesis.NetworkMagic),
+		Caip2: caip2FromNetworkMagic(cardanoGenesis.GetNetworkMagic()),
 	}
 
 	// Decode the hex if shelley genesis hash is configured
