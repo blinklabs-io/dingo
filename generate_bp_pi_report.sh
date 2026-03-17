@@ -8,6 +8,11 @@ CACHE_DIR="${CACHE_DIR:-/tmp/dingo-bp-pi-go-cache}"
 GOMAXPROCS_VALUE="${GOMAXPROCS_VALUE:-4}"
 BENCH_TIME="${BENCH_TIME:-5s}"
 IMMUTABLE_PATH="${IMMUTABLE_PATH:-database/immutable/testdata}"
+RSS_LIMIT_MB="${RSS_LIMIT_MB:-1024}"
+GOMEMLIMIT_VALUE="${GOMEMLIMIT_VALUE:-}"
+BLOCK_CACHE_SIZE_VALUE="${BLOCK_CACHE_SIZE_VALUE:-}"
+INDEX_CACHE_SIZE_VALUE="${INDEX_CACHE_SIZE_VALUE:-}"
+MEMTABLE_SIZE_VALUE="${MEMTABLE_SIZE_VALUE:-}"
 DEFAULT_DB_DIR="${DEFAULT_DB_DIR:-}"
 DEFAULT_LOG_FILE="${DEFAULT_LOG_FILE:-}"
 DB_DIR_BASE="${DB_DIR_BASE:-/tmp}"
@@ -16,6 +21,7 @@ TIME_FORMAT_STYLE=""
 TIME_CMD=()
 AUTO_DEFAULT_DB_DIR=0
 AUTO_DEFAULT_LOG_FILE=0
+DINGO_CACHE_ARGS=()
 
 cleanup() {
   local exit_status=$?
@@ -197,18 +203,25 @@ run_load_profile() {
   validate_db_dir "$db_dir" "$log_file"
   rm -rf "$db_dir"
   : > "$log_file"
+  local -a env_args=(
+    PATH="$PATH"
+    HOME="${HOME:-/tmp}"
+    GOMAXPROCS="$GOMAXPROCS_VALUE"
+    DINGO_RUN_MODE=serve
+    DINGO_STORAGE_MODE=core
+  )
+  if [[ -n "$GOMEMLIMIT_VALUE" ]]; then
+    env_args+=(GOMEMLIMIT="$GOMEMLIMIT_VALUE")
+  fi
   env -i \
-    PATH="$PATH" \
-    HOME="${HOME:-/tmp}" \
-    GOMAXPROCS="$GOMAXPROCS_VALUE" \
-    DINGO_RUN_MODE=serve \
-    DINGO_STORAGE_MODE=core \
+    "${env_args[@]}" \
     "${TIME_CMD[@]}" \
     ./dingo \
     --config /dev/null \
     --blob badger \
     --metadata sqlite \
     --data-dir "$db_dir" \
+    "${DINGO_CACHE_ARGS[@]}" \
     load "$IMMUTABLE_PATH" "$@" \
     > "$log_file" 2>&1
 
@@ -230,6 +243,16 @@ parse_metric() {
 }
 
 configure_time_cmd
+
+if [[ -n "$BLOCK_CACHE_SIZE_VALUE" ]]; then
+  DINGO_CACHE_ARGS+=(--block-cache-size "$BLOCK_CACHE_SIZE_VALUE")
+fi
+if [[ -n "$INDEX_CACHE_SIZE_VALUE" ]]; then
+  DINGO_CACHE_ARGS+=(--index-cache-size "$INDEX_CACHE_SIZE_VALUE")
+fi
+if [[ -n "$MEMTABLE_SIZE_VALUE" ]]; then
+  DINGO_CACHE_ARGS+=(--memtable-size "$MEMTABLE_SIZE_VALUE")
+fi
 
 DB_DIR_BASE="$(resolve_path "$DB_DIR_BASE")"
 
@@ -279,6 +302,12 @@ if [[ ! "$default_rss_kb" =~ ^[0-9]+$ ]]; then
 fi
 
 default_rss_mb="$(awk "BEGIN { printf \"%.1f\", ${default_rss_kb} / 1024 }")"
+rss_limit_kb=$((RSS_LIMIT_MB * 1024))
+
+if (( default_rss_kb > rss_limit_kb )); then
+  echo "error: peak RSS ${default_rss_mb} MB exceeds limit ${RSS_LIMIT_MB} MB" >&2
+  exit 1
+fi
 
 {
   echo "# Four-Thread Block Producer Sizing Report (Non-Pi Host)"
@@ -287,7 +316,23 @@ default_rss_mb="$(awk "BEGIN { printf \"%.1f\", ${default_rss_kb} / 1024 }")"
   printf -- "- \`storageMode=core\`\n"
   printf -- "- \`runMode=serve\`, \`blob=badger\`, \`metadata=sqlite\`\n"
   printf -- "- \`GOMAXPROCS=%s\`\n" "$GOMAXPROCS_VALUE"
+  printf -- "- target peak RSS: \`<= %s MB\`\n" "$RSS_LIMIT_MB"
   printf -- "- immutable fixture: \`%s\`\n" "$IMMUTABLE_PATH"
+  if [[ -n "$GOMEMLIMIT_VALUE" ]]; then
+    printf -- "- test-only \`GOMEMLIMIT=%s\`\n" "$GOMEMLIMIT_VALUE"
+  fi
+  if [[ -n "$BLOCK_CACHE_SIZE_VALUE" || -n "$INDEX_CACHE_SIZE_VALUE" || -n "$MEMTABLE_SIZE_VALUE" ]]; then
+    echo "- explicit Badger test-only overrides:"
+    if [[ -n "$BLOCK_CACHE_SIZE_VALUE" ]]; then
+      printf -- "  - \`--block-cache-size=%s\`\n" "$BLOCK_CACHE_SIZE_VALUE"
+    fi
+    if [[ -n "$INDEX_CACHE_SIZE_VALUE" ]]; then
+      printf -- "  - \`--index-cache-size=%s\`\n" "$INDEX_CACHE_SIZE_VALUE"
+    fi
+    if [[ -n "$MEMTABLE_SIZE_VALUE" ]]; then
+      printf -- "  - \`--memtable-size=%s\`\n" "$MEMTABLE_SIZE_VALUE"
+    fi
+  fi
   echo "- measurements were collected on non-Pi hardware and are a sizing proxy, not Raspberry Pi device benchmarks"
   echo "- block producer peer count remains small; this is not a relay profile"
   echo
@@ -295,11 +340,16 @@ default_rss_mb="$(awk "BEGIN { printf \"%.1f\", ${default_rss_kb} / 1024 }")"
   echo
   echo "| Profile | Elapsed | Peak RSS | Notes |"
   echo "| --- | --- | --- | --- |"
-  printf -- "| \`core-default\` | \`%ss\` | \`%s MB\` | Current default \`serve/core\` cache profile |\n" "$default_elapsed" "$default_rss_mb"
+  if [[ -n "$BLOCK_CACHE_SIZE_VALUE" || -n "$INDEX_CACHE_SIZE_VALUE" || -n "$MEMTABLE_SIZE_VALUE" || -n "$GOMEMLIMIT_VALUE" ]]; then
+    printf -- "| \`core-constrained\` | \`%ss\` | \`%s MB\` | Explicit test-only memory/cache overrides |\n" "$default_elapsed" "$default_rss_mb"
+  else
+    printf -- "| \`core-default\` | \`%ss\` | \`%s MB\` | Current default \`serve/core\` cache profile |\n" "$default_elapsed" "$default_rss_mb"
+  fi
   echo
   echo "## Recommendation"
   echo
-  printf -- "For Raspberry Pi-class sizing in \`storageMode=core\`, the current default \`serve/core\` profile is already in the measured low-memory range on this four-thread non-Pi host.\n"
+  printf -- "For Raspberry Pi-class sizing in \`storageMode=core\`, keep production defaults aligned with normal Badger behavior and use explicit memory/cache constraints only in this harness when validating low-memory targets.\n"
+  printf -- "This run stayed under the configured \`%s MB\` RSS limit.\n" "$RSS_LIMIT_MB"
   echo "Explicit Badger cache settings still override these defaults if an operator wants to tune further."
   echo "Treat this as a sizing baseline rather than a direct Raspberry Pi hardware measurement."
   echo

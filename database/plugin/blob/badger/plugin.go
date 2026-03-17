@@ -78,15 +78,13 @@ func profileSettings(profile Profile) ProfileSettings {
 			CompactBlockMetadata: false,
 		}
 	case ProfileCore:
-		// Core mode intentionally cuts caches to 128MB block cache, 32MB
-		// index cache, and 32MB memtables, roughly 2-4x below load/api
-		// defaults, to fit smaller BP/relay hosts. Monitor Badger cache
-		// hit rates and read latencies after deployment to confirm the
-		// lower footprint is not hiding an I/O regression.
+		// Core mode keeps Badger's normal cache sizing. Low-memory
+		// validation belongs in dedicated constrained-memory test runs,
+		// not in production defaults for serve/core nodes.
 		return ProfileSettings{
-			BlockCacheSize:       134217728, // 128MB
-			IndexCacheSize:       33554432,  // 32MB
-			MemTableSize:         33554432,  // 32MB
+			BlockCacheSize:       DefaultBlockCacheSize,
+			IndexCacheSize:       DefaultIndexCacheSize,
+			MemTableSize:         DefaultMemTableSize,
 			CompactBlockMetadata: false,
 		}
 	case ProfileAPI:
