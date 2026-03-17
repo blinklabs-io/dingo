@@ -13,26 +13,26 @@ Hi folks! Here’s what we shipped in v0.27.2.
 
 ### ✨ What's New
 
-- **Sizing and performance benchmarks:** Capacity planning is easier because we added targeted benchmark suites and sizing reports.
+- Capacity planning is easier because **sizing and performance benchmarks** now include targeted benchmark suites and sizing reports.
 
 ### 💪 Improvements
 
-- **Race-safety around chain reads:** Running under load is more predictable because primary-chain access and current protocol parameter reads now use read locks and Linux CI now runs the Go race detector.
-- **HTTP/RPC timeouts:** Stalled requests are less likely to tie up resources because Bark, Blockfrost, and UTxO RPC servers now enforce write, read, and idle timeouts.
-- **Peer governance and event fan-out:** Larger peer sets are easier to handle because connection-manager checks and metrics are incremental, peer governor reconciliation and quota enforcement are optimized, and event publishing/shutdown now uses a snapshot-based fan-out with an async `Close` API.
-- **KES period offsets:** Operator certificate operations are more consistent because KES periods are now handled relative to the opcert and offset edge cases are validated with tests.
-- **Attestation workflow metadata:** Supply-chain metadata is more consistent because the pipeline now uses `actions/attest` and updated Docker Hub subject names.
+- Running under load is more predictable because **race-safety around chain reads** now includes read locks around primary-chain access and current protocol parameter reads, and Linux CI now runs the Go race detector.
+- Stalled requests are less likely to tie up resources because **HTTP/RPC timeouts** are now enforced on Bark, Blockfrost, and UTxO RPC servers.
+- Larger peer sets are easier to handle because **peer governance and event fan-out** now use incremental connection-manager checks and metrics, optimized peer governor reconciliation and quota enforcement, and snapshot-based fan-out publishing with an async `Close` API.
+- Operator certificate operations are more consistent because **KES period offsets** are now handled relative to the opcert and offset edge cases are validated with tests.
+- Supply-chain metadata is more consistent because **attestation workflow metadata** now uses `actions/attest` and updated Docker Hub subject names.
 
 ### 🔧 Fixes
 
-- **Block metadata marshaling errors:** Crashes are less likely because invalid `PrevHash` lengths now return an error instead of panicking.
-- **Epoch nonce cache validation:** Consensus state is more reliable because cached epoch nonces are only reused when they match the nonce you provide.
-- **SQLite VACUUM execution:** Database maintenance is more reliable because SQLite compaction now runs when requested.
+- Crashes are less likely because **block metadata marshaling errors** now return an error for invalid `PrevHash` lengths instead of panicking.
+- Consensus state is more reliable because **epoch nonce cache validation** only reuses cached epoch nonces when they match the nonce you provide.
+- Database maintenance is more reliable because **SQLite VACUUM execution** now runs when requested.
 
 ### 📋 What You Need to Know
 
-- **Client timeout expectations:** Some clients may need retry or keep-alive tuning because Bark, Blockfrost, and UTxO RPC now enforce write, read, and idle timeouts.
-- **Error handling instead of panics:** Some call paths may now fail explicitly because block metadata marshaling can return an error for invalid `PrevHash` lengths.
+- Some clients may need retry or keep-alive tuning because **client timeout expectations** now include enforced write, read, and idle timeouts on Bark, Blockfrost, and UTxO RPC.
+- Some call paths may now fail explicitly because **error handling instead of panics** now returns an error for invalid `PrevHash` lengths during block metadata marshaling.
 
 ### 🙏 Thank You
 
