@@ -20,6 +20,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/ledger"
 	ouroboros "github.com/blinklabs-io/gouroboros"
@@ -38,6 +39,22 @@ const blockfetchMetricsCdfUpdateInterval = 32
 // would cause the server to iterate the entire chain. The value of 129600
 // corresponds to the stability window (3k/f) on mainnet (k=2160, f=0.05).
 const MaxBlockFetchRange = 129600
+
+type blockfetchRangeIterator interface {
+	Next(bool) (*chain.ChainIteratorResult, error)
+	Cancel()
+}
+
+type blockfetchBatchServer interface {
+	StartBatch() error
+	Block(uint, []byte) error
+	BatchDone() error
+}
+
+type blockfetchConnection interface {
+	ErrorChan() chan error
+	Close() error
+}
 
 func (o *Ouroboros) blockfetchServerConnOpts() []blockfetch.BlockFetchOptionFunc {
 	return []blockfetch.BlockFetchOptionFunc{
@@ -115,67 +132,131 @@ func (o *Ouroboros) blockfetchServerRequestRange(
 	go func() {
 		conn := o.ConnManager.GetConnectionById(ctx.ConnectionId)
 		if conn == nil {
+			chainIter.Cancel()
 			return
 		}
-		if err := ctx.Server.StartBatch(); err != nil {
-			o.config.Logger.Error(
-				"blockfetch: failed to start batch",
-				"connection_id", ctx.ConnectionId.String(),
-				"error", err,
-			)
-			return
-		}
-	Loop:
-		for {
-			select {
-			case <-conn.ErrorChan():
-				return
-			default:
-				next, _ := chainIter.Next(false)
-				if next == nil {
-					break Loop
-				}
-				if next.Block.Slot > end.Slot {
-					break Loop
-				}
-				blockBytes := next.Block.Cbor
-				err := ctx.Server.Block(
-					next.Block.Type,
-					blockBytes,
-				)
-				if err != nil {
-					// Log the error with context (#398)
-					o.config.Logger.Error(
-						"blockfetch: failed to send block to peer",
-						"connection_id", ctx.ConnectionId.String(),
-						"block_slot", next.Block.Slot,
-						"start_slot", start.Slot,
-						"end_slot", end.Slot,
-						"error", err,
-					)
-					return
-				}
-				if o.metrics != nil {
-					o.metrics.servedBlockCount.Inc()
-				}
-				// Make sure we don't hang waiting for the next block if we've already hit the end
-				if next.Block.Slot == end.Slot {
-					break Loop
-				}
-			}
-		}
-		// Signal batch completion
-		if err := ctx.Server.BatchDone(); err != nil {
-			o.config.Logger.Error(
-				"blockfetch: failed to signal batch completion",
-				"connection_id", ctx.ConnectionId.String(),
-				"start_slot", start.Slot,
-				"end_slot", end.Slot,
-				"error", err,
-			)
-		}
+		o.blockfetchServerSendBatch(
+			ctx.ConnectionId.String(),
+			start,
+			end,
+			chainIter,
+			ctx.Server,
+			conn,
+		)
 	}()
 	return nil
+}
+
+func (o *Ouroboros) blockfetchServerSendBatch(
+	connectionID string,
+	start ocommon.Point,
+	end ocommon.Point,
+	chainIter blockfetchRangeIterator,
+	server blockfetchBatchServer,
+	conn blockfetchConnection,
+) {
+	defer chainIter.Cancel()
+	if err := server.StartBatch(); err != nil {
+		o.config.Logger.Error(
+			"blockfetch: failed to start batch",
+			"connection_id", connectionID,
+			"error", err,
+		)
+		return
+	}
+Loop:
+	for {
+		select {
+		case <-conn.ErrorChan():
+			return
+		default:
+			next, iterErr := chainIter.Next(false)
+			if iterErr != nil {
+				if errors.Is(iterErr, chain.ErrIteratorChainTip) {
+					break Loop
+				}
+				o.config.Logger.Error(
+					"blockfetch: iterator error, aborting batch",
+					"connection_id", connectionID,
+					"start_slot", start.Slot,
+					"end_slot", end.Slot,
+					"error", iterErr,
+				)
+				o.closeBlockfetchConnection(
+					conn,
+					connectionID,
+					"iterator error after StartBatch",
+				)
+				return
+			}
+			if next == nil {
+				break Loop
+			}
+			if next.Block.Slot > end.Slot {
+				break Loop
+			}
+			blockBytes := next.Block.Cbor
+			err := server.Block(
+				next.Block.Type,
+				blockBytes,
+			)
+			if err != nil {
+				// After StartBatch(), the only safe recovery for a
+				// failed stream is to drop the transport.
+				o.config.Logger.Error(
+					"blockfetch: failed to send block to peer",
+					"connection_id", connectionID,
+					"block_slot", next.Block.Slot,
+					"start_slot", start.Slot,
+					"end_slot", end.Slot,
+					"error", err,
+				)
+				o.closeBlockfetchConnection(
+					conn,
+					connectionID,
+					"failed to stream block after StartBatch",
+				)
+				return
+			}
+			if o.metrics != nil {
+				o.metrics.servedBlockCount.Inc()
+			}
+			// Make sure we don't hang waiting for the next block if we've already hit the end
+			if next.Block.Slot == end.Slot {
+				break Loop
+			}
+		}
+	}
+	// Signal batch completion
+	if err := server.BatchDone(); err != nil {
+		o.config.Logger.Error(
+			"blockfetch: failed to signal batch completion",
+			"connection_id", connectionID,
+			"start_slot", start.Slot,
+			"end_slot", end.Slot,
+			"error", err,
+		)
+		o.closeBlockfetchConnection(
+			conn,
+			connectionID,
+			"failed to send BatchDone after StartBatch",
+		)
+	}
+}
+
+func (o *Ouroboros) closeBlockfetchConnection(
+	conn blockfetchConnection,
+	connectionID string,
+	reason string,
+) {
+	if err := conn.Close(); err != nil {
+		o.config.Logger.Debug(
+			"blockfetch: failed to close connection after aborted batch",
+			"connection_id", connectionID,
+			"reason", reason,
+			"error", err,
+		)
+	}
 }
 
 // BlockfetchClientRequestRange is called by the ledger when it needs to request a range of block bodies
