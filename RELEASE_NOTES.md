@@ -3,7 +3,7 @@
 
 ## v0.27.2 (March 16, 2026)
 
-**Title:** Updates and polish
+**Title:** Snapshot events and safer services
 
 **Date:** March 16, 2026
 
@@ -11,27 +11,32 @@
 
 Hi folks! Here’s what we shipped in v0.27.2.
 
-{
-  "✨ What's New": [
-    "The relay now publishes events from snapshots and shuts down cleanly without dropping in-flight work."
-  ],
-  "💪 Improvements": [
-    "Network-facing services are more resilient under slow or stalled connections thanks to new write/read/idle timeouts on the Bark, Blockfrost, and UTxO RPC HTTP servers.",
-    "Peer and connection management is faster and uses fewer resources on constrained machines thanks to quicker inbound host lookups, tighter Badger cache defaults, and expanded benchmarks and sizing guidance.",
-    "Block production key period handling is more consistent across configurations thanks to improved key-period calculations with added validation and tests.",
-    "CI tests catch concurrency bugs earlier because the Linux test job now runs with the Go race detector enabled."
-  ],
-  "📋 What You Need to Know": [
-    "Release documentation was updated to reflect the final set of changes, including a detailed v0.27.1 section in RELEASE_NOTES.md.",
-    "Build provenance was updated to match current GitHub tooling and image naming by switching attestations to actions/attest and aligning Docker Hub subject names."
-  ],
-  "🔧 Fixes": [
-    "The system avoids blocking and inconsistent reads during concurrent chain-state access by protecting primary chain and protocol-parameter reads with read locks.",
-    "Nonce reuse is safer because cached epoch nonce entries are now validated against the nonce provided for the current run before reuse.",
-    "Malformed block metadata no longer crashes encoding because previous-hash length issues now return errors instead of panicking.",
-    "SQLite maintenance now completes as intended because VACUUM is now executed rather than only prepared."
-  ]
-}
+### ✨ What's New
+
+- **Snapshot event publishing and clean shutdown:** Relay operation is more reliable because the relay now publishes events from snapshots and shuts down cleanly without dropping in-flight work.
+
+### 💪 Improvements
+
+- **HTTP timeouts for public APIs:** Network-facing services are more resilient under slow or stalled connections thanks to new write/read/idle timeouts on the Bark, Blockfrost, and UTxO RPC HTTP servers.
+- **Leaner peer and connection management:** Peer and connection management is faster and uses fewer resources on constrained machines thanks to quicker inbound host lookups, tighter Badger cache defaults, and expanded benchmarks and sizing guidance.
+- **More consistent key-period handling:** Block production key period handling is more consistent across configurations thanks to improved key-period calculations with added validation and tests.
+- **Race detection in CI:** Test runs catch concurrency bugs earlier because the Linux test job now runs with the Go race detector enabled.
+
+### 🔧 Fixes
+
+- **Safer concurrent chain reads:** Reads are more consistent under load because primary chain and protocol-parameter access are now protected with read locks.
+- **Validated epoch nonce reuse:** Nonce reuse is safer because cached epoch nonce entries are now validated against the nonce provided for the current run before reuse.
+- **Graceful invalid hash handling:** Malformed block metadata no longer crashes encoding because previous-hash length issues now return errors instead of panicking.
+- **SQLite VACUUM actually runs:** Database maintenance now completes as intended because SQLite VACUUM is now executed rather than only prepared.
+
+### 📋 What You Need to Know
+
+- **Release notes alignment:** Release documentation was updated to reflect the final set of changes, including a detailed v0.27.1 section in `RELEASE_NOTES.md`.
+- **Build provenance updates:** Build provenance was updated to match current GitHub tooling and image naming by switching attestations to `actions/attest` and aligning Docker Hub subject names.
+
+### 🙏 Thank You
+
+Thank you for trying!
 
 
 ---
