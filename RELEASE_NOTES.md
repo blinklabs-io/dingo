@@ -3,7 +3,7 @@
 
 ## v0.27.3 (March 17, 2026)
 
-**Title:** Updates and polish
+**Title:** Safer rollbacks and steadier leader election
 
 **Date:** March 17, 2026
 
@@ -11,40 +11,34 @@
 
 Hi folks! Here’s what we shipped in v0.27.3.
 
-<!--
-{
-  "✨ What's New": [
-    "You can now safely reset and roll back “follow tip” state with clearer metadata about what changed.",
-    "Leader election now surfaces readiness sooner and can carry state across failures more reliably."
-  ],
-  "💪 Improvements": [
-    "Cache sizing defaults are now more consistent, and memory limits are easier to control in sizing workflows.",
-    "KES period handling is now more predictable across the API and better aligned with how operational certificates start.",
-    "Block data now carries its original encoded form so downstream consumers can retain exact bytes when needed.",
-    "Genesis reads now return a more complete network identifier without manual mapping by callers.",
-    "Peer switching is now less disruptive to ongoing sync work.",
-    "Mithril snapshot imports are now easier to reason about and more consistent across epochs.",
-    "Protocol library updates are now validated with a regression check for modern-era transactions.",
-    "Container hardening is improved so the default runtime uses safer privileges."
-  ],
-  "🔧 Fixes": [
-    "Background monitoring is now more resilient so a single unexpected failure is less likely to disrupt ongoing operation.",
-    "Block fetch serving is now more robust under batching and failure conditions.",
-    "Unexpected event payloads no longer fail silently, making issues easier to diagnose.",
-    "Shutdown flows now report failures reliably instead of terminating abruptly.",
-    "Transaction submission now fails more clearly when a connection is not properly set up to consume mempool updates."
-  ]
-}
-
--->
-
 ### ✨ What's New
+
+- **Follow-tip reset and rollback:** Rollbacks are easier to manage because the follow-tip API now supports safe reset and rollback with clearer metadata about what changed.
+- **Leader election readiness:** Block producer readiness is easier to track because leader election now surfaces epoch-nonce readiness and carries schedule state more reliably across restarts.
 
 ### 💪 Improvements
 
+- **More consistent cache sizing:** Sizing runs are easier to tune because cache defaults are more consistent and the BP/PI sizing script now supports explicit memory limits and optional cache overrides.
+- **Predictable KES period semantics:** Operational certificate (KES) periods are more predictable because KES APIs now standardize on absolute periods while translating internally from the certificate start period.
+- **Preserved original block bytes:** Downstream tooling can retain exact block bytes because API block objects now include the original CBOR-encoded bytes.
+- **Standard network identifiers from genesis:** Network identification is simpler because genesis reads now return a complete CAIP-2 network identifier derived from network magic.
+- **Smoother peer switching:** Sync stays steadier because chain-sync now preserves its state while only swapping the active connection during a peer switch.
+- **More consistent Mithril imports:** Mithril snapshot imports are more consistent across epochs because imports now normalize snapshot types and centralize persistence and epoch-summary handling.
+- **Protocol dependency validation:** Modern-era transaction handling is more reliable because protocol dependencies were updated and regression tests now guard transaction size behavior.
+- **Safer default containers:** Default containers are safer because the main Docker image now runs as a non-root `dingo` user.
+
 ### 🔧 Fixes
 
+- **Resilient background monitoring:** Long-running monitoring is more resilient because the stall checker now recovers from panics instead of crashing its background loop.
+- **Robust block fetch batching:** Block fetch serving is more robust because batching now handles iterator errors and connection closes correctly.
+- **Clearer unexpected event handling:** Event processing is easier to debug because chain-sync and block fetch now log unexpected event payload types instead of failing silently.
+- **Reliable shutdown error reporting:** Shutdowns are easier to troubleshoot because node and metrics server shutdown now propagates errors instead of exiting abruptly.
+- **Clear tx-submission failures:** Transaction submission fails more clearly because the tx-submission handlers now return an explicit error when no mempool consumer exists.
+
 ### 📋 What You Need to Know
+
+- **Docker volume permissions:** If you run Dingo in Docker with mounted volumes, make sure the data directory is writable by the `dingo` user inside the container.
+- **API integrations:** If you integrate with follow-tip or KES APIs, give your client code a quick check for the updated reset/rollback and period semantics.
 
 ### 🙏 Thank You
 
