@@ -23,6 +23,7 @@ import (
 	"math"
 	"math/big"
 	"sort"
+	"strconv"
 	"time"
 
 	"connectrpc.com/connect"
@@ -363,6 +364,8 @@ func (s *queryServiceServer) SearchUtxos(
 		}
 	}
 
+	var allItems []*query.AnyUtxoData
+
 	// Get UTxOs from ledger
 	for _, address := range addresses {
 		utxos, err := s.utxorpc.config.LedgerState.UtxosByAddress(address)
@@ -434,8 +437,22 @@ func (s *queryServiceServer) SearchUtxos(
 					continue
 				}
 			}
-			resp.Items = append(resp.Items, &aud)
+			allItems = append(allItems, &aud)
 		}
+	}
+
+	paginatedItems, nextToken, err := paginateSearchResults(
+		allItems,
+		startToken,
+		maxItems,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	resp.Items = paginatedItems
+	if nextToken != "" {
+		resp.NextToken = nextToken
 	}
 	// Get chain point (slot and hash)
 	point := s.utxorpc.config.LedgerState.Tip().Point
@@ -445,6 +462,52 @@ func (s *queryServiceServer) SearchUtxos(
 		Hash: point.Hash,
 	}
 	return connect.NewResponse(resp), nil
+}
+
+func paginateSearchResults(
+	items []*query.AnyUtxoData,
+	startToken string,
+	maxItems int32,
+) ([]*query.AnyUtxoData, string, error) {
+	if len(items) == 0 {
+		return nil, "", nil
+	}
+
+	var startIndex int64
+	if startToken != "" {
+		value, err := strconv.ParseInt(startToken, 10, 64)
+		if err != nil || value < 0 {
+			return nil, "", connect.NewError(
+				connect.CodeInvalidArgument,
+				fmt.Errorf("invalid start_token %q", startToken),
+			)
+		}
+		startIndex = value
+	}
+
+	total := int64(len(items))
+	if startIndex >= total {
+		return []*query.AnyUtxoData{}, "", nil
+	}
+
+	var limit int64
+	if maxItems > 0 {
+		limit = int64(maxItems)
+		if limit > total-startIndex {
+			limit = total - startIndex
+		}
+	} else {
+		limit = total - startIndex
+	}
+
+	endIndex := startIndex + limit
+	paginated := items[startIndex:endIndex]
+
+	if maxItems > 0 && endIndex < total {
+		return paginated, strconv.FormatInt(endIndex, 10), nil
+	}
+
+	return paginated, "", nil
 }
 
 // ReadData
