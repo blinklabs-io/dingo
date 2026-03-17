@@ -19,7 +19,7 @@ Hi folks! Here’s what we shipped in v0.27.2.
 
 - Running under load is more predictable because **race-safety around chain reads** now includes read locks around primary-chain access and current protocol parameter reads, and Linux CI now runs the Go race detector.
 - Stalled requests are less likely to tie up resources because **HTTP/RPC timeouts** are now enforced on Bark, Blockfrost, and UTxO RPC servers.
-- Larger peer sets are easier to handle because **peer governance and event fan-out** now use incremental connection-manager checks and metrics, optimized peer governor reconciliation and quota enforcement, and snapshot-based fan-out publishing with an async `Close` API.
+- Larger peer sets are easier to handle because **peer governance and event fan-out** now streamline connection-manager checks and metrics, optimize peer governor reconciliation and quota enforcement, and use snapshot-based fan-out publishing with an async `Close` API.
 - Operator certificate operations are more consistent because **KES period offsets** are now handled relative to the opcert and offset edge cases are validated with tests.
 - Supply-chain metadata is more consistent because **attestation workflow metadata** now uses `actions/attest` and updated Docker Hub subject names.
 
