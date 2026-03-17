@@ -32,15 +32,13 @@ Hi folks! Here’s what we shipped in v0.27.2.
 ### 📋 What You Need to Know
 
 - **Release notes alignment:** Release documentation was updated to reflect the final set of changes, including a detailed v0.27.1 section in `RELEASE_NOTES.md`.
-- **Build provenance updates:** Build provenance was updated to match current GitHub tooling and image naming by switching attestations to `actions/attest` and aligning Docker Hub subject names.
+- **Build provenance updates:** Supply-chain attestations are easier to verify because build provenance now uses `actions/attest` and updated Docker Hub image subjects.
 
 ### 🙏 Thank You
 
 Thank you for trying!
 
-
 ---
-
 
 ## v0.27.1 (March 16, 2026)
 
