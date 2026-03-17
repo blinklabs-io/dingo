@@ -82,6 +82,13 @@ func (s *Schedule) SlotCount() int {
 	return len(s.LeaderSlots)
 }
 
+// LeaderSlotsSnapshot returns a copy of the leader slot list.
+func (s *Schedule) LeaderSlotsSnapshot() []uint64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return append([]uint64(nil), s.LeaderSlots...)
+}
+
 // StakeRatio returns the pool's stake as a fraction of total stake.
 func (s *Schedule) StakeRatio() float64 {
 	if s.TotalStake == 0 {

@@ -1153,6 +1153,13 @@ func (n *Node) initBlockForger(
 		n.eventBus,
 		n.config.logger,
 	)
+	if n.db != nil {
+		if scheduleStore := leader.NewSyncStateScheduleStore(
+			n.db.Metadata(),
+		); scheduleStore != nil {
+			election.SetScheduleStore(scheduleStore)
+		}
+	}
 
 	// Start leader election (subscribes to epoch transitions)
 	if err := election.Start(ctx); err != nil {
@@ -1287,6 +1294,10 @@ func (a *epochInfoAdapter) CurrentEpoch() uint64 {
 
 func (a *epochInfoAdapter) EpochNonce(epoch uint64) []byte {
 	return a.ledgerState.EpochNonce(epoch)
+}
+
+func (a *epochInfoAdapter) NextEpochNonceReadyEpoch() (uint64, bool) {
+	return a.ledgerState.NextEpochNonceReadyEpoch()
 }
 
 func (a *epochInfoAdapter) SlotsPerEpoch() uint64 {
