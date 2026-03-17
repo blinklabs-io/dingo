@@ -15,10 +15,13 @@
 package keystore
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -68,6 +71,23 @@ func setupTestKeys(t *testing.T) (string, string, string) {
 	require.NoError(t, os.WriteFile(opCertPath, []byte(testOpCertJSON), 0o600))
 
 	return vrfPath, kesPath, opCertPath
+}
+
+type safeBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *safeBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *safeBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }
 
 func TestKeyStoreLoadFromFiles(t *testing.T) {
@@ -204,6 +224,53 @@ func TestKESEvolution(t *testing.T) {
 	err = ks.EvolveKESTo(3)
 	require.NoError(t, err)
 	assert.Equal(t, uint64(3), ks.CurrentKESPeriod())
+}
+
+func TestKESEvolutionUsesOpCertStartPeriod(t *testing.T) {
+	vrfPath, kesPath, opCertPath := setupTestKeys(t)
+
+	config := KeyStoreConfig{
+		VRFSKeyPath: vrfPath,
+		KESSKeyPath: kesPath,
+		OpCertPath:  opCertPath,
+	}
+
+	ks := NewKeyStore(config)
+	require.NoError(t, ks.LoadFromFiles())
+
+	ks.opCert.KESPeriod = 100
+
+	require.NoError(t, ks.EvolveKESTo(105))
+	assert.Equal(t, uint64(5), ks.CurrentKESPeriod())
+
+	kesSigner := ks.KESSigner()
+	require.NotNil(t, kesSigner)
+	message := []byte("shifted opcert KES sign")
+	signature, err := kesSigner.Sign(105, message)
+	require.NoError(t, err)
+
+	ok := kes.VerifySignedKES(kesSigner.VKey(), 5, message, signature)
+	assert.True(t, ok, "KES signature verification failed at relative period 5")
+}
+
+func TestKESEvolutionRejectsBeforeOpCertStart(t *testing.T) {
+	vrfPath, kesPath, opCertPath := setupTestKeys(t)
+
+	config := KeyStoreConfig{
+		VRFSKeyPath: vrfPath,
+		KESSKeyPath: kesPath,
+		OpCertPath:  opCertPath,
+	}
+
+	ks := NewKeyStore(config)
+	require.NoError(t, ks.LoadFromFiles())
+
+	ks.opCert.KESPeriod = 100
+
+	err := ks.EvolveKESTo(99)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "before opcert start")
+	assert.Equal(t, uint64(0), ks.CurrentKESPeriod())
 }
 
 func TestOpCertValidation(t *testing.T) {
@@ -385,6 +452,67 @@ func TestKeyStoreKESEvolutionOnPeriodChange(t *testing.T) {
 	require.Eventually(t, func() bool {
 		return ks.CurrentKESPeriod() == 3
 	}, time.Second, 10*time.Millisecond, "KES period should evolve to 3")
+}
+
+func TestKeyStoreKESEvolutionTracksAbsolutePeriodsInMonitor(t *testing.T) {
+	vrfPath, kesPath, opCertPath := setupTestKeys(t)
+
+	var logBuf safeBuffer
+	logger := slog.New(
+		slog.NewTextHandler(
+			&logBuf,
+			&slog.HandlerOptions{Level: slog.LevelDebug},
+		),
+	)
+
+	config := KeyStoreConfig{
+		VRFSKeyPath:       vrfPath,
+		KESSKeyPath:       kesPath,
+		OpCertPath:        opCertPath,
+		SlotsPerKESPeriod: 100,
+		Logger:            logger,
+	}
+
+	ks := NewKeyStore(config)
+	require.NoError(t, ks.LoadFromFiles())
+
+	ks.opCert.KESPeriod = 5
+
+	// Start at slot 550 so the absolute chain KES period is 5 while the
+	// stored KES key period remains relative to the opcert window (0).
+	slotClock := newMockSlotClock(550)
+
+	err := ks.Start(context.Background(), slotClock)
+	require.NoError(t, err)
+	defer func() { _ = ks.Stop() }()
+
+	require.Eventually(t, func() bool {
+		return slotClock.HasSubscribers()
+	}, time.Second, 10*time.Millisecond, "monitor should subscribe to slot clock")
+
+	assert.Equal(t, uint64(0), ks.CurrentKESPeriod())
+
+	slotClock.AdvanceSlot(599)
+
+	require.Never(t, func() bool {
+		return strings.Contains(
+			logBuf.String(),
+			"KES period changed, evolving key",
+		)
+	}, 200*time.Millisecond, 10*time.Millisecond)
+
+	slotClock.AdvanceSlot(650)
+
+	require.Eventually(t, func() bool {
+		return ks.CurrentKESPeriod() == 1
+	}, time.Second, 10*time.Millisecond, "KES period should evolve to relative period 1")
+
+	require.Eventually(t, func() bool {
+		return strings.Count(
+			logBuf.String(),
+			"KES period changed, evolving key",
+		) == 1
+	}, time.Second, 10*time.Millisecond, "monitor should only log a single real period change")
 }
 
 func TestKeyStoreNotLoadedError(t *testing.T) {

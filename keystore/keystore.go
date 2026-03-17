@@ -442,7 +442,33 @@ func (ks *KeyStore) CurrentKESPeriod() uint64 {
 	return ks.kesSKey.Period
 }
 
-// EvolveKESTo evolves the KES key to the specified period.
+func (ks *KeyStore) currentAbsoluteKESPeriodUnsafe() uint64 {
+	if ks.kesSKey == nil {
+		return 0
+	}
+	if ks.opCert == nil {
+		return ks.kesSKey.Period
+	}
+	return ks.opCert.KESPeriod + ks.kesSKey.Period
+}
+
+func (ks *KeyStore) relativeKESPeriodUnsafe(
+	absolutePeriod uint64,
+) (uint64, error) {
+	if ks.opCert == nil {
+		return 0, ErrOpCertNotLoaded
+	}
+	if absolutePeriod < ks.opCert.KESPeriod {
+		return 0, fmt.Errorf(
+			"current KES period %d is before opcert start %d",
+			absolutePeriod,
+			ks.opCert.KESPeriod,
+		)
+	}
+	return absolutePeriod - ks.opCert.KESPeriod, nil
+}
+
+// EvolveKESTo evolves the KES key to the specified ABSOLUTE period.
 func (ks *KeyStore) EvolveKESTo(targetPeriod uint64) error {
 	ks.mu.Lock()
 	defer ks.mu.Unlock()
@@ -454,12 +480,22 @@ func (ks *KeyStore) evolveKESToUnsafe(targetPeriod uint64) error {
 		return ErrKESKeyNotLoaded
 	}
 
-	for ks.kesSKey.Period < targetPeriod {
+	relativeTarget, err := ks.relativeKESPeriodUnsafe(targetPeriod)
+	if err != nil {
+		return fmt.Errorf(
+			"failed to compute relative KES period for target period %d: %w",
+			targetPeriod,
+			err,
+		)
+	}
+
+	for ks.kesSKey.Period < relativeTarget {
 		oldKey := ks.kesSKey
 		newKey, err := kes.Update(oldKey)
 		if err != nil {
 			return fmt.Errorf(
-				"failed to evolve KES key to period %d: %w",
+				"failed to evolve KES key to period %d (absolute %d): %w",
+				relativeTarget,
 				targetPeriod,
 				err,
 			)
@@ -536,7 +572,7 @@ func (ks *KeyStore) monitorSlots(ctx context.Context, slotClock SlotClock) {
 	var lastPeriod uint64
 	ks.mu.RLock()
 	if ks.kesSKey != nil {
-		lastPeriod = ks.kesSKey.Period
+		lastPeriod = ks.currentAbsoluteKESPeriodUnsafe()
 	}
 	ks.mu.RUnlock()
 
@@ -605,7 +641,16 @@ func (k *kesSignerImpl) Sign(period uint64, message []byte) ([]byte, error) {
 		return nil, ErrKESKeyNotLoaded
 	}
 
-	return kes.Sign(k.ks.kesSKey, period, message)
+	relativePeriod, err := k.ks.relativeKESPeriodUnsafe(period)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"failed to compute relative KES period for signing period %d: %w",
+			period,
+			err,
+		)
+	}
+
+	return kes.Sign(k.ks.kesSKey, relativePeriod, message)
 }
 
 func (k *kesSignerImpl) VKey() []byte {

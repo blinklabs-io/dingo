@@ -224,6 +224,49 @@ func TestKESPeriodUpdateBackward(t *testing.T) {
 	assert.Equal(t, uint64(5), pc.kesSKey.Period)
 }
 
+func TestKESPeriodUpdateUsesOpCertStartPeriod(t *testing.T) {
+	vrfPath, kesPath, opCertPath := createTestKeys(t)
+
+	pc := NewPoolCredentials()
+	require.NoError(t, pc.LoadFromFiles(vrfPath, kesPath, opCertPath))
+
+	pc.opCert.KESPeriod = 100
+
+	require.NoError(t, pc.UpdateKESPeriod(105))
+	assert.Equal(t, uint64(5), pc.kesSKey.Period)
+}
+
+func TestKESPeriodUpdateRejectsBeforeOpCertStart(t *testing.T) {
+	vrfPath, kesPath, opCertPath := createTestKeys(t)
+
+	pc := NewPoolCredentials()
+	require.NoError(t, pc.LoadFromFiles(vrfPath, kesPath, opCertPath))
+
+	pc.opCert.KESPeriod = 100
+
+	err := pc.UpdateKESPeriod(99)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "before opcert start")
+	assert.Equal(t, uint64(0), pc.kesSKey.Period)
+}
+
+func TestKESSignUsesRelativePeriodWithNonZeroOpCertStart(t *testing.T) {
+	vrfPath, kesPath, opCertPath := createTestKeys(t)
+
+	pc := NewPoolCredentials()
+	require.NoError(t, pc.LoadFromFiles(vrfPath, kesPath, opCertPath))
+
+	pc.opCert.KESPeriod = 100
+	require.NoError(t, pc.UpdateKESPeriod(105))
+
+	message := []byte("test message with shifted opcert period")
+	signature, err := pc.KESSign(105, message)
+	require.NoError(t, err)
+
+	ok := kes.VerifySignedKES(pc.kesVKey, 5, message, signature)
+	assert.True(t, ok, "KES signature verification failed at relative period 5")
+}
+
 func TestOpCertValidation(t *testing.T) {
 	// Create a properly-signed OpCert programmatically so we can verify
 	// the full validation path including cold key signature verification
