@@ -22,6 +22,7 @@ import (
 	"log/slog"
 	"math/big"
 	"net"
+	"slices"
 	"sort"
 	"time"
 
@@ -1078,20 +1079,19 @@ func importSnapShots(
 		)
 	}
 
-	store := cfg.Database.Metadata()
 	epoch := cfg.State.Epoch
 
-	// Import each snapshot type, saving the "go" result for the
-	// epoch summary to avoid recomputing it.
-	var goSnapshots []*models.PoolStakeSnapshot
-	for _, st := range []struct {
-		name string
-		snap *ParsedSnapShot
-	}{
-		{"mark", &snapshots.Mark},
-		{"set", &snapshots.Set},
-		{"go", &snapshots.Go},
-	} {
+	// Mithril exports the current epoch's Mark/Set/Go bundle, but
+	// Dingo persists only Mark snapshots and resolves Set/Go via
+	// epoch offsets:
+	//   - Mark for epoch N     = current mark snapshot
+	//   - Mark for epoch N-1   = imported set snapshot
+	//   - Mark for epoch N-2   = imported go snapshot
+	//
+	// Import the bundle into those historical epochs so leader
+	// schedule queries (which request epoch-2, "mark") work
+	// immediately after a Mithril restore.
+	for _, st := range snapshotImportTargets(epoch, snapshots) {
 		select {
 		case <-ctx.Done():
 			return fmt.Errorf(
@@ -1101,50 +1101,18 @@ func importSnapShots(
 		}
 
 		poolSnapshots := AggregatePoolStake(
-			st.snap, epoch, st.name, slot,
+			st.snap,
+			st.targetEpoch,
+			"mark",
+			slot,
 		)
 
-		if st.name == "go" {
-			goSnapshots = poolSnapshots
-		}
-
-		if len(poolSnapshots) == 0 {
-			continue
-		}
-
-		if err := func() error {
-			txn := cfg.Database.MetadataTxn(true)
-			defer txn.Release()
-			metaTxn := txn.Metadata()
-
-			if err := store.DeletePoolStakeSnapshotsForEpoch(
-				epoch, st.name, metaTxn,
-			); err != nil {
-				return fmt.Errorf(
-					"deleting existing %s snapshots: %w",
-					st.name,
-					err,
-				)
-			}
-
-			if err := store.SavePoolStakeSnapshots(
-				poolSnapshots, metaTxn,
-			); err != nil {
-				return fmt.Errorf(
-					"saving %s snapshots: %w",
-					st.name,
-					err,
-				)
-			}
-
-			if err := txn.Commit(); err != nil {
-				return fmt.Errorf(
-					"commit transaction: %w",
-					err,
-				)
-			}
-			return nil
-		}(); err != nil {
+		if err := persistImportedSnapshot(
+			cfg,
+			slot,
+			st,
+			poolSnapshots,
+		); err != nil {
 			return fmt.Errorf(
 				"importing %s snapshots: %w",
 				st.name,
@@ -1160,6 +1128,8 @@ func importSnapShots(
 		cfg.Logger.Info(
 			"imported stake snapshot",
 			"snapshot", st.name,
+			"stored_as", "mark",
+			"target_epoch", st.targetEpoch,
 			"pools", len(poolSnapshots),
 			"total_stake", totalStake,
 			"component", "ledgerstate",
@@ -1203,56 +1173,168 @@ func importSnapShots(
 		}
 	}
 
-	// Save epoch summary using the "go" snapshot computed above
-	var totalStake uint64
-	var totalDelegators uint64
-	for _, ps := range goSnapshots {
-		totalStake += uint64(ps.TotalStake)
-		totalDelegators += ps.DelegatorCount
-	}
+	return nil
+}
 
-	summary := &models.EpochSummary{
-		Epoch:            epoch,
-		TotalActiveStake: types.Uint64(totalStake),
-		TotalPoolCount:   uint64(len(goSnapshots)),
-		TotalDelegators:  totalDelegators,
-		BoundarySlot:     slot,
-		SnapshotReady:    true,
-	}
-
+func persistImportedSnapshot(
+	cfg ImportConfig,
+	slot uint64,
+	st snapshotImportTarget,
+	poolSnapshots []*models.PoolStakeSnapshot,
+) error {
+	store := cfg.Database.Metadata()
 	txn := cfg.Database.MetadataTxn(true)
 	defer txn.Release()
+	metaTxn := txn.Metadata()
 
-	// Check if epoch summary already exists (idempotent import)
-	existing, err := store.GetEpochSummary(
-		epoch, txn.Metadata(),
-	)
-	if err != nil {
+	if err := store.DeletePoolStakeSnapshotsForEpoch(
+		st.targetEpoch,
+		"mark",
+		metaTxn,
+	); err != nil {
 		return fmt.Errorf(
-			"checking existing epoch summary: %w",
+			"deleting existing %s snapshot import for epoch %d: %w",
+			st.name,
+			st.targetEpoch,
 			err,
 		)
 	}
-	if existing != nil {
-		return nil
+
+	if len(poolSnapshots) > 0 {
+		if err := store.SavePoolStakeSnapshots(
+			poolSnapshots, metaTxn,
+		); err != nil {
+			return fmt.Errorf(
+				"saving %s snapshot import for epoch %d: %w",
+				st.name,
+				st.targetEpoch,
+				err,
+			)
+		}
 	}
 
-	if err := store.SaveEpochSummary(
-		summary, txn.Metadata(),
-	); err != nil {
+	totalStake, totalDelegators := summarizePoolSnapshots(
+		poolSnapshots,
+	)
+	existingSummary, err := store.GetEpochSummary(
+		st.targetEpoch, metaTxn,
+	)
+	if err != nil {
 		return fmt.Errorf(
-			"saving epoch summary: %w",
+			"getting existing epoch summary for %s snapshot epoch %d: %w",
+			st.name,
+			st.targetEpoch,
+			err,
+		)
+	}
+	summary := importedEpochSummary(
+		existingSummary,
+		cfg.State.Epoch,
+		st.targetEpoch,
+		slot,
+		cfg.State.EpochNonce,
+		totalStake,
+		uint64(len(poolSnapshots)),
+		totalDelegators,
+	)
+
+	if err := store.SaveEpochSummary(summary, metaTxn); err != nil {
+		return fmt.Errorf(
+			"saving epoch summary for %s snapshot epoch %d: %w",
+			st.name,
+			st.targetEpoch,
 			err,
 		)
 	}
 
 	if err := txn.Commit(); err != nil {
-		return fmt.Errorf(
-			"commit transaction in importSnapShots: %w",
-			err,
-		)
+		return fmt.Errorf("commit transaction: %w", err)
 	}
 	return nil
+}
+
+type snapshotImportTarget struct {
+	name        string
+	targetEpoch uint64
+	snap        *ParsedSnapShot
+}
+
+func summarizePoolSnapshots(
+	poolSnapshots []*models.PoolStakeSnapshot,
+) (uint64, uint64) {
+	var totalStake uint64
+	var totalDelegators uint64
+	for _, ps := range poolSnapshots {
+		totalStake += uint64(ps.TotalStake)
+		totalDelegators += ps.DelegatorCount
+	}
+	return totalStake, totalDelegators
+}
+
+func importedEpochSummary(
+	existing *models.EpochSummary,
+	currentEpoch uint64,
+	targetEpoch uint64,
+	importSlot uint64,
+	currentEpochNonce []byte,
+	totalStake uint64,
+	totalPoolCount uint64,
+	totalDelegators uint64,
+) *models.EpochSummary {
+	summary := &models.EpochSummary{
+		Epoch:            targetEpoch,
+		TotalActiveStake: types.Uint64(totalStake),
+		TotalPoolCount:   totalPoolCount,
+		TotalDelegators:  totalDelegators,
+		SnapshotReady:    true,
+	}
+	if targetEpoch == currentEpoch {
+		summary.BoundarySlot = importSlot
+		if len(currentEpochNonce) > 0 {
+			summary.EpochNonce = slices.Clone(currentEpochNonce)
+		}
+	}
+	if existing == nil {
+		return summary
+	}
+	if targetEpoch != currentEpoch && existing.BoundarySlot != 0 {
+		summary.BoundarySlot = existing.BoundarySlot
+	}
+	if targetEpoch != currentEpoch && len(existing.EpochNonce) > 0 {
+		summary.EpochNonce = slices.Clone(existing.EpochNonce)
+	}
+	return summary
+}
+
+func snapshotImportTargets(
+	currentEpoch uint64,
+	snapshots *ParsedSnapShots,
+) []snapshotImportTarget {
+	if snapshots == nil {
+		return nil
+	}
+	targets := []snapshotImportTarget{
+		{
+			name:        "mark",
+			targetEpoch: currentEpoch,
+			snap:        &snapshots.Mark,
+		},
+	}
+	if currentEpoch > 0 {
+		targets = append(targets, snapshotImportTarget{
+			name:        "set",
+			targetEpoch: currentEpoch - 1,
+			snap:        &snapshots.Set,
+		})
+	}
+	if currentEpoch > 1 {
+		targets = append(targets, snapshotImportTarget{
+			name:        "go",
+			targetEpoch: currentEpoch - 2,
+			snap:        &snapshots.Go,
+		})
+	}
+	return targets
 }
 
 func collectPoolsFromSnapshots(
