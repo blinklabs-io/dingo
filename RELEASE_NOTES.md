@@ -1,6 +1,58 @@
 # Release Notes
 
 
+## v0.27.3 (March 17, 2026)
+
+**Title:** Updates and polish
+
+**Date:** March 17, 2026
+
+**Version:** v0.27.3
+
+Hi folks! Here’s what we shipped in v0.27.3.
+
+<!--
+{
+  "✨ What's New": [
+    "You can now safely reset and roll back “follow tip” state with clearer metadata about what changed. This adds Reset action handling and tip metadata to FollowTip, plus test coverage for the new FollowTip response shapes and rollback behavior.",
+    "Leader election now surfaces readiness sooner and can carry state across failures more reliably. This introduces an epoch nonce readiness event and adds leader schedule persistence, validation, precompute support, and rollback handling in the leader election component."
+  ],
+  "💪 Improvements": [
+    "Cache sizing defaults are now more consistent, and memory limits are easier to control in sizing workflows. The Core Badger profile uses shared default cache sizes, and the BP/PI sizing script adds configurable memory limits, optional cache overrides, and updated reporting.",
+    "KES period handling is now more predictable across the API and better aligned with how operational certificates start. The KES APIs standardize on absolute periods while translating internally via the opcert start period, with updated evolution/signing logic and tests for non-zero opcert starts and pre-start rejections.",
+    "Block data now carries its original encoded form so downstream consumers can retain exact bytes when needed. AnyChainBlock.NativeBytes is now populated with the block’s CBOR bytes, with tests confirming the field is settable and non-nil.",
+    "Genesis reads now return a more complete network identifier without manual mapping by callers. The ReadGenesis response now populates Caip2 from network magic via a helper in gouroboros, with tests validating the mapping.",
+    "Peer switching is now less disruptive to ongoing sync work. Chain switch handling is extracted into a method that only updates the active chainsync connection, and tests verify chainsync state is preserved across a peer switch.",
+    "Mithril snapshot imports are now easier to reason about and more consistent across epochs. Mark/Set/Go snapshots are remapped into Mark snapshots for current and prior epochs with centralized persistence and epoch-summary handling, plus tests for the new import behavior.",
+    "Protocol library updates are now validated with a regression check for modern-era transactions. The gouroboros dependency is updated to v0.161.0 and a Conway transaction size regression test is added.",
+    "Container hardening is improved so the default runtime uses safer privileges. The main Docker image now runs as a non-root dingo user, while the antithesis build stage restores root where required."
+  ],
+  "🔧 Fixes": [
+    "Background monitoring is now more resilient so a single unexpected failure is less likely to disrupt ongoing operation. The stall checker now has panic recovery around its goroutine and tick, adjusts stall interval calculation, and includes tests for the recovery helpers.",
+    "Block fetch serving is now more robust under batching and failure conditions. The blockfetch server batching is refactored and now handles iterator errors and connection closes correctly, with tests covering the new behavior.",
+    "Unexpected event payloads no longer fail silently, making issues easier to diagnose. Chainsync and blockfetch events now use checked type assertions and log when event data types are not what was expected.",
+    "Shutdown flows now report failures reliably instead of terminating abruptly. Node and metrics server shutdown are refactored to propagate errors rather than exiting the process, with tests for the shutdown helper utilities.",
+    "Transaction submission now fails more clearly when a connection is not properly set up to consume mempool updates. The txsubmission handlers add explicit error handling when no mempool consumer exists and they no longer discard the AddConsumer result."
+  ]
+}
+
+-->
+
+### ✨ What's New
+
+### 💪 Improvements
+
+### 🔧 Fixes
+
+### 📋 What You Need to Know
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
+
 ## v0.27.2 (March 16, 2026)
 
 **Title:** Snapshot events and safer services
