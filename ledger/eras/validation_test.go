@@ -15,12 +15,14 @@
 package eras
 
 import (
+	"encoding/hex"
 	"iter"
 	"math"
 	"math/big"
 	"testing"
 
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -197,6 +199,25 @@ func TestTxSizeForFee(t *testing.T) {
 			assert.Equal(t, tc.expected, size)
 		})
 	}
+}
+
+func TestTxSizeForFee_RebuiltConwayTxPreservesCanonicalSize(t *testing.T) {
+	const issue1685TxCborHex = "84a500d901028282582004d97ebdeb064082639d67c8318ce069a35983bb05782d1327b004cca330ab5b008258204430e4bc2db0ef794c70b79851eecc332d8f77fb022c0d03ad24797f390ae54f000181825839005e7faca37d22d8753db699b104cbb2586f8787e17c116ff254ef0401e669129d1393c159b9b5a84d894271b5689910cc2e364ca05771988d1b0000000487a0103c021a0002d719031a0661906704d90102818a03581c7f4a5ac4b6a0f40cf07f989238d8e623315d80cc0602255b15c01eb3582025b400987b8e6d3f2d1913f7e7179611dc6563dc6731064de6b6dbe05114006e1b00000002540be4001a1908b100d81e82151901f4581de0e669129d1393c159b9b5a84d894271b5689910cc2e364ca05771988dd9010281581ce669129d1393c159b9b5a84d894271b5689910cc2e364ca05771988d818400190bb9444017f8d6f6827668747470733a2f2f6269742e6c792f34634e34374d31582086ed8edc5e20678c124d49dd1f6f6cb0b358797b71586f8a9db36bccf313f9eea100d9010283825820e61a0ef75ebcfba9569f2ef450d50320f376c36056f09f759d0e18ebf30a5ece5840c329a870e41de8e59b3ec872ec8d06f10e19c5dc436311e409827bf5792f86e75bb2c46785991563f42a03498c9c5342957efa15b348fffbd38f4fe64aef4f01825820942aaf02196ca16a79483b5862ff3d521e4c62c24dbc6aa495a360c101249de3584071ea7ed1740fbabe61f9c73f7306ef1ade9c2cf07a9d3c75d3ca130dd7e2078ea687cc326e7e790038580fdb3d9ec8e7e0edf70f5ff47527dd5ae0de6f5eca04825820eb2dbcf867f0611ca671a3ce89ae6c89a1a2eea96d6dcba82c607d4c9dbc489e5840f7e9a45d24cfbe8a7e7bc8200d84aa914cb51448873a41e0cf80aa641dd266490a0568b3039377fc5836d94320dc5c125f56352e0ad529f518035b4c2a313102f5f6"
+
+	txCbor, err := hex.DecodeString(issue1685TxCborHex)
+	require.NoError(t, err)
+
+	tx, err := conway.NewConwayTransactionFromCbor(txCbor)
+	require.NoError(t, err)
+
+	rebuilt := &conway.ConwayTransaction{
+		Body:       tx.Body,
+		WitnessSet: tx.WitnessSet,
+		TxIsValid:  tx.TxIsValid,
+		TxMetadata: tx.TxMetadata,
+	}
+
+	assert.Equal(t, uint64(699), TxSizeForFee(rebuilt))
 }
 
 func TestValidateTxSize(t *testing.T) {
