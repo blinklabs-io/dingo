@@ -17,10 +17,20 @@ package utxorpc
 import (
 	"testing"
 
+	"math"
+
+	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/stretchr/testify/require"
 )
 
 func TestCaip2FromNetworkMagic_KnownNetworks(t *testing.T) {
+	mainnet, ok := ouroboros.NetworkByName("mainnet")
+	require.True(t, ok, "expected mainnet network to exist")
+	preprod, ok := ouroboros.NetworkByName("preprod")
+	require.True(t, ok, "expected preprod network to exist")
+	preview, ok := ouroboros.NetworkByName("preview")
+	require.True(t, ok, "expected preview network to exist")
+
 	tests := []struct {
 		name   string
 		magic  uint32
@@ -28,17 +38,17 @@ func TestCaip2FromNetworkMagic_KnownNetworks(t *testing.T) {
 	}{
 		{
 			name:  "mainnet",
-			magic: cardanoMainnetNetworkMagic,
+			magic: mainnet.NetworkMagic,
 			caip2: "cardano:mainnet",
 		},
 		{
 			name:  "preprod",
-			magic: cardanoPreprodNetworkMagic,
+			magic: preprod.NetworkMagic,
 			caip2: "cardano:preprod",
 		},
 		{
 			name:  "preview",
-			magic: cardanoPreviewNetworkMagic,
+			magic: preview.NetworkMagic,
 			caip2: "cardano:preview",
 		},
 	}
@@ -54,8 +64,14 @@ func TestCaip2FromNetworkMagic_KnownNetworks(t *testing.T) {
 }
 
 func TestCaip2FromNetworkMagic_UnknownNetwork(t *testing.T) {
-	const unknownMagic uint32 = 42
-	got := caip2FromNetworkMagic(unknownMagic)
-	require.Equal(t, "cardano:42", got)
+	const devnetMagic uint32 = 42
+	got := caip2FromNetworkMagic(devnetMagic)
+	require.Equal(t, "cardano:devnet", got)
+}
+
+func TestCaip2FromNetworkMagic_CustomNetwork(t *testing.T) {
+	const customMagic uint32 = math.MaxUint32
+	got := caip2FromNetworkMagic(customMagic)
+	require.Equal(t, "cardano:4294967295", got)
 }
 

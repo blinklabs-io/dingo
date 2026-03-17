@@ -30,6 +30,7 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/ledger/eras"
+	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
@@ -656,23 +657,13 @@ func (s *queryServiceServer) ReadGenesis(
 	return connect.NewResponse(resp), nil
 }
 
-const (
-	cardanoMainnetNetworkMagic uint32 = 764824073
-	cardanoPreprodNetworkMagic uint32 = 1
-	cardanoPreviewNetworkMagic uint32 = 2
-)
-
 func caip2FromNetworkMagic(networkMagic uint32) string {
-	switch networkMagic {
-	case cardanoMainnetNetworkMagic:
-		return "cardano:mainnet"
-	case cardanoPreprodNetworkMagic:
-		return "cardano:preprod"
-	case cardanoPreviewNetworkMagic:
-		return "cardano:preview"
-	default:
+	network, ok := ouroboros.NetworkByNetworkMagic(networkMagic)
+	if !ok {
 		return fmt.Sprintf("cardano:%d", networkMagic)
 	}
+
+	return "cardano:" + network.String()
 }
 
 func buildCardanoGenesis(
