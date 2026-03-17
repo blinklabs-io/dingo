@@ -46,7 +46,6 @@ Thank you for trying!
 
 ---
 
-
 ## v0.27.2 (March 16, 2026)
 
 **Title:** Snapshot events and safer services
