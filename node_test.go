@@ -17,11 +17,78 @@ package dingo
 import (
 	"io"
 	"log/slog"
+	"net"
 	"sync/atomic"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/chainselection"
+	"github.com/blinklabs-io/dingo/chainsync"
+	"github.com/blinklabs-io/dingo/event"
+	ouroboros "github.com/blinklabs-io/gouroboros"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
+
+func newNodeTestConnId(id uint) ouroboros.ConnectionId {
+	return ouroboros.ConnectionId{
+		LocalAddr: &net.TCPAddr{
+			IP:   net.IPv4(127, 0, 0, 1),
+			Port: 6000,
+		},
+		RemoteAddr: &net.TCPAddr{
+			IP:   net.IPv4(127, 0, 0, 1),
+			Port: int(id),
+		},
+	}
+}
+
+func TestHandleChainSwitchEventUpdatesActiveConnection(t *testing.T) {
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(func() { bus.Stop() })
+	state := chainsync.NewStateWithConfig(
+		bus,
+		nil,
+		chainsync.DefaultConfig(),
+	)
+	connA := newNodeTestConnId(3001)
+	connB := newNodeTestConnId(3002)
+	state.AddClientConnId(connA)
+	state.AddClientConnId(connB)
+	state.SetClientConnId(connA)
+	pointA := ocommon.NewPoint(100, []byte("hash-a"))
+	pointB := ocommon.NewPoint(200, []byte("hash-b"))
+	tipA := ochainsync.Tip{Point: pointA, BlockNumber: 10}
+	tipB := ochainsync.Tip{Point: pointB, BlockNumber: 20}
+	state.UpdateClientTip(connA, pointA, tipA)
+	state.UpdateClientTip(connB, pointB, tipB)
+	n := &Node{
+		config: Config{
+			logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+		chainsyncState: state,
+	}
+
+	n.handleChainSwitchEvent(
+		event.NewEvent(
+			chainselection.ChainSwitchEventType,
+			chainselection.ChainSwitchEvent{
+				PreviousConnectionId: connA,
+				NewConnectionId:      connB,
+				NewTip:               tipB,
+			},
+		),
+	)
+
+	active := state.GetClientConnId()
+	require.NotNil(t, active)
+	assert.Equal(t, connB, *active)
+	assert.Equal(t, pointA, state.GetTrackedClient(connA).Cursor)
+	assert.Equal(t, pointB, state.GetTrackedClient(connB).Cursor)
+	assert.Equal(t, uint64(1), state.GetTrackedClient(connA).HeadersRecv)
+	assert.Equal(t, uint64(1), state.GetTrackedClient(connB).HeadersRecv)
+}
 
 func TestRunStallCheckerTickRecoversAndAllowsFutureTicks(t *testing.T) {
 	n := &Node{

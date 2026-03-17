@@ -73,6 +73,29 @@ type Node struct {
 	shutdownOnce   sync.Once
 }
 
+func (n *Node) handleChainSwitchEvent(evt event.Event) {
+	e, ok := evt.Data.(chainselection.ChainSwitchEvent)
+	if !ok {
+		return
+	}
+	prevConn := "(none)"
+	if e.PreviousConnectionId.LocalAddr != nil &&
+		e.PreviousConnectionId.RemoteAddr != nil {
+		prevConn = e.PreviousConnectionId.String()
+	}
+	n.config.logger.Info(
+		"chain switch: updating active connection",
+		"previous_connection", prevConn,
+		"new_connection", e.NewConnectionId.String(),
+		"new_tip_block", e.NewTip.BlockNumber,
+		"new_tip_slot", e.NewTip.Point.Slot,
+	)
+	// Do not restart chainsync on peer switch. Every connected peer
+	// already maintains its own chainsync client state and pipeline; a
+	// switch only changes which peer's stream feeds the ledger.
+	n.chainsyncState.SetClientConnId(e.NewConnectionId)
+}
+
 func New(cfg Config) (*Node, error) {
 	eventBus := event.NewEventBus(cfg.promRegistry, cfg.logger)
 	n := &Node{
@@ -338,29 +361,7 @@ func (n *Node) Run(ctx context.Context) error {
 	// Subscribe to chain switch events to update active connection
 	n.eventBus.SubscribeFunc(
 		chainselection.ChainSwitchEventType,
-		func(evt event.Event) {
-			e, ok := evt.Data.(chainselection.ChainSwitchEvent)
-			if !ok {
-				return
-			}
-			prevConn := "(none)"
-			if e.PreviousConnectionId.LocalAddr != nil &&
-				e.PreviousConnectionId.RemoteAddr != nil {
-				prevConn = e.PreviousConnectionId.String()
-			}
-			n.config.logger.Info(
-				"chain switch: updating active connection",
-				"previous_connection", prevConn,
-				"new_connection", e.NewConnectionId.String(),
-				"new_tip_block", e.NewTip.BlockNumber,
-				"new_tip_slot", e.NewTip.Point.Slot,
-			)
-			n.chainsyncState.SetClientConnId(e.NewConnectionId)
-			n.ouroboros.ResumeChainsyncOnPeerSwitch(
-				ctx,
-				e.NewConnectionId,
-			)
-		},
+		n.handleChainSwitchEvent,
 	)
 	// Subscribe to chain fork events for monitoring
 	n.eventBus.SubscribeFunc(
