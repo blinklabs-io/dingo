@@ -1,0 +1,8 @@
+FROM ghcr.io/cardano-foundation/testnet-generation-tool:v0.1.0
+RUN useradd -m configurator
+
+COPY --chown=configurator:configurator scripts/configurator.sh /configurator.sh
+COPY --chown=configurator:configurator testnet.yaml /testnet.yaml
+
+USER configurator
+ENTRYPOINT ["/bin/bash", "/configurator.sh"]

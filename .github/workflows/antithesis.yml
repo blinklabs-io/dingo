@@ -1,0 +1,248 @@
+name: antithesis
+
+on:
+  push:
+    branches: ['main']
+  schedule:
+    - cron: '5 1,7,13,19 * * *'
+  workflow_dispatch:
+    inputs:
+      duration:
+        description: 'Test duration in hours'
+        type: string
+        default: '3'
+      no_faults:
+        description: 'Disable fault injection'
+        type: boolean
+        default: false
+      moog_tag:
+        description: 'Pinned Moog CLI tag (defaults to repository variable MOOG_TAG)'
+        type: string
+        default: ''
+
+concurrency:
+  group: antithesis
+  cancel-in-progress: true
+
+env:
+  APPLICATION_NAME: 'dingo'
+
+jobs:
+  build-images:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    outputs:
+      image_tag: ${{ steps.image-tag.outputs.tag }}
+    steps:
+      - uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0 https://github.com/actions/checkout/releases/tag/v6.0.0
+        with:
+          fetch-depth: 0
+      - name: Set image tag
+        id: image-tag
+        run: echo "tag=sha-${{ github.sha }}" >> "$GITHUB_OUTPUT"
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0 https://github.com/docker/setup-buildx-action/releases/tag/v4.0.0
+      - name: Login to GHCR
+        uses: docker/login-action@b45d80f862d83dbcd57f89517bcf500b2ab88fb2 # v4.0.0 https://github.com/docker/login-action/releases/tag/v4.0.0
+        with:
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+          registry: ghcr.io
+      # -----------------------------------------------------------------------
+      # dingo-antithesis — instrumented dingo binary
+      # -----------------------------------------------------------------------
+      - id: antithesis-meta
+        uses: docker/metadata-action@030e881283bb7a6894de51c315a6bfe6a94e05cf # v6.0.0 https://github.com/docker/metadata-action/releases/tag/v6.0.0
+        with:
+          images: |
+            ghcr.io/${{ github.repository }}
+          flavor: |
+            latest=false
+            suffix=-antithesis
+          tags: |
+            type=sha,format=long
+            type=ref,event=branch
+      - name: Build and push dingo-antithesis image
+        id: antithesis-push
+        uses: docker/build-push-action@d08e5c354a6adb9ed34480a06d141179aa583294 # v7.0.0 https://github.com/docker/build-push-action/releases/tag/v7.0.0
+        with:
+          outputs: "type=registry,push=true"
+          platforms: linux/amd64
+          target: antithesis
+          tags: ${{ steps.antithesis-meta.outputs.tags }}
+          labels: ${{ steps.antithesis-meta.outputs.labels }}
+          build-args: |
+            COMMIT_HASH=${{ github.sha }}
+      - name: Attest dingo-antithesis GHCR image
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0 https://github.com/actions/attest/releases/tag/v4.1.0
+        with:
+          subject-name: ghcr.io/${{ github.repository }}
+          subject-digest: ${{ steps.antithesis-push.outputs.digest }}
+          push-to-registry: true
+      # -----------------------------------------------------------------------
+      # configurator — generates pool keys and genesis files
+      # -----------------------------------------------------------------------
+      - id: configurator-meta
+        uses: docker/metadata-action@030e881283bb7a6894de51c315a6bfe6a94e05cf # v6.0.0 https://github.com/docker/metadata-action/releases/tag/v6.0.0
+        with:
+          images: |
+            ghcr.io/${{ github.repository_owner }}/dingo-configurator
+          flavor: |
+            latest=false
+          tags: |
+            type=sha,format=long
+            type=ref,event=branch
+      - name: Build and push configurator image
+        id: configurator-push
+        uses: docker/build-push-action@d08e5c354a6adb9ed34480a06d141179aa583294 # v7.0.0 https://github.com/docker/build-push-action/releases/tag/v7.0.0
+        with:
+          context: internal/test/antithesis
+          file: internal/test/antithesis/Dockerfile.configurator
+          outputs: "type=registry,push=true"
+          platforms: linux/amd64
+          tags: ${{ steps.configurator-meta.outputs.tags }}
+          labels: ${{ steps.configurator-meta.outputs.labels }}
+      - name: Attest configurator GHCR image
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0 https://github.com/actions/attest/releases/tag/v4.1.0
+        with:
+          subject-name: ghcr.io/${{ github.repository_owner }}/dingo-configurator
+          subject-digest: ${{ steps.configurator-push.outputs.digest }}
+          push-to-registry: true
+      # -----------------------------------------------------------------------
+      # txpump — submits transactions to the network under test
+      # -----------------------------------------------------------------------
+      - id: txpump-meta
+        uses: docker/metadata-action@030e881283bb7a6894de51c315a6bfe6a94e05cf # v6.0.0 https://github.com/docker/metadata-action/releases/tag/v6.0.0
+        with:
+          images: |
+            ghcr.io/${{ github.repository_owner }}/dingo-txpump
+          flavor: |
+            latest=false
+          tags: |
+            type=sha,format=long
+            type=ref,event=branch
+      - name: Build and push txpump image
+        id: txpump-push
+        uses: docker/build-push-action@d08e5c354a6adb9ed34480a06d141179aa583294 # v7.0.0 https://github.com/docker/build-push-action/releases/tag/v7.0.0
+        with:
+          context: internal/test/antithesis
+          file: internal/test/antithesis/Dockerfile.txpump
+          outputs: "type=registry,push=true"
+          platforms: linux/amd64
+          tags: ${{ steps.txpump-meta.outputs.tags }}
+          labels: ${{ steps.txpump-meta.outputs.labels }}
+      - name: Attest txpump GHCR image
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0 https://github.com/actions/attest/releases/tag/v4.1.0
+        with:
+          subject-name: ghcr.io/${{ github.repository_owner }}/dingo-txpump
+          subject-digest: ${{ steps.txpump-push.outputs.digest }}
+          push-to-registry: true
+      # -----------------------------------------------------------------------
+      # analysis — reads logs and evaluates safety/liveness properties
+      # -----------------------------------------------------------------------
+      - id: analysis-meta
+        uses: docker/metadata-action@030e881283bb7a6894de51c315a6bfe6a94e05cf # v6.0.0 https://github.com/docker/metadata-action/releases/tag/v6.0.0
+        with:
+          images: |
+            ghcr.io/${{ github.repository_owner }}/dingo-analysis
+          flavor: |
+            latest=false
+          tags: |
+            type=sha,format=long
+            type=ref,event=branch
+      - name: Build and push analysis image
+        id: analysis-push
+        uses: docker/build-push-action@d08e5c354a6adb9ed34480a06d141179aa583294 # v7.0.0 https://github.com/docker/build-push-action/releases/tag/v7.0.0
+        with:
+          context: internal/test/antithesis
+          file: internal/test/antithesis/Dockerfile.analysis
+          outputs: "type=registry,push=true"
+          platforms: linux/amd64
+          tags: ${{ steps.analysis-meta.outputs.tags }}
+          labels: ${{ steps.analysis-meta.outputs.labels }}
+      - name: Attest analysis GHCR image
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0 https://github.com/actions/attest/releases/tag/v4.1.0
+        with:
+          subject-name: ghcr.io/${{ github.repository_owner }}/dingo-analysis
+          subject-digest: ${{ steps.analysis-push.outputs.digest }}
+          push-to-registry: true
+
+  check-moog-secrets:
+    runs-on: ubuntu-latest
+    permissions: {}
+    outputs:
+      available: ${{ steps.check.outputs.available }}
+    steps:
+      - name: Check for Moog secrets
+        id: check
+        env:
+          MOOG_PAT: ${{ secrets.MOOG_GITHUB_PAT }}
+          MOOG_WALLET: ${{ secrets.MOOG_REQUESTER_WALLET }}
+        run: |
+          if [ -n "$MOOG_PAT" ] && [ -n "$MOOG_WALLET" ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  submit-antithesis:
+    needs: [build-images, check-moog-secrets]
+    if: needs.check-moog-secrets.outputs.available == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 600
+    steps:
+      - uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0 https://github.com/actions/checkout/releases/tag/v6.0.0
+      - name: Validate pinned Moog CLI tag
+        run: |
+          if [ -z "$MOOG_TAG" ]; then
+            echo "MOOG_TAG must be set via workflow_dispatch input moog_tag or repository variable MOOG_TAG" >&2
+            exit 1
+          fi
+          echo "Using pinned Moog CLI tag: $MOOG_TAG"
+        env:
+          MOOG_TAG: ${{ github.event.inputs.moog_tag || vars.MOOG_TAG }}
+      - name: Download and install Moog CLI
+        run: |
+          gh release download "$MOOG_TAG" \
+            -R cardano-foundation/moog \
+            -p "moog-*-linux64.tar.gz" -O moog.tar.gz
+          tar xzf moog.tar.gz
+          sudo install -m 0755 moog /usr/local/bin/moog
+          moog --version
+        env:
+          GH_TOKEN: ${{ secrets.MOOG_GITHUB_PAT }}
+          MOOG_TAG: ${{ github.event.inputs.moog_tag || vars.MOOG_TAG }}
+      - name: Configure Moog wallet
+        run: echo "$MOOG_WALLET" | base64 -d > wallet.json
+        env:
+          MOOG_WALLET: ${{ secrets.MOOG_REQUESTER_WALLET }}
+      - name: Submit Antithesis test
+        run: |
+          NO_FAULTS_FLAG=""
+          if [ "$NO_FAULTS" = "true" ]; then
+            NO_FAULTS_FLAG="--no-faults"
+          fi
+          moog requester create-test \
+            -d "internal/test/antithesis/testnets/dingo-praos" \
+            -c "${{ github.sha }}" \
+            -r "$GITHUB_REPOSITORY" \
+            -t "$DURATION" \
+            $NO_FAULTS_FLAG
+        env:
+          MOOG_GITHUB_PAT: ${{ secrets.MOOG_GITHUB_PAT }}
+          MOOG_WALLET_FILE: wallet.json
+          MOOG_MPFS_HOST: ${{ vars.MOOG_MPFS_HOST || 'https://mpfs.plutimus.com' }}
+          MOOG_PLATFORM: github
+          MOOG_REQUESTER: ${{ vars.MOOG_REQUESTER }}
+          MOOG_TOKEN_ID: ${{ vars.MOOG_TOKEN_ID }}
+          DURATION: ${{ inputs.duration || '3' }}
+          NO_FAULTS: ${{ inputs.no_faults || 'false' }}
+      - name: Clean up wallet
+        if: always()
+        run: rm -f wallet.json
