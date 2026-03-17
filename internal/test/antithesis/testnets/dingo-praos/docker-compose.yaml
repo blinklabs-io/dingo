@@ -1,0 +1,261 @@
+# Copyright 2026 Blink Labs Software
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Moog/Antithesis Docker Compose — dingo-praos testnet
+#
+# 5-pool mixed network: p1 (dingo-antithesis) + p2-p5 (cardano-node).
+# Differences from local devnet compose:
+#   - NO build: directives — all images pulled from GHCR
+#   - Hostname-based DNS (no static IPs)
+#   - init: true on all services
+#   - Network supports internal: ${INTERNAL_NETWORK:-false} for Moog isolation
+#   - IMAGE_TAG and CARDANO_NODE_VERSION variables for image pinning
+#   - Includes analysis container (absent from local compose)
+#
+# Variables (set via environment or .env file):
+#   IMAGE_TAG              — dingo image tag        (default: latest)
+#   CARDANO_NODE_VERSION   — cardano-node image tag  (default: 10.5.4)
+#   INTERNAL_NETWORK       — isolate network from host (default: false)
+
+# ---------------------------------------------------------------------------
+# Shared anchor for cardano-node block-producer services (p2–p5)
+# ---------------------------------------------------------------------------
+x-cardano-node-command: &cardano-node-command
+  - "run"
+  - "--config"
+  - "/configs/configs/config.json"
+  - "--topology"
+  - "/configs/configs/topology.json"
+  - "--database-path"
+  - "/data/db"
+  - "--socket-path"
+  - "/ipc/node.socket"
+  - "--shelley-kes-key"
+  - "/configs/keys/kes.skey"
+  - "--shelley-vrf-key"
+  - "/configs/keys/vrf.skey"
+  - "--shelley-operational-certificate"
+  - "/configs/keys/opcert.cert"
+  - "--port"
+  - "3001"
+
+x-cardano-node: &cardano-node
+  image: ghcr.io/blinklabs-io/cardano-node:${CARDANO_NODE_VERSION:-10.5.4}
+  init: true
+  command: *cardano-node-command
+  environment: &cn-env
+    CARDANO_BLOCK_PRODUCER: "true"
+    RESTORE_SNAPSHOT: "false"
+  depends_on:
+    configurator:
+      condition: service_completed_successfully
+  healthcheck:
+    test: ["CMD-SHELL", "test -S /ipc/node.socket || exit 1"]
+    interval: 5s
+    timeout: 3s
+    retries: 30
+    start_period: 10s
+  volumes:
+    - logs:/logs
+  networks:
+    - testnet
+
+services:
+  # --------------------------------------------------------------------------
+  # configurator — generates pool keys and genesis files from testnet.yaml
+  # --------------------------------------------------------------------------
+  configurator:
+    image: ghcr.io/blinklabs-io/dingo-configurator:${IMAGE_TAG:-main}
+    init: true
+    volumes:
+      - p1-configs:/configs/1
+      - p2-configs:/configs/2
+      - p3-configs:/configs/3
+      - p4-configs:/configs/4
+      - p5-configs:/configs/5
+      - utxo-keys:/configs/utxo-keys
+      - testnet-config:/testnet-config
+    networks:
+      - testnet
+
+  # --------------------------------------------------------------------------
+  # p1 — Dingo instrumented block producer (pool 1)
+  # --------------------------------------------------------------------------
+  p1:
+    image: ghcr.io/blinklabs-io/dingo:${IMAGE_TAG:-main}-antithesis
+    init: true
+    hostname: p1.example
+    depends_on:
+      configurator:
+        condition: service_completed_successfully
+    environment:
+      CARDANO_NETWORK: devnet
+      CARDANO_CONFIG: /configs/configs/config.json
+      CARDANO_TOPOLOGY: /configs/configs/dingo-topology.json
+      CARDANO_DATABASE_PATH: /data/db
+      CARDANO_NODE_SOCKET_PATH: /ipc/dingo.socket
+      DINGO_DEBUG: "1"
+      DINGO_PRIVATE_BIND_ADDR: "0.0.0.0"
+      CARDANO_BLOCK_PRODUCER: "true"
+      CARDANO_SHELLEY_VRF_KEY: /configs/keys/vrf.skey
+      CARDANO_SHELLEY_KES_KEY: /configs/keys/kes.skey
+      CARDANO_SHELLEY_OPERATIONAL_CERTIFICATE: /configs/keys/opcert.cert
+    volumes:
+      - p1-configs:/configs:ro
+      - p1-data:/data/db
+      - p1-ipc:/ipc
+      - logs:/logs
+    healthcheck:
+      test: ["CMD-SHELL", "test -S /ipc/dingo.socket || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 10s
+    networks:
+      - testnet
+
+  # --------------------------------------------------------------------------
+  # p2–p5 — cardano-node block producers (pools 2–5)
+  # --------------------------------------------------------------------------
+  p2:
+    <<: *cardano-node
+    hostname: p2.example
+    environment:
+      <<: *cn-env
+    volumes:
+      - p2-configs:/configs:ro
+      - p2-data:/data/db
+      - p2-ipc:/ipc
+      - logs:/logs
+
+  p3:
+    <<: *cardano-node
+    hostname: p3.example
+    environment:
+      <<: *cn-env
+    volumes:
+      - p3-configs:/configs:ro
+      - p3-data:/data/db
+      - p3-ipc:/ipc
+      - logs:/logs
+
+  p4:
+    <<: *cardano-node
+    hostname: p4.example
+    environment:
+      <<: *cn-env
+    volumes:
+      - p4-configs:/configs:ro
+      - p4-data:/data/db
+      - p4-ipc:/ipc
+      - logs:/logs
+
+  p5:
+    <<: *cardano-node
+    hostname: p5.example
+    environment:
+      <<: *cn-env
+    volumes:
+      - p5-configs:/configs:ro
+      - p5-data:/data/db
+      - p5-ipc:/ipc
+      - logs:/logs
+
+  # --------------------------------------------------------------------------
+  # txpump — submits transactions via Dingo's N2C TCP port
+  # Note: cardano-node N2C is socket-only; Moog has no shared-socket support,
+  #       so txpump targets p1's TCP N2C endpoint exclusively (no fallback).
+  # --------------------------------------------------------------------------
+  txpump:
+    image: ghcr.io/blinklabs-io/dingo-txpump:${IMAGE_TAG:-main}
+    init: true
+    depends_on:
+      p1:
+        condition: service_healthy
+    environment:
+      TXPUMP_NODE_ADDR: "p1.example:3002"
+      TXPUMP_NETWORK_MAGIC: "42"
+      TXPUMP_TX_COUNT_MIN: "10"
+      TXPUMP_TX_COUNT_MAX: "50"
+      TXPUMP_COOLDOWN_MIN: "5"
+      TXPUMP_COOLDOWN_MAX: "15"
+      TXPUMP_TYPES: "payment"
+      TXPUMP_LOG_DIR: "/logs"
+      TXPUMP_GENESIS_UTXO_FILE: "/utxo-keys"
+      TXPUMP_GENESIS_FILE: "/testnet-config/testnet.yaml"
+    volumes:
+      - logs:/logs
+      - utxo-keys:/utxo-keys:ro
+      - testnet-config:/testnet-config:ro
+    networks:
+      - testnet
+
+  # --------------------------------------------------------------------------
+  # analysis — reads node logs, evaluates safety/liveness properties
+  # --------------------------------------------------------------------------
+  analysis:
+    image: ghcr.io/blinklabs-io/dingo-analysis:${IMAGE_TAG:-main}
+    init: true
+    depends_on:
+      p1:
+        condition: service_healthy
+      p2:
+        condition: service_healthy
+      p3:
+        condition: service_healthy
+      p4:
+        condition: service_healthy
+      p5:
+        condition: service_healthy
+    environment:
+      ANALYSIS_LOG_DIR: "/logs"
+      ANALYSIS_POOLS: "5"
+      ANALYSIS_MAX_FORK_DEPTH: "40"
+      ANALYSIS_GENESIS_FILE: "/testnet-config/testnet.yaml"
+    volumes:
+      - logs:/logs
+      - testnet-config:/testnet-config:ro
+    networks:
+      - testnet
+
+# ---------------------------------------------------------------------------
+# Networks
+# ---------------------------------------------------------------------------
+networks:
+  testnet:
+    driver: bridge
+    internal: ${INTERNAL_NETWORK:-false}
+
+# ---------------------------------------------------------------------------
+# Volumes
+# ---------------------------------------------------------------------------
+volumes:
+  logs:
+  utxo-keys:
+  testnet-config:
+  p1-configs:
+  p1-data:
+  p1-ipc:
+  p2-configs:
+  p2-data:
+  p2-ipc:
+  p3-configs:
+  p3-data:
+  p3-ipc:
+  p4-configs:
+  p4-data:
+  p4-ipc:
+  p5-configs:
+  p5-data:
+  p5-ipc:

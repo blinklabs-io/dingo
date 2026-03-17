@@ -1,9 +1,9 @@
-# Antithesis configurator specification for DevNet.
+# Antithesis testnet specification for Dingo.
 #
-# Generates unique key sets and genesis files for each pool.
-# Used by the configurator service in docker-compose.yml.
+# 5-pool mixed network: p1 (dingo) + p2-p5 (cardano-node).
+# Fast 500-slot epochs with k=40 for rapid epoch boundary testing.
 #
-# Format: 6 YAML documents (see below)
+# Format: 6 YAML documents
 #   1. Required testnet parameters
 #   2. Byron genesis overrides
 #   3. Shelley genesis overrides
@@ -12,32 +12,29 @@
 #   6. Node config (config.json) overrides
 
 --- # Required Testnet Parameters
-poolCount: 2
+poolCount: 5
 poolCost: 0
 poolMargin: 0.0
 poolPledge: 0
-delegatedSupply: 2000000000000
+delegatedSupply: 600000000000000
 systemStart: 'now'
 systemStartDelay: 5
 networkMagic: 42
-testnetDomain: devnet
+testnetDomain: example
 
 --- # Byron Genesis Override
 protocolConsts:
   k: 40
 
 --- # Shelley Genesis Override
-# 1s slots, ~8 min epochs, block every ~5s per pool (~2.5s total)
-# nonceStabilityWindow = 4k/f = 4*40/0.4 = 400 < 500 = epochLength ✓
-# blockfetchStabilityWindow = 3k/f = 3*40/0.4 = 300 < 500 = epochLength ✓
-# Candidate nonce freezes 400 slots before epoch end (at slot 100).
-# Partition tolerance: K / per-pool-rate where per-pool-rate = 1-(1-f)^(1/n)
-# With f=0.4, n=2: per-pool-rate ≈ 0.225, so K / per-pool-rate ≈ 40/0.225 ≈ 178s (~3 min)
+# 1s slots, ~8 min epochs
+# nonceStabilityWindow = 4k/f = 4*40/0.4 = 400 < 500 ✓
+# blockfetchStabilityWindow = 3k/f = 3*40/0.4 = 300 < 500 ✓
 epochLength: 500
 slotLength: 1
 activeSlotsCoeff: 0.4
 securityParam: 40
-maxLovelaceSupply: 2000000000000
+maxLovelaceSupply: 45000000000000000
 protocolParams:
   decentralisationParam: 0
   protocolVersion:
@@ -57,7 +54,9 @@ TestBabbageHardForkAtEpoch: 0
 TestConwayHardForkAtEpoch: 0
 ExperimentalHardForksEnabled: true
 ExperimentalProtocolsEnabled: true
+PeerSharing: true
 TraceForge: true
 TraceChainDb: true
 TraceMempool: true
 TurnOnLogging: true
+TurnOnLogMetrics: true
