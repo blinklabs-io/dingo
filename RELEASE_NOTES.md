@@ -13,23 +13,23 @@ Hi folks! Here’s what we shipped in v0.27.3.
 
 ### ✨ What's New
 
-- **Follow-tip reset and rollback:** Rollbacks are easier to manage because the follow-tip API now supports safe reset and rollback with clearer metadata about what changed.
+- **Follow-tip reset and rollback:** Tip tracking is easier to manage because the follow-tip API now supports safe reset and rollback with clearer metadata about what changed.
 - **Leader election readiness:** Block producer readiness is easier to track because leader election now surfaces epoch-nonce readiness and carries schedule state more reliably across restarts.
 
 ### 💪 Improvements
 
 - **More consistent cache sizing:** Sizing runs are easier to tune because cache defaults are more consistent and the BP/PI sizing script now supports explicit memory limits and optional cache overrides.
-- **Predictable KES period semantics:** Operational certificate (KES) periods are more predictable because KES APIs now standardize on absolute periods while translating internally from the certificate start period.
-- **Preserved original block bytes:** Downstream tooling can retain exact block bytes because API block objects now include the original CBOR-encoded bytes.
-- **Standard network identifiers from genesis:** Network identification is simpler because genesis reads now return a complete CAIP-2 network identifier derived from network magic.
-- **Smoother peer switching:** Sync stays steadier because chain-sync now preserves its state while only swapping the active connection during a peer switch.
+- **Predictable KES period semantics:** Operational certificate (KES) periods are more predictable because KES endpoints now standardize on absolute periods while translating internally from the certificate start period.
+- **Preserved original block bytes:** Downstream tooling can retain exact block bytes because API block objects now include the original encoded bytes.
+- **Standard network identifiers from genesis:** Network identification is simpler because genesis reads now return a standard CAIP-2 network identifier derived from network magic.
+- **Smoother peer switching:** Sync stays more rock-solid because chain-sync now preserves its state while only swapping the active connection during a peer switch.
 - **More consistent Mithril imports:** Mithril snapshot imports are more consistent across epochs because imports now normalize snapshot types and centralize persistence and epoch-summary handling.
 - **Protocol dependency validation:** Modern-era transaction handling is more reliable because protocol dependencies were updated and regression tests now guard transaction size behavior.
 - **Safer default containers:** Default containers are safer because the main Docker image now runs as a non-root `dingo` user.
 
 ### 🔧 Fixes
 
-- **Resilient background monitoring:** Long-running monitoring is more resilient because the stall checker now recovers from panics instead of crashing its background loop.
+- **Resilient background monitoring:** Long-running monitoring is more rock-solid because the stall checker now recovers from panics instead of crashing its background loop.
 - **Robust block fetch batching:** Block fetch serving is more robust because batching now handles iterator errors and connection closes correctly.
 - **Clearer unexpected event handling:** Event processing is easier to debug because chain-sync and block fetch now log unexpected event payload types instead of failing silently.
 - **Reliable shutdown error reporting:** Shutdowns are easier to troubleshoot because node and metrics server shutdown now propagates errors instead of exiting abruptly.
