@@ -1,0 +1,238 @@
+# Copyright 2026 Blink Labs Software
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Antithesis Docker Compose configuration
+#
+# Runs a 5-pool mixed Cardano network for antithesis testing:
+#   - configurator: Generates unique pool keys and genesis files
+#   - p1 (dingo):   Dingo node forging with pool 1 keys
+#   - p2-p5:        Official cardano-node forging with pool 2-5 keys
+#   - txpump:       Continuous transaction submitter
+#
+# Network: 172.21.0.0/24 (separate from devnet's 172.20.0.0/24)
+#   p1: 172.21.0.10, p2: .11, p3: .12, p4: .13, p5: .14, txpump: .20
+#
+# Usage:
+#   docker compose up -d       # Start all services
+#   docker compose down -v     # Stop and remove volumes
+#   ./scripts/test-local.sh    # Build, start, wait for health, tail logs
+
+x-cardano-node-base: &cardano-node-base
+  image: ghcr.io/blinklabs-io/cardano-node:10.5.4
+  init: true
+  environment: &cardano-node-env
+    CARDANO_BLOCK_PRODUCER: "true"
+    RESTORE_SNAPSHOT: "false"
+  healthcheck:
+    test: ["CMD-SHELL", "test -S /ipc/node.socket || exit 1"]
+    interval: 5s
+    timeout: 3s
+    retries: 30
+    start_period: 10s
+
+x-cardano-node-command: &cardano-node-command
+  - "run"
+  - "--config"
+  - "/configs/configs/config.json"
+  - "--topology"
+  - "/configs/configs/topology.json"
+  - "--database-path"
+  - "/data/db"
+  - "--socket-path"
+  - "/ipc/node.socket"
+  - "--shelley-kes-key"
+  - "/configs/keys/kes.skey"
+  - "--shelley-vrf-key"
+  - "/configs/keys/vrf.skey"
+  - "--shelley-operational-certificate"
+  - "/configs/keys/opcert.cert"
+  - "--port"
+  - "3001"
+
+services:
+  configurator:
+    build:
+      context: .
+      dockerfile: Dockerfile.configurator
+    container_name: antithesis-configurator
+    init: true
+    volumes:
+      - p1-configs:/configs/1
+      - p2-configs:/configs/2
+      - p3-configs:/configs/3
+      - p4-configs:/configs/4
+      - p5-configs:/configs/5
+      - utxo-keys:/configs/utxo-keys
+
+  p1:
+    build:
+      context: ../../..
+    container_name: antithesis-p1
+    init: true
+    depends_on:
+      configurator:
+        condition: service_completed_successfully
+    environment:
+      CARDANO_NETWORK: devnet
+      CARDANO_CONFIG: /configs/configs/config.json
+      CARDANO_TOPOLOGY: /configs/configs/dingo-topology.json
+      CARDANO_DATABASE_PATH: /data/db
+      CARDANO_NODE_SOCKET_PATH: /ipc/dingo.socket
+      DINGO_DEBUG: "1"
+      # Block production credentials (pool 1)
+      CARDANO_BLOCK_PRODUCER: "true"
+      CARDANO_SHELLEY_VRF_KEY: /configs/keys/vrf.skey
+      CARDANO_SHELLEY_KES_KEY: /configs/keys/kes.skey
+      CARDANO_SHELLEY_OPERATIONAL_CERTIFICATE: /configs/keys/opcert.cert
+    volumes:
+      - p1-configs:/configs:ro
+      - p1-data:/data/db
+      - p1-ipc:/ipc
+      - logs:/logs
+    ports:
+      - "3010:3001"
+    networks:
+      antithesis:
+        ipv4_address: 172.21.0.10
+    healthcheck:
+      test: ["CMD-SHELL", "test -S /ipc/dingo.socket || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 10s
+
+  p2:
+    <<: *cardano-node-base
+    container_name: antithesis-p2
+    depends_on:
+      configurator:
+        condition: service_completed_successfully
+    command: *cardano-node-command
+    volumes:
+      - p2-configs:/configs:ro
+      - p2-data:/data/db
+      - p2-ipc:/ipc
+      - logs:/logs
+    ports:
+      - "3011:3001"
+    networks:
+      antithesis:
+        ipv4_address: 172.21.0.11
+
+  p3:
+    <<: *cardano-node-base
+    container_name: antithesis-p3
+    depends_on:
+      configurator:
+        condition: service_completed_successfully
+    command: *cardano-node-command
+    volumes:
+      - p3-configs:/configs:ro
+      - p3-data:/data/db
+      - p3-ipc:/ipc
+      - logs:/logs
+    ports:
+      - "3012:3001"
+    networks:
+      antithesis:
+        ipv4_address: 172.21.0.12
+
+  p4:
+    <<: *cardano-node-base
+    container_name: antithesis-p4
+    depends_on:
+      configurator:
+        condition: service_completed_successfully
+    command: *cardano-node-command
+    volumes:
+      - p4-configs:/configs:ro
+      - p4-data:/data/db
+      - p4-ipc:/ipc
+      - logs:/logs
+    ports:
+      - "3013:3001"
+    networks:
+      antithesis:
+        ipv4_address: 172.21.0.13
+
+  p5:
+    <<: *cardano-node-base
+    container_name: antithesis-p5
+    depends_on:
+      configurator:
+        condition: service_completed_successfully
+    command: *cardano-node-command
+    volumes:
+      - p5-configs:/configs:ro
+      - p5-data:/data/db
+      - p5-ipc:/ipc
+      - logs:/logs
+    ports:
+      - "3014:3001"
+    networks:
+      antithesis:
+        ipv4_address: 172.21.0.14
+
+  txpump:
+    build:
+      context: ../../..
+      dockerfile: internal/test/antithesis/Dockerfile.txpump
+    container_name: antithesis-txpump
+    init: true
+    depends_on:
+      p1:
+        condition: service_healthy
+    environment:
+      TXPUMP_NODE_ADDR: "/ipc/dingo.socket"
+      TXPUMP_NETWORK_MAGIC: "42"
+      TXPUMP_TX_COUNT_MIN: "10"
+      TXPUMP_TX_COUNT_MAX: "50"
+      TXPUMP_COOLDOWN_MIN: "5"
+      TXPUMP_COOLDOWN_MAX: "15"
+      TXPUMP_TYPES: "payment"
+      TXPUMP_GENESIS_FILE: "/testnet/testnet.yaml"
+    volumes:
+      - ./testnet.yaml:/testnet/testnet.yaml:ro
+      - p1-ipc:/ipc:ro
+      - utxo-keys:/utxo-keys:ro
+      - logs:/logs
+    networks:
+      antithesis:
+        ipv4_address: 172.21.0.20
+
+networks:
+  antithesis:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.21.0.0/24
+
+volumes:
+  p1-configs:
+  p2-configs:
+  p3-configs:
+  p4-configs:
+  p5-configs:
+  p1-data:
+  p2-data:
+  p3-data:
+  p4-data:
+  p5-data:
+  p1-ipc:
+  p2-ipc:
+  p3-ipc:
+  p4-ipc:
+  p5-ipc:
+  utxo-keys:
+  logs:
