@@ -23,7 +23,76 @@ const (
 	badgerMetricNamePrefix = "database_blob_"
 )
 
+// ristrettoCacheCollector exposes badger's internal ristretto cache
+// hit/miss counters as prometheus metrics on each scrape.
+type ristrettoCacheCollector struct {
+	db *BlobStoreBadger
+
+	blockHits   *prometheus.Desc
+	blockMisses *prometheus.Desc
+	indexHits   *prometheus.Desc
+	indexMisses *prometheus.Desc
+}
+
+func newRistrettoCacheCollector(db *BlobStoreBadger) *ristrettoCacheCollector {
+	return &ristrettoCacheCollector{
+		db: db,
+		blockHits: prometheus.NewDesc(
+			badgerMetricNamePrefix+"block_cache_hits_total",
+			"badger ristretto block cache hits",
+			nil, nil,
+		),
+		blockMisses: prometheus.NewDesc(
+			badgerMetricNamePrefix+"block_cache_misses_total",
+			"badger ristretto block cache misses",
+			nil, nil,
+		),
+		indexHits: prometheus.NewDesc(
+			badgerMetricNamePrefix+"index_cache_hits_total",
+			"badger ristretto index cache hits",
+			nil, nil,
+		),
+		indexMisses: prometheus.NewDesc(
+			badgerMetricNamePrefix+"index_cache_misses_total",
+			"badger ristretto index cache misses",
+			nil, nil,
+		),
+	}
+}
+
+func (c *ristrettoCacheCollector) Describe(ch chan<- *prometheus.Desc) {
+	ch <- c.blockHits
+	ch <- c.blockMisses
+	ch <- c.indexHits
+	ch <- c.indexMisses
+}
+
+func (c *ristrettoCacheCollector) Collect(ch chan<- prometheus.Metric) {
+	if c.db == nil || c.db.db == nil {
+		return
+	}
+	if m := c.db.db.BlockCacheMetrics(); m != nil {
+		ch <- prometheus.MustNewConstMetric(
+			c.blockHits, prometheus.CounterValue, float64(m.Hits()),
+		)
+		ch <- prometheus.MustNewConstMetric(
+			c.blockMisses, prometheus.CounterValue, float64(m.Misses()),
+		)
+	}
+	if m := c.db.db.IndexCacheMetrics(); m != nil {
+		ch <- prometheus.MustNewConstMetric(
+			c.indexHits, prometheus.CounterValue, float64(m.Hits()),
+		)
+		ch <- prometheus.MustNewConstMetric(
+			c.indexMisses, prometheus.CounterValue, float64(m.Misses()),
+		)
+	}
+}
+
 func (d *BlobStoreBadger) registerBlobMetrics() {
+	// Ristretto cache hit/miss metrics
+	d.promRegistry.MustRegister(newRistrettoCacheCollector(d))
+
 	// Badger exposes metrics via expvar, so we need to set up some translation
 	collector := collectors.NewExpvarCollector(
 		map[string]*prometheus.Desc{

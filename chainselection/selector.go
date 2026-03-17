@@ -563,6 +563,19 @@ func (cs *ChainSelector) EvaluateAndSwitch() bool {
 				return
 			}
 			newTip := newPeerTip.Tip
+
+			// Incumbent advantage: don't switch away from current best
+			// unless the new peer is strictly ahead by at least 1 block.
+			// This prevents thrashing when peers report the same tip at
+			// slightly different times (VRF/connID tiebreakers).
+			if previousBest != nil {
+				if prevTip, ok := cs.peerTips[*previousBest]; ok {
+					if newTip.BlockNumber <= prevTip.Tip.BlockNumber {
+						return
+					}
+				}
+			}
+
 			cs.bestPeerConn = newBest
 			switchOccurred = true
 

@@ -232,20 +232,13 @@ func (ls *LedgerState) detectConnectionSwitch() (activeConnId *ouroboros.Connect
 			ls.dropEventCount = 0
 			ls.dropRollbackCount = 0
 			ls.headerMismatchCount = 0
-			// Clear header queue and blockfetch state from old
-			// connection so stale headers don't block the new
-			// connection's blockfetch pipeline.
-			ls.chain.ClearHeaders()
+			// Reset blockfetch state so the pipeline isn't stuck waiting
+			// for a batch that will never complete from the old connection.
+			// Keep headers — they're valid regardless of source.
 			ls.chainsyncBlockfetchMutex.Lock()
 			ls.blockfetchRequestRangeCleanup()
 			ls.activeBlockfetchConnId = ouroboros.ConnectionId{}
 			ls.chainsyncBlockfetchMutex.Unlock()
-			// Clear per-connection state (e.g., header dedup cache)
-			// so the new connection can re-deliver blocks from the
-			// intersection without them being filtered as duplicates.
-			if ls.config.ConnectionSwitchFunc != nil {
-				ls.config.ConnectionSwitchFunc()
-			}
 		}
 		ls.lastActiveConnId = activeConnId
 		ls.rollbackHistory = nil
@@ -474,24 +467,9 @@ func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 				"slot", e.Point.Slot,
 			)
 		} else if *activeConnId != e.ConnectionId {
-			// Event is from non-active connection, skip
-			// Rate-limit this message to once per dropEventLogInterval
-			now := time.Now()
-			if now.Sub(ls.dropEventLastLog) >= dropEventLogInterval {
-				suppressed := ls.dropEventCount
-				ls.dropEventCount = 0
-				ls.dropEventLastLog = now
-				ls.config.Logger.Debug(
-					"dropping event from non-active connection",
-					"component", "ledger",
-					"event_connection_id", e.ConnectionId.String(),
-					"active_connection_id", activeConnId.String(),
-					"slot", e.Point.Slot,
-					"suppressed_since_last_log", suppressed,
-				)
-			} else {
-				ls.dropEventCount++
-			}
+			// Drop headers from non-active connections to prevent
+			// ephemeral inbound peers from disrupting the pipeline.
+			ls.dropEventCount++
 			return nil
 		}
 	}
@@ -842,10 +820,9 @@ func (ls *LedgerState) tryResolveFork(
 
 //nolint:unparam
 func (ls *LedgerState) handleEventBlockfetchBlock(e BlockfetchEvent) error {
-	// Drop blocks from a stale connection (e.g., after connection switch)
-	if e.ConnectionId != ls.activeBlockfetchConnId {
-		return nil
-	}
+	// Accept blocks from any connection — the chain will reject blocks
+	// that don't fit the tip via AddBlockWithPoint. This avoids discarding
+	// valid in-flight blocks after a connection switch.
 	// Process blocks in small commit batches so they appear on the
 	// chain promptly without paying a full blob transaction cost for
 	// every single block. We still flush well before BatchDone to

@@ -19,9 +19,11 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log/slog"
+	"math/big"
 	"sync"
 
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/gouroboros/consensus"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
 
@@ -474,26 +476,47 @@ func (e *Election) ShouldProduceBlock(slot uint64) bool {
 	if e.schedules != nil {
 		schedule = e.schedules[slotEpoch]
 	}
-	computeCh := e.computeCh
 	e.mu.RUnlock()
 
 	if schedule == nil {
-		// Schedule not yet computed for this epoch.
-		// Request background computation (non-blocking).
-		e.logger.Debug(
-			"no leader schedule for epoch, requesting computation",
-			"component", "leader",
-			"slot", slot,
-			"epoch", slotEpoch,
-		)
-		if computeCh != nil {
-			select {
-			case computeCh <- slotEpoch:
-			default:
-				// Request already pending
-			}
+		// No pre-computed schedule — fall back to inline VRF check
+		// for this single slot. This handles the case where the epoch
+		// nonce wasn't available at startup (e.g., after mithril restore).
+		epochNonce := e.epochProvider.EpochNonce(slotEpoch)
+		if len(epochNonce) == 0 {
+			return false
 		}
-		return false
+		snapshotEpoch := slotEpoch
+		if slotEpoch >= 2 {
+			snapshotEpoch = slotEpoch - 2
+		}
+		poolStake, err := e.stakeProvider.GetPoolStake(
+			snapshotEpoch, e.poolId[:],
+		)
+		if err != nil || poolStake == 0 {
+			return false
+		}
+		totalStake, err := e.stakeProvider.GetTotalActiveStake(
+			snapshotEpoch,
+		)
+		if err != nil || totalStake == 0 {
+			return false
+		}
+		vrfSigner, err := consensus.NewSimpleVRFSigner(e.poolVrfSkey)
+		if err != nil {
+			return false
+		}
+		activeSlotCoeff := new(big.Rat).SetFloat64(
+			e.epochProvider.ActiveSlotCoeff(),
+		)
+		result, err := consensus.IsSlotLeader(
+			slot, epochNonce, poolStake, totalStake,
+			activeSlotCoeff, vrfSigner,
+		)
+		if err != nil {
+			return false
+		}
+		return result.Eligible
 	}
 	return schedule.IsLeaderForSlot(slot)
 }

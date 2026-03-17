@@ -103,6 +103,10 @@ func (t *badgerTxn) Rollback() error {
 	return nil
 }
 
+func (d *BlobStoreBadger) SetPromRegistry(registry prometheus.Registerer) {
+	d.promRegistry = registry
+}
+
 func (d *BlobStoreBadger) SetLogger(logger *slog.Logger) {
 	if logger == nil {
 		d.logger = slog.New(slog.NewJSONHandler(io.Discard, nil))

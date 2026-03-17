@@ -75,6 +75,16 @@ type ConnectionManager struct {
 	trackedConnCount int
 }
 
+// IsInboundConnection returns true if the given connection is inbound.
+func (c *ConnectionManager) IsInboundConnection(connId ouroboros.ConnectionId) bool {
+	c.connectionsMutex.Lock()
+	defer c.connectionsMutex.Unlock()
+	if info, ok := c.connections[connId]; ok {
+		return info.isInbound
+	}
+	return false
+}
+
 // DefaultMaxConnectionsPerIP is the default maximum number of concurrent
 // connections allowed from a single IP address (or /64 prefix for IPv6).
 const DefaultMaxConnectionsPerIP = 5

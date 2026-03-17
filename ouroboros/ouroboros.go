@@ -95,16 +95,18 @@ type OuroborosConfig struct {
 }
 
 type blockfetchMetrics struct {
-	servedBlockCount   prometheus.Counter
-	blockDelay         prometheus.Gauge
-	lateBlocks         prometheus.Counter
-	blockDelayCdfOne   prometheus.Gauge
-	blockDelayCdfThree prometheus.Gauge
-	blockDelayCdfFive  prometheus.Gauge
-	totalBlocksFetched int64
-	blocksUnder1s      int64
-	blocksUnder3s      int64
-	blocksUnder5s      int64
+	servedBlockCount    prometheus.Counter
+	blockDelay          prometheus.Gauge
+	blockDelayHistogram prometheus.Histogram
+	blocksReceivedTotal prometheus.Counter
+	lateBlocks          prometheus.Counter
+	blockDelayCdfOne    prometheus.Gauge
+	blockDelayCdfThree  prometheus.Gauge
+	blockDelayCdfFive   prometheus.Gauge
+	totalBlocksFetched  int64
+	blocksUnder1s       int64
+	blocksUnder3s       int64
+	blocksUnder5s       int64
 }
 
 func NewOuroboros(cfg OuroborosConfig) *Ouroboros {
@@ -169,6 +171,19 @@ func (o *Ouroboros) initMetrics() {
 		Name: "cardano_node_metrics_blockfetchclient_blockdelay_cdfFive",
 		Help: "percentage of blocks fetched in less than 5 seconds",
 	})
+	o.metrics.blockDelayHistogram = promautoFactory.NewHistogram(
+		prometheus.HistogramOpts{
+			Name:    "cardano_node_metrics_blockfetchclient_blockdelay_seconds",
+			Help:    "block propagation delay from slot time to receipt",
+			Buckets: []float64{0.1, 0.2, 0.3, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 5.0, 10.0, 30.0},
+		},
+	)
+	o.metrics.blocksReceivedTotal = promautoFactory.NewCounter(
+		prometheus.CounterOpts{
+			Name: "dingo_blockfetch_blocks_received_total",
+			Help: "total blocks received via blockfetch (including during catchup)",
+		},
+	)
 }
 
 func (o *Ouroboros) ConfigureListeners(
@@ -486,10 +501,16 @@ func (o *Ouroboros) HandleInboundConnEvent(evt event.Event) {
 		return
 	}
 
+	// Don't start chainsync client on inbound connections.
+	// Inbound peers are clients pulling data from us. Starting
+	// client protocols toward them causes chain selection to track
+	// them, and when they disconnect it disrupts the pipeline.
+	// They still get server-side chainsync and blockfetch.
 	o.config.Logger.Info(
-		"full-duplex inbound connection, starting client protocols",
+		"full-duplex inbound connection, server protocols only",
 		"connection_id", connId.String(),
 	)
+	return
 
 	// Start chainsync client on this full-duplex inbound connection.
 	// If the chainsync client fails (e.g. intersection not found because

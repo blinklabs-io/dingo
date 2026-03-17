@@ -14,7 +14,11 @@
 
 package plugin
 
-import "log/slog"
+import (
+	"log/slog"
+
+	"github.com/prometheus/client_golang/prometheus"
+)
 
 // Logger provides a logging interface for plugins.
 type Logger interface {
@@ -32,4 +36,10 @@ type Logger interface {
 // construction.
 type LoggerSetter interface {
 	SetLogger(*slog.Logger)
+}
+
+// PromRegistrySetter is implemented by plugins that can accept a prometheus
+// registry after construction.
+type PromRegistrySetter interface {
+	SetPromRegistry(prometheus.Registerer)
 }

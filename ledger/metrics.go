@@ -20,16 +20,17 @@ import (
 )
 
 type stateMetrics struct {
-	blockNum            prometheus.Gauge
-	density             prometheus.Gauge
-	epochNum            prometheus.Gauge
-	slotInEpoch         prometheus.Gauge
-	slotNum             prometheus.Gauge
-	forks               prometheus.Gauge
-	blocksForgedTotal   prometheus.Counter
-	blockForgingLatency prometheus.Histogram
-	forgingEnabled      prometheus.Gauge
-	nodeStartTime       prometheus.Gauge
+	blockNum              prometheus.Gauge
+	density               prometheus.Gauge
+	epochNum              prometheus.Gauge
+	slotInEpoch           prometheus.Gauge
+	slotNum               prometheus.Gauge
+	forks                 prometheus.Gauge
+	blocksForgedTotal     prometheus.Counter
+	blockForgingLatency   prometheus.Histogram
+	forgingEnabled        prometheus.Gauge
+	nodeStartTime         prometheus.Gauge
+	blockPropagationDelay prometheus.Histogram
 }
 
 func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
@@ -79,6 +80,13 @@ func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
 		prometheus.GaugeOpts{
 			Name: "cardano_node_metrics_nodeStartTime_int",
 			Help: "unix timestamp when the node started",
+		},
+	)
+	m.blockPropagationDelay = promautoFactory.NewHistogram(
+		prometheus.HistogramOpts{
+			Name:    "dingo_block_propagation_delay_seconds",
+			Help:    "delay from block slot time to when the block was applied to the chain",
+			Buckets: []float64{0.1, 0.2, 0.3, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 5.0, 10.0, 30.0},
 		},
 	)
 }

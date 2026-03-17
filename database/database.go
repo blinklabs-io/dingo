@@ -228,6 +228,11 @@ func New(
 	if loggerSetter, ok := blobPlugin.(plugin.LoggerSetter); ok {
 		loggerSetter.SetLogger(configCopy.Logger)
 	}
+	if configCopy.PromRegistry != nil {
+		if registrySetter, ok := blobPlugin.(plugin.PromRegistrySetter); ok {
+			registrySetter.SetPromRegistry(configCopy.PromRegistry)
+		}
+	}
 	if err := blobPlugin.Start(); err != nil {
 		return nil, fmt.Errorf(
 			"starting blob plugin %q: %w",

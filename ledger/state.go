@@ -2523,6 +2523,15 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 					source,
 				)
 			}
+			// Record block propagation delay when at tip
+			if ls.reachedTip {
+				if slotTime, err := ls.SlotToTime(tipForLog.Point.Slot); err == nil {
+					delay := time.Since(slotTime).Seconds()
+					if delay >= 0 {
+						ls.metrics.blockPropagationDelay.Observe(delay)
+					}
+				}
+			}
 			// Periodic sync progress reporting
 			ls.logSyncProgress(tipForLog.Point.Slot)
 		}

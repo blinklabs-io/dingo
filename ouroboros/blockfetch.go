@@ -226,7 +226,12 @@ func (o *Ouroboros) blockfetchClientBlock(
 	if exists {
 		fetchDuration := time.Since(startTime)
 
-		// Only publish block delay metrics after reaching tip once.
+		// Always count blocks received (visible during catchup)
+		if o.metrics != nil {
+			o.metrics.blocksReceivedTotal.Inc()
+		}
+
+		// Only publish delay metrics after reaching tip once.
 		// During catch-up all blocks are naturally "late" relative to
 		// wall-clock time, which permanently poisons the CDF.
 		atTip := o.LedgerState != nil && o.LedgerState.IsAtTip()
@@ -239,10 +244,12 @@ func (o *Ouroboros) blockfetchClientBlock(
 				delaySeconds = fetchDuration.Seconds()
 			}
 
+			// Histogram captures every observation
+			o.metrics.blockDelayHistogram.Observe(delaySeconds)
+			// Gauge for backwards compat
 			o.metrics.blockDelay.Set(delaySeconds)
+
 			total := atomic.AddInt64(&o.metrics.totalBlocksFetched, 1)
-			// Cumulative CDF buckets: each counter includes all
-			// blocks at or below its threshold.
 			if delaySeconds < 1.0 {
 				atomic.AddInt64(&o.metrics.blocksUnder1s, 1)
 			}
@@ -254,22 +261,19 @@ func (o *Ouroboros) blockfetchClientBlock(
 			} else {
 				o.metrics.lateBlocks.Inc()
 			}
-			if total == 1 ||
-				total%blockfetchMetricsCdfUpdateInterval == 0 ||
-				delaySeconds >= 5.0 {
-				under1 := atomic.LoadInt64(&o.metrics.blocksUnder1s)
-				under3 := atomic.LoadInt64(&o.metrics.blocksUnder3s)
-				under5 := atomic.LoadInt64(&o.metrics.blocksUnder5s)
-				o.metrics.blockDelayCdfOne.Set(
-					float64(under1) / float64(total) * 100,
-				)
-				o.metrics.blockDelayCdfThree.Set(
-					float64(under3) / float64(total) * 100,
-				)
-				o.metrics.blockDelayCdfFive.Set(
-					float64(under5) / float64(total) * 100,
-				)
-			}
+			// Update CDF on every block (no more interval throttle)
+			under1 := atomic.LoadInt64(&o.metrics.blocksUnder1s)
+			under3 := atomic.LoadInt64(&o.metrics.blocksUnder3s)
+			under5 := atomic.LoadInt64(&o.metrics.blocksUnder5s)
+			o.metrics.blockDelayCdfOne.Set(
+				float64(under1) / float64(total) * 100,
+			)
+			o.metrics.blockDelayCdfThree.Set(
+				float64(under3) / float64(total) * 100,
+			)
+			o.metrics.blockDelayCdfFive.Set(
+				float64(under5) / float64(total) * 100,
+			)
 		}
 
 		if o.PeerGov != nil {

@@ -418,17 +418,19 @@ func (o *Ouroboros) chainsyncClientRollForward(
 				// Duplicate header already seen from another
 				// client; skip downstream processing but still
 				// refresh peer liveness and update metrics.
-				o.EventBus.Publish(
-					chainselection.PeerTipUpdateEventType,
-					event.NewEvent(
+				if o.ConnManager == nil || !o.ConnManager.IsInboundConnection(ctx.ConnectionId) {
+					o.EventBus.Publish(
 						chainselection.PeerTipUpdateEventType,
-						chainselection.PeerTipUpdateEvent{
-							ConnectionId: ctx.ConnectionId,
-							Tip:          tip,
-							VRFOutput:    vrfOutput,
-						},
-					),
-				)
+						event.NewEvent(
+							chainselection.PeerTipUpdateEventType,
+							chainselection.PeerTipUpdateEvent{
+								ConnectionId: ctx.ConnectionId,
+								Tip:          tip,
+								VRFOutput:    vrfOutput,
+							},
+						),
+					)
+				}
 				o.updateChainsyncMetrics(
 					ctx.ConnectionId,
 					tip,
@@ -436,18 +438,24 @@ func (o *Ouroboros) chainsyncClientRollForward(
 				return nil
 			}
 		}
-		// Publish peer tip update for chain selection
-		o.EventBus.Publish(
-			chainselection.PeerTipUpdateEventType,
-			event.NewEvent(
+		// Publish peer tip update for chain selection (outbound only).
+		// Inbound peers are clients pulling data from us, not sources
+		// of chain truth. Letting them into chain selection causes
+		// oscillation when ephemeral inbound connections report tips
+		// and then disconnect.
+		if o.ConnManager == nil || !o.ConnManager.IsInboundConnection(ctx.ConnectionId) {
+			o.EventBus.Publish(
 				chainselection.PeerTipUpdateEventType,
-				chainselection.PeerTipUpdateEvent{
-					ConnectionId: ctx.ConnectionId,
-					Tip:          tip,
-					VRFOutput:    vrfOutput,
-				},
-			),
-		)
+				event.NewEvent(
+					chainselection.PeerTipUpdateEventType,
+					chainselection.PeerTipUpdateEvent{
+						ConnectionId: ctx.ConnectionId,
+						Tip:          tip,
+						VRFOutput:    vrfOutput,
+					},
+				),
+			)
+		}
 		// Only feed ledger from the currently selected chainsync
 		// connection to avoid overloading the ledger subscriber
 		// queue with non-active peer traffic.

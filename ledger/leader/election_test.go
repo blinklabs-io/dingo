@@ -453,3 +453,60 @@ func TestElectionConcurrentAccess(t *testing.T) {
 		<-done
 	}
 }
+
+func TestShouldProduceBlockInlineVRFFallback(t *testing.T) {
+	poolId := lcommon.PoolKeyHash{}
+	stakeProvider := newMockStakeProvider()
+	stakeProvider.totalStake = 1_000_000
+	stakeProvider.poolStakes[string(poolId[:])] = 1_000_000 // 100% stake
+
+	epochProvider := newMockEpochProvider()
+	epochProvider.currentEpoch.Store(10)
+	epochProvider.activeSlotCoeff = 0.9 // High f for reliable election
+
+	eventBus := event.NewEventBus(nil, nil)
+	defer eventBus.Stop()
+
+	election := NewElection(
+		poolId,
+		electionTestVRFSeed,
+		stakeProvider,
+		epochProvider,
+		eventBus,
+		slog.Default(),
+	)
+
+	// Start the election but DON'T wait for the schedule to be computed.
+	// Instead, immediately clear the schedules map to simulate the case
+	// where no cached schedule exists (e.g., epoch nonce wasn't available
+	// at startup after a mithril restore).
+	err := election.Start(context.Background())
+	require.NoError(t, err)
+	defer func() { _ = election.Stop() }()
+
+	// Overwrite the schedules map so no cached schedule exists for epoch 10.
+	// We must hold the lock to do this safely.
+	election.mu.Lock()
+	election.schedules = make(map[uint64]*Schedule)
+	election.mu.Unlock()
+
+	// With 100% stake and f=0.9, virtually every slot should be a leader
+	// slot. The inline VRF fallback in ShouldProduceBlock should perform
+	// a single-slot VRF check instead of returning false.
+	epochStart := uint64(10) * electionSlotsPerEpoch
+	leaderCount := 0
+	for slot := epochStart; slot < epochStart+electionSlotsPerEpoch; slot++ {
+		if election.ShouldProduceBlock(slot) {
+			leaderCount++
+		}
+	}
+
+	assert.Greater(t, leaderCount, 0,
+		"inline VRF fallback should find at least one leader slot with 100%% stake and f=0.9")
+
+	// With 100% stake and f=0.9, we expect most slots to be leader slots.
+	// Use a generous lower bound of 50% of slots to avoid flakiness.
+	expectedMin := int(electionSlotsPerEpoch) / 2
+	assert.GreaterOrEqual(t, leaderCount, expectedMin,
+		"with 100%% stake and f=0.9, at least half the slots should be leader slots")
+}

@@ -1268,3 +1268,139 @@ func TestSelectBestChainAllowsPlausiblyBehindPeer(t *testing.T) {
 	require.NotNil(t, bestPeer)
 	assert.Equal(t, behindConn, *bestPeer)
 }
+
+func TestIncumbentAdvantageNoSwitchAtEqualBlockNumber(t *testing.T) {
+	eventBus := event.NewEventBus(nil, nil)
+	cs := NewChainSelector(ChainSelectorConfig{
+		EventBus: eventBus,
+	})
+
+	connId1 := newTestConnectionId(1)
+	connId2 := newTestConnectionId(2)
+
+	// Two peers at the same block number but different VRF outputs
+	tip1 := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 100, Hash: []byte("tip1")},
+		BlockNumber: 50,
+	}
+	tip2 := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 100, Hash: []byte("tip2")},
+		BlockNumber: 50,
+	}
+
+	vrfHigher := make64ByteVRF(0xFF)
+	vrfLower := make64ByteVRF(0x00)
+
+	// Add peer 1 with higher VRF and establish it as the best peer
+	cs.UpdatePeerTip(connId1, tip1, vrfHigher)
+	cs.EvaluateAndSwitch()
+	require.NotNil(t, cs.GetBestPeer())
+	assert.Equal(t, connId1, *cs.GetBestPeer())
+
+	// Add peer 2 with lower VRF at the same block number.
+	// SelectBestChain would pick peer 2 (lower VRF), but
+	// EvaluateAndSwitch should NOT switch because the incumbent
+	// is at the same block number.
+	cs.UpdatePeerTip(connId2, tip2, vrfLower)
+	switched := cs.EvaluateAndSwitch()
+
+	assert.False(t, switched, "should not switch away from incumbent at equal block number")
+	assert.Equal(t, connId1, *cs.GetBestPeer(), "incumbent should remain best peer")
+}
+
+func TestIncumbentAdvantageSwitchesWhenBehind(t *testing.T) {
+	cs := NewChainSelector(ChainSelectorConfig{})
+
+	connId1 := newTestConnectionId(1)
+	connId2 := newTestConnectionId(2)
+
+	tip1 := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 100, Hash: []byte("tip1")},
+		BlockNumber: 50,
+	}
+	tip2 := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 101, Hash: []byte("tip2")},
+		BlockNumber: 51, // 1 block ahead
+	}
+
+	// Establish peer 1 as the incumbent
+	cs.UpdatePeerTip(connId1, tip1, nil)
+	cs.EvaluateAndSwitch()
+	require.NotNil(t, cs.GetBestPeer())
+	assert.Equal(t, connId1, *cs.GetBestPeer())
+
+	// Peer 2 is 1 block ahead — should trigger a switch
+	cs.UpdatePeerTip(connId2, tip2, nil)
+
+	// UpdatePeerTip auto-evaluates when a better tip is received,
+	// so the switch should have happened already.
+	require.NotNil(t, cs.GetBestPeer())
+	assert.Equal(t, connId2, *cs.GetBestPeer(), "should switch to peer that is 1 block ahead")
+}
+
+func TestIncumbentAdvantageInitialSelectionStillWorks(t *testing.T) {
+	cs := NewChainSelector(ChainSelectorConfig{})
+
+	connId1 := newTestConnectionId(1)
+	connId2 := newTestConnectionId(2)
+
+	tip1 := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 100, Hash: []byte("tip1")},
+		BlockNumber: 40,
+	}
+	tip2 := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 100, Hash: []byte("tip2")},
+		BlockNumber: 50,
+	}
+
+	// Add both peers before any evaluation — no previous best exists
+	cs.UpdatePeerTip(connId1, tip1, nil)
+	cs.UpdatePeerTip(connId2, tip2, nil)
+
+	// First evaluation with no previous best should pick the best peer
+	switched := cs.EvaluateAndSwitch()
+	// It may or may not report "switched" depending on auto-evaluation
+	// from UpdatePeerTip, but the best peer should be connId2 regardless.
+	_ = switched
+
+	require.NotNil(t, cs.GetBestPeer())
+	assert.Equal(t, connId2, *cs.GetBestPeer(), "initial selection should pick the best peer")
+}
+
+func TestNoOscillationWithMultiplePeersAtSameTip(t *testing.T) {
+	eventBus := event.NewEventBus(nil, nil)
+	cs := NewChainSelector(ChainSelectorConfig{
+		EventBus: eventBus,
+	})
+
+	// 5 peers all at the same block/slot with different VRF outputs
+	const peerCount = 5
+	connIds := make([]ouroboros.ConnectionId, peerCount)
+	for i := range connIds {
+		connIds[i] = newTestConnectionId(i)
+	}
+
+	tip := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 100, Hash: []byte("same")},
+		BlockNumber: 50,
+	}
+
+	for i, connId := range connIds {
+		vrf := make64ByteVRF(byte(i + 1)) // 0x01 through 0x05
+		cs.UpdatePeerTip(connId, tip, vrf)
+	}
+
+	// Initial evaluation to set the best peer
+	cs.EvaluateAndSwitch()
+	require.NotNil(t, cs.GetBestPeer())
+	initialBest := *cs.GetBestPeer()
+
+	// Call EvaluateAndSwitch 100 times. The best peer should never change
+	// because incumbent advantage prevents switching at equal block number.
+	for i := 0; i < 100; i++ {
+		switched := cs.EvaluateAndSwitch()
+		assert.False(t, switched, "iteration %d: should not switch", i)
+		assert.Equal(t, initialBest, *cs.GetBestPeer(),
+			"iteration %d: best peer should remain stable", i)
+	}
+}
