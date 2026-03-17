@@ -26,6 +26,8 @@ import (
 	"testing"
 	"time"
 
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	pcommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -33,6 +35,7 @@ import (
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 )
 
@@ -704,6 +707,328 @@ func TestCalculateStabilityWindow_LargeValues(t *testing.T) {
 	if result != expectedWindow {
 		t.Errorf("expected stability window %d, got %d", expectedWindow, result)
 	}
+}
+
+func newNonceReadyTestConfig(t *testing.T) *cardano.CardanoNodeConfig {
+	t.Helper()
+
+	byronGenesisJSON := `{
+		"protocolConsts": {
+			"k": 432,
+			"protocolMagic": 2
+		}
+	}`
+	shelleyGenesisJSON := `{
+		"activeSlotsCoeff": 0.5,
+		"securityParam": 1,
+		"systemStart": "2022-10-25T00:00:00Z"
+	}`
+
+	cfg := &cardano.CardanoNodeConfig{
+		ShelleyGenesisHash: strings.Repeat("11", 32),
+	}
+	require.NoError(
+		t,
+		cfg.LoadByronGenesisFromReader(strings.NewReader(byronGenesisJSON)),
+	)
+	require.NoError(
+		t,
+		cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)),
+	)
+	return cfg
+}
+
+func newNonceReadyTestLedgerState(
+	t *testing.T,
+	eventBus *event.EventBus,
+	tipSlot uint64,
+) *LedgerState {
+	t.Helper()
+
+	return &LedgerState{
+		currentEra: eras.ShelleyEraDesc,
+		currentEpoch: models.Epoch{
+			EpochId:             10,
+			StartSlot:           1000,
+			LengthInSlots:       100,
+			Nonce:               nil,
+			EvolvingNonce:       []byte{0x02},
+			CandidateNonce:      []byte{0x03},
+			LastEpochBlockNonce: []byte{0x04},
+		},
+		currentTip: ochainsync.Tip{
+			Point: ocommon.Point{
+				Slot: tipSlot,
+			},
+		},
+		config: LedgerStateConfig{
+			CardanoNodeConfig: newNonceReadyTestConfig(t),
+			EventBus:          eventBus,
+			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+}
+
+func TestNextEpochNonceReadyCutoffSlot(t *testing.T) {
+	byronGenesisJSON := `{
+		"protocolConsts": {
+			"k": 432,
+			"protocolMagic": 2
+		}
+	}`
+	shelleyGenesisJSON := `{
+		"activeSlotsCoeff": 0.05,
+		"securityParam": 432,
+		"systemStart": "2022-10-25T00:00:00Z"
+	}`
+
+	cfg := &cardano.CardanoNodeConfig{}
+	require.NoError(
+		t,
+		cfg.LoadByronGenesisFromReader(strings.NewReader(byronGenesisJSON)),
+	)
+	require.NoError(
+		t,
+		cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)),
+	)
+
+	ls := &LedgerState{
+		currentEra: eras.ShelleyEraDesc,
+		config: LedgerStateConfig{
+			CardanoNodeConfig: cfg,
+			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+
+	cutoffSlot, ok := ls.nextEpochNonceReadyCutoffSlot(models.Epoch{
+		EpochId:       1238,
+		StartSlot:     106963200,
+		LengthInSlots: 86400,
+	})
+	require.True(t, ok)
+	assert.Equal(t, uint64(107015040), cutoffSlot)
+}
+
+func TestNextEpochNonceReadyEpoch(t *testing.T) {
+	byronGenesisJSON := `{
+		"protocolConsts": {
+			"k": 432,
+			"protocolMagic": 2
+		}
+	}`
+	shelleyGenesisJSON := `{
+		"activeSlotsCoeff": 0.5,
+		"securityParam": 1,
+		"systemStart": "2022-10-25T00:00:00Z"
+	}`
+
+	cfg := &cardano.CardanoNodeConfig{
+		ShelleyGenesisHash: strings.Repeat("11", 32),
+	}
+	require.NoError(
+		t,
+		cfg.LoadByronGenesisFromReader(strings.NewReader(byronGenesisJSON)),
+	)
+	require.NoError(
+		t,
+		cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)),
+	)
+
+	currentSlot := uint64(1095)
+	provider := newMockSlotTimeProvider(
+		time.Now().Add(-time.Duration(currentSlot)*time.Second),
+		time.Second,
+		100,
+	)
+	clock := NewSlotClock(provider, DefaultSlotClockConfig())
+	clock.nowFunc = func() time.Time {
+		return provider.systemStart.Add(time.Duration(currentSlot) * time.Second)
+	}
+
+	ls := &LedgerState{
+		currentEra: eras.ShelleyEraDesc,
+		currentEpoch: models.Epoch{
+			EpochId:             10,
+			StartSlot:           1000,
+			LengthInSlots:       100,
+			Nonce:               nil,
+			EvolvingNonce:       []byte{0x02},
+			CandidateNonce:      []byte{0x03},
+			LastEpochBlockNonce: []byte{0x04},
+		},
+		currentTip: ochainsync.Tip{
+			Point: ocommon.Point{
+				Slot: 1095,
+			},
+		},
+		slotClock: clock,
+		config: LedgerStateConfig{
+			CardanoNodeConfig: cfg,
+			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+	ls.syncUpstreamTipSlot.Store(1100)
+
+	readyEpoch, ok := ls.NextEpochNonceReadyEpoch()
+	require.True(t, ok)
+	assert.Equal(t, uint64(11), readyEpoch)
+}
+
+func TestNextEpochNonceReadyEpochNotReadyBeforeCutoff(t *testing.T) {
+	byronGenesisJSON := `{
+		"protocolConsts": {
+			"k": 432,
+			"protocolMagic": 2
+		}
+	}`
+	shelleyGenesisJSON := `{
+		"activeSlotsCoeff": 0.5,
+		"securityParam": 1,
+		"systemStart": "2022-10-25T00:00:00Z"
+	}`
+
+	cfg := &cardano.CardanoNodeConfig{
+		ShelleyGenesisHash: strings.Repeat("11", 32),
+	}
+	require.NoError(
+		t,
+		cfg.LoadByronGenesisFromReader(strings.NewReader(byronGenesisJSON)),
+	)
+	require.NoError(
+		t,
+		cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)),
+	)
+
+	currentSlot := uint64(1085)
+	provider := newMockSlotTimeProvider(
+		time.Now().Add(-time.Duration(currentSlot)*time.Second),
+		time.Second,
+		100,
+	)
+	clock := NewSlotClock(provider, DefaultSlotClockConfig())
+	clock.nowFunc = func() time.Time {
+		return provider.systemStart.Add(time.Duration(currentSlot) * time.Second)
+	}
+
+	ls := &LedgerState{
+		currentEra: eras.ShelleyEraDesc,
+		currentEpoch: models.Epoch{
+			EpochId:             10,
+			StartSlot:           1000,
+			LengthInSlots:       100,
+			Nonce:               nil,
+			EvolvingNonce:       []byte{0x02},
+			CandidateNonce:      []byte{0x03},
+			LastEpochBlockNonce: []byte{0x04},
+		},
+		currentTip: ochainsync.Tip{
+			Point: ocommon.Point{
+				Slot: 1085,
+			},
+		},
+		slotClock: clock,
+		config: LedgerStateConfig{
+			CardanoNodeConfig: cfg,
+			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+	ls.syncUpstreamTipSlot.Store(1100)
+
+	readyEpoch, ok := ls.NextEpochNonceReadyEpoch()
+	require.False(t, ok)
+	assert.Equal(t, uint64(0), readyEpoch)
+}
+
+func TestEmitNextEpochNonceReadyRequiresLedgerTipAtCutoff(t *testing.T) {
+	eventBus := event.NewEventBus(nil, nil)
+	defer eventBus.Stop()
+
+	_, evtCh := eventBus.Subscribe(event.EpochNonceReadyEventType)
+	ls := newNonceReadyTestLedgerState(t, eventBus, 1085)
+
+	ls.emitNextEpochNonceReady(
+		slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		SlotTick{Slot: 1095, Epoch: 10},
+		ls.currentEpoch,
+		ls.currentEra,
+		1085,
+	)
+
+	select {
+	case evt := <-evtCh:
+		t.Fatalf("unexpected nonce-ready event published: %#v", evt)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	assert.Equal(t, uint64(0), ls.nextNonceReadyEpoch.Load())
+}
+
+func TestResetNextEpochNonceReadyAllowsReEmit(t *testing.T) {
+	eventBus := event.NewEventBus(nil, nil)
+	defer eventBus.Stop()
+
+	_, evtCh := eventBus.Subscribe(event.EpochNonceReadyEventType)
+	ls := newNonceReadyTestLedgerState(t, eventBus, 1095)
+	ls.nextNonceReadyEpoch.Store(11)
+	ls.resetNextEpochNonceReady()
+
+	ls.emitNextEpochNonceReady(
+		slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		SlotTick{Slot: 1095, Epoch: 10},
+		ls.currentEpoch,
+		ls.currentEra,
+		1095,
+	)
+
+	select {
+	case evt := <-evtCh:
+		readyEvent, ok := evt.Data.(event.EpochNonceReadyEvent)
+		require.True(t, ok)
+		assert.Equal(t, uint64(10), readyEvent.CurrentEpoch)
+		assert.Equal(t, uint64(11), readyEvent.ReadyEpoch)
+	case <-time.After(time.Second):
+		t.Fatal("expected nonce-ready event after rollback reset")
+	}
+}
+
+func TestNextEpochNonceReadyCutoffSlotShortEpoch(t *testing.T) {
+	byronGenesisJSON := `{
+		"protocolConsts": {
+			"k": 432,
+			"protocolMagic": 2
+		}
+	}`
+	shelleyGenesisJSON := `{
+		"activeSlotsCoeff": 0.05,
+		"securityParam": 432,
+		"systemStart": "2022-10-25T00:00:00Z"
+	}`
+
+	cfg := &cardano.CardanoNodeConfig{}
+	require.NoError(
+		t,
+		cfg.LoadByronGenesisFromReader(strings.NewReader(byronGenesisJSON)),
+	)
+	require.NoError(
+		t,
+		cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)),
+	)
+
+	ls := &LedgerState{
+		currentEra: eras.ShelleyEraDesc,
+		config: LedgerStateConfig{
+			CardanoNodeConfig: cfg,
+			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+
+	cutoffSlot, ok := ls.nextEpochNonceReadyCutoffSlot(models.Epoch{
+		EpochId:       42,
+		StartSlot:     1000,
+		LengthInSlots: 100,
+	})
+	require.True(t, ok)
+	assert.Equal(t, uint64(1000), cutoffSlot)
 }
 
 // TestDatabaseWorkerPoolBasic tests basic worker pool functionality

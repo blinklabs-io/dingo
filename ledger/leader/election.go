@@ -15,6 +15,7 @@
 package leader
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"fmt"
@@ -22,6 +23,7 @@ import (
 	"sync"
 
 	"github.com/blinklabs-io/dingo/event"
+	ledgerpkg "github.com/blinklabs-io/dingo/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
 
@@ -44,11 +46,23 @@ type EpochInfoProvider interface {
 	// EpochNonce returns the nonce for the given epoch.
 	EpochNonce(epoch uint64) []byte
 
+	// NextEpochNonceReadyEpoch reports the next epoch number when the
+	// upcoming epoch's nonce is already stable and its leader schedule can
+	// be precomputed immediately. Returns false when startup should wait
+	// for the normal nonce-ready event path instead.
+	NextEpochNonceReadyEpoch() (uint64, bool)
+
 	// SlotsPerEpoch returns the number of slots in an epoch.
 	SlotsPerEpoch() uint64
 
 	// ActiveSlotCoeff returns the active slot coefficient (f parameter).
 	ActiveSlotCoeff() float64
+}
+
+// ScheduleStore persists computed schedules for later reuse.
+type ScheduleStore interface {
+	LoadSchedule(epoch uint64, poolId lcommon.PoolKeyHash) (*Schedule, error)
+	SaveSchedule(schedule *Schedule) error
 }
 
 // maxCachedSchedules is the number of epoch schedules to keep in memory.
@@ -71,6 +85,7 @@ type Election struct {
 	epochProvider EpochInfoProvider
 	eventBus      *event.EventBus
 	logger        *slog.Logger
+	scheduleStore ScheduleStore
 
 	mu             sync.RWMutex
 	schedules      map[uint64]*Schedule // epoch -> schedule
@@ -79,6 +94,8 @@ type Election struct {
 	stopCh         chan struct{} // signals the monitoring goroutine to exit
 	computeCh      chan uint64   // requests background schedule computation
 	subscriptionId event.EventSubscriberId
+	nonceReadySub  event.EventSubscriberId
+	rollbackSub    event.EventSubscriberId
 }
 
 // NewElection creates a new leader election manager for a stake pool.
@@ -103,13 +120,21 @@ func NewElection(
 	}
 }
 
-// Start begins listening for epoch transitions and maintaining the schedule.
+// SetScheduleStore configures an optional persistent schedule store.
+func (e *Election) SetScheduleStore(store ScheduleStore) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.scheduleStore = store
+}
+
+// Start begins listening for epoch transitions and maintaining schedules.
 // The provided context controls the election's lifecycle. When the context is
 // canceled, the election will automatically stop and clean up resources.
 //
 // The initial schedule for the current epoch is computed asynchronously in
 // the background so Start returns immediately and the forger can begin its
-// slot-aligned loop without delay.
+// slot-aligned loop without delay. The next epoch is queued later, once the
+// ledger reports that its nonce has reached the stability cutoff.
 func (e *Election) Start(ctx context.Context) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -140,15 +165,51 @@ func (e *Election) Start(ctx context.Context) error {
 	} else {
 		go e.epochTransitionLoop(ctx, evtCh)
 	}
+
+	var nonceReadyCh <-chan event.Event
+	e.nonceReadySub, nonceReadyCh = e.eventBus.Subscribe(
+		event.EpochNonceReadyEventType,
+	)
+	if nonceReadyCh == nil {
+		e.logger.Warn(
+			"event bus not available, next-epoch precompute will not be tracked",
+			"component", "leader",
+		)
+	} else {
+		go e.epochNonceReadyLoop(ctx, nonceReadyCh)
+	}
+
+	var rollbackCh <-chan event.Event
+	e.rollbackSub, rollbackCh = e.eventBus.Subscribe(
+		ledgerpkg.PoolStateRestoredEventType,
+	)
+	if rollbackCh == nil {
+		e.logger.Warn(
+			"event bus not available, rollback invalidation will not be tracked",
+			"component", "leader",
+		)
+	} else {
+		go e.rollbackLoop(ctx, rollbackCh)
+	}
 	go e.scheduleComputeLoop(ctx, e.computeCh)
 
 	// Kick off initial schedule computation for the current epoch.
-	// The next epoch's schedule cannot be pre-computed because
-	// its nonce depends on the stability window passing first.
 	currentEpoch := e.epochProvider.CurrentEpoch()
 	select {
 	case e.computeCh <- currentEpoch:
 	default:
+	}
+	if nextEpoch, ok := e.epochProvider.NextEpochNonceReadyEpoch(); ok {
+		select {
+		case e.computeCh <- nextEpoch:
+		default:
+		}
+		e.logger.Info(
+			"next epoch nonce already stable at startup, precomputing leader schedule",
+			"component", "leader",
+			"current_epoch", currentEpoch,
+			"ready_epoch", nextEpoch,
+		)
 	}
 
 	// Monitor context cancellation to automatically stop.
@@ -227,6 +288,83 @@ func (e *Election) epochTransitionLoop(
 	}
 }
 
+func (e *Election) epochNonceReadyLoop(
+	ctx context.Context,
+	evtCh <-chan event.Event,
+) {
+	for evt := range evtCh {
+		latest := evt
+	drain:
+		for {
+			select {
+			case newer, ok := <-evtCh:
+				if !ok {
+					return
+				}
+				latest = newer
+			default:
+				break drain
+			}
+		}
+
+		if ctx.Err() != nil {
+			return
+		}
+
+		readyEvent, ok := latest.Data.(event.EpochNonceReadyEvent)
+		if !ok {
+			e.logger.Error(
+				"invalid event data for epoch nonce readiness",
+				"component", "leader",
+			)
+			continue
+		}
+
+		e.logger.Info(
+			"next epoch nonce is stable, precomputing leader schedule",
+			"component", "leader",
+			"current_epoch", readyEvent.CurrentEpoch,
+			"ready_epoch", readyEvent.ReadyEpoch,
+			"cutoff_slot", readyEvent.CutoffSlot,
+		)
+		e.queueScheduleCompute(readyEvent.ReadyEpoch)
+	}
+}
+
+func (e *Election) rollbackLoop(
+	ctx context.Context,
+	evtCh <-chan event.Event,
+) {
+	for evt := range evtCh {
+		if ctx.Err() != nil {
+			return
+		}
+
+		restoreEvent, ok := evt.Data.(ledgerpkg.PoolStateRestoredEvent)
+		if !ok {
+			e.logger.Error(
+				"invalid event data for rollback restoration",
+				"component", "leader",
+			)
+			continue
+		}
+
+		cleared := e.clearSchedules()
+		currentEpoch := e.epochProvider.CurrentEpoch()
+		e.logger.Info(
+			"ledger rollback restored state, invalidating leader schedules",
+			"component", "leader",
+			"rollback_slot", restoreEvent.Slot,
+			"cleared_schedules", cleared,
+			"current_epoch", currentEpoch,
+		)
+		e.queueScheduleCompute(currentEpoch)
+		if nextEpoch, ok := e.epochProvider.NextEpochNonceReadyEpoch(); ok {
+			e.queueScheduleCompute(nextEpoch)
+		}
+	}
+}
+
 // scheduleComputeLoop processes background schedule computation requests.
 // When ShouldProduceBlock detects a missing schedule for a slot's epoch,
 // it sends the epoch number to computeCh. This goroutine picks it up and
@@ -295,6 +433,20 @@ func (e *Election) Stop() error {
 		)
 		e.subscriptionId = 0
 	}
+	if e.nonceReadySub != 0 {
+		e.eventBus.Unsubscribe(
+			event.EpochNonceReadyEventType,
+			e.nonceReadySub,
+		)
+		e.nonceReadySub = 0
+	}
+	if e.rollbackSub != 0 {
+		e.eventBus.Unsubscribe(
+			ledgerpkg.PoolStateRestoredEventType,
+			e.rollbackSub,
+		)
+		e.rollbackSub = 0
+	}
 	e.running = false
 	e.schedules = nil
 
@@ -322,6 +474,35 @@ func (e *Election) RefreshScheduleForEpoch(
 		return nil
 	}
 
+	if schedule, err := e.loadPersistedSchedule(epoch); err != nil {
+		e.logger.Warn(
+			"failed to load persisted leader schedule",
+			"component", "leader",
+			"epoch", epoch,
+			"error", err,
+		)
+	} else if schedule != nil {
+		valid, reason, err := e.validatePersistedSchedule(epoch, schedule)
+		if err != nil {
+			e.logger.Warn(
+				"failed to validate persisted leader schedule",
+				"component", "leader",
+				"epoch", epoch,
+				"error", err,
+			)
+		} else if valid {
+			e.storeSchedule(epoch, schedule)
+			return nil
+		} else {
+			e.logger.Info(
+				"ignoring stale persisted leader schedule",
+				"component", "leader",
+				"epoch", epoch,
+				"reason", reason,
+			)
+		}
+	}
+
 	schedule, err := e.computeSchedule(ctx, epoch)
 	if err != nil {
 		return err
@@ -330,7 +511,103 @@ func (e *Election) RefreshScheduleForEpoch(
 		return nil // no stake or nonce not available
 	}
 	e.storeSchedule(epoch, schedule)
+	e.persistSchedule(schedule)
 	return nil
+}
+
+func (e *Election) loadPersistedSchedule(
+	epoch uint64,
+) (*Schedule, error) {
+	e.mu.RLock()
+	store := e.scheduleStore
+	e.mu.RUnlock()
+	if store == nil {
+		return nil, nil
+	}
+	schedule, err := store.LoadSchedule(epoch, e.poolId)
+	if err != nil {
+		return nil, err
+	}
+	if schedule == nil {
+		return nil, nil
+	}
+	e.logger.Info(
+		"loaded persisted leader schedule",
+		"component", "leader",
+		"epoch", epoch,
+		"leader_slots", schedule.SlotCount(),
+		"leader_slot_list", schedule.LeaderSlotsSnapshot(),
+	)
+	return schedule, nil
+}
+
+func (e *Election) validatePersistedSchedule(
+	epoch uint64,
+	schedule *Schedule,
+) (bool, string, error) {
+	if schedule == nil {
+		return false, "schedule missing", nil
+	}
+
+	expectedNonce := e.epochProvider.EpochNonce(epoch)
+	if len(expectedNonce) == 0 {
+		return false, "epoch nonce unavailable", nil
+	}
+	if !bytes.Equal(expectedNonce, schedule.EpochNonce) {
+		return false, "epoch nonce changed", nil
+	}
+
+	snapshotEpoch := scheduleSnapshotEpoch(epoch)
+	poolStake, err := e.stakeProvider.GetPoolStake(snapshotEpoch, e.poolId[:])
+	if err != nil {
+		return false, "", fmt.Errorf(
+			"get pool stake for epoch %d: %w",
+			snapshotEpoch,
+			err,
+		)
+	}
+	if poolStake != schedule.PoolStake {
+		return false, "pool stake changed", nil
+	}
+
+	totalStake, err := e.stakeProvider.GetTotalActiveStake(snapshotEpoch)
+	if err != nil {
+		return false, "", fmt.Errorf(
+			"get total stake for epoch %d: %w",
+			snapshotEpoch,
+			err,
+		)
+	}
+	if totalStake != schedule.TotalStake {
+		return false, "total stake changed", nil
+	}
+
+	return true, "", nil
+}
+
+func (e *Election) persistSchedule(schedule *Schedule) {
+	e.mu.RLock()
+	store := e.scheduleStore
+	e.mu.RUnlock()
+	if store == nil || schedule == nil {
+		return
+	}
+	if err := store.SaveSchedule(schedule); err != nil {
+		e.logger.Warn(
+			"failed to persist leader schedule",
+			"component", "leader",
+			"epoch", schedule.Epoch,
+			"error", err,
+		)
+		return
+	}
+	e.logger.Info(
+		"persisted leader schedule",
+		"component", "leader",
+		"epoch", schedule.Epoch,
+		"leader_slots", schedule.SlotCount(),
+		"leader_slot_list", schedule.LeaderSlotsSnapshot(),
+	)
 }
 
 // computeSchedule gathers stake data, epoch nonce, and runs VRF for every
@@ -348,10 +625,7 @@ func (e *Election) computeSchedule(
 	// For genesis epochs (0 and 1), use the genesis snapshot directly.
 	// The Cardano spec uses genesis staking for leader election until
 	// the first Mark→Set→Go rotation completes at epoch 2.
-	var snapshotEpoch uint64
-	if currentEpoch >= 2 {
-		snapshotEpoch = currentEpoch - 2
-	}
+	snapshotEpoch := scheduleSnapshotEpoch(currentEpoch)
 
 	// Get pool stake from Go snapshot
 	poolStake, err := e.stakeProvider.GetPoolStake(snapshotEpoch, e.poolId[:])
@@ -433,9 +707,17 @@ func (e *Election) computeSchedule(
 		"total_stake", totalStake,
 		"stake_ratio", schedule.StakeRatio(),
 		"leader_slots", schedule.SlotCount(),
+		"leader_slot_list", schedule.LeaderSlotsSnapshot(),
 	)
 
 	return schedule, nil
+}
+
+func scheduleSnapshotEpoch(epoch uint64) uint64 {
+	if epoch < 2 {
+		return 0
+	}
+	return epoch - 2
 }
 
 // storeSchedule saves a computed schedule under a brief write lock and
@@ -455,6 +737,31 @@ func (e *Election) storeSchedule(epoch uint64, schedule *Schedule) {
 			ep < epoch-maxCachedSchedules+1 {
 			delete(e.schedules, ep)
 		}
+	}
+}
+
+func (e *Election) clearSchedules() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	if !e.running || e.schedules == nil {
+		return 0
+	}
+	count := len(e.schedules)
+	clear(e.schedules)
+	return count
+}
+
+func (e *Election) queueScheduleCompute(epoch uint64) {
+	e.mu.RLock()
+	computeCh := e.computeCh
+	e.mu.RUnlock()
+	if computeCh == nil {
+		return
+	}
+	select {
+	case computeCh <- epoch:
+	default:
 	}
 }
 
@@ -487,11 +794,7 @@ func (e *Election) ShouldProduceBlock(slot uint64) bool {
 			"epoch", slotEpoch,
 		)
 		if computeCh != nil {
-			select {
-			case computeCh <- slotEpoch:
-			default:
-				// Request already pending
-			}
+			e.queueScheduleCompute(slotEpoch)
 		}
 		return false
 	}
