@@ -1,6 +1,42 @@
 # Release Notes
 
 
+## v0.27.2 (March 16, 2026)
+
+**Title:** Updates and polish
+
+**Date:** March 16, 2026
+
+**Version:** v0.27.2
+
+Hi folks! Here’s what we shipped in v0.27.2.
+
+{
+  "✨ What's New": [
+    "The relay now publishes events from snapshots and shuts down cleanly without dropping in-flight work. Internally, this adds snapshot-based event publishing, asynchronous shutdown semantics, and new targeted benchmarks for connmanager/peergov/event/ledger behavior."
+  ],
+  "💪 Improvements": [
+    "Network-facing services are now more resilient under slow or stalled connections. The Bark, Blockfrost, and UTxO RPC HTTP servers now enforce write/read/idle timeouts.",
+    "Peer and connection management operations are now faster and use fewer resources on constrained machines. This speeds up relay inbound host lookups and connection/peer governance, tightens Badger core cache defaults for smaller hosts, and adds Pi-oriented sizing guidance plus expanded benchmark/reporting coverage.",
+    "Block production key period handling is now more consistent across configurations. KES period calculations in UpdateKESPeriod and KESSign now convert absolute periods to opcert-relative periods, with additional validation and tests for offsets and edge cases.",
+    "Test runs are more effective at catching concurrency bugs earlier in CI. The Linux test job now enables the Go race detector to detect data races during automated testing."
+  ],
+  "📋 What You Need to Know": [
+    "Release documentation for this patch was updated to reflect the final set of changes. A detailed v0.27.1 section was added to RELEASE_NOTES.md.",
+    "Build provenance configuration was updated to match current GitHub tooling and image naming. GitHub Actions attestation steps now use actions/attest, and the Docker Hub subject names were updated accordingly."
+  ],
+  "🔧 Fixes": [
+    "The system no longer risks blocking or inconsistent reads when multiple components access core chain state at once. Primary chain access and current protocol parameter access are now protected with read locks.",
+    "Nonce reuse is now safer and less prone to subtle consensus issues. Epoch nonce cache entries are now validated against the currently provided nonce before they are reused.",
+    "Malformed block metadata no longer crashes the process during encoding. PrevHash length validation now returns an error instead of panicking, and callers and tests were updated accordingly.",
+    "Database maintenance now actually completes as intended rather than being staged but not executed. SQLite VACUUM is now run instead of only being prepared."
+  ]
+}
+
+
+---
+
+
 ## v0.27.1 (March 16, 2026)
 
 **Title:** Smoother reconnects and safer chain-sync
