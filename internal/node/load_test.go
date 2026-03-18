@@ -2,10 +2,20 @@ package node
 
 import (
 	"bytes"
+	"context"
+	"io"
+	"log/slog"
+	"path/filepath"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/chain"
+	"github.com/blinklabs-io/dingo/database/immutable"
 	gcbor "github.com/blinklabs-io/gouroboros/cbor"
+	gledger "github.com/blinklabs-io/gouroboros/ledger"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	fxcbor "github.com/fxamacker/cbor/v2"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestExtractHeaderCbor(t *testing.T) {
@@ -116,4 +126,80 @@ func TestCborArrayHeaderLen(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestCopyBlocksRaw_PreservesByronEbbLinkageAtOrigin(t *testing.T) {
+	t.Parallel()
+
+	immutableDir := filepath.Join(
+		"..",
+		"..",
+		"database",
+		"immutable",
+		"testdata",
+	)
+	imm, err := immutable.New(immutableDir)
+	require.NoError(t, err)
+	iter, err := imm.BlocksFromPoint(ocommon.Point{Slot: 0, Hash: []byte{}})
+	require.NoError(t, err)
+	defer iter.Close()
+
+	ebbBlock, err := iter.Next()
+	require.NoError(t, err)
+	require.NotNil(t, ebbBlock)
+	require.True(t, ebbBlock.IsEbb)
+
+	nextBlock, err := iter.Next()
+	require.NoError(t, err)
+	require.NotNil(t, nextBlock)
+
+	ebbHeader, err := decodeImmutableBlockHeader(ebbBlock)
+	require.NoError(t, err)
+	nextHeader, err := decodeImmutableBlockHeader(nextBlock)
+	require.NoError(t, err)
+	require.Equal(
+		t,
+		ebbHeader.Hash().Bytes(),
+		nextHeader.PrevHash().Bytes(),
+	)
+
+	db := newTestDB(t)
+	cm, err := chain.NewManager(db, nil)
+	require.NoError(t, err)
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	blocksCopied, _, err := copyBlocksRaw(
+		context.Background(),
+		logger,
+		immutableDir,
+		cm.PrimaryChain(),
+	)
+	require.NoError(t, err)
+	require.Greater(t, blocksCopied, 1)
+
+	ebbPoint := ocommon.NewPoint(
+		ebbHeader.SlotNumber(),
+		ebbHeader.Hash().Bytes(),
+	)
+	importedEbb, err := cm.BlockByPoint(ebbPoint, nil)
+	require.NoError(t, err)
+	assert.Equal(t, ebbPoint.Hash, importedEbb.Hash)
+
+	nextPoint := ocommon.NewPoint(
+		nextHeader.SlotNumber(),
+		nextHeader.Hash().Bytes(),
+	)
+	importedNext, err := cm.BlockByPoint(nextPoint, nil)
+	require.NoError(t, err)
+	assert.Equal(t, ebbPoint.Hash, importedNext.PrevHash)
+}
+
+func decodeImmutableBlockHeader(
+	block *immutable.Block,
+) (gledger.BlockHeader, error) {
+	headerCbor, err := extractHeaderCbor(block.Cbor)
+	if err != nil {
+		return nil, err
+	}
+	return gledger.NewBlockHeaderFromCbor(block.Type, headerCbor)
 }
