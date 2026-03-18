@@ -205,8 +205,9 @@ func newChainsyncRollbackFixture(t *testing.T) *chainsyncRollbackFixture {
 
 	ls, err := NewLedgerState(
 		LedgerStateConfig{
-			Database:     db,
-			ChainManager: cm,
+			Database:          db,
+			ChainManager:      cm,
+			CardanoNodeConfig: newTestShelleyGenesisCfg(t),
 			Logger: slog.New(
 				slog.NewJSONHandler(io.Discard, nil),
 			),

@@ -445,7 +445,14 @@ func (o *Ouroboros) chainsyncClientRollBackward(
 	point ocommon.Point,
 	tip ochainsync.Tip,
 ) error {
-	if !o.shouldPublishChainsyncToLedger(ctx.ConnectionId) {
+	if o.ConnManager != nil &&
+		o.ConnManager.IsInboundConnection(ctx.ConnectionId) {
+		return nil
+	}
+	if !o.reconcileChainsyncIngressAdmission(
+		ctx.ConnectionId,
+		o.shouldPublishChainsyncToLedger(ctx.ConnectionId),
+	) {
 		return nil
 	}
 	// Generate event
@@ -479,14 +486,18 @@ func (o *Ouroboros) chainsyncClientRollForward(
 		// selection tie-breaking (used in both dedup and normal
 		// paths below).
 		vrfOutput := chainselection.GetVRFOutput(v)
-		ingressEligible := o.shouldPublishChainsyncToLedger(
-			ctx.ConnectionId,
-		)
 		// Inbound connections are clients pulling data from us.
 		// They are not sources of chain truth and should not
 		// influence chain selection or the blockfetch pipeline.
 		isInbound := o.ConnManager != nil &&
 			o.ConnManager.IsInboundConnection(ctx.ConnectionId)
+		ingressEligible := false
+		if !isInbound {
+			ingressEligible = o.reconcileChainsyncIngressAdmission(
+				ctx.ConnectionId,
+				o.shouldPublishChainsyncToLedger(ctx.ConnectionId),
+			)
+		}
 		// Update tracked client state and deduplicate headers.
 		// If this header has already been reported by another
 		// eligible client, skip publishing it into the ledger.
@@ -573,6 +584,79 @@ func (o *Ouroboros) shouldPublishChainsyncToLedger(
 		return true
 	}
 	return o.config.ChainsyncIngressEligible(connId)
+}
+
+func (o *Ouroboros) maxTrackedChainsyncClients() int {
+	maxClients := defaultMaxChainsyncClients
+	if o.ChainsyncState != nil && o.ChainsyncState.MaxClients() > 0 {
+		maxClients = o.ChainsyncState.MaxClients()
+	}
+	return maxClients
+}
+
+func (o *Ouroboros) registerTrackedChainsyncClient(
+	connId ouroboros.ConnectionId,
+	ingressEligible bool,
+) bool {
+	if o.ChainsyncState == nil {
+		return false
+	}
+	if ingressEligible {
+		if o.ChainsyncState.TryAddClientConnId(
+			connId,
+			o.maxTrackedChainsyncClients(),
+		) {
+			return true
+		}
+		if o.ChainsyncState.HasClientConnId(connId) {
+			observabilityOnly, exists := o.ChainsyncState.ClientObservabilityOnly(
+				connId,
+			)
+			if !exists {
+				return false
+			}
+			if observabilityOnly {
+				return o.reconcileChainsyncIngressAdmission(connId, true)
+			}
+			return true
+		}
+		return false
+	}
+	if o.ChainsyncState.TryAddObservedClientConnId(connId) {
+		return true
+	}
+	return o.reconcileChainsyncIngressAdmission(connId, false)
+}
+
+func (o *Ouroboros) reconcileChainsyncIngressAdmission(
+	connId ouroboros.ConnectionId,
+	desiredEligible bool,
+) bool {
+	if o.ChainsyncState == nil {
+		return desiredEligible
+	}
+	observabilityOnly, exists := o.ChainsyncState.ClientObservabilityOnly(
+		connId,
+	)
+	if !exists {
+		return false
+	}
+	if desiredEligible {
+		if !observabilityOnly {
+			return true
+		}
+		if !o.ChainsyncState.SetClientObservabilityOnly(connId, false) {
+			return false
+		}
+		observabilityOnly, exists = o.ChainsyncState.ClientObservabilityOnly(
+			connId,
+		)
+		return exists && !observabilityOnly
+	}
+	if !observabilityOnly {
+		_ = o.ChainsyncState.SetClientObservabilityOnly(connId, true)
+	}
+	return false
 }
 
 // updateChainsyncMetrics calculates and updates ChainSync performance metrics
