@@ -35,7 +35,13 @@ func (d *MetadataStoreSqlite) SavePoolStakeSnapshot(
 	if err != nil {
 		return err
 	}
-	return db.Create(snapshot).Error
+	if err := db.Create(snapshot).Error; err != nil {
+		return fmt.Errorf(
+			"failed to create pool stake snapshot: %w",
+			err,
+		)
+	}
+	return nil
 }
 
 // SavePoolStakeSnapshots saves multiple pool stake snapshots in batch
@@ -253,10 +259,16 @@ func (d *MetadataStoreSqlite) DeletePoolStakeSnapshotsForEpoch(
 	if err != nil {
 		return err
 	}
-	return db.Where(
+	if err := db.Where(
 		"epoch = ? AND snapshot_type = ?",
 		epoch, snapshotType,
-	).Delete(&models.PoolStakeSnapshot{}).Error
+	).Delete(&models.PoolStakeSnapshot{}).Error; err != nil {
+		return fmt.Errorf(
+			"failed to delete pool stake snapshots for epoch: %w",
+			err,
+		)
+	}
+	return nil
 }
 
 // DeletePoolStakeSnapshotsAfterEpoch deletes all pool stake snapshots after a given epoch.
