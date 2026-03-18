@@ -1,6 +1,59 @@
 # Release Notes
 
 
+## v0.27.4 (March 18, 2026)
+
+**Title:** Reliability and usability refinements
+
+**Date:** March 18, 2026
+
+**Version:** v0.27.4
+
+Hi folks! Here’s what we shipped in v0.27.4.
+
+### ✨ What's New
+
+```json
+{
+  "✨ What's New": [
+    "Chain synchronization now recovers more reliably from stalled or unstable network connections so it can keep making progress with less manual intervention. This introduces structured chainsync connection recycling with plateau detection and cooldowns, alongside stricter incumbent retention and a minimum block-difference threshold in chain selection.",
+    "Chain selection now takes peer suitability into account so your node can prefer better candidates and avoid wasting time on poor ones. This adds peer eligibility and priority-aware chain selection with event-driven reevaluation, plus consistent peer cleanup to keep the peer set accurate over time."
+  ],
+  "💪 Improvements": [
+    "Configuration loading no longer fills in a default Cardano configuration path, so your environment stays in full control of what gets configured. The `LoadConfig` behavior was changed to leave `CardanoConfig` empty when not provided, and the test suite was updated to assert the empty value.",
+    "Header processing is now more consistent so the component that downloads blocks can proceed without being blocked by duplicate headers. Chainsync now forwards only deduplicated headers from the active connection to the ledger, ensuring blockfetch can continue.",
+    "Selecting an intersection point with the chain is now more robust, helping synchronization start from the right place more often. Intersect point generation now includes the current tip and deduplicates by `slot+hash`, and ledger intersect logic now returns storage errors when the chain-sampled list is empty (with tests updated accordingly)."
+  ],
+  "📋 What You Need to Know": [
+    "Inbound peers no longer influence which chain is selected, which may change how your node behaves in mixed inbound/outbound topologies. Inbound peers are now excluded from chain selection logic, so only eligible peers are considered for chain choice decisions.",
+    "This release includes documentation-only updates to the project’s release notes, with no direct runtime impact from that specific change. Version v0.27.3 release notes were added to `RELEASE_NOTES.md`."
+  ],
+  "🔧 Fixes": [
+    "Older-era boundary blocks are no longer skipped during block loading, which prevents gaps when importing historical chain data. Byron Epoch Boundary Blocks (EBBs) are now imported instead of being skipped."
+  ]
+}
+
+```
+
+### 💪 Improvements
+
+- **Full changelog:** This release’s categorized items are listed in the raw JSON block above.
+
+### 🔧 Fixes
+
+- **Full changelog:** This release’s categorized items are listed in the raw JSON block above.
+
+### 📋 What You Need to Know
+
+- **Full changelog:** This release’s categorized items are listed in the raw JSON block above.
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
+
 ## v0.27.3 (March 17, 2026)
 
 **Title:** Safer rollbacks and steadier leader election
