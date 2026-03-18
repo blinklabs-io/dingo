@@ -88,8 +88,8 @@ func (p *PeerGovernor) shouldExitBootstrap() (bool, string) {
 	return false, ""
 }
 
-// exitBootstrap reclassifies bootstrap peers as public roots and marks
-// bootstrap as exited.
+// exitBootstrap marks bootstrap as exited while preserving bootstrap-source
+// classification so recovery remains reachable.
 // Acquires p.mu internally and publishes events after releasing it to avoid deadlock.
 //
 //nolint:unused // Used by tests
@@ -104,44 +104,46 @@ func (p *PeerGovernor) exitBootstrap(reason string) {
 // exitBootstrapLocked exits bootstrap mode and returns pending events.
 // Must be called with p.mu held.
 func (p *PeerGovernor) exitBootstrapLocked(reason string) []pendingEvent {
-	var events []pendingEvent
+	events := make([]pendingEvent, 0, 1)
 	if p.bootstrapExited {
 		return events
 	}
+	oldBootstrapExited := p.bootstrapExited
 
-	reclassifiedCount := 0
+	preservedCount := 0
+	demotedCount := 0
 	for _, peer := range p.peers {
 		if peer == nil || peer.Source != PeerSourceTopologyBootstrapPeer {
 			continue
 		}
-		prevSource := peer.Source
-		peer.Source = PeerSourceTopologyPublicRoot
-		reclassifiedCount++
+		preservedCount++
 		p.config.Logger.Info(
-			"bootstrap exit: reclassified peer as public root",
+			"bootstrap exit: preserving bootstrap peer source for recovery",
 			"address", peer.Address,
 			"state", peer.State,
 		)
-		events = append(events, pendingEvent{
-			PeerDemotedEventType,
-			PeerStateChangeEvent{
-				Address: peer.Address,
-				Reason:  "bootstrap exit reclassified as public root",
-			},
-		})
-		if p.metrics != nil && prevSource != peer.Source {
-			p.metrics.churnDemotionsBySource.WithLabelValues(
-				prevSource.String(),
-			).Inc()
-		}
 	}
 
 	p.bootstrapExited = true
+	for _, peer := range p.peers {
+		if peer == nil ||
+			peer.Source != PeerSourceTopologyBootstrapPeer ||
+			peer.Connection == nil {
+			continue
+		}
+		events = p.appendChainSelectionEventsLocked(
+			events,
+			oldBootstrapExited,
+			peer.Source,
+			clonePeerConnection(peer.Connection),
+			peer,
+		)
+	}
 	p.lastBootstrapExit = time.Now()
 	p.config.Logger.Info(
 		"exited bootstrap mode",
 		"reason", reason,
-		"reclassified_peers", reclassifiedCount,
+		"preserved_peers", preservedCount,
 	)
 
 	events = append(events, pendingEvent{
@@ -260,7 +262,22 @@ func (p *PeerGovernor) checkBootstrapRecoveryLocked() []pendingEvent {
 	}
 
 	// Re-enable bootstrap peers
+	oldBootstrapExited := p.bootstrapExited
 	p.bootstrapExited = false
+	for _, peer := range p.peers {
+		if peer == nil ||
+			peer.Source != PeerSourceTopologyBootstrapPeer ||
+			peer.Connection == nil {
+			continue
+		}
+		events = p.appendChainSelectionEventsLocked(
+			events,
+			oldBootstrapExited,
+			peer.Source,
+			clonePeerConnection(peer.Connection),
+			peer,
+		)
+	}
 	p.config.Logger.Info(
 		"re-enabling bootstrap peers due to low hot peer count",
 		"hot_count", hotCount,

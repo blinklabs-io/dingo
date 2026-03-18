@@ -33,9 +33,11 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	dbtypes "github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 )
@@ -2135,59 +2137,26 @@ func TestCleanupOrphanedBlobs_SlotZero(t *testing.T) {
 	assert.Error(t, err, "block at slot 1 should be deleted")
 }
 
-func TestReconcilePrimaryChainTipWithLedgerTipPrunesSpeculativeBlocks(
-	t *testing.T,
-) {
-	db, err := database.New(&database.Config{
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
-		DataDir:        "",
-	})
-	require.NoError(t, err)
-	defer db.Close()
-
-	blocks := make([]models.Block, 0, 5)
-	for slot := uint64(1); slot <= 5; slot++ {
-		block := makeTestBlock(slot, slot)
-		if len(blocks) > 0 {
-			block.PrevHash = append([]byte(nil), blocks[len(blocks)-1].Hash...)
-		}
-		blocks = append(blocks, block)
-		require.NoError(t, db.BlockCreate(block, nil))
-	}
-
+func TestIntersectPointsReturnsStorageErrorWhenSampledListIsEmpty(t *testing.T) {
+	db := newTestDB(t)
 	cm, err := chain.NewManager(db, nil)
 	require.NoError(t, err)
-
-	ledgerTipBlock := blocks[2]
-	ledgerTip := ochainsync.Tip{
-		Point:       makeTestPoint(ledgerTipBlock),
-		BlockNumber: ledgerTipBlock.Number,
-	}
-	require.NoError(t, db.SetTip(ledgerTip, nil))
+	txn := db.BlobTxn(true)
+	err = txn.Do(func(txn *database.Txn) error {
+		return db.Blob().Set(
+			txn.Blob(),
+			dbtypes.BlockBlobIndexKey(1),
+			[]byte("bad"),
+		)
+	})
+	require.NoError(t, err)
 
 	ls := &LedgerState{
 		db:    db,
 		chain: cm.PrimaryChain(),
-		config: LedgerStateConfig{
-			ChainManager: cm,
-			Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		},
 	}
-	ls.currentTip = ledgerTip
-	require.NoError(t, ls.reconcilePrimaryChainTipWithLedgerTip())
 
-	chainTip := cm.PrimaryChain().Tip()
-	assert.Equal(t, ledgerTip.Point.Slot, chainTip.Point.Slot)
-	assert.Equal(t, ledgerTip.BlockNumber, chainTip.BlockNumber)
-	assert.Equal(t, ledgerTip.Point.Hash, chainTip.Point.Hash)
-
-	for _, block := range blocks[:3] {
-		_, err := database.BlockByPoint(db, makeTestPoint(block))
-		assert.NoError(t, err, "block at slot %d should still exist", block.Slot)
-	}
-	for _, block := range blocks[3:] {
-		_, err := database.BlockByPoint(db, makeTestPoint(block))
-		assert.Error(t, err, "block at slot %d should be pruned", block.Slot)
-	}
+	points, err := ls.IntersectPoints(4)
+	require.Error(t, err)
+	assert.Nil(t, points)
 }

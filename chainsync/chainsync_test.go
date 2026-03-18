@@ -844,7 +844,7 @@ func TestClearSeenHeadersFrom(t *testing.T) {
 	isNew = s.UpdateClientTip(connB,
 		ocommon.NewPoint(100, []byte("keep")),
 		ochainsync.Tip{Point: ocommon.NewPoint(100, []byte("keep"))})
-	require.True(t, isNew)
+	require.False(t, isNew)
 
 	isNew = s.UpdateClientTip(connB,
 		ocommon.NewPoint(150, []byte("replay")),

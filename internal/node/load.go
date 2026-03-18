@@ -431,16 +431,9 @@ func copyBlocksRaw(
 			if next == nil {
 				break
 			}
-			// Skip EBBs — Byron Epoch Boundary Blocks have a
-			// different header layout that
-			// NewBlockHeaderFromCbor cannot decode. This is
-			// safe for chain continuity because EBBs are not
-			// part of the PrevHash chain: the next regular
-			// block's PrevHash points to the block before
-			// the EBB, not the EBB itself.
-			if next.IsEbb {
-				continue
-			}
+			// EBBs (Byron Epoch Boundary Blocks) must be
+			// imported: the next regular block's PrevHash
+			// references the EBB, not the block before it.
 			// Skip first block when continuing a load operation
 			if blocksCopied == 0 &&
 				next.Slot == chainTip.Point.Slot {

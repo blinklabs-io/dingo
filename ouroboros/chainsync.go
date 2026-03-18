@@ -15,6 +15,7 @@
 package ouroboros
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -106,7 +107,11 @@ func shouldRestartChainsyncOnSwitch(
 	if trackedClient == nil || isOriginPoint(localTip) {
 		return false
 	}
-	return trackedClient.Cursor.Slot > localTip.Slot
+	if trackedClient.Cursor.Slot > localTip.Slot {
+		return true
+	}
+	return trackedClient.Cursor.Slot == localTip.Slot &&
+		!bytes.Equal(trackedClient.Cursor.Hash, localTip.Hash)
 }
 
 func (o *Ouroboros) buildDefaultChainsyncIntersectPoints(
@@ -129,7 +134,10 @@ func (o *Ouroboros) buildDefaultChainsyncIntersectPoints(
 		chainsyncIntersectPointCount,
 	)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf(
+			"LedgerState.IntersectPoints failed: %w",
+			err,
+		)
 	}
 	// Determine start point if we have no stored chain points
 	if len(intersectPoints) == 0 {
@@ -137,7 +145,10 @@ func (o *Ouroboros) buildDefaultChainsyncIntersectPoints(
 			// Start initial chainsync from current chain tip
 			tip, err := conn.ChainSync().Client.GetCurrentTip()
 			if err != nil {
-				return nil, err
+				return nil, fmt.Errorf(
+					"ChainSync.Client.GetCurrentTip failed: %w",
+					err,
+				)
 			}
 			intersectPoints = append(intersectPoints, tip.Point)
 		} else if len(o.config.IntersectPoints) > 0 {
@@ -197,7 +208,10 @@ func (o *Ouroboros) syncChainsyncClient(
 func (o *Ouroboros) RestartChainsyncClient(connId ouroboros.ConnectionId) error {
 	intersectPoints, err := o.buildDefaultChainsyncIntersectPoints(connId)
 	if err != nil {
-		return err
+		return fmt.Errorf(
+			"build default chainsync intersect points: %w",
+			err,
+		)
 	}
 	return o.RestartChainsyncClientWithPoints(connId, intersectPoints)
 }
@@ -234,9 +248,15 @@ func (o *Ouroboros) RestartChainsyncClientWithPoints(
 func (o *Ouroboros) chainsyncClientStart(connId ouroboros.ConnectionId) error {
 	intersectPoints, err := o.buildDefaultChainsyncIntersectPoints(connId)
 	if err != nil {
-		return err
+		return fmt.Errorf(
+			"build default chainsync intersect points for start: %w",
+			err,
+		)
 	}
-	return o.syncChainsyncClient(connId, intersectPoints)
+	if err := o.syncChainsyncClient(connId, intersectPoints); err != nil {
+		return fmt.Errorf("sync chainsync client: %w", err)
+	}
+	return nil
 }
 
 func (o *Ouroboros) chainsyncServerFindIntersect(
@@ -699,7 +719,10 @@ func (o *Ouroboros) ResumeChainsyncOnPeerSwitch(
 	ctx context.Context,
 	connId ouroboros.ConnectionId,
 ) {
-	if o.ConnManager == nil || o.ChainsyncState == nil || o.LedgerState == nil {
+	if o == nil ||
+		o.ConnManager == nil ||
+		o.ChainsyncState == nil ||
+		o.LedgerState == nil {
 		return
 	}
 	localTip := o.LedgerState.Tip()
@@ -751,6 +774,12 @@ func (o *Ouroboros) ResumeChainsyncOnPeerSwitch(
 				"local_tip_slot", localPoint.Slot,
 				"tracked_cursor_slot", trackedClient.Cursor.Slot,
 			)
+			if err := cs.Client.Stop(); err != nil {
+				return fmt.Errorf(
+					"stop chainsync client after intersect fallback: %w",
+					err,
+				)
+			}
 			o.ChainsyncState.ClearSeenHeaders()
 			return o.RestartChainsyncClient(connId)
 		},

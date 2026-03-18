@@ -634,14 +634,14 @@ func (s *State) ClearSeenHeaders() {
 }
 
 // ClearSeenHeadersFrom removes entries from the header deduplication cache
-// at or above the specified slot. This allows a restarted chainsync client
+// above the specified slot. This allows a restarted chainsync client
 // to replay headers beyond a known-good intersect point after an active-peer
 // switch without discarding older fork-detection history.
 func (s *State) ClearSeenHeadersFrom(fromSlot uint64) {
 	s.seenHeadersMutex.Lock()
 	defer s.seenHeadersMutex.Unlock()
 	for slot := range s.seenHeaders {
-		if slot >= fromSlot {
+		if slot > fromSlot {
 			delete(s.seenHeaders, slot)
 		}
 	}
