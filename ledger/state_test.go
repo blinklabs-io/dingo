@@ -29,6 +29,7 @@ import (
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	pcommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -2158,4 +2159,71 @@ func TestIntersectPointsReturnsStorageErrorWhenSampledListIsEmpty(t *testing.T) 
 	points, err := ls.IntersectPoints(4)
 	require.Error(t, err)
 	assert.Nil(t, points)
+}
+
+func TestDensityWindow(t *testing.T) {
+	shelleyGenesisJSON := `{
+		"activeSlotsCoeff": 0.05,
+		"securityParam": 2160
+	}`
+	cfg := &cardano.CardanoNodeConfig{}
+	require.NoError(
+		t,
+		cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)),
+	)
+
+	ls := &LedgerState{
+		currentEra: eras.ShelleyEraDesc,
+		config: LedgerStateConfig{
+			CardanoNodeConfig: cfg,
+			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+	reg := prometheus.NewRegistry()
+	ls.metrics.init(reg)
+
+	// Window size = 3*2160/0.05 = 129600
+
+	// Simulate extending to slot 200000, block 6000
+	// with blocks every ~33 slots (approx 3% density)
+	slot := uint64(70000)
+	blockNum := uint64(2100)
+	for slot <= 200000 {
+		ls.currentTip = ochainsync.Tip{
+			Point:       ocommon.Point{Slot: slot},
+			BlockNumber: blockNum,
+		}
+		ls.updateTipMetrics()
+		slot += 33
+		blockNum++
+	}
+
+	// The window covers slots [200000-129600, 200000] = [70400, 200000]
+	// First entry in window should be around slot 70400
+	assert.Greater(t, len(ls.densityWindow), 0)
+	assert.GreaterOrEqual(t, ls.densityWindow[0].slot, uint64(70390))
+
+	// Verify density is in a reasonable range for ~3% active slots
+	blocksInWindow := ls.currentTip.BlockNumber - ls.densityWindow[0].blockNum + 1
+	calculatedDensity := float64(blocksInWindow) / 129600.0
+	assert.InDelta(t, 0.03, calculatedDensity, 0.005)
+
+	// Test rollback: roll back to slot 199000
+	rollbackSlot := uint64(199000)
+	rollbackBlock := uint64(0)
+	for i := len(ls.densityWindow) - 1; i >= 0; i-- {
+		if ls.densityWindow[i].slot <= rollbackSlot {
+			rollbackBlock = ls.densityWindow[i].blockNum
+			break
+		}
+	}
+	ls.currentTip = ochainsync.Tip{
+		Point:       ocommon.Point{Slot: rollbackSlot},
+		BlockNumber: rollbackBlock,
+	}
+	ls.updateTipMetrics()
+
+	// Window should have trimmed entries past rollback slot
+	lastEntry := ls.densityWindow[len(ls.densityWindow)-1]
+	assert.LessOrEqual(t, lastEntry.slot, rollbackSlot)
 }

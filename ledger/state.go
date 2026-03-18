@@ -471,6 +471,7 @@ type LedgerState struct {
 	checkpointWrittenForEpoch     bool
 	closed                        atomic.Bool
 	inRecovery                    bool // guards against recursive recovery in SubmitAsyncDBTxn
+	densityWindow                 []densityEntry // sliding window for chain density metric
 
 	// Subscription IDs for event bus unsubscribe on close
 	chainsyncSubID   event.EventSubscriberId
@@ -2776,18 +2777,67 @@ func (ls *LedgerState) ledgerProcessBlock(
 	return delta, nil
 }
 
+// densityEntry records a block's slot and block number for the chain density
+// sliding window calculation.
+type densityEntry struct {
+	slot     uint64
+	blockNum uint64
+}
+
 func (ls *LedgerState) updateTipMetrics() {
-	// Update metrics
 	ls.metrics.blockNum.Set(float64(ls.currentTip.BlockNumber))
 	ls.metrics.slotNum.Set(float64(ls.currentTip.Point.Slot))
 	ls.metrics.slotInEpoch.Set(
 		float64(ls.currentTip.Point.Slot - ls.currentEpoch.StartSlot),
 	)
-	// Chain density = blocks / slots (0.0 to 1.0)
-	if ls.currentTip.Point.Slot > 0 {
+	tipSlot := ls.currentTip.Point.Slot
+	tipBlockNum := ls.currentTip.BlockNumber
+
+	// Trim entries beyond current tip (rollbacks)
+	for len(ls.densityWindow) > 0 &&
+		ls.densityWindow[len(ls.densityWindow)-1].slot > tipSlot {
+		ls.densityWindow = ls.densityWindow[:len(ls.densityWindow)-1]
+	}
+	// Append current tip if new
+	if len(ls.densityWindow) == 0 ||
+		ls.densityWindow[len(ls.densityWindow)-1].slot < tipSlot {
+		ls.densityWindow = append(ls.densityWindow, densityEntry{
+			slot:     tipSlot,
+			blockNum: tipBlockNum,
+		})
+	}
+
+	// Chain density over a 3k/f sliding window (matches cardano-node)
+	k := ls.SecurityParam()
+	f := ls.ActiveSlotCoeff()
+	if k > 0 && f > 0 && tipSlot > 0 {
+		windowSize := uint64(float64(3*k) / f)
+		cutoff := uint64(0)
+		if tipSlot > windowSize {
+			cutoff = tipSlot - windowSize
+		}
+		// Prune entries outside the window
+		pruneIdx := 0
+		for pruneIdx < len(ls.densityWindow) &&
+			ls.densityWindow[pruneIdx].slot < cutoff {
+			pruneIdx++
+		}
+		if pruneIdx > 0 {
+			ls.densityWindow = ls.densityWindow[pruneIdx:]
+		}
+		if len(ls.densityWindow) > 0 {
+			blocksInWindow := tipBlockNum -
+				ls.densityWindow[0].blockNum + 1
+			ls.metrics.density.Set(
+				float64(blocksInWindow) / float64(windowSize),
+			)
+		} else {
+			ls.metrics.density.Set(0)
+		}
+	} else if tipSlot > 0 {
+		// Fallback before protocol params are available
 		ls.metrics.density.Set(
-			float64(ls.currentTip.BlockNumber) /
-				float64(ls.currentTip.Point.Slot),
+			float64(tipBlockNum) / float64(tipSlot),
 		)
 	} else {
 		ls.metrics.density.Set(0)
