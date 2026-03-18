@@ -49,32 +49,82 @@ import (
 )
 
 type Node struct {
-	connManager    *connmanager.ConnectionManager
-	peerGov        *peergov.PeerGovernor
-	chainsyncState *chainsync.State
-	chainSelector  *chainselection.ChainSelector
-	eventBus       *event.EventBus
-	mempool        *mempool.Mempool
-	chainManager   *chain.ChainManager
-	db             *database.Database
-	ledgerState    *ledger.LedgerState
-	snapshotMgr    *snapshot.Manager
-	utxorpc        *utxorpc.Utxorpc
-	bark           *bark.Bark
-	blockfrostAPI  *blockfrost.Blockfrost
-	meshAPI        *mesh.Server
-	ouroboros      *ouroborosPkg.Ouroboros
-	blockForger    *forging.BlockForger
-	leaderElection *leader.Election
-	shutdownFuncs  []func(context.Context) error
-	config         Config
-	ctx            context.Context
-	cancel         context.CancelFunc
-	shutdownOnce   sync.Once
+	connManager                      *connmanager.ConnectionManager
+	peerGov                          *peergov.PeerGovernor
+	chainsyncState                   *chainsync.State
+	chainSelector                    *chainselection.ChainSelector
+	eventBus                         *event.EventBus
+	mempool                          *mempool.Mempool
+	chainManager                     *chain.ChainManager
+	db                               *database.Database
+	ledgerState                      *ledger.LedgerState
+	snapshotMgr                      *snapshot.Manager
+	utxorpc                          *utxorpc.Utxorpc
+	bark                             *bark.Bark
+	blockfrostAPI                    *blockfrost.Blockfrost
+	meshAPI                          *mesh.Server
+	ouroboros                        *ouroborosPkg.Ouroboros
+	blockForger                      *forging.BlockForger
+	leaderElection                   *leader.Election
+	shutdownFuncs                    []func(context.Context) error
+	config                           Config
+	ctx                              context.Context
+	cancel                           context.CancelFunc
+	shutdownOnce                     sync.Once
+	chainsyncIngressEligibilityMu    sync.RWMutex
+	chainsyncIngressEligibilityCache map[ouroboros.ConnectionId]bool
 }
 
 func plateauThreshold(stallTimeout time.Duration) time.Duration {
 	return max(2*stallTimeout, 4*time.Minute)
+}
+
+func (n *Node) isChainsyncIngressEligible(
+	connId ouroboros.ConnectionId,
+) bool {
+	n.chainsyncIngressEligibilityMu.RLock()
+	defer n.chainsyncIngressEligibilityMu.RUnlock()
+	if n.chainsyncIngressEligibilityCache == nil {
+		return false
+	}
+	eligible, ok := n.chainsyncIngressEligibilityCache[connId]
+	if !ok {
+		return false
+	}
+	return eligible
+}
+
+func (n *Node) setChainsyncIngressEligibility(
+	connId ouroboros.ConnectionId,
+	eligible bool,
+) {
+	n.chainsyncIngressEligibilityMu.Lock()
+	defer n.chainsyncIngressEligibilityMu.Unlock()
+	if n.chainsyncIngressEligibilityCache == nil {
+		n.chainsyncIngressEligibilityCache = make(
+			map[ouroboros.ConnectionId]bool,
+		)
+	}
+	n.chainsyncIngressEligibilityCache[connId] = eligible
+}
+
+func (n *Node) deleteChainsyncIngressEligibility(
+	connId ouroboros.ConnectionId,
+) {
+	n.chainsyncIngressEligibilityMu.Lock()
+	defer n.chainsyncIngressEligibilityMu.Unlock()
+	if n.chainsyncIngressEligibilityCache == nil {
+		return
+	}
+	delete(n.chainsyncIngressEligibilityCache, connId)
+}
+
+func (n *Node) handlePeerEligibilityChangedEvent(evt event.Event) {
+	e, ok := evt.Data.(peergov.PeerEligibilityChangedEvent)
+	if !ok {
+		return
+	}
+	n.setChainsyncIngressEligibility(e.ConnectionId, e.Eligible)
 }
 
 func shouldRecycleLocalTipPlateau(
@@ -406,17 +456,21 @@ func (n *Node) Run(ctx context.Context) error {
 		return fmt.Errorf("failed to load chain manager: %w", err)
 	}
 	n.chainManager = cm
+	n.chainsyncIngressEligibilityCache = make(
+		map[ouroboros.ConnectionId]bool,
+	)
 	// Initialize Ouroboros
 	n.ouroboros = ouroborosPkg.NewOuroboros(ouroborosPkg.OuroborosConfig{
-		Logger:          n.config.logger,
-		EventBus:        n.eventBus,
-		ConnManager:     n.connManager,
-		NetworkMagic:    n.config.networkMagic,
-		PeerSharing:     n.config.peerSharing,
-		IntersectTip:    n.config.intersectTip,
-		IntersectPoints: n.config.intersectPoints,
-		PromRegistry:    n.config.promRegistry,
-		EnableLeios:     n.config.runMode == runModeLeios,
+		Logger:                   n.config.logger,
+		EventBus:                 n.eventBus,
+		ConnManager:              n.connManager,
+		NetworkMagic:             n.config.networkMagic,
+		PeerSharing:              n.config.peerSharing,
+		IntersectTip:             n.config.intersectTip,
+		IntersectPoints:          n.config.intersectPoints,
+		PromRegistry:             n.config.promRegistry,
+		EnableLeios:              n.config.runMode == runModeLeios,
+		ChainsyncIngressEligible: n.isChainsyncIngressEligible,
 	})
 	// Load state
 	state, err := ledger.NewLedgerState(
@@ -432,7 +486,10 @@ func (n *Node) Run(ctx context.Context) error {
 			BlockfetchRequestRangeFunc: n.ouroboros.BlockfetchClientRequestRange,
 			DatabaseWorkerPoolConfig:   n.config.DatabaseWorkerPoolConfig,
 			GetActiveConnectionFunc: func() *ouroboros.ConnectionId {
-				// Return the active chainsync client connection from chainsync state
+				// Return the current best peer for rollback filtering and
+				// blockfetch fallback. Headers can arrive from any eligible
+				// peer, but rollbacks and retry selection still need a
+				// current best connection.
 				if n.chainsyncState != nil {
 					return n.chainsyncState.GetClientConnId()
 				}
@@ -542,6 +599,14 @@ func (n *Node) Run(ctx context.Context) error {
 	)
 	n.ouroboros.ChainsyncState = n.chainsyncState
 	n.eventBus.SubscribeFunc(
+		peergov.PeerEligibilityChangedEventType,
+		n.handlePeerEligibilityChangedEvent,
+	)
+	n.eventBus.SubscribeFunc(
+		peergov.PeerEligibilityChangedEventType,
+		n.ouroboros.HandlePeerEligibilityChangedEvent,
+	)
+	n.eventBus.SubscribeFunc(
 		chainsync.ClientRemoveRequestedEventType,
 		n.chainsyncState.HandleClientRemoveRequestedEvent,
 	)
@@ -588,6 +653,7 @@ func (n *Node) Run(ctx context.Context) error {
 				return
 			}
 			n.chainSelector.RemovePeer(e.ConnectionId)
+			n.deleteChainsyncIngressEligibility(e.ConnectionId)
 		},
 	)
 	// Start the chain selector

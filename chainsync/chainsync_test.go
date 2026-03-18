@@ -120,6 +120,112 @@ func TestTryAddClientConnId_DuplicateRejected(t *testing.T) {
 	require.Equal(t, 1, s.ClientConnCount())
 }
 
+func TestTryAddObservedClientConnId_DoesNotConsumeEligibleLimit(
+	t *testing.T,
+) {
+	bus := newTestEventBus(t)
+	s := newTestState(t, bus, chainsync.Config{
+		MaxClients:   1,
+		StallTimeout: 30 * time.Second,
+	})
+
+	connObserved := newTestConnId(1)
+	connEligible := newTestConnId(2)
+
+	require.True(t, s.TryAddObservedClientConnId(connObserved))
+	require.True(t, s.TryAddClientConnId(connEligible, 1))
+	require.True(t, s.HasClientConnId(connObserved))
+	require.True(t, s.HasClientConnId(connEligible))
+	require.Equal(t, 1, s.ClientConnCount())
+
+	observabilityOnly, exists := s.ClientObservabilityOnly(connObserved)
+	require.True(t, exists)
+	require.True(t, observabilityOnly)
+
+	active := s.GetClientConnId()
+	require.NotNil(t, active)
+	require.Equal(t, connEligible, *active)
+}
+
+func TestSetClientObservabilityOnly_DemotesPrimary(t *testing.T) {
+	bus := newTestEventBus(t)
+	s := newTestState(t, bus, chainsync.DefaultConfig())
+
+	connA := newTestConnId(1)
+	connB := newTestConnId(2)
+	s.AddClientConnId(connA)
+	s.AddClientConnId(connB)
+	s.SetClientConnId(connA)
+	s.UpdateClientTip(connA,
+		ocommon.NewPoint(500, []byte("ha")),
+		ochainsync.Tip{Point: ocommon.NewPoint(500, []byte("ha"))},
+	)
+	s.UpdateClientTip(connB,
+		ocommon.NewPoint(400, []byte("hb")),
+		ochainsync.Tip{Point: ocommon.NewPoint(400, []byte("hb"))},
+	)
+
+	require.True(t, s.SetClientObservabilityOnly(connA, true))
+	require.Equal(t, 1, s.ClientConnCount())
+
+	observabilityOnly, exists := s.ClientObservabilityOnly(connA)
+	require.True(t, exists)
+	require.True(t, observabilityOnly)
+
+	active := s.GetClientConnId()
+	require.NotNil(t, active)
+	require.Equal(t, connB, *active)
+}
+
+func TestSetClientObservabilityOnly_EligiblePromotionRespectsMaxClients(
+	t *testing.T,
+) {
+	bus := newTestEventBus(t)
+	s := newTestState(t, bus, chainsync.Config{
+		MaxClients:   1,
+		StallTimeout: 30 * time.Second,
+	})
+
+	connObserved := newTestConnId(1)
+	connEligible := newTestConnId(2)
+	require.True(t, s.TryAddObservedClientConnId(connObserved))
+	require.True(t, s.TryAddClientConnId(connEligible, 1))
+
+	require.False(t, s.SetClientObservabilityOnly(connObserved, false))
+
+	observabilityOnly, exists := s.ClientObservabilityOnly(connObserved)
+	require.True(t, exists)
+	require.True(t, observabilityOnly)
+	require.Equal(t, 1, s.ClientConnCount())
+}
+
+func TestSetClientObservabilityOnly_PreservesCurrentActiveClient(
+	t *testing.T,
+) {
+	bus := newTestEventBus(t)
+	s := newTestState(t, bus, chainsync.DefaultConfig())
+
+	connA := newTestConnId(1)
+	connB := newTestConnId(2)
+	s.AddClientConnId(connA)
+	require.True(t, s.TryAddObservedClientConnId(connB))
+	s.SetClientConnId(connA)
+	s.UpdateClientTip(connA,
+		ocommon.NewPoint(100, []byte("ha")),
+		ochainsync.Tip{Point: ocommon.NewPoint(100, []byte("ha"))},
+	)
+	s.UpdateClientTipWithoutDedup(connB,
+		ocommon.NewPoint(500, []byte("hb")),
+		ochainsync.Tip{Point: ocommon.NewPoint(500, []byte("hb"))},
+	)
+
+	require.True(t, s.SetClientObservabilityOnly(connB, false))
+
+	active := s.GetClientConnId()
+	require.NotNil(t, active)
+	require.Equal(t, connA, *active)
+}
+
 func TestAddClientConnId_DuplicatePreservesState(
 	t *testing.T,
 ) {
@@ -604,6 +710,31 @@ func TestStallDetection_PrimaryFailover(t *testing.T) {
 	active := s.GetClientConnId()
 	require.NotNil(t, active)
 	require.Equal(t, connB, *active)
+}
+
+func TestStallDetection_SkipsObservabilityOnlyClient(t *testing.T) {
+	bus := newTestEventBus(t)
+	cfg := chainsync.Config{
+		MaxClients:   1,
+		StallTimeout: 50 * time.Millisecond,
+	}
+	s := newTestState(t, bus, cfg)
+
+	conn := newTestConnId(1)
+	require.True(t, s.TryAddObservedClientConnId(conn))
+	s.UpdateClientTipWithoutDedup(conn,
+		ocommon.NewPoint(100, []byte("ha")),
+		ochainsync.Tip{Point: ocommon.NewPoint(100, []byte("ha"))},
+	)
+
+	require.Eventually(t, func() bool {
+		return len(s.CheckStalledClients()) == 0
+	}, 250*time.Millisecond, 10*time.Millisecond)
+
+	tc := s.GetTrackedClient(conn)
+	require.NotNil(t, tc)
+	require.Equal(t, chainsync.ClientStatusSyncing, tc.Status)
+	require.True(t, tc.ObservabilityOnly)
 }
 
 // --- Client synced tests ---

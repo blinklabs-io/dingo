@@ -492,9 +492,7 @@ type LedgerState struct {
 	syncUpstreamTipSlot  atomic.Uint64 // upstream peer's tip slot
 	nextNonceReadyEpoch  atomic.Uint64 // last ready epoch emitted for next-epoch nonce stability
 
-	// Rate-limiting for non-active connection drop messages (Fix 3)
-	dropEventLastLog    time.Time // last time we logged a drop event
-	dropEventCount      int64     // count of suppressed drop events since last log
+	// Rate-limiting for non-active rollback drop messages
 	dropRollbackLastLog time.Time // last time we logged a drop rollback
 	dropRollbackCount   int64     // count of suppressed drop rollbacks since last log
 

@@ -256,26 +256,29 @@ func (ls *LedgerState) handleConnectionClosedEvent(evt event.Event) {
 }
 
 // detectConnectionSwitch checks for an active connection change and logs a
-// summary of dropped events when a switch is detected. It returns the current
-// active connection ID and whether connection filtering is configured. When
-// configured is false, callers should skip all connection-based filtering.
-func (ls *LedgerState) detectConnectionSwitch() (activeConnId *ouroboros.ConnectionId, configured bool) {
+// summary of dropped rollback events when a switch is detected. It returns the
+// current active connection ID and whether connection filtering is configured.
+// When configured is false, callers should skip all connection-based filtering.
+func (ls *LedgerState) detectConnectionSwitch() (
+	activeConnId *ouroboros.ConnectionId,
+	configured bool,
+	switched bool,
+) {
 	if ls.config.GetActiveConnectionFunc == nil {
-		return nil, false
+		return nil, false, false
 	}
 	activeConnId = ls.config.GetActiveConnectionFunc()
 	if activeConnId != nil &&
 		(ls.lastActiveConnId == nil || *ls.lastActiveConnId != *activeConnId) {
+		switched = true
 		if ls.lastActiveConnId != nil {
 			ls.config.Logger.Info(
 				"active connection changed",
 				"component", "ledger",
 				"previous_connection_id", ls.lastActiveConnId.String(),
 				"new_connection_id", activeConnId.String(),
-				"dropped_headers", ls.dropEventCount,
 				"dropped_rollbacks", ls.dropRollbackCount,
 			)
-			ls.dropEventCount = 0
 			ls.dropRollbackCount = 0
 			ls.headerMismatchCount = 0
 			// Reset blockfetch state, but preserve queued headers. Valid
@@ -305,12 +308,12 @@ func (ls *LedgerState) detectConnectionSwitch() (activeConnId *ouroboros.Connect
 		ls.lastActiveConnId = activeConnId
 		ls.rollbackHistory = nil
 	}
-	return activeConnId, true
+	return activeConnId, true, switched
 }
 
 func (ls *LedgerState) handleEventChainsyncRollback(e ChainsyncEvent) error {
 	// Filter events from non-active connections when chain selection is enabled
-	if activeConnId, configured := ls.detectConnectionSwitch(); configured {
+	if activeConnId, configured, _ := ls.detectConnectionSwitch(); configured {
 		if activeConnId == nil {
 			// If we already have local chain progress, avoid applying
 			// rollback/header events until an active connection is
@@ -510,48 +513,6 @@ func (ls *LedgerState) resetChainsyncResyncState() {
 }
 
 func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
-	// Filter events from non-active connections when chain selection is enabled
-	if activeConnId, configured := ls.detectConnectionSwitch(); configured {
-		if activeConnId == nil {
-			// If we already have local chain progress, avoid applying
-			// events until an active connection is selected.
-			if ls.chain.Tip().Point.Slot > 0 {
-				ls.config.Logger.Debug(
-					"no active connection, dropping event",
-					"connection_id", e.ConnectionId.String(),
-					"slot", e.Point.Slot,
-					"local_tip_slot", ls.chain.Tip().Point.Slot,
-				)
-				return nil
-			}
-			ls.config.Logger.Debug(
-				"no active connection at origin, processing event",
-				"connection_id", e.ConnectionId.String(),
-				"slot", e.Point.Slot,
-			)
-		} else if *activeConnId != e.ConnectionId {
-			// Event is from non-active connection, skip
-			// Rate-limit this message to once per dropEventLogInterval
-			now := time.Now()
-			if now.Sub(ls.dropEventLastLog) >= dropEventLogInterval {
-				suppressed := ls.dropEventCount
-				ls.dropEventCount = 0
-				ls.dropEventLastLog = now
-				ls.config.Logger.Debug(
-					"dropping event from non-active connection",
-					"component", "ledger",
-					"event_connection_id", e.ConnectionId.String(),
-					"active_connection_id", activeConnId.String(),
-					"slot", e.Point.Slot,
-					"suppressed_since_last_log", suppressed,
-				)
-			} else {
-				ls.dropEventCount++
-			}
-			return nil
-		}
-	}
-
 	// Track upstream tip for sync progress reporting
 	if e.Tip.Point.Slot > ls.syncUpstreamTipSlot.Load() {
 		ls.syncUpstreamTipSlot.Store(e.Tip.Point.Slot)
@@ -706,26 +667,16 @@ func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 		return nil
 	}
 	// Mark blockfetch as in progress
-	ls.chainsyncBlockfetchReadyChan = make(chan struct{})
-	ls.activeBlockfetchConnId = e.ConnectionId
 	ls.selectedBlockfetchConnId = e.ConnectionId
-	// Request next bulk range
-	headerStart, headerEnd := ls.chain.HeaderRange(blockfetchBatchSize)
+	initialConnId := ls.selectInitialBlockfetchConn(e.ConnectionId)
 	ls.config.Logger.Debug(
 		"starting blockfetch",
 		"component", "ledger",
-		"header_start_slot", headerStart.Slot,
-		"header_end_slot", headerEnd.Slot,
+		"connection_id", initialConnId.String(),
 		"header_count", ls.chain.HeaderCount(),
 	)
-	err := ls.blockfetchRequestRangeStart(
-		e.ConnectionId,
-		headerStart,
-		headerEnd,
-	)
+	err := ls.startQueuedBlockfetchLocked(initialConnId)
 	if err != nil {
-		ls.blockfetchRequestRangeCleanup()
-		ls.activeBlockfetchConnId = ouroboros.ConnectionId{}
 		return err
 	}
 	return nil
@@ -947,6 +898,42 @@ func (ls *LedgerState) nextBlockfetchConnId() (ouroboros.ConnectionId, bool) {
 		return ouroboros.ConnectionId{}, false
 	}
 	return ls.activeBlockfetchConnId, true
+}
+
+func (ls *LedgerState) nextBlockfetchConnIdExcept(
+	excludedConnId ouroboros.ConnectionId,
+) (ouroboros.ConnectionId, bool) {
+	if ls.selectedBlockfetchConnId != (ouroboros.ConnectionId{}) &&
+		ls.selectedBlockfetchConnId != excludedConnId {
+		return ls.selectedBlockfetchConnId, true
+	}
+	if ls.activeBlockfetchConnId == (ouroboros.ConnectionId{}) ||
+		ls.activeBlockfetchConnId == excludedConnId {
+		return ouroboros.ConnectionId{}, false
+	}
+	return ls.activeBlockfetchConnId, true
+}
+
+func (ls *LedgerState) startQueuedBlockfetchLocked(
+	connId ouroboros.ConnectionId,
+) error {
+	if ls.chain.HeaderCount() == 0 {
+		ls.activeBlockfetchConnId = ouroboros.ConnectionId{}
+		return nil
+	}
+	ls.chainsyncBlockfetchReadyChan = make(chan struct{})
+	ls.activeBlockfetchConnId = connId
+	headerStart, headerEnd := ls.chain.HeaderRange(blockfetchBatchSize)
+	if err := ls.blockfetchRequestRangeStart(
+		connId,
+		headerStart,
+		headerEnd,
+	); err != nil {
+		ls.blockfetchRequestRangeCleanup()
+		ls.activeBlockfetchConnId = ouroboros.ConnectionId{}
+		return err
+	}
+	return nil
 }
 
 func (ls *LedgerState) flushPendingBlockfetchBlocks() error {
@@ -1982,6 +1969,26 @@ func (ls *LedgerState) checkSlotBattle(
 	}
 }
 
+// selectInitialBlockfetchConn starts blockfetch on the same connection that
+// delivered the header. This keeps header and block ingress aligned and leaves
+// room for future selection logic if a different connection becomes preferable.
+func (ls *LedgerState) selectInitialBlockfetchConn(
+	headerConnId ouroboros.ConnectionId,
+) ouroboros.ConnectionId {
+	return headerConnId
+}
+
+func (ls *LedgerState) selectRetryBlockfetchConn(
+	currentConnId ouroboros.ConnectionId,
+) ouroboros.ConnectionId {
+	if ls.config.GetActiveConnectionFunc != nil {
+		if activeConnId := ls.config.GetActiveConnectionFunc(); activeConnId != nil {
+			return *activeConnId
+		}
+	}
+	return currentConnId
+}
+
 func (ls *LedgerState) blockfetchRequestRangeStart(
 	connId ouroboros.ConnectionId,
 	start ocommon.Point,
@@ -2018,16 +2025,7 @@ func (ls *LedgerState) blockfetchRequestRangeStart(
 			if ls.chainsyncBlockfetchTimerGeneration != currentGeneration {
 				return
 			}
-			ls.blockfetchRequestRangeCleanup()
-			ls.activeBlockfetchConnId = ouroboros.ConnectionId{}
-			ls.config.Logger.Info(
-				fmt.Sprintf(
-					"blockfetch operation timed out after %s",
-					blockfetchBusyTimeout,
-				),
-				"component",
-				"ledger",
-			)
+			ls.handleBlockfetchTimeoutLocked(connId)
 		},
 	)
 	return nil
@@ -2049,6 +2047,77 @@ func (ls *LedgerState) blockfetchRequestRangeCleanup() {
 		ls.chainsyncBlockfetchReadyChan = nil
 	}
 	ls.pendingBlockfetchEvents = ls.pendingBlockfetchEvents[:0]
+}
+
+func (ls *LedgerState) handleBlockfetchTimeoutLocked(
+	currentConnId ouroboros.ConnectionId,
+) {
+	headerCount := ls.chain.HeaderCount()
+	if headerCount == 0 {
+		ls.blockfetchRequestRangeCleanup()
+		ls.activeBlockfetchConnId = ouroboros.ConnectionId{}
+		ls.config.Logger.Info(
+			fmt.Sprintf(
+				"blockfetch operation timed out after %s",
+				blockfetchBusyTimeout,
+			),
+			"component",
+			"ledger",
+			"connection_id",
+			currentConnId.String(),
+		)
+		return
+	}
+
+	headerStart, headerEnd := ls.chain.HeaderRange(blockfetchBatchSize)
+	retryConnId := ls.selectRetryBlockfetchConn(currentConnId)
+	ls.blockfetchRequestRangeCleanup()
+	ls.config.Logger.Warn(
+		"blockfetch operation timed out, retrying queued range",
+		"component", "ledger",
+		"previous_connection_id", currentConnId.String(),
+		"retry_connection_id", retryConnId.String(),
+		"header_start_slot", headerStart.Slot,
+		"header_end_slot", headerEnd.Slot,
+		"header_count", headerCount,
+	)
+	if err := ls.startQueuedBlockfetchLocked(retryConnId); err != nil {
+		ls.config.Logger.Error(
+			"failed to retry blockfetch range after timeout",
+			"component", "ledger",
+			"connection_id", retryConnId.String(),
+			"error", err,
+		)
+		if nextConnId, ok := ls.nextBlockfetchConnIdExcept(retryConnId); ok {
+			ls.config.Logger.Warn(
+				"retrying queued range on alternate blockfetch connection",
+				"component", "ledger",
+				"failed_connection_id", retryConnId.String(),
+				"retry_connection_id", nextConnId.String(),
+				"header_count", ls.chain.HeaderCount(),
+			)
+			if retryErr := ls.startQueuedBlockfetchLocked(nextConnId); retryErr != nil {
+				ls.config.Logger.Error(
+					"failed to restart queued blockfetch after timeout retry failure",
+					"component", "ledger",
+					"connection_id", nextConnId.String(),
+					"error", retryErr,
+				)
+				if ls.chain.HeaderCount() > 0 && ls.config.EventBus != nil {
+					ls.config.EventBus.Publish(
+						event.ChainsyncResyncEventType,
+						event.NewEvent(
+							event.ChainsyncResyncEventType,
+							event.ChainsyncResyncEvent{
+								ConnectionId: retryConnId,
+								Reason:       "blockfetch timeout retry failed on all available connections",
+							},
+						),
+					)
+				}
+			}
+		}
+	}
 }
 
 func (ls *LedgerState) handleEventBlockfetchBatchDone(e BlockfetchEvent) error {
@@ -2096,18 +2165,8 @@ func (ls *LedgerState) handleEventBlockfetchBatchDone(e BlockfetchEvent) error {
 		return nil
 	}
 	// Mark blockfetch as in progress for next batch
-	ls.chainsyncBlockfetchReadyChan = make(chan struct{})
-	ls.activeBlockfetchConnId = nextConnId
-	// Request next waiting bulk range using the active connection
-	headerStart, headerEnd := ls.chain.HeaderRange(blockfetchBatchSize)
-	err := ls.blockfetchRequestRangeStart(
-		nextConnId,
-		headerStart,
-		headerEnd,
-	)
+	err := ls.startQueuedBlockfetchLocked(nextConnId)
 	if err != nil {
-		ls.blockfetchRequestRangeCleanup()
-		ls.activeBlockfetchConnId = ouroboros.ConnectionId{}
 		return err
 	}
 	return nil
