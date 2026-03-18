@@ -303,6 +303,23 @@ func (p *PeerGovernor) SetPeerHotByConnId(connId ouroboros.ConnectionId) {
 	}
 }
 
+func (p *PeerGovernor) IsChainSelectionEligible(
+	connId ouroboros.ConnectionId,
+) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	peerIdx := p.peerIndexByConnId(connId)
+	if peerIdx == -1 || p.peers[peerIdx] == nil {
+		return false
+	}
+	return chainSelectionState(
+		p.bootstrapExited,
+		p.peers[peerIdx].Source,
+		p.peers[peerIdx].Connection,
+	).eligible
+}
+
 func clonePeerConnection(conn *PeerConnection) *PeerConnection {
 	if conn == nil {
 		return nil

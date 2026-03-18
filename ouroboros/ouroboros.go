@@ -90,6 +90,11 @@ type OuroborosConfig struct {
 	// mini-protocol. A value of 0 uses DefaultMaxTxSubmissionsPerSecond.
 	// A negative value disables rate limiting.
 	MaxTxSubmissionsPerSecond int
+	// ChainsyncIngressEligible reports whether a peer is allowed to
+	// feed chainsync events into the ledger pipeline. This lets us
+	// keep inbound/public noise out of ledger ingress while still
+	// tracking peer tips separately for selection and observability.
+	ChainsyncIngressEligible func(ouroboros.ConnectionId) bool
 	// Enable experimental Leios protocol support
 	EnableLeios bool
 }
@@ -370,6 +375,22 @@ func (o *Ouroboros) HandleConnClosedEvent(evt event.Event) {
 	}
 }
 
+func (o *Ouroboros) HandlePeerEligibilityChangedEvent(evt event.Event) {
+	e, ok := evt.Data.(peergov.PeerEligibilityChangedEvent)
+	if !ok {
+		o.config.Logger.Warn(
+			"received unexpected event data type for peer eligibility change event",
+			"expected", "peergov.PeerEligibilityChangedEvent",
+			"got", fmt.Sprintf("%T", evt.Data),
+		)
+		return
+	}
+	_ = o.reconcileChainsyncIngressAdmission(
+		e.ConnectionId,
+		e.Eligible,
+	)
+}
+
 func (o *Ouroboros) HandleOutboundConnEvent(evt event.Event) {
 	e, ok := evt.Data.(peergov.OutboundConnectionEvent)
 	if !ok {
@@ -395,12 +416,11 @@ func (o *Ouroboros) HandleOutboundConnEvent(evt event.Event) {
 	// the Ouroboros handshake/protocol negotiation has already failed and the
 	// peer will reject further mini-protocol starts on this connection.
 	if o.ChainsyncState != nil {
-		maxClients := defaultMaxChainsyncClients
-		if o.ChainsyncState.MaxClients() > 0 {
-			maxClients = o.ChainsyncState.MaxClients()
-		}
-		// Atomically check and add the client to avoid race conditions
-		if o.ChainsyncState.TryAddClientConnId(connId, maxClients) {
+		shouldStartChainsync := o.registerTrackedChainsyncClient(
+			connId,
+			o.shouldPublishChainsyncToLedger(connId),
+		)
+		if shouldStartChainsync {
 			if err := o.chainsyncClientStart(connId); err != nil {
 				// Roll back the registration on failure
 				o.ChainsyncState.RemoveClientConnId(connId)
@@ -419,7 +439,8 @@ func (o *Ouroboros) HandleOutboundConnEvent(evt event.Event) {
 		} else if !o.ChainsyncState.HasClientConnId(connId) {
 			// Not already tracked and TryAdd failed means limit reached
 			o.config.Logger.Debug(
-				"chainsync client limit reached, skipping",
+				"chainsync client limit reached, skipping eligible admission",
+				"connection_id", connId.String(),
 			)
 		}
 	}
@@ -497,11 +518,7 @@ func (o *Ouroboros) HandleInboundConnEvent(evt event.Event) {
 	// peergov stops tracking it and outbound retries are not blocked
 	// by a stale inbound.
 	if o.ChainsyncState != nil {
-		maxClients := defaultMaxChainsyncClients
-		if o.ChainsyncState.MaxClients() > 0 {
-			maxClients = o.ChainsyncState.MaxClients()
-		}
-		if o.ChainsyncState.TryAddClientConnId(connId, maxClients) {
+		if o.registerTrackedChainsyncClient(connId, false) {
 			if err := o.chainsyncClientStart(connId); err != nil {
 				o.ChainsyncState.RemoveClientConnId(connId)
 				o.config.Logger.Warn(

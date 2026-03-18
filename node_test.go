@@ -26,6 +26,7 @@ import (
 	"github.com/blinklabs-io/dingo/chainsync"
 	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/peergov"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -90,6 +91,34 @@ func TestHandleChainSwitchEventUpdatesActiveConnection(t *testing.T) {
 	assert.Equal(t, pointB, state.GetTrackedClient(connB).Cursor)
 	assert.Equal(t, uint64(1), state.GetTrackedClient(connA).HeadersRecv)
 	assert.Equal(t, uint64(1), state.GetTrackedClient(connB).HeadersRecv)
+}
+
+func TestChainsyncIngressEligibilityCacheDefaultsAndUpdates(t *testing.T) {
+	connId := newNodeTestConnId(3003)
+	n := &Node{}
+
+	assert.False(t, n.isChainsyncIngressEligible(connId))
+
+	n.handlePeerEligibilityChangedEvent(event.NewEvent(
+		peergov.PeerEligibilityChangedEventType,
+		peergov.PeerEligibilityChangedEvent{
+			ConnectionId: connId,
+			Eligible:     false,
+		},
+	))
+	assert.False(t, n.isChainsyncIngressEligible(connId))
+
+	n.handlePeerEligibilityChangedEvent(event.NewEvent(
+		peergov.PeerEligibilityChangedEventType,
+		peergov.PeerEligibilityChangedEvent{
+			ConnectionId: connId,
+			Eligible:     true,
+		},
+	))
+	assert.True(t, n.isChainsyncIngressEligible(connId))
+
+	n.deleteChainsyncIngressEligibility(connId)
+	assert.False(t, n.isChainsyncIngressEligible(connId))
 }
 
 func TestPlateauThreshold(t *testing.T) {

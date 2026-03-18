@@ -461,12 +461,15 @@ func (o *Ouroboros) chainsyncClientRollBackward(
 	point ocommon.Point,
 	tip ochainsync.Tip,
 ) error {
-	// Only feed ledger from the currently selected chainsync connection.
-	if o.ChainsyncState != nil {
-		if active := o.ChainsyncState.GetClientConnId(); active != nil &&
-			*active != ctx.ConnectionId {
-			return nil
-		}
+	if o.ConnManager != nil &&
+		o.ConnManager.IsInboundConnection(ctx.ConnectionId) {
+		return nil
+	}
+	if !o.reconcileChainsyncIngressAdmission(
+		ctx.ConnectionId,
+		o.shouldPublishChainsyncToLedger(ctx.ConnectionId),
+	) {
+		return nil
 	}
 	// Generate event
 	o.EventBus.Publish(
@@ -499,63 +502,35 @@ func (o *Ouroboros) chainsyncClientRollForward(
 		// selection tie-breaking (used in both dedup and normal
 		// paths below).
 		vrfOutput := chainselection.GetVRFOutput(v)
-		// Update tracked client state and deduplicate headers.
-		// If this header has already been reported by another
-		// client, skip publishing events for it.
 		// Inbound connections are clients pulling data from us.
 		// They are not sources of chain truth and should not
 		// influence chain selection or the blockfetch pipeline.
 		isInbound := o.ConnManager != nil &&
 			o.ConnManager.IsInboundConnection(ctx.ConnectionId)
-		if o.ChainsyncState != nil {
-			isNew := o.ChainsyncState.UpdateClientTip(
+		ingressEligible := false
+		if !isInbound {
+			ingressEligible = o.reconcileChainsyncIngressAdmission(
 				ctx.ConnectionId,
-				point,
-				tip,
+				o.shouldPublishChainsyncToLedger(ctx.ConnectionId),
 			)
-			if !isNew {
-				// Duplicate header already seen from another
-				// client; still refresh peer liveness and metrics
-				// for outbound peers used in chain selection.
-				if !isInbound {
-					o.EventBus.Publish(
-						chainselection.PeerTipUpdateEventType,
-						event.NewEvent(
-							chainselection.PeerTipUpdateEventType,
-							chainselection.PeerTipUpdateEvent{
-								ConnectionId: ctx.ConnectionId,
-								Tip:          tip,
-								VRFOutput:    vrfOutput,
-							},
-						),
-					)
-				}
-				o.updateChainsyncMetrics(
+		}
+		// Update tracked client state and deduplicate headers.
+		// If this header has already been reported by another
+		// eligible client, skip publishing it into the ledger.
+		isNew := true
+		if o.ChainsyncState != nil {
+			if ingressEligible {
+				isNew = o.ChainsyncState.UpdateClientTip(
 					ctx.ConnectionId,
+					point,
 					tip,
 				)
-				// If this is the active connection, an inactive
-				// peer may have consumed the isNew=true slot
-				// before this connection's callback ran, so the
-				// header never reached the ledger. Publish the
-				// ChainsyncEvent anyway so blockfetch proceeds.
-				if active := o.ChainsyncState.GetClientConnId(); active != nil &&
-					*active == ctx.ConnectionId {
-					o.EventBus.Publish(
-						ledger.ChainsyncEventType,
-						event.NewEvent(
-							ledger.ChainsyncEventType,
-							ledger.ChainsyncEvent{
-								ConnectionId: ctx.ConnectionId,
-								Point:        point,
-								Type:         blockType,
-								BlockHeader:  v,
-								Tip:          tip,
-							},
-						),
-					)
-				}
-				return nil
+			} else {
+				o.ChainsyncState.UpdateClientTipWithoutDedup(
+					ctx.ConnectionId,
+					point,
+					tip,
+				)
 			}
 		}
 		// Publish peer tip update for chain selection (outbound only).
@@ -576,45 +551,118 @@ func (o *Ouroboros) chainsyncClientRollForward(
 				),
 			)
 		}
-		// Only feed ledger from the currently selected chainsync
-		// connection to avoid overloading the ledger subscriber
-		// queue with non-active peer traffic.
-		if o.ChainsyncState == nil {
-			o.EventBus.Publish(
-				ledger.ChainsyncEventType,
-				event.NewEvent(
-					ledger.ChainsyncEventType,
-					ledger.ChainsyncEvent{
-						ConnectionId: ctx.ConnectionId,
-						Point:        point,
-						Type:         blockType,
-						BlockHeader:  v,
-						Tip:          tip,
-					},
-				),
-			)
-		} else if active := o.ChainsyncState.GetClientConnId(); active == nil ||
-			*active == ctx.ConnectionId {
-			o.EventBus.Publish(
-				ledger.ChainsyncEventType,
-				event.NewEvent(
-					ledger.ChainsyncEventType,
-					ledger.ChainsyncEvent{
-						ConnectionId: ctx.ConnectionId,
-						Point:        point,
-						Type:         blockType,
-						BlockHeader:  v,
-						Tip:          tip,
-					},
-				),
-			)
+		if !ingressEligible {
+			o.updateChainsyncMetrics(ctx.ConnectionId, tip)
+			return nil
 		}
+		if !isNew {
+			// Duplicate header already delivered by another
+			// eligible peer. Keep the peer tip fresh, but do not
+			// re-publish the same header into the ledger queue.
+			o.updateChainsyncMetrics(ctx.ConnectionId, tip)
+			return nil
+		}
+		o.EventBus.Publish(
+			ledger.ChainsyncEventType,
+			event.NewEvent(
+				ledger.ChainsyncEventType,
+				ledger.ChainsyncEvent{
+					ConnectionId: ctx.ConnectionId,
+					Point:        point,
+					Type:         blockType,
+					BlockHeader:  v,
+					Tip:          tip,
+				},
+			),
+		)
 		// Update ChainSync performance metrics for peer scoring
 		o.updateChainsyncMetrics(ctx.ConnectionId, tip)
 	default:
 		return fmt.Errorf("unexpected block data type: %T", v)
 	}
 	return nil
+}
+
+func (o *Ouroboros) shouldPublishChainsyncToLedger(
+	connId ouroboros.ConnectionId,
+) bool {
+	if o.config.ChainsyncIngressEligible == nil {
+		return true
+	}
+	return o.config.ChainsyncIngressEligible(connId)
+}
+
+func (o *Ouroboros) maxTrackedChainsyncClients() int {
+	maxClients := defaultMaxChainsyncClients
+	if o.ChainsyncState != nil && o.ChainsyncState.MaxClients() > 0 {
+		maxClients = o.ChainsyncState.MaxClients()
+	}
+	return maxClients
+}
+
+func (o *Ouroboros) registerTrackedChainsyncClient(
+	connId ouroboros.ConnectionId,
+	ingressEligible bool,
+) bool {
+	if o.ChainsyncState == nil {
+		return false
+	}
+	if ingressEligible {
+		if o.ChainsyncState.TryAddClientConnId(
+			connId,
+			o.maxTrackedChainsyncClients(),
+		) {
+			return true
+		}
+		if o.ChainsyncState.HasClientConnId(connId) {
+			observabilityOnly, exists := o.ChainsyncState.ClientObservabilityOnly(
+				connId,
+			)
+			if !exists {
+				return false
+			}
+			if observabilityOnly {
+				return o.reconcileChainsyncIngressAdmission(connId, true)
+			}
+			return true
+		}
+		return false
+	}
+	if o.ChainsyncState.TryAddObservedClientConnId(connId) {
+		return true
+	}
+	return o.reconcileChainsyncIngressAdmission(connId, false)
+}
+
+func (o *Ouroboros) reconcileChainsyncIngressAdmission(
+	connId ouroboros.ConnectionId,
+	desiredEligible bool,
+) bool {
+	if o.ChainsyncState == nil {
+		return desiredEligible
+	}
+	observabilityOnly, exists := o.ChainsyncState.ClientObservabilityOnly(
+		connId,
+	)
+	if !exists {
+		return false
+	}
+	if desiredEligible {
+		if !observabilityOnly {
+			return true
+		}
+		if !o.ChainsyncState.SetClientObservabilityOnly(connId, false) {
+			return false
+		}
+		observabilityOnly, exists = o.ChainsyncState.ClientObservabilityOnly(
+			connId,
+		)
+		return exists && !observabilityOnly
+	}
+	if !observabilityOnly {
+		_ = o.ChainsyncState.SetClientObservabilityOnly(connId, true)
+	}
+	return false
 }
 
 // updateChainsyncMetrics calculates and updates ChainSync performance metrics

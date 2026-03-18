@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"errors"
 	"io"
 	"log/slog"
 	"net"
@@ -26,6 +27,7 @@ import (
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -93,8 +95,9 @@ func TestDetectConnectionSwitchPreservesQueuedHeaders(t *testing.T) {
 		},
 	}
 
-	activeConnId, configured := ls.detectConnectionSwitch()
+	activeConnId, configured, switched := ls.detectConnectionSwitch()
 	require.True(t, configured)
+	require.True(t, switched)
 	require.NotNil(t, activeConnId)
 	assert.Equal(t, connId2, *activeConnId)
 	assert.Equal(t, 1, testChain.HeaderCount())
@@ -280,4 +283,190 @@ func TestHandleChainSwitchEventUpdatesSelectedBlockfetchConnId(t *testing.T) {
 	nextConnId, ok := ls.nextBlockfetchConnId()
 	require.True(t, ok)
 	assert.Equal(t, connId, nextConnId)
+}
+
+func TestHandleEventChainsyncBlockHeader_ProcessesEligibleNonActivePeer(
+	t *testing.T,
+) {
+	connId1 := ouroboros.ConnectionId{
+		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 6000},
+		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3001},
+	}
+	connId2 := ouroboros.ConnectionId{
+		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 6000},
+		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3002},
+	}
+	hash1 := lcommon.NewBlake2b256([]byte("hdr-1"))
+	testChain := &chain.Chain{}
+	var requestedConn ouroboros.ConnectionId
+	ls := &LedgerState{
+		chain:            testChain,
+		lastActiveConnId: &connId1,
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+			BlockfetchRequestRangeFunc: func(
+				connId ouroboros.ConnectionId,
+				start ocommon.Point,
+				end ocommon.Point,
+			) error {
+				_ = start
+				_ = end
+				requestedConn = connId
+				return nil
+			},
+		},
+	}
+
+	err := ls.handleEventChainsyncBlockHeader(ChainsyncEvent{
+		ConnectionId: connId2,
+		Point:        ocommon.NewPoint(1, hash1.Bytes()),
+		BlockHeader: mockHeader{
+			hash:        hash1,
+			prevHash:    lcommon.NewBlake2b256(nil),
+			blockNumber: 1,
+			slot:        1,
+		},
+		Tip: ochainsync.Tip{
+			Point:       ocommon.NewPoint(1, hash1.Bytes()),
+			BlockNumber: 1,
+		},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 1, testChain.HeaderCount())
+	assert.Equal(t, connId2, requestedConn)
+	assert.Equal(t, connId2, ls.activeBlockfetchConnId)
+}
+
+func TestHandleBlockfetchTimeoutLocked_RetriesQueuedRangeUsingActivePeer(
+	t *testing.T,
+) {
+	connId1 := ouroboros.ConnectionId{
+		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 6000},
+		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3001},
+	}
+	connId2 := ouroboros.ConnectionId{
+		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 6000},
+		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3002},
+	}
+	hash1 := lcommon.NewBlake2b256([]byte("hdr-1"))
+	testChain := &chain.Chain{}
+	err := testChain.AddBlockHeader(mockHeader{
+		hash:        hash1,
+		prevHash:    lcommon.NewBlake2b256(nil),
+		blockNumber: 1,
+		slot:        1,
+	})
+	require.NoError(t, err)
+
+	var requestedConn ouroboros.ConnectionId
+	ls := &LedgerState{
+		chain:                  testChain,
+		activeBlockfetchConnId: connId1,
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+			GetActiveConnectionFunc: func() *ouroboros.ConnectionId {
+				return &connId2
+			},
+			BlockfetchRequestRangeFunc: func(
+				connId ouroboros.ConnectionId,
+				start ocommon.Point,
+				end ocommon.Point,
+			) error {
+				_ = start
+				_ = end
+				requestedConn = connId
+				return nil
+			},
+		},
+	}
+
+	ls.handleBlockfetchTimeoutLocked(connId1)
+
+	assert.Equal(t, connId2, requestedConn)
+	assert.Equal(t, connId2, ls.activeBlockfetchConnId)
+	assert.Equal(t, 1, testChain.HeaderCount())
+}
+
+func TestHandleBlockfetchTimeoutLocked_ClearsActiveConnectionWithoutHeaders(
+	t *testing.T,
+) {
+	connId := ouroboros.ConnectionId{
+		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 6000},
+		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3001},
+	}
+
+	ls := &LedgerState{
+		chain:                        &chain.Chain{},
+		activeBlockfetchConnId:       connId,
+		chainsyncBlockfetchReadyChan: make(chan struct{}),
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+
+	ls.handleBlockfetchTimeoutLocked(connId)
+
+	assert.Equal(t, ouroboros.ConnectionId{}, ls.activeBlockfetchConnId)
+	assert.Nil(t, ls.chainsyncBlockfetchReadyChan)
+	_, ok := ls.nextBlockfetchConnId()
+	assert.False(t, ok)
+}
+
+func TestHandleBlockfetchTimeoutLocked_RetryFailureUsesAlternateSelectedPeer(
+	t *testing.T,
+) {
+	connId1 := ouroboros.ConnectionId{
+		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 6000},
+		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3001},
+	}
+	connId2 := ouroboros.ConnectionId{
+		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 6000},
+		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3002},
+	}
+	connId3 := ouroboros.ConnectionId{
+		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 6000},
+		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3003},
+	}
+	hash1 := lcommon.NewBlake2b256([]byte("hdr-1"))
+	testChain := &chain.Chain{}
+	err := testChain.AddBlockHeader(mockHeader{
+		hash:        hash1,
+		prevHash:    lcommon.NewBlake2b256(nil),
+		blockNumber: 1,
+		slot:        1,
+	})
+	require.NoError(t, err)
+
+	requestedConnIds := make([]ouroboros.ConnectionId, 0, 2)
+	ls := &LedgerState{
+		chain:                    testChain,
+		activeBlockfetchConnId:   connId1,
+		selectedBlockfetchConnId: connId3,
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+			GetActiveConnectionFunc: func() *ouroboros.ConnectionId {
+				return &connId2
+			},
+			BlockfetchRequestRangeFunc: func(
+				connId ouroboros.ConnectionId,
+				start ocommon.Point,
+				end ocommon.Point,
+			) error {
+				_ = start
+				_ = end
+				requestedConnIds = append(requestedConnIds, connId)
+				if connId == connId2 {
+					return errors.New("retry failed")
+				}
+				return nil
+			},
+		},
+	}
+
+	ls.handleBlockfetchTimeoutLocked(connId1)
+
+	require.Equal(t, []ouroboros.ConnectionId{connId2, connId3}, requestedConnIds)
+	assert.Equal(t, connId3, ls.activeBlockfetchConnId)
+	require.NotNil(t, ls.chainsyncBlockfetchReadyChan)
+	assert.Equal(t, 1, testChain.HeaderCount())
 }

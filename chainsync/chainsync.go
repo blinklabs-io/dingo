@@ -85,12 +85,16 @@ type ChainsyncClientState struct {
 // TrackedClient holds per-connection state for a tracked
 // chainsync client (outbound node-to-node connections).
 type TrackedClient struct {
-	ConnId       ouroboros.ConnectionId
-	Cursor       ocommon.Point
-	Tip          ochainsync.Tip
-	Status       ClientStatus
-	LastActivity time.Time
-	HeadersRecv  uint64
+	ConnId ouroboros.ConnectionId
+	Cursor ocommon.Point
+	Tip    ochainsync.Tip
+	Status ClientStatus
+	// ObservabilityOnly marks connections that should keep
+	// tip/activity metrics but must not consume the eligible
+	// client pool or become active for ledger ingress.
+	ObservabilityOnly bool
+	LastActivity      time.Time
+	HeadersRecv       uint64
 	// TODO: BytesRecv needs to be wired to the underlying
 	// connection's byte counter. Currently unused.
 	BytesRecv uint64
@@ -243,22 +247,24 @@ func (s *State) RemoveClientConnId(
 ) {
 	s.clientConnIdMutex.Lock()
 	defer s.clientConnIdMutex.Unlock()
+	tc, exists := s.trackedClients[connId]
 	wasPrimary := s.activeClientConnId != nil &&
 		*s.activeClientConnId == connId
+	wasEligible := exists && !tc.ObservabilityOnly
 	delete(s.trackedClients, connId)
 	if wasPrimary {
 		s.activeClientConnId = nil
 		s.promoteBestClientLocked()
 	}
 	// Emit client removed event
-	if s.eventBus != nil {
+	if wasEligible && s.eventBus != nil {
 		s.eventBus.PublishAsync(
 			ClientRemovedEventType,
 			event.NewEvent(
 				ClientRemovedEventType,
 				ClientRemovedEvent{
 					ConnId:       connId,
-					TotalClients: len(s.trackedClients),
+					TotalClients: s.eligibleClientCountLocked(),
 					WasPrimary:   wasPrimary,
 				},
 			),
@@ -286,7 +292,8 @@ func (s *State) promoteBestClientLocked() {
 	var bestId *ouroboros.ConnectionId
 	var bestSlot uint64
 	for id, tc := range s.trackedClients {
-		if tc.Status == ClientStatusFailed ||
+		if tc.ObservabilityOnly ||
+			tc.Status == ClientStatusFailed ||
 			tc.Status == ClientStatusStalled {
 			continue
 		}
@@ -305,25 +312,27 @@ func (s *State) promoteBestClientLocked() {
 // Caller must hold clientConnIdMutex.
 func (s *State) addTrackedClientLocked(
 	connId ouroboros.ConnectionId,
+	observabilityOnly bool,
 ) {
 	s.trackedClients[connId] = &TrackedClient{
-		ConnId:       connId,
-		Status:       ClientStatusSyncing,
-		LastActivity: time.Now(),
+		ConnId:            connId,
+		Status:            ClientStatusSyncing,
+		ObservabilityOnly: observabilityOnly,
+		LastActivity:      time.Now(),
 	}
 	// Set as active if there's no active client
-	if s.activeClientConnId == nil {
+	if !observabilityOnly && s.activeClientConnId == nil {
 		s.activeClientConnId = &connId
 	}
 	// Emit client added event
-	if s.eventBus != nil {
+	if !observabilityOnly && s.eventBus != nil {
 		s.eventBus.PublishAsync(
 			ClientAddedEventType,
 			event.NewEvent(
 				ClientAddedEventType,
 				ClientAddedEvent{
 					ConnId:       connId,
-					TotalClients: len(s.trackedClients),
+					TotalClients: s.eligibleClientCountLocked(),
 				},
 			),
 		)
@@ -339,6 +348,21 @@ func (s *State) AddClientConnId(
 	connId ouroboros.ConnectionId,
 ) bool {
 	return s.TryAddClientConnId(connId, s.config.MaxClients)
+}
+
+// TryAddObservedClientConnId adds a connection to observability-only tracking.
+// Observability-only clients do not consume the eligible client limit and are
+// never promoted as the active chainsync source.
+func (s *State) TryAddObservedClientConnId(
+	connId ouroboros.ConnectionId,
+) bool {
+	s.clientConnIdMutex.Lock()
+	defer s.clientConnIdMutex.Unlock()
+	if _, exists := s.trackedClients[connId]; exists {
+		return false
+	}
+	s.addTrackedClientLocked(connId, true)
+	return true
 }
 
 // HasClientConnId returns true if the connection ID is being
@@ -373,7 +397,7 @@ func (s *State) GetClientConnIds() []ouroboros.ConnectionId {
 func (s *State) ClientConnCount() int {
 	s.clientConnIdMutex.RLock()
 	defer s.clientConnIdMutex.RUnlock()
-	return len(s.trackedClients)
+	return s.eligibleClientCountLocked()
 }
 
 // TryAddClientConnId atomically checks if a connection can be
@@ -391,20 +415,128 @@ func (s *State) TryAddClientConnId(
 		return false
 	}
 	// Check client limit
-	if len(s.trackedClients) >= maxClients {
+	if s.eligibleClientCountLocked() >= maxClients {
 		return false
 	}
-	s.addTrackedClientLocked(connId)
+	s.addTrackedClientLocked(connId, false)
+	return true
+}
+
+// ClientObservabilityOnly reports whether a tracked client is currently
+// observability-only. The second return value reports whether the client exists.
+func (s *State) ClientObservabilityOnly(
+	connId ouroboros.ConnectionId,
+) (bool, bool) {
+	s.clientConnIdMutex.RLock()
+	defer s.clientConnIdMutex.RUnlock()
+	tc, exists := s.trackedClients[connId]
+	if !exists {
+		return false, false
+	}
+	return tc.ObservabilityOnly, true
+}
+
+// SetClientObservabilityOnly toggles whether a tracked client participates in
+// the eligible chainsync pool. Promoting an observability-only client back into
+// the eligible pool respects MaxClients; when the pool is full, the client
+// remains observability-only and this method returns false.
+func (s *State) SetClientObservabilityOnly(
+	connId ouroboros.ConnectionId,
+	observabilityOnly bool,
+) bool {
+	s.clientConnIdMutex.Lock()
+	defer s.clientConnIdMutex.Unlock()
+
+	tc, exists := s.trackedClients[connId]
+	if !exists {
+		return false
+	}
+	if tc.ObservabilityOnly == observabilityOnly {
+		return true
+	}
+	if !observabilityOnly &&
+		s.config.MaxClients > 0 &&
+		s.eligibleClientCountLocked() >= s.config.MaxClients {
+		return false
+	}
+
+	wasPrimary := s.activeClientConnId != nil &&
+		*s.activeClientConnId == connId
+	wasEligible := !tc.ObservabilityOnly
+	tc.ObservabilityOnly = observabilityOnly
+	needPromote := false
+	if wasPrimary && observabilityOnly {
+		s.activeClientConnId = nil
+		needPromote = true
+	}
+	if !observabilityOnly && s.activeClientConnId == nil {
+		needPromote = true
+	}
+	if needPromote {
+		s.promoteBestClientLocked()
+	}
+
+	if s.eventBus == nil {
+		return true
+	}
+	if wasEligible && observabilityOnly {
+		s.eventBus.PublishAsync(
+			ClientRemovedEventType,
+			event.NewEvent(
+				ClientRemovedEventType,
+				ClientRemovedEvent{
+					ConnId:       connId,
+					TotalClients: s.eligibleClientCountLocked(),
+					WasPrimary:   wasPrimary,
+				},
+			),
+		)
+	}
+	if !wasEligible && !observabilityOnly {
+		s.eventBus.PublishAsync(
+			ClientAddedEventType,
+			event.NewEvent(
+				ClientAddedEventType,
+				ClientAddedEvent{
+					ConnId:       connId,
+					TotalClients: s.eligibleClientCountLocked(),
+				},
+			),
+		)
+	}
 	return true
 }
 
 // UpdateClientTip updates the cursor, tip, and activity
-// tracking for a tracked client. Returns true if the header at
-// this point is new (not a duplicate).
+// tracking for a tracked client, and performs header
+// deduplication. Returns true if the header at this point is
+// new (not a duplicate).
 func (s *State) UpdateClientTip(
 	connId ouroboros.ConnectionId,
 	point ocommon.Point,
 	tip ochainsync.Tip,
+) bool {
+	return s.updateClientTip(connId, point, tip, true)
+}
+
+// UpdateClientTipWithoutDedup updates the cursor, tip, and
+// activity tracking for a tracked client without recording the
+// header in the shared dedup cache. This is used for peers that
+// should not drive ledger ingress, so they do not suppress
+// later delivery of the same header from an eligible peer.
+func (s *State) UpdateClientTipWithoutDedup(
+	connId ouroboros.ConnectionId,
+	point ocommon.Point,
+	tip ochainsync.Tip,
+) {
+	s.updateClientTip(connId, point, tip, false)
+}
+
+func (s *State) updateClientTip(
+	connId ouroboros.ConnectionId,
+	point ocommon.Point,
+	tip ochainsync.Tip,
+	dedup bool,
 ) bool {
 	s.clientConnIdMutex.Lock()
 	tc, exists := s.trackedClients[connId]
@@ -421,6 +553,9 @@ func (s *State) UpdateClientTip(
 	}
 	s.clientConnIdMutex.Unlock()
 
+	if !dedup {
+		return true
+	}
 	// Header deduplication and fork detection
 	return s.processHeader(connId, point)
 }
@@ -524,7 +659,8 @@ func (s *State) CheckStalledClients() []ouroboros.ConnectionId {
 	now := time.Now()
 	var stalled []ouroboros.ConnectionId
 	for id, tc := range s.trackedClients {
-		if tc.Status == ClientStatusStalled ||
+		if tc.ObservabilityOnly ||
+			tc.Status == ClientStatusStalled ||
 			tc.Status == ClientStatusFailed {
 			continue
 		}
@@ -642,4 +778,14 @@ func (s *State) PruneSeenHeaders(beforeSlot uint64) {
 			delete(s.seenHeaders, slot)
 		}
 	}
+}
+
+func (s *State) eligibleClientCountLocked() int {
+	count := 0
+	for _, tc := range s.trackedClients {
+		if !tc.ObservabilityOnly {
+			count++
+		}
+	}
+	return count
 }
