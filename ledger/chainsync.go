@@ -2226,6 +2226,8 @@ func (ls *LedgerState) handleEventBlockfetchBatchDone(e BlockfetchEvent) error {
 	}
 	ls.chainsyncBlockfetchTimerGeneration++
 	if err := ls.flushPendingBlockfetchBlocks(); err != nil {
+		ls.blockfetchRequestRangeCleanup()
+		ls.activeBlockfetchConnId = ouroboros.ConnectionId{}
 		return err
 	}
 	// Continue fetching as long as there are queued headers
