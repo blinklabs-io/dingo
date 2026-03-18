@@ -15,6 +15,7 @@
 package chain
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"maps"
@@ -304,6 +305,122 @@ func (cm *ChainManager) loadPrimaryChain() error {
 		}
 	}
 	cm.chains[primaryChainId] = chain
+	return nil
+}
+
+// RewindPrimaryChainToPoint silently prunes the persistent primary chain back
+// to the specified point without emitting rollback/fork events. This runs
+// during startup reconciliation to discard speculative blob-only blocks that
+// were never applied to the authoritative ledger metadata tip, so emitting the
+// normal ChainRollbackEvent/ChainForkEvent flow would be incorrect and could
+// trigger external undo/transaction rollback handlers for work that never
+// actually happened. Callers should treat this as persistent chain pruning
+// only, not a normal rollback/fork transition.
+func (cm *ChainManager) RewindPrimaryChainToPoint(
+	point ocommon.Point,
+) error {
+	cm.mutex.Lock()
+	defer cm.mutex.Unlock()
+	primaryChain := cm.primaryChainLocked()
+	if primaryChain == nil {
+		return errors.New("primary chain not available")
+	}
+	if !primaryChain.persistent {
+		return errors.New("primary chain is not persistent")
+	}
+	primaryChain.mutex.Lock()
+	defer primaryChain.mutex.Unlock()
+
+	rollbackIndex := uint64(0)
+	rollbackBlockNumber := uint64(0)
+	targetTip := ochainsync.Tip{}
+	targetTipSet := false
+	err := func() error {
+		txn := cm.db.BlobTxn(true)
+		return txn.Do(func(txn *database.Txn) error {
+			currentTip := primaryChain.currentTip
+			if point.Slot > 0 || len(point.Hash) > 0 {
+				tmpBlock, err := cm.blockByPoint(point, txn)
+				if err != nil {
+					return fmt.Errorf("lookup rewind point: %w", err)
+				}
+				rollbackIndex = tmpBlock.ID
+				rollbackBlockNumber = tmpBlock.Number
+				if primaryChain.tipBlockIndex < rollbackIndex {
+					return fmt.Errorf(
+						"primary chain tip index %d is behind rewind point index %d",
+						primaryChain.tipBlockIndex,
+						rollbackIndex,
+					)
+				}
+				if primaryChain.tipBlockIndex == rollbackIndex &&
+					primaryChain.currentTip.Point.Slot == point.Slot &&
+					bytes.Equal(primaryChain.currentTip.Point.Hash, point.Hash) {
+					// Already at the requested tip, so there is nothing to prune.
+					targetTip = primaryChain.currentTip
+					targetTipSet = true
+					return nil
+				}
+				targetTip = ochainsync.Tip{
+					Point:       point,
+					BlockNumber: rollbackBlockNumber,
+				}
+				targetTipSet = true
+			} else {
+				rollbackIndex = 0
+				targetTip = ochainsync.Tip{
+					Point:       point,
+					BlockNumber: 0,
+				}
+				targetTipSet = true
+			}
+			for currentTip.Point.Slot != point.Slot ||
+				!bytes.Equal(currentTip.Point.Hash, point.Hash) {
+				currentBlock, err := cm.blockByPoint(currentTip.Point, txn)
+				if err != nil {
+					return fmt.Errorf(
+						"lookup current primary block: %w",
+						err,
+					)
+				}
+				if err := database.BlockDeleteTxn(txn, currentBlock); err != nil {
+					return fmt.Errorf(
+						"delete primary block %d: %w",
+						currentBlock.ID,
+						err,
+					)
+				}
+				if len(currentBlock.PrevHash) == 0 {
+					currentTip = ochainsync.Tip{}
+					break
+				}
+				prevBlock, err := database.BlockByHashTxn(txn, currentBlock.PrevHash)
+				if err != nil {
+					return fmt.Errorf(
+						"lookup previous primary block: %w",
+						err,
+					)
+				}
+				currentTip = ochainsync.Tip{
+					Point: ocommon.NewPoint(
+						prevBlock.Slot,
+						prevBlock.Hash,
+					),
+					BlockNumber: prevBlock.Number,
+				}
+			}
+			if !targetTipSet {
+				targetTip = currentTip
+			}
+			return nil
+		})
+	}()
+	if err != nil {
+		return err
+	}
+	primaryChain.headers = primaryChain.headers[:0]
+	primaryChain.tipBlockIndex = rollbackIndex
+	primaryChain.currentTip = targetTip
 	return nil
 }
 
