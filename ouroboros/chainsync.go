@@ -478,9 +478,14 @@ func (o *Ouroboros) chainsyncClientRollForward(
 		ingressEligible := o.shouldPublishChainsyncToLedger(
 			ctx.ConnectionId,
 		)
+		// Inbound connections are clients pulling data from us.
+		// They are not sources of chain truth and should not
+		// influence chain selection or the blockfetch pipeline.
+		isInbound := o.ConnManager != nil &&
+			o.ConnManager.IsInboundConnection(ctx.ConnectionId)
 		// Update tracked client state and deduplicate headers.
 		// If this header has already been reported by another
-		// client, skip publishing events for it.
+		// eligible client, skip publishing it into the ledger.
 		isNew := true
 		if o.ChainsyncState != nil {
 			if ingressEligible {
@@ -497,18 +502,24 @@ func (o *Ouroboros) chainsyncClientRollForward(
 				)
 			}
 		}
-		// Publish peer tip update for chain selection
-		o.EventBus.Publish(
-			chainselection.PeerTipUpdateEventType,
-			event.NewEvent(
+		// Publish peer tip update for chain selection (outbound only).
+		// Inbound peers are clients pulling data from us, not sources
+		// of chain truth. Letting them into chain selection causes
+		// spurious switches when ephemeral inbound connections report
+		// tips and then disconnect.
+		if !isInbound {
+			o.EventBus.Publish(
 				chainselection.PeerTipUpdateEventType,
-				chainselection.PeerTipUpdateEvent{
-					ConnectionId: ctx.ConnectionId,
-					Tip:          tip,
-					VRFOutput:    vrfOutput,
-				},
-			),
-		)
+				event.NewEvent(
+					chainselection.PeerTipUpdateEventType,
+					chainselection.PeerTipUpdateEvent{
+						ConnectionId: ctx.ConnectionId,
+						Tip:          tip,
+						VRFOutput:    vrfOutput,
+					},
+				),
+			)
+		}
 		if !ingressEligible {
 			o.updateChainsyncMetrics(ctx.ConnectionId, tip)
 			return nil

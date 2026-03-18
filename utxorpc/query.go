@@ -30,6 +30,7 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/ledger/eras"
+	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
@@ -622,7 +623,6 @@ func (s *queryServiceServer) ReadGenesis(
 	req *connect.Request[query.ReadGenesisRequest],
 ) (*connect.Response[query.ReadGenesisResponse], error) {
 	fieldMask := req.Msg.GetFieldMask()
-
 	s.utxorpc.config.Logger.Info(
 		fmt.Sprintf("Got a ReadGenesis request with fieldMask %v", fieldMask),
 	)
@@ -642,6 +642,7 @@ func (s *queryServiceServer) ReadGenesis(
 		Config: &query.ReadGenesisResponse_Cardano{
 			Cardano: cardanoGenesis,
 		},
+		Caip2: caip2FromNetworkMagic(cardanoGenesis.GetNetworkMagic()),
 	}
 
 	// Decode the hex if shelley genesis hash is configured
@@ -654,6 +655,15 @@ func (s *queryServiceServer) ReadGenesis(
 	}
 
 	return connect.NewResponse(resp), nil
+}
+
+func caip2FromNetworkMagic(networkMagic uint32) string {
+	network, ok := ouroboros.NetworkByNetworkMagic(networkMagic)
+	if !ok {
+		return fmt.Sprintf("cardano:%d", networkMagic)
+	}
+
+	return "cardano:" + network.String()
 }
 
 func buildCardanoGenesis(

@@ -24,6 +24,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/blinklabs-io/dingo/event"
+	sync "github.com/utxorpc/go-codegen/utxorpc/v1alpha/sync"
 )
 
 func TestNewUtxorpc_DefaultLimits(t *testing.T) {
@@ -129,4 +130,18 @@ func TestUtxorpc_StartStop(t *testing.T) {
 	defer cancel()
 	err = u.Stop(ctx)
 	require.NoError(t, err, "failed to stop utxorpc")
+}
+
+// TestAnyChainBlockNativeBytes_NonNil ensures that AnyChainBlock.NativeBytes
+// is a real field in the generated type and can be set to non-nil, which is
+// what the SyncService handlers rely on for raw CBOR propagation.
+func TestAnyChainBlockNativeBytes_NonNil(t *testing.T) {
+	raw := []byte{0xde, 0xad, 0xbe, 0xef}
+
+	acb := &sync.AnyChainBlock{
+		NativeBytes: raw,
+	}
+
+	require.NotNil(t, acb.NativeBytes)
+	require.Equal(t, raw, acb.NativeBytes)
 }
