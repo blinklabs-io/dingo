@@ -1907,12 +1907,15 @@ func (ls *LedgerState) ledgerReadChain(
 }
 
 func (ls *LedgerState) ledgerProcessBlocks() {
-	// Start chain reader goroutine
-	readChainResultCh := make(chan readChainResult)
-	go ls.ledgerReadChain(ls.ctx, readChainResultCh)
-	if err := ls.ledgerProcessBlocksFromSource(ls.ctx, readChainResultCh); err != nil {
-		ls.config.Logger.Error(
-			"failed to process blocks",
+	for {
+		readChainResultCh := make(chan readChainResult)
+		go ls.ledgerReadChain(ls.ctx, readChainResultCh)
+		err := ls.ledgerProcessBlocksFromSource(ls.ctx, readChainResultCh)
+		if err == nil || ls.ctx.Err() != nil {
+			return
+		}
+		ls.config.Logger.Warn(
+			"block processing failed, restarting pipeline",
 			"error", err,
 		)
 	}
