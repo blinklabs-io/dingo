@@ -672,6 +672,18 @@ func (c *ConnectionManager) GetConnectionById(
 	return nil // nil indicates connection not found
 }
 
+// IsInboundConnection returns true if the given connection ID is an inbound
+// connection (a remote peer connected to us). Inbound peers are clients
+// pulling data from us and should not be treated as chain truth sources.
+func (c *ConnectionManager) IsInboundConnection(connId ouroboros.ConnectionId) bool {
+	c.connectionsMutex.Lock()
+	defer c.connectionsMutex.Unlock()
+	if info, exists := c.connections[connId]; exists {
+		return info.isInbound
+	}
+	return false
+}
+
 // HandleConnectionRecycleRequestedEvent closes a connection when
 // a recycle request event is received.
 func (c *ConnectionManager) HandleConnectionRecycleRequestedEvent(

@@ -408,6 +408,11 @@ func (o *Ouroboros) chainsyncClientRollForward(
 		// Update tracked client state and deduplicate headers.
 		// If this header has already been reported by another
 		// client, skip publishing events for it.
+		// Inbound connections are clients pulling data from us.
+		// They are not sources of chain truth and should not
+		// influence chain selection or the blockfetch pipeline.
+		isInbound := o.ConnManager != nil &&
+			o.ConnManager.IsInboundConnection(ctx.ConnectionId)
 		if o.ChainsyncState != nil {
 			isNew := o.ChainsyncState.UpdateClientTip(
 				ctx.ConnectionId,
@@ -416,38 +421,67 @@ func (o *Ouroboros) chainsyncClientRollForward(
 			)
 			if !isNew {
 				// Duplicate header already seen from another
-				// client; skip downstream processing but still
-				// refresh peer liveness and update metrics.
-				o.EventBus.Publish(
-					chainselection.PeerTipUpdateEventType,
-					event.NewEvent(
+				// client; still refresh peer liveness and metrics
+				// for outbound peers used in chain selection.
+				if !isInbound {
+					o.EventBus.Publish(
 						chainselection.PeerTipUpdateEventType,
-						chainselection.PeerTipUpdateEvent{
-							ConnectionId: ctx.ConnectionId,
-							Tip:          tip,
-							VRFOutput:    vrfOutput,
-						},
-					),
-				)
+						event.NewEvent(
+							chainselection.PeerTipUpdateEventType,
+							chainselection.PeerTipUpdateEvent{
+								ConnectionId: ctx.ConnectionId,
+								Tip:          tip,
+								VRFOutput:    vrfOutput,
+							},
+						),
+					)
+				}
 				o.updateChainsyncMetrics(
 					ctx.ConnectionId,
 					tip,
 				)
+				// If this is the active connection, an inactive
+				// peer may have consumed the isNew=true slot
+				// before this connection's callback ran, so the
+				// header never reached the ledger. Publish the
+				// ChainsyncEvent anyway so blockfetch proceeds.
+				if active := o.ChainsyncState.GetClientConnId(); active != nil &&
+					*active == ctx.ConnectionId {
+					o.EventBus.Publish(
+						ledger.ChainsyncEventType,
+						event.NewEvent(
+							ledger.ChainsyncEventType,
+							ledger.ChainsyncEvent{
+								ConnectionId: ctx.ConnectionId,
+								Point:        point,
+								Type:         blockType,
+								BlockHeader:  v,
+								Tip:          tip,
+							},
+						),
+					)
+				}
 				return nil
 			}
 		}
-		// Publish peer tip update for chain selection
-		o.EventBus.Publish(
-			chainselection.PeerTipUpdateEventType,
-			event.NewEvent(
+		// Publish peer tip update for chain selection (outbound only).
+		// Inbound peers are clients pulling data from us, not sources
+		// of chain truth. Letting them into chain selection causes
+		// spurious switches when ephemeral inbound connections report
+		// tips and then disconnect.
+		if !isInbound {
+			o.EventBus.Publish(
 				chainselection.PeerTipUpdateEventType,
-				chainselection.PeerTipUpdateEvent{
-					ConnectionId: ctx.ConnectionId,
-					Tip:          tip,
-					VRFOutput:    vrfOutput,
-				},
-			),
-		)
+				event.NewEvent(
+					chainselection.PeerTipUpdateEventType,
+					chainselection.PeerTipUpdateEvent{
+						ConnectionId: ctx.ConnectionId,
+						Tip:          tip,
+						VRFOutput:    vrfOutput,
+					},
+				),
+			)
+		}
 		// Only feed ledger from the currently selected chainsync
 		// connection to avoid overloading the ledger subscriber
 		// queue with non-active peer traffic.
