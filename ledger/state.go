@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"encoding/hex"
@@ -498,7 +499,8 @@ type LedgerState struct {
 	lastActiveConnId *ouroboros.ConnectionId // tracks active connection for switch detection
 
 	// Header mismatch tracking for fork detection and re-sync
-	headerMismatchCount int // consecutive header mismatch count
+	headerMismatchCount  int // consecutive header mismatch count
+	bufferedHeaderEvents map[ouroboros.ConnectionId][]ChainsyncEvent
 }
 
 // EraTransitionResult holds computed state from an era transition
@@ -618,6 +620,9 @@ func (ls *LedgerState) Start(ctx context.Context) error {
 	// Load current tip
 	if err := ls.loadTip(); err != nil {
 		return fmt.Errorf("failed to load tip: %w", err)
+	}
+	if err := ls.reconcilePrimaryChainTipWithLedgerTip(); err != nil {
+		return fmt.Errorf("failed to reconcile primary chain tip: %w", err)
 	}
 	// Create genesis block
 	if err := ls.createGenesisBlock(); err != nil {
@@ -3016,6 +3021,39 @@ func (ls *LedgerState) loadTip() error {
 	}
 	ls.updateTipMetrics()
 	ls.Unlock()
+	return nil
+}
+
+func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTip() error {
+	if ls.chain == nil || ls.config.ChainManager == nil {
+		return nil
+	}
+	ledgerTip := ls.currentTip
+	chainTip := ls.chain.Tip()
+	if chainTip.Point.Slot == ledgerTip.Point.Slot &&
+		bytes.Equal(chainTip.Point.Hash, ledgerTip.Point.Hash) {
+		return nil
+	}
+	if chainTip.Point.Slot < ledgerTip.Point.Slot {
+		return fmt.Errorf(
+			"primary chain tip %d is behind ledger tip %d",
+			chainTip.Point.Slot,
+			ledgerTip.Point.Slot,
+		)
+	}
+	ls.config.Logger.Warn(
+		"primary chain tip ahead of ledger tip at startup, pruning speculative blocks",
+		"component", "ledger",
+		"chain_tip_slot", chainTip.Point.Slot,
+		"ledger_tip_slot", ledgerTip.Point.Slot,
+		"chain_tip_hash", hex.EncodeToString(chainTip.Point.Hash),
+		"ledger_tip_hash", hex.EncodeToString(ledgerTip.Point.Hash),
+	)
+	if err := ls.config.ChainManager.RewindPrimaryChainToPoint(
+		ledgerTip.Point,
+	); err != nil {
+		return fmt.Errorf("rewind primary chain: %w", err)
+	}
 	return nil
 }
 
