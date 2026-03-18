@@ -66,6 +66,15 @@ type CardanoNodeConfig struct {
 	TestAlonzoHardForkAtEpoch    *uint64 `yaml:"TestAlonzoHardForkAtEpoch"`
 	TestBabbageHardForkAtEpoch   *uint64 `yaml:"TestBabbageHardForkAtEpoch"`
 	TestConwayHardForkAtEpoch    *uint64 `yaml:"TestConwayHardForkAtEpoch"`
+
+	// P2P peer target configuration from cardano-node config.json.
+	// These are read but only used as fallback defaults when the
+	// Dingo-native config (dingo.yaml / env) does not specify them.
+	TargetNumberOfRootPeers        int  `yaml:"TargetNumberOfRootPeers"`
+	TargetNumberOfKnownPeers       int  `yaml:"TargetNumberOfKnownPeers"`
+	TargetNumberOfEstablishedPeers int  `yaml:"TargetNumberOfEstablishedPeers"`
+	TargetNumberOfActivePeers      int  `yaml:"TargetNumberOfActivePeers"`
+	EnableP2P                      bool `yaml:"EnableP2P"`
 }
 
 const (
@@ -595,6 +604,17 @@ func (c *CardanoNodeConfig) LoadConwayGenesisFromReader(r io.Reader) error {
 	}
 	c.conwayGenesis = &conwayGenesis
 	return nil
+}
+
+// P2PTargets returns the peer target values from the cardano-node
+// config.json. Values of 0 mean the field was not present.
+func (c *CardanoNodeConfig) P2PTargets() (
+	rootPeers, knownPeers, establishedPeers, activePeers int,
+) {
+	return c.TargetNumberOfRootPeers,
+		c.TargetNumberOfKnownPeers,
+		c.TargetNumberOfEstablishedPeers,
+		c.TargetNumberOfActivePeers
 }
 
 // HardForkEpoch returns the epoch at which the named era's hard fork
