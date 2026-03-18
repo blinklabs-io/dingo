@@ -355,6 +355,21 @@ func (p *PeerGovernor) Start(ctx context.Context) error {
 
 	// Start outbound connections
 	p.startOutboundConnections()
+
+	// Run initial reconcile shortly after startup so gossip and
+	// ledger peer discovery happen promptly rather than waiting
+	// for the first full reconcile interval.
+	go func(stop <-chan struct{}) {
+		select {
+		case <-time.After(initialReconnectDelay):
+			p.reconcile(ctx)
+		case <-stop:
+			return
+		case <-ctx.Done():
+			return
+		}
+	}(stopCh)
+
 	return nil
 }
 
