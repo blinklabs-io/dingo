@@ -2200,7 +2200,7 @@ func TestDensityWindow(t *testing.T) {
 
 	// The window covers slots [200000-129600, 200000] = [70400, 200000]
 	// First entry in window should be around slot 70400
-	assert.Greater(t, len(ls.densityWindow), 0)
+	require.Greater(t, len(ls.densityWindow), 0)
 	assert.GreaterOrEqual(t, ls.densityWindow[0].slot, uint64(70390))
 
 	// Verify density is in a reasonable range for ~3% active slots
