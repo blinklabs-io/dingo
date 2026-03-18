@@ -185,7 +185,7 @@ func (e *Election) Start(ctx context.Context) error {
 	)
 	if rollbackCh == nil {
 		e.logger.Warn(
-			"event bus not available, rollback invalidation will not be tracked",
+			"event bus not available, rollback schedule invalidation will not be tracked",
 			"component", "leader",
 		)
 	} else {
@@ -336,11 +336,25 @@ func (e *Election) rollbackLoop(
 	evtCh <-chan event.Event,
 ) {
 	for evt := range evtCh {
+		latest := evt
+	drain:
+		for {
+			select {
+			case newer, ok := <-evtCh:
+				if !ok {
+					return
+				}
+				latest = newer
+			default:
+				break drain
+			}
+		}
+
 		if ctx.Err() != nil {
 			return
 		}
 
-		restoreEvent, ok := evt.Data.(ledgerpkg.PoolStateRestoredEvent)
+		restoreEvent, ok := latest.Data.(ledgerpkg.PoolStateRestoredEvent)
 		if !ok {
 			e.logger.Error(
 				"invalid event data for rollback restoration",
@@ -349,18 +363,25 @@ func (e *Election) rollbackLoop(
 			continue
 		}
 
-		cleared := e.clearSchedules()
 		currentEpoch := e.epochProvider.CurrentEpoch()
+		readyEpoch, nextReady := e.epochProvider.NextEpochNonceReadyEpoch()
+		cleared := e.clearUnstableSchedules(
+			currentEpoch,
+			readyEpoch,
+			nextReady,
+		)
 		e.logger.Info(
-			"ledger rollback restored state, invalidating leader schedules",
+			"ledger rollback restored state, pruning unstable leader schedules",
 			"component", "leader",
 			"rollback_slot", restoreEvent.Slot,
-			"cleared_schedules", cleared,
 			"current_epoch", currentEpoch,
+			"next_epoch_ready", nextReady,
+			"ready_epoch", readyEpoch,
+			"cleared_schedules", cleared,
 		)
 		e.queueScheduleCompute(currentEpoch)
-		if nextEpoch, ok := e.epochProvider.NextEpochNonceReadyEpoch(); ok {
-			e.queueScheduleCompute(nextEpoch)
+		if nextReady {
+			e.queueScheduleCompute(readyEpoch)
 		}
 	}
 }
@@ -740,16 +761,30 @@ func (e *Election) storeSchedule(epoch uint64, schedule *Schedule) {
 	}
 }
 
-func (e *Election) clearSchedules() int {
+func (e *Election) clearUnstableSchedules(
+	currentEpoch uint64,
+	readyEpoch uint64,
+	nextReady bool,
+) int {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
 	if !e.running || e.schedules == nil {
 		return 0
 	}
-	count := len(e.schedules)
-	clear(e.schedules)
-	return count
+
+	cleared := 0
+	for epoch := range e.schedules {
+		if epoch <= currentEpoch {
+			continue
+		}
+		if nextReady && epoch == readyEpoch {
+			continue
+		}
+		delete(e.schedules, epoch)
+		cleared++
+	}
+	return cleared
 }
 
 func (e *Election) queueScheduleCompute(epoch uint64) {
