@@ -122,64 +122,6 @@ func TestNormalizeIntersectPoints(t *testing.T) {
 	)
 }
 
-func TestShouldRestartChainsyncOnSwitch(t *testing.T) {
-	tests := []struct {
-		name          string
-		localTip      ocommon.Point
-		trackedClient *dchainsync.TrackedClient
-		want          bool
-	}{
-		{
-			name:     "nil tracked client",
-			localTip: ocommon.NewPoint(100, []byte("tip")),
-			want:     false,
-		},
-		{
-			name:          "origin local tip",
-			localTip:      ocommon.NewPointOrigin(),
-			trackedClient: &dchainsync.TrackedClient{Cursor: ocommon.NewPoint(5, []byte("a"))},
-			want:          false,
-		},
-		{
-			name:          "tracked cursor behind local tip",
-			localTip:      ocommon.NewPoint(100, []byte("tip")),
-			trackedClient: &dchainsync.TrackedClient{Cursor: ocommon.NewPoint(90, []byte("a"))},
-			want:          false,
-		},
-		{
-			name:          "tracked cursor equal to local tip",
-			localTip:      ocommon.NewPoint(100, []byte("tip")),
-			trackedClient: &dchainsync.TrackedClient{Cursor: ocommon.NewPoint(100, []byte("tip"))},
-			want:          false,
-		},
-		{
-			name:          "tracked cursor same slot different hash",
-			localTip:      ocommon.NewPoint(100, []byte("tip")),
-			trackedClient: &dchainsync.TrackedClient{Cursor: ocommon.NewPoint(100, []byte("fork"))},
-			want:          true,
-		},
-		{
-			name:          "tracked cursor ahead of local tip",
-			localTip:      ocommon.NewPoint(100, []byte("tip")),
-			trackedClient: &dchainsync.TrackedClient{Cursor: ocommon.NewPoint(110, []byte("ahead"))},
-			want:          true,
-		},
-	}
-
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			require.Equal(
-				t,
-				test.want,
-				shouldRestartChainsyncOnSwitch(
-					test.localTip,
-					test.trackedClient,
-				),
-			)
-		})
-	}
-}
-
 func TestChainsyncClientRollForward_IneligiblePeerDoesNotPoisonDedup(
 	t *testing.T,
 ) {

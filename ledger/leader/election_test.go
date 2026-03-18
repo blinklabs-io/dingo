@@ -83,6 +83,8 @@ func (m *mockStakeProvider) GetTotalActiveStake(epoch uint64) (uint64, error) {
 type mockEpochProvider struct {
 	currentEpoch    atomic.Uint64
 	epochNonce      atomic.Value
+	nonceMu         sync.RWMutex
+	epochNonces     map[uint64][]byte
 	slotsPerEpoch   uint64
 	activeSlotCoeff float64
 	nextEpochReady  atomic.Uint64
@@ -92,6 +94,7 @@ func newMockEpochProvider() *mockEpochProvider {
 	m := &mockEpochProvider{
 		slotsPerEpoch:   electionSlotsPerEpoch,
 		activeSlotCoeff: 0.05,
+		epochNonces:     make(map[uint64][]byte),
 	}
 	m.currentEpoch.Store(10)
 	m.SetEpochNonce(electionTestNonce)
@@ -103,11 +106,18 @@ func (m *mockEpochProvider) CurrentEpoch() uint64 {
 }
 
 func (m *mockEpochProvider) EpochNonce(epoch uint64) []byte {
+	m.nonceMu.RLock()
+	if nonce, ok := m.epochNonces[epoch]; ok {
+		m.nonceMu.RUnlock()
+		return cloneElectionNonce(nonce)
+	}
+	m.nonceMu.RUnlock()
+
 	nonce, ok := m.epochNonce.Load().([]byte)
 	if !ok || len(nonce) == 0 {
 		return nil
 	}
-	return append([]byte(nil), nonce...)
+	return cloneElectionNonce(nonce)
 }
 
 func (m *mockEpochProvider) NextEpochNonceReadyEpoch() (uint64, bool) {
@@ -127,11 +137,20 @@ func (m *mockEpochProvider) ActiveSlotCoeff() float64 {
 }
 
 func (m *mockEpochProvider) SetEpochNonce(nonce []byte) {
+	m.epochNonce.Store(cloneElectionNonce(nonce))
+}
+
+func (m *mockEpochProvider) SetEpochNonceForEpoch(
+	epoch uint64,
+	nonce []byte,
+) {
+	m.nonceMu.Lock()
+	defer m.nonceMu.Unlock()
 	if len(nonce) == 0 {
-		m.epochNonce.Store([]byte(nil))
+		delete(m.epochNonces, epoch)
 		return
 	}
-	m.epochNonce.Store(append([]byte(nil), nonce...))
+	m.epochNonces[epoch] = cloneElectionNonce(nonce)
 }
 
 type mockScheduleStore struct {
@@ -178,6 +197,13 @@ func (m *mockScheduleStore) key(
 
 func makeElectionNonce(fill byte) []byte {
 	return bytes.Repeat([]byte{fill}, 32)
+}
+
+func cloneElectionNonce(nonce []byte) []byte {
+	if len(nonce) == 0 {
+		return nil
+	}
+	return append([]byte(nil), nonce...)
 }
 
 // waitForSchedule polls until CurrentSchedule returns non-nil, or fails
@@ -704,7 +730,7 @@ func TestElectionPrecomputesNextEpochOnNonceReady(t *testing.T) {
 		"next epoch schedule should be persisted")
 }
 
-func TestElectionInvalidatesSchedulesAfterRollback(t *testing.T) {
+func TestElectionRollbackKeepsCurrentSchedule(t *testing.T) {
 	poolId := lcommon.PoolKeyHash{}
 	stakeProvider := newMockStakeProvider()
 	stakeProvider.totalStake = 1_000_000
@@ -712,7 +738,6 @@ func TestElectionInvalidatesSchedulesAfterRollback(t *testing.T) {
 
 	epochProvider := newMockEpochProvider()
 	epochProvider.activeSlotCoeff = 1.0
-	epochProvider.SetEpochNonce(makeElectionNonce(0x11))
 
 	eventBus := event.NewEventBus(nil, nil)
 	defer eventBus.Stop()
@@ -731,9 +756,11 @@ func TestElectionInvalidatesSchedulesAfterRollback(t *testing.T) {
 	defer func() { _ = election.Stop() }()
 
 	schedule := waitForSchedule(t, election, 30*time.Second)
-	require.True(t, bytes.Equal(makeElectionNonce(0x11), schedule.EpochNonce))
-
-	epochProvider.SetEpochNonce(makeElectionNonce(0x22))
+	leaderSlots := schedule.LeaderSlotsSnapshot()
+	if len(leaderSlots) == 0 {
+		t.Fatalf("current schedule should contain at least one leader slot")
+	}
+	leaderSlot := leaderSlots[0]
 
 	eventBus.Publish(
 		ledgerpkg.PoolStateRestoredEventType,
@@ -744,14 +771,21 @@ func TestElectionInvalidatesSchedulesAfterRollback(t *testing.T) {
 	)
 
 	require.Eventually(t, func() bool {
-		recomputed := election.ScheduleForEpoch(10)
-		return recomputed != nil &&
-			bytes.Equal(makeElectionNonce(0x22), recomputed.EpochNonce)
-	}, 30*time.Second, 100*time.Millisecond,
-		"rollback should invalidate and recompute the current epoch schedule")
+		current := election.ScheduleForEpoch(10)
+		if current == nil {
+			return false
+		}
+		currentSlots := current.LeaderSlotsSnapshot()
+		return currentSlots != nil &&
+			len(currentSlots) > 0 &&
+			bytes.Equal(schedule.EpochNonce, current.EpochNonce) &&
+			currentSlots[0] == leaderSlot &&
+			election.ShouldProduceBlock(leaderSlot)
+	}, time.Second, 20*time.Millisecond,
+		"rollback should not invalidate a stable current-epoch schedule")
 }
 
-func TestElectionRollbackKeepsNextEpochRecomputable(t *testing.T) {
+func TestElectionRollbackKeepsStableNextSchedule(t *testing.T) {
 	poolId := lcommon.PoolKeyHash{}
 	stakeProvider := newMockStakeProvider()
 	stakeProvider.totalStake = 1_000_000
@@ -759,8 +793,8 @@ func TestElectionRollbackKeepsNextEpochRecomputable(t *testing.T) {
 
 	epochProvider := newMockEpochProvider()
 	epochProvider.activeSlotCoeff = 1.0
-	epochProvider.SetEpochNonce(makeElectionNonce(0x31))
 	epochProvider.nextEpochReady.Store(11)
+	epochProvider.SetEpochNonceForEpoch(11, makeElectionNonce(0x31))
 
 	eventBus := event.NewEventBus(nil, nil)
 	defer eventBus.Stop()
@@ -779,13 +813,71 @@ func TestElectionRollbackKeepsNextEpochRecomputable(t *testing.T) {
 	defer func() { _ = election.Stop() }()
 
 	waitForSchedule(t, election, 30*time.Second)
+	var nextBefore *Schedule
 	require.Eventually(t, func() bool {
-		return election.ScheduleForEpoch(11) != nil
+		nextBefore = election.ScheduleForEpoch(11)
+		return nextBefore != nil
 	}, 30*time.Second, 100*time.Millisecond)
+	expectedSlots := nextBefore.LeaderSlotsSnapshot()
+	expectedNonce := append([]byte(nil), nextBefore.EpochNonce...)
+
+	eventBus.Publish(
+		ledgerpkg.PoolStateRestoredEventType,
+		event.NewEvent(
+			ledgerpkg.PoolStateRestoredEventType,
+			ledgerpkg.PoolStateRestoredEvent{Slot: 95},
+		),
+	)
+
+	require.Eventually(t, func() bool {
+		schedule := election.ScheduleForEpoch(11)
+		return schedule == nextBefore &&
+			bytes.Equal(expectedNonce, schedule.EpochNonce) &&
+			assert.ObjectsAreEqual(expectedSlots, schedule.LeaderSlotsSnapshot())
+	}, time.Second, 20*time.Millisecond,
+		"rollback after cutoff should not invalidate a stable next-epoch schedule")
+}
+
+func TestElectionRollbackClearsUnstableNextSchedule(t *testing.T) {
+	poolId := lcommon.PoolKeyHash{}
+	stakeProvider := newMockStakeProvider()
+	stakeProvider.totalStake = 1_000_000
+	stakeProvider.poolStakes[string(poolId[:])] = 1_000_000
+
+	epochProvider := newMockEpochProvider()
+	epochProvider.activeSlotCoeff = 1.0
+	epochProvider.nextEpochReady.Store(11)
+	epochProvider.SetEpochNonceForEpoch(11, makeElectionNonce(0x31))
+
+	eventBus := event.NewEventBus(nil, nil)
+	defer eventBus.Stop()
+
+	election := NewElection(
+		poolId,
+		electionTestVRFSeed,
+		stakeProvider,
+		epochProvider,
+		eventBus,
+		slog.Default(),
+	)
+
+	err := election.Start(context.Background())
+	require.NoError(t, err)
+	defer func() { _ = election.Stop() }()
+
+	waitForSchedule(t, election, 30*time.Second)
+	var nextBefore *Schedule
+	require.Eventually(t, func() bool {
+		nextBefore = election.ScheduleForEpoch(11)
+		return nextBefore != nil
+	}, 30*time.Second, 100*time.Millisecond)
+	require.True(
+		t,
+		bytes.Equal(makeElectionNonce(0x31), nextBefore.EpochNonce),
+	)
 
 	epochProvider.nextEpochReady.Store(0)
-	epochProvider.SetEpochNonce(makeElectionNonce(0x32))
-
+	epochProvider.SetEpochNonceForEpoch(11, makeElectionNonce(0x32))
 	eventBus.Publish(
 		ledgerpkg.PoolStateRestoredEventType,
 		event.NewEvent(
@@ -815,6 +907,7 @@ func TestElectionRollbackKeepsNextEpochRecomputable(t *testing.T) {
 	require.Eventually(t, func() bool {
 		schedule := election.ScheduleForEpoch(11)
 		return schedule != nil &&
+			schedule != nextBefore &&
 			bytes.Equal(makeElectionNonce(0x32), schedule.EpochNonce)
 	}, 30*time.Second, 100*time.Millisecond,
 		"nonce-ready replay should rebuild the next epoch schedule after rollback")
