@@ -140,6 +140,23 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 		),
 		"component", "node",
 	)
+	// Apply cardano-node config.json P2P targets as fallback when the
+	// Dingo-native config (dingo.yaml / env) does not specify them.
+	// Priority: dingo.yaml/env > cardano config.json > peergov defaults.
+	if nodeCfg != nil {
+		rp, kp, ep, ap := nodeCfg.P2PTargets()
+		if cfg.TargetNumberOfKnownPeers == 0 && kp > 0 {
+			cfg.TargetNumberOfKnownPeers = kp
+		}
+		if cfg.TargetNumberOfEstablishedPeers == 0 && ep > 0 {
+			cfg.TargetNumberOfEstablishedPeers = ep
+		}
+		if cfg.TargetNumberOfActivePeers == 0 && ap > 0 {
+			cfg.TargetNumberOfActivePeers = ap
+		}
+		_ = rp // TargetNumberOfRootPeers not yet wired to peergov
+	}
+
 	listeners := []dingo.ListenerConfig{}
 	if cfg.RelayPort > 0 {
 		// Public "relay" port (node-to-node)

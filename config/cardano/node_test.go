@@ -52,6 +52,11 @@ var expectedCardanoNodeConfig = &CardanoNodeConfig{
 	TestAllegraHardForkAtEpoch:                  ptrUint64(0),
 	TestMaryHardForkAtEpoch:                     ptrUint64(0),
 	TestAlonzoHardForkAtEpoch:                   ptrUint64(0),
+	TargetNumberOfRootPeers:                     60,
+	TargetNumberOfKnownPeers:                    150,
+	TargetNumberOfEstablishedPeers:               50,
+	TargetNumberOfActivePeers:                    20,
+	EnableP2P:                                   true,
 }
 
 func TestCardanoNodeConfig(t *testing.T) {
