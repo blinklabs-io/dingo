@@ -637,14 +637,10 @@ func LoadConfig(configFile string) (*Config, error) {
 		return nil, err
 	}
 
-	// Set default CardanoConfig path based on network if not provided by user
-	if globalConfig.CardanoConfig == "" {
-		if globalConfig.Network == "preview" {
-			globalConfig.CardanoConfig = "preview/config.json"
-		} else {
-			globalConfig.CardanoConfig = "/opt/cardano/" + globalConfig.Network + "/config.json"
-		}
-	}
+	// NOTE: Do not set a default CardanoConfig here. The network flag
+	// can be overridden after LoadConfig returns (see main.go
+	// PersistentPreRunE). Each consumer resolves the cardano config
+	// path using cfg.Network at call time instead.
 
 	_, err = LoadTopologyConfig()
 	if err != nil {

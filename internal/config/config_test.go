@@ -170,7 +170,7 @@ func TestLoad_WithoutConfigFile_UsesDefaults(t *testing.T) {
 		EvictionWatermark:           0.90,
 		RejectionWatermark:          0.95,
 		BindAddr:                    "0.0.0.0",
-		CardanoConfig:               "preview/config.json", // Set dynamically based on network
+		CardanoConfig:               "", // Resolved by consumers using cfg.Network
 		DatabasePath:                ".dingo",
 		SocketPath:                  "dingo.socket",
 		IntersectTip:                false,
@@ -330,12 +330,10 @@ func TestLoadConfig_EmbeddedDefaults(t *testing.T) {
 		t.Fatalf("expected no error loading default config, got: %v", err)
 	}
 
-	// Should use embedded path for CardanoConfig
-	expected := "preview/config.json"
-	if cfg.CardanoConfig != expected {
+	// CardanoConfig is no longer set by LoadConfig; consumers resolve it
+	if cfg.CardanoConfig != "" {
 		t.Errorf(
-			"expected CardanoConfig to be %q, got %q",
-			expected,
+			"expected CardanoConfig to be empty, got %q",
 			cfg.CardanoConfig,
 		)
 	}
@@ -360,12 +358,10 @@ func TestLoadConfig_MainnetNetwork(t *testing.T) {
 		t.Fatalf("expected no error for non-preview network, got: %v", err)
 	}
 
-	// Should use /opt/cardano path for non-preview networks
-	expected := "/opt/cardano/mainnet/config.json"
-	if cfg.CardanoConfig != expected {
+	// CardanoConfig is no longer set by LoadConfig; consumers resolve it
+	if cfg.CardanoConfig != "" {
 		t.Errorf(
-			"expected CardanoConfig to be %q, got %q",
-			expected,
+			"expected CardanoConfig to be empty, got %q",
 			cfg.CardanoConfig,
 		)
 	}
@@ -386,12 +382,10 @@ func TestLoadConfig_DevnetNetwork(t *testing.T) {
 		t.Fatalf("expected no error for devnet network, got: %v", err)
 	}
 
-	// Should use /opt/cardano path for devnet network
-	expected := "/opt/cardano/devnet/config.json"
-	if cfg.CardanoConfig != expected {
+	// CardanoConfig is no longer set by LoadConfig; consumers resolve it
+	if cfg.CardanoConfig != "" {
 		t.Errorf(
-			"expected CardanoConfig to be %q, got %q",
-			expected,
+			"expected CardanoConfig to be empty, got %q",
 			cfg.CardanoConfig,
 		)
 	}
@@ -593,34 +587,28 @@ database:
 
 func TestLoadConfig_NetworkNameValidation(t *testing.T) {
 	validTests := []struct {
-		name           string
-		network        string
-		wantConfigPath string
+		name    string
+		network string
 	}{
 		{
-			name:           "preview",
-			network:        "preview",
-			wantConfigPath: "preview/config.json",
+			name:    "preview",
+			network: "preview",
 		},
 		{
-			name:           "mainnet",
-			network:        "mainnet",
-			wantConfigPath: "/opt/cardano/mainnet/config.json",
+			name:    "mainnet",
+			network: "mainnet",
 		},
 		{
-			name:           "preprod",
-			network:        "preprod",
-			wantConfigPath: "/opt/cardano/preprod/config.json",
+			name:    "preprod",
+			network: "preprod",
 		},
 		{
-			name:           "hyphenated name",
-			network:        "my-devnet",
-			wantConfigPath: "/opt/cardano/my-devnet/config.json",
+			name:    "hyphenated name",
+			network: "my-devnet",
 		},
 		{
-			name:           "underscore name",
-			network:        "test_net",
-			wantConfigPath: "/opt/cardano/test_net/config.json",
+			name:    "underscore name",
+			network: "test_net",
 		},
 	}
 
@@ -643,11 +631,11 @@ func TestLoadConfig_NetworkNameValidation(t *testing.T) {
 				)
 			}
 
-			if cfg.CardanoConfig != tt.wantConfigPath {
+			// CardanoConfig is resolved by consumers, not LoadConfig
+			if cfg.CardanoConfig != "" {
 				t.Errorf(
-					"CardanoConfig = %q, want %q",
+					"CardanoConfig = %q, want empty",
 					cfg.CardanoConfig,
-					tt.wantConfigPath,
 				)
 			}
 		})
