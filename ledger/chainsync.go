@@ -471,7 +471,7 @@ func (ls *LedgerState) handleEventChainsyncRollback(e ChainsyncEvent) error {
 		)
 		ls.chainsyncState = RollbackChainsyncState
 	}
-	if err := ls.chain.Rollback(e.Point); err != nil {
+	if err := ls.rollbackChainAndState(e.Point); err != nil {
 		if errors.Is(err, models.ErrBlockNotFound) {
 			// Missing rollback point can happen when local state and peer
 			// chainsync cursor drift. Recover by forcing re-intersect.
@@ -800,7 +800,7 @@ func (ls *LedgerState) tryResolveFork(
 		"connection_id", e.ConnectionId.String(),
 	)
 
-	if err := ls.chain.Rollback(rollbackPoint); err != nil {
+	if err := ls.rollbackChainAndState(rollbackPoint); err != nil {
 		if errors.Is(err, chain.ErrRollbackExceedsSecurityParam) {
 			// Fork exceeds security parameter K. We must not
 			// follow a chain that requires rolling back more
@@ -847,38 +847,6 @@ func (ls *LedgerState) tryResolveFork(
 	// Mark state as rollback so the next block header event logs
 	// "switched to fork" and increments the fork metric.
 	ls.chainsyncState = RollbackChainsyncState
-
-	// Invalidate epoch cache entries for epochs that started after
-	// the rollback point. These epochs have nonces computed from the
-	// old fork's blocks and would cause VRF verification failures on
-	// blocks from the new fork. The ledger-level rollback (which
-	// recomputes nonces) is asynchronous, so we must prune the cache
-	// here to prevent stale nonce lookups in handleEventBlockfetchBlock.
-	ls.Lock()
-	newCache := make([]models.Epoch, 0, len(ls.epochCache))
-	for _, ep := range ls.epochCache {
-		if ep.StartSlot <= rollbackPoint.Slot {
-			newCache = append(newCache, ep)
-		}
-	}
-	ls.epochCache = newCache
-	if len(newCache) > 0 {
-		ls.currentEpoch = newCache[len(newCache)-1]
-		eraDesc := eras.GetEraById(ls.currentEpoch.EraId)
-		if eraDesc != nil {
-			ls.currentEra = *eraDesc
-		} else {
-			ls.config.Logger.Warn(
-				"unknown era ID after fork rollback epoch prune, currentEra may be stale",
-				"era_id", ls.currentEpoch.EraId,
-				"component", "ledger",
-			)
-		}
-	} else {
-		ls.currentEpoch = models.Epoch{}
-		ls.currentEra = eras.EraDesc{}
-	}
-	ls.Unlock()
 
 	// Rollback succeeded — re-add the header that triggered fork
 	// detection. Only reset mismatch tracking on successful header

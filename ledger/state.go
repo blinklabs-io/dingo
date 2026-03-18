@@ -1595,6 +1595,42 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 	return nil
 }
 
+// rollbackChainAndState rewinds the primary chain and then synchronizes the
+// metadata-backed ledger state to the same point.
+func (ls *LedgerState) rollbackChainAndState(point ocommon.Point) error {
+	if err := ls.chain.Rollback(point); err != nil {
+		return err
+	}
+	if err := ls.rollback(point); err != nil {
+		return fmt.Errorf("synchronize ledger rollback state: %w", err)
+	}
+	return nil
+}
+
+// processChainIteratorRollback applies a rollback emitted by the primary chain
+// iterator only when the chain still sits at that rollback point. Iterator
+// rollbacks can lag behind live blockfetch/chainsync activity; if the primary
+// chain has already re-extended past the rollback point, applying the rollback
+// again would desynchronize metadata from the blob-backed chain.
+func (ls *LedgerState) processChainIteratorRollback(
+	point ocommon.Point,
+) error {
+	chainTip := ls.chain.Tip()
+	if chainTip.Point.Slot != point.Slot ||
+		!bytes.Equal(chainTip.Point.Hash, point.Hash) {
+		ls.config.Logger.Debug(
+			"skipping stale chain iterator rollback",
+			"component", "ledger",
+			"rollback_slot", point.Slot,
+			"rollback_hash", hex.EncodeToString(point.Hash),
+			"chain_tip_slot", chainTip.Point.Slot,
+			"chain_tip_hash", hex.EncodeToString(chainTip.Point.Hash),
+		)
+		return nil
+	}
+	return ls.rollback(point)
+}
+
 // transitionToEra performs an era transition and returns the result without
 // mutating LedgerState. This allows callers to capture the computed state in a
 // transaction and apply it to in-memory state after the transaction commits.
@@ -2323,7 +2359,9 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 				// that re-acquires ls.Lock(), causing a deadlock. The rollback
 				// method handles its own locking for in-memory state updates.
 				if result.rollback {
-					if err = ls.rollback(result.rollbackPoint); err != nil {
+					if err = ls.processChainIteratorRollback(
+						result.rollbackPoint,
+					); err != nil {
 						return fmt.Errorf("process rollback: %w", err)
 					}
 					continue
@@ -3056,11 +3094,21 @@ func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTip() error {
 		return nil
 	}
 	if chainTip.Point.Slot < ledgerTip.Point.Slot {
-		return fmt.Errorf(
-			"primary chain tip %d is behind ledger tip %d",
-			chainTip.Point.Slot,
-			ledgerTip.Point.Slot,
+		ls.config.Logger.Warn(
+			"ledger tip ahead of primary chain tip at startup, rolling back metadata to chain tip",
+			"component", "ledger",
+			"chain_tip_slot", chainTip.Point.Slot,
+			"ledger_tip_slot", ledgerTip.Point.Slot,
+			"chain_tip_hash", hex.EncodeToString(chainTip.Point.Hash),
+			"ledger_tip_hash", hex.EncodeToString(ledgerTip.Point.Hash),
 		)
+		if err := ls.rollback(chainTip.Point); err != nil {
+			return fmt.Errorf(
+				"rollback ledger tip to primary chain tip: %w",
+				err,
+			)
+		}
+		return nil
 	}
 	ls.config.Logger.Warn(
 		"primary chain tip ahead of ledger tip at startup, pruning speculative blocks",
