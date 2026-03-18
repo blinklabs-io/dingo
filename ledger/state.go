@@ -470,7 +470,7 @@ type LedgerState struct {
 	pendingBlockfetchEvents       []BlockfetchEvent
 	checkpointWrittenForEpoch     bool
 	closed                        atomic.Bool
-	inRecovery                    bool // guards against recursive recovery in SubmitAsyncDBTxn
+	inRecovery                    bool           // guards against recursive recovery in SubmitAsyncDBTxn
 	densityWindow                 []densityEntry // sliding window for chain density metric
 
 	// Subscription IDs for event bus unsubscribe on close
