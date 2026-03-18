@@ -209,12 +209,30 @@ func (d *MetadataStorePostgres) GetUtxosByAddressWithOrdering(
 		return nil, result.Error
 	}
 
-	// Load assets for each UTxO
-	for i := range ret {
-		if err := db.Model(&ret[i].Utxo).
-			Association("Assets").
-			Find(&ret[i].Assets); err != nil {
+	// Batch load assets for all UTxOs to avoid N+1 queries
+	if len(ret) > 0 {
+		utxoIDs := make([]uint, len(ret))
+		for i := range ret {
+			utxoIDs[i] = ret[i].ID
+		}
+
+		var assets []models.Asset
+		if err := db.Where("utxo_id IN ?", utxoIDs).Find(&assets).Error; err != nil {
 			return nil, err
+		}
+
+		// Map assets to their UTxOs
+		assetMap := make(map[uint][]models.Asset)
+		for i := range assets {
+			assetMap[assets[i].UtxoID] = append(
+				assetMap[assets[i].UtxoID],
+				assets[i],
+			)
+		}
+
+		// Assign assets to each UTxO
+		for i := range ret {
+			ret[i].Assets = assetMap[ret[i].ID]
 		}
 	}
 
