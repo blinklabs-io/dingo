@@ -261,11 +261,21 @@ func (p *PeerGovernor) createOutboundConnection(peer *Peer) {
 			}
 			// Use the peer from the slice in case the pointer changed
 			currentPeer := p.peers[peerIdx]
+			oldSource := currentPeer.Source
+			oldConn := clonePeerConnection(currentPeer.Connection)
 			currentPeer.ConnectedAt = time.Now()
 			currentPeer.setConnection(conn, true)
 			currentPeer.State = PeerStateWarm
+			selectionEvents := p.appendChainSelectionEventsLocked(
+				nil,
+				p.bootstrapExited,
+				oldSource,
+				oldConn,
+				currentPeer,
+			)
 			p.updatePeerMetrics()
 			p.mu.Unlock()
+			p.publishPendingEvents(selectionEvents)
 			// Generate event
 			p.publishEvent(
 				OutboundConnectionEventType,
@@ -457,8 +467,8 @@ func (p *PeerGovernor) handleInboundConnectionEvent(evt event.Event) {
 	// Resolve address before acquiring lock to avoid blocking DNS
 	normalized := p.resolveAddress(address)
 
+	var selectionEvents []pendingEvent
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	peerIdx := -1
 	// Check if peer already exists (possibly as inbound)
 	for i, peer := range p.peers {
@@ -481,6 +491,7 @@ func (p *PeerGovernor) handleInboundConnectionEvent(evt event.Event) {
 				"cap", p.maxPeerListSize(),
 				"current", len(p.peers),
 			)
+			p.mu.Unlock()
 			return
 		}
 		tmpPeer = &Peer{
@@ -500,8 +511,11 @@ func (p *PeerGovernor) handleInboundConnectionEvent(evt event.Event) {
 		tmpPeer = p.peers[peerIdx]
 	}
 	if tmpPeer == nil {
+		p.mu.Unlock()
 		return
 	}
+	oldSource := tmpPeer.Source
+	oldConn := clonePeerConnection(tmpPeer.Connection)
 	if p.config.ConnManager != nil {
 		conn := p.config.ConnManager.GetConnectionById(e.ConnectionId)
 		if conn != nil {
@@ -520,7 +534,17 @@ func (p *PeerGovernor) handleInboundConnectionEvent(evt event.Event) {
 		tmpPeer.ReconnectDelay = 0
 		tmpPeer.ReconnectCount = 0
 	}
+	selectionEvents = p.appendChainSelectionEventsLocked(
+		selectionEvents,
+		p.bootstrapExited,
+		oldSource,
+		oldConn,
+		tmpPeer,
+	)
 	p.updatePeerMetrics()
+	p.mu.Unlock()
+
+	p.publishPendingEvents(selectionEvents)
 }
 
 func (p *PeerGovernor) handleConnectionClosedEvent(evt event.Event) {
@@ -532,8 +556,8 @@ func (p *PeerGovernor) handleConnectionClosedEvent(evt event.Event) {
 		)
 		return
 	}
+	var selectionEvents []pendingEvent
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	if e.Error != nil {
 		closeMsg := fmt.Sprintf(
 			"unexpected connection failure: %s",
@@ -558,8 +582,17 @@ func (p *PeerGovernor) handleConnectionClosedEvent(evt event.Event) {
 	peerIdx := p.peerIndexByConnId(e.ConnectionId)
 	if peerIdx != -1 && p.peers[peerIdx] != nil {
 		peer := p.peers[peerIdx]
+		oldSource := peer.Source
+		oldConn := clonePeerConnection(peer.Connection)
 		peer.Connection = nil
 		peer.State = PeerStateCold
+		selectionEvents = p.appendChainSelectionEventsLocked(
+			selectionEvents,
+			p.bootstrapExited,
+			oldSource,
+			oldConn,
+			peer,
+		)
 		p.updatePeerMetrics()
 		// Only reconnect for outbound peers that are not on the deny list
 		if peer.Source != PeerSourceInboundConn &&
@@ -604,6 +637,9 @@ func (p *PeerGovernor) handleConnectionClosedEvent(evt event.Event) {
 			}
 		}
 	}
+	p.mu.Unlock()
+
+	p.publishPendingEvents(selectionEvents)
 }
 
 // DenyPeer adds a peer to the deny list for the specified duration.

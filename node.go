@@ -90,10 +90,11 @@ func (n *Node) handleChainSwitchEvent(evt event.Event) {
 		"new_tip_block", e.NewTip.BlockNumber,
 		"new_tip_slot", e.NewTip.Point.Slot,
 	)
-	// Do not restart chainsync on peer switch. Every connected peer
-	// already maintains its own chainsync client state and pipeline; a
-	// switch only changes which peer's stream feeds the ledger.
 	n.chainsyncState.SetClientConnId(e.NewConnectionId)
+	n.ouroboros.ResumeChainsyncOnPeerSwitch(
+		n.ctx,
+		e.NewConnectionId,
+	)
 }
 
 func New(cfg Config) (*Node, error) {
@@ -229,12 +230,13 @@ func (n *Node) Run(ctx context.Context) error {
 				return nil
 			},
 			ConnectionSwitchFunc: func() {
-				// Clear the header dedup cache so the new connection
-				// can re-deliver blocks from the intersection without
-				// them being filtered as duplicates from the old
-				// connection.
-				if n.chainsyncState != nil {
-					n.chainsyncState.ClearSeenHeaders()
+				// Retain older seen-header history so a switched peer
+				// can replay only the post-tip segment from the local
+				// intersect point without re-delivering older headers.
+				if n.chainsyncState != nil && n.ledgerState != nil {
+					n.chainsyncState.ClearSeenHeadersFrom(
+						n.ledgerState.Tip().Point.Slot,
+					)
 				}
 			},
 			FatalErrorFunc: func(err error) {
@@ -419,6 +421,58 @@ func (n *Node) Run(ctx context.Context) error {
 		connmanager.InboundConnectionEventType,
 		n.ouroboros.HandleInboundConnEvent,
 	)
+	// Configure peer governor before opening listeners so topology-driven
+	// outbound connections start first and do not lose the race to inbounds.
+	// Create ledger peer provider for discovering peers from stake pool relays.
+	ledgerPeerProvider, err := ledger.NewLedgerPeerProvider(
+		n.ledgerState,
+		n.db,
+		n.eventBus,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to create ledger peer provider: %w", err)
+	}
+
+	// Get UseLedgerAfterSlot from topology config (defaults to -1 = disabled).
+	var useLedgerAfterSlot int64 = -1
+	if n.config.topologyConfig != nil {
+		useLedgerAfterSlot = n.config.topologyConfig.UseLedgerAfterSlot
+	}
+
+	n.peerGov = peergov.NewPeerGovernor(
+		peergov.PeerGovernorConfig{
+			Logger:                         n.config.logger,
+			EventBus:                       n.eventBus,
+			ConnManager:                    n.connManager,
+			DisableOutbound:                n.config.isDevMode(),
+			PromRegistry:                   n.config.promRegistry,
+			PeerRequestFunc:                n.ouroboros.RequestPeersFromPeer,
+			LedgerPeerProvider:             ledgerPeerProvider,
+			UseLedgerAfterSlot:             useLedgerAfterSlot,
+			TargetNumberOfKnownPeers:       n.config.targetNumberOfKnownPeers,
+			TargetNumberOfEstablishedPeers: n.config.targetNumberOfEstablishedPeers,
+			TargetNumberOfActivePeers:      n.config.targetNumberOfActivePeers,
+			ActivePeersTopologyQuota:       n.config.activePeersTopologyQuota,
+			ActivePeersGossipQuota:         n.config.activePeersGossipQuota,
+			ActivePeersLedgerQuota:         n.config.activePeersLedgerQuota,
+			MinHotPeers:                    n.config.minHotPeers,
+			ReconcileInterval:              n.config.reconcileInterval,
+			InactivityTimeout:              n.config.inactivityTimeout,
+			SyncProgressProvider:           n.ledgerState,
+		},
+	)
+	n.ouroboros.PeerGov = n.peerGov
+	n.eventBus.SubscribeFunc(
+		peergov.OutboundConnectionEventType,
+		n.ouroboros.HandleOutboundConnEvent,
+	)
+	if n.config.topologyConfig != nil {
+		n.peerGov.LoadTopologyConfig(n.config.topologyConfig)
+	}
+	if err := n.peerGov.Start(n.ctx); err != nil { //nolint:contextcheck
+		return fmt.Errorf("peer governor start failed: %w", err)
+	}
+	started = append(started, func() { n.peerGov.Stop() })
 	// Start listeners
 	if err := n.connManager.Start(n.ctx); err != nil { //nolint:contextcheck
 		return err
@@ -644,57 +698,6 @@ func (n *Node) Run(ctx context.Context) error {
 			}
 		}
 	}(stallCheckInterval, stallRecoveryGrace, stallRecycleCooldown)
-	// Configure peer governor
-	// Create ledger peer provider for discovering peers from stake pool relays
-	ledgerPeerProvider, err := ledger.NewLedgerPeerProvider(
-		n.ledgerState,
-		n.db,
-		n.eventBus,
-	)
-	if err != nil {
-		return fmt.Errorf("failed to create ledger peer provider: %w", err)
-	}
-
-	// Get UseLedgerAfterSlot from topology config (defaults to -1 = disabled)
-	var useLedgerAfterSlot int64 = -1
-	if n.config.topologyConfig != nil {
-		useLedgerAfterSlot = n.config.topologyConfig.UseLedgerAfterSlot
-	}
-
-	n.peerGov = peergov.NewPeerGovernor(
-		peergov.PeerGovernorConfig{
-			Logger:                         n.config.logger,
-			EventBus:                       n.eventBus,
-			ConnManager:                    n.connManager,
-			DisableOutbound:                n.config.isDevMode(),
-			PromRegistry:                   n.config.promRegistry,
-			PeerRequestFunc:                n.ouroboros.RequestPeersFromPeer,
-			LedgerPeerProvider:             ledgerPeerProvider,
-			UseLedgerAfterSlot:             useLedgerAfterSlot,
-			TargetNumberOfKnownPeers:       n.config.targetNumberOfKnownPeers,
-			TargetNumberOfEstablishedPeers: n.config.targetNumberOfEstablishedPeers,
-			TargetNumberOfActivePeers:      n.config.targetNumberOfActivePeers,
-			ActivePeersTopologyQuota:       n.config.activePeersTopologyQuota,
-			ActivePeersGossipQuota:         n.config.activePeersGossipQuota,
-			ActivePeersLedgerQuota:         n.config.activePeersLedgerQuota,
-			MinHotPeers:                    n.config.minHotPeers,
-			ReconcileInterval:              n.config.reconcileInterval,
-			InactivityTimeout:              n.config.inactivityTimeout,
-			SyncProgressProvider:           n.ledgerState,
-		},
-	)
-	n.ouroboros.PeerGov = n.peerGov
-	n.eventBus.SubscribeFunc(
-		peergov.OutboundConnectionEventType,
-		n.ouroboros.HandleOutboundConnEvent,
-	)
-	if n.config.topologyConfig != nil {
-		n.peerGov.LoadTopologyConfig(n.config.topologyConfig)
-	}
-	if err := n.peerGov.Start(n.ctx); err != nil { //nolint:contextcheck
-		return err
-	}
-	started = append(started, func() { n.peerGov.Stop() })
 	// Configure UTxO RPC (only when port is configured)
 	if n.config.utxorpcPort > 0 {
 		n.utxorpc = utxorpc.NewUtxorpc(

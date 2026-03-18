@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/peergov"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 )
@@ -79,21 +80,26 @@ type ChainSelectorConfig struct {
 	EvaluationInterval time.Duration
 	StaleTipThreshold  time.Duration
 	SecurityParam      uint64
+	ConnectionEligible func(ouroboros.ConnectionId) bool
+	ConnectionPriority func(ouroboros.ConnectionId) int
 	MaxTrackedPeers    int // 0 means use DefaultMaxTrackedPeers
 }
 
 // ChainSelector tracks chain tips from multiple peers and selects the best
 // chain according to Ouroboros Praos rules.
 type ChainSelector struct {
-	config          ChainSelectorConfig
-	securityParam   uint64
-	maxTrackedPeers int
-	peerTips        map[ouroboros.ConnectionId]*PeerChainTip
-	bestPeerConn    *ouroboros.ConnectionId
-	localTip        ochainsync.Tip
-	mutex           sync.RWMutex
-	ctx             context.Context
-	cancel          context.CancelFunc
+	config            ChainSelectorConfig
+	securityParam     uint64
+	maxTrackedPeers   int
+	peerTips          map[ouroboros.ConnectionId]*PeerChainTip
+	eligible          map[ouroboros.ConnectionId]bool
+	priority          map[ouroboros.ConnectionId]int
+	evaluationTrigger chan struct{}
+	bestPeerConn      *ouroboros.ConnectionId
+	localTip          ochainsync.Tip
+	mutex             sync.RWMutex
+	ctx               context.Context
+	cancel            context.CancelFunc
 }
 
 // NewChainSelector creates a new ChainSelector with the given configuration.
@@ -112,12 +118,26 @@ func NewChainSelector(cfg ChainSelectorConfig) *ChainSelector {
 	if maxPeers <= 0 {
 		maxPeers = DefaultMaxTrackedPeers
 	}
-	return &ChainSelector{
-		config:          cfg,
-		securityParam:   cfg.SecurityParam,
-		maxTrackedPeers: maxPeers,
-		peerTips:        make(map[ouroboros.ConnectionId]*PeerChainTip),
+	cs := &ChainSelector{
+		config:            cfg,
+		securityParam:     cfg.SecurityParam,
+		maxTrackedPeers:   maxPeers,
+		peerTips:          make(map[ouroboros.ConnectionId]*PeerChainTip),
+		eligible:          make(map[ouroboros.ConnectionId]bool),
+		priority:          make(map[ouroboros.ConnectionId]int),
+		evaluationTrigger: make(chan struct{}, 1),
 	}
+	if cfg.EventBus != nil {
+		cfg.EventBus.SubscribeFunc(
+			peergov.PeerEligibilityChangedEventType,
+			cs.handlePeerEligibilityChangedEvent,
+		)
+		cfg.EventBus.SubscribeFunc(
+			peergov.PeerPriorityChangedEventType,
+			cs.handlePeerPriorityChangedEvent,
+		)
+	}
+	return cs
 }
 
 // Start begins the chain selector's background evaluation loop and subscribes
@@ -233,7 +253,16 @@ func (cs *ChainSelector) UpdatePeerTip(
 		// Check if this peer's tip is better than the current best peer's tip
 		if cs.bestPeerConn != nil {
 			if bestPeerTip, ok := cs.peerTips[*cs.bestPeerConn]; ok {
-				if IsBetterChain(tip, bestPeerTip.Tip) {
+				comparison := CompareChains(tip, bestPeerTip.Tip)
+				if comparison == ChainABetter {
+					shouldEvaluate = true
+				} else if comparison == ChainEqual &&
+					cs.comparePeerTips(
+						connId,
+						cs.peerTips[connId],
+						*cs.bestPeerConn,
+						bestPeerTip,
+					) == ChainABetter {
 					shouldEvaluate = true
 				}
 			}
@@ -324,10 +353,16 @@ func (cs *ChainSelector) evictLeastRecentPeerLocked() *ouroboros.ConnectionId {
 			"peer_count", len(cs.peerTips),
 			"max_tracked_peers", cs.maxTrackedPeers,
 		)
-		delete(cs.peerTips, oldestConn)
+		cs.deletePeerLocked(oldestConn)
 		return &oldestConn
 	}
 	return nil
+}
+
+func (cs *ChainSelector) deletePeerLocked(connId ouroboros.ConnectionId) {
+	delete(cs.peerTips, connId)
+	delete(cs.eligible, connId)
+	delete(cs.priority, connId)
 }
 
 // RemovePeer removes a peer from tracking.
@@ -338,7 +373,7 @@ func (cs *ChainSelector) RemovePeer(connId ouroboros.ConnectionId) {
 		cs.mutex.Lock()
 		defer cs.mutex.Unlock()
 
-		delete(cs.peerTips, connId)
+		cs.deletePeerLocked(connId)
 
 		if cs.bestPeerConn != nil && *cs.bestPeerConn == connId {
 			previousBest := *cs.bestPeerConn
@@ -470,6 +505,13 @@ func (cs *ChainSelector) selectBestChainLocked() *ouroboros.ConnectionId {
 	var bestPeerTip *PeerChainTip
 
 	for connId, peerTip := range cs.peerTips {
+		if !cs.isConnectionEligible(connId) {
+			cs.config.Logger.Debug(
+				"skipping ineligible peer",
+				"connection_id", connId.String(),
+			)
+			continue
+		}
 		// Don't consider peers that are implausibly far behind local tip.
 		// This prevents switching to stale or cross-network peers when
 		// local tip and k are known.
@@ -484,7 +526,7 @@ func (cs *ChainSelector) selectBestChainLocked() *ouroboros.ConnectionId {
 			)
 			continue
 		}
-		if peerTip.IsStale(cs.config.StaleTipThreshold) {
+		if cs.isPeerTipStale(peerTip) {
 			cs.config.Logger.Debug(
 				"skipping stale peer",
 				"connection_id", connId.String(),
@@ -499,33 +541,17 @@ func (cs *ChainSelector) selectBestChainLocked() *ouroboros.ConnectionId {
 			continue
 		}
 
-		comparison := CompareChains(peerTip.Tip, bestPeerTip.Tip)
+		comparison := cs.comparePeerTips(
+			connId,
+			peerTip,
+			bestConnId,
+			bestPeerTip,
+		)
 		switch comparison {
 		case ChainABetter:
 			bestConnId = connId
 			bestPeerTip = peerTip
-		case ChainEqual:
-			// VRF tiebreaker: lower VRF output wins (per Ouroboros Praos)
-			vrfComparison := CompareVRFOutputs(
-				peerTip.VRFOutput,
-				bestPeerTip.VRFOutput,
-			)
-			switch vrfComparison {
-			case ChainABetter:
-				// peerTip has lower VRF, it wins
-				bestConnId = connId
-				bestPeerTip = peerTip
-			case ChainEqual:
-				// VRF outputs are equal (or one/both nil), use connection ID
-				// as final deterministic tiebreaker
-				if connId.String() < bestConnId.String() {
-					bestConnId = connId
-					bestPeerTip = peerTip
-				}
-			case ChainBBetter, ChainComparisonUnknown:
-				// bestPeerTip has lower VRF (or unknown); no change
-			}
-		case ChainBBetter, ChainComparisonUnknown:
+		case ChainBBetter, ChainComparisonUnknown, ChainEqual:
 			// Current best is better (or unknown); no change needed
 		}
 	}
@@ -534,6 +560,99 @@ func (cs *ChainSelector) selectBestChainLocked() *ouroboros.ConnectionId {
 		return nil
 	}
 	return &bestConnId
+}
+
+func (cs *ChainSelector) isConnectionEligible(
+	connId ouroboros.ConnectionId,
+) bool {
+	eligible, ok := cs.eligible[connId]
+	if !ok {
+		return true
+	}
+	return eligible
+}
+
+func (cs *ChainSelector) connectionPriority(
+	connId ouroboros.ConnectionId,
+) int {
+	return cs.priority[connId]
+}
+
+func (cs *ChainSelector) isPeerTipStale(peerTip *PeerChainTip) bool {
+	return peerTip != nil &&
+		peerTip.IsStale(cs.config.StaleTipThreshold)
+}
+
+func (cs *ChainSelector) comparePeerTips(
+	connIdA ouroboros.ConnectionId,
+	peerTipA *PeerChainTip,
+	connIdB ouroboros.ConnectionId,
+	peerTipB *PeerChainTip,
+) ChainComparisonResult {
+	if peerTipA == nil || peerTipB == nil {
+		return ChainComparisonUnknown
+	}
+	comparison := CompareChains(peerTipA.Tip, peerTipB.Tip)
+	switch comparison {
+	case ChainABetter, ChainBBetter, ChainComparisonUnknown:
+		return comparison
+	case ChainEqual:
+		priorityA := cs.connectionPriority(connIdA)
+		priorityB := cs.connectionPriority(connIdB)
+		if priorityA > priorityB {
+			return ChainABetter
+		}
+		if priorityB > priorityA {
+			return ChainBBetter
+		}
+		vrfComparison := CompareVRFOutputs(
+			peerTipA.VRFOutput,
+			peerTipB.VRFOutput,
+		)
+		switch vrfComparison {
+		case ChainABetter, ChainBBetter:
+			return vrfComparison
+		case ChainEqual, ChainComparisonUnknown:
+		}
+		if connIdA.String() < connIdB.String() {
+			return ChainABetter
+		}
+		if connIdB.String() < connIdA.String() {
+			return ChainBBetter
+		}
+		return ChainEqual
+	default:
+		return ChainComparisonUnknown
+	}
+}
+
+func (cs *ChainSelector) handlePeerEligibilityChangedEvent(evt event.Event) {
+	e, ok := evt.Data.(peergov.PeerEligibilityChangedEvent)
+	if !ok {
+		return
+	}
+	cs.mutex.Lock()
+	cs.eligible[e.ConnectionId] = e.Eligible
+	cs.mutex.Unlock()
+	cs.triggerEvaluation()
+}
+
+func (cs *ChainSelector) handlePeerPriorityChangedEvent(evt event.Event) {
+	e, ok := evt.Data.(peergov.PeerPriorityChangedEvent)
+	if !ok {
+		return
+	}
+	cs.mutex.Lock()
+	cs.priority[e.ConnectionId] = e.Priority
+	cs.mutex.Unlock()
+	cs.triggerEvaluation()
+}
+
+func (cs *ChainSelector) triggerEvaluation() {
+	select {
+	case cs.evaluationTrigger <- struct{}{}:
+	default:
+	}
 }
 
 // EvaluateAndSwitch evaluates all peer tips and switches to the best chain if
@@ -556,6 +675,28 @@ func (cs *ChainSelector) EvaluateAndSwitch() bool {
 		}
 
 		previousBest := cs.bestPeerConn
+		if previousBest != nil && *previousBest != *newBest {
+			previousPeerTip, ok := cs.peerTips[*previousBest]
+			if ok {
+				newPeerTip, ok := cs.peerTips[*newBest]
+				if !ok {
+					return
+				}
+				previousEligible := cs.isConnectionEligible(*previousBest)
+				previousFresh := !cs.isPeerTipStale(previousPeerTip)
+				// Preserve the incumbent only when it still wins the same
+				// full comparison used during normal best-peer selection.
+				if previousEligible && previousFresh &&
+					cs.comparePeerTips(
+						*previousBest,
+						previousPeerTip,
+						*newBest,
+						newPeerTip,
+					) == ChainABetter {
+					newBest = previousBest
+				}
+			}
+		}
 
 		if previousBest == nil || *previousBest != *newBest {
 			newPeerTip, ok := cs.peerTips[*newBest]
@@ -657,6 +798,8 @@ func (cs *ChainSelector) evaluationLoop() {
 		select {
 		case <-cs.ctx.Done():
 			return
+		case <-cs.evaluationTrigger:
+			cs.runTriggeredEvaluation()
 		case <-ticker.C:
 			cs.runEvaluationTick()
 		}
@@ -675,6 +818,18 @@ func (cs *ChainSelector) runEvaluationTick() {
 		}
 	}()
 	cs.cleanupStalePeers()
+	cs.EvaluateAndSwitch()
+}
+
+func (cs *ChainSelector) runTriggeredEvaluation() {
+	defer func() {
+		if r := recover(); r != nil {
+			cs.config.Logger.Error(
+				"panic in triggered evaluation, continuing",
+				"panic", r,
+			)
+		}
+	}()
 	cs.EvaluateAndSwitch()
 }
 
@@ -698,7 +853,7 @@ func (cs *ChainSelector) cleanupStalePeers() {
 					"connection_id", connId.String(),
 					"last_updated", peerTip.LastUpdated,
 				)
-				delete(cs.peerTips, connId)
+				cs.deletePeerLocked(connId)
 				// Track if this was the best peer
 				if cs.bestPeerConn != nil && *cs.bestPeerConn == connId {
 					connIdCopy := connId

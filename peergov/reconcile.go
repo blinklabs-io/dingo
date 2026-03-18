@@ -86,6 +86,8 @@ func (p *PeerGovernor) reconcile(ctx context.Context) {
 			// Promote to warm if connection exists
 			// Skip bootstrap peers if bootstrap has been exited
 			if peer.Connection != nil {
+				oldSource := peer.Source
+				oldConn := clonePeerConnection(peer.Connection)
 				if p.isBootstrapPeer(peer) && !p.canPromoteBootstrapPeer() {
 					// Bootstrap peer with connection but bootstrap exited
 					// Close the connection and keep peer cold
@@ -101,6 +103,13 @@ func (p *PeerGovernor) reconcile(ctx context.Context) {
 					p.config.Logger.Debug(
 						"prevented bootstrap peer promotion after exit",
 						"address", peer.Address,
+					)
+					events = p.appendChainSelectionEventsLocked(
+						events,
+						p.bootstrapExited,
+						oldSource,
+						oldConn,
+						peer,
 					)
 				} else {
 					p.peers[i].State = PeerStateWarm

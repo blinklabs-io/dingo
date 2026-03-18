@@ -303,6 +303,148 @@ func (p *PeerGovernor) SetPeerHotByConnId(connId ouroboros.ConnectionId) {
 	}
 }
 
+func clonePeerConnection(conn *PeerConnection) *PeerConnection {
+	if conn == nil {
+		return nil
+	}
+	connCopy := *conn
+	return &connCopy
+}
+
+func chainSelectionEligible(source PeerSource, conn *PeerConnection) bool {
+	_ = source
+	return conn != nil && conn.IsClient
+}
+
+func chainSelectionPriority(source PeerSource) int {
+	switch source {
+	case PeerSourceTopologyLocalRoot:
+		return 50
+	case PeerSourceTopologyBootstrapPeer:
+		return 40
+	case PeerSourceTopologyPublicRoot:
+		return 30
+	case PeerSourceP2PGossip:
+		return 20
+	case PeerSourceP2PLedger:
+		return 10
+	default:
+		return 0
+	}
+}
+
+type chainSelectionPeerState struct {
+	connId   ouroboros.ConnectionId
+	eligible bool
+	priority int
+	ok       bool
+}
+
+func chainSelectionState(
+	bootstrapExited bool,
+	source PeerSource,
+	conn *PeerConnection,
+) chainSelectionPeerState {
+	if conn == nil {
+		return chainSelectionPeerState{}
+	}
+	eligible := chainSelectionEligible(source, conn)
+	priority := chainSelectionPriority(source)
+	if source == PeerSourceTopologyBootstrapPeer && bootstrapExited {
+		eligible = false
+		priority = 0
+	}
+	return chainSelectionPeerState{
+		connId:   conn.Id,
+		eligible: eligible,
+		priority: priority,
+		ok:       true,
+	}
+}
+
+func (p *PeerGovernor) appendChainSelectionEventsLocked(
+	events []pendingEvent,
+	oldBootstrapExited bool,
+	oldSource PeerSource,
+	oldConn *PeerConnection,
+	peer *Peer,
+) []pendingEvent {
+	oldState := chainSelectionState(oldBootstrapExited, oldSource, oldConn)
+	newState := chainSelectionPeerState{}
+	if peer != nil {
+		newState = chainSelectionState(
+			p.bootstrapExited,
+			peer.Source,
+			peer.Connection,
+		)
+	}
+	if oldState.ok && newState.ok && oldState.connId == newState.connId {
+		if oldState.eligible != newState.eligible {
+			events = append(events, pendingEvent{
+				PeerEligibilityChangedEventType,
+				PeerEligibilityChangedEvent{
+					ConnectionId: newState.connId,
+					Eligible:     newState.eligible,
+				},
+			})
+		}
+		if oldState.priority != newState.priority {
+			events = append(events, pendingEvent{
+				PeerPriorityChangedEventType,
+				PeerPriorityChangedEvent{
+					ConnectionId: newState.connId,
+					Priority:     newState.priority,
+				},
+			})
+		}
+		return events
+	}
+	if oldState.ok {
+		if oldState.eligible {
+			events = append(events, pendingEvent{
+				PeerEligibilityChangedEventType,
+				PeerEligibilityChangedEvent{
+					ConnectionId: oldState.connId,
+					Eligible:     false,
+				},
+			})
+		}
+		if oldState.priority != 0 {
+			events = append(events, pendingEvent{
+				PeerPriorityChangedEventType,
+				PeerPriorityChangedEvent{
+					ConnectionId: oldState.connId,
+					Priority:     0,
+				},
+			})
+		}
+	}
+	if newState.ok {
+		if oldState.connId != newState.connId ||
+			oldState.eligible != newState.eligible {
+			events = append(events, pendingEvent{
+				PeerEligibilityChangedEventType,
+				PeerEligibilityChangedEvent{
+					ConnectionId: newState.connId,
+					Eligible:     newState.eligible,
+				},
+			})
+		}
+		if newState.priority != 0 &&
+			(oldState.connId != newState.connId ||
+				oldState.priority != newState.priority) {
+			events = append(events, pendingEvent{
+				PeerPriorityChangedEventType,
+				PeerPriorityChangedEvent{
+					ConnectionId: newState.connId,
+					Priority:     newState.priority,
+				},
+			})
+		}
+	}
+	return events
+}
+
 func (p *PeerGovernor) UpdatePeerBlockFetchObservation(
 	connId ouroboros.ConnectionId,
 	latencyMs float64,

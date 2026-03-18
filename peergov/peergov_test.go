@@ -46,6 +46,31 @@ func boolPtr(v bool) *bool {
 	return &v
 }
 
+func requirePendingEventData[T any](
+	t *testing.T,
+	events []pendingEvent,
+	eventType event.EventType,
+) T {
+	t.Helper()
+	for _, pending := range events {
+		if pending.eventType != eventType {
+			continue
+		}
+		data, ok := pending.data.(T)
+		require.Truef(
+			t,
+			ok,
+			"unexpected event payload type for %s: %T",
+			eventType,
+			pending.data,
+		)
+		return data
+	}
+	t.Fatalf("missing pending event %s", eventType)
+	var zero T
+	return zero
+}
+
 func TestNewPeerGovernor(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -483,6 +508,218 @@ func TestPeerGovernor_SetPeerHotByConnId(t *testing.T) {
 	peers := pg.GetPeers()
 	assert.Equal(t, PeerStateHot, peers[0].State)
 	assert.True(t, peers[0].LastActivity.After(time.Now().Add(-1*time.Second)))
+}
+
+func TestPeerGovernorAppendChainSelectionEventsLocked(t *testing.T) {
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+	})
+	localAddr, _ := net.ResolveTCPAddr("tcp", "44.0.0.1:3001")
+	remoteAddr, _ := net.ResolveTCPAddr("tcp", "44.0.0.1:3004")
+	connId := ouroboros.ConnectionId{
+		LocalAddr:  localAddr,
+		RemoteAddr: remoteAddr,
+	}
+
+	t.Run("new outbound connection publishes eligible and priority", func(t *testing.T) {
+		events := pg.appendChainSelectionEventsLocked(
+			nil,
+			pg.bootstrapExited,
+			PeerSourceP2PGossip,
+			nil,
+			&Peer{
+				Source:     PeerSourceP2PGossip,
+				Connection: &PeerConnection{Id: connId, IsClient: true},
+			},
+		)
+		require.Len(t, events, 2)
+		assert.Equal(
+			t,
+			event.EventType(PeerEligibilityChangedEventType),
+			events[0].eventType,
+		)
+		assert.Equal(
+			t,
+			PeerEligibilityChangedEvent{
+				ConnectionId: connId,
+				Eligible:     true,
+			},
+			events[0].data,
+		)
+		assert.Equal(
+			t,
+			event.EventType(PeerPriorityChangedEventType),
+			events[1].eventType,
+		)
+		assert.Equal(
+			t,
+			PeerPriorityChangedEvent{
+				ConnectionId: connId,
+				Priority:     20,
+			},
+			events[1].data,
+		)
+	})
+
+	t.Run("same connection source change only updates priority", func(t *testing.T) {
+		events := pg.appendChainSelectionEventsLocked(
+			nil,
+			pg.bootstrapExited,
+			PeerSourceP2PGossip,
+			&PeerConnection{Id: connId, IsClient: true},
+			&Peer{
+				Source:     PeerSourceTopologyLocalRoot,
+				Connection: &PeerConnection{Id: connId, IsClient: true},
+			},
+		)
+		require.Len(t, events, 1)
+		assert.Equal(
+			t,
+			event.EventType(PeerPriorityChangedEventType),
+			events[0].eventType,
+		)
+		assert.Equal(
+			t,
+			PeerPriorityChangedEvent{
+				ConnectionId: connId,
+				Priority:     50,
+			},
+			events[0].data,
+		)
+	})
+
+	t.Run("same connection eligibility flip publishes change", func(t *testing.T) {
+		events := pg.appendChainSelectionEventsLocked(
+			nil,
+			pg.bootstrapExited,
+			PeerSourceInboundConn,
+			&PeerConnection{Id: connId, IsClient: true},
+			&Peer{
+				Source:     PeerSourceInboundConn,
+				Connection: &PeerConnection{Id: connId, IsClient: false},
+			},
+		)
+		require.Len(t, events, 1)
+		assert.Equal(
+			t,
+			event.EventType(PeerEligibilityChangedEventType),
+			events[0].eventType,
+		)
+		assert.Equal(
+			t,
+			PeerEligibilityChangedEvent{
+				ConnectionId: connId,
+				Eligible:     false,
+			},
+			events[0].data,
+		)
+	})
+
+	t.Run("connection removal clears eligibility and priority", func(t *testing.T) {
+		events := pg.appendChainSelectionEventsLocked(
+			nil,
+			pg.bootstrapExited,
+			PeerSourceP2PGossip,
+			&PeerConnection{Id: connId, IsClient: true},
+			&Peer{
+				Source: PeerSourceP2PGossip,
+			},
+		)
+		require.Len(t, events, 2)
+		assert.Equal(
+			t,
+			event.EventType(PeerEligibilityChangedEventType),
+			events[0].eventType,
+		)
+		assert.Equal(
+			t,
+			PeerEligibilityChangedEvent{
+				ConnectionId: connId,
+				Eligible:     false,
+			},
+			events[0].data,
+		)
+		assert.Equal(
+			t,
+			event.EventType(PeerPriorityChangedEventType),
+			events[1].eventType,
+		)
+		assert.Equal(
+			t,
+			PeerPriorityChangedEvent{
+				ConnectionId: connId,
+				Priority:     0,
+			},
+			events[1].data,
+		)
+	})
+
+	t.Run("responder-only inbound connection publishes ineligible state", func(t *testing.T) {
+		events := pg.appendChainSelectionEventsLocked(
+			nil,
+			pg.bootstrapExited,
+			PeerSourceInboundConn,
+			nil,
+			&Peer{
+				Source:     PeerSourceInboundConn,
+				Connection: &PeerConnection{Id: connId, IsClient: false},
+			},
+		)
+		require.Len(t, events, 1)
+		assert.Equal(
+			t,
+			event.EventType(PeerEligibilityChangedEventType),
+			events[0].eventType,
+		)
+		assert.Equal(
+			t,
+			PeerEligibilityChangedEvent{
+				ConnectionId: connId,
+				Eligible:     false,
+			},
+			events[0].data,
+		)
+	})
+
+	t.Run("responder-only outbound connection publishes ineligible state", func(t *testing.T) {
+		events := pg.appendChainSelectionEventsLocked(
+			nil,
+			pg.bootstrapExited,
+			PeerSourceP2PGossip,
+			nil,
+			&Peer{
+				Source:     PeerSourceP2PGossip,
+				Connection: &PeerConnection{Id: connId, IsClient: false},
+			},
+		)
+		require.Len(t, events, 2)
+		assert.Equal(
+			t,
+			event.EventType(PeerEligibilityChangedEventType),
+			events[0].eventType,
+		)
+		assert.Equal(
+			t,
+			PeerEligibilityChangedEvent{
+				ConnectionId: connId,
+				Eligible:     false,
+			},
+			events[0].data,
+		)
+		assert.Equal(
+			t,
+			event.EventType(PeerPriorityChangedEventType),
+			events[1].eventType,
+		)
+		assert.Equal(
+			t,
+			PeerPriorityChangedEvent{
+				ConnectionId: connId,
+				Priority:     20,
+			},
+			events[1].data,
+		)
+	})
 }
 
 func TestPeerGovernor_HandleInboundConnection(t *testing.T) {
@@ -2021,6 +2258,119 @@ func TestPeerGovernor_LoadTopologyConfig_ValencyStored(t *testing.T) {
 		}
 	}
 	assert.Equal(t, 1, publicRootCount, "should have 1 public root peer")
+}
+
+func TestPeerGovernor_LoadTopologyConfig_ExitedBootstrapKeepsBootstrapSource(
+	t *testing.T,
+) {
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+	})
+	pg.bootstrapExited = true
+
+	topologyConfig := &topology.TopologyConfig{
+		BootstrapPeers: []topology.TopologyConfigP2PBootstrapPeer{
+			{Address: "44.0.0.10", Port: 3001},
+		},
+	}
+
+	pg.LoadTopologyConfig(topologyConfig)
+
+	require.Len(t, pg.peers, 1)
+	assert.EqualValues(t, PeerSourceTopologyBootstrapPeer, pg.peers[0].Source)
+	assert.Equal(t, "44.0.0.10:3001", pg.peers[0].Address)
+}
+
+func TestPeerGovernor_LoadTopologyConfig_ReusesExistingTopologyPeerState(
+	t *testing.T,
+) {
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+	})
+	connId := ouroboros.ConnectionId{
+		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 6000},
+		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("44.0.0.2"), Port: 3002},
+	}
+	firstSeen := time.Now().Add(-time.Hour)
+	conn := &PeerConnection{Id: connId, IsClient: true}
+	pg.peers = append(pg.peers, &Peer{
+		Address:           "44.0.0.2:3002",
+		NormalizedAddress: "44.0.0.2:3002",
+		Source:            PeerSourceTopologyLocalRoot,
+		State:             PeerStateWarm,
+		Connection:        conn,
+		ReconnectCount:    3,
+		ReconnectDelay:    2 * time.Second,
+		FirstSeen:         firstSeen,
+	})
+
+	pg.LoadTopologyConfig(&topology.TopologyConfig{
+		LocalRoots: []topology.TopologyConfigP2PLocalRoot{
+			{
+				AccessPoints: []topology.TopologyConfigP2PAccessPoint{
+					{Address: "44.0.0.2", Port: 3002},
+				},
+				Advertise: true,
+				Valency:   2,
+			},
+		},
+	})
+
+	require.Len(t, pg.peers, 1)
+	peer := pg.peers[0]
+	assert.EqualValues(t, PeerSourceTopologyLocalRoot, peer.Source)
+	assert.Equal(t, PeerStateWarm, peer.State)
+	assert.Same(t, conn, peer.Connection)
+	assert.Equal(t, 3, peer.ReconnectCount)
+	assert.Equal(t, 2*time.Second, peer.ReconnectDelay)
+	assert.Equal(t, firstSeen, peer.FirstSeen)
+	assert.Equal(t, uint(2), peer.Valency)
+}
+
+func TestPeerGovernor_LoadTopologyConfig_RemovesOrphanedTopologyPeers(
+	t *testing.T,
+) {
+	eventBus := newMockEventBus()
+	t.Cleanup(func() { eventBus.Stop() })
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:   slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		EventBus: eventBus,
+	})
+	_, evtCh := eventBus.Subscribe(PeerRemovedEventType)
+	pg.peers = append(pg.peers, &Peer{
+		Address:           "44.0.0.2:3002",
+		NormalizedAddress: "44.0.0.2:3002",
+		Source:            PeerSourceTopologyLocalRoot,
+		State:             PeerStateCold,
+	})
+
+	pg.LoadTopologyConfig(&topology.TopologyConfig{
+		LocalRoots: []topology.TopologyConfigP2PLocalRoot{
+			{
+				AccessPoints: []topology.TopologyConfigP2PAccessPoint{
+					{Address: "44.0.0.3", Port: 3003},
+				},
+			},
+		},
+	})
+
+	require.Len(t, pg.peers, 1)
+	assert.Equal(t, "44.0.0.3:3003", pg.peers[0].Address)
+	select {
+	case evt := <-evtCh:
+		removedEvent, ok := evt.Data.(PeerStateChangeEvent)
+		require.True(t, ok)
+		assert.Equal(
+			t,
+			PeerStateChangeEvent{
+				Address: "44.0.0.2:3002",
+				Reason:  "topology removed",
+			},
+			removedEvent,
+		)
+	case <-time.After(time.Second):
+		t.Fatal("expected topology removal event")
+	}
 }
 
 // Tests for churn system (Phase 3)
@@ -4542,7 +4892,7 @@ func TestPeerGovernor_ShouldExitBootstrap_AlreadyExited(t *testing.T) {
 	assert.False(t, shouldExit, "should not exit bootstrap when already exited")
 }
 
-func TestPeerGovernor_ExitBootstrap_DemotesPeers(t *testing.T) {
+func TestPeerGovernor_ExitBootstrap_PreservesBootstrapPeers(t *testing.T) {
 	eventBus := newMockEventBus()
 
 	pg := NewPeerGovernor(PeerGovernorConfig{
@@ -4576,13 +4926,25 @@ func TestPeerGovernor_ExitBootstrap_DemotesPeers(t *testing.T) {
 
 	_ = pg.exitBootstrapLocked("test reason")
 
-	// Verify all bootstrap peers are cold
+	// Verify bootstrap peers keep source classification and state
+	bootstrapStates := make(map[string]PeerState)
+	bootstrapCount := 0
+	publicRootCount := 0
 	for _, peer := range pg.peers {
 		if peer.Source == PeerSourceTopologyBootstrapPeer {
-			assert.Equal(t, PeerStateCold, peer.State,
-				"bootstrap peer %s should be cold after exit", peer.Address)
+			bootstrapStates[peer.Address] = peer.State
+			bootstrapCount++
+		}
+		if peer.Source == PeerSourceTopologyPublicRoot {
+			publicRootCount++
 		}
 	}
+	assert.Equal(t, 3, bootstrapCount, "all bootstrap peers should remain bootstrap sourced")
+	assert.Equal(t, 0, publicRootCount, "bootstrap exit should not reclassify bootstrap peers")
+	assert.Equal(t, 3, len(bootstrapStates), "all bootstrap peers should remain present")
+	assert.Equal(t, PeerStateHot, bootstrapStates["44.0.0.1:3001"])
+	assert.Equal(t, PeerStateWarm, bootstrapStates["44.0.0.1:3002"])
+	assert.Equal(t, PeerStateCold, bootstrapStates["44.0.0.1:3003"])
 
 	// Verify non-bootstrap peer is unaffected
 	var gossipPeer *Peer
@@ -4599,6 +4961,91 @@ func TestPeerGovernor_ExitBootstrap_DemotesPeers(t *testing.T) {
 	// Verify bootstrapExited flag is set
 	assert.True(t, pg.bootstrapExited, "bootstrapExited should be true")
 	pg.mu.Unlock()
+}
+
+func TestPeerGovernor_ExitBootstrapDoesNotReportDemotions(t *testing.T) {
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+	})
+
+	pg.mu.Lock()
+	pg.peers = append(pg.peers, &Peer{
+		Address: "44.0.0.1:3001",
+		Source:  PeerSourceTopologyBootstrapPeer,
+		State:   PeerStateHot,
+	})
+	pg.peers = append(pg.peers, &Peer{
+		Address: "44.0.0.1:3002",
+		Source:  PeerSourceTopologyBootstrapPeer,
+		State:   PeerStateWarm,
+	})
+	events := pg.exitBootstrapLocked("test reason")
+	pg.mu.Unlock()
+
+	require.Len(t, events, 1)
+	assert.Equal(
+		t,
+		event.EventType(BootstrapExitedEventType),
+		events[0].eventType,
+	)
+	assert.Equal(
+		t,
+		BootstrapExitedEvent{
+			Reason:       "test reason",
+			DemotedPeers: 0,
+		},
+		events[0].data,
+	)
+}
+
+func TestPeerGovernor_ExitBootstrapPublishesChainSelectionDowngrade(
+	t *testing.T,
+) {
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+	})
+	connId := ouroboros.ConnectionId{
+		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 6000},
+		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("44.0.0.1"), Port: 3001},
+	}
+
+	pg.mu.Lock()
+	pg.peers = append(pg.peers, &Peer{
+		Address: "44.0.0.1:3001",
+		Source:  PeerSourceTopologyBootstrapPeer,
+		State:   PeerStateHot,
+		Connection: &PeerConnection{
+			Id:       connId,
+			IsClient: true,
+		},
+	})
+	events := pg.exitBootstrapLocked("test reason")
+	pg.mu.Unlock()
+
+	assert.Equal(
+		t,
+		PeerEligibilityChangedEvent{
+			ConnectionId: connId,
+			Eligible:     false,
+		},
+		requirePendingEventData[PeerEligibilityChangedEvent](
+			t,
+			events,
+			PeerEligibilityChangedEventType,
+		),
+	)
+	assert.Equal(
+		t,
+		PeerPriorityChangedEvent{
+			ConnectionId: connId,
+			Priority:     0,
+		},
+		requirePendingEventData[PeerPriorityChangedEvent](
+			t,
+			events,
+			PeerPriorityChangedEventType,
+		),
+	)
 }
 
 func TestPeerGovernor_ExitBootstrap_PreventsPromotion(t *testing.T) {
@@ -4669,6 +5116,59 @@ func TestPeerGovernor_BootstrapRecovery(t *testing.T) {
 		"bootstrapExited should be false after recovery",
 	)
 	pg.mu.Unlock()
+}
+
+func TestPeerGovernor_BootstrapRecoveryPublishesChainSelectionUpgrade(
+	t *testing.T,
+) {
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:                slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		MinHotPeers:           3,
+		AutoBootstrapRecovery: boolPtr(true),
+	})
+	connId := ouroboros.ConnectionId{
+		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 6000},
+		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("44.0.0.1"), Port: 3001},
+	}
+
+	pg.mu.Lock()
+	pg.bootstrapExited = true
+	pg.peers = append(pg.peers, &Peer{
+		Address: "44.0.0.1:3001",
+		Source:  PeerSourceTopologyBootstrapPeer,
+		State:   PeerStateWarm,
+		Connection: &PeerConnection{
+			Id:       connId,
+			IsClient: true,
+		},
+	})
+	events := pg.checkBootstrapRecoveryLocked()
+	pg.mu.Unlock()
+
+	assert.Equal(
+		t,
+		PeerEligibilityChangedEvent{
+			ConnectionId: connId,
+			Eligible:     true,
+		},
+		requirePendingEventData[PeerEligibilityChangedEvent](
+			t,
+			events,
+			PeerEligibilityChangedEventType,
+		),
+	)
+	assert.Equal(
+		t,
+		PeerPriorityChangedEvent{
+			ConnectionId: connId,
+			Priority:     40,
+		},
+		requirePendingEventData[PeerPriorityChangedEvent](
+			t,
+			events,
+			PeerPriorityChangedEventType,
+		),
+	)
 }
 
 func TestPeerGovernor_BootstrapRecovery_NotNeededWithWarmCandidates(
@@ -4830,14 +5330,16 @@ func TestPeerGovernor_Reconcile_ExitsBootstrap(t *testing.T) {
 	// Find the bootstrap peer
 	var bootstrapPeer *Peer
 	for _, peer := range pg.peers {
-		if peer.Source == PeerSourceTopologyBootstrapPeer {
+		if peer.Address == "44.0.0.1:3001" {
 			bootstrapPeer = peer
 			break
 		}
 	}
 	assert.NotNil(t, bootstrapPeer)
-	assert.Equal(t, PeerStateCold, bootstrapPeer.State,
-		"bootstrap peer should be cold after reconcile")
+	assert.EqualValues(t, PeerSourceTopologyBootstrapPeer, bootstrapPeer.Source,
+		"bootstrap peer should keep bootstrap source after reconcile")
+	assert.Equal(t, PeerStateWarm, bootstrapPeer.State,
+		"bootstrap peer should keep its state after reconcile")
 	pg.mu.Unlock()
 }
 
