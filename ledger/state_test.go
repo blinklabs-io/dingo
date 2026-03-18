@@ -2227,3 +2227,60 @@ func TestDensityWindow(t *testing.T) {
 	lastEntry := ls.densityWindow[len(ls.densityWindow)-1]
 	assert.LessOrEqual(t, lastEntry.slot, rollbackSlot)
 }
+
+func TestReconcilePrimaryChainTipWithLedgerTipPrunesSpeculativeBlocks(
+	t *testing.T,
+) {
+	db, err := database.New(&database.Config{
+		BlobPlugin:     "badger",
+		MetadataPlugin: "sqlite",
+		DataDir:        "",
+	})
+	require.NoError(t, err)
+	defer db.Close()
+
+	blocks := make([]models.Block, 0, 5)
+	for slot := uint64(1); slot <= 5; slot++ {
+		block := makeTestBlock(slot, slot)
+		if len(blocks) > 0 {
+			block.PrevHash = append([]byte(nil), blocks[len(blocks)-1].Hash...)
+		}
+		blocks = append(blocks, block)
+		require.NoError(t, db.BlockCreate(block, nil))
+	}
+
+	cm, err := chain.NewManager(db, nil)
+	require.NoError(t, err)
+
+	ledgerTipBlock := blocks[2]
+	ledgerTip := ochainsync.Tip{
+		Point:       makeTestPoint(ledgerTipBlock),
+		BlockNumber: ledgerTipBlock.Number,
+	}
+	require.NoError(t, db.SetTip(ledgerTip, nil))
+
+	ls := &LedgerState{
+		db:    db,
+		chain: cm.PrimaryChain(),
+		config: LedgerStateConfig{
+			ChainManager: cm,
+			Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+	ls.currentTip = ledgerTip
+	require.NoError(t, ls.reconcilePrimaryChainTipWithLedgerTip())
+
+	chainTip := cm.PrimaryChain().Tip()
+	assert.Equal(t, ledgerTip.Point.Slot, chainTip.Point.Slot)
+	assert.Equal(t, ledgerTip.BlockNumber, chainTip.BlockNumber)
+	assert.Equal(t, ledgerTip.Point.Hash, chainTip.Point.Hash)
+
+	for _, block := range blocks[:3] {
+		_, err := database.BlockByPoint(db, makeTestPoint(block))
+		assert.NoError(t, err, "block at slot %d should still exist", block.Slot)
+	}
+	for _, block := range blocks[3:] {
+		_, err := database.BlockByPoint(db, makeTestPoint(block))
+		assert.Error(t, err, "block at slot %d should be pruned", block.Slot)
+	}
+}
