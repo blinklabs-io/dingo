@@ -13,14 +13,14 @@ Hi folks! Here’s what we shipped in v0.27.4.
 
 ### ✨ What's New
 
-- **Rock-solid chain sync:** Sync can keep making progress with less manual intervention because chain synchronization now recovers more reliably from stalled or unstable network connections.
-- **More solid chain selection:** Sync can waste less time on poor candidates because chain selection now takes peer suitability into account.
+- **Rock-solid chain-sync recovery:** Sync stays more rock-solid because chain-sync recovers more reliably from stalled or unstable network connections.
+- **Solid chain selection:** Sync wastes less time on poor candidates because chain selection now takes peer suitability into account.
 
 ### 💪 Improvements
 
-- **Simpler config loading:** Configuration stays under your control because loading no longer fills in a default Cardano configuration path.
+- **Simpler config loading:** Configuration stays under your control because config loading no longer fills in a default Cardano configuration path.
 - **Sleeker block downloads:** Block downloads are more consistent because header processing no longer gets blocked by duplicate headers.
-- **More solid intersections:** Synchronization can start from the right place more often because intersection point selection is now more robust.
+- **More robust intersections:** Synchronization starts from the right place more often because intersection point selection is now more robust.
 
 ### 🔧 Fixes
 
@@ -29,14 +29,13 @@ Hi folks! Here’s what we shipped in v0.27.4.
 ### 📋 What You Need to Know
 
 - **Inbound peers excluded from chain choice:** Chain selection behavior may change in mixed inbound/outbound topologies because inbound peers no longer influence which chain is selected.
-- **Documentation-only change:** There is no runtime impact from the release-notes-only updates included in this release.
+- **Documentation-only change:** This release includes a release-notes update with no runtime impact.
 
 ### 🙏 Thank You
 
 Thank you for trying!
 
 ---
-
 
 ## v0.27.3 (March 17, 2026)
 
