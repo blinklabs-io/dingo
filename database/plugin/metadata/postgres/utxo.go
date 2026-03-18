@@ -176,6 +176,51 @@ func (d *MetadataStorePostgres) GetUtxosByAddress(
 	return ret, nil
 }
 
+// GetUtxosByAddressWithOrdering returns UTxOs with transaction ordering metadata
+func (d *MetadataStorePostgres) GetUtxosByAddressWithOrdering(
+	addr ledger.Address,
+	txn types.Txn,
+) ([]models.UtxoWithOrdering, error) {
+	var ret []models.UtxoWithOrdering
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return nil, err
+	}
+	addrQuery := addressWhereClause(db, addr)
+	if addrQuery == nil {
+		return ret, nil
+	}
+
+	// Join with transaction to get ordering metadata
+	result := db.
+		Table("utxo").
+		Select(
+			"utxo.*, transaction.slot as tx_slot, transaction.block_index as tx_block_index",
+		).
+		Joins("LEFT JOIN transaction ON utxo.transaction_id = transaction.id").
+		Where("utxo.deleted_slot = 0").
+		Where(addrQuery).
+		Order(
+			"transaction.slot ASC, transaction.block_index ASC, utxo.output_idx ASC",
+		).
+		Scan(&ret)
+
+	if result.Error != nil {
+		return nil, result.Error
+	}
+
+	// Load assets for each UTxO
+	for i := range ret {
+		if err := db.Model(&ret[i].Utxo).
+			Association("Assets").
+			Find(&ret[i].Assets); err != nil {
+			return nil, err
+		}
+	}
+
+	return ret, nil
+}
+
 // GetUtxosByAddressAtSlot returns UTxOs for an address
 // that existed at a specific slot.
 func (d *MetadataStorePostgres) GetUtxosByAddressAtSlot(
