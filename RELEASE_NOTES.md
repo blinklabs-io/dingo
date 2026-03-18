@@ -13,7 +13,6 @@ Hi folks! Here’s what we shipped in v0.27.4.
 
 ### ✨ What's New
 
-
 - **Resilient chain sync:** Sync can keep making progress with less manual intervention because chain synchronization now recovers more reliably from stalled or unstable network connections.
 - **Smarter chain selection:** Sync can waste less time on poor candidates because chain selection now takes peer suitability into account.
 
