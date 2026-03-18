@@ -468,6 +468,7 @@ type LedgerState struct {
 	chainsyncBlockfetchReadyChan  chan struct{}
 	activeBlockfetchConnId        ouroboros.ConnectionId // connection used for current blockfetch pipeline
 	selectedBlockfetchConnId      ouroboros.ConnectionId // latest selected chainsync connection for the next batch
+	headerPipelineConnId          ouroboros.ConnectionId // connection that currently owns the queued header/blockfetch pipeline
 	pendingBlockfetchEvents       []BlockfetchEvent
 	checkpointWrittenForEpoch     bool
 	closed                        atomic.Bool

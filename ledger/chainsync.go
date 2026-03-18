@@ -248,10 +248,15 @@ func (ls *LedgerState) handleConnectionClosedEvent(evt event.Event) {
 	if !ok {
 		return
 	}
+	ls.chainsyncMutex.Lock()
+	defer ls.chainsyncMutex.Unlock()
 	ls.chainsyncBlockfetchMutex.Lock()
 	defer ls.chainsyncBlockfetchMutex.Unlock()
 	if ls.selectedBlockfetchConnId == e.ConnectionId {
 		ls.selectedBlockfetchConnId = ouroboros.ConnectionId{}
+	}
+	if ls.headerPipelineConnId == e.ConnectionId {
+		ls.clearQueuedHeaders()
 	}
 }
 
@@ -332,6 +337,78 @@ func (ls *LedgerState) bufferHeaderEvent(e ChainsyncEvent) {
 		events = append(events, e)
 	}
 	ls.bufferedHeaderEvents[e.ConnectionId] = events
+}
+
+func (ls *LedgerState) clearQueuedHeaders() {
+	ls.chain.ClearHeaders()
+	ls.headerPipelineConnId = ouroboros.ConnectionId{}
+}
+
+func (ls *LedgerState) shouldBufferHeaderEvent(e ChainsyncEvent) bool {
+	if ls.headerPipelineConnId == (ouroboros.ConnectionId{}) {
+		ls.headerPipelineConnId = e.ConnectionId
+		return false
+	}
+	if ls.headerPipelineConnId == e.ConnectionId {
+		return false
+	}
+	ls.bufferHeaderEvent(e)
+	ls.config.Logger.Debug(
+		"buffering header from non-owner connection",
+		"component", "ledger",
+		"event_connection_id", e.ConnectionId.String(),
+		"owner_connection_id", ls.headerPipelineConnId.String(),
+		"slot", e.Point.Slot,
+	)
+	return true
+}
+
+func (ls *LedgerState) nextBufferedHeaderConnId() (
+	ouroboros.ConnectionId,
+	bool,
+) {
+	if ls.selectedBlockfetchConnId != (ouroboros.ConnectionId{}) &&
+		len(ls.bufferedHeaderEvents[ls.selectedBlockfetchConnId]) > 0 {
+		return ls.selectedBlockfetchConnId, true
+	}
+	var (
+		bestConn ouroboros.ConnectionId
+		bestTip  uint64
+		found    bool
+	)
+	for connId, events := range ls.bufferedHeaderEvents {
+		if len(events) == 0 {
+			continue
+		}
+		tipSlot := events[len(events)-1].Tip.Point.Slot
+		if !found || tipSlot > bestTip {
+			bestConn = connId
+			bestTip = tipSlot
+			found = true
+		}
+	}
+	return bestConn, found
+}
+
+func (ls *LedgerState) replayBufferedHeadersAsync(
+	connId ouroboros.ConnectionId,
+) {
+	go func() {
+		ls.chainsyncMutex.Lock()
+		defer ls.chainsyncMutex.Unlock()
+		if ls.headerPipelineConnId != (ouroboros.ConnectionId{}) ||
+			ls.chain.HeaderCount() > 0 {
+			return
+		}
+		if err := ls.replayBufferedHeaderEvents(connId); err != nil {
+			ls.config.Logger.Warn(
+				"failed to replay buffered header events",
+				"component", "ledger",
+				"connection_id", connId.String(),
+				"error", err,
+			)
+		}
+	}()
 }
 
 func (ls *LedgerState) replayBufferedHeaderEvents(
@@ -547,7 +624,7 @@ func (ls *LedgerState) handleEventChainsyncRollback(e ChainsyncEvent) error {
 func (ls *LedgerState) resetChainsyncResyncState() {
 	ls.rollbackHistory = nil
 	ls.headerMismatchCount = 0
-	ls.chain.ClearHeaders()
+	ls.clearQueuedHeaders()
 	ls.chainsyncBlockfetchMutex.Lock()
 	ls.blockfetchRequestRangeCleanup()
 	ls.activeBlockfetchConnId = ouroboros.ConnectionId{}
@@ -603,6 +680,9 @@ func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 		ls.metrics.forks.Add(1)
 	}
 	ls.chainsyncState = SyncingChainsyncState
+	if ls.shouldBufferHeaderEvent(e) {
+		return nil
+	}
 	// Allow us to build up a few blockfetch batches worth of headers,
 	// but never exceed the chain's actual header queue capacity.
 	allowedHeaderCount := min(
@@ -626,7 +706,7 @@ func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 			// Header doesn't fit current chain tip. Clear stale queued
 			// headers so subsequent headers are evaluated against the
 			// block tip rather than perpetuating the mismatch.
-			ls.chain.ClearHeaders()
+			ls.clearQueuedHeaders()
 			ls.headerMismatchCount++
 			ls.config.Logger.Debug(
 				"block header does not fit chain tip",
@@ -962,7 +1042,7 @@ func (ls *LedgerState) flushPendingBlockfetchBlocks() error {
 				),
 			)
 			if errors.As(addBlockErr, &notMatchErr) {
-				ls.chain.ClearHeaders()
+				ls.clearQueuedHeaders()
 			}
 		} else if err := txn.Commit(); err != nil {
 			_ = txn.Rollback()
@@ -1013,7 +1093,7 @@ func (ls *LedgerState) flushPendingBlockfetchBlocks() error {
 				),
 			)
 			if errors.As(addBlockErrs[idx], &chain.BlockNotMatchHeaderError{}) {
-				ls.chain.ClearHeaders()
+				ls.clearQueuedHeaders()
 			}
 		}
 		return nil
@@ -2046,6 +2126,7 @@ func (ls *LedgerState) handleBlockfetchTimeoutLocked(
 	headerCount := ls.chain.HeaderCount()
 	if headerCount == 0 {
 		ls.blockfetchRequestRangeCleanup()
+		ls.headerPipelineConnId = ouroboros.ConnectionId{}
 		ls.config.Logger.Info(
 			fmt.Sprintf(
 				"blockfetch operation timed out after %s",
@@ -2116,6 +2197,10 @@ func (ls *LedgerState) handleEventBlockfetchBatchDone(e BlockfetchEvent) error {
 		// No more headers to fetch, allow chainsync to collect more
 		ls.blockfetchRequestRangeCleanup()
 		ls.activeBlockfetchConnId = ouroboros.ConnectionId{}
+		ls.headerPipelineConnId = ouroboros.ConnectionId{}
+		if nextConnId, ok := ls.nextBufferedHeaderConnId(); ok {
+			ls.replayBufferedHeadersAsync(nextConnId)
+		}
 		return nil
 	}
 	// Clean up from blockfetch batch
