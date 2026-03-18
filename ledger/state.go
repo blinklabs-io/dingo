@@ -1951,9 +1951,14 @@ func (ls *LedgerState) ledgerReadChain(
 
 func (ls *LedgerState) ledgerProcessBlocks() {
 	for {
+		attemptCtx, cancel := context.WithCancel(ls.ctx)
 		readChainResultCh := make(chan readChainResult)
-		go ls.ledgerReadChain(ls.ctx, readChainResultCh)
-		err := ls.ledgerProcessBlocksFromSource(ls.ctx, readChainResultCh)
+		go ls.ledgerReadChain(attemptCtx, readChainResultCh)
+		err := ls.ledgerProcessBlocksFromSource(
+			attemptCtx,
+			readChainResultCh,
+		)
+		cancel()
 		if err == nil || ls.ctx.Err() != nil {
 			return
 		}
