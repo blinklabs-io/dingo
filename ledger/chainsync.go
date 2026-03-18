@@ -35,7 +35,6 @@ import (
 	"github.com/blinklabs-io/dingo/ledger/forging"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/cbor"
-	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/byron"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
@@ -1034,101 +1033,40 @@ func (ls *LedgerState) flushPendingBlockfetchBlocks() error {
 	}
 	pending := ls.pendingBlockfetchEvents
 	ls.pendingBlockfetchEvents = ls.pendingBlockfetchEvents[:0]
-	if len(pending) == 1 {
-		pendingEvent := pending[0]
-		txn := ls.db.BlobTxn(true)
-		// Avoid Txn.Do in the normal one-block hot path. Near tip we hit this
-		// path for almost every block, and blob-only transactions can commit or
-		// roll back directly without the callback/defer overhead.
+	// Commit each block before exposing it on the primary chain. The chain tip
+	// is used immediately by fork detection, so batching blob writes behind an
+	// already-advanced in-memory tip can strand the node on a fork when ancestor
+	// lookups hit uncommitted state.
+	for _, pendingEvent := range pending {
 		addBlockErr := ls.chain.AddBlockWithPoint(
 			pendingEvent.Block,
 			pendingEvent.Point,
-			txn,
+			nil,
 		)
-		if addBlockErr != nil {
-			var notFitErr chain.BlockNotFitChainTipError
-			var notMatchErr chain.BlockNotMatchHeaderError
-			ignored := errors.As(addBlockErr, &notFitErr) ||
-				errors.As(addBlockErr, &notMatchErr)
-			if rollbackErr := txn.Rollback(); rollbackErr != nil {
-				return fmt.Errorf(
-					"failed rolling back block transaction: %w",
-					rollbackErr,
-				)
-			}
-			if !ignored {
-				return fmt.Errorf(
-					"failed processing block event: add chain block: %w",
-					addBlockErr,
-				)
-			}
-			ls.config.Logger.Warn(
-				fmt.Sprintf(
-					"ignoring blockfetch block: %s",
-					addBlockErr,
-				),
-			)
-			if errors.As(addBlockErr, &notMatchErr) {
-				ls.clearQueuedHeaders()
-			}
-		} else if err := txn.Commit(); err != nil {
-			_ = txn.Rollback()
+		if addBlockErr == nil {
+			ls.checkSlotBattle(pendingEvent, nil)
+			continue
+		}
+		var notFitErr chain.BlockNotFitChainTipError
+		var notMatchErr chain.BlockNotMatchHeaderError
+		ignored := errors.As(addBlockErr, &notFitErr) ||
+			errors.As(addBlockErr, &notMatchErr)
+		if !ignored {
 			return fmt.Errorf(
-				"failed processing block event: commit block transaction: %w",
-				err,
+				"failed processing block event: add chain block: %w",
+				addBlockErr,
 			)
+		}
+		ls.config.Logger.Warn(
+			fmt.Sprintf(
+				"ignoring blockfetch block: %s",
+				addBlockErr,
+			),
+		)
+		if errors.As(addBlockErr, &notMatchErr) {
+			ls.clearQueuedHeaders()
 		}
 		ls.checkSlotBattle(pendingEvent, addBlockErr)
-		ls.chain.NotifyIterators()
-		return nil
-	}
-	blocks := make([]gledger.Block, 0, len(pending))
-	for _, pendingEvent := range pending {
-		blocks = append(blocks, pendingEvent.Block)
-	}
-	if err := ls.chain.AddBlocks(blocks); err == nil {
-		ls.Lock()
-		for _, pendingEvent := range pending {
-			ls.checkSlotBattle(pendingEvent, nil)
-		}
-		ls.Unlock()
-		return nil
-	}
-	addBlockErrs := make([]error, len(pending))
-	txn := ls.db.BlobTxn(true)
-	if err := txn.Do(func(txn *database.Txn) error {
-		for idx, pendingEvent := range pending {
-			addBlockErrs[idx] = ls.chain.AddBlockWithPoint(
-				pendingEvent.Block,
-				pendingEvent.Point,
-				txn,
-			)
-			if addBlockErrs[idx] == nil {
-				continue
-			}
-			if !errors.As(addBlockErrs[idx], &chain.BlockNotFitChainTipError{}) &&
-				!errors.As(addBlockErrs[idx], &chain.BlockNotMatchHeaderError{}) {
-				return fmt.Errorf(
-					"add chain block: %w",
-					addBlockErrs[idx],
-				)
-			}
-			ls.config.Logger.Warn(
-				fmt.Sprintf(
-					"ignoring blockfetch block: %s",
-					addBlockErrs[idx],
-				),
-			)
-			if errors.As(addBlockErrs[idx], &chain.BlockNotMatchHeaderError{}) {
-				ls.clearQueuedHeaders()
-			}
-		}
-		return nil
-	}); err != nil {
-		return fmt.Errorf("failed processing block event: %w", err)
-	}
-	for idx, pendingEvent := range pending {
-		ls.checkSlotBattle(pendingEvent, addBlockErrs[idx])
 	}
 	ls.chain.NotifyIterators()
 	return nil
