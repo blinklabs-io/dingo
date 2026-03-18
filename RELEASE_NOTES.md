@@ -13,14 +13,14 @@ Hi folks! Here’s what we shipped in v0.27.4.
 
 ### ✨ What's New
 
-- **Resilient chain sync:** Sync can keep making progress with less manual intervention because chain synchronization now recovers more reliably from stalled or unstable network connections.
-- **Smarter chain selection:** Sync can waste less time on poor candidates because chain selection now takes peer suitability into account.
+- **Rock-solid chain sync:** Sync can keep making progress with less manual intervention because chain synchronization now recovers more reliably from stalled or unstable network connections.
+- **More solid chain selection:** Sync can waste less time on poor candidates because chain selection now takes peer suitability into account.
 
 ### 💪 Improvements
 
-- **More predictable config loading:** Configuration stays under your control because loading no longer fills in a default Cardano configuration path.
-- **Smoother block downloads:** Block downloads are more consistent because header processing no longer gets blocked by duplicate headers.
-- **More robust intersections:** Synchronization can start from the right place more often because intersection point selection is now more robust.
+- **Simpler config loading:** Configuration stays under your control because loading no longer fills in a default Cardano configuration path.
+- **Sleeker block downloads:** Block downloads are more consistent because header processing no longer gets blocked by duplicate headers.
+- **More solid intersections:** Synchronization can start from the right place more often because intersection point selection is now more robust.
 
 ### 🔧 Fixes
 
