@@ -93,7 +93,7 @@ func TestDetectConnectionSwitchPreservesQueuedHeaders(t *testing.T) {
 		},
 	}
 
-	activeConnId, configured := ls.detectConnectionSwitch()
+	activeConnId, configured, _ := ls.detectConnectionSwitch()
 	require.True(t, configured)
 	require.NotNil(t, activeConnId)
 	assert.Equal(t, connId2, *activeConnId)

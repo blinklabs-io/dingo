@@ -150,7 +150,7 @@ func (p *PeerGovernor) exitBootstrapLocked(reason string) []pendingEvent {
 		BootstrapExitedEventType,
 		BootstrapExitedEvent{
 			Reason:       reason,
-			DemotedPeers: reclassifiedCount,
+			DemotedPeers: demotedCount,
 		},
 	})
 
