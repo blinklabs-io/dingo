@@ -399,12 +399,35 @@ func (s *State) TryAddClientConnId(
 }
 
 // UpdateClientTip updates the cursor, tip, and activity
-// tracking for a tracked client. Returns true if the header at
-// this point is new (not a duplicate).
+// tracking for a tracked client, and performs header
+// deduplication. Returns true if the header at this point is
+// new (not a duplicate).
 func (s *State) UpdateClientTip(
 	connId ouroboros.ConnectionId,
 	point ocommon.Point,
 	tip ochainsync.Tip,
+) bool {
+	return s.updateClientTip(connId, point, tip, true)
+}
+
+// UpdateClientTipWithoutDedup updates the cursor, tip, and
+// activity tracking for a tracked client without recording the
+// header in the shared dedup cache. This is used for peers that
+// should not drive ledger ingress, so they do not suppress
+// later delivery of the same header from an eligible peer.
+func (s *State) UpdateClientTipWithoutDedup(
+	connId ouroboros.ConnectionId,
+	point ocommon.Point,
+	tip ochainsync.Tip,
+) {
+	s.updateClientTip(connId, point, tip, false)
+}
+
+func (s *State) updateClientTip(
+	connId ouroboros.ConnectionId,
+	point ocommon.Point,
+	tip ochainsync.Tip,
+	dedup bool,
 ) bool {
 	s.clientConnIdMutex.Lock()
 	tc, exists := s.trackedClients[connId]
@@ -421,6 +444,9 @@ func (s *State) UpdateClientTip(
 	}
 	s.clientConnIdMutex.Unlock()
 
+	if !dedup {
+		return true
+	}
 	// Header deduplication and fork detection
 	return s.processHeader(connId, point)
 }

@@ -90,6 +90,11 @@ type OuroborosConfig struct {
 	// mini-protocol. A value of 0 uses DefaultMaxTxSubmissionsPerSecond.
 	// A negative value disables rate limiting.
 	MaxTxSubmissionsPerSecond int
+	// ChainsyncIngressEligible reports whether a peer is allowed to
+	// feed chainsync events into the ledger pipeline. This lets us
+	// keep inbound/public noise out of ledger ingress while still
+	// tracking peer tips separately for selection and observability.
+	ChainsyncIngressEligible func(ouroboros.ConnectionId) bool
 	// Enable experimental Leios protocol support
 	EnableLeios bool
 }

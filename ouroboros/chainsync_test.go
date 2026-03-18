@@ -15,12 +15,89 @@
 package ouroboros
 
 import (
+	"net"
 	"testing"
+	"time"
 
 	dchainsync "github.com/blinklabs-io/dingo/chainsync"
+	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/ledger"
+	"github.com/blinklabs-io/gouroboros"
+	gledger "github.com/blinklabs-io/gouroboros/ledger"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
 )
+
+type testBlockHeader struct {
+	hash        gledger.Blake2b256
+	prevHash    gledger.Blake2b256
+	blockNumber uint64
+	slotNumber  uint64
+	bodySize    uint64
+	bodyHash    gledger.Blake2b256
+}
+
+func (h *testBlockHeader) Hash() gledger.Blake2b256 {
+	return h.hash
+}
+
+func (h *testBlockHeader) PrevHash() gledger.Blake2b256 {
+	return h.prevHash
+}
+
+func (h *testBlockHeader) BlockNumber() uint64 {
+	return h.blockNumber
+}
+
+func (h *testBlockHeader) SlotNumber() uint64 {
+	return h.slotNumber
+}
+
+func (h *testBlockHeader) IssuerVkey() gledger.IssuerVkey {
+	return gledger.IssuerVkey{}
+}
+
+func (h *testBlockHeader) BlockBodySize() uint64 {
+	return h.bodySize
+}
+
+func (h *testBlockHeader) Era() gledger.Era {
+	return gledger.Era{}
+}
+
+func (h *testBlockHeader) Cbor() []byte {
+	return nil
+}
+
+func (h *testBlockHeader) BlockBodyHash() gledger.Blake2b256 {
+	return h.bodyHash
+}
+
+func newTestBlockHeader(slot, block uint64, hashByte byte) gledger.BlockHeader {
+	var hash gledger.Blake2b256
+	hash[0] = hashByte
+	return &testBlockHeader{
+		hash:        hash,
+		blockNumber: block,
+		slotNumber:  slot,
+	}
+}
+
+func newTestConnId(local, remote string) ouroboros.ConnectionId {
+	localAddr, err := net.ResolveTCPAddr("tcp", local)
+	if err != nil {
+		panic(err)
+	}
+	remoteAddr, err := net.ResolveTCPAddr("tcp", remote)
+	if err != nil {
+		panic(err)
+	}
+	return ouroboros.ConnectionId{
+		LocalAddr:  localAddr,
+		RemoteAddr: remoteAddr,
+	}
+}
 
 func TestNormalizeIntersectPoints(t *testing.T) {
 	points := []ocommon.Point{
@@ -93,5 +170,66 @@ func TestShouldRestartChainsyncOnSwitch(t *testing.T) {
 				),
 			)
 		})
+	}
+}
+
+func TestChainsyncClientRollForward_IneligiblePeerDoesNotPoisonDedup(
+	t *testing.T,
+) {
+	bus := event.NewEventBus(nil, nil)
+	defer bus.Close()
+
+	connEligible := newTestConnId("127.0.0.1:6000", "1.1.1.1:3001")
+	connIneligible := newTestConnId("127.0.0.1:6000", "2.2.2.2:3001")
+	state := dchainsync.NewState(bus, nil)
+	require.True(t, state.AddClientConnId(connEligible))
+	require.True(t, state.AddClientConnId(connIneligible))
+
+	o := NewOuroboros(OuroborosConfig{
+		EventBus: bus,
+		ChainsyncIngressEligible: func(connId ouroboros.ConnectionId) bool {
+			return connId == connEligible
+		},
+	})
+	o.ChainsyncState = state
+	o.EventBus = bus
+
+	_, ledgerCh := bus.Subscribe(ledger.ChainsyncEventType)
+
+	header := newTestBlockHeader(42, 7, 0xaa)
+	tip := ochainsync.Tip{
+		Point:       ocommon.NewPoint(42, header.Hash().Bytes()),
+		BlockNumber: 7,
+	}
+
+	err := o.chainsyncClientRollForward(
+		ochainsync.CallbackContext{ConnectionId: connIneligible},
+		0,
+		header,
+		tip,
+	)
+	require.NoError(t, err)
+	select {
+	case evt := <-ledgerCh:
+		t.Fatalf("unexpected ledger event from ineligible peer: %#v", evt)
+	default:
+	}
+
+	err = o.chainsyncClientRollForward(
+		ochainsync.CallbackContext{ConnectionId: connEligible},
+		0,
+		header,
+		tip,
+	)
+	require.NoError(t, err)
+
+	select {
+	case evt := <-ledgerCh:
+		data, ok := evt.Data.(ledger.ChainsyncEvent)
+		require.True(t, ok)
+		require.Equal(t, connEligible, data.ConnectionId)
+		require.Equal(t, tip.Point.Slot, data.Point.Slot)
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected eligible peer header to feed the ledger")
 	}
 }

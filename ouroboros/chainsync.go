@@ -441,12 +441,8 @@ func (o *Ouroboros) chainsyncClientRollBackward(
 	point ocommon.Point,
 	tip ochainsync.Tip,
 ) error {
-	// Only feed ledger from the currently selected chainsync connection.
-	if o.ChainsyncState != nil {
-		if active := o.ChainsyncState.GetClientConnId(); active != nil &&
-			*active != ctx.ConnectionId {
-			return nil
-		}
+	if !o.shouldPublishChainsyncToLedger(ctx.ConnectionId) {
+		return nil
 	}
 	// Generate event
 	o.EventBus.Publish(
@@ -479,35 +475,26 @@ func (o *Ouroboros) chainsyncClientRollForward(
 		// selection tie-breaking (used in both dedup and normal
 		// paths below).
 		vrfOutput := chainselection.GetVRFOutput(v)
+		ingressEligible := o.shouldPublishChainsyncToLedger(
+			ctx.ConnectionId,
+		)
 		// Update tracked client state and deduplicate headers.
 		// If this header has already been reported by another
 		// client, skip publishing events for it.
+		isNew := true
 		if o.ChainsyncState != nil {
-			isNew := o.ChainsyncState.UpdateClientTip(
-				ctx.ConnectionId,
-				point,
-				tip,
-			)
-			if !isNew {
-				// Duplicate header already seen from another
-				// client; skip downstream processing but still
-				// refresh peer liveness and update metrics.
-				o.EventBus.Publish(
-					chainselection.PeerTipUpdateEventType,
-					event.NewEvent(
-						chainselection.PeerTipUpdateEventType,
-						chainselection.PeerTipUpdateEvent{
-							ConnectionId: ctx.ConnectionId,
-							Tip:          tip,
-							VRFOutput:    vrfOutput,
-						},
-					),
-				)
-				o.updateChainsyncMetrics(
+			if ingressEligible {
+				isNew = o.ChainsyncState.UpdateClientTip(
 					ctx.ConnectionId,
+					point,
 					tip,
 				)
-				return nil
+			} else {
+				o.ChainsyncState.UpdateClientTipWithoutDedup(
+					ctx.ConnectionId,
+					point,
+					tip,
+				)
 			}
 		}
 		// Publish peer tip update for chain selection
@@ -522,45 +509,45 @@ func (o *Ouroboros) chainsyncClientRollForward(
 				},
 			),
 		)
-		// Only feed ledger from the currently selected chainsync
-		// connection to avoid overloading the ledger subscriber
-		// queue with non-active peer traffic.
-		if o.ChainsyncState == nil {
-			o.EventBus.Publish(
-				ledger.ChainsyncEventType,
-				event.NewEvent(
-					ledger.ChainsyncEventType,
-					ledger.ChainsyncEvent{
-						ConnectionId: ctx.ConnectionId,
-						Point:        point,
-						Type:         blockType,
-						BlockHeader:  v,
-						Tip:          tip,
-					},
-				),
-			)
-		} else if active := o.ChainsyncState.GetClientConnId(); active == nil ||
-			*active == ctx.ConnectionId {
-			o.EventBus.Publish(
-				ledger.ChainsyncEventType,
-				event.NewEvent(
-					ledger.ChainsyncEventType,
-					ledger.ChainsyncEvent{
-						ConnectionId: ctx.ConnectionId,
-						Point:        point,
-						Type:         blockType,
-						BlockHeader:  v,
-						Tip:          tip,
-					},
-				),
-			)
+		if !ingressEligible {
+			o.updateChainsyncMetrics(ctx.ConnectionId, tip)
+			return nil
 		}
+		if !isNew {
+			// Duplicate header already delivered by another
+			// eligible peer. Keep the peer tip fresh, but do not
+			// re-publish the same header into the ledger queue.
+			o.updateChainsyncMetrics(ctx.ConnectionId, tip)
+			return nil
+		}
+		o.EventBus.Publish(
+			ledger.ChainsyncEventType,
+			event.NewEvent(
+				ledger.ChainsyncEventType,
+				ledger.ChainsyncEvent{
+					ConnectionId: ctx.ConnectionId,
+					Point:        point,
+					Type:         blockType,
+					BlockHeader:  v,
+					Tip:          tip,
+				},
+			),
+		)
 		// Update ChainSync performance metrics for peer scoring
 		o.updateChainsyncMetrics(ctx.ConnectionId, tip)
 	default:
 		return fmt.Errorf("unexpected block data type: %T", v)
 	}
 	return nil
+}
+
+func (o *Ouroboros) shouldPublishChainsyncToLedger(
+	connId ouroboros.ConnectionId,
+) bool {
+	if o.config.ChainsyncIngressEligible == nil {
+		return true
+	}
+	return o.config.ChainsyncIngressEligible(connId)
 }
 
 // updateChainsyncMetrics calculates and updates ChainSync performance metrics

@@ -117,7 +117,8 @@ func (n *Node) handleChainSwitchEvent(evt event.Event) {
 	)
 	// Do not restart chainsync on peer switch. Every connected peer
 	// already maintains its own chainsync client state and pipeline; a
-	// switch only changes which peer's stream feeds the ledger.
+	// switch only updates the best peer used for rollback filtering and
+	// blockfetch fallback.
 	n.chainsyncState.SetClientConnId(e.NewConnectionId)
 }
 
@@ -232,6 +233,12 @@ func (n *Node) Run(ctx context.Context) error {
 		IntersectPoints: n.config.intersectPoints,
 		PromRegistry:    n.config.promRegistry,
 		EnableLeios:     n.config.runMode == runModeLeios,
+		ChainsyncIngressEligible: func(connId ouroboros.ConnectionId) bool {
+			if n.peerGov == nil {
+				return true
+			}
+			return n.peerGov.IsChainSelectionEligible(connId)
+		},
 	})
 	// Load state
 	state, err := ledger.NewLedgerState(
@@ -247,20 +254,14 @@ func (n *Node) Run(ctx context.Context) error {
 			BlockfetchRequestRangeFunc: n.ouroboros.BlockfetchClientRequestRange,
 			DatabaseWorkerPoolConfig:   n.config.DatabaseWorkerPoolConfig,
 			GetActiveConnectionFunc: func() *ouroboros.ConnectionId {
-				// Return the active chainsync client connection from chainsync state
+				// Return the current best peer for rollback filtering and
+				// blockfetch fallback. Headers can arrive from any eligible
+				// peer, but rollbacks and retry selection still need a
+				// current best connection.
 				if n.chainsyncState != nil {
 					return n.chainsyncState.GetClientConnId()
 				}
 				return nil
-			},
-			ConnectionSwitchFunc: func() {
-				// Clear the header dedup cache so the new connection
-				// can re-deliver blocks from the intersection without
-				// them being filtered as duplicates from the old
-				// connection.
-				if n.chainsyncState != nil {
-					n.chainsyncState.ClearSeenHeaders()
-				}
 			},
 			FatalErrorFunc: func(err error) {
 				n.config.logger.Error(
