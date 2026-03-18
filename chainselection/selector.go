@@ -39,6 +39,7 @@ func safeAddUint64(a, b uint64) uint64 {
 const (
 	defaultEvaluationInterval = 10 * time.Second
 	defaultStaleTipThreshold  = 60 * time.Second
+	defaultMinSwitchBlockDiff = 2
 
 	// DefaultMaxTrackedPeers is the maximum number of peers tracked by
 	// the ChainSelector. When a new peer is added and the limit is reached,
@@ -79,6 +80,7 @@ type ChainSelectorConfig struct {
 	EventBus           *event.EventBus
 	EvaluationInterval time.Duration
 	StaleTipThreshold  time.Duration
+	MinSwitchBlockDiff uint64
 	SecurityParam      uint64
 	ConnectionEligible func(ouroboros.ConnectionId) bool
 	ConnectionPriority func(ouroboros.ConnectionId) int
@@ -113,6 +115,9 @@ func NewChainSelector(cfg ChainSelectorConfig) *ChainSelector {
 	}
 	if cfg.StaleTipThreshold == 0 {
 		cfg.StaleTipThreshold = defaultStaleTipThreshold
+	}
+	if cfg.MinSwitchBlockDiff == 0 {
+		cfg.MinSwitchBlockDiff = defaultMinSwitchBlockDiff
 	}
 	maxPeers := cfg.MaxTrackedPeers
 	if maxPeers <= 0 {
@@ -496,6 +501,50 @@ func (cs *ChainSelector) SelectBestChain() *ouroboros.ConnectionId {
 	return cs.selectBestChainLocked()
 }
 
+func (cs *ChainSelector) isPeerSelectableLocked(
+	connId ouroboros.ConnectionId,
+	peerTip *PeerChainTip,
+	logSkip bool,
+) bool {
+	if peerTip == nil {
+		return false
+	}
+	if !cs.isConnectionEligible(connId) {
+		if logSkip {
+			cs.config.Logger.Debug(
+				"skipping ineligible peer",
+				"connection_id", connId.String(),
+			)
+		}
+		return false
+	}
+	if cs.securityParam > 0 && cs.localTip.BlockNumber > 0 &&
+		safeAddUint64(peerTip.Tip.BlockNumber, cs.securityParam) <
+			cs.localTip.BlockNumber {
+		if logSkip {
+			cs.config.Logger.Debug(
+				"skipping implausibly-behind peer",
+				"connection_id", connId.String(),
+				"peer_block_number", peerTip.Tip.BlockNumber,
+				"local_block_number", cs.localTip.BlockNumber,
+				"security_param", cs.securityParam,
+			)
+		}
+		return false
+	}
+	if cs.isPeerTipStale(peerTip) {
+		if logSkip {
+			cs.config.Logger.Debug(
+				"skipping stale peer",
+				"connection_id", connId.String(),
+				"last_updated", peerTip.LastUpdated,
+			)
+		}
+		return false
+	}
+	return true
+}
+
 func (cs *ChainSelector) selectBestChainLocked() *ouroboros.ConnectionId {
 	if len(cs.peerTips) == 0 {
 		return nil
@@ -505,33 +554,7 @@ func (cs *ChainSelector) selectBestChainLocked() *ouroboros.ConnectionId {
 	var bestPeerTip *PeerChainTip
 
 	for connId, peerTip := range cs.peerTips {
-		if !cs.isConnectionEligible(connId) {
-			cs.config.Logger.Debug(
-				"skipping ineligible peer",
-				"connection_id", connId.String(),
-			)
-			continue
-		}
-		// Don't consider peers that are implausibly far behind local tip.
-		// This prevents switching to stale or cross-network peers when
-		// local tip and k are known.
-		if cs.securityParam > 0 && cs.localTip.BlockNumber > 0 &&
-			safeAddUint64(peerTip.Tip.BlockNumber, cs.securityParam) < cs.localTip.BlockNumber {
-			cs.config.Logger.Debug(
-				"skipping implausibly-behind peer",
-				"connection_id", connId.String(),
-				"peer_block_number", peerTip.Tip.BlockNumber,
-				"local_block_number", cs.localTip.BlockNumber,
-				"security_param", cs.securityParam,
-			)
-			continue
-		}
-		if cs.isPeerTipStale(peerTip) {
-			cs.config.Logger.Debug(
-				"skipping stale peer",
-				"connection_id", connId.String(),
-				"last_updated", peerTip.LastUpdated,
-			)
+		if !cs.isPeerSelectableLocked(connId, peerTip, true) {
 			continue
 		}
 
@@ -677,22 +700,27 @@ func (cs *ChainSelector) EvaluateAndSwitch() bool {
 		previousBest := cs.bestPeerConn
 		if previousBest != nil && *previousBest != *newBest {
 			previousPeerTip, ok := cs.peerTips[*previousBest]
-			if ok {
+			if ok && cs.isPeerSelectableLocked(*previousBest, previousPeerTip, false) {
 				newPeerTip, ok := cs.peerTips[*newBest]
 				if !ok {
 					return
 				}
-				previousEligible := cs.isConnectionEligible(*previousBest)
-				previousFresh := !cs.isPeerTipStale(previousPeerTip)
 				// Preserve the incumbent only when it still wins the same
 				// full comparison used during normal best-peer selection.
-				if previousEligible && previousFresh &&
-					cs.comparePeerTips(
-						*previousBest,
-						previousPeerTip,
-						*newBest,
-						newPeerTip,
-					) == ChainABetter {
+				if cs.comparePeerTips(
+					*previousBest,
+					previousPeerTip,
+					*newBest,
+					newPeerTip,
+				) == ChainABetter {
+					newBest = previousBest
+				} else if newPeerTip.Tip.BlockNumber >
+					previousPeerTip.Tip.BlockNumber &&
+					!IsSignificantlyBetter(
+						newPeerTip.Tip,
+						previousPeerTip.Tip,
+						cs.config.MinSwitchBlockDiff,
+					) {
 					newBest = previousBest
 				}
 			}
