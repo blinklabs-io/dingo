@@ -23,7 +23,6 @@ import (
 	"sync"
 
 	"github.com/blinklabs-io/dingo/event"
-	ledgerpkg "github.com/blinklabs-io/dingo/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
 
@@ -95,7 +94,6 @@ type Election struct {
 	computeCh      chan uint64   // requests background schedule computation
 	subscriptionId event.EventSubscriberId
 	nonceReadySub  event.EventSubscriberId
-	rollbackSub    event.EventSubscriberId
 }
 
 // NewElection creates a new leader election manager for a stake pool.
@@ -177,19 +175,6 @@ func (e *Election) Start(ctx context.Context) error {
 		)
 	} else {
 		go e.epochNonceReadyLoop(ctx, nonceReadyCh)
-	}
-
-	var rollbackCh <-chan event.Event
-	e.rollbackSub, rollbackCh = e.eventBus.Subscribe(
-		ledgerpkg.PoolStateRestoredEventType,
-	)
-	if rollbackCh == nil {
-		e.logger.Warn(
-			"event bus not available, rollback invalidation will not be tracked",
-			"component", "leader",
-		)
-	} else {
-		go e.rollbackLoop(ctx, rollbackCh)
 	}
 	go e.scheduleComputeLoop(ctx, e.computeCh)
 
@@ -331,40 +316,6 @@ func (e *Election) epochNonceReadyLoop(
 	}
 }
 
-func (e *Election) rollbackLoop(
-	ctx context.Context,
-	evtCh <-chan event.Event,
-) {
-	for evt := range evtCh {
-		if ctx.Err() != nil {
-			return
-		}
-
-		restoreEvent, ok := evt.Data.(ledgerpkg.PoolStateRestoredEvent)
-		if !ok {
-			e.logger.Error(
-				"invalid event data for rollback restoration",
-				"component", "leader",
-			)
-			continue
-		}
-
-		cleared := e.clearSchedules()
-		currentEpoch := e.epochProvider.CurrentEpoch()
-		e.logger.Info(
-			"ledger rollback restored state, invalidating leader schedules",
-			"component", "leader",
-			"rollback_slot", restoreEvent.Slot,
-			"cleared_schedules", cleared,
-			"current_epoch", currentEpoch,
-		)
-		e.queueScheduleCompute(currentEpoch)
-		if nextEpoch, ok := e.epochProvider.NextEpochNonceReadyEpoch(); ok {
-			e.queueScheduleCompute(nextEpoch)
-		}
-	}
-}
-
 // scheduleComputeLoop processes background schedule computation requests.
 // When ShouldProduceBlock detects a missing schedule for a slot's epoch,
 // it sends the epoch number to computeCh. This goroutine picks it up and
@@ -439,13 +390,6 @@ func (e *Election) Stop() error {
 			e.nonceReadySub,
 		)
 		e.nonceReadySub = 0
-	}
-	if e.rollbackSub != 0 {
-		e.eventBus.Unsubscribe(
-			ledgerpkg.PoolStateRestoredEventType,
-			e.rollbackSub,
-		)
-		e.rollbackSub = 0
 	}
 	e.running = false
 	e.schedules = nil
@@ -738,18 +682,6 @@ func (e *Election) storeSchedule(epoch uint64, schedule *Schedule) {
 			delete(e.schedules, ep)
 		}
 	}
-}
-
-func (e *Election) clearSchedules() int {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-
-	if !e.running || e.schedules == nil {
-		return 0
-	}
-	count := len(e.schedules)
-	clear(e.schedules)
-	return count
 }
 
 func (e *Election) queueScheduleCompute(epoch uint64) {

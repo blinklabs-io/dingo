@@ -704,7 +704,7 @@ func TestElectionPrecomputesNextEpochOnNonceReady(t *testing.T) {
 		"next epoch schedule should be persisted")
 }
 
-func TestElectionInvalidatesSchedulesAfterRollback(t *testing.T) {
+func TestElectionRollbackKeepsCurrentSchedule(t *testing.T) {
 	poolId := lcommon.PoolKeyHash{}
 	stakeProvider := newMockStakeProvider()
 	stakeProvider.totalStake = 1_000_000
@@ -712,7 +712,6 @@ func TestElectionInvalidatesSchedulesAfterRollback(t *testing.T) {
 
 	epochProvider := newMockEpochProvider()
 	epochProvider.activeSlotCoeff = 1.0
-	epochProvider.SetEpochNonce(makeElectionNonce(0x11))
 
 	eventBus := event.NewEventBus(nil, nil)
 	defer eventBus.Stop()
@@ -731,9 +730,7 @@ func TestElectionInvalidatesSchedulesAfterRollback(t *testing.T) {
 	defer func() { _ = election.Stop() }()
 
 	schedule := waitForSchedule(t, election, 30*time.Second)
-	require.True(t, bytes.Equal(makeElectionNonce(0x11), schedule.EpochNonce))
-
-	epochProvider.SetEpochNonce(makeElectionNonce(0x22))
+	leaderSlot := schedule.LeaderSlotsSnapshot()[0]
 
 	eventBus.Publish(
 		ledgerpkg.PoolStateRestoredEventType,
@@ -744,14 +741,16 @@ func TestElectionInvalidatesSchedulesAfterRollback(t *testing.T) {
 	)
 
 	require.Eventually(t, func() bool {
-		recomputed := election.ScheduleForEpoch(10)
-		return recomputed != nil &&
-			bytes.Equal(makeElectionNonce(0x22), recomputed.EpochNonce)
-	}, 30*time.Second, 100*time.Millisecond,
-		"rollback should invalidate and recompute the current epoch schedule")
+		current := election.ScheduleForEpoch(10)
+		return current != nil &&
+			bytes.Equal(schedule.EpochNonce, current.EpochNonce) &&
+			current.LeaderSlots[0] == leaderSlot &&
+			election.ShouldProduceBlock(leaderSlot)
+	}, time.Second, 20*time.Millisecond,
+		"rollback should not invalidate a stable current-epoch schedule")
 }
 
-func TestElectionRollbackKeepsNextEpochRecomputable(t *testing.T) {
+func TestElectionRollbackKeepsPrecomputedNextSchedule(t *testing.T) {
 	poolId := lcommon.PoolKeyHash{}
 	stakeProvider := newMockStakeProvider()
 	stakeProvider.totalStake = 1_000_000
@@ -759,7 +758,6 @@ func TestElectionRollbackKeepsNextEpochRecomputable(t *testing.T) {
 
 	epochProvider := newMockEpochProvider()
 	epochProvider.activeSlotCoeff = 1.0
-	epochProvider.SetEpochNonce(makeElectionNonce(0x31))
 	epochProvider.nextEpochReady.Store(11)
 
 	eventBus := event.NewEventBus(nil, nil)
@@ -779,12 +777,13 @@ func TestElectionRollbackKeepsNextEpochRecomputable(t *testing.T) {
 	defer func() { _ = election.Stop() }()
 
 	waitForSchedule(t, election, 30*time.Second)
+	var nextBefore *Schedule
 	require.Eventually(t, func() bool {
-		return election.ScheduleForEpoch(11) != nil
+		nextBefore = election.ScheduleForEpoch(11)
+		return nextBefore != nil
 	}, 30*time.Second, 100*time.Millisecond)
-
-	epochProvider.nextEpochReady.Store(0)
-	epochProvider.SetEpochNonce(makeElectionNonce(0x32))
+	expectedSlots := nextBefore.LeaderSlotsSnapshot()
+	expectedNonce := append([]byte(nil), nextBefore.EpochNonce...)
 
 	eventBus.Publish(
 		ledgerpkg.PoolStateRestoredEventType,
@@ -795,29 +794,12 @@ func TestElectionRollbackKeepsNextEpochRecomputable(t *testing.T) {
 	)
 
 	require.Eventually(t, func() bool {
-		return election.ScheduleForEpoch(11) == nil
-	}, 5*time.Second, 50*time.Millisecond,
-		"rollback before cutoff should clear the precomputed next-epoch schedule")
-
-	epochProvider.nextEpochReady.Store(11)
-	eventBus.Publish(
-		event.EpochNonceReadyEventType,
-		event.NewEvent(
-			event.EpochNonceReadyEventType,
-			event.EpochNonceReadyEvent{
-				CurrentEpoch: 10,
-				ReadyEpoch:   11,
-				CutoffSlot:   95,
-			},
-		),
-	)
-
-	require.Eventually(t, func() bool {
 		schedule := election.ScheduleForEpoch(11)
 		return schedule != nil &&
-			bytes.Equal(makeElectionNonce(0x32), schedule.EpochNonce)
-	}, 30*time.Second, 100*time.Millisecond,
-		"nonce-ready replay should rebuild the next epoch schedule after rollback")
+			bytes.Equal(expectedNonce, schedule.EpochNonce) &&
+			assert.ObjectsAreEqual(expectedSlots, schedule.LeaderSlotsSnapshot())
+	}, time.Second, 20*time.Millisecond,
+		"rollback should not invalidate a precomputed next-epoch schedule")
 }
 
 func TestElectionConcurrentAccess(t *testing.T) {

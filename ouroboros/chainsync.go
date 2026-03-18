@@ -15,7 +15,6 @@
 package ouroboros
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -25,7 +24,6 @@ import (
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/chainselection"
-	dchainsync "github.com/blinklabs-io/dingo/chainsync"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/ledger"
 	ouroboros "github.com/blinklabs-io/gouroboros"
@@ -98,20 +96,6 @@ func normalizeIntersectPoints(points []ocommon.Point) []ocommon.Point {
 
 func isOriginPoint(point ocommon.Point) bool {
 	return point.Slot == 0 && len(point.Hash) == 0
-}
-
-func shouldRestartChainsyncOnSwitch(
-	localTip ocommon.Point,
-	trackedClient *dchainsync.TrackedClient,
-) bool {
-	if trackedClient == nil || isOriginPoint(localTip) {
-		return false
-	}
-	if trackedClient.Cursor.Slot > localTip.Slot {
-		return true
-	}
-	return trackedClient.Cursor.Slot == localTip.Slot &&
-		!bytes.Equal(trackedClient.Cursor.Hash, localTip.Hash)
 }
 
 func (o *Ouroboros) buildDefaultChainsyncIntersectPoints(
@@ -713,77 +697,6 @@ func (o *Ouroboros) restartChainsyncClientAsync(
 		}
 		mu.Unlock()
 	}()
-}
-
-func (o *Ouroboros) ResumeChainsyncOnPeerSwitch(
-	ctx context.Context,
-	connId ouroboros.ConnectionId,
-) {
-	if o == nil ||
-		o.ConnManager == nil ||
-		o.ChainsyncState == nil ||
-		o.LedgerState == nil {
-		return
-	}
-	localTip := o.LedgerState.Tip()
-	trackedClient := o.ChainsyncState.GetTrackedClient(connId)
-	if !shouldRestartChainsyncOnSwitch(localTip.Point, trackedClient) {
-		return
-	}
-	localPoint := localTip.Point
-	reason := "active peer switch exact intersect"
-	o.restartChainsyncClientAsync(
-		ctx,
-		connId,
-		reason,
-		func() error {
-			conn := o.ConnManager.GetConnectionById(connId)
-			if conn == nil {
-				return fmt.Errorf("connection not found: %s", connId.String())
-			}
-			cs := conn.ChainSync()
-			if cs == nil || cs.Client == nil {
-				return fmt.Errorf(
-					"chainsync client not available: %s",
-					connId.String(),
-				)
-			}
-			if err := cs.Client.Stop(); err != nil {
-				return fmt.Errorf("stop chainsync client: %w", err)
-			}
-			o.ChainsyncState.ClearSeenHeadersFrom(localPoint.Slot)
-			err := o.RestartChainsyncClientWithPoints(
-				connId,
-				[]ocommon.Point{localPoint},
-			)
-			if err == nil {
-				o.config.Logger.Info(
-					"restarted switched peer chainsync from local tip",
-					"connection_id", connId.String(),
-					"local_tip_slot", localPoint.Slot,
-					"tracked_cursor_slot", trackedClient.Cursor.Slot,
-				)
-				return nil
-			}
-			if !errors.Is(err, ochainsync.ErrIntersectNotFound) {
-				return err
-			}
-			o.config.Logger.Info(
-				"exact local-tip intersect unavailable on switched peer, falling back",
-				"connection_id", connId.String(),
-				"local_tip_slot", localPoint.Slot,
-				"tracked_cursor_slot", trackedClient.Cursor.Slot,
-			)
-			if err := cs.Client.Stop(); err != nil {
-				return fmt.Errorf(
-					"stop chainsync client after intersect fallback: %w",
-					err,
-				)
-			}
-			o.ChainsyncState.ClearSeenHeaders()
-			return o.RestartChainsyncClient(connId)
-		},
-	)
 }
 
 // SubscribeChainsyncResync registers an EventBus subscriber that

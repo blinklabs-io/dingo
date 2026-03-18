@@ -299,11 +299,10 @@ func (n *Node) handleChainSwitchEvent(evt event.Event) {
 		"new_tip_block", e.NewTip.BlockNumber,
 		"new_tip_slot", e.NewTip.Point.Slot,
 	)
+	// Peer switches only change which already-running chainsync stream feeds
+	// the ledger. Restarting chainsync here re-enters FindIntersect and can
+	// race the protocol state machine under load.
 	n.chainsyncState.SetClientConnId(e.NewConnectionId)
-	n.ouroboros.ResumeChainsyncOnPeerSwitch(
-		n.ctx,
-		e.NewConnectionId,
-	)
 }
 
 func New(cfg Config) (*Node, error) {
