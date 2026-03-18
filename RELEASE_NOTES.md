@@ -1,6 +1,37 @@
 # Release Notes
 
 
+## v0.27.4 (March 18, 2026)
+
+**Title:** Stability updates and polish
+
+**Date:** March 18, 2026
+
+**Version:** v0.27.4
+
+Hi folks! Here’s what we shipped in v0.27.4.
+
+<!--
+{
+  "✨ What's New": [
+    "Chain selection now makes smarter decisions about which peers to follow, so your node can converge on the best chain more reliably. Under the hood, chain selection is now peer eligibility/priority-aware, triggers event-driven reevaluation, and performs consistent peer cleanup."
+  ],
+  "💪 Improvements": [
+    "Block syncing is now more resilient, so block download can continue smoothly after connection changes. Technically, inbound peers are excluded from chain selection and chainsync always forwards deduplicated headers from the active connection to the ledger so blockfetch can proceed.",
+    "Node recovery and stability during syncing has been improved, reducing flapping and unnecessary connection churn. This adds a minimum block-difference threshold, stricter incumbent retention in chain selection, and structured chainsync connection recycling with plateau detection and cooldowns.",
+    "Finding a common point with the network is now more reliable, especially near the chain tip. Specifically, chain-based intersect point generation now includes the current tip, deduplicates by slot+hash, and the ledger intersect logic returns storage errors when the chain-sampled list is empty."
+  ],
+  "🔧 Fixes": [
+    "Configuration loading no longer sets an unexpected default file path, avoiding surprising behavior in fresh setups. Concretely, LoadConfig stops setting a default CardanoConfig path and tests now expect an empty CardanoConfig value instead.",
+    "Older-era boundary blocks are no longer skipped during import, improving completeness when syncing historical data. In particular, Byron Epoch Boundary Blocks (EBBs) are now imported during block loading rather than being skipped."
+  ]
+}
+
+-->
+
+---
+
+
 ## v0.27.3 (March 17, 2026)
 
 **Title:** Safer rollbacks and steadier leader election
