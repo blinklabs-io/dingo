@@ -245,9 +245,26 @@ func (ls *LedgerState) handleChainSwitchEvent(evt event.Event) {
 	if !ok {
 		return
 	}
+	var replayConnId ouroboros.ConnectionId
+	ls.chainsyncMutex.Lock()
+	defer ls.chainsyncMutex.Unlock()
 	ls.chainsyncBlockfetchMutex.Lock()
-	defer ls.chainsyncBlockfetchMutex.Unlock()
-	ls.selectedBlockfetchConnId = e.NewConnectionId
+	replayConnId, err := ls.handoffPipelineOnSwitchLocked(
+		e.NewConnectionId,
+	)
+	ls.chainsyncBlockfetchMutex.Unlock()
+	if err != nil {
+		ls.config.Logger.Warn(
+			"failed to hand off chainsync pipeline on chain switch",
+			"component", "ledger",
+			"connection_id", e.NewConnectionId.String(),
+			"error", err,
+		)
+		return
+	}
+	if connIdKey(replayConnId) != "" {
+		ls.replayBufferedHeadersAsync(replayConnId)
+	}
 }
 
 func (ls *LedgerState) handleConnectionClosedEvent(evt event.Event) {
@@ -295,23 +312,21 @@ func (ls *LedgerState) detectConnectionSwitch() (
 			)
 			ls.dropRollbackCount = 0
 			ls.headerMismatchCount = 0
-			// Reset blockfetch state, but preserve queued headers. Valid
-			// headers remain valid across peer switches, and clearing them
-			// forces the sync pipeline to restart from scratch on every
-			// selector churn event.
 			ls.chainsyncBlockfetchMutex.Lock()
-			if ls.chainsyncBlockfetchReadyChan == nil {
-				ls.blockfetchRequestRangeCleanup()
-				ls.activeBlockfetchConnId = ouroboros.ConnectionId{}
-			} else {
-				ls.config.Logger.Debug(
-					"preserving in-flight blockfetch batch across connection switch",
-					"component", "ledger",
-					"blockfetch_connection_id",
-					ls.activeBlockfetchConnId.String(),
-				)
-			}
+			replayConnId, err := ls.handoffPipelineOnSwitchLocked(
+				*activeConnId,
+			)
 			ls.chainsyncBlockfetchMutex.Unlock()
+			if err != nil {
+				ls.config.Logger.Warn(
+					"failed to hand off chainsync pipeline after active connection change",
+					"component", "ledger",
+					"connection_id", activeConnId.String(),
+					"error", err,
+				)
+			} else if connIdKey(replayConnId) != "" {
+				ls.replayBufferedHeadersAsync(replayConnId)
+			}
 			// Clear per-connection state (e.g., header dedup cache)
 			// so the new connection can re-deliver blocks from the
 			// intersection without them being filtered as duplicates.
@@ -323,6 +338,71 @@ func (ls *LedgerState) detectConnectionSwitch() (
 		ls.rollbackHistory = nil
 	}
 	return activeConnId, true, switched
+}
+
+func (ls *LedgerState) handoffPipelineOnSwitchLocked(
+	newConnId ouroboros.ConnectionId,
+) (ouroboros.ConnectionId, error) {
+	ls.selectedBlockfetchConnId = newConnId
+	headerCount := 0
+	if ls.chain != nil {
+		headerCount = ls.chain.HeaderCount()
+	}
+
+	if connIdKey(newConnId) == "" {
+		return ouroboros.ConnectionId{}, nil
+	}
+
+	if ls.chainsyncBlockfetchReadyChan != nil &&
+		connIdKey(ls.activeBlockfetchConnId) != "" &&
+		!sameConnectionId(ls.activeBlockfetchConnId, newConnId) {
+		ls.config.Logger.Debug(
+			"canceling in-flight blockfetch batch on chain switch",
+			"component", "ledger",
+			"previous_connection_id", ls.activeBlockfetchConnId.String(),
+			"new_connection_id", newConnId.String(),
+			"queued_headers", headerCount,
+		)
+		ls.blockfetchRequestRangeCleanup()
+		ls.activeBlockfetchConnId = ouroboros.ConnectionId{}
+	}
+
+	if connIdKey(ls.headerPipelineConnId) != "" &&
+		!sameConnectionId(ls.headerPipelineConnId, newConnId) {
+		ls.config.Logger.Debug(
+			"releasing stale header pipeline owner on chain switch",
+			"component", "ledger",
+			"previous_owner_connection_id",
+			ls.headerPipelineConnId.String(),
+			"new_connection_id", newConnId.String(),
+			"queued_headers", headerCount,
+		)
+		ls.headerPipelineConnId = ouroboros.ConnectionId{}
+	}
+
+	if ls.chainsyncBlockfetchReadyChan == nil &&
+		headerCount > 0 {
+		ls.config.Logger.Debug(
+			"restarting queued blockfetch on selected connection",
+			"component", "ledger",
+			"connection_id", newConnId.String(),
+			"header_count", headerCount,
+		)
+		if err := ls.startQueuedBlockfetchLocked(newConnId); err != nil {
+			return ouroboros.ConnectionId{}, fmt.Errorf(
+				"restart queued blockfetch on switch: %w",
+				err,
+			)
+		}
+		return ouroboros.ConnectionId{}, nil
+	}
+
+	if ls.chainsyncBlockfetchReadyChan == nil &&
+		len(ls.bufferedHeaderEvents[connIdKey(newConnId)]) > 0 {
+		return newConnId, nil
+	}
+
+	return ouroboros.ConnectionId{}, nil
 }
 
 func (ls *LedgerState) bufferHeaderEvent(e ChainsyncEvent) {
@@ -2168,6 +2248,9 @@ func (ls *LedgerState) blockfetchRequestRangeStart(
 	start ocommon.Point,
 	end ocommon.Point,
 ) error {
+	if ls.config.BlockfetchRequestRangeFunc == nil {
+		return errors.New("blockfetch request range func not configured")
+	}
 	err := ls.config.BlockfetchRequestRangeFunc(
 		connId,
 		start,
