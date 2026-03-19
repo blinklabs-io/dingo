@@ -15,6 +15,7 @@
 package node
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -334,7 +335,8 @@ func copyBlocksDirect(
 				)
 			}
 			if blocksCopied == 0 &&
-				tmpBlock.SlotNumber() == chainTip.Point.Slot {
+				next.Slot == chainTip.Point.Slot &&
+				bytes.Equal(next.Hash, chainTip.Point.Hash) {
 				continue
 			}
 			blockBatch = append(blockBatch, tmpBlock)
@@ -436,7 +438,8 @@ func copyBlocksRaw(
 			// references the EBB, not the block before it.
 			// Skip first block when continuing a load operation
 			if blocksCopied == 0 &&
-				next.Slot == chainTip.Point.Slot {
+				next.Slot == chainTip.Point.Slot &&
+				bytes.Equal(next.Hash, chainTip.Point.Hash) {
 				continue
 			}
 			// Extract header CBOR from the block's outer array
