@@ -16,6 +16,7 @@ package utxorpc
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 
@@ -25,6 +26,57 @@ import (
 	watch "github.com/utxorpc/go-codegen/utxorpc/v1alpha/watch"
 	"github.com/utxorpc/go-codegen/utxorpc/v1alpha/watch/watchconnect"
 )
+
+// watchTxBuildMessages returns stream messages for one chain iterator step.
+// When rollback is true, isRollback is true and out is nil (no block CBOR).
+// For a forward block with no predicate matches, out contains a single Idle
+// heartbeat with the block reference.
+func watchTxBuildMessages(
+	rollback bool,
+	blockType uint,
+	blockCbor []byte,
+	blockSlot, blockHeight uint64,
+	blockHash []byte,
+	shouldSendTx func(ledger.Transaction) bool,
+) (isRollback bool, out []*watch.WatchTxResponse, err error) {
+	if rollback {
+		return true, nil, nil
+	}
+	block, err := ledger.NewBlockFromCbor(blockType, blockCbor)
+	if err != nil {
+		return false, nil, err
+	}
+	txs := block.Transactions()
+	applies := make([]*watch.WatchTxResponse, 0, len(txs))
+	for _, tx := range txs {
+		tmpTx, err := tx.Utxorpc()
+		if err != nil {
+			return false, nil, fmt.Errorf("convert transaction: %w", err)
+		}
+		if !shouldSendTx(tx) {
+			continue
+		}
+		var act watch.AnyChainTx
+		act.Chain = &watch.AnyChainTx_Cardano{Cardano: tmpTx}
+		applies = append(applies, &watch.WatchTxResponse{
+			Action: &watch.WatchTxResponse_Apply{Apply: &act},
+		})
+	}
+	if len(applies) == 0 {
+		hashCopy := append([]byte(nil), blockHash...)
+		idle := &watch.WatchTxResponse{
+			Action: &watch.WatchTxResponse_Idle{
+				Idle: &watch.BlockRef{
+					Slot:   blockSlot,
+					Hash:   hashCopy,
+					Height: blockHeight,
+				},
+			},
+		}
+		return false, []*watch.WatchTxResponse{idle}, nil
+	}
+	return false, applies, nil
+}
 
 // watchServiceServer implements the WatchService API
 type watchServiceServer struct {
@@ -104,11 +156,19 @@ func (s *watchServiceServer) WatchTx(
 		chainIter.Cancel()
 	}()
 
+	shouldSendTx := func(tx ledger.Transaction) bool {
+		if predicate == nil {
+			return true
+		}
+		return s.utxorpc.matchesTxPattern(
+			tx,
+			predicate.GetMatch().GetCardano(),
+		)
+	}
+
 	for {
-		// Check for available block
 		next, err := chainIter.Next(true)
 		if err != nil {
-			// Check if it was a context cancellation
 			if ctx.Err() != nil {
 				s.utxorpc.config.Logger.Debug(
 					"WatchTx client disconnected",
@@ -121,50 +181,39 @@ func (s *watchServiceServer) WatchTx(
 			)
 			return err
 		}
-		if next != nil {
-			// Get ledger.Block from bytes
-			block, err := ledger.NewBlockFromCbor(
-				next.Block.Type,
-				next.Block.Cbor,
+		if next == nil {
+			continue
+		}
+		isRollback, msgs, err := watchTxBuildMessages(
+			next.Rollback,
+			next.Block.Type,
+			next.Block.Cbor,
+			next.Block.Slot,
+			next.Block.Number,
+			next.Block.Hash,
+			shouldSendTx,
+		)
+		if err != nil {
+			s.utxorpc.config.Logger.Error(
+				"failed to get block",
+				"error", err,
 			)
-			if err != nil {
-				s.utxorpc.config.Logger.Error(
-					"failed to get block",
-					"error", err,
-				)
+			return err
+		}
+		if isRollback {
+			s.utxorpc.config.Logger.Debug(
+				"WatchTx skipping rollback (no block payload)",
+				"slot", next.Point.Slot,
+				"hash", hex.EncodeToString(next.Point.Hash),
+			)
+			continue
+		}
+		for _, resp := range msgs {
+			if err := stream.Send(resp); err != nil {
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
 				return err
-			}
-
-			// Loop through transactions
-			for _, tx := range block.Transactions() {
-				tmpTx, err := tx.Utxorpc()
-				if err != nil {
-					return fmt.Errorf("convert transaction: %w", err)
-				}
-				var act watch.AnyChainTx
-				actc := watch.AnyChainTx_Cardano{
-					Cardano: tmpTx,
-				}
-				act.Chain = &actc
-				resp := &watch.WatchTxResponse{
-					Action: &watch.WatchTxResponse_Apply{
-						Apply: &act,
-					},
-				}
-				shouldSend := predicate == nil ||
-					s.utxorpc.matchesTxPattern(
-						tx,
-						predicate.GetMatch().GetCardano(),
-					)
-				if shouldSend {
-					err := stream.Send(resp)
-					if err != nil {
-						if ctx.Err() != nil {
-							return ctx.Err()
-						}
-						return err
-					}
-				}
 			}
 		}
 	}
