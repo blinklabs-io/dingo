@@ -15,11 +15,13 @@
 package ouroboros
 
 import (
+	"context"
 	"net"
 	"testing"
 	"time"
 
 	dchainsync "github.com/blinklabs-io/dingo/chainsync"
+	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/peergov"
@@ -403,4 +405,64 @@ func TestChainsyncClientRollForward_UntrackedPeerDoesNotPublishToLedger(
 		t.Fatalf("unexpected ledger event from untracked peer: %#v", evt)
 	default:
 	}
+}
+
+func TestSubscribeChainsyncResyncRecyclesConnection(t *testing.T) {
+	bus := event.NewEventBus(nil, nil)
+	defer bus.Close()
+
+	connA := newTestConnId("127.0.0.1:6000", "1.1.1.1:3001")
+	connB := newTestConnId("127.0.0.1:6000", "2.2.2.2:3001")
+	point := ocommon.NewPoint(100, []byte("hdr"))
+	tip := ochainsync.Tip{Point: point}
+
+	state := dchainsync.NewState(bus, nil)
+	require.True(t, state.AddClientConnId(connA))
+	require.True(t, state.AddClientConnId(connB))
+	state.UpdateClientTip(connB, point, tip)
+	require.True(
+		t,
+		state.HeaderPreviouslySeenFromOtherConn(connA, point),
+	)
+
+	o := NewOuroboros(OuroborosConfig{EventBus: bus})
+	o.ChainsyncState = state
+	o.EventBus = bus
+
+	_, recycleCh := bus.Subscribe(
+		connmanager.ConnectionRecycleRequestedEventType,
+	)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	o.SubscribeChainsyncResync(ctx)
+
+	bus.Publish(
+		event.ChainsyncResyncEventType,
+		event.NewEvent(
+			event.ChainsyncResyncEventType,
+			event.ChainsyncResyncEvent{
+				ConnectionId: connA,
+				Reason:       "test",
+			},
+		),
+	)
+
+	select {
+	case evt := <-recycleCh:
+		data, ok := evt.Data.(connmanager.ConnectionRecycleRequestedEvent)
+		require.True(t, ok)
+		require.Equal(t, connA, data.ConnectionId)
+		require.Equal(
+			t,
+			"chainsync resync requested: test",
+			data.Reason,
+		)
+	case <-time.After(time.Second):
+		t.Fatal("expected connection recycle request")
+	}
+
+	require.False(
+		t,
+		state.HeaderPreviouslySeenFromOtherConn(connA, point),
+	)
 }

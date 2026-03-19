@@ -24,6 +24,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/chainselection"
+	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/ledger"
 	ouroboros "github.com/blinklabs-io/gouroboros"
@@ -807,11 +808,13 @@ func (o *Ouroboros) restartChainsyncClientAsync(
 // SubscribeChainsyncResync registers an EventBus subscriber that
 // handles chainsync re-sync events. When a resync is requested
 // (e.g. because the ledger detected a persistent fork), this
-// subscriber stops the chainsync client, clears the header dedup
-// cache, and restarts chainsync on the same TCP connection.
+// subscriber clears header dedup state and recycles the entire
+// connection so peer governor can negotiate a fresh session.
 //
-// This consolidates the stop/clear/restart orchestration in one
-// place rather than spreading it across node.go closures.
+// Re-running FindIntersect inside an existing chainsync session can
+// strand the protocol in Intersect while the peer continues sending
+// RollForward messages. Recycling the connection avoids that
+// state-machine hazard.
 func (o *Ouroboros) SubscribeChainsyncResync(ctx context.Context) {
 	if o.EventBus == nil {
 		return
@@ -823,38 +826,23 @@ func (o *Ouroboros) SubscribeChainsyncResync(ctx context.Context) {
 			if !ok {
 				return
 			}
-			connId := e.ConnectionId
-			o.restartChainsyncClientAsync(
-				ctx,
-				connId,
-				e.Reason,
-				func() error {
-					conn := o.ConnManager.GetConnectionById(connId)
-					if conn == nil {
-						return fmt.Errorf(
-							"connection not found: %s",
-							connId.String(),
-						)
-					}
-					// Stop the chainsync client to halt
-					// mismatching headers.
-					cs := conn.ChainSync()
-					if cs != nil && cs.Client != nil {
-						if err := cs.Client.Stop(); err != nil {
-							return fmt.Errorf(
-								"stop chainsync client: %w",
-								err,
-							)
-						}
-					}
-					// Clear the header dedup cache so the
-					// new intersection can re-deliver
-					// headers.
-					if o.ChainsyncState != nil {
-						o.ChainsyncState.ClearSeenHeaders()
-					}
-					return o.RestartChainsyncClient(connId)
-				},
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+			if o.ChainsyncState != nil {
+				o.ChainsyncState.ClearSeenHeaders()
+			}
+			o.EventBus.Publish(
+				connmanager.ConnectionRecycleRequestedEventType,
+				event.NewEvent(
+					connmanager.ConnectionRecycleRequestedEventType,
+					connmanager.ConnectionRecycleRequestedEvent{
+						ConnectionId: e.ConnectionId,
+						Reason:       "chainsync resync requested: " + e.Reason,
+					},
+				),
 			)
 		},
 	)
