@@ -13,19 +13,19 @@ Hi folks! Here’s what we shipped in v0.27.5.
 
 ### ✨ What's New
 
-- **Deterministic UTxO ordering:** UTxO queries are easier to reproduce because results can now be returned in a stable, deterministic order.
-- **Observability-only `ChainSync` clients:** Monitoring is safer because observability-only clients can connect without affecting eligible client pools, peer selection, or client-limit enforcement.
+- **Deterministic UTxO ordering:** UTxO queries are easier to reproduce because results now come back in a handy, deterministic order.
+- **Observability-only `ChainSync` clients:** Monitoring is more rock-solid because observability-only clients can connect without affecting eligible client pools, peer selection, or client-limit enforcement.
 
 ### 💪 Improvements
 
-- **Safer rollbacks for leader scheduling:** Scheduling stays more reliable because rollbacks now keep stable schedule state while cleaning up unstable future plans.
-- **Resilient ledger block processing:** Sync keeps moving because ledger block processing restarts after recoverable errors instead of exiting.
-- **More stable chain density:** Chain-density calculations are more representative because they now use a sliding window of recent slots and blocks.
+- **Safer rollbacks for leader scheduling:** Scheduling is more rock-solid because rollbacks now keep stable schedule state while cleaning up unstable future plans.
+- **Resilient ledger block processing:** Sync stays more rock-solid because ledger block processing restarts after recoverable errors instead of exiting.
+- **More stable chain density:** Chain-density calculations are more solid because they now use a sliding window of recent slots and blocks.
 - **Safer import resuming:** Historical imports are more reliable because resume checks now require both slot and hash to match.
-- **Quicker primary-chain convergence:** Startup is less disruptive because primary-chain tip reconciliation now converges more quickly on the ledger tip.
+- **Quicker primary-chain convergence:** Startup is sleeker because primary-chain tip reconciliation now converges more quickly on the ledger tip.
 - **Sensible peer defaults:** Peer tuning is simpler because peer targets can fall back to cardano-node `config.json` values when explicit targets are not provided.
 - **Earlier peer stabilization:** Early connectivity is smoother because PeerGovernor now triggers an initial reconcile shortly after startup.
-- **More complete block references:** Downstream chain consumers get more context because `utxorpc` `BlockRef` and `ChainPoint` now populate block height when available.
+- **More complete block references:** Downstream chain consumers get handy context because `utxorpc` `BlockRef` and `ChainPoint` now populate block height when available.
 
 ### 🔧 Fixes
 
