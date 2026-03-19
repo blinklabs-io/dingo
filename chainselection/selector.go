@@ -15,6 +15,7 @@
 package chainselection
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"log/slog"
@@ -705,9 +706,23 @@ func (cs *ChainSelector) EvaluateAndSwitch() bool {
 				if !ok {
 					return
 				}
+				if CompareChains(
+					newPeerTip.Tip,
+					previousPeerTip.Tip,
+				) == ChainEqual &&
+					cs.connectionPriority(*newBest) ==
+						cs.connectionPriority(*previousBest) &&
+					len(newPeerTip.VRFOutput) == VRFOutputSize &&
+					len(previousPeerTip.VRFOutput) == VRFOutputSize &&
+					bytes.Equal(
+						newPeerTip.VRFOutput,
+						previousPeerTip.VRFOutput,
+					) {
+					newBest = previousBest
+				} else if
 				// Preserve the incumbent only when it still wins the same
 				// full comparison used during normal best-peer selection.
-				if cs.comparePeerTips(
+				cs.comparePeerTips(
 					*previousBest,
 					previousPeerTip,
 					*newBest,

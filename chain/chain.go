@@ -521,6 +521,71 @@ func (c *Chain) Rollback(point ocommon.Point) error {
 	return nil
 }
 
+// ValidateRollback verifies that Rollback(point) would be accepted without
+// mutating chain state. Callers can use this to avoid applying external
+// side effects before the chain's rollback pre-checks have run.
+func (c *Chain) ValidateRollback(point ocommon.Point) error {
+	if c == nil {
+		return errors.New("chain is nil")
+	}
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	c.manager.mutex.Lock()
+	defer c.manager.mutex.Unlock()
+	// Verify chain integrity
+	if err := c.reconcile(); err != nil {
+		return fmt.Errorf("reconcile chain: %w", err)
+	}
+	// Check headers for rollback point without mutating them
+	if len(c.headers) > 0 {
+		var header queuedHeader
+		for i := len(c.headers) - 1; i >= 0; i-- {
+			header = c.headers[i]
+			if header.point.Slot > point.Slot {
+				continue
+			}
+			if header.point.Slot == point.Slot &&
+				bytes.Equal(header.point.Hash, point.Hash) {
+				return nil
+			}
+			if header.point.Slot < point.Slot {
+				return models.ErrBlockNotFound
+			}
+		}
+	}
+	// Lookup block for rollback point
+	var rollbackBlockIndex uint64
+	if point.Slot > 0 {
+		tmpBlock, err := c.manager.blockByPoint(point, nil)
+		if err != nil {
+			return fmt.Errorf("lookup rollback point: %w", err)
+		}
+		rollbackBlockIndex = tmpBlock.ID
+	}
+	// Calculate fork depth before deleting blocks
+	forkDepth := c.tipBlockIndex - rollbackBlockIndex
+	// Reject rollbacks that exceed the security parameter K on
+	// the persistent chain. Ephemeral (fork-tracking) chains are
+	// not subject to this limit. The check is skipped when
+	// securityParam is 0 (ledger not yet initialized) or when
+	// the chain is shorter than K blocks (initial sync), since
+	// the entire chain can be safely replaced during sync.
+	securityParam := c.manager.securityParam
+	if c.persistent && securityParam > 0 &&
+		c.tipBlockIndex >= uint64(securityParam) && //nolint:gosec
+		forkDepth > uint64(securityParam) { //nolint:gosec
+		slog.Default().Warn(
+			"rejecting rollback that exceeds "+
+				"security parameter K",
+			"fork_depth", forkDepth,
+			"security_param", securityParam,
+			"rollback_slot", point.Slot,
+		)
+		return ErrRollbackExceedsSecurityParam
+	}
+	return nil
+}
+
 // rollbackLocked performs all rollback logic under locks and returns
 // events to be published by the caller after locks are released.
 func (c *Chain) rollbackLocked(

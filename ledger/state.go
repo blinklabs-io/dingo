@@ -468,6 +468,7 @@ type LedgerState struct {
 	chainsyncBlockfetchReadyChan  chan struct{}
 	activeBlockfetchConnId        ouroboros.ConnectionId // connection used for current blockfetch pipeline
 	selectedBlockfetchConnId      ouroboros.ConnectionId // latest selected chainsync connection for the next batch
+	headerPipelineConnId          ouroboros.ConnectionId // connection that currently owns the queued header/blockfetch pipeline
 	pendingBlockfetchEvents       []BlockfetchEvent
 	checkpointWrittenForEpoch     bool
 	closed                        atomic.Bool
@@ -503,7 +504,8 @@ type LedgerState struct {
 	lastActiveConnId *ouroboros.ConnectionId // tracks active connection for switch detection
 
 	// Header mismatch tracking for fork detection and re-sync
-	headerMismatchCount int // consecutive header mismatch count
+	headerMismatchCount  int // consecutive header mismatch count
+	bufferedHeaderEvents map[ouroboros.ConnectionId][]ChainsyncEvent
 }
 
 // EraTransitionResult holds computed state from an era transition
@@ -653,7 +655,7 @@ func (ls *LedgerState) Start(ctx context.Context) error {
 	// Start goroutine to process new blocks unless the caller will feed trusted
 	// batches directly into the replay loop.
 	if !ls.config.ManualBlockProcessing {
-		go ls.ledgerProcessBlocks()
+		go ls.ledgerProcessBlocks(ctx)
 	}
 	return nil
 }
@@ -1593,6 +1595,46 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 	return nil
 }
 
+// rollbackChainAndState first validates that the primary chain will accept the
+// rollback, then synchronizes the metadata-backed ledger state and rewinds the
+// primary chain to the same point.
+func (ls *LedgerState) rollbackChainAndState(point ocommon.Point) error {
+	if err := ls.chain.ValidateRollback(point); err != nil {
+		return fmt.Errorf("validate primary chain rollback: %w", err)
+	}
+	if err := ls.rollback(point); err != nil {
+		return fmt.Errorf("rollback ledger state: %w", err)
+	}
+	if err := ls.chain.Rollback(point); err != nil {
+		return fmt.Errorf("rollback primary chain: %w", err)
+	}
+	return nil
+}
+
+// processChainIteratorRollback applies a rollback emitted by the primary chain
+// iterator only when the chain still sits at that rollback point. Iterator
+// rollbacks can lag behind live blockfetch/chainsync activity; if the primary
+// chain has already re-extended past the rollback point, applying the rollback
+// again would desynchronize metadata from the blob-backed chain.
+func (ls *LedgerState) processChainIteratorRollback(
+	point ocommon.Point,
+) error {
+	chainTip := ls.chain.Tip()
+	if chainTip.Point.Slot != point.Slot ||
+		!bytes.Equal(chainTip.Point.Hash, point.Hash) {
+		ls.config.Logger.Debug(
+			"skipping stale chain iterator rollback",
+			"component", "ledger",
+			"rollback_slot", point.Slot,
+			"rollback_hash", hex.EncodeToString(point.Hash),
+			"chain_tip_slot", chainTip.Point.Slot,
+			"chain_tip_hash", hex.EncodeToString(chainTip.Point.Hash),
+		)
+		return nil
+	}
+	return ls.rollback(point)
+}
+
 // transitionToEra performs an era transition and returns the result without
 // mutating LedgerState. This allows callers to capture the computed state in a
 // transaction and apply it to in-memory state after the transaction commits.
@@ -1811,6 +1853,7 @@ type readChainResult struct {
 	rollbackPoint ocommon.Point
 	blocks        []ledger.Block
 	rollback      bool
+	err           error
 }
 
 func (ls *LedgerState) ledgerReadChain(
@@ -1823,6 +1866,12 @@ func (ls *LedgerState) ledgerReadChain(
 		ls.config.Logger.Error(
 			"failed to create chain iterator: " + err.Error(),
 		)
+		select {
+		case resultCh <- readChainResult{
+			err: fmt.Errorf("create chain iterator: %w", err),
+		}:
+		case <-ctx.Done():
+		}
 		return
 	}
 	// Read blocks from chain iterator and decode
@@ -1852,6 +1901,15 @@ func (ls *LedgerState) ledgerReadChain(
 						ls.config.Logger.Error(
 							"failed to get next block from chain iterator: " + err.Error(),
 						)
+						select {
+						case resultCh <- readChainResult{
+							err: fmt.Errorf(
+								"get next block from chain iterator: %w",
+								err,
+							),
+						}:
+						case <-ctx.Done():
+						}
 						return
 					}
 					shouldBlock = true
@@ -1861,6 +1919,12 @@ func (ls *LedgerState) ledgerReadChain(
 			}
 			if next == nil {
 				ls.config.Logger.Error("next block from chain iterator is nil")
+				select {
+				case resultCh <- readChainResult{
+					err: errors.New("next block from chain iterator is nil"),
+				}:
+				case <-ctx.Done():
+				}
 				return
 			}
 			if next.Rollback {
@@ -1880,6 +1944,12 @@ func (ls *LedgerState) ledgerReadChain(
 				ls.config.Logger.Error(
 					"failed to decode block: " + err.Error(),
 				)
+				select {
+				case resultCh <- readChainResult{
+					err: fmt.Errorf("decode block: %w", err),
+				}:
+				case <-ctx.Done():
+				}
 				return
 			}
 			// Add to batch
@@ -1911,12 +1981,20 @@ func (ls *LedgerState) ledgerReadChain(
 	}
 }
 
-func (ls *LedgerState) ledgerProcessBlocks() {
+func (ls *LedgerState) ledgerProcessBlocks(ctx context.Context) {
 	for {
+		attemptCtx, cancel := context.WithCancel(ctx)
 		readChainResultCh := make(chan readChainResult)
-		go ls.ledgerReadChain(ls.ctx, readChainResultCh)
-		err := ls.ledgerProcessBlocksFromSource(ls.ctx, readChainResultCh)
-		if err == nil || ls.ctx.Err() != nil {
+		go func() {
+			defer close(readChainResultCh)
+			ls.ledgerReadChain(attemptCtx, readChainResultCh)
+		}()
+		err := ls.ledgerProcessBlocksFromSource(
+			attemptCtx,
+			readChainResultCh,
+		)
+		cancel()
+		if err == nil || ctx.Err() != nil {
 			return
 		}
 		ls.config.Logger.Warn(
@@ -2317,6 +2395,9 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 				if !ok {
 					return nil
 				}
+				if result.err != nil {
+					return result.err
+				}
 				nextBatch = result.blocks
 				// Process rollback
 				// Note: We do NOT hold ls.Lock() here because rollback() calls
@@ -2324,7 +2405,9 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 				// that re-acquires ls.Lock(), causing a deadlock. The rollback
 				// method handles its own locking for in-memory state updates.
 				if result.rollback {
-					if err = ls.rollback(result.rollbackPoint); err != nil {
+					if err = ls.processChainIteratorRollback(
+						result.rollbackPoint,
+					); err != nil {
 						return fmt.Errorf("process rollback: %w", err)
 					}
 					continue
@@ -3106,11 +3189,21 @@ func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTip() error {
 		return nil
 	}
 	if chainTip.Point.Slot < ledgerTip.Point.Slot {
-		return fmt.Errorf(
-			"primary chain tip %d is behind ledger tip %d",
-			chainTip.Point.Slot,
-			ledgerTip.Point.Slot,
+		ls.config.Logger.Warn(
+			"ledger tip ahead of primary chain tip at startup, rolling back metadata to chain tip",
+			"component", "ledger",
+			"chain_tip_slot", chainTip.Point.Slot,
+			"ledger_tip_slot", ledgerTip.Point.Slot,
+			"chain_tip_hash", hex.EncodeToString(chainTip.Point.Hash),
+			"ledger_tip_hash", hex.EncodeToString(ledgerTip.Point.Hash),
 		)
+		if err := ls.rollback(chainTip.Point); err != nil {
+			return fmt.Errorf(
+				"rollback ledger tip to primary chain tip: %w",
+				err,
+			)
+		}
+		return nil
 	}
 	ls.config.Logger.Warn(
 		"primary chain tip ahead of ledger tip at startup, pruning speculative blocks",

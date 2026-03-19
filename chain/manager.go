@@ -309,13 +309,9 @@ func (cm *ChainManager) loadPrimaryChain() error {
 }
 
 // RewindPrimaryChainToPoint silently prunes the persistent primary chain back
-// to the specified point without emitting rollback/fork events. This runs
-// during startup reconciliation to discard speculative blob-only blocks that
-// were never applied to the authoritative ledger metadata tip, so emitting the
-// normal ChainRollbackEvent/ChainForkEvent flow would be incorrect and could
-// trigger external undo/transaction rollback handlers for work that never
-// actually happened. Callers should treat this as persistent chain pruning
-// only, not a normal rollback/fork transition.
+// to the specified point without emitting rollback/fork events. This is used
+// during startup to discard speculative blob-only blocks that were never
+// committed into the authoritative ledger metadata tip.
 func (cm *ChainManager) RewindPrimaryChainToPoint(
 	point ocommon.Point,
 ) error {
@@ -334,7 +330,6 @@ func (cm *ChainManager) RewindPrimaryChainToPoint(
 	rollbackIndex := uint64(0)
 	rollbackBlockNumber := uint64(0)
 	targetTip := ochainsync.Tip{}
-	targetTipSet := false
 	err := func() error {
 		txn := cm.db.BlobTxn(true)
 		return txn.Do(func(txn *database.Txn) error {
@@ -356,23 +351,13 @@ func (cm *ChainManager) RewindPrimaryChainToPoint(
 				if primaryChain.tipBlockIndex == rollbackIndex &&
 					primaryChain.currentTip.Point.Slot == point.Slot &&
 					bytes.Equal(primaryChain.currentTip.Point.Hash, point.Hash) {
-					// Already at the requested tip, so there is nothing to prune.
 					targetTip = primaryChain.currentTip
-					targetTipSet = true
 					return nil
 				}
 				targetTip = ochainsync.Tip{
 					Point:       point,
 					BlockNumber: rollbackBlockNumber,
 				}
-				targetTipSet = true
-			} else {
-				rollbackIndex = 0
-				targetTip = ochainsync.Tip{
-					Point:       point,
-					BlockNumber: 0,
-				}
-				targetTipSet = true
 			}
 			for currentTip.Point.Slot != point.Slot ||
 				!bytes.Equal(currentTip.Point.Hash, point.Hash) {
@@ -409,7 +394,7 @@ func (cm *ChainManager) RewindPrimaryChainToPoint(
 					BlockNumber: prevBlock.Number,
 				}
 			}
-			if !targetTipSet {
+			if targetTip.Point.Slot == 0 && len(targetTip.Point.Hash) == 0 {
 				targetTip = currentTip
 			}
 			return nil
