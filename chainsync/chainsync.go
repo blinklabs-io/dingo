@@ -615,6 +615,25 @@ func (s *State) processHeader(
 	return true
 }
 
+// HeaderPreviouslySeenFromOtherConn reports whether the exact header point was
+// already recorded by a different connection. This lets the selected ingress
+// peer replay a header first observed elsewhere without also replaying
+// same-connection duplicates back into the ledger queue.
+func (s *State) HeaderPreviouslySeenFromOtherConn(
+	connId ouroboros.ConnectionId,
+	point ocommon.Point,
+) bool {
+	s.seenHeadersMutex.Lock()
+	defer s.seenHeadersMutex.Unlock()
+	for _, rec := range s.seenHeaders[point.Slot] {
+		if !bytes.Equal(rec.hash, point.Hash) {
+			continue
+		}
+		return rec.connId != connId
+	}
+	return false
+}
+
 // MarkClientSynced marks a tracked client as synced (at chain
 // tip).
 func (s *State) MarkClientSynced(

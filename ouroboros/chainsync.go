@@ -541,7 +541,16 @@ func (o *Ouroboros) chainsyncClientRollForward(
 		}
 		if !isNew {
 			activeConnId := o.ChainsyncState.GetClientConnId()
-			if activeConnId != nil && *activeConnId == ctx.ConnectionId {
+			replayDuplicate := false
+			if activeConnId != nil &&
+				*activeConnId == ctx.ConnectionId &&
+				o.ChainsyncState.HeaderPreviouslySeenFromOtherConn(
+					ctx.ConnectionId,
+					point,
+				) {
+				replayDuplicate = true
+			}
+			if replayDuplicate {
 				o.config.Logger.Debug(
 					"publishing duplicate header from selected connection",
 					"component", "ouroboros",
@@ -550,8 +559,10 @@ func (o *Ouroboros) chainsyncClientRollForward(
 				)
 			} else {
 				// Duplicate header already delivered by another
-				// eligible peer. Keep the peer tip fresh, but do not
-				// re-publish the same header into the ledger queue.
+				// eligible peer, or a repeat delivery from the same
+				// selected peer. Keep the peer tip fresh, but do not
+				// re-publish the same header into the shared ledger
+				// queue.
 				o.updateChainsyncMetrics(ctx.ConnectionId, tip)
 				return nil
 			}
