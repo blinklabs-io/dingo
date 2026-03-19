@@ -506,6 +506,34 @@ func TestChainSelectorPreservesEqualTipIncumbentAtSamePriority(t *testing.T) {
 	assert.Equal(t, connId2, *cs.GetBestPeer())
 }
 
+func TestChainSelectorPreservesEqualTipIncumbentAtSamePriorityWithVRF(
+	t *testing.T,
+) {
+	incumbentConn := newTestConnectionId(1)
+	challengerConn := newTestConnectionId(2)
+	cs := NewChainSelector(ChainSelectorConfig{})
+
+	equalTip := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 120, Hash: []byte("equal-tip")},
+		BlockNumber: 60,
+	}
+	vrfHigher := make64ByteVRF(0xFF)
+	vrfLower := make64ByteVRF(0x00)
+
+	cs.UpdatePeerTip(incumbentConn, equalTip, vrfHigher)
+	require.NotNil(t, cs.GetBestPeer())
+	assert.Equal(t, incumbentConn, *cs.GetBestPeer())
+
+	cs.UpdatePeerTip(challengerConn, equalTip, vrfLower)
+	require.NotNil(t, cs.GetBestPeer())
+	assert.Equal(t, incumbentConn, *cs.GetBestPeer())
+
+	switched := cs.EvaluateAndSwitch()
+	assert.False(t, switched)
+	require.NotNil(t, cs.GetBestPeer())
+	assert.Equal(t, incumbentConn, *cs.GetBestPeer())
+}
+
 func TestChainSelectorUpdatesConnectionStateFromPeerGovEvents(t *testing.T) {
 	eventBus := event.NewEventBus(nil, nil)
 	defer eventBus.Stop()
@@ -885,7 +913,9 @@ func TestChainSelectorVRFTiebreaker(t *testing.T) {
 	assert.Equal(t, connId2, *bestPeer, "peer with lower VRF should win")
 }
 
-func TestChainSelectorUpdatePeerTipTriggersVRFTieBreakEvaluation(t *testing.T) {
+func TestChainSelectorUpdatePeerTipPreservesEqualTipIncumbentOnVRF(
+	t *testing.T,
+) {
 	cs := NewChainSelector(ChainSelectorConfig{})
 
 	connId1 := newTestConnectionId(1)
@@ -905,9 +935,9 @@ func TestChainSelectorUpdatePeerTipTriggersVRFTieBreakEvaluation(t *testing.T) {
 	require.NotNil(t, cs.GetBestPeer())
 	assert.Equal(
 		t,
-		connId2,
+		connId1,
 		*cs.GetBestPeer(),
-		"peer with lower VRF should trigger immediate evaluation",
+		"equal-tip challenger should not steal the incumbent on VRF alone",
 	)
 }
 

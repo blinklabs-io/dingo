@@ -710,11 +710,7 @@ func (cs *ChainSelector) EvaluateAndSwitch() bool {
 					previousPeerTip.Tip,
 				) == ChainEqual &&
 					cs.connectionPriority(*newBest) ==
-						cs.connectionPriority(*previousBest) &&
-					CompareVRFOutputs(
-						newPeerTip.VRFOutput,
-						previousPeerTip.VRFOutput,
-					) == ChainEqual {
+						cs.connectionPriority(*previousBest) {
 					newBest = previousBest
 				} else if
 				// Preserve the incumbent only when it still wins the same
