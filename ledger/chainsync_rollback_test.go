@@ -195,6 +195,67 @@ func TestHandleEventChainsyncBlockHeaderMissingAncestorRequestsResync(
 	assert.False(t, ok)
 }
 
+func TestHandleEventChainsyncBlockHeaderIgnoresStaleRollForwardBehindTip(
+	t *testing.T,
+) {
+	fixture := newChainsyncRollbackFixture(t)
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(func() { bus.Stop() })
+	fixture.ls.config.EventBus = bus
+
+	resyncCh := make(chan event.ChainsyncResyncEvent, 1)
+	subId := bus.SubscribeFunc(
+		event.ChainsyncResyncEventType,
+		func(evt event.Event) {
+			e, ok := evt.Data.(event.ChainsyncResyncEvent)
+			if !ok {
+				return
+			}
+			select {
+			case resyncCh <- e:
+			default:
+			}
+		},
+	)
+	t.Cleanup(func() {
+		bus.Unsubscribe(event.ChainsyncResyncEventType, subId)
+	})
+
+	staleHash := testHashBytes("stale-roll-forward")
+	header := mockHeader{
+		hash:        lcommon.NewBlake2b256(staleHash),
+		prevHash:    lcommon.NewBlake2b256(fixture.ancestorTip.Point.Hash),
+		blockNumber: fixture.ancestorTip.BlockNumber + 1,
+		slot:        fixture.ancestorTip.Point.Slot + 5,
+	}
+
+	err := fixture.ls.handleEventChainsyncBlockHeader(ChainsyncEvent{
+		ConnectionId: fixture.connId,
+		Point: ocommon.NewPoint(
+			header.SlotNumber(),
+			header.Hash().Bytes(),
+		),
+		BlockHeader: header,
+		Tip: ochainsync.Tip{
+			Point: ocommon.NewPoint(
+				fixture.currentTip.Point.Slot+10,
+				testHashBytes("peer-tip"),
+			),
+			BlockNumber: fixture.currentTip.BlockNumber + 10,
+		},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, fixture.currentTip, fixture.ls.chain.Tip())
+	assert.Zero(t, fixture.ls.headerMismatchCount)
+	assert.Zero(t, fixture.ls.chain.HeaderCount())
+
+	select {
+	case resync := <-resyncCh:
+		t.Fatalf("expected no chainsync resync event, got: %#v", resync)
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
 func TestReconcilePrimaryChainTipWithLedgerTipRollsBackMetadata(t *testing.T) {
 	fixture := newChainsyncRollbackFixture(t)
 

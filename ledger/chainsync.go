@@ -733,6 +733,19 @@ func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 	if err := ls.chain.AddBlockHeader(e.BlockHeader); err != nil {
 		var notFitErr chain.BlockNotFitChainTipError
 		if errors.As(err, &notFitErr) {
+			localTip := ls.Tip()
+			if e.Point.Slot <= localTip.Point.Slot {
+				ls.config.Logger.Debug(
+					"ignoring stale roll forward behind local tip",
+					"component", "ledger",
+					"slot", e.Point.Slot,
+					"local_tip_slot", localTip.Point.Slot,
+					"block_prev_hash", notFitErr.BlockPrevHash(),
+					"chain_tip_hash", notFitErr.TipHash(),
+					"connection_id", e.ConnectionId.String(),
+				)
+				return nil
+			}
 			// Header doesn't fit current chain tip. Clear stale queued
 			// headers so subsequent headers are evaluated against the
 			// block tip rather than perpetuating the mismatch.
