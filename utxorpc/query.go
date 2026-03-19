@@ -23,6 +23,7 @@ import (
 	"math"
 	"math/big"
 	"sort"
+	"strconv"
 	"time"
 
 	"connectrpc.com/connect"
@@ -43,6 +44,14 @@ import (
 type queryServiceServer struct {
 	queryconnect.UnimplementedQueryServiceHandler
 	utxorpc *Utxorpc
+}
+
+// utxoWithOrderingInfo wraps AnyUtxoData with ordering metadata for pagination
+type utxoWithOrderingInfo struct {
+	data       *query.AnyUtxoData
+	slot       uint64
+	blockIndex uint32
+	outputIdx  uint32
 }
 
 // ReadParams
@@ -363,9 +372,13 @@ func (s *queryServiceServer) SearchUtxos(
 		}
 	}
 
-	// Get UTxOs from ledger
+	var allItems []*utxoWithOrderingInfo
+
+	// Get UTxOs from ledger with ordering metadata
 	for _, address := range addresses {
-		utxos, err := s.utxorpc.config.LedgerState.UtxosByAddress(address)
+		utxos, err := s.utxorpc.config.LedgerState.UtxosByAddressWithOrdering(
+			address,
+		)
 		if err != nil {
 			return nil, err
 		}
@@ -434,8 +447,27 @@ func (s *queryServiceServer) SearchUtxos(
 					continue
 				}
 			}
-			resp.Items = append(resp.Items, &aud)
+			allItems = append(allItems, &utxoWithOrderingInfo{
+				data:       &aud,
+				slot:       utxo.TxSlot,
+				blockIndex: utxo.TxBlockIndex,
+				outputIdx:  utxo.OutputIdx,
+			})
 		}
+	}
+
+	paginatedItems, nextToken, err := paginateSearchResults(
+		allItems,
+		startToken,
+		maxItems,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	resp.Items = paginatedItems
+	if nextToken != "" {
+		resp.NextToken = nextToken
 	}
 	// Get chain point (slot and hash)
 	point := s.utxorpc.config.LedgerState.Tip().Point
@@ -445,6 +477,145 @@ func (s *queryServiceServer) SearchUtxos(
 		Hash: point.Hash,
 	}
 	return connect.NewResponse(resp), nil
+}
+
+// utxoOrderingInfo holds the ordering fields needed for stable pagination
+type utxoOrderingInfo struct {
+	slot       uint64
+	blockIndex uint32
+	outputIdx  uint32
+}
+
+func paginateSearchResults(
+	items []*utxoWithOrderingInfo,
+	startToken string,
+	maxItems int32,
+) ([]*query.AnyUtxoData, string, error) {
+	if len(items) == 0 {
+		return nil, "", nil
+	}
+
+	// Items are already sorted by database query:
+	// ORDER BY transaction.slot ASC, transaction.block_index ASC, utxo.output_idx ASC
+
+	var startIndex int
+	if startToken != "" {
+		// Parse cursor: "slot:blockIndex:outputIdx"
+		parts := bytes.SplitN([]byte(startToken), []byte(":"), 3)
+		if len(parts) != 3 {
+			return nil, "", connect.NewError(
+				connect.CodeInvalidArgument,
+				errors.New("invalid start_token format"),
+			)
+		}
+
+		cursorSlot, err := strconv.ParseUint(string(parts[0]), 10, 64)
+		if err != nil {
+			return nil, "", connect.NewError(
+				connect.CodeInvalidArgument,
+				errors.New("invalid start_token slot"),
+			)
+		}
+
+		cursorBlockIndex, err := strconv.ParseUint(string(parts[1]), 10, 32)
+		if err != nil {
+			return nil, "", connect.NewError(
+				connect.CodeInvalidArgument,
+				errors.New("invalid start_token block_index"),
+			)
+		}
+
+		cursorOutputIdx, err := strconv.ParseUint(string(parts[2]), 10, 32)
+		if err != nil {
+			return nil, "", connect.NewError(
+				connect.CodeInvalidArgument,
+				errors.New("invalid start_token output_idx"),
+			)
+		}
+
+		cursor := utxoOrderingInfo{
+			slot:       cursorSlot,
+			blockIndex: uint32(cursorBlockIndex),
+			outputIdx:  uint32(cursorOutputIdx),
+		}
+
+		// Find first item that comes after the cursor in sort order
+		// This works even if the cursor UTxO was spent
+		found := false
+		for i, item := range items {
+			itemInfo := utxoOrderingInfo{
+				slot:       item.slot,
+				blockIndex: item.blockIndex,
+				outputIdx:  item.outputIdx,
+			}
+			if compareUtxoOrdering(itemInfo, cursor) > 0 {
+				startIndex = i
+				found = true
+				break
+			}
+		}
+
+		// If no items found after cursor, all items are before/at cursor
+		if !found {
+			return []*query.AnyUtxoData{}, "", nil
+		}
+	}
+
+	var limit int
+	if maxItems > 0 {
+		limit = int(maxItems)
+		if limit > len(items)-startIndex {
+			limit = len(items) - startIndex
+		}
+	} else {
+		limit = len(items) - startIndex
+	}
+
+	endIndex := startIndex + limit
+
+	// Extract just the AnyUtxoData from the wrappers
+	paginated := make([]*query.AnyUtxoData, endIndex-startIndex)
+	for i := startIndex; i < endIndex; i++ {
+		paginated[i-startIndex] = items[i].data
+	}
+
+	// Generate next token if there are more items
+	var nextToken string
+	if maxItems > 0 && endIndex < len(items) {
+		lastItem := items[endIndex-1]
+		nextToken = fmt.Sprintf(
+			"%d:%d:%d",
+			lastItem.slot,
+			lastItem.blockIndex,
+			lastItem.outputIdx,
+		)
+	}
+
+	return paginated, nextToken, nil
+}
+
+// compareUtxoOrdering compares two UTxOs by their ordering fields
+// Returns: -1 if a < b, 0 if a == b, 1 if a > b
+func compareUtxoOrdering(a, b utxoOrderingInfo) int {
+	if a.slot != b.slot {
+		if a.slot < b.slot {
+			return -1
+		}
+		return 1
+	}
+	if a.blockIndex != b.blockIndex {
+		if a.blockIndex < b.blockIndex {
+			return -1
+		}
+		return 1
+	}
+	if a.outputIdx != b.outputIdx {
+		if a.outputIdx < b.outputIdx {
+			return -1
+		}
+		return 1
+	}
+	return 0
 }
 
 // ReadData

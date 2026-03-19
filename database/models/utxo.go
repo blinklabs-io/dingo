@@ -42,6 +42,13 @@ type Utxo struct {
 	OutputIdx               uint32       `gorm:"uniqueIndex:tx_id_output_idx"`
 }
 
+// UtxoWithOrdering includes UTxO with transaction ordering metadata
+type UtxoWithOrdering struct {
+	Utxo
+	TxSlot       uint64 `gorm:"column:tx_slot"`
+	TxBlockIndex uint32 `gorm:"column:tx_block_index"`
+}
+
 func (u *Utxo) TableName() string {
 	return "utxo"
 }

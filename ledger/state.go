@@ -3616,6 +3616,17 @@ func (ls *LedgerState) UtxosByAddress(
 	return ret, nil
 }
 
+// UtxosByAddressWithOrdering returns all UTxOs for an address with ordering metadata
+func (ls *LedgerState) UtxosByAddressWithOrdering(
+	addr ledger.Address,
+) ([]models.UtxoWithOrdering, error) {
+	utxos, err := ls.db.UtxosByAddressWithOrdering(addr, nil)
+	if err != nil {
+		return nil, err
+	}
+	return utxos, nil
+}
+
 // UtxosByAddressAtSlot returns all UTxOs belonging to the
 // specified address that existed at the given slot.
 func (ls *LedgerState) UtxosByAddressAtSlot(

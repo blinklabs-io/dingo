@@ -409,6 +409,13 @@ type MetadataStore interface {
 	// GetUtxosByAddress retrieves all UTxOs for a given address.
 	GetUtxosByAddress(ledger.Address, types.Txn) ([]models.Utxo, error)
 
+	// GetUtxosByAddressWithOrdering retrieves all UTxOs for a given address
+	// with transaction ordering metadata (slot, block_index) for stable pagination.
+	GetUtxosByAddressWithOrdering(
+		ledger.Address,
+		types.Txn,
+	) ([]models.UtxoWithOrdering, error)
+
 	// GetUtxosByAddressAtSlot retrieves all UTxOs for a given address at a specific slot.
 	GetUtxosByAddressAtSlot(
 		lcommon.Address,

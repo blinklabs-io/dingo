@@ -228,6 +228,29 @@ func (d *Database) UtxosByAddress(
 	return utxos, nil
 }
 
+func (d *Database) UtxosByAddressWithOrdering(
+	addr ledger.Address,
+	txn *Txn,
+) ([]models.UtxoWithOrdering, error) {
+	if txn == nil {
+		txn = d.Transaction(false)
+		defer txn.Release()
+	}
+	utxos, err := d.metadata.GetUtxosByAddressWithOrdering(
+		addr,
+		txn.Metadata(),
+	)
+	if err != nil {
+		return nil, err
+	}
+	for i := range utxos {
+		if err := loadCbor(&utxos[i].Utxo, txn); err != nil {
+			return nil, err
+		}
+	}
+	return utxos, nil
+}
+
 func (d *Database) UtxosByAddressAtSlot(
 	addr lcommon.Address,
 	slot uint64,
