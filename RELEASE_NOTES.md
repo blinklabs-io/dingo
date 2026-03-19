@@ -11,29 +11,35 @@
 
 Hi folks! Here’s what we shipped in v0.27.5.
 
-```json
-{
-  "✨ What's New": [
-    "You can now query UTXOs with a stable, deterministic ordering and fetch results by address more efficiently.",
-    "You can now connect “observability-only” ChainSync clients to monitor the system without affecting normal operations."
-  ],
-  "💪 Improvements": [
-    "Rollbacks now preserve stable scheduling information while more reliably cleaning up invalid future plans.",
-    "Ledger block processing is more resilient so the service keeps running during recoverable issues.",
-    "Chain-density calculation is more stable and representative during recent activity.",
-    "Block ingestion and resuming imports is safer, reducing the chance of skipping or mis-linking blocks.",
-    "Primary-chain startup converges on a consistent tip more quickly and with less user-visible disruption.",
-    "Peer configuration uses sensible defaults more consistently, reducing manual tuning.",
-    "Peer selection stabilizes sooner after startup, improving early connectivity behavior.",
-    "Block reference height information is more complete for downstream consumers of chain data."
-  ],
-  "🔧 Fixes": [
-    "Pending-block flush failures no longer leave blockfetch in a partially-stuck state.",
-    "Stake snapshot operations now surface clearer error details to speed up troubleshooting."
-  ]
-}
+### ✨ What's New
 
-```
+- **Deterministic UTxO ordering:** UTxO queries are easier to reproduce because results can now be returned in a stable, deterministic order.
+- **Observability-only `ChainSync` clients:** Monitoring is safer because observability-only clients can connect without affecting eligible client pools, peer selection, or client-limit enforcement.
+
+### 💪 Improvements
+
+- **Safer rollbacks for leader scheduling:** Scheduling stays more reliable because rollbacks now keep stable schedule state while cleaning up unstable future plans.
+- **Resilient ledger block processing:** Sync keeps moving because ledger block processing restarts after recoverable errors instead of exiting.
+- **More stable chain density:** Chain-density calculations are more representative because they now use a sliding window of recent slots and blocks.
+- **Safer import resuming:** Historical imports are more reliable because resume checks now require both slot and hash to match.
+- **Quicker primary-chain convergence:** Startup is less disruptive because primary-chain tip reconciliation now converges more quickly on the ledger tip.
+- **Sensible peer defaults:** Peer tuning is simpler because peer targets can fall back to cardano-node `config.json` values when explicit targets are not provided.
+- **Earlier peer stabilization:** Early connectivity is smoother because PeerGovernor now triggers an initial reconcile shortly after startup.
+- **More complete block references:** Downstream chain consumers get more context because `utxorpc` `BlockRef` and `ChainPoint` now populate block height when available.
+
+### 🔧 Fixes
+
+- **Reliable pending-block flush cleanup:** Block fetch stays more rock-solid because flush failures no longer leave pending-block state partially stuck.
+- **Clearer stake snapshot errors (SQLite):** Troubleshooting is faster because stake snapshot create/delete errors now include more context.
+
+### 📋 What You Need to Know
+
+- **`utxorpc` UTxO consumers:** If your client logic assumes an unspecified UTxO ordering, double-check it against the new deterministic ordering behavior.
+- **`ChainSync` client limits:** Observability-only clients are excluded from client-limit enforcement and eligible-client selection.
+
+### 🙏 Thank You
+
+Thank you for trying!
 
 ---
 
