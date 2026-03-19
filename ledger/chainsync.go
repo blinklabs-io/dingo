@@ -516,6 +516,15 @@ func (ls *LedgerState) replayBufferedHeaderEvents(
 	return nil
 }
 
+func (ls *LedgerState) discardBufferedPeerHeaders(
+	connId ouroboros.ConnectionId,
+) {
+	delete(ls.bufferedHeaderEvents, connIdKey(connId))
+	if sameConnectionId(ls.headerPipelineConnId, connId) {
+		ls.clearQueuedHeaders()
+	}
+}
+
 func (ls *LedgerState) handleEventChainsyncRollback(e ChainsyncEvent) error {
 	// Filter events from non-active connections when chain selection is enabled
 	if activeConnId, configured, _ := ls.detectConnectionSwitch(); configured {
@@ -539,6 +548,7 @@ func (ls *LedgerState) handleEventChainsyncRollback(e ChainsyncEvent) error {
 				"slot", e.Point.Slot,
 			)
 		} else if !sameConnectionId(*activeConnId, e.ConnectionId) {
+			ls.discardBufferedPeerHeaders(e.ConnectionId)
 			// Event is from non-active connection, skip
 			// Rate-limit this message to once per dropEventLogInterval
 			now := time.Now()
@@ -547,11 +557,12 @@ func (ls *LedgerState) handleEventChainsyncRollback(e ChainsyncEvent) error {
 				ls.dropRollbackCount = 0
 				ls.dropRollbackLastLog = now
 				ls.config.Logger.Debug(
-					"dropping rollback from non-active connection",
+					"dropping rollback from non-active connection and clearing buffered peer headers",
 					"component", "ledger",
 					"event_connection_id", e.ConnectionId.String(),
 					"active_connection_id", activeConnId.String(),
 					"slot", e.Point.Slot,
+					"cleared_buffered_headers", true,
 					"suppressed_since_last_log", suppressed,
 				)
 			} else {

@@ -747,6 +747,51 @@ func TestHandleEventChainsyncBlockHeaderIgnoresStaleHeaderBehindChainTip(
 	)
 }
 
+func TestHandleEventChainsyncRollbackClearsBufferedHeadersForNonActivePeer(
+	t *testing.T,
+) {
+	activeConn := ouroboros.ConnectionId{
+		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 6000},
+		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3001},
+	}
+	bufferedConn := ouroboros.ConnectionId{
+		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 6000},
+		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3002},
+	}
+	bufferedHash := lcommon.NewBlake2b256([]byte("buffered-header"))
+	ls := &LedgerState{
+		bufferedHeaderEvents: map[string][]ChainsyncEvent{
+			connIdKey(bufferedConn): {{
+				ConnectionId: bufferedConn,
+				BlockHeader: mockHeader{
+					hash:        bufferedHash,
+					prevHash:    lcommon.NewBlake2b256(nil),
+					blockNumber: 1,
+					slot:        1,
+				},
+				Point: ocommon.NewPoint(1, bufferedHash.Bytes()),
+				Tip: ochainsync.Tip{
+					Point:       ocommon.NewPoint(10, []byte("tip")),
+					BlockNumber: 10,
+				},
+			}},
+		},
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+			GetActiveConnectionFunc: func() *ouroboros.ConnectionId {
+				return &activeConn
+			},
+		},
+	}
+
+	err := ls.handleEventChainsyncRollback(ChainsyncEvent{
+		ConnectionId: bufferedConn,
+		Point:        ocommon.NewPoint(0, nil),
+	})
+	require.NoError(t, err)
+	assert.Empty(t, ls.bufferedHeaderEvents[connIdKey(bufferedConn)])
+}
+
 func TestHandleEventBlockfetchBatchDoneEmptyBatchRetriesAlternateConnection(
 	t *testing.T,
 ) {
