@@ -99,6 +99,16 @@ func isOriginPoint(point ocommon.Point) bool {
 	return point.Slot == 0 && len(point.Hash) == 0
 }
 
+func sameConnectionId(a, b ouroboros.ConnectionId) bool {
+	if a.LocalAddr == nil && a.RemoteAddr == nil {
+		return b.LocalAddr == nil && b.RemoteAddr == nil
+	}
+	if b.LocalAddr == nil && b.RemoteAddr == nil {
+		return false
+	}
+	return a.String() == b.String()
+}
+
 func (o *Ouroboros) buildDefaultChainsyncIntersectPoints(
 	connId ouroboros.ConnectionId,
 ) ([]ocommon.Point, error) {
@@ -544,7 +554,7 @@ func (o *Ouroboros) chainsyncClientRollForward(
 			activeConnId := o.ChainsyncState.GetClientConnId()
 			replayDuplicate := false
 			if activeConnId != nil &&
-				*activeConnId == ctx.ConnectionId &&
+				sameConnectionId(*activeConnId, ctx.ConnectionId) &&
 				o.ChainsyncState.HeaderPreviouslySeenFromOtherConn(
 					ctx.ConnectionId,
 					point,
