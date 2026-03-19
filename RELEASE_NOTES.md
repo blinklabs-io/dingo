@@ -1,6 +1,43 @@
 # Release Notes
 
 
+## v0.27.5 (March 19, 2026)
+
+**Title:** Reliability and maintenance update
+
+**Date:** March 19, 2026
+
+**Version:** v0.27.5
+
+Hi folks! Here’s what we shipped in v0.27.5.
+
+```json
+{
+  "✨ What's New": [
+    "You can now query UTXOs with a stable, deterministic ordering and fetch results by address more efficiently. This adds a new “UTXO-with-ordering” data model plus address-based queries with batched asset loading across all supported metadata backends.",
+    "You can now connect “observability-only” ChainSync clients to monitor the system without affecting normal operations. These clients are counted for metrics, but they are excluded from the eligible client pool, active peer selection, and client-limit enforcement."
+  ],
+  "💪 Improvements": [
+    "Rollbacks are now handled in a way that preserves stable scheduling information while more reliably cleaning up invalid future plans. The rollback logic drains to the latest event, prunes only unstable future leader schedules, and keeps current plus ready next-epoch schedules, with improved logging and broader rollback coverage validated by new tests.",
+    "Ledger block processing is now more resilient so the service keeps running during recoverable issues. Instead of exiting on non-fatal errors, block processing restarts to continue syncing after transient failures.",
+    "Chain-density calculation is now more stable and representative during recent activity. It now uses a sliding window of recent slots/blocks, with added test coverage for both window behavior and rollback interactions.",
+    "Block ingestion and resuming imports is now safer, reducing the chance of skipping or mis-linking blocks. Resume-skip checks now require both slot and hash to match, and raw import preserves Byron EBB origin linkage as verified by new tests.",
+    "Primary-chain startup now converges on a consistent tip more quickly and with less user-visible disruption. A silent primary-chain rewind API was added and the primary-chain tip is reconciled to the ledger tip during ledger startup.",
+    "Peer configuration now uses sensible defaults more consistently, reducing manual tuning. Dingo will fall back to P2P peer target values from cardano-node’s config.json when explicit targets are not provided, and PeerGovernor normalization has additional coverage for non-positive/positive values with default fallbacks.",
+    "Peer selection now stabilizes sooner after startup, improving early connectivity behavior. PeerGovernor triggers an initial reconcile shortly after startup using a timed goroutine.",
+    "Block reference height information is now more complete for downstream consumers of chain data. utxorpc BlockRef/ChainPoint now populates height from the database block model and falls back to height=0 if the lookup fails."
+  ],
+  "🔧 Fixes": [
+    "Pending-block flush failures no longer leave blockfetch in a partially-stuck state. The blockfetch pipeline now cleans up its state when flushing pending blocks fails so it can continue operating reliably.",
+    "Stake snapshot operations now surface clearer error details to speed up troubleshooting. SQLite pool stake snapshot create and delete operations now include contextual error wrapping so failures are easier to diagnose."
+  ]
+}
+
+```
+
+---
+
+
 ## v0.27.4 (March 18, 2026)
 
 **Title:** Reliability and usability refinements
