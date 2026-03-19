@@ -217,6 +217,10 @@ func TestTxSizeForFee_RebuiltConwayTxPreservesCanonicalSize(t *testing.T) {
 		TxMetadata: tx.TxMetadata,
 	}
 
+	// 699 is the canonical Conway transaction byte length produced by
+	// NewConwayTransactionFromCbor for this fixture; TxSizeForFee must preserve
+	// that exact serialized size when reconstructing the transaction for min-fee
+	// accounting.
 	assert.Equal(t, uint64(699), TxSizeForFee(rebuilt))
 }
 
