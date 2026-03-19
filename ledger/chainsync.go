@@ -370,7 +370,11 @@ func sameConnectionId(a, b ouroboros.ConnectionId) bool {
 	return keyA == keyB
 }
 
-func desiredBlockfetchBatchHeaders(gapSlots uint64, maxHeaders int) int {
+func desiredBlockfetchBatchHeaders(
+	gapSlots uint64,
+	gapBlocks uint64,
+	maxHeaders int,
+) int {
 	if maxHeaders <= 0 {
 		return 0
 	}
@@ -380,6 +384,9 @@ func desiredBlockfetchBatchHeaders(gapSlots uint64, maxHeaders int) int {
 		if scaledHeaders > minHeaders {
 			minHeaders = scaledHeaders
 		}
+	}
+	if gapBlocks > 0 {
+		minHeaders = min(minHeaders, int(gapBlocks))
 	}
 	minHeaders = min(minHeaders, blockfetchMaxBatchHeadersWhenBehind)
 	return min(minHeaders, maxHeaders)
@@ -865,10 +872,15 @@ func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 	// Use security window as slot threshold if available
 	headersReady := headerCount + 1
 	localTipSlot := ls.Tip().Point.Slot
+	blockGap := uint64(0)
+	if e.Tip.BlockNumber > ls.Tip().BlockNumber {
+		blockGap = e.Tip.BlockNumber - ls.Tip().BlockNumber
+	}
 	if e.Tip.Point.Slot > localTipSlot &&
 		e.Tip.Point.Slot-localTipSlot >= blockfetchMinBatchGapSlots {
 		minBatchHeaders := desiredBlockfetchBatchHeaders(
 			e.Tip.Point.Slot-localTipSlot,
+			blockGap,
 			allowedHeaderCount,
 		)
 		if headersReady < minBatchHeaders {

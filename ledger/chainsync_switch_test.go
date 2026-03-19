@@ -792,6 +792,63 @@ func TestHandleEventChainsyncRollbackClearsBufferedHeadersForNonActivePeer(
 	assert.Empty(t, ls.bufferedHeaderEvents[connIdKey(bufferedConn)])
 }
 
+func TestHandleEventChainsyncBlockHeaderStartsBlockfetchForSmallBlockGap(
+	t *testing.T,
+) {
+	connId := ouroboros.ConnectionId{
+		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 6000},
+		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3001},
+	}
+	requestCount := 0
+	ls := &LedgerState{
+		chain: &chain.Chain{},
+		currentTip: ochainsync.Tip{
+			Point:       ocommon.NewPoint(1000, []byte("local-tip")),
+			BlockNumber: 100,
+		},
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+			BlockfetchRequestRangeFunc: func(
+				requestConnId ouroboros.ConnectionId,
+				start ocommon.Point,
+				end ocommon.Point,
+			) error {
+				requestCount++
+				assert.Equal(t, connId, requestConnId)
+				assert.Equal(t, uint64(1064), start.Slot)
+				assert.Equal(t, uint64(1080), end.Slot)
+				return nil
+			},
+		},
+	}
+
+	prevHash := lcommon.NewBlake2b256(nil)
+	for i := range 5 {
+		hash := lcommon.NewBlake2b256([]byte(fmt.Sprintf("hdr-%d", i)))
+		slot := uint64(1064 + i*4)
+		err := ls.handleEventChainsyncBlockHeader(ChainsyncEvent{
+			ConnectionId: connId,
+			BlockHeader: mockHeader{
+				hash:        hash,
+				prevHash:    prevHash,
+				blockNumber: 101 + uint64(i),
+				slot:        slot,
+			},
+			Point: ocommon.NewPoint(slot, hash.Bytes()),
+			Tip: ochainsync.Tip{
+				Point:       ocommon.NewPoint(1080, []byte("peer-tip")),
+				BlockNumber: 105,
+			},
+		})
+		require.NoError(t, err)
+		prevHash = hash
+	}
+
+	assert.Equal(t, 1, requestCount)
+	assert.True(t, sameConnectionId(ls.activeBlockfetchConnId, connId))
+	ls.blockfetchRequestRangeCleanup()
+}
+
 func TestHandleEventBlockfetchBatchDoneEmptyBatchRetriesAlternateConnection(
 	t *testing.T,
 ) {
