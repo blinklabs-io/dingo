@@ -51,6 +51,11 @@ func (p *PeerChainTip) UpdateTip(tip ochainsync.Tip, vrfOutput []byte) {
 	p.LastUpdated = time.Now()
 }
 
+// Touch marks the peer as recently active without changing its advertised tip.
+func (p *PeerChainTip) Touch() {
+	p.LastUpdated = time.Now()
+}
+
 // IsStale returns true if the peer's tip hasn't been updated within the given
 // duration.
 func (p *PeerChainTip) IsStale(threshold time.Duration) bool {

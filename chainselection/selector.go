@@ -26,6 +26,7 @@ import (
 	"github.com/blinklabs-io/dingo/peergov"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
+	okeepalive "github.com/blinklabs-io/gouroboros/protocol/keepalive"
 )
 
 // safeAddUint64 returns a + b, clamped to math.MaxUint64 on overflow.
@@ -38,7 +39,12 @@ func safeAddUint64(a, b uint64) uint64 {
 
 const (
 	defaultEvaluationInterval = 10 * time.Second
-	defaultStaleTipThreshold  = 60 * time.Second
+	// Allow at least one full keepalive period plus response timeout and
+	// jitter before declaring a quiet peer stale. Healthy peers at tip can
+	// legitimately sit in AwaitReply without a tip change for long periods.
+	defaultStaleTipThreshold = (okeepalive.DefaultKeepAlivePeriod *
+		time.Second) + (okeepalive.DefaultKeepAliveTimeout * time.Second) +
+		(15 * time.Second)
 	defaultMinSwitchBlockDiff = 2
 
 	// DefaultMaxTrackedPeers is the maximum number of peers tracked by
@@ -140,6 +146,10 @@ func NewChainSelector(cfg ChainSelectorConfig) *ChainSelector {
 		cfg.EventBus.SubscribeFunc(
 			peergov.PeerPriorityChangedEventType,
 			cs.handlePeerPriorityChangedEvent,
+		)
+		cfg.EventBus.SubscribeFunc(
+			PeerActivityEventType,
+			cs.HandlePeerActivityEvent,
 		)
 	}
 	return cs
@@ -429,6 +439,24 @@ func (cs *ChainSelector) SetLocalTip(tip ochainsync.Tip) {
 	cs.mutex.Lock()
 	defer cs.mutex.Unlock()
 	cs.localTip = tip
+}
+
+// TouchPeerActivity refreshes a peer's liveness timestamp without mutating
+// its advertised tip. If the peer was previously stale, selection is
+// re-evaluated immediately so a healthy quiet peer can become eligible again.
+func (cs *ChainSelector) TouchPeerActivity(connId ouroboros.ConnectionId) {
+	shouldEvaluate := false
+
+	cs.mutex.Lock()
+	if peerTip, ok := cs.peerTips[connId]; ok && peerTip != nil {
+		shouldEvaluate = cs.isPeerTipStale(peerTip)
+		peerTip.Touch()
+	}
+	cs.mutex.Unlock()
+
+	if shouldEvaluate {
+		cs.EvaluateAndSwitch()
+	}
 }
 
 // SetSecurityParam updates the security parameter (k) dynamically.
@@ -822,6 +850,20 @@ func (cs *ChainSelector) HandlePeerTipUpdateEvent(evt event.Event) {
 		return
 	}
 	cs.UpdatePeerTip(e.ConnectionId, e.Tip, e.VRFOutput)
+}
+
+// HandlePeerActivityEvent refreshes a peer's liveness on non-tip protocol
+// activity such as keepalive responses.
+func (cs *ChainSelector) HandlePeerActivityEvent(evt event.Event) {
+	e, ok := evt.Data.(PeerActivityEvent)
+	if !ok {
+		cs.config.Logger.Warn(
+			"received unexpected event data type",
+			"expected", "PeerActivityEvent",
+		)
+		return
+	}
+	cs.TouchPeerActivity(e.ConnectionId)
 }
 
 func (cs *ChainSelector) evaluationLoop() {

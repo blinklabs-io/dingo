@@ -33,6 +33,7 @@ import (
 	oblockfetch "github.com/blinklabs-io/gouroboros/protocol/blockfetch"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	okeepalive "github.com/blinklabs-io/gouroboros/protocol/keepalive"
 	oleiosfetch "github.com/blinklabs-io/gouroboros/protocol/leiosfetch"
 	oleiosnotify "github.com/blinklabs-io/gouroboros/protocol/leiosnotify"
 	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
@@ -216,6 +217,9 @@ func (o *Ouroboros) ConfigureListeners(
 				l.ConnectionOpts,
 				ouroboros.WithFullDuplex(true),
 				ouroboros.WithKeepAlive(true),
+				ouroboros.WithKeepAliveConfig(
+					okeepalive.NewConfig(o.keepaliveConnOpts()...),
+				),
 				ouroboros.WithPeerSharing(o.config.PeerSharing),
 				ouroboros.WithNetworkMagic(o.config.NetworkMagic),
 				ouroboros.WithPeerSharingConfig(
@@ -278,6 +282,9 @@ func (o *Ouroboros) OutboundConnOpts() []ouroboros.ConnectionOptionFunc {
 		ouroboros.WithNetworkMagic(o.config.NetworkMagic),
 		ouroboros.WithNodeToNode(true),
 		ouroboros.WithKeepAlive(true),
+		ouroboros.WithKeepAliveConfig(
+			okeepalive.NewConfig(o.keepaliveConnOpts()...),
+		),
 		ouroboros.WithFullDuplex(true),
 		ouroboros.WithPeerSharing(o.config.PeerSharing),
 		ouroboros.WithPeerSharingConfig(

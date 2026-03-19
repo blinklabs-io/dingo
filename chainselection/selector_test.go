@@ -887,6 +887,63 @@ func TestPeerChainTipUpdateTip(t *testing.T) {
 	assert.True(t, peerTip.LastUpdated.After(oldTime))
 }
 
+func TestPeerChainTipTouch(t *testing.T) {
+	connId := newTestConnectionId(1)
+	tip := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 100, Hash: []byte("test")},
+		BlockNumber: 50,
+	}
+
+	peerTip := NewPeerChainTip(connId, tip, nil)
+	require.Eventually(t, func() bool {
+		return peerTip.IsStale(50 * time.Millisecond)
+	}, 2*time.Second, 5*time.Millisecond, "peer tip should become stale")
+	oldTime := peerTip.LastUpdated
+
+	peerTip.Touch()
+
+	assert.True(t, peerTip.LastUpdated.After(oldTime))
+	assert.False(t, peerTip.IsStale(50*time.Millisecond))
+}
+
+func TestChainSelectorTouchPeerActivityRevivesStaleBestPeer(t *testing.T) {
+	cs := NewChainSelector(ChainSelectorConfig{
+		StaleTipThreshold: 50 * time.Millisecond,
+	})
+
+	bestConn := newTestConnectionId(1)
+	freshConn := newTestConnectionId(2)
+	bestTip := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 100, Hash: []byte("best")},
+		BlockNumber: 60,
+	}
+	freshTip := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 100, Hash: []byte("fresh")},
+		BlockNumber: 50,
+	}
+
+	cs.UpdatePeerTip(bestConn, bestTip, nil)
+	cs.UpdatePeerTip(freshConn, freshTip, nil)
+	cs.EvaluateAndSwitch()
+	require.NotNil(t, cs.GetBestPeer())
+	assert.Equal(t, bestConn, *cs.GetBestPeer())
+
+	require.Eventually(t, func() bool {
+		peerTip := cs.GetPeerTip(bestConn)
+		return peerTip != nil && peerTip.IsStale(50*time.Millisecond)
+	}, 2*time.Second, 5*time.Millisecond, "best peer should become stale")
+
+	cs.UpdatePeerTip(freshConn, freshTip, nil)
+	cs.EvaluateAndSwitch()
+	require.NotNil(t, cs.GetBestPeer())
+	assert.Equal(t, freshConn, *cs.GetBestPeer())
+
+	cs.TouchPeerActivity(bestConn)
+
+	require.NotNil(t, cs.GetBestPeer())
+	assert.Equal(t, bestConn, *cs.GetBestPeer())
+}
+
 func TestChainSelectorVRFTiebreaker(t *testing.T) {
 	cs := NewChainSelector(ChainSelectorConfig{})
 
