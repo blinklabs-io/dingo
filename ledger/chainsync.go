@@ -344,6 +344,28 @@ func (ls *LedgerState) clearQueuedHeaders() {
 	ls.headerPipelineConnId = ouroboros.ConnectionId{}
 }
 
+func (ls *LedgerState) requestChainsyncResync(
+	connId ouroboros.ConnectionId,
+	reason string,
+) {
+	ls.headerMismatchCount = 0
+	ls.rollbackHistory = nil
+	delete(ls.bufferedHeaderEvents, connId)
+	if ls.config.EventBus == nil {
+		return
+	}
+	ls.config.EventBus.Publish(
+		event.ChainsyncResyncEventType,
+		event.NewEvent(
+			event.ChainsyncResyncEventType,
+			event.ChainsyncResyncEvent{
+				ConnectionId: connId,
+				Reason:       reason,
+			},
+		),
+	)
+}
+
 func (ls *LedgerState) shouldBufferHeaderEvent(e ChainsyncEvent) bool {
 	if ls.headerPipelineConnId == (ouroboros.ConnectionId{}) {
 		ls.headerPipelineConnId = e.ConnectionId
@@ -739,17 +761,9 @@ func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 					"connection_id", e.ConnectionId.String(),
 					"consecutive_mismatches", ls.headerMismatchCount,
 				)
-				ls.headerMismatchCount = 0
-				ls.rollbackHistory = nil
-				ls.config.EventBus.Publish(
-					event.ChainsyncResyncEventType,
-					event.NewEvent(
-						event.ChainsyncResyncEventType,
-						event.ChainsyncResyncEvent{
-							ConnectionId: e.ConnectionId,
-							Reason:       "persistent chain fork",
-						},
-					),
+				ls.requestChainsyncResync(
+					e.ConnectionId,
+					"persistent chain fork",
 				)
 			}
 			return nil
@@ -807,9 +821,11 @@ func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 
 // tryResolveFork attempts to resolve a chain fork when an incoming header
 // doesn't fit the local chain tip. The incoming header's prevHash identifies
-// the common ancestor. If that block exists on our chain and the peer's
-// chain is ahead, we roll back to the common ancestor so chainsync can
-// continue on the network's canonical chain.
+// a block that exists on our local chain. If the peer's immediate prevHash
+// is already unknown to us, the connection's chainsync cursor has drifted
+// out of continuity with the local header queue and the correct recovery is
+// a fresh FindIntersect on that connection rather than repeated mismatch
+// counting.
 //
 // Returns true if the fork was resolved (chain rolled back), false if the
 // common ancestor was not found or the rollback could not be performed.
@@ -839,14 +855,21 @@ func (ls *LedgerState) tryResolveFork(
 	ancestorBlock, err := database.BlockByHash(ls.db, prevHashBytes)
 	if err != nil {
 		if errors.Is(err, models.ErrBlockNotFound) {
-			// Common ancestor not found in our database — can't resolve.
+			// The peer's header stream is not continuous with our local
+			// chain view. This usually means we buffered or resumed a
+			// stale stream and need a fresh intersection on that
+			// connection instead of waiting for more mismatches.
 			ls.config.Logger.Debug(
-				"common ancestor not found in database, "+
-					"falling back to mismatch counting",
+				"common ancestor not found locally, triggering chainsync re-sync",
 				"component", "ledger",
+				"connection_id", e.ConnectionId.String(),
 				"block_prev_hash", notFitErr.BlockPrevHash(),
 			)
-			return false
+			ls.requestChainsyncResync(
+				e.ConnectionId,
+				resyncReasonRollbackNotFound,
+			)
+			return true
 		}
 		ls.config.Logger.Error(
 			"unexpected error looking up common ancestor",

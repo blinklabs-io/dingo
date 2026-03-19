@@ -21,8 +21,10 @@ import (
 	"log/slog"
 	"net"
 	"testing"
+	"time"
 
 	"github.com/blinklabs-io/dingo/chain"
+	"github.com/blinklabs-io/dingo/event"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
@@ -109,6 +111,88 @@ func TestTryResolveForkSynchronizesLedgerTip(t *testing.T) {
 	dbTip, err := fixture.ls.db.GetTip(nil)
 	require.NoError(t, err)
 	assert.Equal(t, fixture.ancestorTip, dbTip)
+}
+
+func TestHandleEventChainsyncBlockHeaderMissingAncestorRequestsResync(
+	t *testing.T,
+) {
+	fixture := newChainsyncRollbackFixture(t)
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(func() { bus.Stop() })
+	fixture.ls.config.EventBus = bus
+
+	resyncCh := make(chan event.ChainsyncResyncEvent, 1)
+	subId := bus.SubscribeFunc(
+		event.ChainsyncResyncEventType,
+		func(evt event.Event) {
+			e, ok := evt.Data.(event.ChainsyncResyncEvent)
+			if !ok {
+				return
+			}
+			select {
+			case resyncCh <- e:
+			default:
+			}
+		},
+	)
+	t.Cleanup(func() {
+		bus.Unsubscribe(event.ChainsyncResyncEventType, subId)
+	})
+
+	staleHash := testHashBytes("stale-fork-block")
+	stalePrevHash := testHashBytes("missing-ancestor")
+	header := mockHeader{
+		hash:        lcommon.NewBlake2b256(staleHash),
+		prevHash:    lcommon.NewBlake2b256(stalePrevHash),
+		blockNumber: fixture.currentTip.BlockNumber + 1,
+		slot:        fixture.currentTip.Point.Slot + 10,
+	}
+	fixture.ls.bufferedHeaderEvents = map[ouroboros.ConnectionId][]ChainsyncEvent{
+		fixture.connId: {{
+			ConnectionId: fixture.connId,
+			Point: ocommon.NewPoint(
+				header.SlotNumber(),
+				header.Hash().Bytes(),
+			),
+			BlockHeader: header,
+			Tip: ochainsync.Tip{
+				Point: ocommon.NewPoint(
+					header.SlotNumber(),
+					header.Hash().Bytes(),
+				),
+				BlockNumber: header.BlockNumber(),
+			},
+		}},
+	}
+
+	err := fixture.ls.handleEventChainsyncBlockHeader(ChainsyncEvent{
+		ConnectionId: fixture.connId,
+		Point: ocommon.NewPoint(
+			header.SlotNumber(),
+			header.Hash().Bytes(),
+		),
+		BlockHeader: header,
+		Tip: ochainsync.Tip{
+			Point: ocommon.NewPoint(
+				header.SlotNumber(),
+				header.Hash().Bytes(),
+			),
+			BlockNumber: header.BlockNumber(),
+		},
+	})
+	require.NoError(t, err)
+
+	select {
+	case resync := <-resyncCh:
+		assert.Equal(t, fixture.connId, resync.ConnectionId)
+		assert.Equal(t, resyncReasonRollbackNotFound, resync.Reason)
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected chainsync resync event")
+	}
+
+	assert.Zero(t, fixture.ls.headerMismatchCount)
+	_, ok := fixture.ls.bufferedHeaderEvents[fixture.connId]
+	assert.False(t, ok)
 }
 
 func TestReconcilePrimaryChainTipWithLedgerTipRollsBackMetadata(t *testing.T) {
