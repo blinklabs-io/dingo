@@ -104,6 +104,26 @@ func TestNewPeerGovernor(t *testing.T) {
 				ReconcileInterval:            10 * time.Minute,
 				MaxReconnectFailureThreshold: 10,
 				MinHotPeers:                  5,
+				InactivityTimeout:            defaultInactivityTimeout,
+				BootstrapRecoveryCooldown:    defaultBootstrapRecoveryCooldown,
+			},
+		},
+		{
+			name: "non-positive values fall back to defaults",
+			config: PeerGovernorConfig{
+				Logger: slog.New(
+					slog.NewJSONHandler(io.Discard, nil),
+				),
+				ReconcileInterval:            -10 * time.Minute,
+				MaxReconnectFailureThreshold: -10,
+				MinHotPeers:                  -5,
+				InactivityTimeout:            -3 * time.Minute,
+			},
+			expected: PeerGovernorConfig{
+				ReconcileInterval:            defaultReconcileInterval,
+				MaxReconnectFailureThreshold: defaultMaxReconnectFailureThreshold,
+				MinHotPeers:                  defaultMinHotPeers,
+				InactivityTimeout:            defaultInactivityTimeout,
 				BootstrapRecoveryCooldown:    defaultBootstrapRecoveryCooldown,
 			},
 		},
@@ -125,6 +145,11 @@ func TestNewPeerGovernor(t *testing.T) {
 				pg.config.MaxReconnectFailureThreshold,
 			)
 			assert.Equal(t, tt.expected.MinHotPeers, pg.config.MinHotPeers)
+			assert.Equal(
+				t,
+				tt.expected.InactivityTimeout,
+				pg.config.InactivityTimeout,
+			)
 			assert.Equal(
 				t,
 				tt.expected.BootstrapRecoveryCooldown,

@@ -16,6 +16,7 @@ package dingo
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 )
@@ -53,4 +54,36 @@ func TestWithStorageMode(t *testing.T) {
 	// Apply core mode
 	WithStorageMode(StorageModeCore)(cfg)
 	assert.Equal(t, StorageModeCore, cfg.storageMode)
+}
+
+func TestPeerGovernorOptionsIgnoreNonPositiveValues(t *testing.T) {
+	cfg := &Config{}
+
+	WithMinHotPeers(-1)(cfg)
+	WithReconcileInterval(-1 * time.Minute)(cfg)
+	WithInactivityTimeout(-5 * time.Minute)(cfg)
+	WithMaxConnectionsPerIP(-2)(cfg)
+	WithMaxInboundConns(0)(cfg)
+
+	assert.Zero(t, cfg.minHotPeers)
+	assert.Zero(t, cfg.reconcileInterval)
+	assert.Zero(t, cfg.inactivityTimeout)
+	assert.Zero(t, cfg.maxConnectionsPerIP)
+	assert.Zero(t, cfg.maxInboundConns)
+}
+
+func TestPeerGovernorOptionsApplyPositiveValues(t *testing.T) {
+	cfg := &Config{}
+
+	WithMinHotPeers(3)(cfg)
+	WithReconcileInterval(30 * time.Second)(cfg)
+	WithInactivityTimeout(2 * time.Minute)(cfg)
+	WithMaxConnectionsPerIP(4)(cfg)
+	WithMaxInboundConns(25)(cfg)
+
+	assert.Equal(t, 3, cfg.minHotPeers)
+	assert.Equal(t, 30*time.Second, cfg.reconcileInterval)
+	assert.Equal(t, 2*time.Minute, cfg.inactivityTimeout)
+	assert.Equal(t, 4, cfg.maxConnectionsPerIP)
+	assert.Equal(t, 25, cfg.maxInboundConns)
 }
