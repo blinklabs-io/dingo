@@ -456,7 +456,9 @@ func TestChainSelectorDoesNotRestoreStaleIncumbent(t *testing.T) {
 	assert.Equal(t, challengerConn, *cs.GetBestPeer())
 }
 
-func TestChainSelectorPrefersHigherPriorityPeerAtEqualTip(t *testing.T) {
+func TestChainSelectorSelectBestChainPrefersHigherPriorityPeerAtEqualTip(
+	t *testing.T,
+) {
 	publicRootConn := newTestConnectionId(1)
 	localRootConn := newTestConnectionId(2)
 	cs := NewChainSelector(ChainSelectorConfig{})
@@ -469,12 +471,15 @@ func TestChainSelectorPrefersHigherPriorityPeerAtEqualTip(t *testing.T) {
 	}
 
 	cs.UpdatePeerTip(publicRootConn, equalTip, nil)
-	require.NotNil(t, cs.GetBestPeer())
-	assert.Equal(t, publicRootConn, *cs.GetBestPeer())
-
 	cs.UpdatePeerTip(localRootConn, equalTip, nil)
-	require.NotNil(t, cs.GetBestPeer())
-	assert.Equal(t, localRootConn, *cs.GetBestPeer())
+
+	cs.mutex.Lock()
+	cs.bestPeerConn = nil
+	cs.mutex.Unlock()
+
+	bestPeer := cs.SelectBestChain()
+	require.NotNil(t, bestPeer)
+	assert.Equal(t, localRootConn, *bestPeer)
 }
 
 func TestChainSelectorPreservesEqualTipIncumbentAtSamePriority(t *testing.T) {
@@ -487,18 +492,11 @@ func TestChainSelectorPreservesEqualTipIncumbentAtSamePriority(t *testing.T) {
 		BlockNumber: 60,
 	}
 
-	// Seed the incumbent using a temporary priority advantage, then
-	// remove that advantage. Equal-priority peers at the same tip
-	// should not steal incumbency just because the selector re-evaluates.
-	setSelectorConnectionPriority(cs, connId1, 10)
-	setSelectorConnectionPriority(cs, connId2, 20)
-	cs.UpdatePeerTip(connId1, equalTip, nil)
 	cs.UpdatePeerTip(connId2, equalTip, nil)
 	require.NotNil(t, cs.GetBestPeer())
 	assert.Equal(t, connId2, *cs.GetBestPeer())
 
-	setSelectorConnectionPriority(cs, connId1, 50)
-	setSelectorConnectionPriority(cs, connId2, 50)
+	cs.UpdatePeerTip(connId1, equalTip, nil)
 
 	switched := cs.EvaluateAndSwitch()
 	assert.False(t, switched)
@@ -620,7 +618,9 @@ func TestChainSelectorSwitchesImmediatelyOnEligibilityEvent(t *testing.T) {
 	}, time.Second, 5*time.Millisecond)
 }
 
-func TestChainSelectorSwitchesImmediatelyOnPriorityEvent(t *testing.T) {
+func TestChainSelectorDoesNotSwitchEqualTipIncumbentOnPriorityEvent(
+	t *testing.T,
+) {
 	eventBus := event.NewEventBus(nil, nil)
 	defer eventBus.Stop()
 
@@ -655,10 +655,12 @@ func TestChainSelectorSwitchesImmediatelyOnPriorityEvent(t *testing.T) {
 		),
 	)
 
-	require.Eventually(t, func() bool {
+	require.Never(t, func() bool {
 		bestPeer := cs.GetBestPeer()
 		return bestPeer != nil && *bestPeer == challengerConn
-	}, time.Second, 5*time.Millisecond)
+	}, 100*time.Millisecond, 5*time.Millisecond)
+	require.NotNil(t, cs.GetBestPeer())
+	assert.Equal(t, incumbentConn, *cs.GetBestPeer())
 }
 
 func TestChainSelectorDoesNotPreserveImplausiblyBehindIncumbent(t *testing.T) {

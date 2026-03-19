@@ -708,9 +708,7 @@ func (cs *ChainSelector) EvaluateAndSwitch() bool {
 				if CompareChains(
 					newPeerTip.Tip,
 					previousPeerTip.Tip,
-				) == ChainEqual &&
-					cs.connectionPriority(*newBest) ==
-						cs.connectionPriority(*previousBest) {
+				) == ChainEqual {
 					newBest = previousBest
 				} else if
 				// Preserve the incumbent only when it still wins the same
