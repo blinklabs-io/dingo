@@ -22,11 +22,11 @@ Hi folks! Here’s what we shipped in v0.27.5.
 - **More consistent rollback scheduling:** Recovery after chain reorganizations is more reliable because rollback handling now keeps scheduling state more consistent.
 - **Sliding-window chain density:** Chain health signals are more representative because chain density calculations now use a sliding window of recent slots and blocks.
 - **Safer raw block copy resume:** Resuming raw/direct block copying is safer because resume checks are now stricter and reduce accidental skipping or duplication.
-- **Faster peer governance convergence:** Early runtime is steadier because peer governance now converges faster after startup and follows configuration defaults more consistently.
+- **Quicker peer governance convergence:** Early runtime is steadier because peer governance now converges faster after startup and follows configuration defaults more consistently.
 - **Better default peer targets:** Peer configuration works out of the box more often because Dingo now falls back to Cardano P2P peer target values when Dingo peer targets aren’t set.
 - **Richer UTxO RPC chain references:** Downstream indexing and debugging are easier because UTxO RPC responses now include a more complete reference to chain position.
 - **Clearer stake snapshot errors (SQLite):** Operational debugging is quicker because stake snapshot maintenance errors now include clearer context.
-- **Dependency refresh:** Builds are more dependable because dependencies were refreshed to keep compatibility and security posture current.
+- **Dependency refresh:** Builds are more rock-solid because dependencies were refreshed to keep compatibility and security posture current.
 - **Clearer tests and documentation:** Maintenance is simpler because tests and documentation were clarified for long-term readability.
 
 ### 🔧 Fixes
