@@ -258,11 +258,11 @@ func (ls *LedgerState) handleConnectionClosedEvent(evt event.Event) {
 	defer ls.chainsyncMutex.Unlock()
 	ls.chainsyncBlockfetchMutex.Lock()
 	defer ls.chainsyncBlockfetchMutex.Unlock()
-	if ls.selectedBlockfetchConnId == e.ConnectionId {
+	if sameConnectionId(ls.selectedBlockfetchConnId, e.ConnectionId) {
 		ls.selectedBlockfetchConnId = ouroboros.ConnectionId{}
 	}
-	delete(ls.bufferedHeaderEvents, e.ConnectionId)
-	if ls.headerPipelineConnId == e.ConnectionId {
+	delete(ls.bufferedHeaderEvents, connIdKey(e.ConnectionId))
+	if sameConnectionId(ls.headerPipelineConnId, e.ConnectionId) {
 		ls.clearQueuedHeaders()
 	}
 }
@@ -281,7 +281,8 @@ func (ls *LedgerState) detectConnectionSwitch() (
 	}
 	activeConnId = ls.config.GetActiveConnectionFunc()
 	if activeConnId != nil &&
-		(ls.lastActiveConnId == nil || *ls.lastActiveConnId != *activeConnId) {
+		(ls.lastActiveConnId == nil ||
+			!sameConnectionId(*ls.lastActiveConnId, *activeConnId)) {
 		switched = true
 		if ls.lastActiveConnId != nil {
 			ls.config.Logger.Info(
@@ -326,10 +327,11 @@ func (ls *LedgerState) detectConnectionSwitch() (
 func (ls *LedgerState) bufferHeaderEvent(e ChainsyncEvent) {
 	if ls.bufferedHeaderEvents == nil {
 		ls.bufferedHeaderEvents = make(
-			map[ouroboros.ConnectionId][]ChainsyncEvent,
+			map[string][]ChainsyncEvent,
 		)
 	}
-	events := ls.bufferedHeaderEvents[e.ConnectionId]
+	key := connIdKey(e.ConnectionId)
+	events := ls.bufferedHeaderEvents[key]
 	if len(events) > 0 {
 		last := events[len(events)-1]
 		if last.Point.Slot == e.Point.Slot &&
@@ -343,12 +345,28 @@ func (ls *LedgerState) bufferHeaderEvent(e ChainsyncEvent) {
 	} else {
 		events = append(events, e)
 	}
-	ls.bufferedHeaderEvents[e.ConnectionId] = events
+	ls.bufferedHeaderEvents[key] = events
 }
 
 func (ls *LedgerState) clearQueuedHeaders() {
 	ls.chain.ClearHeaders()
 	ls.headerPipelineConnId = ouroboros.ConnectionId{}
+}
+
+func connIdKey(connId ouroboros.ConnectionId) string {
+	if connId.LocalAddr == nil && connId.RemoteAddr == nil {
+		return ""
+	}
+	return connId.String()
+}
+
+func sameConnectionId(a, b ouroboros.ConnectionId) bool {
+	keyA := connIdKey(a)
+	keyB := connIdKey(b)
+	if keyA == "" || keyB == "" {
+		return keyA == keyB
+	}
+	return keyA == keyB
 }
 
 func (ls *LedgerState) requestChainsyncResync(
@@ -357,7 +375,7 @@ func (ls *LedgerState) requestChainsyncResync(
 ) {
 	ls.headerMismatchCount = 0
 	ls.rollbackHistory = nil
-	delete(ls.bufferedHeaderEvents, connId)
+	delete(ls.bufferedHeaderEvents, connIdKey(connId))
 	if ls.config.EventBus == nil {
 		return
 	}
@@ -378,7 +396,8 @@ func (ls *LedgerState) shouldBufferHeaderEvent(e ChainsyncEvent) bool {
 		ls.headerPipelineConnId = e.ConnectionId
 		return false
 	}
-	if ls.headerPipelineConnId == e.ConnectionId {
+	if sameConnectionId(ls.headerPipelineConnId, e.ConnectionId) {
+		ls.headerPipelineConnId = e.ConnectionId
 		return false
 	}
 	ls.bufferHeaderEvent(e)
@@ -396,22 +415,23 @@ func (ls *LedgerState) nextBufferedHeaderConnId() (
 	ouroboros.ConnectionId,
 	bool,
 ) {
-	if ls.selectedBlockfetchConnId != (ouroboros.ConnectionId{}) &&
-		len(ls.bufferedHeaderEvents[ls.selectedBlockfetchConnId]) > 0 {
-		return ls.selectedBlockfetchConnId, true
+	if key := connIdKey(ls.selectedBlockfetchConnId); key != "" {
+		if events := ls.bufferedHeaderEvents[key]; len(events) > 0 {
+			return events[len(events)-1].ConnectionId, true
+		}
 	}
 	var (
 		bestConn ouroboros.ConnectionId
 		bestTip  uint64
 		found    bool
 	)
-	for connId, events := range ls.bufferedHeaderEvents {
+	for _, events := range ls.bufferedHeaderEvents {
 		if len(events) == 0 {
 			continue
 		}
 		tipSlot := events[len(events)-1].Tip.Point.Slot
 		if !found || tipSlot > bestTip {
-			bestConn = connId
+			bestConn = events[len(events)-1].ConnectionId
 			bestTip = tipSlot
 			found = true
 		}
@@ -443,14 +463,15 @@ func (ls *LedgerState) replayBufferedHeadersAsync(
 func (ls *LedgerState) replayBufferedHeaderEvents(
 	connId ouroboros.ConnectionId,
 ) error {
-	if len(ls.bufferedHeaderEvents[connId]) == 0 {
+	key := connIdKey(connId)
+	if len(ls.bufferedHeaderEvents[key]) == 0 {
 		return nil
 	}
 	events := append(
 		[]ChainsyncEvent(nil),
-		ls.bufferedHeaderEvents[connId]...,
+		ls.bufferedHeaderEvents[key]...,
 	)
-	delete(ls.bufferedHeaderEvents, connId)
+	delete(ls.bufferedHeaderEvents, key)
 	for _, evt := range events {
 		if err := ls.handleEventChainsyncBlockHeader(evt); err != nil {
 			return err
@@ -481,7 +502,7 @@ func (ls *LedgerState) handleEventChainsyncRollback(e ChainsyncEvent) error {
 				"connection_id", e.ConnectionId.String(),
 				"slot", e.Point.Slot,
 			)
-		} else if *activeConnId != e.ConnectionId {
+		} else if !sameConnectionId(*activeConnId, e.ConnectionId) {
 			// Event is from non-active connection, skip
 			// Rate-limit this message to once per dropEventLogInterval
 			now := time.Now()
@@ -1011,7 +1032,7 @@ func (ls *LedgerState) handleEventBlockfetchBlock(e BlockfetchEvent) error {
 	// every single block. We still flush well before BatchDone to
 	// avoid downstream ChainSync idle timeouts.
 	if ls.chainsyncBlockfetchReadyChan == nil ||
-		e.ConnectionId != ls.activeBlockfetchConnId {
+		!sameConnectionId(e.ConnectionId, ls.activeBlockfetchConnId) {
 		return nil
 	}
 
@@ -1046,10 +1067,10 @@ func (ls *LedgerState) handleEventBlockfetchBlock(e BlockfetchEvent) error {
 }
 
 func (ls *LedgerState) nextBlockfetchConnId() (ouroboros.ConnectionId, bool) {
-	if ls.selectedBlockfetchConnId != (ouroboros.ConnectionId{}) {
+	if connIdKey(ls.selectedBlockfetchConnId) != "" {
 		return ls.selectedBlockfetchConnId, true
 	}
-	if ls.activeBlockfetchConnId == (ouroboros.ConnectionId{}) {
+	if connIdKey(ls.activeBlockfetchConnId) == "" {
 		return ouroboros.ConnectionId{}, false
 	}
 	return ls.activeBlockfetchConnId, true
@@ -1058,12 +1079,12 @@ func (ls *LedgerState) nextBlockfetchConnId() (ouroboros.ConnectionId, bool) {
 func (ls *LedgerState) nextBlockfetchConnIdExcept(
 	excludedConnId ouroboros.ConnectionId,
 ) (ouroboros.ConnectionId, bool) {
-	if ls.selectedBlockfetchConnId != (ouroboros.ConnectionId{}) &&
-		ls.selectedBlockfetchConnId != excludedConnId {
+	if connIdKey(ls.selectedBlockfetchConnId) != "" &&
+		!sameConnectionId(ls.selectedBlockfetchConnId, excludedConnId) {
 		return ls.selectedBlockfetchConnId, true
 	}
-	if ls.activeBlockfetchConnId == (ouroboros.ConnectionId{}) ||
-		ls.activeBlockfetchConnId == excludedConnId {
+	if connIdKey(ls.activeBlockfetchConnId) == "" ||
+		sameConnectionId(ls.activeBlockfetchConnId, excludedConnId) {
 		return ouroboros.ConnectionId{}, false
 	}
 	return ls.activeBlockfetchConnId, true
@@ -2218,7 +2239,7 @@ func (ls *LedgerState) handleBlockfetchTimeoutLocked(
 func (ls *LedgerState) handleEventBlockfetchBatchDone(e BlockfetchEvent) error {
 	// Drop batch-done from a stale connection (e.g., after connection switch)
 	if ls.chainsyncBlockfetchReadyChan == nil ||
-		e.ConnectionId != ls.activeBlockfetchConnId {
+		!sameConnectionId(e.ConnectionId, ls.activeBlockfetchConnId) {
 		return nil
 	}
 	// Stop the blockfetch timeout timer and invalidate any pending callbacks
@@ -2249,8 +2270,8 @@ func (ls *LedgerState) handleEventBlockfetchBatchDone(e BlockfetchEvent) error {
 		upstreamTipSlot-ls.Tip().Point.Slot >= blockfetchMinBatchGapSlots {
 		retryConnId := ls.selectRetryBlockfetchConn(e.ConnectionId)
 		ls.blockfetchRequestRangeCleanup()
-		if retryConnId != (ouroboros.ConnectionId{}) &&
-			retryConnId != e.ConnectionId {
+		if connIdKey(retryConnId) != "" &&
+			!sameConnectionId(retryConnId, e.ConnectionId) {
 			ls.config.Logger.Warn(
 				"blockfetch batch returned no blocks, retrying queued range on alternate connection",
 				"component", "ledger",

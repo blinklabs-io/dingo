@@ -147,8 +147,8 @@ func TestHandleEventChainsyncBlockHeaderMissingAncestorRequestsResync(
 		blockNumber: fixture.currentTip.BlockNumber + 1,
 		slot:        fixture.currentTip.Point.Slot + 10,
 	}
-	fixture.ls.bufferedHeaderEvents = map[ouroboros.ConnectionId][]ChainsyncEvent{
-		fixture.connId: {{
+	fixture.ls.bufferedHeaderEvents = map[string][]ChainsyncEvent{
+		connIdKey(fixture.connId): {{
 			ConnectionId: fixture.connId,
 			Point: ocommon.NewPoint(
 				header.SlotNumber(),
@@ -191,7 +191,7 @@ func TestHandleEventChainsyncBlockHeaderMissingAncestorRequestsResync(
 	}
 
 	assert.Zero(t, fixture.ls.headerMismatchCount)
-	_, ok := fixture.ls.bufferedHeaderEvents[fixture.connId]
+	_, ok := fixture.ls.bufferedHeaderEvents[connIdKey(fixture.connId)]
 	assert.False(t, ok)
 }
 
