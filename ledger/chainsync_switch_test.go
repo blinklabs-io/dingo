@@ -652,6 +652,65 @@ func TestHandleEventBlockfetchBatchDoneReplaysBufferedHeadersAfterDrain(
 	assert.Equal(t, 1, ls.chain.HeaderCount())
 }
 
+func TestHandleEventChainsyncBlockHeaderKeepsActiveBatchOwner(t *testing.T) {
+	connId1 := ouroboros.ConnectionId{
+		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 6000},
+		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3001},
+	}
+	connId2 := ouroboros.ConnectionId{
+		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 6000},
+		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3002},
+	}
+	ls := &LedgerState{
+		chain:                        &chain.Chain{},
+		activeBlockfetchConnId:       connId1,
+		selectedBlockfetchConnId:     connId2,
+		chainsyncBlockfetchReadyChan: make(chan struct{}),
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+
+	header1Hash := lcommon.NewBlake2b256([]byte("hdr-1"))
+	err := ls.handleEventChainsyncBlockHeader(ChainsyncEvent{
+		ConnectionId: connId2,
+		BlockHeader: mockHeader{
+			hash:        header1Hash,
+			prevHash:    lcommon.NewBlake2b256(nil),
+			blockNumber: 1,
+			slot:        1,
+		},
+		Point: ocommon.NewPoint(1, header1Hash.Bytes()),
+		Tip: ochainsync.Tip{
+			Point:       ocommon.NewPoint(60001, []byte("tip-1")),
+			BlockNumber: 60001,
+		},
+	})
+	require.NoError(t, err)
+	assert.True(t, sameConnectionId(ls.headerPipelineConnId, connId1))
+	assert.Equal(t, 0, ls.chain.HeaderCount())
+	require.Len(t, ls.bufferedHeaderEvents[connIdKey(connId2)], 1)
+
+	header2Hash := lcommon.NewBlake2b256([]byte("hdr-2"))
+	err = ls.handleEventChainsyncBlockHeader(ChainsyncEvent{
+		ConnectionId: connId1,
+		BlockHeader: mockHeader{
+			hash:        header2Hash,
+			prevHash:    lcommon.NewBlake2b256(nil),
+			blockNumber: 2,
+			slot:        2,
+		},
+		Point: ocommon.NewPoint(2, header2Hash.Bytes()),
+		Tip: ochainsync.Tip{
+			Point:       ocommon.NewPoint(60002, []byte("tip-2")),
+			BlockNumber: 60002,
+		},
+	})
+	require.NoError(t, err)
+	assert.True(t, sameConnectionId(ls.headerPipelineConnId, connId1))
+	assert.Equal(t, 1, ls.chain.HeaderCount())
+}
+
 func TestHandleEventBlockfetchBatchDoneEmptyBatchRetriesAlternateConnection(
 	t *testing.T,
 ) {

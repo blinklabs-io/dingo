@@ -407,21 +407,41 @@ func (ls *LedgerState) requestChainsyncResync(
 	)
 }
 
+func (ls *LedgerState) currentHeaderPipelineOwner() ouroboros.ConnectionId {
+	if ls.headerPipelineConnId != (ouroboros.ConnectionId{}) {
+		return ls.headerPipelineConnId
+	}
+	ls.chainsyncBlockfetchMutex.Lock()
+	defer ls.chainsyncBlockfetchMutex.Unlock()
+	if ls.chainsyncBlockfetchReadyChan == nil {
+		return ouroboros.ConnectionId{}
+	}
+	if connIdKey(ls.activeBlockfetchConnId) != "" {
+		return ls.activeBlockfetchConnId
+	}
+	if connIdKey(ls.selectedBlockfetchConnId) != "" {
+		return ls.selectedBlockfetchConnId
+	}
+	return ouroboros.ConnectionId{}
+}
+
 func (ls *LedgerState) shouldBufferHeaderEvent(e ChainsyncEvent) bool {
-	if ls.headerPipelineConnId == (ouroboros.ConnectionId{}) {
+	ownerConnId := ls.currentHeaderPipelineOwner()
+	if ownerConnId == (ouroboros.ConnectionId{}) {
 		ls.headerPipelineConnId = e.ConnectionId
 		return false
 	}
-	if sameConnectionId(ls.headerPipelineConnId, e.ConnectionId) {
+	if sameConnectionId(ownerConnId, e.ConnectionId) {
 		ls.headerPipelineConnId = e.ConnectionId
 		return false
 	}
+	ls.headerPipelineConnId = ownerConnId
 	ls.bufferHeaderEvent(e)
 	ls.config.Logger.Debug(
 		"buffering header from non-owner connection",
 		"component", "ledger",
 		"event_connection_id", e.ConnectionId.String(),
-		"owner_connection_id", ls.headerPipelineConnId.String(),
+		"owner_connection_id", ownerConnId.String(),
 		"slot", e.Point.Slot,
 	)
 	return true
