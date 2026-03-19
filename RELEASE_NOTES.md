@@ -14,27 +14,27 @@ Hi folks! Here’s what we shipped in v0.27.5.
 ```json
 {
   "✨ What's New": [
-    "You can now query UTXOs with a stable ordering and efficiently look them up by address, which makes wallet and explorer-style queries more predictable and faster at scale. This adds a new UTXO-with-ordering data model plus an address-based query path that batch-loads assets consistently across all metadata backends.",
-    "You can now run observability-only chainsync clients that are counted in metrics without affecting normal client operation. This introduces a new chainsync client class that is excluded from the eligible client pool, active selection, and client-limit enforcement while still being tracked for instrumentation.",
-    "Ledger startup can now realign chain state automatically without noisy side effects, reducing manual intervention after interruptions. This adds a silent primary-chain rewind API and performs a primary-chain tip reconciliation to the ledger tip during ledger initialization."
+    "You can now query UTXOs with a stable ordering and efficiently look them up by address, which makes wallet and explorer-style queries more predictable and faster at scale.",
+    "You can now run observability-only chainsync clients that are counted in metrics without affecting normal client operation.",
+    "Ledger startup can now realign chain state automatically without noisy side effects, reducing manual intervention after interruptions."
   ],
   "💪 Improvements": [
-    "Node rollbacks now keep the node’s scheduling state more consistent, which helps the system recover more reliably after chain reorgs. Rollback handling now drains to the latest event and prunes only unstable future leader schedules while preserving the current and ready next-epoch schedules, with improved logging, mock epoch nonce handling, and targeted rollback tests.",
-    "Chain density calculations are now more representative of recent network conditions, which improves decision-making based on current chain health. The chain density metric now uses a sliding window of recent slots/blocks, with new tests covering window behavior and rollback interactions.",
-    "Import and resume behavior during raw/direct block copying is now stricter, which reduces the chance of skipping or duplicating data when resuming work. The resume-skip logic now matches both slot and hash, and tests ensure Byron EBB origin linkage is preserved during raw import.",
-    "Peer governance now converges faster after startup and behaves more consistently with configuration defaults, improving stability in early runtime. PeerGovernor now triggers an initial reconcile via a timed goroutine and normalizes configuration values with tests for non-positive/positive inputs and default fallbacks.",
-    "Dingo peer configuration now works out-of-the-box more often, reducing the need for manual tuning. When Dingo peer targets are not set, it now falls back to the P2P peer target values from cardano-node’s config.json.",
-    "UTXO RPC responses now include a more complete reference to chain position, which improves downstream indexing and debugging. The utxorpc BlockRef/ChainPoint height is now populated from the database block model and falls back to height=0 when lookup fails.",
-    "Error reporting for stake snapshot maintenance is now clearer, which makes operational debugging quicker. SQLite pool stake snapshot create/delete operations now wrap errors with additional context for easier diagnosis.",
-    "Dependencies were refreshed to keep compatibility and security posture current, reducing the risk of build or runtime issues. This updates gouroboros to 0.161.1 and updates the gRPC Go module (including indirect dependency adjustments and go.sum/checksum refreshes).",
-    "Tests and documentation are now clearer, which makes changes easier to maintain over time. This adds an explanatory comment for the Conway transaction size fixture and includes a release-notes entry for v0.27.4 in RELEASE_NOTES.md."
+    "Node rollbacks now keep the node’s scheduling state more consistent, which helps the system recover more reliably after chain reorgs.",
+    "Chain density calculations are now more representative of recent network conditions, which improves decision-making based on current chain health.",
+    "Import and resume behavior during raw/direct block copying is now stricter, which reduces the chance of skipping or duplicating data when resuming work.",
+    "Peer governance now converges faster after startup and behaves more consistently with configuration defaults, improving stability in early runtime.",
+    "Dingo peer configuration now works out-of-the-box more often, reducing the need for manual tuning.",
+    "UTXO RPC responses now include a more complete reference to chain position, which improves downstream indexing and debugging.",
+    "Error reporting for stake snapshot maintenance is now clearer, which makes operational debugging quicker.",
+    "Dependencies were refreshed to keep compatibility and security posture current, reducing the risk of build or runtime issues.",
+    "Tests and documentation are now clearer, which makes changes easier to maintain over time."
   ],
   "📋 What You Need to Know": [
-    "If you rely on chainsync client counts for capacity planning, you may see metrics change because observability-only clients are now tracked separately from eligible clients. No configuration change is required unless you want to explicitly deploy observability-only clients, in which case ensure they are registered with the new observability-only classification so they don’t affect selection or client limits."
+    "If you rely on chainsync client counts for capacity planning, you may see metrics change because observability-only clients are now tracked separately from eligible clients."
   ],
   "🔧 Fixes": [
-    "Ledger block processing is now more resilient, so transient issues are less likely to take the node down. Block processing now restarts on non-fatal errors instead of exiting the process.",
-    "Blockfetch now cleans up state when flushing fails, reducing the chance of getting stuck after an error. The blockfetch pipeline now performs state cleanup when flushing pending blocks fails."
+    "Ledger block processing is now more resilient, so transient issues are less likely to take the node down.",
+    "Blockfetch now cleans up state when flushing fails, reducing the chance of getting stuck after an error."
   ]
 }
 
