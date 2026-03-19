@@ -28,6 +28,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/models"
 )
 
 func decodeHex(hexData string) []byte {
@@ -1003,6 +1004,66 @@ func TestChainRollbackWithinSecurityParam(t *testing.T) {
 			rollbackPoint.Slot,
 			rollbackPoint.Hash,
 		)
+	}
+}
+
+func TestRewindPrimaryChainToPointPrunesPersistentTail(t *testing.T) {
+	db := newTestDB(t)
+	cm, err := chain.NewManager(db, nil)
+	if err != nil {
+		t.Fatalf(
+			"unexpected error creating chain manager: %s",
+			err,
+		)
+	}
+	c := cm.PrimaryChain()
+	for _, testBlock := range testBlocks {
+		if err := c.AddBlock(testBlock, nil); err != nil {
+			t.Fatalf(
+				"unexpected error adding block to chain: %s",
+				err,
+			)
+		}
+	}
+	rewindBlock := testBlocks[2]
+	rewindPoint := ocommon.Point{
+		Slot: rewindBlock.SlotNumber(),
+		Hash: rewindBlock.Hash().Bytes(),
+	}
+	if err := cm.RewindPrimaryChainToPoint(rewindPoint); err != nil {
+		t.Fatalf(
+			"unexpected error rewinding primary chain: %s",
+			err,
+		)
+	}
+	tip := c.Tip()
+	if tip.Point.Slot != rewindPoint.Slot ||
+		string(tip.Point.Hash) != string(rewindPoint.Hash) {
+		t.Fatalf(
+			"chain tip should match rewind point: got %d.%x, wanted %d.%x",
+			tip.Point.Slot,
+			tip.Point.Hash,
+			rewindPoint.Slot,
+			rewindPoint.Hash,
+		)
+	}
+	for idx := uint64(1); idx <= 3; idx++ {
+		if _, err := db.BlockByIndex(idx, nil); err != nil {
+			t.Fatalf(
+				"expected block index %d to remain after rewind: %s",
+				idx,
+				err,
+			)
+		}
+	}
+	for idx := uint64(4); idx <= 6; idx++ {
+		if _, err := db.BlockByIndex(idx, nil); !errors.Is(err, models.ErrBlockNotFound) {
+			t.Fatalf(
+				"expected block index %d to be pruned after rewind, got: %v",
+				idx,
+				err,
+			)
+		}
 	}
 }
 
