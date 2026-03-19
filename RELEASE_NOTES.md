@@ -3,7 +3,7 @@
 
 ## v0.27.5 (March 19, 2026)
 
-**Title:** Update highlights for v0.27.5
+**Title:** Faster UTxO lookups and steadier sync
 
 **Date:** March 19, 2026
 
@@ -11,34 +11,36 @@
 
 Hi folks! Here’s what we shipped in v0.27.5.
 
-```json
-{
-  "✨ What's New": [
-    "You can now query UTXOs with a stable ordering and efficiently look them up by address, which makes wallet and explorer-style queries more predictable and faster at scale.",
-    "You can now run observability-only chainsync clients that are counted in metrics without affecting normal client operation.",
-    "Ledger startup can now realign chain state automatically without noisy side effects, reducing manual intervention after interruptions."
-  ],
-  "💪 Improvements": [
-    "Node rollbacks now keep the node’s scheduling state more consistent, which helps the system recover more reliably after chain reorgs.",
-    "Chain density calculations are now more representative of recent network conditions, which improves decision-making based on current chain health.",
-    "Import and resume behavior during raw/direct block copying is now stricter, which reduces the chance of skipping or duplicating data when resuming work.",
-    "Peer governance now converges faster after startup and behaves more consistently with configuration defaults, improving stability in early runtime.",
-    "Dingo peer configuration now works out-of-the-box more often, reducing the need for manual tuning.",
-    "UTXO RPC responses now include a more complete reference to chain position, which improves downstream indexing and debugging.",
-    "Error reporting for stake snapshot maintenance is now clearer, which makes operational debugging quicker.",
-    "Dependencies were refreshed to keep compatibility and security posture current, reducing the risk of build or runtime issues.",
-    "Tests and documentation are now clearer, which makes changes easier to maintain over time."
-  ],
-  "📋 What You Need to Know": [
-    "If you rely on chainsync client counts for capacity planning, you may see metrics change because observability-only clients are now tracked separately from eligible clients."
-  ],
-  "🔧 Fixes": [
-    "Ledger block processing is now more resilient, so transient issues are less likely to take the node down.",
-    "Blockfetch now cleans up state when flushing fails, reducing the chance of getting stuck after an error."
-  ]
-}
+### ✨ What's New
 
-```
+- **Stable UTxO ordering and address queries:** Wallet and explorer-style queries are more predictable because you can now query UTxOs with a stable ordering and look them up efficiently by address.
+- **Observability-only chain-sync clients:** Metrics are clearer because you can now run observability-only chain-sync clients that are counted in metrics without affecting normal client operation.
+- **Automatic chain realignment on startup:** Recoveries after interruptions are easier because ledger startup can now realign chain state automatically without noisy side effects.
+
+### 💪 Improvements
+
+- **More consistent rollback scheduling:** Recovery after chain reorganizations is more reliable because rollback handling now keeps scheduling state more consistent.
+- **Sliding-window chain density:** Chain health signals are more representative because chain density calculations now use a sliding window of recent slots and blocks.
+- **Safer raw block copy resume:** Resuming raw/direct block copying is safer because resume checks are now stricter and reduce accidental skipping or duplication.
+- **Faster peer governance convergence:** Early runtime is steadier because peer governance now converges faster after startup and follows configuration defaults more consistently.
+- **Better default peer targets:** Peer configuration works out of the box more often because Dingo now falls back to Cardano P2P peer target values when Dingo peer targets aren’t set.
+- **Richer UTxO RPC chain references:** Downstream indexing and debugging are easier because UTxO RPC responses now include a more complete reference to chain position.
+- **Clearer stake snapshot errors (SQLite):** Operational debugging is quicker because stake snapshot maintenance errors now include clearer context.
+- **Dependency refresh:** Builds are more dependable because dependencies were refreshed to keep compatibility and security posture current.
+- **Clearer tests and documentation:** Maintenance is simpler because tests and documentation were clarified for long-term readability.
+
+### 🔧 Fixes
+
+- **Resilient ledger block processing:** The node is less likely to go down on transient ledger errors because block processing now restarts on non-fatal errors instead of exiting.
+- **Safer block fetch flushing:** Block downloads recover more cleanly after flush failures because block fetch now cleans up state when flushing pending blocks fails.
+
+### 📋 What You Need to Know
+
+- **Client-count metrics may shift:** Capacity planning may look different because observability-only chain-sync clients are now tracked separately from eligible clients.
+
+### 🙏 Thank You
+
+Thank you for trying!
 
 ---
 
