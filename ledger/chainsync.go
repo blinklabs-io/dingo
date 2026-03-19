@@ -790,7 +790,7 @@ func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 	if err := ls.chain.AddBlockHeader(e.BlockHeader); err != nil {
 		var notFitErr chain.BlockNotFitChainTipError
 		if errors.As(err, &notFitErr) {
-			localTip := ls.Tip()
+			localTip := ls.chain.Tip()
 			if e.Point.Slot <= localTip.Point.Slot {
 				ls.config.Logger.Debug(
 					"ignoring stale roll forward behind local tip",

@@ -711,6 +711,42 @@ func TestHandleEventChainsyncBlockHeaderKeepsActiveBatchOwner(t *testing.T) {
 	assert.Equal(t, 1, ls.chain.HeaderCount())
 }
 
+func TestHandleEventChainsyncBlockHeaderIgnoresStaleHeaderBehindChainTip(
+	t *testing.T,
+) {
+	fixture := newChainsyncRollbackFixture(t)
+	fixture.ls.currentTip = fixture.ancestorTip
+	staleHash := lcommon.NewBlake2b256([]byte("stale-header"))
+	err := fixture.ls.handleEventChainsyncBlockHeader(ChainsyncEvent{
+		ConnectionId: fixture.connId,
+		BlockHeader: mockHeader{
+			hash:        staleHash,
+			prevHash:    lcommon.NewBlake2b256(nil),
+			blockNumber: 2,
+			slot:        fixture.ancestorTip.Point.Slot + 5,
+		},
+		Point: ocommon.NewPoint(
+			fixture.ancestorTip.Point.Slot+5,
+			staleHash.Bytes(),
+		),
+		Tip: ochainsync.Tip{
+			Point: ocommon.NewPoint(
+				fixture.currentTip.Point.Slot+10,
+				[]byte("tip-30"),
+			),
+			BlockNumber: fixture.currentTip.BlockNumber + 1,
+		},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 0, fixture.ls.headerMismatchCount)
+	assert.Equal(t, 0, fixture.ls.chain.HeaderCount())
+	assert.Equal(
+		t,
+		fixture.currentTip.Point.Slot,
+		fixture.ls.chain.Tip().Point.Slot,
+	)
+}
+
 func TestHandleEventBlockfetchBatchDoneEmptyBatchRetriesAlternateConnection(
 	t *testing.T,
 ) {
