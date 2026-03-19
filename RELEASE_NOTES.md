@@ -43,7 +43,6 @@ Thank you for trying!
 
 ---
 
-
 ## v0.27.4 (March 18, 2026)
 
 **Title:** Reliability and usability refinements
