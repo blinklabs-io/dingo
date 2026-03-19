@@ -51,6 +51,7 @@ const (
 	// near a fork boundary where peers may not yet serve the first announced
 	// block body.
 	blockfetchMinBatchHeadersWhenBehind = 8
+	blockfetchMaxBatchHeadersWhenBehind = 64
 	blockfetchMinBatchGapSlots          = 64
 
 	// Number of received blockfetch blocks to buffer before committing them.
@@ -367,6 +368,21 @@ func sameConnectionId(a, b ouroboros.ConnectionId) bool {
 		return keyA == keyB
 	}
 	return keyA == keyB
+}
+
+func desiredBlockfetchBatchHeaders(gapSlots uint64, maxHeaders int) int {
+	if maxHeaders <= 0 {
+		return 0
+	}
+	minHeaders := blockfetchMinBatchHeadersWhenBehind
+	if gapSlots > 0 {
+		scaledHeaders := int(gapSlots / blockfetchMinBatchGapSlots)
+		if scaledHeaders > minHeaders {
+			minHeaders = scaledHeaders
+		}
+	}
+	minHeaders = min(minHeaders, blockfetchMaxBatchHeadersWhenBehind)
+	return min(minHeaders, maxHeaders)
 }
 
 func (ls *LedgerState) requestChainsyncResync(
@@ -820,8 +836,8 @@ func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 	localTipSlot := ls.Tip().Point.Slot
 	if e.Tip.Point.Slot > localTipSlot &&
 		e.Tip.Point.Slot-localTipSlot >= blockfetchMinBatchGapSlots {
-		minBatchHeaders := min(
-			blockfetchMinBatchHeadersWhenBehind,
+		minBatchHeaders := desiredBlockfetchBatchHeaders(
+			e.Tip.Point.Slot-localTipSlot,
 			allowedHeaderCount,
 		)
 		if headersReady < minBatchHeaders {

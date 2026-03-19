@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -481,6 +482,59 @@ func TestHandleEventChainsyncBlockHeaderBuffersMinimumBatchWhenBehind(
 	assert.Equal(t, 1, ls.chain.HeaderCount())
 	assert.Equal(t, 0, requestCount)
 	assert.Equal(t, connId, ls.headerPipelineConnId)
+}
+
+func TestHandleEventChainsyncBlockHeaderScalesBatchWhenFarBehind(t *testing.T) {
+	connId := ouroboros.ConnectionId{
+		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 6000},
+		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3001},
+	}
+	requestCount := 0
+
+	ls := &LedgerState{
+		chain: &chain.Chain{},
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+			BlockfetchRequestRangeFunc: func(
+				connId ouroboros.ConnectionId,
+				start ocommon.Point,
+				end ocommon.Point,
+			) error {
+				_ = connId
+				_ = start
+				_ = end
+				requestCount++
+				return nil
+			},
+		},
+	}
+
+	prevHash := lcommon.NewBlake2b256(nil)
+	for i := 1; i <= 20; i++ {
+		headerHash := lcommon.NewBlake2b256([]byte(fmt.Sprintf("hdr-%d", i)))
+		err := ls.handleEventChainsyncBlockHeader(ChainsyncEvent{
+			ConnectionId: connId,
+			Point:        ocommon.NewPoint(uint64(i), headerHash.Bytes()),
+			BlockHeader: mockHeader{
+				hash:        headerHash,
+				prevHash:    prevHash,
+				blockNumber: uint64(i),
+				slot:        uint64(i),
+			},
+			Tip: ochainsync.Tip{
+				Point:       ocommon.NewPoint(1280, []byte("tip-1280")),
+				BlockNumber: 1280,
+			},
+		})
+		require.NoError(t, err)
+		prevHash = headerHash
+		if i == 8 {
+			assert.Equal(t, 0, requestCount)
+		}
+	}
+
+	assert.Equal(t, 1, requestCount)
+	assert.Equal(t, 20, ls.chain.HeaderCount())
 }
 
 func TestHandleEventChainsyncBlockHeaderAcceptsEquivalentOwnerConnectionId(
