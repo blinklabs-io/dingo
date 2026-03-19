@@ -46,6 +46,13 @@ const (
 	// This prevents us exceeding the configured recv queue size in the block-fetch protocol
 	blockfetchBatchSize = 500
 
+	// When we're still meaningfully behind tip, wait for a small header runway
+	// before starting blockfetch. This avoids repeated one-block fetch loops
+	// near a fork boundary where peers may not yet serve the first announced
+	// block body.
+	blockfetchMinBatchHeadersWhenBehind = 8
+	blockfetchMinBatchGapSlots          = 64
+
 	// Number of received blockfetch blocks to buffer before committing them.
 	// Keep this small so downstream iterators still see fresh blocks promptly.
 	blockfetchCommitBatchSize = 8
@@ -775,17 +782,38 @@ func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 	// Wait for additional block headers before fetching block bodies if we're
 	// far enough out from upstream tip
 	// Use security window as slot threshold if available
+	headersReady := headerCount + 1
+	localTipSlot := ls.Tip().Point.Slot
+	if e.Tip.Point.Slot > localTipSlot &&
+		e.Tip.Point.Slot-localTipSlot >= blockfetchMinBatchGapSlots {
+		minBatchHeaders := min(
+			blockfetchMinBatchHeadersWhenBehind,
+			allowedHeaderCount,
+		)
+		if headersReady < minBatchHeaders {
+			ls.config.Logger.Debug(
+				"accumulating minimum header batch before blockfetch",
+				"component", "ledger",
+				"slot", e.Point.Slot,
+				"tip_slot", e.Tip.Point.Slot,
+				"local_tip_slot", localTipSlot,
+				"header_count", headersReady,
+				"minimum_header_count", minBatchHeaders,
+			)
+			return nil
+		}
+	}
 	slotThreshold := ls.calculateStabilityWindow()
 	if e.Point.Slot < e.Tip.Point.Slot &&
 		(e.Tip.Point.Slot-e.Point.Slot > slotThreshold) &&
-		(headerCount+1) < allowedHeaderCount {
+		headersReady < allowedHeaderCount {
 		ls.config.Logger.Debug(
 			"accumulating headers (far from tip)",
 			"component", "ledger",
 			"slot", e.Point.Slot,
 			"tip_slot", e.Tip.Point.Slot,
 			"threshold", slotThreshold,
-			"header_count", headerCount+1,
+			"header_count", headersReady,
 		)
 		return nil
 	}
@@ -2186,6 +2214,7 @@ func (ls *LedgerState) handleEventBlockfetchBatchDone(e BlockfetchEvent) error {
 		ls.chainsyncBlockfetchTimeoutTimer = nil
 	}
 	ls.chainsyncBlockfetchTimerGeneration++
+	receivedBlockCount := len(ls.pendingBlockfetchEvents)
 	if err := ls.flushPendingBlockfetchBlocks(); err != nil {
 		ls.blockfetchRequestRangeCleanup()
 		ls.activeBlockfetchConnId = ouroboros.ConnectionId{}
@@ -2199,6 +2228,50 @@ func (ls *LedgerState) handleEventBlockfetchBatchDone(e BlockfetchEvent) error {
 			"component", "ledger",
 			"remaining_headers", remainingHeaders,
 		)
+	}
+	upstreamTipSlot := ls.UpstreamTipSlot()
+	if receivedBlockCount == 0 &&
+		remainingHeaders > 0 &&
+		upstreamTipSlot > ls.Tip().Point.Slot &&
+		upstreamTipSlot-ls.Tip().Point.Slot >= blockfetchMinBatchGapSlots {
+		retryConnId := ls.selectRetryBlockfetchConn(e.ConnectionId)
+		ls.blockfetchRequestRangeCleanup()
+		if retryConnId != (ouroboros.ConnectionId{}) &&
+			retryConnId != e.ConnectionId {
+			ls.config.Logger.Warn(
+				"blockfetch batch returned no blocks, retrying queued range on alternate connection",
+				"component", "ledger",
+				"previous_connection_id", e.ConnectionId.String(),
+				"retry_connection_id", retryConnId.String(),
+				"remaining_headers", remainingHeaders,
+			)
+			if err := ls.startQueuedBlockfetchLocked(retryConnId); err != nil {
+				ls.activeBlockfetchConnId = ouroboros.ConnectionId{}
+				ls.clearQueuedHeaders()
+				ls.requestChainsyncResync(
+					e.ConnectionId,
+					fmt.Sprintf(
+						"empty blockfetch batch alternate retry failed: %v",
+						err,
+					),
+				)
+				return nil
+			}
+			return nil
+		}
+		ls.activeBlockfetchConnId = ouroboros.ConnectionId{}
+		ls.clearQueuedHeaders()
+		ls.config.Logger.Warn(
+			"blockfetch batch returned no blocks, requesting chainsync re-sync",
+			"component", "ledger",
+			"connection_id", e.ConnectionId.String(),
+			"remaining_headers", remainingHeaders,
+		)
+		ls.requestChainsyncResync(
+			e.ConnectionId,
+			"empty blockfetch batch",
+		)
+		return nil
 	}
 	if remainingHeaders == 0 {
 		// No more headers to fetch, allow chainsync to collect more
