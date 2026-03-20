@@ -207,6 +207,116 @@ func TestTryRecoverFromTxValidationErrorRollsBackToEarliestProducerParent(
 	assert.Equal(t, parentTip, dbTip)
 }
 
+func TestTryRecoverFromTxValidationErrorFallsBackToTxBlobOffsets(
+	t *testing.T,
+) {
+	db, err := database.New(&database.Config{
+		BlobPlugin:     "badger",
+		MetadataPlugin: "sqlite",
+		DataDir:        t.TempDir(),
+	})
+	require.NoError(t, err)
+	defer db.Close()
+
+	cm, err := chain.NewManager(db, nil)
+	require.NoError(t, err)
+
+	parentBlock := testRawBlock("blob-parent", 200, 1, nil)
+	producerBlock := testRawBlock("blob-producer", 220, 2, parentBlock.Hash)
+	currentBlock := testRawBlock("blob-current", 260, 3, producerBlock.Hash)
+	require.NoError(
+		t,
+		cm.PrimaryChain().AddRawBlocks(
+			[]chain.RawBlock{
+				parentBlock,
+				producerBlock,
+				currentBlock,
+			},
+		),
+	)
+
+	ls, err := NewLedgerState(LedgerStateConfig{
+		Database:          db,
+		ChainManager:      cm,
+		CardanoNodeConfig: newTestShelleyGenesisCfg(t),
+		Logger: slog.New(
+			slog.NewJSONHandler(io.Discard, nil),
+		),
+	})
+	require.NoError(t, err)
+	ls.metrics.init(prometheus.NewRegistry())
+
+	parentTip := ochainsync.Tip{
+		Point:       ocommon.NewPoint(parentBlock.Slot, parentBlock.Hash),
+		BlockNumber: parentBlock.BlockNumber,
+	}
+	currentTip := ochainsync.Tip{
+		Point:       ocommon.NewPoint(currentBlock.Slot, currentBlock.Hash),
+		BlockNumber: currentBlock.BlockNumber,
+	}
+	require.NoError(
+		t,
+		db.SetBlockNonce(
+			parentTip.Point.Hash,
+			parentTip.Point.Slot,
+			[]byte("nonce-parent"),
+			true,
+			nil,
+		),
+	)
+	require.NoError(
+		t,
+		db.SetBlockNonce(
+			currentTip.Point.Hash,
+			currentTip.Point.Slot,
+			[]byte("nonce-current"),
+			false,
+			nil,
+		),
+	)
+	require.NoError(t, db.SetTip(currentTip, nil))
+
+	txHash := testHashBytes("blob-only-producer-tx")
+	offset := &database.CborOffset{
+		BlockSlot:  producerBlock.Slot,
+		ByteOffset: 10,
+		ByteLength: 20,
+	}
+	copy(offset.BlockHash[:], producerBlock.Hash)
+	blobTxn := db.BlobTxn(true)
+	require.NotNil(t, blobTxn)
+	require.NoError(
+		t,
+		blobTxn.Do(func(txn *database.Txn) error {
+			return db.Blob().SetTx(
+				txn.Blob(),
+				txHash,
+				database.EncodeTxOffset(offset),
+			)
+		}),
+	)
+
+	ls.currentTip = currentTip
+	ls.currentTipBlockNonce = []byte("nonce-current")
+
+	recovered, err := ls.tryRecoverFromTxValidationError(
+		&txValidationError{
+			BlockPoint: currentTip.Point,
+			TxHash:     testHashBytes("blob-only-failing"),
+			Inputs: []lcommon.TransactionInput{
+				&replayRecoveryInput{
+					txId:  txHash,
+					index: 0,
+				},
+			},
+			Cause: errors.New("bad input"),
+		},
+	)
+	require.NoError(t, err)
+	require.True(t, recovered)
+	assert.Equal(t, parentTip, ls.currentTip)
+}
+
 func TestTryRecoverFromTxValidationErrorSkipsUnknownProducer(t *testing.T) {
 	db, err := database.New(&database.Config{
 		BlobPlugin:     "badger",

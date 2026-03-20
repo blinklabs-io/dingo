@@ -21,6 +21,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	dbtypes "github.com/blinklabs-io/dingo/database/types"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
@@ -89,13 +90,17 @@ func (ls *LedgerState) tryRecoverFromTxValidationError(
 	if candidate == nil {
 		return false, nil
 	}
+	producerTxHash := candidate.Input.Id().String()
+	if candidate.ProducerTx != nil {
+		producerTxHash = hex.EncodeToString(candidate.ProducerTx.Hash)
+	}
 	ls.config.Logger.Warn(
 		"detected inconsistent local ledger state during replay, rewinding metadata state",
 		"component", "ledger",
 		"tx_hash", hex.EncodeToString(validationErr.TxHash),
 		"failing_block_slot", validationErr.BlockPoint.Slot,
 		"missing_input", candidate.Input.String(),
-		"producer_tx_hash", hex.EncodeToString(candidate.ProducerTx.Hash),
+		"producer_tx_hash", producerTxHash,
 		"producer_block_slot", candidate.ProducerBlock.Slot,
 		"rollback_slot", candidate.RollbackPoint.Slot,
 		"rollback_hash", hex.EncodeToString(candidate.RollbackPoint.Hash),
@@ -141,6 +146,31 @@ func (ls *LedgerState) findReplayRecoveryCandidate(
 			)
 		}
 		if producerTx == nil || len(producerTx.BlockHash) == 0 {
+			producerBlock, found, err := ls.replayRecoveryBlockFromTxBlob(
+				input.Id().Bytes(),
+			)
+			if err != nil {
+				return nil, err
+			}
+			if !found {
+				continue
+			}
+			if producerBlock.Slot >= validationErr.BlockPoint.Slot {
+				continue
+			}
+			rollbackPoint, err := ls.replayRecoveryParentPoint(producerBlock)
+			if err != nil {
+				return nil, err
+			}
+			if candidate == nil ||
+				producerBlock.Slot < candidate.ProducerBlock.Slot {
+				candidate = &replayRecoveryCandidate{
+					Input:         input,
+					ProducerTx:    nil,
+					ProducerBlock: producerBlock,
+					RollbackPoint: rollbackPoint,
+				}
+			}
 			continue
 		}
 		producerBlock, err := database.BlockByHash(ls.db, producerTx.BlockHash)
@@ -172,6 +202,68 @@ func (ls *LedgerState) findReplayRecoveryCandidate(
 		}
 	}
 	return candidate, nil
+}
+
+func (ls *LedgerState) replayRecoveryBlockFromTxBlob(
+	txHash []byte,
+) (models.Block, bool, error) {
+	blob := ls.db.Blob()
+	if blob == nil {
+		return models.Block{}, false, nil
+	}
+	txn := ls.db.BlobTxn(false)
+	if txn == nil || txn.Blob() == nil {
+		return models.Block{}, false, nil
+	}
+	defer txn.Rollback() //nolint:errcheck
+
+	txData, err := blob.GetTx(txn.Blob(), txHash)
+	if err != nil {
+		if errors.Is(err, dbtypes.ErrBlobKeyNotFound) {
+			return models.Block{}, false, nil
+		}
+		return models.Block{}, false, fmt.Errorf(
+			"lookup tx blob %s: %w",
+			hex.EncodeToString(txHash),
+			err,
+		)
+	}
+
+	var point ocommon.Point
+	switch {
+	case database.IsTxOffsetStorage(txData):
+		offset, err := database.DecodeTxOffset(txData)
+		if err != nil {
+			return models.Block{}, false, fmt.Errorf(
+				"decode tx offset for %s: %w",
+				hex.EncodeToString(txHash),
+				err,
+			)
+		}
+		point = ocommon.NewPoint(offset.BlockSlot, offset.BlockHash[:])
+	case database.IsTxCborPartsStorage(txData):
+		parts, err := database.DecodeTxCborParts(txData)
+		if err != nil {
+			return models.Block{}, false, fmt.Errorf(
+				"decode tx parts for %s: %w",
+				hex.EncodeToString(txHash),
+				err,
+			)
+		}
+		point = ocommon.NewPoint(parts.BlockSlot, parts.BlockHash[:])
+	default:
+		return models.Block{}, false, nil
+	}
+
+	block, err := database.BlockByPoint(ls.db, point)
+	if err != nil {
+		return models.Block{}, false, fmt.Errorf(
+			"lookup producer block from tx blob %s: %w",
+			hex.EncodeToString(txHash),
+			err,
+		)
+	}
+	return block, true, nil
 }
 
 func (ls *LedgerState) replayRecoveryParentPoint(
