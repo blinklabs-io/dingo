@@ -105,6 +105,47 @@ func TestChainSelectorUpdateExistingPeerTip(t *testing.T) {
 	assert.Equal(t, 1, cs.PeerCount())
 }
 
+func TestChainSelectorPrefersMoreAdvancedObservedTip(t *testing.T) {
+	cs := NewChainSelector(ChainSelectorConfig{})
+
+	laggingConn := newTestConnectionId(1)
+	leadingConn := newTestConnectionId(2)
+
+	laggingAdvertisedTip := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 200, Hash: []byte("lagging-advertised")},
+		BlockNumber: 200,
+	}
+	laggingObservedTip := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 120, Hash: []byte("lagging-observed")},
+		BlockNumber: 120,
+	}
+	leadingAdvertisedTip := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 180, Hash: []byte("leading-advertised")},
+		BlockNumber: 180,
+	}
+	leadingObservedTip := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 150, Hash: []byte("leading-observed")},
+		BlockNumber: 150,
+	}
+
+	cs.updatePeerTipObserved(
+		laggingConn,
+		laggingAdvertisedTip,
+		laggingObservedTip,
+		nil,
+	)
+	cs.updatePeerTipObserved(
+		leadingConn,
+		leadingAdvertisedTip,
+		leadingObservedTip,
+		nil,
+	)
+
+	bestPeer := cs.SelectBestChain()
+	require.NotNil(t, bestPeer)
+	assert.Equal(t, leadingConn, *bestPeer)
+}
+
 func TestChainSelectorRemovePeer(t *testing.T) {
 	cs := NewChainSelector(ChainSelectorConfig{})
 
@@ -884,7 +925,27 @@ func TestPeerChainTipUpdateTip(t *testing.T) {
 
 	peerTip.UpdateTip(tip2, nil)
 	assert.Equal(t, tip2.BlockNumber, peerTip.Tip.BlockNumber)
+	assert.Equal(t, tip2.BlockNumber, peerTip.ObservedTip.BlockNumber)
 	assert.True(t, peerTip.LastUpdated.After(oldTime))
+}
+
+func TestPeerChainTipUpdateTipWithObserved(t *testing.T) {
+	connId := newTestConnectionId(1)
+	advertisedTip := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 200, Hash: []byte("advertised")},
+		BlockNumber: 200,
+	}
+	observedTip := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 150, Hash: []byte("observed")},
+		BlockNumber: 150,
+	}
+
+	peerTip := NewPeerChainTip(connId, advertisedTip, nil)
+	peerTip.UpdateTipWithObserved(advertisedTip, observedTip, nil)
+
+	assert.Equal(t, advertisedTip.BlockNumber, peerTip.Tip.BlockNumber)
+	assert.Equal(t, observedTip.BlockNumber, peerTip.ObservedTip.BlockNumber)
+	assert.Equal(t, observedTip.BlockNumber, peerTip.SelectionTip().BlockNumber)
 }
 
 func TestPeerChainTipTouch(t *testing.T) {

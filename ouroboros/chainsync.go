@@ -534,6 +534,10 @@ func (o *Ouroboros) chainsyncClientRollForward(
 		// spurious switches when ephemeral inbound connections report
 		// tips and then disconnect.
 		if !isInbound {
+			observedTip := ochainsync.Tip{
+				Point:       point,
+				BlockNumber: v.BlockNumber(),
+			}
 			o.EventBus.Publish(
 				chainselection.PeerTipUpdateEventType,
 				event.NewEvent(
@@ -541,6 +545,7 @@ func (o *Ouroboros) chainsyncClientRollForward(
 					chainselection.PeerTipUpdateEvent{
 						ConnectionId: ctx.ConnectionId,
 						Tip:          tip,
+						ObservedTip:  observedTip,
 						VRFOutput:    vrfOutput,
 					},
 				),

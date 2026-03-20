@@ -33,7 +33,8 @@ const (
 type PeerTipUpdateEvent struct {
 	ConnectionId ouroboros.ConnectionId
 	Tip          ochainsync.Tip
-	VRFOutput    []byte // VRF output from block header for tie-breaking
+	ObservedTip  ochainsync.Tip
+	VRFOutput    []byte // VRF output from observed block header for tie-breaking
 }
 
 // PeerActivityEvent is published when a peer has recent protocol activity

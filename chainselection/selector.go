@@ -186,6 +186,15 @@ func (cs *ChainSelector) UpdatePeerTip(
 	tip ochainsync.Tip,
 	vrfOutput []byte,
 ) bool {
+	return cs.updatePeerTipObserved(connId, tip, tip, vrfOutput)
+}
+
+func (cs *ChainSelector) updatePeerTipObserved(
+	connId ouroboros.ConnectionId,
+	tip ochainsync.Tip,
+	observedTip ochainsync.Tip,
+	vrfOutput []byte,
+) bool {
 	shouldEvaluate := false
 	accepted := true
 	var evictedConn *ouroboros.ConnectionId
@@ -239,7 +248,7 @@ func (cs *ChainSelector) UpdatePeerTip(
 		}
 
 		if peerTip, exists := cs.peerTips[connId]; exists {
-			peerTip.UpdateTip(tip, vrfOutput)
+			peerTip.UpdateTipWithObserved(tip, observedTip, vrfOutput)
 		} else {
 			// Evict the least-recently-updated peer if at capacity
 			if len(cs.peerTips) >= cs.maxTrackedPeers {
@@ -256,19 +265,26 @@ func (cs *ChainSelector) UpdatePeerTip(
 				}
 			}
 			cs.peerTips[connId] = NewPeerChainTip(connId, tip, vrfOutput)
+			cs.peerTips[connId].ObservedTip = observedTip
 		}
 
 		cs.config.Logger.Debug(
 			"updated peer tip",
 			"connection_id", connId.String(),
-			"block_number", tip.BlockNumber,
-			"slot", tip.Point.Slot,
+			"advertised_block_number", tip.BlockNumber,
+			"advertised_slot", tip.Point.Slot,
+			"observed_block_number", observedTip.BlockNumber,
+			"observed_slot", observedTip.Point.Slot,
 		)
 
-		// Check if this peer's tip is better than the current best peer's tip
+		// Check if this peer's locally observed frontier is better than the
+		// current best peer's locally observed frontier.
 		if cs.bestPeerConn != nil {
 			if bestPeerTip, ok := cs.peerTips[*cs.bestPeerConn]; ok {
-				comparison := CompareChains(tip, bestPeerTip.Tip)
+				comparison := CompareChains(
+					cs.peerTips[connId].SelectionTip(),
+					bestPeerTip.SelectionTip(),
+				)
 				if comparison == ChainABetter {
 					shouldEvaluate = true
 				} else if comparison == ChainEqual &&
@@ -547,13 +563,13 @@ func (cs *ChainSelector) isPeerSelectableLocked(
 		return false
 	}
 	if cs.securityParam > 0 && cs.localTip.BlockNumber > 0 &&
-		safeAddUint64(peerTip.Tip.BlockNumber, cs.securityParam) <
+		safeAddUint64(peerTip.SelectionTip().BlockNumber, cs.securityParam) <
 			cs.localTip.BlockNumber {
 		if logSkip {
 			cs.config.Logger.Debug(
 				"skipping implausibly-behind peer",
 				"connection_id", connId.String(),
-				"peer_block_number", peerTip.Tip.BlockNumber,
+				"peer_block_number", peerTip.SelectionTip().BlockNumber,
 				"local_block_number", cs.localTip.BlockNumber,
 				"security_param", cs.securityParam,
 			)
@@ -643,7 +659,10 @@ func (cs *ChainSelector) comparePeerTips(
 	if peerTipA == nil || peerTipB == nil {
 		return ChainComparisonUnknown
 	}
-	comparison := CompareChains(peerTipA.Tip, peerTipB.Tip)
+	comparison := CompareChains(
+		peerTipA.SelectionTip(),
+		peerTipB.SelectionTip(),
+	)
 	switch comparison {
 	case ChainABetter, ChainBBetter, ChainComparisonUnknown:
 		return comparison
@@ -734,8 +753,8 @@ func (cs *ChainSelector) EvaluateAndSwitch() bool {
 					return
 				}
 				if CompareChains(
-					newPeerTip.Tip,
-					previousPeerTip.Tip,
+					newPeerTip.SelectionTip(),
+					previousPeerTip.SelectionTip(),
 				) == ChainEqual {
 					newBest = previousBest
 				} else if
@@ -748,11 +767,11 @@ func (cs *ChainSelector) EvaluateAndSwitch() bool {
 					newPeerTip,
 				) == ChainABetter {
 					newBest = previousBest
-				} else if newPeerTip.Tip.BlockNumber >
-					previousPeerTip.Tip.BlockNumber &&
+				} else if newPeerTip.SelectionTip().BlockNumber >
+					previousPeerTip.SelectionTip().BlockNumber &&
 					!IsSignificantlyBetter(
-						newPeerTip.Tip,
-						previousPeerTip.Tip,
+						newPeerTip.SelectionTip(),
+						previousPeerTip.SelectionTip(),
 						cs.config.MinSwitchBlockDiff,
 					) {
 					newBest = previousBest
@@ -849,7 +868,12 @@ func (cs *ChainSelector) HandlePeerTipUpdateEvent(evt event.Event) {
 		)
 		return
 	}
-	cs.UpdatePeerTip(e.ConnectionId, e.Tip, e.VRFOutput)
+	cs.updatePeerTipObserved(
+		e.ConnectionId,
+		e.Tip,
+		e.ObservedTip,
+		e.VRFOutput,
+	)
 }
 
 // HandlePeerActivityEvent refreshes a peer's liveness on non-tip protocol
