@@ -1973,6 +1973,9 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 		if err == nil || ls.ctx.Err() != nil {
 			return
 		}
+		if errors.Is(err, errRestartLedgerPipeline) {
+			continue
+		}
 		ls.config.Logger.Warn(
 			"block processing failed, restarting pipeline",
 			"error", err,
@@ -2612,6 +2615,18 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 				return nil
 			}, true)
 			if err != nil {
+				recovered, recoverErr := ls.tryRecoverFromTxValidationError(
+					err,
+				)
+				if recoverErr != nil {
+					return fmt.Errorf(
+						"process block batch: %w",
+						recoverErr,
+					)
+				}
+				if recovered {
+					return errRestartLedgerPipeline
+				}
 				return fmt.Errorf("process block batch: %w", err)
 			}
 			// Transaction committed successfully - now update in-memory state.
@@ -2805,7 +2820,15 @@ func (ls *LedgerState) ledgerProcessBlock(
 						auxCborHex,
 					)
 					delta.Release()
-					return nil, fmt.Errorf("TX validation failure: %w", err)
+					return nil, &txValidationError{
+						BlockPoint: point,
+						TxHash: append(
+							[]byte(nil),
+							tx.Hash().Bytes()...,
+						),
+						Inputs: collectReferencedInputs(tx),
+						Cause:  err,
+					}
 				}
 			}
 		}
