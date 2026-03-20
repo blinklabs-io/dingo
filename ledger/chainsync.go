@@ -618,47 +618,31 @@ func (ls *LedgerState) currentHeaderPipelineOwner() ouroboros.ConnectionId {
 	if ls.chain != nil && ls.chain.HeaderCount() > 0 {
 		return ls.headerPipelineConnId
 	}
-	// Once the shared header queue drains, there is no live pipeline owner.
-	// A stale selected blockfetch peer must not monopolize future headers while
-	// the pipeline is idle; whichever peer delivers the next usable header gets
-	// to seed the next batch.
+	// Once the shared header queue drains, there is no live fragment in flight.
+	// The only idle owner worth preserving is the currently selected active
+	// connection. If selection has already moved elsewhere, drop the stale
+	// preference and let the next usable header start a fresh fragment.
+	if ls.selectedBlockfetchConnStillActive() {
+		return ls.selectedBlockfetchConnId
+	}
 	ls.headerPipelineConnId = ouroboros.ConnectionId{}
+	ls.selectedBlockfetchConnId = ouroboros.ConnectionId{}
 	return ouroboros.ConnectionId{}
 }
 
-func (ls *LedgerState) staleSelectedOwnerWouldBufferHeader(
-	e ChainsyncEvent,
-) bool {
-	return connIdKey(ls.selectedBlockfetchConnId) != "" &&
-		ls.chainsyncBlockfetchReadyChan == nil &&
-		(ls.chain == nil || ls.chain.HeaderCount() == 0) &&
-		!sameConnectionId(ls.selectedBlockfetchConnId, e.ConnectionId)
-}
-
-func (ls *LedgerState) logIdleSelectedOwnerRelease(e ChainsyncEvent) {
-	ls.config.Logger.Debug(
-		"releasing idle selected blockfetch owner before header admission",
-		"component", "ledger",
-		"selected_connection_id", ls.selectedBlockfetchConnId.String(),
-		"event_connection_id", e.ConnectionId.String(),
-		"slot", e.Point.Slot,
-	)
-}
-
-func (ls *LedgerState) clearIdleSelectedOwner() {
-	if ls.chainsyncBlockfetchReadyChan == nil &&
-		(ls.chain == nil || ls.chain.HeaderCount() == 0) {
-		ls.selectedBlockfetchConnId = ouroboros.ConnectionId{}
+func (ls *LedgerState) selectedBlockfetchConnStillActive() bool {
+	if connIdKey(ls.selectedBlockfetchConnId) == "" {
+		return false
 	}
+	if ls.config.GetActiveConnectionFunc == nil {
+		return false
+	}
+	activeConnId := ls.config.GetActiveConnectionFunc()
+	return activeConnId != nil &&
+		sameConnectionId(ls.selectedBlockfetchConnId, *activeConnId)
 }
 
 func (ls *LedgerState) shouldBufferHeaderEvent(e ChainsyncEvent) bool {
-	ls.chainsyncBlockfetchMutex.Lock()
-	if ls.staleSelectedOwnerWouldBufferHeader(e) {
-		ls.logIdleSelectedOwnerRelease(e)
-		ls.clearIdleSelectedOwner()
-	}
-	ls.chainsyncBlockfetchMutex.Unlock()
 	ownerConnId := ls.currentHeaderPipelineOwner()
 	if ownerConnId == (ouroboros.ConnectionId{}) {
 		ls.headerPipelineConnId = e.ConnectionId
