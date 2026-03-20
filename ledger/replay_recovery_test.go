@@ -24,8 +24,10 @@ import (
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/immutable"
 	"github.com/blinklabs-io/dingo/database/models"
 	sqliteplugin "github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
+	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -315,6 +317,211 @@ func TestTryRecoverFromTxValidationErrorFallsBackToTxBlobOffsets(
 	require.NoError(t, err)
 	require.True(t, recovered)
 	assert.Equal(t, parentTip, ls.currentTip)
+}
+
+func TestTryRecoverFromTxValidationErrorFallsBackToChainScan(t *testing.T) {
+	db, err := database.New(&database.Config{
+		BlobPlugin:     "badger",
+		MetadataPlugin: "sqlite",
+		DataDir:        t.TempDir(),
+	})
+	require.NoError(t, err)
+	defer db.Close()
+
+	cm, err := chain.NewManager(db, nil)
+	require.NoError(t, err)
+
+	imm, err := immutable.New("../database/immutable/testdata")
+	require.NoError(t, err)
+	iter, err := imm.BlocksFromPoint(ocommon.Point{})
+	require.NoError(t, err)
+	defer iter.Close()
+
+	type replayRecoveryChainBlock struct {
+		raw   chain.RawBlock
+		block gledger.Block
+	}
+	var chainBlocks []replayRecoveryChainBlock
+	producerIdx := -1
+	for i := 0; i < 200 && (len(chainBlocks) < 12 || producerIdx < 0); i++ {
+		immBlock, err := iter.Next()
+		require.NoError(t, err)
+		require.NotNil(t, immBlock)
+		block, err := gledger.NewBlockFromCbor(immBlock.Type, immBlock.Cbor)
+		require.NoError(t, err)
+		chainBlocks = append(chainBlocks, replayRecoveryChainBlock{
+			raw: chain.RawBlock{
+				Slot:        block.SlotNumber(),
+				Hash:        block.Hash().Bytes(),
+				BlockNumber: block.BlockNumber(),
+				Type:        uint(block.Type()),
+				PrevHash:    block.PrevHash().Bytes(),
+				Cbor:        block.Cbor(),
+			},
+			block: block,
+		})
+		if producerIdx < 0 &&
+			len(chainBlocks) > 1 &&
+			len(block.Transactions()) > 0 {
+			producerIdx = len(chainBlocks) - 1
+		}
+	}
+	require.GreaterOrEqual(t, len(chainBlocks), 12)
+	require.GreaterOrEqual(t, producerIdx, 1)
+	currentIdx := len(chainBlocks) - 1
+	require.Greater(t, currentIdx, producerIdx)
+	require.NoError(
+		t,
+		cm.PrimaryChain().AddRawBlocks(func() []chain.RawBlock {
+			ret := make([]chain.RawBlock, 0, len(chainBlocks))
+			for _, block := range chainBlocks {
+				ret = append(ret, block.raw)
+			}
+			return ret
+		}()),
+	)
+
+	parentBlock := chainBlocks[producerIdx-1]
+	producerBlock := chainBlocks[producerIdx]
+	currentBlock := chainBlocks[currentIdx]
+	parentTip := ochainsync.Tip{
+		Point: ocommon.NewPoint(
+			parentBlock.raw.Slot,
+			parentBlock.raw.Hash,
+		),
+		BlockNumber: parentBlock.raw.BlockNumber,
+	}
+	currentTip := ochainsync.Tip{
+		Point: ocommon.NewPoint(
+			currentBlock.raw.Slot,
+			currentBlock.raw.Hash,
+		),
+		BlockNumber: currentBlock.raw.BlockNumber,
+	}
+	require.NoError(
+		t,
+		db.SetBlockNonce(
+			parentTip.Point.Hash,
+			parentTip.Point.Slot,
+			[]byte("nonce-parent"),
+			true,
+			nil,
+		),
+	)
+	require.NoError(
+		t,
+		db.SetBlockNonce(
+			currentTip.Point.Hash,
+			currentTip.Point.Slot,
+			[]byte("nonce-current"),
+			false,
+			nil,
+		),
+	)
+	require.NoError(t, db.SetTip(currentTip, nil))
+
+	ls, err := NewLedgerState(LedgerStateConfig{
+		Database:          db,
+		ChainManager:      cm,
+		CardanoNodeConfig: newTestShelleyGenesisCfg(t),
+		Logger: slog.New(
+			slog.NewJSONHandler(io.Discard, nil),
+		),
+	})
+	require.NoError(t, err)
+	ls.metrics.init(prometheus.NewRegistry())
+	ls.currentTip = currentTip
+	ls.currentTipBlockNonce = []byte("nonce-current")
+
+	producerTx := producerBlock.block.Transactions()[0]
+	recovered, err := ls.tryRecoverFromTxValidationError(
+		&txValidationError{
+			BlockPoint: currentTip.Point,
+			TxHash:     testHashBytes("chain-scan-failing"),
+			Inputs: []lcommon.TransactionInput{
+				&replayRecoveryInput{
+					txId:  producerTx.Hash().Bytes(),
+					index: 0,
+				},
+			},
+			Cause: errors.New("bad input"),
+		},
+	)
+	require.NoError(t, err)
+	require.True(t, recovered)
+	assert.Equal(t, parentTip, ls.currentTip)
+}
+
+func TestTryRecoverFromTxValidationErrorFallsBackToSecurityParamWindow(
+	t *testing.T,
+) {
+	db, err := database.New(&database.Config{
+		BlobPlugin:     "badger",
+		MetadataPlugin: "sqlite",
+		DataDir:        t.TempDir(),
+	})
+	require.NoError(t, err)
+	defer db.Close()
+
+	cm, err := chain.NewManager(db, nil)
+	require.NoError(t, err)
+
+	blocks := []chain.RawBlock{
+		testRawBlock("fallback-1", 100, 1, nil),
+		testRawBlock("fallback-2", 120, 2, testHashBytes("fallback-1")),
+		testRawBlock("fallback-3", 140, 3, testHashBytes("fallback-2")),
+		testRawBlock("fallback-4", 160, 4, testHashBytes("fallback-3")),
+	}
+	blocks[1].PrevHash = blocks[0].Hash
+	blocks[2].PrevHash = blocks[1].Hash
+	blocks[3].PrevHash = blocks[2].Hash
+	require.NoError(t, cm.PrimaryChain().AddRawBlocks(blocks))
+
+	ls, err := NewLedgerState(LedgerStateConfig{
+		Database:          db,
+		ChainManager:      cm,
+		CardanoNodeConfig: newTestShelleyGenesisCfg(t),
+		Logger: slog.New(
+			slog.NewJSONHandler(io.Discard, nil),
+		),
+	})
+	require.NoError(t, err)
+	ls.metrics.init(prometheus.NewRegistry())
+
+	currentTip := ochainsync.Tip{
+		Point:       ocommon.NewPoint(blocks[3].Slot, blocks[3].Hash),
+		BlockNumber: blocks[3].BlockNumber,
+	}
+	require.NoError(
+		t,
+		db.SetBlockNonce(
+			currentTip.Point.Hash,
+			currentTip.Point.Slot,
+			[]byte("nonce-current"),
+			false,
+			nil,
+		),
+	)
+	require.NoError(t, db.SetTip(currentTip, nil))
+	ls.currentTip = currentTip
+	ls.currentTipBlockNonce = []byte("nonce-current")
+
+	recovered, err := ls.tryRecoverFromTxValidationError(
+		&txValidationError{
+			BlockPoint: currentTip.Point,
+			TxHash:     testHashBytes("fallback-failing"),
+			Inputs: []lcommon.TransactionInput{
+				&replayRecoveryInput{
+					txId:  testHashBytes("missing-producer"),
+					index: 0,
+				},
+			},
+			Cause: errors.New("bad input"),
+		},
+	)
+	require.NoError(t, err)
+	require.True(t, recovered)
+	assert.Equal(t, ochainsync.Tip{}, ls.currentTip)
 }
 
 func TestTryRecoverFromTxValidationErrorSkipsUnknownProducer(t *testing.T) {
