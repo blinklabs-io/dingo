@@ -722,9 +722,22 @@ func (s *State) HeaderPreviouslySeenFromOtherConn(
 		if !bytes.Equal(rec.hash, point.Hash) {
 			continue
 		}
-		return rec.connId != connId
+		return !trackedConnIdsEqual(rec.connId, connId)
 	}
 	return false
+}
+
+func trackedConnIdsEqual(
+	a,
+	b ouroboros.ConnectionId,
+) bool {
+	if a.LocalAddr == nil && a.RemoteAddr == nil {
+		return b.LocalAddr == nil && b.RemoteAddr == nil
+	}
+	if b.LocalAddr == nil && b.RemoteAddr == nil {
+		return false
+	}
+	return a.String() == b.String()
 }
 
 // MarkClientSynced marks a tracked client as synced (at chain

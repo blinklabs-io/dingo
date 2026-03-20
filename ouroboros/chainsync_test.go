@@ -124,7 +124,7 @@ func TestNormalizeIntersectPoints(t *testing.T) {
 	)
 }
 
-func TestChainsyncClientRollForwardPublishesDuplicateFromSelectedPeer(
+func TestChainsyncClientRollForwardReplaysDuplicateFromSelectedPeerSeenElsewhere(
 	t *testing.T,
 ) {
 	bus := event.NewEventBus(nil, nil)
@@ -178,11 +178,13 @@ func TestChainsyncClientRollForwardPublishesDuplicateFromSelectedPeer(
 		require.True(t, ok)
 		require.Equal(t, connA, data2.ConnectionId)
 	case <-time.After(time.Second):
-		t.Fatal("expected duplicate header from selected peer to publish")
+		t.Fatal(
+			"expected selected peer to replay duplicate header first seen elsewhere",
+		)
 	}
 }
 
-func TestChainsyncClientRollForwardPublishesDuplicateFromEquivalentSelectedPeer(
+func TestChainsyncClientRollForwardReplaysDuplicateFromEquivalentSelectedPeerSeenElsewhere(
 	t *testing.T,
 ) {
 	bus := event.NewEventBus(nil, nil)
@@ -239,7 +241,7 @@ func TestChainsyncClientRollForwardPublishesDuplicateFromEquivalentSelectedPeer(
 		require.Equal(t, connADup, data2.ConnectionId)
 	case <-time.After(time.Second):
 		t.Fatal(
-			"expected duplicate header from equivalent selected peer to publish",
+			"expected equivalent selected peer to replay duplicate header first seen elsewhere",
 		)
 	}
 }
@@ -526,5 +528,26 @@ func TestSubscribeChainsyncResyncRecyclesConnection(t *testing.T) {
 	require.False(
 		t,
 		state.HeaderPreviouslySeenFromOtherConn(connA, point),
+	)
+}
+
+func TestHeaderPreviouslySeenFromOtherConnTreatsEquivalentConnIdsAsSame(
+	t *testing.T,
+) {
+	bus := event.NewEventBus(nil, nil)
+	defer bus.Close()
+
+	connA := newTestConnId("127.0.0.1:6000", "1.1.1.1:3001")
+	connADup := newTestConnId("127.0.0.1:6000", "1.1.1.1:3001")
+	point := ocommon.NewPoint(100, []byte("hdr"))
+	tip := ochainsync.Tip{Point: point}
+
+	state := dchainsync.NewState(bus, nil)
+	require.True(t, state.AddClientConnId(connA))
+	state.UpdateClientTip(connA, point, tip)
+
+	require.False(
+		t,
+		state.HeaderPreviouslySeenFromOtherConn(connADup, point),
 	)
 }

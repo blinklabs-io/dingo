@@ -60,6 +60,7 @@ func (o *Ouroboros) chainsyncServerConnOpts() []ochainsync.ChainSyncOptionFunc {
 
 func (o *Ouroboros) chainsyncClientConnOpts() []ochainsync.ChainSyncOptionFunc {
 	return []ochainsync.ChainSyncOptionFunc{
+		ochainsync.WithAwaitReplyFunc(o.chainsyncClientAwaitReply),
 		ochainsync.WithRollForwardFunc(o.chainsyncClientRollForward),
 		ochainsync.WithRollBackwardFunc(o.chainsyncClientRollBackward),
 		// Pipeline enough headers to keep one blockfetch batch (500
@@ -76,6 +77,37 @@ func (o *Ouroboros) chainsyncClientConnOpts() []ochainsync.ChainSyncOptionFunc {
 		// sync from genesis).
 		ochainsync.WithIntersectTimeout(30 * time.Second),
 	}
+}
+
+func (o *Ouroboros) chainsyncClientAwaitReply(
+	ctx ochainsync.CallbackContext,
+) error {
+	if o.ConnManager != nil &&
+		o.ConnManager.IsInboundConnection(ctx.ConnectionId) {
+		return nil
+	}
+	ingressEligible := o.shouldPublishChainsyncToLedger(ctx.ConnectionId)
+	if !o.reconcileChainsyncIngressAdmission(
+		ctx.ConnectionId,
+		ingressEligible,
+	) {
+		return nil
+	}
+	if o.ChainsyncState != nil {
+		o.ChainsyncState.MarkClientSynced(ctx.ConnectionId)
+	}
+	if ingressEligible && o.EventBus != nil {
+		o.EventBus.Publish(
+			ledger.ChainsyncAwaitReplyEventType,
+			event.NewEvent(
+				ledger.ChainsyncAwaitReplyEventType,
+				ledger.ChainsyncAwaitReplyEvent{
+					ConnectionId: ctx.ConnectionId,
+				},
+			),
+		)
+	}
+	return nil
 }
 
 func normalizeIntersectPoints(points []ocommon.Point) []ocommon.Point {
@@ -567,29 +599,24 @@ func (o *Ouroboros) chainsyncClientRollForward(
 			return nil
 		}
 		if !isNew {
-			activeConnId := o.ChainsyncState.GetClientConnId()
-			replayDuplicate := false
-			if activeConnId != nil &&
-				sameConnectionId(*activeConnId, ctx.ConnectionId) &&
-				o.ChainsyncState.HeaderPreviouslySeenFromOtherConn(
-					ctx.ConnectionId,
-					point,
-				) {
-				replayDuplicate = true
+			shouldReplayDuplicate := false
+			if o.ChainsyncState != nil {
+				activeConnId := o.ChainsyncState.GetClientConnId()
+				if activeConnId != nil &&
+					sameConnectionId(*activeConnId, ctx.ConnectionId) &&
+					o.ChainsyncState.HeaderPreviouslySeenFromOtherConn(
+						ctx.ConnectionId,
+						point,
+					) {
+					shouldReplayDuplicate = true
+				}
 			}
-			if replayDuplicate {
-				o.config.Logger.Debug(
-					"publishing duplicate header from selected connection",
-					"component", "ouroboros",
-					"connection_id", ctx.ConnectionId.String(),
-					"slot", point.Slot,
-				)
-			} else {
-				// Duplicate header already delivered by another
-				// eligible peer, or a repeat delivery from the same
-				// selected peer. Keep the peer tip fresh, but do not
-				// re-publish the same header into the shared ledger
-				// queue.
+			if !shouldReplayDuplicate {
+				// Duplicate header already delivered by the same
+				// peer, or by another peer while this connection is
+				// not the selected ingress source. Keep the peer tip
+				// fresh, but do not re-publish the same header into
+				// the shared ledger queue.
 				o.updateChainsyncMetrics(ctx.ConnectionId, tip)
 				return nil
 			}
