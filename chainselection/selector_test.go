@@ -573,6 +573,93 @@ func TestChainSelectorPreservesEqualTipIncumbentAtSamePriorityWithVRF(
 	assert.Equal(t, incumbentConn, *cs.GetBestPeer())
 }
 
+func TestChainSelectorPreservesEqualTipIncumbentAtSamePriority(t *testing.T) {
+	connId1 := newTestConnectionId(1)
+	connId2 := newTestConnectionId(2)
+	cs := NewChainSelector(ChainSelectorConfig{})
+	sharedVRF := make64ByteVRF(0x01)
+
+	equalTip := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 120, Hash: []byte("equal-tip")},
+		BlockNumber: 60,
+	}
+
+	// Seed the incumbent using a temporary priority advantage, then
+	// remove that advantage. Equal-priority peers at the same tip
+	// should not steal incumbency just because the selector re-evaluates.
+	setSelectorConnectionPriority(cs, connId1, 10)
+	setSelectorConnectionPriority(cs, connId2, 20)
+	cs.UpdatePeerTip(connId1, equalTip, sharedVRF)
+	cs.UpdatePeerTip(connId2, equalTip, sharedVRF)
+	require.NotNil(t, cs.GetBestPeer())
+	assert.Equal(t, connId2, *cs.GetBestPeer())
+
+	setSelectorConnectionPriority(cs, connId1, 50)
+	setSelectorConnectionPriority(cs, connId2, 50)
+
+	bestPeer := cs.SelectBestChain()
+	require.NotNil(t, bestPeer)
+	assert.Equal(t, connId1, *bestPeer)
+
+	switched := cs.EvaluateAndSwitch()
+	assert.False(t, switched)
+	require.NotNil(t, cs.GetBestPeer())
+	assert.Equal(t, connId2, *cs.GetBestPeer())
+}
+
+func TestChainSelectorDoesNotPreserveIncumbentWithInvalidEqualVRF(
+	t *testing.T,
+) {
+	testCases := []struct {
+		name string
+		vrfA []byte
+		vrfB []byte
+	}{
+		{
+			name: "nil vrf",
+			vrfA: nil,
+			vrfB: nil,
+		},
+		{
+			name: "short vrf",
+			vrfA: []byte{0x01},
+			vrfB: []byte{0x01},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			connId1 := newTestConnectionId(1)
+			connId2 := newTestConnectionId(2)
+			cs := NewChainSelector(ChainSelectorConfig{})
+
+			equalTip := ochainsync.Tip{
+				Point:       ocommon.Point{Slot: 120, Hash: []byte("equal-tip")},
+				BlockNumber: 60,
+			}
+
+			setSelectorConnectionPriority(cs, connId1, 10)
+			setSelectorConnectionPriority(cs, connId2, 20)
+			cs.UpdatePeerTip(connId1, equalTip, tc.vrfA)
+			cs.UpdatePeerTip(connId2, equalTip, tc.vrfB)
+			require.NotNil(t, cs.GetBestPeer())
+			assert.Equal(t, connId2, *cs.GetBestPeer())
+
+			setSelectorConnectionPriority(cs, connId1, 50)
+			setSelectorConnectionPriority(cs, connId2, 50)
+
+			bestPeer := cs.SelectBestChain()
+			require.NotNil(t, bestPeer)
+			assert.Equal(t, connId1, *bestPeer)
+
+			switched := cs.EvaluateAndSwitch()
+			assert.True(t, switched)
+			require.NotNil(t, cs.GetBestPeer())
+			assert.Equal(t, connId1, *cs.GetBestPeer())
+		})
+	}
+}
+
 func TestChainSelectorUpdatesConnectionStateFromPeerGovEvents(t *testing.T) {
 	eventBus := event.NewEventBus(nil, nil)
 	defer eventBus.Stop()

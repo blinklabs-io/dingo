@@ -15,8 +15,10 @@
 package ledger
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -41,6 +43,26 @@ import (
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 )
+
+func TestLedgerProcessBlocksFromSourceReturnsReaderError(t *testing.T) {
+	ls := &LedgerState{
+		validationEnabled: true,
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+
+	readErr := errors.New("reader failed")
+	readChainResultCh := make(chan readChainResult, 1)
+	readChainResultCh <- readChainResult{err: readErr}
+	close(readChainResultCh)
+
+	err := ls.ledgerProcessBlocksFromSource(
+		context.Background(),
+		readChainResultCh,
+	)
+	require.ErrorIs(t, err, readErr)
+}
 
 // TestCalculateStabilityWindow_ByronEra tests the stability window calculation for Byron era
 func TestCalculateStabilityWindow_ByronEra(t *testing.T) {

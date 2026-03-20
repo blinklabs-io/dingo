@@ -82,8 +82,6 @@ github.com/ProtonMail/go-crypto v1.3.0/go.mod h1:9whxjD8Rbs29b4XWbB8irEcE8KHMqaR
 github.com/aead/siphash v1.0.1/go.mod h1:Nywa3cDsYNNK3gaciGTWPwHt0wlpNV15vwmswBAUSII=
 github.com/andybalholm/brotli v1.1.1 h1:PR2pgnyFznKEugtsUo0xLdDop5SKXd5Qf5ysW+7XdTA=
 github.com/andybalholm/brotli v1.1.1/go.mod h1:05ib4cKhjx3OQYUY22hTVd34Bc8upXjOLL2rKwwZBoA=
-github.com/antithesishq/antithesis-sdk-go v0.6.0 h1:v/YViLhFYkZOEEof4AXjD5AgGnGM84YHF4RqEwp6I2g=
-github.com/antithesishq/antithesis-sdk-go v0.6.0/go.mod h1:IUpT2DPAKh6i/YhSbt6Gl3v2yvUZjmKncl7U91fup7E=
 github.com/aws/aws-sdk-go-v2 v1.41.4 h1:10f50G7WyU02T56ox1wWXq+zTX9I1zxG46HYuG1hH/k=
 github.com/aws/aws-sdk-go-v2 v1.41.4/go.mod h1:mwsPRE8ceUUpiTgF7QmQIJ7lgsKUPQOUl3o72QBrE1o=
 github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream v1.7.7 h1:3kGOqnh1pPeddVa/E37XNTaWJ8W6vrbYV9lJEkCnhuY=
@@ -138,12 +136,8 @@ github.com/blinklabs-io/bursa v0.16.0 h1:EyiEJIvRo5u2nxYQAILUNaCpubUuBrCgnWxIHI1
 github.com/blinklabs-io/bursa v0.16.0/go.mod h1:QushjySLaOipI158YageIEIRksjCxGpAwtM1WbYx4Qo=
 github.com/blinklabs-io/go-bip39 v0.2.0 h1:rHYih+JzqaFVuP+UfvByKTAdJPeYtlvZu49yUGrZUk8=
 github.com/blinklabs-io/go-bip39 v0.2.0/go.mod h1:9Bp7a+XDc/KTPOqNnS7T/v1vH2lDXpmjM0GArwvOQL4=
-github.com/blinklabs-io/gouroboros v0.160.2 h1:BS5dAhqrVNQyJG+d169Hz+JdT/Ce99ezafOJcIxB7Kk=
-github.com/blinklabs-io/gouroboros v0.160.2/go.mod h1:ZhQREyLgf8zv63oz2qNj9rEhForAJj/ySTMiXdeH3l8=
-github.com/blinklabs-io/gouroboros v0.161.0 h1:XGQEb0hGotS6BMRWsKC5pvJBS7vyq2xvk42RRY/DN28=
-github.com/blinklabs-io/gouroboros v0.161.0/go.mod h1:J8m943TBvY+ZfYmIsI94ipvE8XHNhV1V5PNtywr9YAo=
-github.com/blinklabs-io/gouroboros v0.161.1 h1:1r4DAwSebt8/XlK31zJty9QMKuf7rB58bPl59OF1mg0=
-github.com/blinklabs-io/gouroboros v0.161.1/go.mod h1:J8m943TBvY+ZfYmIsI94ipvE8XHNhV1V5PNtywr9YAo=
+github.com/blinklabs-io/gouroboros v0.163.0 h1:P5I6nA0riUDxk/qMjD49fdTFlE81O9x2SgN4++ZEuCk=
+github.com/blinklabs-io/gouroboros v0.163.0/go.mod h1:J8m943TBvY+ZfYmIsI94ipvE8XHNhV1V5PNtywr9YAo=
 github.com/blinklabs-io/ouroboros-mock v0.9.1 h1:88LvCaivQ6j/JSb3j8t99lQvsgnWcjXGaMPdZngbxZo=
 github.com/blinklabs-io/ouroboros-mock v0.9.1/go.mod h1:wLZTHLwKdIC9axVzG7nyAynn2wfLp/ikvX9LjsDh8Xw=
 github.com/blinklabs-io/plutigo v0.0.27 h1:/leKVzb2XrgXo2yGsgpynpw/fh2sB8RNom+k3mXUwhA=

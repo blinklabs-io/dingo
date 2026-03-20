@@ -176,6 +176,69 @@ func (d *MetadataStorePostgres) GetUtxosByAddress(
 	return ret, nil
 }
 
+// GetUtxosByAddressWithOrdering returns UTxOs with transaction ordering metadata
+func (d *MetadataStorePostgres) GetUtxosByAddressWithOrdering(
+	addr ledger.Address,
+	txn types.Txn,
+) ([]models.UtxoWithOrdering, error) {
+	var ret []models.UtxoWithOrdering
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return nil, err
+	}
+	addrQuery := addressWhereClause(db, addr)
+	if addrQuery == nil {
+		return ret, nil
+	}
+
+	// Join with transaction to get ordering metadata
+	result := db.
+		Table("utxo").
+		Select(
+			"utxo.*, transaction.slot as tx_slot, transaction.block_index as tx_block_index",
+		).
+		Joins("LEFT JOIN transaction ON utxo.transaction_id = transaction.id").
+		Where("utxo.deleted_slot = 0").
+		Where(addrQuery).
+		Order(
+			"transaction.slot ASC, transaction.block_index ASC, utxo.output_idx ASC",
+		).
+		Scan(&ret)
+
+	if result.Error != nil {
+		return nil, result.Error
+	}
+
+	// Batch load assets for all UTxOs to avoid N+1 queries
+	if len(ret) > 0 {
+		utxoIDs := make([]uint, len(ret))
+		for i := range ret {
+			utxoIDs[i] = ret[i].ID
+		}
+
+		var assets []models.Asset
+		if err := db.Where("utxo_id IN ?", utxoIDs).Find(&assets).Error; err != nil {
+			return nil, err
+		}
+
+		// Map assets to their UTxOs
+		assetMap := make(map[uint][]models.Asset)
+		for i := range assets {
+			assetMap[assets[i].UtxoID] = append(
+				assetMap[assets[i].UtxoID],
+				assets[i],
+			)
+		}
+
+		// Assign assets to each UTxO
+		for i := range ret {
+			ret[i].Assets = assetMap[ret[i].ID]
+		}
+	}
+
+	return ret, nil
+}
+
 // GetUtxosByAddressAtSlot returns UTxOs for an address
 // that existed at a specific slot.
 func (d *MetadataStorePostgres) GetUtxosByAddressAtSlot(

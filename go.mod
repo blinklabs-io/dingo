@@ -10,14 +10,13 @@ require (
 	connectrpc.com/grpchealth v1.4.0
 	connectrpc.com/grpcreflect v1.3.0
 	github.com/Microsoft/go-winio v0.6.2
-	github.com/antithesishq/antithesis-sdk-go v0.6.0
 	github.com/aws/aws-sdk-go-v2 v1.41.4
 	github.com/aws/aws-sdk-go-v2/config v1.32.10
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.97.1
 	github.com/aws/smithy-go v1.24.2
 	github.com/blinklabs-io/bark v0.0.2
 	github.com/blinklabs-io/bursa v0.16.0
-	github.com/blinklabs-io/gouroboros v0.161.1
+	github.com/blinklabs-io/gouroboros v0.163.0
 	github.com/blinklabs-io/ouroboros-mock v0.9.1
 	github.com/blinklabs-io/plutigo v0.0.27
 	github.com/blockfrost/blockfrost-go v0.3.0
