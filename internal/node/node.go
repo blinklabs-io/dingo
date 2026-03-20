@@ -275,6 +275,7 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 			dingo.WithEvictionWatermark(cfg.EvictionWatermark),
 			dingo.WithRejectionWatermark(cfg.RejectionWatermark),
 			dingo.WithNetwork(cfg.Network),
+			dingo.WithNetworkMagic(cfg.NetworkMagic),
 			dingo.WithCardanoNodeConfig(nodeCfg),
 			dingo.WithListeners(listeners...),
 			dingo.WithOutboundSourcePort(cfg.RelayPort),

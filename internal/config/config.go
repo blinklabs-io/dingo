@@ -192,6 +192,7 @@ type Config struct {
 	ShutdownTimeout      string  `yaml:"shutdownTimeout"                                                  split_words:"true"`
 	LedgerCatchupTimeout string  `yaml:"ledgerCatchupTimeout"  envconfig:"DINGO_LEDGER_CATCHUP_TIMEOUT"`
 	Network              string  `yaml:"network"`
+	NetworkMagic         uint32  `yaml:"networkMagic"                                                     split_words:"true"`
 	MempoolCapacity      int64   `yaml:"mempoolCapacity"                                                  split_words:"true"`
 	EvictionWatermark    float64 `yaml:"evictionWatermark"  envconfig:"DINGO_MEMPOOL_EVICTION_WATERMARK"`
 	RejectionWatermark   float64 `yaml:"rejectionWatermark" envconfig:"DINGO_MEMPOOL_REJECTION_WATERMARK"`
@@ -365,6 +366,7 @@ var globalConfig = &Config{
 	IntersectTip:         false,
 	ValidateHistorical:   false,
 	Network:              "preview",
+	NetworkMagic:         0,
 	MetricsPort:          12798,
 	PrivateBindAddr:      "127.0.0.1",
 	PrivatePort:          3002,
