@@ -546,6 +546,17 @@ func (o *Ouroboros) chainsyncClientRollForward(
 				),
 			)
 		}
+		if !isInbound && o.ChainsyncState != nil {
+			o.ChainsyncState.RecordObservedHeader(
+				ledger.ChainsyncEvent{
+					ConnectionId: ctx.ConnectionId,
+					Point:        point,
+					Type:         blockType,
+					BlockHeader:  v,
+					Tip:          tip,
+				},
+			)
+		}
 		if !ingressEligible {
 			o.updateChainsyncMetrics(ctx.ConnectionId, tip)
 			return nil

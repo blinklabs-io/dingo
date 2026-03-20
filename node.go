@@ -504,6 +504,15 @@ func (n *Node) Run(ctx context.Context) error {
 					)
 				}
 			},
+			PeerHeaderLookupFunc: func(
+				connId ouroboros.ConnectionId,
+				hash []byte,
+			) (ledger.ChainsyncEvent, []byte, bool) {
+				if n.chainsyncState == nil {
+					return ledger.ChainsyncEvent{}, nil, false
+				}
+				return n.chainsyncState.LookupObservedHeader(connId, hash)
+			},
 			FatalErrorFunc: func(err error) {
 				n.config.logger.Error(
 					"fatal ledger error, initiating shutdown",

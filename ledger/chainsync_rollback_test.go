@@ -17,6 +17,7 @@ package ledger
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/hex"
 	"io"
 	"log/slog"
 	"net"
@@ -148,6 +149,90 @@ func TestTryResolveForkQueuesKnownPeerForkSegment(t *testing.T) {
 		Point:        ocommon.NewPoint(header2.SlotNumber(), forkHash2),
 		BlockHeader:  header2,
 	})
+
+	err := fixture.ls.chain.AddBlockHeader(header3)
+	var notFitErr chain.BlockNotFitChainTipError
+	require.ErrorAs(t, err, &notFitErr)
+
+	resolved := fixture.ls.tryResolveFork(
+		ChainsyncEvent{
+			ConnectionId: fixture.connId,
+			Point:        ocommon.NewPoint(header3.SlotNumber(), forkHash3),
+			BlockHeader:  header3,
+			Tip: ochainsync.Tip{
+				Point:       ocommon.NewPoint(header3.SlotNumber(), forkHash3),
+				BlockNumber: header3.BlockNumber(),
+			},
+		},
+		notFitErr,
+	)
+	require.True(t, resolved)
+
+	assert.Equal(t, fixture.ancestorTip, fixture.ls.chain.Tip())
+	assert.Equal(t, fixture.ancestorTip, fixture.ls.currentTip)
+	assert.Equal(t, 3, fixture.ls.chain.HeaderCount())
+
+	start, end := fixture.ls.chain.HeaderRange(10)
+	assert.Equal(t, uint64(header1.SlotNumber()), start.Slot)
+	assert.Equal(t, forkHash1, start.Hash)
+	assert.Equal(t, uint64(header3.SlotNumber()), end.Slot)
+	assert.Equal(t, forkHash3, end.Hash)
+}
+
+func TestTryResolveForkUsesObservedPeerHistoryFallback(t *testing.T) {
+	fixture := newChainsyncRollbackFixture(t)
+
+	forkHash1 := testHashBytes("observed-fork-block-1")
+	forkHash2 := testHashBytes("observed-fork-block-2")
+	forkHash3 := testHashBytes("observed-fork-block-3")
+	header1 := mockHeader{
+		hash:        lcommon.NewBlake2b256(forkHash1),
+		prevHash:    lcommon.NewBlake2b256(fixture.ancestorTip.Point.Hash),
+		blockNumber: fixture.currentTip.BlockNumber + 1,
+		slot:        fixture.currentTip.Point.Slot + 1,
+	}
+	header2 := mockHeader{
+		hash:        lcommon.NewBlake2b256(forkHash2),
+		prevHash:    lcommon.NewBlake2b256(forkHash1),
+		blockNumber: fixture.currentTip.BlockNumber + 2,
+		slot:        fixture.currentTip.Point.Slot + 2,
+	}
+	header3 := mockHeader{
+		hash:        lcommon.NewBlake2b256(forkHash3),
+		prevHash:    lcommon.NewBlake2b256(forkHash2),
+		blockNumber: fixture.currentTip.BlockNumber + 3,
+		slot:        fixture.currentTip.Point.Slot + 3,
+	}
+
+	observedHeaders := map[string]peerHeaderRecord{
+		hex.EncodeToString(forkHash1): {
+			event: ChainsyncEvent{
+				ConnectionId: fixture.connId,
+				Point:        ocommon.NewPoint(header1.SlotNumber(), forkHash1),
+				BlockHeader:  header1,
+			},
+			prevHash: append([]byte(nil), fixture.ancestorTip.Point.Hash...),
+		},
+		hex.EncodeToString(forkHash2): {
+			event: ChainsyncEvent{
+				ConnectionId: fixture.connId,
+				Point:        ocommon.NewPoint(header2.SlotNumber(), forkHash2),
+				BlockHeader:  header2,
+			},
+			prevHash: append([]byte(nil), forkHash1...),
+		},
+	}
+	fixture.ls.config.PeerHeaderLookupFunc = func(
+		connId ouroboros.ConnectionId,
+		hash []byte,
+	) (ChainsyncEvent, []byte, bool) {
+		require.Equal(t, fixture.connId, connId)
+		record, ok := observedHeaders[hex.EncodeToString(hash)]
+		if !ok {
+			return ChainsyncEvent{}, nil, false
+		}
+		return record.event, append([]byte(nil), record.prevHash...), true
+	}
 
 	err := fixture.ls.chain.AddBlockHeader(header3)
 	var notFitErr chain.BlockNotFitChainTipError

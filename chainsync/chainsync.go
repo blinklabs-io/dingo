@@ -16,6 +16,7 @@ package chainsync
 
 import (
 	"bytes"
+	"encoding/hex"
 	"fmt"
 	"slices"
 	"sync"
@@ -135,6 +136,9 @@ type State struct {
 	seenHeaders      map[uint64][]headerRecord
 	seenHeadersMutex sync.Mutex
 
+	observedHeaders      map[ouroboros.ConnectionId]*observedHeaderChain
+	observedHeadersMutex sync.RWMutex
+
 	sync.Mutex
 }
 
@@ -144,6 +148,18 @@ type headerRecord struct {
 	hash   []byte
 	connId ouroboros.ConnectionId
 }
+
+type observedHeaderRecord struct {
+	event    ledger.ChainsyncEvent
+	prevHash []byte
+}
+
+type observedHeaderChain struct {
+	order  []string
+	byHash map[string]observedHeaderRecord
+}
+
+const maxObservedHeadersPerConn = 256
 
 // NewState creates a new chainsync State with the given
 // event bus and ledger state using default configuration.
@@ -174,6 +190,9 @@ func NewStateWithConfig(
 		clients:        make(map[ouroboros.ConnectionId]*ChainsyncClientState),
 		trackedClients: make(map[ouroboros.ConnectionId]*TrackedClient),
 		seenHeaders:    make(map[uint64][]headerRecord),
+		observedHeaders: make(
+			map[ouroboros.ConnectionId]*observedHeaderChain,
+		),
 	}
 	return s
 }
@@ -252,6 +271,7 @@ func (s *State) RemoveClientConnId(
 		*s.activeClientConnId == connId
 	wasEligible := exists && !tc.ObservabilityOnly
 	delete(s.trackedClients, connId)
+	s.clearObservedHeaderHistory(connId)
 	if wasPrimary {
 		s.activeClientConnId = nil
 		s.promoteBestClientLocked()
@@ -530,6 +550,79 @@ func (s *State) UpdateClientTipWithoutDedup(
 	tip ochainsync.Tip,
 ) {
 	s.updateClientTip(connId, point, tip, false)
+}
+
+// RecordObservedHeader stores the raw per-connection header ancestry before
+// cross-peer dedup can suppress delivery into the ledger queue. This lets
+// fork resolution reconstruct the selected peer's candidate fragment even
+// when earlier headers were first seen from another peer.
+func (s *State) RecordObservedHeader(e ledger.ChainsyncEvent) {
+	if e.BlockHeader == nil || len(e.Point.Hash) == 0 {
+		return
+	}
+	prevHash := e.BlockHeader.PrevHash().Bytes()
+	if len(prevHash) == 0 {
+		return
+	}
+
+	s.observedHeadersMutex.Lock()
+	defer s.observedHeadersMutex.Unlock()
+
+	chainHistory := s.observedHeaders[e.ConnectionId]
+	if chainHistory == nil {
+		chainHistory = &observedHeaderChain{
+			order: make([]string, 0, maxObservedHeadersPerConn),
+			byHash: make(map[string]observedHeaderRecord,
+				maxObservedHeadersPerConn),
+		}
+		s.observedHeaders[e.ConnectionId] = chainHistory
+	}
+
+	hashKey := hex.EncodeToString(e.Point.Hash)
+	if _, exists := chainHistory.byHash[hashKey]; exists {
+		return
+	}
+	chainHistory.order = append(chainHistory.order, hashKey)
+	chainHistory.byHash[hashKey] = observedHeaderRecord{
+		event:    e,
+		prevHash: append([]byte(nil), prevHash...),
+	}
+	if len(chainHistory.order) <= maxObservedHeadersPerConn {
+		return
+	}
+	evictKey := chainHistory.order[0]
+	chainHistory.order = chainHistory.order[1:]
+	delete(chainHistory.byHash, evictKey)
+}
+
+// LookupObservedHeader returns a previously observed header for the given
+// connection/hash pair, along with its prev-hash ancestry.
+func (s *State) LookupObservedHeader(
+	connId ouroboros.ConnectionId,
+	hash []byte,
+) (ledger.ChainsyncEvent, []byte, bool) {
+	s.observedHeadersMutex.RLock()
+	defer s.observedHeadersMutex.RUnlock()
+
+	chainHistory := s.observedHeaders[connId]
+	if chainHistory == nil {
+		return ledger.ChainsyncEvent{}, nil, false
+	}
+	record, ok := chainHistory.byHash[hex.EncodeToString(hash)]
+	if !ok {
+		return ledger.ChainsyncEvent{}, nil, false
+	}
+	record.event.Point.Hash = cloneBytes(record.event.Point.Hash)
+	record.event.Tip.Point.Hash = cloneBytes(record.event.Tip.Point.Hash)
+	return record.event, append([]byte(nil), record.prevHash...), true
+}
+
+func (s *State) clearObservedHeaderHistory(
+	connId ouroboros.ConnectionId,
+) {
+	s.observedHeadersMutex.Lock()
+	defer s.observedHeadersMutex.Unlock()
+	delete(s.observedHeaders, connId)
 }
 
 func (s *State) updateClientTip(

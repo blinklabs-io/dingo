@@ -393,6 +393,15 @@ type SlotBattleRecorder interface {
 // the header dedup cache so the new connection can re-deliver blocks.
 type ConnectionSwitchFunc func()
 
+// PeerHeaderLookupFunc looks up a previously observed header for a peer
+// connection, even if that header was suppressed before entering the ledger
+// queue. It returns the recorded chainsync event, the header's prev-hash, and
+// whether the header was found.
+type PeerHeaderLookupFunc func(
+	connId ouroboros.ConnectionId,
+	hash []byte,
+) (ChainsyncEvent, []byte, bool)
+
 type LedgerStateConfig struct {
 	PromRegistry               prometheus.Registerer
 	Logger                     *slog.Logger
@@ -403,6 +412,7 @@ type LedgerStateConfig struct {
 	BlockfetchRequestRangeFunc BlockfetchRequestRangeFunc
 	GetActiveConnectionFunc    GetActiveConnectionFunc
 	ConnectionSwitchFunc       ConnectionSwitchFunc
+	PeerHeaderLookupFunc       PeerHeaderLookupFunc
 	FatalErrorFunc             FatalErrorFunc
 	ForgedBlockChecker         ForgedBlockChecker
 	SlotBattleRecorder         SlotBattleRecorder

@@ -509,11 +509,27 @@ func (ls *LedgerState) findPeerForkPath(
 				err,
 			)
 		}
-		if history == nil {
-			return nil, nil, nil
-		}
 		hashKey := hex.EncodeToString(prevHash)
-		record, ok := history.byHash[hashKey]
+		var (
+			record peerHeaderRecord
+			ok     bool
+		)
+		if history != nil {
+			record, ok = history.byHash[hashKey]
+		}
+		if !ok && ls.config.PeerHeaderLookupFunc != nil {
+			lookupEvent, lookupPrevHash, found := ls.config.PeerHeaderLookupFunc(
+				e.ConnectionId,
+				prevHash,
+			)
+			if found {
+				record = peerHeaderRecord{
+					event:    lookupEvent,
+					prevHash: lookupPrevHash,
+				}
+				ok = true
+			}
+		}
 		if !ok {
 			return nil, nil, nil
 		}

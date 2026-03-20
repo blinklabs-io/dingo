@@ -23,11 +23,31 @@ import (
 	"github.com/blinklabs-io/dingo/chainsync"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
+	"github.com/blinklabs-io/dingo/ledger"
 	ouroboros "github.com/blinklabs-io/gouroboros"
+	"github.com/blinklabs-io/gouroboros/ledger/babbage"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
 )
+
+type testBlockHeader struct {
+	hash        lcommon.Blake2b256
+	prevHash    lcommon.Blake2b256
+	blockNumber uint64
+	slot        uint64
+}
+
+func (h testBlockHeader) Hash() lcommon.Blake2b256          { return h.hash }
+func (h testBlockHeader) PrevHash() lcommon.Blake2b256      { return h.prevHash }
+func (h testBlockHeader) BlockNumber() uint64               { return h.blockNumber }
+func (h testBlockHeader) SlotNumber() uint64                { return h.slot }
+func (h testBlockHeader) IssuerVkey() lcommon.IssuerVkey    { return lcommon.IssuerVkey{} }
+func (h testBlockHeader) BlockBodySize() uint64             { return 0 }
+func (h testBlockHeader) Era() lcommon.Era                  { return babbage.EraBabbage }
+func (h testBlockHeader) Cbor() []byte                      { return nil }
+func (h testBlockHeader) BlockBodyHash() lcommon.Blake2b256 { return lcommon.Blake2b256{} }
 
 // newTestConnId creates a unique ConnectionId for testing by
 // using the id as the remote port number.
@@ -474,6 +494,46 @@ func TestHeaderDeduplication_DuplicateHeader(t *testing.T) {
 	// Second report of same hash is duplicate
 	isNew = s.UpdateClientTip(connB, point, tip)
 	require.False(t, isNew)
+}
+
+func TestObservedHeaderHistoryPersistsAcrossDedupAndClearsOnRemove(
+	t *testing.T,
+) {
+	bus := newTestEventBus(t)
+	s := newTestState(t, bus, chainsync.DefaultConfig())
+
+	conn := newTestConnId(1)
+	s.AddClientConnId(conn)
+
+	hash := []byte("hash-1")
+	prevHash := []byte("prev-hash-1")
+	point := ocommon.NewPoint(100, hash)
+	tip := ochainsync.Tip{Point: point, BlockNumber: 10}
+	header := testBlockHeader{
+		hash:        lcommon.NewBlake2b256(hash),
+		prevHash:    lcommon.NewBlake2b256(prevHash),
+		blockNumber: tip.BlockNumber,
+		slot:        point.Slot,
+	}
+
+	s.RecordObservedHeader(ledger.ChainsyncEvent{
+		ConnectionId: conn,
+		Point:        point,
+		BlockHeader:  header,
+		Tip:          tip,
+	})
+
+	recordedEvent, recordedPrevHash, ok := s.LookupObservedHeader(
+		conn,
+		hash,
+	)
+	require.True(t, ok)
+	require.Equal(t, point, recordedEvent.Point)
+	require.Equal(t, header.prevHash.Bytes(), recordedPrevHash)
+
+	s.RemoveClientConnId(conn)
+	_, _, ok = s.LookupObservedHeader(conn, hash)
+	require.False(t, ok)
 }
 
 // --- Fork detection tests ---
