@@ -85,7 +85,19 @@ const (
 	// Chainsync re-sync reasons
 	resyncReasonRollbackAhead    = "rollback point ahead of local tip"
 	resyncReasonRollbackNotFound = "rollback point not found"
+
+	maxPeerHeaderHistoryPerConn = 256
 )
+
+type peerHeaderRecord struct {
+	event    ChainsyncEvent
+	prevHash []byte
+}
+
+type peerHeaderChain struct {
+	order  []string
+	byHash map[string]peerHeaderRecord
+}
 
 func (ls *LedgerState) handleEventChainsync(evt event.Event) {
 	ls.chainsyncMutex.Lock()
@@ -280,6 +292,7 @@ func (ls *LedgerState) handleConnectionClosedEvent(evt event.Event) {
 		ls.selectedBlockfetchConnId = ouroboros.ConnectionId{}
 	}
 	delete(ls.bufferedHeaderEvents, connIdKey(e.ConnectionId))
+	delete(ls.peerHeaderHistory, connIdKey(e.ConnectionId))
 	if sameConnectionId(ls.headerPipelineConnId, e.ConnectionId) {
 		ls.clearQueuedHeaders()
 	}
@@ -432,6 +445,86 @@ func (ls *LedgerState) bufferHeaderEvent(e ChainsyncEvent) {
 func (ls *LedgerState) clearQueuedHeaders() {
 	ls.chain.ClearHeaders()
 	ls.headerPipelineConnId = ouroboros.ConnectionId{}
+}
+
+func (ls *LedgerState) recordPeerHeaderHistory(e ChainsyncEvent) {
+	if e.BlockHeader == nil || len(e.Point.Hash) == 0 {
+		return
+	}
+	if ls.peerHeaderHistory == nil {
+		ls.peerHeaderHistory = make(map[string]*peerHeaderChain)
+	}
+	key := connIdKey(e.ConnectionId)
+	history := ls.peerHeaderHistory[key]
+	if history == nil {
+		history = &peerHeaderChain{
+			order: make([]string, 0, maxPeerHeaderHistoryPerConn),
+			byHash: make(map[string]peerHeaderRecord,
+				maxPeerHeaderHistoryPerConn),
+		}
+		ls.peerHeaderHistory[key] = history
+	}
+	hashKey := hex.EncodeToString(e.Point.Hash)
+	if _, ok := history.byHash[hashKey]; ok {
+		return
+	}
+	history.order = append(history.order, hashKey)
+	history.byHash[hashKey] = peerHeaderRecord{
+		event:    e,
+		prevHash: append([]byte(nil), e.BlockHeader.PrevHash().Bytes()...),
+	}
+	if len(history.order) <= maxPeerHeaderHistoryPerConn {
+		return
+	}
+	evictKey := history.order[0]
+	history.order = history.order[1:]
+	delete(history.byHash, evictKey)
+}
+
+func (ls *LedgerState) findPeerForkPath(
+	e ChainsyncEvent,
+	initialPrevHash []byte,
+) (*ocommon.Point, []ChainsyncEvent, error) {
+	prevHash := append([]byte(nil), initialPrevHash...)
+	history := ls.peerHeaderHistory[connIdKey(e.ConnectionId)]
+	pathReversed := []ChainsyncEvent{e}
+	visited := map[string]struct{}{
+		hex.EncodeToString(e.Point.Hash): {},
+	}
+	for depth := 0; depth < maxPeerHeaderHistoryPerConn &&
+		len(prevHash) > 0; depth++ {
+		ancestorBlock, err := database.BlockByHash(ls.db, prevHash)
+		if err == nil {
+			point := ocommon.NewPoint(
+				ancestorBlock.Slot,
+				ancestorBlock.Hash,
+			)
+			slices.Reverse(pathReversed)
+			return &point, pathReversed, nil
+		}
+		if !errors.Is(err, models.ErrBlockNotFound) {
+			return nil, nil, fmt.Errorf(
+				"lookup ancestor hash %x: %w",
+				prevHash,
+				err,
+			)
+		}
+		if history == nil {
+			return nil, nil, nil
+		}
+		hashKey := hex.EncodeToString(prevHash)
+		record, ok := history.byHash[hashKey]
+		if !ok {
+			return nil, nil, nil
+		}
+		if _, seen := visited[hashKey]; seen {
+			return nil, nil, nil
+		}
+		visited[hashKey] = struct{}{}
+		pathReversed = append(pathReversed, record.event)
+		prevHash = append(prevHash[:0], record.prevHash...)
+	}
+	return nil, nil, nil
 }
 
 func connIdKey(connId ouroboros.ConnectionId) string {
@@ -865,6 +958,7 @@ func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 		ls.metrics.forks.Add(1)
 	}
 	ls.chainsyncState = SyncingChainsyncState
+	ls.recordPeerHeaderHistory(e)
 	if ls.shouldBufferHeaderEvent(e) {
 		return nil
 	}
@@ -1040,9 +1134,11 @@ func (ls *LedgerState) tryResolveFork(
 		return false
 	}
 
-	// The incoming header's prevHash is the common ancestor hash.
-	// Look it up in the database to get its slot for the rollback
-	// point.
+	// Walk backward through the peer's recently seen header chain until
+	// we find a hash that exists locally. The current header's prevHash is
+	// only the common ancestor when the peer is handing us the first header
+	// after the fork point; once the winning fork is several headers ahead,
+	// we need the peer's recent ancestry to locate the real rollback point.
 	prevHashBytes, err := hex.DecodeString(notFitErr.BlockPrevHash())
 	if err != nil {
 		ls.config.Logger.Warn(
@@ -1053,25 +1149,8 @@ func (ls *LedgerState) tryResolveFork(
 		)
 		return false
 	}
-	ancestorBlock, err := database.BlockByHash(ls.db, prevHashBytes)
+	ancestorPoint, forkPath, err := ls.findPeerForkPath(e, prevHashBytes)
 	if err != nil {
-		if errors.Is(err, models.ErrBlockNotFound) {
-			// The peer's header stream is not continuous with our local
-			// chain view. This usually means we buffered or resumed a
-			// stale stream and need a fresh intersection on that
-			// connection instead of waiting for more mismatches.
-			ls.config.Logger.Debug(
-				"common ancestor not found locally, triggering chainsync re-sync",
-				"component", "ledger",
-				"connection_id", e.ConnectionId.String(),
-				"block_prev_hash", notFitErr.BlockPrevHash(),
-			)
-			ls.requestChainsyncResync(
-				e.ConnectionId,
-				resyncReasonRollbackNotFound,
-			)
-			return true
-		}
 		ls.config.Logger.Error(
 			"unexpected error looking up common ancestor",
 			"component", "ledger",
@@ -1080,10 +1159,34 @@ func (ls *LedgerState) tryResolveFork(
 		)
 		return false
 	}
+	if ancestorPoint == nil {
+		// The peer's header stream is not continuous with our local chain
+		// view or we have not yet seen enough of its ancestry to resolve the
+		// fork locally. Force a fresh intersection on that connection.
+		ls.config.Logger.Debug(
+			"common ancestor not found locally, triggering chainsync re-sync",
+			"component", "ledger",
+			"connection_id", e.ConnectionId.String(),
+			"block_prev_hash", notFitErr.BlockPrevHash(),
+		)
+		ls.requestChainsyncResync(
+			e.ConnectionId,
+			resyncReasonRollbackNotFound,
+		)
+		return true
+	}
+	ancestorBlock, err := database.BlockByHash(ls.db, ancestorPoint.Hash)
+	if err != nil {
+		ls.config.Logger.Error(
+			"failed to reload common ancestor block",
+			"component", "ledger",
+			"error", err,
+			"ancestor_hash", hex.EncodeToString(ancestorPoint.Hash),
+		)
+		return false
+	}
 
-	rollbackPoint := ocommon.NewPoint(
-		ancestorBlock.Slot, ancestorBlock.Hash,
-	)
+	rollbackPoint := *ancestorPoint
 	ls.config.Logger.Info(
 		"fork detected: rolling back to common ancestor",
 		"component", "ledger",
@@ -1142,25 +1245,42 @@ func (ls *LedgerState) tryResolveFork(
 	// "switched to fork" and increments the fork metric.
 	ls.chainsyncState = RollbackChainsyncState
 
-	// Rollback succeeded — re-add the header that triggered fork
-	// detection. Only reset mismatch tracking on successful header
-	// placement so that a failed re-add does not mask the fork and
-	// cause endless rollback loops.
-	if err := ls.chain.AddBlockHeader(
-		e.BlockHeader,
-	); err != nil {
-		ls.config.Logger.Warn(
-			"failed to add header after fork rollback",
-			"component", "ledger",
-			"error", err,
-			"slot", e.Point.Slot,
-		)
-		// Do not reset mismatch state — let the caller know the
-		// resolution failed so subsequent mismatch tracking proceeds.
-		return false
+	// Rollback succeeded — re-add the known peer fork segment from the
+	// common ancestor forward. Re-adding only the latest mismatching header
+	// works for one-block forks but fails once the winning fork is already
+	// several headers ahead.
+	for _, forkEvent := range forkPath {
+		if err := ls.chain.AddBlockHeader(forkEvent.BlockHeader); err != nil {
+			ls.config.Logger.Warn(
+				"failed to queue header after fork rollback",
+				"component", "ledger",
+				"error", err,
+				"slot", forkEvent.Point.Slot,
+				"connection_id", forkEvent.ConnectionId.String(),
+			)
+			// Do not reset mismatch state — let the caller know the
+			// resolution failed so subsequent mismatch tracking proceeds.
+			return false
+		}
 	}
 	ls.headerMismatchCount = 0
 	ls.rollbackHistory = nil
+	if ls.config.BlockfetchRequestRangeFunc != nil &&
+		ls.chain.HeaderCount() > 0 {
+		ls.chainsyncBlockfetchMutex.Lock()
+		if ls.chainsyncBlockfetchReadyChan == nil {
+			ls.selectedBlockfetchConnId = e.ConnectionId
+			if err := ls.startQueuedBlockfetchLocked(e.ConnectionId); err != nil {
+				ls.config.Logger.Warn(
+					"failed to start blockfetch after fork rollback",
+					"component", "ledger",
+					"error", err,
+					"connection_id", e.ConnectionId.String(),
+				)
+			}
+		}
+		ls.chainsyncBlockfetchMutex.Unlock()
+	}
 	return true
 }
 

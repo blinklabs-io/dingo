@@ -506,6 +506,7 @@ type LedgerState struct {
 	// Header mismatch tracking for fork detection and re-sync
 	headerMismatchCount  int // consecutive header mismatch count
 	bufferedHeaderEvents map[string][]ChainsyncEvent
+	peerHeaderHistory    map[string]*peerHeaderChain
 }
 
 // EraTransitionResult holds computed state from an era transition
