@@ -24,18 +24,25 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestWatchTxBuildMessages_RollbackSkipsDecode(t *testing.T) {
+func TestWatchTxBuildRollbackMessages_EmitsUndoWhenPointNotFound(t *testing.T) {
 	t.Parallel()
-	isRb, out, err := watchTxBuildMessages(
-		true,
-		0,
-		nil,
-		0, 0, nil,
-		func(ledger.Transaction) bool { return true },
+	history := []watchTxHistoryEntry{
+		{
+			point: ocommon.NewPoint(10, []byte{0xaa}),
+			appliedTxs: []*watch.AnyChainTx{
+				{Chain: &watch.AnyChainTx_Cardano{}},
+			},
+		},
+	}
+	out, found := watchTxBuildRollbackMessages(
+		&history,
+		ocommon.NewPoint(0, nil),
 	)
-	require.NoError(t, err)
-	require.True(t, isRb)
-	require.Nil(t, out)
+	require.False(t, found)
+	require.Len(t, out, 1)
+	_, ok := out[0].Action.(*watch.WatchTxResponse_Undo)
+	require.True(t, ok, "expected Undo action")
+	require.Empty(t, history)
 }
 
 func TestWatchTxBuildMessages_IdleOnEmptyBlock(t *testing.T) {
@@ -54,8 +61,7 @@ func TestWatchTxBuildMessages_IdleOnEmptyBlock(t *testing.T) {
 	require.Empty(t, blk.Transactions())
 
 	wantHash := append([]byte(nil), blk.Hash().Bytes()...)
-	isRb, out, err := watchTxBuildMessages(
-		false,
+	appliedTxs, out, err := watchTxBuildForwardMessages(
 		uint(immBlock.Type),
 		immBlock.Cbor,
 		blk.SlotNumber(),
@@ -64,7 +70,7 @@ func TestWatchTxBuildMessages_IdleOnEmptyBlock(t *testing.T) {
 		func(ledger.Transaction) bool { return true },
 	)
 	require.NoError(t, err)
-	require.False(t, isRb)
+	require.Empty(t, appliedTxs)
 	require.Len(t, out, 1)
 	idle, ok := out[0].Action.(*watch.WatchTxResponse_Idle)
 	require.True(t, ok, "expected Idle action")
@@ -97,8 +103,7 @@ func TestWatchTxBuildMessages_IdleWhenNoPredicateMatch(t *testing.T) {
 	require.NotEmpty(t, blk.Transactions())
 
 	metaHash := append([]byte(nil), blk.Hash().Bytes()...)
-	isRb, out, err := watchTxBuildMessages(
-		false,
+	appliedTxs, out, err := watchTxBuildForwardMessages(
 		uint(immBlock.Type),
 		immBlock.Cbor,
 		blk.SlotNumber(),
@@ -107,7 +112,7 @@ func TestWatchTxBuildMessages_IdleWhenNoPredicateMatch(t *testing.T) {
 		func(ledger.Transaction) bool { return false },
 	)
 	require.NoError(t, err)
-	require.False(t, isRb)
+	require.Empty(t, appliedTxs)
 	require.Len(t, out, 1)
 	idle, ok := out[0].Action.(*watch.WatchTxResponse_Idle)
 	require.True(t, ok)
@@ -137,8 +142,7 @@ func TestWatchTxBuildMessages_ApplyWhenMatching(t *testing.T) {
 	blk, err := ledger.NewBlockFromCbor(immBlock.Type, immBlock.Cbor)
 	require.NoError(t, err)
 
-	isRb, out, err := watchTxBuildMessages(
-		false,
+	appliedTxs, out, err := watchTxBuildForwardMessages(
 		uint(immBlock.Type),
 		immBlock.Cbor,
 		blk.SlotNumber(),
@@ -147,10 +151,70 @@ func TestWatchTxBuildMessages_ApplyWhenMatching(t *testing.T) {
 		func(ledger.Transaction) bool { return true },
 	)
 	require.NoError(t, err)
-	require.False(t, isRb)
+	require.Len(t, appliedTxs, len(blk.Transactions()))
 	require.Len(t, out, len(blk.Transactions()))
 	for _, resp := range out {
 		_, ok := resp.Action.(*watch.WatchTxResponse_Apply)
 		require.True(t, ok, "expected Apply for each transaction")
 	}
+}
+
+func TestWatchTxBuildRollbackMessages_StopsAtRollbackPoint(t *testing.T) {
+	t.Parallel()
+	txA := &watch.AnyChainTx{Chain: &watch.AnyChainTx_Cardano{}}
+	txB := &watch.AnyChainTx{Chain: &watch.AnyChainTx_Cardano{}}
+	history := []watchTxHistoryEntry{
+		{
+			point:      ocommon.NewPoint(100, []byte{0x01}),
+			appliedTxs: []*watch.AnyChainTx{txA},
+		},
+		{
+			point:      ocommon.NewPoint(101, []byte{0x02}),
+			appliedTxs: nil,
+		},
+		{
+			point:      ocommon.NewPoint(102, []byte{0x03}),
+			appliedTxs: []*watch.AnyChainTx{txB},
+		},
+	}
+
+	out, found := watchTxBuildRollbackMessages(
+		&history,
+		ocommon.NewPoint(101, []byte{0x02}),
+	)
+	require.True(t, found)
+	require.Len(t, out, 1)
+	undo, ok := out[0].Action.(*watch.WatchTxResponse_Undo)
+	require.True(t, ok)
+	require.Equal(t, txB, undo.Undo)
+	require.Len(t, history, 2)
+	require.True(
+		t,
+		pointsEqual(history[len(history)-1].point, ocommon.NewPoint(101, []byte{0x02})),
+	)
+}
+
+func TestPointsEqual(t *testing.T) {
+	t.Parallel()
+	require.True(
+		t,
+		pointsEqual(
+			ocommon.NewPoint(10, []byte{0xaa, 0xbb}),
+			ocommon.NewPoint(10, []byte{0xaa, 0xbb}),
+		),
+	)
+	require.False(
+		t,
+		pointsEqual(
+			ocommon.NewPoint(10, []byte{0xaa, 0xbb}),
+			ocommon.NewPoint(10, []byte{0xaa, 0xcc}),
+		),
+	)
+	require.False(
+		t,
+		pointsEqual(
+			ocommon.NewPoint(10, []byte{0xaa, 0xbb}),
+			ocommon.NewPoint(11, []byte{0xaa, 0xbb}),
+		),
+	)
 }

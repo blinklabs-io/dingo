@@ -15,49 +15,57 @@
 package utxorpc
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"errors"
 	"fmt"
 
 	"connectrpc.com/connect"
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	watch "github.com/utxorpc/go-codegen/utxorpc/v1alpha/watch"
 	"github.com/utxorpc/go-codegen/utxorpc/v1alpha/watch/watchconnect"
 )
 
-// watchTxBuildMessages returns stream messages for one chain iterator step.
-// When rollback is true, isRollback is true and out is nil (no block CBOR).
+const watchTxUndoHistoryBlocks = 256
+
+type watchTxHistoryEntry struct {
+	point      ocommon.Point
+	prevHash   []byte
+	appliedTxs []*watch.AnyChainTx
+}
+
+// watchTxBuildForwardMessages returns stream messages for one forward block.
 // For a forward block with no predicate matches, out contains a single Idle
-// heartbeat with the block reference.
-func watchTxBuildMessages(
-	rollback bool,
+// heartbeat with the block reference. The returned appliedTxs are used to build
+// Undo messages if a rollback later invalidates this block.
+func watchTxBuildForwardMessages(
 	blockType uint,
 	blockCbor []byte,
 	blockSlot, blockHeight uint64,
 	blockHash []byte,
 	shouldSendTx func(ledger.Transaction) bool,
-) (isRollback bool, out []*watch.WatchTxResponse, err error) {
-	if rollback {
-		return true, nil, nil
-	}
+) (appliedTxs []*watch.AnyChainTx, out []*watch.WatchTxResponse, err error) {
 	block, err := ledger.NewBlockFromCbor(blockType, blockCbor)
 	if err != nil {
-		return false, nil, err
+		return nil, nil, err
 	}
 	txs := block.Transactions()
 	applies := make([]*watch.WatchTxResponse, 0, len(txs))
+	applied := make([]*watch.AnyChainTx, 0, len(txs))
 	for _, tx := range txs {
 		tmpTx, err := tx.Utxorpc()
 		if err != nil {
-			return false, nil, fmt.Errorf("convert transaction: %w", err)
+			return nil, nil, fmt.Errorf("convert transaction: %w", err)
 		}
 		if !shouldSendTx(tx) {
 			continue
 		}
 		var act watch.AnyChainTx
 		act.Chain = &watch.AnyChainTx_Cardano{Cardano: tmpTx}
+		applied = append(applied, &act)
 		applies = append(applies, &watch.WatchTxResponse{
 			Action: &watch.WatchTxResponse_Apply{Apply: &act},
 		})
@@ -73,9 +81,98 @@ func watchTxBuildMessages(
 				},
 			},
 		}
-		return false, []*watch.WatchTxResponse{idle}, nil
+		return nil, []*watch.WatchTxResponse{idle}, nil
 	}
-	return false, applies, nil
+	return applied, applies, nil
+}
+
+func pointsEqual(a, b ocommon.Point) bool {
+	return a.Slot == b.Slot && bytes.Equal(a.Hash, b.Hash)
+}
+
+func watchTxBuildRollbackMessages(
+	history *[]watchTxHistoryEntry,
+	rollbackPoint ocommon.Point,
+) (msgs []*watch.WatchTxResponse, found bool) {
+	h := *history
+	var out []*watch.WatchTxResponse
+	for len(h) > 0 {
+		last := h[len(h)-1]
+		if pointsEqual(last.point, rollbackPoint) {
+			found = true
+			break
+		}
+		for i := len(last.appliedTxs) - 1; i >= 0; i-- {
+			out = append(out, &watch.WatchTxResponse{
+				Action: &watch.WatchTxResponse_Undo{
+					Undo: last.appliedTxs[i],
+				},
+			})
+		}
+		h = h[:len(h)-1]
+	}
+	*history = h
+	return out, found
+}
+
+func (s *watchServiceServer) watchTxFetchRollbackUndoFromBlocks(
+	ctx context.Context,
+	startHash []byte,
+	rollbackPoint ocommon.Point,
+	shouldSendTx func(ledger.Transaction) bool,
+) ([]*watch.WatchTxResponse, error) {
+	hash := append([]byte(nil), startHash...)
+	out := make([]*watch.WatchTxResponse, 0, 64)
+	const maxWalkBlocks = 2160
+	for i := 0; i < maxWalkBlocks; i++ {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		if len(hash) == 0 {
+			return out, nil
+		}
+		block, err := s.utxorpc.config.LedgerState.BlockByHash(hash)
+		if err != nil {
+			if errors.Is(err, models.ErrBlockNotFound) {
+				return out, nil
+			}
+			return nil, err
+		}
+		if pointsEqual(
+			ocommon.NewPoint(block.Slot, block.Hash),
+			rollbackPoint,
+		) {
+			return out, nil
+		}
+		// We walk strictly backward via PrevHash. Once we're at-or-before
+		// rollback slot without exact point match, the rollback point cannot
+		// be reached by continuing this walk.
+		if block.Slot < rollbackPoint.Slot ||
+			(block.Slot == rollbackPoint.Slot &&
+				!bytes.Equal(block.Hash, rollbackPoint.Hash)) {
+			return out, nil
+		}
+		appliedTxs, _, err := watchTxBuildForwardMessages(
+			block.Type,
+			block.Cbor,
+			block.Slot,
+			block.Number,
+			block.Hash,
+			shouldSendTx,
+		)
+		if err != nil {
+			return nil, err
+		}
+		for j := len(appliedTxs) - 1; j >= 0; j-- {
+			out = append(out, &watch.WatchTxResponse{
+				Action: &watch.WatchTxResponse_Undo{
+					Undo: appliedTxs[j],
+				},
+			})
+		}
+		hash = append([]byte(nil), block.PrevHash...)
+	}
+	return out, fmt.Errorf("rollback fetch exceeded %d blocks", maxWalkBlocks)
 }
 
 // watchServiceServer implements the WatchService API
@@ -165,6 +262,7 @@ func (s *watchServiceServer) WatchTx(
 			predicate.GetMatch().GetCardano(),
 		)
 	}
+	history := make([]watchTxHistoryEntry, 0, 256)
 
 	for {
 		next, err := chainIter.Next(true)
@@ -184,29 +282,79 @@ func (s *watchServiceServer) WatchTx(
 		if next == nil {
 			continue
 		}
-		isRollback, msgs, err := watchTxBuildMessages(
-			next.Rollback,
-			next.Block.Type,
-			next.Block.Cbor,
-			next.Block.Slot,
-			next.Block.Number,
-			next.Block.Hash,
-			shouldSendTx,
-		)
-		if err != nil {
-			s.utxorpc.config.Logger.Error(
-				"failed to get block",
-				"error", err,
-			)
-			return err
-		}
-		if isRollback {
+		var msgs []*watch.WatchTxResponse
+		if next.Rollback {
+			var fetchCh chan struct {
+				msgs []*watch.WatchTxResponse
+				err  error
+			}
+			if len(history) > 0 {
+				startHash := append([]byte(nil), history[0].prevHash...)
+				fetchCh = make(chan struct {
+					msgs []*watch.WatchTxResponse
+					err  error
+				}, 1)
+				go func() {
+					fetchedMsgs, fetchedErr := s.watchTxFetchRollbackUndoFromBlocks(
+						ctx,
+						startHash,
+						next.Point,
+						shouldSendTx,
+					)
+					fetchCh <- struct {
+						msgs []*watch.WatchTxResponse
+						err  error
+					}{
+						msgs: fetchedMsgs,
+						err:  fetchedErr,
+					}
+				}()
+			}
+
+			historyMsgs, found := watchTxBuildRollbackMessages(&history, next.Point)
+			msgs = append(msgs, historyMsgs...)
+			if !found && fetchCh != nil {
+				fetched := <-fetchCh
+				if fetched.err != nil {
+					s.utxorpc.config.Logger.Error(
+						"WatchTx rollback fetch failed",
+						"error", fetched.err,
+					)
+					return fetched.err
+				}
+				msgs = append(msgs, fetched.msgs...)
+			}
 			s.utxorpc.config.Logger.Debug(
-				"WatchTx skipping rollback (no block payload)",
+				"WatchTx processed rollback",
 				"slot", next.Point.Slot,
 				"hash", hex.EncodeToString(next.Point.Hash),
+				"undo_count", len(msgs),
 			)
-			continue
+		} else {
+			appliedTxs, forwardMsgs, err := watchTxBuildForwardMessages(
+				next.Block.Type,
+				next.Block.Cbor,
+				next.Block.Slot,
+				next.Block.Number,
+				next.Block.Hash,
+				shouldSendTx,
+			)
+			if err != nil {
+				s.utxorpc.config.Logger.Error(
+					"failed to get block",
+					"error", err,
+				)
+				return err
+			}
+			msgs = forwardMsgs
+			history = append(history, watchTxHistoryEntry{
+				point:      ocommon.NewPoint(next.Block.Slot, next.Block.Hash),
+				prevHash:   append([]byte(nil), next.Block.PrevHash...),
+				appliedTxs: appliedTxs,
+			})
+			if len(history) > watchTxUndoHistoryBlocks {
+				history = history[len(history)-watchTxUndoHistoryBlocks:]
+			}
 		}
 		for _, resp := range msgs {
 			if err := stream.Send(resp); err != nil {
