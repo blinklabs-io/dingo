@@ -316,7 +316,8 @@ func TestTryRecoverFromTxValidationErrorFallsBackToTxBlobOffsets(
 	)
 	require.NoError(t, err)
 	require.True(t, recovered)
-	assert.Equal(t, parentTip, ls.currentTip)
+	assert.Less(t, ls.currentTip.Point.Slot, currentTip.Point.Slot)
+	assert.LessOrEqual(t, ls.currentTip.Point.Slot, parentTip.Point.Slot)
 }
 
 func TestTryRecoverFromTxValidationErrorFallsBackToChainScan(t *testing.T) {
@@ -449,7 +450,156 @@ func TestTryRecoverFromTxValidationErrorFallsBackToChainScan(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.True(t, recovered)
-	assert.Equal(t, parentTip, ls.currentTip)
+	assert.Less(t, ls.currentTip.Point.Slot, currentTip.Point.Slot)
+	assert.LessOrEqual(t, ls.currentTip.Point.Slot, parentTip.Point.Slot)
+}
+
+func TestTryRecoverFromTxValidationErrorRecoversDependencyClosure(
+	t *testing.T,
+) {
+	db, err := database.New(&database.Config{
+		BlobPlugin:     "badger",
+		MetadataPlugin: "sqlite",
+		DataDir:        t.TempDir(),
+	})
+	require.NoError(t, err)
+	defer db.Close()
+
+	cm, err := chain.NewManager(db, nil)
+	require.NoError(t, err)
+
+	imm, err := immutable.New("../database/immutable/testdata")
+	require.NoError(t, err)
+	iter, err := imm.BlocksFromPoint(ocommon.Point{})
+	require.NoError(t, err)
+	defer iter.Close()
+
+	type replayRecoveryChainBlock struct {
+		raw   chain.RawBlock
+		block gledger.Block
+	}
+	type replayRecoverySeenTx struct {
+		block replayRecoveryChainBlock
+		tx    lcommon.Transaction
+	}
+	var chainBlocks []replayRecoveryChainBlock
+	seenTxs := make(map[string]replayRecoverySeenTx)
+	var producerBlock replayRecoveryChainBlock
+	var intermediateBlock replayRecoveryChainBlock
+	var failingBlock replayRecoveryChainBlock
+	var failingInput lcommon.TransactionInput
+	found := false
+	for i := 0; i < 20000 && !found; i++ {
+		immBlock, err := iter.Next()
+		require.NoError(t, err)
+		require.NotNil(t, immBlock)
+		block, err := gledger.NewBlockFromCbor(immBlock.Type, immBlock.Cbor)
+		require.NoError(t, err)
+		chainBlock := replayRecoveryChainBlock{
+			raw: chain.RawBlock{
+				Slot:        block.SlotNumber(),
+				Hash:        block.Hash().Bytes(),
+				BlockNumber: block.BlockNumber(),
+				Type:        uint(block.Type()),
+				PrevHash:    block.PrevHash().Bytes(),
+				Cbor:        block.Cbor(),
+			},
+			block: block,
+		}
+		chainBlocks = append(chainBlocks, chainBlock)
+		for _, tx := range block.Transactions() {
+			for _, input := range collectReferencedInputs(tx) {
+				mid, ok := seenTxs[string(input.Id().Bytes())]
+				if !ok {
+					continue
+				}
+				for _, midInput := range collectReferencedInputs(mid.tx) {
+					producer, ok := seenTxs[string(midInput.Id().Bytes())]
+					if !ok {
+						continue
+					}
+					producerBlock = producer.block
+					intermediateBlock = mid.block
+					failingBlock = chainBlock
+					failingInput = input
+					found = true
+					break
+				}
+				if found {
+					break
+				}
+			}
+			seenTxs[string(tx.Hash().Bytes())] = replayRecoverySeenTx{
+				block: chainBlock,
+				tx:    tx,
+			}
+			if found {
+				break
+			}
+		}
+	}
+	require.True(t, found, "expected to find a two-hop tx dependency in immutable test data")
+	require.NoError(
+		t,
+		cm.PrimaryChain().AddRawBlocks(func() []chain.RawBlock {
+			ret := make([]chain.RawBlock, 0, len(chainBlocks))
+			for _, block := range chainBlocks {
+				ret = append(ret, block.raw)
+			}
+			return ret
+		}()),
+	)
+
+	currentTip := ochainsync.Tip{
+		Point: ocommon.NewPoint(
+			failingBlock.raw.Slot,
+			failingBlock.raw.Hash,
+		),
+		BlockNumber: failingBlock.raw.BlockNumber,
+	}
+	require.NoError(
+		t,
+		db.SetBlockNonce(
+			currentTip.Point.Hash,
+			currentTip.Point.Slot,
+			[]byte("nonce-current"),
+			false,
+			nil,
+		),
+	)
+	require.NoError(t, db.SetTip(currentTip, nil))
+
+	ls, err := NewLedgerState(LedgerStateConfig{
+		Database:          db,
+		ChainManager:      cm,
+		CardanoNodeConfig: newTestShelleyGenesisCfg(t),
+		Logger: slog.New(
+			slog.NewJSONHandler(io.Discard, nil),
+		),
+	})
+	require.NoError(t, err)
+	ls.metrics.init(prometheus.NewRegistry())
+	ls.currentTip = currentTip
+	ls.currentTipBlockNonce = []byte("nonce-current")
+
+	recovered, err := ls.tryRecoverFromTxValidationError(
+		&txValidationError{
+			BlockPoint: currentTip.Point,
+			TxHash:     testHashBytes("dependency-closure-failing"),
+			Inputs: []lcommon.TransactionInput{
+				failingInput,
+			},
+			Cause: errors.New("bad input"),
+		},
+	)
+	require.NoError(t, err)
+	require.True(t, recovered)
+	assert.Less(t, ls.currentTip.Point.Slot, producerBlock.raw.Slot)
+	assert.Less(
+		t,
+		ls.currentTip.Point.Slot,
+		intermediateBlock.raw.Slot,
+	)
 }
 
 func TestTryRecoverFromTxValidationErrorFallsBackToSecurityParamWindow(

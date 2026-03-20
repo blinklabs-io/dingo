@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"bytes"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -56,6 +57,29 @@ type replayRecoveryCandidate struct {
 	ProducerBlock models.Block
 	RollbackPoint ocommon.Point
 	Strategy      string
+}
+
+type replayRecoveryPendingInput struct {
+	Input   lcommon.TransactionInput
+	MaxSlot uint64
+}
+
+type replayRecoveryResolvedProducer struct {
+	Input         lcommon.TransactionInput
+	ProducerTx    *models.Transaction
+	ProducerBlock models.Block
+	Tx            lcommon.Transaction
+	Strategy      string
+}
+
+type replayRecoveryChainIndex struct {
+	Txs         map[string]replayRecoveryChainTx
+	OldestBlock *models.Block
+}
+
+type replayRecoveryChainTx struct {
+	Block models.Block
+	Tx    lcommon.Transaction
 }
 
 func collectReferencedInputs(tx lcommon.Transaction) []lcommon.TransactionInput {
@@ -119,127 +143,96 @@ func (ls *LedgerState) tryRecoverFromTxValidationError(
 func (ls *LedgerState) findReplayRecoveryCandidate(
 	validationErr *txValidationError,
 ) (*replayRecoveryCandidate, error) {
+	chainIndex, err := ls.buildReplayRecoveryChainIndex(validationErr.BlockPoint)
+	if err != nil {
+		return nil, err
+	}
 	var candidate *replayRecoveryCandidate
 	var unresolvedInputs []lcommon.TransactionInput
+	pendingInputs := make([]replayRecoveryPendingInput, 0, len(validationErr.Inputs))
 	for _, input := range validationErr.Inputs {
-		utxo, err := ls.db.UtxoByRef(
-			input.Id().Bytes(),
-			input.Index(),
-			nil,
-		)
-		if err != nil && !errors.Is(err, database.ErrUtxoNotFound) {
-			return nil, fmt.Errorf(
-				"lookup validation input %s: %w",
-				input.String(),
-				err,
-			)
-		}
-		if utxo != nil {
+		pendingInputs = append(pendingInputs, replayRecoveryPendingInput{
+			Input:   input,
+			MaxSlot: validationErr.BlockPoint.Slot,
+		})
+	}
+	seenInputs := make(map[string]struct{})
+	expandedTxs := make(map[string]struct{})
+	for len(pendingInputs) > 0 {
+		pending := pendingInputs[0]
+		pendingInputs = pendingInputs[1:]
+		inputKey := pending.Input.String()
+		if _, ok := seenInputs[inputKey]; ok {
 			continue
 		}
-		producerTx, err := ls.db.GetTransactionByHash(
-			input.Id().Bytes(),
-			nil,
+		seenInputs[inputKey] = struct{}{}
+		resolved, err := ls.resolveReplayRecoveryProducer(
+			pending,
+			chainIndex,
 		)
 		if err != nil {
-			return nil, fmt.Errorf(
-				"lookup producer tx %s: %w",
-				input.Id().String(),
-				err,
-			)
+			return nil, err
 		}
-		if producerTx == nil || len(producerTx.BlockHash) == 0 {
-			producerBlock, found, err := ls.replayRecoveryBlockFromTxBlob(
-				input.Id().Bytes(),
-			)
-			if err != nil {
-				return nil, err
-			}
-			if !found {
-				unresolvedInputs = append(unresolvedInputs, input)
-				continue
-			}
-			if producerBlock.Slot >= validationErr.BlockPoint.Slot {
-				continue
-			}
-			rollbackPoint, err := ls.replayRecoveryParentPoint(producerBlock)
-			if err != nil {
-				return nil, err
-			}
-			if candidate == nil ||
-				producerBlock.Slot < candidate.ProducerBlock.Slot {
-				candidate = &replayRecoveryCandidate{
-					Input:         input,
-					ProducerTx:    nil,
-					ProducerBlock: producerBlock,
-					RollbackPoint: rollbackPoint,
-					Strategy:      "tx-blob",
-				}
-			}
+		if resolved == nil {
+			unresolvedInputs = append(unresolvedInputs, pending.Input)
 			continue
 		}
-		producerBlock, err := database.BlockByHash(ls.db, producerTx.BlockHash)
-		if err != nil {
-			return nil, fmt.Errorf(
-				"lookup producer block %x: %w",
-				producerTx.BlockHash,
-				err,
-			)
-		}
-		// Intra-block dependencies should already be satisfied by the in-memory
-		// overlay. A producer from the same or a later block indicates a normal
-		// validation failure, not replayable local state corruption.
-		if producerBlock.Slot >= validationErr.BlockPoint.Slot {
-			continue
-		}
-		rollbackPoint, err := ls.replayRecoveryParentPoint(producerBlock)
+		rollbackPoint, err := ls.replayRecoveryParentPoint(
+			resolved.ProducerBlock,
+		)
 		if err != nil {
 			return nil, err
 		}
 		if candidate == nil ||
-			producerBlock.Slot < candidate.ProducerBlock.Slot {
+			resolved.ProducerBlock.Slot < candidate.ProducerBlock.Slot {
 			candidate = &replayRecoveryCandidate{
-				Input:         input,
-				ProducerTx:    producerTx,
-				ProducerBlock: producerBlock,
+				Input:         resolved.Input,
+				ProducerTx:    resolved.ProducerTx,
+				ProducerBlock: resolved.ProducerBlock,
 				RollbackPoint: rollbackPoint,
-				Strategy:      "metadata",
+				Strategy:      resolved.Strategy,
 			}
+		}
+		if resolved.Tx == nil {
+			continue
+		}
+		txKey := string(resolved.Tx.Hash().Bytes())
+		if _, ok := expandedTxs[txKey]; ok {
+			continue
+		}
+		expandedTxs[txKey] = struct{}{}
+		for _, depInput := range collectReferencedInputs(resolved.Tx) {
+			pendingInputs = append(pendingInputs, replayRecoveryPendingInput{
+				Input:   depInput,
+				MaxSlot: resolved.ProducerBlock.Slot,
+			})
 		}
 	}
 	if len(unresolvedInputs) > 0 {
-		chainCandidate, err := ls.replayRecoveryCandidateFromChain(
+		fallbackCandidate, err := ls.replayRecoveryFallbackCandidate(
 			validationErr.BlockPoint,
 			unresolvedInputs,
 		)
 		if err != nil {
 			return nil, err
 		}
-		if chainCandidate != nil && (candidate == nil ||
-			chainCandidate.ProducerBlock.Slot < candidate.ProducerBlock.Slot) {
-			candidate = chainCandidate
+		if fallbackCandidate != nil && (candidate == nil ||
+			fallbackCandidate.ProducerBlock.Slot < candidate.ProducerBlock.Slot) {
+			candidate = fallbackCandidate
 		}
 	}
-	if candidate != nil {
-		return candidate, nil
-	}
-	return ls.replayRecoveryFallbackCandidate(
-		validationErr.BlockPoint,
-		unresolvedInputs,
-	)
+	return candidate, nil
 }
 
-func (ls *LedgerState) replayRecoveryCandidateFromChain(
+func (ls *LedgerState) buildReplayRecoveryChainIndex(
 	failingPoint ocommon.Point,
-	inputs []lcommon.TransactionInput,
-) (*replayRecoveryCandidate, error) {
-	if len(inputs) == 0 {
-		return nil, nil
-	}
+) (*replayRecoveryChainIndex, error) {
 	failingBlock, err := database.BlockByPoint(ls.db, failingPoint)
 	if err != nil {
 		if errors.Is(err, models.ErrBlockNotFound) {
-			return nil, nil
+			return &replayRecoveryChainIndex{
+				Txs: make(map[string]replayRecoveryChainTx),
+			}, nil
 		}
 		return nil, fmt.Errorf(
 			"lookup failing block %x at slot %d for replay recovery: %w",
@@ -248,18 +241,16 @@ func (ls *LedgerState) replayRecoveryCandidateFromChain(
 			err,
 		)
 	}
+	index := &replayRecoveryChainIndex{
+		Txs: make(map[string]replayRecoveryChainTx),
+	}
 	if failingBlock.ID <= database.BlockInitialIndex {
-		return nil, nil
+		return index, nil
 	}
-	wantedInputs := make(map[string]lcommon.TransactionInput, len(inputs))
-	for _, input := range inputs {
-		wantedInputs[string(input.Id().Bytes())] = input
-	}
-	var candidate *replayRecoveryCandidate
 	const maxReplayRecoveryScanBlocks = 4096
 	scanned := 0
 	for blockIndex := failingBlock.ID - 1; ; blockIndex-- {
-		if scanned >= maxReplayRecoveryScanBlocks || len(wantedInputs) == 0 {
+		if scanned >= maxReplayRecoveryScanBlocks {
 			break
 		}
 		block, err := ls.db.BlockByIndex(blockIndex, nil)
@@ -282,6 +273,7 @@ func (ls *LedgerState) replayRecoveryCandidateFromChain(
 			}
 			continue
 		}
+		index.OldestBlock = &block
 		decodedBlock, err := block.Decode()
 		if err != nil {
 			ls.config.Logger.Debug(
@@ -298,30 +290,148 @@ func (ls *LedgerState) replayRecoveryCandidateFromChain(
 			continue
 		}
 		for _, tx := range decodedBlock.Transactions() {
-			input, ok := wantedInputs[string(tx.Hash().Bytes())]
-			if !ok {
+			txKey := string(tx.Hash().Bytes())
+			if _, ok := index.Txs[txKey]; ok {
 				continue
 			}
-			rollbackPoint, err := ls.replayRecoveryParentPoint(block)
-			if err != nil {
-				return nil, err
+			index.Txs[txKey] = replayRecoveryChainTx{
+				Block: block,
+				Tx:    tx,
 			}
-			if candidate == nil || block.Slot < candidate.ProducerBlock.Slot {
-				candidate = &replayRecoveryCandidate{
-					Input:         input,
-					ProducerBlock: block,
-					RollbackPoint: rollbackPoint,
-					Strategy:      "chain-scan",
-				}
-			}
-			delete(wantedInputs, string(tx.Hash().Bytes()))
 		}
 		scanned++
 		if blockIndex == database.BlockInitialIndex {
 			break
 		}
 	}
-	return candidate, nil
+	return index, nil
+}
+
+func (ls *LedgerState) resolveReplayRecoveryProducer(
+	pending replayRecoveryPendingInput,
+	chainIndex *replayRecoveryChainIndex,
+) (*replayRecoveryResolvedProducer, error) {
+	utxo, err := ls.db.UtxoByRef(
+		pending.Input.Id().Bytes(),
+		pending.Input.Index(),
+		nil,
+	)
+	if err != nil && !errors.Is(err, database.ErrUtxoNotFound) {
+		return nil, fmt.Errorf(
+			"lookup validation input %s: %w",
+			pending.Input.String(),
+			err,
+		)
+	}
+	if utxo != nil {
+		return nil, nil
+	}
+	producerTx, err := ls.db.GetTransactionByHash(
+		pending.Input.Id().Bytes(),
+		nil,
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"lookup producer tx %s: %w",
+			pending.Input.Id().String(),
+			err,
+		)
+	}
+	if producerTx != nil && len(producerTx.BlockHash) > 0 {
+		producerBlock, err := database.BlockByHash(ls.db, producerTx.BlockHash)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"lookup producer block %x: %w",
+				producerTx.BlockHash,
+				err,
+			)
+		}
+		if producerBlock.Slot >= pending.MaxSlot {
+			return nil, nil
+		}
+		tx, err := ls.replayRecoveryResolveTxFromBlock(
+			producerBlock,
+			pending.Input.Id().Bytes(),
+			chainIndex,
+		)
+		if err != nil {
+			return nil, err
+		}
+		return &replayRecoveryResolvedProducer{
+			Input:         pending.Input,
+			ProducerTx:    producerTx,
+			ProducerBlock: producerBlock,
+			Tx:            tx,
+			Strategy:      "metadata",
+		}, nil
+	}
+	producerBlock, found, err := ls.replayRecoveryBlockFromTxBlob(
+		pending.Input.Id().Bytes(),
+	)
+	if err != nil {
+		return nil, err
+	}
+	if found {
+		if producerBlock.Slot >= pending.MaxSlot {
+			return nil, nil
+		}
+		tx, err := ls.replayRecoveryResolveTxFromBlock(
+			producerBlock,
+			pending.Input.Id().Bytes(),
+			chainIndex,
+		)
+		if err != nil {
+			return nil, err
+		}
+		return &replayRecoveryResolvedProducer{
+			Input:         pending.Input,
+			ProducerBlock: producerBlock,
+			Tx:            tx,
+			Strategy:      "tx-blob",
+		}, nil
+	}
+	if chainIndex != nil {
+		chainTx, ok := chainIndex.Txs[string(pending.Input.Id().Bytes())]
+		if ok && chainTx.Block.Slot < pending.MaxSlot {
+			return &replayRecoveryResolvedProducer{
+				Input:         pending.Input,
+				ProducerBlock: chainTx.Block,
+				Tx:            chainTx.Tx,
+				Strategy:      "chain-scan",
+			}, nil
+		}
+	}
+	return nil, nil
+}
+
+func (ls *LedgerState) replayRecoveryResolveTxFromBlock(
+	block models.Block,
+	txHash []byte,
+	chainIndex *replayRecoveryChainIndex,
+) (lcommon.Transaction, error) {
+	if chainIndex != nil {
+		chainTx, ok := chainIndex.Txs[string(txHash)]
+		if ok && bytes.Equal(chainTx.Block.Hash, block.Hash) {
+			return chainTx.Tx, nil
+		}
+	}
+	decodedBlock, err := block.Decode()
+	if err != nil {
+		ls.config.Logger.Debug(
+			"skipping undecodable producer block during replay recovery",
+			"component", "ledger",
+			"block_slot", block.Slot,
+			"block_hash", hex.EncodeToString(block.Hash),
+			"error", err,
+		)
+		return nil, nil
+	}
+	for _, tx := range decodedBlock.Transactions() {
+		if bytes.Equal(tx.Hash().Bytes(), txHash) {
+			return tx, nil
+		}
+	}
+	return nil, nil
 }
 
 func (ls *LedgerState) replayRecoveryFallbackCandidate(
