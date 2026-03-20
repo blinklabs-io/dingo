@@ -308,7 +308,6 @@ func (p *PeerGovernor) IsChainSelectionEligible(
 ) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-
 	peerIdx := p.peerIndexByConnId(connId)
 	if peerIdx == -1 || p.peers[peerIdx] == nil {
 		return false

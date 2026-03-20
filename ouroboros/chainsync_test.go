@@ -122,6 +122,68 @@ func TestNormalizeIntersectPoints(t *testing.T) {
 	)
 }
 
+func TestChainsyncClientRollForwardPublishesDuplicateFromSelectedPeer(
+	t *testing.T,
+) {
+	bus := event.NewEventBus(nil, nil)
+	defer bus.Close()
+
+	_, ch := bus.Subscribe(ledger.ChainsyncEventType)
+	state := dchainsync.NewState(bus, nil)
+	connA := newTestConnId("127.0.0.1:6000", "1.1.1.1:3001")
+	connB := newTestConnId("127.0.0.1:6000", "2.2.2.2:3001")
+	require.True(t, state.AddClientConnId(connA))
+	require.True(t, state.AddClientConnId(connB))
+	state.SetClientConnId(connA)
+
+	o := NewOuroboros(OuroborosConfig{
+		EventBus: bus,
+		ChainsyncIngressEligible: func(ouroboros.ConnectionId) bool {
+			return true
+		},
+	})
+	o.ChainsyncState = state
+	o.EventBus = bus
+
+	header := newTestBlockHeader(100, 1, 0xaa)
+	tip := ochainsync.Tip{
+		Point:       ocommon.NewPoint(100, header.Hash().Bytes()),
+		BlockNumber: 1,
+	}
+
+	err := o.chainsyncClientRollForward(
+		ochainsync.CallbackContext{ConnectionId: connB},
+		0,
+		header,
+		tip,
+	)
+	require.NoError(t, err)
+	select {
+	case evt1 := <-ch:
+		data1, ok := evt1.Data.(ledger.ChainsyncEvent)
+		require.True(t, ok)
+		require.Equal(t, connB, data1.ConnectionId)
+	case <-time.After(time.Second):
+		t.Fatal("expected initial header to be published")
+	}
+
+	err = o.chainsyncClientRollForward(
+		ochainsync.CallbackContext{ConnectionId: connA},
+		0,
+		header,
+		tip,
+	)
+	require.NoError(t, err)
+	select {
+	case evt2 := <-ch:
+		data2, ok := evt2.Data.(ledger.ChainsyncEvent)
+		require.True(t, ok)
+		require.Equal(t, connA, data2.ConnectionId)
+	case <-time.After(time.Second):
+		t.Fatal("expected duplicate header from selected peer to publish")
+	}
+}
+
 func TestChainsyncClientRollForward_IneligiblePeerDoesNotPoisonDedup(
 	t *testing.T,
 ) {

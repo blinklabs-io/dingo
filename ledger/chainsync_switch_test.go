@@ -20,9 +20,11 @@ import (
 	"log/slog"
 	"net"
 	"testing"
+	"time"
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/chainselection"
+	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/event"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
@@ -285,6 +287,103 @@ func TestHandleChainSwitchEventUpdatesSelectedBlockfetchConnId(t *testing.T) {
 	assert.Equal(t, connId, nextConnId)
 }
 
+func TestHandleConnectionClosedEventClearsActiveBlockfetchState(t *testing.T) {
+	connId1 := ouroboros.ConnectionId{
+		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 6000},
+		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3001},
+	}
+	ls := &LedgerState{
+		chain:                        &chain.Chain{},
+		activeBlockfetchConnId:       connId1,
+		selectedBlockfetchConnId:     connId1,
+		headerPipelineConnId:         connId1,
+		chainsyncBlockfetchReadyChan: make(chan struct{}),
+		pendingBlockfetchEvents: []BlockfetchEvent{
+			{ConnectionId: connId1},
+		},
+		bufferedHeaderEvents: map[ouroboros.ConnectionId][]ChainsyncEvent{
+			connId1: {{ConnectionId: connId1}},
+		},
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+
+	ls.handleConnectionClosedEvent(event.NewEvent(
+		connmanager.ConnectionClosedEventType,
+		connmanager.ConnectionClosedEvent{ConnectionId: connId1},
+	))
+
+	assert.Equal(t, ouroboros.ConnectionId{}, ls.activeBlockfetchConnId)
+	assert.Equal(t, ouroboros.ConnectionId{}, ls.selectedBlockfetchConnId)
+	assert.Equal(t, ouroboros.ConnectionId{}, ls.headerPipelineConnId)
+	assert.Nil(t, ls.chainsyncBlockfetchReadyChan)
+	assert.Empty(t, ls.pendingBlockfetchEvents)
+	_, ok := ls.bufferedHeaderEvents[connId1]
+	assert.False(t, ok)
+}
+
+func TestHandleEventChainsyncBlockHeaderBuffersNonOwnerConnection(
+	t *testing.T,
+) {
+	connId1 := ouroboros.ConnectionId{
+		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 6000},
+		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3001},
+	}
+	connId2 := ouroboros.ConnectionId{
+		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 6000},
+		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3002},
+	}
+	header1Hash := lcommon.NewBlake2b256([]byte("hdr-1"))
+	header2Hash := lcommon.NewBlake2b256([]byte("hdr-2"))
+	header1 := mockHeader{
+		hash:        header1Hash,
+		prevHash:    lcommon.NewBlake2b256(nil),
+		blockNumber: 1,
+		slot:        1,
+	}
+	header2 := mockHeader{
+		hash:        header2Hash,
+		prevHash:    header1Hash,
+		blockNumber: 2,
+		slot:        2,
+	}
+	ls := &LedgerState{
+		chain: &chain.Chain{},
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+
+	err := ls.handleEventChainsyncBlockHeader(ChainsyncEvent{
+		ConnectionId: connId1,
+		BlockHeader:  header1,
+		Point:        ocommon.NewPoint(header1.slot, header1.hash.Bytes()),
+		Tip: ochainsync.Tip{
+			Point:       ocommon.NewPoint(60001, []byte("tip-1")),
+			BlockNumber: 60001,
+		},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, connId1, ls.headerPipelineConnId)
+	assert.Equal(t, 1, ls.chain.HeaderCount())
+
+	err = ls.handleEventChainsyncBlockHeader(ChainsyncEvent{
+		ConnectionId: connId2,
+		BlockHeader:  header2,
+		Point:        ocommon.NewPoint(header2.slot, header2.hash.Bytes()),
+		Tip: ochainsync.Tip{
+			Point:       ocommon.NewPoint(60002, []byte("tip-2")),
+			BlockNumber: 60002,
+		},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, connId1, ls.headerPipelineConnId)
+	assert.Equal(t, 1, ls.chain.HeaderCount())
+	require.Len(t, ls.bufferedHeaderEvents[connId2], 1)
+	assert.Equal(t, header2.slot, ls.bufferedHeaderEvents[connId2][0].Point.Slot)
+}
+
 func TestHandleEventChainsyncBlockHeader_ProcessesEligibleNonActivePeer(
 	t *testing.T,
 ) {
@@ -335,6 +434,61 @@ func TestHandleEventChainsyncBlockHeader_ProcessesEligibleNonActivePeer(
 	assert.Equal(t, 1, testChain.HeaderCount())
 	assert.Equal(t, connId2, requestedConn)
 	assert.Equal(t, connId2, ls.activeBlockfetchConnId)
+}
+
+func TestHandleEventBlockfetchBatchDoneReplaysBufferedHeadersAfterDrain(
+	t *testing.T,
+) {
+	connId1 := ouroboros.ConnectionId{
+		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 6000},
+		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3001},
+	}
+	connId2 := ouroboros.ConnectionId{
+		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 6000},
+		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3002},
+	}
+	headerHash := lcommon.NewBlake2b256([]byte("hdr-2"))
+	ls := &LedgerState{
+		chain:                        &chain.Chain{},
+		activeBlockfetchConnId:       connId1,
+		selectedBlockfetchConnId:     connId2,
+		headerPipelineConnId:         connId1,
+		chainsyncBlockfetchReadyChan: make(chan struct{}),
+		bufferedHeaderEvents: map[ouroboros.ConnectionId][]ChainsyncEvent{
+			connId2: {{
+				ConnectionId: connId2,
+				BlockHeader: mockHeader{
+					hash:        headerHash,
+					prevHash:    lcommon.NewBlake2b256(nil),
+					blockNumber: 1,
+					slot:        1,
+				},
+				Point: ocommon.NewPoint(1, headerHash.Bytes()),
+				Tip: ochainsync.Tip{
+					Point:       ocommon.NewPoint(60001, []byte("tip-2")),
+					BlockNumber: 60001,
+				},
+			}},
+		},
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+
+	err := ls.handleEventBlockfetchBatchDone(BlockfetchEvent{
+		ConnectionId: connId1,
+		BatchDone:    true,
+	})
+	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		ls.chainsyncMutex.Lock()
+		defer ls.chainsyncMutex.Unlock()
+		return ls.headerPipelineConnId == connId2 &&
+			len(ls.bufferedHeaderEvents[connId2]) == 0 &&
+			ls.chain.HeaderCount() == 1
+	}, time.Second, 10*time.Millisecond)
+	assert.Equal(t, connId2, ls.headerPipelineConnId)
+	assert.Equal(t, 1, ls.chain.HeaderCount())
 }
 
 func TestHandleBlockfetchTimeoutLocked_RetriesQueuedRangeUsingActivePeer(
@@ -410,6 +564,58 @@ func TestHandleBlockfetchTimeoutLocked_ClearsActiveConnectionWithoutHeaders(
 	assert.Nil(t, ls.chainsyncBlockfetchReadyChan)
 	_, ok := ls.nextBlockfetchConnId()
 	assert.False(t, ok)
+}
+
+func TestHandleBlockfetchTimeoutLocked_ReplaysBufferedHeadersWithoutHeaders(
+	t *testing.T,
+) {
+	connId1 := ouroboros.ConnectionId{
+		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 6000},
+		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3001},
+	}
+	connId2 := ouroboros.ConnectionId{
+		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 6000},
+		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3002},
+	}
+	headerHash := lcommon.NewBlake2b256([]byte("hdr-timeout"))
+	ls := &LedgerState{
+		chain:                        &chain.Chain{},
+		activeBlockfetchConnId:       connId1,
+		selectedBlockfetchConnId:     connId2,
+		headerPipelineConnId:         connId1,
+		chainsyncBlockfetchReadyChan: make(chan struct{}),
+		bufferedHeaderEvents: map[ouroboros.ConnectionId][]ChainsyncEvent{
+			connId2: {{
+				ConnectionId: connId2,
+				BlockHeader: mockHeader{
+					hash:        headerHash,
+					prevHash:    lcommon.NewBlake2b256(nil),
+					blockNumber: 1,
+					slot:        1,
+				},
+				Point: ocommon.NewPoint(1, headerHash.Bytes()),
+				Tip: ochainsync.Tip{
+					Point:       ocommon.NewPoint(60001, []byte("tip-2")),
+					BlockNumber: 60001,
+				},
+			}},
+		},
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+
+	ls.handleBlockfetchTimeoutLocked(connId1)
+
+	require.Eventually(t, func() bool {
+		ls.chainsyncMutex.Lock()
+		defer ls.chainsyncMutex.Unlock()
+		return ls.headerPipelineConnId == connId2 &&
+			len(ls.bufferedHeaderEvents[connId2]) == 0 &&
+			ls.chain.HeaderCount() == 1
+	}, time.Second, 10*time.Millisecond)
+	assert.Equal(t, connId2, ls.headerPipelineConnId)
+	assert.Equal(t, 1, ls.chain.HeaderCount())
 }
 
 func TestHandleBlockfetchTimeoutLocked_RetryFailureUsesAlternateSelectedPeer(
