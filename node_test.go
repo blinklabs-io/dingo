@@ -255,8 +255,8 @@ func TestProcessChainsyncRecyclerTickKeepsStalledRecyclerRunning(
 func TestProcessChainsyncRecyclerTickRecyclesLocalTipPlateau(t *testing.T) {
 	bus := event.NewEventBus(nil, nil)
 	t.Cleanup(func() { bus.Stop() })
-	_, recycleCh := bus.Subscribe(
-		connmanager.ConnectionRecycleRequestedEventType,
+	_, resyncCh := bus.Subscribe(
+		event.ChainsyncResyncEventType,
 	)
 
 	connId := newNodeTestConnId(2)
@@ -311,13 +311,13 @@ func TestProcessChainsyncRecyclerTickRecyclesLocalTipPlateau(t *testing.T) {
 	)
 
 	select {
-	case evt := <-recycleCh:
-		recycleEvt, ok := evt.Data.(connmanager.ConnectionRecycleRequestedEvent)
+	case evt := <-resyncCh:
+		resyncEvt, ok := evt.Data.(event.ChainsyncResyncEvent)
 		require.True(t, ok)
-		assert.Equal(t, connId, recycleEvt.ConnectionId)
-		assert.Equal(t, "local_tip_plateau", recycleEvt.Reason)
+		assert.Equal(t, connId, resyncEvt.ConnectionId)
+		assert.Equal(t, "local_tip_plateau", resyncEvt.Reason)
 	case <-time.After(200 * time.Millisecond):
-		t.Fatal("expected plateau recycler event")
+		t.Fatal("expected plateau resync event")
 	}
 }
 

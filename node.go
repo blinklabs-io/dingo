@@ -212,19 +212,18 @@ func (n *Node) processChainsyncRecyclerTick(
 					plateauRecoveryThreshold,
 				) {
 					n.config.logger.Warn(
-						"local tip plateau detected, recycling chainsync connection",
+						"local tip plateau detected, resyncing chainsync client",
 						"connection_id", connKey,
 						"local_tip_slot", localTipSlot,
 						"best_peer_tip_slot", bestPeerTip.Tip.Point.Slot,
 						"plateau_duration", now.Sub(*lastProgressAt),
 					)
-					n.eventBus.PublishAsync(
-						connmanager.ConnectionRecycleRequestedEventType,
+					n.eventBus.Publish(
+						event.ChainsyncResyncEventType,
 						event.NewEvent(
-							connmanager.ConnectionRecycleRequestedEventType,
-							connmanager.ConnectionRecycleRequestedEvent{
+							event.ChainsyncResyncEventType,
+							event.ChainsyncResyncEvent{
 								ConnectionId: *targetConn,
-								ConnKey:      connKey,
 								Reason:       "local_tip_plateau",
 							},
 						),
