@@ -49,12 +49,21 @@ import (
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/prometheus/client_golang/prometheus"
+	"gorm.io/gorm"
 )
 
 const (
 	cleanupConsumedUtxosInterval = 5 * time.Minute
 	batchSize                    = 50 // Number of blocks to process in a single DB transaction
 )
+
+type metadataDbReader interface {
+	DB() *gorm.DB
+}
+
+type metadataReadDbReader interface {
+	ReadDB() *gorm.DB
+}
 
 // DatabaseOperation represents an asynchronous database operation
 type DatabaseOperation struct {
@@ -3899,6 +3908,90 @@ func (ls *LedgerState) GetTransactionsByAddress(
 	offset int,
 ) ([]models.Transaction, error) {
 	return ls.db.GetTransactionsByAddress(addr, limit, offset, nil)
+}
+
+// CountTransactionsInSlotRange returns the number of transactions whose slot
+// falls within the inclusive range [startSlot, endSlot].
+// Used by the Blockfrost adapter CurrentEpoch() path so epoch responses can
+// return real tx counts without decoding every block in the epoch on demand.
+func (ls *LedgerState) CountTransactionsInSlotRange(
+	startSlot, endSlot uint64,
+) (int, error) {
+	if endSlot < startSlot {
+		return 0, nil
+	}
+	metaStore := ls.db.Metadata()
+	if metaStore == nil {
+		return 0, errors.New("metadata store unavailable")
+	}
+	var db *gorm.DB
+	if reader, ok := metaStore.(metadataReadDbReader); ok {
+		db = reader.ReadDB()
+	} else if reader, ok := metaStore.(metadataDbReader); ok {
+		db = reader.DB()
+	}
+	if db == nil {
+		return 0, errors.New(
+			"metadata store does not expose database handle",
+		)
+	}
+	var count int64
+	if err := db.
+		Model(&models.Transaction{}).
+		Where("slot >= ? AND slot <= ?", startSlot, endSlot).
+		Count(&count).Error; err != nil {
+		return 0, fmt.Errorf(
+			"count transactions in slot range %d-%d: %w",
+			startSlot,
+			endSlot,
+			err,
+		)
+	}
+	return int(count), nil
+}
+
+// CountBlocksInSlotRange returns the number of blocks in the inclusive slot
+// range [startSlot, endSlot], along with the first and last block slots found.
+// It is Used by the Blockfrost adapter CurrentEpoch() path so epoch responses can
+// return real block counts and boundary timestamps without
+// walking previous hash through the active chain block-by-block.
+func (ls *LedgerState) CountBlocksInSlotRange(
+	startSlot, endSlot uint64,
+) (int, uint64, uint64, error) {
+	if endSlot < startSlot {
+		return 0, 0, 0, nil
+	}
+	iter := ls.db.BlocksInRange(startSlot, endSlot)
+	if iter == nil {
+		return 0, 0, 0, errors.New("block iterator unavailable")
+	}
+	defer iter.Close()
+
+	var (
+		count     int
+		firstSlot uint64
+		lastSlot  uint64
+	)
+	for {
+		result, err := iter.NextRaw()
+		if err != nil {
+			return 0, 0, 0, fmt.Errorf(
+				"count blocks in slot range %d-%d: %w",
+				startSlot,
+				endSlot,
+				err,
+			)
+		}
+		if result == nil {
+			break
+		}
+		if count == 0 {
+			firstSlot = result.Slot
+		}
+		lastSlot = result.Slot
+		count++
+	}
+	return count, firstSlot, lastSlot, nil
 }
 
 // resolveValidationEra determines the appropriate era descriptor for
