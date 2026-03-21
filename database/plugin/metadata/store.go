@@ -266,6 +266,16 @@ type MetadataStore interface {
 		types.Txn,
 	) ([]models.AddressTransaction, error)
 
+	// GetTransactionsByMetadataLabel retrieves transactions that include
+	// metadata for the given label.
+	GetTransactionsByMetadataLabel(
+		uint64, // label
+		int, // limit
+		int, // offset
+		string, // order: asc|desc
+		types.Txn,
+	) ([]models.Transaction, error)
+
 	// GetScript retrieves a script by its hash.
 	GetScript(
 		lcommon.ScriptHash,
@@ -529,6 +539,10 @@ type MetadataStore interface {
 	// DeleteAddressTransactionsAfterSlot removes address-transaction mappings
 	// for transactions added after the given slot.
 	DeleteAddressTransactionsAfterSlot(uint64, types.Txn) error
+
+	// DeleteTransactionMetadataLabelsAfterSlot removes transaction metadata
+	// label index records added after the given slot.
+	DeleteTransactionMetadataLabelsAfterSlot(uint64, types.Txn) error
 
 	// Governance methods
 

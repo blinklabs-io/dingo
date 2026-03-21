@@ -16,6 +16,7 @@ package sqlite
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"math/big"
 	"testing"
@@ -59,6 +60,7 @@ type mockTransaction struct {
 	certificates []lcommon.Certificate
 	hash         lcommon.Blake2b256
 	isValid      bool
+	metadata     lcommon.TransactionMetadatum
 }
 
 func (m *mockTransaction) Hash() lcommon.Blake2b256 {
@@ -86,7 +88,7 @@ func (m *mockTransaction) IsValid() bool {
 }
 
 func (m *mockTransaction) Metadata() lcommon.TransactionMetadatum {
-	return nil
+	return m.metadata
 }
 
 func (m *mockTransaction) AuxiliaryData() lcommon.AuxiliaryData {
@@ -191,6 +193,195 @@ func (m *mockTransaction) Utxorpc() (*cardano.Tx, error) {
 
 func (m *mockTransaction) LeiosHash() lcommon.Blake2b256 {
 	return lcommon.Blake2b256{}
+}
+
+func TestTransactionMetadataLabelsIndexAndQuery(t *testing.T) {
+	sqliteStore := setupTestDBWithMode(t, types.StorageModeAPI)
+
+	makeMetadata := func(labels map[uint64]lcommon.TransactionMetadatum) lcommon.TransactionMetadatum {
+		pairs := make([]lcommon.MetaPair, 0, len(labels))
+		for label, value := range labels {
+			pairs = append(pairs, lcommon.MetaPair{
+				Key: lcommon.MetaInt{
+					Value: new(big.Int).SetUint64(label),
+				},
+				Value: value,
+			})
+		}
+		return lcommon.MetaMap{Pairs: pairs}
+	}
+
+	tx1 := &mockTransaction{
+		hash:    lcommon.NewBlake2b256([]byte("metadata_tx_1")),
+		isValid: true,
+		metadata: makeMetadata(map[uint64]lcommon.TransactionMetadatum{
+			721: lcommon.MetaMap{
+				Pairs: []lcommon.MetaPair{
+					{
+						Key:   lcommon.MetaText{Value: "name"},
+						Value: lcommon.MetaText{Value: "nft-one"},
+					},
+				},
+			},
+			674: lcommon.MetaText{Value: "hello"},
+		}),
+	}
+	tx2 := &mockTransaction{
+		hash:    lcommon.NewBlake2b256([]byte("metadata_tx_2")),
+		isValid: true,
+		metadata: makeMetadata(map[uint64]lcommon.TransactionMetadatum{
+			721: lcommon.MetaMap{
+				Pairs: []lcommon.MetaPair{
+					{
+						Key:   lcommon.MetaText{Value: "name"},
+						Value: lcommon.MetaText{Value: "nft-two"},
+					},
+				},
+			},
+		}),
+	}
+
+	if err := sqliteStore.SetTransaction(
+		tx1,
+		ocommon.Point{
+			Hash: []byte("metadata_block_1"),
+			Slot: 100,
+		},
+		0,
+		nil,
+		nil,
+	); err != nil {
+		t.Fatalf("SetTransaction tx1 failed: %v", err)
+	}
+	if err := sqliteStore.SetTransaction(
+		tx2,
+		ocommon.Point{
+			Hash: []byte("metadata_block_2"),
+			Slot: 200,
+		},
+		0,
+		nil,
+		nil,
+	); err != nil {
+		t.Fatalf("SetTransaction tx2 failed: %v", err)
+	}
+
+	var rows []models.TransactionMetadataLabel
+	if err := sqliteStore.DB().
+		Order("transaction_id ASC, label ASC").
+		Find(&rows).Error; err != nil {
+		t.Fatalf("query metadata labels failed: %v", err)
+	}
+	if len(rows) != 3 {
+		t.Fatalf("expected 3 metadata label rows, got %d", len(rows))
+	}
+	for _, row := range rows {
+		if len(row.CborValue) == 0 {
+			t.Fatalf("expected non-empty CBOR value for label %d", row.Label)
+		}
+		if row.JsonValue == "" {
+			t.Fatalf("expected non-empty JSON value for label %d", row.Label)
+		}
+		var tmp any
+		if err := json.Unmarshal([]byte(row.JsonValue), &tmp); err != nil {
+			t.Fatalf("invalid JSON value for label %d: %v", row.Label, err)
+		}
+	}
+
+	txsAsc, err := sqliteStore.GetTransactionsByMetadataLabel(
+		721,
+		10,
+		0,
+		"asc",
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("GetTransactionsByMetadataLabel asc failed: %v", err)
+	}
+	if len(txsAsc) != 2 {
+		t.Fatalf("expected 2 txs for label 721, got %d", len(txsAsc))
+	}
+	if txsAsc[0].Slot != 100 || txsAsc[1].Slot != 200 {
+		t.Fatalf("unexpected ascending order: got slots %d, %d", txsAsc[0].Slot, txsAsc[1].Slot)
+	}
+
+	txsDesc, err := sqliteStore.GetTransactionsByMetadataLabel(
+		721,
+		1,
+		0,
+		"desc",
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("GetTransactionsByMetadataLabel desc failed: %v", err)
+	}
+	if len(txsDesc) != 1 || txsDesc[0].Slot != 200 {
+		t.Fatalf("unexpected desc query result: %#v", txsDesc)
+	}
+}
+
+func TestDeleteTransactionMetadataLabelsAfterSlot(t *testing.T) {
+	sqliteStore := setupTestDBWithMode(t, types.StorageModeAPI)
+
+	makeMetadata := func(label uint64, value string) lcommon.TransactionMetadatum {
+		return lcommon.MetaMap{
+			Pairs: []lcommon.MetaPair{
+				{
+					Key: lcommon.MetaInt{
+						Value: new(big.Int).SetUint64(label),
+					},
+					Value: lcommon.MetaText{Value: value},
+				},
+			},
+		}
+	}
+
+	tx1 := &mockTransaction{
+		hash:     lcommon.NewBlake2b256([]byte("rollback_tx_1")),
+		isValid:  true,
+		metadata: makeMetadata(721, "a"),
+	}
+	tx2 := &mockTransaction{
+		hash:     lcommon.NewBlake2b256([]byte("rollback_tx_2")),
+		isValid:  true,
+		metadata: makeMetadata(721, "b"),
+	}
+
+	if err := sqliteStore.SetTransaction(
+		tx1,
+		ocommon.Point{Hash: []byte("rollback_block_1"), Slot: 100},
+		0,
+		nil,
+		nil,
+	); err != nil {
+		t.Fatalf("SetTransaction tx1 failed: %v", err)
+	}
+	if err := sqliteStore.SetTransaction(
+		tx2,
+		ocommon.Point{Hash: []byte("rollback_block_2"), Slot: 200},
+		0,
+		nil,
+		nil,
+	); err != nil {
+		t.Fatalf("SetTransaction tx2 failed: %v", err)
+	}
+
+	if err := sqliteStore.DeleteTransactionMetadataLabelsAfterSlot(150, nil); err != nil {
+		t.Fatalf("DeleteTransactionMetadataLabelsAfterSlot failed: %v", err)
+	}
+
+	var labels []models.TransactionMetadataLabel
+	if err := sqliteStore.DB().
+		Order("slot ASC").
+		Find(&labels).Error; err != nil {
+		t.Fatalf("query metadata labels failed: %v", err)
+	}
+	if len(labels) != 1 {
+		t.Fatalf("expected 1 metadata label row after rollback cleanup, got %d", len(labels))
+	}
+	if labels[0].Slot != 100 {
+		t.Fatalf("expected remaining label slot=100, got %d", labels[0].Slot)
+	}
 }
 
 // createTestTransaction creates a Transaction record for testing with foreign key constraints.
@@ -1294,6 +1485,26 @@ func TestDeleteTransactionsAfterSlot(t *testing.T) {
 	if result := sqliteStore.DB().Create(&pd2); result.Error != nil {
 		t.Fatalf("failed to create plutus data for tx2: %v", result.Error)
 	}
+	label1 := models.TransactionMetadataLabel{
+		TransactionID: tx1.ID,
+		Label:         674,
+		Slot:          tx1.Slot,
+		CborValue:     []byte{0x01},
+		JsonValue:     `"tx1"`,
+	}
+	if result := sqliteStore.DB().Create(&label1); result.Error != nil {
+		t.Fatalf("failed to create metadata label for tx1: %v", result.Error)
+	}
+	label2 := models.TransactionMetadataLabel{
+		TransactionID: tx2.ID,
+		Label:         721,
+		Slot:          tx2.Slot,
+		CborValue:     []byte{0x02},
+		JsonValue:     `"tx2"`,
+	}
+	if result := sqliteStore.DB().Create(&label2); result.Error != nil {
+		t.Fatalf("failed to create metadata label for tx2: %v", result.Error)
+	}
 
 	// Verify we have 2 transactions and their child records
 	var txCountBefore int64
@@ -1353,6 +1564,28 @@ func TestDeleteTransactionsAfterSlot(t *testing.T) {
 	sqliteStore.DB().Model(&models.PlutusData{}).Count(&pdCountAfter)
 	if pdCountAfter != 0 {
 		t.Errorf("expected 0 plutus data after rollback, got %d", pdCountAfter)
+	}
+
+	var metadataLabelCountAfter int64
+	sqliteStore.DB().
+		Model(&models.TransactionMetadataLabel{}).
+		Count(&metadataLabelCountAfter)
+	if metadataLabelCountAfter != 1 {
+		t.Errorf(
+			"expected 1 metadata label after rollback, got %d",
+			metadataLabelCountAfter,
+		)
+	}
+
+	var remainingLabel models.TransactionMetadataLabel
+	if err := sqliteStore.DB().First(&remainingLabel).Error; err != nil {
+		t.Fatalf("failed to query remaining metadata label: %v", err)
+	}
+	if remainingLabel.TransactionID != tx1.ID {
+		t.Errorf(
+			"expected remaining metadata label to belong to tx1, got tx id %d",
+			remainingLabel.TransactionID,
+		)
 	}
 }
 

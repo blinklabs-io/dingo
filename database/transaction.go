@@ -478,6 +478,67 @@ func (d *Database) GetAddressesByStakingKey(
 	return addresses, nil
 }
 
+// GetTransactionsByMetadataLabel returns transactions that include metadata
+// for a given label key.
+func (d *Database) GetTransactionsByMetadataLabel(
+	label uint64,
+	limit int,
+	offset int,
+	order string,
+	txn *Txn,
+) ([]models.Transaction, error) {
+	if txn == nil {
+		txn = d.Transaction(false)
+		defer txn.Release()
+	}
+	txs, err := d.metadata.GetTransactionsByMetadataLabel(
+		label,
+		limit,
+		offset,
+		order,
+		txn.Metadata(),
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"get txs by metadata label %d limit=%d offset=%d order=%q: %w",
+			label,
+			limit,
+			offset,
+			order,
+			err,
+		)
+	}
+	return txs, nil
+}
+
+// DeleteTransactionMetadataLabelsAfterSlot removes transaction metadata
+// label index records added after the given slot.
+func (d *Database) DeleteTransactionMetadataLabelsAfterSlot(
+	slot uint64,
+	txn *Txn,
+) error {
+	if txn == nil {
+		txn = d.MetadataTxn(true)
+		defer txn.Rollback() //nolint:errcheck
+		if err := d.metadata.DeleteTransactionMetadataLabelsAfterSlot(slot, txn.Metadata()); err != nil {
+			return fmt.Errorf(
+				"delete transaction metadata labels after slot %d: %w",
+				slot,
+				err,
+			)
+		}
+		return txn.Commit()
+	}
+	if err := d.metadata.DeleteTransactionMetadataLabelsAfterSlot(slot, txn.Metadata()); err != nil {
+		return fmt.Errorf(
+			"delete transaction metadata labels after slot %d: %w",
+			slot,
+			err,
+		)
+	}
+	return nil
+}
+
 // deleteTxBlobs attempts to delete blob data for the given transaction hashes.
 // This is a best-effort operation; metadata remains the source of truth. If the
 // provided transaction does not include a blob handle, a temporary blob-only
@@ -570,6 +631,16 @@ func (d *Database) TransactionsDeleteRolledback(
 	if err := d.metadata.DeleteAddressTransactionsAfterSlot(slot, txn.Metadata()); err != nil {
 		return fmt.Errorf(
 			"failed to delete address transaction mappings after slot %d: %w",
+			slot,
+			err,
+		)
+	}
+	if err := d.metadata.DeleteTransactionMetadataLabelsAfterSlot(
+		slot,
+		txn.Metadata(),
+	); err != nil {
+		return fmt.Errorf(
+			"failed to delete transaction metadata labels after slot %d: %w",
 			slot,
 			err,
 		)
