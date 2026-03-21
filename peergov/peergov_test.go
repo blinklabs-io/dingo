@@ -341,6 +341,37 @@ func TestPeerGovernor_Reconcile_Demotions(t *testing.T) {
 	// Event publishing is tested indirectly
 }
 
+func TestPeerGovernor_Reconcile_ConnectedLocalRootStaysHotWhenQuiet(t *testing.T) {
+	eventBus := newMockEventBus()
+	reg := prometheus.NewRegistry()
+
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		EventBus:     eventBus,
+		PromRegistry: reg,
+	})
+
+	localAddr, _ := net.ResolveTCPAddr("tcp", "127.0.0.1:6000")
+	remoteAddr, _ := net.ResolveTCPAddr("tcp", "44.0.0.1:3001")
+	connId := ouroboros.ConnectionId{
+		LocalAddr:  localAddr,
+		RemoteAddr: remoteAddr,
+	}
+
+	pg.AddPeer("44.0.0.1:3001", PeerSourceTopologyLocalRoot)
+	pg.mu.Lock()
+	pg.peers[0].State = PeerStateHot
+	pg.peers[0].Connection = &PeerConnection{Id: connId, IsClient: true}
+	pg.peers[0].LastActivity = time.Now().Add(-15 * time.Minute)
+	pg.mu.Unlock()
+
+	pg.reconcile(t.Context())
+
+	peers := pg.GetPeers()
+	require.Len(t, peers, 1)
+	assert.Equal(t, PeerStateHot, peers[0].State)
+}
+
 func TestPeerGovernor_Reconcile_Removal(t *testing.T) {
 	eventBus := newMockEventBus()
 	reg := prometheus.NewRegistry()
@@ -533,6 +564,33 @@ func TestPeerGovernor_SetPeerHotByConnId(t *testing.T) {
 	peers := pg.GetPeers()
 	assert.Equal(t, PeerStateHot, peers[0].State)
 	assert.True(t, peers[0].LastActivity.After(time.Now().Add(-1*time.Second)))
+}
+
+func TestPeerGovernor_TouchPeerByConnId(t *testing.T) {
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+	})
+
+	pg.AddPeer("44.0.0.1:3001", PeerSourceTopologyLocalRoot)
+
+	localAddr, _ := net.ResolveTCPAddr("tcp", "127.0.0.1:6000")
+	remoteAddr, _ := net.ResolveTCPAddr("tcp", "44.0.0.1:3001")
+	connId := ouroboros.ConnectionId{
+		LocalAddr:  localAddr,
+		RemoteAddr: remoteAddr,
+	}
+
+	pg.mu.Lock()
+	pg.peers[0].Connection = &PeerConnection{Id: connId, IsClient: true}
+	pg.peers[0].LastActivity = time.Now().Add(-30 * time.Minute)
+	oldActivity := pg.peers[0].LastActivity
+	pg.mu.Unlock()
+
+	pg.TouchPeerByConnId(connId)
+
+	peers := pg.GetPeers()
+	require.Len(t, peers, 1)
+	assert.True(t, peers[0].LastActivity.After(oldActivity))
 }
 
 func TestPeerGovernorAppendChainSelectionEventsLocked(t *testing.T) {

@@ -82,6 +82,9 @@ func plateauThreshold(stallTimeout time.Duration) time.Duration {
 func (n *Node) isChainsyncIngressEligible(
 	connId ouroboros.ConnectionId,
 ) bool {
+	if n.peerGov != nil {
+		return n.peerGov.IsChainSelectionEligible(connId)
+	}
 	n.chainsyncIngressEligibilityMu.RLock()
 	defer n.chainsyncIngressEligibilityMu.RUnlock()
 	if n.chainsyncIngressEligibilityCache == nil {
@@ -628,6 +631,29 @@ func (n *Node) Run(ctx context.Context) error {
 	n.eventBus.SubscribeFunc(
 		chainselection.PeerTipUpdateEventType,
 		n.chainSelector.HandlePeerTipUpdateEvent,
+	)
+	n.eventBus.SubscribeFunc(
+		chainselection.PeerTipUpdateEventType,
+		func(evt event.Event) {
+			e, ok := evt.Data.(chainselection.PeerTipUpdateEvent)
+			if !ok || n.peerGov == nil {
+				return
+			}
+			n.peerGov.TouchPeerByConnId(e.ConnectionId)
+		},
+	)
+	n.eventBus.SubscribeFunc(
+		chainselection.PeerActivityEventType,
+		func(evt event.Event) {
+			e, ok := evt.Data.(chainselection.PeerActivityEvent)
+			if !ok {
+				return
+			}
+			n.chainSelector.TouchPeerActivity(e.ConnectionId)
+			if n.peerGov != nil {
+				n.peerGov.TouchPeerByConnId(e.ConnectionId)
+			}
+		},
 	)
 	// Subscribe to chain switch events to update active connection
 	n.eventBus.SubscribeFunc(
