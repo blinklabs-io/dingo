@@ -18,7 +18,9 @@ import (
 	"bytes"
 	"encoding/hex"
 	"fmt"
+	"math"
 	"math/big"
+	"strconv"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/ledger"
@@ -225,15 +227,15 @@ func (a *NodeAdapter) CurrentProtocolParams() (
 	}
 	return ProtocolParamsInfo{
 		Epoch:               a.ledgerState.CurrentEpoch(),
-		MinFeeA:             int(utxorpcBigIntToUint64(utxorpcParams.GetMinFeeCoefficient())),
-		MinFeeB:             int(utxorpcBigIntToUint64(utxorpcParams.GetMinFeeConstant())),
-		MaxBlockSize:        int(utxorpcParams.GetMaxBlockBodySize()),
-		MaxTxSize:           int(utxorpcParams.GetMaxTxSize()),
-		MaxBlockHeaderSize:  int(utxorpcParams.GetMaxBlockHeaderSize()),
+		MinFeeA:             uint64ToInt(utxorpcBigIntToUint64(utxorpcParams.GetMinFeeCoefficient())),
+		MinFeeB:             uint64ToInt(utxorpcBigIntToUint64(utxorpcParams.GetMinFeeConstant())),
+		MaxBlockSize:        uint64ToInt(utxorpcParams.GetMaxBlockBodySize()),
+		MaxTxSize:           uint64ToInt(utxorpcParams.GetMaxTxSize()),
+		MaxBlockHeaderSize:  uint64ToInt(utxorpcParams.GetMaxBlockHeaderSize()),
 		KeyDeposit:          utxorpcBigIntToString(utxorpcParams.GetStakeKeyDeposit()),
 		PoolDeposit:         utxorpcBigIntToString(utxorpcParams.GetPoolDeposit()),
-		EMax:                int(utxorpcParams.GetPoolRetirementEpochBound()),
-		NOpt:                int(utxorpcParams.GetDesiredNumberOfPools()),
+		EMax:                uint64ToInt(utxorpcParams.GetPoolRetirementEpochBound()),
+		NOpt:                uint64ToInt(utxorpcParams.GetDesiredNumberOfPools()),
 		A0:                  rationalToFloat64(utxorpcParams.GetPoolInfluence()),
 		Rho:                 rationalToFloat64(utxorpcParams.GetMonetaryExpansion()),
 		Tau:                 rationalToFloat64(utxorpcParams.GetTreasuryExpansion()),
@@ -247,9 +249,9 @@ func (a *NodeAdapter) CurrentProtocolParams() (
 		MaxTxExSteps:        exUnitsStepsString(utxorpcParams.GetMaxExecutionUnitsPerTransaction()),
 		MaxBlockExMem:       exUnitsMemString(utxorpcParams.GetMaxExecutionUnitsPerBlock()),
 		MaxBlockExSteps:     exUnitsStepsString(utxorpcParams.GetMaxExecutionUnitsPerBlock()),
-		MaxValSize:          fmt.Sprintf("%d", utxorpcParams.GetMaxValueSize()),
-		CollateralPercent:   int(utxorpcParams.GetCollateralPercentage()),
-		MaxCollateralInputs: int(utxorpcParams.GetMaxCollateralInputs()),
+		MaxValSize:          strconv.FormatUint(utxorpcParams.GetMaxValueSize(), 10),
+		CollateralPercent:   uint64ToInt(utxorpcParams.GetCollateralPercentage()),
+		MaxCollateralInputs: uint64ToInt(utxorpcParams.GetMaxCollateralInputs()),
 	}, nil
 }
 
@@ -309,7 +311,7 @@ func utxorpcBigIntToString(v *cardano.BigInt) string {
 	}
 	switch x := v.GetBigInt().(type) {
 	case *cardano.BigInt_Int:
-		return fmt.Sprintf("%d", x.Int)
+		return strconv.FormatInt(x.Int, 10)
 	case *cardano.BigInt_BigUInt:
 		if len(x.BigUInt) == 0 {
 			return "0"
@@ -342,16 +344,23 @@ func utxorpcBigIntToUint64(v *cardano.BigInt) uint64 {
 	}
 }
 
+func uint64ToInt(v uint64) int {
+	if v > math.MaxInt {
+		return math.MaxInt
+	}
+	return int(v)
+}
+
 func exUnitsMemString(exUnits *cardano.ExUnits) string {
 	if exUnits == nil {
 		return "0"
 	}
-	return fmt.Sprintf("%d", exUnits.GetMemory())
+	return strconv.FormatUint(exUnits.GetMemory(), 10)
 }
 
 func exUnitsStepsString(exUnits *cardano.ExUnits) string {
 	if exUnits == nil {
 		return "0"
 	}
-	return fmt.Sprintf("%d", exUnits.GetSteps())
+	return strconv.FormatUint(exUnits.GetSteps(), 10)
 }
