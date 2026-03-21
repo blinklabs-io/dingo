@@ -909,6 +909,10 @@ func (o *Ouroboros) SubscribeChainsyncResync(ctx context.Context) {
 				connIds = append(connIds, e.ConnectionId)
 			} else if o.ChainsyncState != nil {
 				connIds = o.ChainsyncState.RewindTrackedClientsTo(e.Point)
+				if e.Reason == "local ledger rollback" &&
+					len(connIds) == 0 {
+					connIds = o.ChainsyncState.GetClientConnIds()
+				}
 			}
 			if o.ChainsyncState != nil {
 				if e.Point.Slot > 0 || len(e.Point.Hash) > 0 {

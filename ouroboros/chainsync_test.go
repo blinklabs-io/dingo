@@ -16,12 +16,16 @@ package ouroboros
 
 import (
 	"context"
+	"io"
+	"log/slog"
 	"net"
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/chain"
 	dchainsync "github.com/blinklabs-io/dingo/chainsync"
 	"github.com/blinklabs-io/dingo/connmanager"
+	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/peergov"
@@ -100,6 +104,31 @@ func newTestConnId(local, remote string) ouroboros.ConnectionId {
 		LocalAddr:  localAddr,
 		RemoteAddr: remoteAddr,
 	}
+}
+
+func newTestLedgerState(t *testing.T) *ledger.LedgerState {
+	t.Helper()
+
+	db, err := database.New(&database.Config{
+		BlobPlugin:     "badger",
+		MetadataPlugin: "sqlite",
+		DataDir:        "",
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { db.Close() })
+
+	cm, err := chain.NewManager(db, nil)
+	require.NoError(t, err)
+
+	ls, err := ledger.NewLedgerState(ledger.LedgerStateConfig{
+		Database:     db,
+		ChainManager: cm,
+		Logger: slog.New(
+			slog.NewJSONHandler(io.Discard, nil),
+		),
+	})
+	require.NoError(t, err)
+	return ls
 }
 
 func TestNormalizeIntersectPoints(t *testing.T) {
@@ -471,18 +500,28 @@ func TestChainsyncClientRollForward_UntrackedPeerDoesNotPublishToLedger(
 	}
 }
 
-func TestSubscribeChainsyncResyncRecyclesConnection(t *testing.T) {
+func TestSubscribeChainsyncResyncRewindsClientsWithoutRecycle(
+	t *testing.T,
+) {
 	bus := event.NewEventBus(nil, nil)
 	defer bus.Close()
 
 	connA := newTestConnId("127.0.0.1:6000", "1.1.1.1:3001")
 	connB := newTestConnId("127.0.0.1:6000", "2.2.2.2:3001")
+	rollbackPoint := ocommon.NewPoint(90, []byte("rollback"))
 	point := ocommon.NewPoint(100, []byte("hdr"))
 	tip := ochainsync.Tip{Point: point}
 
 	state := dchainsync.NewState(bus, nil)
 	require.True(t, state.AddClientConnId(connA))
 	require.True(t, state.AddClientConnId(connB))
+	state.UpdateClientTip(
+		connA,
+		ocommon.NewPoint(120, []byte("ahead")),
+		ochainsync.Tip{
+			Point: ocommon.NewPoint(120, []byte("ahead")),
+		},
+	)
 	state.UpdateClientTip(connB, point, tip)
 	require.True(
 		t,
@@ -505,30 +544,79 @@ func TestSubscribeChainsyncResyncRecyclesConnection(t *testing.T) {
 		event.NewEvent(
 			event.ChainsyncResyncEventType,
 			event.ChainsyncResyncEvent{
-				ConnectionId: connA,
-				Reason:       "test",
+				Reason: "local ledger rollback",
+				Point:  rollbackPoint,
 			},
 		),
 	)
 
 	select {
 	case evt := <-recycleCh:
-		data, ok := evt.Data.(connmanager.ConnectionRecycleRequestedEvent)
-		require.True(t, ok)
-		require.Equal(t, connA, data.ConnectionId)
-		require.Equal(
-			t,
-			"chainsync resync requested: test",
-			data.Reason,
-		)
-	case <-time.After(time.Second):
-		t.Fatal("expected connection recycle request")
+		t.Fatalf("unexpected recycle request: %#v", evt)
+	case <-time.After(100 * time.Millisecond):
 	}
 
 	require.False(
 		t,
 		state.HeaderPreviouslySeenFromOtherConn(connA, point),
 	)
+	tc := state.GetTrackedClient(connA)
+	require.NotNil(t, tc)
+	require.Equal(t, rollbackPoint, tc.Cursor)
+}
+
+func TestSubscribeChainsyncResyncFallsBackToTrackedClientsOnLocalRollback(
+	t *testing.T,
+) {
+	bus := event.NewEventBus(nil, nil)
+	defer bus.Close()
+
+	connA := newTestConnId("127.0.0.1:6000", "1.1.1.1:3001")
+	rollbackPoint := ocommon.NewPoint(90, []byte("rollback"))
+
+	state := dchainsync.NewState(bus, nil)
+	require.True(t, state.AddClientConnId(connA))
+	// Keep the tracked cursor at the rollback point so
+	// RewindTrackedClientsTo returns no connections. The local rollback
+	// still needs to resynchronize the live tracked session.
+	state.UpdateClientTip(
+		connA,
+		rollbackPoint,
+		ochainsync.Tip{Point: rollbackPoint},
+	)
+
+	o := NewOuroboros(OuroborosConfig{EventBus: bus})
+	o.ChainsyncState = state
+	o.EventBus = bus
+	o.LedgerState = newTestLedgerState(t)
+
+	_, recycleCh := bus.Subscribe(
+		connmanager.ConnectionRecycleRequestedEventType,
+	)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	o.SubscribeChainsyncResync(ctx)
+
+	bus.Publish(
+		event.ChainsyncResyncEventType,
+		event.NewEvent(
+			event.ChainsyncResyncEventType,
+			event.ChainsyncResyncEvent{
+				Reason: "local ledger rollback",
+				Point:  rollbackPoint,
+			},
+		),
+	)
+
+	select {
+	case evt := <-recycleCh:
+		recycleEvt, ok := evt.Data.(connmanager.ConnectionRecycleRequestedEvent)
+		require.True(t, ok)
+		require.Equal(t, connA, recycleEvt.ConnectionId)
+		require.Equal(t, "local ledger rollback", recycleEvt.Reason)
+	case <-time.After(time.Second):
+		t.Fatal("expected tracked client recycle after local rollback")
+	}
 }
 
 func TestHeaderPreviouslySeenFromOtherConnTreatsEquivalentConnIdsAsSame(
