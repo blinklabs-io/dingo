@@ -565,7 +565,7 @@ func TestSubscribeChainsyncResyncRewindsClientsWithoutRecycle(
 	require.Equal(t, rollbackPoint, tc.Cursor)
 }
 
-func TestSubscribeChainsyncResyncFallsBackToTrackedClientsOnLocalRollback(
+func TestSubscribeChainsyncResyncRestartsClientsOnLocalRollbackWithoutPeerHistory(
 	t *testing.T,
 ) {
 	bus := event.NewEventBus(nil, nil)
@@ -584,7 +584,6 @@ func TestSubscribeChainsyncResyncFallsBackToTrackedClientsOnLocalRollback(
 		rollbackPoint,
 		ochainsync.Tip{Point: rollbackPoint},
 	)
-
 	o := NewOuroboros(OuroborosConfig{EventBus: bus})
 	o.ChainsyncState = state
 	o.EventBus = bus
@@ -608,14 +607,11 @@ func TestSubscribeChainsyncResyncFallsBackToTrackedClientsOnLocalRollback(
 		),
 	)
 
+	// Connections should NOT be recycled — they should be restarted.
 	select {
 	case evt := <-recycleCh:
-		recycleEvt, ok := evt.Data.(connmanager.ConnectionRecycleRequestedEvent)
-		require.True(t, ok)
-		require.Equal(t, connA, recycleEvt.ConnectionId)
-		require.Equal(t, "local ledger rollback", recycleEvt.Reason)
-	case <-time.After(time.Second):
-		t.Fatal("expected tracked client recycle after local rollback")
+		t.Fatalf("unexpected recycle request: %#v", evt)
+	case <-time.After(200 * time.Millisecond):
 	}
 }
 

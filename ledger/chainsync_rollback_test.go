@@ -272,7 +272,7 @@ func TestHandleEventChainsyncBlockHeaderMissingAncestorRequestsResync(
 	t.Cleanup(func() { bus.Stop() })
 	fixture.ls.config.EventBus = bus
 
-	resyncCh := make(chan event.ChainsyncResyncEvent, 1)
+	resyncCh := make(chan event.ChainsyncResyncEvent, 4)
 	subId := bus.SubscribeFunc(
 		event.ChainsyncResyncEventType,
 		func(evt event.Event) {
@@ -333,13 +333,26 @@ func TestHandleEventChainsyncBlockHeaderMissingAncestorRequestsResync(
 	})
 	require.NoError(t, err)
 
-	select {
-	case resync := <-resyncCh:
-		assert.Equal(t, fixture.connId, resync.ConnectionId)
-		assert.Equal(t, resyncReasonRollbackNotFound, resync.Reason)
-	case <-time.After(2 * time.Second):
+	// The proactive rollback (one block at a time) fires first,
+	// publishing a "local ledger rollback" resync event. The
+	// original resync reason follows. Drain to the last event.
+	var resync event.ChainsyncResyncEvent
+	var got bool
+	timeout := time.After(2 * time.Second)
+	for {
+		select {
+		case resync = <-resyncCh:
+			got = true
+			continue
+		case <-timeout:
+		}
+		break
+	}
+	if !got {
 		t.Fatal("expected chainsync resync event")
 	}
+	assert.Equal(t, fixture.connId, resync.ConnectionId)
+	assert.Equal(t, resyncReasonRollbackNotFound, resync.Reason)
 
 	assert.Zero(t, fixture.ls.headerMismatchCount)
 	_, ok := fixture.ls.bufferedHeaderEvents[connIdKey(fixture.connId)]

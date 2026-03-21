@@ -25,7 +25,6 @@ import (
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/chainselection"
-	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/ledger"
 	ouroboros "github.com/blinklabs-io/gouroboros"
@@ -916,26 +915,43 @@ func (o *Ouroboros) SubscribeChainsyncResync(ctx context.Context) {
 					connIds,
 					e.Point,
 				)
-				if recovered || o.EventBus == nil || len(connIds) == 0 {
+				if recovered || len(connIds) == 0 {
 					return
 				}
+				// No recoverable peer history — close the affected
+				// connections so peer governance reconnects and starts
+				// fresh chainsync from the updated intersect points.
+				// Previous approach tried Stop→Start→Sync on each
+				// connection, but Stop() blocks for up to 30s when the
+				// protocol is in MustReply state (waiting for a server
+				// response). All connections would timeout and be closed
+				// anyway, wasting 30s during which stale events
+				// accumulated and prevented recovery after reconnect.
+				// RecoverAfterLocalRollback already cleaned up blockfetch
+				// state, so there are no in-flight lookups to break.
 				o.config.Logger.Info(
-					"local rollback had no recoverable peer history, recycling affected chainsync connections",
+					"local rollback had no recoverable peer history, closing connections for fresh chainsync",
 					"component", "ouroboros",
 					"rollback_slot", e.Point.Slot,
 					"connection_count", len(connIds),
 				)
 				for _, connId := range connIds {
-					o.EventBus.Publish(
-						connmanager.ConnectionRecycleRequestedEventType,
-						event.NewEvent(
-							connmanager.ConnectionRecycleRequestedEventType,
-							connmanager.ConnectionRecycleRequestedEvent{
-								ConnectionId: connId,
-								Reason:       e.Reason,
-							},
-						),
+					if o.ChainsyncState != nil {
+						o.ChainsyncState.ClearObservedHeaderHistory(connId)
+					}
+					if o.ConnManager == nil {
+						continue
+					}
+					conn := o.ConnManager.GetConnectionById(connId)
+					if conn == nil {
+						continue
+					}
+					o.config.Logger.Info(
+						"closing connection for fresh chainsync after local rollback",
+						"component", "ouroboros",
+						"connection_id", connId.String(),
 					)
+					conn.Close()
 				}
 				return
 			}

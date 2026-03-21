@@ -72,7 +72,7 @@ const (
 	syncProgressLogInterval = 30 * time.Second
 
 	// Rollback loop detection thresholds
-	rollbackLoopThreshold = 3               // number of rollbacks to same slot before breaking loop
+	rollbackLoopThreshold = 2               // number of rollbacks to same slot before breaking loop
 	rollbackLoopWindow    = 5 * time.Minute // time window for rollback loop detection
 
 	// Number of consecutive header mismatches before triggering
@@ -404,7 +404,11 @@ func (ls *LedgerState) detectConnectionSwitch() (
 			}
 		}
 		ls.lastActiveConnId = activeConnId
-		ls.rollbackHistory = nil
+		// Preserve rollbackHistory across connection switches so the
+		// rollback loop detector can fire when multiple peers all send
+		// RollBackward to the same slot during rapid chain selection
+		// changes (e.g., post-Mithril startup). Clearing it here
+		// previously allowed unbounded oscillation.
 	}
 	return activeConnId, true, switched
 }
@@ -865,23 +869,17 @@ func (ls *LedgerState) handleEventChainsyncRollback(e ChainsyncEvent) error {
 	// Filter events from non-active connections when chain selection is enabled
 	if activeConnId, configured, _ := ls.detectConnectionSwitch(); configured {
 		if activeConnId == nil {
-			// If we already have local chain progress, avoid applying
-			// rollback/header events until an active connection is
-			// selected. This prevents transient "active=nil" races from
-			// accepting deep rollback signals from non-authoritative peers.
-			if ls.chain.Tip().Point.Slot > 0 {
-				ls.config.Logger.Debug(
-					"no active connection, dropping rollback event",
-					"connection_id", e.ConnectionId.String(),
-					"slot", e.Point.Slot,
-					"local_tip_slot", ls.chain.Tip().Point.Slot,
-				)
-				return nil
-			}
+			// No active connection selected yet. Allow the rollback
+			// to proceed — the downstream security-parameter-K check
+			// and rollback-loop detector still guard against deep or
+			// repeated rollbacks. Blanket-dropping here caused
+			// pipeline stalls after Mithril bootstrap when chain
+			// selection had not yet promoted a peer.
 			ls.config.Logger.Debug(
-				"no active connection at origin, processing rollback event",
+				"no active connection, processing rollback event",
 				"connection_id", e.ConnectionId.String(),
 				"slot", e.Point.Slot,
+				"local_tip_slot", ls.chain.Tip().Point.Slot,
 			)
 		} else if !sameConnectionId(*activeConnId, e.ConnectionId) {
 			ls.discardBufferedPeerHeaders(e.ConnectionId)
@@ -1196,6 +1194,13 @@ func (ls *LedgerState) RecoverAfterLocalRollback(
 }
 
 func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
+	// Detect connection switch so pipeline ownership is handed off
+	// even when the first post-switch event is a header rather than
+	// a rollback. Without this, headers from a newly-selected active
+	// connection are buffered indefinitely because the pipeline owner
+	// still points to the old (dead) connection.
+	ls.detectConnectionSwitch()
+
 	// Track upstream tip for sync progress reporting
 	if e.Tip.Point.Slot > ls.syncUpstreamTipSlot.Load() {
 		ls.syncUpstreamTipSlot.Store(e.Tip.Point.Slot)
@@ -1448,13 +1453,46 @@ func (ls *LedgerState) tryResolveFork(
 	if ancestorPoint == nil {
 		// The peer's header stream is not continuous with our local chain
 		// view or we have not yet seen enough of its ancestry to resolve the
-		// fork locally. Force a fresh intersection on that connection.
-		ls.config.Logger.Debug(
-			"common ancestor not found locally, triggering chainsync re-sync",
-			"component", "ledger",
-			"connection_id", e.ConnectionId.String(),
-			"block_prev_hash", notFitErr.BlockPrevHash(),
-		)
+		// fork locally.
+		//
+		// After Mithril bootstrap (or any cold start), peer header history
+		// is empty so findPeerForkPath cannot walk backward through the
+		// peer's ancestry. If the local chain tip sits on a volatile-zone
+		// fork that the network has since abandoned, a plain chainsync
+		// re-sync will loop forever because the same stale intersect
+		// points produce the same fork mismatch.
+		//
+		// Break the loop by proactively rolling back one block each
+		// time this case is hit. Single-block rollbacks keep BadgerDB
+		// transactions small (avoiding "Txn is too big" after Mithril
+		// import) while progressively finding common ground with the
+		// network across successive header events.
+		recentPoints := ls.chain.RecentPoints(2)
+		if len(recentPoints) > 1 {
+			rollbackTarget := recentPoints[1]
+			ls.config.Logger.Info(
+				"common ancestor not found, rolling back one block to find common ground",
+				"component", "ledger",
+				"connection_id", e.ConnectionId.String(),
+				"block_prev_hash", notFitErr.BlockPrevHash(),
+				"consecutive_mismatches", ls.headerMismatchCount,
+				"rollback_target_slot", rollbackTarget.Slot,
+			)
+			if err := ls.rollbackChainAndState(rollbackTarget); err != nil {
+				ls.config.Logger.Warn(
+					"proactive rollback failed, falling back to chainsync re-sync",
+					"component", "ledger",
+					"error", err,
+				)
+			}
+		} else {
+			ls.config.Logger.Debug(
+				"common ancestor not found locally, triggering chainsync re-sync",
+				"component", "ledger",
+				"connection_id", e.ConnectionId.String(),
+				"block_prev_hash", notFitErr.BlockPrevHash(),
+			)
+		}
 		ls.requestChainsyncResync(
 			e.ConnectionId,
 			resyncReasonRollbackNotFound,
