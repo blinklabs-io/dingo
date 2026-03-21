@@ -26,7 +26,6 @@ import (
 	"github.com/blinklabs-io/dingo/peergov"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
-	okeepalive "github.com/blinklabs-io/gouroboros/protocol/keepalive"
 )
 
 // safeAddUint64 returns a + b, clamped to math.MaxUint64 on overflow.
@@ -39,12 +38,7 @@ func safeAddUint64(a, b uint64) uint64 {
 
 const (
 	defaultEvaluationInterval = 10 * time.Second
-	// Allow at least one full keepalive period plus response timeout and
-	// jitter before declaring a quiet peer stale. Healthy peers at tip can
-	// legitimately sit in AwaitReply without a tip change for long periods.
-	defaultStaleTipThreshold = (okeepalive.DefaultKeepAlivePeriod *
-		time.Second) + (okeepalive.DefaultKeepAliveTimeout * time.Second) +
-		(15 * time.Second)
+	defaultStaleTipThreshold  = 60 * time.Second
 	defaultMinSwitchBlockDiff = 2
 
 	// DefaultMaxTrackedPeers is the maximum number of peers tracked by
@@ -147,10 +141,6 @@ func NewChainSelector(cfg ChainSelectorConfig) *ChainSelector {
 			peergov.PeerPriorityChangedEventType,
 			cs.handlePeerPriorityChangedEvent,
 		)
-		cfg.EventBus.SubscribeFunc(
-			PeerActivityEventType,
-			cs.HandlePeerActivityEvent,
-		)
 	}
 	return cs
 }
@@ -248,7 +238,11 @@ func (cs *ChainSelector) updatePeerTipObserved(
 		}
 
 		if peerTip, exists := cs.peerTips[connId]; exists {
-			peerTip.UpdateTipWithObserved(tip, observedTip, vrfOutput)
+			peerTip.UpdateTipWithObserved(
+				tip,
+				observedTip,
+				vrfOutput,
+			)
 		} else {
 			// Evict the least-recently-updated peer if at capacity
 			if len(cs.peerTips) >= cs.maxTrackedPeers {
@@ -264,21 +258,19 @@ func (cs *ChainSelector) updatePeerTipObserved(
 					return
 				}
 			}
-			cs.peerTips[connId] = NewPeerChainTip(connId, tip, vrfOutput)
-			cs.peerTips[connId].ObservedTip = observedTip
+			peerTip := NewPeerChainTip(connId, tip, vrfOutput)
+			peerTip.ObservedTip = observedTip
+			cs.peerTips[connId] = peerTip
 		}
 
 		cs.config.Logger.Debug(
 			"updated peer tip",
 			"connection_id", connId.String(),
-			"advertised_block_number", tip.BlockNumber,
-			"advertised_slot", tip.Point.Slot,
-			"observed_block_number", observedTip.BlockNumber,
-			"observed_slot", observedTip.Point.Slot,
+			"block_number", tip.BlockNumber,
+			"slot", tip.Point.Slot,
 		)
 
-		// Check if this peer's locally observed frontier is better than the
-		// current best peer's locally observed frontier.
+		// Check if this peer's tip is better than the current best peer's tip
 		if cs.bestPeerConn != nil {
 			if bestPeerTip, ok := cs.peerTips[*cs.bestPeerConn]; ok {
 				comparison := CompareChains(
@@ -321,6 +313,20 @@ func (cs *ChainSelector) updatePeerTipObserved(
 	}
 
 	return true
+}
+
+func (cs *ChainSelector) TouchPeerActivity(connId ouroboros.ConnectionId) {
+	cs.mutex.Lock()
+	defer cs.mutex.Unlock()
+
+	peerTip, exists := cs.peerTips[connId]
+	if !exists {
+		return
+	}
+	peerTip.Touch()
+	if newBest := cs.selectBestChainLocked(); newBest != nil {
+		cs.bestPeerConn = newBest
+	}
 }
 
 // evictLeastRecentPeerLocked removes the peer with the oldest LastUpdated
@@ -457,24 +463,6 @@ func (cs *ChainSelector) SetLocalTip(tip ochainsync.Tip) {
 	cs.localTip = tip
 }
 
-// TouchPeerActivity refreshes a peer's liveness timestamp without mutating
-// its advertised tip. If the peer was previously stale, selection is
-// re-evaluated immediately so a healthy quiet peer can become eligible again.
-func (cs *ChainSelector) TouchPeerActivity(connId ouroboros.ConnectionId) {
-	shouldEvaluate := false
-
-	cs.mutex.Lock()
-	if peerTip, ok := cs.peerTips[connId]; ok && peerTip != nil {
-		shouldEvaluate = cs.isPeerTipStale(peerTip)
-		peerTip.Touch()
-	}
-	cs.mutex.Unlock()
-
-	if shouldEvaluate {
-		cs.EvaluateAndSwitch()
-	}
-}
-
 // SetSecurityParam updates the security parameter (k) dynamically.
 // This allows the selector to use protocol parameters for density-based
 // comparison.
@@ -563,13 +551,13 @@ func (cs *ChainSelector) isPeerSelectableLocked(
 		return false
 	}
 	if cs.securityParam > 0 && cs.localTip.BlockNumber > 0 &&
-		safeAddUint64(peerTip.SelectionTip().BlockNumber, cs.securityParam) <
+		safeAddUint64(peerTip.Tip.BlockNumber, cs.securityParam) <
 			cs.localTip.BlockNumber {
 		if logSkip {
 			cs.config.Logger.Debug(
 				"skipping implausibly-behind peer",
 				"connection_id", connId.String(),
-				"peer_block_number", peerTip.SelectionTip().BlockNumber,
+				"peer_block_number", peerTip.Tip.BlockNumber,
 				"local_block_number", cs.localTip.BlockNumber,
 				"security_param", cs.securityParam,
 			)
@@ -756,6 +744,10 @@ func (cs *ChainSelector) EvaluateAndSwitch() bool {
 					newPeerTip.SelectionTip(),
 					previousPeerTip.SelectionTip(),
 				) == ChainEqual {
+					// When two peers have delivered the same observed frontier,
+					// keep following the incumbent. The first peer to deliver the
+					// fitting header already won on latency; switching on source
+					// priority or VRF alone just creates churn near tip.
 					newBest = previousBest
 				} else if
 				// Preserve the incumbent only when it still wins the same
@@ -767,11 +759,11 @@ func (cs *ChainSelector) EvaluateAndSwitch() bool {
 					newPeerTip,
 				) == ChainABetter {
 					newBest = previousBest
-				} else if newPeerTip.SelectionTip().BlockNumber >
-					previousPeerTip.SelectionTip().BlockNumber &&
+				} else if newPeerTip.Tip.BlockNumber >
+					previousPeerTip.Tip.BlockNumber &&
 					!IsSignificantlyBetter(
-						newPeerTip.SelectionTip(),
-						previousPeerTip.SelectionTip(),
+						newPeerTip.Tip,
+						previousPeerTip.Tip,
 						cs.config.MinSwitchBlockDiff,
 					) {
 					newBest = previousBest

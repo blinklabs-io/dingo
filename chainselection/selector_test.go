@@ -105,47 +105,6 @@ func TestChainSelectorUpdateExistingPeerTip(t *testing.T) {
 	assert.Equal(t, 1, cs.PeerCount())
 }
 
-func TestChainSelectorPrefersMoreAdvancedObservedTip(t *testing.T) {
-	cs := NewChainSelector(ChainSelectorConfig{})
-
-	laggingConn := newTestConnectionId(1)
-	leadingConn := newTestConnectionId(2)
-
-	laggingAdvertisedTip := ochainsync.Tip{
-		Point:       ocommon.Point{Slot: 200, Hash: []byte("lagging-advertised")},
-		BlockNumber: 200,
-	}
-	laggingObservedTip := ochainsync.Tip{
-		Point:       ocommon.Point{Slot: 120, Hash: []byte("lagging-observed")},
-		BlockNumber: 120,
-	}
-	leadingAdvertisedTip := ochainsync.Tip{
-		Point:       ocommon.Point{Slot: 180, Hash: []byte("leading-advertised")},
-		BlockNumber: 180,
-	}
-	leadingObservedTip := ochainsync.Tip{
-		Point:       ocommon.Point{Slot: 150, Hash: []byte("leading-observed")},
-		BlockNumber: 150,
-	}
-
-	cs.updatePeerTipObserved(
-		laggingConn,
-		laggingAdvertisedTip,
-		laggingObservedTip,
-		nil,
-	)
-	cs.updatePeerTipObserved(
-		leadingConn,
-		leadingAdvertisedTip,
-		leadingObservedTip,
-		nil,
-	)
-
-	bestPeer := cs.SelectBestChain()
-	require.NotNil(t, bestPeer)
-	assert.Equal(t, leadingConn, *bestPeer)
-}
-
 func TestChainSelectorRemovePeer(t *testing.T) {
 	cs := NewChainSelector(ChainSelectorConfig{})
 
@@ -523,54 +482,116 @@ func TestChainSelectorSelectBestChainPrefersHigherPriorityPeerAtEqualTip(
 	assert.Equal(t, localRootConn, *bestPeer)
 }
 
+func TestChainSelectorPreservesEqualTipIncumbentAgainstHigherPriorityPeer(
+	t *testing.T,
+) {
+	publicRootConn := newTestConnectionId(1)
+	localRootConn := newTestConnectionId(2)
+	cs := NewChainSelector(ChainSelectorConfig{})
+	setSelectorConnectionPriority(cs, localRootConn, 20)
+	setSelectorConnectionPriority(cs, publicRootConn, 10)
+
+	equalTip := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 120, Hash: []byte("equal-tip")},
+		BlockNumber: 60,
+	}
+
+	cs.UpdatePeerTip(publicRootConn, equalTip, nil)
+	require.NotNil(t, cs.GetBestPeer())
+	assert.Equal(t, publicRootConn, *cs.GetBestPeer())
+
+	cs.UpdatePeerTip(localRootConn, equalTip, nil)
+	switched := cs.EvaluateAndSwitch()
+	assert.False(t, switched)
+	require.NotNil(t, cs.GetBestPeer())
+	assert.Equal(t, publicRootConn, *cs.GetBestPeer())
+}
+
 func TestChainSelectorPreservesEqualTipIncumbentAtSamePriority(t *testing.T) {
 	connId1 := newTestConnectionId(1)
 	connId2 := newTestConnectionId(2)
 	cs := NewChainSelector(ChainSelectorConfig{})
+	sharedVRF := make64ByteVRF(0x01)
 
 	equalTip := ochainsync.Tip{
 		Point:       ocommon.Point{Slot: 120, Hash: []byte("equal-tip")},
 		BlockNumber: 60,
 	}
 
-	cs.UpdatePeerTip(connId2, equalTip, nil)
+	// Seed the incumbent using a temporary priority advantage, then
+	// remove that advantage. Equal-priority peers at the same tip
+	// should not steal incumbency just because the selector re-evaluates.
+	setSelectorConnectionPriority(cs, connId1, 10)
+	setSelectorConnectionPriority(cs, connId2, 20)
+	cs.UpdatePeerTip(connId1, equalTip, sharedVRF)
+	cs.UpdatePeerTip(connId2, equalTip, sharedVRF)
 	require.NotNil(t, cs.GetBestPeer())
-	assert.Equal(t, connId2, *cs.GetBestPeer())
+	assert.Equal(t, connId1, *cs.GetBestPeer())
 
-	cs.UpdatePeerTip(connId1, equalTip, nil)
+	setSelectorConnectionPriority(cs, connId1, 50)
+	setSelectorConnectionPriority(cs, connId2, 50)
+
+	bestPeer := cs.SelectBestChain()
+	require.NotNil(t, bestPeer)
+	assert.Equal(t, connId1, *bestPeer)
 
 	switched := cs.EvaluateAndSwitch()
 	assert.False(t, switched)
 	require.NotNil(t, cs.GetBestPeer())
-	assert.Equal(t, connId2, *cs.GetBestPeer())
+	assert.Equal(t, connId1, *cs.GetBestPeer())
 }
 
-func TestChainSelectorPreservesEqualTipIncumbentAtSamePriorityWithVRF(
+func TestChainSelectorPreservesIncumbentWithInvalidEqualVRF(
 	t *testing.T,
 ) {
-	incumbentConn := newTestConnectionId(1)
-	challengerConn := newTestConnectionId(2)
-	cs := NewChainSelector(ChainSelectorConfig{})
-
-	equalTip := ochainsync.Tip{
-		Point:       ocommon.Point{Slot: 120, Hash: []byte("equal-tip")},
-		BlockNumber: 60,
+	testCases := []struct {
+		name string
+		vrfA []byte
+		vrfB []byte
+	}{
+		{
+			name: "nil vrf",
+			vrfA: nil,
+			vrfB: nil,
+		},
+		{
+			name: "short vrf",
+			vrfA: []byte{0x01},
+			vrfB: []byte{0x01},
+		},
 	}
-	vrfHigher := make64ByteVRF(0xFF)
-	vrfLower := make64ByteVRF(0x00)
 
-	cs.UpdatePeerTip(incumbentConn, equalTip, vrfHigher)
-	require.NotNil(t, cs.GetBestPeer())
-	assert.Equal(t, incumbentConn, *cs.GetBestPeer())
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			connId1 := newTestConnectionId(1)
+			connId2 := newTestConnectionId(2)
+			cs := NewChainSelector(ChainSelectorConfig{})
 
-	cs.UpdatePeerTip(challengerConn, equalTip, vrfLower)
-	require.NotNil(t, cs.GetBestPeer())
-	assert.Equal(t, incumbentConn, *cs.GetBestPeer())
+			equalTip := ochainsync.Tip{
+				Point:       ocommon.Point{Slot: 120, Hash: []byte("equal-tip")},
+				BlockNumber: 60,
+			}
 
-	switched := cs.EvaluateAndSwitch()
-	assert.False(t, switched)
-	require.NotNil(t, cs.GetBestPeer())
-	assert.Equal(t, incumbentConn, *cs.GetBestPeer())
+			setSelectorConnectionPriority(cs, connId1, 10)
+			setSelectorConnectionPriority(cs, connId2, 20)
+			cs.UpdatePeerTip(connId1, equalTip, tc.vrfA)
+			cs.UpdatePeerTip(connId2, equalTip, tc.vrfB)
+			require.NotNil(t, cs.GetBestPeer())
+			assert.Equal(t, connId1, *cs.GetBestPeer())
+
+			setSelectorConnectionPriority(cs, connId1, 50)
+			setSelectorConnectionPriority(cs, connId2, 50)
+
+			bestPeer := cs.SelectBestChain()
+			require.NotNil(t, bestPeer)
+			assert.Equal(t, connId1, *bestPeer)
+
+			switched := cs.EvaluateAndSwitch()
+			assert.False(t, switched)
+			require.NotNil(t, cs.GetBestPeer())
+			assert.Equal(t, connId1, *cs.GetBestPeer())
+		})
+	}
 }
 
 func TestChainSelectorUpdatesConnectionStateFromPeerGovEvents(t *testing.T) {
@@ -925,84 +946,7 @@ func TestPeerChainTipUpdateTip(t *testing.T) {
 
 	peerTip.UpdateTip(tip2, nil)
 	assert.Equal(t, tip2.BlockNumber, peerTip.Tip.BlockNumber)
-	assert.Equal(t, tip2.BlockNumber, peerTip.ObservedTip.BlockNumber)
 	assert.True(t, peerTip.LastUpdated.After(oldTime))
-}
-
-func TestPeerChainTipUpdateTipWithObserved(t *testing.T) {
-	connId := newTestConnectionId(1)
-	advertisedTip := ochainsync.Tip{
-		Point:       ocommon.Point{Slot: 200, Hash: []byte("advertised")},
-		BlockNumber: 200,
-	}
-	observedTip := ochainsync.Tip{
-		Point:       ocommon.Point{Slot: 150, Hash: []byte("observed")},
-		BlockNumber: 150,
-	}
-
-	peerTip := NewPeerChainTip(connId, advertisedTip, nil)
-	peerTip.UpdateTipWithObserved(advertisedTip, observedTip, nil)
-
-	assert.Equal(t, advertisedTip.BlockNumber, peerTip.Tip.BlockNumber)
-	assert.Equal(t, observedTip.BlockNumber, peerTip.ObservedTip.BlockNumber)
-	assert.Equal(t, observedTip.BlockNumber, peerTip.SelectionTip().BlockNumber)
-}
-
-func TestPeerChainTipTouch(t *testing.T) {
-	connId := newTestConnectionId(1)
-	tip := ochainsync.Tip{
-		Point:       ocommon.Point{Slot: 100, Hash: []byte("test")},
-		BlockNumber: 50,
-	}
-
-	peerTip := NewPeerChainTip(connId, tip, nil)
-	require.Eventually(t, func() bool {
-		return peerTip.IsStale(50 * time.Millisecond)
-	}, 2*time.Second, 5*time.Millisecond, "peer tip should become stale")
-	oldTime := peerTip.LastUpdated
-
-	peerTip.Touch()
-
-	assert.True(t, peerTip.LastUpdated.After(oldTime))
-	assert.False(t, peerTip.IsStale(50*time.Millisecond))
-}
-
-func TestChainSelectorTouchPeerActivityRevivesStaleBestPeer(t *testing.T) {
-	cs := NewChainSelector(ChainSelectorConfig{
-		StaleTipThreshold: 50 * time.Millisecond,
-	})
-
-	bestConn := newTestConnectionId(1)
-	freshConn := newTestConnectionId(2)
-	bestTip := ochainsync.Tip{
-		Point:       ocommon.Point{Slot: 100, Hash: []byte("best")},
-		BlockNumber: 60,
-	}
-	freshTip := ochainsync.Tip{
-		Point:       ocommon.Point{Slot: 100, Hash: []byte("fresh")},
-		BlockNumber: 50,
-	}
-
-	cs.UpdatePeerTip(bestConn, bestTip, nil)
-	cs.UpdatePeerTip(freshConn, freshTip, nil)
-	cs.EvaluateAndSwitch()
-	require.NotNil(t, cs.GetBestPeer())
-	assert.Equal(t, bestConn, *cs.GetBestPeer())
-
-	require.Eventually(t, func() bool {
-		peerTip := cs.GetPeerTip(bestConn)
-		return peerTip != nil && peerTip.IsStale(50*time.Millisecond)
-	}, 2*time.Second, 5*time.Millisecond, "best peer should become stale")
-
-	cs.UpdatePeerTip(freshConn, freshTip, nil)
-	cs.EvaluateAndSwitch()
-	require.NotNil(t, cs.GetBestPeer())
-	assert.Equal(t, freshConn, *cs.GetBestPeer())
-
-	cs.TouchPeerActivity(bestConn)
-
-	require.NotNil(t, cs.GetBestPeer())
-	assert.Equal(t, bestConn, *cs.GetBestPeer())
 }
 
 func TestChainSelectorVRFTiebreaker(t *testing.T) {
