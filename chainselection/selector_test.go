@@ -1118,47 +1118,37 @@ func TestPeerChainTipVRFOutputStored(t *testing.T) {
 	assert.Equal(t, newVRF, peerTip.VRFOutput)
 }
 
-func TestUpdatePeerTipRejectsImplausibleTip(t *testing.T) {
+func TestUpdatePeerTipRejectsImplausibleKnownPeerJump(t *testing.T) {
 	cs := NewChainSelector(ChainSelectorConfig{
 		SecurityParam: 2160, // Cardano mainnet k
 	})
 
-	// Set local tip so the plausibility check is active
-	cs.SetLocalTip(ochainsync.Tip{
-		Point:       ocommon.Point{Slot: 100000, Hash: []byte("local")},
-		BlockNumber: 50000,
-	})
+	connId := newTestConnectionId(1)
 
-	// Add a plausible peer first so the implausible check activates
-	// (the check requires len(peerTips) > 0 to avoid blocking
-	// initial sync where all peers are legitimately far ahead).
-	existingConn := newTestConnectionId(2)
-	plausibleTip := ochainsync.Tip{
+	// First tip accepted (new peer, always accepted)
+	initialTip := ochainsync.Tip{
 		Point:       ocommon.Point{Slot: 100500, Hash: []byte("ok")},
 		BlockNumber: 50500,
 	}
-	cs.UpdatePeerTip(existingConn, plausibleTip, nil)
+	accepted := cs.UpdatePeerTip(connId, initialTip, nil)
+	assert.True(t, accepted, "initial tip should be accepted")
 
-	connId := newTestConnectionId(1)
-
-	// A spoofed tip claiming to be far beyond local tip + k
+	// Same peer jumps far beyond previous tip + k
 	spoofedTip := ochainsync.Tip{
 		Point:       ocommon.Point{Slot: math.MaxUint64, Hash: []byte("spoof")},
 		BlockNumber: math.MaxUint64,
 	}
 
-	accepted := cs.UpdatePeerTip(connId, spoofedTip, nil)
+	accepted = cs.UpdatePeerTip(connId, spoofedTip, nil)
 	assert.False(
 		t,
 		accepted,
-		"implausibly high tip should be rejected",
+		"known peer jumping beyond k should be rejected",
 	)
-	assert.Nil(
-		t,
-		cs.GetPeerTip(connId),
-		"rejected tip should not be tracked",
-	)
-	assert.Equal(t, 1, cs.PeerCount(), "peer count should remain 1 (existing peer only)")
+	// Peer tip should still be the original tip
+	pt := cs.GetPeerTip(connId)
+	require.NotNil(t, pt)
+	assert.Equal(t, uint64(50500), pt.Tip.BlockNumber)
 }
 
 func TestUpdatePeerTipAcceptsPlausibleTip(t *testing.T) {
@@ -1223,43 +1213,40 @@ func TestUpdatePeerTipAcceptsTipAtExactBoundary(t *testing.T) {
 	assert.NotNil(t, cs.GetPeerTip(connId))
 }
 
-func TestUpdatePeerTipRejectsTipOneOverBoundary(t *testing.T) {
+func TestUpdatePeerTipAcceptsNewPeerFarAhead(t *testing.T) {
+	// New peers are always accepted regardless of how far ahead they
+	// claim to be. This supports cold-start scenarios like Mithril
+	// bootstrap where legitimate peers may be >k blocks ahead of
+	// the local reference.
 	cs := NewChainSelector(ChainSelectorConfig{
-		SecurityParam: 2160,
+		SecurityParam: 432, // preview k
 	})
 
-	cs.SetLocalTip(ochainsync.Tip{
-		Point:       ocommon.Point{Slot: 100000, Hash: []byte("local")},
-		BlockNumber: 50000,
-	})
-
-	// Add a plausible peer first so the implausible check has a
-	// reference point. The reference is the best known peer tip
-	// (block 50500), not the local tip.
-	existingConn := newTestConnectionId(2)
-	cs.UpdatePeerTip(existingConn, ochainsync.Tip{
-		Point:       ocommon.Point{Slot: 100500, Hash: []byte("ok")},
-		BlockNumber: 50500,
+	// Add a peer at the Mithril snapshot block
+	snapshotConn := newTestConnectionId(1)
+	cs.UpdatePeerTip(snapshotConn, ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 100000, Hash: []byte("snapshot")},
+		BlockNumber: 4125222,
 	}, nil)
 
-	connId := newTestConnectionId(1)
-
-	// Tip one block past the boundary (reference peer block + k + 1)
-	overBoundaryTip := ochainsync.Tip{
+	// A new peer at the real chain tip, 500 blocks ahead (> k=432)
+	realConn := newTestConnectionId(2)
+	realTip := ochainsync.Tip{
 		Point: ocommon.Point{
-			Slot: 106000,
-			Hash: []byte("over"),
+			Slot: 110000,
+			Hash: []byte("real"),
 		},
-		BlockNumber: 50500 + 2160 + 1,
+		BlockNumber: 4125722, // 500 blocks ahead of snapshot
 	}
 
-	accepted := cs.UpdatePeerTip(connId, overBoundaryTip, nil)
-	assert.False(
+	accepted := cs.UpdatePeerTip(realConn, realTip, nil)
+	assert.True(
 		t,
 		accepted,
-		"tip one past boundary should be rejected",
+		"new peer should be accepted even if >k blocks ahead of existing peers",
 	)
-	assert.Nil(t, cs.GetPeerTip(connId))
+	assert.NotNil(t, cs.GetPeerTip(realConn))
+	assert.Equal(t, 2, cs.PeerCount())
 }
 
 func TestUpdatePeerTipAcceptsTipWhenSecurityParamZero(t *testing.T) {
@@ -1384,46 +1371,37 @@ func TestUpdatePeerTipRejectsKnownPeerJumpFromZero(t *testing.T) {
 	assert.Equal(t, uint64(0), pt.Tip.BlockNumber)
 }
 
-func TestUpdatePeerTipSpoofedPeerDoesNotBecomesBest(t *testing.T) {
+func TestUpdatePeerTipKnownPeerSpoofRejected(t *testing.T) {
+	// A known peer that tries to jump its tip by more than k blocks
+	// is rejected. This is the primary anti-spoofing defense.
 	cs := NewChainSelector(ChainSelectorConfig{
 		SecurityParam: 2160,
 	})
 
-	cs.SetLocalTip(ochainsync.Tip{
-		Point:       ocommon.Point{Slot: 100000, Hash: []byte("local")},
-		BlockNumber: 50000,
-	})
-
-	// Add a legitimate peer first
-	legitimateConn := newTestConnectionId(1)
-	legitimateTip := ochainsync.Tip{
+	// Peer establishes initial tip
+	connId := newTestConnectionId(1)
+	initialTip := ochainsync.Tip{
 		Point: ocommon.Point{
 			Slot: 100100,
 			Hash: []byte("legit"),
 		},
 		BlockNumber: 50050,
 	}
-	cs.UpdatePeerTip(legitimateConn, legitimateTip, nil)
+	cs.UpdatePeerTip(connId, initialTip, nil)
 
-	// Now a malicious peer tries to spoof
-	maliciousConn := newTestConnectionId(2)
+	// Same peer tries to spoof by jumping far ahead
 	spoofedTip := ochainsync.Tip{
 		Point:       ocommon.Point{Slot: math.MaxUint64, Hash: []byte("evil")},
 		BlockNumber: math.MaxUint64,
 	}
 
-	accepted := cs.UpdatePeerTip(maliciousConn, spoofedTip, nil)
-	assert.False(t, accepted, "spoofed tip should be rejected")
+	accepted := cs.UpdatePeerTip(connId, spoofedTip, nil)
+	assert.False(t, accepted, "known peer jumping beyond k should be rejected")
 
-	// The legitimate peer should still be the best
-	bestPeer := cs.GetBestPeer()
-	require.NotNil(t, bestPeer)
-	assert.Equal(
-		t,
-		legitimateConn,
-		*bestPeer,
-		"legitimate peer should remain best peer",
-	)
+	// Peer tip should still be the original
+	pt := cs.GetPeerTip(connId)
+	require.NotNil(t, pt)
+	assert.Equal(t, uint64(50050), pt.Tip.BlockNumber)
 }
 
 func TestChainSelectorMaxTrackedPeersDefault(t *testing.T) {
