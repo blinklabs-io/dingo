@@ -24,7 +24,6 @@ import (
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/chainselection"
-	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/ledger"
 	ouroboros "github.com/blinklabs-io/gouroboros"
@@ -884,10 +883,11 @@ func (o *Ouroboros) restartChainsyncClientAsync(
 }
 
 // SubscribeChainsyncResync registers an EventBus subscriber that
-// handles chainsync re-sync events. When a resync is requested, we restart
-// the ChainSync mini-protocol on the existing bearer after sending MsgDone and
-// resetting the local cursor. This preserves the stable TCP connection and
-// only falls back to closing the bearer if the protocol restart itself fails.
+// handles chainsync re-sync events. Ordinary resyncs restart the
+// ChainSync mini-protocol on the existing bearer after resetting
+// local dedup state. Local authoritative rollbacks additionally
+// rewind tracked client cursors and attempt ledger-side recovery
+// before recycling affected connections as a fallback.
 func (o *Ouroboros) SubscribeChainsyncResync(ctx context.Context) {
 	if o.EventBus == nil {
 		return
@@ -956,6 +956,7 @@ func (o *Ouroboros) SubscribeChainsyncResync(ctx context.Context) {
 				return
 			}
 			for _, connId := range connIds {
+				connId := connId
 				if o.ChainsyncState != nil {
 					o.ChainsyncState.ClearObservedHeaderHistory(connId)
 				}
@@ -976,7 +977,23 @@ func (o *Ouroboros) SubscribeChainsyncResync(ctx context.Context) {
 								err,
 							)
 						}
-						return o.resyncChainsyncClientWithPoints(
+						conn := o.ConnManager.GetConnectionById(connId)
+						if conn == nil {
+							return fmt.Errorf(
+								"connection not found: %s",
+								connId.String(),
+							)
+						}
+						cs := conn.ChainSync()
+						if cs != nil && cs.Client != nil {
+							if err := cs.Client.Stop(); err != nil {
+								return fmt.Errorf(
+									"stop chainsync client: %w",
+									err,
+								)
+							}
+						}
+						return o.RestartChainsyncClientWithPoints(
 							connId,
 							intersectPoints,
 						)

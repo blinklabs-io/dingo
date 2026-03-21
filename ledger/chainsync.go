@@ -618,31 +618,47 @@ func (ls *LedgerState) currentHeaderPipelineOwner() ouroboros.ConnectionId {
 	if ls.chain != nil && ls.chain.HeaderCount() > 0 {
 		return ls.headerPipelineConnId
 	}
-	// Once the shared header queue drains, there is no live fragment in flight.
-	// The only idle owner worth preserving is the currently selected active
-	// connection. If selection has already moved elsewhere, drop the stale
-	// preference and let the next usable header start a fresh fragment.
-	if ls.selectedBlockfetchConnStillActive() {
-		return ls.selectedBlockfetchConnId
-	}
+	// Once the shared header queue drains, there is no live pipeline owner.
+	// A stale selected blockfetch peer must not monopolize future headers while
+	// the pipeline is idle; whichever peer delivers the next usable header gets
+	// to seed the next batch.
 	ls.headerPipelineConnId = ouroboros.ConnectionId{}
-	ls.selectedBlockfetchConnId = ouroboros.ConnectionId{}
 	return ouroboros.ConnectionId{}
 }
 
-func (ls *LedgerState) selectedBlockfetchConnStillActive() bool {
-	if connIdKey(ls.selectedBlockfetchConnId) == "" {
-		return false
+func (ls *LedgerState) staleSelectedOwnerWouldBufferHeader(
+	e ChainsyncEvent,
+) bool {
+	return connIdKey(ls.selectedBlockfetchConnId) != "" &&
+		ls.chainsyncBlockfetchReadyChan == nil &&
+		(ls.chain == nil || ls.chain.HeaderCount() == 0) &&
+		!sameConnectionId(ls.selectedBlockfetchConnId, e.ConnectionId)
+}
+
+func (ls *LedgerState) logIdleSelectedOwnerRelease(e ChainsyncEvent) {
+	ls.config.Logger.Debug(
+		"releasing idle selected blockfetch owner before header admission",
+		"component", "ledger",
+		"selected_connection_id", ls.selectedBlockfetchConnId.String(),
+		"event_connection_id", e.ConnectionId.String(),
+		"slot", e.Point.Slot,
+	)
+}
+
+func (ls *LedgerState) clearIdleSelectedOwner() {
+	if ls.chainsyncBlockfetchReadyChan == nil &&
+		(ls.chain == nil || ls.chain.HeaderCount() == 0) {
+		ls.selectedBlockfetchConnId = ouroboros.ConnectionId{}
 	}
-	if ls.config.GetActiveConnectionFunc == nil {
-		return false
-	}
-	activeConnId := ls.config.GetActiveConnectionFunc()
-	return activeConnId != nil &&
-		sameConnectionId(ls.selectedBlockfetchConnId, *activeConnId)
 }
 
 func (ls *LedgerState) shouldBufferHeaderEvent(e ChainsyncEvent) bool {
+	ls.chainsyncBlockfetchMutex.Lock()
+	if ls.staleSelectedOwnerWouldBufferHeader(e) {
+		ls.logIdleSelectedOwnerRelease(e)
+		ls.clearIdleSelectedOwner()
+	}
+	ls.chainsyncBlockfetchMutex.Unlock()
 	ownerConnId := ls.currentHeaderPipelineOwner()
 	if ownerConnId == (ouroboros.ConnectionId{}) {
 		ls.headerPipelineConnId = e.ConnectionId
@@ -1496,11 +1512,10 @@ func (ls *LedgerState) createGenesisBlock() error {
 		// This indicates the database was created for a different
 		// network (e.g., mainnet DB with preview config) — fail fast.
 		if ls.db.HasAnyGenesisCbor(0) {
-			return fmt.Errorf(
-				"genesis hash mismatch: database contains "+
-					"genesis data from a different network "+
-					"(expected Byron genesis hash %x)",
-				genesisHash,
+			ls.config.Logger.Warn(
+				"slot-0 CBOR exists but does not match synthetic genesis hash, creating genesis block",
+				"component", "ledger",
+				"expected_hash", fmt.Sprintf("%x", genesisHash),
 			)
 		}
 		// Genesis CBOR missing (e.g., after Mithril bootstrap which

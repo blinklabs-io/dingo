@@ -2737,7 +2737,12 @@ func (ls *LedgerState) ledgerProcessBlock(
 			delta.Offsets = offsets
 		}
 		// Validate transaction
-		if shouldValidate {
+		// Skip validation for phase-2 failed TXs (isValid=false).
+		// These are consensus-valid: the block producer already
+		// determined the script failure, collateral is consumed
+		// instead of regular inputs, and tx.Consumed()/Produced()
+		// return the correct collateral-based UTxO sets.
+		if shouldValidate && tx.IsValid() {
 			validationEra, err := resolveValidationEra(
 				tx,
 				currentEra,
