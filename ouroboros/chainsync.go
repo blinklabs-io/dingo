@@ -272,6 +272,31 @@ func (o *Ouroboros) RestartChainsyncClientWithPoints(
 	return nil
 }
 
+func (o *Ouroboros) resyncChainsyncClientWithPoints(
+	connId ouroboros.ConnectionId,
+	intersectPoints []ocommon.Point,
+) error {
+	conn := o.ConnManager.GetConnectionById(connId)
+	if conn == nil {
+		return fmt.Errorf("connection not found: %s", connId.String())
+	}
+	cs := conn.ChainSync()
+	if cs == nil || cs.Client == nil {
+		return fmt.Errorf(
+			"chainsync client not available: %s",
+			connId.String(),
+		)
+	}
+	if err := cs.Client.Stop(); err != nil {
+		return fmt.Errorf(
+			"stop chainsync client for conn %s: %w",
+			connId.String(),
+			err,
+		)
+	}
+	return o.RestartChainsyncClientWithPoints(connId, intersectPoints)
+}
+
 func (o *Ouroboros) chainsyncClientStart(connId ouroboros.ConnectionId) error {
 	intersectPoints, err := o.buildDefaultChainsyncIntersectPoints(connId)
 	if err != nil {
@@ -859,15 +884,10 @@ func (o *Ouroboros) restartChainsyncClientAsync(
 }
 
 // SubscribeChainsyncResync registers an EventBus subscriber that
-// handles chainsync re-sync events. When a resync is requested
-// (e.g. because the ledger detected a persistent fork), this
-// subscriber clears header dedup state and recycles the entire
-// connection so peer governor can negotiate a fresh session.
-//
-// Re-running FindIntersect inside an existing chainsync session can
-// strand the protocol in Intersect while the peer continues sending
-// RollForward messages. Recycling the connection avoids that
-// state-machine hazard.
+// handles chainsync re-sync events. When a resync is requested, we restart
+// the ChainSync mini-protocol on the existing bearer after sending MsgDone and
+// resetting the local cursor. This preserves the stable TCP connection and
+// only falls back to closing the bearer if the protocol restart itself fails.
 func (o *Ouroboros) SubscribeChainsyncResync(ctx context.Context) {
 	if o.EventBus == nil {
 		return
@@ -884,19 +904,81 @@ func (o *Ouroboros) SubscribeChainsyncResync(ctx context.Context) {
 				return
 			default:
 			}
-			if o.ChainsyncState != nil {
-				o.ChainsyncState.ClearSeenHeaders()
+			var connIds []ouroboros.ConnectionId
+			if e.ConnectionId != (ouroboros.ConnectionId{}) {
+				connIds = append(connIds, e.ConnectionId)
+			} else if o.ChainsyncState != nil {
+				connIds = o.ChainsyncState.RewindTrackedClientsTo(e.Point)
 			}
-			o.EventBus.Publish(
-				connmanager.ConnectionRecycleRequestedEventType,
-				event.NewEvent(
-					connmanager.ConnectionRecycleRequestedEventType,
-					connmanager.ConnectionRecycleRequestedEvent{
-						ConnectionId: e.ConnectionId,
-						Reason:       "chainsync resync requested: " + e.Reason,
+			if o.ChainsyncState != nil {
+				if e.Point.Slot > 0 || len(e.Point.Hash) > 0 {
+					o.ChainsyncState.ClearSeenHeadersFrom(e.Point.Slot)
+				} else {
+					o.ChainsyncState.ClearSeenHeaders()
+				}
+			}
+			if e.Reason == "local ledger rollback" {
+				if o.LedgerState == nil {
+					return
+				}
+				recovered := o.LedgerState.RecoverAfterLocalRollback(
+					connIds,
+					e.Point,
+				)
+				if recovered || o.EventBus == nil || len(connIds) == 0 {
+					return
+				}
+				o.config.Logger.Info(
+					"local rollback had no recoverable peer history, recycling affected chainsync connections",
+					"component", "ouroboros",
+					"rollback_slot", e.Point.Slot,
+					"connection_count", len(connIds),
+				)
+				for _, connId := range connIds {
+					o.EventBus.Publish(
+						connmanager.ConnectionRecycleRequestedEventType,
+						event.NewEvent(
+							connmanager.ConnectionRecycleRequestedEventType,
+							connmanager.ConnectionRecycleRequestedEvent{
+								ConnectionId: connId,
+								Reason:       e.Reason,
+							},
+						),
+					)
+				}
+				return
+			}
+			if len(connIds) == 0 {
+				return
+			}
+			for _, connId := range connIds {
+				if o.ChainsyncState != nil {
+					o.ChainsyncState.ClearObservedHeaderHistory(connId)
+				}
+				if o.ConnManager == nil {
+					continue
+				}
+				o.restartChainsyncClientAsync(
+					ctx,
+					connId,
+					e.Reason,
+					func() error {
+						intersectPoints, err := o.buildDefaultChainsyncIntersectPoints(
+							connId,
+						)
+						if err != nil {
+							return fmt.Errorf(
+								"build default chainsync intersect points: %w",
+								err,
+							)
+						}
+						return o.resyncChainsyncClientWithPoints(
+							connId,
+							intersectPoints,
+						)
 					},
-				),
-			)
+				)
+			}
 		},
 	)
 }
