@@ -18,7 +18,7 @@ package models
 // for efficient label-based querying.
 type TransactionMetadataLabel struct {
 	ID            uint   `gorm:"primaryKey"`
-	TransactionID uint   `gorm:"index;uniqueIndex:idx_tx_metadata_label_tx_label"`
+	TransactionID uint   `gorm:"uniqueIndex:idx_tx_metadata_label_tx_label"`
 	Label         uint64 `gorm:"index;uniqueIndex:idx_tx_metadata_label_tx_label"`
 	Slot          uint64 `gorm:"index"`
 	CborValue     []byte
