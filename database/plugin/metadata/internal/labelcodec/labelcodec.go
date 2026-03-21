@@ -46,7 +46,10 @@ func EncodeAndExtract(
 	if err != nil {
 		labels, err = extractFromMetadatum(txMetadata)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, fmt.Errorf(
+				"extract metadata labels from metadatum fallback: %w",
+				err,
+			)
 		}
 	}
 	return metadataCbor, labels, nil
@@ -128,15 +131,15 @@ func decodeMetadataLabelMap(
 func metadatumRawToJSON(raw cbor.RawMessage) (string, error) {
 	decoded, err := lcommon.DecodeMetadatumRaw(raw)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("decode raw metadatum: %w", err)
 	}
 	tmpValue, err := metadatumToJSONValue(decoded)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("convert metadatum to json value: %w", err)
 	}
 	jsonBytes, err := json.Marshal(tmpValue)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("marshal metadatum json: %w", err)
 	}
 	return string(jsonBytes), nil
 }
@@ -198,7 +201,7 @@ func metadatumToJSONValue(md lcommon.TransactionMetadatum) (any, error) {
 	switch m := md.(type) {
 	case lcommon.MetaInt:
 		if m.Value == nil {
-			return "0", nil
+			return nil, errors.New("invalid metadatum integer value: nil")
 		}
 		if m.Value.IsInt64() {
 			return m.Value.Int64(), nil
@@ -241,7 +244,7 @@ func metadatumMapKeyToString(md lcommon.TransactionMetadatum) (string, error) {
 	switch m := md.(type) {
 	case lcommon.MetaInt:
 		if m.Value == nil {
-			return "0", nil
+			return "", errors.New("invalid metadatum integer key: nil")
 		}
 		return m.Value.String(), nil
 	case lcommon.MetaText:
