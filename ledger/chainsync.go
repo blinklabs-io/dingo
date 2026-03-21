@@ -1452,47 +1452,15 @@ func (ls *LedgerState) tryResolveFork(
 	}
 	if ancestorPoint == nil {
 		// The peer's header stream is not continuous with our local chain
-		// view or we have not yet seen enough of its ancestry to resolve the
-		// fork locally.
-		//
-		// After Mithril bootstrap (or any cold start), peer header history
-		// is empty so findPeerForkPath cannot walk backward through the
-		// peer's ancestry. If the local chain tip sits on a volatile-zone
-		// fork that the network has since abandoned, a plain chainsync
-		// re-sync will loop forever because the same stale intersect
-		// points produce the same fork mismatch.
-		//
-		// Break the loop by proactively rolling back one block each
-		// time this case is hit. Single-block rollbacks keep BadgerDB
-		// transactions small (avoiding "Txn is too big" after Mithril
-		// import) while progressively finding common ground with the
-		// network across successive header events.
-		recentPoints := ls.chain.RecentPoints(2)
-		if len(recentPoints) > 1 {
-			rollbackTarget := recentPoints[1]
-			ls.config.Logger.Info(
-				"common ancestor not found, rolling back one block to find common ground",
-				"component", "ledger",
-				"connection_id", e.ConnectionId.String(),
-				"block_prev_hash", notFitErr.BlockPrevHash(),
-				"consecutive_mismatches", ls.headerMismatchCount,
-				"rollback_target_slot", rollbackTarget.Slot,
-			)
-			if err := ls.rollbackChainAndState(rollbackTarget); err != nil {
-				ls.config.Logger.Warn(
-					"proactive rollback failed, falling back to chainsync re-sync",
-					"component", "ledger",
-					"error", err,
-				)
-			}
-		} else {
-			ls.config.Logger.Debug(
-				"common ancestor not found locally, triggering chainsync re-sync",
-				"component", "ledger",
-				"connection_id", e.ConnectionId.String(),
-				"block_prev_hash", notFitErr.BlockPrevHash(),
-			)
-		}
+		// view or we have not yet seen enough of its ancestry to resolve
+		// the fork locally. Request a chainsync re-sync so the intersect
+		// protocol finds the common point with the peer.
+		ls.config.Logger.Debug(
+			"common ancestor not found locally, triggering chainsync re-sync",
+			"component", "ledger",
+			"connection_id", e.ConnectionId.String(),
+			"block_prev_hash", notFitErr.BlockPrevHash(),
+		)
 		ls.requestChainsyncResync(
 			e.ConnectionId,
 			resyncReasonRollbackNotFound,
