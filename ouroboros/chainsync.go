@@ -15,6 +15,7 @@
 package ouroboros
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -60,7 +61,6 @@ func (o *Ouroboros) chainsyncServerConnOpts() []ochainsync.ChainSyncOptionFunc {
 
 func (o *Ouroboros) chainsyncClientConnOpts() []ochainsync.ChainSyncOptionFunc {
 	return []ochainsync.ChainSyncOptionFunc{
-		ochainsync.WithAwaitReplyFunc(o.chainsyncClientAwaitReply),
 		ochainsync.WithRollForwardFunc(o.chainsyncClientRollForward),
 		ochainsync.WithRollBackwardFunc(o.chainsyncClientRollBackward),
 		// Pipeline enough headers to keep one blockfetch batch (500
@@ -77,37 +77,6 @@ func (o *Ouroboros) chainsyncClientConnOpts() []ochainsync.ChainSyncOptionFunc {
 		// sync from genesis).
 		ochainsync.WithIntersectTimeout(30 * time.Second),
 	}
-}
-
-func (o *Ouroboros) chainsyncClientAwaitReply(
-	ctx ochainsync.CallbackContext,
-) error {
-	if o.ConnManager != nil &&
-		o.ConnManager.IsInboundConnection(ctx.ConnectionId) {
-		return nil
-	}
-	ingressEligible := o.shouldPublishChainsyncToLedger(ctx.ConnectionId)
-	if !o.reconcileChainsyncIngressAdmission(
-		ctx.ConnectionId,
-		ingressEligible,
-	) {
-		return nil
-	}
-	if o.ChainsyncState != nil {
-		o.ChainsyncState.MarkClientSynced(ctx.ConnectionId)
-	}
-	if ingressEligible && o.EventBus != nil {
-		o.EventBus.Publish(
-			ledger.ChainsyncAwaitReplyEventType,
-			event.NewEvent(
-				ledger.ChainsyncAwaitReplyEventType,
-				ledger.ChainsyncAwaitReplyEvent{
-					ConnectionId: ctx.ConnectionId,
-				},
-			),
-		)
-	}
-	return nil
 }
 
 func normalizeIntersectPoints(points []ocommon.Point) []ocommon.Point {
@@ -659,6 +628,23 @@ func (o *Ouroboros) chainsyncClientRollForward(
 				},
 			),
 		)
+		if point.Slot == tip.Point.Slot &&
+			bytes.Equal(point.Hash, tip.Point.Hash) {
+			if o.ChainsyncState != nil {
+				o.ChainsyncState.MarkClientSynced(ctx.ConnectionId)
+			}
+			if ingressEligible && o.EventBus != nil {
+				o.EventBus.Publish(
+					ledger.ChainsyncAwaitReplyEventType,
+					event.NewEvent(
+						ledger.ChainsyncAwaitReplyEventType,
+						ledger.ChainsyncAwaitReplyEvent{
+							ConnectionId: ctx.ConnectionId,
+						},
+					),
+				)
+			}
+		}
 		// Update ChainSync performance metrics for peer scoring
 		o.updateChainsyncMetrics(ctx.ConnectionId, tip)
 	default:
