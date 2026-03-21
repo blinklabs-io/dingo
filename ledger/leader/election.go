@@ -647,6 +647,7 @@ func (e *Election) computeSchedule(
 		"leader schedule calculated",
 		"component", "leader",
 		"epoch", currentEpoch,
+		"epoch_nonce", hex.EncodeToString(epochNonce),
 		"pool_stake", poolStake,
 		"total_stake", totalStake,
 		"stake_ratio", schedule.StakeRatio(),
