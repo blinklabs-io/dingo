@@ -486,11 +486,12 @@ type LedgerState struct {
 	densityWindow                 []densityEntry // sliding window for chain density metric
 
 	// Subscription IDs for event bus unsubscribe on close
-	chainsyncSubID   event.EventSubscriberId
-	blockfetchSubID  event.EventSubscriberId
-	chainUpdateSubID event.EventSubscriberId
-	chainSwitchSubID event.EventSubscriberId
-	connClosedSubID  event.EventSubscriberId
+	chainsyncSubID           event.EventSubscriberId
+	chainsyncAwaitReplySubID event.EventSubscriberId
+	blockfetchSubID          event.EventSubscriberId
+	chainUpdateSubID         event.EventSubscriberId
+	chainSwitchSubID         event.EventSubscriberId
+	connClosedSubID          event.EventSubscriberId
 
 	// rollbackMu serializes rollbackWG.Add with Close's rollbackWG.Wait
 	// to prevent Add-after-Wait panics from the TOCTOU race between
@@ -609,6 +610,10 @@ func (ls *LedgerState) Start(ctx context.Context) error {
 		ls.chainsyncSubID = ls.config.EventBus.SubscribeFunc(
 			ChainsyncEventType,
 			ls.handleEventChainsync,
+		)
+		ls.chainsyncAwaitReplySubID = ls.config.EventBus.SubscribeFunc(
+			ChainsyncAwaitReplyEventType,
+			ls.handleEventChainsyncAwaitReply,
 		)
 		ls.blockfetchSubID = ls.config.EventBus.SubscribeFunc(
 			BlockfetchEventType,
@@ -879,6 +884,10 @@ func (ls *LedgerState) Close() error {
 		ls.config.EventBus.Unsubscribe(
 			ChainsyncEventType,
 			ls.chainsyncSubID,
+		)
+		ls.config.EventBus.Unsubscribe(
+			ChainsyncAwaitReplyEventType,
+			ls.chainsyncAwaitReplySubID,
 		)
 		ls.config.EventBus.Unsubscribe(
 			BlockfetchEventType,
@@ -1588,6 +1597,18 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 	ls.resetNextEpochNonceReady()
 	ls.updateTipMetrics()
 	ls.Unlock()
+	if ls.config.EventBus != nil {
+		ls.config.EventBus.Publish(
+			event.ChainsyncResyncEventType,
+			event.NewEvent(
+				event.ChainsyncResyncEventType,
+				event.ChainsyncResyncEvent{
+					Reason: "local ledger rollback",
+					Point:  point,
+				},
+			),
+		)
+	}
 	var hash string
 	if point.Slot == 0 {
 		hash = "<genesis>"
@@ -1622,7 +1643,10 @@ func (ls *LedgerState) rollbackChainAndState(point ocommon.Point) error {
 // iterator only when the chain still sits at that rollback point. Iterator
 // rollbacks can lag behind live blockfetch/chainsync activity; if the primary
 // chain has already re-extended past the rollback point, applying the rollback
-// again would desynchronize metadata from the blob-backed chain.
+// again would desynchronize metadata from the blob-backed chain. In that case
+// we must restart the ledger pipeline so the chain iterator rewinds itself to
+// the current metadata tip and resumes on the canonical chain instead of
+// continuing from stale block indexes on the abandoned fork.
 func (ls *LedgerState) processChainIteratorRollback(
 	point ocommon.Point,
 ) error {
@@ -1630,13 +1654,20 @@ func (ls *LedgerState) processChainIteratorRollback(
 	if chainTip.Point.Slot != point.Slot ||
 		!bytes.Equal(chainTip.Point.Hash, point.Hash) {
 		ls.config.Logger.Debug(
-			"skipping stale chain iterator rollback",
+			"stale chain iterator rollback detected, restarting ledger pipeline",
 			"component", "ledger",
 			"rollback_slot", point.Slot,
 			"rollback_hash", hex.EncodeToString(point.Hash),
 			"chain_tip_slot", chainTip.Point.Slot,
 			"chain_tip_hash", hex.EncodeToString(chainTip.Point.Hash),
 		)
+		return errRestartLedgerPipeline
+	}
+	ls.RLock()
+	currentTip := ls.currentTip
+	ls.RUnlock()
+	if currentTip.Point.Slot == point.Slot &&
+		bytes.Equal(currentTip.Point.Hash, point.Hash) {
 		return nil
 	}
 	return ls.rollback(point)
@@ -1860,6 +1891,27 @@ type readChainResult struct {
 	rollbackPoint ocommon.Point
 	blocks        []ledger.Block
 	rollback      bool
+	done          chan struct{}
+}
+
+func trimReadBatchForRollback(
+	nextBatch []ledger.Block,
+	rollbackPoint ocommon.Point,
+) ([]ledger.Block, bool) {
+	for idx, block := range nextBatch {
+		if block.SlotNumber() != rollbackPoint.Slot {
+			continue
+		}
+		if !bytes.Equal(block.Hash().Bytes(), rollbackPoint.Hash) {
+			continue
+		}
+		return nextBatch[:idx+1], false
+	}
+	return nil, true
+}
+
+type ledgerReadIterator interface {
+	Next(blocking bool) (*chain.ChainIteratorResult, error)
 }
 
 func (ls *LedgerState) ledgerReadChain(
@@ -1874,11 +1926,19 @@ func (ls *LedgerState) ledgerReadChain(
 		)
 		return
 	}
+	ls.ledgerReadChainIterator(ctx, iter, resultCh)
+}
+
+func (ls *LedgerState) ledgerReadChainIterator(
+	ctx context.Context,
+	iter ledgerReadIterator,
+	resultCh chan readChainResult,
+) {
 	// Read blocks from chain iterator and decode
 	var next, cachedNext *chain.ChainIteratorResult
 	var tmpBlock ledger.Block
-	var needsRollback, shouldBlock bool
-	var rollbackPoint ocommon.Point
+	var err error
+	var shouldBlock bool
 	var result readChainResult
 	for {
 		select {
@@ -1913,14 +1973,24 @@ func (ls *LedgerState) ledgerReadChain(
 				return
 			}
 			if next.Rollback {
-				// End existing batch and cache rollback if we have any blocks in the batch
-				// We need special processing for rollbacks below
 				if len(nextBatch) > 0 {
-					cachedNext = next
-					break
+					trimmedBatch, emitRollback := trimReadBatchForRollback(
+						nextBatch,
+						next.Point,
+					)
+					if len(trimmedBatch) > 0 {
+						nextBatch = trimmedBatch
+						if emitRollback {
+							cachedNext = next
+						}
+						break
+					}
 				}
-				needsRollback = true
-				rollbackPoint = next.Point
+				result = readChainResult{
+					rollback:      true,
+					rollbackPoint: next.Point,
+					done:          make(chan struct{}),
+				}
 				break
 			}
 			// Decode block
@@ -1941,15 +2011,10 @@ func (ls *LedgerState) ledgerReadChain(
 				break
 			}
 		}
-		if needsRollback {
-			needsRollback = false
-			result = readChainResult{
-				rollback:      true,
-				rollbackPoint: rollbackPoint,
-			}
-		} else {
+		if !result.rollback {
 			result = readChainResult{
 				blocks: nextBatch,
+				done:   make(chan struct{}),
 			}
 		}
 		select {
@@ -1957,6 +2022,12 @@ func (ls *LedgerState) ledgerReadChain(
 		case <-ctx.Done():
 			return
 		}
+		select {
+		case <-result.done:
+		case <-ctx.Done():
+			return
+		}
+		result = readChainResult{}
 	}
 }
 
@@ -2021,7 +2092,10 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 	// Enable bulk-load optimizations when syncing from behind
 	var bulkOptimizer metadata.BulkLoadOptimizer
 	bulkLoadActive := false
-	if !ls.validationEnabled {
+	ls.RLock()
+	bulkLoadAllowed := !ls.validationEnabled && !ls.reachedTip
+	ls.RUnlock()
+	if bulkLoadAllowed {
 		if opt, ok := ls.db.Metadata().(metadata.BulkLoadOptimizer); ok {
 			if err := opt.SetBulkLoadPragmas(); err != nil {
 				ls.config.Logger.Warn(
@@ -2050,8 +2124,15 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 	var end, i int
 	var err error
 	var nextBatch, cachedNextBatch []ledger.Block
+	var currentReadResultDone chan struct{}
 	var delta *LedgerDelta
 	var deltaBatch *LedgerDeltaBatch
+	completeReadResult := func() {
+		if currentReadResultDone != nil {
+			close(currentReadResultDone)
+			currentReadResultDone = nil
+		}
+	}
 	for {
 		if needsEpochRollover {
 			needsEpochRollover = false
@@ -2363,6 +2444,7 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 				}
 			}
 		}
+		currentReadResultDone = nil
 		if cachedNextBatch != nil {
 			// Use cached block batch
 			nextBatch = cachedNextBatch
@@ -2374,6 +2456,7 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 				if !ok {
 					return nil
 				}
+				currentReadResultDone = result.done
 				nextBatch = result.blocks
 				// Process rollback
 				// Note: We do NOT hold ls.Lock() here because rollback() calls
@@ -2384,8 +2467,10 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 					if err = ls.processChainIteratorRollback(
 						result.rollbackPoint,
 					); err != nil {
+						completeReadResult()
 						return fmt.Errorf("process rollback: %w", err)
 					}
+					completeReadResult()
 					continue
 				}
 			case <-ctx.Done():
@@ -2619,14 +2704,17 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 					err,
 				)
 				if recoverErr != nil {
+					completeReadResult()
 					return fmt.Errorf(
 						"process block batch: %w",
 						recoverErr,
 					)
 				}
 				if recovered {
+					completeReadResult()
 					return errRestartLedgerPipeline
 				}
+				completeReadResult()
 				return fmt.Errorf("process block batch: %w", err)
 			}
 			// Transaction committed successfully - now update in-memory state.
@@ -2690,6 +2778,7 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 			// Periodic sync progress reporting
 			ls.logSyncProgress(tipForLog.Point.Slot)
 		}
+		completeReadResult()
 	}
 }
 
@@ -3207,18 +3296,13 @@ func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTip() error {
 		return nil
 	}
 	ls.config.Logger.Warn(
-		"primary chain tip ahead of ledger tip at startup, pruning speculative blocks",
+		"primary chain tip ahead of ledger tip at startup, replaying metadata from selected chain",
 		"component", "ledger",
 		"chain_tip_slot", chainTip.Point.Slot,
 		"ledger_tip_slot", ledgerTip.Point.Slot,
 		"chain_tip_hash", hex.EncodeToString(chainTip.Point.Hash),
 		"ledger_tip_hash", hex.EncodeToString(ledgerTip.Point.Hash),
 	)
-	if err := ls.config.ChainManager.RewindPrimaryChainToPoint(
-		ledgerTip.Point,
-	); err != nil {
-		return fmt.Errorf("rewind primary chain: %w", err)
-	}
 	return nil
 }
 
@@ -3230,58 +3314,62 @@ func (ls *LedgerState) GetBlock(point ocommon.Point) (models.Block, error) {
 	return ret, nil
 }
 
-// RecentChainPoints returns the requested count of recent chain
-// points in descending order. This is used mostly for building a set
-// of intersect points when acting as a chainsync client.
-//
-// Points are first collected from the in-memory chain state, which is
-// always up-to-date even when the blob store has not yet flushed
-// recent writes. Database points are then appended to fill the
-// requested count, with duplicates removed.
-func (ls *LedgerState) RecentChainPoints(
+func (ls *LedgerState) chainTipMatchesLedgerTip() bool {
+	if ls.chain == nil {
+		return false
+	}
+	ls.RLock()
+	ledgerTip := ls.currentTip
+	ls.RUnlock()
+	chainTip := ls.chain.Tip()
+	return chainTip.Point.Slot == ledgerTip.Point.Slot &&
+		bytes.Equal(chainTip.Point.Hash, ledgerTip.Point.Hash)
+}
+
+func (ls *LedgerState) authoritativeRecentChainPoints(
 	count int,
 ) ([]ocommon.Point, error) {
-	var points []ocommon.Point
-	// Collect points from the in-memory chain first. The chain's
-	// tip and recent blocks are always current, even when the
-	// underlying blob store has pending writes that are not yet
-	// visible to new read transactions.
-	if ls.chain != nil {
-		points = ls.chain.RecentPoints(count)
+	if count <= 0 {
+		return nil, nil
 	}
-	// Supplement with database points for deeper history
-	if len(points) < count {
-		remaining := count - len(points)
-		tmpBlocks, err := database.BlocksRecent(
-			ls.db, remaining,
-		)
+	ls.RLock()
+	currentTip := ls.currentTip
+	ls.RUnlock()
+	if currentTip.Point.Slot == 0 && len(currentTip.Point.Hash) == 0 {
+		return nil, nil
+	}
+	points := make([]ocommon.Point, 0, count)
+	nextHash := append([]byte(nil), currentTip.Point.Hash...)
+	nextSlot := currentTip.Point.Slot
+	for len(points) < count && len(nextHash) > 0 {
+		block, err := database.BlockByHash(ls.db, nextHash)
 		if err != nil {
-			// If we already have in-memory points, a database
-			// error is non-fatal: return what we have.
-			if len(points) > 0 {
-				return points, nil
-			}
 			return nil, err
 		}
-		// Build a set of existing points for deduplication
-		seen := make(map[string]struct{}, len(points))
-		for _, p := range points {
-			seen[pointKey(p)] = struct{}{}
+		points = append(
+			points,
+			ocommon.NewPoint(block.Slot, block.Hash),
+		)
+		if len(block.PrevHash) == 0 {
+			break
 		}
-		for _, blk := range tmpBlocks {
-			p := ocommon.NewPoint(blk.Slot, blk.Hash)
-			key := pointKey(p)
-			if _, exists := seen[key]; exists {
-				continue
-			}
-			seen[key] = struct{}{}
-			points = append(points, p)
-			if len(points) >= count {
-				break
-			}
+		nextHash = append(nextHash[:0], block.PrevHash...)
+		nextSlot = block.Slot
+		if nextSlot == 0 && len(nextHash) == 0 {
+			break
 		}
 	}
 	return points, nil
+}
+
+// RecentChainPoints returns the requested count of recent chain points in
+// descending order from the authoritative ledger tip. This avoids exposing
+// blob-backed primary-chain points that have not yet been replayed into the
+// metadata/ledger state.
+func (ls *LedgerState) RecentChainPoints(
+	count int,
+) ([]ocommon.Point, error) {
+	return ls.authoritativeRecentChainPoints(count)
 }
 
 // IntersectPoints returns chainsync FindIntersect candidates ordered from
@@ -3294,7 +3382,7 @@ func (ls *LedgerState) IntersectPoints(
 	if count <= 0 {
 		return nil, nil
 	}
-	if ls.chain != nil {
+	if ls.chain != nil && ls.chainTipMatchesLedgerTip() {
 		points := ls.chain.IntersectPoints(count)
 		if len(points) > 0 {
 			return points, nil
@@ -3745,6 +3833,18 @@ func (ls *LedgerState) UtxosByAddress(
 	ret := make([]models.Utxo, 0, len(utxos))
 	ret = append(ret, utxos...)
 	return ret, nil
+}
+
+// UtxosByAddressWithOrdering returns all UTxOs for an address with
+// ordering metadata.
+func (ls *LedgerState) UtxosByAddressWithOrdering(
+	addr ledger.Address,
+) ([]models.UtxoWithOrdering, error) {
+	utxos, err := ls.db.UtxosByAddressWithOrdering(addr, nil)
+	if err != nil {
+		return nil, err
+	}
+	return utxos, nil
 }
 
 // UtxosByAddressAtSlot returns all UTxOs belonging to the

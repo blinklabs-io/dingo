@@ -23,6 +23,7 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	dbtypes "github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/event"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
@@ -108,6 +109,9 @@ func (ls *LedgerState) tryRecoverFromTxValidationError(
 	if !errors.As(err, &validationErr) {
 		return false, nil
 	}
+	if ls.IsAtTip() {
+		return ls.recoverAtTipFromTxValidationError(validationErr)
+	}
 	candidate, err := ls.findReplayRecoveryCandidate(validationErr)
 	if err != nil {
 		return false, err
@@ -135,6 +139,49 @@ func (ls *LedgerState) tryRecoverFromTxValidationError(
 		return false, fmt.Errorf(
 			"rollback ledger state for replay recovery: %w",
 			err,
+		)
+	}
+	return true, nil
+}
+
+func (ls *LedgerState) recoverAtTipFromTxValidationError(
+	validationErr *txValidationError,
+) (bool, error) {
+	if ls.chain == nil || ls.config.ChainManager == nil {
+		return false, nil
+	}
+	ls.RLock()
+	ledgerTip := ls.currentTip
+	ls.RUnlock()
+	chainTip := ls.chain.Tip()
+	ls.config.Logger.Warn(
+		"validation failure after reaching tip, rewinding primary chain to authoritative ledger tip",
+		"component", "ledger",
+		"tx_hash", hex.EncodeToString(validationErr.TxHash),
+		"failing_block_slot", validationErr.BlockPoint.Slot,
+		"ledger_tip_slot", ledgerTip.Point.Slot,
+		"ledger_tip_hash", hex.EncodeToString(ledgerTip.Point.Hash),
+		"primary_chain_tip_slot", chainTip.Point.Slot,
+		"primary_chain_tip_hash", hex.EncodeToString(chainTip.Point.Hash),
+	)
+	if err := ls.config.ChainManager.RewindPrimaryChainToPoint(
+		ledgerTip.Point,
+	); err != nil {
+		return false, fmt.Errorf(
+			"rewind primary chain to authoritative ledger tip: %w",
+			err,
+		)
+	}
+	if ls.config.EventBus != nil {
+		ls.config.EventBus.Publish(
+			event.ChainsyncResyncEventType,
+			event.NewEvent(
+				event.ChainsyncResyncEventType,
+				event.ChainsyncResyncEvent{
+					Reason: "live tx validation recovery",
+					Point:  ledgerTip.Point,
+				},
+			),
 		)
 	}
 	return true, nil

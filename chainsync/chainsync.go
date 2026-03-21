@@ -292,6 +292,13 @@ func (s *State) RemoveClientConnId(
 	}
 }
 
+func pointAheadOf(a, b ocommon.Point) bool {
+	if a.Slot != b.Slot {
+		return a.Slot > b.Slot
+	}
+	return !bytes.Equal(a.Hash, b.Hash)
+}
+
 // HandleClientRemoveRequestedEvent removes a tracked client when
 // a component publishes a client removal request event.
 func (s *State) HandleClientRemoveRequestedEvent(evt event.Event) {
@@ -552,6 +559,31 @@ func (s *State) UpdateClientTipWithoutDedup(
 	s.updateClientTip(connId, point, tip, false)
 }
 
+// RewindTrackedClientsTo rewinds tracked client cursors that sit ahead of the
+// provided local ledger point. This keeps chainsync client state aligned with
+// local rollback/recovery so peers do not strand us in AwaitReply on a stale
+// higher cursor.
+func (s *State) RewindTrackedClientsTo(
+	point ocommon.Point,
+) []ouroboros.ConnectionId {
+	s.clientConnIdMutex.Lock()
+	defer s.clientConnIdMutex.Unlock()
+	var ret []ouroboros.ConnectionId
+	for connId, tc := range s.trackedClients {
+		if !pointAheadOf(tc.Cursor, point) {
+			continue
+		}
+		tc.Cursor = ocommon.Point{
+			Slot: point.Slot,
+			Hash: cloneBytes(point.Hash),
+		}
+		tc.Status = ClientStatusSyncing
+		tc.LastActivity = time.Now()
+		ret = append(ret, connId)
+	}
+	return ret
+}
+
 // RecordObservedHeader stores the raw per-connection header ancestry before
 // cross-peer dedup can suppress delivery into the ledger queue. This lets
 // fork resolution reconstruct the selected peer's candidate fragment even
@@ -623,6 +655,12 @@ func (s *State) clearObservedHeaderHistory(
 	s.observedHeadersMutex.Lock()
 	defer s.observedHeadersMutex.Unlock()
 	delete(s.observedHeaders, connId)
+}
+
+func (s *State) ClearObservedHeaderHistory(
+	connId ouroboros.ConnectionId,
+) {
+	s.clearObservedHeaderHistory(connId)
 }
 
 func (s *State) updateClientTip(

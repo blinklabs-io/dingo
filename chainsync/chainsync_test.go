@@ -1168,3 +1168,62 @@ func TestRemoveAllClients_NilActive(t *testing.T) {
 	require.Nil(t, active)
 	require.Equal(t, 0, s.ClientConnCount())
 }
+
+func TestRewindTrackedClientsToRewindsAheadClients(t *testing.T) {
+	bus := newTestEventBus(t)
+	s := newTestState(t, bus, chainsync.DefaultConfig())
+
+	connAhead := newTestConnId(1)
+	connSame := newTestConnId(2)
+	connBehind := newTestConnId(3)
+	rollbackPoint := ocommon.NewPoint(100, []byte("rollback"))
+	aheadPoint := ocommon.NewPoint(120, []byte("ahead"))
+	samePoint := ocommon.NewPoint(100, []byte("same"))
+	behindPoint := ocommon.NewPoint(90, []byte("behind"))
+
+	s.AddClientConnId(connAhead)
+	s.AddClientConnId(connSame)
+	s.AddClientConnId(connBehind)
+	s.UpdateClientTip(
+		connAhead,
+		aheadPoint,
+		ochainsync.Tip{Point: aheadPoint},
+	)
+	s.UpdateClientTip(
+		connSame,
+		samePoint,
+		ochainsync.Tip{Point: samePoint},
+	)
+	s.UpdateClientTip(
+		connBehind,
+		behindPoint,
+		ochainsync.Tip{Point: behindPoint},
+	)
+	s.MarkClientSynced(connAhead)
+
+	rewound := s.RewindTrackedClientsTo(rollbackPoint)
+
+	// A chainsync cursor must match the local rollback point exactly. A
+	// peer sitting at the same slot on a different hash still needs a
+	// fresh intersect before it can supply headers that fit the current
+	// selected chain.
+	require.ElementsMatch(
+		t,
+		[]ouroboros.ConnectionId{connAhead, connSame},
+		rewound,
+	)
+
+	aheadClient := s.GetTrackedClient(connAhead)
+	require.NotNil(t, aheadClient)
+	require.Equal(t, rollbackPoint, aheadClient.Cursor)
+	require.Equal(t, chainsync.ClientStatusSyncing, aheadClient.Status)
+
+	sameClient := s.GetTrackedClient(connSame)
+	require.NotNil(t, sameClient)
+	require.Equal(t, rollbackPoint, sameClient.Cursor)
+	require.Equal(t, chainsync.ClientStatusSyncing, sameClient.Status)
+
+	behindClient := s.GetTrackedClient(connBehind)
+	require.NotNil(t, behindClient)
+	require.Equal(t, behindPoint, behindClient.Cursor)
+}

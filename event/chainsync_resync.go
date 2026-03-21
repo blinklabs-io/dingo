@@ -14,7 +14,10 @@
 
 package event
 
-import ouroboros "github.com/blinklabs-io/gouroboros"
+import (
+	ouroboros "github.com/blinklabs-io/gouroboros"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+)
 
 // ChainsyncResyncEventType is the event type emitted when a
 // chainsync re-sync is required (e.g. persistent fork detected
@@ -26,4 +29,5 @@ const ChainsyncResyncEventType = EventType("chainsync.resync")
 type ChainsyncResyncEvent struct {
 	ConnectionId ouroboros.ConnectionId
 	Reason       string
+	Point        ocommon.Point
 }

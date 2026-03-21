@@ -298,6 +298,62 @@ func (ls *LedgerState) handleConnectionClosedEvent(evt event.Event) {
 	}
 }
 
+func (ls *LedgerState) handleEventChainsyncAwaitReply(evt event.Event) {
+	e, ok := evt.Data.(ChainsyncAwaitReplyEvent)
+	if !ok {
+		ls.logUnexpectedChainsyncEventData(
+			"ChainsyncAwaitReplyEvent",
+			evt,
+		)
+		return
+	}
+	ls.chainsyncMutex.Lock()
+	defer ls.chainsyncMutex.Unlock()
+	if ls.chain == nil || ls.chain.HeaderCount() == 0 {
+		return
+	}
+	if ls.config.GetActiveConnectionFunc == nil {
+		return
+	}
+	activeConnId := ls.config.GetActiveConnectionFunc()
+	if activeConnId == nil ||
+		!sameConnectionId(*activeConnId, e.ConnectionId) {
+		return
+	}
+	ls.chainsyncBlockfetchMutex.Lock()
+	defer ls.chainsyncBlockfetchMutex.Unlock()
+	if ls.chainsyncBlockfetchReadyChan != nil || ls.chain.HeaderCount() == 0 {
+		return
+	}
+	ls.selectedBlockfetchConnId = e.ConnectionId
+	ls.config.Logger.Debug(
+		"selected chainsync peer entered await reply, flushing queued headers to blockfetch",
+		"component", "ledger",
+		"connection_id", e.ConnectionId.String(),
+		"header_count", ls.chain.HeaderCount(),
+	)
+	if err := ls.startQueuedBlockfetchLocked(e.ConnectionId); err != nil {
+		ls.config.Logger.Error(
+			"failed to start blockfetch after await reply",
+			"component", "ledger",
+			"connection_id", e.ConnectionId.String(),
+			"error", err,
+		)
+		if ls.config.EventBus != nil {
+			ls.config.EventBus.Publish(
+				LedgerErrorEventType,
+				event.NewEvent(
+					LedgerErrorEventType,
+					LedgerErrorEvent{
+						Error:     err,
+						Operation: "await_reply_blockfetch",
+					},
+				),
+			)
+		}
+	}
+}
+
 // detectConnectionSwitch checks for an active connection change and logs a
 // summary of dropped rollback events when a switch is detected. It returns the
 // current active connection ID and whether connection filtering is configured.
@@ -366,6 +422,10 @@ func (ls *LedgerState) handoffPipelineOnSwitchLocked(
 		return ouroboros.ConnectionId{}, nil
 	}
 
+	hasBufferedHeadersForNewConn := len(
+		ls.bufferedHeaderEvents[connIdKey(newConnId)],
+	) > 0
+
 	if ls.chainsyncBlockfetchReadyChan != nil &&
 		connIdKey(ls.activeBlockfetchConnId) != "" &&
 		!sameConnectionId(ls.activeBlockfetchConnId, newConnId) {
@@ -382,6 +442,20 @@ func (ls *LedgerState) handoffPipelineOnSwitchLocked(
 
 	if connIdKey(ls.headerPipelineConnId) != "" &&
 		!sameConnectionId(ls.headerPipelineConnId, newConnId) {
+		if ls.chainsyncBlockfetchReadyChan == nil &&
+			headerCount > 0 &&
+			hasBufferedHeadersForNewConn {
+			ls.config.Logger.Debug(
+				"dropping stale queued header fragment on chain switch",
+				"component", "ledger",
+				"previous_owner_connection_id",
+				ls.headerPipelineConnId.String(),
+				"new_connection_id", newConnId.String(),
+				"queued_headers", headerCount,
+			)
+			ls.clearQueuedHeaders()
+			return newConnId, nil
+		}
 		ls.config.Logger.Debug(
 			"releasing stale header pipeline owner on chain switch",
 			"component", "ledger",
@@ -411,7 +485,7 @@ func (ls *LedgerState) handoffPipelineOnSwitchLocked(
 	}
 
 	if ls.chainsyncBlockfetchReadyChan == nil &&
-		len(ls.bufferedHeaderEvents[connIdKey(newConnId)]) > 0 {
+		hasBufferedHeadersForNewConn {
 		return newConnId, nil
 	}
 
@@ -567,16 +641,22 @@ func desiredBlockfetchBatchHeaders(
 	if maxHeaders <= 0 {
 		return 0
 	}
-	minHeaders := blockfetchMinBatchHeadersWhenBehind
-	if gapSlots > 0 {
-		scaledHeaders := int(gapSlots / blockfetchMinBatchGapSlots)
-		if scaledHeaders > minHeaders {
-			minHeaders = scaledHeaders
+	if gapBlocks == 0 {
+		if gapSlots == 0 {
+			return 0
 		}
+		return min(1, maxHeaders)
 	}
-	if gapBlocks > 0 {
-		minHeaders = min(minHeaders, int(gapBlocks))
+	minHeaders := int(gapBlocks)
+	switch {
+	case gapBlocks > 64:
+		minHeaders = 8
+	case gapBlocks > 16:
+		minHeaders = 4
+	case gapBlocks > 4:
+		minHeaders = 2
 	}
+	minHeaders = min(minHeaders, int(gapBlocks))
 	minHeaders = min(minHeaders, blockfetchMaxBatchHeadersWhenBehind)
 	return min(minHeaders, maxHeaders)
 }
@@ -651,7 +731,6 @@ func (ls *LedgerState) clearIdleSelectedOwner() {
 		ls.selectedBlockfetchConnId = ouroboros.ConnectionId{}
 	}
 }
-
 func (ls *LedgerState) shouldBufferHeaderEvent(e ChainsyncEvent) bool {
 	ls.chainsyncBlockfetchMutex.Lock()
 	if ls.staleSelectedOwnerWouldBufferHeader(e) {
@@ -668,6 +747,18 @@ func (ls *LedgerState) shouldBufferHeaderEvent(e ChainsyncEvent) bool {
 		ls.headerPipelineConnId = e.ConnectionId
 		return false
 	}
+	if ls.headerFitsCurrentPipeline(e) {
+		ls.headerPipelineConnId = e.ConnectionId
+		ls.selectedBlockfetchConnId = e.ConnectionId
+		ls.config.Logger.Debug(
+			"accepting compatible header from different connection",
+			"component", "ledger",
+			"event_connection_id", e.ConnectionId.String(),
+			"previous_owner_connection_id", ownerConnId.String(),
+			"slot", e.Point.Slot,
+		)
+		return false
+	}
 	ls.headerPipelineConnId = ownerConnId
 	ls.bufferHeaderEvent(e)
 	ls.config.Logger.Debug(
@@ -678,6 +769,18 @@ func (ls *LedgerState) shouldBufferHeaderEvent(e ChainsyncEvent) bool {
 		"slot", e.Point.Slot,
 	)
 	return true
+}
+
+func (ls *LedgerState) headerFitsCurrentPipeline(e ChainsyncEvent) bool {
+	if ls.chain == nil || e.BlockHeader == nil {
+		return false
+	}
+	prevHash := e.BlockHeader.PrevHash().Bytes()
+	headerTip := ls.chain.HeaderTip()
+	if len(headerTip.Point.Hash) == 0 {
+		return len(prevHash) == 0
+	}
+	return bytes.Equal(prevHash, headerTip.Point.Hash)
 }
 
 func (ls *LedgerState) nextBufferedHeaderConnId() (
@@ -955,11 +1058,141 @@ func (ls *LedgerState) resetChainsyncResyncState() {
 	ls.rollbackHistory = nil
 	ls.headerMismatchCount = 0
 	ls.bufferedHeaderEvents = nil
+	ls.selectedBlockfetchConnId = ouroboros.ConnectionId{}
 	ls.clearQueuedHeaders()
 	ls.chainsyncBlockfetchMutex.Lock()
 	ls.blockfetchRequestRangeCleanup()
 	ls.activeBlockfetchConnId = ouroboros.ConnectionId{}
 	ls.chainsyncBlockfetchMutex.Unlock()
+}
+
+func pointMatches(a, b ocommon.Point) bool {
+	return a.Slot == b.Slot && bytes.Equal(a.Hash, b.Hash)
+}
+
+func (ls *LedgerState) recoverPeerHeaderHistoryFromPointLocked(
+	connId ouroboros.ConnectionId,
+	point ocommon.Point,
+) (int, error) {
+	history := ls.peerHeaderHistory[connIdKey(connId)]
+	if history == nil || len(history.order) == 0 {
+		return 0, nil
+	}
+	for i := len(history.order) - 1; i >= 0; i-- {
+		record, ok := history.byHash[history.order[i]]
+		if !ok || record.event.Point.Slot <= point.Slot {
+			continue
+		}
+		ancestorPoint, forkPath, err := ls.findPeerForkPath(
+			record.event,
+			record.prevHash,
+		)
+		if err != nil {
+			return 0, err
+		}
+		if ancestorPoint == nil || !pointMatches(*ancestorPoint, point) {
+			continue
+		}
+		for _, evt := range forkPath {
+			if evt.Point.Slot <= point.Slot {
+				continue
+			}
+			if err := ls.chain.AddBlockHeader(evt.BlockHeader); err != nil {
+				ls.clearQueuedHeaders()
+				ls.headerPipelineConnId = ouroboros.ConnectionId{}
+				return 0, nil
+			}
+		}
+		if ls.chain.HeaderCount() == 0 {
+			continue
+		}
+		ls.headerPipelineConnId = connId
+		ls.selectedBlockfetchConnId = connId
+		return ls.chain.HeaderCount(), nil
+	}
+	return 0, nil
+}
+
+// RecoverAfterLocalRollback resets chainsync-local queued state after a ledger
+// rollback, then replays any peer-local header history that still fits the new
+// tip. This keeps rollback recovery local to the node instead of re-entering
+// FindIntersect on live ChainSync sessions. It returns true when it seeded a
+// new local header fragment from peer history.
+func (ls *LedgerState) RecoverAfterLocalRollback(
+	connIds []ouroboros.ConnectionId,
+	point ocommon.Point,
+) bool {
+	ls.chainsyncMutex.Lock()
+	defer ls.chainsyncMutex.Unlock()
+
+	ls.resetChainsyncResyncState()
+	if ls.chain == nil {
+		return false
+	}
+
+	preferredConnIds := make([]ouroboros.ConnectionId, 0, len(connIds)+1)
+	seenConnIds := make(map[string]struct{}, len(connIds)+1)
+	if ls.config.GetActiveConnectionFunc != nil {
+		if activeConnId := ls.config.GetActiveConnectionFunc(); activeConnId != nil {
+			key := connIdKey(*activeConnId)
+			if key != "" {
+				preferredConnIds = append(preferredConnIds, *activeConnId)
+				seenConnIds[key] = struct{}{}
+			}
+		}
+	}
+	for _, connId := range connIds {
+		key := connIdKey(connId)
+		if key == "" {
+			continue
+		}
+		if _, ok := seenConnIds[key]; ok {
+			continue
+		}
+		preferredConnIds = append(preferredConnIds, connId)
+		seenConnIds[key] = struct{}{}
+	}
+
+	for _, connId := range preferredConnIds {
+		headerCount, err := ls.recoverPeerHeaderHistoryFromPointLocked(
+			connId,
+			point,
+		)
+		if err != nil {
+			ls.config.Logger.Warn(
+				"failed to recover peer header history after local rollback",
+				"component", "ledger",
+				"connection_id", connId.String(),
+				"slot", point.Slot,
+				"error", err,
+			)
+			continue
+		}
+		if headerCount == 0 {
+			continue
+		}
+		ls.config.Logger.Info(
+			"replayed peer header history after local rollback",
+			"component", "ledger",
+			"connection_id", connId.String(),
+			"rollback_slot", point.Slot,
+			"header_count", headerCount,
+		)
+		ls.chainsyncBlockfetchMutex.Lock()
+		if ls.chainsyncBlockfetchReadyChan == nil {
+			if err := ls.startQueuedBlockfetchLocked(connId); err != nil {
+				ls.config.Logger.Warn(
+					"failed to start blockfetch after local rollback recovery",
+					"component", "ledger",
+					"connection_id", connId.String(),
+					"error", err,
+				)
+			}
+		}
+		ls.chainsyncBlockfetchMutex.Unlock()
+		return true
+	}
+	return false
 }
 
 func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {

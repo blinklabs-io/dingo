@@ -209,6 +209,118 @@ func TestTryRecoverFromTxValidationErrorRollsBackToEarliestProducerParent(
 	assert.Equal(t, parentTip, dbTip)
 }
 
+func TestTryRecoverFromTxValidationErrorAtTipRewindsPrimaryChain(
+	t *testing.T,
+) {
+	db, err := database.New(&database.Config{
+		BlobPlugin:     "badger",
+		MetadataPlugin: "sqlite",
+		DataDir:        t.TempDir(),
+	})
+	require.NoError(t, err)
+	defer db.Close()
+
+	cm, err := chain.NewManager(db, nil)
+	require.NoError(t, err)
+
+	parentBlock := testRawBlock("at-tip-parent", 100, 1, nil)
+	producerBlock := testRawBlock(
+		"at-tip-producer",
+		120,
+		2,
+		parentBlock.Hash,
+	)
+	ledgerTipBlock := testRawBlock(
+		"at-tip-ledger-tip",
+		140,
+		3,
+		producerBlock.Hash,
+	)
+	failingBlock := testRawBlock(
+		"at-tip-failing",
+		160,
+		4,
+		ledgerTipBlock.Hash,
+	)
+	require.NoError(
+		t,
+		cm.PrimaryChain().AddRawBlocks(
+			[]chain.RawBlock{
+				parentBlock,
+				producerBlock,
+				ledgerTipBlock,
+				failingBlock,
+			},
+		),
+	)
+
+	ls, err := NewLedgerState(LedgerStateConfig{
+		Database:          db,
+		ChainManager:      cm,
+		CardanoNodeConfig: newTestShelleyGenesisCfg(t),
+		Logger: slog.New(
+			slog.NewJSONHandler(io.Discard, nil),
+		),
+	})
+	require.NoError(t, err)
+	ls.metrics.init(prometheus.NewRegistry())
+
+	ledgerTip := ochainsync.Tip{
+		Point:       ocommon.NewPoint(ledgerTipBlock.Slot, ledgerTipBlock.Hash),
+		BlockNumber: ledgerTipBlock.BlockNumber,
+	}
+	require.NoError(t, db.SetTip(ledgerTip, nil))
+	ls.currentTip = ledgerTip
+	ls.currentTipBlockNonce = []byte("nonce-ledger-tip")
+	ls.validationEnabled = true
+	ls.reachedTip = true
+
+	store, ok := db.Metadata().(*sqliteplugin.MetadataStoreSqlite)
+	require.True(t, ok)
+	require.NoError(
+		t,
+		store.DB().Create(&models.Transaction{
+			Hash:       testHashBytes("producer-tx-live"),
+			BlockHash:  producerBlock.Hash,
+			Slot:       producerBlock.Slot,
+			Type:       1,
+			Valid:      true,
+			BlockIndex: 0,
+		}).Error,
+	)
+
+	recovered, err := ls.tryRecoverFromTxValidationError(
+		&txValidationError{
+			BlockPoint: ocommon.NewPoint(
+				failingBlock.Slot,
+				failingBlock.Hash,
+			),
+			TxHash: testHashBytes("failing-live-tx"),
+			Inputs: []lcommon.TransactionInput{
+				&replayRecoveryInput{
+					txId:  testHashBytes("producer-tx-live"),
+					index: 0,
+				},
+			},
+			Cause: errors.New("missing input"),
+		},
+	)
+	require.NoError(t, err)
+	require.True(t, recovered)
+
+	assert.Equal(t, ledgerTip, ls.currentTip)
+	assert.Equal(t, ledgerTip, ls.chain.Tip())
+	dbTip, err := ls.db.GetTip(nil)
+	require.NoError(t, err)
+	assert.Equal(t, ledgerTip, dbTip)
+
+	_, err = database.BlockByPoint(
+		db,
+		ocommon.NewPoint(failingBlock.Slot, failingBlock.Hash),
+	)
+	assert.ErrorIs(t, err, models.ErrBlockNotFound)
+}
+
 func TestTryRecoverFromTxValidationErrorFallsBackToTxBlobOffsets(
 	t *testing.T,
 ) {
