@@ -575,7 +575,7 @@ func (c *ConnectionManager) addConnectionImpl(
 		defer c.goroutineWg.Done()
 		err := <-conn.ErrorChan()
 		// Remove connection (also releases IP slot)
-		c.RemoveConnection(connId)
+		c.RemoveConnection(connId, conn)
 		// Generate event
 		if c.config.EventBus != nil {
 			c.config.EventBus.Publish(
@@ -596,9 +596,19 @@ func (c *ConnectionManager) addConnectionImpl(
 	}()
 }
 
-func (c *ConnectionManager) RemoveConnection(connId ouroboros.ConnectionId) {
+func (c *ConnectionManager) RemoveConnection(
+	connId ouroboros.ConnectionId,
+	conn *ouroboros.Connection,
+) {
 	c.connectionsMutex.Lock()
 	info := c.connections[connId]
+	// Only remove if the map still holds this exact connection.
+	// A replacement connection may have re-registered under the
+	// same ID (OutboundSourcePort reuse).
+	if info == nil || info.conn != conn {
+		c.connectionsMutex.Unlock()
+		return
+	}
 	delete(c.connections, connId)
 	if info != nil &&
 		info.isInbound &&
