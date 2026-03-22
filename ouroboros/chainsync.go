@@ -534,6 +534,15 @@ func (o *Ouroboros) chainsyncClientRollForward(
 				o.shouldPublishChainsyncToLedger(ctx.ConnectionId),
 			)
 		}
+		o.config.Logger.Debug(
+			"chainsync: header received",
+			"component", "ouroboros",
+			"slot", blockSlot,
+			"tip_slot", tip.Point.Slot,
+			"connection_id", ctx.ConnectionId.String(),
+			"inbound", isInbound,
+			"ingress_eligible", ingressEligible,
+		)
 		// Update tracked client state and deduplicate headers.
 		// If this header has already been reported by another
 		// eligible client, skip publishing it into the ledger.
@@ -588,6 +597,12 @@ func (o *Ouroboros) chainsyncClientRollForward(
 			)
 		}
 		if !ingressEligible {
+			o.config.Logger.Debug(
+				"chainsync: header dropped (not ingress eligible)",
+				"component", "ouroboros",
+				"slot", blockSlot,
+				"connection_id", ctx.ConnectionId.String(),
+			)
 			o.updateChainsyncMetrics(ctx.ConnectionId, tip)
 			return nil
 		}
@@ -605,11 +620,12 @@ func (o *Ouroboros) chainsyncClientRollForward(
 				}
 			}
 			if !shouldReplayDuplicate {
-				// Duplicate header already delivered by the same
-				// peer, or by another peer while this connection is
-				// not the selected ingress source. Keep the peer tip
-				// fresh, but do not re-publish the same header into
-				// the shared ledger queue.
+				o.config.Logger.Debug(
+					"chainsync: header dropped (duplicate)",
+					"component", "ouroboros",
+					"slot", blockSlot,
+					"connection_id", ctx.ConnectionId.String(),
+				)
 				o.updateChainsyncMetrics(ctx.ConnectionId, tip)
 				return nil
 			}

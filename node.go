@@ -506,6 +506,11 @@ func (n *Node) Run(ctx context.Context) error {
 					)
 				}
 			},
+			ClearSeenHeadersFromFunc: func(fromSlot uint64) {
+				if n.chainsyncState != nil {
+					n.chainsyncState.ClearSeenHeadersFrom(fromSlot)
+				}
+			},
 			PeerHeaderLookupFunc: func(
 				connId ouroboros.ConnectionId,
 				hash []byte,

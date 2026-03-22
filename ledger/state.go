@@ -393,6 +393,11 @@ type SlotBattleRecorder interface {
 // the header dedup cache so the new connection can re-deliver blocks.
 type ConnectionSwitchFunc func()
 
+// ClearSeenHeadersFromFunc clears the header dedup cache for slots
+// beyond the given slot. This allows headers that were discarded
+// (e.g. by clearQueuedHeaders) to be re-delivered on reconnection.
+type ClearSeenHeadersFromFunc func(fromSlot uint64)
+
 // PeerHeaderLookupFunc looks up a previously observed header for a peer
 // connection, even if that header was suppressed before entering the ledger
 // queue. It returns the recorded chainsync event, the header's prev-hash, and
@@ -412,6 +417,7 @@ type LedgerStateConfig struct {
 	BlockfetchRequestRangeFunc BlockfetchRequestRangeFunc
 	GetActiveConnectionFunc    GetActiveConnectionFunc
 	ConnectionSwitchFunc       ConnectionSwitchFunc
+	ClearSeenHeadersFromFunc   ClearSeenHeadersFromFunc
 	PeerHeaderLookupFunc       PeerHeaderLookupFunc
 	FatalErrorFunc             FatalErrorFunc
 	ForgedBlockChecker         ForgedBlockChecker
@@ -480,6 +486,7 @@ type LedgerState struct {
 	selectedBlockfetchConnId      ouroboros.ConnectionId // latest selected chainsync connection for the next batch
 	headerPipelineConnId          ouroboros.ConnectionId // connection that currently owns the queued header/blockfetch pipeline
 	pendingBlockfetchEvents       []BlockfetchEvent
+	batchBlocksReceived           int // total blocks received in current blockfetch batch (including mid-batch flushes)
 	checkpointWrittenForEpoch     bool
 	closed                        atomic.Bool
 	inRecovery                    bool           // guards against recursive recovery in SubmitAsyncDBTxn
