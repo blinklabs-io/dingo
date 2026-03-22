@@ -3961,19 +3961,50 @@ func (ls *LedgerState) CountBlocksInSlotRange(
 	if endSlot < startSlot {
 		return 0, 0, 0, nil
 	}
-	iter := ls.db.BlocksInRange(startSlot, endSlot)
+	blob := ls.db.Blob()
+	if blob == nil {
+		return 0, 0, 0, types.ErrBlobStoreUnavailable
+	}
+	readTxn := blob.NewTransaction(false)
+	defer readTxn.Rollback() //nolint:errcheck
+
+	iterOpts := types.BlobIteratorOptions{
+		Prefix: []byte(types.BlockBlobKeyPrefix),
+	}
+	iter := blob.NewIterator(readTxn, iterOpts)
 	if iter == nil {
 		return 0, 0, 0, errors.New("block iterator unavailable")
 	}
 	defer iter.Close()
+
+	seekKey := append(
+		[]byte(types.BlockBlobKeyPrefix),
+		types.BlockBlobKeyUint64ToBytes(startSlot)...,
+	)
 
 	var (
 		count     int
 		firstSlot uint64
 		lastSlot  uint64
 	)
-	for {
-		result, err := iter.NextRaw()
+	for iter.Seek(seekKey); iter.ValidForPrefix(
+		[]byte(types.BlockBlobKeyPrefix),
+	); iter.Next() {
+		item := iter.Item()
+		if item == nil {
+			continue
+		}
+		key := item.Key()
+		if key == nil {
+			continue
+		}
+		if bytes.HasSuffix(
+			key,
+			[]byte(types.BlockBlobMetadataKeySuffix),
+		) {
+			continue
+		}
+		point, err := database.BlockBlobKeyToPoint(key)
 		if err != nil {
 			return 0, 0, 0, fmt.Errorf(
 				"count blocks in slot range %d-%d: %w",
@@ -3982,14 +4013,22 @@ func (ls *LedgerState) CountBlocksInSlotRange(
 				err,
 			)
 		}
-		if result == nil {
+		if point.Slot > endSlot {
 			break
 		}
 		if count == 0 {
-			firstSlot = result.Slot
+			firstSlot = point.Slot
 		}
-		lastSlot = result.Slot
+		lastSlot = point.Slot
 		count++
+	}
+	if err := iter.Err(); err != nil {
+		return 0, 0, 0, fmt.Errorf(
+			"count blocks in slot range %d-%d: %w",
+			startSlot,
+			endSlot,
+			err,
+		)
 	}
 	return count, firstSlot, lastSlot, nil
 }

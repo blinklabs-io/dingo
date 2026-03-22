@@ -218,6 +218,11 @@ func (a *NodeAdapter) CurrentProtocolParams() (
 	ProtocolParamsInfo, error,
 ) {
 	pparams := a.ledgerState.GetCurrentPParams()
+	if pparams == nil {
+		return ProtocolParamsInfo{}, fmt.Errorf(
+			"protocol parameters not available",
+		)
+	}
 	utxorpcParams, err := pparams.Utxorpc()
 	if err != nil {
 		return ProtocolParamsInfo{}, fmt.Errorf(
