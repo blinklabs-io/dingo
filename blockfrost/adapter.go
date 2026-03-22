@@ -130,7 +130,6 @@ func (a *NodeAdapter) CurrentEpoch() (
 	EpochInfo, error,
 ) {
 	tip := a.ledgerState.Tip()
-	epoch := a.ledgerState.CurrentEpoch()
 	tipEpoch, err := a.ledgerState.SlotToEpoch(tip.Point.Slot)
 	if err != nil {
 		return EpochInfo{}, fmt.Errorf(
@@ -203,7 +202,7 @@ func (a *NodeAdapter) CurrentEpoch() (
 		lastBlockTime = lastTime.Unix()
 	}
 	return EpochInfo{
-		Epoch:          epoch,
+		Epoch:          tipEpoch.EpochId,
 		StartTime:      startTime.Unix(),
 		EndTime:        endTime.Unix(),
 		FirstBlockTime: firstBlockTime,
@@ -245,12 +244,12 @@ func (a *NodeAdapter) CurrentProtocolParams() (
 		A0:                  rationalToFloat64(utxorpcParams.GetPoolInfluence()),
 		Rho:                 rationalToFloat64(utxorpcParams.GetMonetaryExpansion()),
 		Tau:                 rationalToFloat64(utxorpcParams.GetTreasuryExpansion()),
-		ProtocolMajorVer:    int(utxorpcParams.GetProtocolVersion().GetMajor()),
-		ProtocolMinorVer:    int(utxorpcParams.GetProtocolVersion().GetMinor()),
+		ProtocolMajorVer:    protocolVersionMajor(utxorpcParams.GetProtocolVersion()),
+		ProtocolMinorVer:    protocolVersionMinor(utxorpcParams.GetProtocolVersion()),
 		MinPoolCost:         utxorpcBigIntToString(utxorpcParams.GetMinPoolCost()),
 		CoinsPerUtxoSize:    utxorpcBigIntToString(utxorpcParams.GetCoinsPerUtxoByte()),
-		PriceMem:            rationalToFloat64(utxorpcParams.GetPrices().GetMemory()),
-		PriceStep:           rationalToFloat64(utxorpcParams.GetPrices().GetSteps()),
+		PriceMem:            pricesMem(utxorpcParams.GetPrices()),
+		PriceStep:           pricesStep(utxorpcParams.GetPrices()),
 		MaxTxExMem:          exUnitsMemString(utxorpcParams.GetMaxExecutionUnitsPerTransaction()),
 		MaxTxExSteps:        exUnitsStepsString(utxorpcParams.GetMaxExecutionUnitsPerTransaction()),
 		MaxBlockExMem:       exUnitsMemString(utxorpcParams.GetMaxExecutionUnitsPerBlock()),
@@ -309,6 +308,34 @@ func rationalToFloat64(r *cardano.RationalNumber) float64 {
 		return 0
 	}
 	return float64(r.GetNumerator()) / float64(r.GetDenominator())
+}
+
+func protocolVersionMajor(v *cardano.ProtocolVersion) int {
+	if v == nil {
+		return 0
+	}
+	return int(v.GetMajor())
+}
+
+func protocolVersionMinor(v *cardano.ProtocolVersion) int {
+	if v == nil {
+		return 0
+	}
+	return int(v.GetMinor())
+}
+
+func pricesMem(p *cardano.ExPrices) float64 {
+	if p == nil {
+		return 0
+	}
+	return rationalToFloat64(p.GetMemory())
+}
+
+func pricesStep(p *cardano.ExPrices) float64 {
+	if p == nil {
+		return 0
+	}
+	return rationalToFloat64(p.GetSteps())
 }
 
 func utxorpcBigIntToString(v *cardano.BigInt) string {
