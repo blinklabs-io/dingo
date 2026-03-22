@@ -82,21 +82,11 @@ func (s *syncServiceServer) FetchBlock(
 		if err != nil {
 			return nil, err
 		}
-		var acb sync.AnyChainBlock
-		ret, err := block.Decode()
+		acb, err := anyChainBlockFromModel(block)
 		if err != nil {
 			return nil, err
 		}
-		tmpBlock, err := ret.Utxorpc()
-		if err != nil {
-			return nil, fmt.Errorf("convert block: %w", err)
-		}
-		acbc := sync.AnyChainBlock_Cardano{
-			Cardano: tmpBlock,
-		}
-		acb.Chain = &acbc
-		acb.NativeBytes = block.Cbor
-		resp.Block = append(resp.Block, &acb)
+		resp.Block = append(resp.Block, acb)
 	}
 
 	return connect.NewResponse(resp), nil
@@ -134,48 +124,43 @@ func (s *syncServiceServer) DumpHistory(
 		)
 	}
 
-	// Get our points
-	var points []ocommon.Point
-	if maxItems > 0 {
-		tmpPoints, err := s.utxorpc.config.LedgerState.RecentChainPoints(
-			int(maxItems),
+	var startPoint ocommon.Point
+	inclusive := true
+	if startToken != nil {
+		startPoint = ocommon.NewPoint(
+			startToken.GetSlot(),
+			startToken.GetHash(),
 		)
-		if err != nil {
-			return nil, err
-		}
-		points = tmpPoints
-	} else {
-		point := s.utxorpc.config.LedgerState.Tip().Point
-		points = append(points, point)
+		inclusive = false
 	}
-	// TODO: make this work (#401)
-	// if startToken != nil {
-	// 	blockIdx := startToken.GetIndex()
-	// 	blockHash := startToken.GetHash()
-	// 	slot := uint64(blockIdx)
-	// 	point = ocommon.NewPoint(slot, blockHash)
-	// }
 
-	for _, point := range points {
-		block, err := s.utxorpc.config.LedgerState.GetBlock(point)
-		if err != nil {
-			return nil, err
+	chainIter, err := s.utxorpc.config.LedgerState.GetChainFromPoint(
+		startPoint,
+		inclusive,
+	)
+	if err != nil {
+		if errors.Is(err, models.ErrBlockNotFound) {
+			return nil, connect.NewError(
+				connect.CodeNotFound,
+				fmt.Errorf("start_token not on chain: %w", err),
+			)
 		}
-		var acb sync.AnyChainBlock
-		ret, err := block.Decode()
-		if err != nil {
-			return nil, err
-		}
-		tmpBlock, err := ret.Utxorpc()
-		if err != nil {
-			return nil, fmt.Errorf("convert block: %w", err)
-		}
-		acbc := sync.AnyChainBlock_Cardano{
-			Cardano: tmpBlock,
-		}
-		acb.Chain = &acbc
-		acb.NativeBytes = block.Cbor
-		resp.Block = append(resp.Block, &acb)
+		return nil, err
+	}
+	defer chainIter.Cancel()
+
+	blocks, lastModel, hasMore, err := collectDumpHistoryPage(
+		ctx,
+		chainIter,
+		maxItems,
+	)
+	if err != nil {
+		return nil, err
+	}
+	resp.Block = blocks
+
+	if hasMore && lastModel != nil {
+		resp.NextToken = syncBlockRefFromModel(*lastModel)
 	}
 
 	return connect.NewResponse(resp), nil
