@@ -29,14 +29,28 @@ type dumpHistoryIterator interface {
 	Next(blocking bool) (*chain.ChainIteratorResult, error)
 }
 
+// effectiveDumpHistoryMaxItems maps DumpHistoryRequest.max_items to a page size.
+// Protobuf uses 0 when the client omits the field; that is treated as maxAllowed
+// (the server-configured cap). If maxAllowed is 0, the result is 0 (empty page).
+func effectiveDumpHistoryMaxItems(requested, maxAllowed uint32) uint32 {
+	if requested != 0 {
+		return requested
+	}
+	return maxAllowed
+}
+
 // collectDumpHistoryPage reads up to maxItems forward blocks from the iterator
 // using non-blocking Next. Skips rollback markers. If the page is full, peeks
 // one more forward block to set hasMore (without including that block in out).
+// Pass requested maxItems and maxAllowed; unset (0) is resolved via
+// effectiveDumpHistoryMaxItems.
 func collectDumpHistoryPage(
 	ctx context.Context,
 	iter dumpHistoryIterator,
 	maxItems uint32,
+	maxAllowed uint32,
 ) (out []*sync.AnyChainBlock, lastModel *models.Block, hasMore bool, err error) {
+	maxItems = effectiveDumpHistoryMaxItems(maxItems, maxAllowed)
 	if maxItems == 0 {
 		return nil, nil, false, nil
 	}

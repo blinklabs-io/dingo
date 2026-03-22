@@ -98,21 +98,13 @@ func (s *syncServiceServer) DumpHistory(
 	req *connect.Request[sync.DumpHistoryRequest],
 ) (*connect.Response[sync.DumpHistoryResponse], error) {
 	startToken := req.Msg.GetStartToken() // *BlockRef
-	maxItems := req.Msg.GetMaxItems()     // uint32
+	maxItems := req.Msg.GetMaxItems()     // uint32; 0 = omitted in protobuf
 	fieldMask := req.Msg.GetFieldMask()
 
-	s.utxorpc.config.Logger.Info(
-		fmt.Sprintf(
-			"Got a DumpHistory request with token %v and maxItems %d and fieldMask %v",
-			startToken,
-			maxItems,
-			fieldMask,
-		),
-	)
-	resp := &sync.DumpHistoryResponse{}
-
-	// Enforce request size limit
 	maxAllowed := uint32(s.utxorpc.config.MaxHistoryItems) // #nosec G115 -- bounded by DefaultMaxHistoryItems (10000)
+
+	// Reject explicit max_items above server cap. Omitted field is 0; see
+	// effectiveDumpHistoryMaxItems.
 	if maxItems > maxAllowed {
 		return nil, connect.NewError(
 			connect.CodeInvalidArgument,
@@ -123,6 +115,18 @@ func (s *syncServiceServer) DumpHistory(
 			),
 		)
 	}
+
+	effectiveMax := effectiveDumpHistoryMaxItems(maxItems, maxAllowed)
+	s.utxorpc.config.Logger.Info(
+		fmt.Sprintf(
+			"Got a DumpHistory request with token %v maxItems raw=%d effective=%d fieldMask %v",
+			startToken,
+			maxItems,
+			effectiveMax,
+			fieldMask,
+		),
+	)
+	resp := &sync.DumpHistoryResponse{}
 
 	var startPoint ocommon.Point
 	inclusive := true
@@ -153,6 +157,7 @@ func (s *syncServiceServer) DumpHistory(
 		ctx,
 		chainIter,
 		maxItems,
+		maxAllowed,
 	)
 	if err != nil {
 		return nil, err

@@ -83,6 +83,7 @@ func TestCollectDumpHistoryPage_FullPageHasNextToken(t *testing.T) {
 		ctx,
 		&fakeDumpHistoryIter{queue: queue},
 		2,
+		DefaultMaxHistoryItems,
 	)
 	require.NoError(t, err)
 	require.Len(t, out, 2)
@@ -112,6 +113,7 @@ func TestCollectDumpHistoryPage_PartialPageNoNextToken(t *testing.T) {
 		ctx,
 		&fakeDumpHistoryIter{queue: queue},
 		10,
+		DefaultMaxHistoryItems,
 	)
 	require.NoError(t, err)
 	require.Len(t, out, 2)
@@ -119,7 +121,15 @@ func TestCollectDumpHistoryPage_PartialPageNoNextToken(t *testing.T) {
 	require.False(t, hasMore)
 }
 
-func TestCollectDumpHistoryPage_MaxItemsZero(t *testing.T) {
+func TestEffectiveDumpHistoryMaxItems(t *testing.T) {
+	t.Parallel()
+	require.Equal(t, uint32(100), effectiveDumpHistoryMaxItems(100, 10_000))
+	require.Equal(t, uint32(10_000), effectiveDumpHistoryMaxItems(0, 10_000))
+	require.Equal(t, uint32(50), effectiveDumpHistoryMaxItems(0, 50))
+	require.Equal(t, uint32(0), effectiveDumpHistoryMaxItems(0, 0))
+}
+
+func TestCollectDumpHistoryPage_MaxAllowedZeroReturnsEmpty(t *testing.T) {
 	t.Parallel()
 	blocks := loadTestChainBlocks(t, 1)
 	queue := []*chain.ChainIteratorResult{
@@ -133,10 +143,33 @@ func TestCollectDumpHistoryPage_MaxItemsZero(t *testing.T) {
 		ctx,
 		&fakeDumpHistoryIter{queue: queue},
 		0,
+		0,
 	)
 	require.NoError(t, err)
 	require.Empty(t, out)
 	require.Nil(t, last)
+	require.False(t, hasMore)
+}
+
+func TestCollectDumpHistoryPage_OmittedMaxItemsUsesMaxAllowed(t *testing.T) {
+	t.Parallel()
+	blocks := loadTestChainBlocks(t, 1)
+	queue := []*chain.ChainIteratorResult{
+		{
+			Point: ocommon.NewPoint(blocks[0].Slot, blocks[0].Hash),
+			Block: blocks[0],
+		},
+	}
+	ctx := context.Background()
+	out, last, hasMore, err := collectDumpHistoryPage(
+		ctx,
+		&fakeDumpHistoryIter{queue: queue},
+		0,
+		DefaultMaxHistoryItems,
+	)
+	require.NoError(t, err)
+	require.Len(t, out, 1)
+	require.NotNil(t, last)
 	require.False(t, hasMore)
 }
 
@@ -162,6 +195,7 @@ func TestCollectDumpHistoryPage_SkipsRollback(t *testing.T) {
 		ctx,
 		&fakeDumpHistoryIter{queue: queue},
 		2,
+		DefaultMaxHistoryItems,
 	)
 	require.NoError(t, err)
 	require.Len(t, out, 2)

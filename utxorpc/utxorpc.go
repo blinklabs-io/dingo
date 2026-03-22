@@ -64,8 +64,9 @@ type UtxorpcConfig struct {
 	Port            uint
 
 	// Request size limits (0 = use default)
-	MaxBlockRefs    int
-	MaxUtxoKeys     int
+	MaxBlockRefs int
+	MaxUtxoKeys  int
+	// MaxHistoryItems caps DumpHistory page size; omitted max_items uses this cap.
 	MaxHistoryItems int
 	MaxDataKeys     int
 }
