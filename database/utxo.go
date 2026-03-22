@@ -33,34 +33,34 @@ var ErrUtxoNotFound = errors.New("utxo not found")
 // This is a best-effort operation; metadata remains the source of truth. If the
 // provided transaction does not include a blob handle, a temporary blob-only
 // transaction is used instead.
-func deleteUtxoBlobs(d *Database, utxos []models.Utxo, txn *Txn) error {
+func deleteUtxoBlobs(d *Database, utxos []models.Utxo, _ *Txn) error {
+	const batchSize = 500
 	blob := d.Blob()
 	if blob == nil {
 		return types.ErrBlobStoreUnavailable
 	}
 
-	useTxn := txn
-	owned := false
-	if useTxn == nil || useTxn.Blob() == nil {
-		useTxn = NewBlobOnlyTxn(d, true)
-		owned = true
-		defer func() {
-			if owned {
-				useTxn.Rollback() //nolint:errcheck
-			}
-		}()
-	}
-
 	var deleteErrors int
-	for _, utxo := range utxos {
-		if err := blob.DeleteUtxo(useTxn.Blob(), utxo.TxId, utxo.OutputIdx); err != nil {
-			deleteErrors++
-			d.logger.Debug(
-				"failed to delete UTxO blob data",
-				"txid", hex.EncodeToString(utxo.TxId),
-				"output_idx", utxo.OutputIdx,
-				"error", err,
-			)
+	for start := 0; start < len(utxos); start += batchSize {
+		end := start + batchSize
+		if end > len(utxos) {
+			end = len(utxos)
+		}
+		batchTxn := NewBlobOnlyTxn(d, true)
+		for _, utxo := range utxos[start:end] {
+			if err := blob.DeleteUtxo(batchTxn.Blob(), utxo.TxId, utxo.OutputIdx); err != nil {
+				deleteErrors++
+				d.logger.Debug(
+					"failed to delete UTxO blob data",
+					"txid", hex.EncodeToString(utxo.TxId),
+					"output_idx", utxo.OutputIdx,
+					"error", err,
+				)
+			}
+		}
+		if err := batchTxn.Commit(); err != nil {
+			_ = batchTxn.Rollback()
+			d.logger.Debug("blob delete batch commit failed", "error", err)
 		}
 	}
 	if deleteErrors > 0 {
@@ -71,14 +71,6 @@ func deleteUtxoBlobs(d *Database, utxos []models.Utxo, txn *Txn) error {
 			"total",
 			len(utxos),
 		)
-	}
-
-	if owned {
-		owned = false // prevent deferred rollback
-		if err := useTxn.Commit(); err != nil {
-			_ = useTxn.Rollback() // explicit rollback on commit failure
-			d.logger.Debug("blob delete commit failed", "error", err)
-		}
 	}
 
 	return nil

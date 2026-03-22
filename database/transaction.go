@@ -482,33 +482,33 @@ func (d *Database) GetAddressesByStakingKey(
 // This is a best-effort operation; metadata remains the source of truth. If the
 // provided transaction does not include a blob handle, a temporary blob-only
 // transaction is used instead.
-func deleteTxBlobs(d *Database, txHashes [][]byte, txn *Txn) error {
+func deleteTxBlobs(d *Database, txHashes [][]byte, _ *Txn) error {
+	const batchSize = 500
 	blob := d.Blob()
 	if blob == nil {
 		return types.ErrBlobStoreUnavailable
 	}
 
-	useTxn := txn
-	owned := false
-	if useTxn == nil || useTxn.Blob() == nil {
-		useTxn = NewBlobOnlyTxn(d, true)
-		owned = true
-		defer func() {
-			if owned {
-				useTxn.Rollback() //nolint:errcheck
-			}
-		}()
-	}
-
 	var deleteErrors int
-	for _, txHash := range txHashes {
-		if err := blob.DeleteTx(useTxn.Blob(), txHash); err != nil {
-			deleteErrors++
-			d.logger.Debug(
-				"failed to delete TX blob data",
-				"txHash", hex.EncodeToString(txHash),
-				"error", err,
-			)
+	for start := 0; start < len(txHashes); start += batchSize {
+		end := start + batchSize
+		if end > len(txHashes) {
+			end = len(txHashes)
+		}
+		batchTxn := NewBlobOnlyTxn(d, true)
+		for _, txHash := range txHashes[start:end] {
+			if err := blob.DeleteTx(batchTxn.Blob(), txHash); err != nil {
+				deleteErrors++
+				d.logger.Debug(
+					"failed to delete TX blob data",
+					"txHash", hex.EncodeToString(txHash),
+					"error", err,
+				)
+			}
+		}
+		if err := batchTxn.Commit(); err != nil {
+			_ = batchTxn.Rollback()
+			d.logger.Debug("tx blob delete batch commit failed", "error", err)
 		}
 	}
 	if deleteErrors > 0 {
@@ -519,14 +519,6 @@ func deleteTxBlobs(d *Database, txHashes [][]byte, txn *Txn) error {
 			"total",
 			len(txHashes),
 		)
-	}
-
-	if owned {
-		owned = false // prevent deferred rollback
-		if err := useTxn.Commit(); err != nil {
-			_ = useTxn.Rollback() // explicit rollback on commit failure
-			d.logger.Debug("tx blob delete commit failed", "error", err)
-		}
 	}
 
 	return nil
