@@ -17,6 +17,7 @@ package blockfrost
 import (
 	"bytes"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"math"
 	"math/big"
@@ -219,7 +220,7 @@ func (a *NodeAdapter) CurrentProtocolParams() (
 ) {
 	pparams := a.ledgerState.GetCurrentPParams()
 	if pparams == nil {
-		return ProtocolParamsInfo{}, fmt.Errorf(
+		return ProtocolParamsInfo{}, errors.New(
 			"protocol parameters not available",
 		)
 	}
