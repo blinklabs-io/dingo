@@ -82,6 +82,9 @@ func plateauThreshold(stallTimeout time.Duration) time.Duration {
 func (n *Node) isChainsyncIngressEligible(
 	connId ouroboros.ConnectionId,
 ) bool {
+	if n.peerGov != nil {
+		return n.peerGov.IsChainSelectionEligible(connId)
+	}
 	n.chainsyncIngressEligibilityMu.RLock()
 	defer n.chainsyncIngressEligibilityMu.RUnlock()
 	if n.chainsyncIngressEligibilityCache == nil {
@@ -212,19 +215,18 @@ func (n *Node) processChainsyncRecyclerTick(
 					plateauRecoveryThreshold,
 				) {
 					n.config.logger.Warn(
-						"local tip plateau detected, recycling chainsync connection",
+						"local tip plateau detected, resyncing chainsync client",
 						"connection_id", connKey,
 						"local_tip_slot", localTipSlot,
 						"best_peer_tip_slot", bestPeerTip.Tip.Point.Slot,
 						"plateau_duration", now.Sub(*lastProgressAt),
 					)
-					n.eventBus.PublishAsync(
-						connmanager.ConnectionRecycleRequestedEventType,
+					n.eventBus.Publish(
+						event.ChainsyncResyncEventType,
 						event.NewEvent(
-							connmanager.ConnectionRecycleRequestedEventType,
-							connmanager.ConnectionRecycleRequestedEvent{
+							event.ChainsyncResyncEventType,
+							event.ChainsyncResyncEvent{
 								ConnectionId: *targetConn,
-								ConnKey:      connKey,
 								Reason:       "local_tip_plateau",
 							},
 						),
@@ -504,6 +506,20 @@ func (n *Node) Run(ctx context.Context) error {
 					)
 				}
 			},
+			ClearSeenHeadersFromFunc: func(fromSlot uint64) {
+				if n.chainsyncState != nil {
+					n.chainsyncState.ClearSeenHeadersFrom(fromSlot)
+				}
+			},
+			PeerHeaderLookupFunc: func(
+				connId ouroboros.ConnectionId,
+				hash []byte,
+			) (ledger.ChainsyncEvent, []byte, bool) {
+				if n.chainsyncState == nil {
+					return ledger.ChainsyncEvent{}, nil, false
+				}
+				return n.chainsyncState.LookupObservedHeader(connId, hash)
+			},
 			FatalErrorFunc: func(err error) {
 				n.config.logger.Error(
 					"fatal ledger error, initiating shutdown",
@@ -620,6 +636,29 @@ func (n *Node) Run(ctx context.Context) error {
 	n.eventBus.SubscribeFunc(
 		chainselection.PeerTipUpdateEventType,
 		n.chainSelector.HandlePeerTipUpdateEvent,
+	)
+	n.eventBus.SubscribeFunc(
+		chainselection.PeerTipUpdateEventType,
+		func(evt event.Event) {
+			e, ok := evt.Data.(chainselection.PeerTipUpdateEvent)
+			if !ok || n.peerGov == nil {
+				return
+			}
+			n.peerGov.TouchPeerByConnId(e.ConnectionId)
+		},
+	)
+	n.eventBus.SubscribeFunc(
+		chainselection.PeerActivityEventType,
+		func(evt event.Event) {
+			e, ok := evt.Data.(chainselection.PeerActivityEvent)
+			if !ok {
+				return
+			}
+			n.chainSelector.TouchPeerActivity(e.ConnectionId)
+			if n.peerGov != nil {
+				n.peerGov.TouchPeerByConnId(e.ConnectionId)
+			}
+		},
 	)
 	// Subscribe to chain switch events to update active connection
 	n.eventBus.SubscribeFunc(

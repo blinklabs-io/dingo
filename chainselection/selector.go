@@ -15,7 +15,6 @@
 package chainselection
 
 import (
-	"bytes"
 	"context"
 	"io"
 	"log/slog"
@@ -167,14 +166,23 @@ func (cs *ChainSelector) Stop() {
 // and slot.
 //
 // Returns true if the tip was accepted, false if it was rejected as
-// implausible. A tip is considered implausible if it claims a block number
-// more than securityParam (k) blocks ahead of a reference point. For known
-// peers, the reference is the peer's own previous tip; for new peers, the
-// reference is the best known peer tip. This avoids rejecting legitimate
-// peers during sync (where the local tip is far behind).
+// implausible. A tip is considered implausible if a known peer claims a
+// block number more than securityParam (k) blocks ahead of its own previous
+// tip. New (unknown) peers are always accepted to support cold-start
+// scenarios such as Mithril bootstrap where the first peers may be far
+// ahead of any local reference.
 func (cs *ChainSelector) UpdatePeerTip(
 	connId ouroboros.ConnectionId,
 	tip ochainsync.Tip,
+	vrfOutput []byte,
+) bool {
+	return cs.updatePeerTipObserved(connId, tip, tip, vrfOutput)
+}
+
+func (cs *ChainSelector) updatePeerTipObserved(
+	connId ouroboros.ConnectionId,
+	tip ochainsync.Tip,
+	observedTip ochainsync.Tip,
 	vrfOutput []byte,
 ) bool {
 	shouldEvaluate := false
@@ -186,51 +194,46 @@ func (cs *ChainSelector) UpdatePeerTip(
 		defer cs.mutex.Unlock()
 
 		// Reject implausible tips that claim to be too far ahead of
-		// a reference point. Three cases:
-		//  1. Known peer: compare against the peer's own previous
-		//     tip — chainsync advances incrementally so the delta
-		//     is always small. Always checked (even if prev == 0).
-		//  2. New peer with existing peers: compare against the
-		//     best known peer tip to prevent a malicious newcomer
-		//     from spoofing an extremely high block number.
-		//  3. First peer ever: no reference exists, accept to
-		//     allow bootstrap.
+		// a reference point. Only checked for known peers: chainsync
+		// advances incrementally so a known peer's tip should never
+		// jump more than k blocks between updates.
+		//
+		// New peers are accepted unconditionally. Restricting new
+		// peers based on the best known peer tip breaks cold-start
+		// scenarios (e.g., Mithril bootstrap) where the reference
+		// is stale and legitimate peers are >k blocks ahead. Once
+		// a new peer is tracked, subsequent updates are bounded by
+		// this check. Non-functional peers are evicted by the stale
+		// tip threshold.
 		if cs.securityParam > 0 {
-			rejectTip := false
-			var referenceBlock uint64
 			if prevTip, exists := cs.peerTips[connId]; exists {
-				// Case 1: known peer — always check
-				referenceBlock = prevTip.Tip.BlockNumber
-				rejectTip = tip.BlockNumber >
-					safeAddUint64(referenceBlock, cs.securityParam)
-			} else if len(cs.peerTips) > 0 {
-				// Case 2: new peer — check against best known
-				for _, pt := range cs.peerTips {
-					if pt.Tip.BlockNumber > referenceBlock {
-						referenceBlock = pt.Tip.BlockNumber
-					}
+				referenceBlock := prevTip.Tip.BlockNumber
+				if tip.BlockNumber >
+					safeAddUint64(referenceBlock, cs.securityParam) {
+					cs.config.Logger.Warn(
+						"rejecting implausible peer tip",
+						"connection_id", connId.String(),
+						"claimed_block", tip.BlockNumber,
+						"reference_block", referenceBlock,
+						"security_param", cs.securityParam,
+						"max_plausible_block",
+						safeAddUint64(
+							referenceBlock,
+							cs.securityParam,
+						),
+					)
+					accepted = false
+					return
 				}
-				rejectTip = tip.BlockNumber >
-					safeAddUint64(referenceBlock, cs.securityParam)
-			}
-			// Case 3: len(peerTips)==0 && peer not known → bootstrap
-			if rejectTip {
-				cs.config.Logger.Warn(
-					"rejecting implausible peer tip",
-					"connection_id", connId.String(),
-					"claimed_block", tip.BlockNumber,
-					"reference_block", referenceBlock,
-					"security_param", cs.securityParam,
-					"max_plausible_block",
-					safeAddUint64(referenceBlock, cs.securityParam),
-				)
-				accepted = false
-				return
 			}
 		}
 
 		if peerTip, exists := cs.peerTips[connId]; exists {
-			peerTip.UpdateTip(tip, vrfOutput)
+			peerTip.UpdateTipWithObserved(
+				tip,
+				observedTip,
+				vrfOutput,
+			)
 		} else {
 			// Evict the least-recently-updated peer if at capacity
 			if len(cs.peerTips) >= cs.maxTrackedPeers {
@@ -246,7 +249,9 @@ func (cs *ChainSelector) UpdatePeerTip(
 					return
 				}
 			}
-			cs.peerTips[connId] = NewPeerChainTip(connId, tip, vrfOutput)
+			peerTip := NewPeerChainTip(connId, tip, vrfOutput)
+			peerTip.ObservedTip = observedTip
+			cs.peerTips[connId] = peerTip
 		}
 
 		cs.config.Logger.Debug(
@@ -259,7 +264,10 @@ func (cs *ChainSelector) UpdatePeerTip(
 		// Check if this peer's tip is better than the current best peer's tip
 		if cs.bestPeerConn != nil {
 			if bestPeerTip, ok := cs.peerTips[*cs.bestPeerConn]; ok {
-				comparison := CompareChains(tip, bestPeerTip.Tip)
+				comparison := CompareChains(
+					cs.peerTips[connId].SelectionTip(),
+					bestPeerTip.SelectionTip(),
+				)
 				if comparison == ChainABetter {
 					shouldEvaluate = true
 				} else if comparison == ChainEqual &&
@@ -296,6 +304,17 @@ func (cs *ChainSelector) UpdatePeerTip(
 	}
 
 	return true
+}
+
+func (cs *ChainSelector) TouchPeerActivity(connId ouroboros.ConnectionId) {
+	cs.mutex.Lock()
+	defer cs.mutex.Unlock()
+
+	peerTip, exists := cs.peerTips[connId]
+	if !exists {
+		return
+	}
+	peerTip.Touch()
 }
 
 // evictLeastRecentPeerLocked removes the peer with the oldest LastUpdated
@@ -616,7 +635,10 @@ func (cs *ChainSelector) comparePeerTips(
 	if peerTipA == nil || peerTipB == nil {
 		return ChainComparisonUnknown
 	}
-	comparison := CompareChains(peerTipA.Tip, peerTipB.Tip)
+	comparison := CompareChains(
+		peerTipA.SelectionTip(),
+		peerTipB.SelectionTip(),
+	)
 	switch comparison {
 	case ChainABetter, ChainBBetter, ChainComparisonUnknown:
 		return comparison
@@ -707,17 +729,13 @@ func (cs *ChainSelector) EvaluateAndSwitch() bool {
 					return
 				}
 				if CompareChains(
-					newPeerTip.Tip,
-					previousPeerTip.Tip,
-				) == ChainEqual &&
-					cs.connectionPriority(*newBest) ==
-						cs.connectionPriority(*previousBest) &&
-					len(newPeerTip.VRFOutput) == VRFOutputSize &&
-					len(previousPeerTip.VRFOutput) == VRFOutputSize &&
-					bytes.Equal(
-						newPeerTip.VRFOutput,
-						previousPeerTip.VRFOutput,
-					) {
+					newPeerTip.SelectionTip(),
+					previousPeerTip.SelectionTip(),
+				) == ChainEqual {
+					// When two peers have delivered the same observed frontier,
+					// keep following the incumbent. The first peer to deliver the
+					// fitting header already won on latency; switching on source
+					// priority or VRF alone just creates churn near tip.
 					newBest = previousBest
 				} else if
 				// Preserve the incumbent only when it still wins the same
@@ -830,7 +848,26 @@ func (cs *ChainSelector) HandlePeerTipUpdateEvent(evt event.Event) {
 		)
 		return
 	}
-	cs.UpdatePeerTip(e.ConnectionId, e.Tip, e.VRFOutput)
+	cs.updatePeerTipObserved(
+		e.ConnectionId,
+		e.Tip,
+		e.ObservedTip,
+		e.VRFOutput,
+	)
+}
+
+// HandlePeerActivityEvent refreshes a peer's liveness on non-tip protocol
+// activity such as keepalive responses.
+func (cs *ChainSelector) HandlePeerActivityEvent(evt event.Event) {
+	e, ok := evt.Data.(PeerActivityEvent)
+	if !ok {
+		cs.config.Logger.Warn(
+			"received unexpected event data type",
+			"expected", "PeerActivityEvent",
+		)
+		return
+	}
+	cs.TouchPeerActivity(e.ConnectionId)
 }
 
 func (cs *ChainSelector) evaluationLoop() {

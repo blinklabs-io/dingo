@@ -57,9 +57,14 @@ func (p *PeerGovernor) reconcile(ctx context.Context) {
 		}
 		switch peer.State {
 		case PeerStateHot:
-			// Demote if inactive (no connection or last activity > timeout)
-			if peer.Connection == nil ||
-				now.Sub(peer.LastActivity) > p.config.InactivityTimeout {
+			// Demote on transport loss for all peers. For connected local roots,
+			// do not age them out just because they are quiet: they are
+			// explicitly configured peers and should only leave hot when the
+			// connection is actually bad or gone.
+			demoteForInactivity := !peer.hasClientConnection() ||
+				(peer.Source != PeerSourceTopologyLocalRoot &&
+					now.Sub(peer.LastActivity) > p.config.InactivityTimeout)
+			if demoteForInactivity {
 				p.peers[i].State = PeerStateWarm
 				warmDemotions++
 				activeDecreased++

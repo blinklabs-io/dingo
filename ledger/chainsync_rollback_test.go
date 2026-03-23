@@ -16,7 +16,9 @@ package ledger
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
+	"encoding/hex"
 	"io"
 	"log/slog"
 	"net"
@@ -43,14 +45,6 @@ type chainsyncRollbackFixture struct {
 	forkPoint     ocommon.Point
 }
 
-type testSecurityParamLedger struct {
-	securityParam int
-}
-
-func (m testSecurityParamLedger) SecurityParam() int {
-	return m.securityParam
-}
-
 func TestHandleEventChainsyncRollbackSynchronizesLedgerTip(t *testing.T) {
 	fixture := newChainsyncRollbackFixture(t)
 
@@ -74,121 +68,8 @@ func TestHandleEventChainsyncRollbackSynchronizesLedgerTip(t *testing.T) {
 	assert.Equal(t, fixture.ancestorTip, dbTip)
 }
 
-func TestRollbackChainAndStateRejectedRollbackDoesNotMutateLedgerState(
-	t *testing.T,
-) {
-	db := newTestDB(t)
-	cm, err := chain.NewManager(db, nil)
-	require.NoError(t, err)
-
-	blocks := []chain.RawBlock{
-		{
-			Slot:        10,
-			Hash:        testHashBytes("rollback-precheck-1"),
-			BlockNumber: 1,
-			Type:        1,
-			Cbor:        []byte{0x80},
-		},
-		{
-			Slot:        20,
-			Hash:        testHashBytes("rollback-precheck-2"),
-			BlockNumber: 2,
-			Type:        1,
-			PrevHash:    testHashBytes("rollback-precheck-1"),
-			Cbor:        []byte{0x80},
-		},
-		{
-			Slot:        30,
-			Hash:        testHashBytes("rollback-precheck-3"),
-			BlockNumber: 3,
-			Type:        1,
-			PrevHash:    testHashBytes("rollback-precheck-2"),
-			Cbor:        []byte{0x80},
-		},
-		{
-			Slot:        40,
-			Hash:        testHashBytes("rollback-precheck-4"),
-			BlockNumber: 4,
-			Type:        1,
-			PrevHash:    testHashBytes("rollback-precheck-3"),
-			Cbor:        []byte{0x80},
-		},
-	}
-	require.NoError(t, cm.PrimaryChain().AddRawBlocks(blocks))
-
-	ls, err := NewLedgerState(
-		LedgerStateConfig{
-			Database:          db,
-			ChainManager:      cm,
-			CardanoNodeConfig: newTestShelleyGenesisCfg(t),
-			Logger: slog.New(
-				slog.NewJSONHandler(io.Discard, nil),
-			),
-		},
-	)
-	require.NoError(t, err)
-	ls.metrics.init(prometheus.NewRegistry())
-	cm.SetLedger(testSecurityParamLedger{securityParam: 1})
-
-	rollbackPoint := ocommon.NewPoint(blocks[1].Slot, blocks[1].Hash)
-	currentTip := ochainsync.Tip{
-		Point:       ocommon.NewPoint(blocks[3].Slot, blocks[3].Hash),
-		BlockNumber: blocks[3].BlockNumber,
-	}
-	rollbackNonce := []byte("rollback-point-nonce")
-	currentNonce := []byte("current-point-nonce")
-	require.NoError(
-		t,
-		db.SetBlockNonce(
-			rollbackPoint.Hash,
-			rollbackPoint.Slot,
-			rollbackNonce,
-			true,
-			nil,
-		),
-	)
-	require.NoError(
-		t,
-		db.SetBlockNonce(
-			currentTip.Point.Hash,
-			currentTip.Point.Slot,
-			currentNonce,
-			false,
-			nil,
-		),
-	)
-	require.NoError(t, db.SetTip(currentTip, nil))
-	ls.currentTip = currentTip
-	ls.currentTipBlockNonce = append([]byte(nil), currentNonce...)
-
-	err = ls.rollbackChainAndState(rollbackPoint)
-	require.ErrorIs(t, err, chain.ErrRollbackExceedsSecurityParam)
-
-	assert.Equal(t, currentTip, ls.chain.Tip())
-	assert.Equal(t, currentTip, ls.currentTip)
-	assert.True(t, bytes.Equal(currentNonce, ls.currentTipBlockNonce))
-
-	dbTip, err := db.GetTip(nil)
-	require.NoError(t, err)
-	assert.Equal(t, currentTip, dbTip)
-}
-
 func TestTryResolveForkSynchronizesLedgerTip(t *testing.T) {
 	fixture := newChainsyncRollbackFixture(t)
-	var requestedConnId ouroboros.ConnectionId
-	fixture.ls.config.BlockfetchRequestRangeFunc = func(
-		connId ouroboros.ConnectionId,
-		start ocommon.Point,
-		end ocommon.Point,
-	) error {
-		_ = start
-		_ = end
-		requestedConnId = connId
-		return nil
-	}
-	t.Cleanup(func() {
-		fixture.ls.blockfetchRequestRangeCleanup()
-	})
 
 	forkHash := testHashBytes("fork-block")
 	header := mockHeader{
@@ -201,7 +82,7 @@ func TestTryResolveForkSynchronizesLedgerTip(t *testing.T) {
 	var notFitErr chain.BlockNotFitChainTipError
 	require.ErrorAs(t, err, &notFitErr)
 
-	resolved, err := fixture.ls.tryResolveFork(
+	resolved := fixture.ls.tryResolveFork(
 		ChainsyncEvent{
 			ConnectionId: fixture.connId,
 			Point: ocommon.NewPoint(
@@ -219,7 +100,6 @@ func TestTryResolveForkSynchronizesLedgerTip(t *testing.T) {
 		},
 		notFitErr,
 	)
-	require.NoError(t, err)
 	require.True(t, resolved)
 
 	assert.Equal(t, fixture.ancestorTip, fixture.ls.chain.Tip())
@@ -229,13 +109,159 @@ func TestTryResolveForkSynchronizesLedgerTip(t *testing.T) {
 		bytes.Equal(fixture.ancestorNonce, fixture.ls.currentTipBlockNonce),
 	)
 	assert.Equal(t, 1, fixture.ls.chain.HeaderCount())
-	assert.Equal(t, fixture.connId, requestedConnId)
-	assert.Equal(t, fixture.connId, fixture.ls.activeBlockfetchConnId)
-	require.NotNil(t, fixture.ls.chainsyncBlockfetchReadyChan)
 
 	dbTip, err := fixture.ls.db.GetTip(nil)
 	require.NoError(t, err)
 	assert.Equal(t, fixture.ancestorTip, dbTip)
+}
+
+func TestTryResolveForkQueuesKnownPeerForkSegment(t *testing.T) {
+	fixture := newChainsyncRollbackFixture(t)
+
+	forkHash1 := testHashBytes("fork-block-1")
+	forkHash2 := testHashBytes("fork-block-2")
+	forkHash3 := testHashBytes("fork-block-3")
+	header1 := mockHeader{
+		hash:        lcommon.NewBlake2b256(forkHash1),
+		prevHash:    lcommon.NewBlake2b256(fixture.ancestorTip.Point.Hash),
+		blockNumber: fixture.currentTip.BlockNumber + 1,
+		slot:        fixture.currentTip.Point.Slot + 1,
+	}
+	header2 := mockHeader{
+		hash:        lcommon.NewBlake2b256(forkHash2),
+		prevHash:    lcommon.NewBlake2b256(forkHash1),
+		blockNumber: fixture.currentTip.BlockNumber + 2,
+		slot:        fixture.currentTip.Point.Slot + 2,
+	}
+	header3 := mockHeader{
+		hash:        lcommon.NewBlake2b256(forkHash3),
+		prevHash:    lcommon.NewBlake2b256(forkHash2),
+		blockNumber: fixture.currentTip.BlockNumber + 3,
+		slot:        fixture.currentTip.Point.Slot + 3,
+	}
+
+	fixture.ls.recordPeerHeaderHistory(ChainsyncEvent{
+		ConnectionId: fixture.connId,
+		Point:        ocommon.NewPoint(header1.SlotNumber(), forkHash1),
+		BlockHeader:  header1,
+	})
+	fixture.ls.recordPeerHeaderHistory(ChainsyncEvent{
+		ConnectionId: fixture.connId,
+		Point:        ocommon.NewPoint(header2.SlotNumber(), forkHash2),
+		BlockHeader:  header2,
+	})
+
+	err := fixture.ls.chain.AddBlockHeader(header3)
+	var notFitErr chain.BlockNotFitChainTipError
+	require.ErrorAs(t, err, &notFitErr)
+
+	resolved := fixture.ls.tryResolveFork(
+		ChainsyncEvent{
+			ConnectionId: fixture.connId,
+			Point:        ocommon.NewPoint(header3.SlotNumber(), forkHash3),
+			BlockHeader:  header3,
+			Tip: ochainsync.Tip{
+				Point:       ocommon.NewPoint(header3.SlotNumber(), forkHash3),
+				BlockNumber: header3.BlockNumber(),
+			},
+		},
+		notFitErr,
+	)
+	require.True(t, resolved)
+
+	assert.Equal(t, fixture.ancestorTip, fixture.ls.chain.Tip())
+	assert.Equal(t, fixture.ancestorTip, fixture.ls.currentTip)
+	assert.Equal(t, 3, fixture.ls.chain.HeaderCount())
+
+	start, end := fixture.ls.chain.HeaderRange(10)
+	assert.Equal(t, uint64(header1.SlotNumber()), start.Slot)
+	assert.Equal(t, forkHash1, start.Hash)
+	assert.Equal(t, uint64(header3.SlotNumber()), end.Slot)
+	assert.Equal(t, forkHash3, end.Hash)
+}
+
+func TestTryResolveForkUsesObservedPeerHistoryFallback(t *testing.T) {
+	fixture := newChainsyncRollbackFixture(t)
+
+	forkHash1 := testHashBytes("observed-fork-block-1")
+	forkHash2 := testHashBytes("observed-fork-block-2")
+	forkHash3 := testHashBytes("observed-fork-block-3")
+	header1 := mockHeader{
+		hash:        lcommon.NewBlake2b256(forkHash1),
+		prevHash:    lcommon.NewBlake2b256(fixture.ancestorTip.Point.Hash),
+		blockNumber: fixture.currentTip.BlockNumber + 1,
+		slot:        fixture.currentTip.Point.Slot + 1,
+	}
+	header2 := mockHeader{
+		hash:        lcommon.NewBlake2b256(forkHash2),
+		prevHash:    lcommon.NewBlake2b256(forkHash1),
+		blockNumber: fixture.currentTip.BlockNumber + 2,
+		slot:        fixture.currentTip.Point.Slot + 2,
+	}
+	header3 := mockHeader{
+		hash:        lcommon.NewBlake2b256(forkHash3),
+		prevHash:    lcommon.NewBlake2b256(forkHash2),
+		blockNumber: fixture.currentTip.BlockNumber + 3,
+		slot:        fixture.currentTip.Point.Slot + 3,
+	}
+
+	observedHeaders := map[string]peerHeaderRecord{
+		hex.EncodeToString(forkHash1): {
+			event: ChainsyncEvent{
+				ConnectionId: fixture.connId,
+				Point:        ocommon.NewPoint(header1.SlotNumber(), forkHash1),
+				BlockHeader:  header1,
+			},
+			prevHash: append([]byte(nil), fixture.ancestorTip.Point.Hash...),
+		},
+		hex.EncodeToString(forkHash2): {
+			event: ChainsyncEvent{
+				ConnectionId: fixture.connId,
+				Point:        ocommon.NewPoint(header2.SlotNumber(), forkHash2),
+				BlockHeader:  header2,
+			},
+			prevHash: append([]byte(nil), forkHash1...),
+		},
+	}
+	fixture.ls.config.PeerHeaderLookupFunc = func(
+		connId ouroboros.ConnectionId,
+		hash []byte,
+	) (ChainsyncEvent, []byte, bool) {
+		require.Equal(t, fixture.connId, connId)
+		record, ok := observedHeaders[hex.EncodeToString(hash)]
+		if !ok {
+			return ChainsyncEvent{}, nil, false
+		}
+		return record.event, append([]byte(nil), record.prevHash...), true
+	}
+
+	err := fixture.ls.chain.AddBlockHeader(header3)
+	var notFitErr chain.BlockNotFitChainTipError
+	require.ErrorAs(t, err, &notFitErr)
+
+	resolved := fixture.ls.tryResolveFork(
+		ChainsyncEvent{
+			ConnectionId: fixture.connId,
+			Point:        ocommon.NewPoint(header3.SlotNumber(), forkHash3),
+			BlockHeader:  header3,
+			Tip: ochainsync.Tip{
+				Point:       ocommon.NewPoint(header3.SlotNumber(), forkHash3),
+				BlockNumber: header3.BlockNumber(),
+			},
+		},
+		notFitErr,
+	)
+	require.True(t, resolved)
+
+	assert.Equal(t, fixture.ancestorTip, fixture.ls.chain.Tip())
+	assert.Equal(t, fixture.ancestorTip, fixture.ls.currentTip)
+	assert.Equal(t, 3, fixture.ls.chain.HeaderCount())
+
+	start, end := fixture.ls.chain.HeaderRange(10)
+	assert.Equal(t, uint64(header1.SlotNumber()), start.Slot)
+	assert.Equal(t, forkHash1, start.Hash)
+	assert.Equal(t, uint64(header3.SlotNumber()), end.Slot)
+	assert.Equal(t, forkHash3, end.Hash)
 }
 
 func TestHandleEventChainsyncBlockHeaderMissingAncestorRequestsResync(
@@ -272,8 +298,8 @@ func TestHandleEventChainsyncBlockHeaderMissingAncestorRequestsResync(
 		blockNumber: fixture.currentTip.BlockNumber + 1,
 		slot:        fixture.currentTip.Point.Slot + 10,
 	}
-	fixture.ls.bufferedHeaderEvents = map[ouroboros.ConnectionId][]ChainsyncEvent{
-		fixture.connId: {{
+	fixture.ls.bufferedHeaderEvents = map[string][]ChainsyncEvent{
+		connIdKey(fixture.connId): {{
 			ConnectionId: fixture.connId,
 			Point: ocommon.NewPoint(
 				header.SlotNumber(),
@@ -305,7 +331,7 @@ func TestHandleEventChainsyncBlockHeaderMissingAncestorRequestsResync(
 			BlockNumber: header.BlockNumber(),
 		},
 	})
-	require.ErrorIs(t, err, errChainsyncResyncRequested)
+	require.NoError(t, err)
 
 	select {
 	case resync := <-resyncCh:
@@ -316,23 +342,15 @@ func TestHandleEventChainsyncBlockHeaderMissingAncestorRequestsResync(
 	}
 
 	assert.Zero(t, fixture.ls.headerMismatchCount)
-	_, ok := fixture.ls.bufferedHeaderEvents[fixture.connId]
+	_, ok := fixture.ls.bufferedHeaderEvents[connIdKey(fixture.connId)]
 	assert.False(t, ok)
 }
 
-func TestReplayBufferedHeaderEventsStopsAfterResyncRequest(t *testing.T) {
+func TestRollbackPublishesChainsyncResyncAtRollbackPoint(t *testing.T) {
 	fixture := newChainsyncRollbackFixture(t)
 	bus := event.NewEventBus(nil, nil)
 	t.Cleanup(func() { bus.Stop() })
 	fixture.ls.config.EventBus = bus
-	fixture.ls.config.BlockfetchRequestRangeFunc = func(
-		ouroboros.ConnectionId,
-		ocommon.Point,
-		ocommon.Point,
-	) error {
-		t.Fatal("unexpected blockfetch request after resync")
-		return nil
-	}
 
 	resyncCh := make(chan event.ChainsyncResyncEvent, 1)
 	subId := bus.SubscribeFunc(
@@ -352,133 +370,242 @@ func TestReplayBufferedHeaderEventsStopsAfterResyncRequest(t *testing.T) {
 		bus.Unsubscribe(event.ChainsyncResyncEventType, subId)
 	})
 
-	staleHash := testHashBytes("stale-fork-block")
-	stalePrevHash := testHashBytes("missing-ancestor")
-	validHash := testHashBytes("valid-buffered-header")
-	staleHeader := mockHeader{
-		hash:        lcommon.NewBlake2b256(staleHash),
-		prevHash:    lcommon.NewBlake2b256(stalePrevHash),
-		blockNumber: fixture.currentTip.BlockNumber + 1,
-		slot:        fixture.currentTip.Point.Slot + 10,
-	}
-	validHeader := mockHeader{
-		hash:        lcommon.NewBlake2b256(validHash),
-		prevHash:    lcommon.NewBlake2b256(fixture.currentTip.Point.Hash),
-		blockNumber: fixture.currentTip.BlockNumber + 2,
-		slot:        fixture.currentTip.Point.Slot + 20,
-	}
-	fixture.ls.bufferedHeaderEvents = map[ouroboros.ConnectionId][]ChainsyncEvent{
-		fixture.connId: {
-			{
-				ConnectionId: fixture.connId,
-				Point: ocommon.NewPoint(
-					staleHeader.SlotNumber(),
-					staleHeader.Hash().Bytes(),
-				),
-				BlockHeader: staleHeader,
-				Tip: ochainsync.Tip{
-					Point: ocommon.NewPoint(
-						staleHeader.SlotNumber(),
-						staleHeader.Hash().Bytes(),
-					),
-					BlockNumber: staleHeader.BlockNumber(),
-				},
-			},
-			{
-				ConnectionId: fixture.connId,
-				Point: ocommon.NewPoint(
-					validHeader.SlotNumber(),
-					validHeader.Hash().Bytes(),
-				),
-				BlockHeader: validHeader,
-				Tip: ochainsync.Tip{
-					Point: ocommon.NewPoint(
-						validHeader.SlotNumber(),
-						validHeader.Hash().Bytes(),
-					),
-					BlockNumber: validHeader.BlockNumber(),
-				},
-			},
-		},
-	}
-
-	err := fixture.ls.replayBufferedHeaderEvents(fixture.connId)
-	require.NoError(t, err)
+	require.NoError(t, fixture.ls.rollback(fixture.ancestorTip.Point))
 
 	select {
 	case resync := <-resyncCh:
-		assert.Equal(t, fixture.connId, resync.ConnectionId)
-		assert.Equal(t, resyncReasonRollbackNotFound, resync.Reason)
+		assert.Equal(t, "local ledger rollback", resync.Reason)
+		assert.Equal(t, fixture.ancestorTip.Point, resync.Point)
+		assert.Equal(t, ouroboros.ConnectionId{}, resync.ConnectionId)
 	case <-time.After(2 * time.Second):
 		t.Fatal("expected chainsync resync event")
 	}
-
-	assert.Zero(t, fixture.ls.headerMismatchCount)
-	assert.Equal(t, 0, fixture.ls.chain.HeaderCount())
-	assert.Equal(t, ouroboros.ConnectionId{}, fixture.ls.headerPipelineConnId)
-	_, ok := fixture.ls.bufferedHeaderEvents[fixture.connId]
-	assert.False(t, ok)
 }
 
-func TestReplayBufferedHeadersAsyncSkipsActiveBlockfetch(t *testing.T) {
+func TestRecoverAfterLocalRollbackReplaysPeerHeaderHistory(
+	t *testing.T,
+) {
 	fixture := newChainsyncRollbackFixture(t)
-	requestedCh := make(chan struct{}, 1)
+
+	require.NoError(
+		t,
+		fixture.ls.chain.Rollback(fixture.ancestorTip.Point),
+	)
+	require.NoError(t, fixture.ls.db.SetTip(fixture.ancestorTip, nil))
+	fixture.ls.currentTip = fixture.ancestorTip
+	fixture.ls.currentTipBlockNonce = append(
+		[]byte(nil),
+		fixture.ancestorNonce...,
+	)
+
+	connId := fixture.connId
+	requestCount := 0
+	fixture.ls.config.GetActiveConnectionFunc = func() *ouroboros.ConnectionId {
+		return &connId
+	}
 	fixture.ls.config.BlockfetchRequestRangeFunc = func(
-		ouroboros.ConnectionId,
-		ocommon.Point,
-		ocommon.Point,
+		requestConnId ouroboros.ConnectionId,
+		start ocommon.Point,
+		end ocommon.Point,
 	) error {
-		select {
-		case requestedCh <- struct{}{}:
-		default:
-		}
+		requestCount++
+		assert.True(t, sameConnectionId(connId, requestConnId))
+		assert.Equal(t, uint64(11), start.Slot)
+		assert.Equal(t, uint64(12), end.Slot)
 		return nil
 	}
 
-	headerHash := testHashBytes("async-buffered-header")
+	header1Hash := lcommon.NewBlake2b256(testHashBytes("rollback-replay-1"))
+	header2Hash := lcommon.NewBlake2b256(testHashBytes("rollback-replay-2"))
+	header1 := mockHeader{
+		hash:        header1Hash,
+		prevHash:    lcommon.NewBlake2b256(fixture.ancestorTip.Point.Hash),
+		blockNumber: fixture.ancestorTip.BlockNumber + 1,
+		slot:        fixture.ancestorTip.Point.Slot + 1,
+	}
+	header2 := mockHeader{
+		hash:        header2Hash,
+		prevHash:    header1Hash,
+		blockNumber: fixture.ancestorTip.BlockNumber + 2,
+		slot:        fixture.ancestorTip.Point.Slot + 2,
+	}
+	fixture.ls.recordPeerHeaderHistory(ChainsyncEvent{
+		ConnectionId: fixture.connId,
+		Point: ocommon.NewPoint(
+			header1.slot,
+			header1.hash.Bytes(),
+		),
+		Tip: ochainsync.Tip{
+			Point: ocommon.NewPoint(
+				header2.slot,
+				header2.hash.Bytes(),
+			),
+			BlockNumber: header2.blockNumber,
+		},
+		BlockHeader: header1,
+	})
+	fixture.ls.recordPeerHeaderHistory(ChainsyncEvent{
+		ConnectionId: fixture.connId,
+		Point: ocommon.NewPoint(
+			header2.slot,
+			header2.hash.Bytes(),
+		),
+		Tip: ochainsync.Tip{
+			Point: ocommon.NewPoint(
+				header2.slot,
+				header2.hash.Bytes(),
+			),
+			BlockNumber: header2.blockNumber,
+		},
+		BlockHeader: header2,
+	})
+
+	recovered := fixture.ls.RecoverAfterLocalRollback(
+		[]ouroboros.ConnectionId{fixture.connId},
+		fixture.ancestorTip.Point,
+	)
+
+	require.True(t, recovered)
+	assert.Equal(t, 2, fixture.ls.chain.HeaderCount())
+	assert.True(
+		t,
+		sameConnectionId(fixture.ls.headerPipelineConnId, fixture.connId),
+	)
+	assert.True(
+		t,
+		sameConnectionId(
+			fixture.ls.selectedBlockfetchConnId,
+			fixture.connId,
+		),
+	)
+	assert.True(
+		t,
+		sameConnectionId(
+			fixture.ls.activeBlockfetchConnId,
+			fixture.connId,
+		),
+	)
+	assert.Equal(t, 1, requestCount)
+	fixture.ls.blockfetchRequestRangeCleanup()
+}
+
+func TestRecoverAfterLocalRollbackResetsStateWithoutTrackedClients(t *testing.T) {
+	fixture := newChainsyncRollbackFixture(t)
+
 	header := mockHeader{
-		hash:        lcommon.NewBlake2b256(headerHash),
+		hash:        lcommon.NewBlake2b256(testHashBytes("rollback-reset-1")),
 		prevHash:    lcommon.NewBlake2b256(fixture.currentTip.Point.Hash),
 		blockNumber: fixture.currentTip.BlockNumber + 1,
 		slot:        fixture.currentTip.Point.Slot + 1,
 	}
-	fixture.ls.bufferedHeaderEvents = map[ouroboros.ConnectionId][]ChainsyncEvent{
-		fixture.connId: {{
-			ConnectionId: fixture.connId,
-			Point: ocommon.NewPoint(
-				header.SlotNumber(),
-				header.Hash().Bytes(),
-			),
-			BlockHeader: header,
-			Tip: ochainsync.Tip{
+	require.NoError(t, fixture.ls.chain.AddBlockHeader(header))
+
+	fixture.ls.headerPipelineConnId = fixture.connId
+	fixture.ls.selectedBlockfetchConnId = fixture.connId
+	fixture.ls.activeBlockfetchConnId = fixture.connId
+	fixture.ls.headerMismatchCount = 3
+	fixture.ls.rollbackHistory = []rollbackRecord{
+		{
+			slot:      fixture.currentTip.Point.Slot,
+			timestamp: time.Now(),
+		},
+	}
+	fixture.ls.bufferedHeaderEvents = map[string][]ChainsyncEvent{
+		connIdKey(fixture.connId): {
+			{
+				ConnectionId: fixture.connId,
 				Point: ocommon.NewPoint(
-					header.SlotNumber(),
-					header.Hash().Bytes(),
+					header.slot,
+					header.hash.Bytes(),
 				),
-				BlockNumber: header.BlockNumber(),
+				BlockHeader: header,
 			},
-		}},
+		},
 	}
 
-	fixture.ls.chainsyncMutex.Lock()
-	fixture.ls.replayBufferedHeadersAsync(fixture.connId)
-	fixture.ls.chainsyncBlockfetchMutex.Lock()
-	fixture.ls.chainsyncBlockfetchReadyChan = make(chan struct{})
-	fixture.ls.chainsyncBlockfetchMutex.Unlock()
-	fixture.ls.chainsyncMutex.Unlock()
+	recovered := fixture.ls.RecoverAfterLocalRollback(
+		nil,
+		fixture.ancestorTip.Point,
+	)
+
+	require.False(t, recovered)
+	assert.Zero(t, fixture.ls.chain.HeaderCount())
+	assert.Zero(t, fixture.ls.headerMismatchCount)
+	assert.Nil(t, fixture.ls.rollbackHistory)
+	assert.Nil(t, fixture.ls.bufferedHeaderEvents)
+	assert.True(
+		t,
+		fixture.ls.headerPipelineConnId == (ouroboros.ConnectionId{}),
+	)
+	assert.True(
+		t,
+		fixture.ls.selectedBlockfetchConnId == (ouroboros.ConnectionId{}),
+	)
+	assert.True(
+		t,
+		fixture.ls.activeBlockfetchConnId == (ouroboros.ConnectionId{}),
+	)
+}
+
+func TestHandleEventChainsyncBlockHeaderIgnoresStaleRollForwardBehindTip(
+	t *testing.T,
+) {
+	fixture := newChainsyncRollbackFixture(t)
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(func() { bus.Stop() })
+	fixture.ls.config.EventBus = bus
+
+	resyncCh := make(chan event.ChainsyncResyncEvent, 1)
+	subId := bus.SubscribeFunc(
+		event.ChainsyncResyncEventType,
+		func(evt event.Event) {
+			e, ok := evt.Data.(event.ChainsyncResyncEvent)
+			if !ok {
+				return
+			}
+			select {
+			case resyncCh <- e:
+			default:
+			}
+		},
+	)
+	t.Cleanup(func() {
+		bus.Unsubscribe(event.ChainsyncResyncEventType, subId)
+	})
+
+	staleHash := testHashBytes("stale-roll-forward")
+	header := mockHeader{
+		hash:        lcommon.NewBlake2b256(staleHash),
+		prevHash:    lcommon.NewBlake2b256(fixture.ancestorTip.Point.Hash),
+		blockNumber: fixture.ancestorTip.BlockNumber + 1,
+		slot:        fixture.ancestorTip.Point.Slot + 5,
+	}
+
+	err := fixture.ls.handleEventChainsyncBlockHeader(ChainsyncEvent{
+		ConnectionId: fixture.connId,
+		Point: ocommon.NewPoint(
+			header.SlotNumber(),
+			header.Hash().Bytes(),
+		),
+		BlockHeader: header,
+		Tip: ochainsync.Tip{
+			Point: ocommon.NewPoint(
+				fixture.currentTip.Point.Slot+10,
+				testHashBytes("peer-tip"),
+			),
+			BlockNumber: fixture.currentTip.BlockNumber + 10,
+		},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, fixture.currentTip, fixture.ls.chain.Tip())
+	assert.Zero(t, fixture.ls.headerMismatchCount)
+	assert.Zero(t, fixture.ls.chain.HeaderCount())
 
 	select {
-	case <-requestedCh:
-		t.Fatal("unexpected blockfetch request while active batch is present")
-	case <-time.After(100 * time.Millisecond):
+	case resync := <-resyncCh:
+		t.Fatalf("expected no chainsync resync event, got: %#v", resync)
+	case <-time.After(200 * time.Millisecond):
 	}
-
-	fixture.ls.chainsyncMutex.Lock()
-	defer fixture.ls.chainsyncMutex.Unlock()
-	assert.Equal(t, 0, fixture.ls.chain.HeaderCount())
-	assert.Equal(t, ouroboros.ConnectionId{}, fixture.ls.headerPipelineConnId)
-	_, ok := fixture.ls.bufferedHeaderEvents[fixture.connId]
-	assert.True(t, ok)
 }
 
 func TestReconcilePrimaryChainTipWithLedgerTipRollsBackMetadata(t *testing.T) {
@@ -520,6 +647,29 @@ func TestProcessChainIteratorRollbackAppliesMatchingRollback(t *testing.T) {
 	assert.Equal(t, fixture.ancestorTip, dbTip)
 }
 
+func TestProcessChainIteratorRollbackNoopWhenLedgerAlreadyAtPoint(t *testing.T) {
+	fixture := newChainsyncRollbackFixture(t)
+
+	require.NoError(t, fixture.ls.chain.Rollback(fixture.ancestorTip.Point))
+	fixture.ls.currentTip = fixture.ancestorTip
+	fixture.ls.currentTipBlockNonce = append(
+		[]byte(nil),
+		fixture.ancestorNonce...,
+	)
+	require.NoError(t, fixture.ls.db.SetTip(fixture.ancestorTip, nil))
+
+	err := fixture.ls.processChainIteratorRollback(
+		fixture.ancestorTip.Point,
+	)
+	require.NoError(t, err)
+
+	assert.Equal(t, fixture.ancestorTip, fixture.ls.chain.Tip())
+	assert.Equal(t, fixture.ancestorTip, fixture.ls.currentTip)
+	dbTip, err := fixture.ls.db.GetTip(nil)
+	require.NoError(t, err)
+	assert.Equal(t, fixture.ancestorTip, dbTip)
+}
+
 func TestProcessChainIteratorRollbackSkipsStaleRollback(t *testing.T) {
 	fixture := newChainsyncRollbackFixture(t)
 
@@ -527,7 +677,7 @@ func TestProcessChainIteratorRollbackSkipsStaleRollback(t *testing.T) {
 	err := fixture.ls.processChainIteratorRollback(
 		fixture.ancestorTip.Point,
 	)
-	require.NoError(t, err)
+	require.ErrorIs(t, err, errRestartLedgerPipeline)
 
 	assert.Equal(t, fixture.currentTip, fixture.ls.chain.Tip())
 	assert.Equal(t, fixture.currentTip, fixture.ls.currentTip)
@@ -539,6 +689,25 @@ func TestProcessChainIteratorRollbackSkipsStaleRollback(t *testing.T) {
 	dbTip, err := fixture.ls.db.GetTip(nil)
 	require.NoError(t, err)
 	assert.Equal(t, fixture.currentTip, dbTip)
+}
+
+func TestLedgerProcessBlocksFromSourceRestartsOnStaleIteratorRollback(
+	t *testing.T,
+) {
+	fixture := newChainsyncRollbackFixture(t)
+
+	readChainResultCh := make(chan readChainResult, 1)
+	readChainResultCh <- readChainResult{
+		rollback:      true,
+		rollbackPoint: fixture.ancestorTip.Point,
+	}
+	close(readChainResultCh)
+
+	err := fixture.ls.ledgerProcessBlocksFromSource(
+		context.Background(),
+		readChainResultCh,
+	)
+	require.ErrorIs(t, err, errRestartLedgerPipeline)
 }
 
 func newChainsyncRollbackFixture(t *testing.T) *chainsyncRollbackFixture {
