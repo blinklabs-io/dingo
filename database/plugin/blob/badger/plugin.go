@@ -23,8 +23,9 @@ import (
 
 // Default cache sizes for BadgerDB (in bytes).
 //
-// Block cache is needed because we use Snappy compression. Badger's
+// Block cache is needed when Snappy compression is enabled. Badger's
 // own default is 256 MB block cache and 0 (unlimited) index cache.
+// Set compression=false and block-cache-size=0 for mmap-only mode.
 // Setting IndexCacheSize to 0 lets Badger memory-map the full index
 // without eviction, which is preferable to capping it.
 //
@@ -63,7 +64,8 @@ var (
 		valueLogFileSize uint64
 		memTableSize     uint64
 		valueThreshold   uint64
-		gcEnabled        bool
+		gcEnabled          bool
+		compressionEnabled bool
 	}
 	cmdlineOptionsMutex sync.RWMutex
 )
@@ -145,6 +147,7 @@ func initCmdlineOptions() {
 	cmdlineOptions.runMode = ""
 	cmdlineOptions.storageMode = "core"
 	cmdlineOptions.gcEnabled = true
+	cmdlineOptions.compressionEnabled = true
 	cmdlineOptions.dataDir = ".dingo"
 }
 
@@ -221,6 +224,13 @@ func init() {
 					DefaultValue: uint64(DefaultValueThreshold),
 					Dest:         &(cmdlineOptions.valueThreshold),
 				},
+				{
+					Name:         "compression",
+					Type:         plugin.PluginOptionTypeBool,
+					Description:  "Enable Snappy compression (disable for mmap-only mode)",
+					DefaultValue: true,
+					Dest:         &(cmdlineOptions.compressionEnabled),
+				},
 			},
 		},
 	)
@@ -274,6 +284,7 @@ func NewFromCmdlineOptions() plugin.Plugin {
 			int64(valueThreshold),
 		),
 		WithGc(cmdlineOptions.gcEnabled),
+		WithCompressionEnabled(cmdlineOptions.compressionEnabled),
 		WithDeferOpen(),
 	}
 	cmdlineOptionsMutex.Unlock()
