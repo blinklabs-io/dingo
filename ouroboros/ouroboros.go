@@ -520,23 +520,23 @@ func (o *Ouroboros) HandleInboundConnEvent(evt event.Event) {
 	)
 
 	// Start chainsync client on this full-duplex inbound connection.
-	// If the chainsync client fails (e.g. intersection not found because
-	// the peer follows a different fork), close the connection so
-	// peergov stops tracking it and outbound retries are not blocked
-	// by a stale inbound.
+	// If the chainsync client fails (e.g. intersection not found,
+	// stale connection ID after rollback), close the connection so
+	// it doesn't consume a per-IP slot as a zombie. Zombie
+	// connections that lack chainsync but count toward the per-IP
+	// limit can prevent functional reconnections, causing permanent
+	// chainsync stalls after rollback events.
 	if o.ChainsyncState != nil {
 		if o.registerTrackedChainsyncClient(connId, false) {
 			if err := o.chainsyncClientStart(connId); err != nil {
 				o.ChainsyncState.RemoveClientConnId(connId)
 				o.config.Logger.Warn(
-					"chainsync client failed on inbound connection, keeping alive for other protocols",
+					"chainsync client failed on inbound connection, closing to free per-IP slot",
 					"error", err,
 					"connection_id", connId.String(),
 				)
-				// Don't close the connection — the peer may still be
-				// useful for keep-alive, peer-sharing, or other
-				// mini-protocols (e.g. cardano-cli ping or partial
-				// full-duplex peers).
+				conn.Close()
+				return
 			} else {
 				o.config.Logger.Debug(
 					"started chainsync client on inbound connection",
