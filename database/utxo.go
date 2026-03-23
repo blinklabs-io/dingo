@@ -15,6 +15,7 @@
 package database
 
 import (
+	"bytes"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -23,42 +24,45 @@ import (
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
 var ErrUtxoNotFound = errors.New("utxo not found")
 
-// deleteUtxoBlobs attempts to delete blob data for the given UTxOs.
-// This is a best-effort operation; metadata remains the source of truth. If the
-// provided transaction does not include a blob handle, a temporary blob-only
-// transaction is used instead.
-func deleteUtxoBlobs(d *Database, utxos []models.Utxo, txn *Txn) error {
+// deleteUtxoBlobs performs best-effort deletion of blob data for the given
+// [models.Utxo] entries. Metadata remains the authoritative source of truth;
+// blob deletions are supplementary. The caller [*Txn] is ignored — this
+// function always creates and commits its own blob-only batches via the
+// [Database], so callers should not expect blob deletes to participate in any
+// outer transaction.
+func deleteUtxoBlobs(d *Database, utxos []models.Utxo, _ *Txn) error {
+	const batchSize = 500
 	blob := d.Blob()
 	if blob == nil {
 		return types.ErrBlobStoreUnavailable
 	}
 
-	useTxn := txn
-	owned := false
-	if useTxn == nil || useTxn.Blob() == nil {
-		useTxn = NewBlobOnlyTxn(d, true)
-		owned = true
-		defer func() {
-			if owned {
-				useTxn.Rollback() //nolint:errcheck
-			}
-		}()
-	}
-
 	var deleteErrors int
-	for _, utxo := range utxos {
-		if err := blob.DeleteUtxo(useTxn.Blob(), utxo.TxId, utxo.OutputIdx); err != nil {
-			deleteErrors++
-			d.logger.Debug(
-				"failed to delete UTxO blob data",
-				"txid", hex.EncodeToString(utxo.TxId),
-				"output_idx", utxo.OutputIdx,
-				"error", err,
-			)
+	for start := 0; start < len(utxos); start += batchSize {
+		end := start + batchSize
+		if end > len(utxos) {
+			end = len(utxos)
+		}
+		batchTxn := NewBlobOnlyTxn(d, true)
+		for _, utxo := range utxos[start:end] {
+			if err := blob.DeleteUtxo(batchTxn.Blob(), utxo.TxId, utxo.OutputIdx); err != nil {
+				deleteErrors++
+				d.logger.Debug(
+					"failed to delete UTxO blob data",
+					"txid", hex.EncodeToString(utxo.TxId),
+					"output_idx", utxo.OutputIdx,
+					"error", err,
+				)
+			}
+		}
+		if err := batchTxn.Commit(); err != nil {
+			_ = batchTxn.Rollback()
+			d.logger.Debug("blob delete batch commit failed", "error", err)
 		}
 	}
 	if deleteErrors > 0 {
@@ -69,14 +73,6 @@ func deleteUtxoBlobs(d *Database, utxos []models.Utxo, txn *Txn) error {
 			"total",
 			len(utxos),
 		)
-	}
-
-	if owned {
-		owned = false // prevent deferred rollback
-		if err := useTxn.Commit(); err != nil {
-			_ = useTxn.Rollback() // explicit rollback on commit failure
-			d.logger.Debug("blob delete commit failed", "error", err)
-		}
 	}
 
 	return nil
@@ -91,9 +87,18 @@ func loadCbor(u *models.Utxo, txn *Txn) error {
 		blobTxn := txn.Blob()
 		cbor, err := db.cborCache.ResolveUtxoCbor(u.TxId, u.OutputIdx, blobTxn)
 		if err != nil {
-			// Map blob-key-not-found to ErrUtxoNotFound
 			if errors.Is(err, types.ErrBlobKeyNotFound) {
-				return ErrUtxoNotFound
+				recoveredCbor, recoverErr := recoverUtxoCbor(
+					db,
+					txn,
+					u.TxId,
+					u.OutputIdx,
+				)
+				if recoverErr == nil {
+					u.Cbor = recoveredCbor
+					return nil
+				}
+				return recoverErr
 			}
 			return fmt.Errorf(
 				"resolve UTxO cbor tx=%x idx=%d: %w",
@@ -113,9 +118,18 @@ func loadCbor(u *models.Utxo, txn *Txn) error {
 	}
 	val, err := blob.GetUtxo(txn.Blob(), u.TxId, u.OutputIdx)
 	if err != nil {
-		// Map blob-key-not-found to ErrUtxoNotFound since it means the UTxO's blob is missing
 		if errors.Is(err, types.ErrBlobKeyNotFound) {
-			return ErrUtxoNotFound
+			recoveredCbor, recoverErr := recoverUtxoCbor(
+				db,
+				txn,
+				u.TxId,
+				u.OutputIdx,
+			)
+			if recoverErr == nil {
+				u.Cbor = recoveredCbor
+				return nil
+			}
+			return recoverErr
 		}
 		return fmt.Errorf(
 			"resolve UTxO cbor tx=%x idx=%d: %w",
@@ -155,6 +169,205 @@ func loadCbor(u *models.Utxo, txn *Txn) error {
 
 	// Legacy format: raw CBOR data
 	u.Cbor = val
+	return nil
+}
+
+func recoverUtxoCbor(
+	db *Database,
+	txn *Txn,
+	txId []byte,
+	outputIdx uint32,
+) ([]byte, error) {
+	block, err := utxoRecoveryBlockForTx(db, txn, txId)
+	if err != nil {
+		return nil, err
+	}
+	if block == nil {
+		return nil, ErrUtxoNotFound
+	}
+
+	// Decode the block once for both CBOR extraction and offset computation
+	decodedBlock, err := block.Decode()
+	if err != nil {
+		return nil, fmt.Errorf(
+			"decode producer block for utxo recovery at slot %d: %w",
+			block.Slot,
+			err,
+		)
+	}
+
+	// Extract the UTxO CBOR from the decoded block
+	recoveredCbor, err := utxoCborFromDecodedBlock(
+		decodedBlock, txId, outputIdx,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	// Compute the DOFF offset so the repair stores a proper offset reference
+	indexer := NewBlockIndexer(block.Slot, block.Hash)
+	offsets, indexErr := indexer.ComputeOffsets(block.Cbor, decodedBlock)
+	if indexErr == nil {
+		var txHashArray [32]byte
+		copy(txHashArray[:], txId)
+		ref := UtxoRef{TxId: txHashArray, OutputIdx: outputIdx}
+		if offset, ok := offsets.UtxoOffsets[ref]; ok {
+			if repairErr := repairUtxoBlob(
+				db, txn, txId, outputIdx, &offset,
+			); repairErr != nil {
+				db.logger.Debug(
+					"failed to repair missing UTxO blob",
+					"txid", hex.EncodeToString(txId),
+					"output_idx", outputIdx,
+					"error", repairErr,
+				)
+			}
+		}
+	}
+
+	return recoveredCbor, nil
+}
+
+func utxoRecoveryBlockForTx(
+	db *Database,
+	txn *Txn,
+	txId []byte,
+) (*models.Block, error) {
+	// Try the blob-based path when both the blob store and a blob
+	// transaction handle are available; otherwise skip straight to the
+	// metadata-based lookup below.
+	blob := db.Blob()
+	blobTxn := txn.Blob()
+	if blob != nil && blobTxn != nil {
+		if txData, err := blob.GetTx(blobTxn, txId); err == nil {
+			switch {
+			case IsTxOffsetStorage(txData):
+				offset, err := DecodeTxOffset(txData)
+				if err != nil {
+					return nil, fmt.Errorf(
+						"decode tx offset for utxo recovery %x: %w",
+						txId[:8],
+						err,
+					)
+				}
+				block, err := BlockByPointTxn(
+					txn,
+					ocommon.NewPoint(offset.BlockSlot, offset.BlockHash[:]),
+				)
+				if err != nil {
+					return nil, fmt.Errorf(
+						"lookup producer block from tx offset %x: %w",
+						txId[:8],
+						err,
+					)
+				}
+				return &block, nil
+			case IsTxCborPartsStorage(txData):
+				parts, err := DecodeTxCborParts(txData)
+				if err != nil {
+					return nil, fmt.Errorf(
+						"decode tx parts for utxo recovery %x: %w",
+						txId[:8],
+						err,
+					)
+				}
+				block, err := BlockByPointTxn(
+					txn,
+					ocommon.NewPoint(parts.BlockSlot, parts.BlockHash[:]),
+				)
+				if err != nil {
+					return nil, fmt.Errorf(
+						"lookup producer block from tx parts %x: %w",
+						txId[:8],
+						err,
+					)
+				}
+				return &block, nil
+			}
+		} else if !errors.Is(err, types.ErrBlobKeyNotFound) {
+			return nil, fmt.Errorf(
+				"lookup tx blob for utxo recovery %x: %w",
+				txId[:8],
+				err,
+			)
+		}
+	}
+	producerTx, err := db.metadata.GetTransactionByHash(txId, txn.Metadata())
+	if err != nil {
+		return nil, fmt.Errorf(
+			"lookup producer tx metadata for utxo recovery %x: %w",
+			txId[:8],
+			err,
+		)
+	}
+	if producerTx == nil || len(producerTx.BlockHash) == 0 {
+		return nil, nil
+	}
+	block, err := BlockByPointTxn(
+		txn,
+		ocommon.NewPoint(producerTx.Slot, producerTx.BlockHash),
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"lookup producer block from tx metadata %x: %w",
+			txId[:8],
+			err,
+		)
+	}
+	return &block, nil
+}
+
+func utxoCborFromDecodedBlock(
+	decodedBlock ledger.Block,
+	txId []byte,
+	outputIdx uint32,
+) ([]byte, error) {
+	for _, tx := range decodedBlock.Transactions() {
+		if !bytes.Equal(tx.Hash().Bytes(), txId) {
+			continue
+		}
+		for _, produced := range tx.Produced() {
+			if produced.Id.Index() == outputIdx {
+				return produced.Output.Cbor(), nil
+			}
+		}
+		return nil, ErrUtxoNotFound
+	}
+	return nil, ErrUtxoNotFound
+}
+
+func repairUtxoBlob(
+	db *Database,
+	txn *Txn,
+	txId []byte,
+	outputIdx uint32,
+	offset *CborOffset,
+) error {
+	blob := db.Blob()
+	if blob == nil {
+		return nil
+	}
+
+	offsetData := EncodeUtxoOffset(offset)
+
+	// Use the caller's blob txn when it is write-capable
+	if txn != nil && txn.Blob() != nil && txn.IsReadWrite() {
+		return blob.SetUtxo(txn.Blob(), txId, outputIdx, offsetData)
+	}
+
+	// Open a dedicated write transaction when the caller txn is
+	// nil or its blob handle is read-only / absent.
+	writeTxn := NewBlobOnlyTxn(db, true)
+	if err := blob.SetUtxo(
+		writeTxn.Blob(), txId, outputIdx, offsetData,
+	); err != nil {
+		_ = writeTxn.Rollback()
+		return err
+	}
+	if err := writeTxn.Commit(); err != nil {
+		_ = writeTxn.Rollback()
+		return err
+	}
 	return nil
 }
 

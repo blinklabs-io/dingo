@@ -479,30 +479,22 @@ func (d *Database) GetAddressesByStakingKey(
 }
 
 // deleteTxBlobs attempts to delete blob data for the given transaction hashes.
-// This is a best-effort operation; metadata remains the source of truth. If the
-// provided transaction does not include a blob handle, a temporary blob-only
-// transaction is used instead.
+// This is a best-effort operation; metadata remains the source of truth.
+// Blob deletions use the provided outer transaction so they participate in
+// the same atomic commit as metadata changes.
 func deleteTxBlobs(d *Database, txHashes [][]byte, txn *Txn) error {
 	blob := d.Blob()
 	if blob == nil {
 		return types.ErrBlobStoreUnavailable
 	}
-
-	useTxn := txn
-	owned := false
-	if useTxn == nil || useTxn.Blob() == nil {
-		useTxn = NewBlobOnlyTxn(d, true)
-		owned = true
-		defer func() {
-			if owned {
-				useTxn.Rollback() //nolint:errcheck
-			}
-		}()
+	blobTxn := txn.Blob()
+	if blobTxn == nil {
+		return types.ErrNilTxn
 	}
 
 	var deleteErrors int
 	for _, txHash := range txHashes {
-		if err := blob.DeleteTx(useTxn.Blob(), txHash); err != nil {
+		if err := blob.DeleteTx(blobTxn, txHash); err != nil {
 			deleteErrors++
 			d.logger.Debug(
 				"failed to delete TX blob data",
@@ -519,14 +511,6 @@ func deleteTxBlobs(d *Database, txHashes [][]byte, txn *Txn) error {
 			"total",
 			len(txHashes),
 		)
-	}
-
-	if owned {
-		owned = false // prevent deferred rollback
-		if err := useTxn.Commit(); err != nil {
-			_ = useTxn.Rollback() // explicit rollback on commit failure
-			d.logger.Debug("tx blob delete commit failed", "error", err)
-		}
 	}
 
 	return nil

@@ -482,3 +482,139 @@ func TestUtxoByRefAfterSetTransaction(t *testing.T) {
 	})
 	require.NoError(t, err)
 }
+
+func TestUtxoByRefRecoversMissingBlobFromProducerBlock(t *testing.T) {
+	for _, deleteTxBlob := range []bool{false, true} {
+		t.Run(fmt.Sprintf("delete_tx_blob=%t", deleteTxBlob), func(t *testing.T) {
+			tmpDir, err := os.MkdirTemp("", "utxo_byref_recover_test")
+			require.NoError(t, err)
+			defer os.RemoveAll(tmpDir)
+
+			logger := slog.New(
+				slog.NewTextHandler(
+					io.Discard,
+					&slog.HandlerOptions{Level: slog.LevelDebug},
+				),
+			)
+
+			dbConfig := &database.Config{
+				DataDir:        tmpDir,
+				Logger:         logger,
+				BlobPlugin:     "badger",
+				MetadataPlugin: "sqlite",
+			}
+			db, err := database.New(dbConfig)
+			require.NoError(t, err)
+			defer db.Close()
+
+			imm, err := immutable.New("../database/immutable/testdata")
+			require.NoError(t, err)
+
+			iter, err := imm.BlocksFromPoint(ocommon.Point{Slot: 0, Hash: nil})
+			require.NoError(t, err)
+			defer iter.Close()
+
+			var block lcommon.Block
+			var blockCbor []byte
+			for {
+				immBlock, err := iter.Next()
+				require.NoError(t, err)
+				if immBlock == nil {
+					t.Fatal("no blocks with transactions found")
+				}
+				block, err = ledger.NewBlockFromCbor(immBlock.Type, immBlock.Cbor)
+				require.NoError(t, err)
+				if len(block.Transactions()) == 0 {
+					continue
+				}
+				if len(block.Transactions()[0].Produced()) == 0 {
+					continue
+				}
+				blockCbor = immBlock.Cbor
+				break
+			}
+
+			point := ocommon.Point{
+				Slot: block.SlotNumber(),
+				Hash: block.Hash().Bytes(),
+			}
+			tx := block.Transactions()[0]
+			expectedUtxo := tx.Produced()[0]
+			txId := tx.Hash().Bytes()
+			outputIdx := expectedUtxo.Id.Index()
+
+			txn := db.Transaction(true)
+			err = txn.Do(func(txn *database.Txn) error {
+				blockRecord := models.Block{
+					Slot:     point.Slot,
+					Hash:     point.Hash,
+					Number:   block.BlockNumber(),
+					Type:     uint(block.Type()),
+					PrevHash: block.PrevHash().Bytes(),
+					Cbor:     blockCbor,
+				}
+				if err := db.BlockCreate(blockRecord, txn); err != nil {
+					return err
+				}
+				indexer := database.NewBlockIndexer(point.Slot, point.Hash)
+				offsets, err := indexer.ComputeOffsets(blockCbor, block)
+				if err != nil {
+					return fmt.Errorf("compute offsets: %w", err)
+				}
+				return db.SetTransaction(
+					tx,
+					point,
+					0,
+					0,
+					nil,
+					nil,
+					&database.BlockIngestionResult{
+						TxOffsets:   offsets.TxOffsets,
+						UtxoOffsets: offsets.UtxoOffsets,
+					},
+					txn,
+				)
+			})
+			require.NoError(t, err)
+
+			deleteTxn := db.Transaction(true)
+			err = deleteTxn.Do(func(txn *database.Txn) error {
+				if err := db.Blob().DeleteUtxo(txn.Blob(), txId, outputIdx); err != nil {
+					return err
+				}
+				if deleteTxBlob {
+					if err := db.Blob().DeleteTx(txn.Blob(), txId); err != nil {
+						return err
+					}
+				}
+				return nil
+			})
+			require.NoError(t, err)
+
+			metaUtxo, err := db.Metadata().GetUtxo(txId, outputIdx, nil)
+			require.NoError(t, err)
+			require.NotNil(t, metaUtxo)
+
+			lookupTxn := db.Transaction(true)
+			err = lookupTxn.Do(func(txn *database.Txn) error {
+				retrieved, err := db.UtxoByRef(txId, outputIdx, txn)
+				require.NoError(t, err)
+				require.Equal(t, expectedUtxo.Output.Cbor(), retrieved.Cbor)
+
+				// The recovery path should heal the missing blob so future
+				// lookups do not need to re-derive it from the producer block.
+				// Verify by checking the blob key exists (the stored value is a
+				// DOFF offset reference, not raw CBOR).
+				_, err = db.Blob().GetUtxo(txn.Blob(), txId, outputIdx)
+				require.NoError(t, err)
+
+				// A second UtxoByRef should succeed without recovery.
+				retrieved2, err := db.UtxoByRef(txId, outputIdx, txn)
+				require.NoError(t, err)
+				require.Equal(t, expectedUtxo.Output.Cbor(), retrieved2.Cbor)
+				return nil
+			})
+			require.NoError(t, err)
+		})
+	}
+}

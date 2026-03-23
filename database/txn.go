@@ -122,6 +122,11 @@ func (t *Txn) Blob() types.Txn {
 	return t.blobTxn
 }
 
+// IsReadWrite reports whether the transaction was opened for writing.
+func (t *Txn) IsReadWrite() bool {
+	return t.readWrite
+}
+
 // Do executes the specified function in the context of the transaction. Any errors returned will result
 // in the transaction being rolled back. If the function panics, the transaction is rolled back and the
 // panic is re-raised after logging.
