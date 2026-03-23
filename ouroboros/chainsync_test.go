@@ -15,11 +15,17 @@
 package ouroboros
 
 import (
+	"context"
+	"io"
+	"log/slog"
 	"net"
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/chain"
 	dchainsync "github.com/blinklabs-io/dingo/chainsync"
+	"github.com/blinklabs-io/dingo/connmanager"
+	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/peergov"
@@ -100,6 +106,31 @@ func newTestConnId(local, remote string) ouroboros.ConnectionId {
 	}
 }
 
+func newTestLedgerState(t *testing.T) *ledger.LedgerState {
+	t.Helper()
+
+	db, err := database.New(&database.Config{
+		BlobPlugin:     "badger",
+		MetadataPlugin: "sqlite",
+		DataDir:        "",
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { db.Close() })
+
+	cm, err := chain.NewManager(db, nil)
+	require.NoError(t, err)
+
+	ls, err := ledger.NewLedgerState(ledger.LedgerStateConfig{
+		Database:     db,
+		ChainManager: cm,
+		Logger: slog.New(
+			slog.NewJSONHandler(io.Discard, nil),
+		),
+	})
+	require.NoError(t, err)
+	return ls
+}
+
 func TestNormalizeIntersectPoints(t *testing.T) {
 	points := []ocommon.Point{
 		ocommon.NewPoint(20, []byte("b")),
@@ -122,7 +153,7 @@ func TestNormalizeIntersectPoints(t *testing.T) {
 	)
 }
 
-func TestChainsyncClientRollForwardPublishesDuplicateFromSelectedPeer(
+func TestChainsyncClientRollForwardReplaysDuplicateFromSelectedPeerSeenElsewhere(
 	t *testing.T,
 ) {
 	bus := event.NewEventBus(nil, nil)
@@ -158,14 +189,10 @@ func TestChainsyncClientRollForwardPublishesDuplicateFromSelectedPeer(
 		tip,
 	)
 	require.NoError(t, err)
-	select {
-	case evt1 := <-ch:
-		data1, ok := evt1.Data.(ledger.ChainsyncEvent)
-		require.True(t, ok)
-		require.Equal(t, connB, data1.ConnectionId)
-	case <-time.After(time.Second):
-		t.Fatal("expected initial header to be published")
-	}
+	evt1 := <-ch
+	data1, ok := evt1.Data.(ledger.ChainsyncEvent)
+	require.True(t, ok)
+	require.Equal(t, connB, data1.ConnectionId)
 
 	err = o.chainsyncClientRollForward(
 		ochainsync.CallbackContext{ConnectionId: connA},
@@ -180,7 +207,127 @@ func TestChainsyncClientRollForwardPublishesDuplicateFromSelectedPeer(
 		require.True(t, ok)
 		require.Equal(t, connA, data2.ConnectionId)
 	case <-time.After(time.Second):
-		t.Fatal("expected duplicate header from selected peer to publish")
+		t.Fatal(
+			"expected selected peer to replay duplicate header first seen elsewhere",
+		)
+	}
+}
+
+func TestChainsyncClientRollForwardReplaysDuplicateFromEquivalentSelectedPeerSeenElsewhere(
+	t *testing.T,
+) {
+	bus := event.NewEventBus(nil, nil)
+	defer bus.Close()
+
+	_, ch := bus.Subscribe(ledger.ChainsyncEventType)
+	state := dchainsync.NewState(bus, nil)
+	connA := newTestConnId("127.0.0.1:6000", "1.1.1.1:3001")
+	connADup := newTestConnId("127.0.0.1:6000", "1.1.1.1:3001")
+	connB := newTestConnId("127.0.0.1:6000", "2.2.2.2:3001")
+	require.True(t, state.AddClientConnId(connA))
+	require.True(t, state.AddClientConnId(connADup))
+	require.True(t, state.AddClientConnId(connB))
+	state.SetClientConnId(connA)
+
+	o := NewOuroboros(OuroborosConfig{
+		EventBus: bus,
+		ChainsyncIngressEligible: func(ouroboros.ConnectionId) bool {
+			return true
+		},
+	})
+	o.ChainsyncState = state
+	o.EventBus = bus
+
+	header := newTestBlockHeader(100, 1, 0xaa)
+	tip := ochainsync.Tip{
+		Point:       ocommon.NewPoint(100, header.Hash().Bytes()),
+		BlockNumber: 1,
+	}
+
+	err := o.chainsyncClientRollForward(
+		ochainsync.CallbackContext{ConnectionId: connB},
+		0,
+		header,
+		tip,
+	)
+	require.NoError(t, err)
+	evt1 := <-ch
+	data1, ok := evt1.Data.(ledger.ChainsyncEvent)
+	require.True(t, ok)
+	require.Equal(t, connB, data1.ConnectionId)
+
+	err = o.chainsyncClientRollForward(
+		ochainsync.CallbackContext{ConnectionId: connADup},
+		0,
+		header,
+		tip,
+	)
+	require.NoError(t, err)
+	select {
+	case evt2 := <-ch:
+		data2, ok := evt2.Data.(ledger.ChainsyncEvent)
+		require.True(t, ok)
+		require.Equal(t, connADup, data2.ConnectionId)
+	case <-time.After(time.Second):
+		t.Fatal(
+			"expected equivalent selected peer to replay duplicate header first seen elsewhere",
+		)
+	}
+}
+
+func TestChainsyncClientRollForwardDropsDuplicateFromSameSelectedPeer(
+	t *testing.T,
+) {
+	bus := event.NewEventBus(nil, nil)
+	defer bus.Close()
+
+	_, ch := bus.Subscribe(ledger.ChainsyncEventType)
+	state := dchainsync.NewState(bus, nil)
+	connA := newTestConnId("127.0.0.1:6000", "1.1.1.1:3001")
+	require.True(t, state.AddClientConnId(connA))
+	state.SetClientConnId(connA)
+
+	o := NewOuroboros(OuroborosConfig{
+		EventBus: bus,
+		ChainsyncIngressEligible: func(ouroboros.ConnectionId) bool {
+			return true
+		},
+	})
+	o.ChainsyncState = state
+	o.EventBus = bus
+
+	header := newTestBlockHeader(100, 1, 0xaa)
+	tip := ochainsync.Tip{
+		Point:       ocommon.NewPoint(100, header.Hash().Bytes()),
+		BlockNumber: 1,
+	}
+
+	err := o.chainsyncClientRollForward(
+		ochainsync.CallbackContext{ConnectionId: connA},
+		0,
+		header,
+		tip,
+	)
+	require.NoError(t, err)
+	evt1 := <-ch
+	data1, ok := evt1.Data.(ledger.ChainsyncEvent)
+	require.True(t, ok)
+	require.Equal(t, connA, data1.ConnectionId)
+
+	err = o.chainsyncClientRollForward(
+		ochainsync.CallbackContext{ConnectionId: connA},
+		0,
+		header,
+		tip,
+	)
+	require.NoError(t, err)
+	select {
+	case evt2 := <-ch:
+		t.Fatalf(
+			"expected same-connection duplicate to be dropped, got event: %#v",
+			evt2,
+		)
+	case <-time.After(200 * time.Millisecond):
 	}
 }
 
@@ -351,4 +498,146 @@ func TestChainsyncClientRollForward_UntrackedPeerDoesNotPublishToLedger(
 		t.Fatalf("unexpected ledger event from untracked peer: %#v", evt)
 	default:
 	}
+}
+
+func TestSubscribeChainsyncResyncRewindsClientsWithoutRecycle(
+	t *testing.T,
+) {
+	bus := event.NewEventBus(nil, nil)
+	defer bus.Close()
+
+	connA := newTestConnId("127.0.0.1:6000", "1.1.1.1:3001")
+	connB := newTestConnId("127.0.0.1:6000", "2.2.2.2:3001")
+	rollbackPoint := ocommon.NewPoint(90, []byte("rollback"))
+	point := ocommon.NewPoint(100, []byte("hdr"))
+	tip := ochainsync.Tip{Point: point}
+
+	state := dchainsync.NewState(bus, nil)
+	require.True(t, state.AddClientConnId(connA))
+	require.True(t, state.AddClientConnId(connB))
+	state.UpdateClientTip(
+		connA,
+		ocommon.NewPoint(120, []byte("ahead")),
+		ochainsync.Tip{
+			Point: ocommon.NewPoint(120, []byte("ahead")),
+		},
+	)
+	state.UpdateClientTip(connB, point, tip)
+	require.True(
+		t,
+		state.HeaderPreviouslySeenFromOtherConn(connA, point),
+	)
+
+	o := NewOuroboros(OuroborosConfig{EventBus: bus})
+	o.ChainsyncState = state
+	o.EventBus = bus
+
+	_, recycleCh := bus.Subscribe(
+		connmanager.ConnectionRecycleRequestedEventType,
+	)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	o.SubscribeChainsyncResync(ctx)
+
+	bus.Publish(
+		event.ChainsyncResyncEventType,
+		event.NewEvent(
+			event.ChainsyncResyncEventType,
+			event.ChainsyncResyncEvent{
+				Reason: "local ledger rollback",
+				Point:  rollbackPoint,
+			},
+		),
+	)
+
+	select {
+	case evt := <-recycleCh:
+		t.Fatalf("unexpected recycle request: %#v", evt)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	require.False(
+		t,
+		state.HeaderPreviouslySeenFromOtherConn(connA, point),
+	)
+	tc := state.GetTrackedClient(connA)
+	require.NotNil(t, tc)
+	require.Equal(t, rollbackPoint, tc.Cursor)
+}
+
+func TestSubscribeChainsyncResyncRestartsClientsOnLocalRollbackWithoutPeerHistory(
+	t *testing.T,
+) {
+	bus := event.NewEventBus(nil, nil)
+	defer bus.Close()
+
+	connA := newTestConnId("127.0.0.1:6000", "1.1.1.1:3001")
+	rollbackPoint := ocommon.NewPoint(90, []byte("rollback"))
+
+	state := dchainsync.NewState(bus, nil)
+	require.True(t, state.AddClientConnId(connA))
+	// Keep the tracked cursor at the rollback point so
+	// RewindTrackedClientsTo returns no connections. The local rollback
+	// still needs to resynchronize the live tracked session.
+	state.UpdateClientTip(
+		connA,
+		rollbackPoint,
+		ochainsync.Tip{Point: rollbackPoint},
+	)
+	o := NewOuroboros(OuroborosConfig{EventBus: bus})
+	o.ChainsyncState = state
+	o.EventBus = bus
+	o.LedgerState = newTestLedgerState(t)
+
+	_, recycleCh := bus.Subscribe(
+		connmanager.ConnectionRecycleRequestedEventType,
+	)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	o.SubscribeChainsyncResync(ctx)
+
+	bus.Publish(
+		event.ChainsyncResyncEventType,
+		event.NewEvent(
+			event.ChainsyncResyncEventType,
+			event.ChainsyncResyncEvent{
+				Reason: "local ledger rollback",
+				Point:  rollbackPoint,
+			},
+		),
+	)
+
+	// Connections should NOT be recycled — they should be restarted.
+	select {
+	case evt := <-recycleCh:
+		t.Fatalf("unexpected recycle request: %#v", evt)
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	// Verify the tracked client's cursor was rewound to the rollback point,
+	// confirming the resync actually occurred.
+	tc := state.GetTrackedClient(connA)
+	require.NotNil(t, tc)
+	require.Equal(t, rollbackPoint, tc.Cursor)
+}
+
+func TestHeaderPreviouslySeenFromOtherConnTreatsEquivalentConnIdsAsSame(
+	t *testing.T,
+) {
+	bus := event.NewEventBus(nil, nil)
+	defer bus.Close()
+
+	connA := newTestConnId("127.0.0.1:6000", "1.1.1.1:3001")
+	connADup := newTestConnId("127.0.0.1:6000", "1.1.1.1:3001")
+	point := ocommon.NewPoint(100, []byte("hdr"))
+	tip := ochainsync.Tip{Point: point}
+
+	state := dchainsync.NewState(bus, nil)
+	require.True(t, state.AddClientConnId(connA))
+	state.UpdateClientTip(connA, point, tip)
+
+	require.False(
+		t,
+		state.HeaderPreviouslySeenFromOtherConn(connADup, point),
+	)
 }

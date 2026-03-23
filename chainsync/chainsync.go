@@ -16,6 +16,7 @@ package chainsync
 
 import (
 	"bytes"
+	"encoding/hex"
 	"fmt"
 	"slices"
 	"sync"
@@ -135,6 +136,9 @@ type State struct {
 	seenHeaders      map[uint64][]headerRecord
 	seenHeadersMutex sync.Mutex
 
+	observedHeaders      map[string]*observedHeaderChain
+	observedHeadersMutex sync.RWMutex
+
 	sync.Mutex
 }
 
@@ -144,6 +148,18 @@ type headerRecord struct {
 	hash   []byte
 	connId ouroboros.ConnectionId
 }
+
+type observedHeaderRecord struct {
+	event    ledger.ChainsyncEvent
+	prevHash []byte
+}
+
+type observedHeaderChain struct {
+	order  []string
+	byHash map[string]observedHeaderRecord
+}
+
+const maxObservedHeadersPerConn = 256
 
 // NewState creates a new chainsync State with the given
 // event bus and ledger state using default configuration.
@@ -174,6 +190,9 @@ func NewStateWithConfig(
 		clients:        make(map[ouroboros.ConnectionId]*ChainsyncClientState),
 		trackedClients: make(map[ouroboros.ConnectionId]*TrackedClient),
 		seenHeaders:    make(map[uint64][]headerRecord),
+		observedHeaders: make(
+			map[string]*observedHeaderChain,
+		),
 	}
 	return s
 }
@@ -252,6 +271,7 @@ func (s *State) RemoveClientConnId(
 		*s.activeClientConnId == connId
 	wasEligible := exists && !tc.ObservabilityOnly
 	delete(s.trackedClients, connId)
+	s.clearObservedHeaderHistory(connId)
 	if wasPrimary {
 		s.activeClientConnId = nil
 		s.promoteBestClientLocked()
@@ -272,6 +292,13 @@ func (s *State) RemoveClientConnId(
 	}
 }
 
+func pointAheadOf(a, b ocommon.Point) bool {
+	if a.Slot != b.Slot {
+		return a.Slot > b.Slot
+	}
+	return !bytes.Equal(a.Hash, b.Hash)
+}
+
 // HandleClientRemoveRequestedEvent removes a tracked client when
 // a component publishes a client removal request event.
 func (s *State) HandleClientRemoveRequestedEvent(evt event.Event) {
@@ -283,18 +310,28 @@ func (s *State) HandleClientRemoveRequestedEvent(evt event.Event) {
 }
 
 // promoteBestClientLocked selects the tracked client with the
-// highest tip slot as the new active client. Only healthy
-// (syncing or synced) clients are considered. If no healthy
-// client exists, activeClientConnId is set to nil so that
-// callers do not route work to a known-bad peer.
+// highest tip slot as the new active client. Healthy (syncing
+// or synced) clients are preferred. If no healthy client exists,
+// the stalled client with the most recent activity is promoted
+// as a fallback — receiving a header will transition it back to
+// syncing, breaking the deadlock where nil active selection
+// prevents any client from making progress.
 // Caller must hold clientConnIdMutex.
 func (s *State) promoteBestClientLocked() {
 	var bestId *ouroboros.ConnectionId
 	var bestSlot uint64
+	var bestStalledId *ouroboros.ConnectionId
+	var bestStalledActivity time.Time
 	for id, tc := range s.trackedClients {
-		if tc.ObservabilityOnly ||
-			tc.Status == ClientStatusFailed ||
-			tc.Status == ClientStatusStalled {
+		if tc.ObservabilityOnly || tc.Status == ClientStatusFailed {
+			continue
+		}
+		if tc.Status == ClientStatusStalled {
+			if bestStalledId == nil || tc.LastActivity.After(bestStalledActivity) {
+				idCopy := id
+				bestStalledId = &idCopy
+				bestStalledActivity = tc.LastActivity
+			}
 			continue
 		}
 		if bestId == nil || tc.Tip.Point.Slot > bestSlot {
@@ -303,7 +340,15 @@ func (s *State) promoteBestClientLocked() {
 			bestSlot = tc.Tip.Point.Slot
 		}
 	}
-	s.activeClientConnId = bestId
+	if bestId != nil {
+		s.activeClientConnId = bestId
+	} else if bestStalledId != nil {
+		// All clients stalled — promote the most recently active
+		// one to prevent permanent nil-selection deadlock.
+		s.activeClientConnId = bestStalledId
+	} else {
+		s.activeClientConnId = nil
+	}
 }
 
 // addTrackedClientLocked registers a new tracked client. It
@@ -532,6 +577,111 @@ func (s *State) UpdateClientTipWithoutDedup(
 	s.updateClientTip(connId, point, tip, false)
 }
 
+// RewindTrackedClientsTo rewinds tracked client cursors that sit ahead of the
+// provided local ledger point. This keeps chainsync client state aligned with
+// local rollback/recovery so peers do not strand us in AwaitReply on a stale
+// higher cursor.
+func (s *State) RewindTrackedClientsTo(
+	point ocommon.Point,
+) []ouroboros.ConnectionId {
+	s.clientConnIdMutex.Lock()
+	defer s.clientConnIdMutex.Unlock()
+	var ret []ouroboros.ConnectionId
+	for connId, tc := range s.trackedClients {
+		if !pointAheadOf(tc.Cursor, point) {
+			continue
+		}
+		tc.Cursor = ocommon.Point{
+			Slot: point.Slot,
+			Hash: cloneBytes(point.Hash),
+		}
+		tc.Status = ClientStatusSyncing
+		tc.LastActivity = time.Now()
+		ret = append(ret, connId)
+	}
+	return ret
+}
+
+// RecordObservedHeader stores the raw per-connection header ancestry before
+// cross-peer dedup can suppress delivery into the ledger queue. This lets
+// fork resolution reconstruct the selected peer's candidate fragment even
+// when earlier headers were first seen from another peer.
+func (s *State) RecordObservedHeader(e ledger.ChainsyncEvent) {
+	if e.BlockHeader == nil || len(e.Point.Hash) == 0 {
+		return
+	}
+	prevHash := e.BlockHeader.PrevHash().Bytes()
+	if len(prevHash) == 0 {
+		return
+	}
+
+	s.observedHeadersMutex.Lock()
+	defer s.observedHeadersMutex.Unlock()
+
+	connKey := e.ConnectionId.String()
+	chainHistory := s.observedHeaders[connKey]
+	if chainHistory == nil {
+		chainHistory = &observedHeaderChain{
+			order: make([]string, 0, maxObservedHeadersPerConn),
+			byHash: make(map[string]observedHeaderRecord,
+				maxObservedHeadersPerConn),
+		}
+		s.observedHeaders[connKey] = chainHistory
+	}
+
+	hashKey := hex.EncodeToString(e.Point.Hash)
+	if _, exists := chainHistory.byHash[hashKey]; exists {
+		return
+	}
+	chainHistory.order = append(chainHistory.order, hashKey)
+	chainHistory.byHash[hashKey] = observedHeaderRecord{
+		event:    e,
+		prevHash: append([]byte(nil), prevHash...),
+	}
+	if len(chainHistory.order) <= maxObservedHeadersPerConn {
+		return
+	}
+	evictKey := chainHistory.order[0]
+	chainHistory.order = chainHistory.order[1:]
+	delete(chainHistory.byHash, evictKey)
+}
+
+// LookupObservedHeader returns a previously observed header for the given
+// connection/hash pair, along with its prev-hash ancestry.
+func (s *State) LookupObservedHeader(
+	connId ouroboros.ConnectionId,
+	hash []byte,
+) (ledger.ChainsyncEvent, []byte, bool) {
+	s.observedHeadersMutex.RLock()
+	defer s.observedHeadersMutex.RUnlock()
+
+	chainHistory := s.observedHeaders[connId.String()]
+	if chainHistory == nil {
+		return ledger.ChainsyncEvent{}, nil, false
+	}
+	record, ok := chainHistory.byHash[hex.EncodeToString(hash)]
+	if !ok {
+		return ledger.ChainsyncEvent{}, nil, false
+	}
+	record.event.Point.Hash = cloneBytes(record.event.Point.Hash)
+	record.event.Tip.Point.Hash = cloneBytes(record.event.Tip.Point.Hash)
+	return record.event, append([]byte(nil), record.prevHash...), true
+}
+
+func (s *State) clearObservedHeaderHistory(
+	connId ouroboros.ConnectionId,
+) {
+	s.observedHeadersMutex.Lock()
+	defer s.observedHeadersMutex.Unlock()
+	delete(s.observedHeaders, connId.String())
+}
+
+func (s *State) ClearObservedHeaderHistory(
+	connId ouroboros.ConnectionId,
+) {
+	s.clearObservedHeaderHistory(connId)
+}
+
 func (s *State) updateClientTip(
 	connId ouroboros.ConnectionId,
 	point ocommon.Point,
@@ -613,6 +763,38 @@ func (s *State) processHeader(
 		}
 	}
 	return true
+}
+
+// HeaderPreviouslySeenFromOtherConn reports whether the exact header point was
+// already recorded by a different connection. This lets the selected ingress
+// peer replay a header first observed elsewhere without also replaying
+// same-connection duplicates back into the ledger queue.
+func (s *State) HeaderPreviouslySeenFromOtherConn(
+	connId ouroboros.ConnectionId,
+	point ocommon.Point,
+) bool {
+	s.seenHeadersMutex.Lock()
+	defer s.seenHeadersMutex.Unlock()
+	for _, rec := range s.seenHeaders[point.Slot] {
+		if !bytes.Equal(rec.hash, point.Hash) {
+			continue
+		}
+		return !trackedConnIdsEqual(rec.connId, connId)
+	}
+	return false
+}
+
+func trackedConnIdsEqual(
+	a,
+	b ouroboros.ConnectionId,
+) bool {
+	if a.LocalAddr == nil && a.RemoteAddr == nil {
+		return b.LocalAddr == nil && b.RemoteAddr == nil
+	}
+	if b.LocalAddr == nil && b.RemoteAddr == nil {
+		return false
+	}
+	return a.String() == b.String()
 }
 
 // MarkClientSynced marks a tracked client as synced (at chain

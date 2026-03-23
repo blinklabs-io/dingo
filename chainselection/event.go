@@ -22,6 +22,7 @@ import (
 
 const (
 	PeerTipUpdateEventType  event.EventType = "chainselection.peer_tip_update"
+	PeerActivityEventType   event.EventType = "chainselection.peer_activity"
 	ChainSwitchEventType    event.EventType = "chainselection.chain_switch"
 	ChainSelectionEventType event.EventType = "chainselection.selection"
 	PeerEvictedEventType    event.EventType = "chainselection.peer_evicted"
@@ -32,7 +33,15 @@ const (
 type PeerTipUpdateEvent struct {
 	ConnectionId ouroboros.ConnectionId
 	Tip          ochainsync.Tip
-	VRFOutput    []byte // VRF output from block header for tie-breaking
+	ObservedTip  ochainsync.Tip
+	VRFOutput    []byte // VRF output from observed block header for tie-breaking
+}
+
+// PeerActivityEvent is published when a peer has recent protocol activity
+// (for example, a keepalive response) without a tip change. This refreshes
+// selector liveness for healthy but temporarily quiet peers.
+type PeerActivityEvent struct {
+	ConnectionId ouroboros.ConnectionId
 }
 
 // ChainSwitchEvent is published when the chain selector decides to switch

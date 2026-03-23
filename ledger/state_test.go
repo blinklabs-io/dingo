@@ -18,7 +18,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
-	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -44,7 +43,9 @@ import (
 	"github.com/blinklabs-io/dingo/ledger/eras"
 )
 
-func TestLedgerProcessBlocksFromSourceReturnsReaderError(t *testing.T) {
+func TestLedgerProcessBlocksFromSourceReturnsNilWhenReaderCloses(
+	t *testing.T,
+) {
 	ls := &LedgerState{
 		validationEnabled: true,
 		config: LedgerStateConfig{
@@ -52,16 +53,14 @@ func TestLedgerProcessBlocksFromSourceReturnsReaderError(t *testing.T) {
 		},
 	}
 
-	readErr := errors.New("reader failed")
 	readChainResultCh := make(chan readChainResult, 1)
-	readChainResultCh <- readChainResult{err: readErr}
 	close(readChainResultCh)
 
 	err := ls.ledgerProcessBlocksFromSource(
 		context.Background(),
 		readChainResultCh,
 	)
-	require.ErrorIs(t, err, readErr)
+	require.NoError(t, err)
 }
 
 // TestCalculateStabilityWindow_ByronEra tests the stability window calculation for Byron era
@@ -2159,7 +2158,9 @@ func TestCleanupOrphanedBlobs_SlotZero(t *testing.T) {
 	assert.Error(t, err, "block at slot 1 should be deleted")
 }
 
-func TestIntersectPointsReturnsStorageErrorWhenSampledListIsEmpty(t *testing.T) {
+func TestIntersectPointsReturnsNoPointsWhenLedgerTipIsEmpty(
+	t *testing.T,
+) {
 	db := newTestDB(t)
 	cm, err := chain.NewManager(db, nil)
 	require.NoError(t, err)
@@ -2179,8 +2180,55 @@ func TestIntersectPointsReturnsStorageErrorWhenSampledListIsEmpty(t *testing.T) 
 	}
 
 	points, err := ls.IntersectPoints(4)
-	require.Error(t, err)
-	assert.Nil(t, points)
+	require.NoError(t, err)
+	require.Len(t, points, 1)
+	assert.Equal(t, ocommon.NewPointOrigin(), points[0])
+}
+
+func TestIntersectPointsUsesLedgerTipWhenPrimaryChainIsAhead(t *testing.T) {
+	db, err := database.New(&database.Config{
+		BlobPlugin:     "badger",
+		MetadataPlugin: "sqlite",
+		DataDir:        "",
+	})
+	require.NoError(t, err)
+	defer db.Close()
+
+	blocks := make([]models.Block, 0, 5)
+	for slot := uint64(1); slot <= 5; slot++ {
+		block := makeTestBlock(slot, slot)
+		if len(blocks) > 0 {
+			block.PrevHash = append([]byte(nil), blocks[len(blocks)-1].Hash...)
+		}
+		blocks = append(blocks, block)
+		require.NoError(t, db.BlockCreate(block, nil))
+	}
+
+	cm, err := chain.NewManager(db, nil)
+	require.NoError(t, err)
+
+	ledgerTipBlock := blocks[2]
+	ledgerTip := ochainsync.Tip{
+		Point:       makeTestPoint(ledgerTipBlock),
+		BlockNumber: ledgerTipBlock.Number,
+	}
+	require.NoError(t, db.SetTip(ledgerTip, nil))
+
+	ls := &LedgerState{
+		db:    db,
+		chain: cm.PrimaryChain(),
+	}
+	ls.currentTip = ledgerTip
+
+	points, err := ls.IntersectPoints(3)
+	require.NoError(t, err)
+	require.Len(t, points, 3)
+	assert.Equal(t, ledgerTipBlock.Slot, points[0].Slot)
+	assert.Equal(t, ledgerTipBlock.Hash, points[0].Hash)
+	assert.Equal(t, blocks[1].Slot, points[1].Slot)
+	assert.Equal(t, blocks[1].Hash, points[1].Hash)
+	assert.Equal(t, blocks[0].Slot, points[2].Slot)
+	assert.Equal(t, blocks[0].Hash, points[2].Hash)
 }
 
 func TestDensityWindow(t *testing.T) {
@@ -2250,7 +2298,7 @@ func TestDensityWindow(t *testing.T) {
 	assert.LessOrEqual(t, lastEntry.slot, rollbackSlot)
 }
 
-func TestReconcilePrimaryChainTipWithLedgerTipPrunesSpeculativeBlocks(
+func TestReconcilePrimaryChainTipWithLedgerTipPreservesSelectedChain(
 	t *testing.T,
 ) {
 	db, err := database.New(&database.Config{
@@ -2293,16 +2341,13 @@ func TestReconcilePrimaryChainTipWithLedgerTipPrunesSpeculativeBlocks(
 	require.NoError(t, ls.reconcilePrimaryChainTipWithLedgerTip())
 
 	chainTip := cm.PrimaryChain().Tip()
-	assert.Equal(t, ledgerTip.Point.Slot, chainTip.Point.Slot)
-	assert.Equal(t, ledgerTip.BlockNumber, chainTip.BlockNumber)
-	assert.Equal(t, ledgerTip.Point.Hash, chainTip.Point.Hash)
+	assert.Equal(t, blocks[len(blocks)-1].Slot, chainTip.Point.Slot)
+	assert.Equal(t, blocks[len(blocks)-1].Number, chainTip.BlockNumber)
+	assert.Equal(t, blocks[len(blocks)-1].Hash, chainTip.Point.Hash)
+	assert.Equal(t, ledgerTip, ls.currentTip)
 
-	for _, block := range blocks[:3] {
+	for _, block := range blocks {
 		_, err := database.BlockByPoint(db, makeTestPoint(block))
 		assert.NoError(t, err, "block at slot %d should still exist", block.Slot)
-	}
-	for _, block := range blocks[3:] {
-		_, err := database.BlockByPoint(db, makeTestPoint(block))
-		assert.Error(t, err, "block at slot %d should be pruned", block.Slot)
 	}
 }

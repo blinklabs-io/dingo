@@ -15,6 +15,7 @@
 package ouroboros
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -96,6 +97,16 @@ func normalizeIntersectPoints(points []ocommon.Point) []ocommon.Point {
 
 func isOriginPoint(point ocommon.Point) bool {
 	return point.Slot == 0 && len(point.Hash) == 0
+}
+
+func sameConnectionId(a, b ouroboros.ConnectionId) bool {
+	if a.LocalAddr == nil && a.RemoteAddr == nil {
+		return b.LocalAddr == nil && b.RemoteAddr == nil
+	}
+	if b.LocalAddr == nil && b.RemoteAddr == nil {
+		return false
+	}
+	return a.String() == b.String()
 }
 
 func (o *Ouroboros) buildDefaultChainsyncIntersectPoints(
@@ -498,6 +509,15 @@ func (o *Ouroboros) chainsyncClientRollForward(
 				o.shouldPublishChainsyncToLedger(ctx.ConnectionId),
 			)
 		}
+		o.config.Logger.Debug(
+			"chainsync: header received",
+			"component", "ouroboros",
+			"slot", blockSlot,
+			"tip_slot", tip.Point.Slot,
+			"connection_id", ctx.ConnectionId.String(),
+			"inbound", isInbound,
+			"ingress_eligible", ingressEligible,
+		)
 		// Update tracked client state and deduplicate headers.
 		// If this header has already been reported by another
 		// eligible client, skip publishing it into the ledger.
@@ -523,6 +543,10 @@ func (o *Ouroboros) chainsyncClientRollForward(
 		// spurious switches when ephemeral inbound connections report
 		// tips and then disconnect.
 		if !isInbound {
+			observedTip := ochainsync.Tip{
+				Point:       point,
+				BlockNumber: v.BlockNumber(),
+			}
 			o.EventBus.Publish(
 				chainselection.PeerTipUpdateEventType,
 				event.NewEvent(
@@ -530,28 +554,53 @@ func (o *Ouroboros) chainsyncClientRollForward(
 					chainselection.PeerTipUpdateEvent{
 						ConnectionId: ctx.ConnectionId,
 						Tip:          tip,
+						ObservedTip:  observedTip,
 						VRFOutput:    vrfOutput,
 					},
 				),
 			)
 		}
+		if !isInbound && o.ChainsyncState != nil {
+			o.ChainsyncState.RecordObservedHeader(
+				ledger.ChainsyncEvent{
+					ConnectionId: ctx.ConnectionId,
+					Point:        point,
+					Type:         blockType,
+					BlockHeader:  v,
+					Tip:          tip,
+				},
+			)
+		}
 		if !ingressEligible {
+			o.config.Logger.Debug(
+				"chainsync: header dropped (not ingress eligible)",
+				"component", "ouroboros",
+				"slot", blockSlot,
+				"connection_id", ctx.ConnectionId.String(),
+			)
 			o.updateChainsyncMetrics(ctx.ConnectionId, tip)
 			return nil
 		}
 		if !isNew {
-			activeConnId := o.ChainsyncState.GetClientConnId()
-			if activeConnId != nil && *activeConnId == ctx.ConnectionId {
+			shouldReplayDuplicate := false
+			if o.ChainsyncState != nil {
+				activeConnId := o.ChainsyncState.GetClientConnId()
+				if activeConnId != nil &&
+					sameConnectionId(*activeConnId, ctx.ConnectionId) &&
+					o.ChainsyncState.HeaderPreviouslySeenFromOtherConn(
+						ctx.ConnectionId,
+						point,
+					) {
+					shouldReplayDuplicate = true
+				}
+			}
+			if !shouldReplayDuplicate {
 				o.config.Logger.Debug(
-					"publishing duplicate header from selected connection",
+					"chainsync: header dropped (duplicate)",
 					"component", "ouroboros",
+					"slot", blockSlot,
 					"connection_id", ctx.ConnectionId.String(),
-					"slot", point.Slot,
 				)
-			} else {
-				// Duplicate header already delivered by another
-				// eligible peer. Keep the peer tip fresh, but do not
-				// re-publish the same header into the ledger queue.
 				o.updateChainsyncMetrics(ctx.ConnectionId, tip)
 				return nil
 			}
@@ -569,6 +618,23 @@ func (o *Ouroboros) chainsyncClientRollForward(
 				},
 			),
 		)
+		if point.Slot == tip.Point.Slot &&
+			bytes.Equal(point.Hash, tip.Point.Hash) {
+			if o.ChainsyncState != nil {
+				o.ChainsyncState.MarkClientSynced(ctx.ConnectionId)
+			}
+			if ingressEligible && o.EventBus != nil {
+				o.EventBus.Publish(
+					ledger.ChainsyncAwaitReplyEventType,
+					event.NewEvent(
+						ledger.ChainsyncAwaitReplyEventType,
+						ledger.ChainsyncAwaitReplyEvent{
+							ConnectionId: ctx.ConnectionId,
+						},
+					),
+				)
+			}
+		}
 		// Update ChainSync performance metrics for peer scoring
 		o.updateChainsyncMetrics(ctx.ConnectionId, tip)
 	default:
@@ -794,13 +860,11 @@ func (o *Ouroboros) restartChainsyncClientAsync(
 }
 
 // SubscribeChainsyncResync registers an EventBus subscriber that
-// handles chainsync re-sync events. When a resync is requested
-// (e.g. because the ledger detected a persistent fork), this
-// subscriber stops the chainsync client, clears the header dedup
-// cache, and restarts chainsync on the same TCP connection.
-//
-// This consolidates the stop/clear/restart orchestration in one
-// place rather than spreading it across node.go closures.
+// handles chainsync re-sync events. Ordinary resyncs restart the
+// ChainSync mini-protocol on the existing bearer after resetting
+// local dedup state. Local authoritative rollbacks additionally
+// rewind tracked client cursors and attempt ledger-side recovery
+// before recycling affected connections as a fallback.
 func (o *Ouroboros) SubscribeChainsyncResync(ctx context.Context) {
 	if o.EventBus == nil {
 		return
@@ -812,39 +876,123 @@ func (o *Ouroboros) SubscribeChainsyncResync(ctx context.Context) {
 			if !ok {
 				return
 			}
-			connId := e.ConnectionId
-			o.restartChainsyncClientAsync(
-				ctx,
-				connId,
-				e.Reason,
-				func() error {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+			var connIds []ouroboros.ConnectionId
+			if e.ConnectionId != (ouroboros.ConnectionId{}) {
+				connIds = append(connIds, e.ConnectionId)
+			} else if o.ChainsyncState != nil {
+				connIds = o.ChainsyncState.RewindTrackedClientsTo(e.Point)
+				if e.Reason == "local ledger rollback" &&
+					len(connIds) == 0 {
+					connIds = o.ChainsyncState.GetClientConnIds()
+				}
+			}
+			if o.ChainsyncState != nil {
+				if e.Point.Slot > 0 || len(e.Point.Hash) > 0 {
+					o.ChainsyncState.ClearSeenHeadersFrom(e.Point.Slot)
+				} else {
+					o.ChainsyncState.ClearSeenHeaders()
+				}
+			}
+			if e.Reason == "local ledger rollback" {
+				if o.LedgerState == nil {
+					return
+				}
+				recovered := o.LedgerState.RecoverAfterLocalRollback(
+					connIds,
+					e.Point,
+				)
+				if recovered || len(connIds) == 0 {
+					return
+				}
+				// No recoverable peer history — close the affected
+				// connections so peer governance reconnects and starts
+				// fresh chainsync from the updated intersect points.
+				// Previous approach tried Stop→Start→Sync on each
+				// connection, but Stop() blocks for up to 30s when the
+				// protocol is in MustReply state (waiting for a server
+				// response). All connections would timeout and be closed
+				// anyway, wasting 30s during which stale events
+				// accumulated and prevented recovery after reconnect.
+				// RecoverAfterLocalRollback already cleaned up blockfetch
+				// state, so there are no in-flight lookups to break.
+				o.config.Logger.Info(
+					"local rollback had no recoverable peer history, closing connections for fresh chainsync",
+					"component", "ouroboros",
+					"rollback_slot", e.Point.Slot,
+					"connection_count", len(connIds),
+				)
+				for _, connId := range connIds {
+					if o.ChainsyncState != nil {
+						o.ChainsyncState.ClearObservedHeaderHistory(connId)
+					}
+					if o.ConnManager == nil {
+						continue
+					}
 					conn := o.ConnManager.GetConnectionById(connId)
 					if conn == nil {
-						return fmt.Errorf(
-							"connection not found: %s",
-							connId.String(),
-						)
+						continue
 					}
-					// Stop the chainsync client to halt
-					// mismatching headers.
-					cs := conn.ChainSync()
-					if cs != nil && cs.Client != nil {
-						if err := cs.Client.Stop(); err != nil {
+					o.config.Logger.Info(
+						"closing connection for fresh chainsync after local rollback",
+						"component", "ouroboros",
+						"connection_id", connId.String(),
+					)
+					conn.Close()
+				}
+				return
+			}
+			if len(connIds) == 0 {
+				return
+			}
+			for _, connId := range connIds {
+				if o.ChainsyncState != nil {
+					o.ChainsyncState.ClearObservedHeaderHistory(connId)
+				}
+				if o.ConnManager == nil {
+					continue
+				}
+				o.restartChainsyncClientAsync(
+					ctx,
+					connId,
+					e.Reason,
+					func() error {
+						intersectPoints, err := o.buildDefaultChainsyncIntersectPoints(
+							connId,
+						)
+						if err != nil {
 							return fmt.Errorf(
-								"stop chainsync client: %w",
+								"build default chainsync intersect points: %w",
 								err,
 							)
 						}
-					}
-					// Clear the header dedup cache so the
-					// new intersection can re-deliver
-					// headers.
-					if o.ChainsyncState != nil {
-						o.ChainsyncState.ClearSeenHeaders()
-					}
-					return o.RestartChainsyncClient(connId)
-				},
-			)
+						conn := o.ConnManager.GetConnectionById(connId)
+						if conn == nil {
+							return fmt.Errorf(
+								"connection not found: %s",
+								connId.String(),
+							)
+						}
+						cs := conn.ChainSync()
+						if cs != nil && cs.Client != nil {
+							if err := cs.Client.Stop(); err != nil {
+								return fmt.Errorf(
+									"stop chainsync client: %w",
+									err,
+								)
+							}
+						}
+						return o.RestartChainsyncClientWithPoints(
+							connId,
+							intersectPoints,
+						)
+					},
+				)
+			}
 		},
 	)
 }

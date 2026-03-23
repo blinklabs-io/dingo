@@ -303,6 +303,15 @@ func (p *PeerGovernor) SetPeerHotByConnId(connId ouroboros.ConnectionId) {
 	}
 }
 
+func (p *PeerGovernor) TouchPeerByConnId(connId ouroboros.ConnectionId) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	peerIdx := p.peerIndexByConnId(connId)
+	if peerIdx != -1 && p.peers[peerIdx] != nil {
+		p.peers[peerIdx].LastActivity = time.Now()
+	}
+}
+
 func (p *PeerGovernor) IsChainSelectionEligible(
 	connId ouroboros.ConnectionId,
 ) bool {

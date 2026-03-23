@@ -24,12 +24,13 @@ import (
 )
 
 const (
-	BlockfetchEventType        event.EventType = "ledger.blockfetch"
-	BlockEventType             event.EventType = "ledger.block"
-	ChainsyncEventType         event.EventType = "ledger.chainsync"
-	LedgerErrorEventType       event.EventType = "ledger.error"
-	PoolStateRestoredEventType event.EventType = "ledger.pool_restored"
-	TransactionEventType       event.EventType = "ledger.tx"
+	BlockfetchEventType          event.EventType = "ledger.blockfetch"
+	BlockEventType               event.EventType = "ledger.block"
+	ChainsyncEventType           event.EventType = "ledger.chainsync"
+	ChainsyncAwaitReplyEventType event.EventType = "ledger.chainsync_await_reply"
+	LedgerErrorEventType         event.EventType = "ledger.error"
+	PoolStateRestoredEventType   event.EventType = "ledger.pool_restored"
+	TransactionEventType         event.EventType = "ledger.tx"
 )
 
 // It represents the direction a block is applied to the ledger.
@@ -67,6 +68,12 @@ type ChainsyncEvent struct {
 	BlockNumber  uint64
 	Type         uint // Block or header type ID
 	Rollback     bool // Set to true for a Rollback event
+}
+
+// ChainsyncAwaitReplyEvent is emitted when a chainsync peer explicitly reports
+// it has no additional headers to send right now.
+type ChainsyncAwaitReplyEvent struct {
+	ConnectionId ouroboros.ConnectionId
 }
 
 // LedgerErrorEvent represents an error that occurred during ledger processing.
