@@ -244,7 +244,7 @@ func TestProcessChainsyncRecyclerTickKeepsStalledRecyclerRunning(
 		assert.Equal(t, connId, recycleEvt.ConnectionId)
 		assert.Equal(
 			t,
-			"stalled_connection_no_active_selection",
+			"stalled_active_connection",
 			recycleEvt.Reason,
 		)
 	case <-time.After(200 * time.Millisecond):

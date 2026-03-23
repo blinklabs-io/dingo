@@ -974,6 +974,33 @@ func (o *Ouroboros) SubscribeChainsyncResync(ctx context.Context) {
 			if len(connIds) == 0 {
 				return
 			}
+			// Plateau events close the connection immediately rather
+			// than attempting an in-place Stop→Start→Sync restart.
+			// Stop() blocks for up to 30s when the protocol is in
+			// MustReply state, during which no recovery can happen.
+			// Closing lets peer governance reconnect with a fresh
+			// bearer and updated intersect points.
+			if e.Reason == "local_tip_plateau" {
+				for _, connId := range connIds {
+					if o.ChainsyncState != nil {
+						o.ChainsyncState.ClearObservedHeaderHistory(connId)
+					}
+					if o.ConnManager == nil {
+						continue
+					}
+					conn := o.ConnManager.GetConnectionById(connId)
+					if conn == nil {
+						continue
+					}
+					o.config.Logger.Info(
+						"closing stalled connection for fresh chainsync",
+						"connection_id", connId.String(),
+						"reason", e.Reason,
+					)
+					conn.Close()
+				}
+				return
+			}
 			for _, connId := range connIds {
 				connId := connId
 				if o.ChainsyncState != nil {
