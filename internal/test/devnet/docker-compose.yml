@@ -42,6 +42,7 @@ services:
       - ./testnet.yaml:/testnet.yaml
       - p1-configs:/configs/1
       - p2-configs:/configs/2
+      - utxo-keys:/configs/utxo-keys
 
   dingo-producer:
     build:
@@ -123,6 +124,32 @@ services:
       retries: 30
       start_period: 10s
 
+  txpump:
+    build:
+      context: ../../..
+      dockerfile: internal/test/antithesis/Dockerfile.txpump
+    container_name: devnet-txpump
+    depends_on:
+      dingo-producer:
+        condition: service_healthy
+    environment:
+      TXPUMP_NODE_ADDR: "/ipc/dingo.socket"
+      TXPUMP_NETWORK_MAGIC: "42"
+      TXPUMP_TX_COUNT_MIN: "10"
+      TXPUMP_TX_COUNT_MAX: "50"
+      TXPUMP_COOLDOWN_MIN: "5"
+      TXPUMP_COOLDOWN_MAX: "15"
+      TXPUMP_TYPES: "payment"
+      TXPUMP_LOG_DIR: "/logs"
+      TXPUMP_GENESIS_UTXO_FILE: "/utxo-keys"
+    volumes:
+      - dingo-producer-ipc:/ipc:ro
+      - logs:/logs
+      - utxo-keys:/utxo-keys:ro
+    networks:
+      devnet:
+        ipv4_address: 172.20.0.20
+
   cardano-relay:
     image: ghcr.io/blinklabs-io/cardano-node:10.5.4
     container_name: cardano-relay
@@ -170,6 +197,8 @@ networks:
 volumes:
   p1-configs:
   p2-configs:
+  utxo-keys:
+  logs:
   dingo-producer-data:
   dingo-producer-ipc:
   cardano-producer-data:

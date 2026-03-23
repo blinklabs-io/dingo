@@ -24,19 +24,19 @@ testnetDomain: devnet
 
 --- # Byron Genesis Override
 protocolConsts:
-  k: 100
+  k: 40
 
 --- # Shelley Genesis Override
-# 1s slots, 25 min epochs, block every ~5s per pool (~2.5s total)
-# nonceStabilityWindow = 4k/f = 4*100/0.4 = 1000 < 1500 = epochLength ✓
-# blockfetchStabilityWindow = 3k/f = 3*100/0.4 = 750
-# Candidate nonce freezes 1000 slots before epoch end (at slot 500).
+# 1s slots, ~8 min epochs, block every ~5s per pool (~2.5s total)
+# nonceStabilityWindow = 4k/f = 4*40/0.4 = 400 < 500 = epochLength ✓
+# blockfetchStabilityWindow = 3k/f = 3*40/0.4 = 300 < 500 = epochLength ✓
+# Candidate nonce freezes 400 slots before epoch end (at slot 100).
 # Partition tolerance: K / per-pool-rate where per-pool-rate = 1-(1-f)^(1/n)
-# With f=0.4, n=2: per-pool-rate ≈ 0.225, so K / per-pool-rate ≈ 100/0.225 ≈ 444s (~7.4 min)
-epochLength: 1500
+# With f=0.4, n=2: per-pool-rate ≈ 0.225, so K / per-pool-rate ≈ 40/0.225 ≈ 178s (~3 min)
+epochLength: 500
 slotLength: 1
 activeSlotsCoeff: 0.4
-securityParam: 100
+securityParam: 40
 maxLovelaceSupply: 2000000000000
 protocolParams:
   decentralisationParam: 0
