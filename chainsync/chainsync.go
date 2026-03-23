@@ -310,18 +310,28 @@ func (s *State) HandleClientRemoveRequestedEvent(evt event.Event) {
 }
 
 // promoteBestClientLocked selects the tracked client with the
-// highest tip slot as the new active client. Only healthy
-// (syncing or synced) clients are considered. If no healthy
-// client exists, activeClientConnId is set to nil so that
-// callers do not route work to a known-bad peer.
+// highest tip slot as the new active client. Healthy (syncing
+// or synced) clients are preferred. If no healthy client exists,
+// the stalled client with the most recent activity is promoted
+// as a fallback — receiving a header will transition it back to
+// syncing, breaking the deadlock where nil active selection
+// prevents any client from making progress.
 // Caller must hold clientConnIdMutex.
 func (s *State) promoteBestClientLocked() {
 	var bestId *ouroboros.ConnectionId
 	var bestSlot uint64
+	var bestStalledId *ouroboros.ConnectionId
+	var bestStalledActivity time.Time
 	for id, tc := range s.trackedClients {
-		if tc.ObservabilityOnly ||
-			tc.Status == ClientStatusFailed ||
-			tc.Status == ClientStatusStalled {
+		if tc.ObservabilityOnly || tc.Status == ClientStatusFailed {
+			continue
+		}
+		if tc.Status == ClientStatusStalled {
+			if bestStalledId == nil || tc.LastActivity.After(bestStalledActivity) {
+				idCopy := id
+				bestStalledId = &idCopy
+				bestStalledActivity = tc.LastActivity
+			}
 			continue
 		}
 		if bestId == nil || tc.Tip.Point.Slot > bestSlot {
@@ -330,7 +340,15 @@ func (s *State) promoteBestClientLocked() {
 			bestSlot = tc.Tip.Point.Slot
 		}
 	}
-	s.activeClientConnId = bestId
+	if bestId != nil {
+		s.activeClientConnId = bestId
+	} else if bestStalledId != nil {
+		// All clients stalled — promote the most recently active
+		// one to prevent permanent nil-selection deadlock.
+		s.activeClientConnId = bestStalledId
+	} else {
+		s.activeClientConnId = nil
+	}
 }
 
 // addTrackedClientLocked registers a new tracked client. It

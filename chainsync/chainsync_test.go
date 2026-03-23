@@ -324,12 +324,16 @@ func TestPromoteBestClient_NoHealthyClients(t *testing.T) {
 	require.Len(t, stalledSet, 2)
 
 	// Remove primary; only stalled clients remain so
-	// active should be nil (no fallback to bad peers).
+	// the most recently active stalled client is promoted
+	// as a fallback to prevent permanent nil-selection deadlock.
 	s.RemoveClientConnId(connA)
 	active := s.GetClientConnId()
-	require.Nil(
+	require.NotNil(
 		t, active,
-		"should not promote stalled client",
+		"should promote stalled client as fallback when no healthy clients exist",
+	)
+	require.Equal(t, connB, *active,
+		"should promote the remaining stalled client",
 	)
 }
 
