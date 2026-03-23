@@ -15,12 +15,13 @@
 package utxorpc
 
 import (
-	"testing"
-
 	"math"
+	"testing"
 
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/stretchr/testify/require"
+	utxorpcCardano "github.com/utxorpc/go-codegen/utxorpc/v1alpha/cardano"
+	query "github.com/utxorpc/go-codegen/utxorpc/v1alpha/query"
 )
 
 func TestCaip2FromNetworkMagic_KnownNetworks(t *testing.T) {
@@ -73,5 +74,35 @@ func TestCaip2FromNetworkMagic_CustomNetwork(t *testing.T) {
 	const customMagic uint32 = math.MaxUint32
 	got := caip2FromNetworkMagic(customMagic)
 	require.Equal(t, "cardano:4294967295", got)
+}
+
+func TestExtractSearchPredicatePatterns_NilPredicate(t *testing.T) {
+	addressPattern, assetPattern := extractSearchPredicatePatterns(nil)
+	require.Nil(t, addressPattern)
+	require.Nil(t, assetPattern)
+}
+
+func TestExtractSearchPredicatePatterns_WithCardanoMatch(t *testing.T) {
+	address := &utxorpcCardano.AddressPattern{
+		ExactAddress: []byte{0x01, 0x02},
+	}
+	asset := &utxorpcCardano.AssetPattern{
+		PolicyId:  []byte{0xaa},
+		AssetName: []byte{0xbb},
+	}
+	predicate := &query.UtxoPredicate{
+		Match: &query.AnyUtxoPattern{
+			UtxoPattern: &query.AnyUtxoPattern_Cardano{
+				Cardano: &utxorpcCardano.TxOutputPattern{
+					Address: address,
+					Asset:   asset,
+				},
+			},
+		},
+	}
+
+	addressPattern, assetPattern := extractSearchPredicatePatterns(predicate)
+	require.Equal(t, address, addressPattern)
+	require.Equal(t, asset, assetPattern)
 }
 
