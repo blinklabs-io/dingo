@@ -264,16 +264,22 @@ func (ls *LedgerState) handleChainSwitchEvent(evt event.Event) {
 	replayConnId, err := ls.handoffPipelineOnSwitchLocked(
 		e.NewConnectionId,
 	)
-	ls.chainsyncBlockfetchMutex.Unlock()
 	if err != nil {
 		ls.config.Logger.Warn(
-			"failed to hand off chainsync pipeline on chain switch",
+			"failed to hand off chainsync pipeline on chain switch, resetting pipeline",
 			"component", "ledger",
 			"connection_id", e.NewConnectionId.String(),
 			"error", err,
 		)
+		// Clear orphaned headers and stale connection refs so the
+		// pipeline can accept headers from reconnected peers instead
+		// of stalling permanently.
+		ls.clearQueuedHeaders()
+		ls.selectedBlockfetchConnId = ouroboros.ConnectionId{}
+		ls.chainsyncBlockfetchMutex.Unlock()
 		return
 	}
+	ls.chainsyncBlockfetchMutex.Unlock()
 	if connIdKey(replayConnId) != "" {
 		ls.replayBufferedHeadersAsync(replayConnId)
 	}
@@ -399,15 +405,18 @@ func (ls *LedgerState) detectConnectionSwitch() (
 			replayConnId, err := ls.handoffPipelineOnSwitchLocked(
 				*activeConnId,
 			)
-			ls.chainsyncBlockfetchMutex.Unlock()
 			if err != nil {
 				ls.config.Logger.Warn(
-					"failed to hand off chainsync pipeline after active connection change",
+					"failed to hand off chainsync pipeline after active connection change, resetting pipeline",
 					"component", "ledger",
 					"connection_id", activeConnId.String(),
 					"error", err,
 				)
-			} else if connIdKey(replayConnId) != "" {
+				ls.clearQueuedHeaders()
+				ls.selectedBlockfetchConnId = ouroboros.ConnectionId{}
+			}
+			ls.chainsyncBlockfetchMutex.Unlock()
+			if err == nil && connIdKey(replayConnId) != "" {
 				ls.replayBufferedHeadersAsync(replayConnId)
 			}
 			// Clear per-connection state (e.g., header dedup cache)
