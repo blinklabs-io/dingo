@@ -150,6 +150,22 @@ func (ls *LedgerState) recoverAtTipFromTxValidationError(
 	if ls.chain == nil || ls.config.ChainManager == nil {
 		return false, nil
 	}
+	// Prevent infinite loops: if we already attempted recovery for this
+	// slot (or an earlier one), the problem is persistent and recovery
+	// will not help. Return false so the error propagates instead of
+	// restarting the pipeline into the same failing block.
+	if validationErr.BlockPoint.Slot > 0 &&
+		validationErr.BlockPoint.Slot <= ls.lastAtTipRecoverySlot {
+		ls.config.Logger.Error(
+			"at-tip recovery already attempted for this slot, halting to avoid infinite loop",
+			"component", "ledger",
+			"failing_slot", validationErr.BlockPoint.Slot,
+			"last_recovery_slot", ls.lastAtTipRecoverySlot,
+			"tx_hash", hex.EncodeToString(validationErr.TxHash),
+		)
+		return false, nil
+	}
+	ls.lastAtTipRecoverySlot = validationErr.BlockPoint.Slot
 	ls.RLock()
 	ledgerTip := ls.currentTip
 	ls.RUnlock()

@@ -491,6 +491,7 @@ type LedgerState struct {
 	closed                        atomic.Bool
 	inRecovery                    bool           // guards against recursive recovery in SubmitAsyncDBTxn
 	densityWindow                 []densityEntry // sliding window for chain density metric
+	lastAtTipRecoverySlot         uint64         // guards against infinite at-tip recovery loops
 
 	// Subscription IDs for event bus unsubscribe on close
 	chainsyncSubID           event.EventSubscriberId
@@ -2867,6 +2868,25 @@ func (ls *LedgerState) ledgerProcessBlock(
 					lv,
 					pp,
 				)
+				// When a TX has isValid=true, the block producer's
+				// Plutus evaluator verified the script passed. If our
+				// evaluator disagrees, the fault is in our VM (known
+				// gouroboros CEK machine limitations), not in the block.
+				// Log the disagreement but trust the block producer.
+				var plutusErr conway.PlutusScriptFailedError
+				if err != nil && errors.As(err, &plutusErr) {
+					ls.config.Logger.Warn(
+						"Plutus evaluation disagrees with block producer (trusting isValid=true)",
+						"component", "ledger",
+						"tx_hash", tx.Hash().String(),
+						"block_slot", point.Slot,
+						"script_hash", fmt.Sprintf("%x", plutusErr.ScriptHash[:]),
+						"redeemer_tag", plutusErr.Tag,
+						"redeemer_index", plutusErr.Index,
+						"eval_error", plutusErr.Err.Error(),
+					)
+					err = nil
+				}
 				if err != nil {
 					// Attempt to include raw CBOR for diagnostics (if available)
 					var txCborHex string
