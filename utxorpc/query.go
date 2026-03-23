@@ -54,6 +54,23 @@ type utxoWithOrderingInfo struct {
 	outputIdx  uint32
 }
 
+func extractSearchPredicatePatterns(
+	predicate *query.UtxoPredicate,
+) (*utxorpcCardano.AddressPattern, *utxorpcCardano.AssetPattern) {
+	if predicate == nil {
+		return nil, nil
+	}
+	match := predicate.GetMatch()
+	if match == nil {
+		return nil, nil
+	}
+	cardanoMatch := match.GetCardano()
+	if cardanoMatch == nil {
+		return nil, nil
+	}
+	return cardanoMatch.GetAddress(), cardanoMatch.GetAsset()
+}
+
 // ReadParams
 func (s *queryServiceServer) ReadParams(
 	ctx context.Context,
@@ -348,13 +365,7 @@ func (s *queryServiceServer) SearchUtxos(
 	)
 	resp := &query.SearchUtxosResponse{}
 
-	// TODO: make this optional and create separate code paths
-	if predicate == nil {
-		return nil, fmt.Errorf("empty predicate: %v", predicate)
-	}
-
-	addressPattern := predicate.GetMatch().GetCardano().GetAddress()
-	assetPattern := predicate.GetMatch().GetCardano().GetAsset()
+	addressPattern, assetPattern := extractSearchPredicatePatterns(predicate)
 
 	var addresses []ledger.Address
 	if addressPattern != nil {
@@ -400,6 +411,10 @@ func (s *queryServiceServer) SearchUtxos(
 			}
 			addresses = append(addresses, delegationAddr)
 		}
+	}
+	// Nil predicate means "all addresses"; use empty address as no-op filter.
+	if predicate == nil {
+		addresses = append(addresses, ledger.Address{})
 	}
 
 	var allItems []*utxoWithOrderingInfo
