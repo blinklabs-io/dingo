@@ -16,6 +16,9 @@ package bark
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"io"
 	"log/slog"
 	"sync"
 	"time"
@@ -42,16 +45,42 @@ type Pruner struct {
 	cancel context.CancelFunc
 }
 
-func NewPruner(config PrunerConfig) *Pruner {
+func NewPruner(cfg PrunerConfig) *Pruner {
+	if cfg.Logger == nil {
+		cfg.Logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
+	}
 	return &Pruner{
-		config:      config,
-		logger:      config.Logger,
-		ledgerState: config.LedgerState,
-		db:          config.DB,
+		config:      cfg,
+		logger:      cfg.Logger,
+		ledgerState: cfg.LedgerState,
+		db:          cfg.DB,
 	}
 }
 
-func (p *Pruner) prune() {
+func (p *Pruner) pruneBlock(next *database.BlobBlockResult) error {
+	txn := p.db.BlobTxn(true)
+	return txn.Do(func(txn *database.Txn) error {
+		_, metadata, err := p.db.Blob().GetBlock(txn, next.Slot, next.Hash)
+		if err != nil {
+			return fmt.Errorf(
+				"pruner: failed to get block metadata: %w",
+				err,
+			)
+		}
+		if err := p.db.Blob().DeleteBlock(
+			txn,
+			next.Slot,
+			next.Hash,
+			metadata.ID,
+		); err != nil {
+			return fmt.Errorf("pruner: failed to delete block: %w", err)
+		}
+
+		return nil
+	})
+}
+
+func (p *Pruner) prune(ctx context.Context) {
 	currentSlot, err := p.ledgerState.CurrentSlot()
 	if err != nil {
 		p.logger.Error(
@@ -62,51 +91,43 @@ func (p *Pruner) prune() {
 		return
 	}
 
-	if currentSlot < p.config.SecurityWindow {
+	if currentSlot <= p.config.SecurityWindow {
 		p.logger.Debug(
 			"pruner: skipped because current slot is not high enough")
 		return
 	}
-	iter := p.db.BlocksInRange(0, currentSlot-p.config.SecurityWindow)
+	iter := p.db.BlocksInRange(
+		0,
+		currentSlot-p.config.SecurityWindow-1,
+	)
 	defer iter.Close()
 
 	for {
-		next, err := iter.NextRaw()
-		if err != nil {
-			p.logger.Error(
-				"pruner: failed to get next block",
-				"error",
-				err,
-			)
+		select {
+		case <-ctx.Done():
 			return
-		}
-		if next == nil {
-			p.logger.Debug("pruner: completed round of pruning")
-			return
-		}
+		default:
+			next, err := iter.NextRaw()
+			if err != nil {
+				p.logger.Error(
+					"pruner: failed to prune block",
+					"error",
+					err,
+				)
+				return
+			}
+			if next == nil {
+				p.logger.Debug("pruner: completed round of pruning")
+				return
+			}
 
-		txn := p.db.BlobTxn(true)
-		_, metadata, err := p.db.Blob().GetBlock(txn, next.Slot, next.Hash)
-		if err != nil {
-			p.logger.Error(
-				"pruner: failed to get block",
-				"error",
-				err,
-			)
-			return
-		}
-		if err := p.db.Blob().DeleteBlock(
-			txn,
-			next.Slot,
-			next.Hash,
-			metadata.ID,
-		); err != nil {
-			p.logger.Error(
-				"pruner: failed to delete block",
-				"error",
-				err,
-			)
-			return
+			if err := p.pruneBlock(next); err != nil {
+				p.logger.Error(
+					"pruner: failed to prune block",
+					"error",
+					err,
+				)
+			}
 		}
 	}
 }
@@ -117,7 +138,7 @@ func (p *Pruner) run(ctx context.Context) {
 	for {
 		select {
 		case <-ticker.C:
-			p.prune()
+			p.prune(ctx)
 		case <-ctx.Done():
 			return
 		}
@@ -125,7 +146,20 @@ func (p *Pruner) run(ctx context.Context) {
 }
 
 func (p *Pruner) Start(ctx context.Context) error {
-	ctx, p.cancel = context.WithCancel(ctx)
+	if p.config.Frequency <= 0 {
+		return fmt.Errorf(
+			"pruner: invalid frequency %d (must be > 0)",
+			p.config.Frequency,
+		)
+	}
+	if p.ledgerState == nil {
+		return errors.New("pruner: ledger state must not be nil")
+	}
+	if p.db == nil {
+		return errors.New("pruner: database must not be nil")
+	}
+
+	ctx, p.cancel = context.WithCancel(ctx) //nolint:gosec
 
 	p.wg.Add(1)
 	go func() {
@@ -135,8 +169,23 @@ func (p *Pruner) Start(ctx context.Context) error {
 	return nil
 }
 
-func (p *Pruner) Close(ctx context.Context) error {
-	p.cancel()
-	p.wg.Wait()
-	return nil
+func (p *Pruner) Stop(ctx context.Context) error {
+	if p.cancel != nil {
+		p.cancel()
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		p.wg.Wait()
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return fmt.Errorf(
+			"pruner: failed to stop before context cancellation: %w",
+			ctx.Err(),
+		)
+	}
 }

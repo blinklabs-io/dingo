@@ -61,6 +61,7 @@ type Node struct {
 	snapshotMgr                      *snapshot.Manager
 	utxorpc                          *utxorpc.Utxorpc
 	bark                             *bark.Bark
+	barkPruner                       *bark.Pruner
 	blockfrostAPI                    *blockfrost.Blockfrost
 	meshAPI                          *mesh.Server
 	ouroboros                        *ouroborosPkg.Ouroboros
@@ -531,7 +532,7 @@ func (n *Node) Run(ctx context.Context) error {
 			Logger:      n.config.logger,
 		}, n.db.Blob()))
 
-		pruner := bark.NewPruner(bark.PrunerConfig{
+		n.barkPruner = bark.NewPruner(bark.PrunerConfig{
 			LedgerState:    state,
 			DB:             n.db,
 			Logger:         n.config.logger,
@@ -539,12 +540,12 @@ func (n *Node) Run(ctx context.Context) error {
 			Frequency:      time.Hour,
 		})
 
-		if err := pruner.Start(n.ctx); err != nil {
+		if err := n.barkPruner.Start(n.ctx); err != nil {
 			return fmt.Errorf("failed to start pruner: %w", err)
 		}
 
 		started = append(started, func() {
-			pruner.Close(context.Background())
+			_ = n.barkPruner.Stop(context.Background())
 		})
 	}
 
@@ -1115,6 +1116,14 @@ func (n *Node) shutdown() error {
 	if n.bark != nil {
 		if stopErr := n.bark.Stop(ctx); stopErr != nil {
 			err = errors.Join(err, fmt.Errorf("bark shutdown: %w", stopErr))
+		}
+	}
+
+	if n.barkPruner != nil {
+		if stopErr := n.barkPruner.Stop(ctx); stopErr != nil {
+			err = errors.Join(
+				err,
+				fmt.Errorf("bark pruner shutdown: %w", stopErr))
 		}
 	}
 
