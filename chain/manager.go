@@ -34,6 +34,9 @@ type ChainId uint64
 
 const (
 	primaryChainId ChainId = 1
+	// primaryChainRewindBatchSize bounds startup reconciliation work per
+	// write transaction when pruning a speculative primary-chain tail.
+	primaryChainRewindBatchSize = 512
 )
 
 type ChainManager struct {
@@ -331,74 +334,68 @@ func (cm *ChainManager) RewindPrimaryChainToPoint(
 	rollbackBlockNumber := uint64(0)
 	targetTip := ochainsync.Tip{}
 	err := func() error {
-		txn := cm.db.BlobTxn(true)
-		return txn.Do(func(txn *database.Txn) error {
-			currentTip := primaryChain.currentTip
-			if point.Slot > 0 || len(point.Hash) > 0 {
-				tmpBlock, err := cm.blockByPoint(point, txn)
-				if err != nil {
-					return fmt.Errorf("lookup rewind point: %w", err)
-				}
-				rollbackIndex = tmpBlock.ID
-				rollbackBlockNumber = tmpBlock.Number
-				if primaryChain.tipBlockIndex < rollbackIndex {
-					return fmt.Errorf(
-						"primary chain tip index %d is behind rewind point index %d",
-						primaryChain.tipBlockIndex,
-						rollbackIndex,
-					)
-				}
-				if primaryChain.tipBlockIndex == rollbackIndex &&
-					primaryChain.currentTip.Point.Slot == point.Slot &&
-					bytes.Equal(primaryChain.currentTip.Point.Hash, point.Hash) {
-					targetTip = primaryChain.currentTip
-					return nil
-				}
-				targetTip = ochainsync.Tip{
-					Point:       point,
-					BlockNumber: rollbackBlockNumber,
-				}
+		if point.Slot > 0 || len(point.Hash) > 0 {
+			readTxn := cm.db.BlobTxn(false)
+			defer readTxn.Rollback() //nolint:errcheck
+			tmpBlock, err := cm.blockByPoint(point, readTxn)
+			if err != nil {
+				return fmt.Errorf("lookup rewind point: %w", err)
 			}
-			for currentTip.Point.Slot != point.Slot ||
-				!bytes.Equal(currentTip.Point.Hash, point.Hash) {
-				currentBlock, err := cm.blockByPoint(currentTip.Point, txn)
-				if err != nil {
-					return fmt.Errorf(
-						"lookup current primary block: %w",
-						err,
-					)
-				}
-				if err := database.BlockDeleteTxn(txn, currentBlock); err != nil {
-					return fmt.Errorf(
-						"delete primary block %d: %w",
-						currentBlock.ID,
-						err,
-					)
-				}
-				if len(currentBlock.PrevHash) == 0 {
-					currentTip = ochainsync.Tip{}
-					break
-				}
-				prevBlock, err := database.BlockByHashTxn(txn, currentBlock.PrevHash)
-				if err != nil {
-					return fmt.Errorf(
-						"lookup previous primary block: %w",
-						err,
-					)
-				}
-				currentTip = ochainsync.Tip{
-					Point: ocommon.NewPoint(
-						prevBlock.Slot,
-						prevBlock.Hash,
-					),
-					BlockNumber: prevBlock.Number,
-				}
+			rollbackIndex = tmpBlock.ID
+			rollbackBlockNumber = tmpBlock.Number
+			if primaryChain.tipBlockIndex < rollbackIndex {
+				return fmt.Errorf(
+					"primary chain tip index %d is behind rewind point index %d",
+					primaryChain.tipBlockIndex,
+					rollbackIndex,
+				)
 			}
-			if targetTip.Point.Slot == 0 && len(targetTip.Point.Hash) == 0 {
-				targetTip = currentTip
+			if primaryChain.tipBlockIndex == rollbackIndex &&
+				primaryChain.currentTip.Point.Slot == point.Slot &&
+				bytes.Equal(primaryChain.currentTip.Point.Hash, point.Hash) {
+				targetTip = primaryChain.currentTip
+				return nil
 			}
-			return nil
-		})
+			targetTip = ochainsync.Tip{
+				Point:       point,
+				BlockNumber: rollbackBlockNumber,
+			}
+		}
+		currentIndex := primaryChain.tipBlockIndex
+		for currentIndex > rollbackIndex {
+			batchFloor := rollbackIndex
+			if currentIndex-rollbackIndex > primaryChainRewindBatchSize {
+				batchFloor = currentIndex - primaryChainRewindBatchSize
+			}
+			txn := cm.db.BlobTxn(true)
+			if err := txn.Do(func(txn *database.Txn) error {
+				for idx := currentIndex; idx > batchFloor; idx-- {
+					currentBlock, err := cm.db.BlockByIndex(idx, txn)
+					if err != nil {
+						return fmt.Errorf(
+							"lookup current primary block by index %d: %w",
+							idx,
+							err,
+						)
+					}
+					if err := database.BlockDeleteTxn(txn, currentBlock); err != nil {
+						return fmt.Errorf(
+							"delete primary block %d: %w",
+							currentBlock.ID,
+							err,
+						)
+					}
+				}
+				return nil
+			}); err != nil {
+				return err
+			}
+			currentIndex = batchFloor
+		}
+		if targetTip.Point.Slot == 0 && len(targetTip.Point.Hash) == 0 {
+			targetTip = ochainsync.Tip{}
+		}
+		return nil
 	}()
 	if err != nil {
 		return err
