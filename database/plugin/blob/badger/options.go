@@ -94,6 +94,14 @@ func WithCompactBlockMetadata(enabled bool) BlobStoreBadgerOptionFunc {
 	}
 }
 
+// WithCompressionEnabled controls Snappy compression of SSTable blocks.
+// Disabling compression allows block cache size 0 (pure mmap).
+func WithCompressionEnabled(enabled bool) BlobStoreBadgerOptionFunc {
+	return func(b *BlobStoreBadger) {
+		b.compressionEnabled = enabled
+	}
+}
+
 // WithDeferOpen defers opening Badger until Start() is called.
 // This allows a logger to be injected via SetLogger before Badger
 // emits any startup logs.
