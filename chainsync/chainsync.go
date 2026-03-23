@@ -136,7 +136,7 @@ type State struct {
 	seenHeaders      map[uint64][]headerRecord
 	seenHeadersMutex sync.Mutex
 
-	observedHeaders      map[string]*observedHeaderChain
+	observedHeaders      map[ouroboros.ConnectionId]*observedHeaderChain
 	observedHeadersMutex sync.RWMutex
 
 	sync.Mutex
@@ -191,7 +191,7 @@ func NewStateWithConfig(
 		trackedClients: make(map[ouroboros.ConnectionId]*TrackedClient),
 		seenHeaders:    make(map[uint64][]headerRecord),
 		observedHeaders: make(
-			map[string]*observedHeaderChain,
+			map[ouroboros.ConnectionId]*observedHeaderChain,
 		),
 	}
 	return s
@@ -618,15 +618,14 @@ func (s *State) RecordObservedHeader(e ledger.ChainsyncEvent) {
 	s.observedHeadersMutex.Lock()
 	defer s.observedHeadersMutex.Unlock()
 
-	connKey := e.ConnectionId.String()
-	chainHistory := s.observedHeaders[connKey]
+	chainHistory := s.observedHeaders[e.ConnectionId]
 	if chainHistory == nil {
 		chainHistory = &observedHeaderChain{
 			order: make([]string, 0, maxObservedHeadersPerConn),
 			byHash: make(map[string]observedHeaderRecord,
 				maxObservedHeadersPerConn),
 		}
-		s.observedHeaders[connKey] = chainHistory
+		s.observedHeaders[e.ConnectionId] = chainHistory
 	}
 
 	hashKey := hex.EncodeToString(e.Point.Hash)
@@ -655,7 +654,7 @@ func (s *State) LookupObservedHeader(
 	s.observedHeadersMutex.RLock()
 	defer s.observedHeadersMutex.RUnlock()
 
-	chainHistory := s.observedHeaders[connId.String()]
+	chainHistory := s.observedHeaders[connId]
 	if chainHistory == nil {
 		return ledger.ChainsyncEvent{}, nil, false
 	}
@@ -673,7 +672,7 @@ func (s *State) clearObservedHeaderHistory(
 ) {
 	s.observedHeadersMutex.Lock()
 	defer s.observedHeadersMutex.Unlock()
-	delete(s.observedHeaders, connId.String())
+	delete(s.observedHeaders, connId)
 }
 
 func (s *State) ClearObservedHeaderHistory(

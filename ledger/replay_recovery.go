@@ -61,9 +61,8 @@ type replayRecoveryCandidate struct {
 }
 
 type replayRecoveryPendingInput struct {
-	Input        lcommon.TransactionInput
-	MaxSlot      uint64
-	MaxCertIndex uint64 // block-local ordering for same-slot comparison
+	Input   lcommon.TransactionInput
+	MaxSlot uint64
 }
 
 type replayRecoveryResolvedProducer struct {
@@ -151,6 +150,22 @@ func (ls *LedgerState) recoverAtTipFromTxValidationError(
 	if ls.chain == nil || ls.config.ChainManager == nil {
 		return false, nil
 	}
+	// Prevent infinite loops: if we already attempted recovery for this
+	// slot (or an earlier one), the problem is persistent and recovery
+	// will not help. Return false so the error propagates instead of
+	// restarting the pipeline into the same failing block.
+	if validationErr.BlockPoint.Slot > 0 &&
+		validationErr.BlockPoint.Slot <= ls.lastAtTipRecoverySlot {
+		ls.config.Logger.Error(
+			"at-tip recovery already attempted for this slot, halting to avoid infinite loop",
+			"component", "ledger",
+			"failing_slot", validationErr.BlockPoint.Slot,
+			"last_recovery_slot", ls.lastAtTipRecoverySlot,
+			"tx_hash", hex.EncodeToString(validationErr.TxHash),
+		)
+		return false, nil
+	}
+	ls.lastAtTipRecoverySlot = validationErr.BlockPoint.Slot
 	ls.RLock()
 	ledgerTip := ls.currentTip
 	ls.RUnlock()
@@ -165,8 +180,16 @@ func (ls *LedgerState) recoverAtTipFromTxValidationError(
 		"primary_chain_tip_slot", chainTip.Point.Slot,
 		"primary_chain_tip_hash", hex.EncodeToString(chainTip.Point.Hash),
 	)
+	if err := ls.config.ChainManager.RewindPrimaryChainToPoint(
+		ledgerTip.Point,
+	); err != nil {
+		return false, fmt.Errorf(
+			"rewind primary chain to authoritative ledger tip: %w",
+			err,
+		)
+	}
 	if ls.config.EventBus != nil {
-		ls.config.EventBus.PublishAsync(
+		ls.config.EventBus.Publish(
 			event.ChainsyncResyncEventType,
 			event.NewEvent(
 				event.ChainsyncResyncEventType,
@@ -289,7 +312,7 @@ func (ls *LedgerState) buildReplayRecoveryChainIndex(
 	}
 	const maxReplayRecoveryScanBlocks = 4096
 	scanned := 0
-	for blockIndex := failingBlock.ID; ; blockIndex-- {
+	for blockIndex := failingBlock.ID - 1; ; blockIndex-- {
 		if scanned >= maxReplayRecoveryScanBlocks {
 			break
 		}
@@ -307,7 +330,7 @@ func (ls *LedgerState) buildReplayRecoveryChainIndex(
 				err,
 			)
 		}
-		if block.Slot > failingPoint.Slot {
+		if block.Slot >= failingPoint.Slot {
 			if blockIndex == database.BlockInitialIndex {
 				break
 			}
@@ -345,24 +368,6 @@ func (ls *LedgerState) buildReplayRecoveryChainIndex(
 		}
 	}
 	return index, nil
-}
-
-// producerBlockNotBefore returns true when the producer block cannot have
-// produced the input (it was created at or after the consuming tx).
-func producerBlockNotBefore(
-	producerSlot uint64,
-	producerIndex uint64,
-	pending replayRecoveryPendingInput,
-) bool {
-	if producerSlot > pending.MaxSlot {
-		return true
-	}
-	if producerSlot == pending.MaxSlot &&
-		pending.MaxCertIndex > 0 &&
-		producerIndex >= pending.MaxCertIndex {
-		return true
-	}
-	return false
 }
 
 func (ls *LedgerState) resolveReplayRecoveryProducer(
@@ -404,7 +409,7 @@ func (ls *LedgerState) resolveReplayRecoveryProducer(
 				err,
 			)
 		}
-		if producerBlockNotBefore(producerBlock.Slot, producerBlock.ID, pending) {
+		if producerBlock.Slot >= pending.MaxSlot {
 			return nil, nil
 		}
 		tx := ls.replayRecoveryResolveTxFromBlock(
@@ -427,7 +432,7 @@ func (ls *LedgerState) resolveReplayRecoveryProducer(
 		return nil, err
 	}
 	if found {
-		if producerBlockNotBefore(producerBlock.Slot, producerBlock.ID, pending) {
+		if producerBlock.Slot >= pending.MaxSlot {
 			return nil, nil
 		}
 		tx := ls.replayRecoveryResolveTxFromBlock(
@@ -444,7 +449,7 @@ func (ls *LedgerState) resolveReplayRecoveryProducer(
 	}
 	if chainIndex != nil {
 		chainTx, ok := chainIndex.Txs[string(pending.Input.Id().Bytes())]
-		if ok && !producerBlockNotBefore(chainTx.Block.Slot, chainTx.Block.ID, pending) {
+		if ok && chainTx.Block.Slot < pending.MaxSlot {
 			return &replayRecoveryResolvedProducer{
 				Input:         pending.Input,
 				ProducerBlock: chainTx.Block,

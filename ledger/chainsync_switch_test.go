@@ -1011,6 +1011,7 @@ func TestHandleEventChainsyncBlockHeaderIgnoresIdleSelectedOwner(
 	assert.Empty(t, ls.bufferedHeaderEvents)
 	assert.Equal(t, ouroboros.ConnectionId{}, ls.selectedBlockfetchConnId)
 }
+
 func TestHandleEventChainsyncBlockHeaderIgnoresStaleHeaderBehindChainTip(
 	t *testing.T,
 ) {

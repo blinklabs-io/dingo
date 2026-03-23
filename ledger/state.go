@@ -491,6 +491,7 @@ type LedgerState struct {
 	closed                        atomic.Bool
 	inRecovery                    bool           // guards against recursive recovery in SubmitAsyncDBTxn
 	densityWindow                 []densityEntry // sliding window for chain density metric
+	lastAtTipRecoverySlot         uint64         // guards against infinite at-tip recovery loops
 
 	// Subscription IDs for event bus unsubscribe on close
 	chainsyncSubID           event.EventSubscriberId
@@ -678,7 +679,7 @@ func (ls *LedgerState) Start(ctx context.Context) error {
 	// Start goroutine to process new blocks unless the caller will feed trusted
 	// batches directly into the replay loop.
 	if !ls.config.ManualBlockProcessing {
-		go ls.ledgerProcessBlocks() //nolint:contextcheck
+		go ls.ledgerProcessBlocks(ctx)
 	}
 	return nil
 }
@@ -1605,7 +1606,7 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 	ls.updateTipMetrics()
 	ls.Unlock()
 	if ls.config.EventBus != nil {
-		ls.config.EventBus.PublishAsync(
+		ls.config.EventBus.Publish(
 			event.ChainsyncResyncEventType,
 			event.NewEvent(
 				event.ChainsyncResyncEventType,
@@ -1635,24 +1636,13 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 }
 
 // rollbackChainAndState rewinds the primary chain and then synchronizes the
-// metadata-backed ledger state to the same point. If the metadata rollback
-// fails, it attempts to restore the primary chain to its previous tip so
-// both remain consistent.
+// metadata-backed ledger state to the same point.
 func (ls *LedgerState) rollbackChainAndState(point ocommon.Point) error {
-	prevHead := ls.chain.Tip()
 	if err := ls.chain.Rollback(point); err != nil {
-		return fmt.Errorf("rollbackChainAndState: primary chain rollback: %w", err)
+		return err
 	}
 	if err := ls.rollback(point); err != nil {
-		// Attempt to restore the primary chain to its previous tip.
-		if restoreErr := ls.chain.Rollback(prevHead.Point); restoreErr != nil {
-			return fmt.Errorf(
-				"rollbackChainAndState: metadata rollback failed (%w) and chain restore also failed: %w",
-				err,
-				restoreErr,
-			)
-		}
-		return fmt.Errorf("rollbackChainAndState: metadata rollback: %w", err)
+		return fmt.Errorf("synchronize ledger rollback state: %w", err)
 	}
 	return nil
 }
@@ -1936,7 +1926,6 @@ func (ls *LedgerState) ledgerReadChain(
 	ctx context.Context,
 	resultCh chan readChainResult,
 ) {
-	defer close(resultCh)
 	// Create chain iterator
 	iter, err := ls.chain.FromPoint(ls.currentTip.Point, false)
 	if err != nil {
@@ -2050,9 +2039,9 @@ func (ls *LedgerState) ledgerReadChainIterator(
 	}
 }
 
-func (ls *LedgerState) ledgerProcessBlocks() {
+func (ls *LedgerState) ledgerProcessBlocks(ctx context.Context) {
 	for {
-		attemptCtx, cancel := context.WithCancel(ls.ctx)
+		attemptCtx, cancel := context.WithCancel(ctx)
 		readChainResultCh := make(chan readChainResult)
 		go ls.ledgerReadChain(attemptCtx, readChainResultCh)
 		err := ls.ledgerProcessBlocksFromSource(
@@ -2060,7 +2049,7 @@ func (ls *LedgerState) ledgerProcessBlocks() {
 			readChainResultCh,
 		)
 		cancel()
-		if err == nil || ls.ctx.Err() != nil {
+		if err == nil || ctx.Err() != nil {
 			return
 		}
 		if errors.Is(err, errRestartLedgerPipeline) {
@@ -2879,6 +2868,25 @@ func (ls *LedgerState) ledgerProcessBlock(
 					lv,
 					pp,
 				)
+				// When a TX has isValid=true, the block producer's
+				// Plutus evaluator verified the script passed. If our
+				// evaluator disagrees, the fault is in our VM (known
+				// gouroboros CEK machine limitations), not in the block.
+				// Log the disagreement but trust the block producer.
+				var plutusErr conway.PlutusScriptFailedError
+				if err != nil && errors.As(err, &plutusErr) {
+					ls.config.Logger.Warn(
+						"Plutus evaluation disagrees with block producer (trusting isValid=true)",
+						"component", "ledger",
+						"tx_hash", tx.Hash().String(),
+						"block_slot", point.Slot,
+						"script_hash", hex.EncodeToString(plutusErr.ScriptHash[:]),
+						"redeemer_tag", plutusErr.Tag,
+						"redeemer_index", plutusErr.Index,
+						"eval_error", plutusErr.Err.Error(),
+					)
+					err = nil
+				}
 				if err != nil {
 					// Attempt to include raw CBOR for diagnostics (if available)
 					var txCborHex string
@@ -3355,11 +3363,10 @@ func (ls *LedgerState) authoritativeRecentChainPoints(
 	currentTip := ls.currentTip
 	ls.RUnlock()
 	if currentTip.Point.Slot == 0 && len(currentTip.Point.Hash) == 0 {
-		return []ocommon.Point{ocommon.NewPointOrigin()}, nil
+		return nil, nil
 	}
 	points := make([]ocommon.Point, 0, count)
 	nextHash := append([]byte(nil), currentTip.Point.Hash...)
-	var nextSlot uint64
 	for len(points) < count && len(nextHash) > 0 {
 		block, err := database.BlockByHash(ls.db, nextHash)
 		if err != nil {
@@ -3370,16 +3377,9 @@ func (ls *LedgerState) authoritativeRecentChainPoints(
 			ocommon.NewPoint(block.Slot, block.Hash),
 		)
 		if len(block.PrevHash) == 0 {
-			if len(points) < count {
-				points = append(points, ocommon.NewPointOrigin())
-			}
 			break
 		}
 		nextHash = append(nextHash[:0], block.PrevHash...)
-		nextSlot = block.Slot
-		if nextSlot == 0 && len(nextHash) == 0 {
-			break
-		}
 	}
 	return points, nil
 }

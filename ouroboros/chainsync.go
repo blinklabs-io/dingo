@@ -240,6 +240,31 @@ func (o *Ouroboros) RestartChainsyncClientWithPoints(
 	return nil
 }
 
+func (o *Ouroboros) resyncChainsyncClientWithPoints(
+	connId ouroboros.ConnectionId,
+	intersectPoints []ocommon.Point,
+) error {
+	conn := o.ConnManager.GetConnectionById(connId)
+	if conn == nil {
+		return fmt.Errorf("connection not found: %s", connId.String())
+	}
+	cs := conn.ChainSync()
+	if cs == nil || cs.Client == nil {
+		return fmt.Errorf(
+			"chainsync client not available: %s",
+			connId.String(),
+		)
+	}
+	if err := cs.Client.Stop(); err != nil {
+		return fmt.Errorf(
+			"stop chainsync client for conn %s: %w",
+			connId.String(),
+			err,
+		)
+	}
+	return o.RestartChainsyncClientWithPoints(connId, intersectPoints)
+}
+
 func (o *Ouroboros) chainsyncClientStart(connId ouroboros.ConnectionId) error {
 	intersectPoints, err := o.buildDefaultChainsyncIntersectPoints(connId)
 	if err != nil {
@@ -949,6 +974,33 @@ func (o *Ouroboros) SubscribeChainsyncResync(ctx context.Context) {
 			if len(connIds) == 0 {
 				return
 			}
+			// Plateau events close the connection immediately rather
+			// than attempting an in-place Stop→Start→Sync restart.
+			// Stop() blocks for up to 30s when the protocol is in
+			// MustReply state, during which no recovery can happen.
+			// Closing lets peer governance reconnect with a fresh
+			// bearer and updated intersect points.
+			if e.Reason == "local_tip_plateau" {
+				for _, connId := range connIds {
+					if o.ChainsyncState != nil {
+						o.ChainsyncState.ClearObservedHeaderHistory(connId)
+					}
+					if o.ConnManager == nil {
+						continue
+					}
+					conn := o.ConnManager.GetConnectionById(connId)
+					if conn == nil {
+						continue
+					}
+					o.config.Logger.Info(
+						"closing stalled connection for fresh chainsync",
+						"connection_id", connId.String(),
+						"reason", e.Reason,
+					)
+					conn.Close()
+				}
+				return
+			}
 			for _, connId := range connIds {
 				if o.ChainsyncState != nil {
 					o.ChainsyncState.ClearObservedHeaderHistory(connId)
@@ -970,23 +1022,7 @@ func (o *Ouroboros) SubscribeChainsyncResync(ctx context.Context) {
 								err,
 							)
 						}
-						conn := o.ConnManager.GetConnectionById(connId)
-						if conn == nil {
-							return fmt.Errorf(
-								"connection not found: %s",
-								connId.String(),
-							)
-						}
-						cs := conn.ChainSync()
-						if cs != nil && cs.Client != nil {
-							if err := cs.Client.Stop(); err != nil {
-								return fmt.Errorf(
-									"stop chainsync client: %w",
-									err,
-								)
-							}
-						}
-						return o.RestartChainsyncClientWithPoints(
+						return o.resyncChainsyncClientWithPoints(
 							connId,
 							intersectPoints,
 						)

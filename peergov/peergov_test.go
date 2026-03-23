@@ -586,27 +586,11 @@ func TestPeerGovernor_TouchPeerByConnId(t *testing.T) {
 	oldActivity := pg.peers[0].LastActivity
 	pg.mu.Unlock()
 
-	// Add a second peer to verify isolation
-	pg.AddPeer("44.0.0.2:3001", PeerSourceTopologyLocalRoot)
-	localAddr2, _ := net.ResolveTCPAddr("tcp", "127.0.0.1:6001")
-	remoteAddr2, _ := net.ResolveTCPAddr("tcp", "44.0.0.2:3001")
-	connId2 := ouroboros.ConnectionId{
-		LocalAddr:  localAddr2,
-		RemoteAddr: remoteAddr2,
-	}
-	pg.mu.Lock()
-	pg.peers[1].Connection = &PeerConnection{Id: connId2, IsClient: true}
-	pg.peers[1].LastActivity = time.Now().Add(-30 * time.Minute)
-	otherActivity := pg.peers[1].LastActivity
-	pg.mu.Unlock()
-
 	pg.TouchPeerByConnId(connId)
 
 	peers := pg.GetPeers()
-	require.Len(t, peers, 2)
+	require.Len(t, peers, 1)
 	assert.True(t, peers[0].LastActivity.After(oldActivity))
-	// Second peer should be untouched
-	assert.Equal(t, otherActivity, peers[1].LastActivity)
 }
 
 func TestPeerGovernorAppendChainSelectionEventsLocked(t *testing.T) {

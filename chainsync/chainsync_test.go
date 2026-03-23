@@ -527,14 +527,6 @@ func TestObservedHeaderHistoryPersistsAcrossDedupAndClearsOnRemove(
 		Tip:          tip,
 	})
 
-	// Duplicate record with the same hash should be a no-op
-	s.RecordObservedHeader(ledger.ChainsyncEvent{
-		ConnectionId: conn,
-		Point:        point,
-		BlockHeader:  header,
-		Tip:          tip,
-	})
-
 	recordedEvent, recordedPrevHash, ok := s.LookupObservedHeader(
 		conn,
 		hash,

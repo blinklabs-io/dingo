@@ -308,8 +308,17 @@ func TestTryRecoverFromTxValidationErrorAtTipRewindsPrimaryChain(
 	require.NoError(t, err)
 	require.True(t, recovered)
 
-	// The ledger tip should remain at the authoritative tip.
 	assert.Equal(t, ledgerTip, ls.currentTip)
+	assert.Equal(t, ledgerTip, ls.chain.Tip())
+	dbTip, err := ls.db.GetTip(nil)
+	require.NoError(t, err)
+	assert.Equal(t, ledgerTip, dbTip)
+
+	_, err = database.BlockByPoint(
+		db,
+		ocommon.NewPoint(failingBlock.Slot, failingBlock.Hash),
+	)
+	assert.ErrorIs(t, err, models.ErrBlockNotFound)
 }
 
 func TestTryRecoverFromTxValidationErrorFallsBackToTxBlobOffsets(
