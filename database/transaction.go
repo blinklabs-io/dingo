@@ -479,28 +479,54 @@ func (d *Database) GetAddressesByStakingKey(
 }
 
 // deleteTxBlobs attempts to delete blob data for the given transaction hashes.
-// This is a best-effort operation; metadata remains the source of truth.
-// Blob deletions use the provided outer transaction so they participate in
-// the same atomic commit as metadata changes.
+// This is a best-effort operation; metadata remains the source of truth. When
+// the caller provides a blob transaction, deletions stay coupled to that outer
+// commit. A temporary blob-only transaction is used only as a fallback when no
+// blob handle is available.
 func deleteTxBlobs(d *Database, txHashes [][]byte, txn *Txn) error {
+	const batchSize = 500
 	blob := d.Blob()
 	if blob == nil {
 		return types.ErrBlobStoreUnavailable
 	}
-	blobTxn := txn.Blob()
-	if blobTxn == nil {
-		return types.ErrNilTxn
-	}
 
 	var deleteErrors int
-	for _, txHash := range txHashes {
-		if err := blob.DeleteTx(blobTxn, txHash); err != nil {
-			deleteErrors++
-			d.logger.Debug(
-				"failed to delete TX blob data",
-				"txHash", hex.EncodeToString(txHash),
-				"error", err,
-			)
+	deleteBatch := func(blobTxn types.Txn, batch [][]byte) int {
+		var batchDeleteErrors int
+		for _, txHash := range batch {
+			if err := blob.DeleteTx(blobTxn, txHash); err != nil {
+				deleteErrors++
+				batchDeleteErrors++
+				d.logger.Debug(
+					"failed to delete TX blob data",
+					"txHash", hex.EncodeToString(txHash),
+					"error", err,
+				)
+			}
+		}
+		return batchDeleteErrors
+	}
+
+	if txn != nil && txn.Blob() != nil {
+		deleteBatch(txn.Blob(), txHashes)
+	} else {
+		for start := 0; start < len(txHashes); start += batchSize {
+			end := start + batchSize
+			if end > len(txHashes) {
+				end = len(txHashes)
+			}
+			batch := txHashes[start:end]
+			batchTxn := NewBlobOnlyTxn(d, true)
+			batchBlobTxn := batchTxn.Blob()
+			if batchBlobTxn == nil {
+				return types.ErrNilTxn
+			}
+			batchDeleteErrors := deleteBatch(batchBlobTxn, batch)
+			if err := batchTxn.Commit(); err != nil {
+				deleteErrors += len(batch) - batchDeleteErrors
+				_ = batchTxn.Rollback()
+				d.logger.Debug("tx blob delete batch commit failed", "error", err)
+			}
 		}
 	}
 	if deleteErrors > 0 {
