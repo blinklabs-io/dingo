@@ -9,19 +9,19 @@ WORKDIR /code
 RUN go env -w GOCACHE=/go-cache
 RUN go env -w GOMODCACHE=/gomod-cache
 COPY go.* .
-RUN --mount=type=cache,target=/gomod-cache go mod download
+RUN go mod download
 COPY . .
-RUN --mount=type=cache,target=/gomod-cache --mount=type=cache,target=/go-cache make build
+RUN make build
 
 FROM build AS antithesis-build
 RUN go get github.com/antithesishq/antithesis-sdk-go@latest
 RUN go install github.com/antithesishq/antithesis-sdk-go/tools/antithesis-go-instrumentor@latest
-RUN --mount=type=cache,target=/gomod-cache make mod-tidy
+RUN make mod-tidy
 RUN mkdir -p /antithesis
 # Create instrumented code in /antithesis
-RUN --mount=type=cache,target=/gomod-cache `go env GOPATH`/bin/antithesis-go-instrumentor /code /antithesis
+RUN `go env GOPATH`/bin/antithesis-go-instrumentor /code /antithesis
 WORKDIR /antithesis/customer
-RUN --mount=type=cache,target=/gomod-cache --mount=type=cache,target=/go-cache make build
+RUN make build
 
 FROM ghcr.io/blinklabs-io/cardano-cli:10.14.0.0-1 AS cardano-cli
 FROM ghcr.io/blinklabs-io/cardano-configs:20251128-1 AS cardano-configs
