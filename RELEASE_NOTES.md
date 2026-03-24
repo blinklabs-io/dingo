@@ -3,7 +3,7 @@
 
 ## v0.27.7 (March 24, 2026)
 
-**Title:** Operational and API refinements
+**Title:** Configurable networking and leaner storage
 
 **Date:** March 24, 2026
 
@@ -13,43 +13,27 @@ Hi folks! Here’s what we shipped in v0.27.7.
 
 ### ✨ What's New
 
-```json
-{
-  "✨ What's New": [
-    "You can now tune network behavior via configuration instead of relying on hard-coded defaults.",
-    "You can now enable compression for blob storage to reduce disk usage and improve storage efficiency.",
-    "Development networks now include an additional transaction pumping service to better exercise transaction flows during testing."
-  ],
-  "💪 Improvements": [
-    "Chain syncing and chain selection now behave more reliably under competing peers and fast-moving tips.",
-    "Rollback and ledger replay behaviors are now safer and easier to reason about during rewinds and recovery.",
-    "Pruning and rewind operations now complete more predictably and with less database write pressure.",
-    "Blob deletion now matches transaction boundaries more closely, which improves correctness and recoverability when storage is under pressure.",
-    "Telemetry and build tooling dependencies are now more up to date for better compatibility and maintenance.",
-    "Container builds are now simpler and more consistent across environments."
-  ],
-  "📋 What You Need to Know": [
-    "If you run the node on a non-default network, you may need to explicitly set the network identifier in your configuration.",
-    "If you manage blob storage, you can choose whether to enable compression and should monitor resource tradeoffs after changing the setting."
-  ],
-  "🔧 Fixes": [
-    "Event emission and smart-contract error handling are now more consistent during chain sync and recovery."
-  ]
-}
-
-```
+- **Configurable `networkMagic`:** Running on non-default networks is easier because you can now set `networkMagic` in your config instead of relying on hard-coded defaults.
+- **Badger blob compression (Snappy):** Storage can be leaner because you can now enable optional Snappy compression for the Badger-backed blob store.
+- **Devnet `txpump` service:** Testing transaction flows is easier because devnet now includes a `txpump` service.
 
 ### 💪 Improvements
 
-_Release notes for this section will be formatted from the raw entries above._
+- **Steadier chain-sync and selection:** Sync stays more rock-solid because chain-sync and chain selection now behave more reliably under competing peers and fast-moving tips.
+- **Safer rollbacks and ledger replay:** Recoveries are easier to reason about because rollback and ledger replay behavior is now safer during rewinds.
+- **More predictable rewinds and pruning:** Maintenance runs finish more consistently because rewind and pruning operations now complete more predictably with less database write pressure.
+- **More correct blob deletion:** Recoverability is easier because blob deletion now aligns more closely with transaction boundaries.
+- **Dependency refresh:** Builds are more rock-solid because telemetry and build-tooling dependencies were updated for compatibility and maintenance.
+- **Simpler Docker builds:** Container builds are more consistent because the Dockerfile no longer uses Go build cache mounts.
 
 ### 🔧 Fixes
 
-_Release notes for this section will be formatted from the raw entries above._
+- **Cleaner chain-sync events and Plutus errors:** Debugging is easier because event emission and smart-contract error handling are now more consistent during chain sync and recovery.
 
 ### 📋 What You Need to Know
 
-_Release notes for this section will be formatted from the raw entries above._
+- **Non-default networks:** If you run on a non-default network, make sure `networkMagic` is set correctly in your configuration.
+- **Blob compression tradeoffs:** If you enable Snappy blob compression, keep an eye on disk and CPU usage.
 
 ### 🙏 Thank You
 
