@@ -13,13 +13,13 @@ Hi folks! Here’s what we shipped in v0.27.7.
 
 ### ✨ What's New
 
-- **Configurable network ID:** Connecting to the right Cardano network is more reliable because you can now set the network identifier in configuration.
+- **Configurable network ID:** Connecting to the right Cardano network is more rock-solid because you can now set the network identifier in configuration.
 - **Optional blob-store compression:** Disk usage can be lower because you can now enable compression for blob storage in some environments.
 - **Devnet transaction pump:** Testing transaction flow is easier because development networks now include an additional transaction pump service.
 
 ### 💪 Improvements
 
-- **More stable chain following:** Sync needs fewer manual interventions because chain following and recovery is now more stable during tip changes and temporary peer issues.
+- **More stable chain following:** Sync is more rock-solid because chain following and recovery is now more stable during tip changes and temporary peer issues.
 - **Safer rollbacks and replay:** Reorg handling is more predictable because rollback and ledger replay behavior is now safer.
 - **Lighter rewind pruning:** Larger cleanups are smoother because rewind and pruning operations now put less pressure on storage backends.
 - **Stickier best-peer selection:** Peer churn can be lower because peer selection now better preserves stable connections when multiple peers report equivalent tips.
