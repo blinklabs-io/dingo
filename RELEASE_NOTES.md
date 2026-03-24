@@ -23,7 +23,7 @@ Hi folks! Here’s what we shipped in v0.27.7.
 - **Safer rollbacks and ledger replay:** Recoveries are easier to reason about because rollback and ledger replay behavior is now safer during rewinds.
 - **More predictable rewinds and pruning:** Maintenance runs finish more consistently because rewind and pruning operations now complete more predictably with less database write pressure.
 - **More correct blob deletion:** Recoverability is easier because blob deletion now aligns more closely with transaction boundaries.
-- **Dependency refresh:** Builds are more rock-solid because telemetry and build-tooling dependencies were updated for compatibility and maintenance.
+- **Dependency refresh:** Builds are more rock-solid because telemetry and build-tooling dependencies were refreshed for compatibility and maintenance.
 - **Simpler Docker builds:** Container builds are more consistent because the Dockerfile no longer uses Go build cache mounts.
 
 ### 🔧 Fixes
