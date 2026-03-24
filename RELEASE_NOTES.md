@@ -14,24 +14,24 @@ Hi folks! Here’s what we shipped in v0.27.7.
 ```json
 {
   "✨ What's New": [
-    "You can now set the Cardano network identifier in configuration so the node connects to the right network more reliably. This adds a configurable `networkMagic` value and passes it through the updated `gouroboros/dingo` node options.",
-    "You can now enable compression for blob storage to reduce disk usage and improve storage efficiency in some environments. This adds configurable Snappy compression for the Badger-backed blob store and applies it when building Badger options.",
-    "Development networks now include an additional transaction pump service to help generate and test transaction flow more easily. This adds a `txpump` service and volumes to devnet, and also reduces `k` and `epochLength` in testnet parameters to better match faster testing needs."
+    "You can now set the Cardano network identifier in configuration so the node connects to the right network more reliably.",
+    "You can now enable compression for blob storage to reduce disk usage and improve storage efficiency in some environments.",
+    "Development networks now include an additional transaction pump service to help generate and test transaction flow more easily."
   ],
   "💪 Improvements": [
-    "Chain following and recovery is now more stable during tip changes and temporary peer issues, so the node can return to a healthy syncing state with fewer manual interventions. This refines chain selection and chain-sync recovery by tracking observed tips and peer-activity events, using locally observed frontiers and liveness touches, and tightening tip plausibility checks.",
-    "Rollback and ledger replay behavior is now safer and more predictable, reducing the risk of incorrect state after reorganizations. This tightens replay/rollback guards, adds non-mutating rollback validation, simplifies primary-chain rewind target-tip handling, and adjusts event publication and Plutus error handling with updated test coverage.",
-    "Rewind and pruning operations now put less pressure on storage backends, improving performance and reliability during larger cleanups. This refactors rewind to delete blocks in indexed batches with bounded write transactions and adds/updates tests for primary-chain rewind pruning behavior.",
-    "Peer selection now better preserves stable connections, which can reduce churn when multiple peers report equivalent chain tips. This refines best-peer selection to keep incumbents when tips, priority, and VRF are equal, with corresponding tests."
+    "Chain following and recovery is now more stable during tip changes and temporary peer issues, so the node can return to a healthy syncing state with fewer manual interventions.",
+    "Rollback and ledger replay behavior is now safer and more predictable, reducing the risk of incorrect state after reorganizations.",
+    "Rewind and pruning operations now put less pressure on storage backends, improving performance and reliability during larger cleanups.",
+    "Peer selection now better preserves stable connections, which can reduce churn when multiple peers report equivalent chain tips."
   ],
   "📋 What You Need to Know": [
-    "If you run the node against different Cardano networks, you may want to review your configuration to ensure the correct network is selected. Set `networkMagic` in your config as needed so the updated `gouroboros/dingo` options initialize the node with the intended network ID.",
-    "If you rely on custom Docker build performance optimizations, be aware that container builds may behave differently. The Dockerfile removes Go-related build cache mounts, which can change how intermediate layers are reused in some build setups.",
-    "You may notice routine updates to build tooling and libraries as part of keeping the project secure and compatible. Several dependencies and CI workflows were updated (including Go modules, OpenTelemetry exporters, cloud tooling, and GitHub Actions cache), which should be transparent to most users unless you pin exact versions in your environment."
+    "If you run the node against different Cardano networks, you may want to review your configuration to ensure the correct network is selected.",
+    "If you rely on custom Docker build performance optimizations, be aware that container builds may behave differently.",
+    "You may notice routine updates to build tooling and libraries as part of keeping the project secure and compatible."
   ],
   "🔧 Fixes": [
-    "Blob deletion now better matches transaction behavior, reducing inconsistencies when errors occur during cleanup. This aligns blob deletion with transaction semantics by using the caller’s blob transaction when available, otherwise batching deletions in blob-only transactions, and adds tests using a mock blob store to validate behavior and error accounting.",
-    "Missing blob data is now handled more gracefully so recovery is possible instead of failing hard in some cases. This adds UTxO CBOR recovery logic when referenced blobs are missing and updates behavior to account for absent blob content during processing."
+    "Blob deletion now better matches transaction behavior, reducing inconsistencies when errors occur during cleanup.",
+    "Missing blob data is now handled more gracefully so recovery is possible instead of failing hard in some cases."
   ]
 }
 
