@@ -161,120 +161,6 @@ func CertDepositConway(
 	}
 }
 
-// conwayUtxoValidationRules overrides gouroboros rule 7 with a fixed version.
-// Upstream rule 7 (UtxoValidateRedeemerAndScriptWitnesses) rejects transactions
-// that have a ScriptDataHash and witness datums but no redeemers. Per the
-// Cardano spec, ScriptDataHash is valid when witness datums are present even
-// without redeemers (e.g. script deployment transactions).
-var conwayUtxoValidationRules []lcommon.UtxoValidationRuleFunc
-
-func init() {
-	conwayUtxoValidationRules = make(
-		[]lcommon.UtxoValidationRuleFunc,
-		len(conway.UtxoValidationRules),
-	)
-	copy(conwayUtxoValidationRules, conway.UtxoValidationRules)
-	// Replace rule 7 with fixed version
-	conwayUtxoValidationRules[7] = fixedUtxoValidateRedeemerAndScriptWitnesses
-}
-
-// fixedUtxoValidateRedeemerAndScriptWitnesses is a corrected version of
-// conway.UtxoValidateRedeemerAndScriptWitnesses. The upstream version rejects
-// transactions with ScriptDataHash but no redeemers, even when witness datums
-// are present. Per the Cardano ledger spec, ScriptDataHash is required when
-// either redeemers OR witness datums are present.
-func fixedUtxoValidateRedeemerAndScriptWitnesses(
-	tx lcommon.Transaction,
-	slot uint64,
-	ls lcommon.LedgerState,
-	pp lcommon.ProtocolParameters,
-) error {
-	wits := tx.Witnesses()
-	redeemerCount := 0
-	if wits != nil {
-		if r := wits.Redeemers(); r != nil {
-			for range r.Iter() {
-				redeemerCount++
-			}
-		}
-	}
-
-	hasPlutusWitness := false
-	hasPlutusReference := false
-	if wits != nil {
-		hasPlutusWitness = len(wits.PlutusV1Scripts()) > 0 ||
-			len(wits.PlutusV2Scripts()) > 0 ||
-			len(wits.PlutusV3Scripts()) > 0
-	}
-
-	for _, refInput := range tx.ReferenceInputs() {
-		utxo, err := ls.UtxoById(refInput)
-		if err != nil {
-			return lcommon.ReferenceInputResolutionError{
-				Input: refInput,
-				Err:   err,
-			}
-		}
-		if utxo.Output == nil {
-			continue
-		}
-		script := utxo.Output.ScriptRef()
-		if script == nil {
-			continue
-		}
-		switch script.(type) {
-		case lcommon.PlutusV1Script, lcommon.PlutusV2Script, lcommon.PlutusV3Script:
-			hasPlutusReference = true
-		}
-		if hasPlutusReference {
-			break
-		}
-	}
-
-	if !hasPlutusReference {
-		for _, input := range tx.Inputs() {
-			utxo, err := ls.UtxoById(input)
-			if err != nil {
-				continue
-			}
-			if utxo.Output == nil {
-				continue
-			}
-			script := utxo.Output.ScriptRef()
-			if script == nil {
-				continue
-			}
-			switch script.(type) {
-			case lcommon.PlutusV1Script, lcommon.PlutusV2Script, lcommon.PlutusV3Script:
-				hasPlutusReference = true
-			}
-			if hasPlutusReference {
-				break
-			}
-		}
-	}
-
-	// FIX: Per Cardano spec, ScriptDataHash is valid when witness datums
-	// are present even without redeemers (e.g. script deployment TXs).
-	// Upstream gouroboros only checks redeemerCount here.
-	if tx.ScriptDataHash() != nil && redeemerCount == 0 {
-		hasDatums := wits != nil && len(wits.PlutusData()) > 0
-		if !hasDatums {
-			return conway.MissingRedeemersForScriptDataHashError{}
-		}
-	}
-
-	if redeemerCount > 0 && (!hasPlutusWitness && !hasPlutusReference) {
-		return conway.MissingPlutusScriptWitnessesError{}
-	}
-
-	if redeemerCount == 0 && hasPlutusWitness {
-		return conway.ExtraneousPlutusScriptWitnessesError{}
-	}
-
-	return nil
-}
-
 func ValidateTxConway(
 	tx lcommon.Transaction,
 	slot uint64,
@@ -289,7 +175,7 @@ func ValidateTxConway(
 	// require valid structure, fees, and UTxO references for collateral.
 	errs := []error{}
 	var err error
-	for idx, validationFunc := range conwayUtxoValidationRules {
+	for idx, validationFunc := range conway.UtxoValidationRules {
 		err = validationFunc(tx, slot, ls, pp)
 		if err != nil {
 			errs = append(
