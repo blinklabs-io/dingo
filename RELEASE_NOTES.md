@@ -3,7 +3,7 @@
 
 ## v0.27.7 (March 24, 2026)
 
-**Title:** v0.27.7 updates
+**Title:** Steadier sync and leaner storage
 
 **Date:** March 24, 2026
 
@@ -11,31 +11,33 @@
 
 Hi folks! Here’s what we shipped in v0.27.7.
 
-```json
-{
-  "✨ What's New": [
-    "You can now set the Cardano network identifier in configuration so the node connects to the right network more reliably.",
-    "You can now enable compression for blob storage to reduce disk usage and improve storage efficiency in some environments.",
-    "Development networks now include an additional transaction pump service to help generate and test transaction flow more easily."
-  ],
-  "💪 Improvements": [
-    "Chain following and recovery is now more stable during tip changes and temporary peer issues, so the node can return to a healthy syncing state with fewer manual interventions.",
-    "Rollback and ledger replay behavior is now safer and more predictable, reducing the risk of incorrect state after reorganizations.",
-    "Rewind and pruning operations now put less pressure on storage backends, improving performance and reliability during larger cleanups.",
-    "Peer selection now better preserves stable connections, which can reduce churn when multiple peers report equivalent chain tips."
-  ],
-  "📋 What You Need to Know": [
-    "If you run the node against different Cardano networks, you may want to review your configuration to ensure the correct network is selected.",
-    "If you rely on custom Docker build performance optimizations, be aware that container builds may behave differently.",
-    "You may notice routine updates to build tooling and libraries as part of keeping the project secure and compatible."
-  ],
-  "🔧 Fixes": [
-    "Blob deletion now better matches transaction behavior, reducing inconsistencies when errors occur during cleanup.",
-    "Missing blob data is now handled more gracefully so recovery is possible instead of failing hard in some cases."
-  ]
-}
+### ✨ What's New
 
-```
+- **Configurable network ID:** Connecting to the right Cardano network is more reliable because you can now set the network identifier in configuration.
+- **Optional blob-store compression:** Disk usage can be lower because you can now enable compression for blob storage in some environments.
+- **Devnet transaction pump:** Testing transaction flow is easier because development networks now include an additional transaction pump service.
+
+### 💪 Improvements
+
+- **More stable chain following:** Sync needs fewer manual interventions because chain following and recovery is now more stable during tip changes and temporary peer issues.
+- **Safer rollbacks and replay:** Reorg handling is more predictable because rollback and ledger replay behavior is now safer.
+- **Lighter rewind pruning:** Larger cleanups are smoother because rewind and pruning operations now put less pressure on storage backends.
+- **Stickier best-peer selection:** Peer churn can be lower because peer selection now better preserves stable connections when multiple peers report equivalent tips.
+
+### 🔧 Fixes
+
+- **More consistent blob deletion:** Cleanup is more reliable because blob deletion now better matches transaction behavior.
+- **Graceful missing-blob recovery:** Processing is more resilient because missing blob data is now handled more gracefully in some cases.
+
+### 📋 What You Need to Know
+
+- **Multi-network deployments:** If you run against different Cardano networks, review your config to ensure the correct network is selected.
+- **Docker builds:** If you rely on custom Docker build caching, container builds may behave differently.
+- **Tooling refreshes:** Routine updates to build tooling and libraries may land as part of keeping the project secure and compatible.
+
+### 🙏 Thank You
+
+Thank you for trying!
 
 ---
 
