@@ -264,16 +264,22 @@ func (ls *LedgerState) handleChainSwitchEvent(evt event.Event) {
 	replayConnId, err := ls.handoffPipelineOnSwitchLocked(
 		e.NewConnectionId,
 	)
-	ls.chainsyncBlockfetchMutex.Unlock()
 	if err != nil {
 		ls.config.Logger.Warn(
-			"failed to hand off chainsync pipeline on chain switch",
+			"failed to hand off chainsync pipeline on chain switch, resetting pipeline",
 			"component", "ledger",
 			"connection_id", e.NewConnectionId.String(),
 			"error", err,
 		)
+		// Clear orphaned headers and stale connection refs so the
+		// pipeline can accept headers from reconnected peers instead
+		// of stalling permanently.
+		ls.clearQueuedHeaders()
+		ls.selectedBlockfetchConnId = ouroboros.ConnectionId{}
+		ls.chainsyncBlockfetchMutex.Unlock()
 		return
 	}
+	ls.chainsyncBlockfetchMutex.Unlock()
 	if connIdKey(replayConnId) != "" {
 		ls.replayBufferedHeadersAsync(replayConnId)
 	}
@@ -397,15 +403,18 @@ func (ls *LedgerState) detectConnectionSwitch() (
 			replayConnId, err := ls.handoffPipelineOnSwitchLocked(
 				*activeConnId,
 			)
-			ls.chainsyncBlockfetchMutex.Unlock()
 			if err != nil {
 				ls.config.Logger.Warn(
-					"failed to hand off chainsync pipeline after active connection change",
+					"failed to hand off chainsync pipeline after active connection change, resetting pipeline",
 					"component", "ledger",
 					"connection_id", activeConnId.String(),
 					"error", err,
 				)
-			} else if connIdKey(replayConnId) != "" {
+				ls.clearQueuedHeaders()
+				ls.selectedBlockfetchConnId = ouroboros.ConnectionId{}
+			}
+			ls.chainsyncBlockfetchMutex.Unlock()
+			if err == nil && connIdKey(replayConnId) != "" {
 				ls.replayBufferedHeadersAsync(replayConnId)
 			}
 			// Clear per-connection state (e.g., header dedup cache)
@@ -679,7 +688,6 @@ func desiredBlockfetchBatchHeaders(
 		}
 		return min(1, maxHeaders)
 	}
-	// All switch cases produce small constants, so the final int() is safe.
 	var minHeaders int
 	switch {
 	case gapBlocks > 64:
@@ -689,8 +697,7 @@ func desiredBlockfetchBatchHeaders(
 	case gapBlocks > 4:
 		minHeaders = 2
 	default:
-		// gapBlocks is at most 4 here, safe to narrow.
-		minHeaders = int(gapBlocks) //nolint:gosec
+		minHeaders = int(gapBlocks)
 	}
 	minHeaders = min(minHeaders, blockfetchMaxBatchHeadersWhenBehind)
 	return min(minHeaders, maxHeaders)
@@ -1144,13 +1151,9 @@ func (ls *LedgerState) recoverPeerHeaderHistoryFromPointLocked(
 				continue
 			}
 			if err := ls.chain.AddBlockHeader(evt.BlockHeader); err != nil {
-				// Header replay failed; clear state so the caller
-				// retries with a different peer. The error is not
-				// propagated because zero replayed headers already
-				// signals "nothing usable".
 				ls.clearQueuedHeaders()
 				ls.headerPipelineConnId = ouroboros.ConnectionId{}
-				return 0, nil //nolint:nilerr
+				return 0, err
 			}
 		}
 		if ls.chain.HeaderCount() == 0 {
@@ -1635,14 +1638,12 @@ func (ls *LedgerState) tryResolveFork(
 		if ls.chainsyncBlockfetchReadyChan == nil {
 			ls.selectedBlockfetchConnId = e.ConnectionId
 			if err := ls.startQueuedBlockfetchLocked(e.ConnectionId); err != nil {
-				ls.chainsyncBlockfetchMutex.Unlock()
 				ls.config.Logger.Warn(
 					"failed to start blockfetch after fork rollback",
 					"component", "ledger",
 					"error", err,
 					"connection_id", e.ConnectionId.String(),
 				)
-				return false
 			}
 		}
 		ls.chainsyncBlockfetchMutex.Unlock()

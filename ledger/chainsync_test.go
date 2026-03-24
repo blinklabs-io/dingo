@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"strings"
 	"testing"
 
@@ -26,6 +27,79 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 )
+
+func TestDesiredBlockfetchBatchHeaders(t *testing.T) {
+	testCases := []struct {
+		name       string
+		gapSlots   uint64
+		gapBlocks  uint64
+		maxHeaders int
+		want       int
+	}{
+		{
+			name:       "no gap",
+			gapSlots:   0,
+			gapBlocks:  0,
+			maxHeaders: 16,
+			want:       0,
+		},
+		{
+			name:       "slot gap without block gap",
+			gapSlots:   128,
+			gapBlocks:  0,
+			maxHeaders: 16,
+			want:       1,
+		},
+		{
+			name:       "small block gap",
+			gapSlots:   128,
+			gapBlocks:  3,
+			maxHeaders: 16,
+			want:       3,
+		},
+		{
+			name:       "medium block gap",
+			gapSlots:   128,
+			gapBlocks:  8,
+			maxHeaders: 16,
+			want:       2,
+		},
+		{
+			name:       "large block gap",
+			gapSlots:   128,
+			gapBlocks:  32,
+			maxHeaders: 16,
+			want:       4,
+		},
+		{
+			name:       "overflow-sized block gap stays bounded",
+			gapSlots:   128,
+			gapBlocks:  math.MaxUint64,
+			maxHeaders: 16,
+			want:       8,
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			got := desiredBlockfetchBatchHeaders(
+				testCase.gapSlots,
+				testCase.gapBlocks,
+				testCase.maxHeaders,
+			)
+			if got != testCase.want {
+				t.Fatalf(
+					"desiredBlockfetchBatchHeaders(%d, %d, %d) = %d, want %d",
+					testCase.gapSlots,
+					testCase.gapBlocks,
+					testCase.maxHeaders,
+					got,
+					testCase.want,
+				)
+			}
+		})
+	}
+}
 
 // TestCalculateEpochNonce_ByronEra tests epoch nonce calculation in Byron era
 func TestCalculateEpochNonce_ByronEra(t *testing.T) {

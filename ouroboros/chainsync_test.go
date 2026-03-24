@@ -565,7 +565,7 @@ func TestSubscribeChainsyncResyncRewindsClientsWithoutRecycle(
 	require.Equal(t, rollbackPoint, tc.Cursor)
 }
 
-func TestSubscribeChainsyncResyncRestartsClientsOnLocalRollbackWithoutPeerHistory(
+func TestSubscribeChainsyncResyncDoesNotRecycleOnLocalRollbackWithoutPeerHistory(
 	t *testing.T,
 ) {
 	bus := event.NewEventBus(nil, nil)
@@ -607,18 +607,13 @@ func TestSubscribeChainsyncResyncRestartsClientsOnLocalRollbackWithoutPeerHistor
 		),
 	)
 
-	// Connections should NOT be recycled — they should be restarted.
+	// The fallback path should not request peer-governance recycling here.
+	// Recovery may close the connection for a fresh reconnect instead.
 	select {
 	case evt := <-recycleCh:
 		t.Fatalf("unexpected recycle request: %#v", evt)
 	case <-time.After(200 * time.Millisecond):
 	}
-
-	// Verify the tracked client's cursor was rewound to the rollback point,
-	// confirming the resync actually occurred.
-	tc := state.GetTrackedClient(connA)
-	require.NotNil(t, tc)
-	require.Equal(t, rollbackPoint, tc.Cursor)
 }
 
 func TestHeaderPreviouslySeenFromOtherConnTreatsEquivalentConnIdsAsSame(

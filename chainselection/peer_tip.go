@@ -23,12 +23,11 @@ import (
 
 // PeerChainTip tracks the chain tip reported by a specific peer.
 type PeerChainTip struct {
-	ConnectionId   ouroboros.ConnectionId
-	Tip            ochainsync.Tip
-	ObservedTip    ochainsync.Tip
-	ObservedTipSet bool   // true when ObservedTip has been explicitly set
-	VRFOutput      []byte // VRF output from tip block for tie-breaking
-	LastUpdated    time.Time
+	ConnectionId ouroboros.ConnectionId
+	Tip          ochainsync.Tip
+	ObservedTip  ochainsync.Tip
+	VRFOutput    []byte // VRF output from tip block for tie-breaking
+	LastUpdated  time.Time
 }
 
 // NewPeerChainTip creates a new PeerChainTip with the given connection ID,
@@ -39,12 +38,11 @@ func NewPeerChainTip(
 	vrfOutput []byte,
 ) *PeerChainTip {
 	return &PeerChainTip{
-		ConnectionId:   connId,
-		Tip:            tip,
-		ObservedTip:    tip,
-		ObservedTipSet: true,
-		VRFOutput:      vrfOutput,
-		LastUpdated:    time.Now(),
+		ConnectionId: connId,
+		Tip:          tip,
+		ObservedTip:  tip,
+		VRFOutput:    vrfOutput,
+		LastUpdated:  time.Now(),
 	}
 }
 
@@ -62,7 +60,6 @@ func (p *PeerChainTip) UpdateTipWithObserved(
 ) {
 	p.Tip = tip
 	p.ObservedTip = observedTip
-	p.ObservedTipSet = true
 	p.VRFOutput = vrfOutput
 	p.LastUpdated = time.Now()
 }
@@ -75,7 +72,8 @@ func (p *PeerChainTip) SelectionTip() ochainsync.Tip {
 	if p == nil {
 		return ochainsync.Tip{}
 	}
-	if p.ObservedTipSet {
+	if p.ObservedTip.BlockNumber > 0 || p.ObservedTip.Point.Slot > 0 ||
+		len(p.ObservedTip.Point.Hash) > 0 {
 		return p.ObservedTip
 	}
 	return p.Tip

@@ -202,6 +202,62 @@ func TestChainSelectorRemoveBestPeerEmitsChainSwitchEvent(t *testing.T) {
 	}
 }
 
+func TestChainSelectorTouchPeerActivityEmitsChainSwitchEvent(
+	t *testing.T,
+) {
+	eventBus := event.NewEventBus(nil, nil)
+	t.Cleanup(func() { eventBus.Stop() })
+	cs := NewChainSelector(ChainSelectorConfig{
+		EventBus:          eventBus,
+		StaleTipThreshold: time.Second,
+	})
+
+	connId1 := newTestConnectionId(1)
+	connId2 := newTestConnectionId(2)
+
+	tip1 := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 100, Hash: []byte("tip1")},
+		BlockNumber: 60,
+	}
+	tip2 := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 100, Hash: []byte("tip2")},
+		BlockNumber: 50,
+	}
+
+	_, evtCh := eventBus.Subscribe(ChainSwitchEventType)
+
+	cs.UpdatePeerTip(connId1, tip1, nil)
+	cs.UpdatePeerTip(connId2, tip2, nil)
+	cs.EvaluateAndSwitch()
+
+	require.NotNil(t, cs.GetBestPeer())
+	assert.Equal(t, connId1, *cs.GetBestPeer())
+
+	for len(evtCh) > 0 {
+		<-evtCh
+	}
+
+	cs.mutex.Lock()
+	cs.peerTips[connId1].LastUpdated = time.Now().Add(-2 * time.Second)
+	cs.mutex.Unlock()
+
+	cs.TouchPeerActivity(connId2)
+
+	require.NotNil(t, cs.GetBestPeer())
+	assert.Equal(t, connId2, *cs.GetBestPeer())
+
+	select {
+	case evt := <-evtCh:
+		switchEvt, ok := evt.Data.(ChainSwitchEvent)
+		require.True(t, ok, "expected ChainSwitchEvent")
+		assert.Equal(t, connId1, switchEvt.PreviousConnectionId)
+		assert.Equal(t, connId2, switchEvt.NewConnectionId)
+		assert.Equal(t, tip2.BlockNumber, switchEvt.NewTip.BlockNumber)
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("expected ChainSwitchEvent was not emitted")
+	}
+}
+
 func TestChainSelectorSelectBestChain(t *testing.T) {
 	cs := NewChainSelector(ChainSelectorConfig{})
 

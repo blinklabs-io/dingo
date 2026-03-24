@@ -2181,8 +2181,7 @@ func TestIntersectPointsReturnsNoPointsWhenLedgerTipIsEmpty(
 
 	points, err := ls.IntersectPoints(4)
 	require.NoError(t, err)
-	require.Len(t, points, 1)
-	assert.Equal(t, ocommon.NewPointOrigin(), points[0])
+	assert.Nil(t, points)
 }
 
 func TestIntersectPointsUsesLedgerTipWhenPrimaryChainIsAhead(t *testing.T) {

@@ -307,14 +307,30 @@ func (cs *ChainSelector) updatePeerTipObserved(
 }
 
 func (cs *ChainSelector) TouchPeerActivity(connId ouroboros.ConnectionId) {
-	cs.mutex.Lock()
-	defer cs.mutex.Unlock()
+	shouldEvaluate := false
 
+	cs.mutex.Lock()
 	peerTip, exists := cs.peerTips[connId]
 	if !exists {
+		cs.mutex.Unlock()
 		return
 	}
 	peerTip.Touch()
+	newBest := cs.selectBestChainLocked()
+	switch {
+	case cs.bestPeerConn == nil && newBest != nil:
+		shouldEvaluate = true
+	case cs.bestPeerConn != nil && newBest == nil:
+		shouldEvaluate = true
+	case cs.bestPeerConn != nil && newBest != nil &&
+		*cs.bestPeerConn != *newBest:
+		shouldEvaluate = true
+	}
+	cs.mutex.Unlock()
+
+	if shouldEvaluate {
+		cs.EvaluateAndSwitch()
+	}
 }
 
 // evictLeastRecentPeerLocked removes the peer with the oldest LastUpdated
