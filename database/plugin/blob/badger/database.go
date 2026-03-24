@@ -247,6 +247,7 @@ type BlobStoreBadger struct {
 	memTableSize         int64
 	valueThreshold       int64
 	compactBlockMetadata bool
+	compressionEnabled   bool
 	gcEnabled            bool
 	deferOpen            bool // when true, Badger is opened in Start() not New()
 }
@@ -257,12 +258,13 @@ type BlobStoreBadger struct {
 func New(opts ...BlobStoreBadgerOptionFunc) (*BlobStoreBadger, error) {
 	db := &BlobStoreBadger{
 		// Set defaults
-		gcEnabled:        true, // Enable GC by default for disk-backed stores
-		blockCacheSize:   DefaultBlockCacheSize,
-		indexCacheSize:   DefaultIndexCacheSize,
-		valueLogFileSize: int64(DefaultValueLogFileSize),
-		memTableSize:     int64(DefaultMemTableSize),
-		valueThreshold:   int64(DefaultValueThreshold),
+		gcEnabled:          true, // Enable GC by default for disk-backed stores
+		compressionEnabled: true, // Snappy compression by default
+		blockCacheSize:     DefaultBlockCacheSize,
+		indexCacheSize:     DefaultIndexCacheSize,
+		valueLogFileSize:   int64(DefaultValueLogFileSize),
+		memTableSize:       int64(DefaultMemTableSize),
+		valueThreshold:     int64(DefaultValueThreshold),
 	}
 	for _, opt := range opts {
 		opt(db)
@@ -289,7 +291,8 @@ func (db *BlobStoreBadger) open() error {
 			// The default INFO logging is a bit verbose
 			WithLoggingLevel(badger.WARNING).
 			WithInMemory(true).
-			WithValueThreshold(db.valueThreshold)
+			WithValueThreshold(db.valueThreshold).
+			WithCompression(db.badgerCompression())
 		blobDb, err = badger.Open(badgerOpts)
 		if err != nil {
 			return fmt.Errorf("badger open in-memory: %w", err)
@@ -317,7 +320,7 @@ func (db *BlobStoreBadger) open() error {
 			WithValueLogFileSize(db.valueLogFileSize).
 			WithMemTableSize(db.memTableSize).
 			WithValueThreshold(db.valueThreshold).
-			WithCompression(options.Snappy)
+			WithCompression(db.badgerCompression())
 		blobDb, err = badger.Open(badgerOpts)
 		if err != nil {
 			return fmt.Errorf("badger open on-disk: %w", err)
@@ -337,6 +340,13 @@ func (db *BlobStoreBadger) open() error {
 		)
 	}
 	return nil
+}
+
+func (db *BlobStoreBadger) badgerCompression() options.CompressionType {
+	if db.compressionEnabled {
+		return options.Snappy
+	}
+	return options.None
 }
 
 func (d *BlobStoreBadger) init() error {
