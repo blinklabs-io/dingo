@@ -14,15 +14,15 @@ Hi folks! Here’s what we shipped in v0.27.7.
 ### ✨ What's New
 
 - **Configurable `networkMagic`:** Running on non-default networks is easier because you can now set `networkMagic` in your config instead of relying on hard-coded defaults.
-- **Badger blob compression (Snappy):** Storage can be leaner because you can now enable optional Snappy compression for the Badger-backed blob store.
+- **Badger blob compression (Snappy):** Disk usage can be smaller because you can now enable optional Snappy compression for the Badger-backed blob store.
 - **Devnet `txpump` service:** Testing transaction flows is easier because devnet now includes a `txpump` service.
 
 ### 💪 Improvements
 
 - **Steadier chain-sync and selection:** Sync stays more rock-solid because chain-sync and chain selection now behave more reliably under competing peers and fast-moving tips.
-- **Safer rollbacks and ledger replay:** Recoveries are easier to reason about because rollback and ledger replay behavior is now safer during rewinds.
+- **Safer rollbacks and ledger replay:** Recovery is easier to reason about because rollback and ledger replay behavior is now safer during rewinds.
 - **More predictable rewinds and pruning:** Maintenance runs finish more consistently because rewind and pruning operations now complete more predictably with less database write pressure.
-- **More correct blob deletion:** Recoverability is easier because blob deletion now aligns more closely with transaction boundaries.
+- **More correct blob deletion:** Recovery is easier because blob deletion now aligns more closely with transaction boundaries.
 - **Dependency refresh:** Builds are more rock-solid because telemetry and build-tooling dependencies were refreshed for compatibility and maintenance.
 - **Simpler Docker builds:** Container builds are more consistent because the Dockerfile no longer uses Go build cache mounts.
 
