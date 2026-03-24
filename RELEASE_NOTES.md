@@ -32,7 +32,7 @@ Hi folks! Here’s what we shipped in v0.27.7.
 ### 📋 What You Need to Know
 
 - **Multi-network deployments:** If you run against different Cardano networks, review your config to ensure the correct network is selected.
-- **Docker builds:** If you rely on custom Docker build caching, container builds may behave differently.
+- **Docker builds:** If you rely on custom Docker build caching, Docker builds may behave differently.
 - **Tooling refreshes:** Routine updates to build tooling and libraries may land as part of keeping the project secure and compatible.
 
 ### 🙏 Thank You
