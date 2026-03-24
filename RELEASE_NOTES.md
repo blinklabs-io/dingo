@@ -1,6 +1,63 @@
 # Release Notes
 
 
+## v0.27.7 (March 24, 2026)
+
+**Title:** Operational and API refinements
+
+**Date:** March 24, 2026
+
+**Version:** v0.27.7
+
+Hi folks! Here’s what we shipped in v0.27.7.
+
+### ✨ What's New
+
+```json
+{
+  "✨ What's New": [
+    "You can now tune network behavior via configuration instead of relying on hard-coded defaults. This adds a configurable `networkMagic` value and wires it through to the node using updated `gouroboros/dingo` options.",
+    "You can now enable compression for blob storage to reduce disk usage and improve storage efficiency. This adds configurable Snappy compression for the Badger-backed blob store and applies it when constructing Badger options.",
+    "Development networks now include an additional transaction pumping service to better exercise transaction flows during testing. This adds a `txpump` service and volumes to devnet and also reduces `k` and `epochLength` in testnet parameters to speed up test cycles."
+  ],
+  "💪 Improvements": [
+    "Chain syncing and chain selection now behave more reliably under competing peers and fast-moving tips. This refines chain selection and chainsync recovery by adding observed tip tracking and peer-activity events, using locally observed frontiers and liveness touches, and improving best-peer selection to preserve incumbents when tips, priority, and VRF are equal.",
+    "Rollback and ledger replay behaviors are now safer and easier to reason about during rewinds and recovery. This adds non-mutating rollback validation, tightens ledger replay/rollback with additional safety guards, simplifies primary-chain rewind target-tip handling, and updates associated test coverage.",
+    "Pruning and rewind operations now complete more predictably and with less database write pressure. This refactors primary-chain rewind to delete blocks in indexed batches with bounded write transactions and adds/updates tests for rewind pruning behavior.",
+    "Blob deletion now matches transaction boundaries more closely, which improves correctness and recoverability when storage is under pressure. This aligns blob deletion with transaction semantics by using the caller’s blob transaction when available (or batched blob-only transactions otherwise) and adds UTxO CBOR recovery when blobs are missing, with tests using a mock blob store to validate error accounting.",
+    "Telemetry and build tooling dependencies are now more up to date for better compatibility and maintenance. This updates OpenTelemetry exporters (including OTLP trace), Google Cloud Storage dependencies, `sops` and related cloud/container tooling, bumps `github.com/klauspost/compress` to v1.18.5, updates `gouroboros` to v0.163.1, refreshes GitHub Actions `actions/cache` to v5.0.4, and moves the Docker build base image to `blinklabs-io/go:1.25.8-1`.",
+    "Container builds are now simpler and more consistent across environments. This removes Docker build cache mounts from Go-related `RUN` steps in the Dockerfile."
+  ],
+  "📋 What You Need to Know": [
+    "If you run the node on a non-default network, you may need to explicitly set the network identifier in your configuration. This release introduces a configurable `networkMagic`, and environments that previously depended on implicit defaults should verify the configured value is correct for their target network.",
+    "If you manage blob storage, you can choose whether to enable compression and should monitor resource tradeoffs after changing the setting. Snappy compression for the Badger blob store is now configurable, which may reduce storage size while changing CPU usage characteristics."
+  ],
+  "🔧 Fixes": [
+    "Event emission and smart-contract error handling are now more consistent during chain sync and recovery. This adjusts event publication behavior and refines Plutus error handling as part of the broader chainsync recovery and rollback safety updates."
+  ]
+}
+
+```
+
+### 💪 Improvements
+
+_Release notes for this section will be formatted from the raw entries above._
+
+### 🔧 Fixes
+
+_Release notes for this section will be formatted from the raw entries above._
+
+### 📋 What You Need to Know
+
+_Release notes for this section will be formatted from the raw entries above._
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
+
 ## v0.27.5 (March 19, 2026)
 
 **Title:** Faster UTxO lookups and steadier sync
