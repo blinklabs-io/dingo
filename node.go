@@ -366,6 +366,9 @@ func New(cfg Config) (*Node, error) {
 	if err := n.configPopulateNetworkMagic(); err != nil {
 		return nil, fmt.Errorf("invalid configuration: %w", err)
 	}
+	// Wrap the prometheus registry with a "network" label so all metrics
+	// registered by subsystems carry the network name automatically.
+	n.configWrapPromRegistry()
 	if err := n.configValidate(); err != nil {
 		return nil, fmt.Errorf("invalid configuration: %w", err)
 	}
