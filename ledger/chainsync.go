@@ -969,14 +969,31 @@ func (ls *LedgerState) handleEventChainsyncRollback(e ChainsyncEvent) error {
 		}
 	}
 	if slotCount >= rollbackLoopThreshold {
-		ls.config.Logger.Warn(
-			"rollback loop detected, skipping rollback to break loop",
-			"component", "ledger",
-			"slot", e.Point.Slot,
-			"count", slotCount,
-			"window", rollbackLoopWindow,
-		)
-		return nil
+		// Exempt rollbacks to slots where we forged a block — fork
+		// resolution on our own block is normal Ouroboros behavior
+		// (slot battles), not a pathological loop.
+		skipRollback := true
+		if checker := ls.loadForgedBlockChecker(); checker != nil {
+			if _, forged := checker.WasForgedByUs(e.Point.Slot); forged {
+				ls.config.Logger.Info(
+					"allowing rollback on forged slot (slot battle resolution)",
+					"component", "ledger",
+					"slot", e.Point.Slot,
+					"count", slotCount,
+				)
+				skipRollback = false
+			}
+		}
+		if skipRollback {
+			ls.config.Logger.Warn(
+				"rollback loop detected, skipping rollback to break loop",
+				"component", "ledger",
+				"slot", e.Point.Slot,
+				"count", slotCount,
+				"window", rollbackLoopWindow,
+			)
+			return nil
+		}
 	}
 
 	// A rollback to the current tip is a no-op — the peer's
