@@ -147,6 +147,29 @@ func (n *Node) configPopulateNetworkMagic() error {
 	return nil
 }
 
+// configWrapPromRegistry wraps the prometheus registry with a "network" label
+// so that all metrics registered through it carry the network name automatically.
+func (n *Node) configWrapPromRegistry() {
+	if n.config.promRegistry == nil {
+		return
+	}
+	// Determine the network name: prefer the configured name, fall back to
+	// reverse-lookup by network magic.
+	networkName := n.config.network
+	if networkName == "" {
+		if net, ok := ouroboros.NetworkByNetworkMagic(n.config.networkMagic); ok {
+			networkName = net.String()
+		}
+	}
+	if networkName == "" {
+		return
+	}
+	n.config.promRegistry = prometheus.WrapRegistererWith(
+		prometheus.Labels{"network": networkName},
+		n.config.promRegistry,
+	)
+}
+
 // isDevMode returns true if running in development mode
 func (c *Config) isDevMode() bool {
 	return c.runMode == runModeDev
