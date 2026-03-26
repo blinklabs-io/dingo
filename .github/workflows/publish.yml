@@ -244,6 +244,72 @@ jobs:
           subject-name: ghcr.io/${{ github.repository }}
           subject-digest: ${{ steps.antithesis-push.outputs.digest }}
           push-to-registry: true
+      # Txpump image (amd64 only)
+      - id: txpump-meta
+        if: matrix.arch == 'amd64'
+        uses: docker/metadata-action@030e881283bb7a6894de51c315a6bfe6a94e05cf # v6.0.0 https://github.com/docker/metadata-action/releases/tag/v6.0.0
+        with:
+          images: |
+            ghcr.io/${{ github.repository_owner }}/dingo-txpump
+          flavor: |
+            latest=false
+          tags: |
+            # Only version, no revision
+            type=match,pattern=v(.*)-(.*),group=1
+            # branch
+            type=ref,event=branch
+            # semver
+            type=semver,pattern={{version}}
+      - name: Build and push txpump image
+        if: matrix.arch == 'amd64'
+        id: txpump-push
+        uses: docker/build-push-action@d08e5c354a6adb9ed34480a06d141179aa583294 # v7.0.0 https://github.com/docker/build-push-action/releases/tag/v7.0.0
+        with:
+          outputs: "type=registry,push=true"
+          platforms: linux/amd64
+          file: internal/test/antithesis/Dockerfile.txpump
+          tags: ${{ steps.txpump-meta.outputs.tags }}
+          labels: ${{ steps.txpump-meta.outputs.labels }}
+      - name: Attest txpump GHCR image
+        if: matrix.arch == 'amd64'
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0 https://github.com/actions/attest/releases/tag/v4.1.0
+        with:
+          subject-name: ghcr.io/${{ github.repository_owner }}/dingo-txpump
+          subject-digest: ${{ steps.txpump-push.outputs.digest }}
+          push-to-registry: true
+      # Analysis image (amd64 only)
+      - id: analysis-meta
+        if: matrix.arch == 'amd64'
+        uses: docker/metadata-action@030e881283bb7a6894de51c315a6bfe6a94e05cf # v6.0.0 https://github.com/docker/metadata-action/releases/tag/v6.0.0
+        with:
+          images: |
+            ghcr.io/${{ github.repository_owner }}/dingo-analysis
+          flavor: |
+            latest=false
+          tags: |
+            # Only version, no revision
+            type=match,pattern=v(.*)-(.*),group=1
+            # branch
+            type=ref,event=branch
+            # semver
+            type=semver,pattern={{version}}
+      - name: Build and push analysis image
+        if: matrix.arch == 'amd64'
+        id: analysis-push
+        uses: docker/build-push-action@d08e5c354a6adb9ed34480a06d141179aa583294 # v7.0.0 https://github.com/docker/build-push-action/releases/tag/v7.0.0
+        with:
+          outputs: "type=registry,push=true"
+          platforms: linux/amd64
+          file: internal/test/antithesis/Dockerfile.analysis
+          tags: ${{ steps.analysis-meta.outputs.tags }}
+          labels: ${{ steps.analysis-meta.outputs.labels }}
+      - name: Attest analysis GHCR image
+        if: matrix.arch == 'amd64'
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0 https://github.com/actions/attest/releases/tag/v4.1.0
+        with:
+          subject-name: ghcr.io/${{ github.repository_owner }}/dingo-analysis
+          subject-digest: ${{ steps.analysis-push.outputs.digest }}
+          push-to-registry: true
 
   build-image-manifest:
     needs: [build-images]
