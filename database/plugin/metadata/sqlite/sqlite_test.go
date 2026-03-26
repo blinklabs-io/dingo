@@ -292,7 +292,7 @@ func TestTransactionMetadataLabelsIndexAndQuery(t *testing.T) {
 		721,
 		10,
 		0,
-		"asc",
+		false,
 		nil,
 	)
 	if err != nil {
@@ -309,7 +309,7 @@ func TestTransactionMetadataLabelsIndexAndQuery(t *testing.T) {
 		721,
 		1,
 		0,
-		"desc",
+		true,
 		nil,
 	)
 	if err != nil {

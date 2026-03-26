@@ -87,32 +87,13 @@ func extractFromCbor(
 	return ret, nil
 }
 
-// Decode CBOR map keys as (uint64/uint/int/int64)
+// Decode CBOR map keys as uint64 or int64 labels.
 func decodeMetadataLabelMap(
 	metadataCbor []byte,
 ) (map[uint64]cbor.RawMessage, error) {
 	var asUint64 map[uint64]cbor.RawMessage
 	if _, err := cbor.Decode(metadataCbor, &asUint64); err == nil {
 		return asUint64, nil
-	}
-	var asUint map[uint]cbor.RawMessage
-	if _, err := cbor.Decode(metadataCbor, &asUint); err == nil {
-		ret := make(map[uint64]cbor.RawMessage, len(asUint))
-		for k, v := range asUint {
-			ret[uint64(k)] = v
-		}
-		return ret, nil
-	}
-	var asInt map[int]cbor.RawMessage
-	if _, err := cbor.Decode(metadataCbor, &asInt); err == nil {
-		ret := make(map[uint64]cbor.RawMessage, len(asInt))
-		for k, v := range asInt {
-			if k < 0 {
-				return nil, fmt.Errorf("negative metadata label: %d", k)
-			}
-			ret[uint64(k)] = v
-		}
-		return ret, nil
 	}
 	var asInt64 map[int64]cbor.RawMessage
 	if _, err := cbor.Decode(metadataCbor, &asInt64); err == nil {

@@ -484,7 +484,7 @@ func (d *Database) GetTransactionsByMetadataLabel(
 	label uint64,
 	limit int,
 	offset int,
-	order string,
+	descending bool,
 	txn *Txn,
 ) ([]models.Transaction, error) {
 	if txn == nil {
@@ -495,16 +495,16 @@ func (d *Database) GetTransactionsByMetadataLabel(
 		label,
 		limit,
 		offset,
-		order,
+		descending,
 		txn.Metadata(),
 	)
 	if err != nil {
 		return nil, fmt.Errorf(
-			"get txs by metadata label %d limit=%d offset=%d order=%q: %w",
+			"get txs by metadata label %d limit=%d offset=%d descending=%t: %w",
 			label,
 			limit,
 			offset,
-			order,
+			descending,
 			err,
 		)
 	}

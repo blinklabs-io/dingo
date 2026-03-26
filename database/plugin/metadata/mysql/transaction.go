@@ -260,7 +260,7 @@ func (d *MetadataStoreMysql) GetTransactionsByMetadataLabel(
 	label uint64,
 	limit int,
 	offset int,
-	order string,
+	descending bool,
 	txn types.Txn,
 ) ([]models.Transaction, error) {
 	var ret []models.Transaction
@@ -270,7 +270,7 @@ func (d *MetadataStoreMysql) GetTransactionsByMetadataLabel(
 	}
 
 	orderClause := "slot ASC, block_index ASC, id ASC"
-	if strings.EqualFold(order, "desc") {
+	if descending {
 		orderClause = "slot DESC, block_index DESC, id DESC"
 	}
 

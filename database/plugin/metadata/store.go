@@ -272,7 +272,7 @@ type MetadataStore interface {
 		uint64, // label
 		int, // limit
 		int, // offset
-		string, // order: asc|desc
+		bool, // descending
 		types.Txn,
 	) ([]models.Transaction, error)
 

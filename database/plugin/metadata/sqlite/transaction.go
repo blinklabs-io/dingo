@@ -284,7 +284,7 @@ func (d *MetadataStoreSqlite) GetTransactionsByMetadataLabel(
 	label uint64,
 	limit int,
 	offset int,
-	order string,
+	descending bool,
 	txn types.Txn,
 ) ([]models.Transaction, error) {
 	var ret []models.Transaction
@@ -294,7 +294,7 @@ func (d *MetadataStoreSqlite) GetTransactionsByMetadataLabel(
 	}
 
 	orderClause := "slot ASC, block_index ASC, id ASC"
-	if strings.EqualFold(order, "desc") {
+	if descending {
 		orderClause = "slot DESC, block_index DESC, id DESC"
 	}
 
@@ -589,10 +589,6 @@ func (d *MetadataStoreSqlite) SetTransaction(
 	}
 	var metadataLabels []labelcodec.Entry
 	if tx.Metadata() != nil && d.storageMode == types.StorageModeAPI {
-		// tmpMetadata, err := cbor.Encode(tx.Metadata())
-		// if err != nil {
-		// 	return fmt.Errorf("failed to encode metadata: %w", err)
-		// }
 		tmpMetadata, tmpLabels, err := labelcodec.EncodeAndExtract(
 			tx.Metadata(),
 		)
