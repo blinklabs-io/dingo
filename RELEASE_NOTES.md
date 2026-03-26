@@ -1,6 +1,47 @@
 # Release Notes
 
 
+## v0.27.7 (March 24, 2026)
+
+**Title:** Steadier sync and leaner storage
+
+**Date:** March 24, 2026
+
+**Version:** v0.27.7
+
+Hi folks! Here’s what we shipped in v0.27.7.
+
+### ✨ What's New
+
+- **Configurable network ID:** Connecting to the right Cardano network is more rock-solid because you can now set the network identifier in configuration.
+- **Optional blob-store compression:** Disk usage can be lower because you can now enable compression for blob storage in some environments.
+- **Devnet transaction pump:** Testing transaction flow is easier because development networks now include an additional transaction pump service.
+
+### 💪 Improvements
+
+- **More stable chain following:** Sync is more rock-solid because chain following and recovery is now more stable during tip changes and temporary peer issues.
+- **Safer rollbacks and replay:** Reorg handling is more predictable because rollback and ledger replay behavior is now safer.
+- **Lighter rewind pruning:** Larger cleanups are smoother because rewind and pruning operations now put less pressure on storage backends.
+- **Stickier best-peer selection:** Peer churn can be lower because peer selection now better preserves stable connections when multiple peers report equivalent tips.
+
+### 🔧 Fixes
+
+- **More consistent blob deletion:** Cleanup is more reliable because blob deletion now better matches transaction behavior.
+- **Graceful missing-blob recovery:** Processing is more resilient because missing blob data is now handled more gracefully in some cases.
+
+### 📋 What You Need to Know
+
+- **Multi-network deployments:** If you run against different Cardano networks, review your config to ensure the correct network is selected.
+- **Docker builds:** If you rely on custom Docker build caching, Docker builds may behave differently.
+- **Tooling refreshes:** Routine updates to build tooling and libraries may land as part of keeping the project secure and compatible.
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
+
 ## v0.27.5 (March 19, 2026)
 
 **Title:** Faster UTxO lookups and steadier sync
