@@ -256,7 +256,7 @@ func (s *submitServiceServer) EvalTx(
 	tmpRedeemers := make([]*cardano.Redeemer, 0, len(redeemerExUnits))
 	for key, val := range redeemerExUnits {
 		r := &cardano.Redeemer{
-			Purpose: cardano.RedeemerPurpose(key.Tag),
+			Purpose: cardano.RedeemerPurpose(key.Tag + 1), // gouroboros tags are 0-based, cardano tags are offset by 1
 			Index:   key.Index,
 			ExUnits: &cardano.ExUnits{
 				Steps:  uint64(val.Steps),  // nolint:gosec
@@ -541,7 +541,7 @@ func (u *Utxorpc) matchesTxPattern(
 	}
 
 	// Convert everything to utxos for matching
-	var utxos []gledger.TransactionOutput
+	utxos := make([]gledger.TransactionOutput, 0, len(tx.Outputs()))
 	utxos = append(utxos, tx.Outputs()...)
 	if cr := tx.CollateralReturn(); cr != nil {
 		utxos = append(utxos, cr)
