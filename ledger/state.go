@@ -3920,20 +3920,9 @@ func (ls *LedgerState) CountTransactionsInSlotRange(
 	if endSlot < startSlot {
 		return 0, nil
 	}
-	metaStore := ls.db.Metadata()
-	if metaStore == nil {
-		return 0, errors.New("metadata store unavailable")
-	}
-	var db *gorm.DB
-	if reader, ok := metaStore.(metadataReadDbReader); ok {
-		db = reader.ReadDB()
-	} else if reader, ok := metaStore.(metadataDbReader); ok {
-		db = reader.DB()
-	}
-	if db == nil {
-		return 0, errors.New(
-			"metadata store does not expose database handle",
-		)
+	db, err := resolveMetadataQueryDB(ls)
+	if err != nil {
+		return 0, err
 	}
 	var count int64
 	if err := db.
@@ -3950,79 +3939,53 @@ func (ls *LedgerState) CountTransactionsInSlotRange(
 	return int(count), nil
 }
 
-// CountBlocksInSlotRange returns the number of blocks in the inclusive slot
-// range [startSlot, endSlot], along with the first and last block slots found.
-// It is Used by the Blockfrost adapter CurrentEpoch() path so epoch responses can
-// return real block counts and boundary timestamps without
-// walking previous hash through the active chain block-by-block.
+func resolveMetadataQueryDB(ls *LedgerState) (*gorm.DB, error) {
+	metaStore := ls.db.Metadata()
+	if metaStore == nil {
+		return nil, errors.New("metadata store unavailable")
+	}
+	if reader, ok := metaStore.(metadataReadDbReader); ok {
+		if db := reader.ReadDB(); db != nil {
+			return db, nil
+		}
+	}
+	if reader, ok := metaStore.(metadataDbReader); ok {
+		if db := reader.DB(); db != nil {
+			return db, nil
+		}
+	}
+	return nil, errors.New(
+		"metadata store does not expose database handle",
+	)
+}
+
+// CountBlocksInSlotRange returns the number of canonical blocks in the
+// inclusive slot range [startSlot, endSlot], along with the first and last
+// block slots found. It uses canonical metadata rows instead of raw blob keys
+// so orphaned fork blocks do not leak into Blockfrost epoch responses.
 func (ls *LedgerState) CountBlocksInSlotRange(
 	startSlot, endSlot uint64,
 ) (int, uint64, uint64, error) {
 	if endSlot < startSlot {
 		return 0, 0, 0, nil
 	}
-	blob := ls.db.Blob()
-	if blob == nil {
-		return 0, 0, 0, types.ErrBlobStoreUnavailable
+	db, err := resolveMetadataQueryDB(ls)
+	if err != nil {
+		return 0, 0, 0, err
 	}
-	readTxn := blob.NewTransaction(false)
-	defer readTxn.Rollback() //nolint:errcheck
-
-	iterOpts := types.BlobIteratorOptions{
-		Prefix: []byte(types.BlockBlobKeyPrefix),
+	type blockRangeStats struct {
+		Count     int64
+		FirstSlot *uint64
+		LastSlot  *uint64
 	}
-	iter := blob.NewIterator(readTxn, iterOpts)
-	if iter == nil {
-		return 0, 0, 0, errors.New("block iterator unavailable")
-	}
-	defer iter.Close()
-
-	seekKey := append(
-		[]byte(types.BlockBlobKeyPrefix),
-		types.BlockBlobKeyUint64ToBytes(startSlot)...,
-	)
-
-	var (
-		count     int
-		firstSlot uint64
-		lastSlot  uint64
-	)
-	for iter.Seek(seekKey); iter.ValidForPrefix(
-		[]byte(types.BlockBlobKeyPrefix),
-	); iter.Next() {
-		item := iter.Item()
-		if item == nil {
-			continue
-		}
-		key := item.Key()
-		if key == nil {
-			continue
-		}
-		if bytes.HasSuffix(
-			key,
-			[]byte(types.BlockBlobMetadataKeySuffix),
-		) {
-			continue
-		}
-		point, err := database.BlockBlobKeyToPoint(key)
-		if err != nil {
-			return 0, 0, 0, fmt.Errorf(
-				"count blocks in slot range %d-%d: %w",
-				startSlot,
-				endSlot,
-				err,
-			)
-		}
-		if point.Slot > endSlot {
-			break
-		}
-		if count == 0 {
-			firstSlot = point.Slot
-		}
-		lastSlot = point.Slot
-		count++
-	}
-	if err := iter.Err(); err != nil {
+	var stats blockRangeStats
+	if err := db.
+		Model(&models.BlockNonce{}).
+		Select(
+			"COUNT(*) AS count, MIN(slot) AS first_slot, MAX(slot) AS last_slot",
+		).
+		Where("slot >= ? AND slot <= ?", startSlot, endSlot).
+		Scan(&stats).Error; err != nil {
 		return 0, 0, 0, fmt.Errorf(
 			"count blocks in slot range %d-%d: %w",
 			startSlot,
@@ -4030,7 +3993,10 @@ func (ls *LedgerState) CountBlocksInSlotRange(
 			err,
 		)
 	}
-	return count, firstSlot, lastSlot, nil
+	if stats.Count == 0 || stats.FirstSlot == nil || stats.LastSlot == nil {
+		return 0, 0, 0, nil
+	}
+	return int(stats.Count), *stats.FirstSlot, *stats.LastSlot, nil
 }
 
 // resolveValidationEra determines the appropriate era descriptor for
