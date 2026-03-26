@@ -546,6 +546,22 @@ func (n *Node) Run(ctx context.Context) error {
 			LedgerState: state,
 			Logger:      n.config.logger,
 		}, n.db.Blob()))
+
+		pruner := bark.NewPruner(bark.PrunerConfig{
+			LedgerState:    state,
+			DB:             n.db,
+			Logger:         n.config.logger,
+			SecurityWindow: n.config.barkSecurityWindow,
+			Frequency:      time.Hour,
+		})
+
+		if err := pruner.Start(n.ctx); err != nil {
+			return fmt.Errorf("failed to start pruner: %w", err)
+		}
+
+		started = append(started, func() {
+			pruner.Close(context.Background())
+		})
 	}
 
 	// Run DB recovery if needed
