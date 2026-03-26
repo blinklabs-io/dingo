@@ -1,6 +1,6 @@
 module github.com/blinklabs-io/dingo
 
-go 1.25.0
+go 1.25.7
 
 toolchain go1.25.8
 
@@ -16,12 +16,12 @@ require (
 	github.com/aws/smithy-go v1.24.2
 	github.com/blinklabs-io/bark v0.0.2
 	github.com/blinklabs-io/bursa v0.16.0
-	github.com/blinklabs-io/gouroboros v0.163.0
+	github.com/blinklabs-io/gouroboros v0.163.3
 	github.com/blinklabs-io/ouroboros-mock v0.9.1
-	github.com/blinklabs-io/plutigo v0.0.27
+	github.com/blinklabs-io/plutigo v0.0.29
 	github.com/blockfrost/blockfrost-go v0.3.0
 	github.com/btcsuite/btcd/btcutil v1.1.6
-	github.com/consensys/gnark-crypto v0.19.2
+	github.com/consensys/gnark-crypto v0.20.1
 	github.com/dgraph-io/badger/v4 v4.9.1
 	github.com/fxamacker/cbor/v2 v2.9.0
 	github.com/getsops/sops/v3 v3.12.1
