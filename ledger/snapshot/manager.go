@@ -320,6 +320,21 @@ func (m *Manager) CaptureGenesisSnapshot(ctx context.Context) error {
 		return fmt.Errorf("calculate genesis distribution: %w", err)
 	}
 
+	// After Mithril import, slot 0 has no pool data. Fall back to
+	// the latest epoch's start slot where imported pools are visible.
+	if distribution.TotalPools == 0 {
+		epochs, epErr := m.db.GetEpochs(nil)
+		if epErr == nil && len(epochs) > 0 {
+			lastEpoch := epochs[len(epochs)-1]
+			dist2, err2 := calculator.CalculateStakeDistribution(
+				ctx, lastEpoch.StartSlot,
+			)
+			if err2 == nil && dist2.TotalPools > 0 {
+				distribution = dist2
+			}
+		}
+	}
+
 	if distribution.TotalPools == 0 {
 		m.logger.Info(
 			"no genesis pools; leader election disabled"+
