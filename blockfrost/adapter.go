@@ -67,7 +67,9 @@ func (a *NodeAdapter) LatestBlock() (
 	BlockInfo, error,
 ) {
 	tip := a.ledgerState.Tip()
-	block, decodedBlock, err := a.latestBlockData()
+	block, decodedBlock, err := a.latestBlockData(
+		tip.Point.Hash,
+	)
 	if err != nil {
 		return BlockInfo{}, err
 	}
@@ -113,7 +115,10 @@ func (a *NodeAdapter) LatestBlock() (
 func (a *NodeAdapter) LatestBlockTxHashes() (
 	[]string, error,
 ) {
-	_, decodedBlock, err := a.latestBlockData()
+	tip := a.ledgerState.Tip()
+	_, decodedBlock, err := a.latestBlockData(
+		tip.Point.Hash,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -260,25 +265,26 @@ func (a *NodeAdapter) CurrentProtocolParams() (
 	}, nil
 }
 
-func (a *NodeAdapter) latestBlockData() (
+func (a *NodeAdapter) latestBlockData(
+	hash []byte,
+) (
 	models.Block,
 	lcommon.Block,
 	error,
 ) {
-	tip := a.ledgerState.Tip()
-	block, err := a.ledgerState.BlockByHash(tip.Point.Hash)
+	block, err := a.ledgerState.BlockByHash(hash)
 	if err != nil {
 		return models.Block{}, nil, fmt.Errorf(
-			"get tip block by hash %x: %w",
-			tip.Point.Hash,
+			"get block by hash %x: %w",
+			hash,
 			err,
 		)
 	}
 	decodedBlock, err := block.Decode()
 	if err != nil {
 		return models.Block{}, nil, fmt.Errorf(
-			"decode tip block %x: %w",
-			tip.Point.Hash,
+			"decode block %x: %w",
+			hash,
 			err,
 		)
 	}
