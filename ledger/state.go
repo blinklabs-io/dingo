@@ -3567,13 +3567,29 @@ func (ls *LedgerState) EpochNonce(epoch uint64) []byte {
 	ls.RLock()
 	// Check current epoch under read lock; copy nonce if it matches
 	if epoch == ls.currentEpoch.EpochId {
-		if len(ls.currentEpoch.Nonce) == 0 {
+		if len(ls.currentEpoch.Nonce) > 0 {
+			nonce := make([]byte, len(ls.currentEpoch.Nonce))
+			copy(nonce, ls.currentEpoch.Nonce)
 			ls.RUnlock()
+			return nonce
+		}
+		// In-memory nonce empty (e.g. after Mithril import) —
+		// fall through to DB lookup
+		ls.RUnlock()
+		ep, err := ls.db.GetEpoch(epoch, nil)
+		if err != nil {
+			ls.config.Logger.Error(
+				"failed to look up epoch nonce from DB",
+				"epoch", epoch,
+				"error", err,
+			)
 			return nil
 		}
-		nonce := make([]byte, len(ls.currentEpoch.Nonce))
-		copy(nonce, ls.currentEpoch.Nonce)
-		ls.RUnlock()
+		if ep == nil || len(ep.Nonce) == 0 {
+			return nil
+		}
+		nonce := make([]byte, len(ep.Nonce))
+		copy(nonce, ep.Nonce)
 		return nonce
 	}
 	// If the requested epoch is ahead of the ledger state (slot clock
