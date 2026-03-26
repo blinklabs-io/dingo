@@ -252,20 +252,21 @@ func (s *submitServiceServer) EvalTx(
 		tx,
 	)
 	// Populate response
+	redeemerData := redeemerPlutusDataByKey(tx)
 	tmpRedeemers := make([]*cardano.Redeemer, 0, len(redeemerExUnits))
 	for key, val := range redeemerExUnits {
-		tmpRedeemers = append(
-			tmpRedeemers,
-			&cardano.Redeemer{
-				Purpose: cardano.RedeemerPurpose(key.Tag),
-				Index:   key.Index,
-				ExUnits: &cardano.ExUnits{
-					Steps:  uint64(val.Steps),  // nolint:gosec
-					Memory: uint64(val.Memory), // nolint:gosec
-				},
-				// TODO: Payload
+		r := &cardano.Redeemer{
+			Purpose: cardano.RedeemerPurpose(key.Tag),
+			Index:   key.Index,
+			ExUnits: &cardano.ExUnits{
+				Steps:  uint64(val.Steps),  // nolint:gosec
+				Memory: uint64(val.Memory), // nolint:gosec
 			},
-		)
+		}
+		if pd, ok := redeemerData[key]; ok {
+			r.Payload = plutusDataToCardano(pd)
+		}
+		tmpRedeemers = append(tmpRedeemers, r)
 	}
 	var txEval *cardano.TxEval
 	if err != nil {
