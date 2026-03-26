@@ -320,6 +320,42 @@ func (m *Manager) CaptureGenesisSnapshot(ctx context.Context) error {
 		return fmt.Errorf("calculate genesis distribution: %w", err)
 	}
 
+	// After Mithril import, slot 0 has no pool data. Fall back to
+	// the latest epoch's start slot where imported pools are visible.
+	if distribution.TotalPools == 0 {
+		epochs, epErr := m.db.GetEpochs(nil)
+		if epErr != nil {
+			m.logger.Warn(
+				"failed to load epochs for genesis stake fallback",
+				"component", "snapshot",
+				"error", epErr,
+				"total_pools", distribution.TotalPools,
+			)
+		} else if len(epochs) > 0 {
+			lastEpoch := epochs[len(epochs)-1]
+			m.logger.Debug(
+				"attempting genesis stake fallback from latest epoch",
+				"component", "snapshot",
+				"start_slot", lastEpoch.StartSlot,
+				"total_pools", distribution.TotalPools,
+			)
+			dist2, err2 := calculator.CalculateStakeDistribution(
+				ctx, lastEpoch.StartSlot,
+			)
+			if err2 != nil {
+				m.logger.Warn(
+					"failed to calculate fallback genesis stake distribution",
+					"component", "snapshot",
+					"error", err2,
+					"start_slot", lastEpoch.StartSlot,
+					"total_pools", distribution.TotalPools,
+				)
+			} else if dist2.TotalPools > 0 {
+				distribution = dist2
+			}
+		}
+	}
+
 	if distribution.TotalPools == 0 {
 		m.logger.Info(
 			"no genesis pools; leader election disabled"+
