@@ -59,11 +59,13 @@ func plutusDataToCardano(d pdata.PlutusData) *cardano.PlutusData {
 		for i, f := range v.Fields {
 			fields[i] = plutusDataToCardano(f)
 		}
-		tag := uint32(v.Tag)
+		var tag uint32
 		var anyAlt uint64
 		if v.Tag > 127 {
 			tag = 0
 			anyAlt = uint64(v.Tag)
+		} else {
+			tag = uint32(v.Tag)
 		}
 		return &cardano.PlutusData{
 			PlutusData: &cardano.PlutusData_Constr{
