@@ -15,9 +15,18 @@
 package blockfrost
 
 import (
+	"bytes"
 	"encoding/hex"
+	"errors"
+	"fmt"
+	"math"
+	"math/big"
+	"strconv"
 
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/ledger"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	cardano "github.com/utxorpc/go-codegen/utxorpc/v1alpha/cardano"
 )
 
 // NodeAdapter wraps a real dingo Node's LedgerState to
@@ -58,23 +67,45 @@ func (a *NodeAdapter) LatestBlock() (
 	BlockInfo, error,
 ) {
 	tip := a.ledgerState.Tip()
-	// TODO: Retrieve full block details (size, tx count,
-	// slot leader, previous block, epoch, epoch slot)
-	// from the database once block query methods are
-	// available.
+	block, decodedBlock, err := a.latestBlockData(
+		tip.Point.Hash,
+	)
+	if err != nil {
+		return BlockInfo{}, err
+	}
+	epoch, err := a.ledgerState.SlotToEpoch(tip.Point.Slot)
+	if err != nil {
+		return BlockInfo{}, fmt.Errorf(
+			"get epoch for tip slot %d: %w",
+			tip.Point.Slot,
+			err,
+		)
+	}
+	slotTime, err := a.ledgerState.SlotToTime(tip.Point.Slot)
+	if err != nil {
+		return BlockInfo{}, fmt.Errorf(
+			"get time for tip slot %d: %w",
+			tip.Point.Slot,
+			err,
+		)
+	}
 	return BlockInfo{
 		Hash: hex.EncodeToString(
 			tip.Point.Hash,
 		),
-		Slot:          tip.Point.Slot,
-		Height:        tip.BlockNumber,
-		Epoch:         0,
-		EpochSlot:     0,
-		Time:          0,
-		Size:          0,
-		TxCount:       0,
-		SlotLeader:    "",
-		PreviousBlock: "",
+		Slot:      tip.Point.Slot,
+		Height:    tip.BlockNumber,
+		Epoch:     epoch.EpochId,
+		EpochSlot: tip.Point.Slot - epoch.StartSlot,
+		Time:      slotTime.Unix(),
+		Size:      uint64(len(block.Cbor)),
+		TxCount:   len(decodedBlock.Transactions()),
+		SlotLeader: blockIssuer(
+			decodedBlock.IssuerVkey(),
+		),
+		PreviousBlock: blockHashString(
+			block.PrevHash,
+		),
 		Confirmations: 0,
 	}, nil
 }
@@ -84,10 +115,18 @@ func (a *NodeAdapter) LatestBlock() (
 func (a *NodeAdapter) LatestBlockTxHashes() (
 	[]string, error,
 ) {
-	// TODO: Query the database for transaction hashes
-	// in the latest block once the appropriate query
-	// methods are available.
-	return []string{}, nil
+	tip := a.ledgerState.Tip()
+	_, decodedBlock, err := a.latestBlockData(
+		tip.Point.Hash,
+	)
+	if err != nil {
+		return nil, err
+	}
+	ret := make([]string, 0, len(decodedBlock.Transactions()))
+	for _, tx := range decodedBlock.Transactions() {
+		ret = append(ret, tx.Hash().String())
+	}
+	return ret, nil
 }
 
 // CurrentEpoch returns information about the current
@@ -95,17 +134,86 @@ func (a *NodeAdapter) LatestBlockTxHashes() (
 func (a *NodeAdapter) CurrentEpoch() (
 	EpochInfo, error,
 ) {
-	// TODO: Retrieve full epoch details (epoch number,
-	// start/end time, block count, tx count) from the
-	// database once epoch query methods are available.
+	tip := a.ledgerState.Tip()
+	tipEpoch, err := a.ledgerState.SlotToEpoch(tip.Point.Slot)
+	if err != nil {
+		return EpochInfo{}, fmt.Errorf(
+			"get epoch for tip slot %d: %w",
+			tip.Point.Slot,
+			err,
+		)
+	}
+	startTime, err := a.ledgerState.SlotToTime(tipEpoch.StartSlot)
+	if err != nil {
+		return EpochInfo{}, fmt.Errorf(
+			"get epoch start time for slot %d: %w",
+			tipEpoch.StartSlot,
+			err,
+		)
+	}
+	endSlot := tipEpoch.StartSlot + uint64(tipEpoch.LengthInSlots)
+	endTime, err := a.ledgerState.SlotToTime(endSlot)
+	if err != nil {
+		return EpochInfo{}, fmt.Errorf(
+			"get epoch end time for slot %d: %w",
+			endSlot,
+			err,
+		)
+	}
+	blockCount, firstBlockSlot, lastBlockSlot, err := a.ledgerState.CountBlocksInSlotRange(
+		tipEpoch.StartSlot,
+		tip.Point.Slot,
+	)
+	if err != nil {
+		return EpochInfo{}, fmt.Errorf(
+			"count epoch blocks for slots %d-%d: %w",
+			tipEpoch.StartSlot,
+			tip.Point.Slot,
+			err,
+		)
+	}
+	txCount, err := a.ledgerState.CountTransactionsInSlotRange(
+		tipEpoch.StartSlot,
+		tip.Point.Slot,
+	)
+	if err != nil {
+		return EpochInfo{}, fmt.Errorf(
+			"count epoch transactions for slots %d-%d: %w",
+			tipEpoch.StartSlot,
+			tip.Point.Slot,
+			err,
+		)
+	}
+	firstBlockTime := int64(0)
+	lastBlockTime := int64(0)
+	if blockCount > 0 {
+		firstTime, err := a.ledgerState.SlotToTime(firstBlockSlot)
+		if err != nil {
+			return EpochInfo{}, fmt.Errorf(
+				"get first epoch block time for slot %d: %w",
+				firstBlockSlot,
+				err,
+			)
+		}
+		lastTime, err := a.ledgerState.SlotToTime(lastBlockSlot)
+		if err != nil {
+			return EpochInfo{}, fmt.Errorf(
+				"get last epoch block time for slot %d: %w",
+				lastBlockSlot,
+				err,
+			)
+		}
+		firstBlockTime = firstTime.Unix()
+		lastBlockTime = lastTime.Unix()
+	}
 	return EpochInfo{
-		Epoch:          0,
-		StartTime:      0,
-		EndTime:        0,
-		FirstBlockTime: 0,
-		LastBlockTime:  0,
-		BlockCount:     0,
-		TxCount:        0,
+		Epoch:          tipEpoch.EpochId,
+		StartTime:      startTime.Unix(),
+		EndTime:        endTime.Unix(),
+		FirstBlockTime: firstBlockTime,
+		LastBlockTime:  lastBlockTime,
+		BlockCount:     blockCount,
+		TxCount:        txCount,
 	}, nil
 }
 
@@ -114,36 +222,184 @@ func (a *NodeAdapter) CurrentEpoch() (
 func (a *NodeAdapter) CurrentProtocolParams() (
 	ProtocolParamsInfo, error,
 ) {
-	// TODO: Map real protocol parameter fields from
-	// GetCurrentPParams() once the gouroboros
-	// ProtocolParameters interface exposes the necessary
-	// getters. For now, return placeholder values.
+	pparams := a.ledgerState.GetCurrentPParams()
+	if pparams == nil {
+		return ProtocolParamsInfo{}, errors.New(
+			"protocol parameters not available",
+		)
+	}
+	utxorpcParams, err := pparams.Utxorpc()
+	if err != nil {
+		return ProtocolParamsInfo{}, fmt.Errorf(
+			"convert current protocol parameters: %w",
+			err,
+		)
+	}
 	return ProtocolParamsInfo{
-		Epoch:               0,
-		MinFeeA:             0,
-		MinFeeB:             0,
-		MaxBlockSize:        0,
-		MaxTxSize:           0,
-		MaxBlockHeaderSize:  0,
-		KeyDeposit:          "0",
-		PoolDeposit:         "0",
-		EMax:                0,
-		NOpt:                0,
-		A0:                  0,
-		Rho:                 0,
-		Tau:                 0,
-		ProtocolMajorVer:    0,
-		ProtocolMinorVer:    0,
-		MinPoolCost:         "0",
-		CoinsPerUtxoSize:    "0",
-		PriceMem:            0,
-		PriceStep:           0,
-		MaxTxExMem:          "0",
-		MaxTxExSteps:        "0",
-		MaxBlockExMem:       "0",
-		MaxBlockExSteps:     "0",
-		MaxValSize:          "0",
-		CollateralPercent:   0,
-		MaxCollateralInputs: 0,
+		Epoch:               a.ledgerState.CurrentEpoch(),
+		MinFeeA:             uint64ToInt(utxorpcBigIntToUint64(utxorpcParams.GetMinFeeCoefficient())),
+		MinFeeB:             uint64ToInt(utxorpcBigIntToUint64(utxorpcParams.GetMinFeeConstant())),
+		MaxBlockSize:        uint64ToInt(utxorpcParams.GetMaxBlockBodySize()),
+		MaxTxSize:           uint64ToInt(utxorpcParams.GetMaxTxSize()),
+		MaxBlockHeaderSize:  uint64ToInt(utxorpcParams.GetMaxBlockHeaderSize()),
+		KeyDeposit:          utxorpcBigIntToString(utxorpcParams.GetStakeKeyDeposit()),
+		PoolDeposit:         utxorpcBigIntToString(utxorpcParams.GetPoolDeposit()),
+		EMax:                uint64ToInt(utxorpcParams.GetPoolRetirementEpochBound()),
+		NOpt:                uint64ToInt(utxorpcParams.GetDesiredNumberOfPools()),
+		A0:                  rationalToFloat64(utxorpcParams.GetPoolInfluence()),
+		Rho:                 rationalToFloat64(utxorpcParams.GetMonetaryExpansion()),
+		Tau:                 rationalToFloat64(utxorpcParams.GetTreasuryExpansion()),
+		ProtocolMajorVer:    protocolVersionMajor(utxorpcParams.GetProtocolVersion()),
+		ProtocolMinorVer:    protocolVersionMinor(utxorpcParams.GetProtocolVersion()),
+		MinPoolCost:         utxorpcBigIntToString(utxorpcParams.GetMinPoolCost()),
+		CoinsPerUtxoSize:    utxorpcBigIntToString(utxorpcParams.GetCoinsPerUtxoByte()),
+		PriceMem:            pricesMem(utxorpcParams.GetPrices()),
+		PriceStep:           pricesStep(utxorpcParams.GetPrices()),
+		MaxTxExMem:          exUnitsMemString(utxorpcParams.GetMaxExecutionUnitsPerTransaction()),
+		MaxTxExSteps:        exUnitsStepsString(utxorpcParams.GetMaxExecutionUnitsPerTransaction()),
+		MaxBlockExMem:       exUnitsMemString(utxorpcParams.GetMaxExecutionUnitsPerBlock()),
+		MaxBlockExSteps:     exUnitsStepsString(utxorpcParams.GetMaxExecutionUnitsPerBlock()),
+		MaxValSize:          strconv.FormatUint(utxorpcParams.GetMaxValueSize(), 10),
+		CollateralPercent:   uint64ToInt(utxorpcParams.GetCollateralPercentage()),
+		MaxCollateralInputs: uint64ToInt(utxorpcParams.GetMaxCollateralInputs()),
 	}, nil
+}
+
+func (a *NodeAdapter) latestBlockData(
+	hash []byte,
+) (
+	models.Block,
+	lcommon.Block,
+	error,
+) {
+	block, err := a.ledgerState.BlockByHash(hash)
+	if err != nil {
+		return models.Block{}, nil, fmt.Errorf(
+			"get block by hash %x: %w",
+			hash,
+			err,
+		)
+	}
+	decodedBlock, err := block.Decode()
+	if err != nil {
+		return models.Block{}, nil, fmt.Errorf(
+			"decode block %x: %w",
+			hash,
+			err,
+		)
+	}
+	return block, decodedBlock, nil
+}
+
+func blockIssuer(issuer lcommon.IssuerVkey) string {
+	if bytes.Equal(issuer[:], make([]byte, len(issuer))) {
+		return ""
+	}
+	return issuer.PoolId()
+}
+
+func blockHashString(hash []byte) string {
+	if len(hash) == 0 || isZeroHash(hash) {
+		return ""
+	}
+	return hex.EncodeToString(hash)
+}
+
+func isZeroHash(hash []byte) bool {
+	return bytes.Equal(hash, make([]byte, len(hash)))
+}
+
+func rationalToFloat64(r *cardano.RationalNumber) float64 {
+	if r == nil || r.GetDenominator() == 0 {
+		return 0
+	}
+	return float64(r.GetNumerator()) / float64(r.GetDenominator())
+}
+
+func protocolVersionMajor(v *cardano.ProtocolVersion) int {
+	if v == nil {
+		return 0
+	}
+	return int(v.GetMajor())
+}
+
+func protocolVersionMinor(v *cardano.ProtocolVersion) int {
+	if v == nil {
+		return 0
+	}
+	return int(v.GetMinor())
+}
+
+func pricesMem(p *cardano.ExPrices) float64 {
+	if p == nil {
+		return 0
+	}
+	return rationalToFloat64(p.GetMemory())
+}
+
+func pricesStep(p *cardano.ExPrices) float64 {
+	if p == nil {
+		return 0
+	}
+	return rationalToFloat64(p.GetSteps())
+}
+
+func utxorpcBigIntToString(v *cardano.BigInt) string {
+	if v == nil {
+		return "0"
+	}
+	switch x := v.GetBigInt().(type) {
+	case *cardano.BigInt_Int:
+		return strconv.FormatInt(x.Int, 10)
+	case *cardano.BigInt_BigUInt:
+		if len(x.BigUInt) == 0 {
+			return "0"
+		}
+		return new(big.Int).SetBytes(x.BigUInt).String()
+	case *cardano.BigInt_BigNInt:
+		if len(x.BigNInt) == 0 {
+			return "0"
+		}
+		return new(big.Int).Neg(new(big.Int).SetBytes(x.BigNInt)).String()
+	default:
+		return "0"
+	}
+}
+
+func utxorpcBigIntToUint64(v *cardano.BigInt) uint64 {
+	if v == nil {
+		return 0
+	}
+	switch x := v.GetBigInt().(type) {
+	case *cardano.BigInt_Int:
+		if x.Int < 0 {
+			return 0
+		}
+		return uint64(x.Int)
+	case *cardano.BigInt_BigUInt:
+		return new(big.Int).SetBytes(x.BigUInt).Uint64()
+	default:
+		return 0
+	}
+}
+
+func uint64ToInt(v uint64) int {
+	if v > math.MaxInt {
+		return math.MaxInt
+	}
+	return int(v)
+}
+
+func exUnitsMemString(exUnits *cardano.ExUnits) string {
+	if exUnits == nil {
+		return "0"
+	}
+	return strconv.FormatUint(exUnits.GetMemory(), 10)
+}
+
+func exUnitsStepsString(exUnits *cardano.ExUnits) string {
+	if exUnits == nil {
+		return "0"
+	}
+	return strconv.FormatUint(exUnits.GetSteps(), 10)
 }

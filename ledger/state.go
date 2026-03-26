@@ -49,12 +49,21 @@ import (
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/prometheus/client_golang/prometheus"
+	"gorm.io/gorm"
 )
 
 const (
 	cleanupConsumedUtxosInterval = 5 * time.Minute
 	batchSize                    = 50 // Number of blocks to process in a single DB transaction
 )
+
+type metadataDbReader interface {
+	DB() *gorm.DB
+}
+
+type metadataReadDbReader interface {
+	ReadDB() *gorm.DB
+}
 
 // DatabaseOperation represents an asynchronous database operation
 type DatabaseOperation struct {
@@ -3899,6 +3908,95 @@ func (ls *LedgerState) GetTransactionsByAddress(
 	offset int,
 ) ([]models.Transaction, error) {
 	return ls.db.GetTransactionsByAddress(addr, limit, offset, nil)
+}
+
+// CountTransactionsInSlotRange returns the number of transactions whose slot
+// falls within the inclusive range [startSlot, endSlot].
+// Used by the Blockfrost adapter CurrentEpoch() path so epoch responses can
+// return real tx counts without decoding every block in the epoch on demand.
+func (ls *LedgerState) CountTransactionsInSlotRange(
+	startSlot, endSlot uint64,
+) (int, error) {
+	if endSlot < startSlot {
+		return 0, nil
+	}
+	db, err := resolveMetadataQueryDB(ls)
+	if err != nil {
+		return 0, err
+	}
+	var count int64
+	if err := db.
+		Model(&models.Transaction{}).
+		Where("slot >= ? AND slot <= ?", startSlot, endSlot).
+		Count(&count).Error; err != nil {
+		return 0, fmt.Errorf(
+			"count transactions in slot range %d-%d: %w",
+			startSlot,
+			endSlot,
+			err,
+		)
+	}
+	return int(count), nil
+}
+
+func resolveMetadataQueryDB(ls *LedgerState) (*gorm.DB, error) {
+	metaStore := ls.db.Metadata()
+	if metaStore == nil {
+		return nil, errors.New("metadata store unavailable")
+	}
+	if reader, ok := metaStore.(metadataReadDbReader); ok {
+		if db := reader.ReadDB(); db != nil {
+			return db, nil
+		}
+	}
+	if reader, ok := metaStore.(metadataDbReader); ok {
+		if db := reader.DB(); db != nil {
+			return db, nil
+		}
+	}
+	return nil, errors.New(
+		"metadata store does not expose database handle",
+	)
+}
+
+// CountBlocksInSlotRange returns the number of canonical blocks in the
+// inclusive slot range [startSlot, endSlot], along with the first and last
+// block slots found. It uses canonical metadata rows instead of raw blob keys
+// so orphaned fork blocks do not leak into Blockfrost epoch responses.
+func (ls *LedgerState) CountBlocksInSlotRange(
+	startSlot, endSlot uint64,
+) (int, uint64, uint64, error) {
+	if endSlot < startSlot {
+		return 0, 0, 0, nil
+	}
+	db, err := resolveMetadataQueryDB(ls)
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	type blockRangeStats struct {
+		Count     int64
+		FirstSlot *uint64
+		LastSlot  *uint64
+	}
+	var stats blockRangeStats
+	if err := db.
+		Model(&models.BlockNonce{}).
+		Select(
+			"COUNT(*) AS count, MIN(slot) AS first_slot, MAX(slot) AS last_slot",
+		).
+		Where("slot >= ? AND slot <= ?", startSlot, endSlot).
+		Scan(&stats).Error; err != nil {
+		return 0, 0, 0, fmt.Errorf(
+			"count blocks in slot range %d-%d: %w",
+			startSlot,
+			endSlot,
+			err,
+		)
+	}
+	if stats.Count == 0 || stats.FirstSlot == nil || stats.LastSlot == nil {
+		return 0, 0, 0, nil
+	}
+	return int(stats.Count), *stats.FirstSlot, *stats.LastSlot, nil
 }
 
 // resolveValidationEra determines the appropriate era descriptor for
