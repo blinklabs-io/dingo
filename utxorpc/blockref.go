@@ -15,7 +15,10 @@
 package utxorpc
 
 import (
+	"fmt"
+
 	"github.com/blinklabs-io/dingo/database/models"
+	sync "github.com/utxorpc/go-codegen/utxorpc/v1alpha/sync"
 )
 
 // blockRef is an internal helper representation that can be adapted to
@@ -33,5 +36,33 @@ func blockRefFromModel(b models.Block) blockRef {
 		Slot:   b.Slot,
 		Hash:   b.Hash,
 		Height: b.Number,
+	}
+}
+
+// anyChainBlockFromModel decodes a stored block via gouroboros ledger.Block and
+// ledger.Block.Utxorpc, then attaches raw CBOR as NativeBytes.
+func anyChainBlockFromModel(block models.Block) (*sync.AnyChainBlock, error) {
+	ret, err := block.Decode()
+	if err != nil {
+		return nil, err
+	}
+	tmpBlock, err := ret.Utxorpc()
+	if err != nil {
+		return nil, fmt.Errorf("convert block: %w", err)
+	}
+	var acb sync.AnyChainBlock
+	acb.Chain = &sync.AnyChainBlock_Cardano{Cardano: tmpBlock}
+	acb.NativeBytes = block.Cbor
+	return &acb, nil
+}
+
+// syncBlockRefFromModel builds sync.BlockRef for DumpHistory next_token cursors.
+// Hash is copied so later mutations to the model slice do not affect the proto.
+func syncBlockRefFromModel(b models.Block) *sync.BlockRef {
+	r := blockRefFromModel(b)
+	return &sync.BlockRef{
+		Slot:   r.Slot,
+		Hash:   append([]byte(nil), r.Hash...),
+		Height: r.Height,
 	}
 }
