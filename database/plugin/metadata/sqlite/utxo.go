@@ -246,20 +246,19 @@ func (d *MetadataStoreSqlite) GetUtxosByAddressWithOrdering(
 	if err != nil {
 		return nil, err
 	}
-	addrQuery := addressWhereClause(db, addr)
-	if addrQuery == nil {
-		return ret, nil
-	}
-
 	// Join with transaction to get ordering metadata
-	result := db.
+	query := db.
 		Table("utxo").
 		Select(
 			"utxo.*, transaction.slot as tx_slot, transaction.block_index as tx_block_index",
 		).
 		Joins("LEFT JOIN transaction ON utxo.transaction_id = transaction.id").
-		Where("utxo.deleted_slot = 0").
-		Where(addrQuery).
+		Where("utxo.deleted_slot = 0")
+	addrQuery := addressWhereClause(db, addr)
+	if addrQuery != nil {
+		query = query.Where(addrQuery)
+	}
+	result := query.
 		Order(
 			"transaction.slot ASC, transaction.block_index ASC, utxo.output_idx ASC",
 		).
