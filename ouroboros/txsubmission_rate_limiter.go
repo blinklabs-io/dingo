@@ -21,6 +21,12 @@ import (
 	ouroboros "github.com/blinklabs-io/gouroboros"
 )
 
+// connIdKey returns a stable string key for a ConnectionId suitable for
+// use with sync.Map, which requires comparable keys.
+func connIdKey(c ouroboros.ConnectionId) string {
+	return c.String()
+}
+
 // DefaultMaxTxSubmissionsPerSecond is the default maximum number of
 // transaction submissions accepted per peer per second.
 const DefaultMaxTxSubmissionsPerSecond = 30
@@ -100,12 +106,12 @@ func (tb *tokenBucket) waitDuration(
 }
 
 // txSubmissionRateLimiter manages per-peer rate limiting for
-// the TxSubmission mini-protocol.
+// the TxSubmission mini-protocol. Uses sync.Map for lock-free
+// reads on the hot path (existing peers).
 type txSubmissionRateLimiter struct {
-	mu      sync.Mutex
-	peers   map[ouroboros.ConnectionId]*tokenBucket
-	rate    float64 // tokens per second per peer
-	burst   float64 // max burst per peer
+	peers   sync.Map // map[string]*tokenBucket keyed by connIdKey
+	rate    float64  // tokens per second per peer
+	burst   float64  // max burst per peer
 	nowFunc func() time.Time
 }
 
@@ -118,7 +124,6 @@ func newTxSubmissionRateLimiter(
 	burst float64,
 ) *txSubmissionRateLimiter {
 	return &txSubmissionRateLimiter{
-		peers:   make(map[ouroboros.ConnectionId]*tokenBucket),
 		rate:    rate,
 		burst:   burst,
 		nowFunc: time.Now,
@@ -132,15 +137,13 @@ func (rl *txSubmissionRateLimiter) Allow(
 	connId ouroboros.ConnectionId,
 	n int,
 ) bool {
-	rl.mu.Lock()
-	bucket, ok := rl.peers[connId]
+	key := connIdKey(connId)
+	val, ok := rl.peers.Load(key)
 	if !ok {
-		bucket = newTokenBucket(rl.rate, rl.burst, rl.nowFunc())
-		rl.peers[connId] = bucket
+		bucket := newTokenBucket(rl.rate, rl.burst, rl.nowFunc())
+		val, _ = rl.peers.LoadOrStore(key, bucket)
 	}
-	rl.mu.Unlock()
-
-	return bucket.allow(float64(n), rl.nowFunc())
+	return val.(*tokenBucket).allow(float64(n), rl.nowFunc())
 }
 
 // WaitDuration returns how long to wait before n transactions from
@@ -149,14 +152,12 @@ func (rl *txSubmissionRateLimiter) WaitDuration(
 	connId ouroboros.ConnectionId,
 	n int,
 ) time.Duration {
-	rl.mu.Lock()
-	bucket, ok := rl.peers[connId]
-	rl.mu.Unlock()
-
+	key := connIdKey(connId)
+	val, ok := rl.peers.Load(key)
 	if !ok {
 		return 0
 	}
-	return bucket.waitDuration(float64(n), rl.nowFunc())
+	return val.(*tokenBucket).waitDuration(float64(n), rl.nowFunc())
 }
 
 // RemovePeer removes rate limiting state for the given connection.
@@ -164,7 +165,5 @@ func (rl *txSubmissionRateLimiter) WaitDuration(
 func (rl *txSubmissionRateLimiter) RemovePeer(
 	connId ouroboros.ConnectionId,
 ) {
-	rl.mu.Lock()
-	defer rl.mu.Unlock()
-	delete(rl.peers, connId)
+	rl.peers.Delete(connIdKey(connId))
 }
