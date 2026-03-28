@@ -368,6 +368,7 @@ func New(cfg Config) (*Node, error) {
 	// registered by subsystems carry the network name automatically.
 	// This must happen before any component registers metrics.
 	n.configWrapPromRegistry()
+	n.registerBuildInfo()
 	n.eventBus = event.NewEventBus(n.config.promRegistry, n.config.logger)
 	if err := n.configValidate(); err != nil {
 		return nil, fmt.Errorf("invalid configuration: %w", err)

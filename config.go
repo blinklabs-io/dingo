@@ -19,15 +19,18 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"runtime"
 	"time"
 
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/connmanager"
+	"github.com/blinklabs-io/dingo/internal/version"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/topology"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 )
 
 type ListenerConfig = connmanager.ListenerConfig
@@ -168,6 +171,25 @@ func (n *Node) configWrapPromRegistry() {
 		prometheus.Labels{"network": networkName},
 		n.config.promRegistry,
 	)
+}
+
+// registerBuildInfo registers a dingo_build_info gauge with version and
+// commit labels. The gauge is always set to 1; Grafana reads the labels.
+func (n *Node) registerBuildInfo() {
+	if n.config.promRegistry == nil {
+		return
+	}
+	promauto.With(n.config.promRegistry).NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "dingo_build_info",
+			Help: "dingo build information",
+		},
+		[]string{"version", "commit", "goversion"},
+	).WithLabelValues(
+		version.GetVersionString(),
+		version.CommitHash,
+		runtime.Version(),
+	).Set(1)
 }
 
 // isDevMode returns true if running in development mode
