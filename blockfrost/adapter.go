@@ -20,13 +20,17 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"math/big"
 	"strconv"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/ledger"
+	"github.com/blinklabs-io/gouroboros/cbor"
+	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
+	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
-	cardano "github.com/utxorpc/go-codegen/utxorpc/v1alpha/cardano"
+	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	"github.com/blinklabs-io/gouroboros/ledger/mary"
+	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 )
 
 // NodeAdapter wraps a real dingo Node's LedgerState to
@@ -228,41 +232,17 @@ func (a *NodeAdapter) CurrentProtocolParams() (
 			"protocol parameters not available",
 		)
 	}
-	utxorpcParams, err := pparams.Utxorpc()
+	info, err := protocolParamsInfoFromNative(
+		pparams,
+		a.ledgerState.CurrentEpoch(),
+	)
 	if err != nil {
 		return ProtocolParamsInfo{}, fmt.Errorf(
 			"convert current protocol parameters: %w",
 			err,
 		)
 	}
-	return ProtocolParamsInfo{
-		Epoch:               a.ledgerState.CurrentEpoch(),
-		MinFeeA:             uint64ToInt(utxorpcBigIntToUint64(utxorpcParams.GetMinFeeCoefficient())),
-		MinFeeB:             uint64ToInt(utxorpcBigIntToUint64(utxorpcParams.GetMinFeeConstant())),
-		MaxBlockSize:        uint64ToInt(utxorpcParams.GetMaxBlockBodySize()),
-		MaxTxSize:           uint64ToInt(utxorpcParams.GetMaxTxSize()),
-		MaxBlockHeaderSize:  uint64ToInt(utxorpcParams.GetMaxBlockHeaderSize()),
-		KeyDeposit:          utxorpcBigIntToString(utxorpcParams.GetStakeKeyDeposit()),
-		PoolDeposit:         utxorpcBigIntToString(utxorpcParams.GetPoolDeposit()),
-		EMax:                uint64ToInt(utxorpcParams.GetPoolRetirementEpochBound()),
-		NOpt:                uint64ToInt(utxorpcParams.GetDesiredNumberOfPools()),
-		A0:                  rationalToFloat64(utxorpcParams.GetPoolInfluence()),
-		Rho:                 rationalToFloat64(utxorpcParams.GetMonetaryExpansion()),
-		Tau:                 rationalToFloat64(utxorpcParams.GetTreasuryExpansion()),
-		ProtocolMajorVer:    protocolVersionMajor(utxorpcParams.GetProtocolVersion()),
-		ProtocolMinorVer:    protocolVersionMinor(utxorpcParams.GetProtocolVersion()),
-		MinPoolCost:         utxorpcBigIntToString(utxorpcParams.GetMinPoolCost()),
-		CoinsPerUtxoSize:    utxorpcBigIntToString(utxorpcParams.GetCoinsPerUtxoByte()),
-		PriceMem:            pricesMem(utxorpcParams.GetPrices()),
-		PriceStep:           pricesStep(utxorpcParams.GetPrices()),
-		MaxTxExMem:          exUnitsMemString(utxorpcParams.GetMaxExecutionUnitsPerTransaction()),
-		MaxTxExSteps:        exUnitsStepsString(utxorpcParams.GetMaxExecutionUnitsPerTransaction()),
-		MaxBlockExMem:       exUnitsMemString(utxorpcParams.GetMaxExecutionUnitsPerBlock()),
-		MaxBlockExSteps:     exUnitsStepsString(utxorpcParams.GetMaxExecutionUnitsPerBlock()),
-		MaxValSize:          strconv.FormatUint(utxorpcParams.GetMaxValueSize(), 10),
-		CollateralPercent:   uint64ToInt(utxorpcParams.GetCollateralPercentage()),
-		MaxCollateralInputs: uint64ToInt(utxorpcParams.GetMaxCollateralInputs()),
-	}, nil
+	return info, nil
 }
 
 func (a *NodeAdapter) latestBlockData(
@@ -309,78 +289,12 @@ func isZeroHash(hash []byte) bool {
 	return bytes.Equal(hash, make([]byte, len(hash)))
 }
 
-func rationalToFloat64(r *cardano.RationalNumber) float64 {
-	if r == nil || r.GetDenominator() == 0 {
+func ratToFloat64(r *cbor.Rat) float64 {
+	if r == nil || r.Denom().Sign() == 0 {
 		return 0
 	}
-	return float64(r.GetNumerator()) / float64(r.GetDenominator())
-}
-
-func protocolVersionMajor(v *cardano.ProtocolVersion) int {
-	if v == nil {
-		return 0
-	}
-	return int(v.GetMajor())
-}
-
-func protocolVersionMinor(v *cardano.ProtocolVersion) int {
-	if v == nil {
-		return 0
-	}
-	return int(v.GetMinor())
-}
-
-func pricesMem(p *cardano.ExPrices) float64 {
-	if p == nil {
-		return 0
-	}
-	return rationalToFloat64(p.GetMemory())
-}
-
-func pricesStep(p *cardano.ExPrices) float64 {
-	if p == nil {
-		return 0
-	}
-	return rationalToFloat64(p.GetSteps())
-}
-
-func utxorpcBigIntToString(v *cardano.BigInt) string {
-	if v == nil {
-		return "0"
-	}
-	switch x := v.GetBigInt().(type) {
-	case *cardano.BigInt_Int:
-		return strconv.FormatInt(x.Int, 10)
-	case *cardano.BigInt_BigUInt:
-		if len(x.BigUInt) == 0 {
-			return "0"
-		}
-		return new(big.Int).SetBytes(x.BigUInt).String()
-	case *cardano.BigInt_BigNInt:
-		if len(x.BigNInt) == 0 {
-			return "0"
-		}
-		return new(big.Int).Neg(new(big.Int).SetBytes(x.BigNInt)).String()
-	default:
-		return "0"
-	}
-}
-
-func utxorpcBigIntToUint64(v *cardano.BigInt) uint64 {
-	if v == nil {
-		return 0
-	}
-	switch x := v.GetBigInt().(type) {
-	case *cardano.BigInt_Int:
-		if x.Int < 0 {
-			return 0
-		}
-		return uint64(x.Int)
-	case *cardano.BigInt_BigUInt:
-		return new(big.Int).SetBytes(x.BigUInt).Uint64()
-	default:
-		return 0
-	}
+	f, _ := r.Float64()
+	return f
 }
 
 func uint64ToInt(v uint64) int {
@@ -390,16 +304,126 @@ func uint64ToInt(v uint64) int {
 	return int(v)
 }
 
-func exUnitsMemString(exUnits *cardano.ExUnits) string {
-	if exUnits == nil {
+func exUnitsMemString(exUnits lcommon.ExUnits) string {
+	if exUnits.Memory <= 0 {
 		return "0"
 	}
-	return strconv.FormatUint(exUnits.GetMemory(), 10)
+	return strconv.FormatInt(exUnits.Memory, 10)
 }
 
-func exUnitsStepsString(exUnits *cardano.ExUnits) string {
-	if exUnits == nil {
+func exUnitsStepsString(exUnits lcommon.ExUnits) string {
+	if exUnits.Steps <= 0 {
 		return "0"
 	}
-	return strconv.FormatUint(exUnits.GetSteps(), 10)
+	return strconv.FormatInt(exUnits.Steps, 10)
+}
+
+// Blockfrost uses a flattened protocol-parameter view, while Dingo keeps
+// era-specific native types. Map directly from the native ledger type here
+// instead of routing through the UTxO RPC representation first.
+func protocolParamsInfoFromNative(
+	pparams lcommon.ProtocolParameters,
+	epoch uint64,
+) (ProtocolParamsInfo, error) {
+	info := ProtocolParamsInfo{
+		Epoch:            epoch,
+		KeyDeposit:       "0",
+		PoolDeposit:      "0",
+		MinPoolCost:      "0",
+		CoinsPerUtxoSize: "0",
+		MaxTxExMem:       "0",
+		MaxTxExSteps:     "0",
+		MaxBlockExMem:    "0",
+		MaxBlockExSteps:  "0",
+		MaxValSize:       "0",
+	}
+	switch pp := pparams.(type) {
+	case *shelley.ShelleyProtocolParameters:
+		fillBasePParamsInfo(&info, pp.MinFeeA, pp.MinFeeB, pp.MaxBlockBodySize, pp.MaxTxSize, pp.MaxBlockHeaderSize, pp.KeyDeposit, pp.PoolDeposit, pp.MaxEpoch, pp.NOpt, pp.A0, pp.Rho, pp.Tau, pp.ProtocolMajor, pp.ProtocolMinor)
+	case *mary.MaryProtocolParameters:
+		fillBasePParamsInfo(&info, pp.MinFeeA, pp.MinFeeB, pp.MaxBlockBodySize, pp.MaxTxSize, pp.MaxBlockHeaderSize, pp.KeyDeposit, pp.PoolDeposit, pp.MaxEpoch, pp.NOpt, pp.A0, pp.Rho, pp.Tau, pp.ProtocolMajor, pp.ProtocolMinor)
+		info.MinPoolCost = strconv.FormatUint(pp.MinPoolCost, 10)
+	case *alonzo.AlonzoProtocolParameters:
+		fillBasePParamsInfo(&info, pp.MinFeeA, pp.MinFeeB, pp.MaxBlockBodySize, pp.MaxTxSize, pp.MaxBlockHeaderSize, pp.KeyDeposit, pp.PoolDeposit, pp.MaxEpoch, pp.NOpt, pp.A0, pp.Rho, pp.Tau, pp.ProtocolMajor, pp.ProtocolMinor)
+		fillAlonzoPParamsInfo(&info, pp.MinPoolCost, pp.AdaPerUtxoByte, pp.ExecutionCosts, pp.MaxTxExUnits, pp.MaxBlockExUnits, pp.MaxValueSize, pp.CollateralPercentage, pp.MaxCollateralInputs)
+	case *babbage.BabbageProtocolParameters:
+		fillBasePParamsInfo(&info, pp.MinFeeA, pp.MinFeeB, pp.MaxBlockBodySize, pp.MaxTxSize, pp.MaxBlockHeaderSize, pp.KeyDeposit, pp.PoolDeposit, pp.MaxEpoch, pp.NOpt, pp.A0, pp.Rho, pp.Tau, pp.ProtocolMajor, pp.ProtocolMinor)
+		fillAlonzoPParamsInfo(&info, pp.MinPoolCost, pp.AdaPerUtxoByte, pp.ExecutionCosts, pp.MaxTxExUnits, pp.MaxBlockExUnits, pp.MaxValueSize, pp.CollateralPercentage, pp.MaxCollateralInputs)
+	case *conway.ConwayProtocolParameters:
+		fillBasePParamsInfo(&info, pp.MinFeeA, pp.MinFeeB, pp.MaxBlockBodySize, pp.MaxTxSize, pp.MaxBlockHeaderSize, pp.KeyDeposit, pp.PoolDeposit, pp.MaxEpoch, pp.NOpt, pp.A0, pp.Rho, pp.Tau, pp.ProtocolVersion.Major, pp.ProtocolVersion.Minor)
+		fillAlonzoPParamsInfo(&info, pp.MinPoolCost, pp.AdaPerUtxoByte, pp.ExecutionCosts, pp.MaxTxExUnits, pp.MaxBlockExUnits, pp.MaxValueSize, pp.CollateralPercentage, pp.MaxCollateralInputs)
+	default:
+		return ProtocolParamsInfo{}, fmt.Errorf(
+			"unsupported protocol parameters type: %T",
+			pparams,
+		)
+	}
+	return info, nil
+}
+
+func fillBasePParamsInfo(
+	info *ProtocolParamsInfo,
+	minFeeA uint,
+	minFeeB uint,
+	maxBlockBodySize uint,
+	maxTxSize uint,
+	maxBlockHeaderSize uint,
+	keyDeposit uint,
+	poolDeposit uint,
+	maxEpoch uint,
+	nOpt uint,
+	a0 *cbor.Rat,
+	rho *cbor.Rat,
+	tau *cbor.Rat,
+	protocolMajor uint,
+	protocolMinor uint,
+) {
+	// These fields are shared across the Shelley-family protocol parameter
+	// types, so they can be filled uniformly regardless of era.
+	info.MinFeeA = uintToInt(minFeeA)
+	info.MinFeeB = uintToInt(minFeeB)
+	info.MaxBlockSize = uintToInt(maxBlockBodySize)
+	info.MaxTxSize = uintToInt(maxTxSize)
+	info.MaxBlockHeaderSize = uintToInt(maxBlockHeaderSize)
+	info.KeyDeposit = strconv.FormatUint(uint64(keyDeposit), 10)
+	info.PoolDeposit = strconv.FormatUint(uint64(poolDeposit), 10)
+	info.EMax = uintToInt(maxEpoch)
+	info.NOpt = uintToInt(nOpt)
+	info.A0 = ratToFloat64(a0)
+	info.Rho = ratToFloat64(rho)
+	info.Tau = ratToFloat64(tau)
+	info.ProtocolMajorVer = uintToInt(protocolMajor)
+	info.ProtocolMinorVer = uintToInt(protocolMinor)
+}
+
+func fillAlonzoPParamsInfo(
+	info *ProtocolParamsInfo,
+	minPoolCost uint64,
+	coinsPerUtxoByte uint64,
+	executionCosts lcommon.ExUnitPrice,
+	maxTxExUnits lcommon.ExUnits,
+	maxBlockExUnits lcommon.ExUnits,
+	maxValueSize uint,
+	collateralPercentage uint,
+	maxCollateralInputs uint,
+) {
+	// Execution pricing, ex-units, collateral, and coins-per-UTxO sizing only
+	info.MinPoolCost = strconv.FormatUint(minPoolCost, 10)
+	info.CoinsPerUtxoSize = strconv.FormatUint(coinsPerUtxoByte, 10)
+	info.PriceMem = ratToFloat64(executionCosts.MemPrice)
+	info.PriceStep = ratToFloat64(executionCosts.StepPrice)
+	info.MaxTxExMem = exUnitsMemString(maxTxExUnits)
+	info.MaxTxExSteps = exUnitsStepsString(maxTxExUnits)
+	info.MaxBlockExMem = exUnitsMemString(maxBlockExUnits)
+	info.MaxBlockExSteps = exUnitsStepsString(maxBlockExUnits)
+	info.MaxValSize = strconv.FormatUint(uint64(maxValueSize), 10)
+	info.CollateralPercent = uintToInt(collateralPercentage)
+	info.MaxCollateralInputs = uintToInt(maxCollateralInputs)
+}
+
+func uintToInt(v uint) int {
+	if uint64(v) > math.MaxInt {
+		return math.MaxInt
+	}
+	return int(v)
 }
