@@ -359,9 +359,7 @@ func TestHandleConnClosedEvent_CleansUpRateLimiter(t *testing.T) {
 	o.txSubmissionRateLimiter.Allow(peer, 1)
 
 	// Verify the peer exists in the rate limiter
-	o.txSubmissionRateLimiter.mu.Lock()
-	_, exists := o.txSubmissionRateLimiter.peers[peer]
-	o.txSubmissionRateLimiter.mu.Unlock()
+	_, exists := o.txSubmissionRateLimiter.peers.Load(connIdKey(peer))
 	require.True(t, exists, "peer should exist in rate limiter")
 
 	// Simulate a connection closed event through the actual handler
@@ -374,9 +372,7 @@ func TestHandleConnClosedEvent_CleansUpRateLimiter(t *testing.T) {
 	o.HandleConnClosedEvent(evt)
 
 	// Verify cleanup
-	o.txSubmissionRateLimiter.mu.Lock()
-	_, exists = o.txSubmissionRateLimiter.peers[peer]
-	o.txSubmissionRateLimiter.mu.Unlock()
+	_, exists = o.txSubmissionRateLimiter.peers.Load(connIdKey(peer))
 	assert.False(
 		t,
 		exists,
@@ -488,6 +484,42 @@ func TestTxSubmissionRateLimiter_WaitDuration(t *testing.T) {
 		rl.WaitDuration(peer, 10) > 0,
 		"should report positive wait when exhausted",
 	)
+}
+
+func TestTxSubmissionRateLimiter_SyncMapConcurrency(t *testing.T) {
+	rl := newTxSubmissionRateLimiter(1000, 2000)
+
+	var wg sync.WaitGroup
+	// Concurrent Allow, WaitDuration, and RemovePeer across many peers
+	for i := 0; i < 50; i++ {
+		wg.Add(1)
+		go func(port int) {
+			defer wg.Done()
+			peer := testConnIdWithPort(port)
+			rl.Allow(peer, 1)
+			rl.WaitDuration(peer, 1)
+			rl.Allow(peer, 5)
+			rl.RemovePeer(peer)
+			// Re-create after removal
+			rl.Allow(peer, 1)
+		}(6000 + i)
+	}
+	wg.Wait()
+}
+
+func TestTxsubmissionBackoffDuration(t *testing.T) {
+	// First hit: base backoff
+	assert.Equal(t, 150*time.Millisecond, txsubmissionBackoffDuration(1))
+	// Second hit: 2x
+	assert.Equal(t, 300*time.Millisecond, txsubmissionBackoffDuration(2))
+	// Third hit: 4x
+	assert.Equal(t, 600*time.Millisecond, txsubmissionBackoffDuration(3))
+	// Fourth hit: 8x = 1200ms
+	assert.Equal(t, 1200*time.Millisecond, txsubmissionBackoffDuration(4))
+	// High hits: capped at max
+	assert.Equal(t, txsubmissionMaxBackoff, txsubmissionBackoffDuration(20))
+	// Zero/negative: base
+	assert.Equal(t, txsubmissionBaseBackoff, txsubmissionBackoffDuration(0))
 }
 
 func TestTxSubmissionRateLimiter_MultiplePeersIndependent(
