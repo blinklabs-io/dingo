@@ -297,13 +297,6 @@ func ratToFloat64(r *cbor.Rat) float64 {
 	return f
 }
 
-func uint64ToInt(v uint64) int {
-	if v > math.MaxInt {
-		return math.MaxInt
-	}
-	return int(v)
-}
-
 func exUnitsMemString(exUnits lcommon.ExUnits) string {
 	if exUnits.Memory <= 0 {
 		return "0"
