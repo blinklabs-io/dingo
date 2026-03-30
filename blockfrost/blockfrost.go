@@ -90,6 +90,14 @@ func (b *Blockfrost) Start(
 		"GET /api/v0/network",
 		b.handleNetwork,
 	)
+	mux.HandleFunc(
+		"GET /api/v0/addresses/{address}/utxos",
+		b.handleAddressUTXOs,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/addresses/{address}/transactions",
+		b.handleAddressTransactions,
+	)
 
 	// Wrap handler with a request body size limit (1 MB)
 	// as defense-in-depth against oversized payloads.

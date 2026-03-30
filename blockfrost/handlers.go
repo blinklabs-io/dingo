@@ -264,3 +264,137 @@ func (b *Blockfrost) handleNetwork(
 		},
 	})
 }
+
+// handleAddressUTXOs handles GET /api/v0/addresses/{address}/utxos
+// and returns the current UTxOs for an address.
+func (b *Blockfrost) handleAddressUTXOs(
+	w http.ResponseWriter,
+	r *http.Request,
+) {
+	params, ok := parsePaginationOrWriteError(w, r)
+	if !ok {
+		return
+	}
+	address := r.PathValue("address")
+	utxos, total, err := b.node.AddressUTXOs(address, params)
+	if err != nil {
+		b.logger.Error(
+			"failed to get address utxos",
+			"address", address,
+			"error", err,
+		)
+		writeNodeQueryError(
+			w,
+			err,
+			"failed to retrieve address UTxOs",
+		)
+		return
+	}
+
+	SetPaginationHeaders(w, total, params)
+	resp := make([]AddressUTXOResponse, 0, len(utxos))
+	for _, utxo := range utxos {
+		resp = append(resp, AddressUTXOResponse{
+			Address:             utxo.Address,
+			TxHash:              utxo.TxHash,
+			OutputIndex:         int(utxo.OutputIndex),
+			Amount:              convertAddressAmounts(utxo.Amount),
+			Block:               utxo.Block,
+			DataHash:            utxo.DataHash,
+			InlineDatum:         utxo.InlineDatum,
+			ReferenceScriptHash: utxo.ReferenceScriptHash,
+		})
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// handleAddressTransactions handles GET /api/v0/addresses/{address}/transactions
+// and returns transaction history for an address.
+func (b *Blockfrost) handleAddressTransactions(
+	w http.ResponseWriter,
+	r *http.Request,
+) {
+	params, ok := parsePaginationOrWriteError(w, r)
+	if !ok {
+		return
+	}
+	address := r.PathValue("address")
+	txs, total, err := b.node.AddressTransactions(address, params)
+	if err != nil {
+		b.logger.Error(
+			"failed to get address transactions",
+			"address", address,
+			"error", err,
+		)
+		writeNodeQueryError(
+			w,
+			err,
+			"failed to retrieve address transactions",
+		)
+		return
+	}
+
+	SetPaginationHeaders(w, total, params)
+	resp := make([]AddressTransactionResponse, 0, len(txs))
+	for _, tx := range txs {
+		resp = append(resp, AddressTransactionResponse{
+			TxHash:      tx.TxHash,
+			TxIndex:     int(tx.TxIndex),
+			BlockHeight: int(tx.BlockHeight),
+			BlockTime:   int(tx.BlockTime),
+		})
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func parsePaginationOrWriteError(
+	w http.ResponseWriter,
+	r *http.Request,
+) (PaginationParams, bool) {
+	params, err := ParsePagination(r)
+	if err != nil {
+		writeError(
+			w,
+			http.StatusBadRequest,
+			"Bad Request",
+			"Invalid pagination parameters.",
+		)
+		return PaginationParams{}, false
+	}
+	return params, true
+}
+
+func writeNodeQueryError(
+	w http.ResponseWriter,
+	err error,
+	message string,
+) {
+	if err == ErrInvalidAddress {
+		writeError(
+			w,
+			http.StatusBadRequest,
+			"Bad Request",
+			"Invalid address provided.",
+		)
+		return
+	}
+	writeError(
+		w,
+		http.StatusInternalServerError,
+		"Internal Server Error",
+		message,
+	)
+}
+
+func convertAddressAmounts(
+	amounts []AddressAmountInfo,
+) []AddressAmountResponse {
+	ret := make([]AddressAmountResponse, 0, len(amounts))
+	for _, amount := range amounts {
+		ret = append(ret, AddressAmountResponse{
+			Unit:     amount.Unit,
+			Quantity: amount.Quantity,
+		})
+	}
+	return ret
+}
