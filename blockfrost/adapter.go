@@ -16,9 +16,15 @@ package blockfrost
 
 import (
 	"encoding/hex"
+	"errors"
+	"strconv"
 
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/ledger"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
+
+var ErrInvalidAddress = errors.New("invalid address")
 
 // NodeAdapter wraps a real dingo Node's LedgerState to
 // implement the BlockfrostNode interface.
@@ -146,4 +152,198 @@ func (a *NodeAdapter) CurrentProtocolParams() (
 		CollateralPercent:   0,
 		MaxCollateralInputs: 0,
 	}, nil
+}
+
+// AddressUTXOs returns paginated current UTxOs for the
+// requested address.
+func (a *NodeAdapter) AddressUTXOs(
+	address string,
+	params PaginationParams,
+) ([]AddressUTXOInfo, int, error) {
+	addr, err := lcommon.NewAddress(address)
+	if err != nil {
+		return nil, 0, ErrInvalidAddress
+	}
+
+	utxos, err := a.ledgerState.UtxosByAddressWithOrdering(addr)
+	if err != nil {
+		return nil, 0, err
+	}
+	total := len(utxos)
+	if params.Order == PaginationOrderDesc {
+		for left, right := 0, len(utxos)-1; left < right; left, right = left+1, right-1 {
+			utxos[left], utxos[right] = utxos[right], utxos[left]
+		}
+	}
+
+	paged := paginateUtxos(utxos, params)
+	txBlockHashes, err := a.addressUtxoBlockHashes(
+		addr,
+		paged,
+	)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	ret := make([]AddressUTXOInfo, 0, len(paged))
+	for _, utxo := range paged {
+		txKey := hex.EncodeToString(utxo.TxId)
+		ret = append(ret, AddressUTXOInfo{
+			Address:             address,
+			TxHash:              txKey,
+			OutputIndex:         utxo.OutputIdx,
+			Amount:              addressAmountsFromUtxo(utxo.Utxo),
+			Block:               txBlockHashes[txKey],
+			DataHash:            optionalHexString(utxo.DatumHash),
+			InlineDatum:         nil,
+			ReferenceScriptHash: nil,
+		})
+	}
+	return ret, total, nil
+}
+
+// AddressTransactions returns paginated transaction
+// history for the requested address.
+func (a *NodeAdapter) AddressTransactions(
+	address string,
+	params PaginationParams,
+) ([]AddressTransactionInfo, int, error) {
+	addr, err := lcommon.NewAddress(address)
+	if err != nil {
+		return nil, 0, ErrInvalidAddress
+	}
+
+	txs, err := a.ledgerState.GetTransactionsByAddress(
+		addr,
+		0,
+		0,
+	)
+	if err != nil {
+		return nil, 0, err
+	}
+	total := len(txs)
+	if params.Order == PaginationOrderAsc {
+		for left, right := 0, len(txs)-1; left < right; left, right = left+1, right-1 {
+			txs[left], txs[right] = txs[right], txs[left]
+		}
+	}
+
+	paged := paginateTransactions(txs, params)
+	ret := make([]AddressTransactionInfo, 0, len(paged))
+	for _, tx := range paged {
+		blockHeight, blockTime, err := a.transactionBlockInfo(tx)
+		if err != nil {
+			return nil, 0, err
+		}
+		ret = append(ret, AddressTransactionInfo{
+			TxHash:      hex.EncodeToString(tx.Hash),
+			TxIndex:     tx.BlockIndex,
+			BlockHeight: blockHeight,
+			BlockTime:   blockTime,
+		})
+	}
+	return ret, total, nil
+}
+
+func (a *NodeAdapter) addressUtxoBlockHashes(
+	addr lcommon.Address,
+	utxos []models.UtxoWithOrdering,
+) (map[string]string, error) {
+	ret := make(map[string]string, len(utxos))
+	if len(utxos) == 0 {
+		return ret, nil
+	}
+
+	txs, err := a.ledgerState.GetTransactionsByAddress(
+		addr,
+		0,
+		0,
+	)
+	if err != nil {
+		return nil, err
+	}
+	for _, tx := range txs {
+		ret[hex.EncodeToString(tx.Hash)] = hex.EncodeToString(tx.BlockHash)
+	}
+	return ret, nil
+}
+
+func (a *NodeAdapter) transactionBlockInfo(
+	tx models.Transaction,
+) (uint64, int64, error) {
+	block, err := a.ledgerState.BlockByHash(tx.BlockHash)
+	if err != nil {
+		return 0, 0, err
+	}
+	blockTime, err := a.ledgerState.SlotToTime(tx.Slot)
+	if err != nil {
+		return 0, 0, err
+	}
+	return block.Number, blockTime.Unix(), nil
+}
+
+func addressAmountsFromUtxo(
+	utxo models.Utxo,
+) []AddressAmountInfo {
+	ret := make([]AddressAmountInfo, 0, len(utxo.Assets)+1)
+	ret = append(ret, AddressAmountInfo{
+		Unit:     "lovelace",
+		Quantity: strconv.FormatUint(uint64(utxo.Amount), 10),
+	})
+	for _, asset := range utxo.Assets {
+		ret = append(ret, AddressAmountInfo{
+			Unit: hex.EncodeToString(asset.PolicyId) +
+				hex.EncodeToString(asset.Name),
+			Quantity: strconv.FormatUint(
+				uint64(asset.Amount),
+				10,
+			),
+		})
+	}
+	return ret
+}
+
+func optionalHexString(data []byte) *string {
+	if len(data) == 0 {
+		return nil
+	}
+	ret := hex.EncodeToString(data)
+	return &ret
+}
+
+func paginateUtxos(
+	utxos []models.UtxoWithOrdering,
+	params PaginationParams,
+) []models.UtxoWithOrdering {
+	start, end := paginationRange(len(utxos), params)
+	if start >= end {
+		return []models.UtxoWithOrdering{}
+	}
+	return utxos[start:end]
+}
+
+func paginateTransactions(
+	txs []models.Transaction,
+	params PaginationParams,
+) []models.Transaction {
+	start, end := paginationRange(len(txs), params)
+	if start >= end {
+		return []models.Transaction{}
+	}
+	return txs[start:end]
+}
+
+func paginationRange(
+	total int,
+	params PaginationParams,
+) (int, int) {
+	start := (params.Page - 1) * params.Count
+	if start >= total {
+		return total, total
+	}
+	end := start + params.Count
+	if end > total {
+		end = total
+	}
+	return start, end
 }

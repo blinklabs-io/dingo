@@ -255,13 +255,13 @@ func (d *MetadataStoreSqlite) GetUtxosByAddressWithOrdering(
 	result := db.
 		Table("utxo").
 		Select(
-			"utxo.*, transaction.slot as tx_slot, transaction.block_index as tx_block_index",
+			`utxo.*, tx.slot as tx_slot, tx.block_index as tx_block_index`,
 		).
-		Joins("LEFT JOIN transaction ON utxo.transaction_id = transaction.id").
+		Joins(`LEFT JOIN "transaction" tx ON utxo.transaction_id = tx.id`).
 		Where("utxo.deleted_slot = 0").
 		Where(addrQuery).
 		Order(
-			"transaction.slot ASC, transaction.block_index ASC, utxo.output_idx ASC",
+			"tx.slot ASC, tx.block_index ASC, utxo.output_idx ASC",
 		).
 		Scan(&ret)
 
