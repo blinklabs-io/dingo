@@ -30,6 +30,9 @@ type stateMetrics struct {
 	blockForgingLatency prometheus.Histogram
 	forgingEnabled      prometheus.Gauge
 	nodeStartTime       prometheus.Gauge
+	tipGapSlots         prometheus.Gauge
+	shelleyStartTime    prometheus.Gauge
+	epochLengthSlots    prometheus.Gauge
 }
 
 func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
@@ -79,6 +82,24 @@ func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
 		prometheus.GaugeOpts{
 			Name: "cardano_node_metrics_nodeStartTime_int",
 			Help: "unix timestamp when the node started",
+		},
+	)
+	m.tipGapSlots = promautoFactory.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "dingo_tip_gap_slots",
+			Help: "slots between wall-clock slot and chain tip",
+		},
+	)
+	m.shelleyStartTime = promautoFactory.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "dingo_shelley_start_time",
+			Help: "Shelley genesis start as unix timestamp",
+		},
+	)
+	m.epochLengthSlots = promautoFactory.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "dingo_epoch_length_slots",
+			Help: "slots per epoch for the current network",
 		},
 	)
 }

@@ -358,14 +358,18 @@ func (n *Node) handleChainSwitchEvent(evt event.Event) {
 }
 
 func New(cfg Config) (*Node, error) {
-	eventBus := event.NewEventBus(cfg.promRegistry, cfg.logger)
 	n := &Node{
-		config:   cfg,
-		eventBus: eventBus,
+		config: cfg,
 	}
 	if err := n.configPopulateNetworkMagic(); err != nil {
 		return nil, fmt.Errorf("invalid configuration: %w", err)
 	}
+	// Wrap the prometheus registry with a "network" label so all metrics
+	// registered by subsystems carry the network name automatically.
+	// This must happen before any component registers metrics.
+	n.configWrapPromRegistry()
+	n.registerBuildInfo()
+	n.eventBus = event.NewEventBus(n.config.promRegistry, n.config.logger)
 	if err := n.configValidate(); err != nil {
 		return nil, fmt.Errorf("invalid configuration: %w", err)
 	}
