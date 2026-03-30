@@ -705,13 +705,21 @@ func (s *queryServiceServer) ReadData(
 			}
 			return nil, fmt.Errorf("get datum %x: %w", key, err)
 		}
-		resp.Values = append(
-			resp.Values,
-			&query.AnyChainDatum{
-				Key:         datum.Hash,
-				NativeBytes: datum.RawDatum,
-			},
-		)
+		parsed, err := plutusDatumCBORToCardano(datum.RawDatum)
+		if err != nil {
+			return nil, connect.NewError(
+				connect.CodeInternal,
+				fmt.Errorf("decode datum plutus data %x: %w", key, err),
+			)
+		}
+		acd := &query.AnyChainDatum{
+			Key:         datum.Hash,
+			NativeBytes: datum.RawDatum,
+		}
+		if parsed != nil {
+			acd.ParsedState = &query.AnyChainDatum_Cardano{Cardano: parsed}
+		}
+		resp.Values = append(resp.Values, acd)
 	}
 
 	// Get chain point (slot and hash)
