@@ -338,7 +338,7 @@ func testBabbagePParams() *lbabbage.BabbageProtocolParameters {
 		ProtocolMinor:      0,
 		MinPoolCost:        340000000,
 		AdaPerUtxoByte:     4310,
-		CostModels:         map[uint][]int64{1: []int64{0}},
+		CostModels:         map[uint][]int64{1: {0}},
 		ExecutionCosts: lcommon.ExUnitPrice{
 			MemPrice:  &cbor.Rat{Rat: big.NewRat(577, 10000)},
 			StepPrice: &cbor.Rat{Rat: big.NewRat(721, 10000000)},
@@ -377,7 +377,7 @@ func testConwayPParams() *lconway.ConwayProtocolParameters {
 		},
 		MinPoolCost:    340000000,
 		AdaPerUtxoByte: 4310,
-		CostModels:     map[uint][]int64{1: []int64{0}},
+		CostModels:     map[uint][]int64{1: {0}},
 		ExecutionCosts: lcommon.ExUnitPrice{
 			MemPrice:  &cbor.Rat{Rat: big.NewRat(577, 10000)},
 			StepPrice: &cbor.Rat{Rat: big.NewRat(721, 10000000)},

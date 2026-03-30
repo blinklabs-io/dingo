@@ -19,11 +19,11 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/gouroboros/cbor"
-	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	pdata "github.com/blinklabs-io/plutigo/data"
-	cardano "github.com/utxorpc/go-codegen/utxorpc/v1alpha/cardano"
 	"github.com/stretchr/testify/require"
+	cardano "github.com/utxorpc/go-codegen/utxorpc/v1alpha/cardano"
 )
 
 func TestPlutusDataToCardano_IntegerInt64(t *testing.T) {

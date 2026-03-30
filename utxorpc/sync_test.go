@@ -19,17 +19,17 @@ import (
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database/models"
-	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
-	sync "github.com/utxorpc/go-codegen/utxorpc/v1alpha/sync"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
+	sync "github.com/utxorpc/go-codegen/utxorpc/v1alpha/sync"
 )
 
 // TestFollowTipResponse_ResetActionStructure verifies that the Reset action
 // can be constructed with the correct field names and all fields populated
 func TestFollowTipResponse_ResetActionStructure(t *testing.T) {
 	rollbackPoint := ocommon.NewPoint(100, []byte{0x01, 0x02, 0x03})
-	
+
 	// This is the structure used in FollowTip when Rollback=true
 	resp := &sync.FollowTipResponse{
 		Action: &sync.FollowTipResponse_Reset_{
@@ -41,7 +41,7 @@ func TestFollowTipResponse_ResetActionStructure(t *testing.T) {
 			},
 		},
 	}
-	
+
 	// Verify the action can be type-asserted
 	reset, ok := resp.Action.(*sync.FollowTipResponse_Reset_)
 	require.True(t, ok, "action should be Reset_")
@@ -56,14 +56,14 @@ func TestFollowTipResponse_ResetActionStructure(t *testing.T) {
 // structure remains unchanged
 func TestFollowTipResponse_ApplyActionStructure(t *testing.T) {
 	var acb sync.AnyChainBlock
-	
+
 	// This is the structure used in FollowTip when Rollback=false
 	resp := &sync.FollowTipResponse{
 		Action: &sync.FollowTipResponse_Apply{
 			Apply: &acb,
 		},
 	}
-	
+
 	// Verify the action can be type-asserted
 	apply, ok := resp.Action.(*sync.FollowTipResponse_Apply)
 	require.True(t, ok, "action should be Apply")
@@ -77,7 +77,7 @@ func TestFollowTipResponse_TipFieldStructure(t *testing.T) {
 		Point:       ocommon.NewPoint(200, []byte{0x04, 0x05, 0x06}),
 		BlockNumber: 200,
 	}
-	
+
 	resp := &sync.FollowTipResponse{
 		Tip: &sync.BlockRef{
 			Slot:      tip.Point.Slot,
@@ -86,7 +86,7 @@ func TestFollowTipResponse_TipFieldStructure(t *testing.T) {
 			Timestamp: 1234567890000,
 		},
 	}
-	
+
 	require.NotNil(t, resp.Tip, "Tip should not be nil")
 	require.Equal(t, tip.Point.Slot, resp.Tip.Slot, "Tip slot should match")
 	require.Equal(t, tip.Point.Hash, resp.Tip.Hash, "Tip hash should match")
@@ -103,7 +103,7 @@ func TestChainIteratorResult_RollbackField(t *testing.T) {
 		Rollback: true,
 	}
 	require.True(t, rollbackResult.Rollback, "Rollback should be true")
-	
+
 	// Test forward block result
 	forwardResult := &chain.ChainIteratorResult{
 		Point: ocommon.NewPoint(101, []byte{0x02}),
@@ -124,16 +124,16 @@ func TestChainIteratorResult_RollbackField(t *testing.T) {
 // integration testing, see internal/integration/ tests.
 func TestFollowTip_LogicFlow(t *testing.T) {
 	// Simulate the logic flow in FollowTip
-	
+
 	// Case 1: Rollback scenario
 	t.Run("rollback_scenario", func(t *testing.T) {
 		next := &chain.ChainIteratorResult{
 			Point:    ocommon.NewPoint(100, []byte{0x01}),
 			Rollback: true,
 		}
-		
+
 		var resp *sync.FollowTipResponse
-		
+
 		if next.Rollback {
 			// Should emit Reset action with all fields
 			resp = &sync.FollowTipResponse{
@@ -147,7 +147,7 @@ func TestFollowTip_LogicFlow(t *testing.T) {
 				},
 			}
 		}
-		
+
 		// Populate Tip field (may differ from Reset if new blocks arrived)
 		tip := ochainsync.Tip{
 			Point:       ocommon.NewPoint(200, []byte{0x02}),
@@ -159,7 +159,7 @@ func TestFollowTip_LogicFlow(t *testing.T) {
 			Height:    tip.BlockNumber,
 			Timestamp: 9876543210000,
 		}
-		
+
 		// Verify Reset action
 		reset, ok := resp.Action.(*sync.FollowTipResponse_Reset_)
 		require.True(t, ok, "should be Reset action")
@@ -167,17 +167,17 @@ func TestFollowTip_LogicFlow(t *testing.T) {
 		require.Equal(t, uint64(100), reset.Reset_.Slot, "Reset slot should be 100")
 		require.Equal(t, uint64(100), reset.Reset_.Height, "Reset height should be 100")
 		require.NotZero(t, reset.Reset_.Timestamp, "Reset timestamp should be set")
-		
+
 		// Verify Tip field
 		require.NotNil(t, resp.Tip, "Tip should be populated")
 		require.Equal(t, uint64(200), resp.Tip.Slot, "Tip slot should be 200")
 		require.Equal(t, uint64(200), resp.Tip.Height, "Tip height should be 200")
 		require.NotZero(t, resp.Tip.Timestamp, "Tip timestamp should be set")
-		
+
 		// Verify Reset and Tip can be different (concurrent updates)
 		require.NotEqual(t, reset.Reset_.Slot, resp.Tip.Slot, "Reset and Tip can differ")
 	})
-	
+
 	// Case 2: Forward block scenario
 	t.Run("forward_block_scenario", func(t *testing.T) {
 		next := &chain.ChainIteratorResult{
@@ -188,9 +188,9 @@ func TestFollowTip_LogicFlow(t *testing.T) {
 			},
 			Rollback: false,
 		}
-		
+
 		var resp *sync.FollowTipResponse
-		
+
 		if !next.Rollback {
 			// Should emit Apply action
 			var acb sync.AnyChainBlock
@@ -200,7 +200,7 @@ func TestFollowTip_LogicFlow(t *testing.T) {
 				},
 			}
 		}
-		
+
 		// Populate Tip field
 		tip := ochainsync.Tip{
 			Point:       ocommon.NewPoint(200, []byte{0x04}),
@@ -212,12 +212,12 @@ func TestFollowTip_LogicFlow(t *testing.T) {
 			Height:    tip.BlockNumber,
 			Timestamp: 9876543210000,
 		}
-		
+
 		// Verify Apply action
 		apply, ok := resp.Action.(*sync.FollowTipResponse_Apply)
 		require.True(t, ok, "should be Apply action")
 		require.NotNil(t, apply.Apply, "Apply should not be nil")
-		
+
 		// Verify Tip field
 		require.NotNil(t, resp.Tip, "Tip should be populated")
 		require.Equal(t, uint64(200), resp.Tip.Slot, "Tip slot should be 200")
@@ -231,26 +231,26 @@ func TestFollowTip_LogicFlow(t *testing.T) {
 func TestFollowTip_RollbackToOrigin(t *testing.T) {
 	// Origin point has slot=0 and empty hash
 	originPoint := ocommon.NewPoint(0, []byte{})
-	
+
 	next := &chain.ChainIteratorResult{
 		Point:    originPoint,
 		Rollback: true,
 	}
-	
+
 	var resp *sync.FollowTipResponse
-	
+
 	// Simulate the rollback-to-origin logic
 	if next.Rollback {
 		var height uint64
 		var timestamp uint64
-		
+
 		// Origin check: don't call GetBlock for genesis
 		if next.Point.Slot > 0 || len(next.Point.Hash) > 0 {
 			// Would call GetBlock here for non-origin rollbacks
 			t.Fatal("should not attempt to fetch block for origin point")
 		}
 		// For origin, height and timestamp remain zero
-		
+
 		resp = &sync.FollowTipResponse{
 			Action: &sync.FollowTipResponse_Reset_{
 				Reset_: &sync.BlockRef{
@@ -262,7 +262,7 @@ func TestFollowTip_RollbackToOrigin(t *testing.T) {
 			},
 		}
 	}
-	
+
 	// Verify Reset action for origin
 	reset, ok := resp.Action.(*sync.FollowTipResponse_Reset_)
 	require.True(t, ok, "should be Reset action")
