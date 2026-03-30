@@ -412,11 +412,10 @@ func (s *submitServiceServer) WatchMempool(
 			}
 			resp.Tx = record
 
-			shouldSend := predicate == nil ||
-				s.utxorpc.matchesTxPattern(
-					tx,
-					predicate.GetMatch().GetCardano(),
-				)
+			shouldSend := s.utxorpc.matchesSubmitTxPredicate(
+				tx,
+				predicate,
+			)
 			if !shouldSend {
 				return
 			}

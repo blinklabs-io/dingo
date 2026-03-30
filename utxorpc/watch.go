@@ -151,11 +151,10 @@ func (s *watchServiceServer) WatchTx(
 						Apply: &act,
 					},
 				}
-				shouldSend := predicate == nil ||
-					s.utxorpc.matchesTxPattern(
-						tx,
-						predicate.GetMatch().GetCardano(),
-					)
+				shouldSend := s.utxorpc.matchesWatchTxPredicate(
+					tx,
+					predicate,
+				)
 				if shouldSend {
 					err := stream.Send(resp)
 					if err != nil {
