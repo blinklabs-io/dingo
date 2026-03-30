@@ -18,7 +18,7 @@ GO_LDFLAGS=-ldflags "-s -w -X '$(GOMODULE)/internal/version.Version=$(VERSION)' 
 .PHONY: all build mod-tidy clean format golines test bench test-load test-load-log test-load-profile
 
 # Default target
-all: format test build
+all: format build
 
 # Build target
 build: $(BINARIES)
