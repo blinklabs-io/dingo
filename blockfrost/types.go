@@ -145,7 +145,7 @@ type AddressUTXOResponse struct {
 type AddressTransactionResponse struct {
 	TxHash      string `json:"tx_hash"`
 	TxIndex     int    `json:"tx_index"`
-	BlockHeight int    `json:"block_height"`
+	BlockHeight uint64 `json:"block_height"`
 	BlockTime   int    `json:"block_time"`
 }
 

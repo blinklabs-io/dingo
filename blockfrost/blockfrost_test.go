@@ -583,6 +583,6 @@ func TestHandleAddressTransactions(t *testing.T) {
 	require.Len(t, resp, 1)
 	assert.Equal(t, "txhash1", resp[0].TxHash)
 	assert.Equal(t, 2, resp[0].TxIndex)
-	assert.Equal(t, 55, resp[0].BlockHeight)
+	assert.EqualValues(t, 55, resp[0].BlockHeight)
 	assert.Equal(t, 1700000000, resp[0].BlockTime)
 }

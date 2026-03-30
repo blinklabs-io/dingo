@@ -16,6 +16,7 @@ package blockfrost
 
 import (
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 )
@@ -340,7 +341,7 @@ func (b *Blockfrost) handleAddressTransactions(
 		resp = append(resp, AddressTransactionResponse{
 			TxHash:      tx.TxHash,
 			TxIndex:     int(tx.TxIndex),
-			BlockHeight: int(tx.BlockHeight),
+			BlockHeight: tx.BlockHeight,
 			BlockTime:   int(tx.BlockTime),
 		})
 	}
@@ -369,7 +370,7 @@ func writeNodeQueryError(
 	err error,
 	message string,
 ) {
-	if err == ErrInvalidAddress {
+	if errors.Is(err, ErrInvalidAddress) {
 		writeError(
 			w,
 			http.StatusBadRequest,
@@ -391,10 +392,7 @@ func convertAddressAmounts(
 ) []AddressAmountResponse {
 	ret := make([]AddressAmountResponse, 0, len(amounts))
 	for _, amount := range amounts {
-		ret = append(ret, AddressAmountResponse{
-			Unit:     amount.Unit,
-			Quantity: amount.Quantity,
-		})
+		ret = append(ret, AddressAmountResponse(amount))
 	}
 	return ret
 }
