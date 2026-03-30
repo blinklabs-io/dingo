@@ -597,6 +597,13 @@ func (ls *LedgerState) Start(ctx context.Context) error {
 	ls.metrics.nodeStartTime.Set(
 		float64(time.Now().Unix()),
 	)
+	// Set Shelley start time and epoch length from genesis config
+	if sg := ls.config.CardanoNodeConfig.ShelleyGenesis(); sg != nil {
+		ls.metrics.shelleyStartTime.Set(float64(sg.SystemStart.Unix()))
+	}
+	if ls.currentEpoch.LengthInSlots > 0 {
+		ls.metrics.epochLengthSlots.Set(float64(ls.currentEpoch.LengthInSlots))
+	}
 
 	// Initialize database worker pool for async operations
 	if !ls.config.DatabaseWorkerPoolConfig.Disabled {
@@ -1083,6 +1090,17 @@ func (ls *LedgerState) handleSlotTicks() {
 		currentEra := ls.currentEra
 		tipSlot := ls.currentTip.Point.Slot
 		ls.RUnlock()
+
+		// Update wall-clock-based metrics every tick
+		// (must run even when chain is stalled or catching up)
+		if tick.Slot > tipSlot {
+			ls.metrics.tipGapSlots.Set(float64(tick.Slot - tipSlot))
+		} else {
+			ls.metrics.tipGapSlots.Set(0)
+		}
+		if currentEpoch.LengthInSlots > 0 {
+			ls.metrics.epochLengthSlots.Set(float64(currentEpoch.LengthInSlots))
+		}
 
 		// During catch up, don't emit slot-based epoch events. Block
 		// processing handles epoch transitions for historical data. We
