@@ -166,11 +166,11 @@ func (cs *ChainSelector) Stop() {
 // and slot.
 //
 // Returns true if the tip was accepted, false if it was rejected as
-// implausible. A tip is considered implausible if a known peer claims a
-// block number more than securityParam (k) blocks ahead of its own previous
-// tip. New (unknown) peers are always accepted to support cold-start
-// scenarios such as Mithril bootstrap where the first peers may be far
-// ahead of any local reference.
+// implausible. A tip is considered implausible if it claims a block number
+// more than securityParam (k) blocks ahead of a reference point. For known
+// peers, the reference is the peer's own previous tip; for new peers, the
+// reference is the best known peer tip. This avoids rejecting legitimate
+// peers during sync (where the local tip is far behind).
 func (cs *ChainSelector) UpdatePeerTip(
 	connId ouroboros.ConnectionId,
 	tip ochainsync.Tip,
@@ -194,37 +194,46 @@ func (cs *ChainSelector) updatePeerTipObserved(
 		defer cs.mutex.Unlock()
 
 		// Reject implausible tips that claim to be too far ahead of
-		// a reference point. Only checked for known peers: chainsync
-		// advances incrementally so a known peer's tip should never
-		// jump more than k blocks between updates.
-		//
-		// New peers are accepted unconditionally. Restricting new
-		// peers based on the best known peer tip breaks cold-start
-		// scenarios (e.g., Mithril bootstrap) where the reference
-		// is stale and legitimate peers are >k blocks ahead. Once
-		// a new peer is tracked, subsequent updates are bounded by
-		// this check. Non-functional peers are evicted by the stale
-		// tip threshold.
+		// a reference point. Three cases:
+		//  1. Known peer: compare against the peer's own previous
+		//     tip — chainsync advances incrementally so the delta
+		//     is always small. Always checked (even if prev == 0).
+		//  2. New peer with existing peers: compare against the
+		//     best known peer tip to prevent a malicious newcomer
+		//     from spoofing an extremely high block number.
+		//  3. First peer ever: no reference exists, accept to
+		//     allow bootstrap.
 		if cs.securityParam > 0 {
+			rejectTip := false
+			var referenceBlock uint64
 			if prevTip, exists := cs.peerTips[connId]; exists {
-				referenceBlock := prevTip.Tip.BlockNumber
-				if tip.BlockNumber >
-					safeAddUint64(referenceBlock, cs.securityParam) {
-					cs.config.Logger.Warn(
-						"rejecting implausible peer tip",
-						"connection_id", connId.String(),
-						"claimed_block", tip.BlockNumber,
-						"reference_block", referenceBlock,
-						"security_param", cs.securityParam,
-						"max_plausible_block",
-						safeAddUint64(
-							referenceBlock,
-							cs.securityParam,
-						),
-					)
-					accepted = false
-					return
+				// Case 1: known peer — always check
+				referenceBlock = prevTip.Tip.BlockNumber
+				rejectTip = tip.BlockNumber >
+					safeAddUint64(referenceBlock, cs.securityParam)
+			} else if len(cs.peerTips) > 0 {
+				// Case 2: new peer — check against best known
+				for _, pt := range cs.peerTips {
+					if pt.Tip.BlockNumber > referenceBlock {
+						referenceBlock = pt.Tip.BlockNumber
+					}
 				}
+				rejectTip = tip.BlockNumber >
+					safeAddUint64(referenceBlock, cs.securityParam)
+			}
+			// Case 3: len(peerTips)==0 && peer not known → bootstrap
+			if rejectTip {
+				cs.config.Logger.Warn(
+					"rejecting implausible peer tip",
+					"connection_id", connId.String(),
+					"claimed_block", tip.BlockNumber,
+					"reference_block", referenceBlock,
+					"security_param", cs.securityParam,
+					"max_plausible_block",
+					safeAddUint64(referenceBlock, cs.securityParam),
+				)
+				accepted = false
+				return
 			}
 		}
 
@@ -307,30 +316,22 @@ func (cs *ChainSelector) updatePeerTipObserved(
 }
 
 func (cs *ChainSelector) TouchPeerActivity(connId ouroboros.ConnectionId) {
-	shouldEvaluate := false
+	var switchEvent *event.Event
+	var selectionEvent *event.Event
 
-	cs.mutex.Lock()
-	peerTip, exists := cs.peerTips[connId]
-	if !exists {
-		cs.mutex.Unlock()
-		return
-	}
-	peerTip.Touch()
-	newBest := cs.selectBestChainLocked()
-	switch {
-	case cs.bestPeerConn == nil && newBest != nil:
-		shouldEvaluate = true
-	case cs.bestPeerConn != nil && newBest == nil:
-		shouldEvaluate = true
-	case cs.bestPeerConn != nil && newBest != nil &&
-		*cs.bestPeerConn != *newBest:
-		shouldEvaluate = true
-	}
-	cs.mutex.Unlock()
+	func() {
+		cs.mutex.Lock()
+		defer cs.mutex.Unlock()
 
-	if shouldEvaluate {
-		cs.EvaluateAndSwitch()
-	}
+		peerTip, exists := cs.peerTips[connId]
+		if !exists {
+			return
+		}
+		peerTip.Touch()
+		_, switchEvent, selectionEvent = cs.evaluateBestPeerLocked()
+	}()
+
+	cs.publishSelectionEvents(switchEvent, selectionEvent)
 }
 
 // evictLeastRecentPeerLocked removes the peer with the oldest LastUpdated
@@ -717,10 +718,146 @@ func (cs *ChainSelector) triggerEvaluation() {
 	}
 }
 
+func (cs *ChainSelector) publishSelectionEvents(
+	switchEvent *event.Event,
+	selectionEvent *event.Event,
+) {
+	if cs.config.EventBus == nil {
+		return
+	}
+	if switchEvent != nil {
+		cs.config.EventBus.Publish(ChainSwitchEventType, *switchEvent)
+	}
+	if selectionEvent != nil {
+		cs.config.EventBus.Publish(ChainSelectionEventType, *selectionEvent)
+	}
+}
+
+func (cs *ChainSelector) evaluateBestPeerLocked() (
+	bool,
+	*event.Event,
+	*event.Event,
+) {
+	var switchEvent *event.Event
+	var selectionEvent *event.Event
+	switchOccurred := false
+
+	newBest := cs.selectBestChainLocked()
+	if newBest == nil {
+		// Clear stale reference to avoid returning a disconnected peer
+		cs.bestPeerConn = nil
+		return false, nil, nil
+	}
+
+	previousBest := cs.bestPeerConn
+	if previousBest != nil && *previousBest != *newBest {
+		previousPeerTip, ok := cs.peerTips[*previousBest]
+		if ok && cs.isPeerSelectableLocked(*previousBest, previousPeerTip, false) {
+			newPeerTip, ok := cs.peerTips[*newBest]
+			if !ok {
+				return false, nil, nil
+			}
+			if CompareChains(
+				newPeerTip.SelectionTip(),
+				previousPeerTip.SelectionTip(),
+			) == ChainEqual {
+				// When two peers have delivered the same observed frontier,
+				// keep following the incumbent. The first peer to deliver the
+				// fitting header already won on latency; switching on source
+				// priority or VRF alone just creates churn near tip.
+				newBest = previousBest
+			} else if
+			// Preserve the incumbent only when it still wins the same
+			// full comparison used during normal best-peer selection.
+			cs.comparePeerTips(
+				*previousBest,
+				previousPeerTip,
+				*newBest,
+				newPeerTip,
+			) == ChainABetter {
+				newBest = previousBest
+			} else if newPeerTip.Tip.BlockNumber >
+				previousPeerTip.Tip.BlockNumber &&
+				!IsSignificantlyBetter(
+					newPeerTip.Tip,
+					previousPeerTip.Tip,
+					cs.config.MinSwitchBlockDiff,
+				) {
+				newBest = previousBest
+			}
+		}
+	}
+
+	if previousBest == nil || *previousBest != *newBest {
+		newPeerTip, ok := cs.peerTips[*newBest]
+		if !ok {
+			return false, nil, nil
+		}
+		newTip := newPeerTip.Tip
+		cs.bestPeerConn = newBest
+		switchOccurred = true
+
+		cs.config.Logger.Info(
+			"selected new best peer",
+			"connection_id", newBest.String(),
+			"block_number", newTip.BlockNumber,
+			"slot", newTip.Point.Slot,
+		)
+
+		if cs.config.EventBus != nil {
+			var previousTip ochainsync.Tip
+			var previousConnId ouroboros.ConnectionId
+			if previousBest != nil {
+				previousConnId = *previousBest
+				if pt, ok := cs.peerTips[*previousBest]; ok {
+					previousTip = pt.Tip
+				}
+			}
+			// Compute comparison result and block difference
+			comparisonResult := CompareChains(newTip, previousTip)
+			blockDiff := safeBlockDiff(
+				newTip.BlockNumber,
+				previousTip.BlockNumber,
+			)
+			evt := event.NewEvent(
+				ChainSwitchEventType,
+				ChainSwitchEvent{
+					PreviousConnectionId: previousConnId,
+					NewConnectionId:      *newBest,
+					NewTip:               newTip,
+					PreviousTip:          previousTip,
+					ComparisonResult:     comparisonResult,
+					BlockDifference:      blockDiff,
+				},
+			)
+			switchEvent = &evt
+		}
+	}
+
+	if cs.config.EventBus != nil && cs.bestPeerConn != nil {
+		bestPeerTip, ok := cs.peerTips[*cs.bestPeerConn]
+		if !ok {
+			return false, nil, nil
+		}
+		bestTip := bestPeerTip.Tip
+		evt := event.NewEvent(
+			ChainSelectionEventType,
+			ChainSelectionEvent{
+				BestConnectionId: *cs.bestPeerConn,
+				BestTip:          bestTip,
+				PeerCount:        len(cs.peerTips),
+				SwitchOccurred:   switchOccurred,
+			},
+		)
+		selectionEvent = &evt
+	}
+
+	return switchOccurred, switchEvent, selectionEvent
+}
+
 // EvaluateAndSwitch evaluates all peer tips and switches to the best chain if
 // it differs from the current best. Returns true if a switch occurred.
 func (cs *ChainSelector) EvaluateAndSwitch() bool {
-	// Collect events to publish outside the lock to prevent deadlock
 	var switchEvent *event.Event
 	var selectionEvent *event.Event
 	switchOccurred := false
@@ -728,129 +865,10 @@ func (cs *ChainSelector) EvaluateAndSwitch() bool {
 	func() {
 		cs.mutex.Lock()
 		defer cs.mutex.Unlock()
-
-		newBest := cs.selectBestChainLocked()
-		if newBest == nil {
-			// Clear stale reference to avoid returning a disconnected peer
-			cs.bestPeerConn = nil
-			return
-		}
-
-		previousBest := cs.bestPeerConn
-		if previousBest != nil && *previousBest != *newBest {
-			previousPeerTip, ok := cs.peerTips[*previousBest]
-			if ok && cs.isPeerSelectableLocked(*previousBest, previousPeerTip, false) {
-				newPeerTip, ok := cs.peerTips[*newBest]
-				if !ok {
-					return
-				}
-				if CompareChains(
-					newPeerTip.SelectionTip(),
-					previousPeerTip.SelectionTip(),
-				) == ChainEqual {
-					// When two peers have delivered the same observed frontier,
-					// keep following the incumbent. The first peer to deliver the
-					// fitting header already won on latency; switching on source
-					// priority or VRF alone just creates churn near tip.
-					newBest = previousBest
-				} else if
-				// Preserve the incumbent only when it still wins the same
-				// full comparison used during normal best-peer selection.
-				cs.comparePeerTips(
-					*previousBest,
-					previousPeerTip,
-					*newBest,
-					newPeerTip,
-				) == ChainABetter {
-					newBest = previousBest
-				} else if newPeerTip.Tip.BlockNumber >
-					previousPeerTip.Tip.BlockNumber &&
-					!IsSignificantlyBetter(
-						newPeerTip.Tip,
-						previousPeerTip.Tip,
-						cs.config.MinSwitchBlockDiff,
-					) {
-					newBest = previousBest
-				}
-			}
-		}
-
-		if previousBest == nil || *previousBest != *newBest {
-			newPeerTip, ok := cs.peerTips[*newBest]
-			if !ok {
-				return
-			}
-			newTip := newPeerTip.Tip
-			cs.bestPeerConn = newBest
-			switchOccurred = true
-
-			cs.config.Logger.Info(
-				"selected new best peer",
-				"connection_id", newBest.String(),
-				"block_number", newTip.BlockNumber,
-				"slot", newTip.Point.Slot,
-			)
-
-			if cs.config.EventBus != nil {
-				var previousTip ochainsync.Tip
-				var previousConnId ouroboros.ConnectionId
-				if previousBest != nil {
-					previousConnId = *previousBest
-					if pt, ok := cs.peerTips[*previousBest]; ok {
-						previousTip = pt.Tip
-					}
-				}
-				// Compute comparison result and block difference
-				comparisonResult := CompareChains(newTip, previousTip)
-				blockDiff := safeBlockDiff(
-					newTip.BlockNumber,
-					previousTip.BlockNumber,
-				)
-				evt := event.NewEvent(
-					ChainSwitchEventType,
-					ChainSwitchEvent{
-						PreviousConnectionId: previousConnId,
-						NewConnectionId:      *newBest,
-						NewTip:               newTip,
-						PreviousTip:          previousTip,
-						ComparisonResult:     comparisonResult,
-						BlockDifference:      blockDiff,
-					},
-				)
-				switchEvent = &evt
-			}
-		}
-
-		if cs.config.EventBus != nil && cs.bestPeerConn != nil {
-			bestPeerTip, ok := cs.peerTips[*cs.bestPeerConn]
-			if !ok {
-				return
-			}
-			bestTip := bestPeerTip.Tip
-			evt := event.NewEvent(
-				ChainSelectionEventType,
-				ChainSelectionEvent{
-					BestConnectionId: *cs.bestPeerConn,
-					BestTip:          bestTip,
-					PeerCount:        len(cs.peerTips),
-					SwitchOccurred:   switchOccurred,
-				},
-			)
-			selectionEvent = &evt
-		}
+		switchOccurred, switchEvent, selectionEvent = cs.evaluateBestPeerLocked()
 	}()
 
-	// Publish events outside the lock to prevent deadlock if subscribers
-	// call back into ChainSelector
-	if cs.config.EventBus != nil {
-		if switchEvent != nil {
-			cs.config.EventBus.Publish(ChainSwitchEventType, *switchEvent)
-		}
-		if selectionEvent != nil {
-			cs.config.EventBus.Publish(ChainSelectionEventType, *selectionEvent)
-		}
-	}
-
+	cs.publishSelectionEvents(switchEvent, selectionEvent)
 	return switchOccurred
 }
 
