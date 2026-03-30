@@ -15,6 +15,7 @@
 package utxorpc
 
 import (
+	"errors"
 	"math/big"
 
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
@@ -22,6 +23,23 @@ import (
 	pdata "github.com/blinklabs-io/plutigo/data"
 	cardano "github.com/utxorpc/go-codegen/utxorpc/v1alpha/cardano"
 )
+
+// plutusDatumCBORToCardano decodes Cardano datum CBOR and maps it to
+// utxorpc.cardano.PlutusData for AnyChainDatum parsed_state (cardano).
+func plutusDatumCBORToCardano(raw []byte) (*cardano.PlutusData, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	pd, err := pdata.Decode(raw)
+	if err != nil {
+		return nil, err
+	}
+	proto := plutusDataToCardano(pd)
+	if proto == nil {
+		return nil, errors.New("unsupported PlutusData type for utxorpc mapping")
+	}
+	return proto, nil
+}
 
 // redeemerPlutusDataByKey returns Plutus redeemer payloads from the
 // transaction witness set, keyed by redeemer tag and index.

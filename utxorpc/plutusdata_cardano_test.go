@@ -93,6 +93,25 @@ func TestPlutusDataToCardano_ConstrLargeTagUsesAnyConstructor(t *testing.T) {
 	require.Equal(t, uint64(200), cv.Constr.AnyConstructor)
 }
 
+func TestPlutusDatumCBORToCardano_Integer(t *testing.T) {
+	raw, err := pdata.Encode(pdata.NewInteger(big.NewInt(42)))
+	require.NoError(t, err)
+	proto, err := plutusDatumCBORToCardano(raw)
+	require.NoError(t, err)
+	require.NotNil(t, proto)
+	intv, ok := proto.GetPlutusData().(*cardano.PlutusData_BigInt)
+	require.True(t, ok)
+	iv, ok := intv.BigInt.GetBigInt().(*cardano.BigInt_Int)
+	require.True(t, ok)
+	require.Equal(t, int64(42), iv.Int)
+}
+
+func TestPlutusDatumCBORToCardano_EmptyRaw(t *testing.T) {
+	proto, err := plutusDatumCBORToCardano(nil)
+	require.NoError(t, err)
+	require.Nil(t, proto)
+}
+
 // TestRedeemerPlutusDataByKey_DecodedWitness verifies that redeemer
 // Plutus data from a decoded Conway transaction is keyed identically to
 // ledger evaluation (tag + index).
