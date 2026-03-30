@@ -317,7 +317,7 @@ func TestCompatAddressTransactionResponse(t *testing.T) {
 
 	assert.Equal(t, "txhash1", theirs.TxHash)
 	assert.Equal(t, 3, theirs.TxIndex)
-	assert.Equal(t, 99, theirs.BlockHeight)
+	assert.EqualValues(t, 99, theirs.BlockHeight)
 	assert.Equal(t, 1700000000, theirs.BlockTime)
 }
 
