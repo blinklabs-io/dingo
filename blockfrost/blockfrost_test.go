@@ -33,18 +33,24 @@ func intPtr(v int) *int {
 
 // mockNode implements BlockfrostNode for testing.
 type mockNode struct {
-	chainTip    ChainTipInfo
-	block       BlockInfo
-	txHashes    []string
-	epoch       EpochInfo
-	params      ProtocolParamsInfo
-	pools       []PoolExtendedInfo
-	chainTipErr error
-	blockErr    error
-	txHashesErr error
-	epochErr    error
-	paramsErr   error
-	poolsErr    error
+	chainTip               ChainTipInfo
+	block                  BlockInfo
+	txHashes               []string
+	epoch                  EpochInfo
+	params                 ProtocolParamsInfo
+	pools                  []PoolExtendedInfo
+	addressUTXOs           []AddressUTXOInfo
+	addressTransactions    []AddressTransactionInfo
+	addressUTXOsTotal      int
+	addressTxsTotal        int
+	chainTipErr            error
+	blockErr               error
+	txHashesErr            error
+	epochErr               error
+	paramsErr              error
+	poolsErr               error
+	addressUTXOsErr        error
+	addressTransactionsErr error
 }
 
 func (m *mockNode) ChainTip() (
@@ -81,6 +87,20 @@ func (m *mockNode) PoolsExtended() (
 	[]PoolExtendedInfo, error,
 ) {
 	return m.pools, m.poolsErr
+}
+
+func (m *mockNode) AddressUTXOs(
+	_ string,
+	_ PaginationParams,
+) ([]AddressUTXOInfo, int, error) {
+	return m.addressUTXOs, m.addressUTXOsTotal, m.addressUTXOsErr
+}
+
+func (m *mockNode) AddressTransactions(
+	_ string,
+	_ PaginationParams,
+) ([]AddressTransactionInfo, int, error) {
+	return m.addressTransactions, m.addressTxsTotal, m.addressTransactionsErr
 }
 
 func newTestBlockfrost(
@@ -609,4 +629,118 @@ func TestDefaultListenAddress(t *testing.T) {
 		slog.Default(),
 	)
 	assert.Equal(t, ":3000", b.config.ListenAddress)
+}
+
+func TestHandleAddressUTXOs(t *testing.T) {
+	mock := &mockNode{
+		addressUTXOsTotal: 2,
+		addressUTXOs: []AddressUTXOInfo{
+			{
+				Address:     "addr_test1vr8nl4...",
+				TxHash:      "txhash1",
+				OutputIndex: 1,
+				Amount: []AddressAmountInfo{
+					{Unit: "lovelace", Quantity: "1000"},
+					{Unit: "policyasset", Quantity: "5"},
+				},
+				Block: "blockhash1",
+			},
+		},
+	}
+	b := newTestBlockfrost(mock)
+
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/api/v0/addresses/addr_test1vr8nl4.../utxos?count=1&page=1&order=desc",
+		nil,
+	)
+	req.SetPathValue("address", "addr_test1vr8nl4...")
+	w := httptest.NewRecorder()
+	b.handleAddressUTXOs(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, "2", w.Header().Get("X-Pagination-Count-Total"))
+	assert.Equal(t, "2", w.Header().Get("X-Pagination-Page-Total"))
+
+	var resp []AddressUTXOResponse
+	err := json.NewDecoder(w.Body).Decode(&resp)
+	require.NoError(t, err)
+	require.Len(t, resp, 1)
+	assert.Equal(t, "addr_test1vr8nl4...", resp[0].Address)
+	assert.Equal(t, "txhash1", resp[0].TxHash)
+	assert.Equal(t, 1, resp[0].OutputIndex)
+	assert.Equal(t, "lovelace", resp[0].Amount[0].Unit)
+	assert.Equal(t, "1000", resp[0].Amount[0].Quantity)
+	assert.Equal(t, "blockhash1", resp[0].Block)
+}
+
+func TestHandleAddressUTXOsInvalidPagination(t *testing.T) {
+	b := newTestBlockfrost(&mockNode{})
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/api/v0/addresses/addr_test1vr8nl4.../utxos?count=abc",
+		nil,
+	)
+	req.SetPathValue("address", "addr_test1vr8nl4...")
+	w := httptest.NewRecorder()
+	b.handleAddressUTXOs(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	var resp ErrorResponse
+	err := json.NewDecoder(w.Body).Decode(&resp)
+	require.NoError(t, err)
+	assert.Equal(t, "Invalid pagination parameters.", resp.Message)
+}
+
+func TestHandleAddressUTXOsInvalidAddress(t *testing.T) {
+	b := newTestBlockfrost(&mockNode{
+		addressUTXOsErr: ErrInvalidAddress,
+	})
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/api/v0/addresses/not_an_address/utxos",
+		nil,
+	)
+	req.SetPathValue("address", "not_an_address")
+	w := httptest.NewRecorder()
+	b.handleAddressUTXOs(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+func TestHandleAddressTransactions(t *testing.T) {
+	mock := &mockNode{
+		addressTxsTotal: 3,
+		addressTransactions: []AddressTransactionInfo{
+			{
+				TxHash:      "txhash1",
+				TxIndex:     2,
+				BlockHeight: 55,
+				BlockTime:   1700000000,
+			},
+		},
+	}
+	b := newTestBlockfrost(mock)
+
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/api/v0/addresses/addr_test1vr8nl4.../transactions?count=2&page=1",
+		nil,
+	)
+	req.SetPathValue("address", "addr_test1vr8nl4...")
+	w := httptest.NewRecorder()
+	b.handleAddressTransactions(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, "3", w.Header().Get("X-Pagination-Count-Total"))
+	assert.Equal(t, "2", w.Header().Get("X-Pagination-Page-Total"))
+
+	var resp []AddressTransactionResponse
+	err := json.NewDecoder(w.Body).Decode(&resp)
+	require.NoError(t, err)
+	require.Len(t, resp, 1)
+	assert.Equal(t, "txhash1", resp[0].TxHash)
+	assert.Equal(t, 2, resp[0].TxIndex)
+	assert.Equal(t, 55, resp[0].BlockHeight)
+	assert.Equal(t, 1700000000, resp[0].BlockTime)
 }
