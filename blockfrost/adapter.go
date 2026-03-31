@@ -15,9 +15,22 @@
 package blockfrost
 
 import (
+	"bytes"
 	"encoding/hex"
+	"errors"
+	"fmt"
+	"math"
+	"strconv"
 
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/ledger"
+	"github.com/blinklabs-io/gouroboros/cbor"
+	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
+	"github.com/blinklabs-io/gouroboros/ledger/babbage"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	"github.com/blinklabs-io/gouroboros/ledger/mary"
+	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 )
 
 // NodeAdapter wraps a real dingo Node's LedgerState to
@@ -58,23 +71,45 @@ func (a *NodeAdapter) LatestBlock() (
 	BlockInfo, error,
 ) {
 	tip := a.ledgerState.Tip()
-	// TODO: Retrieve full block details (size, tx count,
-	// slot leader, previous block, epoch, epoch slot)
-	// from the database once block query methods are
-	// available.
+	block, decodedBlock, err := a.latestBlockData(
+		tip.Point.Hash,
+	)
+	if err != nil {
+		return BlockInfo{}, err
+	}
+	epoch, err := a.ledgerState.SlotToEpoch(tip.Point.Slot)
+	if err != nil {
+		return BlockInfo{}, fmt.Errorf(
+			"get epoch for tip slot %d: %w",
+			tip.Point.Slot,
+			err,
+		)
+	}
+	slotTime, err := a.ledgerState.SlotToTime(tip.Point.Slot)
+	if err != nil {
+		return BlockInfo{}, fmt.Errorf(
+			"get time for tip slot %d: %w",
+			tip.Point.Slot,
+			err,
+		)
+	}
 	return BlockInfo{
 		Hash: hex.EncodeToString(
 			tip.Point.Hash,
 		),
-		Slot:          tip.Point.Slot,
-		Height:        tip.BlockNumber,
-		Epoch:         0,
-		EpochSlot:     0,
-		Time:          0,
-		Size:          0,
-		TxCount:       0,
-		SlotLeader:    "",
-		PreviousBlock: "",
+		Slot:      tip.Point.Slot,
+		Height:    tip.BlockNumber,
+		Epoch:     epoch.EpochId,
+		EpochSlot: tip.Point.Slot - epoch.StartSlot,
+		Time:      slotTime.Unix(),
+		Size:      uint64(len(block.Cbor)),
+		TxCount:   len(decodedBlock.Transactions()),
+		SlotLeader: blockIssuer(
+			decodedBlock.IssuerVkey(),
+		),
+		PreviousBlock: blockHashString(
+			block.PrevHash,
+		),
 		Confirmations: 0,
 	}, nil
 }
@@ -84,10 +119,18 @@ func (a *NodeAdapter) LatestBlock() (
 func (a *NodeAdapter) LatestBlockTxHashes() (
 	[]string, error,
 ) {
-	// TODO: Query the database for transaction hashes
-	// in the latest block once the appropriate query
-	// methods are available.
-	return []string{}, nil
+	tip := a.ledgerState.Tip()
+	_, decodedBlock, err := a.latestBlockData(
+		tip.Point.Hash,
+	)
+	if err != nil {
+		return nil, err
+	}
+	ret := make([]string, 0, len(decodedBlock.Transactions()))
+	for _, tx := range decodedBlock.Transactions() {
+		ret = append(ret, tx.Hash().String())
+	}
+	return ret, nil
 }
 
 // CurrentEpoch returns information about the current
@@ -95,17 +138,86 @@ func (a *NodeAdapter) LatestBlockTxHashes() (
 func (a *NodeAdapter) CurrentEpoch() (
 	EpochInfo, error,
 ) {
-	// TODO: Retrieve full epoch details (epoch number,
-	// start/end time, block count, tx count) from the
-	// database once epoch query methods are available.
+	tip := a.ledgerState.Tip()
+	tipEpoch, err := a.ledgerState.SlotToEpoch(tip.Point.Slot)
+	if err != nil {
+		return EpochInfo{}, fmt.Errorf(
+			"get epoch for tip slot %d: %w",
+			tip.Point.Slot,
+			err,
+		)
+	}
+	startTime, err := a.ledgerState.SlotToTime(tipEpoch.StartSlot)
+	if err != nil {
+		return EpochInfo{}, fmt.Errorf(
+			"get epoch start time for slot %d: %w",
+			tipEpoch.StartSlot,
+			err,
+		)
+	}
+	endSlot := tipEpoch.StartSlot + uint64(tipEpoch.LengthInSlots)
+	endTime, err := a.ledgerState.SlotToTime(endSlot)
+	if err != nil {
+		return EpochInfo{}, fmt.Errorf(
+			"get epoch end time for slot %d: %w",
+			endSlot,
+			err,
+		)
+	}
+	blockCount, firstBlockSlot, lastBlockSlot, err := a.ledgerState.CountBlocksInSlotRange(
+		tipEpoch.StartSlot,
+		tip.Point.Slot,
+	)
+	if err != nil {
+		return EpochInfo{}, fmt.Errorf(
+			"count epoch blocks for slots %d-%d: %w",
+			tipEpoch.StartSlot,
+			tip.Point.Slot,
+			err,
+		)
+	}
+	txCount, err := a.ledgerState.CountTransactionsInSlotRange(
+		tipEpoch.StartSlot,
+		tip.Point.Slot,
+	)
+	if err != nil {
+		return EpochInfo{}, fmt.Errorf(
+			"count epoch transactions for slots %d-%d: %w",
+			tipEpoch.StartSlot,
+			tip.Point.Slot,
+			err,
+		)
+	}
+	firstBlockTime := int64(0)
+	lastBlockTime := int64(0)
+	if blockCount > 0 {
+		firstTime, err := a.ledgerState.SlotToTime(firstBlockSlot)
+		if err != nil {
+			return EpochInfo{}, fmt.Errorf(
+				"get first epoch block time for slot %d: %w",
+				firstBlockSlot,
+				err,
+			)
+		}
+		lastTime, err := a.ledgerState.SlotToTime(lastBlockSlot)
+		if err != nil {
+			return EpochInfo{}, fmt.Errorf(
+				"get last epoch block time for slot %d: %w",
+				lastBlockSlot,
+				err,
+			)
+		}
+		firstBlockTime = firstTime.Unix()
+		lastBlockTime = lastTime.Unix()
+	}
 	return EpochInfo{
-		Epoch:          0,
-		StartTime:      0,
-		EndTime:        0,
-		FirstBlockTime: 0,
-		LastBlockTime:  0,
-		BlockCount:     0,
-		TxCount:        0,
+		Epoch:          tipEpoch.EpochId,
+		StartTime:      startTime.Unix(),
+		EndTime:        endTime.Unix(),
+		FirstBlockTime: firstBlockTime,
+		LastBlockTime:  lastBlockTime,
+		BlockCount:     blockCount,
+		TxCount:        txCount,
 	}, nil
 }
 
@@ -114,36 +226,197 @@ func (a *NodeAdapter) CurrentEpoch() (
 func (a *NodeAdapter) CurrentProtocolParams() (
 	ProtocolParamsInfo, error,
 ) {
-	// TODO: Map real protocol parameter fields from
-	// GetCurrentPParams() once the gouroboros
-	// ProtocolParameters interface exposes the necessary
-	// getters. For now, return placeholder values.
-	return ProtocolParamsInfo{
-		Epoch:               0,
-		MinFeeA:             0,
-		MinFeeB:             0,
-		MaxBlockSize:        0,
-		MaxTxSize:           0,
-		MaxBlockHeaderSize:  0,
-		KeyDeposit:          "0",
-		PoolDeposit:         "0",
-		EMax:                0,
-		NOpt:                0,
-		A0:                  0,
-		Rho:                 0,
-		Tau:                 0,
-		ProtocolMajorVer:    0,
-		ProtocolMinorVer:    0,
-		MinPoolCost:         "0",
-		CoinsPerUtxoSize:    "0",
-		PriceMem:            0,
-		PriceStep:           0,
-		MaxTxExMem:          "0",
-		MaxTxExSteps:        "0",
-		MaxBlockExMem:       "0",
-		MaxBlockExSteps:     "0",
-		MaxValSize:          "0",
-		CollateralPercent:   0,
-		MaxCollateralInputs: 0,
-	}, nil
+	pparams := a.ledgerState.GetCurrentPParams()
+	if pparams == nil {
+		return ProtocolParamsInfo{}, errors.New(
+			"protocol parameters not available",
+		)
+	}
+	info, err := protocolParamsInfoFromNative(
+		pparams,
+		a.ledgerState.CurrentEpoch(),
+	)
+	if err != nil {
+		return ProtocolParamsInfo{}, fmt.Errorf(
+			"convert current protocol parameters: %w",
+			err,
+		)
+	}
+	return info, nil
+}
+
+func (a *NodeAdapter) latestBlockData(
+	hash []byte,
+) (
+	models.Block,
+	lcommon.Block,
+	error,
+) {
+	block, err := a.ledgerState.BlockByHash(hash)
+	if err != nil {
+		return models.Block{}, nil, fmt.Errorf(
+			"get block by hash %x: %w",
+			hash,
+			err,
+		)
+	}
+	decodedBlock, err := block.Decode()
+	if err != nil {
+		return models.Block{}, nil, fmt.Errorf(
+			"decode block %x: %w",
+			hash,
+			err,
+		)
+	}
+	return block, decodedBlock, nil
+}
+
+func blockIssuer(issuer lcommon.IssuerVkey) string {
+	if bytes.Equal(issuer[:], make([]byte, len(issuer))) {
+		return ""
+	}
+	return issuer.PoolId()
+}
+
+func blockHashString(hash []byte) string {
+	if len(hash) == 0 || isZeroHash(hash) {
+		return ""
+	}
+	return hex.EncodeToString(hash)
+}
+
+func isZeroHash(hash []byte) bool {
+	return bytes.Equal(hash, make([]byte, len(hash)))
+}
+
+func ratToFloat64(r *cbor.Rat) float64 {
+	if r == nil || r.Denom().Sign() == 0 {
+		return 0
+	}
+	f, _ := r.Float64()
+	return f
+}
+
+func exUnitsMemString(exUnits lcommon.ExUnits) string {
+	if exUnits.Memory <= 0 {
+		return "0"
+	}
+	return strconv.FormatInt(exUnits.Memory, 10)
+}
+
+func exUnitsStepsString(exUnits lcommon.ExUnits) string {
+	if exUnits.Steps <= 0 {
+		return "0"
+	}
+	return strconv.FormatInt(exUnits.Steps, 10)
+}
+
+// Blockfrost uses a flattened protocol-parameter view, while Dingo keeps
+// era-specific native types. Map directly from the native ledger type here
+// instead of routing through the UTxO RPC representation first.
+func protocolParamsInfoFromNative(
+	pparams lcommon.ProtocolParameters,
+	epoch uint64,
+) (ProtocolParamsInfo, error) {
+	info := ProtocolParamsInfo{
+		Epoch:            epoch,
+		KeyDeposit:       "0",
+		PoolDeposit:      "0",
+		MinPoolCost:      "0",
+		CoinsPerUtxoSize: "0",
+		MaxTxExMem:       "0",
+		MaxTxExSteps:     "0",
+		MaxBlockExMem:    "0",
+		MaxBlockExSteps:  "0",
+		MaxValSize:       "0",
+	}
+	switch pp := pparams.(type) {
+	case *shelley.ShelleyProtocolParameters:
+		fillBasePParamsInfo(&info, pp.MinFeeA, pp.MinFeeB, pp.MaxBlockBodySize, pp.MaxTxSize, pp.MaxBlockHeaderSize, pp.KeyDeposit, pp.PoolDeposit, pp.MaxEpoch, pp.NOpt, pp.A0, pp.Rho, pp.Tau, pp.ProtocolMajor, pp.ProtocolMinor)
+	case *mary.MaryProtocolParameters:
+		fillBasePParamsInfo(&info, pp.MinFeeA, pp.MinFeeB, pp.MaxBlockBodySize, pp.MaxTxSize, pp.MaxBlockHeaderSize, pp.KeyDeposit, pp.PoolDeposit, pp.MaxEpoch, pp.NOpt, pp.A0, pp.Rho, pp.Tau, pp.ProtocolMajor, pp.ProtocolMinor)
+		info.MinPoolCost = strconv.FormatUint(pp.MinPoolCost, 10)
+	case *alonzo.AlonzoProtocolParameters:
+		fillBasePParamsInfo(&info, pp.MinFeeA, pp.MinFeeB, pp.MaxBlockBodySize, pp.MaxTxSize, pp.MaxBlockHeaderSize, pp.KeyDeposit, pp.PoolDeposit, pp.MaxEpoch, pp.NOpt, pp.A0, pp.Rho, pp.Tau, pp.ProtocolMajor, pp.ProtocolMinor)
+		fillAlonzoPParamsInfo(&info, pp.MinPoolCost, pp.AdaPerUtxoByte, pp.ExecutionCosts, pp.MaxTxExUnits, pp.MaxBlockExUnits, pp.MaxValueSize, pp.CollateralPercentage, pp.MaxCollateralInputs)
+	case *babbage.BabbageProtocolParameters:
+		fillBasePParamsInfo(&info, pp.MinFeeA, pp.MinFeeB, pp.MaxBlockBodySize, pp.MaxTxSize, pp.MaxBlockHeaderSize, pp.KeyDeposit, pp.PoolDeposit, pp.MaxEpoch, pp.NOpt, pp.A0, pp.Rho, pp.Tau, pp.ProtocolMajor, pp.ProtocolMinor)
+		fillAlonzoPParamsInfo(&info, pp.MinPoolCost, pp.AdaPerUtxoByte, pp.ExecutionCosts, pp.MaxTxExUnits, pp.MaxBlockExUnits, pp.MaxValueSize, pp.CollateralPercentage, pp.MaxCollateralInputs)
+	case *conway.ConwayProtocolParameters:
+		fillBasePParamsInfo(&info, pp.MinFeeA, pp.MinFeeB, pp.MaxBlockBodySize, pp.MaxTxSize, pp.MaxBlockHeaderSize, pp.KeyDeposit, pp.PoolDeposit, pp.MaxEpoch, pp.NOpt, pp.A0, pp.Rho, pp.Tau, pp.ProtocolVersion.Major, pp.ProtocolVersion.Minor)
+		fillAlonzoPParamsInfo(&info, pp.MinPoolCost, pp.AdaPerUtxoByte, pp.ExecutionCosts, pp.MaxTxExUnits, pp.MaxBlockExUnits, pp.MaxValueSize, pp.CollateralPercentage, pp.MaxCollateralInputs)
+	default:
+		return ProtocolParamsInfo{}, fmt.Errorf(
+			"unsupported protocol parameters type: %T",
+			pparams,
+		)
+	}
+	return info, nil
+}
+
+func fillBasePParamsInfo(
+	info *ProtocolParamsInfo,
+	minFeeA uint,
+	minFeeB uint,
+	maxBlockBodySize uint,
+	maxTxSize uint,
+	maxBlockHeaderSize uint,
+	keyDeposit uint,
+	poolDeposit uint,
+	maxEpoch uint,
+	nOpt uint,
+	a0 *cbor.Rat,
+	rho *cbor.Rat,
+	tau *cbor.Rat,
+	protocolMajor uint,
+	protocolMinor uint,
+) {
+	// These fields are shared across the Shelley-family protocol parameter
+	// types, so they can be filled uniformly regardless of era.
+	info.MinFeeA = uintToInt(minFeeA)
+	info.MinFeeB = uintToInt(minFeeB)
+	info.MaxBlockSize = uintToInt(maxBlockBodySize)
+	info.MaxTxSize = uintToInt(maxTxSize)
+	info.MaxBlockHeaderSize = uintToInt(maxBlockHeaderSize)
+	info.KeyDeposit = strconv.FormatUint(uint64(keyDeposit), 10)
+	info.PoolDeposit = strconv.FormatUint(uint64(poolDeposit), 10)
+	info.EMax = uintToInt(maxEpoch)
+	info.NOpt = uintToInt(nOpt)
+	info.A0 = ratToFloat64(a0)
+	info.Rho = ratToFloat64(rho)
+	info.Tau = ratToFloat64(tau)
+	info.ProtocolMajorVer = uintToInt(protocolMajor)
+	info.ProtocolMinorVer = uintToInt(protocolMinor)
+}
+
+func fillAlonzoPParamsInfo(
+	info *ProtocolParamsInfo,
+	minPoolCost uint64,
+	coinsPerUtxoByte uint64,
+	executionCosts lcommon.ExUnitPrice,
+	maxTxExUnits lcommon.ExUnits,
+	maxBlockExUnits lcommon.ExUnits,
+	maxValueSize uint,
+	collateralPercentage uint,
+	maxCollateralInputs uint,
+) {
+	// Execution pricing, ex-units, collateral, and coins-per-UTxO sizing only
+	info.MinPoolCost = strconv.FormatUint(minPoolCost, 10)
+	info.CoinsPerUtxoSize = strconv.FormatUint(coinsPerUtxoByte, 10)
+	info.PriceMem = ratToFloat64(executionCosts.MemPrice)
+	info.PriceStep = ratToFloat64(executionCosts.StepPrice)
+	info.MaxTxExMem = exUnitsMemString(maxTxExUnits)
+	info.MaxTxExSteps = exUnitsStepsString(maxTxExUnits)
+	info.MaxBlockExMem = exUnitsMemString(maxBlockExUnits)
+	info.MaxBlockExSteps = exUnitsStepsString(maxBlockExUnits)
+	info.MaxValSize = strconv.FormatUint(uint64(maxValueSize), 10)
+	info.CollateralPercent = uintToInt(collateralPercentage)
+	info.MaxCollateralInputs = uintToInt(maxCollateralInputs)
+}
+
+func uintToInt(v uint) int {
+	if uint64(v) > math.MaxInt {
+		return math.MaxInt
+	}
+	return int(v)
 }
