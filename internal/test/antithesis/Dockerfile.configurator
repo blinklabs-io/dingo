@@ -1,8 +1,70 @@
-FROM ghcr.io/cardano-foundation/testnet-generation-tool:v0.1.0
-RUN useradd -m configurator
+# Antithesis configurator for ARM64/AMD64.
+#
+# Builds from cardano-foundation/testnet-generation-tool to generate
+# unique pool keys and genesis files for Antithesis testing.
 
-COPY --chown=configurator:configurator scripts/configurator.sh /configurator.sh
-COPY --chown=configurator:configurator testnet.yaml /testnet.yaml
+# Pin to same version used in docker-compose.yaml
+FROM ghcr.io/blinklabs-io/cardano-node:10.5.4
 
-USER configurator
+ARG UV_VERSION=0.11.2
+ARG TESTNET_GENERATION_TOOL_VERSION=v0.1.0
+ARG TESTNET_GENERATION_TOOL_COMMIT=abab0b3ce616928cae4ea5c36a41654ec068e2e4
+
+USER root
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        git \
+        tar \
+        tree \
+        python3 \
+        python3-pip \
+        jq && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN python3 -m pip install --break-system-packages \
+        "uv==${UV_VERSION}"
+
+RUN useradd --system --create-home --home-dir /home/cardano \
+        --shell /bin/bash --user-group cardano && \
+    install --directory --owner=root --group=root --mode=0755 \
+        /usr/local/src /usr/local/src/cardano-node
+
+WORKDIR /usr/local/src
+# Pin to v0.1.0 and fail the build if the tag no longer resolves to the
+# expected commit.
+RUN git clone --branch "${TESTNET_GENERATION_TOOL_VERSION}" --depth 1 \
+        https://github.com/cardano-foundation/testnet-generation-tool.git && \
+    git -C testnet-generation-tool checkout --detach \
+        "${TESTNET_GENERATION_TOOL_COMMIT}" && \
+    test "$(git -C testnet-generation-tool rev-parse HEAD)" = \
+        "${TESTNET_GENERATION_TOOL_COMMIT}"
+
+WORKDIR /usr/local/src/testnet-generation-tool
+RUN uv sync && mkdir -p cardano-node && ln -sf /usr/local/bin ./cardano-node/bin
+
+COPY scripts/configurator.sh /configurator.sh
+COPY testnet.yaml /testnet.yaml
+RUN chmod 0755 /configurator.sh && \
+    install --directory --owner=cardano --group=cardano --mode=0755 \
+        /configs \
+        /configs/1 /configs/1/configs \
+        /configs/2 /configs/2/configs \
+        /configs/3 /configs/3/configs \
+        /configs/4 /configs/4/configs \
+        /configs/5 /configs/5/configs \
+        /configs/utxo-keys \
+        /tmp/testnet && \
+    chown -R cardano:cardano \
+        /home/cardano \
+        /usr/local/src \
+        /configurator.sh \
+        /testnet.yaml
+
+ENV HOME=/home/cardano
+
+USER cardano
+
 ENTRYPOINT ["/bin/bash", "/configurator.sh"]
