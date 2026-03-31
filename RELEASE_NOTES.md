@@ -38,6 +38,19 @@ Thank you for trying!
 ---
 
 
+## v0.28.0 (TBD)
+
+**Title:** TODO
+
+**Date:** TBD
+
+**Version:** v0.28.0
+
+Release notes for v0.28.0 will be added here when they are available.
+
+---
+
+
 ## v0.27.7 (March 24, 2026)
 
 **Title:** Steadier sync and leaner storage
