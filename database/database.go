@@ -322,12 +322,14 @@ func New(
 			ConstLabels: prometheus.Labels{"store": "metadata"},
 		})
 		if err := configCopy.PromRegistry.Register(blobSizeGauge); err != nil {
-			if are, ok := err.(prometheus.AlreadyRegisteredError); ok {
+			var are prometheus.AlreadyRegisteredError
+			if errors.As(err, &are) {
 				blobSizeGauge = are.ExistingCollector.(prometheus.Gauge)
 			}
 		}
 		if err := configCopy.PromRegistry.Register(metadataSizeGauge); err != nil {
-			if are, ok := err.(prometheus.AlreadyRegisteredError); ok {
+			var are prometheus.AlreadyRegisteredError
+			if errors.As(err, &are) {
 				metadataSizeGauge = are.ExistingCollector.(prometheus.Gauge)
 			}
 		}
