@@ -120,6 +120,7 @@ func SetPluginOption(
 					)
 				}
 				*dest = v
+				markOptionSet(opt.SetIndicator)
 				return nil
 			case PluginOptionTypeBool:
 				v, ok := value.(bool)
@@ -149,6 +150,7 @@ func SetPluginOption(
 					)
 				}
 				*dest = v
+				markOptionSet(opt.SetIndicator)
 				return nil
 			case PluginOptionTypeInt:
 				v, ok := value.(int)
@@ -178,6 +180,7 @@ func SetPluginOption(
 					)
 				}
 				*dest = v
+				markOptionSet(opt.SetIndicator)
 				return nil
 			case PluginOptionTypeUint:
 				// accept uint64 or int
@@ -194,6 +197,7 @@ func SetPluginOption(
 						return fmt.Errorf("nil destination pointer for option %s", optionName)
 					}
 					*dest = tv
+					markOptionSet(opt.SetIndicator)
 					return nil
 				case int:
 					if tv < 0 {
@@ -210,6 +214,7 @@ func SetPluginOption(
 						return fmt.Errorf("nil destination pointer for option %s", optionName)
 					}
 					*dest = uint64(tv)
+					markOptionSet(opt.SetIndicator)
 					return nil
 				default:
 					return fmt.Errorf("invalid type for option %s: expected uint64 or int", optionName)

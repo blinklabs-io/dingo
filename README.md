@@ -209,6 +209,8 @@ CARDANO_BLOCK_PRODUCER=true \
   ./dingo
 ```
 
+When `storageMode=core`, the Badger blob store defaults to mmap-only settings: `block-cache-size=0`, `index-cache-size=0`, and `compression=false`. When `storageMode=api`, the default Badger profile is `block-cache-size=268435456`, `index-cache-size=0`, and `compression=true`. YAML, environment variable, and CLI Badger options override those defaults only when explicitly set.
+
 See `dingo.yaml.example` for the full set of configuration options.
 
 ## Fast Bootstrapping with Mithril
@@ -313,7 +315,10 @@ BadgerDB Options:
 - `data-dir` - Directory for database files
 - `block-cache-size` - Block cache size in bytes
 - `index-cache-size` - Index cache size in bytes
+- `compression` - Enable Snappy compression
 - `gc` - Enable garbage collection
+
+Leave the mode-sensitive Badger settings unset if you want Dingo's storage-mode defaults. `storageMode=core` uses `block-cache-size=0`, `index-cache-size=0`, and `compression=false`; `storageMode=api` uses `block-cache-size=268435456`, `index-cache-size=0`, and `compression=true`.
 
 Google Cloud Storage Options:
 - `bucket` - GCS bucket name

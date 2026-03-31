@@ -1,5 +1,7 @@
 # Example config file for dingo
-# The values shown below correspond to the in-code defaults
+# The values shown below correspond to the in-code defaults unless a
+# setting is left commented out to preserve a storage-mode-specific
+# runtime default.
 
 # Public bind address for the Dingo server
 bindAddr: "0.0.0.0"
@@ -19,12 +21,21 @@ database:
     badger:
       # Data directory for BadgerDB storage
       data-dir: ".dingo/badger"
-      # Block cache size in bytes (default: 1610612736 ~1.5GB)
-      block-cache-size: 1610612736
-      # Index cache size in bytes (default: 536870912 ~512MB)
-      index-cache-size: 536870912
+      # Block cache size in bytes.
+      # Leave unset to use the storage-mode default:
+      # - 0 when storageMode: "core"
+      # - 268435456 (256MB) when storageMode: "api"
+      # block-cache-size: 0
+      # Index cache size in bytes.
+      # Leave unset to use the runtime default (0 in both core and api modes).
+      # index-cache-size: 0
       # Enable garbage collection (default: true)
       gc: true
+      # Enable Snappy compression.
+      # Leave unset to use the storage-mode default:
+      # - false when storageMode: "core"
+      # - true when storageMode: "api"
+      # compression: false
     gcs:
       # Google Cloud Storage bucket name
       bucket: ""
@@ -170,6 +181,10 @@ barkPort: 0
 #   storageMode: "api"
 #   utxorpcPort: 9090
 #   blockfrostPort: 3100
+#   # With storageMode: "api", leave mode-sensitive Badger settings unset to keep:
+#   #   block-cache-size: 268435456
+#   #   index-cache-size: 0
+#   #   compression: true
 #
 # Validator / block producer (core storage, no APIs):
 #   storageMode: "core"
@@ -177,6 +192,11 @@ barkPort: 0
 #   shelleyVrfKey: "/keys/vrf.skey"
 #   shelleyKesKey: "/keys/kes.skey"
 #   shelleyOperationalCertificate: "/keys/opcert.cert"
+#   # With storageMode: "core", Badger blob defaults switch to mmap-only:
+#   #   block-cache-size: 0
+#   #   index-cache-size: 0
+#   #   compression: false
+#   # You can still override any of those explicitly under database.blob.badger.
 #   # Optional forging tolerances (0 = defaults)
 #   forgeSyncToleranceSlots: 0
 #   forgeStaleGapThresholdSlots: 0
