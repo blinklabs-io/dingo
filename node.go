@@ -419,6 +419,12 @@ func (n *Node) Run(ctx context.Context) error {
 		MetadataPlugin: n.config.metadataPlugin,
 		MaxConnections: n.config.DatabaseWorkerPoolConfig.WorkerPoolSize,
 		StorageMode:    string(n.config.storageMode),
+		CacheConfig: database.CborCacheConfig{
+			BlockLRUEntries: n.config.cacheBlockLRUEntries,
+			HotUtxoEntries:  n.config.cacheHotUtxoEntries,
+			HotTxEntries:    n.config.cacheHotTxEntries,
+			HotTxMaxBytes:   n.config.cacheHotTxMaxBytes,
+		},
 	}
 	db, err := database.New(dbConfig)
 	if db == nil {
