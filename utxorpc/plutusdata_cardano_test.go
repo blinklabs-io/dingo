@@ -19,11 +19,11 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/gouroboros/cbor"
-	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	pdata "github.com/blinklabs-io/plutigo/data"
-	cardano "github.com/utxorpc/go-codegen/utxorpc/v1alpha/cardano"
 	"github.com/stretchr/testify/require"
+	cardano "github.com/utxorpc/go-codegen/utxorpc/v1alpha/cardano"
 )
 
 func TestPlutusDataToCardano_IntegerInt64(t *testing.T) {
@@ -91,6 +91,25 @@ func TestPlutusDataToCardano_ConstrLargeTagUsesAnyConstructor(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, uint32(0), cv.Constr.Tag)
 	require.Equal(t, uint64(200), cv.Constr.AnyConstructor)
+}
+
+func TestPlutusDatumCBORToCardano_Integer(t *testing.T) {
+	raw, err := pdata.Encode(pdata.NewInteger(big.NewInt(42)))
+	require.NoError(t, err)
+	proto, err := plutusDatumCBORToCardano(raw)
+	require.NoError(t, err)
+	require.NotNil(t, proto)
+	intv, ok := proto.GetPlutusData().(*cardano.PlutusData_BigInt)
+	require.True(t, ok)
+	iv, ok := intv.BigInt.GetBigInt().(*cardano.BigInt_Int)
+	require.True(t, ok)
+	require.Equal(t, int64(42), iv.Int)
+}
+
+func TestPlutusDatumCBORToCardano_EmptyRaw(t *testing.T) {
+	proto, err := plutusDatumCBORToCardano(nil)
+	require.NoError(t, err)
+	require.Nil(t, proto)
 }
 
 // TestRedeemerPlutusDataByKey_DecodedWitness verifies that redeemer

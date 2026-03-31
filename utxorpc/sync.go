@@ -82,21 +82,11 @@ func (s *syncServiceServer) FetchBlock(
 		if err != nil {
 			return nil, err
 		}
-		var acb sync.AnyChainBlock
-		ret, err := block.Decode()
+		acb, err := anyChainBlockFromModel(block)
 		if err != nil {
 			return nil, err
 		}
-		tmpBlock, err := ret.Utxorpc()
-		if err != nil {
-			return nil, fmt.Errorf("convert block: %w", err)
-		}
-		acbc := sync.AnyChainBlock_Cardano{
-			Cardano: tmpBlock,
-		}
-		acb.Chain = &acbc
-		acb.NativeBytes = block.Cbor
-		resp.Block = append(resp.Block, &acb)
+		resp.Block = append(resp.Block, acb)
 	}
 
 	return connect.NewResponse(resp), nil
@@ -108,21 +98,13 @@ func (s *syncServiceServer) DumpHistory(
 	req *connect.Request[sync.DumpHistoryRequest],
 ) (*connect.Response[sync.DumpHistoryResponse], error) {
 	startToken := req.Msg.GetStartToken() // *BlockRef
-	maxItems := req.Msg.GetMaxItems()     // uint32
+	maxItems := req.Msg.GetMaxItems()     // uint32; 0 = omitted in protobuf
 	fieldMask := req.Msg.GetFieldMask()
 
-	s.utxorpc.config.Logger.Info(
-		fmt.Sprintf(
-			"Got a DumpHistory request with token %v and maxItems %d and fieldMask %v",
-			startToken,
-			maxItems,
-			fieldMask,
-		),
-	)
-	resp := &sync.DumpHistoryResponse{}
-
-	// Enforce request size limit
 	maxAllowed := uint32(s.utxorpc.config.MaxHistoryItems) // #nosec G115 -- bounded by DefaultMaxHistoryItems (10000)
+
+	// Reject explicit max_items above server cap. Omitted field is 0; see
+	// effectiveDumpHistoryMaxItems.
 	if maxItems > maxAllowed {
 		return nil, connect.NewError(
 			connect.CodeInvalidArgument,
@@ -134,48 +116,56 @@ func (s *syncServiceServer) DumpHistory(
 		)
 	}
 
-	// Get our points
-	var points []ocommon.Point
-	if maxItems > 0 {
-		tmpPoints, err := s.utxorpc.config.LedgerState.RecentChainPoints(
-			int(maxItems),
-		)
-		if err != nil {
-			return nil, err
-		}
-		points = tmpPoints
-	} else {
-		point := s.utxorpc.config.LedgerState.Tip().Point
-		points = append(points, point)
-	}
-	// TODO: make this work (#401)
-	// if startToken != nil {
-	// 	blockIdx := startToken.GetIndex()
-	// 	blockHash := startToken.GetHash()
-	// 	slot := uint64(blockIdx)
-	// 	point = ocommon.NewPoint(slot, blockHash)
-	// }
+	effectiveMax := effectiveDumpHistoryMaxItems(maxItems, maxAllowed)
+	s.utxorpc.config.Logger.Info(
+		fmt.Sprintf(
+			"Got a DumpHistory request with token %v maxItems raw=%d effective=%d fieldMask %v",
+			startToken,
+			maxItems,
+			effectiveMax,
+			fieldMask,
+		),
+	)
+	resp := &sync.DumpHistoryResponse{}
 
-	for _, point := range points {
-		block, err := s.utxorpc.config.LedgerState.GetBlock(point)
-		if err != nil {
-			return nil, err
+	var startPoint ocommon.Point
+	inclusive := true
+	if startToken != nil {
+		startPoint = ocommon.NewPoint(
+			startToken.GetSlot(),
+			startToken.GetHash(),
+		)
+		inclusive = false
+	}
+
+	chainIter, err := s.utxorpc.config.LedgerState.GetChainFromPoint(
+		startPoint,
+		inclusive,
+	)
+	if err != nil {
+		if errors.Is(err, models.ErrBlockNotFound) {
+			return nil, connect.NewError(
+				connect.CodeNotFound,
+				fmt.Errorf("start_token not on chain: %w", err),
+			)
 		}
-		var acb sync.AnyChainBlock
-		ret, err := block.Decode()
-		if err != nil {
-			return nil, err
-		}
-		tmpBlock, err := ret.Utxorpc()
-		if err != nil {
-			return nil, fmt.Errorf("convert block: %w", err)
-		}
-		acbc := sync.AnyChainBlock_Cardano{
-			Cardano: tmpBlock,
-		}
-		acb.Chain = &acbc
-		acb.NativeBytes = block.Cbor
-		resp.Block = append(resp.Block, &acb)
+		return nil, err
+	}
+	defer chainIter.Cancel()
+
+	blocks, lastModel, hasMore, err := collectDumpHistoryPage(
+		ctx,
+		chainIter,
+		maxItems,
+		maxAllowed,
+	)
+	if err != nil {
+		return nil, err
+	}
+	resp.Block = blocks
+
+	if hasMore && lastModel != nil {
+		resp.NextToken = syncBlockRefFromModel(*lastModel)
 	}
 
 	return connect.NewResponse(resp), nil

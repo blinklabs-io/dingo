@@ -254,23 +254,28 @@ func (o *Ouroboros) ConfigureListeners(
 						)...,
 					),
 				),
-				ouroboros.WithLeiosFetchConfig(
-					oleiosfetch.NewConfig(
-						slices.Concat(
-							o.leiosfetchClientConnOpts(),
-							o.leiosfetchServerConnOpts(),
-						)...,
-					),
-				),
-				ouroboros.WithLeiosNotifyConfig(
-					oleiosnotify.NewConfig(
-						slices.Concat(
-							o.leiosnotifyClientConnOpts(),
-							o.leiosnotifyServerConnOpts(),
-						)...,
-					),
-				),
 			)
+			if o.config.EnableLeios {
+				l.ConnectionOpts = append(
+					l.ConnectionOpts,
+					ouroboros.WithLeiosFetchConfig(
+						oleiosfetch.NewConfig(
+							slices.Concat(
+								o.leiosfetchClientConnOpts(),
+								o.leiosfetchServerConnOpts(),
+							)...,
+						),
+					),
+					ouroboros.WithLeiosNotifyConfig(
+						oleiosnotify.NewConfig(
+							slices.Concat(
+								o.leiosnotifyClientConnOpts(),
+								o.leiosnotifyServerConnOpts(),
+							)...,
+						),
+					),
+				)
+			}
 		}
 		tmpListeners[idx] = l
 	}
@@ -278,7 +283,7 @@ func (o *Ouroboros) ConfigureListeners(
 }
 
 func (o *Ouroboros) OutboundConnOpts() []ouroboros.ConnectionOptionFunc {
-	return []ouroboros.ConnectionOptionFunc{
+	opts := []ouroboros.ConnectionOptionFunc{
 		ouroboros.WithNetworkMagic(o.config.NetworkMagic),
 		ouroboros.WithNodeToNode(true),
 		ouroboros.WithKeepAlive(true),
@@ -319,23 +324,29 @@ func (o *Ouroboros) OutboundConnOpts() []ouroboros.ConnectionOptionFunc {
 				)...,
 			),
 		),
-		ouroboros.WithLeiosFetchConfig(
-			oleiosfetch.NewConfig(
-				slices.Concat(
-					o.leiosfetchClientConnOpts(),
-					o.leiosfetchServerConnOpts(),
-				)...,
-			),
-		),
-		ouroboros.WithLeiosNotifyConfig(
-			oleiosnotify.NewConfig(
-				slices.Concat(
-					o.leiosnotifyClientConnOpts(),
-					o.leiosnotifyServerConnOpts(),
-				)...,
-			),
-		),
 	}
+	if o.config.EnableLeios {
+		opts = append(
+			opts,
+			ouroboros.WithLeiosFetchConfig(
+				oleiosfetch.NewConfig(
+					slices.Concat(
+						o.leiosfetchClientConnOpts(),
+						o.leiosfetchServerConnOpts(),
+					)...,
+				),
+			),
+			ouroboros.WithLeiosNotifyConfig(
+				oleiosnotify.NewConfig(
+					slices.Concat(
+						o.leiosnotifyClientConnOpts(),
+						o.leiosnotifyServerConnOpts(),
+					)...,
+				),
+			),
+		)
+	}
+	return opts
 }
 
 func (o *Ouroboros) HandleConnClosedEvent(evt event.Event) {

@@ -32,9 +32,9 @@ func TestCaip2FromNetworkMagic_KnownNetworks(t *testing.T) {
 	require.True(t, ok, "expected preview network to exist")
 
 	tests := []struct {
-		name   string
-		magic  uint32
-		caip2  string
+		name  string
+		magic uint32
+		caip2 string
 	}{
 		{
 			name:  "mainnet",
@@ -74,4 +74,3 @@ func TestCaip2FromNetworkMagic_CustomNetwork(t *testing.T) {
 	got := caip2FromNetworkMagic(customMagic)
 	require.Equal(t, "cardano:4294967295", got)
 }
-

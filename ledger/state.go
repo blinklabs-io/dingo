@@ -49,12 +49,21 @@ import (
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/prometheus/client_golang/prometheus"
+	"gorm.io/gorm"
 )
 
 const (
 	cleanupConsumedUtxosInterval = 5 * time.Minute
 	batchSize                    = 50 // Number of blocks to process in a single DB transaction
 )
+
+type metadataDbReader interface {
+	DB() *gorm.DB
+}
+
+type metadataReadDbReader interface {
+	ReadDB() *gorm.DB
+}
 
 // DatabaseOperation represents an asynchronous database operation
 type DatabaseOperation struct {
@@ -597,6 +606,13 @@ func (ls *LedgerState) Start(ctx context.Context) error {
 	ls.metrics.nodeStartTime.Set(
 		float64(time.Now().Unix()),
 	)
+	// Set Shelley start time and epoch length from genesis config
+	if sg := ls.config.CardanoNodeConfig.ShelleyGenesis(); sg != nil {
+		ls.metrics.shelleyStartTime.Set(float64(sg.SystemStart.Unix()))
+	}
+	if ls.currentEpoch.LengthInSlots > 0 {
+		ls.metrics.epochLengthSlots.Set(float64(ls.currentEpoch.LengthInSlots))
+	}
 
 	// Initialize database worker pool for async operations
 	if !ls.config.DatabaseWorkerPoolConfig.Disabled {
@@ -1083,6 +1099,17 @@ func (ls *LedgerState) handleSlotTicks() {
 		currentEra := ls.currentEra
 		tipSlot := ls.currentTip.Point.Slot
 		ls.RUnlock()
+
+		// Update wall-clock-based metrics every tick
+		// (must run even when chain is stalled or catching up)
+		if tick.Slot > tipSlot {
+			ls.metrics.tipGapSlots.Set(float64(tick.Slot - tipSlot))
+		} else {
+			ls.metrics.tipGapSlots.Set(0)
+		}
+		if currentEpoch.LengthInSlots > 0 {
+			ls.metrics.epochLengthSlots.Set(float64(currentEpoch.LengthInSlots))
+		}
 
 		// During catch up, don't emit slot-based epoch events. Block
 		// processing handles epoch transitions for historical data. We
@@ -3567,13 +3594,29 @@ func (ls *LedgerState) EpochNonce(epoch uint64) []byte {
 	ls.RLock()
 	// Check current epoch under read lock; copy nonce if it matches
 	if epoch == ls.currentEpoch.EpochId {
-		if len(ls.currentEpoch.Nonce) == 0 {
+		if len(ls.currentEpoch.Nonce) > 0 {
+			nonce := make([]byte, len(ls.currentEpoch.Nonce))
+			copy(nonce, ls.currentEpoch.Nonce)
 			ls.RUnlock()
+			return nonce
+		}
+		// In-memory nonce empty (e.g. after Mithril import) —
+		// fall through to DB lookup
+		ls.RUnlock()
+		ep, err := ls.db.GetEpoch(epoch, nil)
+		if err != nil {
+			ls.config.Logger.Error(
+				"failed to look up epoch nonce from DB",
+				"epoch", epoch,
+				"error", err,
+			)
 			return nil
 		}
-		nonce := make([]byte, len(ls.currentEpoch.Nonce))
-		copy(nonce, ls.currentEpoch.Nonce)
-		ls.RUnlock()
+		if ep == nil || len(ep.Nonce) == 0 {
+			return nil
+		}
+		nonce := make([]byte, len(ep.Nonce))
+		copy(nonce, ep.Nonce)
 		return nonce
 	}
 	// If the requested epoch is ahead of the ledger state (slot clock
@@ -3899,6 +3942,95 @@ func (ls *LedgerState) GetTransactionsByAddress(
 	offset int,
 ) ([]models.Transaction, error) {
 	return ls.db.GetTransactionsByAddress(addr, limit, offset, nil)
+}
+
+// CountTransactionsInSlotRange returns the number of transactions whose slot
+// falls within the inclusive range [startSlot, endSlot].
+// Used by the Blockfrost adapter CurrentEpoch() path so epoch responses can
+// return real tx counts without decoding every block in the epoch on demand.
+func (ls *LedgerState) CountTransactionsInSlotRange(
+	startSlot, endSlot uint64,
+) (int, error) {
+	if endSlot < startSlot {
+		return 0, nil
+	}
+	db, err := resolveMetadataQueryDB(ls)
+	if err != nil {
+		return 0, err
+	}
+	var count int64
+	if err := db.
+		Model(&models.Transaction{}).
+		Where("slot >= ? AND slot <= ?", startSlot, endSlot).
+		Count(&count).Error; err != nil {
+		return 0, fmt.Errorf(
+			"count transactions in slot range %d-%d: %w",
+			startSlot,
+			endSlot,
+			err,
+		)
+	}
+	return int(count), nil
+}
+
+func resolveMetadataQueryDB(ls *LedgerState) (*gorm.DB, error) {
+	metaStore := ls.db.Metadata()
+	if metaStore == nil {
+		return nil, errors.New("metadata store unavailable")
+	}
+	if reader, ok := metaStore.(metadataReadDbReader); ok {
+		if db := reader.ReadDB(); db != nil {
+			return db, nil
+		}
+	}
+	if reader, ok := metaStore.(metadataDbReader); ok {
+		if db := reader.DB(); db != nil {
+			return db, nil
+		}
+	}
+	return nil, errors.New(
+		"metadata store does not expose database handle",
+	)
+}
+
+// CountBlocksInSlotRange returns the number of canonical blocks in the
+// inclusive slot range [startSlot, endSlot], along with the first and last
+// block slots found. It uses canonical metadata rows instead of raw blob keys
+// so orphaned fork blocks do not leak into Blockfrost epoch responses.
+func (ls *LedgerState) CountBlocksInSlotRange(
+	startSlot, endSlot uint64,
+) (int, uint64, uint64, error) {
+	if endSlot < startSlot {
+		return 0, 0, 0, nil
+	}
+	db, err := resolveMetadataQueryDB(ls)
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	type blockRangeStats struct {
+		Count     int64
+		FirstSlot *uint64
+		LastSlot  *uint64
+	}
+	var stats blockRangeStats
+	if err := db.
+		Model(&models.BlockNonce{}).
+		Select(
+			"COUNT(*) AS count, MIN(slot) AS first_slot, MAX(slot) AS last_slot",
+		).
+		Where("slot >= ? AND slot <= ?", startSlot, endSlot).
+		Scan(&stats).Error; err != nil {
+		return 0, 0, 0, fmt.Errorf(
+			"count blocks in slot range %d-%d: %w",
+			startSlot,
+			endSlot,
+			err,
+		)
+	}
+	if stats.Count == 0 || stats.FirstSlot == nil || stats.LastSlot == nil {
+		return 0, 0, 0, nil
+	}
+	return int(stats.Count), *stats.FirstSlot, *stats.LastSlot, nil
 }
 
 // resolveValidationEra determines the appropriate era descriptor for
