@@ -3,21 +3,37 @@
 
 ## v0.29.0 (March 31, 2026)
 
-{
-  "✨ What's New": [
-    "You can now plan capacity before it becomes a problem because the blob store and metadata store track `DiskSize` and export it as Prometheus gauge metrics.",
-    "You can now rely on up-to-date chain context because the Blockfrost adapter populates the latest block, epoch, and protocol parameters from ledger state and the local DB."
-  ],
-  "💪 Improvements": [
-    "Chain synchronization is now faster after restoring from a snapshot because the node persists a Mithril trust-boundary slot so replay can skip work covered by the snapshot.",
-    "You can now tune memory for CBOR-heavy workloads because configuration supports CBOR cache sizing and passes it through to database initialization.",
-    "Storage defaults are now more predictable because Dingo applies storage-mode-specific Badger defaults only when options are unset.",
-    "Transaction watching is now more consistent across forward progress and rollbacks because WatchTx now supports undo using transaction history and ledger backfill."
-  ],
-  "🔧 Fixes": [
-    "Chain sync now recovers more gracefully from a missing rollback target because the chainsync error handler treats \"rollback point not found\" the same as \"local_tip_plateau\"."
-  ]
-}
+**Title:** Capacity metrics and steadier replay
+
+**Date:** March 31, 2026
+
+**Version:** v0.29.0
+
+Hi folks! Here’s what we shipped in v0.29.0.
+
+### ✨ What's New
+
+- **Disk-size metrics:** Capacity planning is easier because the blob store and metadata store track `DiskSize` and export it as Prometheus gauge metrics.
+- **Richer Blockfrost chain context:** API responses are more reliable because the Blockfrost adapter populates the latest block, epoch, and protocol parameters from ledger state and the local DB.
+
+### 💪 Improvements
+
+- **Faster replay after Mithril restore:** Chain synchronization is sleeker after restoring from a snapshot because the node persists a Mithril trust-boundary slot so replay can skip work covered by the snapshot.
+- **Configurable CBOR cache sizing:** CBOR-heavy workloads are easier to tune because configuration supports CBOR cache sizing and passes it through to database initialization.
+- **Storage-mode-specific Badger defaults:** Storage defaults are more predictable because Dingo applies storage-mode-specific Badger defaults only when options are unset.
+- **More consistent transaction watching:** Transaction watching is more consistent across forward progress and rollbacks because WatchTx now supports undo using transaction history and ledger backfill.
+
+### 🔧 Fixes
+
+- **Graceful missing rollback targets:** Chain sync recovers more reliably from a missing rollback target because the error handler treats "rollback point not found" the same as "local_tip_plateau".
+
+### 📋 What You Need to Know
+
+- **No required upgrade steps:** You’re all set—no required configuration changes for this release.
+
+### 🙏 Thank You
+
+Thank you for trying!
 
 
 ---
