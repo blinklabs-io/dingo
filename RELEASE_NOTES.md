@@ -13,30 +13,23 @@ Hi folks! Here’s what we shipped in v0.29.0.
 
 ### ✨ What's New
 
-```json
-{
-  "✨ What's New": [
-    "You can now monitor how much space your storage layers are using so it’s easier to plan capacity and spot unexpected growth early."
-  ],
-  "💪 Improvements": [
-    "Chain synchronization now replays faster after a snapshot by skipping work that’s already covered, which reduces startup and catch-up time.",
-    "Node configuration now gives you more predictable performance tuning for CBOR-heavy workloads without code changes.",
-    "Database configuration now behaves more consistently across deployment styles, so you don’t get surprise defaults overriding your intended settings.",
-    "Block and epoch data served through the Blockfrost-compatible interface is now more accurate and up to date, especially right after syncing."
-  ],
-  "🔧 Fixes": [
-    "Chain sync error handling is now more resilient in edge cases, helping the node recover more smoothly instead of getting stuck on similar failure modes.",
-    "Transaction watching is now more reliable around rollbacks, reducing the chance of missing or mis-ordering events during chain reorganizations."
-  ]
-}
-
-```
+- **Storage disk-usage metrics:** Capacity planning is easier because the blob store and metadata store now export disk-usage (`DiskSize`) Prometheus gauge metrics.
 
 ### 💪 Improvements
 
+- **Faster post-snapshot replay:** Restarts are faster because chain sync can skip replay work already covered by a Mithril snapshot.
+- **Configurable CBOR cache sizing:** Performance tuning is simpler because you can now set the CBOR cache size in configuration.
+- **More predictable Badger defaults:** Deployments are more consistent because storage-mode-specific defaults only apply when values are truly unset.
+- **More accurate Blockfrost responses:** Block and epoch data is more reliable because latest block, epoch, and protocol-parameter responses are now sourced from ledger state and the database.
+
 ### 🔧 Fixes
 
+- **Resilient rollback recovery:** Recovery is smoother because “rollback point not found” now follows the same handling path as `local_tip_plateau`.
+- **Safer WatchTx rollback handling:** Transaction watching is more reliable because WatchTx now better supports undo/rollback during chain reorganizations.
+
 ### 📋 What You Need to Know
+
+- No user action is required for this release.
 
 ### 🙏 Thank You
 
