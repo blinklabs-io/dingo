@@ -24,12 +24,12 @@ Hi folks! Here’s what we shipped in v0.29.0.
 
 ### 🔧 Fixes
 
-- **Resilient rollback recovery:** Recovery is smoother because “rollback point not found” now follows the same handling path as `local_tip_plateau`.
-- **Safer WatchTx rollback handling:** Transaction watching is more reliable because WatchTx now better supports undo/rollback during chain reorganizations.
+- **Rock-solid rollback recovery:** Recovery is smoother because “rollback point not found” now follows the same handling path as `local_tip_plateau`.
+- **Rock-solid WatchTx rollbacks:** Transaction watching is more reliable because WatchTx now supports undo/rollback during chain reorganizations.
 
 ### 📋 What You Need to Know
 
-- No user action is required for this release.
+- **No action required:** You're all set—just upgrade to v0.29.0.
 
 ### 🙏 Thank You
 
