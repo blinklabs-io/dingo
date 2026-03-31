@@ -11,6 +11,27 @@
 
 Hi folks! Here’s what we shipped in v0.29.0.
 
+<!-- BEGIN v0.29.0 generated notes (json) -->
+
+```json
+{
+  "✨ What's New": [
+    "You can now generate and exercise newer-era transactions in automated runs, making it easier to test end-to-end flows on local and test networks. This adds Conway-era payment builders and Plutus transaction builders, plus a randomized txpump loop with wallet integration, a randomness helper, and accompanying tests.",
+    "You can now stand up and validate more complete test environments with less manual setup. This introduces wallet-focused test coverage, a configurator script, local devnet helpers, a dingo testnet spec, and Antithesis docker-compose wiring for automated execution."
+  ],
+  "💪 Improvements": [
+    "Sync replay is now faster and avoids redoing work that is already captured in a trusted snapshot. This uses a Mithril trust-boundary slot so chainsync replay skips validation and processing for blocks covered by the Mithril snapshot and gap closure.",
+    "Rollback handling is now safer around trusted snapshot boundaries. The implementation clears the Mithril trust-boundary when rolling back behind it to ensure the node returns to fully validating behavior."
+  ],
+  "📋 What You Need to Know": [
+    "If you rely on replay/rollback behavior during testing, you may see different performance characteristics and fewer re-processed blocks after upgrading. This is expected because chainsync replay now respects the Mithril trust-boundary slot and resets that boundary when a rollback crosses it."
+  ]
+}
+
+```
+
+<!-- END v0.29.0 generated notes (json) -->
+
 ### ✨ What's New
 
 - **Storage disk-usage metrics:** Capacity planning is easier because the blob store and metadata store now export disk-usage (`DiskSize`) Prometheus gauge metrics.
