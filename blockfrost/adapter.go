@@ -277,7 +277,10 @@ func (a *NodeAdapter) PoolsExtended() (
 	[]PoolExtendedInfo, error,
 ) {
 	db := a.ledgerState.Database()
-	poolKeyHashes, err := db.Metadata().GetActivePoolKeyHashes(nil)
+	txn := db.Transaction(false)
+	defer txn.Release()
+
+	poolKeyHashes, err := db.Metadata().GetActivePoolKeyHashes(txn.Metadata())
 	if err != nil {
 		return nil, fmt.Errorf(
 			"get active pool key hashes: %w",
@@ -290,7 +293,7 @@ func (a *NodeAdapter) PoolsExtended() (
 
 	liveStakeByPool, _, err := db.Metadata().GetStakeByPools(
 		poolKeyHashes,
-		nil,
+		txn.Metadata(),
 	)
 	if err != nil {
 		return nil, fmt.Errorf(
@@ -308,7 +311,7 @@ func (a *NodeAdapter) PoolsExtended() (
 	snapshots, err := db.Metadata().GetPoolStakeSnapshotsByEpoch(
 		activeStakeEpoch,
 		"mark",
-		nil,
+		txn.Metadata(),
 	)
 	if err != nil {
 		return nil, fmt.Errorf(
@@ -325,7 +328,7 @@ func (a *NodeAdapter) PoolsExtended() (
 	for _, poolKeyHash := range poolKeyHashes {
 		poolHashes = append(poolHashes, lcommon.PoolKeyHash(poolKeyHash))
 	}
-	pools, err := db.GetPools(poolHashes, nil)
+	pools, err := db.GetPools(poolHashes, txn)
 	if err != nil {
 		return nil, fmt.Errorf("get pools: %w", err)
 	}
