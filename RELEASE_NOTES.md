@@ -42,15 +42,44 @@ Thank you for trying!
 ---
 
 
-## v0.28.0 (TBD)
+## v0.28.0 (March 30, 2026)
 
-**Title:** TODO
+**Title:** Network-aware metrics and steadier block production
 
-**Date:** TBD
+**Date:** March 30, 2026
 
 **Version:** v0.28.0
 
-Release notes for v0.28.0 will be added here when they are available.
+Hi folks! Here's what we shipped in v0.28.0.
+
+### ✨ What's New
+
+- **Network-labelled Prometheus metrics and build info:** Dashboard setup is easier because every Prometheus metric now carries a `network` label automatically, and a new `dingo_build_info` gauge exposes version, commit, and Go version at a glance.
+- **Tip gap and epoch gauges:** Sync monitoring is simpler because three new gauges track tip gap (wall-clock slot minus chain tip), Shelley genesis start time, and epoch length.
+- **Transaction metadata label index (Blockfrost):** Metadata queries are faster because a new transaction metadata label table powers indexed lookups with deterministic pagination and rollback-safe cleanup.
+
+### 💪 Improvements
+
+- **Smarter chain selection near tip:** Tip following is steadier because chain selection now prefers the actually-delivered chainsync tip over the advertised remote tip and sticks with the incumbent peer when two peers report the same frontier.
+- **Paginated DumpHistory (UTxO RPC):** Large history queries are more reliable because `DumpHistory` now uses a chain iterator with `next_token` pagination and sensible defaults when `max_items` is omitted.
+- **Leaner TxSubmission pipeline:** CPU usage under load is lower because the unnecessary rate limiter on the pull-based TxSubmission protocol was removed, eliminating a tight retry loop that starved chainsync and blockfetch.
+- **Leios protocols gated behind config:** Compatibility with non-Leios peers is more rock-solid because Leios mini-protocols are now only registered when `EnableLeios` is set, preventing muxer errors from peers that reject unknown protocols.
+
+### 🔧 Fixes
+
+- **Post-Mithril leader election:** Block production after a Mithril bootstrap is more reliable because `EpochNonce()` now falls through to the database when the in-memory nonce is empty, and `CaptureGenesisSnapshot()` falls back to the latest epoch start slot when slot 0 yields no pools.
+- **Forged-block rollback exemption:** Fork resolution after slot battles is correct because the rollback loop detector now exempts rollbacks through slots where the node forged a block.
+- **Richer UTxO RPC responses:** Script evaluation and data queries are more complete because `evalTx` now includes redeemer payloads and `readData` now returns parsed datums.
+
+### 📋 What You Need to Know
+
+- **Metrics dashboards:** If you run Prometheus dashboards, all metrics now include a `network` label — update your queries or selectors if you filter by metric name alone.
+- **Leios users:** If you use Leios mode, make sure `EnableLeios` is set in your configuration; the protocols are no longer registered by default.
+- **Default make target:** `make` no longer runs tests by default — use `make test` explicitly.
+
+### 🙏 Thank You
+
+Thank you for trying!
 
 ---
 
