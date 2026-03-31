@@ -748,6 +748,10 @@ type MetadataStore interface {
 		checkpoint *models.BackfillCheckpoint,
 		txn types.Txn,
 	) error
+
+	// DiskSize returns the on-disk size of the metadata store in bytes.
+	// Returns 0 for remote databases where local size is not meaningful.
+	DiskSize() (int64, error)
 }
 
 // BulkLoadOptimizer is an optional interface that metadata stores can

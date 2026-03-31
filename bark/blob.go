@@ -78,6 +78,10 @@ func (b *BlobStoreBark) Close() error {
 	return b.upstream.Close()
 }
 
+func (b *BlobStoreBark) DiskSize() (int64, error) {
+	return b.upstream.DiskSize()
+}
+
 func (b *BlobStoreBark) NewTransaction(b2 bool) types.Txn {
 	return b.upstream.NewTransaction(b2)
 }

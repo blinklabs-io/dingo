@@ -411,6 +411,11 @@ func (d *MetadataStoreMysql) Close() error {
 	return db.Close()
 }
 
+// DiskSize returns 0 for remote database stores.
+func (d *MetadataStoreMysql) DiskSize() (int64, error) {
+	return 0, nil
+}
+
 // Create creates a record
 func (d *MetadataStoreMysql) Create(value any) *gorm.DB {
 	return d.DB().Create(value)

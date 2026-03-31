@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"time"
 
 	"github.com/blinklabs-io/dingo/database/plugin"
 	"github.com/blinklabs-io/dingo/database/plugin/blob"
@@ -48,11 +49,13 @@ type Config struct {
 
 // Database represents our data storage services
 type Database struct {
-	config    *Config
-	logger    *slog.Logger
-	blob      blob.BlobStore
-	metadata  metadata.MetadataStore
-	cborCache *TieredCborCache
+	config          *Config
+	logger          *slog.Logger
+	blob            blob.BlobStore
+	metadata        metadata.MetadataStore
+	cborCache       *TieredCborCache
+	sizeMetricsStop chan struct{}
+	sizeMetricsDone chan struct{}
 }
 
 // Blob returns the underling blob store instance
@@ -97,6 +100,11 @@ func (d *Database) MetadataTxn(readWrite bool) *Txn {
 
 // Close cleans up the database connections
 func (d *Database) Close() error {
+	// Stop the metrics goroutine if running
+	if d.sizeMetricsStop != nil {
+		close(d.sizeMetricsStop)
+		<-d.sizeMetricsDone
+	}
 	var err error
 	if d.metadata != nil {
 		err = errors.Join(err, d.metadata.Close())
@@ -300,6 +308,56 @@ func New(
 	// Register cache metrics if prometheus registry is available
 	if configCopy.PromRegistry != nil {
 		db.cborCache.Metrics().Register(configCopy.PromRegistry)
+	}
+	// Register database size metrics
+	if configCopy.PromRegistry != nil {
+		blobSizeGauge := prometheus.NewGauge(prometheus.GaugeOpts{
+			Name:        "dingo_database_size_bytes",
+			Help:        "on-disk size of the database in bytes",
+			ConstLabels: prometheus.Labels{"store": "blob"},
+		})
+		metadataSizeGauge := prometheus.NewGauge(prometheus.GaugeOpts{
+			Name:        "dingo_database_size_bytes",
+			Help:        "on-disk size of the database in bytes",
+			ConstLabels: prometheus.Labels{"store": "metadata"},
+		})
+		if err := configCopy.PromRegistry.Register(blobSizeGauge); err != nil {
+			var are prometheus.AlreadyRegisteredError
+			if errors.As(err, &are) {
+				blobSizeGauge = are.ExistingCollector.(prometheus.Gauge)
+			}
+		}
+		if err := configCopy.PromRegistry.Register(metadataSizeGauge); err != nil {
+			var are prometheus.AlreadyRegisteredError
+			if errors.As(err, &are) {
+				metadataSizeGauge = are.ExistingCollector.(prometheus.Gauge)
+			}
+		}
+
+		db.sizeMetricsStop = make(chan struct{})
+		db.sizeMetricsDone = make(chan struct{})
+		go func() {
+			defer close(db.sizeMetricsDone)
+			ticker := time.NewTicker(60 * time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-db.sizeMetricsStop:
+					return
+				case <-ticker.C:
+					if db.blob != nil {
+						if size, err := db.blob.DiskSize(); err == nil {
+							blobSizeGauge.Set(float64(size))
+						}
+					}
+					if db.metadata != nil {
+						if size, err := db.metadata.DiskSize(); err == nil {
+							metadataSizeGauge.Set(float64(size))
+						}
+					}
+				}
+			}
+		}()
 	}
 	if err := db.init(); err != nil {
 		// Database is available for recovery, so return it with error

@@ -45,6 +45,10 @@ func (m *mockBlobStore) Close() error {
 	return nil
 }
 
+func (m *mockBlobStore) DiskSize() (int64, error) {
+	return 0, nil
+}
+
 func (m *mockBlobStore) NewTransaction(bool) types.Txn {
 	txn := &mockBlobTxn{id: len(m.txns) + 1}
 	if idx := len(m.txns); idx < len(m.commitErrs) {

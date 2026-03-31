@@ -136,6 +136,11 @@ func (d *BlobStoreGCS) Close() error {
 	return err
 }
 
+// DiskSize returns 0 for cloud-backed stores.
+func (d *BlobStoreGCS) DiskSize() (int64, error) {
+	return 0, nil
+}
+
 // NewTransaction returns a lightweight transaction wrapper.
 func (d *BlobStoreGCS) NewTransaction(readWrite bool) types.Txn {
 	return &gcsTxn{store: d, readWrite: readWrite}
