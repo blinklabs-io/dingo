@@ -497,6 +497,18 @@ func (d *MetadataStoreSqlite) Close() error {
 	return errors.Join(errs...)
 }
 
+// DiskSize returns the on-disk size of the SQLite database in bytes.
+func (d *MetadataStoreSqlite) DiskSize() (int64, error) {
+	var pageCount, pageSize int64
+	if err := d.DB().Raw("PRAGMA page_count").Scan(&pageCount).Error; err != nil {
+		return 0, err
+	}
+	if err := d.DB().Raw("PRAGMA page_size").Scan(&pageSize).Error; err != nil {
+		return 0, err
+	}
+	return pageCount * pageSize, nil
+}
+
 // Create creates a record
 func (d *MetadataStoreSqlite) Create(value any) *gorm.DB {
 	return d.DB().Create(value)

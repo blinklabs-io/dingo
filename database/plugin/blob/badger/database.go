@@ -436,6 +436,17 @@ func (d *BlobStoreBadger) DB() *badger.DB {
 	return d.db
 }
 
+// DiskSize returns the on-disk size of the Badger database in bytes
+// (LSM tree size + value log size).
+func (d *BlobStoreBadger) DiskSize() (int64, error) {
+	db := d.DB()
+	if db == nil {
+		return 0, nil
+	}
+	lsm, vlog := db.Size()
+	return lsm + vlog, nil
+}
+
 // NewTransaction creates a new badger transaction
 func (d *BlobStoreBadger) NewTransaction(update bool) types.Txn {
 	return newBadgerTxn(d, d.DB().NewTransaction(update))

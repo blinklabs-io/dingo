@@ -81,6 +81,10 @@ type BlobStore interface {
 	SetTx(txn types.Txn, txHash []byte, offsetData []byte) error
 	GetTx(txn types.Txn, txHash []byte) ([]byte, error)
 	DeleteTx(txn types.Txn, txHash []byte) error
+
+	// DiskSize returns the on-disk size of the blob store in bytes.
+	// Returns 0 for cloud-backed stores where local size is not meaningful.
+	DiskSize() (int64, error)
 }
 
 // New returns the started blob plugin selected by name

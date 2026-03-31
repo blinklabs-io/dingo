@@ -307,6 +307,11 @@ func (d *MetadataStorePostgres) Close() error {
 	return db.Close()
 }
 
+// DiskSize returns 0 for remote database stores.
+func (d *MetadataStorePostgres) DiskSize() (int64, error) {
+	return 0, nil
+}
+
 // Create creates a record
 func (d *MetadataStorePostgres) Create(value any) *gorm.DB {
 	return d.DB().Create(value)

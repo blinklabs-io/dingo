@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"time"
 
 	"github.com/blinklabs-io/dingo/database/plugin"
 	"github.com/blinklabs-io/dingo/database/plugin/blob"
@@ -300,6 +301,38 @@ func New(
 	// Register cache metrics if prometheus registry is available
 	if configCopy.PromRegistry != nil {
 		db.cborCache.Metrics().Register(configCopy.PromRegistry)
+	}
+	// Register database size metrics
+	if configCopy.PromRegistry != nil {
+		blobSizeGauge := prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "dingo_database_size_bytes",
+			Help: "on-disk size of the database in bytes",
+			ConstLabels: prometheus.Labels{"store": "blob"},
+		})
+		metadataSizeGauge := prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "dingo_database_size_bytes",
+			Help: "on-disk size of the database in bytes",
+			ConstLabels: prometheus.Labels{"store": "metadata"},
+		})
+		configCopy.PromRegistry.MustRegister(blobSizeGauge)
+		configCopy.PromRegistry.MustRegister(metadataSizeGauge)
+
+		go func() {
+			ticker := time.NewTicker(60 * time.Second)
+			defer ticker.Stop()
+			for range ticker.C {
+				if db.blob != nil {
+					if size, err := db.blob.DiskSize(); err == nil {
+						blobSizeGauge.Set(float64(size))
+					}
+				}
+				if db.metadata != nil {
+					if size, err := db.metadata.DiskSize(); err == nil {
+						metadataSizeGauge.Set(float64(size))
+					}
+				}
+			}
+		}()
 	}
 	if err := db.init(); err != nil {
 		// Database is available for recovery, so return it with error
