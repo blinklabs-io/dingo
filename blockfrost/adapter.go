@@ -337,6 +337,9 @@ func (a *NodeAdapter) PoolsExtended() (
 
 		relays := make([]PoolRelayInfo, 0, len(latestRelays))
 		for _, relay := range latestRelays {
+			if relay.Port > uint(math.MaxInt) {
+				return nil, fmt.Errorf("relay port out of range for pool %x", pool.PoolKeyHash)
+			}
 			tmpRelay := PoolRelayInfo{
 				Port: int(relay.Port),
 				DNS:  relay.Hostname,
@@ -359,10 +362,10 @@ func (a *NodeAdapter) PoolsExtended() (
 			PoolID:         poolID.String(),
 			Hex:            poolHex,
 			VrfKey:         hex.EncodeToString(pool.VrfKeyHash),
-			ActiveStake:    fmt.Sprintf("%d", activeStakeByPool[poolHex]),
-			LiveStake:      fmt.Sprintf("%d", liveStakeByPool[string(pool.PoolKeyHash)]),
-			DeclaredPledge: fmt.Sprintf("%d", uint64(pool.Pledge)),
-			FixedCost:      fmt.Sprintf("%d", uint64(pool.Cost)),
+			ActiveStake:    strconv.FormatUint(activeStakeByPool[poolHex], 10),
+			LiveStake:      strconv.FormatUint(liveStakeByPool[string(pool.PoolKeyHash)], 10),
+			DeclaredPledge: strconv.FormatUint(uint64(pool.Pledge), 10),
+			FixedCost:      strconv.FormatUint(uint64(pool.Cost), 10),
 			MarginCost:     marginCost,
 			Relays:         relays,
 		})
