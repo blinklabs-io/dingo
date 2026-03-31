@@ -19,6 +19,7 @@ import (
 	"log/slog"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/database/plugin"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -131,69 +132,71 @@ func TestOptionsCombination(t *testing.T) {
 	}
 }
 
-func TestApplyOperationalDefaultsCore(t *testing.T) {
-	blockCache := uint64(DefaultBlockCacheSize)
-	indexCache := uint64(DefaultIndexCacheSize)
-	memtable := uint64(DefaultMemTableSize)
+func TestApplyStorageModeDefaultsAPIWhenUnset(t *testing.T) {
+	blockCache := uint64(DefaultCoreBlockCacheSize)
+	indexCache := uint64(DefaultCoreIndexCacheSize)
+	compressionEnabled := DefaultCoreCompressionEnabled
 
-	applyOperationalDefaults(
-		"",
-		string(ProfileCore),
+	applyStorageModeDefaults(
+		"api",
 		&blockCache,
 		&indexCache,
-		&memtable,
+		&compressionEnabled,
+		false,
+		false,
+		false,
 	)
 
-	if blockCache != DefaultBlockCacheSize {
+	if blockCache != DefaultAPIBlockCacheSize {
+		t.Fatalf("expected api block cache size %d, got %d", DefaultAPIBlockCacheSize, blockCache)
+	}
+	if indexCache != DefaultAPIIndexCacheSize {
+		t.Fatalf("expected api index cache size %d, got %d", DefaultAPIIndexCacheSize, indexCache)
+	}
+	if compressionEnabled != DefaultAPICompressionEnabled {
+		t.Fatalf(
+			"expected api compression %v, got %v",
+			DefaultAPICompressionEnabled,
+			compressionEnabled,
+		)
+	}
+}
+
+func TestApplyStorageModeDefaultsCoreWhenUnset(t *testing.T) {
+	blockCache := uint64(DefaultBlockCacheSize)
+	indexCache := uint64(DefaultIndexCacheSize)
+	compressionEnabled := true
+
+	applyStorageModeDefaults(
+		"core",
+		&blockCache,
+		&indexCache,
+		&compressionEnabled,
+		false,
+		false,
+		false,
+	)
+
+	if blockCache != DefaultCoreBlockCacheSize {
 		t.Fatalf(
 			"expected core block cache size %d, got %d",
-			DefaultBlockCacheSize,
+			DefaultCoreBlockCacheSize,
 			blockCache,
 		)
 	}
-	if indexCache != DefaultIndexCacheSize {
+	if indexCache != DefaultCoreIndexCacheSize {
 		t.Fatalf(
 			"expected core index cache size %d, got %d",
-			DefaultIndexCacheSize,
+			DefaultCoreIndexCacheSize,
 			indexCache,
 		)
 	}
-	if memtable != DefaultMemTableSize {
+	if compressionEnabled != DefaultCoreCompressionEnabled {
 		t.Fatalf(
-			"expected core memtable size %d, got %d",
-			DefaultMemTableSize,
-			memtable,
+			"expected core compression %v, got %v",
+			DefaultCoreCompressionEnabled,
+			compressionEnabled,
 		)
-	}
-}
-
-func TestApplyOperationalDefaultsLoadPreservesOverrides(t *testing.T) {
-	blockCache := uint64(123)
-	indexCache := uint64(456)
-	memtable := uint64(789)
-
-	applyOperationalDefaults(
-		string(ProfileLoad),
-		string(ProfileAPI),
-		&blockCache,
-		&indexCache,
-		&memtable,
-	)
-
-	if blockCache != 123 {
-		t.Fatalf("expected block cache override to be preserved, got %d", blockCache)
-	}
-	if indexCache != 456 {
-		t.Fatalf("expected index cache override to be preserved, got %d", indexCache)
-	}
-	if memtable != 789 {
-		t.Fatalf("expected memtable override to be preserved, got %d", memtable)
-	}
-}
-
-func TestResolveProfilePrefersLoadRunMode(t *testing.T) {
-	if profile := resolveProfile(string(ProfileLoad), string(ProfileAPI)); profile != ProfileLoad {
-		t.Fatalf("expected load profile, got %q", profile)
 	}
 }
 
@@ -204,11 +207,11 @@ func TestUseCompactBlockMetadata(t *testing.T) {
 		storageMode string
 		expected    bool
 	}{
-		{name: "serve core", runMode: "serve", storageMode: string(ProfileCore), expected: true},
-		{name: "leios core", runMode: "leios", storageMode: string(ProfileCore), expected: true},
-		{name: "load core", runMode: string(ProfileLoad), storageMode: string(ProfileCore), expected: false},
-		{name: "serve api", runMode: "serve", storageMode: string(ProfileAPI), expected: false},
-		{name: "empty run mode", runMode: "", storageMode: string(ProfileCore), expected: false},
+		{name: "serve core", runMode: "serve", storageMode: "core", expected: true},
+		{name: "leios core", runMode: "leios", storageMode: "core", expected: true},
+		{name: "load core", runMode: "load", storageMode: "core", expected: false},
+		{name: "serve api", runMode: "serve", storageMode: "api", expected: false},
+		{name: "empty run mode", runMode: "", storageMode: "core", expected: false},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -219,27 +222,12 @@ func TestUseCompactBlockMetadata(t *testing.T) {
 	}
 }
 
-func TestApplyOperationalDefaultsPreservesExplicitEqualToDefault(t *testing.T) {
-	// An explicit override that happens to equal the API-profile default
-	// must NOT be overwritten when a different profile is resolved.
+func TestApplyStorageModeDefaultsPreservesExplicitOverrides(t *testing.T) {
 	blockCache := uint64(DefaultBlockCacheSize)
 	indexCache := uint64(DefaultIndexCacheSize)
-	memtable := uint64(DefaultMemTableSize)
-
-	// With load profile, core/load sizes differ from the defaults (which
-	// match the API profile). If the caller explicitly set the API-default
-	// values, applyOperationalDefaults will still overwrite them because it
-	// compares against the constants. This test documents the current
-	// limitation: callers that need to preserve explicit overrides must
-	// copy values to locals before calling applyOperationalDefaults (as
-	// NewFromCmdlineOptions does).
-	//
-	// The important invariant: cmdlineOptions must NOT be mutated.
+	compressionEnabled := true
 	cmdlineOptionsMutex.Lock()
 	saved := cmdlineOptions
-	cmdlineOptions.blockCacheSize = DefaultBlockCacheSize
-	cmdlineOptions.indexCacheSize = DefaultIndexCacheSize
-	cmdlineOptions.memTableSize = DefaultMemTableSize
 	cmdlineOptionsMutex.Unlock()
 	t.Cleanup(func() {
 		cmdlineOptionsMutex.Lock()
@@ -247,41 +235,130 @@ func TestApplyOperationalDefaultsPreservesExplicitEqualToDefault(t *testing.T) {
 		cmdlineOptionsMutex.Unlock()
 	})
 
-	applyOperationalDefaults(
-		string(ProfileLoad),
-		"",
+	applyStorageModeDefaults(
+		"core",
 		&blockCache,
 		&indexCache,
-		&memtable,
+		&compressionEnabled,
+		true,
+		true,
+		true,
 	)
 
-	// Verify that the global cmdlineOptions were NOT mutated
-	if cmdlineOptions.blockCacheSize != saved.blockCacheSize {
+	if blockCache != DefaultBlockCacheSize {
 		t.Fatalf(
-			"cmdlineOptions.blockCacheSize mutated: want %d, got %d",
-			saved.blockCacheSize,
-			cmdlineOptions.blockCacheSize,
+			"expected explicit block cache override %d, got %d",
+			DefaultBlockCacheSize,
+			blockCache,
 		)
 	}
-	if cmdlineOptions.indexCacheSize != saved.indexCacheSize {
+	if indexCache != DefaultIndexCacheSize {
 		t.Fatalf(
-			"cmdlineOptions.indexCacheSize mutated: want %d, got %d",
-			saved.indexCacheSize,
-			cmdlineOptions.indexCacheSize,
+			"expected explicit index cache override %d, got %d",
+			DefaultIndexCacheSize,
+			indexCache,
 		)
 	}
-	if cmdlineOptions.memTableSize != saved.memTableSize {
+	if !compressionEnabled {
+		t.Fatal("expected explicit compression override to remain enabled")
+	}
+}
+
+func TestNewFromCmdlineOptionsUsesAPIDefaultsWhenCompressionUnset(t *testing.T) {
+	cmdlineOptionsMutex.Lock()
+	saved := cmdlineOptions
+	cmdlineOptionsMutex.Unlock()
+	t.Cleanup(func() {
+		cmdlineOptionsMutex.Lock()
+		cmdlineOptions = saved
+		cmdlineOptionsMutex.Unlock()
+	})
+	initCmdlineOptions()
+
+	if err := plugin.SetPluginOption(
+		plugin.PluginTypeBlob,
+		"badger",
+		"storage-mode",
+		"api",
+	); err != nil {
+		t.Fatalf("set storage-mode: %v", err)
+	}
+
+	p := NewFromCmdlineOptions()
+	b, ok := p.(*BlobStoreBadger)
+	if !ok {
+		t.Fatal("expected *BlobStoreBadger from NewFromCmdlineOptions")
+	}
+	if b.blockCacheSize != DefaultAPIBlockCacheSize {
 		t.Fatalf(
-			"cmdlineOptions.memTableSize mutated: want %d, got %d",
-			saved.memTableSize,
-			cmdlineOptions.memTableSize,
+			"blockCacheSize: want api default %d, got %d",
+			DefaultAPIBlockCacheSize,
+			b.blockCacheSize,
+		)
+	}
+	if b.indexCacheSize != DefaultAPIIndexCacheSize {
+		t.Fatalf(
+			"indexCacheSize: want api default %d, got %d",
+			DefaultAPIIndexCacheSize,
+			b.indexCacheSize,
+		)
+	}
+	if b.compressionEnabled != DefaultAPICompressionEnabled {
+		t.Fatalf(
+			"compressionEnabled: want api default %v, got %v",
+			DefaultAPICompressionEnabled,
+			b.compressionEnabled,
 		)
 	}
 }
 
+func TestNewFromCmdlineOptionsPreservesExplicitCompressionDisableInAPIStorageMode(t *testing.T) {
+	cmdlineOptionsMutex.Lock()
+	saved := cmdlineOptions
+	cmdlineOptionsMutex.Unlock()
+	t.Cleanup(func() {
+		cmdlineOptionsMutex.Lock()
+		cmdlineOptions = saved
+		cmdlineOptionsMutex.Unlock()
+	})
+	initCmdlineOptions()
+
+	if err := plugin.SetPluginOption(
+		plugin.PluginTypeBlob,
+		"badger",
+		"storage-mode",
+		"api",
+	); err != nil {
+		t.Fatalf("set storage-mode: %v", err)
+	}
+	if err := plugin.ProcessConfig(map[string]map[string]map[string]any{
+		"blob": {
+			"badger": {
+				"compression": false,
+			},
+		},
+	}); err != nil {
+		t.Fatalf("process plugin config: %v", err)
+	}
+
+	p := NewFromCmdlineOptions()
+	b, ok := p.(*BlobStoreBadger)
+	if !ok {
+		t.Fatal("expected *BlobStoreBadger from NewFromCmdlineOptions")
+	}
+	if b.blockCacheSize != DefaultAPIBlockCacheSize {
+		t.Fatalf(
+			"blockCacheSize: want api default %d, got %d",
+			DefaultAPIBlockCacheSize,
+			b.blockCacheSize,
+		)
+	}
+	if b.compressionEnabled {
+		t.Fatal("compressionEnabled: expected explicit false override")
+	}
+}
+
 func TestNewFromCmdlineOptionsDoesNotMutateGlobals(t *testing.T) {
-	// Run NewFromCmdlineOptions twice with different profiles and verify
-	// the second call does not inherit the first profile's derived sizes.
 	cmdlineOptionsMutex.Lock()
 	saved := cmdlineOptions
 	cmdlineOptionsMutex.Unlock()
@@ -292,7 +369,7 @@ func TestNewFromCmdlineOptionsDoesNotMutateGlobals(t *testing.T) {
 	})
 	initCmdlineOptions()
 	cmdlineOptionsMutex.Lock()
-	cmdlineOptions.runMode = string(ProfileLoad)
+	cmdlineOptions.storageMode = "core"
 	cmdlineOptionsMutex.Unlock()
 
 	p1 := NewFromCmdlineOptions()
@@ -306,36 +383,56 @@ func TestNewFromCmdlineOptionsDoesNotMutateGlobals(t *testing.T) {
 	cmdlineOptionsMutex.Lock()
 	blockAfterFirst := cmdlineOptions.blockCacheSize
 	indexAfterFirst := cmdlineOptions.indexCacheSize
-	memAfterFirst := cmdlineOptions.memTableSize
+	compressionAfterFirst := cmdlineOptions.compressionEnabled
 	cmdlineOptionsMutex.Unlock()
 
-	// Globals should still be at init defaults
-	if blockAfterFirst != DefaultBlockCacheSize {
+	if blockAfterFirst != DefaultCoreBlockCacheSize {
 		t.Fatalf(
 			"blockCacheSize mutated after first call: want %d, got %d",
-			DefaultBlockCacheSize,
+			DefaultCoreBlockCacheSize,
 			blockAfterFirst,
 		)
 	}
-	if indexAfterFirst != DefaultIndexCacheSize {
+	if indexAfterFirst != DefaultCoreIndexCacheSize {
 		t.Fatalf(
 			"indexCacheSize mutated after first call: want %d, got %d",
-			DefaultIndexCacheSize,
+			DefaultCoreIndexCacheSize,
 			indexAfterFirst,
 		)
 	}
-	if memAfterFirst != DefaultMemTableSize {
+	if compressionAfterFirst != DefaultCoreCompressionEnabled {
 		t.Fatalf(
-			"memTableSize mutated after first call: want %d, got %d",
-			DefaultMemTableSize,
-			memAfterFirst,
+			"compressionEnabled mutated after first call: want %v, got %v",
+			DefaultCoreCompressionEnabled,
+			compressionAfterFirst,
 		)
 	}
 
-	// Second call with API profile should get API defaults, not load sizes
+	b1, ok := p1.(*BlobStoreBadger)
+	if !ok {
+		t.Fatal("expected *BlobStoreBadger from first NewFromCmdlineOptions")
+	}
+	if b1.blockCacheSize != DefaultCoreBlockCacheSize {
+		t.Fatalf(
+			"first call blockCacheSize: want %d, got %d",
+			DefaultCoreBlockCacheSize,
+			b1.blockCacheSize,
+		)
+	}
+	if b1.compressionEnabled != DefaultCoreCompressionEnabled {
+		t.Fatalf(
+			"first call compressionEnabled: want %v, got %v",
+			DefaultCoreCompressionEnabled,
+			b1.compressionEnabled,
+		)
+	}
+
 	cmdlineOptionsMutex.Lock()
-	cmdlineOptions.runMode = ""
-	cmdlineOptions.storageMode = string(ProfileAPI)
+	cmdlineOptions.storageMode = "core"
+	cmdlineOptions.blockCacheSize = DefaultBlockCacheSize
+	cmdlineOptions.blockCacheSizeSet = true
+	cmdlineOptions.compressionEnabled = true
+	cmdlineOptions.compressionEnabledSet = true
 	cmdlineOptionsMutex.Unlock()
 
 	p2 := NewFromCmdlineOptions()
@@ -351,9 +448,12 @@ func TestNewFromCmdlineOptionsDoesNotMutateGlobals(t *testing.T) {
 	}
 	if b2.blockCacheSize != DefaultBlockCacheSize {
 		t.Fatalf(
-			"second call blockCacheSize: want %d (API default), got %d",
+			"second call blockCacheSize: want explicit override %d, got %d",
 			DefaultBlockCacheSize,
 			b2.blockCacheSize,
 		)
+	}
+	if !b2.compressionEnabled {
+		t.Fatal("second call compressionEnabled: expected explicit true override")
 	}
 }

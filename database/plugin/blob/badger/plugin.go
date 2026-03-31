@@ -32,122 +32,92 @@ import (
 // Operators can override via block-cache-size / index-cache-size CLI
 // flags or YAML config.
 const (
-	DefaultBlockCacheSize   = 268435456  // 256 MB — Badger's own default; sufficient for core nodes
-	DefaultIndexCacheSize   = 0          // 0 = unlimited; Badger memory-maps the full index
-	DefaultValueLogFileSize = 1073741824 // 1 GB
-	DefaultMemTableSize     = 134217728  // 128 MB
-	DefaultValueThreshold   = 1048576    // 1 MB
+	DefaultBlockCacheSize         = 268435456  // 256 MB
+	DefaultIndexCacheSize         = 0          // 0 = unlimited
+	DefaultValueLogFileSize       = 1073741824 // 1 GB
+	DefaultMemTableSize           = 134217728  // 128 MB
+	DefaultValueThreshold         = 1048576    // 1 MB
+	DefaultCoreBlockCacheSize     = 0
+	DefaultCoreIndexCacheSize     = 0
+	DefaultCoreCompressionEnabled = false
+	DefaultAPIBlockCacheSize      = DefaultBlockCacheSize
+	DefaultAPIIndexCacheSize      = DefaultIndexCacheSize
+	DefaultAPICompressionEnabled  = true
 )
-
-type Profile string
-
-const (
-	ProfileCore Profile = "core"
-	ProfileAPI  Profile = "api"
-	ProfileLoad Profile = "load"
-)
-
-type ProfileSettings struct {
-	BlockCacheSize       uint64
-	IndexCacheSize       uint64
-	MemTableSize         uint64
-	CompactBlockMetadata bool
-}
 
 var (
 	cmdlineOptions struct {
-		dataDir            string
-		runMode            string
-		storageMode        string
-		blockCacheSize     uint64
-		indexCacheSize     uint64
-		valueLogFileSize   uint64
-		memTableSize       uint64
-		valueThreshold     uint64
-		gcEnabled          bool
-		compressionEnabled bool
+		dataDir               string
+		runMode               string
+		storageMode           string
+		blockCacheSize        uint64
+		indexCacheSize        uint64
+		valueLogFileSize      uint64
+		memTableSize          uint64
+		valueThreshold        uint64
+		gcEnabled             bool
+		compressionEnabled    bool
+		blockCacheSizeSet     bool
+		indexCacheSizeSet     bool
+		compressionEnabledSet bool
 	}
 	cmdlineOptionsMutex sync.RWMutex
 )
 
-func profileSettings(profile Profile) ProfileSettings {
-	switch profile {
-	case ProfileLoad:
-		return ProfileSettings{
-			BlockCacheSize:       268435456, // 256MB
-			IndexCacheSize:       67108864,  // 64MB
-			MemTableSize:         67108864,  // 64MB
-			CompactBlockMetadata: false,
-		}
-	case ProfileCore:
-		// Core mode keeps Badger's normal cache sizing. Low-memory
-		// validation belongs in dedicated constrained-memory test runs,
-		// not in production defaults for serve/core nodes.
-		return ProfileSettings{
-			BlockCacheSize:       DefaultBlockCacheSize,
-			IndexCacheSize:       DefaultIndexCacheSize,
-			MemTableSize:         DefaultMemTableSize,
-			CompactBlockMetadata: false,
-		}
-	case ProfileAPI:
-		fallthrough
-	default:
-		return ProfileSettings{
-			BlockCacheSize:       DefaultBlockCacheSize,
-			IndexCacheSize:       DefaultIndexCacheSize,
-			MemTableSize:         DefaultMemTableSize,
-			CompactBlockMetadata: false,
-		}
-	}
-}
-
-func resolveProfile(runMode, storageMode string) Profile {
-	if runMode == string(ProfileLoad) {
-		return ProfileLoad
-	}
-	if storageMode == string(ProfileAPI) {
-		return ProfileAPI
-	}
-	return ProfileCore
-}
-
-func applyOperationalDefaults(
-	runMode string,
+func applyStorageModeDefaults(
 	storageMode string,
 	blockCacheSize *uint64,
 	indexCacheSize *uint64,
-	memTableSize *uint64,
+	compressionEnabled *bool,
+	blockCacheSizeSet bool,
+	indexCacheSizeSet bool,
+	compressionEnabledSet bool,
 ) {
-	settings := profileSettings(resolveProfile(runMode, storageMode))
-	if *blockCacheSize == DefaultBlockCacheSize {
-		*blockCacheSize = settings.BlockCacheSize
-	}
-	if *indexCacheSize == DefaultIndexCacheSize {
-		*indexCacheSize = settings.IndexCacheSize
-	}
-	if *memTableSize == DefaultMemTableSize {
-		*memTableSize = settings.MemTableSize
+	switch storageMode {
+	case "api":
+		if !blockCacheSizeSet {
+			*blockCacheSize = DefaultAPIBlockCacheSize
+		}
+		if !indexCacheSizeSet {
+			*indexCacheSize = DefaultAPIIndexCacheSize
+		}
+		if !compressionEnabledSet {
+			*compressionEnabled = DefaultAPICompressionEnabled
+		}
+	default:
+		if !blockCacheSizeSet {
+			*blockCacheSize = DefaultCoreBlockCacheSize
+		}
+		if !indexCacheSizeSet {
+			*indexCacheSize = DefaultCoreIndexCacheSize
+		}
+		if !compressionEnabledSet {
+			*compressionEnabled = DefaultCoreCompressionEnabled
+		}
 	}
 }
 
 func useCompactBlockMetadata(runMode, storageMode string) bool {
 	return (runMode == "serve" || runMode == "leios") &&
-		storageMode == string(ProfileCore)
+		storageMode == "core"
 }
 
 // initCmdlineOptions sets default values for cmdlineOptions
 func initCmdlineOptions() {
 	cmdlineOptionsMutex.Lock()
 	defer cmdlineOptionsMutex.Unlock()
-	cmdlineOptions.blockCacheSize = DefaultBlockCacheSize
-	cmdlineOptions.indexCacheSize = DefaultIndexCacheSize
+	cmdlineOptions.blockCacheSize = DefaultCoreBlockCacheSize
+	cmdlineOptions.indexCacheSize = DefaultCoreIndexCacheSize
 	cmdlineOptions.valueLogFileSize = DefaultValueLogFileSize
 	cmdlineOptions.memTableSize = DefaultMemTableSize
 	cmdlineOptions.valueThreshold = DefaultValueThreshold
 	cmdlineOptions.runMode = ""
 	cmdlineOptions.storageMode = "core"
 	cmdlineOptions.gcEnabled = true
-	cmdlineOptions.compressionEnabled = true
+	cmdlineOptions.compressionEnabled = DefaultCoreCompressionEnabled
+	cmdlineOptions.blockCacheSizeSet = false
+	cmdlineOptions.indexCacheSizeSet = false
+	cmdlineOptions.compressionEnabledSet = false
 	cmdlineOptions.dataDir = ".dingo"
 }
 
@@ -185,9 +155,10 @@ func init() {
 				{
 					Name:         "block-cache-size",
 					Type:         plugin.PluginOptionTypeUint,
-					Description:  "Badger block cache size",
-					DefaultValue: uint64(DefaultBlockCacheSize),
+					Description:  "Badger block cache size (runtime default: 0 in core mode, 268435456 in api mode)",
+					DefaultValue: uint64(DefaultCoreBlockCacheSize),
 					Dest:         &(cmdlineOptions.blockCacheSize),
+					SetIndicator: &(cmdlineOptions.blockCacheSizeSet),
 				},
 				{
 					Name:         "index-cache-size",
@@ -195,6 +166,7 @@ func init() {
 					Description:  "Badger index cache size",
 					DefaultValue: uint64(DefaultIndexCacheSize),
 					Dest:         &(cmdlineOptions.indexCacheSize),
+					SetIndicator: &(cmdlineOptions.indexCacheSizeSet),
 				},
 				{
 					Name:         "gc",
@@ -227,9 +199,10 @@ func init() {
 				{
 					Name:         "compression",
 					Type:         plugin.PluginOptionTypeBool,
-					Description:  "Enable Snappy compression (disable for mmap-only mode; set block-cache-size=0 for mmap-only)",
-					DefaultValue: true,
+					Description:  "Enable Snappy compression (runtime default: false in core mode, true in api mode)",
+					DefaultValue: DefaultCoreCompressionEnabled,
 					Dest:         &(cmdlineOptions.compressionEnabled),
+					SetIndicator: &(cmdlineOptions.compressionEnabledSet),
 				},
 			},
 		},
@@ -238,53 +211,48 @@ func init() {
 
 func NewFromCmdlineOptions() plugin.Plugin {
 	cmdlineOptionsMutex.Lock()
-	// Copy cmdline values to locals so applyOperationalDefaults does not
-	// mutate the shared cmdlineOptions struct.
 	blockCacheSize := cmdlineOptions.blockCacheSize
 	indexCacheSize := cmdlineOptions.indexCacheSize
 	memTableSize := cmdlineOptions.memTableSize
-	profile := resolveProfile(cmdlineOptions.runMode, cmdlineOptions.storageMode)
-	settings := profileSettings(profile)
-	applyOperationalDefaults(
-		cmdlineOptions.runMode,
+	compressionEnabled := cmdlineOptions.compressionEnabled
+	applyStorageModeDefaults(
 		cmdlineOptions.storageMode,
 		&blockCacheSize,
 		&indexCacheSize,
-		&memTableSize,
+		&compressionEnabled,
+		cmdlineOptions.blockCacheSizeSet,
+		cmdlineOptions.indexCacheSizeSet,
+		cmdlineOptions.compressionEnabledSet,
 	)
 	// Safe conversion from uint64 to int64 with bounds checking
-	valueLogFileSize := min(cmdlineOptions.valueLogFileSize,
-		// Cap at max int64
-		uint64(math.MaxInt64))
-	memTableSizeCapped := min(memTableSize,
-		// Cap at max int64
-		uint64(math.MaxInt64))
-	valueThreshold := min(cmdlineOptions.valueThreshold,
-		// Cap at max int64
-		uint64(math.MaxInt64))
+	valueLogFileSize := min(
+		cmdlineOptions.valueLogFileSize,
+		uint64(math.MaxInt64),
+	)
+	memTableSizeCapped := min(
+		memTableSize,
+		uint64(math.MaxInt64),
+	)
+	valueThreshold := min(
+		cmdlineOptions.valueThreshold,
+		uint64(math.MaxInt64),
+	)
 	// #nosec G115
 	opts := []BlobStoreBadgerOptionFunc{
 		WithDataDir(cmdlineOptions.dataDir),
 		WithBlockCacheSize(blockCacheSize),
 		WithIndexCacheSize(indexCacheSize),
-		WithValueLogFileSize(
-			int64(valueLogFileSize),
-		),
-		WithMemTableSize(
-			int64(memTableSizeCapped),
-		),
+		WithValueLogFileSize(int64(valueLogFileSize)),
+		WithMemTableSize(int64(memTableSizeCapped)),
 		WithCompactBlockMetadata(
-			settings.CompactBlockMetadata ||
-				useCompactBlockMetadata(
-					cmdlineOptions.runMode,
-					cmdlineOptions.storageMode,
-				),
+			useCompactBlockMetadata(
+				cmdlineOptions.runMode,
+				cmdlineOptions.storageMode,
+			),
 		),
-		WithValueThreshold(
-			int64(valueThreshold),
-		),
+		WithValueThreshold(int64(valueThreshold)),
 		WithGc(cmdlineOptions.gcEnabled),
-		WithCompressionEnabled(cmdlineOptions.compressionEnabled),
+		WithCompressionEnabled(compressionEnabled),
 		WithDeferOpen(),
 	}
 	cmdlineOptionsMutex.Unlock()

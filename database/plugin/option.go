@@ -39,6 +39,8 @@ type PluginOption struct {
 	CustomEnvVar string
 	CustomFlag   string
 	Description  string
+	RuntimeOnly  bool
+	SetIndicator *bool
 	Type         PluginOptionType
 }
 
@@ -47,6 +49,9 @@ func (p *PluginOption) AddToFlagSet(
 	pluginType string,
 	pluginName string,
 ) error {
+	if p.RuntimeOnly {
+		return nil
+	}
 	var flagName string
 	if p.CustomFlag != "" {
 		flagName = fmt.Sprintf("%s-%s", pluginType, p.CustomFlag)
@@ -55,26 +60,49 @@ func (p *PluginOption) AddToFlagSet(
 	}
 	switch p.Type {
 	case PluginOptionTypeString:
-		fs.StringVar(
-			p.Dest.(*string),
+		dest := p.Dest.(*string)
+		*dest = p.DefaultValue.(string)
+		fs.Var(
+			&trackedStringValue{
+				dest:         dest,
+				setIndicator: p.SetIndicator,
+			},
 			flagName,
-			p.DefaultValue.(string),
 			p.Description,
 		)
 	case PluginOptionTypeBool:
-		fs.BoolVar(
-			p.Dest.(*bool),
+		dest := p.Dest.(*bool)
+		*dest = p.DefaultValue.(bool)
+		flag := fs.VarPF(
+			&trackedBoolValue{
+				dest:         dest,
+				setIndicator: p.SetIndicator,
+			},
 			flagName,
-			p.DefaultValue.(bool),
+			"",
 			p.Description,
 		)
+		flag.NoOptDefVal = "true"
 	case PluginOptionTypeInt:
-		fs.IntVar(p.Dest.(*int), flagName, p.DefaultValue.(int), p.Description)
-	case PluginOptionTypeUint:
-		fs.Uint64Var(
-			p.Dest.(*uint64),
+		dest := p.Dest.(*int)
+		*dest = p.DefaultValue.(int)
+		fs.Var(
+			&trackedIntValue{
+				dest:         dest,
+				setIndicator: p.SetIndicator,
+			},
 			flagName,
-			p.DefaultValue.(uint64),
+			p.Description,
+		)
+	case PluginOptionTypeUint:
+		dest := p.Dest.(*uint64)
+		*dest = p.DefaultValue.(uint64)
+		fs.Var(
+			&trackedUint64Value{
+				dest:         dest,
+				setIndicator: p.SetIndicator,
+			},
+			flagName,
 			p.Description,
 		)
 	default:
@@ -88,6 +116,9 @@ func (p *PluginOption) AddToFlagSet(
 }
 
 func (p *PluginOption) ProcessEnvVars(envPrefix string) error {
+	if p.RuntimeOnly {
+		return nil
+	}
 	envVars := []string{
 		// Automatically generate env var from specified prefix and option name
 		strings.ToUpper(
@@ -137,6 +168,7 @@ func (p *PluginOption) ProcessEnvVars(envPrefix string) error {
 					p.Name,
 				)
 			}
+			markOptionSet(p.SetIndicator)
 		}
 	}
 	return nil
@@ -145,6 +177,9 @@ func (p *PluginOption) ProcessEnvVars(envPrefix string) error {
 func (p *PluginOption) ProcessConfig(
 	pluginData map[string]any,
 ) error {
+	if p.RuntimeOnly {
+		return nil
+	}
 	if optionData, ok := pluginData[p.Name]; ok {
 		switch p.Type {
 		case PluginOptionTypeString:
@@ -188,6 +223,113 @@ func (p *PluginOption) ProcessConfig(
 				p.Name,
 			)
 		}
+		markOptionSet(p.SetIndicator)
 	}
 	return nil
+}
+
+func markOptionSet(setIndicator *bool) {
+	if setIndicator != nil {
+		*setIndicator = true
+	}
+}
+
+type trackedStringValue struct {
+	dest         *string
+	setIndicator *bool
+}
+
+func (v *trackedStringValue) Set(value string) error {
+	*(v.dest) = value
+	markOptionSet(v.setIndicator)
+	return nil
+}
+
+func (v *trackedStringValue) String() string {
+	if v.dest == nil {
+		return ""
+	}
+	return *(v.dest)
+}
+
+func (v *trackedStringValue) Type() string {
+	return "string"
+}
+
+type trackedBoolValue struct {
+	dest         *bool
+	setIndicator *bool
+}
+
+func (v *trackedBoolValue) Set(value string) error {
+	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		return err
+	}
+	*(v.dest) = parsed
+	markOptionSet(v.setIndicator)
+	return nil
+}
+
+func (v *trackedBoolValue) String() string {
+	if v.dest == nil {
+		return "false"
+	}
+	return strconv.FormatBool(*(v.dest))
+}
+
+func (v *trackedBoolValue) Type() string {
+	return "bool"
+}
+
+type trackedIntValue struct {
+	dest         *int
+	setIndicator *bool
+}
+
+func (v *trackedIntValue) Set(value string) error {
+	parsed, err := strconv.ParseInt(value, 10, 32)
+	if err != nil {
+		return err
+	}
+	*(v.dest) = int(parsed)
+	markOptionSet(v.setIndicator)
+	return nil
+}
+
+func (v *trackedIntValue) String() string {
+	if v.dest == nil {
+		return "0"
+	}
+	return strconv.Itoa(*(v.dest))
+}
+
+func (v *trackedIntValue) Type() string {
+	return "int"
+}
+
+type trackedUint64Value struct {
+	dest         *uint64
+	setIndicator *bool
+}
+
+func (v *trackedUint64Value) Set(value string) error {
+	parsed, err := strconv.ParseUint(value, 10, 64)
+	if err != nil {
+		return err
+	}
+	*(v.dest) = parsed
+	markOptionSet(v.setIndicator)
+	return nil
+}
+
+func (v *trackedUint64Value) String() string {
+	if v.dest == nil {
+		return "0"
+	}
+	return strconv.FormatUint(*(v.dest), 10)
+}
+
+func (v *trackedUint64Value) Type() string {
+	return "uint"
 }
