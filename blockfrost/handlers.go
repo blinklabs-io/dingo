@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"slices"
 )
 
 const apiVersion = "0.1.0"
@@ -263,4 +264,97 @@ func (b *Blockfrost) handleNetwork(
 			Active: "0",
 		},
 	})
+}
+
+// handlePoolsExtended handles GET /api/v0/pools/extended
+// and returns active pools with extended details.
+func (b *Blockfrost) handlePoolsExtended(
+	w http.ResponseWriter,
+	r *http.Request,
+) {
+	params, err := ParsePagination(r)
+	if err != nil {
+		writeError(
+			w,
+			http.StatusBadRequest,
+			"Bad Request",
+			"Invalid pagination parameters.",
+		)
+		return
+	}
+
+	pools, err := b.node.PoolsExtended()
+	if err != nil {
+		b.logger.Error(
+			"failed to get extended pools",
+			"error", err,
+		)
+		writeError(
+			w,
+			http.StatusInternalServerError,
+			"Internal Server Error",
+			"failed to retrieve pools",
+		)
+		return
+	}
+
+	slices.SortFunc(
+		pools,
+		func(a, b PoolExtendedInfo) int {
+			switch {
+			case a.Hex < b.Hex:
+				return -1
+			case a.Hex > b.Hex:
+				return 1
+			default:
+				return 0
+			}
+		},
+	)
+	if params.Order == PaginationOrderDesc {
+		slices.Reverse(pools)
+	}
+
+	totalItems := len(pools)
+	SetPaginationHeaders(w, totalItems, params)
+
+	start := (params.Page - 1) * params.Count
+	if start >= totalItems {
+		writeJSON(w, http.StatusOK, []PoolExtendedResponse{})
+		return
+	}
+	end := min(start+params.Count, totalItems)
+
+	resp := make([]PoolExtendedResponse, 0, end-start)
+	for _, pool := range pools[start:end] {
+		relays := make([]PoolRelayResponse, 0, len(pool.Relays))
+		for _, relay := range pool.Relays {
+			tmpRelay := PoolRelayResponse{
+				Port: relay.Port,
+			}
+			if relay.IPv4 != "" {
+				tmpRelay.IPv4 = &relay.IPv4
+			}
+			if relay.IPv6 != "" {
+				tmpRelay.IPv6 = &relay.IPv6
+			}
+			if relay.DNS != "" {
+				tmpRelay.DNS = &relay.DNS
+			}
+			relays = append(relays, tmpRelay)
+		}
+		resp = append(resp, PoolExtendedResponse{
+			PoolID:         pool.PoolID,
+			Hex:            pool.Hex,
+			VrfKey:         pool.VrfKey,
+			ActiveStake:    pool.ActiveStake,
+			LiveStake:      pool.LiveStake,
+			DeclaredPledge: pool.DeclaredPledge,
+			FixedCost:      pool.FixedCost,
+			MarginCost:     pool.MarginCost,
+			Relays:         relays,
+		})
+	}
+
+	writeJSON(w, http.StatusOK, resp)
 }

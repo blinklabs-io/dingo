@@ -16,8 +16,10 @@ package blockfrost
 
 import (
 	"encoding/hex"
+	"fmt"
 
 	"github.com/blinklabs-io/dingo/ledger"
+	"github.com/blinklabs-io/gouroboros/ledger/common"
 )
 
 // NodeAdapter wraps a real dingo Node's LedgerState to
@@ -146,4 +148,104 @@ func (a *NodeAdapter) CurrentProtocolParams() (
 		CollateralPercent:   0,
 		MaxCollateralInputs: 0,
 	}, nil
+}
+
+// PoolsExtended returns the current active pools with
+// extended details.
+func (a *NodeAdapter) PoolsExtended() (
+	[]PoolExtendedInfo, error,
+) {
+	db := a.ledgerState.Database()
+	poolKeyHashes, err := db.Metadata().GetActivePoolKeyHashes(nil)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"get active pool key hashes: %w",
+			err,
+		)
+	}
+	if len(poolKeyHashes) == 0 {
+		return []PoolExtendedInfo{}, nil
+	}
+
+	liveStakeByPool, _, err := db.Metadata().GetStakeByPools(
+		poolKeyHashes,
+		nil,
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"get live stake by pools: %w",
+			err,
+		)
+	}
+
+	activeStakeByPool := make(map[string]uint64, len(poolKeyHashes))
+	currentEpoch := a.ledgerState.CurrentEpoch()
+	snapshots, err := db.Metadata().GetPoolStakeSnapshotsByEpoch(
+		currentEpoch,
+		"mark",
+		nil,
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"get pool stake snapshots for epoch %d: %w",
+			currentEpoch,
+			err,
+		)
+	}
+	for _, snapshot := range snapshots {
+		activeStakeByPool[hex.EncodeToString(snapshot.PoolKeyHash)] = uint64(snapshot.TotalStake)
+	}
+
+	ret := make([]PoolExtendedInfo, 0, len(poolKeyHashes))
+	for _, poolKeyHash := range poolKeyHashes {
+		pool, err := db.GetPool(common.PoolKeyHash(poolKeyHash), false, nil)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"get pool %x: %w",
+				poolKeyHash,
+				err,
+			)
+		}
+		poolID := common.PoolId(common.NewBlake2b224(pool.PoolKeyHash))
+		poolHex := hex.EncodeToString(pool.PoolKeyHash)
+
+		latestRelays := pool.Relays
+		if len(pool.Registration) > 0 {
+			latestRelays = pool.Registration[0].Relays
+		}
+
+		relays := make([]PoolRelayInfo, 0, len(latestRelays))
+		for _, relay := range latestRelays {
+			tmpRelay := PoolRelayInfo{
+				Port: int(relay.Port),
+				DNS:  relay.Hostname,
+			}
+			if relay.Ipv4 != nil {
+				tmpRelay.IPv4 = relay.Ipv4.String()
+			}
+			if relay.Ipv6 != nil {
+				tmpRelay.IPv6 = relay.Ipv6.String()
+			}
+			relays = append(relays, tmpRelay)
+		}
+
+		marginCost := 0.0
+		if pool.Margin != nil && pool.Margin.Rat != nil {
+			marginCost, _ = pool.Margin.Float64()
+		}
+
+		ret = append(ret, PoolExtendedInfo{
+			PoolID:         poolID.String(),
+			Hex:            poolHex,
+			VrfKey:         hex.EncodeToString(pool.VrfKeyHash),
+			ActiveStake:    fmt.Sprintf("%d", activeStakeByPool[poolHex]),
+			LiveStake:      fmt.Sprintf("%d", liveStakeByPool[string(pool.PoolKeyHash)]),
+			DeclaredPledge: fmt.Sprintf("%d", uint64(pool.Pledge)),
+			FixedCost:      fmt.Sprintf("%d", uint64(pool.Cost)),
+			MarginCost:     marginCost,
+			Relays:         relays,
+		})
+	}
+
+	return ret, nil
 }
