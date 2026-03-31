@@ -18,7 +18,7 @@ Hi folks! Here’s what we shipped in v0.29.0.
 
 ### 💪 Improvements
 
-- **Faster replay after Mithril restore:** Chain synchronization is sleeker after restoring from a snapshot because the node persists a Mithril trust-boundary slot so replay can skip work covered by the snapshot.
+- **Sleeker replay after Mithril restore:** Chain synchronization is sleeker after restoring from a snapshot because the node persists a Mithril trust-boundary slot so replay can skip work covered by the snapshot.
 - **Configurable CBOR cache sizing:** CBOR-heavy workloads are easier to tune because configuration supports CBOR cache sizing and passes it through to database initialization.
 - **Storage-mode-specific Badger defaults:** Storage defaults are more predictable because Dingo applies storage-mode-specific Badger defaults only when options are unset.
 - **More consistent transaction watching:** Transaction watching is more consistent across forward progress and rollbacks because WatchTx now supports undo using transaction history and ledger backfill.
