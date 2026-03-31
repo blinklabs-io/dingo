@@ -1,6 +1,50 @@
 # Release Notes
 
 
+## v0.29.0 (March 31, 2026)
+
+**Title:** Smoother operations and API refinements
+
+**Date:** March 31, 2026
+
+**Version:** v0.29.0
+
+Hi folks! Here’s what we shipped in v0.29.0.
+
+### ✨ What's New
+
+```json
+{
+  "✨ What's New": [
+    "You can now monitor how much space your storage layers are using so it’s easier to plan capacity and spot unexpected growth early. The blob store and metadata store now track `DiskSize` and export those values as Prometheus gauge metrics on a periodic basis."
+  ],
+  "💪 Improvements": [
+    "Chain synchronization now replays faster after a snapshot by skipping work that’s already covered, which reduces startup and catch-up time. The node persists a Mithril trust-boundary slot so chainsync replay can skip validation/processing for blocks included in the Mithril snapshot and gap closure, and it clears that boundary if a rollback goes behind it.",
+    "Node configuration now gives you more predictable performance tuning for CBOR-heavy workloads without code changes. The configuration adds a configurable CBOR cache size and passes the value through to database initialization so the cache is applied consistently at startup.",
+    "Database configuration now behaves more consistently across deployment styles, so you don’t get surprise defaults overriding your intended settings. The system introduces storage-mode-specific Badger defaults (core vs api) and tracks explicit overrides across CLI, environment variables, and YAML so defaults are only applied when values are truly unset.",
+    "Block and epoch data served through the Blockfrost-compatible interface is now more accurate and up to date, especially right after syncing. The adapter now populates latest block, epoch, and protocol-parameter responses from ledger state and the DB, backed by helper utilities and ledger range-count queries."
+  ],
+  "🔧 Fixes": [
+    "Chain sync error handling is now more resilient in edge cases, helping the node recover more smoothly instead of getting stuck on similar failure modes. The error handler now treats \"rollback point not found\" the same as `local_tip_plateau` so both cases follow the same recovery path.",
+    "Transaction watching is now more reliable around rollbacks, reducing the chance of missing or mis-ordering events during chain reorganizations. The WatchTx pipeline was refactored to centralize block-to-message building and add undo/rollback support using transaction history and ledger backfill, with tests covering the helper logic."
+  ]
+}
+
+```
+
+### 💪 Improvements
+
+### 🔧 Fixes
+
+### 📋 What You Need to Know
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
+
 ## v0.27.7 (March 24, 2026)
 
 **Title:** Steadier sync and leaner storage
