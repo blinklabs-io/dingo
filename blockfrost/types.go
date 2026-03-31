@@ -132,7 +132,7 @@ type PoolRelayResponse struct {
 	IPv4 *string `json:"ipv4"`
 	IPv6 *string `json:"ipv6"`
 	DNS  *string `json:"dns"`
-	Port int     `json:"port"`
+	Port *int    `json:"port"`
 }
 
 // PoolExtendedResponse represents an extended stake pool

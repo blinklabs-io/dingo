@@ -351,12 +351,15 @@ func (a *NodeAdapter) PoolsExtended() (
 
 		relays := make([]PoolRelayInfo, 0, len(latestRelays))
 		for _, relay := range latestRelays {
-			if relay.Port > uint(math.MaxInt) {
-				return nil, fmt.Errorf("relay port out of range for pool %x", pool.PoolKeyHash)
-			}
 			tmpRelay := PoolRelayInfo{
-				Port: int(relay.Port),
-				DNS:  relay.Hostname,
+				DNS: relay.Hostname,
+			}
+			if relay.Port != 0 {
+				if relay.Port > uint(math.MaxInt) {
+					return nil, fmt.Errorf("relay port out of range for pool %x", pool.PoolKeyHash)
+				}
+				port := int(relay.Port)
+				tmpRelay.Port = &port
 			}
 			if relay.Ipv4 != nil {
 				tmpRelay.IPv4 = relay.Ipv4.String()

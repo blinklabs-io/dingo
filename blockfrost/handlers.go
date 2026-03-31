@@ -329,9 +329,7 @@ func (b *Blockfrost) handlePoolsExtended(
 	for _, pool := range pools[start:end] {
 		relays := make([]PoolRelayResponse, 0, len(pool.Relays))
 		for _, relay := range pool.Relays {
-			tmpRelay := PoolRelayResponse{
-				Port: relay.Port,
-			}
+			tmpRelay := PoolRelayResponse{}
 			if relay.IPv4 != "" {
 				tmpRelay.IPv4 = &relay.IPv4
 			}
@@ -340,6 +338,9 @@ func (b *Blockfrost) handlePoolsExtended(
 			}
 			if relay.DNS != "" {
 				tmpRelay.DNS = &relay.DNS
+			}
+			if relay.Port != nil {
+				tmpRelay.Port = relay.Port
 			}
 			relays = append(relays, tmpRelay)
 		}

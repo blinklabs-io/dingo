@@ -126,5 +126,5 @@ type PoolRelayInfo struct {
 	IPv4 string
 	IPv6 string
 	DNS  string
-	Port int
+	Port *int
 }

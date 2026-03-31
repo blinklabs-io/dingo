@@ -27,6 +27,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func intPtr(v int) *int {
+	return &v
+}
+
 // mockNode implements BlockfrostNode for testing.
 type mockNode struct {
 	chainTip    ChainTipInfo
@@ -277,7 +281,7 @@ func TestHandlePoolsExtended(t *testing.T) {
 					{
 						IPv4: "192.168.0.1",
 						DNS:  "relay-two.example",
-						Port: 3002,
+						Port: intPtr(3002),
 					},
 				},
 			},
@@ -294,7 +298,10 @@ func TestHandlePoolsExtended(t *testing.T) {
 					{
 						IPv6: "2001:db8::1",
 						DNS:  "relay-one.example",
-						Port: 3001,
+						Port: intPtr(3001),
+					},
+					{
+						DNS: "relay-no-port.example",
 					},
 				},
 			},
@@ -334,13 +341,17 @@ func TestHandlePoolsExtended(t *testing.T) {
 	assert.Equal(t, "40", resp[0].DeclaredPledge)
 	assert.Equal(t, "50", resp[0].FixedCost)
 	assert.InDelta(t, 0.1, resp[0].MarginCost, 0.0001)
-	require.Len(t, resp[0].Relays, 1)
+	require.Len(t, resp[0].Relays, 2)
 	assert.Nil(t, resp[0].Relays[0].IPv4)
 	require.NotNil(t, resp[0].Relays[0].IPv6)
 	assert.Equal(t, "2001:db8::1", *resp[0].Relays[0].IPv6)
 	require.NotNil(t, resp[0].Relays[0].DNS)
 	assert.Equal(t, "relay-one.example", *resp[0].Relays[0].DNS)
-	assert.Equal(t, 3001, resp[0].Relays[0].Port)
+	require.NotNil(t, resp[0].Relays[0].Port)
+	assert.Equal(t, 3001, *resp[0].Relays[0].Port)
+	require.NotNil(t, resp[0].Relays[1].DNS)
+	assert.Equal(t, "relay-no-port.example", *resp[0].Relays[1].DNS)
+	assert.Nil(t, resp[0].Relays[1].Port)
 }
 
 func TestHandlePoolsExtendedInvalidPagination(t *testing.T) {
