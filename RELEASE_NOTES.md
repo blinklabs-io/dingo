@@ -11,46 +11,29 @@
 
 Hi folks! Here’s what we shipped in v0.29.0.
 
-<!-- BEGIN v0.29.0 generated notes (json) -->
-
-```json
-{
-  "✨ What's New": [
-    "You can now generate and exercise newer-era transactions in automated runs, making it easier to test end-to-end flows on local and test networks.",
-    "You can now stand up and validate more complete test environments with less manual setup."
-  ],
-  "💪 Improvements": [
-    "Sync replay is now faster and avoids redoing work that is already captured in a trusted snapshot.",
-    "Rollback handling is now safer around trusted snapshot boundaries."
-  ],
-  "📋 What You Need to Know": [
-    "If you rely on replay/rollback behavior during testing, you may see different performance characteristics and fewer re-processed blocks after upgrading."
-  ]
-}
-
-```
-
-<!-- END v0.29.0 generated notes (json) -->
-
 ### ✨ What's New
 
+- **Conway-era transaction builders and txpump:** End-to-end testing is easier because you can now generate and run newer-era transactions in automated runs.
+- **Devnet and testnet helpers:** Spinning up test environments is simpler because you now have wallet-focused tests, a configurator script, local devnet helpers, a Dingo testnet spec, and Antithesis `docker-compose` wiring.
 - **Storage disk-usage metrics:** Capacity planning is easier because the blob store and metadata store now export disk-usage (`DiskSize`) Prometheus gauge metrics.
 
 ### 💪 Improvements
 
-- **Faster post-snapshot replay:** Restarts are faster because chain-sync can skip replay work already covered by a Mithril snapshot.
+- **Faster post-snapshot replay:** Restarts are faster because chain-sync now uses a Mithril trust-boundary slot to skip replay work already covered by a snapshot.
 - **Configurable CBOR cache sizing:** Performance tuning is simpler because you can now set the CBOR cache size in configuration.
 - **More predictable Badger defaults:** Deployments are more consistent because storage-mode-specific defaults only apply when values are truly unset.
 - **More accurate Blockfrost responses:** Block and epoch data is more reliable because latest block, epoch, and protocol-parameter responses are now sourced from ledger state and the database.
 
 ### 🔧 Fixes
 
+- **Safer rollbacks behind snapshots:** Rollback behavior is more rock-solid because the Mithril trust-boundary now resets when a rollback crosses it.
 - **Rock-solid rollback recovery:** Recovery is smoother because “rollback point not found” now follows the same handling path as `local_tip_plateau`.
 - **Rock-solid WatchTx rollbacks:** Transaction watching is more reliable because WatchTx now supports undo and rollback during chain reorganizations.
 
 ### 📋 What You Need to Know
 
 - **No action required:** You're all set—just upgrade to v0.29.0.
+- **Replay and rollback near snapshots:** Testing runs may look different because chain-sync replay now respects the Mithril trust-boundary and resets it on rollback.
 
 ### 🙏 Thank You
 
