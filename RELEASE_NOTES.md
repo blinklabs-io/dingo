@@ -35,7 +35,6 @@ Hi folks! Here’s what we shipped in v0.29.0.
 
 Thank you for trying!
 
-
 ---
 
 
