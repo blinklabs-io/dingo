@@ -17,7 +17,7 @@ Hi folks! Here’s what we shipped in v0.29.0.
 
 ### 💪 Improvements
 
-- **Faster post-snapshot replay:** Restarts are faster because chain sync can skip replay work already covered by a Mithril snapshot.
+- **Faster post-snapshot replay:** Restarts are faster because chain-sync can skip replay work already covered by a Mithril snapshot.
 - **Configurable CBOR cache sizing:** Performance tuning is simpler because you can now set the CBOR cache size in configuration.
 - **More predictable Badger defaults:** Deployments are more consistent because storage-mode-specific defaults only apply when values are truly unset.
 - **More accurate Blockfrost responses:** Block and epoch data is more reliable because latest block, epoch, and protocol-parameter responses are now sourced from ledger state and the database.
@@ -25,7 +25,7 @@ Hi folks! Here’s what we shipped in v0.29.0.
 ### 🔧 Fixes
 
 - **Rock-solid rollback recovery:** Recovery is smoother because “rollback point not found” now follows the same handling path as `local_tip_plateau`.
-- **Rock-solid WatchTx rollbacks:** Transaction watching is more reliable because WatchTx now supports undo/rollback during chain reorganizations.
+- **Rock-solid WatchTx rollbacks:** Transaction watching is more reliable because WatchTx now supports undo and rollback during chain reorganizations.
 
 ### 📋 What You Need to Know
 
