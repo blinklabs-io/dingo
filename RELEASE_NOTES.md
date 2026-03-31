@@ -5,17 +5,17 @@
 
 {
   "✨ What's New": [
-    "You can now monitor how much disk space your stored data is using so you can plan capacity before it becomes a problem. The blob store and metadata store now track `DiskSize` and periodically export those values as Prometheus gauge metrics.",
-    "You can now rely on the API adapter to return up-to-date chain context, even when it needs to read from local state instead of an external source. The Blockfrost adapter now populates “latest block”, “epoch”, and “protocol parameters” from ledger state and the local DB, using new helper functions and ledger range-count queries."
+    "You can now plan capacity before it becomes a problem because the blob store and metadata store track `DiskSize` and export it as Prometheus gauge metrics.",
+    "You can now rely on up-to-date chain context because the Blockfrost adapter populates the latest block, epoch, and protocol parameters from ledger state and the local DB."
   ],
   "💪 Improvements": [
-    "Chain synchronization is now faster after restoring from a snapshot because it avoids redoing work that is already known to be correct. The node now persists a Mithril trust-boundary slot so chainsync replay skips validation and processing for blocks covered by the Mithril snapshot and gap closure, and it clears that boundary if a rollback goes behind it.",
-    "You can now tune memory and performance for CBOR-heavy workloads to better fit your deployment size. The node configuration now supports configurable CBOR cache sizing and passes the configured value through to database initialization.",
-    "Running the same software in different storage modes now behaves more predictably, with sensible defaults that won’t override your explicit settings. The system introduces storage-mode-specific Badger defaults (core vs api) and tracks overrides across CLI/env/YAML so defaults are applied only when options are unset.",
-    "Transaction watching now behaves more consistently across forward progress and rollbacks, improving downstream reliability. WatchTx was refactored to centralize block-to-message construction and now supports undo/rollback using transaction history and ledger backfill, with added tests for the new helpers."
+    "Chain synchronization is now faster after restoring from a snapshot because the node persists a Mithril trust-boundary slot so replay can skip work covered by the snapshot.",
+    "You can now tune memory for CBOR-heavy workloads because configuration supports CBOR cache sizing and passes it through to database initialization.",
+    "Storage defaults are now more predictable because Dingo applies storage-mode-specific Badger defaults only when options are unset.",
+    "Transaction watching is now more consistent across forward progress and rollbacks because WatchTx now supports undo using transaction history and ledger backfill."
   ],
   "🔧 Fixes": [
-    "Chain sync now recovers more gracefully from a missing rollback target, reducing needless failure loops during reorg handling. The chainsync error handler now treats \"rollback point not found\" the same as \"local_tip_plateau\"."
+    "Chain sync now recovers more gracefully from a missing rollback target because the chainsync error handler treats \"rollback point not found\" the same as \"local_tip_plateau\"."
   ]
 }
 
