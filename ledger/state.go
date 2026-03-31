@@ -2594,6 +2594,7 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 			snapshotValidationEnabled := ls.validationEnabled
 			snapshotChainsyncState := ls.chainsyncState
 			chainTipSlot := ls.chain.Tip().Point.Slot
+			snapshotMithrilSlot := ls.mithrilLedgerSlot
 			ls.RUnlock()
 
 			// Compute stability window and cutoff slot outside the callback
@@ -2666,8 +2667,8 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 						// the UTxO set from the snapshot does not
 						// contain intermediate states for volatile
 						// blocks fetched during gap closure.
-						if ls.mithrilLedgerSlot > 0 &&
-							next.SlotNumber() <= ls.mithrilLedgerSlot {
+						if snapshotMithrilSlot > 0 &&
+							next.SlotNumber() <= snapshotMithrilSlot {
 							// Still within Mithril trust boundary —
 							// skip validation but mark that we've
 							// reached the tip region so catch-up mode
@@ -2727,8 +2728,8 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 					// via SetTransaction would fail with "UTxO
 					// already spent" since the Mithril snapshot's
 					// UTxO set already reflects the spent state.
-					if ls.mithrilLedgerSlot > 0 &&
-						tmpPoint.Slot <= ls.mithrilLedgerSlot {
+					if snapshotMithrilSlot > 0 &&
+						tmpPoint.Slot <= snapshotMithrilSlot {
 						// Load stored nonce so the rolling nonce
 						// stays correct across the gap boundary.
 						if storedNonce, nonceErr := ls.db.GetBlockNonce(
