@@ -78,6 +78,21 @@ func (d *Database) GetPool(
 	return ret, nil
 }
 
+// GetPools returns pools by key hash.
+func (d *Database) GetPools(
+	pkhs []lcommon.PoolKeyHash,
+	txn *Txn,
+) ([]models.Pool, error) {
+	if len(pkhs) == 0 {
+		return []models.Pool{}, nil
+	}
+	if txn == nil {
+		txn = d.Transaction(false)
+		defer txn.Release()
+	}
+	return d.metadata.GetPools(pkhs, txn.Metadata())
+}
+
 // GetPoolByVrfKeyHash retrieves an active pool by its VRF key hash.
 // Returns nil if no active pool uses this VRF key.
 func (d *Database) GetPoolByVrfKeyHash(

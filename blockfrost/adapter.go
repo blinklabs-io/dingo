@@ -301,15 +301,19 @@ func (a *NodeAdapter) PoolsExtended() (
 
 	activeStakeByPool := make(map[string]uint64, len(poolKeyHashes))
 	currentEpoch := a.ledgerState.CurrentEpoch()
+	activeStakeEpoch := uint64(0)
+	if currentEpoch >= 2 {
+		activeStakeEpoch = currentEpoch - 2
+	}
 	snapshots, err := db.Metadata().GetPoolStakeSnapshotsByEpoch(
-		currentEpoch,
+		activeStakeEpoch,
 		"mark",
 		nil,
 	)
 	if err != nil {
 		return nil, fmt.Errorf(
 			"get pool stake snapshots for epoch %d: %w",
-			currentEpoch,
+			activeStakeEpoch,
 			err,
 		)
 	}
@@ -317,15 +321,25 @@ func (a *NodeAdapter) PoolsExtended() (
 		activeStakeByPool[hex.EncodeToString(snapshot.PoolKeyHash)] = uint64(snapshot.TotalStake)
 	}
 
+	poolHashes := make([]lcommon.PoolKeyHash, 0, len(poolKeyHashes))
+	for _, poolKeyHash := range poolKeyHashes {
+		poolHashes = append(poolHashes, lcommon.PoolKeyHash(poolKeyHash))
+	}
+	pools, err := db.GetPools(poolHashes, nil)
+	if err != nil {
+		return nil, fmt.Errorf("get pools: %w", err)
+	}
+	poolsByHash := make(map[string]*models.Pool, len(pools))
+	for i := range pools {
+		pool := &pools[i]
+		poolsByHash[string(pool.PoolKeyHash)] = pool
+	}
+
 	ret := make([]PoolExtendedInfo, 0, len(poolKeyHashes))
 	for _, poolKeyHash := range poolKeyHashes {
-		pool, err := db.GetPool(lcommon.PoolKeyHash(poolKeyHash), false, nil)
-		if err != nil {
-			return nil, fmt.Errorf(
-				"get pool %x: %w",
-				poolKeyHash,
-				err,
-			)
+		pool, ok := poolsByHash[string(poolKeyHash)]
+		if !ok {
+			return nil, fmt.Errorf("get pool %x: %w", poolKeyHash, models.ErrPoolNotFound)
 		}
 		poolID := lcommon.PoolId(lcommon.NewBlake2b224(pool.PoolKeyHash))
 		poolHex := hex.EncodeToString(pool.PoolKeyHash)
