@@ -314,6 +314,12 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 			dingo.WithInactivityTimeout(cfg.InactivityTimeout),
 			dingo.WithMaxConnectionsPerIP(cfg.MaxConnectionsPerIP),
 			dingo.WithMaxInboundConns(cfg.MaxInboundConns),
+			dingo.WithCacheConfig(
+				cfg.Cache.BlockLRUEntries,
+				cfg.Cache.HotUtxoEntries,
+				cfg.Cache.HotTxEntries,
+				cfg.Cache.HotTxMaxBytes,
+			),
 			dingo.WithChainsyncMaxClients(
 				cfg.Chainsync.MaxClients,
 			),

@@ -135,6 +135,11 @@ type Config struct {
 	meshPort uint
 	// Storage mode: "core" or "api"
 	storageMode StorageMode
+	// CBOR cache configuration
+	cacheBlockLRUEntries int
+	cacheHotUtxoEntries  int
+	cacheHotTxEntries    int
+	cacheHotTxMaxBytes   int64
 }
 
 // configPopulateNetworkMagic uses the named network (if specified) to determine the network magic value (if not specified)
@@ -677,5 +682,16 @@ func WithMeshPort(port uint) ConfigOptionFunc {
 func WithStorageMode(mode StorageMode) ConfigOptionFunc {
 	return func(c *Config) {
 		c.storageMode = mode
+	}
+}
+
+// WithCacheConfig sets the CBOR cache sizes for block LRU,
+// hot UTxO, and hot TX caches.
+func WithCacheConfig(blockLRU, hotUtxo, hotTx int, hotTxMaxBytes int64) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cacheBlockLRUEntries = blockLRU
+		c.cacheHotUtxoEntries = hotUtxo
+		c.cacheHotTxEntries = hotTx
+		c.cacheHotTxMaxBytes = hotTxMaxBytes
 	}
 }
