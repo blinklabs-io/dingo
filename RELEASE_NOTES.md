@@ -14,7 +14,7 @@ Hi folks! Here’s what we shipped in v0.29.0.
 ### ✨ What's New
 
 - **Conway-era transaction builders and txpump:** End-to-end testing is easier because you can now generate and run newer-era transactions in automated runs.
-- **Devnet and testnet helpers:** Spinning up test environments is simpler because you can now spin up wallet-focused tests, a configurator script, local devnet helpers, a Dingo testnet spec, and Antithesis `docker-compose` wiring.
+- **Devnet and testnet helpers:** Spinning up test environments is simpler because you now have wallet-focused tests, a configurator script, local devnet helpers, a Dingo testnet spec, and Antithesis `docker-compose` wiring.
 - **Storage disk-usage metrics:** Capacity planning is easier because the blob store and metadata store now export disk-usage (`DiskSize`) Prometheus gauge metrics.
 
 ### 💪 Improvements
