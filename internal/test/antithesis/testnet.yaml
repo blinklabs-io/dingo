@@ -1,0 +1,62 @@
+# Antithesis testnet specification for Dingo.
+#
+# 5-pool mixed network: p1 (dingo) + p2-p5 (cardano-node).
+# Fast 500-slot epochs with k=40 for rapid epoch boundary testing.
+#
+# Format: 6 YAML documents
+#   1. Required testnet parameters
+#   2. Byron genesis overrides
+#   3. Shelley genesis overrides
+#   4. Alonzo genesis overrides
+#   5. Conway genesis overrides
+#   6. Node config (config.json) overrides
+
+--- # Required Testnet Parameters
+poolCount: 5
+poolCost: 0
+poolMargin: 0.0
+poolPledge: 0
+delegatedSupply: 600000000000000
+systemStart: 'now'
+systemStartDelay: 5
+networkMagic: 42
+testnetDomain: example
+
+--- # Byron Genesis Override
+protocolConsts:
+  k: 40
+
+--- # Shelley Genesis Override
+# 1s slots, ~8 min epochs
+# nonceStabilityWindow = 4k/f = 4*40/0.4 = 400 < 500 ✓
+# blockfetchStabilityWindow = 3k/f = 3*40/0.4 = 300 < 500 ✓
+epochLength: 500
+slotLength: 1
+activeSlotsCoeff: 0.4
+securityParam: 40
+maxLovelaceSupply: 45000000000000000
+protocolParams:
+  decentralisationParam: 0
+  protocolVersion:
+    major: 10
+    minor: 0
+
+--- # Alonzo Genesis Override
+
+--- # Conway Genesis Override
+
+--- # Node Config Override
+TestShelleyHardForkAtEpoch: 0
+TestAllegraHardForkAtEpoch: 0
+TestMaryHardForkAtEpoch: 0
+TestAlonzoHardForkAtEpoch: 0
+TestBabbageHardForkAtEpoch: 0
+TestConwayHardForkAtEpoch: 0
+ExperimentalHardForksEnabled: true
+ExperimentalProtocolsEnabled: true
+PeerSharing: true
+TraceForge: true
+TraceChainDb: true
+TraceMempool: true
+TurnOnLogging: true
+TurnOnLogMetrics: true
