@@ -24,6 +24,7 @@ import (
 	"io"
 	"log/slog"
 	"math/big"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -501,6 +502,7 @@ type LedgerState struct {
 	inRecovery                    bool           // guards against recursive recovery in SubmitAsyncDBTxn
 	densityWindow                 []densityEntry // sliding window for chain density metric
 	lastAtTipRecoverySlot         uint64         // guards against infinite at-tip recovery loops
+	mithrilLedgerSlot             uint64         // blocks at or below this slot are Mithril-verified; skip validation
 
 	// Subscription IDs for event bus unsubscribe on close
 	chainsyncSubID           event.EventSubscriberId
@@ -612,6 +614,38 @@ func (ls *LedgerState) Start(ctx context.Context) error {
 	}
 	if ls.currentEpoch.LengthInSlots > 0 {
 		ls.metrics.epochLengthSlots.Set(float64(ls.currentEpoch.LengthInSlots))
+	}
+
+	// Read Mithril ledger state slot if present. Blocks at or below
+	// this slot were verified by the Mithril certificate chain during
+	// import and must not be re-validated during chainsync replay.
+	if mithrilSlotStr, err := ls.db.GetSyncState(
+		"mithril_ledger_slot", nil,
+	); err != nil {
+		ls.config.Logger.Warn(
+			"failed to read Mithril trust boundary from database",
+			"component", "ledger",
+			"error", err,
+		)
+	} else if mithrilSlotStr != "" {
+		mls, parseErr := strconv.ParseUint(
+			mithrilSlotStr, 10, 64,
+		)
+		if parseErr != nil {
+			ls.config.Logger.Warn(
+				"malformed mithril_ledger_slot value, ignoring",
+				"component", "ledger",
+				"value", mithrilSlotStr,
+				"error", parseErr,
+			)
+		} else {
+			ls.mithrilLedgerSlot = mls
+			ls.config.Logger.Info(
+				"loaded Mithril trust boundary",
+				"component", "ledger",
+				"mithril_ledger_slot", mls,
+			)
+		}
 	}
 
 	// Initialize database worker pool for async operations
@@ -1624,6 +1658,31 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 		ls.prevEraPParams = newPrevPParams
 	}
 	ls.currentTip = newTip
+	// If rolling back behind the Mithril trust boundary, clear it.
+	// A rollback inside the gap means replacement blocks on the new
+	// fork were NOT processed by SetGapBlockTransaction and must go
+	// through normal block processing.
+	if ls.mithrilLedgerSlot > 0 && point.Slot < ls.mithrilLedgerSlot {
+		ls.config.Logger.Warn(
+			"rollback behind Mithril trust boundary, clearing",
+			"component", "ledger",
+			"rollback_slot", point.Slot,
+			"mithril_ledger_slot", ls.mithrilLedgerSlot,
+		)
+		ls.mithrilLedgerSlot = 0
+		// Also clear the persisted value so a restart doesn't
+		// reload the stale boundary and skip replacement-fork
+		// blocks.
+		if err := ls.db.DeleteSyncState(
+			"mithril_ledger_slot", nil,
+		); err != nil {
+			ls.config.Logger.Warn(
+				"failed to clear persisted Mithril trust boundary",
+				"component", "ledger",
+				"error", err,
+			)
+		}
+	}
 	// Always update nonce - clear it on genesis rollback, set
 	// it otherwise
 	ls.currentTipBlockNonce = newNonce
@@ -2600,8 +2659,24 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 					} else if !ls.config.TrustedReplay &&
 						snapshotChainsyncState == SyncingChainsyncState &&
 						next.SlotNumber() >= cutoffSlot {
-						wantEnableValidation = true
-						shouldValidateBlock = true
+						// Do not validate blocks covered by the
+						// Mithril snapshot. These were already
+						// verified by the certificate chain during
+						// import; re-validating them fails because
+						// the UTxO set from the snapshot does not
+						// contain intermediate states for volatile
+						// blocks fetched during gap closure.
+						if ls.mithrilLedgerSlot > 0 &&
+							next.SlotNumber() <= ls.mithrilLedgerSlot {
+							// Still within Mithril trust boundary —
+							// skip validation but mark that we've
+							// reached the tip region so catch-up mode
+							// and bulk-load pragmas are disabled.
+							wantEnableValidation = true
+						} else {
+							wantEnableValidation = true
+							shouldValidateBlock = true
+						}
 					}
 					// Flush accumulated deltas before the first validated
 					// block so that UTxOs created by earlier non-validated
@@ -2644,6 +2719,31 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 								offsetErr,
 							)
 						}
+					}
+					// Skip full block processing for blocks
+					// already handled during Mithril gap closure.
+					// Their transaction metadata was recorded by
+					// SetGapBlockTransaction; re-processing them
+					// via SetTransaction would fail with "UTxO
+					// already spent" since the Mithril snapshot's
+					// UTxO set already reflects the spent state.
+					if ls.mithrilLedgerSlot > 0 &&
+						tmpPoint.Slot <= ls.mithrilLedgerSlot {
+						// Load stored nonce so the rolling nonce
+						// stays correct across the gap boundary.
+						if storedNonce, nonceErr := ls.db.GetBlockNonce(
+							tmpPoint, txn,
+						); nonceErr == nil && len(storedNonce) > 0 {
+							runningNonce = storedNonce
+							pendingNonce = storedNonce
+						}
+						pendingTip = ochainsync.Tip{
+							Point:       tmpPoint,
+							BlockNumber: next.BlockNumber(),
+						}
+						expectedPrevHash = tmpPoint.Hash
+						blocksProcessed++
+						continue
 					}
 					// Process block
 					delta, err = ls.ledgerProcessBlock(
