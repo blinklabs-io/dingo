@@ -980,7 +980,7 @@ func (o *Ouroboros) SubscribeChainsyncResync(ctx context.Context) {
 			// MustReply state, during which no recovery can happen.
 			// Closing lets peer governance reconnect with a fresh
 			// bearer and updated intersect points.
-			if e.Reason == "local_tip_plateau" {
+			if e.Reason == "local_tip_plateau" || e.Reason == "rollback point not found" {
 				for _, connId := range connIds {
 					if o.ChainsyncState != nil {
 						o.ChainsyncState.ClearObservedHeaderHistory(connId)
