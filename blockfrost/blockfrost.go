@@ -90,6 +90,10 @@ func (b *Blockfrost) Start(
 		"GET /api/v0/network",
 		b.handleNetwork,
 	)
+	mux.HandleFunc(
+		"GET /api/v0/pools/extended",
+		b.handlePoolsExtended,
+	)
 
 	// Wrap handler with a request body size limit (1 MB)
 	// as defense-in-depth against oversized payloads.
