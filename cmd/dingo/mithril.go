@@ -519,13 +519,37 @@ func runMithrilSync(
 		)
 	}
 
-	// Clean up all sync_state entries.
-	// These are ephemeral and only used by the sync process itself.
-	// Set syncComplete after success so the deferred error message
-	// fires if cleanup fails (the user needs to re-run or manually
-	// clear sync state so `dingo serve` will start).
-	if err := db.ClearSyncState(nil); err != nil {
-		return fmt.Errorf("cleaning up sync state: %w", err)
+	// Record the trust boundary as the chain tip AFTER gap closure,
+	// not the Mithril snapshot slot. Gap blocks between the snapshot
+	// slot and chain tip were imported via SetGapBlockTransaction
+	// (no UTxO tracking), so chainsync replay must skip them too.
+	// Fall back to the snapshot slot when no gap blocks were fetched.
+	trustBoundarySlot := ledgerStateSlot
+	if len(recentBlocks) > 0 {
+		trustBoundarySlot = recentBlocks[0].Slot
+	}
+
+	// Clean up ephemeral sync state and record the Mithril trust
+	// boundary atomically. Both must succeed together: if cleanup
+	// succeeds but the boundary write fails, dingo serve would
+	// start without the trust boundary and hit the replay bug.
+	txn := db.MetadataTxn(true)
+	if err := txn.Do(func(txn *database.Txn) error {
+		if err := db.ClearSyncState(txn); err != nil {
+			return fmt.Errorf("cleaning up sync state: %w", err)
+		}
+		if err := db.SetSyncState(
+			"mithril_ledger_slot",
+			strconv.FormatUint(trustBoundarySlot, 10),
+			txn,
+		); err != nil {
+			return fmt.Errorf(
+				"recording mithril ledger slot: %w", err,
+			)
+		}
+		return nil
+	}); err != nil {
+		return err
 	}
 	syncComplete = true
 
