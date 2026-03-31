@@ -519,6 +519,16 @@ func runMithrilSync(
 		)
 	}
 
+	// Record the trust boundary as the chain tip AFTER gap closure,
+	// not the Mithril snapshot slot. Gap blocks between the snapshot
+	// slot and chain tip were imported via SetGapBlockTransaction
+	// (no UTxO tracking), so chainsync replay must skip them too.
+	// Fall back to the snapshot slot when no gap blocks were fetched.
+	trustBoundarySlot := ledgerStateSlot
+	if len(recentBlocks) > 0 {
+		trustBoundarySlot = recentBlocks[0].Slot
+	}
+
 	// Clean up ephemeral sync state and record the Mithril trust
 	// boundary atomically. Both must succeed together: if cleanup
 	// succeeds but the boundary write fails, dingo serve would
@@ -530,7 +540,7 @@ func runMithrilSync(
 		}
 		if err := db.SetSyncState(
 			"mithril_ledger_slot",
-			strconv.FormatUint(ledgerStateSlot, 10),
+			strconv.FormatUint(trustBoundarySlot, 10),
 			txn,
 		); err != nil {
 			return fmt.Errorf(
