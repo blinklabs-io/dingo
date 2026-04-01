@@ -708,7 +708,14 @@ func (c *Chain) rollbackLocked(
 	c.tipBlockIndex = rollbackBlockIndex
 	// Update iterators for rollback
 	for _, iter := range c.iterators {
-		if iter.lastPoint.Slot > point.Slot {
+		// Use startPoint for iterators that haven't delivered any blocks
+		// yet (lastPoint is zero-value). Without this, newly created
+		// iterators miss rollback signals entirely.
+		refSlot := iter.lastPoint.Slot
+		if refSlot == 0 && len(iter.lastPoint.Hash) == 0 {
+			refSlot = iter.startPoint.Slot
+		}
+		if refSlot > point.Slot {
 			// Don't update rollback point if the iterator already has an older one pending
 			if iter.needsRollback && point.Slot > iter.rollbackPoint.Slot {
 				continue
@@ -717,6 +724,9 @@ func (c *Chain) rollbackLocked(
 			iter.needsRollback = true
 		}
 	}
+	// Wake any iterators that are blocked waiting for new blocks so
+	// they can process the rollback signal promptly.
+	c.notifyWaitingIterators()
 	// Build events for caller to publish after locks are released
 	var pendingEvents []event.Event
 	if len(rolledBackBlocks) > 0 {
