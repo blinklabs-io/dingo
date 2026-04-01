@@ -207,7 +207,8 @@ func (cs *ChainSelector) updatePeerTipObserved(
 			rejectTip := false
 			var referenceBlock uint64
 			if prevTip, exists := cs.peerTips[connId]; exists {
-				// Case 1: known peer — always check
+				// Case 1: known peer — compare against the peer's
+				// own previous tip (chainsync advances incrementally).
 				referenceBlock = prevTip.Tip.BlockNumber
 				rejectTip = tip.BlockNumber >
 					safeAddUint64(referenceBlock, cs.securityParam)
@@ -220,6 +221,22 @@ func (cs *ChainSelector) updatePeerTipObserved(
 				}
 				rejectTip = tip.BlockNumber >
 					safeAddUint64(referenceBlock, cs.securityParam)
+			}
+			// Catch-up relaxation: after a stall, recorded peer tips
+			// go stale while the network advances. A peer whose
+			// delta from the stale reference exceeds K looks
+			// implausible, but the network legitimately moved on.
+			// Accept the tip if it is within 2*K of the local tip
+			// AND the reference itself is stale (reference <=
+			// local tip, meaning the node hasn't updated peer
+			// records since the stall began).
+			if rejectTip && cs.localTip.BlockNumber > 0 &&
+				referenceBlock <= cs.localTip.BlockNumber {
+				rejectTip = tip.BlockNumber >
+					safeAddUint64(
+						cs.localTip.BlockNumber,
+						safeAddUint64(cs.securityParam, cs.securityParam),
+					)
 			}
 			// Case 3: len(peerTips)==0 && peer not known → bootstrap
 			if rejectTip {

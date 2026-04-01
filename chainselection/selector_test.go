@@ -1590,6 +1590,67 @@ func TestUpdatePeerTipAcceptsDuringInitialSyncNoPeers(t *testing.T) {
 	assert.NotNil(t, cs.GetPeerTip(connId))
 }
 
+func TestUpdatePeerTipAcceptsDuringCatchUp(t *testing.T) {
+	// After a stall the node's recorded peer tips go stale. When the
+	// network advances >K blocks, a known peer's tip update exceeds
+	// the normal incremental check (Case 1). The catch-up relaxation
+	// should accept the tip because it is within 2*K of the local tip.
+	cs := NewChainSelector(ChainSelectorConfig{
+		SecurityParam: 432, // preview k
+	})
+
+	// Local tip: node was stalled at block 4153528
+	cs.SetLocalTip(ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 100000000, Hash: []byte("local")},
+		BlockNumber: 4153528,
+	})
+
+	// First peer accepted (Case 3: bootstrap, no existing peers)
+	conn1 := newTestConnectionId(1)
+	tip1 := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 106000000, Hash: []byte("peer1")},
+		BlockNumber: 4153528, // same as local — accepted trivially
+	}
+	accepted := cs.UpdatePeerTip(conn1, tip1, nil)
+	assert.True(t, accepted, "first peer should be accepted (bootstrap)")
+
+	// Peer advances by 568 blocks (>K=432) — Case 1 rejects this
+	// without the catch-up fix. With fix: 4154096 <= 4153528 + 2*432
+	// = 4154392, so it's accepted.
+	tip1b := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 106001000, Hash: []byte("peer1b")},
+		BlockNumber: 4154096, // 568 blocks ahead of stale prev tip
+	}
+	accepted = cs.UpdatePeerTip(conn1, tip1b, nil)
+	assert.True(
+		t,
+		accepted,
+		"known peer within 2*K of local tip should be accepted during catch-up",
+	)
+
+	// New peer claiming similar height — Case 2, within best+K
+	conn2 := newTestConnectionId(2)
+	tip2 := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 106001100, Hash: []byte("peer2")},
+		BlockNumber: 4154100,
+	}
+	accepted = cs.UpdatePeerTip(conn2, tip2, nil)
+	assert.True(t, accepted, "new peer near best peer should be accepted")
+
+	// Truly implausible peer: beyond both best+K AND local+2*K
+	conn3 := newTestConnectionId(3)
+	tip3 := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 200000000, Hash: []byte("spoof")},
+		BlockNumber: 4153528 + 2*432 + 4154096 + 432 + 1, // absurdly far
+	}
+	accepted = cs.UpdatePeerTip(conn3, tip3, nil)
+	assert.False(
+		t,
+		accepted,
+		"peer far beyond both thresholds should still be rejected",
+	)
+}
+
 func TestUpdatePeerTipRejectsKnownPeerJumpFromZero(t *testing.T) {
 	// A known peer whose previous tip was at block 0 must still be
 	// checked. Without this, a malicious peer could send tip=0 first,
