@@ -218,18 +218,9 @@ func (n *Node) configValidate() error {
 			StorageModeAPI,
 		)
 	}
-	// APIs require "api" storage mode.
-	anyAPIEnabled := n.config.utxorpcPort > 0 ||
-		n.config.blockfrostPort > 0 ||
-		n.config.meshPort > 0
-	if anyAPIEnabled && !n.config.storageMode.IsAPI() {
-		return fmt.Errorf(
-			"storage mode is %q but one or more API ports are enabled; "+
-				"set storage mode to %q or disable all API ports",
-			n.config.storageMode,
-			StorageModeAPI,
-		)
-	}
+	// In core mode, ignore API ports — they are only used in API mode.
+	// This lets defaults stay non-zero without requiring core-mode users
+	// to explicitly disable each one.
 	if n.config.networkMagic == 0 {
 		return fmt.Errorf(
 			"invalid network magic value: %d",
