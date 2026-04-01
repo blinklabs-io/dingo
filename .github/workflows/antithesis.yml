@@ -171,43 +171,69 @@ jobs:
           subject-digest: ${{ steps.analysis-push.outputs.digest }}
           push-to-registry: true
 
+  # ==========================================================================
+  # Submit to Antithesis via Moog
+  # ==========================================================================
+  # Requires the following GitHub configuration:
+  #
+  # Secrets:
+  #   MOOG_GITHUB_PAT        - GitHub PAT for Moog API access
+  #   MOOG_REQUESTER_WALLET  - Base64-encoded Cardano preprod wallet JSON
+  #
+  # Variables:
+  #   MOOG_MPFS_HOST         - MPFS service URL (default: https://mpfs.plutimus.com)
+  #   MOOG_REQUESTER         - GitHub username registered as Moog requester
+  #   MOOG_TOKEN_ID          - ID for Antithesis tenant (default is CF's)
+  #
+  # Prerequisites:
+  #   - Requester registered with Moog (Ed25519 keypair, CODEOWNERS entry)
+  #   - CF Moog agent has whitelisted this repository
+  #
   check-moog-secrets:
+    name: "Check Moog secrets"
     runs-on: ubuntu-latest
     permissions: {}
     outputs:
       available: ${{ steps.check.outputs.available }}
     steps:
-      - name: Check for Moog secrets
-        id: check
+      - id: check
         env:
           MOOG_PAT: ${{ secrets.MOOG_GITHUB_PAT }}
-          MOOG_WALLET: ${{ secrets.MOOG_REQUESTER_WALLET }}
+          MOOG_REQUESTER_WALLET: ${{ secrets.MOOG_REQUESTER_WALLET }}
         run: |
-          if [ -n "$MOOG_PAT" ] && [ -n "$MOOG_WALLET" ]; then
+          if [ -n "$MOOG_PAT" ] && [ -n "$MOOG_REQUESTER_WALLET" ]; then
             echo "available=true" >> "$GITHUB_OUTPUT"
           else
+            echo "MOOG_GITHUB_PAT or MOOG_REQUESTER_WALLET not configured - skipping submission"
             echo "available=false" >> "$GITHUB_OUTPUT"
           fi
 
   submit-antithesis:
+    name: "Submit Antithesis test via Moog"
     needs: [build-images, check-moog-secrets]
-    if: needs.check-moog-secrets.outputs.available == 'true'
+    if: needs['check-moog-secrets'].outputs.available == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
     timeout-minutes: 600
     steps:
-      - uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0 https://github.com/actions/checkout/releases/tag/v6.0.0
-      - name: Validate pinned Moog CLI tag
+      - name: Checkout repository
+        uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0 https://github.com/actions/checkout/releases/tag/v6.0.0
+
+      - name: Get latest Moog release tag
+        id: moog-release
         run: |
-          if [ -z "$MOOG_TAG" ]; then
-            echo "MOOG_TAG must be set via workflow_dispatch input moog_tag or repository variable MOOG_TAG" >&2
-            exit 1
+          TAG="${MOOG_TAG_INPUT:-}"
+          if [ -z "$TAG" ]; then
+            TAG=$(gh api repos/cardano-foundation/moog/releases/latest --jq '.tag_name')
           fi
-          echo "Using pinned Moog CLI tag: $MOOG_TAG"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Moog release: $TAG"
         env:
-          MOOG_TAG: ${{ github.event.inputs.moog_tag || vars.MOOG_TAG }}
-      - name: Download and install Moog CLI
+          GH_TOKEN: ${{ secrets.MOOG_GITHUB_PAT }}
+          MOOG_TAG_INPUT: ${{ github.event.inputs.moog_tag || vars.MOOG_TAG }}
+
+      - name: Download and install Moog
         run: |
           gh release download "$MOOG_TAG" \
             -R cardano-foundation/moog \
@@ -217,21 +243,24 @@ jobs:
           moog --version
         env:
           GH_TOKEN: ${{ secrets.MOOG_GITHUB_PAT }}
-          MOOG_TAG: ${{ github.event.inputs.moog_tag || vars.MOOG_TAG }}
-      - name: Configure Moog wallet
+          MOOG_TAG: ${{ steps.moog-release.outputs.tag }}
+
+      - name: Configure wallet
         run: echo "$MOOG_WALLET" | base64 -d > wallet.json
         env:
           MOOG_WALLET: ${{ secrets.MOOG_REQUESTER_WALLET }}
-      - name: Submit Antithesis test
+
+      - name: Submit test to Antithesis
         run: |
           NO_FAULTS_FLAG=""
           if [ "$NO_FAULTS" = "true" ]; then
             NO_FAULTS_FLAG="--no-faults"
           fi
+          echo "Submitting Antithesis test for commit ${GITHUB_SHA}..."
           moog requester create-test \
             -d "internal/test/antithesis/testnets/dingo-praos" \
-            -c "${{ github.sha }}" \
-            -r "$GITHUB_REPOSITORY" \
+            -c "${GITHUB_SHA}" \
+            -r "${GITHUB_REPOSITORY}" \
             -t "$DURATION" \
             $NO_FAULTS_FLAG
         env:
@@ -240,9 +269,10 @@ jobs:
           MOOG_MPFS_HOST: ${{ vars.MOOG_MPFS_HOST || 'https://mpfs.plutimus.com' }}
           MOOG_PLATFORM: github
           MOOG_REQUESTER: ${{ vars.MOOG_REQUESTER }}
-          MOOG_TOKEN_ID: ${{ vars.MOOG_TOKEN_ID }}
+          MOOG_TOKEN_ID: ${{ vars.MOOG_TOKEN_ID || '21c523c3b4565f1fc1ad7e54e82ca976f60997d8e7e9946826813fabf341069b' }} # not a secret
           DURATION: ${{ inputs.duration || '3' }}
           NO_FAULTS: ${{ inputs.no_faults || 'false' }}
+
       - name: Clean up wallet
         if: always()
         run: rm -f wallet.json
