@@ -235,7 +235,7 @@ func (cs *ChainSelector) updatePeerTipObserved(
 				rejectTip = tip.BlockNumber >
 					safeAddUint64(
 						cs.localTip.BlockNumber,
-						2*cs.securityParam,
+						safeAddUint64(cs.securityParam, cs.securityParam),
 					)
 			}
 			// Case 3: len(peerTips)==0 && peer not known → bootstrap
