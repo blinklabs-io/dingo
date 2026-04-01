@@ -44,6 +44,7 @@ type Config struct {
 	MetadataPlugin string
 	MaxConnections int    // Connection pool size for metadata plugin (should match DatabaseWorkers)
 	StorageMode    string // "core" or "api"
+	Network        string // Cardano network name (e.g. "preview", "mainnet")
 	CacheConfig    CborCacheConfig
 }
 
@@ -123,6 +124,10 @@ func (d *Database) init() error {
 	}
 	// Check commit timestamp
 	if err := d.checkCommitTimestamp(); err != nil {
+		return err
+	}
+	// Check immutable settings have not changed since initial sync
+	if err := d.checkNodeSettings(); err != nil {
 		return err
 	}
 	return nil

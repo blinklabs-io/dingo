@@ -23,6 +23,7 @@ import (
 	"strings"
 
 	"github.com/blinklabs-io/dingo/database/plugin"
+	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/internal/version"
 	"github.com/spf13/cobra"
@@ -218,9 +219,10 @@ Data Directory:
           --metadata-sqlite-data-dir /nvme/indexes
 
 Storage Mode:
-  --blob-badger-storage-mode and --metadata-*-storage-mode override the
-  global storageMode config. Use "core" for minimal validation data or
-  "api" for full indexing (witnesses, scripts, datums, redeemers).
+  --storage-mode sets the global storage mode for all plugins. Use "core"
+  for minimal validation data or "api" for full indexing (witnesses,
+  scripts, datums, redeemers). Dev mode always enables "api" mode.
+  Per-plugin overrides: --blob-badger-storage-mode, --metadata-*-storage-mode.
 
 Network:
   --network sets the Cardano network name and automatically derives the
@@ -278,6 +280,8 @@ DSN Override:
 		Int("db-queue-size", 50, "database worker pool task queue size")
 	rootCmd.PersistentFlags().
 		String("data-dir", "", "data directory for all storage plugins (overrides CARDANO_DATABASE_PATH)")
+	rootCmd.PersistentFlags().
+		String("storage-mode", "", "storage mode: \"core\" (minimal) or \"api\" (full indexing)")
 
 	// Add plugin-specific flags
 	if err := plugin.PopulateCmdlineOptions(rootCmd.PersistentFlags()); err != nil {
@@ -346,6 +350,29 @@ DSN Override:
 		if cmd.Root().PersistentFlags().Changed("db-queue-size") {
 			if queueSize, err := cmd.Root().PersistentFlags().GetInt("db-queue-size"); err == nil {
 				cfg.DatabaseQueueSize = queueSize
+			}
+		}
+
+		// Override storage mode if flag is provided
+		if cmd.Root().PersistentFlags().Changed("storage-mode") {
+			storageMode, err := cmd.Root().PersistentFlags().GetString("storage-mode")
+			if err != nil {
+				return fmt.Errorf(
+					"reading storage-mode flag: %w", err,
+				)
+			}
+			storageMode = strings.ToLower(storageMode)
+			switch storageMode {
+			case types.StorageModeCore, types.StorageModeAPI:
+				cfg.StorageMode = storageMode
+			default:
+				return fmt.Errorf(
+					"invalid storage mode %q: "+
+						"must be %q or %q",
+					storageMode,
+					types.StorageModeCore,
+					types.StorageModeAPI,
+				)
 			}
 		}
 

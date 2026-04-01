@@ -131,6 +131,13 @@ const (
 	StorageModeAPI = "api"
 )
 
+// NodeSettings holds immutable node configuration that is persisted on first
+// sync and enforced on every subsequent startup.
+type NodeSettings struct {
+	StorageMode string
+	Network     string
+}
+
 // ErrBlobKeyNotFound is returned by blob operations when a key is missing
 var ErrBlobKeyNotFound = errors.New("blob key not found")
 
