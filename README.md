@@ -163,7 +163,7 @@ storageMode: "api"
 
 ## API Servers
 
-Dingo includes three API servers, all disabled by default. Enable them by setting a non-zero port. All API servers require `storageMode: "api"`. The Blockfrost server provides a WIP Blockfrost-compatible REST API with a growing subset of the compatibility surface.
+Dingo includes three API servers. All APIs require `storageMode: "api"` and start automatically on their default ports in that mode. Set an individual port to 0 to disable a specific API. The Blockfrost server provides a WIP Blockfrost-compatible REST API with a growing subset of the compatibility surface.
 
 | API | Port Env Var | Default | Protocol |
 |-----|-------------|---------|----------|
