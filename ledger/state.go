@@ -2036,6 +2036,7 @@ func (ls *LedgerState) ledgerReadChain(
 		)
 		return
 	}
+	defer iter.Cancel()
 	ls.ledgerReadChainIterator(ctx, iter, resultCh)
 }
 
