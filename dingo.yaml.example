@@ -139,26 +139,26 @@ relayPort: 3001
 
 # Storage mode controls how much data is persisted.
 # - "core": Only consensus data (UTxOs, certs, pools, pparams). Suitable for
-#   block producers and relay nodes with no APIs enabled.
+#   block producers and relay nodes. API ports are ignored in core mode.
 # - "api": Core data plus full transaction metadata (witnesses, scripts, datums,
-#   redeemers). Required when any API is enabled.
-# APIs will refuse to start if storage mode is not "api".
+#   redeemers). All APIs start automatically on their default ports.
 #
 # Can be overridden with DINGO_STORAGE_MODE
 storageMode: "core"
 
-# API ports (0 = disabled, default)
-# All APIs require storageMode: "api"
+# API ports — only used when storageMode is "api".
+# In API mode, all APIs start on their default ports. Set a port to 0 to
+# disable an individual API.
 #
-# UTxO RPC gRPC API port
+# UTxO RPC gRPC API port (default: 9090)
 # Can be overridden with DINGO_UTXORPC_PORT
-utxorpcPort: 0
-# Blockfrost-compatible REST API port
+utxorpcPort: 9090
+# Blockfrost-compatible REST API port (default: 3000)
 # Can be overridden with DINGO_BLOCKFROST_PORT
-blockfrostPort: 0
-# Mesh (Coinbase Rosetta) REST API port
+blockfrostPort: 3000
+# Mesh (Coinbase Rosetta) REST API port (default: 8080)
 # Can be overridden with DINGO_MESH_PORT
-meshPort: 0
+meshPort: 8080
 
 # base url of bark archive server
 barkBaseUrl: ""
@@ -173,20 +173,21 @@ barkPort: 0
 # ---
 # Deployment pattern examples (uncomment one block):
 #
-# Relay node (core storage, no APIs):
+# Relay node (core storage, API ports ignored):
 #   storageMode: "core"
 #   blockProducer: false
 #
-# Data node (API storage, one or more API ports enabled):
+# Data node (all APIs start on defaults automatically):
 #   storageMode: "api"
-#   utxorpcPort: 9090
-#   blockfrostPort: 3100
+#   # Override individual ports or set to 0 to disable:
+#   # blockfrostPort: 3100
+#   # meshPort: 0            # disable Mesh API
 #   # With storageMode: "api", leave mode-sensitive Badger settings unset to keep:
 #   #   block-cache-size: 268435456
 #   #   index-cache-size: 0
 #   #   compression: true
 #
-# Validator / block producer (core storage, no APIs):
+# Validator / block producer (core storage, API ports ignored):
 #   storageMode: "core"
 #   blockProducer: true
 #   shelleyVrfKey: "/keys/vrf.skey"

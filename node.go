@@ -874,8 +874,8 @@ func (n *Node) Run(ctx context.Context) error {
 			}
 		}
 	}(stallCheckInterval, stallRecoveryGrace, stallRecycleCooldown)
-	// Configure UTxO RPC (only when port is configured)
-	if n.config.utxorpcPort > 0 {
+	// Configure UTxO RPC (only in API mode with a non-zero port)
+	if n.config.storageMode.IsAPI() && n.config.utxorpcPort > 0 {
 		n.utxorpc = utxorpc.NewUtxorpc(
 			utxorpc.UtxorpcConfig{
 				Logger:          n.config.logger,
@@ -922,8 +922,8 @@ func (n *Node) Run(ctx context.Context) error {
 		})
 	}
 
-	// Configure Blockfrost API (if port is set)
-	if n.config.blockfrostPort > 0 {
+	// Configure Blockfrost API (only in API mode with a non-zero port)
+	if n.config.storageMode.IsAPI() && n.config.blockfrostPort > 0 {
 		listenAddr := net.JoinHostPort(
 			n.config.bindAddr,
 			strconv.FormatUint(uint64(n.config.blockfrostPort), 10),
@@ -950,8 +950,8 @@ func (n *Node) Run(ctx context.Context) error {
 		})
 	}
 
-	// Configure Mesh API (if port is set)
-	if n.config.meshPort > 0 {
+	// Configure Mesh API (only in API mode with a non-zero port)
+	if n.config.storageMode.IsAPI() && n.config.meshPort > 0 {
 		var genesisHash string
 		var genesisStartTimeSec int64
 		if nc := n.config.cardanoNodeConfig; nc != nil {

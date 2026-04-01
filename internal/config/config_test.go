@@ -38,7 +38,9 @@ func resetGlobalConfig() {
 		PrivateBindAddr:             "127.0.0.1",
 		PrivatePort:                 3002,
 		RelayPort:                   3001,
-		UtxorpcPort:                 0,
+		UtxorpcPort:                 9090,
+		BlockfrostPort:              3000,
+		MeshPort:                    8080,
 		Topology:                    "",
 		TlsCertFilePath:             "",
 		TlsKeyFilePath:              "",
@@ -120,6 +122,8 @@ mithril:
 		PrivatePort:                 8000,
 		RelayPort:                   4000,
 		UtxorpcPort:                 9940, // explicit override from YAML
+		BlockfrostPort:              3000, // default
+		MeshPort:                    8080, // default
 		Topology:                    "",
 		TlsCertFilePath:             "cert1.pem",
 		TlsKeyFilePath:              "key1.pem",
@@ -180,7 +184,9 @@ func TestLoad_WithoutConfigFile_UsesDefaults(t *testing.T) {
 		PrivateBindAddr:             "127.0.0.1",
 		PrivatePort:                 3002,
 		RelayPort:                   3001,
-		UtxorpcPort:                 0,
+		UtxorpcPort:                 9090,
+		BlockfrostPort:              3000,
+		MeshPort:                    8080,
 		Topology:                    "",
 		TlsCertFilePath:             "",
 		TlsKeyFilePath:              "",
@@ -755,28 +761,27 @@ network: "preview"
 
 func TestLoad_APIPortsDefault(t *testing.T) {
 	resetGlobalConfig()
-	globalConfig.RunMode = RunModeDev
 
 	cfg, err := LoadConfig("")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if cfg.BlockfrostPort != 0 {
+	if cfg.BlockfrostPort != 3000 {
 		t.Errorf(
-			"expected BlockfrostPort default to be 0, got %d",
+			"expected BlockfrostPort default to be 3000, got %d",
 			cfg.BlockfrostPort,
 		)
 	}
-	if cfg.UtxorpcPort != 0 {
+	if cfg.UtxorpcPort != 9090 {
 		t.Errorf(
-			"expected UtxorpcPort default to be 0, got %d",
+			"expected UtxorpcPort default to be 9090, got %d",
 			cfg.UtxorpcPort,
 		)
 	}
-	if cfg.MeshPort != 0 {
+	if cfg.MeshPort != 8080 {
 		t.Errorf(
-			"expected MeshPort default to be 0, got %d",
+			"expected MeshPort default to be 8080, got %d",
 			cfg.MeshPort,
 		)
 	}

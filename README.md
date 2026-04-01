@@ -22,7 +22,7 @@ A high-performance Cardano blockchain node implementation in Go by Blink Labs. D
 - Peer governance with dynamic peer selection, ledger peers, and topology support
 - Chain rollback support for handling forks with automatic state restoration
 - Fast bootstrapping via built-in Mithril client
-- Multiple API servers: UTxO RPC, Blockfrost-compatible REST, Mesh (Coinbase Rosetta)
+- Multiple API servers: UTxO RPC, WIP Blockfrost-compatible REST, Mesh (Coinbase Rosetta)
 
 Note: On Windows systems, named pipes are used instead of Unix sockets for node-to-client communication.
 
@@ -163,14 +163,13 @@ storageMode: "api"
 
 ## API Servers
 
-Dingo includes four API servers, all disabled by default. Enable them by setting a non-zero port. All API servers except Bark require `storageMode: "api"`.
+Dingo includes three API servers. All APIs require `storageMode: "api"` and start automatically on their default ports in that mode. Set an individual port to 0 to disable a specific API. The Blockfrost server provides a WIP Blockfrost-compatible REST API with a growing subset of the compatibility surface.
 
 | API | Port Env Var | Default | Protocol |
 |-----|-------------|---------|----------|
 | UTxO RPC | `DINGO_UTXORPC_PORT` | disabled | gRPC |
 | Blockfrost | `DINGO_BLOCKFROST_PORT` | disabled | REST |
 | Mesh (Rosetta) | `DINGO_MESH_PORT` | disabled | REST |
-| Bark | `DINGO_BARK_PORT` | disabled | RPC |
 
 ```bash
 # Enable Blockfrost API on port 3100 and UTxO RPC on port 9090
@@ -441,9 +440,8 @@ For information on developing custom storage plugins, see [PLUGIN_DEVELOPMENT.md
   - [x] Genesis snapshot capture
 - [x] API Servers
   - [x] UTxO RPC (gRPC)
-  - [x] Blockfrost-compatible REST API
+  - [ ] WIP Blockfrost-compatible REST API
   - [x] Mesh (Coinbase Rosetta) API
-  - [x] Bark block archive API
 - [x] Mithril Bootstrap
   - [x] Built-in Mithril client
   - [x] Ledger state import (UTxOs, accounts, pools, DReps, epochs)

@@ -245,23 +245,11 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 		)
 		storageMode = dingo.StorageModeAPI
 	}
-	// APIs require "api" storage mode
-	anyAPIEnabled := cfg.BlockfrostPort > 0 ||
-		cfg.MeshPort > 0 ||
-		cfg.UtxorpcPort > 0
-	if anyAPIEnabled && !storageMode.IsAPI() {
-		return fmt.Errorf(
-			"storage mode is %q but one or more APIs are enabled; "+
-				"set storageMode to %q or disable all APIs",
-			storageMode,
-			dingo.StorageModeAPI,
-		)
-	}
 	logger.Info("storage mode",
 		"mode", string(storageMode),
-		"blockfrost", cfg.BlockfrostPort > 0,
-		"utxorpc", cfg.UtxorpcPort > 0,
-		"mesh", cfg.MeshPort > 0,
+		"blockfrost", storageMode.IsAPI() && cfg.BlockfrostPort > 0,
+		"utxorpc", storageMode.IsAPI() && cfg.UtxorpcPort > 0,
+		"mesh", storageMode.IsAPI() && cfg.MeshPort > 0,
 	)
 
 	d, err := dingo.New(
