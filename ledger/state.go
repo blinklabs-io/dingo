@@ -2012,11 +2012,27 @@ func (ls *LedgerState) ledgerReadChain(
 	ctx context.Context,
 	resultCh chan readChainResult,
 ) {
+	// Ensure the channel is closed when the reader exits for any
+	// reason (error, context cancellation, iterator exhaustion).
+	// Without this, the consumer blocks forever on the channel
+	// read if the reader goroutine exits silently on an error.
+	defer close(resultCh)
+	// Snapshot the current tip under lock to avoid a data race with
+	// concurrent rollbacks that update ls.currentTip.
+	ls.RLock()
+	startPoint := ls.currentTip.Point
+	ls.RUnlock()
 	// Create chain iterator
-	iter, err := ls.chain.FromPoint(ls.currentTip.Point, false)
+	iter, err := ls.chain.FromPoint(startPoint, false)
 	if err != nil {
-		ls.config.Logger.Error(
-			"failed to create chain iterator: " + err.Error(),
+		// The start point may have been rolled back off the chain
+		// between the snapshot and iterator creation. Log and return —
+		// the outer loop in ledgerProcessBlocks will retry after the
+		// rollback updates ls.currentTip.
+		ls.config.Logger.Warn(
+			"chain iterator start point not on chain, will retry",
+			"error", err,
+			"start_slot", startPoint.Slot,
 		)
 		return
 	}
@@ -2538,12 +2554,15 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 				}
 			}
 		}
-		currentReadResultDone = nil
 		if cachedNextBatch != nil {
-			// Use cached block batch
+			// Use cached block batch — keep the original
+			// currentReadResultDone so the reader goroutine
+			// is signalled when all cached blocks are processed.
 			nextBatch = cachedNextBatch
 			cachedNextBatch = nil
 		} else {
+			// Only reset when reading fresh from the channel
+			currentReadResultDone = nil
 			// Read next result from readChain channel
 			select {
 			case result, ok := <-readChainResultCh:
