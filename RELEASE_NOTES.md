@@ -3,7 +3,7 @@
 
 ## v0.30.0 (April 2, 2026)
 
-**Title:** Platform updates and smoother operations
+**Title:** Richer pool data and safer CI
 
 **Date:** April 2, 2026
 
@@ -27,7 +27,7 @@ Hi folks! Here’s what we shipped in v0.30.0.
 
 ### 📋 What You Need to Know
 
-- **Pool-data consumers:** If you consume pool data, switch to `GET /api/v0/pools/extended` and use pagination to fetch the most complete view.
+- **Pool data users:** If you consume pool data, switch to `GET /api/v0/pools/extended` and use pagination to fetch the most complete view.
 
 ### 🙏 Thank You
 
