@@ -260,6 +260,67 @@ func TestCompatProtocolParamsResponse(t *testing.T) {
 	assert.Equal(t, 3, *theirs.MaxCollateralInputs)
 }
 
+func TestCompatAddressUTXOResponse(t *testing.T) {
+	dataHash := "datumhash1"
+	inlineDatum := "d8799f"
+	refScriptHash := "scripthash1"
+	ours := AddressUTXOResponse{
+		Address:     "addr1...",
+		TxHash:      "txhash1",
+		OutputIndex: 1,
+		Amount: []AddressAmountResponse{
+			{Unit: "lovelace", Quantity: "1000"},
+			{Unit: "policyasset", Quantity: "5"},
+		},
+		Block:               "blockhash1",
+		DataHash:            &dataHash,
+		InlineDatum:         &inlineDatum,
+		ReferenceScriptHash: &refScriptHash,
+	}
+
+	data, err := json.Marshal(ours)
+	require.NoError(t, err)
+
+	var theirs bfgo.AddressUTXO
+	err = json.Unmarshal(data, &theirs)
+	require.NoError(t, err)
+
+	assert.Equal(t, "addr1...", theirs.Address)
+	assert.Equal(t, "txhash1", theirs.TxHash)
+	assert.Equal(t, 1, theirs.OutputIndex)
+	require.Len(t, theirs.Amount, 2)
+	assert.Equal(t, "lovelace", theirs.Amount[0].Unit)
+	assert.Equal(t, "1000", theirs.Amount[0].Quantity)
+	assert.Equal(t, "blockhash1", theirs.Block)
+	require.NotNil(t, theirs.DataHash)
+	assert.Equal(t, "datumhash1", *theirs.DataHash)
+	require.NotNil(t, theirs.InlineDatum)
+	assert.Equal(t, "d8799f", *theirs.InlineDatum)
+	require.NotNil(t, theirs.ReferenceScriptHash)
+	assert.Equal(t, "scripthash1", *theirs.ReferenceScriptHash)
+}
+
+func TestCompatAddressTransactionResponse(t *testing.T) {
+	ours := AddressTransactionResponse{
+		TxHash:      "txhash1",
+		TxIndex:     3,
+		BlockHeight: 99,
+		BlockTime:   1700000000,
+	}
+
+	data, err := json.Marshal(ours)
+	require.NoError(t, err)
+
+	var theirs bfgo.AddressTransactions
+	err = json.Unmarshal(data, &theirs)
+	require.NoError(t, err)
+
+	assert.Equal(t, "txhash1", theirs.TxHash)
+	assert.Equal(t, 3, theirs.TxIndex)
+	assert.EqualValues(t, 99, theirs.BlockHeight)
+	assert.Equal(t, 1700000000, theirs.BlockTime)
+}
+
 // TestCompatHealthResponse verifies that our
 // HealthResponse round-trips through blockfrost-go's
 // Health type.
