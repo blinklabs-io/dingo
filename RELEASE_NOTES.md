@@ -11,24 +11,22 @@
 
 Hi folks! Here’s what we shipped in v0.30.0.
 
-```json
-{
-  "✨ What's New": [
-    "You can now request more detailed stake pool information in smaller, easier-to-handle pages."
-  ],
-  "💪 Improvements": [
-    "Builds and releases now pull in the latest upstream changes from a key dependency to keep the system current and reliable.",
-    "Automated workflows are now more predictable and better aligned with expected defaults during runs."
-  ],
-  "📋 What You Need to Know": [
-    "If you are consuming the pools API, you may want to switch to the new endpoint to access the extended, paginated data."
-  ],
-  "🔧 Fixes": [
-    "Unintended automation runs should no longer start at surprising times, reducing noise and avoiding accidental executions."
-  ]
-}
+### ✨ What's New
 
-```
+- **Paginated extended stake pool details (HTTP API):** Pool queries are easier to work with because you can now request extended stake pool data in smaller pages via `/api/v0/pools/extended`.
+
+### 💪 Improvements
+
+- **Dependency refresh:** Builds stay more rock-solid because we updated a key upstream dependency.
+- **More predictable Antithesis runs:** Automation is easier to reason about because the Antithesis GitHub Actions workflow now runs with the expected default argument.
+
+### 🔧 Fixes
+
+- **No surprise automation runs:** CI noise is lower because affected workflows no longer auto-trigger unexpectedly.
+
+### 📋 What You Need to Know
+
+- **Pools API users:** If you use the pools API, consider switching to `/api/v0/pools/extended` to page through extended pool data.
 
 ---
 
