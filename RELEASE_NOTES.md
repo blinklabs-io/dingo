@@ -11,22 +11,27 @@
 
 Hi folks! Here’s what we shipped in v0.30.0.
 
-```json
-{
-  "✨ What's New": [
-    "Pool browsing is easier because you can now use the paginated `GET /api/v0/pools/extended` endpoint backed by batch `GetPools` database methods to fetch richer stake pool details."
-  ],
-  "💪 Improvements": [
-    "Upstream supply-chain verification is more reliable because `gouroboros` was updated to `v0.163.5` and the corresponding checksums were added.",
-    "CI runs are more predictable because the Antithesis GitHub Actions workflow now passes an additional `-y 1` argument.",
-    "CI defaults are safer because workflow triggers were disabled and a default workflow input value was changed from `3` to `1`."
-  ],
-  "📋 What You Need to Know": [
-    "If you consume pool data, switch to `GET /api/v0/pools/extended` and use pagination to fetch the most complete view."
-  ]
-}
+### ✨ What's New
 
-```
+- **Extended stake pool endpoint:** Pool browsing is easier because you can now use the paginated `GET /api/v0/pools/extended` endpoint backed by batch `GetPools` database methods to fetch richer stake pool details.
+
+### 💪 Improvements
+
+- **Updated `gouroboros` dependency:** Upstream supply-chain verification is more reliable because `gouroboros` was updated to `v0.163.5` and the corresponding checksums were added.
+- **Antithesis workflow tweak:** CI runs are more predictable because the Antithesis GitHub Actions workflow now passes an additional `-y 1` argument.
+- **Safer CI defaults:** CI defaults are safer because workflow triggers were disabled and a default workflow input value was changed from `3` to `1`.
+
+### 🔧 Fixes
+
+- **No notable fixes:** This release focuses on new pool data APIs and CI refinements.
+
+### 📋 What You Need to Know
+
+- **Pool-data consumers:** If you consume pool data, switch to `GET /api/v0/pools/extended` and use pagination to fetch the most complete view.
+
+### 🙏 Thank You
+
+Thank you for trying!
 
 ---
 
