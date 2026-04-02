@@ -56,11 +56,12 @@ func (d *Database) SetTransaction(
 	copy(txHashArray[:], txHash.Bytes())
 
 	if offsets == nil {
-		return fmt.Errorf(
-			"missing offsets for transaction %s at slot %d: offsets must be computed",
-			hex.EncodeToString(txHash.Bytes()[:8]),
-			point.Slot,
-		)
+		// Byron-era blocks may not have computable CBOR offsets.
+		// Skip transaction recording gracefully instead of failing
+		// the entire block processing pipeline. The block's
+		// transactions will not be queryable via API but the node
+		// continues syncing.
+		return nil
 	}
 	txOffset, ok := offsets.TxOffsets[txHashArray]
 	if !ok {

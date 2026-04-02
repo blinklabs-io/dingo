@@ -2713,12 +2713,17 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 							next,
 						)
 						if offsetErr != nil {
-							deltaBatch.Release()
-							return fmt.Errorf(
-								"compute CBOR offsets for block at slot %d: %w",
-								tmpPoint.Slot,
-								offsetErr,
+							// Non-fatal: Byron-era blocks may fail CBOR
+							// offset extraction due to mismatched tx body
+							// and witness set counts. Log and continue
+							// with nil offsets so the chainsync pipeline
+							// does not stall.
+							ls.config.Logger.Warn(
+								"CBOR offset extraction failed, skipping transaction indexing for block",
+								"slot", tmpPoint.Slot,
+								"error", offsetErr,
 							)
+							blockOffsets = nil
 						}
 					}
 					// Skip full block processing for blocks
