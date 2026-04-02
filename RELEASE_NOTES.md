@@ -1,6 +1,40 @@
 # Release Notes
 
 
+## v0.30.0 (April 2, 2026)
+
+**Title:** Paginated pools API and steadier automation
+
+**Date:** April 2, 2026
+
+**Version:** v0.30.0
+
+Hi folks! Here’s what we shipped in v0.30.0.
+
+### ✨ What's New
+
+- **Paginated extended stake pool details (HTTP API):** Pool queries are easier to work with because you can now request extended stake pool data in smaller pages via `/api/v0/pools/extended`.
+
+### 💪 Improvements
+
+- **Dependency refresh:** Builds stay more rock-solid because we updated a key upstream dependency.
+- **More predictable Antithesis runs:** Automation is easier to reason about because the Antithesis GitHub Actions workflow now runs with the expected default argument.
+
+### 🔧 Fixes
+
+- **No surprise automation runs:** CI noise is lower because affected workflows no longer auto-trigger unexpectedly.
+
+### 📋 What You Need to Know
+
+- **Pools API users:** If you use the pools API, consider switching to `/api/v0/pools/extended` to page through extended pool data.
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
+
 ## v0.29.1 (April 2, 2026)
 
 **Title:** Safer APIs and steadier sync
