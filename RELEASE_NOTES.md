@@ -3,7 +3,7 @@
 
 ## v0.30.0 (April 2, 2026)
 
-**Title:** Updates and refinements
+**Title:** Paginated pools API and steadier automation
 
 **Date:** April 2, 2026
 
@@ -27,6 +27,10 @@ Hi folks! Here’s what we shipped in v0.30.0.
 ### 📋 What You Need to Know
 
 - **Pools API users:** If you use the pools API, consider switching to `/api/v0/pools/extended` to page through extended pool data.
+
+### 🙏 Thank You
+
+Thank you for trying!
 
 ---
 
