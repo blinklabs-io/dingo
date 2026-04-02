@@ -3,7 +3,7 @@
 
 ## v0.29.1 (April 2, 2026)
 
-**Title:** Update for v0.29.1
+**Title:** Safer APIs and steadier sync
 
 **Date:** April 2, 2026
 
@@ -11,26 +11,23 @@
 
 Hi folks! Here’s what we shipped in v0.29.1.
 
-```json
-{
-  "✨ What's New": [
-    "Added new transaction-building capabilities and a randomized transaction pump loop to support more end-to-end testing scenarios.",
-    "Added new tooling and specifications to make it easier to spin up and validate local and testnet environments."
-  ],
-  "💪 Improvements": [
-    "Made API defaults safer and clearer so services only expose endpoints when you explicitly opt in.",
-    "Improved reliability and safety of chain iteration under rollbacks so catch-up and restart behavior is more predictable.",
-    "Relaxed peer tip validation during catch-up to reduce unnecessary rejections while syncing, with clearer threshold behavior.",
-    "Hardened CI and release automation so builds and Antithesis runs are more reproducible and easier to operate.",
-    "Updated project release documentation so users can more easily understand what changed between versions.",
-    "Updated a key dependency to incorporate upstream changes and keep the module set current."
-  ],
-  "🔧 Fixes": [
-    "Prevented potential resource leaks during ledger iteration so long-running processes remain stable."
-  ]
-}
+### ✨ What's New
 
-```
+- **Expanded transaction-building and txpump testing:** End-to-end testing coverage is easier to broaden because you can now build more transaction types and run a randomized txpump loop.
+- **More devnet and testnet setup tooling:** Spinning up local and testnet environments is simpler because you now have additional helper scripts, specs, and Antithesis wiring.
+
+### 💪 Improvements
+
+- **Safer API opt-in defaults:** Exposing services is clearer because APIs now only activate when you explicitly opt in.
+- **Steadier rollback iteration:** Catch-up and restart behavior is more predictable because chain iteration is now safer under rollbacks.
+- **Relaxed peer-tip validation during catch-up:** Sync is smoother because peer tip checks are less likely to reject useful peers while you’re catching up.
+- **More reproducible CI and release automation:** Builds are easier to operate because CI and Antithesis automation were hardened.
+- **Clearer release documentation:** Understanding what changed is simpler because release documentation was updated.
+- **Refreshed dependency set:** Compatibility stays rock-solid because a key dependency was updated.
+
+### 🔧 Fixes
+
+- **Iterator cleanup in ledger iteration:** Long-running processes are steadier because ledger iteration now avoids potential resource leaks.
 
 ---
 
