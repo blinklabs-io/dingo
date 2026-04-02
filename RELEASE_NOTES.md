@@ -29,6 +29,15 @@ Hi folks! Here’s what we shipped in v0.29.1.
 
 - **Iterator cleanup in ledger iteration:** Long-running processes are steadier because ledger iteration now avoids potential resource leaks.
 
+### 📋 What You Need to Know
+
+- **No action required:** You're all set—just upgrade to v0.29.1.
+- **API users:** If you rely on Dingo APIs, make sure your configuration explicitly opts in so the endpoints are enabled.
+
+### 🙏 Thank You
+
+Thank you for trying!
+
 ---
 
 
