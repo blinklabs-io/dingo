@@ -110,6 +110,12 @@ type MetadataStore interface {
 		types.Txn,
 	) (*models.Pool, error)
 
+	// GetPools retrieves pools by key hash in batch.
+	GetPools(
+		[]lcommon.PoolKeyHash,
+		types.Txn,
+	) ([]models.Pool, error)
+
 	// GetPoolByVrfKeyHash retrieves an active pool by its VRF key hash.
 	// Returns nil if no active pool uses this VRF key.
 	GetPoolByVrfKeyHash(

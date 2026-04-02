@@ -37,6 +37,10 @@ type BlockfrostNode interface {
 	// CurrentProtocolParams returns the current protocol
 	// parameters.
 	CurrentProtocolParams() (ProtocolParamsInfo, error)
+
+	// PoolsExtended returns the current active pools with
+	// extended details.
+	PoolsExtended() ([]PoolExtendedInfo, error)
 }
 
 // ChainTipInfo holds chain tip data needed by the API.
@@ -101,4 +105,26 @@ type ProtocolParamsInfo struct {
 	MaxValSize          string
 	CollateralPercent   int
 	MaxCollateralInputs int
+}
+
+// PoolExtendedInfo holds pool data needed by the
+// /pools/extended endpoint.
+type PoolExtendedInfo struct {
+	PoolID         string
+	Hex            string
+	VrfKey         string
+	ActiveStake    string
+	LiveStake      string
+	DeclaredPledge string
+	FixedCost      string
+	MarginCost     float64
+	Relays         []PoolRelayInfo
+}
+
+// PoolRelayInfo holds relay data for pool responses.
+type PoolRelayInfo struct {
+	IPv4 string
+	IPv6 string
+	DNS  string
+	Port *int
 }

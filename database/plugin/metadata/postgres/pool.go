@@ -170,6 +170,43 @@ func (d *MetadataStorePostgres) GetPool(
 	return ret, nil
 }
 
+// GetPools gets pools by key hash.
+func (d *MetadataStorePostgres) GetPools(
+	pkhs []lcommon.PoolKeyHash,
+	txn types.Txn,
+) ([]models.Pool, error) {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return nil, err
+	}
+	hashes := make([][]byte, 0, len(pkhs))
+	for _, pkh := range pkhs {
+		hashes = append(hashes, pkh.Bytes())
+	}
+	ret := make([]models.Pool, 0, len(pkhs))
+	result := db.
+		Preload("Registration", func(db *gorm.DB) *gorm.DB {
+			return db.Select("pool_registration.*").
+				Joins("LEFT JOIN certs ON certs.id = pool_registration.certificate_id").
+				Joins("LEFT JOIN \"transaction\" ON \"transaction\".id = certs.transaction_id").
+				Order("pool_registration.added_slot DESC, COALESCE(\"transaction\".block_index, 0) DESC, COALESCE(certs.cert_index, 0) DESC")
+		}).
+		Preload("Registration.Owners").
+		Preload("Registration.Relays").
+		Preload("Retirement", func(db *gorm.DB) *gorm.DB {
+			return db.Select("pool_retirement.*").
+				Joins("LEFT JOIN certs ON certs.id = pool_retirement.certificate_id").
+				Joins("LEFT JOIN \"transaction\" ON \"transaction\".id = certs.transaction_id").
+				Order("pool_retirement.added_slot DESC, COALESCE(\"transaction\".block_index, 0) DESC, COALESCE(certs.cert_index, 0) DESC")
+		}).
+		Where("pool_key_hash IN ?", hashes).
+		Find(&ret)
+	if result.Error != nil {
+		return nil, result.Error
+	}
+	return ret, nil
+}
+
 // GetPoolRegistrations returns pool registration certificates
 func (d *MetadataStorePostgres) GetPoolRegistrations(
 	pkh lcommon.PoolKeyHash,

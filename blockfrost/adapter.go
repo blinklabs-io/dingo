@@ -271,6 +271,129 @@ func (a *NodeAdapter) latestBlockData(
 	return block, decodedBlock, nil
 }
 
+// PoolsExtended returns the current active pools with
+// extended details.
+func (a *NodeAdapter) PoolsExtended() (
+	[]PoolExtendedInfo, error,
+) {
+	db := a.ledgerState.Database()
+	txn := db.Transaction(false)
+	defer txn.Release()
+
+	poolKeyHashes, err := db.Metadata().GetActivePoolKeyHashes(txn.Metadata())
+	if err != nil {
+		return nil, fmt.Errorf(
+			"get active pool key hashes: %w",
+			err,
+		)
+	}
+	if len(poolKeyHashes) == 0 {
+		return []PoolExtendedInfo{}, nil
+	}
+
+	liveStakeByPool, _, err := db.Metadata().GetStakeByPools(
+		poolKeyHashes,
+		txn.Metadata(),
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"get live stake by pools: %w",
+			err,
+		)
+	}
+
+	activeStakeByPool := make(map[string]uint64, len(poolKeyHashes))
+	currentEpoch := a.ledgerState.CurrentEpoch()
+	activeStakeEpoch := uint64(0)
+	if currentEpoch >= 2 {
+		activeStakeEpoch = currentEpoch - 2
+	}
+	snapshots, err := db.Metadata().GetPoolStakeSnapshotsByEpoch(
+		activeStakeEpoch,
+		"mark",
+		txn.Metadata(),
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"get pool stake snapshots for epoch %d: %w",
+			activeStakeEpoch,
+			err,
+		)
+	}
+	for _, snapshot := range snapshots {
+		activeStakeByPool[hex.EncodeToString(snapshot.PoolKeyHash)] = uint64(snapshot.TotalStake)
+	}
+
+	poolHashes := make([]lcommon.PoolKeyHash, 0, len(poolKeyHashes))
+	for _, poolKeyHash := range poolKeyHashes {
+		poolHashes = append(poolHashes, lcommon.PoolKeyHash(poolKeyHash))
+	}
+	pools, err := db.GetPools(poolHashes, txn)
+	if err != nil {
+		return nil, fmt.Errorf("get pools: %w", err)
+	}
+	poolsByHash := make(map[string]*models.Pool, len(pools))
+	for i := range pools {
+		pool := &pools[i]
+		poolsByHash[string(pool.PoolKeyHash)] = pool
+	}
+
+	ret := make([]PoolExtendedInfo, 0, len(poolKeyHashes))
+	for _, poolKeyHash := range poolKeyHashes {
+		pool, ok := poolsByHash[string(poolKeyHash)]
+		if !ok {
+			return nil, fmt.Errorf("get pool %x: %w", poolKeyHash, models.ErrPoolNotFound)
+		}
+		poolID := lcommon.PoolId(lcommon.NewBlake2b224(pool.PoolKeyHash))
+		poolHex := hex.EncodeToString(pool.PoolKeyHash)
+
+		latestRelays := pool.Relays
+		if len(pool.Registration) > 0 {
+			latestRelays = pool.Registration[0].Relays
+		}
+
+		relays := make([]PoolRelayInfo, 0, len(latestRelays))
+		for _, relay := range latestRelays {
+			tmpRelay := PoolRelayInfo{
+				DNS: relay.Hostname,
+			}
+			if relay.Port != 0 {
+				if relay.Port > uint(math.MaxInt) {
+					return nil, fmt.Errorf("relay port out of range for pool %x", pool.PoolKeyHash)
+				}
+				port := int(relay.Port)
+				tmpRelay.Port = &port
+			}
+			if relay.Ipv4 != nil {
+				tmpRelay.IPv4 = relay.Ipv4.String()
+			}
+			if relay.Ipv6 != nil {
+				tmpRelay.IPv6 = relay.Ipv6.String()
+			}
+			relays = append(relays, tmpRelay)
+		}
+
+		marginCost := 0.0
+		if pool.Margin != nil && pool.Margin.Rat != nil {
+			marginCost, _ = pool.Margin.Float64()
+		}
+
+		ret = append(ret, PoolExtendedInfo{
+			PoolID:         poolID.String(),
+			Hex:            poolHex,
+			VrfKey:         hex.EncodeToString(pool.VrfKeyHash),
+			ActiveStake:    strconv.FormatUint(activeStakeByPool[poolHex], 10),
+			LiveStake:      strconv.FormatUint(liveStakeByPool[string(pool.PoolKeyHash)], 10),
+			DeclaredPledge: strconv.FormatUint(uint64(pool.Pledge), 10),
+			FixedCost:      strconv.FormatUint(uint64(pool.Cost), 10),
+			MarginCost:     marginCost,
+			Relays:         relays,
+		})
+	}
+
+	return ret, nil
+}
+
 func blockIssuer(issuer lcommon.IssuerVkey) string {
 	if bytes.Equal(issuer[:], make([]byte, len(issuer))) {
 		return ""

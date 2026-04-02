@@ -117,6 +117,39 @@ func (d *MetadataStoreMysql) GetPool(
 	return ret, nil
 }
 
+// GetPools gets pools by key hash.
+func (d *MetadataStoreMysql) GetPools(
+	pkhs []lcommon.PoolKeyHash,
+	txn types.Txn,
+) ([]models.Pool, error) {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return nil, err
+	}
+	hashes := make([][]byte, 0, len(pkhs))
+	for _, pkh := range pkhs {
+		hashes = append(hashes, pkh.Bytes())
+	}
+	ret := make([]models.Pool, 0, len(pkhs))
+	result := db.
+		Preload(
+			"Registration",
+			func(db *gorm.DB) *gorm.DB { return db.Order("added_slot DESC, id DESC") },
+		).
+		Preload("Registration.Owners").
+		Preload("Registration.Relays").
+		Preload(
+			"Retirement",
+			func(db *gorm.DB) *gorm.DB { return db.Order("added_slot DESC, id DESC") },
+		).
+		Where("pool_key_hash IN ?", hashes).
+		Find(&ret)
+	if result.Error != nil {
+		return nil, result.Error
+	}
+	return ret, nil
+}
+
 // certOrderInfo holds block_index and cert_index for same-slot comparison.
 type certOrderInfo struct {
 	blockIndex uint32

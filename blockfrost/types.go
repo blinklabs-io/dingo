@@ -126,3 +126,25 @@ type ErrorResponse struct {
 	Error      string `json:"error"`
 	Message    string `json:"message"`
 }
+
+// PoolRelayResponse represents a stake pool relay.
+type PoolRelayResponse struct {
+	IPv4 *string `json:"ipv4"`
+	IPv6 *string `json:"ipv6"`
+	DNS  *string `json:"dns"`
+	Port *int    `json:"port"`
+}
+
+// PoolExtendedResponse represents an extended stake pool
+// list item.
+type PoolExtendedResponse struct {
+	PoolID         string              `json:"pool_id"`
+	Hex            string              `json:"hex"`
+	VrfKey         string              `json:"vrf_key"`
+	ActiveStake    string              `json:"active_stake"`
+	LiveStake      string              `json:"live_stake"`
+	DeclaredPledge string              `json:"declared_pledge"`
+	FixedCost      string              `json:"fixed_cost"`
+	MarginCost     float64             `json:"margin_cost"`
+	Relays         []PoolRelayResponse `json:"relays"`
+}

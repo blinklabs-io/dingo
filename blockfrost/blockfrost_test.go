@@ -27,6 +27,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func intPtr(v int) *int {
+	return &v
+}
+
 // mockNode implements BlockfrostNode for testing.
 type mockNode struct {
 	chainTip    ChainTipInfo
@@ -34,11 +38,13 @@ type mockNode struct {
 	txHashes    []string
 	epoch       EpochInfo
 	params      ProtocolParamsInfo
+	pools       []PoolExtendedInfo
 	chainTipErr error
 	blockErr    error
 	txHashesErr error
 	epochErr    error
 	paramsErr   error
+	poolsErr    error
 }
 
 func (m *mockNode) ChainTip() (
@@ -69,6 +75,12 @@ func (m *mockNode) CurrentProtocolParams() (
 	ProtocolParamsInfo, error,
 ) {
 	return m.params, m.paramsErr
+}
+
+func (m *mockNode) PoolsExtended() (
+	[]PoolExtendedInfo, error,
+) {
+	return m.pools, m.poolsErr
 }
 
 func newTestBlockfrost(
@@ -235,6 +247,152 @@ func TestHandleLatestBlockError(t *testing.T) {
 	)
 	w := httptest.NewRecorder()
 	b.handleLatestBlock(w, req)
+
+	assert.Equal(
+		t,
+		http.StatusInternalServerError,
+		w.Code,
+	)
+
+	var resp ErrorResponse
+	err := json.NewDecoder(w.Body).Decode(&resp)
+	require.NoError(t, err)
+	assert.Equal(t, 500, resp.StatusCode)
+	assert.Equal(
+		t,
+		"Internal Server Error",
+		resp.Error,
+	)
+}
+
+func TestHandlePoolsExtended(t *testing.T) {
+	mock := &mockNode{
+		pools: []PoolExtendedInfo{
+			{
+				PoolID:         "pool1zzz",
+				Hex:            "ff",
+				VrfKey:         "vrf2",
+				ActiveStake:    "200",
+				LiveStake:      "300",
+				DeclaredPledge: "400",
+				FixedCost:      "500",
+				MarginCost:     0.2,
+				Relays: []PoolRelayInfo{
+					{
+						IPv4: "192.168.0.1",
+						DNS:  "relay-two.example",
+						Port: intPtr(3002),
+					},
+				},
+			},
+			{
+				PoolID:         "pool1aaa",
+				Hex:            "01",
+				VrfKey:         "vrf1",
+				ActiveStake:    "20",
+				LiveStake:      "30",
+				DeclaredPledge: "40",
+				FixedCost:      "50",
+				MarginCost:     0.1,
+				Relays: []PoolRelayInfo{
+					{
+						IPv6: "2001:db8::1",
+						DNS:  "relay-one.example",
+						Port: intPtr(3001),
+					},
+					{
+						DNS: "relay-no-port.example",
+					},
+				},
+			},
+		},
+	}
+	b := newTestBlockfrost(mock)
+
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/api/v0/pools/extended?count=1&page=1&order=asc",
+		nil,
+	)
+	w := httptest.NewRecorder()
+	b.handlePoolsExtended(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(
+		t,
+		"2",
+		w.Header().Get("X-Pagination-Count-Total"),
+	)
+	assert.Equal(
+		t,
+		"2",
+		w.Header().Get("X-Pagination-Page-Total"),
+	)
+
+	var resp []PoolExtendedResponse
+	err := json.NewDecoder(w.Body).Decode(&resp)
+	require.NoError(t, err)
+	require.Len(t, resp, 1)
+	assert.Equal(t, "pool1aaa", resp[0].PoolID)
+	assert.Equal(t, "01", resp[0].Hex)
+	assert.Equal(t, "vrf1", resp[0].VrfKey)
+	assert.Equal(t, "20", resp[0].ActiveStake)
+	assert.Equal(t, "30", resp[0].LiveStake)
+	assert.Equal(t, "40", resp[0].DeclaredPledge)
+	assert.Equal(t, "50", resp[0].FixedCost)
+	assert.InDelta(t, 0.1, resp[0].MarginCost, 0.0001)
+	require.Len(t, resp[0].Relays, 2)
+	assert.Nil(t, resp[0].Relays[0].IPv4)
+	require.NotNil(t, resp[0].Relays[0].IPv6)
+	assert.Equal(t, "2001:db8::1", *resp[0].Relays[0].IPv6)
+	require.NotNil(t, resp[0].Relays[0].DNS)
+	assert.Equal(t, "relay-one.example", *resp[0].Relays[0].DNS)
+	require.NotNil(t, resp[0].Relays[0].Port)
+	assert.Equal(t, 3001, *resp[0].Relays[0].Port)
+	require.NotNil(t, resp[0].Relays[1].DNS)
+	assert.Equal(t, "relay-no-port.example", *resp[0].Relays[1].DNS)
+	assert.Nil(t, resp[0].Relays[1].Port)
+}
+
+func TestHandlePoolsExtendedInvalidPagination(t *testing.T) {
+	mock := &mockNode{}
+	b := newTestBlockfrost(mock)
+
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/api/v0/pools/extended?count=abc",
+		nil,
+	)
+	w := httptest.NewRecorder()
+	b.handlePoolsExtended(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+
+	var resp ErrorResponse
+	err := json.NewDecoder(w.Body).Decode(&resp)
+	require.NoError(t, err)
+	assert.Equal(t, 400, resp.StatusCode)
+	assert.Equal(t, "Bad Request", resp.Error)
+	assert.Equal(
+		t,
+		"Invalid pagination parameters.",
+		resp.Message,
+	)
+}
+
+func TestHandlePoolsExtendedError(t *testing.T) {
+	mock := &mockNode{
+		poolsErr: assert.AnError,
+	}
+	b := newTestBlockfrost(mock)
+
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/api/v0/pools/extended",
+		nil,
+	)
+	w := httptest.NewRecorder()
+	b.handlePoolsExtended(w, req)
 
 	assert.Equal(
 		t,
