@@ -14,17 +14,17 @@ Hi folks! Here’s what we shipped in v0.30.0.
 ```json
 {
   "✨ What's New": [
-    "You can now request more detailed stake pool information in smaller, easier-to-handle pages. This adds backend retrieval plus a new paginated HTTP endpoint at `/api/v0/pools/extended`, supported by new database batch `GetPools` methods."
+    "You can now request more detailed stake pool information in smaller, easier-to-handle pages."
   ],
   "💪 Improvements": [
-    "Builds and releases now pull in the latest upstream changes from a key dependency to keep the system current and reliable. The `gouroboros` dependency was updated to `v0.163.5`, and its checksums were added to ensure integrity and reproducible builds.",
-    "Automated workflows are now more predictable and better aligned with expected defaults during runs. The Antithesis GitHub Actions workflow now passes a `-y 1` argument to its command, and the default input value was changed from `3` to `1`."
+    "Builds and releases now pull in the latest upstream changes from a key dependency to keep the system current and reliable.",
+    "Automated workflows are now more predictable and better aligned with expected defaults during runs."
   ],
   "📋 What You Need to Know": [
-    "If you are consuming the pools API, you may want to switch to the new endpoint to access the extended, paginated data. Use `/api/v0/pools/extended` and be prepared to follow pagination parameters rather than assuming a single unpaginated response."
+    "If you are consuming the pools API, you may want to switch to the new endpoint to access the extended, paginated data."
   ],
   "🔧 Fixes": [
-    "Unintended automation runs should no longer start at surprising times, reducing noise and avoiding accidental executions. Workflow triggers were disabled to prevent the affected workflows from running automatically."
+    "Unintended automation runs should no longer start at surprising times, reducing noise and avoiding accidental executions."
   ]
 }
 
