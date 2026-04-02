@@ -13,16 +13,16 @@ Hi folks! Here’s what we shipped in v0.29.1.
 
 ### ✨ What's New
 
-- **Expanded transaction-building and txpump testing:** End-to-end testing coverage is easier to broaden because you can now build more transaction types and run a randomized txpump loop.
-- **More devnet and testnet setup tooling:** Spinning up local and testnet environments is simpler because you now have additional helper scripts, specs, and Antithesis wiring.
+- **Rolled out expanded transaction builders and txpump testing:** End-to-end testing is easier because you can now build more transaction types and run a randomized txpump loop.
+- **Handy devnet and testnet setup tooling:** Spinning up local and testnet environments is simpler because you now have additional helper scripts, specs, and Antithesis wiring.
 
 ### 💪 Improvements
 
-- **Safer API opt-in defaults:** Exposing services is clearer because APIs now only activate when you explicitly opt in.
+- **Safer API opt-in defaults:** Service exposure is clearer because APIs now only activate when you explicitly opt in.
 - **Steadier rollback iteration:** Catch-up and restart behavior is more predictable because chain iteration is now safer under rollbacks.
 - **Relaxed peer-tip validation during catch-up:** Sync is smoother because peer tip checks are less likely to reject useful peers while you’re catching up.
 - **More reproducible CI and release automation:** Builds are easier to operate because CI and Antithesis automation were hardened.
-- **Clearer release documentation:** Understanding what changed is simpler because release documentation was updated.
+- **Clearer release documentation:** What changed is easier to see because release documentation was updated.
 - **Refreshed dependency set:** Compatibility stays rock-solid because a key dependency was updated.
 
 ### 🔧 Fixes
