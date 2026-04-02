@@ -1,6 +1,58 @@
 # Release Notes
 
 
+## v0.29.1 (April 2, 2026)
+
+**Title:** Bug fixes and minor improvements
+
+**Date:** April 2, 2026
+
+**Version:** v0.29.1
+
+Hi folks! Here’s what we shipped in v0.29.1.
+
+### ✨ What's New
+
+```json
+{
+  "✨ What's New": [
+    "You can now build and send newer-era payments and transactions with more complete tooling. Under the hood, this adds Conway payment support, Plutus transaction builders, and a randomized “txpump” loop that uses wallet integration plus a randomness helper, along with a dingo testnet spec to exercise these paths."
+  ],
+  "💪 Improvements": [
+    "Running and validating the service is now more predictable in local and CI environments. This introduces wallet-focused test coverage, a configurator script, a local devnet helper, and Antithesis wiring (including a refreshed Moog workflow that uses updated secrets/variables, auto-resolves the Moog CLI release tag, and tightens step names and conditions).",
+    "Container builds now carry more traceable build metadata for reproducibility. The CI Docker build now accepts VERSION and COMMIT_HASH build arguments so images can be linked back to an exact source revision.",
+    "The Antithesis configurator container is now built on a more stable and repeatable base. The image is rebuilt on a pinned cardano-node base, installs dependencies, clones testnet-generation-tool at a fixed commit, prepares configuration directories, and runs as a non-root cardano user.",
+    "The project’s Go module dependencies have been refreshed to pick up upstream improvements. Specifically, the plutigo dependency is updated to v0.1.0."
+  ],
+  "📋 What You Need to Know": [
+    "If you rely on API endpoints, you may need to review your configuration before upgrading. APIs will only start when storageMode is \"api\", ports default to non-zero values, and Blockfrost should be considered incomplete while its WIP behavior is finalized."
+  ],
+  "🔧 Fixes": [
+    "API behavior is now safer and less error-prone out of the box. All API ports are now non-zero by default, APIs only activate when storageMode is set to \"api\", and Blockfrost is treated as a work-in-progress API with configuration, tests, and documentation updated accordingly.",
+    "Long-running ledger scans now clean up correctly to reduce resource leaks. Iterator cancellation is now deferred in ledger/state.go so iterators are reliably closed when operations exit early.",
+    "Chain synchronization is now more resilient during rollbacks and tip changes. This adjusts rollback slot handling and wakeups, makes block-reading safer via channel closure and tip snapshotting, and adds start-point retry handling for rollback scenarios.",
+    "Peer tip validation is now less likely to fail during catch-up while still rejecting bad data. The peer tip validator now relaxes thresholds during catch-up and includes a test covering both acceptance and rejection boundaries."
+  ],
+  "🙏 Thank You": [
+    "Thanks to everyone who shared feedback and edge cases around rollbacks, peer validation, and CI/devnet reliability. Your reports helped prioritize safer synchronization behavior and more reproducible build and test workflows."
+  ]
+}
+
+```
+
+### 💪 Improvements
+
+### 🔧 Fixes
+
+### 📋 What You Need to Know
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
+
 ## v0.29.0 (March 31, 2026)
 
 **Title:** Smoother operations and API refinements
