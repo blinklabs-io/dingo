@@ -40,6 +40,18 @@ type MetadataStore interface {
 	// the transaction is the final parameter.
 	SetCommitTimestamp(int64, types.Txn) error
 
+	// GetNodeSettings returns the persisted immutable node settings, or
+	// nil if the database has never been initialised.
+	GetNodeSettings() (*types.NodeSettings, error)
+
+	// SetNodeSettings persists the immutable node settings via an
+	// idempotent insert that succeeds on repeated calls. If the row
+	// already exists, implementations must not overwrite immutable
+	// fields and should only populate network fields when they are
+	// currently unset so callers like checkNodeSettings can perform
+	// a one-time network backfill.
+	SetNodeSettings(*types.NodeSettings) error
+
 	// Transaction creates a new metadata transaction on the write
 	// connection pool. Use ReadTransaction for read-only access to
 	// avoid contending with writers.

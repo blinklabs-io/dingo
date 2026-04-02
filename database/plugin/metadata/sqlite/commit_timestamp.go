@@ -16,6 +16,7 @@ package sqlite
 
 import (
 	"errors"
+	"fmt"
 
 	"github.com/blinklabs-io/dingo/database/types"
 	"gorm.io/gorm"
@@ -24,6 +25,7 @@ import (
 
 const (
 	commitTimestampRowId = 1
+	nodeSettingsRowId    = 1
 )
 
 // CommitTimestamp represents the sqlite table used to track the current commit timestamp
@@ -68,6 +70,72 @@ func (d *MetadataStoreSqlite) SetCommitTimestamp(
 	}).Create(&tmpCommitTimestamp)
 	if result.Error != nil {
 		return result.Error
+	}
+	return nil
+}
+
+// NodeSettings persists immutable node configuration so that storage mode
+// and network cannot be changed after the database has been initialised.
+type NodeSettings struct {
+	ID          uint   `gorm:"primarykey"`
+	StorageMode string `gorm:"size:16;not null"`
+	Network     string `gorm:"size:64;not null"`
+}
+
+func (NodeSettings) TableName() string {
+	return "node_settings"
+}
+
+// GetNodeSettings returns the persisted node settings, or nil if the
+// database has never been initialised.
+func (d *MetadataStoreSqlite) GetNodeSettings() (*types.NodeSettings, error) {
+	var row NodeSettings
+	result := d.ReadDB().
+		Where("id = ?", nodeSettingsRowId).
+		First(&row)
+	if result.Error != nil {
+		if errors.Is(result.Error, gorm.ErrRecordNotFound) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("GetNodeSettings failed: %w", result.Error)
+	}
+	return &types.NodeSettings{
+		StorageMode: row.StorageMode,
+		Network:     row.Network,
+	}, nil
+}
+
+// SetNodeSettings persists the immutable node settings, inserting the
+// singleton row if it does not already exist.
+func (d *MetadataStoreSqlite) SetNodeSettings(
+	s *types.NodeSettings,
+) error {
+	row := NodeSettings{
+		ID:          nodeSettingsRowId,
+		StorageMode: s.StorageMode,
+		Network:     s.Network,
+	}
+	result := d.DB().Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "id"}},
+		DoNothing: true,
+	}).Create(&row)
+	if result.Error != nil {
+		return fmt.Errorf("SetNodeSettings failed: %w", result.Error)
+	}
+	if result.RowsAffected > 0 || s.Network == "" {
+		return nil
+	}
+	result = d.DB().
+		Model(&NodeSettings{}).
+		Where(
+			"id = ? AND storage_mode = ? AND network = ?",
+			nodeSettingsRowId,
+			s.StorageMode,
+			"",
+		).
+		Update("network", s.Network)
+	if result.Error != nil {
+		return fmt.Errorf("SetNodeSettings failed: %w", result.Error)
 	}
 	return nil
 }

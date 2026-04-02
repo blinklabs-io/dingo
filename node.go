@@ -419,6 +419,7 @@ func (n *Node) Run(ctx context.Context) error {
 		MetadataPlugin: n.config.metadataPlugin,
 		MaxConnections: n.config.DatabaseWorkerPoolConfig.WorkerPoolSize,
 		StorageMode:    string(n.config.storageMode),
+		Network:        n.config.network,
 		CacheConfig: database.CborCacheConfig{
 			BlockLRUEntries: n.config.cacheBlockLRUEntries,
 			HotUtxoEntries:  n.config.cacheHotUtxoEntries,

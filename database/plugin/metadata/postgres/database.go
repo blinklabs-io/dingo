@@ -276,6 +276,13 @@ func (d *MetadataStorePostgres) Start() error {
 	if err := d.db.AutoMigrate(&CommitTimestamp{}); err != nil {
 		return err
 	}
+	d.logger.Debug(
+		"creating table",
+		"model", fmt.Sprintf("%T", &NodeSettings{}),
+	)
+	if err := d.db.AutoMigrate(&NodeSettings{}); err != nil {
+		return err
+	}
 	for _, model := range models.MigrateModels {
 		d.logger.Debug(
 			"creating table",

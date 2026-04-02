@@ -15,7 +15,9 @@
 package database
 
 import (
+	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/blinklabs-io/dingo/database/types"
 )
@@ -79,6 +81,110 @@ func (b *Database) updateCommitTimestamp(txn *Txn, timestamp int64) error {
 	blobTxn := txn.Blob()
 	if err := b.Blob().SetCommitTimestamp(timestamp, blobTxn); err != nil {
 		return err
+	}
+	return nil
+}
+
+// NodeSettingsError is returned when the configured node settings differ
+// from those persisted in the database. Changing immutable settings after
+// initial sync would leave the database in an inconsistent state.
+type NodeSettingsError struct {
+	Mismatches []string
+}
+
+func (e NodeSettingsError) Error() string {
+	return fmt.Sprintf(
+		"node settings mismatch: %s; changing these settings requires "+
+			"re-syncing from scratch",
+		strings.Join(e.Mismatches, "; "),
+	)
+}
+
+// checkNodeSettings validates that immutable settings (storage mode,
+// network) have not changed since the database was first initialised.
+// On first start it persists the configured values.
+func (d *Database) checkNodeSettings() error {
+	persisted, err := d.Metadata().GetNodeSettings()
+	if err != nil {
+		return fmt.Errorf(
+			"failed to get node settings from metadata: %w", err,
+		)
+	}
+
+	configured := &types.NodeSettings{
+		StorageMode: d.config.StorageMode,
+		Network:     d.config.Network,
+	}
+
+	firstStart := persisted == nil
+	if firstStart {
+		// First start: persist the configured settings. Re-read
+		// afterwards so concurrent initialisation cannot silently
+		// continue with a conflicting configuration.
+		if err := d.Metadata().SetNodeSettings(configured); err != nil {
+			return fmt.Errorf(
+				"failed to persist node settings: %w", err,
+			)
+		}
+		persisted, err = d.Metadata().GetNodeSettings()
+		if err != nil {
+			return fmt.Errorf(
+				"failed to re-read node settings from metadata: %w",
+				err,
+			)
+		}
+		if persisted == nil {
+			return errors.New("node settings were not found after persistence")
+		}
+	}
+
+	var mismatches []string
+	if persisted.StorageMode != configured.StorageMode {
+		mismatches = append(mismatches, fmt.Sprintf(
+			"storage mode was %q but configured as %q",
+			persisted.StorageMode, configured.StorageMode,
+		))
+	}
+
+	// Some database open paths do not know the network yet. In that case,
+	// preserve the persisted value and skip network validation. When the
+	// network later becomes available, fill it in exactly once.
+	if configured.Network != "" &&
+		persisted.Network == "" &&
+		len(mismatches) == 0 {
+		if err := d.Metadata().SetNodeSettings(configured); err != nil {
+			return fmt.Errorf(
+				"failed to persist node settings: %w",
+				err,
+			)
+		}
+		persisted, err = d.Metadata().GetNodeSettings()
+		if err != nil {
+			return fmt.Errorf(
+				"failed to re-read node settings from metadata: %w",
+				err,
+			)
+		}
+		if persisted == nil {
+			return errors.New("node settings were not found after persistence")
+		}
+	}
+
+	if configured.Network != "" && persisted.Network != configured.Network {
+		mismatches = append(mismatches, fmt.Sprintf(
+			"network was %q but configured as %q",
+			persisted.Network, configured.Network,
+		))
+	}
+	if len(mismatches) > 0 {
+		return NodeSettingsError{Mismatches: mismatches}
+	}
+	if firstStart {
+		d.logger.Info(
+			"node settings initialized",
+			"storageMode", configured.StorageMode,
+			"network", configured.Network,
+		)
 	}
 	return nil
 }
