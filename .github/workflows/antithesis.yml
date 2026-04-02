@@ -262,6 +262,7 @@ jobs:
             -c "${GITHUB_SHA}" \
             -r "${GITHUB_REPOSITORY}" \
             -t "$DURATION" \
+            -y 1 \
             $NO_FAULTS_FLAG
         env:
           MOOG_GITHUB_PAT: ${{ secrets.MOOG_GITHUB_PAT }}
