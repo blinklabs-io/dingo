@@ -1,6 +1,46 @@
 # Release Notes
 
 
+## v0.29.1 (April 2, 2026)
+
+**Title:** Safer APIs and steadier sync
+
+**Date:** April 2, 2026
+
+**Version:** v0.29.1
+
+Hi folks! Here’s what we shipped in v0.29.1.
+
+### ✨ What's New
+
+- **Rolled out expanded transaction builders and txpump testing:** End-to-end testing is easier because you can now build more transaction types and run a randomized txpump loop.
+- **Handy devnet and testnet setup tooling:** Spinning up local and testnet environments is simpler because you now have additional helper scripts, specs, and Antithesis wiring.
+
+### 💪 Improvements
+
+- **Safer API opt-in defaults:** Service exposure is clearer because APIs now only activate when you explicitly opt in.
+- **Steadier rollback iteration:** Catch-up and restart behavior is more predictable because chain iteration is now safer under rollbacks.
+- **Relaxed peer-tip validation during catch-up:** Sync is smoother because peer tip checks are less likely to reject useful peers while you’re catching up.
+- **More reproducible CI and release automation:** Builds are easier to operate because CI and Antithesis automation were hardened.
+- **Clearer release documentation:** What changed is easier to see because release documentation was updated.
+- **Refreshed dependency set:** Compatibility stays rock-solid because a key dependency was updated.
+
+### 🔧 Fixes
+
+- **Iterator cleanup in ledger iteration:** Long-running processes are steadier because ledger iteration now avoids potential resource leaks.
+
+### 📋 What You Need to Know
+
+- **No action required:** You're all set—just upgrade to v0.29.1.
+- **API users:** If you rely on Dingo APIs, make sure your configuration explicitly opts in so the endpoints are enabled.
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
+
 ## v0.29.0 (March 31, 2026)
 
 **Title:** Smoother operations and API refinements
