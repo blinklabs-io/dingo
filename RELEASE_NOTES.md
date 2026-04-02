@@ -1,6 +1,36 @@
 # Release Notes
 
 
+## v0.30.0 (April 2, 2026)
+
+**Title:** Platform updates and smoother operations
+
+**Date:** April 2, 2026
+
+**Version:** v0.30.0
+
+Hi folks! Here’s what we shipped in v0.30.0.
+
+```json
+{
+  "✨ What's New": [
+    "You can now fetch richer stake pool details in a way that’s easier to browse and process in chunks. This adds backend retrieval plus a new paginated HTTP endpoint at `GET /api/v0/pools/extended`, backed by new database batch `GetPools` methods to support extended stake pool information."
+  ],
+  "💪 Improvements": [
+    "Build integrity and supply-chain verification are more reliable when pulling upstream components. The `gouroboros` dependency was updated to `v0.163.5` and its corresponding checksums were added.",
+    "Automation runs more predictably and with fewer manual tweaks during CI execution. The Antithesis GitHub Actions workflow now passes an additional `-y 1` argument to the relevant command.",
+    "CI defaults are now safer for routine usage and less likely to run unexpectedly. Workflow triggers were disabled and a default workflow input value was changed from `3` to `1`."
+  ],
+  "📋 What You Need to Know": [
+    "If you have tooling that consumes pool data, you may want to switch to the new endpoint for the most complete view. Use `GET /api/v0/pools/extended` and follow its pagination to retrieve extended stake pool information without pulling everything in one request."
+  ]
+}
+
+```
+
+---
+
+
 ## v0.29.1 (April 2, 2026)
 
 **Title:** Safer APIs and steadier sync
