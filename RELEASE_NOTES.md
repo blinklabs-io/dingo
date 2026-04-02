@@ -14,19 +14,19 @@ Hi folks! Here’s what we shipped in v0.29.1.
 ```json
 {
   "✨ What's New": [
-    "Added new transaction-building capabilities and a randomized transaction pump loop to support more end-to-end testing scenarios. This introduces Conway payment builders, Plutus transaction builders, a txpump loop with wallet integration and randomness helpers, plus new wallet-focused tests and supporting test fixtures.",
-    "Added new tooling and specifications to make it easier to spin up and validate local and testnet environments. This includes a configurator script, a local devnet helper, a Dingo testnet spec, and Antithesis docker-compose wiring for running the stack in the Antithesis environment."
+    "Added new transaction-building capabilities and a randomized transaction pump loop to support more end-to-end testing scenarios.",
+    "Added new tooling and specifications to make it easier to spin up and validate local and testnet environments."
   ],
   "💪 Improvements": [
-    "Made API defaults safer and clearer so services only expose endpoints when you explicitly opt in. Concretely, API ports are now non-zero by default, APIs only activate when `storageMode` is set to `\"api\"`, and Blockfrost is treated as a work-in-progress API, with configuration, tests, and documentation updated accordingly.",
-    "Improved reliability and safety of chain iteration under rollbacks so catch-up and restart behavior is more predictable. This refines rollback slot handling and wakeups, makes ledger block reads safer via channel-closure handling and tip snapshotting, and adds start-point retry logic for rollback scenarios.",
-    "Relaxed peer tip validation during catch-up to reduce unnecessary rejections while syncing, with clearer threshold behavior. This updates the peer tip validation logic and adds a test that covers both acceptance and rejection thresholds.",
-    "Hardened CI and release automation so builds and Antithesis runs are more reproducible and easier to operate. This updates the Antithesis Moog workflow to use new secrets/variables and auto-resolve the Moog CLI tag, adds `VERSION` and `COMMIT_HASH` build args in Docker CI builds, and rebuilds the Antithesis configurator image on a pinned `cardano-node` base while running as a non-root `cardano` user.",
-    "Updated project release documentation so users can more easily understand what changed between versions. This adds detailed v0.29.0 notes, introduces a v0.28.0 placeholder that was then fully filled in with features/improvements/fixes and user-facing notes in `RELEASE_NOTES.md`.",
-    "Updated a key dependency to incorporate upstream changes and keep the module set current. This bumps the `plutigo` Go module dependency to v0.1.0."
+    "Made API defaults safer and clearer so services only expose endpoints when you explicitly opt in.",
+    "Improved reliability and safety of chain iteration under rollbacks so catch-up and restart behavior is more predictable.",
+    "Relaxed peer tip validation during catch-up to reduce unnecessary rejections while syncing, with clearer threshold behavior.",
+    "Hardened CI and release automation so builds and Antithesis runs are more reproducible and easier to operate.",
+    "Updated project release documentation so users can more easily understand what changed between versions.",
+    "Updated a key dependency to incorporate upstream changes and keep the module set current."
   ],
   "🔧 Fixes": [
-    "Prevented potential resource leaks during ledger iteration so long-running processes remain stable. This adds deferred iterator cancellation in `ledger/state.go` to ensure iterators are always cleaned up."
+    "Prevented potential resource leaks during ledger iteration so long-running processes remain stable."
   ]
 }
 
