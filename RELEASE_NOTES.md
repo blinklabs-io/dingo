@@ -13,7 +13,7 @@ Hi folks! Here’s what we shipped in v0.29.1.
 
 ### ✨ What's New
 
-- **Conway-era payment and transaction tooling:** Building and sending newer-era transactions is easier because v0.29.1 adds Conway payment support, Plutus transaction builders, and a randomized `txpump`.
+- **Conway-era payment and transaction tooling:** Building and sending newer-era transactions is easier because you can now use Conway payment support, Plutus transaction builders, and a randomized `txpump`.
 
 ### 💪 Improvements
 
@@ -35,7 +35,7 @@ Hi folks! Here’s what we shipped in v0.29.1.
 
 ### 🙏 Thank You
 
-Thank you for trying, and thanks for the feedback on rollbacks, peer validation, and CI/devnet reliability.
+Thank you for trying!
 
 ---
 
