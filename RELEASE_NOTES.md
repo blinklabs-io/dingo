@@ -3,7 +3,7 @@
 
 ## v0.29.1 (April 2, 2026)
 
-**Title:** Bug fixes and minor improvements
+**Title:** Safer API defaults and steadier sync
 
 **Date:** April 2, 2026
 
@@ -13,42 +13,29 @@ Hi folks! Here’s what we shipped in v0.29.1.
 
 ### ✨ What's New
 
-```json
-{
-  "✨ What's New": [
-    "You can now build and send newer-era payments and transactions with more complete tooling."
-  ],
-  "💪 Improvements": [
-    "Running and validating the service is now more predictable in local and CI environments.",
-    "Container builds now carry more traceable build metadata for reproducibility.",
-    "The Antithesis configurator container is now built on a more stable and repeatable base.",
-    "The project’s Go module dependencies have been refreshed to pick up upstream improvements."
-  ],
-  "📋 What You Need to Know": [
-    "If you rely on API endpoints, you may need to review your configuration before upgrading."
-  ],
-  "🔧 Fixes": [
-    "API behavior is now safer and less error-prone out of the box.",
-    "Long-running ledger scans now clean up correctly to reduce resource leaks.",
-    "Chain synchronization is now more resilient during rollbacks and tip changes.",
-    "Peer tip validation is now less likely to fail during catch-up while still rejecting bad data."
-  ],
-  "🙏 Thank You": [
-    "Thanks to everyone who shared feedback and edge cases around rollbacks, peer validation, and CI/devnet reliability."
-  ]
-}
-
-```
+- **Conway-era payment and transaction tooling:** Building and sending newer-era transactions is easier because v0.29.1 adds Conway payment support, Plutus transaction builders, and a randomized `txpump`.
 
 ### 💪 Improvements
 
+- **More predictable local and CI validation:** Running and validating the service is smoother because we added wallet-focused test coverage, a configurator script, a local devnet helper, and refreshed Antithesis wiring.
+- **Traceable Docker image metadata:** Reproducibility is easier because CI Docker builds now accept `VERSION` and `COMMIT_HASH` build arguments.
+- **More repeatable Antithesis configurator image:** Setup is more rock-solid because the configurator container is rebuilt on a pinned `cardano-node` base and runs as a non-root `cardano` user.
+- **Dependency refresh:** Builds are more rock-solid because `plutigo` is updated to v0.1.0.
+
 ### 🔧 Fixes
+
+- **Safer API defaults:** API usage is less error-prone because ports now default to non-zero values and APIs only start when `storageMode` is set to `"api"`.
+- **Cleaner iterator shutdown:** Long-running ledger scans leak fewer resources because iterator cancellation is deferred so iterators are reliably closed.
+- **More resilient rollback handling:** Chain sync is steadier because rollback wakeups and start-point retries handle tip changes more safely.
+- **More robust peer tip validation during catch-up:** Catch-up is smoother because the peer tip validator relaxes thresholds while still rejecting invalid data.
 
 ### 📋 What You Need to Know
 
+- **API deployments:** Upgrades are smoother if you verify `storageMode`, API port settings, and your Blockfrost usage before upgrading.
+
 ### 🙏 Thank You
 
-Thank you for trying!
+Thank you for trying, and thanks for the feedback on rollbacks, peer validation, and CI/devnet reliability.
 
 ---
 
