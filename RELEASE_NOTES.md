@@ -18,7 +18,7 @@ Hi folks! Here’s what we shipped in v0.30.0.
 ### 💪 Improvements
 
 - **Updated `gouroboros` dependency:** Upstream supply-chain verification is more reliable because `gouroboros` was updated to `v0.163.5` and the corresponding checksums were added.
-- **Antithesis workflow tweak:** CI runs are more predictable because the Antithesis GitHub Actions workflow now passes an additional `-y 1` argument.
+- **Antithesis workflow tweak:** CI runs are more predictable because the Antithesis GitHub Actions workflow now passes an extra `-y 1` argument.
 - **Safer CI defaults:** CI defaults are safer because workflow triggers were disabled and a default workflow input value was changed from `3` to `1`.
 
 ### 🔧 Fixes
