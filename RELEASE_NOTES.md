@@ -3,7 +3,7 @@
 
 ## v0.29.1 (April 2, 2026)
 
-**Title:** Safer API defaults and steadier sync
+**Title:** Rock-solid API defaults and steadier sync
 
 **Date:** April 2, 2026
 
@@ -17,8 +17,8 @@ Hi folks! Here’s what we shipped in v0.29.1.
 
 ### 💪 Improvements
 
-- **More predictable local and CI validation:** Running and validating the service is smoother because we added wallet-focused test coverage, a configurator script, a local devnet helper, and refreshed Antithesis wiring.
-- **Traceable Docker image metadata:** Reproducibility is easier because CI Docker builds now accept `VERSION` and `COMMIT_HASH` build arguments.
+- **More predictable local and CI validation:** Running and validating the service is easier because we added wallet-focused test coverage, a configurator script, a local devnet helper, and refreshed Antithesis wiring.
+- **Traceable Docker image metadata:** Reproducibility is simpler because CI Docker builds now accept `VERSION` and `COMMIT_HASH` build arguments.
 - **More repeatable Antithesis configurator image:** Setup is more rock-solid because the configurator container is rebuilt on a pinned `cardano-node` base and runs as a non-root `cardano` user.
 - **Dependency refresh:** Builds are more rock-solid because `plutigo` is updated to v0.1.0.
 
@@ -26,7 +26,7 @@ Hi folks! Here’s what we shipped in v0.29.1.
 
 - **Safer API defaults:** API usage is less error-prone because ports now default to non-zero values and APIs only start when `storageMode` is set to `"api"`.
 - **Cleaner iterator shutdown:** Long-running ledger scans leak fewer resources because iterator cancellation is deferred so iterators are reliably closed.
-- **More resilient rollback handling:** Chain sync is steadier because rollback wakeups and start-point retries handle tip changes more safely.
+- **More resilient rollback handling:** Chain sync is more rock-solid because rollback wakeups and start-point retries handle tip changes more safely.
 - **More robust peer tip validation during catch-up:** Catch-up is smoother because the peer tip validator relaxes thresholds while still rejecting invalid data.
 
 ### 📋 What You Need to Know
