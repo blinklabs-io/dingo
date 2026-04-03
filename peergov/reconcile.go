@@ -345,11 +345,15 @@ func (p *PeerGovernor) reconcile(ctx context.Context) {
 		coldPromotions+warmPromotions+warmDemotions+knownRemoved,
 	)
 
-	// Peer Discovery via Peer Sharing (outside lock)
+	// Peer Discovery (outside lock)
 	p.mu.Unlock()
 
 	// Publish all collected events after releasing the lock (avoid deadlock)
 	p.publishPendingEvents(events)
+
+	// Discover peers from ledger (stake pool relays) before peer sharing,
+	// which can block on unresponsive peers.
+	p.discoverLedgerPeers()
 
 	for i := range eligiblePeersCopy {
 		addrs := p.config.PeerRequestFunc(&eligiblePeersCopy[i])
@@ -359,9 +363,6 @@ func (p *PeerGovernor) reconcile(ctx context.Context) {
 			_ = p.AddPeer(addr, PeerSourceP2PGossip)
 		}
 	}
-
-	// Discover peers from ledger (stake pool relays)
-	p.discoverLedgerPeers()
 }
 
 // enforcePeerLimits removes excess peers when targets are exceeded.
