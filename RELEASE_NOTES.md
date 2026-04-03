@@ -14,22 +14,22 @@ Hi folks! Here’s what we shipped in v0.31.0.
 
 ### ✨ What's New
 
-- **Immutable storage settings:** Upgrades are safer because the node now persists storage mode and network metadata and refuses to open a database if they don’t match your current `--storage-mode` configuration.
+- **Immutable storage settings:** Upgrades are more rock-solid because the node now persists storage mode and network metadata and refuses to open a database if they don’t match your current `--storage-mode` configuration.
 - **Earlier ledger peer discovery:** Peer discovery can start sooner because reconciliation now invokes ledger-based discovery earlier with debug logs and configurable target and bound settings.
 - **Shared transaction filtering (`TxPredicate`):** Transaction submit and watch are more consistent because filtering now uses a shared `TxPredicate` evaluation engine.
 
 ### 💪 Improvements
 
 - **Quieter near-tip chain sync logs:** Routine operation is less noisy because chain-sync progress logging now pauses once you’re at least 99.9% synced.
-- **Smarter peer lag filtering:** Time-to-sync can be better because peer selection now skips nodes that are far behind the best known tip using a `securityParam`-based filter.
+- **Smarter peer lag filtering:** Sync catch-up is smoother because peer selection now skips nodes that are far behind the best known tip using a `securityParam`-based filter.
 - **Smoother Prometheus defaults and cache visibility:** Metrics setup is simpler because the node now uses the default Prometheus registry when none is provided and exports Badger cache gauges.
 - **More accurate SQLite disk reporting:** Troubleshooting is easier because SQLite disk size reporting and error diagnostics are now more accurate.
 - **Clearer CI and release documentation:** Release automation is easier to follow because workflow behavior and related documentation were refined.
 
 ### 🔧 Fixes
 
-- **Safer fork extension handling:** Fork recovery is smoother because blockfetch now restarts cleanly on forks and skips unnecessary rollbacks when a fork extends from your local tip.
-- **Earlier validity-interval rejection:** Mempool processing is more efficient because transactions whose validity interval starts after the current tip slot are rejected up front.
+- **Safer fork extension handling:** Fork recovery is smoother because block fetching now restarts cleanly on forks and skips unnecessary rollbacks when a fork extends from your local tip.
+- **Earlier validity-interval rejection:** Mempool processing is more efficient because transactions that can’t be valid yet are rejected up front.
 - **Security dependency update:** Security stays solid because `github.com/go-jose/go-jose/v4` was updated to v4.1.4.
 
 ### 📋 What You Need to Know
