@@ -123,12 +123,15 @@ func (u *Utxorpc) matchTxPredicateNode(
 	return evalTxPredicateOutcome(tx, node, u.matchesTxPattern) == predMatch
 }
 
+// andOutcome combines two conjuncts. A definite non-match dominates
+// unevaluable: false ∧ unknown is false (so all_of can fail even when one
+// branch cannot be evaluated).
 func andOutcome(a, b predOutcome) predOutcome {
-	if a == predUnevaluable || b == predUnevaluable {
-		return predUnevaluable
-	}
 	if a == predNoMatch || b == predNoMatch {
 		return predNoMatch
+	}
+	if a == predUnevaluable || b == predUnevaluable {
+		return predUnevaluable
 	}
 	return predMatch
 }

@@ -132,6 +132,39 @@ func TestEvalTxPredicate_AllOf(t *testing.T) {
 		}
 		require.False(t, evalSubmit(nil, pred, leaf))
 	})
+
+	// Definite miss must dominate unevaluable under AND so not(all_of(...))
+	// can negate a definite false inner predicate.
+	t.Run("definite_miss_dominates_unevaluable", func(t *testing.T) {
+		pA := &cardano.TxPattern{}
+		leafMiss := func(_ gledger.Transaction, _ *cardano.TxPattern) predOutcome {
+			return predNoMatch
+		}
+		pred := &submit.TxPredicate{
+			AllOf: []*submit.TxPredicate{
+				{Match: &submit.AnyChainTxPattern{}},
+				matchSubmit(pA),
+			},
+		}
+		require.Equal(
+			t,
+			predNoMatch,
+			evalTxPredicateOutcome(
+				nil,
+				txPredicateFromSubmit(pred),
+				leafMiss,
+			),
+		)
+
+		notPred := &submit.TxPredicate{
+			Not: []*submit.TxPredicate{pred},
+		}
+		require.True(
+			t,
+			evalSubmit(nil, notPred, leafMiss),
+			"not(all_of(unevaluable, miss)) should be true",
+		)
+	})
 }
 
 func TestEvalTxPredicate_AnyOf(t *testing.T) {
