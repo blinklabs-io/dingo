@@ -11,28 +11,33 @@
 
 Hi folks! Here’s what we shipped in v0.31.0.
 
-```json
-{
-  "✨ What's New": [
-    "You can now lock in key storage settings so your node stays consistent across restarts and machines."
-  ],
-  "💪 Improvements": [
-    "Working with long lists of results is now smoother and more predictable when calling the API.",
-    "Peer discovery now gives you more control and better visibility so the node can find healthy peers faster.",
-    "Transaction filtering is now more consistent across features so you get the same match behavior whether you are submitting or watching transactions.",
-    "Monitoring now works more reliably out of the box and exposes more useful cache telemetry.",
-    "Sync logs are now less noisy near the end of chain catch-up so you can focus on meaningful progress updates.",
-    "Disk usage reporting for SQLite is now more accurate and error messages are clearer when something goes wrong.",
-    "Dependency security and stability are kept up to date so you benefit from upstream fixes."
-  ],
-  "🔧 Fixes": [
-    "Fork handling is now more resilient so the node can recover and continue syncing without getting stuck in a bad state.",
-    "The node is now better at avoiding peers that cannot help it catch up, which reduces wasted connections and improves sync quality.",
-    "The mempool now rejects transactions that are not yet valid at the current tip so invalid future-dated submissions do not clog up processing."
-  ]
-}
+### ✨ What's New
 
-```
+- **Pinned storage mode and network metadata:** Operations are more predictable because Dingo now locks storage settings so the database won’t open if those settings change after the initial sync.
+
+### 💪 Improvements
+
+- **Clearer pagination docs:** Large result sets are easier to work with because the v0.30.0 notes now document API pagination behavior.
+- **More controlled peer discovery:** Catch-up can be smoother because ledger-based discovery runs earlier with improved debug logging and configurable targets.
+- **Consistent transaction filtering:** Filtering is more predictable because submit and watch now share the same TxPredicate evaluation behavior.
+- **More reliable Prometheus setup:** Monitoring is steadier because Dingo falls back to the default Prometheus registry and exports additional Badger cache metrics.
+- **Quieter near-tip sync logs:** Progress is easier to follow because chain sync skips progress logging at or above 99.9%.
+- **More accurate SQLite disk reporting:** Capacity diagnostics are clearer because SQLite disk size reporting is more accurate and error handling is hardened.
+- **Dependency refresh:** Security stays more rock-solid because `github.com/go-jose/go-jose/v4` was updated.
+
+### 🔧 Fixes
+
+- **More resilient fork handling:** Sync recovers more reliably because blockfetch state is reset on forks and some fork rollbacks are avoided.
+- **Skip far-behind peers:** Peer selection is more efficient because the node filters out peers too far behind the best known tip.
+- **Reject future-dated mempool txs:** Mempool processing is cleaner because transactions that are not yet valid at the current tip are rejected.
+
+### 📋 What You Need to Know
+
+- **Storage settings:** If you change `--storage-mode` or network settings after first sync, Dingo will refuse to open the existing database—use a fresh database directory if you need to switch.
+
+### 🙏 Thank You
+
+Thank you for trying!
 
 ---
 
