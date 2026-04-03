@@ -27,8 +27,17 @@ import (
 func (p *PeerGovernor) discoverLedgerPeers() {
 	// Check if ledger peer provider is configured
 	if p.config.LedgerPeerProvider == nil {
+		p.config.Logger.Debug(
+			"ledger peer discovery skipped: provider is nil",
+			"component", "peergov",
+		)
 		return
 	}
+	p.config.Logger.Debug(
+		"ledger peer discovery starting",
+		"component", "peergov",
+		"use_ledger_after_slot", p.config.UseLedgerAfterSlot,
+	)
 
 	// Check UseLedgerAfterSlot threshold first (before claiming refresh)
 	if p.config.UseLedgerAfterSlot < 0 {
