@@ -774,6 +774,7 @@ func (n *Node) Run(ctx context.Context) error {
 			PeerRequestFunc:                n.ouroboros.RequestPeersFromPeer,
 			LedgerPeerProvider:             ledgerPeerProvider,
 			UseLedgerAfterSlot:             useLedgerAfterSlot,
+			LedgerPeerTarget:               n.config.ledgerPeerTarget,
 			TargetNumberOfKnownPeers:       n.config.targetNumberOfKnownPeers,
 			TargetNumberOfEstablishedPeers: n.config.targetNumberOfEstablishedPeers,
 			TargetNumberOfActivePeers:      n.config.targetNumberOfActivePeers,

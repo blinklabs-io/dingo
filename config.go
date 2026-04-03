@@ -111,6 +111,9 @@ type Config struct {
 	activePeersTopologyQuota int
 	activePeersGossipQuota   int
 	activePeersLedgerQuota   int
+	// Ledger peer discovery (negative = disabled, 0 = use
+	// defaultLedgerPeerTarget, positive = target)
+	ledgerPeerTarget int
 	// Peer governor tuning (0 = use default)
 	minHotPeers         int
 	reconcileInterval   time.Duration
@@ -507,6 +510,16 @@ func WithActivePeersQuotas(
 		c.activePeersTopologyQuota = topologyQuota
 		c.activePeersGossipQuota = gossipQuota
 		c.activePeersLedgerQuota = ledgerQuota
+	}
+}
+
+// WithLedgerPeerTarget specifies the target number of known ledger peers.
+// Discovery will add peers only until this target is reached.
+// Negative values disable ledger peer discovery, 0 uses
+// defaultLedgerPeerTarget, and positive values use that target. Default: 20.
+func WithLedgerPeerTarget(n int) ConfigOptionFunc {
+	return func(c *Config) {
+		c.ledgerPeerTarget = n
 	}
 }
 
