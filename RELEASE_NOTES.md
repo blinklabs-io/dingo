@@ -1,6 +1,48 @@
 # Release Notes
 
 
+## v0.31.0 (April 3, 2026)
+
+**Title:** Storage safeguards and smarter peer sync
+
+**Date:** April 3, 2026
+
+**Version:** v0.31.0
+
+Hi folks! Here’s what we shipped in v0.31.0.
+
+### ✨ What's New
+
+- **Immutable storage settings:** Upgrades are more rock-solid because the node now persists storage mode and network metadata and refuses to open a database if they don’t match your current `--storage-mode` configuration.
+- **Earlier ledger peer discovery:** Peer discovery starts sooner because reconciliation now invokes ledger-based discovery earlier with debug logs and configurable target and bound settings.
+- **Shared transaction filtering (`TxPredicate`):** Transaction submit and watch are more consistent because filtering now uses a shared `TxPredicate` evaluation engine.
+
+### 💪 Improvements
+
+- **Quieter near-tip chain sync logs:** Routine operation is less noisy because chain-sync progress logging now pauses once you’re at least 99.9% synced.
+- **Smarter peer lag filtering:** Sync catch-up is smoother because peer selection now skips nodes that are far behind the best known tip using a `securityParam`-based filter.
+- **Smoother Prometheus defaults and cache visibility:** Metrics setup is simpler because the node now uses the default Prometheus registry when none is provided and exports Badger cache gauges.
+- **More accurate SQLite disk reporting:** Troubleshooting is easier because SQLite disk size reporting and error diagnostics are now more accurate.
+- **Clearer CI and release documentation:** Release automation is easier to follow because workflow behavior and related documentation were refined.
+
+### 🔧 Fixes
+
+- **Safer fork extension handling:** Fork recovery is smoother because block fetching now restarts cleanly on forks and skips unnecessary rollbacks when a fork extends from your local tip.
+- **Earlier validity-interval rejection:** Mempool processing is more efficient because transactions that can’t be valid yet are rejected up front.
+- **Security dependency update:** Security stays solid because `github.com/go-jose/go-jose/v4` was updated to v4.1.4.
+
+### 📋 What You Need to Know
+
+- **No action required for most users:** You're all set—just upgrade to v0.31.0.
+- **Operators changing storage settings:** If you change storage mode or network for an existing database, the node will now fail fast to prevent opening it with incompatible settings.
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
+
 ## v0.30.0 (April 2, 2026)
 
 **Title:** Paginated pools API and steadier automation
