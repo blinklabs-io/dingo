@@ -1571,6 +1571,54 @@ func (ls *LedgerState) tryResolveFork(
 	}
 
 	rollbackPoint := *ancestorPoint
+
+	// If the ancestor IS the local tip, the peer's fork segment extends
+	// our chain directly — no rollback is needed. Skip the rollback to
+	// avoid publishing a "local ledger rollback" event that would
+	// trigger recovery and close all connections unnecessarily.
+	if rollbackPoint.Slot == localTip.Point.Slot &&
+		bytes.Equal(rollbackPoint.Hash, localTip.Point.Hash) {
+		ls.config.Logger.Info(
+			"fork extends from current tip, adding headers without rollback",
+			"component", "ledger",
+			"local_tip_slot", localTip.Point.Slot,
+			"peer_tip_slot", e.Tip.Point.Slot,
+			"fork_path_headers", len(forkPath),
+			"connection_id", e.ConnectionId.String(),
+		)
+		for _, forkEvent := range forkPath {
+			if err := ls.chain.AddBlockHeader(forkEvent.BlockHeader); err != nil {
+				ls.config.Logger.Warn(
+					"failed to queue header from fork extension",
+					"component", "ledger",
+					"error", err,
+					"slot", forkEvent.Point.Slot,
+					"connection_id", forkEvent.ConnectionId.String(),
+				)
+				return false
+			}
+		}
+		ls.headerMismatchCount = 0
+		ls.rollbackHistory = nil
+		if ls.config.BlockfetchRequestRangeFunc != nil &&
+			ls.chain.HeaderCount() > 0 {
+			ls.chainsyncBlockfetchMutex.Lock()
+			if ls.chainsyncBlockfetchReadyChan == nil {
+				ls.selectedBlockfetchConnId = e.ConnectionId
+				if err := ls.startQueuedBlockfetchLocked(e.ConnectionId); err != nil {
+					ls.config.Logger.Warn(
+						"failed to start blockfetch after fork extension",
+						"component", "ledger",
+						"error", err,
+						"connection_id", e.ConnectionId.String(),
+					)
+				}
+			}
+			ls.chainsyncBlockfetchMutex.Unlock()
+		}
+		return true
+	}
+
 	ls.config.Logger.Info(
 		"fork detected: rolling back to common ancestor",
 		"component", "ledger",
