@@ -200,6 +200,11 @@ func (s *watchServiceServer) WatchTx(
 		),
 	)
 
+	var predTree *txPredicateNode
+	if predicate != nil {
+		predTree = txPredicateFromWatch(predicate)
+	}
+
 	// Get our points
 	var points []ocommon.Point
 	if len(intersect) > 0 {
@@ -253,14 +258,11 @@ func (s *watchServiceServer) WatchTx(
 		chainIter.Cancel()
 	}()
 
-	shouldSendTx := func(tx ledger.Transaction) bool {
+	shouldSend := func(tx ledger.Transaction) bool {
 		if predicate == nil {
 			return true
 		}
-		return s.utxorpc.matchesTxPattern(
-			tx,
-			predicate.GetMatch().GetCardano(),
-		)
+		return s.utxorpc.matchTxPredicateNode(tx, predTree)
 	}
 	history := make([]watchTxHistoryEntry, 0, 256)
 
@@ -299,7 +301,7 @@ func (s *watchServiceServer) WatchTx(
 						ctx,
 						startHash,
 						next.Point,
-						shouldSendTx,
+						shouldSend,
 					)
 					fetchCh <- struct {
 						msgs []*watch.WatchTxResponse
@@ -337,7 +339,7 @@ func (s *watchServiceServer) WatchTx(
 				next.Block.Slot,
 				next.Block.Number,
 				next.Block.Hash,
-				shouldSendTx,
+				shouldSend,
 			)
 			if err != nil {
 				s.utxorpc.config.Logger.Error(
