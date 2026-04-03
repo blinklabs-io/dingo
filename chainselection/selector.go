@@ -594,7 +594,8 @@ func (cs *ChainSelector) isPeerSelectableLocked(
 	// further behind are not useful for syncing.
 	if cs.securityParam > 0 {
 		bestBlock := cs.bestKnownBlockNumber()
-		if bestBlock > 0 && peerTip.Tip.BlockNumber+cs.securityParam < bestBlock {
+		if bestBlock > 0 &&
+			safeAddUint64(peerTip.Tip.BlockNumber, cs.securityParam) < bestBlock {
 			if logSkip {
 				cs.config.Logger.Debug(
 					"skipping peer behind best known tip",
