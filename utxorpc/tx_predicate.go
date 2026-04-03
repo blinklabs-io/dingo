@@ -46,13 +46,27 @@ type txPredicateNode struct {
 	anyOf           []*txPredicateNode
 }
 
-// txPredicateFromSubmit maps submit.TxPredicate into txPredicateNode.
-func txPredicateFromSubmit(p *submit.TxPredicate) *txPredicateNode {
-	if p == nil {
+type txPatternProto interface {
+	GetCardano() *cardano.TxPattern
+}
+
+type txPredicateProto[T any, M txPatternProto] interface {
+	GetMatch() M
+	GetNot() []T
+	GetAllOf() []T
+	GetAnyOf() []T
+}
+
+func buildTxPredicateNodeFromProto[T txPredicateProto[T, M], M txPatternProto](
+	p T,
+	isNilPredicate func(T) bool,
+	isNilMatch func(M) bool,
+) *txPredicateNode {
+	if isNilPredicate(p) {
 		return nil
 	}
 	n := &txPredicateNode{}
-	if m := p.GetMatch(); m != nil {
+	if m := p.GetMatch(); !isNilMatch(m) {
 		if c := m.GetCardano(); c != nil {
 			n.match = c
 		} else {
@@ -60,52 +74,52 @@ func txPredicateFromSubmit(p *submit.TxPredicate) *txPredicateNode {
 		}
 	}
 	for _, c := range p.GetNot() {
-		if c != nil {
-			n.not = append(n.not, txPredicateFromSubmit(c))
+		if !isNilPredicate(c) {
+			n.not = append(
+				n.not,
+				buildTxPredicateNodeFromProto(c, isNilPredicate, isNilMatch),
+			)
 		}
 	}
 	for _, c := range p.GetAllOf() {
-		if c != nil {
-			n.allOf = append(n.allOf, txPredicateFromSubmit(c))
+		if !isNilPredicate(c) {
+			n.allOf = append(
+				n.allOf,
+				buildTxPredicateNodeFromProto(c, isNilPredicate, isNilMatch),
+			)
 		}
 	}
 	for _, c := range p.GetAnyOf() {
-		if c != nil {
-			n.anyOf = append(n.anyOf, txPredicateFromSubmit(c))
+		if !isNilPredicate(c) {
+			n.anyOf = append(
+				n.anyOf,
+				buildTxPredicateNodeFromProto(c, isNilPredicate, isNilMatch),
+			)
 		}
 	}
 	return n
 }
 
+func isNilPtr[T any](p *T) bool {
+	return p == nil
+}
+
+// txPredicateFromSubmit maps submit.TxPredicate into txPredicateNode.
+func txPredicateFromSubmit(p *submit.TxPredicate) *txPredicateNode {
+	return buildTxPredicateNodeFromProto(
+		p,
+		isNilPtr[submit.TxPredicate],
+		isNilPtr[submit.AnyChainTxPattern],
+	)
+}
+
 // txPredicateFromWatch maps watch.TxPredicate into txPredicateNode.
 func txPredicateFromWatch(p *watch.TxPredicate) *txPredicateNode {
-	if p == nil {
-		return nil
-	}
-	n := &txPredicateNode{}
-	if m := p.GetMatch(); m != nil {
-		if c := m.GetCardano(); c != nil {
-			n.match = c
-		} else {
-			n.matchNonCardano = true
-		}
-	}
-	for _, c := range p.GetNot() {
-		if c != nil {
-			n.not = append(n.not, txPredicateFromWatch(c))
-		}
-	}
-	for _, c := range p.GetAllOf() {
-		if c != nil {
-			n.allOf = append(n.allOf, txPredicateFromWatch(c))
-		}
-	}
-	for _, c := range p.GetAnyOf() {
-		if c != nil {
-			n.anyOf = append(n.anyOf, txPredicateFromWatch(c))
-		}
-	}
-	return n
+	return buildTxPredicateNodeFromProto(
+		p,
+		isNilPtr[watch.TxPredicate],
+		isNilPtr[watch.AnyChainTxPattern],
+	)
 }
 
 // txPatternLeaf matches a transaction against a Cardano TxPattern (outputs,

@@ -1603,16 +1603,13 @@ func (ls *LedgerState) tryResolveFork(
 		if ls.config.BlockfetchRequestRangeFunc != nil &&
 			ls.chain.HeaderCount() > 0 {
 			ls.chainsyncBlockfetchMutex.Lock()
-			if ls.chainsyncBlockfetchReadyChan == nil {
-				ls.selectedBlockfetchConnId = e.ConnectionId
-				if err := ls.startQueuedBlockfetchLocked(e.ConnectionId); err != nil {
-					ls.config.Logger.Warn(
-						"failed to start blockfetch after fork extension",
-						"component", "ledger",
-						"error", err,
-						"connection_id", e.ConnectionId.String(),
-					)
-				}
+			if err := ls.restartQueuedBlockfetchAfterForkLocked(e.ConnectionId); err != nil {
+				ls.config.Logger.Warn(
+					"failed to start blockfetch after fork extension",
+					"component", "ledger",
+					"error", err,
+					"connection_id", e.ConnectionId.String(),
+				)
 			}
 			ls.chainsyncBlockfetchMutex.Unlock()
 		}
@@ -1700,16 +1697,13 @@ func (ls *LedgerState) tryResolveFork(
 	if ls.config.BlockfetchRequestRangeFunc != nil &&
 		ls.chain.HeaderCount() > 0 {
 		ls.chainsyncBlockfetchMutex.Lock()
-		if ls.chainsyncBlockfetchReadyChan == nil {
-			ls.selectedBlockfetchConnId = e.ConnectionId
-			if err := ls.startQueuedBlockfetchLocked(e.ConnectionId); err != nil {
-				ls.config.Logger.Warn(
-					"failed to start blockfetch after fork rollback",
-					"component", "ledger",
-					"error", err,
-					"connection_id", e.ConnectionId.String(),
-				)
-			}
+		if err := ls.restartQueuedBlockfetchAfterForkLocked(e.ConnectionId); err != nil {
+			ls.config.Logger.Warn(
+				"failed to start blockfetch after fork rollback",
+				"component", "ledger",
+				"error", err,
+				"connection_id", e.ConnectionId.String(),
+			)
 		}
 		ls.chainsyncBlockfetchMutex.Unlock()
 	}
@@ -1780,6 +1774,35 @@ func (ls *LedgerState) nextBlockfetchConnIdExcept(
 		return ouroboros.ConnectionId{}, false
 	}
 	return ls.activeBlockfetchConnId, true
+}
+
+func (ls *LedgerState) restartQueuedBlockfetchAfterForkLocked(
+	connId ouroboros.ConnectionId,
+) error {
+	if ls.chainsyncBlockfetchReadyChan != nil {
+		if ls.chainsyncBlockfetchTimeoutTimer != nil {
+			ls.chainsyncBlockfetchTimeoutTimer.Stop()
+			ls.chainsyncBlockfetchTimeoutTimer = nil
+		}
+		ls.chainsyncBlockfetchTimerGeneration++
+		ls.chainsyncBlockfetchReadyMutex.Lock()
+		if ls.chainsyncBlockfetchReadyChan != nil {
+			close(ls.chainsyncBlockfetchReadyChan)
+			ls.chainsyncBlockfetchReadyChan = nil
+		}
+		ls.chainsyncBlockfetchReadyMutex.Unlock()
+		if err := ls.flushPendingBlockfetchBlocks(); err != nil {
+			ls.activeBlockfetchConnId = ouroboros.ConnectionId{}
+			ls.selectedBlockfetchConnId = ouroboros.ConnectionId{}
+			return fmt.Errorf(
+				"failed to flush stale blockfetch batch before restart: %w",
+				err,
+			)
+		}
+		ls.activeBlockfetchConnId = ouroboros.ConnectionId{}
+	}
+	ls.selectedBlockfetchConnId = connId
+	return ls.startQueuedBlockfetchLocked(connId)
 }
 
 func (ls *LedgerState) startQueuedBlockfetchLocked(
