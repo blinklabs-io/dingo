@@ -1,6 +1,47 @@
 # Release Notes
 
 
+## v0.31.0 (April 3, 2026)
+
+**Title:** Updates and refinements
+
+**Date:** April 3, 2026
+
+**Version:** v0.31.0
+
+Hi folks! Here’s what we shipped in v0.31.0.
+
+<details>
+<summary>Internal: raw release notes</summary>
+
+```json
+{
+  "✨ What's New": [
+    "You can now configure and enforce immutable node storage settings so your node won’t accidentally reopen a database with incompatible settings. This adds a global `--storage-mode` flag and persists immutable metadata (storage mode and network) so database opens fail if these values change after the initial sync.",
+    "The node can now discover peers via the ledger earlier and with more observable behavior during reconciliation. This adds debug logging for ledger peer discovery, invokes ledger-based discovery earlier in the reconcile flow, and introduces configurable ledger peer target/bound parameters that also shuffle and account results during discovery.",
+    "Transaction filtering is now powered by a shared evaluation engine so “submit” and “watch” behave consistently and report clearer outcomes. This introduces a common `TxPredicate` evaluation engine with three-way match results, explicit handling for unevaluable filters, and wiring into the transaction filtering pipeline."
+  ],
+  "💪 Improvements": [
+    "Chain-sync progress logs are now quieter when you are effectively caught up so routine operation is less noisy. This adds a near-tip guard that skips chain sync progress logging once sync reaches ≥99.9%.",
+    "Peer selection is now more resilient against lagging nodes, improving time-to-sync and reducing wasted work. This adds a `securityParam`-based filter that skips peers far behind the best known tip using a new `bestKnownBlockNumber` helper.",
+    "CI and workflow behavior has been updated along with documentation of other v0.30.0 changes so releases are easier to understand and reproduce. This adds release notes for v0.30.0 covering API pagination, dependency updates, workflow changes, and CI behavior.",
+    "Prometheus metrics integration now works more smoothly out of the box and exposes more cache visibility. This uses the default Prometheus registry when none is provided, safely registers collectors, and exports Badger block/index cache metrics as Prometheus gauges.",
+    "SQLite resource reporting and error diagnostics are more accurate and robust during operation. This improves SQLite disk size calculation, hardens error reporting, refactors nonce and `TxPredicate` helper construction, and generalizes `TxPredicate` construction for multiple protocol sources."
+  ],
+  "🔧 Fixes": [
+    "Fork handling is now safer and avoids unnecessary rollback work in common fork-extension cases. This resets and restarts blockfetch state on forks, skips rollback when a fork extends directly from the current local tip, and instead adds fork headers and triggers blockfetch.",
+    "The mempool now rejects transactions earlier when their validity interval cannot be valid yet, reducing wasted processing and clearer failure behavior. This adds a tip-slot-based pre-check that rejects transactions whose validity interval starts after the current tip slot, wires the check to the node’s ledger tip, and adds tests for the new behavior.",
+    "A security dependency has been updated to include the latest upstream fixes. This updates `github.com/go-jose/go-jose/v4` from v4.1.3 to v4.1.4."
+  ]
+}
+
+```
+
+</details>
+
+---
+
+
 ## v0.30.0 (April 2, 2026)
 
 **Title:** Paginated pools API and steadier automation
