@@ -15,6 +15,8 @@
 package badger
 
 import (
+	"errors"
+
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
 )
@@ -22,6 +24,18 @@ import (
 const (
 	badgerMetricNamePrefix = "database_blob_"
 )
+
+// safeRegister registers a collector, silently ignoring duplicates.
+func safeRegister(reg prometheus.Registerer, c prometheus.Collector) {
+	if err := reg.Register(c); err != nil {
+		// Ignore AlreadyRegisteredError — a second blob store instance
+		// (e.g. chain-manager store) shares the same default registry.
+		var are prometheus.AlreadyRegisteredError
+		if !errors.As(err, &are) {
+			panic(err)
+		}
+	}
+}
 
 func (d *BlobStoreBadger) registerBlobMetrics() {
 	// Badger exposes metrics via expvar, so we need to set up some translation
@@ -94,5 +108,120 @@ func (d *BlobStoreBadger) registerBlobMetrics() {
 			),
 		},
 	)
-	d.promRegistry.MustRegister(collector)
+	safeRegister(d.promRegistry, collector)
+
+	// Ristretto block/index cache metrics from Badger's DB handle
+	safeRegister(d.promRegistry, prometheus.NewGaugeFunc(
+		prometheus.GaugeOpts{
+			Name: badgerMetricNamePrefix + "block_cache_hits_total",
+			Help: "Total block cache hits",
+		},
+		func() float64 {
+			if m := d.DB().BlockCacheMetrics(); m != nil {
+				return float64(m.Hits())
+			}
+			return 0
+		},
+	))
+	safeRegister(d.promRegistry, prometheus.NewGaugeFunc(
+		prometheus.GaugeOpts{
+			Name: badgerMetricNamePrefix + "block_cache_misses_total",
+			Help: "Total block cache misses",
+		},
+		func() float64 {
+			if m := d.DB().BlockCacheMetrics(); m != nil {
+				return float64(m.Misses())
+			}
+			return 0
+		},
+	))
+	safeRegister(d.promRegistry, prometheus.NewGaugeFunc(
+		prometheus.GaugeOpts{
+			Name: badgerMetricNamePrefix + "block_cache_hit_ratio",
+			Help: "Block cache hit ratio (0.0-1.0)",
+		},
+		func() float64 {
+			if m := d.DB().BlockCacheMetrics(); m != nil {
+				return m.Ratio()
+			}
+			return 0
+		},
+	))
+	safeRegister(d.promRegistry, prometheus.NewGaugeFunc(
+		prometheus.GaugeOpts{
+			Name: badgerMetricNamePrefix + "block_cache_cost_bytes",
+			Help: "Current block cache cost in bytes (added - evicted)",
+		},
+		func() float64 {
+			if m := d.DB().BlockCacheMetrics(); m != nil {
+				added := m.CostAdded()
+				evicted := m.CostEvicted()
+				if added >= evicted {
+					return float64(added - evicted)
+				}
+				return 0
+			}
+			return 0
+		},
+	))
+	safeRegister(d.promRegistry, prometheus.NewGaugeFunc(
+		prometheus.GaugeOpts{
+			Name: badgerMetricNamePrefix + "block_cache_keys_added_total",
+			Help: "Total keys added to block cache",
+		},
+		func() float64 {
+			if m := d.DB().BlockCacheMetrics(); m != nil {
+				return float64(m.KeysAdded())
+			}
+			return 0
+		},
+	))
+	safeRegister(d.promRegistry, prometheus.NewGaugeFunc(
+		prometheus.GaugeOpts{
+			Name: badgerMetricNamePrefix + "block_cache_keys_evicted_total",
+			Help: "Total keys evicted from block cache",
+		},
+		func() float64 {
+			if m := d.DB().BlockCacheMetrics(); m != nil {
+				return float64(m.KeysEvicted())
+			}
+			return 0
+		},
+	))
+	safeRegister(d.promRegistry, prometheus.NewGaugeFunc(
+		prometheus.GaugeOpts{
+			Name: badgerMetricNamePrefix + "index_cache_hits_total",
+			Help: "Total index cache hits",
+		},
+		func() float64 {
+			if m := d.DB().IndexCacheMetrics(); m != nil {
+				return float64(m.Hits())
+			}
+			return 0
+		},
+	))
+	safeRegister(d.promRegistry, prometheus.NewGaugeFunc(
+		prometheus.GaugeOpts{
+			Name: badgerMetricNamePrefix + "index_cache_misses_total",
+			Help: "Total index cache misses",
+		},
+		func() float64 {
+			if m := d.DB().IndexCacheMetrics(); m != nil {
+				return float64(m.Misses())
+			}
+			return 0
+		},
+	))
+	safeRegister(d.promRegistry, prometheus.NewGaugeFunc(
+		prometheus.GaugeOpts{
+			Name: badgerMetricNamePrefix + "index_cache_hit_ratio",
+			Help: "Index cache hit ratio (0.0-1.0)",
+		},
+		func() float64 {
+			if m := d.DB().IndexCacheMetrics(); m != nil {
+				return m.Ratio()
+			}
+			return 0
+		},
+	))
 }

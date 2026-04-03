@@ -355,10 +355,13 @@ func (d *BlobStoreBadger) init() error {
 		// We do this so we don't have to add guards around every log operation
 		d.logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
 	}
-	// Configure metrics
-	if d.promRegistry != nil {
-		d.registerBlobMetrics()
+	// Configure metrics — fall back to the default registry so that
+	// plugins created via NewFromCmdlineOptions (which does not
+	// receive a prometheus.Registerer) still export metrics.
+	if d.promRegistry == nil {
+		d.promRegistry = prometheus.DefaultRegisterer
 	}
+	d.registerBlobMetrics()
 	// Configure GC
 	if d.gcEnabled {
 		d.gcTicker = time.NewTicker(5 * time.Minute)
