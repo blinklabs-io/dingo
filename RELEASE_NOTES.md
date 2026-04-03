@@ -3,7 +3,7 @@
 
 ## v0.31.0 (April 3, 2026)
 
-**Title:** Updates and refinements
+**Title:** Storage safeguards and smarter peer sync
 
 **Date:** April 3, 2026
 
@@ -11,33 +11,35 @@
 
 Hi folks! Here’s what we shipped in v0.31.0.
 
-<details>
-<summary>Internal: raw release notes</summary>
 
-```json
-{
-  "✨ What's New": [
-    "You can now configure and enforce immutable node storage settings so your node won’t accidentally reopen a database with incompatible settings.",
-    "The node can now discover peers via the ledger earlier and with more observable behavior during reconciliation.",
-    "Transaction filtering is now powered by a shared evaluation engine so “submit” and “watch” behave consistently and report clearer outcomes."
-  ],
-  "💪 Improvements": [
-    "Chain-sync progress logs are now quieter when you are effectively caught up so routine operation is less noisy.",
-    "Peer selection is now more resilient against lagging nodes, improving time-to-sync and reducing wasted work.",
-    "CI and workflow behavior has been updated along with documentation of other v0.30.0 changes so releases are easier to understand and reproduce.",
-    "Prometheus metrics integration now works more smoothly out of the box and exposes more cache visibility.",
-    "SQLite resource reporting and error diagnostics are more accurate and robust during operation."
-  ],
-  "🔧 Fixes": [
-    "Fork handling is now safer and avoids unnecessary rollback work in common fork-extension cases.",
-    "The mempool now rejects transactions earlier when their validity interval cannot be valid yet, reducing wasted processing and clearer failure behavior.",
-    "A security dependency has been updated to include the latest upstream fixes."
-  ]
-}
+### ✨ What's New
 
-```
+- **Immutable storage settings:** Upgrades are safer because the node now persists storage mode and network metadata and refuses to open a database if they don’t match your current `--storage-mode` configuration.
+- **Earlier ledger peer discovery:** Peer discovery can start sooner because reconciliation now invokes ledger-based discovery earlier with debug logs and configurable target and bound settings.
+- **Shared transaction filtering (`TxPredicate`):** Transaction submit and watch are more consistent because filtering now uses a shared `TxPredicate` evaluation engine with clearer outcomes.
 
-</details>
+### 💪 Improvements
+
+- **Quieter near-tip chain sync logs:** Routine operation is less noisy because chain-sync progress logging now pauses once you’re at least 99.9% synced.
+- **Smarter peer lag filtering:** Time-to-sync can be better because peer selection now skips nodes that are far behind the best known tip using a `securityParam`-based filter.
+- **Smoother Prometheus defaults and cache visibility:** Metrics setup is simpler because the node now uses the default Prometheus registry when none is provided and exports Badger cache gauges.
+- **More accurate SQLite disk reporting:** Troubleshooting is easier because SQLite disk size reporting and error diagnostics are now more accurate.
+- **Clearer CI and release documentation:** Release automation is easier to follow because workflow behavior and related documentation were refined.
+
+### 🔧 Fixes
+
+- **Safer fork extension handling:** Fork recovery is smoother because blockfetch now restarts cleanly on forks and skips unnecessary rollbacks when a fork extends from your local tip.
+- **Earlier validity-interval rejection:** Mempool processing is more efficient because transactions whose validity interval starts after the current tip slot are rejected up front.
+- **Security dependency update:** Security stays solid because `github.com/go-jose/go-jose/v4` was updated to v4.1.4.
+
+### 📋 What You Need to Know
+
+- **No action required for most users:** You're all set—just upgrade to v0.31.0.
+- **Operators changing storage settings:** If you change storage mode or network for an existing database, the node will now fail fast to prevent opening it with incompatible settings.
+
+### 🙏 Thank You
+
+Thank you for trying!
 
 ---
 
