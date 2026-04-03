@@ -41,6 +41,14 @@ var electionTestNonce = func() []byte {
 	return nonce
 }()
 
+func makeDistinctNonce(nonce []byte) []byte {
+	distinct := append([]byte(nil), nonce...)
+	if len(distinct) > 0 {
+		distinct[0] ^= 0xff
+	}
+	return distinct
+}
+
 // electionTestVRFSeed is a 32-byte VRF seed for election tests.
 var electionTestVRFSeed = []byte("election_vrf_seed_32_bytes_ok!!!")
 
@@ -441,8 +449,7 @@ func TestElectionPrecomputesNextEpochAtStartupWhenNonceReady(t *testing.T) {
 	epochProvider := newMockEpochProvider()
 	epochProvider.currentEpoch.Store(10)
 	epochProvider.nextEpochReady.Store(11)
-	electionTestNonce11 := append([]byte(nil), electionTestNonce...)
-	electionTestNonce11[0] ^= 0xff
+	electionTestNonce11 := makeDistinctNonce(electionTestNonce)
 	epochProvider.SetEpochNonceForEpoch(11, electionTestNonce11)
 
 	eventBus := event.NewEventBus(nil, nil)
@@ -488,8 +495,7 @@ func TestElectionZeroPoolStake(t *testing.T) {
 
 	epochProvider := newMockEpochProvider()
 	epochProvider.currentEpoch.Store(10)
-	electionTestNonce11 := append([]byte(nil), electionTestNonce...)
-	electionTestNonce11[0] ^= 0xff
+	electionTestNonce11 := makeDistinctNonce(electionTestNonce)
 	epochProvider.SetEpochNonceForEpoch(11, electionTestNonce11)
 
 	eventBus := event.NewEventBus(nil, nil)
@@ -527,8 +533,7 @@ func TestElectionShouldProduceBlock(t *testing.T) {
 	// we reliably get leader slots despite the small sample size.
 	epochProvider := newMockEpochProvider()
 	epochProvider.currentEpoch.Store(10)
-	electionTestNonce11 := append([]byte(nil), electionTestNonce...)
-	electionTestNonce11[0] ^= 0xff
+	electionTestNonce11 := makeDistinctNonce(electionTestNonce)
 	epochProvider.SetEpochNonceForEpoch(11, electionTestNonce11)
 	epochProvider.activeSlotCoeff = 0.9
 
@@ -612,8 +617,7 @@ func TestElectionEpochTransition(t *testing.T) {
 
 	epochProvider := newMockEpochProvider()
 	epochProvider.currentEpoch.Store(10)
-	electionTestNonce11 := append([]byte(nil), electionTestNonce...)
-	electionTestNonce11[0] ^= 0xff
+	electionTestNonce11 := makeDistinctNonce(electionTestNonce)
 	epochProvider.SetEpochNonceForEpoch(11, electionTestNonce11)
 
 	eventBus := event.NewEventBus(nil, nil)
@@ -683,8 +687,7 @@ func TestElectionPrecomputesNextEpochOnNonceReady(t *testing.T) {
 
 	epochProvider := newMockEpochProvider()
 	epochProvider.currentEpoch.Store(10)
-	electionTestNonce11 := append([]byte(nil), electionTestNonce...)
-	electionTestNonce11[0] ^= 0xff
+	electionTestNonce11 := makeDistinctNonce(electionTestNonce)
 	epochProvider.SetEpochNonceForEpoch(11, electionTestNonce11)
 
 	store := newMockScheduleStore()
@@ -796,8 +799,7 @@ func TestElectionRollbackKeepsPrecomputedNextSchedule(t *testing.T) {
 	epochProvider := newMockEpochProvider()
 	epochProvider.activeSlotCoeff = 1.0
 	epochProvider.nextEpochReady.Store(11)
-	nextEpochNonce := append([]byte(nil), electionTestNonce...)
-	nextEpochNonce[0] ^= 0xff
+	nextEpochNonce := makeDistinctNonce(electionTestNonce)
 	epochProvider.SetEpochNonceForEpoch(11, nextEpochNonce)
 
 	eventBus := event.NewEventBus(nil, nil)

@@ -3,6 +3,7 @@ package node
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"path/filepath"
@@ -183,6 +184,7 @@ func TestCopyBlocksRaw_PreservesByronEbbLinkageAtOrigin(t *testing.T) {
 	)
 	importedEbb, err := cm.BlockByPoint(ebbPoint, nil)
 	require.NoError(t, err)
+	require.NotNil(t, importedEbb)
 	assert.Equal(t, ebbPoint.Hash, importedEbb.Hash)
 
 	nextPoint := ocommon.NewPoint(
@@ -191,6 +193,7 @@ func TestCopyBlocksRaw_PreservesByronEbbLinkageAtOrigin(t *testing.T) {
 	)
 	importedNext, err := cm.BlockByPoint(nextPoint, nil)
 	require.NoError(t, err)
+	require.NotNil(t, importedNext)
 	assert.Equal(t, ebbPoint.Hash, importedNext.PrevHash)
 }
 
@@ -199,7 +202,18 @@ func decodeImmutableBlockHeader(
 ) (gledger.BlockHeader, error) {
 	headerCbor, err := extractHeaderCbor(block.Cbor)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf(
+			"decodeImmutableBlockHeader: extractHeaderCbor failed: %w",
+			err,
+		)
 	}
-	return gledger.NewBlockHeaderFromCbor(block.Type, headerCbor)
+	header, err := gledger.NewBlockHeaderFromCbor(block.Type, headerCbor)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"decodeImmutableBlockHeader: NewBlockHeaderFromCbor failed for type %v: %w",
+			block.Type,
+			err,
+		)
+	}
+	return header, nil
 }

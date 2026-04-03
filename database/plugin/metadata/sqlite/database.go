@@ -512,12 +512,39 @@ func (d *MetadataStoreSqlite) DiskSize() (int64, error) {
 	}
 	var pageCount, pageSize int64
 	if err := d.DB().Raw("PRAGMA page_count").Scan(&pageCount).Error; err != nil {
-		return 0, err
+		return 0, fmt.Errorf("sqlite disk size: query PRAGMA page_count: %w", err)
 	}
 	if err := d.DB().Raw("PRAGMA page_size").Scan(&pageSize).Error; err != nil {
+		return 0, fmt.Errorf("sqlite disk size: query PRAGMA page_size: %w", err)
+	}
+	fileSize := func(path string, optional bool) (int64, error) {
+		info, err := os.Stat(path)
+		if err != nil {
+			if optional && errors.Is(err, fs.ErrNotExist) {
+				return 0, nil
+			}
+			return 0, fmt.Errorf("sqlite disk size: stat %s: %w", path, err)
+		}
+		return info.Size(), nil
+	}
+
+	metadataDbPath := filepath.Join(d.dataDir, "metadata.sqlite")
+	totalSize := pageCount * pageSize
+	dbFileSize, err := fileSize(metadataDbPath, false)
+	if err != nil {
 		return 0, err
 	}
-	return pageCount * pageSize, nil
+	if dbFileSize > totalSize {
+		totalSize = dbFileSize
+	}
+	for _, suffix := range []string{"-wal", "-shm"} {
+		extraSize, err := fileSize(metadataDbPath+suffix, true)
+		if err != nil {
+			return 0, err
+		}
+		totalSize += extraSize
+	}
+	return totalSize, nil
 }
 
 // Create creates a record

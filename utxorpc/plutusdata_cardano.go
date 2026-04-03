@@ -16,6 +16,7 @@ package utxorpc
 
 import (
 	"errors"
+	"fmt"
 	"math/big"
 
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
@@ -32,7 +33,7 @@ func plutusDatumCBORToCardano(raw []byte) (*cardano.PlutusData, error) {
 	}
 	pd, err := pdata.Decode(raw)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("decode plutus data: %w", err)
 	}
 	proto := plutusDataToCardano(pd)
 	if proto == nil {
