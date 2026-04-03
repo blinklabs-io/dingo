@@ -352,6 +352,10 @@ func (s *submitServiceServer) WatchMempool(
 		),
 	)
 
+	var predTree *txPredicateNode
+	if predicate != nil {
+		predTree = txPredicateFromSubmit(predicate)
+	}
 	// Channel to propagate errors from the event handler
 	errCh := make(chan error, 1)
 
@@ -413,10 +417,7 @@ func (s *submitServiceServer) WatchMempool(
 			resp.Tx = record
 
 			shouldSend := predicate == nil ||
-				s.utxorpc.matchesTxPattern(
-					tx,
-					predicate.GetMatch().GetCardano(),
-				)
+				s.utxorpc.matchTxPredicateNode(tx, predTree)
 			if !shouldSend {
 				return
 			}
@@ -465,13 +466,17 @@ func (s *submitServiceServer) WatchMempool(
 	}
 }
 
-// matchesTxPattern checks whether a transaction matches the given
-// TxPattern (address and asset filters). This is shared between
-// WatchMempool (submit) and WatchTx (watch) endpoints.
+// matchesTxPattern classifies a tx against a Cardano TxPattern.
+// predUnevaluable is returned when the filter cannot be applied (no usable
+// address constraint, bad address bytes, etc.), so composite not() does not
+// treat it as a definite non-match.
 func (u *Utxorpc) matchesTxPattern(
 	tx gledger.Transaction,
 	pattern *cardano.TxPattern,
-) bool {
+) predOutcome {
+	if pattern == nil {
+		return predUnevaluable
+	}
 	addressPattern := pattern.GetHasAddress()
 	mintAssetPattern := pattern.GetMintsAsset()
 	moveAssetPattern := pattern.GetMovesAsset()
@@ -489,7 +494,7 @@ func (u *Utxorpc) matchesTxPattern(
 					"failed to decode exact address",
 					"error", err,
 				)
-				return false
+				return predUnevaluable
 			}
 			addresses = append(addresses, addr)
 		}
@@ -505,7 +510,7 @@ func (u *Utxorpc) matchesTxPattern(
 					"failed to decode payment part",
 					"error", err,
 				)
-				return false
+				return predUnevaluable
 			}
 			addresses = append(addresses, paymentAddr)
 		}
@@ -521,7 +526,7 @@ func (u *Utxorpc) matchesTxPattern(
 					"failed to decode delegation part",
 					"error", err,
 				)
-				return false
+				return predUnevaluable
 			}
 			addresses = append(addresses, delegationAddr)
 		}
@@ -535,9 +540,9 @@ func (u *Utxorpc) matchesTxPattern(
 		assetPatterns = append(assetPatterns, moveAssetPattern)
 	}
 
-	// If no address filter specified, no match via predicate
+	// No usable address filter: cannot evaluate this predicate.
 	if len(addresses) == 0 {
-		return false
+		return predUnevaluable
 	}
 
 	// Convert everything to utxos for matching
@@ -591,11 +596,11 @@ func (u *Utxorpc) matchesTxPattern(
 			}
 			// Address matched; check asset patterns
 			if len(assetPatterns) == 0 {
-				return true
+				return predMatch
 			}
 			for _, assetPattern := range assetPatterns {
 				if assetPattern == nil {
-					return true
+					return predMatch
 				}
 				for _, policyId := range utxo.Assets().Policies() {
 					if !bytes.Equal(
@@ -611,12 +616,12 @@ func (u *Utxorpc) matchesTxPattern(
 							asset,
 							assetPattern.GetAssetName(),
 						) {
-							return true
+							return predMatch
 						}
 					}
 				}
 			}
 		}
 	}
-	return false
+	return predNoMatch
 }
