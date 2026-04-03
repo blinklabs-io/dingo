@@ -661,11 +661,16 @@ func (cs *ChainSelector) selectBestChainLocked() *ouroboros.ConnectionId {
 }
 
 // bestKnownBlockNumber returns the highest block number reported by any
-// selectable peer. Used to skip peers that are far behind the network tip
-// during catch-up.
+// eligible, non-stale peer. Used to skip peers that are far behind the
+// network tip during catch-up. Only considers peers that pass eligibility
+// and staleness checks to avoid letting an ineligible outlier suppress
+// valid peer selection.
 func (cs *ChainSelector) bestKnownBlockNumber() uint64 {
 	var best uint64
-	for _, pt := range cs.peerTips {
+	for connId, pt := range cs.peerTips {
+		if !cs.isConnectionEligible(connId) || cs.isPeerTipStale(pt) {
+			continue
+		}
 		if pt.Tip.BlockNumber > best {
 			best = pt.Tip.BlockNumber
 		}
