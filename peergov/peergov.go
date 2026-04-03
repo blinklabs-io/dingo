@@ -35,6 +35,7 @@ const (
 	defaultTestCooldown                 = 5 * time.Minute
 	defaultDenyDuration                 = 30 * time.Minute
 	defaultLedgerPeerRefreshInterval    = 1 * time.Hour
+	defaultLedgerPeerTarget             = 20
 
 	// Default peer targets match cardano-node config.json defaults.
 	defaultTargetNumberOfKnownPeers       = 150
@@ -95,9 +96,10 @@ type PeerGovernor struct {
 	denyList              map[string]time.Time // address -> expiry time
 	peers                 []*Peer
 	config                PeerGovernorConfig
-	lastLedgerPeerRefresh atomic.Int64 // UnixNano timestamp of last ledger peer discovery
-	bootstrapExited       bool         // Whether bootstrap peers have been exited
-	lastBootstrapExit     time.Time    // Timestamp of most recent bootstrap exit
+	lastLedgerPeerRefresh atomic.Int64        // UnixNano timestamp of last ledger peer discovery
+	ledgerKnownAddrs      map[string]struct{} // addresses seen from ledger discovery
+	bootstrapExited       bool                // Whether bootstrap peers have been exited
+	lastBootstrapExit     time.Time           // Timestamp of most recent bootstrap exit
 	mu                    sync.Mutex
 }
 
@@ -120,6 +122,7 @@ type PeerGovernorConfig struct {
 	LedgerPeerProvider        LedgerPeerProvider // Provider for ledger peer information
 	UseLedgerAfterSlot        int64              // Slot after which to enable ledger peers (-1 = disabled)
 	LedgerPeerRefreshInterval time.Duration      // How often to refresh ledger peers
+	LedgerPeerTarget          int                // Negative disables ledger discovery, 0 uses defaultLedgerPeerTarget, positive uses that target
 
 	// Peer targets (0 = use default, -1 = unlimited)
 	// These are goals the system works toward, not hard limits.
@@ -196,6 +199,11 @@ func NewPeerGovernor(cfg PeerGovernorConfig) *PeerGovernor {
 	if cfg.LedgerPeerRefreshInterval == 0 {
 		cfg.LedgerPeerRefreshInterval = defaultLedgerPeerRefreshInterval
 	}
+	// Ledger peer target mapping: negative disables discovery, 0 uses
+	// defaultLedgerPeerTarget, positive uses the explicit target.
+	if cfg.LedgerPeerTarget == 0 {
+		cfg.LedgerPeerTarget = defaultLedgerPeerTarget
+	}
 	// Peer targets: 0 means use default, -1 means unlimited
 	if cfg.TargetNumberOfKnownPeers == 0 {
 		cfg.TargetNumberOfKnownPeers = defaultTargetNumberOfKnownPeers
@@ -270,9 +278,10 @@ func NewPeerGovernor(cfg PeerGovernorConfig) *PeerGovernor {
 	}
 	cfg.Logger = cfg.Logger.With("component", "peergov")
 	p := &PeerGovernor{
-		config:   cfg,
-		peers:    []*Peer{},
-		denyList: make(map[string]time.Time),
+		config:           cfg,
+		peers:            []*Peer{},
+		denyList:         make(map[string]time.Time),
+		ledgerKnownAddrs: make(map[string]struct{}),
 	}
 	if cfg.PromRegistry != nil {
 		p.initMetrics()
