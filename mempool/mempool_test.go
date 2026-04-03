@@ -1383,6 +1383,73 @@ func TestMempool_MempoolFull(t *testing.T) {
 }
 
 // =============================================================================
+// TipSlotFunc / Validity Interval Tests
+// =============================================================================
+
+// testTxWithValidityStartHex is a Conway TX with ValidityIntervalStart = 50000000.
+// Derived from testTxHex with CBOR key 8 added to the body map.
+const testTxWithValidityStartHex = "84a8081a02faf08000818258200c07395aed88bdddc6de0518d1462dd0ec7e52e1e3a53599f7cdb24dc80237f8010181a20058390073a817bb425cbe179af824529d96ceb93c41c3ab507380095d1be4ebd64c93ef0094f5c179e5380109ebeef022245944e3914f5bcca3a793011a02dc6c00021a001e84800b5820192d0c0c2c2320e843e080b5f91a9ca35155bc50f3ef3bfdbc72c1711b86367e0d818258203af629a5cd75f76d0cc21172e1193b85f199ca78e837c3965d77d7d6bc90206b0010a20058390073a817bb425cbe179af824529d96ceb93c41c3ab507380095d1be4ebd64c93ef0094f5c179e5380109ebeef022245944e3914f5bcca3a793011a006acfc0111a002dc6c0a4008182582025fcacade3fffc096b53bdaf4c7d012bded303c9edbee686d24b372dae60aa1b58409da928a064ff9f795110bdcb8ab05d2a7a023dd15ebc42044f102ce366c0c9077024c7951c2d63584b7d2eea7bf1da4a7453bde4c99dd083889c1e2e2e3db804048119077a0581840000187b820a0a06814746010000222601f4f6"
+
+func TestMempool_AddTransaction_RejectsValidityIntervalBeyondTip(t *testing.T) {
+	m := NewMempool(MempoolConfig{
+		Logger:          slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		EventBus:        event.NewEventBus(nil, nil),
+		PromRegistry:    prometheus.NewRegistry(),
+		Validator:       newMockValidator(),
+		MempoolCapacity: 1024 * 1024,
+		TipSlotFunc:     func() uint64 { return 40_000_000 },
+	})
+	defer m.Stop(context.Background())
+
+	txBytes, err := hex.DecodeString(testTxWithValidityStartHex)
+	require.NoError(t, err)
+
+	// TX has ValidityIntervalStart=50000000, tip is at 40000000 → reject
+	err = m.AddTransaction(uint(conway.EraIdConway), txBytes)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "validity interval start")
+	assert.Equal(t, 0, len(m.Transactions()), "rejected TX should not be in mempool")
+}
+
+func TestMempool_AddTransaction_AcceptsValidityIntervalAtOrBelowTip(t *testing.T) {
+	m := NewMempool(MempoolConfig{
+		Logger:          slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		EventBus:        event.NewEventBus(nil, nil),
+		PromRegistry:    prometheus.NewRegistry(),
+		Validator:       newMockValidator(),
+		MempoolCapacity: 1024 * 1024,
+		TipSlotFunc:     func() uint64 { return 60_000_000 },
+	})
+	defer m.Stop(context.Background())
+
+	txBytes, err := hex.DecodeString(testTxWithValidityStartHex)
+	require.NoError(t, err)
+
+	// TX has ValidityIntervalStart=50000000, tip is at 60000000 → accept
+	err = m.AddTransaction(uint(conway.EraIdConway), txBytes)
+	require.NoError(t, err)
+	assert.Equal(t, 1, len(m.Transactions()), "accepted TX should be in mempool")
+}
+
+func TestMempool_AddTransaction_NoValidityStart_BypassesCheck(t *testing.T) {
+	m := NewMempool(MempoolConfig{
+		Logger:          slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		EventBus:        event.NewEventBus(nil, nil),
+		PromRegistry:    prometheus.NewRegistry(),
+		Validator:       newMockValidator(),
+		MempoolCapacity: 1024 * 1024,
+		TipSlotFunc:     func() uint64 { return 1 }, // very low tip
+	})
+	defer m.Stop(context.Background())
+
+	// Original test TX has ValidityIntervalStart=0 (no lower bound)
+	txBytes := getTestTxBytes(t)
+	err := m.AddTransaction(uint(conway.EraIdConway), txBytes)
+	require.NoError(t, err)
+	assert.Equal(t, 1, len(m.Transactions()), "TX with no validity start should bypass check")
+}
+
+// =============================================================================
 // Stress/Load Tests
 // =============================================================================
 
