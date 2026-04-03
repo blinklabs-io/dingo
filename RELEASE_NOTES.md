@@ -14,21 +14,21 @@ Hi folks! Here’s what we shipped in v0.31.0.
 ```json
 {
   "✨ What's New": [
-    "You can now lock in key storage settings so your node stays consistent across restarts and machines. A new global `--storage-mode` flag is persisted alongside immutable node metadata (including storage mode and network), and the database will refuse to open if those settings change after the initial sync."
+    "You can now lock in key storage settings so your node stays consistent across restarts and machines."
   ],
   "💪 Improvements": [
-    "Working with long lists of results is now smoother and more predictable when calling the API. The v0.30.0 release notes now document the API pagination behavior along with related workflow and CI behavior changes.",
-    "Peer discovery now gives you more control and better visibility so the node can find healthy peers faster. The reconcile flow invokes ledger-based peer discovery earlier, adds debug logging for discovery, and introduces configurable ledger peer targets plus bound and shuffle behavior for the discovered peer set.",
-    "Transaction filtering is now more consistent across features so you get the same match behavior whether you are submitting or watching transactions. A shared TxPredicate evaluation engine is used for both submit and watch, including three-way match outcomes and correct handling of unevaluable filters, and it generalizes predicate construction across multiple protocol sources.",
-    "Monitoring now works more reliably out of the box and exposes more useful cache telemetry. The node falls back to the default Prometheus registry when none is provided, registers collectors safely, and exports Badger block and index cache metrics as Prometheus gauges.",
-    "Sync logs are now less noisy near the end of chain catch-up so you can focus on meaningful progress updates. A near-tip guard skips chain sync progress logging when reported sync progress is at or above 99.9%.",
-    "Disk usage reporting for SQLite is now more accurate and error messages are clearer when something goes wrong. The SQLite disk size calculation was improved and error reporting was hardened to provide better diagnostics.",
-    "Dependency security and stability are kept up to date so you benefit from upstream fixes. The `github.com/go-jose/go-jose/v4` dependency was updated from v4.1.3 to v4.1.4."
+    "Working with long lists of results is now smoother and more predictable when calling the API.",
+    "Peer discovery now gives you more control and better visibility so the node can find healthy peers faster.",
+    "Transaction filtering is now more consistent across features so you get the same match behavior whether you are submitting or watching transactions.",
+    "Monitoring now works more reliably out of the box and exposes more useful cache telemetry.",
+    "Sync logs are now less noisy near the end of chain catch-up so you can focus on meaningful progress updates.",
+    "Disk usage reporting for SQLite is now more accurate and error messages are clearer when something goes wrong.",
+    "Dependency security and stability are kept up to date so you benefit from upstream fixes."
   ],
   "🔧 Fixes": [
-    "Fork handling is now more resilient so the node can recover and continue syncing without getting stuck in a bad state. The node resets and restarts blockfetch state on forks, skips rollback when a fork extends directly from the current local tip (adding fork headers and triggering blockfetch instead), and uses helpers like `bestKnownBlockNumber` to manage fork-related comparisons.",
-    "The node is now better at avoiding peers that cannot help it catch up, which reduces wasted connections and improves sync quality. A security-parameter-based filter skips peers that are far behind the best known tip so peer selection stays aligned with current chain progress.",
-    "The mempool now rejects transactions that are not yet valid at the current tip so invalid future-dated submissions do not clog up processing. A tip-slot-based pre-check compares the transaction validity interval start against the node’s ledger tip slot and includes tests to verify the behavior."
+    "Fork handling is now more resilient so the node can recover and continue syncing without getting stuck in a bad state.",
+    "The node is now better at avoiding peers that cannot help it catch up, which reduces wasted connections and improves sync quality.",
+    "The mempool now rejects transactions that are not yet valid at the current tip so invalid future-dated submissions do not clog up processing."
   ]
 }
 
