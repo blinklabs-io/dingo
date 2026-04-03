@@ -3086,6 +3086,12 @@ func (ls *LedgerState) logSyncProgress(currentSlot uint64) {
 			pct = 100
 		}
 	}
+	// Suppress progress logging when we're near the tip
+	if pct >= 99.9 {
+		ls.syncProgressLastLog = now
+		ls.syncProgressLastSlot = currentSlot
+		return
+	}
 	ls.config.Logger.Info(
 		fmt.Sprintf(
 			"sync progress: slot %d/%d (%.1f%%), %.0f slots/sec",
