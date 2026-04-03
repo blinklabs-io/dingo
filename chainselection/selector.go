@@ -586,6 +586,27 @@ func (cs *ChainSelector) isPeerSelectableLocked(
 		}
 		return false
 	}
+	// Skip peers whose tip is far behind the best known peer tip.
+	// During catch-up, switching to a behind peer causes pipeline
+	// stalls and dropped rollbacks that cost minutes of sync time.
+	// Use securityParam (K) as the threshold — peers within K blocks
+	// of the best are acceptable (normal fork variance), but peers
+	// further behind are not useful for syncing.
+	if cs.securityParam > 0 {
+		bestBlock := cs.bestKnownBlockNumber()
+		if bestBlock > 0 && peerTip.Tip.BlockNumber+cs.securityParam < bestBlock {
+			if logSkip {
+				cs.config.Logger.Debug(
+					"skipping peer behind best known tip",
+					"connection_id", connId.String(),
+					"peer_block_number", peerTip.Tip.BlockNumber,
+					"best_known_block", bestBlock,
+					"security_param", cs.securityParam,
+				)
+			}
+			return false
+		}
+	}
 	if cs.isPeerTipStale(peerTip) {
 		if logSkip {
 			cs.config.Logger.Debug(
@@ -637,6 +658,19 @@ func (cs *ChainSelector) selectBestChainLocked() *ouroboros.ConnectionId {
 		return nil
 	}
 	return &bestConnId
+}
+
+// bestKnownBlockNumber returns the highest block number reported by any
+// selectable peer. Used to skip peers that are far behind the network tip
+// during catch-up.
+func (cs *ChainSelector) bestKnownBlockNumber() uint64 {
+	var best uint64
+	for _, pt := range cs.peerTips {
+		if pt.Tip.BlockNumber > best {
+			best = pt.Tip.BlockNumber
+		}
+	}
+	return best
 }
 
 func (cs *ChainSelector) isConnectionEligible(
