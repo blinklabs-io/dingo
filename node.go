@@ -596,6 +596,7 @@ func (n *Node) Run(ctx context.Context) error {
 		EventBus:           n.eventBus,
 		PromRegistry:       n.config.promRegistry,
 		Validator:          n.ledgerState,
+		TipSlotFunc:        func() uint64 { return n.ledgerState.Tip().Point.Slot },
 	},
 	)
 	started = append(started, func() { //nolint:contextcheck
