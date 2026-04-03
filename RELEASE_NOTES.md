@@ -18,7 +18,7 @@ Hi folks! Here’s what we shipped in v0.31.0.
 ### 💪 Improvements
 
 - **Clearer pagination docs:** Large result sets are easier to work with because the v0.30.0 notes now document API pagination behavior.
-- **More controlled peer discovery:** Catch-up can be smoother because ledger-based discovery runs earlier with improved debug logging and configurable targets.
+- **More controlled peer discovery:** Catch-up can be smoother because ledger-based discovery runs earlier with Handy debug logging and configurable targets.
 - **Consistent transaction filtering:** Filtering is more predictable because submit and watch now share the same TxPredicate evaluation behavior.
 - **More reliable Prometheus setup:** Monitoring is steadier because Dingo falls back to the default Prometheus registry and exports additional Badger cache metrics.
 - **Quieter near-tip sync logs:** Progress is easier to follow because chain sync skips progress logging at or above 99.9%.
