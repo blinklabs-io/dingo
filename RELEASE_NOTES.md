@@ -16,7 +16,7 @@ Hi folks! Here’s what we shipped in v0.31.0.
 
 - **Immutable storage settings:** Upgrades are safer because the node now persists storage mode and network metadata and refuses to open a database if they don’t match your current `--storage-mode` configuration.
 - **Earlier ledger peer discovery:** Peer discovery can start sooner because reconciliation now invokes ledger-based discovery earlier with debug logs and configurable target and bound settings.
-- **Shared transaction filtering (`TxPredicate`):** Transaction submit and watch are more consistent because filtering now uses a shared `TxPredicate` evaluation engine with clearer outcomes.
+- **Shared transaction filtering (`TxPredicate`):** Transaction submit and watch are more consistent because filtering now uses a shared `TxPredicate` evaluation engine.
 
 ### 💪 Improvements
 
