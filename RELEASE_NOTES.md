@@ -13,11 +13,11 @@ Hi folks! Here’s what we shipped in v0.31.1.
 
 ### ✨ What's New
 
-- **Clearer rollback recovery status:** Recovery is easier to understand because chain recovery now reports clearer outcomes after a local rollback.
+- **Clearer rollback recovery status:** Recovery is simpler to understand because chain recovery now reports clearer outcomes after a local rollback.
 
 ### 💪 Improvements
 
-- **More consistent recovery staleness checks:** Recovery decisions are more consistent because staleness checks are now based on the primary chain tip.
+- **More consistent recovery staleness checks:** Recovery decisions are more rock-solid because staleness checks are now based on the primary chain tip.
 
 ### 🔧 Fixes
 
