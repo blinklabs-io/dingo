@@ -1,6 +1,31 @@
 # Release Notes
 
 
+## v0.31.1 (April 4, 2026)
+
+**Title:** Reliability tweaks and small fixes
+
+**Date:** April 4, 2026
+
+**Version:** v0.31.1
+
+Hi folks! Here’s what we shipped in v0.31.1.
+
+```json
+{
+  "💪 Improvements": [
+    "Chain recovery now gives operators clearer insight into whether a rollback replay actually ran or whether the node was already beyond the rollback point. Technically, this adds rollback tracking plus a richer `RecoverAfterLocalRollback` result, and updates chainsync logic and test coverage to consume that result so recovery paths can be distinguished reliably."
+  ],
+  "🔧 Fixes": [
+    "Staleness detection during chain sync is now based on the primary chain tip so health signals remain accurate during and after rollback-related recovery. Internally, chainsync handling was adjusted to compute staleness from the primary chain tip (rather than an indirectly derived value), and the associated tests were updated to prevent regressions."
+  ]
+}
+
+```
+
+---
+
+
 ## v0.31.0 (April 3, 2026)
 
 **Title:** Storage safeguards and smarter peer sync
