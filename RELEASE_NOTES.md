@@ -11,6 +11,10 @@
 
 Hi folks! Here’s what we shipped in v0.31.1.
 
+### ✨ What's New
+
+- **No new features:** This release focuses on reliability improvements and fixes.
+
 ### 💪 Improvements
 
 - **Clearer rollback recovery status:** Troubleshooting is simpler because chain recovery now tells you whether a rollback replay actually ran or whether the node was already beyond the rollback point.
@@ -18,6 +22,14 @@ Hi folks! Here’s what we shipped in v0.31.1.
 ### 🔧 Fixes
 
 - **More accurate chain-sync staleness checks:** Monitoring is more reliable because staleness detection during chain sync is now based on the primary chain tip.
+
+### 📋 What You Need to Know
+
+- **No action required:** You're all set—just upgrade to v0.31.1.
+
+### 🙏 Thank You
+
+Thank you for trying!
 
 ---
 
