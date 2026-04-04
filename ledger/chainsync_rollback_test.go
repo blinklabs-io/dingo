@@ -460,12 +460,13 @@ func TestRecoverAfterLocalRollbackReplaysPeerHeaderHistory(
 		BlockHeader: header2,
 	})
 
-	recovered := fixture.ls.RecoverAfterLocalRollback(
+	result := fixture.ls.RecoverAfterLocalRollback(
 		[]ouroboros.ConnectionId{fixture.connId},
 		fixture.ancestorTip.Point,
 	)
 
-	require.True(t, recovered)
+	require.True(t, result.Recovered)
+	assert.False(t, result.SkipConnectionClose)
 	assert.Equal(t, 2, fixture.ls.chain.HeaderCount())
 	assert.True(
 		t,
@@ -523,12 +524,13 @@ func TestRecoverAfterLocalRollbackResetsStateWithoutTrackedClients(t *testing.T)
 		},
 	}
 
-	recovered := fixture.ls.RecoverAfterLocalRollback(
+	result := fixture.ls.RecoverAfterLocalRollback(
 		nil,
 		fixture.ancestorTip.Point,
 	)
 
-	require.False(t, recovered)
+	require.False(t, result.Recovered)
+	assert.False(t, result.SkipConnectionClose)
 	assert.Zero(t, fixture.ls.chain.HeaderCount())
 	assert.Zero(t, fixture.ls.headerMismatchCount)
 	assert.Nil(t, fixture.ls.rollbackHistory)
@@ -545,6 +547,74 @@ func TestRecoverAfterLocalRollbackResetsStateWithoutTrackedClients(t *testing.T)
 		t,
 		fixture.ls.activeBlockfetchConnId == (ouroboros.ConnectionId{}),
 	)
+}
+
+func TestRecoverAfterLocalRollbackDoesNotUsePreRollbackTipAsStalenessSignal(
+	t *testing.T,
+) {
+	fixture := newChainsyncRollbackFixture(t)
+
+	result := fixture.ls.RecoverAfterLocalRollback(
+		[]ouroboros.ConnectionId{fixture.connId},
+		fixture.ancestorTip.Point,
+	)
+
+	require.False(t, result.Recovered)
+	assert.False(t, result.SkipConnectionClose)
+	assert.Zero(t, result.PrimaryChainTipSlot)
+}
+
+func TestRecoverAfterLocalRollbackReturnsEmptyResultWhenChainNil(t *testing.T) {
+	fixture := newChainsyncRollbackFixture(t)
+	fixture.ls.chain = nil
+
+	result := fixture.ls.RecoverAfterLocalRollback(
+		[]ouroboros.ConnectionId{fixture.connId},
+		fixture.ancestorTip.Point,
+	)
+
+	assert.Equal(t, LocalRollbackRecoveryResult{}, result)
+}
+
+func TestRecoverAfterLocalRollbackSkipsConnectionCloseWhenPrimaryChainTipPastRollbackPoint(
+	t *testing.T,
+) {
+	fixture := newChainsyncRollbackFixture(t)
+
+	queuedHeader := mockHeader{
+		hash:        lcommon.NewBlake2b256(testHashBytes("rollback-stale-queued")),
+		prevHash:    lcommon.NewBlake2b256(fixture.currentTip.Point.Hash),
+		blockNumber: fixture.currentTip.BlockNumber + 1,
+		slot:        fixture.currentTip.Point.Slot + 1,
+	}
+	require.NoError(t, fixture.ls.chain.AddBlockHeader(queuedHeader))
+
+	fixture.ls.currentTip = fixture.ancestorTip
+	fixture.ls.currentTipBlockNonce = append(
+		[]byte(nil),
+		fixture.ancestorNonce...,
+	)
+	fixture.ls.headerMismatchCount = 7
+	fixture.ls.lastLocalRollbackSeq = 1
+	fixture.ls.lastLocalRollbackPoint = ocommon.Point{
+		Slot: fixture.ancestorTip.Point.Slot,
+		Hash: append([]byte(nil), fixture.ancestorTip.Point.Hash...),
+	}
+
+	result := fixture.ls.RecoverAfterLocalRollback(
+		[]ouroboros.ConnectionId{fixture.connId},
+		fixture.ancestorTip.Point,
+	)
+
+	require.False(t, result.Recovered)
+	assert.True(t, result.SkipConnectionClose)
+	assert.Equal(
+		t,
+		fixture.currentTip.Point.Slot,
+		result.PrimaryChainTipSlot,
+	)
+	assert.Equal(t, 1, fixture.ls.chain.HeaderCount())
+	assert.Equal(t, 7, fixture.ls.headerMismatchCount)
 }
 
 func TestHandleEventChainsyncBlockHeaderIgnoresStaleRollForwardBehindTip(

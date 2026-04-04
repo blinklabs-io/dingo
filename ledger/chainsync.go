@@ -38,6 +38,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/byron"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
@@ -1140,6 +1141,12 @@ func pointMatches(a, b ocommon.Point) bool {
 	return a.Slot == b.Slot && bytes.Equal(a.Hash, b.Hash)
 }
 
+type LocalRollbackRecoveryResult struct {
+	Recovered           bool
+	SkipConnectionClose bool
+	PrimaryChainTipSlot uint64
+}
+
 func (ls *LedgerState) recoverPeerHeaderHistoryFromPointLocked(
 	connId ouroboros.ConnectionId,
 	point ocommon.Point,
@@ -1186,19 +1193,33 @@ func (ls *LedgerState) recoverPeerHeaderHistoryFromPointLocked(
 // RecoverAfterLocalRollback resets chainsync-local queued state after a ledger
 // rollback, then replays any peer-local header history that still fits the new
 // tip. This keeps rollback recovery local to the node instead of re-entering
-// FindIntersect on live ChainSync sessions. It returns true when it seeded a
-// new local header fragment from peer history.
+// FindIntersect on live ChainSync sessions. The result reports whether peer
+// history was replayed and whether connection closure should be skipped because
+// the primary chain tip is already past the completed rollback point.
 func (ls *LedgerState) RecoverAfterLocalRollback(
 	connIds []ouroboros.ConnectionId,
 	point ocommon.Point,
-) bool {
+) LocalRollbackRecoveryResult {
 	ls.chainsyncMutex.Lock()
 	defer ls.chainsyncMutex.Unlock()
 
-	ls.resetChainsyncResyncState()
 	if ls.chain == nil {
-		return false
+		return LocalRollbackRecoveryResult{}
 	}
+	ls.RLock()
+	lastLocalRollbackSeq := ls.lastLocalRollbackSeq
+	lastLocalRollbackPoint := ls.lastLocalRollbackPoint
+	ls.RUnlock()
+	if lastLocalRollbackSeq > 0 &&
+		pointMatches(lastLocalRollbackPoint, point) {
+		if chainTipSlot := ls.PrimaryChainTipSlot(); chainTipSlot > point.Slot {
+			return LocalRollbackRecoveryResult{
+				SkipConnectionClose: true,
+				PrimaryChainTipSlot: chainTipSlot,
+			}
+		}
+	}
+	ls.resetChainsyncResyncState()
 
 	preferredConnIds := make([]ouroboros.ConnectionId, 0, len(connIds)+1)
 	seenConnIds := make(map[string]struct{}, len(connIds)+1)
@@ -1260,9 +1281,9 @@ func (ls *LedgerState) RecoverAfterLocalRollback(
 			}
 		}
 		ls.chainsyncBlockfetchMutex.Unlock()
-		return true
+		return LocalRollbackRecoveryResult{Recovered: true}
 	}
-	return false
+	return LocalRollbackRecoveryResult{}
 }
 
 func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
@@ -1408,10 +1429,16 @@ func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 	// far enough out from upstream tip
 	// Use security window as slot threshold if available
 	headersReady := headerCount + 1
-	localTipSlot := ls.Tip().Point.Slot
+	// Use the primary chain header tip so the slot and block-number gaps reflect
+	// fetched-but-unprocessed blocks that are already queued in ls.chain.
+	localChainTip := ochainsync.Tip{}
+	if ls.chain != nil {
+		localChainTip = ls.chain.HeaderTip()
+	}
+	localTipSlot := localChainTip.Point.Slot
 	blockGap := uint64(0)
-	if e.Tip.BlockNumber > ls.Tip().BlockNumber {
-		blockGap = e.Tip.BlockNumber - ls.Tip().BlockNumber
+	if e.Tip.BlockNumber > localChainTip.BlockNumber {
+		blockGap = e.Tip.BlockNumber - localChainTip.BlockNumber
 	}
 	if e.Tip.Point.Slot > localTipSlot &&
 		e.Tip.Point.Slot-localTipSlot >= blockfetchMinBatchGapSlots {
