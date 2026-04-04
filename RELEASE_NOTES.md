@@ -21,7 +21,7 @@ Hi folks! Here’s what we shipped in v0.31.1.
 
 ### 🔧 Fixes
 
-- **Rollback-aware recovery test coverage:** Reliability is more rock-solid because recovery and chain-sync tests now validate rollback-aware behavior.
+- **Rollback-aware recovery test coverage:** Reliability is more rock-solid because recovery and chainsync tests now validate rollback-aware behavior.
 
 ### 📋 What You Need to Know
 
