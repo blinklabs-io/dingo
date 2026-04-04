@@ -11,17 +11,13 @@
 
 Hi folks! Here’s what we shipped in v0.31.1.
 
-```json
-{
-  "💪 Improvements": [
-    "Chain recovery now gives operators clearer insight into whether a rollback replay actually ran or whether the node was already beyond the rollback point."
-  ],
-  "🔧 Fixes": [
-    "Staleness detection during chain sync is now based on the primary chain tip so health signals remain accurate during and after rollback-related recovery."
-  ]
-}
+### 💪 Improvements
 
-```
+- **Clearer rollback recovery status:** Troubleshooting is simpler because chain recovery now tells you whether a rollback replay actually ran or whether the node was already beyond the rollback point.
+
+### 🔧 Fixes
+
+- **More accurate chain-sync staleness checks:** Monitoring is more reliable because staleness detection during chain sync is now based on the primary chain tip.
 
 ---
 
