@@ -503,6 +503,8 @@ type LedgerState struct {
 	densityWindow                 []densityEntry // sliding window for chain density metric
 	lastAtTipRecoverySlot         uint64         // guards against infinite at-tip recovery loops
 	mithrilLedgerSlot             uint64         // blocks at or below this slot are Mithril-verified; skip validation
+	lastLocalRollbackSeq          uint64
+	lastLocalRollbackPoint        ocommon.Point
 
 	// Subscription IDs for event bus unsubscribe on close
 	chainsyncSubID           event.EventSubscriberId
@@ -1656,6 +1658,11 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 	if newPParams != nil {
 		ls.currentPParams = newPParams
 		ls.prevEraPParams = newPrevPParams
+	}
+	ls.lastLocalRollbackSeq++
+	ls.lastLocalRollbackPoint = ocommon.Point{
+		Slot: point.Slot,
+		Hash: append([]byte(nil), point.Hash...),
 	}
 	ls.currentTip = newTip
 	// If rolling back behind the Mithril trust boundary, clear it.
@@ -3639,6 +3646,26 @@ func (ls *LedgerState) ChainTipSlot() uint64 {
 	ls.RLock()
 	defer ls.RUnlock()
 	return ls.currentTip.Point.Slot
+}
+
+// PrimaryChainTip returns the tip of the primary chain. This can be ahead of
+// Tip() while the ledger pipeline is still replaying blocks into committed
+// metadata state.
+func (ls *LedgerState) PrimaryChainTip() ochainsync.Tip {
+	ls.RLock()
+	chain := ls.chain
+	ls.RUnlock()
+	if chain == nil {
+		return ochainsync.Tip{}
+	}
+	return chain.Tip()
+}
+
+// PrimaryChainTipSlot returns the slot number of the primary chain tip. This
+// can be ahead of ChainTipSlot() while the ledger pipeline is still replaying
+// blocks into committed metadata state.
+func (ls *LedgerState) PrimaryChainTipSlot() uint64 {
+	return ls.PrimaryChainTip().Point.Slot
 }
 
 // UpstreamTipSlot returns the latest known tip slot from upstream peers.

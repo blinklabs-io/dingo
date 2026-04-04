@@ -927,11 +927,20 @@ func (o *Ouroboros) SubscribeChainsyncResync(ctx context.Context) {
 				if o.LedgerState == nil {
 					return
 				}
-				recovered := o.LedgerState.RecoverAfterLocalRollback(
+				recovery := o.LedgerState.RecoverAfterLocalRollback(
 					connIds,
 					e.Point,
 				)
-				if recovered || len(connIds) == 0 {
+				if recovery.Recovered || len(connIds) == 0 {
+					return
+				}
+				if recovery.SkipConnectionClose {
+					o.config.Logger.Info(
+						"skipping connection closure: chain already past rollback point",
+						"component", "ouroboros",
+						"rollback_slot", e.Point.Slot,
+						"chain_tip_slot", recovery.PrimaryChainTipSlot,
+					)
 					return
 				}
 				// No recoverable peer history — close the affected
