@@ -22,7 +22,7 @@ Dingo is a high-performance Cardano blockchain node implementation in Go. This d
 - [Transaction Mempool](#transaction-mempool)
 - [Block Production](#block-production)
 - [Mithril Bootstrap](#mithril-bootstrap)
-- [API Servers](#api-servers)
+- [External Interfaces](#external-interfaces)
 - [Design Patterns](#design-patterns)
 - [Threading and Concurrency](#threading-and-concurrency)
 - [Configuration](#configuration)
@@ -79,7 +79,7 @@ graph TB
         Meta["MetadataStore<br/>sqlite / postgres / mysql"]
     end
 
-    subgraph "API Servers"
+    subgraph "External Interfaces"
         URPC["UTxO RPC<br/><i>utxorpc/</i>"]
         BFA["Blockfrost API<br/><i>blockfrost/</i>"]
         Mesh["Mesh API<br/><i>mesh/</i>"]
@@ -490,10 +490,10 @@ dingo/
 │   ├── submit.go        # Submit service
 │   ├── sync.go          # Sync service
 │   └── watch.go         # Watch service
-├── bark/                # Bark archive block storage
-│   ├── bark.go          # HTTP server for block archive access
-│   ├── archive.go       # Archive blob store interface
-│   └── blob.go          # Blob store adapter with security window
+├── bark/                # Bark Dingo-to-Dingo C2 and archive protocol
+│   ├── bark.go          # Bark server lifecycle and transport setup
+│   ├── archive.go       # Archive service interface
+│   └── blob.go          # Remote archive blob adapter with security window
 ├── mithril/             # Mithril snapshot bootstrap
 │   ├── bootstrap.go     # Bootstrap orchestration
 │   ├── client.go        # Mithril aggregator client
@@ -538,7 +538,7 @@ type Node struct {
     ledgerState    *ledger.LedgerState            // UTXO/state tracking
     snapshotMgr    *snapshot.Manager              // Stake snapshot capture
     utxorpc        *utxorpc.Utxorpc               // UTxO RPC server
-    bark           *bark.Bark                     // Block archive server
+    bark           *bark.Bark                     // Bark C2/archive server
     blockfrostAPI  *blockfrost.Blockfrost         // Blockfrost REST API
     meshAPI        *mesh.Server                   // Mesh (Rosetta) API
     ouroboros      *ouroboros.Ouroboros            // Protocol handlers
@@ -557,7 +557,7 @@ When `Node.Run()` is called, components are initialized in this order:
  3. ChainManager initialization
  4. Ouroboros protocol handler creation
  5. LedgerState creation (UTXO tracking, validation)
- 6. Bark blob store adapter (if configured)
+ 6. Bark remote archive adapter (if configured)
  7. LedgerState start
  8. Snapshot manager start (captures genesis snapshot)
  9. Mempool setup
@@ -567,7 +567,7 @@ When `Node.Run()` is called, components are initialized in this order:
 13. Stalled client recycler (background goroutine)
 14. PeerGovernor (topology + churn + ledger peers)
 15. UTxO RPC server (if port configured)
-16. Bark archive server (if port configured)
+16. Bark C2/archive server (if port configured)
 17. Blockfrost API (if port configured)
 18. Mesh API (if port configured)
 19. Block forger + leader election (if block producer mode)
@@ -582,7 +582,7 @@ Graceful shutdown proceeds in phases:
 Phase 1: Stop accepting new work
   Block forger, leader election, chain selector,
   peer governor, snapshot manager, UTxO RPC,
-  Bark, Blockfrost API, Mesh API
+  Bark C2/archive server, Blockfrost API, Mesh API
 
 Phase 2: Drain and close connections
   Mempool, ConnectionManager
@@ -679,7 +679,7 @@ Dingo uses a dual-layer storage architecture with pluggable backends:
 Dingo supports two storage modes, configured via `storageMode`:
 
 - `core` (default): Minimal storage for chain following and block production.
-- `api`: Extended storage with transaction indexes, address lookups, and asset tracking. Required when any API server (Blockfrost, Mesh, UTxO RPC) is enabled.
+- `api`: Extended storage with transaction indexes, address lookups, and asset tracking. Required when any client-facing API server (Blockfrost, Mesh, UTxO RPC) is enabled. Bark is a separate Dingo-to-Dingo protocol and is not part of that API surface.
 
 ### Tiered CBOR Cache
 
@@ -977,13 +977,13 @@ The `mithril/` package enables fast initial sync by downloading and importing a 
 
 This is exposed via the `dingo mithril` CLI subcommand and the `dingo load` command.
 
-## API Servers
+## External Interfaces
 
-Dingo provides multiple API interfaces, all optional and gated by port configuration. All require `storageMode: api`.
+Dingo provides three client-facing APIs plus Bark. All are optional and gated by port configuration. UTxO RPC, Blockfrost, and Mesh are general-purpose external APIs and require `storageMode: api`. Bark is different: it is Dingo's own protocol for Dingo-to-Dingo C2/archive services, not a general-purpose application API.
 
 ### Blockfrost API (`blockfrost/`)
 
-A Blockfrost-compatible REST API that provides read access to chain data. Uses an adapter pattern to translate between Dingo's internal state and Blockfrost response types. Supports cursor-based pagination.
+A Blockfrost-compatible REST API that provides read access to chain data. The current implementation exposes the latest, epoch, network, and pool subset. It uses an adapter pattern to translate between Dingo's internal state and Blockfrost response types and supports cursor-based pagination.
 
 ### Mesh API (`mesh/`)
 
@@ -995,7 +995,7 @@ A gRPC server implementing the UTxO RPC specification with query, submit, sync, 
 
 ### Bark (`bark/`)
 
-An HTTP server for block archive access. Also acts as a blob store adapter with a configurable security window, allowing Dingo to fetch historical blocks from a remote Bark instance instead of storing them locally.
+Bark is Dingo's own protocol for Dingo-to-Dingo control-plane and archive services. It exposes archive access over Connect/gRPC and also supplies a remote archive adapter with a configurable security window, allowing Dingo to fetch historical blocks from a remote Bark instance instead of storing them locally.
 
 ## Design Patterns
 
@@ -1066,7 +1066,7 @@ Key configuration areas:
 - CBOR cache sizing (hot entries, block LRU)
 - Chainsync client limits and stall timeout
 - Block producer credentials (VRF key, KES key, operational certificate)
-- API server ports (Blockfrost, Mesh, UTxO RPC, Bark)
+- External interface ports (Blockfrost, Mesh, UTxO RPC, Bark)
 
 ## Stake Snapshots
 
