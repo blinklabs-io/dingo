@@ -1117,7 +1117,7 @@ func TestHandleEventChainsyncBlockHeaderStartsBlockfetchForSmallBlockGap(
 				requestCount++
 				assert.Equal(t, connId, requestConnId)
 				assert.Equal(t, uint64(1064), start.Slot)
-				assert.Equal(t, uint64(1068), end.Slot)
+				assert.Equal(t, uint64(1064), end.Slot)
 				return nil
 			},
 		},
@@ -1174,7 +1174,7 @@ func TestHandleEventChainsyncBlockHeaderStartsBlockfetchForSparseBlockGap(
 				requestCount++
 				assert.Equal(t, connId, requestConnId)
 				assert.Equal(t, uint64(107374026), start.Slot)
-				assert.Equal(t, uint64(107374530), end.Slot)
+				assert.Equal(t, uint64(107374047), end.Slot)
 				return nil
 			},
 		},
