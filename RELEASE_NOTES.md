@@ -13,15 +13,15 @@ Hi folks! Here’s what we shipped in v0.31.1.
 
 ### ✨ What's New
 
-- **Clearer rollback recovery status:** Chain recovery now reports clearer outcomes after a local rollback, so you can quickly tell whether the node successfully caught up or whether it didn’t need to replay anything.
+- **Clearer rollback recovery status:** Recovery is easier to understand because chain recovery now reports clearer outcomes after a local rollback.
 
 ### 💪 Improvements
 
-- **More consistent recovery staleness checks:** Recovery staleness checks are now based on the primary chain tip, which makes recovery decisions more consistent in mixed-chain scenarios.
+- **More consistent recovery staleness checks:** Recovery decisions are more consistent because staleness checks are now based on the primary chain tip.
 
 ### 🔧 Fixes
 
-- **Rollback-aware recovery test coverage:** Recovery and chainsync tests now validate the rollback-aware behavior, reducing the risk of regressions in edge-case rollback paths.
+- **Rollback-aware recovery test coverage:** Reliability is more rock-solid because recovery and chain-sync tests now validate rollback-aware behavior.
 
 ### 📋 What You Need to Know
 
