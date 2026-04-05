@@ -87,7 +87,13 @@ type ConnectionManagerConfig struct {
 	Listeners          []ListenerConfig
 	OutboundConnOpts   []ouroboros.ConnectionOptionFunc
 	OutboundSourcePort uint
-	MaxInboundConns    int // 0 means use DefaultMaxInboundConnections
+	// IsAtTipFunc returns whether the node is synced to tip. When
+	// provided and returning false, outbound connections skip source
+	// port binding to avoid TIME_WAIT socket exhaustion during
+	// catch-up. Source port binding is only needed for peer sharing
+	// which is not useful while the node is behind.
+	IsAtTipFunc     func() bool
+	MaxInboundConns int // 0 means use DefaultMaxInboundConnections
 	// MaxConnectionsPerIP limits the number of concurrent inbound
 	// connections from the same IP address. IPv6 addresses are grouped
 	// by /64 prefix. A value of 0 means use DefaultMaxConnectionsPerIP.

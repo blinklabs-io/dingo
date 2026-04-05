@@ -42,9 +42,13 @@ func (c *ConnectionManager) CreateOutboundConn(
 	dialer := net.Dialer{
 		Timeout: 10 * time.Second,
 	}
-	if c.config.OutboundSourcePort > 0 {
-		// Setup connection to use our listening port as the source port
-		// This is required for peer sharing to be useful
+	atTip := c.config.IsAtTipFunc == nil || c.config.IsAtTipFunc()
+	if c.config.OutboundSourcePort > 0 && atTip {
+		// Setup connection to use our listening port as the source port.
+		// This is required for peer sharing to be useful.
+		// Skip during catch-up to avoid TIME_WAIT socket exhaustion
+		// from connection churn — peer sharing is not useful while
+		// the node is behind tip anyway.
 		clientAddr, _ = net.ResolveTCPAddr(
 			"tcp",
 			fmt.Sprintf(":%d", c.config.OutboundSourcePort),
