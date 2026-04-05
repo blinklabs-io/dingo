@@ -761,16 +761,6 @@ func paginateUtxos(
 	return utxos[start:end]
 }
 
-func paginateTransactions(
-	txs []models.Transaction,
-	params PaginationParams,
-) []models.Transaction {
-	start, end := paginationRange(len(txs), params)
-	if start >= end {
-		return []models.Transaction{}
-	}
-	return txs[start:end]
-}
 
 func paginationRange(
 	total int,

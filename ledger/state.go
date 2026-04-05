@@ -4118,13 +4118,23 @@ func (ls *LedgerState) GetTransactionsByAddressWithOrder(
 	offset int,
 	order string,
 ) ([]models.Transaction, error) {
-	return ls.db.GetTransactionsByAddressWithOrder(
+	txs, err := ls.db.GetTransactionsByAddressWithOrder(
 		addr,
 		limit,
 		offset,
 		order,
 		nil,
 	)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"get transactions by address (limit=%d offset=%d order=%s): %w",
+			limit,
+			offset,
+			order,
+			err,
+		)
+	}
+	return txs, nil
 }
 
 // CountTransactionsByAddress returns the total number of
@@ -4132,7 +4142,11 @@ func (ls *LedgerState) GetTransactionsByAddressWithOrder(
 func (ls *LedgerState) CountTransactionsByAddress(
 	addr lcommon.Address,
 ) (int, error) {
-	return ls.db.CountTransactionsByAddress(addr, nil)
+	count, err := ls.db.CountTransactionsByAddress(addr, nil)
+	if err != nil {
+		return 0, fmt.Errorf("count transactions by address: %w", err)
+	}
+	return count, nil
 }
 
 // CountTransactionsInSlotRange returns the number of transactions whose slot
