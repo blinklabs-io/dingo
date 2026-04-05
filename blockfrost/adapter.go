@@ -766,6 +766,12 @@ func paginationRange(
 	total int,
 	params PaginationParams,
 ) (int, int) {
+	if total <= 0 || params.Count <= 0 || params.Page <= 0 {
+		return total, total
+	}
+	if params.Page-1 > (math.MaxInt / params.Count) {
+		return total, total
+	}
 	start := (params.Page - 1) * params.Count
 	if start >= total {
 		return total, total
