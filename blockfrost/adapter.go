@@ -577,10 +577,7 @@ func (a *NodeAdapter) AddressUTXOs(
 	}
 
 	paged := paginateUtxos(utxos, params)
-	txBlockHashes, err := a.addressUtxoBlockHashes(
-		addr,
-		paged,
-	)
+	txBlockHashes, err := a.addressUtxoBlockHashes(paged)
 	if err != nil {
 		return nil, 0, fmt.Errorf(
 			"get block hashes for address UTxOs %q: %w",
@@ -681,7 +678,6 @@ func (a *NodeAdapter) AddressTransactions(
 }
 
 func (a *NodeAdapter) addressUtxoBlockHashes(
-	addr lcommon.Address,
 	utxos []models.UtxoWithOrdering,
 ) (map[string]string, error) {
 	ret := make(map[string]string, len(utxos))
@@ -689,11 +685,18 @@ func (a *NodeAdapter) addressUtxoBlockHashes(
 		return ret, nil
 	}
 
-	txs, err := a.ledgerState.GetTransactionsByAddress(
-		addr,
-		0,
-		0,
-	)
+	hashes := make([][]byte, 0, len(utxos))
+	seen := make(map[string]struct{}, len(utxos))
+	for _, utxo := range utxos {
+		txKey := hex.EncodeToString(utxo.TxId)
+		if _, ok := seen[txKey]; ok {
+			continue
+		}
+		seen[txKey] = struct{}{}
+		hashes = append(hashes, utxo.TxId)
+	}
+
+	txs, err := a.ledgerState.GetTransactionsByHashes(hashes)
 	if err != nil {
 		return nil, fmt.Errorf(
 			"get transactions for address UTxO block mapping: %w",
@@ -760,7 +763,6 @@ func paginateUtxos(
 	}
 	return utxos[start:end]
 }
-
 
 func paginationRange(
 	total int,

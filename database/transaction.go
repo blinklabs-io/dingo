@@ -360,6 +360,25 @@ func (d *Database) GetTransactionByHash(
 	return d.metadata.GetTransactionByHash(hash, txn.Metadata())
 }
 
+// GetTransactionsByHashes returns transactions for the provided hashes.
+func (d *Database) GetTransactionsByHashes(
+	hashes [][]byte,
+	txn *Txn,
+) ([]models.Transaction, error) {
+	if len(hashes) == 0 {
+		return nil, nil
+	}
+	if txn == nil {
+		txn = d.Transaction(false)
+		defer txn.Release()
+	}
+	txs, err := d.metadata.GetTransactionsByHashes(hashes, txn.Metadata())
+	if err != nil {
+		return nil, fmt.Errorf("get txs by hashes: %w", err)
+	}
+	return txs, nil
+}
+
 // GetTransactionsByBlockHash returns all transactions for a given
 // block hash, ordered by their position within the block.
 func (d *Database) GetTransactionsByBlockHash(

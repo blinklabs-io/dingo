@@ -4100,6 +4100,17 @@ func (ls *LedgerState) GetTransactionsByBlockHash(
 	return ls.db.GetTransactionsByBlockHash(blockHash, nil)
 }
 
+// GetTransactionsByHashes returns transactions for the provided hashes.
+func (ls *LedgerState) GetTransactionsByHashes(
+	hashes [][]byte,
+) ([]models.Transaction, error) {
+	txs, err := ls.db.GetTransactionsByHashes(hashes, nil)
+	if err != nil {
+		return nil, fmt.Errorf("get transactions by hashes: %w", err)
+	}
+	return txs, nil
+}
+
 // GetTransactionsByAddress returns transactions involving the given
 // address.
 func (ls *LedgerState) GetTransactionsByAddress(

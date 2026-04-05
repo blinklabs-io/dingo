@@ -122,6 +122,33 @@ func (d *MetadataStoreSqlite) GetTransactionByHash(
 	return ret, nil
 }
 
+// GetTransactionsByHashes returns transactions for the provided hashes.
+func (d *MetadataStoreSqlite) GetTransactionsByHashes(
+	hashes [][]byte,
+	txn types.Txn,
+) ([]models.Transaction, error) {
+	var ret []models.Transaction
+	if len(hashes) == 0 {
+		return ret, nil
+	}
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return nil, err
+	}
+	result := db.
+		Where("hash IN ?", hashes).
+		Preload(clause.Associations).
+		Preload("Inputs.Assets").
+		Preload("Outputs.Assets").
+		Preload("Collateral.Assets").
+		Preload("ReferenceInputs.Assets").
+		Find(&ret)
+	if result.Error != nil {
+		return nil, fmt.Errorf("get txs by hashes: %w", result.Error)
+	}
+	return ret, nil
+}
+
 // GetTransactionsByBlockHash returns all transactions for a given
 // block hash, ordered by their position within the block.
 func (d *MetadataStoreSqlite) GetTransactionsByBlockHash(

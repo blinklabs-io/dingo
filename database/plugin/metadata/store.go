@@ -258,6 +258,12 @@ type MetadataStore interface {
 		types.Txn,
 	) (*models.Transaction, error)
 
+	// GetTransactionsByHashes retrieves transactions by their hashes.
+	GetTransactionsByHashes(
+		[][]byte, // hashes
+		types.Txn,
+	) ([]models.Transaction, error)
+
 	// GetTransactionsByBlockHash retrieves all transactions
 	// for a given block hash, ordered by block_index.
 	GetTransactionsByBlockHash(
