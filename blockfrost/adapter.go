@@ -605,25 +605,36 @@ func (a *NodeAdapter) AddressTransactions(
 		return nil, 0, ErrInvalidAddress
 	}
 
-	txs, err := a.ledgerState.GetTransactionsByAddress(
+	total, err := a.ledgerState.CountTransactionsByAddress(addr)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	txs, err := a.ledgerState.GetTransactionsByAddressWithOrder(
 		addr,
-		0,
-		0,
+		params.Count,
+		(params.Page-1)*params.Count,
+		params.Order,
 	)
 	if err != nil {
 		return nil, 0, err
 	}
-	total := len(txs)
-	if params.Order == PaginationOrderAsc {
-		for left, right := 0, len(txs)-1; left < right; left, right = left+1, right-1 {
-			txs[left], txs[right] = txs[right], txs[left]
-		}
-	}
 
-	paged := paginateTransactions(txs, params)
-	ret := make([]AddressTransactionInfo, 0, len(paged))
-	for _, tx := range paged {
-		blockHeight, blockTime, err := a.transactionBlockInfo(tx)
+	blockNumbers := make(map[string]uint64, len(txs))
+	ret := make([]AddressTransactionInfo, 0, len(txs))
+	for _, tx := range txs {
+		blockHashKey := hex.EncodeToString(tx.BlockHash)
+		blockHeight, ok := blockNumbers[blockHashKey]
+		if !ok {
+			block, err := a.ledgerState.BlockByHash(tx.BlockHash)
+			if err != nil {
+				return nil, 0, err
+			}
+			blockHeight = block.Number
+			blockNumbers[blockHashKey] = blockHeight
+		}
+
+		blockTime, err := a.transactionBlockTime(tx)
 		if err != nil {
 			return nil, 0, err
 		}
@@ -660,18 +671,14 @@ func (a *NodeAdapter) addressUtxoBlockHashes(
 	return ret, nil
 }
 
-func (a *NodeAdapter) transactionBlockInfo(
+func (a *NodeAdapter) transactionBlockTime(
 	tx models.Transaction,
-) (uint64, int64, error) {
-	block, err := a.ledgerState.BlockByHash(tx.BlockHash)
-	if err != nil {
-		return 0, 0, err
-	}
+) (int64, error) {
 	blockTime, err := a.ledgerState.SlotToTime(tx.Slot)
 	if err != nil {
-		return 0, 0, err
+		return 0, err
 	}
-	return block.Number, blockTime.Unix(), nil
+	return blockTime.Unix(), nil
 }
 
 func addressAmountsFromUtxo(

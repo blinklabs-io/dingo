@@ -276,6 +276,15 @@ type MetadataStore interface {
 		types.Txn,
 	) ([]models.Transaction, error)
 
+	// CountTransactionsByAddress returns the total number of
+	// transactions involving the provided payment/staking
+	// key pair.
+	CountTransactionsByAddress(
+		[]byte, // paymentKey
+		[]byte, // stakingKey
+		types.Txn,
+	) (int, error)
+
 	// GetAddressesByStakingKey retrieves distinct address mappings for a staking key.
 	GetAddressesByStakingKey(
 		[]byte, // stakingKey

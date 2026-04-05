@@ -4110,6 +4110,31 @@ func (ls *LedgerState) GetTransactionsByAddress(
 	return ls.db.GetTransactionsByAddress(addr, limit, offset, nil)
 }
 
+// GetTransactionsByAddressWithOrder returns transactions
+// involving the given address with explicit ordering.
+func (ls *LedgerState) GetTransactionsByAddressWithOrder(
+	addr lcommon.Address,
+	limit int,
+	offset int,
+	order string,
+) ([]models.Transaction, error) {
+	return ls.db.GetTransactionsByAddressWithOrder(
+		addr,
+		limit,
+		offset,
+		order,
+		nil,
+	)
+}
+
+// CountTransactionsByAddress returns the total number of
+// transactions involving the given address.
+func (ls *LedgerState) CountTransactionsByAddress(
+	addr lcommon.Address,
+) (int, error) {
+	return ls.db.CountTransactionsByAddress(addr, nil)
+}
+
 // CountTransactionsInSlotRange returns the number of transactions whose slot
 // falls within the inclusive range [startSlot, endSlot].
 // Used by the Blockfrost adapter CurrentEpoch() path so epoch responses can

@@ -245,6 +245,51 @@ func (d *MetadataStoreSqlite) GetTransactionsByAddress(
 	return ret, nil
 }
 
+// CountTransactionsByAddress returns the total number of
+// distinct transactions involving the given
+// payment/staking key.
+func (d *MetadataStoreSqlite) CountTransactionsByAddress(
+	paymentKey []byte,
+	stakingKey []byte,
+	txn types.Txn,
+) (int, error) {
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return 0, err
+	}
+
+	if len(paymentKey) == 0 && len(stakingKey) == 0 {
+		return 0, nil
+	}
+
+	addrQuery := db.Model(&models.AddressTransaction{})
+	switch {
+	case len(paymentKey) > 0 && len(stakingKey) > 0:
+		addrQuery = addrQuery.Where(
+			"payment_key = ? AND staking_key = ?",
+			paymentKey,
+			stakingKey,
+		)
+	case len(paymentKey) > 0:
+		addrQuery = addrQuery.Where(
+			"payment_key = ? AND (staking_key IS NULL OR LENGTH(staking_key) = 0)",
+			paymentKey,
+		)
+	default:
+		addrQuery = addrQuery.Where("staking_key = ?", stakingKey)
+	}
+
+	var count int64
+	result := addrQuery.Distinct("transaction_id").Count(&count)
+	if result.Error != nil {
+		return 0, fmt.Errorf(
+			"count txs by address: %w",
+			result.Error,
+		)
+	}
+	return int(count), nil
+}
+
 // GetAddressesByStakingKey returns distinct addresses mapped to a staking key.
 func (d *MetadataStoreSqlite) GetAddressesByStakingKey(
 	stakingKey []byte,
