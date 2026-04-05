@@ -554,12 +554,20 @@ func (a *NodeAdapter) AddressUTXOs(
 ) ([]AddressUTXOInfo, int, error) {
 	addr, err := lcommon.NewAddress(address)
 	if err != nil {
-		return nil, 0, ErrInvalidAddress
+		return nil, 0, fmt.Errorf(
+			"parse address %q: %w",
+			address,
+			ErrInvalidAddress,
+		)
 	}
 
 	utxos, err := a.ledgerState.UtxosByAddressWithOrdering(addr)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, fmt.Errorf(
+			"get address UTxOs for %q: %w",
+			address,
+			err,
+		)
 	}
 	total := len(utxos)
 	if params.Order == PaginationOrderDesc {
@@ -574,7 +582,11 @@ func (a *NodeAdapter) AddressUTXOs(
 		paged,
 	)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, fmt.Errorf(
+			"get block hashes for address UTxOs %q: %w",
+			address,
+			err,
+		)
 	}
 
 	ret := make([]AddressUTXOInfo, 0, len(paged))
@@ -602,12 +614,20 @@ func (a *NodeAdapter) AddressTransactions(
 ) ([]AddressTransactionInfo, int, error) {
 	addr, err := lcommon.NewAddress(address)
 	if err != nil {
-		return nil, 0, ErrInvalidAddress
+		return nil, 0, fmt.Errorf(
+			"parse address %q: %w",
+			address,
+			ErrInvalidAddress,
+		)
 	}
 
 	total, err := a.ledgerState.CountTransactionsByAddress(addr)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, fmt.Errorf(
+			"count address transactions for %q: %w",
+			address,
+			err,
+		)
 	}
 
 	txs, err := a.ledgerState.GetTransactionsByAddressWithOrder(
@@ -617,7 +637,11 @@ func (a *NodeAdapter) AddressTransactions(
 		params.Order,
 	)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, fmt.Errorf(
+			"get address transactions for %q: %w",
+			address,
+			err,
+		)
 	}
 
 	blockNumbers := make(map[string]uint64, len(txs))
@@ -628,7 +652,11 @@ func (a *NodeAdapter) AddressTransactions(
 		if !ok {
 			block, err := a.ledgerState.BlockByHash(tx.BlockHash)
 			if err != nil {
-				return nil, 0, err
+				return nil, 0, fmt.Errorf(
+					"get block for transaction %x: %w",
+					tx.Hash,
+					err,
+				)
 			}
 			blockHeight = block.Number
 			blockNumbers[blockHashKey] = blockHeight
@@ -636,7 +664,11 @@ func (a *NodeAdapter) AddressTransactions(
 
 		blockTime, err := a.transactionBlockTime(tx)
 		if err != nil {
-			return nil, 0, err
+			return nil, 0, fmt.Errorf(
+				"get block time for transaction %x: %w",
+				tx.Hash,
+				err,
+			)
 		}
 		ret = append(ret, AddressTransactionInfo{
 			TxHash:      hex.EncodeToString(tx.Hash),
@@ -663,7 +695,10 @@ func (a *NodeAdapter) addressUtxoBlockHashes(
 		0,
 	)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf(
+			"get transactions for address UTxO block mapping: %w",
+			err,
+		)
 	}
 	for _, tx := range txs {
 		ret[hex.EncodeToString(tx.Hash)] = hex.EncodeToString(tx.BlockHash)
@@ -676,7 +711,12 @@ func (a *NodeAdapter) transactionBlockTime(
 ) (int64, error) {
 	blockTime, err := a.ledgerState.SlotToTime(tx.Slot)
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf(
+			"convert slot %d to block time for transaction %x: %w",
+			tx.Slot,
+			tx.Hash,
+			err,
+		)
 	}
 	return blockTime.Unix(), nil
 }
