@@ -167,6 +167,18 @@ func (n *Node) processChainsyncRecyclerTick(
 		*lastProgressSlot = localTipSlot
 		*lastProgressAt = now
 	}
+	// During catch-up, extend all recycling thresholds to avoid
+	// churning connections while the node is making progress.
+	// Connection recycling during bulk sync causes pipeline resets,
+	// TIME_WAIT socket exhaustion, and dropped rollbacks that slow
+	// catch-up far more than the stall itself.
+	catchUpMultiplier := time.Duration(1)
+	if n.ledgerState != nil && !n.ledgerState.IsAtTip() {
+		catchUpMultiplier = 5
+	}
+	effectiveGrace := grace * catchUpMultiplier
+	effectivePlateau := plateauRecoveryThreshold * catchUpMultiplier
+	effectiveCooldown := cooldown * catchUpMultiplier
 	n.chainsyncState.CheckStalledClients()
 	trackedClients := n.chainsyncState.GetTrackedClients()
 	trackedByID := make(
@@ -183,7 +195,7 @@ func (n *Node) processChainsyncRecyclerTick(
 	// Prune expired cooldown entries so this map does
 	// not grow without bound over long runtimes.
 	for connKey, last := range lastRecycled {
-		if now.Sub(last) >= cooldown {
+		if now.Sub(last) >= effectiveCooldown {
 			delete(lastRecycled, connKey)
 		}
 	}
@@ -211,8 +223,8 @@ func (n *Node) processChainsyncRecyclerTick(
 					localTipSlot,
 					bestPeerTip.Tip.Point.Slot,
 					lastRecycledAt,
-					cooldown,
-					plateauRecoveryThreshold,
+					effectiveCooldown,
+					effectivePlateau,
 				) {
 					n.config.logger.Warn(
 						"local tip plateau detected, resyncing chainsync client",
@@ -244,12 +256,12 @@ func (n *Node) processChainsyncRecyclerTick(
 		}
 		connKey := conn.ConnId.String()
 		if _, exists := recycleAt[connKey]; !exists {
-			recycleAt[connKey] = now.Add(grace)
+			recycleAt[connKey] = now.Add(effectiveGrace)
 			n.config.logger.Info(
 				"chainsync client stalled, scheduling guarded recycle",
 				"connection_id", connKey,
 				"stall_timeout", chainsyncCfg.StallTimeout,
-				"grace_period", grace,
+				"grace_period", effectiveGrace,
 			)
 		}
 	}
@@ -264,8 +276,8 @@ func (n *Node) processChainsyncRecyclerTick(
 		}
 		connId := tracked.ConnId
 		if last, ok := lastRecycled[connKey]; ok &&
-			now.Sub(last) < cooldown {
-			recycleAt[connKey] = now.Add(cooldown - now.Sub(last))
+			now.Sub(last) < effectiveCooldown {
+			recycleAt[connKey] = now.Add(effectiveCooldown - now.Sub(last))
 			continue
 		}
 		active := n.chainsyncState.GetClientConnId()
