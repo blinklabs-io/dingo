@@ -114,6 +114,26 @@ func (b *Blockfrost) Start(
 		"GET /api/v0/metadata/txs/labels/{label}/cbor",
 		b.handleMetadataTransactionsCBOR,
 	)
+	mux.HandleFunc(
+		"GET /api/v0/accounts/{stake_address}",
+		b.handleAccount,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/accounts/{stake_address}/addresses",
+		b.handleAccountAssociatedAddresses,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/accounts/{stake_address}/delegations",
+		b.handleAccountDelegationHistory,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/accounts/{stake_address}/registrations",
+		b.handleAccountRegistrationHistory,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/accounts/{stake_address}/rewards",
+		b.handleAccountRewardHistory,
+	)
 
 	// Wrap handler with a request body size limit (1 MB)
 	// as defense-in-depth against oversized payloads.

@@ -307,6 +307,18 @@ type MetadataStore interface {
 		types.Txn,
 	) ([]models.AddressTransaction, error)
 
+	// GetAccountDelegationHistory retrieves delegation history rows for a staking key.
+	GetAccountDelegationHistory(
+		[]byte, // stakingKey
+		types.Txn,
+	) ([]models.AccountDelegationHistoryRow, error)
+
+	// GetAccountRegistrationHistory retrieves registration history rows for a staking key.
+	GetAccountRegistrationHistory(
+		[]byte, // stakingKey
+		types.Txn,
+	) ([]models.AccountRegistrationHistoryRow, error)
+
 	// GetTransactionsByMetadataLabel retrieves transactions that include
 	// metadata for the given label.
 	GetTransactionsByMetadataLabel(

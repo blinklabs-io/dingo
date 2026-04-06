@@ -21,6 +21,7 @@ import (
 	"strings"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata/internal/accounthistory"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/labelcodec"
 	"github.com/blinklabs-io/dingo/database/types"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -324,6 +325,36 @@ func (d *MetadataStorePostgres) GetAddressesByStakingKey(
 		return nil, fmt.Errorf("get addresses by staking key: %w", result.Error)
 	}
 	return ret, nil
+}
+
+// GetAccountDelegationHistory returns delegation history rows for a staking key.
+func (d *MetadataStorePostgres) GetAccountDelegationHistory(
+	stakingKey []byte,
+	txn types.Txn,
+) ([]models.AccountDelegationHistoryRow, error) {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return nil, err
+	}
+	return accounthistory.QueryDelegationHistory(
+		db,
+		stakingKey,
+	)
+}
+
+// GetAccountRegistrationHistory returns registration history rows for a staking key.
+func (d *MetadataStorePostgres) GetAccountRegistrationHistory(
+	stakingKey []byte,
+	txn types.Txn,
+) ([]models.AccountRegistrationHistoryRow, error) {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return nil, err
+	}
+	return accounthistory.QueryRegistrationHistory(
+		db,
+		stakingKey,
+	)
 }
 
 // GetTransactionsByMetadataLabel returns transactions containing a metadata
