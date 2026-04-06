@@ -1,6 +1,39 @@
 # Release Notes
 
 
+## v0.31.1 (April 4, 2026)
+
+**Title:** Clearer rollback recovery outcomes
+
+**Date:** April 4, 2026
+
+**Version:** v0.31.1
+
+Hi folks! Here’s what we shipped in v0.31.1.
+
+### ✨ What's New
+
+- **Clearer rollback recovery status:** Recovery is simpler to understand because chain recovery now reports clearer outcomes after a local rollback.
+
+### 💪 Improvements
+
+- **More consistent recovery staleness checks:** Recovery decisions are more rock-solid because staleness checks are now based on the primary chain tip.
+
+### 🔧 Fixes
+
+- **Rollback-aware recovery test coverage:** Reliability is more rock-solid because recovery and chainsync tests now validate rollback-aware behavior.
+
+### 📋 What You Need to Know
+
+- **No action required:** You're all set—just upgrade to v0.31.1.
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
+
 ## v0.31.0 (April 3, 2026)
 
 **Title:** Storage safeguards and smarter peer sync
