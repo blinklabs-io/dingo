@@ -273,7 +273,7 @@ func (d *MetadataStoreSqlite) GetUtxosByAddressWithOrdering(
 	}
 	base := db.
 		Table("utxo").
-		Joins("LEFT JOIN transaction ON utxo.transaction_id = transaction.id").
+		Joins("INNER JOIN transaction ON utxo.transaction_id = transaction.id").
 		Where("utxo.deleted_slot = 0")
 
 	addrs := q.Addresses
@@ -311,8 +311,8 @@ func (d *MetadataStoreSqlite) GetUtxosByAddressWithOrdering(
 
 	useKeyset := q.Limit > 0 || q.After != nil
 	if useKeyset {
-		slotExpr := "COALESCE(transaction.slot, 0)"
-		biExpr := "COALESCE(transaction.block_index, 0)"
+		slotExpr := "transaction.slot"
+		biExpr := "transaction.block_index"
 		base = base.Select(fmt.Sprintf(
 			"utxo.*, %s as tx_slot, %s as tx_block_index",
 			slotExpr,

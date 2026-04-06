@@ -51,9 +51,8 @@ type UtxoWithOrdering struct {
 
 // UtxoOrderingCursor is the keyset position for SearchUtxos.
 //
-// Text form (required when non-empty): slot:block_index:output_idx. That tuple
-// uniquely identifies a created UTxO in chain order (slot, transaction index in
-// block, output index within the transaction).
+// Text form (non-empty): slot:block_index:output_idx. GetUtxosByAddressWithOrdering
+// uses INNER JOIN transaction so these come from real chain position (no COALESCE).
 type UtxoOrderingCursor struct {
 	Slot       uint64
 	BlockIndex uint32
@@ -64,7 +63,8 @@ type UtxoOrderingCursor struct {
 //
 // Address matching (exactly one of these applies):
 //   - MatchAllAddresses true: do not filter by payment/stake keys (all live UTxOs, subject
-//     to asset filter if set). SearchUtxos sets this when the request predicate is nil.
+//     to asset filter if set). SearchUtxos sets this when the predicate is nil or is
+//     asset-only (no address pattern).
 //   - MatchAllAddresses false and len(Addresses) == 0: match no rows (caller uses this when
 //     a predicate was given but no Cardano address parts could be decoded).
 //   - MatchAllAddresses false and len(Addresses) > 0: match UTxOs that satisfy ANY branch

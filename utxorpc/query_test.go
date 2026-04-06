@@ -97,6 +97,51 @@ func TestParseSearchUtxosStartToken_NotThreeParts(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestParseSearchUtxosStartToken_FourPartsInvalid(t *testing.T) {
+	t.Parallel()
+	_, err := parseSearchUtxosStartToken("10:20:30:42")
+	require.Error(t, err)
+}
+
+func TestSearchUtxosMatchAllAddresses(t *testing.T) {
+	t.Parallel()
+	policy := []byte{0xaa, 0xbb}
+	assetOnly := &query.UtxoPredicate{
+		Match: &query.AnyUtxoPattern{
+			UtxoPattern: &query.AnyUtxoPattern_Cardano{
+				Cardano: &utxorpcCardano.TxOutputPattern{
+					Asset: &utxorpcCardano.AssetPattern{
+						PolicyId: policy,
+					},
+				},
+			},
+		},
+	}
+	addr := &utxorpcCardano.AddressPattern{ExactAddress: []byte{0x01}}
+	asset := &utxorpcCardano.AssetPattern{PolicyId: policy}
+	addrAndAsset := &query.UtxoPredicate{
+		Match: &query.AnyUtxoPattern{
+			UtxoPattern: &query.AnyUtxoPattern_Cardano{
+				Cardano: &utxorpcCardano.TxOutputPattern{
+					Address: addr,
+					Asset:   asset,
+				},
+			},
+		},
+	}
+
+	apAsset, assetP := extractSearchPredicatePatterns(assetOnly)
+	require.Nil(t, apAsset)
+	require.NotNil(t, assetP)
+	require.True(t, searchUtxosMatchAllAddresses(assetOnly, apAsset, assetP))
+
+	apBoth, assetBoth := extractSearchPredicatePatterns(addrAndAsset)
+	require.NotNil(t, apBoth)
+	require.False(t, searchUtxosMatchAllAddresses(addrAndAsset, apBoth, assetBoth))
+
+	require.True(t, searchUtxosMatchAllAddresses(nil, nil, nil))
+}
+
 func TestDedupeSearchAddresses(t *testing.T) {
 	paymentKey := make([]byte, 28)
 	stakeKey := make([]byte, 28)

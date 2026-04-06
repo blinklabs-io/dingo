@@ -64,6 +64,23 @@ func extractSearchPredicatePatterns(
 	return cardanoMatch.GetAddress(), cardanoMatch.GetAsset()
 }
 
+// searchUtxosMatchAllAddresses is true when the query must not filter by
+// payment/stake keys: nil predicate, or Cardano predicate with an asset pattern
+// but no address pattern (asset-only search).
+func searchUtxosMatchAllAddresses(
+	predicate *query.UtxoPredicate,
+	addressPattern *utxorpcCardano.AddressPattern,
+	assetPattern *utxorpcCardano.AssetPattern,
+) bool {
+	if predicate == nil {
+		return true
+	}
+	if addressPattern == nil && assetPattern != nil {
+		return true
+	}
+	return false
+}
+
 func effectiveSearchUtxosMaxItems(requested, maxAllowed int32) int32 {
 	if requested != 0 {
 		return requested
@@ -515,11 +532,15 @@ func (s *queryServiceServer) SearchUtxos(
 	addressPattern, assetPattern := extractSearchPredicatePatterns(predicate)
 
 	// Address resolution for the query:
-	// - predicate == nil  → MatchAllAddresses (scan all live UTxOs; still limited by max_items
-	//   in SQL and optional asset filter).
-	// - predicate != nil with no decodable address fields → empty result (handled below).
-	// - predicate != nil with one or more parts → OR of those address constraints.
-	matchAllAddresses := predicate == nil
+	// - MatchAllAddresses → scan all live UTxOs (nil predicate, or asset-only predicate);
+	//   still limited by max_items and optional asset filter.
+	// - predicate != nil with address pattern but no decodable address fields → empty result.
+	// - predicate != nil with one or more decoded addresses → OR of those constraints.
+	matchAllAddresses := searchUtxosMatchAllAddresses(
+		predicate,
+		addressPattern,
+		assetPattern,
+	)
 
 	var addresses []ledger.Address
 	if addressPattern != nil {
