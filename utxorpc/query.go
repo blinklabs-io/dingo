@@ -24,6 +24,7 @@ import (
 	"math/big"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"connectrpc.com/connect"
@@ -46,14 +47,6 @@ type queryServiceServer struct {
 	utxorpc *Utxorpc
 }
 
-// utxoWithOrderingInfo wraps AnyUtxoData with ordering metadata for pagination
-type utxoWithOrderingInfo struct {
-	data       *query.AnyUtxoData
-	slot       uint64
-	blockIndex uint32
-	outputIdx  uint32
-}
-
 func extractSearchPredicatePatterns(
 	predicate *query.UtxoPredicate,
 ) (*utxorpcCardano.AddressPattern, *utxorpcCardano.AssetPattern) {
@@ -69,6 +62,115 @@ func extractSearchPredicatePatterns(
 		return nil, nil
 	}
 	return cardanoMatch.GetAddress(), cardanoMatch.GetAsset()
+}
+
+func effectiveSearchUtxosMaxItems(requested, maxAllowed int32) int32 {
+	if requested != 0 {
+		return requested
+	}
+	return maxAllowed
+}
+
+func parseSearchUtxosStartToken(
+	startToken string,
+) (*models.UtxoOrderingCursor, error) {
+	if startToken == "" {
+		return nil, nil
+	}
+	parts := strings.Split(startToken, ":")
+	if len(parts) != 3 {
+		return nil, connect.NewError(
+			connect.CodeInvalidArgument,
+			errors.New("invalid start_token: expected slot:block_index:output_idx"),
+		)
+	}
+
+	cursorSlot, err := strconv.ParseUint(parts[0], 10, 64)
+	if err != nil {
+		return nil, connect.NewError(
+			connect.CodeInvalidArgument,
+			errors.New("invalid start_token slot"),
+		)
+	}
+
+	cursorBlockIndex, err := strconv.ParseUint(parts[1], 10, 32)
+	if err != nil {
+		return nil, connect.NewError(
+			connect.CodeInvalidArgument,
+			errors.New("invalid start_token block_index"),
+		)
+	}
+
+	cursorOutputIdx, err := strconv.ParseUint(parts[2], 10, 32)
+	if err != nil {
+		return nil, connect.NewError(
+			connect.CodeInvalidArgument,
+			errors.New("invalid start_token output_idx"),
+		)
+	}
+
+	return &models.UtxoOrderingCursor{
+		Slot:       cursorSlot,
+		BlockIndex: uint32(cursorBlockIndex),
+		OutputIdx:  uint32(cursorOutputIdx),
+	}, nil
+}
+
+func searchUtxoModelToAnyData(utxo *models.UtxoWithOrdering) (*query.AnyUtxoData, error) {
+	var aud query.AnyUtxoData
+	ret, err := utxo.Decode()
+	if err != nil {
+		return nil, err
+	}
+	if ret == nil {
+		return nil, errors.New("decode returned empty utxo")
+	}
+	tmpUtxo, err := ret.Utxorpc()
+	if err != nil {
+		return nil, fmt.Errorf("failed to convert UTxO: %w", err)
+	}
+	audc := query.AnyUtxoData_Cardano{
+		Cardano: tmpUtxo,
+	}
+	aud.NativeBytes = utxo.Cbor
+	aud.TxoRef = &query.TxoRef{
+		Hash:  utxo.TxId,
+		Index: utxo.OutputIdx,
+	}
+	if audc.Cardano.GetDatum() != nil {
+		isAllZeroes := true
+		for _, b := range audc.Cardano.GetDatum().GetHash() {
+			if b != 0 {
+				isAllZeroes = false
+				break
+			}
+		}
+		if isAllZeroes {
+			audc.Cardano.Datum = nil
+		}
+	}
+	aud.ParsedState = &audc
+	return &aud, nil
+}
+
+// dedupeSearchAddresses drops duplicate ledger addresses (same payment + stake keys).
+func dedupeSearchAddresses(addrs []ledger.Address) []ledger.Address {
+	if len(addrs) < 2 {
+		return addrs
+	}
+	seen := make(map[string]struct{}, len(addrs))
+	out := make([]ledger.Address, 0, len(addrs))
+	for _, a := range addrs {
+		pkb := a.PaymentKeyHash().Bytes()
+		skb := a.StakeKeyHash().Bytes()
+		key := string(pkb) + "\x00" + string(skb)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, a)
+	}
+	return out
 }
 
 // ReadParams
@@ -344,6 +446,30 @@ func (s *queryServiceServer) ReadUtxos(
 	return connect.NewResponse(resp), nil
 }
 
+// searchUtxosLedgerTip returns the current tip as a ChainPoint for SearchUtxos responses.
+func (s *queryServiceServer) searchUtxosLedgerTip() *query.ChainPoint {
+	point := s.utxorpc.config.LedgerState.Tip().Point
+	var br blockRef
+	if model, err := s.utxorpc.config.LedgerState.BlockByHash(point.Hash); err != nil {
+		s.utxorpc.config.Logger.Warn(
+			"failed to look up tip block for height; using height=0",
+			"error", err,
+		)
+		br = blockRef{
+			Slot:   point.Slot,
+			Hash:   point.Hash,
+			Height: 0,
+		}
+	} else {
+		br = blockRefFromModel(model)
+	}
+	return &query.ChainPoint{
+		Slot:   br.Slot,
+		Hash:   br.Hash,
+		Height: br.Height,
+	}
+}
+
 // SearchUtxos
 func (s *queryServiceServer) SearchUtxos(
 	ctx context.Context,
@@ -354,12 +480,33 @@ func (s *queryServiceServer) SearchUtxos(
 	maxItems := req.Msg.GetMaxItems()     // int32
 	fieldMask := req.Msg.GetFieldMask()
 
+	maxAllowed := int32(s.utxorpc.config.MaxHistoryItems) // #nosec G115 -- DefaultMaxHistoryItems (10000)
+	if maxItems < 0 {
+		return nil, connect.NewError(
+			connect.CodeInvalidArgument,
+			fmt.Errorf("maxItems %d must not be negative", maxItems),
+		)
+	}
+	if maxItems > maxAllowed {
+		return nil, connect.NewError(
+			connect.CodeInvalidArgument,
+			fmt.Errorf(
+				"maxItems %d exceeds maximum of %d",
+				maxItems,
+				maxAllowed,
+			),
+		)
+	}
+	effectiveMax := effectiveSearchUtxosMaxItems(maxItems, maxAllowed)
+
 	s.utxorpc.config.Logger.Info(
 		fmt.Sprintf(
-			"Got a SearchUtxos request with predicate %v, startToken %s, maxItems %d, and fieldMask %v",
+			"Got a SearchUtxos request with predicate %v, startToken %s, "+
+				"maxItems raw=%d effective=%d fieldMask %v",
 			predicate,
 			startToken,
 			maxItems,
+			effectiveMax,
 			fieldMask,
 		),
 	)
@@ -367,9 +514,15 @@ func (s *queryServiceServer) SearchUtxos(
 
 	addressPattern, assetPattern := extractSearchPredicatePatterns(predicate)
 
+	// Address resolution for the query:
+	// - predicate == nil  → MatchAllAddresses (scan all live UTxOs; still limited by max_items
+	//   in SQL and optional asset filter).
+	// - predicate != nil with no decodable address fields → empty result (handled below).
+	// - predicate != nil with one or more parts → OR of those address constraints.
+	matchAllAddresses := predicate == nil
+
 	var addresses []ledger.Address
 	if addressPattern != nil {
-		// Handle Exact Address
 		exactAddressBytes := addressPattern.GetExactAddress()
 		if exactAddressBytes != nil {
 			var addr ledger.Address
@@ -383,7 +536,6 @@ func (s *queryServiceServer) SearchUtxos(
 			addresses = append(addresses, addr)
 		}
 
-		// Handle Payment Part
 		paymentPart := addressPattern.GetPaymentPart()
 		if paymentPart != nil {
 			s.utxorpc.config.Logger.Info("PaymentPart is present, decoding...")
@@ -395,7 +547,6 @@ func (s *queryServiceServer) SearchUtxos(
 			addresses = append(addresses, paymentAddr)
 		}
 
-		// Handle Delegation Part
 		delegationPart := addressPattern.GetDelegationPart()
 		if delegationPart != nil {
 			s.utxorpc.config.Logger.Info(
@@ -412,271 +563,81 @@ func (s *queryServiceServer) SearchUtxos(
 			addresses = append(addresses, delegationAddr)
 		}
 	}
-	// Nil predicate means "all addresses"; use empty address as no-op filter.
-	if predicate == nil {
-		addresses = append(addresses, ledger.Address{})
+
+	if !matchAllAddresses && len(addresses) == 0 {
+		resp.LedgerTip = s.searchUtxosLedgerTip()
+		return connect.NewResponse(resp), nil
 	}
 
-	var allItems []*utxoWithOrderingInfo
-
-	// Get UTxOs from ledger with ordering metadata
-	for _, address := range addresses {
-		utxos, err := s.utxorpc.config.LedgerState.UtxosByAddressWithOrdering(
-			address,
-		)
-		if err != nil {
-			return nil, err
-		}
-		for _, utxo := range utxos {
-			var aud query.AnyUtxoData
-			ret, err := utxo.Decode()
-			if err != nil {
-				return nil, err
-			}
-			if ret == nil {
-				return nil, errors.New("decode returned empty utxo")
-			}
-			tmpUtxo, err := ret.Utxorpc()
-			if err != nil {
-				return nil, fmt.Errorf("failed to convert UTxO: %w", err)
-			}
-			audc := query.AnyUtxoData_Cardano{
-				Cardano: tmpUtxo,
-			}
-			aud.NativeBytes = utxo.Cbor
-			aud.TxoRef = &query.TxoRef{
-				Hash:  utxo.TxId,
-				Index: utxo.OutputIdx,
-			}
-			if audc.Cardano.GetDatum() != nil {
-				// Check if Datum.Hash is all zeroes
-				isAllZeroes := true
-				for _, b := range audc.Cardano.GetDatum().GetHash() {
-					if b != 0 {
-						isAllZeroes = false
-						break
-					}
-				}
-				if isAllZeroes {
-					// No actual datum; set Datum to nil to omit it
-					audc.Cardano.Datum = nil
-				}
-			}
-			aud.ParsedState = &audc
-
-			// If AssetPattern is specified, filter based on it
-			if assetPattern != nil {
-				assetFound := false
-				for _, multiasset := range audc.Cardano.GetAssets() {
-					if bytes.Equal(
-						multiasset.GetPolicyId(),
-						assetPattern.GetPolicyId(),
-					) {
-						for _, asset := range multiasset.GetAssets() {
-							if bytes.Equal(
-								asset.GetName(),
-								assetPattern.GetAssetName(),
-							) {
-								assetFound = true
-								break
-							}
-						}
-					}
-					if assetFound {
-						break
-					}
-				}
-
-				// Asset not found; skip this UTxO
-				if !assetFound {
-					continue
-				}
-			}
-			allItems = append(allItems, &utxoWithOrderingInfo{
-				data:       &aud,
-				slot:       utxo.TxSlot,
-				blockIndex: utxo.TxBlockIndex,
-				outputIdx:  utxo.OutputIdx,
-			})
-		}
+	if effectiveMax == 0 {
+		resp.LedgerTip = s.searchUtxosLedgerTip()
+		return connect.NewResponse(resp), nil
 	}
 
-	paginatedItems, nextToken, err := paginateSearchResults(
-		allItems,
-		startToken,
-		maxItems,
-	)
+	filterByAsset := assetPattern != nil
+	var assetPolicy []byte
+	var assetName []byte
+	if filterByAsset {
+		assetPolicy = assetPattern.GetPolicyId()
+		if len(assetPolicy) == 0 {
+			return nil, connect.NewError(
+				connect.CodeInvalidArgument,
+				errors.New("asset pattern requires non-empty policy id"),
+			)
+		}
+		assetName = assetPattern.GetAssetName()
+	}
+
+	if !matchAllAddresses {
+		addresses = dedupeSearchAddresses(addresses)
+	}
+
+	after, err := parseSearchUtxosStartToken(startToken)
 	if err != nil {
 		return nil, err
 	}
 
-	resp.Items = paginatedItems
-	if nextToken != "" {
-		resp.NextToken = nextToken
+	utxoQ := &models.UtxoWithOrderingQuery{
+		MatchAllAddresses: matchAllAddresses,
+		Addresses:         addresses,
+		After:             after,
+		Limit:             int(effectiveMax) + 1,
+		FilterByAsset:     filterByAsset,
+		AssetPolicyID:     assetPolicy,
+		AssetName:         assetName,
 	}
 
-	// Get chain point (slot, hash, and height)
-	point := s.utxorpc.config.LedgerState.Tip().Point
-	var br blockRef
-	if model, err := s.utxorpc.config.LedgerState.BlockByHash(point.Hash); err != nil {
-		s.utxorpc.config.Logger.Warn(
-			"failed to look up tip block for height; using height=0",
-			"error", err,
-		)
-		br = blockRef{
-			Slot:   point.Slot,
-			Hash:   point.Hash,
-			Height: 0,
-		}
-	} else {
-		br = blockRefFromModel(model)
+	utxos, err := s.utxorpc.config.LedgerState.UtxosByAddressWithOrdering(utxoQ)
+	if err != nil {
+		return nil, err
 	}
 
-	resp.LedgerTip = &query.ChainPoint{
-		Slot:   br.Slot,
-		Hash:   br.Hash,
-		Height: br.Height,
+	pageCap := int(effectiveMax)
+	hasMore := len(utxos) > pageCap
+	if hasMore {
+		utxos = utxos[:pageCap]
 	}
-	return connect.NewResponse(resp), nil
-}
-
-// utxoOrderingInfo holds the ordering fields needed for stable pagination
-type utxoOrderingInfo struct {
-	slot       uint64
-	blockIndex uint32
-	outputIdx  uint32
-}
-
-func paginateSearchResults(
-	items []*utxoWithOrderingInfo,
-	startToken string,
-	maxItems int32,
-) ([]*query.AnyUtxoData, string, error) {
-	if len(items) == 0 {
-		return nil, "", nil
-	}
-
-	// Items are already sorted by database query:
-	// ORDER BY transaction.slot ASC, transaction.block_index ASC, utxo.output_idx ASC
-
-	var startIndex int
-	if startToken != "" {
-		// Parse cursor: "slot:blockIndex:outputIdx"
-		parts := bytes.SplitN([]byte(startToken), []byte(":"), 3)
-		if len(parts) != 3 {
-			return nil, "", connect.NewError(
-				connect.CodeInvalidArgument,
-				errors.New("invalid start_token format"),
-			)
-		}
-
-		cursorSlot, err := strconv.ParseUint(string(parts[0]), 10, 64)
+	items := make([]*query.AnyUtxoData, 0, len(utxos))
+	for i := range utxos {
+		aud, err := searchUtxoModelToAnyData(&utxos[i])
 		if err != nil {
-			return nil, "", connect.NewError(
-				connect.CodeInvalidArgument,
-				errors.New("invalid start_token slot"),
-			)
+			return nil, err
 		}
-
-		cursorBlockIndex, err := strconv.ParseUint(string(parts[1]), 10, 32)
-		if err != nil {
-			return nil, "", connect.NewError(
-				connect.CodeInvalidArgument,
-				errors.New("invalid start_token block_index"),
-			)
-		}
-
-		cursorOutputIdx, err := strconv.ParseUint(string(parts[2]), 10, 32)
-		if err != nil {
-			return nil, "", connect.NewError(
-				connect.CodeInvalidArgument,
-				errors.New("invalid start_token output_idx"),
-			)
-		}
-
-		cursor := utxoOrderingInfo{
-			slot:       cursorSlot,
-			blockIndex: uint32(cursorBlockIndex),
-			outputIdx:  uint32(cursorOutputIdx),
-		}
-
-		// Find first item that comes after the cursor in sort order
-		// This works even if the cursor UTxO was spent
-		found := false
-		for i, item := range items {
-			itemInfo := utxoOrderingInfo{
-				slot:       item.slot,
-				blockIndex: item.blockIndex,
-				outputIdx:  item.outputIdx,
-			}
-			if compareUtxoOrdering(itemInfo, cursor) > 0 {
-				startIndex = i
-				found = true
-				break
-			}
-		}
-
-		// If no items found after cursor, all items are before/at cursor
-		if !found {
-			return []*query.AnyUtxoData{}, "", nil
-		}
+		items = append(items, aud)
 	}
-
-	var limit int
-	if maxItems > 0 {
-		limit = int(maxItems)
-		if limit > len(items)-startIndex {
-			limit = len(items) - startIndex
-		}
-	} else {
-		limit = len(items) - startIndex
-	}
-
-	endIndex := startIndex + limit
-
-	// Extract just the AnyUtxoData from the wrappers
-	paginated := make([]*query.AnyUtxoData, endIndex-startIndex)
-	for i := startIndex; i < endIndex; i++ {
-		paginated[i-startIndex] = items[i].data
-	}
-
-	// Generate next token if there are more items
-	var nextToken string
-	if maxItems > 0 && endIndex < len(items) {
-		lastItem := items[endIndex-1]
-		nextToken = fmt.Sprintf(
+	resp.Items = items
+	if hasMore && len(utxos) > 0 {
+		last := utxos[len(utxos)-1]
+		resp.NextToken = fmt.Sprintf(
 			"%d:%d:%d",
-			lastItem.slot,
-			lastItem.blockIndex,
-			lastItem.outputIdx,
+			last.TxSlot,
+			last.TxBlockIndex,
+			last.OutputIdx,
 		)
 	}
 
-	return paginated, nextToken, nil
-}
-
-// compareUtxoOrdering compares two UTxOs by their ordering fields
-// Returns: -1 if a < b, 0 if a == b, 1 if a > b
-func compareUtxoOrdering(a, b utxoOrderingInfo) int {
-	if a.slot != b.slot {
-		if a.slot < b.slot {
-			return -1
-		}
-		return 1
-	}
-	if a.blockIndex != b.blockIndex {
-		if a.blockIndex < b.blockIndex {
-			return -1
-		}
-		return 1
-	}
-	if a.outputIdx != b.outputIdx {
-		if a.outputIdx < b.outputIdx {
-			return -1
-		}
-		return 1
-	}
-	return 0
+	resp.LedgerTip = s.searchUtxosLedgerTip()
+	return connect.NewResponse(resp), nil
 }
 
 // ReadData

@@ -49,6 +49,43 @@ type UtxoWithOrdering struct {
 	TxBlockIndex uint32 `gorm:"column:tx_block_index"`
 }
 
+// UtxoOrderingCursor is the keyset position for SearchUtxos.
+//
+// Text form (required when non-empty): slot:block_index:output_idx. That tuple
+// uniquely identifies a created UTxO in chain order (slot, transaction index in
+// block, output index within the transaction).
+type UtxoOrderingCursor struct {
+	Slot       uint64
+	BlockIndex uint32
+	OutputIdx  uint32
+}
+
+// UtxoWithOrderingQuery drives GetUtxosByAddressWithOrdering (single MetadataStore entry).
+//
+// Address matching (exactly one of these applies):
+//   - MatchAllAddresses true: do not filter by payment/stake keys (all live UTxOs, subject
+//     to asset filter if set). SearchUtxos sets this when the request predicate is nil.
+//   - MatchAllAddresses false and len(Addresses) == 0: match no rows (caller uses this when
+//     a predicate was given but no Cardano address parts could be decoded).
+//   - MatchAllAddresses false and len(Addresses) > 0: match UTxOs that satisfy ANY branch
+//     (OR): exact / payment-only / stake-only per address, same rules as legacy
+//     addressWhereClause.
+//
+// After + Limit: keyset pagination; Limit <= 0 means no SQL LIMIT. SearchUtxos sets Limit to
+// effective page size + 1.
+//
+// FilterByAsset: when true, AssetPolicyID is required; AssetName nil matches any name under
+// the policy (same semantics as GetUtxosByAssets).
+type UtxoWithOrderingQuery struct {
+	MatchAllAddresses bool
+	Addresses         []ledger.Address
+	After             *UtxoOrderingCursor
+	Limit             int
+	FilterByAsset     bool
+	AssetPolicyID     []byte
+	AssetName         []byte
+}
+
 func (u *Utxo) TableName() string {
 	return "utxo"
 }

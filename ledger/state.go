@@ -4016,12 +4016,12 @@ func (ls *LedgerState) UtxosByAddress(
 	return ret, nil
 }
 
-// UtxosByAddressWithOrdering returns all UTxOs for an address with
-// ordering metadata.
+// UtxosByAddressWithOrdering returns UTxOs matching q with ordering metadata.
+// See models.UtxoWithOrderingQuery (nil SearchUtxos predicate: MatchAllAddresses).
 func (ls *LedgerState) UtxosByAddressWithOrdering(
-	addr ledger.Address,
+	q *models.UtxoWithOrderingQuery,
 ) ([]models.UtxoWithOrdering, error) {
-	utxos, err := ls.db.UtxosByAddressWithOrdering(addr, nil)
+	utxos, err := ls.db.UtxosByAddressWithOrdering(q, nil)
 	if err != nil {
 		return nil, err
 	}
