@@ -88,8 +88,10 @@ type OuroborosConfig struct {
 	PromRegistry    prometheus.Registerer
 	// MaxTxSubmissionsPerSecond is the maximum number of transaction
 	// submissions accepted per peer per second via the TxSubmission
-	// mini-protocol. A value of 0 uses DefaultMaxTxSubmissionsPerSecond.
-	// A negative value disables rate limiting.
+	// mini-protocol. A value of 0 disables rate limiting, which is the
+	// default because TxSubmission is pull-based and the local server
+	// already controls the request pace. A negative value also disables
+	// rate limiting.
 	MaxTxSubmissionsPerSecond int
 	// ChainsyncIngressEligible reports whether a peer is allowed to
 	// feed chainsync events into the ledger pipeline. This lets us
@@ -127,9 +129,6 @@ func NewOuroboros(cfg OuroborosConfig) *Ouroboros {
 	}
 	// Initialize per-peer TxSubmission rate limiter
 	txRate := cfg.MaxTxSubmissionsPerSecond
-	if txRate == 0 {
-		txRate = DefaultMaxTxSubmissionsPerSecond
-	}
 	if txRate > 0 {
 		// Burst allows small batches: 2x the per-second rate
 		burst := float64(txRate) * 2
