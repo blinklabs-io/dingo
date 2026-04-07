@@ -289,22 +289,10 @@ func TestNewOuroboros_DefaultRateLimit(t *testing.T) {
 		EventBus: event.NewEventBus(nil, logger),
 	})
 
-	require.NotNil(
+	assert.Nil(
 		t,
 		o.txSubmissionRateLimiter,
-		"rate limiter should be initialized with default config",
-	)
-	assert.Equal(
-		t,
-		float64(DefaultMaxTxSubmissionsPerSecond),
-		o.txSubmissionRateLimiter.rate,
-		"rate should use default",
-	)
-	assert.Equal(
-		t,
-		float64(DefaultMaxTxSubmissionsPerSecond)*2,
-		o.txSubmissionRateLimiter.burst,
-		"burst should be 2x default rate",
+		"rate limiter should be nil when default is disabled (-1)",
 	)
 }
 
@@ -349,13 +337,15 @@ func TestNewOuroboros_DisabledRateLimit(t *testing.T) {
 func TestHandleConnClosedEvent_CleansUpRateLimiter(t *testing.T) {
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	o := NewOuroboros(OuroborosConfig{
-		Logger:   logger,
-		EventBus: event.NewEventBus(nil, logger),
+		Logger:                    logger,
+		EventBus:                  event.NewEventBus(nil, logger),
+		MaxTxSubmissionsPerSecond: 30,
 	})
 
 	peer := testConnIdWithPort(4001)
 
 	// Create rate limiter state for this peer
+	require.NotNil(t, o.txSubmissionRateLimiter, "rate limiter should exist when explicitly configured")
 	o.txSubmissionRateLimiter.Allow(peer, 1)
 
 	// Verify the peer exists in the rate limiter
