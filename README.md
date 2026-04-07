@@ -22,7 +22,7 @@ A high-performance Cardano blockchain node implementation in Go by Blink Labs. D
 - Peer governance with dynamic peer selection, ledger peers, and topology support
 - Chain rollback support for handling forks with automatic state restoration
 - Fast bootstrapping via built-in Mithril client
-- Multiple API servers: UTxO RPC, WIP Blockfrost-compatible REST, Mesh (Coinbase Rosetta)
+- Multiple external interfaces: general-purpose APIs (UTxO RPC, Blockfrost-compatible REST, Mesh/Rosetta) plus Bark for Dingo-to-Dingo C2 and archive services
 
 Note: On Windows systems, named pipes are used instead of Unix sockets for node-to-client communication.
 
@@ -132,11 +132,15 @@ docker run -p 3001:3001 \
 
 The image is based on Debian bookworm-slim and includes `cardano-cli`, `nview`, and `txtop`. Mithril snapshot support is built into dingo natively (`dingo mithril sync`). The Dockerfile sets `CARDANO_DATABASE_PATH=/data/db` and `CARDANO_SOCKET_PATH=/ipc/dingo.socket`, overriding the local defaults of `.dingo` and `dingo.socket` — the volume mounts above map to these container paths.
 
-| Port | Service |
-|------|---------|
-| 3001 | Ouroboros NtN (node-to-node) |
-| 3002 | Ouroboros NtC over TCP |
-| 12798 | Prometheus metrics |
+| Port | Service | Default |
+|------|---------|---------|
+| 3001 | Ouroboros NtN (node-to-node) | Enabled |
+| 3002 | Ouroboros NtC over TCP | Enabled |
+| 12798 | Prometheus metrics | Enabled |
+| 3000 | Blockfrost REST API | Disabled |
+| 8080 | Mesh (Rosetta) REST API | Disabled |
+| 9090 | UTxO RPC (gRPC) | Disabled |
+| — | Bark archive (gRPC) | Disabled (example when enabled: 9091) |
 
 ## Storage Modes
 
@@ -161,15 +165,16 @@ Or in `dingo.yaml`:
 storageMode: "api"
 ```
 
-## API Servers
+## API Servers and Bark
 
-Dingo includes three API servers. All APIs require `storageMode: "api"` and start automatically on their default ports in that mode. Set an individual port to 0 to disable a specific API. The Blockfrost server provides a WIP Blockfrost-compatible REST API with a growing subset of the compatibility surface.
+Dingo includes three general-purpose external APIs plus Bark. UTxO RPC, Blockfrost, and Mesh are client-facing APIs and require `storageMode: "api"`. Bark is different: it is Dingo's own protocol for Dingo-to-Dingo C2/archive services, not a general-purpose application API. Set an individual port to 0 to disable a specific interface. The Blockfrost server currently exposes the latest, epoch, network, and pool subset.
 
-| API | Port Env Var | Default | Protocol |
-|-----|-------------|---------|----------|
-| UTxO RPC | `DINGO_UTXORPC_PORT` | disabled | gRPC |
-| Blockfrost | `DINGO_BLOCKFROST_PORT` | disabled | REST |
-| Mesh (Rosetta) | `DINGO_MESH_PORT` | disabled | REST |
+| Interface | Port Env Var | Default | Protocol | Role |
+|-----------|--------------|---------|----------|------|
+| UTxO RPC | `DINGO_UTXORPC_PORT` | disabled | gRPC | General-purpose client API |
+| Blockfrost | `DINGO_BLOCKFROST_PORT` | disabled | REST | General-purpose client API |
+| Mesh (Rosetta) | `DINGO_MESH_PORT` | disabled | REST | General-purpose client API |
+| Bark | `DINGO_BARK_PORT` | disabled | Connect/gRPC | Dingo-to-Dingo C2/archive protocol |
 
 ```bash
 # Enable Blockfrost API on port 3100 and UTxO RPC on port 9090
