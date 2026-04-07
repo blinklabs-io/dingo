@@ -36,18 +36,7 @@ Hi folks! Here’s what we shipped in v0.32.0.
 Thank you for trying!
 
 <!--
-{
-  "✨ What's New": [
-    "A new background cleanup task now helps keep nodes running smoothly over time by automatically removing no-longer-needed data. This introduces a periodic Bark block pruner that is wired into node startup and shutdown so pruning is scheduled and stopped cleanly.",
-    "Finding and listing UTXOs is now more consistent and scalable, especially when results span many pages. This adds a structured UTXO query/pagination model and moves SearchUtxos pagination plus asset filtering into the database layer, with corresponding updates to ledger/RPC code and tests."
-  ],
-  "💪 Improvements": [
-    "Transaction validation is now more reliable when the node’s view of time/slot position changes, reducing edge-case mismatches. The ledger and mempool now validate against the current-or-tip slot, track slot-clock fallbacks, and update wiring and tests accordingly.",
-    "Documentation is now clearer about what is part of the client-facing surface area versus internal components, making integration decisions easier. The docs rename the API section to **external interfaces**, clarify Bark’s role, and expand port/configuration tables with defaults and role descriptions.",
-    "Builds and CI workflows are now more up to date, improving compatibility with newer toolchains and reducing maintenance friction. This updates GitHub workflows to use actions/setup-go v6.4.0 and updates the Go build image in the Dockerfile from 1.25.8-1 to 1.26.1-1.",
-    "Dependencies are now on newer patch versions to pick up upstream stability and security improvements with minimal behavior change. This updates fxamacker/cbor to v2.9.1, plutigo to v0.1.1, AWS SDK for Go v2 S3-related modules to newer patch releases, OpenTelemetry Go to v1.43.0, and google.golang.org/api to v0.274.0."
-  ]
-}
+%NEW_RELEASE_NOTES%
 
 -->
 
