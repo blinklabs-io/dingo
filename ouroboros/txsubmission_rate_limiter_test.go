@@ -282,29 +282,17 @@ func TestTxSubmissionRateLimiter_ConcurrentAccess(t *testing.T) {
 	// the concurrent access is safe
 }
 
-func TestNewOuroboros_DefaultRateLimit(t *testing.T) {
+func TestNewOuroboros_DefaultRateLimitDisabled(t *testing.T) {
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	o := NewOuroboros(OuroborosConfig{
 		Logger:   logger,
 		EventBus: event.NewEventBus(nil, logger),
 	})
 
-	require.NotNil(
+	assert.Nil(
 		t,
 		o.txSubmissionRateLimiter,
-		"rate limiter should be initialized with default config",
-	)
-	assert.Equal(
-		t,
-		float64(DefaultMaxTxSubmissionsPerSecond),
-		o.txSubmissionRateLimiter.rate,
-		"rate should use default",
-	)
-	assert.Equal(
-		t,
-		float64(DefaultMaxTxSubmissionsPerSecond)*2,
-		o.txSubmissionRateLimiter.burst,
-		"burst should be 2x default rate",
+		"rate limiter should be disabled by default",
 	)
 }
 
@@ -349,8 +337,9 @@ func TestNewOuroboros_DisabledRateLimit(t *testing.T) {
 func TestHandleConnClosedEvent_CleansUpRateLimiter(t *testing.T) {
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	o := NewOuroboros(OuroborosConfig{
-		Logger:   logger,
-		EventBus: event.NewEventBus(nil, logger),
+		Logger:                    logger,
+		EventBus:                  event.NewEventBus(nil, logger),
+		MaxTxSubmissionsPerSecond: 10,
 	})
 
 	peer := testConnIdWithPort(4001)
