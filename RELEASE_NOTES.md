@@ -13,7 +13,7 @@ Hi folks! Here’s what we shipped in v0.32.0.
 
 ### ✨ What's New
 
-- **Automatic Bark block pruning:** Long-running nodes stay smoother because the node now runs periodic Bark block pruning as part of its startup and shutdown lifecycle.
+- **Automatic Bark block pruning:** Long-running nodes are steadier because the node now runs a periodic Bark block pruner that starts and stops with the node.
 - **Paginated UTXO search with asset filtering:** Large wallets and index-heavy workloads are easier to query because UTXO search now supports pagination and asset filtering backed by the database layer.
 
 ### 💪 Improvements
@@ -27,7 +27,7 @@ Hi folks! Here’s what we shipped in v0.32.0.
 
 ### 📋 What You Need to Know
 
-- **Dependency and build tooling updates:** If you pin toolchain versions, review your pins because this release updates several Go dependencies, GitHub Actions `actions/setup-go`, and the Docker Go build image.
+- **Dependency and build tooling updates:** If you pin toolchain versions, review your pins because this release updates several Go dependencies (including OpenTelemetry, `fxamacker/cbor`, `google.golang.org/api`, and `plutigo`), GitHub Actions `actions/setup-go` to v6.4.0, and the Docker Go build image from 1.25.8-1 to 1.26.1-1.
 
 ### 🙏 Thank You
 
