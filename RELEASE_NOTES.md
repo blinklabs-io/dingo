@@ -17,12 +17,12 @@ Hi folks! Here’s what we shipped in v0.32.1.
 
 ### ✨ What's New
 
-- **Clearer `TxPattern` matching:** Transaction matching is more consistent because `TxPattern` now follows clearer address and asset matching semantics.
+- **More predictable transaction matching:** Results are more consistent because transaction patterns now match addresses and assets in a more predictable way.
 
 ### 💪 Improvements
 
 - **Rate limiting can be disabled:** Transaction submission is easier to tune because setting the submission rate limit to `0` now disables throttling.
-- **Updated AWS S3 dependencies:** Cloud storage integrations stay current because we updated AWS SDK for Go v2 S3 modules.
+- **Updated AWS S3 dependencies:** Cloud storage integrations stay current because the AWS S3 dependencies were updated.
 
 ### 🔧 Fixes
 
