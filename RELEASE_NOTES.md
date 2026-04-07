@@ -11,26 +11,22 @@
 
 Hi folks! Here’s what we shipped in v0.32.1.
 
-<!--
-{
-  "💪 Improvements": [
-    "You can now fully disable transaction submission throttling by setting the transaction submission rate limit to `0`.",
-    "Transaction pattern checks are easier to reason about because the matcher now uses dedicated helpers for `consumes`, `produces`, `has_address`, and asset filters with structured matching and better tests."
-  ],
-  "🔧 Fixes": [
-    "AWS S3 integrations are more rock-solid because AWS SDK for Go v2 S3 modules were bumped to newer patch versions."
-  ]
-}
-
--->
-
 ### ✨ What's New
+
+- **No new features:** This patch focuses on improvements and fixes.
 
 ### 💪 Improvements
 
+- **Disable transaction submission throttling:** High-throughput workloads are simpler to run because setting the transaction submission rate limit to `0` now fully disables throttling.
+- **Refined transaction pattern matching:** Filtering rules are easier to reason about because transaction pattern matching now uses dedicated helpers for `consumes`, `produces`, `has_address`, and asset filters.
+
 ### 🔧 Fixes
 
+- **AWS SDK patch updates (S3 modules):** AWS S3 integrations are more rock-solid because AWS SDK for Go v2 S3 modules were bumped to newer patch versions.
+
 ### 📋 What You Need to Know
+
+- **No action required:** You're all set—just upgrade to v0.32.1.
 
 ### 🙏 Thank You
 
@@ -72,20 +68,6 @@ Hi folks! Here’s what we shipped in v0.32.0.
 ### 🙏 Thank You
 
 Thank you for trying!
-
-<!--
-{
-  "💪 Improvements": [
-    "You can now fully disable transaction submission throttling by setting the transaction submission rate limit to `0`.",
-    "Transaction pattern checks are easier to reason about because the matcher now uses dedicated helpers for `consumes`, `produces`, `has_address`, and asset filters with structured matching and better tests."
-  ],
-  "🔧 Fixes": [
-    "AWS S3 integrations are more rock-solid because AWS SDK for Go v2 S3 modules were bumped to newer patch versions."
-  ]
-}
-
-
--->
 
 ---
 
