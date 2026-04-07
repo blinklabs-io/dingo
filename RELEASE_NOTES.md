@@ -22,7 +22,7 @@ Hi folks! Here’s what we shipped in v0.32.1.
 
 ### 🔧 Fixes
 
-- **AWS SDK patch updates (S3 modules):** AWS S3 integrations are more rock-solid because AWS SDK for Go v2 S3 modules were bumped to newer patch versions.
+- **AWS SDK patch updates:** AWS S3 integrations are more rock-solid because AWS SDK for Go v2 S3 modules were bumped to newer patch versions.
 
 ### 📋 What You Need to Know
 
