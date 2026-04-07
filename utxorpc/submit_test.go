@@ -421,6 +421,18 @@ func txPatternMustAddrBytes(t *testing.T, bech32 string) []byte {
 	return b
 }
 
+func txPatternMustPaymentPartBytes(t *testing.T, bech32 string) []byte {
+	t.Helper()
+	addr := txPatternMustAddr(t, bech32)
+	return addr.PaymentKeyHash().Bytes()
+}
+
+func txPatternMustDelegationPartBytes(t *testing.T, bech32 string) []byte {
+	t.Helper()
+	addr := txPatternMustAddr(t, bech32)
+	return addr.StakeKeyHash().Bytes()
+}
+
 func txPatternTestUtxorpc(t *testing.T) *Utxorpc {
 	t.Helper()
 	eb := event.NewEventBus(nil, nil)
@@ -435,6 +447,8 @@ func TestTxPatternMatchProduces(t *testing.T) {
 	t.Parallel()
 	addrA := txPatternMustAddr(t, txPatternAddrA)
 	bytesB := txPatternMustAddrBytes(t, txPatternAddrB)
+	payA := txPatternMustPaymentPartBytes(t, txPatternAddrA)
+	delA := txPatternMustDelegationPartBytes(t, txPatternAddrA)
 
 	var policy common.Blake2b224
 	copy(policy[:], []byte("policy123456789012345678901234"))
@@ -491,6 +505,30 @@ func TestTxPatternMatchProduces(t *testing.T) {
 					PolicyId:  policy[:],
 					AssetName: assetName,
 				},
+			},
+			want: predMatch,
+		},
+		{
+			name: "payment_part_match",
+			tx: &txPatternTestTx{
+				outs: []common.TransactionOutput{
+					&txPatternTestOutput{addr: addrA},
+				},
+			},
+			pat: &cardano.TxOutputPattern{
+				Address: &cardano.AddressPattern{PaymentPart: payA},
+			},
+			want: predMatch,
+		},
+		{
+			name: "delegation_part_match",
+			tx: &txPatternTestTx{
+				outs: []common.TransactionOutput{
+					&txPatternTestOutput{addr: addrA},
+				},
+			},
+			pat: &cardano.TxOutputPattern{
+				Address: &cardano.AddressPattern{DelegationPart: delA},
 			},
 			want: predMatch,
 		},

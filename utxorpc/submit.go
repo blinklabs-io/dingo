@@ -576,22 +576,11 @@ func (u *Utxorpc) txOutputPatternMatches(
 		return predMatch
 	}
 	if addrPat != nil {
-		addrs, st := u.addressesFromPattern(addrPat)
+		addrMatch, st := u.addressPatternMatchesOutput(out, addrPat)
 		if st != predMatch {
 			return st
 		}
-		if len(addrs) == 0 {
-			return predUnevaluable
-		}
-		outAddr := out.Address().String()
-		ok := false
-		for _, a := range addrs {
-			if outAddr == a.String() {
-				ok = true
-				break
-			}
-		}
-		if !ok {
+		if !addrMatch {
 			return predNoMatch
 		}
 	}
@@ -602,6 +591,57 @@ func (u *Utxorpc) txOutputPatternMatches(
 		return predNoMatch
 	}
 	return predMatch
+}
+
+func (u *Utxorpc) addressPatternMatchesOutput(
+	out gledger.TransactionOutput,
+	ap *cardano.AddressPattern,
+) (bool, predOutcome) {
+	if ap == nil {
+		return false, predUnevaluable
+	}
+	hasConstraint := ap.GetExactAddress() != nil ||
+		ap.GetPaymentPart() != nil ||
+		ap.GetDelegationPart() != nil
+	if !hasConstraint {
+		return false, predUnevaluable
+	}
+	addr := out.Address()
+	if b := ap.GetExactAddress(); b != nil {
+		patAddr, err := lcommon.NewAddressFromBytes(b)
+		if err != nil {
+			u.config.Logger.Error("failed to decode exact address", "error", err)
+			return false, predUnevaluable
+		}
+		if addr.String() == patAddr.String() {
+			return true, predMatch
+		}
+	}
+	if b := ap.GetPaymentPart(); b != nil {
+		if len(b) != lcommon.AddressHashSize {
+			u.config.Logger.Error(
+				"invalid payment_part length",
+				"length", len(b),
+			)
+			return false, predUnevaluable
+		}
+		if bytes.Equal(addr.PaymentKeyHash().Bytes(), b) {
+			return true, predMatch
+		}
+	}
+	if b := ap.GetDelegationPart(); b != nil {
+		if len(b) != lcommon.AddressHashSize {
+			u.config.Logger.Error(
+				"invalid delegation_part length",
+				"length", len(b),
+			)
+			return false, predUnevaluable
+		}
+		if bytes.Equal(addr.StakeKeyHash().Bytes(), b) {
+			return true, predMatch
+		}
+	}
+	return false, predMatch
 }
 
 func (u *Utxorpc) txOutputHasAssetPattern(
@@ -628,7 +668,7 @@ func (u *Utxorpc) txOutputHasAssetPattern(
 	return false
 }
 
-// addressesFromPattern decodes utxorpc AddressPattern (exact, payment, delegation).
+// addressesFromPattern decodes exact_address entries from AddressPattern.
 func (u *Utxorpc) addressesFromPattern(
 	ap *cardano.AddressPattern,
 ) ([]gledger.Address, predOutcome) {
@@ -640,22 +680,6 @@ func (u *Utxorpc) addressesFromPattern(
 		addr, err := lcommon.NewAddressFromBytes(b)
 		if err != nil {
 			u.config.Logger.Error("failed to decode exact address", "error", err)
-			return nil, predUnevaluable
-		}
-		addrs = append(addrs, addr)
-	}
-	if b := ap.GetPaymentPart(); b != nil {
-		addr, err := lcommon.NewAddressFromBytes(b)
-		if err != nil {
-			u.config.Logger.Error("failed to decode payment part", "error", err)
-			return nil, predUnevaluable
-		}
-		addrs = append(addrs, addr)
-	}
-	if b := ap.GetDelegationPart(); b != nil {
-		addr, err := lcommon.NewAddressFromBytes(b)
-		if err != nil {
-			u.config.Logger.Error("failed to decode delegation part", "error", err)
 			return nil, predUnevaluable
 		}
 		addrs = append(addrs, addr)
