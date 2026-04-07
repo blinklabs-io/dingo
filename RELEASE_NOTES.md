@@ -6,14 +6,14 @@
 <!--
 {
   "✨ What's New": [
-    "This release adds clearer transaction matching behavior so you can reliably describe what a transaction should include and get consistent results. It refactors `TxPattern` matching into dedicated helpers for `consumes`, `produces`, `has_address`, and asset filters, and updates `has_address` and asset semantics to use structured-output matching plus lookup with comprehensive new tests."
+    "This release adds clearer transaction matching behavior so you can reliably describe what a transaction should include and get consistent results."
   ],
   "💪 Improvements": [
-    "This release makes rate limiting easier to control when submitting transactions, especially in environments where you want no throttling. The default transaction submission rate-limit behavior now treats a value of `0` as “rate limiting disabled,” and the test suite has been updated to reflect the new semantics.",
-    "This release refreshes cloud storage dependencies to keep integrations current and reduce risk from outdated patches. It updates AWS SDK for Go v2 S3-related modules to newer patch versions."
+    "This release makes rate limiting easier to control when submitting transactions, especially in environments where you want no throttling.",
+    "This release refreshes cloud storage dependencies to keep integrations current and reduce risk from outdated patches."
   ],
   "📋 What You Need to Know": [
-    "If you previously set the transaction submission rate limit to `0` expecting a different behavior, you may see a change in throughput after upgrading. A configured value of `0` now explicitly disables rate limiting, so review your submission configuration if you relied on `0` to mean a default or minimal limit."
+    "If you previously set the transaction submission rate limit to `0` expecting a different behavior, you may see a change in throughput after upgrading."
   ]
 }
 
@@ -59,14 +59,14 @@ Thank you for trying!
 <!--
 {
   "✨ What's New": [
-    "This release adds clearer transaction matching behavior so you can reliably describe what a transaction should include and get consistent results. It refactors `TxPattern` matching into dedicated helpers for `consumes`, `produces`, `has_address`, and asset filters, and updates `has_address` and asset semantics to use structured-output matching plus lookup with comprehensive new tests."
+    "This release adds clearer transaction matching behavior so you can reliably describe what a transaction should include and get consistent results."
   ],
   "💪 Improvements": [
-    "This release makes rate limiting easier to control when submitting transactions, especially in environments where you want no throttling. The default transaction submission rate-limit behavior now treats a value of `0` as “rate limiting disabled,” and the test suite has been updated to reflect the new semantics.",
-    "This release refreshes cloud storage dependencies to keep integrations current and reduce risk from outdated patches. It updates AWS SDK for Go v2 S3-related modules to newer patch versions."
+    "This release makes rate limiting easier to control when submitting transactions, especially in environments where you want no throttling.",
+    "This release refreshes cloud storage dependencies to keep integrations current and reduce risk from outdated patches."
   ],
   "📋 What You Need to Know": [
-    "If you previously set the transaction submission rate limit to `0` expecting a different behavior, you may see a change in throughput after upgrading. A configured value of `0` now explicitly disables rate limiting, so review your submission configuration if you relied on `0` to mean a default or minimal limit."
+    "If you previously set the transaction submission rate limit to `0` expecting a different behavior, you may see a change in throughput after upgrading."
   ]
 }
 
