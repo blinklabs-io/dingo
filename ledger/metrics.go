@@ -26,6 +26,7 @@ type stateMetrics struct {
 	slotInEpoch         prometheus.Gauge
 	slotNum             prometheus.Gauge
 	forks               prometheus.Gauge
+	slotClockFallbacks  prometheus.Counter
 	blocksForgedTotal   prometheus.Counter
 	blockForgingLatency prometheus.Histogram
 	forgingEnabled      prometheus.Gauge
@@ -60,6 +61,10 @@ func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
 	m.forks = promautoFactory.NewGauge(prometheus.GaugeOpts{
 		Name: "cardano_node_metrics_forks_int",
 		Help: "number of forks seen",
+	})
+	m.slotClockFallbacks = promautoFactory.NewCounter(prometheus.CounterOpts{
+		Name: "dingo_ledger_slot_clock_fallback_total",
+		Help: "number of ledger slot clock fallbacks to the current tip",
 	})
 	m.blocksForgedTotal = promautoFactory.NewCounter(prometheus.CounterOpts{
 		Name: "cardano_node_metrics_blocksForgedNum_int",

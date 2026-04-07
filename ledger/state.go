@@ -3989,6 +3989,18 @@ func (ls *LedgerState) CurrentSlot() (uint64, error) {
 	return ls.slotClock.CurrentSlot()
 }
 
+// CurrentOrTipSlot returns the current wall-clock slot if available, or the
+// current chain tip slot when the slot clock is unavailable. When both are
+// available, it returns whichever slot is ahead.
+func (ls *LedgerState) CurrentOrTipSlot() uint64 {
+	tipSlot := ls.Tip().Point.Slot
+	currentSlot, err := ls.CurrentSlot()
+	if err != nil || currentSlot < tipSlot {
+		return tipSlot
+	}
+	return currentSlot
+}
+
 // NextSlotTime returns the wall-clock time when the next slot begins.
 func (ls *LedgerState) NextSlotTime() (time.Time, error) {
 	if ls.slotClock == nil {
@@ -4212,6 +4224,17 @@ func resolveValidationEra(
 	return *txEra, nil
 }
 
+func validationReferenceSlot(
+	tipSlot uint64,
+	currentSlot uint64,
+	currentSlotErr error,
+) uint64 {
+	if currentSlotErr == nil && currentSlot > tipSlot {
+		return currentSlot
+	}
+	return tipSlot
+}
+
 // validateTxCore is the shared validation flow for ValidateTx and
 // ValidateTxWithOverlay. It snapshots ledger state, resolves the
 // validation era, opens a DB transaction, and invokes the era's
@@ -4222,10 +4245,26 @@ func (ls *LedgerState) validateTxCore(
 ) error {
 	ls.RLock()
 	snapshotEra := ls.currentEra
-	snapshotSlot := ls.currentTip.Point.Slot
+	snapshotTipSlot := ls.currentTip.Point.Slot
 	snapshotPParams := ls.currentPParams
 	snapshotPrevEraPParams := ls.prevEraPParams
 	ls.RUnlock()
+	currentSlot, currentSlotErr := ls.CurrentSlot()
+	if currentSlotErr != nil {
+		ls.config.Logger.Debug(
+			"slot clock unavailable during tx validation, falling back to snapshot tip slot",
+			"error",
+			currentSlotErr,
+			"snapshot_tip_slot",
+			snapshotTipSlot,
+		)
+		ls.metrics.slotClockFallbacks.Inc()
+	}
+	snapshotSlot := validationReferenceSlot(
+		snapshotTipSlot,
+		currentSlot,
+		currentSlotErr,
+	)
 
 	validationEra, err := resolveValidationEra(tx, snapshotEra)
 	if err != nil {

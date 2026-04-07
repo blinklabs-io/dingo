@@ -79,7 +79,7 @@ type MempoolConfig struct {
 	CleanupInterval    time.Duration
 	EvictionWatermark  float64
 	RejectionWatermark float64
-	TipSlotFunc        func() uint64 // returns current tip slot for early TX rejection
+	CurrentSlotFunc    func() uint64 // returns current slot for early TX rejection
 }
 
 type Mempool struct {
@@ -672,17 +672,18 @@ func (m *Mempool) AddTransaction(txType uint, txBytes []byte) error {
 		return fmt.Errorf("decode transaction: %w", err)
 	}
 	// Early reject TXs whose validity interval hasn't started yet.
-	// This avoids expensive UTxO resolution for TXs we can't possibly
-	// accept, which matters when the node is behind tip and peers are
-	// submitting current-slot transactions.
-	if m.config.TipSlotFunc != nil {
+	// Compare against the current wall-clock slot rather than the last
+	// block slot. Quiet networks often have a tip that lags the current
+	// slot, and using the tip would incorrectly reject transactions that
+	// are already valid now.
+	if m.config.CurrentSlotFunc != nil {
 		if start := tmpTx.ValidityIntervalStart(); start > 0 {
-			tipSlot := m.config.TipSlotFunc()
-			if start > tipSlot {
+			currentSlot := m.config.CurrentSlotFunc()
+			if start > currentSlot {
 				return fmt.Errorf(
-					"transaction validity interval start %d is beyond current tip slot %d",
+					"transaction validity interval start %d is beyond current slot %d",
 					start,
-					tipSlot,
+					currentSlot,
 				)
 			}
 		}
