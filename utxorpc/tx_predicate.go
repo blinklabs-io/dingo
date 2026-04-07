@@ -122,8 +122,8 @@ func txPredicateFromWatch(p *watch.TxPredicate) *txPredicateNode {
 	)
 }
 
-// txPatternLeaf matches a transaction against a Cardano TxPattern (outputs,
-// inputs via ledger state, mint/move asset filters).
+// txPatternLeaf matches a transaction against a Cardano TxPattern (consumes,
+// produces, has_address; inputs resolved via ledger where needed).
 type txPatternLeaf func(tx gledger.Transaction, pat *cardano.TxPattern) predOutcome
 
 // matchTxPredicateNode evaluates a prebuilt txPredicateNode (from

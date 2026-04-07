@@ -470,6 +470,9 @@ func (s *submitServiceServer) WatchMempool(
 // predUnevaluable is returned when the filter cannot be applied (no usable
 // address constraint, bad address bytes, etc.), so composite not() does not
 // treat it as a definite non-match.
+//
+// Set fields are combined with AND: consumes ∧ produces ∧ has_address (each
+// present sub-pattern must match).
 func (u *Utxorpc) matchesTxPattern(
 	tx gledger.Transaction,
 	pattern *cardano.TxPattern,
@@ -477,76 +480,207 @@ func (u *Utxorpc) matchesTxPattern(
 	if pattern == nil {
 		return predUnevaluable
 	}
-	addressPattern := pattern.GetHasAddress()
-	mintAssetPattern := pattern.GetMintsAsset()
-	moveAssetPattern := pattern.GetMovesAsset()
-
-	var addresses []gledger.Address
-	if addressPattern != nil {
-		// Handle Exact Address
-		exactAddressBytes := addressPattern.GetExactAddress()
-		if exactAddressBytes != nil {
-			addr, err := lcommon.NewAddressFromBytes(
-				exactAddressBytes,
-			)
-			if err != nil {
-				u.config.Logger.Error(
-					"failed to decode exact address",
-					"error", err,
-				)
-				return predUnevaluable
-			}
-			addresses = append(addresses, addr)
-		}
-
-		// Handle Payment Part
-		paymentPart := addressPattern.GetPaymentPart()
-		if paymentPart != nil {
-			paymentAddr, err := lcommon.NewAddressFromBytes(
-				paymentPart,
-			)
-			if err != nil {
-				u.config.Logger.Error(
-					"failed to decode payment part",
-					"error", err,
-				)
-				return predUnevaluable
-			}
-			addresses = append(addresses, paymentAddr)
-		}
-
-		// Handle Delegation Part
-		delegationPart := addressPattern.GetDelegationPart()
-		if delegationPart != nil {
-			delegationAddr, err := lcommon.NewAddressFromBytes(
-				delegationPart,
-			)
-			if err != nil {
-				u.config.Logger.Error(
-					"failed to decode delegation part",
-					"error", err,
-				)
-				return predUnevaluable
-			}
-			addresses = append(addresses, delegationAddr)
-		}
+	var parts []predOutcome
+	if p := pattern.GetConsumes(); p != nil {
+		parts = append(parts, u.txPatternMatchConsumes(tx, p))
 	}
-
-	var assetPatterns []*cardano.AssetPattern
-	if mintAssetPattern != nil {
-		assetPatterns = append(assetPatterns, mintAssetPattern)
+	if p := pattern.GetProduces(); p != nil {
+		parts = append(parts, u.txPatternMatchProduces(tx, p))
 	}
-	if moveAssetPattern != nil {
-		assetPatterns = append(assetPatterns, moveAssetPattern)
+	if pattern.GetHasAddress() != nil {
+		parts = append(parts, u.txPatternMatchHasAddress(tx, pattern))
 	}
-
-	// No usable address filter: cannot evaluate this predicate.
-	if len(addresses) == 0 {
+	if len(parts) == 0 {
 		return predUnevaluable
 	}
+	return combineANDBranches(parts)
+}
 
-	// Convert everything to utxos for matching
-	utxos := make([]gledger.TransactionOutput, 0, len(tx.Outputs()))
+func (u *Utxorpc) txPatternMatchConsumes(
+	tx gledger.Transaction,
+	pat *cardano.TxOutputPattern,
+) predOutcome {
+	return u.matchConsumesWithLookup(tx, pat, u.lookupSpentOutput)
+}
+
+func (u *Utxorpc) matchConsumesWithLookup(
+	tx gledger.Transaction,
+	pat *cardano.TxOutputPattern,
+	lookup func(gledger.TransactionInput) (gledger.TransactionOutput, error),
+) predOutcome {
+	var sawUnevaluable bool
+	for _, in := range tx.Consumed() {
+		out, err := lookup(in)
+		if err != nil {
+			u.config.Logger.Error(
+				"failed to look up input for consumes predicate",
+				"error", err,
+			)
+			continue
+		}
+		switch u.txOutputPatternMatches(out, pat) {
+		case predMatch:
+			return predMatch
+		case predUnevaluable:
+			sawUnevaluable = true
+		case predNoMatch:
+		}
+	}
+	if sawUnevaluable {
+		return predUnevaluable
+	}
+	return predNoMatch
+}
+
+func (u *Utxorpc) txPatternMatchProduces(
+	tx gledger.Transaction,
+	pat *cardano.TxOutputPattern,
+) predOutcome {
+	// Body outputs only; collateral return is not part of "produces" here.
+	outs := tx.Outputs()
+	var sawUnevaluable bool
+	for _, out := range outs {
+		switch u.txOutputPatternMatches(out, pat) {
+		case predMatch:
+			return predMatch
+		case predUnevaluable:
+			sawUnevaluable = true
+		case predNoMatch:
+		}
+	}
+	if sawUnevaluable {
+		return predUnevaluable
+	}
+	return predNoMatch
+}
+
+// txOutputPatternMatches tests one ledger output against TxOutputPattern
+// (optional AddressPattern + optional AssetPattern; both must hold when set).
+func (u *Utxorpc) txOutputPatternMatches(
+	out gledger.TransactionOutput,
+	pat *cardano.TxOutputPattern,
+) predOutcome {
+	if pat == nil {
+		return predUnevaluable
+	}
+	addrPat := pat.GetAddress()
+	assetPat := pat.GetAsset()
+	if addrPat == nil && assetPat == nil {
+		return predMatch
+	}
+	if addrPat != nil {
+		addrs, st := u.addressesFromPattern(addrPat)
+		if st != predMatch {
+			return st
+		}
+		if len(addrs) == 0 {
+			return predUnevaluable
+		}
+		outAddr := out.Address().String()
+		ok := false
+		for _, a := range addrs {
+			if outAddr == a.String() {
+				ok = true
+				break
+			}
+		}
+		if !ok {
+			return predNoMatch
+		}
+	}
+	if assetPat != nil {
+		if u.txOutputHasAssetPattern(out, assetPat) {
+			return predMatch
+		}
+		return predNoMatch
+	}
+	return predMatch
+}
+
+func (u *Utxorpc) txOutputHasAssetPattern(
+	out gledger.TransactionOutput,
+	ap *cardano.AssetPattern,
+) bool {
+	if ap == nil {
+		return true
+	}
+	for _, policyID := range out.Assets().Policies() {
+		if !bytes.Equal(policyID.Bytes(), ap.GetPolicyId()) {
+			continue
+		}
+		for _, asset := range out.Assets().Assets(policyID) {
+			if bytes.Equal(asset, ap.GetAssetName()) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// addressesFromPattern decodes utxorpc AddressPattern (exact, payment, delegation).
+func (u *Utxorpc) addressesFromPattern(
+	ap *cardano.AddressPattern,
+) ([]gledger.Address, predOutcome) {
+	if ap == nil {
+		return nil, predUnevaluable
+	}
+	var addrs []gledger.Address
+	if b := ap.GetExactAddress(); b != nil {
+		addr, err := lcommon.NewAddressFromBytes(b)
+		if err != nil {
+			u.config.Logger.Error("failed to decode exact address", "error", err)
+			return nil, predUnevaluable
+		}
+		addrs = append(addrs, addr)
+	}
+	if b := ap.GetPaymentPart(); b != nil {
+		addr, err := lcommon.NewAddressFromBytes(b)
+		if err != nil {
+			u.config.Logger.Error("failed to decode payment part", "error", err)
+			return nil, predUnevaluable
+		}
+		addrs = append(addrs, addr)
+	}
+	if b := ap.GetDelegationPart(); b != nil {
+		addr, err := lcommon.NewAddressFromBytes(b)
+		if err != nil {
+			u.config.Logger.Error("failed to decode delegation part", "error", err)
+			return nil, predUnevaluable
+		}
+		addrs = append(addrs, addr)
+	}
+	return addrs, predMatch
+}
+
+func (u *Utxorpc) lookupSpentOutput(
+	in gledger.TransactionInput,
+) (gledger.TransactionOutput, error) {
+	if u.config.LedgerState == nil {
+		return nil, errors.New("ledger state not available")
+	}
+	rec, err := u.config.LedgerState.UtxoByRef(
+		in.Id().Bytes(),
+		in.Index(),
+	)
+	if err != nil {
+		return nil, err
+	}
+	out, err := rec.Decode()
+	if err != nil {
+		return nil, err
+	}
+	if out == nil {
+		return nil, errors.New("decoded utxo is nil")
+	}
+	return out, nil
+}
+
+// collectOutputsForHasAddress returns outputs, collateral return, and UTxOs
+// resolved from ordinary, reference, and collateral inputs (same set as before).
+func (u *Utxorpc) collectOutputsForHasAddress(
+	tx gledger.Transaction,
+) []gledger.TransactionOutput {
+	utxos := make([]gledger.TransactionOutput, 0, len(tx.Outputs())+8)
 	utxos = append(utxos, tx.Outputs()...)
 	if cr := tx.CollateralReturn(); cr != nil {
 		utxos = append(utxos, cr)
@@ -563,10 +697,7 @@ func (u *Utxorpc) matchesTxPattern(
 	inputs = append(inputs, refInputs...)
 	inputs = append(inputs, collateral...)
 	for _, input := range inputs {
-		utxo, err := u.config.LedgerState.UtxoByRef(
-			input.Id().Bytes(),
-			input.Index(),
-		)
+		out, err := u.lookupSpentOutput(input)
 		if err != nil {
 			u.config.Logger.Error(
 				"failed to look up input for predicate",
@@ -574,27 +705,42 @@ func (u *Utxorpc) matchesTxPattern(
 			)
 			continue
 		}
-		ret, err := utxo.Decode()
-		if err != nil {
-			u.config.Logger.Error(
-				"failed to decode utxo for predicate",
-				"error", err,
-			)
-			continue
-		}
-		if ret == nil {
-			continue
-		}
-		utxos = append(utxos, ret)
+		utxos = append(utxos, out)
+	}
+	return utxos
+}
+
+func (u *Utxorpc) txPatternMatchHasAddress(
+	tx gledger.Transaction,
+	pattern *cardano.TxPattern,
+) predOutcome {
+	addressPattern := pattern.GetHasAddress()
+	mintAssetPattern := pattern.GetMintsAsset()
+	moveAssetPattern := pattern.GetMovesAsset()
+
+	addresses, st := u.addressesFromPattern(addressPattern)
+	if st != predMatch {
+		return st
+	}
+	if len(addresses) == 0 {
+		return predUnevaluable
 	}
 
-	// Check UTxOs for matching addresses and assets
+	var assetPatterns []*cardano.AssetPattern
+	if mintAssetPattern != nil {
+		assetPatterns = append(assetPatterns, mintAssetPattern)
+	}
+	if moveAssetPattern != nil {
+		assetPatterns = append(assetPatterns, moveAssetPattern)
+	}
+
+	utxos := u.collectOutputsForHasAddress(tx)
+
 	for _, address := range addresses {
 		for _, utxo := range utxos {
 			if utxo.Address().String() != address.String() {
 				continue
 			}
-			// Address matched; check asset patterns
 			if len(assetPatterns) == 0 {
 				return predMatch
 			}
@@ -602,23 +748,8 @@ func (u *Utxorpc) matchesTxPattern(
 				if assetPattern == nil {
 					return predMatch
 				}
-				for _, policyId := range utxo.Assets().Policies() {
-					if !bytes.Equal(
-						policyId.Bytes(),
-						assetPattern.GetPolicyId(),
-					) {
-						continue
-					}
-					for _, asset := range utxo.Assets().Assets(
-						policyId,
-					) {
-						if bytes.Equal(
-							asset,
-							assetPattern.GetAssetName(),
-						) {
-							return predMatch
-						}
-					}
+				if u.txOutputHasAssetPattern(utxo, assetPattern) {
+					return predMatch
 				}
 			}
 		}
