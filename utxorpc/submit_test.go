@@ -730,3 +730,56 @@ func TestMatchesTxPattern_MovesAssetOnly(t *testing.T) {
 	}
 	require.Equal(t, predMatch, u.matchesTxPattern(tx, p))
 }
+
+func TestMatchesTxPattern_HasAddressPaymentPartOnly(t *testing.T) {
+	t.Parallel()
+	addrA := txPatternMustAddr(t, txPatternAddrA)
+	u := txPatternTestUtxorpc(t)
+	tx := &txPatternTestTx{
+		outs: []common.TransactionOutput{
+			&txPatternTestOutput{addr: addrA},
+		},
+	}
+	p := &cardano.TxPattern{
+		HasAddress: &cardano.AddressPattern{
+			PaymentPart: txPatternMustPaymentPartBytes(t, txPatternAddrA),
+		},
+	}
+	require.Equal(t, predMatch, u.matchesTxPattern(tx, p))
+}
+
+func TestMatchesTxPattern_HasAddressDelegationPartOnly(t *testing.T) {
+	t.Parallel()
+	addrA := txPatternMustAddr(t, txPatternAddrA)
+	u := txPatternTestUtxorpc(t)
+	tx := &txPatternTestTx{
+		outs: []common.TransactionOutput{
+			&txPatternTestOutput{addr: addrA},
+		},
+	}
+	p := &cardano.TxPattern{
+		HasAddress: &cardano.AddressPattern{
+			DelegationPart: txPatternMustDelegationPartBytes(t, txPatternAddrA),
+		},
+	}
+	require.Equal(t, predMatch, u.matchesTxPattern(tx, p))
+}
+
+func TestMatchesTxPattern_HasAddressANDMismatch(t *testing.T) {
+	t.Parallel()
+	addrA := txPatternMustAddr(t, txPatternAddrA)
+	u := txPatternTestUtxorpc(t)
+	tx := &txPatternTestTx{
+		outs: []common.TransactionOutput{
+			&txPatternTestOutput{addr: addrA},
+		},
+	}
+	p := &cardano.TxPattern{
+		HasAddress: &cardano.AddressPattern{
+			ExactAddress: txPatternMustAddrBytes(t, txPatternAddrA),
+			// Deliberately mismatched with exact_address to assert AND semantics
+			PaymentPart: txPatternMustPaymentPartBytes(t, txPatternAddrB),
+		},
+	}
+	require.Equal(t, predNoMatch, u.matchesTxPattern(tx, p))
+}

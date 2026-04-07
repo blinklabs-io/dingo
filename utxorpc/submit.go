@@ -575,46 +575,44 @@ func (u *Utxorpc) txOutputPatternMatches(
 	if addrPat == nil && assetPat == nil {
 		return predMatch
 	}
+	parts := make([]predOutcome, 0, 2)
 	if addrPat != nil {
-		addrMatch, st := u.addressPatternMatchesOutput(out, addrPat)
-		if st != predMatch {
-			return st
-		}
-		if !addrMatch {
-			return predNoMatch
-		}
+		addrMatch := u.addressPatternMatchesOutput(out, addrPat)
+		parts = append(parts, addrMatch)
 	}
 	if assetPat != nil {
-		if u.txOutputHasAssetPattern(out, assetPat) {
-			return predMatch
+		assetMatch := u.txOutputHasAssetPattern(out, assetPat)
+		if assetMatch {
+			parts = append(parts, predMatch)
+		} else {
+			parts = append(parts, predNoMatch)
 		}
-		return predNoMatch
 	}
-	return predMatch
+	return combineANDBranches(parts)
 }
 
 func (u *Utxorpc) addressPatternMatchesOutput(
 	out gledger.TransactionOutput,
 	ap *cardano.AddressPattern,
-) (bool, predOutcome) {
+) predOutcome {
 	if ap == nil {
-		return false, predUnevaluable
+		return predUnevaluable
 	}
 	hasConstraint := ap.GetExactAddress() != nil ||
 		ap.GetPaymentPart() != nil ||
 		ap.GetDelegationPart() != nil
 	if !hasConstraint {
-		return false, predUnevaluable
+		return predUnevaluable
 	}
 	addr := out.Address()
+	sawUnevaluable := false
 	if b := ap.GetExactAddress(); b != nil {
 		patAddr, err := lcommon.NewAddressFromBytes(b)
 		if err != nil {
 			u.config.Logger.Error("failed to decode exact address", "error", err)
-			return false, predUnevaluable
-		}
-		if addr.String() == patAddr.String() {
-			return true, predMatch
+			sawUnevaluable = true
+		} else if addr.String() != patAddr.String() {
+			return predNoMatch
 		}
 	}
 	if b := ap.GetPaymentPart(); b != nil {
@@ -623,10 +621,9 @@ func (u *Utxorpc) addressPatternMatchesOutput(
 				"invalid payment_part length",
 				"length", len(b),
 			)
-			return false, predUnevaluable
-		}
-		if bytes.Equal(addr.PaymentKeyHash().Bytes(), b) {
-			return true, predMatch
+			sawUnevaluable = true
+		} else if !bytes.Equal(addr.PaymentKeyHash().Bytes(), b) {
+			return predNoMatch
 		}
 	}
 	if b := ap.GetDelegationPart(); b != nil {
@@ -635,13 +632,15 @@ func (u *Utxorpc) addressPatternMatchesOutput(
 				"invalid delegation_part length",
 				"length", len(b),
 			)
-			return false, predUnevaluable
-		}
-		if bytes.Equal(addr.StakeKeyHash().Bytes(), b) {
-			return true, predMatch
+			sawUnevaluable = true
+		} else if !bytes.Equal(addr.StakeKeyHash().Bytes(), b) {
+			return predNoMatch
 		}
 	}
-	return false, predMatch
+	if sawUnevaluable {
+		return predUnevaluable
+	}
+	return predMatch
 }
 
 func (u *Utxorpc) txOutputHasAssetPattern(
@@ -666,25 +665,6 @@ func (u *Utxorpc) txOutputHasAssetPattern(
 		}
 	}
 	return false
-}
-
-// addressesFromPattern decodes exact_address entries from AddressPattern.
-func (u *Utxorpc) addressesFromPattern(
-	ap *cardano.AddressPattern,
-) ([]gledger.Address, predOutcome) {
-	if ap == nil {
-		return nil, predUnevaluable
-	}
-	var addrs []gledger.Address
-	if b := ap.GetExactAddress(); b != nil {
-		addr, err := lcommon.NewAddressFromBytes(b)
-		if err != nil {
-			u.config.Logger.Error("failed to decode exact address", "error", err)
-			return nil, predUnevaluable
-		}
-		addrs = append(addrs, addr)
-	}
-	return addrs, predMatch
 }
 
 func (u *Utxorpc) lookupSpentOutput(
@@ -752,22 +732,19 @@ func (u *Utxorpc) txPatternMatchHasAddress(
 	pattern *cardano.TxPattern,
 ) predOutcome {
 	addressPattern := pattern.GetHasAddress()
-
-	addresses, st := u.addressesFromPattern(addressPattern)
-	if st != predMatch {
-		return st
-	}
-	if len(addresses) == 0 {
+	if addressPattern == nil {
 		return predUnevaluable
 	}
 
 	utxos, sawUnevaluable := u.collectOutputsForHasAddress(tx)
 
-	for _, address := range addresses {
-		for _, utxo := range utxos {
-			if utxo.Address().String() != address.String() {
-				continue
-			}
+	for _, utxo := range utxos {
+		st := u.addressPatternMatchesOutput(utxo, addressPattern)
+		if st == predUnevaluable {
+			sawUnevaluable = true
+			continue
+		}
+		if st == predMatch {
 			return predMatch
 		}
 	}
