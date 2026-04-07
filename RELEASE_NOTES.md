@@ -35,7 +35,7 @@ Hi folks! Here’s what we shipped in v0.32.0.
 
 Thank you for trying!
 
-<!--
+<!-- DO NOT PUBLISH: raw payload (remove) -->
 {
   "✨ What's New": [
     "A new background cleanup task now helps keep nodes running smoothly over time by automatically removing no-longer-needed data. This introduces a periodic Bark block pruner that is wired into node startup and shutdown so pruning is scheduled and stopped cleanly.",
