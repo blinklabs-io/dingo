@@ -442,7 +442,7 @@ func (d *Database) UtxosByAddress(
 }
 
 func (d *Database) UtxosByAddressWithOrdering(
-	addr ledger.Address,
+	q *models.UtxoWithOrderingQuery,
 	txn *Txn,
 ) ([]models.UtxoWithOrdering, error) {
 	if txn == nil {
@@ -450,7 +450,7 @@ func (d *Database) UtxosByAddressWithOrdering(
 		defer txn.Release()
 	}
 	utxos, err := d.metadata.GetUtxosByAddressWithOrdering(
-		addr,
+		q,
 		txn.Metadata(),
 	)
 	if err != nil {

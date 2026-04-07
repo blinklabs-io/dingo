@@ -84,7 +84,7 @@ func TestRequestLimitConstants(t *testing.T) {
 }
 
 // TestRequestLimitEnforcement_Pattern verifies the limit enforcement
-// pattern used in FetchBlock, ReadUtxos, DumpHistory, and ReadData.
+// pattern used in FetchBlock, ReadUtxos, DumpHistory, SearchUtxos, and ReadData.
 // This tests the comparison logic in isolation, since calling the
 // actual gRPC handlers requires a full LedgerState.
 func TestRequestLimitEnforcement_Pattern(t *testing.T) {

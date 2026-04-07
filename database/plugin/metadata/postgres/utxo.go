@@ -176,40 +176,125 @@ func (d *MetadataStorePostgres) GetUtxosByAddress(
 	return ret, nil
 }
 
-// GetUtxosByAddressWithOrdering returns UTxOs with transaction ordering metadata
+func appendUtxoAddressOrBranchPostgres(ors *[]string, args *[]any, addr ledger.Address) {
+	zeroHash := lcommon.NewBlake2b224(nil)
+	pk := addr.PaymentKeyHash()
+	sk := addr.StakeKeyHash()
+	hasPayment := pk != zeroHash
+	hasStake := sk != zeroHash
+	switch {
+	case hasPayment && hasStake:
+		*ors = append(
+			*ors,
+			"(utxo.payment_key = ? AND utxo.staking_key = ?)",
+		)
+		*args = append(*args, pk.Bytes(), sk.Bytes())
+	case hasPayment:
+		*ors = append(*ors, "(utxo.payment_key = ?)")
+		*args = append(*args, pk.Bytes())
+	case hasStake:
+		*ors = append(*ors, "(utxo.staking_key = ?)")
+		*args = append(*args, sk.Bytes())
+	}
+}
+
+// GetUtxosByAddressWithOrdering returns UTxOs matching q (OR of addresses, optional asset).
 func (d *MetadataStorePostgres) GetUtxosByAddressWithOrdering(
-	addr ledger.Address,
+	q *models.UtxoWithOrderingQuery,
 	txn types.Txn,
 ) ([]models.UtxoWithOrdering, error) {
+	if q == nil {
+		return nil, errors.New("nil UtxoWithOrderingQuery")
+	}
 	var ret []models.UtxoWithOrdering
 	db, err := d.resolveDB(txn)
 	if err != nil {
 		return nil, err
 	}
-	addrQuery := addressWhereClause(db, addr)
-	if addrQuery == nil {
-		return ret, nil
+	base := db.
+		Table("utxo").
+		Joins("INNER JOIN transaction ON utxo.transaction_id = transaction.id").
+		Where("utxo.deleted_slot = 0")
+
+	addrs := q.Addresses
+	switch {
+	case q.MatchAllAddresses:
+	case len(addrs) == 0:
+		base = base.Where("1 = 0")
+	default:
+		var ors []string
+		var args []any
+		for i := range addrs {
+			appendUtxoAddressOrBranchPostgres(&ors, &args, addrs[i])
+		}
+		if len(ors) == 0 {
+			base = base.Where("1 = 0")
+		} else {
+			base = base.Where("("+strings.Join(ors, " OR ")+")", args...)
+		}
 	}
 
-	// Join with transaction to get ordering metadata
-	result := db.
-		Table("utxo").
-		Select(
-			"utxo.*, transaction.slot as tx_slot, transaction.block_index as tx_block_index",
-		).
-		Joins("LEFT JOIN transaction ON utxo.transaction_id = transaction.id").
-		Where("utxo.deleted_slot = 0").
-		Where(addrQuery).
-		Order(
-			"transaction.slot ASC, transaction.block_index ASC, utxo.output_idx ASC",
-		).
-		Scan(&ret)
+	if q.FilterByAsset {
+		if len(q.AssetPolicyID) == 0 {
+			return nil, errors.New("asset filter requires non-empty policy id")
+		}
+		assetSub := db.Table("asset").Select("utxo_id").Where(
+			"policy_id = ?",
+			q.AssetPolicyID,
+		)
+		if q.AssetName != nil {
+			assetSub = assetSub.Where("name = ?", q.AssetName)
+		}
+		base = base.Where("utxo.id IN (?)", assetSub)
+	}
 
+	useKeyset := q.Limit > 0 || q.After != nil
+	if useKeyset {
+		slotExpr := "transaction.slot"
+		biExpr := "transaction.block_index"
+		base = base.Select(fmt.Sprintf(
+			"utxo.*, %s as tx_slot, %s as tx_block_index",
+			slotExpr,
+			biExpr,
+		))
+		if q.After != nil {
+			base = base.Where(
+				fmt.Sprintf(
+					"(%s > ?) OR (%s = ? AND %s > ?) OR (%s = ? AND %s = ? AND utxo.output_idx > ?)",
+					slotExpr, slotExpr, biExpr, slotExpr, biExpr,
+				),
+				q.After.Slot,
+				q.After.Slot,
+				q.After.BlockIndex,
+				q.After.Slot,
+				q.After.BlockIndex,
+				q.After.OutputIdx,
+			)
+		}
+		base = base.Order(
+			fmt.Sprintf(
+				"%s ASC, %s ASC, utxo.output_idx ASC",
+				slotExpr,
+				biExpr,
+			),
+		)
+	} else {
+		base = base.Select(
+			"utxo.*, transaction.slot as tx_slot, transaction.block_index as tx_block_index",
+		).Order(
+			"transaction.slot ASC, transaction.block_index ASC, utxo.output_idx ASC",
+		)
+	}
+
+	if q.Limit > 0 {
+		base = base.Limit(q.Limit)
+	}
+
+	result := base.Scan(&ret)
 	if result.Error != nil {
 		return nil, result.Error
 	}
 
-	// Batch load assets for all UTxOs to avoid N+1 queries
 	if len(ret) > 0 {
 		utxoIDs := make([]uint, len(ret))
 		for i := range ret {
@@ -221,7 +306,6 @@ func (d *MetadataStorePostgres) GetUtxosByAddressWithOrdering(
 			return nil, err
 		}
 
-		// Map assets to their UTxOs
 		assetMap := make(map[uint][]models.Asset)
 		for i := range assets {
 			assetMap[assets[i].UtxoID] = append(
@@ -230,7 +314,6 @@ func (d *MetadataStorePostgres) GetUtxosByAddressWithOrdering(
 			)
 		}
 
-		// Assign assets to each UTxO
 		for i := range ret {
 			ret[i].Assets = assetMap[ret[i].ID]
 		}
