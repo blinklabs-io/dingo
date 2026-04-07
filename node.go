@@ -172,13 +172,13 @@ func (n *Node) processChainsyncRecyclerTick(
 	// Connection recycling during bulk sync causes pipeline resets,
 	// TIME_WAIT socket exhaustion, and dropped rollbacks that slow
 	// catch-up far more than the stall itself.
-	catchUpMultiplier := time.Duration(1)
+	var catchUpMultiplier int = 1
 	if n.ledgerState != nil && !n.ledgerState.IsAtTip() {
 		catchUpMultiplier = 5
 	}
-	effectiveGrace := grace * catchUpMultiplier
-	effectivePlateau := plateauRecoveryThreshold * catchUpMultiplier
-	effectiveCooldown := cooldown * catchUpMultiplier
+	effectiveGrace := time.Duration(catchUpMultiplier) * grace
+	effectivePlateau := time.Duration(catchUpMultiplier) * plateauRecoveryThreshold
+	effectiveCooldown := time.Duration(catchUpMultiplier) * cooldown
 	n.chainsyncState.CheckStalledClients()
 	trackedClients := n.chainsyncState.GetTrackedClients()
 	trackedByID := make(
@@ -255,14 +255,19 @@ func (n *Node) processChainsyncRecyclerTick(
 			continue
 		}
 		connKey := conn.ConnId.String()
-		if _, exists := recycleAt[connKey]; !exists {
-			recycleAt[connKey] = now.Add(effectiveGrace)
+		desiredDueAt := now.Add(effectiveGrace)
+		if dueAt, exists := recycleAt[connKey]; !exists {
+			recycleAt[connKey] = desiredDueAt
 			n.config.logger.Info(
 				"chainsync client stalled, scheduling guarded recycle",
 				"connection_id", connKey,
 				"stall_timeout", chainsyncCfg.StallTimeout,
 				"grace_period", effectiveGrace,
 			)
+		} else if dueAt.After(desiredDueAt) {
+			// Shrink deadline when transitioning from catch-up
+			// to at-tip so stalls aren't delayed unnecessarily.
+			recycleAt[connKey] = desiredDueAt
 		}
 	}
 	for connKey, dueAt := range recycleAt {
