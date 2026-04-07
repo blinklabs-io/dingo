@@ -623,7 +623,7 @@ func TestMatchesTxPattern_ProducesOnly(t *testing.T) {
 	require.Equal(t, predMatch, u.matchesTxPattern(tx, p))
 }
 
-// Without LedgerState, consumed inputs cannot be resolved; consumes filter yields no match.
+// Without LedgerState, consumed inputs cannot be resolved; consumes is unevaluable.
 func TestMatchesTxPattern_ConsumesOnly_LookupFailsWithoutLedger(t *testing.T) {
 	t.Parallel()
 	bytesA := txPatternMustAddrBytes(t, txPatternAddrA)
@@ -638,5 +638,57 @@ func TestMatchesTxPattern_ConsumesOnly_LookupFailsWithoutLedger(t *testing.T) {
 			Address: &cardano.AddressPattern{ExactAddress: bytesA},
 		},
 	}
-	require.Equal(t, predNoMatch, u.matchesTxPattern(tx, p))
+	require.Equal(t, predUnevaluable, u.matchesTxPattern(tx, p))
+}
+
+func TestMatchesTxPattern_MintsAssetOnly(t *testing.T) {
+	t.Parallel()
+	addrA := txPatternMustAddr(t, txPatternAddrA)
+	u := txPatternTestUtxorpc(t)
+	var policy common.Blake2b224
+	copy(policy[:], []byte("policy123456789012345678901234"))
+	assetName := []byte{0x41, 0x42}
+	ma := common.NewMultiAsset(
+		map[common.Blake2b224]map[cbor.ByteString]common.MultiAssetTypeOutput{
+			policy: {cbor.NewByteString(assetName): big.NewInt(1)},
+		},
+	)
+	tx := &txPatternTestTx{
+		outs: []common.TransactionOutput{
+			&txPatternTestOutput{addr: addrA, ma: &ma},
+		},
+	}
+	p := &cardano.TxPattern{
+		MintsAsset: &cardano.AssetPattern{
+			PolicyId:  policy[:],
+			AssetName: assetName,
+		},
+	}
+	require.Equal(t, predMatch, u.matchesTxPattern(tx, p))
+}
+
+func TestMatchesTxPattern_MovesAssetOnly(t *testing.T) {
+	t.Parallel()
+	addrA := txPatternMustAddr(t, txPatternAddrA)
+	u := txPatternTestUtxorpc(t)
+	var policy common.Blake2b224
+	copy(policy[:], []byte("policy123456789012345678901234"))
+	assetName := []byte{0x41, 0x42}
+	ma := common.NewMultiAsset(
+		map[common.Blake2b224]map[cbor.ByteString]common.MultiAssetTypeOutput{
+			policy: {cbor.NewByteString(assetName): big.NewInt(1)},
+		},
+	)
+	tx := &txPatternTestTx{
+		outs: []common.TransactionOutput{
+			&txPatternTestOutput{addr: addrA, ma: &ma},
+		},
+	}
+	p := &cardano.TxPattern{
+		MovesAsset: &cardano.AssetPattern{
+			PolicyId:  policy[:],
+			AssetName: assetName,
+		},
+	}
+	require.Equal(t, predMatch, u.matchesTxPattern(tx, p))
 }

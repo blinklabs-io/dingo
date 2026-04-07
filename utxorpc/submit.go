@@ -471,8 +471,8 @@ func (s *submitServiceServer) WatchMempool(
 // address constraint, bad address bytes, etc.), so composite not() does not
 // treat it as a definite non-match.
 //
-// Set fields are combined with AND: consumes ∧ produces ∧ has_address (each
-// present sub-pattern must match).
+// Set fields are combined with AND: consumes ∧ produces ∧ has_address ∧
+// mints_asset ∧ moves_asset (each present sub-pattern must match).
 func (u *Utxorpc) matchesTxPattern(
 	tx gledger.Transaction,
 	pattern *cardano.TxPattern,
@@ -489,6 +489,12 @@ func (u *Utxorpc) matchesTxPattern(
 	}
 	if pattern.GetHasAddress() != nil {
 		parts = append(parts, u.txPatternMatchHasAddress(tx, pattern))
+	}
+	if p := pattern.GetMintsAsset(); p != nil {
+		parts = append(parts, u.txPatternMatchAsset(tx, p))
+	}
+	if p := pattern.GetMovesAsset(); p != nil {
+		parts = append(parts, u.txPatternMatchAsset(tx, p))
 	}
 	if len(parts) == 0 {
 		return predUnevaluable
@@ -516,6 +522,7 @@ func (u *Utxorpc) matchConsumesWithLookup(
 				"failed to look up input for consumes predicate",
 				"error", err,
 			)
+			sawUnevaluable = true
 			continue
 		}
 		switch u.txOutputPatternMatches(out, pat) {
@@ -604,11 +611,15 @@ func (u *Utxorpc) txOutputHasAssetPattern(
 	if ap == nil {
 		return true
 	}
-	for _, policyID := range out.Assets().Policies() {
+	assets := out.Assets()
+	if assets == nil {
+		return false
+	}
+	for _, policyID := range assets.Policies() {
 		if !bytes.Equal(policyID.Bytes(), ap.GetPolicyId()) {
 			continue
 		}
-		for _, asset := range out.Assets().Assets(policyID) {
+		for _, asset := range assets.Assets(policyID) {
 			if bytes.Equal(asset, ap.GetAssetName()) {
 				return true
 			}
@@ -679,7 +690,8 @@ func (u *Utxorpc) lookupSpentOutput(
 // resolved from ordinary, reference, and collateral inputs (same set as before).
 func (u *Utxorpc) collectOutputsForHasAddress(
 	tx gledger.Transaction,
-) []gledger.TransactionOutput {
+) ([]gledger.TransactionOutput, bool) {
+	var sawUnevaluable bool
 	utxos := make([]gledger.TransactionOutput, 0, len(tx.Outputs())+8)
 	utxos = append(utxos, tx.Outputs()...)
 	if cr := tx.CollateralReturn(); cr != nil {
@@ -703,11 +715,12 @@ func (u *Utxorpc) collectOutputsForHasAddress(
 				"failed to look up input for predicate",
 				"error", err,
 			)
+			sawUnevaluable = true
 			continue
 		}
 		utxos = append(utxos, out)
 	}
-	return utxos
+	return utxos, sawUnevaluable
 }
 
 func (u *Utxorpc) txPatternMatchHasAddress(
@@ -715,8 +728,6 @@ func (u *Utxorpc) txPatternMatchHasAddress(
 	pattern *cardano.TxPattern,
 ) predOutcome {
 	addressPattern := pattern.GetHasAddress()
-	mintAssetPattern := pattern.GetMintsAsset()
-	moveAssetPattern := pattern.GetMovesAsset()
 
 	addresses, st := u.addressesFromPattern(addressPattern)
 	if st != predMatch {
@@ -726,33 +737,37 @@ func (u *Utxorpc) txPatternMatchHasAddress(
 		return predUnevaluable
 	}
 
-	var assetPatterns []*cardano.AssetPattern
-	if mintAssetPattern != nil {
-		assetPatterns = append(assetPatterns, mintAssetPattern)
-	}
-	if moveAssetPattern != nil {
-		assetPatterns = append(assetPatterns, moveAssetPattern)
-	}
-
-	utxos := u.collectOutputsForHasAddress(tx)
+	utxos, sawUnevaluable := u.collectOutputsForHasAddress(tx)
 
 	for _, address := range addresses {
 		for _, utxo := range utxos {
 			if utxo.Address().String() != address.String() {
 				continue
 			}
-			if len(assetPatterns) == 0 {
-				return predMatch
-			}
-			for _, assetPattern := range assetPatterns {
-				if assetPattern == nil {
-					return predMatch
-				}
-				if u.txOutputHasAssetPattern(utxo, assetPattern) {
-					return predMatch
-				}
-			}
+			return predMatch
 		}
+	}
+	if sawUnevaluable {
+		return predUnevaluable
+	}
+	return predNoMatch
+}
+
+func (u *Utxorpc) txPatternMatchAsset(
+	tx gledger.Transaction,
+	assetPattern *cardano.AssetPattern,
+) predOutcome {
+	if assetPattern == nil {
+		return predUnevaluable
+	}
+	utxos, sawUnevaluable := u.collectOutputsForHasAddress(tx)
+	for _, utxo := range utxos {
+		if u.txOutputHasAssetPattern(utxo, assetPattern) {
+			return predMatch
+		}
+	}
+	if sawUnevaluable {
+		return predUnevaluable
 	}
 	return predNoMatch
 }
