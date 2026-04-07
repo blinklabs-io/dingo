@@ -4,19 +4,7 @@
 ## v0.32.1 (April 7, 2026)
 
 <!--
-{
-  "✨ What's New": [
-    "This release adds clearer transaction matching behavior so you can reliably describe what a transaction should include and get consistent results."
-  ],
-  "💪 Improvements": [
-    "This release makes rate limiting easier to control when submitting transactions, especially in environments where you want no throttling.",
-    "This release refreshes cloud storage dependencies to keep integrations current and reduce risk from outdated patches."
-  ],
-  "📋 What You Need to Know": [
-    "If you previously set the transaction submission rate limit to `0` expecting a different behavior, you may see a change in throughput after upgrading."
-  ]
-}
-
+%NEW_RELEASE_NOTES%
 -->
 
 **Title:** Predictable transaction matching and submission tuning
