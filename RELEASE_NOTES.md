@@ -1,6 +1,44 @@
 # Release Notes
 
 
+## v0.32.1 (April 7, 2026)
+
+**Title:** Patch updates and polish
+
+**Date:** April 7, 2026
+
+**Version:** v0.32.1
+
+Hi folks! Here’s what we shipped in v0.32.1.
+
+<!--
+{
+  "💪 Improvements": [
+    "You can now fully disable transaction submission throttling when you need maximum throughput. The default transaction submission rate limit now treats a value of `0` as “no limit,” and the test suite has been updated to enforce the new `0 == disabled` behavior.",
+    "Transaction pattern checks are now more reliable and easier to reason about when you build filtering rules. The transaction pattern matcher was refactored into dedicated helpers for `consumes`, `produces`, `has_address`, and asset filters, and `has_address`/asset matching now uses structured-output matching plus lookups with comprehensive new tests."
+  ],
+  "🔧 Fixes": [
+    "AWS S3 integrations now stay current with upstream maintenance updates to reduce dependency-related issues. The AWS SDK for Go v2 S3-related modules were bumped to newer patch versions to pick up the latest fixes and compatibility updates."
+  ]
+}
+
+-->
+
+### ✨ What's New
+
+### 💪 Improvements
+
+### 🔧 Fixes
+
+### 📋 What You Need to Know
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
+
 ## v0.32.0 (April 7, 2026)
 
 **Title:** Background pruning and scalable UTxO search
@@ -36,7 +74,16 @@ Hi folks! Here’s what we shipped in v0.32.0.
 Thank you for trying!
 
 <!--
-%NEW_RELEASE_NOTES%
+{
+  "💪 Improvements": [
+    "You can now fully disable transaction submission throttling when you need maximum throughput. The default transaction submission rate limit now treats a value of `0` as “no limit,” and the test suite has been updated to enforce the new `0 == disabled` behavior.",
+    "Transaction pattern checks are now more reliable and easier to reason about when you build filtering rules. The transaction pattern matcher was refactored into dedicated helpers for `consumes`, `produces`, `has_address`, and asset filters, and `has_address`/asset matching now uses structured-output matching plus lookups with comprehensive new tests."
+  ],
+  "🔧 Fixes": [
+    "AWS S3 integrations now stay current with upstream maintenance updates to reduce dependency-related issues. The AWS SDK for Go v2 S3-related modules were bumped to newer patch versions to pick up the latest fixes and compatibility updates."
+  ]
+}
+
 
 -->
 
