@@ -17,6 +17,9 @@ package utxorpc
 import (
 	"context"
 	"encoding/hex"
+	"io"
+	"log/slog"
+	"math/big"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -25,7 +28,12 @@ import (
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/mempool"
+	"github.com/blinklabs-io/gouroboros/cbor"
+	gledger "github.com/blinklabs-io/gouroboros/ledger"
+	"github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/plutigo/data"
 	"github.com/stretchr/testify/require"
+	cardano "github.com/utxorpc/go-codegen/utxorpc/v1alpha/cardano"
 )
 
 // TestWaitForTx_PendingSetTracking verifies the pending transaction tracking
@@ -310,4 +318,468 @@ func TestWatchMempool_BrokenComparisonRemoved(t *testing.T) {
 	}, 2*time.Second, 10*time.Millisecond,
 		"event handler should receive AddTransactionEvent",
 	)
+}
+
+// TxPattern test fixtures: two distinct mainnet-style addresses from gouroboros tests.
+const (
+	txPatternAddrA = "addr1qytna5k2fq9ler0fuk45j7zfwv7t2zwhp777nvdjqqfr5tz8ztpwnk8zq5ngetcz5k5mckgkajnygtsra9aej2h3ek5seupmvd"
+	txPatternAddrB = "addr1qx2fxv2umyhttkxyxp8x0dlpdt3k6cwng5pxj3jhsydzer3n0d3vllmyqwsx5wktcd8cc3sq835lu7drv2xwl2wywfgse35a3x"
+)
+
+// txPatternTestTx is a minimal gledger.Transaction for TxPattern tests.
+type txPatternTestTx struct {
+	common.TransactionBodyBase
+	consumed []common.TransactionInput
+	outs     []common.TransactionOutput
+	collRet  common.TransactionOutput
+}
+
+func (t *txPatternTestTx) ProtocolParameterUpdates() (
+	uint64,
+	map[common.Blake2b224]common.ProtocolParameterUpdate,
+) {
+	return 0, nil
+}
+
+func (t *txPatternTestTx) Outputs() []common.TransactionOutput { return t.outs }
+
+func (t *txPatternTestTx) CollateralReturn() common.TransactionOutput { return t.collRet }
+
+func (t *txPatternTestTx) Type() int { return 0 }
+
+func (t *txPatternTestTx) Cbor() []byte { return nil }
+
+func (t *txPatternTestTx) Hash() common.Blake2b256 { return common.Blake2b256{} }
+
+func (t *txPatternTestTx) LeiosHash() common.Blake2b256 { return common.Blake2b256{} }
+
+func (t *txPatternTestTx) Metadata() common.TransactionMetadatum { return nil }
+
+func (t *txPatternTestTx) AuxiliaryData() common.AuxiliaryData { return nil }
+
+func (t *txPatternTestTx) IsValid() bool { return true }
+
+func (t *txPatternTestTx) Consumed() []common.TransactionInput { return t.consumed }
+
+func (t *txPatternTestTx) Produced() []common.Utxo { return nil }
+
+func (t *txPatternTestTx) Witnesses() common.TransactionWitnessSet { return nil }
+
+type txPatternTestInput struct {
+	id  common.Blake2b256
+	idx uint32
+}
+
+func (i *txPatternTestInput) Id() common.Blake2b256 { return i.id }
+
+func (i *txPatternTestInput) Index() uint32 { return i.idx }
+
+func (i *txPatternTestInput) String() string { return i.id.String() }
+
+func (i *txPatternTestInput) Utxorpc() (*cardano.TxInput, error) { return nil, nil }
+
+func (i *txPatternTestInput) ToPlutusData() data.PlutusData { return nil }
+
+type txPatternTestOutput struct {
+	addr common.Address
+	ma   *common.MultiAsset[common.MultiAssetTypeOutput]
+}
+
+func (o *txPatternTestOutput) Address() common.Address { return o.addr }
+
+func (o *txPatternTestOutput) Amount() *big.Int { return big.NewInt(1_000_000) }
+
+func (o *txPatternTestOutput) Assets() *common.MultiAsset[common.MultiAssetTypeOutput] {
+	return o.ma
+}
+
+func (o *txPatternTestOutput) Datum() *common.Datum { return nil }
+
+func (o *txPatternTestOutput) DatumHash() *common.Blake2b256 { return nil }
+
+func (o *txPatternTestOutput) Cbor() []byte { return nil }
+
+func (o *txPatternTestOutput) Utxorpc() (*cardano.TxOutput, error) { return nil, nil }
+
+func (o *txPatternTestOutput) ScriptRef() common.Script { return nil }
+
+func (o *txPatternTestOutput) ToPlutusData() data.PlutusData { return nil }
+
+func (o *txPatternTestOutput) String() string { return "" }
+
+func txPatternMustAddr(t *testing.T, bech32 string) common.Address {
+	t.Helper()
+	addr, err := common.NewAddress(bech32)
+	require.NoError(t, err)
+	return addr
+}
+
+func txPatternMustAddrBytes(t *testing.T, bech32 string) []byte {
+	t.Helper()
+	b, err := txPatternMustAddr(t, bech32).Bytes()
+	require.NoError(t, err)
+	return b
+}
+
+func txPatternMustPaymentPartBytes(t *testing.T, bech32 string) []byte {
+	t.Helper()
+	addr := txPatternMustAddr(t, bech32)
+	return addr.PaymentKeyHash().Bytes()
+}
+
+func txPatternMustDelegationPartBytes(t *testing.T, bech32 string) []byte {
+	t.Helper()
+	addr := txPatternMustAddr(t, bech32)
+	return addr.StakeKeyHash().Bytes()
+}
+
+func txPatternTestUtxorpc(t *testing.T) *Utxorpc {
+	t.Helper()
+	eb := event.NewEventBus(nil, nil)
+	t.Cleanup(eb.Stop)
+	return NewUtxorpc(UtxorpcConfig{
+		Logger:   slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		EventBus: eb,
+	})
+}
+
+func TestTxPatternMatchProduces(t *testing.T) {
+	t.Parallel()
+	addrA := txPatternMustAddr(t, txPatternAddrA)
+	bytesB := txPatternMustAddrBytes(t, txPatternAddrB)
+	payA := txPatternMustPaymentPartBytes(t, txPatternAddrA)
+	delA := txPatternMustDelegationPartBytes(t, txPatternAddrA)
+
+	var policy common.Blake2b224
+	copy(policy[:], []byte("policy123456789012345678901234"))
+	assetName := []byte{0x41, 0x42}
+	ma := common.NewMultiAsset(
+		map[common.Blake2b224]map[cbor.ByteString]common.MultiAssetTypeOutput{
+			policy: {cbor.NewByteString(assetName): big.NewInt(1)},
+		},
+	)
+
+	u := txPatternTestUtxorpc(t)
+
+	tests := []struct {
+		name string
+		tx   *txPatternTestTx
+		pat  *cardano.TxOutputPattern
+		want predOutcome
+	}{
+		{
+			name: "address_match_on_output",
+			tx: &txPatternTestTx{
+				outs: []common.TransactionOutput{
+					&txPatternTestOutput{addr: addrA},
+				},
+			},
+			pat: &cardano.TxOutputPattern{
+				Address: &cardano.AddressPattern{
+					ExactAddress: txPatternMustAddrBytes(t, txPatternAddrA),
+				},
+			},
+			want: predMatch,
+		},
+		{
+			name: "address_no_match",
+			tx: &txPatternTestTx{
+				outs: []common.TransactionOutput{
+					&txPatternTestOutput{addr: addrA},
+				},
+			},
+			pat: &cardano.TxOutputPattern{
+				Address: &cardano.AddressPattern{ExactAddress: bytesB},
+			},
+			want: predNoMatch,
+		},
+		{
+			name: "asset_match",
+			tx: &txPatternTestTx{
+				outs: []common.TransactionOutput{
+					&txPatternTestOutput{addr: addrA, ma: &ma},
+				},
+			},
+			pat: &cardano.TxOutputPattern{
+				Asset: &cardano.AssetPattern{
+					PolicyId:  policy[:],
+					AssetName: assetName,
+				},
+			},
+			want: predMatch,
+		},
+		{
+			name: "payment_part_match",
+			tx: &txPatternTestTx{
+				outs: []common.TransactionOutput{
+					&txPatternTestOutput{addr: addrA},
+				},
+			},
+			pat: &cardano.TxOutputPattern{
+				Address: &cardano.AddressPattern{PaymentPart: payA},
+			},
+			want: predMatch,
+		},
+		{
+			name: "delegation_part_match",
+			tx: &txPatternTestTx{
+				outs: []common.TransactionOutput{
+					&txPatternTestOutput{addr: addrA},
+				},
+			},
+			pat: &cardano.TxOutputPattern{
+				Address: &cardano.AddressPattern{DelegationPart: delA},
+			},
+			want: predMatch,
+		},
+		{
+			name: "empty_outputs",
+			tx:   &txPatternTestTx{},
+			pat: &cardano.TxOutputPattern{
+				Address: &cardano.AddressPattern{
+					ExactAddress: txPatternMustAddrBytes(t, txPatternAddrA),
+				},
+			},
+			want: predNoMatch,
+		},
+		{
+			name: "collateral_return_not_in_produces",
+			tx: &txPatternTestTx{
+				outs:    nil,
+				collRet: &txPatternTestOutput{addr: addrA},
+			},
+			pat: &cardano.TxOutputPattern{
+				Address: &cardano.AddressPattern{
+					ExactAddress: txPatternMustAddrBytes(t, txPatternAddrA),
+				},
+			},
+			want: predNoMatch,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := u.txPatternMatchProduces(tt.tx, tt.pat)
+			require.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestMatchConsumesWithLookup(t *testing.T) {
+	t.Parallel()
+	addrA := txPatternMustAddr(t, txPatternAddrA)
+	addrB := txPatternMustAddr(t, txPatternAddrB)
+	bytesA := txPatternMustAddrBytes(t, txPatternAddrA)
+	bytesB := txPatternMustAddrBytes(t, txPatternAddrB)
+
+	u := txPatternTestUtxorpc(t)
+
+	t.Run("address_match", func(t *testing.T) {
+		t.Parallel()
+		tx := &txPatternTestTx{
+			consumed: []common.TransactionInput{
+				&txPatternTestInput{id: common.Blake2b256{0x01}, idx: 0},
+			},
+		}
+		pat := &cardano.TxOutputPattern{
+			Address: &cardano.AddressPattern{ExactAddress: bytesA},
+		}
+		spent := &txPatternTestOutput{addr: addrA}
+		got := u.matchConsumesWithLookup(tx, pat, func(gledger.TransactionInput) (gledger.TransactionOutput, error) {
+			return spent, nil
+		})
+		require.Equal(t, predMatch, got)
+	})
+
+	t.Run("address_no_match", func(t *testing.T) {
+		t.Parallel()
+		tx := &txPatternTestTx{
+			consumed: []common.TransactionInput{
+				&txPatternTestInput{id: common.Blake2b256{0x02}, idx: 0},
+			},
+		}
+		pat := &cardano.TxOutputPattern{
+			Address: &cardano.AddressPattern{ExactAddress: bytesB},
+		}
+		spent := &txPatternTestOutput{addr: addrA}
+		got := u.matchConsumesWithLookup(tx, pat, func(gledger.TransactionInput) (gledger.TransactionOutput, error) {
+			return spent, nil
+		})
+		require.Equal(t, predNoMatch, got)
+	})
+
+	t.Run("later_input_matches_after_first_no_match", func(t *testing.T) {
+		t.Parallel()
+		tx := &txPatternTestTx{
+			consumed: []common.TransactionInput{
+				&txPatternTestInput{id: common.Blake2b256{0x10}, idx: 0},
+				&txPatternTestInput{id: common.Blake2b256{0x11}, idx: 0},
+			},
+		}
+		pat := &cardano.TxOutputPattern{
+			Address: &cardano.AddressPattern{ExactAddress: bytesA},
+		}
+		var n int
+		got := u.matchConsumesWithLookup(tx, pat, func(gledger.TransactionInput) (gledger.TransactionOutput, error) {
+			n++
+			if n == 1 {
+				return &txPatternTestOutput{addr: addrB}, nil
+			}
+			return &txPatternTestOutput{addr: addrA}, nil
+		})
+		require.Equal(t, 2, n, "stub should run once per consumed input")
+		require.Equal(t, predMatch, got)
+	})
+
+	t.Run("no_consumed_inputs", func(t *testing.T) {
+		t.Parallel()
+		tx := &txPatternTestTx{consumed: nil}
+		pat := &cardano.TxOutputPattern{
+			Address: &cardano.AddressPattern{ExactAddress: bytesA},
+		}
+		got := u.matchConsumesWithLookup(tx, pat, func(gledger.TransactionInput) (gledger.TransactionOutput, error) {
+			t.Fatal("lookup must not be called when there are no inputs")
+			return nil, nil
+		})
+		require.Equal(t, predNoMatch, got)
+	})
+}
+
+func TestMatchesTxPattern_ProducesOnly(t *testing.T) {
+	t.Parallel()
+	addrA := txPatternMustAddr(t, txPatternAddrA)
+	bytesA := txPatternMustAddrBytes(t, txPatternAddrA)
+	u := txPatternTestUtxorpc(t)
+	tx := &txPatternTestTx{
+		outs: []common.TransactionOutput{&txPatternTestOutput{addr: addrA}},
+	}
+	p := &cardano.TxPattern{
+		Produces: &cardano.TxOutputPattern{
+			Address: &cardano.AddressPattern{ExactAddress: bytesA},
+		},
+	}
+	require.Equal(t, predMatch, u.matchesTxPattern(tx, p))
+}
+
+// Without LedgerState, consumed inputs cannot be resolved; consumes is unevaluable.
+func TestMatchesTxPattern_ConsumesOnly_LookupFailsWithoutLedger(t *testing.T) {
+	t.Parallel()
+	bytesA := txPatternMustAddrBytes(t, txPatternAddrA)
+	u := txPatternTestUtxorpc(t)
+	tx := &txPatternTestTx{
+		consumed: []common.TransactionInput{
+			&txPatternTestInput{id: common.Blake2b256{0x99}, idx: 0},
+		},
+	}
+	p := &cardano.TxPattern{
+		Consumes: &cardano.TxOutputPattern{
+			Address: &cardano.AddressPattern{ExactAddress: bytesA},
+		},
+	}
+	require.Equal(t, predUnevaluable, u.matchesTxPattern(tx, p))
+}
+
+func TestMatchesTxPattern_MintsAssetOnly(t *testing.T) {
+	t.Parallel()
+	addrA := txPatternMustAddr(t, txPatternAddrA)
+	u := txPatternTestUtxorpc(t)
+	var policy common.Blake2b224
+	copy(policy[:], []byte("policy123456789012345678901234"))
+	assetName := []byte{0x41, 0x42}
+	ma := common.NewMultiAsset(
+		map[common.Blake2b224]map[cbor.ByteString]common.MultiAssetTypeOutput{
+			policy: {cbor.NewByteString(assetName): big.NewInt(1)},
+		},
+	)
+	tx := &txPatternTestTx{
+		outs: []common.TransactionOutput{
+			&txPatternTestOutput{addr: addrA, ma: &ma},
+		},
+	}
+	p := &cardano.TxPattern{
+		MintsAsset: &cardano.AssetPattern{
+			PolicyId:  policy[:],
+			AssetName: assetName,
+		},
+	}
+	require.Equal(t, predMatch, u.matchesTxPattern(tx, p))
+}
+
+func TestMatchesTxPattern_MovesAssetOnly(t *testing.T) {
+	t.Parallel()
+	addrA := txPatternMustAddr(t, txPatternAddrA)
+	u := txPatternTestUtxorpc(t)
+	var policy common.Blake2b224
+	copy(policy[:], []byte("policy123456789012345678901234"))
+	assetName := []byte{0x41, 0x42}
+	ma := common.NewMultiAsset(
+		map[common.Blake2b224]map[cbor.ByteString]common.MultiAssetTypeOutput{
+			policy: {cbor.NewByteString(assetName): big.NewInt(1)},
+		},
+	)
+	tx := &txPatternTestTx{
+		outs: []common.TransactionOutput{
+			&txPatternTestOutput{addr: addrA, ma: &ma},
+		},
+	}
+	p := &cardano.TxPattern{
+		MovesAsset: &cardano.AssetPattern{
+			PolicyId:  policy[:],
+			AssetName: assetName,
+		},
+	}
+	require.Equal(t, predMatch, u.matchesTxPattern(tx, p))
+}
+
+func TestMatchesTxPattern_HasAddressPaymentPartOnly(t *testing.T) {
+	t.Parallel()
+	addrA := txPatternMustAddr(t, txPatternAddrA)
+	u := txPatternTestUtxorpc(t)
+	tx := &txPatternTestTx{
+		outs: []common.TransactionOutput{
+			&txPatternTestOutput{addr: addrA},
+		},
+	}
+	p := &cardano.TxPattern{
+		HasAddress: &cardano.AddressPattern{
+			PaymentPart: txPatternMustPaymentPartBytes(t, txPatternAddrA),
+		},
+	}
+	require.Equal(t, predMatch, u.matchesTxPattern(tx, p))
+}
+
+func TestMatchesTxPattern_HasAddressDelegationPartOnly(t *testing.T) {
+	t.Parallel()
+	addrA := txPatternMustAddr(t, txPatternAddrA)
+	u := txPatternTestUtxorpc(t)
+	tx := &txPatternTestTx{
+		outs: []common.TransactionOutput{
+			&txPatternTestOutput{addr: addrA},
+		},
+	}
+	p := &cardano.TxPattern{
+		HasAddress: &cardano.AddressPattern{
+			DelegationPart: txPatternMustDelegationPartBytes(t, txPatternAddrA),
+		},
+	}
+	require.Equal(t, predMatch, u.matchesTxPattern(tx, p))
+}
+
+func TestMatchesTxPattern_HasAddressANDMismatch(t *testing.T) {
+	t.Parallel()
+	addrA := txPatternMustAddr(t, txPatternAddrA)
+	u := txPatternTestUtxorpc(t)
+	tx := &txPatternTestTx{
+		outs: []common.TransactionOutput{
+			&txPatternTestOutput{addr: addrA},
+		},
+	}
+	p := &cardano.TxPattern{
+		HasAddress: &cardano.AddressPattern{
+			ExactAddress: txPatternMustAddrBytes(t, txPatternAddrA),
+			// Deliberately mismatched with exact_address to assert AND semantics
+			PaymentPart: txPatternMustPaymentPartBytes(t, txPatternAddrB),
+		},
+	}
+	require.Equal(t, predNoMatch, u.matchesTxPattern(tx, p))
 }
