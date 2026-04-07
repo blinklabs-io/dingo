@@ -14,11 +14,11 @@ Hi folks! Here’s what we shipped in v0.32.1.
 <!--
 {
   "💪 Improvements": [
-    "You can now fully disable transaction submission throttling when you need maximum throughput. The default transaction submission rate limit now treats a value of `0` as “no limit,” and the test suite has been updated to enforce the new `0 == disabled` behavior.",
-    "Transaction pattern checks are now more reliable and easier to reason about when you build filtering rules. The transaction pattern matcher was refactored into dedicated helpers for `consumes`, `produces`, `has_address`, and asset filters, and `has_address`/asset matching now uses structured-output matching plus lookups with comprehensive new tests."
+    "You can now fully disable transaction submission throttling by setting the transaction submission rate limit to `0`.",
+    "Transaction pattern checks are easier to reason about because the matcher now uses dedicated helpers for `consumes`, `produces`, `has_address`, and asset filters with structured matching and better tests."
   ],
   "🔧 Fixes": [
-    "AWS S3 integrations now stay current with upstream maintenance updates to reduce dependency-related issues. The AWS SDK for Go v2 S3-related modules were bumped to newer patch versions to pick up the latest fixes and compatibility updates."
+    "AWS S3 integrations are more rock-solid because AWS SDK for Go v2 S3 modules were bumped to newer patch versions."
   ]
 }
 
@@ -76,11 +76,11 @@ Thank you for trying!
 <!--
 {
   "💪 Improvements": [
-    "You can now fully disable transaction submission throttling when you need maximum throughput. The default transaction submission rate limit now treats a value of `0` as “no limit,” and the test suite has been updated to enforce the new `0 == disabled` behavior.",
-    "Transaction pattern checks are now more reliable and easier to reason about when you build filtering rules. The transaction pattern matcher was refactored into dedicated helpers for `consumes`, `produces`, `has_address`, and asset filters, and `has_address`/asset matching now uses structured-output matching plus lookups with comprehensive new tests."
+    "You can now fully disable transaction submission throttling by setting the transaction submission rate limit to `0`.",
+    "Transaction pattern checks are easier to reason about because the matcher now uses dedicated helpers for `consumes`, `produces`, `has_address`, and asset filters with structured matching and better tests."
   ],
   "🔧 Fixes": [
-    "AWS S3 integrations now stay current with upstream maintenance updates to reduce dependency-related issues. The AWS SDK for Go v2 S3-related modules were bumped to newer patch versions to pick up the latest fixes and compatibility updates."
+    "AWS S3 integrations are more rock-solid because AWS SDK for Go v2 S3 modules were bumped to newer patch versions."
   ]
 }
 
