@@ -3,22 +3,35 @@
 
 ## v0.32.0 (April 7, 2026)
 
-```json
-{
-  "✨ What's New": [
-    "Node maintenance now includes an automatic cleanup process to help keep the system running smoothly over time.",
-    "UTXO searching now returns results in a more structured, scalable way so large wallets and index-heavy workloads can be queried more predictably."
-  ],
-  "💪 Improvements": [
-    "Validation now follows the chain’s most relevant slot more consistently, which improves correctness when the node is tracking the head of the chain.",
-    "Documentation is clearer about which components are internal versus intended for client integrations, making it easier to configure and operate deployments."
-  ],
-  "📋 What You Need to Know": [
-    "This release includes routine dependency and build tooling updates, which may affect reproducibility if you pin toolchain versions in your environment."
-  ]
-}
+**Title:** Paginated UTXO search and automatic pruning
 
-```
+**Date:** April 7, 2026
+
+**Version:** v0.32.0
+
+Hi folks! Here’s what we shipped in v0.32.0.
+
+### ✨ What's New
+
+- **Automatic Bark block pruning:** Long-running nodes stay smoother because the node now runs periodic Bark block pruning as part of its startup and shutdown lifecycle.
+- **Paginated UTXO search with asset filtering:** Large wallets and index-heavy workloads are easier to query because UTXO search now supports pagination and asset filtering backed by the database layer.
+
+### 💪 Improvements
+
+- **Current-or-tip slot validation:** Ledger and mempool correctness is more consistent because validation now follows the chain’s current-or-tip slot and tracks slot-clock fallbacks.
+- **Clearer API documentation boundaries:** Deployment setup is simpler because the docs now distinguish Bark internals from client-facing APIs and rename the API section to “external interfaces.”
+
+### 🔧 Fixes
+
+- **No notable fixes:** You’re all set—this release focuses on new capabilities and refinements.
+
+### 📋 What You Need to Know
+
+- **Dependency and build tooling updates:** If you pin toolchain versions, builds may differ because this release updates several Go dependencies, GitHub Actions `actions/setup-go`, and the Docker Go build image.
+
+### 🙏 Thank You
+
+Thank you for trying!
 
 ---
 
