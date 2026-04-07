@@ -19,6 +19,35 @@
 
 -->
 
+**Title:** Predictable transaction matching and submission tuning
+
+**Date:** April 7, 2026
+
+**Version:** v0.32.1
+
+Hi folks! Here’s what we shipped in v0.32.1.
+
+### ✨ What's New
+
+- **Clearer `TxPattern` matching:** Transaction matching is more consistent because transaction patterns now follow clearer address and asset matching semantics.
+
+### 💪 Improvements
+
+- **Rate limiting can be disabled:** Transaction submission is easier to tune because setting the submission rate limit to `0` now disables rate limiting.
+- **Updated AWS S3 dependencies:** Cloud storage integrations stay current because AWS SDK for Go v2 S3-related modules were updated.
+
+### 🔧 Fixes
+
+- **No user-facing fixes:** This release focuses on improvements.
+
+### 📋 What You Need to Know
+
+- **Rate limit `0` now means “disabled”:** Throughput may change after upgrading if you used `0` expecting a default or minimal limit.
+
+### 🙏 Thank You
+
+Thank you for trying!
+
 ---
 
 
