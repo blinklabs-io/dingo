@@ -3,10 +3,6 @@
 
 ## v0.32.1 (April 7, 2026)
 
-<!--
-%NEW_RELEASE_NOTES%
--->
-
 **Title:** Predictable transaction matching and submission tuning
 
 **Date:** April 7, 2026
