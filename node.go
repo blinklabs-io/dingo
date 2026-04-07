@@ -172,7 +172,7 @@ func (n *Node) processChainsyncRecyclerTick(
 	// Connection recycling during bulk sync causes pipeline resets,
 	// TIME_WAIT socket exhaustion, and dropped rollbacks that slow
 	// catch-up far more than the stall itself.
-	var catchUpMultiplier int = 1
+	catchUpMultiplier := 1
 	if n.ledgerState != nil && !n.ledgerState.IsAtTip() {
 		catchUpMultiplier = 5
 	}
