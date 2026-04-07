@@ -23,11 +23,11 @@ Hi folks! Here’s what we shipped in v0.32.0.
 
 ### 🔧 Fixes
 
-- **No notable fixes:** You’re all set—this release focuses on new capabilities and refinements.
+- **No notable fixes:** Stability stays rock-solid because this release focuses on new capabilities and refinements.
 
 ### 📋 What You Need to Know
 
-- **Dependency and build tooling updates:** If you pin toolchain versions, builds may differ because this release updates several Go dependencies, GitHub Actions `actions/setup-go`, and the Docker Go build image.
+- **Dependency and build tooling updates:** If you pin toolchain versions, review your pins because this release updates several Go dependencies, GitHub Actions `actions/setup-go`, and the Docker Go build image.
 
 ### 🙏 Thank You
 
