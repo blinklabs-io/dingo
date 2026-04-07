@@ -6,15 +6,15 @@
 ```json
 {
   "✨ What's New": [
-    "Node maintenance now includes an automatic cleanup process to help keep the system running smoothly over time. Specifically, a periodic Bark block pruner was added and is wired into node startup and shutdown so pruning begins and ends safely with the node lifecycle.",
-    "UTXO searching now returns results in a more structured, scalable way so large wallets and index-heavy workloads can be queried more predictably. Specifically, a structured UTXO query and pagination model was introduced, with SearchUtxos pagination and asset filtering moved into the database layer and the ledger/RPC code and tests updated accordingly."
+    "Node maintenance now includes an automatic cleanup process to help keep the system running smoothly over time.",
+    "UTXO searching now returns results in a more structured, scalable way so large wallets and index-heavy workloads can be queried more predictably."
   ],
   "💪 Improvements": [
-    "Validation now follows the chain’s most relevant slot more consistently, which improves correctness when the node is tracking the head of the chain. Specifically, the ledger and mempool were changed to validate against the current-or-tip slot, slot-clock fallbacks are tracked, and related wiring and tests were adjusted.",
-    "Documentation is clearer about which components are internal versus intended for client integrations, making it easier to configure and operate deployments. Specifically, the API documentation was reframed to distinguish Bark from client-facing APIs, the API section was renamed to “external interfaces,” and the port/configuration tables were expanded with default values and role descriptions."
+    "Validation now follows the chain’s most relevant slot more consistently, which improves correctness when the node is tracking the head of the chain.",
+    "Documentation is clearer about which components are internal versus intended for client integrations, making it easier to configure and operate deployments."
   ],
   "📋 What You Need to Know": [
-    "This release includes routine dependency and build tooling updates, which may affect reproducibility if you pin toolchain versions in your environment. Specifically, several Go dependencies were upgraded (including OpenTelemetry, fxamacker/cbor, google.golang.org/api, and plutigo), GitHub workflows moved to actions/setup-go v6.4.0, and the Dockerfile Go build image was updated from 1.25.8-1 to 1.26.1-1."
+    "This release includes routine dependency and build tooling updates, which may affect reproducibility if you pin toolchain versions in your environment."
   ]
 }
 
