@@ -3,7 +3,7 @@
 
 ## v0.32.1 (April 7, 2026)
 
-**Title:** Patch updates and polish
+**Title:** Smoother submission controls and matching
 
 **Date:** April 7, 2026
 
@@ -17,7 +17,7 @@ Hi folks! Here’s what we shipped in v0.32.1.
 
 ### 💪 Improvements
 
-- **Disable transaction submission throttling:** High-throughput workloads are simpler to run because setting the transaction submission rate limit to `0` now fully disables throttling.
+- **Disable transaction submission throttling:** High-throughput workloads are easier to run because setting the transaction submission rate limit to `0` now fully disables throttling.
 - **Refined transaction pattern matching:** Filtering rules are easier to reason about because transaction pattern matching now uses dedicated helpers for `consumes`, `produces`, `has_address`, and asset filters.
 
 ### 🔧 Fixes
