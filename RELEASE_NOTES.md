@@ -3,7 +3,7 @@
 
 ## v0.32.0 (April 7, 2026)
 
-**Title:** Updates and refinements
+**Title:** Background pruning and scalable UTxO search
 
 **Date:** April 7, 2026
 
