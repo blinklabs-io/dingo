@@ -153,6 +153,11 @@ Hi folks! Here’s what we shipped in v0.31.0.
 
 Thank you for trying!
 
+<!--
+%NEW_RELEASE_NOTES%
+
+-->
+
 ---
 
 
