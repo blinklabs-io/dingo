@@ -101,11 +101,25 @@ type peerHeaderChain struct {
 }
 
 func (ls *LedgerState) handleEventChainsync(evt event.Event) {
-	ls.chainsyncMutex.Lock()
-	defer ls.chainsyncMutex.Unlock()
 	e, ok := evt.Data.(ChainsyncEvent)
 	if !ok {
+		ls.chainsyncMutex.Lock()
+		defer ls.chainsyncMutex.Unlock()
 		ls.logUnexpectedChainsyncEventData("ChainsyncEvent", evt)
+		return
+	}
+	ls.chainsyncMutex.Lock()
+	defer ls.chainsyncMutex.Unlock()
+	if !ls.isConnectionLive(e.ConnectionId) {
+		ls.config.Logger.Debug(
+			"ignoring chainsync event from closed connection",
+			"component", "ledger",
+			"connection_id", e.ConnectionId.String(),
+			"rollback", e.Rollback,
+			"slot", e.Point.Slot,
+		)
+		ls.discardBufferedPeerHeaders(e.ConnectionId)
+		delete(ls.peerHeaderHistory, connIdKey(e.ConnectionId))
 		return
 	}
 	if e.Rollback {
@@ -160,6 +174,15 @@ func (ls *LedgerState) handleEventChainsync(evt event.Event) {
 			return
 		}
 	}
+}
+
+func (ls *LedgerState) isConnectionLive(
+	connId ouroboros.ConnectionId,
+) bool {
+	if ls.config.ConnectionLiveFunc == nil {
+		return true
+	}
+	return ls.config.ConnectionLiveFunc(connId)
 }
 
 func (ls *LedgerState) handleEventBlockfetch(evt event.Event) {
@@ -330,6 +353,14 @@ func (ls *LedgerState) handleEventChainsyncAwaitReply(evt event.Event) {
 	}
 	ls.chainsyncMutex.Lock()
 	defer ls.chainsyncMutex.Unlock()
+	if !ls.isConnectionLive(e.ConnectionId) {
+		ls.config.Logger.Debug(
+			"ignoring await-reply event from closed connection",
+			"component", "ledger",
+			"connection_id", e.ConnectionId.String(),
+		)
+		return
+	}
 	if ls.chain == nil || ls.chain.HeaderCount() == 0 {
 		return
 	}

@@ -508,6 +508,10 @@ func (n *Node) Run(ctx context.Context) error {
 				}
 				return nil
 			},
+			ConnectionLiveFunc: func(connId ouroboros.ConnectionId) bool {
+				return n.connManager != nil &&
+					n.connManager.GetConnectionById(connId) != nil
+			},
 			ConnectionSwitchFunc: func() {
 				// Retain older seen-header history so a switched peer
 				// can replay only the post-tip segment from the local
@@ -659,6 +663,10 @@ func (n *Node) Run(ctx context.Context) error {
 		chainselection.ChainSelectorConfig{
 			Logger:   n.config.logger,
 			EventBus: n.eventBus,
+			ConnectionLive: func(connId ouroboros.ConnectionId) bool {
+				return n.connManager != nil &&
+					n.connManager.GetConnectionById(connId) != nil
+			},
 		},
 	)
 	// Subscribe chain selector to peer tip update events

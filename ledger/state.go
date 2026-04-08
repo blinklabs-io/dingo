@@ -382,6 +382,11 @@ type FatalErrorFunc func(err error)
 // chainsync connection ID for chain selection purposes.
 type GetActiveConnectionFunc func() *ouroboros.ConnectionId
 
+// ConnectionLiveFunc reports whether a connection is still registered with the
+// connection manager. This allows the ledger to drop late chainsync events that
+// arrive after teardown.
+type ConnectionLiveFunc func(ouroboros.ConnectionId) bool
+
 // ForgedBlockChecker is an interface for checking whether the local
 // node recently forged a block for a given slot. This is used by
 // chainsync to detect slot battles when an incoming block from a
@@ -426,6 +431,7 @@ type LedgerStateConfig struct {
 	CardanoNodeConfig          *cardano.CardanoNodeConfig
 	BlockfetchRequestRangeFunc BlockfetchRequestRangeFunc
 	GetActiveConnectionFunc    GetActiveConnectionFunc
+	ConnectionLiveFunc         ConnectionLiveFunc
 	ConnectionSwitchFunc       ConnectionSwitchFunc
 	ClearSeenHeadersFromFunc   ClearSeenHeadersFromFunc
 	PeerHeaderLookupFunc       PeerHeaderLookupFunc
