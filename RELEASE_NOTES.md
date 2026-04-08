@@ -1,6 +1,40 @@
 # Release Notes
 
 
+## v0.32.1 (April 7, 2026)
+
+**Title:** Smoother submission controls and matching
+
+**Date:** April 7, 2026
+
+**Version:** v0.32.1
+
+Hi folks! Here’s what we shipped in v0.32.1.
+
+### ✨ What's New
+
+- **No new features:** This patch focuses on improvements and fixes.
+
+### 💪 Improvements
+
+- **Disable transaction submission throttling:** High-throughput workloads are easier to run because setting the transaction submission rate limit to `0` now fully disables throttling.
+- **Refined transaction pattern matching:** Filtering rules are easier to reason about because transaction pattern matching now uses dedicated helpers for `consumes`, `produces`, `has_address`, and asset filters.
+
+### 🔧 Fixes
+
+- **AWS SDK patch updates:** AWS S3 integrations are more rock-solid because AWS SDK for Go v2 S3 modules were bumped to newer patch versions.
+
+### 📋 What You Need to Know
+
+- **No action required:** You're all set—just upgrade to v0.32.1.
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
+
 ## v0.32.0 (April 7, 2026)
 
 **Title:** Background pruning and scalable UTxO search
@@ -34,11 +68,6 @@ Hi folks! Here’s what we shipped in v0.32.0.
 ### 🙏 Thank You
 
 Thank you for trying!
-
-<!--
-%NEW_RELEASE_NOTES%
-
--->
 
 ---
 
