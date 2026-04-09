@@ -345,7 +345,11 @@ func TestHandleConnClosedEvent_CleansUpRateLimiter(t *testing.T) {
 	peer := testConnIdWithPort(4001)
 
 	// Create rate limiter state for this peer
-	require.NotNil(t, o.txSubmissionRateLimiter, "rate limiter should exist when explicitly configured")
+	require.NotNil(
+		t,
+		o.txSubmissionRateLimiter,
+		"rate limiter should exist when explicitly configured",
+	)
 	o.txSubmissionRateLimiter.Allow(peer, 1)
 
 	// Verify the peer exists in the rate limiter
