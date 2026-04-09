@@ -1,6 +1,32 @@
 # Release Notes
 
 
+## v0.32.2 (April 9, 2026)
+
+**Title:** Stability and polish updates
+
+**Date:** April 9, 2026
+
+**Version:** v0.32.2
+
+Hi folks! Here’s what we shipped in v0.32.2.
+
+```json
+{
+  "💪 Improvements": [
+    "Connection handling is now more reliable by automatically detecting inactive links and cleaning up leftover state from connections that have been closed. Specifically, the system now performs connection-liveness checks so chain selection and ledger-ignore logic can ignore and purge data tied to closed connections.",
+    "The project’s core telemetry and math/runtime libraries have been refreshed so you benefit from newer performance, compatibility, and observability improvements. This updates key dependencies including OpenTelemetry, the GCP detector, genproto, gRPC, and gonum to more recent versions."
+  ],
+  "🔧 Fixes": [
+    "Release notes are now properly populated for v0.32.1, and the placeholder text that could cause confusion has been removed. In particular, the v0.32.1 release-notes entry was added and the temporary release-notes placeholder comment was deleted."
+  ]
+}
+
+```
+
+---
+
+
 ## v0.32.1 (April 7, 2026)
 
 **Title:** Smoother submission controls and matching
