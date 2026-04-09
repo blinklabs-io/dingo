@@ -3,7 +3,7 @@
 
 ## v0.32.2 (April 9, 2026)
 
-**Title:** Reliability refinements
+**Title:** Rock-solid connection handling
 
 **Date:** April 9, 2026
 
@@ -19,7 +19,7 @@ Hi folks! Here’s what we shipped in v0.32.2.
 
 - **Connection-liveness checks:** Reliability is more rock-solid because chain selection and ledger-ignore logic can now detect closed connections, ignore them safely, and clean up their associated state.
 - **Dependency refresh:** Compatibility stays rock-solid because we upgraded core libraries including OpenTelemetry, the GCP detector, genproto, gRPC, and gonum.
-- **Clearer release documentation:** It’s easier to see what changed because release documentation was updated to remove placeholder text.
+- **Clearer release documentation:** It's easier to see what changed because release documentation was updated to remove placeholder text.
 
 ### 🔧 Fixes
 
