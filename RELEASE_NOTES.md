@@ -11,18 +11,26 @@
 
 Hi folks! Here’s what we shipped in v0.32.2.
 
-```json
-{
-  "💪 Improvements": [
-    "Connection handling is now more reliable by automatically detecting inactive links and cleaning up leftover state from connections that have been closed.",
-    "The project’s core telemetry and math/runtime libraries have been refreshed so you benefit from newer performance, compatibility, and observability improvements."
-  ],
-  "🔧 Fixes": [
-    "Release notes are now properly populated for v0.32.1, and the placeholder text that could cause confusion has been removed."
-  ]
-}
+### ✨ What's New
 
-```
+- **No new features:** This patch focuses on improvements and fixes.
+
+### 💪 Improvements
+
+- **More reliable connection cleanup:** Network operation is more rock-solid because the node now detects inactive connections and purges leftover state tied to closed links.
+- **Updated telemetry and runtime dependencies:** Observability and compatibility are smoother because core dependencies (including OpenTelemetry, gRPC, and gonum) were refreshed.
+
+### 🔧 Fixes
+
+- **Release notes placeholder cleanup:** Documentation is clearer because v0.32.1 release notes are now populated and placeholder text was removed.
+
+### 📋 What You Need to Know
+
+- **No action required:** You're all set—just upgrade to v0.32.2.
+
+### 🙏 Thank You
+
+Thank you for trying!
 
 ---
 
