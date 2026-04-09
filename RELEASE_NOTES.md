@@ -1,6 +1,32 @@
 # Release Notes
 
 
+## v0.32.2 (April 9, 2026)
+
+**Title:** Reliability refinements
+
+**Date:** April 9, 2026
+
+**Version:** v0.32.2
+
+Hi folks! Here’s what we shipped in v0.32.2.
+
+```json
+{
+  "💪 Improvements": [
+    "Reliability has been improved so you spend less time dealing with stale connections and inconsistent state during normal operation. The system now performs connection-liveness checks so chain selection and ledger-ignore logic can detect closed connections, ignore them safely, and clean up their associated data."
+  ],
+  "📋 What You Need to Know": [
+    "This release updates several core libraries to keep compatibility and reduce exposure to known issues in older versions. Dependencies including OpenTelemetry, the GCP detector, genproto, gRPC, and gonum were upgraded, which may change transitive versions in your build and can affect telemetry/export and RPC behavior in edge cases.",
+    "Release documentation has been brought up to date so you can see what changed without placeholder text. The v0.32.1 release notes were added and the release-notes placeholder comment was removed from the documentation/source notes."
+  ]
+}
+
+```
+
+---
+
+
 ## v0.32.1 (April 7, 2026)
 
 **Title:** Smoother submission controls and matching
