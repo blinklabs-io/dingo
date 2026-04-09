@@ -1,6 +1,40 @@
 # Release Notes
 
 
+## v0.32.2 (April 9, 2026)
+
+**Title:** Stability and polish updates
+
+**Date:** April 9, 2026
+
+**Version:** v0.32.2
+
+Hi folks! Here’s what we shipped in v0.32.2.
+
+### ✨ What's New
+
+- **No new features:** This patch focuses on improvements and fixes.
+
+### 💪 Improvements
+
+- **More reliable connection cleanup:** Network operations stay more rock-solid because the node now detects inactive connections and purges leftover state tied to closed links.
+- **Refreshed telemetry and runtime dependencies:** Observability and compatibility stay smoother because core dependencies (including OpenTelemetry, gRPC, and gonum) were refreshed.
+
+### 🔧 Fixes
+
+- **Clearer v0.32.1 release notes:** Documentation is clearer because v0.32.1 release notes are now populated and placeholder text was removed.
+
+### 📋 What You Need to Know
+
+- **No action required:** You're all set—just upgrade to v0.32.2.
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
+
 ## v0.32.1 (April 7, 2026)
 
 **Title:** Smoother submission controls and matching
