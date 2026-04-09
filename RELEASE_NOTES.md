@@ -11,18 +11,27 @@
 
 Hi folks! Here’s what we shipped in v0.32.2.
 
-```json
-{
-  "💪 Improvements": [
-    "Spend less time dealing with stale connections and inconsistent state during normal operation thanks to new connection-liveness checks that let chain selection and ledger-ignore logic safely ignore and clean up closed connections."
-  ],
-  "📋 What You Need to Know": [
-    "Keep compatibility and reduce exposure to known issues by upgrading core libraries including OpenTelemetry, the GCP detector, genproto, gRPC, and gonum.",
-    "See what changed without placeholder text thanks to updated release documentation."
-  ]
-}
+### ✨ What's New
 
-```
+- **No new features:** This patch focuses on improvements and fixes.
+
+### 💪 Improvements
+
+- **Connection-liveness checks:** Reliability is more rock-solid because chain selection and ledger-ignore logic can now detect closed connections, ignore them safely, and clean up their associated state.
+- **Dependency refresh:** Compatibility stays rock-solid because we upgraded core libraries including OpenTelemetry, the GCP detector, genproto, gRPC, and gonum.
+- **Clearer release documentation:** It’s easier to see what changed because release documentation was updated to remove placeholder text.
+
+### 🔧 Fixes
+
+- **No user-facing fixes:** This patch focuses on improvements and documentation updates.
+
+### 📋 What You Need to Know
+
+- **No action required:** You're all set—just upgrade to v0.32.2.
+
+### 🙏 Thank You
+
+Thank you for trying!
 
 ---
 
