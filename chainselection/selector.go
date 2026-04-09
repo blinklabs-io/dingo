@@ -82,6 +82,7 @@ type ChainSelectorConfig struct {
 	StaleTipThreshold  time.Duration
 	MinSwitchBlockDiff uint64
 	SecurityParam      uint64
+	ConnectionLive     func(ouroboros.ConnectionId) bool
 	ConnectionEligible func(ouroboros.ConnectionId) bool
 	ConnectionPriority func(ouroboros.ConnectionId) int
 	MaxTrackedPeers    int // 0 means use DefaultMaxTrackedPeers
@@ -185,6 +186,16 @@ func (cs *ChainSelector) updatePeerTipObserved(
 	observedTip ochainsync.Tip,
 	vrfOutput []byte,
 ) bool {
+	if cs.config.ConnectionLive != nil &&
+		!cs.config.ConnectionLive(connId) {
+		cs.config.Logger.Debug(
+			"ignoring tip update from closed connection",
+			"connection_id", connId.String(),
+			"block_number", tip.BlockNumber,
+			"slot", tip.Point.Slot,
+		)
+		return false
+	}
 	shouldEvaluate := false
 	accepted := true
 	var evictedConn *ouroboros.ConnectionId
@@ -333,6 +344,14 @@ func (cs *ChainSelector) updatePeerTipObserved(
 }
 
 func (cs *ChainSelector) TouchPeerActivity(connId ouroboros.ConnectionId) {
+	if cs.config.ConnectionLive != nil &&
+		!cs.config.ConnectionLive(connId) {
+		cs.config.Logger.Debug(
+			"ignoring peer activity from closed connection",
+			"connection_id", connId.String(),
+		)
+		return
+	}
 	var switchEvent *event.Event
 	var selectionEvent *event.Event
 
@@ -561,6 +580,16 @@ func (cs *ChainSelector) isPeerSelectableLocked(
 	logSkip bool,
 ) bool {
 	if peerTip == nil {
+		return false
+	}
+	if cs.config.ConnectionLive != nil &&
+		!cs.config.ConnectionLive(connId) {
+		if logSkip {
+			cs.config.Logger.Debug(
+				"skipping closed peer",
+				"connection_id", connId.String(),
+			)
+		}
 		return false
 	}
 	if !cs.isConnectionEligible(connId) {

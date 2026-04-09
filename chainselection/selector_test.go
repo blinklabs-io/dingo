@@ -102,6 +102,58 @@ func TestChainSelectorUpdatePeerTip(t *testing.T) {
 	assert.Equal(t, 1, cs.PeerCount())
 }
 
+func TestChainSelectorIgnoresTipUpdateFromClosedConnection(t *testing.T) {
+	connId := newTestConnectionId(1)
+	cs := NewChainSelector(ChainSelectorConfig{
+		ConnectionLive: func(candidate ouroboros.ConnectionId) bool {
+			return candidate != connId
+		},
+	})
+
+	tip := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 100, Hash: []byte("test")},
+		BlockNumber: 50,
+	}
+
+	accepted := cs.UpdatePeerTip(connId, tip, nil)
+	assert.False(t, accepted)
+	assert.Nil(t, cs.GetPeerTip(connId))
+	assert.Equal(t, 0, cs.PeerCount())
+}
+
+func TestChainSelectorSkipsClosedTrackedPeerDuringEvaluation(t *testing.T) {
+	live := make(map[string]bool)
+	connId1 := newTestConnectionId(1)
+	connId2 := newTestConnectionId(2)
+	live[connId1.String()] = true
+	live[connId2.String()] = true
+	cs := NewChainSelector(ChainSelectorConfig{
+		ConnectionLive: func(connId ouroboros.ConnectionId) bool {
+			return live[connId.String()]
+		},
+	})
+
+	cs.UpdatePeerTip(connId1, ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 100, Hash: []byte("peer-1")},
+		BlockNumber: 100,
+	}, nil)
+	cs.UpdatePeerTip(connId2, ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 120, Hash: []byte("peer-2")},
+		BlockNumber: 120,
+	}, nil)
+
+	bestPeer := cs.GetBestPeer()
+	require.NotNil(t, bestPeer)
+	assert.Equal(t, connId2, *bestPeer)
+
+	live[connId2.String()] = false
+	assert.True(t, cs.EvaluateAndSwitch())
+
+	bestPeer = cs.GetBestPeer()
+	require.NotNil(t, bestPeer)
+	assert.Equal(t, connId1, *bestPeer)
+}
+
 func TestChainSelectorUpdateExistingPeerTip(t *testing.T) {
 	cs := NewChainSelector(ChainSelectorConfig{})
 
