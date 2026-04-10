@@ -5,7 +5,6 @@
 
 **Title:** Certificate-aware matching and more rock-solid chain sync
 
-
 **Date:** April 10, 2026
 
 **Version:** v0.32.3
