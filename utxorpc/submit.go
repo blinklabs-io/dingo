@@ -472,7 +472,8 @@ func (s *submitServiceServer) WatchMempool(
 // treat it as a definite non-match.
 //
 // Set fields are combined with AND: consumes ∧ produces ∧ has_address ∧
-// mints_asset ∧ moves_asset (each present sub-pattern must match).
+// mints_asset ∧ moves_asset ∧ has_certificate (each present sub-pattern must
+// match).
 func (u *Utxorpc) matchesTxPattern(
 	tx gledger.Transaction,
 	pattern *cardano.TxPattern,
@@ -495,6 +496,9 @@ func (u *Utxorpc) matchesTxPattern(
 	}
 	if p := pattern.GetMovesAsset(); p != nil {
 		parts = append(parts, u.txPatternMatchAsset(tx, p))
+	}
+	if p := pattern.GetHasCertificate(); p != nil {
+		parts = append(parts, u.txPatternMatchHasCertificate(tx, p))
 	}
 	if len(parts) == 0 {
 		return predUnevaluable
