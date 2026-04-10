@@ -1,6 +1,52 @@
 # Release Notes
 
 
+## v0.32.3 (April 10, 2026)
+
+**Title:** Maintenance updates
+
+**Date:** April 10, 2026
+
+**Version:** v0.32.3
+
+Hi folks! Here’s what we shipped in v0.32.3.
+
+### ✨ What's New
+
+```json
+{
+  "✨ What's New": [
+    "You can now match and validate Cardano certificate activity directly in your transaction pattern rules. This adds a new `has_certificate` transaction pattern with detailed certificate matching plus comprehensive test coverage to ensure consistent behavior."
+  ],
+  "💪 Improvements": [
+    "Chain sync now recovers more safely when it detects a persistent fork by actively closing the affected connection. This extends resync handling for the `persistent chain fork` case, and includes a new test that verifies the connection is closed and the expected log message is emitted."
+  ],
+  "📋 What You Need to Know": [
+    "If you maintain custom transaction-pattern configurations, you can start using the new `has_certificate` pattern to filter or detect certificate-related transactions. The matcher supports more detailed Cardano certificate checks, so you may want to tighten or expand your existing rules to take advantage of the added specificity."
+  ]
+}
+
+```
+
+### 💪 Improvements
+
+_Coming soon._
+
+### 🔧 Fixes
+
+_Coming soon._
+
+### 📋 What You Need to Know
+
+_Coming soon._
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
+
 ## v0.32.2 (April 9, 2026)
 
 **Title:** Stability and polish updates
