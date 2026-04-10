@@ -22,11 +22,12 @@ Hi folks! Here’s what we shipped in v0.32.3.
 
 ### 🔧 Fixes
 
-- **No user-facing fixes:** This patch focuses on what’s new and improvements.
+- **No user-facing fixes:** This patch focuses on new features and improvements.
 
 ### 📋 What You Need to Know
 
-- **No action required (with a heads-up for pattern and monitoring users):** You're all set, but if you maintain custom transaction-pattern rules or chainsync monitoring, note the new `has_certificate` pattern and the explicit connection close (with logging) on `persistent chain fork` scenarios.
+- **No action required:** You're all set—just upgrade to v0.32.3.
+- **Custom patterns and monitoring:** If you maintain custom transaction-pattern rules or chainsync monitoring, note the new `has_certificate` pattern and the explicit connection close (with logging) on `persistent chain fork` scenarios.
 
 ### 🙏 Thank You
 
