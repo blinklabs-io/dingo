@@ -13,32 +13,19 @@ Hi folks! Here’s what we shipped in v0.32.3.
 
 ### ✨ What's New
 
-```json
-{
-  "✨ What's New": [
-    "You can now match and validate Cardano certificate activity directly in your transaction pattern rules. This adds a new `has_certificate` transaction pattern with detailed certificate matching plus comprehensive test coverage to ensure consistent behavior."
-  ],
-  "💪 Improvements": [
-    "Chain sync now recovers more safely when it detects a persistent fork by actively closing the affected connection. This extends resync handling for the `persistent chain fork` case, and includes a new test that verifies the connection is closed and the expected log message is emitted."
-  ],
-  "📋 What You Need to Know": [
-    "If you maintain custom transaction-pattern configurations, you can start using the new `has_certificate` pattern to filter or detect certificate-related transactions. The matcher supports more detailed Cardano certificate checks, so you may want to tighten or expand your existing rules to take advantage of the added specificity."
-  ]
-}
-
-```
+- **Certificate-aware transaction pattern matching (`has_certificate`):** Filtering certificate-related transactions is easier because you can now match and validate Cardano certificates directly in transaction pattern rules.
 
 ### 💪 Improvements
 
-_Coming soon._
+- **Safer persistent-fork recovery:** Sync is more rock-solid because chain sync now closes the affected connection when it detects a persistent fork.
 
 ### 🔧 Fixes
 
-_Coming soon._
+- **No user-facing fixes:** This patch focuses on new features and improvements.
 
 ### 📋 What You Need to Know
 
-_Coming soon._
+- **Transaction-pattern configs:** If you maintain custom transaction-pattern rules, you can start using `has_certificate` to filter or detect certificate-related transactions.
 
 ### 🙏 Thank You
 
