@@ -67,6 +67,7 @@ type Node struct {
 	ouroboros                        *ouroborosPkg.Ouroboros
 	blockForger                      *forging.BlockForger
 	leaderElection                   *leader.Election
+	rtsMetrics                       *rtsMetrics
 	shutdownFuncs                    []func(context.Context) error
 	config                           Config
 	ctx                              context.Context
@@ -370,6 +371,7 @@ func New(cfg Config) (*Node, error) {
 	// This must happen before any component registers metrics.
 	n.configWrapPromRegistry()
 	n.registerBuildInfo()
+	n.registerRTSMetrics()
 	n.eventBus = event.NewEventBus(n.config.promRegistry, n.config.logger)
 	if err := n.configValidate(); err != nil {
 		return nil, fmt.Errorf("invalid configuration: %w", err)
@@ -387,18 +389,30 @@ func (n *Node) Run(ctx context.Context) error {
 	}
 	n.ctx, n.cancel = context.WithCancel(ctx)
 
+	// Start the RTS metrics updater goroutine. It samples runtime.MemStats
+	// on a ticker and exits when n.ctx is cancelled by the existing
+	// shutdown or startup-failure cleanup, so it does not need an entry in
+	// the `started` cleanup stack.
+	go n.runRTSMetricsUpdater(n.ctx, rtsMetricsUpdateInterval)
+
 	// Track started components for cleanup on failure
 	var started []func()
 	success := false
 	defer func() {
 		r := recover()
 		if r != nil {
+			if n.cancel != nil {
+				n.cancel()
+			}
 			// Cleanup on panic, then re-panic
 			for i := len(started) - 1; i >= 0; i-- {
 				started[i]()
 			}
 			panic(r)
 		} else if !success {
+			if n.cancel != nil {
+				n.cancel()
+			}
 			// Cleanup on failure (non-panic)
 			for i := len(started) - 1; i >= 0; i-- {
 				started[i]()
