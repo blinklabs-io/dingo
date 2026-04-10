@@ -797,6 +797,10 @@ func certPatternHash28(seed byte) []byte {
 	return bytes.Repeat([]byte{seed}, 28)
 }
 
+func certPatternHash32(seed byte) []byte {
+	return bytes.Repeat([]byte{seed}, 32)
+}
+
 func TestMatchesTxPattern_HasCertificateStakeRegistration(t *testing.T) {
 	t.Parallel()
 	u := txPatternTestUtxorpc(t)
@@ -853,6 +857,173 @@ func TestMatchesTxPattern_HasCertificateStakeRegistrationMismatch(t *testing.T) 
 		},
 	}
 	require.Equal(t, predNoMatch, u.matchesTxPattern(tx, p))
+}
+
+func testCertPoolRegistration(t *testing.T) *common.PoolRegistrationCertificate {
+	t.Helper()
+	var op common.PoolKeyHash
+	copy(op[:], certPatternHash28(0x20))
+	var vrf common.VrfKeyHash
+	copy(vrf[:], certPatternHash32(0x21))
+	var reward common.AddrKeyHash
+	copy(reward[:], certPatternHash28(0x22))
+	return &common.PoolRegistrationCertificate{
+		CertType:      uint(common.CertificateTypePoolRegistration),
+		Operator:      op,
+		VrfKeyHash:    vrf,
+		Pledge:        0,
+		Cost:          0,
+		Margin:        cbor.Rat{Rat: big.NewRat(0, 1)},
+		RewardAccount: reward,
+		PoolMetadata: &common.PoolMetadata{
+			Url:  "",
+			Hash: common.PoolMetadataHash{},
+		},
+	}
+}
+
+func TestMatchesTxPattern_HasCertificateEmptyStakeDelegationTypeOnly(t *testing.T) {
+	t.Parallel()
+	u := txPatternTestUtxorpc(t)
+	stake := certPatternHash28(3)
+	var stakeCH common.CredentialHash
+	copy(stakeCH[:], stake)
+	var poolKH common.PoolKeyHash
+	copy(poolKH[:], certPatternHash28(4))
+	deleg := &common.StakeDelegationCertificate{
+		CertType: uint(common.CertificateTypeStakeDelegation),
+		StakeCredential: &common.Credential{
+			CredType:   common.CredentialTypeAddrKeyHash,
+			Credential: stakeCH,
+		},
+		PoolKeyHash: poolKH,
+	}
+	tx := &txPatternTestTx{certs: []common.Certificate{deleg}}
+	p := &cardano.TxPattern{
+		HasCertificate: &cardano.CertificatePattern{
+			CertificateType: &cardano.CertificatePattern_StakeDelegation{
+				StakeDelegation: &cardano.StakeDelegationPattern{},
+			},
+		},
+	}
+	require.Equal(t, predMatch, u.matchesTxPattern(tx, p))
+}
+
+func TestMatchesTxPattern_HasCertificateEmptyStakeDelegationWrongCertType(t *testing.T) {
+	t.Parallel()
+	u := txPatternTestUtxorpc(t)
+	h := certPatternHash28(3)
+	var ch common.CredentialHash
+	copy(ch[:], h)
+	regCert := &common.StakeRegistrationCertificate{
+		CertType:        uint(common.CertificateTypeStakeRegistration),
+		StakeCredential: common.Credential{
+			CredType:   common.CredentialTypeAddrKeyHash,
+			Credential: ch,
+		},
+	}
+	tx := &txPatternTestTx{certs: []common.Certificate{regCert}}
+	p := &cardano.TxPattern{
+		HasCertificate: &cardano.CertificatePattern{
+			CertificateType: &cardano.CertificatePattern_StakeDelegation{
+				StakeDelegation: &cardano.StakeDelegationPattern{},
+			},
+		},
+	}
+	require.Equal(t, predNoMatch, u.matchesTxPattern(tx, p))
+}
+
+func TestMatchesTxPattern_HasCertificateEmptyStakeRegistrationTypeOnly(t *testing.T) {
+	t.Parallel()
+	u := txPatternTestUtxorpc(t)
+	h := certPatternHash28(9)
+	var ch common.CredentialHash
+	copy(ch[:], h)
+	regCert := &common.StakeRegistrationCertificate{
+		CertType:        uint(common.CertificateTypeStakeRegistration),
+		StakeCredential: common.Credential{
+			CredType:   common.CredentialTypeAddrKeyHash,
+			Credential: ch,
+		},
+	}
+	tx := &txPatternTestTx{certs: []common.Certificate{regCert}}
+	p := &cardano.TxPattern{
+		HasCertificate: &cardano.CertificatePattern{
+			CertificateType: &cardano.CertificatePattern_StakeRegistration{
+				StakeRegistration: &cardano.StakeCredential{},
+			},
+		},
+	}
+	require.Equal(t, predMatch, u.matchesTxPattern(tx, p))
+}
+
+func TestMatchesTxPattern_HasCertificateEmptyPoolRetirementTypeOnly(t *testing.T) {
+	t.Parallel()
+	u := txPatternTestUtxorpc(t)
+	var poolKH common.PoolKeyHash
+	copy(poolKH[:], certPatternHash28(5))
+	retire := &common.PoolRetirementCertificate{
+		CertType:    uint(common.CertificateTypePoolRetirement),
+		PoolKeyHash: poolKH,
+		Epoch:       42,
+	}
+	tx := &txPatternTestTx{certs: []common.Certificate{retire}}
+	p := &cardano.TxPattern{
+		HasCertificate: &cardano.CertificatePattern{
+			CertificateType: &cardano.CertificatePattern_PoolRetirement{
+				PoolRetirement: &cardano.PoolRetirementPattern{},
+			},
+		},
+	}
+	require.Equal(t, predMatch, u.matchesTxPattern(tx, p))
+}
+
+func TestMatchesTxPattern_HasCertificatePoolRetirementEpochOnlyNoPoolKey(t *testing.T) {
+	t.Parallel()
+	u := txPatternTestUtxorpc(t)
+	var poolKH common.PoolKeyHash
+	copy(poolKH[:], certPatternHash28(5))
+	retire := &common.PoolRetirementCertificate{
+		CertType:    uint(common.CertificateTypePoolRetirement),
+		PoolKeyHash: poolKH,
+		Epoch:       300,
+	}
+	tx := &txPatternTestTx{certs: []common.Certificate{retire}}
+	match := &cardano.TxPattern{
+		HasCertificate: &cardano.CertificatePattern{
+			CertificateType: &cardano.CertificatePattern_PoolRetirement{
+				PoolRetirement: &cardano.PoolRetirementPattern{
+					Epoch: 300,
+				},
+			},
+		},
+	}
+	noMatch := &cardano.TxPattern{
+		HasCertificate: &cardano.CertificatePattern{
+			CertificateType: &cardano.CertificatePattern_PoolRetirement{
+				PoolRetirement: &cardano.PoolRetirementPattern{
+					Epoch: 301,
+				},
+			},
+		},
+	}
+	require.Equal(t, predMatch, u.matchesTxPattern(tx, match))
+	require.Equal(t, predNoMatch, u.matchesTxPattern(tx, noMatch))
+}
+
+func TestMatchesTxPattern_HasCertificateEmptyPoolRegistrationTypeOnly(t *testing.T) {
+	t.Parallel()
+	u := txPatternTestUtxorpc(t)
+	poolCert := testCertPoolRegistration(t)
+	tx := &txPatternTestTx{certs: []common.Certificate{poolCert}}
+	p := &cardano.TxPattern{
+		HasCertificate: &cardano.CertificatePattern{
+			CertificateType: &cardano.CertificatePattern_PoolRegistration{
+				PoolRegistration: &cardano.PoolRegistrationPattern{},
+			},
+		},
+	}
+	require.Equal(t, predMatch, u.matchesTxPattern(tx, p))
 }
 
 func TestMatchesTxPattern_HasCertificateStakeDelegationPoolOnly(t *testing.T) {

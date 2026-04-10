@@ -23,14 +23,20 @@ import (
 )
 
 // Certificate pattern matching notes (utxorpc Cardano TxPattern.has_certificate):
-//   - StakeDelegationPattern: only non-empty stake_credential fields (addr or
-//     script hash) and non-empty pool_keyhash slices count as constraints.
-//   - PoolRegistrationPattern: operator and pool_keyhash both compare against
-//     the pool cold key (operator) bytes on PoolRegistrationCert.
-//   - PoolRetirementPattern: epoch 0 means “match any epoch”; non-zero epoch
-//     requires an exact match.
+//   - Empty nested messages (no populated inner fields) mean “match this
+//     certificate type only” (e.g. any stake delegation, any pool retirement).
+//   - StakeDelegationPattern: optional stake_credential and pool_keyhash; when
+//     both are absent, any StakeDelegationCert matches.
+//   - PoolRegistrationPattern: optional operator and pool_keyhash (each compared
+//     to the pool cold key on PoolRegistrationCert); when both absent, any
+//     pool registration matches.
+//   - PoolRetirementPattern: optional pool_keyhash. With no pool key, any
+//     retirement matches unless epoch is non-zero (then epoch must match).
+//     With a pool key set, epoch 0 means any epoch for that pool.
 //   - AnyPoolKeyhash: enumerates operator/pool key hashes from delegation and
 //     pool registration/retirement; VRF key hashes are not included.
+//   - any_stake_credential / any_pool_keyhash / any_drep: empty []byte remains
+//     unevaluable (not a nested message; no wildcard semantics).
 
 // txPatternMatchHasCertificate reports whether any certificate on the
 // transaction matches the given utxorpc CertificatePattern.
@@ -87,6 +93,9 @@ func certificatePatternMatches(
 		if got == nil {
 			return predNoMatch
 		}
+		if !stakeCredentialHasConstraint(want) {
+			return predMatch
+		}
 		if proto.Equal(want, got) {
 			return predMatch
 		}
@@ -100,6 +109,9 @@ func certificatePatternMatches(
 		got := uc.GetStakeDeregistration()
 		if got == nil {
 			return predNoMatch
+		}
+		if !stakeCredentialHasConstraint(want) {
+			return predMatch
 		}
 		if proto.Equal(want, got) {
 			return predMatch
@@ -115,21 +127,15 @@ func certificatePatternMatches(
 		if got == nil {
 			return predNoMatch
 		}
-		var hasConstraint bool
 		if sc := sdp.GetStakeCredential(); stakeCredentialHasConstraint(sc) {
-			hasConstraint = true
 			if !proto.Equal(sc, got.GetStakeCredential()) {
 				return predNoMatch
 			}
 		}
 		if pkh := sdp.GetPoolKeyhash(); len(pkh) > 0 {
-			hasConstraint = true
 			if !bytes.Equal(pkh, got.GetPoolKeyhash()) {
 				return predNoMatch
 			}
-		}
-		if !hasConstraint {
-			return predUnevaluable
 		}
 		return predMatch
 
@@ -142,21 +148,15 @@ func certificatePatternMatches(
 		if got == nil {
 			return predNoMatch
 		}
-		var hasConstraint bool
 		if op := prp.GetOperator(); len(op) > 0 {
-			hasConstraint = true
 			if !bytes.Equal(op, got.GetOperator()) {
 				return predNoMatch
 			}
 		}
 		if pkh := prp.GetPoolKeyhash(); len(pkh) > 0 {
-			hasConstraint = true
 			if !bytes.Equal(pkh, got.GetOperator()) {
 				return predNoMatch
 			}
-		}
-		if !hasConstraint {
-			return predUnevaluable
 		}
 		return predMatch
 
@@ -165,12 +165,15 @@ func certificatePatternMatches(
 		if prt == nil {
 			return predUnevaluable
 		}
-		if len(prt.GetPoolKeyhash()) == 0 {
-			return predUnevaluable
-		}
 		got := uc.GetPoolRetirement()
 		if got == nil {
 			return predNoMatch
+		}
+		if len(prt.GetPoolKeyhash()) == 0 {
+			if wantEp := prt.GetEpoch(); wantEp != 0 && wantEp != got.GetEpoch() {
+				return predNoMatch
+			}
+			return predMatch
 		}
 		if !bytes.Equal(prt.GetPoolKeyhash(), got.GetPoolKeyhash()) {
 			return predNoMatch
