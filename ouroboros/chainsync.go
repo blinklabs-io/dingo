@@ -983,13 +983,16 @@ func (o *Ouroboros) SubscribeChainsyncResync(ctx context.Context) {
 			if len(connIds) == 0 {
 				return
 			}
-			// Plateau events close the connection immediately rather
-			// than attempting an in-place Stop→Start→Sync restart.
-			// Stop() blocks for up to 30s when the protocol is in
-			// MustReply state, during which no recovery can happen.
-			// Closing lets peer governance reconnect with a fresh
-			// bearer and updated intersect points.
-			if e.Reason == "local_tip_plateau" || e.Reason == "rollback point not found" {
+			// Plateau and unresolved fork events close the connection
+			// immediately rather than attempting an in-place
+			// Stop→Start→Sync restart. Stop() blocks for up to 30s
+			// when the protocol is in MustReply state, during which
+			// no recovery can happen. Closing lets peer governance
+			// reconnect with a fresh bearer and updated intersect
+			// points.
+			if e.Reason == "local_tip_plateau" ||
+				e.Reason == "rollback point not found" ||
+				e.Reason == "persistent chain fork" {
 				for _, connId := range connIds {
 					if o.ChainsyncState != nil {
 						o.ChainsyncState.ClearObservedHeaderHistory(connId)
