@@ -15,10 +15,13 @@
 package ouroboros
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"log/slog"
 	"net"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -33,8 +36,27 @@ import (
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	"github.com/blinklabs-io/gouroboros/protocol/keepalive"
+	ouroboros_mock "github.com/blinklabs-io/ouroboros-mock"
 	"github.com/stretchr/testify/require"
 )
+
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
 
 type testBlockHeader struct {
 	hash        gledger.Blake2b256
@@ -614,6 +636,104 @@ func TestSubscribeChainsyncResyncDoesNotRecycleOnLocalRollbackWithoutPeerHistory
 		t.Fatalf("unexpected recycle request: %#v", evt)
 	case <-time.After(200 * time.Millisecond):
 	}
+}
+
+func TestSubscribeChainsyncResyncClosesConnectionOnPersistentFork(
+	t *testing.T,
+) {
+	logBuf := &lockedBuffer{}
+	logger := slog.New(
+		slog.NewJSONHandler(
+			logBuf,
+			&slog.HandlerOptions{Level: slog.LevelDebug},
+		),
+	)
+	bus := event.NewEventBus(nil, logger)
+	defer bus.Close()
+
+	connManager := connmanager.NewConnectionManager(
+		connmanager.ConnectionManagerConfig{
+			EventBus: bus,
+			Logger:   logger,
+		},
+	)
+	t.Cleanup(func() {
+		stopCtx, stopCancel := context.WithTimeout(
+			context.Background(),
+			5*time.Second,
+		)
+		defer stopCancel()
+		_ = connManager.Stop(stopCtx)
+	})
+
+	mockConn := ouroboros_mock.NewConnection(
+		ouroboros_mock.ProtocolRoleClient,
+		ouroboros_mock.ConversationKeepAlive,
+	)
+	oConn, err := ouroboros.New(
+		ouroboros.WithConnection(mockConn),
+		ouroboros.WithNetworkMagic(ouroboros_mock.MockNetworkMagic),
+		ouroboros.WithNodeToNode(true),
+		ouroboros.WithKeepAlive(true),
+		ouroboros.WithKeepAliveConfig(
+			keepalive.NewConfig(
+				keepalive.WithCookie(ouroboros_mock.MockKeepAliveCookie),
+				keepalive.WithPeriod(30*time.Second),
+				keepalive.WithTimeout(15*time.Second),
+			),
+		),
+	)
+	require.NoError(t, err)
+	connManager.AddConnection(oConn, false, "127.0.0.1:1234")
+
+	o := NewOuroboros(OuroborosConfig{
+		EventBus: bus,
+		Logger:   logger,
+	})
+	o.EventBus = bus
+	o.ConnManager = connManager
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	o.SubscribeChainsyncResync(ctx)
+
+	connId := oConn.Id()
+	bus.Publish(
+		event.ChainsyncResyncEventType,
+		event.NewEvent(
+			event.ChainsyncResyncEventType,
+			event.ChainsyncResyncEvent{
+				ConnectionId: connId,
+				Reason:       "persistent chain fork",
+			},
+		),
+	)
+
+	require.Eventually(
+		t,
+		func() bool {
+			return connManager.GetConnectionById(connId) == nil
+		},
+		2*time.Second,
+		20*time.Millisecond,
+	)
+	require.Eventually(
+		t,
+		func() bool {
+			logs := logBuf.String()
+			return strings.Contains(
+				logs,
+				`"msg":"closing stalled connection for fresh chainsync"`,
+			) && strings.Contains(logs, `"reason":"persistent chain fork"`)
+		},
+		2*time.Second,
+		20*time.Millisecond,
+	)
+	require.NotContains(
+		t,
+		logBuf.String(),
+		`"msg":"restarting chainsync client"`,
+	)
 }
 
 func TestHeaderPreviouslySeenFromOtherConnTreatsEquivalentConnIdsAsSame(
