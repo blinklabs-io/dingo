@@ -1,6 +1,102 @@
 # Release Notes
 
 
+## v0.32.3 (April 10, 2026)
+
+**Title:** {
+  "✨ What's New": [
+    "You can now match and detect Cardano certificate-related activity more reliably when analyzing transactions. This adds support for a `has_certificate` transaction pattern with detailed certificate matching logic and accompanying tests to validate the behavior."
+  ],
+  "💪 Improvements": [
+    "Recovery from certain chain sync edge cases is now more predictable, reducing the chance of a stuck or misleading connection state. The chainsync resync flow now closes connections when a `persistent chain fork` is detected, and includes a test that verifies the connection is closed and the expected log message is emitted."
+  ],
+  "📋 What You Need to Know": [
+    "No action is required to benefit from these updates in normal usage. If you maintain custom transaction-pattern rules or operational monitoring around chainsync, note the new `has_certificate` pattern and that `persistent chain fork` scenarios now trigger an explicit connection close with corresponding logging."
+  ]
+}
+
+
+**Date:** April 10, 2026
+
+**Version:** v0.32.3
+
+Hi folks! Here’s what we shipped in v0.32.3.
+
+### ✨ What's New
+
+```json
+{
+  "✨ What's New": [
+    "You can now match and detect Cardano certificate-related activity more reliably when analyzing transactions. This adds support for a `has_certificate` transaction pattern with detailed certificate matching logic and accompanying tests to validate the behavior."
+  ],
+  "💪 Improvements": [
+    "Recovery from certain chain sync edge cases is now more predictable, reducing the chance of a stuck or misleading connection state. The chainsync resync flow now closes connections when a `persistent chain fork` is detected, and includes a test that verifies the connection is closed and the expected log message is emitted."
+  ],
+  "📋 What You Need to Know": [
+    "No action is required to benefit from these updates in normal usage. If you maintain custom transaction-pattern rules or operational monitoring around chainsync, note the new `has_certificate` pattern and that `persistent chain fork` scenarios now trigger an explicit connection close with corresponding logging."
+  ]
+}
+
+```
+
+### 💪 Improvements
+
+```json
+{
+  "✨ What's New": [
+    "You can now match and detect Cardano certificate-related activity more reliably when analyzing transactions. This adds support for a `has_certificate` transaction pattern with detailed certificate matching logic and accompanying tests to validate the behavior."
+  ],
+  "💪 Improvements": [
+    "Recovery from certain chain sync edge cases is now more predictable, reducing the chance of a stuck or misleading connection state. The chainsync resync flow now closes connections when a `persistent chain fork` is detected, and includes a test that verifies the connection is closed and the expected log message is emitted."
+  ],
+  "📋 What You Need to Know": [
+    "No action is required to benefit from these updates in normal usage. If you maintain custom transaction-pattern rules or operational monitoring around chainsync, note the new `has_certificate` pattern and that `persistent chain fork` scenarios now trigger an explicit connection close with corresponding logging."
+  ]
+}
+
+```
+
+### 🔧 Fixes
+
+```json
+{
+  "✨ What's New": [
+    "You can now match and detect Cardano certificate-related activity more reliably when analyzing transactions. This adds support for a `has_certificate` transaction pattern with detailed certificate matching logic and accompanying tests to validate the behavior."
+  ],
+  "💪 Improvements": [
+    "Recovery from certain chain sync edge cases is now more predictable, reducing the chance of a stuck or misleading connection state. The chainsync resync flow now closes connections when a `persistent chain fork` is detected, and includes a test that verifies the connection is closed and the expected log message is emitted."
+  ],
+  "📋 What You Need to Know": [
+    "No action is required to benefit from these updates in normal usage. If you maintain custom transaction-pattern rules or operational monitoring around chainsync, note the new `has_certificate` pattern and that `persistent chain fork` scenarios now trigger an explicit connection close with corresponding logging."
+  ]
+}
+
+```
+
+### 📋 What You Need to Know
+
+```json
+{
+  "✨ What's New": [
+    "You can now match and detect Cardano certificate-related activity more reliably when analyzing transactions. This adds support for a `has_certificate` transaction pattern with detailed certificate matching logic and accompanying tests to validate the behavior."
+  ],
+  "💪 Improvements": [
+    "Recovery from certain chain sync edge cases is now more predictable, reducing the chance of a stuck or misleading connection state. The chainsync resync flow now closes connections when a `persistent chain fork` is detected, and includes a test that verifies the connection is closed and the expected log message is emitted."
+  ],
+  "📋 What You Need to Know": [
+    "No action is required to benefit from these updates in normal usage. If you maintain custom transaction-pattern rules or operational monitoring around chainsync, note the new `has_certificate` pattern and that `persistent chain fork` scenarios now trigger an explicit connection close with corresponding logging."
+  ]
+}
+
+```
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
+
 ## v0.32.2 (April 9, 2026)
 
 **Title:** Stability and polish updates
