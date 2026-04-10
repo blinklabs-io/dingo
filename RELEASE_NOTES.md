@@ -17,7 +17,7 @@ Hi folks! Here’s what we shipped in v0.32.3.
 
 ### 💪 Improvements
 
-- **Safer persistent-fork recovery:** Sync is more rock-solid because chain sync now closes the affected connection when it detects a persistent fork.
+- **More rock-solid persistent-fork recovery:** Sync is more rock-solid because chain sync now closes the affected connection when it detects a persistent fork.
 
 ### 🔧 Fixes
 
