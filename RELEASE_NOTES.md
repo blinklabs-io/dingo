@@ -3,7 +3,7 @@
 
 ## v0.32.3 (April 10, 2026)
 
-**Title:** Maintenance updates
+**Title:** Certificate-aware transaction matching
 
 **Date:** April 10, 2026
 
