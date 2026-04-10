@@ -3,7 +3,7 @@
 
 ## v0.32.3 (April 10, 2026)
 
-**Title:** Certificate-aware matching and steadier chain sync
+**Title:** Certificate-aware matching and more rock-solid chain sync
 
 
 **Date:** April 10, 2026
@@ -14,11 +14,11 @@ Hi folks! Here’s what we shipped in v0.32.3.
 
 ### ✨ What's New
 
-- **Certificate-aware transaction matching (`has_certificate`):** Transaction analysis is easier and more reliable because you can now match Cardano certificate activity using the new `has_certificate` pattern with detailed certificate matching and tests.
+- **Handy certificate-aware transaction matching (`has_certificate`):** Transaction analysis is easier and more reliable because you can now match Cardano certificate activity using the new `has_certificate` pattern with detailed certificate matching and tests.
 
 ### 💪 Improvements
 
-- **Safer resync on persistent chain forks:** Recovery is more predictable because the chainsync resync flow now closes the connection when a `persistent chain fork` is detected and verifies the behavior in tests and logs.
+- **More rock-solid resync on persistent chain forks:** Recovery is more predictable because the chainsync resync flow now closes the connection when a `persistent chain fork` is detected and verifies the behavior in tests and logs.
 
 ### 🔧 Fixes
 
