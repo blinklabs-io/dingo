@@ -345,7 +345,7 @@ func (d *MetadataStorePostgres) CountAddressesByStakingKey(
 	}
 	var count int64
 	if err := db.Model(&models.AddressTransaction{}).
-		Where("staking_key = ?", stakingKey).
+		Where("staking_key = ? AND length(payment_key) > 0", stakingKey).
 		Distinct("payment_key").
 		Count(&count).Error; err != nil {
 		return 0, fmt.Errorf("count addresses by staking key: %w", err)
