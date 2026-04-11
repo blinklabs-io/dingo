@@ -1,6 +1,39 @@
 # Release Notes
 
 
+## v0.32.3 (April 10, 2026)
+
+**Title:** Certificate-aware transaction matching
+
+**Date:** April 10, 2026
+
+**Version:** v0.32.3
+
+Hi folks! Here’s what we shipped in v0.32.3.
+
+### ✨ What's New
+
+- **Certificate-aware transaction pattern matching (`has_certificate`):** Filtering certificate-related transactions is easier because you can now match and validate Cardano certificates directly in transaction pattern rules.
+
+### 💪 Improvements
+
+- **More reliable persistent-fork recovery:** Sync is more rock-solid because chain sync now closes the affected connection when it detects a persistent fork.
+
+### 🔧 Fixes
+
+- **No user-facing fixes:** This patch focuses on new features and improvements.
+
+### 📋 What You Need to Know
+
+- **Transaction-pattern configs:** If you maintain custom transaction-pattern rules, you can start using `has_certificate` to filter or detect certificate-related transactions.
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
+
 ## v0.32.2 (April 9, 2026)
 
 **Title:** Stability and polish updates
