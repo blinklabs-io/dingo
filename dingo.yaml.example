@@ -11,6 +11,11 @@ bindAddr: "0.0.0.0"
 # Can be overridden with the config environment variable
 cardanoConfig: "./config/cardano/preview/config.json"
 
+# Global data directory for both blob and metadata storage plugins.
+# Can be overridden with CARDANO_DATABASE_PATH or --data-dir.
+# Plugin-specific data-dir settings below override this value.
+databasePath: ".dingo"
+
 # Database configuration
 database:
   # Blob storage plugin configuration
