@@ -20,6 +20,7 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"net"
 	"os"
 	"path/filepath"
 	"testing"
@@ -32,21 +33,29 @@ import (
 )
 
 // TestStartListener_UnixSocket_RemovesStaleSocketFile verifies that a stale
-// Unix socket file is automatically removed before binding a new listener.
+// Unix socket file left over from an unclean shutdown is automatically removed
+// before binding a new listener.
 func TestStartListener_UnixSocket_RemovesStaleSocketFile(t *testing.T) {
 	defer goleak.VerifyNone(t)
 
 	socketPath := filepath.Join(t.TempDir(), "test.sock")
 
-	// Create a stale socket file to simulate an unclean previous shutdown.
-	// Use os.Create so the file remains after creation (net.Listen removes
-	// the file on Close, so we use a plain file to simulate the stale case).
-	f, err := os.Create(socketPath)
+	// Create a stale unix socket file to simulate an unclean previous shutdown:
+	// listen, disable auto-unlink on close, then close so the socket file
+	// remains on disk.
+	staleLn, err := net.Listen("unix", socketPath)
 	require.NoError(t, err)
-	f.Close()
-	// Verify the file exists
-	_, err = os.Stat(socketPath)
+	staleLn.(*net.UnixListener).SetUnlinkOnClose(false)
+	staleLn.Close()
+
+	// Verify the socket file is still present
+	fi, err := os.Lstat(socketPath)
 	require.NoError(t, err, "stale socket file should exist before test")
+	require.NotZero(
+		t,
+		fi.Mode()&os.ModeSocket,
+		"stale file should be a unix socket",
+	)
 
 	cfg := ConnectionManagerConfig{
 		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -100,18 +109,16 @@ func TestStartListener_UnixSocket_NoExistingFile(t *testing.T) {
 	require.NoError(t, err)
 }
 
-// TestStartListener_UnixSocket_RemoveFailsOnDirectory verifies that an error
-// is surfaced when the socket path is a non-empty directory (cannot be removed).
-func TestStartListener_UnixSocket_RemoveFailsOnDirectory(t *testing.T) {
+// TestStartListener_UnixSocket_ErrorOnNonSocketFile verifies that an error is
+// surfaced when the socket path is occupied by a regular (non-socket) file.
+// The server must not silently delete arbitrary files.
+func TestStartListener_UnixSocket_ErrorOnNonSocketFile(t *testing.T) {
 	defer goleak.VerifyNone(t)
 
-	// Create a non-empty directory at the socket path so that os.Remove fails
-	socketPath := filepath.Join(t.TempDir(), "stale-dir")
-	require.NoError(t, os.MkdirAll(socketPath, 0o755))
-	// Add a child entry to make it non-empty
-	child, err := os.Create(filepath.Join(socketPath, "child"))
+	socketPath := filepath.Join(t.TempDir(), "not-a-socket")
+	f, err := os.Create(socketPath)
 	require.NoError(t, err)
-	child.Close()
+	f.Close()
 
 	cfg := ConnectionManagerConfig{
 		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -127,6 +134,32 @@ func TestStartListener_UnixSocket_RemoveFailsOnDirectory(t *testing.T) {
 	cm := NewConnectionManager(cfg)
 	ctx := context.Background()
 	err = cm.Start(ctx)
-	require.Error(t, err, "Start should fail when socket path cannot be removed")
-	assert.Contains(t, err.Error(), "failed to remove existing socket file")
+	require.Error(t, err, "Start should fail when socket path is a non-socket file")
+	assert.Contains(t, err.Error(), "exists and is not a unix socket")
+}
+
+// TestStartListener_UnixSocket_ErrorOnDirectory verifies that an error is
+// surfaced when the socket path is occupied by a directory.
+func TestStartListener_UnixSocket_ErrorOnDirectory(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	socketPath := filepath.Join(t.TempDir(), "stale-dir")
+	require.NoError(t, os.MkdirAll(socketPath, 0o755))
+
+	cfg := ConnectionManagerConfig{
+		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		PromRegistry: prometheus.NewRegistry(),
+		Listeners: []ListenerConfig{
+			{
+				ListenNetwork: "unix",
+				ListenAddress: socketPath,
+			},
+		},
+	}
+
+	cm := NewConnectionManager(cfg)
+	ctx := context.Background()
+	err := cm.Start(ctx)
+	require.Error(t, err, "Start should fail when socket path is a directory")
+	assert.Contains(t, err.Error(), "exists and is not a unix socket")
 }
