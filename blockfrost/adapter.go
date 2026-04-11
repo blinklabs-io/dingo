@@ -706,6 +706,7 @@ func (a *NodeAdapter) AccountDelegationHistory(
 	if err != nil {
 		return nil, 0, err
 	}
+
 	if _, err := a.ledgerState.Database().
 		GetAccount(stakeKey, true, nil); err != nil {
 		return nil, 0, err
@@ -732,13 +733,6 @@ func (a *NodeAdapter) AccountDelegationHistory(
 				err,
 			)
 		}
-		activeEpoch, err := uint64ToInt32(
-			epoch.EpochId,
-			"delegation active epoch",
-		)
-		if err != nil {
-			return nil, err
-		}
 		ret = append(ret, AccountDelegationHistoryInfo{
 			ActiveEpoch: activeEpoch,
 			TxHash:      hex.EncodeToString(row.TxHash),
@@ -748,6 +742,7 @@ func (a *NodeAdapter) AccountDelegationHistory(
 			).String(),
 		})
 	}
+
 	if params.Order == PaginationOrderAsc {
 		slices.Reverse(ret)
 	}
@@ -770,6 +765,7 @@ func (a *NodeAdapter) AccountRegistrationHistory(
 	if err != nil {
 		return nil, 0, err
 	}
+
 	if _, err := a.ledgerState.Database().
 		GetAccount(stakeKey, true, nil); err != nil {
 		return nil, 0, err
@@ -794,6 +790,7 @@ func (a *NodeAdapter) AccountRegistrationHistory(
 			Action: row.Action,
 		})
 	}
+
 	if params.Order == PaginationOrderAsc {
 		slices.Reverse(ret)
 	}

@@ -15,6 +15,7 @@
 package accounthistory
 
 import (
+	"bytes"
 	"fmt"
 	"slices"
 
@@ -199,6 +200,14 @@ func CompareRegistrationRows(
 	case a.CertIndex < b.CertIndex:
 		return -1
 	case a.CertIndex > b.CertIndex:
+		return 1
+	case bytes.Compare(a.TxHash, b.TxHash) < 0:
+		return -1
+	case bytes.Compare(a.TxHash, b.TxHash) > 0:
+		return 1
+	case a.Action < b.Action:
+		return -1
+	case a.Action > b.Action:
 		return 1
 	default:
 		return 0

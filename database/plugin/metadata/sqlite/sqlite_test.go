@@ -483,7 +483,7 @@ func TestGetAddressesByStakingKey(t *testing.T) {
 		t.Fatalf("failed to create address_tx rows: %v", err)
 	}
 
-	addrs, err := store.GetAddressesByStakingKey(stake, 10, 0, nil)
+	addrs, err := store.GetAddressesByStakingKey(stake, 10, 0, "asc", nil)
 	if err != nil {
 		t.Fatalf("GetAddressesByStakingKey failed: %v", err)
 	}
@@ -491,7 +491,7 @@ func TestGetAddressesByStakingKey(t *testing.T) {
 		t.Fatalf("expected 2 distinct addresses, got %d", len(addrs))
 	}
 
-	page, err := store.GetAddressesByStakingKey(stake, 1, 1, nil)
+	page, err := store.GetAddressesByStakingKey(stake, 1, 1, "asc", nil)
 	if err != nil {
 		t.Fatalf("GetAddressesByStakingKey pagination failed: %v", err)
 	}

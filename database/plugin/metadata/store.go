@@ -304,8 +304,15 @@ type MetadataStore interface {
 		[]byte, // stakingKey
 		int, // limit
 		int, // offset
+		string, // order (asc|desc)
 		types.Txn,
 	) ([]models.AddressTransaction, error)
+
+	// CountAddressesByStakingKey retrieves the total count of distinct address mappings for a staking key.
+	CountAddressesByStakingKey(
+		[]byte, // stakingKey
+		types.Txn,
+	) (int, error)
 
 	// GetAccountDelegationHistory retrieves delegation history rows for a staking key.
 	GetAccountDelegationHistory(

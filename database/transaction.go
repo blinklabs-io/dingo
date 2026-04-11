@@ -550,6 +550,7 @@ func (d *Database) GetAddressesByStakingKey(
 	stakingKey []byte,
 	limit int,
 	offset int,
+	order string,
 	txn *Txn,
 ) ([]models.AddressTransaction, error) {
 	if txn == nil {
@@ -560,6 +561,7 @@ func (d *Database) GetAddressesByStakingKey(
 		stakingKey,
 		limit,
 		offset,
+		order,
 		txn.Metadata(),
 	)
 	if err != nil {
@@ -572,6 +574,29 @@ func (d *Database) GetAddressesByStakingKey(
 		)
 	}
 	return addresses, nil
+}
+
+// CountAddressesByStakingKey returns the total number of distinct address mappings for a staking key.
+func (d *Database) CountAddressesByStakingKey(
+	stakingKey []byte,
+	txn *Txn,
+) (int, error) {
+	if txn == nil {
+		txn = d.Transaction(false)
+		defer txn.Release()
+	}
+	count, err := d.metadata.CountAddressesByStakingKey(
+		stakingKey,
+		txn.Metadata(),
+	)
+	if err != nil {
+		return 0, fmt.Errorf(
+			"count addresses by staking key=%x: %w",
+			stakingKey,
+			err,
+		)
+	}
+	return count, nil
 }
 
 // GetTransactionsByMetadataLabel returns transactions that include metadata
