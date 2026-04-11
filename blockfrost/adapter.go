@@ -561,7 +561,11 @@ func (a *NodeAdapter) AddressUTXOs(
 		)
 	}
 
-	utxos, err := a.ledgerState.UtxosByAddressWithOrdering(addr)
+	utxos, err := a.ledgerState.UtxosByAddressWithOrdering(
+		&models.UtxoWithOrderingQuery{
+			Addresses: []lcommon.Address{addr},
+		},
+	)
 	if err != nil {
 		return nil, 0, fmt.Errorf(
 			"get address UTxOs for %q: %w",
