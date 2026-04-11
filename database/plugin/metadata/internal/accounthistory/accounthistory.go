@@ -116,7 +116,7 @@ func QueryRegistrationHistory(
 }
 
 func transactionJoinClause(db *gorm.DB) string {
-	switch strings.ToLower(db.Dialector.Name()) {
+	switch strings.ToLower(db.Name()) {
 	case "mysql":
 		return "INNER JOIN `transaction` tx ON tx.id = certs.transaction_id"
 	default:
@@ -187,13 +187,17 @@ func CompareDelegationRows(
 ) int {
 	switch {
 	case a.AddedSlot < b.AddedSlot:
-		return -1
+		return 1
 	case a.AddedSlot > b.AddedSlot:
-		return 1
-	case a.CertIndex < b.CertIndex:
 		return -1
-	case a.CertIndex > b.CertIndex:
+	case a.CertIndex < b.CertIndex:
 		return 1
+	case a.CertIndex > b.CertIndex:
+		return -1
+	case bytes.Compare(a.TxHash, b.TxHash) < 0:
+		return 1
+	case bytes.Compare(a.TxHash, b.TxHash) > 0:
+		return -1
 	default:
 		return 0
 	}
@@ -204,21 +208,21 @@ func CompareRegistrationRows(
 ) int {
 	switch {
 	case a.AddedSlot < b.AddedSlot:
-		return -1
+		return 1
 	case a.AddedSlot > b.AddedSlot:
-		return 1
+		return -1
 	case a.CertIndex < b.CertIndex:
-		return -1
+		return 1
 	case a.CertIndex > b.CertIndex:
-		return 1
+		return -1
 	case bytes.Compare(a.TxHash, b.TxHash) < 0:
-		return -1
+		return 1
 	case bytes.Compare(a.TxHash, b.TxHash) > 0:
-		return 1
-	case a.Action < b.Action:
 		return -1
-	case a.Action > b.Action:
+	case a.Action < b.Action:
 		return 1
+	case a.Action > b.Action:
+		return -1
 	default:
 		return 0
 	}
