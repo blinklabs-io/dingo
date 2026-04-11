@@ -15,6 +15,7 @@
 package dingo
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -201,6 +202,100 @@ func (n *Node) registerBuildInfo() {
 		version.CommitHash,
 		runtime.Version(),
 	).Set(1)
+}
+
+// rtsMetricsUpdateInterval is how often the background updater refreshes
+// the RTS-style gauges from runtime.MemStats. Chosen to stay comfortably
+// under the default Prometheus scrape interval (15s) so consecutive
+// scrapes always see a fresh sample, without paying ReadMemStats
+// stop-the-world cost more often than necessary.
+const rtsMetricsUpdateInterval = 10 * time.Second
+
+// rtsMetrics holds Haskell-cardano-node-style RTS memory gauges backed
+// by Go runtime.MemStats. Matching the Haskell naming lets existing
+// cardano-node dashboards and alert rules work against Dingo without
+// rewriting queries. See docs/plans/RTS_METRICS.md for the semantic
+// mapping between Go and Haskell GC concepts.
+type rtsMetrics struct {
+	gcLiveBytes prometheus.Gauge
+	gcHeapBytes prometheus.Gauge
+	gcMajorNum  prometheus.Gauge
+	gcMinorNum  prometheus.Gauge
+}
+
+// registerRTSMetrics creates the four RTS gauges on the node's Prometheus
+// registry. Safe to call when promRegistry is nil — in that case it
+// returns early and leaves n.rtsMetrics nil, matching the registerBuildInfo
+// nil-guard pattern.
+func (n *Node) registerRTSMetrics() {
+	if n.config.promRegistry == nil {
+		return
+	}
+	factory := promauto.With(n.config.promRegistry)
+	n.rtsMetrics = &rtsMetrics{
+		gcLiveBytes: factory.NewGauge(prometheus.GaugeOpts{
+			Name: "cardano_node_metrics_RTS_gcLiveBytes_int",
+			Help: "live heap bytes currently in use (Go runtime.MemStats.HeapAlloc)",
+		}),
+		gcHeapBytes: factory.NewGauge(prometheus.GaugeOpts{
+			Name: "cardano_node_metrics_RTS_gcHeapBytes_int",
+			Help: "heap memory bytes obtained from the OS (Go runtime.MemStats.HeapSys)",
+		}),
+		gcMajorNum: factory.NewGauge(prometheus.GaugeOpts{
+			Name: "cardano_node_metrics_RTS_gcMajorNum_int",
+			Help: "count of forced GCs (Go runtime.MemStats.NumForcedGC)",
+		}),
+		gcMinorNum: factory.NewGauge(prometheus.GaugeOpts{
+			Name: "cardano_node_metrics_RTS_gcMinorNum_int",
+			Help: "count of automatic GCs (Go runtime.MemStats.NumGC - NumForcedGC)",
+		}),
+	}
+}
+
+// updateRTSMetrics writes the four gauge values from a runtime.MemStats
+// snapshot. Kept as a pure function (no ReadMemStats call, no timer) so
+// unit tests can drive it with crafted MemStats values. The Go runtime
+// guarantees NumForcedGC <= NumGC, so the subtraction never underflows.
+func updateRTSMetrics(m *rtsMetrics, stats *runtime.MemStats) {
+	m.gcLiveBytes.Set(float64(stats.HeapAlloc))
+	m.gcHeapBytes.Set(float64(stats.HeapSys))
+	m.gcMajorNum.Set(float64(stats.NumForcedGC))
+	m.gcMinorNum.Set(float64(stats.NumGC - stats.NumForcedGC))
+}
+
+// runRTSMetricsUpdater samples runtime.MemStats on a ticker and writes
+// the values into the RTS gauges. Collection happens on this goroutine
+// rather than at Prometheus scrape time so a scrape never pays the
+// ReadMemStats stop-the-world cost. Exits when ctx is cancelled.
+//
+// The interval parameter is accepted explicitly so tests can drive the
+// updater with a much shorter tick without changing production cadence;
+// production callers pass rtsMetricsUpdateInterval.
+func (n *Node) runRTSMetricsUpdater(
+	ctx context.Context,
+	interval time.Duration,
+) {
+	if n.rtsMetrics == nil {
+		return
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	// Prime the gauges immediately so a scrape arriving before the
+	// first tick returns real values instead of zero.
+	var stats runtime.MemStats
+	runtime.ReadMemStats(&stats)
+	updateRTSMetrics(n.rtsMetrics, &stats)
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			runtime.ReadMemStats(&stats)
+			updateRTSMetrics(n.rtsMetrics, &stats)
+		}
+	}
 }
 
 // isDevMode returns true if running in development mode
