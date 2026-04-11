@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"fmt"
 	"slices"
+	"strings"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -50,7 +51,7 @@ func QueryDelegationHistory(
 				"INNER JOIN certs ON certs.certificate_id = "+table+".id",
 			).
 			Joins(
-				`INNER JOIN "transaction" tx ON tx.id = certs.transaction_id`,
+				transactionJoinClause(db),
 			).
 			Where(
 				table+".staking_key = ? AND certs.cert_type IN ?",
@@ -90,7 +91,7 @@ func QueryRegistrationHistory(
 				"INNER JOIN certs ON certs.certificate_id = "+table+".id",
 			).
 			Joins(
-				`INNER JOIN "transaction" tx ON tx.id = certs.transaction_id`,
+				transactionJoinClause(db),
 			).
 			Where(
 				table+".staking_key = ? AND certs.cert_type IN ?",
@@ -112,6 +113,15 @@ func QueryRegistrationHistory(
 
 	slices.SortFunc(ret, CompareRegistrationRows)
 	return ret, nil
+}
+
+func transactionJoinClause(db *gorm.DB) string {
+	switch strings.ToLower(db.Dialector.Name()) {
+	case "mysql":
+		return "INNER JOIN `transaction` tx ON tx.id = certs.transaction_id"
+	default:
+		return `INNER JOIN "transaction" tx ON tx.id = certs.transaction_id`
+	}
 }
 
 func DelegationCertTypes() []uint {
