@@ -338,7 +338,10 @@ func (d *MetadataStorePostgres) CountAddressesByStakingKey(
 	}
 	db, err := d.resolveDB(txn)
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf(
+			"resolve DB for count addresses by staking key: %w",
+			err,
+		)
 	}
 	var count int64
 	if err := db.Model(&models.AddressTransaction{}).

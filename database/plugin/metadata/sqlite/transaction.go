@@ -362,7 +362,10 @@ func (d *MetadataStoreSqlite) CountAddressesByStakingKey(
 	}
 	db, err := d.resolveReadDB(txn)
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf(
+			"resolve read DB for count addresses by staking key: %w",
+			err,
+		)
 	}
 	var count int64
 	if err := db.Model(&models.AddressTransaction{}).
