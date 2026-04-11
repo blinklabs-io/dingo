@@ -587,6 +587,14 @@ func (a *NodeAdapter) Account(
 			err,
 		)
 	}
+	epochID, err := uint64ToInt64(
+		epoch.EpochId,
+		"account active epoch",
+	)
+	if err != nil {
+		return AccountInfo{}, err
+	}
+	activeEpoch = &epochID
 
 	epochID, err := uint64ToInt64(
 		epoch.EpochId,
