@@ -596,15 +596,6 @@ func (a *NodeAdapter) Account(
 	}
 	activeEpoch = &epochID
 
-	epochID, err := uint64ToInt64(
-		epoch.EpochId,
-		"account active epoch",
-	)
-	if err != nil {
-		return AccountInfo{}, err
-	}
-	activeEpoch = &epochID
-
 	var poolID *string
 	if account.Active && len(account.Pool) > 0 {
 		pool := lcommon.PoolId(
