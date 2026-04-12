@@ -34,8 +34,10 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 )
 
-var ErrInvalidAddress = errors.New("invalid address")
-var ErrEpochNotFound = errors.New("epoch not found")
+var (
+	ErrInvalidAddress = errors.New("invalid address")
+	ErrEpochNotFound  = errors.New("epoch not found")
+)
 
 // NodeAdapter wraps a real dingo Node's LedgerState to
 // implement the BlockfrostNode interface.
