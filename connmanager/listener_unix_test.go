@@ -32,13 +32,25 @@ import (
 	"go.uber.org/goleak"
 )
 
+// unixTestTempDir creates a short-lived temp directory suitable for Unix
+// socket paths. t.TempDir() embeds the full test name, easily exceeding macOS's
+// 104-byte sockaddr_un.sun_path limit. Using a short prefix keeps the path
+// under the limit on all platforms.
+func unixTestTempDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "dt*")
+	require.NoError(t, err)
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	return dir
+}
+
 // TestStartListener_UnixSocket_RemovesStaleSocketFile verifies that a stale
 // Unix socket file left over from an unclean shutdown is automatically removed
 // before binding a new listener.
 func TestStartListener_UnixSocket_RemovesStaleSocketFile(t *testing.T) {
 	defer goleak.VerifyNone(t)
 
-	socketPath := filepath.Join(t.TempDir(), "test.sock")
+	socketPath := filepath.Join(unixTestTempDir(t), "test.sock")
 
 	// Create a stale unix socket file to simulate an unclean previous shutdown:
 	// listen, disable auto-unlink on close, then close so the socket file
@@ -84,7 +96,7 @@ func TestStartListener_UnixSocket_RemovesStaleSocketFile(t *testing.T) {
 func TestStartListener_UnixSocket_NoExistingFile(t *testing.T) {
 	defer goleak.VerifyNone(t)
 
-	socketPath := filepath.Join(t.TempDir(), "test.sock")
+	socketPath := filepath.Join(unixTestTempDir(t), "test.sock")
 	// No pre-existing socket file
 
 	cfg := ConnectionManagerConfig{
@@ -115,7 +127,7 @@ func TestStartListener_UnixSocket_NoExistingFile(t *testing.T) {
 func TestStartListener_UnixSocket_ErrorOnNonSocketFile(t *testing.T) {
 	defer goleak.VerifyNone(t)
 
-	socketPath := filepath.Join(t.TempDir(), "not-a-socket")
+	socketPath := filepath.Join(unixTestTempDir(t), "not-a-socket")
 	f, err := os.Create(socketPath)
 	require.NoError(t, err)
 	f.Close()
@@ -143,7 +155,7 @@ func TestStartListener_UnixSocket_ErrorOnNonSocketFile(t *testing.T) {
 func TestStartListener_UnixSocket_ErrorOnDirectory(t *testing.T) {
 	defer goleak.VerifyNone(t)
 
-	socketPath := filepath.Join(t.TempDir(), "stale-dir")
+	socketPath := filepath.Join(unixTestTempDir(t), "stale-dir")
 	require.NoError(t, os.MkdirAll(socketPath, 0o755))
 
 	cfg := ConnectionManagerConfig{
