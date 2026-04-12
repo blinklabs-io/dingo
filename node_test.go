@@ -183,15 +183,23 @@ func TestProcessChainsyncRecyclerTickKeepsStalledRecyclerRunning(
 		connmanager.ConnectionRecycleRequestedEventType,
 	)
 
+	// Two eligible peers so the stall guard does not suppress
+	// the recycle (single-peer guard is tested separately).
+	// Add connId2 first so connId has a more recent LastActivity;
+	// promoteBestClientLocked will then select connId as active
+	// after both clients stall, making the recycle deterministic.
 	connId := newNodeTestConnId(1)
+	connId2 := newNodeTestConnId(2)
 	state := chainsync.NewStateWithConfig(
 		bus,
 		nil,
 		chainsync.Config{
-			MaxClients:   1,
+			MaxClients:   2,
 			StallTimeout: time.Millisecond,
 		},
 	)
+	require.True(t, state.AddClientConnId(connId2))
+	time.Sleep(time.Millisecond)
 	require.True(t, state.AddClientConnId(connId))
 
 	selector := chainselection.NewChainSelector(
@@ -225,7 +233,7 @@ func TestProcessChainsyncRecyclerTickKeepsStalledRecyclerRunning(
 		now,
 		100,
 		chainsync.Config{
-			MaxClients:   1,
+			MaxClients:   2,
 			StallTimeout: time.Millisecond,
 		},
 		recycleAt,
@@ -250,6 +258,88 @@ func TestProcessChainsyncRecyclerTickKeepsStalledRecyclerRunning(
 	case <-time.After(200 * time.Millisecond):
 		t.Fatal("expected stalled recycler event")
 	}
+}
+
+func TestProcessChainsyncRecyclerTickSkipsRecycleOnlyPeer(
+	t *testing.T,
+) {
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(func() { bus.Stop() })
+	_, recycleCh := bus.Subscribe(
+		connmanager.ConnectionRecycleRequestedEventType,
+	)
+
+	connId := newNodeTestConnId(1)
+	state := chainsync.NewStateWithConfig(
+		bus,
+		nil,
+		chainsync.Config{
+			MaxClients:   1,
+			StallTimeout: time.Millisecond,
+		},
+	)
+	require.True(t, state.AddClientConnId(connId))
+
+	selector := chainselection.NewChainSelector(
+		chainselection.ChainSelectorConfig{},
+	)
+	selector.UpdatePeerTip(connId, ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 120, Hash: []byte("best")},
+		BlockNumber: 60,
+	}, nil)
+
+	n := &Node{
+		config: Config{
+			logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+		chainsyncState: state,
+		chainSelector:  selector,
+		eventBus:       bus,
+	}
+
+	time.Sleep(5 * time.Millisecond)
+
+	now := time.Now()
+	lastProgressSlot := uint64(100)
+	lastProgressAt := now
+	grace := time.Second
+	recycleAt := map[string]time.Time{
+		connId.String(): now.Add(-time.Second),
+	}
+	lastRecycled := make(map[string]time.Time)
+
+	n.processChainsyncRecyclerTick(
+		now,
+		100,
+		chainsync.Config{
+			MaxClients:   1,
+			StallTimeout: time.Millisecond,
+		},
+		recycleAt,
+		lastRecycled,
+		&lastProgressSlot,
+		&lastProgressAt,
+		plateauThreshold(2*time.Minute),
+		grace,
+		2*time.Minute,
+	)
+
+	// No recycle event should be emitted for the only peer.
+	select {
+	case evt := <-recycleCh:
+		t.Fatalf("unexpected recycle event: %+v", evt)
+	case <-time.After(50 * time.Millisecond):
+		// Expected: recycle suppressed.
+	}
+
+	// Grace timer should be rescheduled.
+	dueAt, ok := recycleAt[connId.String()]
+	require.True(t, ok, "recycle entry should still exist")
+	assert.True(
+		t,
+		dueAt.After(now),
+		"due time should be pushed forward",
+	)
 }
 
 func TestProcessChainsyncRecyclerTickRecyclesLocalTipPlateau(t *testing.T) {

@@ -124,11 +124,15 @@ func (n *Node) processChainsyncRecyclerTick(
 		map[string]chainsync.TrackedClient,
 		len(trackedClients),
 	)
+	eligibleCount := 0
 	for _, conn := range trackedClients {
 		connKey := conn.ConnId.String()
 		trackedByID[connKey] = conn
 		if conn.Status != chainsync.ClientStatusStalled {
 			delete(recycleAt, connKey)
+		}
+		if !conn.ObservabilityOnly {
+			eligibleCount++
 		}
 	}
 	// Prune expired cooldown entries so this map does
@@ -217,6 +221,20 @@ func (n *Node) processChainsyncRecyclerTick(
 		if last, ok := lastRecycled[connKey]; ok &&
 			now.Sub(last) < cooldown {
 			recycleAt[connKey] = now.Add(cooldown - now.Sub(last))
+			continue
+		}
+		// Never recycle the only eligible peer. A block producer
+		// with a single relay would lose its only propagation
+		// path during the reconnect window. Observability-only
+		// connections are not eligible, so recycling them does
+		// not reduce the eligible count.
+		if eligibleCount <= 1 && !tracked.ObservabilityOnly {
+			n.config.logger.Warn(
+				"chainsync client stalled but is only eligible peer, skipping recycle",
+				"connection_id", connKey,
+				"stall_timeout", chainsyncCfg.StallTimeout,
+			)
+			recycleAt[connKey] = now.Add(grace)
 			continue
 		}
 		active := n.chainsyncState.GetClientConnId()
