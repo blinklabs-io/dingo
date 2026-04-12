@@ -20,6 +20,7 @@ import (
 	"log/slog"
 	"net/http"
 	"slices"
+	"strconv"
 )
 
 const apiVersion = "0.1.0"
@@ -209,39 +210,54 @@ func (b *Blockfrost) handleLatestEpochParams(
 		)
 		return
 	}
-	writeJSON(w, http.StatusOK, ProtocolParamsResponse{
-		Epoch:                 info.Epoch,
-		MinFeeA:               info.MinFeeA,
-		MinFeeB:               info.MinFeeB,
-		MaxBlockSize:          info.MaxBlockSize,
-		MaxTxSize:             info.MaxTxSize,
-		MaxBlockHeaderSize:    info.MaxBlockHeaderSize,
-		KeyDeposit:            info.KeyDeposit,
-		PoolDeposit:           info.PoolDeposit,
-		EMax:                  info.EMax,
-		NOpt:                  info.NOpt,
-		A0:                    info.A0,
-		Rho:                   info.Rho,
-		Tau:                   info.Tau,
-		ProtocolMajorVer:      info.ProtocolMajorVer,
-		ProtocolMinorVer:      info.ProtocolMinorVer,
-		MinPoolCost:           info.MinPoolCost,
-		CoinsPerUtxoSize:      &info.CoinsPerUtxoSize,
-		CoinsPerUtxoWord:      info.CoinsPerUtxoSize,
-		PriceMem:              &info.PriceMem,
-		PriceStep:             &info.PriceStep,
-		MaxTxExMem:            &info.MaxTxExMem,
-		MaxTxExSteps:          &info.MaxTxExSteps,
-		MaxBlockExMem:         &info.MaxBlockExMem,
-		MaxBlockExSteps:       &info.MaxBlockExSteps,
-		MaxValSize:            &info.MaxValSize,
-		CollateralPercent:     &info.CollateralPercent,
-		MaxCollateralInputs:   &info.MaxCollateralInputs,
-		MinUtxo:               "0",
-		Nonce:                 "",
-		DecentralisationParam: 0,
-		ExtraEntropy:          nil,
-	})
+	writeJSON(w, http.StatusOK, protocolParamsResponse(info))
+}
+
+// handleEpochParams handles GET /api/v0/epochs/{number}/parameters and
+// returns the protocol parameters for a specific epoch.
+func (b *Blockfrost) handleEpochParams(
+	w http.ResponseWriter,
+	r *http.Request,
+) {
+	epoch, err := strconv.ParseUint(
+		r.PathValue("number"),
+		10,
+		64,
+	)
+	if err != nil {
+		writeError(
+			w,
+			http.StatusBadRequest,
+			"Bad Request",
+			"Invalid epoch number.",
+		)
+		return
+	}
+	info, err := b.node.EpochProtocolParams(epoch)
+	if err != nil {
+		b.logger.Error(
+			"failed to get protocol params for epoch",
+			"epoch", epoch,
+			"error", err,
+		)
+		if errors.Is(err, ErrEpochNotFound) {
+			writeError(
+				w,
+				http.StatusNotFound,
+				"Not Found",
+				"The requested epoch could not be found.",
+			)
+			return
+		}
+		writeError(
+			w,
+			http.StatusInternalServerError,
+			"Internal Server Error",
+			"failed to retrieve protocol parameters",
+		)
+		return
+	}
+	writeJSON(w, http.StatusOK, protocolParamsResponse(info))
 }
 
 // handleNetwork handles GET /api/v0/network and returns
@@ -490,4 +506,42 @@ func convertAddressAmounts(
 		ret = append(ret, AddressAmountResponse(amount))
 	}
 	return ret
+}
+
+func protocolParamsResponse(
+	info ProtocolParamsInfo,
+) ProtocolParamsResponse {
+	return ProtocolParamsResponse{
+		Epoch:                 info.Epoch,
+		MinFeeA:               info.MinFeeA,
+		MinFeeB:               info.MinFeeB,
+		MaxBlockSize:          info.MaxBlockSize,
+		MaxTxSize:             info.MaxTxSize,
+		MaxBlockHeaderSize:    info.MaxBlockHeaderSize,
+		KeyDeposit:            info.KeyDeposit,
+		PoolDeposit:           info.PoolDeposit,
+		EMax:                  info.EMax,
+		NOpt:                  info.NOpt,
+		A0:                    info.A0,
+		Rho:                   info.Rho,
+		Tau:                   info.Tau,
+		ProtocolMajorVer:      info.ProtocolMajorVer,
+		ProtocolMinorVer:      info.ProtocolMinorVer,
+		MinPoolCost:           info.MinPoolCost,
+		CoinsPerUtxoSize:      &info.CoinsPerUtxoSize,
+		CoinsPerUtxoWord:      info.CoinsPerUtxoSize,
+		PriceMem:              &info.PriceMem,
+		PriceStep:             &info.PriceStep,
+		MaxTxExMem:            &info.MaxTxExMem,
+		MaxTxExSteps:          &info.MaxTxExSteps,
+		MaxBlockExMem:         &info.MaxBlockExMem,
+		MaxBlockExSteps:       &info.MaxBlockExSteps,
+		MaxValSize:            &info.MaxValSize,
+		CollateralPercent:     &info.CollateralPercent,
+		MaxCollateralInputs:   &info.MaxCollateralInputs,
+		MinUtxo:               "0",
+		Nonce:                 "",
+		DecentralisationParam: 0,
+		ExtraEntropy:          nil,
+	}
 }

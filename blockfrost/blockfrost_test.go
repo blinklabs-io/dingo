@@ -38,6 +38,7 @@ type mockNode struct {
 	txHashes               []string
 	epoch                  EpochInfo
 	params                 ProtocolParamsInfo
+	epochParams            ProtocolParamsInfo
 	pools                  []PoolExtendedInfo
 	addressUTXOs           []AddressUTXOInfo
 	addressTransactions    []AddressTransactionInfo
@@ -48,6 +49,7 @@ type mockNode struct {
 	txHashesErr            error
 	epochErr               error
 	paramsErr              error
+	epochParamsErr         error
 	poolsErr               error
 	addressUTXOsErr        error
 	addressTransactionsErr error
@@ -81,6 +83,12 @@ func (m *mockNode) CurrentProtocolParams() (
 	ProtocolParamsInfo, error,
 ) {
 	return m.params, m.paramsErr
+}
+
+func (m *mockNode) EpochProtocolParams(
+	_ uint64,
+) (ProtocolParamsInfo, error) {
+	return m.epochParams, m.epochParamsErr
 }
 
 func (m *mockNode) PoolsExtended() (
@@ -571,6 +579,106 @@ func TestHandleLatestEpochParams(t *testing.T) {
 	assert.Equal(t, 150, *resp.CollateralPercent)
 	require.NotNil(t, resp.MaxCollateralInputs)
 	assert.Equal(t, 3, *resp.MaxCollateralInputs)
+}
+
+func TestHandleEpochParams(t *testing.T) {
+	mock := &mockNode{
+		epochParams: ProtocolParamsInfo{
+			Epoch:               42,
+			MinFeeA:             44,
+			MinFeeB:             155381,
+			MaxBlockSize:        65536,
+			MaxTxSize:           16384,
+			MaxBlockHeaderSize:  1100,
+			KeyDeposit:          "2000000",
+			PoolDeposit:         "500000000",
+			EMax:                18,
+			NOpt:                150,
+			A0:                  0.3,
+			Rho:                 0.003,
+			Tau:                 0.2,
+			ProtocolMajorVer:    8,
+			ProtocolMinorVer:    0,
+			MinPoolCost:         "170000000",
+			CoinsPerUtxoSize:    "4310",
+			PriceMem:            0.0577,
+			PriceStep:           0.0000721,
+			MaxTxExMem:          "10000000000",
+			MaxTxExSteps:        "10000000000000",
+			MaxBlockExMem:       "50000000000",
+			MaxBlockExSteps:     "40000000000000",
+			MaxValSize:          "5000",
+			CollateralPercent:   150,
+			MaxCollateralInputs: 3,
+		},
+	}
+	b := newTestBlockfrost(mock)
+
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/api/v0/epochs/42/parameters",
+		nil,
+	)
+	req.SetPathValue("number", "42")
+	w := httptest.NewRecorder()
+	b.handleEpochParams(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	var resp ProtocolParamsResponse
+	err := json.NewDecoder(w.Body).Decode(&resp)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(42), resp.Epoch)
+	assert.Equal(t, 44, resp.MinFeeA)
+	assert.Equal(t, 155381, resp.MinFeeB)
+	assert.Equal(t, "4310", resp.CoinsPerUtxoWord)
+}
+
+func TestHandleEpochParamsInvalidEpoch(t *testing.T) {
+	mock := &mockNode{}
+	b := newTestBlockfrost(mock)
+
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/api/v0/epochs/not-a-number/parameters",
+		nil,
+	)
+	req.SetPathValue("number", "not-a-number")
+	w := httptest.NewRecorder()
+	b.handleEpochParams(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+
+	var resp ErrorResponse
+	err := json.NewDecoder(w.Body).Decode(&resp)
+	require.NoError(t, err)
+	assert.Equal(t, 400, resp.StatusCode)
+	assert.Equal(t, "Bad Request", resp.Error)
+	assert.Equal(t, "Invalid epoch number.", resp.Message)
+}
+
+func TestHandleEpochParamsNotFound(t *testing.T) {
+	mock := &mockNode{
+		epochParamsErr: ErrEpochNotFound,
+	}
+	b := newTestBlockfrost(mock)
+
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/api/v0/epochs/42/parameters",
+		nil,
+	)
+	req.SetPathValue("number", "42")
+	w := httptest.NewRecorder()
+	b.handleEpochParams(w, req)
+
+	assert.Equal(t, http.StatusNotFound, w.Code)
+
+	var resp ErrorResponse
+	err := json.NewDecoder(w.Body).Decode(&resp)
+	require.NoError(t, err)
+	assert.Equal(t, 404, resp.StatusCode)
+	assert.Equal(t, "Not Found", resp.Error)
 }
 
 func TestHandleNetwork(t *testing.T) {

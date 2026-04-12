@@ -38,6 +38,10 @@ type BlockfrostNode interface {
 	// parameters.
 	CurrentProtocolParams() (ProtocolParamsInfo, error)
 
+	// EpochProtocolParams returns protocol parameters for a
+	// specific epoch.
+	EpochProtocolParams(epoch uint64) (ProtocolParamsInfo, error)
+
 	// PoolsExtended returns the current active pools with
 	// extended details.
 	PoolsExtended() ([]PoolExtendedInfo, error)
