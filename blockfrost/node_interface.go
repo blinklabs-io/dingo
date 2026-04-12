@@ -41,6 +41,22 @@ type BlockfrostNode interface {
 	// PoolsExtended returns the current active pools with
 	// extended details.
 	PoolsExtended() ([]PoolExtendedInfo, error)
+
+	// AddressUTXOs returns the paginated current UTxOs for
+	// an address along with the total number of matching
+	// results before pagination.
+	AddressUTXOs(
+		address string,
+		params PaginationParams,
+	) ([]AddressUTXOInfo, int, error)
+
+	// AddressTransactions returns the paginated transaction
+	// history for an address along with the total number of
+	// matching results before pagination.
+	AddressTransactions(
+		address string,
+		params PaginationParams,
+	) ([]AddressTransactionInfo, int, error)
 }
 
 // ChainTipInfo holds chain tip data needed by the API.
@@ -127,4 +143,33 @@ type PoolRelayInfo struct {
 	IPv6 string
 	DNS  string
 	Port *int
+}
+
+// AddressAmountInfo holds amount data needed by address
+// UTxO responses.
+type AddressAmountInfo struct {
+	Unit     string
+	Quantity string
+}
+
+// AddressUTXOInfo holds address UTxO data needed by the
+// API.
+type AddressUTXOInfo struct {
+	Address             string
+	TxHash              string
+	OutputIndex         uint32
+	Amount              []AddressAmountInfo
+	Block               string
+	DataHash            *string
+	InlineDatum         *string
+	ReferenceScriptHash *string
+}
+
+// AddressTransactionInfo holds address transaction data
+// needed by the API.
+type AddressTransactionInfo struct {
+	TxHash      string
+	TxIndex     uint32
+	BlockHeight uint64
+	BlockTime   int64
 }

@@ -120,6 +120,35 @@ type NetworkStake struct {
 	Active string `json:"active"`
 }
 
+// AddressAmountResponse represents a Blockfrost address
+// amount object.
+type AddressAmountResponse struct {
+	Unit     string `json:"unit"`
+	Quantity string `json:"quantity"`
+}
+
+// AddressUTXOResponse represents a Blockfrost address
+// UTxO object.
+type AddressUTXOResponse struct {
+	Address             string                  `json:"address"`
+	TxHash              string                  `json:"tx_hash"`
+	OutputIndex         int                     `json:"output_index"`
+	Amount              []AddressAmountResponse `json:"amount"`
+	Block               string                  `json:"block"`
+	DataHash            *string                 `json:"data_hash"`
+	InlineDatum         *string                 `json:"inline_datum"`
+	ReferenceScriptHash *string                 `json:"reference_script_hash"`
+}
+
+// AddressTransactionResponse represents a Blockfrost
+// address transaction object.
+type AddressTransactionResponse struct {
+	TxHash      string `json:"tx_hash"`
+	TxIndex     int    `json:"tx_index"`
+	BlockHeight uint64 `json:"block_height"`
+	BlockTime   int    `json:"block_time"`
+}
+
 // ErrorResponse represents a Blockfrost error response.
 type ErrorResponse struct {
 	StatusCode int    `json:"status_code"`

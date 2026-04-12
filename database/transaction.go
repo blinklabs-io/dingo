@@ -360,6 +360,25 @@ func (d *Database) GetTransactionByHash(
 	return d.metadata.GetTransactionByHash(hash, txn.Metadata())
 }
 
+// GetTransactionsByHashes returns transactions for the provided hashes.
+func (d *Database) GetTransactionsByHashes(
+	hashes [][]byte,
+	txn *Txn,
+) ([]models.Transaction, error) {
+	if len(hashes) == 0 {
+		return nil, nil
+	}
+	if txn == nil {
+		txn = d.Transaction(false)
+		defer txn.Release()
+	}
+	txs, err := d.metadata.GetTransactionsByHashes(hashes, txn.Metadata())
+	if err != nil {
+		return nil, fmt.Errorf("get txs by hashes: %w", err)
+	}
+	return txs, nil
+}
+
 // GetTransactionsByBlockHash returns all transactions for a given
 // block hash, ordered by their position within the block.
 func (d *Database) GetTransactionsByBlockHash(
@@ -413,6 +432,34 @@ func (d *Database) GetTransactionsByAddress(
 	)
 }
 
+// GetTransactionsByAddressWithOrder returns transactions
+// involving a given address with explicit ordering.
+func (d *Database) GetTransactionsByAddressWithOrder(
+	addr lcommon.Address,
+	limit int,
+	offset int,
+	order string,
+	txn *Txn,
+) ([]models.Transaction, error) {
+	zeroHash := lcommon.NewBlake2b224(nil)
+	var paymentKey []byte
+	var stakingKey []byte
+	if pkh := addr.PaymentKeyHash(); pkh != zeroHash {
+		paymentKey = pkh.Bytes()
+	}
+	if skh := addr.StakeKeyHash(); skh != zeroHash {
+		stakingKey = skh.Bytes()
+	}
+	return d.GetTransactionsByAddressKeys(
+		paymentKey,
+		stakingKey,
+		limit,
+		offset,
+		order,
+		txn,
+	)
+}
+
 // GetTransactionsByAddressKeys returns transactions for a payment/staking key
 // tuple with pagination and explicit order (asc|desc).
 func (d *Database) GetTransactionsByAddressKeys(
@@ -447,6 +494,55 @@ func (d *Database) GetTransactionsByAddressKeys(
 		)
 	}
 	return txs, nil
+}
+
+// CountTransactionsByAddress returns the total number of
+// transactions involving a given address.
+func (d *Database) CountTransactionsByAddress(
+	addr lcommon.Address,
+	txn *Txn,
+) (int, error) {
+	zeroHash := lcommon.NewBlake2b224(nil)
+	var paymentKey []byte
+	var stakingKey []byte
+	if pkh := addr.PaymentKeyHash(); pkh != zeroHash {
+		paymentKey = pkh.Bytes()
+	}
+	if skh := addr.StakeKeyHash(); skh != zeroHash {
+		stakingKey = skh.Bytes()
+	}
+	return d.CountTransactionsByAddressKeys(
+		paymentKey,
+		stakingKey,
+		txn,
+	)
+}
+
+// CountTransactionsByAddressKeys returns the total number
+// of transactions for a payment/staking key tuple.
+func (d *Database) CountTransactionsByAddressKeys(
+	paymentKey []byte,
+	stakingKey []byte,
+	txn *Txn,
+) (int, error) {
+	if txn == nil {
+		txn = d.Transaction(false)
+		defer txn.Release()
+	}
+	count, err := d.metadata.CountTransactionsByAddress(
+		paymentKey,
+		stakingKey,
+		txn.Metadata(),
+	)
+	if err != nil {
+		return 0, fmt.Errorf(
+			"count txs by address payment=%x staking=%x: %w",
+			paymentKey,
+			stakingKey,
+			err,
+		)
+	}
+	return count, nil
 }
 
 // GetAddressesByStakingKey returns distinct address mappings for a staking key.

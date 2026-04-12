@@ -4100,6 +4100,17 @@ func (ls *LedgerState) GetTransactionsByBlockHash(
 	return ls.db.GetTransactionsByBlockHash(blockHash, nil)
 }
 
+// GetTransactionsByHashes returns transactions for the provided hashes.
+func (ls *LedgerState) GetTransactionsByHashes(
+	hashes [][]byte,
+) ([]models.Transaction, error) {
+	txs, err := ls.db.GetTransactionsByHashes(hashes, nil)
+	if err != nil {
+		return nil, fmt.Errorf("get transactions by hashes: %w", err)
+	}
+	return txs, nil
+}
+
 // GetTransactionsByAddress returns transactions involving the given
 // address.
 func (ls *LedgerState) GetTransactionsByAddress(
@@ -4108,6 +4119,45 @@ func (ls *LedgerState) GetTransactionsByAddress(
 	offset int,
 ) ([]models.Transaction, error) {
 	return ls.db.GetTransactionsByAddress(addr, limit, offset, nil)
+}
+
+// GetTransactionsByAddressWithOrder returns transactions
+// involving the given address with explicit ordering.
+func (ls *LedgerState) GetTransactionsByAddressWithOrder(
+	addr lcommon.Address,
+	limit int,
+	offset int,
+	order string,
+) ([]models.Transaction, error) {
+	txs, err := ls.db.GetTransactionsByAddressWithOrder(
+		addr,
+		limit,
+		offset,
+		order,
+		nil,
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"get transactions by address (limit=%d offset=%d order=%s): %w",
+			limit,
+			offset,
+			order,
+			err,
+		)
+	}
+	return txs, nil
+}
+
+// CountTransactionsByAddress returns the total number of
+// transactions involving the given address.
+func (ls *LedgerState) CountTransactionsByAddress(
+	addr lcommon.Address,
+) (int, error) {
+	count, err := ls.db.CountTransactionsByAddress(addr, nil)
+	if err != nil {
+		return 0, fmt.Errorf("count transactions by address: %w", err)
+	}
+	return count, nil
 }
 
 // CountTransactionsInSlotRange returns the number of transactions whose slot

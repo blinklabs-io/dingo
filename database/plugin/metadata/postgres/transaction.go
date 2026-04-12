@@ -100,6 +100,33 @@ func (d *MetadataStorePostgres) GetTransactionByHash(
 	return ret, nil
 }
 
+// GetTransactionsByHashes returns transactions for the provided hashes.
+func (d *MetadataStorePostgres) GetTransactionsByHashes(
+	hashes [][]byte,
+	txn types.Txn,
+) ([]models.Transaction, error) {
+	var ret []models.Transaction
+	if len(hashes) == 0 {
+		return ret, nil
+	}
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return nil, err
+	}
+	result := db.
+		Where("hash IN ?", hashes).
+		Preload(clause.Associations).
+		Preload("Inputs.Assets").
+		Preload("Outputs.Assets").
+		Preload("Collateral.Assets").
+		Preload("ReferenceInputs.Assets").
+		Find(&ret)
+	if result.Error != nil {
+		return nil, fmt.Errorf("get txs by hashes: %w", result.Error)
+	}
+	return ret, nil
+}
+
 // GetTransactionsByBlockHash returns all transactions in a block, ordered by index
 func (d *MetadataStorePostgres) GetTransactionsByBlockHash(
 	blockHash []byte,
@@ -220,6 +247,51 @@ func (d *MetadataStorePostgres) GetTransactionsByAddress(
 		)
 	}
 	return ret, nil
+}
+
+// CountTransactionsByAddress returns the total number of
+// distinct transactions involving the given
+// payment/staking key.
+func (d *MetadataStorePostgres) CountTransactionsByAddress(
+	paymentKey []byte,
+	stakingKey []byte,
+	txn types.Txn,
+) (int, error) {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return 0, err
+	}
+
+	if len(paymentKey) == 0 && len(stakingKey) == 0 {
+		return 0, nil
+	}
+
+	addrQuery := db.Model(&models.AddressTransaction{})
+	switch {
+	case len(paymentKey) > 0 && len(stakingKey) > 0:
+		addrQuery = addrQuery.Where(
+			"payment_key = ? AND staking_key = ?",
+			paymentKey,
+			stakingKey,
+		)
+	case len(paymentKey) > 0:
+		addrQuery = addrQuery.Where(
+			"payment_key = ? AND (staking_key IS NULL OR OCTET_LENGTH(staking_key) = 0)",
+			paymentKey,
+		)
+	default:
+		addrQuery = addrQuery.Where("staking_key = ?", stakingKey)
+	}
+
+	var count int64
+	result := addrQuery.Distinct("transaction_id").Count(&count)
+	if result.Error != nil {
+		return 0, fmt.Errorf(
+			"count txs by address: %w",
+			result.Error,
+		)
+	}
+	return int(count), nil
 }
 
 // GetAddressesByStakingKey returns distinct addresses mapped to a staking key.

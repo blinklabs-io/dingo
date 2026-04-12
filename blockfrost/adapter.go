@@ -33,6 +33,8 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 )
 
+var ErrInvalidAddress = errors.New("invalid address")
+
 // NodeAdapter wraps a real dingo Node's LedgerState to
 // implement the BlockfrostNode interface.
 type NodeAdapter struct {
@@ -542,4 +544,247 @@ func uintToInt(v uint) int {
 		return math.MaxInt
 	}
 	return int(v)
+}
+
+// AddressUTXOs returns paginated current UTxOs for the
+// requested address.
+func (a *NodeAdapter) AddressUTXOs(
+	address string,
+	params PaginationParams,
+) ([]AddressUTXOInfo, int, error) {
+	addr, err := lcommon.NewAddress(address)
+	if err != nil {
+		return nil, 0, fmt.Errorf(
+			"parse address %q: %w",
+			address,
+			ErrInvalidAddress,
+		)
+	}
+
+	utxos, err := a.ledgerState.UtxosByAddressWithOrdering(
+		&models.UtxoWithOrderingQuery{
+			Addresses: []lcommon.Address{addr},
+		},
+	)
+	if err != nil {
+		return nil, 0, fmt.Errorf(
+			"get address UTxOs for %q: %w",
+			address,
+			err,
+		)
+	}
+	total := len(utxos)
+	if params.Order == PaginationOrderDesc {
+		for left, right := 0, len(utxos)-1; left < right; left, right = left+1, right-1 {
+			utxos[left], utxos[right] = utxos[right], utxos[left]
+		}
+	}
+
+	paged := paginateUtxos(utxos, params)
+	txBlockHashes, err := a.addressUtxoBlockHashes(paged)
+	if err != nil {
+		return nil, 0, fmt.Errorf(
+			"get block hashes for address UTxOs %q: %w",
+			address,
+			err,
+		)
+	}
+
+	ret := make([]AddressUTXOInfo, 0, len(paged))
+	for _, utxo := range paged {
+		txKey := hex.EncodeToString(utxo.TxId)
+		ret = append(ret, AddressUTXOInfo{
+			Address:             address,
+			TxHash:              txKey,
+			OutputIndex:         utxo.OutputIdx,
+			Amount:              addressAmountsFromUtxo(utxo.Utxo),
+			Block:               txBlockHashes[txKey],
+			DataHash:            optionalHexString(utxo.DatumHash),
+			InlineDatum:         nil,
+			ReferenceScriptHash: nil,
+		})
+	}
+	return ret, total, nil
+}
+
+// AddressTransactions returns paginated transaction
+// history for the requested address.
+func (a *NodeAdapter) AddressTransactions(
+	address string,
+	params PaginationParams,
+) ([]AddressTransactionInfo, int, error) {
+	addr, err := lcommon.NewAddress(address)
+	if err != nil {
+		return nil, 0, fmt.Errorf(
+			"parse address %q: %w",
+			address,
+			ErrInvalidAddress,
+		)
+	}
+
+	total, err := a.ledgerState.CountTransactionsByAddress(addr)
+	if err != nil {
+		return nil, 0, fmt.Errorf(
+			"count address transactions for %q: %w",
+			address,
+			err,
+		)
+	}
+
+	txs, err := a.ledgerState.GetTransactionsByAddressWithOrder(
+		addr,
+		params.Count,
+		(params.Page-1)*params.Count,
+		params.Order,
+	)
+	if err != nil {
+		return nil, 0, fmt.Errorf(
+			"get address transactions for %q: %w",
+			address,
+			err,
+		)
+	}
+
+	blockNumbers := make(map[string]uint64, len(txs))
+	ret := make([]AddressTransactionInfo, 0, len(txs))
+	for _, tx := range txs {
+		blockHashKey := hex.EncodeToString(tx.BlockHash)
+		blockHeight, ok := blockNumbers[blockHashKey]
+		if !ok {
+			block, err := a.ledgerState.BlockByHash(tx.BlockHash)
+			if err != nil {
+				return nil, 0, fmt.Errorf(
+					"get block for transaction %x: %w",
+					tx.Hash,
+					err,
+				)
+			}
+			blockHeight = block.Number
+			blockNumbers[blockHashKey] = blockHeight
+		}
+
+		blockTime, err := a.transactionBlockTime(tx)
+		if err != nil {
+			return nil, 0, fmt.Errorf(
+				"get block time for transaction %x: %w",
+				tx.Hash,
+				err,
+			)
+		}
+		ret = append(ret, AddressTransactionInfo{
+			TxHash:      hex.EncodeToString(tx.Hash),
+			TxIndex:     tx.BlockIndex,
+			BlockHeight: blockHeight,
+			BlockTime:   blockTime,
+		})
+	}
+	return ret, total, nil
+}
+
+func (a *NodeAdapter) addressUtxoBlockHashes(
+	utxos []models.UtxoWithOrdering,
+) (map[string]string, error) {
+	ret := make(map[string]string, len(utxos))
+	if len(utxos) == 0 {
+		return ret, nil
+	}
+
+	hashes := make([][]byte, 0, len(utxos))
+	seen := make(map[string]struct{}, len(utxos))
+	for _, utxo := range utxos {
+		txKey := hex.EncodeToString(utxo.TxId)
+		if _, ok := seen[txKey]; ok {
+			continue
+		}
+		seen[txKey] = struct{}{}
+		hashes = append(hashes, utxo.TxId)
+	}
+
+	txs, err := a.ledgerState.GetTransactionsByHashes(hashes)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"get transactions for address UTxO block mapping: %w",
+			err,
+		)
+	}
+	for _, tx := range txs {
+		ret[hex.EncodeToString(tx.Hash)] = hex.EncodeToString(tx.BlockHash)
+	}
+	return ret, nil
+}
+
+func (a *NodeAdapter) transactionBlockTime(
+	tx models.Transaction,
+) (int64, error) {
+	blockTime, err := a.ledgerState.SlotToTime(tx.Slot)
+	if err != nil {
+		return 0, fmt.Errorf(
+			"convert slot %d to block time for transaction %x: %w",
+			tx.Slot,
+			tx.Hash,
+			err,
+		)
+	}
+	return blockTime.Unix(), nil
+}
+
+func addressAmountsFromUtxo(
+	utxo models.Utxo,
+) []AddressAmountInfo {
+	ret := make([]AddressAmountInfo, 0, len(utxo.Assets)+1)
+	ret = append(ret, AddressAmountInfo{
+		Unit:     "lovelace",
+		Quantity: strconv.FormatUint(uint64(utxo.Amount), 10),
+	})
+	for _, asset := range utxo.Assets {
+		ret = append(ret, AddressAmountInfo{
+			Unit: hex.EncodeToString(asset.PolicyId) +
+				hex.EncodeToString(asset.Name),
+			Quantity: strconv.FormatUint(
+				uint64(asset.Amount),
+				10,
+			),
+		})
+	}
+	return ret
+}
+
+func optionalHexString(data []byte) *string {
+	if len(data) == 0 {
+		return nil
+	}
+	ret := hex.EncodeToString(data)
+	return &ret
+}
+
+func paginateUtxos(
+	utxos []models.UtxoWithOrdering,
+	params PaginationParams,
+) []models.UtxoWithOrdering {
+	start, end := paginationRange(len(utxos), params)
+	if start >= end {
+		return []models.UtxoWithOrdering{}
+	}
+	return utxos[start:end]
+}
+
+func paginationRange(
+	total int,
+	params PaginationParams,
+) (int, int) {
+	if total <= 0 || params.Count <= 0 || params.Page <= 0 {
+		return total, total
+	}
+	if params.Page-1 > (math.MaxInt / params.Count) {
+		return total, total
+	}
+	start := (params.Page - 1) * params.Count
+	if start >= total {
+		return total, total
+	}
+	end := start + params.Count
+	if end > total {
+		end = total
+	}
+	return start, end
 }
