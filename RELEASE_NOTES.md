@@ -11,28 +11,32 @@
 
 Hi folks! Here’s what we shipped in v0.33.0.
 
-### Draft (auto-generated)
+### ✨ What's New
 
-```json
-{
-  "✨ What's New": [
-    "You can now query address UTxOs and transactions using Blockfrost-compatible endpoints, which makes it easier to plug Dingo into existing tooling and integrations.",
-    "You can now fetch protocol parameters for a specific epoch, which improves compatibility with clients that need historical or epoch-bound chain configuration."
-  ],
-  "💪 Improvements": [
-    "Node observability is improved so you can monitor memory and garbage-collection behavior more easily in production.",
-    "The codebase is easier to navigate and maintain without changing how the node behaves.",
-    "Project setup and maintenance is simpler with clearer build and lint entry points.",
-    "Documentation and licensing are clearer so it’s easier to understand and use the core packages correctly.",
-    "Keeping the build and release pipeline current reduces friction when consuming the project in modern environments.",
-    "Default configuration is more usable out of the box so you spend less time on initial setup."
-  ],
-  "🔧 Fixes": [
-    "The node is less likely to destabilize a stalled sync by making an overly aggressive peer rotation decision."
-  ]
-}
+- **Blockfrost-compatible address UTxO and transaction queries:** Integrations are easier because you can now query address UTxOs and transactions via Blockfrost-compatible endpoints.
+- **Epoch-specific protocol parameters:** Client compatibility is better because you can now fetch protocol parameters for a specific epoch.
 
-```
+### 💪 Improvements
+
+- **Prometheus Go runtime GC metrics:** Production monitoring is easier because the node now exports GC and memory Prometheus gauges from Go runtime stats.
+- **Node internals refactor (chainsync, forging, shutdown):** Maintenance is smoother because key node lifecycle logic was split into dedicated files without changing behavior.
+- **Makefile help and lint targets:** Project setup is simpler because the Makefile now documents targets and includes `help` and `lint`.
+- **Expanded package docs and Apache 2.0 headers:** Core packages are easier to use because more packages now include license headers and package-level documentation.
+- **Dependency and workflow refresh:** Upgrades are smoother because Go modules, the txtop Docker image, and GitHub Actions workflow actions were updated.
+- **Improved example config defaults:** First-time setup is simpler because `dingo.yaml.example` now includes a default `databasePath`.
+
+### 🔧 Fixes
+
+- **Safer single-peer stall handling:** Sync recovery is more rock-solid because the chainsync recycler no longer recycles the only eligible peer during a stall.
+
+### 📋 What You Need to Know
+
+- **API nodes:** To use the Blockfrost-compatible address endpoints, run with `storageMode: "api"` and enable the Blockfrost server port (`DINGO_BLOCKFROST_PORT` / `blockfrostPort`).
+- **Config copies:** If you maintain a copy of `dingo.yaml.example`, pull in the new `databasePath` default.
+
+### 🙏 Thank You
+
+Thank you for trying!
 
 ---
 
