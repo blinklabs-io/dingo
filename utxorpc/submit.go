@@ -682,11 +682,13 @@ func (u *Utxorpc) lookupSpentOutput(
 		in.Index(),
 	)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf(
+			"UtxoByRef(%x, %d): %w", in.Id().Bytes(), in.Index(), err,
+		)
 	}
 	out, err := rec.Decode()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("decode: %w", err)
 	}
 	if out == nil {
 		return nil, errors.New("decoded utxo is nil")
