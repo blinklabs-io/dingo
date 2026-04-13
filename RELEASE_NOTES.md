@@ -1,6 +1,39 @@
 # Release Notes
 
 
+## v0.33.0 (April 13, 2026)
+
+**Title:** Release updates
+
+**Date:** April 13, 2026
+
+**Version:** v0.33.0
+
+Hi folks! Here’s what we shipped in v0.33.0.
+
+```json
+{
+  "✨ What's New": [
+    "You can now query address UTxOs and transactions through Blockfrost-compatible endpoints, making it easier to plug Dingo into existing tooling. This adds new address UTxO and transaction HTTP APIs backed by new ledger/database helper layers, including pagination, error mapping, and coverage via unit/integration tests.",
+    "You can now request protocol parameters for a specific epoch so clients can fetch the exact settings they need for historical or upcoming validation. This adds epoch-scoped protocol-params retrieval and an HTTP endpoint, introduces supporting error types, and fixes protocol-params CBOR encoding/decoding to ensure round-trip correctness."
+  ],
+  "💪 Improvements": [
+    "The node’s codebase is now easier to navigate and maintain, with clearer separation of responsibilities. The chainsync recycler, forging, and shutdown logic were split out of node.go into node_chainsync_recycler.go, node_forging.go, and node_shutdown.go while preserving behavior.",
+    "Build and contributor workflows are easier to discover and run consistently. The Makefile now includes a help and lint target, and existing targets are documented with inline descriptions.",
+    "The project’s dependencies and CI tooling are up to date to improve compatibility and reduce maintenance friction. This updates Go module dependencies (including golang.org/x), bumps actions/github-script to v9.0.0, updates docker/build-push-action to v7.1.0, and upgrades the txtop Docker image to 0.15.0.",
+    "Project files and package docs are clearer and more complete for developers and downstream users. This adds Apache 2.0 license headers plus detailed package-level documentation for core Dingo node packages, and documents the ledger rules conformance test suite under internal/test/conformance.",
+    "Default configuration is easier to start from without extra manual setup. The dingo.yaml.example file now includes a default databasePath setting that matches the expected on-disk layout."
+  ],
+  "🔧 Fixes": [
+    "Chainsync recycling is now less likely to disrupt a small network by dropping your only workable connection. The recycler now guards against recycling the only eligible peer, and tests were extended to cover both multi-peer and single-peer stall scenarios."
+  ]
+}
+
+```
+
+---
+
+
 ## v0.32.3 (April 10, 2026)
 
 **Title:** Certificate-aware transaction matching
