@@ -1,6 +1,42 @@
 # Release Notes
 
 
+## v0.33.0 (April 13, 2026)
+
+**Title:** Feature and reliability updates
+
+**Date:** April 13, 2026
+
+**Version:** v0.33.0
+
+Hi folks! Here’s what we shipped in v0.33.0.
+
+### Draft (auto-generated)
+
+```json
+{
+  "✨ What's New": [
+    "You can now query address UTxOs and transactions using Blockfrost-compatible endpoints, which makes it easier to plug Dingo into existing tooling and integrations. The node adds new address UTxO and transaction API handlers backed by new ledger/database helper layers, with pagination, consistent error handling, and test coverage.",
+    "You can now fetch protocol parameters for a specific epoch, which improves compatibility with clients that need historical or epoch-bound chain configuration. This adds epoch-specific protocol-params retrieval and an HTTP endpoint, introduces supporting error types, and corrects protocol-params CBOR encoding/decoding."
+  ],
+  "💪 Improvements": [
+    "Node observability is improved so you can monitor memory and garbage-collection behavior more easily in production. The node exports RTS-style Prometheus GC gauges sourced from Go runtime stats and refreshes them periodically from a background goroutine, with tests covering the mapping and updater lifecycle.",
+    "The codebase is easier to navigate and maintain without changing how the node behaves. Chainsync recycler, forging, and shutdown logic were split out of node.go into dedicated files (node_chainsync_recycler.go, node_forging.go, and node_shutdown.go) while keeping functionality equivalent.",
+    "Project setup and maintenance is simpler with clearer build and lint entry points. The Makefile now includes a help and lint target and documents existing targets with inline descriptions.",
+    "Documentation and licensing are clearer so it’s easier to understand and use the core packages correctly. The repository adds Apache 2.0 headers and expanded package-level documentation for core Dingo node packages, and it includes documentation for the ledger rules conformance test suite under internal/test/conformance.",
+    "Keeping the build and release pipeline current reduces friction when consuming the project in modern environments. Go module dependencies, golang.org/x libraries, the txtop Docker image, and GitHub Actions workflow actions were updated to newer versions (including actions/github-script v9 and docker/build-push-action v7.1.0).",
+    "Default configuration is more usable out of the box so you spend less time on initial setup. The example dingo.yaml now includes a default databasePath setting."
+  ],
+  "🔧 Fixes": [
+    "The node is less likely to destabilize a stalled sync by making an overly aggressive peer rotation decision. The chainsync recycler now avoids recycling the only eligible peer and includes expanded tests for both multi-peer and single-peer stall scenarios."
+  ]
+}
+
+```
+
+---
+
+
 ## v0.32.3 (April 10, 2026)
 
 **Title:** Certificate-aware transaction matching
