@@ -916,7 +916,7 @@ func TestMatchesTxPattern_HasCertificateEmptyStakeDelegationWrongCertType(t *tes
 	var ch common.CredentialHash
 	copy(ch[:], h)
 	regCert := &common.StakeRegistrationCertificate{
-		CertType:        uint(common.CertificateTypeStakeRegistration),
+		CertType: uint(common.CertificateTypeStakeRegistration),
 		StakeCredential: common.Credential{
 			CredType:   common.CredentialTypeAddrKeyHash,
 			Credential: ch,
@@ -940,7 +940,7 @@ func TestMatchesTxPattern_HasCertificateEmptyStakeRegistrationTypeOnly(t *testin
 	var ch common.CredentialHash
 	copy(ch[:], h)
 	regCert := &common.StakeRegistrationCertificate{
-		CertType:        uint(common.CertificateTypeStakeRegistration),
+		CertType: uint(common.CertificateTypeStakeRegistration),
 		StakeCredential: common.Credential{
 			CredType:   common.CredentialTypeAddrKeyHash,
 			Credential: ch,

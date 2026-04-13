@@ -15,10 +15,49 @@
 package models
 
 import (
+	"errors"
+
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
+
+// Sentinel errors for UtxoWithOrderingQuery validation.
+var (
+	ErrNilUtxoWithOrderingQuery = errors.New(
+		"nil UtxoWithOrderingQuery",
+	)
+	ErrEmptyAssetPolicyID = errors.New("empty asset policy id")
+)
+
+// AppendUtxoAddressOrBranch appends an OR branch for the given address
+// to the ors/args slices. It uses standard "?" placeholders that work
+// across SQLite, MySQL, and Postgres via GORM.
+func AppendUtxoAddressOrBranch(
+	ors *[]string,
+	args *[]any,
+	addr ledger.Address,
+) {
+	zeroHash := lcommon.NewBlake2b224(nil)
+	pk := addr.PaymentKeyHash()
+	sk := addr.StakeKeyHash()
+	hasPayment := pk != zeroHash
+	hasStake := sk != zeroHash
+	switch {
+	case hasPayment && hasStake:
+		*ors = append(
+			*ors,
+			"(utxo.payment_key = ? AND utxo.staking_key = ?)",
+		)
+		*args = append(*args, pk.Bytes(), sk.Bytes())
+	case hasPayment:
+		*ors = append(*ors, "(utxo.payment_key = ?)")
+		*args = append(*args, pk.Bytes())
+	case hasStake:
+		*ors = append(*ors, "(utxo.staking_key = ?)")
+		*args = append(*args, sk.Bytes())
+	}
+}
 
 // Utxo represents an unspent transaction output
 type Utxo struct {

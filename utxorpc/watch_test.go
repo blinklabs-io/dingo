@@ -20,8 +20,8 @@ import (
 	"github.com/blinklabs-io/dingo/database/immutable"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
-	watch "github.com/utxorpc/go-codegen/utxorpc/v1alpha/watch"
 	"github.com/stretchr/testify/require"
+	watch "github.com/utxorpc/go-codegen/utxorpc/v1alpha/watch"
 )
 
 func TestWatchTxBuildRollbackMessages_EmitsUndoWhenPointNotFound(t *testing.T) {

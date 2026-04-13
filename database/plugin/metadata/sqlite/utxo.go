@@ -236,35 +236,16 @@ func (d *MetadataStoreSqlite) GetUtxosByAddress(
 	return ret, nil
 }
 
-func appendUtxoAddressOrBranch(ors *[]string, args *[]any, addr ledger.Address) {
-	zeroHash := lcommon.NewBlake2b224(nil)
-	pk := addr.PaymentKeyHash()
-	sk := addr.StakeKeyHash()
-	hasPayment := pk != zeroHash
-	hasStake := sk != zeroHash
-	switch {
-	case hasPayment && hasStake:
-		*ors = append(
-			*ors,
-			"(utxo.payment_key = ? AND utxo.staking_key = ?)",
-		)
-		*args = append(*args, pk.Bytes(), sk.Bytes())
-	case hasPayment:
-		*ors = append(*ors, "(utxo.payment_key = ?)")
-		*args = append(*args, pk.Bytes())
-	case hasStake:
-		*ors = append(*ors, "(utxo.staking_key = ?)")
-		*args = append(*args, sk.Bytes())
-	}
-}
-
 // GetUtxosByAddressWithOrdering returns UTxOs matching q (OR of addresses, optional asset).
 func (d *MetadataStoreSqlite) GetUtxosByAddressWithOrdering(
 	q *models.UtxoWithOrderingQuery,
 	txn types.Txn,
 ) ([]models.UtxoWithOrdering, error) {
 	if q == nil {
-		return nil, errors.New("nil UtxoWithOrderingQuery")
+		return nil, fmt.Errorf(
+			"GetUtxosByAddressWithOrdering: %w",
+			models.ErrNilUtxoWithOrderingQuery,
+		)
 	}
 	var ret []models.UtxoWithOrdering
 	db, err := d.resolveReadDB(txn)
@@ -286,7 +267,7 @@ func (d *MetadataStoreSqlite) GetUtxosByAddressWithOrdering(
 		var ors []string
 		var args []any
 		for i := range addrs {
-			appendUtxoAddressOrBranch(&ors, &args, addrs[i])
+			models.AppendUtxoAddressOrBranch(&ors, &args, addrs[i])
 		}
 		if len(ors) == 0 {
 			base = base.Where("1 = 0")
@@ -297,7 +278,10 @@ func (d *MetadataStoreSqlite) GetUtxosByAddressWithOrdering(
 
 	if q.FilterByAsset {
 		if len(q.AssetPolicyID) == 0 {
-			return nil, errors.New("asset filter requires non-empty policy id")
+			return nil, fmt.Errorf(
+				"GetUtxosByAddressWithOrdering: asset filter requires non-empty policy id: %w",
+				models.ErrEmptyAssetPolicyID,
+			)
 		}
 		assetSub := db.Table("asset").Select("utxo_id").Where(
 			"policy_id = ?",
