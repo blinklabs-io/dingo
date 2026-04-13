@@ -31,6 +31,7 @@ Hi folks! Here’s what we shipped in v0.33.0.
 
 ### 📋 What You Need to Know
 
+- **No action required:** You're all set—just upgrade to v0.33.0.
 - **API nodes:** To use the Blockfrost-compatible address endpoints, run with `storageMode: "api"` and enable the Blockfrost server port (`DINGO_BLOCKFROST_PORT` / `blockfrostPort`).
 - **Config copies:** If you maintain a copy of `dingo.yaml.example`, pull in the new `databasePath` default.
 
