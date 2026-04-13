@@ -87,6 +87,10 @@ func (b *Blockfrost) Start(
 		b.handleLatestEpochParams,
 	)
 	mux.HandleFunc(
+		"GET /api/v0/epochs/{number}/parameters",
+		b.handleEpochParams,
+	)
+	mux.HandleFunc(
 		"GET /api/v0/network",
 		b.handleNetwork,
 	)

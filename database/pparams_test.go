@@ -181,6 +181,21 @@ func TestComputeAndApplyPParamUpdates_QuorumMet(
 		updateApplied,
 		"update should be applied when quorum is met",
 	)
+
+	stored, err := db.GetPParams(
+		4,
+		func(data []byte) (lcommon.ProtocolParameters, error) {
+			var params shelley.ShelleyProtocolParameters
+			_, err := cbor.Decode(data, &params)
+			if err != nil {
+				return nil, err
+			}
+			return &params, nil
+		},
+		txn,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, stored)
 }
 
 func TestComputeAndApplyPParamUpdates_FiltersEpoch(

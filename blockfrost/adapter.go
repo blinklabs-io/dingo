@@ -24,6 +24,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/ledger"
+	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
@@ -33,7 +34,10 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 )
 
-var ErrInvalidAddress = errors.New("invalid address")
+var (
+	ErrInvalidAddress = errors.New("invalid address")
+	ErrEpochNotFound  = errors.New("epoch not found")
+)
 
 // NodeAdapter wraps a real dingo Node's LedgerState to
 // implement the BlockfrostNode interface.
@@ -241,6 +245,70 @@ func (a *NodeAdapter) CurrentProtocolParams() (
 	if err != nil {
 		return ProtocolParamsInfo{}, fmt.Errorf(
 			"convert current protocol parameters: %w",
+			err,
+		)
+	}
+	return info, nil
+}
+
+// EpochProtocolParams returns protocol parameters for the
+// requested epoch.
+func (a *NodeAdapter) EpochProtocolParams(
+	epoch uint64,
+) (ProtocolParamsInfo, error) {
+	pparamRows, err := a.ledgerState.Database().Metadata().GetPParams(
+		epoch,
+		nil,
+	)
+	if err != nil {
+		return ProtocolParamsInfo{}, fmt.Errorf(
+			"get protocol parameters for epoch %d: %w",
+			epoch,
+			err,
+		)
+	}
+	if len(pparamRows) == 0 {
+		return ProtocolParamsInfo{}, fmt.Errorf(
+			"get protocol parameters for epoch %d: %w",
+			epoch,
+			ErrEpochNotFound,
+		)
+	}
+	pparamRow := pparamRows[0]
+	era := eras.GetEraById(pparamRow.EraId)
+	if era == nil {
+		return ProtocolParamsInfo{}, fmt.Errorf(
+			"get protocol parameters for epoch %d: unknown era ID %d",
+			epoch,
+			pparamRow.EraId,
+		)
+	}
+	pparams, err := era.DecodePParamsFunc(
+		pparamRow.Cbor,
+	)
+	if err != nil {
+		return ProtocolParamsInfo{}, fmt.Errorf(
+			"decode protocol parameters for epoch %d from row epoch %d: %w",
+			epoch,
+			pparamRow.Epoch,
+			err,
+		)
+	}
+	if pparams == nil {
+		return ProtocolParamsInfo{}, fmt.Errorf(
+			"get protocol parameters for epoch %d: %w",
+			epoch,
+			ErrEpochNotFound,
+		)
+	}
+	info, err := protocolParamsInfoFromNative(
+		pparams,
+		epoch,
+	)
+	if err != nil {
+		return ProtocolParamsInfo{}, fmt.Errorf(
+			"convert protocol parameters for epoch %d: %w",
+			epoch,
 			err,
 		)
 	}

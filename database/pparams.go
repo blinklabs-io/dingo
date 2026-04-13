@@ -154,7 +154,7 @@ func (d *Database) ApplyPParamUpdates(
 		"pparams", fmt.Sprintf("%#v", currentPParams),
 	)
 	// Write pparams update to DB
-	pparamsCbor, err := cbor.Encode(&currentPParams)
+	pparamsCbor, err := cbor.Encode(*currentPParams)
 	if err != nil {
 		return fmt.Errorf("encode updated pparams: %w", err)
 	}
@@ -262,7 +262,7 @@ func (d *Database) ComputeAndApplyPParamUpdates(
 		"pparams", fmt.Sprintf("%#v", newPParams),
 	)
 	// Write pparams update to DB
-	pparamsCbor, err := cbor.Encode(&newPParams)
+	pparamsCbor, err := cbor.Encode(newPParams)
 	if err != nil {
 		return nil, fmt.Errorf("encode updated pparams: %w", err)
 	}
