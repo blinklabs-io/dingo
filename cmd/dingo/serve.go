@@ -73,6 +73,7 @@ func checkSyncState(
 		RunMode:        string(cfg.RunMode),
 		MetadataPlugin: cfg.MetadataPlugin,
 		MaxConnections: 1,
+		StorageMode:    cfg.StorageMode,
 	})
 	if err != nil {
 		return fmt.Errorf("opening database: %w", err)

@@ -607,6 +607,30 @@ func (d *Database) GetTransactionsByMetadataLabel(
 	return txs, nil
 }
 
+// CountTransactionsByMetadataLabel returns the total number of transactions
+// that include metadata for a given label key.
+func (d *Database) CountTransactionsByMetadataLabel(
+	label uint64,
+	txn *Txn,
+) (int, error) {
+	if txn == nil {
+		txn = d.Transaction(false)
+		defer txn.Release()
+	}
+	count, err := d.metadata.CountTransactionsByMetadataLabel(
+		label,
+		txn.Metadata(),
+	)
+	if err != nil {
+		return 0, fmt.Errorf(
+			"count txs by metadata label %d: %w",
+			label,
+			err,
+		)
+	}
+	return count, nil
+}
+
 // DeleteTransactionMetadataLabelsAfterSlot removes transaction metadata
 // label index records added after the given slot.
 func (d *Database) DeleteTransactionMetadataLabelsAfterSlot(

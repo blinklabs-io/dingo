@@ -14,6 +14,8 @@
 
 package blockfrost
 
+import "encoding/json"
+
 // RootResponse is returned by GET /.
 type RootResponse struct {
 	URL     string `json:"url"`
@@ -176,4 +178,19 @@ type PoolExtendedResponse struct {
 	FixedCost      string              `json:"fixed_cost"`
 	MarginCost     float64             `json:"margin_cost"`
 	Relays         []PoolRelayResponse `json:"relays"`
+}
+
+// MetadataTransactionJSONResponse represents a Blockfrost
+// metadata label transaction item with JSON content.
+type MetadataTransactionJSONResponse struct {
+	TxHash       string          `json:"tx_hash"`
+	JSONMetadata json.RawMessage `json:"json_metadata"`
+}
+
+// MetadataTransactionCBORResponse represents a Blockfrost
+// metadata label transaction item with CBOR content.
+type MetadataTransactionCBORResponse struct {
+	TxHash       string  `json:"tx_hash"`
+	CborMetadata *string `json:"cbor_metadata"`
+	Metadata     string  `json:"metadata"`
 }

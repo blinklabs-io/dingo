@@ -23,6 +23,7 @@ import (
 	"strconv"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata/labelcodec"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
@@ -676,6 +677,108 @@ func (a *NodeAdapter) AddressTransactions(
 			TxIndex:     tx.BlockIndex,
 			BlockHeight: blockHeight,
 			BlockTime:   blockTime,
+		})
+	}
+	return ret, total, nil
+}
+
+// MetadataTransactions returns paginated transaction metadata values for the
+// requested label in JSON form.
+func (a *NodeAdapter) MetadataTransactions(
+	label uint64,
+	params PaginationParams,
+) ([]MetadataTransactionJSONInfo, int, error) {
+	db := a.ledgerState.Database()
+
+	total, err := db.CountTransactionsByMetadataLabel(label, nil)
+	if err != nil {
+		return nil, 0, fmt.Errorf(
+			"count transactions by metadata label %d: %w",
+			label,
+			err,
+		)
+	}
+
+	txs, err := db.GetTransactionsByMetadataLabel(
+		label,
+		params.Count,
+		(params.Page-1)*params.Count,
+		params.Order == PaginationOrderDesc,
+		nil,
+	)
+	if err != nil {
+		return nil, 0, fmt.Errorf(
+			"get transactions by metadata label %d: %w",
+			label,
+			err,
+		)
+	}
+
+	ret := make([]MetadataTransactionJSONInfo, 0, len(txs))
+	for _, tx := range txs {
+		jsonValue, _, err := labelcodec.RawValues(tx.Metadata, label)
+		if err != nil {
+			return nil, 0, fmt.Errorf(
+				"extract json metadata label %d from tx %x: %w",
+				label,
+				tx.Hash,
+				err,
+			)
+		}
+		ret = append(ret, MetadataTransactionJSONInfo{
+			TxHash:       hex.EncodeToString(tx.Hash),
+			JSONMetadata: jsonValue,
+		})
+	}
+	return ret, total, nil
+}
+
+// MetadataTransactionsCBOR returns paginated transaction metadata values for
+// the requested label in CBOR-hex form.
+func (a *NodeAdapter) MetadataTransactionsCBOR(
+	label uint64,
+	params PaginationParams,
+) ([]MetadataTransactionCBORInfo, int, error) {
+	db := a.ledgerState.Database()
+
+	total, err := db.CountTransactionsByMetadataLabel(label, nil)
+	if err != nil {
+		return nil, 0, fmt.Errorf(
+			"count transactions by metadata label %d: %w",
+			label,
+			err,
+		)
+	}
+
+	txs, err := db.GetTransactionsByMetadataLabel(
+		label,
+		params.Count,
+		(params.Page-1)*params.Count,
+		params.Order == PaginationOrderDesc,
+		nil,
+	)
+	if err != nil {
+		return nil, 0, fmt.Errorf(
+			"get transactions by metadata label %d: %w",
+			label,
+			err,
+		)
+	}
+
+	ret := make([]MetadataTransactionCBORInfo, 0, len(txs))
+	for _, tx := range txs {
+		_, cborValue, err := labelcodec.RawValues(tx.Metadata, label)
+		if err != nil {
+			return nil, 0, fmt.Errorf(
+				"extract cbor metadata label %d from tx %x: %w",
+				label,
+				tx.Hash,
+				err,
+			)
+		}
+		ret = append(ret, MetadataTransactionCBORInfo{
+			TxHash:   hex.EncodeToString(tx.Hash),
+			Metadata: hex.EncodeToString(cborValue),
 		})
 	}
 	return ret, total, nil

@@ -31,7 +31,7 @@ type Entry struct {
 	JsonValue string
 }
 
-// Returns full metadata CBOR and per-label entries
+// EncodeAndExtract returns full metadata CBOR and per-label entries.
 func EncodeAndExtract(
 	txMetadata lcommon.TransactionMetadatum,
 ) ([]byte, []Entry, error) {
@@ -53,6 +53,33 @@ func EncodeAndExtract(
 		}
 	}
 	return metadataCbor, labels, nil
+}
+
+// RawValues returns the JSON and CBOR representation for a single metadata
+// label from encoded transaction metadata.
+func RawValues(
+	metadataCbor []byte,
+	label uint64,
+) (json.RawMessage, []byte, error) {
+	if len(metadataCbor) == 0 {
+		return nil, nil, errors.New("transaction has no metadata")
+	}
+
+	rawByLabel, err := decodeMetadataLabelMap(metadataCbor)
+	if err != nil {
+		return nil, nil, err
+	}
+	rawValue, ok := rawByLabel[label]
+	if !ok {
+		return nil, nil, fmt.Errorf("metadata label %d not found", label)
+	}
+
+	jsonValue, err := metadatumRawToJSON(rawValue)
+	if err != nil {
+		return nil, nil, fmt.Errorf("decode metadata label %d JSON: %w", label, err)
+	}
+
+	return json.RawMessage(jsonValue), append([]byte(nil), rawValue...), nil
 }
 
 func extractFromCbor(
@@ -87,7 +114,7 @@ func extractFromCbor(
 	return ret, nil
 }
 
-// Decode CBOR map keys as uint64 or int64 labels.
+// decodeMetadataLabelMap decodes CBOR map keys as uint64 or int64 labels.
 func decodeMetadataLabelMap(
 	metadataCbor []byte,
 ) (map[uint64]cbor.RawMessage, error) {
@@ -177,7 +204,7 @@ func extractFromMetadatum(
 	return ret, nil
 }
 
-// Convert to JSON safe (int/text/bytes/list/map)
+// Convert to JSON-safe values (int/text/bytes/list/map).
 func metadatumToJSONValue(md lcommon.TransactionMetadatum) (any, error) {
 	switch m := md.(type) {
 	case lcommon.MetaInt:

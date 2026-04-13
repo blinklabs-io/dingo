@@ -4160,6 +4160,22 @@ func (ls *LedgerState) CountTransactionsByAddress(
 	return count, nil
 }
 
+// CountTransactionsByMetadataLabel returns the total number of transactions
+// that include metadata for the requested label.
+func (ls *LedgerState) CountTransactionsByMetadataLabel(
+	label uint64,
+) (int, error) {
+	count, err := ls.db.CountTransactionsByMetadataLabel(label, nil)
+	if err != nil {
+		return 0, fmt.Errorf(
+			"count transactions by metadata label %d: %w",
+			label,
+			err,
+		)
+	}
+	return count, nil
+}
+
 // CountTransactionsInSlotRange returns the number of transactions whose slot
 // falls within the inclusive range [startSlot, endSlot].
 // Used by the Blockfrost adapter CurrentEpoch() path so epoch responses can

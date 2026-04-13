@@ -309,6 +309,13 @@ type MetadataStore interface {
 		types.Txn,
 	) ([]models.Transaction, error)
 
+	// CountTransactionsByMetadataLabel returns the total number of
+	// transactions that include metadata for the given label.
+	CountTransactionsByMetadataLabel(
+		uint64, // label
+		types.Txn,
+	) (int, error)
+
 	// GetScript retrieves a script by its hash.
 	GetScript(
 		lcommon.ScriptHash,
