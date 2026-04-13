@@ -1,6 +1,44 @@
 # Release Notes
 
 
+## v0.33.0 (April 13, 2026)
+
+**Title:** Blockfrost-compatible address endpoints
+
+**Date:** April 13, 2026
+
+**Version:** v0.33.0
+
+Hi folks! Here’s what we shipped in v0.33.0.
+
+### ✨ What's New
+
+- **Blockfrost-compatible address endpoints:** Plugging Dingo into existing Blockfrost-based tooling is easier because you can now query address UTxOs and transactions via Blockfrost-compatible HTTP endpoints.
+- **Epoch-scoped protocol parameters:** Clients can fetch the exact settings they need for historical or upcoming validation because protocol parameters can now be requested for a specific epoch.
+
+### 💪 Improvements
+
+- **Node internals split into focused files:** The codebase is easier to navigate because chainsync recycling, forging, and shutdown logic moved out of `node.go` into dedicated files.
+- **Makefile help and lint targets:** Build and contributor workflows are easier to run consistently because the Makefile now includes `help` and `lint` targets with inline target descriptions.
+- **Dependency and CI refresh:** Compatibility stays smoother because Go module dependencies (including `golang.org/x`), key CI actions, and the txtop Docker image were updated.
+- **Clearer package docs and licensing:** Development is simpler because core packages now include Apache 2.0 headers, richer package docs, and conformance test suite docs under `internal/test/conformance`.
+- **More complete `dingo.yaml.example`:** Getting started is easier because the example config now includes a default `databasePath` that matches the expected on-disk layout.
+
+### 🔧 Fixes
+
+- **Safer chainsync recycling on small topologies:** Small networks are less likely to lose their only workable connection because the recycler now avoids recycling the only eligible peer.
+
+### 📋 What You Need to Know
+
+- **No action required:** You're all set—just upgrade to v0.33.0.
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
+
 ## v0.32.3 (April 10, 2026)
 
 **Title:** Certificate-aware transaction matching
