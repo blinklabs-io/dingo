@@ -479,10 +479,7 @@ func (b *Blockfrost) handleMetadataTransactions(
 	SetPaginationHeaders(w, total, params)
 	resp := make([]MetadataTransactionJSONResponse, 0, len(rows))
 	for _, row := range rows {
-		resp = append(resp, MetadataTransactionJSONResponse{
-			TxHash:       row.TxHash,
-			JSONMetadata: row.JSONMetadata,
-		})
+		resp = append(resp, MetadataTransactionJSONResponse(row))
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
