@@ -3,7 +3,7 @@
 
 ## v0.33.0 (April 13, 2026)
 
-**Title:** Blockfrost-compatible address APIs
+**Title:** Blockfrost-compatible address endpoints
 
 **Date:** April 13, 2026
 
