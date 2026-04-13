@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os"
 	"runtime"
 	"time"
 
@@ -69,6 +70,30 @@ func (c *ConnectionManager) startListener(
 			}
 			l.Listener = listener
 		} else {
+			// For Unix domain sockets, remove any stale socket file before binding
+			if l.ListenNetwork == "unix" {
+				if fi, err := os.Lstat(l.ListenAddress); err == nil {
+					if fi.Mode()&os.ModeSocket == 0 {
+						return fmt.Errorf(
+							"listen address %s exists and is not a unix socket",
+							l.ListenAddress,
+						)
+					}
+					if err := os.Remove(l.ListenAddress); err != nil {
+						return fmt.Errorf(
+							"failed to remove existing socket file %s: %w",
+							l.ListenAddress,
+							err,
+						)
+					}
+				} else if !errors.Is(err, os.ErrNotExist) {
+					return fmt.Errorf(
+						"failed to check socket file %s: %w",
+						l.ListenAddress,
+						err,
+					)
+				}
+			}
 			listenConfig := net.ListenConfig{}
 			if l.ReuseAddress {
 				listenConfig.Control = socketControl
