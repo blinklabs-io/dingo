@@ -20,7 +20,7 @@ Hi folks! Here’s what we shipped in v0.33.0.
 
 - **Node internals split into focused files:** The codebase is easier to navigate because chainsync recycling, forging, and shutdown logic moved out of `node.go` into dedicated files.
 - **Makefile help and lint targets:** Build and contributor workflows are easier to run consistently because the Makefile now includes `help` and `lint` targets with inline target descriptions.
-- **Dependency and CI refresh:** Compatibility stays smoother because Go module dependencies (including `golang.org/x`), key CI actions, and the txtop Docker image were updated.
+- **Dependency and CI refresh:** Compatibility stays sleek because Go module dependencies (including `golang.org/x`), key CI actions, and the txtop Docker image were updated.
 - **Clearer package docs and licensing:** Development is simpler because core packages now include Apache 2.0 headers, richer package docs, and conformance test-suite docs under `internal/test/conformance`.
 - **More complete `dingo.yaml.example`:** Getting started is easier because the example config now includes a default `databasePath` that matches the expected on-disk layout.
 
