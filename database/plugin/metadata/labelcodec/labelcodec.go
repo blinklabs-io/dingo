@@ -31,7 +31,7 @@ type Entry struct {
 	JsonValue string
 }
 
-// EncodeAndExtract returns full metadata CBOR and per-label entries.
+// Returns full metadata CBOR and per-label entries.
 func EncodeAndExtract(
 	txMetadata lcommon.TransactionMetadatum,
 ) ([]byte, []Entry, error) {
@@ -114,7 +114,7 @@ func extractFromCbor(
 	return ret, nil
 }
 
-// decodeMetadataLabelMap decodes CBOR map keys as uint64 or int64 labels.
+// Decode CBOR map keys as uint64 or int64 labels.
 func decodeMetadataLabelMap(
 	metadataCbor []byte,
 ) (map[uint64]cbor.RawMessage, error) {
@@ -204,7 +204,7 @@ func extractFromMetadatum(
 	return ret, nil
 }
 
-// Convert to JSON-safe values (int/text/bytes/list/map).
+// Convert to JSON safe (int/text/bytes/list/map).
 func metadatumToJSONValue(md lcommon.TransactionMetadatum) (any, error) {
 	switch m := md.(type) {
 	case lcommon.MetaInt:
