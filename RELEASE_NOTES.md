@@ -11,24 +11,29 @@
 
 Hi folks! Here’s what we shipped in v0.34.0.
 
-```json
-{
-  "✨ What's New": [
-    "You can now list transactions by metadata label using Blockfrost-compatible endpoints, with results available alongside their metadata payloads."
-  ],
-  "💪 Improvements": [
-    "Dependency updates were applied to keep cloud integrations and networking libraries current and compatible.",
-    "Ledger validation handling is now more consistent and avoids repeatedly re-processing the same failing transaction.",
-    "Unix-domain socket startup behavior is safer and more resilient when stale sockets are present.",
-    "SQL plugin error handling is now more standardized to make failures easier to interpret across implementations.",
-    "CI workflow configuration was adjusted to better reflect the intended behavior of the Antithesis GitHub Actions runs."
-  ],
-  "🔧 Fixes": [
-    "Error messages returned during UTxO RPC submission now include more context to speed up troubleshooting."
-  ]
-}
+### ✨ What's New
 
-```
+- **Blockfrost-compatible metadata label listing:** Finding transactions tied to a specific metadata label is easier because you can now list them via Blockfrost-compatible endpoints and get the metadata payloads back.
+
+### 💪 Improvements
+
+- **Dependency updates:** Compatibility stays smoother because cloud integrations and networking libraries were refreshed.
+- **More consistent ledger validation handling:** Mempool and ledger processing are more rock-solid because validation avoids repeatedly re-processing the same failing transaction.
+- **Safer Unix-domain socket startup:** Local deployments are more reliable because startup now handles stale Unix sockets more safely.
+- **Standardized SQL plugin errors:** Troubleshooting is easier because SQL plugins now share more consistent sentinel errors and context.
+- **Refined Antithesis CI workflow behavior:** CI runs are easier to reason about because Antithesis workflow settings now better reflect intended defaults.
+
+### 🔧 Fixes
+
+- **More contextual UTxO RPC submission errors:** Debugging submission failures is simpler because UTxO RPC errors now include clearer context.
+
+### 📋 What You Need to Know
+
+- **No action required:** You're all set—just upgrade to v0.34.0.
+
+### 🙏 Thank You
+
+Thank you for trying!
 
 ---
 
