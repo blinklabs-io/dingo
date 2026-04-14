@@ -13,16 +13,16 @@ Hi folks! Here’s what we shipped in v0.34.0.
 
 ### ✨ What's New
 
-- **Blockfrost-compatible metadata-label transaction endpoints:** Building Blockfrost-style integrations is easier because you can now retrieve transactions by metadata label using endpoints that match Blockfrost conventions. This adds new list and count APIs with pagination and support for returning metadata as either JSON or CBOR.
+- **Blockfrost-compatible metadata-label transaction endpoints:** Building Blockfrost-style integrations is easier because you can now retrieve transactions by metadata label using endpoints that match Blockfrost conventions.
 
 ### 💪 Improvements
 
-- **Ledger validation guardrails:** Ledger validation and processing is now more consistent in edge cases, which helps avoid repeated work and makes failures easier to understand. The node now normalizes script-data-hash CBOR before era validation and stops ledger processing when it detects repeated identical transaction validation failures per block and transaction.
-- **Safer Unix-domain socket startup:** Local Unix socket startup is safer and more reliable, reducing the chance of startup failures due to leftover files. The service now performs pre-bind cleanup for Unix-domain sockets and includes Unix-only tests to verify stale socket removal while protecting against accidentally deleting non-socket paths.
-- **Clearer submit errors (`utxorpc/submit.go`):** Error messages now provide clearer context when a submission fails, making troubleshooting faster. Returned errors from `utxorpc/submit.go` are now wrapped with contextual `fmt.Errorf` messages.
-- **Shared SQL address filtering and sentinel errors:** SQL plugins now share a consistent way to filter UTxO addresses and report common failure cases, improving maintainability and debugging. A shared address-filter helper and sentinel errors were introduced in `models` and adopted across all SQL plugins with additional contextual error wrapping.
-- **Dependency refresh:** Dependencies were refreshed to keep the project current and compatible with upstream fixes and improvements. This includes updates to Google Cloud Storage/IAM/Longrunning, the OpenTelemetry stdout metric exporter, AWS S3 SDK (v1.98.0 → v1.99.0), and `golang.org/x/net` (v0.52.0 → v0.53.0).
-- **More adaptive Antithesis workflow defaults:** CI workflow behavior is now more adaptive, helping reduce unintended pinning to outdated behavior in automation runs. The Antithesis GitHub Actions workflow now sets the `latest` parameter from `false` to `auto` in four places.
+- **Ledger validation guardrails:** Ledger validation and processing is now more consistent in edge cases, which helps avoid repeated work and makes failures easier to understand.
+- **Safer Unix-domain socket startup:** Local Unix socket startup is safer and more reliable, reducing the chance of startup failures due to leftover files.
+- **Clearer submit errors (`utxorpc/submit.go`):** Error messages now provide clearer context when a submission fails, making troubleshooting faster.
+- **Shared SQL address filtering and sentinel errors:** SQL plugins now share a consistent way to filter UTxO addresses and report common failure cases, improving maintainability and debugging.
+- **Dependency refresh:** Dependencies were refreshed to keep the project current and compatible with upstream fixes and improvements.
+- **More adaptive Antithesis workflow defaults:** CI workflow behavior is now more adaptive, helping reduce unintended pinning to outdated behavior in automation runs.
 
 ### 🔧 Fixes
 
@@ -30,7 +30,7 @@ Hi folks! Here’s what we shipped in v0.34.0.
 
 ### 📋 What You Need to Know
 
-- **Blockfrost integrations:** If you rely on Blockfrost-compatible behavior, you can start using the new metadata-label transaction endpoints immediately without changing existing endpoints. If you page through results or need totals, use the new pagination and count support and choose JSON or CBOR metadata formats as appropriate for your client.
+- **Blockfrost integrations:** If you rely on Blockfrost-compatible behavior, you can start using the new metadata-label transaction endpoints immediately without changing existing endpoints.
 
 ### 🙏 Thank You
 
