@@ -459,6 +459,91 @@ func (b *Blockfrost) handleAddressTransactions(
 	writeJSON(w, http.StatusOK, resp)
 }
 
+// handleMetadataTransactions handles
+// GET /api/v0/metadata/txs/labels/{label} and returns metadata values for the
+// requested label in JSON form.
+func (b *Blockfrost) handleMetadataTransactions(
+	w http.ResponseWriter,
+	r *http.Request,
+) {
+	params, ok := parsePaginationOrWriteError(w, r)
+	if !ok {
+		return
+	}
+	label, ok := parseMetadataLabelOrWriteError(w, r)
+	if !ok {
+		return
+	}
+
+	rows, total, err := b.node.MetadataTransactions(label, params)
+	if err != nil {
+		b.logger.Error(
+			"failed to get metadata transactions",
+			"label", label,
+			"error", err,
+		)
+		writeError(
+			w,
+			http.StatusInternalServerError,
+			"Internal Server Error",
+			"failed to retrieve transaction metadata",
+		)
+		return
+	}
+
+	SetPaginationHeaders(w, total, params)
+	resp := make([]MetadataTransactionJSONResponse, 0, len(rows))
+	for _, row := range rows {
+		resp = append(resp, MetadataTransactionJSONResponse(row))
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// handleMetadataTransactionsCBOR handles
+// GET /api/v0/metadata/txs/labels/{label}/cbor and returns metadata values
+// for the requested label in CBOR-hex form.
+func (b *Blockfrost) handleMetadataTransactionsCBOR(
+	w http.ResponseWriter,
+	r *http.Request,
+) {
+	params, ok := parsePaginationOrWriteError(w, r)
+	if !ok {
+		return
+	}
+	label, ok := parseMetadataLabelOrWriteError(w, r)
+	if !ok {
+		return
+	}
+
+	rows, total, err := b.node.MetadataTransactionsCBOR(label, params)
+	if err != nil {
+		b.logger.Error(
+			"failed to get CBOR metadata transactions",
+			"label", label,
+			"error", err,
+		)
+		writeError(
+			w,
+			http.StatusInternalServerError,
+			"Internal Server Error",
+			"failed to retrieve transaction metadata",
+		)
+		return
+	}
+
+	SetPaginationHeaders(w, total, params)
+	resp := make([]MetadataTransactionCBORResponse, 0, len(rows))
+	for _, row := range rows {
+		metadata := row.Metadata
+		resp = append(resp, MetadataTransactionCBORResponse{
+			TxHash:       row.TxHash,
+			CborMetadata: &metadata,
+			Metadata:     metadata,
+		})
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
 func parsePaginationOrWriteError(
 	w http.ResponseWriter,
 	r *http.Request,
@@ -474,6 +559,23 @@ func parsePaginationOrWriteError(
 		return PaginationParams{}, false
 	}
 	return params, true
+}
+
+func parseMetadataLabelOrWriteError(
+	w http.ResponseWriter,
+	r *http.Request,
+) (uint64, bool) {
+	label, err := strconv.ParseUint(r.PathValue("label"), 10, 64)
+	if err != nil {
+		writeError(
+			w,
+			http.StatusBadRequest,
+			"Bad Request",
+			"Invalid metadata label.",
+		)
+		return 0, false
+	}
+	return label, true
 }
 
 func writeNodeQueryError(

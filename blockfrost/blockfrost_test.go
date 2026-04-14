@@ -42,8 +42,12 @@ type mockNode struct {
 	pools                  []PoolExtendedInfo
 	addressUTXOs           []AddressUTXOInfo
 	addressTransactions    []AddressTransactionInfo
+	metadataJSON           []MetadataTransactionJSONInfo
+	metadataCBOR           []MetadataTransactionCBORInfo
 	addressUTXOsTotal      int
 	addressTxsTotal        int
+	metadataJSONTotal      int
+	metadataCBORTotal      int
 	chainTipErr            error
 	blockErr               error
 	txHashesErr            error
@@ -53,6 +57,8 @@ type mockNode struct {
 	poolsErr               error
 	addressUTXOsErr        error
 	addressTransactionsErr error
+	metadataJSONErr        error
+	metadataCBORErr        error
 }
 
 func (m *mockNode) ChainTip() (
@@ -109,6 +115,20 @@ func (m *mockNode) AddressTransactions(
 	_ PaginationParams,
 ) ([]AddressTransactionInfo, int, error) {
 	return m.addressTransactions, m.addressTxsTotal, m.addressTransactionsErr
+}
+
+func (m *mockNode) MetadataTransactions(
+	_ uint64,
+	_ PaginationParams,
+) ([]MetadataTransactionJSONInfo, int, error) {
+	return m.metadataJSON, m.metadataJSONTotal, m.metadataJSONErr
+}
+
+func (m *mockNode) MetadataTransactionsCBOR(
+	_ uint64,
+	_ PaginationParams,
+) ([]MetadataTransactionCBORInfo, int, error) {
+	return m.metadataCBOR, m.metadataCBORTotal, m.metadataCBORErr
 }
 
 func newTestBlockfrost(
@@ -851,4 +871,108 @@ func TestHandleAddressTransactions(t *testing.T) {
 	assert.Equal(t, 2, resp[0].TxIndex)
 	assert.EqualValues(t, 55, resp[0].BlockHeight)
 	assert.Equal(t, 1700000000, resp[0].BlockTime)
+}
+
+func TestHandleMetadataTransactions(t *testing.T) {
+	mock := &mockNode{
+		metadataJSONTotal: 2,
+		metadataJSON: []MetadataTransactionJSONInfo{
+			{
+				TxHash:       "txhash1",
+				JSONMetadata: json.RawMessage(`{"name":"nft-one"}`),
+			},
+		},
+	}
+	b := newTestBlockfrost(mock)
+
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/api/v0/metadata/txs/labels/721?count=1&page=1&order=asc",
+		nil,
+	)
+	req.SetPathValue("label", "721")
+	w := httptest.NewRecorder()
+	b.handleMetadataTransactions(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, "2", w.Header().Get("X-Pagination-Count-Total"))
+	assert.Equal(t, "2", w.Header().Get("X-Pagination-Page-Total"))
+
+	var resp []MetadataTransactionJSONResponse
+	err := json.NewDecoder(w.Body).Decode(&resp)
+	require.NoError(t, err)
+	require.Len(t, resp, 1)
+	assert.Equal(t, "txhash1", resp[0].TxHash)
+	assert.JSONEq(t, `{"name":"nft-one"}`, string(resp[0].JSONMetadata))
+}
+
+func TestHandleMetadataTransactionsCBOR(t *testing.T) {
+	mock := &mockNode{
+		metadataCBORTotal: 1,
+		metadataCBOR: []MetadataTransactionCBORInfo{
+			{
+				TxHash:   "txhash2",
+				Metadata: "a1646e616d65676e66742d74776f",
+			},
+		},
+	}
+	b := newTestBlockfrost(mock)
+
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/api/v0/metadata/txs/labels/721/cbor?count=1&page=1&order=desc",
+		nil,
+	)
+	req.SetPathValue("label", "721")
+	w := httptest.NewRecorder()
+	b.handleMetadataTransactionsCBOR(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, "1", w.Header().Get("X-Pagination-Count-Total"))
+	assert.Equal(t, "1", w.Header().Get("X-Pagination-Page-Total"))
+
+	var resp []MetadataTransactionCBORResponse
+	err := json.NewDecoder(w.Body).Decode(&resp)
+	require.NoError(t, err)
+	require.Len(t, resp, 1)
+	assert.Equal(t, "txhash2", resp[0].TxHash)
+	require.NotNil(t, resp[0].CborMetadata)
+	assert.Equal(t, "a1646e616d65676e66742d74776f", *resp[0].CborMetadata)
+	assert.Equal(t, "a1646e616d65676e66742d74776f", resp[0].Metadata)
+}
+
+func TestHandleMetadataTransactionsInvalidPagination(t *testing.T) {
+	b := newTestBlockfrost(&mockNode{})
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/api/v0/metadata/txs/labels/721?count=abc",
+		nil,
+	)
+	req.SetPathValue("label", "721")
+	w := httptest.NewRecorder()
+	b.handleMetadataTransactions(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	var resp ErrorResponse
+	err := json.NewDecoder(w.Body).Decode(&resp)
+	require.NoError(t, err)
+	assert.Equal(t, "Invalid pagination parameters.", resp.Message)
+}
+
+func TestHandleMetadataTransactionsInvalidLabel(t *testing.T) {
+	b := newTestBlockfrost(&mockNode{})
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/api/v0/metadata/txs/labels/not-a-number",
+		nil,
+	)
+	req.SetPathValue("label", "not-a-number")
+	w := httptest.NewRecorder()
+	b.handleMetadataTransactions(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	var resp ErrorResponse
+	err := json.NewDecoder(w.Body).Decode(&resp)
+	require.NoError(t, err)
+	assert.Equal(t, "Invalid metadata label.", resp.Message)
 }

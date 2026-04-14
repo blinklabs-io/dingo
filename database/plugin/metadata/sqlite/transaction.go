@@ -22,7 +22,7 @@ import (
 	"strings"
 
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/plugin/metadata/internal/labelcodec"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata/labelcodec"
 	"github.com/blinklabs-io/dingo/database/types"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -399,6 +399,30 @@ func (d *MetadataStoreSqlite) GetTransactionsByMetadataLabel(
 	}
 
 	return ret, nil
+}
+
+// CountTransactionsByMetadataLabel returns the total number of transactions
+// that include metadata for the requested label.
+func (d *MetadataStoreSqlite) CountTransactionsByMetadataLabel(
+	label uint64,
+	txn types.Txn,
+) (int, error) {
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return 0, err
+	}
+
+	var count int64
+	if result := db.Model(&models.TransactionMetadataLabel{}).
+		Where("label = ?", label).
+		Count(&count); result.Error != nil {
+		return 0, fmt.Errorf(
+			"count txs by metadata label %d: %w",
+			label,
+			result.Error,
+		)
+	}
+	return int(count), nil
 }
 
 // processScripts is a generic helper to process any script type

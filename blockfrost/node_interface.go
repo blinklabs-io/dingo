@@ -14,6 +14,8 @@
 
 package blockfrost
 
+import "encoding/json"
+
 // BlockfrostNode is the interface that the Blockfrost API
 // server uses to query the node for blockchain data. This
 // decouples the HTTP server from the concrete Node struct
@@ -61,6 +63,20 @@ type BlockfrostNode interface {
 		address string,
 		params PaginationParams,
 	) ([]AddressTransactionInfo, int, error)
+
+	// MetadataTransactions returns the paginated transactions
+	// containing the requested metadata label, with JSON values.
+	MetadataTransactions(
+		label uint64,
+		params PaginationParams,
+	) ([]MetadataTransactionJSONInfo, int, error)
+
+	// MetadataTransactionsCBOR returns the paginated transactions
+	// containing the requested metadata label, with CBOR values.
+	MetadataTransactionsCBOR(
+		label uint64,
+		params PaginationParams,
+	) ([]MetadataTransactionCBORInfo, int, error)
 }
 
 // ChainTipInfo holds chain tip data needed by the API.
@@ -176,4 +192,18 @@ type AddressTransactionInfo struct {
 	TxIndex     uint32
 	BlockHeight uint64
 	BlockTime   int64
+}
+
+// MetadataTransactionJSONInfo holds metadata label query
+// data for the JSON endpoint.
+type MetadataTransactionJSONInfo struct {
+	TxHash       string
+	JSONMetadata json.RawMessage
+}
+
+// MetadataTransactionCBORInfo holds metadata label query
+// data for the CBOR endpoint.
+type MetadataTransactionCBORInfo struct {
+	TxHash   string
+	Metadata string
 }

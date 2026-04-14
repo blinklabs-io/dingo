@@ -318,6 +318,14 @@ func TestTransactionMetadataLabelsIndexAndQuery(t *testing.T) {
 	if len(txsDesc) != 1 || txsDesc[0].Slot != 200 {
 		t.Fatalf("unexpected desc query result: %#v", txsDesc)
 	}
+
+	count721, err := sqliteStore.CountTransactionsByMetadataLabel(721, nil)
+	if err != nil {
+		t.Fatalf("CountTransactionsByMetadataLabel failed: %v", err)
+	}
+	if count721 != 2 {
+		t.Fatalf("expected count 2 for label 721, got %d", count721)
+	}
 }
 
 func TestDeleteTransactionMetadataLabelsAfterSlot(t *testing.T) {

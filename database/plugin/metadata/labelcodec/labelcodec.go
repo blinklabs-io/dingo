@@ -55,6 +55,33 @@ func EncodeAndExtract(
 	return metadataCbor, labels, nil
 }
 
+// RawValues returns the JSON and CBOR representation for a single metadata
+// label from encoded transaction metadata.
+func RawValues(
+	metadataCbor []byte,
+	label uint64,
+) (json.RawMessage, []byte, error) {
+	if len(metadataCbor) == 0 {
+		return nil, nil, errors.New("transaction has no metadata")
+	}
+
+	rawByLabel, err := decodeMetadataLabelMap(metadataCbor)
+	if err != nil {
+		return nil, nil, err
+	}
+	rawValue, ok := rawByLabel[label]
+	if !ok {
+		return nil, nil, fmt.Errorf("metadata label %d not found", label)
+	}
+
+	jsonValue, err := metadatumRawToJSON(rawValue)
+	if err != nil {
+		return nil, nil, fmt.Errorf("decode metadata label %d JSON: %w", label, err)
+	}
+
+	return json.RawMessage(jsonValue), append([]byte(nil), rawValue...), nil
+}
+
 func extractFromCbor(
 	metadataCbor []byte,
 ) ([]Entry, error) {

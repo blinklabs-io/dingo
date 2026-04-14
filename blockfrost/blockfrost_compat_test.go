@@ -260,6 +260,47 @@ func TestCompatProtocolParamsResponse(t *testing.T) {
 	assert.Equal(t, 3, *theirs.MaxCollateralInputs)
 }
 
+func TestCompatMetadataTransactionJSONResponse(t *testing.T) {
+	ours := MetadataTransactionJSONResponse{
+		TxHash:       "abc123",
+		JSONMetadata: json.RawMessage(`{"name":"nft-one","image":"ipfs://cid"}`),
+	}
+
+	data, err := json.Marshal(ours)
+	require.NoError(t, err)
+
+	var theirs bfgo.MetadataTxContentInJSON
+	err = json.Unmarshal(data, &theirs)
+	require.NoError(t, err)
+
+	assert.Equal(t, "abc123", theirs.TxHash)
+	require.NotNil(t, theirs.JSONMetadata)
+	jsonMetadata, ok := (*theirs.JSONMetadata).(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "nft-one", jsonMetadata["name"])
+	assert.Equal(t, "ipfs://cid", jsonMetadata["image"])
+}
+
+func TestCompatMetadataTransactionCBORResponse(t *testing.T) {
+	cborMetadata := "a1646e616d65676e66742d6f6e65"
+	ours := MetadataTransactionCBORResponse{
+		TxHash:       "abc123",
+		CborMetadata: &cborMetadata,
+		Metadata:     cborMetadata,
+	}
+
+	data, err := json.Marshal(ours)
+	require.NoError(t, err)
+
+	var theirs bfgo.MetadataTxContentInCBOR
+	err = json.Unmarshal(data, &theirs)
+	require.NoError(t, err)
+
+	assert.Equal(t, "abc123", theirs.TxHash)
+	require.NotNil(t, theirs.Metadata)
+	assert.Equal(t, cborMetadata, *theirs.Metadata)
+}
+
 func TestCompatAddressUTXOResponse(t *testing.T) {
 	dataHash := "datumhash1"
 	inlineDatum := "d8799f"
