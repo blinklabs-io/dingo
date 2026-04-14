@@ -61,7 +61,7 @@ jobs:
           images: |
             ghcr.io/${{ github.repository }}
           flavor: |
-            latest=false
+            latest=auto
             suffix=-antithesis
           tags: |
             type=sha,format=long
@@ -92,7 +92,7 @@ jobs:
           images: |
             ghcr.io/${{ github.repository_owner }}/dingo-configurator
           flavor: |
-            latest=false
+            latest=auto
           tags: |
             type=sha,format=long
             type=ref,event=branch
@@ -121,7 +121,7 @@ jobs:
           images: |
             ghcr.io/${{ github.repository_owner }}/dingo-txpump
           flavor: |
-            latest=false
+            latest=auto
           tags: |
             type=sha,format=long
             type=ref,event=branch
@@ -150,7 +150,7 @@ jobs:
           images: |
             ghcr.io/${{ github.repository_owner }}/dingo-analysis
           flavor: |
-            latest=false
+            latest=auto
           tags: |
             type=sha,format=long
             type=ref,event=branch
