@@ -3,7 +3,7 @@
 
 ## v0.34.0 (April 14, 2026)
 
-**Title:** v0.34.0 updates
+**Title:** Blockfrost-compatible metadata label listing
 
 **Date:** April 14, 2026
 
@@ -13,15 +13,15 @@ Hi folks! Here’s what we shipped in v0.34.0.
 
 ### ✨ What's New
 
-- **Blockfrost-compatible metadata label listing:** Finding transactions tied to a specific metadata label is easier because you can now list them via Blockfrost-compatible endpoints and get the metadata payloads back.
+- **Blockfrost-compatible metadata label listing:** Finding transactions tied to a specific metadata label is easier because you can now list them via Blockfrost-compatible endpoints and retrieve the metadata payloads.
 
 ### 💪 Improvements
 
-- **Dependency updates:** Compatibility stays smoother because cloud integrations and networking libraries were refreshed.
+- **Dependency updates:** Compatibility stays smooth because cloud integrations and networking libraries were refreshed.
 - **More consistent ledger validation handling:** Mempool and ledger processing are more rock-solid because validation avoids repeatedly re-processing the same failing transaction.
-- **Safer Unix-domain socket startup:** Local deployments are more reliable because startup now handles stale Unix sockets more safely.
-- **Standardized SQL plugin errors:** Troubleshooting is easier because SQL plugins now share more consistent sentinel errors and context.
-- **Refined Antithesis CI workflow behavior:** CI runs are easier to reason about because Antithesis workflow settings now better reflect intended defaults.
+- **Safer Unix-domain socket startup:** Local deployments are more rock-solid because startup now handles stale Unix sockets more safely.
+- **Standardized SQL plugin errors:** Troubleshooting is simpler because SQL plugins now share more consistent sentinel errors and context.
+- **Refined Antithesis CI workflow behavior:** CI runs are easier to reason about because Antithesis workflow settings were tweaked to better reflect intended defaults.
 
 ### 🔧 Fixes
 
