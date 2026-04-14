@@ -20,7 +20,10 @@ import (
 	"math"
 	"math/big"
 
+	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
+	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/conway"
 )
 
 // ErrExUnitsOverflow is returned when ExUnits
@@ -136,6 +139,66 @@ func ValidateTxExUnits(
 		)
 	}
 	return nil
+}
+
+func normalizeScriptDataHashCbor(
+	tx lcommon.Transaction,
+) (lcommon.Transaction, error) {
+	if tx.ScriptDataHash() == nil {
+		return tx, nil
+	}
+	switch tmpTx := tx.(type) {
+	case *alonzo.AlonzoTransaction:
+		if !alonzoScriptDataHashCborMissing(tmpTx) {
+			return tx, nil
+		}
+		txCbor := tmpTx.Cbor()
+		if len(txCbor) == 0 {
+			return tx, nil
+		}
+		return alonzo.NewAlonzoTransactionFromCbor(txCbor)
+	case *babbage.BabbageTransaction:
+		if !babbageScriptDataHashCborMissing(tmpTx) {
+			return tx, nil
+		}
+		txCbor := tmpTx.Cbor()
+		if len(txCbor) == 0 {
+			return tx, nil
+		}
+		return babbage.NewBabbageTransactionFromCbor(txCbor)
+	case *conway.ConwayTransaction:
+		if !conwayScriptDataHashCborMissing(tmpTx) {
+			return tx, nil
+		}
+		txCbor := tmpTx.Cbor()
+		if len(txCbor) == 0 {
+			return tx, nil
+		}
+		return conway.NewConwayTransactionFromCbor(txCbor)
+	default:
+		return tx, nil
+	}
+}
+
+func alonzoScriptDataHashCborMissing(tx *alonzo.AlonzoTransaction) bool {
+	return (len(tx.WitnessSet.WsRedeemers.Redeemers) > 0 &&
+		len(tx.WitnessSet.WsRedeemers.Cbor()) == 0) ||
+		(len(tx.WitnessSet.WsPlutusData.Items) > 0 &&
+			len(tx.WitnessSet.WsPlutusData.Cbor()) == 0)
+}
+
+func babbageScriptDataHashCborMissing(tx *babbage.BabbageTransaction) bool {
+	return (len(tx.WitnessSet.WsRedeemers.Redeemers) > 0 &&
+		len(tx.WitnessSet.WsRedeemers.Cbor()) == 0) ||
+		(len(tx.WitnessSet.WsPlutusData.Items) > 0 &&
+			len(tx.WitnessSet.WsPlutusData.Cbor()) == 0)
+}
+
+func conwayScriptDataHashCborMissing(tx *conway.ConwayTransaction) bool {
+	return (tx.WitnessSet.WsRedeemers.Len() > 0 &&
+		len(tx.WitnessSet.WsRedeemers.Cbor()) == 0) ||
+		(len(tx.WitnessSet.WsPlutusData.Items()) > 0 &&
+			len(tx.WitnessSet.WsPlutusData.Cbor()) == 0)
 }
 
 // CalculateMinFee computes the minimum fee for a

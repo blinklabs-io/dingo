@@ -32,6 +32,10 @@ var errRestartLedgerPipeline = errors.New(
 	"restart ledger pipeline after local state recovery",
 )
 
+var errHaltLedgerPipeline = errors.New(
+	"halt ledger pipeline after persistent tx validation failure",
+)
+
 type txValidationError struct {
 	BlockPoint ocommon.Point
 	TxHash     []byte
@@ -50,6 +54,31 @@ func (e *txValidationError) Error() string {
 
 func (e *txValidationError) Unwrap() error {
 	return e.Cause
+}
+
+type atTipRecoveryAttempt struct {
+	BlockPoint ocommon.Point
+	TxHash     []byte
+}
+
+func newAtTipRecoveryAttempt(
+	validationErr *txValidationError,
+) *atTipRecoveryAttempt {
+	blockPoint := validationErr.BlockPoint
+	blockPoint.Hash = append([]byte(nil), blockPoint.Hash...)
+	return &atTipRecoveryAttempt{
+		BlockPoint: blockPoint,
+		TxHash:     append([]byte(nil), validationErr.TxHash...),
+	}
+}
+
+func (a *atTipRecoveryAttempt) matches(
+	validationErr *txValidationError,
+) bool {
+	return a != nil &&
+		validationErr.BlockPoint.Slot == a.BlockPoint.Slot &&
+		bytes.Equal(validationErr.BlockPoint.Hash, a.BlockPoint.Hash) &&
+		bytes.Equal(validationErr.TxHash, a.TxHash)
 }
 
 type replayRecoveryCandidate struct {
@@ -150,22 +179,28 @@ func (ls *LedgerState) recoverAtTipFromTxValidationError(
 	if ls.chain == nil || ls.config.ChainManager == nil {
 		return false, nil
 	}
-	// Prevent infinite loops: if we already attempted recovery for this
-	// slot (or an earlier one), the problem is persistent and recovery
-	// will not help. Return false so the error propagates instead of
+	// Prevent infinite loops: if we already attempted recovery for this exact
+	// block/tx failure, the problem is persistent and recovery will not help.
+	// Return a sentinel error so the block processor halts instead of
 	// restarting the pipeline into the same failing block.
-	if validationErr.BlockPoint.Slot > 0 &&
-		validationErr.BlockPoint.Slot <= ls.lastAtTipRecoverySlot {
+	if ls.lastAtTipRecovery != nil &&
+		ls.lastAtTipRecovery.matches(validationErr) {
 		ls.config.Logger.Error(
-			"at-tip recovery already attempted for this slot, halting to avoid infinite loop",
+			"at-tip recovery already attempted for this validation failure, halting to avoid infinite loop",
 			"component", "ledger",
 			"failing_slot", validationErr.BlockPoint.Slot,
-			"last_recovery_slot", ls.lastAtTipRecoverySlot,
+			"failing_block_hash", hex.EncodeToString(
+				validationErr.BlockPoint.Hash,
+			),
 			"tx_hash", hex.EncodeToString(validationErr.TxHash),
 		)
-		return false, nil
+		return false, fmt.Errorf(
+			"%w: %w",
+			errHaltLedgerPipeline,
+			validationErr,
+		)
 	}
-	ls.lastAtTipRecoverySlot = validationErr.BlockPoint.Slot
+	ls.lastAtTipRecovery = newAtTipRecoveryAttempt(validationErr)
 	ls.RLock()
 	ledgerTip := ls.currentTip
 	ls.RUnlock()
