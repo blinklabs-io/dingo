@@ -194,8 +194,12 @@ func ValidateTxBabbage(
 	if !ok {
 		return ErrIncompatibleProtocolParams
 	}
+	normalizedTx, err := normalizeScriptDataHashCbor(tx)
+	if err != nil {
+		return fmt.Errorf("normalize script data hash CBOR: %w", err)
+	}
+	tx = normalizedTx
 	errs := []error{}
-	var err error
 	for _, validationFunc := range babbage.UtxoValidationRules {
 		err = validationFunc(tx, slot, ls, pp)
 		if err != nil {

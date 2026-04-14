@@ -170,11 +170,15 @@ func ValidateTxConway(
 	if _, ok := pp.(*conway.ConwayProtocolParameters); !ok {
 		return ErrIncompatibleProtocolParams
 	}
+	normalizedTx, err := normalizeScriptDataHashCbor(tx)
+	if err != nil {
+		return fmt.Errorf("normalize script data hash CBOR: %w", err)
+	}
+	tx = normalizedTx
 	// Validate TX through ledger validation rules (Phase-1).
 	// These must run even for isValid=false transactions, which still
 	// require valid structure, fees, and UTxO references for collateral.
 	errs := []error{}
-	var err error
 	for idx, validationFunc := range conway.UtxoValidationRules {
 		err = validationFunc(tx, slot, ls, pp)
 		if err != nil {

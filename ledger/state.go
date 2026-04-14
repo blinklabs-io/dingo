@@ -507,8 +507,8 @@ type LedgerState struct {
 	closed                        atomic.Bool
 	inRecovery                    bool           // guards against recursive recovery in SubmitAsyncDBTxn
 	densityWindow                 []densityEntry // sliding window for chain density metric
-	lastAtTipRecoverySlot         uint64         // guards against infinite at-tip recovery loops
-	mithrilLedgerSlot             uint64         // blocks at or below this slot are Mithril-verified; skip validation
+	lastAtTipRecovery             *atTipRecoveryAttempt
+	mithrilLedgerSlot             uint64 // blocks at or below this slot are Mithril-verified; skip validation
 	lastLocalRollbackSeq          uint64
 	lastLocalRollbackPoint        ocommon.Point
 
@@ -2170,6 +2170,13 @@ func (ls *LedgerState) ledgerProcessBlocks(ctx context.Context) {
 		}
 		if errors.Is(err, errRestartLedgerPipeline) {
 			continue
+		}
+		if errors.Is(err, errHaltLedgerPipeline) {
+			ls.config.Logger.Error(
+				"block processing halted after persistent validation failure",
+				"error", err,
+			)
+			return
 		}
 		ls.config.Logger.Warn(
 			"block processing failed, restarting pipeline",

@@ -289,22 +289,23 @@ func TestTryRecoverFromTxValidationErrorAtTipRewindsPrimaryChain(
 		}).Error,
 	)
 
-	recovered, err := ls.tryRecoverFromTxValidationError(
-		&txValidationError{
-			BlockPoint: ocommon.NewPoint(
-				failingBlock.Slot,
-				failingBlock.Hash,
-			),
-			TxHash: testHashBytes("failing-live-tx"),
-			Inputs: []lcommon.TransactionInput{
-				&replayRecoveryInput{
-					txId:  testHashBytes("producer-tx-live"),
-					index: 0,
-				},
+	validationErr := &txValidationError{
+		BlockPoint: ocommon.NewPoint(
+			failingBlock.Slot,
+			failingBlock.Hash,
+		),
+		TxHash: testHashBytes("failing-live-tx"),
+		Inputs: []lcommon.TransactionInput{
+			&replayRecoveryInput{
+				txId:  testHashBytes("producer-tx-live"),
+				index: 0,
 			},
-			Cause: errors.New("missing input"),
 		},
-	)
+		Cause: errors.New(
+			"conway utxo validation rule 38: delegation state mismatch",
+		),
+	}
+	recovered, err := ls.tryRecoverFromTxValidationError(validationErr)
 	require.NoError(t, err)
 	require.True(t, recovered)
 
@@ -319,6 +320,13 @@ func TestTryRecoverFromTxValidationErrorAtTipRewindsPrimaryChain(
 		ocommon.NewPoint(failingBlock.Slot, failingBlock.Hash),
 	)
 	assert.ErrorIs(t, err, models.ErrBlockNotFound)
+
+	recovered, err = ls.tryRecoverFromTxValidationError(validationErr)
+	require.ErrorIs(t, err, errHaltLedgerPipeline)
+	require.False(t, recovered)
+	var txErr *txValidationError
+	require.ErrorAs(t, err, &txErr)
+	assert.Equal(t, validationErr, txErr)
 }
 
 func TestTryRecoverFromTxValidationErrorFallsBackToTxBlobOffsets(
