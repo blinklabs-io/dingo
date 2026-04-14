@@ -14,17 +14,17 @@ Hi folks! Here’s what we shipped in v0.34.0.
 ```json
 {
   "✨ What's New": [
-    "You can now list transactions by metadata label using Blockfrost-compatible endpoints, with results available alongside their metadata payloads. This adds new APIs for listing transactions by metadata label with JSON or CBOR metadata, including total counting and pagination support."
+    "You can now list transactions by metadata label using Blockfrost-compatible endpoints, with results available alongside their metadata payloads."
   ],
   "💪 Improvements": [
-    "Dependency updates were applied to keep cloud integrations and networking libraries current and compatible. This bumps Google Cloud Storage/IAM/Longrunning, the OpenTelemetry stdout metric exporter, AWS S3 Go SDK (v1.98.0→v1.99.0), and golang.org/x/net (v0.52.0→v0.53.0).",
-    "Ledger validation handling is now more consistent and avoids repeatedly re-processing the same failing transaction. This normalizes script data hash CBOR before era validations and stops ledger processing on repeated identical tx validation failures keyed by block/tx.",
-    "Unix-domain socket startup behavior is safer and more resilient when stale sockets are present. This adds pre-bind cleanup plus Unix-specific tests that verify stale socket removal and protect against deleting non-socket paths.",
-    "SQL plugin error handling is now more standardized to make failures easier to interpret across implementations. This introduces a shared UTXO address filter helper and sentinel errors in models and adopts them across all SQL plugins while wrapping errors with additional context.",
-    "CI workflow configuration was adjusted to better reflect the intended behavior of the Antithesis GitHub Actions runs. This sets the `latest` parameter from `false` to `auto` in four places in the Antithesis workflow."
+    "Dependency updates were applied to keep cloud integrations and networking libraries current and compatible.",
+    "Ledger validation handling is now more consistent and avoids repeatedly re-processing the same failing transaction.",
+    "Unix-domain socket startup behavior is safer and more resilient when stale sockets are present.",
+    "SQL plugin error handling is now more standardized to make failures easier to interpret across implementations.",
+    "CI workflow configuration was adjusted to better reflect the intended behavior of the Antithesis GitHub Actions runs."
   ],
   "🔧 Fixes": [
-    "Error messages returned during UTXO RPC submission now include more context to speed up troubleshooting. This wraps errors in `utxorpc/submit.go` using contextual `fmt.Errorf` messages."
+    "Error messages returned during UTxO RPC submission now include more context to speed up troubleshooting."
   ]
 }
 
