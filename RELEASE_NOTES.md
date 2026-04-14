@@ -3,7 +3,7 @@
 
 ## v0.34.0 (April 14, 2026)
 
-**Title:** Updates and refinements
+**Title:** Blockfrost-compatible metadata label endpoints
 
 **Date:** April 14, 2026
 
@@ -11,25 +11,30 @@
 
 Hi folks! Here’s what we shipped in v0.34.0.
 
-<!--
-{
-  "✨ What's New": [
-    "You can now retrieve transactions by metadata label using endpoints that match Blockfrost’s conventions, so it’s easier to build compatible integrations and explore metadata-driven activity. This adds new list/count APIs with pagination and support for returning metadata as either JSON or CBOR."
-  ],
-  "💪 Improvements": [
-    "Ledger validation and processing is now more consistent in edge cases, which helps avoid repeated work and makes failures easier to understand. The node now normalizes script data hash CBOR before era validations and stops ledger processing when it detects repeated identical transaction validation failures keyed by block/transaction.",
-    "Local Unix socket startup is safer and more reliable, reducing the chance of startup failures due to leftover files. The service now performs pre-bind cleanup for Unix-domain sockets and includes Unix-only tests to verify stale socket removal while protecting against accidentally deleting non-socket paths.",
-    "Error messages now provide clearer context when a submission fails, making troubleshooting faster. Returned errors from `utxorpc/submit.go` are now wrapped with contextual `fmt.Errorf` messages.",
-    "SQL plugins now share a consistent way to filter UTXO addresses and report common failure cases, improving maintainability and debugging. A shared address-filter helper and sentinel errors were introduced in `models` and adopted across all SQL plugins with additional contextual error wrapping.",
-    "Dependencies were refreshed to keep the project current and compatible with upstream fixes and improvements. This includes updates to Google Cloud Storage/IAM/Longrunning, the OpenTelemetry stdout metric exporter, AWS S3 SDK (v1.98.0 → v1.99.0), and `golang.org/x/net` (v0.52.0 → v0.53.0).",
-    "CI workflow behavior is now more adaptive, helping reduce unintended pinning to outdated behavior in automation runs. The Antithesis GitHub Actions workflow now sets the `latest` parameter from `false` to `auto` in four places."
-  ],
-  "📋 What You Need to Know": [
-    "If you rely on Blockfrost-compatible behavior, you can start using the new metadata-label transaction endpoints immediately without changing existing endpoints. If you page through results or need totals, use the new pagination and count support and choose JSON or CBOR metadata formats as appropriate for your client."
-  ]
-}
+### ✨ What's New
 
--->
+- **Blockfrost-compatible metadata-label transaction endpoints:** Building Blockfrost-style integrations is easier because you can now retrieve transactions by metadata label using endpoints that match Blockfrost conventions. This adds new list and count APIs with pagination and support for returning metadata as either JSON or CBOR.
+
+### 💪 Improvements
+
+- **Ledger validation guardrails:** Ledger validation and processing is now more consistent in edge cases, which helps avoid repeated work and makes failures easier to understand. The node now normalizes script-data-hash CBOR before era validation and stops ledger processing when it detects repeated identical transaction validation failures per block and transaction.
+- **Safer Unix-domain socket startup:** Local Unix socket startup is safer and more reliable, reducing the chance of startup failures due to leftover files. The service now performs pre-bind cleanup for Unix-domain sockets and includes Unix-only tests to verify stale socket removal while protecting against accidentally deleting non-socket paths.
+- **Clearer submit errors (`utxorpc/submit.go`):** Error messages now provide clearer context when a submission fails, making troubleshooting faster. Returned errors from `utxorpc/submit.go` are now wrapped with contextual `fmt.Errorf` messages.
+- **Shared SQL address filtering and sentinel errors:** SQL plugins now share a consistent way to filter UTxO addresses and report common failure cases, improving maintainability and debugging. A shared address-filter helper and sentinel errors were introduced in `models` and adopted across all SQL plugins with additional contextual error wrapping.
+- **Dependency refresh:** Dependencies were refreshed to keep the project current and compatible with upstream fixes and improvements. This includes updates to Google Cloud Storage/IAM/Longrunning, the OpenTelemetry stdout metric exporter, AWS S3 SDK (v1.98.0 → v1.99.0), and `golang.org/x/net` (v0.52.0 → v0.53.0).
+- **More adaptive Antithesis workflow defaults:** CI workflow behavior is now more adaptive, helping reduce unintended pinning to outdated behavior in automation runs. The Antithesis GitHub Actions workflow now sets the `latest` parameter from `false` to `auto` in four places.
+
+### 🔧 Fixes
+
+- **No user-facing fixes:** This release focuses on new features and improvements.
+
+### 📋 What You Need to Know
+
+- **Blockfrost integrations:** If you rely on Blockfrost-compatible behavior, you can start using the new metadata-label transaction endpoints immediately without changing existing endpoints. If you page through results or need totals, use the new pagination and count support and choose JSON or CBOR metadata formats as appropriate for your client.
+
+### 🙏 Thank You
+
+Thank you for trying!
 
 ---
 
