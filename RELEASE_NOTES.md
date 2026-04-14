@@ -17,10 +17,10 @@ Hi folks! Here’s what we shipped in v0.34.0.
 
 ### 💪 Improvements
 
-- **Dependency updates:** Compatibility stays smooth because cloud integrations and networking libraries were refreshed.
+- **Dependency updates:** Compatibility stays smoother because cloud integrations and networking libraries (including AWS S3, OpenTelemetry, and `golang.org/x/net`) were refreshed.
 - **More consistent ledger validation handling:** Mempool and ledger processing are more rock-solid because validation avoids repeatedly re-processing the same failing transaction.
 - **Safer Unix-domain socket startup:** Local deployments are more rock-solid because startup now handles stale Unix sockets more safely.
-- **Standardized SQL plugin errors:** Troubleshooting is simpler because SQL plugins now share more consistent sentinel errors and context.
+- **Standardized SQL plugin errors:** Troubleshooting is simpler because SQL plugins now share more consistent sentinel errors and clearer context.
 - **Refined Antithesis CI workflow behavior:** CI runs are easier to reason about because Antithesis workflow settings were tweaked to better reflect intended defaults.
 
 ### 🔧 Fixes
