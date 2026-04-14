@@ -1,6 +1,44 @@
 # Release Notes
 
 
+## v0.34.0 (April 14, 2026)
+
+**Title:** Blockfrost-compatible metadata label endpoints
+
+**Date:** April 14, 2026
+
+**Version:** v0.34.0
+
+Hi folks! Here’s what we shipped in v0.34.0.
+
+### ✨ What's New
+
+- **Blockfrost-compatible metadata-label transaction endpoints:** Building Blockfrost-style integrations is easier because you can now retrieve transactions by metadata label using endpoints that match Blockfrost conventions.
+
+### 💪 Improvements
+
+- **Ledger validation guardrails:** Ledger validation and processing is more consistent in edge cases, which helps avoid repeated work and makes failures easier to understand.
+- **Safer Unix-domain socket startup:** Local Unix socket startup is safer and more reliable, reducing the chance of startup failures due to leftover files.
+- **Clearer submit errors (`utxorpc/submit.go`):** Error messages now provide clearer context when a submission fails, making troubleshooting faster.
+- **Shared SQL address filtering and sentinel errors:** SQL plugins now share a consistent way to filter UTxO addresses and report common failure cases, which improves maintainability and debugging.
+- **Dependency refresh:** Dependencies were refreshed to keep the project current and compatible with upstream fixes and improvements.
+- **More adaptive Antithesis workflow defaults:** CI workflow behavior is now more adaptive, helping reduce unintended pinning to outdated behavior in automation runs.
+
+### 🔧 Fixes
+
+- **No user-facing fixes:** This release focuses on new features and improvements.
+
+### 📋 What You Need to Know
+
+- **Blockfrost integrations:** If you rely on Blockfrost-compatible behavior, you can start using the new metadata-label transaction endpoints immediately without changing existing endpoints.
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
+
 ## v0.33.0 (April 13, 2026)
 
 **Title:** Blockfrost-compatible address endpoints
