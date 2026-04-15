@@ -3,7 +3,7 @@
 
 ## v0.35.0 (April 15, 2026)
 
-**Title:** Updates and polish
+**Title:** Faster bootstrap and steadier sync
 
 **Date:** April 15, 2026
 
@@ -13,19 +13,19 @@ Hi folks! Here’s what we rolled out in v0.35.0.
 
 ### ✨ What's New
 
-- It’s easier to query transaction metadata by label with **Blockfrost-compatible metadata label endpoints** that follow familiar Blockfrost-style patterns.
+- **Blockfrost-compatible metadata label endpoints:** It’s easier to query transaction metadata by label because the API now follows familiar Blockfrost-style patterns.
 
 ### 💪 Improvements
 
-- Nodes become usable faster after Mithril bootstrap because **more complete snapshot seeding** now fills in the extra snapshots needed for the current epoch window.
-- Sync stays rock-solid when a target connection isn’t reachable because **more resilient peer fallback for syncing and block retrieval** now retries using the current best active peer.
-- You can retrieve specific blocks faster because **block retrieval by hash** now uses a hash-to-block index when available.
-- Bursty workloads run more smoothly because **larger event queue capacity** increases the queue limit from 10,000 to 100,000.
-- Network behavior is more predictable because **more reliable connection direction handling** tracks whether a sync client started outbound and better handles duplicate connection IDs.
+- **More complete snapshot seeding after Mithril bootstrap:** Nodes become usable faster after Mithril bootstrap because snapshot seeding now fills in the extra snapshots needed for the current epoch window.
+- **More resilient peer fallback for syncing and block retrieval:** Sync stays rock-solid when a target connection isn’t reachable because the node now retries using the current best active peer.
+- **Faster block retrieval by hash:** You can retrieve specific blocks faster because the node now uses a hash-to-block index for direct lookups when available.
+- **Larger event queue capacity:** Bursty workloads run more smoothly because the event queue limit increased from 10,000 to 100,000.
+- **More reliable connection direction handling:** Network behavior is more predictable because sync clients track whether they started outbound and the node better handles duplicate connection identifiers.
 
 ### 🔧 Fixes
 
-- Metadata indexing is more consistent because **more predictable SQLite metadata batching** now uses an explicit accumulator to add and reset batches.
+- **More predictable SQLite metadata batching:** Metadata indexing is more consistent because batching now uses an explicit accumulator to add and reset batches.
 
 ### 📋 What You Need to Know
 
