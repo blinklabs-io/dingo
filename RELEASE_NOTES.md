@@ -13,19 +13,19 @@ Hi folks! Here’s what we shipped in v0.35.0.
 
 ### ✨ What's New
 
-- **Blockfrost-compatible metadata label endpoints:** Querying transaction metadata by label is simpler because the API now follows Blockfrost-style patterns.
+- It’s easier to query transaction metadata by label with **Blockfrost-compatible metadata label endpoints** that follow familiar Blockfrost-style patterns.
 
 ### 💪 Improvements
 
-- **More complete snapshot seeding after Mithril bootstrap:** Nodes become usable faster after bootstrap because snapshot seeding now covers the current Mark/Set/Go epoch window.
-- **More resilient peer fallback for syncing and block fetch:** Sync stays rock-solid because chainsync and block fetch now fall back to the current best active peer when a target connection isn’t reachable.
-- **Faster block retrieval by hash:** Finding a specific block is quicker because the node now maintains a hash-to-block index for direct lookups when available.
-- **Larger event queue capacity:** Bursty workloads run more smoothly because the event queue limit increased from 10,000 to 100,000.
-- **More reliable connection direction handling:** Network behavior is more predictable because chainsync tracks whether it started outbound and the connection manager better handles inbound/outbound connection ID collisions.
+- Nodes become usable faster after Mithril bootstrap because **more complete snapshot seeding** now fills in the extra snapshots needed for the current epoch window.
+- Sync stays rock-solid when a target connection isn’t reachable because **more resilient peer fallback for syncing and block retrieval** now retries using the current best active peer.
+- You can retrieve specific blocks faster because **block retrieval by hash** now uses a hash-to-block index when available.
+- Bursty workloads run more smoothly because **larger event queue capacity** increases the queue limit from 10,000 to 100,000.
+- Network behavior is more predictable because **more reliable connection direction handling** tracks whether a sync client started outbound and better handles duplicate connection IDs.
 
 ### 🔧 Fixes
 
-- **More predictable SQLite metadata batching:** Indexing is more consistent because SQLite metadata batches are now accumulated and reset explicitly to avoid mixed or stale batches.
+- Metadata indexing is more consistent because **more predictable SQLite metadata batching** now uses an explicit accumulator to add and reset batches.
 
 ### 📋 What You Need to Know
 
