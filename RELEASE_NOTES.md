@@ -9,7 +9,7 @@
 
 **Version:** v0.35.0
 
-Hi folks! Here’s what we shipped in v0.35.0.
+Hi folks! Here’s what we rolled out in v0.35.0.
 
 ### ✨ What's New
 
