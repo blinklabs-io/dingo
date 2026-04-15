@@ -24,7 +24,7 @@ import (
 )
 
 const (
-	EventQueueSize       = 10000
+	EventQueueSize       = 100000
 	AsyncQueueSize       = 1000
 	AsyncWorkerPoolSize  = 4
 	RemoteDeliverTimeout = 5 * time.Second
