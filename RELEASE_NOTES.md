@@ -13,12 +13,12 @@ Hi folks! Here’s what we shipped in v0.35.0.
 
 ### ✨ What's New
 
-- **Blockfrost-compatible metadata label endpoints:** Building Blockfrost-style integrations is easier because you can now query transaction metadata labels using Blockfrost-compatible endpoints.
+- **Blockfrost-compatible metadata-label transaction endpoints:** Building Blockfrost-style integrations is easier because you can now query transaction metadata labels using Blockfrost-compatible endpoints.
 
 ### 💪 Improvements
 
-- **More complete Mithril bootstrap snapshots:** Startup is smoother because nodes now prepare more snapshot data needed for the current epoch window after a Mithril bootstrap.
-- **More resilient peer retry behavior:** Sync is more rock-solid because chainsync and blockfetch retry against the active best peer when target connections aren’t available.
+- **More complete Mithril bootstrap snapshots:** Startup is smoother because nodes now prepare more of the snapshot data needed for the current epoch window after a Mithril bootstrap.
+- **More resilient peer retry behavior:** Sync is more rock-solid because chainsync and blockfetch retry using the active best peer when target connections aren’t available.
 - **Faster block lookup by hash:** Hash-based block queries are faster because block-by-hash resolution is streamlined across blob storage backends.
 - **Larger event queue capacity:** Bursty workloads are easier to handle because the event queue capacity was increased from 10,000 to 100,000.
 - **Stronger connection direction tracking:** Networking is more rock-solid because chainsync tracks outbound-started clients and the connection manager detects inbound/outbound `ConnectionId` collisions.
