@@ -1,6 +1,48 @@
 # Release Notes
 
 
+## v0.35.0 (April 15, 2026)
+
+**Title:** Update highlights
+
+**Date:** April 15, 2026
+
+**Version:** v0.35.0
+
+Hi folks! Here’s what we shipped in v0.35.0.
+
+```json
+{
+  "✨ What's New": [
+    "You can now query transaction metadata labels using new Blockfrost-compatible endpoints, making it easier to integrate with existing Blockfrost-based tooling. Specifically, v0.34.0 adds Blockfrost-style routes for metadata label discovery and retrieval, aligning request/response behavior with common Blockfrost conventions."
+  ],
+  "💪 Improvements": [
+    "Node startup after a Mithril bootstrap now prepares more of the snapshot data needed for smooth operation in the current epoch window. Concretely, genesis snapshot capture was extended to also seed mark snapshots for the active Mark/Set/Go window, with added coverage for fresh sync, Mithril bootstrap, no-pool, and small-epoch scenarios.",
+    "Sync is now more resilient when a chosen peer becomes unavailable, reducing stalls during normal operation. The chainsync and blockfetch clients now retry using the currently active best peer when target connections aren’t available, with improved logging and delayed state clearing to avoid thrashing.",
+    "Fetching a block by hash is now much faster across blob storage backends, improving responsiveness for hash-based lookups. A new hash→block-key index enables O(1) BlockByHash resolution when available, while still falling back to a sequential scan for safety and compatibility.",
+    "High-throughput event processing is less likely to back up under load, reducing the chance of dropped or delayed work. The event queue capacity was increased from 10,000 to 100,000 to better accommodate bursty workloads.",
+    "Connection handling is now more robust in mixed inbound/outbound scenarios, reducing edge cases that could cause incorrect behavior. The system now tracks whether each chainsync client started on an outbound connection and uses that to determine behavior independent of live direction, while the connection manager also detects inbound/outbound ConnectionId collisions, propagates add failures, and includes new tests for these cases.",
+    "Batching SQLite metadata updates is now simpler and safer to manage, improving maintainability and correctness of batched writes. A new BatchAccumulator was introduced for collecting SQLite metadata model batches with explicit add/reset operations, along with tests validating expected behavior."
+  ]
+}
+
+```
+
+### ✨ What's New
+
+### 💪 Improvements
+
+### 🔧 Fixes
+
+### 📋 What You Need to Know
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
+
 ## v0.34.0 (April 14, 2026)
 
 **Title:** Blockfrost-compatible metadata label endpoints
