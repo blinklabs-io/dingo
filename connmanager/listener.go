@@ -240,9 +240,11 @@ func (c *ConnectionManager) startListener(
 				if conn.RemoteAddr() != nil {
 					peerAddr = conn.RemoteAddr().String()
 				}
-				c.addNtCConnectionWithIPKey(
+				if !c.addNtCConnectionWithIPKey(
 					oConn, true, peerAddr, "",
-				)
+				) {
+					continue
+				}
 				// Generate event
 				if c.config.EventBus != nil {
 					c.config.EventBus.Publish(
@@ -337,9 +339,11 @@ func (c *ConnectionManager) startListener(
 			if conn.RemoteAddr() != nil {
 				peerAddr = conn.RemoteAddr().String()
 			}
-			c.addConnectionWithIPKey(
+			if !c.addConnectionWithIPKey(
 				oConn, true, peerAddr, ipKey,
-			)
+			) {
+				continue
+			}
 			// Generate event
 			if c.config.EventBus != nil {
 				c.config.EventBus.Publish(

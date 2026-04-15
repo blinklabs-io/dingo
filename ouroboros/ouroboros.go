@@ -436,6 +436,7 @@ func (o *Ouroboros) HandleOutboundConnEvent(evt event.Event) {
 		shouldStartChainsync := o.registerTrackedChainsyncClient(
 			connId,
 			o.shouldPublishChainsyncToLedger(connId),
+			true, // startedAsOutbound
 		)
 		if shouldStartChainsync {
 			if err := o.chainsyncClientStart(connId); err != nil {
@@ -537,7 +538,7 @@ func (o *Ouroboros) HandleInboundConnEvent(evt event.Event) {
 	// limit can prevent functional reconnections, causing permanent
 	// chainsync stalls after rollback events.
 	if o.ChainsyncState != nil {
-		if o.registerTrackedChainsyncClient(connId, false) {
+		if o.registerTrackedChainsyncClient(connId, false, false) {
 			if err := o.chainsyncClientStart(connId); err != nil {
 				o.ChainsyncState.RemoveClientConnId(connId)
 				o.config.Logger.Warn(

@@ -335,8 +335,12 @@ func (c *ConnectionManager) updatePeerConnectivityLocked(
 	} else {
 		after = after.withoutOutbound()
 	}
-	beforeDuplex, beforeUnidirectional, beforePrunable := connectionSummaryTotals(before)
-	afterDuplex, afterUnidirectional, afterPrunable := connectionSummaryTotals(after)
+	beforeDuplex, beforeUnidirectional, beforePrunable := connectionSummaryTotals(
+		before,
+	)
+	afterDuplex, afterUnidirectional, afterPrunable := connectionSummaryTotals(
+		after,
+	)
 	c.duplexPeers += afterDuplex - beforeDuplex
 	c.unidirectional += afterUnidirectional - beforeUnidirectional
 	c.prunableConns += afterPrunable - beforePrunable
@@ -509,8 +513,8 @@ func (c *ConnectionManager) AddConnection(
 	conn *ouroboros.Connection,
 	isInbound bool,
 	peerAddr string,
-) {
-	c.addConnectionImpl(conn, isInbound, false, peerAddr, "")
+) bool {
+	return c.addConnectionImpl(conn, isInbound, false, peerAddr, "")
 }
 
 func (c *ConnectionManager) addConnectionWithIPKey(
@@ -518,8 +522,8 @@ func (c *ConnectionManager) addConnectionWithIPKey(
 	isInbound bool,
 	peerAddr string,
 	ipKey string,
-) {
-	c.addConnectionImpl(conn, isInbound, false, peerAddr, ipKey)
+) bool {
+	return c.addConnectionImpl(conn, isInbound, false, peerAddr, ipKey)
 }
 
 func (c *ConnectionManager) addNtCConnectionWithIPKey(
@@ -527,8 +531,8 @@ func (c *ConnectionManager) addNtCConnectionWithIPKey(
 	isInbound bool,
 	peerAddr string,
 	ipKey string,
-) {
-	c.addConnectionImpl(conn, isInbound, true, peerAddr, ipKey)
+) bool {
+	return c.addConnectionImpl(conn, isInbound, true, peerAddr, ipKey)
 }
 
 func (c *ConnectionManager) addConnectionImpl(
@@ -537,7 +541,7 @@ func (c *ConnectionManager) addConnectionImpl(
 	isNtC bool,
 	peerAddr string,
 	ipKey string,
-) {
+) bool {
 	// Check if shutting down before adding to WaitGroup to prevent panic
 	// during Stop()'s Wait() call. Must hold the same lock used to set closing.
 	c.listenersMutex.Lock()
@@ -548,13 +552,101 @@ func (c *ConnectionManager) addConnectionImpl(
 		if conn != nil {
 			conn.Close()
 		}
-		return
+		return false
 	}
 	c.goroutineWg.Add(1)
 	c.listenersMutex.Unlock()
 
 	connId := conn.Id()
 	c.connectionsMutex.Lock()
+
+	// Detect ConnectionId collision. When both sides use listen-port
+	// reuse (OutboundSourcePort), the inbound and outbound connections
+	// produce identical ConnectionIds. Without dedup the inbound
+	// silently overwrites the outbound, corrupting IsInboundConnection
+	// and causing chainsync client callbacks to be dropped.
+	if existing, ok := c.connections[connId]; ok && existing.conn != nil {
+		switch {
+		case !existing.isInbound && isInbound:
+			// Existing outbound + new inbound: keep outbound.
+			// Outbound connections carry the chainsync client (chain
+			// truth source). Matches cardano-node dedup behavior.
+			c.connectionsMutex.Unlock()
+			c.config.Logger.Warn(
+				"closing inbound connection that collides with existing outbound",
+				"peer_addr",
+				peerAddr,
+			)
+			conn.Close()
+			c.releaseIPSlot(ipKey)
+			c.goroutineWg.Done()
+			return false
+
+		case existing.isInbound && !isInbound:
+			// Existing inbound + new outbound: outbound wins.
+			// Clean up inbound peer address tracking for the evicted
+			// connection before replacing it.
+			c.config.Logger.Info(
+				"replacing inbound connection with outbound on ConnectionId collision",
+				"peer_addr",
+				peerAddr,
+			)
+			if existing.isInbound &&
+				!existing.isNtC &&
+				c.tracksInboundPeerAddresses() {
+				if peerKey := normalizePeerAddr(existing.peerAddr); peerKey != "" {
+					c.inboundPeerAddrs[peerKey]--
+					if c.inboundPeerAddrs[peerKey] <= 0 {
+						delete(c.inboundPeerAddrs, peerKey)
+					}
+				}
+			}
+			c.updateConnectionMetricsLocked(existing, false)
+			existingConn := existing.conn
+			existingIPKey := existing.ipKey
+			// Remove the old entry so the evicted connection's
+			// error-watcher goroutine cannot double-decrement
+			// metrics via RemoveConnection.
+			delete(c.connections, connId)
+			c.connectionsMutex.Unlock()
+			existingConn.Close()
+			if existingIPKey != "" {
+				c.releaseIPSlot(existingIPKey)
+			}
+			c.connectionsMutex.Lock()
+
+		default:
+			// Same direction — allow overwrite (reconnect/replacement).
+			// Clean up old connection to avoid leaking metrics, IP slots,
+			// and inbound peer counters.
+			c.config.Logger.Info(
+				"replacing same-direction connection on ConnectionId collision",
+				"peer_addr", peerAddr,
+				"direction_inbound", isInbound,
+			)
+			if existing.isInbound &&
+				!existing.isNtC &&
+				c.tracksInboundPeerAddresses() {
+				if peerKey := normalizePeerAddr(existing.peerAddr); peerKey != "" {
+					c.inboundPeerAddrs[peerKey]--
+					if c.inboundPeerAddrs[peerKey] <= 0 {
+						delete(c.inboundPeerAddrs, peerKey)
+					}
+				}
+			}
+			c.updateConnectionMetricsLocked(existing, false)
+			existingConn := existing.conn
+			existingIPKey := existing.ipKey
+			delete(c.connections, connId)
+			c.connectionsMutex.Unlock()
+			existingConn.Close()
+			if existingIPKey != "" {
+				c.releaseIPSlot(existingIPKey)
+			}
+			c.connectionsMutex.Lock()
+		}
+	}
+
 	c.connections[connId] = &connectionInfo{
 		conn:      conn,
 		isInbound: isInbound,
@@ -575,7 +667,9 @@ func (c *ConnectionManager) addConnectionImpl(
 		defer c.goroutineWg.Done()
 		err := <-conn.ErrorChan()
 		// Remove connection (also releases IP slot)
-		c.RemoveConnection(connId, conn)
+		if !c.RemoveConnection(connId, conn) {
+			return
+		}
 		// Generate event
 		if c.config.EventBus != nil {
 			c.config.EventBus.Publish(
@@ -594,12 +688,13 @@ func (c *ConnectionManager) addConnectionImpl(
 			c.config.ConnClosedFunc(connId, err)
 		}
 	}()
+	return true
 }
 
 func (c *ConnectionManager) RemoveConnection(
 	connId ouroboros.ConnectionId,
 	conn *ouroboros.Connection,
-) {
+) bool {
 	c.connectionsMutex.Lock()
 	info := c.connections[connId]
 	// Only remove if the map still holds this exact connection.
@@ -607,7 +702,7 @@ func (c *ConnectionManager) RemoveConnection(
 	// same ID (OutboundSourcePort reuse).
 	if info == nil || info.conn != conn {
 		c.connectionsMutex.Unlock()
-		return
+		return false
 	}
 	delete(c.connections, connId)
 	if info != nil &&
@@ -628,6 +723,7 @@ func (c *ConnectionManager) RemoveConnection(
 		c.releaseIPSlot(info.ipKey)
 	}
 	c.updateConnectionMetrics()
+	return true
 }
 
 // HasInboundPeerAddress returns true if there is already an inbound connection
@@ -685,7 +781,9 @@ func (c *ConnectionManager) GetConnectionById(
 // IsInboundConnection returns true if the given connection ID is an inbound
 // connection (a remote peer connected to us). Inbound peers are clients
 // pulling data from us and should not be treated as chain truth sources.
-func (c *ConnectionManager) IsInboundConnection(connId ouroboros.ConnectionId) bool {
+func (c *ConnectionManager) IsInboundConnection(
+	connId ouroboros.ConnectionId,
+) bool {
 	c.connectionsMutex.Lock()
 	defer c.connectionsMutex.Unlock()
 	if info, exists := c.connections[connId]; exists {

@@ -1231,3 +1231,102 @@ func TestRewindTrackedClientsToRewindsAheadClients(t *testing.T) {
 	require.NotNil(t, behindClient)
 	require.Equal(t, behindPoint, behindClient.Cursor)
 }
+
+// --- StartedAsOutbound direction flag tests ---
+
+func TestTryAddClientConnIdWithDirection_RecordsOutboundFlag(
+	t *testing.T,
+) {
+	bus := newTestEventBus(t)
+	s := newTestState(t, bus, chainsync.DefaultConfig())
+
+	connOutbound := newTestConnId(1)
+	connInbound := newTestConnId(2)
+
+	// Add an outbound client
+	require.True(t, s.TryAddClientConnIdWithDirection(connOutbound, 10, true))
+	// Add an inbound (non-outbound) client
+	require.True(t, s.TryAddClientConnIdWithDirection(connInbound, 10, false))
+
+	// Verify outbound flag is recorded
+	outbound, exists := s.ClientStartedAsOutbound(connOutbound)
+	require.True(t, exists)
+	require.True(t, outbound, "outbound client should have StartedAsOutbound=true")
+
+	inbound, exists := s.ClientStartedAsOutbound(connInbound)
+	require.True(t, exists)
+	require.False(t, inbound, "inbound client should have StartedAsOutbound=false")
+
+	// Verify non-existent client returns false, false
+	_, exists = s.ClientStartedAsOutbound(newTestConnId(99))
+	require.False(t, exists)
+}
+
+func TestTryAddClientConnId_DefaultsOutboundFalse(t *testing.T) {
+	bus := newTestEventBus(t)
+	s := newTestState(t, bus, chainsync.DefaultConfig())
+
+	conn := newTestConnId(1)
+	require.True(t, s.TryAddClientConnId(conn, 10))
+
+	outbound, exists := s.ClientStartedAsOutbound(conn)
+	require.True(t, exists)
+	require.False(t, outbound, "TryAddClientConnId should default to StartedAsOutbound=false")
+}
+
+func TestTryAddObservedClientConnId_DefaultsOutboundFalse(t *testing.T) {
+	bus := newTestEventBus(t)
+	s := newTestState(t, bus, chainsync.DefaultConfig())
+
+	conn := newTestConnId(1)
+	require.True(t, s.TryAddObservedClientConnId(conn))
+
+	outbound, exists := s.ClientStartedAsOutbound(conn)
+	require.True(t, exists)
+	require.False(t, outbound, "TryAddObservedClientConnId should default to StartedAsOutbound=false")
+}
+
+func TestTryAddObservedClientConnIdWithDirection_RecordsOutboundFlag(
+	t *testing.T,
+) {
+	bus := newTestEventBus(t)
+	s := newTestState(t, bus, chainsync.DefaultConfig())
+
+	conn := newTestConnId(1)
+	require.True(t, s.TryAddObservedClientConnIdWithDirection(conn, true))
+
+	outbound, exists := s.ClientStartedAsOutbound(conn)
+	require.True(t, exists)
+	require.True(t, outbound)
+
+	require.True(t, s.SetClientStartedAsOutbound(conn, false))
+	outbound, exists = s.ClientStartedAsOutbound(conn)
+	require.True(t, exists)
+	require.False(t, outbound)
+}
+
+func TestTryAddClientConnIdWithDirection_DuplicateRejected(
+	t *testing.T,
+) {
+	bus := newTestEventBus(t)
+	s := newTestState(t, bus, chainsync.DefaultConfig())
+
+	conn := newTestConnId(1)
+	require.True(t, s.TryAddClientConnIdWithDirection(conn, 10, true))
+	require.False(t, s.TryAddClientConnIdWithDirection(conn, 10, true))
+	require.Equal(t, 1, s.ClientConnCount())
+}
+
+func TestTryAddClientConnIdWithDirection_LimitEnforced(t *testing.T) {
+	bus := newTestEventBus(t)
+	s := newTestState(t, bus, chainsync.Config{
+		MaxClients:   1,
+		StallTimeout: 30 * time.Second,
+	})
+
+	connA := newTestConnId(1)
+	connB := newTestConnId(2)
+	require.True(t, s.TryAddClientConnIdWithDirection(connA, 1, true))
+	require.False(t, s.TryAddClientConnIdWithDirection(connB, 1, true))
+	require.Equal(t, 1, s.ClientConnCount())
+}

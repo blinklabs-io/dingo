@@ -105,6 +105,12 @@ func (c *ConnectionManager) CreateOutboundConn(
 		"resolved_address", peerAddr,
 		"connection_id", oConn.Id().String(),
 	)
-	c.AddConnection(oConn, false, peerAddr)
+	if !c.AddConnection(oConn, false, peerAddr) {
+		oConn.Close()
+		return nil, fmt.Errorf(
+			"connection rejected (shutdown or collision): %s",
+			address,
+		)
+	}
 	return oConn, nil
 }
