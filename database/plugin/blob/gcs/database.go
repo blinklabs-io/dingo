@@ -338,6 +338,22 @@ func (d *BlobStoreGCS) SetBlock(
 	}
 	writtenObjects = append(writtenObjects, string(indexKey))
 
+	// Hash-to-block-key index for O(1) BlockByHash lookups
+	hashIndexKey := types.BlockHashIndexKey(hash)
+	w = d.object(hashIndexKey).NewWriter(ctx)
+	if _, err := w.Write(key); err != nil {
+		_ = w.Close()
+		d.logger.Errorf("failed to write object %q: %v", string(hashIndexKey), err)
+		d.cleanupObjects(ctx, writtenObjects)
+		return err
+	}
+	if err := w.Close(); err != nil {
+		d.logger.Errorf("failed to close writer for %q: %v", string(hashIndexKey), err)
+		d.cleanupObjects(ctx, writtenObjects)
+		return err
+	}
+	writtenObjects = append(writtenObjects, string(hashIndexKey))
+
 	// Block metadata by point
 	metadataKey := types.BlockBlobMetadataKey(key)
 	tmpMetadata := types.BlockMetadata{
@@ -510,6 +526,12 @@ func (d *BlobStoreGCS) DeleteBlock(
 	if err := d.object(metadataKey).Delete(ctx); err != nil &&
 		!errors.Is(err, storage.ErrObjectNotExist) {
 		d.logger.Errorf("gcs delete %q failed: %v", string(metadataKey), err)
+		return err
+	}
+	hashIndexKey := types.BlockHashIndexKey(hash)
+	if err := d.object(hashIndexKey).Delete(ctx); err != nil &&
+		!errors.Is(err, storage.ErrObjectNotExist) {
+		d.logger.Errorf("gcs delete %q failed: %v", string(hashIndexKey), err)
 		return err
 	}
 	return nil

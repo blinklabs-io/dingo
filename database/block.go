@@ -303,6 +303,13 @@ func BlockByHashTxn(txn *Txn, hash []byte) (models.Block, error) {
 	if blob == nil {
 		return models.Block{}, types.ErrBlobStoreUnavailable
 	}
+	// Try O(1) hash index lookup first
+	hashIndexKey := types.BlockHashIndexKey(hash)
+	blockKey, err := blob.Get(blobTxn, hashIndexKey)
+	if err == nil && len(blockKey) > 0 {
+		return blockByKey(txn, blockKey)
+	}
+	// Fallback to sequential scan for blocks written before the index existed
 	iterOpts := types.BlobIteratorOptions{
 		Prefix: []byte(types.BlockBlobKeyPrefix),
 	}
