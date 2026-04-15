@@ -3,7 +3,7 @@
 
 ## v0.35.0 (April 15, 2026)
 
-**Title:** Update highlights
+**Title:** Smoother sync and faster block lookups
 
 **Date:** April 15, 2026
 
@@ -19,9 +19,9 @@ Hi folks! Here’s what we shipped in v0.35.0.
 
 - **More complete Mithril bootstrap snapshots:** Startup is smoother because nodes now prepare more snapshot data needed for the current epoch window after a Mithril bootstrap.
 - **More resilient peer retry behavior:** Sync is more rock-solid because chainsync and blockfetch retry against the active best peer when target connections aren’t available.
-- **Faster block lookup by hash:** Hash-based block queries are snappier because block-by-hash resolution is faster across blob storage backends.
+- **Faster block lookup by hash:** Hash-based block queries are faster because block-by-hash resolution is streamlined across blob storage backends.
 - **Larger event queue capacity:** Bursty workloads are easier to handle because the event queue capacity was increased from 10,000 to 100,000.
-- **Stronger connection direction tracking:** Networking is more dependable because chainsync tracks outbound-started clients and the connection manager detects inbound/outbound `ConnectionId` collisions.
+- **Stronger connection direction tracking:** Networking is more rock-solid because chainsync tracks outbound-started clients and the connection manager detects inbound/outbound `ConnectionId` collisions.
 - **Simpler SQLite metadata batching:** Batched metadata writes are easier to manage because a `BatchAccumulator` streamlines collecting and resetting SQLite metadata model batches.
 
 ### 🔧 Fixes
