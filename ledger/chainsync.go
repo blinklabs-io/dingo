@@ -289,21 +289,43 @@ func (ls *LedgerState) handleChainSwitchEvent(evt event.Event) {
 		e.NewConnectionId,
 	)
 	if err != nil {
-		ls.config.Logger.Warn(
-			"failed to hand off chainsync pipeline on chain switch, resetting pipeline",
-			"component", "ledger",
-			"connection_id", e.NewConnectionId.String(),
-			"error", err,
-		)
-		// Clear orphaned headers and stale connection refs so the
-		// pipeline can accept headers from reconnected peers instead
-		// of stalling permanently.
-		ls.clearQueuedHeaders()
-		ls.selectedBlockfetchConnId = ouroboros.ConnectionId{}
-		ls.chainsyncBlockfetchMutex.Unlock()
-		return
+		// The target connection may have closed between chain selection
+		// and event processing. Retry with the current active best peer
+		// before giving up.
+		if ls.config.GetActiveConnectionFunc != nil {
+			if activeConnId := ls.config.GetActiveConnectionFunc(); activeConnId != nil &&
+				!sameConnectionId(*activeConnId, e.NewConnectionId) {
+				ls.config.Logger.Info(
+					"chain switch target unavailable, retrying with active best peer",
+					"component", "ledger",
+					"failed_connection_id", e.NewConnectionId.String(),
+					"active_connection_id", activeConnId.String(),
+					"error", err,
+				)
+				if retryConnId, retryErr := ls.handoffPipelineOnSwitchLocked(*activeConnId); retryErr == nil {
+					replayConnId = retryConnId
+					err = nil
+				}
+			}
+		}
+		if err != nil {
+			ls.config.Logger.Warn(
+				"failed to hand off chainsync pipeline on chain switch, resetting pipeline",
+				"component", "ledger",
+				"connection_id", e.NewConnectionId.String(),
+				"error", err,
+			)
+			// Clear orphaned headers and stale connection refs so the
+			// pipeline can accept headers from reconnected peers instead
+			// of stalling permanently.
+			ls.clearQueuedHeaders()
+			ls.selectedBlockfetchConnId = ouroboros.ConnectionId{}
+		}
 	}
 	ls.chainsyncBlockfetchMutex.Unlock()
+	if err != nil {
+		return
+	}
 	if connIdKey(replayConnId) != "" {
 		ls.replayBufferedHeadersAsync(replayConnId)
 	}
@@ -1303,12 +1325,34 @@ func (ls *LedgerState) RecoverAfterLocalRollback(
 		ls.chainsyncBlockfetchMutex.Lock()
 		if ls.chainsyncBlockfetchReadyChan == nil {
 			if err := ls.startQueuedBlockfetchLocked(connId); err != nil {
-				ls.config.Logger.Warn(
-					"failed to start blockfetch after local rollback recovery",
-					"component", "ledger",
-					"connection_id", connId.String(),
-					"error", err,
-				)
+				// Recovery connection may have closed. Retry with
+				// the current active best peer before giving up,
+				// otherwise the pipeline stalls until restart.
+				if ls.config.GetActiveConnectionFunc != nil {
+					if activeConnId := ls.config.GetActiveConnectionFunc(); activeConnId != nil &&
+						!sameConnectionId(*activeConnId, connId) {
+						ls.config.Logger.Info(
+							"local rollback recovery connection unavailable, retrying with active best peer",
+							"component", "ledger",
+							"failed_connection_id", connId.String(),
+							"active_connection_id", activeConnId.String(),
+							"error", err,
+						)
+						if retryErr := ls.startQueuedBlockfetchLocked(*activeConnId); retryErr == nil {
+							err = nil
+						} else {
+							err = retryErr
+						}
+					}
+				}
+				if err != nil {
+					ls.config.Logger.Warn(
+						"failed to start blockfetch after local rollback recovery",
+						"component", "ledger",
+						"connection_id", connId.String(),
+						"error", err,
+					)
+				}
 			}
 		}
 		ls.chainsyncBlockfetchMutex.Unlock()
@@ -1532,7 +1576,7 @@ func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 	if err != nil {
 		// The chosen connection's blockfetch protocol may have shut
 		// down. Try the header source connection if it's different;
-		// otherwise clear stale headers and resync.
+		// otherwise try the active best peer before giving up.
 		if !sameConnectionId(e.ConnectionId, initialConnId) {
 			ls.config.Logger.Warn(
 				"blockfetch start failed, retrying on header source connection",
@@ -1545,6 +1589,30 @@ func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 				return nil
 			}
 		}
+		// Header source also failed (or was the same connection).
+		// Try the current active best peer as a last resort before
+		// clearing state — otherwise every subsequent header will
+		// fail the same stale lookup.
+		if ls.config.GetActiveConnectionFunc != nil {
+			if activeConnId := ls.config.GetActiveConnectionFunc(); activeConnId != nil &&
+				!sameConnectionId(*activeConnId, initialConnId) &&
+				!sameConnectionId(*activeConnId, e.ConnectionId) {
+				ls.config.Logger.Info(
+					"blockfetch connections unavailable, retrying with active best peer",
+					"component", "ledger",
+					"failed_connection_id", initialConnId.String(),
+					"active_connection_id", activeConnId.String(),
+					"error", err,
+				)
+				ls.selectedBlockfetchConnId = *activeConnId
+				if retryErr := ls.startQueuedBlockfetchLocked(*activeConnId); retryErr == nil {
+					return nil
+				}
+			}
+		}
+		// All fallbacks exhausted. Clear stale state so the next
+		// header can start a fresh blockfetch attempt.
+		ls.selectedBlockfetchConnId = ouroboros.ConnectionId{}
 		ls.clearQueuedHeaders()
 		ls.requestChainsyncResync(
 			initialConnId,
