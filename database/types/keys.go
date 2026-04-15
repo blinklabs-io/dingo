@@ -54,6 +54,18 @@ func BlockBlobMetadataKey(baseKey []byte) []byte {
 	return slices.Concat(baseKey, []byte(BlockBlobMetadataKeySuffix))
 }
 
+// BlockHashIndexKeyPrefix is the key prefix for the hash→block-key index.
+// Key format: "bh" + hash(32 bytes), value: BlockBlobKey (slot+hash).
+const BlockHashIndexKeyPrefix = "bh"
+
+// BlockHashIndexKey builds the key for a hash→slot lookup index entry.
+func BlockHashIndexKey(hash []byte) []byte {
+	key := make([]byte, 0, len(BlockHashIndexKeyPrefix)+len(hash))
+	key = append(key, BlockHashIndexKeyPrefix...)
+	key = append(key, hash...)
+	return key
+}
+
 func UtxoBlobKey(txId []byte, outputIdx uint32) []byte {
 	key := []byte(UtxoBlobKeyPrefix)
 	key = append(key, txId...)

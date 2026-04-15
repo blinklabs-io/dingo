@@ -539,7 +539,8 @@ func (d *BlobStoreBadger) SetBlock(
 	keyLen := len(types.BlockBlobKeyPrefix) + 8 + len(hash)
 	indexKeyLen := len(types.BlockBlobIndexKeyPrefix) + 8
 	metadataKeyLen := keyLen + len(types.BlockBlobMetadataKeySuffix)
-	packedLen := keyLen + indexKeyLen + metadataKeyLen
+	hashIndexKeyLen := len(types.BlockHashIndexKeyPrefix) + len(hash)
+	packedLen := keyLen + indexKeyLen + metadataKeyLen + hashIndexKeyLen
 	if d.compactBlockMetadata {
 		packedLen += 32 + len(prevHash)
 	}
@@ -557,8 +558,17 @@ func (d *BlobStoreBadger) SetBlock(
 	if err := badgerTxn.tx.Set(indexKey, key); err != nil {
 		return err
 	}
+	// Hash-to-block-key index for O(1) BlockByHash lookups
+	hashIndexStart := indexKeyEnd
+	hashIndexEnd := hashIndexStart + hashIndexKeyLen
+	hashIndexKey := packed[hashIndexStart:hashIndexEnd]
+	copy(hashIndexKey, types.BlockHashIndexKeyPrefix)
+	copy(hashIndexKey[len(types.BlockHashIndexKeyPrefix):], hash)
+	if err := badgerTxn.tx.Set(hashIndexKey, key); err != nil {
+		return err
+	}
 	// Block metadata by point
-	metadataKeyStart := indexKeyEnd
+	metadataKeyStart := hashIndexEnd
 	metadataKeyEnd := metadataKeyStart + metadataKeyLen
 	metadataKey := packed[metadataKeyStart:metadataKeyEnd]
 	buildBlockBlobMetadataKey(metadataKey, key)
@@ -642,6 +652,11 @@ func (d *BlobStoreBadger) DeleteBlock(
 	}
 	metadataKey := types.BlockBlobMetadataKey(key)
 	if err := badgerTxn.tx.Delete(metadataKey); err != nil {
+		return err
+	}
+	// Clean up hash-to-block-key index
+	hashIndexKey := types.BlockHashIndexKey(hash)
+	if err := badgerTxn.tx.Delete(hashIndexKey); err != nil {
 		return err
 	}
 	return nil
