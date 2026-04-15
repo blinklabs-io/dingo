@@ -429,18 +429,52 @@ func TestRegisterTrackedChainsyncClient_ObservabilityOnlyDoesNotConsumePool(
 	o := NewOuroboros(OuroborosConfig{EventBus: bus})
 	o.ChainsyncState = state
 
-	require.True(t, o.registerTrackedChainsyncClient(connObserved, false))
+	require.True(t, o.registerTrackedChainsyncClient(connObserved, false, true))
 	observabilityOnly, exists := state.ClientObservabilityOnly(connObserved)
 	require.True(t, exists)
 	require.True(t, observabilityOnly)
+	outbound, exists := state.ClientStartedAsOutbound(connObserved)
+	require.True(t, exists)
+	require.True(t, outbound)
+	require.False(t, o.isInboundChainsyncClient(connObserved))
 	require.Equal(t, 0, state.ClientConnCount())
 
-	require.True(t, o.registerTrackedChainsyncClient(connEligible, true))
+	require.True(t, o.registerTrackedChainsyncClient(connEligible, true, true))
 	require.Equal(t, 1, state.ClientConnCount())
 
 	active := state.GetClientConnId()
 	require.NotNil(t, active)
 	require.Equal(t, connEligible, *active)
+}
+
+func TestRegisterTrackedChainsyncClient_PromotedObservedKeepsDirection(
+	t *testing.T,
+) {
+	bus := event.NewEventBus(nil, nil)
+	defer bus.Close()
+
+	connId := newTestConnId("127.0.0.1:6000", "2.2.2.2:3001")
+	state := dchainsync.NewStateWithConfig(bus, nil, dchainsync.Config{
+		MaxClients:   1,
+		StallTimeout: time.Minute,
+	})
+	o := NewOuroboros(OuroborosConfig{EventBus: bus})
+	o.ChainsyncState = state
+
+	require.True(t, o.registerTrackedChainsyncClient(connId, false, true))
+	observabilityOnly, exists := state.ClientObservabilityOnly(connId)
+	require.True(t, exists)
+	require.True(t, observabilityOnly)
+	require.False(t, o.isInboundChainsyncClient(connId))
+
+	require.True(t, o.registerTrackedChainsyncClient(connId, true, true))
+	observabilityOnly, exists = state.ClientObservabilityOnly(connId)
+	require.True(t, exists)
+	require.False(t, observabilityOnly)
+	outbound, exists := state.ClientStartedAsOutbound(connId)
+	require.True(t, exists)
+	require.True(t, outbound)
+	require.False(t, o.isInboundChainsyncClient(connId))
 }
 
 func TestHandlePeerEligibilityChangedEvent_DemotesObservedIngress(t *testing.T) {

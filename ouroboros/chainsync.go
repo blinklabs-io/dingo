@@ -481,8 +481,7 @@ func (o *Ouroboros) chainsyncClientRollBackward(
 	point ocommon.Point,
 	tip ochainsync.Tip,
 ) error {
-	if o.ConnManager != nil &&
-		o.ConnManager.IsInboundConnection(ctx.ConnectionId) {
+	if o.isInboundChainsyncClient(ctx.ConnectionId) {
 		return nil
 	}
 	if !o.reconcileChainsyncIngressAdmission(
@@ -525,8 +524,7 @@ func (o *Ouroboros) chainsyncClientRollForward(
 		// Inbound connections are clients pulling data from us.
 		// They are not sources of chain truth and should not
 		// influence chain selection or the blockfetch pipeline.
-		isInbound := o.ConnManager != nil &&
-			o.ConnManager.IsInboundConnection(ctx.ConnectionId)
+		isInbound := o.isInboundChainsyncClient(ctx.ConnectionId)
 		ingressEligible := false
 		if !isInbound {
 			ingressEligible = o.reconcileChainsyncIngressAdmission(
@@ -677,6 +675,26 @@ func (o *Ouroboros) shouldPublishChainsyncToLedger(
 	return o.config.ChainsyncIngressEligible(connId)
 }
 
+// isInboundChainsyncClient returns true if the chainsync client for
+// connId was started on an inbound connection. This uses the tracked
+// client's recorded direction instead of connmanager.IsInboundConnection,
+// making it immune to ConnectionId collisions under listen-port reuse.
+// Returns true (treat as inbound) if the client is not tracked.
+func (o *Ouroboros) isInboundChainsyncClient(
+	connId ouroboros.ConnectionId,
+) bool {
+	if o.ChainsyncState == nil {
+		return false
+	}
+	outbound, exists := o.ChainsyncState.ClientStartedAsOutbound(connId)
+	if !exists {
+		// Unknown client — treat as inbound (conservative: don't
+		// feed untracked connections into the ledger).
+		return true
+	}
+	return !outbound
+}
+
 func (o *Ouroboros) maxTrackedChainsyncClients() int {
 	maxClients := defaultMaxChainsyncClients
 	if o.ChainsyncState != nil && o.ChainsyncState.MaxClients() > 0 {
@@ -688,18 +706,24 @@ func (o *Ouroboros) maxTrackedChainsyncClients() int {
 func (o *Ouroboros) registerTrackedChainsyncClient(
 	connId ouroboros.ConnectionId,
 	ingressEligible bool,
+	startedAsOutbound bool,
 ) bool {
 	if o.ChainsyncState == nil {
 		return false
 	}
 	if ingressEligible {
-		if o.ChainsyncState.TryAddClientConnId(
+		if o.ChainsyncState.TryAddClientConnIdWithDirection(
 			connId,
 			o.maxTrackedChainsyncClients(),
+			startedAsOutbound,
 		) {
 			return true
 		}
 		if o.ChainsyncState.HasClientConnId(connId) {
+			o.ChainsyncState.SetClientStartedAsOutbound(
+				connId,
+				startedAsOutbound,
+			)
 			observabilityOnly, exists := o.ChainsyncState.ClientObservabilityOnly(
 				connId,
 			)
@@ -713,7 +737,10 @@ func (o *Ouroboros) registerTrackedChainsyncClient(
 		}
 		return false
 	}
-	if o.ChainsyncState.TryAddObservedClientConnId(connId) {
+	if o.ChainsyncState.TryAddObservedClientConnIdWithDirection(
+		connId,
+		startedAsOutbound,
+	) {
 		return true
 	}
 	return o.reconcileChainsyncIngressAdmission(connId, false)

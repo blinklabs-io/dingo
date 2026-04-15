@@ -94,6 +94,12 @@ type TrackedClient struct {
 	// tip/activity metrics but must not consume the eligible
 	// client pool or become active for ledger ingress.
 	ObservabilityOnly bool
+	// StartedAsOutbound records whether the connection was
+	// initiated by us (outbound). This is stamped at
+	// registration time and can be refreshed only when the
+	// same ConnectionId is explicitly re-registered after a
+	// connmanager collision replacement.
+	StartedAsOutbound bool
 	LastActivity      time.Time
 	HeadersRecv       uint64
 	// TODO: BytesRecv needs to be wired to the underlying
@@ -358,11 +364,13 @@ func (s *State) promoteBestClientLocked() {
 func (s *State) addTrackedClientLocked(
 	connId ouroboros.ConnectionId,
 	observabilityOnly bool,
+	startedAsOutbound bool,
 ) {
 	s.trackedClients[connId] = &TrackedClient{
 		ConnId:            connId,
 		Status:            ClientStatusSyncing,
 		ObservabilityOnly: observabilityOnly,
+		StartedAsOutbound: startedAsOutbound,
 		LastActivity:      time.Now(),
 	}
 	// Set as active if there's no active client
@@ -389,10 +397,15 @@ func (s *State) addTrackedClientLocked(
 // Returns true if the client was added, false if rejected
 // (already tracked or at capacity). If no active client exists,
 // this connection is automatically set as the active client.
+// The client is recorded as outbound (StartedAsOutbound=true).
 func (s *State) AddClientConnId(
 	connId ouroboros.ConnectionId,
 ) bool {
-	return s.TryAddClientConnId(connId, s.config.MaxClients)
+	return s.TryAddClientConnIdWithDirection(
+		connId,
+		s.config.MaxClients,
+		true,
+	)
 }
 
 // TryAddObservedClientConnId adds a connection to observability-only tracking.
@@ -401,12 +414,22 @@ func (s *State) AddClientConnId(
 func (s *State) TryAddObservedClientConnId(
 	connId ouroboros.ConnectionId,
 ) bool {
+	return s.TryAddObservedClientConnIdWithDirection(connId, false)
+}
+
+// TryAddObservedClientConnIdWithDirection adds a connection to
+// observability-only tracking and records whether it was started
+// as outbound.
+func (s *State) TryAddObservedClientConnIdWithDirection(
+	connId ouroboros.ConnectionId,
+	startedAsOutbound bool,
+) bool {
 	s.clientConnIdMutex.Lock()
 	defer s.clientConnIdMutex.Unlock()
 	if _, exists := s.trackedClients[connId]; exists {
 		return false
 	}
-	s.addTrackedClientLocked(connId, true)
+	s.addTrackedClientLocked(connId, true, startedAsOutbound)
 	return true
 }
 
@@ -463,7 +486,31 @@ func (s *State) TryAddClientConnId(
 	if s.eligibleClientCountLocked() >= maxClients {
 		return false
 	}
-	s.addTrackedClientLocked(connId, false)
+	s.addTrackedClientLocked(connId, false, false)
+	return true
+}
+
+// TryAddClientConnIdWithDirection is like TryAddClientConnId but
+// additionally records whether the connection was started as
+// outbound. This is used to stamp each tracked client with its
+// connection direction at registration time, providing a reliable
+// flag that survives ConnectionId collisions.
+func (s *State) TryAddClientConnIdWithDirection(
+	connId ouroboros.ConnectionId,
+	maxClients int,
+	startedAsOutbound bool,
+) bool {
+	s.clientConnIdMutex.Lock()
+	defer s.clientConnIdMutex.Unlock()
+	// Check if already tracked
+	if _, exists := s.trackedClients[connId]; exists {
+		return false
+	}
+	// Check client limit
+	if s.eligibleClientCountLocked() >= maxClients {
+		return false
+	}
+	s.addTrackedClientLocked(connId, false, startedAsOutbound)
 	return true
 }
 
@@ -479,6 +526,39 @@ func (s *State) ClientObservabilityOnly(
 		return false, false
 	}
 	return tc.ObservabilityOnly, true
+}
+
+// ClientStartedAsOutbound reports whether a tracked client was
+// registered as an outbound connection. The second return value
+// reports whether the client exists.
+func (s *State) ClientStartedAsOutbound(
+	connId ouroboros.ConnectionId,
+) (bool, bool) {
+	s.clientConnIdMutex.RLock()
+	defer s.clientConnIdMutex.RUnlock()
+	tc, exists := s.trackedClients[connId]
+	if !exists {
+		return false, false
+	}
+	return tc.StartedAsOutbound, true
+}
+
+// SetClientStartedAsOutbound updates the recorded connection
+// direction for an existing tracked client. This is used when a
+// ConnectionId collision causes a new physical connection to replace
+// an older tracked connection under the same ID.
+func (s *State) SetClientStartedAsOutbound(
+	connId ouroboros.ConnectionId,
+	startedAsOutbound bool,
+) bool {
+	s.clientConnIdMutex.Lock()
+	defer s.clientConnIdMutex.Unlock()
+	tc, exists := s.trackedClients[connId]
+	if !exists {
+		return false
+	}
+	tc.StartedAsOutbound = startedAsOutbound
+	return true
 }
 
 // SetClientObservabilityOnly toggles whether a tracked client participates in
