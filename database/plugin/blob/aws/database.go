@@ -284,6 +284,11 @@ func (d *BlobStoreS3) SetBlock(
 	if err := d.Put(ctx, string(indexKey), key); err != nil {
 		return err
 	}
+	// Hash-to-block-key index for O(1) BlockByHash lookups
+	hashIndexKey := types.BlockHashIndexKey(hash)
+	if err := d.Put(ctx, string(hashIndexKey), key); err != nil {
+		return err
+	}
 	// Block metadata by point
 	metadataKey := types.BlockBlobMetadataKey(key)
 	tmpMetadata := types.BlockMetadata{
@@ -370,6 +375,13 @@ func (d *BlobStoreS3) DeleteBlock(
 	if _, err := d.client.DeleteObject(ctx, &s3.DeleteObjectInput{
 		Bucket: aws.String(d.bucket),
 		Key:    awsString(d.fullKey(string(metadataKey))),
+	}); err != nil && !isS3NotFound(err) {
+		return err
+	}
+	hashIndexKey := types.BlockHashIndexKey(hash)
+	if _, err := d.client.DeleteObject(ctx, &s3.DeleteObjectInput{
+		Bucket: aws.String(d.bucket),
+		Key:    awsString(d.fullKey(string(hashIndexKey))),
 	}); err != nil && !isS3NotFound(err) {
 		return err
 	}
