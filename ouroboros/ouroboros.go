@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"slices"
 	"sync"
 	"time"
@@ -509,6 +510,21 @@ func (o *Ouroboros) HandleInboundConnEvent(evt event.Event) {
 	if versionData == nil || versionData.DiffusionMode() != oprotocol.DiffusionModeInitiatorAndResponder {
 		o.config.Logger.Debug(
 			"inbound connection is not full-duplex, skipping client start",
+			"connection_id", connId.String(),
+		)
+		return
+	}
+
+	// DINGO_DISABLE_INBOUND_CLIENT skips starting chainsync/txsubmission
+	// clients on full-duplex inbound connections. This prevents chain
+	// selection flapping on resource-constrained hardware where a second
+	// chainsync client causes constant connection switching that stalls
+	// the blockfetch pipeline. The inbound peer can still pull blocks
+	// via the chainsync server running on this connection.
+	if os.Getenv("DINGO_DISABLE_INBOUND_CLIENT") != "" {
+		o.config.Logger.Info(
+			"inbound client protocols disabled by DINGO_DISABLE_INBOUND_CLIENT",
+			"component", "ouroboros",
 			"connection_id", connId.String(),
 		)
 		return

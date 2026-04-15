@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"os"
 	"time"
 
 	ouroboros "github.com/blinklabs-io/gouroboros"
@@ -42,9 +43,11 @@ func (c *ConnectionManager) CreateOutboundConn(
 	dialer := net.Dialer{
 		Timeout: 10 * time.Second,
 	}
-	if c.config.OutboundSourcePort > 0 {
+	if c.config.OutboundSourcePort > 0 && os.Getenv("DINGO_DISABLE_SOURCE_PORT") == "" {
 		// Setup connection to use our listening port as the source port
-		// This is required for peer sharing to be useful
+		// This is required for peer sharing to be useful.
+		// DINGO_DISABLE_SOURCE_PORT skips this to avoid TIME_WAIT socket
+		// exhaustion on resource-constrained hardware (e.g. Raspberry Pi).
 		clientAddr, _ = net.ResolveTCPAddr(
 			"tcp",
 			fmt.Sprintf(":%d", c.config.OutboundSourcePort),
