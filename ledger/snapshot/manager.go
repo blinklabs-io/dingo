@@ -308,10 +308,12 @@ func (m *Manager) captureMarkSnapshot(
 	return nil
 }
 
-// CaptureGenesisSnapshot captures the initial stake distribution from genesis
-// as a mark snapshot for epoch 0. This ensures the "Go" snapshot is available
-// at epoch 2 for leader election, matching the Cardano spec which uses the
-// genesis stake distribution for the first two epochs.
+// CaptureGenesisSnapshot captures the initial stake distribution as mark
+// snapshots. For a fresh sync this seeds epoch 0 so that leader election
+// works at epoch 2. After a Mithril bootstrap the node starts at a much
+// later epoch, so the method also seeds the current Mark/Set/Go window
+// (epochs N, N-1, N-2) to ensure leader election can find its "Go"
+// snapshot immediately.
 func (m *Manager) CaptureGenesisSnapshot(ctx context.Context) error {
 	calculator := NewCalculator(m.db)
 
@@ -322,6 +324,9 @@ func (m *Manager) CaptureGenesisSnapshot(ctx context.Context) error {
 
 	// After Mithril import, slot 0 has no pool data. Fall back to
 	// the latest epoch's start slot where imported pools are visible.
+	// Also remember the latest epoch so we can seed the Mark/Set/Go
+	// window below.
+	var currentEpochId uint64
 	if distribution.TotalPools == 0 {
 		epochs, epErr := m.db.GetEpochs(nil)
 		if epErr != nil {
@@ -333,9 +338,11 @@ func (m *Manager) CaptureGenesisSnapshot(ctx context.Context) error {
 			)
 		} else if len(epochs) > 0 {
 			lastEpoch := epochs[len(epochs)-1]
+			currentEpochId = lastEpoch.EpochId
 			m.logger.Debug(
 				"attempting genesis stake fallback from latest epoch",
 				"component", "snapshot",
+				"epoch", currentEpochId,
 				"start_slot", lastEpoch.StartSlot,
 				"total_pools", distribution.TotalPools,
 			)
@@ -372,6 +379,8 @@ func (m *Manager) CaptureGenesisSnapshot(ctx context.Context) error {
 		"total_stake", distribution.TotalStake,
 	)
 
+	// Always save epoch 0 for normal bootstrap (leader election at
+	// epochs 0 and 1 uses genesis snapshot directly).
 	evt := event.EpochTransitionEvent{
 		NewEpoch:     0,
 		BoundarySlot: 0,
@@ -379,6 +388,39 @@ func (m *Manager) CaptureGenesisSnapshot(ctx context.Context) error {
 	}
 	if err := m.saveSnapshot(ctx, 0, "mark", distribution, evt); err != nil {
 		return fmt.Errorf("save genesis snapshot: %w", err)
+	}
+
+	// After Mithril bootstrap: seed the Mark/Set/Go window for the
+	// current epoch so leader election works immediately. Leader
+	// election for epoch N queries the "mark" snapshot at epoch N-2
+	// (the "Go" snapshot), so we need mark snapshots at N, N-1, and
+	// N-2. Without these the pool shows pool_stake=0 and cannot
+	// forge until two epoch transitions pass.
+	if currentEpochId > 0 {
+		for offset := uint64(0); offset <= 2 && offset <= currentEpochId; offset++ {
+			seedEpoch := currentEpochId - offset
+			if seedEpoch == 0 {
+				continue // already saved above
+			}
+			seedEvt := event.EpochTransitionEvent{
+				NewEpoch: seedEpoch,
+			}
+			if err := m.saveSnapshot(
+				ctx, seedEpoch, "mark", distribution, seedEvt,
+			); err != nil {
+				return fmt.Errorf(
+					"save bootstrap snapshot for epoch %d: %w",
+					seedEpoch, err,
+				)
+			}
+			m.logger.Info(
+				"seeded post-Mithril snapshot",
+				"component", "snapshot",
+				"epoch", seedEpoch,
+				"total_pools", distribution.TotalPools,
+				"total_stake", distribution.TotalStake,
+			)
+		}
 	}
 
 	m.logger.Info(
