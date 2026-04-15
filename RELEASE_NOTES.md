@@ -11,30 +11,26 @@
 
 Hi folks! Here’s what we shipped in v0.35.0.
 
-```json
-{
-  "✨ What's New": [
-    "You can now query transaction metadata labels using new Blockfrost-compatible endpoints, making it easier to integrate with existing Blockfrost-based tooling."
-  ],
-  "💪 Improvements": [
-    "Node startup after a Mithril bootstrap now prepares more of the snapshot data needed for smooth operation in the current epoch window.",
-    "Sync is now more resilient when a chosen peer becomes unavailable, reducing stalls during normal operation.",
-    "Fetching a block by hash is now much faster across blob storage backends, improving responsiveness for hash-based lookups.",
-    "High-throughput event processing is less likely to back up under load, reducing the chance of dropped or delayed work.",
-    "Connection handling is now more robust in mixed inbound/outbound scenarios, reducing edge cases that could cause incorrect behavior.",
-    "Batching SQLite metadata updates is now simpler and safer to manage, improving maintainability and correctness of batched writes."
-  ]
-}
-
-```
-
 ### ✨ What's New
+
+- **Blockfrost-compatible metadata label endpoints:** Building Blockfrost-style integrations is easier because you can now query transaction metadata labels using Blockfrost-compatible endpoints.
 
 ### 💪 Improvements
 
+- **More complete Mithril bootstrap snapshots:** Startup is smoother because nodes now prepare more snapshot data needed for the current epoch window after a Mithril bootstrap.
+- **More resilient peer retry behavior:** Sync is more rock-solid because chainsync and blockfetch retry against the active best peer when target connections aren’t available.
+- **Faster block lookup by hash:** Hash-based block queries are snappier because block-by-hash resolution is faster across blob storage backends.
+- **Larger event queue capacity:** Bursty workloads are easier to handle because the event queue capacity was increased from 10,000 to 100,000.
+- **Stronger connection direction tracking:** Networking is more dependable because chainsync tracks outbound-started clients and the connection manager detects inbound/outbound `ConnectionId` collisions.
+- **Simpler SQLite metadata batching:** Batched metadata writes are easier to manage because a `BatchAccumulator` streamlines collecting and resetting SQLite metadata model batches.
+
 ### 🔧 Fixes
 
+- **No user-facing fixes:** This release focuses on new features and improvements.
+
 ### 📋 What You Need to Know
+
+- **No action required:** You're all set—just upgrade to v0.35.0.
 
 ### 🙏 Thank You
 
