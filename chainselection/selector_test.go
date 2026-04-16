@@ -1275,7 +1275,9 @@ func TestChainSelectorVRFTiebreakerWithNilVRF(t *testing.T) {
 	cs.UpdatePeerTip(connId2, tip, nil)
 
 	// When VRF comparison returns equal (due to nil), fall back to remote address
-	// tiebreaker. connId1 remote (127.0.0.1:10001) < connId2 remote (127.0.0.1:10002).
+	// tiebreaker. Test peers use localhost with distinct ports (n+10000) as
+	// stand-ins for real peer addresses; connId1 (port 10001) sorts before
+	// connId2 (port 10002) so connId1 wins.
 	bestPeer := cs.SelectBestChain()
 	require.NotNil(t, bestPeer)
 	// Since VRF comparison returns ChainEqual when one is nil,
