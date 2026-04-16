@@ -252,9 +252,13 @@ func (d *MetadataStoreSqlite) GetUtxosByAddressWithOrdering(
 	if err != nil {
 		return nil, err
 	}
+	// SQLite treats TRANSACTION as a reserved keyword, so table references
+	// must be quoted when joining against the transaction table.
 	base := db.
 		Table("utxo").
-		Joins("INNER JOIN transaction ON utxo.transaction_id = transaction.id").
+		Joins(
+			`INNER JOIN "transaction" ON utxo.transaction_id = "transaction".id`,
+		).
 		Where("utxo.deleted_slot = 0")
 
 	addrs := q.Addresses
@@ -295,8 +299,8 @@ func (d *MetadataStoreSqlite) GetUtxosByAddressWithOrdering(
 
 	useKeyset := q.Limit > 0 || q.After != nil
 	if useKeyset {
-		slotExpr := "transaction.slot"
-		biExpr := "transaction.block_index"
+		slotExpr := `"transaction".slot`
+		biExpr := `"transaction".block_index`
 		base = base.Select(fmt.Sprintf(
 			"utxo.*, %s as tx_slot, %s as tx_block_index",
 			slotExpr,
@@ -325,9 +329,9 @@ func (d *MetadataStoreSqlite) GetUtxosByAddressWithOrdering(
 		)
 	} else {
 		base = base.Select(
-			"utxo.*, transaction.slot as tx_slot, transaction.block_index as tx_block_index",
+			`utxo.*, "transaction".slot as tx_slot, "transaction".block_index as tx_block_index`,
 		).Order(
-			"transaction.slot ASC, transaction.block_index ASC, utxo.output_idx ASC",
+			`"transaction".slot ASC, "transaction".block_index ASC, utxo.output_idx ASC`,
 		)
 	}
 
