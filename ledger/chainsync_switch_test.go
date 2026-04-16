@@ -76,7 +76,6 @@ func TestDetectConnectionSwitchHandsOffQueuedHeadersToNewActiveConnection(
 	currentConn := connId2
 	switchCalls := 0
 	requestCount := 0
-	requestedConnId := ouroboros.ConnectionId{}
 
 	ls := &LedgerState{
 		chain:                        testChain,
@@ -101,10 +100,10 @@ func TestDetectConnectionSwitchHandsOffQueuedHeadersToNewActiveConnection(
 				start ocommon.Point,
 				end ocommon.Point,
 			) error {
+				_ = connId
 				_ = start
 				_ = end
 				requestCount++
-				requestedConnId = connId
 				return nil
 			},
 			ConnectionSwitchFunc: func() {
@@ -118,12 +117,15 @@ func TestDetectConnectionSwitchHandsOffQueuedHeadersToNewActiveConnection(
 	require.NotNil(t, activeConnId)
 	assert.Equal(t, connId2, *activeConnId)
 	assert.Equal(t, 1, testChain.HeaderCount())
-	assert.Equal(t, 1, requestCount)
-	assert.Equal(t, connId2, requestedConnId)
-	assert.Equal(t, connId2, ls.activeBlockfetchConnId)
+	// In-flight blockfetch is preserved across the switch so the current batch
+	// can complete. selectedBlockfetchConnId is updated so the NEXT batch uses
+	// the new connection. requestCount stays 0 — no immediate restart.
+	assert.Equal(t, 0, requestCount)
+	assert.Equal(t, connId1, ls.activeBlockfetchConnId)
+	assert.Equal(t, connId2, ls.selectedBlockfetchConnId)
 	assert.Equal(t, ouroboros.ConnectionId{}, ls.headerPipelineConnId)
 	require.NotNil(t, ls.chainsyncBlockfetchReadyChan)
-	require.Empty(t, ls.pendingBlockfetchEvents)
+	assert.Equal(t, 1, len(ls.pendingBlockfetchEvents))
 	assert.Equal(t, 1, switchCalls)
 
 	ls.blockfetchRequestRangeCleanup()
