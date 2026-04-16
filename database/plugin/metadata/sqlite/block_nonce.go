@@ -93,6 +93,32 @@ func (d *MetadataStoreSqlite) GetBlockNoncesInSlotRange(
 	return results, nil
 }
 
+// GetLastBlockNonceInRange retrieves the block nonce with the highest slot
+// in [startSlot, endSlot). Returns nil nonce and no error if none found.
+func (d *MetadataStoreSqlite) GetLastBlockNonceInRange(
+	startSlot uint64,
+	endSlot uint64,
+	txn types.Txn,
+) ([]byte, error) {
+	ret := models.BlockNonce{}
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return nil, err
+	}
+	result := db.
+		Where("slot >= ? AND slot < ?", startSlot, endSlot).
+		Order("slot DESC, hash DESC").
+		Limit(1).
+		First(&ret)
+	if result.Error != nil {
+		if errors.Is(result.Error, gorm.ErrRecordNotFound) {
+			return nil, nil
+		}
+		return nil, result.Error
+	}
+	return ret.Nonce, nil
+}
+
 // DeleteBlockNoncesBeforeSlot deletes block_nonce records with slot less than the specified value
 func (d *MetadataStoreSqlite) DeleteBlockNoncesBeforeSlot(
 	slotNumber uint64,

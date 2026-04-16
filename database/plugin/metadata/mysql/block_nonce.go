@@ -94,6 +94,38 @@ func (d *MetadataStoreMysql) GetBlockNoncesInSlotRange(
 	return results, nil
 }
 
+// GetLastBlockNonceInRange retrieves the block nonce with the highest slot
+// in [startSlot, endSlot). Returns nil nonce and no error if none found.
+func (d *MetadataStoreMysql) GetLastBlockNonceInRange(
+	startSlot uint64,
+	endSlot uint64,
+	txn types.Txn,
+) ([]byte, error) {
+	ret := models.BlockNonce{}
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"resolveDB for slot range [%d,%d): %w",
+			startSlot, endSlot, err,
+		)
+	}
+	result := db.
+		Where("slot >= ? AND slot < ?", startSlot, endSlot).
+		Order("slot DESC, hash DESC").
+		Limit(1).
+		First(&ret)
+	if result.Error != nil {
+		if errors.Is(result.Error, gorm.ErrRecordNotFound) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf(
+			"query block nonce in slot range [%d,%d): %w",
+			startSlot, endSlot, result.Error,
+		)
+	}
+	return ret.Nonce, nil
+}
+
 // DeleteBlockNoncesBeforeSlot deletes block_nonce records with slot less than the specified value
 func (d *MetadataStoreMysql) DeleteBlockNoncesBeforeSlot(
 	slotNumber uint64,

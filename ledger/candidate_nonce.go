@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"math/big"
 
@@ -24,6 +25,11 @@ import (
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/ledger/byron"
 )
+
+// errNoncesMissing is returned by computeCandidateNonceFast when blocks
+// exist in the epoch but no pre-stored nonce rows are found. The caller
+// falls back to the slow CBOR-decode path.
+var errNoncesMissing = errors.New("block nonce rows missing for epoch")
 
 // computeCandidateNonce computes the candidate nonce and end-of-epoch
 // evolving nonce for the given epoch.
@@ -75,36 +81,164 @@ func (ls *LedgerState) computeCandidateNonce(
 	stabilityWindow := ls.nonceStabilityWindow()
 	epochEndSlot := epochStartSlot + epochLengthInSlots
 
-	// Start from the previous epoch's evolving nonce
-	evolvingNonce := make([]byte, len(prevEvolvingNonce))
-	copy(evolvingNonce, prevEvolvingNonce)
-
-	// candidateNonce starts at prevCandidateNonce (carried across
-	// epochs, matching Haskell's psCandidateNonce). It tracks the
-	// evolving nonce until the stability window cutoff. When
-	// stabilityWindow >= epochLength, no blocks update it, so it
-	// stays at prevCandidateNonce.
-	candidateNonce := make([]byte, len(prevCandidateNonce))
-	copy(candidateNonce, prevCandidateNonce)
-
 	// Determine the cutoff slot. Blocks at or past this slot do NOT
 	// update candidateNonce (it freezes), but still update evolvingNonce.
 	var cutoffSlot uint64
 	if stabilityWindow >= epochLengthInSlots {
-		// All blocks are past the cutoff — candidateNonce stays at
-		// prevCandidateNonce, but evolvingNonce is still updated.
 		cutoffSlot = epochStartSlot
 	} else {
 		cutoffSlot = epochStartSlot + epochLengthInSlots -
 			stabilityWindow
 	}
 
+	// Fast path: look up pre-stored evolving nonces from the
+	// block_nonce table. Each block's evolving nonce is stored
+	// during normal block processing (SetBlockNonce), so we can
+	// retrieve the candidate and end-of-epoch nonces with two
+	// indexed queries instead of re-decoding every block's CBOR.
+	candidateNonce, evolvingNonce, err := ls.computeCandidateNonceFast(
+		txn,
+		prevEvolvingNonce,
+		prevCandidateNonce,
+		epochStartSlot,
+		epochEndSlot,
+		cutoffSlot,
+	)
+	if err == nil {
+		return candidateNonce, evolvingNonce, nil
+	}
+	ls.config.Logger.Debug(
+		"fast candidate nonce lookup unavailable, falling back to CBOR decode",
+		"epoch_start_slot", epochStartSlot,
+		"reason", err.Error(),
+		"component", "ledger",
+	)
+
+	// Slow path: iterate every block, decode from CBOR, and
+	// recompute VRF nonces. This is needed when block nonces
+	// are not yet stored (e.g., first sync before nonce storage
+	// was introduced).
+	return ls.computeCandidateNonceSlow(
+		txn,
+		prevEvolvingNonce,
+		prevCandidateNonce,
+		epochStartSlot,
+		epochEndSlot,
+		cutoffSlot,
+		stabilityWindow,
+	)
+}
+
+// computeCandidateNonceFast retrieves pre-stored evolving nonces from the
+// block_nonce table. Returns an error if nonces are not available.
+func (ls *LedgerState) computeCandidateNonceFast(
+	txn *database.Txn,
+	prevEvolvingNonce []byte,
+	prevCandidateNonce []byte,
+	epochStartSlot uint64,
+	epochEndSlot uint64,
+	cutoffSlot uint64,
+) ([]byte, []byte, error) {
+	// Get the evolving nonce at the last block of the epoch
+	evolvingNonce, err := ls.db.GetLastBlockNonceInRange(
+		epochStartSlot,
+		epochEndSlot,
+		txn,
+	)
+	if err != nil {
+		return nil, nil, fmt.Errorf(
+			"get last nonce in epoch: %w", err,
+		)
+	}
+	if len(evolvingNonce) == 0 {
+		// No nonce rows found. Check whether blocks actually exist
+		// in this epoch — if they do, nonces are missing (e.g., old
+		// database) and we must fall back to the slow path.
+		hasBlocks := false
+		if txn != nil {
+			lastBlock, blockErr := database.BlockBeforeSlotTxn(
+				txn,
+				epochEndSlot,
+			)
+			hasBlocks = blockErr == nil &&
+				lastBlock.Slot >= epochStartSlot
+		} else {
+			lastBlock, blockErr := database.BlockBeforeSlot(
+				ls.db,
+				epochEndSlot,
+			)
+			hasBlocks = blockErr == nil &&
+				lastBlock.Slot >= epochStartSlot
+		}
+		if hasBlocks {
+			return nil, nil, errNoncesMissing
+		}
+		// No blocks either — use previous values
+		evolvingNonce = make([]byte, len(prevEvolvingNonce))
+		copy(evolvingNonce, prevEvolvingNonce)
+	}
+
+	// Get the candidate nonce (frozen at the stability window cutoff)
+	var candidateNonce []byte
+	if cutoffSlot <= epochStartSlot {
+		// All blocks are past the cutoff — candidate stays at previous
+		candidateNonce = make([]byte, len(prevCandidateNonce))
+		copy(candidateNonce, prevCandidateNonce)
+	} else {
+		candidateNonce, err = ls.db.GetLastBlockNonceInRange(
+			epochStartSlot,
+			cutoffSlot,
+			txn,
+		)
+		if err != nil {
+			return nil, nil, fmt.Errorf(
+				"get last nonce before cutoff: %w", err,
+			)
+		}
+		if len(candidateNonce) == 0 {
+			// No blocks before cutoff — candidate stays at previous
+			candidateNonce = make([]byte, len(prevCandidateNonce))
+			copy(candidateNonce, prevCandidateNonce)
+		}
+	}
+
+	ls.config.Logger.Debug(
+		"computed candidate nonce from stored block nonces (fast path)",
+		"epoch_start_slot", epochStartSlot,
+		"cutoff_slot", cutoffSlot,
+		"candidate_nonce", hex.EncodeToString(candidateNonce),
+		"evolving_nonce", hex.EncodeToString(evolvingNonce),
+		"component", "ledger",
+	)
+
+	return candidateNonce, evolvingNonce, nil
+}
+
+// computeCandidateNonceSlow re-decodes every block in the epoch from CBOR
+// and recomputes VRF nonces. This is the fallback when pre-stored nonces
+// are not available.
+func (ls *LedgerState) computeCandidateNonceSlow(
+	txn *database.Txn,
+	prevEvolvingNonce []byte,
+	prevCandidateNonce []byte,
+	epochStartSlot uint64,
+	epochEndSlot uint64,
+	cutoffSlot uint64,
+	stabilityWindow uint64,
+) ([]byte, []byte, error) {
+	// Start from the previous epoch's evolving nonce
+	evolvingNonce := make([]byte, len(prevEvolvingNonce))
+	copy(evolvingNonce, prevEvolvingNonce)
+
+	// candidateNonce starts at prevCandidateNonce (carried across
+	// epochs, matching Haskell's psCandidateNonce).
+	candidateNonce := make([]byte, len(prevCandidateNonce))
+	copy(candidateNonce, prevCandidateNonce)
+
 	var blockCount, preCutoffCount int
 
 	iterFn := func(block models.Block) error {
-		// Byron blocks have no VRF contribution. Skip them
-		// before decoding to avoid failures on devnet EBBs
-		// whose CBOR layout may differ from mainnet.
+		// Byron blocks have no VRF contribution.
 		if block.Type == byron.BlockTypeByronEbb ||
 			block.Type == byron.BlockTypeByronMain {
 			return nil
@@ -120,7 +254,6 @@ func (ls *LedgerState) computeCandidateNonce(
 		eraId := uint(parsedBlock.Era().Id)
 		era := eras.GetEraById(eraId)
 		if era == nil || era.CalculateEtaVFunc == nil {
-			// Unknown era - no VRF contribution
 			return nil
 		}
 		newNonce, err := era.CalculateEtaVFunc(
@@ -138,7 +271,6 @@ func (ls *LedgerState) computeCandidateNonce(
 		evolvingNonce = newNonce
 		blockCount++
 
-		// Before the cutoff, candidateNonce tracks evolvingNonce
 		if block.Slot < cutoffSlot {
 			candidateNonce = make([]byte, len(evolvingNonce))
 			copy(candidateNonce, evolvingNonce)
@@ -180,7 +312,7 @@ func (ls *LedgerState) computeCandidateNonce(
 	}
 
 	ls.config.Logger.Debug(
-		"computed candidate nonce from block VRF outputs",
+		"computed candidate nonce from block VRF outputs (slow path)",
 		"epoch_start_slot", epochStartSlot,
 		"cutoff_slot", cutoffSlot,
 		"stability_window", stabilityWindow,
