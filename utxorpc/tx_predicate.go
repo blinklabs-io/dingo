@@ -32,6 +32,8 @@ const (
 	predMatch
 )
 
+const maxTxPredicateDepth = 64
+
 // txPredicateNode is the Cardano evaluation shape for utxorpc TxPredicate
 // (submit and watch protos share the same fields). Conversion from generated
 // *TxPredicate types happens once at the API boundary; recursion uses only
@@ -62,8 +64,28 @@ func buildTxPredicateNodeFromProto[T txPredicateProto[T, M], M txPatternProto](
 	isNilPredicate func(T) bool,
 	isNilMatch func(M) bool,
 ) *txPredicateNode {
+	return buildTxPredicateNodeFromProtoWithDepth(
+		p,
+		isNilPredicate,
+		isNilMatch,
+		0,
+	)
+}
+
+func buildTxPredicateNodeFromProtoWithDepth[
+	T txPredicateProto[T, M],
+	M txPatternProto,
+](
+	p T,
+	isNilPredicate func(T) bool,
+	isNilMatch func(M) bool,
+	depth int,
+) *txPredicateNode {
 	if isNilPredicate(p) {
 		return nil
+	}
+	if depth >= maxTxPredicateDepth {
+		return &txPredicateNode{matchNonCardano: true}
 	}
 	n := &txPredicateNode{}
 	if m := p.GetMatch(); !isNilMatch(m) {
@@ -77,7 +99,12 @@ func buildTxPredicateNodeFromProto[T txPredicateProto[T, M], M txPatternProto](
 		if !isNilPredicate(c) {
 			n.not = append(
 				n.not,
-				buildTxPredicateNodeFromProto(c, isNilPredicate, isNilMatch),
+				buildTxPredicateNodeFromProtoWithDepth(
+					c,
+					isNilPredicate,
+					isNilMatch,
+					depth+1,
+				),
 			)
 		}
 	}
@@ -85,7 +112,12 @@ func buildTxPredicateNodeFromProto[T txPredicateProto[T, M], M txPatternProto](
 		if !isNilPredicate(c) {
 			n.allOf = append(
 				n.allOf,
-				buildTxPredicateNodeFromProto(c, isNilPredicate, isNilMatch),
+				buildTxPredicateNodeFromProtoWithDepth(
+					c,
+					isNilPredicate,
+					isNilMatch,
+					depth+1,
+				),
 			)
 		}
 	}
@@ -93,7 +125,12 @@ func buildTxPredicateNodeFromProto[T txPredicateProto[T, M], M txPatternProto](
 		if !isNilPredicate(c) {
 			n.anyOf = append(
 				n.anyOf,
-				buildTxPredicateNodeFromProto(c, isNilPredicate, isNilMatch),
+				buildTxPredicateNodeFromProtoWithDepth(
+					c,
+					isNilPredicate,
+					isNilMatch,
+					depth+1,
+				),
 			)
 		}
 	}
@@ -215,8 +252,20 @@ func evalTxPredicateOutcome(
 	p *txPredicateNode,
 	leaf txPatternLeaf,
 ) predOutcome {
+	return evalTxPredicateOutcomeWithDepth(tx, p, leaf, 0)
+}
+
+func evalTxPredicateOutcomeWithDepth(
+	tx gledger.Transaction,
+	p *txPredicateNode,
+	leaf txPatternLeaf,
+	depth int,
+) predOutcome {
 	if p == nil {
 		return predNoMatch
+	}
+	if depth >= maxTxPredicateDepth {
+		return predUnevaluable
 	}
 	parts := make([]predOutcome, 0, 4)
 	if p.matchNonCardano {
@@ -225,19 +274,28 @@ func evalTxPredicateOutcome(
 		parts = append(parts, leaf(tx, p.match))
 	}
 	for _, c := range p.not {
-		parts = append(parts, notOutcome(evalTxPredicateOutcome(tx, c, leaf)))
+		parts = append(
+			parts,
+			notOutcome(evalTxPredicateOutcomeWithDepth(tx, c, leaf, depth+1)),
+		)
 	}
 	if len(p.allOf) > 0 {
 		sub := make([]predOutcome, 0, len(p.allOf))
 		for _, c := range p.allOf {
-			sub = append(sub, evalTxPredicateOutcome(tx, c, leaf))
+			sub = append(
+				sub,
+				evalTxPredicateOutcomeWithDepth(tx, c, leaf, depth+1),
+			)
 		}
 		parts = append(parts, combineANDBranches(sub))
 	}
 	if len(p.anyOf) > 0 {
 		sub := make([]predOutcome, 0, len(p.anyOf))
 		for _, c := range p.anyOf {
-			sub = append(sub, evalTxPredicateOutcome(tx, c, leaf))
+			sub = append(
+				sub,
+				evalTxPredicateOutcomeWithDepth(tx, c, leaf, depth+1),
+			)
 		}
 		parts = append(parts, combineORBranches(sub))
 	}

@@ -312,3 +312,27 @@ func TestWatchHandlers_nilProtobufPredicateSkipsEval(t *testing.T) {
 	predicate := (*submit.TxPredicate)(nil)
 	require.Nil(t, txPredicateFromSubmit(predicate))
 }
+
+func TestEvalTxPredicate_MaxDepthExceeded(t *testing.T) {
+	pred := matchSubmit(&cardano.TxPattern{})
+	for i := 0; i < maxTxPredicateDepth; i++ {
+		pred = &submit.TxPredicate{
+			Not: []*submit.TxPredicate{pred},
+		}
+	}
+	require.Equal(
+		t,
+		predUnevaluable,
+		evalTxPredicateOutcome(nil, txPredicateFromSubmit(pred), stubLeaf(nil)),
+	)
+}
+
+func TestEvalTxPredicate_CycleBecomesUnevaluable(t *testing.T) {
+	node := &txPredicateNode{}
+	node.not = []*txPredicateNode{node}
+	require.Equal(
+		t,
+		predUnevaluable,
+		evalTxPredicateOutcome(nil, node, stubLeaf(nil)),
+	)
+}
