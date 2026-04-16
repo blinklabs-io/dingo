@@ -27,7 +27,6 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
-	stdsync "sync"
 	"testing"
 	"time"
 
@@ -785,25 +784,32 @@ func TestConnect_WaitForTx_ConfirmsOnBlockfetchEvent(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
 	defer cancel()
 
-	var wg stdsync.WaitGroup
-	wg.Add(1)
+	stopPublish := make(chan struct{})
 	go func() {
-		defer wg.Done()
-		time.Sleep(150 * time.Millisecond)
-		h.EB.Publish(
-			ledger.BlockfetchEventType,
-			event.NewEvent(
-				ledger.BlockfetchEventType,
-				ledger.BlockfetchEvent{
-					ConnectionId: ouroboros.ConnectionId{},
-					Block:        blk,
-					Point:        ocommon.NewPoint(mb.Slot, mb.Hash),
-					Type:         uint(mb.Type),
-					BatchDone:    false,
-				},
-			),
-		)
+		ticker := time.NewTicker(20 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stopPublish:
+				return
+			case <-ticker.C:
+				h.EB.Publish(
+					ledger.BlockfetchEventType,
+					event.NewEvent(
+						ledger.BlockfetchEventType,
+						ledger.BlockfetchEvent{
+							ConnectionId: ouroboros.ConnectionId{},
+							Block:        blk,
+							Point:        ocommon.NewPoint(mb.Slot, mb.Hash),
+							Type:         uint(mb.Type),
+							BatchDone:    false,
+						},
+					),
+				)
+			}
+		}
 	}()
+	defer close(stopPublish)
 
 	stream, err := cli.WaitForTx(
 		ctx,
@@ -812,14 +818,16 @@ func TestConnect_WaitForTx_ConfirmsOnBlockfetchEvent(t *testing.T) {
 		}),
 	)
 	require.NoError(t, err)
-	require.True(t, stream.Receive(), "WaitForTx should confirm when blockfetch fires")
+	if !stream.Receive() {
+		require.NoError(t, stream.Err())
+		t.Fatal("WaitForTx stream closed without confirmation frame")
+	}
 	resp := stream.Msg()
 	require.NotNil(t, resp)
 	require.Equal(t, submit.Stage_STAGE_CONFIRMED, resp.GetStage())
 	require.Equal(t, txHash, resp.GetRef())
 	require.False(t, stream.Receive(), "handler returns after confirming all refs")
 	require.NoError(t, stream.Err())
-	wg.Wait()
 	cancel()
 }
 
@@ -833,41 +841,51 @@ func TestConnect_WatchMempool_StreamsOnAddTransactionEvent(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
 	defer cancel()
 
-	var wg stdsync.WaitGroup
-	wg.Add(1)
+	stopPublish := make(chan struct{})
 	go func() {
-		defer wg.Done()
-		time.Sleep(150 * time.Millisecond)
-		h.EB.Publish(
-			mempool.AddTransactionEventType,
-			event.NewEvent(
-				mempool.AddTransactionEventType,
-				mempool.AddTransactionEvent{
-					Hash: hex.EncodeToString(txHash),
-					Type: txType,
-					Body: append([]byte(nil), txCbor...),
-				},
-			),
-		)
+		ticker := time.NewTicker(20 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stopPublish:
+				return
+			case <-ticker.C:
+				h.EB.Publish(
+					mempool.AddTransactionEventType,
+					event.NewEvent(
+						mempool.AddTransactionEventType,
+						mempool.AddTransactionEvent{
+							Hash: hex.EncodeToString(txHash),
+							Type: txType,
+							Body: append([]byte(nil), txCbor...),
+						},
+					),
+				)
+			}
+		}
 	}()
+	defer close(stopPublish)
 
 	stream, err := cli.WatchMempool(
 		ctx,
 		connect.NewRequest(&submit.WatchMempoolRequest{}),
 	)
 	require.NoError(t, err)
-	require.True(t, stream.Receive(), "WatchMempool should stream mempool add events")
-	require.NotNil(t, stream.Msg().GetTx())
-	require.Equal(t, submit.Stage_STAGE_MEMPOOL, stream.Msg().GetTx().GetStage())
-	require.True(t, bytes.Equal(txCbor, stream.Msg().GetTx().GetNativeBytes()))
-	outTxType, err := gledger.DetermineTransactionType(stream.Msg().GetTx().GetNativeBytes())
+	if !stream.Receive() {
+		require.NoError(t, stream.Err())
+		t.Fatal("WatchMempool stream closed without event frame")
+	}
+	resp := stream.Msg()
+	require.NotNil(t, resp.GetTx())
+	require.Equal(t, submit.Stage_STAGE_MEMPOOL, resp.GetTx().GetStage())
+	require.True(t, bytes.Equal(txCbor, resp.GetTx().GetNativeBytes()))
+	outTxType, err := gledger.DetermineTransactionType(resp.GetTx().GetNativeBytes())
 	require.NoError(t, err)
 	outTx, err := gledger.NewTransactionFromCbor(
 		outTxType,
-		stream.Msg().GetTx().GetNativeBytes(),
+		resp.GetTx().GetNativeBytes(),
 	)
 	require.NoError(t, err)
 	require.Equal(t, txHash, outTx.Hash().Bytes())
 	cancel()
-	wg.Wait()
 }
