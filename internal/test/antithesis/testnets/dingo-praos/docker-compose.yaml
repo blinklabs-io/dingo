@@ -24,7 +24,7 @@
 #   - Includes analysis container (absent from local compose)
 #
 # Variables (set via environment or .env file):
-#   IMAGE_TAG              — dingo image tag        (default: latest)
+#   IMAGE_TAG              — dingo image tag        (default: main)
 #   CARDANO_NODE_VERSION   — cardano-node image tag  (default: 10.5.4)
 #   INTERNAL_NETWORK       — isolate network from host (default: false)
 
@@ -76,7 +76,7 @@ services:
   # configurator — generates pool keys and genesis files from testnet.yaml
   # --------------------------------------------------------------------------
   configurator:
-    image: ghcr.io/blinklabs-io/dingo-configurator:${IMAGE_TAG:-latest}
+    image: ghcr.io/blinklabs-io/dingo-configurator:${IMAGE_TAG:-main}
     init: true
     environment:
       NODE_DATABASE_PATH: /data/db
@@ -95,7 +95,7 @@ services:
   # p1 — Dingo instrumented block producer (pool 1)
   # --------------------------------------------------------------------------
   p1:
-    image: ghcr.io/blinklabs-io/dingo:${IMAGE_TAG:-latest}-antithesis
+    image: ghcr.io/blinklabs-io/dingo:${IMAGE_TAG:-main}-antithesis
     init: true
     hostname: p1.example
     depends_on:
@@ -180,7 +180,7 @@ services:
   #       so txpump targets p1's TCP N2C endpoint exclusively (no fallback).
   # --------------------------------------------------------------------------
   txpump:
-    image: ghcr.io/blinklabs-io/dingo-txpump:${IMAGE_TAG:-latest}
+    image: ghcr.io/blinklabs-io/dingo-txpump:${IMAGE_TAG:-main}
     init: true
     depends_on:
       p1:
@@ -207,7 +207,7 @@ services:
   # analysis — reads node logs, evaluates safety/liveness properties
   # --------------------------------------------------------------------------
   analysis:
-    image: ghcr.io/blinklabs-io/dingo-analysis:${IMAGE_TAG:-latest}
+    image: ghcr.io/blinklabs-io/dingo-analysis:${IMAGE_TAG:-main}
     init: true
     depends_on:
       p1:
