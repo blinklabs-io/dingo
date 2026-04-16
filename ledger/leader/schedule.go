@@ -179,20 +179,32 @@ func (c *Calculator) CalculateSchedule(
 		return nil, fmt.Errorf("invalid active slot coefficient: %w", err)
 	}
 
+	// Precompute the leadership threshold once. It depends only on poolStake,
+	// totalStake, and activeSlotCoeff — all constant for the epoch — so computing
+	// it inside the 86,400-slot loop (which is what IsSlotLeader does) wastes
+	// two 20-term big.Rat Taylor series and a 2^256 multiply per slot.
+	threshold := consensus.CertifiedNatThresholdWithMode(
+		poolStake,
+		totalStake,
+		activeSlotCoeff,
+		consensus.ConsensusModeCPraos,
+	)
+
 	// Check each slot in the epoch
 	for slot := epochStartSlot; slot < epochEndSlot; slot++ {
-		result, err := consensus.IsSlotLeader(
-			slot,
-			epochNonce,
-			poolStake,
-			totalStake,
-			activeSlotCoeff,
-			vrfSigner,
-		)
+		vrfInput := consensus.ComputeVRFInput(slot, epochNonce)
+		if vrfInput == nil {
+			return nil, fmt.Errorf("check slot %d: failed to compute VRF input", slot)
+		}
+		_, output, err := vrfSigner.Prove(vrfInput)
 		if err != nil {
 			return nil, fmt.Errorf("check slot %d: %w", slot, err)
 		}
-		if result.Eligible {
+		if consensus.IsVRFOutputBelowThresholdWithMode(
+			output,
+			threshold,
+			consensus.ConsensusModeCPraos,
+		) {
 			schedule.AddLeaderSlot(slot)
 		}
 	}
