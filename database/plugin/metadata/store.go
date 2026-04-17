@@ -209,6 +209,14 @@ type MetadataStore interface {
 		txn types.Txn,
 	) ([]models.BlockNonce, error)
 
+	// GetLastBlockNonceInRange retrieves the block nonce with the highest slot
+	// in [startSlot, endSlot). Returns nil nonce and no error if none found.
+	GetLastBlockNonceInRange(
+		startSlot uint64,
+		endSlot uint64,
+		txn types.Txn,
+	) ([]byte, error)
+
 	// GetDatum retrieves a datum by its hash, returning nil if not found.
 	GetDatum(
 		lcommon.Blake2b256,
