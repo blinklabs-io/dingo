@@ -1,6 +1,24 @@
 # Release Notes
 
 
+## v0.35.1 (April 17, 2026)
+
+**Title:** Stability and performance refinements
+
+**Date:** April 17, 2026
+
+**Version:** v0.35.1
+
+Hi folks! Here’s what we shipped in v0.35.1.
+
+### ✨ What's New
+
+* Celebrated no new features in this patch release because v0.35.1 primarily focuses on improvements and fixes.
+
+### 💪 Improvements
+
+* Improved leader schedule generation so lower powered hardware can keep up more easily during epoch transitions.
+
 ## v0.35.0 (April 15, 2026)
 
 **Title:** Smoother sync and faster block lookups
