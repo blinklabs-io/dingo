@@ -246,7 +246,7 @@ func (n *Node) Run(ctx context.Context) error {
 					)
 				}
 			},
-			DatabaseWorkerPoolConfig:   n.config.DatabaseWorkerPoolConfig,
+			DatabaseWorkerPoolConfig: n.config.DatabaseWorkerPoolConfig,
 			GetActiveConnectionFunc: func() *ouroboros.ConnectionId {
 				// Return the current best peer for rollback filtering and
 				// blockfetch fallback. Headers can arrive from any eligible

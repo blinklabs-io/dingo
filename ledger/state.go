@@ -423,28 +423,28 @@ type PeerHeaderLookupFunc func(
 ) (ChainsyncEvent, []byte, bool)
 
 type LedgerStateConfig struct {
-	PromRegistry               prometheus.Registerer
-	Logger                     *slog.Logger
-	Database                   *database.Database
-	ChainManager               *chain.ChainManager
-	EventBus                   *event.EventBus
-	CardanoNodeConfig          *cardano.CardanoNodeConfig
-	BlockfetchRequestRangeFunc BlockfetchRequestRangeFunc
-	PeersWithBlockFunc         PeersWithBlockFunc
+	PromRegistry                prometheus.Registerer
+	Logger                      *slog.Logger
+	Database                    *database.Database
+	ChainManager                *chain.ChainManager
+	EventBus                    *event.EventBus
+	CardanoNodeConfig           *cardano.CardanoNodeConfig
+	BlockfetchRequestRangeFunc  BlockfetchRequestRangeFunc
+	PeersWithBlockFunc          PeersWithBlockFunc
 	RecordBlockfetchLatencyFunc RecordBlockfetchLatencyFunc
-	GetActiveConnectionFunc    GetActiveConnectionFunc
-	ConnectionLiveFunc         ConnectionLiveFunc
-	ConnectionSwitchFunc       ConnectionSwitchFunc
-	ClearSeenHeadersFromFunc   ClearSeenHeadersFromFunc
-	PeerHeaderLookupFunc       PeerHeaderLookupFunc
-	FatalErrorFunc             FatalErrorFunc
-	ForgedBlockChecker         ForgedBlockChecker
-	SlotBattleRecorder         SlotBattleRecorder
-	ValidateHistorical         bool
-	TrustedReplay              bool
-	ManualBlockProcessing      bool
-	ForgeBlocks                bool
-	DatabaseWorkerPoolConfig   DatabaseWorkerPoolConfig
+	GetActiveConnectionFunc     GetActiveConnectionFunc
+	ConnectionLiveFunc          ConnectionLiveFunc
+	ConnectionSwitchFunc        ConnectionSwitchFunc
+	ClearSeenHeadersFromFunc    ClearSeenHeadersFromFunc
+	PeerHeaderLookupFunc        PeerHeaderLookupFunc
+	FatalErrorFunc              FatalErrorFunc
+	ForgedBlockChecker          ForgedBlockChecker
+	SlotBattleRecorder          SlotBattleRecorder
+	ValidateHistorical          bool
+	TrustedReplay               bool
+	ManualBlockProcessing       bool
+	ForgeBlocks                 bool
+	DatabaseWorkerPoolConfig    DatabaseWorkerPoolConfig
 }
 
 // BlockfetchRequestRangeFunc describes a callback function used to start a blockfetch request for
@@ -517,10 +517,10 @@ type LedgerState struct {
 	selectedBlockfetchConnId      ouroboros.ConnectionId // latest selected chainsync connection for the next batch
 	headerPipelineConnId          ouroboros.ConnectionId // connection that currently owns the queued header/blockfetch pipeline
 	pendingBlockfetchEvents       []BlockfetchEvent
-	activeBlockfetchStart         time.Time              // when RequestRange was issued (for latency measurement)
-	firstBlockReceived            bool                   // true after latency sample recorded for this batch
-	shadowBlockReceivedHashes     map[string]struct{}    // blocks delivered this batch (dedup shadow vs primary)
-	batchBlocksReceived           int // total blocks received in current blockfetch batch (including mid-batch flushes)
+	activeBlockfetchStart         time.Time           // when RequestRange was issued (for latency measurement)
+	firstBlockReceived            bool                // true after latency sample recorded for this batch
+	shadowBlockReceivedHashes     map[string]struct{} // blocks delivered this batch (dedup shadow vs primary)
+	batchBlocksReceived           int                 // total blocks received in current blockfetch batch (including mid-batch flushes)
 	checkpointWrittenForEpoch     bool
 	closed                        atomic.Bool
 	inRecovery                    bool           // guards against recursive recovery in SubmitAsyncDBTxn
