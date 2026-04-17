@@ -430,6 +430,8 @@ type LedgerStateConfig struct {
 	EventBus                   *event.EventBus
 	CardanoNodeConfig          *cardano.CardanoNodeConfig
 	BlockfetchRequestRangeFunc BlockfetchRequestRangeFunc
+	PeersWithBlockFunc         PeersWithBlockFunc
+	RecordBlockfetchLatencyFunc RecordBlockfetchLatencyFunc
 	GetActiveConnectionFunc    GetActiveConnectionFunc
 	ConnectionLiveFunc         ConnectionLiveFunc
 	ConnectionSwitchFunc       ConnectionSwitchFunc
@@ -448,6 +450,18 @@ type LedgerStateConfig struct {
 // BlockfetchRequestRangeFunc describes a callback function used to start a blockfetch request for
 // a range of blocks
 type BlockfetchRequestRangeFunc func(ouroboros.ConnectionId, ocommon.Point, ocommon.Point) error
+
+// PeersWithBlockFunc returns all tracked connection IDs — excluding
+// origin — that have a recorded observed header at the given point.
+// Used to locate shadow peers for parallel blockfetch dispatch.
+type PeersWithBlockFunc func(
+	origin ouroboros.ConnectionId,
+	point ocommon.Point,
+) []ouroboros.ConnectionId
+
+// RecordBlockfetchLatencyFunc records a first-block latency sample
+// for the given connection after a successful RequestRange response.
+type RecordBlockfetchLatencyFunc func(ouroboros.ConnectionId, time.Duration)
 
 // In ledger/state.go or a shared package
 type MempoolProvider interface {
@@ -499,9 +513,13 @@ type LedgerState struct {
 	chainsyncBlockfetchReadyMutex sync.Mutex
 	chainsyncBlockfetchReadyChan  chan struct{}
 	activeBlockfetchConnId        ouroboros.ConnectionId // connection used for current blockfetch pipeline
+	shadowBlockfetchConnId        ouroboros.ConnectionId // shadow peer dispatched for parallel blockfetch
 	selectedBlockfetchConnId      ouroboros.ConnectionId // latest selected chainsync connection for the next batch
 	headerPipelineConnId          ouroboros.ConnectionId // connection that currently owns the queued header/blockfetch pipeline
 	pendingBlockfetchEvents       []BlockfetchEvent
+	activeBlockfetchStart         time.Time              // when RequestRange was issued (for latency measurement)
+	firstBlockReceived            bool                   // true after latency sample recorded for this batch
+	shadowBlockReceivedHashes     map[string]struct{}    // blocks delivered this batch (dedup shadow vs primary)
 	batchBlocksReceived           int // total blocks received in current blockfetch batch (including mid-batch flushes)
 	checkpointWrittenForEpoch     bool
 	closed                        atomic.Bool

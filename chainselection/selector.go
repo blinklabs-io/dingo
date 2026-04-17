@@ -86,6 +86,10 @@ type ChainSelectorConfig struct {
 	ConnectionEligible func(ouroboros.ConnectionId) bool
 	ConnectionPriority func(ouroboros.ConnectionId) int
 	MaxTrackedPeers    int // 0 means use DefaultMaxTrackedPeers
+	// BlockfetchLatency returns the EWMA first-block latency for a
+	// connection and whether any samples exist. Used as a tiebreaker
+	// when two peers share the same SelectionTip and VRF output.
+	BlockfetchLatency func(ouroboros.ConnectionId) (time.Duration, bool)
 }
 
 // ChainSelector tracks chain tips from multiple peers and selects the best
@@ -762,6 +766,22 @@ func (cs *ChainSelector) comparePeerTips(
 		case ChainABetter, ChainBBetter:
 			return vrfComparison
 		case ChainEqual, ChainComparisonUnknown:
+		}
+		// Latency tiebreaker: prefer the peer with lower blockfetch
+		// EWMA when VRF and SelectionTip are equal. Only fires when
+		// both peers have at least one sample; otherwise fall through
+		// to the connId string tiebreaker.
+		if cs.config.BlockfetchLatency != nil {
+			latencyA, okA := cs.config.BlockfetchLatency(connIdA)
+			latencyB, okB := cs.config.BlockfetchLatency(connIdB)
+			if okA && okB {
+				if latencyA < latencyB {
+					return ChainABetter
+				}
+				if latencyB < latencyA {
+					return ChainBBetter
+				}
+			}
 		}
 		if connIdA.String() < connIdB.String() {
 			return ChainABetter
