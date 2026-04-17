@@ -146,6 +146,13 @@ func checkedSlotAdd(
 }
 
 func (ls *LedgerState) queryHardForkEraHistory() (any, error) {
+	// Snapshot the tip and current era under the read lock so we can use them
+	// without holding the lock during the (potentially slow) DB queries below.
+	ls.RLock()
+	tipSlot := ls.currentTip.Point.Slot
+	currentEraId := ls.currentEra.Id
+	ls.RUnlock()
+
 	retData := []any{}
 	timespan := big.NewInt(0)
 	var epochs []models.Epoch
@@ -215,6 +222,49 @@ func (ls *LedgerState) queryHardForkEraHistory() (any, error) {
 					new(big.Int).Set(timespan),
 					endSlot,
 					tmpEpoch.EpochId + 1,
+				}
+			}
+		}
+		// For the current (open) era, cap EraEnd at ledgerTip + safeZone.
+		// The Haskell node uses StandardSafeZone for this: clients must not
+		// attempt slot↔time conversions beyond this bound because a hard fork
+		// could invalidate them.  Without this cap, dingo serves the full
+		// epoch-end slot, over-claiming certainty about the future.
+		if era.Id == currentEraId && len(epochs) > 0 {
+			safeZone := ls.calculateStabilityWindowForEra(era.Id)
+			safeEndSlot, addErr := checkedSlotAdd(tipSlot, safeZone)
+			epochEndSlot, slotErr := checkedSlotAdd(
+				tmpEpoch.StartSlot,
+				uint64(tmpEpoch.LengthInSlots),
+			)
+			if addErr == nil && slotErr == nil &&
+				safeEndSlot >= tmpEpoch.StartSlot &&
+				safeEndSlot < epochEndSlot {
+				// Work backward from the accumulated timespan (which now
+				// points to epochEndSlot) to find the relative time at
+				// the start of the last epoch, then advance it by the
+				// partial number of slots to safeEndSlot.
+				timespanAtEpochStart := new(big.Int).Sub(
+					timespan,
+					epochPicoseconds(tmpEpoch.SlotLength, tmpEpoch.LengthInSlots),
+				)
+				slotsIntoEpoch := safeEndSlot - tmpEpoch.StartSlot
+				safeRelTime := new(big.Int).Add(
+					timespanAtEpochStart,
+					new(big.Int).Mul(
+						new(big.Int).SetUint64(slotsIntoEpoch),
+						new(big.Int).Mul(
+							new(big.Int).SetUint64(uint64(tmpEpoch.SlotLength)),
+							big.NewInt(1_000_000_000),
+						),
+					),
+				)
+				// safeEndSlot is within tmpEpoch, so the epoch number is
+				// tmpEpoch.EpochId (not +1).
+				tmpEnd = []any{
+					safeRelTime,
+					safeEndSlot,
+					tmpEpoch.EpochId,
 				}
 			}
 		}

@@ -15,15 +15,119 @@
 package ledger
 
 import (
+	"io"
+	"log/slog"
 	"math"
 	"math/big"
+	"strings"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/config/cardano"
+	"github.com/blinklabs-io/dingo/ledger/eras"
+	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// newTestEraHistoryCfg builds a CardanoNodeConfig with both Byron and Shelley
+// genesis data, including slotLength and epochLength needed by EpochLengthShelley
+// and the security parameters needed by calculateStabilityWindowForEra.
+func newTestEraHistoryCfg(t testing.TB) *cardano.CardanoNodeConfig {
+	t.Helper()
+	byronGenesisJSON := `{
+		"blockVersionData": { "slotDuration": "20000" },
+		"protocolConsts": { "k": 432 }
+	}`
+	shelleyGenesisJSON := `{
+		"activeSlotsCoeff": 0.05,
+		"securityParam": 432,
+		"slotLength": 1,
+		"epochLength": 432000,
+		"systemStart": "2022-10-25T00:00:00Z"
+	}`
+	cfg := &cardano.CardanoNodeConfig{}
+	err := cfg.LoadByronGenesisFromReader(strings.NewReader(byronGenesisJSON))
+	require.NoError(t, err)
+	err = cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON))
+	require.NoError(t, err)
+	return cfg
+}
+
+// TestQueryHardForkEraHistory_OpenEraEndBoundedBySafeZone proves that the
+// current era's EraEnd must be capped at ledgerTip + safeZone, not left as the
+// end of the last committed epoch.  The Haskell node uses StandardSafeZone for
+// this purpose; without it, clients can attempt slot↔time conversions beyond
+// the safe forecast horizon.
+//
+// Setup:
+//   - One Conway epoch: startSlot=100_000, length=432_000 (ends at slot 532_000)
+//   - ledgerTip at slot 200_000 (well inside the epoch)
+//   - safeZone = ceil(3k/f) = ceil(3*432/0.05) = 25_920
+//
+// Expected EraEnd slot: 200_000 + 25_920 = 225_920
+// Current (broken) EraEnd slot: 100_000 + 432_000 = 532_000
+func TestQueryHardForkEraHistory_OpenEraEndBoundedBySafeZone(t *testing.T) {
+	const (
+		tipSlot        = uint64(200_000)
+		epochStartSlot = uint64(100_000)
+		epochLen       = uint(432_000)
+		slotLenMs      = uint(1_000) // 1 second in milliseconds
+		epochId        = uint64(500)
+	)
+	// safeZone = ceil(3 * 432 / 0.05) = 25_920
+	const expectedSafeZone = uint64(25_920)
+	expectedEraEndSlot := tipSlot + expectedSafeZone // 225_920
+
+	db := newTestDB(t)
+	require.NoError(t, db.SetEpoch(
+		epochStartSlot, epochId,
+		nil, nil, nil, nil,
+		eras.ConwayEraDesc.Id, slotLenMs, epochLen,
+		nil,
+	))
+
+	ls := &LedgerState{
+		db:         db,
+		currentEra: eras.ConwayEraDesc,
+		currentTip: ochainsync.Tip{
+			Point: ocommon.NewPoint(tipSlot, []byte("tip")),
+		},
+		config: LedgerStateConfig{
+			CardanoNodeConfig: newTestEraHistoryCfg(t),
+			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+
+	result, err := ls.queryHardForkEraHistory()
+	require.NoError(t, err)
+
+	eraList, ok := result.(cbor.IndefLengthList)
+	require.True(t, ok)
+	require.NotEmpty(t, eraList)
+
+	// The last entry in the list is the Conway (current, open) era.
+	lastEra, ok := eraList[len(eraList)-1].([]any)
+	require.True(t, ok, "era entry should be []any")
+	require.Len(t, lastEra, 3, "era entry should be [start, end, params]")
+
+	eraEnd, ok := lastEra[1].([]any)
+	require.True(t, ok, "EraEnd should be []any")
+	require.Len(t, eraEnd, 3, "EraEnd should be [relTime, slot, epoch]")
+
+	actualEraEndSlot, ok := eraEnd[1].(uint64)
+	require.True(t, ok, "EraEnd slot should be uint64")
+
+	assert.Equal(t, expectedEraEndSlot, actualEraEndSlot,
+		"open era EraEnd slot should be ledgerTip(%d) + safeZone(%d) = %d, "+
+			"not the epoch boundary at slot %d",
+		tipSlot, expectedSafeZone, expectedEraEndSlot,
+		epochStartSlot+uint64(epochLen),
+	)
+}
 
 func TestQueryShelleyUtxoByAddress_EmptySlice(t *testing.T) {
 	ls := &LedgerState{}
