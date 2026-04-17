@@ -2004,20 +2004,28 @@ func (ls *LedgerState) startQueuedBlockfetchLocked(
 				sameConnectionId(shadowConn, connId) {
 				continue
 			}
-			if err := ls.config.BlockfetchRequestRangeFunc(
+			err := ls.config.BlockfetchRequestRangeFunc(
 				shadowConn,
 				headerStart,
 				headerEnd,
-			); err == nil {
-				ls.shadowBlockfetchConnId = shadowConn
+			)
+			if err != nil {
 				ls.config.Logger.Debug(
-					"dispatched shadow blockfetch",
+					"shadow blockfetch dispatch failed, trying next candidate",
 					"component", "ledger",
-					"primary_connection_id", connId.String(),
 					"shadow_connection_id", shadowConn.String(),
-					"header_start_slot", headerStart.Slot,
+					"error", err,
 				)
+				continue
 			}
+			ls.shadowBlockfetchConnId = shadowConn
+			ls.config.Logger.Debug(
+				"dispatched shadow blockfetch",
+				"component", "ledger",
+				"primary_connection_id", connId.String(),
+				"shadow_connection_id", shadowConn.String(),
+				"header_start_slot", headerStart.Slot,
+			)
 			break // one shadow is enough
 		}
 	}
