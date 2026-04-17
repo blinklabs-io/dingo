@@ -862,13 +862,22 @@ func (cs *ChainSelector) evaluateBestPeerLocked() (
 				newPeerTip,
 			) == ChainABetter {
 				newBest = previousBest
-			} else if newPeerTip.Tip.BlockNumber >
-				previousPeerTip.Tip.BlockNumber &&
+			} else if newPeerTip.SelectionTip().BlockNumber >
+				previousPeerTip.SelectionTip().BlockNumber &&
 				!IsSignificantlyBetter(
-					newPeerTip.Tip,
-					previousPeerTip.Tip,
+					newPeerTip.SelectionTip(),
+					previousPeerTip.SelectionTip(),
 					cs.config.MinSwitchBlockDiff,
 				) {
+				// Suppress switches where the challenger is only marginally
+				// ahead in SelectionTip (observed frontier, which includes
+				// in-flight headers from RollForward). The original guard used
+				// Tip.BlockNumber (the peer's claimed remote tip), which can be
+				// ahead of ObservedTip when a peer advertises N+1 in a
+				// RollForward tip claim before actually delivering the N+1
+				// header. That caused both peers to show Tip.BlockNumber=N+1
+				// while only one had SelectionTip=N+1, making the `>` guard
+				// fail and allowing a switch for a 1-block observed lead.
 				newBest = previousBest
 			}
 		}
