@@ -1,6 +1,46 @@
 # Release Notes
 
 
+## v0.35.1 (April 17, 2026)
+
+**Title:** Steadier peers and faster schedule calculations
+
+**Date:** April 17, 2026
+
+**Version:** v0.35.1
+
+Hi folks! Here’s what we shipped in v0.35.1.
+
+### ✨ What's New
+
+- **No new features:** This patch focuses on improvements and fixes.
+
+### 💪 Improvements
+
+- **Faster epoch nonce computation:** Ledger processing moves faster because epoch nonce calculation now uses stored nonce data instead of decoding every block again.
+- **Quicker leader schedule generation:** Schedule calculation finishes dramatically faster, especially on lower-powered hardware, while keeping the same scheduling behavior.
+- **Current upstream protocol compatibility:** Cardano protocol support stays current because key upstream dependencies were refreshed for smoother compatibility.
+- **Stronger PostgreSQL compatibility:** PostgreSQL-backed setups are more robust because upstream database coverage and compatibility were improved.
+- **More predictable Antithesis defaults:** Test environments are easier to reason about because the default `IMAGE_TAG` now resolves to `main` instead of `latest`.
+
+### 🔧 Fixes
+
+- **Steadier peer selection near tip:** Nodes are less likely to bounce between near-tip peers because chain selection now compares the tips it has actually observed.
+- **Safer UTxO RPC predicate handling:** Deep or cyclic request predicates no longer recurse indefinitely, so requests do not hang or risk crash-like behavior.
+- **More reliable UTxO RPC queries:** SQLite-backed address queries now handle the reserved `transaction` table name correctly, and broader Connect RPC coverage helps harden query, submit, sync, and watch behavior.
+
+### 📋 What You Need to Know
+
+- **No action required for most users:** You're all set—just upgrade to v0.35.1.
+- **Antithesis users:** If you rely on the default IMAGE_TAG in the dingo-praos testnet compose file, it now resolves to `main` instead of `latest`.
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
+
 ## v0.35.0 (April 15, 2026)
 
 **Title:** Smoother sync and faster block lookups
