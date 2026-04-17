@@ -23,9 +23,13 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/config/cardano"
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/babbage"
+	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -277,6 +281,147 @@ func TestEpochPicoseconds_OverflowSafe(t *testing.T) {
 	)
 }
 
+// TestQueryHardForkEraHistory_TransitionKnown proves that when TransitionInfo
+// is set to TransitionKnown the era history response uses the transition
+// epoch's StartSlot as the exact EraEnd, rather than the safe-zone cap.
+//
+// Setup:
+//   - Two Conway epochs: epoch 500 (startSlot=100_000, length=432_000) and
+//     epoch 501 (startSlot=532_000, length=432_000) — epoch 501 is the
+//     transition epoch (stored with the old era's EraId).
+//   - transitionInfo = {State: TransitionKnown, KnownEpoch: 501}
+//   - ledgerTip at slot 200_000 (well inside epoch 500)
+//
+// Expected EraEnd slot: 532_000 (epoch 501's StartSlot — the exact boundary)
+// Without TransitionKnown: EraEnd would be 200_000 + 25_920 = 225_920
+func TestQueryHardForkEraHistory_TransitionKnown(t *testing.T) {
+	const (
+		tipSlot          = uint64(200_000)
+		epoch500Start    = uint64(100_000)
+		epoch501Start    = uint64(532_000)
+		epochLen         = uint(432_000)
+		slotLenMs        = uint(1_000)
+		epoch500Id       = uint64(500)
+		epoch501Id       = uint64(501)
+	)
+
+	db := newTestDB(t)
+	// Epoch 500: the active epoch in the old era
+	require.NoError(t, db.SetEpoch(
+		epoch500Start, epoch500Id,
+		nil, nil, nil, nil,
+		eras.ConwayEraDesc.Id, slotLenMs, epochLen,
+		nil,
+	))
+	// Epoch 501: the transition epoch, still stored with Conway era's EraId
+	require.NoError(t, db.SetEpoch(
+		epoch501Start, epoch501Id,
+		nil, nil, nil, nil,
+		eras.ConwayEraDesc.Id, slotLenMs, epochLen,
+		nil,
+	))
+
+	ls := &LedgerState{
+		db:         db,
+		currentEra: eras.ConwayEraDesc,
+		currentTip: ochainsync.Tip{
+			Point: ocommon.NewPoint(tipSlot, []byte("tip")),
+		},
+		transitionInfo: TransitionInfo{
+			State:      TransitionKnown,
+			KnownEpoch: epoch501Id,
+		},
+		config: LedgerStateConfig{
+			CardanoNodeConfig: newTestEraHistoryCfg(t),
+			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+
+	result, err := ls.queryHardForkEraHistory()
+	require.NoError(t, err)
+
+	eraList, ok := result.(cbor.IndefLengthList)
+	require.True(t, ok)
+	require.NotEmpty(t, eraList)
+
+	// The last entry in the list is the Conway (current, open) era.
+	lastEra, ok := eraList[len(eraList)-1].([]any)
+	require.True(t, ok, "era entry should be []any")
+	require.Len(t, lastEra, 3, "era entry should be [start, end, params]")
+
+	eraEnd, ok := lastEra[1].([]any)
+	require.True(t, ok, "EraEnd should be []any")
+	require.Len(t, eraEnd, 3, "EraEnd should be [relTime, slot, epoch]")
+
+	actualSlot, ok := eraEnd[1].(uint64)
+	require.True(t, ok, "EraEnd slot should be uint64")
+	assert.Equal(t, epoch501Start, actualSlot,
+		"TransitionKnown: EraEnd slot should be transition epoch's StartSlot (%d), not safe-zone cap",
+		epoch501Start,
+	)
+
+	// Verify EraEnd epoch number is the transition epoch ID
+	actualEpoch, ok := eraEnd[2].(uint64)
+	require.True(t, ok, "EraEnd epoch should be uint64")
+	assert.Equal(t, epoch501Id, actualEpoch,
+		"TransitionKnown: EraEnd epoch should be the transition epoch ID",
+	)
+}
+
+// TestQueryHardForkEraHistory_TransitionUnknown_FallsBackToSafeZone confirms
+// that TransitionUnknown state still produces the safe-zone-capped EraEnd,
+// i.e. the existing behaviour is preserved.
+func TestQueryHardForkEraHistory_TransitionUnknown_FallsBackToSafeZone(t *testing.T) {
+	const (
+		tipSlot        = uint64(200_000)
+		epochStartSlot = uint64(100_000)
+		epochLen       = uint(432_000)
+		slotLenMs      = uint(1_000)
+		epochId        = uint64(500)
+	)
+	const expectedSafeZone = uint64(25_920)
+	expectedEraEndSlot := tipSlot + expectedSafeZone
+
+	db := newTestDB(t)
+	require.NoError(t, db.SetEpoch(
+		epochStartSlot, epochId,
+		nil, nil, nil, nil,
+		eras.ConwayEraDesc.Id, slotLenMs, epochLen,
+		nil,
+	))
+
+	ls := &LedgerState{
+		db:             db,
+		currentEra:     eras.ConwayEraDesc,
+		transitionInfo: TransitionInfo{State: TransitionUnknown},
+		currentTip: ochainsync.Tip{
+			Point: ocommon.NewPoint(tipSlot, []byte("tip")),
+		},
+		config: LedgerStateConfig{
+			CardanoNodeConfig: newTestEraHistoryCfg(t),
+			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+
+	result, err := ls.queryHardForkEraHistory()
+	require.NoError(t, err)
+
+	eraList, ok := result.(cbor.IndefLengthList)
+	require.True(t, ok)
+	require.NotEmpty(t, eraList)
+
+	lastEra, ok := eraList[len(eraList)-1].([]any)
+	require.True(t, ok)
+	eraEnd, ok := lastEra[1].([]any)
+	require.True(t, ok)
+	actualSlot, ok := eraEnd[1].(uint64)
+	require.True(t, ok)
+	assert.Equal(t, expectedEraEndSlot, actualSlot,
+		"TransitionUnknown: EraEnd slot should be tipSlot(%d)+safeZone(%d)=%d",
+		tipSlot, expectedSafeZone, expectedEraEndSlot,
+	)
+}
+
 func TestCheckedSlotAdd(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -351,6 +496,91 @@ func TestCheckedSlotAdd(t *testing.T) {
 			}
 			require.NoError(t, err)
 			assert.Equal(t, tc.expected, result)
+		})
+	}
+}
+
+// TestReconstructTransitionInfo verifies that reconstructTransitionInfo sets
+// TransitionKnown when the loaded pparams carry a protocol version that maps
+// to a later era than the current epoch's stored EraId — i.e., the node was
+// stopped in the window between an epoch-rollover version bump and the first
+// block of the new era.
+func TestReconstructTransitionInfo(t *testing.T) {
+	tests := []struct {
+		name           string
+		currentEra     eras.EraDesc
+		currentEpoch   models.Epoch
+		currentPParams lcommon.ProtocolParameters
+		expectedState  TransitionState
+		expectedEpoch  uint64
+	}{
+		{
+			// Babbage pparams with Conway major version (9): TransitionKnown.
+			// This is the pre-Conway restart window scenario.
+			name:       "babbage era pparams with conway version → TransitionKnown",
+			currentEra: *eras.GetEraById(eras.BabbageEraDesc.Id),
+			currentEpoch: models.Epoch{
+				EpochId: 500,
+				EraId:   eras.BabbageEraDesc.Id,
+			},
+			currentPParams: &babbage.BabbageProtocolParameters{
+				ProtocolMajor: 9, // Conway major version, stored under Babbage era
+			},
+			expectedState: TransitionKnown,
+			expectedEpoch: 500,
+		},
+		{
+			// Babbage pparams with normal Babbage version: no transition.
+			name:       "babbage era pparams with babbage version → TransitionUnknown",
+			currentEra: *eras.GetEraById(eras.BabbageEraDesc.Id),
+			currentEpoch: models.Epoch{
+				EpochId: 499,
+				EraId:   eras.BabbageEraDesc.Id,
+			},
+			currentPParams: &babbage.BabbageProtocolParameters{
+				ProtocolMajor: 8,
+			},
+			expectedState: TransitionUnknown,
+		},
+		{
+			// Conway pparams in Conway era: pparamsEra == currentEra, no transition.
+			name:       "conway era pparams with conway version → TransitionUnknown",
+			currentEra: *eras.GetEraById(eras.ConwayEraDesc.Id),
+			currentEpoch: models.Epoch{
+				EpochId: 600,
+				EraId:   eras.ConwayEraDesc.Id,
+			},
+			currentPParams: &conway.ConwayProtocolParameters{
+				ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
+					Major: 9,
+				},
+			},
+			expectedState: TransitionUnknown,
+		},
+		{
+			// Nil pparams: must not panic, leave TransitionUnknown.
+			name:          "nil pparams → TransitionUnknown",
+			currentEra:    *eras.GetEraById(eras.BabbageEraDesc.Id),
+			currentEpoch:  models.Epoch{EpochId: 400, EraId: eras.BabbageEraDesc.Id},
+			currentPParams: nil,
+			expectedState: TransitionUnknown,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ls := &LedgerState{
+				currentEra:     tc.currentEra,
+				currentEpoch:   tc.currentEpoch,
+				currentPParams: tc.currentPParams,
+				// transitionInfo starts at zero value (TransitionUnknown)
+			}
+			ls.reconstructTransitionInfo()
+
+			assert.Equal(t, tc.expectedState, ls.transitionInfo.State)
+			if tc.expectedState == TransitionKnown {
+				assert.Equal(t, tc.expectedEpoch, ls.transitionInfo.KnownEpoch)
+			}
 		})
 	}
 }

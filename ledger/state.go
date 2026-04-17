@@ -474,6 +474,7 @@ type LedgerState struct {
 	chainsyncBlockfetchTimerGeneration uint64      // generation counter to detect stale timer callbacks
 	currentPParams                     lcommon.ProtocolParameters
 	prevEraPParams                     lcommon.ProtocolParameters // pparams from the immediately previous era (for era-1 TX validation)
+	transitionInfo                     TransitionInfo             // upcoming era boundary state (mirrors Haskell HFC TransitionInfo)
 	mempool                            MempoolProvider
 	timerCleanupConsumedUtxos          *time.Timer
 	Scheduler                          *Scheduler
@@ -551,6 +552,34 @@ type LedgerState struct {
 type EraTransitionResult struct {
 	NewPParams lcommon.ProtocolParameters
 	NewEra     eras.EraDesc
+}
+
+// TransitionState encodes which of the three HFC TransitionInfo
+// cases currently applies to the open (current) era.
+type TransitionState uint8
+
+const (
+	// TransitionUnknown means no confirmed upcoming hard fork is
+	// known.  The open era's EraEnd is capped at tipSlot + safeZone.
+	TransitionUnknown TransitionState = iota
+	// TransitionKnown means the epoch-rollover logic has detected a
+	// protocol-version bump in the upcoming epoch's pparams, but the
+	// first block of the new era has not arrived yet.  KnownEpoch is
+	// the first epoch number of the next era; its StartSlot is the
+	// exact era boundary.
+	TransitionKnown
+	// TransitionImpossible means a hard fork cannot occur in the
+	// current epoch (e.g. the safe-zone has already passed the epoch
+	// end).  Reserved for future use; treated like TransitionUnknown
+	// for query purposes.
+	TransitionImpossible
+)
+
+// TransitionInfo mirrors Haskell's HFC TransitionInfo, tracking
+// whether a confirmed upcoming era transition is known.
+type TransitionInfo struct {
+	State      TransitionState
+	KnownEpoch uint64 // first epoch of the next era; valid when State == TransitionKnown
 }
 
 // HardForkInfo holds details about a detected hard fork
@@ -712,6 +741,13 @@ func (ls *LedgerState) Start(ctx context.Context) error {
 	if err := ls.loadPParams(); err != nil {
 		return fmt.Errorf("failed to load pparams: %w", err)
 	}
+	// Reconstruct TransitionInfo from loaded state.  After restart, the
+	// in-memory field is zero (TransitionUnknown), but if the node shut down
+	// while in the window between an epoch-boundary version bump and the first
+	// block of the new era, the pparams will report a major version that maps
+	// to a later era than currentEpoch.EraId.  Detecting this here restores
+	// the correct TransitionKnown state without persisting extra data.
+	ls.reconstructTransitionInfo()
 	// Load current tip
 	if err := ls.loadTip(); err != nil {
 		return fmt.Errorf("failed to load tip: %w", err)
@@ -1671,6 +1707,9 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 		Hash: append([]byte(nil), point.Hash...),
 	}
 	ls.currentTip = newTip
+	// A rollback invalidates any pending TransitionKnown because the
+	// epoch-rollover block that set it may no longer be on the chain.
+	ls.transitionInfo = TransitionInfo{State: TransitionUnknown}
 	// If rolling back behind the Mithril trust boundary, clear it.
 	// A rollback inside the gap means replacement blocks on the new
 	// fork were NOT processed by SetGapBlockTransaction and must go
@@ -1950,6 +1989,15 @@ func (ls *LedgerState) calculateStabilityWindowForEra(eraId uint) uint64 {
 		return blockfetchBatchSlotThresholdDefault
 	}
 	return window.Uint64()
+}
+
+// CurrentTransitionInfo returns a snapshot of the current TransitionInfo
+// under a read lock.  Callers must not hold ls.RLock() when calling this.
+func (ls *LedgerState) CurrentTransitionInfo() TransitionInfo {
+	ls.RLock()
+	ti := ls.transitionInfo
+	ls.RUnlock()
+	return ti
 }
 
 // SecurityParam returns the security parameter for the current era
@@ -2341,6 +2389,28 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 				ls.currentPParams = rolloverResult.NewCurrentPParams
 				ls.checkpointWrittenForEpoch = rolloverResult.CheckpointWrittenForEpoch
 				ls.metrics.epochNum.Set(rolloverResult.NewEpochNum)
+			}
+			// Update TransitionInfo based on rollover outcome.
+			//
+			// Case 1: epoch rollover detected a version bump AND no era
+			// transition has occurred yet (we're still in the old era at
+			// the boundary block).  The transition epoch exists in the DB
+			// under the old era's EraId; its StartSlot is the exact
+			// upcoming era boundary.
+			//
+			// Case 2: an era transition happened this block (eraTransitions
+			// non-empty).  The new era is already active — clear any
+			// pending TransitionKnown.
+			if len(eraTransitions) > 0 {
+				// New era is active; previous TransitionKnown (if any) is consumed.
+				ls.transitionInfo = TransitionInfo{State: TransitionUnknown}
+			} else if rolloverResult != nil && rolloverResult.HardFork != nil {
+				// Epoch committed in the old era and version bump detected.
+				// The transition epoch number is the new (just-committed) epoch.
+				ls.transitionInfo = TransitionInfo{
+					State:      TransitionKnown,
+					KnownEpoch: rolloverResult.NewCurrentEpoch.EpochId,
+				}
 			}
 			ls.Unlock()
 
@@ -3232,6 +3302,44 @@ func (ls *LedgerState) loadPParams() error {
 	ls.currentPParams = pp
 	ls.prevEraPParams = prevPP
 	return nil
+}
+
+// reconstructTransitionInfo infers the correct TransitionInfo from the
+// already-loaded currentPParams, currentEra, and currentEpoch.
+//
+// This is called once during Start() after loadPParams(), while the
+// LedgerState is still single-threaded (no lock required).
+//
+// The window that needs reconstruction: when an epoch boundary committed
+// protocol-parameter updates that bump the major protocol version (signalling
+// an upcoming era transition), but the node was stopped before the first
+// block of the new era arrived.  After restart, currentEpoch.EraId is still
+// the OLD era, but currentPParams carries the bumped version.  If those
+// pparams map to a later era than currentEra, we restore TransitionKnown.
+func (ls *LedgerState) reconstructTransitionInfo() {
+	if ls.currentPParams == nil {
+		return
+	}
+	ver, err := GetProtocolVersion(ls.currentPParams)
+	if err != nil {
+		// Not all era pparams are versioned (e.g. Byron falls through);
+		// silently leave transitionInfo at TransitionUnknown.
+		return
+	}
+	pparamsEraId, ok := EraForVersion(ver.Major)
+	if !ok {
+		return
+	}
+	// If the pparams version maps to a later era than the epoch's stored
+	// era, restore TransitionKnown.  KnownEpoch is the current epoch: it
+	// was created with the old EraId but its StartSlot is the exact
+	// upcoming era boundary.
+	if pparamsEraId > ls.currentEra.Id {
+		ls.transitionInfo = TransitionInfo{
+			State:      TransitionKnown,
+			KnownEpoch: ls.currentEpoch.EpochId,
+		}
+	}
 }
 
 // computePParams loads protocol parameters for the given epoch/era
