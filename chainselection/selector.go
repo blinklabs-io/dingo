@@ -763,10 +763,22 @@ func (cs *ChainSelector) comparePeerTips(
 			return vrfComparison
 		case ChainEqual, ChainComparisonUnknown:
 		}
-		if connIdA.String() < connIdB.String() {
+		// Use stable remote address for final tiebreak rather than the full
+		// connection ID string. The full string includes the local ephemeral TCP
+		// port, which changes on every reconnect. That causes the sort order to
+		// flip whenever a peer reconnects — triggering spurious chain switches
+		// and pipeline stalls on resource-constrained nodes (e.g. Raspberry Pi).
+		var remoteA, remoteB string
+		if connIdA.RemoteAddr != nil {
+			remoteA = connIdA.RemoteAddr.String()
+		}
+		if connIdB.RemoteAddr != nil {
+			remoteB = connIdB.RemoteAddr.String()
+		}
+		if remoteA < remoteB {
 			return ChainABetter
 		}
-		if connIdB.String() < connIdA.String() {
+		if remoteB < remoteA {
 			return ChainBBetter
 		}
 		return ChainEqual
