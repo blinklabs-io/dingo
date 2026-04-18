@@ -505,19 +505,12 @@ func (ls *LedgerState) handoffPipelineOnSwitchLocked(
 		ls.bufferedHeaderEvents[connIdKey(newConnId)],
 	) > 0
 
-	if ls.chainsyncBlockfetchReadyChan != nil &&
-		connIdKey(ls.activeBlockfetchConnId) != "" &&
-		!sameConnectionId(ls.activeBlockfetchConnId, newConnId) {
-		ls.config.Logger.Debug(
-			"canceling in-flight blockfetch batch on chain switch",
-			"component", "ledger",
-			"previous_connection_id", ls.activeBlockfetchConnId.String(),
-			"new_connection_id", newConnId.String(),
-			"queued_headers", headerCount,
-		)
-		ls.blockfetchRequestRangeCleanup()
-		ls.activeBlockfetchConnId = ouroboros.ConnectionId{}
-	}
+	// When a blockfetch batch is already in progress on a different connection,
+	// let it complete rather than canceling it. The fetched blocks are canonical
+	// regardless of which peer serves them. Canceling here when peers alternate
+	// rapidly (equal-tip switching) prevents blockfetch from ever completing.
+	// The selectedBlockfetchConnId update above ensures the NEXT batch uses the
+	// new connection after the current one finishes.
 
 	if connIdKey(ls.headerPipelineConnId) != "" &&
 		!sameConnectionId(ls.headerPipelineConnId, newConnId) {
