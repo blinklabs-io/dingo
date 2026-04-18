@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"slices"
 	"strconv"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -36,8 +37,9 @@ import (
 )
 
 var (
-	ErrInvalidAddress = errors.New("invalid address")
-	ErrEpochNotFound  = errors.New("epoch not found")
+	ErrInvalidAddress      = errors.New("invalid address")
+	ErrEpochNotFound       = errors.New("epoch not found")
+	ErrInvalidStakeAddress = errors.New("invalid stake address")
 )
 
 // NodeAdapter wraps a real dingo Node's LedgerState to
@@ -56,6 +58,55 @@ func NewNodeAdapter(
 		panic("NewNodeAdapter: LedgerState must not be nil")
 	}
 	return &NodeAdapter{ledgerState: ls}
+}
+
+func uintToUint8(v uint, fieldName string) (uint8, error) {
+	if v > math.MaxUint8 {
+		return 0, fmt.Errorf(
+			"%s out of range for uint8: %d",
+			fieldName,
+			v,
+		)
+	}
+	return uint8(v), nil
+}
+
+func uint64ToInt64(v uint64, fieldName string) (int64, error) {
+	if v > math.MaxInt64 {
+		return 0, fmt.Errorf(
+			"%s out of range for int64: %d",
+			fieldName,
+			v,
+		)
+	}
+	return int64(v), nil
+}
+
+func uint64ToInt32(v uint64, fieldName string) (int32, error) {
+	if v > math.MaxInt32 {
+		return 0, fmt.Errorf(
+			"%s out of range for int32: %d",
+			fieldName,
+			v,
+		)
+	}
+	return int32(v), nil
+}
+
+func delegationActivationEpoch(
+	ls *ledger.LedgerState,
+	slot uint64,
+) (int32, error) {
+	epoch, err := ls.SlotToEpoch(slot)
+	if err != nil {
+		return 0, err
+	}
+	// Stake delegation becomes active after snapshot
+	// rotation, two epochs after the certificate epoch.
+	return uint64ToInt32(
+		epoch.EpochId+2,
+		"delegation active epoch",
+	)
 }
 
 // ChainTip returns the current chain tip from the ledger
@@ -465,11 +516,330 @@ func (a *NodeAdapter) PoolsExtended() (
 	return ret, nil
 }
 
+// Account returns stake-account information for the
+// requested stake address.
+func (a *NodeAdapter) Account(
+	stakeAddress string,
+) (AccountInfo, error) {
+	stakeAddr, stakeKey, err := parseStakeAddress(
+		stakeAddress,
+	)
+	if err != nil {
+		return AccountInfo{}, err
+	}
+
+	db := a.ledgerState.Database()
+	account, err := db.GetAccount(stakeKey, true, nil)
+	if err != nil {
+		return AccountInfo{}, err
+	}
+	networkID, err := uintToUint8(
+		stakeAddr.NetworkId(),
+		"stake address network id",
+	)
+	if err != nil {
+		return AccountInfo{}, err
+	}
+
+	rows, err := a.ledgerState.Database().
+		GetAddressesByStakingKey(stakeKey, 0, 0, PaginationOrderAsc, nil)
+	if err != nil {
+		return AccountInfo{}, fmt.Errorf(
+			"get associated addresses: %w",
+			err,
+		)
+	}
+	var controlledAmount uint64
+	for _, row := range rows {
+		if len(row.PaymentKey) == 0 {
+			continue
+		}
+		addr, err := lcommon.NewAddressFromParts(
+			lcommon.AddressTypeKeyKey,
+			networkID,
+			row.PaymentKey,
+			stakeKey,
+		)
+		if err != nil {
+			return AccountInfo{}, fmt.Errorf(
+				"build associated address: %w",
+				err,
+			)
+		}
+		utxos, err := a.ledgerState.UtxosByAddress(addr)
+		if err != nil {
+			return AccountInfo{}, fmt.Errorf(
+				"get controlled utxos: %w",
+				err,
+			)
+		}
+		for _, utxo := range utxos {
+			controlledAmount += uint64(utxo.Amount)
+		}
+	}
+
+	var activeEpoch *int64
+	epoch, err := a.ledgerState.SlotToEpoch(account.AddedSlot)
+	if err != nil {
+		return AccountInfo{}, fmt.Errorf(
+			"get account active epoch for slot %d: %w",
+			account.AddedSlot,
+			err,
+		)
+	}
+	epochID, err := uint64ToInt64(
+		epoch.EpochId,
+		"account active epoch",
+	)
+	if err != nil {
+		return AccountInfo{}, err
+	}
+	activeEpoch = &epochID
+
+	var poolID *string
+	if account.Active && len(account.Pool) > 0 {
+		pool := lcommon.PoolId(
+			lcommon.NewBlake2b224(account.Pool),
+		).String()
+		poolID = &pool
+	}
+
+	reward := strconv.FormatUint(uint64(account.Reward), 10)
+	return AccountInfo{
+		StakeAddress:       stakeAddress,
+		Active:             account.Active,
+		ActiveEpoch:        activeEpoch,
+		ControlledAmount:   strconv.FormatUint(controlledAmount, 10),
+		RewardsSum:         reward,
+		WithdrawalsSum:     "0",
+		ReservesSum:        "0",
+		TreasurySum:        "0",
+		WithdrawableAmount: reward,
+		PoolID:             poolID,
+	}, nil
+}
+
+// AccountAssociatedAddresses returns payment addresses
+// associated with the requested stake address.
+func (a *NodeAdapter) AccountAssociatedAddresses(
+	stakeAddress string,
+	params PaginationParams,
+) ([]AccountAssociatedAddressInfo, int, error) {
+	stakeAddr, stakeKey, err := parseStakeAddress(
+		stakeAddress,
+	)
+	if err != nil {
+		return nil, 0, err
+	}
+	networkID, err := uintToUint8(
+		stakeAddr.NetworkId(),
+		"stake address network id",
+	)
+	if err != nil {
+		return nil, 0, err
+	}
+	if _, err := a.ledgerState.Database().
+		GetAccount(stakeKey, true, nil); err != nil {
+		return nil, 0, err
+	}
+	total, err := a.ledgerState.Database().
+		CountAddressesByStakingKey(stakeKey, nil)
+	if err != nil {
+		return nil, 0, fmt.Errorf(
+			"count associated addresses: %w",
+			err,
+		)
+	}
+	offset := (params.Page - 1) * params.Count
+
+	rows, err := a.ledgerState.Database().
+		GetAddressesByStakingKey(
+			stakeKey,
+			params.Count,
+			offset,
+			params.Order,
+			nil,
+		)
+	if err != nil {
+		return nil, 0, fmt.Errorf(
+			"get associated addresses: %w",
+			err,
+		)
+	}
+
+	ret := make(
+		[]AccountAssociatedAddressInfo,
+		0,
+		len(rows),
+	)
+	for _, row := range rows {
+		if len(row.PaymentKey) == 0 {
+			continue
+		}
+		addr, err := lcommon.NewAddressFromParts(
+			lcommon.AddressTypeKeyKey,
+			networkID,
+			row.PaymentKey,
+			stakeKey,
+		)
+		if err != nil {
+			return nil, 0, fmt.Errorf(
+				"build associated address: %w",
+				err,
+			)
+		}
+		ret = append(ret, AccountAssociatedAddressInfo{
+			Address: addr.String(),
+		})
+	}
+	return ret, total, nil
+}
+
+// AccountDelegationHistory returns delegation history
+// rows for the requested stake address.
+func (a *NodeAdapter) AccountDelegationHistory(
+	stakeAddress string,
+	params PaginationParams,
+) ([]AccountDelegationHistoryInfo, int, error) {
+	_, stakeKey, err := parseStakeAddress(stakeAddress)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	if _, err := a.ledgerState.Database().
+		GetAccount(stakeKey, true, nil); err != nil {
+		return nil, 0, err
+	}
+	rows, err := a.ledgerState.Database().
+		GetAccountDelegationHistory(stakeKey, nil)
+	if err != nil {
+		return nil, 0, fmt.Errorf(
+			"get account delegation history: %w",
+			err,
+		)
+	}
+
+	ret := make([]AccountDelegationHistoryInfo, 0, len(rows))
+	for _, row := range rows {
+		activeEpoch, err := delegationActivationEpoch(
+			a.ledgerState,
+			row.AddedSlot,
+		)
+		if err != nil {
+			return nil, 0, fmt.Errorf(
+				"get activation epoch for delegation slot %d: %w",
+				row.AddedSlot,
+				err,
+			)
+		}
+		ret = append(ret, AccountDelegationHistoryInfo{
+			ActiveEpoch: activeEpoch,
+			TxHash:      hex.EncodeToString(row.TxHash),
+			Amount:      "0",
+			PoolID: lcommon.PoolId(
+				lcommon.NewBlake2b224(row.PoolKeyHash),
+			).String(),
+		})
+	}
+
+	if params.Order == PaginationOrderAsc {
+		slices.Reverse(ret)
+	}
+	total := len(ret)
+	start := (params.Page - 1) * params.Count
+	if start >= total {
+		return []AccountDelegationHistoryInfo{}, total, nil
+	}
+	end := min(start+params.Count, total)
+	return ret[start:end], total, nil
+}
+
+// AccountRegistrationHistory returns registration
+// history rows for the requested stake address.
+func (a *NodeAdapter) AccountRegistrationHistory(
+	stakeAddress string,
+	params PaginationParams,
+) ([]AccountRegistrationHistoryInfo, int, error) {
+	_, stakeKey, err := parseStakeAddress(stakeAddress)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	if _, err := a.ledgerState.Database().
+		GetAccount(stakeKey, true, nil); err != nil {
+		return nil, 0, err
+	}
+	rows, err := a.ledgerState.Database().
+		GetAccountRegistrationHistory(stakeKey, nil)
+	if err != nil {
+		return nil, 0, fmt.Errorf(
+			"get account registration history: %w",
+			err,
+		)
+	}
+
+	ret := make(
+		[]AccountRegistrationHistoryInfo,
+		0,
+		len(rows),
+	)
+	for _, row := range rows {
+		ret = append(ret, AccountRegistrationHistoryInfo{
+			TxHash: hex.EncodeToString(row.TxHash),
+			Action: row.Action,
+		})
+	}
+
+	if params.Order == PaginationOrderAsc {
+		slices.Reverse(ret)
+	}
+	total := len(ret)
+	start := (params.Page - 1) * params.Count
+	if start >= total {
+		return []AccountRegistrationHistoryInfo{}, total, nil
+	}
+	end := min(start+params.Count, total)
+	return ret[start:end], total, nil
+}
+
+// AccountRewardHistory returns reward history rows for
+// the requested stake address.
+func (a *NodeAdapter) AccountRewardHistory(
+	stakeAddress string,
+	params PaginationParams,
+) ([]AccountRewardHistoryInfo, int, error) {
+	_, stakeKey, err := parseStakeAddress(stakeAddress)
+	if err != nil {
+		return nil, 0, err
+	}
+	if _, err := a.ledgerState.Database().
+		GetAccount(stakeKey, true, nil); err != nil {
+		return nil, 0, err
+	}
+	return []AccountRewardHistoryInfo{}, 0, nil
+}
+
 func blockIssuer(issuer lcommon.IssuerVkey) string {
 	if bytes.Equal(issuer[:], make([]byte, len(issuer))) {
 		return ""
 	}
 	return issuer.PoolId()
+}
+
+func parseStakeAddress(
+	stakeAddress string,
+) (lcommon.Address, []byte, error) {
+	addr, err := lcommon.NewAddress(stakeAddress)
+	if err != nil {
+		return lcommon.Address{}, nil, ErrInvalidStakeAddress
+	}
+	zeroHash := lcommon.NewBlake2b224(nil)
+	if addr.PaymentKeyHash() != zeroHash ||
+		addr.StakeKeyHash() == zeroHash {
+		return lcommon.Address{}, nil, ErrInvalidStakeAddress
+	}
+	stakeKey := addr.StakeKeyHash().Bytes()
+	return addr, stakeKey, nil
 }
 
 func blockHashString(hash []byte) string {

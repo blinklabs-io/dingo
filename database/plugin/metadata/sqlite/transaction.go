@@ -22,6 +22,7 @@ import (
 	"strings"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata/internal/accounthistory"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/labelcodec"
 	"github.com/blinklabs-io/dingo/database/types"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -322,6 +323,7 @@ func (d *MetadataStoreSqlite) GetAddressesByStakingKey(
 	stakingKey []byte,
 	limit int,
 	offset int,
+	order string,
 	txn types.Txn,
 ) ([]models.AddressTransaction, error) {
 	var ret []models.AddressTransaction
@@ -337,7 +339,7 @@ func (d *MetadataStoreSqlite) GetAddressesByStakingKey(
 		Select("MIN(id) AS id, payment_key, staking_key").
 		Where("staking_key = ?", stakingKey).
 		Group("payment_key, staking_key").
-		Order("payment_key ASC")
+		Order(addressOrderClause(order))
 	if limit > 0 {
 		query = query.Limit(limit)
 	}
@@ -348,6 +350,88 @@ func (d *MetadataStoreSqlite) GetAddressesByStakingKey(
 		return nil, fmt.Errorf("get addresses by staking key: %w", result.Error)
 	}
 	return ret, nil
+}
+
+// CountAddressesByStakingKey returns the total number of distinct addresses mapped to a staking key.
+func (d *MetadataStoreSqlite) CountAddressesByStakingKey(
+	stakingKey []byte,
+	txn types.Txn,
+) (int, error) {
+	if len(stakingKey) == 0 {
+		return 0, nil
+	}
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return 0, fmt.Errorf(
+			"resolve read DB for count addresses by staking key: %w",
+			err,
+		)
+	}
+	var count int64
+	if err := db.Model(&models.AddressTransaction{}).
+		Where("staking_key = ? AND length(payment_key) > 0", stakingKey).
+		Distinct("payment_key").
+		Count(&count).Error; err != nil {
+		return 0, fmt.Errorf("count addresses by staking key: %w", err)
+	}
+	return int(count), nil
+}
+
+func addressOrderClause(order string) string {
+	if strings.EqualFold(order, "desc") {
+		return "payment_key DESC"
+	}
+	return "payment_key ASC"
+}
+
+// GetAccountDelegationHistory returns delegation history rows for a staking key.
+func (d *MetadataStoreSqlite) GetAccountDelegationHistory(
+	stakingKey []byte,
+	txn types.Txn,
+) ([]models.AccountDelegationHistoryRow, error) {
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"resolve read DB for account delegation history: %w",
+			err,
+		)
+	}
+	rows, err := accounthistory.QueryDelegationHistory(
+		db,
+		stakingKey,
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"query account delegation history: %w",
+			err,
+		)
+	}
+	return rows, nil
+}
+
+// GetAccountRegistrationHistory returns registration history rows for a staking key.
+func (d *MetadataStoreSqlite) GetAccountRegistrationHistory(
+	stakingKey []byte,
+	txn types.Txn,
+) ([]models.AccountRegistrationHistoryRow, error) {
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"resolve read DB for account registration history: %w",
+			err,
+		)
+	}
+	rows, err := accounthistory.QueryRegistrationHistory(
+		db,
+		stakingKey,
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"query account registration history: %w",
+			err,
+		)
+	}
+	return rows, nil
 }
 
 // GetTransactionsByMetadataLabel returns transactions containing a metadata

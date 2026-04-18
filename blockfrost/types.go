@@ -194,3 +194,47 @@ type MetadataTransactionCBORResponse struct {
 	CborMetadata *string `json:"cbor_metadata"`
 	Metadata     string  `json:"metadata"`
 }
+
+// AccountResponse represents a Blockfrost stake account.
+type AccountResponse struct {
+	StakeAddress       string  `json:"stake_address"`
+	Active             bool    `json:"active"`
+	ActiveEpoch        *int64  `json:"active_epoch"`
+	ControlledAmount   string  `json:"controlled_amount"`
+	RewardsSum         string  `json:"rewards_sum"`
+	WithdrawalsSum     string  `json:"withdrawals_sum"`
+	ReservesSum        string  `json:"reserves_sum"`
+	TreasurySum        string  `json:"treasury_sum"`
+	WithdrawableAmount string  `json:"withdrawable_amount"`
+	PoolID             *string `json:"pool_id"`
+}
+
+// AccountAssociatedAddressResponse represents a stake
+// account associated payment address.
+type AccountAssociatedAddressResponse struct {
+	Address string `json:"address"`
+}
+
+// AccountDelegationHistoryResponse represents a
+// stake-account delegation history row.
+type AccountDelegationHistoryResponse struct {
+	ActiveEpoch int32  `json:"active_epoch"`
+	TxHash      string `json:"tx_hash"`
+	Amount      string `json:"amount"`
+	PoolID      string `json:"pool_id"`
+}
+
+// AccountRegistrationHistoryResponse represents a
+// stake-account registration history row.
+type AccountRegistrationHistoryResponse struct {
+	TxHash string `json:"tx_hash"`
+	Action string `json:"action"`
+}
+
+// AccountRewardHistoryResponse represents a stake-account
+// reward history row.
+type AccountRewardHistoryResponse struct {
+	Epoch  int32  `json:"epoch"`
+	Amount string `json:"amount"`
+	PoolID string `json:"pool_id"`
+}

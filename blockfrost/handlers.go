@@ -21,6 +21,8 @@ import (
 	"net/http"
 	"slices"
 	"strconv"
+
+	"github.com/blinklabs-io/dingo/database/models"
 )
 
 const apiVersion = "0.1.0"
@@ -645,5 +647,200 @@ func protocolParamsResponse(
 		Nonce:                 "",
 		DecentralisationParam: 0,
 		ExtraEntropy:          nil,
+	}
+}
+
+func (b *Blockfrost) handleAccount(
+	w http.ResponseWriter,
+	r *http.Request,
+) {
+	account, err := b.node.Account(r.PathValue("stake_address"))
+	if err != nil {
+		b.writeAccountError(w, err, "failed to retrieve account")
+		return
+	}
+	writeJSON(w, http.StatusOK, AccountResponse(account))
+}
+
+func (b *Blockfrost) handleAccountAssociatedAddresses(
+	w http.ResponseWriter,
+	r *http.Request,
+) {
+	params, err := ParsePagination(r)
+	if err != nil {
+		writeError(
+			w,
+			http.StatusBadRequest,
+			"Bad Request",
+			"Invalid pagination parameters.",
+		)
+		return
+	}
+	items, total, err := b.node.AccountAssociatedAddresses(
+		r.PathValue("stake_address"),
+		params,
+	)
+	if err != nil {
+		b.writeAccountError(
+			w, err, "failed to retrieve account addresses",
+		)
+		return
+	}
+	SetPaginationHeaders(w, total, params)
+	resp := make(
+		[]AccountAssociatedAddressResponse,
+		0,
+		len(items),
+	)
+	for _, item := range items {
+		resp = append(
+			resp,
+			AccountAssociatedAddressResponse(item),
+		)
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func (b *Blockfrost) handleAccountDelegationHistory(
+	w http.ResponseWriter,
+	r *http.Request,
+) {
+	params, err := ParsePagination(r)
+	if err != nil {
+		writeError(
+			w,
+			http.StatusBadRequest,
+			"Bad Request",
+			"Invalid pagination parameters.",
+		)
+		return
+	}
+	items, total, err := b.node.AccountDelegationHistory(
+		r.PathValue("stake_address"),
+		params,
+	)
+	if err != nil {
+		b.writeAccountError(
+			w, err, "failed to retrieve account delegation history",
+		)
+		return
+	}
+	SetPaginationHeaders(w, total, params)
+	resp := make(
+		[]AccountDelegationHistoryResponse,
+		0,
+		len(items),
+	)
+	for _, item := range items {
+		resp = append(
+			resp,
+			AccountDelegationHistoryResponse(item),
+		)
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func (b *Blockfrost) handleAccountRegistrationHistory(
+	w http.ResponseWriter,
+	r *http.Request,
+) {
+	params, err := ParsePagination(r)
+	if err != nil {
+		writeError(
+			w,
+			http.StatusBadRequest,
+			"Bad Request",
+			"Invalid pagination parameters.",
+		)
+		return
+	}
+	items, total, err := b.node.AccountRegistrationHistory(
+		r.PathValue("stake_address"),
+		params,
+	)
+	if err != nil {
+		b.writeAccountError(
+			w, err, "failed to retrieve account registration history",
+		)
+		return
+	}
+	SetPaginationHeaders(w, total, params)
+	resp := make(
+		[]AccountRegistrationHistoryResponse,
+		0,
+		len(items),
+	)
+	for _, item := range items {
+		resp = append(
+			resp,
+			AccountRegistrationHistoryResponse(item),
+		)
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func (b *Blockfrost) handleAccountRewardHistory(
+	w http.ResponseWriter,
+	r *http.Request,
+) {
+	params, err := ParsePagination(r)
+	if err != nil {
+		writeError(
+			w,
+			http.StatusBadRequest,
+			"Bad Request",
+			"Invalid pagination parameters.",
+		)
+		return
+	}
+	items, total, err := b.node.AccountRewardHistory(
+		r.PathValue("stake_address"),
+		params,
+	)
+	if err != nil {
+		b.writeAccountError(
+			w, err, "failed to retrieve account reward history",
+		)
+		return
+	}
+	SetPaginationHeaders(w, total, params)
+	resp := make([]AccountRewardHistoryResponse, 0, len(items))
+	for _, item := range items {
+		resp = append(
+			resp,
+			AccountRewardHistoryResponse(item),
+		)
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func (b *Blockfrost) writeAccountError(
+	w http.ResponseWriter,
+	err error,
+	internalMessage string,
+) {
+	switch {
+	case errors.Is(err, ErrInvalidStakeAddress):
+		writeError(
+			w,
+			http.StatusBadRequest,
+			"Bad Request",
+			"Invalid stake address.",
+		)
+	case errors.Is(err, models.ErrAccountNotFound):
+		writeError(
+			w,
+			http.StatusNotFound,
+			"Not Found",
+			"The requested component has not been found.",
+		)
+	default:
+		b.logger.Error(internalMessage, "error", err)
+		writeError(
+			w,
+			http.StatusInternalServerError,
+			"Internal Server Error",
+			internalMessage,
+		)
 	}
 }

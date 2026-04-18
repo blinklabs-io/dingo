@@ -23,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -48,6 +49,11 @@ type mockNode struct {
 	addressTxsTotal        int
 	metadataJSONTotal      int
 	metadataCBORTotal      int
+	account                AccountInfo
+	addresses              []AccountAssociatedAddressInfo
+	delegations            []AccountDelegationHistoryInfo
+	regs                   []AccountRegistrationHistoryInfo
+	rewards                []AccountRewardHistoryInfo
 	chainTipErr            error
 	blockErr               error
 	txHashesErr            error
@@ -59,6 +65,11 @@ type mockNode struct {
 	addressTransactionsErr error
 	metadataJSONErr        error
 	metadataCBORErr        error
+	accountErr             error
+	addressesErr           error
+	delegationsErr         error
+	regsErr                error
+	rewardsErr             error
 }
 
 func (m *mockNode) ChainTip() (
@@ -129,6 +140,88 @@ func (m *mockNode) MetadataTransactionsCBOR(
 	_ PaginationParams,
 ) ([]MetadataTransactionCBORInfo, int, error) {
 	return m.metadataCBOR, m.metadataCBORTotal, m.metadataCBORErr
+}
+
+func (m *mockNode) Account(
+	_ string,
+) (AccountInfo, error) {
+	return m.account, m.accountErr
+}
+
+func (m *mockNode) AccountAssociatedAddresses(
+	_ string,
+	params PaginationParams,
+) ([]AccountAssociatedAddressInfo, int, error) {
+	items := append([]AccountAssociatedAddressInfo(nil), m.addresses...)
+	total := len(items)
+	if params.Order == PaginationOrderDesc {
+		for i, j := 0, len(items)-1; i < j; i, j = i+1, j-1 {
+			items[i], items[j] = items[j], items[i]
+		}
+	}
+	start := (params.Page - 1) * params.Count
+	if start >= total {
+		return []AccountAssociatedAddressInfo{}, total, m.addressesErr
+	}
+	end := min(start+params.Count, total)
+	return items[start:end], total, m.addressesErr
+}
+
+func (m *mockNode) AccountDelegationHistory(
+	_ string,
+	params PaginationParams,
+) ([]AccountDelegationHistoryInfo, int, error) {
+	items := append([]AccountDelegationHistoryInfo(nil), m.delegations...)
+	total := len(items)
+	if params.Order == PaginationOrderDesc {
+		for i, j := 0, len(items)-1; i < j; i, j = i+1, j-1 {
+			items[i], items[j] = items[j], items[i]
+		}
+	}
+	start := (params.Page - 1) * params.Count
+	if start >= total {
+		return []AccountDelegationHistoryInfo{}, total, m.delegationsErr
+	}
+	end := min(start+params.Count, total)
+	return items[start:end], total, m.delegationsErr
+}
+
+func (m *mockNode) AccountRegistrationHistory(
+	_ string,
+	params PaginationParams,
+) ([]AccountRegistrationHistoryInfo, int, error) {
+	items := append([]AccountRegistrationHistoryInfo(nil), m.regs...)
+	total := len(items)
+	if params.Order == PaginationOrderDesc {
+		for i, j := 0, len(items)-1; i < j; i, j = i+1, j-1 {
+			items[i], items[j] = items[j], items[i]
+		}
+	}
+	start := (params.Page - 1) * params.Count
+	if start >= total {
+		return []AccountRegistrationHistoryInfo{}, total, m.regsErr
+	}
+	end := min(start+params.Count, total)
+	return items[start:end], total, m.regsErr
+}
+
+func (m *mockNode) AccountRewardHistory(
+	_ string,
+	params PaginationParams,
+) ([]AccountRewardHistoryInfo, int, error) {
+	items := append([]AccountRewardHistoryInfo(nil), m.rewards...)
+	total := len(items)
+	if params.Order == PaginationOrderDesc {
+		for i, j := 0, len(items)-1; i < j; i, j = i+1, j-1 {
+			items[i], items[j] = items[j], items[i]
+		}
+	}
+	start := (params.Page - 1) * params.Count
+	if start >= total {
+		return []AccountRewardHistoryInfo{}, total, m.rewardsErr
+	}
+	end := min(start+params.Count, total)
+	return items[start:end], total, m.rewardsErr
 }
 
 func newTestBlockfrost(
@@ -699,6 +792,207 @@ func TestHandleEpochParamsNotFound(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 404, resp.StatusCode)
 	assert.Equal(t, "Not Found", resp.Error)
+}
+
+func TestHandleAccount(t *testing.T) {
+	mock := &mockNode{
+		account: AccountInfo{
+			StakeAddress:       "stake_test1",
+			Active:             true,
+			ControlledAmount:   "123",
+			RewardsSum:         "10",
+			WithdrawalsSum:     "0",
+			ReservesSum:        "0",
+			TreasurySum:        "0",
+			WithdrawableAmount: "10",
+		},
+	}
+	b := newTestBlockfrost(mock)
+
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/api/v0/accounts/stake_test1",
+		nil,
+	)
+	req.SetPathValue("stake_address", "stake_test1")
+	w := httptest.NewRecorder()
+	b.handleAccount(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	var resp AccountResponse
+	err := json.NewDecoder(w.Body).Decode(&resp)
+	require.NoError(t, err)
+	assert.Equal(t, "stake_test1", resp.StakeAddress)
+	assert.True(t, resp.Active)
+	assert.Equal(t, "123", resp.ControlledAmount)
+	assert.Equal(t, "10", resp.RewardsSum)
+	assert.Equal(t, "10", resp.WithdrawableAmount)
+}
+
+func TestHandleAccountInvalidStakeAddress(t *testing.T) {
+	mock := &mockNode{
+		accountErr: ErrInvalidStakeAddress,
+	}
+	b := newTestBlockfrost(mock)
+
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/api/v0/accounts/invalid",
+		nil,
+	)
+	req.SetPathValue("stake_address", "invalid")
+	w := httptest.NewRecorder()
+	b.handleAccount(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+
+	var resp ErrorResponse
+	err := json.NewDecoder(w.Body).Decode(&resp)
+	require.NoError(t, err)
+	assert.Equal(t, 400, resp.StatusCode)
+	assert.Equal(t, "Invalid stake address.", resp.Message)
+}
+
+func TestHandleAccountNotFound(t *testing.T) {
+	mock := &mockNode{
+		accountErr: models.ErrAccountNotFound,
+	}
+	b := newTestBlockfrost(mock)
+
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/api/v0/accounts/stake_missing",
+		nil,
+	)
+	req.SetPathValue("stake_address", "stake_missing")
+	w := httptest.NewRecorder()
+	b.handleAccount(w, req)
+
+	assert.Equal(t, http.StatusNotFound, w.Code)
+}
+
+func TestHandleAccountAssociatedAddresses(t *testing.T) {
+	mock := &mockNode{
+		addresses: []AccountAssociatedAddressInfo{
+			{Address: "addr_test1"},
+			{Address: "addr_test2"},
+		},
+	}
+	b := newTestBlockfrost(mock)
+
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/api/v0/accounts/stake_test1/addresses?count=1&page=2&order=asc",
+		nil,
+	)
+	req.SetPathValue("stake_address", "stake_test1")
+	w := httptest.NewRecorder()
+	b.handleAccountAssociatedAddresses(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, "2", w.Header().Get("X-Pagination-Count-Total"))
+	assert.Equal(t, "2", w.Header().Get("X-Pagination-Page-Total"))
+
+	var resp []AccountAssociatedAddressResponse
+	err := json.NewDecoder(w.Body).Decode(&resp)
+	require.NoError(t, err)
+	require.Len(t, resp, 1)
+	assert.Equal(t, "addr_test2", resp[0].Address)
+}
+
+func TestHandleAccountDelegationHistory(t *testing.T) {
+	mock := &mockNode{
+		delegations: []AccountDelegationHistoryInfo{
+			{
+				ActiveEpoch: 1,
+				TxHash:      "tx1",
+				Amount:      "0",
+				PoolID:      "pool1",
+			},
+			{
+				ActiveEpoch: 2,
+				TxHash:      "tx2",
+				Amount:      "0",
+				PoolID:      "pool2",
+			},
+		},
+	}
+	b := newTestBlockfrost(mock)
+
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/api/v0/accounts/stake_test1/delegations?count=1&page=1&order=desc",
+		nil,
+	)
+	req.SetPathValue("stake_address", "stake_test1")
+	w := httptest.NewRecorder()
+	b.handleAccountDelegationHistory(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	var resp []AccountDelegationHistoryResponse
+	err := json.NewDecoder(w.Body).Decode(&resp)
+	require.NoError(t, err)
+	require.Len(t, resp, 1)
+	assert.Equal(t, int32(2), resp[0].ActiveEpoch)
+	assert.Equal(t, "tx2", resp[0].TxHash)
+	assert.Equal(t, "pool2", resp[0].PoolID)
+}
+
+func TestHandleAccountRegistrationHistory(t *testing.T) {
+	mock := &mockNode{
+		regs: []AccountRegistrationHistoryInfo{
+			{TxHash: "tx1", Action: "registered"},
+			{TxHash: "tx2", Action: "deregistered"},
+		},
+	}
+	b := newTestBlockfrost(mock)
+
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/api/v0/accounts/stake_test1/registrations?count=2&page=1&order=asc",
+		nil,
+	)
+	req.SetPathValue("stake_address", "stake_test1")
+	w := httptest.NewRecorder()
+	b.handleAccountRegistrationHistory(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	var resp []AccountRegistrationHistoryResponse
+	err := json.NewDecoder(w.Body).Decode(&resp)
+	require.NoError(t, err)
+	require.Len(t, resp, 2)
+	assert.Equal(t, "registered", resp[0].Action)
+	assert.Equal(t, "deregistered", resp[1].Action)
+}
+
+func TestHandleAccountRewardHistory(t *testing.T) {
+	mock := &mockNode{
+		rewards: []AccountRewardHistoryInfo{
+			{Epoch: 3, Amount: "12", PoolID: "pool1"},
+		},
+	}
+	b := newTestBlockfrost(mock)
+
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/api/v0/accounts/stake_test1/rewards",
+		nil,
+	)
+	req.SetPathValue("stake_address", "stake_test1")
+	w := httptest.NewRecorder()
+	b.handleAccountRewardHistory(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	var resp []AccountRewardHistoryResponse
+	err := json.NewDecoder(w.Body).Decode(&resp)
+	require.NoError(t, err)
+	require.Len(t, resp, 1)
+	assert.Equal(t, int32(3), resp[0].Epoch)
+	assert.Equal(t, "12", resp[0].Amount)
 }
 
 func TestHandleNetwork(t *testing.T) {

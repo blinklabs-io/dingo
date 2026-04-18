@@ -447,3 +447,156 @@ func TestCompatNetworkResponse(t *testing.T) {
 		t, "22000000000000000", theirs.Stake.Active,
 	)
 }
+
+// TestCompatAccountResponse verifies that our
+// AccountResponse round-trips through blockfrost-go's
+// Account type.
+func TestCompatAccountResponse(t *testing.T) {
+	activeEpoch := int64(42)
+	poolID := "pool1xyz"
+	ours := AccountResponse{
+		StakeAddress:       "stake_test1upugeuz3jdy0a7hncusutadavzcetdzylgxcldz39hp9n0s0xy0n5",
+		Active:             true,
+		ActiveEpoch:        &activeEpoch,
+		ControlledAmount:   "1000000",
+		RewardsSum:         "123",
+		WithdrawalsSum:     "45",
+		ReservesSum:        "6",
+		TreasurySum:        "7",
+		WithdrawableAmount: "89",
+		PoolID:             &poolID,
+	}
+
+	data, err := json.Marshal(ours)
+	require.NoError(t, err)
+
+	var theirs bfgo.Account
+	err = json.Unmarshal(data, &theirs)
+	require.NoError(t, err)
+
+	assert.Equal(t, ours.StakeAddress, theirs.StakeAddress)
+	assert.Equal(t, ours.Active, theirs.Active)
+	require.NotNil(t, theirs.ActiveEpoch)
+	assert.Equal(t, activeEpoch, *theirs.ActiveEpoch)
+	assert.Equal(
+		t, ours.ControlledAmount, theirs.ControlledAmount,
+	)
+	assert.Equal(t, ours.RewardsSum, theirs.RewardsSum)
+	assert.Equal(
+		t, ours.WithdrawalsSum, theirs.WithdrawalsSum,
+	)
+	assert.Equal(t, ours.ReservesSum, theirs.ReservesSum)
+	assert.Equal(t, ours.TreasurySum, theirs.TreasurySum)
+	assert.Equal(
+		t, ours.WithdrawableAmount, theirs.WithdrawableAmount,
+	)
+	require.NotNil(t, theirs.PoolID)
+	assert.Equal(t, poolID, *theirs.PoolID)
+}
+
+// TestCompatAccountAssociatedAddressesResponse verifies
+// that our AccountAssociatedAddressResponse round-trips
+// through blockfrost-go's AccountAssociatedAddress type.
+func TestCompatAccountAssociatedAddressesResponse(t *testing.T) {
+	ours := []AccountAssociatedAddressResponse{
+		{Address: "addr_test1qqqexample"},
+		{Address: "addr_test1qqqexample2"},
+	}
+
+	data, err := json.Marshal(ours)
+	require.NoError(t, err)
+
+	var theirs []bfgo.AccountAssociatedAddress
+	err = json.Unmarshal(data, &theirs)
+	require.NoError(t, err)
+
+	require.Len(t, theirs, 2)
+	assert.Equal(t, ours[0].Address, theirs[0].Address)
+	assert.Equal(t, ours[1].Address, theirs[1].Address)
+}
+
+// TestCompatAccountDelegationHistoryResponse verifies
+// that our AccountDelegationHistoryResponse round-trips
+// through blockfrost-go's AccountDelegationHistory type.
+func TestCompatAccountDelegationHistoryResponse(t *testing.T) {
+	ours := []AccountDelegationHistoryResponse{
+		{
+			ActiveEpoch: 7,
+			TxHash:      "abc123",
+			Amount:      "1000000",
+			PoolID:      "pool1xyz",
+		},
+	}
+
+	data, err := json.Marshal(ours)
+	require.NoError(t, err)
+
+	var theirs []bfgo.AccountDelegationHistory
+	err = json.Unmarshal(data, &theirs)
+	require.NoError(t, err)
+
+	require.Len(t, theirs, 1)
+	assert.Equal(
+		t, int32(ours[0].ActiveEpoch), theirs[0].ActiveEpoch,
+	)
+	assert.Equal(t, ours[0].TxHash, theirs[0].TXHash)
+	assert.Equal(t, ours[0].Amount, theirs[0].Amount)
+	assert.Equal(t, ours[0].PoolID, theirs[0].PoolID)
+}
+
+// TestCompatAccountRegistrationHistoryResponse verifies
+// that our AccountRegistrationHistoryResponse
+// round-trips through blockfrost-go's
+// AccountRegistrationHistory type.
+func TestCompatAccountRegistrationHistoryResponse(
+	t *testing.T,
+) {
+	ours := []AccountRegistrationHistoryResponse{
+		{
+			TxHash: "abc123",
+			Action: "registered",
+		},
+		{
+			TxHash: "def456",
+			Action: "deregistered",
+		},
+	}
+
+	data, err := json.Marshal(ours)
+	require.NoError(t, err)
+
+	var theirs []bfgo.AccountRegistrationHistory
+	err = json.Unmarshal(data, &theirs)
+	require.NoError(t, err)
+
+	require.Len(t, theirs, 2)
+	assert.Equal(t, ours[0].TxHash, theirs[0].TXHash)
+	assert.Equal(t, ours[0].Action, theirs[0].Action)
+	assert.Equal(t, ours[1].TxHash, theirs[1].TXHash)
+	assert.Equal(t, ours[1].Action, theirs[1].Action)
+}
+
+// TestCompatAccountRewardHistoryResponse verifies that
+// our AccountRewardHistoryResponse round-trips through
+// blockfrost-go's AccountRewardsHistory type.
+func TestCompatAccountRewardHistoryResponse(t *testing.T) {
+	ours := []AccountRewardHistoryResponse{
+		{
+			Epoch:  11,
+			Amount: "500",
+			PoolID: "pool1xyz",
+		},
+	}
+
+	data, err := json.Marshal(ours)
+	require.NoError(t, err)
+
+	var theirs []bfgo.AccountRewardsHistory
+	err = json.Unmarshal(data, &theirs)
+	require.NoError(t, err)
+
+	require.Len(t, theirs, 1)
+	assert.Equal(t, int32(ours[0].Epoch), theirs[0].Epoch)
+	assert.Equal(t, ours[0].Amount, theirs[0].Amount)
+	assert.Equal(t, ours[0].PoolID, theirs[0].PoolID)
+}
