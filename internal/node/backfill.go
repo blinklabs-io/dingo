@@ -24,8 +24,8 @@ import (
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/ledger/eras"
+	"github.com/blinklabs-io/dingo/ledger/governance"
 	ouroboros_cbor "github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -480,7 +480,7 @@ func (b *Backfill) processBlockGovernance(
 		return nil
 	}
 	if len(proposals) > 0 {
-		if err := ledger.ProcessGovernanceProposals(
+		if err := governance.ProcessProposals(
 			tx, point, epochId,
 			conwayPP.GovActionValidityPeriod,
 			b.db, txn,
@@ -491,7 +491,7 @@ func (b *Backfill) processBlockGovernance(
 		}
 	}
 	if len(votes) > 0 {
-		if err := ledger.ProcessGovernanceVotes(
+		if err := governance.ProcessVotes(
 			tx, point, epochId,
 			conwayPP.DRepInactivityPeriod,
 			b.db, txn,

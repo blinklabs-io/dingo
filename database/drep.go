@@ -88,8 +88,8 @@ func (d *Database) GetActiveDreps(
 }
 
 // GetDRepVotingPower calculates the voting power for a DRep by summing
-// the stake of all accounts delegated to it. Uses the current live
-// UTxO set (deleted_slot = 0) for the calculation.
+// the current stake of all delegated accounts, approximated from live
+// UTxO balance plus reward-account balance.
 func (d *Database) GetDRepVotingPower(
 	drepCredential []byte,
 	txn *Txn,
@@ -102,6 +102,56 @@ func (d *Database) GetDRepVotingPower(
 		drepCredential,
 		txn.Metadata(),
 	)
+}
+
+// GetDRepVotingPowerBatch is the batch form of GetDRepVotingPower; see
+// the metadata-store interface for the contract.
+func (d *Database) GetDRepVotingPowerBatch(
+	drepCredentials [][]byte,
+	txn *Txn,
+) (map[string]uint64, error) {
+	if txn == nil {
+		txn = d.MetadataTxn(false)
+		defer txn.Release()
+	}
+	result, err := d.metadata.GetDRepVotingPowerBatch(
+		drepCredentials,
+		txn.Metadata(),
+	)
+	if err != nil {
+		return result, fmt.Errorf(
+			"Database.GetDRepVotingPowerBatch: failed to get "+
+				"voting power for %d credentials: %w",
+			len(drepCredentials),
+			err,
+		)
+	}
+	return result, nil
+}
+
+// GetDRepVotingPowerByType returns voting power grouped by DRep
+// delegation type.
+func (d *Database) GetDRepVotingPowerByType(
+	drepTypes []uint64,
+	txn *Txn,
+) (map[uint64]uint64, error) {
+	if txn == nil {
+		txn = d.MetadataTxn(false)
+		defer txn.Release()
+	}
+	result, err := d.metadata.GetDRepVotingPowerByType(
+		drepTypes,
+		txn.Metadata(),
+	)
+	if err != nil {
+		return result, fmt.Errorf(
+			"Database.GetDRepVotingPowerByType: failed to get "+
+				"voting power for types %v: %w",
+			drepTypes,
+			err,
+		)
+	}
+	return result, nil
 }
 
 // UpdateDRepActivity updates the DRep's last activity epoch and

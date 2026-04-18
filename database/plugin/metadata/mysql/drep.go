@@ -98,10 +98,10 @@ func (d *MetadataStoreMysql) SetDrep(
 }
 
 // GetDRepVotingPower calculates the voting power for a DRep by summing the
-// stake of all accounts delegated to it. Uses the current live UTxO set
-// (deleted_slot = 0) for the calculation.
+// current stake of all accounts delegated to it, including live UTxO balance
+// plus reward-account balance.
 //
-// TODO: This implementation uses the current live UTxO set as an
+// TODO: This implementation uses current live balances as an
 // approximation. A future implementation should accept an epoch
 // parameter and use epoch-based stake snapshots for accurate
 // voting power at a specific point in time.
@@ -115,18 +115,136 @@ func (d *MetadataStoreMysql) GetDRepVotingPower(
 	}
 	var totalStake uint64
 	if err := db.Raw(`
-		SELECT COALESCE(SUM(CAST(u.amount AS UNSIGNED)), 0)
-		FROM utxo u
-		WHERE u.deleted_slot = 0
-		AND u.staking_key IN (
-			SELECT a.staking_key
-			FROM account a
-			WHERE a.drep = ? AND a.active = 1
-		)
-	`, drepCredential).Scan(&totalStake).Error; err != nil {
+		SELECT COALESCE(SUM(
+				   COALESCE(u.utxo_sum, 0)
+				   + COALESCE(CAST(a.reward AS UNSIGNED), 0)
+			   ), 0)
+		FROM account a
+		LEFT JOIN (
+			SELECT staking_key,
+				   COALESCE(SUM(CAST(amount AS UNSIGNED)), 0) AS utxo_sum
+			FROM utxo
+			WHERE deleted_slot = 0
+			  AND staking_key IN (
+				  SELECT staking_key FROM account
+				  WHERE drep = ? AND active = 1
+			  )
+			GROUP BY staking_key
+		) u ON u.staking_key = a.staking_key
+		WHERE a.drep = ? AND a.active = 1
+	`, drepCredential, drepCredential).Scan(&totalStake).Error; err != nil {
 		return 0, fmt.Errorf("get drep voting power: %w", err)
 	}
 	return totalStake, nil
+}
+
+// GetDRepVotingPowerBatch returns voting power for each DRep credential
+// in a single query. See sqlite/drep.go for the documented contract.
+func (d *MetadataStoreMysql) GetDRepVotingPowerBatch(
+	drepCredentials [][]byte,
+	txn types.Txn,
+) (map[string]uint64, error) {
+	out := make(map[string]uint64, len(drepCredentials))
+	if len(drepCredentials) == 0 {
+		return out, nil
+	}
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return nil, err
+	}
+	type row struct {
+		Drep  []byte
+		Stake uint64
+	}
+	var rows []row
+	// Aggregate UTxO amounts per staking_key in a subquery before
+	// adding account.reward, otherwise the LEFT JOIN would multiply
+	// the per-account reward by the number of live UTxOs and inflate
+	// the totals. Each account contributes (utxo_sum + reward) once
+	// to its DRep bucket.
+	if err := db.Raw(`
+		SELECT a.drep AS drep,
+			   COALESCE(SUM(
+				   COALESCE(u.utxo_sum, 0)
+				   + COALESCE(CAST(a.reward AS UNSIGNED), 0)
+			   ), 0) AS stake
+		FROM account a
+		LEFT JOIN (
+			SELECT staking_key,
+				   COALESCE(SUM(CAST(amount AS UNSIGNED)), 0) AS utxo_sum
+			FROM utxo
+			WHERE deleted_slot = 0
+			  AND staking_key IN (
+				  SELECT staking_key FROM account
+				  WHERE active = 1 AND drep IN ?
+			  )
+			GROUP BY staking_key
+		) u ON u.staking_key = a.staking_key
+		WHERE a.active = 1 AND a.drep IN ?
+		GROUP BY a.drep
+	`, drepCredentials, drepCredentials).Scan(&rows).Error; err != nil {
+		return nil, fmt.Errorf("get drep voting power batch: %w", err)
+	}
+	for _, r := range rows {
+		out[string(r.Drep)] = r.Stake
+	}
+	return out, nil
+}
+
+// GetDRepVotingPowerByType returns voting power grouped by DRep delegation
+// type. It is used for predefined DRep options, which carry no credential.
+func (d *MetadataStoreMysql) GetDRepVotingPowerByType(
+	drepTypes []uint64,
+	txn types.Txn,
+) (map[uint64]uint64, error) {
+	out := make(map[uint64]uint64, len(drepTypes))
+	if len(drepTypes) == 0 {
+		return out, nil
+	}
+	if err := models.ValidatePredefinedDrepTypes(drepTypes); err != nil {
+		return nil, err
+	}
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return nil, err
+	}
+	type row struct {
+		DrepType uint64
+		Stake    uint64
+	}
+	var rows []row
+	// Aggregate UTxO amounts per staking_key in a subquery before
+	// adding account.reward, otherwise the LEFT JOIN would multiply
+	// the per-account reward by the number of live UTxOs and inflate
+	// the totals. Each account contributes (utxo_sum + reward) once
+	// to its drep_type bucket.
+	if err := db.Raw(`
+		SELECT a.drep_type AS drep_type,
+			   COALESCE(SUM(
+				   COALESCE(u.utxo_sum, 0)
+				   + COALESCE(CAST(a.reward AS UNSIGNED), 0)
+			   ), 0) AS stake
+		FROM account a
+		LEFT JOIN (
+			SELECT staking_key,
+				   COALESCE(SUM(CAST(amount AS UNSIGNED)), 0) AS utxo_sum
+			FROM utxo
+			WHERE deleted_slot = 0
+			  AND staking_key IN (
+				  SELECT staking_key FROM account
+				  WHERE active = 1 AND drep_type IN ?
+			  )
+			GROUP BY staking_key
+		) u ON u.staking_key = a.staking_key
+		WHERE a.active = 1 AND a.drep_type IN ?
+		GROUP BY a.drep_type
+	`, drepTypes, drepTypes).Scan(&rows).Error; err != nil {
+		return nil, fmt.Errorf("get drep voting power by type: %w", err)
+	}
+	for _, r := range rows {
+		out[r.DrepType] = r.Stake
+	}
+	return out, nil
 }
 
 // UpdateDRepActivity updates the DRep's last activity epoch and

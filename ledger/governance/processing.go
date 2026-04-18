@@ -12,26 +12,27 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package ledger
+package governance
 
 import (
 	"fmt"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
-// ProcessGovernanceProposals extracts governance proposals from a Conway-era
+// ProcessProposals extracts governance proposals from a Conway-era
 // transaction and persists them to the database. Each proposal procedure in the
 // transaction body is mapped to a GovernanceProposal model with the appropriate
 // action type, parent action, anchor, and deposit information.
 //
 // The govActionLifetime parameter determines how many epochs a proposal remains
 // active before expiring.
-func ProcessGovernanceProposals(
+func ProcessProposals(
 	tx lcommon.Transaction,
 	point ocommon.Point,
 	currentEpoch uint64,
@@ -45,16 +46,19 @@ func ProcessGovernanceProposals(
 	}
 
 	txHash := tx.Hash().Bytes()
+	if len(txHash) != 32 {
+		return fmt.Errorf("invalid tx hash length: got %d", len(txHash))
+	}
+	txHashForLog := shortHash(txHash)
 
 	for i, proposal := range proposals {
-		actionType, parentTxHash, parentActionIdx, policyHash, err := extractGovActionInfo(
-			proposal.GovAction(),
-		)
+		govAction := proposal.GovAction()
+		actionType, parentTxHash, parentActionIdx, policyHash, err := extractGovActionInfo(govAction)
 		if err != nil {
 			return fmt.Errorf(
-				"proposal %d in tx %x: %w",
+				"proposal %d in tx %s: %w",
 				i,
-				txHash[:8],
+				txHashForLog,
 				err,
 			)
 		}
@@ -66,9 +70,19 @@ func ProcessGovernanceProposals(
 		rewardAddrBytes, err := rewardAddr.Bytes()
 		if err != nil {
 			return fmt.Errorf(
-				"encode reward address for proposal %d in tx %x: %w",
+				"encode reward address for proposal %d in tx %s: %w",
 				i,
-				txHash[:8],
+				txHashForLog,
+				err,
+			)
+		}
+
+		actionCbor, err := cbor.Encode(govAction)
+		if err != nil {
+			return fmt.Errorf(
+				"encode gov action cbor for proposal %d in tx %s: %w",
+				i,
+				txHashForLog,
 				err,
 			)
 		}
@@ -83,6 +97,7 @@ func ProcessGovernanceProposals(
 			AnchorHash:    anchorHash[:],
 			Deposit:       proposal.Deposit(),
 			ReturnAddress: rewardAddrBytes,
+			GovActionCbor: actionCbor,
 			AddedSlot:     point.Slot,
 		}
 
@@ -97,9 +112,9 @@ func ProcessGovernanceProposals(
 
 		if err := db.SetGovernanceProposal(govProposal, txn); err != nil {
 			return fmt.Errorf(
-				"set governance proposal %d in tx %x: %w",
+				"set governance proposal %d in tx %s: %w",
 				i,
-				txHash[:8],
+				txHashForLog,
 				err,
 			)
 		}
@@ -108,13 +123,13 @@ func ProcessGovernanceProposals(
 	return nil
 }
 
-// ProcessGovernanceVotes extracts voting procedures from a Conway-era
+// ProcessVotes extracts voting procedures from a Conway-era
 // transaction and persists them to the database. Each vote maps a voter
 // (CC member, DRep, or SPO) and a governance action to a vote choice.
 //
 // When a DRep votes, their activity epoch is updated to the current epoch,
 // which resets their expiry countdown based on the dRepInactivityPeriod.
-func ProcessGovernanceVotes(
+func ProcessVotes(
 	tx lcommon.Transaction,
 	point ocommon.Point,
 	currentEpoch uint64,
@@ -128,6 +143,10 @@ func ProcessGovernanceVotes(
 	}
 
 	txHash := tx.Hash().Bytes()
+	if len(txHash) != 32 {
+		return fmt.Errorf("invalid tx hash length: got %d", len(txHash))
+	}
+	txHashForLog := shortHash(txHash)
 
 	// Cache proposal lookups to avoid redundant DB queries when multiple
 	// voters vote on the same governance action within a single transaction.
@@ -149,8 +168,8 @@ func ProcessGovernanceVotes(
 		voterType, err := mapVoterType(voter.Type)
 		if err != nil {
 			return fmt.Errorf(
-				"vote in tx %x: %w",
-				txHash[:8],
+				"vote in tx %s: %w",
+				txHashForLog,
 				err,
 			)
 		}
@@ -166,8 +185,8 @@ func ProcessGovernanceVotes(
 					txn,
 				); err != nil {
 					return fmt.Errorf(
-						"update drep activity in tx %x: %w",
-						txHash[:8],
+						"update drep activity in tx %s: %w",
+						txHashForLog,
 						err,
 					)
 				}
@@ -195,8 +214,8 @@ func ProcessGovernanceVotes(
 				)
 				if err != nil {
 					return fmt.Errorf(
-						"lookup governance proposal for vote in tx %x: %w",
-						txHash[:8],
+						"lookup governance proposal for vote in tx %s: %w",
+						txHashForLog,
 						err,
 					)
 				}
@@ -225,8 +244,8 @@ func ProcessGovernanceVotes(
 
 			if err := db.SetGovernanceVote(vote, txn); err != nil {
 				return fmt.Errorf(
-					"set governance vote in tx %x: %w",
-					txHash[:8],
+					"set governance vote in tx %s: %w",
+					txHashForLog,
 					err,
 				)
 			}

@@ -112,7 +112,7 @@ func TestGetCommitteeMember(t *testing.T) {
 	// Add a committee member
 	result := store.DB().Create(&models.AuthCommitteeHot{
 		ColdCredential: coldKey,
-		HostCredential: hotKey,
+		HotCredential:  hotKey,
 		CertificateID:  1,
 		AddedSlot:      1000,
 	})
@@ -123,7 +123,7 @@ func TestGetCommitteeMember(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, member)
 	assert.Equal(t, coldKey, member.ColdCredential)
-	assert.Equal(t, hotKey, member.HostCredential)
+	assert.Equal(t, hotKey, member.HotCredential)
 }
 
 func TestGetActiveCommitteeMembers(t *testing.T) {
@@ -137,7 +137,7 @@ func TestGetActiveCommitteeMembers(t *testing.T) {
 	// Add two committee members
 	result := store.DB().Create(&models.AuthCommitteeHot{
 		ColdCredential: coldKey1,
-		HostCredential: hotKey1,
+		HotCredential:  hotKey1,
 		CertificateID:  1,
 		AddedSlot:      1000,
 	})
@@ -145,7 +145,7 @@ func TestGetActiveCommitteeMembers(t *testing.T) {
 
 	result = store.DB().Create(&models.AuthCommitteeHot{
 		ColdCredential: coldKey2,
-		HostCredential: hotKey2,
+		HotCredential:  hotKey2,
 		CertificateID:  2,
 		AddedSlot:      1000,
 	})
@@ -171,7 +171,7 @@ func TestIsCommitteeMemberResigned(t *testing.T) {
 	// Add a committee member
 	result := store.DB().Create(&models.AuthCommitteeHot{
 		ColdCredential: coldKey,
-		HostCredential: hotKey,
+		HotCredential:  hotKey,
 		CertificateID:  1,
 		AddedSlot:      1000,
 	})
@@ -194,6 +194,62 @@ func TestIsCommitteeMemberResigned(t *testing.T) {
 	resigned, err = store.IsCommitteeMemberResigned(coldKey, nil)
 	require.NoError(t, err)
 	assert.True(t, resigned)
+}
+
+func TestGetResignedCommitteeMembers(t *testing.T) {
+	store := setupTestStore(t)
+
+	resignedCold := []byte("cold_credential_12345678901234567890123456")
+	activeCold := []byte("cold_credential_22345678901234567890123456")
+	rejoinedCold := []byte("cold_credential_32345678901234567890123456")
+
+	require.NoError(t, store.DB().Create(&[]models.AuthCommitteeHot{
+		{
+			ColdCredential: resignedCold,
+			HotCredential:  []byte("hot_credential_123456789012345678901"),
+			CertificateID:  1,
+			AddedSlot:      1000,
+		},
+		{
+			ColdCredential: activeCold,
+			HotCredential:  []byte("hot_credential_223456789012345678901"),
+			CertificateID:  2,
+			AddedSlot:      1000,
+		},
+		{
+			ColdCredential: rejoinedCold,
+			HotCredential:  []byte("hot_credential_323456789012345678901"),
+			CertificateID:  3,
+			AddedSlot:      1000,
+		},
+		{
+			ColdCredential: rejoinedCold,
+			HotCredential:  []byte("hot_credential_423456789012345678901"),
+			CertificateID:  5,
+			AddedSlot:      3000,
+		},
+	}).Error)
+	require.NoError(t, store.DB().Create(&[]models.ResignCommitteeCold{
+		{
+			ColdCredential: resignedCold,
+			CertificateID:  4,
+			AddedSlot:      2000,
+		},
+		{
+			ColdCredential: rejoinedCold,
+			CertificateID:  4,
+			AddedSlot:      2000,
+		},
+	}).Error)
+
+	resigned, err := store.GetResignedCommitteeMembers(
+		[][]byte{resignedCold, activeCold, rejoinedCold},
+		nil,
+	)
+	require.NoError(t, err)
+	assert.True(t, resigned[string(resignedCold)])
+	assert.False(t, resigned[string(activeCold)])
+	assert.False(t, resigned[string(rejoinedCold)])
 }
 
 func TestGetActiveDreps(t *testing.T) {
@@ -391,6 +447,301 @@ func TestGetActiveGovernanceProposals(t *testing.T) {
 	assert.Len(t, proposals, 2)
 }
 
+// TestGetActiveGovernanceProposals_DeterministicOrder verifies the stable
+// sort used by the epoch tick (proposed_epoch, added_slot, tx_hash,
+// action_index). This is consensus-critical: the ratification loop
+// enforces at-most-one ratification per purpose per tick, so nodes
+// must see proposals in the same order.
+func TestGetActiveGovernanceProposals_DeterministicOrder(t *testing.T) {
+	store := setupTestStore(t)
+
+	// Insert in reverse-sorted order; the query must return them in
+	// sorted (proposed_epoch ASC, added_slot ASC, tx_hash ASC,
+	// action_index ASC) order regardless.
+	inputs := []models.GovernanceProposal{
+		{
+			TxHash:        []byte("tx_hash_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+			ActionIndex:   1,
+			ActionType:    uint8(6),
+			ProposedEpoch: 200,
+			ExpiresEpoch:  300,
+			AnchorURL:     "https://c.example.com",
+			AnchorHash:    []byte("anchor_hash_c23456789012345678901c"),
+			Deposit:       500,
+			ReturnAddress: []byte("return_addr_0000000000000000000"),
+			AddedSlot:     9000,
+		},
+		{
+			TxHash:        []byte("tx_hash_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+			ActionIndex:   0,
+			ActionType:    uint8(6),
+			ProposedEpoch: 100,
+			ExpiresEpoch:  300,
+			AnchorURL:     "https://a.example.com",
+			AnchorHash:    []byte("anchor_hash_a23456789012345678901a"),
+			Deposit:       500,
+			ReturnAddress: []byte("return_addr_0000000000000000000"),
+			AddedSlot:     5000,
+		},
+		{
+			TxHash:        []byte("tx_hash_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+			ActionIndex:   1,
+			ActionType:    uint8(6),
+			ProposedEpoch: 100,
+			ExpiresEpoch:  300,
+			AnchorURL:     "https://b.example.com",
+			AnchorHash:    []byte("anchor_hash_b23456789012345678901b"),
+			Deposit:       500,
+			ReturnAddress: []byte("return_addr_0000000000000000000"),
+			AddedSlot:     5000,
+		},
+	}
+	for i := range inputs {
+		require.NoError(t, store.SetGovernanceProposal(&inputs[i], nil))
+	}
+
+	got, err := store.GetActiveGovernanceProposals(100, nil)
+	require.NoError(t, err)
+	require.Len(t, got, 3)
+	// Expected order:
+	// (100, 5000, aaa, 0), (100, 5000, aaa, 1),
+	// (200, 9000, bbb, 1)
+	assert.Equal(t, "https://a.example.com", got[0].AnchorURL)
+	assert.Equal(t, "https://b.example.com", got[1].AnchorURL)
+	assert.Equal(t, "https://c.example.com", got[2].AnchorURL)
+}
+
+func TestGetRatifiedGovernanceProposals(t *testing.T) {
+	store := setupTestStore(t)
+
+	// Active (not ratified)
+	require.NoError(t, store.SetGovernanceProposal(
+		&models.GovernanceProposal{
+			TxHash:        []byte("tx_hash_active_12345678901234567890123456"),
+			ActionIndex:   0,
+			ActionType:    uint8(6),
+			ProposedEpoch: 100,
+			ExpiresEpoch:  200,
+			AnchorURL:     "https://active.example.com",
+			AnchorHash:    []byte("anchor_hash_1234567890123456789012"),
+			Deposit:       500,
+			ReturnAddress: []byte("return_addr_1234567890123456789"),
+			AddedSlot:     1000,
+		}, nil,
+	))
+
+	ratifiedEpoch := uint64(105)
+	ratifiedSlot := uint64(3000)
+	require.NoError(t, store.SetGovernanceProposal(
+		&models.GovernanceProposal{
+			TxHash:        []byte("tx_hash_ratifiedA_1234567890123456789012"),
+			ActionIndex:   0,
+			ActionType:    uint8(6),
+			ProposedEpoch: 100,
+			ExpiresEpoch:  200,
+			RatifiedEpoch: &ratifiedEpoch,
+			RatifiedSlot:  &ratifiedSlot,
+			AnchorURL:     "https://ratifiedA.example.com",
+			AnchorHash:    []byte("anchor_hash_2234567890123456789012"),
+			Deposit:       500,
+			ReturnAddress: []byte("return_addr_2234567890123456789"),
+			AddedSlot:     2000,
+		}, nil,
+	))
+
+	// Already enacted: must be excluded.
+	enactedEpoch := uint64(110)
+	enactedSlot := uint64(4000)
+	require.NoError(t, store.SetGovernanceProposal(
+		&models.GovernanceProposal{
+			TxHash:        []byte("tx_hash_enacted_12345678901234567890123456"),
+			ActionIndex:   0,
+			ActionType:    uint8(6),
+			ProposedEpoch: 100,
+			ExpiresEpoch:  200,
+			RatifiedEpoch: &ratifiedEpoch,
+			RatifiedSlot:  &ratifiedSlot,
+			EnactedEpoch:  &enactedEpoch,
+			EnactedSlot:   &enactedSlot,
+			AnchorURL:     "https://enacted.example.com",
+			AnchorHash:    []byte("anchor_hash_3234567890123456789012"),
+			Deposit:       500,
+			ReturnAddress: []byte("return_addr_3234567890123456789"),
+			AddedSlot:     1500,
+		}, nil,
+	))
+
+	ratified, err := store.GetRatifiedGovernanceProposals(nil)
+	require.NoError(t, err)
+	require.Len(t, ratified, 1)
+	assert.Equal(
+		t,
+		"https://ratifiedA.example.com",
+		ratified[0].AnchorURL,
+	)
+}
+
+func TestGetLastEnactedGovernanceProposal(t *testing.T) {
+	store := setupTestStore(t)
+
+	// Enact two ParameterChange proposals at different slots.
+	enacted1Epoch := uint64(100)
+	enacted1Slot := uint64(1000)
+	require.NoError(t, store.SetGovernanceProposal(
+		&models.GovernanceProposal{
+			TxHash:        []byte("tx_hash_paramA_1234567890123456789012345"),
+			ActionIndex:   0,
+			ActionType:    uint8(0), // ParameterChange
+			ProposedEpoch: 80,
+			ExpiresEpoch:  200,
+			EnactedEpoch:  &enacted1Epoch,
+			EnactedSlot:   &enacted1Slot,
+			AnchorURL:     "https://paramA.example.com",
+			AnchorHash:    []byte("anchor_hash_1234567890123456789012"),
+			Deposit:       500,
+			ReturnAddress: []byte("return_addr_1234567890123456789"),
+			AddedSlot:     500,
+		}, nil,
+	))
+	enacted2Epoch := uint64(110)
+	enacted2Slot := uint64(2000)
+	require.NoError(t, store.SetGovernanceProposal(
+		&models.GovernanceProposal{
+			TxHash:        []byte("tx_hash_paramB_1234567890123456789012345"),
+			ActionIndex:   0,
+			ActionType:    uint8(0),
+			ProposedEpoch: 90,
+			ExpiresEpoch:  210,
+			EnactedEpoch:  &enacted2Epoch,
+			EnactedSlot:   &enacted2Slot,
+			AnchorURL:     "https://paramB.example.com",
+			AnchorHash:    []byte("anchor_hash_2234567890123456789012"),
+			Deposit:       500,
+			ReturnAddress: []byte("return_addr_2234567890123456789"),
+			AddedSlot:     700,
+		}, nil,
+	))
+	// Enact a different type so it should not leak into ParameterChange root.
+	enacted3Epoch := uint64(115)
+	enacted3Slot := uint64(2500)
+	require.NoError(t, store.SetGovernanceProposal(
+		&models.GovernanceProposal{
+			TxHash:        []byte("tx_hash_info_12345678901234567890123456aa"),
+			ActionIndex:   0,
+			ActionType:    uint8(6),
+			ProposedEpoch: 95,
+			ExpiresEpoch:  215,
+			EnactedEpoch:  &enacted3Epoch,
+			EnactedSlot:   &enacted3Slot,
+			AnchorURL:     "https://info.example.com",
+			AnchorHash:    []byte("anchor_hash_3234567890123456789012"),
+			Deposit:       500,
+			ReturnAddress: []byte("return_addr_3234567890123456789"),
+			AddedSlot:     800,
+		}, nil,
+	))
+
+	latest, err := store.GetLastEnactedGovernanceProposal(
+		[]uint8{0}, nil,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, latest)
+	assert.Equal(
+		t,
+		"https://paramB.example.com",
+		latest.AnchorURL,
+	)
+
+	// Action type with no enacted proposal returns nil, no error.
+	latest, err = store.GetLastEnactedGovernanceProposal(
+		[]uint8{3}, nil,
+	)
+	require.NoError(t, err)
+	assert.Nil(t, latest)
+
+	// Empty set returns nil with no error (defensive).
+	latest, err = store.GetLastEnactedGovernanceProposal(nil, nil)
+	require.NoError(t, err)
+	assert.Nil(t, latest)
+}
+
+// TestGetLastEnactedGovernanceProposal_CommitteePurpose confirms that
+// NoConfidence and UpdateCommittee share a chain root: querying for
+// either via the purpose's action-type set must find the most
+// recently enacted of both.
+func TestGetLastEnactedGovernanceProposal_CommitteePurpose(t *testing.T) {
+	store := setupTestStore(t)
+
+	// Enact a NoConfidence, then a later UpdateCommittee. Both belong
+	// to the committee purpose per CIP-1694.
+	enactedNCEpoch := uint64(100)
+	enactedNCSlot := uint64(1000)
+	require.NoError(t, store.SetGovernanceProposal(
+		&models.GovernanceProposal{
+			TxHash: []byte(
+				"tx_hash_nc_12345678901234567890123456aaaa",
+			),
+			ActionIndex:   0,
+			ActionType:    uint8(3), // NoConfidence
+			ProposedEpoch: 80,
+			ExpiresEpoch:  200,
+			EnactedEpoch:  &enactedNCEpoch,
+			EnactedSlot:   &enactedNCSlot,
+			AnchorURL:     "https://nc.example.com",
+			AnchorHash:    []byte("anchor_hash_1234567890123456789012"),
+			Deposit:       500,
+			ReturnAddress: []byte("return_addr_1234567890123456789"),
+			AddedSlot:     500,
+		}, nil,
+	))
+	enactedUCEpoch := uint64(110)
+	enactedUCSlot := uint64(2000)
+	require.NoError(t, store.SetGovernanceProposal(
+		&models.GovernanceProposal{
+			TxHash: []byte(
+				"tx_hash_uc_12345678901234567890123456bbbb",
+			),
+			ActionIndex:   0,
+			ActionType:    uint8(4), // UpdateCommittee
+			ProposedEpoch: 90,
+			ExpiresEpoch:  210,
+			EnactedEpoch:  &enactedUCEpoch,
+			EnactedSlot:   &enactedUCSlot,
+			AnchorURL:     "https://uc.example.com",
+			AnchorHash:    []byte("anchor_hash_2234567890123456789012"),
+			Deposit:       500,
+			ReturnAddress: []byte("return_addr_2234567890123456789"),
+			AddedSlot:     700,
+		}, nil,
+	))
+
+	// Query with both types: expect the most recent (UpdateCommittee).
+	latest, err := store.GetLastEnactedGovernanceProposal(
+		[]uint8{3, 4}, nil,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, latest)
+	assert.Equal(t, "https://uc.example.com", latest.AnchorURL)
+
+	// Single-type query misses the cross-type root — demonstrates
+	// why the purpose-aware form is required.
+	singleType, err := store.GetLastEnactedGovernanceProposal(
+		[]uint8{4}, nil,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, singleType)
+	assert.Equal(t, "https://uc.example.com", singleType.AnchorURL)
+	// But querying just NoConfidence also finds NoConfidence even
+	// though a later UpdateCommittee exists — that's the bug the
+	// purpose-aware form fixes when used together in practice.
+	singleType, err = store.GetLastEnactedGovernanceProposal(
+		[]uint8{3}, nil,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, singleType)
+	assert.Equal(t, "https://nc.example.com", singleType.AnchorURL)
+}
+
 func TestUpdateDRepActivity(t *testing.T) {
 	store := setupTestStore(t)
 
@@ -563,6 +914,28 @@ func TestGetDRepVotingPower(t *testing.T) {
 	assert.Equal(t, uint64(10000000), power)
 }
 
+func TestGetDRepVotingPowerByTypeRejectsCredentialTypes(t *testing.T) {
+	store := setupTestStore(t)
+
+	_, err := store.GetDRepVotingPowerByType(
+		[]uint64{models.DrepTypeAddrKeyHash},
+		nil,
+	)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "credential-backed")
+
+	_, err = store.GetDRepVotingPowerByType(
+		[]uint64{models.DrepTypeScriptHash},
+		nil,
+	)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "credential-backed")
+
+	_, err = store.GetDRepVotingPowerByType([]uint64{99}, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unknown predefined drep type")
+}
+
 func TestGetCommitteeActiveCount(t *testing.T) {
 	store := setupTestStore(t)
 
@@ -618,7 +991,7 @@ func TestGetCommitteeActiveCount(t *testing.T) {
 	// Add two committee members
 	result = store.DB().Create(&models.AuthCommitteeHot{
 		ColdCredential: []byte("cold_credential_1234567890123456789012345a"),
-		HostCredential: []byte("hot_credential_12345678901234567890123456a"),
+		HotCredential:  []byte("hot_credential_12345678901234567890123456a"),
 		CertificateID:  1,
 		AddedSlot:      1000,
 	})
@@ -626,7 +999,7 @@ func TestGetCommitteeActiveCount(t *testing.T) {
 
 	result = store.DB().Create(&models.AuthCommitteeHot{
 		ColdCredential: []byte("cold_credential_1234567890123456789012345b"),
-		HostCredential: []byte("hot_credential_12345678901234567890123456b"),
+		HotCredential:  []byte("hot_credential_12345678901234567890123456b"),
 		CertificateID:  2,
 		AddedSlot:      1000,
 	})

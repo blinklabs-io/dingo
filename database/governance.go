@@ -117,7 +117,8 @@ func (d *Database) GetGovernanceProposal(
 	return proposal, nil
 }
 
-// GetActiveGovernanceProposals returns all governance proposals that haven't expired
+// GetActiveGovernanceProposals returns all governance proposals that are
+// still in the active pool (not expired, not enacted, not soft-deleted).
 func (d *Database) GetActiveGovernanceProposals(
 	epoch uint64,
 	txn *Txn,
@@ -131,6 +132,70 @@ func (d *Database) GetActiveGovernanceProposals(
 		return nil, fmt.Errorf("failed to get active governance proposals: %w", err)
 	}
 	return proposals, nil
+}
+
+// GetExpiringGovernanceProposals returns proposals whose expires_epoch is
+// strictly less than the given epoch and that have not yet been enacted,
+// expired, or soft-deleted.
+func (d *Database) GetExpiringGovernanceProposals(
+	epoch uint64,
+	txn *Txn,
+) ([]*models.GovernanceProposal, error) {
+	if txn == nil {
+		txn = d.MetadataTxn(false)
+		defer txn.Release()
+	}
+	proposals, err := d.metadata.GetExpiringGovernanceProposals(
+		epoch, txn.Metadata(),
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"failed to get expiring governance proposals: %w", err,
+		)
+	}
+	return proposals, nil
+}
+
+// GetRatifiedGovernanceProposals returns proposals ratified but not yet
+// enacted, ordered by (ratified_epoch, ratified_slot, id). Used at epoch
+// start for enactment.
+func (d *Database) GetRatifiedGovernanceProposals(
+	txn *Txn,
+) ([]*models.GovernanceProposal, error) {
+	if txn == nil {
+		txn = d.MetadataTxn(false)
+		defer txn.Release()
+	}
+	proposals, err := d.metadata.GetRatifiedGovernanceProposals(txn.Metadata())
+	if err != nil {
+		return nil, fmt.Errorf(
+			"failed to get ratified governance proposals: %w", err,
+		)
+	}
+	return proposals, nil
+}
+
+// GetLastEnactedGovernanceProposal returns the most recently enacted
+// proposal whose action_type is in actionTypes, or nil if none exist.
+// Callers group per-purpose action types (CIP-1694 chain roots) in
+// the slice; the single-type case passes a one-element slice.
+func (d *Database) GetLastEnactedGovernanceProposal(
+	actionTypes []uint8,
+	txn *Txn,
+) (*models.GovernanceProposal, error) {
+	if txn == nil {
+		txn = d.MetadataTxn(false)
+		defer txn.Release()
+	}
+	proposal, err := d.metadata.GetLastEnactedGovernanceProposal(
+		actionTypes, txn.Metadata(),
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"failed to get last enacted governance proposal: %w", err,
+		)
+	}
+	return proposal, nil
 }
 
 // SetGovernanceProposal creates or updates a governance proposal

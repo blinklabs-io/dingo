@@ -196,6 +196,18 @@ type MetadataStore interface {
 		types.Txn,
 	) (*models.Account, error)
 
+	// AddAccountReward credits a reward account by stake credential.
+	AddAccountReward(
+		[]byte, // stakeKey
+		uint64, // amount
+		uint64, // slot
+		types.Txn,
+	) error
+
+	// DeleteAccountRewardsAfterSlot reverts reward credits recorded after
+	// the given slot and deletes their journal entries.
+	DeleteAccountRewardsAfterSlot(uint64, types.Txn) error
+
 	// GetBlockNonce retrieves a block nonce for a given point.
 	GetBlockNonce(
 		ocommon.Point,
@@ -601,11 +613,39 @@ type MetadataStore interface {
 		types.Txn,
 	) (*models.GovernanceProposal, error)
 
-	// GetActiveGovernanceProposals retrieves all governance proposals that haven't expired.
+	// GetActiveGovernanceProposals retrieves all governance proposals that
+	// are still in the active pool (not expired, not enacted, not marked
+	// expired, not soft-deleted).
 	GetActiveGovernanceProposals(
 		uint64, // epoch
 		types.Txn,
 	) ([]*models.GovernanceProposal, error)
+
+	// GetRatifiedGovernanceProposals returns proposals that have been
+	// ratified but not yet enacted. Used at epoch start by enactment.
+	GetRatifiedGovernanceProposals(
+		types.Txn,
+	) ([]*models.GovernanceProposal, error)
+
+	// GetExpiringGovernanceProposals returns proposals whose
+	// `expires_epoch` is strictly less than the given epoch and that
+	// have not yet been enacted, expired, or soft-deleted. Used at
+	// epoch boundaries to mark expired proposals and return deposits.
+	GetExpiringGovernanceProposals(
+		epoch uint64,
+		txn types.Txn,
+	) ([]*models.GovernanceProposal, error)
+
+	// GetLastEnactedGovernanceProposal returns the most recently enacted
+	// proposal whose action_type is in the given set, or nil if none
+	// exist. Callers pass the set of action types that share a chain
+	// root per CIP-1694 (e.g., NoConfidence + UpdateCommittee together).
+	// Used to resolve governance action chain roots at ratification
+	// time.
+	GetLastEnactedGovernanceProposal(
+		actionTypes []uint8,
+		txn types.Txn,
+	) (*models.GovernanceProposal, error)
 
 	// SetGovernanceProposal creates or updates a governance proposal.
 	SetGovernanceProposal(
@@ -642,6 +682,13 @@ type MetadataStore interface {
 		types.Txn,
 	) (bool, error)
 
+	// GetResignedCommitteeMembers returns the cold credentials whose
+	// latest resignation is after their latest authorization.
+	GetResignedCommitteeMembers(
+		[][]byte, // coldKeys
+		types.Txn,
+	) (map[string]bool, error)
+
 	// GetCommitteeActiveCount returns the number of active (non-resigned)
 	// committee members.
 	GetCommitteeActiveCount(types.Txn) (int, error)
@@ -656,24 +703,74 @@ type MetadataStore interface {
 		types.Txn,
 	) error
 
+	// SetCommitteeQuorum stores the quorum threshold enacted with a
+	// committee update.
+	SetCommitteeQuorum(*types.Rat, uint64, types.Txn) error
+
+	// GetCommitteeQuorum retrieves the latest enacted committee quorum.
+	GetCommitteeQuorum(types.Txn) (*types.Rat, error)
+
 	// GetCommitteeMembers retrieves all active (non-deleted)
 	// snapshot-imported committee members.
 	GetCommitteeMembers(types.Txn) ([]*models.CommitteeMember, error)
 
-	// DeleteCommitteeMembersAfterSlot removes committee members added
-	// after the given slot and clears deleted_slot for any that were
+	// GetCommitteeMembersIncludeDeleted retrieves every committee
+	// member row, including rows whose deleted_slot is set. Used to
+	// distinguish "committee never seated" from "committee voted out
+	// via NoConfidence" — the latter leaves every row soft-deleted,
+	// which GetCommitteeMembers would hide.
+	GetCommitteeMembersIncludeDeleted(
+		types.Txn,
+	) ([]*models.CommitteeMember, error)
+
+	// DeleteCommitteeMembersAfterSlot removes committee state added
+	// after the given slot and clears deleted_slot for any members
 	// soft-deleted after that slot. Used during chain rollbacks.
 	DeleteCommitteeMembersAfterSlot(uint64, types.Txn) error
+
+	// SoftDeleteCommitteeMembers marks the given cold credential hashes
+	// as removed by setting deleted_slot. Used by governance enactment
+	// to remove members (UpdateCommittee/NoConfidence action).
+	SoftDeleteCommitteeMembers(
+		coldCredHashes [][]byte,
+		slot uint64,
+		txn types.Txn,
+	) error
+
+	// SoftDeleteAllCommitteeMembers marks all active committee members as
+	// removed. Used by governance enactment for NoConfidence actions.
+	SoftDeleteAllCommitteeMembers(
+		slot uint64,
+		txn types.Txn,
+	) error
 
 	// DRep voting power and activity methods
 
 	// GetDRepVotingPower calculates the voting power for a DRep by summing
-	// the stake of all accounts delegated to it. Uses the current live
-	// UTxO set (deleted_slot = 0) for the calculation.
+	// the current stake of all delegated accounts, approximated from live
+	// UTxO balance plus reward-account balance.
 	GetDRepVotingPower(
 		[]byte, // drepCredential
 		types.Txn,
 	) (uint64, error)
+
+	// GetDRepVotingPowerBatch is the batch form of GetDRepVotingPower.
+	// Returns a credential-to-power map; credentials with no delegated
+	// stake are omitted. Used by governance tallying to avoid N+1
+	// per-DRep lookups.
+	GetDRepVotingPowerBatch(
+		drepCredentials [][]byte,
+		txn types.Txn,
+	) (map[string]uint64, error)
+
+	// GetDRepVotingPowerByType returns voting power grouped by DRep
+	// delegation type. This is used for predefined DRep options such
+	// as AlwaysAbstain and AlwaysNoConfidence, which do not have a
+	// credential hash.
+	GetDRepVotingPowerByType(
+		drepTypes []uint64,
+		txn types.Txn,
+	) (map[uint64]uint64, error)
 
 	// UpdateDRepActivity updates the DRep's last activity epoch and
 	// recalculates the expiry epoch.

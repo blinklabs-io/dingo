@@ -15,8 +15,10 @@
 package sqlite
 
 import (
+	"math/big"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -46,6 +48,87 @@ func TestSetCommitteeMembers(t *testing.T) {
 	result, err := store.GetCommitteeMembers(nil)
 	require.NoError(t, err)
 	assert.Len(t, result, 2)
+}
+
+func TestSetCommitteeQuorum(t *testing.T) {
+	store := setupTestStore(t)
+
+	got, err := store.GetCommitteeQuorum(nil)
+	require.NoError(t, err)
+	assert.Nil(t, got)
+
+	err = store.SetCommitteeQuorum(
+		&types.Rat{Rat: big.NewRat(2, 3)}, 100, nil,
+	)
+	require.NoError(t, err)
+
+	err = store.SetCommitteeQuorum(
+		&types.Rat{Rat: big.NewRat(3, 5)}, 200, nil,
+	)
+	require.NoError(t, err)
+
+	got, err = store.GetCommitteeQuorum(nil)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.Equal(t, big.NewRat(3, 5), got.Rat)
+}
+
+func TestSoftDeleteCommitteeMembers(t *testing.T) {
+	store := setupTestStore(t)
+
+	credA := []byte("cred_hash_a_1234567890123456")
+	credB := []byte("cred_hash_b_1234567890123456")
+	credC := []byte("cred_hash_c_1234567890123456")
+
+	err := store.SetCommitteeMembers([]*models.CommitteeMember{
+		{ColdCredHash: credA, ExpiresEpoch: 300, AddedSlot: 100},
+		{ColdCredHash: credB, ExpiresEpoch: 300, AddedSlot: 100},
+		{ColdCredHash: credC, ExpiresEpoch: 300, AddedSlot: 100},
+	}, nil)
+	require.NoError(t, err)
+
+	err = store.SoftDeleteCommitteeMembers(
+		[][]byte{credA, credC}, 200, nil,
+	)
+	require.NoError(t, err)
+
+	remaining, err := store.GetCommitteeMembers(nil)
+	require.NoError(t, err)
+	require.Len(t, remaining, 1)
+	assert.Equal(t, credB, remaining[0].ColdCredHash)
+}
+
+func TestSoftDeleteAllCommitteeMembers(t *testing.T) {
+	store := setupTestStore(t)
+
+	err := store.SetCommitteeMembers([]*models.CommitteeMember{
+		{ColdCredHash: []byte("aa_1234567890123456789012345"), ExpiresEpoch: 300, AddedSlot: 100},
+		{ColdCredHash: []byte("bb_1234567890123456789012345"), ExpiresEpoch: 300, AddedSlot: 100},
+	}, nil)
+	require.NoError(t, err)
+
+	err = store.SoftDeleteAllCommitteeMembers(200, nil)
+	require.NoError(t, err)
+
+	remaining, err := store.GetCommitteeMembers(nil)
+	require.NoError(t, err)
+	assert.Empty(t, remaining)
+}
+
+func TestSoftDeleteCommitteeMembersEmpty(t *testing.T) {
+	store := setupTestStore(t)
+
+	err := store.SetCommitteeMembers([]*models.CommitteeMember{
+		{ColdCredHash: []byte("aa_1234567890123456789012345"), ExpiresEpoch: 300, AddedSlot: 100},
+	}, nil)
+	require.NoError(t, err)
+
+	err = store.SoftDeleteCommitteeMembers(nil, 200, nil)
+	require.NoError(t, err)
+
+	remaining, err := store.GetCommitteeMembers(nil)
+	require.NoError(t, err)
+	assert.Len(t, remaining, 1)
 }
 
 func TestSetCommitteeMembersEmpty(t *testing.T) {
@@ -160,6 +243,25 @@ func TestDeleteCommitteeMembersAfterSlot(t *testing.T) {
 		[]byte("cred_hash_1_2345678901234567"),
 		members[0].ColdCredHash,
 	)
+}
+
+func TestDeleteCommitteeMembersAfterSlotDeletesQuorum(t *testing.T) {
+	store := setupTestStore(t)
+
+	require.NoError(t, store.SetCommitteeQuorum(
+		&types.Rat{Rat: big.NewRat(2, 3)}, 5000, nil,
+	))
+	require.NoError(t, store.SetCommitteeQuorum(
+		&types.Rat{Rat: big.NewRat(3, 5)}, 7000, nil,
+	))
+
+	err := store.DeleteCommitteeMembersAfterSlot(6000, nil)
+	require.NoError(t, err)
+
+	got, err := store.GetCommitteeQuorum(nil)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.Equal(t, big.NewRat(2, 3), got.Rat)
 }
 
 func TestDeleteCommitteeMembersAfterSlotClearsDeletedSlot(t *testing.T) {

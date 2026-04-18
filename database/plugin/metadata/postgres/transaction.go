@@ -483,6 +483,7 @@ func saveAccount(account *models.Account, db *gorm.DB) error {
 				[]string{
 					"pool",
 					"drep",
+					"drep_type",
 					"active",
 					"certificate_id",
 				},
@@ -1584,15 +1585,26 @@ func (d *MetadataStorePostgres) SetTransaction(
 					if err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
+					drepType, err := models.DrepTypeFromInt(c.Drep.Type)
+					if err != nil {
+						return fmt.Errorf("process certificate: %w", err)
+					}
+					var drepCredential []byte
+					if drepType != models.DrepTypeAlwaysAbstain &&
+						drepType != models.DrepTypeAlwaysNoConfidence {
+						drepCredential = c.Drep.Credential[:]
+					}
 
 					tmpAccount.Pool = c.PoolKeyHash[:]
-					tmpAccount.Drep = c.Drep.Credential[:]
+					tmpAccount.Drep = drepCredential
+					tmpAccount.DrepType = drepType
 					tmpAccount.AddedSlot = point.Slot
 
 					tmpItem := models.StakeVoteDelegation{
 						StakingKey:    stakeKey,
 						PoolKeyHash:   c.PoolKeyHash[:],
-						Drep:          c.Drep.Credential[:],
+						Drep:          drepCredential,
+						DrepType:      drepType,
 						AddedSlot:     point.Slot,
 						CertificateID: certIDMap[i],
 					}
@@ -1761,14 +1773,25 @@ func (d *MetadataStorePostgres) SetTransaction(
 					if err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
+					drepType, err := models.DrepTypeFromInt(c.Drep.Type)
+					if err != nil {
+						return fmt.Errorf("process certificate: %w", err)
+					}
+					var drepCredential []byte
+					if drepType != models.DrepTypeAlwaysAbstain &&
+						drepType != models.DrepTypeAlwaysNoConfidence {
+						drepCredential = c.Drep.Credential[:]
+					}
 
 					tmpAccount.Pool = c.PoolKeyHash[:]
-					tmpAccount.Drep = c.Drep.Credential[:]
+					tmpAccount.Drep = drepCredential
+					tmpAccount.DrepType = drepType
 
 					tmpReg := models.StakeVoteRegistrationDelegation{
 						StakingKey:    stakeKey,
 						PoolKeyHash:   c.PoolKeyHash[:],
-						Drep:          c.Drep.Credential[:],
+						Drep:          drepCredential,
+						DrepType:      drepType,
 						AddedSlot:     point.Slot,
 						DepositAmount: types.Uint64(deposit),
 						CertificateID: certIDMap[i],
@@ -1790,12 +1813,23 @@ func (d *MetadataStorePostgres) SetTransaction(
 					if err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
+					drepType, err := models.DrepTypeFromInt(c.Drep.Type)
+					if err != nil {
+						return fmt.Errorf("process certificate: %w", err)
+					}
+					var drepCredential []byte
+					if drepType != models.DrepTypeAlwaysAbstain &&
+						drepType != models.DrepTypeAlwaysNoConfidence {
+						drepCredential = c.Drep.Credential[:]
+					}
 
-					tmpAccount.Drep = c.Drep.Credential[:]
+					tmpAccount.Drep = drepCredential
+					tmpAccount.DrepType = drepType
 
 					tmpReg := models.VoteRegistrationDelegation{
 						StakingKey:    stakeKey,
-						Drep:          c.Drep.Credential[:],
+						Drep:          drepCredential,
+						DrepType:      drepType,
 						AddedSlot:     point.Slot,
 						DepositAmount: types.Uint64(deposit),
 						CertificateID: certIDMap[i],
@@ -1817,12 +1851,23 @@ func (d *MetadataStorePostgres) SetTransaction(
 					if err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
+					drepType, err := models.DrepTypeFromInt(c.Drep.Type)
+					if err != nil {
+						return fmt.Errorf("process certificate: %w", err)
+					}
+					var drepCredential []byte
+					if drepType != models.DrepTypeAlwaysAbstain &&
+						drepType != models.DrepTypeAlwaysNoConfidence {
+						drepCredential = c.Drep.Credential[:]
+					}
 
-					tmpAccount.Drep = c.Drep.Credential[:]
+					tmpAccount.Drep = drepCredential
+					tmpAccount.DrepType = drepType
 
 					tmpItem := models.VoteDelegation{
 						StakingKey:    stakeKey,
-						Drep:          c.Drep.Credential[:],
+						Drep:          drepCredential,
+						DrepType:      drepType,
 						AddedSlot:     point.Slot,
 						CertificateID: certIDMap[i],
 					}
@@ -1843,7 +1888,7 @@ func (d *MetadataStorePostgres) SetTransaction(
 
 					tmpAuth := models.AuthCommitteeHot{
 						ColdCredential: coldCredential,
-						HostCredential: hotCredential,
+						HotCredential:  hotCredential,
 						CertificateID:  certIDMap[i],
 						AddedSlot:      point.Slot,
 					}

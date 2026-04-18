@@ -421,18 +421,39 @@ func extractRawCostModels(
 	}
 }
 
-// CommitteeMember returns a committee member by cold key.
-// Returns nil if the cold key is not an authorized committee member.
+// CommitteeMember returns a seated committee member by cold key.
+// Returns nil if the cold key is not in the current committee.
 func (lv *LedgerView) CommitteeMember(
 	coldKey lcommon.Blake2b224,
 ) (*lcommon.CommitteeMember, error) {
-	member, err := lv.ls.db.GetCommitteeMember(coldKey[:], lv.txn)
+	dbMembers, err := lv.ls.db.GetCommitteeMembers(lv.txn)
 	if err != nil {
-		if errors.Is(err, models.ErrCommitteeMemberNotFound) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("get committee member: %w", err)
+		return nil, fmt.Errorf("get committee members: %w", err)
 	}
+	var found *models.CommitteeMember
+	for _, member := range dbMembers {
+		if string(member.ColdCredHash) == string(coldKey[:]) {
+			found = member
+			break
+		}
+	}
+	if found == nil {
+		return nil, nil
+	}
+
+	hotByCold, err := lv.committeeHotCredentialsByCold()
+	if err != nil {
+		return nil, err
+	}
+	member := &lcommon.CommitteeMember{
+		ColdKey:     coldKey,
+		ExpiryEpoch: found.ExpiresEpoch,
+	}
+	if hotKey, ok := hotByCold[string(coldKey[:])]; ok {
+		member.HotKey = &hotKey
+		return member, nil
+	}
+
 	resigned, err := lv.ls.db.IsCommitteeMemberResigned(coldKey[:], lv.txn)
 	if err != nil {
 		return nil, fmt.Errorf(
@@ -440,31 +461,73 @@ func (lv *LedgerView) CommitteeMember(
 			err,
 		)
 	}
-	hotKey := lcommon.NewBlake2b224(member.HostCredential)
-	return &lcommon.CommitteeMember{
-		ColdKey:  coldKey,
-		HotKey:   &hotKey,
-		Resigned: resigned,
-	}, nil
+	member.Resigned = resigned
+	return member, nil
 }
 
-// CommitteeMembers returns all active (non-resigned) committee members.
+// CommitteeMembers returns all seated committee members.
 func (lv *LedgerView) CommitteeMembers() ([]lcommon.CommitteeMember, error) {
-	dbMembers, err := lv.ls.db.GetActiveCommitteeMembers(lv.txn)
+	dbMembers, err := lv.ls.db.GetCommitteeMembers(lv.txn)
 	if err != nil {
-		return nil, fmt.Errorf("get active committee members: %w", err)
+		return nil, fmt.Errorf("get committee members: %w", err)
 	}
+	hotByCold, err := lv.committeeHotCredentialsByCold()
+	if err != nil {
+		return nil, err
+	}
+
+	coldKeysWithoutHot := make([][]byte, 0, len(dbMembers))
+	for _, m := range dbMembers {
+		if _, ok := hotByCold[string(m.ColdCredHash)]; !ok {
+			coldKeysWithoutHot = append(
+				coldKeysWithoutHot,
+				m.ColdCredHash,
+			)
+		}
+	}
+	resignedByCold, err := lv.ls.db.GetResignedCommitteeMembers(
+		coldKeysWithoutHot,
+		lv.txn,
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"check committee member resignations: %w",
+			err,
+		)
+	}
+
 	members := make([]lcommon.CommitteeMember, 0, len(dbMembers))
 	for _, m := range dbMembers {
-		coldKey := lcommon.NewBlake2b224(m.ColdCredential)
-		hotKey := lcommon.NewBlake2b224(m.HostCredential)
-		members = append(members, lcommon.CommitteeMember{
-			ColdKey:  coldKey,
-			HotKey:   &hotKey,
-			Resigned: false, // Active members are not resigned
-		})
+		coldKey := lcommon.NewBlake2b224(m.ColdCredHash)
+		member := lcommon.CommitteeMember{
+			ColdKey:     coldKey,
+			ExpiryEpoch: m.ExpiresEpoch,
+		}
+		if hotKey, ok := hotByCold[string(m.ColdCredHash)]; ok {
+			member.HotKey = &hotKey
+		} else {
+			member.Resigned = resignedByCold[string(m.ColdCredHash)]
+		}
+		members = append(members, member)
 	}
 	return members, nil
+}
+
+func (lv *LedgerView) committeeHotCredentialsByCold() (
+	map[string]lcommon.Blake2b224,
+	error,
+) {
+	dbMembers, err := lv.ls.db.GetActiveCommitteeMembers(lv.txn)
+	if err != nil {
+		return nil, fmt.Errorf("get active committee hot keys: %w", err)
+	}
+	hotByCold := make(map[string]lcommon.Blake2b224, len(dbMembers))
+	for _, member := range dbMembers {
+		hotByCold[string(member.ColdCredential)] = lcommon.NewBlake2b224(
+			member.HotCredential,
+		)
+	}
+	return hotByCold, nil
 }
 
 // DRepRegistration returns a DRep registration by credential.
@@ -654,11 +717,12 @@ func (lv *LedgerView) GetTotalActiveStake(epoch uint64) (uint64, error) {
 }
 
 // GetDRepVotingPower returns the voting power for a DRep by summing the
-// stake of all accounts delegated to it. Uses the current live UTxO set.
+// current stake of all delegated accounts, approximated from live UTxO
+// balance plus reward-account balance.
 //
 // TODO: Accept an epoch parameter and use epoch-based stake snapshots
 // for accurate voting power. The current implementation approximates
-// voting power using the live UTxO set.
+// voting power using current live balances.
 func (lv *LedgerView) GetDRepVotingPower(
 	drepCredential []byte,
 ) (uint64, error) {

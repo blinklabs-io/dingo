@@ -80,3 +80,76 @@ func (d *Database) GetAccount(
 	}
 	return account, nil
 }
+
+// AddAccountReward credits the reward balance for a registered account.
+func (d *Database) AddAccountReward(
+	stakeKey []byte,
+	amount uint64,
+	slot uint64,
+	txn *Txn,
+) error {
+	if amount == 0 {
+		return nil
+	}
+	owned := false
+	if txn == nil {
+		txn = d.MetadataTxn(true)
+		owned = true
+		defer func() {
+			if owned {
+				txn.Rollback() //nolint:errcheck
+			}
+		}()
+	}
+	if err := d.metadata.AddAccountReward(
+		stakeKey,
+		amount,
+		slot,
+		txn.Metadata(),
+	); err != nil {
+		return fmt.Errorf("failed to add account reward: %w", err)
+	}
+	if owned {
+		if err := txn.Commit(); err != nil {
+			return fmt.Errorf("commit transaction: %w", err)
+		}
+		owned = false
+	}
+	return nil
+}
+
+// DeleteAccountRewardsAfterSlot reverts reward-account credits recorded after
+// the given slot. Used during chain rollback for governance deposit refunds
+// and treasury withdrawals.
+func (d *Database) DeleteAccountRewardsAfterSlot(
+	slot uint64,
+	txn *Txn,
+) error {
+	owned := false
+	if txn == nil {
+		txn = d.MetadataTxn(true)
+		owned = true
+		defer func() {
+			if owned {
+				txn.Rollback() //nolint:errcheck
+			}
+		}()
+	}
+	if err := d.metadata.DeleteAccountRewardsAfterSlot(
+		slot,
+		txn.Metadata(),
+	); err != nil {
+		return fmt.Errorf(
+			"failed to delete account reward deltas after slot %d: %w",
+			slot,
+			err,
+		)
+	}
+	if owned {
+		if err := txn.Commit(); err != nil {
+			return fmt.Errorf("commit transaction: %w", err)
+		}
+		owned = false
+	}
+	return nil
+}

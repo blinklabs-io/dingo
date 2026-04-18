@@ -48,7 +48,9 @@ func (d *MetadataStoreMysql) GetGovernanceProposal(
 	return &proposal, nil
 }
 
-// GetActiveGovernanceProposals retrieves all governance proposals that haven't expired.
+// GetActiveGovernanceProposals retrieves all governance proposals that
+// are still in the active pool: not expired past the given epoch, not
+// enacted, not marked expired, not soft-deleted.
 func (d *MetadataStoreMysql) GetActiveGovernanceProposals(
 	epoch uint64,
 	txn types.Txn,
@@ -59,12 +61,159 @@ func (d *MetadataStoreMysql) GetActiveGovernanceProposals(
 		return nil, err
 	}
 	if result := db.Where(
-		"expires_epoch >= ? AND enacted_epoch IS NULL AND deleted_slot IS NULL",
+		"expires_epoch >= ? AND enacted_epoch IS NULL AND expired_epoch IS NULL AND deleted_slot IS NULL",
 		epoch,
-	).Find(&proposals); result.Error != nil {
+	).Order(governanceProposalOrder).Find(&proposals); result.Error != nil {
 		return nil, result.Error
 	}
 	return proposals, nil
+}
+
+// GetExpiringGovernanceProposals returns proposals whose expires_epoch is
+// strictly less than the given epoch and that have not yet been enacted,
+// expired, or soft-deleted.
+func (d *MetadataStoreMysql) GetExpiringGovernanceProposals(
+	epoch uint64,
+	txn types.Txn,
+) ([]*models.GovernanceProposal, error) {
+	var proposals []*models.GovernanceProposal
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return nil, err
+	}
+	if result := db.Where(
+		"expires_epoch < ? AND enacted_epoch IS NULL AND expired_epoch IS NULL AND deleted_slot IS NULL",
+		epoch,
+	).Order(governanceProposalOrder).Find(&proposals); result.Error != nil {
+		return nil, result.Error
+	}
+	return proposals, nil
+}
+
+// governanceProposalOrder is the stable row order used when iterating
+// active/expiring proposals at epoch boundaries. Consensus-critical:
+// the epoch tick enforces at-most-one ratification per purpose, so
+// nodes must see proposals in the same order to agree on which one
+// ratifies.
+const governanceProposalOrder = "proposed_epoch ASC, added_slot ASC, tx_hash ASC, action_index ASC"
+
+// ratifiedGovernanceProposalOrder is the row order used when iterating
+// ratified-but-not-yet-enacted proposals at epoch start. Consensus-critical:
+// ratification time comes first so older ratifications enact first; the
+// remainder is the chain-deterministic tie-break shared by
+// governanceProposalOrder so all nodes (regardless of insertion order or
+// restored backups) agree on enactment order within a single tick.
+const ratifiedGovernanceProposalOrder = "ratified_epoch ASC, ratified_slot ASC, proposed_epoch ASC, added_slot ASC, tx_hash ASC, action_index ASC"
+
+// GetRatifiedGovernanceProposals returns proposals that have been ratified
+// but not yet enacted.
+func (d *MetadataStoreMysql) GetRatifiedGovernanceProposals(
+	txn types.Txn,
+) ([]*models.GovernanceProposal, error) {
+	var proposals []*models.GovernanceProposal
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return nil, err
+	}
+	if result := db.Where(
+		"ratified_epoch IS NOT NULL AND enacted_epoch IS NULL AND deleted_slot IS NULL",
+	).Order(ratifiedGovernanceProposalOrder).Find(&proposals); result.Error != nil {
+		return nil, result.Error
+	}
+	return proposals, nil
+}
+
+// GetLastEnactedGovernanceProposal returns the most recently enacted
+// proposal whose action_type is in actionTypes, or nil if none exist.
+// See the sqlite variant for the per-purpose grouping rationale.
+func (d *MetadataStoreMysql) GetLastEnactedGovernanceProposal(
+	actionTypes []uint8,
+	txn types.Txn,
+) (*models.GovernanceProposal, error) {
+	if len(actionTypes) == 0 {
+		return nil, nil
+	}
+	// GORM serialises []uint8 as a single binary blob, so expand to
+	// []int before passing to IN ?.
+	params := make([]int, len(actionTypes))
+	for i, t := range actionTypes {
+		params[i] = int(t)
+	}
+	var proposal models.GovernanceProposal
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return nil, err
+	}
+	if result := db.Where(
+		"action_type IN ? AND enacted_epoch IS NOT NULL AND deleted_slot IS NULL",
+		params,
+	).Order("enacted_epoch DESC, enacted_slot DESC, id DESC").First(&proposal); result.Error != nil {
+		if errors.Is(result.Error, gorm.ErrRecordNotFound) {
+			return nil, nil
+		}
+		return nil, result.Error
+	}
+	return &proposal, nil
+}
+
+// govProposalUpsertColumns is the list of columns whose values are
+// always replaced on upsert. Lifecycle columns (enacted_*, ratified_*,
+// expired_*, deleted_slot) and gov_action_cbor are handled separately
+// (see govProposalUpsertAssignments) so a re-submission of the base
+// proposal record (e.g., a resumable import) does not clobber a
+// previously-recorded state transition.
+var govProposalUpsertColumns = []string{
+	"action_type",
+	"proposed_epoch",
+	"expires_epoch",
+	"parent_tx_hash",
+	"parent_action_idx",
+	"policy_hash",
+	"anchor_url",
+	"anchor_hash",
+	"deposit",
+	"return_address",
+}
+
+// govProposalLifecycleColumns are nullable columns that carry state
+// transitions written by governance enactment/ratification/expiry/
+// deletion. They must only be updated when the incoming value is
+// non-NULL so an unrelated upsert cannot revert a transition to NULL.
+var govProposalLifecycleColumns = []string{
+	"enacted_epoch",
+	"enacted_slot",
+	"ratified_epoch",
+	"ratified_slot",
+	"expired_epoch",
+	"expired_slot",
+	"deleted_slot",
+}
+
+// govProposalUpsertAssignments builds the on-conflict Set for
+// SetGovernanceProposal. MySQL's ON DUPLICATE KEY UPDATE refers to
+// the incoming row with VALUES(col); we guard the gov_action_cbor
+// assignment so an empty incoming payload keeps the stored value,
+// and we guard each lifecycle column the same way so a NULL incoming
+// value preserves the prior transition.
+func govProposalUpsertAssignments() clause.Set {
+	set := clause.AssignmentColumns(govProposalUpsertColumns)
+	set = append(set, clause.Assignment{
+		Column: clause.Column{Name: "gov_action_cbor"},
+		Value: gorm.Expr(
+			"IF(LENGTH(VALUES(gov_action_cbor)) > 0, " +
+				"VALUES(gov_action_cbor), gov_action_cbor)",
+		),
+	})
+	for _, col := range govProposalLifecycleColumns {
+		set = append(set, clause.Assignment{
+			Column: clause.Column{Name: col},
+			Value: gorm.Expr(
+				"IF(VALUES(" + col + ") IS NOT NULL, " +
+					"VALUES(" + col + "), " + col + ")",
+			),
+		})
+	}
+	return set
 }
 
 // SetGovernanceProposal creates or updates a governance proposal.
@@ -81,26 +230,12 @@ func (d *MetadataStoreMysql) SetGovernanceProposal(
 			{Name: "tx_hash"},
 			{Name: "action_index"},
 		},
-		// Note: added_slot is NOT updated on conflict to preserve rollback safety.
-		// The original added_slot represents when the proposal was first submitted.
-		// enacted_slot and ratified_slot track when status changes occur for rollback.
-		DoUpdates: clause.AssignmentColumns([]string{
-			"action_type",
-			"proposed_epoch",
-			"expires_epoch",
-			"parent_tx_hash",
-			"parent_action_idx",
-			"enacted_epoch",
-			"enacted_slot",
-			"ratified_epoch",
-			"ratified_slot",
-			"policy_hash",
-			"anchor_url",
-			"anchor_hash",
-			"deposit",
-			"return_address",
-			"deleted_slot",
-		}),
+		// Note: added_slot is NOT updated on conflict to preserve
+		// rollback safety. enacted_slot and ratified_slot track when
+		// status changes occur for rollback. gov_action_cbor uses a
+		// conditional update so an empty incoming payload (from a
+		// resumable import) doesn't overwrite stored CBOR.
+		DoUpdates: govProposalUpsertAssignments(),
 	}
 	if result := db.Clauses(onConflict).Create(proposal); result.Error != nil {
 		return result.Error
@@ -263,6 +398,95 @@ func (d *MetadataStoreMysql) IsCommitteeMemberResigned(
 	return false, nil
 }
 
+// GetResignedCommitteeMembers returns cold credentials whose latest
+// resignation is after their latest authorization.
+func (d *MetadataStoreMysql) GetResignedCommitteeMembers(
+	coldKeys [][]byte,
+	txn types.Txn,
+) (map[string]bool, error) {
+	resigned := make(map[string]bool)
+	if len(coldKeys) == 0 {
+		return resigned, nil
+	}
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return nil, err
+	}
+
+	var auths []models.AuthCommitteeHot
+	if result := db.Where(
+		"cold_credential IN ?",
+		coldKeys,
+	).Find(&auths); result.Error != nil {
+		return nil, result.Error
+	}
+	latestAuth := make(map[string]models.AuthCommitteeHot, len(auths))
+	for _, auth := range auths {
+		key := string(auth.ColdCredential)
+		prev, ok := latestAuth[key]
+		if !ok || committeeEventAfter(
+			auth.AddedSlot,
+			auth.CertificateID,
+			prev.AddedSlot,
+			prev.CertificateID,
+		) {
+			latestAuth[key] = auth
+		}
+	}
+
+	var resigns []models.ResignCommitteeCold
+	if result := db.Where(
+		"cold_credential IN ?",
+		coldKeys,
+	).Find(&resigns); result.Error != nil {
+		return nil, result.Error
+	}
+	latestResign := make(
+		map[string]models.ResignCommitteeCold,
+		len(resigns),
+	)
+	for _, resign := range resigns {
+		key := string(resign.ColdCredential)
+		prev, ok := latestResign[key]
+		if !ok || committeeEventAfter(
+			resign.AddedSlot,
+			resign.CertificateID,
+			prev.AddedSlot,
+			prev.CertificateID,
+		) {
+			latestResign[key] = resign
+		}
+	}
+
+	for key, resign := range latestResign {
+		auth, ok := latestAuth[key]
+		if !ok {
+			continue
+		}
+		if committeeEventAfter(
+			resign.AddedSlot,
+			resign.CertificateID,
+			auth.AddedSlot,
+			auth.CertificateID,
+		) {
+			resigned[key] = true
+		}
+	}
+	return resigned, nil
+}
+
+func committeeEventAfter(
+	addedSlot uint64,
+	certificateID uint,
+	otherAddedSlot uint64,
+	otherCertificateID uint,
+) bool {
+	if addedSlot > otherAddedSlot {
+		return true
+	}
+	return addedSlot == otherAddedSlot && certificateID > otherCertificateID
+}
+
 // GetConstitution retrieves the current constitution.
 // Returns nil if the constitution has been soft-deleted.
 func (d *MetadataStoreMysql) GetConstitution(
@@ -347,39 +571,54 @@ func (d *MetadataStoreMysql) DeleteGovernanceProposalsAfterSlot(
 		return err
 	}
 
-	// Delete proposals added after the rollback slot
-	if result := db.Where("added_slot > ?", slot).Delete(&models.GovernanceProposal{}); result.Error != nil {
-		return result.Error
+	rollback := func(tx *gorm.DB) error {
+		// Delete proposals added after the rollback slot
+		if result := tx.Where("added_slot > ?", slot).Delete(&models.GovernanceProposal{}); result.Error != nil {
+			return result.Error
+		}
+		// Clear deleted_slot for proposals soft-deleted after the rollback slot
+		if result := tx.Model(&models.GovernanceProposal{}).
+			Where("deleted_slot > ?", slot).
+			Update("deleted_slot", nil); result.Error != nil {
+			return result.Error
+		}
+		// Revert ratification that occurred after the rollback slot
+		if result := tx.Model(&models.GovernanceProposal{}).
+			Where("ratified_slot > ?", slot).
+			Updates(map[string]any{
+				"ratified_epoch": nil,
+				"ratified_slot":  nil,
+			}); result.Error != nil {
+			return result.Error
+		}
+		// Revert enactment that occurred after the rollback slot
+		if result := tx.Model(&models.GovernanceProposal{}).
+			Where("enacted_slot > ?", slot).
+			Updates(map[string]any{
+				"enacted_epoch": nil,
+				"enacted_slot":  nil,
+			}); result.Error != nil {
+			return result.Error
+		}
+		// Revert expiry that occurred after the rollback slot
+		if result := tx.Model(&models.GovernanceProposal{}).
+			Where("expired_slot > ?", slot).
+			Updates(map[string]any{
+				"expired_epoch": nil,
+				"expired_slot":  nil,
+			}); result.Error != nil {
+			return result.Error
+		}
+		return nil
 	}
 
-	// Clear deleted_slot for proposals soft-deleted after the rollback slot
-	if result := db.Model(&models.GovernanceProposal{}).
-		Where("deleted_slot > ?", slot).
-		Update("deleted_slot", nil); result.Error != nil {
-		return result.Error
+	// If caller provided a transaction, use it directly. Otherwise wrap
+	// in a single transaction so a partial failure cannot leave the
+	// table half-rolled-back.
+	if txn != nil {
+		return rollback(db)
 	}
-
-	// Revert ratification that occurred after the rollback slot
-	if result := db.Model(&models.GovernanceProposal{}).
-		Where("ratified_slot > ?", slot).
-		Updates(map[string]any{
-			"ratified_epoch": nil,
-			"ratified_slot":  nil,
-		}); result.Error != nil {
-		return result.Error
-	}
-
-	// Revert enactment that occurred after the rollback slot
-	if result := db.Model(&models.GovernanceProposal{}).
-		Where("enacted_slot > ?", slot).
-		Updates(map[string]any{
-			"enacted_epoch": nil,
-			"enacted_slot":  nil,
-		}); result.Error != nil {
-		return result.Error
-	}
-
-	return nil
+	return db.Transaction(rollback)
 }
 
 // DeleteGovernanceVotesAfterSlot removes votes added after the given slot
@@ -401,24 +640,28 @@ func (d *MetadataStoreMysql) DeleteGovernanceVotesAfterSlot(
 		return err
 	}
 
-	// Delete votes added after the rollback slot
-	if result := db.Where("added_slot > ?", slot).Delete(&models.GovernanceVote{}); result.Error != nil {
-		return result.Error
+	rollback := func(tx *gorm.DB) error {
+		// Delete votes added after the rollback slot
+		if result := tx.Where("added_slot > ?", slot).Delete(&models.GovernanceVote{}); result.Error != nil {
+			return result.Error
+		}
+		// Delete votes that were updated (changed) after the rollback slot
+		// Since we can't restore the previous vote value, removing the vote is safer
+		// than keeping a potentially incorrect value
+		if result := tx.Where("vote_updated_slot > ?", slot).Delete(&models.GovernanceVote{}); result.Error != nil {
+			return result.Error
+		}
+		// Clear deleted_slot for votes soft-deleted after the rollback slot
+		if result := tx.Model(&models.GovernanceVote{}).
+			Where("deleted_slot > ?", slot).
+			Update("deleted_slot", nil); result.Error != nil {
+			return result.Error
+		}
+		return nil
 	}
 
-	// Delete votes that were updated (changed) after the rollback slot
-	// Since we can't restore the previous vote value, removing the vote is safer
-	// than keeping a potentially incorrect value
-	if result := db.Where("vote_updated_slot > ?", slot).Delete(&models.GovernanceVote{}); result.Error != nil {
-		return result.Error
+	if txn != nil {
+		return rollback(db)
 	}
-
-	// Clear deleted_slot for votes soft-deleted after the rollback slot
-	if result := db.Model(&models.GovernanceVote{}).
-		Where("deleted_slot > ?", slot).
-		Update("deleted_slot", nil); result.Error != nil {
-		return result.Error
-	}
-
-	return nil
+	return db.Transaction(rollback)
 }

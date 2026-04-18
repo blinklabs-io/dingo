@@ -1392,6 +1392,18 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 				err,
 			)
 		}
+		// Revert reward-account credits from rolled-back governance
+		// finalization before account restoration can delete accounts
+		// registered after the rollback slot.
+		if err := ls.db.DeleteAccountRewardsAfterSlot(
+			point.Slot,
+			txn,
+		); err != nil {
+			return fmt.Errorf(
+				"delete account reward deltas after rollback: %w",
+				err,
+			)
+		}
 		// Restore account delegation state
 		if err := ls.db.RestoreAccountStateAtSlot(
 			point.Slot,
@@ -1469,6 +1481,16 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 		); err != nil {
 			return fmt.Errorf(
 				"delete constitutions after rollback: %w",
+				err,
+			)
+		}
+		// Delete rolled-back committee state
+		if err := ls.db.DeleteCommitteeMembersAfterSlot(
+			point.Slot,
+			txn,
+		); err != nil {
+			return fmt.Errorf(
+				"delete committee state after rollback: %w",
 				err,
 			)
 		}

@@ -1311,9 +1311,10 @@ type ParsedGovProposal struct {
 
 // ParsedGovState holds all decoded governance state components.
 type ParsedGovState struct {
-	Constitution *ParsedConstitution
-	Committee    []ParsedCommitteeMember
-	Proposals    []ParsedGovProposal
+	Constitution    *ParsedConstitution
+	Committee       []ParsedCommitteeMember
+	CommitteeQuorum *cbor.Rat
+	Proposals       []ParsedGovProposal
 }
 
 // ParseGovState decodes governance state from raw CBOR.
@@ -1371,13 +1372,14 @@ func ParseGovState(
 	}
 
 	// Parse committee (field 1) — best-effort
-	committee, err := parseCommittee(fields[1])
+	committee, quorum, err := parseCommittee(fields[1])
 	if err != nil {
 		warnings = append(warnings, fmt.Errorf(
 			"parsing committee: %w", err,
 		))
 	}
 	result.Committee = committee
+	result.CommitteeQuorum = quorum
 
 	// Parse proposals (field 0) — best-effort
 	proposals, err := parseProposals(fields[0])
@@ -1490,20 +1492,20 @@ func parseConstitution(data []byte) (
 //
 // where committee_body = [members_map, quorum].
 func parseCommittee(data []byte) (
-	[]ParsedCommitteeMember, error,
+	[]ParsedCommitteeMember, *cbor.Rat, error,
 ) {
 	outer, err := decodeRawArray(data)
 	if err != nil {
-		return nil, fmt.Errorf(
+		return nil, nil, fmt.Errorf(
 			"decoding committee: %w", err,
 		)
 	}
 	// StrictMaybe: empty array = SNothing, 1-element = SJust
 	if len(outer) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 	if len(outer) != 1 {
-		return nil, fmt.Errorf(
+		return nil, nil, fmt.Errorf(
 			"StrictMaybe committee has %d elements, "+
 				"expected 0 or 1",
 			len(outer),
@@ -1514,22 +1516,34 @@ func parseCommittee(data []byte) (
 	// [members_map, quorum]
 	fields, err := decodeRawArray(outer[0])
 	if err != nil {
-		return nil, fmt.Errorf(
+		return nil, nil, fmt.Errorf(
 			"decoding committee body: %w", err,
 		)
 	}
 	if len(fields) < 2 {
-		return nil, fmt.Errorf(
+		return nil, nil, fmt.Errorf(
 			"committee body has %d elements, expected 2",
 			len(fields),
 		)
 	}
 
+	var quorum cbor.Rat
+	if _, err := cbor.Decode(fields[1], &quorum); err != nil {
+		return nil, nil, fmt.Errorf(
+			"decoding committee quorum: %w", err,
+		)
+	}
+	if quorum.Rat == nil {
+		return nil, nil, errors.New("committee quorum is nil")
+	}
+
 	// Decode the committee map using decodeMapEntries to
-	// handle credential array keys.
+	// handle credential array keys. Preserve the already-decoded
+	// quorum on failure so best-effort governance import can still
+	// surface it.
 	entries, err := decodeMapEntries(fields[0])
 	if err != nil {
-		return nil, fmt.Errorf(
+		return nil, &quorum, fmt.Errorf(
 			"decoding committee members map: %w", err,
 		)
 	}
@@ -1564,7 +1578,7 @@ func parseCommittee(data []byte) (
 	}
 
 	// Return parsed members even if some failed
-	return members, errors.Join(memberErrs...)
+	return members, &quorum, errors.Join(memberErrs...)
 }
 
 // parseProposals decodes governance proposals from CBOR.

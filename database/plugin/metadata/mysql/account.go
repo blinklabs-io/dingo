@@ -16,6 +16,7 @@ package mysql
 
 import (
 	"errors"
+	"fmt"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
@@ -46,6 +47,136 @@ func (d *MetadataStoreMysql) GetAccount(
 		return nil, result.Error
 	}
 	return ret, nil
+}
+
+// AddAccountReward credits a registered reward account.
+func (d *MetadataStoreMysql) AddAccountReward(
+	stakeKey []byte,
+	amount uint64,
+	slot uint64,
+	txn types.Txn,
+) error {
+	if amount == 0 {
+		return nil
+	}
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return err
+	}
+	// Wrap the read-check-write and the journal insert in a single
+	// transaction so the on-disk reward and the AccountRewardDelta
+	// journal stay in sync: if the journal insert fails, the reward
+	// update rolls back. The overflow check runs in Go because the
+	// reward column is stored as a decimal string (see
+	// types.Uint64.Value), which makes SQL `reward + ? <= ?`
+	// comparisons lexicographic, not numeric, and unsafe as a guard.
+	credit := func(tx *gorm.DB) error {
+		var account models.Account
+		if err := tx.Where(
+			"staking_key = ? AND active = ?",
+			stakeKey,
+			true,
+		).First(&account).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return models.ErrAccountNotFound
+			}
+			return err
+		}
+		current := uint64(account.Reward)
+		if current > ^uint64(0)-amount {
+			return fmt.Errorf(
+				"account reward overflow for stake key %x",
+				stakeKey,
+			)
+		}
+		result := tx.Model(&models.Account{}).
+			Where("id = ?", account.ID).
+			Update("reward", types.Uint64(current+amount))
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected == 0 {
+			return models.ErrAccountNotFound
+		}
+		delta := &models.AccountRewardDelta{
+			StakingKey: stakeKey,
+			Amount:     types.Uint64(amount),
+			AddedSlot:  slot,
+		}
+		return tx.Create(delta).Error
+	}
+	if txn != nil {
+		return credit(db)
+	}
+	return db.Transaction(credit)
+}
+
+// DeleteAccountRewardsAfterSlot reverts account reward credits recorded
+// after the given slot and deletes their journal rows.
+func (d *MetadataStoreMysql) DeleteAccountRewardsAfterSlot(
+	slot uint64,
+	txn types.Txn,
+) error {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return err
+	}
+	rollback := func(tx *gorm.DB) error {
+		var deltas []models.AccountRewardDelta
+		if result := tx.Where(
+			"added_slot > ?",
+			slot,
+		).Find(&deltas); result.Error != nil {
+			return result.Error
+		}
+		byStakeKey := make(map[string]uint64, len(deltas))
+		for _, delta := range deltas {
+			key := string(delta.StakingKey)
+			amount := uint64(delta.Amount)
+			if byStakeKey[key] > ^uint64(0)-amount {
+				return fmt.Errorf(
+					"account reward rollback overflow for stake key %x",
+					delta.StakingKey,
+				)
+			}
+			byStakeKey[key] += amount
+		}
+		for key, amount := range byStakeKey {
+			var account models.Account
+			if result := tx.Where(
+				"staking_key = ?",
+				[]byte(key),
+			).First(&account); result.Error != nil {
+				if errors.Is(result.Error, gorm.ErrRecordNotFound) {
+					return models.ErrAccountNotFound
+				}
+				return result.Error
+			}
+			current := uint64(account.Reward)
+			if current < amount {
+				return fmt.Errorf(
+					"account reward rollback underflow for stake key %x",
+					[]byte(key),
+				)
+			}
+			if result := tx.Model(&models.Account{}).
+				Where("id = ?", account.ID).
+				Update("reward", types.Uint64(current-amount)); result.Error != nil {
+				return result.Error
+			}
+		}
+		if result := tx.Where(
+			"added_slot > ?",
+			slot,
+		).Delete(&models.AccountRewardDelta{}); result.Error != nil {
+			return result.Error
+		}
+		return nil
+	}
+	if txn != nil {
+		return rollback(db)
+	}
+	return db.Transaction(rollback)
 }
 
 // SetAccount saves an account
@@ -84,6 +215,7 @@ func (d *MetadataStoreMysql) SetAccount(
 type certRecord struct {
 	pool      []byte
 	drep      []byte
+	drepType  uint64
 	addedSlot uint64
 	certIndex uint32
 }
@@ -304,13 +436,14 @@ func batchFetchStakeVoteRegistrationDelegation(
 		StakingKey  []byte
 		PoolKeyHash []byte
 		Drep        []byte
+		DrepType    uint64
 		AddedSlot   uint64
 		CertIndex   uint32
 	}
 	var records []result
 	query := `
 		WITH ranked AS (
-			SELECT t.staking_key, t.pool_key_hash, t.drep, t.added_slot, c.cert_index,
+			SELECT t.staking_key, t.pool_key_hash, t.drep, t.drep_type, t.added_slot, c.cert_index,
 				ROW_NUMBER() OVER (
 					PARTITION BY t.staking_key
 					ORDER BY t.added_slot DESC, c.cert_index DESC
@@ -319,7 +452,7 @@ func batchFetchStakeVoteRegistrationDelegation(
 			INNER JOIN certs c ON c.id = t.certificate_id
 			WHERE t.staking_key IN ? AND t.added_slot <= ?
 		)
-		SELECT staking_key, pool_key_hash, drep, added_slot, cert_index
+		SELECT staking_key, pool_key_hash, drep, drep_type, added_slot, cert_index
 		FROM ranked WHERE rn = 1`
 	if err := db.Raw(query, stakingKeys, slot).Scan(&records).Error; err != nil {
 		return err
@@ -329,6 +462,7 @@ func batchFetchStakeVoteRegistrationDelegation(
 		rec := certRecord{
 			pool:      r.PoolKeyHash,
 			drep:      r.Drep,
+			drepType:  r.DrepType,
 			addedSlot: r.AddedSlot,
 			certIndex: r.CertIndex,
 		}
@@ -338,6 +472,7 @@ func batchFetchStakeVoteRegistrationDelegation(
 			key,
 			certRecord{
 				drep:      r.Drep,
+				drepType:  r.DrepType,
 				addedSlot: r.AddedSlot,
 				certIndex: r.CertIndex,
 			},
@@ -355,13 +490,14 @@ func batchFetchVoteRegistrationDelegation(
 	type result struct {
 		StakingKey []byte
 		Drep       []byte
+		DrepType   uint64
 		AddedSlot  uint64
 		CertIndex  uint32
 	}
 	var records []result
 	query := `
 		WITH ranked AS (
-			SELECT t.staking_key, t.drep, t.added_slot, c.cert_index,
+			SELECT t.staking_key, t.drep, t.drep_type, t.added_slot, c.cert_index,
 				ROW_NUMBER() OVER (
 					PARTITION BY t.staking_key
 					ORDER BY t.added_slot DESC, c.cert_index DESC
@@ -370,7 +506,7 @@ func batchFetchVoteRegistrationDelegation(
 			INNER JOIN certs c ON c.id = t.certificate_id
 			WHERE t.staking_key IN ? AND t.added_slot <= ?
 		)
-		SELECT staking_key, drep, added_slot, cert_index
+		SELECT staking_key, drep, drep_type, added_slot, cert_index
 		FROM ranked WHERE rn = 1`
 	if err := db.Raw(query, stakingKeys, slot).Scan(&records).Error; err != nil {
 		return err
@@ -379,6 +515,7 @@ func batchFetchVoteRegistrationDelegation(
 		key := string(r.StakingKey)
 		rec := certRecord{
 			drep:      r.Drep,
+			drepType:  r.DrepType,
 			addedSlot: r.AddedSlot,
 			certIndex: r.CertIndex,
 		}
@@ -551,13 +688,14 @@ func batchFetchStakeVoteDelegation(
 		StakingKey  []byte
 		PoolKeyHash []byte
 		Drep        []byte
+		DrepType    uint64
 		AddedSlot   uint64
 		CertIndex   uint32
 	}
 	var records []result
 	query := `
 		WITH ranked AS (
-			SELECT t.staking_key, t.pool_key_hash, t.drep, t.added_slot, c.cert_index,
+			SELECT t.staking_key, t.pool_key_hash, t.drep, t.drep_type, t.added_slot, c.cert_index,
 				ROW_NUMBER() OVER (
 					PARTITION BY t.staking_key
 					ORDER BY t.added_slot DESC, c.cert_index DESC
@@ -566,7 +704,7 @@ func batchFetchStakeVoteDelegation(
 			INNER JOIN certs c ON c.id = t.certificate_id
 			WHERE t.staking_key IN ? AND t.added_slot <= ?
 		)
-		SELECT staking_key, pool_key_hash, drep, added_slot, cert_index
+		SELECT staking_key, pool_key_hash, drep, drep_type, added_slot, cert_index
 		FROM ranked WHERE rn = 1`
 	if err := db.Raw(query, stakingKeys, slot).Scan(&records).Error; err != nil {
 		return err
@@ -585,6 +723,7 @@ func batchFetchStakeVoteDelegation(
 			key,
 			certRecord{
 				drep:      r.Drep,
+				drepType:  r.DrepType,
 				addedSlot: r.AddedSlot,
 				certIndex: r.CertIndex,
 			},
@@ -602,13 +741,14 @@ func batchFetchVoteDelegation(
 	type result struct {
 		StakingKey []byte
 		Drep       []byte
+		DrepType   uint64
 		AddedSlot  uint64
 		CertIndex  uint32
 	}
 	var records []result
 	query := `
 		WITH ranked AS (
-			SELECT t.staking_key, t.drep, t.added_slot, c.cert_index,
+			SELECT t.staking_key, t.drep, t.drep_type, t.added_slot, c.cert_index,
 				ROW_NUMBER() OVER (
 					PARTITION BY t.staking_key
 					ORDER BY t.added_slot DESC, c.cert_index DESC
@@ -617,7 +757,7 @@ func batchFetchVoteDelegation(
 			INNER JOIN certs c ON c.id = t.certificate_id
 			WHERE t.staking_key IN ? AND t.added_slot <= ?
 		)
-		SELECT staking_key, drep, added_slot, cert_index
+		SELECT staking_key, drep, drep_type, added_slot, cert_index
 		FROM ranked WHERE rn = 1`
 	if err := db.Raw(query, stakingKeys, slot).Scan(&records).Error; err != nil {
 		return err
@@ -627,6 +767,7 @@ func batchFetchVoteDelegation(
 			string(r.StakingKey),
 			certRecord{
 				drep:      r.Drep,
+				drepType:  r.DrepType,
 				addedSlot: r.AddedSlot,
 				certIndex: r.CertIndex,
 			},
@@ -700,9 +841,11 @@ func (d *MetadataStoreMysql) RestoreAccountStateAtSlot(
 
 		// Get DRep delegation from cache
 		var drep []byte
+		var drepType uint64
 		var drepRec certRecord
 		if rec, ok := cache.drepDelegation[key]; ok {
 			drep = rec.drep
+			drepType = rec.drepType
 			drepRec = rec
 		}
 
@@ -733,6 +876,7 @@ func (d *MetadataStoreMysql) RestoreAccountStateAtSlot(
 		if result := db.Model(&account).Updates(map[string]any{
 			"pool":       pool,
 			"drep":       drep,
+			"drep_type":  drepType,
 			"active":     active,
 			"added_slot": lastModSlot,
 		}); result.Error != nil {

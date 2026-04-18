@@ -125,3 +125,92 @@ func (d *MetadataStoreSqlite) IsCommitteeMemberResigned(
 	}
 	return false, nil
 }
+
+// GetResignedCommitteeMembers returns cold credentials whose latest
+// resignation is after their latest authorization.
+func (d *MetadataStoreSqlite) GetResignedCommitteeMembers(
+	coldKeys [][]byte,
+	txn types.Txn,
+) (map[string]bool, error) {
+	resigned := make(map[string]bool)
+	if len(coldKeys) == 0 {
+		return resigned, nil
+	}
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return nil, err
+	}
+
+	var auths []models.AuthCommitteeHot
+	if result := db.Where(
+		"cold_credential IN ?",
+		coldKeys,
+	).Find(&auths); result.Error != nil {
+		return nil, result.Error
+	}
+	latestAuth := make(map[string]models.AuthCommitteeHot, len(auths))
+	for _, auth := range auths {
+		key := string(auth.ColdCredential)
+		prev, ok := latestAuth[key]
+		if !ok || committeeEventAfter(
+			auth.AddedSlot,
+			auth.CertificateID,
+			prev.AddedSlot,
+			prev.CertificateID,
+		) {
+			latestAuth[key] = auth
+		}
+	}
+
+	var resigns []models.ResignCommitteeCold
+	if result := db.Where(
+		"cold_credential IN ?",
+		coldKeys,
+	).Find(&resigns); result.Error != nil {
+		return nil, result.Error
+	}
+	latestResign := make(
+		map[string]models.ResignCommitteeCold,
+		len(resigns),
+	)
+	for _, resign := range resigns {
+		key := string(resign.ColdCredential)
+		prev, ok := latestResign[key]
+		if !ok || committeeEventAfter(
+			resign.AddedSlot,
+			resign.CertificateID,
+			prev.AddedSlot,
+			prev.CertificateID,
+		) {
+			latestResign[key] = resign
+		}
+	}
+
+	for key, resign := range latestResign {
+		auth, ok := latestAuth[key]
+		if !ok {
+			continue
+		}
+		if committeeEventAfter(
+			resign.AddedSlot,
+			resign.CertificateID,
+			auth.AddedSlot,
+			auth.CertificateID,
+		) {
+			resigned[key] = true
+		}
+	}
+	return resigned, nil
+}
+
+func committeeEventAfter(
+	addedSlot uint64,
+	certificateID uint,
+	otherAddedSlot uint64,
+	otherCertificateID uint,
+) bool {
+	if addedSlot > otherAddedSlot {
+		return true
+	}
+	return addedSlot == otherAddedSlot && certificateID > otherCertificateID
+}

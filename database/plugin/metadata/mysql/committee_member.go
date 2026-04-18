@@ -15,6 +15,7 @@
 package mysql
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -53,6 +54,62 @@ func (d *MetadataStoreMysql) SetCommitteeMembers(
 	return nil
 }
 
+// SetCommitteeQuorum stores the quorum threshold enacted with a committee.
+func (d *MetadataStoreMysql) SetCommitteeQuorum(
+	quorum *types.Rat,
+	slot uint64,
+	txn types.Txn,
+) error {
+	if quorum == nil || quorum.Rat == nil {
+		return errors.New("committee quorum cannot be nil")
+	}
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return fmt.Errorf("SetCommitteeQuorum: resolve db: %w", err)
+	}
+	state := &models.CommitteeQuorum{
+		Quorum:    quorum,
+		AddedSlot: slot,
+	}
+	onConflict := clause.OnConflict{
+		Columns: []clause.Column{{Name: "added_slot"}},
+		DoUpdates: clause.AssignmentColumns([]string{
+			"quorum",
+		}),
+	}
+	if result := db.Clauses(onConflict).Create(state); result.Error != nil {
+		return fmt.Errorf(
+			"SetCommitteeQuorum: upsert failed: %w",
+			result.Error,
+		)
+	}
+	return nil
+}
+
+// GetCommitteeQuorum retrieves the latest enacted committee quorum.
+func (d *MetadataStoreMysql) GetCommitteeQuorum(
+	txn types.Txn,
+) (*types.Rat, error) {
+	var state models.CommitteeQuorum
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"GetCommitteeQuorum: resolve db: %w", err,
+		)
+	}
+	if result := db.Order("added_slot DESC, id DESC").
+		First(&state); result.Error != nil {
+		if errors.Is(result.Error, gorm.ErrRecordNotFound) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf(
+			"GetCommitteeQuorum: query failed: %w",
+			result.Error,
+		)
+	}
+	return state.Quorum, nil
+}
+
 // GetCommitteeMembers retrieves all active (non-deleted) snapshot-imported
 // committee members.
 func (d *MetadataStoreMysql) GetCommitteeMembers(
@@ -76,8 +133,80 @@ func (d *MetadataStoreMysql) GetCommitteeMembers(
 	return members, nil
 }
 
-// DeleteCommitteeMembersAfterSlot removes committee members added after
-// the given slot and clears deleted_slot for any that were soft-deleted
+// GetCommitteeMembersIncludeDeleted returns every committee member
+// row including soft-deleted ones. See sqlite variant for rationale.
+func (d *MetadataStoreMysql) GetCommitteeMembersIncludeDeleted(
+	txn types.Txn,
+) ([]*models.CommitteeMember, error) {
+	var members []*models.CommitteeMember
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"GetCommitteeMembersIncludeDeleted: resolve db: %w", err,
+		)
+	}
+	if result := db.Find(&members); result.Error != nil {
+		return nil, fmt.Errorf(
+			"GetCommitteeMembersIncludeDeleted: query failed: %w",
+			result.Error,
+		)
+	}
+	return members, nil
+}
+
+// SoftDeleteCommitteeMembers marks the given cold credential hashes as
+// removed by setting deleted_slot. Used by governance enactment to remove
+// members listed in an UpdateCommittee action.
+func (d *MetadataStoreMysql) SoftDeleteCommitteeMembers(
+	coldCredHashes [][]byte,
+	slot uint64,
+	txn types.Txn,
+) error {
+	if len(coldCredHashes) == 0 {
+		return nil
+	}
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return fmt.Errorf(
+			"SoftDeleteCommitteeMembers: resolve db: %w", err,
+		)
+	}
+	if result := db.Model(&models.CommitteeMember{}).
+		Where("cold_cred_hash IN ? AND deleted_slot IS NULL", coldCredHashes).
+		Update("deleted_slot", slot); result.Error != nil {
+		return fmt.Errorf(
+			"SoftDeleteCommitteeMembers: update failed: %w",
+			result.Error,
+		)
+	}
+	return nil
+}
+
+// SoftDeleteAllCommitteeMembers marks all active committee members as
+// removed. Used by governance enactment for NoConfidence actions.
+func (d *MetadataStoreMysql) SoftDeleteAllCommitteeMembers(
+	slot uint64,
+	txn types.Txn,
+) error {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return fmt.Errorf(
+			"SoftDeleteAllCommitteeMembers: resolve db: %w", err,
+		)
+	}
+	if result := db.Model(&models.CommitteeMember{}).
+		Where("deleted_slot IS NULL").
+		Update("deleted_slot", slot); result.Error != nil {
+		return fmt.Errorf(
+			"SoftDeleteAllCommitteeMembers: update failed: %w",
+			result.Error,
+		)
+	}
+	return nil
+}
+
+// DeleteCommitteeMembersAfterSlot removes committee state added after
+// the given slot and clears deleted_slot for any members soft-deleted
 // after that slot.
 func (d *MetadataStoreMysql) DeleteCommitteeMembersAfterSlot(
 	slot uint64,
@@ -97,6 +226,15 @@ func (d *MetadataStoreMysql) DeleteCommitteeMembersAfterSlot(
 		).Delete(&models.CommitteeMember{}); result.Error != nil {
 			return fmt.Errorf(
 				"DeleteCommitteeMembersAfterSlot: delete failed: %w",
+				result.Error,
+			)
+		}
+
+		if result := tx.Where(
+			"added_slot > ?", slot,
+		).Delete(&models.CommitteeQuorum{}); result.Error != nil {
+			return fmt.Errorf(
+				"DeleteCommitteeMembersAfterSlot: delete quorum failed: %w",
 				result.Error,
 			)
 		}
