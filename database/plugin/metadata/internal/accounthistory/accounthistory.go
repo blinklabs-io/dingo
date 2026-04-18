@@ -56,7 +56,7 @@ func QueryDelegationHistory(
 			Where(
 				table+".staking_key = ? AND certs.cert_type IN ?",
 				stakingKey,
-				DelegationCertTypes(),
+				DelegationTableCertTypes(table),
 			).
 			Scan(&tmp).Error; err != nil {
 			return nil, fmt.Errorf(
@@ -124,12 +124,26 @@ func transactionJoinClause(db *gorm.DB) string {
 	}
 }
 
-func DelegationCertTypes() []uint {
-	return []uint{
-		uint(lcommon.CertificateTypeStakeDelegation),
-		uint(lcommon.CertificateTypeStakeRegistrationDelegation),
-		uint(lcommon.CertificateTypeStakeVoteDelegation),
-		uint(lcommon.CertificateTypeStakeVoteRegistrationDelegation),
+func DelegationTableCertTypes(table string) []uint {
+	switch table {
+	case "stake_delegation":
+		return []uint{
+			uint(lcommon.CertificateTypeStakeDelegation),
+		}
+	case "stake_registration_delegation":
+		return []uint{
+			uint(lcommon.CertificateTypeStakeRegistrationDelegation),
+		}
+	case "stake_vote_delegation":
+		return []uint{
+			uint(lcommon.CertificateTypeStakeVoteDelegation),
+		}
+	case "stake_vote_registration_delegation":
+		return []uint{
+			uint(lcommon.CertificateTypeStakeVoteRegistrationDelegation),
+		}
+	default:
+		return nil
 	}
 }
 
