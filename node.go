@@ -42,6 +42,7 @@ import (
 	"github.com/blinklabs-io/dingo/peergov"
 	"github.com/blinklabs-io/dingo/utxorpc"
 	ouroboros "github.com/blinklabs-io/gouroboros"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
 type Node struct {
@@ -225,7 +226,27 @@ func (n *Node) Run(ctx context.Context) error {
 			ForgeBlocks:                n.config.isDevMode(),
 			ValidateHistorical:         n.config.validateHistorical,
 			BlockfetchRequestRangeFunc: n.ouroboros.BlockfetchClientRequestRange,
-			DatabaseWorkerPoolConfig:   n.config.DatabaseWorkerPoolConfig,
+			PeersWithBlockFunc: func(
+				origin ouroboros.ConnectionId,
+				point ocommon.Point,
+			) []ouroboros.ConnectionId {
+				if n.chainsyncState == nil {
+					return nil
+				}
+				return n.chainsyncState.PeersWithBlock(origin, point)
+			},
+			RecordBlockfetchLatencyFunc: func(
+				connId ouroboros.ConnectionId,
+				latency time.Duration,
+			) {
+				if n.chainsyncState != nil {
+					n.chainsyncState.RecordBlockfetchLatency(
+						connId,
+						latency,
+					)
+				}
+			},
+			DatabaseWorkerPoolConfig: n.config.DatabaseWorkerPoolConfig,
 			GetActiveConnectionFunc: func() *ouroboros.ConnectionId {
 				// Return the current best peer for rollback filtering and
 				// blockfetch fallback. Headers can arrive from any eligible
@@ -394,6 +415,12 @@ func (n *Node) Run(ctx context.Context) error {
 			ConnectionLive: func(connId ouroboros.ConnectionId) bool {
 				return n.connManager != nil &&
 					n.connManager.GetConnectionById(connId) != nil
+			},
+			BlockfetchLatency: func(connId ouroboros.ConnectionId) (time.Duration, bool) {
+				if n.chainsyncState == nil {
+					return 0, false
+				}
+				return n.chainsyncState.BlockfetchLatency(connId)
 			},
 		},
 	)

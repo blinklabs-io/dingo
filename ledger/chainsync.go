@@ -343,6 +343,9 @@ func (ls *LedgerState) handleConnectionClosedEvent(evt event.Event) {
 	if sameConnectionId(ls.selectedBlockfetchConnId, e.ConnectionId) {
 		ls.selectedBlockfetchConnId = ouroboros.ConnectionId{}
 	}
+	if sameConnectionId(ls.shadowBlockfetchConnId, e.ConnectionId) {
+		ls.shadowBlockfetchConnId = ouroboros.ConnectionId{}
+	}
 	delete(ls.bufferedHeaderEvents, connIdKey(e.ConnectionId))
 	delete(ls.peerHeaderHistory, connIdKey(e.ConnectionId))
 	// Cancel in-flight blockfetch if the dead connection owns it.
@@ -1842,9 +1845,33 @@ func (ls *LedgerState) handleEventBlockfetchBlock(e BlockfetchEvent) error {
 	// chain promptly without paying a full blob transaction cost for
 	// every single block. We still flush well before BatchDone to
 	// avoid downstream ChainSync idle timeouts.
-	if ls.chainsyncBlockfetchReadyChan == nil ||
-		!sameConnectionId(e.ConnectionId, ls.activeBlockfetchConnId) {
+	if ls.chainsyncBlockfetchReadyChan == nil {
 		return nil
+	}
+	fromPrimary := sameConnectionId(e.ConnectionId, ls.activeBlockfetchConnId)
+	fromShadow := connIdKey(ls.shadowBlockfetchConnId) != "" &&
+		sameConnectionId(e.ConnectionId, ls.shadowBlockfetchConnId)
+	if !fromPrimary && !fromShadow {
+		return nil
+	}
+	// Deduplicate: if the other peer already delivered this block,
+	// discard silently. The winner records their latency sample.
+	blockHashKey := hex.EncodeToString(e.Point.Hash)
+	if ls.shadowBlockReceivedHashes != nil {
+		if _, seen := ls.shadowBlockReceivedHashes[blockHashKey]; seen {
+			return nil
+		}
+	} else {
+		ls.shadowBlockReceivedHashes = make(map[string]struct{})
+	}
+	ls.shadowBlockReceivedHashes[blockHashKey] = struct{}{}
+	// Record first-block latency for the winning peer.
+	if !ls.firstBlockReceived && !ls.activeBlockfetchStart.IsZero() {
+		ls.firstBlockReceived = true
+		latency := time.Since(ls.activeBlockfetchStart)
+		if ls.config.RecordBlockfetchLatencyFunc != nil {
+			ls.config.RecordBlockfetchLatencyFunc(e.ConnectionId, latency)
+		}
 	}
 
 	// Verify block header cryptographic proofs (VRF, KES).
@@ -1931,6 +1958,13 @@ func (ls *LedgerState) restartQueuedBlockfetchAfterForkLocked(
 	return ls.startQueuedBlockfetchLocked(connId)
 }
 
+// shadowBlockfetchMaxHeaders is the header-queue depth threshold
+// below which a shadow blockfetch is dispatched. Near tip the queue
+// is short (1–4 headers), so shadow dispatch is cheap and the
+// latency win is real. For bulk catch-up batches the extra request
+// adds noise without meaningful benefit.
+const shadowBlockfetchMaxHeaders = 4
+
 func (ls *LedgerState) startQueuedBlockfetchLocked(
 	connId ouroboros.ConnectionId,
 ) error {
@@ -1941,6 +1975,11 @@ func (ls *LedgerState) startQueuedBlockfetchLocked(
 	ls.chainsyncBlockfetchReadyChan = make(chan struct{})
 	ls.activeBlockfetchConnId = connId
 	ls.batchBlocksReceived = 0
+	ls.activeBlockfetchStart = time.Now()
+	ls.firstBlockReceived = false
+	if ls.shadowBlockReceivedHashes != nil {
+		ls.shadowBlockReceivedHashes = nil
+	}
 	headerStart, headerEnd := ls.chain.HeaderRange(blockfetchBatchSize)
 	if err := ls.blockfetchRequestRangeStart(
 		connId,
@@ -1950,6 +1989,45 @@ func (ls *LedgerState) startQueuedBlockfetchLocked(
 		ls.blockfetchRequestRangeCleanup()
 		ls.activeBlockfetchConnId = ouroboros.ConnectionId{}
 		return err
+	}
+	// Near tip: dispatch the same range to one shadow peer if any
+	// tracked peer has already seen the first block header. Whichever
+	// peer responds first wins; duplicates are dropped by hash.
+	if ls.chain.HeaderCount() <= shadowBlockfetchMaxHeaders &&
+		ls.config.PeersWithBlockFunc != nil &&
+		ls.config.BlockfetchRequestRangeFunc != nil {
+		for _, shadowConn := range ls.config.PeersWithBlockFunc(
+			connId,
+			headerStart,
+		) {
+			if connIdKey(shadowConn) == "" ||
+				sameConnectionId(shadowConn, connId) {
+				continue
+			}
+			err := ls.config.BlockfetchRequestRangeFunc(
+				shadowConn,
+				headerStart,
+				headerEnd,
+			)
+			if err != nil {
+				ls.config.Logger.Debug(
+					"shadow blockfetch dispatch failed, trying next candidate",
+					"component", "ledger",
+					"shadow_connection_id", shadowConn.String(),
+					"error", err,
+				)
+				continue
+			}
+			ls.shadowBlockfetchConnId = shadowConn
+			ls.config.Logger.Debug(
+				"dispatched shadow blockfetch",
+				"component", "ledger",
+				"primary_connection_id", connId.String(),
+				"shadow_connection_id", shadowConn.String(),
+				"header_start_slot", headerStart.Slot,
+			)
+			break // one shadow is enough
+		}
 	}
 	return nil
 }
@@ -2998,6 +3076,10 @@ func (ls *LedgerState) blockfetchRequestRangeCleanup() {
 	}
 	// Increment generation to ensure any pending timer callbacks are ignored
 	ls.chainsyncBlockfetchTimerGeneration++
+	// Clear shadow blockfetch state for the completed batch
+	ls.shadowBlockfetchConnId = ouroboros.ConnectionId{}
+	ls.shadowBlockReceivedHashes = nil
+	ls.firstBlockReceived = false
 	// Close our blockfetch done signal channel
 	ls.chainsyncBlockfetchReadyMutex.Lock()
 	defer ls.chainsyncBlockfetchReadyMutex.Unlock()
