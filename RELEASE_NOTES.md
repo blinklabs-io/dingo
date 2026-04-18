@@ -1,6 +1,39 @@
 # Release Notes
 
 
+## v0.35.2 (April 18, 2026)
+
+**Title:** Safer era forecasts and refreshed dependencies
+
+**Date:** April 18, 2026
+
+**Version:** v0.35.2
+
+Hi folks! Here’s what we shipped in v0.35.2.
+
+### ✨ What's New
+
+* Noted **no new features:** This patch focuses on improvements and fixes.
+
+### 💪 Improvements
+
+* Improved **protocol library compatibility:** Dingo now uses gouroboros v0.165.1 to stay current with upstream protocol library updates.
+
+### 🔧 Fixes
+
+* Corrected **safer era forecasts:** Hard fork era history now stays within the safe forecast horizon, so slot and time lookups do not promise certainty too far past the current ledger tip.
+* Restored **release history continuity:** The changelog now includes the v0.35.1 entry so recent release history stays complete and easier to scan.
+
+### 📋 What You Need to Know
+
+* Simplified **upgrade guidance:** No action is required for most users, and upgrading to v0.35.2 is sufficient.
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
 ## v0.35.1 (April 17, 2026)
 
 **Title:** Steadier peers and faster schedule calculations
