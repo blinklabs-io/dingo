@@ -1,6 +1,40 @@
 # Release Notes
 
 
+## v0.35.2 (April 18, 2026)
+
+**Title:** Safer era forecasts and refreshed protocol compatibility
+
+**Date:** April 18, 2026
+
+**Version:** v0.35.2
+
+Hi folks! Here’s what we shipped in v0.35.2.
+
+### ✨ What's New
+
+- **No new features:** This patch focuses on runtime correctness and dependency updates.
+
+### 💪 Improvements
+
+- **Current upstream protocol compatibility:** Dingo now uses `github.com/blinklabs-io/gouroboros v0.165.1`, which keeps protocol compatibility current and pulls in upstream patch-level fixes.
+
+### 🔧 Fixes
+
+- **Safer era forecasts near the ledger tip:** Hard-fork era history now caps the current era end at the ledger tip plus the safe zone instead of the full epoch boundary, which prevents clients from relying on unsafe slot-to-time forecasts beyond the safe conversion horizon.
+
+### 📋 What You Need to Know
+
+- **No action required for most users:** You're all set—just upgrade to v0.35.2.
+- **Source builds and vendored modules:** If you pin or vendor Go modules, re-sync dependencies to pick up `github.com/blinklabs-io/gouroboros v0.165.1`.
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
+
 ## v0.35.1 (April 17, 2026)
 
 **Title:** Steadier peers and faster schedule calculations
