@@ -146,11 +146,13 @@ func checkedSlotAdd(
 }
 
 func (ls *LedgerState) queryHardForkEraHistory() (any, error) {
-	// Snapshot the tip and current era under the read lock so we can use them
-	// without holding the lock during the (potentially slow) DB queries below.
+	// Snapshot the tip, current era, and transition info under the read lock
+	// so we can use them without holding the lock during the (potentially
+	// slow) DB queries below.
 	ls.RLock()
 	tipSlot := ls.currentTip.Point.Slot
 	currentEraId := ls.currentEra.Id
+	transitionInfo := ls.transitionInfo
 	ls.RUnlock()
 
 	retData := []any{}
@@ -225,46 +227,78 @@ func (ls *LedgerState) queryHardForkEraHistory() (any, error) {
 				}
 			}
 		}
-		// For the current (open) era, cap EraEnd at ledgerTip + safeZone.
-		// The Haskell node uses StandardSafeZone for this: clients must not
-		// attempt slot↔time conversions beyond this bound because a hard fork
-		// could invalidate them.  Without this cap, dingo serves the full
-		// epoch-end slot, over-claiming certainty about the future.
+		// For the current (open) era, cap EraEnd at a safe forecast horizon.
+		//
+		// When TransitionKnown is set the epoch-rollover logic has confirmed
+		// an upcoming hard fork: use the transition epoch's StartSlot as the
+		// exact era boundary (mirrors Haskell's TransitionKnown branch).
+		//
+		// Otherwise, cap at ledgerTip + safeZone (StandardSafeZone): clients
+		// must not attempt slot↔time conversions beyond this bound because a
+		// hard fork could invalidate them.
 		if era.Id == currentEraId && len(epochs) > 0 {
-			safeZone := ls.calculateStabilityWindowForEra(era.Id)
-			safeEndSlot, addErr := checkedSlotAdd(tipSlot, safeZone)
-			epochEndSlot, slotErr := checkedSlotAdd(
-				tmpEpoch.StartSlot,
-				uint64(tmpEpoch.LengthInSlots),
-			)
-			if addErr == nil && slotErr == nil &&
-				safeEndSlot >= tmpEpoch.StartSlot &&
-				safeEndSlot < epochEndSlot {
-				// Work backward from the accumulated timespan (which now
-				// points to epochEndSlot) to find the relative time at
-				// the start of the last epoch, then advance it by the
-				// partial number of slots to safeEndSlot.
-				timespanAtEpochStart := new(big.Int).Sub(
-					timespan,
-					epochPicoseconds(tmpEpoch.SlotLength, tmpEpoch.LengthInSlots),
+			foundTransition := false
+			if transitionInfo.State == TransitionKnown {
+				// Find the transition epoch in the committed epoch list.
+				// It was created with the old era's EraId, so it appears
+				// in epochs.  Its StartSlot is the exact era end boundary.
+				for _, ep := range epochs {
+					if ep.EpochId == transitionInfo.KnownEpoch {
+						// Compute the accumulated relative time up to ep.StartSlot.
+						// timespan currently reflects the end of tmpEpoch (last epoch).
+						// Walk back to the start of ep, then forward to ep.StartSlot.
+						timespanAtEpochStart := new(big.Int).Sub(
+							timespan,
+							epochPicoseconds(ep.SlotLength, ep.LengthInSlots),
+						)
+						// The era ends at ep.StartSlot; no partial-slot offset needed.
+						tmpEnd = []any{
+							timespanAtEpochStart,
+							ep.StartSlot,
+							ep.EpochId,
+						}
+						foundTransition = true
+						break
+					}
+				}
+			}
+			if transitionInfo.State != TransitionKnown || !foundTransition {
+				// No confirmed transition: cap at tipSlot + safeZone.
+				safeZone := ls.calculateStabilityWindowForEra(era.Id)
+				safeEndSlot, addErr := checkedSlotAdd(tipSlot, safeZone)
+				epochEndSlot, slotErr := checkedSlotAdd(
+					tmpEpoch.StartSlot,
+					uint64(tmpEpoch.LengthInSlots),
 				)
-				slotsIntoEpoch := safeEndSlot - tmpEpoch.StartSlot
-				safeRelTime := new(big.Int).Add(
-					timespanAtEpochStart,
-					new(big.Int).Mul(
-						new(big.Int).SetUint64(slotsIntoEpoch),
+				if addErr == nil && slotErr == nil &&
+					safeEndSlot >= tmpEpoch.StartSlot &&
+					safeEndSlot < epochEndSlot {
+					// Work backward from the accumulated timespan (which now
+					// points to epochEndSlot) to find the relative time at
+					// the start of the last epoch, then advance it by the
+					// partial number of slots to safeEndSlot.
+					timespanAtEpochStart := new(big.Int).Sub(
+						timespan,
+						epochPicoseconds(tmpEpoch.SlotLength, tmpEpoch.LengthInSlots),
+					)
+					slotsIntoEpoch := safeEndSlot - tmpEpoch.StartSlot
+					safeRelTime := new(big.Int).Add(
+						timespanAtEpochStart,
 						new(big.Int).Mul(
-							new(big.Int).SetUint64(uint64(tmpEpoch.SlotLength)),
-							big.NewInt(1_000_000_000),
+							new(big.Int).SetUint64(slotsIntoEpoch),
+							new(big.Int).Mul(
+								new(big.Int).SetUint64(uint64(tmpEpoch.SlotLength)),
+								big.NewInt(1_000_000_000),
+							),
 						),
-					),
-				)
-				// safeEndSlot is within tmpEpoch, so the epoch number is
-				// tmpEpoch.EpochId (not +1).
-				tmpEnd = []any{
-					safeRelTime,
-					safeEndSlot,
-					tmpEpoch.EpochId,
+					)
+					// safeEndSlot is within tmpEpoch, so the epoch number is
+					// tmpEpoch.EpochId (not +1).
+					tmpEnd = []any{
+						safeRelTime,
+						safeEndSlot,
+						tmpEpoch.EpochId,
+					}
 				}
 			}
 		}
