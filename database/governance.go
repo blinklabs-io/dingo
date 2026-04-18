@@ -117,7 +117,8 @@ func (d *Database) GetGovernanceProposal(
 	return proposal, nil
 }
 
-// GetActiveGovernanceProposals returns all governance proposals that haven't expired
+// GetActiveGovernanceProposals returns all governance proposals that are
+// still in the active pool (not expired, not enacted, not soft-deleted).
 func (d *Database) GetActiveGovernanceProposals(
 	epoch uint64,
 	txn *Txn,
@@ -131,6 +132,40 @@ func (d *Database) GetActiveGovernanceProposals(
 		return nil, fmt.Errorf("failed to get active governance proposals: %w", err)
 	}
 	return proposals, nil
+}
+
+// GetRatifiedGovernanceProposals returns proposals ratified but not yet
+// enacted, ordered by (ratified_epoch, ratified_slot, id). Used at epoch
+// start for enactment.
+func (d *Database) GetRatifiedGovernanceProposals(
+	txn *Txn,
+) ([]*models.GovernanceProposal, error) {
+	if txn == nil {
+		txn = d.MetadataTxn(false)
+		defer txn.Release()
+	}
+	proposals, err := d.metadata.GetRatifiedGovernanceProposals(txn.Metadata())
+	if err != nil {
+		return nil, fmt.Errorf(
+			"failed to get ratified governance proposals: %w", err,
+		)
+	}
+	return proposals, nil
+}
+
+// GetLastEnactedGovernanceProposal returns the most recently enacted
+// proposal of the given action type, or nil if none exist.
+func (d *Database) GetLastEnactedGovernanceProposal(
+	actionType uint8,
+	txn *Txn,
+) (*models.GovernanceProposal, error) {
+	if txn == nil {
+		txn = d.MetadataTxn(false)
+		defer txn.Release()
+	}
+	return d.metadata.GetLastEnactedGovernanceProposal(
+		actionType, txn.Metadata(),
+	)
 }
 
 // SetGovernanceProposal creates or updates a governance proposal

@@ -601,11 +601,27 @@ type MetadataStore interface {
 		types.Txn,
 	) (*models.GovernanceProposal, error)
 
-	// GetActiveGovernanceProposals retrieves all governance proposals that haven't expired.
+	// GetActiveGovernanceProposals retrieves all governance proposals that
+	// are still in the active pool (not expired, not enacted, not marked
+	// expired, not soft-deleted).
 	GetActiveGovernanceProposals(
 		uint64, // epoch
 		types.Txn,
 	) ([]*models.GovernanceProposal, error)
+
+	// GetRatifiedGovernanceProposals returns proposals that have been
+	// ratified but not yet enacted. Used at epoch start by enactment.
+	GetRatifiedGovernanceProposals(
+		types.Txn,
+	) ([]*models.GovernanceProposal, error)
+
+	// GetLastEnactedGovernanceProposal returns the most recently enacted
+	// proposal of the given action type, or nil if none exist. Used to
+	// resolve governance action chain roots at ratification time.
+	GetLastEnactedGovernanceProposal(
+		actionType uint8,
+		txn types.Txn,
+	) (*models.GovernanceProposal, error)
 
 	// SetGovernanceProposal creates or updates a governance proposal.
 	SetGovernanceProposal(
@@ -664,6 +680,22 @@ type MetadataStore interface {
 	// after the given slot and clears deleted_slot for any that were
 	// soft-deleted after that slot. Used during chain rollbacks.
 	DeleteCommitteeMembersAfterSlot(uint64, types.Txn) error
+
+	// SoftDeleteCommitteeMembers marks the given cold credential hashes
+	// as removed by setting deleted_slot. Used by governance enactment
+	// to remove members (UpdateCommittee/NoConfidence action).
+	SoftDeleteCommitteeMembers(
+		coldCredHashes [][]byte,
+		slot uint64,
+		txn types.Txn,
+	) error
+
+	// SoftDeleteAllCommitteeMembers marks all active committee members as
+	// removed. Used by governance enactment for NoConfidence actions.
+	SoftDeleteAllCommitteeMembers(
+		slot uint64,
+		txn types.Txn,
+	) error
 
 	// DRep voting power and activity methods
 

@@ -391,6 +391,151 @@ func TestGetActiveGovernanceProposals(t *testing.T) {
 	assert.Len(t, proposals, 2)
 }
 
+func TestGetRatifiedGovernanceProposals(t *testing.T) {
+	store := setupTestStore(t)
+
+	// Active (not ratified)
+	require.NoError(t, store.SetGovernanceProposal(
+		&models.GovernanceProposal{
+			TxHash:        []byte("tx_hash_active_12345678901234567890123456"),
+			ActionIndex:   0,
+			ActionType:    uint8(6),
+			ProposedEpoch: 100,
+			ExpiresEpoch:  200,
+			AnchorURL:     "https://active.example.com",
+			AnchorHash:    []byte("anchor_hash_1234567890123456789012"),
+			Deposit:       500,
+			ReturnAddress: []byte("return_addr_1234567890123456789"),
+			AddedSlot:     1000,
+		}, nil,
+	))
+
+	ratifiedEpoch := uint64(105)
+	ratifiedSlot := uint64(3000)
+	require.NoError(t, store.SetGovernanceProposal(
+		&models.GovernanceProposal{
+			TxHash:        []byte("tx_hash_ratifiedA_1234567890123456789012"),
+			ActionIndex:   0,
+			ActionType:    uint8(6),
+			ProposedEpoch: 100,
+			ExpiresEpoch:  200,
+			RatifiedEpoch: &ratifiedEpoch,
+			RatifiedSlot:  &ratifiedSlot,
+			AnchorURL:     "https://ratifiedA.example.com",
+			AnchorHash:    []byte("anchor_hash_2234567890123456789012"),
+			Deposit:       500,
+			ReturnAddress: []byte("return_addr_2234567890123456789"),
+			AddedSlot:     2000,
+		}, nil,
+	))
+
+	// Already enacted: must be excluded.
+	enactedEpoch := uint64(110)
+	enactedSlot := uint64(4000)
+	require.NoError(t, store.SetGovernanceProposal(
+		&models.GovernanceProposal{
+			TxHash:        []byte("tx_hash_enacted_12345678901234567890123456"),
+			ActionIndex:   0,
+			ActionType:    uint8(6),
+			ProposedEpoch: 100,
+			ExpiresEpoch:  200,
+			RatifiedEpoch: &ratifiedEpoch,
+			RatifiedSlot:  &ratifiedSlot,
+			EnactedEpoch:  &enactedEpoch,
+			EnactedSlot:   &enactedSlot,
+			AnchorURL:     "https://enacted.example.com",
+			AnchorHash:    []byte("anchor_hash_3234567890123456789012"),
+			Deposit:       500,
+			ReturnAddress: []byte("return_addr_3234567890123456789"),
+			AddedSlot:     1500,
+		}, nil,
+	))
+
+	ratified, err := store.GetRatifiedGovernanceProposals(nil)
+	require.NoError(t, err)
+	require.Len(t, ratified, 1)
+	assert.Equal(
+		t,
+		"https://ratifiedA.example.com",
+		ratified[0].AnchorURL,
+	)
+}
+
+func TestGetLastEnactedGovernanceProposal(t *testing.T) {
+	store := setupTestStore(t)
+
+	// Enact two ParameterChange proposals at different slots.
+	enacted1Epoch := uint64(100)
+	enacted1Slot := uint64(1000)
+	require.NoError(t, store.SetGovernanceProposal(
+		&models.GovernanceProposal{
+			TxHash:        []byte("tx_hash_paramA_1234567890123456789012345"),
+			ActionIndex:   0,
+			ActionType:    uint8(0), // ParameterChange
+			ProposedEpoch: 80,
+			ExpiresEpoch:  200,
+			EnactedEpoch:  &enacted1Epoch,
+			EnactedSlot:   &enacted1Slot,
+			AnchorURL:     "https://paramA.example.com",
+			AnchorHash:    []byte("anchor_hash_1234567890123456789012"),
+			Deposit:       500,
+			ReturnAddress: []byte("return_addr_1234567890123456789"),
+			AddedSlot:     500,
+		}, nil,
+	))
+	enacted2Epoch := uint64(110)
+	enacted2Slot := uint64(2000)
+	require.NoError(t, store.SetGovernanceProposal(
+		&models.GovernanceProposal{
+			TxHash:        []byte("tx_hash_paramB_1234567890123456789012345"),
+			ActionIndex:   0,
+			ActionType:    uint8(0),
+			ProposedEpoch: 90,
+			ExpiresEpoch:  210,
+			EnactedEpoch:  &enacted2Epoch,
+			EnactedSlot:   &enacted2Slot,
+			AnchorURL:     "https://paramB.example.com",
+			AnchorHash:    []byte("anchor_hash_2234567890123456789012"),
+			Deposit:       500,
+			ReturnAddress: []byte("return_addr_2234567890123456789"),
+			AddedSlot:     700,
+		}, nil,
+	))
+	// Enact a different type so it should not leak into ParameterChange root.
+	enacted3Epoch := uint64(115)
+	enacted3Slot := uint64(2500)
+	require.NoError(t, store.SetGovernanceProposal(
+		&models.GovernanceProposal{
+			TxHash:        []byte("tx_hash_info_12345678901234567890123456aa"),
+			ActionIndex:   0,
+			ActionType:    uint8(6),
+			ProposedEpoch: 95,
+			ExpiresEpoch:  215,
+			EnactedEpoch:  &enacted3Epoch,
+			EnactedSlot:   &enacted3Slot,
+			AnchorURL:     "https://info.example.com",
+			AnchorHash:    []byte("anchor_hash_3234567890123456789012"),
+			Deposit:       500,
+			ReturnAddress: []byte("return_addr_3234567890123456789"),
+			AddedSlot:     800,
+		}, nil,
+	))
+
+	latest, err := store.GetLastEnactedGovernanceProposal(0, nil)
+	require.NoError(t, err)
+	require.NotNil(t, latest)
+	assert.Equal(
+		t,
+		"https://paramB.example.com",
+		latest.AnchorURL,
+	)
+
+	// Action type with no enacted proposal returns nil, no error.
+	latest, err = store.GetLastEnactedGovernanceProposal(3, nil)
+	require.NoError(t, err)
+	assert.Nil(t, latest)
+}
+
 func TestUpdateDRepActivity(t *testing.T) {
 	store := setupTestStore(t)
 
