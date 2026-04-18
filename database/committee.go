@@ -71,3 +71,56 @@ func (d *Database) GetCommitteeActiveCount(
 	}
 	return d.metadata.GetCommitteeActiveCount(txn.Metadata())
 }
+
+// SetCommitteeMembers upserts governance-enacted committee members. Used
+// by UpdateCommittee action enactment and snapshot import.
+func (d *Database) SetCommitteeMembers(
+	members []*models.CommitteeMember,
+	txn *Txn,
+) error {
+	if txn == nil {
+		return d.metadata.SetCommitteeMembers(members, nil)
+	}
+	return d.metadata.SetCommitteeMembers(members, txn.Metadata())
+}
+
+// GetCommitteeMembers returns all active (non-deleted) governance-enacted
+// committee members.
+func (d *Database) GetCommitteeMembers(
+	txn *Txn,
+) ([]*models.CommitteeMember, error) {
+	if txn == nil {
+		txn = d.MetadataTxn(false)
+		defer txn.Release()
+	}
+	return d.metadata.GetCommitteeMembers(txn.Metadata())
+}
+
+// SoftDeleteCommitteeMembers marks the given cold credential hashes as
+// removed. Used by UpdateCommittee action enactment to remove members.
+func (d *Database) SoftDeleteCommitteeMembers(
+	coldCredHashes [][]byte,
+	slot uint64,
+	txn *Txn,
+) error {
+	if txn == nil {
+		return d.metadata.SoftDeleteCommitteeMembers(
+			coldCredHashes, slot, nil,
+		)
+	}
+	return d.metadata.SoftDeleteCommitteeMembers(
+		coldCredHashes, slot, txn.Metadata(),
+	)
+}
+
+// SoftDeleteAllCommitteeMembers marks all active committee members as
+// removed. Used by NoConfidence action enactment.
+func (d *Database) SoftDeleteAllCommitteeMembers(
+	slot uint64,
+	txn *Txn,
+) error {
+	if txn == nil {
+		return d.metadata.SoftDeleteAllCommitteeMembers(slot, nil)
+	}
+	return d.metadata.SoftDeleteAllCommitteeMembers(slot, txn.Metadata())
+}

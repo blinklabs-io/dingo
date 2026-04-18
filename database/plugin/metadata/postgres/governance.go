@@ -48,7 +48,9 @@ func (d *MetadataStorePostgres) GetGovernanceProposal(
 	return &proposal, nil
 }
 
-// GetActiveGovernanceProposals retrieves all governance proposals that haven't expired.
+// GetActiveGovernanceProposals retrieves all governance proposals that
+// are still in the active pool: not expired past the given epoch, not
+// enacted, not marked expired, not soft-deleted.
 func (d *MetadataStorePostgres) GetActiveGovernanceProposals(
 	epoch uint64,
 	txn types.Txn,
@@ -59,12 +61,53 @@ func (d *MetadataStorePostgres) GetActiveGovernanceProposals(
 		return nil, err
 	}
 	if result := db.Where(
-		"expires_epoch >= ? AND enacted_epoch IS NULL AND deleted_slot IS NULL",
+		"expires_epoch >= ? AND enacted_epoch IS NULL AND expired_epoch IS NULL AND deleted_slot IS NULL",
 		epoch,
 	).Find(&proposals); result.Error != nil {
 		return nil, result.Error
 	}
 	return proposals, nil
+}
+
+// GetRatifiedGovernanceProposals returns proposals that have been ratified
+// but not yet enacted.
+func (d *MetadataStorePostgres) GetRatifiedGovernanceProposals(
+	txn types.Txn,
+) ([]*models.GovernanceProposal, error) {
+	var proposals []*models.GovernanceProposal
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return nil, err
+	}
+	if result := db.Where(
+		"ratified_epoch IS NOT NULL AND enacted_epoch IS NULL AND deleted_slot IS NULL",
+	).Order("ratified_epoch ASC, ratified_slot ASC, id ASC").Find(&proposals); result.Error != nil {
+		return nil, result.Error
+	}
+	return proposals, nil
+}
+
+// GetLastEnactedGovernanceProposal returns the most recently enacted
+// proposal of the given action type, or nil if none exist.
+func (d *MetadataStorePostgres) GetLastEnactedGovernanceProposal(
+	actionType uint8,
+	txn types.Txn,
+) (*models.GovernanceProposal, error) {
+	var proposal models.GovernanceProposal
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return nil, err
+	}
+	if result := db.Where(
+		"action_type = ? AND enacted_epoch IS NOT NULL AND deleted_slot IS NULL",
+		actionType,
+	).Order("enacted_epoch DESC, enacted_slot DESC, id DESC").First(&proposal); result.Error != nil {
+		if errors.Is(result.Error, gorm.ErrRecordNotFound) {
+			return nil, nil
+		}
+		return nil, result.Error
+	}
+	return &proposal, nil
 }
 
 // SetGovernanceProposal creates or updates a governance proposal.
@@ -94,11 +137,14 @@ func (d *MetadataStorePostgres) SetGovernanceProposal(
 			"enacted_slot",
 			"ratified_epoch",
 			"ratified_slot",
+			"expired_epoch",
+			"expired_slot",
 			"policy_hash",
 			"anchor_url",
 			"anchor_hash",
 			"deposit",
 			"return_address",
+			"gov_action_cbor",
 			"deleted_slot",
 		}),
 	}
@@ -375,6 +421,16 @@ func (d *MetadataStorePostgres) DeleteGovernanceProposalsAfterSlot(
 		Updates(map[string]any{
 			"enacted_epoch": nil,
 			"enacted_slot":  nil,
+		}); result.Error != nil {
+		return result.Error
+	}
+
+	// Revert expiry that occurred after the rollback slot
+	if result := db.Model(&models.GovernanceProposal{}).
+		Where("expired_slot > ?", slot).
+		Updates(map[string]any{
+			"expired_epoch": nil,
+			"expired_slot":  nil,
 		}); result.Error != nil {
 		return result.Error
 	}

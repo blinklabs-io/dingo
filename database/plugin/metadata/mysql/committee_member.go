@@ -76,6 +76,57 @@ func (d *MetadataStoreMysql) GetCommitteeMembers(
 	return members, nil
 }
 
+// SoftDeleteCommitteeMembers marks the given cold credential hashes as
+// removed by setting deleted_slot. Used by governance enactment to remove
+// members listed in an UpdateCommittee action.
+func (d *MetadataStoreMysql) SoftDeleteCommitteeMembers(
+	coldCredHashes [][]byte,
+	slot uint64,
+	txn types.Txn,
+) error {
+	if len(coldCredHashes) == 0 {
+		return nil
+	}
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return fmt.Errorf(
+			"SoftDeleteCommitteeMembers: resolve db: %w", err,
+		)
+	}
+	if result := db.Model(&models.CommitteeMember{}).
+		Where("cold_cred_hash IN ? AND deleted_slot IS NULL", coldCredHashes).
+		Update("deleted_slot", slot); result.Error != nil {
+		return fmt.Errorf(
+			"SoftDeleteCommitteeMembers: update failed: %w",
+			result.Error,
+		)
+	}
+	return nil
+}
+
+// SoftDeleteAllCommitteeMembers marks all active committee members as
+// removed. Used by governance enactment for NoConfidence actions.
+func (d *MetadataStoreMysql) SoftDeleteAllCommitteeMembers(
+	slot uint64,
+	txn types.Txn,
+) error {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return fmt.Errorf(
+			"SoftDeleteAllCommitteeMembers: resolve db: %w", err,
+		)
+	}
+	if result := db.Model(&models.CommitteeMember{}).
+		Where("deleted_slot IS NULL").
+		Update("deleted_slot", slot); result.Error != nil {
+		return fmt.Errorf(
+			"SoftDeleteAllCommitteeMembers: update failed: %w",
+			result.Error,
+		)
+	}
+	return nil
+}
+
 // DeleteCommitteeMembersAfterSlot removes committee members added after
 // the given slot and clears deleted_slot for any that were soft-deleted
 // after that slot.

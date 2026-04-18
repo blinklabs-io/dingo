@@ -33,6 +33,7 @@ import (
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/forging"
+	"github.com/blinklabs-io/dingo/ledger/governance"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/byron"
@@ -2710,6 +2711,45 @@ func (ls *LedgerState) processEpochRollover(
 	)
 	if err != nil {
 		return nil, fmt.Errorf("apply pparam updates: %w", err)
+	}
+
+	// Run the CIP-1694 governance tick: enact proposals ratified in the
+	// previous epoch (possibly mutating pparams), expire stale proposals,
+	// and ratify active proposals whose tallies meet threshold. Any
+	// pparams change from enactment is persisted via SetPParams so the
+	// next epoch's pparams reflect the enacted state.
+	govOut, err := governance.ProcessEpoch(&governance.EpochInput{
+		DB:           ls.db,
+		Txn:          txn,
+		Logger:       ls.config.Logger,
+		PrevEpoch:    currentEpoch.EpochId,
+		NewEpoch:     currentEpoch.EpochId + 1,
+		BoundarySlot: epochStartSlot,
+		PParams:      newPParams,
+		UpdateFn:     currentEra.PParamsUpdateFunc,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("process governance epoch: %w", err)
+	}
+	if govOut.PParamsChanged {
+		newPParams = govOut.UpdatedPParams
+		pparamsCbor, encErr := cbor.Encode(newPParams)
+		if encErr != nil {
+			return nil, fmt.Errorf(
+				"encode post-enactment pparams: %w", encErr,
+			)
+		}
+		if err := ls.db.SetPParams(
+			pparamsCbor,
+			epochStartSlot,
+			currentEpoch.EpochId+1,
+			currentEra.Id,
+			txn,
+		); err != nil {
+			return nil, fmt.Errorf(
+				"persist post-enactment pparams: %w", err,
+			)
+		}
 	}
 	result.NewCurrentPParams = newPParams
 

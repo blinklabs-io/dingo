@@ -12,26 +12,27 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package ledger
+package governance
 
 import (
 	"fmt"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
-// ProcessGovernanceProposals extracts governance proposals from a Conway-era
+// ProcessProposals extracts governance proposals from a Conway-era
 // transaction and persists them to the database. Each proposal procedure in the
 // transaction body is mapped to a GovernanceProposal model with the appropriate
 // action type, parent action, anchor, and deposit information.
 //
 // The govActionLifetime parameter determines how many epochs a proposal remains
 // active before expiring.
-func ProcessGovernanceProposals(
+func ProcessProposals(
 	tx lcommon.Transaction,
 	point ocommon.Point,
 	currentEpoch uint64,
@@ -73,6 +74,16 @@ func ProcessGovernanceProposals(
 			)
 		}
 
+		actionCbor, err := cbor.Encode(proposal.GovAction())
+		if err != nil {
+			return fmt.Errorf(
+				"encode gov action cbor for proposal %d in tx %x: %w",
+				i,
+				txHash[:8],
+				err,
+			)
+		}
+
 		govProposal := &models.GovernanceProposal{
 			TxHash:        txHash,
 			ActionIndex:   uint32(i), //nolint:gosec
@@ -83,6 +94,7 @@ func ProcessGovernanceProposals(
 			AnchorHash:    anchorHash[:],
 			Deposit:       proposal.Deposit(),
 			ReturnAddress: rewardAddrBytes,
+			GovActionCbor: actionCbor,
 			AddedSlot:     point.Slot,
 		}
 
@@ -108,13 +120,13 @@ func ProcessGovernanceProposals(
 	return nil
 }
 
-// ProcessGovernanceVotes extracts voting procedures from a Conway-era
+// ProcessVotes extracts voting procedures from a Conway-era
 // transaction and persists them to the database. Each vote maps a voter
 // (CC member, DRep, or SPO) and a governance action to a vote choice.
 //
 // When a DRep votes, their activity epoch is updated to the current epoch,
 // which resets their expiry countdown based on the dRepInactivityPeriod.
-func ProcessGovernanceVotes(
+func ProcessVotes(
 	tx lcommon.Transaction,
 	point ocommon.Point,
 	currentEpoch uint64,

@@ -48,6 +48,64 @@ func TestSetCommitteeMembers(t *testing.T) {
 	assert.Len(t, result, 2)
 }
 
+func TestSoftDeleteCommitteeMembers(t *testing.T) {
+	store := setupTestStore(t)
+
+	credA := []byte("cred_hash_a_1234567890123456")
+	credB := []byte("cred_hash_b_1234567890123456")
+	credC := []byte("cred_hash_c_1234567890123456")
+
+	err := store.SetCommitteeMembers([]*models.CommitteeMember{
+		{ColdCredHash: credA, ExpiresEpoch: 300, AddedSlot: 100},
+		{ColdCredHash: credB, ExpiresEpoch: 300, AddedSlot: 100},
+		{ColdCredHash: credC, ExpiresEpoch: 300, AddedSlot: 100},
+	}, nil)
+	require.NoError(t, err)
+
+	err = store.SoftDeleteCommitteeMembers(
+		[][]byte{credA, credC}, 200, nil,
+	)
+	require.NoError(t, err)
+
+	remaining, err := store.GetCommitteeMembers(nil)
+	require.NoError(t, err)
+	require.Len(t, remaining, 1)
+	assert.Equal(t, credB, remaining[0].ColdCredHash)
+}
+
+func TestSoftDeleteAllCommitteeMembers(t *testing.T) {
+	store := setupTestStore(t)
+
+	err := store.SetCommitteeMembers([]*models.CommitteeMember{
+		{ColdCredHash: []byte("aa_1234567890123456789012345"), ExpiresEpoch: 300, AddedSlot: 100},
+		{ColdCredHash: []byte("bb_1234567890123456789012345"), ExpiresEpoch: 300, AddedSlot: 100},
+	}, nil)
+	require.NoError(t, err)
+
+	err = store.SoftDeleteAllCommitteeMembers(200, nil)
+	require.NoError(t, err)
+
+	remaining, err := store.GetCommitteeMembers(nil)
+	require.NoError(t, err)
+	assert.Empty(t, remaining)
+}
+
+func TestSoftDeleteCommitteeMembersEmpty(t *testing.T) {
+	store := setupTestStore(t)
+
+	err := store.SetCommitteeMembers([]*models.CommitteeMember{
+		{ColdCredHash: []byte("aa_1234567890123456789012345"), ExpiresEpoch: 300, AddedSlot: 100},
+	}, nil)
+	require.NoError(t, err)
+
+	err = store.SoftDeleteCommitteeMembers(nil, 200, nil)
+	require.NoError(t, err)
+
+	remaining, err := store.GetCommitteeMembers(nil)
+	require.NoError(t, err)
+	assert.Len(t, remaining, 1)
+}
+
 func TestSetCommitteeMembersEmpty(t *testing.T) {
 	store := setupTestStore(t)
 
