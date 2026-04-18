@@ -1,6 +1,22 @@
 # Release Notes
 
 
+## v0.35.2 (April 18, 2026)
+
+**Title:** Safer era forecasts and refreshed dependencies
+
+**Date:** April 18, 2026
+
+**Version:** v0.35.2
+
+Hi folks! Here’s what we shipped in v0.35.2.
+
+### ✨ What's New
+
+* Added **no new features:** This patch focuses on improvements and fixes.
+
+### 💪 Improvements
+
 ## v0.35.1 (April 17, 2026)
 
 **Title:** Steadier peers and faster schedule calculations
