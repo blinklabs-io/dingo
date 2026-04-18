@@ -138,6 +138,8 @@ github.com/blinklabs-io/go-bip39 v0.2.0 h1:rHYih+JzqaFVuP+UfvByKTAdJPeYtlvZu49yU
 github.com/blinklabs-io/go-bip39 v0.2.0/go.mod h1:9Bp7a+XDc/KTPOqNnS7T/v1vH2lDXpmjM0GArwvOQL4=
 github.com/blinklabs-io/gouroboros v0.165.0 h1:GO9uOJ+Sr/Y6ipVK6H72a5BSgfgHM0/4p0hB5ITb71o=
 github.com/blinklabs-io/gouroboros v0.165.0/go.mod h1:fKNdzXX6qvd9YjGpvI+lZgqN2smgRYJYo95E4stoQ1E=
+github.com/blinklabs-io/gouroboros v0.165.1 h1:CbxJUpXs2TFHqJitRGP+q+fYaasCOOAB0JZpzBeSIkc=
+github.com/blinklabs-io/gouroboros v0.165.1/go.mod h1:fKNdzXX6qvd9YjGpvI+lZgqN2smgRYJYo95E4stoQ1E=
 github.com/blinklabs-io/ouroboros-mock v0.9.1 h1:88LvCaivQ6j/JSb3j8t99lQvsgnWcjXGaMPdZngbxZo=
 github.com/blinklabs-io/ouroboros-mock v0.9.1/go.mod h1:wLZTHLwKdIC9axVzG7nyAynn2wfLp/ikvX9LjsDh8Xw=
 github.com/blinklabs-io/plutigo v0.1.7 h1:vzrzcHRcCEAyrHZaTo1UQUxQpmU8eM1jFvtwg7MxqMY=
