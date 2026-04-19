@@ -351,6 +351,17 @@ func (a *NodeAdapter) Asset(
 			ErrAssetNotFound,
 		)
 	}
+	quantity, err := a.ledgerState.Database().
+		Metadata().
+		GetAssetQuantityByPolicyAndName(policyHash, assetName, nil)
+	if err != nil {
+		return AssetInfo{}, fmt.Errorf(
+			"get asset quantity by policy %s and name %x: %w",
+			policyID,
+			assetName,
+			err,
+		)
+	}
 
 	return AssetInfo{
 		Asset:             policyID + hex.EncodeToString(assetName),
@@ -358,7 +369,7 @@ func (a *NodeAdapter) Asset(
 		AssetName:         hex.EncodeToString(assetName),
 		AssetNameASCII:    assetNameASCII(assetName),
 		Fingerprint:       string(asset.Fingerprint),
-		Quantity:          strconv.FormatUint(uint64(asset.Amount), 10),
+		Quantity:          strconv.FormatUint(quantity, 10),
 		InitialMintTxHash: "",
 		MintOrBurnCount:   0,
 		OnchainMetadata:   nil,

@@ -333,6 +333,14 @@ type MetadataStore interface {
 		types.Txn,
 	) (models.Asset, error)
 
+	// GetAssetQuantityByPolicyAndName returns the sum of live quantities for
+	// the provided policy ID and asset name across all matching UTxOs.
+	GetAssetQuantityByPolicyAndName(
+		lcommon.Blake2b224,
+		[]byte, // assetName
+		types.Txn,
+	) (uint64, error)
+
 	// GetScript retrieves a script by its hash.
 	GetScript(
 		lcommon.ScriptHash,
