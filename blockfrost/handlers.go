@@ -639,14 +639,21 @@ func parseMetadataLabelOrWriteError(
 func parseAssetIdentifier(
 	asset string,
 ) (string, []byte, error) {
-	const policyIDHexLen = 56
+	const (
+		policyIDHexLen        = 56
+		maxAssetNameHexLen    = 64
+		maxAssetIdentifierLen = policyIDHexLen + maxAssetNameHexLen
+	)
 
 	if len(asset) < policyIDHexLen {
 		return "", nil, errors.New("asset ID too short")
 	}
+	if len(asset) > maxAssetIdentifierLen {
+		return "", nil, errors.New("asset ID too long")
+	}
 	policyID := asset[:policyIDHexLen]
 	assetNameHex := asset[policyIDHexLen:]
-	if len(assetNameHex) > 64 {
+	if len(assetNameHex) > maxAssetNameHexLen {
 		return "", nil, errors.New("asset name too long")
 	}
 
