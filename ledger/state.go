@@ -39,6 +39,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
+	dingoversion "github.com/blinklabs-io/dingo/internal/version"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/mempool"
 	ouroboros "github.com/blinklabs-io/gouroboros"
@@ -4782,9 +4783,12 @@ func (ls *LedgerState) forgeBlock() {
 		BlockBodySize: blockSize,
 		BlockBodyHash: lcommon.Blake2b256{},
 		OpCert:        babbage.BabbageOpCert{},
+		// Keep header-field changes in sync with ledger/forging/builder.go:
+		// this dev-mode path duplicates mempool iteration, ExUnits accounting,
+		// metadata encoding, and header assembly.
 		ProtoVersion: babbage.BabbageProtoVersion{
-			Major: 8,
-			Minor: 0,
+			Major: uint64(conwayPParams.ProtocolVersion.Major),
+			Minor: dingoversion.BlockHeaderProtocolMinor,
 		},
 	}
 

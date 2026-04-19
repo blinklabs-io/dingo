@@ -21,6 +21,7 @@ import (
 	"math"
 	"testing"
 
+	dingoversion "github.com/blinklabs-io/dingo/internal/version"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -205,6 +206,82 @@ func TestBuildBlockEmptyMempool(t *testing.T) {
 	assert.Equal(t, uint64(1001), block.SlotNumber())
 	assert.Equal(t, uint64(101), block.BlockNumber())
 	assert.Equal(t, 0, len(block.Transactions()))
+}
+
+func TestBuildBlockUsesDingoProtocolMinor(t *testing.T) {
+	creds := setupTestCredentials(t)
+
+	tests := []struct {
+		name         string
+		major        uint
+		pparamMinor  uint
+		expectedSlot uint64
+	}{
+		{
+			name:         "overwrites zero pparam minor",
+			major:        9,
+			pparamMinor:  0,
+			expectedSlot: 1001,
+		},
+		{
+			name:         "overwrites non-zero pparam minor",
+			major:        9,
+			pparamMinor:  5,
+			expectedSlot: 1002,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pparams := &conway.ConwayProtocolParameters{
+				ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
+					Major: tt.major,
+					Minor: tt.pparamMinor,
+				},
+				MaxTxSize:        16384,
+				MaxBlockBodySize: 90112,
+				MaxBlockExUnits: lcommon.ExUnits{
+					Memory: 62000000,
+					Steps:  20000000000,
+				},
+			}
+			builder, err := NewDefaultBlockBuilder(BlockBuilderConfig{
+				Mempool: &mockMempool{
+					transactions: []MempoolTransaction{},
+				},
+				PParamsProvider: &mockPParamsProvider{pparams: pparams},
+				ChainTip: &mockChainTip{
+					tip: ochainsync.Tip{
+						Point: ocommon.Point{
+							Slot: 1000,
+							Hash: make([]byte, 32),
+						},
+						BlockNumber: 100,
+					},
+				},
+				EpochNonce: &mockEpochNonceProvider{
+					epoch: 1,
+					nonce: make([]byte, 32),
+				},
+				Credentials: creds,
+			})
+			require.NoError(t, err)
+
+			_, blockCbor, err := builder.BuildBlock(tt.expectedSlot, 0)
+			require.NoError(t, err)
+
+			decodedBlock, err := conway.NewConwayBlockFromCbor(blockCbor)
+			require.NoError(t, err)
+
+			protoVersion := decodedBlock.BlockHeader.Body.ProtoVersion
+			assert.Equal(t, uint64(tt.major), protoVersion.Major)
+			assert.Equal(
+				t,
+				dingoversion.BlockHeaderProtocolMinor,
+				protoVersion.Minor,
+			)
+		})
+	}
 }
 
 func TestBuildBlockMissingVRFKey(t *testing.T) {
