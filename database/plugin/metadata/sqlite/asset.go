@@ -63,8 +63,13 @@ func (d *MetadataStoreSqlite) GetAssetQuantityByPolicyAndName(
 	}
 
 	result := query.Model(&models.Asset{}).
-		Select("COALESCE(SUM(amount), 0)").
-		Where("policy_id = ? AND name = ?", policyId[:], assetName).
+		Joins("INNER JOIN utxo ON asset.utxo_id = utxo.id").
+		Select("COALESCE(SUM(asset.amount), 0)").
+		Where(
+			"asset.policy_id = ? AND asset.name = ? AND utxo.deleted_slot = 0",
+			policyId[:],
+			assetName,
+		).
 		Scan(&total)
 	if result.Error != nil {
 		return 0, result.Error
