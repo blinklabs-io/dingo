@@ -38,6 +38,7 @@ import (
 var (
 	ErrInvalidAddress = errors.New("invalid address")
 	ErrEpochNotFound  = errors.New("epoch not found")
+	ErrAssetNotFound  = errors.New("asset not found")
 )
 
 // NodeAdapter wraps a real dingo Node's LedgerState to
@@ -314,6 +315,49 @@ func (a *NodeAdapter) EpochProtocolParams(
 		)
 	}
 	return info, nil
+}
+
+// Asset returns native asset information for a policy ID
+// and raw asset name bytes.
+func (a *NodeAdapter) Asset(
+	policyID string,
+	assetName []byte,
+) (AssetInfo, error) {
+	policyIDBytes, err := hex.DecodeString(policyID)
+	if err != nil {
+		return AssetInfo{}, fmt.Errorf(
+			"decode asset policy ID %q: %w",
+			policyID,
+			err,
+		)
+	}
+	policyHash := lcommon.NewBlake2b224(policyIDBytes)
+	asset, err := a.ledgerState.Database().
+		Metadata().
+		GetAssetByPolicyAndName(policyHash, assetName, nil)
+	if err != nil {
+		return AssetInfo{}, fmt.Errorf(
+			"get asset by policy %s and name %x: %w",
+			policyID,
+			assetName,
+			err,
+		)
+	}
+	if asset.ID == 0 {
+		return AssetInfo{}, ErrAssetNotFound
+	}
+
+	return AssetInfo{
+		Asset:             policyID + hex.EncodeToString(assetName),
+		PolicyID:          policyID,
+		AssetName:         hex.EncodeToString(assetName),
+		AssetNameASCII:    assetNameASCII(assetName),
+		Fingerprint:       string(asset.Fingerprint),
+		Quantity:          strconv.FormatUint(uint64(asset.Amount), 10),
+		InitialMintTxHash: "",
+		MintOrBurnCount:   0,
+		OnchainMetadata:   nil,
+	}, nil
 }
 
 func (a *NodeAdapter) latestBlockData(

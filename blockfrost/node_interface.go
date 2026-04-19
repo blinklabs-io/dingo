@@ -77,6 +77,13 @@ type BlockfrostNode interface {
 		label uint64,
 		params PaginationParams,
 	) ([]MetadataTransactionCBORInfo, int, error)
+
+	// Asset returns native asset information for a
+	// concatenated hex asset ID ({policy_id}{asset_name}).
+	Asset(
+		policyID string,
+		assetName []byte,
+	) (AssetInfo, error)
 }
 
 // ChainTipInfo holds chain tip data needed by the API.
@@ -206,4 +213,17 @@ type MetadataTransactionJSONInfo struct {
 type MetadataTransactionCBORInfo struct {
 	TxHash   string
 	Metadata string
+}
+
+// AssetInfo holds native asset data needed by the API.
+type AssetInfo struct {
+	Asset             string
+	PolicyID          string
+	AssetName         string
+	AssetNameASCII    string
+	Fingerprint       string
+	Quantity          string
+	InitialMintTxHash string
+	MintOrBurnCount   int
+	OnchainMetadata   *any
 }

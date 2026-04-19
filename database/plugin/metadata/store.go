@@ -324,6 +324,15 @@ type MetadataStore interface {
 		types.Txn,
 	) (int, error)
 
+	// GetAssetByPolicyAndName returns a live asset row for the provided
+	// policy ID and asset name. Implementations return an empty model and
+	// no error when the asset is not found.
+	GetAssetByPolicyAndName(
+		lcommon.Blake2b224,
+		[]byte, // assetName
+		types.Txn,
+	) (models.Asset, error)
+
 	// GetScript retrieves a script by its hash.
 	GetScript(
 		lcommon.ScriptHash,
