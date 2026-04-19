@@ -1,6 +1,24 @@
 # Release Notes
 
 
+## v0.35.3 (April 19, 2026)
+
+**Title:** Improve peer sharing stability and preserve release history continuity
+
+**Date:** April 19, 2026
+
+**Version:** v0.35.3
+
+Hi folks! Here’s what we shipped in v0.35.3.
+
+### ✨ What's New
+
+* Noted **no new features:** This patch focuses on fixes.
+
+### 💪 Improvements
+
+* Refined **release history continuity:** Recent release history stays complete and easier to scan.
+
 ## v0.35.2 (April 18, 2026)
 
 **Title:** Safer era forecasts and refreshed dependencies
