@@ -1,23 +1,21 @@
 # Release Notes
 
 
-## v0.35.3 (April 19, 2026)
+### 🔧 Fixes
 
-**Title:** Improve peer sharing stability and preserve release history continuity
+* Corrected **steadier peer sharing:** Dingo no longer asks peers to share peers when those peers have peer sharing turned off or do not support that conversation, so nodes avoid protocol errors and connection resets.
+* Restored **release history continuity:** `RELEASE_NOTES.md` now includes the prior v0.35.2 notes so the release history stays complete and easier to scan.
 
-**Date:** April 19, 2026
+### 📋 What You Need to Know
 
-**Version:** v0.35.3
+* Simplified **upgrade guidance:** Most users only need to upgrade to v0.35.3.
+* Clarified **peer connection expectations:** Operators who saw peer sharing related connection resets should see steadier peer interactions after upgrading.
 
-Hi folks! Here’s what we shipped in v0.35.3.
+### 🙏 Thank You
 
-### ✨ What's New
+Thank you for trying!
 
-* Noted **no new features:** This patch focuses on fixes.
-
-### 💪 Improvements
-
-* Refined **release history continuity:** Recent release history stays complete and easier to scan.
+---
 
 ## v0.35.2 (April 18, 2026)
 
