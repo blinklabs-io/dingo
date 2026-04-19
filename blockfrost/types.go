@@ -165,6 +165,7 @@ type AssetResponse struct {
 	OnchainMetadata         *any    `json:"onchain_metadata"`
 	OnchainMetadataStandard *string `json:"onchain_metadata_standard"`
 	OnchainMetadataExtra    *string `json:"onchain_metadata_extra"`
+	Metadata                *any    `json:"metadata"`
 }
 
 // ErrorResponse represents a Blockfrost error response.
