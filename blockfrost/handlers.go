@@ -305,11 +305,6 @@ func (b *Blockfrost) handleAsset(
 
 	asset, err := b.node.Asset(policyID, assetName)
 	if err != nil {
-		b.logger.Error(
-			"failed to get asset",
-			"asset", r.PathValue("asset"),
-			"error", err,
-		)
 		if errors.Is(err, ErrAssetNotFound) {
 			writeError(
 				w,
@@ -319,6 +314,11 @@ func (b *Blockfrost) handleAsset(
 			)
 			return
 		}
+		b.logger.Error(
+			"failed to get asset",
+			"asset", r.PathValue("asset"),
+			"error", err,
+		)
 		writeError(
 			w,
 			http.StatusInternalServerError,
