@@ -344,7 +344,12 @@ func (a *NodeAdapter) Asset(
 		)
 	}
 	if asset.ID == 0 {
-		return AssetInfo{}, ErrAssetNotFound
+		return AssetInfo{}, fmt.Errorf(
+			"asset %s%x: %w",
+			policyID,
+			assetName,
+			ErrAssetNotFound,
+		)
 	}
 
 	return AssetInfo{
