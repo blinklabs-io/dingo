@@ -646,6 +646,9 @@ func parseAssetIdentifier(
 	}
 	policyID := asset[:policyIDHexLen]
 	assetNameHex := asset[policyIDHexLen:]
+	if len(assetNameHex) > 64 {
+		return "", nil, errors.New("asset name too long")
+	}
 
 	if _, err := hex.DecodeString(policyID); err != nil {
 		return "", nil, err
