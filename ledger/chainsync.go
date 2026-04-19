@@ -1471,9 +1471,19 @@ func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 			// from — the common ancestor. If that block exists on our
 			// chain and the peer's chain is ahead, we roll back to
 			// the common ancestor so chainsync can continue.
-			if resolved := ls.tryResolveFork(
+			resolved, resolveErr := ls.tryResolveFork(
 				e, notFitErr,
-			); resolved {
+			)
+			if resolveErr != nil {
+				if ls.headerMismatchCount > 0 {
+					ls.headerMismatchCount--
+				}
+				return fmt.Errorf(
+					"failed resolving fork after header mismatch: %w",
+					resolveErr,
+				)
+			}
+			if resolved {
 				return nil
 			}
 			// Fallback: after several consecutive mismatches where
@@ -1631,16 +1641,18 @@ func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 // a fresh FindIntersect on that connection rather than repeated mismatch
 // counting.
 //
-// Returns true if the fork was resolved (chain rolled back), false if the
-// common ancestor was not found or the rollback could not be performed.
+// Returns true if the fork was resolved (chain rolled back or a re-sync was
+// requested), false if the common ancestor was not found yet. Unexpected
+// internal failures are returned as errors so callers do not treat them as
+// ordinary header mismatches.
 func (ls *LedgerState) tryResolveFork(
 	e ChainsyncEvent,
 	notFitErr chain.BlockNotFitChainTipError,
-) bool {
+) (bool, error) {
 	// Only resolve forks when the peer is ahead of us.
 	localTip := ls.chain.Tip()
 	if e.Tip.Point.Slot <= localTip.Point.Slot {
-		return false
+		return false, nil
 	}
 
 	// Walk backward through the peer's recently seen header chain until
@@ -1656,17 +1668,15 @@ func (ls *LedgerState) tryResolveFork(
 			"error", err,
 			"block_prev_hash", notFitErr.BlockPrevHash(),
 		)
-		return false
+		return false, nil
 	}
 	ancestorPoint, forkPath, err := ls.findPeerForkPath(e, prevHashBytes)
 	if err != nil {
-		ls.config.Logger.Error(
-			"unexpected error looking up common ancestor",
-			"component", "ledger",
-			"error", err,
-			"block_prev_hash", notFitErr.BlockPrevHash(),
+		return false, fmt.Errorf(
+			"unexpected error looking up common ancestor for prev hash %s: %w",
+			notFitErr.BlockPrevHash(),
+			err,
 		)
-		return false
 	}
 	if ancestorPoint == nil {
 		// The peer's header stream is not continuous with our local chain
@@ -1683,17 +1693,15 @@ func (ls *LedgerState) tryResolveFork(
 			e.ConnectionId,
 			resyncReasonRollbackNotFound,
 		)
-		return true
+		return true, nil
 	}
 	ancestorBlock, err := database.BlockByHash(ls.db, ancestorPoint.Hash)
 	if err != nil {
-		ls.config.Logger.Error(
-			"failed to reload common ancestor block",
-			"component", "ledger",
-			"error", err,
-			"ancestor_hash", hex.EncodeToString(ancestorPoint.Hash),
+		return false, fmt.Errorf(
+			"failed to reload common ancestor block %s: %w",
+			hex.EncodeToString(ancestorPoint.Hash),
+			err,
 		)
-		return false
 	}
 
 	rollbackPoint := *ancestorPoint
@@ -1721,7 +1729,7 @@ func (ls *LedgerState) tryResolveFork(
 					"slot", forkEvent.Point.Slot,
 					"connection_id", forkEvent.ConnectionId.String(),
 				)
-				return false
+				return false, nil
 			}
 		}
 		ls.headerMismatchCount = 0
@@ -1739,7 +1747,7 @@ func (ls *LedgerState) tryResolveFork(
 			}
 			ls.chainsyncBlockfetchMutex.Unlock()
 		}
-		return true
+		return true, nil
 	}
 
 	ls.config.Logger.Info(
@@ -1793,7 +1801,7 @@ func (ls *LedgerState) tryResolveFork(
 				"ancestor_slot", ancestorBlock.Slot,
 			)
 		}
-		return false
+		return false, nil
 	}
 
 	// Mark state as rollback so the next block header event logs
@@ -1815,7 +1823,7 @@ func (ls *LedgerState) tryResolveFork(
 			)
 			// Do not reset mismatch state — let the caller know the
 			// resolution failed so subsequent mismatch tracking proceeds.
-			return false
+			return false, nil
 		}
 	}
 	ls.headerMismatchCount = 0
@@ -1833,7 +1841,7 @@ func (ls *LedgerState) tryResolveFork(
 		}
 		ls.chainsyncBlockfetchMutex.Unlock()
 	}
-	return true
+	return true, nil
 }
 
 //nolint:unparam

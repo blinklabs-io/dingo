@@ -82,7 +82,7 @@ func TestTryResolveForkSynchronizesLedgerTip(t *testing.T) {
 	var notFitErr chain.BlockNotFitChainTipError
 	require.ErrorAs(t, err, &notFitErr)
 
-	resolved := fixture.ls.tryResolveFork(
+	resolved, err := fixture.ls.tryResolveFork(
 		ChainsyncEvent{
 			ConnectionId: fixture.connId,
 			Point: ocommon.NewPoint(
@@ -100,6 +100,7 @@ func TestTryResolveForkSynchronizesLedgerTip(t *testing.T) {
 		},
 		notFitErr,
 	)
+	require.NoError(t, err)
 	require.True(t, resolved)
 
 	assert.Equal(t, fixture.ancestorTip, fixture.ls.chain.Tip())
@@ -155,7 +156,7 @@ func TestTryResolveForkQueuesKnownPeerForkSegment(t *testing.T) {
 	var notFitErr chain.BlockNotFitChainTipError
 	require.ErrorAs(t, err, &notFitErr)
 
-	resolved := fixture.ls.tryResolveFork(
+	resolved, err := fixture.ls.tryResolveFork(
 		ChainsyncEvent{
 			ConnectionId: fixture.connId,
 			Point:        ocommon.NewPoint(header3.SlotNumber(), forkHash3),
@@ -167,6 +168,7 @@ func TestTryResolveForkQueuesKnownPeerForkSegment(t *testing.T) {
 		},
 		notFitErr,
 	)
+	require.NoError(t, err)
 	require.True(t, resolved)
 
 	assert.Equal(t, fixture.ancestorTip, fixture.ls.chain.Tip())
@@ -239,7 +241,7 @@ func TestTryResolveForkUsesObservedPeerHistoryFallback(t *testing.T) {
 	var notFitErr chain.BlockNotFitChainTipError
 	require.ErrorAs(t, err, &notFitErr)
 
-	resolved := fixture.ls.tryResolveFork(
+	resolved, err := fixture.ls.tryResolveFork(
 		ChainsyncEvent{
 			ConnectionId: fixture.connId,
 			Point:        ocommon.NewPoint(header3.SlotNumber(), forkHash3),
@@ -251,6 +253,7 @@ func TestTryResolveForkUsesObservedPeerHistoryFallback(t *testing.T) {
 		},
 		notFitErr,
 	)
+	require.NoError(t, err)
 	require.True(t, resolved)
 
 	assert.Equal(t, fixture.ancestorTip, fixture.ls.chain.Tip())
