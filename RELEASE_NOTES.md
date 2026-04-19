@@ -1,6 +1,38 @@
 # Release Notes
 
 
+## v0.35.3 (April 19, 2026)
+
+**Title:** Improve peer sharing compatibility
+
+**Date:** April 19, 2026
+
+**Version:** v0.35.3
+
+Hi folks! Here’s what we shipped in v0.35.3.
+
+### ✨ What's New
+
+* Noted **no new features:** This patch focuses on improvements and fixes.
+
+### 💪 Improvements
+
+* Refined **release history continuity:** RELEASE_NOTES.md now stays up to date, so recent changes are easier to scan in one place.
+
+### 🔧 Fixes
+
+* Corrected **safer peer sharing behavior:** Dingo now avoids asking peers to share more peers when they do not offer that capability, so connections stay steadier and compatibility is smoother across mixed peer setups.
+
+### 📋 What You Need to Know
+
+* Simplified **upgrade guidance:** Most users only need to upgrade to v0.35.3, and peer sharing now behaves more safely with peers that do not advertise sharing.
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
 ## v0.35.2 (April 18, 2026)
 
 **Title:** Safer era forecasts and refreshed dependencies
