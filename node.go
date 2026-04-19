@@ -684,7 +684,15 @@ func (n *Node) Run(ctx context.Context) error {
 			n.config.bindAddr,
 			strconv.FormatUint(uint64(n.config.blockfrostPort), 10),
 		)
-		adapter := blockfrost.NewNodeAdapter(n.ledgerState)
+		adapter, err := blockfrost.NewNodeAdapter(
+			n.ledgerState,
+		)
+		if err != nil {
+			return fmt.Errorf(
+				"creating blockfrost node adapter: %w",
+				err,
+			)
+		}
 		n.blockfrostAPI = blockfrost.New(
 			blockfrost.BlockfrostConfig{
 				ListenAddress: listenAddr,

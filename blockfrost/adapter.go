@@ -47,15 +47,16 @@ type NodeAdapter struct {
 }
 
 // NewNodeAdapter creates a NodeAdapter that queries the
-// given LedgerState for blockchain data. Panics if ls is
-// nil.
+// given LedgerState for blockchain data.
 func NewNodeAdapter(
 	ls *ledger.LedgerState,
-) *NodeAdapter {
+) (*NodeAdapter, error) {
 	if ls == nil {
-		panic("NewNodeAdapter: LedgerState must not be nil")
+		return nil, errors.New(
+			"new node adapter: ledger state must not be nil",
+		)
 	}
-	return &NodeAdapter{ledgerState: ls}
+	return &NodeAdapter{ledgerState: ls}, nil
 }
 
 // ChainTip returns the current chain tip from the ledger
