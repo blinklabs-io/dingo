@@ -40,6 +40,7 @@ type mockNode struct {
 	params                 ProtocolParamsInfo
 	epochParams            ProtocolParamsInfo
 	pools                  []PoolExtendedInfo
+	asset                  AssetInfo
 	addressUTXOs           []AddressUTXOInfo
 	addressTransactions    []AddressTransactionInfo
 	metadataJSON           []MetadataTransactionJSONInfo
@@ -55,6 +56,7 @@ type mockNode struct {
 	paramsErr              error
 	epochParamsErr         error
 	poolsErr               error
+	assetErr               error
 	addressUTXOsErr        error
 	addressTransactionsErr error
 	metadataJSONErr        error
@@ -101,6 +103,13 @@ func (m *mockNode) PoolsExtended() (
 	[]PoolExtendedInfo, error,
 ) {
 	return m.pools, m.poolsErr
+}
+
+func (m *mockNode) Asset(
+	_ string,
+	_ []byte,
+) (AssetInfo, error) {
+	return m.asset, m.assetErr
 }
 
 func (m *mockNode) AddressUTXOs(
@@ -280,6 +289,100 @@ func TestHandleLatestBlock(t *testing.T) {
 	assert.Equal(t, "pool1xyz", resp.SlotLeader)
 	assert.Equal(t, "prev123", resp.PreviousBlock)
 	assert.Equal(t, uint64(10), resp.Confirmations)
+}
+
+func TestHandleAsset(t *testing.T) {
+	mock := &mockNode{
+		asset: AssetInfo{
+			Asset:             "00112233445566778899aabbccddeeff00112233445566778899aabb746f6b656e",
+			PolicyID:          "00112233445566778899aabbccddeeff00112233445566778899aabb",
+			AssetName:         "746f6b656e",
+			AssetNameASCII:    "token",
+			Fingerprint:       "asset1test",
+			Quantity:          "42",
+			InitialMintTxHash: "",
+			MintOrBurnCount:   0,
+		},
+	}
+	b := newTestBlockfrost(mock)
+
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/api/v0/assets/00112233445566778899aabbccddeeff00112233445566778899aabb746f6b656e",
+		nil,
+	)
+	req.SetPathValue(
+		"asset",
+		"00112233445566778899aabbccddeeff00112233445566778899aabb746f6b656e",
+	)
+	w := httptest.NewRecorder()
+	b.handleAsset(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	var resp AssetResponse
+	err := json.NewDecoder(w.Body).Decode(&resp)
+	require.NoError(t, err)
+	assert.Equal(t, mock.asset.Asset, resp.Asset)
+	assert.Equal(t, mock.asset.PolicyID, resp.PolicyID)
+	assert.Equal(t, mock.asset.AssetName, resp.AssetName)
+	assert.Equal(t, mock.asset.AssetNameASCII, resp.AssetNameASCII)
+	assert.Equal(t, mock.asset.Fingerprint, resp.Fingerprint)
+	assert.Equal(t, mock.asset.Quantity, resp.Quantity)
+	assert.Equal(t, mock.asset.InitialMintTxHash, resp.InitialMintTxHash)
+	assert.Equal(t, mock.asset.MintOrBurnCount, resp.MintOrBurnCount)
+	assert.Nil(t, resp.OnchainMetadata)
+}
+
+func TestHandleAssetInvalidIdentifier(t *testing.T) {
+	mock := &mockNode{}
+	b := newTestBlockfrost(mock)
+
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/api/v0/assets/not-hex",
+		nil,
+	)
+	req.SetPathValue("asset", "not-hex")
+	w := httptest.NewRecorder()
+	b.handleAsset(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+
+	var resp ErrorResponse
+	err := json.NewDecoder(w.Body).Decode(&resp)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	assert.Equal(t, "Bad Request", resp.Error)
+	assert.Equal(t, "Invalid asset identifier.", resp.Message)
+}
+
+func TestHandleAssetNotFound(t *testing.T) {
+	mock := &mockNode{
+		assetErr: ErrAssetNotFound,
+	}
+	b := newTestBlockfrost(mock)
+
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/api/v0/assets/00112233445566778899aabbccddeeff00112233445566778899aabb",
+		nil,
+	)
+	req.SetPathValue(
+		"asset",
+		"00112233445566778899aabbccddeeff00112233445566778899aabb",
+	)
+	w := httptest.NewRecorder()
+	b.handleAsset(w, req)
+
+	assert.Equal(t, http.StatusNotFound, w.Code)
+
+	var resp ErrorResponse
+	err := json.NewDecoder(w.Body).Decode(&resp)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+	assert.Equal(t, "Not Found", resp.Error)
+	assert.Equal(t, "The requested asset could not be found.", resp.Message)
 }
 
 func TestHandleLatestBlockError(t *testing.T) {

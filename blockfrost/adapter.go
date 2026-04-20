@@ -38,6 +38,7 @@ import (
 var (
 	ErrInvalidAddress = errors.New("invalid address")
 	ErrEpochNotFound  = errors.New("epoch not found")
+	ErrAssetNotFound  = errors.New("asset not found")
 )
 
 // NodeAdapter wraps a real dingo Node's LedgerState to
@@ -47,15 +48,16 @@ type NodeAdapter struct {
 }
 
 // NewNodeAdapter creates a NodeAdapter that queries the
-// given LedgerState for blockchain data. Panics if ls is
-// nil.
+// given LedgerState for blockchain data.
 func NewNodeAdapter(
 	ls *ledger.LedgerState,
-) *NodeAdapter {
+) (*NodeAdapter, error) {
 	if ls == nil {
-		panic("NewNodeAdapter: LedgerState must not be nil")
+		return nil, errors.New(
+			"new node adapter: ledger state must not be nil",
+		)
 	}
-	return &NodeAdapter{ledgerState: ls}
+	return &NodeAdapter{ledgerState: ls}, nil
 }
 
 // ChainTip returns the current chain tip from the ledger
@@ -314,6 +316,65 @@ func (a *NodeAdapter) EpochProtocolParams(
 		)
 	}
 	return info, nil
+}
+
+// Asset returns native asset information for a policy ID
+// and raw asset name bytes.
+func (a *NodeAdapter) Asset(
+	policyID string,
+	assetName []byte,
+) (AssetInfo, error) {
+	policyIDBytes, err := hex.DecodeString(policyID)
+	if err != nil {
+		return AssetInfo{}, fmt.Errorf(
+			"decode asset policy ID %q: %w",
+			policyID,
+			err,
+		)
+	}
+	policyHash := lcommon.NewBlake2b224(policyIDBytes)
+	asset, err := a.ledgerState.Database().
+		Metadata().
+		GetAssetByPolicyAndName(policyHash, assetName, nil)
+	if err != nil {
+		return AssetInfo{}, fmt.Errorf(
+			"get asset by policy %s and name %x: %w",
+			policyID,
+			assetName,
+			err,
+		)
+	}
+	if asset.ID == 0 {
+		return AssetInfo{}, fmt.Errorf(
+			"asset %s%x: %w",
+			policyID,
+			assetName,
+			ErrAssetNotFound,
+		)
+	}
+	quantity, err := a.ledgerState.Database().
+		Metadata().
+		GetAssetQuantityByPolicyAndName(policyHash, assetName, nil)
+	if err != nil {
+		return AssetInfo{}, fmt.Errorf(
+			"get asset quantity by policy %s and name %x: %w",
+			policyID,
+			assetName,
+			err,
+		)
+	}
+
+	return AssetInfo{
+		Asset:             policyID + hex.EncodeToString(assetName),
+		PolicyID:          policyID,
+		AssetName:         hex.EncodeToString(assetName),
+		AssetNameASCII:    assetNameASCII(assetName),
+		Fingerprint:       string(asset.Fingerprint),
+		Quantity:          strconv.FormatUint(quantity, 10),
+		InitialMintTxHash: "",
+		MintOrBurnCount:   0,
+		OnchainMetadata:   nil,
+	}, nil
 }
 
 func (a *NodeAdapter) latestBlockData(

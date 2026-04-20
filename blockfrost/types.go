@@ -151,6 +151,23 @@ type AddressTransactionResponse struct {
 	BlockTime   int    `json:"block_time"`
 }
 
+// AssetResponse represents a Blockfrost native asset
+// object.
+type AssetResponse struct {
+	Asset                   string  `json:"asset"`
+	PolicyID                string  `json:"policy_id"`
+	AssetName               string  `json:"asset_name"`
+	AssetNameASCII          string  `json:"asset_name_ascii"`
+	Fingerprint             string  `json:"fingerprint"`
+	Quantity                string  `json:"quantity"`
+	InitialMintTxHash       string  `json:"initial_mint_tx_hash"`
+	MintOrBurnCount         int     `json:"mint_or_burn_count"`
+	OnchainMetadata         *any    `json:"onchain_metadata"`
+	OnchainMetadataStandard *string `json:"onchain_metadata_standard"`
+	OnchainMetadataExtra    *string `json:"onchain_metadata_extra"`
+	Metadata                *any    `json:"metadata"`
+}
+
 // ErrorResponse represents a Blockfrost error response.
 type ErrorResponse struct {
 	StatusCode int    `json:"status_code"`

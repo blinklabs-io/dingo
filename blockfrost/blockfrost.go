@@ -95,6 +95,10 @@ func (b *Blockfrost) Start(
 		b.handleNetwork,
 	)
 	mux.HandleFunc(
+		"GET /api/v0/assets/{asset}",
+		b.handleAsset,
+	)
+	mux.HandleFunc(
 		"GET /api/v0/pools/extended",
 		b.handlePoolsExtended,
 	)

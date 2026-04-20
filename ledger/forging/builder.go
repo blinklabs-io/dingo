@@ -20,6 +20,7 @@ import (
 	"log/slog"
 	"math"
 
+	dingoversion "github.com/blinklabs-io/dingo/internal/version"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
@@ -510,7 +511,7 @@ func (b *DefaultBlockBuilder) BuildBlock(
 		OpCert:        opCertBody,
 		ProtoVersion: babbage.BabbageProtoVersion{
 			Major: uint64(conwayPParams.ProtocolVersion.Major),
-			Minor: uint64(conwayPParams.ProtocolVersion.Minor),
+			Minor: dingoversion.BlockHeaderProtocolMinor,
 		},
 	}
 

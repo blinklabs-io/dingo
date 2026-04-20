@@ -15,6 +15,7 @@
 package blockfrost
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -280,6 +281,63 @@ func (b *Blockfrost) handleNetwork(
 			Live:   "0",
 			Active: "0",
 		},
+	})
+}
+
+// handleAsset handles GET /api/v0/assets/{asset} and
+// returns native asset information.
+func (b *Blockfrost) handleAsset(
+	w http.ResponseWriter,
+	r *http.Request,
+) {
+	policyID, assetName, err := parseAssetIdentifier(
+		r.PathValue("asset"),
+	)
+	if err != nil {
+		writeError(
+			w,
+			http.StatusBadRequest,
+			"Bad Request",
+			"Invalid asset identifier.",
+		)
+		return
+	}
+
+	asset, err := b.node.Asset(policyID, assetName)
+	if err != nil {
+		if errors.Is(err, ErrAssetNotFound) {
+			writeError(
+				w,
+				http.StatusNotFound,
+				"Not Found",
+				"The requested asset could not be found.",
+			)
+			return
+		}
+		b.logger.Error(
+			"failed to get asset",
+			"asset", r.PathValue("asset"),
+			"error", err,
+		)
+		writeError(
+			w,
+			http.StatusInternalServerError,
+			"Internal Server Error",
+			"failed to retrieve asset",
+		)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, AssetResponse{
+		Asset:             asset.Asset,
+		PolicyID:          asset.PolicyID,
+		AssetName:         asset.AssetName,
+		AssetNameASCII:    asset.AssetNameASCII,
+		Fingerprint:       asset.Fingerprint,
+		Quantity:          asset.Quantity,
+		InitialMintTxHash: asset.InitialMintTxHash,
+		MintOrBurnCount:   asset.MintOrBurnCount,
+		OnchainMetadata:   asset.OnchainMetadata,
 	})
 }
 
@@ -578,6 +636,37 @@ func parseMetadataLabelOrWriteError(
 	return label, true
 }
 
+func parseAssetIdentifier(
+	asset string,
+) (string, []byte, error) {
+	const (
+		policyIDHexLen        = 56
+		maxAssetNameHexLen    = 64
+		maxAssetIdentifierLen = policyIDHexLen + maxAssetNameHexLen
+	)
+
+	if len(asset) < policyIDHexLen {
+		return "", nil, errors.New("asset ID too short")
+	}
+	if len(asset) > maxAssetIdentifierLen {
+		return "", nil, errors.New("asset ID too long")
+	}
+	policyID := asset[:policyIDHexLen]
+	assetNameHex := asset[policyIDHexLen:]
+	if len(assetNameHex) > maxAssetNameHexLen {
+		return "", nil, errors.New("asset name too long")
+	}
+
+	if _, err := hex.DecodeString(policyID); err != nil {
+		return "", nil, err
+	}
+	assetName, err := hex.DecodeString(assetNameHex)
+	if err != nil {
+		return "", nil, err
+	}
+	return policyID, assetName, nil
+}
+
 func writeNodeQueryError(
 	w http.ResponseWriter,
 	err error,
@@ -608,6 +697,19 @@ func convertAddressAmounts(
 		ret = append(ret, AddressAmountResponse(amount))
 	}
 	return ret
+}
+
+func assetNameASCII(
+	assetName []byte,
+) string {
+	ret := make([]byte, 0, len(assetName))
+	for _, b := range assetName {
+		if b < 32 || b > 126 {
+			return ""
+		}
+		ret = append(ret, b)
+	}
+	return string(ret)
 }
 
 func protocolParamsResponse(
