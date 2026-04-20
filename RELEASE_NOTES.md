@@ -1,14 +1,50 @@
 # Release Notes
 
 
+## v0.36.0 (April 20, 2026)
+
+**Title:** Asset endpoints and steadier chain operations
+
+**Date:** April 20, 2026
+
+**Version:** v0.36.0
+
+Hi folks! Here’s what we shipped in v0.36.0.
+
+### ✨ What's New
+
+* Added **asset queries for Blockfrost API users:** Blockfrost API users can now query native assets through `/api/v0/assets/{asset}` with the combined asset identifier format.
+* Expanded **era transition visibility:** Era history now shows confirmed upcoming change points more clearly, so slot and time forecasts stay aligned with known transitions.
+* Clarified **safe epoch boundaries:** Era history now reports when an era change cannot happen in the current epoch, which makes forecast results steadier near the epoch boundary.
+
 ### 💪 Improvements
 
-* Improved **contributor guidance:** Development guidance is easier to follow because contributor instructions now spell out testing, architecture, and profiling expectations more clearly.
-* Refreshed **build cache handling:** Build automation now uses a newer cache action release for steadier CI runs.
-* Modernized **protocol library compatibility:** Cardano protocol support stays current with newer upstream protocol library updates.
-* Updated **command line tooling compatibility:** Operational workflows stay aligned with newer Cardano command line tooling.
-* Streamlined **era rollover handling:** Era changes now follow a single transition path, which makes chain operations more consistent when the network moves into a new era.
-* Refined **release history continuity:** The release notes now include this version so recent changes stay easier to scan in one place.
+* Improved **contributor setup guidance:** Development work is easier to follow because the project now includes clearer guidance for testing, architecture, and profiling.
+* Refreshed **build cache stability:** Automation now uses a newer cache action release for steadier build runs.
+* Updated **protocol support alignment:** Network compatibility stays current with newer upstream protocol updates.
+* Modernized **operator tooling support:** Operational workflows stay aligned with newer Cardano command line tooling.
+* Streamlined **era rollover handling:** Era changes now follow one transition path, which makes chain operations more consistent during rollovers.
+* Restored **release history continuity:** Recent changes stay easier to scan in one place through the updated release notes.
+
+### 🔧 Fixes
+
+* Fixed **single relay sync stalls:** Single-relay block producers now keep chain progress steadier when the relay reconnects first after an interruption.
+* Hardened **ledger startup safeguards:** Startup and rollback related paths now stop immediately when the Ouroboros security parameter K is missing or zero.
+* Corrected **fork recovery error reporting:** Fork recovery now returns ancestor lookup failures directly, which makes recovery issues easier to detect.
+* Prevented **Blockfrost startup crashes:** Blockfrost startup now returns a clear error when ledger state is missing instead of crashing.
+* Set **forged block version markers:** Forged blocks now carry the expected minor protocol version for steadier interoperability.
+
+### 📋 What You Need to Know
+
+* Blockfrost API users can now query native assets through /api/v0/assets/{asset} using the concatenated {policy_id}{asset_name_hex} identifier format.
+* Operators should ensure ledger initialization provides a positive Ouroboros security parameter K, because startup and rollback-related paths now fail fast when K is unset or zero.
+* Most users can upgrade normally to v0.36.0; single-relay block producers should see steadier sync behavior, and Blockfrost startup now reports missing ledger state as an error instead of panicking.
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
 
 ## v0.35.3 (April 19, 2026)
 
