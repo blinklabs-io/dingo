@@ -1,6 +1,24 @@
 # Release Notes
 
 
+## v0.36.0 (April 20, 2026)
+
+**Title:** Asset lookups and safer chain operations
+
+**Date:** April 20, 2026
+
+**Version:** v0.36.0
+
+Hi folks! Here’s what we shipped in v0.36.0.
+
+### ✨ What's New
+
+* Added **Blockfrost-compatible native asset lookups:** Existing Blockfrost-style tooling can now fetch native asset details through `/api/v0/assets/{asset}`, including stricter asset checks, clearer missing-asset handling, and live quantity totals across current UTxOs.
+* Expanded **hard-fork era history precision:** Era history now uses confirmed transition boundaries when they are known, so slot and time lookups stay more precise around era changes.
+* Clarified **confirmed epoch-end forecasting:** Era history now keeps confirmed epoch ends available when no hard fork can still happen in the current epoch, so time and slot forecasts stay accurate deeper into safe periods.
+
+### 💪 Improvements
+
 ## v0.35.3 (April 19, 2026)
 
 **Title:** Improve peer sharing compatibility
