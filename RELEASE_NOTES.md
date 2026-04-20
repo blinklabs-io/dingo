@@ -1,19 +1,21 @@
 # Release Notes
 
 
-## v0.35.3 (April 19, 2026)
+## v0.36.0 (April 20, 2026)
 
-**Title:** Improve peer sharing compatibility
+**Title:** Asset lookups and safer chain operations
 
-**Date:** April 19, 2026
+**Date:** April 20, 2026
 
-**Version:** v0.35.3
+**Version:** v0.36.0
 
-Hi folks! Here’s what we shipped in v0.35.3.
+Hi folks! Here’s what we shipped in v0.36.0.
 
 ### ✨ What's New
 
-* Noted **no new features:** This patch focuses on improvements and fixes.
+* Added **Blockfrost-compatible native asset lookups:** Existing Blockfrost-style tooling can now fetch native asset details through `/api/v0/assets/{asset}`, including stricter asset checks, clearer missing-asset handling, and live quantity totals across current UTxOs.
+* Expanded **hard-fork era history precision:** Era history now uses confirmed transition boundaries when they are known, so slot and time lookups stay more precise around era changes.
+* Clarified **confirmed epoch-end forecasting:** Era history now keeps confirmed epoch ends available when no hard fork can still happen in the current epoch, so time and slot forecasts stay accurate deeper into safe periods.
 
 ### 💪 Improvements
 
@@ -33,6 +35,33 @@ Hi folks! Here’s what we shipped in v0.35.3.
 * Marked **forged blocks clearly:** Dingo-forged block headers now carry a Dingo-specific protocol minor version while preserving the correct major version for chain compatibility.
 
 ### 📋 What You Need to Know
+
+* Explained **native asset lookups:** Blockfrost-compatible native asset lookup is now available at `/api/v0/assets/{asset}`.
+* Recommended **upgrading reconnect-sensitive topologies:** Operators with single-relay or reconnect-sensitive topologies benefit from the chainsync reliability fix and should upgrade.
+* Highlighted **more precise era forecasting:** Hard-fork era history and slot/time forecasting are now more precise because transition-state handling is more accurate.
+* Emphasized **fail-fast chain safety:** Chain startup and rollback behavior now fail fast when the Ouroboros security parameter K is missing or invalid.
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
+## v0.35.3 (April 19, 2026)
+
+**Title:** Improve peer sharing compatibility
+
+**Date:** April 19, 2026
+
+**Version:** v0.35.3
+
+Hi folks! Here’s what we shipped in v0.35.3.
+
+### ✨ What's New
+
+* Noted **no new features:** This patch focuses on improvements and fixes.
+
+### 💪 Improvements
 
 * Refined **release history continuity:** RELEASE_NOTES.md now stays up to date, so recent changes are easier to scan in one place.
 
