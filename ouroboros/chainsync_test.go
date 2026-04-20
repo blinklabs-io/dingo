@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/chain"
+	"github.com/blinklabs-io/dingo/chainselection"
 	dchainsync "github.com/blinklabs-io/dingo/chainsync"
 	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/database"
@@ -789,4 +790,279 @@ func TestHeaderPreviouslySeenFromOtherConnTreatsEquivalentConnIdsAsSame(
 		t,
 		state.HeaderPreviouslySeenFromOtherConn(connADup, point),
 	)
+}
+
+// TestChainsyncClientRollForward_InboundUpstreamPublishesWhenEligible
+// exercises a full-duplex inbound connection from a configured upstream peer
+// (one that ChainsyncIngressEligible recognises as eligible). Even though the
+// chainsync client is registered inbound (startedAsOutbound=false), headers
+// should flow into the ledger and a PeerTipUpdateEvent should be emitted.
+// This covers the single-relay block producer scenario where the relay wins
+// the dial race after a crash.
+func TestChainsyncClientRollForward_InboundUpstreamPublishesWhenEligible(
+	t *testing.T,
+) {
+	bus := event.NewEventBus(nil, nil)
+	defer bus.Close()
+
+	connInbound := newTestConnId("127.0.0.1:6000", "1.1.1.1:3001")
+	state := dchainsync.NewState(bus, nil)
+
+	o := NewOuroboros(OuroborosConfig{
+		EventBus: bus,
+		ChainsyncIngressEligible: func(connId ouroboros.ConnectionId) bool {
+			return connId == connInbound
+		},
+	})
+	o.ChainsyncState = state
+	o.EventBus = bus
+
+	// Register as inbound + ingress-eligible to model a full-duplex inbound
+	// from a trusted upstream peer.
+	require.True(t, o.registerTrackedChainsyncClient(connInbound, true, false))
+	observabilityOnly, exists := state.ClientObservabilityOnly(connInbound)
+	require.True(t, exists)
+	require.False(
+		t,
+		observabilityOnly,
+		"eligible inbound should not be observability-only",
+	)
+	require.True(t, o.isInboundChainsyncClient(connInbound))
+
+	_, ledgerCh := bus.Subscribe(ledger.ChainsyncEventType)
+	_, tipCh := bus.Subscribe(chainselection.PeerTipUpdateEventType)
+
+	header := newTestBlockHeader(100, 1, 0xaa)
+	tip := ochainsync.Tip{
+		Point:       ocommon.NewPoint(100, header.Hash().Bytes()),
+		BlockNumber: 1,
+	}
+
+	err := o.chainsyncClientRollForward(
+		ochainsync.CallbackContext{ConnectionId: connInbound},
+		0,
+		header,
+		tip,
+	)
+	require.NoError(t, err)
+
+	select {
+	case evt := <-ledgerCh:
+		data, ok := evt.Data.(ledger.ChainsyncEvent)
+		require.True(t, ok)
+		require.Equal(t, connInbound, data.ConnectionId)
+		require.Equal(t, tip.Point.Slot, data.Point.Slot)
+	case <-time.After(2 * time.Second):
+		t.Fatal(
+			"expected eligible inbound header to feed the ledger; " +
+				"single-relay producer would stay stuck at tip otherwise",
+		)
+	}
+
+	select {
+	case evt := <-tipCh:
+		data, ok := evt.Data.(chainselection.PeerTipUpdateEvent)
+		require.True(t, ok)
+		require.Equal(t, connInbound, data.ConnectionId)
+		require.Equal(t, tip.Point.Slot, data.Tip.Point.Slot)
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected PeerTipUpdateEvent for eligible inbound peer")
+	}
+}
+
+// TestChainsyncClientRollForward_InboundIneligiblePeerStaysObservabilityOnly
+// verifies the fix preserves the protection added in #1699: when peergov
+// reports the peer as ineligible (e.g. a random downstream client pulling
+// data from us), its headers must not feed the ledger even though chainsync
+// is running against it.
+func TestChainsyncClientRollForward_InboundIneligiblePeerStaysObservabilityOnly(
+	t *testing.T,
+) {
+	bus := event.NewEventBus(nil, nil)
+	defer bus.Close()
+
+	connInbound := newTestConnId("127.0.0.1:6000", "2.2.2.2:3001")
+	state := dchainsync.NewState(bus, nil)
+
+	o := NewOuroboros(OuroborosConfig{
+		EventBus: bus,
+		ChainsyncIngressEligible: func(ouroboros.ConnectionId) bool {
+			return false
+		},
+	})
+	o.ChainsyncState = state
+	o.EventBus = bus
+
+	require.True(t, o.registerTrackedChainsyncClient(connInbound, false, false))
+	observabilityOnly, exists := state.ClientObservabilityOnly(connInbound)
+	require.True(t, exists)
+	require.True(t, observabilityOnly)
+
+	_, ledgerCh := bus.Subscribe(ledger.ChainsyncEventType)
+	_, tipCh := bus.Subscribe(chainselection.PeerTipUpdateEventType)
+
+	header := newTestBlockHeader(100, 1, 0xaa)
+	tip := ochainsync.Tip{
+		Point:       ocommon.NewPoint(100, header.Hash().Bytes()),
+		BlockNumber: 1,
+	}
+
+	err := o.chainsyncClientRollForward(
+		ochainsync.CallbackContext{ConnectionId: connInbound},
+		0,
+		header,
+		tip,
+	)
+	require.NoError(t, err)
+
+	select {
+	case evt := <-ledgerCh:
+		t.Fatalf(
+			"unexpected ledger event from ineligible inbound peer: %#v",
+			evt,
+		)
+	case <-time.After(200 * time.Millisecond):
+	}
+	select {
+	case evt := <-tipCh:
+		t.Fatalf(
+			"unexpected PeerTipUpdateEvent from ineligible inbound peer: %#v",
+			evt,
+		)
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+// TestShouldPublishChainsyncToLedger_InboundFailsClosedWithNilCallback
+// verifies that when no ChainsyncIngressEligible policy is wired, an inbound
+// full-duplex chainsync client is not treated as ingress-eligible. Outbound
+// chainsync retains its legacy default of eligible so the fix does not
+// regress existing callers that don't pass a policy. Regression guard for
+// the review feedback on issue #1982.
+func TestShouldPublishChainsyncToLedger_InboundFailsClosedWithNilCallback(
+	t *testing.T,
+) {
+	bus := event.NewEventBus(nil, nil)
+	defer bus.Close()
+
+	connInbound := newTestConnId("127.0.0.1:6000", "1.1.1.1:3001")
+	connOutbound := newTestConnId("127.0.0.1:6000", "2.2.2.2:3001")
+	state := dchainsync.NewState(bus, nil)
+
+	o := NewOuroboros(OuroborosConfig{EventBus: bus})
+	o.ChainsyncState = state
+	o.EventBus = bus
+	require.Nil(t, o.config.ChainsyncIngressEligible)
+
+	require.True(t, o.registerTrackedChainsyncClient(connOutbound, true, true))
+	require.True(t, o.registerTrackedChainsyncClient(connInbound, false, false))
+
+	require.True(
+		t,
+		o.shouldPublishChainsyncToLedger(connOutbound),
+		"outbound default must remain eligible when no policy is wired",
+	)
+	require.False(
+		t,
+		o.shouldPublishChainsyncToLedger(connInbound),
+		"inbound default must be observability-only when no policy is wired",
+	)
+
+	header := newTestBlockHeader(100, 1, 0xaa)
+	tip := ochainsync.Tip{
+		Point:       ocommon.NewPoint(100, header.Hash().Bytes()),
+		BlockNumber: 1,
+	}
+
+	_, ledgerCh := bus.Subscribe(ledger.ChainsyncEventType)
+	_, tipCh := bus.Subscribe(chainselection.PeerTipUpdateEventType)
+
+	require.NoError(
+		t,
+		o.chainsyncClientRollForward(
+			ochainsync.CallbackContext{ConnectionId: connInbound},
+			0,
+			header,
+			tip,
+		),
+	)
+
+	select {
+	case evt := <-ledgerCh:
+		t.Fatalf(
+			"inbound peer with nil policy must not feed ledger: %#v",
+			evt,
+		)
+	case <-time.After(200 * time.Millisecond):
+	}
+	select {
+	case evt := <-tipCh:
+		t.Fatalf(
+			"inbound peer with nil policy must not emit PeerTipUpdateEvent: %#v",
+			evt,
+		)
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	observabilityOnly, exists := state.ClientObservabilityOnly(connInbound)
+	require.True(t, exists)
+	require.True(
+		t,
+		observabilityOnly,
+		"reconcile must not upgrade inbound under nil policy",
+	)
+}
+
+// TestChainsyncClientRollBackward_InboundUpstreamProcessesRollback verifies
+// that rollbacks received on an eligible inbound chainsync client are
+// forwarded to the ledger. Without the fix, isInboundChainsyncClient
+// short-circuits before reconcileChainsyncIngressAdmission and rollbacks are
+// silently dropped, so the node can't react to chain reorganisations reported
+// by a configured upstream when the relay dialed first.
+func TestChainsyncClientRollBackward_InboundUpstreamProcessesRollback(
+	t *testing.T,
+) {
+	bus := event.NewEventBus(nil, nil)
+	defer bus.Close()
+
+	connInbound := newTestConnId("127.0.0.1:6000", "1.1.1.1:3001")
+	state := dchainsync.NewState(bus, nil)
+
+	o := NewOuroboros(OuroborosConfig{
+		EventBus: bus,
+		ChainsyncIngressEligible: func(ouroboros.ConnectionId) bool {
+			return true
+		},
+	})
+	o.ChainsyncState = state
+	o.EventBus = bus
+
+	require.True(t, o.registerTrackedChainsyncClient(connInbound, true, false))
+
+	_, rollbackCh := bus.Subscribe(ledger.ChainsyncEventType)
+	rollbackPoint := ocommon.NewPoint(90, []byte("rollback"))
+	tip := ochainsync.Tip{
+		Point:       ocommon.NewPoint(95, []byte("tip")),
+		BlockNumber: 5,
+	}
+
+	err := o.chainsyncClientRollBackward(
+		ochainsync.CallbackContext{ConnectionId: connInbound},
+		rollbackPoint,
+		tip,
+	)
+	require.NoError(t, err)
+
+	select {
+	case evt := <-rollbackCh:
+		data, ok := evt.Data.(ledger.ChainsyncEvent)
+		require.True(t, ok)
+		require.Equal(t, connInbound, data.ConnectionId)
+		require.Equal(t, rollbackPoint.Slot, data.Point.Slot)
+		require.True(t, data.Rollback)
+	case <-time.After(2 * time.Second):
+		t.Fatal(
+			"expected rollback event from eligible inbound peer",
+		)
+	}
 }

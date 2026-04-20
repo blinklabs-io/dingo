@@ -337,8 +337,14 @@ func clonePeerConnection(conn *PeerConnection) *PeerConnection {
 }
 
 func chainSelectionEligible(source PeerSource, conn *PeerConnection) bool {
-	_ = source
-	return conn != nil && conn.IsClient
+	if conn == nil || !conn.IsClient {
+		return false
+	}
+	// A peer whose only record comes from an unsolicited inbound
+	// connection is not a trusted source of chain truth. Topology and
+	// P2P-discovered peers keep their source even when they happen to
+	// dial us first, so they stay eligible on full-duplex inbound.
+	return source != PeerSourceInboundConn
 }
 
 func chainSelectionPriority(source PeerSource) int {

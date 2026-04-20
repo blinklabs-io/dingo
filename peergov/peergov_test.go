@@ -675,10 +675,10 @@ func TestPeerGovernorAppendChainSelectionEventsLocked(t *testing.T) {
 		events := pg.appendChainSelectionEventsLocked(
 			nil,
 			pg.bootstrapExited,
-			PeerSourceInboundConn,
+			PeerSourceP2PGossip,
 			&PeerConnection{Id: connId, IsClient: true},
 			&Peer{
-				Source:     PeerSourceInboundConn,
+				Source:     PeerSourceP2PGossip,
 				Connection: &PeerConnection{Id: connId, IsClient: false},
 			},
 		)

@@ -481,9 +481,6 @@ func (o *Ouroboros) chainsyncClientRollBackward(
 	point ocommon.Point,
 	tip ochainsync.Tip,
 ) error {
-	if o.isInboundChainsyncClient(ctx.ConnectionId) {
-		return nil
-	}
 	if !o.reconcileChainsyncIngressAdmission(
 		ctx.ConnectionId,
 		o.shouldPublishChainsyncToLedger(ctx.ConnectionId),
@@ -521,24 +518,23 @@ func (o *Ouroboros) chainsyncClientRollForward(
 		// selection tie-breaking (used in both dedup and normal
 		// paths below).
 		vrfOutput := chainselection.GetVRFOutput(v)
-		// Inbound connections are clients pulling data from us.
-		// They are not sources of chain truth and should not
-		// influence chain selection or the blockfetch pipeline.
-		isInbound := o.isInboundChainsyncClient(ctx.ConnectionId)
-		ingressEligible := false
-		if !isInbound {
-			ingressEligible = o.reconcileChainsyncIngressAdmission(
-				ctx.ConnectionId,
-				o.shouldPublishChainsyncToLedger(ctx.ConnectionId),
-			)
-		}
+		// Ingress eligibility is the sole gate for feeding the ledger
+		// and chain selection. reconcileChainsyncIngressAdmission
+		// defers to ChainsyncIngressEligible (peergov), which already
+		// filters random inbound peers via chainSelectionEligible.
+		// A full-duplex inbound from a configured upstream remains
+		// eligible here, so the node doesn't stall when the relay
+		// dials us first after a crash.
+		ingressEligible := o.reconcileChainsyncIngressAdmission(
+			ctx.ConnectionId,
+			o.shouldPublishChainsyncToLedger(ctx.ConnectionId),
+		)
 		o.config.Logger.Debug(
 			"chainsync: header received",
 			"component", "ouroboros",
 			"slot", blockSlot,
 			"tip_slot", tip.Point.Slot,
 			"connection_id", ctx.ConnectionId.String(),
-			"inbound", isInbound,
 			"ingress_eligible", ingressEligible,
 		)
 		// Update tracked client state and deduplicate headers.
@@ -560,12 +556,12 @@ func (o *Ouroboros) chainsyncClientRollForward(
 				)
 			}
 		}
-		// Publish peer tip update for chain selection (outbound only).
-		// Inbound peers are clients pulling data from us, not sources
-		// of chain truth. Letting them into chain selection causes
-		// spurious switches when ephemeral inbound connections report
-		// tips and then disconnect.
-		if !isInbound {
+		// Publish peer tip update for chain selection only for
+		// ingress-eligible peers. Random inbound peers reporting
+		// ephemeral tips would cause spurious chain switches; peergov
+		// filters them via chainSelectionEligible so they fail the
+		// reconcile above and get skipped here.
+		if ingressEligible {
 			observedTip := ochainsync.Tip{
 				Point:       point,
 				BlockNumber: v.BlockNumber(),
@@ -583,7 +579,7 @@ func (o *Ouroboros) chainsyncClientRollForward(
 				),
 			)
 		}
-		if !isInbound && o.ChainsyncState != nil {
+		if ingressEligible && o.ChainsyncState != nil {
 			o.ChainsyncState.RecordObservedHeader(
 				ledger.ChainsyncEvent{
 					ConnectionId: ctx.ConnectionId,
@@ -666,13 +662,25 @@ func (o *Ouroboros) chainsyncClientRollForward(
 	return nil
 }
 
+// shouldPublishChainsyncToLedger reports whether headers from connId should
+// feed the ledger / chain selector. When ChainsyncIngressEligible is wired,
+// it is always authoritative. When no policy is wired we fall back to the
+// tracked client's recorded direction: outbound-started chainsync defaults
+// to eligible (legacy behaviour) while inbound-started chainsync defaults
+// to observability-only. The inbound default is intentionally fail-closed
+// so a misconfigured node cannot accept chain headers from random inbound
+// peers that happen to negotiate full-duplex.
 func (o *Ouroboros) shouldPublishChainsyncToLedger(
 	connId ouroboros.ConnectionId,
 ) bool {
-	if o.config.ChainsyncIngressEligible == nil {
-		return true
+	if o.config.ChainsyncIngressEligible != nil {
+		return o.config.ChainsyncIngressEligible(connId)
 	}
-	return o.config.ChainsyncIngressEligible(connId)
+	if o.ChainsyncState == nil {
+		return false
+	}
+	outbound, exists := o.ChainsyncState.ClientStartedAsOutbound(connId)
+	return exists && outbound
 }
 
 // isInboundChainsyncClient returns true if the chainsync client for
@@ -680,6 +688,8 @@ func (o *Ouroboros) shouldPublishChainsyncToLedger(
 // client's recorded direction instead of connmanager.IsInboundConnection,
 // making it immune to ConnectionId collisions under listen-port reuse.
 // Returns true (treat as inbound) if the client is not tracked.
+//
+//nolint:unused // Retained as a test helper and for future diagnostics.
 func (o *Ouroboros) isInboundChainsyncClient(
 	connId ouroboros.ConnectionId,
 ) bool {
