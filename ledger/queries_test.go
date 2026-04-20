@@ -30,9 +30,9 @@ import (
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
-	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -810,4 +810,345 @@ func TestReconstructTransitionInfo(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestQueryHardForkEraHistory_PastEra_NormalEpochEnd verifies that a closed
+// past era whose last epoch carries the same-era protocol version produces an
+// EraEnd equal to lastEp.StartSlot + lastEp.LengthInSlots (the raw boundary),
+// not some alternative.
+//
+// Setup:
+//   - currentEra = Conway (era 9)
+//   - Babbage epoch 499: startSlot=64_000_000, length=432_000 → raw end=64_432_000
+//   - Babbage pparams for epoch 499: ProtocolMajor=8 (Babbage version)
+//
+// Expected Babbage EraEnd slot: 64_432_000
+func TestQueryHardForkEraHistory_PastEra_NormalEpochEnd(t *testing.T) {
+	const (
+		epochId       = uint64(499)
+		epochStart    = uint64(64_000_000)
+		epochLen      = uint(432_000)
+		slotLenMs     = uint(1_000)
+		rawEraEnd     = epochStart + uint64(epochLen) // 64_432_000
+	)
+
+	db := newTestDB(t)
+	// Store the Babbage epoch.
+	require.NoError(t, db.SetEpoch(
+		epochStart, epochId,
+		nil, nil, nil, nil,
+		eras.BabbageEraDesc.Id, slotLenMs, epochLen,
+		nil,
+	))
+	// Store Babbage pparams for epoch 499 with Babbage major version (8).
+	pp := &babbage.BabbageProtocolParameters{ProtocolMajor: 8}
+	ppCbor, err := cbor.Encode(pp)
+	require.NoError(t, err)
+	require.NoError(t, db.SetPParams(
+		ppCbor,
+		epochStart, // slot
+		epochId,
+		eras.BabbageEraDesc.Id,
+		nil,
+	))
+
+	ls := &LedgerState{
+		db:         db,
+		currentEra: eras.ConwayEraDesc,
+		currentTip: ochainsync.Tip{
+			Point: ocommon.NewPoint(epochStart+1, []byte("tip")),
+		},
+		transitionInfo: TransitionInfo{State: TransitionUnknown},
+		config: LedgerStateConfig{
+			CardanoNodeConfig: newTestEraHistoryCfg(t),
+			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+
+	result, err := ls.queryHardForkEraHistory()
+	require.NoError(t, err)
+
+	eraList, ok := result.(cbor.IndefLengthList)
+	require.True(t, ok)
+
+	// Find the Babbage entry (second-to-last before Conway).
+	var babbageEraEnd []any
+	for _, entry := range eraList {
+		eraEntry, ok := entry.([]any)
+		if !ok || len(eraEntry) < 3 {
+			continue
+		}
+		end, ok := eraEntry[1].([]any)
+		if !ok || len(end) < 3 {
+			continue
+		}
+		slot, ok := end[1].(uint64)
+		if !ok {
+			continue
+		}
+		// The Babbage era's EraEnd epoch number is epochId+1 in the normal case.
+		epochNo, ok := end[2].(uint64)
+		if !ok {
+			continue
+		}
+		if epochNo == epochId+1 && slot == rawEraEnd {
+			babbageEraEnd = end
+			break
+		}
+	}
+	require.NotNil(t, babbageEraEnd,
+		"expected to find Babbage EraEnd with slot=%d, epochNo=%d in era history",
+		rawEraEnd, epochId+1,
+	)
+	assert.Equal(t, rawEraEnd, babbageEraEnd[1].(uint64),
+		"past era with normal pparams version: EraEnd slot should be raw boundary (%d)", rawEraEnd,
+	)
+}
+
+// TestQueryHardForkEraHistory_PastEra_TransitionEpoch verifies that a closed
+// past era whose last epoch carries the next-era protocol version produces an
+// EraEnd equal to lastEp.StartSlot (the confirmed boundary), not the raw
+// StartSlot+LengthInSlots which would overshoot.
+//
+// This is the SCENARIO 2 case: TransitionKnown was active, epoch K was created
+// under OLD_ERA's EraId, but its pparams already show the new-era version.
+// After the hard fork, epoch K ends up as the last epoch of OLD_ERA in the DB,
+// but the actual era boundary is at epoch K's *start*, not its end.
+//
+// Setup:
+//   - currentEra = Conway (era 9)
+//   - Babbage epoch 499: startSlot=64_000_000, length=432_000 → raw end=64_432_000
+//   - Babbage pparams for epoch 499: ProtocolMajor=9 (Conway version — transition epoch)
+//
+// Expected Babbage EraEnd slot: 64_000_000 (epoch 499's StartSlot)
+func TestQueryHardForkEraHistory_PastEra_TransitionEpoch(t *testing.T) {
+	const (
+		epochId    = uint64(499)
+		epochStart = uint64(64_000_000)
+		epochLen   = uint(432_000)
+		slotLenMs  = uint(1_000)
+		rawEraEnd  = epochStart + uint64(epochLen) // 64_432_000 — wrong
+		// correct boundary is epochStart because epoch 499 is a transition epoch
+	)
+
+	db := newTestDB(t)
+	require.NoError(t, db.SetEpoch(
+		epochStart, epochId,
+		nil, nil, nil, nil,
+		eras.BabbageEraDesc.Id, slotLenMs, epochLen,
+		nil,
+	))
+	// Pparams carry Conway major version (9) — this is a transition epoch.
+	pp := &babbage.BabbageProtocolParameters{ProtocolMajor: 9}
+	ppCbor, err := cbor.Encode(pp)
+	require.NoError(t, err)
+	require.NoError(t, db.SetPParams(
+		ppCbor,
+		epochStart,
+		epochId,
+		eras.BabbageEraDesc.Id,
+		nil,
+	))
+
+	ls := &LedgerState{
+		db:         db,
+		currentEra: eras.ConwayEraDesc,
+		currentTip: ochainsync.Tip{
+			Point: ocommon.NewPoint(epochStart+1, []byte("tip")),
+		},
+		transitionInfo: TransitionInfo{State: TransitionUnknown},
+		config: LedgerStateConfig{
+			CardanoNodeConfig: newTestEraHistoryCfg(t),
+			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+
+	result, err := ls.queryHardForkEraHistory()
+	require.NoError(t, err)
+
+	eraList, ok := result.(cbor.IndefLengthList)
+	require.True(t, ok)
+
+	// Find the Babbage entry: for a transition epoch, EraEnd slot = epochStart
+	// and EraEnd epochNo = epochId (not epochId+1).
+	var babbageEraEnd []any
+	for _, entry := range eraList {
+		eraEntry, ok := entry.([]any)
+		if !ok || len(eraEntry) < 3 {
+			continue
+		}
+		end, ok := eraEntry[1].([]any)
+		if !ok || len(end) < 3 {
+			continue
+		}
+		slot, ok := end[1].(uint64)
+		if !ok {
+			continue
+		}
+		epochNo, ok := end[2].(uint64)
+		if !ok {
+			continue
+		}
+		// Both the raw boundary and the corrected boundary are non-zero;
+		// distinguish by era params or just search for the corrected slot.
+		if slot == epochStart && epochNo == epochId {
+			babbageEraEnd = end
+			break
+		}
+	}
+
+	require.NotNil(t, babbageEraEnd,
+		"expected Babbage EraEnd with slot=%d epochNo=%d; "+
+			"got raw boundary %d instead — transition epoch not detected",
+		epochStart, epochId, rawEraEnd,
+	)
+	assert.Equal(t, epochStart, babbageEraEnd[1].(uint64),
+		"past era with transition-epoch pparams: EraEnd slot should be "+
+			"confirmed boundary (%d = lastEp.StartSlot), not raw end (%d)",
+		epochStart, rawEraEnd,
+	)
+	assert.Equal(t, epochId, babbageEraEnd[2].(uint64),
+		"past era with transition-epoch pparams: EraEnd epochNo should be "+
+			"the transition epoch's own ID (%d), not next epoch (%d)",
+		epochId, epochId+1,
+	)
+	// Sanity: the raw boundary must NOT appear as the EraEnd slot.
+	assert.NotEqual(t, rawEraEnd, babbageEraEnd[1].(uint64),
+		"raw EraEnd slot (%d) must not be used for a transition epoch", rawEraEnd,
+	)
+}
+
+// TestQueryHardForkEraHistory_PastEra_TransitionEpoch_Contiguity verifies that
+// when a past era ends on a transition epoch the rolled-back timespan produces
+// contiguous era boundaries: the closed era's EraEnd.relTime must equal the
+// open era's EraStart.relTime.
+//
+// Without the timespan roll-back fix, there would be a gap of
+// epochPicoseconds(lastEp) between the two, because timespan was not decremented
+// after correcting tmpEnd.
+//
+// Setup:
+//   - currentEra = Conway (era 9)
+//   - Babbage epoch 499: startSlot=64_000_000, slotLen=1_000ms, length=432_000
+//     → picoseconds = 1_000 * 432_000 * 1e9 = 432_000_000_000_000_000
+//     → raw end slot = 64_432_000  (transition epoch — pparams ProtocolMajor=9)
+//   - Conway epoch 500: startSlot=64_000_000 (same as Babbage 499's StartSlot),
+//     slotLen=1_000ms, length=432_000
+//
+// Expected: babbageEraEnd.relTime == conwayEraStart.relTime
+func TestQueryHardForkEraHistory_PastEra_TransitionEpoch_Contiguity(t *testing.T) {
+	const (
+		babbageEpochId    = uint64(499)
+		babbageEpochStart = uint64(64_000_000)
+		babbageEpochLen   = uint(432_000)
+		slotLenMs         = uint(1_000)
+		conwayEpochId     = uint64(500)
+		// The Conway epoch starts at the Babbage transition epoch's StartSlot
+		// (the confirmed era boundary).
+		conwayEpochStart = babbageEpochStart
+		conwayEpochLen   = uint(432_000)
+	)
+
+	db := newTestDB(t)
+	// Babbage transition epoch (pparams carry Conway major version).
+	require.NoError(t, db.SetEpoch(
+		babbageEpochStart, babbageEpochId,
+		nil, nil, nil, nil,
+		eras.BabbageEraDesc.Id, slotLenMs, babbageEpochLen,
+		nil,
+	))
+	pp := &babbage.BabbageProtocolParameters{ProtocolMajor: 9}
+	ppCbor, err := cbor.Encode(pp)
+	require.NoError(t, err)
+	require.NoError(t, db.SetPParams(
+		ppCbor,
+		babbageEpochStart,
+		babbageEpochId,
+		eras.BabbageEraDesc.Id,
+		nil,
+	))
+	// Conway epoch starts at the confirmed boundary.
+	require.NoError(t, db.SetEpoch(
+		conwayEpochStart, conwayEpochId,
+		nil, nil, nil, nil,
+		eras.ConwayEraDesc.Id, slotLenMs, conwayEpochLen,
+		nil,
+	))
+
+	ls := &LedgerState{
+		db:         db,
+		currentEra: eras.ConwayEraDesc,
+		currentTip: ochainsync.Tip{
+			Point: ocommon.NewPoint(conwayEpochStart+1, []byte("tip")),
+		},
+		transitionInfo: TransitionInfo{State: TransitionUnknown},
+		config: LedgerStateConfig{
+			CardanoNodeConfig: newTestEraHistoryCfg(t),
+			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+
+	result, err := ls.queryHardForkEraHistory()
+	require.NoError(t, err)
+
+	eraList, ok := result.(cbor.IndefLengthList)
+	require.True(t, ok)
+
+	// Extract relTime (big.Int) from an era's start or end tuple.
+	relTime := func(tuple []any) *big.Int {
+		require.GreaterOrEqual(t, len(tuple), 1)
+		v, ok := tuple[0].(*big.Int)
+		require.True(t, ok, "relTime should be *big.Int, got %T", tuple[0])
+		return v
+	}
+
+	// Locate Babbage and Conway entries in the list by matching their EraEnd
+	// epoch numbers.
+	var babbageEnd, conwayStart []any
+	for _, entry := range eraList {
+		eraEntry, ok := entry.([]any)
+		if !ok || len(eraEntry) < 3 {
+			continue
+		}
+		start, ok := eraEntry[0].([]any)
+		if !ok {
+			continue
+		}
+		end, ok := eraEntry[1].([]any)
+		if !ok {
+			continue
+		}
+		if len(end) < 3 {
+			continue
+		}
+		endEpoch, ok := end[2].(uint64)
+		if !ok {
+			continue
+		}
+		// Babbage's corrected EraEnd has epochNo = babbageEpochId.
+		if endEpoch == babbageEpochId {
+			babbageEnd = end
+		}
+		// Conway's EraStart has epochNo = conwayEpochId.
+		if len(start) >= 3 {
+			startEpoch, ok := start[2].(uint64)
+			if ok && startEpoch == conwayEpochId {
+				conwayStart = start
+			}
+		}
+	}
+
+	require.NotNil(t, babbageEnd,
+		"Babbage EraEnd with epochNo=%d not found in era history", babbageEpochId)
+	require.NotNil(t, conwayStart,
+		"Conway EraStart with epochNo=%d not found in era history", conwayEpochId)
+
+	babbageEndTime := relTime(babbageEnd)
+	conwayStartTime := relTime(conwayStart)
+
+	assert.Equal(t, 0, babbageEndTime.Cmp(conwayStartTime),
+		"era boundaries must be contiguous: Babbage EraEnd.relTime (%s) != Conway EraStart.relTime (%s); "+
+			"timespan was not rolled back after correcting the transition-epoch EraEnd",
+		babbageEndTime.String(), conwayStartTime.String(),
+	)
 }

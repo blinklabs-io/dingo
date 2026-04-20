@@ -227,6 +227,60 @@ func (ls *LedgerState) queryHardForkEraHistory() (any, error) {
 				}
 			}
 		}
+		// For closed past eras, check whether the last epoch is a "transition
+		// epoch" — created under this era's EraId during a TransitionKnown
+		// window whose pparams already carry the next-era version.  In that
+		// case the raw epoch-end (StartSlot+LengthInSlots) overshoots the
+		// confirmed boundary; the correct EraEnd is lastEp.StartSlot.
+		if era.Id < currentEraId && len(epochs) > 0 &&
+			era.DecodePParamsFunc != nil {
+			lastEp := epochs[len(epochs)-1]
+			pp, ppErr := ls.db.GetPParams(
+				lastEp.EpochId,
+				era.DecodePParamsFunc,
+				nil,
+			)
+			if ppErr != nil {
+				return nil, fmt.Errorf(
+					"getting pparams for epoch %d: %w",
+					lastEp.EpochId,
+					ppErr,
+				)
+			}
+			if pp != nil {
+				ver, verErr := GetProtocolVersion(pp)
+				if verErr != nil {
+					return nil, fmt.Errorf(
+						"extracting protocol version for epoch %d: %w",
+						lastEp.EpochId,
+						verErr,
+					)
+				}
+				if pparamsEraId, ok := EraForVersion(ver.Major); ok &&
+					pparamsEraId > era.Id {
+					epPc := epochPicoseconds(
+						lastEp.SlotLength,
+						lastEp.LengthInSlots,
+					)
+					timespanAtLastEpochStart := new(big.Int).Sub(
+						timespan,
+						epPc,
+					)
+					tmpEnd = []any{
+						timespanAtLastEpochStart,
+						lastEp.StartSlot,
+						lastEp.EpochId,
+					}
+					// Roll back timespan to match the corrected EraEnd so
+					// the next era's tmpStart.relTime is contiguous with
+					// this era's tmpEnd.relTime.  Must use in-place Sub
+					// (not timespan = timespanAtLastEpochStart) because
+					// timespanAtLastEpochStart is already referenced by
+					// tmpEnd[0] and a later timespan.Add would corrupt it.
+					timespan.Sub(timespan, epPc)
+				}
+			}
+		}
 		// For the current (open) era, set EraEnd based on what is known about
 		// the upcoming era boundary:
 		//
