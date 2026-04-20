@@ -1,6 +1,22 @@
 # Release Notes
 
 
+## v0.36.0 (April 20, 2026)
+
+**Title:** Asset endpoints and steadier chain operations
+
+**Date:** April 20, 2026
+
+**Version:** v0.36.0
+
+Hi folks! Here’s what we shipped in v0.36.0.
+
+### ✨ What's New
+
+* Added **asset lookups through the Blockfrost API:** Blockfrost API users can now query native assets by their concatenated policy ID and asset name identifier through `/api/v0/assets/{asset}`.
+* Expanded **era boundary visibility:** Hard fork era history now reports confirmed upcoming era boundaries more accurately, so slot and time lookups stay aligned with known transition points.
+* Introduced **clearer no transition reporting:** Era history now distinguishes when an era change cannot happen within the current epoch, which makes forecast results steadier near epoch boundaries.
+
 ## v0.35.3 (April 19, 2026)
 
 **Title:** Improve peer sharing compatibility
