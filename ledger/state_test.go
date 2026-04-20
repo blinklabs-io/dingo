@@ -41,6 +41,8 @@ import (
 	dbtypes "github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/ledger/eras"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 )
 
 func TestLedgerProcessBlocksFromSourceReturnsNilWhenReaderCloses(
@@ -2349,4 +2351,261 @@ func TestReconcilePrimaryChainTipWithLedgerTipPreservesSelectedChain(
 		_, err := database.BlockByPoint(db, makeTestPoint(block))
 		assert.NoError(t, err, "block at slot %d should still exist", block.Slot)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// applyEraTransition / transitionInfo clearing tests
+// ---------------------------------------------------------------------------
+
+// babbagePParams returns a minimal *babbage.BabbageProtocolParameters with
+// the given protocol major version.  Used to construct era transitions without
+// going through the full genesis-loading machinery.
+func babbagePParams(major uint) *babbage.BabbageProtocolParameters {
+	return &babbage.BabbageProtocolParameters{ProtocolMajor: major}
+}
+
+// TestApplyEraTransition_ClearsTransitionKnown verifies that
+// applyEraTransition unconditionally clears a pending TransitionKnown, even
+// when called outside of any epoch-rollover context (the "standalone
+// era-transition block" case).
+func TestApplyEraTransition_ClearsTransitionKnown(t *testing.T) {
+	ls := &LedgerState{
+		currentEra:     *eras.GetEraById(eras.BabbageEraDesc.Id),
+		currentPParams: babbagePParams(8),
+		transitionInfo: TransitionInfo{
+			State:      TransitionKnown,
+			KnownEpoch: 500,
+		},
+	}
+
+	result := &EraTransitionResult{
+		NewEra:     *eras.GetEraById(eras.ConwayEraDesc.Id),
+		NewPParams: babbagePParams(9),
+	}
+
+	// Simulate a standalone era-transition path: apply under the lock,
+	// no epoch rollover involved.
+	ls.Lock()
+	ls.applyEraTransition(result)
+	ls.Unlock()
+
+	assert.Equal(t, TransitionUnknown, ls.transitionInfo.State,
+		"TransitionKnown must be cleared when the new era becomes active")
+	assert.Equal(t, eras.ConwayEraDesc.Id, ls.currentEra.Id)
+}
+
+// TestApplyEraTransition_ClearsTransitionUnknown confirms that calling
+// applyEraTransition when transitionInfo is already TransitionUnknown is a
+// no-op for the State field (still TransitionUnknown).
+func TestApplyEraTransition_ClearsTransitionUnknown(t *testing.T) {
+	ls := &LedgerState{
+		currentEra:     *eras.GetEraById(eras.BabbageEraDesc.Id),
+		currentPParams: babbagePParams(8),
+		transitionInfo: TransitionInfo{State: TransitionUnknown},
+	}
+
+	result := &EraTransitionResult{
+		NewEra:     *eras.GetEraById(eras.ConwayEraDesc.Id),
+		NewPParams: babbagePParams(9),
+	}
+
+	ls.Lock()
+	ls.applyEraTransition(result)
+	ls.Unlock()
+
+	assert.Equal(t, TransitionUnknown, ls.transitionInfo.State)
+}
+
+// TestApplyEraTransition_PreservesAndUpdatesFields verifies that
+// applyEraTransition correctly rotates currentPParams → prevEraPParams
+// and installs result.NewPParams / result.NewEra.
+func TestApplyEraTransition_PreservesAndUpdatesFields(t *testing.T) {
+	oldPParams := babbagePParams(8)
+	newPParams := babbagePParams(9)
+
+	ls := &LedgerState{
+		currentEra:     *eras.GetEraById(eras.BabbageEraDesc.Id),
+		currentPParams: lcommon.ProtocolParameters(oldPParams),
+		transitionInfo: TransitionInfo{State: TransitionKnown, KnownEpoch: 500},
+	}
+
+	result := &EraTransitionResult{
+		NewEra:     *eras.GetEraById(eras.ConwayEraDesc.Id),
+		NewPParams: lcommon.ProtocolParameters(newPParams),
+	}
+
+	ls.Lock()
+	ls.applyEraTransition(result)
+	ls.Unlock()
+
+	assert.Equal(t, lcommon.ProtocolParameters(oldPParams), ls.prevEraPParams,
+		"old pparams must be preserved as prevEraPParams")
+	assert.Equal(t, lcommon.ProtocolParameters(newPParams), ls.currentPParams,
+		"new pparams must become currentPParams")
+	assert.Equal(t, eras.ConwayEraDesc.Id, ls.currentEra.Id,
+		"currentEra must be updated to the new era")
+	assert.Equal(t, TransitionUnknown, ls.transitionInfo.State,
+		"transitionInfo must be cleared")
+}
+
+// TestApplyEraTransition_MultipleSteps_AllCleared verifies the chained-
+// transition case (e.g. jumping two eras at once): each step clears
+// transitionInfo, and the final state is TransitionUnknown.
+func TestApplyEraTransition_MultipleSteps_AllCleared(t *testing.T) {
+	ls := &LedgerState{
+		currentEra:     *eras.GetEraById(eras.AlonzoEraDesc.Id),
+		currentPParams: babbagePParams(6),
+		transitionInfo: TransitionInfo{State: TransitionKnown, KnownEpoch: 300},
+	}
+
+	steps := []*EraTransitionResult{
+		{
+			NewEra:     *eras.GetEraById(eras.BabbageEraDesc.Id),
+			NewPParams: babbagePParams(8),
+		},
+		{
+			NewEra:     *eras.GetEraById(eras.ConwayEraDesc.Id),
+			NewPParams: babbagePParams(9),
+		},
+	}
+
+	ls.Lock()
+	for _, step := range steps {
+		ls.applyEraTransition(step)
+	}
+	ls.Unlock()
+
+	assert.Equal(t, TransitionUnknown, ls.transitionInfo.State)
+	assert.Equal(t, eras.ConwayEraDesc.Id, ls.currentEra.Id)
+}
+
+// TestRolloverCommit_EraTransitionClearsTransitionInfo exercises the
+// in-memory state update block (the rollover-commit path) with both
+// eraTransitions and a rolloverResult to confirm that eraTransitions take
+// precedence: TransitionKnown is cleared even when rolloverResult.HardFork
+// is also set (should not happen in practice, but the logic must be safe).
+func TestRolloverCommit_EraTransitionClearsTransitionInfo(t *testing.T) {
+	ls := &LedgerState{
+		currentEra:     *eras.GetEraById(eras.BabbageEraDesc.Id),
+		currentPParams: babbagePParams(8),
+		transitionInfo: TransitionInfo{State: TransitionKnown, KnownEpoch: 499},
+	}
+
+	eraTransitions := []*EraTransitionResult{
+		{
+			NewEra:     *eras.GetEraById(eras.ConwayEraDesc.Id),
+			NewPParams: babbagePParams(9),
+		},
+	}
+	rolloverResult := &EpochRolloverResult{
+		NewCurrentEpoch:   models.Epoch{EpochId: 500},
+		NewCurrentEra:     *eras.GetEraById(eras.ConwayEraDesc.Id),
+		NewCurrentPParams: babbagePParams(9),
+		NewEpochCache:     []models.Epoch{{EpochId: 500}},
+		HardFork: &HardForkInfo{
+			OldVersion: ProtocolVersion{Major: 8},
+			NewVersion: ProtocolVersion{Major: 9},
+		},
+	}
+
+	// Replicate the rollover-commit block logic directly.
+	ls.Lock()
+	for _, eraResult := range eraTransitions {
+		ls.applyEraTransition(eraResult)
+	}
+	ls.epochCache = rolloverResult.NewEpochCache
+	ls.currentEpoch = rolloverResult.NewCurrentEpoch
+	ls.currentEra = rolloverResult.NewCurrentEra
+	ls.currentPParams = rolloverResult.NewCurrentPParams
+	if len(eraTransitions) == 0 && rolloverResult.HardFork != nil {
+		ls.transitionInfo = TransitionInfo{
+			State:      TransitionKnown,
+			KnownEpoch: rolloverResult.NewCurrentEpoch.EpochId,
+		}
+	}
+	ls.Unlock()
+
+	assert.Equal(t, TransitionUnknown, ls.transitionInfo.State,
+		"era transition must clear transitionInfo even when rolloverResult.HardFork is set")
+}
+
+// TestRolloverCommit_HardForkWithoutEraTransition verifies that
+// TransitionKnown is set when rolloverResult.HardFork is non-nil and no era
+// transition happened (the normal epoch-boundary version-bump window).
+func TestRolloverCommit_HardForkWithoutEraTransition(t *testing.T) {
+	ls := &LedgerState{
+		currentEra:     *eras.GetEraById(eras.BabbageEraDesc.Id),
+		currentPParams: babbagePParams(8),
+		transitionInfo: TransitionInfo{State: TransitionUnknown},
+	}
+
+	var eraTransitions []*EraTransitionResult // empty — no standalone transition
+	rolloverResult := &EpochRolloverResult{
+		NewCurrentEpoch:   models.Epoch{EpochId: 500},
+		NewCurrentEra:     *eras.GetEraById(eras.BabbageEraDesc.Id),
+		NewCurrentPParams: babbagePParams(9),
+		NewEpochCache:     []models.Epoch{{EpochId: 500}},
+		HardFork: &HardForkInfo{
+			OldVersion: ProtocolVersion{Major: 8},
+			NewVersion: ProtocolVersion{Major: 9},
+		},
+	}
+
+	ls.Lock()
+	for _, eraResult := range eraTransitions {
+		ls.applyEraTransition(eraResult)
+	}
+	ls.epochCache = rolloverResult.NewEpochCache
+	ls.currentEpoch = rolloverResult.NewCurrentEpoch
+	ls.currentEra = rolloverResult.NewCurrentEra
+	ls.currentPParams = rolloverResult.NewCurrentPParams
+	if len(eraTransitions) == 0 && rolloverResult.HardFork != nil {
+		ls.transitionInfo = TransitionInfo{
+			State:      TransitionKnown,
+			KnownEpoch: rolloverResult.NewCurrentEpoch.EpochId,
+		}
+	}
+	ls.Unlock()
+
+	assert.Equal(t, TransitionKnown, ls.transitionInfo.State,
+		"version bump at epoch boundary without era transition must set TransitionKnown")
+	assert.Equal(t, uint64(500), ls.transitionInfo.KnownEpoch)
+}
+
+// TestRolloverCommit_NoHardFork_TransitionInfoUnchanged verifies that a plain
+// epoch rollover (no HardFork, no era transition) leaves transitionInfo alone.
+func TestRolloverCommit_NoHardFork_TransitionInfoUnchanged(t *testing.T) {
+	ls := &LedgerState{
+		currentEra:     *eras.GetEraById(eras.ConwayEraDesc.Id),
+		currentPParams: babbagePParams(9),
+		transitionInfo: TransitionInfo{State: TransitionUnknown},
+	}
+
+	var eraTransitions []*EraTransitionResult
+	rolloverResult := &EpochRolloverResult{
+		NewCurrentEpoch:   models.Epoch{EpochId: 501},
+		NewCurrentEra:     *eras.GetEraById(eras.ConwayEraDesc.Id),
+		NewCurrentPParams: babbagePParams(9),
+		NewEpochCache:     []models.Epoch{{EpochId: 501}},
+		HardFork:          nil,
+	}
+
+	ls.Lock()
+	for _, eraResult := range eraTransitions {
+		ls.applyEraTransition(eraResult)
+	}
+	ls.epochCache = rolloverResult.NewEpochCache
+	ls.currentEpoch = rolloverResult.NewCurrentEpoch
+	ls.currentEra = rolloverResult.NewCurrentEra
+	ls.currentPParams = rolloverResult.NewCurrentPParams
+	if len(eraTransitions) == 0 && rolloverResult.HardFork != nil {
+		ls.transitionInfo = TransitionInfo{
+			State:      TransitionKnown,
+			KnownEpoch: rolloverResult.NewCurrentEpoch.EpochId,
+		}
+	}
+	ls.Unlock()
+
+	assert.Equal(t, TransitionUnknown, ls.transitionInfo.State,
+		"plain epoch rollover must not change transitionInfo")
 }

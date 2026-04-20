@@ -1878,6 +1878,26 @@ func (ls *LedgerState) transitionToEra(
 	return result, nil
 }
 
+// applyEraTransition applies a single era-transition result to the in-memory
+// LedgerState fields. Must be called while holding ls.Lock(), except during
+// single-threaded startup before LedgerState is visible to concurrent readers.
+//
+// It unconditionally clears transitionInfo so that any pending
+// TransitionKnown is consumed the moment the new era becomes active,
+// regardless of whether an epoch rollover is also happening.  This makes
+// the clearing self-contained: every code path that applies an
+// EraTransitionResult (the epoch-rollover path, startup, or a future
+// standalone era-transition path) gets the same behaviour without
+// duplicating the clear-on-era-advance logic.
+func (ls *LedgerState) applyEraTransition(result *EraTransitionResult) {
+	// Preserve the pre-hard-fork pparams for era-1 TX validation.
+	ls.prevEraPParams = ls.currentPParams
+	ls.currentPParams = result.NewPParams
+	ls.currentEra = result.NewEra
+	// Any pending TransitionKnown is consumed: the new era is now active.
+	ls.transitionInfo = TransitionInfo{State: TransitionUnknown}
+}
+
 // IsAtTip reports whether the node has caught up to the chain tip at least
 // once since boot. This is used to gate metrics that are only meaningful
 // when processing live blocks (e.g., block delay CDF). Unlike
@@ -2377,10 +2397,10 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 			// Apply in-memory state updates with brief lock after successful commit
 			ls.Lock()
 			for _, eraResult := range eraTransitions {
-				// Preserve the pre-hard-fork pparams for era-1 TX validation
-				ls.prevEraPParams = ls.currentPParams
-				ls.currentPParams = eraResult.NewPParams
-				ls.currentEra = eraResult.NewEra
+				// applyEraTransition also clears transitionInfo so that
+				// TransitionKnown is consumed whenever the new era is active,
+				// regardless of whether an epoch rollover is also happening.
+				ls.applyEraTransition(eraResult)
 			}
 			if rolloverResult != nil {
 				ls.epochCache = rolloverResult.NewEpochCache
@@ -2391,23 +2411,12 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 				ls.checkpointWrittenForEpoch = rolloverResult.CheckpointWrittenForEpoch
 				ls.metrics.epochNum.Set(rolloverResult.NewEpochNum)
 			}
-			// Update TransitionInfo based on rollover outcome.
-			//
-			// Case 1: epoch rollover detected a version bump AND no era
-			// transition has occurred yet (we're still in the old era at
-			// the boundary block).  The transition epoch exists in the DB
-			// under the old era's EraId; its StartSlot is the exact
-			// upcoming era boundary.
-			//
-			// Case 2: an era transition happened this block (eraTransitions
-			// non-empty).  The new era is already active — clear any
-			// pending TransitionKnown.
-			if len(eraTransitions) > 0 {
-				// New era is active; previous TransitionKnown (if any) is consumed.
-				ls.transitionInfo = TransitionInfo{State: TransitionUnknown}
-			} else if rolloverResult != nil && rolloverResult.HardFork != nil {
-				// Epoch committed in the old era and version bump detected.
-				// The transition epoch number is the new (just-committed) epoch.
+			// Set TransitionKnown only when epoch rolled over in the old era
+			// with a version bump AND no era transition already cleared it.
+			// applyEraTransition (above) handles the clear for transitions.
+			if len(eraTransitions) == 0 &&
+				rolloverResult != nil &&
+				rolloverResult.HardFork != nil {
 				ls.transitionInfo = TransitionInfo{
 					State:      TransitionKnown,
 					KnownEpoch: rolloverResult.NewCurrentEpoch.EpochId,
@@ -3518,11 +3527,11 @@ func (ls *LedgerState) loadEpochs(txn *database.Txn) error {
 		if err != nil {
 			return err
 		}
-		// Apply result immediately during startup
-		// Preserve the pre-hard-fork pparams for era-1 TX validation
-		ls.prevEraPParams = ls.currentPParams
-		ls.currentPParams = result.NewPParams
-		ls.currentEra = result.NewEra
+		// Apply result immediately during startup (single-threaded, no lock needed).
+		// applyEraTransition clears transitionInfo; reconstructTransitionInfo()
+		// called later in Start() will restore it if the startup state implies
+		// a pending TransitionKnown.
+		ls.applyEraTransition(result)
 	}
 	// Generate initial epoch
 	rolloverResult, err := ls.processEpochRollover(
