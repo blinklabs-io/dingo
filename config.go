@@ -116,11 +116,14 @@ type Config struct {
 	// defaultLedgerPeerTarget, positive = target)
 	ledgerPeerTarget int
 	// Peer governor tuning (0 = use default)
-	minHotPeers         int
-	reconcileInterval   time.Duration
-	inactivityTimeout   time.Duration
-	maxConnectionsPerIP int
-	maxInboundConns     int
+	minHotPeers                          int
+	reconcileInterval                    time.Duration
+	inactivityTimeout                    time.Duration
+	bootstrapPromotionMinDiversityGroups int
+	maxConnectionsPerIP                  int
+	maxInboundConns                      int
+	genesisBootstrap                     bool
+	genesisWindowSlots                   uint64
 	// Block production configuration (SPO mode)
 	// Field names match cardano-node environment variable naming convention
 	blockProducer                 bool
@@ -363,7 +366,8 @@ func NewConfig(opts ...ConfigOptionFunc) Config {
 	c := Config{
 		// Default logger will throw away logs
 		// We do this so we don't have to add guards around every log operation
-		logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		logger:           slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		genesisBootstrap: true,
 	}
 	// Apply options
 	for _, opt := range opts {
@@ -628,6 +632,15 @@ func WithMinHotPeers(n int) ConfigOptionFunc {
 	}
 }
 
+// WithBootstrapPromotionMinDiversityGroups sets the minimum number of
+// bootstrap-time peer diversity groups to prefer before falling back to pure
+// score ordering. Non-positive values use the peer-governor default.
+func WithBootstrapPromotionMinDiversityGroups(n int) ConfigOptionFunc {
+	return func(c *Config) {
+		c.bootstrapPromotionMinDiversityGroups = n
+	}
+}
+
 // WithReconcileInterval specifies how often the peer governor runs its
 // reconciliation loop. Non-positive values are ignored. Default: 5m.
 func WithReconcileInterval(d time.Duration) ConfigOptionFunc {
@@ -665,6 +678,24 @@ func WithMaxInboundConns(n int) ConfigOptionFunc {
 		if n > 0 {
 			c.maxInboundConns = n
 		}
+	}
+}
+
+// WithGenesisBootstrap enables Genesis-mode chain selection during from-origin
+// bootstrap. Genesis mode automatically exits once the local tip is within the
+// configured Genesis window of the best known peer tip.
+func WithGenesisBootstrap(enabled bool) ConfigOptionFunc {
+	return func(c *Config) {
+		c.genesisBootstrap = enabled
+	}
+}
+
+// WithGenesisWindowSlots overrides the Genesis density comparison window.
+// A zero value lets the node derive the window from Shelley genesis parameters
+// using 3k/f.
+func WithGenesisWindowSlots(slots uint64) ConfigOptionFunc {
+	return func(c *Config) {
+		c.genesisWindowSlots = slots
 	}
 }
 

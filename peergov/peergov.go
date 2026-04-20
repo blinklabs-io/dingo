@@ -63,9 +63,10 @@ const (
 	defaultInboundMinTenure         = 10 * time.Minute
 
 	// Default bootstrap exit configuration
-	defaultMinLedgerPeersForExit     = 5
-	defaultSyncProgressForExit       = 0.95 // 95%
-	defaultBootstrapRecoveryCooldown = 2 * time.Minute
+	defaultMinLedgerPeersForExit                = 5
+	defaultSyncProgressForExit                  = 0.95 // 95%
+	defaultBootstrapRecoveryCooldown            = 2 * time.Minute
+	defaultBootstrapPromotionMinDiversityGroups = 2
 )
 
 const (
@@ -166,6 +167,12 @@ type PeerGovernorConfig struct {
 	AutoBootstrapRecovery     *bool                // Re-enable bootstrap if hot peers drop too low (nil = default true)
 	BootstrapRecoveryCooldown time.Duration        // Minimum time to wait after bootstrap exit before recovery
 	SyncProgressProvider      SyncProgressProvider // Provider for current sync progress
+
+	// Bootstrap promotion configuration
+	// While bootstrap is active, prefer historical topology peers and
+	// diversify hot promotion across multiple peer groups.
+	BootstrapPromotionEnabled            *bool // nil = default true
+	BootstrapPromotionMinDiversityGroups int   // 0 = default 2
 }
 
 // pendingEvent holds an event to publish after releasing locks.
@@ -275,6 +282,13 @@ func NewPeerGovernor(cfg PeerGovernorConfig) *PeerGovernor {
 	// AutoBootstrapRecovery: nil means use default (true), explicit false disables
 	if cfg.BootstrapRecoveryCooldown <= 0 {
 		cfg.BootstrapRecoveryCooldown = defaultBootstrapRecoveryCooldown
+	}
+	if cfg.BootstrapPromotionEnabled == nil {
+		b := true
+		cfg.BootstrapPromotionEnabled = &b
+	}
+	if cfg.BootstrapPromotionMinDiversityGroups <= 0 {
+		cfg.BootstrapPromotionMinDiversityGroups = defaultBootstrapPromotionMinDiversityGroups
 	}
 	cfg.Logger = cfg.Logger.With("component", "peergov")
 	p := &PeerGovernor{

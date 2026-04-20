@@ -155,6 +155,13 @@ func TestNewPeerGovernor(t *testing.T) {
 				tt.expected.BootstrapRecoveryCooldown,
 				pg.config.BootstrapRecoveryCooldown,
 			)
+			assert.NotNil(t, pg.config.BootstrapPromotionEnabled)
+			assert.True(t, *pg.config.BootstrapPromotionEnabled)
+			assert.Equal(
+				t,
+				defaultBootstrapPromotionMinDiversityGroups,
+				pg.config.BootstrapPromotionMinDiversityGroups,
+			)
 			assert.NotNil(t, pg.config.Logger)
 		})
 	}
@@ -3846,6 +3853,154 @@ func TestPeerGovernor_ReconcilePromotion_ValencyAware(t *testing.T) {
 		group2Hot,
 		"at-valency group should not get more promotions",
 	)
+}
+
+func TestPeerGovernor_ReconcilePromotion_PrefersHistoricalBootstrapPeers(
+	t *testing.T,
+) {
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:                    slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		MinHotPeers:               1,
+		TargetNumberOfActivePeers: 1,
+	})
+
+	pg.peers = []*Peer{
+		{
+			Address:          "44.0.0.1:3001",
+			Source:           PeerSourceTopologyBootstrapPeer,
+			State:            PeerStateWarm,
+			PerformanceScore: 0.10,
+			Connection:       &PeerConnection{IsClient: true},
+		},
+		{
+			Address:          "44.0.0.2:3001",
+			Source:           PeerSourceP2PGossip,
+			State:            PeerStateWarm,
+			PerformanceScore: 0.90,
+			Connection:       &PeerConnection{IsClient: true},
+		},
+	}
+
+	pg.reconcile(t.Context())
+
+	var bootstrapPeer *Peer
+	var gossipPeer *Peer
+	for _, peer := range pg.peers {
+		switch peer.Source {
+		case PeerSourceTopologyBootstrapPeer:
+			bootstrapPeer = peer
+		case PeerSourceP2PGossip:
+			gossipPeer = peer
+		}
+	}
+
+	assert.NotNil(t, bootstrapPeer)
+	assert.NotNil(t, gossipPeer)
+	assert.Equal(t, PeerStateHot, bootstrapPeer.State)
+	assert.NotEqual(t, PeerStateHot, gossipPeer.State)
+}
+
+func TestPeerGovernor_ReconcilePromotion_DiversifiesBootstrapPeers(t *testing.T) {
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:                    slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		MinHotPeers:               2,
+		TargetNumberOfActivePeers: 2,
+	})
+
+	pg.peers = []*Peer{
+		{
+			Address:          "44.0.0.1:3001",
+			Source:           PeerSourceTopologyPublicRoot,
+			State:            PeerStateWarm,
+			PerformanceScore: 0.90,
+			Connection:       &PeerConnection{IsClient: true},
+		},
+		{
+			Address:          "44.0.0.2:3001",
+			Source:           PeerSourceTopologyPublicRoot,
+			State:            PeerStateWarm,
+			PerformanceScore: 0.80,
+			Connection:       &PeerConnection{IsClient: true},
+		},
+		{
+			Address:          "44.0.1.1:3001",
+			Source:           PeerSourceTopologyPublicRoot,
+			State:            PeerStateWarm,
+			PerformanceScore: 0.10,
+			Connection:       &PeerConnection{IsClient: true},
+		},
+	}
+
+	pg.reconcile(t.Context())
+
+	groupCounts := make(map[string]int)
+	hotCount := 0
+	for _, peer := range pg.peers {
+		if peer.State != PeerStateHot {
+			continue
+		}
+		hotCount++
+		groupCounts[pg.peerDiversityGroup(peer)]++
+	}
+
+	assert.Equal(t, 2, hotCount)
+	assert.Len(t, groupCounts, 2)
+	for group, count := range groupCounts {
+		assert.Equalf(
+			t,
+			1,
+			count,
+			"group %s should only contribute one hot peer",
+			group,
+		)
+	}
+}
+
+func TestPeerGovernor_ReconcilePromotion_IgnoresBootstrapBiasAfterExit(t *testing.T) {
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:                    slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		MinHotPeers:               1,
+		TargetNumberOfActivePeers: 1,
+	})
+
+	pg.mu.Lock()
+	pg.bootstrapExited = true
+	pg.mu.Unlock()
+
+	pg.peers = []*Peer{
+		{
+			Address:          "44.0.0.1:3001",
+			Source:           PeerSourceTopologyBootstrapPeer,
+			State:            PeerStateWarm,
+			PerformanceScore: 0.10,
+			Connection:       &PeerConnection{IsClient: true},
+		},
+		{
+			Address:          "44.0.0.2:3001",
+			Source:           PeerSourceP2PGossip,
+			State:            PeerStateWarm,
+			PerformanceScore: 0.90,
+			Connection:       &PeerConnection{IsClient: true},
+		},
+	}
+
+	pg.reconcile(t.Context())
+
+	var bootstrapPeer *Peer
+	var gossipPeer *Peer
+	for _, peer := range pg.peers {
+		switch peer.Source {
+		case PeerSourceTopologyBootstrapPeer:
+			bootstrapPeer = peer
+		case PeerSourceP2PGossip:
+			gossipPeer = peer
+		}
+	}
+
+	assert.NotNil(t, bootstrapPeer)
+	assert.NotNil(t, gossipPeer)
+	assert.NotEqual(t, PeerStateHot, bootstrapPeer.State)
+	assert.Equal(t, PeerStateHot, gossipPeer.State)
 }
 
 // TestPeerGovernor_InboundConfig_DefaultValues tests that default values

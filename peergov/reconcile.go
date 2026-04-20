@@ -170,11 +170,11 @@ func (p *PeerGovernor) reconcile(ctx context.Context) {
 		if refillTarget <= 0 {
 			refillTarget = p.config.MinHotPeers
 		}
-		// Score-based selection: collect warm peers with connections, compute scores,
-		// sort by valency priority then score, and promote top N to reach the refill target.
 		type promotionCandidate struct {
-			peer         *Peer
-			underValency bool
+			peer           *Peer
+			underValency   bool
+			historical     bool
+			diversityGroup string
 		}
 		candidates := make([]promotionCandidate, 0, len(p.peers))
 		for _, peer := range p.peers {
@@ -185,7 +185,11 @@ func (p *PeerGovernor) reconcile(ctx context.Context) {
 					continue
 				}
 				peer.UpdatePeerScore()
-				candidates = append(candidates, promotionCandidate{peer: peer})
+				candidates = append(candidates, promotionCandidate{
+					peer:           peer,
+					historical:     p.isBootstrapPromotionHistoricalPeer(peer),
+					diversityGroup: p.peerDiversityGroup(peer),
+				})
 			}
 		}
 
@@ -198,18 +202,54 @@ func (p *PeerGovernor) reconcile(ctx context.Context) {
 			)
 		}
 
-		// Comparator: under-valency groups first, then by score descending
-		rankCandidates := func(a, b promotionCandidate) int {
-			if a.underValency && !b.underValency {
-				return -1
+		bootstrapPromotion := !p.bootstrapExited &&
+			p.bootstrapPromotionEnabled()
+		selectedGroups := make(map[string]struct{})
+		if bootstrapPromotion {
+			for _, peer := range p.peers {
+				if peer == nil || peer.State != PeerStateHot {
+					continue
+				}
+				if diversityGroup := p.peerDiversityGroup(peer); diversityGroup != "" {
+					selectedGroups[diversityGroup] = struct{}{}
+				}
 			}
-			if !a.underValency && b.underValency {
+		}
+
+		rankCandidates := func(a, b promotionCandidate) int {
+			if bootstrapPromotion {
+				if a.historical != b.historical {
+					if a.historical {
+						return -1
+					}
+					return 1
+				}
+				if len(selectedGroups) < p.bootstrapPromotionMinDiversityGroups() {
+					_, aSeen := selectedGroups[a.diversityGroup]
+					_, bSeen := selectedGroups[b.diversityGroup]
+					aNew := a.diversityGroup != "" && !aSeen
+					bNew := b.diversityGroup != "" && !bSeen
+					if aNew != bNew {
+						if aNew {
+							return -1
+						}
+						return 1
+					}
+				}
+			}
+			if a.underValency != b.underValency {
+				if a.underValency {
+					return -1
+				}
 				return 1
 			}
-			return cmp.Compare(
-				b.peer.PerformanceScore,
-				a.peer.PerformanceScore,
-			)
+			if a.peer.PerformanceScore != b.peer.PerformanceScore {
+				return cmp.Compare(
+					b.peer.PerformanceScore,
+					a.peer.PerformanceScore,
+				)
+			}
+			return cmp.Compare(a.peer.Address, b.peer.Address)
 		}
 
 		// Initial sort
@@ -241,6 +281,9 @@ func (p *PeerGovernor) reconcile(ctx context.Context) {
 			warmPromotions++
 			activeIncreased++
 			promoted++
+			if bootstrapPromotion && candidates[i].diversityGroup != "" {
+				selectedGroups[candidates[i].diversityGroup] = struct{}{}
+			}
 			// Update group counts after promotion
 			if gc, exists := groups[peer.GroupID]; exists {
 				gc.Hot++

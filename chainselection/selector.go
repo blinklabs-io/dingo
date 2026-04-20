@@ -82,6 +82,8 @@ type ChainSelectorConfig struct {
 	StaleTipThreshold  time.Duration
 	MinSwitchBlockDiff uint64
 	SecurityParam      uint64
+	GenesisMode        bool
+	GenesisWindowSlots uint64
 	ConnectionLive     func(ouroboros.ConnectionId) bool
 	ConnectionEligible func(ouroboros.ConnectionId) bool
 	ConnectionPriority func(ouroboros.ConnectionId) int
@@ -94,6 +96,7 @@ type ChainSelector struct {
 	config            ChainSelectorConfig
 	securityParam     uint64
 	maxTrackedPeers   int
+	mode              SelectionMode
 	peerTips          map[ouroboros.ConnectionId]*PeerChainTip
 	eligible          map[ouroboros.ConnectionId]bool
 	priority          map[ouroboros.ConnectionId]int
@@ -128,10 +131,14 @@ func NewChainSelector(cfg ChainSelectorConfig) *ChainSelector {
 		config:            cfg,
 		securityParam:     cfg.SecurityParam,
 		maxTrackedPeers:   maxPeers,
+		mode:              SelectionModePraos,
 		peerTips:          make(map[ouroboros.ConnectionId]*PeerChainTip),
 		eligible:          make(map[ouroboros.ConnectionId]bool),
 		priority:          make(map[ouroboros.ConnectionId]int),
 		evaluationTrigger: make(chan struct{}, 1),
+	}
+	if cfg.GenesisMode {
+		cs.mode = SelectionModeGenesis
 	}
 	if cfg.EventBus != nil {
 		cfg.EventBus.SubscribeFunc(
@@ -159,6 +166,61 @@ func (cs *ChainSelector) Stop() {
 	if cs.cancel != nil {
 		cs.cancel()
 	}
+}
+
+func (cs *ChainSelector) genesisWindowSlotsLocked() uint64 {
+	if cs.config.GenesisWindowSlots > 0 {
+		return cs.config.GenesisWindowSlots
+	}
+	if cs.securityParam > 0 {
+		return safeAddUint64(
+			cs.securityParam,
+			safeAddUint64(cs.securityParam, cs.securityParam),
+		)
+	}
+	return defaultGenesisWindowSlots
+}
+
+func (cs *ChainSelector) bestKnownGenesisSlotLocked() uint64 {
+	var best uint64
+	for connId, pt := range cs.peerTips {
+		if !cs.isPeerSelectableLocked(connId, pt, false) {
+			continue
+		}
+		tip := pt.SelectionTip()
+		if tip.Point.Slot > best {
+			best = tip.Point.Slot
+		}
+	}
+	return best
+}
+
+func (cs *ChainSelector) shouldExitGenesisModeLocked() bool {
+	if cs.mode != SelectionModeGenesis {
+		return false
+	}
+	bestSlot := cs.bestKnownGenesisSlotLocked()
+	if bestSlot == 0 {
+		return false
+	}
+	return safeAddUint64(
+		cs.localTip.Point.Slot,
+		cs.genesisWindowSlotsLocked(),
+	) >= bestSlot
+}
+
+func (cs *ChainSelector) advanceSelectionModeLocked() bool {
+	if !cs.shouldExitGenesisModeLocked() {
+		return false
+	}
+	cs.mode = SelectionModePraos
+	cs.config.Logger.Info(
+		"exiting Genesis selection mode",
+		"local_slot", cs.localTip.Point.Slot,
+		"best_known_slot", cs.bestKnownGenesisSlotLocked(),
+		"genesis_window_slots", cs.genesisWindowSlotsLocked(),
+	)
+	return true
 }
 
 // UpdatePeerTip updates the chain tip for a specific peer and triggers
@@ -199,6 +261,7 @@ func (cs *ChainSelector) updatePeerTipObserved(
 	shouldEvaluate := false
 	accepted := true
 	var evictedConn *ouroboros.ConnectionId
+	var modeChanged bool
 
 	func() {
 		cs.mutex.Lock()
@@ -271,6 +334,10 @@ func (cs *ChainSelector) updatePeerTipObserved(
 				observedTip,
 				vrfOutput,
 			)
+			peerTip.recordObservedSlot(
+				observedTip.Point.Slot,
+				cs.genesisWindowSlotsLocked(),
+			)
 		} else {
 			// Evict the least-recently-updated peer if at capacity
 			if len(cs.peerTips) >= cs.maxTrackedPeers {
@@ -288,8 +355,14 @@ func (cs *ChainSelector) updatePeerTipObserved(
 			}
 			peerTip := NewPeerChainTip(connId, tip, vrfOutput)
 			peerTip.ObservedTip = observedTip
+			peerTip.recordObservedSlot(
+				observedTip.Point.Slot,
+				cs.genesisWindowSlotsLocked(),
+			)
 			cs.peerTips[connId] = peerTip
 		}
+
+		modeChanged = cs.advanceSelectionModeLocked()
 
 		cs.config.Logger.Debug(
 			"updated peer tip",
@@ -299,22 +372,33 @@ func (cs *ChainSelector) updatePeerTipObserved(
 		)
 
 		// Check if this peer's tip is better than the current best peer's tip
-		if cs.bestPeerConn != nil {
+		if modeChanged {
+			shouldEvaluate = true
+		} else if cs.bestPeerConn != nil {
 			if bestPeerTip, ok := cs.peerTips[*cs.bestPeerConn]; ok {
-				comparison := CompareChains(
-					cs.peerTips[connId].SelectionTip(),
-					bestPeerTip.SelectionTip(),
-				)
-				if comparison == ChainABetter {
-					shouldEvaluate = true
-				} else if comparison == ChainEqual &&
-					cs.comparePeerTips(
+				if cs.mode == SelectionModeGenesis {
+					shouldEvaluate = cs.comparePeerTips(
 						connId,
 						cs.peerTips[connId],
 						*cs.bestPeerConn,
 						bestPeerTip,
-					) == ChainABetter {
-					shouldEvaluate = true
+					) == ChainABetter
+				} else {
+					comparison := CompareChains(
+						cs.peerTips[connId].SelectionTip(),
+						bestPeerTip.SelectionTip(),
+					)
+					if comparison == ChainABetter {
+						shouldEvaluate = true
+					} else if comparison == ChainEqual &&
+						cs.comparePeerTips(
+							connId,
+							cs.peerTips[connId],
+							*cs.bestPeerConn,
+							bestPeerTip,
+						) == ChainABetter {
+						shouldEvaluate = true
+					}
 				}
 			}
 		} else {
@@ -499,18 +583,42 @@ func (cs *ChainSelector) RemovePeer(connId ouroboros.ConnectionId) {
 
 // SetLocalTip updates the local chain tip for comparison.
 func (cs *ChainSelector) SetLocalTip(tip ochainsync.Tip) {
+	shouldEvaluate := false
 	cs.mutex.Lock()
-	defer cs.mutex.Unlock()
 	cs.localTip = tip
+	shouldEvaluate = cs.advanceSelectionModeLocked()
+	cs.mutex.Unlock()
+	if shouldEvaluate {
+		cs.EvaluateAndSwitch()
+	}
 }
 
 // SetSecurityParam updates the security parameter (k) dynamically.
 // This allows the selector to use protocol parameters for density-based
 // comparison.
 func (cs *ChainSelector) SetSecurityParam(k uint64) {
+	shouldEvaluate := false
 	cs.mutex.Lock()
-	defer cs.mutex.Unlock()
 	cs.securityParam = k
+	shouldEvaluate = cs.advanceSelectionModeLocked()
+	cs.mutex.Unlock()
+	if shouldEvaluate {
+		cs.EvaluateAndSwitch()
+	}
+}
+
+// SelectionMode returns the selector's current mode.
+func (cs *ChainSelector) SelectionMode() SelectionMode {
+	cs.mutex.RLock()
+	defer cs.mutex.RUnlock()
+	return cs.mode
+}
+
+// GenesisWindowSlots returns the slot window used for Genesis density checks.
+func (cs *ChainSelector) GenesisWindowSlots() uint64 {
+	cs.mutex.RLock()
+	defer cs.mutex.RUnlock()
+	return cs.genesisWindowSlotsLocked()
 }
 
 // GetBestPeer returns the connection ID of the peer with the best chain, or
@@ -537,6 +645,10 @@ func (cs *ChainSelector) GetPeerTip(
 		tipCopy.VRFOutput = make([]byte, len(pt.VRFOutput))
 		copy(tipCopy.VRFOutput, pt.VRFOutput)
 	}
+	if len(pt.observedSlots) > 0 {
+		tipCopy.observedSlots = make([]uint64, len(pt.observedSlots))
+		copy(tipCopy.observedSlots, pt.observedSlots)
+	}
 	return &tipCopy
 }
 
@@ -553,6 +665,10 @@ func (cs *ChainSelector) GetAllPeerTips() map[ouroboros.ConnectionId]*PeerChainT
 		if v.VRFOutput != nil {
 			tipCopy.VRFOutput = make([]byte, len(v.VRFOutput))
 			copy(tipCopy.VRFOutput, v.VRFOutput)
+		}
+		if len(v.observedSlots) > 0 {
+			tipCopy.observedSlots = make([]uint64, len(v.observedSlots))
+			copy(tipCopy.observedSlots, v.observedSlots)
 		}
 		result[k] = &tipCopy
 	}
@@ -651,6 +767,7 @@ func (cs *ChainSelector) isPeerSelectableLocked(
 }
 
 func (cs *ChainSelector) selectBestChainLocked() *ouroboros.ConnectionId {
+	cs.advanceSelectionModeLocked()
 	if len(cs.peerTips) == 0 {
 		return nil
 	}
@@ -738,6 +855,31 @@ func (cs *ChainSelector) comparePeerTips(
 	if peerTipA == nil || peerTipB == nil {
 		return ChainComparisonUnknown
 	}
+	if cs.mode == SelectionModeGenesis {
+		genesisWindow := cs.genesisWindowSlotsLocked()
+		densityA := peerTipA.observedDensity(genesisWindow)
+		densityB := peerTipB.observedDensity(genesisWindow)
+		if densityA > densityB {
+			return ChainABetter
+		}
+		if densityB > densityA {
+			return ChainBBetter
+		}
+	}
+	return cs.comparePeerTipsPraos(
+		connIdA,
+		peerTipA,
+		connIdB,
+		peerTipB,
+	)
+}
+
+func (cs *ChainSelector) comparePeerTipsPraos(
+	connIdA ouroboros.ConnectionId,
+	peerTipA *PeerChainTip,
+	connIdB ouroboros.ConnectionId,
+	peerTipB *PeerChainTip,
+) ChainComparisonResult {
 	comparison := CompareChains(
 		peerTipA.SelectionTip(),
 		peerTipB.SelectionTip(),
