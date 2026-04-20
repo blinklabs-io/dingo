@@ -1,24 +1,6 @@
 # Release Notes
 
 
-## v0.36.0 (April 20, 2026)
-
-**Title:** Asset lookups and safer chain operations
-
-**Date:** April 20, 2026
-
-**Version:** v0.36.0
-
-Hi folks! Here’s what we shipped in v0.36.0.
-
-### ✨ What's New
-
-* Added **Blockfrost-compatible native asset lookups:** Existing Blockfrost-style tooling can now fetch native asset details through `/api/v0/assets/{asset}`, including stricter asset checks, clearer missing-asset handling, and live quantity totals across current UTxOs.
-* Expanded **hard-fork era history precision:** Era history now uses confirmed transition boundaries when they are known, so slot and time lookups stay more precise around era changes.
-* Clarified **confirmed epoch-end forecasting:** Era history now keeps confirmed epoch ends available when no hard fork can still happen in the current epoch, so time and slot forecasts stay accurate deeper into safe periods.
-
-### 💪 Improvements
-
 ## v0.35.3 (April 19, 2026)
 
 **Title:** Improve peer sharing compatibility
@@ -34,6 +16,23 @@ Hi folks! Here’s what we shipped in v0.35.3.
 * Noted **no new features:** This patch focuses on improvements and fixes.
 
 ### 💪 Improvements
+
+* Refined **contributor guidance:** Project contributors now have clearer working guidance, which helps changes land more consistently.
+* Stabilized **build caching:** Build automation now uses a refreshed cache action release for smoother routine runs.
+* Updated **upstream protocol compatibility:** Dingo now tracks newer upstream protocol and ledger libraries for steadier compatibility.
+* Refreshed **Cardano CLI tooling:** Container-based workflows now use a newer `cardano-cli` image for smoother operations.
+* Simplified **era-transition handling:** Era changes now follow a single internal path, which makes chain behavior more consistent around rollovers.
+* Restored **release history continuity:** Release notes now stay current, so recent updates remain easier to review in one place.
+
+### 🔧 Fixes
+
+* Corrected **single-relay chainsync recovery:** Block producers now keep chainsync moving when a trusted relay reconnects first, which makes reconnect-sensitive topologies steadier.
+* Hardened **security parameter validation:** Dingo now stops early when the Ouroboros security parameter K is missing, zero, or invalid, so startup and rollback behavior fail fast instead of drifting into unsafe operation.
+* Exposed **fork-resolution failures clearly:** Unexpected ancestor lookup failures now surface as real errors, so fork recovery problems are easier to detect and address.
+* Prevented **Blockfrost adapter crashes:** Blockfrost startup now returns a normal error when ledger state is unavailable instead of failing abruptly.
+* Marked **forged blocks clearly:** Dingo-forged block headers now carry a Dingo-specific protocol minor version while preserving the correct major version for chain compatibility.
+
+### 📋 What You Need to Know
 
 * Refined **release history continuity:** RELEASE_NOTES.md now stays up to date, so recent changes are easier to scan in one place.
 
