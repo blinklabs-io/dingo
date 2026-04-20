@@ -227,43 +227,62 @@ func (ls *LedgerState) queryHardForkEraHistory() (any, error) {
 				}
 			}
 		}
-		// For the current (open) era, cap EraEnd at a safe forecast horizon.
+		// For the current (open) era, set EraEnd based on what is known about
+		// the upcoming era boundary:
 		//
-		// When TransitionKnown is set the epoch-rollover logic has confirmed
-		// an upcoming hard fork: use the transition epoch's StartSlot as the
-		// exact era boundary (mirrors Haskell's TransitionKnown branch).
+		//  TransitionKnown      — epoch-rollover confirmed a version bump; use
+		//                         the transition epoch's StartSlot as the exact
+		//                         boundary (mirrors Haskell's TransitionKnown).
 		//
-		// Otherwise, cap at ledgerTip + safeZone (StandardSafeZone): clients
-		// must not attempt slot↔time conversions beyond this bound because a
-		// hard fork could invalidate them.
+		//  TransitionImpossible — the stability window already reaches or
+		//                         exceeds the epoch end; a hard fork cannot
+		//                         happen this epoch.  The epoch-end slot is
+		//                         confirmed safe — serve it directly without any
+		//                         safeZone cap.
+		//
+		//  TransitionUnknown    — cap at ledgerTip + safeZone (StandardSafeZone)
+		//                         so clients do not attempt slot↔time conversions
+		//                         beyond the safe forecast horizon.
 		if era.Id == currentEraId && len(epochs) > 0 {
-			foundTransition := false
-			if transitionInfo.State == TransitionKnown {
+			// useSafeZoneCap is set when no confirmed exact boundary is
+			// available, including the fallback when TransitionKnown is set
+			// but KnownEpoch is absent from the DB epoch list (e.g. due to a
+			// race or rollback).  In that case serving the uncapped epoch-end
+			// would over-claim certainty, so we fall back to the safe-zone cap.
+			useSafeZoneCap := false
+			switch transitionInfo.State {
+			case TransitionKnown:
 				// Find the transition epoch in the committed epoch list.
-				// It was created with the old era's EraId, so it appears
-				// in epochs.  Its StartSlot is the exact era end boundary.
+				// It was created with the old era's EraId, so it appears in
+				// epochs.  Its StartSlot is the exact era end boundary.
+				found := false
 				for _, ep := range epochs {
 					if ep.EpochId == transitionInfo.KnownEpoch {
-						// Compute the accumulated relative time up to ep.StartSlot.
-						// timespan currently reflects the end of tmpEpoch (last epoch).
-						// Walk back to the start of ep, then forward to ep.StartSlot.
 						timespanAtEpochStart := new(big.Int).Sub(
 							timespan,
 							epochPicoseconds(ep.SlotLength, ep.LengthInSlots),
 						)
-						// The era ends at ep.StartSlot; no partial-slot offset needed.
 						tmpEnd = []any{
 							timespanAtEpochStart,
 							ep.StartSlot,
 							ep.EpochId,
 						}
-						foundTransition = true
+						found = true
 						break
 					}
 				}
+				if !found {
+					// KnownEpoch missing from DB — fall back to safe-zone cap
+					// rather than serving the uncapped epoch end.
+					useSafeZoneCap = true
+				}
+			case TransitionImpossible:
+				// Safe zone already covers the epoch end; tmpEnd was set to
+				// the epoch boundary above — no further capping needed.
+			case TransitionUnknown:
+				useSafeZoneCap = true
 			}
-			if transitionInfo.State != TransitionKnown || !foundTransition {
-				// No confirmed transition: cap at tipSlot + safeZone.
+			if useSafeZoneCap {
 				safeZone := ls.calculateStabilityWindowForEra(era.Id)
 				safeEndSlot, addErr := checkedSlotAdd(tipSlot, safeZone)
 				epochEndSlot, slotErr := checkedSlotAdd(
@@ -273,10 +292,6 @@ func (ls *LedgerState) queryHardForkEraHistory() (any, error) {
 				if addErr == nil && slotErr == nil &&
 					safeEndSlot >= tmpEpoch.StartSlot &&
 					safeEndSlot < epochEndSlot {
-					// Work backward from the accumulated timespan (which now
-					// points to epochEndSlot) to find the relative time at
-					// the start of the last epoch, then advance it by the
-					// partial number of slots to safeEndSlot.
 					timespanAtEpochStart := new(big.Int).Sub(
 						timespan,
 						epochPicoseconds(tmpEpoch.SlotLength, tmpEpoch.LengthInSlots),

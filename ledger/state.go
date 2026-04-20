@@ -753,6 +753,11 @@ func (ls *LedgerState) Start(ctx context.Context) error {
 	if err := ls.loadTip(); err != nil {
 		return fmt.Errorf("failed to load tip: %w", err)
 	}
+	// Now that both tip and epoch are loaded, check whether the safe zone
+	// already covers the epoch end (TransitionImpossible).  This handles the
+	// case where the node was shut down after the tip advanced past the
+	// stability window but before the next epoch rollover was processed.
+	ls.evaluateTransitionImpossible()
 	if err := ls.reconcilePrimaryChainTipWithLedgerTip(); err != nil {
 		return fmt.Errorf("failed to reconcile primary chain tip: %w", err)
 	}
@@ -2410,6 +2415,13 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 				ls.currentPParams = rolloverResult.NewCurrentPParams
 				ls.checkpointWrittenForEpoch = rolloverResult.CheckpointWrittenForEpoch
 				ls.metrics.epochNum.Set(rolloverResult.NewEpochNum)
+				// New epoch: any TransitionImpossible set for the previous
+				// epoch is now stale.  Reset to Unknown so the tip-update
+				// logic re-evaluates for the new epoch's horizon.
+				// (applyEraTransition already handles the era-transition case.)
+				if len(eraTransitions) == 0 {
+					ls.transitionInfo = TransitionInfo{State: TransitionUnknown}
+				}
 			}
 			// Set TransitionKnown only when epoch rolled over in the old era
 			// with a version bump AND no era transition already cleared it.
@@ -2988,6 +3000,12 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 					ls.reachedTip = true
 				}
 				ls.updateTipMetrics()
+				// After advancing the tip, check whether the stability window
+				// now reaches or exceeds the epoch end.  If so, a hard fork
+				// cannot happen within this epoch and TransitionImpossible
+				// should be recorded so queryHardForkEraHistory serves the
+				// confirmed epoch-end slot instead of a stale safeZone cap.
+				ls.evaluateTransitionImpossible()
 				// Capture tip for logging while holding the lock
 				tipForLog = ls.currentTip
 				checker = ls.config.ForgedBlockChecker
@@ -3349,6 +3367,46 @@ func (ls *LedgerState) reconstructTransitionInfo() {
 			State:      TransitionKnown,
 			KnownEpoch: ls.currentEpoch.EpochId,
 		}
+	}
+}
+
+// evaluateTransitionImpossible sets transitionInfo to TransitionImpossible
+// when the safe-zone end for the current era already reaches or exceeds the
+// current epoch's end slot.
+//
+// At that point a hard-fork transition is impossible within this epoch: the
+// stability window has "vouched for" slots up to (and past) the boundary, so
+// no rollover can introduce a new era within the epoch.  Serving the full
+// epoch-end slot as EraEnd is therefore safe and more informative than the
+// stale tipSlot+safeZone cap.
+//
+// The method is a no-op unless transitionInfo.State is TransitionUnknown; it
+// must not override a confirmed TransitionKnown.
+//
+// Call under ls.Lock() (runtime tip-update) or without a lock during
+// single-threaded startup (after loadTip).
+func (ls *LedgerState) evaluateTransitionImpossible() {
+	if ls.transitionInfo.State != TransitionUnknown {
+		return
+	}
+	// Only meaningful when we have a fully-populated epoch.
+	if ls.currentEpoch.LengthInSlots == 0 {
+		return
+	}
+	epochEndSlot, addErr := checkedSlotAdd(
+		ls.currentEpoch.StartSlot,
+		uint64(ls.currentEpoch.LengthInSlots),
+	)
+	if addErr != nil {
+		return
+	}
+	safeZone := ls.calculateStabilityWindowForEra(ls.currentEra.Id)
+	safeEndSlot, addErr := checkedSlotAdd(ls.currentTip.Point.Slot, safeZone)
+	if addErr != nil {
+		return
+	}
+	if safeEndSlot >= epochEndSlot {
+		ls.transitionInfo = TransitionInfo{State: TransitionImpossible}
 	}
 }
 

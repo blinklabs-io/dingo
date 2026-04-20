@@ -2364,6 +2364,235 @@ func babbagePParams(major uint) *babbage.BabbageProtocolParameters {
 	return &babbage.BabbageProtocolParameters{ProtocolMajor: major}
 }
 
+// newTestEpoch is a convenience builder for models.Epoch.
+func newTestEpoch(id, startSlot uint64, lengthInSlots uint, eraId uint) models.Epoch {
+	return models.Epoch{
+		EpochId:      id,
+		StartSlot:    startSlot,
+		LengthInSlots: lengthInSlots,
+		EraId:        eraId,
+		SlotLength:   1000,
+	}
+}
+
+// ---------------------------------------------------------------------------
+// evaluateTransitionImpossible tests
+// ---------------------------------------------------------------------------
+
+// TestEvaluateTransitionImpossible_SetWhenSafeZoneReachesEpochEnd verifies
+// that TransitionImpossible is set when tipSlot + safeZone >= epochEndSlot.
+//
+// Using Shelley-era parameters from newTestEraHistoryCfg:
+//   securityParam=432, activeSlotsCoeff=0.05
+//   safeZone = ceil(3*432/0.05) = 25_920
+//   epoch: startSlot=100_000, length=432_000, end=532_000
+//   tipSlot = 532_000 - 25_920 = 506_080 → safeEnd = 532_000 = epochEnd → Impossible
+func TestEvaluateTransitionImpossible_SetWhenSafeZoneReachesEpochEnd(t *testing.T) {
+	const (
+		epochStart = uint64(100_000)
+		epochLen   = uint(432_000)
+		epochEnd   = uint64(532_000)
+		safeZone   = uint64(25_920)
+		// tipSlot such that tipSlot + safeZone == epochEnd (boundary case)
+		tipSlot = epochEnd - safeZone // 506_080
+	)
+
+	cfg := newTestEraHistoryCfg(t)
+	ls := &LedgerState{
+		currentEra:   *eras.GetEraById(eras.ConwayEraDesc.Id),
+		currentEpoch: newTestEpoch(500, epochStart, epochLen, eras.ConwayEraDesc.Id),
+		currentTip: ochainsync.Tip{
+			Point: ocommon.NewPoint(tipSlot, []byte("tip")),
+		},
+		transitionInfo: TransitionInfo{State: TransitionUnknown},
+		config: LedgerStateConfig{
+			CardanoNodeConfig: cfg,
+			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+
+	ls.evaluateTransitionImpossible()
+
+	assert.Equal(t, TransitionImpossible, ls.transitionInfo.State,
+		"when safeEndSlot == epochEndSlot, TransitionImpossible must be set")
+}
+
+// TestEvaluateTransitionImpossible_SetWhenSafeZoneExceedsEpochEnd verifies
+// that TransitionImpossible is set when safeEndSlot > epochEndSlot.
+func TestEvaluateTransitionImpossible_SetWhenSafeZoneExceedsEpochEnd(t *testing.T) {
+	const (
+		epochStart = uint64(100_000)
+		epochLen   = uint(432_000)
+		epochEnd   = uint64(532_000)
+		// tipSlot well past the safe-zone boundary
+		tipSlot = uint64(520_000)
+	)
+
+	cfg := newTestEraHistoryCfg(t)
+	ls := &LedgerState{
+		currentEra:   *eras.GetEraById(eras.ConwayEraDesc.Id),
+		currentEpoch: newTestEpoch(500, epochStart, epochLen, eras.ConwayEraDesc.Id),
+		currentTip: ochainsync.Tip{
+			Point: ocommon.NewPoint(tipSlot, []byte("tip")),
+		},
+		transitionInfo: TransitionInfo{State: TransitionUnknown},
+		config: LedgerStateConfig{
+			CardanoNodeConfig: cfg,
+			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+
+	ls.evaluateTransitionImpossible()
+
+	assert.Equal(t, TransitionImpossible, ls.transitionInfo.State)
+}
+
+// TestEvaluateTransitionImpossible_NotSetWhenSafeZoneInsideEpoch verifies
+// that TransitionImpossible is NOT set when safeEndSlot < epochEndSlot.
+func TestEvaluateTransitionImpossible_NotSetWhenSafeZoneInsideEpoch(t *testing.T) {
+	const (
+		epochStart = uint64(100_000)
+		epochLen   = uint(432_000)
+		// tipSlot one slot before the boundary: safeEnd = epochEnd - 1
+		tipSlot = uint64(506_079) // 532_000 - 25_920 - 1
+	)
+
+	cfg := newTestEraHistoryCfg(t)
+	ls := &LedgerState{
+		currentEra:   *eras.GetEraById(eras.ConwayEraDesc.Id),
+		currentEpoch: newTestEpoch(500, epochStart, epochLen, eras.ConwayEraDesc.Id),
+		currentTip: ochainsync.Tip{
+			Point: ocommon.NewPoint(tipSlot, []byte("tip")),
+		},
+		transitionInfo: TransitionInfo{State: TransitionUnknown},
+		config: LedgerStateConfig{
+			CardanoNodeConfig: cfg,
+			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+
+	ls.evaluateTransitionImpossible()
+
+	assert.Equal(t, TransitionUnknown, ls.transitionInfo.State,
+		"safeEndSlot < epochEndSlot: TransitionImpossible must NOT be set")
+}
+
+// TestEvaluateTransitionImpossible_NoOpWhenTransitionKnown verifies that
+// evaluateTransitionImpossible does not override a confirmed TransitionKnown.
+func TestEvaluateTransitionImpossible_NoOpWhenTransitionKnown(t *testing.T) {
+	cfg := newTestEraHistoryCfg(t)
+	ls := &LedgerState{
+		currentEra:   *eras.GetEraById(eras.ConwayEraDesc.Id),
+		currentEpoch: newTestEpoch(500, 100_000, 432_000, eras.ConwayEraDesc.Id),
+		currentTip: ochainsync.Tip{
+			// tipSlot past the safe-zone boundary → would normally trigger Impossible
+			Point: ocommon.NewPoint(520_000, []byte("tip")),
+		},
+		transitionInfo: TransitionInfo{State: TransitionKnown, KnownEpoch: 501},
+		config: LedgerStateConfig{
+			CardanoNodeConfig: cfg,
+			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+
+	ls.evaluateTransitionImpossible()
+
+	assert.Equal(t, TransitionKnown, ls.transitionInfo.State,
+		"evaluateTransitionImpossible must not override TransitionKnown")
+	assert.Equal(t, uint64(501), ls.transitionInfo.KnownEpoch)
+}
+
+// TestEvaluateTransitionImpossible_NoOpAlreadyImpossible verifies that the
+// call is idempotent when TransitionImpossible is already set.
+func TestEvaluateTransitionImpossible_NoOpAlreadyImpossible(t *testing.T) {
+	cfg := newTestEraHistoryCfg(t)
+	ls := &LedgerState{
+		currentEra:   *eras.GetEraById(eras.ConwayEraDesc.Id),
+		currentEpoch: newTestEpoch(500, 100_000, 432_000, eras.ConwayEraDesc.Id),
+		currentTip: ochainsync.Tip{
+			Point: ocommon.NewPoint(520_000, []byte("tip")),
+		},
+		transitionInfo: TransitionInfo{State: TransitionImpossible},
+		config: LedgerStateConfig{
+			CardanoNodeConfig: cfg,
+			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+
+	ls.evaluateTransitionImpossible()
+
+	assert.Equal(t, TransitionImpossible, ls.transitionInfo.State)
+}
+
+// TestEvaluateTransitionImpossible_NoOpWhenEpochLengthZero verifies that a
+// zero LengthInSlots (uninitialized epoch) is skipped safely.
+func TestEvaluateTransitionImpossible_NoOpWhenEpochLengthZero(t *testing.T) {
+	cfg := newTestEraHistoryCfg(t)
+	ls := &LedgerState{
+		currentEra:   *eras.GetEraById(eras.ConwayEraDesc.Id),
+		currentEpoch: models.Epoch{EpochId: 0, LengthInSlots: 0},
+		currentTip: ochainsync.Tip{
+			Point: ocommon.NewPoint(999_999, []byte("tip")),
+		},
+		transitionInfo: TransitionInfo{State: TransitionUnknown},
+		config: LedgerStateConfig{
+			CardanoNodeConfig: cfg,
+			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+
+	ls.evaluateTransitionImpossible()
+
+	assert.Equal(t, TransitionUnknown, ls.transitionInfo.State,
+		"zero-length epoch must not trigger TransitionImpossible")
+}
+
+// TestRolloverCommit_ResetsTransitionImpossible verifies that a plain epoch
+// rollover (no HardFork, no era transition) resets TransitionImpossible to
+// TransitionUnknown so the new epoch starts fresh.
+func TestRolloverCommit_ResetsTransitionImpossible(t *testing.T) {
+	ls := &LedgerState{
+		currentEra:     *eras.GetEraById(eras.ConwayEraDesc.Id),
+		currentPParams: babbagePParams(9),
+		// Simulate state at end of epoch 500: TransitionImpossible was set
+		// because the tip's safe zone reached the epoch end.
+		transitionInfo: TransitionInfo{State: TransitionImpossible},
+	}
+
+	var eraTransitions []*EraTransitionResult
+	rolloverResult := &EpochRolloverResult{
+		NewCurrentEpoch:   models.Epoch{EpochId: 501, StartSlot: 532_000, LengthInSlots: 432_000},
+		NewCurrentEra:     *eras.GetEraById(eras.ConwayEraDesc.Id),
+		NewCurrentPParams: babbagePParams(9),
+		NewEpochCache:     []models.Epoch{{EpochId: 501}},
+		HardFork:          nil,
+	}
+
+	ls.Lock()
+	for _, eraResult := range eraTransitions {
+		ls.applyEraTransition(eraResult)
+	}
+	if rolloverResult != nil {
+		ls.epochCache = rolloverResult.NewEpochCache
+		ls.currentEpoch = rolloverResult.NewCurrentEpoch
+		ls.currentEra = rolloverResult.NewCurrentEra
+		ls.currentPParams = rolloverResult.NewCurrentPParams
+		if len(eraTransitions) == 0 {
+			ls.transitionInfo = TransitionInfo{State: TransitionUnknown}
+		}
+	}
+	if len(eraTransitions) == 0 && rolloverResult != nil && rolloverResult.HardFork != nil {
+		ls.transitionInfo = TransitionInfo{
+			State:      TransitionKnown,
+			KnownEpoch: rolloverResult.NewCurrentEpoch.EpochId,
+		}
+	}
+	ls.Unlock()
+
+	assert.Equal(t, TransitionUnknown, ls.transitionInfo.State,
+		"plain epoch rollover must reset TransitionImpossible to TransitionUnknown")
+}
+
 // TestApplyEraTransition_ClearsTransitionKnown verifies that
 // applyEraTransition unconditionally clears a pending TransitionKnown, even
 // when called outside of any epoch-rollover context (the "standalone

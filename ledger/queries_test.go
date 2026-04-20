@@ -368,6 +368,70 @@ func TestQueryHardForkEraHistory_TransitionKnown(t *testing.T) {
 	)
 }
 
+// TestQueryHardForkEraHistory_TransitionKnown_MissingEpochFallsBackToSafeZone
+// verifies the fix for the bug where TransitionKnown with a KnownEpoch absent
+// from the DB epoch list would return the uncapped epoch-end slot instead of
+// the safe-zone cap.
+//
+// Setup: one Conway epoch (500), transitionInfo.KnownEpoch = 999 (not in DB).
+// Expected: falls back to tipSlot + safeZone, not the uncapped epoch end.
+func TestQueryHardForkEraHistory_TransitionKnown_MissingEpochFallsBackToSafeZone(t *testing.T) {
+	const (
+		tipSlot        = uint64(200_000)
+		epochStartSlot = uint64(100_000)
+		epochLen       = uint(432_000)
+		slotLenMs      = uint(1_000)
+		epochId        = uint64(500)
+		missingEpoch   = uint64(999) // deliberately absent from DB
+	)
+	const expectedSafeZone = uint64(25_920)
+	expectedEraEndSlot := tipSlot + expectedSafeZone // 225_920, not 532_000
+
+	db := newTestDB(t)
+	require.NoError(t, db.SetEpoch(
+		epochStartSlot, epochId,
+		nil, nil, nil, nil,
+		eras.ConwayEraDesc.Id, slotLenMs, epochLen,
+		nil,
+	))
+
+	ls := &LedgerState{
+		db:         db,
+		currentEra: eras.ConwayEraDesc,
+		currentTip: ochainsync.Tip{
+			Point: ocommon.NewPoint(tipSlot, []byte("tip")),
+		},
+		transitionInfo: TransitionInfo{
+			State:      TransitionKnown,
+			KnownEpoch: missingEpoch,
+		},
+		config: LedgerStateConfig{
+			CardanoNodeConfig: newTestEraHistoryCfg(t),
+			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+
+	result, err := ls.queryHardForkEraHistory()
+	require.NoError(t, err)
+
+	eraList, ok := result.(cbor.IndefLengthList)
+	require.True(t, ok)
+	require.NotEmpty(t, eraList)
+
+	lastEra, ok := eraList[len(eraList)-1].([]any)
+	require.True(t, ok, "era entry should be []any")
+	eraEnd, ok := lastEra[1].([]any)
+	require.True(t, ok, "EraEnd should be []any")
+	actualSlot, ok := eraEnd[1].(uint64)
+	require.True(t, ok, "EraEnd slot should be uint64")
+
+	assert.Equal(t, expectedEraEndSlot, actualSlot,
+		"TransitionKnown with missing KnownEpoch must fall back to safe-zone cap (%d), "+
+			"not return the uncapped epoch end (532_000)",
+		expectedEraEndSlot,
+	)
+}
+
 // TestQueryHardForkEraHistory_TransitionUnknown_FallsBackToSafeZone confirms
 // that TransitionUnknown state still produces the safe-zone-capped EraEnd,
 // i.e. the existing behaviour is preserved.
@@ -420,6 +484,169 @@ func TestQueryHardForkEraHistory_TransitionUnknown_FallsBackToSafeZone(t *testin
 		"TransitionUnknown: EraEnd slot should be tipSlot(%d)+safeZone(%d)=%d",
 		tipSlot, expectedSafeZone, expectedEraEndSlot,
 	)
+}
+
+// TestQueryHardForkEraHistory_TransitionImpossible_ServesEpochEnd verifies
+// that when TransitionImpossible is set, queryHardForkEraHistory returns the
+// full epoch-end slot rather than a safe-zone cap.
+//
+// Setup (mirrors TestQueryHardForkEraHistory_OpenEraEndBoundedBySafeZone):
+//   - Conway epoch 500: startSlot=100_000, length=432_000 (ends at 532_000)
+//   - tipSlot past the safe-zone boundary (safeEnd >= epochEnd)
+//   - transitionInfo = TransitionImpossible
+//
+// Expected EraEnd slot: 532_000 (confirmed epoch end, no cap)
+func TestQueryHardForkEraHistory_TransitionImpossible_ServesEpochEnd(t *testing.T) {
+	const (
+		epochStartSlot = uint64(100_000)
+		epochLen       = uint(432_000)
+		epochEndSlot   = uint64(532_000)
+		slotLenMs      = uint(1_000)
+		epochId        = uint64(500)
+		// tipSlot well past the safe-zone decision point
+		tipSlot = uint64(520_000)
+	)
+
+	db := newTestDB(t)
+	require.NoError(t, db.SetEpoch(
+		epochStartSlot, epochId,
+		nil, nil, nil, nil,
+		eras.ConwayEraDesc.Id, slotLenMs, epochLen,
+		nil,
+	))
+
+	ls := &LedgerState{
+		db:         db,
+		currentEra: eras.ConwayEraDesc,
+		currentTip: ochainsync.Tip{
+			Point: ocommon.NewPoint(tipSlot, []byte("tip")),
+		},
+		transitionInfo: TransitionInfo{State: TransitionImpossible},
+		config: LedgerStateConfig{
+			CardanoNodeConfig: newTestEraHistoryCfg(t),
+			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+
+	result, err := ls.queryHardForkEraHistory()
+	require.NoError(t, err)
+
+	eraList, ok := result.(cbor.IndefLengthList)
+	require.True(t, ok)
+	require.NotEmpty(t, eraList)
+
+	lastEra, ok := eraList[len(eraList)-1].([]any)
+	require.True(t, ok, "era entry should be []any")
+	eraEnd, ok := lastEra[1].([]any)
+	require.True(t, ok, "EraEnd should be []any")
+	actualSlot, ok := eraEnd[1].(uint64)
+	require.True(t, ok, "EraEnd slot should be uint64")
+
+	assert.Equal(t, epochEndSlot, actualSlot,
+		"TransitionImpossible: EraEnd slot should be the confirmed epoch end (%d), not a safeZone cap",
+		epochEndSlot,
+	)
+}
+
+// TestQueryHardForkEraHistory_TransitionImpossible_EpochNumberIsNextEpoch
+// verifies that the EraEnd epoch number is epochId+1 when TransitionImpossible
+// is set (the epoch-loop sets tmpEnd with epochId+1 for the last epoch).
+func TestQueryHardForkEraHistory_TransitionImpossible_EpochNumberIsNextEpoch(t *testing.T) {
+	const (
+		epochStartSlot = uint64(100_000)
+		epochLen       = uint(432_000)
+		slotLenMs      = uint(1_000)
+		epochId        = uint64(500)
+		tipSlot        = uint64(520_000)
+	)
+
+	db := newTestDB(t)
+	require.NoError(t, db.SetEpoch(
+		epochStartSlot, epochId,
+		nil, nil, nil, nil,
+		eras.ConwayEraDesc.Id, slotLenMs, epochLen,
+		nil,
+	))
+
+	ls := &LedgerState{
+		db:             db,
+		currentEra:     eras.ConwayEraDesc,
+		currentTip:     ochainsync.Tip{Point: ocommon.NewPoint(tipSlot, []byte("tip"))},
+		transitionInfo: TransitionInfo{State: TransitionImpossible},
+		config: LedgerStateConfig{
+			CardanoNodeConfig: newTestEraHistoryCfg(t),
+			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+
+	result, err := ls.queryHardForkEraHistory()
+	require.NoError(t, err)
+
+	eraList := result.(cbor.IndefLengthList)
+	lastEra := eraList[len(eraList)-1].([]any)
+	eraEnd := lastEra[1].([]any)
+
+	actualEpoch, ok := eraEnd[2].(uint64)
+	require.True(t, ok, "EraEnd epoch should be uint64")
+	assert.Equal(t, epochId+1, actualEpoch,
+		"TransitionImpossible: EraEnd epoch should be epochId+1 (%d)", epochId+1)
+}
+
+// TestQueryHardForkEraHistory_TransitionImpossible_vs_Unknown_Comparison
+// confirms that TransitionImpossible serves a LARGER EraEnd slot than
+// TransitionUnknown (safeZone cap) would for the same tip.
+func TestQueryHardForkEraHistory_TransitionImpossible_vs_Unknown_Comparison(t *testing.T) {
+	const (
+		epochStartSlot   = uint64(100_000)
+		epochLen         = uint(432_000)
+		slotLenMs        = uint(1_000)
+		epochId          = uint64(500)
+		tipSlot          = uint64(520_000) // safeEnd = 545_920 > epochEnd 532_000
+	)
+
+	setupLS := func(state TransitionState) *LedgerState {
+		db := newTestDB(t)
+		require.NoError(t, db.SetEpoch(
+			epochStartSlot, epochId,
+			nil, nil, nil, nil,
+			eras.ConwayEraDesc.Id, slotLenMs, epochLen,
+			nil,
+		))
+		return &LedgerState{
+			db:             db,
+			currentEra:     eras.ConwayEraDesc,
+			currentTip:     ochainsync.Tip{Point: ocommon.NewPoint(tipSlot, []byte("tip"))},
+			transitionInfo: TransitionInfo{State: state},
+			config: LedgerStateConfig{
+				CardanoNodeConfig: newTestEraHistoryCfg(t),
+				Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+			},
+		}
+	}
+
+	eraEndSlot := func(ls *LedgerState) uint64 {
+		result, err := ls.queryHardForkEraHistory()
+		require.NoError(t, err)
+		eraList := result.(cbor.IndefLengthList)
+		lastEra := eraList[len(eraList)-1].([]any)
+		eraEnd := lastEra[1].([]any)
+		slot, ok := eraEnd[1].(uint64)
+		require.True(t, ok)
+		return slot
+	}
+
+	impossibleSlot := eraEndSlot(setupLS(TransitionImpossible))
+	unknownSlot := eraEndSlot(setupLS(TransitionUnknown))
+
+	// When tipSlot + safeZone > epochEnd, TransitionUnknown's safeZone cap
+	// would exceed the epoch boundary — so the cap is NOT applied and both
+	// should return the epoch end.
+	assert.Equal(t, uint64(532_000), impossibleSlot,
+		"TransitionImpossible must serve the epoch end")
+	assert.Equal(t, uint64(532_000), unknownSlot,
+		"TransitionUnknown with safeEnd > epochEnd also falls through to epoch end")
+	assert.Equal(t, impossibleSlot, unknownSlot,
+		"both states return the same slot when safeEnd exceeds the epoch boundary")
 }
 
 func TestCheckedSlotAdd(t *testing.T) {
