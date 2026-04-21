@@ -1,31 +1,6 @@
 # Release Notes
 
 
-### 💪 Improvements
-
-* Improved **Google API dependency freshness:** Integrations that rely on Google API client support stay current with the update to v0.276.0.
-* Refreshed **AWS configuration compatibility:** AWS backed setups stay aligned with the newer aws-sdk-go-v2 config v1.32.16 release.
-* Updated **AWS SDK baseline alignment:** AWS integrations stay current with aws-sdk-go-v2 v1.41.6 and smithy-go v1.25.0.
-* Restored **release history continuity:** Recent changes stay easier to scan in one place because the v0.36.0 release entry is now included.
-
-### 🔧 Fixes
-
-* Stabilized **catch-up synchronization:** Nodes that are still syncing behind tip now recycle chainsync connections less aggressively, which reduces connection churn and avoids unnecessary rollback drops.
-* Hardened **database work delivery:** Queued and in-flight asynchronous database work now reports errors more reliably and avoids shutdown panic risks.
-* Clarified **rollback error visibility:** Rollback undo decode failures now emit `LedgerErrorEvent` entries with block context so ledger issues are easier to trace.
-
-### 📋 What You Need to Know
-
-* Confirmed **normal upgrade path:** Most users can upgrade normally to v0.36.1.
-* Expected **steadier catch-up behavior:** Operators catching up from behind tip should see steadier synchronization with fewer unnecessary chainsync connection recycles.
-* Noted **ledger monitoring change:** Operators and integrators relying on ledger error monitoring should note that rollback undo decode failures now emit `LedgerErrorEvent` entries with block context.
-
-### 🙏 Thank You
-
-Thank you for trying!
-
----
-
 ## v0.36.0 (April 20, 2026)
 
 **Title:** Asset endpoints and steadier chain operations
@@ -41,6 +16,20 @@ Hi folks! Here’s what we shipped in v0.36.0.
 * Added **asset queries for Blockfrost API users:** Blockfrost API users can now query native assets through `/api/v0/assets/{asset}` with the combined asset identifier format.
 * Expanded **era transition visibility:** Era history now shows confirmed upcoming change points more clearly, so slot and time forecasts stay aligned with known transitions.
 * Clarified **safe epoch boundaries:** Era history now reports when an era change cannot happen in the current epoch, which makes forecast results steadier near the epoch boundary.
+
+## v0.36.1 (April 21, 2026)
+
+**Title:** Steadier catch-up and stronger ledger safeguards
+
+**Date:** April 21, 2026
+
+**Version:** v0.36.1
+
+Hi folks! Here’s what we shipped in v0.36.1.
+
+### ✨ What's New
+
+* Noted **no new features:** This patch focuses on improvements and fixes.
 
 ### 💪 Improvements
 
