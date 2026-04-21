@@ -215,5 +215,5 @@ echo "copying utxo keys to /configs/utxo-keys"
 cp -r /tmp/testnet/utxos /configs/utxo-keys
 
 # Copy testnet.yaml to shared volume for analysis/txpump genesis config
-echo "copying testnet.yaml to /configs/testnet.yaml"
-cp /testnet.yaml /configs/testnet.yaml
+echo "copying testnet.yaml to /testnet-config/testnet.yaml"
+cp /testnet.yaml /testnet-config/testnet.yaml
