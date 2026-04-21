@@ -99,7 +99,7 @@ jobs:
 
   # macOS and Windows jobs without Postgres service
   go-test-other:
-    name: go-test (${{ matrix.platform }})
+    name: go-test (${{ matrix.platform }}) (${{ matrix.go-version }})
     strategy:
       matrix:
         go-version: [1.25.x, 1.26.x]
