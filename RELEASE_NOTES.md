@@ -1,6 +1,45 @@
 # Release Notes
 
 
+## v0.36.1 (April 21, 2026)
+
+**Title:** Steadier catch-up and stronger ledger safeguards
+
+**Date:** April 21, 2026
+
+**Version:** v0.36.1
+
+Hi folks! Here’s what we shipped in v0.36.1.
+
+### ✨ What's New
+
+* Noted **no new features:** This patch focuses on improvements and fixes.
+
+### 💪 Improvements
+
+* Improved **Google API compatibility:** Google API integrations stay current with the refresh to v0.276.0.
+* Updated **AWS configuration support:** AWS configuration handling stays aligned with aws-sdk-go-v2/config v1.32.16.
+* Refreshed **AWS client foundations:** AWS integrations stay current with aws-sdk-go-v2 v1.41.6 and smithy-go v1.25.0.
+* Restored **release history continuity:** Release history stays current because the v0.36.0 notes are now included.
+
+### 🔧 Fixes
+
+* Extended **catch-up stall recovery:** Nodes syncing from behind tip now avoid unnecessary chainsync recycling more often, which reduces connection churn, TIME_WAIT buildup, and dropped rollbacks during catch-up.
+* Stabilized **database work shutdown handling:** Queued and in-flight asynchronous database work now delivers results more reliably during shutdown without dropping errors or risking shutdown panics.
+* Clarified **rollback error visibility:** Rollback undo decode failures now emit `LedgerErrorEvent` entries with block context, which makes ledger monitoring easier to interpret.
+
+### 📋 What You Need to Know
+
+* Simplified **upgrade guidance:** Most users can upgrade normally to v0.36.1.
+* Highlighted **steadier catch-up behavior:** Operators catching up from behind tip should expect steadier synchronization with fewer unnecessary chainsync connection recycles.
+* Documented **ledger error monitoring changes:** Operators and integrators relying on ledger error monitoring should note that rollback undo decode failures now emit `LedgerErrorEvent` entries with block context.
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
 ## v0.36.0 (April 20, 2026)
 
 **Title:** Asset endpoints and steadier chain operations
