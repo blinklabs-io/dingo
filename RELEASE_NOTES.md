@@ -1,6 +1,22 @@
 # Release Notes
 
 
+## v0.36.1 (April 21, 2026)
+
+**Title:** Steadier catch-up sync and clearer rollback visibility
+
+**Date:** April 21, 2026
+
+**Version:** v0.36.1
+
+Hi folks! Here’s what we shipped in v0.36.1.
+
+### ✨ What's New
+
+* Noted **no new features:** This patch focuses on improvements and fixes.
+
+### 💪 Improvements
+
 ## v0.36.0 (April 20, 2026)
 
 **Title:** Asset endpoints and steadier chain operations
