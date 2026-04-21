@@ -1,15 +1,15 @@
 # Release Notes
 
 
-## v0.36.0 (April 20, 2026)
+## v0.36.1 (April 21, 2026)
 
 **Title:** Steadier catch-up sync and refreshed integrations
 
-**Date:** April 20, 2026
+**Date:** April 21, 2026
 
-**Version:** v0.36.0
+**Version:** v0.36.1
 
-Hi folks! Here’s what we shipped in v0.36.0.
+Hi folks! Here’s what we shipped in v0.36.1.
 
 ### 💪 Improvements
 
