@@ -294,9 +294,13 @@ func (ls *LedgerState) queryHardForkEraHistory() (any, error) {
 		//                         confirmed safe — serve it directly without any
 		//                         safeZone cap.
 		//
-		//  TransitionUnknown    — cap at ledgerTip + safeZone (StandardSafeZone)
-		//                         so clients do not attempt slot↔time conversions
-		//                         beyond the safe forecast horizon.
+		//  TransitionUnknown    — snap to the end of the epoch containing
+		//                         ledgerTip + safeZone.  Within a single epoch
+		//                         slot↔time is linear (constant slot length), so
+		//                         the epoch-end boundary is the safe forecast
+		//                         limit.  Uncertainty begins at the boundary
+		//                         itself, where a hard fork could alter epoch
+		//                         parameters.
 		if era.Id == currentEraId && len(epochs) > 0 {
 			// useSafeZoneCap is set when no confirmed exact boundary is
 			// available, including the fallback when TransitionKnown is set
@@ -343,30 +347,19 @@ func (ls *LedgerState) queryHardForkEraHistory() (any, error) {
 					tmpEpoch.StartSlot,
 					uint64(tmpEpoch.LengthInSlots),
 				)
+				// Snap to the epoch-end boundary containing safeEndSlot.
+				// Within a single epoch slot↔time is linear (constant slot
+				// length), so uncertainty begins only at the epoch boundary.
+				// timespan already holds the accumulated relTime through the
+				// end of tmpEpoch (set by the epoch loop), so it is the
+				// correct relTime for epochEndSlot.  The epoch number follows
+				// the same +1 convention as the epoch loop.
 				if addErr == nil && slotErr == nil &&
-					safeEndSlot >= tmpEpoch.StartSlot &&
-					safeEndSlot < epochEndSlot {
-					timespanAtEpochStart := new(big.Int).Sub(
-						timespan,
-						epochPicoseconds(tmpEpoch.SlotLength, tmpEpoch.LengthInSlots),
-					)
-					slotsIntoEpoch := safeEndSlot - tmpEpoch.StartSlot
-					safeRelTime := new(big.Int).Add(
-						timespanAtEpochStart,
-						new(big.Int).Mul(
-							new(big.Int).SetUint64(slotsIntoEpoch),
-							new(big.Int).Mul(
-								new(big.Int).SetUint64(uint64(tmpEpoch.SlotLength)),
-								big.NewInt(1_000_000_000),
-							),
-						),
-					)
-					// safeEndSlot is within tmpEpoch, so the epoch number is
-					// tmpEpoch.EpochId (not +1).
+					safeEndSlot >= tmpEpoch.StartSlot {
 					tmpEnd = []any{
-						safeRelTime,
-						safeEndSlot,
-						tmpEpoch.EpochId,
+						new(big.Int).Set(timespan),
+						epochEndSlot,
+						tmpEpoch.EpochId + 1,
 					}
 				}
 			}

@@ -62,18 +62,17 @@ func newTestEraHistoryCfg(t testing.TB) *cardano.CardanoNodeConfig {
 }
 
 // TestQueryHardForkEraHistory_OpenEraEndBoundedBySafeZone proves that the
-// current era's EraEnd must be capped at ledgerTip + safeZone, not left as the
-// end of the last committed epoch.  The Haskell node uses StandardSafeZone for
-// this purpose; without it, clients can attempt slot↔time conversions beyond
-// the safe forecast horizon.
+// current era's EraEnd is snapped to the end of the epoch that contains
+// ledgerTip + safeZone.  Within a single epoch slot↔time is linear (constant
+// slot length), so the epoch-end boundary is the safe forecast limit.
 //
 // Setup:
 //   - One Conway epoch: startSlot=100_000, length=432_000 (ends at slot 532_000)
 //   - ledgerTip at slot 200_000 (well inside the epoch)
 //   - safeZone = ceil(3k/f) = ceil(3*432/0.05) = 25_920
+//   - safeEndSlot = 225_920, which is within the epoch (< 532_000)
 //
-// Expected EraEnd slot: 200_000 + 25_920 = 225_920
-// Current (broken) EraEnd slot: 100_000 + 432_000 = 532_000
+// Expected EraEnd slot: 532_000 (epoch end), epoch number: 501
 func TestQueryHardForkEraHistory_OpenEraEndBoundedBySafeZone(t *testing.T) {
 	const (
 		tipSlot        = uint64(200_000)
@@ -82,9 +81,9 @@ func TestQueryHardForkEraHistory_OpenEraEndBoundedBySafeZone(t *testing.T) {
 		slotLenMs      = uint(1_000) // 1 second in milliseconds
 		epochId        = uint64(500)
 	)
-	// safeZone = ceil(3 * 432 / 0.05) = 25_920
+	// safeZone = ceil(3 * 432 / 0.05) = 25_920; safeEndSlot = 225_920 < 532_000
 	const expectedSafeZone = uint64(25_920)
-	expectedEraEndSlot := tipSlot + expectedSafeZone // 225_920
+	expectedEraEndSlot := epochStartSlot + uint64(epochLen) // 532_000
 
 	db := newTestDB(t)
 	require.NoError(t, db.SetEpoch(
@@ -125,11 +124,15 @@ func TestQueryHardForkEraHistory_OpenEraEndBoundedBySafeZone(t *testing.T) {
 	actualEraEndSlot, ok := eraEnd[1].(uint64)
 	require.True(t, ok, "EraEnd slot should be uint64")
 
+	actualEraEndEpoch, ok := eraEnd[2].(uint64)
+	require.True(t, ok, "EraEnd epoch should be uint64")
+
 	assert.Equal(t, expectedEraEndSlot, actualEraEndSlot,
-		"open era EraEnd slot should be ledgerTip(%d) + safeZone(%d) = %d, "+
-			"not the epoch boundary at slot %d",
-		tipSlot, expectedSafeZone, expectedEraEndSlot,
-		epochStartSlot+uint64(epochLen),
+		"open era EraEnd slot should snap to epoch boundary (%d), not mid-epoch safeEndSlot (%d)",
+		expectedEraEndSlot, tipSlot+expectedSafeZone,
+	)
+	assert.Equal(t, epochId+1, actualEraEndEpoch,
+		"open era EraEnd epoch number should be epochId+1 (%d)", epochId+1,
 	)
 }
 
@@ -369,12 +372,11 @@ func TestQueryHardForkEraHistory_TransitionKnown(t *testing.T) {
 }
 
 // TestQueryHardForkEraHistory_TransitionKnown_MissingEpochFallsBackToSafeZone
-// verifies the fix for the bug where TransitionKnown with a KnownEpoch absent
-// from the DB epoch list would return the uncapped epoch-end slot instead of
-// the safe-zone cap.
+// verifies that TransitionKnown with a KnownEpoch absent from the DB falls back
+// to the safe-zone path, which snaps to the epoch-end boundary.
 //
 // Setup: one Conway epoch (500), transitionInfo.KnownEpoch = 999 (not in DB).
-// Expected: falls back to tipSlot + safeZone, not the uncapped epoch end.
+// Expected: falls back to epoch-end snap (532_000), epoch number 501.
 func TestQueryHardForkEraHistory_TransitionKnown_MissingEpochFallsBackToSafeZone(t *testing.T) {
 	const (
 		tipSlot        = uint64(200_000)
@@ -385,7 +387,7 @@ func TestQueryHardForkEraHistory_TransitionKnown_MissingEpochFallsBackToSafeZone
 		missingEpoch   = uint64(999) // deliberately absent from DB
 	)
 	const expectedSafeZone = uint64(25_920)
-	expectedEraEndSlot := tipSlot + expectedSafeZone // 225_920, not 532_000
+	expectedEraEndSlot := epochStartSlot + uint64(epochLen) // 532_000 (epoch end)
 
 	db := newTestDB(t)
 	require.NoError(t, db.SetEpoch(
@@ -425,16 +427,21 @@ func TestQueryHardForkEraHistory_TransitionKnown_MissingEpochFallsBackToSafeZone
 	actualSlot, ok := eraEnd[1].(uint64)
 	require.True(t, ok, "EraEnd slot should be uint64")
 
+	actualEpoch, ok := eraEnd[2].(uint64)
+	require.True(t, ok, "EraEnd epoch should be uint64")
+
 	assert.Equal(t, expectedEraEndSlot, actualSlot,
-		"TransitionKnown with missing KnownEpoch must fall back to safe-zone cap (%d), "+
-			"not return the uncapped epoch end (532_000)",
+		"TransitionKnown with missing KnownEpoch must fall back to epoch-end snap (%d)",
 		expectedEraEndSlot,
+	)
+	assert.Equal(t, epochId+1, actualEpoch,
+		"EraEnd epoch should be epochId+1 (%d)", epochId+1,
 	)
 }
 
 // TestQueryHardForkEraHistory_TransitionUnknown_FallsBackToSafeZone confirms
-// that TransitionUnknown state still produces the safe-zone-capped EraEnd,
-// i.e. the existing behaviour is preserved.
+// that TransitionUnknown snaps to the epoch-end boundary (not the raw
+// safeEndSlot), matching Haskell's slotToEpochBound behaviour.
 func TestQueryHardForkEraHistory_TransitionUnknown_FallsBackToSafeZone(t *testing.T) {
 	const (
 		tipSlot        = uint64(200_000)
@@ -443,8 +450,9 @@ func TestQueryHardForkEraHistory_TransitionUnknown_FallsBackToSafeZone(t *testin
 		slotLenMs      = uint(1_000)
 		epochId        = uint64(500)
 	)
+	// safeZone = 25_920; safeEndSlot = 225_920 which is inside the epoch (< 532_000)
 	const expectedSafeZone = uint64(25_920)
-	expectedEraEndSlot := tipSlot + expectedSafeZone
+	expectedEraEndSlot := epochStartSlot + uint64(epochLen) // 532_000
 
 	db := newTestDB(t)
 	require.NoError(t, db.SetEpoch(
@@ -480,9 +488,14 @@ func TestQueryHardForkEraHistory_TransitionUnknown_FallsBackToSafeZone(t *testin
 	require.True(t, ok)
 	actualSlot, ok := eraEnd[1].(uint64)
 	require.True(t, ok)
+	actualEpoch, ok := eraEnd[2].(uint64)
+	require.True(t, ok)
 	assert.Equal(t, expectedEraEndSlot, actualSlot,
-		"TransitionUnknown: EraEnd slot should be tipSlot(%d)+safeZone(%d)=%d",
-		tipSlot, expectedSafeZone, expectedEraEndSlot,
+		"TransitionUnknown: EraEnd slot should snap to epoch end (%d), not mid-epoch safeEndSlot (%d)",
+		expectedEraEndSlot, tipSlot+expectedSafeZone,
+	)
+	assert.Equal(t, epochId+1, actualEpoch,
+		"TransitionUnknown: EraEnd epoch should be epochId+1 (%d)", epochId+1,
 	)
 }
 
@@ -593,8 +606,8 @@ func TestQueryHardForkEraHistory_TransitionImpossible_EpochNumberIsNextEpoch(t *
 }
 
 // TestQueryHardForkEraHistory_TransitionImpossible_vs_Unknown_Comparison
-// confirms that TransitionImpossible serves a LARGER EraEnd slot than
-// TransitionUnknown (safeZone cap) would for the same tip.
+// confirms that both TransitionImpossible and TransitionUnknown serve the
+// epoch-end slot when safeEndSlot >= epochStartSlot (both snap to epoch end).
 func TestQueryHardForkEraHistory_TransitionImpossible_vs_Unknown_Comparison(t *testing.T) {
 	const (
 		epochStartSlot   = uint64(100_000)
@@ -638,15 +651,14 @@ func TestQueryHardForkEraHistory_TransitionImpossible_vs_Unknown_Comparison(t *t
 	impossibleSlot := eraEndSlot(setupLS(TransitionImpossible))
 	unknownSlot := eraEndSlot(setupLS(TransitionUnknown))
 
-	// When tipSlot + safeZone > epochEnd, TransitionUnknown's safeZone cap
-	// would exceed the epoch boundary — so the cap is NOT applied and both
-	// should return the epoch end.
+	// Both states snap to the epoch-end boundary.  TransitionImpossible is
+	// set directly; TransitionUnknown snaps because safeEndSlot >= epochStartSlot.
 	assert.Equal(t, uint64(532_000), impossibleSlot,
 		"TransitionImpossible must serve the epoch end")
 	assert.Equal(t, uint64(532_000), unknownSlot,
-		"TransitionUnknown with safeEnd > epochEnd also falls through to epoch end")
+		"TransitionUnknown snaps to epoch end (safeEndSlot >= epochStartSlot)")
 	assert.Equal(t, impossibleSlot, unknownSlot,
-		"both states return the same slot when safeEnd exceeds the epoch boundary")
+		"both states return the same epoch-end slot")
 }
 
 func TestCheckedSlotAdd(t *testing.T) {
