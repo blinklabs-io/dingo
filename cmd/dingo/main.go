@@ -23,7 +23,6 @@ import (
 	"strings"
 
 	"github.com/blinklabs-io/dingo/database/plugin"
-	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/internal/version"
 	"github.com/spf13/cobra"
@@ -268,20 +267,7 @@ DSN Override:
 		BoolVarP(&globalFlags.debug, "debug", "D", false, "enable debug logging")
 	rootCmd.PersistentFlags().
 		StringVar(&configFile, "config", "", "path to config file")
-	rootCmd.PersistentFlags().
-		StringP("blob", "b", config.DefaultBlobPlugin, "blob store plugin to use, 'list' to show available")
-	rootCmd.PersistentFlags().
-		StringP("metadata", "m", config.DefaultMetadataPlugin, "metadata store plugin to use, 'list' to show available")
-	rootCmd.PersistentFlags().
-		StringP("network", "n", "", "Cardano network name (e.g. preview, preprod, mainnet)")
-	rootCmd.PersistentFlags().
-		Int("db-workers", 5, "database worker pool worker count")
-	rootCmd.PersistentFlags().
-		Int("db-queue-size", 50, "database worker pool task queue size")
-	rootCmd.PersistentFlags().
-		String("data-dir", "", "data directory for all storage plugins (overrides CARDANO_DATABASE_PATH)")
-	rootCmd.PersistentFlags().
-		String("storage-mode", "", "storage mode: \"core\" (minimal) or \"api\" (full indexing)")
+	config.RegisterFlags(rootCmd)
 
 	// Add plugin-specific flags
 	if err := plugin.PopulateCmdlineOptions(rootCmd.PersistentFlags()); err != nil {
@@ -305,75 +291,8 @@ DSN Override:
 			return fmt.Errorf("failed to load config: %w", err)
 		}
 
-		// Override config with command line flags
-		if blobPlugin != config.DefaultBlobPlugin {
-			cfg.BlobPlugin = blobPlugin
-		}
-		if metadataPlugin != config.DefaultMetadataPlugin {
-			cfg.MetadataPlugin = metadataPlugin
-		}
-
-		// Override network if flag is provided
-		if cmd.Root().PersistentFlags().Changed("network") {
-			network, err := cmd.Root().PersistentFlags().GetString("network")
-			if err != nil {
-				return fmt.Errorf(
-					"reading network flag: %w", err,
-				)
-			}
-			if err := config.ValidateNetworkName(network); err != nil {
-				return fmt.Errorf(
-					"validating network flag %q: %w",
-					network, err,
-				)
-			}
-			cfg.Network = network
-		}
-
-		// Override data directory if flag is provided
-		if cmd.Root().PersistentFlags().Changed("data-dir") {
-			dataDir, err := cmd.Root().PersistentFlags().GetString("data-dir")
-			if err != nil {
-				return fmt.Errorf(
-					"reading data-dir flag: %w", err,
-				)
-			}
-			cfg.DatabasePath = dataDir
-		}
-
-		// Override database worker pool config if flags are provided
-		if cmd.Root().PersistentFlags().Changed("db-workers") {
-			if workers, err := cmd.Root().PersistentFlags().GetInt("db-workers"); err == nil {
-				cfg.DatabaseWorkers = workers
-			}
-		}
-		if cmd.Root().PersistentFlags().Changed("db-queue-size") {
-			if queueSize, err := cmd.Root().PersistentFlags().GetInt("db-queue-size"); err == nil {
-				cfg.DatabaseQueueSize = queueSize
-			}
-		}
-
-		// Override storage mode if flag is provided
-		if cmd.Root().PersistentFlags().Changed("storage-mode") {
-			storageMode, err := cmd.Root().PersistentFlags().GetString("storage-mode")
-			if err != nil {
-				return fmt.Errorf(
-					"reading storage-mode flag: %w", err,
-				)
-			}
-			storageMode = strings.ToLower(storageMode)
-			switch storageMode {
-			case types.StorageModeCore, types.StorageModeAPI:
-				cfg.StorageMode = storageMode
-			default:
-				return fmt.Errorf(
-					"invalid storage mode %q: "+
-						"must be %q or %q",
-					storageMode,
-					types.StorageModeCore,
-					types.StorageModeAPI,
-				)
-			}
+		if err := config.ApplyFlags(cmd, cfg); err != nil {
+			return fmt.Errorf("applying CLI flags: %w", err)
 		}
 
 		cmd.SetContext(config.WithContext(cmd.Context(), cfg))
