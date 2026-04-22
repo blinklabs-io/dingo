@@ -17,6 +17,7 @@ package sqlite
 import (
 	"errors"
 	"fmt"
+	"math/big"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
@@ -56,6 +57,11 @@ func (d *MetadataStoreSqlite) SetCommitteeMembers(
 }
 
 // SetCommitteeQuorum stores the quorum threshold enacted with a committee.
+// Invariant: at most one committee-quorum mutation per slot (added_slot is
+// uniquely indexed). Governance ratifies at most one committee-purpose
+// action per epoch tick, so SetCommitteeQuorum and ClearCommitteeQuorum
+// cannot race at the same slot under normal operation; the upsert's
+// overwrite semantics exist to keep import/replay idempotent.
 func (d *MetadataStoreSqlite) SetCommitteeQuorum(
 	quorum *types.Rat,
 	slot uint64,
@@ -87,7 +93,42 @@ func (d *MetadataStoreSqlite) SetCommitteeQuorum(
 	return nil
 }
 
+// ClearCommitteeQuorum records that no quorum is in effect from the
+// given slot onward. It inserts a zero-valued marker row so a later
+// GetCommitteeQuorum returns nil (and callers fall back to Conway
+// genesis) until a subsequent UpdateCommittee sets a new positive
+// quorum. Shares the one-mutation-per-slot invariant documented on
+// SetCommitteeQuorum.
+func (d *MetadataStoreSqlite) ClearCommitteeQuorum(
+	slot uint64,
+	txn types.Txn,
+) error {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return fmt.Errorf("ClearCommitteeQuorum: resolve db: %w", err)
+	}
+	state := &models.CommitteeQuorum{
+		Quorum:    &types.Rat{Rat: new(big.Rat)},
+		AddedSlot: slot,
+	}
+	onConflict := clause.OnConflict{
+		Columns: []clause.Column{{Name: "added_slot"}},
+		DoUpdates: clause.AssignmentColumns([]string{
+			"quorum",
+		}),
+	}
+	if result := db.Clauses(onConflict).Create(state); result.Error != nil {
+		return fmt.Errorf(
+			"ClearCommitteeQuorum: upsert failed: %w",
+			result.Error,
+		)
+	}
+	return nil
+}
+
 // GetCommitteeQuorum retrieves the latest enacted committee quorum.
+// A most-recent marker row with a non-positive quorum represents a
+// NoConfidence-driven clear and is reported as "no quorum enacted".
 func (d *MetadataStoreSqlite) GetCommitteeQuorum(
 	txn types.Txn,
 ) (*types.Rat, error) {
@@ -107,6 +148,10 @@ func (d *MetadataStoreSqlite) GetCommitteeQuorum(
 			"GetCommitteeQuorum: query failed: %w",
 			result.Error,
 		)
+	}
+	if state.Quorum == nil || state.Quorum.Rat == nil ||
+		state.Quorum.Sign() <= 0 {
+		return nil, nil
 	}
 	return state.Quorum, nil
 }

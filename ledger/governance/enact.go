@@ -103,6 +103,14 @@ func EnactProposal(
 		); err != nil {
 			return nil, fmt.Errorf("no confidence: %w", err)
 		}
+		// Drop the enacted committee quorum so ratification falls back
+		// to Conway genesis until a subsequent UpdateCommittee enacts
+		// a new positive threshold.
+		if err := ctx.DB.ClearCommitteeQuorum(
+			ctx.Slot, ctx.Txn,
+		); err != nil {
+			return nil, fmt.Errorf("no confidence: clear quorum: %w", err)
+		}
 
 	case *lcommon.UpdateCommitteeGovAction:
 		if err := applyUpdateCommittee(ctx, a); err != nil {

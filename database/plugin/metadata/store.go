@@ -724,7 +724,16 @@ type MetadataStore interface {
 	// committee update.
 	SetCommitteeQuorum(*types.Rat, uint64, types.Txn) error
 
+	// ClearCommitteeQuorum records that the committee has no
+	// enacted quorum as of the given slot. Used by NoConfidence
+	// enactment so GetCommitteeQuorum falls back to Conway
+	// genesis until a subsequent UpdateCommittee sets a new
+	// quorum.
+	ClearCommitteeQuorum(uint64, types.Txn) error
+
 	// GetCommitteeQuorum retrieves the latest enacted committee quorum.
+	// Returns (nil, nil) when no quorum has been enacted or when the
+	// most recent record is a ClearCommitteeQuorum marker.
 	GetCommitteeQuorum(types.Txn) (*types.Rat, error)
 
 	// GetCommitteeMembers retrieves all active (non-deleted)

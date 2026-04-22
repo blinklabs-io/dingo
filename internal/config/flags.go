@@ -110,6 +110,11 @@ var flagSpecs = []flagSpec{
 	intFlag("Chainsync.MaxClients", "chainsync-max-clients", "max chainsync clients"),
 	stringFlag("Chainsync.StallTimeout", "chainsync-stall-timeout", "", "chainsync stall timeout"),
 
+	// Genesis bootstrap
+	boolFlag("GenesisBootstrap.Enabled", "genesis-bootstrap-enabled", "enable Genesis bootstrap mode when starting from origin"),
+	uint64Flag("GenesisBootstrap.WindowSlots", "genesis-bootstrap-window-slots", "Genesis density comparison window in slots (0 derives from Shelley genesis 3k/f)"),
+	intFlag("GenesisBootstrap.PromotionMinDiversityGroups", "genesis-bootstrap-promotion-min-diversity-groups", "minimum diversity groups preferred during Genesis bootstrap peer promotion"),
+
 	// Database workers
 	intFlag("DatabaseWorkers", "db-workers", "database worker pool worker count"),
 	intFlag("DatabaseQueueSize", "db-queue-size", "database worker pool task queue size"),

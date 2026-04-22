@@ -264,6 +264,72 @@ func TestDeleteCommitteeMembersAfterSlotDeletesQuorum(t *testing.T) {
 	assert.Equal(t, big.NewRat(2, 3), got.Rat)
 }
 
+func TestClearCommitteeQuorum(t *testing.T) {
+	store := setupTestStore(t)
+
+	// Seed a quorum.
+	require.NoError(t, store.SetCommitteeQuorum(
+		&types.Rat{Rat: big.NewRat(2, 3)}, 100, nil,
+	))
+
+	// Clear at a later slot.
+	require.NoError(t, store.ClearCommitteeQuorum(200, nil))
+
+	// GetCommitteeQuorum hides the cleared marker.
+	got, err := store.GetCommitteeQuorum(nil)
+	require.NoError(t, err)
+	assert.Nil(t, got)
+
+	// A subsequent positive quorum is reported again.
+	require.NoError(t, store.SetCommitteeQuorum(
+		&types.Rat{Rat: big.NewRat(3, 5)}, 300, nil,
+	))
+	got, err = store.GetCommitteeQuorum(nil)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.Equal(t, big.NewRat(3, 5), got.Rat)
+}
+
+func TestClearCommitteeQuorumWhenNoPrior(t *testing.T) {
+	store := setupTestStore(t)
+
+	// Clearing without any prior Set must still leave GetCommitteeQuorum
+	// reporting "no quorum enacted" so conwayRatifyQuorum falls back to
+	// Conway genesis.
+	require.NoError(t, store.ClearCommitteeQuorum(100, nil))
+
+	got, err := store.GetCommitteeQuorum(nil)
+	require.NoError(t, err)
+	assert.Nil(t, got)
+
+	// A later positive SetCommitteeQuorum must override the earlier
+	// clear marker.
+	require.NoError(t, store.SetCommitteeQuorum(
+		&types.Rat{Rat: big.NewRat(2, 3)}, 200, nil,
+	))
+	got, err = store.GetCommitteeQuorum(nil)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.Equal(t, big.NewRat(2, 3), got.Rat)
+}
+
+func TestClearCommitteeQuorumRollbackRestoresPrior(t *testing.T) {
+	store := setupTestStore(t)
+
+	require.NoError(t, store.SetCommitteeQuorum(
+		&types.Rat{Rat: big.NewRat(2, 3)}, 100, nil,
+	))
+	require.NoError(t, store.ClearCommitteeQuorum(200, nil))
+
+	// Rollback past the clear should restore the earlier positive quorum.
+	require.NoError(t, store.DeleteCommitteeMembersAfterSlot(150, nil))
+
+	got, err := store.GetCommitteeQuorum(nil)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.Equal(t, big.NewRat(2, 3), got.Rat)
+}
+
 func TestDeleteCommitteeMembersAfterSlotClearsDeletedSlot(t *testing.T) {
 	store := setupTestStore(t)
 

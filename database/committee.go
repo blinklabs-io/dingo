@@ -164,6 +164,40 @@ func (d *Database) SetCommitteeQuorum(
 	return nil
 }
 
+// ClearCommitteeQuorum records at the given slot that no quorum is
+// in effect (e.g. after a NoConfidence action is enacted). A later
+// GetCommitteeQuorum will return nil until a subsequent
+// SetCommitteeQuorum writes a new positive value.
+func (d *Database) ClearCommitteeQuorum(
+	slot uint64,
+	txn *Txn,
+) error {
+	owned := false
+	if txn == nil {
+		txn = d.MetadataTxn(true)
+		owned = true
+		defer func() {
+			if owned {
+				txn.Rollback() //nolint:errcheck
+			}
+		}()
+	}
+	if err := d.metadata.ClearCommitteeQuorum(
+		slot, txn.Metadata(),
+	); err != nil {
+		return fmt.Errorf("failed to clear committee quorum: %w", err)
+	}
+	if owned {
+		if err := txn.Commit(); err != nil {
+			return fmt.Errorf(
+				"failed to commit cleared committee quorum: %w", err,
+			)
+		}
+		owned = false
+	}
+	return nil
+}
+
 // GetCommitteeQuorum returns the latest enacted committee quorum.
 func (d *Database) GetCommitteeQuorum(
 	txn *Txn,

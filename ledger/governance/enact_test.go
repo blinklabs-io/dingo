@@ -15,6 +15,7 @@
 package governance
 
 import (
+	"math/big"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -176,6 +177,70 @@ func TestStakeEpochFor(t *testing.T) {
 // Expiry is exercised end-to-end via the DB query and ProcessEpoch
 // integration rather than a split-in-memory helper, so there is no unit
 // test for a partition function here.
+
+func TestApplyUpdateCommittee_PersistsEnactedQuorum(t *testing.T) {
+	db, _ := newTallyTestDB(t)
+
+	action := &lcommon.UpdateCommitteeGovAction{
+		Credentials: []lcommon.Credential{},
+		CredEpochs:  map[*lcommon.Credential]uint{},
+		Quorum:      cbor.Rat{Rat: big.NewRat(3, 5)},
+	}
+	err := applyUpdateCommittee(
+		&EnactmentContext{DB: db, Slot: 4242},
+		action,
+	)
+	require.NoError(t, err)
+
+	got, err := db.GetCommitteeQuorum(nil)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.Equal(t, 0, got.Cmp(big.NewRat(3, 5)))
+}
+
+func TestEnactProposal_NoConfidence_ClearsCommitteeQuorum(
+	t *testing.T,
+) {
+	db, _ := newTallyTestDB(t)
+
+	// Seed an enacted quorum from a prior UpdateCommittee.
+	require.NoError(
+		t,
+		db.SetCommitteeQuorum(big.NewRat(3, 5), 1000, nil),
+	)
+
+	// Build a NoConfidence proposal with a zero deposit so the
+	// reward-account refund path short-circuits.
+	action := &lcommon.NoConfidenceGovAction{
+		Type: uint(lcommon.GovActionTypeNoConfidence),
+	}
+	encoded, err := cbor.Encode(action)
+	require.NoError(t, err)
+	proposal := &models.GovernanceProposal{
+		TxHash:        testBytes(32, 7),
+		ActionIndex:   0,
+		ActionType:    uint8(lcommon.GovActionTypeNoConfidence),
+		GovActionCbor: encoded,
+		AddedSlot:     500,
+		ExpiresEpoch:  100,
+		AnchorURL:     "https://example.invalid/noconf",
+		AnchorHash:    testBytes(32, 8),
+		ReturnAddress: testBytes(29, 9),
+		// Zero deposit keeps the refund path a no-op so this test
+		// isolates the committee-quorum clear behavior.
+		Deposit: 0,
+	}
+
+	_, err = EnactProposal(
+		&EnactmentContext{DB: db, Slot: 2000, Epoch: 42},
+		proposal,
+	)
+	require.NoError(t, err)
+
+	got, err := db.GetCommitteeQuorum(nil)
+	require.NoError(t, err)
+	assert.Nil(t, got, "NoConfidence should clear the enacted quorum")
+}
 
 func TestApplyTreasuryWithdrawal_CreditsRewardsAndDebitsTreasury(
 	t *testing.T,

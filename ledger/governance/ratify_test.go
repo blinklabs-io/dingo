@@ -23,6 +23,7 @@ import (
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // newRat is a test helper that builds a cbor.Rat from num/denom.
@@ -516,4 +517,49 @@ func TestConwayRatifyQuorum_FallbackWhenThresholdMissing(t *testing.T) {
 	got, err := conwayRatifyQuorum(nil, nil, nil, genesis)
 	assert.NoError(t, err)
 	assert.Equal(t, big.NewRat(2, 3), got)
+}
+
+func TestConwayRatifyQuorum_PrefersDBOverGenesis(t *testing.T) {
+	db, _ := newTallyTestDB(t)
+
+	// An enacted quorum must win over the Conway genesis default so
+	// the ratify loop tracks on-chain state rather than the initial
+	// bootstrap threshold.
+	require.NoError(t, db.SetCommitteeQuorum(big.NewRat(3, 5), 1000, nil))
+
+	threshold := cbor.Rat{Rat: big.NewRat(2, 3)}
+	genesis := &conway.ConwayGenesis{
+		Committee: conway.ConwayGenesisCommittee{
+			Threshold: &threshold,
+		},
+	}
+	got, err := conwayRatifyQuorum(nil, db, nil, genesis)
+	require.NoError(t, err)
+	assert.Equal(t, big.NewRat(3, 5), got)
+}
+
+func TestConwayRatifyQuorum_FallsBackToGenesisAfterClear(
+	t *testing.T,
+) {
+	db, _ := newTallyTestDB(t)
+
+	// Enact then immediately clear. Ratify must fall back to Conway
+	// genesis until the next UpdateCommittee writes a new positive
+	// quorum, matching the cardano-ledger ENACT semantics for
+	// NoConfidence.
+	require.NoError(t, db.SetCommitteeQuorum(big.NewRat(3, 5), 1000, nil))
+	require.NoError(t, db.ClearCommitteeQuorum(2000, nil))
+
+	// Pick a genesis threshold distinct from defaultCCQuorum (2/3) so
+	// the assertion fails if the code path slipped to the last-resort
+	// default instead of the genesis branch.
+	threshold := cbor.Rat{Rat: big.NewRat(4, 7)}
+	genesis := &conway.ConwayGenesis{
+		Committee: conway.ConwayGenesisCommittee{
+			Threshold: &threshold,
+		},
+	}
+	got, err := conwayRatifyQuorum(nil, db, nil, genesis)
+	require.NoError(t, err)
+	assert.Equal(t, big.NewRat(4, 7), got)
 }
