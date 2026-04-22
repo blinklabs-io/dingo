@@ -1040,6 +1040,9 @@ func TestChainsyncClientRollBackward_InboundUpstreamProcessesRollback(
 	require.True(t, o.registerTrackedChainsyncClient(connInbound, true, false))
 
 	_, rollbackCh := bus.Subscribe(ledger.ChainsyncEventType)
+	_, chainSelectionRollbackCh := bus.Subscribe(
+		chainselection.PeerRollbackEventType,
+	)
 	rollbackPoint := ocommon.NewPoint(90, []byte("rollback"))
 	tip := ochainsync.Tip{
 		Point:       ocommon.NewPoint(95, []byte("tip")),
@@ -1063,6 +1066,19 @@ func TestChainsyncClientRollBackward_InboundUpstreamProcessesRollback(
 	case <-time.After(2 * time.Second):
 		t.Fatal(
 			"expected rollback event from eligible inbound peer",
+		)
+	}
+
+	select {
+	case evt := <-chainSelectionRollbackCh:
+		data, ok := evt.Data.(chainselection.PeerRollbackEvent)
+		require.True(t, ok)
+		require.Equal(t, connInbound, data.ConnectionId)
+		require.Equal(t, rollbackPoint.Slot, data.Point.Slot)
+		require.Equal(t, tip.BlockNumber, data.Tip.BlockNumber)
+	case <-time.After(2 * time.Second):
+		t.Fatal(
+			"expected chainselection rollback event from eligible inbound peer",
 		)
 	}
 }

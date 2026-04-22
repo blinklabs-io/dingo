@@ -500,6 +500,17 @@ func (o *Ouroboros) chainsyncClientRollBackward(
 			},
 		),
 	)
+	o.EventBus.Publish(
+		chainselection.PeerRollbackEventType,
+		event.NewEvent(
+			chainselection.PeerRollbackEventType,
+			chainselection.PeerRollbackEvent{
+				ConnectionId: ctx.ConnectionId,
+				Point:        point,
+				Tip:          tip,
+			},
+		),
+	)
 	return nil
 }
 

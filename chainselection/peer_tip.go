@@ -19,6 +19,7 @@ import (
 
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
 // PeerChainTip tracks the chain tip reported by a specific peer.
@@ -63,6 +64,36 @@ func (p *PeerChainTip) UpdateTipWithObserved(
 	p.ObservedTip = observedTip
 	p.VRFOutput = vrfOutput
 	p.LastUpdated = time.Now()
+}
+
+// ApplyRollback trims observed history at the rollback point and refreshes the
+// peer tip to the chainsync tip reported with the rollback.
+func (p *PeerChainTip) ApplyRollback(
+	point ocommon.Point,
+	tip ochainsync.Tip,
+) {
+	if p == nil {
+		return
+	}
+	p.Tip = tip
+	p.ObservedTip = tip
+	p.VRFOutput = nil
+	p.LastUpdated = time.Now()
+	if point.Slot == 0 || len(p.observedSlots) == 0 {
+		p.observedSlots = nil
+		return
+	}
+
+	keepUntil := 0
+	for keepUntil < len(p.observedSlots) &&
+		p.observedSlots[keepUntil] <= point.Slot {
+		keepUntil++
+	}
+	if keepUntil == 0 {
+		p.observedSlots = nil
+		return
+	}
+	p.observedSlots = p.observedSlots[:keepUntil]
 }
 
 func (p *PeerChainTip) recordObservedSlot(slot, window uint64) {

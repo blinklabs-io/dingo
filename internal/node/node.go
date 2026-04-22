@@ -292,6 +292,11 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 				cfg.TargetNumberOfEstablishedPeers,
 				cfg.TargetNumberOfActivePeers,
 			),
+			dingo.WithGenesisBootstrap(cfg.GenesisBootstrap.Enabled),
+			dingo.WithGenesisWindowSlots(cfg.GenesisBootstrap.WindowSlots),
+			dingo.WithBootstrapPromotionMinDiversityGroups(
+				cfg.GenesisBootstrap.PromotionMinDiversityGroups,
+			),
 			dingo.WithActivePeersQuotas(
 				cfg.ActivePeersTopologyQuota,
 				cfg.ActivePeersGossipQuota,

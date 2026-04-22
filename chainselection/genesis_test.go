@@ -17,7 +17,9 @@ package chainselection
 import (
 	"math"
 	"testing"
+	"time"
 
+	"github.com/blinklabs-io/dingo/event"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/assert"
@@ -146,4 +148,65 @@ func TestChainSelectorGenesisTransitionsBackToPraos(t *testing.T) {
 	require.Equal(t, SelectionModePraos, cs.SelectionMode())
 	require.NotNil(t, cs.GetBestPeer())
 	assert.Equal(t, connId, *cs.GetBestPeer())
+}
+
+func TestChainSelectorGenesisRollbackTrimsObservedHistory(t *testing.T) {
+	bus := event.NewEventBus(nil, nil)
+	defer bus.Close()
+
+	cs := NewChainSelector(ChainSelectorConfig{
+		GenesisMode:   true,
+		SecurityParam: 10,
+		EventBus:      bus,
+	})
+
+	connId := newTestConnectionId(1)
+	for _, tip := range []ochainsync.Tip{
+		{
+			Point:       ocommon.Point{Slot: 1, Hash: []byte("slot-1")},
+			BlockNumber: 1,
+		},
+		{
+			Point:       ocommon.Point{Slot: 6, Hash: []byte("slot-6")},
+			BlockNumber: 2,
+		},
+		{
+			Point:       ocommon.Point{Slot: 12, Hash: []byte("slot-12")},
+			BlockNumber: 3,
+		},
+	} {
+		cs.UpdatePeerTip(connId, tip, nil)
+	}
+
+	rollbackEvent := PeerRollbackEvent{
+		ConnectionId: connId,
+		Point:        ocommon.Point{Slot: 6, Hash: []byte("slot-6")},
+		Tip: ochainsync.Tip{
+			Point:       ocommon.Point{Slot: 18, Hash: []byte("slot-18")},
+			BlockNumber: 4,
+		},
+	}
+	bus.Publish(
+		PeerRollbackEventType,
+		event.NewEvent(PeerRollbackEventType, rollbackEvent),
+	)
+
+	require.Eventually(t, func() bool {
+		peerTip := cs.GetPeerTip(connId)
+		return peerTip != nil &&
+			len(peerTip.observedSlots) == 2 &&
+			peerTip.observedSlots[0] == 1 &&
+			peerTip.observedSlots[1] == 6 &&
+			peerTip.observedDensity(cs.GenesisWindowSlots()) == 2
+	}, 2*time.Second, 10*time.Millisecond)
+
+	cs.UpdatePeerTip(connId, ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 20, Hash: []byte("slot-20")},
+		BlockNumber: 5,
+	}, nil)
+
+	peerTip := cs.GetPeerTip(connId)
+	require.NotNil(t, peerTip)
+	assert.Equal(t, []uint64{1, 6, 20}, peerTip.observedSlots)
+	assert.Equal(t, uint64(3), peerTip.observedDensity(cs.GenesisWindowSlots()))
 }

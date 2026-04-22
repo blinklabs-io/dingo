@@ -149,6 +149,10 @@ func NewChainSelector(cfg ChainSelectorConfig) *ChainSelector {
 			peergov.PeerPriorityChangedEventType,
 			cs.handlePeerPriorityChangedEvent,
 		)
+		cfg.EventBus.SubscribeFunc(
+			PeerRollbackEventType,
+			cs.handlePeerRollbackEvent,
+		)
 	}
 	return cs
 }
@@ -1139,6 +1143,31 @@ func (cs *ChainSelector) HandlePeerActivityEvent(evt event.Event) {
 		return
 	}
 	cs.TouchPeerActivity(e.ConnectionId)
+}
+
+// handlePeerRollbackEvent trims Genesis observed history and refreshes the
+// tracked peer tip after a rollback.
+func (cs *ChainSelector) handlePeerRollbackEvent(evt event.Event) {
+	e, ok := evt.Data.(PeerRollbackEvent)
+	if !ok {
+		cs.config.Logger.Warn(
+			"received unexpected event data type",
+			"expected", "PeerRollbackEvent",
+		)
+		return
+	}
+
+	var shouldEvaluate bool
+	cs.mutex.Lock()
+	if peerTip, exists := cs.peerTips[e.ConnectionId]; exists {
+		peerTip.ApplyRollback(e.Point, e.Tip)
+		shouldEvaluate = true
+	}
+	cs.mutex.Unlock()
+
+	if shouldEvaluate {
+		cs.EvaluateAndSwitch()
+	}
 }
 
 func (cs *ChainSelector) evaluationLoop() {

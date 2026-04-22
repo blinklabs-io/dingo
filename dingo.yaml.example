@@ -269,6 +269,19 @@ activePeersGossipQuota: 0
 # Active peer slots for ledger sources
 activePeersLedgerQuota: 0
 
+# Genesis bootstrap configuration
+# Used only for from-origin sync. Default behavior keeps this enabled and
+# exits Genesis mode automatically near the best known peer tip.
+genesisBootstrap:
+  # Enable/disable Genesis bootstrap mode (default: true).
+  enabled: true
+  # Override the Genesis comparison window in slots.
+  # 0 auto-derives the window from genesis params (3k/f).
+  windowSlots: 0
+  # Minimum diversity groups to prefer while promoting peers during bootstrap.
+  # 0 uses the peer-governor default.
+  promotionMinDiversityGroups: 0
+
 # Cache configuration for tiered CBOR cache system
 # This controls the in-memory caching of UTxO and transaction CBOR data
 cache:

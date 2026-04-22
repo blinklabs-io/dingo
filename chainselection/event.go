@@ -18,11 +18,13 @@ import (
 	"github.com/blinklabs-io/dingo/event"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
 const (
 	PeerTipUpdateEventType  event.EventType = "chainselection.peer_tip_update"
 	PeerActivityEventType   event.EventType = "chainselection.peer_activity"
+	PeerRollbackEventType   event.EventType = "chainselection.peer_rollback"
 	ChainSwitchEventType    event.EventType = "chainselection.chain_switch"
 	ChainSelectionEventType event.EventType = "chainselection.selection"
 	PeerEvictedEventType    event.EventType = "chainselection.peer_evicted"
@@ -42,6 +44,15 @@ type PeerTipUpdateEvent struct {
 // selector liveness for healthy but temporarily quiet peers.
 type PeerActivityEvent struct {
 	ConnectionId ouroboros.ConnectionId
+}
+
+// PeerRollbackEvent is published when an ingress-eligible chainsync peer
+// reports a rollback. Point is the rollback point; Tip is the peer's current
+// chainsync tip after the rollback.
+type PeerRollbackEvent struct {
+	ConnectionId ouroboros.ConnectionId
+	Point        ocommon.Point
+	Tip          ochainsync.Tip
 }
 
 // ChainSwitchEvent is published when the chain selector decides to switch

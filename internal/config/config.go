@@ -137,6 +137,20 @@ type ChainsyncConfig struct {
 	StallTimeout string `yaml:"stallTimeout" envconfig:"DINGO_CHAINSYNC_STALL_TIMEOUT"`
 }
 
+// GenesisBootstrapConfig holds configuration for Genesis-mode chain
+// selection and bootstrap-time peer promotion.
+type GenesisBootstrapConfig struct {
+	// Enabled controls whether Genesis bootstrap mode is used when the node
+	// starts from origin.
+	Enabled bool `yaml:"enabled" envconfig:"DINGO_GENESIS_BOOTSTRAP_ENABLED"`
+	// WindowSlots overrides the Genesis density comparison window in slots.
+	// A zero value derives the window from Shelley genesis parameters (3k/f).
+	WindowSlots uint64 `yaml:"windowSlots" envconfig:"DINGO_GENESIS_BOOTSTRAP_WINDOW_SLOTS"`
+	// PromotionMinDiversityGroups sets the minimum number of diversity groups
+	// to prefer while promoting peers during bootstrap.
+	PromotionMinDiversityGroups int `yaml:"promotionMinDiversityGroups" envconfig:"DINGO_GENESIS_BOOTSTRAP_PROMOTION_MIN_DIVERSITY_GROUPS"`
+}
+
 // DefaultChainsyncConfig returns the default chainsync configuration.
 // StallTimeout must match chainsync.DefaultStallTimeout and the
 // fallback in internal/node/node.go.
@@ -144,6 +158,14 @@ func DefaultChainsyncConfig() ChainsyncConfig {
 	return ChainsyncConfig{
 		MaxClients:   3,
 		StallTimeout: "2m",
+	}
+}
+
+// DefaultGenesisBootstrapConfig returns the default Genesis bootstrap
+// configuration values.
+func DefaultGenesisBootstrapConfig() GenesisBootstrapConfig {
+	return GenesisBootstrapConfig{
+		Enabled: true,
 	}
 }
 
@@ -233,6 +255,9 @@ type Config struct {
 
 	// Chainsync configuration for multi-client support
 	Chainsync ChainsyncConfig `yaml:"chainsync"`
+
+	// Genesis bootstrap configuration for from-origin chain selection.
+	GenesisBootstrap GenesisBootstrapConfig `yaml:"genesisBootstrap"`
 
 	// KES (Key Evolving Signature) configuration for block production
 	// SlotsPerKESPeriod is the number of slots in a KES period.
@@ -394,6 +419,8 @@ var globalConfig = &Config{
 	Cache: DefaultCacheConfig(),
 	// Chainsync configuration defaults
 	Chainsync: DefaultChainsyncConfig(),
+	// Genesis bootstrap defaults
+	GenesisBootstrap: DefaultGenesisBootstrapConfig(),
 	// KES configuration defaults (mainnet values)
 	SlotsPerKESPeriod: 129600, // 1.5 days at 1 second per slot
 	MaxKESEvolutions:  62,     // 2^6 - 2 for KES depth 6
