@@ -268,14 +268,12 @@ func TestTxSubmissionRateLimiter_ConcurrentAccess(t *testing.T) {
 	peer := testConnIdWithPort(4001)
 
 	var wg sync.WaitGroup
-	for i := 0; i < 100; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range 100 {
+		wg.Go(func() {
 			// Just exercise the rate limiter concurrently;
 			// we don't assert results since timing varies
 			rl.Allow(peer, 1)
-		}()
+		})
 	}
 	wg.Wait()
 	// If the test reaches here without data races (with -race),
@@ -480,7 +478,7 @@ func TestTxSubmissionRateLimiter_SyncMapConcurrency(t *testing.T) {
 
 	var wg sync.WaitGroup
 	// Concurrent Allow, WaitDuration, and RemovePeer across many peers
-	for i := 0; i < 50; i++ {
+	for i := range 50 {
 		wg.Add(1)
 		go func(port int) {
 			defer wg.Done()

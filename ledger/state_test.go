@@ -1925,9 +1925,7 @@ func TestEpochRollover_ConcurrentReaders(t *testing.T) {
 	rolloverErr := make(chan error, 1)
 
 	// Start the epoch rollover goroutine
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 
 		// Capture snapshot
 		ls.RLock()
@@ -1969,13 +1967,11 @@ func TestEpochRollover_ConcurrentReaders(t *testing.T) {
 		ls.Unlock()
 
 		close(txnDone)
-	}()
+	})
 
 	// Start multiple reader goroutines that try to read during the transaction
 	for range 5 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 
 			// Wait for transaction to start
 			<-txnStarted
@@ -1994,7 +1990,7 @@ func TestEpochRollover_ConcurrentReaders(t *testing.T) {
 					time.Sleep(5 * time.Millisecond)
 				}
 			}
-		}()
+		})
 	}
 
 	// Wait for all goroutines with timeout

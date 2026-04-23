@@ -1014,9 +1014,6 @@ func paginationRange(
 	if start >= total {
 		return total, total
 	}
-	end := start + params.Count
-	if end > total {
-		end = total
-	}
+	end := min(start+params.Count, total)
 	return start, end
 }

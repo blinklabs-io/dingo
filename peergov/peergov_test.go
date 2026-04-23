@@ -1711,7 +1711,7 @@ func TestPeerGovernor_QuotaSumExceedsTarget(t *testing.T) {
 	})
 
 	// Simulate 30 hot peers across 3 sources (10 each)
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		pg.peers = append(pg.peers, &Peer{
 			Address: fmt.Sprintf("gossip-%d:3001", i),
 			Source:  PeerSourceP2PGossip,

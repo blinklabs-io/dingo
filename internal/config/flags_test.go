@@ -49,7 +49,7 @@ func TestRegisterFlags_CoversAllExportedConfigFields(t *testing.T) {
 	}
 
 	leafFields := map[string]struct{}{}
-	collectExportedLeafFields(reflect.TypeOf(Config{}), "", leafFields)
+	collectExportedLeafFields(reflect.TypeFor[Config](), "", leafFields)
 
 	for fieldPath := range leafFields {
 		if _, ok := specFields[fieldPath]; !ok {

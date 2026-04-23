@@ -67,10 +67,7 @@ func BuildSummary(
 		end = &b
 	case TransitionUnknown:
 		// Measure safe zone from max(tipSlot+1, era start).
-		fromSlot := tipSlot + 1
-		if fromSlot < current.Start.Slot {
-			fromSlot = current.Start.Slot
-		}
+		fromSlot := max(tipSlot+1, current.Start.Slot)
 		end = applySafeZone(current.Params, current.Start, fromSlot)
 	case TransitionImpossible:
 		end = applySafeZone(current.Params, current.Start, current.Start.Slot)

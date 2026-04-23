@@ -138,9 +138,7 @@ func (c *ConnectionManager) startListener(
 		defaultConnOpts,
 		l.ConnectionOpts...,
 	)
-	c.goroutineWg.Add(1)
-	go func() {
-		defer c.goroutineWg.Done()
+	c.goroutineWg.Go(func() {
 		var consecutiveErrors int
 		for {
 			// Accept connection
@@ -360,7 +358,7 @@ func (c *ConnectionManager) startListener(
 				)
 			}
 		}
-	}()
+	})
 	return nil
 }
 

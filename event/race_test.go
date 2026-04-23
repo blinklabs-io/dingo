@@ -69,22 +69,18 @@ func TestSubscribeFuncStopRace(t *testing.T) {
 
 		// Spawn multiple SubscribeFunc goroutines concurrently
 		for range 5 {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
+			wg.Go(func() {
 				subId := eb.SubscribeFunc(typ, func(Event) {})
 				if subId != 0 {
 					successfulSubscribes.Add(1)
 				}
-			}()
+			})
 		}
 
 		// Concurrently call Stop
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			eb.Stop()
-		}()
+		})
 
 		wg.Wait()
 		// If we get here without panic, the race is handled correctly.

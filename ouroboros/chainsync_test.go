@@ -592,8 +592,7 @@ func TestSubscribeChainsyncResyncRewindsClientsWithoutRecycle(
 	_, recycleCh := bus.Subscribe(
 		connmanager.ConnectionRecycleRequestedEventType,
 	)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	o.SubscribeChainsyncResync(ctx)
 
 	bus.Publish(
@@ -649,8 +648,7 @@ func TestSubscribeChainsyncResyncDoesNotRecycleOnLocalRollbackWithoutPeerHistory
 	_, recycleCh := bus.Subscribe(
 		connmanager.ConnectionRecycleRequestedEventType,
 	)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	o.SubscribeChainsyncResync(ctx)
 
 	bus.Publish(
@@ -728,8 +726,7 @@ func TestSubscribeChainsyncResyncClosesConnectionOnPersistentFork(
 	o.EventBus = bus
 	o.ConnManager = connManager
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	o.SubscribeChainsyncResync(ctx)
 
 	connId := oConn.Id()

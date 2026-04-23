@@ -44,10 +44,7 @@ func deleteUtxoBlobs(d *Database, utxos []models.Utxo, _ *Txn) error {
 
 	var deleteErrors int
 	for start := 0; start < len(utxos); start += batchSize {
-		end := start + batchSize
-		if end > len(utxos) {
-			end = len(utxos)
-		}
+		end := min(start+batchSize, len(utxos))
 		batchTxn := NewBlobOnlyTxn(d, true)
 		for _, utxo := range utxos[start:end] {
 			if err := blob.DeleteUtxo(batchTxn.Blob(), utxo.TxId, utxo.OutputIdx); err != nil {

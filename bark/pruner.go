@@ -161,11 +161,9 @@ func (p *Pruner) Start(ctx context.Context) error {
 
 	ctx, p.cancel = context.WithCancel(ctx) //nolint:gosec
 
-	p.wg.Add(1)
-	go func() {
-		defer p.wg.Done()
+	p.wg.Go(func() {
 		p.run(ctx)
-	}()
+	})
 	return nil
 }
 

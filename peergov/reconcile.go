@@ -540,7 +540,7 @@ func (p *PeerGovernor) enforceStateLimit(
 
 	removeIdx := make([]bool, len(p.peers))
 	removed := 0
-	for i := 0; i < removeCount; i++ {
+	for i := range removeCount {
 		candidate := candidates[i]
 		peer := candidate.peer
 		p.config.Logger.Debug(

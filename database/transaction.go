@@ -692,10 +692,7 @@ func deleteTxBlobs(d *Database, txHashes [][]byte, txn *Txn) error {
 		deleteBatch(txn.Blob(), txHashes)
 	} else {
 		for start := 0; start < len(txHashes); start += batchSize {
-			end := start + batchSize
-			if end > len(txHashes) {
-				end = len(txHashes)
-			}
+			end := min(start+batchSize, len(txHashes))
 			batch := txHashes[start:end]
 			batchTxn := NewBlobOnlyTxn(d, true)
 			batchBlobTxn := batchTxn.Blob()

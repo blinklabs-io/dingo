@@ -129,9 +129,7 @@ func (m *Manager) Start(ctx context.Context) error {
 			"component", "snapshot",
 		)
 	} else {
-		m.loopWg.Add(1)
-		go func() {
-			defer m.loopWg.Done()
+		m.loopWg.Go(func() {
 			m.epochTransitionLoop(childCtx, evtCh)
 			// If the goroutine exits because the parent
 			// context was cancelled (not via Stop), reset
@@ -154,7 +152,7 @@ func (m *Manager) Start(ctx context.Context) error {
 				}
 			}
 			m.mu.Unlock()
-		}()
+		})
 	}
 
 	m.logger.Info("snapshot manager started", "component", "snapshot")

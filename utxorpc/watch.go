@@ -124,7 +124,7 @@ func (s *watchServiceServer) watchTxFetchRollbackUndoFromBlocks(
 	hash := append([]byte(nil), startHash...)
 	out := make([]*watch.WatchTxResponse, 0, 64)
 	const maxWalkBlocks = 2160
-	for i := 0; i < maxWalkBlocks; i++ {
+	for range maxWalkBlocks {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}

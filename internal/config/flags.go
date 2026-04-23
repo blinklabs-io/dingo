@@ -167,7 +167,7 @@ func ApplyFlags(cmd *cobra.Command, cfg *Config) error {
 
 // fieldByPath walks a dotted path (e.g. "Cache.HotUtxoEntries") on v.
 func fieldByPath(v reflect.Value, path string) reflect.Value {
-	for _, p := range strings.Split(path, ".") {
+	for p := range strings.SplitSeq(path, ".") {
 		v = v.FieldByName(p)
 	}
 	return v
