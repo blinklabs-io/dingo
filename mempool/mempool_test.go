@@ -2165,7 +2165,10 @@ func TestMempool_TTL_NonExpiredTransactionsRetained(t *testing.T) {
 }
 
 func TestMempool_TTL_MixedExpiryRetainsNonExpired(t *testing.T) {
-	m := newTestMempoolWithTTL(t, 50*time.Millisecond, 20*time.Millisecond)
+	// TTL is deliberately long relative to the test window so fresh
+	// txs can't age past it before Eventually observes len==2, even
+	// under scheduler jitter on slow CI runners.
+	m := newTestMempoolWithTTL(t, 5*time.Second, 20*time.Millisecond)
 	defer m.Stop(context.Background())
 
 	// Add a mix of expired and fresh transactions
@@ -2177,7 +2180,7 @@ func TestMempool_TTL_MixedExpiryRetainsNonExpired(t *testing.T) {
 			Hash:     fmt.Sprintf("old-tx-%d", i),
 			Cbor:     fmt.Appendf(nil, "old-cbor-%d", i),
 			Type:     uint(conway.EraIdConway),
-			LastSeen: time.Now().Add(-200 * time.Millisecond),
+			LastSeen: time.Now().Add(-10 * time.Second),
 		}
 		m.transactions = append(m.transactions, tx)
 		m.txByHash[tx.Hash] = tx
@@ -2307,7 +2310,10 @@ func TestMempool_TTL_ExpiredMetricUpdated(t *testing.T) {
 }
 
 func TestMempool_TTL_ConsumerIndexAdjustedOnExpiry(t *testing.T) {
-	m := newTestMempoolWithTTL(t, 50*time.Millisecond, 20*time.Millisecond)
+	// TTL is deliberately long relative to the test window so fresh
+	// txs can't age past it before Eventually observes len==3, even
+	// under scheduler jitter on slow CI runners.
+	m := newTestMempoolWithTTL(t, 5*time.Second, 20*time.Millisecond)
 	defer m.Stop(context.Background())
 
 	// Add a mix of expired and fresh transactions
@@ -2319,7 +2325,7 @@ func TestMempool_TTL_ConsumerIndexAdjustedOnExpiry(t *testing.T) {
 			Hash:     fmt.Sprintf("expired-%d", i),
 			Cbor:     fmt.Appendf(nil, "expired-cbor-%d", i),
 			Type:     uint(conway.EraIdConway),
-			LastSeen: time.Now().Add(-200 * time.Millisecond),
+			LastSeen: time.Now().Add(-10 * time.Second),
 		}
 		m.transactions = append(m.transactions, tx)
 		m.txByHash[tx.Hash] = tx
