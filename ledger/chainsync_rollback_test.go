@@ -76,6 +76,70 @@ func TestHandleEventChainsyncRollbackSynchronizesLedgerTip(t *testing.T) {
 	assert.Equal(t, fixture.ancestorTip, dbTip)
 }
 
+func TestHandleEventChainsyncRollbackDoesNotSkipDifferentPeerHistory(
+	t *testing.T,
+) {
+	fixture := newChainsyncRollbackFixture(t)
+
+	otherConnId := ouroboros.ConnectionId{
+		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 6001},
+		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3002},
+	}
+	fixture.ls.rollbackHistory = []rollbackRecord{
+		{
+			point: ocommon.Point{
+				Slot: fixture.ancestorTip.Point.Slot,
+				Hash: append([]byte(nil), fixture.ancestorTip.Point.Hash...),
+			},
+			connKey:   connIdKey(otherConnId),
+			timestamp: time.Now(),
+		},
+	}
+
+	err := fixture.ls.handleEventChainsyncRollback(
+		ChainsyncEvent{
+			ConnectionId: fixture.connId,
+			Point:        fixture.ancestorTip.Point,
+		},
+	)
+	require.NoError(t, err)
+
+	assert.Equal(t, fixture.ancestorTip, fixture.ls.chain.Tip())
+	assert.Equal(t, fixture.ancestorTip, fixture.ls.currentTip)
+	assert.True(
+		t,
+		bytes.Equal(fixture.ancestorNonce, fixture.ls.currentTipBlockNonce),
+	)
+}
+
+func TestHandleEventChainsyncRollbackSkipsSamePeerLoop(
+	t *testing.T,
+) {
+	fixture := newChainsyncRollbackFixture(t)
+
+	fixture.ls.rollbackHistory = []rollbackRecord{
+		{
+			point: ocommon.Point{
+				Slot: fixture.ancestorTip.Point.Slot,
+				Hash: append([]byte(nil), fixture.ancestorTip.Point.Hash...),
+			},
+			connKey:   connIdKey(fixture.connId),
+			timestamp: time.Now(),
+		},
+	}
+
+	err := fixture.ls.handleEventChainsyncRollback(
+		ChainsyncEvent{
+			ConnectionId: fixture.connId,
+			Point:        fixture.ancestorTip.Point,
+		},
+	)
+	require.NoError(t, err)
+
+	assert.Equal(t, fixture.currentTip, fixture.ls.chain.Tip())
+	assert.Equal(t, fixture.currentTip, fixture.ls.currentTip)
+}
+
 func TestTryResolveForkSynchronizesLedgerTip(t *testing.T) {
 	fixture := newChainsyncRollbackFixture(t)
 
@@ -518,7 +582,11 @@ func TestRecoverAfterLocalRollbackResetsStateWithoutTrackedClients(t *testing.T)
 	fixture.ls.headerMismatchCount = 3
 	fixture.ls.rollbackHistory = []rollbackRecord{
 		{
-			slot:      fixture.currentTip.Point.Slot,
+			point: ocommon.Point{
+				Slot: fixture.currentTip.Point.Slot,
+				Hash: append([]byte(nil), fixture.currentTip.Point.Hash...),
+			},
+			connKey:   connIdKey(fixture.connId),
 			timestamp: time.Now(),
 		},
 	}

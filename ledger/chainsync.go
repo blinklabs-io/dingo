@@ -482,10 +482,10 @@ func (ls *LedgerState) detectConnectionSwitch() (
 		}
 		ls.lastActiveConnId = activeConnId
 		// Preserve rollbackHistory across connection switches so the
-		// rollback loop detector can fire when multiple peers all send
-		// RollBackward to the same slot during rapid chain selection
-		// changes (e.g., post-Mithril startup). Clearing it here
-		// previously allowed unbounded oscillation.
+		// loop detector can still catch repeated rollbacks from the
+		// same peer/session. The detector keys on exact rollback
+		// point + connection, so peer switches do not poison healthy
+		// fork convergence.
 	}
 	return activeConnId, true
 }
@@ -1002,10 +1002,16 @@ func (ls *LedgerState) handleEventChainsyncRollback(e ChainsyncEvent) error {
 	}
 
 	// Rollback loop detection: track recent rollbacks and skip if
-	// the same slot appears too frequently within the detection window.
+	// the same peer repeats the same rollback point too frequently
+	// within the detection window.
 	now := time.Now()
+	connKey := connIdKey(e.ConnectionId)
 	ls.rollbackHistory = append(ls.rollbackHistory, rollbackRecord{
-		slot:      e.Point.Slot,
+		point: ocommon.Point{
+			Slot: e.Point.Slot,
+			Hash: append([]byte(nil), e.Point.Hash...),
+		},
+		connKey:   connKey,
 		timestamp: now,
 	})
 	// Prune entries older than the detection window
@@ -1017,10 +1023,13 @@ func (ls *LedgerState) handleEventChainsyncRollback(e ChainsyncEvent) error {
 		}
 	}
 	ls.rollbackHistory = pruned
-	// Count rollbacks to this specific slot
+	// Count repeated rollbacks to this exact point from the same
+	// connection. Different peers can legitimately converge on the
+	// same rollback point during chain selection, and those rollbacks
+	// must not be suppressed.
 	var slotCount int
 	for _, r := range ls.rollbackHistory {
-		if r.slot == e.Point.Slot {
+		if r.connKey == connKey && pointMatches(r.point, e.Point) {
 			slotCount++
 		}
 	}
