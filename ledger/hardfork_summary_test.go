@@ -132,6 +132,10 @@ func TestHardForkSummary_EmptyCache(t *testing.T) {
 }
 
 // TestHardForkSummary_MissingShelleyGenesis errors.
+// Tolerates a config without a shelley genesis: SystemStart stays at the
+// zero time. Callers that need wall-clock conversions must provide the
+// genesis, but epoch-cache-only callers (like SlotToEpoch) can still get a
+// meaningful Summary.
 func TestHardForkSummary_MissingShelleyGenesis(t *testing.T) {
 	ls := &LedgerState{
 		epochCache: []models.Epoch{
@@ -139,8 +143,11 @@ func TestHardForkSummary_MissingShelleyGenesis(t *testing.T) {
 		},
 		config: LedgerStateConfig{CardanoNodeConfig: &cardano.CardanoNodeConfig{}},
 	}
-	_, err := ls.HardForkSummary()
-	assert.Error(t, err)
+	sum, err := ls.HardForkSummary()
+	require.NoError(t, err)
+	assert.True(t, sum.SystemStart.IsZero(),
+		"missing shelley genesis ⇒ SystemStart is zero time")
+	require.Len(t, sum.Eras, 1)
 }
 
 // TestHardForkSummary_CarriesTransitionInfo ensures the current transitionInfo

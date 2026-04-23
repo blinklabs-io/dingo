@@ -33,12 +33,15 @@ import (
 // friends. Once dingo tracks per-era safe zones end-to-end, this will flip to
 // a bounded end sourced from BuildSummary + the real TransitionInfo.
 func (ls *LedgerState) HardForkSummary() (*hardfork.Summary, error) {
-	if ls.config.CardanoNodeConfig == nil {
-		return nil, errors.New("ledger: nil CardanoNodeConfig")
-	}
-	shelleyGenesis := ls.config.CardanoNodeConfig.ShelleyGenesis()
-	if shelleyGenesis == nil {
-		return nil, errors.New("ledger: Shelley genesis unavailable")
+	// SystemStart is sourced from the Shelley genesis when available. When it
+	// isn't (e.g. SlotToEpoch-style callers that work from the epoch cache
+	// alone), SystemStart stays at the zero time.Time and callers must avoid
+	// using Summary.SlotToTime / TimeToSlot.
+	var systemStart time.Time
+	if ls.config.CardanoNodeConfig != nil {
+		if sg := ls.config.CardanoNodeConfig.ShelleyGenesis(); sg != nil {
+			systemStart = sg.SystemStart
+		}
 	}
 
 	ls.RLock()
@@ -111,7 +114,7 @@ func (ls *LedgerState) HardForkSummary() (*hardfork.Summary, error) {
 	}
 
 	return &hardfork.Summary{
-		SystemStart: shelleyGenesis.SystemStart,
+		SystemStart: systemStart,
 		Eras:        eras,
 		Transition:  transitionInfo,
 	}, nil
