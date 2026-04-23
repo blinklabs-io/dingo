@@ -1644,7 +1644,7 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 	ls.currentTip = newTip
 	// A rollback invalidates any pending TransitionKnown because the
 	// epoch-rollover block that set it may no longer be on the chain.
-	ls.transitionInfo = hardfork.TransitionInfo{State: hardfork.TransitionUnknown}
+	ls.transitionInfo = hardfork.NewTransitionUnknown()
 	// If rolling back behind the Mithril trust boundary, clear it.
 	// A rollback inside the gap means replacement blocks on the new
 	// fork were NOT processed by SetGapBlockTransaction and must go
@@ -1829,7 +1829,7 @@ func (ls *LedgerState) applyEraTransition(result *EraTransitionResult) {
 	ls.currentPParams = result.NewPParams
 	ls.currentEra = result.NewEra
 	// Any pending TransitionKnown is consumed: the new era is now active.
-	ls.transitionInfo = hardfork.TransitionInfo{State: hardfork.TransitionUnknown}
+	ls.transitionInfo = hardfork.NewTransitionUnknown()
 }
 
 // IsAtTip reports whether the node has caught up to the chain tip at least
@@ -2349,7 +2349,7 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 				// logic re-evaluates for the new epoch's horizon.
 				// (applyEraTransition already handles the era-transition case.)
 				if len(eraTransitions) == 0 {
-					ls.transitionInfo = hardfork.TransitionInfo{State: hardfork.TransitionUnknown}
+					ls.transitionInfo = hardfork.NewTransitionUnknown()
 				}
 			}
 			// Set TransitionKnown only when epoch rolled over in the old era
@@ -2358,10 +2358,9 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 			if len(eraTransitions) == 0 &&
 				rolloverResult != nil &&
 				rolloverResult.HardFork != nil {
-				ls.transitionInfo = hardfork.TransitionInfo{
-					State:      hardfork.TransitionKnown,
-					KnownEpoch: rolloverResult.NewCurrentEpoch.EpochId,
-				}
+				ls.transitionInfo = hardfork.NewTransitionKnown(
+					rolloverResult.NewCurrentEpoch.EpochId,
+				)
 			}
 			ls.Unlock()
 
@@ -3292,10 +3291,7 @@ func (ls *LedgerState) reconstructTransitionInfo() {
 	// was created with the old EraId but its StartSlot is the exact
 	// upcoming era boundary.
 	if pparamsEraId > ls.currentEra.Id {
-		ls.transitionInfo = hardfork.TransitionInfo{
-			State:      hardfork.TransitionKnown,
-			KnownEpoch: ls.currentEpoch.EpochId,
-		}
+		ls.transitionInfo = hardfork.NewTransitionKnown(ls.currentEpoch.EpochId)
 	}
 }
 
@@ -3335,7 +3331,7 @@ func (ls *LedgerState) evaluateTransitionImpossible() {
 		return
 	}
 	if safeEndSlot >= epochEndSlot {
-		ls.transitionInfo = hardfork.TransitionInfo{State: hardfork.TransitionImpossible}
+		ls.transitionInfo = hardfork.NewTransitionImpossible()
 	}
 }
 

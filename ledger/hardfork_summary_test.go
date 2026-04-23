@@ -131,8 +131,8 @@ func TestHardForkSummary_EmptyCache(t *testing.T) {
 	assert.Error(t, err)
 }
 
-// TestHardForkSummary_MissingShelleyGenesis errors.
-// Tolerates a config without a shelley genesis: SystemStart stays at the
+// TestHardForkSummary_MissingShelleyGenesis tolerates a config without a
+// Shelley genesis: SystemStart stays at the
 // zero time. Callers that need wall-clock conversions must provide the
 // genesis, but epoch-cache-only callers (like SlotToEpoch) can still get a
 // meaningful Summary.

@@ -71,7 +71,10 @@ func (ls *LedgerState) TimeToSlot(t time.Time) (uint64, error) {
 	}
 	sum, err := ls.HardForkSummary()
 	if err != nil {
-		if time.Since(t) < 5*time.Second {
+		// time.Since(t) == now - t, so it is negative for future times.
+		// Guard both directions so arbitrary future times don't match the
+		// "near now" fallback.
+		if d := time.Since(t); d >= -5*time.Second && d < 5*time.Second {
 			return nearNowSlot(shelleyGenesis), nil
 		}
 		return 0, errors.New("time not found in known epochs")
@@ -100,16 +103,22 @@ func (ls *LedgerState) SlotToEpoch(slot uint64) (models.Epoch, error) {
 	info, err := sum.SlotToEpoch(slot)
 	if err != nil {
 		if errors.Is(err, hardfork.ErrPastHorizon) {
+			// ErrPastHorizon fires for slots outside every era's bounds —
+			// either below the first era's start or past the last bounded
+			// era's end. Don't claim a direction we don't know.
 			return models.Epoch{}, errors.New(
-				"slot is before the first known epoch",
+				"slot is outside the known epoch range",
 			)
 		}
 		return models.Epoch{}, err
 	}
 	return models.Epoch{
-		EpochId:       info.Epoch,
-		StartSlot:     info.StartSlot,
-		EraId:         info.EraID,
+		EpochId:   info.Epoch,
+		StartSlot: info.StartSlot,
+		EraId:     info.EraID,
+		// info.SlotLength is a positive, protocol-bounded duration; the
+		// millisecond quotient fits in uint.
+		// #nosec G115
 		SlotLength:    uint(info.SlotLength / time.Millisecond),
 		LengthInSlots: uint(info.LengthInSlots),
 		// Nonce stays nil: unknown for projected epochs, and callers must
@@ -133,7 +142,13 @@ func nearNowSlot(sg *shelley.ShelleyGenesis) uint64 {
 	if slotLenMs == 0 {
 		return 0
 	}
-	//nolint:gosec // time.Since is bounded; conversion is safe.
-	sinceStartMs := uint64(time.Since(sg.SystemStart) / time.Millisecond)
+	// If SystemStart is in the future (clock skew or node started before the
+	// configured genesis), time.Since is negative; don't wrap it through
+	// uint64 — return 0 so callers see "genesis hasn't happened yet".
+	elapsed := time.Since(sg.SystemStart)
+	if elapsed <= 0 {
+		return 0
+	}
+	sinceStartMs := uint64(elapsed / time.Millisecond)
 	return sinceStartMs / slotLenMs
 }

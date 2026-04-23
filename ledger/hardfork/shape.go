@@ -65,7 +65,10 @@ func (s Shape) Validate() error {
 			continue
 		}
 		prev := s.Eras[i-1]
-		if e.MinMajorVersion != prev.MaxMajorVersion+1 {
+		// Check contiguity without computing prev.MaxMajorVersion+1 directly —
+		// that addition can wrap uint if MaxMajorVersion == math.MaxUint and
+		// silently accept e.MinMajorVersion == 0 as a valid successor.
+		if e.MinMajorVersion == 0 || e.MinMajorVersion-1 != prev.MaxMajorVersion {
 			return fmt.Errorf(
 				"hardfork: era %q: MinMajorVersion (%d) must be prev (%q) MaxMajorVersion (%d) + 1",
 				e.EraName, e.MinMajorVersion, prev.EraName, prev.MaxMajorVersion,

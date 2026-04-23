@@ -77,7 +77,7 @@ func TestSlotToTime_CrossEra(t *testing.T) {
 func TestTimeToSlot_CrossEra(t *testing.T) {
 	ls := crossEraLedger(t)
 	for _, slot := range []uint64{0, 50, 199, 200, 250, 631, 700} {
-		t.Run("", func(t *testing.T) {
+		t.Run((time.Duration(slot) * time.Second).String(), func(t *testing.T) {
 			tt, err := ls.SlotToTime(slot)
 			require.NoError(t, err)
 			got, err := ls.TimeToSlot(tt)

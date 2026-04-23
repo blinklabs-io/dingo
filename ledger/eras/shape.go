@@ -63,6 +63,12 @@ func StabilityWindowForEra(cfg *cardano.CardanoNodeConfig, eraId uint) (uint64, 
 			activeSlotsCoeff.String(),
 		)
 	}
+	if activeSlotsCoeff.Cmp(big.NewRat(1, 1)) > 0 {
+		return 0, fmt.Errorf(
+			"eras: ActiveSlotsCoeff must be <= 1, got %s",
+			activeSlotsCoeff.String(),
+		)
+	}
 	// ceil(3 * k / f) where f = num/denom → ceil(3 * k * denom / num)
 	numerator := new(big.Int).SetUint64(uint64(k))
 	numerator.Mul(numerator, big.NewInt(3))
@@ -115,7 +121,9 @@ func BuildEraParams(cfg *cardano.CardanoNodeConfig, era EraDesc) (hardfork.EraPa
 		)
 	}
 	return hardfork.EraParams{
-		EpochSize:     uint64(epochLen),
+		EpochSize: uint64(epochLen),
+		// slotLenMs is protocol-bounded (milliseconds per slot, 1–20s range).
+		// #nosec G115
 		SlotLength:    time.Duration(slotLenMs) * time.Millisecond,
 		SafeZoneSlots: safeZone,
 		// GenesisWindow is not yet tracked per era in dingo; defaulting to

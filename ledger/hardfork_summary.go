@@ -66,6 +66,8 @@ func (ls *LedgerState) HardForkSummary() (*hardfork.Summary, error) {
 		eraID := first.EraId
 		// Per-epoch params within an era are expected to be constant; we use
 		// the first epoch's values as the era-level params.
+		// first.SlotLength is protocol-bounded (milliseconds per slot).
+		// #nosec G115
 		slotLen := time.Duration(first.SlotLength) * time.Millisecond
 		epochSize := uint64(first.LengthInSlots)
 
@@ -80,6 +82,8 @@ func (ls *LedgerState) HardForkSummary() (*hardfork.Summary, error) {
 		j := i
 		for j < len(cache) && cache[j].EraId == eraID {
 			ep := cache[j]
+			// LengthInSlots and SlotLength are protocol-bounded uints.
+			// #nosec G115
 			relTime += time.Duration(ep.LengthInSlots) *
 				time.Duration(ep.SlotLength) * time.Millisecond
 			j++

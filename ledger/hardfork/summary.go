@@ -82,11 +82,19 @@ func (s *Summary) Validate() error {
 	if len(s.Eras) == 0 {
 		return errors.New("hardfork: Summary must have at least one era")
 	}
+	for i, era := range s.Eras {
+		if err := era.Params.Validate(); err != nil {
+			return fmt.Errorf(
+				"hardfork: era %d (id=%d) params: %w",
+				i, era.EraID, err,
+			)
+		}
+	}
 	for i := 1; i < len(s.Eras); i++ {
 		prev := s.Eras[i-1]
 		cur := s.Eras[i]
 		if prev.End == nil {
-			return fmt.Errorf("hardfork: era %d (%q) is unbounded but not last",
+			return fmt.Errorf("hardfork: era %d (id=%d) is unbounded but not last",
 				i-1, prev.EraID)
 		}
 		if *prev.End != cur.Start {
@@ -135,6 +143,9 @@ func (s *Summary) SlotToTime(slot uint64) (time.Time, error) {
 		return time.Time{}, err
 	}
 	slotsIntoEra := slot - era.Start.Slot
+	// slotsIntoEra is bounded by the era slot range; at Cardano slot lengths
+	// the product stays well within time.Duration's int64 nanosecond range.
+	// #nosec G115
 	rel := era.Start.RelativeTime + time.Duration(slotsIntoEra)*era.Params.SlotLength
 	return s.SystemStart.Add(rel), nil
 }
@@ -151,6 +162,9 @@ func (s *Summary) TimeToSlot(t time.Time) (uint64, error) {
 		return 0, err
 	}
 	relInEra := rel - era.Start.RelativeTime
+	// eraForRelTime guarantees rel >= era.Start.RelativeTime, and Validate
+	// requires SlotLength > 0, so the quotient is non-negative.
+	// #nosec G115
 	slotsInEra := uint64(relInEra / era.Params.SlotLength)
 	return era.Start.Slot + slotsInEra, nil
 }

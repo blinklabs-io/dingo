@@ -98,6 +98,9 @@ func BuildSummary(
 func mkUpperBound(params EraParams, lo Bound, hiEpoch uint64) Bound {
 	epochsInEra := hiEpoch - lo.Epoch
 	slotsInEra := epochsInEra * params.EpochSize
+	// slotsInEra is bounded by the era's epoch span; real-chain values remain
+	// well under int64 (292 years at 1s/slot).
+	// #nosec G115
 	inEraTime := time.Duration(slotsInEra) * params.SlotLength
 	return Bound{
 		RelativeTime: lo.RelativeTime + inEraTime,
@@ -133,4 +136,3 @@ func applySafeZone(params EraParams, lo Bound, fromSlot uint64) *Bound {
 	b := mkUpperBound(params, lo, hiEpoch)
 	return &b
 }
-

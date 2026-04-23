@@ -331,10 +331,7 @@ func TestQueryHardForkEraHistory_TransitionKnown(t *testing.T) {
 		currentTip: ochainsync.Tip{
 			Point: ocommon.NewPoint(tipSlot, []byte("tip")),
 		},
-		transitionInfo: hardfork.TransitionInfo{
-			State:      hardfork.TransitionKnown,
-			KnownEpoch: epoch501Id,
-		},
+		transitionInfo: hardfork.NewTransitionKnown(epoch501Id),
 		config: LedgerStateConfig{
 			CardanoNodeConfig: newTestEraHistoryCfg(t),
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -404,10 +401,7 @@ func TestQueryHardForkEraHistory_TransitionKnown_MissingEpochFallsBackToSafeZone
 		currentTip: ochainsync.Tip{
 			Point: ocommon.NewPoint(tipSlot, []byte("tip")),
 		},
-		transitionInfo: hardfork.TransitionInfo{
-			State:      hardfork.TransitionKnown,
-			KnownEpoch: missingEpoch,
-		},
+		transitionInfo: hardfork.NewTransitionKnown(missingEpoch),
 		config: LedgerStateConfig{
 			CardanoNodeConfig: newTestEraHistoryCfg(t),
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -466,7 +460,7 @@ func TestQueryHardForkEraHistory_TransitionUnknown_FallsBackToSafeZone(t *testin
 	ls := &LedgerState{
 		db:             db,
 		currentEra:     eras.ConwayEraDesc,
-		transitionInfo: hardfork.TransitionInfo{State: hardfork.TransitionUnknown},
+		transitionInfo: hardfork.NewTransitionUnknown(),
 		currentTip: ochainsync.Tip{
 			Point: ocommon.NewPoint(tipSlot, []byte("tip")),
 		},
@@ -535,7 +529,7 @@ func TestQueryHardForkEraHistory_TransitionImpossible_ServesEpochEnd(t *testing.
 		currentTip: ochainsync.Tip{
 			Point: ocommon.NewPoint(tipSlot, []byte("tip")),
 		},
-		transitionInfo: hardfork.TransitionInfo{State: hardfork.TransitionImpossible},
+		transitionInfo: hardfork.NewTransitionImpossible(),
 		config: LedgerStateConfig{
 			CardanoNodeConfig: newTestEraHistoryCfg(t),
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -586,7 +580,7 @@ func TestQueryHardForkEraHistory_TransitionImpossible_EpochNumberIsNextEpoch(t *
 		db:             db,
 		currentEra:     eras.ConwayEraDesc,
 		currentTip:     ochainsync.Tip{Point: ocommon.NewPoint(tipSlot, []byte("tip"))},
-		transitionInfo: hardfork.TransitionInfo{State: hardfork.TransitionImpossible},
+		transitionInfo: hardfork.NewTransitionImpossible(),
 		config: LedgerStateConfig{
 			CardanoNodeConfig: newTestEraHistoryCfg(t),
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -607,15 +601,22 @@ func TestQueryHardForkEraHistory_TransitionImpossible_EpochNumberIsNextEpoch(t *
 }
 
 // TestQueryHardForkEraHistory_TransitionImpossible_vs_Unknown_Comparison
-// confirms that both TransitionImpossible and TransitionUnknown serve the
-// epoch-end slot when safeEndSlot >= epochStartSlot (both snap to epoch end).
+// confirms that TransitionImpossible and TransitionUnknown converge on the
+// same epoch-end boundary when tipSlot + safeZone still lies within the
+// current epoch — the common steady-state early-in-epoch case.
+//
+// Divergence at late-in-epoch tips (tip + safeZone crossing into the next
+// epoch) is covered by TransitionUnknown_FallsBackToSafeZone and matches
+// Haskell HFC's slotToEpochBound semantics.
 func TestQueryHardForkEraHistory_TransitionImpossible_vs_Unknown_Comparison(t *testing.T) {
 	const (
 		epochStartSlot = uint64(100_000)
 		epochLen       = uint(432_000)
 		slotLenMs      = uint(1_000)
 		epochId        = uint64(500)
-		tipSlot        = uint64(520_000) // safeEnd = 545_920 > epochEnd 532_000
+		// tipSlot well inside the epoch so tip + safeZone (25_920) stays in
+		// the same epoch — both states snap to the same epoch-end boundary.
+		tipSlot = uint64(200_000)
 	)
 
 	setupLS := func(state hardfork.TransitionState) *LedgerState {
@@ -652,12 +653,10 @@ func TestQueryHardForkEraHistory_TransitionImpossible_vs_Unknown_Comparison(t *t
 	impossibleSlot := eraEndSlot(setupLS(hardfork.TransitionImpossible))
 	unknownSlot := eraEndSlot(setupLS(hardfork.TransitionUnknown))
 
-	// Both states snap to the epoch-end boundary.  TransitionImpossible is
-	// set directly; TransitionUnknown snaps because safeEndSlot >= epochStartSlot.
 	assert.Equal(t, uint64(532_000), impossibleSlot,
 		"TransitionImpossible must serve the epoch end")
 	assert.Equal(t, uint64(532_000), unknownSlot,
-		"TransitionUnknown snaps to epoch end (safeEndSlot >= epochStartSlot)")
+		"TransitionUnknown snaps to epoch end when tip+safeZone stays in the same epoch")
 	assert.Equal(t, impossibleSlot, unknownSlot,
 		"both states return the same epoch-end slot")
 }
@@ -871,7 +870,7 @@ func TestQueryHardForkEraHistory_PastEra_NormalEpochEnd(t *testing.T) {
 		currentTip: ochainsync.Tip{
 			Point: ocommon.NewPoint(epochStart+1, []byte("tip")),
 		},
-		transitionInfo: hardfork.TransitionInfo{State: hardfork.TransitionUnknown},
+		transitionInfo: hardfork.NewTransitionUnknown(),
 		config: LedgerStateConfig{
 			CardanoNodeConfig: newTestEraHistoryCfg(t),
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -969,7 +968,7 @@ func TestQueryHardForkEraHistory_PastEra_TransitionEpoch(t *testing.T) {
 		currentTip: ochainsync.Tip{
 			Point: ocommon.NewPoint(epochStart+1, []byte("tip")),
 		},
-		transitionInfo: hardfork.TransitionInfo{State: hardfork.TransitionUnknown},
+		transitionInfo: hardfork.NewTransitionUnknown(),
 		config: LedgerStateConfig{
 			CardanoNodeConfig: newTestEraHistoryCfg(t),
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -1094,7 +1093,7 @@ func TestQueryHardForkEraHistory_PastEra_TransitionEpoch_Contiguity(t *testing.T
 		currentTip: ochainsync.Tip{
 			Point: ocommon.NewPoint(conwayEpochStart+1, []byte("tip")),
 		},
-		transitionInfo: hardfork.TransitionInfo{State: hardfork.TransitionUnknown},
+		transitionInfo: hardfork.NewTransitionUnknown(),
 		config: LedgerStateConfig{
 			CardanoNodeConfig: newTestEraHistoryCfg(t),
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
