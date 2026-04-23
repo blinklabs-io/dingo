@@ -207,6 +207,73 @@ func TestFlushBatch_UtxoOutputsAndSpends(t *testing.T) {
 	assert.Equal(t, spentBy, outputs[1].SpentAtTxId)
 }
 
+func TestFlushBatch_MultipleSpends(t *testing.T) {
+	// This test specifically guards against the args-ordering bug in
+	// batchSpendUtxos: with N>1 spends the SQL has three separate CASE
+	// sections whose bindings must be grouped (all deletedSlot args, then
+	// all spentAt args, then all WHERE args), not interleaved per-spend.
+	store := setupTestDBWithMode(t, "api")
+	batch := NewBatchAccumulator()
+
+	txID1 := bytes.Repeat([]byte{0x11}, 32)
+	txID2 := bytes.Repeat([]byte{0x22}, 32)
+	spentBy1 := bytes.Repeat([]byte{0xA1}, 32)
+	spentBy2 := bytes.Repeat([]byte{0xA2}, 32)
+
+	// Pre-insert spending transactions to satisfy the FK constraint.
+	require.NoError(
+		t,
+		store.DB().Create(
+			&models.Transaction{Hash: spentBy1, Slot: 200, Valid: true},
+		).Error,
+	)
+	require.NoError(
+		t,
+		store.DB().Create(
+			&models.Transaction{Hash: spentBy2, Slot: 201, Valid: true},
+		).Error,
+	)
+
+	// Two outputs from two different tx hashes.
+	batch.AddUtxoOutput(
+		models.Utxo{TxId: txID1, OutputIdx: 0, AddedSlot: 100, Amount: 1},
+	)
+	batch.AddUtxoOutput(
+		models.Utxo{TxId: txID2, OutputIdx: 0, AddedSlot: 100, Amount: 2},
+	)
+	// Spend both, with deliberately different slots and spentBy hashes.
+	batch.AddUtxoSpend(utxoSpend{
+		TxId:          txID1,
+		OutputIdx:     0,
+		Slot:          200,
+		SpentByTxHash: spentBy1,
+	})
+	batch.AddUtxoSpend(utxoSpend{
+		TxId:          txID2,
+		OutputIdx:     0,
+		Slot:          201,
+		SpentByTxHash: spentBy2,
+	})
+
+	require.NoError(t, store.FlushBatch(batch, nil))
+
+	var u1, u2 models.Utxo
+	require.NoError(
+		t,
+		store.DB().Where("tx_id = ? AND output_idx = 0", txID1).First(&u1).Error,
+	)
+	require.NoError(
+		t,
+		store.DB().Where("tx_id = ? AND output_idx = 0", txID2).First(&u2).Error,
+	)
+
+	// Each UTxO must carry its own slot and spentBy — wrong if args were interleaved.
+	assert.Equal(t, uint64(200), u1.DeletedSlot)
+	assert.Equal(t, spentBy1, u1.SpentAtTxId)
+	assert.Equal(t, uint64(201), u2.DeletedSlot)
+	assert.Equal(t, spentBy2, u2.SpentAtTxId)
+}
+
 func TestFlushBatch_Idempotent(t *testing.T) {
 	store := setupTestDBWithMode(t, "api")
 	batch := NewBatchAccumulator()
@@ -226,13 +293,13 @@ func TestFlushBatch_Idempotent(t *testing.T) {
 		TxIndex:       4,
 	})
 	batch.AddScript(models.Script{
-		Hash:        []byte("script-hash-000000000000000001"),
+		Hash:        bytes.Repeat([]byte{0xCC}, 28),
 		Content:     []byte{0x10, 0x11},
 		CreatedSlot: 300,
 		Type:        1,
 	})
 	batch.AddUtxoOutput(models.Utxo{
-		TxId:      []byte("utxo-hash-000000000000000000000001"),
+		TxId:      bytes.Repeat([]byte{0xDD}, 32),
 		OutputIdx: 0,
 		AddedSlot: 300,
 		Amount:    50,

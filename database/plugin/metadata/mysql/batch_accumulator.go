@@ -279,26 +279,42 @@ func batchSpendUtxos(db *gorm.DB, spends []utxoSpend) error {
 		var deletedSlotCases []string
 		var spentAtCases []string
 		var whereConditions []string
-		args := make([]any, 0, len(chunk)*8)
+		var deletedSlotArgs []any
+		var spentAtArgs []any
+		var whereArgs []any
 		for _, spend := range chunk {
 			deletedSlotCases = append(
 				deletedSlotCases,
 				"WHEN tx_id = ? AND output_idx = ? THEN ?",
 			)
-			args = append(args, spend.TxId, spend.OutputIdx, spend.Slot)
+			deletedSlotArgs = append(
+				deletedSlotArgs,
+				spend.TxId,
+				spend.OutputIdx,
+				spend.Slot,
+			)
 
 			spentAtCases = append(
 				spentAtCases,
 				"WHEN tx_id = ? AND output_idx = ? THEN ?",
 			)
-			args = append(args, spend.TxId, spend.OutputIdx, spend.SpentByTxHash)
+			spentAtArgs = append(
+				spentAtArgs,
+				spend.TxId,
+				spend.OutputIdx,
+				spend.SpentByTxHash,
+			)
 
 			whereConditions = append(
 				whereConditions,
 				"(tx_id = ? AND output_idx = ?)",
 			)
-			args = append(args, spend.TxId, spend.OutputIdx)
+			whereArgs = append(whereArgs, spend.TxId, spend.OutputIdx)
 		}
+		args := make([]any, 0, len(deletedSlotArgs)+len(spentAtArgs)+len(whereArgs))
+		args = append(args, deletedSlotArgs...)
+		args = append(args, spentAtArgs...)
+		args = append(args, whereArgs...)
 		sql := fmt.Sprintf(
 			"UPDATE utxo SET deleted_slot = CASE %s ELSE deleted_slot END, spent_at_tx_id = CASE %s ELSE spent_at_tx_id END WHERE deleted_slot = 0 AND (%s)",
 			strings.Join(deletedSlotCases, " "),
