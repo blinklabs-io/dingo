@@ -167,10 +167,9 @@ func (ls *LedgerState) queryHardForkEraHistory() (any, error) {
 	transitionInfo := ls.transitionInfo
 	ls.RUnlock()
 
-	cfg := ls.config.CardanoNodeConfig
-	shape, err := eras.BuildShape(cfg)
-	if err != nil {
-		return nil, err
+	shape := ls.eraShape()
+	if len(shape.Eras) == 0 {
+		return nil, errors.New("era history: shape unavailable")
 	}
 	if len(shape.Eras) != len(eras.Eras) {
 		return nil, fmt.Errorf(

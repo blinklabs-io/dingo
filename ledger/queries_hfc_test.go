@@ -20,6 +20,7 @@ import (
 	"math/big"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/hardfork"
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -147,6 +148,85 @@ func TestQueryHardForkEraHistory_TransitionUnknown_TipNearEpochEnd(t *testing.T)
 		"Unknown: tip+safeZone crossing into next epoch should extend EraEnd to that epoch's end")
 	assert.Equal(t, expectedEraEndEpoch, epoch,
 		"Unknown: EraEnd epoch should be the epoch *after* the one containing tip+safeZone")
+}
+
+// TestQueryHardForkEraHistory_AtEpochOverride_SurfacesKnownEnd pins that
+// TestShelleyHardForkAtEpoch + ExperimentalHardForksEnabled propagates through
+// to queryHardForkEraHistory as a TransitionKnown end: the open era's EraEnd
+// epoch is the override epoch, not the stale tipSlot + safeZone cap.
+//
+// Setup: a Byron-only DB with a single epoch 3 occupying slots
+// [epochStart, epochStart+length). TestShelleyHardForkAtEpoch is 5 and
+// ExperimentalHardForksEnabled is true, so Byron's NextEraTrigger resolves to
+// AtEpoch(5). With currentEpoch=3 < 5, evaluateTriggerAtEpoch will set
+// TransitionKnown(5) and the Byron era's End must snap to epoch 5's start.
+func TestQueryHardForkEraHistory_AtEpochOverride_SurfacesKnownEnd(t *testing.T) {
+	const (
+		epochId        = uint64(3)
+		epochLen       = uint(21_600)   // Byron epoch length (10k, k=2160)
+		slotLenMs      = uint(20_000)   // 20s Byron slot
+		epochStartSlot = uint64(64_800) // epoch 3 starts after 3 * 21_600
+		tipSlot        = uint64(70_000)
+	)
+
+	db := newTestDB(t)
+	require.NoError(t, db.SetEpoch(
+		epochStartSlot, epochId,
+		nil, nil, nil, nil,
+		eras.ByronEraDesc.Id, slotLenMs, epochLen,
+		nil,
+	))
+
+	cfg := newTestEraHistoryCfg(t)
+	enabled := true
+	override := uint64(5)
+	cfg.ExperimentalHardForksEnabled = &enabled
+	cfg.TestShelleyHardForkAtEpoch = &override
+
+	ls := &LedgerState{
+		db:         db,
+		currentEra: eras.ByronEraDesc,
+		currentEpoch: models.Epoch{
+			EpochId:       epochId,
+			StartSlot:     epochStartSlot,
+			LengthInSlots: epochLen,
+			SlotLength:    slotLenMs,
+			EraId:         eras.ByronEraDesc.Id,
+		},
+		currentTip: ochainsync.Tip{
+			Point: ocommon.NewPoint(tipSlot, []byte("tip")),
+		},
+		transitionInfo: hardfork.NewTransitionUnknown(),
+		config: LedgerStateConfig{
+			CardanoNodeConfig: cfg,
+			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+
+	// Apply the trigger so transitionInfo reflects TransitionKnown(5) as it
+	// would at runtime via Start() / the tip-update path.
+	ls.evaluateTriggerAtEpoch()
+	require.Equal(t, hardfork.TransitionKnown, ls.transitionInfo.State)
+	require.Equal(t, override, ls.transitionInfo.KnownEpoch)
+
+	result, err := ls.queryHardForkEraHistory()
+	require.NoError(t, err)
+	list, ok := result.(cbor.IndefLengthList)
+	require.True(t, ok)
+	require.NotEmpty(t, list)
+
+	// The currently-open era (Byron at index 0) should have EraEnd.Epoch == 5.
+	byronEra, ok := list[0].([]any)
+	require.True(t, ok)
+	require.Len(t, byronEra, 3)
+	byronEnd, ok := byronEra[1].([]any)
+	require.True(t, ok)
+	require.Len(t, byronEnd, 3, "EraEnd is [relTime, slot, epoch]")
+
+	endEpoch, ok := byronEnd[2].(uint64)
+	require.True(t, ok, "EraEnd epoch must be uint64, got %T", byronEnd[2])
+	assert.Equal(t, override, endEpoch,
+		"AtEpoch override must pin the open era's EraEnd.Epoch at the override value")
 }
 
 // TestQueryHardForkEraHistory_AdjacentErasContiguous pins that whenever two

@@ -21,16 +21,21 @@ import (
 )
 
 // ShapeEntry describes one era's static identity and parameters: the era ID,
-// the span of protocol major versions it covers, and its EraParams.
+// the span of protocol major versions it covers, its EraParams, and the
+// trigger that arms the transition OUT of this era into its successor.
 //
 // Protocol major version ranges must be contiguous and non-overlapping across
-// a valid Shape.
+// a valid Shape. NextEraTrigger mirrors Haskell's per-era TriggerHardFork:
+// the final entry must be TriggerNotDuringThisExecution; every other entry
+// should carry either TriggerAtVersion (the default, keyed on the next era's
+// MinMajorVersion) or TriggerAtEpoch (the TestXHardForkAtEpoch override).
 type ShapeEntry struct {
 	EraID           uint
 	EraName         string
 	MinMajorVersion uint
 	MaxMajorVersion uint
 	Params          EraParams
+	NextEraTrigger  TriggerHardFork
 }
 
 // Shape is the static, compile-time-known era table: the set of eras this node
@@ -47,6 +52,8 @@ type Shape struct {
 //   - Consecutive entries' version ranges meet without gap and without overlap
 //     (cur.Min == prev.Max + 1).
 //   - Each entry's EraParams validate.
+//   - The final entry carries TriggerNotDuringThisExecution; no other entry
+//     does.
 func (s Shape) Validate() error {
 	if len(s.Eras) == 0 {
 		return errors.New("hardfork: Shape must have at least one era")
@@ -60,6 +67,26 @@ func (s Shape) Validate() error {
 		}
 		if err := e.Params.Validate(); err != nil {
 			return fmt.Errorf("hardfork: era %q: %w", e.EraName, err)
+		}
+		isLast := i == len(s.Eras)-1
+		switch {
+		case e.NextEraTrigger.Kind != TriggerAtVersion &&
+			e.NextEraTrigger.Kind != TriggerAtEpoch &&
+			e.NextEraTrigger.Kind != TriggerNotDuringThisExecution:
+			return fmt.Errorf(
+				"hardfork: era %q: NextEraTrigger has unknown kind %d",
+				e.EraName, e.NextEraTrigger.Kind,
+			)
+		case isLast && e.NextEraTrigger.Kind != TriggerNotDuringThisExecution:
+			return fmt.Errorf(
+				"hardfork: era %q (final): NextEraTrigger must be NotDuringThisExecution, got %s",
+				e.EraName, e.NextEraTrigger,
+			)
+		case !isLast && e.NextEraTrigger.Kind == TriggerNotDuringThisExecution:
+			return fmt.Errorf(
+				"hardfork: era %q (non-final): NextEraTrigger must not be NotDuringThisExecution",
+				e.EraName,
+			)
 		}
 		if i == 0 {
 			continue

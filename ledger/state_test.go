@@ -2602,6 +2602,173 @@ func TestEvaluateTransitionImpossible_NoOpWhenEpochLengthZero(t *testing.T) {
 		"zero-length epoch must not trigger TransitionImpossible")
 }
 
+// ---------------------------------------------------------------------------
+// evaluateTriggerAtEpoch tests
+// ---------------------------------------------------------------------------
+
+// newTestLedgerStateWithTrigger builds a minimal LedgerState with the given
+// currentEra / currentEpoch / initial transitionInfo, and the requested
+// TestXHardForkAtEpoch override wired into the config (keyed on the
+// successor era's lowercase name).
+func newTestLedgerStateWithTrigger(
+	t *testing.T,
+	currentEraId uint,
+	currentEpochId uint64,
+	initialTI hardfork.TransitionInfo,
+	nextEraLower string,
+	overrideEpoch *uint64,
+	experimentalEnabled bool,
+) *LedgerState {
+	t.Helper()
+	cfg := newTestEraHistoryCfg(t)
+	if experimentalEnabled {
+		enabled := true
+		cfg.ExperimentalHardForksEnabled = &enabled
+	}
+	switch nextEraLower {
+	case "shelley":
+		cfg.TestShelleyHardForkAtEpoch = overrideEpoch
+	case "allegra":
+		cfg.TestAllegraHardForkAtEpoch = overrideEpoch
+	case "mary":
+		cfg.TestMaryHardForkAtEpoch = overrideEpoch
+	case "alonzo":
+		cfg.TestAlonzoHardForkAtEpoch = overrideEpoch
+	case "babbage":
+		cfg.TestBabbageHardForkAtEpoch = overrideEpoch
+	case "conway":
+		cfg.TestConwayHardForkAtEpoch = overrideEpoch
+	}
+	return &LedgerState{
+		currentEra:     *eras.GetEraById(currentEraId),
+		currentEpoch:   newTestEpoch(currentEpochId, 0, 432_000, currentEraId),
+		transitionInfo: initialTI,
+		config: LedgerStateConfig{
+			CardanoNodeConfig: cfg,
+			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+}
+
+// Happy path: in Byron, with ExperimentalHardForksEnabled and
+// TestShelleyHardForkAtEpoch=5, and the current epoch before 5, the
+// TransitionInfo is surfaced as TransitionKnown(5).
+func TestEvaluateTriggerAtEpoch_SetsTransitionKnown(t *testing.T) {
+	target := uint64(5)
+	ls := newTestLedgerStateWithTrigger(
+		t,
+		eras.ByronEraDesc.Id, 3,
+		hardfork.NewTransitionUnknown(),
+		"shelley", &target, true,
+	)
+	ls.evaluateTriggerAtEpoch()
+	assert.Equal(t, hardfork.TransitionKnown, ls.transitionInfo.State)
+	assert.Equal(t, target, ls.transitionInfo.KnownEpoch)
+}
+
+// Without ExperimentalHardForksEnabled, the override is inert.
+func TestEvaluateTriggerAtEpoch_InertWithoutExperimentalFlag(t *testing.T) {
+	target := uint64(5)
+	ls := newTestLedgerStateWithTrigger(
+		t,
+		eras.ByronEraDesc.Id, 3,
+		hardfork.NewTransitionUnknown(),
+		"shelley", &target, false,
+	)
+	ls.evaluateTriggerAtEpoch()
+	assert.Equal(t, hardfork.TransitionUnknown, ls.transitionInfo.State,
+		"override must be ignored without ExperimentalHardForksEnabled")
+}
+
+// When currentEpoch.EpochId >= target epoch, the trigger is not applied
+// (the transition should have already occurred).
+func TestEvaluateTriggerAtEpoch_NotSetWhenEpochReached(t *testing.T) {
+	target := uint64(5)
+	ls := newTestLedgerStateWithTrigger(
+		t,
+		eras.ByronEraDesc.Id, 5,
+		hardfork.NewTransitionUnknown(),
+		"shelley", &target, true,
+	)
+	ls.evaluateTriggerAtEpoch()
+	assert.Equal(t, hardfork.TransitionUnknown, ls.transitionInfo.State)
+}
+
+// The last known era has no successor: the call is a no-op even if
+// Test<Next>HardForkAtEpoch happens to be set (not meaningful).
+func TestEvaluateTriggerAtEpoch_NoOpOnFinalEra(t *testing.T) {
+	target := uint64(100)
+	ls := newTestLedgerStateWithTrigger(
+		t,
+		eras.ConwayEraDesc.Id, 3,
+		hardfork.NewTransitionUnknown(),
+		// Conway is final today; there is no TestDijkstraHardForkAtEpoch
+		// field on the config, so no override can ever match.
+		"", &target, true,
+	)
+	ls.evaluateTriggerAtEpoch()
+	assert.Equal(t, hardfork.TransitionUnknown, ls.transitionInfo.State)
+}
+
+// AtEpoch override supersedes a prior TransitionImpossible: AtEpoch is
+// authoritative info about a known upcoming transition and must override the
+// safe-zone-derived "no transition in this epoch" verdict.
+func TestEvaluateTriggerAtEpoch_OverridesTransitionImpossible(t *testing.T) {
+	target := uint64(10)
+	ls := newTestLedgerStateWithTrigger(
+		t,
+		eras.ByronEraDesc.Id, 3,
+		hardfork.NewTransitionImpossible(),
+		"shelley", &target, true,
+	)
+	ls.evaluateTriggerAtEpoch()
+	assert.Equal(t, hardfork.TransitionKnown, ls.transitionInfo.State)
+	assert.Equal(t, target, ls.transitionInfo.KnownEpoch)
+}
+
+// AtEpoch override replaces a TransitionKnown set for a different epoch.
+// Mirrors Haskell's shelleyTriggerHardFork short-circuit: the AtEpoch config
+// is the truth and bypasses pparams-vote inspection entirely.
+func TestEvaluateTriggerAtEpoch_ReplacesDifferentKnownEpoch(t *testing.T) {
+	target := uint64(10)
+	ls := newTestLedgerStateWithTrigger(
+		t,
+		eras.ByronEraDesc.Id, 3,
+		hardfork.NewTransitionKnown(4),
+		"shelley", &target, true,
+	)
+	ls.evaluateTriggerAtEpoch()
+	assert.Equal(t, hardfork.TransitionKnown, ls.transitionInfo.State)
+	assert.Equal(t, target, ls.transitionInfo.KnownEpoch,
+		"AtEpoch override must replace a stale TransitionKnown(other)")
+}
+
+// Idempotent when already TransitionKnown at the same epoch.
+func TestEvaluateTriggerAtEpoch_IdempotentOnSameEpoch(t *testing.T) {
+	target := uint64(10)
+	ls := newTestLedgerStateWithTrigger(
+		t,
+		eras.ByronEraDesc.Id, 3,
+		hardfork.NewTransitionKnown(target),
+		"shelley", &target, true,
+	)
+	ls.evaluateTriggerAtEpoch()
+	assert.Equal(t, hardfork.TransitionKnown, ls.transitionInfo.State)
+	assert.Equal(t, target, ls.transitionInfo.KnownEpoch)
+}
+
+// No override configured at all: evaluateTriggerAtEpoch is a no-op.
+func TestEvaluateTriggerAtEpoch_NoOpWithoutOverride(t *testing.T) {
+	ls := newTestLedgerStateWithTrigger(
+		t,
+		eras.ByronEraDesc.Id, 3,
+		hardfork.NewTransitionUnknown(),
+		"", nil, true,
+	)
+	ls.evaluateTriggerAtEpoch()
+	assert.Equal(t, hardfork.TransitionUnknown, ls.transitionInfo.State)
+}
+
 // TestRolloverCommit_ResetsTransitionImpossible verifies that a plain epoch
 // rollover (no HardFork, no era transition) resets TransitionImpossible to
 // TransitionUnknown so the new epoch starts fresh.

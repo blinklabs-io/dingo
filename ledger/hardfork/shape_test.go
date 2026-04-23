@@ -26,13 +26,13 @@ func sampleShape() hardfork.Shape {
 	return hardfork.Shape{
 		SystemStart: testSysStart,
 		Eras: []hardfork.ShapeEntry{
-			{EraID: 0, EraName: "Byron", MinMajorVersion: 0, MaxMajorVersion: 1, Params: byronParams},
-			{EraID: 1, EraName: "Shelley", MinMajorVersion: 2, MaxMajorVersion: 2, Params: shelleyParams},
-			{EraID: 2, EraName: "Allegra", MinMajorVersion: 3, MaxMajorVersion: 3, Params: shelleyParams},
-			{EraID: 3, EraName: "Mary", MinMajorVersion: 4, MaxMajorVersion: 4, Params: shelleyParams},
-			{EraID: 4, EraName: "Alonzo", MinMajorVersion: 5, MaxMajorVersion: 6, Params: shelleyParams},
-			{EraID: 5, EraName: "Babbage", MinMajorVersion: 7, MaxMajorVersion: 8, Params: shelleyParams},
-			{EraID: 6, EraName: "Conway", MinMajorVersion: 9, MaxMajorVersion: 10, Params: shelleyParams},
+			{EraID: 0, EraName: "Byron", MinMajorVersion: 0, MaxMajorVersion: 1, Params: byronParams, NextEraTrigger: hardfork.NewTriggerAtVersion(2)},
+			{EraID: 1, EraName: "Shelley", MinMajorVersion: 2, MaxMajorVersion: 2, Params: shelleyParams, NextEraTrigger: hardfork.NewTriggerAtVersion(3)},
+			{EraID: 2, EraName: "Allegra", MinMajorVersion: 3, MaxMajorVersion: 3, Params: shelleyParams, NextEraTrigger: hardfork.NewTriggerAtVersion(4)},
+			{EraID: 3, EraName: "Mary", MinMajorVersion: 4, MaxMajorVersion: 4, Params: shelleyParams, NextEraTrigger: hardfork.NewTriggerAtVersion(5)},
+			{EraID: 4, EraName: "Alonzo", MinMajorVersion: 5, MaxMajorVersion: 6, Params: shelleyParams, NextEraTrigger: hardfork.NewTriggerAtVersion(7)},
+			{EraID: 5, EraName: "Babbage", MinMajorVersion: 7, MaxMajorVersion: 8, Params: shelleyParams, NextEraTrigger: hardfork.NewTriggerAtVersion(9)},
+			{EraID: 6, EraName: "Conway", MinMajorVersion: 9, MaxMajorVersion: 10, Params: shelleyParams, NextEraTrigger: hardfork.NewTriggerNotDuringThisExecution()},
 		},
 	}
 }
@@ -117,4 +117,41 @@ func TestShape_EraIndex(t *testing.T) {
 
 	_, ok = s.EraIndex(99)
 	assert.False(t, ok)
+}
+
+// Validate must reject a shape whose non-final era carries
+// TriggerNotDuringThisExecution — that variant is reserved for the final era.
+func TestShape_Validate_RejectsNonFinalNotDuringThisExecution(t *testing.T) {
+	s := sampleShape()
+	// Force Byron (non-final) to carry NotDuringThisExecution.
+	s.Eras[0].NextEraTrigger = hardfork.NewTriggerNotDuringThisExecution()
+	err := s.Validate()
+	assert.ErrorContains(t, err, "NotDuringThisExecution")
+}
+
+// Validate must reject a shape whose final era carries a trigger other than
+// NotDuringThisExecution.
+func TestShape_Validate_RejectsFinalWithSuccessorTrigger(t *testing.T) {
+	s := sampleShape()
+	// Force Conway (final) to carry AtEpoch.
+	s.Eras[len(s.Eras)-1].NextEraTrigger = hardfork.NewTriggerAtEpoch(100)
+	err := s.Validate()
+	assert.ErrorContains(t, err, "final")
+}
+
+// AtEpoch triggers on non-final eras are accepted.
+func TestShape_Validate_AcceptsAtEpochOnNonFinal(t *testing.T) {
+	s := sampleShape()
+	s.Eras[0].NextEraTrigger = hardfork.NewTriggerAtEpoch(5)
+	assert.NoError(t, s.Validate())
+}
+
+// Validate must reject a trigger whose Kind is not one of the three known
+// variants, so future refactors / external constructors can't quietly produce
+// a shape that passes the final/non-final checks with a bogus kind.
+func TestShape_Validate_RejectsUnknownTriggerKind(t *testing.T) {
+	s := sampleShape()
+	s.Eras[0].NextEraTrigger = hardfork.TriggerHardFork{Kind: 99}
+	err := s.Validate()
+	assert.ErrorContains(t, err, "unknown kind")
 }

@@ -423,6 +423,7 @@ type LedgerState struct {
 	slotsPerKESPeriod                  atomic.Uint64
 	forgedBlockChecker                 atomic.Pointer[forgedBlockCheckerHolder]
 	slotBattleRecorder                 atomic.Pointer[slotBattleRecorderHolder]
+	cachedShape                        atomic.Pointer[hardfork.Shape] // lazy-built from CardanoNodeConfig; immutable for the LedgerState's lifetime
 	reachedTip                         bool
 	currentTip                         ochainsync.Tip
 	currentEpoch                       models.Epoch
@@ -664,6 +665,10 @@ func (ls *LedgerState) Start(ctx context.Context) error {
 	// already covers the epoch end (TransitionImpossible).  This handles the
 	// case where the node was shut down after the tip advanced past the
 	// stability window but before the next epoch rollover was processed.
+	// First honor any TestXHardForkAtEpoch override (TriggerAtEpoch): this
+	// short-circuits TransitionUnknown/Impossible with a known-in-advance
+	// transition epoch, matching the Haskell HFC semantics.
+	ls.evaluateTriggerAtEpoch()
 	ls.evaluateTransitionImpossible()
 	if err := ls.reconcilePrimaryChainTipWithLedgerTip(); err != nil {
 		return fmt.Errorf("failed to reconcile primary chain tip: %w", err)
@@ -2362,6 +2367,12 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 					rolloverResult.NewCurrentEpoch.EpochId,
 				)
 			}
+			// Re-apply any TestXHardForkAtEpoch override. This matters both
+			// when no eraTransitions/HardFork occurred (the rollover reset
+			// transitionInfo to Unknown above) and when an era transition
+			// advanced ls.currentEra to a new era whose own successor may
+			// carry its own AtEpoch override.
+			ls.evaluateTriggerAtEpoch()
 			ls.Unlock()
 
 			// Update scheduler (thread-safe, no lock needed)
@@ -2928,11 +2939,14 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 					ls.reachedTip = true
 				}
 				ls.updateTipMetrics()
-				// After advancing the tip, check whether the stability window
-				// now reaches or exceeds the epoch end.  If so, a hard fork
-				// cannot happen within this epoch and TransitionImpossible
-				// should be recorded so queryHardForkEraHistory serves the
-				// confirmed epoch-end slot instead of a stale safeZone cap.
+				// After advancing the tip, first honor any TestXHardForkAtEpoch
+				// override so queries surface the pinned epoch ahead of time;
+				// then check whether the stability window reaches or exceeds
+				// the epoch end, in which case a hard fork cannot happen
+				// within this epoch and TransitionImpossible should be
+				// recorded so queryHardForkEraHistory serves the confirmed
+				// epoch-end slot instead of a stale safeZone cap.
+				ls.evaluateTriggerAtEpoch()
 				ls.evaluateTransitionImpossible()
 				// Capture tip for logging while holding the lock
 				tipForLog = ls.currentTip
@@ -3293,6 +3307,75 @@ func (ls *LedgerState) reconstructTransitionInfo() {
 	if pparamsEraId > ls.currentEra.Id {
 		ls.transitionInfo = hardfork.NewTransitionKnown(ls.currentEpoch.EpochId)
 	}
+}
+
+// eraShape returns the resolved hardfork.Shape for this LedgerState's
+// CardanoNodeConfig, building and caching it on first access. cfg is
+// immutable for the LedgerState's lifetime, so the cached shape is too.
+//
+// Returns an empty Shape (no error) when CardanoNodeConfig is unset or when
+// BuildShape fails; callers must treat an empty Shape as "shape unavailable"
+// and skip shape-derived work.
+func (ls *LedgerState) eraShape() hardfork.Shape {
+	if s := ls.cachedShape.Load(); s != nil {
+		return *s
+	}
+	cfg := ls.config.CardanoNodeConfig
+	if cfg == nil {
+		return hardfork.Shape{}
+	}
+	s, err := eras.BuildShape(cfg)
+	if err != nil {
+		return hardfork.Shape{}
+	}
+	ls.cachedShape.CompareAndSwap(nil, &s)
+	return *ls.cachedShape.Load()
+}
+
+// evaluateTriggerAtEpoch sets transitionInfo to TransitionKnown(e) when the
+// current era's NextEraTrigger is TriggerAtEpoch(e) and that epoch has not
+// yet arrived. The trigger is resolved once at Shape build time from
+// CardanoNodeConfig (TestXHardForkAtEpoch + ExperimentalHardForksEnabled);
+// this method only consumes that resolution.
+//
+// The AtEpoch override is authoritative: it supersedes a prior
+// TransitionUnknown / TransitionImpossible, and replaces any
+// TransitionKnown(other) that may have been set from an on-chain pparams
+// major-version bump, mirroring the Haskell semantics where
+// `shelleyTriggerHardFork` short-circuits to the configured epoch without
+// inspecting pparams at all.
+//
+// The call is a no-op when:
+//   - the shape is unavailable or the current era is unknown to it,
+//   - the current era's NextEraTrigger is not TriggerAtEpoch (i.e. final era,
+//     or default AtVersion),
+//   - the configured epoch has already been reached (EpochId >= e) — at that
+//     point either the rollover has already applied the transition, or
+//     queries should naturally fall through to the new era's own trigger.
+//
+// Call under ls.Lock() (runtime paths) or without a lock during
+// single-threaded startup.
+func (ls *LedgerState) evaluateTriggerAtEpoch() {
+	shape := ls.eraShape()
+	if len(shape.Eras) == 0 {
+		return
+	}
+	entry, ok := shape.EraForID(ls.currentEra.Id)
+	if !ok {
+		return
+	}
+	if entry.NextEraTrigger.Kind != hardfork.TriggerAtEpoch {
+		return
+	}
+	epoch := entry.NextEraTrigger.Epoch
+	if ls.currentEpoch.EpochId >= epoch {
+		return
+	}
+	if ls.transitionInfo.State == hardfork.TransitionKnown &&
+		ls.transitionInfo.KnownEpoch == epoch {
+		return
+	}
+	ls.transitionInfo = hardfork.NewTransitionKnown(epoch)
 }
 
 // evaluateTransitionImpossible sets transitionInfo to TransitionImpossible

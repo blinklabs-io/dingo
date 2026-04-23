@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"strings"
 	"time"
 
 	"github.com/blinklabs-io/dingo/config/cardano"
@@ -187,6 +188,23 @@ func BuildShape(cfg *cardano.CardanoNodeConfig) (hardfork.Shape, error) {
 			MaxMajorVersion: r.max,
 			Params:          params,
 		})
+	}
+
+	// Resolve each entry's NextEraTrigger. Must happen after the entries are
+	// built because AtVersion defaults to the *next* entry's MinMajorVersion.
+	// TestXHardForkAtEpoch is keyed on the lowercase successor era name and
+	// only honoured when ExperimentalHardForksEnabled is set.
+	for i := range entries {
+		if i == len(entries)-1 {
+			entries[i].NextEraTrigger = hardfork.NewTriggerNotDuringThisExecution()
+			continue
+		}
+		nextEra := entries[i+1]
+		if epoch, ok := cfg.HardForkEpoch(strings.ToLower(nextEra.EraName)); ok {
+			entries[i].NextEraTrigger = hardfork.NewTriggerAtEpoch(epoch)
+			continue
+		}
+		entries[i].NextEraTrigger = hardfork.NewTriggerAtVersion(nextEra.MinMajorVersion)
 	}
 
 	return hardfork.Shape{

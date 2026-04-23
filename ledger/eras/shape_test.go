@@ -21,6 +21,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/ledger/eras"
+	"github.com/blinklabs-io/dingo/ledger/hardfork"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -182,4 +183,113 @@ func TestBuildShape_MissingShelleyGenesis(t *testing.T) {
 	cfg := &cardano.CardanoNodeConfig{}
 	_, err := eras.BuildShape(cfg)
 	assert.Error(t, err)
+}
+
+// ---------------------------------------------------------------- NextEraTrigger
+
+// Default (no TestXHardForkAtEpoch configured): each era's NextEraTrigger is
+// TriggerAtVersion keyed on the next era's MinMajorVersion; the final era
+// is NotDuringThisExecution.
+func TestBuildShape_NextEraTrigger_DefaultsToAtVersion(t *testing.T) {
+	cfg := newTestCfg(t)
+	shape, err := eras.BuildShape(cfg)
+	require.NoError(t, err)
+
+	for i, e := range shape.Eras {
+		if i == len(shape.Eras)-1 {
+			assert.Equal(t,
+				hardfork.TriggerNotDuringThisExecution,
+				e.NextEraTrigger.Kind,
+				"final era %q should carry NotDuringThisExecution", e.EraName,
+			)
+			continue
+		}
+		next := shape.Eras[i+1]
+		assert.Equal(t, hardfork.TriggerAtVersion, e.NextEraTrigger.Kind,
+			"era %q → %q should default to AtVersion", e.EraName, next.EraName)
+		assert.Equal(t, next.MinMajorVersion, e.NextEraTrigger.Version,
+			"era %q → %q: Version should equal next era's MinMajorVersion",
+			e.EraName, next.EraName)
+	}
+}
+
+// With ExperimentalHardForksEnabled=true and TestShelleyHardForkAtEpoch set,
+// Byron's NextEraTrigger becomes AtEpoch; all other eras remain AtVersion.
+func TestBuildShape_NextEraTrigger_AtEpochOverride(t *testing.T) {
+	cfg := newTestCfg(t)
+	enabled := true
+	override := uint64(5)
+	cfg.ExperimentalHardForksEnabled = &enabled
+	cfg.TestShelleyHardForkAtEpoch = &override
+
+	shape, err := eras.BuildShape(cfg)
+	require.NoError(t, err)
+
+	// Byron → Shelley should be AtEpoch(5).
+	byron := shape.Eras[0]
+	require.Equal(t, "Byron", byron.EraName)
+	assert.Equal(t, hardfork.TriggerAtEpoch, byron.NextEraTrigger.Kind)
+	assert.Equal(t, uint64(5), byron.NextEraTrigger.Epoch)
+
+	// Shelley → Allegra should still be AtVersion.
+	shelley := shape.Eras[1]
+	require.Equal(t, "Shelley", shelley.EraName)
+	assert.Equal(t, hardfork.TriggerAtVersion, shelley.NextEraTrigger.Kind)
+}
+
+// TestXHardForkAtEpoch is ignored when ExperimentalHardForksEnabled is not
+// set: HardForkEpoch returns false, so we fall through to AtVersion.
+func TestBuildShape_NextEraTrigger_NoOverrideWithoutExperimentalFlag(t *testing.T) {
+	cfg := newTestCfg(t)
+	override := uint64(5)
+	cfg.TestShelleyHardForkAtEpoch = &override
+	// ExperimentalHardForksEnabled left nil.
+
+	shape, err := eras.BuildShape(cfg)
+	require.NoError(t, err)
+
+	byron := shape.Eras[0]
+	require.Equal(t, "Byron", byron.EraName)
+	assert.Equal(t, hardfork.TriggerAtVersion, byron.NextEraTrigger.Kind,
+		"without ExperimentalHardForksEnabled, override must be ignored")
+}
+
+// Multiple TestXHardForkAtEpoch overrides: each affects only the era
+// whose successor it names.
+func TestBuildShape_NextEraTrigger_MultipleOverrides(t *testing.T) {
+	cfg := newTestCfg(t)
+	enabled := true
+	shelleyEpoch := uint64(3)
+	conwayEpoch := uint64(20)
+	cfg.ExperimentalHardForksEnabled = &enabled
+	cfg.TestShelleyHardForkAtEpoch = &shelleyEpoch
+	cfg.TestConwayHardForkAtEpoch = &conwayEpoch
+
+	shape, err := eras.BuildShape(cfg)
+	require.NoError(t, err)
+
+	byEra := map[string]hardfork.ShapeEntry{}
+	for _, e := range shape.Eras {
+		byEra[e.EraName] = e
+	}
+
+	assert.Equal(t, hardfork.TriggerAtEpoch, byEra["Byron"].NextEraTrigger.Kind)
+	assert.Equal(t, shelleyEpoch, byEra["Byron"].NextEraTrigger.Epoch)
+	assert.Equal(t, hardfork.TriggerAtEpoch, byEra["Babbage"].NextEraTrigger.Kind)
+	assert.Equal(t, conwayEpoch, byEra["Babbage"].NextEraTrigger.Epoch)
+	assert.Equal(t, hardfork.TriggerAtVersion, byEra["Shelley"].NextEraTrigger.Kind)
+}
+
+// The Shape produced by BuildShape always validates, including the
+// NextEraTrigger invariants.
+func TestBuildShape_ValidateIncludesTriggerInvariants(t *testing.T) {
+	cfg := newTestCfg(t)
+	enabled := true
+	e := uint64(1)
+	cfg.ExperimentalHardForksEnabled = &enabled
+	cfg.TestShelleyHardForkAtEpoch = &e
+
+	shape, err := eras.BuildShape(cfg)
+	require.NoError(t, err)
+	assert.NoError(t, shape.Validate())
 }
