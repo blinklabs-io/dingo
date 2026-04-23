@@ -102,9 +102,6 @@ var flagSpecs = []flagSpec{
 	durationFlag("InboundPruneAfter", "inbound-prune-after", "inbound prune grace duration"),
 	boolFlag("InboundDuplexOnlyForHot", "inbound-duplex-only-for-hot", "restrict duplex inbound handling to hot peers"),
 	durationFlag("InboundCooldown", "inbound-cooldown", "inbound governance cooldown duration"),
-	boolFlag("GenesisBootstrap.Enabled", "genesis-bootstrap-enabled", "enable genesis bootstrap mode"),
-	uint64Flag("GenesisBootstrap.WindowSlots", "genesis-bootstrap-window-slots", "genesis bootstrap comparison window in slots"),
-	intFlag("GenesisBootstrap.PromotionMinDiversityGroups", "genesis-bootstrap-promotion-min-diversity-groups", "minimum bootstrap diversity groups for promotion"),
 	intFlag("MaxConnectionsPerIP", "max-connections-per-ip", "max simultaneous connections per IP"),
 	intFlag("MaxInboundConns", "max-inbound-conns", "max inbound connections"),
 
