@@ -42,8 +42,9 @@ import (
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger/eras"
-	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/dingo/ledger/hardfork"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
 
 func TestLedgerProcessBlocksFromSourceReturnsNilWhenReaderCloses(
@@ -2420,11 +2421,11 @@ func babbagePParams(major uint) *babbage.BabbageProtocolParameters {
 // newTestEpoch is a convenience builder for models.Epoch.
 func newTestEpoch(id, startSlot uint64, lengthInSlots uint, eraId uint) models.Epoch {
 	return models.Epoch{
-		EpochId:      id,
-		StartSlot:    startSlot,
+		EpochId:       id,
+		StartSlot:     startSlot,
 		LengthInSlots: lengthInSlots,
-		EraId:        eraId,
-		SlotLength:   1000,
+		EraId:         eraId,
+		SlotLength:    1000,
 	}
 }
 
@@ -2436,10 +2437,11 @@ func newTestEpoch(id, startSlot uint64, lengthInSlots uint, eraId uint) models.E
 // that TransitionImpossible is set when tipSlot + safeZone >= epochEndSlot.
 //
 // Using Shelley-era parameters from newTestEraHistoryCfg:
-//   securityParam=432, activeSlotsCoeff=0.05
-//   safeZone = ceil(3*432/0.05) = 25_920
-//   epoch: startSlot=100_000, length=432_000, end=532_000
-//   tipSlot = 532_000 - 25_920 = 506_080 → safeEnd = 532_000 = epochEnd → Impossible
+//
+//	securityParam=432, activeSlotsCoeff=0.05
+//	safeZone = ceil(3*432/0.05) = 25_920
+//	epoch: startSlot=100_000, length=432_000, end=532_000
+//	tipSlot = 532_000 - 25_920 = 506_080 → safeEnd = 532_000 = epochEnd → Impossible
 func TestEvaluateTransitionImpossible_SetWhenSafeZoneReachesEpochEnd(t *testing.T) {
 	const (
 		epochStart = uint64(100_000)
@@ -2457,7 +2459,7 @@ func TestEvaluateTransitionImpossible_SetWhenSafeZoneReachesEpochEnd(t *testing.
 		currentTip: ochainsync.Tip{
 			Point: ocommon.NewPoint(tipSlot, []byte("tip")),
 		},
-		transitionInfo: TransitionInfo{State: TransitionUnknown},
+		transitionInfo: hardfork.TransitionInfo{State: hardfork.TransitionUnknown},
 		config: LedgerStateConfig{
 			CardanoNodeConfig: cfg,
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -2466,7 +2468,7 @@ func TestEvaluateTransitionImpossible_SetWhenSafeZoneReachesEpochEnd(t *testing.
 
 	ls.evaluateTransitionImpossible()
 
-	assert.Equal(t, TransitionImpossible, ls.transitionInfo.State,
+	assert.Equal(t, hardfork.TransitionImpossible, ls.transitionInfo.State,
 		"when safeEndSlot == epochEndSlot, TransitionImpossible must be set")
 }
 
@@ -2488,7 +2490,7 @@ func TestEvaluateTransitionImpossible_SetWhenSafeZoneExceedsEpochEnd(t *testing.
 		currentTip: ochainsync.Tip{
 			Point: ocommon.NewPoint(tipSlot, []byte("tip")),
 		},
-		transitionInfo: TransitionInfo{State: TransitionUnknown},
+		transitionInfo: hardfork.TransitionInfo{State: hardfork.TransitionUnknown},
 		config: LedgerStateConfig{
 			CardanoNodeConfig: cfg,
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -2497,7 +2499,7 @@ func TestEvaluateTransitionImpossible_SetWhenSafeZoneExceedsEpochEnd(t *testing.
 
 	ls.evaluateTransitionImpossible()
 
-	assert.Equal(t, TransitionImpossible, ls.transitionInfo.State)
+	assert.Equal(t, hardfork.TransitionImpossible, ls.transitionInfo.State)
 }
 
 // TestEvaluateTransitionImpossible_NotSetWhenSafeZoneInsideEpoch verifies
@@ -2517,7 +2519,7 @@ func TestEvaluateTransitionImpossible_NotSetWhenSafeZoneInsideEpoch(t *testing.T
 		currentTip: ochainsync.Tip{
 			Point: ocommon.NewPoint(tipSlot, []byte("tip")),
 		},
-		transitionInfo: TransitionInfo{State: TransitionUnknown},
+		transitionInfo: hardfork.TransitionInfo{State: hardfork.TransitionUnknown},
 		config: LedgerStateConfig{
 			CardanoNodeConfig: cfg,
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -2526,7 +2528,7 @@ func TestEvaluateTransitionImpossible_NotSetWhenSafeZoneInsideEpoch(t *testing.T
 
 	ls.evaluateTransitionImpossible()
 
-	assert.Equal(t, TransitionUnknown, ls.transitionInfo.State,
+	assert.Equal(t, hardfork.TransitionUnknown, ls.transitionInfo.State,
 		"safeEndSlot < epochEndSlot: TransitionImpossible must NOT be set")
 }
 
@@ -2541,7 +2543,7 @@ func TestEvaluateTransitionImpossible_NoOpWhenTransitionKnown(t *testing.T) {
 			// tipSlot past the safe-zone boundary → would normally trigger Impossible
 			Point: ocommon.NewPoint(520_000, []byte("tip")),
 		},
-		transitionInfo: TransitionInfo{State: TransitionKnown, KnownEpoch: 501},
+		transitionInfo: hardfork.TransitionInfo{State: hardfork.TransitionKnown, KnownEpoch: 501},
 		config: LedgerStateConfig{
 			CardanoNodeConfig: cfg,
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -2550,7 +2552,7 @@ func TestEvaluateTransitionImpossible_NoOpWhenTransitionKnown(t *testing.T) {
 
 	ls.evaluateTransitionImpossible()
 
-	assert.Equal(t, TransitionKnown, ls.transitionInfo.State,
+	assert.Equal(t, hardfork.TransitionKnown, ls.transitionInfo.State,
 		"evaluateTransitionImpossible must not override TransitionKnown")
 	assert.Equal(t, uint64(501), ls.transitionInfo.KnownEpoch)
 }
@@ -2565,7 +2567,7 @@ func TestEvaluateTransitionImpossible_NoOpAlreadyImpossible(t *testing.T) {
 		currentTip: ochainsync.Tip{
 			Point: ocommon.NewPoint(520_000, []byte("tip")),
 		},
-		transitionInfo: TransitionInfo{State: TransitionImpossible},
+		transitionInfo: hardfork.TransitionInfo{State: hardfork.TransitionImpossible},
 		config: LedgerStateConfig{
 			CardanoNodeConfig: cfg,
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -2574,7 +2576,7 @@ func TestEvaluateTransitionImpossible_NoOpAlreadyImpossible(t *testing.T) {
 
 	ls.evaluateTransitionImpossible()
 
-	assert.Equal(t, TransitionImpossible, ls.transitionInfo.State)
+	assert.Equal(t, hardfork.TransitionImpossible, ls.transitionInfo.State)
 }
 
 // TestEvaluateTransitionImpossible_NoOpWhenEpochLengthZero verifies that a
@@ -2587,7 +2589,7 @@ func TestEvaluateTransitionImpossible_NoOpWhenEpochLengthZero(t *testing.T) {
 		currentTip: ochainsync.Tip{
 			Point: ocommon.NewPoint(999_999, []byte("tip")),
 		},
-		transitionInfo: TransitionInfo{State: TransitionUnknown},
+		transitionInfo: hardfork.TransitionInfo{State: hardfork.TransitionUnknown},
 		config: LedgerStateConfig{
 			CardanoNodeConfig: cfg,
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -2596,7 +2598,7 @@ func TestEvaluateTransitionImpossible_NoOpWhenEpochLengthZero(t *testing.T) {
 
 	ls.evaluateTransitionImpossible()
 
-	assert.Equal(t, TransitionUnknown, ls.transitionInfo.State,
+	assert.Equal(t, hardfork.TransitionUnknown, ls.transitionInfo.State,
 		"zero-length epoch must not trigger TransitionImpossible")
 }
 
@@ -2609,7 +2611,7 @@ func TestRolloverCommit_ResetsTransitionImpossible(t *testing.T) {
 		currentPParams: babbagePParams(9),
 		// Simulate state at end of epoch 500: TransitionImpossible was set
 		// because the tip's safe zone reached the epoch end.
-		transitionInfo: TransitionInfo{State: TransitionImpossible},
+		transitionInfo: hardfork.TransitionInfo{State: hardfork.TransitionImpossible},
 	}
 
 	var eraTransitions []*EraTransitionResult
@@ -2631,18 +2633,18 @@ func TestRolloverCommit_ResetsTransitionImpossible(t *testing.T) {
 		ls.currentEra = rolloverResult.NewCurrentEra
 		ls.currentPParams = rolloverResult.NewCurrentPParams
 		if len(eraTransitions) == 0 {
-			ls.transitionInfo = TransitionInfo{State: TransitionUnknown}
+			ls.transitionInfo = hardfork.TransitionInfo{State: hardfork.TransitionUnknown}
 		}
 	}
 	if len(eraTransitions) == 0 && rolloverResult != nil && rolloverResult.HardFork != nil {
-		ls.transitionInfo = TransitionInfo{
-			State:      TransitionKnown,
+		ls.transitionInfo = hardfork.TransitionInfo{
+			State:      hardfork.TransitionKnown,
 			KnownEpoch: rolloverResult.NewCurrentEpoch.EpochId,
 		}
 	}
 	ls.Unlock()
 
-	assert.Equal(t, TransitionUnknown, ls.transitionInfo.State,
+	assert.Equal(t, hardfork.TransitionUnknown, ls.transitionInfo.State,
 		"plain epoch rollover must reset TransitionImpossible to TransitionUnknown")
 }
 
@@ -2654,8 +2656,8 @@ func TestApplyEraTransition_ClearsTransitionKnown(t *testing.T) {
 	ls := &LedgerState{
 		currentEra:     *eras.GetEraById(eras.BabbageEraDesc.Id),
 		currentPParams: babbagePParams(8),
-		transitionInfo: TransitionInfo{
-			State:      TransitionKnown,
+		transitionInfo: hardfork.TransitionInfo{
+			State:      hardfork.TransitionKnown,
 			KnownEpoch: 500,
 		},
 	}
@@ -2671,7 +2673,7 @@ func TestApplyEraTransition_ClearsTransitionKnown(t *testing.T) {
 	ls.applyEraTransition(result)
 	ls.Unlock()
 
-	assert.Equal(t, TransitionUnknown, ls.transitionInfo.State,
+	assert.Equal(t, hardfork.TransitionUnknown, ls.transitionInfo.State,
 		"TransitionKnown must be cleared when the new era becomes active")
 	assert.Equal(t, eras.ConwayEraDesc.Id, ls.currentEra.Id)
 }
@@ -2683,7 +2685,7 @@ func TestApplyEraTransition_ClearsTransitionUnknown(t *testing.T) {
 	ls := &LedgerState{
 		currentEra:     *eras.GetEraById(eras.BabbageEraDesc.Id),
 		currentPParams: babbagePParams(8),
-		transitionInfo: TransitionInfo{State: TransitionUnknown},
+		transitionInfo: hardfork.TransitionInfo{State: hardfork.TransitionUnknown},
 	}
 
 	result := &EraTransitionResult{
@@ -2695,7 +2697,7 @@ func TestApplyEraTransition_ClearsTransitionUnknown(t *testing.T) {
 	ls.applyEraTransition(result)
 	ls.Unlock()
 
-	assert.Equal(t, TransitionUnknown, ls.transitionInfo.State)
+	assert.Equal(t, hardfork.TransitionUnknown, ls.transitionInfo.State)
 }
 
 // TestApplyEraTransition_PreservesAndUpdatesFields verifies that
@@ -2708,7 +2710,7 @@ func TestApplyEraTransition_PreservesAndUpdatesFields(t *testing.T) {
 	ls := &LedgerState{
 		currentEra:     *eras.GetEraById(eras.BabbageEraDesc.Id),
 		currentPParams: lcommon.ProtocolParameters(oldPParams),
-		transitionInfo: TransitionInfo{State: TransitionKnown, KnownEpoch: 500},
+		transitionInfo: hardfork.TransitionInfo{State: hardfork.TransitionKnown, KnownEpoch: 500},
 	}
 
 	result := &EraTransitionResult{
@@ -2726,7 +2728,7 @@ func TestApplyEraTransition_PreservesAndUpdatesFields(t *testing.T) {
 		"new pparams must become currentPParams")
 	assert.Equal(t, eras.ConwayEraDesc.Id, ls.currentEra.Id,
 		"currentEra must be updated to the new era")
-	assert.Equal(t, TransitionUnknown, ls.transitionInfo.State,
+	assert.Equal(t, hardfork.TransitionUnknown, ls.transitionInfo.State,
 		"transitionInfo must be cleared")
 }
 
@@ -2737,7 +2739,7 @@ func TestApplyEraTransition_MultipleSteps_AllCleared(t *testing.T) {
 	ls := &LedgerState{
 		currentEra:     *eras.GetEraById(eras.AlonzoEraDesc.Id),
 		currentPParams: babbagePParams(6),
-		transitionInfo: TransitionInfo{State: TransitionKnown, KnownEpoch: 300},
+		transitionInfo: hardfork.TransitionInfo{State: hardfork.TransitionKnown, KnownEpoch: 300},
 	}
 
 	steps := []*EraTransitionResult{
@@ -2757,7 +2759,7 @@ func TestApplyEraTransition_MultipleSteps_AllCleared(t *testing.T) {
 	}
 	ls.Unlock()
 
-	assert.Equal(t, TransitionUnknown, ls.transitionInfo.State)
+	assert.Equal(t, hardfork.TransitionUnknown, ls.transitionInfo.State)
 	assert.Equal(t, eras.ConwayEraDesc.Id, ls.currentEra.Id)
 }
 
@@ -2770,7 +2772,7 @@ func TestRolloverCommit_EraTransitionClearsTransitionInfo(t *testing.T) {
 	ls := &LedgerState{
 		currentEra:     *eras.GetEraById(eras.BabbageEraDesc.Id),
 		currentPParams: babbagePParams(8),
-		transitionInfo: TransitionInfo{State: TransitionKnown, KnownEpoch: 499},
+		transitionInfo: hardfork.TransitionInfo{State: hardfork.TransitionKnown, KnownEpoch: 499},
 	}
 
 	eraTransitions := []*EraTransitionResult{
@@ -2800,14 +2802,14 @@ func TestRolloverCommit_EraTransitionClearsTransitionInfo(t *testing.T) {
 	ls.currentEra = rolloverResult.NewCurrentEra
 	ls.currentPParams = rolloverResult.NewCurrentPParams
 	if len(eraTransitions) == 0 && rolloverResult.HardFork != nil {
-		ls.transitionInfo = TransitionInfo{
-			State:      TransitionKnown,
+		ls.transitionInfo = hardfork.TransitionInfo{
+			State:      hardfork.TransitionKnown,
 			KnownEpoch: rolloverResult.NewCurrentEpoch.EpochId,
 		}
 	}
 	ls.Unlock()
 
-	assert.Equal(t, TransitionUnknown, ls.transitionInfo.State,
+	assert.Equal(t, hardfork.TransitionUnknown, ls.transitionInfo.State,
 		"era transition must clear transitionInfo even when rolloverResult.HardFork is set")
 }
 
@@ -2818,7 +2820,7 @@ func TestRolloverCommit_HardForkWithoutEraTransition(t *testing.T) {
 	ls := &LedgerState{
 		currentEra:     *eras.GetEraById(eras.BabbageEraDesc.Id),
 		currentPParams: babbagePParams(8),
-		transitionInfo: TransitionInfo{State: TransitionUnknown},
+		transitionInfo: hardfork.TransitionInfo{State: hardfork.TransitionUnknown},
 	}
 
 	var eraTransitions []*EraTransitionResult // empty — no standalone transition
@@ -2842,14 +2844,14 @@ func TestRolloverCommit_HardForkWithoutEraTransition(t *testing.T) {
 	ls.currentEra = rolloverResult.NewCurrentEra
 	ls.currentPParams = rolloverResult.NewCurrentPParams
 	if len(eraTransitions) == 0 && rolloverResult.HardFork != nil {
-		ls.transitionInfo = TransitionInfo{
-			State:      TransitionKnown,
+		ls.transitionInfo = hardfork.TransitionInfo{
+			State:      hardfork.TransitionKnown,
 			KnownEpoch: rolloverResult.NewCurrentEpoch.EpochId,
 		}
 	}
 	ls.Unlock()
 
-	assert.Equal(t, TransitionKnown, ls.transitionInfo.State,
+	assert.Equal(t, hardfork.TransitionKnown, ls.transitionInfo.State,
 		"version bump at epoch boundary without era transition must set TransitionKnown")
 	assert.Equal(t, uint64(500), ls.transitionInfo.KnownEpoch)
 }
@@ -2860,7 +2862,7 @@ func TestRolloverCommit_NoHardFork_TransitionInfoUnchanged(t *testing.T) {
 	ls := &LedgerState{
 		currentEra:     *eras.GetEraById(eras.ConwayEraDesc.Id),
 		currentPParams: babbagePParams(9),
-		transitionInfo: TransitionInfo{State: TransitionUnknown},
+		transitionInfo: hardfork.TransitionInfo{State: hardfork.TransitionUnknown},
 	}
 
 	var eraTransitions []*EraTransitionResult
@@ -2881,13 +2883,13 @@ func TestRolloverCommit_NoHardFork_TransitionInfoUnchanged(t *testing.T) {
 	ls.currentEra = rolloverResult.NewCurrentEra
 	ls.currentPParams = rolloverResult.NewCurrentPParams
 	if len(eraTransitions) == 0 && rolloverResult.HardFork != nil {
-		ls.transitionInfo = TransitionInfo{
-			State:      TransitionKnown,
+		ls.transitionInfo = hardfork.TransitionInfo{
+			State:      hardfork.TransitionKnown,
 			KnownEpoch: rolloverResult.NewCurrentEpoch.EpochId,
 		}
 	}
 	ls.Unlock()
 
-	assert.Equal(t, TransitionUnknown, ls.transitionInfo.State,
+	assert.Equal(t, hardfork.TransitionUnknown, ls.transitionInfo.State,
 		"plain epoch rollover must not change transitionInfo")
 }

@@ -41,6 +41,7 @@ import (
 	"github.com/blinklabs-io/dingo/event"
 	dingoversion "github.com/blinklabs-io/dingo/internal/version"
 	"github.com/blinklabs-io/dingo/ledger/eras"
+	"github.com/blinklabs-io/dingo/ledger/hardfork"
 	"github.com/blinklabs-io/dingo/mempool"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -409,7 +410,7 @@ type LedgerState struct {
 	chainsyncBlockfetchTimerGeneration uint64      // generation counter to detect stale timer callbacks
 	currentPParams                     lcommon.ProtocolParameters
 	prevEraPParams                     lcommon.ProtocolParameters // pparams from the immediately previous era (for era-1 TX validation)
-	transitionInfo                     TransitionInfo             // upcoming era boundary state (mirrors Haskell HFC TransitionInfo)
+	transitionInfo                     hardfork.TransitionInfo    // upcoming era boundary state (mirrors Haskell HFC TransitionInfo)
 	mempool                            MempoolProvider
 	timerCleanupConsumedUtxos          *time.Timer
 	Scheduler                          *Scheduler
@@ -487,34 +488,6 @@ type LedgerState struct {
 type EraTransitionResult struct {
 	NewPParams lcommon.ProtocolParameters
 	NewEra     eras.EraDesc
-}
-
-// TransitionState encodes which of the three HFC TransitionInfo
-// cases currently applies to the open (current) era.
-type TransitionState uint8
-
-const (
-	// TransitionUnknown means no confirmed upcoming hard fork is
-	// known.  The open era's EraEnd is capped at tipSlot + safeZone.
-	TransitionUnknown TransitionState = iota
-	// TransitionKnown means the epoch-rollover logic has detected a
-	// protocol-version bump in the upcoming epoch's pparams, but the
-	// first block of the new era has not arrived yet.  KnownEpoch is
-	// the first epoch number of the next era; its StartSlot is the
-	// exact era boundary.
-	TransitionKnown
-	// TransitionImpossible means a hard fork cannot occur in the
-	// current epoch (e.g. the safe-zone has already passed the epoch
-	// end).  Reserved for future use; treated like TransitionUnknown
-	// for query purposes.
-	TransitionImpossible
-)
-
-// TransitionInfo mirrors Haskell's HFC TransitionInfo, tracking
-// whether a confirmed upcoming era transition is known.
-type TransitionInfo struct {
-	State      TransitionState
-	KnownEpoch uint64 // first epoch of the next era; valid when State == TransitionKnown
 }
 
 // HardForkInfo holds details about a detected hard fork
@@ -1671,7 +1644,7 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 	ls.currentTip = newTip
 	// A rollback invalidates any pending TransitionKnown because the
 	// epoch-rollover block that set it may no longer be on the chain.
-	ls.transitionInfo = TransitionInfo{State: TransitionUnknown}
+	ls.transitionInfo = hardfork.TransitionInfo{State: hardfork.TransitionUnknown}
 	// If rolling back behind the Mithril trust boundary, clear it.
 	// A rollback inside the gap means replacement blocks on the new
 	// fork were NOT processed by SetGapBlockTransaction and must go
@@ -1856,7 +1829,7 @@ func (ls *LedgerState) applyEraTransition(result *EraTransitionResult) {
 	ls.currentPParams = result.NewPParams
 	ls.currentEra = result.NewEra
 	// Any pending TransitionKnown is consumed: the new era is now active.
-	ls.transitionInfo = TransitionInfo{State: TransitionUnknown}
+	ls.transitionInfo = hardfork.TransitionInfo{State: hardfork.TransitionUnknown}
 }
 
 // IsAtTip reports whether the node has caught up to the chain tip at least
@@ -1975,7 +1948,7 @@ func (ls *LedgerState) calculateStabilityWindowForEra(eraId uint) uint64 {
 
 // CurrentTransitionInfo returns a snapshot of the current TransitionInfo
 // under a read lock.  Callers must not hold ls.RLock() when calling this.
-func (ls *LedgerState) CurrentTransitionInfo() TransitionInfo {
+func (ls *LedgerState) CurrentTransitionInfo() hardfork.TransitionInfo {
 	ls.RLock()
 	ti := ls.transitionInfo
 	ls.RUnlock()
@@ -2376,7 +2349,7 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 				// logic re-evaluates for the new epoch's horizon.
 				// (applyEraTransition already handles the era-transition case.)
 				if len(eraTransitions) == 0 {
-					ls.transitionInfo = TransitionInfo{State: TransitionUnknown}
+					ls.transitionInfo = hardfork.TransitionInfo{State: hardfork.TransitionUnknown}
 				}
 			}
 			// Set TransitionKnown only when epoch rolled over in the old era
@@ -2385,8 +2358,8 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 			if len(eraTransitions) == 0 &&
 				rolloverResult != nil &&
 				rolloverResult.HardFork != nil {
-				ls.transitionInfo = TransitionInfo{
-					State:      TransitionKnown,
+				ls.transitionInfo = hardfork.TransitionInfo{
+					State:      hardfork.TransitionKnown,
 					KnownEpoch: rolloverResult.NewCurrentEpoch.EpochId,
 				}
 			}
@@ -3319,8 +3292,8 @@ func (ls *LedgerState) reconstructTransitionInfo() {
 	// was created with the old EraId but its StartSlot is the exact
 	// upcoming era boundary.
 	if pparamsEraId > ls.currentEra.Id {
-		ls.transitionInfo = TransitionInfo{
-			State:      TransitionKnown,
+		ls.transitionInfo = hardfork.TransitionInfo{
+			State:      hardfork.TransitionKnown,
 			KnownEpoch: ls.currentEpoch.EpochId,
 		}
 	}
@@ -3342,7 +3315,7 @@ func (ls *LedgerState) reconstructTransitionInfo() {
 // Call under ls.Lock() (runtime tip-update) or without a lock during
 // single-threaded startup (after loadTip).
 func (ls *LedgerState) evaluateTransitionImpossible() {
-	if ls.transitionInfo.State != TransitionUnknown {
+	if ls.transitionInfo.State != hardfork.TransitionUnknown {
 		return
 	}
 	// Only meaningful when we have a fully-populated epoch.
@@ -3362,7 +3335,7 @@ func (ls *LedgerState) evaluateTransitionImpossible() {
 		return
 	}
 	if safeEndSlot >= epochEndSlot {
-		ls.transitionInfo = TransitionInfo{State: TransitionImpossible}
+		ls.transitionInfo = hardfork.TransitionInfo{State: hardfork.TransitionImpossible}
 	}
 }
 

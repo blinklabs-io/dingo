@@ -22,6 +22,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/ledger/eras"
+	"github.com/blinklabs-io/dingo/ledger/hardfork"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
@@ -309,7 +310,7 @@ func (ls *LedgerState) queryHardForkEraHistory() (any, error) {
 			// would over-claim certainty, so we fall back to the safe-zone cap.
 			useSafeZoneCap := false
 			switch transitionInfo.State {
-			case TransitionKnown:
+			case hardfork.TransitionKnown:
 				// Find the transition epoch in the committed epoch list.
 				// It was created with the old era's EraId, so it appears in
 				// epochs.  Its StartSlot is the exact era end boundary.
@@ -334,10 +335,10 @@ func (ls *LedgerState) queryHardForkEraHistory() (any, error) {
 					// rather than serving the uncapped epoch end.
 					useSafeZoneCap = true
 				}
-			case TransitionImpossible:
+			case hardfork.TransitionImpossible:
 				// Safe zone already covers the epoch end; tmpEnd was set to
 				// the epoch boundary above — no further capping needed.
-			case TransitionUnknown:
+			case hardfork.TransitionUnknown:
 				useSafeZoneCap = true
 			}
 			if useSafeZoneCap {
