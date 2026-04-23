@@ -635,26 +635,24 @@ func (d *MetadataStoreSqlite) SetGapBlockTransaction(
 	for i := range tmpTx.Outputs {
 		tmpTx.Outputs[i].ID = 0
 		tmpTx.Outputs[i].TransactionID = &tmpTx.ID
-		result := db.Clauses(clause.OnConflict{
-			Columns:   []clause.Column{{Name: "tx_id"}, {Name: "output_idx"}},
-			DoNothing: true,
-		}).Create(&tmpTx.Outputs[i])
-		if result.Error != nil {
+	}
+	if len(tmpTx.Outputs) > 0 {
+		if err := d.ImportUtxos(tmpTx.Outputs, txn); err != nil {
 			return fmt.Errorf(
-				"create gap block utxo output %d for tx %x: %w",
-				i, txHash, result.Error,
+				"create gap block utxo outputs for tx %x: %w",
+				txHash, err,
 			)
 		}
 	}
 	if tmpTx.CollateralReturn != nil {
 		tmpTx.CollateralReturn.CollateralReturnForTxID = &tmpTx.ID
-		if result := db.Clauses(clause.OnConflict{
-			Columns:   []clause.Column{{Name: "tx_id"}, {Name: "output_idx"}},
-			DoNothing: true,
-		}).Create(tmpTx.CollateralReturn); result.Error != nil {
+		if err := d.ImportUtxos(
+			[]models.Utxo{*tmpTx.CollateralReturn},
+			txn,
+		); err != nil {
 			return fmt.Errorf(
-				"create gap block collateral return: %w",
-				result.Error,
+				"create gap block collateral return for tx %x: %w",
+				txHash, err,
 			)
 		}
 	}

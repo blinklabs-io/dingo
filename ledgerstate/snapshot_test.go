@@ -144,6 +144,20 @@ func TestFindUTxOTableFile(t *testing.T) {
 	require.Equal(t, tvarPath, found)
 }
 
+func TestFindUTxOTableFileCurrentTablesFile(t *testing.T) {
+	dir := t.TempDir()
+	slotDir := filepath.Join(dir, "ledger", "99999")
+	err := os.MkdirAll(slotDir, 0o750)
+	require.NoError(t, err)
+
+	tablesPath := filepath.Join(slotDir, "tables")
+	err = os.WriteFile(tablesPath, []byte("data"), 0o640)
+	require.NoError(t, err)
+
+	found := FindUTxOTableFile(dir)
+	require.Equal(t, tablesPath, found)
+}
+
 func TestFindUTxOTableFileNotFound(t *testing.T) {
 	dir := t.TempDir()
 	ledgerDir := filepath.Join(dir, "ledger")
@@ -188,6 +202,99 @@ func TestEraName(t *testing.T) {
 	require.Equal(t, "Babbage", EraName(EraBabbage))
 	require.Equal(t, "Conway", EraName(EraConway))
 	require.Contains(t, EraName(99), "Unknown")
+}
+
+func TestParseSnapShotsAcceptsTwoElementSnapshots(t *testing.T) {
+	emptyMap, err := cbor.Encode(map[uint64]uint64{})
+	require.NoError(t, err)
+
+	snapshot, err := cbor.Encode([]any{
+		cbor.RawMessage(emptyMap),
+		cbor.RawMessage(emptyMap),
+	})
+	require.NoError(t, err)
+
+	data, err := cbor.Encode([]any{
+		cbor.RawMessage(snapshot),
+		cbor.RawMessage(snapshot),
+		cbor.RawMessage(snapshot),
+	})
+	require.NoError(t, err)
+
+	snapshots, err := ParseSnapShots(data)
+	require.NoError(t, err)
+	require.NotNil(t, snapshots)
+	require.Empty(t, snapshots.Mark.PoolParams)
+	require.Empty(t, snapshots.Set.PoolParams)
+	require.Empty(t, snapshots.Go.PoolParams)
+}
+
+func TestParseSnapShotsAcceptsUTxOHDStakeWithPool(t *testing.T) {
+	credHash := toFixed28([]byte("credential hash for snapshot"))
+	poolHash := toFixed28([]byte("pool hash for snapshot"))
+	stakeMap := encodeCredentialMapEntry(
+		t,
+		[]any{uint64(0), credHash[:]},
+		[]any{uint64(42), poolHash[:]},
+	)
+
+	emptyMap, err := cbor.Encode(map[uint64]uint64{})
+	require.NoError(t, err)
+
+	snapshot, err := cbor.Encode([]any{
+		cbor.RawMessage(stakeMap),
+		cbor.RawMessage(emptyMap),
+	})
+	require.NoError(t, err)
+
+	data, err := cbor.Encode([]any{
+		cbor.RawMessage(snapshot),
+		cbor.RawMessage(snapshot),
+		cbor.RawMessage(snapshot),
+	})
+	require.NoError(t, err)
+
+	snapshots, err := ParseSnapShots(data)
+	require.NoError(t, err)
+
+	credKey := hex.EncodeToString(credHash[:])
+	require.Equal(t, uint64(42), snapshots.Mark.Stake[credKey])
+	require.Equal(t, poolHash[:], snapshots.Mark.Delegations[credKey])
+	require.Equal(t, uint64(42), snapshots.Set.Stake[credKey])
+	require.Equal(t, poolHash[:], snapshots.Set.Delegations[credKey])
+	require.Equal(t, uint64(42), snapshots.Go.Stake[credKey])
+	require.Equal(t, poolHash[:], snapshots.Go.Delegations[credKey])
+}
+
+func TestParsePoolParamsMapAcceptsPoolDistrEntry(t *testing.T) {
+	poolHash := toFixed28([]byte("pool hash for distribution"))
+	vrfHash := [32]byte{}
+	copy(vrfHash[:], []byte("vrf hash for distribution entry"))
+
+	poolMap := encodeCredentialMapEntry(
+		t,
+		poolHash[:],
+		[]any{
+			uint64(0),
+			[]any{uint64(0), uint64(1)},
+			[]any{},
+			uint64(0),
+			vrfHash[:],
+			uint64(0),
+			uint64(0),
+			[]any{uint64(0), uint64(1)},
+			uint64(0),
+			[]any{},
+		},
+	)
+
+	pools, err := parsePoolParamsMap(poolMap)
+	require.NoError(t, err)
+
+	pool := pools[hex.EncodeToString(poolHash[:])]
+	require.NotNil(t, pool)
+	require.Equal(t, poolHash[:], pool.PoolKeyHash)
+	require.Equal(t, vrfHash[:], pool.VrfKeyHash)
 }
 
 func TestVerifySnapshotDigest(t *testing.T) {

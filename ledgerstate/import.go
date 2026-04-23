@@ -100,6 +100,11 @@ type RawLedgerState struct {
 	// format). When set, UTxOs are streamed from this file instead
 	// of from UTxOData.
 	UTxOTablePath string
+	// UTxOHD indicates that the snapshot used the UTxO-HD ledger
+	// state wrapper. These snapshots keep the real UTxO set in an
+	// external table file and the inline UTxO field is only a
+	// placeholder.
+	UTxOHD bool
 }
 
 // EraBound represents the start boundary of an era in the
@@ -321,6 +326,11 @@ func ImportLedgerState(
 		completedPhase,
 		models.ImportPhaseUTxO,
 	) {
+		if cfg.State.UTxOHD && cfg.State.UTxOTablePath == "" {
+			return errors.New(
+				"UTxO-HD ledger state requires external UTxO table file",
+			)
+		}
 		if cfg.State.UTxOTablePath != "" ||
 			cfg.State.UTxOData != nil {
 			if err := importUTxOs(

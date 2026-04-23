@@ -39,6 +39,7 @@ import (
 	"github.com/blinklabs-io/dingo/ledgerstate"
 	"github.com/blinklabs-io/dingo/mithril"
 	ouroboros "github.com/blinklabs-io/gouroboros"
+	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/protocol/blockfetch"
@@ -1043,6 +1044,90 @@ func processGapBlocks(
 	return nil
 }
 
+const txBodyKeyCollateralReturn uint64 = 16
+
+// extractInvalidTxIndices returns the set of transaction indices flagged as
+// script-invalid in the block (blockArray[4] for Alonzo+ blocks). The
+// collateral-return UTxO is produced only for invalid transactions — see
+// gouroboros ConwayTransaction.Produced(). Eras without invalid_transactions
+// (Byron/Shelley/Allegra/Mary) return an empty set.
+func extractInvalidTxIndices(blockCbor []byte) (map[int]struct{}, error) {
+	var blockArray []cbor.RawMessage
+	if _, err := cbor.Decode(blockCbor, &blockArray); err != nil {
+		return nil, err
+	}
+	if len(blockArray) < 5 {
+		return nil, nil
+	}
+	var invalidTxs []uint
+	if _, err := cbor.Decode([]byte(blockArray[4]), &invalidTxs); err != nil {
+		return nil, err
+	}
+	if len(invalidTxs) == 0 {
+		return nil, nil
+	}
+	set := make(map[int]struct{}, len(invalidTxs))
+	for _, idx := range invalidTxs {
+		set[int(idx)] = struct{}{} // #nosec G115 -- gouroboros bounds to 1M
+	}
+	return set, nil
+}
+
+func txBodyMapValueRange(
+	bodyCbor []byte,
+	bodyOffset uint32,
+	key uint64,
+) (uint32, uint32, bool, error) {
+	decoder, err := cbor.NewStreamDecoder(bodyCbor)
+	if err != nil {
+		return 0, 0, false, err
+	}
+	count, _, _, err := decoder.DecodeMapHeader()
+	if err != nil {
+		return 0, 0, false, err
+	}
+	for range count {
+		var currentKey uint64
+		if _, _, err := decoder.Decode(&currentKey); err != nil {
+			return 0, 0, false, err
+		}
+		valueOffset, valueLen, err := decoder.Skip()
+		if err != nil {
+			return 0, 0, false, err
+		}
+		if currentKey != key {
+			continue
+		}
+		valueOffset32, err := checkedUint32(valueOffset)
+		if err != nil {
+			return 0, 0, false, err
+		}
+		valueLen32, err := checkedUint32(valueLen)
+		if err != nil {
+			return 0, 0, false, err
+		}
+		if valueOffset32 > ^uint32(0)-bodyOffset {
+			return 0, 0, false, fmt.Errorf(
+				"value offset %d overflows body offset %d",
+				valueOffset32,
+				bodyOffset,
+			)
+		}
+		return bodyOffset + valueOffset32, valueLen32, true, nil
+	}
+	return 0, 0, false, nil
+}
+
+func checkedUint32(v int) (uint32, error) {
+	if v < 0 {
+		return 0, fmt.Errorf("negative value %d", v)
+	}
+	if uint64(v) > uint64(^uint32(0)) {
+		return 0, fmt.Errorf("value %d overflows uint32", v)
+	}
+	return uint32(v), nil // #nosec G115 -- checked above
+}
+
 // postProcessUtxoOffsets iterates all ImmutableDB blocks and
 // computes byte offset references for every transaction output.
 // This enables UtxoByRef() to extract UTxO CBOR on-demand from
@@ -1150,7 +1235,15 @@ func postProcessUtxoOffsets(
 			next.Cbor,
 		)
 		if extractErr == nil {
-			for _, txLoc := range offsets.Transactions {
+			invalidTxs, invErr := extractInvalidTxIndices(next.Cbor)
+			if invErr != nil {
+				txn.Rollback() //nolint:errcheck
+				return fmt.Errorf(
+					"block at slot %d: decoding invalid tx indices: %w",
+					next.Slot, invErr,
+				)
+			}
+			for txIdx, txLoc := range offsets.Transactions {
 				bodyEnd := txLoc.Body.Offset +
 					txLoc.Body.Length
 				if int(bodyEnd) > len(next.Cbor) {
@@ -1167,30 +1260,80 @@ func postProcessUtxoOffsets(
 				}
 				bodyBytes := next.Cbor[txLoc.Body.Offset:bodyEnd]
 				txHash := lcommon.Blake2b256Hash(bodyBytes)
+				_, txIsInvalid := invalidTxs[txIdx]
 
-				for i, outLoc := range txLoc.Outputs {
-					if outLoc.Length == 0 {
-						continue
+				if !txIsInvalid {
+					for i, outLoc := range txLoc.Outputs {
+						if outLoc.Length == 0 {
+							continue
+						}
+						offset := database.CborOffset{
+							BlockSlot:  next.Slot,
+							BlockHash:  blockHash,
+							ByteOffset: outLoc.Offset,
+							ByteLength: outLoc.Length,
+						}
+						offsetData := database.EncodeUtxoOffset(
+							&offset,
+						)
+						// #nosec G115
+						if err := blob.SetUtxo(
+							blobTxn,
+							txHash[:],
+							uint32(i),
+							offsetData,
+						); err != nil {
+							txn.Rollback() //nolint:errcheck
+							return fmt.Errorf(
+								"storing UTxO offset: %w",
+								err,
+							)
+						}
+						totalUtxos++
+						utxosInBatch++
+						if utxosInBatch >= batchUtxoOffsets {
+							if err := flushTxn(); err != nil {
+								return err
+							}
+							blobTxn = txn.Blob()
+						}
 					}
+					continue
+				}
+				collReturnOffset, collReturnLen, found, err := txBodyMapValueRange(
+					next.Cbor[txLoc.Body.Offset:bodyEnd],
+					txLoc.Body.Offset,
+					txBodyKeyCollateralReturn,
+				)
+				if err != nil {
+					txn.Rollback() //nolint:errcheck
+					return fmt.Errorf(
+						"block at slot %d: transaction %x collateral return offset: %w",
+						next.Slot,
+						txHash[:8],
+						err,
+					)
+				}
+				if found {
 					offset := database.CborOffset{
 						BlockSlot:  next.Slot,
 						BlockHash:  blockHash,
-						ByteOffset: outLoc.Offset,
-						ByteLength: outLoc.Length,
+						ByteOffset: collReturnOffset,
+						ByteLength: collReturnLen,
 					}
 					offsetData := database.EncodeUtxoOffset(
 						&offset,
 					)
-					// #nosec G115
+					outputIdx := uint32(len(txLoc.Outputs)) // #nosec G115
 					if err := blob.SetUtxo(
 						blobTxn,
 						txHash[:],
-						uint32(i),
+						outputIdx,
 						offsetData,
 					); err != nil {
 						txn.Rollback() //nolint:errcheck
 						return fmt.Errorf(
-							"storing UTxO offset: %w",
+							"storing collateral return UTxO offset: %w",
 							err,
 						)
 					}

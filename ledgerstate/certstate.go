@@ -341,7 +341,7 @@ func parseCertPoolParamsMap(data []byte) ([]ParsedPool, error) {
 			continue
 		}
 
-		pool, err := parsePoolParams(
+		pool, err := parsePoolParamsOrDistr(
 			poolKeyHash, entry.ValueRaw,
 		)
 		if err != nil {
@@ -696,7 +696,7 @@ func parsePState(data []byte) ([]ParsedPool, error) {
 			continue
 		}
 
-		pool, err := parsePoolParams(
+		pool, err := parsePoolParamsOrDistr(
 			poolKeyHash, entry.ValueRaw,
 		)
 		if err != nil {
@@ -773,6 +773,14 @@ func looksLikeDeposits(m map[string]uint64) bool {
 	return large*2 >= len(m)
 }
 
+// ErrNotPoolParams signals that the input CBOR is not shaped like a full
+// PoolParams registration (either not an array or too short). Callers can
+// use errors.Is(err, ErrNotPoolParams) to decide whether to try decoding
+// the input as the compact PoolDistr shape. Any other decode failure
+// indicates the value looked like PoolParams but was malformed, and must
+// not silently fall back.
+var ErrNotPoolParams = errors.New("not pool params shape")
+
 // parsePoolParams decodes a single pool's parameters.
 // PoolParams = [
 //
@@ -793,12 +801,15 @@ func parsePoolParams(
 ) (*ParsedPool, error) {
 	var params []cbor.RawMessage
 	if _, err := cbor.Decode(data, &params); err != nil {
-		return nil, fmt.Errorf("decoding pool params: %w", err)
+		return nil, fmt.Errorf(
+			"%w: decoding pool params array: %w",
+			ErrNotPoolParams, err,
+		)
 	}
 	if len(params) < 7 {
 		return nil, fmt.Errorf(
-			"pool params has %d elements, expected at least 7",
-			len(params),
+			"%w: pool params has %d elements, expected at least 7",
+			ErrNotPoolParams, len(params),
 		)
 	}
 
@@ -806,12 +817,24 @@ func parsePoolParams(
 		PoolKeyHash: poolKeyHash,
 	}
 
-	// VRF key hash (index 1)
+	// VRF key hash (index 1). A valid full PoolParams registration
+	// always has a 32-byte hash here; anything else means the value
+	// is actually the compact PoolDistr shape (VRF lives elsewhere)
+	// and should trigger the fallback via ErrNotPoolParams.
 	if _, err := cbor.Decode(
 		params[1],
 		&pool.VrfKeyHash,
 	); err != nil {
-		return nil, fmt.Errorf("decoding VRF key hash: %w", err)
+		return nil, fmt.Errorf(
+			"%w: decoding VRF key hash: %w",
+			ErrNotPoolParams, err,
+		)
+	}
+	if len(pool.VrfKeyHash) != 32 {
+		return nil, fmt.Errorf(
+			"%w: VRF key hash is %d bytes, expected 32",
+			ErrNotPoolParams, len(pool.VrfKeyHash),
+		)
 	}
 
 	// Pledge (index 2)
@@ -879,6 +902,88 @@ func parsePoolParams(
 	}
 
 	return pool, nil
+}
+
+func parsePoolParamsOrDistr(
+	poolKeyHash []byte,
+	data []byte,
+) (*ParsedPool, error) {
+	pool, err := parsePoolParams(poolKeyHash, data)
+	if err == nil {
+		return pool, nil
+	}
+	// Only fall back to the compact PoolDistr shape when the input
+	// clearly isn't a full PoolParams registration. A malformed full
+	// registration (e.g. bad VRF key, bad pledge) must surface its
+	// own error rather than getting reinterpreted as PoolDistr, whose
+	// decoder will happily latch onto any 32-byte field it finds.
+	if !errors.Is(err, ErrNotPoolParams) {
+		return nil, err
+	}
+	pool, distrErr := parsePoolDistrEntry(poolKeyHash, data)
+	if distrErr == nil {
+		return pool, nil
+	}
+	return nil, fmt.Errorf(
+		"parsing pool params: %w; parsing pool distribution: %w",
+		err,
+		distrErr,
+	)
+}
+
+// parsePoolDistrEntry decodes the compact PoolDistr/UTxO-HD pool
+// state shape used by current snapshots. The full registration
+// parameters are not present in the legacy order, but the pool key and
+// VRF key are enough to restore pool identity for header validation.
+func parsePoolDistrEntry(
+	poolKeyHash []byte,
+	data []byte,
+) (*ParsedPool, error) {
+	const preferredVrfFieldIdx = 4
+
+	fields, err := decodeRawArray(data)
+	if err != nil {
+		return nil, fmt.Errorf("decoding pool distribution: %w", err)
+	}
+
+	var vrfKeyHash []byte
+	if len(fields) > preferredVrfFieldIdx {
+		if _, err := cbor.Decode(
+			fields[preferredVrfFieldIdx],
+			&vrfKeyHash,
+		); err == nil && len(vrfKeyHash) == 32 {
+			return &ParsedPool{
+				PoolKeyHash: slices.Clone(poolKeyHash),
+				VrfKeyHash:  vrfKeyHash,
+			}, nil
+		}
+	}
+
+	for idx, field := range fields {
+		if idx == preferredVrfFieldIdx {
+			continue
+		}
+		var candidate []byte
+		if _, err := cbor.Decode(
+			field,
+			&candidate,
+		); err == nil && len(candidate) == 32 {
+			slog.Warn(
+				"pool distribution VRF key hash found outside preferred field",
+				"pool", hex.EncodeToString(poolKeyHash),
+				"preferred_index", preferredVrfFieldIdx,
+				"actual_index", idx,
+			)
+			return &ParsedPool{
+				PoolKeyHash: slices.Clone(poolKeyHash),
+				VrfKeyHash:  candidate,
+			}, nil
+		}
+	}
+
+	return nil, errors.New(
+		"pool distribution does not contain a 32-byte VRF key hash",
+	)
 }
 
 // parseRelays decodes an array of relay entries from CBOR.
