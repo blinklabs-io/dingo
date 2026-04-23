@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package sqlite
+package mysql
 
 import (
 	"fmt"
@@ -25,10 +25,10 @@ import (
 )
 
 const (
+	batchChunkSize = 499
 	batchChunkRows = 100
 )
 
-// utxoSpend captures the information needed to mark a UTxO as spent.
 type utxoSpend struct {
 	TxId          []byte
 	OutputIdx     uint32
@@ -37,9 +37,7 @@ type utxoSpend struct {
 }
 
 // BatchAccumulator collects metadata rows across multiple transactions
-// for bulk database insertion. It is the foundational data structure for
-// the backfill batching optimization that reduces per-block SQL statements
-// from 30-150 down to 2-5 by batching writes across 50-100 blocks.
+// for bulk database insertion.
 type BatchAccumulator struct {
 	KeyWitnesses   []models.KeyWitness
 	WitnessScripts []models.WitnessScripts
@@ -53,7 +51,6 @@ type BatchAccumulator struct {
 	DeleteTxIDs    []uint
 }
 
-// NewBatchAccumulator returns an empty BatchAccumulator ready for use.
 func NewBatchAccumulator() *BatchAccumulator {
 	return &BatchAccumulator{}
 }
@@ -125,7 +122,7 @@ func (b *BatchAccumulator) Reset() {
 }
 
 // FlushBatch writes all accumulated records in a deterministic order.
-func (d *MetadataStoreSqlite) FlushBatch(
+func (d *MetadataStoreMysql) FlushBatch(
 	batch *BatchAccumulator,
 	txn types.Txn,
 ) error {
