@@ -20,6 +20,8 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/gouroboros/cbor"
+	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -40,6 +42,27 @@ func testHash28(seed string) []byte {
 	hash := make([]byte, 28)
 	copy(hash, []byte(seed))
 	return hash
+}
+
+func testConwayProtocolParameters() *conway.ConwayProtocolParameters {
+	pparams := mockledger.NewMockConwayProtocolParams()
+	pparams.GovActionValidityPeriod = 20
+	pparams.DRepInactivityPeriod = 20
+	return &pparams
+}
+
+func TestEpochContainsSlot(t *testing.T) {
+	epoch := models.Epoch{EpochId: 1, StartSlot: 100, LengthInSlots: 100}
+	require.False(t, epochContainsSlot(epoch, 99))
+	require.True(t, epochContainsSlot(epoch, 100))
+	require.True(t, epochContainsSlot(epoch, 199))
+	require.False(t, epochContainsSlot(epoch, 200))
+}
+
+func TestEpochContainsSlotZeroLengthRejectsAll(t *testing.T) {
+	epoch := models.Epoch{EpochId: 1, StartSlot: 100, LengthInSlots: 0}
+	require.False(t, epochContainsSlot(epoch, 100))
+	require.False(t, epochContainsSlot(epoch, 200))
 }
 
 func TestMapVoterType(t *testing.T) {
@@ -331,4 +354,203 @@ func TestProcessVotesRepairsMissingDRepRow(t *testing.T) {
 	assert.Equal(t, drepCred, votes[0].VoterCredential)
 	assert.Equal(t, uint8(models.VoteYes), votes[0].Vote)
 	assert.Equal(t, point.Slot, votes[0].AddedSlot)
+}
+
+func TestProcessVotesRepairsMissingGovernanceProposal(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	db, err := database.New(&database.Config{
+		DataDir:        tmpDir,
+		Logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
+		BlobPlugin:     "badger",
+		MetadataPlugin: "sqlite",
+	})
+	require.NoError(t, err)
+	defer db.Close()
+
+	const (
+		proposalEpoch     = uint64(100)
+		proposalSlot      = uint64(1000)
+		voteEpoch         = uint64(101)
+		govActionLifetime = uint64(20)
+	)
+	require.NoError(
+		t,
+		db.SetEpoch(
+			proposalSlot,
+			proposalEpoch,
+			nil,
+			nil,
+			nil,
+			nil,
+			conway.EraIdConway,
+			1,
+			432000,
+			nil,
+		),
+	)
+	pparams := testConwayProtocolParameters()
+	pparamsCbor, err := cbor.Encode(pparams)
+	require.NoError(t, err)
+	require.NoError(
+		t,
+		db.SetPParams(
+			pparamsCbor,
+			proposalSlot,
+			proposalEpoch,
+			conway.EraIdConway,
+			nil,
+		),
+	)
+
+	rewardAddress, err := lcommon.NewAddressFromBytes(
+		append([]byte{0xE1}, testHash28("proposal-reward")...),
+	)
+	require.NoError(t, err)
+	proposalProcedure := conway.ConwayProposalProcedure{
+		PPDeposit:       42,
+		PPRewardAccount: rewardAddress,
+		PPGovAction: conway.ConwayGovAction{
+			Type: uint(lcommon.GovActionTypeInfo),
+			Action: &lcommon.InfoGovAction{
+				Type: uint(lcommon.GovActionTypeInfo),
+			},
+		},
+		PPAnchor: lcommon.GovAnchor{
+			Url:      "https://example.com/proposal",
+			DataHash: [32]byte(testHash32("proposal-anchor")),
+		},
+	}
+	proposalBodyCbor, err := cbor.Encode(
+		&conway.ConwayTransactionBody{
+			TxProposalProcedures: []conway.ConwayProposalProcedure{
+				proposalProcedure,
+			},
+		},
+	)
+	require.NoError(t, err)
+	proposalTxHash := lcommon.Blake2b256Hash(proposalBodyCbor)
+	proposalTx := mockledger.NewTransactionBuilder()
+	proposalTx.WithId(proposalTxHash.Bytes())
+	proposalTx.WithType(gledger.TxTypeConway)
+	proposalTx.WithProposalProcedures(proposalProcedure)
+	proposalTx.WithValid(true)
+	proposalPoint := ocommon.Point{
+		Slot: proposalSlot,
+		Hash: testHash32("proposal-block"),
+	}
+	// Mirror the production gap-block storage path: store the proposal
+	// body inside a synthetic block in the blob store and register it
+	// through SetGapBlockTransaction with offsets, so the repair path
+	// must traverse ResolveTxCbor's offset-decode + block-extract branch
+	// instead of the legacy raw-CBOR fallback.
+	blockBytes := append(
+		[]byte("gap-block-prefix-"),
+		proposalBodyCbor...,
+	)
+	bodyByteOffset := uint32(len(blockBytes) - len(proposalBodyCbor))
+	var blockHashArr [32]byte
+	copy(blockHashArr[:], proposalPoint.Hash)
+	var proposalTxHashArr [32]byte
+	copy(proposalTxHashArr[:], proposalTxHash.Bytes())
+	offsets := &database.BlockIngestionResult{
+		TxOffsets: map[[32]byte]database.CborOffset{
+			proposalTxHashArr: {
+				BlockSlot:  proposalSlot,
+				BlockHash:  blockHashArr,
+				ByteOffset: bodyByteOffset,
+				ByteLength: uint32(len(proposalBodyCbor)),
+			},
+		},
+		UtxoOffsets: make(map[database.UtxoRef]database.CborOffset),
+	}
+	ccCred := testHash28("committee-voter")
+	var voterHash [28]byte
+	copy(voterHash[:], ccCred)
+	var actionTxHash [32]byte
+	copy(actionTxHash[:], proposalTxHash.Bytes())
+	voter := &lcommon.Voter{
+		Type: lcommon.VoterTypeConstitutionalCommitteeHotKeyHash,
+		Hash: voterHash,
+	}
+	actionID := &lcommon.GovActionId{
+		TransactionId: actionTxHash,
+		GovActionIdx:  0,
+	}
+	var voteTxHash lcommon.Blake2b256
+	copy(voteTxHash[:], testHash32("vote-tx"))
+	voteTx := mockledger.NewTransactionBuilder()
+	voteTx.WithId(voteTxHash.Bytes())
+	voteTx.WithType(gledger.TxTypeConway)
+	voteTx.WithValid(true)
+	voteTx.WithVotingProcedures(lcommon.VotingProcedures{
+		voter: {
+			actionID: {Vote: models.VoteYes},
+		},
+	})
+	votePoint := ocommon.Point{
+		Slot: proposalSlot + 50,
+		Hash: testHash32("vote-block"),
+	}
+
+	_, err = db.GetGovernanceProposal(proposalTxHash.Bytes(), 0, nil)
+	require.ErrorIs(t, err, models.ErrGovernanceProposalNotFound)
+
+	// Mirror the production gap-block + vote processing path, where the
+	// blob write and ProcessVotes happen inside the same write txn so
+	// ResolveTxCbor must see the uncommitted blob to repair the proposal.
+	txn := db.Transaction(true)
+	defer txn.Release()
+	require.NoError(
+		t,
+		txn.Do(func(txn *database.Txn) error {
+			if err := db.Blob().SetBlock(
+				txn.Blob(),
+				proposalSlot,
+				proposalPoint.Hash,
+				blockBytes,
+				0,
+				0,
+				0,
+				nil,
+			); err != nil {
+				return err
+			}
+			if err := db.SetGapBlockTransaction(
+				proposalTx,
+				proposalPoint,
+				0,
+				offsets,
+				txn,
+			); err != nil {
+				return err
+			}
+			return ProcessVotes(voteTx, votePoint, voteEpoch, 20, db, txn)
+		}),
+	)
+
+	proposal, err := db.GetGovernanceProposal(proposalTxHash.Bytes(), 0, nil)
+	require.NoError(t, err)
+	require.NotNil(t, proposal)
+	assert.Equal(t, proposalTxHash.Bytes(), proposal.TxHash)
+	assert.Equal(t, uint32(0), proposal.ActionIndex)
+	assert.Equal(t, uint8(lcommon.GovActionTypeInfo), proposal.ActionType)
+	assert.Equal(t, proposalEpoch, proposal.ProposedEpoch)
+	assert.Equal(t, proposalEpoch+govActionLifetime, proposal.ExpiresEpoch)
+	assert.Equal(t, proposalProcedure.PPAnchor.Url, proposal.AnchorURL)
+	assert.Equal(t, proposalProcedure.PPAnchor.DataHash[:], proposal.AnchorHash)
+	assert.Equal(t, proposalProcedure.PPDeposit, proposal.Deposit)
+	returnAddress, err := rewardAddress.Bytes()
+	require.NoError(t, err)
+	assert.Equal(t, returnAddress, proposal.ReturnAddress)
+	assert.Equal(t, proposalSlot, proposal.AddedSlot)
+	assert.NotEmpty(t, proposal.GovActionCbor)
+
+	votes, err := db.GetGovernanceVotes(proposal.ID, nil)
+	require.NoError(t, err)
+	require.Len(t, votes, 1)
+	assert.Equal(t, uint8(models.VoterTypeCC), votes[0].VoterType)
+	assert.Equal(t, ccCred, votes[0].VoterCredential)
+	assert.Equal(t, uint8(models.VoteYes), votes[0].Vote)
+	assert.Equal(t, votePoint.Slot, votes[0].AddedSlot)
 }

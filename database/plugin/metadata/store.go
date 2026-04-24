@@ -295,6 +295,25 @@ type MetadataStore interface {
 		types.Txn,
 	) (*models.Transaction, error)
 
+	// GetTransactionSlotByHash returns the slot of the block that
+	// contains the given tx hash. The bool result is false when no
+	// such transaction is recorded. Lighter than GetTransactionByHash
+	// because it skips loading inputs/outputs/witnesses.
+	GetTransactionSlotByHash(
+		[]byte, // hash
+		types.Txn,
+	) (uint64, bool, error)
+
+	// GetTransactionIDByHash returns the primary-key ID of the
+	// transaction with the given hash. The bool result is false when
+	// no such transaction is recorded. Used by UTxO recovery paths
+	// that need to populate the producer transaction FK on rows they
+	// re-import without paying the cost of loading every association.
+	GetTransactionIDByHash(
+		[]byte, // hash
+		types.Txn,
+	) (uint, bool, error)
+
 	// GetTransactionsByHashes retrieves transactions by their hashes.
 	GetTransactionsByHashes(
 		[][]byte, // hashes
@@ -502,6 +521,10 @@ type MetadataStore interface {
 	// GetEpochs retrieves all epochs.
 	GetEpochs(types.Txn) ([]models.Epoch, error)
 
+	// GetEpochBySlot retrieves the epoch containing the given slot.
+	// Returns nil if no matching epoch exists.
+	GetEpochBySlot(uint64, types.Txn) (*models.Epoch, error)
+
 	// DeleteEpochsAfterSlot removes all epoch entries whose start slot
 	// is after the given slot. Used during chain rollback to discard
 	// epoch nonces that were computed from rolled-back blocks.
@@ -548,11 +571,13 @@ type MetadataStore interface {
 		types.Txn,
 	) ([]models.Utxo, error)
 
-	// SetUtxoDeletedAtSlot marks a UTxO as deleted at the given slot.
+	// SetUtxoDeletedAtSlot marks a UTxO as deleted at the given slot
+	// and records the hash of the transaction that consumed it.
 	SetUtxoDeletedAtSlot(
-		ledger.TransactionInput,
-		uint64,
-		types.Txn,
+		input ledger.TransactionInput,
+		deletedAtSlot uint64,
+		spenderHash []byte,
+		txn types.Txn,
 	) error
 
 	// SetUtxosNotDeletedAfterSlot marks all UTxOs created after the given slot as not deleted.

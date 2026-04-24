@@ -22,9 +22,13 @@ import (
 	"github.com/blinklabs-io/dingo/database/types"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
-// SetBlockNonce inserts a block nonce into the block_nonce table
+// SetBlockNonce inserts or updates a block nonce. The (hash, slot)
+// uniqueIndex makes this safe to call repeatedly for the same block,
+// which happens when the metadata backfill resumes from a checkpoint
+// that pre-dates a previously-written nonce row.
 func (d *MetadataStoreMysql) SetBlockNonce(
 	blockHash []byte,
 	slotNumber uint64,
@@ -43,7 +47,26 @@ func (d *MetadataStoreMysql) SetBlockNonce(
 	if err != nil {
 		return err
 	}
-	result := db.Create(&item)
+	// is_checkpoint is updated with an OR so a later upsert with
+	// false cannot demote a previously-promoted checkpoint row.
+	result := db.Clauses(clause.OnConflict{
+		Columns: []clause.Column{
+			{Name: "hash"},
+			{Name: "slot"},
+		},
+		DoUpdates: clause.Set{
+			{
+				Column: clause.Column{Name: "nonce"},
+				Value:  gorm.Expr("VALUES(nonce)"),
+			},
+			{
+				Column: clause.Column{Name: "is_checkpoint"},
+				Value: gorm.Expr(
+					"is_checkpoint OR VALUES(is_checkpoint)",
+				),
+			},
+		},
+	}).Create(&item)
 
 	if result.Error != nil {
 		return result.Error

@@ -30,7 +30,7 @@ import (
 // ErrUtxoNotFound signals that the metadata row for a UTxO does not
 // exist (or was filtered out, e.g. by deleted_slot != 0 in the live
 // view). Callers may use errors.Is to detect a genuinely-absent row.
-var ErrUtxoNotFound = errors.New("utxo not found")
+var ErrUtxoNotFound = types.ErrUtxoNotFound
 
 // ErrUtxoCborUnavailable signals that the metadata row for a UTxO
 // exists but its CBOR could not be loaded from the blob store and
@@ -242,6 +242,88 @@ func recoverUtxoCbor(
 	return recoveredCbor, nil
 }
 
+// utxoRecoverySlotForTx returns the producer block slot for txId without
+// fetching the block itself. Returns (0, false, nil) when the producer tx
+// cannot be located so callers can decide whether that is fatal.
+func utxoRecoverySlotForTx(
+	db *Database,
+	txn *Txn,
+	txId []byte,
+) (uint64, bool, error) {
+	slot, _, found, err := fetchTxBlobSlotAndHash(db, txn, txId)
+	if err != nil {
+		return 0, false, err
+	}
+	if found {
+		return slot, true, nil
+	}
+	slot, found, err = db.metadata.GetTransactionSlotByHash(
+		txId, txn.Metadata(),
+	)
+	if err != nil {
+		return 0, false, fmt.Errorf(
+			"lookup producer tx metadata for utxo recovery %x: %w",
+			txId[:8],
+			err,
+		)
+	}
+	if !found {
+		return 0, false, nil
+	}
+	return slot, true, nil
+}
+
+func fetchTxBlobSlotAndHash(
+	db *Database,
+	txn *Txn,
+	txId []byte,
+) (uint64, [32]byte, bool, error) {
+	var blockHash [32]byte
+	if db == nil || txn == nil {
+		return 0, blockHash, false, nil
+	}
+	blob := db.Blob()
+	blobTxn := txn.Blob()
+	if blob == nil || blobTxn == nil {
+		return 0, blockHash, false, nil
+	}
+	txData, err := blob.GetTx(blobTxn, txId)
+	if err != nil {
+		if errors.Is(err, types.ErrBlobKeyNotFound) {
+			return 0, blockHash, false, nil
+		}
+		return 0, blockHash, false, fmt.Errorf(
+			"lookup tx blob for utxo recovery %x: %w",
+			txId[:8],
+			err,
+		)
+	}
+	switch {
+	case IsTxOffsetStorage(txData):
+		offset, err := DecodeTxOffset(txData)
+		if err != nil {
+			return 0, blockHash, false, fmt.Errorf(
+				"decode tx offset for utxo recovery %x: %w",
+				txId[:8],
+				err,
+			)
+		}
+		return offset.BlockSlot, offset.BlockHash, true, nil
+	case IsTxCborPartsStorage(txData):
+		parts, err := DecodeTxCborParts(txData)
+		if err != nil {
+			return 0, blockHash, false, fmt.Errorf(
+				"decode tx parts for utxo recovery %x: %w",
+				txId[:8],
+				err,
+			)
+		}
+		return parts.BlockSlot, parts.BlockHash, true, nil
+	default:
+		return 0, blockHash, false, nil
+	}
+}
+
 func utxoRecoveryBlockForTx(
 	db *Database,
 	txn *Txn,
@@ -250,61 +332,23 @@ func utxoRecoveryBlockForTx(
 	// Try the blob-based path when both the blob store and a blob
 	// transaction handle are available; otherwise skip straight to the
 	// metadata-based lookup below.
-	blob := db.Blob()
-	blobTxn := txn.Blob()
-	if blob != nil && blobTxn != nil {
-		if txData, err := blob.GetTx(blobTxn, txId); err == nil {
-			switch {
-			case IsTxOffsetStorage(txData):
-				offset, err := DecodeTxOffset(txData)
-				if err != nil {
-					return nil, fmt.Errorf(
-						"decode tx offset for utxo recovery %x: %w",
-						txId[:8],
-						err,
-					)
-				}
-				block, err := BlockByPointTxn(
-					txn,
-					ocommon.NewPoint(offset.BlockSlot, offset.BlockHash[:]),
-				)
-				if err != nil {
-					return nil, fmt.Errorf(
-						"lookup producer block from tx offset %x: %w",
-						txId[:8],
-						err,
-					)
-				}
-				return &block, nil
-			case IsTxCborPartsStorage(txData):
-				parts, err := DecodeTxCborParts(txData)
-				if err != nil {
-					return nil, fmt.Errorf(
-						"decode tx parts for utxo recovery %x: %w",
-						txId[:8],
-						err,
-					)
-				}
-				block, err := BlockByPointTxn(
-					txn,
-					ocommon.NewPoint(parts.BlockSlot, parts.BlockHash[:]),
-				)
-				if err != nil {
-					return nil, fmt.Errorf(
-						"lookup producer block from tx parts %x: %w",
-						txId[:8],
-						err,
-					)
-				}
-				return &block, nil
-			}
-		} else if !errors.Is(err, types.ErrBlobKeyNotFound) {
+	slot, blockHash, found, err := fetchTxBlobSlotAndHash(db, txn, txId)
+	if err != nil {
+		return nil, err
+	}
+	if found {
+		block, err := BlockByPointTxn(
+			txn,
+			ocommon.NewPoint(slot, blockHash[:]),
+		)
+		if err != nil {
 			return nil, fmt.Errorf(
-				"lookup tx blob for utxo recovery %x: %w",
+				"lookup producer block from tx blob %x: %w",
 				txId[:8],
 				err,
 			)
 		}
+		return &block, nil
 	}
 	producerTx, err := db.metadata.GetTransactionByHash(txId, txn.Metadata())
 	if err != nil {

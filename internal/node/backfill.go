@@ -33,7 +33,9 @@ import (
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
-const backfillPhase = "metadata"
+// BackfillPhase is the phase name used for the historical metadata
+// backfill checkpoint.
+const BackfillPhase = "metadata"
 
 // Backfill replays stored blocks to populate historical metadata.
 // It is triggered automatically during Mithril sync when
@@ -69,10 +71,9 @@ func NewBackfill(
 }
 
 // NeedsBackfill checks if there's an incomplete backfill checkpoint.
-// Returns true only when a checkpoint exists and is not yet completed.
 func (b *Backfill) NeedsBackfill() (bool, error) {
 	cp, err := b.db.Metadata().GetBackfillCheckpoint(
-		backfillPhase, nil,
+		BackfillPhase, nil,
 	)
 	if err != nil {
 		return false, fmt.Errorf(
@@ -91,6 +92,18 @@ func (b *Backfill) loadEpochs() error {
 	b.epochs = epochs
 	b.pparamsCache = make(map[uint64]lcommon.ProtocolParameters)
 	return nil
+}
+
+func (b *Backfill) initializeFromFirstEpoch() {
+	if len(b.epochs) == 0 {
+		return
+	}
+	b.lastEpochId = b.epochs[0].EpochId
+	b.currentEraId = b.epochs[0].EraId
+	pp := b.getPParams(b.epochs[0].EpochId)
+	if pp != nil {
+		b.currentPParams = pp
+	}
 }
 
 // slotToEpoch finds the epoch containing the given slot.
@@ -509,7 +522,7 @@ func (b *Backfill) processBlockGovernance(
 // resume.
 func (b *Backfill) Run(ctx context.Context) error {
 	cp, err := b.db.Metadata().GetBackfillCheckpoint(
-		backfillPhase, nil,
+		BackfillPhase, nil,
 	)
 	if err != nil {
 		return fmt.Errorf("reading backfill checkpoint: %w", err)
@@ -531,6 +544,24 @@ func (b *Backfill) Run(ctx context.Context) error {
 			"no blocks in blob store, nothing to backfill",
 			"component", "backfill",
 		)
+		// A pre-seeded checkpoint (e.g. from `dingo mithril sync`
+		// marking the backfill in-progress before any blocks are
+		// written) would otherwise persist forever, leaving
+		// NeedsBackfill() perpetually true on every subsequent
+		// startup. Mark it complete so the empty-store case is
+		// truly a no-op for resume purposes.
+		if cp != nil && !cp.Completed {
+			cp.Completed = true
+			cp.UpdatedAt = time.Now()
+			if err := b.db.Metadata().SetBackfillCheckpoint(
+				cp, nil,
+			); err != nil {
+				return fmt.Errorf(
+					"completing empty backfill checkpoint: %w",
+					err,
+				)
+			}
+		}
 		return nil
 	}
 	tipSlot := tipBlocks[0].Slot
@@ -554,7 +585,7 @@ func (b *Backfill) Run(ctx context.Context) error {
 	now := time.Now()
 	if cp == nil {
 		cp = &models.BackfillCheckpoint{
-			Phase:      backfillPhase,
+			Phase:      BackfillPhase,
 			LastSlot:   0,
 			TotalSlots: tipSlot,
 			StartedAt:  now,
@@ -575,33 +606,42 @@ func (b *Backfill) Run(ctx context.Context) error {
 		// Fresh start: reset epoch/era tracking to the
 		// first epoch so processEpochBoundary doesn't
 		// misinterpret the first block as an era change.
-		if len(b.epochs) > 0 {
-			b.lastEpochId = b.epochs[0].EpochId
-			b.currentEraId = b.epochs[0].EraId
-			pp := b.getPParams(b.epochs[0].EpochId)
+		b.initializeFromFirstEpoch()
+	} else {
+		startSlot = cp.LastSlot + 1
+		if cp.LastSlot == 0 {
+			// LastSlot 0 is ambiguous: it can mean either
+			// slot 0 was processed or an initial checkpoint
+			// was written before any block completed. Resume
+			// from 0 so a pre-seeded checkpoint cannot skip
+			// the first real block.
+			startSlot = 0
+			b.logger.Info(
+				"reinitializing metadata backfill from first block",
+				"component", "backfill",
+				"tip_slot", tipSlot,
+				"restart_from_first_block", true,
+			)
+			b.initializeFromFirstEpoch()
+		} else {
+			b.logger.Info(
+				"resuming metadata backfill",
+				"component", "backfill",
+				"resume_from_slot", cp.LastSlot,
+				"tip_slot", tipSlot,
+			)
+			// Recover running nonce from the last processed
+			// block so nonce computation can continue.
+			b.recoverNonce(cp.LastSlot)
+
+			// Set epoch tracking to resume point.
+			epochId, eraId := b.slotToEpoch(cp.LastSlot)
+			b.lastEpochId = epochId
+			b.currentEraId = eraId
+			pp := b.getPParams(epochId)
 			if pp != nil {
 				b.currentPParams = pp
 			}
-		}
-	} else {
-		startSlot = cp.LastSlot + 1
-		b.logger.Info(
-			"resuming metadata backfill",
-			"component", "backfill",
-			"resume_from_slot", cp.LastSlot,
-			"tip_slot", tipSlot,
-		)
-		// Recover running nonce from the last processed
-		// block so nonce computation can continue.
-		b.recoverNonce(cp.LastSlot)
-
-		// Set epoch tracking to resume point
-		epochId, eraId := b.slotToEpoch(cp.LastSlot)
-		b.lastEpochId = epochId
-		b.currentEraId = eraId
-		pp := b.getPParams(epochId)
-		if pp != nil {
-			b.currentPParams = pp
 		}
 	}
 

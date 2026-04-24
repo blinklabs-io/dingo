@@ -32,6 +32,7 @@ import (
 	gcbor "github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	fxcbor "github.com/fxamacker/cbor/v2"
 )
 
@@ -262,12 +263,26 @@ func LoadBlobsWithDB(
 		return nil, errors.New("primary chain not available")
 	}
 
-	blocksCopied, immutableTipSlot, err := copyBlocksRaw(
-		ctx, logger, immutableDir, c,
+	var utxoOffsetsStored int
+	blocksCopied, immutableTipSlot, err := copyBlocksRawWithCallback(
+		ctx, logger, immutableDir, db, c,
+		func(rb chain.RawBlock, txn *database.Txn) error {
+			stored, err := storeRawBlockUtxoOffsets(txn, rb)
+			if err != nil {
+				return err
+			}
+			utxoOffsetsStored += stored
+			return nil
+		},
 	)
 	if err != nil {
 		return nil, fmt.Errorf("loading blocks: %w", err)
 	}
+	logger.Info(
+		"finished storing immutable UTxO offsets during copy",
+		"blocks_copied", blocksCopied,
+		"utxo_offsets_stored", utxoOffsetsStored,
+	)
 
 	return &LoadBlobsResult{
 		BlocksCopied:     blocksCopied,
@@ -297,6 +312,14 @@ func copyBlocksDirect(
 	}
 	logger.Info("copying blocks from immutable DB")
 	chainTip := c.Tip()
+	if chainTip.Point.Slot > immutableTip.Slot {
+		logger.Info(
+			"chain tip already beyond immutable DB tip; skipping immutable copy",
+			"chain_tip_slot", chainTip.Point.Slot,
+			"immutable_tip_slot", immutableTip.Slot,
+		)
+		return 0, immutableTip.Slot, nil
+	}
 	iter, err := immutable.BlocksFromPoint(chainTip.Point)
 	if err != nil {
 		return 0, 0, fmt.Errorf(
@@ -385,16 +408,20 @@ func copyBlocksDirect(
 	return blocksCopied, immutableTip.Slot, nil
 }
 
-// copyBlocksRaw is a lightweight variant of copyBlocks that decodes only
-// block headers instead of full blocks. This is significantly faster for
-// bulk loading since it skips decoding transaction bodies and witnesses
-// (which can be 50-90KB per block) while extracting just the ~200-500
-// byte header needed for chain indexing.
-func copyBlocksRaw(
+// copyBlocksRawWithCallback is a lightweight variant of copyBlocks that
+// decodes only block headers instead of full blocks. This is significantly
+// faster for bulk loading since it skips decoding transaction bodies and
+// witnesses (which can be 50-90KB per block) while extracting just the
+// ~200-500 byte header needed for chain indexing. The optional callback
+// runs in the same transaction after each block is persisted, giving
+// callers a hook to attach derived blob-side state such as UTxO offsets.
+func copyBlocksRawWithCallback(
 	ctx context.Context,
 	logger *slog.Logger,
 	immutableDir string,
+	db *database.Database,
 	c *chain.Chain,
+	callback func(chain.RawBlock, *database.Txn) error,
 ) (int, uint64, error) {
 	imm, err := immutable.New(immutableDir)
 	if err != nil {
@@ -409,6 +436,32 @@ func copyBlocksRaw(
 	}
 	logger.Info("copying blocks from immutable DB (header-only decode)")
 	chainTip := c.Tip()
+	if chainTip.Point.Slot > immutableTip.Slot {
+		logger.Info(
+			"chain tip already beyond immutable DB tip; skipping immutable copy",
+			"chain_tip_slot", chainTip.Point.Slot,
+			"immutable_tip_slot", immutableTip.Slot,
+		)
+		if callback != nil && db != nil {
+			blocksBackfilled, err := backfillRawBlockCallbacks(
+				ctx,
+				imm,
+				db,
+				callback,
+			)
+			if err != nil {
+				return 0, immutableTip.Slot, fmt.Errorf(
+					"backfill immutable raw block callback state: %w",
+					err,
+				)
+			}
+			logger.Info(
+				"backfilled immutable raw block callback state",
+				"blocks_backfilled", blocksBackfilled,
+			)
+		}
+		return 0, immutableTip.Slot, nil
+	}
 	iter, err := imm.BlocksFromPoint(chainTip.Point)
 	if err != nil {
 		return 0, 0, fmt.Errorf(
@@ -442,32 +495,14 @@ func copyBlocksRaw(
 				bytes.Equal(next.Hash, chainTip.Point.Hash) {
 				continue
 			}
-			// Extract header CBOR from the block's outer array
-			// (first element for all eras), then decode just the
-			// header — skipping transaction bodies and witnesses.
-			headerCbor, err := extractHeaderCbor(next.Cbor)
+			rawBlock, err := rawBlockFromImmutableBlock(next)
 			if err != nil {
 				return blocksCopied, immutableTip.Slot, fmt.Errorf(
-					"extracting block header CBOR: %w", err,
+					"building raw block: %w",
+					err,
 				)
 			}
-			header, err := gledger.NewBlockHeaderFromCbor(
-				next.Type,
-				headerCbor,
-			)
-			if err != nil {
-				return blocksCopied, immutableTip.Slot, fmt.Errorf(
-					"decoding block header: %w", err,
-				)
-			}
-			blockBatch = append(blockBatch, chain.RawBlock{
-				Slot:        header.SlotNumber(),
-				Hash:        header.Hash().Bytes(),
-				BlockNumber: header.BlockNumber(),
-				Type:        next.Type,
-				PrevHash:    header.PrevHash().Bytes(),
-				Cbor:        next.Cbor,
-			})
+			blockBatch = append(blockBatch, rawBlock)
 			if len(blockBatch) == cap(blockBatch) {
 				break
 			}
@@ -475,7 +510,7 @@ func copyBlocksRaw(
 		if len(blockBatch) == 0 {
 			break
 		}
-		if err := c.AddRawBlocks(blockBatch); err != nil {
+		if err := c.AddRawBlocksWithCallback(blockBatch, callback); err != nil {
 			return blocksCopied, immutableTip.Slot, fmt.Errorf(
 				"failed to import block: %w",
 				err,
@@ -506,6 +541,286 @@ func copyBlocksRaw(
 		"blocks_copied", blocksCopied,
 	)
 	return blocksCopied, immutableTip.Slot, nil
+}
+
+func backfillRawBlockCallbacks(
+	ctx context.Context,
+	imm *immutable.ImmutableDb,
+	db *database.Database,
+	callback func(chain.RawBlock, *database.Txn) error,
+) (int, error) {
+	iter, err := imm.BlocksFromPoint(ocommon.Point{})
+	if err != nil {
+		return 0, fmt.Errorf("failed to get immutable DB iterator: %w", err)
+	}
+	defer iter.Close()
+
+	var blocksBackfilled int
+	blockBatch := make([]chain.RawBlock, 0, loadBlockBatchSize)
+	flush := func() error {
+		if len(blockBatch) == 0 {
+			return nil
+		}
+		txn := db.BlobTxn(true)
+		defer txn.Release()
+		if err := txn.Do(func(txn *database.Txn) error {
+			for _, rb := range blockBatch {
+				if err := callback(rb, txn); err != nil {
+					return err
+				}
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
+		blocksBackfilled += len(blockBatch)
+		blockBatch = blockBatch[:0]
+		return nil
+	}
+
+	for {
+		next, err := iter.Next()
+		if err != nil {
+			return blocksBackfilled, fmt.Errorf("reading next block: %w", err)
+		}
+		if next == nil {
+			break
+		}
+		rawBlock, err := rawBlockFromImmutableBlock(next)
+		if err != nil {
+			return blocksBackfilled, fmt.Errorf("building raw block: %w", err)
+		}
+		blockBatch = append(blockBatch, rawBlock)
+		if len(blockBatch) == cap(blockBatch) {
+			if err := flush(); err != nil {
+				return blocksBackfilled, err
+			}
+			if err := ctx.Err(); err != nil {
+				return blocksBackfilled, fmt.Errorf("loading blocks: %w", err)
+			}
+		}
+	}
+	if err := flush(); err != nil {
+		return blocksBackfilled, err
+	}
+	if err := ctx.Err(); err != nil {
+		return blocksBackfilled, fmt.Errorf("loading blocks: %w", err)
+	}
+	return blocksBackfilled, nil
+}
+
+func rawBlockFromImmutableBlock(block *immutable.Block) (chain.RawBlock, error) {
+	// Extract header CBOR from the block's outer array (first element for all
+	// eras), then decode just the header without decoding transaction bodies.
+	headerCbor, err := extractHeaderCbor(block.Cbor)
+	if err != nil {
+		return chain.RawBlock{}, fmt.Errorf(
+			"extracting block header CBOR: %w",
+			err,
+		)
+	}
+	header, err := gledger.NewBlockHeaderFromCbor(block.Type, headerCbor)
+	if err != nil {
+		return chain.RawBlock{}, fmt.Errorf("decoding block header: %w", err)
+	}
+	return chain.RawBlock{
+		Slot:        header.SlotNumber(),
+		Hash:        header.Hash().Bytes(),
+		BlockNumber: header.BlockNumber(),
+		Type:        block.Type,
+		PrevHash:    header.PrevHash().Bytes(),
+		Cbor:        block.Cbor,
+	}, nil
+}
+
+func storeRawBlockUtxoOffsets(
+	txn *database.Txn,
+	block chain.RawBlock,
+) (int, error) {
+	if txn == nil || txn.Blob() == nil {
+		return 0, errors.New("blob transaction not available")
+	}
+	blob := txn.DB().Blob()
+	if blob == nil {
+		return 0, errors.New("blob store not available")
+	}
+	var blockHash [32]byte
+	copy(blockHash[:], block.Hash)
+	totalUtxos := 0
+
+	offsets, extractErr := lcommon.ExtractTransactionOffsets(block.Cbor)
+	if extractErr != nil {
+		return 0, fmt.Errorf(
+			"block at slot %d: extract transaction offsets: %w",
+			block.Slot,
+			extractErr,
+		)
+	}
+	if offsets == nil || len(offsets.Transactions) == 0 {
+		return 0, nil
+	}
+	invalidTxs, err := extractInvalidTxIndices(block.Cbor)
+	if err != nil {
+		return 0, fmt.Errorf(
+			"block at slot %d: decode invalid tx indices: %w",
+			block.Slot,
+			err,
+		)
+	}
+	for txIdx, txLoc := range offsets.Transactions {
+		bodyEnd := txLoc.Body.Offset + txLoc.Body.Length
+		if int(bodyEnd) > len(block.Cbor) {
+			return 0, fmt.Errorf(
+				"block at slot %d: body range [%d:%d] exceeds block size %d",
+				block.Slot,
+				txLoc.Body.Offset,
+				bodyEnd,
+				len(block.Cbor),
+			)
+		}
+		bodyBytes := block.Cbor[txLoc.Body.Offset:bodyEnd]
+		txHash := lcommon.Blake2b256Hash(bodyBytes)
+		_, txIsInvalid := invalidTxs[txIdx]
+		if !txIsInvalid {
+			for i, outLoc := range txLoc.Outputs {
+				if outLoc.Length == 0 {
+					continue
+				}
+				offset := database.CborOffset{
+					BlockSlot:  block.Slot,
+					BlockHash:  blockHash,
+					ByteOffset: outLoc.Offset,
+					ByteLength: outLoc.Length,
+				}
+				if err := blob.SetUtxo(
+					txn.Blob(),
+					txHash[:],
+					uint32(i), // #nosec G115
+					database.EncodeUtxoOffset(&offset),
+				); err != nil {
+					return 0, fmt.Errorf("storing UTxO offset: %w", err)
+				}
+				totalUtxos++
+			}
+			continue
+		}
+		collReturnOffset, collReturnLen, found, err := txBodyMapValueRange(
+			block.Cbor[txLoc.Body.Offset:bodyEnd],
+			txLoc.Body.Offset,
+			database.TxBodyKeyCollateralReturn,
+		)
+		if err != nil {
+			return 0, fmt.Errorf(
+				"block at slot %d: transaction %x collateral return offset: %w",
+				block.Slot,
+				txHash[:8],
+				err,
+			)
+		}
+		if !found {
+			continue
+		}
+		offset := database.CborOffset{
+			BlockSlot:  block.Slot,
+			BlockHash:  blockHash,
+			ByteOffset: collReturnOffset,
+			ByteLength: collReturnLen,
+		}
+		outputIdx := uint32(len(txLoc.Outputs)) // #nosec G115
+		if err := blob.SetUtxo(
+			txn.Blob(),
+			txHash[:],
+			outputIdx,
+			database.EncodeUtxoOffset(&offset),
+		); err != nil {
+			return 0, fmt.Errorf(
+				"storing collateral return UTxO offset: %w",
+				err,
+			)
+		}
+		totalUtxos++
+	}
+	return totalUtxos, nil
+}
+
+func extractInvalidTxIndices(blockCbor []byte) (map[int]struct{}, error) {
+	var blockArray []gcbor.RawMessage
+	if _, err := gcbor.Decode(blockCbor, &blockArray); err != nil {
+		return nil, err
+	}
+	if len(blockArray) < 5 {
+		return nil, nil
+	}
+	var invalidTxs []uint
+	if _, err := gcbor.Decode([]byte(blockArray[4]), &invalidTxs); err != nil {
+		return nil, err
+	}
+	if len(invalidTxs) == 0 {
+		return nil, nil
+	}
+	set := make(map[int]struct{}, len(invalidTxs))
+	for _, idx := range invalidTxs {
+		set[int(idx)] = struct{}{} // #nosec G115
+	}
+	return set, nil
+}
+
+func txBodyMapValueRange(
+	bodyCbor []byte,
+	bodyOffset uint32,
+	key uint64,
+) (uint32, uint32, bool, error) {
+	decoder, err := gcbor.NewStreamDecoder(bodyCbor)
+	if err != nil {
+		return 0, 0, false, err
+	}
+	count, _, _, err := decoder.DecodeMapHeader()
+	if err != nil {
+		return 0, 0, false, err
+	}
+	if count < 0 {
+		return 0, 0, false, errors.New("indefinite tx body map")
+	}
+	for range count {
+		var currentKey uint64
+		if _, _, err := decoder.Decode(&currentKey); err != nil {
+			return 0, 0, false, err
+		}
+		valueOffset, valueLen, err := decoder.Skip()
+		if err != nil {
+			return 0, 0, false, err
+		}
+		if currentKey != key {
+			continue
+		}
+		valueOffset32, err := checkedUint32(valueOffset)
+		if err != nil {
+			return 0, 0, false, err
+		}
+		valueLen32, err := checkedUint32(valueLen)
+		if err != nil {
+			return 0, 0, false, err
+		}
+		if valueOffset32 > ^uint32(0)-bodyOffset {
+			return 0, 0, false, fmt.Errorf(
+				"value offset %d overflows body offset %d",
+				valueOffset32,
+				bodyOffset,
+			)
+		}
+		return bodyOffset + valueOffset32, valueLen32, true, nil
+	}
+	return 0, 0, false, nil
+}
+
+func checkedUint32(v int) (uint32, error) {
+	if v < 0 {
+		return 0, fmt.Errorf("negative value %d", v)
+	}
+	if uint64(v) > uint64(^uint32(0)) {
+		return 0, fmt.Errorf("value %d overflows uint32", v)
+	}
+	return uint32(v), nil // #nosec G115
 }
 
 func maybeLogBlockCopyProgress(

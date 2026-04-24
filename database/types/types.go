@@ -172,6 +172,9 @@ var ErrPartialCommit = errors.New(
 // conflicts from other errors and retry or reject accordingly.
 var ErrUtxoConflict = errors.New("UTxO already spent")
 
+// ErrUtxoNotFound is returned when a requested UTxO row does not exist.
+var ErrUtxoNotFound = errors.New("utxo not found")
+
 // UtxoKey identifies a UTxO row by its transaction id and output
 // index. Used as a parameter type for batch UTxO operations across
 // the metadata-store interface (e.g. MarkUtxosDeletedAtSlot). The

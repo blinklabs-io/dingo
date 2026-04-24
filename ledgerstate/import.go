@@ -457,7 +457,7 @@ func ImportLedgerState(
 		if cfg.State.GovStateData != nil &&
 			cfg.State.EraIndex >= EraConway {
 			if err := importGovState(
-				ctx, cfg, slot, progress,
+				ctx, cfg, progress,
 			); err != nil {
 				return fmt.Errorf(
 					"importing governance state: %w",
@@ -1772,11 +1772,15 @@ func importPParams(
 	store := cfg.Database.Metadata()
 	txn := cfg.Database.MetadataTxn(true)
 	defer txn.Release()
+	pparamsSlot := snapshotEpochAnchorSlot(
+		cfg,
+		cfg.State.Epoch,
+	)
 
 	// #nosec G115
 	if err := store.SetPParams(
 		pparamsCbor,
-		cfg.State.Tip.Slot,
+		pparamsSlot,
 		cfg.State.Epoch,
 		uint(cfg.State.EraIndex),
 		txn.Metadata(),
@@ -1801,7 +1805,6 @@ func importPParams(
 func importGovState(
 	ctx context.Context,
 	cfg ImportConfig,
-	slot uint64,
 	progress func(ImportProgress),
 ) error {
 	cfg.Logger.Info(
@@ -1830,6 +1833,10 @@ func importGovState(
 	}
 
 	store := cfg.Database.Metadata()
+	currentEpochSlot := snapshotEpochAnchorSlot(
+		cfg,
+		cfg.State.Epoch,
+	)
 
 	// Import constitution
 	if govState.Constitution != nil {
@@ -1841,7 +1848,7 @@ func importGovState(
 					AnchorURL:  govState.Constitution.AnchorURL,
 					AnchorHash: govState.Constitution.AnchorHash,
 					PolicyHash: govState.Constitution.PolicyHash,
-					AddedSlot:  slot,
+					AddedSlot:  currentEpochSlot,
 				},
 				txn.Metadata(),
 			); err != nil {
@@ -1886,7 +1893,7 @@ func importGovState(
 					members[i] = &models.CommitteeMember{
 						ColdCredHash: cm.ColdCredential.Hash,
 						ExpiresEpoch: cm.ExpiresEpoch,
-						AddedSlot:    slot,
+						AddedSlot:    currentEpochSlot,
 					}
 				}
 				if err := store.SetCommitteeMembers(
@@ -1905,7 +1912,7 @@ func importGovState(
 					Rat: new(big.Rat).Set(govState.CommitteeQuorum.Rat),
 				}
 				if err := store.SetCommitteeQuorum(
-					quorum, slot, txn.Metadata(),
+					quorum, currentEpochSlot, txn.Metadata(),
 				); err != nil {
 					return fmt.Errorf(
 						"importing committee quorum: %w", err,
@@ -1947,6 +1954,10 @@ func importGovState(
 					)
 				default:
 				}
+				proposedSlot := snapshotEpochAnchorSlot(
+					cfg,
+					prop.ProposedIn,
+				)
 				if err := store.SetGovernanceProposal(
 					&models.GovernanceProposal{
 						TxHash:        prop.TxHash,
@@ -1958,7 +1969,7 @@ func importGovState(
 						ReturnAddress: prop.ReturnAddr,
 						AnchorURL:     prop.AnchorURL,
 						AnchorHash:    prop.AnchorHash,
-						AddedSlot:     slot,
+						AddedSlot:     proposedSlot,
 					},
 					metaTxn,
 				); err != nil {
@@ -1994,4 +2005,116 @@ func importGovState(
 	})
 
 	return nil
+}
+
+func snapshotEpochAnchorSlot(
+	cfg ImportConfig,
+	epoch uint64,
+) uint64 {
+	if cfg.State == nil {
+		return 0
+	}
+	if len(cfg.State.EraBounds) > 0 &&
+		epoch < cfg.State.EraBounds[0].Epoch {
+		logSnapshotEpochAnchorFallback(
+			cfg,
+			epoch,
+			"epoch precedes first era bound",
+			nil,
+		)
+		return 0
+	}
+	for eraIndex := len(cfg.State.EraBounds) - 1; eraIndex >= 0; eraIndex-- {
+		bound := cfg.State.EraBounds[eraIndex]
+		if epoch < bound.Epoch {
+			continue
+		}
+		return snapshotEpochAnchorSlotFromBound(
+			cfg,
+			epoch,
+			uint(eraIndex), //nolint:gosec // era index fits in uint
+			bound.Epoch,
+			bound.Slot,
+		)
+	}
+	if epoch < cfg.State.EraBoundEpoch {
+		logSnapshotEpochAnchorFallback(
+			cfg,
+			epoch,
+			"era bounds unavailable; using single-bound fallback",
+			nil,
+		)
+	}
+	return snapshotEpochAnchorSlotFromBound(
+		cfg,
+		epoch,
+		uint(cfg.State.EraIndex), //nolint:gosec // era ID fits in uint
+		cfg.State.EraBoundEpoch,
+		cfg.State.EraBoundSlot,
+	)
+}
+
+func snapshotEpochAnchorSlotFromBound(
+	cfg ImportConfig,
+	epoch uint64,
+	eraIndex uint,
+	boundEpoch uint64,
+	boundSlot uint64,
+) uint64 {
+	if epoch < boundEpoch {
+		return boundSlot
+	}
+	if cfg.EpochLength == nil {
+		logSnapshotEpochAnchorFallback(
+			cfg,
+			epoch,
+			"epoch length unavailable (EpochLength is nil)",
+			nil,
+		)
+		return boundSlot
+	}
+	_, epochLength, err := cfg.EpochLength(eraIndex)
+	if err != nil {
+		logSnapshotEpochAnchorFallback(
+			cfg,
+			epoch,
+			"failed to resolve epoch length",
+			err,
+		)
+		return boundSlot
+	}
+	if epochLength == 0 {
+		logSnapshotEpochAnchorFallback(
+			cfg,
+			epoch,
+			"epoch length is zero",
+			nil,
+		)
+		return boundSlot
+	}
+	return boundSlot + (epoch-boundEpoch)*uint64(epochLength)
+}
+
+func logSnapshotEpochAnchorFallback(
+	cfg ImportConfig,
+	epoch uint64,
+	msg string,
+	err error,
+) {
+	if cfg.State == nil {
+		return
+	}
+	logger := cfg.Logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+	args := []any{
+		"component", "ledgerstate",
+		"epoch", epoch,
+		"era_bound_epoch", cfg.State.EraBoundEpoch,
+	}
+	if err != nil {
+		args = append(args, "error", err)
+	}
+	logger.Warn("snapshotEpochAnchorSlot: "+msg, args...)
 }

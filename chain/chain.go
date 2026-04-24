@@ -367,6 +367,7 @@ type RawBlock struct {
 func (c *Chain) addRawBlockLocked(
 	rb RawBlock,
 	txn *database.Txn,
+	callback func(RawBlock, *database.Txn) error,
 ) (event.Event, error) {
 	// Validate hash fields before any comparisons
 	if len(rb.Hash) == 0 {
@@ -417,6 +418,11 @@ func (c *Chain) addRawBlockLocked(
 	if err := c.manager.addBlock(tmpBlock, txn, c.persistent); err != nil {
 		return event.Event{}, fmt.Errorf("persisting block: %w", err)
 	}
+	if callback != nil {
+		if err := callback(rb, txn); err != nil {
+			return event.Event{}, err
+		}
+	}
 	if !c.persistent {
 		c.blocks = append(c.blocks, tmpPoint)
 	}
@@ -444,6 +450,39 @@ func (c *Chain) addRawBlockLocked(
 
 // AddRawBlocks adds a batch of pre-extracted blocks to the chain.
 func (c *Chain) AddRawBlocks(blocks []RawBlock) error {
+	return c.addRawBlocks(blocks, nil)
+}
+
+// AddRawBlocksWithCallback adds a batch of pre-extracted blocks to the chain
+// and runs the callback in the same transaction after each block is persisted.
+// Callers can use this to atomically attach additional blob-side state, such as
+// offset indexes, without reopening the immutable DB on resume.
+//
+// The callback executes with c.mutex and c.manager.mutex locked, inside the
+// active blob transaction, and BEFORE c.currentTip / c.tipBlockIndex are
+// updated for the just-persisted block. As a result:
+//   - The callback must not call back into Chain or ChainManager methods that
+//     acquire those same locks (e.g., c.Tip(), c.HeaderTip(),
+//     c.BlockByPoint()) — doing so will deadlock.
+//   - Tip-state observed via fields read under those locks reflects the
+//     pre-update tip, not the block being added.
+//
+// Error semantics: a callback error aborts the entire current batch, not just
+// the offending block. addRawBlocks drives the loop inside txn.Do, which rolls
+// back every block persisted by that transaction when the callback returns
+// non-nil. Callers should make per-batch decisions idempotent so a retry on a
+// later batch does not duplicate effects from a partial earlier attempt.
+func (c *Chain) AddRawBlocksWithCallback(
+	blocks []RawBlock,
+	callback func(RawBlock, *database.Txn) error,
+) error {
+	return c.addRawBlocks(blocks, callback)
+}
+
+func (c *Chain) addRawBlocks(
+	blocks []RawBlock,
+	callback func(RawBlock, *database.Txn) error,
+) error {
 	if c == nil {
 		return errors.New("chain is nil")
 	}
@@ -458,7 +497,23 @@ func (c *Chain) AddRawBlocks(blocks []RawBlock) error {
 		// successfully.
 		pendingEvents := make([]event.Event, 0, batchSize)
 		txn := c.manager.db.BlobTxn(true)
+		// addRawBlockLocked mutates c.currentTip, c.tipBlockIndex,
+		// c.headers, and c.blocks before the txn commits. If a
+		// later block in the batch fails the closure restores the
+		// pre-batch state, but txn.Do also runs Commit *after* the
+		// closure returns and after the chain locks are released —
+		// a Commit failure rolls back the persistent state while
+		// leaving the in-memory chain advanced. Capture the
+		// snapshot here so we can also restore on Commit failure.
+		var (
+			snapshotTaken      bool
+			savedTip           ochainsync.Tip
+			savedTipBlockIndex uint64
+			savedHeaders       []queuedHeader
+			savedBlocks        []ocommon.Point
+		)
 		err := txn.Do(func(txn *database.Txn) error {
+			batch := blocks[batchOffset : batchOffset+batchSize]
 			c.mutex.Lock()
 			defer c.mutex.Unlock()
 			c.manager.mutex.Lock()
@@ -466,9 +521,26 @@ func (c *Chain) AddRawBlocks(blocks []RawBlock) error {
 			if err := c.reconcile(); err != nil {
 				return fmt.Errorf("reconcile: %w", err)
 			}
-			for _, rb := range blocks[batchOffset : batchOffset+batchSize] {
-				evt, err := c.addRawBlockLocked(rb, txn)
+			savedTip = c.currentTip
+			savedTipBlockIndex = c.tipBlockIndex
+			savedHeaders = slices.Clone(c.headers)
+			if !c.persistent {
+				savedBlocks = slices.Clone(c.blocks)
+			}
+			snapshotTaken = true
+			for _, rb := range batch {
+				evt, err := c.addRawBlockLocked(
+					rb,
+					txn,
+					callback,
+				)
 				if err != nil {
+					c.currentTip = savedTip
+					c.tipBlockIndex = savedTipBlockIndex
+					c.headers = savedHeaders
+					if !c.persistent {
+						c.blocks = savedBlocks
+					}
 					return err
 				}
 				if evt.Type != "" {
@@ -480,6 +552,24 @@ func (c *Chain) AddRawBlocks(blocks []RawBlock) error {
 			return nil
 		})
 		if err != nil {
+			// Cover the Commit-failure path: closure returned nil
+			// but txn.Do's later Commit failed, so memory still
+			// reflects the post-batch tip while the DB rolled
+			// back. Re-acquire the locks and restore. Restoring
+			// after a closure-internal error path is a safe no-op
+			// because the closure already wrote the same values.
+			if snapshotTaken {
+				c.mutex.Lock()
+				c.manager.mutex.Lock()
+				c.currentTip = savedTip
+				c.tipBlockIndex = savedTipBlockIndex
+				c.headers = savedHeaders
+				if !c.persistent {
+					c.blocks = savedBlocks
+				}
+				c.manager.mutex.Unlock()
+				c.mutex.Unlock()
+			}
 			return fmt.Errorf("add raw block batch: %w", err)
 		}
 		c.notifyWaitingIterators()

@@ -31,17 +31,17 @@ import (
 	dingo "github.com/blinklabs-io/dingo"
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
-	"github.com/blinklabs-io/dingo/database/immutable"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/internal/node"
 	"github.com/blinklabs-io/dingo/ledger/eras"
+	"github.com/blinklabs-io/dingo/ledger/governance"
 	"github.com/blinklabs-io/dingo/ledgerstate"
 	"github.com/blinklabs-io/dingo/mithril"
 	ouroboros "github.com/blinklabs-io/gouroboros"
-	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/blinklabs-io/gouroboros/protocol/blockfetch"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -352,6 +352,28 @@ func runMithrilSync(
 	if err := db.SetSyncState("sync_status", "in_progress", nil); err != nil {
 		return fmt.Errorf("marking sync in-progress: %w", err)
 	}
+
+	// For API mode, mark an incomplete backfill checkpoint BEFORE any
+	// blob writes. If the process dies between writing blocks and
+	// node.Backfill.Run() creating its own initial checkpoint, the next
+	// startup would see blocks but no checkpoint and skip the backfill.
+	// Pre-seeding the checkpoint here ensures NeedsBackfill() returns
+	// the correct answer at any interruption point.
+	if dingo.StorageMode(cfg.StorageMode).IsAPI() {
+		now := time.Now()
+		if err := db.Metadata().SetBackfillCheckpoint(
+			&models.BackfillCheckpoint{
+				Phase:     node.BackfillPhase,
+				StartedAt: now,
+				UpdatedAt: now,
+			},
+			nil,
+		); err != nil {
+			return fmt.Errorf(
+				"marking backfill in-progress: %w", err,
+			)
+		}
+	}
 	// On error, log a message guiding the user to re-run.
 	syncComplete := false
 	defer func() {
@@ -409,24 +431,6 @@ func runMithrilSync(
 		return err
 	}
 
-	// Post-process ImmutableDB blocks to compute UTxO byte
-	// offsets. The ImmutableDB load (copyBlocksRaw) only stores
-	// block CBOR and header metadata. This step re-reads the
-	// ImmutableDB files, extracts transaction output byte ranges,
-	// and stores offset references in the blob store so that
-	// UtxoByRef() can extract UTxO CBOR on-demand from blocks.
-	logger.Info(
-		"post-processing UTxO offsets from ImmutableDB",
-		"component", "mithril",
-	)
-	if err := postProcessUtxoOffsets(
-		ctx, db, logger, result.ImmutableDir,
-	); err != nil {
-		return fmt.Errorf(
-			"post-processing UTxO offsets: %w", err,
-		)
-	}
-
 	// Fetch volatile blocks between the ImmutableDB tip and the
 	// ledger state tip. The Mithril snapshot's UTxO set is at the
 	// ledger state tip, but the ImmutableDB only has blocks up to
@@ -435,6 +439,166 @@ func runMithrilSync(
 	recentBlocks, err := database.BlocksRecent(db, 1)
 	if err != nil {
 		return fmt.Errorf("reading chain tip: %w", err)
+	}
+	immutableTipSlot := uint64(0)
+	if loadResult != nil {
+		immutableTipSlot = loadResult.ImmutableTipSlot
+	}
+	// When the snapshot's ledger state lands exactly on an immutable
+	// boundary, there is no gap to fill — but stale volatile blocks
+	// from a prior run can still sit above it. Drop them now so the
+	// trust boundary below lands on ledgerStateSlot instead of the
+	// stale block slot.
+	if len(recentBlocks) > 0 &&
+		recentBlocks[0].Slot > immutableTipSlot &&
+		immutableTipSlot == ledgerStateSlot {
+		logger.Info(
+			"removing stale volatile blocks above ledger state tip",
+			"component", "mithril",
+			"stored_tip_slot", recentBlocks[0].Slot,
+			"ledger_state_slot", ledgerStateSlot,
+		)
+		if cleanupErr := deleteBlobBlocksAboveSlot(
+			db, immutableTipSlot,
+		); cleanupErr != nil {
+			return fmt.Errorf(
+				"removing stale volatile blocks above slot %d: %w",
+				immutableTipSlot, cleanupErr,
+			)
+		}
+		recentBlocks, err = database.BlocksRecent(db, 1)
+		if err != nil {
+			return fmt.Errorf(
+				"reading chain tip after stale volatile cleanup: %w",
+				err,
+			)
+		}
+	}
+	if len(recentBlocks) > 0 &&
+		recentBlocks[0].Slot > immutableTipSlot &&
+		immutableTipSlot < ledgerStateSlot {
+		resumeGapEnd := min(recentBlocks[0].Slot, ledgerStateSlot)
+		logger.Info(
+			"processing stored volatile gap blocks from blob store",
+			"component", "mithril",
+			"immutable_tip_slot", immutableTipSlot,
+			"stored_tip_slot", recentBlocks[0].Slot,
+			"resume_gap_end_slot", resumeGapEnd,
+		)
+		storedGapBlocks, err := loadGapBlocksFromBlob(
+			db,
+			immutableTipSlot+1,
+			resumeGapEnd,
+		)
+		if err != nil {
+			return fmt.Errorf(
+				"loading stored gap blocks from blob store: %w",
+				err,
+			)
+		}
+		immutableTip, err := database.BlockBeforeSlot(
+			db,
+			immutableTipSlot+1,
+		)
+		if err != nil {
+			return fmt.Errorf(
+				"reading immutable tip for stored gap validation: %w",
+				err,
+			)
+		}
+		if immutableTip.Slot != immutableTipSlot {
+			return fmt.Errorf(
+				"reading immutable tip for stored gap validation: expected slot %d, got slot %d",
+				immutableTipSlot,
+				immutableTip.Slot,
+			)
+		}
+		// Only enforce the terminal-hash check against ledgerStateHash
+		// when the stored gap reaches the ledger state tip. A partial
+		// stored gap is still useful: continuity-validate it and let
+		// the volatile fetch path below pull the remainder.
+		var validateErr error
+		if resumeGapEnd == ledgerStateSlot {
+			validateErr = validateStoredGapBlocks(
+				storedGapBlocks,
+				immutableTip,
+				ledgerStateHash,
+			)
+		} else {
+			validateErr = validateStoredGapContinuity(
+				storedGapBlocks,
+				immutableTip,
+			)
+		}
+		if validateErr != nil {
+			logger.Warn(
+				"stored volatile gap blocks failed continuity check, refetching from relay",
+				"component", "mithril",
+				"immutable_tip_slot", immutableTipSlot,
+				"resume_gap_end_slot", resumeGapEnd,
+				"ledger_state_slot", ledgerStateSlot,
+				"ledger_state_hash", hex.EncodeToString(ledgerStateHash),
+				"error", validateErr,
+			)
+			// Drop the rejected blob blocks so neither the upcoming
+			// BlocksRecent query nor any slot-ordered iterator can
+			// resurface them as the chain tip after the relay refetch.
+			if cleanupErr := deleteBlobBlocksAboveSlot(
+				db, immutableTipSlot,
+			); cleanupErr != nil {
+				return fmt.Errorf(
+					"removing rejected gap blocks above slot %d: %w",
+					immutableTipSlot, cleanupErr,
+				)
+			}
+			recentBlocks = []models.Block{immutableTip}
+		} else {
+			storedTipSlot := recentBlocks[0].Slot
+			if storedTipSlot > resumeGapEnd {
+				logger.Info(
+					"removing stored volatile blocks beyond ledger state tip",
+					"component", "mithril",
+					"stored_tip_slot", storedTipSlot,
+					"resume_gap_end_slot", resumeGapEnd,
+				)
+				if cleanupErr := deleteBlobBlocksAboveSlot(
+					db, resumeGapEnd,
+				); cleanupErr != nil {
+					return fmt.Errorf(
+						"removing stored gap blocks above slot %d: %w",
+						resumeGapEnd,
+						cleanupErr,
+					)
+				}
+			}
+			if resumeGapEnd < ledgerStateSlot {
+				logger.Info(
+					"accepted partial stored volatile gap; remainder will be fetched from relay",
+					"component", "mithril",
+					"immutable_tip_slot", immutableTipSlot,
+					"resume_gap_end_slot", resumeGapEnd,
+					"ledger_state_slot", ledgerStateSlot,
+				)
+			}
+			if err := processGapBlocks(
+				ctx,
+				db,
+				logger,
+				storedGapBlocks,
+			); err != nil {
+				return fmt.Errorf(
+					"processing stored gap block transactions: %w",
+					err,
+				)
+			}
+			recentBlocks, err = database.BlocksRecent(db, 1)
+			if err != nil {
+				return fmt.Errorf(
+					"reading chain tip after gap resume: %w",
+					err,
+				)
+			}
+		}
 	}
 	if len(recentBlocks) > 0 && ledgerStateSlot > recentBlocks[0].Slot {
 		immutableTip := recentBlocks[0]
@@ -958,6 +1122,201 @@ func fetchGapBlocksFromPeer(
 	return blocks, nil
 }
 
+// deleteBlobBlocksAboveSlot removes every block from the blob store
+// whose slot is greater than the given threshold AND drops any
+// metadata indexed for those blocks (transactions, UTxOs, governance
+// proposals/votes), and restores any UTxOs that the rejected gap
+// blocks had marked spent. Used to clean up rejected gap blocks from
+// a previous failed Mithril resume so the next BlocksRecent query and
+// any slot-ordered iterator (chainsync replay, etc.) cannot resurface
+// them, and so leftover metadata from the discarded fork cannot
+// shadow the refetched chain.
+func deleteBlobBlocksAboveSlot(
+	db *database.Database,
+	slot uint64,
+) error {
+	if slot == ^uint64(0) {
+		return nil
+	}
+	iter := db.BlocksInRange(slot+1, ^uint64(0))
+	var stale []ocommon.Point
+	for {
+		next, err := iter.NextRaw()
+		if err != nil {
+			iter.Close()
+			return fmt.Errorf(
+				"iterating stale gap blocks above slot %d: %w",
+				slot, err,
+			)
+		}
+		if next == nil {
+			break
+		}
+		stale = append(stale, ocommon.Point{
+			Slot: next.Slot,
+			Hash: append([]byte(nil), next.Hash...),
+		})
+	}
+	iter.Close()
+	if len(stale) == 0 {
+		return nil
+	}
+	txn := db.Transaction(true)
+	return txn.Do(func(txn *database.Txn) error {
+		for _, p := range stale {
+			block, err := database.BlockByPointTxn(txn, p)
+			if err != nil {
+				if errors.Is(err, models.ErrBlockNotFound) {
+					continue
+				}
+				return fmt.Errorf(
+					"lookup stale gap block at slot %d: %w",
+					p.Slot, err,
+				)
+			}
+			if err := database.BlockDeleteTxn(txn, block); err != nil {
+				return fmt.Errorf(
+					"delete stale gap block at slot %d: %w",
+					p.Slot, err,
+				)
+			}
+		}
+		// Drop metadata indexed for the rejected blocks. Without this
+		// the refetched chain would inherit stale UTxO consumption,
+		// duplicate tx records, and orphan governance proposals/votes
+		// from the previous run's gap-block processing.
+		if err := db.UtxosDeleteRolledback(slot, txn); err != nil {
+			return fmt.Errorf(
+				"delete rolled-back UTxOs above slot %d: %w",
+				slot, err,
+			)
+		}
+		if err := db.TransactionsDeleteRolledback(slot, txn); err != nil {
+			return fmt.Errorf(
+				"delete rolled-back transactions above slot %d: %w",
+				slot, err,
+			)
+		}
+		if err := db.UtxosUnspend(slot, txn); err != nil {
+			return fmt.Errorf(
+				"restore UTxOs spent above slot %d: %w",
+				slot, err,
+			)
+		}
+		if err := db.DeleteGovernanceVotesAfterSlot(
+			slot, txn,
+		); err != nil {
+			return fmt.Errorf(
+				"delete rolled-back governance votes above slot %d: %w",
+				slot, err,
+			)
+		}
+		if err := db.DeleteGovernanceProposalsAfterSlot(
+			slot, txn,
+		); err != nil {
+			return fmt.Errorf(
+				"delete rolled-back governance proposals above slot %d: %w",
+				slot, err,
+			)
+		}
+		return nil
+	})
+}
+
+func loadGapBlocksFromBlob(
+	db *database.Database,
+	startSlot uint64,
+	endSlot uint64,
+) ([]models.Block, error) {
+	if startSlot > endSlot {
+		return nil, nil
+	}
+	iter := db.BlocksInRange(startSlot, endSlot)
+	defer iter.Close()
+	var ret []models.Block
+	for {
+		next, err := iter.NextRaw()
+		if err != nil {
+			return nil, fmt.Errorf(
+				"iterate blob blocks in range [%d,%d]: %w",
+				startSlot,
+				endSlot,
+				err,
+			)
+		}
+		if next == nil {
+			break
+		}
+		ret = append(ret, models.Block{
+			Slot:     next.Slot,
+			Hash:     append([]byte(nil), next.Hash...),
+			PrevHash: append([]byte(nil), next.PrevHash...),
+			Cbor:     append([]byte(nil), next.Cbor...),
+			Number:   next.Height,
+			Type:     next.BlockType,
+		})
+	}
+	return ret, nil
+}
+
+// validateStoredGapContinuity verifies the stored gap is non-empty,
+// chains from immutableTip, and is internally hash-linked. It does not
+// check the terminal block hash, so it is safe to use for partial gaps
+// that don't yet reach the ledger state tip.
+func validateStoredGapContinuity(
+	blocks []models.Block,
+	immutableTip models.Block,
+) error {
+	if len(blocks) == 0 {
+		return fmt.Errorf(
+			"stored volatile gap is empty after immutable tip slot %d",
+			immutableTip.Slot,
+		)
+	}
+	if !bytes.Equal(blocks[0].PrevHash, immutableTip.Hash) {
+		return fmt.Errorf(
+			"stored gap first block at slot %d prev hash %x does not match immutable tip slot %d hash %x",
+			blocks[0].Slot,
+			blocks[0].PrevHash,
+			immutableTip.Slot,
+			immutableTip.Hash,
+		)
+	}
+	for i := 1; i < len(blocks); i++ {
+		if bytes.Equal(blocks[i].PrevHash, blocks[i-1].Hash) {
+			continue
+		}
+		return fmt.Errorf(
+			"stored gap block at slot %d prev hash %x does not match previous block slot %d hash %x",
+			blocks[i].Slot,
+			blocks[i].PrevHash,
+			blocks[i-1].Slot,
+			blocks[i-1].Hash,
+		)
+	}
+	return nil
+}
+
+func validateStoredGapBlocks(
+	blocks []models.Block,
+	immutableTip models.Block,
+	ledgerStateHash []byte,
+) error {
+	if err := validateStoredGapContinuity(blocks, immutableTip); err != nil {
+		return err
+	}
+	last := blocks[len(blocks)-1]
+	if !bytes.Equal(last.Hash, ledgerStateHash) {
+		return fmt.Errorf(
+			"stored gap terminal block at slot %d hash %x does not match ledger state hash %x",
+			last.Slot,
+			last.Hash,
+			ledgerStateHash,
+		)
+	}
+	return nil
+}
+
 // processGapBlocks computes byte offsets and stores transaction
 // metadata for gap blocks that were fetched from a relay peer.
 // BlockCreate only writes raw CBOR to the blob store; this function
@@ -969,6 +1328,14 @@ func processGapBlocks(
 	logger *slog.Logger,
 	blocks []models.Block,
 ) error {
+	if len(blocks) == 0 {
+		return nil
+	}
+	epochs, err := db.GetEpochs(nil)
+	if err != nil {
+		return fmt.Errorf("loading epochs for gap blocks: %w", err)
+	}
+	conwayPParamsCache := make(map[uint64]*conway.ConwayProtocolParameters)
 	for _, block := range blocks {
 		if err := ctx.Err(); err != nil {
 			return fmt.Errorf("cancelled: %w", err)
@@ -1004,31 +1371,54 @@ func processGapBlocks(
 			)
 		}
 		point := ocommon.NewPoint(block.Slot, block.Hash)
-		if err := func() error {
-			txn := db.Transaction(true)
-			defer txn.Release()
-			// Gap blocks are already reflected in the Mithril
-			// snapshot's UTxO set, so input UTxOs are already
-			// consumed. Use SetGapBlockTransaction which stores
-			// only blob offsets and the TX record without
-			// attempting to look up or consume inputs.
-			for i, tx := range txs {
-				if err := db.SetGapBlockTransaction(
-					tx, point, uint32(i), // #nosec G115 -- tx index within a block
-					offsets, txn,
-				); err != nil {
+		epoch, err := gapBlockEpoch(epochs, block.Slot)
+		if err != nil {
+			return fmt.Errorf(
+				"resolving epoch for gap block at slot %d: %w",
+				block.Slot,
+				err,
+			)
+		}
+		blockConwayPParams := (*conway.ConwayProtocolParameters)(nil)
+		if epoch.EraId == conway.EraIdConway {
+			cached, ok := conwayPParamsCache[epoch.EpochId]
+			if !ok {
+				pparams, err := db.GetPParams(
+					epoch.EpochId,
+					eras.ConwayEraDesc.DecodePParamsFunc,
+					nil,
+				)
+				if err != nil {
 					return fmt.Errorf(
-						"storing TX: %w", err,
+						"loading protocol parameters for gap block at slot %d (epoch %d): %w",
+						block.Slot,
+						epoch.EpochId,
+						err,
 					)
 				}
+				if pparams != nil {
+					cached, ok = pparams.(*conway.ConwayProtocolParameters)
+					if !ok {
+						return fmt.Errorf(
+							"unexpected protocol params %T for gap block at slot %d (epoch %d)",
+							pparams,
+							block.Slot,
+							epoch.EpochId,
+						)
+					}
+				}
+				conwayPParamsCache[epoch.EpochId] = cached
 			}
-			if err := txn.Commit(); err != nil {
-				return fmt.Errorf(
-					"commit transaction: %w", err,
-				)
-			}
-			return nil
-		}(); err != nil {
+			blockConwayPParams = cached
+		}
+		if err := processGapBlockTransactions(
+			db,
+			point,
+			txs,
+			offsets,
+			epoch.EpochId,
+			blockConwayPParams,
+		); err != nil {
 			return fmt.Errorf(
 				"processing gap block at slot %d: %w",
 				block.Slot, err,
@@ -1044,506 +1434,101 @@ func processGapBlocks(
 	return nil
 }
 
-const txBodyKeyCollateralReturn uint64 = 16
-
-// extractInvalidTxIndices returns the set of transaction indices flagged as
-// script-invalid in the block (blockArray[4] for Alonzo+ blocks). The
-// collateral-return UTxO is produced only for invalid transactions — see
-// gouroboros ConwayTransaction.Produced(). Eras without invalid_transactions
-// (Byron/Shelley/Allegra/Mary) return an empty set.
-func extractInvalidTxIndices(blockCbor []byte) (map[int]struct{}, error) {
-	var blockArray []cbor.RawMessage
-	if _, err := cbor.Decode(blockCbor, &blockArray); err != nil {
-		return nil, err
-	}
-	if len(blockArray) < 5 {
-		return nil, nil
-	}
-	var invalidTxs []uint
-	if _, err := cbor.Decode([]byte(blockArray[4]), &invalidTxs); err != nil {
-		return nil, err
-	}
-	if len(invalidTxs) == 0 {
-		return nil, nil
-	}
-	set := make(map[int]struct{}, len(invalidTxs))
-	for _, idx := range invalidTxs {
-		set[int(idx)] = struct{}{} // #nosec G115 -- gouroboros bounds to 1M
-	}
-	return set, nil
-}
-
-func txBodyMapValueRange(
-	bodyCbor []byte,
-	bodyOffset uint32,
-	key uint64,
-) (uint32, uint32, bool, error) {
-	decoder, err := cbor.NewStreamDecoder(bodyCbor)
-	if err != nil {
-		return 0, 0, false, err
-	}
-	count, _, _, err := decoder.DecodeMapHeader()
-	if err != nil {
-		return 0, 0, false, err
-	}
-	for range count {
-		var currentKey uint64
-		if _, _, err := decoder.Decode(&currentKey); err != nil {
-			return 0, 0, false, err
-		}
-		valueOffset, valueLen, err := decoder.Skip()
-		if err != nil {
-			return 0, 0, false, err
-		}
-		if currentKey != key {
-			continue
-		}
-		valueOffset32, err := checkedUint32(valueOffset)
-		if err != nil {
-			return 0, 0, false, err
-		}
-		valueLen32, err := checkedUint32(valueLen)
-		if err != nil {
-			return 0, 0, false, err
-		}
-		if valueOffset32 > ^uint32(0)-bodyOffset {
-			return 0, 0, false, fmt.Errorf(
-				"value offset %d overflows body offset %d",
-				valueOffset32,
-				bodyOffset,
-			)
-		}
-		return bodyOffset + valueOffset32, valueLen32, true, nil
-	}
-	return 0, 0, false, nil
-}
-
-func checkedUint32(v int) (uint32, error) {
-	if v < 0 {
-		return 0, fmt.Errorf("negative value %d", v)
-	}
-	if uint64(v) > uint64(^uint32(0)) {
-		return 0, fmt.Errorf("value %d overflows uint32", v)
-	}
-	return uint32(v), nil // #nosec G115 -- checked above
-}
-
-// postProcessUtxoOffsets iterates all ImmutableDB blocks and
-// computes byte offset references for every transaction output.
-// This enables UtxoByRef() to extract UTxO CBOR on-demand from
-// the source block stored in the blob store.
-//
-// Fast path (Shelley+): uses ExtractTransactionOffsets for
-// structural CBOR parsing without full block decode, then
-// computes tx hashes via blake2b-256 on body CBOR.
-//
-// Fallback (Byron and other eras): parses the full block via
-// NewBlockFromCbor and locates output CBOR via byte search.
-func postProcessUtxoOffsets(
-	ctx context.Context,
+func processGapBlockTransactions(
 	db *database.Database,
-	logger *slog.Logger,
-	immutableDir string,
+	point ocommon.Point,
+	txs []lcommon.Transaction,
+	offsets *database.BlockIngestionResult,
+	epochId uint64,
+	conwayPParams *conway.ConwayProtocolParameters,
 ) error {
-	blob := db.Blob()
-	if blob == nil {
-		return errors.New("blob store not available")
-	}
-
-	imm, err := immutable.New(immutableDir)
-	if err != nil {
-		return fmt.Errorf(
-			"opening immutable DB: %w", err,
-		)
-	}
-	immutableTip, err := imm.GetTip()
-	if err != nil {
-		return fmt.Errorf(
-			"getting immutable DB tip: %w", err,
-		)
-	}
-	if immutableTip == nil {
-		return errors.New("immutable DB tip is nil")
-	}
-
-	iter, err := imm.BlocksFromPoint(ocommon.Point{})
-	if err != nil {
-		return fmt.Errorf(
-			"getting block iterator: %w", err,
-		)
-	}
-	defer iter.Close()
-
-	const batchBlocks = 50
-	const batchUtxoOffsets = 10000
-	var processedBlocks, totalUtxos int
-	startTime := time.Now()
-	lastProgressLog := time.Time{}
-	lastProgressSlot := uint64(0)
-	txn := db.BlobTxn(true)
-	blocksInBatch := 0
-	utxosInBatch := 0
-	// Deferred rollback ensures the active transaction is cleaned
-	// up if the loop body panics. Rollback after Commit is a no-op
-	// in Badger, so this is safe on the normal path.
-	defer func() { txn.Rollback() }() //nolint:errcheck
-
-	flushTxn := func() error {
-		if err := txn.Commit(); err != nil {
-			return fmt.Errorf(
-				"committing UTxO offsets: %w",
-				err,
-			)
+	txn := db.Transaction(true)
+	defer txn.Release()
+	for i, tx := range txs {
+		// Gap blocks are already reflected in the Mithril snapshot's
+		// UTxO set, so input UTxOs are already consumed. Store the TX
+		// record and blob offsets without re-consuming inputs.
+		if err := db.SetGapBlockTransaction(
+			tx,
+			point,
+			uint32(i), // #nosec G115 -- tx index within a block
+			offsets,
+			txn,
+		); err != nil {
+			return fmt.Errorf("storing TX: %w", err)
 		}
-		blocksInBatch = 0
-		utxosInBatch = 0
-		if err := ctx.Err(); err != nil {
-			return fmt.Errorf("cancelled: %w", err)
-		}
-		txn = db.BlobTxn(true)
-		return nil
-	}
-
-	for {
-		if err := ctx.Err(); err != nil {
-			txn.Rollback() //nolint:errcheck
-			return fmt.Errorf("cancelled: %w", err)
-		}
-		next, err := iter.Next()
-		if err != nil {
-			txn.Rollback() //nolint:errcheck
-			return fmt.Errorf("reading block: %w", err)
-		}
-		if next == nil {
-			break
-		}
-
-		// Skip EBBs (epoch boundary blocks have no
-		// transactions).
-		if next.IsEbb {
-			processedBlocks++
+		if !tx.IsValid() {
 			continue
 		}
-
-		var blockHash [32]byte
-		copy(blockHash[:], next.Hash)
-		blobTxn := txn.Blob()
-
-		// Try fast path: structural CBOR parsing without
-		// full block decode (works for Shelley+ eras).
-		offsets, extractErr := lcommon.ExtractTransactionOffsets(
-			next.Cbor,
-		)
-		if extractErr == nil {
-			invalidTxs, invErr := extractInvalidTxIndices(next.Cbor)
-			if invErr != nil {
-				txn.Rollback() //nolint:errcheck
-				return fmt.Errorf(
-					"block at slot %d: decoding invalid tx indices: %w",
-					next.Slot, invErr,
-				)
-			}
-			for txIdx, txLoc := range offsets.Transactions {
-				bodyEnd := txLoc.Body.Offset +
-					txLoc.Body.Length
-				if int(bodyEnd) > len(next.Cbor) {
-					txn.Rollback() //nolint:errcheck
-					return fmt.Errorf(
-						"block at slot %d: body "+
-							"range [%d:%d] exceeds "+
-							"block size %d",
-						next.Slot,
-						txLoc.Body.Offset,
-						bodyEnd,
-						len(next.Cbor),
-					)
-				}
-				bodyBytes := next.Cbor[txLoc.Body.Offset:bodyEnd]
-				txHash := lcommon.Blake2b256Hash(bodyBytes)
-				_, txIsInvalid := invalidTxs[txIdx]
-
-				if !txIsInvalid {
-					for i, outLoc := range txLoc.Outputs {
-						if outLoc.Length == 0 {
-							continue
-						}
-						offset := database.CborOffset{
-							BlockSlot:  next.Slot,
-							BlockHash:  blockHash,
-							ByteOffset: outLoc.Offset,
-							ByteLength: outLoc.Length,
-						}
-						offsetData := database.EncodeUtxoOffset(
-							&offset,
-						)
-						// #nosec G115
-						if err := blob.SetUtxo(
-							blobTxn,
-							txHash[:],
-							uint32(i),
-							offsetData,
-						); err != nil {
-							txn.Rollback() //nolint:errcheck
-							return fmt.Errorf(
-								"storing UTxO offset: %w",
-								err,
-							)
-						}
-						totalUtxos++
-						utxosInBatch++
-						if utxosInBatch >= batchUtxoOffsets {
-							if err := flushTxn(); err != nil {
-								return err
-							}
-							blobTxn = txn.Blob()
-						}
-					}
-					continue
-				}
-				collReturnOffset, collReturnLen, found, err := txBodyMapValueRange(
-					next.Cbor[txLoc.Body.Offset:bodyEnd],
-					txLoc.Body.Offset,
-					txBodyKeyCollateralReturn,
-				)
-				if err != nil {
-					txn.Rollback() //nolint:errcheck
-					return fmt.Errorf(
-						"block at slot %d: transaction %x collateral return offset: %w",
-						next.Slot,
-						txHash[:8],
-						err,
-					)
-				}
-				if found {
-					offset := database.CborOffset{
-						BlockSlot:  next.Slot,
-						BlockHash:  blockHash,
-						ByteOffset: collReturnOffset,
-						ByteLength: collReturnLen,
-					}
-					offsetData := database.EncodeUtxoOffset(
-						&offset,
-					)
-					outputIdx := uint32(len(txLoc.Outputs)) // #nosec G115
-					if err := blob.SetUtxo(
-						blobTxn,
-						txHash[:],
-						outputIdx,
-						offsetData,
-					); err != nil {
-						txn.Rollback() //nolint:errcheck
-						return fmt.Errorf(
-							"storing collateral return UTxO offset: %w",
-							err,
-						)
-					}
-					totalUtxos++
-					utxosInBatch++
-					if utxosInBatch >= batchUtxoOffsets {
-						if err := flushTxn(); err != nil {
-							return err
-						}
-						blobTxn = txn.Blob()
-					}
-				}
-			}
-		} else {
-			// Fallback: full block parsing for Byron
-			// and other eras where structural extraction
-			// fails.
-			parsedBlock, parseErr := gledger.NewBlockFromCbor(
-				next.Type, next.Cbor,
+		hasGovernance := len(tx.ProposalProcedures()) > 0 ||
+			len(tx.VotingProcedures()) > 0
+		if !hasGovernance {
+			continue
+		}
+		if conwayPParams == nil {
+			return errors.New(
+				"missing Conway protocol parameters for governance gap block processing",
 			)
-			if parseErr != nil {
-				txn.Rollback() //nolint:errcheck
-				return fmt.Errorf(
-					"parsing block at slot %d: %w",
-					next.Slot, parseErr,
-				)
-			}
-			seenCbor := make(map[string]int)
-			for _, tx := range parsedBlock.Transactions() {
-				txHash := tx.Hash()
-				var txHashArr [32]byte
-				copy(txHashArr[:], txHash.Bytes())
-				produced := tx.Produced()
-				for _, utxo := range produced {
-					outCbor := utxo.Output.Cbor()
-					if len(outCbor) == 0 {
-						txn.Rollback() //nolint:errcheck
-						return fmt.Errorf(
-							"block at slot %d: "+
-								"output %d has "+
-								"no CBOR",
-							next.Slot,
-							utxo.Id.Index(),
-						)
-					}
-					// Search the raw block for the nth
-					// occurrence of this output's CBOR.
-					// NOTE: this searches all block
-					// sections (header, witnesses, etc.),
-					// not just outputs. A false match in
-					// a non-output section would produce
-					// a wrong offset. In practice this is
-					// safe for Byron blocks because output
-					// CBOR (unique base58 addresses +
-					// amounts) is extremely unlikely to
-					// appear verbatim elsewhere. Shelley+
-					// blocks use the structural fast path.
-					key := string(outCbor)
-					nth := seenCbor[key]
-					seenCbor[key]++
-					pos := findNthOccurrence(
-						next.Cbor, outCbor, nth,
-					)
-					if pos < 0 {
-						txn.Rollback() //nolint:errcheck
-						return fmt.Errorf(
-							"block at slot %d: "+
-								"output %d CBOR "+
-								"not found",
-							next.Slot,
-							utxo.Id.Index(),
-						)
-					}
-					offset := database.CborOffset{
-						BlockSlot: next.Slot,
-						BlockHash: blockHash,
-						// #nosec G115
-						ByteOffset: uint32(pos),
-						// #nosec G115
-						ByteLength: uint32(
-							len(outCbor),
-						),
-					}
-					offsetData := database.EncodeUtxoOffset(
-						&offset,
-					)
-					if err := blob.SetUtxo(
-						blobTxn,
-						txHashArr[:],
-						utxo.Id.Index(),
-						offsetData,
-					); err != nil {
-						txn.Rollback() //nolint:errcheck
-						return fmt.Errorf(
-							"storing UTxO offset: %w",
-							err,
-						)
-					}
-					totalUtxos++
-					utxosInBatch++
-					if utxosInBatch >= batchUtxoOffsets {
-						if err := flushTxn(); err != nil {
-							return err
-						}
-						blobTxn = txn.Blob()
-					}
-				}
-			}
 		}
-
-		processedBlocks++
-		lastProgressSlot = next.Slot
-		blocksInBatch++
-
-		if blocksInBatch >= batchBlocks {
-			if err := flushTxn(); err != nil {
-				return err
-			}
-		}
-
-		maybeLogUtxoOffsetProgress(
-			logger,
-			processedBlocks,
-			totalUtxos,
-			lastProgressSlot,
-			immutableTip.Slot,
-			startTime,
-			&lastProgressLog,
-		)
-	}
-
-	// Commit remaining batch; the deferred rollback handles
-	// cleanup when there is nothing to commit.
-	if blocksInBatch > 0 || utxosInBatch > 0 {
-		if err := txn.Commit(); err != nil {
+		if err := governance.ProcessProposals(
+			tx,
+			point,
+			epochId,
+			conwayPParams.GovActionValidityPeriod,
+			db,
+			txn,
+		); err != nil {
 			return fmt.Errorf(
-				"committing final UTxO offsets: %w",
+				"processing governance proposals: %w",
+				err,
+			)
+		}
+		if err := governance.ProcessVotes(
+			tx,
+			point,
+			epochId,
+			conwayPParams.DRepInactivityPeriod,
+			db,
+			txn,
+		); err != nil {
+			return fmt.Errorf(
+				"processing governance votes: %w",
 				err,
 			)
 		}
 	}
-
-	logger.Info(
-		"UTxO offset post-processing complete",
-		"component", "mithril",
-		"blocks_processed", processedBlocks,
-		"utxo_offsets_stored", totalUtxos,
-	)
-
+	if err := txn.Commit(); err != nil {
+		return fmt.Errorf("commit transaction: %w", err)
+	}
 	return nil
 }
 
-func maybeLogUtxoOffsetProgress(
-	logger *slog.Logger,
-	processedBlocks int,
-	totalUtxos int,
-	currentSlot uint64,
-	tipSlot uint64,
-	startTime time.Time,
-	lastLogTime *time.Time,
-) {
-	now := time.Now()
-	if !lastLogTime.IsZero() && now.Sub(*lastLogTime) < 10*time.Second {
-		return
-	}
-	*lastLogTime = now
-
-	elapsed := now.Sub(startTime)
-	attrs := []any{
-		"component", "mithril",
-		"blocks", processedBlocks,
-		"utxos", totalUtxos,
-		"slot", currentSlot,
-	}
-	if elapsed > 0 {
-		attrs = append(
-			attrs,
-			"blocks_per_sec",
-			fmt.Sprintf("%.0f", float64(processedBlocks)/elapsed.Seconds()),
-		)
-	}
-	if tipSlot > 0 {
-		attrs = append(
-			attrs,
-			"progress",
-			fmt.Sprintf("%.1f%%", float64(currentSlot)/float64(tipSlot)*100),
-		)
-	}
-	logger.Info("UTxO offset progress", attrs...)
-}
-
-// findNthOccurrence returns the byte offset of the nth (0-indexed)
-// occurrence of target within data, or -1 if not found.
-func findNthOccurrence(data, target []byte, n int) int {
-	if len(target) == 0 || n < 0 {
-		return -1
-	}
-	off := 0
-	for range n {
-		idx := bytes.Index(data[off:], target)
-		if idx < 0 {
-			return -1
+// gapBlockEpoch resolves the epoch containing slot from a slice of
+// epochs ordered by ascending StartSlot (as returned by db.GetEpochs).
+// It enforces the upper bound StartSlot + LengthInSlots so a slot past
+// the last known epoch surfaces an error rather than silently binding
+// to the final entry.
+func gapBlockEpoch(
+	epochs []models.Epoch,
+	slot uint64,
+) (models.Epoch, error) {
+	for i := len(epochs) - 1; i >= 0; i-- {
+		if slot < epochs[i].StartSlot {
+			continue
 		}
-		off += idx + len(target)
+		end := epochs[i].StartSlot + uint64(epochs[i].LengthInSlots)
+		if epochs[i].LengthInSlots > 0 && slot >= end {
+			return models.Epoch{}, fmt.Errorf(
+				"slot %d is past the end of the last known epoch %d (slots %d..%d)",
+				slot,
+				epochs[i].EpochId,
+				epochs[i].StartSlot,
+				end,
+			)
+		}
+		return epochs[i], nil
 	}
-	idx := bytes.Index(data[off:], target)
-	if idx < 0 {
-		return -1
-	}
-	return off + idx
+	return models.Epoch{}, fmt.Errorf("no epoch found for slot %d", slot)
 }
 
 // epochLengthFromConfig returns an EpochLengthFunc that resolves

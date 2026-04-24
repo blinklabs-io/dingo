@@ -12,13 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package main
+package node
 
 import (
 	"bytes"
 	"encoding/hex"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
@@ -55,7 +56,7 @@ func TestTxBodyMapValueRangeFindsCollateralReturn(t *testing.T) {
 	offset, length, found, err := txBodyMapValueRange(
 		bodyCbor,
 		0,
-		txBodyKeyCollateralReturn,
+		database.TxBodyKeyCollateralReturn,
 	)
 	require.NoError(t, err)
 	require.True(t, found)
@@ -97,7 +98,7 @@ func TestTxBodyMapValueRangeHonorsBaseOffset(t *testing.T) {
 	offset, length, found, err := txBodyMapValueRange(
 		bodyCbor,
 		bodyOffset,
-		txBodyKeyCollateralReturn,
+		database.TxBodyKeyCollateralReturn,
 	)
 	require.NoError(t, err)
 	require.True(t, found)
@@ -119,7 +120,7 @@ func TestTxBodyMapValueRangeMissingKey(t *testing.T) {
 	_, _, found, err := txBodyMapValueRange(
 		bodyCbor,
 		0,
-		txBodyKeyCollateralReturn,
+		database.TxBodyKeyCollateralReturn,
 	)
 	require.NoError(t, err)
 	require.False(t, found)

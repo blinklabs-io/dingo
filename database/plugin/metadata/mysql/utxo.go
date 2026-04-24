@@ -489,26 +489,76 @@ func (d *MetadataStoreMysql) AddUtxos(
 	return nil
 }
 
-// SetUtxoDeletedAtSlot marks a UTxO as deleted at a given slot
+// SetUtxoDeletedAtSlot marks a UTxO as deleted at a given slot and
+// records the hash of the transaction that consumed it. The update uses
+// the same optimistic-locking predicate as the normal consume path and
+// also repairs same-slot rows that are still missing spent_at_tx_id.
 func (d *MetadataStoreMysql) SetUtxoDeletedAtSlot(
 	utxoId ledger.TransactionInput,
 	slot uint64,
+	spenderTxHash []byte,
 	txn types.Txn,
 ) error {
 	db, err := d.resolveDB(txn)
 	if err != nil {
 		return err
 	}
-	result := db.Model(models.Utxo{}).
-		Where("tx_id = ? AND output_idx = ?", utxoId.Id().Bytes(), utxoId.Index()).
-		Update("deleted_slot", slot)
+	result := db.Model(&models.Utxo{}).
+		Where(
+			"tx_id = ? AND output_idx = ? AND spent_at_tx_id IS NULL AND (deleted_slot = 0 OR deleted_slot = ?)",
+			utxoId.Id().Bytes(),
+			utxoId.Index(),
+			slot,
+		).
+		Updates(map[string]any{
+			"deleted_slot":   slot,
+			"spent_at_tx_id": spenderTxHash,
+		})
 	if result.Error != nil {
 		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		var count int64
+		existsResult := db.Model(&models.Utxo{}).
+			Where(
+				"tx_id = ? AND output_idx = ?",
+				utxoId.Id().Bytes(),
+				utxoId.Index(),
+			).
+			Count(&count)
+		if existsResult.Error != nil {
+			return existsResult.Error
+		}
+		if count == 0 {
+			return fmt.Errorf(
+				"%w: %x:%d",
+				types.ErrUtxoNotFound,
+				utxoId.Id().Bytes(),
+				utxoId.Index(),
+			)
+		}
+		return fmt.Errorf(
+			"%w: %x:%d",
+			types.ErrUtxoConflict,
+			utxoId.Id().Bytes(),
+			utxoId.Index(),
+		)
+	}
+	if result.RowsAffected != 1 {
+		return fmt.Errorf(
+			"%w: %x:%d",
+			types.ErrUtxoConflict,
+			utxoId.Id().Bytes(),
+			utxoId.Index(),
+		)
 	}
 	return nil
 }
 
-// SetUtxosNotDeletedAfterSlot marks a list of Utxos as not deleted after a given slot
+// SetUtxosNotDeletedAfterSlot marks a list of Utxos as not deleted after a given slot.
+// Both deleted_slot and spent_at_tx_id must be cleared so the restored row
+// satisfies the spend predicate (deleted_slot = 0 AND spent_at_tx_id IS NULL);
+// otherwise the UTxO appears live but cannot be re-spent.
 func (d *MetadataStoreMysql) SetUtxosNotDeletedAfterSlot(
 	slot uint64,
 	txn types.Txn,
@@ -519,7 +569,10 @@ func (d *MetadataStoreMysql) SetUtxosNotDeletedAfterSlot(
 	}
 	result := db.Model(models.Utxo{}).
 		Where("deleted_slot > ?", slot).
-		Update("deleted_slot", 0)
+		Updates(map[string]any{
+			"deleted_slot":   0,
+			"spent_at_tx_id": nil,
+		})
 	if result.Error != nil {
 		return result.Error
 	}

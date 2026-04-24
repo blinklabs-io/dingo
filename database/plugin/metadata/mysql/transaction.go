@@ -100,6 +100,56 @@ func (d *MetadataStoreMysql) GetTransactionByHash(
 	return ret, nil
 }
 
+// GetTransactionSlotByHash returns the slot of the transaction with the
+// given hash without preloading any related rows. Returns (0, false, nil)
+// when no such transaction exists.
+func (d *MetadataStoreMysql) GetTransactionSlotByHash(
+	hash []byte,
+	txn types.Txn,
+) (uint64, bool, error) {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return 0, false, err
+	}
+	var row struct{ Slot uint64 }
+	result := db.Model(&models.Transaction{}).
+		Select("slot").
+		Where("hash = ?", hash).
+		Take(&row)
+	if result.Error != nil {
+		if errors.Is(result.Error, gorm.ErrRecordNotFound) {
+			return 0, false, nil
+		}
+		return 0, false, result.Error
+	}
+	return row.Slot, true, nil
+}
+
+// GetTransactionIDByHash returns the primary-key ID of the transaction
+// with the given hash without preloading any related rows. Returns
+// (0, false, nil) when no such transaction exists.
+func (d *MetadataStoreMysql) GetTransactionIDByHash(
+	hash []byte,
+	txn types.Txn,
+) (uint, bool, error) {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return 0, false, err
+	}
+	var row struct{ ID uint }
+	result := db.Model(&models.Transaction{}).
+		Select("id").
+		Where("hash = ?", hash).
+		Take(&row)
+	if result.Error != nil {
+		if errors.Is(result.Error, gorm.ErrRecordNotFound) {
+			return 0, false, nil
+		}
+		return 0, false, result.Error
+	}
+	return row.ID, true, nil
+}
+
 // GetTransactionsByHashes returns transactions for the provided hashes.
 func (d *MetadataStoreMysql) GetTransactionsByHashes(
 	hashes [][]byte,
@@ -628,30 +678,12 @@ func (d *MetadataStoreMysql) SetTransaction(
 		metadataLabels = tmpLabels
 	}
 	collateralReturn := tx.CollateralReturn()
-	// For invalid transactions with collateral returns, fix indices via CBOR matching
-	// since Produced() uses enumerated indices rather than real transaction indices
-	var realIndexMap map[lcommon.Blake2b256]uint32
-	if !tx.IsValid() && collateralReturn != nil {
-		realIndexMap = make(map[lcommon.Blake2b256]uint32)
-		for idx, out := range tx.Outputs() {
-			if out != nil && idx <= int(^uint32(0)) {
-				// Hash CBOR for efficient map key
-				outputHash := lcommon.NewBlake2b256(out.Cbor())
-				//nolint:gosec // G115: idx bounds already checked above
-				realIndexMap[outputHash] = uint32(idx)
-			}
-		}
-	}
+	// tx.Produced() already returns correct indices for both
+	// valid transactions (regular outputs at 0, 1, ...) and
+	// invalid transactions (collateral return at len(Outputs())).
 	for _, utxo := range tx.Produced() {
 		if collateralReturn != nil && utxo.Output == collateralReturn {
 			m := models.UtxoLedgerToModel(utxo, point.Slot)
-			// Fix collateral return index for invalid transactions
-			if realIndexMap != nil && m.Cbor != nil {
-				outputHash := lcommon.NewBlake2b256(m.Cbor)
-				if realIdx, ok := realIndexMap[outputHash]; ok {
-					m.OutputIdx = realIdx
-				}
-			}
 			tmpTx.CollateralReturn = &m
 			continue
 		}

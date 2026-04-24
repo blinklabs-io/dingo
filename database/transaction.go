@@ -15,11 +15,14 @@
 package database
 
 import (
+	"bytes"
 	"encoding/hex"
+	"errors"
 	"fmt"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
+	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
@@ -117,6 +120,9 @@ func (d *Database) SetTransaction(
 		}
 	}
 
+	if err := d.ensureTransactionConsumedUtxos(tx, point, txn); err != nil {
+		return err
+	}
 	if err := d.metadata.SetTransaction(tx, point, idx, certDeposits, txn.Metadata()); err != nil {
 		return fmt.Errorf("set transaction metadata: %w", err)
 	}
@@ -223,6 +229,13 @@ func (d *Database) SetGapBlockTransaction(
 			"set gap block transaction metadata: %w", err,
 		)
 	}
+	if err := d.ensureGapConsumedUtxos(
+		tx,
+		point,
+		txn,
+	); err != nil {
+		return err
+	}
 
 	if owned {
 		if err := txn.Commit(); err != nil {
@@ -231,6 +244,367 @@ func (d *Database) SetGapBlockTransaction(
 	}
 
 	return nil
+}
+
+func (d *Database) ensureTransactionConsumedUtxos(
+	tx lcommon.Transaction,
+	point ocommon.Point,
+	txn *Txn,
+) error {
+	consumed := tx.Consumed()
+	if len(consumed) == 0 {
+		return nil
+	}
+	spenderTxHash := tx.Hash().Bytes()
+	recoveredUtxos := make([]models.Utxo, 0, len(consumed))
+	seen := make(map[string]struct{}, len(consumed))
+	for _, input := range consumed {
+		inputTxId := input.Id().Bytes()
+		inputKey := fmt.Sprintf("%x:%d", inputTxId, input.Index())
+		if _, ok := seen[inputKey]; ok {
+			continue
+		}
+		seen[inputKey] = struct{}{}
+		existingUtxo, err := d.metadata.GetUtxoIncludingSpent(
+			inputTxId,
+			input.Index(),
+			txn.Metadata(),
+		)
+		if err != nil {
+			return fmt.Errorf(
+				"check transaction input utxo %s: %w",
+				input.String(),
+				err,
+			)
+		}
+		if existingUtxo != nil {
+			// Backfill the spender link on a same-slot row that was
+			// marked deleted by an earlier code path (e.g., a previous
+			// partial run) without recording the consumer tx hash.
+			// Without this, metadata.SetTransaction's batch consume
+			// would fail with ErrUtxoConflict and rollback cleanup
+			// could not restore the row.
+			if existingUtxo.SpentAtTxId == nil &&
+				existingUtxo.DeletedSlot == point.Slot {
+				if err := d.metadata.SetUtxoDeletedAtSlot(
+					input,
+					point.Slot,
+					spenderTxHash,
+					txn.Metadata(),
+				); err != nil &&
+					!errors.Is(err, types.ErrUtxoNotFound) &&
+					!errors.Is(err, types.ErrUtxoConflict) {
+					return fmt.Errorf(
+						"backfill spender for input utxo %s at slot %d: %w",
+						input.String(),
+						point.Slot,
+						err,
+					)
+				}
+			}
+			continue
+		}
+		recoveredUtxo, err := d.recoverConsumedUtxo(
+			input,
+			txn,
+		)
+		if err != nil {
+			d.logger.Debug(
+				"skipping unrecoverable transaction input utxo repair",
+				"input",
+				input.String(),
+				"error",
+				err,
+			)
+			continue
+		}
+		recoveredUtxos = append(recoveredUtxos, *recoveredUtxo)
+	}
+	if len(recoveredUtxos) == 0 {
+		return nil
+	}
+	if err := d.metadata.ImportUtxos(
+		recoveredUtxos,
+		txn.Metadata(),
+	); err != nil {
+		return fmt.Errorf(
+			"import recovered transaction input utxos: %w",
+			err,
+		)
+	}
+	return nil
+}
+
+func (d *Database) ensureGapConsumedUtxos(
+	tx lcommon.Transaction,
+	point ocommon.Point,
+	txn *Txn,
+) error {
+	consumed := tx.Consumed()
+	if len(consumed) == 0 {
+		return nil
+	}
+	spenderTxHash := tx.Hash().Bytes()
+	recoveredUtxos := make([]models.Utxo, 0, len(consumed))
+	seen := make(map[string]struct{}, len(consumed))
+	for _, input := range consumed {
+		inputTxId := input.Id().Bytes()
+		inputKey := fmt.Sprintf("%x:%d", inputTxId, input.Index())
+		if _, ok := seen[inputKey]; ok {
+			continue
+		}
+		seen[inputKey] = struct{}{}
+		existingUtxo, err := d.metadata.GetUtxoIncludingSpent(
+			inputTxId,
+			input.Index(),
+			txn.Metadata(),
+		)
+		if err != nil {
+			return fmt.Errorf(
+				"check gap input utxo %s at slot %d: %w",
+				input.String(),
+				point.Slot,
+				err,
+			)
+		}
+		if existingUtxo != nil {
+			// Already spent by this same transaction: idempotent
+			// re-processing of the same gap block is a no-op.
+			if existingUtxo.SpentAtTxId != nil &&
+				bytes.Equal(existingUtxo.SpentAtTxId, spenderTxHash) {
+				continue
+			}
+			// Live rows from an earlier gap block or snapshot need to
+			// be consumed now. Same-slot deleted rows with a missing
+			// SpentAtTxId need their consumer link backfilled.
+			if existingUtxo.SpentAtTxId == nil &&
+				(existingUtxo.DeletedSlot == 0 ||
+					existingUtxo.DeletedSlot == point.Slot) {
+				if err := d.metadata.SetUtxoDeletedAtSlot(
+					input,
+					point.Slot,
+					spenderTxHash,
+					txn.Metadata(),
+				); err != nil {
+					// ErrUtxoConflict can occur if another path raced
+					// the row into a different state between our read
+					// and the update; treat it like NotFound so the
+					// recover-from-blob path runs (which is a no-op for
+					// any row that actually still exists thanks to
+					// ImportUtxos' ON CONFLICT DO NOTHING).
+					switch {
+					case errors.Is(err, types.ErrUtxoNotFound),
+						errors.Is(err, types.ErrUtxoConflict):
+						existingUtxo = nil
+					default:
+						return fmt.Errorf(
+							"mark gap input utxo %s spent at slot %d: %w",
+							input.String(),
+							point.Slot,
+							err,
+						)
+					}
+				}
+				if existingUtxo != nil {
+					continue
+				}
+			} else {
+				// Already spent by a different tx (e.g. the Mithril
+				// snapshot import already recorded this spend): leave the
+				// existing row alone.
+				continue
+			}
+		}
+		recoveredUtxo, err := d.recoverConsumedUtxo(input, txn)
+		if err != nil {
+			return fmt.Errorf(
+				"recover gap input utxo %s at slot %d: %w",
+				input.String(),
+				point.Slot,
+				err,
+			)
+		}
+		recoveredUtxo.DeletedSlot = point.Slot
+		recoveredUtxo.SpentAtTxId = append(
+			[]byte(nil),
+			spenderTxHash...,
+		)
+		recoveredUtxos = append(recoveredUtxos, *recoveredUtxo)
+	}
+	if len(recoveredUtxos) == 0 {
+		return nil
+	}
+	if err := d.metadata.ImportUtxos(
+		recoveredUtxos,
+		txn.Metadata(),
+	); err != nil {
+		return fmt.Errorf(
+			"import recovered gap input utxos at slot %d: %w",
+			point.Slot,
+			err,
+		)
+	}
+	return nil
+}
+
+func (d *Database) recoverConsumedUtxo(
+	input lcommon.TransactionInput,
+	txn *Txn,
+) (*models.Utxo, error) {
+	blob := txn.DB().Blob()
+	if blob == nil {
+		return nil, types.ErrBlobStoreUnavailable
+	}
+	blobTxn := txn.Blob()
+	if blobTxn == nil {
+		return nil, types.ErrNilTxn
+	}
+	utxoData, err := blob.GetUtxo(
+		blobTxn,
+		input.Id().Bytes(),
+		input.Index(),
+	)
+	if err != nil && !errors.Is(err, types.ErrBlobKeyNotFound) {
+		return nil, fmt.Errorf("lookup blob data: %w", err)
+	}
+	addedSlot := uint64(0)
+	outputCbor := utxoData
+	switch {
+	case err == nil && IsUtxoOffsetStorage(utxoData):
+		offset, err := DecodeUtxoOffset(utxoData)
+		if err != nil {
+			return nil, fmt.Errorf("decode utxo offset: %w", err)
+		}
+		blockCbor, _, err := blob.GetBlock(
+			blobTxn,
+			offset.BlockSlot,
+			offset.BlockHash[:],
+		)
+		if err != nil {
+			return nil, fmt.Errorf("load producer block: %w", err)
+		}
+		end := uint64(offset.ByteOffset) + uint64(offset.ByteLength)
+		if end > uint64(len(blockCbor)) {
+			return nil, fmt.Errorf(
+				"utxo offset out of bounds: offset=%d, length=%d, block_size=%d",
+				offset.ByteOffset,
+				offset.ByteLength,
+				len(blockCbor),
+			)
+		}
+		outputCbor = blockCbor[offset.ByteOffset:end]
+		addedSlot = offset.BlockSlot
+	case err == nil:
+		// Legacy format: raw output CBOR is already present in utxoData.
+		// Resolve the producer slot so addedSlot reflects when the UTxO
+		// was actually created; otherwise recovered legacy rows would look
+		// like genesis entries (added_slot = 0) and be invisible to
+		// slot-bounded queries and rollback cleanup. We only need the slot
+		// here, so the metadata-driven slot lookup avoids a full block
+		// fetch.
+		slot, found, slotErr := utxoRecoverySlotForTx(
+			txn.DB(),
+			txn,
+			input.Id().Bytes(),
+		)
+		if slotErr != nil {
+			return nil, fmt.Errorf(
+				"lookup producer slot for legacy utxo recovery: %w",
+				slotErr,
+			)
+		}
+		if !found {
+			return nil, ErrUtxoNotFound
+		}
+		addedSlot = slot
+	default:
+		block, err := utxoRecoveryBlockForTx(
+			txn.DB(),
+			txn,
+			input.Id().Bytes(),
+		)
+		if err != nil {
+			return nil, fmt.Errorf("lookup producer block: %w", err)
+		}
+		if block == nil {
+			return nil, ErrUtxoNotFound
+		}
+		decodedBlock, err := block.Decode()
+		if err != nil {
+			return nil, fmt.Errorf(
+				"decode producer block for input recovery at slot %d: %w",
+				block.Slot,
+				err,
+			)
+		}
+		outputCbor, err = utxoCborFromDecodedBlock(
+			decodedBlock,
+			input.Id().Bytes(),
+			input.Index(),
+		)
+		if err != nil {
+			return nil, err
+		}
+		addedSlot = block.Slot
+		indexer := NewBlockIndexer(block.Slot, block.Hash)
+		offsets, indexErr := indexer.ComputeOffsets(block.Cbor, decodedBlock)
+		if indexErr == nil {
+			var txHashArray [32]byte
+			copy(txHashArray[:], input.Id().Bytes())
+			ref := UtxoRef{TxId: txHashArray, OutputIdx: input.Index()}
+			if offset, ok := offsets.UtxoOffsets[ref]; ok {
+				if repairErr := repairUtxoBlob(
+					txn.DB(),
+					txn,
+					input.Id().Bytes(),
+					input.Index(),
+					&offset,
+				); repairErr != nil {
+					d.logger.Debug(
+						"failed to repair missing consumed input utxo blob",
+						"input",
+						input.String(),
+						"error",
+						repairErr,
+					)
+				}
+			}
+		}
+	}
+	output, err := gledger.NewTransactionOutputFromCbor(outputCbor)
+	if err != nil {
+		return nil, fmt.Errorf("decode transaction output: %w", err)
+	}
+	ret := models.UtxoLedgerToModel(
+		lcommon.Utxo{
+			Id:     input,
+			Output: output,
+		},
+		addedSlot,
+	)
+	// Populate the producer transaction FK so that joins on
+	// utxo.transaction_id and Preload("Outputs") from the producer
+	// Transaction see this row after a rollback reanimates it. The
+	// producer tx record may genuinely be absent (the very condition
+	// that drove recovery in some branches); in that case we leave
+	// the FK nil and the row stays unjoinable until backfilled by a
+	// later path that has the producer.
+	producerID, found, lookupErr := d.metadata.GetTransactionIDByHash(
+		input.Id().Bytes(),
+		txn.Metadata(),
+	)
+	if lookupErr != nil {
+		d.logger.Debug(
+			"failed to resolve producer transaction id for recovered utxo",
+			"input",
+			input.String(),
+			"error",
+			lookupErr,
+		)
+	} else if found {
+		ret.TransactionID = &producerID
+	}
+	return &ret, nil
 }
 
 // SetGenesisTransaction stores a genesis transaction with its UTxO outputs.

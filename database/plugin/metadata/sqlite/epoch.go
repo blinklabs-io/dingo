@@ -90,6 +90,37 @@ func (d *MetadataStoreSqlite) GetEpochs(
 	return ret, nil
 }
 
+// GetEpochBySlot returns the epoch containing the given slot, or nil if not found.
+func (d *MetadataStoreSqlite) GetEpochBySlot(
+	slot uint64,
+	txn types.Txn,
+) (*models.Epoch, error) {
+	var ret models.Epoch
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"GetEpochBySlot: resolve db: %w", err,
+		)
+	}
+	result := db.
+		Where(
+			"start_slot <= ? AND ? < start_slot + length_in_slots",
+			slot,
+			slot,
+		).
+		Order("start_slot DESC").
+		First(&ret)
+	if result.Error != nil {
+		if errors.Is(result.Error, gorm.ErrRecordNotFound) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf(
+			"GetEpochBySlot: query: %w", result.Error,
+		)
+	}
+	return &ret, nil
+}
+
 // DeleteEpochsAfterSlot removes all epoch entries whose start slot
 // is after the given slot.
 func (d *MetadataStoreSqlite) DeleteEpochsAfterSlot(

@@ -16,6 +16,7 @@ package ledgerstate
 
 import (
 	"bytes"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -37,14 +38,14 @@ var zeroBlake2b224 ledger.Blake2b224
 //   - CBOR array: [hash, index]
 //   - CBOR tag 24 (WrappedCbor): bstr wrapping CBOR or binary TxIn
 //   - Plain byte string: CBOR or binary TxIn inside
-//   - Binary: 32-byte hash + 2-byte little-endian index
+//   - Binary: 32-byte hash + 2-byte big-endian index
 func decodeTxIn(
 	raw cbor.RawMessage,
 ) (txHash []byte, outputIndex uint32, err error) {
 	// Try 1: Plain byte string (MemPack TxIn in UTxO-HD tvar)
 	// This is the most common case for MemPack files where each
 	// key is a CBOR byte string wrapping 34 bytes of MemPack
-	// TxIn (32-byte hash + 2-byte LE index).
+	// TxIn (32-byte hash + 2-byte BE index).
 	// decodeTxInFromBytes handles both the exact 34-byte binary
 	// path and CBOR-array-inside-byte-string fallback.
 	var keyBytes []byte
@@ -103,18 +104,20 @@ func decodeTxInFromArray(
 }
 
 // decodeTxInFromBytes decodes TxIn from inner bytes that may be
-// raw binary (32-byte hash + 2-byte LE index) or a CBOR array.
+// raw binary (32-byte hash + 2-byte BE index) or a CBOR array.
 // Binary format is tried first since it's the standard MemPack
 // encoding used in UTxO-HD tvar files.
 func decodeTxInFromBytes(
 	data []byte,
 ) ([]byte, uint32, error) {
-	// Binary format: 32-byte hash + 2-byte little-endian index
-	// This is the MemPack TxIn encoding (PackedBytes32 + Word16)
+	// Binary format: 32-byte hash + 2-byte big-endian index.
+	// Preview UTxO-HD snapshots encode the trailing Word16 in
+	// network order; decoding it as little-endian inflates #1 to
+	// #256 and corrupts imported UTxO keys.
 	if len(data) == 34 {
 		txHash := make([]byte, 32)
 		copy(txHash, data[:32])
-		idx := uint32(data[32]) | uint32(data[33])<<8
+		idx := uint32(binary.BigEndian.Uint16(data[32:34]))
 		return txHash, idx, nil
 	}
 
@@ -348,7 +351,7 @@ func parseUTxOsStreamingWithProgress(
 //   - Legacy CBOR: TxOut is a CBOR array or map
 //   - UTxO-HD MemPack: TxOut is MemPack binary (tags 0-5)
 //   - TxIn: CBOR array, tag-24-wrapped, or plain byte string
-//     with 32-byte hash + 2-byte LE index
+//     with 32-byte hash + 2-byte BE index
 func parseUTxOEntry(
 	keyRaw cbor.RawMessage,
 	valRaw cbor.RawMessage,

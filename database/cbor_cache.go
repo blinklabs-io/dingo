@@ -310,7 +310,7 @@ func (c *TieredCborCache) ResolveUtxoCbor(
 // so reconstructing a complete transaction ([body, witness, is_valid, aux_data])
 // would require fetching multiple components. Use tx.Cbor() from the parsed
 // block if you need complete transaction CBOR for decoding.
-func (c *TieredCborCache) ResolveTxCbor(txHash []byte) ([]byte, error) {
+func (c *TieredCborCache) ResolveTxCbor(txn *Txn, txHash []byte) ([]byte, error) {
 	// Tier 1: Hot cache check
 	if cbor, ok := c.hotTx.Get(txHash); ok {
 		c.metrics.IncTxHotHit()
@@ -330,11 +330,22 @@ func (c *TieredCborCache) ResolveTxCbor(txHash []byte) ([]byte, error) {
 		return nil, types.ErrBlobStoreUnavailable
 	}
 
-	// Get TX offset data from blob store
-	txn := blob.NewTransaction(false)
-	defer txn.Rollback() //nolint:errcheck
+	// Get TX offset data from blob store. Use the caller's active
+	// blob transaction when provided so uncommitted writes are visible.
+	blobTxn := types.Txn(nil)
+	cacheResolved := true
+	if txn != nil {
+		blobTxn = txn.Blob()
+		if blobTxn != nil && txn.IsReadWrite() {
+			cacheResolved = false
+		}
+	}
+	if blobTxn == nil {
+		blobTxn = blob.NewTransaction(false)
+		defer blobTxn.Rollback() //nolint:errcheck
+	}
 
-	txData, err := blob.GetTx(txn, txHash)
+	txData, err := blob.GetTx(blobTxn, txHash)
 	if err != nil {
 		return nil, fmt.Errorf("get tx from blob: %w", err)
 	}
@@ -342,7 +353,9 @@ func (c *TieredCborCache) ResolveTxCbor(txHash []byte) ([]byte, error) {
 	// Check if this is offset-based storage
 	if !IsTxOffsetStorage(txData) {
 		// Legacy format: raw CBOR data - populate hot cache and return
-		c.hotTx.Put(txHash, txData)
+		if cacheResolved {
+			c.hotTx.Put(txHash, txData)
+		}
 		return txData, nil
 	}
 
@@ -358,7 +371,9 @@ func (c *TieredCborCache) ResolveTxCbor(txHash []byte) ([]byte, error) {
 		cbor := cachedBlock.Extract(offset.ByteOffset, offset.ByteLength)
 		if cbor != nil {
 			// Populate hot cache
-			c.hotTx.Put(txHash, cbor)
+			if cacheResolved {
+				c.hotTx.Put(txHash, cbor)
+			}
 			return cbor, nil
 		}
 	}
@@ -367,7 +382,11 @@ func (c *TieredCborCache) ResolveTxCbor(txHash []byte) ([]byte, error) {
 	c.metrics.IncBlockLRUMiss()
 
 	// Fetch block from blob store
-	blockCbor, _, err := blob.GetBlock(txn, offset.BlockSlot, offset.BlockHash[:])
+	blockCbor, _, err := blob.GetBlock(
+		blobTxn,
+		offset.BlockSlot,
+		offset.BlockHash[:],
+	)
 	if err != nil {
 		return nil, fmt.Errorf("get block for tx extraction: %w", err)
 	}
@@ -390,7 +409,9 @@ func (c *TieredCborCache) ResolveTxCbor(txHash []byte) ([]byte, error) {
 	}
 
 	// Populate hot cache
-	c.hotTx.Put(txHash, cbor)
+	if cacheResolved {
+		c.hotTx.Put(txHash, cbor)
+	}
 	return cbor, nil
 }
 

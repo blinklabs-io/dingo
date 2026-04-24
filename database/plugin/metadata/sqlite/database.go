@@ -437,6 +437,16 @@ func (d *MetadataStoreSqlite) Start() error {
 			"pool_stake_snapshot dedup failed: %w", err,
 		)
 	}
+	// Promote the legacy non-unique block_nonce hash_slot index to a
+	// unique one before AutoMigrate; AutoMigrate will not change index
+	// uniqueness on its own and SetBlockNonce's upsert depends on it.
+	if err := models.MigrateBlockNonceUniqueIndex(
+		d.db, d.logger,
+	); err != nil {
+		return fmt.Errorf(
+			"block_nonce unique index migration failed: %w", err,
+		)
+	}
 	// Create table schemas (uses write connection)
 	d.logger.Debug(
 		"creating table",

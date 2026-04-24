@@ -122,6 +122,56 @@ func (d *MetadataStoreSqlite) GetTransactionByHash(
 	return ret, nil
 }
 
+// GetTransactionSlotByHash returns the slot of the transaction with the
+// given hash without preloading any related rows. Returns (0, false, nil)
+// when no such transaction exists.
+func (d *MetadataStoreSqlite) GetTransactionSlotByHash(
+	hash []byte,
+	txn types.Txn,
+) (uint64, bool, error) {
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return 0, false, err
+	}
+	var row struct{ Slot uint64 }
+	result := db.Model(&models.Transaction{}).
+		Select("slot").
+		Where("hash = ?", hash).
+		Take(&row)
+	if result.Error != nil {
+		if errors.Is(result.Error, gorm.ErrRecordNotFound) {
+			return 0, false, nil
+		}
+		return 0, false, result.Error
+	}
+	return row.Slot, true, nil
+}
+
+// GetTransactionIDByHash returns the primary-key ID of the transaction
+// with the given hash without preloading any related rows. Returns
+// (0, false, nil) when no such transaction exists.
+func (d *MetadataStoreSqlite) GetTransactionIDByHash(
+	hash []byte,
+	txn types.Txn,
+) (uint, bool, error) {
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return 0, false, err
+	}
+	var row struct{ ID uint }
+	result := db.Model(&models.Transaction{}).
+		Select("id").
+		Where("hash = ?", hash).
+		Take(&row)
+	if result.Error != nil {
+		if errors.Is(result.Error, gorm.ErrRecordNotFound) {
+			return 0, false, nil
+		}
+		return 0, false, result.Error
+	}
+	return row.ID, true, nil
+}
+
 // GetTransactionsByHashes returns transactions for the provided hashes.
 func (d *MetadataStoreSqlite) GetTransactionsByHashes(
 	hashes [][]byte,
