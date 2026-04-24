@@ -16,30 +16,34 @@ Monitoring dashboards for [Dingo](https://github.com/blinklabs-io/dingo), the Go
 
 ## Prerequisites
 
-- **Grafana** 10+ (tested on 12.4)
-- **Prometheus** datasource with UID `prometheus`
+Before you begin, make sure you have:
+
+- **Grafana 9+** (tested on 12.4) — [install guide](https://grafana.com/docs/grafana/latest/setup-grafana/installation/)
+- **Prometheus** scraping your Dingo node on port `12798` (configured in step 2 below)
 - **Dingo** node with metrics enabled (default port `12798`)
-- **[Business Text](https://grafana.com/grafana/plugins/marcusolsson-dynamictext-panel/)** plugin — required by all dashboards for header panels
-- **[prometheus-node-exporter](https://github.com/prometheus/node_exporter)** — required by Resource Usage dashboard for host-level CPU, memory, and disk metrics
+- **[Business Text plugin](https://grafana.com/grafana/plugins/marcusolsson-dynamictext-panel/)** — required by all dashboards for the header panel
+- **[prometheus-node-exporter](https://github.com/prometheus/node_exporter)** — required only by the Resource Usage dashboard for host-level CPU, memory, and disk metrics
 
 ## Quick start
 
 ### 1. Install the Business Text plugin
+
+Open a terminal on the machine running Grafana and run:
 
 ```bash
 grafana-cli plugins install marcusolsson-dynamictext-panel
 sudo systemctl restart grafana-server
 ```
 
-Or via `GF_INSTALL_PLUGINS` environment variable (Docker/Kubernetes):
+If you are running Grafana in Docker or Kubernetes, set the environment variable instead:
 
-```
+```text
 GF_INSTALL_PLUGINS=marcusolsson-dynamictext-panel
 ```
 
 ### 2. Configure Prometheus scrape targets
 
-Add to your `prometheus.yml` under `scrape_configs`:
+Prometheus needs to know where to find your Dingo node. Add the following to your `prometheus.yml` under `scrape_configs`:
 
 ```yaml
 - job_name: dingo
@@ -54,13 +58,19 @@ Add to your `prometheus.yml` under `scrape_configs`:
     - targets: ['localhost:9100']
 ```
 
+Then reload Prometheus to apply the change:
+
 ```bash
 sudo systemctl reload prometheus
 ```
 
 ### 3. Import dashboards
 
+There are two ways to get the dashboards into Grafana.
+
 **Option A: Provisioning (recommended)**
+
+Provisioning automatically loads dashboards from files on disk. Grafana will pick them up on startup or within about 30 seconds if already running.
 
 ```bash
 sudo cp docs/dashboards/provisioning.yaml /etc/grafana/provisioning/dashboards/dingo.yaml
@@ -70,26 +80,36 @@ sudo chown -R grafana:grafana /var/lib/grafana/dashboards/dingo/
 sudo systemctl restart grafana-server
 ```
 
-Dashboards appear in a **Dingo** folder automatically.
+After restarting, go to **Dashboards → Browse** in the Grafana UI and search for "Dingo". All five dashboards appear in a **Dingo** folder automatically.
 
 **Option B: Manual import**
 
-1. Open Grafana
-2. Go to **Dashboards > New > Import**
+1. Open Grafana in your browser
+2. Go to **Dashboards → New → Import**
 3. Upload each JSON file
 4. Select your Prometheus datasource when prompted
 
 ### 4. Alert rules (optional)
 
+The alert rules file is ready to use as-is — no editing required.
+
+Copy the file to your Prometheus rules directory:
+
 ```bash
 sudo cp docs/dashboards/alerts.yaml /etc/prometheus/rules/dingo.yml
 ```
 
-Add to `prometheus.yml`:
+Then add it to `prometheus.yml`:
 
 ```yaml
 rule_files:
   - /etc/prometheus/rules/dingo.yml
+```
+
+Reload Prometheus:
+
+```bash
+sudo systemctl reload prometheus
 ```
 
 ## Datasource
@@ -129,7 +149,7 @@ Some metrics only emit when their feature is active. Panels display "No data" un
 
 ## File listing
 
-```
+```text
 docs/dashboards/
   node-overview.json       Node Overview dashboard
   block-production.json    Block Production dashboard
@@ -142,3 +162,17 @@ docs/dashboards/
   alerts.yaml              Prometheus alert rules
   README.md                This file
 ```
+
+## Troubleshooting
+
+**Business Text plugin not found / panels show "Panel plugin not found: marcusolsson-dynamictext-panel"**
+Install the plugin (step 1 above) and restart Grafana. If running in a managed environment, add `marcusolsson-dynamictext-panel` to your `GF_INSTALL_PLUGINS` list.
+
+**Panels show "No data"**
+Check that Prometheus is scraping your Dingo node: open Prometheus in the browser, go to **Status → Targets**, and confirm the `dingo` job is up. Also verify the `$network` and `$instance` template variables at the top of the dashboard are set to the correct values.
+
+**Datasource UID mismatch ("datasource not found")**
+All JSON files use the datasource UID `prometheus`. If your Prometheus datasource has a different UID, either rename it to `prometheus` in **Connections → Data sources**, or do a find-and-replace of `"prometheus"` with your actual UID in the JSON files before importing.
+
+**Dashboards not appearing after provisioning**
+Confirm `/etc/grafana/provisioning/dashboards/dingo.yaml` references the correct path. Grafana auto-reloads provisioned dashboards every 30 seconds; if it hasn't appeared after a minute, check the Grafana log (`journalctl -u grafana-server`) for errors.

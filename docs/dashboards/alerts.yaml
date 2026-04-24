@@ -1,41 +1,29 @@
-## Recommended Prometheus alert rules for Dingo nodes
-##
-## Save as /etc/prometheus/rules/dingo.yml and reference in prometheus.yml:
-##   rule_files:
-##     - /etc/prometheus/rules/dingo.yml
-##
-## The $network variable must match your Cardano network's Shelley start
-## timestamp (e.g. 1666656000 for preview). If using Grafana alerting,
-## the template variable handles this automatically. For standalone
-## Prometheus, replace $network with the appropriate timestamp.
-
 groups:
   - name: dingo
-    interval: 30s
     rules:
-      - alert: DingoBlockHeightStall
-        expr: increase(cardano_node_metrics_blockNum_int[3m]) == 0
+      - alert: DingoBlockStall
+        expr: increase(cardano_node_metrics_blockNum_int[5m]) == 0
         for: 3m
         labels:
-          severity: critical
+          severity: warning
         annotations:
-          summary: "Block height has not increased in 3 minutes"
-          description: "cardano_node_metrics_blockNum_int has not changed for 3+ minutes."
+          summary: "Dingo block height stalled"
+          description: "cardano_node_metrics_blockNum_int has not increased in 3+ minutes."
 
       - alert: DingoSlotDrift
-        expr: (time() - $network) - cardano_node_metrics_slotNum_int > 120
+        expr: increase(cardano_node_metrics_slotNum_int[2m]) == 0
         for: 2m
         labels:
           severity: warning
         annotations:
-          summary: "Node tip is drifting from reference slot"
-          description: "Tip slot is {{ $value }} seconds behind the expected network slot."
+          summary: "Dingo slot counter stalled"
+          description: "cardano_node_metrics_slotNum_int has not increased in 2 minutes. Node may be stalled or disconnected."
 
       - alert: DingoPeerLoss
-        expr: cardano_node_metrics_connectionManager_incomingConns == 0 or cardano_node_metrics_connectionManager_outgoingConns == 0
+        expr: cardano_node_metrics_connectionManager_outgoingConns == 0
         for: 5m
         labels:
           severity: critical
         annotations:
-          summary: "No incoming or outgoing peer connections"
-          description: "Either incoming or outgoing connections have been zero for 5 minutes."
+          summary: "Dingo has no outgoing peer connections"
+          description: "cardano_node_metrics_connectionManager_outgoingConns has been 0 for 5+ minutes. Node cannot sync."
