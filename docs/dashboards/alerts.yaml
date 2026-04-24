@@ -2,22 +2,22 @@ groups:
   - name: dingo
     rules:
       - alert: DingoBlockStall
-        expr: increase(cardano_node_metrics_blockNum_int[5m]) == 0
-        for: 3m
+        expr: changes(cardano_node_metrics_blockNum_int[5m]) == 0
+        for: 0m
         labels:
           severity: warning
         annotations:
-          summary: "Dingo block height stalled"
-          description: "cardano_node_metrics_blockNum_int has not increased in 3+ minutes."
+          summary: "Dingo block height stalled on {{ $labels.network }}"
+          description: "Node {{ $labels.instance }} on {{ $labels.network }}: block height has not changed in 5 minutes."
 
       - alert: DingoSlotDrift
-        expr: increase(cardano_node_metrics_slotNum_int[2m]) == 0
-        for: 2m
+        expr: changes(cardano_node_metrics_slotNum_int[2m]) == 0
+        for: 0m
         labels:
           severity: warning
         annotations:
-          summary: "Dingo slot counter stalled"
-          description: "cardano_node_metrics_slotNum_int has not increased in 2 minutes. Node may be stalled or disconnected."
+          summary: "Dingo slot counter stalled on {{ $labels.network }}"
+          description: "Node {{ $labels.instance }} on {{ $labels.network }}: slot counter has not advanced in 2 minutes."
 
       - alert: DingoPeerLoss
         expr: cardano_node_metrics_connectionManager_outgoingConns == 0
@@ -25,5 +25,5 @@ groups:
         labels:
           severity: critical
         annotations:
-          summary: "Dingo has no outgoing peer connections"
-          description: "cardano_node_metrics_connectionManager_outgoingConns has been 0 for 5+ minutes. Node cannot sync."
+          summary: "Dingo has no outgoing peers on {{ $labels.network }}"
+          description: "Node {{ $labels.instance }} on {{ $labels.network }}: zero outgoing connections for 5+ minutes. Node cannot sync."

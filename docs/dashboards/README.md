@@ -18,7 +18,7 @@ Monitoring dashboards for [Dingo](https://github.com/blinklabs-io/dingo), the Go
 
 Before you begin, make sure you have:
 
-- **Grafana 9+** (tested on 12.4) — [install guide](https://grafana.com/docs/grafana/latest/setup-grafana/installation/)
+- **Grafana 10+** (tested on 12.4) — [install guide](https://grafana.com/docs/grafana/latest/setup-grafana/installation/)
 - **Prometheus** scraping your Dingo node on port `12798` (configured in step 2 below)
 - **Dingo** node with metrics enabled (default port `12798`)
 - **[Business Text plugin](https://grafana.com/grafana/plugins/marcusolsson-dynamictext-panel/)** — required by all dashboards for the header panel
@@ -125,9 +125,17 @@ All dashboards include two template variables that auto-discover dingo instances
 | `$network` | `label_values(dingo_build_info, network)` | Selects the Cardano network (`preview`, `preprod`, `mainnet`). |
 | `$instance` | `label_values(dingo_build_info{network="$network"}, instance)` | Selects specific dingo instance(s). Multi-select with "All" default. |
 
-`dingo_build_info` is a metric only dingo exposes (includes `network`, `version`, `revision` labels). This ensures dropdowns show only dingo targets, never Haskell cardano-node.
+`dingo_build_info` is a metric only dingo exposes (includes `network`, `version`, `commit` labels). This ensures dropdowns show only dingo targets, never Haskell cardano-node.
 
 All panel queries use `{network="$network", instance=~"$instance"}` as their selector.
+
+The **Resource Usage** dashboard adds a third variable:
+
+| Variable | Query | Purpose |
+|----------|-------|---------|
+| `$node_instance` | `label_values(node_uname_info, instance)` | Selects the node_exporter target for host-level metrics (CPU, memory, disk, network). node_exporter runs on a different port (default `9100`) from the dingo metrics port, so it needs its own instance dropdown. |
+
+Set `$node_instance` to the hostname/port reported by your node_exporter scrape target (typically `localhost:9100` or the host IP).
 
 ## Navigation
 
