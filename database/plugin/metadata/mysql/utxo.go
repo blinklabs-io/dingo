@@ -496,3 +496,46 @@ func (d *MetadataStoreMysql) SetUtxosNotDeletedAfterSlot(
 	}
 	return nil
 }
+
+// RemoveByronAvvmUtxos implements the Shelley→Allegra HARDFORK rule
+// (cardano-ledger Allegra/Translation.hs, returnRedeemAddrsToReserves):
+// marks all live UTxOs at Byron redeem (AVVM) addresses as deleted at
+// atSlot and returns the count and total lovelace amount that was
+// reclaimed. DeletedSlot is set to atSlot so rollback across the
+// boundary (via SetUtxosNotDeletedAfterSlot) correctly un-deletes them.
+// See the MetadataStore interface for semantics.
+func (d *MetadataStoreMysql) RemoveByronAvvmUtxos(
+	atSlot uint64,
+	txn types.Txn,
+) (int, uint64, error) {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return 0, 0, err
+	}
+	var stats struct {
+		Count int64
+		Sum   uint64
+	}
+	if err := db.Model(&models.Utxo{}).
+		Select("COUNT(*) AS count, COALESCE(SUM(amount), 0) AS sum").
+		Where(
+			"byron_address_type = ? AND deleted_slot = 0",
+			uint8(lcommon.ByronAddressTypeRedeem),
+		).
+		Scan(&stats).Error; err != nil {
+		return 0, 0, err
+	}
+	if stats.Count == 0 {
+		return 0, 0, nil
+	}
+	result := db.Model(&models.Utxo{}).
+		Where(
+			"byron_address_type = ? AND deleted_slot = 0",
+			uint8(lcommon.ByronAddressTypeRedeem),
+		).
+		Update("deleted_slot", atSlot)
+	if result.Error != nil {
+		return 0, 0, result.Error
+	}
+	return int(stats.Count), stats.Sum, nil
+}

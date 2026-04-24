@@ -629,3 +629,46 @@ func (d *Database) UtxosUnspend(
 	}
 	return nil
 }
+
+// RemoveByronAvvmUtxos applies the Shelley→Allegra HARDFORK rule
+// (cardano-ledger Allegra/Translation.hs, returnRedeemAddrsToReserves):
+// marks every live UTxO at a Byron redeem (AVVM) address as deleted at
+// atSlot and returns the count and total lovelace reclaimed. The
+// DeletedSlot bookkeeping lets a rollback past atSlot un-delete the rows
+// via the existing SetUtxosNotDeletedAfterSlot path. Callers are
+// responsible for adding totalLovelace to reserves; this wrapper does
+// not touch NetworkState because reserves tracking is broader than the
+// AVVM rule.
+func (d *Database) RemoveByronAvvmUtxos(
+	atSlot uint64,
+	txn *Txn,
+) (int, uint64, error) {
+	owned := false
+	if txn == nil {
+		txn = NewMetadataOnlyTxn(d, true)
+		owned = true
+		defer func() {
+			if owned {
+				txn.Rollback() //nolint:errcheck
+			}
+		}()
+	}
+	count, total, err := d.metadata.RemoveByronAvvmUtxos(
+		atSlot,
+		txn.Metadata(),
+	)
+	if err != nil {
+		return 0, 0, fmt.Errorf(
+			"remove Byron AVVM UTxOs at slot %d: %w",
+			atSlot,
+			err,
+		)
+	}
+	if owned {
+		if err := txn.Commit(); err != nil {
+			return 0, 0, fmt.Errorf("commit transaction: %w", err)
+		}
+		owned = false
+	}
+	return count, total, nil
+}

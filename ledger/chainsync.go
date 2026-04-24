@@ -2834,6 +2834,19 @@ func (ls *LedgerState) processEpochRollover(
 				"component", "ledger",
 			)
 		}
+		// Apply cardano-ledger's per-major-version HARDFORK rule. This
+		// runs on ANY major-version bump, including intra-era ones like
+		// Conway pv9→pv10 (Plomin, mainnet January 2025) that do not
+		// trigger an era change, and inter-era ones like Shelley→Allegra
+		// (pv2→pv3) that carry a state rewrite. See cardano-ledger
+		// Conway/Rules/HardFork.hs and Allegra/Translation.hs.
+		if oldVer.Major != newVer.Major {
+			if err := ls.applyIntraEraHardForkRule(
+				txn, newVer.Major, epochStartSlot, currentEpoch.EpochId+1,
+			); err != nil {
+				return nil, fmt.Errorf("apply major-version HARDFORK: %w", err)
+			}
+		}
 	}
 
 	// Create next epoch record
