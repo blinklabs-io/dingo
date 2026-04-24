@@ -368,7 +368,7 @@
             "type": "prometheus",
             "uid": null
           },
-          "expr": "cardano_node_metrics_currentKESKESPeriod_int{network=\"$network\",instance=~\"$instance\"}",
+          "expr": "cardano_node_metrics_currentKESPeriod_int{network=\"$network\",instance=~\"$instance\"}",
           "instant": true,
           "legendFormat": "",
           "range": false,
@@ -2070,17 +2070,6 @@
           "legendFormat": "Fetch Delay",
           "range": true,
           "refId": "B"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": null
-          },
-          "editorMode": "code",
-          "expr": "last_over_time(cardano_node_metrics_blockfetchclient_blocksize{network=\"$network\",instance=~\"$instance\"}[30s])",
-          "legendFormat": "Fetch Size",
-          "range": true,
-          "refId": "C"
         }
       ],
       "transparent": true

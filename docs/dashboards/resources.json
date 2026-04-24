@@ -369,7 +369,7 @@
             "type": "prometheus",
             "uid": null
           },
-          "expr": "cardano_node_metrics_currentKESKESPeriod_int{network=\"$network\",instance=~\"$instance\"}",
+          "expr": "cardano_node_metrics_currentKESPeriod_int{network=\"$network\",instance=~\"$instance\"}",
           "instant": true,
           "legendFormat": "",
           "range": false,
