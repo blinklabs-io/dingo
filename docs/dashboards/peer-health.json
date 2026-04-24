@@ -2486,18 +2486,52 @@
       "fieldConfig": {
         "defaults": {
           "color": {
-            "fixedColor": "#4285F4",
-            "mode": "fixed"
+            "mode": "palette-classic"
           },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 5,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
           "thresholds": {
             "mode": "absolute",
             "steps": [
               {
-                "color": "#6e7681",
+                "color": "green",
                 "value": null
               }
             ]
-          }
+          },
+          "unit": "short"
         },
         "overrides": []
       },
@@ -2508,20 +2542,14 @@
         "y": 34
       },
       "options": {
-        "bucketSize": 5,
-        "combine": false,
-        "fillOpacity": 80,
-        "gradientMode": "scheme",
         "legend": {
-          "displayMode": "hidden",
+          "displayMode": "list",
           "placement": "bottom",
-          "showLegend": false
-        },
-        "stacking": {
-          "mode": "none"
+          "showLegend": true
         },
         "tooltip": {
-          "mode": "multi"
+          "mode": "multi",
+          "sort": "desc"
         }
       },
       "targets": [
@@ -2538,7 +2566,7 @@
       ],
       "title": "chainsync event distribution",
       "transparent": true,
-      "type": "histogram",
+      "type": "timeseries",
       "id": 310,
       "description": "Distribution of chain sync events received from peers."
     },

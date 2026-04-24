@@ -3126,7 +3126,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "go_gc_duration_seconds{quantile=\"0.5\",network=\"$network\",instance=~\"$instance\"}",
+          "expr": "go_gc_duration_seconds{quantile=\"0.5\",instance=~\"$instance\"}",
           "legendFormat": "{{alias}} p50",
           "range": true,
           "refId": "A"
@@ -3136,7 +3136,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "go_gc_duration_seconds{quantile=\"0.75\",network=\"$network\",instance=~\"$instance\"}",
+          "expr": "go_gc_duration_seconds{quantile=\"0.75\",instance=~\"$instance\"}",
           "legendFormat": "{{alias}} p75",
           "range": true,
           "refId": "B"
@@ -3146,7 +3146,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "go_gc_duration_seconds{quantile=\"1\",network=\"$network\",instance=~\"$instance\"}",
+          "expr": "go_gc_duration_seconds{quantile=\"1\",instance=~\"$instance\"}",
           "legendFormat": "{{alias}} p99",
           "range": true,
           "refId": "C"
@@ -3226,7 +3226,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "rate(database_blob_block_cache_hits_total{instance=~\"$instance\"}[5m]) / (rate(database_blob_block_cache_hits_total{instance=~\"$instance\"}[5m]) + rate(database_blob_block_cache_misses_total{instance=~\"$instance\"}[5m]))",
+          "expr": "database_blob_block_cache_hit_ratio",
           "instant": true,
           "legendFormat": "{{alias}}",
           "refId": "A"
@@ -3316,7 +3316,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "rate(database_blob_block_cache_hits_total{instance=~\"$instance\"}[5m])",
+          "expr": "database_blob_block_cache_hits_total",
           "legendFormat": "{{alias}} hits/s",
           "range": true,
           "refId": "A"
@@ -3326,7 +3326,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "rate(database_blob_block_cache_misses_total{instance=~\"$instance\"}[5m])",
+          "expr": "database_blob_block_cache_misses_total",
           "legendFormat": "{{alias}} misses/s",
           "range": true,
           "refId": "B"
