@@ -881,6 +881,20 @@ type MetadataStore interface {
 	// anchor and active status restored.
 	RestoreDrepStateAtSlot(uint64, types.Txn) error
 
+	// ClearDanglingDRepDelegations implements the cardano-ledger Conway
+	// HARDFORK STS rule for protocol major version 10 (Plomin, mainnet
+	// January 2025, Cardano/Conway/Rules/HardFork.hs updateDRepDelegations).
+	// For each account with a credential-backed DRep delegation
+	// (DrepType 0 or 1), if the target DRep credential is not currently
+	// registered as an active DRep, clear the delegation. Pseudo-DRep
+	// delegations (AlwaysAbstain, AlwaysNoConfidence) are preserved.
+	// Updates Account.AddedSlot to atSlot on every row it modifies so the
+	// rewritten row is excluded from a subsequent rollback restore
+	// targeting any slot before atSlot (the restore filters on
+	// `added_slot <= targetSlot` and falls back to prior certificate
+	// history). Returns the number of accounts updated.
+	ClearDanglingDRepDelegations(atSlot uint64, txn types.Txn) (int, error)
+
 	// DeletePParamsAfterSlot removes protocol parameter records added after
 	// the given slot.
 	DeletePParamsAfterSlot(uint64, types.Txn) error
