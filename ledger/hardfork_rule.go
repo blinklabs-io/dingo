@@ -36,6 +36,10 @@ import (
 //     live UTxO at a Byron redeem (AVVM) address and return its lovelace
 //     to reserves. Ports cardano-ledger
 //     Allegra/Translation.hs:returnRedeemAddrsToReserves.
+//   - major == 10 (Plomin, mainnet January 2025): clear any dangling
+//     credential-backed DRep delegation whose target DRep credential is
+//     not currently registered as an active DRep. Pseudo-DRep
+//     delegations (AlwaysAbstain, AlwaysNoConfidence) are preserved.
 //
 // Cases known but not yet required (no era defined in dingo yet):
 //

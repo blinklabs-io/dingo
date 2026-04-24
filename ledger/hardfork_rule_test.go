@@ -78,21 +78,6 @@ func seedPlominFixtures(t *testing.T, db *database.Database) plominFixtureKeys {
 	return keys
 }
 
-// newTestLSForPlomin wires just enough of a LedgerState to call
-// applyIntraEraHardForkRule against the given test DB.
-func newTestLSForPlomin(
-	t *testing.T,
-	db *database.Database,
-) *LedgerState {
-	t.Helper()
-	return &LedgerState{
-		db: db,
-		config: LedgerStateConfig{
-			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		},
-	}
-}
-
 // pv10 is the major-version bump that currently has a non-no-op handler:
 // accounts with credential-backed delegations to unregistered DReps are
 // cleared; accounts delegating to registered DReps are preserved.
@@ -100,7 +85,7 @@ func TestApplyIntraEraHardForkRule_Pv10_ClearsDangling(t *testing.T) {
 	db := newTestDB(t)
 	keys := seedPlominFixtures(t, db)
 
-	ls := newTestLSForPlomin(t, db)
+	ls := newTestLSForHardForkRule(t, db)
 	require.NoError(t, ls.applyIntraEraHardForkRule(
 		nil,  // nil txn → owned metadata txn inside the Database wrapper
 		10,   // newMajor
@@ -130,7 +115,7 @@ func TestApplyIntraEraHardForkRule_UnknownMajor_NoOp(t *testing.T) {
 	db := newTestDB(t)
 	keys := seedPlominFixtures(t, db)
 
-	ls := newTestLSForPlomin(t, db)
+	ls := newTestLSForHardForkRule(t, db)
 
 	for _, major := range []uint{9, 11, 12, 99} {
 		require.NoError(t, ls.applyIntraEraHardForkRule(
@@ -243,10 +228,10 @@ func TestApplyIntraEraHardForkRule_Pv3_RemovesAvvm(t *testing.T) {
 		"Byron pubkey UTxO must survive the pv3 rule")
 }
 
-// Unknown major versions are a no-op — matches the Haskell rule's
-// `otherwise = id` branch. Explicitly verifies that pv2 (pre-Allegra),
-// pv4 (Allegra→Mary), and pv10 (Plomin, handled elsewhere) do not touch
-// AVVM UTxOs through this dispatch.
+// Only pv3 may touch AVVM UTxOs. Verifies that other majors — both the
+// no-op branches matching the Haskell rule's `otherwise = id` (pv2, pv99)
+// and majors with their own non-AVVM handlers (pv10/Plomin) — leave
+// redeem UTxOs untouched through this dispatch.
 func TestApplyIntraEraHardForkRule_OtherMajors_DoNotTouchAvvm(t *testing.T) {
 	db := newTestDB(t)
 	keys := seedAllegraAvvmFixtures(t, db)
