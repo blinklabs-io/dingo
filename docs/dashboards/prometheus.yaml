@@ -1,0 +1,16 @@
+## Prometheus scrape configuration for Dingo dashboards
+##
+## Add these jobs to your prometheus.yml under scrape_configs:
+
+scrape_configs:
+  # Dingo node metrics (default port 12798)
+  - job_name: dingo
+    scrape_interval: 15s
+    static_configs:
+      - targets: ['localhost:12798']
+
+  # Node exporter for host-level metrics (required by Resource Usage dashboard)
+  - job_name: node
+    scrape_interval: 15s
+    static_configs:
+      - targets: ['localhost:9100']

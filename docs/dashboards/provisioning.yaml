@@ -1,0 +1,14 @@
+apiVersion: 1
+
+providers:
+  - name: dingo
+    orgId: 1
+    folder: Dingo
+    folderUid: dingo-dashboards
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    allowUiUpdates: true
+    options:
+      path: /var/lib/grafana/dashboards/dingo
+      foldersFromFilesStructure: false

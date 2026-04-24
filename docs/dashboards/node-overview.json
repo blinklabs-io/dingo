@@ -29,7 +29,7 @@
       }
     ]
   },
-  "description": "Host resources via node_exporter (CPU, RAM, swap, disk, network) + Dingo process + Go memstats + cache",
+  "description": "Dingo node overview \u2014 sync, chain, KES, uptime, Go runtime, process stats",
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 2,
@@ -132,11 +132,10 @@
   "schemaVersion": 42,
   "tags": [
     "dingo",
-    "cardano",
-    "node-exporter"
+    "cardano"
   ],
-  "title": "Dingo \u2014 Resources",
-  "uid": "dingo-resources",
+  "title": "Dingo \u2014 Node Overview",
+  "uid": "dingo-overview",
   "version": 1,
   "panels": [
     {
@@ -744,48 +743,94 @@
       }
     },
     {
-      "collapsed": false,
+      "type": "stat",
+      "title": "Forging",
+      "id": 1,
       "gridPos": {
-        "h": 1,
-        "w": 24,
+        "h": 3,
+        "w": 3,
         "x": 0,
         "y": 10
       },
-      "id": 1,
-      "title": "Host \u2014 CPU (node_exporter)",
-      "type": "row",
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "color": "#ef4444",
+                  "text": "OFF"
+                },
+                "1": {
+                  "color": "#22c55e",
+                  "text": "ON"
+                }
+              }
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#ef4444",
+                "value": 0
+              },
+              {
+                "color": "#22c55e",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": null
+          },
+          "expr": "cardano_node_metrics_forging_enabled{network=\"$network\",instance=~\"$instance\"}",
+          "instant": true,
+          "legendFormat": "{{instance}}",
+          "refId": "A"
+        }
+      ],
       "transparent": true
     },
     {
-      "type": "timeseries",
-      "title": "CPU Usage %",
+      "type": "stat",
+      "title": "Block Height",
       "id": 2,
       "gridPos": {
-        "h": 7,
-        "w": 12,
-        "x": 0,
-        "y": 11
+        "h": 3,
+        "w": 3,
+        "x": 3,
+        "y": 10
       },
       "fieldConfig": {
         "defaults": {
           "color": {
-            "mode": "palette-classic"
+            "fixedColor": "#3b82f6",
+            "mode": "fixed"
           },
-          "custom": {
-            "drawStyle": "line",
-            "fillOpacity": 15,
-            "lineWidth": 2,
-            "showPoints": "never"
-          },
-          "unit": "percent",
-          "min": 0,
-          "max": 100,
+          "unit": "locale",
           "mappings": [],
           "thresholds": {
             "mode": "absolute",
             "steps": [
               {
-                "color": "green",
+                "color": "#3b82f6",
                 "value": 0
               }
             ]
@@ -794,13 +839,12 @@
         "overrides": []
       },
       "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "single"
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
         }
       },
       "targets": [
@@ -809,42 +853,37 @@
             "type": "prometheus",
             "uid": null
           },
-          "expr": "100 - (avg by (instance) (rate(node_cpu_seconds_total{mode=\"idle\"}[5m])) * 100)",
-          "legendFormat": "{{instance}} cpu%",
-          "range": true,
+          "expr": "cardano_node_metrics_blockNum_int{network=\"$network\",instance=~\"$instance\"}",
+          "instant": true,
+          "legendFormat": "{{instance}}",
           "refId": "A"
         }
       ],
       "transparent": true
     },
     {
-      "type": "timeseries",
-      "title": "CPU by Mode",
+      "type": "stat",
+      "title": "Slot Number",
       "id": 3,
       "gridPos": {
-        "h": 7,
-        "w": 12,
-        "x": 12,
-        "y": 11
+        "h": 3,
+        "w": 3,
+        "x": 6,
+        "y": 10
       },
       "fieldConfig": {
         "defaults": {
           "color": {
-            "mode": "palette-classic"
+            "fixedColor": "#60a5fa",
+            "mode": "fixed"
           },
-          "custom": {
-            "drawStyle": "line",
-            "fillOpacity": 10,
-            "lineWidth": 1,
-            "showPoints": "never"
-          },
-          "unit": "percent",
+          "unit": "locale",
           "mappings": [],
           "thresholds": {
             "mode": "absolute",
             "steps": [
               {
-                "color": "green",
+                "color": "#60a5fa",
                 "value": 0
               }
             ]
@@ -853,13 +892,12 @@
         "overrides": []
       },
       "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "single"
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
         }
       },
       "targets": [
@@ -868,102 +906,51 @@
             "type": "prometheus",
             "uid": null
           },
-          "expr": "avg by (instance, mode) (rate(node_cpu_seconds_total[5m])) * 100",
-          "legendFormat": "{{instance}} {{mode}}",
-          "range": true,
+          "expr": "cardano_node_metrics_slotNum_int{network=\"$network\",instance=~\"$instance\"}",
+          "instant": true,
+          "legendFormat": "{{instance}}",
           "refId": "A"
         }
       ],
       "transparent": true
     },
     {
-      "type": "timeseries",
-      "title": "Load Average (1m / 5m / 15m)",
+      "type": "stat",
+      "title": "Epoch",
       "id": 4,
       "gridPos": {
-        "h": 7,
-        "w": 12,
-        "x": 0,
-        "y": 18
+        "h": 3,
+        "w": 2,
+        "x": 9,
+        "y": 10
       },
       "fieldConfig": {
         "defaults": {
           "color": {
-            "mode": "palette-classic"
+            "fixedColor": "#8ab8ff",
+            "mode": "fixed"
           },
-          "custom": {
-            "drawStyle": "line",
-            "fillOpacity": 10,
-            "lineWidth": 2,
-            "showPoints": "auto"
-          },
+          "unit": "locale",
           "mappings": [],
           "thresholds": {
             "mode": "absolute",
             "steps": [
               {
-                "color": "green",
+                "color": "#8ab8ff",
                 "value": 0
               }
             ]
           }
         },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".*load1.*"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#ef4444",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".*load5.*"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#f59e0b",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".*load15.*"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#22c55e",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          }
-        ]
+        "overrides": []
       },
       "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "single"
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
         }
       },
       "targets": [
@@ -972,336 +959,72 @@
             "type": "prometheus",
             "uid": null
           },
-          "expr": "node_load1",
-          "legendFormat": "{{instance}} load1",
-          "range": true,
+          "expr": "cardano_node_metrics_epoch_int{network=\"$network\",instance=~\"$instance\"}",
+          "instant": true,
+          "legendFormat": "{{instance}}",
           "refId": "A"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": null
-          },
-          "expr": "node_load5",
-          "legendFormat": "{{instance}} load5",
-          "range": true,
-          "refId": "B"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": null
-          },
-          "expr": "node_load15",
-          "legendFormat": "{{instance}} load15",
-          "range": true,
-          "refId": "C"
         }
       ],
       "transparent": true
     },
     {
-      "type": "timeseries",
-      "title": "Context Switches & Forks",
+      "type": "stat",
+      "title": "Epoch Progress",
       "id": 5,
       "gridPos": {
-        "h": 7,
-        "w": 12,
-        "x": 12,
-        "y": 18
+        "h": 3,
+        "w": 2,
+        "x": 11,
+        "y": 10
       },
       "fieldConfig": {
         "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "drawStyle": "line",
-            "fillOpacity": 10,
-            "lineWidth": 2,
-            "showPoints": "auto"
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": 0
-              }
-            ]
-          }
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".*ctx.*"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#f59e0b",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".*forks.*"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#3b82f6",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          }
-        ]
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "single"
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": null
-          },
-          "expr": "rate(node_context_switches_total[5m])",
-          "legendFormat": "{{instance}} ctx switches/s",
-          "range": true,
-          "refId": "A"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": null
-          },
-          "expr": "rate(node_forks_total[5m])",
-          "legendFormat": "{{instance}} forks/s",
-          "range": true,
-          "refId": "B"
-        }
-      ],
-      "transparent": true
-    },
-    {
-      "collapsed": false,
-      "gridPos": {
-        "h": 1,
-        "w": 24,
-        "x": 0,
-        "y": 25
-      },
-      "id": 10,
-      "title": "Host \u2014 Memory & Swap (node_exporter)",
-      "type": "row",
-      "transparent": true
-    },
-    {
-      "type": "timeseries",
-      "title": "Memory Breakdown",
-      "id": 11,
-      "gridPos": {
-        "h": 7,
-        "w": 12,
-        "x": 0,
-        "y": 26
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "drawStyle": "line",
-            "fillOpacity": 15,
-            "lineWidth": 2,
-            "showPoints": "never"
-          },
-          "unit": "bytes",
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": 0
-              }
-            ]
-          }
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".*total.*"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#475569",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".*used.*"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#ef4444",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".*available.*"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#22c55e",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".*cached.*"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#3b82f6",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".*buffers.*"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#8ab8ff",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          }
-        ]
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "single"
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": null
-          },
-          "expr": "node_memory_MemTotal_bytes",
-          "legendFormat": "{{instance}} total",
-          "range": true,
-          "refId": "A"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": null
-          },
-          "expr": "node_memory_MemTotal_bytes - node_memory_MemAvailable_bytes",
-          "legendFormat": "{{instance}} used",
-          "range": true,
-          "refId": "B"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": null
-          },
-          "expr": "node_memory_MemAvailable_bytes",
-          "legendFormat": "{{instance}} available",
-          "range": true,
-          "refId": "C"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": null
-          },
-          "expr": "node_memory_Cached_bytes",
-          "legendFormat": "{{instance}} cached",
-          "range": true,
-          "refId": "D"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": null
-          },
-          "expr": "node_memory_Buffers_bytes",
-          "legendFormat": "{{instance}} buffers",
-          "range": true,
-          "refId": "E"
-        }
-      ],
-      "transparent": true
-    },
-    {
-      "type": "gauge",
-      "title": "Memory Used %",
-      "id": 12,
-      "gridPos": {
-        "h": 7,
-        "w": 6,
-        "x": 12,
-        "y": 26
-      },
-      "fieldConfig": {
-        "defaults": {
-          "mappings": [],
-          "max": 100,
+          "unit": "percent",
+          "decimals": 1,
           "min": 0,
+          "max": 100,
+          "color": {
+            "mode": "continuous-BlYlRd"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "background",
+        "graphMode": "area"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": null
+          },
+          "expr": "cardano_node_metrics_slotInEpoch_int{network=\"$network\",instance=~\"$instance\"} / dingo_epoch_length_slots{network=\"$network\",instance=~\"$instance\"} * 100",
+          "instant": true,
+          "legendFormat": "{{instance}}",
+          "refId": "A"
+        }
+      ],
+      "transparent": true
+    },
+    {
+      "type": "stat",
+      "title": "Tip Gap",
+      "id": 6,
+      "gridPos": {
+        "h": 3,
+        "w": 2,
+        "x": 13,
+        "y": 10
+      },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
           "thresholds": {
             "mode": "absolute",
             "steps": [
@@ -1311,29 +1034,29 @@
               },
               {
                 "color": "#f59e0b",
-                "value": 70
+                "value": 10
+              },
+              {
+                "color": "#f97316",
+                "value": 100
               },
               {
                 "color": "#ef4444",
-                "value": 90
+                "value": 500
               }
             ]
-          },
-          "unit": "percent"
+          }
         },
         "overrides": []
       },
       "options": {
-        "minVizHeight": 75,
-        "minVizWidth": 75,
-        "orientation": "auto",
+        "colorMode": "value",
+        "graphMode": "area",
         "reduceOptions": {
           "calcs": [
             "lastNotNull"
           ]
-        },
-        "showThresholdLabels": false,
-        "showThresholdMarkers": true
+        }
       },
       "targets": [
         {
@@ -1341,7 +1064,225 @@
             "type": "prometheus",
             "uid": null
           },
-          "expr": "(1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) * 100",
+          "expr": "dingo_tip_gap_slots{instance=~\"$instance\"}",
+          "instant": true,
+          "legendFormat": "{{instance}}",
+          "refId": "A"
+        }
+      ],
+      "transparent": true
+    },
+    {
+      "type": "stat",
+      "title": "Chain Density",
+      "id": 7,
+      "gridPos": {
+        "h": 3,
+        "w": 2,
+        "x": 15,
+        "y": 10
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "#b877d9",
+            "mode": "fixed"
+          },
+          "unit": "percentunit",
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#b877d9",
+                "value": 0
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": null
+          },
+          "expr": "cardano_node_metrics_density_real{network=\"$network\",instance=~\"$instance\"}",
+          "instant": true,
+          "legendFormat": "{{instance}}",
+          "refId": "A"
+        }
+      ],
+      "transparent": true
+    },
+    {
+      "type": "stat",
+      "title": "Forks",
+      "id": 8,
+      "gridPos": {
+        "h": 3,
+        "w": 2,
+        "x": 17,
+        "y": 10
+      },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#22c55e",
+                "value": 0
+              },
+              {
+                "color": "#f59e0b",
+                "value": 5
+              },
+              {
+                "color": "#ef4444",
+                "value": 15
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": null
+          },
+          "expr": "cardano_node_metrics_forks_int{network=\"$network\",instance=~\"$instance\"}",
+          "instant": true,
+          "legendFormat": "{{instance}}",
+          "refId": "A"
+        }
+      ],
+      "transparent": true
+    },
+    {
+      "type": "stat",
+      "title": "Uptime",
+      "id": 9,
+      "gridPos": {
+        "h": 3,
+        "w": 3,
+        "x": 19,
+        "y": 10
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "#22c55e",
+            "mode": "fixed"
+          },
+          "unit": "s",
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#22c55e",
+                "value": 0
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": null
+          },
+          "expr": "time() - cardano_node_metrics_nodeStartTime_int{network=\"$network\",instance=~\"$instance\"}",
+          "instant": true,
+          "legendFormat": "{{instance}}",
+          "refId": "A"
+        }
+      ],
+      "transparent": true
+    },
+    {
+      "type": "stat",
+      "title": "Open FDs",
+      "id": 10,
+      "gridPos": {
+        "h": 3,
+        "w": 2,
+        "x": 22,
+        "y": 10
+      },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#22c55e",
+                "value": 0
+              },
+              {
+                "color": "#f59e0b",
+                "value": 500
+              },
+              {
+                "color": "#ef4444",
+                "value": 900
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": null
+          },
+          "expr": "process_open_fds{instance=~\"$instance\"}",
           "instant": true,
           "legendFormat": "{{instance}}",
           "refId": "A"
@@ -1351,126 +1292,13 @@
     },
     {
       "type": "timeseries",
-      "title": "Swap Usage",
-      "id": 13,
-      "gridPos": {
-        "h": 7,
-        "w": 6,
-        "x": 18,
-        "y": 26
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "drawStyle": "line",
-            "fillOpacity": 15,
-            "lineWidth": 2,
-            "showPoints": "never"
-          },
-          "unit": "bytes",
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": 0
-              }
-            ]
-          }
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".*total.*"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#475569",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".*used.*"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#ef4444",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          }
-        ]
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "single"
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": null
-          },
-          "expr": "node_memory_SwapTotal_bytes",
-          "legendFormat": "{{instance}} swap total",
-          "range": true,
-          "refId": "A"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": null
-          },
-          "expr": "node_memory_SwapTotal_bytes - node_memory_SwapFree_bytes",
-          "legendFormat": "{{instance}} swap used",
-          "range": true,
-          "refId": "B"
-        }
-      ],
-      "transparent": true
-    },
-    {
-      "collapsed": false,
-      "gridPos": {
-        "h": 1,
-        "w": 24,
-        "x": 0,
-        "y": 33
-      },
-      "id": 20,
-      "title": "Host \u2014 Disk (node_exporter)",
-      "type": "row",
-      "transparent": true
-    },
-    {
-      "type": "timeseries",
-      "title": "Disk Throughput (read / write)",
-      "id": 21,
+      "title": "Block Number",
+      "id": 11,
       "gridPos": {
         "h": 7,
         "w": 12,
         "x": 0,
-        "y": 34
+        "y": 13
       },
       "fieldConfig": {
         "defaults": {
@@ -1479,213 +1307,12 @@
           },
           "custom": {
             "drawStyle": "line",
-            "fillOpacity": 10,
+            "fillOpacity": 5,
             "lineWidth": 2,
-            "showPoints": "never"
+            "showPoints": "never",
+            "spanNulls": false
           },
-          "unit": "Bps",
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": 0
-              }
-            ]
-          }
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".*read.*"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#3b82f6",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".*write.*"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#f97316",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          }
-        ]
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "single"
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": null
-          },
-          "expr": "rate(node_disk_read_bytes_total[5m])",
-          "legendFormat": "{{instance}} {{device}} read",
-          "range": true,
-          "refId": "A"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": null
-          },
-          "expr": "rate(node_disk_written_bytes_total[5m])",
-          "legendFormat": "{{instance}} {{device}} write",
-          "range": true,
-          "refId": "B"
-        }
-      ],
-      "transparent": true
-    },
-    {
-      "type": "timeseries",
-      "title": "Disk IOPS",
-      "id": 22,
-      "gridPos": {
-        "h": 7,
-        "w": 12,
-        "x": 12,
-        "y": 34
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "drawStyle": "line",
-            "fillOpacity": 10,
-            "lineWidth": 2,
-            "showPoints": "never"
-          },
-          "unit": "iops",
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": 0
-              }
-            ]
-          }
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".*read.*"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#3b82f6",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".*write.*"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#f97316",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          }
-        ]
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "single"
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": null
-          },
-          "expr": "rate(node_disk_reads_completed_total[5m])",
-          "legendFormat": "{{instance}} {{device}} read ops",
-          "range": true,
-          "refId": "A"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": null
-          },
-          "expr": "rate(node_disk_writes_completed_total[5m])",
-          "legendFormat": "{{instance}} {{device}} write ops",
-          "range": true,
-          "refId": "B"
-        }
-      ],
-      "transparent": true
-    },
-    {
-      "type": "timeseries",
-      "title": "Disk I/O Utilisation %",
-      "id": 23,
-      "gridPos": {
-        "h": 7,
-        "w": 12,
-        "x": 0,
-        "y": 41
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "drawStyle": "line",
-            "fillOpacity": 15,
-            "lineWidth": 2,
-            "showPoints": "never"
-          },
-          "unit": "percent",
-          "min": 0,
-          "max": 100,
+          "unit": "locale",
           "mappings": [],
           "thresholds": {
             "mode": "absolute",
@@ -1701,6 +1328,123 @@
       },
       "options": {
         "legend": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": null
+          },
+          "expr": "cardano_node_metrics_blockNum_int{network=\"$network\",instance=~\"$instance\"}",
+          "legendFormat": "{{instance}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "transparent": true
+    },
+    {
+      "type": "timeseries",
+      "title": "Slot In Epoch",
+      "id": 12,
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 13
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 5,
+            "lineWidth": 1,
+            "showPoints": "auto",
+            "spanNulls": false,
+            "lineInterpolation": "linear"
+          },
+          "unit": "locale",
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "A"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#4285F4",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "B"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#73BF69",
+                  "mode": "fixed"
+                }
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "dash": [
+                    10,
+                    10
+                  ],
+                  "fill": "dash"
+                }
+              },
+              {
+                "id": "custom.fillOpacity",
+                "value": 0
+              },
+              {
+                "id": "custom.lineInterpolation",
+                "value": "linear"
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 2
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
           "displayMode": "list",
           "placement": "bottom",
           "showLegend": true
@@ -1715,34 +1459,408 @@
             "type": "prometheus",
             "uid": null
           },
-          "expr": "rate(node_disk_io_time_seconds_total[5m]) * 100",
-          "legendFormat": "{{instance}} {{device}}",
+          "expr": "cardano_node_metrics_slotInEpoch_int{network=\"$network\",instance=~\"$instance\"}",
+          "legendFormat": "{{instance}}",
           "range": true,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": null
+          },
+          "expr": "dingo_epoch_length_slots{network=\"$network\",instance=~\"$instance\"}",
+          "legendFormat": "epoch length",
+          "range": true,
+          "refId": "B"
+        }
+      ],
+      "transparent": true
+    },
+    {
+      "type": "stat",
+      "title": "KES Left",
+      "id": 13,
+      "gridPos": {
+        "h": 3,
+        "w": 3,
+        "x": 0,
+        "y": 20
+      },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#ef4444",
+                "value": 0
+              },
+              {
+                "color": "#f59e0b",
+                "value": 5
+              },
+              {
+                "color": "#22c55e",
+                "value": 15
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": null
+          },
+          "expr": "cardano_node_metrics_remainingKESPeriods_int{network=\"$network\",instance=~\"$instance\"}",
+          "instant": true,
+          "legendFormat": "{{instance}}",
           "refId": "A"
         }
       ],
       "transparent": true
     },
     {
-      "type": "timeseries",
-      "title": "Filesystem Usage",
-      "id": 24,
+      "type": "stat",
+      "title": "KES Period",
+      "id": 14,
       "gridPos": {
-        "h": 7,
-        "w": 12,
-        "x": 12,
-        "y": 41
+        "h": 3,
+        "w": 3,
+        "x": 3,
+        "y": 20
       },
       "fieldConfig": {
         "defaults": {
           "color": {
-            "mode": "palette-classic"
+            "fixedColor": "#60a5fa",
+            "mode": "fixed"
           },
-          "custom": {
-            "drawStyle": "line",
-            "fillOpacity": 10,
-            "lineWidth": 2,
-            "showPoints": "never"
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#60a5fa",
+                "value": 0
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": null
+          },
+          "expr": "cardano_node_metrics_currentKESPeriod_int{network=\"$network\",instance=~\"$instance\"}",
+          "instant": true,
+          "legendFormat": "{{instance}}",
+          "refId": "A"
+        }
+      ],
+      "transparent": true
+    },
+    {
+      "type": "stat",
+      "title": "KES Start Period",
+      "id": 15,
+      "gridPos": {
+        "h": 3,
+        "w": 3,
+        "x": 6,
+        "y": 20
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "#475569",
+            "mode": "fixed"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#475569",
+                "value": 0
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": null
+          },
+          "expr": "cardano_node_metrics_operationalCertificateStartKESPeriod_int{network=\"$network\",instance=~\"$instance\"}",
+          "instant": true,
+          "legendFormat": "{{instance}}",
+          "refId": "A"
+        }
+      ],
+      "transparent": true
+    },
+    {
+      "type": "stat",
+      "title": "KES Expiry Period",
+      "id": 16,
+      "gridPos": {
+        "h": 3,
+        "w": 3,
+        "x": 9,
+        "y": 20
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "#94a3b8",
+            "mode": "fixed"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#94a3b8",
+                "value": 0
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": null
+          },
+          "expr": "cardano_node_metrics_operationalCertificateExpiryKESPeriod_int{network=\"$network\",instance=~\"$instance\"}",
+          "instant": true,
+          "legendFormat": "{{instance}}",
+          "refId": "A"
+        }
+      ],
+      "transparent": true
+    },
+    {
+      "type": "stat",
+      "title": "Max FDs",
+      "id": 17,
+      "gridPos": {
+        "h": 3,
+        "w": 3,
+        "x": 12,
+        "y": 20
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "#475569",
+            "mode": "fixed"
+          },
+          "unit": "locale",
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#475569",
+                "value": 0
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": null
+          },
+          "expr": "process_max_fds{instance=~\"$instance\"}",
+          "instant": true,
+          "legendFormat": "{{instance}}",
+          "refId": "A"
+        }
+      ],
+      "transparent": true
+    },
+    {
+      "type": "stat",
+      "title": "OS Threads",
+      "id": 18,
+      "gridPos": {
+        "h": 3,
+        "w": 3,
+        "x": 15,
+        "y": 20
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "#7dd3fc",
+            "mode": "fixed"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#7dd3fc",
+                "value": 0
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": null
+          },
+          "expr": "go_threads{instance=~\"$instance\"}",
+          "instant": true,
+          "legendFormat": "{{instance}}",
+          "refId": "A"
+        }
+      ],
+      "transparent": true
+    },
+    {
+      "type": "stat",
+      "title": "GOMAXPROCS",
+      "id": 19,
+      "gridPos": {
+        "h": 3,
+        "w": 3,
+        "x": 18,
+        "y": 20
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "#94a3b8",
+            "mode": "fixed"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#94a3b8",
+                "value": 0
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": null
+          },
+          "expr": "go_sched_gomaxprocs_threads{instance=~\"$instance\"}",
+          "instant": true,
+          "legendFormat": "{{instance}}",
+          "refId": "A"
+        }
+      ],
+      "transparent": true
+    },
+    {
+      "type": "stat",
+      "title": "Virtual Memory",
+      "id": 20,
+      "gridPos": {
+        "h": 3,
+        "w": 3,
+        "x": 21,
+        "y": 20
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "#64748b",
+            "mode": "fixed"
           },
           "unit": "bytes",
           "mappings": [],
@@ -1750,503 +1868,32 @@
             "mode": "absolute",
             "steps": [
               {
-                "color": "green",
+                "color": "#64748b",
                 "value": 0
               }
             ]
           }
         },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".*total.*"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#475569",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".*used.*"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#ef4444",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          }
-        ]
+        "overrides": []
       },
       "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "single"
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
         }
       },
       "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": null
-          },
-          "expr": "node_filesystem_size_bytes{fstype!=\"tmpfs\",fstype!=\"overlay\",fstype!=\"squashfs\"}",
-          "legendFormat": "{{instance}} {{mountpoint}} total",
-          "range": true,
-          "refId": "A"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": null
-          },
-          "expr": "node_filesystem_size_bytes{fstype!=\"tmpfs\",fstype!=\"overlay\",fstype!=\"squashfs\"} - node_filesystem_avail_bytes{fstype!=\"tmpfs\",fstype!=\"overlay\",fstype!=\"squashfs\"}",
-          "legendFormat": "{{instance}} {{mountpoint}} used",
-          "range": true,
-          "refId": "B"
-        }
-      ],
-      "transparent": true
-    },
-    {
-      "collapsed": false,
-      "gridPos": {
-        "h": 1,
-        "w": 24,
-        "x": 0,
-        "y": 48
-      },
-      "id": 30,
-      "title": "Host \u2014 Network (node_exporter)",
-      "type": "row",
-      "transparent": true
-    },
-    {
-      "type": "timeseries",
-      "title": "Network Throughput",
-      "id": 31,
-      "gridPos": {
-        "h": 7,
-        "w": 12,
-        "x": 0,
-        "y": 49
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "drawStyle": "line",
-            "fillOpacity": 10,
-            "lineWidth": 2,
-            "showPoints": "never"
-          },
-          "unit": "Bps",
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": 0
-              }
-            ]
-          }
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".*rx.*"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#3b82f6",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".*tx.*"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#22c55e",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          }
-        ]
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "single"
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": null
-          },
-          "expr": "rate(node_network_receive_bytes_total{device!~\"lo|veth.*|docker.*|br-.*\"}[5m])",
-          "legendFormat": "{{instance}} {{device}} rx",
-          "range": true,
-          "refId": "A"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": null
-          },
-          "expr": "rate(node_network_transmit_bytes_total{device!~\"lo|veth.*|docker.*|br-.*\"}[5m])",
-          "legendFormat": "{{instance}} {{device}} tx",
-          "range": true,
-          "refId": "B"
-        }
-      ],
-      "transparent": true
-    },
-    {
-      "type": "timeseries",
-      "title": "Network Errors & Drops",
-      "id": 32,
-      "gridPos": {
-        "h": 7,
-        "w": 12,
-        "x": 12,
-        "y": 49
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "drawStyle": "line",
-            "fillOpacity": 10,
-            "lineWidth": 2,
-            "showPoints": "auto"
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": 0
-              }
-            ]
-          }
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".*err.*"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#ef4444",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".*drop.*"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#f59e0b",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          }
-        ]
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "single"
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": null
-          },
-          "expr": "rate(node_network_receive_errs_total{device!~\"lo\"}[5m])",
-          "legendFormat": "{{instance}} {{device}} rx err",
-          "range": true,
-          "refId": "A"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": null
-          },
-          "expr": "rate(node_network_transmit_errs_total{device!~\"lo\"}[5m])",
-          "legendFormat": "{{instance}} {{device}} tx err",
-          "range": true,
-          "refId": "B"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": null
-          },
-          "expr": "rate(node_network_receive_drop_total{device!~\"lo\"}[5m])",
-          "legendFormat": "{{instance}} {{device}} rx drop",
-          "range": true,
-          "refId": "C"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": null
-          },
-          "expr": "rate(node_network_transmit_drop_total{device!~\"lo\"}[5m])",
-          "legendFormat": "{{instance}} {{device}} tx drop",
-          "range": true,
-          "refId": "D"
-        }
-      ],
-      "transparent": true
-    },
-    {
-      "collapsed": false,
-      "gridPos": {
-        "h": 1,
-        "w": 24,
-        "x": 0,
-        "y": 56
-      },
-      "id": 40,
-      "title": "Dingo Process \u2014 RSS, CPU, Network",
-      "type": "row",
-      "transparent": true
-    },
-    {
-      "type": "timeseries",
-      "title": "Process RSS & Heap",
-      "id": 41,
-      "gridPos": {
-        "h": 6,
-        "w": 8,
-        "x": 0,
-        "y": 57
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "drawStyle": "line",
-            "fillOpacity": 10,
-            "lineWidth": 2,
-            "showPoints": "auto"
-          },
-          "unit": "bytes",
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": 0
-              }
-            ]
-          }
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".*rss.*"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#3b82f6",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".*heap alloc.*"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#ef4444",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".*virtual.*"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#475569",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          }
-        ]
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "single"
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": null
-          },
-          "expr": "process_resident_memory_bytes{instance=~\"$instance\"}",
-          "legendFormat": "{{alias}} rss",
-          "range": true,
-          "refId": "A"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": null
-          },
-          "expr": "go_memstats_heap_alloc_bytes{instance=~\"$instance\"}",
-          "legendFormat": "{{alias}} heap alloc",
-          "range": true,
-          "refId": "B"
-        },
         {
           "datasource": {
             "type": "prometheus",
             "uid": null
           },
           "expr": "process_virtual_memory_bytes{instance=~\"$instance\"}",
-          "legendFormat": "{{alias}} virtual",
-          "range": true,
-          "refId": "C"
-        }
-      ],
-      "transparent": true
-    },
-    {
-      "type": "timeseries",
-      "title": "Process CPU (cores)",
-      "id": 42,
-      "gridPos": {
-        "h": 6,
-        "w": 8,
-        "x": 8,
-        "y": 57
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "fixedColor": "#22c55e",
-            "mode": "fixed"
-          },
-          "custom": {
-            "drawStyle": "line",
-            "fillOpacity": 20,
-            "lineWidth": 2,
-            "showPoints": "auto"
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": 0
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "single"
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": null
-          },
-          "expr": "rate(process_cpu_seconds_total{instance=~\"$instance\"}[5m])",
-          "legendFormat": "{{alias}} cores",
-          "range": true,
+          "instant": true,
+          "legendFormat": "{{instance}}",
           "refId": "A"
         }
       ],
@@ -2254,13 +1901,13 @@
     },
     {
       "type": "timeseries",
-      "title": "Process Network Rx / Tx",
-      "id": 43,
+      "title": "Tip Gap & Sync Skips",
+      "id": 21,
       "gridPos": {
-        "h": 6,
-        "w": 8,
-        "x": 16,
-        "y": 57
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 23
       },
       "fieldConfig": {
         "defaults": {
@@ -2269,11 +1916,11 @@
           },
           "custom": {
             "drawStyle": "line",
-            "fillOpacity": 10,
+            "fillOpacity": 15,
             "lineWidth": 2,
-            "showPoints": "auto"
+            "showPoints": "auto",
+            "spanNulls": false
           },
-          "unit": "Bps",
           "mappings": [],
           "thresholds": {
             "mode": "absolute",
@@ -2289,22 +1936,7 @@
           {
             "matcher": {
               "id": "byRegexp",
-              "options": ".*rx.*"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#3b82f6",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".*tx.*"
+              "options": ".*gap.*"
             },
             "properties": [
               {
@@ -2315,94 +1947,11 @@
                 }
               }
             ]
-          }
-        ]
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "single"
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": null
           },
-          "expr": "rate(process_network_receive_bytes_total{instance=~\"$instance\"}[5m])",
-          "legendFormat": "{{alias}} rx",
-          "range": true,
-          "refId": "A"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": null
-          },
-          "expr": "rate(process_network_transmit_bytes_total{instance=~\"$instance\"}[5m])",
-          "legendFormat": "{{alias}} tx",
-          "range": true,
-          "refId": "B"
-        }
-      ],
-      "transparent": true
-    },
-    {
-      "collapsed": false,
-      "gridPos": {
-        "h": 1,
-        "w": 24,
-        "x": 0,
-        "y": 63
-      },
-      "id": 50,
-      "title": "Dingo \u2014 Go Memstats",
-      "type": "row",
-      "transparent": true
-    },
-    {
-      "type": "timeseries",
-      "title": "Heap: Alloc / Inuse / Idle / Sys",
-      "id": 51,
-      "gridPos": {
-        "h": 7,
-        "w": 12,
-        "x": 0,
-        "y": 64
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "drawStyle": "line",
-            "fillOpacity": 10,
-            "lineWidth": 2,
-            "showPoints": "never"
-          },
-          "unit": "bytes",
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": 0
-              }
-            ]
-          }
-        },
-        "overrides": [
           {
             "matcher": {
               "id": "byRegexp",
-              "options": ".*alloc.*"
+              "options": ".*skip.*"
             },
             "properties": [
               {
@@ -2411,296 +1960,17 @@
                   "fixedColor": "#ef4444",
                   "mode": "fixed"
                 }
+              },
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
               }
             ]
           },
           {
             "matcher": {
               "id": "byRegexp",
-              "options": ".*inuse.*"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#f97316",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".*idle.*"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#22c55e",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".*sys.*"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#475569",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".*released.*"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#60a5fa",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          }
-        ]
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "single"
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": null
-          },
-          "expr": "go_memstats_heap_alloc_bytes{instance=~\"$instance\"}",
-          "legendFormat": "{{alias}} heap alloc",
-          "range": true,
-          "refId": "A"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": null
-          },
-          "expr": "go_memstats_heap_inuse_bytes{instance=~\"$instance\"}",
-          "legendFormat": "{{alias}} heap inuse",
-          "range": true,
-          "refId": "B"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": null
-          },
-          "expr": "go_memstats_heap_idle_bytes{instance=~\"$instance\"}",
-          "legendFormat": "{{alias}} heap idle",
-          "range": true,
-          "refId": "C"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": null
-          },
-          "expr": "go_memstats_heap_sys_bytes{instance=~\"$instance\"}",
-          "legendFormat": "{{alias}} heap sys",
-          "range": true,
-          "refId": "D"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": null
-          },
-          "expr": "go_memstats_heap_released_bytes{instance=~\"$instance\"}",
-          "legendFormat": "{{alias}} heap released",
-          "range": true,
-          "refId": "E"
-        }
-      ],
-      "transparent": true
-    },
-    {
-      "type": "timeseries",
-      "title": "Stack / mspan / mcache / other Sys",
-      "id": 52,
-      "gridPos": {
-        "h": 7,
-        "w": 12,
-        "x": 12,
-        "y": 64
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "drawStyle": "line",
-            "fillOpacity": 10,
-            "lineWidth": 2,
-            "showPoints": "never"
-          },
-          "unit": "bytes",
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": 0
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "single"
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": null
-          },
-          "expr": "go_memstats_stack_inuse_bytes{instance=~\"$instance\"}",
-          "legendFormat": "{{alias}} stack inuse",
-          "range": true,
-          "refId": "A"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": null
-          },
-          "expr": "go_memstats_stack_sys_bytes{instance=~\"$instance\"}",
-          "legendFormat": "{{alias}} stack sys",
-          "range": true,
-          "refId": "B"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": null
-          },
-          "expr": "go_memstats_mspan_inuse_bytes{instance=~\"$instance\"}",
-          "legendFormat": "{{alias}} mspan inuse",
-          "range": true,
-          "refId": "C"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": null
-          },
-          "expr": "go_memstats_mcache_inuse_bytes{instance=~\"$instance\"}",
-          "legendFormat": "{{alias}} mcache inuse",
-          "range": true,
-          "refId": "D"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": null
-          },
-          "expr": "go_memstats_other_sys_bytes{instance=~\"$instance\"}",
-          "legendFormat": "{{alias}} other sys",
-          "range": true,
-          "refId": "E"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": null
-          },
-          "expr": "go_memstats_buck_hash_sys_bytes{instance=~\"$instance\"}",
-          "legendFormat": "{{alias}} buck hash sys",
-          "range": true,
-          "refId": "F"
-        }
-      ],
-      "transparent": true
-    },
-    {
-      "type": "timeseries",
-      "title": "Goroutines & Heap Objects",
-      "id": 53,
-      "gridPos": {
-        "h": 7,
-        "w": 12,
-        "x": 0,
-        "y": 71
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "drawStyle": "line",
-            "fillOpacity": 10,
-            "lineWidth": 2,
-            "showPoints": "auto"
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": 0
-              }
-            ]
-          }
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".*goroutines.*"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#b877d9",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".*objects.*"
+              "options": ".*clock.*"
             },
             "properties": [
               {
@@ -2734,8 +2004,8 @@
             "type": "prometheus",
             "uid": null
           },
-          "expr": "go_goroutines{instance=~\"$instance\"}",
-          "legendFormat": "{{alias}} goroutines",
+          "expr": "dingo_forge_tip_gap_slots{instance=~\"$instance\"}",
+          "legendFormat": "{{alias}} gap slots",
           "range": true,
           "refId": "A"
         },
@@ -2744,123 +2014,8 @@
             "type": "prometheus",
             "uid": null
           },
-          "expr": "go_memstats_heap_objects{instance=~\"$instance\"}",
-          "legendFormat": "{{alias}} heap objects",
-          "range": true,
-          "refId": "B"
-        }
-      ],
-      "transparent": true
-    },
-    {
-      "type": "timeseries",
-      "title": "GC Alloc / Free / Malloc Rate",
-      "id": 54,
-      "gridPos": {
-        "h": 7,
-        "w": 12,
-        "x": 12,
-        "y": 71
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "drawStyle": "line",
-            "fillOpacity": 10,
-            "lineWidth": 2,
-            "showPoints": "never"
-          },
-          "unit": "Bps",
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": 0
-              }
-            ]
-          }
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".*alloc.*"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#ef4444",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".*free.*"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#22c55e",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".*malloc.*"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#f59e0b",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          }
-        ]
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "single"
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": null
-          },
-          "expr": "rate(go_memstats_alloc_bytes_total{instance=~\"$instance\"}[5m])",
-          "legendFormat": "{{alias}} alloc/s",
-          "range": true,
-          "refId": "A"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": null
-          },
-          "expr": "rate(go_memstats_frees_total{instance=~\"$instance\"}[5m])",
-          "legendFormat": "{{alias}} frees/s",
+          "expr": "rate(dingo_forge_sync_skip_total{instance=~\"$instance\"}[5m]) * 60",
+          "legendFormat": "{{alias}} skips/min",
           "range": true,
           "refId": "B"
         },
@@ -2869,8 +2024,8 @@
             "type": "prometheus",
             "uid": null
           },
-          "expr": "rate(go_memstats_mallocs_total{instance=~\"$instance\"}[5m])",
-          "legendFormat": "{{alias}} mallocs/s",
+          "expr": "rate(dingo_forge_slot_clock_errors_total{instance=~\"$instance\"}[5m]) * 60",
+          "legendFormat": "{{alias}} clock errors/min",
           "range": true,
           "refId": "C"
         }
@@ -2879,13 +2034,13 @@
     },
     {
       "type": "timeseries",
-      "title": "Next GC Target & GC Sys",
-      "id": 55,
+      "title": "Chain Switches & Cached Blocks",
+      "id": 22,
       "gridPos": {
         "h": 7,
         "w": 12,
-        "x": 0,
-        "y": 78
+        "x": 12,
+        "y": 23
       },
       "fieldConfig": {
         "defaults": {
@@ -2898,7 +2053,6 @@
             "lineWidth": 2,
             "showPoints": "auto"
           },
-          "unit": "bytes",
           "mappings": [],
           "thresholds": {
             "mode": "absolute",
@@ -2914,7 +2068,7 @@
           {
             "matcher": {
               "id": "byRegexp",
-              "options": ".*next gc.*"
+              "options": ".*switches.*"
             },
             "properties": [
               {
@@ -2929,15 +2083,19 @@
           {
             "matcher": {
               "id": "byRegexp",
-              "options": ".*gc sys.*"
+              "options": ".*cached.*"
             },
             "properties": [
               {
                 "id": "color",
                 "value": {
-                  "fixedColor": "#475569",
+                  "fixedColor": "#3b82f6",
                   "mode": "fixed"
                 }
+              },
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
               }
             ]
           }
@@ -2959,8 +2117,8 @@
             "type": "prometheus",
             "uid": null
           },
-          "expr": "go_memstats_next_gc_bytes{instance=~\"$instance\"}",
-          "legendFormat": "{{alias}} next gc target",
+          "expr": "rate(event_total{type=\"chainselection.chain_switch\",network=\"$network\",instance=~\"$instance\"}[5m]) * 60",
+          "legendFormat": "{{alias}} switches/min",
           "range": true,
           "refId": "A"
         },
@@ -2969,20 +2127,82 @@
             "type": "prometheus",
             "uid": null
           },
-          "expr": "go_memstats_gc_sys_bytes{instance=~\"$instance\"}",
-          "legendFormat": "{{alias}} gc sys",
+          "expr": "dingo_chain_manager_cached_blocks{instance=~\"$instance\"}",
+          "legendFormat": "{{alias}} cached blocks",
           "range": true,
           "refId": "B"
+        }
+      ],
+      "transparent": true
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 30
+      },
+      "id": 50,
+      "title": "Go Runtime",
+      "type": "row",
+      "transparent": true
+    },
+    {
+      "type": "timeseries",
+      "title": "Goroutines",
+      "id": 51,
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 0,
+        "y": 31
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "#b877d9",
+            "mode": "fixed"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 15,
+            "lineWidth": 2,
+            "showPoints": "auto"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              }
+            ]
+          }
         },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single"
+        }
+      },
+      "targets": [
         {
           "datasource": {
             "type": "prometheus",
             "uid": null
           },
-          "expr": "go_memstats_sys_bytes{instance=~\"$instance\"}",
-          "legendFormat": "{{alias}} total sys",
+          "expr": "go_goroutines{instance=~\"$instance\"}",
+          "legendFormat": "{{instance}}",
           "range": true,
-          "refId": "C"
+          "refId": "A"
         }
       ],
       "transparent": true
@@ -2990,12 +2210,12 @@
     {
       "type": "timeseries",
       "title": "GC Pause Duration p50/p75/p99",
-      "id": 56,
+      "id": 52,
       "gridPos": {
-        "h": 7,
-        "w": 12,
-        "x": 12,
-        "y": 78
+        "h": 6,
+        "w": 8,
+        "x": 8,
+        "y": 31
       },
       "fieldConfig": {
         "defaults": {
@@ -3113,93 +2333,14 @@
       "transparent": true
     },
     {
-      "collapsed": false,
-      "gridPos": {
-        "h": 1,
-        "w": 24,
-        "x": 0,
-        "y": 85
-      },
-      "id": 60,
-      "title": "Dingo \u2014 Cache Performance",
-      "type": "row",
-      "transparent": true
-    },
-    {
-      "type": "gauge",
-      "title": "Badger Block Cache Hit Ratio",
-      "id": 61,
-      "gridPos": {
-        "h": 6,
-        "w": 4,
-        "x": 0,
-        "y": 86
-      },
-      "fieldConfig": {
-        "defaults": {
-          "mappings": [],
-          "max": 1,
-          "min": 0,
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "#ef4444",
-                "value": 0
-              },
-              {
-                "color": "#f97316",
-                "value": 0.3
-              },
-              {
-                "color": "#f59e0b",
-                "value": 0.5
-              },
-              {
-                "color": "#22c55e",
-                "value": 0.8
-              }
-            ]
-          },
-          "unit": "percentunit"
-        },
-        "overrides": []
-      },
-      "options": {
-        "minVizHeight": 75,
-        "minVizWidth": 75,
-        "orientation": "auto",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ]
-        },
-        "showThresholdLabels": false,
-        "showThresholdMarkers": true
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": null
-          },
-          "expr": "rate(database_blob_block_cache_hits_total{network=\"$network\",instance=~\"$instance\"}[5m]) / (rate(database_blob_block_cache_hits_total{network=\"$network\",instance=~\"$instance\"}[5m]) + rate(database_blob_block_cache_misses_total{network=\"$network\",instance=~\"$instance\"}[5m]))",
-          "instant": true,
-          "legendFormat": "{{alias}}",
-          "refId": "A"
-        }
-      ],
-      "transparent": true
-    },
-    {
       "type": "timeseries",
-      "title": "Badger Cache Hits vs Misses",
-      "id": 62,
+      "title": "Process CPU & Network",
+      "id": 53,
       "gridPos": {
         "h": 6,
-        "w": 10,
-        "x": 4,
-        "y": 86
+        "w": 8,
+        "x": 16,
+        "y": 31
       },
       "fieldConfig": {
         "defaults": {
@@ -3208,7 +2349,7 @@
           },
           "custom": {
             "drawStyle": "line",
-            "fillOpacity": 20,
+            "fillOpacity": 10,
             "lineWidth": 2,
             "showPoints": "auto"
           },
@@ -3227,7 +2368,7 @@
           {
             "matcher": {
               "id": "byRegexp",
-              "options": ".*hits.*"
+              "options": ".*cpu.*"
             },
             "properties": [
               {
@@ -3236,21 +2377,56 @@
                   "fixedColor": "#22c55e",
                   "mode": "fixed"
                 }
+              },
+              {
+                "id": "unit",
+                "value": "short"
               }
             ]
           },
           {
             "matcher": {
               "id": "byRegexp",
-              "options": ".*misses.*"
+              "options": ".*rx.*"
             },
             "properties": [
               {
                 "id": "color",
                 "value": {
-                  "fixedColor": "#ef4444",
+                  "fixedColor": "#3b82f6",
                   "mode": "fixed"
                 }
+              },
+              {
+                "id": "unit",
+                "value": "Bps"
+              },
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".*tx.*"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#f97316",
+                  "mode": "fixed"
+                }
+              },
+              {
+                "id": "unit",
+                "value": "Bps"
+              },
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
               }
             ]
           }
@@ -3272,8 +2448,8 @@
             "type": "prometheus",
             "uid": null
           },
-          "expr": "rate(database_blob_block_cache_hits_total{network=\"$network\",instance=~\"$instance\"}[5m])",
-          "legendFormat": "{{alias}} hits/s",
+          "expr": "rate(process_cpu_seconds_total{instance=~\"$instance\"}[5m])",
+          "legendFormat": "{{alias}} cpu cores",
           "range": true,
           "refId": "A"
         },
@@ -3282,23 +2458,33 @@
             "type": "prometheus",
             "uid": null
           },
-          "expr": "rate(database_blob_block_cache_misses_total{network=\"$network\",instance=~\"$instance\"}[5m])",
-          "legendFormat": "{{alias}} misses/s",
+          "expr": "rate(process_network_receive_bytes_total{instance=~\"$instance\"}[5m])",
+          "legendFormat": "{{alias}} rx",
           "range": true,
           "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": null
+          },
+          "expr": "rate(process_network_transmit_bytes_total{instance=~\"$instance\"}[5m])",
+          "legendFormat": "{{alias}} tx",
+          "range": true,
+          "refId": "C"
         }
       ],
       "transparent": true
     },
     {
       "type": "timeseries",
-      "title": "CBOR Cache \u2014 UTxO, Block, TX",
-      "id": 63,
+      "title": "Heap: Alloc / Inuse / Idle / Sys",
+      "id": 54,
       "gridPos": {
-        "h": 6,
-        "w": 10,
-        "x": 14,
-        "y": 86
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 37
       },
       "fieldConfig": {
         "defaults": {
@@ -3308,9 +2494,10 @@
           "custom": {
             "drawStyle": "line",
             "fillOpacity": 10,
-            "lineWidth": 1,
-            "showPoints": "auto"
+            "lineWidth": 2,
+            "showPoints": "never"
           },
+          "unit": "bytes",
           "mappings": [],
           "thresholds": {
             "mode": "absolute",
@@ -3326,7 +2513,37 @@
           {
             "matcher": {
               "id": "byRegexp",
-              "options": ".*hits.*"
+              "options": ".*alloc.*"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#ef4444",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".*inuse.*"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#f97316",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".*idle.*"
             },
             "properties": [
               {
@@ -3341,13 +2558,13 @@
           {
             "matcher": {
               "id": "byRegexp",
-              "options": ".*miss.*"
+              "options": ".*sys.*"
             },
             "properties": [
               {
                 "id": "color",
                 "value": {
-                  "fixedColor": "#ef4444",
+                  "fixedColor": "#475569",
                   "mode": "fixed"
                 }
               }
@@ -3371,8 +2588,8 @@
             "type": "prometheus",
             "uid": null
           },
-          "expr": "rate(dingo_cbor_cache_utxo_hot_hits_total{instance=~\"$instance\"}[5m])",
-          "legendFormat": "{{alias}} utxo hits/s",
+          "expr": "go_memstats_heap_alloc_bytes{instance=~\"$instance\"}",
+          "legendFormat": "{{alias}} heap alloc",
           "range": true,
           "refId": "A"
         },
@@ -3381,8 +2598,8 @@
             "type": "prometheus",
             "uid": null
           },
-          "expr": "rate(dingo_cbor_cache_utxo_hot_misses_total{instance=~\"$instance\"}[5m])",
-          "legendFormat": "{{alias}} utxo miss/s",
+          "expr": "go_memstats_heap_inuse_bytes{instance=~\"$instance\"}",
+          "legendFormat": "{{alias}} heap inuse",
           "range": true,
           "refId": "B"
         },
@@ -3391,8 +2608,8 @@
             "type": "prometheus",
             "uid": null
           },
-          "expr": "rate(dingo_cbor_cache_block_lru_hits_total{instance=~\"$instance\"}[5m])",
-          "legendFormat": "{{alias}} blk hits/s",
+          "expr": "go_memstats_heap_idle_bytes{instance=~\"$instance\"}",
+          "legendFormat": "{{alias}} heap idle",
           "range": true,
           "refId": "C"
         },
@@ -3401,115 +2618,36 @@
             "type": "prometheus",
             "uid": null
           },
-          "expr": "rate(dingo_cbor_cache_block_lru_misses_total{instance=~\"$instance\"}[5m])",
-          "legendFormat": "{{alias}} blk miss/s",
+          "expr": "go_memstats_heap_sys_bytes{instance=~\"$instance\"}",
+          "legendFormat": "{{alias}} heap sys",
           "range": true,
           "refId": "D"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": null
-          },
-          "expr": "rate(dingo_cbor_cache_tx_hot_hits_total{instance=~\"$instance\"}[5m])",
-          "legendFormat": "{{alias}} tx hits/s",
-          "range": true,
-          "refId": "E"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": null
-          },
-          "expr": "rate(dingo_cbor_cache_tx_hot_misses_total{instance=~\"$instance\"}[5m])",
-          "legendFormat": "{{alias}} tx miss/s",
-          "range": true,
-          "refId": "F"
         }
       ],
       "transparent": true
     },
     {
       "type": "timeseries",
-      "title": "CBOR Cold Extractions",
-      "id": 64,
+      "title": "Memory: Stack / Sys / RSS / Next GC",
+      "id": 55,
       "gridPos": {
-        "h": 6,
-        "w": 12,
-        "x": 0,
-        "y": 92
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "fixedColor": "#94a3b8",
-            "mode": "fixed"
-          },
-          "custom": {
-            "drawStyle": "line",
-            "fillOpacity": 10,
-            "lineWidth": 2,
-            "showPoints": "auto"
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": 0
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "single"
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": null
-          },
-          "expr": "rate(dingo_cbor_cache_cold_extractions_total{instance=~\"$instance\"}[5m])",
-          "legendFormat": "{{alias}} cold extractions/s",
-          "range": true,
-          "refId": "A"
-        }
-      ],
-      "transparent": true
-    },
-    {
-      "type": "timeseries",
-      "title": "Chain Manager Cached Blocks",
-      "id": 65,
-      "gridPos": {
-        "h": 6,
+        "h": 7,
         "w": 12,
         "x": 12,
-        "y": 92
+        "y": 37
       },
       "fieldConfig": {
         "defaults": {
           "color": {
-            "fixedColor": "#3b82f6",
-            "mode": "fixed"
+            "mode": "palette-classic"
           },
           "custom": {
             "drawStyle": "line",
             "fillOpacity": 10,
             "lineWidth": 2,
-            "showPoints": "auto"
+            "showPoints": "never"
           },
+          "unit": "bytes",
           "mappings": [],
           "thresholds": {
             "mode": "absolute",
@@ -3521,7 +2659,68 @@
             ]
           }
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".*rss.*"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#3b82f6",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".*stack.*"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#b877d9",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".*next gc.*"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#f59e0b",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".*sys total.*"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#475569",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
+        ]
       },
       "options": {
         "legend": {
@@ -3539,179 +2738,8 @@
             "type": "prometheus",
             "uid": null
           },
-          "expr": "dingo_chain_manager_cached_blocks{instance=~\"$instance\"}",
-          "legendFormat": "{{alias}}",
-          "range": true,
-          "refId": "A"
-        }
-      ],
-      "transparent": true
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": null
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "axisBorderShow": false,
-            "axisCenteredZero": false,
-            "axisColorMode": "text",
-            "axisLabel": "",
-            "axisPlacement": "auto",
-            "barAlignment": 0,
-            "barWidthFactor": 0.6,
-            "drawStyle": "line",
-            "fillOpacity": 10,
-            "gradientMode": "hue",
-            "hideFrom": {
-              "legend": false,
-              "tooltip": false,
-              "viz": false
-            },
-            "insertNulls": false,
-            "lineInterpolation": "smooth",
-            "lineWidth": 2,
-            "pointSize": 5,
-            "scaleDistribution": {
-              "type": "linear"
-            },
-            "showPoints": "never",
-            "spanNulls": false,
-            "stacking": {
-              "group": "A",
-              "mode": "none"
-            },
-            "thresholdsStyle": {
-              "mode": "off"
-            }
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "red",
-                "value": 80
-              }
-            ]
-          },
-          "unit": "percent"
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "cpu wait %"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#F2495C",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "mem wait %"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#E88C30",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "mem stall %"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#FF0080",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "io wait %"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#00B4D8",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "io stall %"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#FF2DAA",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          }
-        ]
-      },
-      "gridPos": {
-        "h": 6,
-        "w": 24,
-        "x": 0,
-        "y": 98
-      },
-      "id": 500,
-      "options": {
-        "legend": {
-          "displayMode": "hidden",
-          "showLegend": false
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": null
-          },
-          "editorMode": "code",
-          "expr": "rate(node_pressure_cpu_waiting_seconds_total[$__rate_interval]) * 100",
-          "format": "time_series",
-          "instant": false,
-          "legendFormat": "cpu wait %",
+          "expr": "process_resident_memory_bytes{instance=~\"$instance\"}",
+          "legendFormat": "{{alias}} rss",
           "range": true,
           "refId": "A"
         },
@@ -3720,11 +2748,8 @@
             "type": "prometheus",
             "uid": null
           },
-          "editorMode": "code",
-          "expr": "rate(node_pressure_memory_waiting_seconds_total[$__rate_interval]) * 100",
-          "format": "time_series",
-          "instant": false,
-          "legendFormat": "mem wait %",
+          "expr": "go_memstats_stack_inuse_bytes{instance=~\"$instance\"}",
+          "legendFormat": "{{alias}} stack inuse",
           "range": true,
           "refId": "B"
         },
@@ -3733,11 +2758,8 @@
             "type": "prometheus",
             "uid": null
           },
-          "editorMode": "code",
-          "expr": "rate(node_pressure_memory_stalled_seconds_total[$__rate_interval]) * 100",
-          "format": "time_series",
-          "instant": false,
-          "legendFormat": "mem stall %",
+          "expr": "go_memstats_next_gc_bytes{instance=~\"$instance\"}",
+          "legendFormat": "{{alias}} next gc target",
           "range": true,
           "refId": "C"
         },
@@ -3746,31 +2768,263 @@
             "type": "prometheus",
             "uid": null
           },
-          "editorMode": "code",
-          "expr": "rate(node_pressure_io_waiting_seconds_total[$__rate_interval]) * 100",
-          "format": "time_series",
-          "instant": false,
-          "legendFormat": "io wait %",
+          "expr": "go_memstats_sys_bytes{instance=~\"$instance\"}",
+          "legendFormat": "{{alias}} sys total",
           "range": true,
           "refId": "D"
+        }
+      ],
+      "transparent": true
+    },
+    {
+      "type": "timeseries",
+      "title": "GC Alloc / Free Rate",
+      "id": 56,
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 44
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "lineWidth": 2,
+            "showPoints": "never"
+          },
+          "unit": "Bps",
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".*alloc.*"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#ef4444",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".*free.*"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#22c55e",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": null
+          },
+          "expr": "rate(go_memstats_alloc_bytes_total{instance=~\"$instance\"}[5m])",
+          "legendFormat": "{{alias}} alloc/s",
+          "range": true,
+          "refId": "A"
         },
         {
           "datasource": {
             "type": "prometheus",
             "uid": null
           },
-          "editorMode": "code",
-          "expr": "rate(node_pressure_io_stalled_seconds_total[$__rate_interval]) * 100",
-          "format": "time_series",
-          "instant": false,
-          "legendFormat": "io stall %",
+          "expr": "rate(go_memstats_frees_total{instance=~\"$instance\"}[5m])",
+          "legendFormat": "{{alias}} frees/s",
           "range": true,
-          "refId": "E"
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": null
+          },
+          "expr": "rate(go_memstats_mallocs_total{instance=~\"$instance\"}[5m])",
+          "legendFormat": "{{alias}} mallocs/s",
+          "range": true,
+          "refId": "C"
         }
       ],
-      "title": "psi pressure",
-      "transparent": true,
-      "type": "timeseries"
+      "transparent": true
+    },
+    {
+      "type": "timeseries",
+      "title": "Heap Objects & GC Sys",
+      "id": 57,
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 44
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "lineWidth": 2,
+            "showPoints": "never"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".*objects.*"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#f59e0b",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".*gc sys.*"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#475569",
+                  "mode": "fixed"
+                }
+              },
+              {
+                "id": "unit",
+                "value": "bytes"
+              },
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".*gogc.*"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#94a3b8",
+                  "mode": "fixed"
+                }
+              },
+              {
+                "id": "unit",
+                "value": "percent"
+              },
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": null
+          },
+          "expr": "go_memstats_heap_objects{instance=~\"$instance\"}",
+          "legendFormat": "{{alias}} heap objects",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": null
+          },
+          "expr": "go_memstats_gc_sys_bytes{instance=~\"$instance\"}",
+          "legendFormat": "{{alias}} gc sys",
+          "range": true,
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": null
+          },
+          "expr": "go_gc_gogc_percent{instance=~\"$instance\"}",
+          "legendFormat": "{{alias}} GOGC %",
+          "range": true,
+          "refId": "C"
+        }
+      ],
+      "transparent": true
     }
   ]
 }
