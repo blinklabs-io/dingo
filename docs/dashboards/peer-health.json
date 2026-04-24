@@ -2485,7 +2485,7 @@
       "fieldConfig": {
         "defaults": {
           "color": {
-            "fixedColor": "#b877d9",
+            "fixedColor": "#4285F4",
             "mode": "fixed"
           },
           "mappings": [],
@@ -2493,7 +2493,7 @@
             "mode": "absolute",
             "steps": [
               {
-                "color": "#b877d9",
+                "color": "#4285F4",
                 "value": 0
               }
             ]
@@ -2538,7 +2538,7 @@
       "fieldConfig": {
         "defaults": {
           "color": {
-            "fixedColor": "#3b82f6",
+            "fixedColor": "#73BF69",
             "mode": "fixed"
           },
           "unit": "locale",
@@ -2547,7 +2547,7 @@
             "mode": "absolute",
             "steps": [
               {
-                "color": "#3b82f6",
+                "color": "#73BF69",
                 "value": 0
               }
             ]
@@ -2592,7 +2592,7 @@
       "fieldConfig": {
         "defaults": {
           "color": {
-            "fixedColor": "#22c55e",
+            "fixedColor": "#33CCE8",
             "mode": "fixed"
           },
           "unit": "locale",
@@ -2601,7 +2601,7 @@
             "mode": "absolute",
             "steps": [
               {
-                "color": "#22c55e",
+                "color": "#33CCE8",
                 "value": 0
               }
             ]
@@ -2646,7 +2646,7 @@
       "fieldConfig": {
         "defaults": {
           "color": {
-            "fixedColor": "#f97316",
+            "fixedColor": "#FADE2A",
             "mode": "fixed"
           },
           "unit": "locale",
@@ -2655,7 +2655,7 @@
             "mode": "absolute",
             "steps": [
               {
-                "color": "#f97316",
+                "color": "#FADE2A",
                 "value": 0
               }
             ]
@@ -2704,14 +2704,14 @@
             "mode": "absolute",
             "steps": [
               {
-                "color": "#22c55e",
+                "color": "#F2495C",
                 "value": 0
-              },
-              {
-                "color": "#ef4444",
-                "value": 1
               }
             ]
+          },
+          "color": {
+            "fixedColor": "#F2495C",
+            "mode": "fixed"
           }
         },
         "overrides": []
@@ -2988,6 +2988,180 @@
         }
       ],
       "transparent": true
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "dfh3w6gmkjrwgb"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "#4285F4",
+            "mode": "fixed"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#6e7681",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 45
+      },
+      "options": {
+        "bucketSize": 5,
+        "combine": false,
+        "fillOpacity": 80,
+        "gradientMode": "scheme",
+        "legend": {
+          "displayMode": "hidden",
+          "placement": "bottom",
+          "showLegend": false
+        },
+        "stacking": {
+          "mode": "none"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "dfh3w6gmkjrwgb"
+          },
+          "expr": "increase(event_total{type=~\"chainsync.*\"}[5m])",
+          "format": "time_series",
+          "legendFormat": "{{type}}",
+          "range": true
+        }
+      ],
+      "title": "chainsync event distribution",
+      "transparent": true,
+      "type": "histogram",
+      "id": 310
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "dfh3w6gmkjrwgb"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "#8FD47E",
+            "mode": "fixed"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 5,
+            "gradientMode": "hue",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          },
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 52
+      },
+      "id": 311,
+      "options": {
+        "legend": {
+          "displayMode": "hidden",
+          "showLegend": false
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "dfh3w6gmkjrwgb"
+          },
+          "editorMode": "code",
+          "expr": "rate(event_total{type=~\"peergov.*\"}[$__rate_interval])",
+          "format": "time_series",
+          "instant": false,
+          "legendFormat": "{{type}}",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "dfh3w6gmkjrwgb"
+          },
+          "editorMode": "code",
+          "expr": "rate(event_total{type=~\"connmanager.*\"}[$__rate_interval])",
+          "format": "time_series",
+          "instant": false,
+          "legendFormat": "{{type}}",
+          "range": true,
+          "refId": "B"
+        }
+      ],
+      "title": "peer events",
+      "transparent": true,
+      "type": "timeseries"
     }
   ]
 }
