@@ -2,7 +2,7 @@ groups:
   - name: dingo
     rules:
       - alert: DingoBlockStall
-        expr: changes(cardano_node_metrics_blockNum_int[5m]) == 0
+        expr: changes(cardano_node_metrics_blockNum_int{network=~".+"}[5m]) == 0
         for: 0m
         labels:
           severity: warning
@@ -11,7 +11,7 @@ groups:
           description: "Node {{ $labels.instance }} on {{ $labels.network }}: block height has not changed in 5 minutes."
 
       - alert: DingoSlotDrift
-        expr: changes(cardano_node_metrics_slotNum_int[2m]) == 0
+        expr: changes(cardano_node_metrics_slotNum_int{network=~".+"}[2m]) == 0
         for: 0m
         labels:
           severity: warning
@@ -20,7 +20,7 @@ groups:
           description: "Node {{ $labels.instance }} on {{ $labels.network }}: slot counter has not advanced in 2 minutes."
 
       - alert: DingoPeerLoss
-        expr: cardano_node_metrics_connectionManager_outgoingConns == 0
+        expr: cardano_node_metrics_connectionManager_outgoingConns{network=~".+"} == 0
         for: 5m
         labels:
           severity: critical

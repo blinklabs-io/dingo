@@ -18,7 +18,7 @@ Monitoring dashboards for [Dingo](https://github.com/blinklabs-io/dingo), the Go
 
 Before you begin, make sure you have:
 
-- **Grafana 10+** (tested on 12.4) — [install guide](https://grafana.com/docs/grafana/latest/setup-grafana/installation/)
+- **Grafana 12+** (tested on 12.4) — [install guide](https://grafana.com/docs/grafana/latest/setup-grafana/installation/)
 - **Prometheus** scraping your Dingo node on port `12798` (configured in step 2 below)
 - **Dingo** node with metrics enabled (default port `12798`)
 - **[Business Text plugin](https://grafana.com/grafana/plugins/marcusolsson-dynamictext-panel/)** — required by all dashboards for the header panel
@@ -82,6 +82,8 @@ sudo systemctl restart grafana-server
 
 After restarting, go to **Dashboards → Browse** in the Grafana UI and search for "Dingo". All five dashboards appear in a **Dingo** folder automatically.
 
+**Note:** `allowUiUpdates: true` lets you edit dashboards in the Grafana UI, but changes will be overwritten on the next provision cycle (every 30 seconds). To make permanent edits, modify the JSON files directly.
+
 **Option B: Manual import**
 
 1. Open Grafana in your browser
@@ -96,14 +98,14 @@ The alert rules file is ready to use as-is — no editing required.
 Copy the file to your Prometheus rules directory:
 
 ```bash
-sudo cp docs/dashboards/alerts.yaml /etc/prometheus/rules/dingo.yml
+sudo cp docs/dashboards/alerts.yaml /etc/prometheus/rules/dingo.yaml
 ```
 
 Then add it to `prometheus.yml`:
 
 ```yaml
 rule_files:
-  - /etc/prometheus/rules/dingo.yml
+  - /etc/prometheus/rules/dingo.yaml
 ```
 
 Reload Prometheus:

@@ -3226,7 +3226,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "rate(database_blob_block_cache_hits_total{network=\"$network\",instance=~\"$instance\"}[5m]) / (rate(database_blob_block_cache_hits_total{network=\"$network\",instance=~\"$instance\"}[5m]) + rate(database_blob_block_cache_misses_total{network=\"$network\",instance=~\"$instance\"}[5m]))",
+          "expr": "rate(database_blob_block_cache_hits_total{instance=~\"$instance\"}[5m]) / (rate(database_blob_block_cache_hits_total{instance=~\"$instance\"}[5m]) + rate(database_blob_block_cache_misses_total{instance=~\"$instance\"}[5m]))",
           "instant": true,
           "legendFormat": "{{alias}}",
           "refId": "A"
@@ -3316,7 +3316,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "rate(database_blob_block_cache_hits_total{network=\"$network\",instance=~\"$instance\"}[5m])",
+          "expr": "rate(database_blob_block_cache_hits_total{instance=~\"$instance\"}[5m])",
           "legendFormat": "{{alias}} hits/s",
           "range": true,
           "refId": "A"
@@ -3326,7 +3326,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "rate(database_blob_block_cache_misses_total{network=\"$network\",instance=~\"$instance\"}[5m])",
+          "expr": "rate(database_blob_block_cache_misses_total{instance=~\"$instance\"}[5m])",
           "legendFormat": "{{alias}} misses/s",
           "range": true,
           "refId": "B"

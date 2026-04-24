@@ -1741,7 +1741,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "increase(event_total[5m]) > 0",
+          "expr": "increase(event_total{network=\"$network\",instance=~\"$instance\"}[5m]) > 0",
           "format": "time_series",
           "legendFormat": "{{type}}",
           "range": true
@@ -1836,7 +1836,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "rate(event_total{type=~\"chain.update|ledger.block|ledger.tx|chainsync.*|chainselection.*\"}[5m]) * 60",
+          "expr": "rate(event_total{type=~\"chain.update|ledger.block|ledger.tx|chainsync.*|chainselection.*\",network=\"$network\",instance=~\"$instance\"}[5m]) * 60",
           "format": "time_series",
           "legendFormat": "{{type}}",
           "range": true
@@ -1911,7 +1911,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "event_subscribers",
+          "expr": "event_subscribers{network=\"$network\",instance=~\"$instance\"}",
           "format": "time_series",
           "instant": true,
           "legendFormat": "{{type}} ({{kind}})",
@@ -2241,7 +2241,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "rate(event_total{type=\"ledger.tx\"}[$__rate_interval])",
+          "expr": "rate(event_total{type=\"ledger.tx\",network=\"$network\",instance=~\"$instance\"}[$__rate_interval])",
           "format": "time_series",
           "instant": false,
           "legendFormat": "ledger.tx",
@@ -2254,7 +2254,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "rate(event_total{type=\"ledger.block\"}[$__rate_interval])",
+          "expr": "rate(event_total{type=\"ledger.block\",network=\"$network\",instance=~\"$instance\"}[$__rate_interval])",
           "format": "time_series",
           "instant": false,
           "legendFormat": "ledger.block",
@@ -2267,7 +2267,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "rate(event_total{type=\"ledger.blockfetch\"}[$__rate_interval])",
+          "expr": "rate(event_total{type=\"ledger.blockfetch\",network=\"$network\",instance=~\"$instance\"}[$__rate_interval])",
           "format": "time_series",
           "instant": false,
           "legendFormat": "ledger.blockfetch",
@@ -2280,7 +2280,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "rate(event_total{type=\"ledger.chainsync\"}[$__rate_interval])",
+          "expr": "rate(event_total{type=\"ledger.chainsync\",network=\"$network\",instance=~\"$instance\"}[$__rate_interval])",
           "format": "time_series",
           "instant": false,
           "legendFormat": "ledger.chainsync",
@@ -2410,7 +2410,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "rate(event_delivery_errors_total[$__rate_interval])",
+          "expr": "rate(event_delivery_errors_total{network=\"$network\",instance=~\"$instance\"}[$__rate_interval])",
           "format": "time_series",
           "instant": false,
           "legendFormat": "err {{type}}",
@@ -2423,7 +2423,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "rate(event_delivery_timeouts_total[$__rate_interval])",
+          "expr": "rate(event_delivery_timeouts_total{network=\"$network\",instance=~\"$instance\"}[$__rate_interval])",
           "format": "time_series",
           "instant": false,
           "legendFormat": "timeout {{type}}",
