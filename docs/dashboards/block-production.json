@@ -806,7 +806,8 @@
           "refId": "A"
         }
       ],
-      "transparent": true
+      "transparent": true,
+      "description": "Whether this node is configured as a block producer. ON means the node will attempt to forge blocks when elected."
     },
     {
       "type": "stat",
@@ -858,7 +859,8 @@
           "refId": "A"
         }
       ],
-      "transparent": true
+      "transparent": true,
+      "description": "Total blocks successfully forged by this node."
     },
     {
       "type": "stat",
@@ -910,7 +912,8 @@
           "refId": "A"
         }
       ],
-      "transparent": true
+      "transparent": true,
+      "description": "Blocks forged and adopted into the chain."
     },
     {
       "type": "stat",
@@ -962,7 +965,8 @@
           "refId": "A"
         }
       ],
-      "transparent": true
+      "transparent": true,
+      "description": "Slots where the node was elected leader but could not forge a block."
     },
     {
       "type": "stat",
@@ -1014,7 +1018,8 @@
           "refId": "A"
         }
       ],
-      "transparent": true
+      "transparent": true,
+      "description": "Slots where this node was elected slot leader."
     },
     {
       "type": "stat",
@@ -1067,7 +1072,8 @@
           "refId": "A"
         }
       ],
-      "transparent": true
+      "transparent": true,
+      "description": "Expected \u2014 slots where this node was not elected leader."
     },
     {
       "type": "stat",
@@ -1123,7 +1129,8 @@
           "refId": "A"
         }
       ],
-      "transparent": true
+      "transparent": true,
+      "description": "Slots where two nodes attempted to forge at the same time."
     },
     {
       "type": "stat",
@@ -1176,7 +1183,8 @@
           "refId": "A"
         }
       ],
-      "transparent": true
+      "transparent": true,
+      "description": "Cumulative total of blocks forged by this node since startup."
     },
     {
       "type": "stat",
@@ -1229,7 +1237,8 @@
           "refId": "A"
         }
       ],
-      "transparent": true
+      "transparent": true,
+      "description": "Total blocks served to peers via the blockfetch protocol."
     },
     {
       "type": "stat",
@@ -1285,7 +1294,8 @@
           "refId": "A"
         }
       ],
-      "transparent": true
+      "transparent": true,
+      "description": "Blocks that arrived or were produced later than expected."
     },
     {
       "type": "stat",
@@ -1341,7 +1351,8 @@
           "refId": "A"
         }
       ],
-      "transparent": true
+      "transparent": true,
+      "description": "KES periods remaining before mandatory key rotation."
     },
     {
       "type": "timeseries",
@@ -1491,7 +1502,8 @@
           "refId": "D"
         }
       ],
-      "transparent": true
+      "transparent": true,
+      "description": "Rate of block forge outcomes over time. Useful for spotting forge failures or slot battles."
     },
     {
       "type": "timeseries",
@@ -1606,7 +1618,8 @@
           "refId": "C"
         }
       ],
-      "transparent": true
+      "transparent": true,
+      "description": "Rate of blocks flowing through the chain sync pipeline."
     },
     {
       "type": "timeseries",
@@ -1731,7 +1744,8 @@
           "refId": "C"
         }
       ],
-      "transparent": true
+      "transparent": true,
+      "description": "Latency distribution for block forging. High values risk missing the slot."
     },
     {
       "type": "timeseries",
@@ -1908,7 +1922,8 @@
           "refId": "D"
         }
       ],
-      "transparent": true
+      "transparent": true,
+      "description": "Block propagation delay and cumulative distribution. Indicates how quickly blocks reach this node."
     },
     {
       "type": "barchart",
@@ -2072,7 +2087,8 @@
           "refId": "B"
         }
       ],
-      "transparent": true
+      "transparent": true,
+      "description": "Block fetch delay broken down by block number. Outliers indicate specific slow peers."
     },
     {
       "type": "timeseries",
@@ -2112,7 +2128,8 @@
           "unit": "blocks/s"
         },
         "overrides": []
-      }
+      },
+      "description": "Rate at which this node serves blocks to its peers."
     },
     {
       "type": "timeseries",
@@ -2234,7 +2251,8 @@
           }
         }
       ],
-      "transparent": true
+      "transparent": true,
+      "description": "Cumulative distribution of block propagation delays."
     },
     {
       "type": "timeseries",
@@ -2334,7 +2352,8 @@
           "refId": "B"
         }
       ],
-      "transparent": true
+      "transparent": true,
+      "description": "Size distribution of forged blocks. Useful for understanding transaction load."
     },
     {
       "type": "timeseries",
@@ -2433,7 +2452,8 @@
           "refId": "B"
         }
       ],
-      "transparent": true
+      "transparent": true,
+      "description": "Transaction count distribution of forged blocks."
     },
     {
       "type": "timeseries",
@@ -2566,7 +2586,8 @@
           "refId": "C"
         }
       ],
-      "transparent": true
+      "transparent": true,
+      "description": "Tip gap and sync skip events over time. Spike in skips may indicate transient network issues."
     },
     {
       "datasource": {
@@ -2679,7 +2700,8 @@
       ],
       "title": "slot clock errors",
       "transparent": true,
-      "type": "timeseries"
+      "type": "timeseries",
+      "description": "Count of slot clock errors. Non-zero values indicate timing issues on the host."
     },
     {
       "datasource": {
@@ -2811,7 +2833,8 @@
       "title": "block delay cdf breakdown",
       "transparent": true,
       "type": "barchart",
-      "id": 201
+      "id": 201,
+      "description": "Block delay CDF breakdown by peer or network segment."
     },
     {
       "datasource": {
@@ -2878,7 +2901,8 @@
       "title": "chain event log",
       "transparent": true,
       "type": "table",
-      "id": 202
+      "id": 202,
+      "description": "Log of recent chain events (blocks added, rolled back). Useful for post-hoc analysis."
     },
     {
       "datasource": {
@@ -3065,7 +3089,8 @@
       "title": "forge rates + disk throughput",
       "transparent": true,
       "type": "timeseries",
-      "id": 203
+      "id": 203,
+      "description": "Block forge rate overlaid with disk throughput. Detects I/O bottlenecks during forging."
     }
   ]
 }

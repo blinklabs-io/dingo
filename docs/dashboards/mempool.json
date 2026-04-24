@@ -796,7 +796,8 @@
           "refId": "A"
         }
       ],
-      "transparent": true
+      "transparent": true,
+      "description": "Number of transactions currently in the mempool."
     },
     {
       "type": "stat",
@@ -853,7 +854,8 @@
           "refId": "A"
         }
       ],
-      "transparent": true
+      "transparent": true,
+      "description": "Total size in bytes of transactions in the mempool."
     },
     {
       "type": "stat",
@@ -906,7 +908,8 @@
           "refId": "A"
         }
       ],
-      "transparent": true
+      "transparent": true,
+      "description": "Total transactions that have been processed (submitted or expired) from the mempool."
     },
     {
       "type": "stat",
@@ -959,7 +962,8 @@
           "refId": "A"
         }
       ],
-      "transparent": true
+      "transparent": true,
+      "description": "Transactions removed from the mempool without being submitted."
     },
     {
       "type": "stat",
@@ -1012,7 +1016,8 @@
           "refId": "A"
         }
       ],
-      "transparent": true
+      "transparent": true,
+      "description": "Transactions that exceeded their TTL and were dropped from the mempool."
     },
     {
       "type": "stat",
@@ -1069,7 +1074,8 @@
           "refId": "A"
         }
       ],
-      "transparent": true
+      "transparent": true,
+      "description": "Rate at which transactions are being added to the mempool over a 5-minute window."
     },
     {
       "type": "timeseries",
@@ -1128,7 +1134,8 @@
           "refId": "A"
         }
       ],
-      "transparent": true
+      "transparent": true,
+      "description": "Number of transactions currently in the mempool."
     },
     {
       "type": "timeseries",
@@ -1188,7 +1195,8 @@
           "refId": "A"
         }
       ],
-      "transparent": true
+      "transparent": true,
+      "description": "Mempool total byte size over time. Tracks memory pressure from pending transactions."
     },
     {
       "type": "timeseries",
@@ -1337,7 +1345,8 @@
           "refId": "D"
         }
       ],
-      "transparent": true
+      "transparent": true,
+      "description": "Rate at which transactions are admitted to and removed from the mempool."
     },
     {
       "type": "timeseries",
@@ -1436,7 +1445,8 @@
           "refId": "B"
         }
       ],
-      "transparent": true
+      "transparent": true,
+      "description": "TX processing rate alongside ledger transaction events."
     },
     {
       "type": "timeseries",
@@ -1560,7 +1570,8 @@
           "refId": "C"
         }
       ],
-      "transparent": true
+      "transparent": true,
+      "description": "Number of mempool subscribers and chainsync events. Indicates consumer activity."
     },
     {
       "type": "timeseries",
@@ -1659,7 +1670,8 @@
           "refId": "B"
         }
       ],
-      "transparent": true
+      "transparent": true,
+      "description": "Ledger-level blockfetch and block events feeding the mempool validation pipeline."
     },
     {
       "collapsed": false,
@@ -1738,7 +1750,8 @@
       "title": "event rates (per 5m window)",
       "transparent": true,
       "type": "bargauge",
-      "id": 401
+      "id": 401,
+      "description": "Per-event-type rates over a 5-minute window. Identifies dominant event flows."
     },
     {
       "datasource": {
@@ -1832,7 +1845,8 @@
       "title": "event stream",
       "transparent": true,
       "type": "timeseries",
-      "id": 402
+      "id": 402,
+      "description": "Real-time stream of event bus activity. Useful for diagnosing event delivery issues."
     },
     {
       "datasource": {
@@ -1907,7 +1921,8 @@
       ],
       "title": "event subscribers",
       "transparent": true,
-      "type": "table"
+      "type": "table",
+      "description": "Active event bus subscribers and their subscription counts."
     },
     {
       "datasource": {
@@ -2076,7 +2091,8 @@
       ],
       "title": "tx admission & removal rate",
       "transparent": true,
-      "type": "timeseries"
+      "type": "timeseries",
+      "description": "Detailed admission and removal rates for the mempool transaction pipeline."
     },
     {
       "datasource": {
@@ -2274,7 +2290,8 @@
       ],
       "title": "ledger tx & block events",
       "transparent": true,
-      "type": "timeseries"
+      "type": "timeseries",
+      "description": "Ledger transaction and block events consumed by the mempool."
     },
     {
       "datasource": {
@@ -2416,7 +2433,8 @@
       ],
       "title": "event delivery errors & timeouts",
       "transparent": true,
-      "type": "timeseries"
+      "type": "timeseries",
+      "description": "Count of event delivery failures and timeouts. Non-zero values require investigation."
     },
     {
       "datasource": {
@@ -2494,7 +2512,8 @@
       ],
       "title": "utxo cache hit rate",
       "transparent": true,
-      "type": "gauge"
+      "type": "gauge",
+      "description": "UTxO cache hit ratio. Higher values mean less ledger lookups and faster validation."
     },
     {
       "datasource": {
@@ -2573,7 +2592,8 @@
       ],
       "title": "tx cache hit rate",
       "transparent": true,
-      "type": "gauge"
+      "type": "gauge",
+      "description": "Transaction cache hit ratio. Higher values reduce repeated CBOR deserialization."
     },
     {
       "datasource": {
@@ -2652,7 +2672,8 @@
       ],
       "title": "block cache hit rate",
       "transparent": true,
-      "type": "gauge"
+      "type": "gauge",
+      "description": "Block cache hit ratio. Higher values reduce cold storage reads."
     },
     {
       "datasource": {
@@ -2934,7 +2955,8 @@
       ],
       "title": "cache operations",
       "transparent": true,
-      "type": "timeseries"
+      "type": "timeseries",
+      "description": "Rate of cache operations (hits, misses, evictions) across all cache tiers."
     }
   ]
 }

@@ -796,7 +796,8 @@
           "refId": "A"
         }
       ],
-      "transparent": true
+      "transparent": true,
+      "description": "Number of hot peers \u2014 fully promoted, providing chain data."
     },
     {
       "type": "stat",
@@ -848,7 +849,8 @@
           "refId": "A"
         }
       ],
-      "transparent": true
+      "transparent": true,
+      "description": "Number of warm peers \u2014 connected and idle, ready to promote."
     },
     {
       "type": "stat",
@@ -900,7 +902,8 @@
           "refId": "A"
         }
       ],
-      "transparent": true
+      "transparent": true,
+      "description": "Number of cold peers \u2014 known but not currently connected."
     },
     {
       "type": "stat",
@@ -952,7 +955,8 @@
           "refId": "A"
         }
       ],
-      "transparent": true
+      "transparent": true,
+      "description": "Total active peer connections (hot + warm)."
     },
     {
       "type": "stat",
@@ -1004,7 +1008,8 @@
           "refId": "A"
         }
       ],
-      "transparent": true
+      "transparent": true,
+      "description": "Established TCP connections to peers."
     },
     {
       "type": "stat",
@@ -1056,7 +1061,8 @@
           "refId": "A"
         }
       ],
-      "transparent": true
+      "transparent": true,
+      "description": "Total known peers in the peer selection set."
     },
     {
       "type": "stat",
@@ -1108,7 +1114,8 @@
           "refId": "A"
         }
       ],
-      "transparent": true
+      "transparent": true,
+      "description": "Connections this node initiated to remote peers."
     },
     {
       "type": "stat",
@@ -1160,7 +1167,8 @@
           "refId": "A"
         }
       ],
-      "transparent": true
+      "transparent": true,
+      "description": "Connections remote peers initiated to this node."
     },
     {
       "type": "stat",
@@ -1212,7 +1220,8 @@
           "refId": "A"
         }
       ],
-      "transparent": true
+      "transparent": true,
+      "description": "Peers with full-duplex (bidirectional) communication established."
     },
     {
       "type": "stat",
@@ -1264,7 +1273,8 @@
           "refId": "A"
         }
       ],
-      "transparent": true
+      "transparent": true,
+      "description": "Total number of duplex (bidirectional) connections."
     },
     {
       "type": "stat",
@@ -1316,7 +1326,8 @@
           "refId": "A"
         }
       ],
-      "transparent": true
+      "transparent": true,
+      "description": "Peers with only unidirectional communication. Typically transient."
     },
     {
       "type": "stat",
@@ -1368,7 +1379,8 @@
           "refId": "A"
         }
       ],
-      "transparent": true
+      "transparent": true,
+      "description": "Peers eligible for pruning by the peer selection governor."
     },
     {
       "type": "timeseries",
@@ -1495,7 +1507,8 @@
           "refId": "C"
         }
       ],
-      "transparent": true
+      "transparent": true,
+      "description": "Peer count by state (hot/warm/cold) over time."
     },
     {
       "type": "timeseries",
@@ -1694,7 +1707,8 @@
           "refId": "F"
         }
       ],
-      "transparent": true
+      "transparent": true,
+      "description": "Connection counts (incoming/outgoing) over time."
     },
     {
       "type": "timeseries",
@@ -1908,7 +1922,8 @@
           "refId": "F"
         }
       ],
-      "transparent": true
+      "transparent": true,
+      "description": "Rate of peers being promoted or demoted between connection states."
     },
     {
       "type": "timeseries",
@@ -2082,7 +2097,8 @@
           "refId": "E"
         }
       ],
-      "transparent": true
+      "transparent": true,
+      "description": "Rate of peers connecting and disconnecting. High churn may indicate network instability."
     },
     {
       "type": "timeseries",
@@ -2160,7 +2176,8 @@
           "refId": "C"
         }
       ],
-      "transparent": true
+      "transparent": true,
+      "description": "Hot and warm peer counts broken down by source (local config, peer sharing, DNS)."
     },
     {
       "type": "timeseries",
@@ -2359,7 +2376,8 @@
           "refId": "F"
         }
       ],
-      "transparent": true
+      "transparent": true,
+      "description": "Rate of peer-related events (connect, disconnect, promote, demote)."
     },
     {
       "type": "timeseries",
@@ -2457,537 +2475,8 @@
           "refId": "E"
         }
       ],
-      "transparent": true
-    },
-    {
-      "collapsed": false,
-      "gridPos": {
-        "h": 1,
-        "w": 24,
-        "x": 0,
-        "y": 34
-      },
-      "id": 50,
-      "title": "Red Rocket \u2014 TX Relay",
-      "type": "row",
-      "transparent": true
-    },
-    {
-      "type": "stat",
-      "title": "RR Peers",
-      "id": 51,
-      "gridPos": {
-        "h": 4,
-        "w": 4,
-        "x": 0,
-        "y": 35
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "fixedColor": "#4285F4",
-            "mode": "fixed"
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "#4285F4",
-                "value": 0
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "colorMode": "value",
-        "graphMode": "area",
-        "textMode": "value_and_name",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ]
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": null
-          },
-          "expr": "dingo_redrocket_peers_connected{instance=~\"$instance\"}",
-          "instant": true,
-          "legendFormat": "{{alias}}",
-          "refId": "A"
-        }
-      ],
-      "transparent": true
-    },
-    {
-      "type": "stat",
-      "title": "TX Inbound",
-      "id": 52,
-      "gridPos": {
-        "h": 4,
-        "w": 4,
-        "x": 4,
-        "y": 35
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "fixedColor": "#73BF69",
-            "mode": "fixed"
-          },
-          "unit": "locale",
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "#73BF69",
-                "value": 0
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "colorMode": "value",
-        "graphMode": "area",
-        "textMode": "value_and_name",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ]
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": null
-          },
-          "expr": "dingo_redrocket_tx_relayed_total{direction=\"inbound\",network=\"$network\",instance=~\"$instance\"}",
-          "instant": true,
-          "legendFormat": "{{alias}}",
-          "refId": "A"
-        }
-      ],
-      "transparent": true
-    },
-    {
-      "type": "stat",
-      "title": "TX Outbound",
-      "id": 53,
-      "gridPos": {
-        "h": 4,
-        "w": 4,
-        "x": 8,
-        "y": 35
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "fixedColor": "#33CCE8",
-            "mode": "fixed"
-          },
-          "unit": "locale",
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "#33CCE8",
-                "value": 0
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "colorMode": "value",
-        "graphMode": "area",
-        "textMode": "value_and_name",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ]
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": null
-          },
-          "expr": "dingo_redrocket_tx_relayed_total{direction=\"outbound\",network=\"$network\",instance=~\"$instance\"}",
-          "instant": true,
-          "legendFormat": "{{alias}}",
-          "refId": "A"
-        }
-      ],
-      "transparent": true
-    },
-    {
-      "type": "stat",
-      "title": "TX Deduped",
-      "id": 54,
-      "gridPos": {
-        "h": 4,
-        "w": 4,
-        "x": 12,
-        "y": 35
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "fixedColor": "#FADE2A",
-            "mode": "fixed"
-          },
-          "unit": "locale",
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "#FADE2A",
-                "value": 0
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "colorMode": "value",
-        "graphMode": "area",
-        "textMode": "value_and_name",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ]
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": null
-          },
-          "expr": "dingo_redrocket_tx_deduplicated_total{instance=~\"$instance\"}",
-          "instant": true,
-          "legendFormat": "{{alias}}",
-          "refId": "A"
-        }
-      ],
-      "transparent": true
-    },
-    {
-      "type": "stat",
-      "title": "Validation Fails",
-      "id": 55,
-      "gridPos": {
-        "h": 4,
-        "w": 4,
-        "x": 16,
-        "y": 35
-      },
-      "fieldConfig": {
-        "defaults": {
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "#F2495C",
-                "value": 0
-              }
-            ]
-          },
-          "color": {
-            "fixedColor": "#F2495C",
-            "mode": "fixed"
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "colorMode": "value",
-        "graphMode": "area",
-        "textMode": "value_and_name",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ]
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": null
-          },
-          "expr": "dingo_redrocket_tx_validation_failures_total{instance=~\"$instance\"}",
-          "instant": true,
-          "legendFormat": "{{alias}}",
-          "refId": "A"
-        }
-      ],
-      "transparent": true
-    },
-    {
-      "type": "timeseries",
-      "title": "TX Relay Rate",
-      "id": 56,
-      "gridPos": {
-        "h": 7,
-        "w": 12,
-        "x": 0,
-        "y": 39
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "drawStyle": "line",
-            "fillOpacity": 15,
-            "lineWidth": 2,
-            "showPoints": "auto"
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": 0
-              }
-            ]
-          }
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".*in/min.*"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#3b82f6",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".*out/min.*"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#22c55e",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".*dedup.*"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#f97316",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          }
-        ]
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "single"
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": null
-          },
-          "expr": "rate(dingo_redrocket_tx_relayed_total{direction=\"inbound\",network=\"$network\",instance=~\"$instance\"}[5m]) * 60",
-          "legendFormat": "{{alias}} in/min",
-          "range": true,
-          "refId": "A"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": null
-          },
-          "expr": "rate(dingo_redrocket_tx_relayed_total{direction=\"outbound\",network=\"$network\",instance=~\"$instance\"}[5m]) * 60",
-          "legendFormat": "{{alias}} out/min",
-          "range": true,
-          "refId": "B"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": null
-          },
-          "expr": "rate(dingo_redrocket_tx_deduplicated_total{instance=~\"$instance\"}[5m]) * 60",
-          "legendFormat": "{{alias}} dedup/min",
-          "range": true,
-          "refId": "C"
-        }
-      ],
-      "transparent": true
-    },
-    {
-      "type": "timeseries",
-      "title": "RR Relay Latency p50/p95/p99",
-      "id": 57,
-      "gridPos": {
-        "h": 7,
-        "w": 12,
-        "x": 12,
-        "y": 39
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "drawStyle": "line",
-            "fillOpacity": 10,
-            "lineWidth": 2,
-            "showPoints": "auto"
-          },
-          "unit": "s",
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": 0
-              }
-            ]
-          }
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".*p50.*"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#22c55e",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".*p95.*"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#f59e0b",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".*p99.*"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#ef4444",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          }
-        ]
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "single"
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": null
-          },
-          "expr": "histogram_quantile(0.5, rate(dingo_redrocket_relay_latency_seconds_bucket{instance=~\"$instance\"}[5m]))",
-          "legendFormat": "{{alias}} p50",
-          "range": true,
-          "refId": "A"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": null
-          },
-          "expr": "histogram_quantile(0.95, rate(dingo_redrocket_relay_latency_seconds_bucket{instance=~\"$instance\"}[5m]))",
-          "legendFormat": "{{alias}} p95",
-          "range": true,
-          "refId": "B"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": null
-          },
-          "expr": "histogram_quantile(0.99, rate(dingo_redrocket_relay_latency_seconds_bucket{instance=~\"$instance\"}[5m]))",
-          "legendFormat": "{{alias}} p99",
-          "range": true,
-          "refId": "C"
-        }
-      ],
-      "transparent": true
+      "transparent": true,
+      "description": "Peer governance events from the Cardano peer selection governor."
     },
     {
       "datasource": {
@@ -3016,7 +2505,7 @@
         "h": 7,
         "w": 12,
         "x": 12,
-        "y": 46
+        "y": 34
       },
       "options": {
         "bucketSize": 5,
@@ -3050,7 +2539,8 @@
       "title": "chainsync event distribution",
       "transparent": true,
       "type": "histogram",
-      "id": 310
+      "id": 310,
+      "description": "Distribution of chain sync events received from peers."
     },
     {
       "datasource": {
@@ -3118,7 +2608,7 @@
         "h": 7,
         "w": 12,
         "x": 12,
-        "y": 53
+        "y": 41
       },
       "id": 311,
       "options": {
@@ -3161,7 +2651,8 @@
       ],
       "title": "peer events",
       "transparent": true,
-      "type": "timeseries"
+      "type": "timeseries",
+      "description": "Per-peer event rate. Identifies noisy or failing peers."
     }
   ]
 }

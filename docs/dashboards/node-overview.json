@@ -806,7 +806,8 @@
           "refId": "A"
         }
       ],
-      "transparent": true
+      "transparent": true,
+      "description": "Whether this node is configured as a block producer. ON means the node will attempt to forge blocks when elected."
     },
     {
       "type": "stat",
@@ -859,7 +860,8 @@
           "refId": "A"
         }
       ],
-      "transparent": true
+      "transparent": true,
+      "description": "Current block number the node has reached."
     },
     {
       "type": "stat",
@@ -912,7 +914,8 @@
           "refId": "A"
         }
       ],
-      "transparent": true
+      "transparent": true,
+      "description": "The most recent slot the node has processed. Used to gauge sync progress."
     },
     {
       "type": "stat",
@@ -965,7 +968,8 @@
           "refId": "A"
         }
       ],
-      "transparent": true
+      "transparent": true,
+      "description": "Current epoch number on the Cardano network."
     },
     {
       "type": "stat",
@@ -1010,7 +1014,8 @@
           "refId": "A"
         }
       ],
-      "transparent": true
+      "transparent": true,
+      "description": "Percentage progress through the current epoch."
     },
     {
       "type": "stat",
@@ -1070,7 +1075,8 @@
           "refId": "A"
         }
       ],
-      "transparent": true
+      "transparent": true,
+      "description": "Number of slots the node is behind the chain tip. Zero means the node is fully synced."
     },
     {
       "type": "stat",
@@ -1123,7 +1129,8 @@
           "refId": "A"
         }
       ],
-      "transparent": true
+      "transparent": true,
+      "description": "Fraction of slots that contain a block. Expected near 5% on mainnet."
     },
     {
       "type": "stat",
@@ -1179,7 +1186,8 @@
           "refId": "A"
         }
       ],
-      "transparent": true
+      "transparent": true,
+      "description": "Number of chain forks encountered. Persistent non-zero values may indicate network partition."
     },
     {
       "type": "stat",
@@ -1232,7 +1240,8 @@
           "refId": "A"
         }
       ],
-      "transparent": true
+      "transparent": true,
+      "description": "How long the node process has been running continuously."
     },
     {
       "type": "stat",
@@ -1288,7 +1297,8 @@
           "refId": "A"
         }
       ],
-      "transparent": true
+      "transparent": true,
+      "description": "Number of open file handles. Approaching OS limits can cause failures."
     },
     {
       "type": "timeseries",
@@ -1351,7 +1361,8 @@
           "refId": "A"
         }
       ],
-      "transparent": true
+      "transparent": true,
+      "description": "Block number over time. Use to confirm the node is making forward progress."
     },
     {
       "type": "timeseries",
@@ -1475,7 +1486,8 @@
           "refId": "B"
         }
       ],
-      "transparent": true
+      "transparent": true,
+      "description": "Progress through the current epoch expressed as slot number."
     },
     {
       "type": "stat",
@@ -1531,7 +1543,8 @@
           "refId": "A"
         }
       ],
-      "transparent": true
+      "transparent": true,
+      "description": "KES periods remaining before mandatory key rotation."
     },
     {
       "type": "stat",
@@ -1583,7 +1596,8 @@
           "refId": "A"
         }
       ],
-      "transparent": true
+      "transparent": true,
+      "description": "Current KES period."
     },
     {
       "type": "stat",
@@ -1635,7 +1649,8 @@
           "refId": "A"
         }
       ],
-      "transparent": true
+      "transparent": true,
+      "description": "KES period at which the current operational certificate became valid."
     },
     {
       "type": "stat",
@@ -1687,7 +1702,8 @@
           "refId": "A"
         }
       ],
-      "transparent": true
+      "transparent": true,
+      "description": "KES period at which the current operational certificate expires."
     },
     {
       "type": "stat",
@@ -1740,7 +1756,8 @@
           "refId": "A"
         }
       ],
-      "transparent": true
+      "transparent": true,
+      "description": "Maximum number of file descriptors available to the process."
     },
     {
       "type": "stat",
@@ -1792,7 +1809,8 @@
           "refId": "A"
         }
       ],
-      "transparent": true
+      "transparent": true,
+      "description": "Number of OS threads in use by the Go runtime."
     },
     {
       "type": "stat",
@@ -1844,7 +1862,8 @@
           "refId": "A"
         }
       ],
-      "transparent": true
+      "transparent": true,
+      "description": "Number of CPU cores the Go runtime is using. Reflects the node's parallelism setting."
     },
     {
       "type": "stat",
@@ -1897,7 +1916,8 @@
           "refId": "A"
         }
       ],
-      "transparent": true
+      "transparent": true,
+      "description": "Virtual address space allocated to the process."
     },
     {
       "type": "timeseries",
@@ -2030,7 +2050,8 @@
           "refId": "C"
         }
       ],
-      "transparent": true
+      "transparent": true,
+      "description": "Tip gap and sync skip events over time. Spike in skips may indicate transient network issues."
     },
     {
       "type": "timeseries",
@@ -2133,7 +2154,8 @@
           "refId": "B"
         }
       ],
-      "transparent": true
+      "transparent": true,
+      "description": "Chain switch (rollback) events and number of blocks held in the chain cache."
     },
     {
       "collapsed": false,
@@ -2205,7 +2227,8 @@
           "refId": "A"
         }
       ],
-      "transparent": true
+      "transparent": true,
+      "description": "Number of active Go routines. Sustained growth may indicate a goroutine leak."
     },
     {
       "type": "timeseries",
@@ -2330,7 +2353,8 @@
           "refId": "C"
         }
       ],
-      "transparent": true
+      "transparent": true,
+      "description": "Go GC pause duration distribution. High values indicate memory pressure."
     },
     {
       "type": "timeseries",
@@ -2474,7 +2498,8 @@
           "refId": "C"
         }
       ],
-      "transparent": true
+      "transparent": true,
+      "description": "CPU utilization and network I/O for the dingo process."
     },
     {
       "type": "timeseries",
@@ -2624,7 +2649,8 @@
           "refId": "D"
         }
       ],
-      "transparent": true
+      "transparent": true,
+      "description": "Go heap memory breakdown: allocated, in-use, idle, and total system reservation."
     },
     {
       "type": "timeseries",
@@ -2774,7 +2800,8 @@
           "refId": "D"
         }
       ],
-      "transparent": true
+      "transparent": true,
+      "description": "Memory breakdown including stack, system, RSS, and next GC target."
     },
     {
       "type": "timeseries",
@@ -2884,7 +2911,8 @@
           "refId": "C"
         }
       ],
-      "transparent": true
+      "transparent": true,
+      "description": "Rate of memory allocations and frees by the garbage collector."
     },
     {
       "type": "timeseries",
@@ -3024,7 +3052,8 @@
           "refId": "C"
         }
       ],
-      "transparent": true
+      "transparent": true,
+      "description": "Number of live heap objects and memory used by the GC subsystem."
     }
   ]
 }

@@ -815,7 +815,8 @@
           "refId": "A"
         }
       ],
-      "transparent": true
+      "transparent": true,
+      "description": "CPU utilization of the host as a percentage of total capacity."
     },
     {
       "type": "timeseries",
@@ -874,7 +875,8 @@
           "refId": "A"
         }
       ],
-      "transparent": true
+      "transparent": true,
+      "description": "CPU time broken down by mode (user, system, iowait, idle). Identifies bottlenecks."
     },
     {
       "type": "timeseries",
@@ -998,7 +1000,8 @@
           "refId": "C"
         }
       ],
-      "transparent": true
+      "transparent": true,
+      "description": "System load averages. Values consistently above CPU count indicate CPU saturation."
     },
     {
       "type": "timeseries",
@@ -1097,7 +1100,8 @@
           "refId": "B"
         }
       ],
-      "transparent": true
+      "transparent": true,
+      "description": "Rate of OS context switches and process forks. Elevated values may indicate scheduler pressure."
     },
     {
       "collapsed": false,
@@ -1285,7 +1289,8 @@
           "refId": "E"
         }
       ],
-      "transparent": true
+      "transparent": true,
+      "description": "Host memory usage breakdown (used, buffered, cached, free)."
     },
     {
       "type": "gauge",
@@ -1347,7 +1352,8 @@
           "refId": "A"
         }
       ],
-      "transparent": true
+      "transparent": true,
+      "description": "Percentage of host memory in use. High values increase swap pressure."
     },
     {
       "type": "timeseries",
@@ -1447,7 +1453,8 @@
           "refId": "B"
         }
       ],
-      "transparent": true
+      "transparent": true,
+      "description": "Swap space used. Non-zero values on a busy node indicate memory pressure."
     },
     {
       "collapsed": false,
@@ -1560,7 +1567,8 @@
           "refId": "B"
         }
       ],
-      "transparent": true
+      "transparent": true,
+      "description": "Disk read and write throughput. Helps identify I/O bottlenecks affecting the node."
     },
     {
       "type": "timeseries",
@@ -1660,7 +1668,8 @@
           "refId": "B"
         }
       ],
-      "transparent": true
+      "transparent": true,
+      "description": "Disk I/O operations per second. High IOPS with high latency indicates storage saturation."
     },
     {
       "type": "timeseries",
@@ -1721,7 +1730,8 @@
           "refId": "A"
         }
       ],
-      "transparent": true
+      "transparent": true,
+      "description": "Disk I/O utilisation percentage. Near 100% means the disk is saturated."
     },
     {
       "type": "timeseries",
@@ -1821,7 +1831,8 @@
           "refId": "B"
         }
       ],
-      "transparent": true
+      "transparent": true,
+      "description": "Filesystem space usage. Running out of disk space will crash the node."
     },
     {
       "collapsed": false,
@@ -1934,7 +1945,8 @@
           "refId": "B"
         }
       ],
-      "transparent": true
+      "transparent": true,
+      "description": "Network bytes sent and received per second at the host level."
     },
     {
       "type": "timeseries",
@@ -2053,7 +2065,8 @@
           "refId": "D"
         }
       ],
-      "transparent": true
+      "transparent": true,
+      "description": "Network errors and dropped packets. Non-zero values indicate NIC or link issues."
     },
     {
       "collapsed": false,
@@ -2191,7 +2204,8 @@
           "refId": "C"
         }
       ],
-      "transparent": true
+      "transparent": true,
+      "description": "Dingo process RSS and Go heap size. Tracks actual memory consumption."
     },
     {
       "type": "timeseries",
@@ -2250,7 +2264,8 @@
           "refId": "A"
         }
       ],
-      "transparent": true
+      "transparent": true,
+      "description": "CPU cores consumed by the dingo process."
     },
     {
       "type": "timeseries",
@@ -2350,7 +2365,8 @@
           "refId": "B"
         }
       ],
-      "transparent": true
+      "transparent": true,
+      "description": "Network bytes received and transmitted by the dingo process."
     },
     {
       "collapsed": false,
@@ -2538,7 +2554,8 @@
           "refId": "E"
         }
       ],
-      "transparent": true
+      "transparent": true,
+      "description": "Go heap memory breakdown: allocated, in-use, idle, and total system reservation."
     },
     {
       "type": "timeseries",
@@ -2647,7 +2664,8 @@
           "refId": "F"
         }
       ],
-      "transparent": true
+      "transparent": true,
+      "description": "Go runtime memory overhead from stacks, span metadata, mcache, and other subsystems."
     },
     {
       "type": "timeseries",
@@ -2750,7 +2768,8 @@
           "refId": "B"
         }
       ],
-      "transparent": true
+      "transparent": true,
+      "description": "Number of goroutines and live heap objects. Sustained growth indicates leaks."
     },
     {
       "type": "timeseries",
@@ -2875,7 +2894,8 @@
           "refId": "C"
         }
       ],
-      "transparent": true
+      "transparent": true,
+      "description": "Rate of Go GC memory allocations, frees, and mallocs."
     },
     {
       "type": "timeseries",
@@ -2985,7 +3005,8 @@
           "refId": "C"
         }
       ],
-      "transparent": true
+      "transparent": true,
+      "description": "The heap size that will trigger the next GC cycle, and GC system overhead."
     },
     {
       "type": "timeseries",
@@ -3110,7 +3131,8 @@
           "refId": "C"
         }
       ],
-      "transparent": true
+      "transparent": true,
+      "description": "Go GC pause duration distribution. High values indicate memory pressure."
     },
     {
       "collapsed": false,
@@ -3189,7 +3211,8 @@
           "refId": "A"
         }
       ],
-      "transparent": true
+      "transparent": true,
+      "description": "Badger blob store block cache hit ratio. Higher is better \u2014 reduces disk reads."
     },
     {
       "type": "timeseries",
@@ -3288,7 +3311,8 @@
           "refId": "B"
         }
       ],
-      "transparent": true
+      "transparent": true,
+      "description": "Badger cache hits versus misses over time."
     },
     {
       "type": "timeseries",
@@ -3427,7 +3451,8 @@
           "refId": "F"
         }
       ],
-      "transparent": true
+      "transparent": true,
+      "description": "Hit rates for the tiered CBOR offset cache across UTxO, block, and TX lookups."
     },
     {
       "type": "timeseries",
@@ -3486,7 +3511,8 @@
           "refId": "A"
         }
       ],
-      "transparent": true
+      "transparent": true,
+      "description": "Rate of cold (disk) CBOR extractions. High values indicate cache pressure."
     },
     {
       "type": "timeseries",
@@ -3545,7 +3571,8 @@
           "refId": "A"
         }
       ],
-      "transparent": true
+      "transparent": true,
+      "description": "Number of blocks held in the chain manager's block cache."
     },
     {
       "datasource": {
@@ -3770,7 +3797,8 @@
       ],
       "title": "psi pressure",
       "transparent": true,
-      "type": "timeseries"
+      "type": "timeseries",
+      "description": "Linux PSI (Pressure Stall Information) for CPU, memory, and I/O. Non-zero full-stall values indicate resource saturation."
     }
   ]
 }

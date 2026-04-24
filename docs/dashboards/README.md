@@ -126,7 +126,6 @@ Some metrics only emit when their feature is active. Panels display "No data" un
 | `dingo_forge_tip_gap_slots` | Forging is enabled |
 | `dingo_database_size_bytes` | Database stores are initialized |
 | `database_blob_*` | Badger blob store is active |
-| `dingo_redrocket_*` | Red Rocket relay is enabled (requires `feat/red-rocket` branch) |
 
 ## File listing
 
