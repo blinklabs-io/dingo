@@ -772,6 +772,21 @@ type MetadataStore interface {
 
 	// DRep voting power and activity methods
 
+	// InsertDrepIfAbsent inserts a minimal DRep row when no record
+	// exists for the given credential. If a row already exists, it is
+	// left untouched: added_slot, anchor_url, anchor_hash, and active
+	// are never overwritten. Used on the vote-replay recovery path to
+	// recreate rows lost during recovery/bootstrap without clobbering
+	// real registration metadata.
+	InsertDrepIfAbsent(
+		cred []byte,
+		slot uint64,
+		url string,
+		hash []byte,
+		active bool,
+		txn types.Txn,
+	) error
+
 	// GetDRepVotingPower calculates the voting power for a DRep by summing
 	// the current stake of all delegated accounts, approximated from live
 	// UTxO balance plus reward-account balance.

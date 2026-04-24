@@ -145,3 +145,48 @@ func TestSqliteGetDRepVotingPowerBatchDoesNotMultiplyRewardAcrossUTxOs(t *testin
 	require.NoError(t, err)
 	assert.Equal(t, uint64(1200), powers[string(drepCred)])
 }
+
+func TestSqliteInsertDrepIfAbsentInsertsNewRow(t *testing.T) {
+	store := setupTestStore(t)
+
+	cred := []byte("drep_insert_absent_1234567890123456789012")
+	require.NoError(
+		t,
+		store.InsertDrepIfAbsent(cred, 1500, "", nil, true, nil),
+	)
+
+	drep, err := store.GetDrep(cred, true, nil)
+	require.NoError(t, err)
+	require.NotNil(t, drep)
+	assert.True(t, drep.Active)
+	assert.Equal(t, uint64(1500), drep.AddedSlot)
+	assert.Equal(t, "", drep.AnchorURL)
+	assert.Nil(t, drep.AnchorHash)
+}
+
+func TestSqliteInsertDrepIfAbsentLeavesExistingRowUntouched(t *testing.T) {
+	store := setupTestStore(t)
+
+	cred := []byte("drep_insert_absent_2234567890123456789012")
+	anchorURL := "https://drep.example.com/metadata"
+	anchorHash := []byte("anchor_hash_1234567890123456789012345678")
+	require.NoError(
+		t,
+		store.SetDrep(cred, 1000, anchorURL, anchorHash, true, nil),
+	)
+
+	// Attempt repair with placeholder values at a later slot — must be a no-op.
+	require.NoError(
+		t,
+		store.InsertDrepIfAbsent(cred, 9999, "", nil, true, nil),
+	)
+
+	drep, err := store.GetDrep(cred, true, nil)
+	require.NoError(t, err)
+	require.NotNil(t, drep)
+	assert.Equal(t, uint64(1000), drep.AddedSlot)
+	assert.Equal(t, anchorURL, drep.AnchorURL)
+	assert.Equal(t, anchorHash, drep.AnchorHash)
+	assert.True(t, drep.Active)
+}
+

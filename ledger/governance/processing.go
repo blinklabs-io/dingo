@@ -15,6 +15,8 @@
 package governance
 
 import (
+	"encoding/hex"
+	"errors"
 	"fmt"
 
 	"github.com/blinklabs-io/dingo/database"
@@ -178,12 +180,51 @@ func ProcessVotes(
 		if voterType == models.VoterTypeDRep {
 			credKey := string(voter.Hash[:])
 			if !drepActivityUpdated[credKey] {
-				if err := db.UpdateDRepActivity(
+				err := db.UpdateDRepActivity(
 					voter.Hash[:],
 					currentEpoch,
 					drepInactivityPeriod,
 					txn,
-				); err != nil {
+				)
+				if errors.Is(err, models.ErrDrepActivityNotUpdated) {
+					// A valid DRep vote proves the credential exists on-chain.
+					// If metadata lost the DRep row during recovery/bootstrap,
+					// recreate a minimal active record so replay can continue.
+					// InsertDrepIfAbsent never overwrites an existing row, so
+					// any real registration metadata (added_slot, anchor_url,
+					// anchor_hash, active) is preserved and rollback semantics
+					// in RestoreDrepStateAtSlot remain intact.
+					if setErr := db.InsertDrepIfAbsent(
+						voter.Hash[:],
+						point.Slot,
+						"",
+						nil,
+						true,
+						txn,
+					); setErr != nil {
+						return fmt.Errorf(
+							"repair missing drep in tx %s: %w",
+							txHashForLog,
+							setErr,
+						)
+					}
+					if logger := db.Logger(); logger != nil {
+						logger.Warn(
+							"recreated missing drep record during vote replay",
+							"tx_hash", txHashForLog,
+							"drep_hash", hex.EncodeToString(voter.Hash[:]),
+							"slot", point.Slot,
+							"component", "governance",
+						)
+					}
+					err = db.UpdateDRepActivity(
+						voter.Hash[:],
+						currentEpoch,
+						drepInactivityPeriod,
+						txn,
+					)
+				}
+				if err != nil {
 					return fmt.Errorf(
 						"update drep activity in tx %s: %w",
 						txHashForLog,
