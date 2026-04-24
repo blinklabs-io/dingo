@@ -785,6 +785,21 @@ type MetadataStore interface {
 
 	// DRep voting power and activity methods
 
+	// InsertDrepIfAbsent inserts a minimal DRep row when no record
+	// exists for the given credential. If a row already exists, it is
+	// left untouched: added_slot, anchor_url, anchor_hash, and active
+	// are never overwritten. Used on the vote-replay recovery path to
+	// recreate rows lost during recovery/bootstrap without clobbering
+	// real registration metadata.
+	InsertDrepIfAbsent(
+		cred []byte,
+		slot uint64,
+		url string,
+		hash []byte,
+		active bool,
+		txn types.Txn,
+	) error
+
 	// GetDRepVotingPower calculates the voting power for a DRep by summing
 	// the current stake of all delegated accounts, approximated from live
 	// UTxO balance plus reward-account balance.
@@ -893,6 +908,20 @@ type MetadataStore interface {
 	// registered only after the slot are deleted; remaining DReps have their
 	// anchor and active status restored.
 	RestoreDrepStateAtSlot(uint64, types.Txn) error
+
+	// ClearDanglingDRepDelegations implements the cardano-ledger Conway
+	// HARDFORK STS rule for protocol major version 10 (Plomin, mainnet
+	// January 2025, Cardano/Conway/Rules/HardFork.hs updateDRepDelegations).
+	// For each account with a credential-backed DRep delegation
+	// (DrepType 0 or 1), if the target DRep credential is not currently
+	// registered as an active DRep, clear the delegation. Pseudo-DRep
+	// delegations (AlwaysAbstain, AlwaysNoConfidence) are preserved.
+	// Updates Account.AddedSlot to atSlot on every row it modifies so the
+	// rewritten row is excluded from a subsequent rollback restore
+	// targeting any slot before atSlot (the restore filters on
+	// `added_slot <= targetSlot` and falls back to prior certificate
+	// history). Returns the number of accounts updated.
+	ClearDanglingDRepDelegations(atSlot uint64, txn types.Txn) (int, error)
 
 	// DeletePParamsAfterSlot removes protocol parameter records added after
 	// the given slot.

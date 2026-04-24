@@ -87,6 +87,47 @@ func (d *Database) GetActiveDreps(
 	return d.metadata.GetActiveDreps(txn.Metadata())
 }
 
+// InsertDrepIfAbsent inserts a minimal DRep row when no record exists
+// for the given credential. Existing rows are left untouched so real
+// registration metadata (added_slot, anchor_url, anchor_hash, active)
+// is never overwritten by the vote-replay recovery path.
+func (d *Database) InsertDrepIfAbsent(
+	cred []byte,
+	slot uint64,
+	url string,
+	hash []byte,
+	active bool,
+	txn *Txn,
+) error {
+	owned := false
+	if txn == nil {
+		txn = d.MetadataTxn(true)
+		owned = true
+		defer func() {
+			if owned {
+				txn.Rollback() //nolint:errcheck
+			}
+		}()
+	}
+	if err := d.metadata.InsertDrepIfAbsent(
+		cred,
+		slot,
+		url,
+		hash,
+		active,
+		txn.Metadata(),
+	); err != nil {
+		return fmt.Errorf("failed to insert DRep if absent: %w", err)
+	}
+	if owned {
+		if err := txn.Commit(); err != nil {
+			return fmt.Errorf("commit transaction: %w", err)
+		}
+		owned = false
+	}
+	return nil
+}
+
 // GetDRepVotingPower calculates the voting power for a DRep by summing
 // the current stake of all delegated accounts, approximated from live
 // UTxO balance plus reward-account balance.

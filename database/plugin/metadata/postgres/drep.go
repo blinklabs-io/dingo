@@ -97,6 +97,35 @@ func (d *MetadataStorePostgres) SetDrep(
 	return nil
 }
 
+// InsertDrepIfAbsent inserts a DRep row only when no record exists for
+// the given credential. Existing rows are left untouched so the repair
+// path cannot clobber real registration metadata.
+func (d *MetadataStorePostgres) InsertDrepIfAbsent(
+	cred []byte,
+	slot uint64,
+	url string,
+	hash []byte,
+	active bool,
+	txn types.Txn,
+) error {
+	tmpItem := models.Drep{
+		Credential: cred,
+		AddedSlot:  slot,
+		AnchorURL:  url,
+		AnchorHash: hash,
+		Active:     active,
+	}
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return err
+	}
+	if result := db.Clauses(clause.OnConflict{DoNothing: true}).
+		Create(&tmpItem); result.Error != nil {
+		return result.Error
+	}
+	return nil
+}
+
 // GetDRepVotingPower calculates the voting power for a DRep by summing the
 // current stake of all accounts delegated to it, including live UTxO balance
 // plus reward-account balance.

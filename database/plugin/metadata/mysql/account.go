@@ -886,3 +886,40 @@ func (d *MetadataStoreMysql) RestoreAccountStateAtSlot(
 
 	return nil
 }
+
+// ClearDanglingDRepDelegations implements the Conway HARDFORK rule for
+// protocol major version 10 (Plomin). See the MetadataStore interface
+// documentation for semantics.
+func (d *MetadataStoreMysql) ClearDanglingDRepDelegations(
+	atSlot uint64,
+	txn types.Txn,
+) (int, error) {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return 0, err
+	}
+	// NOT EXISTS is used rather than NOT IN because NOT IN has
+	// surprising semantics around NULL values in the subquery result.
+	liveDrepExists := db.Model(&models.Drep{}).
+		Select("1").
+		Where("drep.credential = account.drep AND drep.active = ?", true)
+	result := db.Model(&models.Account{}).
+		Where("drep IS NOT NULL").
+		Where(
+			"drep_type IN ?",
+			[]uint64{
+				models.DrepTypeAddrKeyHash,
+				models.DrepTypeScriptHash,
+			},
+		).
+		Where("NOT EXISTS (?)", liveDrepExists).
+		Updates(map[string]any{
+			"drep":       gorm.Expr("NULL"),
+			"drep_type":  uint64(0),
+			"added_slot": atSlot,
+		})
+	if result.Error != nil {
+		return 0, result.Error
+	}
+	return int(result.RowsAffected), nil
+}

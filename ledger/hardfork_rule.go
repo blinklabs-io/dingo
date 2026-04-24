@@ -69,6 +69,18 @@ func (ls *LedgerState) applyIntraEraHardForkRule(
 			"boundary_slot", boundarySlot,
 			"component", "ledger",
 		)
+	case 10:
+		n, err := ls.db.ClearDanglingDRepDelegations(boundarySlot, txn)
+		if err != nil {
+			return fmt.Errorf("pv10 clear dangling DRep delegations: %w", err)
+		}
+		ls.config.Logger.Info(
+			"applied Conway HARDFORK rule (pv10 Plomin)",
+			"cleared_dangling_drep_delegations", n,
+			"epoch", newEpoch,
+			"boundary_slot", boundarySlot,
+			"component", "ledger",
+		)
 	}
 	return nil
 }
