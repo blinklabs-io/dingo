@@ -30,6 +30,8 @@ import (
 var MaryEraDesc = EraDesc{
 	Id:                      mary.EraIdMary,
 	Name:                    mary.EraNameMary,
+	MinMajorVersion:         4,
+	MaxMajorVersion:         4,
 	DecodePParamsFunc:       DecodePParamsMary,
 	DecodePParamsUpdateFunc: DecodePParamsUpdateMary,
 	PParamsUpdateFunc:       PParamsUpdateMary,

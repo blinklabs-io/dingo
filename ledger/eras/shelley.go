@@ -30,6 +30,8 @@ import (
 var ShelleyEraDesc = EraDesc{
 	Id:                      shelley.EraIdShelley,
 	Name:                    shelley.EraNameShelley,
+	MinMajorVersion:         2,
+	MaxMajorVersion:         2,
 	DecodePParamsFunc:       DecodePParamsShelley,
 	DecodePParamsUpdateFunc: DecodePParamsUpdateShelley,
 	PParamsUpdateFunc:       PParamsUpdateShelley,

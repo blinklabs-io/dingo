@@ -36,6 +36,8 @@ import (
 var ConwayEraDesc = EraDesc{
 	Id:                      conway.EraIdConway,
 	Name:                    conway.EraNameConway,
+	MinMajorVersion:         9,
+	MaxMajorVersion:         10,
 	DecodePParamsFunc:       DecodePParamsConway,
 	DecodePParamsUpdateFunc: DecodePParamsUpdateConway,
 	PParamsUpdateFunc:       PParamsUpdateConway,

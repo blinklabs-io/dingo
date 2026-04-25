@@ -36,6 +36,8 @@ import (
 var AlonzoEraDesc = EraDesc{
 	Id:                      alonzo.EraIdAlonzo,
 	Name:                    alonzo.EraNameAlonzo,
+	MinMajorVersion:         5,
+	MaxMajorVersion:         6,
 	DecodePParamsFunc:       DecodePParamsAlonzo,
 	DecodePParamsUpdateFunc: DecodePParamsUpdateAlonzo,
 	PParamsUpdateFunc:       PParamsUpdateAlonzo,

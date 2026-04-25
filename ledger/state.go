@@ -3577,13 +3577,20 @@ func (ls *LedgerState) loadEpochs(txn *database.Txn) error {
 		return errors.New("failed to load Shelley genesis")
 	}
 	startProtoVersion := shelleyGenesis.ProtocolParameters.ProtocolVersion.Major
-	startEra := eras.ProtocolMajorVersionToEra[startProtoVersion]
+	startEra, startEraOk := eras.EraForVersion(startProtoVersion)
 	// Initialize current era to Byron when starting from genesis
 	ls.currentEra = eras.Eras[0] // Byron era
-	// Transition through every era between the current and the target era
+	// Transition through every era between the current and the target era.
+	// If the configured version is unknown, the loop is skipped and the
+	// node starts at Byron — same fallback behavior as the previous map
+	// lookup, which returned the zero-value EraDesc for unmapped versions.
 	// During startup, it's safe to apply results immediately since there's
 	// no concurrent access.
-	for nextEraId := ls.currentEra.Id + 1; nextEraId <= startEra.Id; nextEraId++ {
+	startEraId := uint(0)
+	if startEraOk {
+		startEraId = startEra.Id
+	}
+	for nextEraId := ls.currentEra.Id + 1; nextEraId <= startEraId; nextEraId++ {
 		result, err := ls.transitionToEra(
 			txn,
 			nextEraId,

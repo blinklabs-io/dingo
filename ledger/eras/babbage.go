@@ -36,6 +36,8 @@ import (
 var BabbageEraDesc = EraDesc{
 	Id:                      babbage.EraIdBabbage,
 	Name:                    babbage.EraNameBabbage,
+	MinMajorVersion:         7,
+	MaxMajorVersion:         8,
 	DecodePParamsFunc:       DecodePParamsBabbage,
 	DecodePParamsUpdateFunc: DecodePParamsUpdateBabbage,
 	PParamsUpdateFunc:       PParamsUpdateBabbage,

@@ -136,8 +136,7 @@ func BuildEraParams(cfg *cardano.CardanoNodeConfig, era EraDesc) (hardfork.EraPa
 // BuildShape constructs a hardfork.Shape from dingo's static era table.
 // The shape's SystemStart comes from the Shelley genesis; each entry's
 // EraParams are built via BuildEraParams; the protocol-version range
-// (MinMajorVersion/MaxMajorVersion) is derived by inverting
-// ProtocolMajorVersionToEra.
+// is read directly from EraDesc.MinMajorVersion / MaxMajorVersion.
 func BuildShape(cfg *cardano.CardanoNodeConfig) (hardfork.Shape, error) {
 	if cfg == nil {
 		return hardfork.Shape{}, errors.New("eras: nil CardanoNodeConfig")
@@ -147,45 +146,17 @@ func BuildShape(cfg *cardano.CardanoNodeConfig) (hardfork.Shape, error) {
 		return hardfork.Shape{}, errors.New("eras: Shelley genesis unavailable (required for SystemStart)")
 	}
 
-	// Invert ProtocolMajorVersionToEra to compute {min,max} per era ID.
-	type versionRange struct {
-		min, max uint
-		hasAny   bool
-	}
-	ranges := map[uint]*versionRange{}
-	for v, e := range ProtocolMajorVersionToEra {
-		r, ok := ranges[e.Id]
-		if !ok {
-			r = &versionRange{min: v, max: v, hasAny: true}
-			ranges[e.Id] = r
-			continue
-		}
-		if v < r.min {
-			r.min = v
-		}
-		if v > r.max {
-			r.max = v
-		}
-	}
-
 	entries := make([]hardfork.ShapeEntry, 0, len(Eras))
 	for _, era := range Eras {
 		params, err := BuildEraParams(cfg, era)
 		if err != nil {
 			return hardfork.Shape{}, err
 		}
-		r, ok := ranges[era.Id]
-		if !ok {
-			return hardfork.Shape{}, fmt.Errorf(
-				"eras: era %q (id=%d) has no entry in ProtocolMajorVersionToEra",
-				era.Name, era.Id,
-			)
-		}
 		entries = append(entries, hardfork.ShapeEntry{
 			EraID:           era.Id,
 			EraName:         era.Name,
-			MinMajorVersion: r.min,
-			MaxMajorVersion: r.max,
+			MinMajorVersion: era.MinMajorVersion,
+			MaxMajorVersion: era.MaxMajorVersion,
 			Params:          params,
 		})
 	}

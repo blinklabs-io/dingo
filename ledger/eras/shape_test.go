@@ -141,7 +141,7 @@ func TestBuildShape_OK(t *testing.T) {
 	assert.Equal(t, "Shelley", shape.Eras[1].EraName)
 	assert.Equal(t, "Conway", shape.Eras[6].EraName)
 
-	// Version ranges derived from ProtocolMajorVersionToEra.
+	// Version ranges read directly from each EraDesc.
 	type vr struct{ min, max uint }
 	want := map[string]vr{
 		"Byron":   {0, 1},
@@ -162,21 +162,25 @@ func TestBuildShape_OK(t *testing.T) {
 	assert.NoError(t, shape.Validate(), "BuildShape must produce a valid Shape")
 }
 
-// EraForVersion from the resulting Shape matches the legacy EraForVersion lookup.
-func TestBuildShape_EraForVersionMatchesLegacy(t *testing.T) {
+// Shape.EraForVersion and the package-level eras.EraForVersion agree on
+// every covered major-version, and both reject unknown versions.
+func TestBuildShape_EraForVersionAgreesWithEraTable(t *testing.T) {
 	cfg := newTestCfg(t)
 	shape, err := eras.BuildShape(cfg)
 	require.NoError(t, err)
 
 	for v := uint(0); v <= 10; v++ {
-		got, found := shape.EraForVersion(v)
-		require.True(t, found, "version %d should resolve", v)
-		legacy := eras.ProtocolMajorVersionToEra[v]
-		assert.Equal(t, legacy.Id, got.EraID, "version %d EraID", v)
+		gotShape, found := shape.EraForVersion(v)
+		require.True(t, found, "version %d should resolve via Shape", v)
+		gotEra, found := eras.EraForVersion(v)
+		require.True(t, found, "version %d should resolve via era table", v)
+		assert.Equal(t, gotEra.Id, gotShape.EraID, "version %d EraID", v)
 	}
 
 	_, found := shape.EraForVersion(99)
-	assert.False(t, found)
+	assert.False(t, found, "Shape should reject unknown version")
+	_, found = eras.EraForVersion(99)
+	assert.False(t, found, "era table should reject unknown version")
 }
 
 func TestBuildShape_MissingShelleyGenesis(t *testing.T) {
