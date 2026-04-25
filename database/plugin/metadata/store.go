@@ -552,18 +552,30 @@ type MetadataStore interface {
 	// SetUtxosNotDeletedAfterSlot marks all UTxOs created after the given slot as not deleted.
 	SetUtxosNotDeletedAfterSlot(uint64, types.Txn) error
 
-	// RemoveByronAvvmUtxos implements the Shelley→Allegra HARDFORK rule
-	// (cardano-ledger Allegra/Translation.hs, returnRedeemAddrsToReserves).
-	// At the Shelley→Allegra boundary, every live UTxO at a Byron redeem
-	// (AVVM, ByronAddressType == 2) address is removed from the active
-	// UTxO set and its lovelace is reclaimed into reserves. Implementations
-	// mark matching rows as deleted at atSlot and return (count, total
-	// lovelace) reclaimed; callers handle the reserves accounting and
-	// rollback un-deletion (via SetUtxosNotDeletedAfterSlot).
-	RemoveByronAvvmUtxos(
-		atSlot uint64,
+	// IterateLiveUtxos invokes fn once for each live UTxO row
+	// (DeletedSlot == 0) in unspecified order. fn receives a
+	// pointer to a row that is reused between callbacks — copy
+	// out anything you intend to retain. Returning a non-nil
+	// error from fn aborts iteration and that error is propagated
+	// up. The intended callers iterate, classify, and (optionally)
+	// hand a list of UtxoKeys to MarkUtxosDeletedAtSlot;
+	// implementations are free to page or stream the underlying
+	// query as long as the callback contract is honored.
+	IterateLiveUtxos(
 		txn types.Txn,
-	) (count int, totalLovelace uint64, err error)
+		fn func(*models.Utxo) error,
+	) error
+
+	// MarkUtxosDeletedAtSlot marks every live UTxO row matching one
+	// of refs as deleted at atSlot. Refs that don't match any live
+	// row are silently ignored (the SQL filter is deleted_slot == 0,
+	// so already-deleted rows don't get rewritten). Rollback
+	// un-deletion is handled by SetUtxosNotDeletedAfterSlot.
+	MarkUtxosDeletedAtSlot(
+		txn types.Txn,
+		refs []types.UtxoKey,
+		atSlot uint64,
+	) error
 
 	// Stake snapshot methods
 

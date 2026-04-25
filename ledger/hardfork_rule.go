@@ -56,10 +56,10 @@ func (ls *LedgerState) applyIntraEraHardForkRule(
 ) error {
 	switch newMajor {
 	case 3:
-		count, total, err := ls.db.RemoveByronAvvmUtxos(boundarySlot, txn)
+		count, total, err := ls.removeAvvmUtxos(txn, boundarySlot)
 		if err != nil {
 			return fmt.Errorf(
-				"pv3 remove Byron AVVM UTxOs at slot %d: %w",
+				"pv3 remove AVVM UTxOs at slot %d: %w",
 				boundarySlot, err,
 			)
 		}
@@ -67,7 +67,8 @@ func (ls *LedgerState) applyIntraEraHardForkRule(
 		// today — governance enactment is the only caller that writes
 		// NetworkState — so we log the reclaimed total rather than
 		// writing a partial, likely-misleading reserves value. When
-		// full reserves tracking lands, consume totalLovelace here.
+		// full reserves tracking lands, consume the reclaimed total
+		// from removeAvvmUtxos here.
 		ls.config.Logger.Info(
 			"applied Allegra HARDFORK rule (pv3 AVVM return)",
 			"removed_avvm_utxos", count,

@@ -560,45 +560,92 @@ func (d *MetadataStoreSqlite) SetUtxosNotDeletedAfterSlot(
 	return nil
 }
 
-// RemoveByronAvvmUtxos implements the Shelley→Allegra HARDFORK rule
-// (cardano-ledger Allegra/Translation.hs, returnRedeemAddrsToReserves):
-// marks all live UTxOs at Byron redeem (AVVM) addresses as deleted at
-// atSlot and returns the count and total lovelace amount that was
-// reclaimed. DeletedSlot is set to atSlot so rollback across the
-// boundary (via SetUtxosNotDeletedAfterSlot) correctly un-deletes them.
-// See the MetadataStore interface for semantics.
-func (d *MetadataStoreSqlite) RemoveByronAvvmUtxos(
-	atSlot uint64,
+// liveUtxoIterPageSize bounds how many rows are fetched per page from
+// the live UTxO scan. Picked to keep peak memory bounded while
+// amortizing round-trip overhead.
+const liveUtxoIterPageSize = 4096
+
+// IterateLiveUtxos invokes fn for every live UTxO row in unspecified
+// order, paging through the table to avoid loading the full set at
+// once. See the MetadataStore interface for semantics.
+func (d *MetadataStoreSqlite) IterateLiveUtxos(
 	txn types.Txn,
-) (int, uint64, error) {
+	fn func(*models.Utxo) error,
+) error {
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return err
+	}
+	var lastID uint
+	for {
+		var batch []models.Utxo
+		if err := db.Model(&models.Utxo{}).
+			Where("deleted_slot = 0 AND id > ?", lastID).
+			Order("id ASC").
+			Limit(liveUtxoIterPageSize).
+			Find(&batch).Error; err != nil {
+			return err
+		}
+		if len(batch) == 0 {
+			return nil
+		}
+		for i := range batch {
+			if err := fn(&batch[i]); err != nil {
+				return err
+			}
+		}
+		lastID = batch[len(batch)-1].ID
+		if len(batch) < liveUtxoIterPageSize {
+			return nil
+		}
+	}
+}
+
+// markUtxosDeletedChunkSize bounds how many (tx_id, output_idx)
+// composite predicates are sent in a single UPDATE to keep us under
+// SQLite's bind-variable limit (sqliteBindVarLimit, two bindings per
+// ref).
+const markUtxosDeletedChunkSize = sqliteBindVarLimit / 2
+
+// MarkUtxosDeletedAtSlot marks every live UTxO row matching one of
+// refs as deleted at atSlot. See the MetadataStore interface for
+// semantics.
+func (d *MetadataStoreSqlite) MarkUtxosDeletedAtSlot(
+	txn types.Txn,
+	refs []types.UtxoKey,
+	atSlot uint64,
+) error {
+	if len(refs) == 0 {
+		return nil
+	}
 	db, err := d.resolveDB(txn)
 	if err != nil {
-		return 0, 0, err
+		return err
 	}
-	var stats struct {
-		Count int64
-		Sum   uint64
+	for start := 0; start < len(refs); start += markUtxosDeletedChunkSize {
+		end := min(start+markUtxosDeletedChunkSize, len(refs))
+		chunk := refs[start:end]
+		// GORM's tuple-IN handling unpacks []byte arguments byte-by-byte
+		// across drivers, so build an OR chain with parallel
+		// (tx_id, output_idx) equality predicates instead.
+		var (
+			clauses strings.Builder
+			args    = make([]any, 0, 2*len(chunk))
+		)
+		for i, r := range chunk {
+			if i > 0 {
+				clauses.WriteString(" OR ")
+			}
+			clauses.WriteString("(tx_id = ? AND output_idx = ?)")
+			args = append(args, r.TxId, r.OutputIdx)
+		}
+		whereClause := "deleted_slot = 0 AND (" + clauses.String() + ")"
+		result := db.Model(&models.Utxo{}).
+			Where(whereClause, args...).
+			Update("deleted_slot", atSlot)
+		if result.Error != nil {
+			return result.Error
+		}
 	}
-	if err := db.Model(&models.Utxo{}).
-		Select("COUNT(*) AS count, COALESCE(SUM(amount), 0) AS sum").
-		Where(
-			"byron_address_type = ? AND deleted_slot = 0",
-			uint8(lcommon.ByronAddressTypeRedeem),
-		).
-		Scan(&stats).Error; err != nil {
-		return 0, 0, err
-	}
-	if stats.Count == 0 {
-		return 0, 0, nil
-	}
-	result := db.Model(&models.Utxo{}).
-		Where(
-			"byron_address_type = ? AND deleted_slot = 0",
-			uint8(lcommon.ByronAddressTypeRedeem),
-		).
-		Update("deleted_slot", atSlot)
-	if result.Error != nil {
-		return 0, 0, result.Error
-	}
-	return int(stats.Count), stats.Sum, nil
+	return nil
 }

@@ -172,6 +172,17 @@ var ErrPartialCommit = errors.New(
 // conflicts from other errors and retry or reject accordingly.
 var ErrUtxoConflict = errors.New("UTxO already spent")
 
+// UtxoKey identifies a UTxO row by its transaction id and output
+// index. Used as a parameter type for batch UTxO operations across
+// the metadata-store interface (e.g. MarkUtxosDeletedAtSlot). The
+// fixed-size UtxoRef in database/cbor_cache.go is for in-memory map
+// keys; this variable-length form matches the byte slices stored on
+// the UTxO row directly.
+type UtxoKey struct {
+	TxId      []byte
+	OutputIdx uint32
+}
+
 // BlobItem represents a value returned by an iterator
 type BlobItem interface {
 	Key() []byte

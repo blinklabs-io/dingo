@@ -666,45 +666,59 @@ func (d *Database) UtxosUnspend(
 	return nil
 }
 
-// RemoveByronAvvmUtxos applies the Shelley→Allegra HARDFORK rule
-// (cardano-ledger Allegra/Translation.hs, returnRedeemAddrsToReserves):
-// marks every live UTxO at a Byron redeem (AVVM) address as deleted at
-// atSlot and returns the count and total lovelace reclaimed. The
-// DeletedSlot bookkeeping lets a rollback past atSlot un-delete the rows
-// via the existing SetUtxosNotDeletedAfterSlot path. Callers are
-// responsible for adding totalLovelace to reserves; this wrapper does
-// not touch NetworkState because reserves tracking is broader than the
-// AVVM rule.
-func (d *Database) RemoveByronAvvmUtxos(
-	atSlot uint64,
+// IterateLiveUtxos invokes fn once for each live UTxO row
+// (DeletedSlot == 0). The callback receives a pointer to a row whose
+// Cbor field has been populated from blob storage (or recovered from
+// the producing block) — copy out anything you intend to retain
+// because the underlying buffer is reused between callbacks.
+// Returning a non-nil error from fn aborts iteration and that error
+// is propagated up; CBOR-loading failures are also propagated.
+// When txn is nil a read transaction is opened internally.
+func (d *Database) IterateLiveUtxos(
 	txn *Txn,
-) (int, uint64, error) {
-	owned := false
-	if txn == nil {
-		txn = NewMetadataOnlyTxn(d, true)
-		owned = true
-		defer func() {
-			if owned {
-				txn.Rollback() //nolint:errcheck
+	fn func(*models.Utxo) error,
+) error {
+	withCbor := func(t *Txn) func(*models.Utxo) error {
+		return func(u *models.Utxo) error {
+			if err := loadCbor(u, t); err != nil {
+				return fmt.Errorf(
+					"load utxo cbor tx=%x idx=%d: %w",
+					u.TxId[:8], u.OutputIdx, err,
+				)
 			}
-		}()
+			return fn(u)
+		}
 	}
-	count, total, err := d.metadata.RemoveByronAvvmUtxos(
-		atSlot,
-		txn.Metadata(),
-	)
-	if err != nil {
-		return 0, 0, fmt.Errorf(
-			"remove Byron AVVM UTxOs at slot %d: %w",
-			atSlot,
-			err,
+	if txn != nil {
+		return d.metadata.IterateLiveUtxos(txn.Metadata(), withCbor(txn))
+	}
+	return d.Transaction(false).Do(func(t *Txn) error {
+		return d.metadata.IterateLiveUtxos(t.Metadata(), withCbor(t))
+	})
+}
+
+// MarkUtxosDeletedAtSlot marks every live UTxO row matching one of
+// refs as deleted at atSlot. Refs that don't match any live row are
+// silently ignored; rollback un-deletion is handled by the existing
+// rollback path (SetUtxosNotDeletedAfterSlot). When txn is nil a
+// write transaction is opened, committed on success and rolled back
+// on error via Txn.Do.
+func (d *Database) MarkUtxosDeletedAtSlot(
+	txn *Txn,
+	refs []types.UtxoKey,
+	atSlot uint64,
+) error {
+	if len(refs) == 0 {
+		return nil
+	}
+	if txn != nil {
+		return d.metadata.MarkUtxosDeletedAtSlot(
+			txn.Metadata(), refs, atSlot,
 		)
 	}
-	if owned {
-		if err := txn.Commit(); err != nil {
-			return 0, 0, fmt.Errorf("commit transaction: %w", err)
-		}
-		owned = false
-	}
-	return count, total, nil
+	return d.MetadataTxn(true).Do(func(t *Txn) error {
+		return d.metadata.MarkUtxosDeletedAtSlot(
+			t.Metadata(), refs, atSlot,
+		)
+	})
 }

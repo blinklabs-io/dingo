@@ -79,14 +79,6 @@ type Utxo struct {
 	DeletedSlot             uint64       `gorm:"index"`
 	Amount                  types.Uint64 `gorm:"index"`
 	OutputIdx               uint32       `gorm:"uniqueIndex:tx_id_output_idx"`
-	// ByronAddressType records the inner Byron address type (pubkey=0,
-	// script=1, redeem=2) for UTxOs at Byron-format addresses. Non-Byron
-	// UTxOs and Byron pubkey UTxOs both store 0; to distinguish them use
-	// the 1/2 values directly or check the payment address separately.
-	// Used by the Shelley→Allegra HARDFORK rule to identify AVVM redeem
-	// UTxOs for removal (cardano-ledger Allegra/Translation.hs
-	// returnRedeemAddrsToReserves).
-	ByronAddressType uint8 `gorm:"default:0;index"`
 }
 
 // UtxoWithOrdering includes UTxO with transaction ordering metadata
@@ -152,19 +144,6 @@ func UtxoLedgerToModel(
 		AddedSlot: slot,
 		Amount:    types.Uint64(utxo.Output.Amount().Uint64()),
 		OutputIdx: utxo.Id.Index(),
-	}
-	if outAddr.Type() == lcommon.AddressTypeByron {
-		// Narrow the decoded uint64 to the known inner-type values so a
-		// malformed address with an out-of-range type cannot overflow
-		// the uint8 column (gosec G115).
-		switch outAddr.ByronType() {
-		case lcommon.ByronAddressTypePubkey:
-			ret.ByronAddressType = uint8(lcommon.ByronAddressTypePubkey)
-		case lcommon.ByronAddressTypeScript:
-			ret.ByronAddressType = uint8(lcommon.ByronAddressTypeScript)
-		case lcommon.ByronAddressTypeRedeem:
-			ret.ByronAddressType = uint8(lcommon.ByronAddressTypeRedeem)
-		}
 	}
 	var zeroHash ledger.Blake2b224
 	pkh := outAddr.PaymentKeyHash()
