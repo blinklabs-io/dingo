@@ -58,7 +58,10 @@ func (ls *LedgerState) applyIntraEraHardForkRule(
 	case 3:
 		count, total, err := ls.db.RemoveByronAvvmUtxos(boundarySlot, txn)
 		if err != nil {
-			return fmt.Errorf("pv3 remove Byron AVVM UTxOs: %w", err)
+			return fmt.Errorf(
+				"pv3 remove Byron AVVM UTxOs at slot %d: %w",
+				boundarySlot, err,
+			)
 		}
 		// Reserves are not maintained on every epoch-rollover in dingo
 		// today — governance enactment is the only caller that writes
@@ -76,7 +79,10 @@ func (ls *LedgerState) applyIntraEraHardForkRule(
 	case 10:
 		n, err := ls.db.ClearDanglingDRepDelegations(boundarySlot, txn)
 		if err != nil {
-			return fmt.Errorf("pv10 clear dangling DRep delegations: %w", err)
+			return fmt.Errorf(
+				"pv10 clear dangling DRep delegations at slot %d: %w",
+				boundarySlot, err,
+			)
 		}
 		ls.config.Logger.Info(
 			"applied Conway HARDFORK rule (pv10 Plomin)",

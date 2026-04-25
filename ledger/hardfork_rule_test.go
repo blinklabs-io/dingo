@@ -225,6 +225,15 @@ func TestApplyIntraEraHardForkRule_Pv3_RemovesAvvm(t *testing.T) {
 		require.ErrorIs(t, err, database.ErrUtxoNotFound,
 			"AVVM UTxO must be removed from the live UTxO set")
 	}
+
+	// Non-redeem Byron (pubkey) UTxO must survive the pv3 rule: the
+	// only thing standing between the dispatcher and over-deletion of
+	// every Byron UTxO is the ByronAddressType == Redeem filter in the
+	// metadata layer, so check it directly here.
+	_, err := db.UtxoByRef(keys.Pubkey, 0, nil)
+	require.ErrorIs(t, err, database.ErrUtxoCborUnavailable,
+		"non-redeem Byron UTxO must survive the pv3 AVVM return rule")
+	require.NotErrorIs(t, err, database.ErrUtxoNotFound)
 }
 
 // Only pv3 may touch AVVM UTxOs. Verifies that other majors — both the
@@ -251,4 +260,13 @@ func TestApplyIntraEraHardForkRule_OtherMajors_DoNotTouchAvvm(t *testing.T) {
 		require.NotErrorIs(t, err, database.ErrUtxoNotFound,
 			"non-pv3 dispatch must not remove AVVM UTxOs")
 	}
+
+	// Pubkey (non-AVVM) Byron UTxO must also remain untouched: a
+	// regression that incorrectly broadens the metadata filter beyond
+	// ByronAddressType == Redeem on a non-pv3 major would otherwise
+	// slip through.
+	_, err := db.UtxoByRef(keys.Pubkey, 0, nil)
+	require.ErrorIs(t, err, database.ErrUtxoCborUnavailable,
+		"non-pv3 dispatch must not touch AVVM pubkey UTxOs")
+	require.NotErrorIs(t, err, database.ErrUtxoNotFound)
 }
