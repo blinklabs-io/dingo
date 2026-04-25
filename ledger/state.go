@@ -4032,68 +4032,19 @@ func (ls *LedgerState) computeNextEpochNonce(
 	if currentEra.Id == 0 {
 		return nil
 	}
-	if ls.config.CardanoNodeConfig == nil ||
-		ls.config.CardanoNodeConfig.ShelleyGenesisHash == "" {
-		return nil
-	}
-
-	genesisHashBytes, err := hex.DecodeString(
-		ls.config.CardanoNodeConfig.ShelleyGenesisHash,
-	)
-	if err != nil {
-		return nil
-	}
-
-	if len(currentEpoch.Nonce) == 0 {
-		return genesisHashBytes
-	}
-
-	prevEvolvingNonce := currentEpoch.EvolvingNonce
-	if len(prevEvolvingNonce) == 0 {
-		prevEvolvingNonce = genesisHashBytes
-	}
-
-	prevCandidateNonce := currentEpoch.CandidateNonce
-	if len(prevCandidateNonce) == 0 {
-		prevCandidateNonce = genesisHashBytes
-	}
-
-	candidateNonce, _, err := ls.computeCandidateNonce(
-		nil,
-		prevEvolvingNonce,
-		prevCandidateNonce,
-		currentEpoch.StartSlot,
-		uint64(currentEpoch.LengthInSlots),
+	nextEpochStartSlot := currentEpoch.StartSlot +
+		uint64(currentEpoch.LengthInSlots)
+	nonce, _, _, _, err := ls.computeEpochNonceForSlot(
+		nextEpochStartSlot,
+		currentEpoch,
 	)
 	if err != nil {
 		ls.config.Logger.Warn(
-			"failed to compute candidate nonce",
+			"failed to compute next epoch nonce",
 			"component", "ledger",
+			"current_epoch", currentEpoch.EpochId,
+			"next_epoch", currentEpoch.EpochId+1,
 			"error", err,
-		)
-		return nil
-	}
-
-	// Use the LAGGED lastEpochBlockNonce. When NeutralNonce
-	// (epoch 0→1), candidateNonce ⭒ NeutralNonce = candidateNonce.
-	lastEpochBlockNonce := currentEpoch.LastEpochBlockNonce
-	if len(lastEpochBlockNonce) == 0 {
-		return candidateNonce
-	}
-	if len(candidateNonce) < 32 ||
-		len(lastEpochBlockNonce) < 32 {
-		return nil
-	}
-	result, calcErr := lcommon.CalculateEpochNonce(
-		candidateNonce,
-		lastEpochBlockNonce,
-		nil,
-	)
-	if calcErr != nil {
-		ls.config.Logger.Warn(
-			"failed to calculate epoch nonce",
-			"component", "ledger",
-			"error", calcErr,
 		)
 		return nil
 	}
@@ -4101,12 +4052,9 @@ func (ls *LedgerState) computeNextEpochNonce(
 		"speculative epoch nonce computed for next epoch",
 		"component", "ledger",
 		"next_epoch", currentEpoch.EpochId+1,
-		"candidate_nonce", hex.EncodeToString(candidateNonce),
-		"last_epoch_block_nonce",
-		hex.EncodeToString(lastEpochBlockNonce),
-		"epoch_nonce", hex.EncodeToString(result.Bytes()),
+		"epoch_nonce", hex.EncodeToString(nonce),
 	)
-	return result.Bytes()
+	return nonce
 }
 
 // SlotsPerEpoch returns the number of slots in an epoch for the current era.

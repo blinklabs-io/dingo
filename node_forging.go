@@ -299,6 +299,14 @@ func (a *epochNonceAdapter) CurrentEpoch() uint64 {
 	return a.ledgerState.CurrentEpoch()
 }
 
+func (a *epochNonceAdapter) EpochForSlot(slot uint64) (uint64, error) {
+	epoch, err := a.ledgerState.SlotToEpoch(slot)
+	if err != nil {
+		return 0, err
+	}
+	return epoch.EpochId, nil
+}
+
 func (a *epochNonceAdapter) EpochNonce(epoch uint64) []byte {
 	return a.ledgerState.EpochNonce(epoch)
 }

@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
@@ -900,6 +901,53 @@ func TestNextEpochNonceReadyEpoch(t *testing.T) {
 	readyEpoch, ok := ls.NextEpochNonceReadyEpoch()
 	require.True(t, ok)
 	assert.Equal(t, uint64(11), readyEpoch)
+}
+
+func TestComputeNextEpochNonceUsesImportedTipAnchor(t *testing.T) {
+	db, err := database.New(&database.Config{DataDir: ""})
+	require.NoError(t, err)
+	defer db.Close()
+
+	tipNonce := bytes.Repeat([]byte{0x22}, 32)
+	candidateNonce := bytes.Repeat([]byte{0x33}, 32)
+
+	require.NoError(t, db.SetBlockNonce(
+		bytes.Repeat([]byte{0x44}, 32),
+		1050,
+		tipNonce,
+		false,
+		nil,
+	))
+
+	ls := &LedgerState{
+		db:         db,
+		currentEra: eras.ShelleyEraDesc,
+		currentEpoch: models.Epoch{
+			EpochId:        10,
+			StartSlot:      1000,
+			LengthInSlots:  100,
+			Nonce:          bytes.Repeat([]byte{0x11}, 32),
+			EvolvingNonce:  tipNonce,
+			CandidateNonce: candidateNonce,
+		},
+		currentTip: ochainsync.Tip{
+			Point: ocommon.Point{
+				Slot: 1050,
+			},
+		},
+		// currentTipBlockNonce is intentionally unset to mimic a snapshot
+		// import where the in-memory tip-nonce cache hasn't been populated.
+		// This forces computeEpochNonceForSlot past its in-memory short-circuit
+		// and exercises the DB-resume anchor lookup against block_nonce rows.
+		config: LedgerStateConfig{
+			CardanoNodeConfig: newNonceReadyTestConfig(t),
+			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+
+	got := ls.computeNextEpochNonce(ls.currentEpoch, ls.currentEra)
+	require.Equal(t, candidateNonce, got)
+	require.NotEqual(t, tipNonce, got)
 }
 
 func TestNextEpochNonceReadyEpochNotReadyBeforeCutoff(t *testing.T) {

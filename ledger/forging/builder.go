@@ -58,6 +58,8 @@ type ChainTipProvider interface {
 type EpochNonceProvider interface {
 	// CurrentEpoch returns the current epoch number.
 	CurrentEpoch() uint64
+	// EpochForSlot returns the epoch containing the given slot.
+	EpochForSlot(slot uint64) (uint64, error)
 	// EpochNonce returns the nonce for the given epoch.
 	EpochNonce(epoch uint64) []byte
 }
@@ -423,9 +425,19 @@ func (b *DefaultBlockBuilder) BuildBlock(
 		)
 	}
 
-	// Compute VRF proof for leader election
-	currentEpoch := b.epochNonce.CurrentEpoch()
-	epochNonce := b.epochNonce.EpochNonce(currentEpoch)
+	// Compute VRF proof for leader election. Use the block slot's
+	// epoch rather than the ledger's current epoch because the slot
+	// clock can reach a new epoch before block processing commits the
+	// epoch rollover.
+	blockEpoch, err := b.epochNonce.EpochForSlot(slot)
+	if err != nil {
+		return nil, nil, fmt.Errorf(
+			"failed to resolve epoch for slot %d: %w",
+			slot,
+			err,
+		)
+	}
+	epochNonce := b.epochNonce.EpochNonce(blockEpoch)
 	if len(epochNonce) == 0 {
 		return nil, nil, errors.New("epoch nonce not available")
 	}

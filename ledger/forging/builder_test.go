@@ -15,6 +15,7 @@
 package forging
 
 import (
+	"bytes"
 	"encoding/hex"
 	"errors"
 	"log/slog"
@@ -61,15 +62,33 @@ func (m *mockChainTip) Tip() ochainsync.Tip {
 
 // mockEpochNonceProvider implements EpochNonceProvider for testing.
 type mockEpochNonceProvider struct {
-	epoch uint64
-	nonce []byte
+	epoch           uint64
+	nonce           []byte
+	nonces          map[uint64][]byte
+	slotsPerEpoch   uint64
+	epochForSlotErr error
+	requestedEpochs []uint64
 }
 
 func (m *mockEpochNonceProvider) CurrentEpoch() uint64 {
 	return m.epoch
 }
 
-func (m *mockEpochNonceProvider) EpochNonce(_ uint64) []byte {
+func (m *mockEpochNonceProvider) EpochForSlot(slot uint64) (uint64, error) {
+	if m.epochForSlotErr != nil {
+		return 0, m.epochForSlotErr
+	}
+	if m.slotsPerEpoch == 0 {
+		return m.epoch, nil
+	}
+	return slot / m.slotsPerEpoch, nil
+}
+
+func (m *mockEpochNonceProvider) EpochNonce(epoch uint64) []byte {
+	m.requestedEpochs = append(m.requestedEpochs, epoch)
+	if m.nonces != nil {
+		return m.nonces[epoch]
+	}
 	return m.nonce
 }
 
@@ -206,6 +225,89 @@ func TestBuildBlockEmptyMempool(t *testing.T) {
 	assert.Equal(t, uint64(1001), block.SlotNumber())
 	assert.Equal(t, uint64(101), block.BlockNumber())
 	assert.Equal(t, 0, len(block.Transactions()))
+}
+
+func TestBuildBlockUsesSlotEpochForVRFNonce(t *testing.T) {
+	creds := setupTestCredentials(t)
+
+	pparams := &conway.ConwayProtocolParameters{
+		MaxTxSize:        16384,
+		MaxBlockBodySize: 90112,
+		MaxBlockExUnits: lcommon.ExUnits{
+			Memory: 62000000,
+			Steps:  20000000000,
+		},
+	}
+	epochNonce := &mockEpochNonceProvider{
+		epoch:         10, // ledger state has not rolled over yet
+		slotsPerEpoch: 100,
+		nonces: map[uint64][]byte{
+			10: bytes.Repeat([]byte{0x10}, 32),
+			11: bytes.Repeat([]byte{0x11}, 32),
+		},
+	}
+	builder, err := NewDefaultBlockBuilder(BlockBuilderConfig{
+		Mempool:         &mockMempool{transactions: []MempoolTransaction{}},
+		PParamsProvider: &mockPParamsProvider{pparams: pparams},
+		ChainTip: &mockChainTip{
+			tip: ochainsync.Tip{
+				Point: ocommon.Point{
+					Slot: 1099,
+					Hash: make([]byte, 32),
+				},
+				BlockNumber: 100,
+			},
+		},
+		EpochNonce:  epochNonce,
+		Credentials: creds,
+	})
+	require.NoError(t, err)
+
+	block, _, err := builder.BuildBlock(1100, 0)
+	require.NoError(t, err)
+	require.NotNil(t, block)
+	require.Equal(t, []uint64{11}, epochNonce.requestedEpochs)
+}
+
+func TestBuildBlockPropagatesEpochForSlotError(t *testing.T) {
+	creds := setupTestCredentials(t)
+
+	pparams := &conway.ConwayProtocolParameters{
+		MaxTxSize:        16384,
+		MaxBlockBodySize: 90112,
+		MaxBlockExUnits: lcommon.ExUnits{
+			Memory: 62000000,
+			Steps:  20000000000,
+		},
+	}
+	sentinelErr := errors.New("epoch resolution failed")
+	epochNonce := &mockEpochNonceProvider{
+		epoch:           10,
+		nonce:           make([]byte, 32),
+		epochForSlotErr: sentinelErr,
+	}
+	builder, err := NewDefaultBlockBuilder(BlockBuilderConfig{
+		Mempool:         &mockMempool{transactions: []MempoolTransaction{}},
+		PParamsProvider: &mockPParamsProvider{pparams: pparams},
+		ChainTip: &mockChainTip{
+			tip: ochainsync.Tip{
+				Point: ocommon.Point{
+					Slot: 1000,
+					Hash: make([]byte, 32),
+				},
+				BlockNumber: 100,
+			},
+		},
+		EpochNonce:  epochNonce,
+		Credentials: creds,
+	})
+	require.NoError(t, err)
+
+	_, _, err = builder.BuildBlock(1001, 0)
+	require.Error(t, err)
+	require.ErrorIs(t, err, sentinelErr)
+	require.Empty(t, epochNonce.requestedEpochs,
+		"EpochNonce must not be queried when EpochForSlot fails")
 }
 
 func TestBuildBlockUsesDingoProtocolMinor(t *testing.T) {
