@@ -20,6 +20,20 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 )
 
+// CreateDrep inserts a Drep row directly. See the MetadataStore
+// interface for the difference between this and ImportDrep. When txn
+// is nil a write transaction is opened, committed on success and
+// rolled back on error via Txn.Do; pass an existing write txn to
+// participate in a wider unit of work.
+func (d *Database) CreateDrep(txn *Txn, drep *models.Drep) error {
+	if txn != nil {
+		return d.metadata.CreateDrep(txn.Metadata(), drep)
+	}
+	return d.MetadataTxn(true).Do(func(t *Txn) error {
+		return d.metadata.CreateDrep(t.Metadata(), drep)
+	})
+}
+
 // RestoreDrepStateAtSlot reverts DRep state to the given slot. DReps
 // registered only after the slot are deleted; remaining DReps have their
 // anchor and active status restored.

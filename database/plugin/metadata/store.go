@@ -94,6 +94,23 @@ type MetadataStore interface {
 		types.Txn,
 	) error
 
+	// CreateDrep inserts a Drep row directly. Used by callers (e.g.
+	// fixture seeding from outside the plugin packages) that already
+	// have a fully-populated model and want a single-row insert without
+	// the registration-record side effects of ImportDrep.
+	CreateDrep(types.Txn, *models.Drep) error
+
+	// CreateAccount inserts an Account row directly. See CreateDrep
+	// for the rationale; this is the simple-insert sibling of
+	// ImportAccount.
+	CreateAccount(types.Txn, *models.Account) error
+
+	// CreateUtxo inserts a Utxo row directly. The normal block-
+	// application path uses AddUtxos with UtxoSlot inputs; this is
+	// the simple-insert variant for callers that already have a
+	// populated model.
+	CreateUtxo(types.Txn, *models.Utxo) error
+
 	// GetImportCheckpoint retrieves the checkpoint for a given
 	// import key (e.g., "{digest}:{slot}"). Returns nil if no
 	// checkpoint exists.

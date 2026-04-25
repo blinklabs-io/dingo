@@ -20,6 +20,20 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 )
 
+// CreateAccount inserts an Account row directly. See the MetadataStore
+// interface for the difference between this and ImportAccount. When txn
+// is nil a write transaction is opened, committed on success and rolled
+// back on error via Txn.Do; pass an existing write txn to participate
+// in a wider unit of work.
+func (d *Database) CreateAccount(txn *Txn, account *models.Account) error {
+	if txn != nil {
+		return d.metadata.CreateAccount(txn.Metadata(), account)
+	}
+	return d.MetadataTxn(true).Do(func(t *Txn) error {
+		return d.metadata.CreateAccount(t.Metadata(), account)
+	})
+}
+
 // ClearDanglingDRepDelegations applies the cardano-ledger Conway HARDFORK
 // STS rule for protocol major version 10 (Plomin, mainnet January 2025): any
 // account with a credential-backed DRep delegation (DrepType 0 or 1) whose

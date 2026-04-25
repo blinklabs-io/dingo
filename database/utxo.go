@@ -27,7 +27,20 @@ import (
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
+// ErrUtxoNotFound signals that the metadata row for a UTxO does not
+// exist (or was filtered out, e.g. by deleted_slot != 0 in the live
+// view). Callers may use errors.Is to detect a genuinely-absent row.
 var ErrUtxoNotFound = errors.New("utxo not found")
+
+// ErrUtxoCborUnavailable signals that the metadata row for a UTxO
+// exists but its CBOR could not be loaded from the blob store and
+// could not be recovered from any indexed block — typically because
+// the row was inserted directly (e.g. fixture seeding) without a
+// corresponding blob, or because the producing block is missing.
+// This is distinct from ErrUtxoNotFound: the row IS present in the
+// live UTxO set; only the on-the-wire bytes are unrecoverable. Callers
+// that only need indexed metadata fields can ignore this error.
+var ErrUtxoCborUnavailable = errors.New("utxo cbor unavailable")
 
 // deleteUtxoBlobs performs best-effort deletion of blob data for the given
 // [models.Utxo] entries. Metadata remains the authoritative source of truth;
@@ -180,7 +193,11 @@ func recoverUtxoCbor(
 		return nil, err
 	}
 	if block == nil {
-		return nil, ErrUtxoNotFound
+		// The producer block could not be located. This is a CBOR-
+		// recovery failure (the metadata row may still be present);
+		// use the dedicated sentinel so callers can distinguish it
+		// from a missing metadata row.
+		return nil, ErrUtxoCborUnavailable
 	}
 
 	// Decode the block once for both CBOR extraction and offset computation
@@ -319,6 +336,11 @@ func utxoCborFromDecodedBlock(
 	txId []byte,
 	outputIdx uint32,
 ) ([]byte, error) {
+	// These returns signal "the producing block was located but the
+	// requested output's CBOR cannot be reconstructed from it" — a
+	// CBOR-recovery failure, not a missing metadata row. Use the
+	// dedicated sentinel so callers can distinguish the two via
+	// errors.Is.
 	for _, tx := range decodedBlock.Transactions() {
 		if !bytes.Equal(tx.Hash().Bytes(), txId) {
 			continue
@@ -328,9 +350,9 @@ func utxoCborFromDecodedBlock(
 				return produced.Output.Cbor(), nil
 			}
 		}
-		return nil, ErrUtxoNotFound
+		return nil, ErrUtxoCborUnavailable
 	}
-	return nil, ErrUtxoNotFound
+	return nil, ErrUtxoCborUnavailable
 }
 
 func repairUtxoBlob(
@@ -388,6 +410,20 @@ func (d *Database) UtxoByRef(
 		return nil, err
 	}
 	return utxo, nil
+}
+
+// CreateUtxo inserts a Utxo row directly. The normal block-application
+// path uses AddUtxos with UtxoSlot inputs; this is the simple-insert
+// variant for callers that already have a populated model. When txn
+// is nil a write transaction is opened, committed on success and
+// rolled back on error via Txn.Do.
+func (d *Database) CreateUtxo(txn *Txn, utxo *models.Utxo) error {
+	if txn != nil {
+		return d.metadata.CreateUtxo(txn.Metadata(), utxo)
+	}
+	return d.MetadataTxn(true).Do(func(t *Txn) error {
+		return d.metadata.CreateUtxo(t.Metadata(), utxo)
+	})
 }
 
 // UtxoByRefIncludingSpent returns a Utxo by reference,

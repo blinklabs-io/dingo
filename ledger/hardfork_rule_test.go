@@ -25,7 +25,6 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
-	sqliteplugin "github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
 	"github.com/blinklabs-io/dingo/database/types"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
@@ -53,28 +52,25 @@ func seedPlominFixtures(t *testing.T, db *database.Database) plominFixtureKeys {
 		Dead: bytes.Repeat([]byte{0xA2}, 28),
 	}
 
-	store, ok := db.Metadata().(*sqliteplugin.MetadataStoreSqlite)
-	require.True(t, ok, "test DB must be backed by sqlite")
-
-	require.NoError(t, store.DB().Create(&models.Drep{
+	require.NoError(t, db.CreateDrep(nil, &models.Drep{
 		Credential: liveCred,
 		Active:     true,
 		AddedSlot:  10,
-	}).Error)
-	require.NoError(t, store.DB().Create(&models.Account{
+	}))
+	require.NoError(t, db.CreateAccount(nil, &models.Account{
 		StakingKey: keys.Live,
 		Drep:       liveCred,
 		DrepType:   models.DrepTypeAddrKeyHash,
 		Active:     true,
 		AddedSlot:  100,
-	}).Error)
-	require.NoError(t, store.DB().Create(&models.Account{
+	}))
+	require.NoError(t, db.CreateAccount(nil, &models.Account{
 		StakingKey: keys.Dead,
 		Drep:       deadCred,
 		DrepType:   models.DrepTypeAddrKeyHash,
 		Active:     true,
 		AddedSlot:  100,
-	}).Error)
+	}))
 	return keys
 }
 
@@ -150,9 +146,6 @@ func seedAllegraAvvmFixtures(
 	db *database.Database,
 ) allegraAvvmFixtureKeys {
 	t.Helper()
-	store, ok := db.Metadata().(*sqliteplugin.MetadataStoreSqlite)
-	require.True(t, ok, "test DB must be backed by sqlite")
-
 	keys := allegraAvvmFixtureKeys{
 		Redeem: [][]byte{
 			bytes.Repeat([]byte{0x01}, 32),
@@ -162,23 +155,23 @@ func seedAllegraAvvmFixtures(
 	}
 
 	for i, id := range keys.Redeem {
-		require.NoError(t, store.DB().Create(&models.Utxo{
+		require.NoError(t, db.CreateUtxo(nil, &models.Utxo{
 			TxId:             id,
 			OutputIdx:        0,
 			PaymentKey:       bytes.Repeat([]byte{0xA0 + byte(i)}, 28),
 			Amount:           types.Uint64(uint64(1_000_000 * (i + 1))),
 			AddedSlot:        100,
 			ByronAddressType: uint8(lcommon.ByronAddressTypeRedeem),
-		}).Error)
+		}))
 	}
-	require.NoError(t, store.DB().Create(&models.Utxo{
+	require.NoError(t, db.CreateUtxo(nil, &models.Utxo{
 		TxId:             keys.Pubkey,
 		OutputIdx:        0,
 		PaymentKey:       bytes.Repeat([]byte{0xB1}, 28),
 		Amount:           types.Uint64(5_555_555),
 		AddedSlot:        150,
 		ByronAddressType: uint8(lcommon.ByronAddressTypePubkey),
-	}).Error)
+	}))
 	return keys
 }
 
@@ -197,11 +190,25 @@ func newTestLSForHardForkRule(
 	}
 }
 
-// pv3 (Shelley→Allegra): every live AVVM UTxO is marked deleted at the
-// boundary slot; non-redeem UTxOs are preserved.
+// pv3 (Shelley→Allegra): every live AVVM UTxO is removed from the live
+// UTxO set. The dispatcher's contract with the database layer (exact
+// DeletedSlot bookkeeping, idempotency) is covered in the sqlite
+// plugin's allegra_avvm_test.go. Here we only verify that the dispatch
+// reached the rule, distinguishing "metadata row gone" (ErrUtxoNotFound)
+// from "metadata row present but CBOR unavailable"
+// (ErrUtxoCborUnavailable, which is what fixture rows return before the
+// rule runs because no blob backs them).
 func TestApplyIntraEraHardForkRule_Pv3_RemovesAvvm(t *testing.T) {
 	db := newTestDB(t)
 	keys := seedAllegraAvvmFixtures(t, db)
+
+	// Sanity-check the seed: pre-rule, fixture rows are present in
+	// metadata but have no CBOR backing.
+	for _, id := range keys.Redeem {
+		_, err := db.UtxoByRef(id, 0, nil)
+		require.ErrorIs(t, err, database.ErrUtxoCborUnavailable,
+			"pre-rule fixture row should be in live set with no CBOR")
+	}
 
 	ls := newTestLSForHardForkRule(t, db)
 	const boundarySlot uint64 = 4_492_800 // approx mainnet Allegra start
@@ -212,26 +219,20 @@ func TestApplyIntraEraHardForkRule_Pv3_RemovesAvvm(t *testing.T) {
 		208,          // newEpoch (log-only)
 	))
 
-	store := db.Metadata().(*sqliteplugin.MetadataStoreSqlite)
+	// Post-rule, the metadata rows are gone from the live set.
 	for _, id := range keys.Redeem {
-		var u models.Utxo
-		require.NoError(t, store.DB().
-			Where("tx_id = ?", id).First(&u).Error)
-		assert.Equal(t, boundarySlot, u.DeletedSlot,
-			"AVVM UTxO must be deleted at the Allegra boundary slot")
+		_, err := db.UtxoByRef(id, 0, nil)
+		require.ErrorIs(t, err, database.ErrUtxoNotFound,
+			"AVVM UTxO must be removed from the live UTxO set")
 	}
-
-	var pubkey models.Utxo
-	require.NoError(t, store.DB().
-		Where("tx_id = ?", keys.Pubkey).First(&pubkey).Error)
-	assert.Equal(t, uint64(0), pubkey.DeletedSlot,
-		"Byron pubkey UTxO must survive the pv3 rule")
 }
 
 // Only pv3 may touch AVVM UTxOs. Verifies that other majors — both the
 // no-op branches matching the Haskell rule's `otherwise = id` (pv2, pv99)
 // and majors with their own non-AVVM handlers (pv10/Plomin) — leave
-// redeem UTxOs untouched through this dispatch.
+// redeem UTxOs in the live set. The rows still exist in metadata so
+// UtxoByRef returns ErrUtxoCborUnavailable (not ErrUtxoNotFound)
+// because the fixture has no blob backing.
 func TestApplyIntraEraHardForkRule_OtherMajors_DoNotTouchAvvm(t *testing.T) {
 	db := newTestDB(t)
 	keys := seedAllegraAvvmFixtures(t, db)
@@ -243,12 +244,11 @@ func TestApplyIntraEraHardForkRule_OtherMajors_DoNotTouchAvvm(t *testing.T) {
 		))
 	}
 
-	store := db.Metadata().(*sqliteplugin.MetadataStoreSqlite)
 	for _, id := range keys.Redeem {
-		var u models.Utxo
-		require.NoError(t, store.DB().
-			Where("tx_id = ?", id).First(&u).Error)
-		assert.Equal(t, uint64(0), u.DeletedSlot,
-			"non-pv3 dispatch must not touch AVVM UTxOs")
+		_, err := db.UtxoByRef(id, 0, nil)
+		require.ErrorIs(t, err, database.ErrUtxoCborUnavailable,
+			"non-pv3 dispatch must leave AVVM rows in the live set")
+		require.NotErrorIs(t, err, database.ErrUtxoNotFound,
+			"non-pv3 dispatch must not remove AVVM UTxOs")
 	}
 }
