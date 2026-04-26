@@ -79,6 +79,10 @@ func (b *Blockfrost) Start(
 		b.handleLatestBlockTxs,
 	)
 	mux.HandleFunc(
+		"GET /api/v0/blocks/{hash_or_number}",
+		b.handleBlock,
+	)
+	mux.HandleFunc(
 		"GET /api/v0/epochs/latest",
 		b.handleLatestEpoch,
 	)
@@ -93,6 +97,14 @@ func (b *Blockfrost) Start(
 	mux.HandleFunc(
 		"GET /api/v0/network",
 		b.handleNetwork,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/network/eras",
+		b.handleNetworkEras,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/genesis",
+		b.handleGenesis,
 	)
 	mux.HandleFunc(
 		"GET /api/v0/assets/{asset}",
