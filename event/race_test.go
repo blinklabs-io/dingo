@@ -146,10 +146,13 @@ func TestStopWaitsForInFlightPublish(t *testing.T) {
 	}
 
 	stopDone := make(chan struct{})
+	stopStarted := make(chan struct{})
 	go func() {
+		close(stopStarted)
 		defer close(stopDone)
 		eb.Stop()
 	}()
+	<-stopStarted
 
 	select {
 	case <-stopDone:
