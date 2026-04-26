@@ -439,6 +439,10 @@ func (ls *LedgerState) queryShelley(
 		return ls.queryShelleyUtxoByAddress(q.Addrs)
 	case *olocalstatequery.ShelleyUtxoByTxinQuery:
 		return ls.queryShelleyUtxoByTxIn(q.TxIns)
+	case *olocalstatequery.ShelleyFilteredDelegationAndRewardAccountsQuery:
+		return ls.queryShelleyFilteredDelegationAndRewardAccounts(
+			q.Creds.Items(),
+		)
 	// TODO (#394)
 	/*
 		case *olocalstatequery.ShelleyLedgerTipQuery:
@@ -448,7 +452,6 @@ func (ls *LedgerState) queryShelley(
 		case *olocalstatequery.ShelleyUtxoWholeQuery:
 		case *olocalstatequery.ShelleyDebugEpochStateQuery:
 		case *olocalstatequery.ShelleyCborQuery:
-		case *olocalstatequery.ShelleyFilteredDelegationAndRewardAccountsQuery:
 		case *olocalstatequery.ShelleyDebugNewEpochStateQuery:
 		case *olocalstatequery.ShelleyDebugChainDepStateQuery:
 		case *olocalstatequery.ShelleyRewardProvenanceQuery:
@@ -493,6 +496,48 @@ func (ls *LedgerState) queryShelleyUtxoByAddress(
 		ret[utxoId] = txOut
 	}
 	return []any{ret}, nil
+}
+
+// queryShelleyFilteredDelegationAndRewardAccounts answers
+// GetFilteredDelegationsAndRewardAccounts: given a set of stake credentials,
+// return their current pool delegations and reward balances.
+//
+// Wire shape: array(1)[array(2)[
+//
+//	map[StakeCredential]PoolId,    // delegations: only registered + delegated
+//	map[StakeCredential]uint64,    // rewards: every registered cred from input
+//
+// ]]
+//
+// Semantics (matches Haskell ledger): only registered (active) accounts
+// appear in either map. Unknown or deregistered credentials are silently
+// filtered out. The delegations map only contains accounts whose `Pool`
+// is currently set; an account that is registered but undelegated will
+// appear in the rewards map only.
+//
+// Stake credential lookup is hash-only: dingo's Account.StakingKey is the
+// 28-byte Blake2b224 credential hash and does not carry the key/script
+// discriminator. Collisions across the two tag spaces are cryptographically
+// negligible. TODO(#394): refine if Account grows tag-aware storage.
+func (ls *LedgerState) queryShelleyFilteredDelegationAndRewardAccounts(
+	creds []olocalstatequery.StakeCredential,
+) (any, error) {
+	delegations := make(map[olocalstatequery.StakeCredential]ledger.Blake2b224)
+	rewards := make(map[olocalstatequery.StakeCredential]uint64)
+	for _, cred := range creds {
+		account, err := ls.db.GetAccount(cred.Bytes[:], false, nil)
+		if err != nil {
+			if errors.Is(err, models.ErrAccountNotFound) {
+				continue
+			}
+			return nil, err
+		}
+		rewards[cred] = uint64(account.Reward)
+		if len(account.Pool) > 0 {
+			delegations[cred] = ledger.NewBlake2b224(account.Pool)
+		}
+	}
+	return []any{[]any{delegations, rewards}}, nil
 }
 
 func (ls *LedgerState) queryShelleyUtxoByTxIn(
