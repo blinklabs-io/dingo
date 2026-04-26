@@ -18,6 +18,7 @@ package models
 // query results for a stake account.
 type AccountDelegationHistoryRow struct {
 	AddedSlot   uint64
+	BlockIndex  uint32
 	CertIndex   uint32
 	TxHash      []byte
 	PoolKeyHash []byte
@@ -27,6 +28,7 @@ type AccountDelegationHistoryRow struct {
 // history query results for a stake account.
 type AccountRegistrationHistoryRow struct {
 	AddedSlot uint64
+	BlockIndex uint32
 	CertIndex uint32
 	TxHash    []byte
 	Action    string

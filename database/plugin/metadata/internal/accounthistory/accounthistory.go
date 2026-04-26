@@ -38,9 +38,9 @@ func QueryDelegationHistory(
 
 	query, args := delegationHistoryUnionQuery(db, stakingKey)
 	if strings.EqualFold(order, "asc") {
-		query += " ORDER BY added_slot ASC, cert_index ASC, tx_hash ASC"
+		query += " ORDER BY added_slot ASC, block_index ASC, cert_index ASC, tx_hash ASC"
 	} else {
-		query += " ORDER BY added_slot DESC, cert_index DESC, tx_hash DESC"
+		query += " ORDER BY added_slot DESC, block_index DESC, cert_index DESC, tx_hash DESC"
 	}
 	if limit > 0 {
 		query += " LIMIT ?"
@@ -89,6 +89,7 @@ func delegationHistoryUnionQuery(
 	for _, table := range tables {
 		parts = append(parts, fmt.Sprintf(
 			`SELECT %[1]s.added_slot AS added_slot,
+				tx.block_index AS block_index,
 				certs.cert_index AS cert_index,
 				tx.hash AS tx_hash,
 				%[1]s.pool_key_hash AS pool_key_hash
@@ -124,9 +125,9 @@ func QueryRegistrationHistory(
 
 	query, args := registrationHistoryUnionQuery(db, stakingKey)
 	if strings.EqualFold(order, "asc") {
-		query += " ORDER BY added_slot ASC, cert_index ASC, tx_hash ASC, action ASC"
+		query += " ORDER BY added_slot ASC, block_index ASC, cert_index ASC, tx_hash ASC, action ASC"
 	} else {
-		query += " ORDER BY added_slot DESC, cert_index DESC, tx_hash DESC, action DESC"
+		query += " ORDER BY added_slot DESC, block_index DESC, cert_index DESC, tx_hash DESC, action DESC"
 	}
 	if limit > 0 {
 		query += " LIMIT ?"
@@ -210,6 +211,7 @@ func registrationHistoryUnionQuery(
 	for _, source := range sources {
 		parts = append(parts, fmt.Sprintf(
 			`SELECT %[1]s.added_slot AS added_slot,
+				tx.block_index AS block_index,
 				certs.cert_index AS cert_index,
 				tx.hash AS tx_hash,
 				? AS action
@@ -289,6 +291,10 @@ func CompareDelegationRows(
 		return 1
 	case a.AddedSlot > b.AddedSlot:
 		return -1
+	case a.BlockIndex < b.BlockIndex:
+		return 1
+	case a.BlockIndex > b.BlockIndex:
+		return -1
 	case a.CertIndex < b.CertIndex:
 		return 1
 	case a.CertIndex > b.CertIndex:
@@ -309,6 +315,10 @@ func CompareRegistrationRows(
 	case a.AddedSlot < b.AddedSlot:
 		return 1
 	case a.AddedSlot > b.AddedSlot:
+		return -1
+	case a.BlockIndex < b.BlockIndex:
+		return 1
+	case a.BlockIndex > b.BlockIndex:
 		return -1
 	case a.CertIndex < b.CertIndex:
 		return 1
