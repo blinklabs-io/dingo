@@ -15,11 +15,13 @@
 package ledger
 
 import (
+	"errors"
 	"iter"
 	"math"
 	"math/big"
 	"testing"
 
+	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -771,7 +773,13 @@ func TestValidateTxEra(t *testing.T) {
 		txEra     int
 		ledgerEra uint
 		expectErr bool
-		errMsg    string
+		// On expectErr=true, both names must appear in the typed
+		// *gledger.EraMismatch returned. ValidateTxEra now returns a
+		// typed wire-encodable error rather than fmt.Errorf — the
+		// Error() string is fixed by the wire-format contract, so the
+		// regression-stable assertion is on the typed fields.
+		wantOtherEraName  string
+		wantLedgerEraName string
 	}{
 		{
 			name:      "same era passes",
@@ -786,18 +794,20 @@ func TestValidateTxEra(t *testing.T) {
 			expectErr: false,
 		},
 		{
-			name:      "two eras back fails",
-			txEra:     int(eras.AlonzoEraDesc.Id),
-			ledgerEra: eras.ConwayEraDesc.Id,
-			expectErr: true,
-			errMsg:    "not compatible",
+			name:              "two eras back fails",
+			txEra:             int(eras.AlonzoEraDesc.Id),
+			ledgerEra:         eras.ConwayEraDesc.Id,
+			expectErr:         true,
+			wantOtherEraName:  "Alonzo",
+			wantLedgerEraName: "Conway",
 		},
 		{
-			name:      "future era fails",
-			txEra:     int(eras.ConwayEraDesc.Id),
-			ledgerEra: eras.BabbageEraDesc.Id,
-			expectErr: true,
-			errMsg:    "not compatible",
+			name:              "future era fails",
+			txEra:             int(eras.ConwayEraDesc.Id),
+			ledgerEra:         eras.BabbageEraDesc.Id,
+			expectErr:         true,
+			wantOtherEraName:  "Conway",
+			wantLedgerEraName: "Babbage",
 		},
 	}
 	for _, tc := range tests {
@@ -809,11 +819,11 @@ func TestValidateTxEra(t *testing.T) {
 			err := ValidateTxEra(tx, tc.ledgerEra)
 			if tc.expectErr {
 				require.Error(t, err)
-				assert.Contains(
-					t,
-					err.Error(),
-					tc.errMsg,
-				)
+				var em *gledger.EraMismatch
+				require.True(t, errors.As(err, &em),
+					"expected typed *gledger.EraMismatch, got %T", err)
+				assert.Equal(t, tc.wantOtherEraName, em.OtherEra.Name)
+				assert.Equal(t, tc.wantLedgerEraName, em.LedgerEra.Name)
 			} else {
 				require.NoError(t, err)
 			}

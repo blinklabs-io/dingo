@@ -15,7 +15,6 @@
 package ledger
 
 import (
-	"fmt"
 	"math/big"
 
 	"github.com/blinklabs-io/dingo/ledger/eras"
@@ -124,30 +123,19 @@ func IsCompatibleEra(txEraId, ledgerEraId uint) bool {
 }
 
 // ValidateTxEra checks that a transaction's era is
-// compatible with the current ledger era. Returns an
-// error if the transaction era is not the current era
-// or the immediately previous era.
+// compatible with the current ledger era. Returns
+// *gouroboros/ledger.EraMismatch on mismatch — a typed error whose
+// MarshalCBOR matches the Haskell HardForkApplyTxErrWrongEra wire
+// format, so when surfaced through localtxsubmission's SubmitTxFunc
+// it reaches peers as canonical CBOR rather than an unstructured
+// string.
 func ValidateTxEra(
 	tx lcommon.Transaction,
 	ledgerEraId uint,
 ) error {
 	txEraId := uint(tx.Type()) // #nosec G115 -- era IDs are non-negative
 	if !eras.IsCompatibleEra(txEraId, ledgerEraId) {
-		txEra := eras.GetEraById(txEraId)
-		ledgerEra := eras.GetEraById(ledgerEraId)
-		txEraName := fmt.Sprintf("unknown(%d)", txEraId)
-		ledgerEraName := fmt.Sprintf("unknown(%d)", ledgerEraId)
-		if txEra != nil {
-			txEraName = txEra.Name
-		}
-		if ledgerEra != nil {
-			ledgerEraName = ledgerEra.Name
-		}
-		return fmt.Errorf(
-			"transaction era %s is not compatible with ledger era %s",
-			txEraName,
-			ledgerEraName,
-		)
+		return newEraMismatchError(txEraId, ledgerEraId)
 	}
 	return nil
 }
