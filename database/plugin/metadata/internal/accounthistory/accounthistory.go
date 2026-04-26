@@ -17,7 +17,6 @@ package accounthistory
 import (
 	"bytes"
 	"fmt"
-	"slices"
 	"strings"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -114,43 +113,32 @@ func delegationHistoryUnionQuery(
 func QueryRegistrationHistory(
 	db *gorm.DB,
 	stakingKey []byte,
+	limit int,
+	offset int,
+	order string,
 ) ([]models.AccountRegistrationHistoryRow, error) {
 	ret := make([]models.AccountRegistrationHistoryRow, 0)
 	if len(stakingKey) == 0 {
 		return ret, nil
 	}
 
-	for table, action := range RegistrationHistoryTables() {
-		var tmp []models.AccountRegistrationHistoryRow
-		if err := db.Table(table).
-			Select(
-				table+".added_slot, certs.cert_index, tx.hash AS tx_hash",
-			).
-			Joins(
-				"INNER JOIN certs ON certs.certificate_id = "+table+".id",
-			).
-			Joins(
-				transactionJoinClause(db),
-			).
-			Where(
-				table+".staking_key = ? AND certs.cert_type IN ?",
-				stakingKey,
-				RegistrationTableCertTypes(table),
-			).
-			Scan(&tmp).Error; err != nil {
-			return nil, fmt.Errorf(
-				"get account registration history from %s: %w",
-				table,
-				err,
-			)
-		}
-		for i := range tmp {
-			tmp[i].Action = action
-		}
-		ret = append(ret, tmp...)
+	query, args := registrationHistoryUnionQuery(db, stakingKey)
+	if strings.EqualFold(order, "asc") {
+		query += " ORDER BY added_slot ASC, cert_index ASC, tx_hash ASC, action ASC"
+	} else {
+		query += " ORDER BY added_slot DESC, cert_index DESC, tx_hash DESC, action DESC"
 	}
-
-	slices.SortFunc(ret, CompareRegistrationRows)
+	if limit > 0 {
+		query += " LIMIT ?"
+		args = append(args, limit)
+	}
+	if offset > 0 {
+		query += " OFFSET ?"
+		args = append(args, offset)
+	}
+	if err := db.Raw(query, args...).Scan(&ret).Error; err != nil {
+		return nil, fmt.Errorf("get account registration history: %w", err)
+	}
 	return ret, nil
 }
 
@@ -190,15 +178,70 @@ func DelegationTableCertTypes(table string) []uint {
 	}
 }
 
-func RegistrationHistoryTables() map[string]string {
-	return map[string]string{
-		"deregistration":                     "deregistered",
-		"registration":                       "registered",
-		"stake_deregistration":               "deregistered",
-		"stake_registration":                 "registered",
-		"stake_registration_delegation":      "registered",
-		"stake_vote_registration_delegation": "registered",
-		"vote_registration_delegation":       "registered",
+func CountRegistrationHistory(
+	db *gorm.DB,
+	stakingKey []byte,
+) (int, error) {
+	if len(stakingKey) == 0 {
+		return 0, nil
+	}
+	query, args := registrationHistoryUnionQuery(db, stakingKey)
+	var count int64
+	if err := db.Raw(
+		"SELECT COUNT(*) AS count FROM ("+query+") AS registration_history",
+		args...,
+	).Scan(&count).Error; err != nil {
+		return 0, fmt.Errorf("count account registration history: %w", err)
+	}
+	return int(count), nil
+}
+
+type registrationHistorySource struct {
+	table  string
+	action string
+}
+
+func registrationHistoryUnionQuery(
+	db *gorm.DB,
+	stakingKey []byte,
+) (string, []any) {
+	sources := registrationHistorySources()
+	parts := make([]string, 0, len(sources))
+	args := make([]any, 0, len(sources)*3)
+	for _, source := range sources {
+		parts = append(parts, fmt.Sprintf(
+			`SELECT %[1]s.added_slot AS added_slot,
+				certs.cert_index AS cert_index,
+				tx.hash AS tx_hash,
+				? AS action
+			FROM %[1]s
+			INNER JOIN certs
+				ON certs.certificate_id = %[1]s.id
+				AND certs.cert_type = ?
+			%[2]s
+			WHERE %[1]s.staking_key = ?`,
+			source.table,
+			transactionJoinClause(db),
+		))
+		args = append(
+			args,
+			source.action,
+			RegistrationTableCertTypes(source.table)[0],
+			stakingKey,
+		)
+	}
+	return strings.Join(parts, " UNION ALL "), args
+}
+
+func registrationHistorySources() []registrationHistorySource {
+	return []registrationHistorySource{
+		{table: "deregistration", action: "deregistered"},
+		{table: "registration", action: "registered"},
+		{table: "stake_deregistration", action: "deregistered"},
+		{table: "stake_registration", action: "registered"},
+		{table: "stake_registration_delegation", action: "registered"},
+		{table: "stake_vote_registration_delegation", action: "registered"},
+		{table: "vote_registration_delegation", action: "registered"},
 	}
 }
 

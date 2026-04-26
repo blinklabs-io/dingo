@@ -492,6 +492,9 @@ func (d *MetadataStoreSqlite) CountAccountDelegationHistory(
 // GetAccountRegistrationHistory returns registration history rows for a staking key.
 func (d *MetadataStoreSqlite) GetAccountRegistrationHistory(
 	stakingKey []byte,
+	limit int,
+	offset int,
+	order string,
 	txn types.Txn,
 ) ([]models.AccountRegistrationHistoryRow, error) {
 	db, err := d.resolveReadDB(txn)
@@ -504,6 +507,9 @@ func (d *MetadataStoreSqlite) GetAccountRegistrationHistory(
 	rows, err := accounthistory.QueryRegistrationHistory(
 		db,
 		stakingKey,
+		limit,
+		offset,
+		order,
 	)
 	if err != nil {
 		return nil, fmt.Errorf(
@@ -512,6 +518,29 @@ func (d *MetadataStoreSqlite) GetAccountRegistrationHistory(
 		)
 	}
 	return rows, nil
+}
+
+// CountAccountRegistrationHistory returns the total number of
+// registration history rows for a staking key.
+func (d *MetadataStoreSqlite) CountAccountRegistrationHistory(
+	stakingKey []byte,
+	txn types.Txn,
+) (int, error) {
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return 0, fmt.Errorf(
+			"resolve read DB for count account registration history: %w",
+			err,
+		)
+	}
+	count, err := accounthistory.CountRegistrationHistory(db, stakingKey)
+	if err != nil {
+		return 0, fmt.Errorf(
+			"count account registration history: %w",
+			err,
+		)
+	}
+	return count, nil
 }
 
 // GetTransactionsByMetadataLabel returns transactions containing a metadata

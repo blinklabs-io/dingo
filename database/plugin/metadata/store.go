@@ -400,8 +400,18 @@ type MetadataStore interface {
 	// GetAccountRegistrationHistory retrieves registration history rows for a staking key.
 	GetAccountRegistrationHistory(
 		[]byte, // stakingKey
+		int, // limit
+		int, // offset
+		string, // order (asc|desc)
 		types.Txn,
 	) ([]models.AccountRegistrationHistoryRow, error)
+
+	// CountAccountRegistrationHistory retrieves the total count of
+	// registration history rows for a staking key.
+	CountAccountRegistrationHistory(
+		[]byte, // stakingKey
+		types.Txn,
+	) (int, error)
 
 	// GetTransactionsByMetadataLabel retrieves transactions that include
 	// metadata for the given label.

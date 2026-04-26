@@ -74,6 +74,9 @@ func (d *Database) CountAccountDelegationHistory(
 // GetAccountRegistrationHistory returns registration history rows for a staking key.
 func (d *Database) GetAccountRegistrationHistory(
 	stakeKey []byte,
+	limit int,
+	offset int,
+	order string,
 	txn *Txn,
 ) ([]models.AccountRegistrationHistoryRow, error) {
 	if txn == nil {
@@ -82,6 +85,9 @@ func (d *Database) GetAccountRegistrationHistory(
 	}
 	rows, err := d.metadata.GetAccountRegistrationHistory(
 		stakeKey,
+		limit,
+		offset,
+		order,
 		txn.Metadata(),
 	)
 	if err != nil {
@@ -91,4 +97,27 @@ func (d *Database) GetAccountRegistrationHistory(
 		)
 	}
 	return rows, nil
+}
+
+// CountAccountRegistrationHistory returns the total number of
+// registration history rows for a staking key.
+func (d *Database) CountAccountRegistrationHistory(
+	stakeKey []byte,
+	txn *Txn,
+) (int, error) {
+	if txn == nil {
+		txn = d.Transaction(false)
+		defer txn.Release()
+	}
+	count, err := d.metadata.CountAccountRegistrationHistory(
+		stakeKey,
+		txn.Metadata(),
+	)
+	if err != nil {
+		return 0, fmt.Errorf(
+			"count account registration history: %w",
+			err,
+		)
+	}
+	return count, nil
 }
