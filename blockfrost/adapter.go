@@ -989,22 +989,24 @@ func (a *NodeAdapter) Account(
 	}
 
 	var activeEpoch *int64
-	epoch, err := a.ledgerState.SlotToEpoch(account.AddedSlot)
-	if err != nil {
-		return AccountInfo{}, fmt.Errorf(
-			"get account active epoch for slot %d: %w",
-			account.AddedSlot,
-			err,
+	if account.Active {
+		epoch, err := a.ledgerState.SlotToEpoch(account.AddedSlot)
+		if err != nil {
+			return AccountInfo{}, fmt.Errorf(
+				"get account active epoch for slot %d: %w",
+				account.AddedSlot,
+				err,
+			)
+		}
+		epochID, err := uint64ToInt64(
+			epoch.EpochId,
+			"account active epoch",
 		)
+		if err != nil {
+			return AccountInfo{}, err
+		}
+		activeEpoch = &epochID
 	}
-	epochID, err := uint64ToInt64(
-		epoch.EpochId,
-		"account active epoch",
-	)
-	if err != nil {
-		return AccountInfo{}, err
-	}
-	activeEpoch = &epochID
 
 	var poolID *string
 	if account.Active && len(account.Pool) > 0 {
