@@ -94,7 +94,7 @@ func delegationHistoryUnionQuery(
 				%[1]s.pool_key_hash AS pool_key_hash
 			FROM %[1]s
 			INNER JOIN certs
-				ON certs.certificate_id = %[1]s.id
+				ON certs.id = %[1]s.certificate_id
 				AND certs.cert_type = ?
 			%[2]s
 			WHERE %[1]s.staking_key = ?`,
@@ -215,7 +215,7 @@ func registrationHistoryUnionQuery(
 				? AS action
 			FROM %[1]s
 			INNER JOIN certs
-				ON certs.certificate_id = %[1]s.id
+				ON certs.id = %[1]s.certificate_id
 				AND certs.cert_type = ?
 			%[2]s
 			WHERE %[1]s.staking_key = ?`,
