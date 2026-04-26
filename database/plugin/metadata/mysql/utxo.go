@@ -205,6 +205,35 @@ func (d *MetadataStoreMysql) GetUtxosByAddress(
 	return ret, nil
 }
 
+// GetControlledAmountByStakingKey returns the sum of live UTxO amounts
+// controlled by the given staking key.
+func (d *MetadataStoreMysql) GetControlledAmountByStakingKey(
+	stakingKey []byte,
+	txn types.Txn,
+) (uint64, error) {
+	if len(stakingKey) == 0 {
+		return 0, nil
+	}
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return 0, fmt.Errorf(
+			"resolve DB for controlled amount by staking key: %w",
+			err,
+		)
+	}
+	var total uint64
+	if err := db.Model(&models.Utxo{}).
+		Where("staking_key = ? AND deleted_slot = 0", stakingKey).
+		Select("COALESCE(SUM(amount), 0)").
+		Scan(&total).Error; err != nil {
+		return 0, fmt.Errorf(
+			"get controlled amount by staking key: %w",
+			err,
+		)
+	}
+	return total, nil
+}
+
 // GetUtxosByAddressWithOrdering returns UTxOs matching q (OR of addresses, optional asset).
 func (d *MetadataStoreMysql) GetUtxosByAddressWithOrdering(
 	q *models.UtxoWithOrderingQuery,

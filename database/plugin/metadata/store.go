@@ -584,6 +584,10 @@ type MetadataStore interface {
 	// GetUtxosByAddress retrieves all UTxOs for a given address.
 	GetUtxosByAddress(ledger.Address, types.Txn) ([]models.Utxo, error)
 
+	// GetControlledAmountByStakingKey returns the sum of live UTxO
+	// amounts controlled by the given staking key.
+	GetControlledAmountByStakingKey([]byte, types.Txn) (uint64, error)
+
 	// GetUtxosByAddressWithOrdering runs q against live UTxOs with ordering metadata.
 	// See models.UtxoWithOrderingQuery. q must be non-nil.
 	GetUtxosByAddressWithOrdering(

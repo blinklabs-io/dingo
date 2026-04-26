@@ -967,7 +967,7 @@ func (a *NodeAdapter) PoolsExtended() (
 func (a *NodeAdapter) Account(
 	stakeAddress string,
 ) (AccountInfo, error) {
-	stakeAddr, stakeKey, err := parseStakeAddress(
+	_, stakeKey, err := parseStakeAddress(
 		stakeAddress,
 	)
 	if err != nil {
@@ -979,49 +979,13 @@ func (a *NodeAdapter) Account(
 	if err != nil {
 		return AccountInfo{}, err
 	}
-	networkID, err := uintToUint8(
-		stakeAddr.NetworkId(),
-		"stake address network id",
-	)
-	if err != nil {
-		return AccountInfo{}, err
-	}
-
-	rows, err := a.ledgerState.Database().
-		GetAddressesByStakingKey(stakeKey, 0, 0, PaginationOrderAsc, nil)
+	controlledAmount, err := a.ledgerState.Database().
+		GetControlledAmountByStakingKey(stakeKey, nil)
 	if err != nil {
 		return AccountInfo{}, fmt.Errorf(
-			"get associated addresses: %w",
+			"get controlled amount: %w",
 			err,
 		)
-	}
-	var controlledAmount uint64
-	for _, row := range rows {
-		if len(row.PaymentKey) == 0 {
-			continue
-		}
-		addr, err := lcommon.NewAddressFromParts(
-			lcommon.AddressTypeKeyKey,
-			networkID,
-			row.PaymentKey,
-			stakeKey,
-		)
-		if err != nil {
-			return AccountInfo{}, fmt.Errorf(
-				"build associated address: %w",
-				err,
-			)
-		}
-		utxos, err := a.ledgerState.UtxosByAddress(addr)
-		if err != nil {
-			return AccountInfo{}, fmt.Errorf(
-				"get controlled utxos: %w",
-				err,
-			)
-		}
-		for _, utxo := range utxos {
-			controlledAmount += uint64(utxo.Amount)
-		}
 	}
 
 	var activeEpoch *int64
@@ -1262,6 +1226,10 @@ func (a *NodeAdapter) AccountRewardHistory(
 		GetAccount(stakeKey, true, nil); err != nil {
 		return nil, 0, err
 	}
+	// TODO(#1875): Implement reward history once Dingo persists
+	// per-account, per-epoch reward records. This endpoint remains
+	// stubbed in this PR because the backing reward-history storage
+	// and rollback-safe ledger/database plumbing do not exist yet.
 	return []AccountRewardHistoryInfo{}, 0, nil
 }
 

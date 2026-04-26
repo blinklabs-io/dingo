@@ -518,6 +518,30 @@ func (d *Database) UtxosByAddress(
 	return utxos, nil
 }
 
+// GetControlledAmountByStakingKey returns the sum of live UTxO amounts
+// controlled by the given staking key.
+func (d *Database) GetControlledAmountByStakingKey(
+	stakingKey []byte,
+	txn *Txn,
+) (uint64, error) {
+	if txn == nil {
+		txn = d.Transaction(false)
+		defer txn.Release()
+	}
+	total, err := d.metadata.GetControlledAmountByStakingKey(
+		stakingKey,
+		txn.Metadata(),
+	)
+	if err != nil {
+		return 0, fmt.Errorf(
+			"get controlled amount by staking key=%x: %w",
+			stakingKey,
+			err,
+		)
+	}
+	return total, nil
+}
+
 func (d *Database) UtxosByAddressWithOrdering(
 	q *models.UtxoWithOrderingQuery,
 	txn *Txn,
