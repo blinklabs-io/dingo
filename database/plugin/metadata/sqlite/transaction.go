@@ -438,6 +438,9 @@ func addressOrderClause(order string) string {
 // GetAccountDelegationHistory returns delegation history rows for a staking key.
 func (d *MetadataStoreSqlite) GetAccountDelegationHistory(
 	stakingKey []byte,
+	limit int,
+	offset int,
+	order string,
 	txn types.Txn,
 ) ([]models.AccountDelegationHistoryRow, error) {
 	db, err := d.resolveReadDB(txn)
@@ -450,6 +453,9 @@ func (d *MetadataStoreSqlite) GetAccountDelegationHistory(
 	rows, err := accounthistory.QueryDelegationHistory(
 		db,
 		stakingKey,
+		limit,
+		offset,
+		order,
 	)
 	if err != nil {
 		return nil, fmt.Errorf(
@@ -458,6 +464,29 @@ func (d *MetadataStoreSqlite) GetAccountDelegationHistory(
 		)
 	}
 	return rows, nil
+}
+
+// CountAccountDelegationHistory returns the total number of
+// delegation history rows for a staking key.
+func (d *MetadataStoreSqlite) CountAccountDelegationHistory(
+	stakingKey []byte,
+	txn types.Txn,
+) (int, error) {
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return 0, fmt.Errorf(
+			"resolve read DB for count account delegation history: %w",
+			err,
+		)
+	}
+	count, err := accounthistory.CountDelegationHistory(db, stakingKey)
+	if err != nil {
+		return 0, fmt.Errorf(
+			"count account delegation history: %w",
+			err,
+		)
+	}
+	return count, nil
 }
 
 // GetAccountRegistrationHistory returns registration history rows for a staking key.

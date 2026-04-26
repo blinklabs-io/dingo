@@ -1119,8 +1119,26 @@ func (a *NodeAdapter) AccountDelegationHistory(
 		GetAccount(stakeKey, true, nil); err != nil {
 		return nil, 0, err
 	}
+	offset := (params.Page - 1) * params.Count
+	total, err := a.ledgerState.Database().
+		CountAccountDelegationHistory(stakeKey, nil)
+	if err != nil {
+		return nil, 0, fmt.Errorf(
+			"count account delegation history: %w",
+			err,
+		)
+	}
+	if offset >= total {
+		return []AccountDelegationHistoryInfo{}, total, nil
+	}
 	rows, err := a.ledgerState.Database().
-		GetAccountDelegationHistory(stakeKey, nil)
+		GetAccountDelegationHistory(
+			stakeKey,
+			params.Count,
+			offset,
+			params.Order,
+			nil,
+		)
 	if err != nil {
 		return nil, 0, fmt.Errorf(
 			"get account delegation history: %w",
@@ -1150,17 +1168,7 @@ func (a *NodeAdapter) AccountDelegationHistory(
 			).String(),
 		})
 	}
-
-	if params.Order == PaginationOrderAsc {
-		slices.Reverse(ret)
-	}
-	total := len(ret)
-	start := (params.Page - 1) * params.Count
-	if start >= total {
-		return []AccountDelegationHistoryInfo{}, total, nil
-	}
-	end := min(start+params.Count, total)
-	return ret[start:end], total, nil
+	return ret, total, nil
 }
 
 // AccountRegistrationHistory returns registration

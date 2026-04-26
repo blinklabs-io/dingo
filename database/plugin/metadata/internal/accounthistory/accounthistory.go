@@ -28,48 +28,87 @@ import (
 func QueryDelegationHistory(
 	db *gorm.DB,
 	stakingKey []byte,
+	limit int,
+	offset int,
+	order string,
 ) ([]models.AccountDelegationHistoryRow, error) {
 	ret := make([]models.AccountDelegationHistoryRow, 0)
 	if len(stakingKey) == 0 {
 		return ret, nil
 	}
 
+	query, args := delegationHistoryUnionQuery(db, stakingKey)
+	if strings.EqualFold(order, "asc") {
+		query += " ORDER BY added_slot ASC, cert_index ASC, tx_hash ASC"
+	} else {
+		query += " ORDER BY added_slot DESC, cert_index DESC, tx_hash DESC"
+	}
+	if limit > 0 {
+		query += " LIMIT ?"
+		args = append(args, limit)
+	}
+	if offset > 0 {
+		query += " OFFSET ?"
+		args = append(args, offset)
+	}
+	if err := db.Raw(query, args...).Scan(&ret).Error; err != nil {
+		return nil, fmt.Errorf("get account delegation history: %w", err)
+	}
+	return ret, nil
+}
+
+func CountDelegationHistory(
+	db *gorm.DB,
+	stakingKey []byte,
+) (int, error) {
+	if len(stakingKey) == 0 {
+		return 0, nil
+	}
+	query, args := delegationHistoryUnionQuery(db, stakingKey)
+	var count int64
+	if err := db.Raw(
+		"SELECT COUNT(*) AS count FROM ("+query+") AS delegation_history",
+		args...,
+	).Scan(&count).Error; err != nil {
+		return 0, fmt.Errorf("count account delegation history: %w", err)
+	}
+	return int(count), nil
+}
+
+func delegationHistoryUnionQuery(
+	db *gorm.DB,
+	stakingKey []byte,
+) (string, []any) {
 	tables := []string{
 		"stake_delegation",
 		"stake_registration_delegation",
 		"stake_vote_delegation",
 		"stake_vote_registration_delegation",
 	}
+	parts := make([]string, 0, len(tables))
+	args := make([]any, 0, len(tables)*2)
 	for _, table := range tables {
-		var tmp []models.AccountDelegationHistoryRow
-		if err := db.Table(table).
-			Select(
-				table+".added_slot, certs.cert_index, tx.hash AS tx_hash, "+
-					table+".pool_key_hash",
-			).
-			Joins(
-				"INNER JOIN certs ON certs.certificate_id = "+table+".id",
-			).
-			Joins(
-				transactionJoinClause(db),
-			).
-			Where(
-				table+".staking_key = ? AND certs.cert_type IN ?",
-				stakingKey,
-				DelegationTableCertTypes(table),
-			).
-			Scan(&tmp).Error; err != nil {
-			return nil, fmt.Errorf(
-				"get account delegation history from %s: %w",
-				table,
-				err,
-			)
-		}
-		ret = append(ret, tmp...)
+		parts = append(parts, fmt.Sprintf(
+			`SELECT %[1]s.added_slot AS added_slot,
+				certs.cert_index AS cert_index,
+				tx.hash AS tx_hash,
+				%[1]s.pool_key_hash AS pool_key_hash
+			FROM %[1]s
+			INNER JOIN certs
+				ON certs.certificate_id = %[1]s.id
+				AND certs.cert_type = ?
+			%[2]s
+			WHERE %[1]s.staking_key = ?`,
+			table,
+			transactionJoinClause(db),
+		))
+		args = append(
+			args,
+			DelegationTableCertTypes(table)[0],
+			stakingKey,
+		)
 	}
-
-	slices.SortFunc(ret, CompareDelegationRows)
-	return ret, nil
+	return strings.Join(parts, " UNION ALL "), args
 }
 
 func QueryRegistrationHistory(
@@ -116,6 +155,9 @@ func QueryRegistrationHistory(
 }
 
 func transactionJoinClause(db *gorm.DB) string {
+	if db == nil {
+		return `INNER JOIN "transaction" tx ON tx.id = certs.transaction_id`
+	}
 	switch strings.ToLower(db.Name()) {
 	case "mysql":
 		return "INNER JOIN `transaction` tx ON tx.id = certs.transaction_id"
@@ -123,6 +165,7 @@ func transactionJoinClause(db *gorm.DB) string {
 		return `INNER JOIN "transaction" tx ON tx.id = certs.transaction_id`
 	}
 }
+
 
 func DelegationTableCertTypes(table string) []uint {
 	switch table {

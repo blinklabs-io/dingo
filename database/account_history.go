@@ -23,6 +23,9 @@ import (
 // GetAccountDelegationHistory returns delegation history rows for a staking key.
 func (d *Database) GetAccountDelegationHistory(
 	stakeKey []byte,
+	limit int,
+	offset int,
+	order string,
 	txn *Txn,
 ) ([]models.AccountDelegationHistoryRow, error) {
 	if txn == nil {
@@ -31,6 +34,9 @@ func (d *Database) GetAccountDelegationHistory(
 	}
 	rows, err := d.metadata.GetAccountDelegationHistory(
 		stakeKey,
+		limit,
+		offset,
+		order,
 		txn.Metadata(),
 	)
 	if err != nil {
@@ -40,6 +46,29 @@ func (d *Database) GetAccountDelegationHistory(
 		)
 	}
 	return rows, nil
+}
+
+// CountAccountDelegationHistory returns the total number of delegation
+// history rows for a staking key.
+func (d *Database) CountAccountDelegationHistory(
+	stakeKey []byte,
+	txn *Txn,
+) (int, error) {
+	if txn == nil {
+		txn = d.Transaction(false)
+		defer txn.Release()
+	}
+	count, err := d.metadata.CountAccountDelegationHistory(
+		stakeKey,
+		txn.Metadata(),
+	)
+	if err != nil {
+		return 0, fmt.Errorf(
+			"count account delegation history: %w",
+			err,
+		)
+	}
+	return count, nil
 }
 
 // GetAccountRegistrationHistory returns registration history rows for a staking key.

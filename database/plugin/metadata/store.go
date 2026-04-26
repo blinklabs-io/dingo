@@ -384,8 +384,18 @@ type MetadataStore interface {
 	// GetAccountDelegationHistory retrieves delegation history rows for a staking key.
 	GetAccountDelegationHistory(
 		[]byte, // stakingKey
+		int, // limit
+		int, // offset
+		string, // order (asc|desc)
 		types.Txn,
 	) ([]models.AccountDelegationHistoryRow, error)
+
+	// CountAccountDelegationHistory retrieves the total count of
+	// delegation history rows for a staking key.
+	CountAccountDelegationHistory(
+		[]byte, // stakingKey
+		types.Txn,
+	) (int, error)
 
 	// GetAccountRegistrationHistory retrieves registration history rows for a staking key.
 	GetAccountRegistrationHistory(
