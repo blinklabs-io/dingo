@@ -363,7 +363,7 @@ func (d *MetadataStoreMysql) GetAddressesByStakingKey(
 	}
 	query := db.Model(&models.AddressTransaction{}).
 		Select("MIN(id) AS id, payment_key, staking_key").
-		Where("staking_key = ?", stakingKey).
+		Where("staking_key = ? AND length(payment_key) > 0", stakingKey).
 		Group("payment_key, staking_key").
 		Order(addressOrderClause(order))
 	if limit > 0 {
