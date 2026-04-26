@@ -2710,9 +2710,33 @@ func (ls *LedgerState) processEpochRollover(
 		)
 		return result, nil
 	}
-	// Apply pending pparam updates using the non-mutating version
-	// Updates target the next epoch, so we pass currentEpoch.EpochId + 1
-	// The quorum threshold comes from shelley-genesis.json updateQuorum
+	// EPOCH→HARDFORK ordering invariant.
+	//
+	// The remainder of this function mirrors the sequencing of cardano-
+	// ledger's Conway/Rules/Epoch.hs:374-379 (EPOCH STS), which dispatches
+	// HARDFORK only after enactment + pparams write. The relative order
+	// matters because the HARDFORK rule branch is selected from the new
+	// pparams' major version — a HARDFORK rule that ran before enactment
+	// would observe stale pparams and pick the wrong branch.
+	//
+	// The order, asserted by TestProcessEpochRollover_OrderingInvariant in
+	// chainsync_ordering_test.go, is:
+	//
+	//   1. ComputeAndApplyPParamUpdates  — Shelley-style ppuProtocolVersion
+	//      voting path; produces newPParams from on-chain pparam-update
+	//      proposals.
+	//   2. governance.ProcessEpoch       — Conway-style HardForkInitiation /
+	//      ParameterChange enactment; may further mutate pparams.
+	//   3. SetPParams                    — persist the enacted pparams.
+	//   4. IsHardForkTransition check    — detect inter-era boundary from
+	//      the now-final pparams.
+	//   5. applyIntraEraHardForkRule     — dispatch the per-major-version
+	//      HARDFORK STS rule (e.g. pv3 AVVM removal, pv10 DRep clear).
+	//
+	// Steps 4 and 5 must observe the post-enactment major version. Step 5
+	// must observe the persisted pparams (not just the in-memory ones)
+	// because its body issues SQL within `txn` that may join against
+	// `pparams` rows.
 	updateQuorum := 0
 	if shelleyGenesis := ls.config.CardanoNodeConfig.ShelleyGenesis(); shelleyGenesis != nil {
 		updateQuorum = shelleyGenesis.UpdateQuorum
