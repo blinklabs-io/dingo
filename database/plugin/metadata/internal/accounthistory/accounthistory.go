@@ -154,7 +154,6 @@ func transactionJoinClause(db *gorm.DB) string {
 	}
 }
 
-
 func DelegationTableCertTypes(table string) []uint {
 	switch table {
 	case "stake_delegation":
