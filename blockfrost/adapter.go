@@ -519,7 +519,11 @@ func (a *NodeAdapter) NetworkEras() ([]NetworkEraInfo, error) {
 				err,
 			)
 		}
-		slotLengthSeconds := uint64(last.SlotLength) / 1000
+		slotLengthMs := uint64(last.SlotLength)
+		slotLengthSeconds := (slotLengthMs + 500) / 1000
+		if slotLengthMs > 0 && slotLengthSeconds == 0 {
+			slotLengthSeconds = 1
+		}
 		ret = append(ret, NetworkEraInfo{
 			Era: era.Name,
 			Start: NetworkEraBoundInfo{
