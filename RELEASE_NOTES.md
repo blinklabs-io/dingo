@@ -1,6 +1,30 @@
 # Release Notes
 
 
+## v0.37.0 (April 27, 2026)
+
+**Title:** Genesis bootstrap, governance, and steadier Mithril recovery
+
+**Date:** April 27, 2026
+
+**Version:** v0.37.0
+
+Hi folks! Here’s what we shipped in v0.37.0.
+
+### ✨ What's New
+
+* Added **Ouroboros Genesis bootstrap support:** Operators can now start from Genesis based bootstrap flows, which gives early sync a clearer path before the node reaches the current chain tip.
+* Expanded **Genesis mode chain selection:** Nodes can now choose the chain more safely during Genesis mode, which keeps early sync aligned with the right history.
+* Introduced **bootstrap aware peer promotion:** Peer promotion now accounts for bootstrap state, which helps early sync keep useful peers active while the node is still catching up.
+* Delivered **Conway governance ratification support:** Governance aware services can now track ratified actions more completely as Conway era governance advances.
+* Enabled **Conway governance enactment handling:** Governance state now follows enacted actions more accurately, which gives operators and integrators a clearer view of active governance outcomes.
+* Added **committee quorum persistence:** Committee quorum information now persists across restarts, which keeps governance state steadier after interruptions.
+* Opened **broader governance state handling:** Governance aware integrations can now read and handle more of the Conway governance state without losing important context.
+* Unlocked **new Blockfrost compatible block endpoints:** Blockfrost compatible users can now retrieve additional block details through newly added block endpoints.
+* Extended **new Blockfrost compatible network endpoints:** Network status integrations can now access newly added network endpoints in a Blockfrost compatible shape.
+* Introduced **new Blockfrost compatible era endpoints:** Era aware clients can now request era information through new Blockfrost compatible endpoints.
+* Added **new Blockfrost compatible genesis endpoints:** Genesis data is now available through new Blockfrost compatible endpoints for services that need network bootstrap details.
+
 ## v0.36.1 (April 21, 2026)
 
 **Title:** Steadier catch-up sync and refreshed integrations
