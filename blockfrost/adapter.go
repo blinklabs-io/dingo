@@ -127,6 +127,13 @@ func (a *NodeAdapter) BlockByHashOrNumber(
 			ErrInvalidBlockID,
 		)
 	}
+	if height > math.MaxUint64-database.BlockInitialIndex {
+		return BlockInfo{}, fmt.Errorf(
+			"block height %q overflows internal index: %w",
+			id,
+			ErrInvalidBlockID,
+		)
+	}
 	// Blockfrost accepts Cardano block height here. Dingo's blob block index
 	// is 1-based while Cardano block heights are 0-based, so translate height
 	// to the internal index before lookup.
