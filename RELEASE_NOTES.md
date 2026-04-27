@@ -1,29 +1,33 @@
 # Release Notes
 
 
-## v0.37.0 (April 27, 2026)
+### 💪 Improvements
 
-**Title:** Genesis bootstrap, governance, and steadier Mithril recovery
+* Improved **newer Mithril snapshot compatibility:** Bootstrap runs now accept newer snapshot shapes more reliably, which makes setup and recovery smoother across current Mithril data.
+* Refined **interrupted Mithril resume safety:** Resuming after an interrupted Mithril run now behaves more safely, which reduces the chance of a broken recovery path.
+* Enhanced **bootstrap aware peer governance:** Peer promotion and selection now align more closely with bootstrap state, which helps early sync keep useful peers active.
+* Modernized **bootstrap and governance observability:** Operators can now see more metrics and event signals around bootstrap and governance behavior.
+* Updated **operator and integrator guidance:** Documentation and workflow refreshes make recent bootstrap, governance, and API behavior easier to follow.
 
-**Date:** April 27, 2026
+### 🔧 Fixes
 
-**Version:** v0.37.0
+* Fixed **Mithril bootstrap resume reliability:** Mithril bootstrap and resume handling now recover more reliably when a previous run stopped before completion.
+* Corrected **snapshot bootstrap handling:** Snapshot based bootstrap flows now handle current snapshot layouts correctly, which reduces failed setup paths.
+* Hardened **early sync recovery behavior:** Recovery during early sync now follows Genesis mode chain selection and bootstrap aware promotion more safely after interruptions.
+* Stabilized **governance state continuity:** Governance state now keeps ratification, enactment, and committee quorum handling steadier across restarts and replay.
 
-Hi folks! Here’s what we shipped in v0.37.0.
+### 📋 What You Need to Know
 
-### ✨ What's New
+* Clarified **Genesis bootstrap rollout:** Ouroboros Genesis bootstrap changes early sync behavior, including Genesis mode chain selection and bootstrap aware peer promotion.
+* Highlighted **governance support growth:** Conway governance coverage now reaches ratification, enactment, committee quorum persistence, and broader governance state handling.
+* Emphasized **steadier Mithril recovery:** Mithril bootstrap and resume handling now work more reliably with newer snapshot shapes and safer interrupted resume behavior.
+* Summarized **expanded Blockfrost compatibility:** Blockfrost compatible users can now use new block, network, era, and genesis endpoints.
 
-* Added **Ouroboros Genesis bootstrap support:** Operators can now start from Genesis based bootstrap flows, which gives early sync a clearer path before the node reaches the current chain tip.
-* Expanded **Genesis mode chain selection:** Nodes can now choose the chain more safely during Genesis mode, which keeps early sync aligned with the right history.
-* Introduced **bootstrap aware peer promotion:** Peer promotion now accounts for bootstrap state, which helps early sync keep useful peers active while the node is still catching up.
-* Delivered **Conway governance ratification support:** Governance aware services can now track ratified actions more completely as Conway era governance advances.
-* Enabled **Conway governance enactment handling:** Governance state now follows enacted actions more accurately, which gives operators and integrators a clearer view of active governance outcomes.
-* Added **committee quorum persistence:** Committee quorum information now persists across restarts, which keeps governance state steadier after interruptions.
-* Opened **broader governance state handling:** Governance aware integrations can now read and handle more of the Conway governance state without losing important context.
-* Unlocked **new Blockfrost compatible block endpoints:** Blockfrost compatible users can now retrieve additional block details through newly added block endpoints.
-* Extended **new Blockfrost compatible network endpoints:** Network status integrations can now access newly added network endpoints in a Blockfrost compatible shape.
-* Introduced **new Blockfrost compatible era endpoints:** Era aware clients can now request era information through new Blockfrost compatible endpoints.
-* Added **new Blockfrost compatible genesis endpoints:** Genesis data is now available through new Blockfrost compatible endpoints for services that need network bootstrap details.
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
 
 ## v0.36.1 (April 21, 2026)
 
