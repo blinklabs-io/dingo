@@ -1,14 +1,6 @@
 # Release Notes
 
 
-### 💪 Improvements
-
-* Improved **newer Mithril snapshot compatibility:** Bootstrap runs now accept newer snapshot shapes more reliably, which makes setup and recovery smoother across current Mithril data.
-* Refined **interrupted Mithril resume safety:** Resuming after an interrupted Mithril run now behaves more safely, which reduces the chance of a broken recovery path.
-* Enhanced **bootstrap aware peer governance:** Peer promotion and selection now align more closely with bootstrap state, which helps early sync keep useful peers active.
-* Modernized **bootstrap and governance observability:** Operators can now see more metrics and event signals around bootstrap and governance behavior.
-* Updated **operator and integrator guidance:** Documentation and workflow refreshes make recent bootstrap, governance, and API behavior easier to follow.
-
 ## v0.37.0 (April 27, 2026)
 
 **Title:** Genesis bootstrap, governance, and steadier Mithril recovery
@@ -32,6 +24,14 @@ Hi folks! Here’s what we shipped in v0.37.0.
 * Extended **new Blockfrost compatible network endpoints:** Network status integrations can now access new network endpoints in a Blockfrost compatible shape.
 * Introduced **new Blockfrost compatible era endpoints:** Era aware clients can now request era information through new Blockfrost compatible endpoints.
 * Added **new Blockfrost compatible genesis endpoints:** Genesis data is now available through new Blockfrost compatible endpoints for services that need network bootstrap details.
+
+### 💪 Improvements
+
+* Improved **newer Mithril snapshot compatibility:** Bootstrap runs now accept newer snapshot shapes more reliably, which makes setup and recovery smoother across current Mithril data.
+* Refined **interrupted Mithril resume safety:** Resuming after an interrupted Mithril run now behaves more safely, which reduces the chance of a broken recovery path.
+* Enhanced **bootstrap aware peer governance:** Peer promotion and selection now align more closely with bootstrap state, which helps early sync keep useful peers active.
+* Modernized **bootstrap and governance observability:** Operators can now see more metrics and event signals around bootstrap and governance behavior.
+* Updated **operator and integrator guidance:** Documentation and workflow refreshes make recent bootstrap, governance, and API behavior easier to follow.
 
 ### 🔧 Fixes
 
