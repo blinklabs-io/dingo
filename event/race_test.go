@@ -89,6 +89,95 @@ func TestSubscribeFuncStopRace(t *testing.T) {
 	}
 }
 
+type blockingSubscriber struct {
+	deliverStarted chan struct{}
+	releaseDeliver chan struct{}
+	deliverDone    chan struct{}
+	closeCalled    atomic.Bool
+	startOnce      sync.Once
+	doneOnce       sync.Once
+}
+
+func newBlockingSubscriber() *blockingSubscriber {
+	return &blockingSubscriber{
+		deliverStarted: make(chan struct{}),
+		releaseDeliver: make(chan struct{}),
+		deliverDone:    make(chan struct{}),
+	}
+}
+
+func (s *blockingSubscriber) Deliver(Event) error {
+	s.startOnce.Do(func() {
+		close(s.deliverStarted)
+	})
+	<-s.releaseDeliver
+	s.doneOnce.Do(func() {
+		close(s.deliverDone)
+	})
+	return nil
+}
+
+func (s *blockingSubscriber) Close() {
+	s.closeCalled.Store(true)
+}
+
+// TestStopWaitsForInFlightPublish verifies that Stop cannot close subscribers
+// and return while a Publish call is still delivering to a subscriber.
+func TestStopWaitsForInFlightPublish(t *testing.T) {
+	eb := NewEventBus(nil, nil)
+	typ := EventType("race.publish.stop.wait")
+	sub := newBlockingSubscriber()
+	require.NotZero(t, eb.RegisterSubscriber(typ, sub))
+
+	publishDone := make(chan struct{})
+	go func() {
+		defer close(publishDone)
+		eb.Publish(typ, NewEvent(typ, "blocked"))
+	}()
+
+	select {
+	case <-sub.deliverStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Publish did not enter subscriber Deliver")
+	}
+
+	stopDone := make(chan struct{})
+	stopStarted := make(chan struct{})
+	go func() {
+		close(stopStarted)
+		defer close(stopDone)
+		eb.Stop()
+	}()
+	<-stopStarted
+
+	select {
+	case <-stopDone:
+		t.Fatal("Stop returned while Publish was still in flight")
+	case <-time.After(25 * time.Millisecond):
+		// Expected: Stop is blocked behind the in-flight Publish.
+	}
+
+	close(sub.releaseDeliver)
+
+	select {
+	case <-publishDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Publish did not complete after subscriber was released")
+	}
+	select {
+	case <-stopDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Stop did not complete after in-flight Publish completed")
+	}
+
+	require.True(t, sub.closeCalled.Load(), "Stop should close subscriber")
+	select {
+	case <-sub.deliverDone:
+	default:
+		t.Fatal("subscriber Close happened before Deliver completed")
+	}
+}
+
 // TestPublishDoesNotBlockOnFullChannel verifies that Publish returns
 // promptly even when a subscriber's channel buffer is completely full.
 // Before the non-blocking send fix, this scenario would deadlock:

@@ -22,6 +22,7 @@ import (
 	"math"
 	"strconv"
 
+	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/labelcodec"
 	"github.com/blinklabs-io/dingo/ledger"
@@ -37,6 +38,8 @@ import (
 
 var (
 	ErrInvalidAddress = errors.New("invalid address")
+	ErrInvalidBlockID = errors.New("invalid block id")
+	ErrBlockNotFound  = errors.New("block not found")
 	ErrEpochNotFound  = errors.New("epoch not found")
 	ErrAssetNotFound  = errors.New("asset not found")
 )
@@ -80,36 +83,115 @@ func (a *NodeAdapter) LatestBlock() (
 	BlockInfo, error,
 ) {
 	tip := a.ledgerState.Tip()
-	block, decodedBlock, err := a.latestBlockData(
-		tip.Point.Hash,
-	)
+	block, err := a.ledgerState.BlockByHash(tip.Point.Hash)
 	if err != nil {
 		return BlockInfo{}, err
 	}
-	epoch, err := a.ledgerState.SlotToEpoch(tip.Point.Slot)
+	return a.blockInfoFromBlock(block)
+}
+
+// BlockByHashOrNumber returns block information by hash or height.
+func (a *NodeAdapter) BlockByHashOrNumber(
+	id string,
+) (BlockInfo, error) {
+	var block models.Block
+	if len(id) == 64 {
+		hash, err := hex.DecodeString(id)
+		if err != nil {
+			return BlockInfo{}, fmt.Errorf(
+				"decode block hash %q: %w",
+				id,
+				ErrInvalidBlockID,
+			)
+		}
+		var getErr error
+		block, getErr = a.ledgerState.BlockByHash(hash)
+		if getErr != nil {
+			if errors.Is(getErr, models.ErrBlockNotFound) {
+				return BlockInfo{}, fmt.Errorf(
+					"block %s: %w",
+					id,
+					ErrBlockNotFound,
+				)
+			}
+			return BlockInfo{}, getErr
+		}
+		return a.blockInfoFromBlock(block)
+	}
+
+	height, err := strconv.ParseUint(id, 10, 64)
 	if err != nil {
 		return BlockInfo{}, fmt.Errorf(
-			"get epoch for tip slot %d: %w",
-			tip.Point.Slot,
+			"parse block height %q: %w",
+			id,
+			ErrInvalidBlockID,
+		)
+	}
+	if height > math.MaxUint64-database.BlockInitialIndex {
+		return BlockInfo{}, fmt.Errorf(
+			"block height %q overflows internal index: %w",
+			id,
+			ErrInvalidBlockID,
+		)
+	}
+	// Blockfrost accepts Cardano block height here. Dingo's blob block index
+	// is 1-based while Cardano block heights are 0-based, so translate height
+	// to the internal index before lookup.
+	block, err = a.ledgerState.Database().BlockByIndex(
+		height+database.BlockInitialIndex,
+		nil,
+	)
+	if err != nil {
+		if errors.Is(err, models.ErrBlockNotFound) {
+			return BlockInfo{}, fmt.Errorf(
+				"block %s: %w",
+				id,
+				ErrBlockNotFound,
+			)
+		}
+		return BlockInfo{}, err
+	}
+	return a.blockInfoFromBlock(block)
+}
+
+func (a *NodeAdapter) blockInfoFromBlock(
+	block models.Block,
+) (BlockInfo, error) {
+	decodedBlock, err := block.Decode()
+	if err != nil {
+		return BlockInfo{}, fmt.Errorf(
+			"decode block %x: %w",
+			block.Hash,
 			err,
 		)
 	}
-	slotTime, err := a.ledgerState.SlotToTime(tip.Point.Slot)
+	epoch, err := a.ledgerState.SlotToEpoch(block.Slot)
 	if err != nil {
 		return BlockInfo{}, fmt.Errorf(
-			"get time for tip slot %d: %w",
-			tip.Point.Slot,
+			"get epoch for block slot %d: %w",
+			block.Slot,
 			err,
 		)
+	}
+	slotTime, err := a.ledgerState.SlotToTime(block.Slot)
+	if err != nil {
+		return BlockInfo{}, fmt.Errorf(
+			"get time for block slot %d: %w",
+			block.Slot,
+			err,
+		)
+	}
+	tip := a.ledgerState.Tip()
+	confirmations := uint64(0)
+	if tip.BlockNumber >= block.Number {
+		confirmations = tip.BlockNumber - block.Number
 	}
 	return BlockInfo{
-		Hash: hex.EncodeToString(
-			tip.Point.Hash,
-		),
-		Slot:      tip.Point.Slot,
-		Height:    tip.BlockNumber,
+		Hash:      hex.EncodeToString(block.Hash),
+		Slot:      block.Slot,
+		Height:    block.Number,
 		Epoch:     epoch.EpochId,
-		EpochSlot: tip.Point.Slot - epoch.StartSlot,
+		EpochSlot: block.Slot - epoch.StartSlot,
 		Time:      slotTime.Unix(),
 		Size:      uint64(len(block.Cbor)),
 		TxCount:   len(decodedBlock.Transactions()),
@@ -119,7 +201,7 @@ func (a *NodeAdapter) LatestBlock() (
 		PreviousBlock: blockHashString(
 			block.PrevHash,
 		),
-		Confirmations: 0,
+		Confirmations: confirmations,
 	}, nil
 }
 
@@ -318,6 +400,181 @@ func (a *NodeAdapter) EpochProtocolParams(
 	return info, nil
 }
 
+// Network returns current network supply and stake information.
+func (a *NodeAdapter) Network() (NetworkInfo, error) {
+	nodeCfg := a.ledgerState.CardanoNodeConfig()
+	if nodeCfg == nil || nodeCfg.ShelleyGenesis() == nil {
+		return NetworkInfo{}, errors.New("shelley genesis not available")
+	}
+	genesis := nodeCfg.ShelleyGenesis()
+	maxSupply := genesis.MaxLovelaceSupply
+
+	state, err := a.ledgerState.Database().Metadata().GetNetworkState(nil)
+	if err != nil {
+		return NetworkInfo{}, fmt.Errorf("get network state: %w", err)
+	}
+	treasury := uint64(0)
+	reserves := uint64(0)
+	if state != nil {
+		treasury = uint64(state.Treasury)
+		reserves = uint64(state.Reserves)
+	}
+	// TODO: Wire locked supply from script-address UTxOs and ledger deposits,
+	// then subtract it from circulating supply.
+	locked := uint64(0)
+	total := uint64(0)
+	if reserves <= maxSupply {
+		total = maxSupply - reserves
+	}
+	circulating := uint64(0)
+	if treasury+locked <= total {
+		circulating = total - treasury - locked
+	}
+
+	activeStakeEpoch := uint64(0)
+	currentEpoch := a.ledgerState.CurrentEpoch()
+	if currentEpoch >= 2 {
+		activeStakeEpoch = currentEpoch - 2
+	}
+	activeStake, err := a.ledgerState.Database().Metadata().
+		GetTotalActiveStake(activeStakeEpoch, "mark", nil)
+	if err != nil {
+		return NetworkInfo{}, fmt.Errorf(
+			"get active stake for epoch %d: %w",
+			activeStakeEpoch,
+			err,
+		)
+	}
+
+	liveStake, err := a.liveStake()
+	if err != nil {
+		return NetworkInfo{}, err
+	}
+
+	return NetworkInfo{
+		Supply: NetworkSupplyInfo{
+			Max: strconv.FormatUint(maxSupply, 10),
+			Total: strconv.FormatUint(
+				total,
+				10,
+			),
+			Circulating: strconv.FormatUint(
+				circulating,
+				10,
+			),
+			Locked:   strconv.FormatUint(locked, 10),
+			Treasury: strconv.FormatUint(treasury, 10),
+			Reserves: strconv.FormatUint(reserves, 10),
+		},
+		Stake: NetworkStakeInfo{
+			Live:   strconv.FormatUint(liveStake, 10),
+			Active: strconv.FormatUint(activeStake, 10),
+		},
+	}, nil
+}
+
+// NetworkEras returns hard-fork era summaries.
+func (a *NodeAdapter) NetworkEras() ([]NetworkEraInfo, error) {
+	ret := make([]NetworkEraInfo, 0, len(eras.Eras))
+	for _, era := range eras.Eras {
+		epochs, err := a.ledgerState.Database().Metadata().
+			GetEpochsByEra(era.Id, nil)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"get epochs for era %s: %w",
+				era.Name,
+				err,
+			)
+		}
+		if len(epochs) == 0 {
+			continue
+		}
+		first := epochs[0]
+		last := epochs[len(epochs)-1]
+		params, err := eras.BuildEraParams(
+			a.ledgerState.CardanoNodeConfig(),
+			era,
+		)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"build era params for %s: %w",
+				era.Name,
+				err,
+			)
+		}
+		startTime, err := a.ledgerState.SlotToTime(first.StartSlot)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"get era %s start time: %w",
+				era.Name,
+				err,
+			)
+		}
+		endSlot := last.StartSlot + uint64(last.LengthInSlots)
+		endTime, err := a.ledgerState.SlotToTime(endSlot)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"get era %s end time: %w",
+				era.Name,
+				err,
+			)
+		}
+		slotLengthMs := uint64(last.SlotLength)
+		slotLengthSeconds := (slotLengthMs + 500) / 1000
+		if slotLengthMs > 0 && slotLengthSeconds == 0 {
+			slotLengthSeconds = 1
+		}
+		ret = append(ret, NetworkEraInfo{
+			Era: era.Name,
+			Start: NetworkEraBoundInfo{
+				Time:  startTime.Unix(),
+				Slot:  first.StartSlot,
+				Epoch: first.EpochId,
+			},
+			End: &NetworkEraBoundInfo{
+				Time:  endTime.Unix(),
+				Slot:  endSlot,
+				Epoch: last.EpochId + 1,
+			},
+			Params: NetworkEraParamsInfo{
+				EpochLength: uint64(last.LengthInSlots),
+				SlotLength:  slotLengthSeconds,
+				SafeZone:    params.SafeZoneSlots,
+			},
+		})
+	}
+	return ret, nil
+}
+
+// Genesis returns Shelley genesis configuration values.
+func (a *NodeAdapter) Genesis() (GenesisInfo, error) {
+	nodeCfg := a.ledgerState.CardanoNodeConfig()
+	if nodeCfg == nil || nodeCfg.ShelleyGenesis() == nil {
+		return GenesisInfo{}, errors.New("shelley genesis not available")
+	}
+	genesis := nodeCfg.ShelleyGenesis()
+	slotLength, _ := genesis.SlotLength.Float64()
+	slotLengthSeconds := int(math.Round(slotLength))
+	if slotLength > 0 && slotLengthSeconds == 0 {
+		slotLengthSeconds = 1
+	}
+	return GenesisInfo{
+		ActiveSlotsCoefficient: float32(a.ledgerState.ActiveSlotCoeff()),
+		UpdateQuorum:           genesis.UpdateQuorum,
+		MaxLovelaceSupply: strconv.FormatUint(
+			genesis.MaxLovelaceSupply,
+			10,
+		),
+		NetworkMagic:      int(genesis.NetworkMagic),
+		EpochLength:       genesis.EpochLength,
+		SystemStart:       int(genesis.SystemStart.Unix()),
+		SlotsPerKESPeriod: genesis.SlotsPerKESPeriod,
+		SlotLength:        slotLengthSeconds,
+		MaxKESEvolutions:  genesis.MaxKESEvolutions,
+		SecurityParam:     genesis.SecurityParam,
+	}, nil
+}
+
 // Asset returns native asset information for a policy ID
 // and raw asset name bytes.
 func (a *NodeAdapter) Asset(
@@ -401,6 +658,30 @@ func (a *NodeAdapter) latestBlockData(
 		)
 	}
 	return block, decodedBlock, nil
+}
+
+func (a *NodeAdapter) liveStake() (uint64, error) {
+	poolKeyHashes, err := a.ledgerState.Database().Metadata().
+		GetActivePoolKeyHashes(nil)
+	if err != nil {
+		return 0, fmt.Errorf(
+			"get active pool key hashes: %w",
+			err,
+		)
+	}
+	if len(poolKeyHashes) == 0 {
+		return 0, nil
+	}
+	stakeByPool, _, err := a.ledgerState.Database().Metadata().
+		GetStakeByPools(poolKeyHashes, nil)
+	if err != nil {
+		return 0, fmt.Errorf("get live stake by pools: %w", err)
+	}
+	total := uint64(0)
+	for _, stake := range stakeByPool {
+		total += stake
+	}
+	return total, nil
 }
 
 // PoolsExtended returns the current active pools with

@@ -510,6 +510,12 @@ type MetadataStore interface {
 	// GetUtxosAddedAfterSlot retrieves all UTxOs added after the given slot.
 	GetUtxosAddedAfterSlot(uint64, types.Txn) ([]models.Utxo, error)
 
+	// GetLiveUtxosBySlot returns the references ({TxId, OutputIdx}) of all
+	// live UTxOs (deleted_slot = 0) created at the given slot. Used by the
+	// pruner to materialize block-referenced UTxO bytes before deleting the
+	// source block.
+	GetLiveUtxosBySlot(uint64, types.Txn) ([]models.UtxoId, error)
+
 	// GetUtxosByAddress retrieves all UTxOs for a given address.
 	GetUtxosByAddress(ledger.Address, types.Txn) ([]models.Utxo, error)
 

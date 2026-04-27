@@ -472,10 +472,8 @@ func (p *PeerGovernor) isInboundEligibleForHot(peer *Peer) bool {
 	if p.config.InboundDuplexOnlyForHot && !peer.hasClientConnection() && !peer.InboundDuplex {
 		return false
 	}
-	// Penalize peers that are reconnect-flapping (multiple arrivals in cooldown).
-	if peer.InboundArrivals > 1 &&
-		!peer.LastInboundArrival.IsZero() &&
-		now.Sub(peer.LastInboundArrival) < p.config.InboundCooldown {
+	// Penalize peers that are reconnect-flapping (repeated short-lived sessions).
+	if flapping, _ := p.inboundFlappingStateLocked(peer, now); flapping {
 		return false
 	}
 	// When observed, connection stability must meet a baseline.
@@ -490,6 +488,24 @@ func (p *PeerGovernor) isInboundEligibleForHot(peer *Peer) bool {
 		peer.BlockFetchSuccessInit &&
 		peer.BlockFetchSuccessRate >= minInboundBlockfetchSuccess
 	return chainSyncUseful || blockFetchUseful
+}
+
+// inboundFlappingStateLocked reports whether an inbound peer is currently
+// reconnect-flapping, and returns a bounded escalation multiplier.
+func (p *PeerGovernor) inboundFlappingStateLocked(
+	peer *Peer,
+	now time.Time,
+) (flapping bool, multiplier int) {
+	if peer == nil || peer.Source != PeerSourceInboundConn {
+		return false, 0
+	}
+	if peer.InboundShortLivedCount < 2 || peer.LastInboundDisconnect.IsZero() {
+		return false, 0
+	}
+	if now.Sub(peer.LastInboundDisconnect) >= p.config.InboundCooldown {
+		return false, 0
+	}
+	return true, min(int(peer.InboundShortLivedCount), 5)
 }
 
 // isReusableInboundTopologyConnectionLocked reports whether this peer currently
@@ -513,7 +529,7 @@ func (p *PeerGovernor) inboundSatisfiesTopologyValencyLocked(peer *Peer) bool {
 		peer.GroupID == "" || peer.Valency == 0 {
 		return false
 	}
-	reusableInboundHot := 0
+	var reusableInboundHot uint
 	for _, candidate := range p.peers {
 		if candidate == nil ||
 			candidate.GroupID != peer.GroupID ||
@@ -524,7 +540,7 @@ func (p *PeerGovernor) inboundSatisfiesTopologyValencyLocked(peer *Peer) bool {
 			reusableInboundHot++
 		}
 	}
-	return uint(reusableInboundHot) >= peer.Valency
+	return reusableInboundHot >= peer.Valency
 }
 
 // redistributeUnusedSlots redistributes unused quota slots to other categories.

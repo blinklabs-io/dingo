@@ -36,6 +36,9 @@ var ErrNilDecodedOutput = errors.New("nil decoded output")
 // ErrUtxoAlreadyConsumed is returned when a UTxO has been consumed by a pending transaction.
 var ErrUtxoAlreadyConsumed = errors.New("UTxO already consumed")
 
+// ErrNotImplemented marks LedgerView stubs that are not implemented yet.
+var ErrNotImplemented = errors.New("not implemented")
+
 type LedgerView struct {
 	ls  *LedgerState
 	txn *database.Txn
@@ -280,7 +283,7 @@ func (lv *LedgerView) CalculateRewards(
 	rewardSnapshot lcommon.RewardSnapshot,
 	rewardParams lcommon.RewardParameters,
 ) (*lcommon.RewardCalculationResult, error) {
-	return nil, nil
+	return nil, ErrNotImplemented
 }
 
 // GetAdaPots returns the current Ada pots.
@@ -296,13 +299,13 @@ func (lv *LedgerView) GetAdaPots() lcommon.AdaPots {
 func (lv *LedgerView) GetRewardSnapshot(
 	epoch uint64,
 ) (lcommon.RewardSnapshot, error) {
-	return lcommon.RewardSnapshot{}, nil
+	return lcommon.RewardSnapshot{}, ErrNotImplemented
 }
 
 // UpdateAdaPots updates the Ada pots.
 // TODO: implement Ada pots update. Requires Ada pots storage in the database.
 func (lv *LedgerView) UpdateAdaPots(adaPots lcommon.AdaPots) error {
-	return nil
+	return ErrNotImplemented
 }
 
 // IsRewardAccountRegistered checks if a reward account is registered
@@ -330,7 +333,7 @@ func (lv *LedgerView) IsRewardAccountRegistered(
 func (lv *LedgerView) RewardAccountBalance(
 	cred lcommon.Credential,
 ) (*uint64, error) {
-	return nil, nil
+	return nil, ErrNotImplemented
 }
 
 // CostModels returns which Plutus language versions have cost
@@ -612,7 +615,7 @@ func (lv *LedgerView) Constitution() (*lcommon.Constitution, error) {
 // which is not yet stored in the database. The treasury value is part of
 // the Ada pots (reserves, treasury, fees, rewards).
 func (lv *LedgerView) TreasuryValue() (uint64, error) {
-	return 0, nil
+	return 0, ErrNotImplemented
 }
 
 // GovActionById returns a governance action by its ID.

@@ -4685,20 +4685,20 @@ func TestPeerGovernor_IsInboundEligibleForHot_RejectsFlappingPeer(t *testing.T) 
 	pg.mu.Lock()
 	defer pg.mu.Unlock()
 	peer := &Peer{
-		Source:              PeerSourceInboundConn,
-		State:               PeerStateWarm,
-		Connection:          &PeerConnection{IsClient: true},
-		PerformanceScore:    0.9,
-		FirstSeen:           time.Now().Add(-time.Hour),
-		ChainSyncLastUpdate: time.Now(),
-		TipSlotDeltaInit:    true,
-		TipSlotDelta:        0,
-		InboundArrivals:     3,
-		LastInboundArrival:  time.Now(),
+		Source:                 PeerSourceInboundConn,
+		State:                  PeerStateWarm,
+		Connection:             &PeerConnection{IsClient: true},
+		PerformanceScore:       0.9,
+		FirstSeen:              time.Now().Add(-time.Hour),
+		ChainSyncLastUpdate:    time.Now(),
+		TipSlotDeltaInit:       true,
+		TipSlotDelta:           0,
+		InboundShortLivedCount: 3,
+		LastInboundDisconnect:  time.Now(),
 	}
 	assert.False(t, pg.isInboundEligibleForHot(peer),
 		"recent re-arrivals within cooldown must be treated as unstable")
-	peer.LastInboundArrival = time.Now().Add(-10 * time.Minute)
+	peer.LastInboundDisconnect = time.Now().Add(-10 * time.Minute)
 	assert.True(t, pg.isInboundEligibleForHot(peer),
 		"once cooldown passes, peer can be promoted again")
 }
@@ -4723,6 +4723,352 @@ func TestPeerGovernor_IsInboundEligibleForHot_BlockFetchSignalAlone(t *testing.T
 	}
 	assert.True(t, pg.isInboundEligibleForHot(peer),
 		"fresh useful blockfetch signal should be sufficient")
+}
+
+func TestPeerGovernor_Reconcile_PrunesIdleInboundWarmPeer(t *testing.T) {
+	eventBus := newMockEventBus()
+	defer eventBus.Stop()
+	_, recycleCh := eventBus.Subscribe(connmanager.ConnectionRecycleRequestedEventType)
+	_, removedCh := eventBus.Subscribe(PeerRemovedEventType)
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:                         slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		EventBus:                       eventBus,
+		InboundPruneAfter:              time.Minute,
+		InboundCooldown:                5 * time.Minute,
+		TargetNumberOfKnownPeers:       -1,
+		TargetNumberOfEstablishedPeers: -1,
+		TargetNumberOfActivePeers:      -1,
+	})
+	now := time.Now()
+	connID := ouroboros.ConnectionId{
+		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 4000},
+		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("192.168.50.2"), Port: 3001},
+	}
+	pg.mu.Lock()
+	pg.peers = []*Peer{
+		{
+			Address:           "192.168.50.2:3001",
+			NormalizedAddress: "192.168.50.2:3001",
+			Source:            PeerSourceInboundConn,
+			State:             PeerStateWarm,
+			Connection:        &PeerConnection{Id: connID, IsClient: true},
+			FirstSeen:         now.Add(-2 * time.Hour),
+			LastActivity:      now.Add(-2 * time.Hour),
+		},
+	}
+	pg.mu.Unlock()
+
+	pg.reconcile(t.Context())
+
+	require.Empty(t, pg.GetPeers(), "idle unhelpful inbound warm peer should be pruned")
+	select {
+	case evt := <-recycleCh:
+		recycleEvt, ok := evt.Data.(connmanager.ConnectionRecycleRequestedEvent)
+		require.True(t, ok)
+		assert.Equal(t, connID, recycleEvt.ConnectionId)
+		assert.Equal(t, "192.168.50.2:3001", recycleEvt.ConnKey)
+		assert.Equal(t, "inbound idle or unhelpful past prune threshold", recycleEvt.Reason)
+	case <-time.After(time.Second):
+		t.Fatal("expected connection recycle request for pruned inbound peer")
+	}
+	select {
+	case evt := <-removedCh:
+		removedEvt, ok := evt.Data.(PeerStateChangeEvent)
+		require.True(t, ok)
+		assert.Equal(t, "192.168.50.2:3001", removedEvt.Address)
+		assert.Equal(t, "inbound idle or unhelpful past prune threshold", removedEvt.Reason)
+	case <-time.After(time.Second):
+		t.Fatal("expected peer removed event for pruned inbound peer")
+	}
+}
+
+func TestPeerGovernor_Reconcile_AppliesEscalatingInboundCooldownForFlappingPeer(t *testing.T) {
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		InboundPruneAfter: time.Minute,
+		InboundCooldown:   2 * time.Minute,
+		DenyDuration:      30 * time.Second,
+	})
+	now := time.Now()
+	addr := "192.168.60.2:3001"
+	pg.mu.Lock()
+	pg.peers = []*Peer{
+		{
+			Address:                addr,
+			NormalizedAddress:      addr,
+			Source:                 PeerSourceInboundConn,
+			State:                  PeerStateWarm,
+			FirstSeen:              now.Add(-time.Hour),
+			LastActivity:           now.Add(-time.Hour),
+			LastInboundDisconnect:  now.Add(-30 * time.Second),
+			InboundShortLivedCount: 4,
+		},
+	}
+	pg.mu.Unlock()
+
+	start := time.Now()
+	pg.reconcile(t.Context())
+	end := time.Now()
+
+	require.Empty(t, pg.GetPeers(), "flapping inbound peer should be removed")
+	pg.mu.Lock()
+	expiry, ok := pg.denyList[addr]
+	pg.mu.Unlock()
+	require.True(t, ok, "flapping inbound peer should be cooled down on deny list")
+	minExpected := start.Add(8 * time.Minute)
+	maxExpected := end.Add(8*time.Minute + 2*time.Second)
+	assert.True(t, expiry.After(minExpected) || expiry.Equal(minExpected))
+	assert.True(t, expiry.Before(maxExpected) || expiry.Equal(maxExpected))
+}
+
+func TestPeerGovernor_Reconcile_DoesNotPruneUsefulTopologyInboundDuplexPeer(t *testing.T) {
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:                         slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		InboundPruneAfter:              time.Minute,
+		TargetNumberOfKnownPeers:       -1,
+		TargetNumberOfEstablishedPeers: -1,
+		TargetNumberOfActivePeers:      -1,
+	})
+	now := time.Now()
+	pg.mu.Lock()
+	pg.peers = []*Peer{
+		{
+			Address:              "44.0.0.2:3001",
+			NormalizedAddress:    "44.0.0.2:3001",
+			Source:               PeerSourceTopologyLocalRoot,
+			State:                PeerStateWarm,
+			Connection:           &PeerConnection{IsClient: true},
+			FirstSeen:            now.Add(-2 * time.Hour),
+			LastActivity:         now.Add(-2 * time.Hour),
+			InboundDuplex:        true,
+			InboundTopologyMatch: "local-root-0",
+			GroupID:              "local-root-0",
+		},
+	}
+	pg.mu.Unlock()
+
+	pg.reconcile(t.Context())
+	peers := pg.GetPeers()
+	require.Len(t, peers, 1, "topology peer must not be pruned by inbound pruning")
+	assert.EqualValues(t, PeerSourceTopologyLocalRoot, peers[0].Source)
+}
+
+func TestPeerGovernor_Reconcile_IdleInboundPruneDoesNotApplyCooldownDeny(t *testing.T) {
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:                         slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		InboundPruneAfter:              time.Minute,
+		InboundCooldown:                5 * time.Minute,
+		TargetNumberOfKnownPeers:       -1,
+		TargetNumberOfEstablishedPeers: -1,
+		TargetNumberOfActivePeers:      -1,
+	})
+	now := time.Now()
+	addr := "192.168.70.2:3001"
+	pg.mu.Lock()
+	pg.peers = []*Peer{
+		{
+			Address:                addr,
+			NormalizedAddress:      addr,
+			Source:                 PeerSourceInboundConn,
+			State:                  PeerStateWarm,
+			FirstSeen:              now.Add(-2 * time.Hour),
+			LastActivity:           now.Add(-2 * time.Hour),
+			LastInboundDisconnect:  now.Add(-2 * time.Hour),
+			InboundShortLivedCount: 1, // Not flapping; should not trigger cooldown deny
+		},
+	}
+	pg.mu.Unlock()
+
+	pg.reconcile(t.Context())
+	require.Empty(t, pg.GetPeers(), "idle inbound peer should be pruned")
+
+	pg.mu.Lock()
+	_, denied := pg.denyList[addr]
+	pg.mu.Unlock()
+	assert.False(t, denied, "idle/unhelpful prune should not add cooldown deny entry")
+}
+
+func TestPeerGovernor_Reconcile_KeepsUsefulInboundWarmPeerPastPruneAfter(t *testing.T) {
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:                         slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		InboundPruneAfter:              time.Minute,
+		InboundHotScoreThreshold:       0.6,
+		InboundMinTenure:               10 * time.Minute,
+		TargetNumberOfKnownPeers:       -1,
+		TargetNumberOfEstablishedPeers: -1,
+		TargetNumberOfActivePeers:      -1,
+	})
+	now := time.Now()
+	addr := "192.168.71.2:3001"
+	pg.mu.Lock()
+	pg.peers = []*Peer{
+		{
+			Address:                addr,
+			NormalizedAddress:      addr,
+			Source:                 PeerSourceInboundConn,
+			State:                  PeerStateWarm,
+			Connection:             &PeerConnection{IsClient: true},
+			FirstSeen:              now.Add(-2 * time.Hour),
+			LastActivity:           now.Add(-2 * time.Hour),
+			LastInboundDisconnect:  now.Add(-2 * time.Hour),
+			PerformanceScore:       0.95,
+			ChainSyncLastUpdate:    now, // Fresh usefulness signal
+			TipSlotDeltaInit:       true,
+			TipSlotDelta:           0,
+			InboundShortLivedCount: 1,
+		},
+	}
+	pg.mu.Unlock()
+
+	pg.reconcile(t.Context())
+
+	var kept bool
+	for _, peer := range pg.GetPeers() {
+		if peer.Address == addr {
+			kept = true
+			break
+		}
+	}
+	assert.True(t, kept, "useful inbound peer should not be pruned just for age")
+}
+
+func TestPeerGovernor_Reconcile_FlappingCooldownReasonMetricAndCap(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	eventBus := newMockEventBus()
+	defer eventBus.Stop()
+	_, removedCh := eventBus.Subscribe(PeerRemovedEventType)
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		PromRegistry:      reg,
+		EventBus:          eventBus,
+		InboundPruneAfter: time.Minute,
+		InboundCooldown:   2 * time.Minute,
+		DenyDuration:      30 * time.Second,
+	})
+	now := time.Now()
+	addr := "192.168.72.2:3001"
+	connID := ouroboros.ConnectionId{
+		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 4001},
+		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("192.168.72.2"), Port: 3001},
+	}
+	pg.mu.Lock()
+	pg.peers = []*Peer{
+		{
+			Address:                addr,
+			NormalizedAddress:      addr,
+			Source:                 PeerSourceInboundConn,
+			State:                  PeerStateWarm,
+			Connection:             &PeerConnection{Id: connID, IsClient: true},
+			FirstSeen:              now.Add(-2 * time.Hour),
+			LastActivity:           now.Add(-2 * time.Hour),
+			LastInboundDisconnect:  now.Add(-10 * time.Second),
+			InboundShortLivedCount: 10, // Should cap multiplier at 5
+		},
+	}
+	pg.mu.Unlock()
+
+	start := time.Now()
+	pg.reconcile(t.Context())
+	end := time.Now()
+
+	select {
+	case evt := <-removedCh:
+		removedEvt, ok := evt.Data.(PeerStateChangeEvent)
+		require.True(t, ok)
+		assert.Equal(t, "inbound flapping cooldown", removedEvt.Reason)
+	case <-time.After(time.Second):
+		t.Fatal("expected peer removed event for flapping inbound peer")
+	}
+	assert.Equal(
+		t,
+		float64(1),
+		testutil.ToFloat64(
+			pg.metrics.inboundPrunedByReason.WithLabelValues("flapping_cooldown"),
+		),
+		"flapping prune reason metric should increment",
+	)
+
+	pg.mu.Lock()
+	expiry, ok := pg.denyList[addr]
+	pg.mu.Unlock()
+	require.True(t, ok)
+	minExpected := start.Add(10 * time.Minute) // 2m * min(10,5)
+	maxExpected := end.Add(10*time.Minute + 2*time.Second)
+	assert.True(t, expiry.After(minExpected) || expiry.Equal(minExpected))
+	assert.True(t, expiry.Before(maxExpected) || expiry.Equal(maxExpected))
+}
+
+func TestPeerGovernor_Reconcile_DoesNotCooldownSecondInboundArrival(t *testing.T) {
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		InboundPruneAfter: time.Minute,
+		InboundCooldown:   2 * time.Minute,
+		DenyDuration:      30 * time.Second,
+	})
+	now := time.Now()
+	addr := "192.168.73.2:3001"
+	pg.mu.Lock()
+	pg.peers = []*Peer{
+		{
+			Address:                addr,
+			NormalizedAddress:      addr,
+			Source:                 PeerSourceInboundConn,
+			State:                  PeerStateWarm,
+			FirstSeen:              now.Add(-time.Hour),
+			LastActivity:           now.Add(-time.Hour),
+			LastInboundDisconnect:  now.Add(-10 * time.Second),
+			InboundShortLivedCount: 1, // single short-lived prior session should not trigger flapping
+		},
+	}
+	pg.mu.Unlock()
+
+	pg.reconcile(t.Context())
+
+	peers := pg.GetPeers()
+	require.Len(t, peers, 1, "single reconnect should not trigger flapping cooldown prune")
+	pg.mu.Lock()
+	_, denied := pg.denyList[addr]
+	pg.mu.Unlock()
+	assert.False(t, denied, "single reconnect should not apply cooldown deny")
+}
+
+func TestPeerGovernor_Reconcile_InboundLimitExceededReasonMetric(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:                         slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		PromRegistry:                   reg,
+		TargetNumberOfKnownPeers:       1,
+		TargetNumberOfEstablishedPeers: -1,
+		TargetNumberOfActivePeers:      -1,
+		InboundPruneAfter:              time.Hour, // Avoid prune path to isolate limit path
+	})
+	pg.mu.Lock()
+	pg.peers = []*Peer{
+		{
+			Address:           "192.168.74.2:3001",
+			NormalizedAddress: "192.168.74.2:3001",
+			Source:            PeerSourceInboundConn,
+			State:             PeerStateCold,
+		},
+		{
+			Address:           "192.168.74.3:3001",
+			NormalizedAddress: "192.168.74.3:3001",
+			Source:            PeerSourceInboundConn,
+			State:             PeerStateCold,
+		},
+	}
+	pg.mu.Unlock()
+
+	pg.reconcile(t.Context())
+
+	assert.Equal(
+		t,
+		float64(1),
+		testutil.ToFloat64(
+			pg.metrics.inboundPrunedByReason.WithLabelValues("limit_exceeded"),
+		),
+		"limit exceeded inbound prune should increment reason metric",
+	)
 }
 
 func TestPeerGovernor_PromotionPrefersHigherPrioritySources(t *testing.T) {
@@ -6493,8 +6839,7 @@ func TestHandleInboundConnection_TopologyHostMatch(t *testing.T) {
 		"source must remain topology; inbound does not downgrade identity")
 	assert.Equal(t, "local-root-0", peer.InboundTopologyMatch,
 		"matched topology GroupID must be recorded")
-	assert.Equal(t, uint32(1), peer.InboundArrivals)
-	assert.False(t, peer.LastInboundArrival.IsZero())
+	assert.False(t, peer.InboundConnectedAt.IsZero())
 	assert.True(t, peer.InboundDuplex,
 		"event-carried IsDuplex must be recorded when no connmanager is wired")
 }
@@ -6543,7 +6888,7 @@ func TestHandleInboundConnection_AmbiguousHostCreatesNewPeer(t *testing.T) {
 	assert.True(t, foundInbound, "new inbound peer must be created")
 }
 
-func TestHandleInboundConnection_ReArrivalIncrementsArrivals(t *testing.T) {
+func TestHandleInboundConnection_ReArrivalKeepsFirstSeenAndRefreshesInboundConnectedAt(t *testing.T) {
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		EventBus:     newMockEventBus(),
@@ -6567,20 +6912,17 @@ func TestHandleInboundConnection_ReArrivalIncrementsArrivals(t *testing.T) {
 	first := pg.GetPeers()
 	require.Len(t, first, 1)
 	firstSeen := first[0].FirstSeen
-	firstArrival := first[0].LastInboundArrival
-	require.Equal(t, uint32(1), first[0].InboundArrivals)
+	firstConnectedAt := first[0].InboundConnectedAt
+	require.False(t, firstConnectedAt.IsZero())
 
-	// Small real delay so the monotonic component advances; we only
-	// need LastInboundArrival to strictly increase, which time.Now()
-	// guarantees on the next call under Go's monotonic clock.
+	// Re-arrival should refresh InboundConnectedAt while preserving identity fields.
 	pg.handleInboundConnectionEvent(evt)
 	second := pg.GetPeers()
 	require.Len(t, second, 1, "re-arrival must not spawn a second peer entry")
-	assert.Equal(t, uint32(2), second[0].InboundArrivals)
 	assert.Equal(t, firstSeen, second[0].FirstSeen,
 		"FirstSeen must not move on re-arrival")
-	assert.False(t, second[0].LastInboundArrival.Before(firstArrival),
-		"LastInboundArrival must not go backwards")
+	assert.False(t, second[0].InboundConnectedAt.Before(firstConnectedAt),
+		"InboundConnectedAt must not go backwards on re-arrival")
 }
 
 func TestHandleInboundConnection_TopologyMatchPersistsOnReArrival(t *testing.T) {
@@ -6627,7 +6969,6 @@ func TestHandleInboundConnection_TopologyMatchPersistsOnReArrival(t *testing.T) 
 	require.Len(t, peers, 1)
 	assert.Equal(t, "local-root-0", peers[0].InboundTopologyMatch,
 		"rule-1 re-arrival must not clobber the existing topology match")
-	assert.Equal(t, uint32(2), peers[0].InboundArrivals)
 }
 
 // TestHandleInboundConnection_TopologyMatchNotClearedByUnrelatedReArrival
@@ -6652,7 +6993,6 @@ func TestHandleInboundConnection_TopologyMatchNotClearedByUnrelatedReArrival(
 		Source:               PeerSourceInboundConn,
 		State:                PeerStateWarm,
 		FirstSeen:            time.Now().Add(-time.Hour),
-		InboundArrivals:      1,
 		InboundTopologyMatch: "local-root-0",
 	})
 	pg.mu.Unlock()
@@ -6673,7 +7013,6 @@ func TestHandleInboundConnection_TopologyMatchNotClearedByUnrelatedReArrival(
 	require.Len(t, peers, 1)
 	assert.Equal(t, "local-root-0", peers[0].InboundTopologyMatch,
 		"re-arrival against a non-topology existing entry must not clear match")
-	assert.Equal(t, uint32(2), peers[0].InboundArrivals)
 }
 
 func TestInboundProvisionalWindow_ExcludesFreshFromCounts(t *testing.T) {
@@ -6767,7 +7106,6 @@ func TestCensusInboundCounts_DuplexRequiresLiveConnection(t *testing.T) {
 		State:             PeerStateWarm,
 		FirstSeen:         time.Now().Add(-time.Hour),
 		InboundDuplex:     true,
-		InboundArrivals:   1,
 	})
 	census := pg.censusInboundCounts()
 	pg.mu.Unlock()
@@ -6805,8 +7143,7 @@ func TestHandleConnectionClosedEvent_DuplexCensusDropsOnClose(t *testing.T) {
 			Id:       connId,
 			IsClient: true,
 		},
-		InboundDuplex:   true,
-		InboundArrivals: 1,
+		InboundDuplex: true,
 	})
 	require.Equal(t, 1, pg.censusInboundCounts().Duplex)
 	pg.mu.Unlock()

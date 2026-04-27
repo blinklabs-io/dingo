@@ -107,25 +107,50 @@ func (b *Blockfrost) handleLatestBlock(
 		)
 		return
 	}
-	output := "0"
-	fees := "0"
-	writeJSON(w, http.StatusOK, BlockResponse{
-		Hash:          info.Hash,
-		Slot:          info.Slot,
-		Epoch:         info.Epoch,
-		EpochSlot:     info.EpochSlot,
-		Height:        info.Height,
-		Time:          info.Time,
-		Size:          info.Size,
-		TxCount:       info.TxCount,
-		SlotLeader:    info.SlotLeader,
-		PreviousBlock: info.PreviousBlock,
-		Confirmations: info.Confirmations,
-		Output:        &output,
-		Fees:          &fees,
-		BlockVRF:      nil,
-		NextBlock:     nil,
-	})
+	writeJSON(w, http.StatusOK, blockResponse(info))
+}
+
+// handleBlock handles GET /api/v0/blocks/{hash_or_number}.
+func (b *Blockfrost) handleBlock(
+	w http.ResponseWriter,
+	r *http.Request,
+) {
+	info, err := b.node.BlockByHashOrNumber(
+		r.PathValue("hash_or_number"),
+	)
+	if err != nil {
+		if errors.Is(err, ErrInvalidBlockID) {
+			writeError(
+				w,
+				http.StatusBadRequest,
+				"Bad Request",
+				"Invalid block hash or number.",
+			)
+			return
+		}
+		if errors.Is(err, ErrBlockNotFound) {
+			writeError(
+				w,
+				http.StatusNotFound,
+				"Not Found",
+				"The requested block could not be found.",
+			)
+			return
+		}
+		b.logger.Error(
+			"failed to get block",
+			"block", r.PathValue("hash_or_number"),
+			"error", err,
+		)
+		writeError(
+			w,
+			http.StatusInternalServerError,
+			"Internal Server Error",
+			"failed to retrieve block",
+		)
+		return
+	}
+	writeJSON(w, http.StatusOK, blockResponse(info))
 }
 
 // handleLatestBlockTxs handles
@@ -267,21 +292,103 @@ func (b *Blockfrost) handleNetwork(
 	w http.ResponseWriter,
 	_ *http.Request,
 ) {
-	// TODO: Wire to real supply/stake data when available
+	info, err := b.node.Network()
+	if err != nil {
+		b.logger.Error(
+			"failed to get network info",
+			"error", err,
+		)
+		writeError(
+			w,
+			http.StatusInternalServerError,
+			"Internal Server Error",
+			"failed to retrieve network information",
+		)
+		return
+	}
 	writeJSON(w, http.StatusOK, NetworkResponse{
 		Supply: NetworkSupply{
-			Max:         "45000000000000000",
-			Total:       "0",
-			Circulating: "0",
-			Locked:      "0",
-			Treasury:    "0",
-			Reserves:    "0",
+			Max:         info.Supply.Max,
+			Total:       info.Supply.Total,
+			Circulating: info.Supply.Circulating,
+			Locked:      info.Supply.Locked,
+			Treasury:    info.Supply.Treasury,
+			Reserves:    info.Supply.Reserves,
 		},
 		Stake: NetworkStake{
-			Live:   "0",
-			Active: "0",
+			Live:   info.Stake.Live,
+			Active: info.Stake.Active,
 		},
 	})
+}
+
+// handleNetworkEras handles GET /api/v0/network/eras.
+func (b *Blockfrost) handleNetworkEras(
+	w http.ResponseWriter,
+	_ *http.Request,
+) {
+	eras, err := b.node.NetworkEras()
+	if err != nil {
+		b.logger.Error(
+			"failed to get network eras",
+			"error", err,
+		)
+		writeError(
+			w,
+			http.StatusInternalServerError,
+			"Internal Server Error",
+			"failed to retrieve network eras",
+		)
+		return
+	}
+	resp := make([]NetworkEraResponse, 0, len(eras))
+	for _, era := range eras {
+		var end *NetworkEraBound
+		if era.End != nil {
+			end = &NetworkEraBound{
+				Time:  era.End.Time,
+				Slot:  era.End.Slot,
+				Epoch: era.End.Epoch,
+			}
+		}
+		resp = append(resp, NetworkEraResponse{
+			Era: era.Era,
+			Start: NetworkEraBound{
+				Time:  era.Start.Time,
+				Slot:  era.Start.Slot,
+				Epoch: era.Start.Epoch,
+			},
+			End: end,
+			Parameters: NetworkEraParameters{
+				EpochLength: era.Params.EpochLength,
+				SlotLength:  era.Params.SlotLength,
+				SafeZone:    era.Params.SafeZone,
+			},
+		})
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// handleGenesis handles GET /api/v0/genesis.
+func (b *Blockfrost) handleGenesis(
+	w http.ResponseWriter,
+	_ *http.Request,
+) {
+	info, err := b.node.Genesis()
+	if err != nil {
+		b.logger.Error(
+			"failed to get genesis info",
+			"error", err,
+		)
+		writeError(
+			w,
+			http.StatusInternalServerError,
+			"Internal Server Error",
+			"failed to retrieve genesis information",
+		)
+		return
+	}
+	writeJSON(w, http.StatusOK, GenesisResponse(info))
 }
 
 // handleAsset handles GET /api/v0/assets/{asset} and
@@ -710,6 +817,28 @@ func assetNameASCII(
 		ret = append(ret, b)
 	}
 	return string(ret)
+}
+
+func blockResponse(info BlockInfo) BlockResponse {
+	output := "0"
+	fees := "0"
+	return BlockResponse{
+		Hash:          info.Hash,
+		Slot:          info.Slot,
+		Epoch:         info.Epoch,
+		EpochSlot:     info.EpochSlot,
+		Height:        info.Height,
+		Time:          info.Time,
+		Size:          info.Size,
+		TxCount:       info.TxCount,
+		SlotLeader:    info.SlotLeader,
+		PreviousBlock: info.PreviousBlock,
+		Confirmations: info.Confirmations,
+		Output:        &output,
+		Fees:          &fees,
+		BlockVRF:      nil,
+		NextBlock:     nil,
+	}
 }
 
 func protocolParamsResponse(

@@ -20,6 +20,8 @@ import (
 	"log/slog"
 	"slices"
 	"time"
+
+	"github.com/blinklabs-io/dingo/connmanager"
 )
 
 func (p *PeerGovernor) reconcile(ctx context.Context) {
@@ -350,6 +352,10 @@ func (p *PeerGovernor) reconcile(ctx context.Context) {
 	// This ensures no single source dominates the hot peer slots
 	events = append(events, p.enforcePerSourceQuotas()...)
 
+	// Prune idle/unhelpful inbound warm peers and apply cooldown for
+	// flapping identities before generic state-limit pruning.
+	events = append(events, p.pruneInboundWarmPeersLocked(now, &knownRemoved)...)
+
 	// Log valency status for topology groups
 	if debugEnabled {
 		p.logValencyStatus()
@@ -590,6 +596,7 @@ func (p *PeerGovernor) enforceStateLimit(
 			p.inboundPruned++
 			if p.metrics != nil {
 				p.metrics.inboundPruned.Inc()
+				p.metrics.inboundPrunedByReason.WithLabelValues("limit_exceeded").Inc()
 			}
 		}
 	}
@@ -619,4 +626,119 @@ func (p *PeerGovernor) enforceStateLimit(
 	}
 
 	return events
+}
+
+func (p *PeerGovernor) pruneInboundWarmPeersLocked(
+	now time.Time,
+	removedCount *int,
+) []pendingEvent {
+	var events []pendingEvent
+	for i := len(p.peers) - 1; i >= 0; i-- {
+		peer := p.peers[i]
+		if peer == nil || peer.Source != PeerSourceInboundConn || peer.State != PeerStateWarm {
+			continue
+		}
+		shouldPrune, reason, reasonLabel, cooldownDuration, applyCooldown := p.inboundPruneDecisionLocked(peer, now)
+		if !shouldPrune {
+			continue
+		}
+		oldSource := peer.Source
+		oldConn := clonePeerConnection(peer.Connection)
+		if peer.Connection != nil {
+			events = p.appendChainSelectionEventsLocked(
+				events,
+				p.bootstrapExited,
+				oldSource,
+				oldConn,
+				nil,
+			)
+			events = append(events, pendingEvent{
+				eventType: connmanager.ConnectionRecycleRequestedEventType,
+				data: connmanager.ConnectionRecycleRequestedEvent{
+					ConnectionId: peer.Connection.Id,
+					ConnKey:      peer.NormalizedAddress,
+					Reason:       reason,
+				},
+			})
+		}
+		if applyCooldown {
+			p.denyList[peer.NormalizedAddress] = now.Add(cooldownDuration)
+		}
+		p.config.Logger.Info(
+			"pruned inbound warm peer",
+			"address", peer.Address,
+			"reason", reason,
+			"inbound_short_lived_count", peer.InboundShortLivedCount,
+			"last_inbound_disconnect", peer.LastInboundDisconnect,
+			"last_inbound_session_duration", peer.LastInboundSessionDuration,
+			"prune_after", p.config.InboundPruneAfter,
+			"cooldown_applied", applyCooldown,
+			"cooldown_duration", cooldownDuration,
+		)
+		events = append(events, pendingEvent{
+			eventType: PeerRemovedEventType,
+			data: PeerStateChangeEvent{
+				Address: peer.Address,
+				Reason:  reason,
+			},
+		})
+		p.peers = slices.Delete(p.peers, i, i+1)
+		p.inboundPruned++
+		*removedCount++
+		if p.metrics != nil {
+			p.metrics.inboundPruned.Inc()
+			p.metrics.inboundPrunedByReason.WithLabelValues(reasonLabel).Inc()
+		}
+	}
+	return events
+}
+
+func (p *PeerGovernor) inboundPruneDecisionLocked(
+	peer *Peer,
+	now time.Time,
+) (
+	shouldPrune bool,
+	reason, reasonLabel string,
+	cooldownDuration time.Duration,
+	applyCooldown bool,
+) {
+	reason = "inbound idle or unhelpful past prune threshold"
+	reasonLabel = "idle_unhelpful"
+	if peer == nil || peer.Source != PeerSourceInboundConn || peer.State != PeerStateWarm {
+		return false, "", "", 0, false
+	}
+	if flapping, multiplier := p.inboundFlappingStateLocked(peer, now); flapping {
+		cooldownDuration = p.config.InboundCooldown * time.Duration(multiplier)
+		// Keep cooldown at least as long as the normal deny duration.
+		if cooldownDuration < p.config.DenyDuration {
+			cooldownDuration = p.config.DenyDuration
+		}
+		reason = "inbound flapping cooldown"
+		reasonLabel = "flapping_cooldown"
+		applyCooldown = true
+		return true, reason, reasonLabel, cooldownDuration, applyCooldown
+	}
+	lastSignal := peer.FirstSeen
+	if peer.LastActivity.After(lastSignal) {
+		lastSignal = peer.LastActivity
+	}
+	if peer.ChainSyncLastUpdate.After(lastSignal) {
+		lastSignal = peer.ChainSyncLastUpdate
+	}
+	if peer.LastBlockFetchTime.After(lastSignal) {
+		lastSignal = peer.LastBlockFetchTime
+	}
+	if peer.LastInboundDisconnect.After(lastSignal) {
+		lastSignal = peer.LastInboundDisconnect
+	}
+	if peer.ConnectedAt.After(lastSignal) {
+		lastSignal = peer.ConnectedAt
+	}
+	if lastSignal.IsZero() || now.Sub(lastSignal) < p.config.InboundPruneAfter {
+		return false, reason, reasonLabel, cooldownDuration, applyCooldown
+	}
+	if p.isInboundEligibleForHot(peer) {
+		return false, reason, reasonLabel, cooldownDuration, applyCooldown
+	}
+	return true, reason, reasonLabel, cooldownDuration, applyCooldown
 }

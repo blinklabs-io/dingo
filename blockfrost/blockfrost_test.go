@@ -35,10 +35,14 @@ func intPtr(v int) *int {
 type mockNode struct {
 	chainTip               ChainTipInfo
 	block                  BlockInfo
+	blockByID              BlockInfo
 	txHashes               []string
 	epoch                  EpochInfo
 	params                 ProtocolParamsInfo
 	epochParams            ProtocolParamsInfo
+	network                NetworkInfo
+	networkEras            []NetworkEraInfo
+	genesis                GenesisInfo
 	pools                  []PoolExtendedInfo
 	asset                  AssetInfo
 	addressUTXOs           []AddressUTXOInfo
@@ -51,10 +55,14 @@ type mockNode struct {
 	metadataCBORTotal      int
 	chainTipErr            error
 	blockErr               error
+	blockByIDErr           error
 	txHashesErr            error
 	epochErr               error
 	paramsErr              error
 	epochParamsErr         error
+	networkErr             error
+	networkErasErr         error
+	genesisErr             error
 	poolsErr               error
 	assetErr               error
 	addressUTXOsErr        error
@@ -73,6 +81,12 @@ func (m *mockNode) LatestBlock() (
 	BlockInfo, error,
 ) {
 	return m.block, m.blockErr
+}
+
+func (m *mockNode) BlockByHashOrNumber(
+	_ string,
+) (BlockInfo, error) {
+	return m.blockByID, m.blockByIDErr
 }
 
 func (m *mockNode) LatestBlockTxHashes() (
@@ -97,6 +111,24 @@ func (m *mockNode) EpochProtocolParams(
 	_ uint64,
 ) (ProtocolParamsInfo, error) {
 	return m.epochParams, m.epochParamsErr
+}
+
+func (m *mockNode) Network() (
+	NetworkInfo, error,
+) {
+	return m.network, m.networkErr
+}
+
+func (m *mockNode) NetworkEras() (
+	[]NetworkEraInfo, error,
+) {
+	return m.networkEras, m.networkErasErr
+}
+
+func (m *mockNode) Genesis() (
+	GenesisInfo, error,
+) {
+	return m.genesis, m.genesisErr
 }
 
 func (m *mockNode) PoolsExtended() (
@@ -289,6 +321,59 @@ func TestHandleLatestBlock(t *testing.T) {
 	assert.Equal(t, "pool1xyz", resp.SlotLeader)
 	assert.Equal(t, "prev123", resp.PreviousBlock)
 	assert.Equal(t, uint64(10), resp.Confirmations)
+}
+
+func TestHandleBlockByHashOrNumber(t *testing.T) {
+	mock := &mockNode{
+		blockByID: BlockInfo{
+			Hash:          "abc123",
+			Slot:          12345,
+			Epoch:         10,
+			EpochSlot:     345,
+			Height:        1000,
+			Time:          1700000000,
+			Size:          4096,
+			TxCount:       5,
+			SlotLeader:    "pool1...",
+			PreviousBlock: "prevhash",
+			Confirmations: 7,
+		},
+	}
+	b := newTestBlockfrost(mock)
+
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/api/v0/blocks/1000",
+		nil,
+	)
+	req.SetPathValue("hash_or_number", "1000")
+	w := httptest.NewRecorder()
+	b.handleBlock(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	var resp BlockResponse
+	err := json.NewDecoder(w.Body).Decode(&resp)
+	require.NoError(t, err)
+	assert.Equal(t, "abc123", resp.Hash)
+	assert.Equal(t, uint64(1000), resp.Height)
+	assert.Equal(t, uint64(7), resp.Confirmations)
+}
+
+func TestHandleBlockNotFound(t *testing.T) {
+	mock := &mockNode{blockByIDErr: ErrBlockNotFound}
+	b := newTestBlockfrost(mock)
+
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/api/v0/blocks/999999",
+		nil,
+	)
+	req.SetPathValue("hash_or_number", "999999")
+	w := httptest.NewRecorder()
+	b.handleBlock(w, req)
+
+	assert.Equal(t, http.StatusNotFound, w.Code)
 }
 
 func TestHandleAsset(t *testing.T) {
@@ -805,7 +890,22 @@ func TestHandleEpochParamsNotFound(t *testing.T) {
 }
 
 func TestHandleNetwork(t *testing.T) {
-	mock := &mockNode{}
+	mock := &mockNode{
+		network: NetworkInfo{
+			Supply: NetworkSupplyInfo{
+				Max:         "45000000000000000",
+				Total:       "33000000000000000",
+				Circulating: "32000000000000000",
+				Locked:      "0",
+				Treasury:    "500000000000",
+				Reserves:    "12000000000000000",
+			},
+			Stake: NetworkStakeInfo{
+				Live:   "25000000000000000",
+				Active: "24000000000000000",
+			},
+		},
+	}
 	b := newTestBlockfrost(mock)
 
 	req := httptest.NewRequest(
@@ -828,6 +928,90 @@ func TestHandleNetwork(t *testing.T) {
 	)
 	assert.NotEmpty(t, resp.Stake.Live)
 	assert.NotEmpty(t, resp.Stake.Active)
+	assert.Equal(t, "500000000000", resp.Supply.Treasury)
+	assert.Equal(t, "12000000000000000", resp.Supply.Reserves)
+}
+
+func TestHandleNetworkEras(t *testing.T) {
+	mock := &mockNode{
+		networkEras: []NetworkEraInfo{
+			{
+				Era: "Byron",
+				Start: NetworkEraBoundInfo{
+					Time:  1506203091,
+					Slot:  0,
+					Epoch: 0,
+				},
+				End: &NetworkEraBoundInfo{
+					Time:  1563999616,
+					Slot:  4492800,
+					Epoch: 208,
+				},
+				Params: NetworkEraParamsInfo{
+					EpochLength: 21600,
+					SlotLength:  20,
+					SafeZone:    4320,
+				},
+			},
+		},
+	}
+	b := newTestBlockfrost(mock)
+
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/api/v0/network/eras",
+		nil,
+	)
+	w := httptest.NewRecorder()
+	b.handleNetworkEras(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	var resp []NetworkEraResponse
+	err := json.NewDecoder(w.Body).Decode(&resp)
+	require.NoError(t, err)
+	require.Len(t, resp, 1)
+	assert.Equal(t, "Byron", resp[0].Era)
+	assert.Equal(t, uint64(0), resp[0].Start.Epoch)
+	require.NotNil(t, resp[0].End)
+	assert.Equal(t, uint64(208), resp[0].End.Epoch)
+	assert.Equal(t, uint64(21600), resp[0].Parameters.EpochLength)
+	assert.Equal(t, uint64(4320), resp[0].Parameters.SafeZone)
+}
+
+func TestHandleGenesis(t *testing.T) {
+	mock := &mockNode{
+		genesis: GenesisInfo{
+			ActiveSlotsCoefficient: 0.05,
+			UpdateQuorum:           5,
+			MaxLovelaceSupply:      "45000000000000000",
+			NetworkMagic:           764824073,
+			EpochLength:            432000,
+			SystemStart:            1506203091,
+			SlotsPerKESPeriod:      129600,
+			SlotLength:             1,
+			MaxKESEvolutions:       62,
+			SecurityParam:          2160,
+		},
+	}
+	b := newTestBlockfrost(mock)
+
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/api/v0/genesis",
+		nil,
+	)
+	w := httptest.NewRecorder()
+	b.handleGenesis(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	var resp GenesisResponse
+	err := json.NewDecoder(w.Body).Decode(&resp)
+	require.NoError(t, err)
+	assert.Equal(t, "45000000000000000", resp.MaxLovelaceSupply)
+	assert.Equal(t, 764824073, resp.NetworkMagic)
+	assert.Equal(t, 432000, resp.EpochLength)
 }
 
 func TestStopIdempotent(t *testing.T) {

@@ -37,6 +37,24 @@ import (
 // each output's address and checking for Byron + redeem — lives here
 // because that knowledge is ledger-domain.
 //
+// Divergence from cardano-ledger:
+//
+// Haskell's Shelley ledger stashes the AVVM UTxO set into a dedicated
+// `stashedAVVMAddresses` NewEpochState field at genesis-build time, and
+// Allegra translation consumes that stash via
+// `shelleyToAllegraAVVMsToDelete = stashedAVVMAddresses`, then discards
+// the field. The comment at
+// cardano-ledger/eras/allegra/.../Translation.hs:53-54 is explicit about
+// the reason: a full UTxO scan at the boundary would be prohibitive on a
+// disk-persisted state. Dingo scans the live UTxO instead, which is
+// mainnet-equivalent because no AVVM UTxOs were spent before the
+// Allegra boundary so the live AVVM set equals the stashed set there.
+// On a hypothetical chain where AVVM UTxOs ARE spent pre-Allegra, the
+// scan-based approach is still correct — the stash variant gives the
+// same answer because spent UTxOs are absent from both views — so the
+// divergence is purely an implementation choice driven by dingo's
+// SQLite-backed UTxO model, not a semantic difference.
+//
 // Returns the count and total lovelace of the rows marked deleted.
 func (ls *LedgerState) removeAvvmUtxos(
 	txn *database.Txn,

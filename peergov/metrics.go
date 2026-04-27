@@ -54,6 +54,7 @@ type peerGovernorMetrics struct {
 	inboundArrivalsTotal   prometheus.Counter
 	inboundTopologyMatched prometheus.Gauge
 	inboundDuplexHeld      prometheus.Gauge
+	inboundPrunedByReason  *prometheus.CounterVec
 }
 
 func (p *PeerGovernor) initMetrics() {
@@ -204,6 +205,13 @@ func (p *PeerGovernor) initMetrics() {
 			Name: "cardano_node_metrics_peerSelection_InboundDuplexHeld",
 			Help: "current number of inbound peers on full-duplex connections",
 		},
+	)
+	p.metrics.inboundPrunedByReason = promautoFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "cardano_node_metrics_peerSelection_InboundPrunedByReason",
+			Help: "total inbound peers pruned by policy reason",
+		},
+		[]string{"reason"},
 	)
 }
 

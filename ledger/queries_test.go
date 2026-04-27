@@ -24,6 +24,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/hardfork"
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -161,6 +162,177 @@ func TestQueryShelleyUtxoByTxIn_EmptySlice(t *testing.T) {
 	m, ok := arr[0].(map[olocalstatequery.UtxoId]ledger.TransactionOutput)
 	require.True(t, ok, "expected UtxoId map")
 	require.Empty(t, m)
+}
+
+// --- ShelleyFilteredDelegationAndRewardAccountsQuery -----------------------
+
+// stakeCred28 builds a 28-byte stake-credential hash from a single byte
+// pattern, so test data is easy to read at a glance.
+func stakeCred28(b byte) []byte {
+	out := make([]byte, 28)
+	for i := range out {
+		out[i] = b
+	}
+	return out
+}
+
+func toBlake2b224(b []byte) lcommon.Blake2b224 {
+	var h lcommon.Blake2b224
+	copy(h[:], b)
+	return h
+}
+
+// unwrapFilteredDelegationResult unpacks the
+// []any{[]any{delegations, rewards}} wire shape and asserts both maps are
+// of the expected typed shape.
+func unwrapFilteredDelegationResult(
+	t *testing.T,
+	result any,
+) (map[olocalstatequery.StakeCredential]lcommon.Blake2b224,
+	map[olocalstatequery.StakeCredential]uint64,
+) {
+	t.Helper()
+	outer, ok := result.([]any)
+	require.True(t, ok, "expected outer []any")
+	require.Len(t, outer, 1, "expected outer array of length 1")
+	inner, ok := outer[0].([]any)
+	require.True(t, ok, "expected inner []any")
+	require.Len(t, inner, 2, "expected inner array [delegations, rewards]")
+	dels, ok := inner[0].(map[olocalstatequery.StakeCredential]lcommon.Blake2b224)
+	require.True(t, ok, "expected delegations map type")
+	rwds, ok := inner[1].(map[olocalstatequery.StakeCredential]uint64)
+	require.True(t, ok, "expected rewards map type")
+	return dels, rwds
+}
+
+func TestQueryShelleyFilteredDelegationAndRewardAccounts_EmptyCreds(t *testing.T) {
+	ls := &LedgerState{}
+	result, err := ls.queryShelleyFilteredDelegationAndRewardAccounts(nil)
+	require.NoError(t, err)
+	dels, rwds := unwrapFilteredDelegationResult(t, result)
+	assert.Empty(t, dels, "delegations map should be empty for empty input")
+	assert.Empty(t, rwds, "rewards map should be empty for empty input")
+}
+
+func TestQueryShelleyFilteredDelegationAndRewardAccounts_UnknownCred(t *testing.T) {
+	db := newTestDB(t)
+	ls := &LedgerState{db: db}
+
+	cred := olocalstatequery.StakeCredential{
+		Tag:   0,
+		Bytes: toBlake2b224(stakeCred28(0xAA)),
+	}
+	result, err := ls.queryShelleyFilteredDelegationAndRewardAccounts(
+		[]olocalstatequery.StakeCredential{cred},
+	)
+	require.NoError(t, err)
+	dels, rwds := unwrapFilteredDelegationResult(t, result)
+	assert.Empty(t, dels, "unknown cred should not appear in delegations")
+	assert.Empty(t, rwds, "unknown cred should not appear in rewards")
+}
+
+func TestQueryShelleyFilteredDelegationAndRewardAccounts_RegisteredUndelegated(t *testing.T) {
+	db := newTestDB(t)
+	stakeKey := stakeCred28(0xAA)
+	require.NoError(t, db.Metadata().CreateAccount(nil, &models.Account{
+		StakingKey: stakeKey,
+		Pool:       nil, // undelegated
+		Reward:     types.Uint64(1_000_000),
+		Active:     true,
+	}))
+	ls := &LedgerState{db: db}
+
+	cred := olocalstatequery.StakeCredential{
+		Tag:   0,
+		Bytes: toBlake2b224(stakeKey),
+	}
+	result, err := ls.queryShelleyFilteredDelegationAndRewardAccounts(
+		[]olocalstatequery.StakeCredential{cred},
+	)
+	require.NoError(t, err)
+	dels, rwds := unwrapFilteredDelegationResult(t, result)
+
+	assert.NotContains(t, dels, cred,
+		"undelegated account must not appear in delegations map")
+	assert.Equal(t, uint64(1_000_000), rwds[cred],
+		"reward balance must be returned for registered account")
+}
+
+func TestQueryShelleyFilteredDelegationAndRewardAccounts_RegisteredDelegated(t *testing.T) {
+	db := newTestDB(t)
+	stakeKey := stakeCred28(0xBB)
+	poolHash := stakeCred28(0xCC) // 28 bytes is also pool key hash size
+	require.NoError(t, db.Metadata().CreateAccount(nil, &models.Account{
+		StakingKey: stakeKey,
+		Pool:       poolHash,
+		Reward:     types.Uint64(2_500_000),
+		Active:     true,
+	}))
+	ls := &LedgerState{db: db}
+
+	cred := olocalstatequery.StakeCredential{
+		Tag:   0,
+		Bytes: toBlake2b224(stakeKey),
+	}
+	result, err := ls.queryShelleyFilteredDelegationAndRewardAccounts(
+		[]olocalstatequery.StakeCredential{cred},
+	)
+	require.NoError(t, err)
+	dels, rwds := unwrapFilteredDelegationResult(t, result)
+
+	assert.Equal(t, toBlake2b224(poolHash), dels[cred],
+		"delegated account must report its pool")
+	assert.Equal(t, uint64(2_500_000), rwds[cred],
+		"reward balance must be returned for delegated account")
+}
+
+func TestQueryShelleyFilteredDelegationAndRewardAccounts_Mixed(t *testing.T) {
+	db := newTestDB(t)
+
+	delegatedKey := stakeCred28(0x01)
+	delegatedPool := stakeCred28(0x10)
+	require.NoError(t, db.Metadata().CreateAccount(nil, &models.Account{
+		StakingKey: delegatedKey,
+		Pool:       delegatedPool,
+		Reward:     types.Uint64(100),
+		Active:     true,
+	}))
+
+	undelegatedKey := stakeCred28(0x02)
+	require.NoError(t, db.Metadata().CreateAccount(nil, &models.Account{
+		StakingKey: undelegatedKey,
+		Pool:       nil,
+		Reward:     types.Uint64(200),
+		Active:     true,
+	}))
+
+	unknownKey := stakeCred28(0x03) // never inserted
+
+	ls := &LedgerState{db: db}
+
+	creds := []olocalstatequery.StakeCredential{
+		{Tag: 0, Bytes: toBlake2b224(delegatedKey)},
+		{Tag: 0, Bytes: toBlake2b224(undelegatedKey)},
+		{Tag: 0, Bytes: toBlake2b224(unknownKey)},
+	}
+	result, err := ls.queryShelleyFilteredDelegationAndRewardAccounts(creds)
+	require.NoError(t, err)
+	dels, rwds := unwrapFilteredDelegationResult(t, result)
+
+	// Delegated cred → in both maps.
+	assert.Equal(t, toBlake2b224(delegatedPool), dels[creds[0]])
+	assert.Equal(t, uint64(100), rwds[creds[0]])
+
+	// Undelegated cred → in rewards only.
+	assert.NotContains(t, dels, creds[1])
+	assert.Equal(t, uint64(200), rwds[creds[1]])
+
+	// Unknown cred → in neither.
+	assert.NotContains(t, dels, creds[2])
+	assert.NotContains(t, rwds, creds[2])
+
+	assert.Len(t, dels, 1, "exactly one delegation expected")
+	assert.Len(t, rwds, 2, "exactly two reward entries expected")
 }
 
 func TestEpochPicoseconds(t *testing.T) {

@@ -28,6 +28,10 @@ type BlockfrostNode interface {
 	// block on the chain.
 	LatestBlock() (BlockInfo, error)
 
+	// BlockByHashOrNumber returns information about a block
+	// identified by a 64-character hex hash or decimal height.
+	BlockByHashOrNumber(id string) (BlockInfo, error)
+
 	// LatestBlockTxHashes returns the transaction hashes
 	// for the latest block.
 	LatestBlockTxHashes() ([]string, error)
@@ -43,6 +47,15 @@ type BlockfrostNode interface {
 	// EpochProtocolParams returns protocol parameters for a
 	// specific epoch.
 	EpochProtocolParams(epoch uint64) (ProtocolParamsInfo, error)
+
+	// Network returns current network supply and stake information.
+	Network() (NetworkInfo, error)
+
+	// NetworkEras returns hard-fork era summaries.
+	NetworkEras() ([]NetworkEraInfo, error)
+
+	// Genesis returns Shelley genesis configuration values.
+	Genesis() (GenesisInfo, error)
 
 	// PoolsExtended returns the current active pools with
 	// extended details.
@@ -148,6 +161,64 @@ type ProtocolParamsInfo struct {
 	MaxValSize          string
 	CollateralPercent   int
 	MaxCollateralInputs int
+}
+
+// NetworkInfo holds network supply and stake data needed by the API.
+type NetworkInfo struct {
+	Supply NetworkSupplyInfo
+	Stake  NetworkStakeInfo
+}
+
+// NetworkSupplyInfo holds network supply data needed by the API.
+type NetworkSupplyInfo struct {
+	Max         string
+	Total       string
+	Circulating string
+	Locked      string
+	Treasury    string
+	Reserves    string
+}
+
+// NetworkStakeInfo holds network stake data needed by the API.
+type NetworkStakeInfo struct {
+	Live   string
+	Active string
+}
+
+// NetworkEraInfo holds a Blockfrost hard-fork era summary.
+type NetworkEraInfo struct {
+	Era    string
+	Start  NetworkEraBoundInfo
+	End    *NetworkEraBoundInfo
+	Params NetworkEraParamsInfo
+}
+
+// NetworkEraBoundInfo holds an era boundary.
+type NetworkEraBoundInfo struct {
+	Time  int64
+	Slot  uint64
+	Epoch uint64
+}
+
+// NetworkEraParamsInfo holds era timing parameters.
+type NetworkEraParamsInfo struct {
+	EpochLength uint64
+	SlotLength  uint64
+	SafeZone    uint64
+}
+
+// GenesisInfo holds Shelley genesis configuration values.
+type GenesisInfo struct {
+	ActiveSlotsCoefficient float32
+	UpdateQuorum           int
+	MaxLovelaceSupply      string
+	NetworkMagic           int
+	EpochLength            int
+	SystemStart            int
+	SlotsPerKESPeriod      int
+	SlotLength             int
+	MaxKESEvolutions       int
+	SecurityParam          int
 }
 
 // PoolExtendedInfo holds pool data needed by the

@@ -122,6 +122,42 @@ type NetworkStake struct {
 	Active string `json:"active"`
 }
 
+// NetworkEraResponse represents a Blockfrost era summary.
+type NetworkEraResponse struct {
+	Era        string               `json:"era,omitempty"`
+	Start      NetworkEraBound      `json:"start"`
+	End        *NetworkEraBound     `json:"end"`
+	Parameters NetworkEraParameters `json:"parameters"`
+}
+
+// NetworkEraBound represents an era boundary.
+type NetworkEraBound struct {
+	Time  int64  `json:"time"`
+	Slot  uint64 `json:"slot"`
+	Epoch uint64 `json:"epoch"`
+}
+
+// NetworkEraParameters represents era timing parameters.
+type NetworkEraParameters struct {
+	EpochLength uint64 `json:"epoch_length"`
+	SlotLength  uint64 `json:"slot_length"`
+	SafeZone    uint64 `json:"safe_zone"`
+}
+
+// GenesisResponse represents Blockfrost genesis info.
+type GenesisResponse struct {
+	ActiveSlotsCoefficient float32 `json:"active_slots_coefficient"`
+	UpdateQuorum           int     `json:"update_quorum"`
+	MaxLovelaceSupply      string  `json:"max_lovelace_supply"`
+	NetworkMagic           int     `json:"network_magic"`
+	EpochLength            int     `json:"epoch_length"`
+	SystemStart            int     `json:"system_start"`
+	SlotsPerKESPeriod      int     `json:"slots_per_kes_period"`
+	SlotLength             int     `json:"slot_length"`
+	MaxKESEvolutions       int     `json:"max_kes_evolutions"`
+	SecurityParam          int     `json:"security_param"`
+}
+
 // AddressAmountResponse represents a Blockfrost address
 // amount object.
 type AddressAmountResponse struct {

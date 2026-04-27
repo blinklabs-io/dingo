@@ -95,6 +95,35 @@ func (d *MetadataStorePostgres) GetUtxosAddedAfterSlot(
 	return ret, nil
 }
 
+// GetLiveUtxosBySlot returns the references of all live UTxOs (deleted_slot = 0)
+// created at the given slot. Only TxId and OutputIdx are populated.
+func (d *MetadataStorePostgres) GetLiveUtxosBySlot(
+	slot uint64,
+	txn types.Txn,
+) ([]models.UtxoId, error) {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return nil, err
+	}
+	var rows []struct {
+		TxId      []byte `gorm:"column:tx_id"`
+		OutputIdx uint32 `gorm:"column:output_idx"`
+	}
+	result := db.
+		Model(&models.Utxo{}).
+		Where("deleted_slot = 0 AND added_slot = ?", slot).
+		Select("tx_id", "output_idx").
+		Find(&rows)
+	if result.Error != nil {
+		return nil, result.Error
+	}
+	ret := make([]models.UtxoId, len(rows))
+	for i, r := range rows {
+		ret[i] = models.UtxoId{Hash: r.TxId, Idx: r.OutputIdx}
+	}
+	return ret, nil
+}
+
 // GetUtxosDeletedBeforeSlot returns a list of Utxos marked as deleted before a given slot
 func (d *MetadataStorePostgres) GetUtxosDeletedBeforeSlot(
 	slot uint64,

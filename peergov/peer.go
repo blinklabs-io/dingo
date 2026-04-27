@@ -97,6 +97,7 @@ type Peer struct {
 	ConnectionStability     float64 // Connection stability score 0..1
 	ReconnectDelay          time.Duration
 	ConnectedAt             time.Time // When current outbound connection was established
+	InboundConnectedAt      time.Time // When current inbound connection was established
 	PerformanceScore        float64   // Composite score from the above metrics
 	ReconnectCount          int
 	Reconnecting            bool // Whether a reconnect goroutine is active for this peer
@@ -136,14 +137,16 @@ type Peer struct {
 	// from Connection.IsClient because it is retained across brief
 	// reconnects within the provisional window.
 	InboundDuplex bool
-	// InboundArrivals is the number of distinct inbound connection
-	// events observed for this peer identity since the process started.
-	// A value > 1 indicates a repeat arrival (the peer was already
-	// known when the event fired).
-	InboundArrivals uint32
-	// LastInboundArrival is the wall-clock time of the most recent
-	// inbound connection event matched to this peer.
-	LastInboundArrival time.Time
+	// InboundShortLivedCount counts consecutive short-lived inbound
+	// sessions (duration < minStableConnectionDuration). This drives
+	// flapping cooldown decisions.
+	InboundShortLivedCount uint32
+	// LastInboundDisconnect is when the most recent inbound connection
+	// for this peer closed.
+	LastInboundDisconnect time.Time
+	// LastInboundSessionDuration is the duration of the most recently
+	// closed inbound session.
+	LastInboundSessionDuration time.Duration
 	// InboundTopologyMatch records the GroupID of the configured
 	// topology peer that an inbound arrival was identified as, via the
 	// safe host-match rule in resolveInboundIdentity. Empty when no

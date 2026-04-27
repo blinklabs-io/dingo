@@ -25,6 +25,33 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestLedgerViewUnimplementedMethodsReturnSentinelError(t *testing.T) {
+	lv := &LedgerView{}
+
+	rewards, err := lv.CalculateRewards(
+		lcommon.AdaPots{},
+		lcommon.RewardSnapshot{},
+		lcommon.RewardParameters{},
+	)
+	require.ErrorIs(t, err, ErrNotImplemented)
+	require.Nil(t, rewards)
+
+	snapshot, err := lv.GetRewardSnapshot(0)
+	require.ErrorIs(t, err, ErrNotImplemented)
+	require.Equal(t, lcommon.RewardSnapshot{}, snapshot)
+
+	err = lv.UpdateAdaPots(lcommon.AdaPots{})
+	require.ErrorIs(t, err, ErrNotImplemented)
+
+	balance, err := lv.RewardAccountBalance(lcommon.Credential{})
+	require.ErrorIs(t, err, ErrNotImplemented)
+	require.Nil(t, balance)
+
+	treasury, err := lv.TreasuryValue()
+	require.ErrorIs(t, err, ErrNotImplemented)
+	require.Zero(t, treasury)
+}
+
 func TestExtractCostModelsFromPParams_Nil(t *testing.T) {
 	result := extractCostModelsFromPParams(nil)
 	require.Empty(t, result)
