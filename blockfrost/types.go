@@ -139,15 +139,15 @@ type NetworkEraBound struct {
 
 // NetworkEraParameters represents era timing parameters.
 type NetworkEraParameters struct {
-	EpochLength uint64  `json:"epoch_length"`
-	SlotLength  uint64  `json:"slot_length"`
-	SafeZone    *uint64 `json:"safe_zone"`
+	EpochLength uint64 `json:"epoch_length"`
+	SlotLength  uint64 `json:"slot_length"`
+	SafeZone    uint64 `json:"safe_zone"`
 }
 
 // GenesisResponse represents Blockfrost genesis info.
 type GenesisResponse struct {
 	ActiveSlotsCoefficient float32 `json:"active_slots_coefficient"`
-	UpdateQuorum           float32 `json:"update_quorum"`
+	UpdateQuorum           int     `json:"update_quorum"`
 	MaxLovelaceSupply      string  `json:"max_lovelace_supply"`
 	NetworkMagic           int     `json:"network_magic"`
 	EpochLength            int     `json:"epoch_length"`

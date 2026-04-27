@@ -204,13 +204,13 @@ type NetworkEraBoundInfo struct {
 type NetworkEraParamsInfo struct {
 	EpochLength uint64
 	SlotLength  uint64
-	SafeZone    *uint64
+	SafeZone    uint64
 }
 
 // GenesisInfo holds Shelley genesis configuration values.
 type GenesisInfo struct {
 	ActiveSlotsCoefficient float32
-	UpdateQuorum           float32
+	UpdateQuorum           int
 	MaxLovelaceSupply      string
 	NetworkMagic           int
 	EpochLength            int

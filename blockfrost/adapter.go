@@ -412,13 +412,16 @@ func (a *NodeAdapter) Network() (NetworkInfo, error) {
 		treasury = uint64(state.Treasury)
 		reserves = uint64(state.Reserves)
 	}
+	// TODO: Wire locked supply from script-address UTxOs and ledger deposits,
+	// then subtract it from circulating supply.
+	locked := uint64(0)
 	total := uint64(0)
 	if reserves <= maxSupply {
 		total = maxSupply - reserves
 	}
 	circulating := uint64(0)
-	if treasury <= total {
-		circulating = total - treasury
+	if treasury+locked <= total {
+		circulating = total - treasury - locked
 	}
 
 	activeStakeEpoch := uint64(0)
@@ -452,7 +455,7 @@ func (a *NodeAdapter) Network() (NetworkInfo, error) {
 				circulating,
 				10,
 			),
-			Locked:   "0",
+			Locked:   strconv.FormatUint(locked, 10),
 			Treasury: strconv.FormatUint(treasury, 10),
 			Reserves: strconv.FormatUint(reserves, 10),
 		},
@@ -481,6 +484,17 @@ func (a *NodeAdapter) NetworkEras() ([]NetworkEraInfo, error) {
 		}
 		first := epochs[0]
 		last := epochs[len(epochs)-1]
+		params, err := eras.BuildEraParams(
+			a.ledgerState.CardanoNodeConfig(),
+			era,
+		)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"build era params for %s: %w",
+				era.Name,
+				err,
+			)
+		}
 		startTime, err := a.ledgerState.SlotToTime(first.StartSlot)
 		if err != nil {
 			return nil, fmt.Errorf(
@@ -514,7 +528,7 @@ func (a *NodeAdapter) NetworkEras() ([]NetworkEraInfo, error) {
 			Params: NetworkEraParamsInfo{
 				EpochLength: uint64(last.LengthInSlots),
 				SlotLength:  slotLengthSeconds,
-				SafeZone:    nil,
+				SafeZone:    params.SafeZoneSlots,
 			},
 		})
 	}
@@ -529,9 +543,13 @@ func (a *NodeAdapter) Genesis() (GenesisInfo, error) {
 	}
 	genesis := nodeCfg.ShelleyGenesis()
 	slotLength, _ := genesis.SlotLength.Float64()
+	slotLengthSeconds := int(math.Round(slotLength))
+	if slotLength > 0 && slotLengthSeconds == 0 {
+		slotLengthSeconds = 1
+	}
 	return GenesisInfo{
 		ActiveSlotsCoefficient: float32(a.ledgerState.ActiveSlotCoeff()),
-		UpdateQuorum:           float32(genesis.UpdateQuorum),
+		UpdateQuorum:           genesis.UpdateQuorum,
 		MaxLovelaceSupply: strconv.FormatUint(
 			genesis.MaxLovelaceSupply,
 			10,
@@ -540,7 +558,7 @@ func (a *NodeAdapter) Genesis() (GenesisInfo, error) {
 		EpochLength:       genesis.EpochLength,
 		SystemStart:       int(genesis.SystemStart.Unix()),
 		SlotsPerKESPeriod: genesis.SlotsPerKESPeriod,
-		SlotLength:        int(slotLength),
+		SlotLength:        slotLengthSeconds,
 		MaxKESEvolutions:  genesis.MaxKESEvolutions,
 		SecurityParam:     genesis.SecurityParam,
 	}, nil

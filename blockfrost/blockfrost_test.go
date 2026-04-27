@@ -933,7 +933,6 @@ func TestHandleNetwork(t *testing.T) {
 }
 
 func TestHandleNetworkEras(t *testing.T) {
-	safeZone := uint64(4320)
 	mock := &mockNode{
 		networkEras: []NetworkEraInfo{
 			{
@@ -951,7 +950,7 @@ func TestHandleNetworkEras(t *testing.T) {
 				Params: NetworkEraParamsInfo{
 					EpochLength: 21600,
 					SlotLength:  20,
-					SafeZone:    &safeZone,
+					SafeZone:    4320,
 				},
 			},
 		},
@@ -977,6 +976,7 @@ func TestHandleNetworkEras(t *testing.T) {
 	require.NotNil(t, resp[0].End)
 	assert.Equal(t, uint64(208), resp[0].End.Epoch)
 	assert.Equal(t, uint64(21600), resp[0].Parameters.EpochLength)
+	assert.Equal(t, uint64(4320), resp[0].Parameters.SafeZone)
 }
 
 func TestHandleGenesis(t *testing.T) {
