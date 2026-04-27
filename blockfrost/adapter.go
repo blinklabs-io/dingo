@@ -127,6 +127,9 @@ func (a *NodeAdapter) BlockByHashOrNumber(
 			ErrInvalidBlockID,
 		)
 	}
+	// Blockfrost accepts Cardano block height here. Dingo's blob block index
+	// is 1-based while Cardano block heights are 0-based, so translate height
+	// to the internal index before lookup.
 	block, err = a.ledgerState.Database().BlockByIndex(
 		height+database.BlockInitialIndex,
 		nil,
