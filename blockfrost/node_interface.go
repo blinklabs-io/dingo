@@ -203,7 +203,7 @@ type NetworkEraBoundInfo struct {
 // NetworkEraParamsInfo holds era timing parameters.
 type NetworkEraParamsInfo struct {
 	EpochLength uint64
-	SlotLength  int64
+	SlotLength  uint64
 	SafeZone    *uint64
 }
 

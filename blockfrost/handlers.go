@@ -388,18 +388,7 @@ func (b *Blockfrost) handleGenesis(
 		)
 		return
 	}
-	writeJSON(w, http.StatusOK, GenesisResponse{
-		ActiveSlotsCoefficient: info.ActiveSlotsCoefficient,
-		UpdateQuorum:           info.UpdateQuorum,
-		MaxLovelaceSupply:      info.MaxLovelaceSupply,
-		NetworkMagic:           info.NetworkMagic,
-		EpochLength:            info.EpochLength,
-		SystemStart:            info.SystemStart,
-		SlotsPerKESPeriod:      info.SlotsPerKESPeriod,
-		SlotLength:             info.SlotLength,
-		MaxKESEvolutions:       info.MaxKESEvolutions,
-		SecurityParam:          info.SecurityParam,
-	})
+	writeJSON(w, http.StatusOK, GenesisResponse(info))
 }
 
 // handleAsset handles GET /api/v0/assets/{asset} and

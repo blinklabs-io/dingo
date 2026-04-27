@@ -140,7 +140,7 @@ type NetworkEraBound struct {
 // NetworkEraParameters represents era timing parameters.
 type NetworkEraParameters struct {
 	EpochLength uint64  `json:"epoch_length"`
-	SlotLength  int64   `json:"slot_length"`
+	SlotLength  uint64  `json:"slot_length"`
 	SafeZone    *uint64 `json:"safe_zone"`
 }
 

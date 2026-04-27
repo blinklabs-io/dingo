@@ -21,7 +21,6 @@ import (
 	"fmt"
 	"math"
 	"strconv"
-	"time"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
@@ -496,7 +495,7 @@ func (a *NodeAdapter) NetworkEras() ([]NetworkEraInfo, error) {
 				err,
 			)
 		}
-		slotLength := time.Duration(last.SlotLength) * time.Millisecond
+		slotLengthSeconds := uint64(last.SlotLength) / 1000
 		ret = append(ret, NetworkEraInfo{
 			Era: era.Name,
 			Start: NetworkEraBoundInfo{
@@ -511,7 +510,7 @@ func (a *NodeAdapter) NetworkEras() ([]NetworkEraInfo, error) {
 			},
 			Params: NetworkEraParamsInfo{
 				EpochLength: uint64(last.LengthInSlots),
-				SlotLength:  int64(slotLength / time.Second),
+				SlotLength:  slotLengthSeconds,
 				SafeZone:    nil,
 			},
 		})
