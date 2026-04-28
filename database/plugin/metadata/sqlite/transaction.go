@@ -19,6 +19,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -2241,13 +2242,21 @@ func (d *MetadataStoreSqlite) SetTransactionBatched(
 	// ------------------------------------------------------------------ //
 	// 1. Write transaction record immediately (needed for FK IDs)         //
 	// ------------------------------------------------------------------ //
+	var feeUint uint64
+	if txFee := tx.Fee(); txFee != nil {
+		if txFee.BitLen() > 64 {
+			feeUint = math.MaxUint64
+		} else {
+			feeUint = txFee.Uint64()
+		}
+	}
 	tmpTx := &models.Transaction{
 		Hash:       txHash,
 		Type:       tx.Type(),
 		BlockHash:  point.Hash,
 		BlockIndex: idx,
 		Slot:       point.Slot,
-		Fee:        types.Uint64(tx.Fee().Uint64()),
+		Fee:        types.Uint64(feeUint),
 		TTL:        types.Uint64(tx.TTL()),
 		Valid:      tx.IsValid(),
 	}

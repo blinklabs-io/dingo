@@ -2075,13 +2075,21 @@ func (d *MetadataStoreMysql) SetTransactionBatched(
 	// ------------------------------------------------------------------ //
 	// 1. Write transaction record immediately (needed for FK IDs)         //
 	// ------------------------------------------------------------------ //
+	var feeUint uint64
+	if txFee := tx.Fee(); txFee != nil {
+		if txFee.BitLen() > 64 {
+			feeUint = math.MaxUint64
+		} else {
+			feeUint = txFee.Uint64()
+		}
+	}
 	tmpTx := &models.Transaction{
 		Hash:       txHash,
 		Type:       tx.Type(),
 		BlockHash:  point.Hash,
 		BlockIndex: idx,
 		Slot:       point.Slot,
-		Fee:        types.Uint64(tx.Fee().Uint64()),
+		Fee:        types.Uint64(feeUint),
 		TTL:        types.Uint64(tx.TTL()),
 		Valid:      tx.IsValid(),
 	}
@@ -2103,12 +2111,34 @@ func (d *MetadataStoreMysql) SetTransactionBatched(
 	collateralReturn := tx.CollateralReturn()
 	produced := tx.Produced()
 
+	// For invalid transactions with collateral returns, fix indices via CBOR matching
+	// since Produced() uses enumerated indices rather than real transaction indices
+	var realIndexMap map[lcommon.Blake2b256]uint32
+	if !tx.IsValid() && collateralReturn != nil {
+		realIndexMap = make(map[lcommon.Blake2b256]uint32)
+		for idx, out := range tx.Outputs() {
+			if out != nil && idx <= int(^uint32(0)) {
+				// Hash CBOR for efficient map key
+				outputHash := lcommon.NewBlake2b256(out.Cbor())
+				//nolint:gosec // G115: idx bounds already checked above
+				realIndexMap[outputHash] = uint32(idx)
+			}
+		}
+	}
+
 	// Separate collateral return from regular outputs.
 	var colRetUtxo *models.Utxo
 	outputModels := make([]models.Utxo, 0, len(produced))
 	for _, utxo := range produced {
 		m := models.UtxoLedgerToModel(utxo, point.Slot)
 		if collateralReturn != nil && utxo.Output == collateralReturn {
+			// Fix collateral return index for invalid transactions
+			if realIndexMap != nil && m.Cbor != nil {
+				outputHash := lcommon.NewBlake2b256(m.Cbor)
+				if realIdx, ok := realIndexMap[outputHash]; ok {
+					m.OutputIdx = realIdx
+				}
+			}
 			colRetUtxo = &m
 			continue
 		}
@@ -2200,116 +2230,97 @@ func (d *MetadataStoreMysql) SetTransactionBatched(
 	// 3. Collateral / reference-input marker UPDATEs (immediate)         //
 	//    These update UTxOs that already exist from prior blocks.        //
 	// ------------------------------------------------------------------ //
-	if d.storageMode == types.StorageModeAPI {
-		// Fetch input UTxOs for address-indexing below.
-		for _, input := range tx.Inputs() {
+	if len(tx.Collateral()) > 0 {
+		var caseClauses []string
+		var whereConditions []string
+		var caseArgs []any
+		var whereArgs []any
+		for _, input := range tx.Collateral() {
 			inTxId := input.Id().Bytes()
 			inIdx := input.Index()
 			utxo, err := d.GetUtxo(inTxId, inIdx, txn)
 			if err != nil {
 				return fmt.Errorf(
-					"failed to fetch input UTxO (batched): %w",
+					"failed to fetch collateral UTxO (batched): %w",
 					err,
 				)
 			}
 			if utxo == nil {
 				continue
 			}
-			tmpTx.Inputs = append(tmpTx.Inputs, *utxo)
+			caseClauses = append(
+				caseClauses,
+				"WHEN tx_id = ? AND output_idx = ? THEN ?",
+			)
+			caseArgs = append(caseArgs, inTxId, inIdx, txHash)
+			whereConditions = append(
+				whereConditions,
+				"(tx_id = ? AND output_idx = ?)",
+			)
+			whereArgs = append(whereArgs, inTxId, inIdx)
+			tmpTx.Collateral = append(tmpTx.Collateral, *utxo)
 		}
-
-		if len(tx.Collateral()) > 0 {
-			var caseClauses []string
-			var whereConditions []string
-			var caseArgs []any
-			var whereArgs []any
-			for _, input := range tx.Collateral() {
-				inTxId := input.Id().Bytes()
-				inIdx := input.Index()
-				utxo, err := d.GetUtxo(inTxId, inIdx, txn)
-				if err != nil {
-					return fmt.Errorf(
-						"failed to fetch collateral UTxO (batched): %w",
-						err,
-					)
-				}
-				if utxo == nil {
-					continue
-				}
-				caseClauses = append(
-					caseClauses,
-					"WHEN tx_id = ? AND output_idx = ? THEN ?",
+		if len(caseClauses) > 0 {
+			args := append(caseArgs, whereArgs...)
+			sql := fmt.Sprintf(
+				"UPDATE utxo SET collateral_by_tx_id = CASE %s ELSE collateral_by_tx_id END WHERE %s",
+				strings.Join(caseClauses, " "),
+				strings.Join(whereConditions, " OR "),
+			)
+			if r := db.Exec(sql, args...); r.Error != nil {
+				return fmt.Errorf(
+					"batch update collateral (batched): %w",
+					r.Error,
 				)
-				caseArgs = append(caseArgs, inTxId, inIdx, txHash)
-				whereConditions = append(
-					whereConditions,
-					"(tx_id = ? AND output_idx = ?)",
-				)
-				whereArgs = append(whereArgs, inTxId, inIdx)
-				tmpTx.Collateral = append(tmpTx.Collateral, *utxo)
-			}
-			if len(caseClauses) > 0 {
-				args := append(caseArgs, whereArgs...)
-				sql := fmt.Sprintf(
-					"UPDATE utxo SET collateral_by_tx_id = CASE %s ELSE collateral_by_tx_id END WHERE %s",
-					strings.Join(caseClauses, " "),
-					strings.Join(whereConditions, " OR "),
-				)
-				if r := db.Exec(sql, args...); r.Error != nil {
-					return fmt.Errorf(
-						"batch update collateral (batched): %w",
-						r.Error,
-					)
-				}
 			}
 		}
+	}
 
-		if len(tx.ReferenceInputs()) > 0 {
-			var caseClauses []string
-			var whereConditions []string
-			var caseArgs []any
-			var whereArgs []any
-			for _, input := range tx.ReferenceInputs() {
-				inTxId := input.Id().Bytes()
-				inIdx := input.Index()
-				utxo, err := d.GetUtxo(inTxId, inIdx, txn)
-				if err != nil {
-					return fmt.Errorf(
-						"failed to fetch reference input UTxO (batched): %w",
-						err,
-					)
-				}
-				if utxo == nil {
-					continue
-				}
-				caseClauses = append(
-					caseClauses,
-					"WHEN tx_id = ? AND output_idx = ? THEN ?",
-				)
-				caseArgs = append(caseArgs, inTxId, inIdx, txHash)
-				whereConditions = append(
-					whereConditions,
-					"(tx_id = ? AND output_idx = ?)",
-				)
-				whereArgs = append(whereArgs, inTxId, inIdx)
-				tmpTx.ReferenceInputs = append(
-					tmpTx.ReferenceInputs,
-					*utxo,
+	if len(tx.ReferenceInputs()) > 0 {
+		var caseClauses []string
+		var whereConditions []string
+		var caseArgs []any
+		var whereArgs []any
+		for _, input := range tx.ReferenceInputs() {
+			inTxId := input.Id().Bytes()
+			inIdx := input.Index()
+			utxo, err := d.GetUtxo(inTxId, inIdx, txn)
+			if err != nil {
+				return fmt.Errorf(
+					"failed to fetch reference input UTxO (batched): %w",
+					err,
 				)
 			}
-			if len(caseClauses) > 0 {
-				args := append(caseArgs, whereArgs...)
-				sql := fmt.Sprintf(
-					"UPDATE utxo SET referenced_by_tx_id = CASE %s ELSE referenced_by_tx_id END WHERE %s",
-					strings.Join(caseClauses, " "),
-					strings.Join(whereConditions, " OR "),
+			if utxo == nil {
+				continue
+			}
+			caseClauses = append(
+				caseClauses,
+				"WHEN tx_id = ? AND output_idx = ? THEN ?",
+			)
+			caseArgs = append(caseArgs, inTxId, inIdx, txHash)
+			whereConditions = append(
+				whereConditions,
+				"(tx_id = ? AND output_idx = ?)",
+			)
+			whereArgs = append(whereArgs, inTxId, inIdx)
+			tmpTx.ReferenceInputs = append(
+				tmpTx.ReferenceInputs,
+				*utxo,
+			)
+		}
+		if len(caseClauses) > 0 {
+			args := append(caseArgs, whereArgs...)
+			sql := fmt.Sprintf(
+				"UPDATE utxo SET referenced_by_tx_id = CASE %s ELSE referenced_by_tx_id END WHERE %s",
+				strings.Join(caseClauses, " "),
+				strings.Join(whereConditions, " OR "),
+			)
+			if r := db.Exec(sql, args...); r.Error != nil {
+				return fmt.Errorf(
+					"batch update reference inputs (batched): %w",
+					r.Error,
 				)
-				if r := db.Exec(sql, args...); r.Error != nil {
-					return fmt.Errorf(
-						"batch update reference inputs (batched): %w",
-						r.Error,
-					)
-				}
 			}
 		}
 	}
@@ -2343,6 +2354,23 @@ func (d *MetadataStoreMysql) SetTransactionBatched(
 		// On retry: schedule deletion of previously flushed rows for this tx.
 		if needsIdFetch {
 			acc.AddDeleteTxID(tmpTx.ID)
+		}
+
+		// Fetch input UTxOs for address-indexing below.
+		for _, input := range tx.Inputs() {
+			inTxId := input.Id().Bytes()
+			inIdx := input.Index()
+			utxo, err := d.GetUtxo(inTxId, inIdx, txn)
+			if err != nil {
+				return fmt.Errorf(
+					"failed to fetch input UTxO (batched): %w",
+					err,
+				)
+			}
+			if utxo == nil {
+				continue
+			}
+			tmpTx.Inputs = append(tmpTx.Inputs, *utxo)
 		}
 
 		// Address-transaction index.
@@ -2486,6 +2514,9 @@ func (d *MetadataStoreMysql) SetTransactionBatched(
 			}
 			if len(unifiedIDs) > 0 {
 				tables := []string{
+					// Child tables must be deleted before parent tables (FK constraints).
+					"pool_registration_owner",
+					"pool_registration_relay",
 					"stake_registration", "pool_registration", "pool_retirement",
 					"auth_committee_hot", "resign_committee_cold",
 					"deregistration", "stake_delegation",
@@ -2770,6 +2801,7 @@ func (d *MetadataStoreMysql) SetTransactionBatched(
 					}
 					if tmpAccount.ID == 0 {
 						tmpAccount.AddedSlot = point.Slot
+						tmpAccount.CertificateID = certIDMap[i]
 					}
 					if err := saveAccount(tmpAccount, db); err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
@@ -2960,6 +2992,7 @@ func (d *MetadataStoreMysql) SetTransactionBatched(
 					}
 					if tmpAccount.ID == 0 {
 						tmpAccount.AddedSlot = point.Slot
+						tmpAccount.CertificateID = certIDMap[i]
 					}
 					if err := saveAccount(tmpAccount, db); err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
