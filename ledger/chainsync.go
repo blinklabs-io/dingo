@@ -61,6 +61,13 @@ const (
 	// Keep this small so downstream iterators still see fresh blocks promptly.
 	blockfetchCommitBatchSize = 8
 
+	// shadowBlockfetchMaxHeaders is the header-queue depth threshold
+	// below which a shadow blockfetch is dispatched. Near tip the queue
+	// is short (1–4 headers), so shadow dispatch is cheap and the
+	// latency win is real. For bulk catch-up batches the extra request
+	// adds noise without meaningful benefit.
+	shadowBlockfetchMaxHeaders = 4
+
 	// Default/fallback slot threshold for blockfetch batches
 	blockfetchBatchSlotThresholdDefault = 2500 * 20
 
@@ -344,6 +351,9 @@ func (ls *LedgerState) handleConnectionClosedEvent(evt event.Event) {
 	defer ls.chainsyncBlockfetchMutex.Unlock()
 	if sameConnectionId(ls.selectedBlockfetchConnId, e.ConnectionId) {
 		ls.selectedBlockfetchConnId = ouroboros.ConnectionId{}
+	}
+	if sameConnectionId(ls.shadowBlockfetchConnId, e.ConnectionId) {
+		ls.shadowBlockfetchConnId = ouroboros.ConnectionId{}
 	}
 	delete(ls.bufferedHeaderEvents, connIdKey(e.ConnectionId))
 	delete(ls.peerHeaderHistory, connIdKey(e.ConnectionId))
@@ -1854,9 +1864,33 @@ func (ls *LedgerState) handleEventBlockfetchBlock(e BlockfetchEvent) error {
 	// chain promptly without paying a full blob transaction cost for
 	// every single block. We still flush well before BatchDone to
 	// avoid downstream ChainSync idle timeouts.
-	if ls.chainsyncBlockfetchReadyChan == nil ||
-		!sameConnectionId(e.ConnectionId, ls.activeBlockfetchConnId) {
+	if ls.chainsyncBlockfetchReadyChan == nil {
 		return nil
+	}
+	fromPrimary := sameConnectionId(e.ConnectionId, ls.activeBlockfetchConnId)
+	fromShadow := connIdKey(ls.shadowBlockfetchConnId) != "" &&
+		sameConnectionId(e.ConnectionId, ls.shadowBlockfetchConnId)
+	if !fromPrimary && !fromShadow {
+		return nil
+	}
+	// Deduplicate: if the other peer already delivered this block,
+	// discard silently. The winner records their latency sample.
+	blockHashKey := hex.EncodeToString(e.Point.Hash)
+	if ls.shadowBlockReceivedHashes != nil {
+		if _, seen := ls.shadowBlockReceivedHashes[blockHashKey]; seen {
+			return nil
+		}
+	} else {
+		ls.shadowBlockReceivedHashes = make(map[string]struct{})
+	}
+	ls.shadowBlockReceivedHashes[blockHashKey] = struct{}{}
+	// Record first-block latency for the winning peer.
+	if !ls.firstBlockReceived && !ls.activeBlockfetchStart.IsZero() {
+		ls.firstBlockReceived = true
+		latency := time.Since(ls.activeBlockfetchStart)
+		if ls.config.RecordBlockfetchLatencyFunc != nil {
+			ls.config.RecordBlockfetchLatencyFunc(e.ConnectionId, latency)
+		}
 	}
 
 	// Verify block header cryptographic proofs (VRF, KES).
@@ -1952,7 +1986,17 @@ func (ls *LedgerState) startQueuedBlockfetchLocked(
 	}
 	ls.chainsyncBlockfetchReadyChan = make(chan struct{})
 	ls.activeBlockfetchConnId = connId
+	// Reset per-batch shadow state. The normal batch-completion path
+	// goes through blockfetchRequestRangeCleanup, which clears these,
+	// but restartQueuedBlockfetchAfterForkLocked re-enters this
+	// function without that helper, so resetting unconditionally here
+	// prevents stale shadow IDs and dedup hashes from leaking across a
+	// fork-restart.
+	ls.shadowBlockfetchConnId = ouroboros.ConnectionId{}
+	ls.shadowBlockReceivedHashes = nil
 	ls.batchBlocksReceived = 0
+	ls.activeBlockfetchStart = time.Now()
+	ls.firstBlockReceived = false
 	headerStart, headerEnd := ls.chain.HeaderRange(blockfetchBatchSize)
 	if err := ls.blockfetchRequestRangeStart(
 		connId,
@@ -1962,6 +2006,45 @@ func (ls *LedgerState) startQueuedBlockfetchLocked(
 		ls.blockfetchRequestRangeCleanup()
 		ls.activeBlockfetchConnId = ouroboros.ConnectionId{}
 		return err
+	}
+	// Near tip: dispatch the same range to one shadow peer if any
+	// tracked peer has already seen the first block header. Whichever
+	// peer responds first wins; duplicates are dropped by hash.
+	if ls.chain.HeaderCount() <= shadowBlockfetchMaxHeaders &&
+		ls.config.PeersWithBlockFunc != nil &&
+		ls.config.BlockfetchRequestRangeFunc != nil {
+		for _, shadowConn := range ls.config.PeersWithBlockFunc(
+			connId,
+			headerStart,
+		) {
+			if connIdKey(shadowConn) == "" ||
+				sameConnectionId(shadowConn, connId) {
+				continue
+			}
+			err := ls.config.BlockfetchRequestRangeFunc(
+				shadowConn,
+				headerStart,
+				headerEnd,
+			)
+			if err != nil {
+				ls.config.Logger.Debug(
+					"shadow blockfetch dispatch failed, trying next candidate",
+					"component", "ledger",
+					"shadow_connection_id", shadowConn.String(),
+					"error", err,
+				)
+				continue
+			}
+			ls.shadowBlockfetchConnId = shadowConn
+			ls.config.Logger.Debug(
+				"dispatched shadow blockfetch",
+				"component", "ledger",
+				"primary_connection_id", connId.String(),
+				"shadow_connection_id", shadowConn.String(),
+				"header_start_slot", headerStart.Slot,
+			)
+			break // one shadow is enough
+		}
 	}
 	return nil
 }
@@ -3091,6 +3174,10 @@ func (ls *LedgerState) blockfetchRequestRangeCleanup() {
 	}
 	// Increment generation to ensure any pending timer callbacks are ignored
 	ls.chainsyncBlockfetchTimerGeneration++
+	// Clear shadow blockfetch state for the completed batch
+	ls.shadowBlockfetchConnId = ouroboros.ConnectionId{}
+	ls.shadowBlockReceivedHashes = nil
+	ls.firstBlockReceived = false
 	// Close our blockfetch done signal channel
 	ls.chainsyncBlockfetchReadyMutex.Lock()
 	defer ls.chainsyncBlockfetchReadyMutex.Unlock()
@@ -3174,10 +3261,30 @@ func (ls *LedgerState) handleBlockfetchTimeoutLocked(
 }
 
 func (ls *LedgerState) handleEventBlockfetchBatchDone(e BlockfetchEvent) error {
-	// Drop batch-done from a stale connection (e.g., after connection switch)
-	if ls.chainsyncBlockfetchReadyChan == nil ||
-		!sameConnectionId(e.ConnectionId, ls.activeBlockfetchConnId) {
+	// Drop batch-done from a stale connection (e.g., after connection switch).
+	// Accept it from either the primary or the shadow peer: in the near-tip
+	// shadow path the shadow can win the race and emit BatchDone before the
+	// slow primary, and waiting for the primary's BatchDone defeats the
+	// purpose of dispatching a shadow at all.
+	if ls.chainsyncBlockfetchReadyChan == nil {
 		return nil
+	}
+	fromActive := sameConnectionId(e.ConnectionId, ls.activeBlockfetchConnId)
+	fromShadow := connIdKey(ls.shadowBlockfetchConnId) != "" &&
+		sameConnectionId(e.ConnectionId, ls.shadowBlockfetchConnId)
+	if !fromActive && !fromShadow {
+		return nil
+	}
+	// If the shadow wins the race, treat it as the active connection for
+	// the rest of this completion path so retry/resync decisions are made
+	// against the peer that actually drove the batch to completion.
+	if fromShadow && !fromActive {
+		ls.activeBlockfetchConnId = ls.shadowBlockfetchConnId
+		ls.config.Logger.Debug(
+			"shadow blockfetch peer completed batch ahead of primary",
+			"component", "ledger",
+			"shadow_connection_id", e.ConnectionId.String(),
+		)
 	}
 	// Stop the blockfetch timeout timer and invalidate any pending callbacks
 	if ls.chainsyncBlockfetchTimeoutTimer != nil {

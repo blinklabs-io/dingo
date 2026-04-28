@@ -105,6 +105,11 @@ type TrackedClient struct {
 	// TODO: BytesRecv needs to be wired to the underlying
 	// connection's byte counter. Currently unused.
 	BytesRecv uint64
+	// BlockfetchLatencyEWMA is an exponential moving average
+	// (alpha=0.2) of the time from RequestRange to first block
+	// response. Zero means no samples recorded yet.
+	BlockfetchLatencyEWMA time.Duration
+	blockfetchSampleCount uint64
 }
 
 // Config holds configuration for the chainsync State.
@@ -1049,4 +1054,74 @@ func (s *State) eligibleClientCountLocked() int {
 		}
 	}
 	return count
+}
+
+// blockfetchLatencyAlpha is the smoothing factor for the blockfetch
+// latency EWMA. A value of 0.2 weights recent samples moderately.
+const blockfetchLatencyAlpha = 0.2
+
+// PeersWithBlock returns all tracked connection IDs — excluding
+// origin — that have a recorded observed header at the given point.
+// Callers use this to identify shadow peers for parallel blockfetch.
+func (s *State) PeersWithBlock(
+	origin ouroboros.ConnectionId,
+	point ocommon.Point,
+) []ouroboros.ConnectionId {
+	if len(point.Hash) == 0 {
+		return nil
+	}
+	hashKey := hex.EncodeToString(point.Hash)
+	s.observedHeadersMutex.RLock()
+	defer s.observedHeadersMutex.RUnlock()
+	var result []ouroboros.ConnectionId
+	for connId, chain := range s.observedHeaders {
+		if connId == origin {
+			continue
+		}
+		if _, ok := chain.byHash[hashKey]; ok {
+			result = append(result, connId)
+		}
+	}
+	return result
+}
+
+// RecordBlockfetchLatency updates the EWMA blockfetch latency for
+// the given connection. Called by the ledger when the first block
+// body arrives after a RequestRange.
+func (s *State) RecordBlockfetchLatency(
+	connId ouroboros.ConnectionId,
+	latency time.Duration,
+) {
+	if latency <= 0 {
+		return
+	}
+	s.clientConnIdMutex.Lock()
+	defer s.clientConnIdMutex.Unlock()
+	tc, ok := s.trackedClients[connId]
+	if !ok {
+		return
+	}
+	tc.blockfetchSampleCount++
+	if tc.blockfetchSampleCount == 1 {
+		tc.BlockfetchLatencyEWMA = latency
+		return
+	}
+	tc.BlockfetchLatencyEWMA = time.Duration(
+		float64(latency)*blockfetchLatencyAlpha +
+			float64(tc.BlockfetchLatencyEWMA)*(1-blockfetchLatencyAlpha),
+	)
+}
+
+// BlockfetchLatency returns the blockfetch EWMA for the given
+// connection and whether any samples have been recorded.
+func (s *State) BlockfetchLatency(
+	connId ouroboros.ConnectionId,
+) (time.Duration, bool) {
+	s.clientConnIdMutex.RLock()
+	defer s.clientConnIdMutex.RUnlock()
+	tc, ok := s.trackedClients[connId]
+	if !ok || tc.blockfetchSampleCount == 0 {
+		return 0, false
+	}
+	return tc.BlockfetchLatencyEWMA, true
 }
