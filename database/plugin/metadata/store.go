@@ -502,6 +502,10 @@ type MetadataStore interface {
 		types.Txn,
 	) error
 
+	// DeleteBlockNoncesAfterPoint removes block nonces after a rollback
+	// point and competing nonces at the same slot.
+	DeleteBlockNoncesAfterPoint(ocommon.Point, types.Txn) error
+
 	// DeleteUtxo removes a single unspent transaction output.
 	DeleteUtxo(models.UtxoId, types.Txn) error
 

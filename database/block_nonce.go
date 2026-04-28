@@ -99,6 +99,19 @@ func (d *Database) DeleteBlockNoncesBeforeSlotWithoutCheckpoints(
 	)
 }
 
+// DeleteBlockNoncesAfterPoint removes nonces that cannot belong to the
+// active chain after rolling back to point. It keeps the exact point row and
+// removes competing rows at the same slot.
+func (d *Database) DeleteBlockNoncesAfterPoint(
+	point ocommon.Point,
+	txn *Txn,
+) error {
+	if txn == nil {
+		return d.metadata.DeleteBlockNoncesAfterPoint(point, nil)
+	}
+	return d.metadata.DeleteBlockNoncesAfterPoint(point, txn.Metadata())
+}
+
 func (d *Database) SetBlockNonce(
 	blockHash []byte,
 	slotNumber uint64,

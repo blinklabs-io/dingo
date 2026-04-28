@@ -76,6 +76,96 @@ func TestHandleEventChainsyncRollbackSynchronizesLedgerTip(t *testing.T) {
 	assert.Equal(t, fixture.ancestorTip, dbTip)
 }
 
+func TestHandleEventChainsyncRollbackPrunesStaleBlockNonces(
+	t *testing.T,
+) {
+	fixture := newChainsyncRollbackFixture(t)
+	competingHash := testHashBytes("competing-ancestor-slot")
+	require.NoError(
+		t,
+		fixture.ls.db.SetBlockNonce(
+			competingHash,
+			fixture.ancestorTip.Point.Slot,
+			[]byte("stale-same-slot"),
+			false,
+			nil,
+		),
+	)
+	require.NoError(
+		t,
+		fixture.ls.db.SetBlockNonce(
+			testHashBytes("future-fork-block"),
+			fixture.currentTip.Point.Slot+10,
+			[]byte("stale-future"),
+			false,
+			nil,
+		),
+	)
+
+	err := fixture.ls.handleEventChainsyncRollback(
+		ChainsyncEvent{
+			ConnectionId: fixture.connId,
+			Point:        fixture.ancestorTip.Point,
+		},
+	)
+	require.NoError(t, err)
+
+	rows, err := fixture.ls.db.GetBlockNoncesInSlotRange(
+		fixture.ancestorTip.Point.Slot,
+		fixture.currentTip.Point.Slot+11,
+		nil,
+	)
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	assert.Equal(t, fixture.ancestorTip.Point.Hash, rows[0].Hash)
+	assert.Equal(t, fixture.ancestorTip.Point.Slot, rows[0].Slot)
+	assert.Equal(t, fixture.ancestorNonce, rows[0].Nonce)
+}
+
+func TestLoadTipPrunesStaleBlockNonces(t *testing.T) {
+	fixture := newChainsyncRollbackFixture(t)
+	competingHash := testHashBytes("competing-tip-slot")
+	require.NoError(
+		t,
+		fixture.ls.db.SetBlockNonce(
+			competingHash,
+			fixture.currentTip.Point.Slot,
+			[]byte("stale-same-slot"),
+			false,
+			nil,
+		),
+	)
+	require.NoError(
+		t,
+		fixture.ls.db.SetBlockNonce(
+			testHashBytes("future-fork-block"),
+			fixture.currentTip.Point.Slot+10,
+			[]byte("stale-future"),
+			false,
+			nil,
+		),
+	)
+
+	require.NoError(t, fixture.ls.loadTip())
+
+	rows, err := fixture.ls.db.GetBlockNoncesInSlotRange(
+		fixture.ancestorTip.Point.Slot,
+		fixture.currentTip.Point.Slot+11,
+		nil,
+	)
+	require.NoError(t, err)
+	require.Len(t, rows, 2)
+	assert.Equal(t, fixture.ancestorTip.Point.Hash, rows[0].Hash)
+	assert.Equal(t, fixture.currentTip.Point.Hash, rows[1].Hash)
+	assert.True(
+		t,
+		bytes.Equal(
+			fixture.ls.currentTipBlockNonce,
+			rows[1].Nonce,
+		),
+	)
+}
+
 func TestHandleEventChainsyncRollbackDoesNotSkipDifferentPeerHistory(
 	t *testing.T,
 ) {
