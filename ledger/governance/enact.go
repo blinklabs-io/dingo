@@ -73,6 +73,18 @@ func EnactProposal(
 
 	switch a := action.(type) {
 	case *conway.ConwayParameterChangeGovAction:
+		// Cross-era hazard: ctx.UpdateFn is the era's PParamsUpdateFunc,
+		// which type-asserts on its own ParameterUpdate struct. A
+		// proposal ratified in era E and enacted in era E+1 (because a
+		// HardForkInitiation also ratified at the same boundary) will
+		// hit this site with a Conway-shape ParamUpdate but era-E+1's
+		// UpdateFn — the assertion fails, the tick aborts, and the
+		// chain halts at that boundary. Pre-Dijkstra blast radius is
+		// zero (Conway is the only governance era today). The fix
+		// when a post-Conway era is added is a per-pair
+		// (fromEra, toEra) update-translation table called at the
+		// boundary, parallel to the EraDesc.HardForkFunc table that
+		// already translates pparams.
 		updated, err := ctx.UpdateFn(ctx.PParams, &a.ParamUpdate)
 		if err != nil {
 			return nil, fmt.Errorf("apply param update: %w", err)

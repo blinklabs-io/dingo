@@ -1820,6 +1820,17 @@ func (ls *LedgerState) processChainIteratorRollback(
 //   - currentPParams: current protocol parameters (read-only input)
 //
 // Returns the new era and protocol parameters, or an error.
+//
+// What this function does NOT do: translate in-flight governance state
+// across the boundary. Specifically, a ParameterChange proposal that is
+// ratified-but-not-enacted at this transition will keep its old-era
+// ProtocolParameterUpdate CBOR shape, and the subsequent ENACT call in
+// the new era's context will fail its type assertion and halt the
+// chain. The blast radius is zero pre-Dijkstra (Conway is the only
+// governance era currently in eras.Eras), and the fix when a post-
+// Conway era is added is a per-pair (fromEra, toEra) update-translation
+// table called from this site, parallel to the EraDesc.HardForkFunc
+// table that already translates pparams here.
 func (ls *LedgerState) transitionToEra(
 	txn *database.Txn,
 	nextEraId uint,
