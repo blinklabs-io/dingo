@@ -183,7 +183,7 @@ func (b *BlobStoreBark) GetBlock(
 		return nil, types.BlockMetadata{},
 			fmt.Errorf("failed creating request for bark supplied url: %w", err)
 	}
-	blockResp, err := b.httpClient.Do(blockReq) //nolint:gosec // URL is from trusted bark archive service
+	blockResp, err := b.httpClient.Do(blockReq) //nolint:gosec
 	if err != nil {
 		return nil, types.BlockMetadata{},
 			fmt.Errorf("failed downloading block from bark supplied url: %w", err)
