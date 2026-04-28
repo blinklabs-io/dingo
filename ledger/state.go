@@ -4441,12 +4441,11 @@ func resolveValidationEra(
 		return currentEra, nil
 	}
 	if !eras.IsCompatibleEra(txEraId, currentEra.Id) {
-		return eras.EraDesc{}, fmt.Errorf(
-			"TX %s era %d is not compatible with ledger era %d",
-			tx.Hash(),
-			txEraId,
-			currentEra.Id,
-		)
+		// Typed *gledger.EraMismatch carries the Haskell-canonical
+		// wire format via MarshalCBOR; localtxsubmission's
+		// encodeRejectReason picks it up via errors.As and emits
+		// canonical CBOR to peers.
+		return eras.EraDesc{}, newEraMismatchError(txEraId, currentEra.Id)
 	}
 	txEra := eras.GetEraById(txEraId)
 	if txEra == nil {
