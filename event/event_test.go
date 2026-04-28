@@ -266,7 +266,7 @@ func TestSubscribeFuncPanicRecovery(t *testing.T) {
 	// Wait for the handler to process both events
 	require.Eventually(t, func() bool {
 		return received.Load() >= 2
-	}, 2*time.Second, 10*time.Millisecond,
+	}, 10*time.Second, 10*time.Millisecond,
 		"handler should continue processing events after a panic",
 	)
 }

@@ -95,7 +95,7 @@ jobs:
       - name: go-build
         run: go build ./cmd/dingo
       - name: go-test
-        run: go test -race ./...
+        run: go test -ldflags="-s -w" -race ./...
 
   # macOS and Windows jobs without Postgres service
   go-test-other:
@@ -126,4 +126,4 @@ jobs:
       - name: go-build
         run: go build ./cmd/dingo
       - name: go-test
-        run: go test ./...
+        run: go test -ldflags="-s -w" ./...
