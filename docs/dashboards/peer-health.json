@@ -1,0 +1,2686 @@
+{
+  "__requires": [
+    {
+      "type": "grafana",
+      "id": "grafana",
+      "name": "Grafana",
+      "version": "10.0.0"
+    },
+    {
+      "type": "datasource",
+      "id": "prometheus",
+      "name": "Prometheus",
+      "version": "1.0.0"
+    }
+  ],
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0,211,255,1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "description": "Dingo peer health \u2014 peer states, promotions, demotions, connections, churn, events, Red Rocket",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 2,
+  "id": null,
+  "links": [
+    {
+      "title": "Node Overview",
+      "url": "/d/dingo-overview",
+      "type": "link",
+      "icon": "external link",
+      "keepTime": true,
+      "targetBlank": false,
+      "includeVars": true
+    },
+    {
+      "title": "Block Production",
+      "url": "/d/dingo-bp",
+      "type": "link",
+      "icon": "external link",
+      "keepTime": true,
+      "targetBlank": false,
+      "includeVars": true
+    },
+    {
+      "title": "Peer Health",
+      "url": "/d/dingo-peers",
+      "type": "link",
+      "icon": "external link",
+      "keepTime": true,
+      "targetBlank": false,
+      "includeVars": true
+    },
+    {
+      "title": "Mempool",
+      "url": "/d/dingo-mempool",
+      "type": "link",
+      "icon": "external link",
+      "keepTime": true,
+      "targetBlank": false,
+      "includeVars": true
+    },
+    {
+      "title": "Resources",
+      "url": "/d/dingo-resources",
+      "type": "link",
+      "icon": "external link",
+      "keepTime": true,
+      "targetBlank": false,
+      "includeVars": true
+    }
+  ],
+  "liveNow": false,
+  "templating": {
+    "list": [
+      {
+        "name": "network",
+        "type": "query",
+        "query": {
+          "qryType": 1,
+          "query": "label_values(dingo_build_info, network)"
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "current": {},
+        "refresh": 1,
+        "hide": 0,
+        "multi": false,
+        "includeAll": false,
+        "sort": 1
+      },
+      {
+        "name": "instance",
+        "type": "query",
+        "query": {
+          "qryType": 1,
+          "query": "label_values(dingo_build_info{network=\"$network\"}, instance)"
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "current": {},
+        "refresh": 1,
+        "hide": 0,
+        "multi": true,
+        "includeAll": true,
+        "sort": 1
+      }
+    ]
+  },
+  "time": {
+    "from": "now-3h",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "",
+  "refresh": "30s",
+  "schemaVersion": 42,
+  "tags": [
+    "dingo",
+    "cardano"
+  ],
+  "title": "Dingo \u2014 Peer Health",
+  "uid": "dingo-peers",
+  "version": 1,
+  "panels": [
+    {
+      "id": 999,
+      "type": "marcusolsson-dynamictext-panel",
+      "title": " ",
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "h": 10,
+        "w": 24
+      },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "transparent": true,
+      "pluginVersion": "6.2.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "cardano_node_metrics_blockNum_int{network=\"$network\",instance=~\"$instance\"}",
+          "instant": true,
+          "legendFormat": "",
+          "range": false,
+          "refId": "BH"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "cardano_node_metrics_slotNum_int{network=\"$network\",instance=~\"$instance\"}",
+          "instant": true,
+          "legendFormat": "",
+          "range": false,
+          "refId": "SN"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "cardano_node_metrics_epoch_int{network=\"$network\",instance=~\"$instance\"}",
+          "instant": true,
+          "legendFormat": "",
+          "range": false,
+          "refId": "EP"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "cardano_node_metrics_slotInEpoch_int{network=\"$network\",instance=~\"$instance\"}",
+          "instant": true,
+          "legendFormat": "",
+          "range": false,
+          "refId": "SE"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "time() - cardano_node_metrics_nodeStartTime_int{network=\"$network\",instance=~\"$instance\"}",
+          "instant": true,
+          "legendFormat": "",
+          "range": false,
+          "refId": "UP"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "cardano_node_metrics_density_real{network=\"$network\",instance=~\"$instance\"}",
+          "instant": true,
+          "legendFormat": "",
+          "range": false,
+          "refId": "DN"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "cardano_node_metrics_forks_int{network=\"$network\",instance=~\"$instance\"}",
+          "instant": true,
+          "legendFormat": "",
+          "range": false,
+          "refId": "FK"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "cardano_node_metrics_forging_enabled{network=\"$network\",instance=~\"$instance\"}",
+          "instant": true,
+          "legendFormat": "",
+          "range": false,
+          "refId": "FG"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "go_info{instance=~\"$instance\"}",
+          "instant": true,
+          "legendFormat": "{{version}}",
+          "range": false,
+          "refId": "GO"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "cardano_node_metrics_peerSelection_hot{network=\"$network\",instance=~\"$instance\"}",
+          "instant": true,
+          "legendFormat": "",
+          "range": false,
+          "refId": "PH"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "cardano_node_metrics_peerSelection_warm{network=\"$network\",instance=~\"$instance\"}",
+          "instant": true,
+          "legendFormat": "",
+          "range": false,
+          "refId": "PW"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "cardano_node_metrics_peerSelection_cold{network=\"$network\",instance=~\"$instance\"}",
+          "instant": true,
+          "legendFormat": "",
+          "range": false,
+          "refId": "PC"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "cardano_node_metrics_connectionManager_incomingConns{network=\"$network\",instance=~\"$instance\"}",
+          "instant": true,
+          "legendFormat": "",
+          "range": false,
+          "refId": "CI"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "cardano_node_metrics_connectionManager_outgoingConns{network=\"$network\",instance=~\"$instance\"}",
+          "instant": true,
+          "legendFormat": "",
+          "range": false,
+          "refId": "CO"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "cardano_node_metrics_peerSelection_KnownPeers{network=\"$network\",instance=~\"$instance\"}",
+          "instant": true,
+          "legendFormat": "",
+          "range": false,
+          "refId": "PK"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "cardano_node_metrics_txsInMempool_int{network=\"$network\",instance=~\"$instance\"}",
+          "instant": true,
+          "legendFormat": "",
+          "range": false,
+          "refId": "MT"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "cardano_node_metrics_mempoolBytes_int{network=\"$network\",instance=~\"$instance\"}",
+          "instant": true,
+          "legendFormat": "",
+          "range": false,
+          "refId": "MB"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "dingo_tip_gap_slots{network=\"$network\",instance=~\"$instance\"}",
+          "instant": true,
+          "legendFormat": "",
+          "range": false,
+          "refId": "TG"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "cardano_node_metrics_currentKESPeriod_int{network=\"$network\",instance=~\"$instance\"}",
+          "instant": true,
+          "legendFormat": "",
+          "range": false,
+          "refId": "KS"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "cardano_node_metrics_remainingKESPeriods_int{network=\"$network\",instance=~\"$instance\"}",
+          "instant": true,
+          "legendFormat": "",
+          "range": false,
+          "refId": "KR"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "process_open_fds{instance=~\"$instance\"}",
+          "instant": true,
+          "legendFormat": "",
+          "range": false,
+          "refId": "FD"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "go_goroutines{instance=~\"$instance\"}",
+          "instant": true,
+          "legendFormat": "",
+          "range": false,
+          "refId": "GR"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "cardano_node_metrics_Forge_forged_int{network=\"$network\",instance=~\"$instance\"}",
+          "instant": true,
+          "legendFormat": "",
+          "range": false,
+          "refId": "BF"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "rate(process_cpu_seconds_total{instance=~\"$instance\"}[2m]) * 100",
+          "instant": true,
+          "legendFormat": "",
+          "range": false,
+          "refId": "CPU"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "go_memstats_sys_bytes{instance=~\"$instance\"}",
+          "instant": true,
+          "legendFormat": "",
+          "range": false,
+          "refId": "MEM"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "(process_resident_memory_bytes{instance=~\"$instance\"} - go_memstats_sys_bytes{instance=~\"$instance\"})",
+          "instant": true,
+          "legendFormat": "",
+          "range": false,
+          "refId": "DISK"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "go_memstats_heap_inuse_bytes{instance=~\"$instance\"}",
+          "instant": true,
+          "legendFormat": "",
+          "range": false,
+          "refId": "SWAP"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "cardano_node_metrics_blockfetchclient_lateblocks{network=\"$network\",instance=~\"$instance\"}",
+          "instant": true,
+          "legendFormat": "",
+          "range": false,
+          "refId": "BL"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "cardano_node_metrics_txsEvictedNum_int{network=\"$network\",instance=~\"$instance\"}",
+          "instant": true,
+          "legendFormat": "",
+          "range": false,
+          "refId": "ME"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "process_resident_memory_bytes{instance=~\"$instance\"}",
+          "instant": true,
+          "legendFormat": "__auto",
+          "range": false,
+          "refId": "RS"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "go_memstats_heap_alloc_bytes{instance=~\"$instance\"}",
+          "instant": true,
+          "legendFormat": "__auto",
+          "range": false,
+          "refId": "HA"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "go_gc_duration_seconds{instance=~\"$instance\",quantile=\"1\"}",
+          "instant": true,
+          "legendFormat": "__auto",
+          "range": false,
+          "refId": "GP"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "cardano_node_metrics_peerSelection_EstablishedPeers{network=\"$network\",instance=~\"$instance\"}",
+          "instant": true,
+          "refId": "EP2"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "cardano_node_metrics_txsProcessedNum_int{network=\"$network\",instance=~\"$instance\"}",
+          "instant": true,
+          "refId": "MP"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "cardano_node_metrics_connectionManager_duplexConns{network=\"$network\",instance=~\"$instance\"}",
+          "instant": true,
+          "refId": "DX"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "dingo_forge_tip_gap_slots{network=\"$network\",instance=~\"$instance\"}",
+          "instant": true,
+          "legendFormat": "",
+          "range": false,
+          "refId": "SR"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "dingo_build_info{network=\"$network\",instance=~\"$instance\"}",
+          "instant": true,
+          "legendFormat": "{{version}}",
+          "range": false,
+          "refId": "DBI"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "last_over_time(cardano_node_metrics_blockfetchclient_blockdelay_s{network=\"$network\",instance=~\"$instance\"}[15s])",
+          "instant": false,
+          "legendFormat": "",
+          "range": true,
+          "refId": "BDR"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "cardano_node_metrics_slotBattlesTotal_int{network=\"$network\",instance=~\"$instance\"}",
+          "instant": true,
+          "legendFormat": "",
+          "range": false,
+          "refId": "SL"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "cardano_node_metrics_Forge_adopted_int{network=\"$network\",instance=~\"$instance\"}",
+          "instant": true,
+          "legendFormat": "",
+          "range": false,
+          "refId": "NA"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "cardano_node_metrics_Forge_could_not_forge_int{network=\"$network\",instance=~\"$instance\"}",
+          "instant": true,
+          "legendFormat": "",
+          "range": false,
+          "refId": "FI"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "last_over_time(cardano_node_metrics_blockfetchclient_blockdelay_s{network=\"$network\",instance=~\"$instance\"}[30s])",
+          "instant": true,
+          "legendFormat": "",
+          "range": false,
+          "refId": "BD"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "cardano_node_metrics_blockfetchclient_blockdelay_cdfOne{network=\"$network\",instance=~\"$instance\"}",
+          "instant": true,
+          "legendFormat": "",
+          "range": false,
+          "refId": "CD1"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "cardano_node_metrics_mempoolBytes_int{network=\"$network\",instance=~\"$instance\"}",
+          "instant": false,
+          "legendFormat": "",
+          "range": true,
+          "refId": "MBR"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "cardano_node_metrics_blockNum_int{network=\"$network\",instance=~\"$instance\"}",
+          "instant": false,
+          "legendFormat": "",
+          "range": true,
+          "refId": "BNR"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "rate(dingo_cbor_cache_utxo_hot_hits_total{network=\"$network\",instance=~\"$instance\"}[5m]) / (rate(dingo_cbor_cache_utxo_hot_hits_total{network=\"$network\",instance=~\"$instance\"}[5m]) + rate(dingo_cbor_cache_utxo_hot_misses_total{network=\"$network\",instance=~\"$instance\"}[5m]))",
+          "instant": true,
+          "legendFormat": "",
+          "range": false,
+          "refId": "UTXO"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "dingo_epoch_length_slots{network=\"$network\",instance=~\"$instance\"}",
+          "instant": true,
+          "legendFormat": "",
+          "range": false,
+          "refId": "ELS"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "go_sched_gomaxprocs_threads{instance=~\"$instance\"}",
+          "instant": true,
+          "legendFormat": "",
+          "range": false,
+          "refId": "MAXP"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "dingo_database_size_bytes{store=\"blob\",network=\"$network\",instance=~\"$instance\"} or dingo_database_size_bytes{store=\"blob\",job=~\".*dingo.*\",instance=~\"$instance\"}",
+          "instant": true,
+          "legendFormat": "",
+          "range": false,
+          "refId": "DBBLOB"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "dingo_database_size_bytes{store=\"metadata\",network=\"$network\",instance=~\"$instance\"} or dingo_database_size_bytes{store=\"metadata\",job=~\".*dingo.*\",instance=~\"$instance\"}",
+          "instant": true,
+          "legendFormat": "",
+          "range": false,
+          "refId": "DBMETA"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "rate(dingo_cbor_cache_block_lru_hits_total{network=\"$network\",instance=~\"$instance\"}[5m]) / (rate(dingo_cbor_cache_block_lru_hits_total{network=\"$network\",instance=~\"$instance\"}[5m]) + rate(dingo_cbor_cache_block_lru_misses_total{network=\"$network\",instance=~\"$instance\"}[5m]))",
+          "instant": true,
+          "legendFormat": "",
+          "range": false,
+          "refId": "LRUHIT"
+        }
+      ],
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "options": {
+        "renderMode": "data",
+        "editors": [],
+        "editor": {
+          "language": "html",
+          "format": "auto"
+        },
+        "wrap": false,
+        "contentPartials": [],
+        "content": "<!-- \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\n     Dingo Node Overview \u2014 Header Panel v2\n     Business Text (marcusolsson-dynamictext-panel)\n     Paste this into the \"Content\" field\n     \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550 -->\n<div class=\"p\">\n  <div class=\"stale-banner\" id=\"stale-banner\">NO DATA</div>\n  <div class=\"copy-toast\" id=\"copy-toast\"></div>\n\n  <!-- LEFT: chain, mempool sparklines -->\n  <div\n    style=\"display:flex;flex-direction:column;gap:3px;padding-right:14px;border-right:1px solid rgba(255,255,255,.05);overflow:hidden\">\n\n    <div>\n      <div style=\"display:flex;align-items:baseline;gap:8px\">\n        <span class=\"lb\" style=\"margin:0\">epoch</span>\n        <span class=\"vl\" style=\"font-size:24px;letter-spacing:-1px;color:#f0f3f8;text-shadow:0 0 20px rgba(66,133,244,.15)\" id=\"vep\">\u2014</span>\n        <div class=\"epb\" style=\"flex:1;margin:0\">\n          <div class=\"epf\" id=\"ebar\"></div>\n        </div>\n        <span class=\"vl\" style=\"font-size:14px;color:rgba(240,243,248,.75)\" id=\"vepct\">\u2014</span><span style=\"font-size:10px;color:rgba(180,210,255,.45)\">%</span>\n      </div>\n      <div style=\"display:flex;align-items:baseline;gap:6px;margin-top:4px;flex-wrap:wrap\">\n        <span class=\"lb\" style=\"margin:0\">height</span>\n        <span class=\"vl\" style=\"font-size:15px;color:#f0f3f8\" id=\"vbh\">\u2014</span>\n        <span style=\"font-size:8px;color:rgba(180,210,255,.2)\">\u2022</span>\n        <span class=\"lb\" style=\"margin:0\">slot</span>\n        <span class=\"vl\" style=\"font-size:13px;color:rgba(200,220,255,.7)\" id=\"vsn\">\u2014</span>\n        <span style=\"font-size:8px;color:rgba(180,210,255,.2)\">\u2022</span>\n        <span class=\"lb\" style=\"margin:0\">ep slot</span>\n        <span class=\"vl\" style=\"font-size:13px;color:rgba(200,220,255,.7)\" id=\"vse\">\u2014</span>\n        <span style=\"font-size:8px;color:rgba(180,210,255,.2)\">\u2022</span>\n        <span class=\"lb\" style=\"margin:0\">density</span>\n        <span class=\"vl\" style=\"font-size:13px\" id=\"vdn\">\u2014</span>\n      </div>\n      <div style=\"display:flex;align-items:baseline;gap:6px;margin-top:2px;flex-wrap:wrap\">\n        <span class=\"lb\" style=\"margin:0\">forks</span>\n        <span class=\"vl\" style=\"font-size:13px\" id=\"vfk\">\u2014</span>\n        <span style=\"font-size:8px;color:rgba(180,210,255,.2)\">\u2022</span>\n        <span class=\"lb\" style=\"margin:0\">late</span>\n        <span class=\"vl\" style=\"font-size:13px\" id=\"vbl\">\u2014</span>\n        <span style=\"font-size:8px;color:rgba(180,210,255,.2)\">\u2022</span>\n        <span class=\"lb\" style=\"margin:0\">tip gap</span>\n        <span class=\"vl\" style=\"font-size:13px\" id=\"vtg\">\u2014</span>\n        <span id=\"forge-gap-wrap\" style=\"display:none\">\n        <span style=\"font-size:8px;color:rgba(180,210,255,.2)\">\u2022</span>\n        <span class=\"lb\" style=\"margin:0\">forge gap</span>\n        <span class=\"vl\" style=\"font-size:13px\" id=\"vfg\">\u2014</span>\n        </span>\n        <span style=\"font-size:8px;color:rgba(180,210,255,.2)\">\u2022</span>\n        <span class=\"lb\" style=\"margin:0\">blk delay</span>\n        <span class=\"vl\" style=\"font-size:13px\" id=\"vbd2\">\u2014</span>\n        <span style=\"font-size:8px;color:rgba(180,210,255,.2)\">\u2022</span>\n        <span class=\"lb\" style=\"margin:0\">&lt;1s recv</span>\n        <span class=\"vl\" style=\"font-size:13px\" id=\"vcd2\">\u2014</span>\n      </div>\n    </div>\n\n    <div class=\"dh\"></div>\n\n    <div style=\"flex:1;min-height:0;display:flex;flex-direction:column;gap:3px\">\n      <div style=\"display:flex;gap:10px;align-items:baseline\">\n        <div><span class=\"lb\">bytes</span>\n          <div class=\"vl\" style=\"font-size:13px;color:#33CCE8\" id=\"vmb\">\u2014</div>\n        </div>\n        <div><span class=\"lb\">txs</span>\n          <div class=\"vl\" style=\"font-size:13px;color:#8FD47E\" id=\"vmt\">\u2014</div>\n        </div>\n        <div><span class=\"lb\">avg/tx</span>\n          <div class=\"vl\" style=\"font-size:13px;color:rgba(200,220,255,.6)\" id=\"vmcap\">\u2014</div>\n        </div>\n        <div><span class=\"lb\">processed</span>\n          <div class=\"vl\" style=\"font-size:13px;color:#A0C8FF\" id=\"vmp\">\u2014</div>\n        </div>\n        <div><span class=\"lb\">evicted</span>\n          <div class=\"vl\" style=\"font-size:13px\" id=\"vme\">\u2014</div>\n        </div>\n      </div>\n      <div style=\"flex:1;min-height:0;display:flex;gap:8px\">\n        <div class=\"spark-wrap\">\n          <span class=\"lb\" style=\"font-size:8px;margin-bottom:3px\">mempool bytes</span>\n          <canvas id=\"spark2\" style=\"width:100%;flex:1;min-height:20px\"></canvas>\n        </div>\n        <div class=\"spark-wrap\">\n          <span class=\"lb\" style=\"font-size:8px;margin-bottom:3px\">blockfetch</span>\n          <canvas id=\"spark-bars\" style=\"width:100%;flex:1;min-height:20px\"></canvas>\n        </div>\n      </div>\n    </div>\n\n  </div>\n\n  <!-- CENTER: logo + badges + forge info -->\n  <div\n    style=\"display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;padding:0 10px;border-right:1px solid rgba(255,255,255,.05)\">\n    <div style=\"position:relative;line-height:0\">\n      <div\n        style=\"position:absolute;inset:-8px;border-radius:50%;background:radial-gradient(circle,rgba(66,133,244,.12) 0%,transparent 70%);animation:glow-pulse 4s ease-in-out infinite;pointer-events:none\">\n      </div>\n      <img id=\"dingo-logo\" src=\"https://docs.blinklabs.io/dingo-logo-250.png\" alt=\"Dingo\" style=\"height:90px;filter:drop-shadow(0 0 12px rgba(66,133,244,.35));position:relative;z-index:1\"/>\n    </div>\n    <div\n      style=\"font-size:10px;font-weight:700;letter-spacing:2.5px;text-transform:uppercase;color:rgba(200,220,255,.65);text-align:center;white-space:nowrap;margin-top:6px\">\n      Dingo Monitor</div>\n    <div style=\"display:flex;flex-direction:column;gap:3px;width:100%;padding:0 10px\">\n      <span class=\"badge bg\" id=\"vfb\">NODE</span>\n      <span class=\"badge bgr\" id=\"vsync\">\u2014</span>\n    </div>\n        <div id=\"ctr-gouroboros\" style=\"display:none;padding:12px 10px 0;text-align:center\">\n      <img src=\"https://github.com/blinklabs-io/gouroboros/blob/main/.github/assets/gOuroboros-illustration.png?raw=true\" alt=\"gOuroboros\" style=\"max-height:45px;object-fit:contain;filter:drop-shadow(0 0 6px rgba(66,133,244,.2));opacity:0.8\"/>\n    </div>\n    <div id=\"ctr-era\" style=\"display:none;width:100%;padding:0 10px;margin-top:auto;text-align:center\">\n      <span class=\"lb\" style=\"margin-bottom:2px;display:block\">era</span>\n      <div class=\"vl\" style=\"font-size:14px;color:#A0C8FF\" id=\"vera\">\u2014</div>\n    </div>\n    <div id=\"ctr-forge\" style=\"display:none;flex-direction:column;gap:3px;width:100%;padding:0 6px;margin-top:2px\">\n      <div style=\"display:flex;gap:3px\">\n        <div class=\"pill\" style=\"flex:1;background:rgba(66,133,244,.06);border:1px solid rgba(66,133,244,.12)\">\n          <span style=\"font-size:8px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:rgba(66,133,244,.6)\">forged</span>\n          <div class=\"vl\" style=\"font-size:16px;color:#6CA6F7\" id=\"vcf\">\u2014</div>\n        </div>\n        <div class=\"pill\" style=\"flex:1;background:rgba(115,191,105,.06);border:1px solid rgba(115,191,105,.12)\">\n          <span style=\"font-size:8px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:rgba(115,191,105,.6)\">adopted</span>\n          <div class=\"vl\" style=\"font-size:16px;color:#8FD47E\" id=\"vca\">\u2014</div>\n        </div>\n      </div>\n      <div style=\"display:flex;gap:3px\">\n        <div class=\"pill\" style=\"flex:1;background:rgba(242,73,92,.06);border:1px solid rgba(242,73,92,.1)\">\n          <span style=\"font-size:8px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:rgba(242,73,92,.6)\">missed</span>\n          <div class=\"vl\" style=\"font-size:14px\" id=\"vnb\">\u2014</div>\n        </div>\n        <div class=\"pill\" style=\"flex:1;background:rgba(250,222,42,.06);border:1px solid rgba(250,222,42,.1)\">\n          <span style=\"font-size:8px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:rgba(250,222,42,.6)\">battles</span>\n          <div class=\"vl\" style=\"font-size:14px\" id=\"vsl\">\u2014</div>\n        </div>\n      </div>\n      <div style=\"margin-top:1px\">\n        <div style=\"display:flex;justify-content:space-between;align-items:baseline\">\n          <span class=\"lb\">kes <span class=\"vl\" style=\"font-size:10px;color:rgba(200,220,255,.6)\" id=\"vks\">\u2014</span></span>\n          <span class=\"vl\" style=\"font-size:11px\" id=\"vkr\">\u2014</span>\n        </div>\n        <div class=\"kbt\">\n          <div class=\"kbf\" id=\"vkr-bar\" style=\"width:0%\"></div>\n        </div>\n      </div>\n    </div>\n  \n  </div>\n\n  <!-- RIGHT: system, peers, runtime -->\n  <div style=\"display:flex;flex-direction:column;gap:8px;padding-left:16px;overflow:hidden\">\n\n    <div>\n      <div style=\"display:flex;align-items:center;gap:6px;margin-bottom:3px\">\n        <span style=\"font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:rgba(180,210,255,.5);width:36px;flex-shrink:0\">CPU</span>\n        <div class=\"bt\">\n          <div id=\"bc\" class=\"bf\" style=\"background:linear-gradient(90deg,#4285F4,#00B4D8)\"></div>\n        </div>\n        <span class=\"vl\" style=\"font-size:11px;min-width:30px;text-align:right;color:#d0d8e8\" id=\"vc\">\u2014</span>\n      </div>\n      <div style=\"display:flex;align-items:center;gap:6px;margin-bottom:3px\">\n        <span style=\"font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:rgba(180,210,255,.5);width:36px;flex-shrink:0\">MEM</span>\n        <div class=\"bt\">\n          <div id=\"bm\" class=\"bf\" style=\"background:linear-gradient(90deg,#FF9830,#E88C30)\"></div>\n        </div>\n        <span class=\"vl\" style=\"font-size:11px;min-width:30px;text-align:right;color:#d0d8e8\" id=\"vm\">\u2014</span>\n      </div>\n      <div style=\"display:flex;align-items:center;gap:6px;margin-bottom:3px\">\n        <span style=\"font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:rgba(180,210,255,.5);width:36px;flex-shrink:0\">MMAP</span>\n        <div class=\"bt\">\n          <div id=\"bd\" class=\"bf\" style=\"background:linear-gradient(90deg,#FADE2A,#FF9800)\"></div>\n        </div>\n        <span class=\"vl\" style=\"font-size:11px;min-width:30px;text-align:right;color:#d0d8e8\" id=\"vd\">\u2014</span>\n      </div>\n      <div style=\"display:flex;align-items:center;gap:6px\">\n        <span style=\"font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:rgba(180,210,255,.5);width:36px;flex-shrink:0\">HEAP</span>\n        <div class=\"bt\">\n          <div id=\"bs\" class=\"bf\" style=\"background:linear-gradient(90deg,#B88CFF,#9C27B0)\"></div>\n        </div>\n        <span class=\"vl\" style=\"font-size:11px;min-width:30px;text-align:right;color:#d0d8e8\" id=\"vs\">\u2014</span>\n      </div>\n\n    </div>\n\n    <div>\n      <span class=\"sl\">peers</span>\n      <div style=\"display:flex;gap:5px;align-items:stretch\">\n        <div class=\"pill\"\n          style=\"background:rgba(115,191,105,.1);border:1px solid rgba(115,191,105,.15);flex:1;padding:5px 10px\" id=\"pill-in\">\n          <span style=\"font-size:9px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:rgba(143,212,126,.65)\">in</span>\n          <div class=\"vl\" style=\"font-size:22px;color:#8FD47E\" id=\"vpi\">\u2014</div>\n        </div>\n        <div class=\"pill\"\n          style=\"background:rgba(115,191,105,.1);border:1px solid rgba(115,191,105,.15);flex:1;padding:5px 10px\" id=\"pill-out\">\n          <span style=\"font-size:9px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:rgba(143,212,126,.65)\">out</span>\n          <div class=\"vl\" style=\"font-size:22px;color:#8FD47E\" id=\"vpo\">\u2014</div>\n        </div>\n        <div style=\"width:1px;align-self:stretch;background:rgba(255,255,255,.06);flex-shrink:0;margin:0 2px\"></div>\n        <div class=\"pill\" style=\"background:rgba(242,73,92,.08);border:1px solid rgba(242,73,92,.12);flex:1;padding:5px 8px\">\n          <span style=\"font-size:8px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:rgba(242,100,115,.6)\">hot</span>\n          <div class=\"vl\" style=\"font-size:18px;color:#F56B7A\" id=\"vph\">\u2014</div>\n        </div>\n        <div class=\"pill\"\n          style=\"background:rgba(250,222,42,.08);border:1px solid rgba(250,222,42,.12);flex:1;padding:5px 8px\">\n          <span style=\"font-size:8px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:rgba(255,230,80,.6)\">warm</span>\n          <div class=\"vl\" style=\"font-size:18px;color:#FFE650\" id=\"vpw\">\u2014</div>\n        </div>\n        <div class=\"pill\"\n          style=\"background:rgba(66,133,244,.08);border:1px solid rgba(66,133,244,.12);flex:1;padding:5px 8px\">\n          <span style=\"font-size:8px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:rgba(100,170,255,.6)\">cold</span>\n          <div class=\"vl\" style=\"font-size:18px;color:#6CA6F7\" id=\"vpc\">\u2014</div>\n        </div>\n        <div style=\"width:1px;align-self:stretch;background:rgba(255,255,255,.06);flex-shrink:0;margin:0 4px\"></div>\n        <div class=\"pill\"\n          style=\"background:rgba(184,140,255,.08);border:1px solid rgba(184,140,255,.12);flex:1;padding:5px 8px\">\n          <span style=\"font-size:8px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:rgba(200,170,255,.6)\">duplex</span>\n          <div class=\"vl\" style=\"font-size:16px;color:#C8AAFF\" id=\"vpd\">\u2014</div>\n        </div>\n        <div class=\"pill\"\n          style=\"background:rgba(230,237,243,.06);border:1px solid rgba(255,255,255,.08);flex:1;padding:5px 8px\">\n          <span style=\"font-size:8px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:rgba(200,220,255,.5)\">known</span>\n          <div class=\"vl\" style=\"font-size:16px;color:#d0d8e8\" id=\"vpk\">\u2014</div>\n        </div>\n        <div class=\"pill\"\n          style=\"background:rgba(230,237,243,.06);border:1px solid rgba(255,255,255,.08);flex:1;padding:5px 8px\">\n          <span style=\"font-size:8px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:rgba(200,220,255,.5)\">estab</span>\n          <div class=\"vl\" style=\"font-size:16px;color:#d0d8e8\" id=\"vep2\">\u2014</div>\n        </div>\n      </div>\n    </div>\n\n    <div>\n      <span class=\"sl\">storage</span>\n            <div style=\"display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:4px 14px\">\n        <div><span class=\"lb\">blob</span>\n          <div class=\"vl\" style=\"font-size:13px;color:#FF9830;margin-top:2px\" id=\"vblob\">\u2014</div>\n        </div>\n        <div><span class=\"lb\">metadata</span>\n          <div class=\"vl\" style=\"font-size:13px;color:#A0C8FF;margin-top:2px\" id=\"vmeta\">\u2014</div>\n        </div>\n        <div><span class=\"lb\">lru hit</span>\n          <div class=\"vl\" style=\"font-size:13px;color:#73BF69;margin-top:2px\" id=\"vu\">\u2014</div>\n        </div>\n        <div><span class=\"lb\">cbor hit</span>\n          <div class=\"vl\" style=\"font-size:13px;color:#73BF69;margin-top:2px\" id=\"vutxo\">\u2014</div>\n        </div>\n      </div>\n      <span class=\"sl\">runtime</span>\n            <div style=\"display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:4px 14px\">\n        <div><span class=\"lb\">heap alloc</span>\n          <div class=\"vl\" style=\"font-size:13px;color:#8FD47E;margin-top:2px\" id=\"vrs\">\u2014</div>\n        </div>\n        <div><span class=\"lb\">heap</span>\n          <div class=\"vl\" style=\"font-size:13px;color:#8FD47E;margin-top:2px\" id=\"vha\">\u2014</div>\n        </div>\n        <div><span class=\"lb\">gc p99</span>\n          <div class=\"vl\" style=\"font-size:13px;color:#A0C8FF;margin-top:2px\" id=\"vgp\">\u2014</div>\n        </div>\n        <div><span class=\"lb\">goroutines</span>\n          <div class=\"vl\" style=\"font-size:13px;color:#C8AAFF;margin-top:2px\" id=\"vgr\">\u2014</div>\n        </div>\n        <div><span class=\"lb\">fd</span>\n          <div class=\"vl\" style=\"font-size:13px;margin-top:2px\" id=\"vfd\">\u2014</div>\n        </div>\n        <div><span class=\"lb\">uptime</span>\n          <div class=\"vl\" style=\"font-size:13px;color:#8FD47E;margin-top:2px\" id=\"vup\">\u2014</div>\n        </div>\n        <div><span class=\"lb\">dingo</span>\n          <div class=\"vl\" style=\"font-size:13px;color:#A0C8FF;margin-top:2px\" id=\"vdv\">\u2014</div>\n        </div>\n        <div><span class=\"lb\">go</span>\n          <div class=\"vl\" style=\"font-size:13px;color:rgba(200,220,255,.6);margin-top:2px\" id=\"vgo\">\u2014</div>\n        </div>\n      </div>\n    </div>\n\n  </div>\n</div>",
+        "defaultContent": "",
+        "helpers": "",
+        "afterRender": "// \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\n// Dingo Node Overview \u2014 afterRender JS\n// Paste this into the \"After content ready\" / afterRender field\n// \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\n(function () {\n  /* \u2500\u2500 hide panel header \u2500\u2500 */\n  try { var el = document.getElementById('vbh'); if (el) { var p = el.closest('[class*=\"panel-container\"]') || el.closest('.react-grid-item'); if (p) { var h = p.querySelector('[class*=\"panel-header\"]') || p.querySelector('[data-testid=\"header-container\"]'); if (h) h.style.display = 'none' } } } catch (e) { }\n\n  /* \u2500\u2500 force .p to fill panel \u2500\u2500 */\n  try { var pEl = document.querySelector('.p'); if (pEl) { pEl.style.height = '100%'; var el = pEl.parentElement; while (el && el !== document.body) { var cls = typeof el.className === 'string' ? el.className : ''; if (cls.indexOf('react-grid-item') >= 0) break; el.style.height = '100%'; el.style.overflow = 'hidden'; el = el.parentElement; } } } catch (e) { }\n\n  var s = (context.panelData && context.panelData.series) ? context.panelData.series : [];\n  function byRef(r) { for (var i = 0; i < s.length; i++)if (s[i].refId === r) return s[i]; return null }\n  function last(r) { var result = null; for (var si = 0; si < s.length; si++) { if (s[si].refId !== r) continue; try { var f = s[si].fields; for (var fi = 0; fi < f.length; fi++) { if (f[fi].name === 'Value' || f[fi].type === 'number') { var v = f[fi].values; var lv = v[v.length - 1]; if (lv !== null && lv !== undefined && (result === null || lv > result)) result = lv } } } catch(e){} } return result }\n  function vals(r) { var sr = byRef(r); if (!sr) return []; try { var f = sr.fields; var best = null; for (var i = 0; i < f.length; i++) { if (f[i].name === 'Value') return f[i].values || []; if (f[i].type === 'number' && f[i].name !== 'Time') { var v = f[i].values; if (v && v.length > 0 && (!best || v.length > best.length)) best = v } } if (best) return best } catch (e) { } return [] }\n  function legendVal(r) { var sr = byRef(r); if (!sr) return null; try { var f = sr.fields; for (var i = 0; i < f.length; i++) { if (f[i].labels && f[i].labels.version) return f[i].labels.version } } catch (e) { } return null }\n\n  var setCount = 0;\n  function set(id, v) { var e = document.getElementById(id); if (e && v !== null && v !== undefined) { var old = e.textContent; e.textContent = v; setCount++; if (old !== '\u2014' && old !== String(v)) { e.classList.remove('val-flash'); void e.offsetWidth; e.classList.add('val-flash') } } }\n  function fmt(n) { return n !== null && n !== undefined ? Math.round(n).toLocaleString() : '-' }\n  function fmtB(n) { if (n === null || n === undefined) return '-'; if (n >= 1099511627776) return (n / 1099511627776).toFixed(2) + ' TB'; if (n >= 1073741824) return (n / 1073741824).toFixed(1) + ' GB'; if (n >= 1048576) return (n / 1048576).toFixed(1) + ' MB'; if (n >= 1024) return (n / 1024).toFixed(0) + ' KB'; return n + ' B' }\n  function fmtUp(s) { if (!s && s !== 0) return '-'; var h = s / 3600; return h >= 24 ? (h / 24).toFixed(1) + 'd' : h.toFixed(1) + 'h' }\n  function bar(bi, pct) { var p = Math.max(0, Math.min(100, Math.round(pct || 0))); var b = document.getElementById(bi); if (b) b.style.width = p + '%'; return p }\n\n  /* system bars \u2014 CPU, MEM(sys), MMAP, Heap, CBOR cache */\n  var cpuV = last('CPU'), sysV = last('MEM'), mmapV = last('DISK'), heapV = last('SWAP'), utxoR = last('UTXO');\n  var cpuCores = (cpuV || 0) / 100; var maxP = last('MAXP') || 4; var cpuPct = Math.round(cpuCores / maxP * 100); bar('bc', Math.min(100, cpuPct)); set('vc', cpuV !== null ? cpuPct + '%' : '\u2014');\n  var sysMB = sysV ? sysV / 1048576 : 0;\n  bar('bm', (sysMB / 4096) * 100); set('vm', sysMB >= 1024 ? (sysMB / 1024).toFixed(1) + ' GB' : Math.round(sysMB) + ' MB');\n  var mmapMB = mmapV ? mmapV / 1048576 : 0;\n  bar('bd', (mmapMB / 16384) * 100); set('vd', mmapMB >= 1024 ? (mmapMB / 1024).toFixed(1) + ' GB' : Math.round(mmapMB) + ' MB');\n  var heapMB = heapV ? heapV / 1048576 : 0;\n  bar('bs', (heapMB / 4096) * 100); set('vs', heapMB >= 1024 ? (heapMB / 1024).toFixed(1) + ' GB' : Math.round(heapMB) + ' MB');\n  var utxoPct = (utxoR !== null && !isNaN(utxoR)) ? Math.round(utxoR * 100) : null;\n  set('vutxo', utxoPct !== null ? utxoPct + '%' : '\u2014');\n  var vutxoEl = document.getElementById('vutxo'); if (vutxoEl) vutxoEl.style.color = utxoPct === null ? 'rgba(200,220,255,.6)' : utxoPct >= 90 ? '#73BF69' : utxoPct >= 50 ? '#FADE2A' : '#F2495C';\n  var lruR = last('LRUHIT'), lruPct = (lruR !== null && !isNaN(lruR)) ? Math.round(lruR * 100) : null;\n  set('vu', lruPct !== null ? lruPct + '%' : '\u2014');\n  var vuEl = document.getElementById('vu'); if (vuEl) vuEl.style.color = lruPct === null ? 'rgba(200,220,255,.6)' : lruPct >= 50 ? '#73BF69' : lruPct >= 20 ? '#FADE2A' : '#F2495C';\n  var blobSize = last('DBBLOB'), metaSize = last('DBMETA');\n  set('vblob', blobSize !== null ? (blobSize >= 1073741824 ? (blobSize / 1073741824).toFixed(1) + ' GB' : (blobSize / 1048576).toFixed(0) + ' MB') : '\u2014');\n  set('vmeta', metaSize !== null ? (metaSize >= 1073741824 ? (metaSize / 1073741824).toFixed(1) + ' GB' : (metaSize / 1048576).toFixed(0) + ' MB') : '\u2014');\n\n  /* chain */\n  set('vbh', fmt(last('BH'))); set('vsn', fmt(last('SN'))); set('vep', fmt(last('EP')));\n  var sie = last('SE'); set('vse', fmt(sie));\n  var epochLen = last('ELS') || 432000; var epct = sie ? Math.min(100, Math.round((sie / epochLen) * 100)) : 0;\n  var eb = document.getElementById('ebar'); if (eb) eb.style.width = epct + '%';\n  set('vepct', epct);\n\n  /* density */\n  var dn = last('DN'), dnStr = dn !== null ? (dn * 100).toFixed(2) + '%' : '-';\n  set('vdn', dnStr); var dnEl = document.getElementById('vdn');\n  if (dn !== null && dnEl) dnEl.style.color = dn > 0.01 ? '#73BF69' : dn > 0.005 ? '#FADE2A' : '#F2495C';\n\n  /* forks */\n  var fkv = last('FK'); set('vfk', fmt(fkv)); var fkEl = document.getElementById('vfk');\n  if (fkEl) fkEl.style.color = !fkv || fkv === 0 ? '#73BF69' : fkv <= 5 ? '#FADE2A' : '#F2495C';\n\n  /* tip gap */\n  var tg = last('TG'), tgel = document.getElementById('vtg');\n  if (tg !== null && tgel) { tgel.textContent = Math.round(tg); tgel.style.color = tg > 5 ? '#F2495C' : tg >= 1 ? '#FADE2A' : '#73BF69' }\n\n  /* blockfetch */\n  var bdv2 = last('BD');\n  if (bdv2 !== null) { var bd2El = document.getElementById('vbd2'); if (bd2El) { bd2El.textContent = bdv2.toFixed(3) + 's'; bd2El.style.color = bdv2 < 1 ? '#73BF69' : bdv2 < 3 ? '#FADE2A' : '#F2495C' } }\n  var cd2v = last('CD1');\n  if (cd2v !== null) { var cd2El = document.getElementById('vcd2'); if (cd2El) { cd2El.textContent = Math.round(cd2v) + '%'; cd2El.style.color = cd2v > 90 ? '#73BF69' : cd2v > 50 ? '#FADE2A' : '#F2495C' } }\n\n  /* late */\n  var blv = last('BL'); set('vbl', fmt(blv)); var blEl = document.getElementById('vbl');\n  if (blEl) blEl.style.color = !blv || blv === 0 ? '#73BF69' : blv <= 5 ? '#FADE2A' : '#F2495C';\n\n  /* peers */\n  var ciV = last('CI'), coV = last('CO'), dxV = last('DX');\n  set('vpi', fmt(ciV)); set('vpo', fmt(coV));\n  var pillIn = document.getElementById('pill-in'), piEl = document.getElementById('vpi');\n  if (pillIn && piEl) { if (ciV !== null && ciV > 0) { piEl.style.color = '#8FD47E'; pillIn.style.background = 'rgba(115,191,105,.1)'; pillIn.style.borderColor = 'rgba(115,191,105,.15)' } else { piEl.style.color = '#F56B7A'; pillIn.style.background = 'rgba(242,73,92,.1)'; pillIn.style.borderColor = 'rgba(242,73,92,.15)' } }\n  var pillOut = document.getElementById('pill-out'), poEl = document.getElementById('vpo');\n  if (pillOut && poEl) { if (coV !== null && coV > 0) { poEl.style.color = '#8FD47E'; pillOut.style.background = 'rgba(115,191,105,.1)'; pillOut.style.borderColor = 'rgba(115,191,105,.15)' } else { poEl.style.color = '#F56B7A'; pillOut.style.background = 'rgba(242,73,92,.1)'; pillOut.style.borderColor = 'rgba(242,73,92,.15)' } }\n  set('vph', fmt(last('PH'))); set('vpw', fmt(last('PW'))); set('vpc', fmt(last('PC')));\n  set('vpk', fmt(last('PK'))); set('vep2', fmt(last('EP2')));\n  set('vpd', fmt(dxV));\n\n  /* mempool */\n  var mbv = last('MB'); set('vmb', fmtB(mbv));\n  var mtv = last('MT'); set('vmt', fmt(mtv));\n  if (mtv && mtv > 0 && mbv !== null) { set('vmcap', fmtB(Math.round(mbv / mtv)) + '/tx') } else set('vmcap', '-');\n  set('vmp', fmt(last('MP')));\n  var mev = last('ME'); set('vme', fmt(mev)); var meEl = document.getElementById('vme');\n  if (meEl) meEl.style.color = !mev || mev === 0 ? '#73BF69' : mev <= 100 ? '#FADE2A' : '#F2495C';\n\n  /* \u2500\u2500 blockfetch bar chart with click-to-copy \u2500\u2500 */\n  function drawBarChart(canvasId, refId, blockRefId, thresholds, softMax) {\n    var cv = document.getElementById(canvasId); if (!cv) return;\n    var rawVV = vals(refId), rawBlocks = vals(blockRefId);\n    if (rawVV.length <= 1) { cv.style.background = 'rgba(255,255,255,.02)'; return }\n    var vv = [], blocks = [];\n    var lastBn = null, curMax = 0;\n    for (var di = 0; di < rawVV.length; di++) {\n      var bn = rawBlocks[di];\n      if (bn !== lastBn) {\n        if (lastBn !== null) { vv.push(curMax); blocks.push(lastBn) }\n        lastBn = bn; curMax = rawVV[di] || 0;\n      } else { if (rawVV[di] > curMax) curMax = rawVV[di] }\n    }\n    if (lastBn !== null) { vv.push(curMax); blocks.push(lastBn) }\n    if (vv.length <= 1) { cv.style.background = 'rgba(255,255,255,.02)'; return }\n    var n = vv.length, dataMx = 0;\n    for (var i = 0; i < n; i++) { if (vv[i] > dataMx) dataMx = vv[i] }\n    var mx = softMax > 0 ? softMax : (dataMx * 1.1 || 1);\n    function getColor(v) { var c = thresholds[0].color; for (var t = 0; t < thresholds.length; t++) { if (v >= thresholds[t].value) c = thresholds[t].color } return c }\n    function paint(highlightIdx) {\n      var dpr = window.devicePixelRatio || 1;\n      cv.width = cv.offsetWidth * dpr; cv.height = cv.offsetHeight * dpr;\n      var ctx = cv.getContext('2d'); ctx.scale(dpr, dpr);\n      var w = cv.offsetWidth, h = cv.offsetHeight;\n      ctx.clearRect(0, 0, w, h);\n      var gap = 1, barW = Math.max(1, (w - gap * n) / n);\n      for (var i = 0; i < n; i++) {\n        var v = vv[i], barH = Math.max(1, (v / mx) * (h - 2)), x = i * (barW + gap);\n        if (i === highlightIdx) { ctx.fillStyle = 'rgba(255,255,255,0.9)'; ctx.fillRect(x, 0, barW, h) }\n        else { ctx.fillStyle = getColor(v); ctx.fillRect(x, h - barH, barW, barH) }\n      }\n      for (var t = 1; t < thresholds.length; t++) {\n        var ty = h - (thresholds[t].value / mx) * (h - 2);\n        if (ty < 2 || ty > h - 2) continue; ctx.beginPath(); ctx.setLineDash([4, 3]); ctx.moveTo(0, ty); ctx.lineTo(w, ty);\n        ctx.strokeStyle = thresholds[t].color; ctx.lineWidth = 1; ctx.globalAlpha = 0.6; ctx.stroke(); ctx.globalAlpha = 1.0; ctx.setLineDash([])\n      }\n    }\n    paint(-1);\n    var barPositions = [];\n    var gap = 1, bw = Math.max(1, (cv.offsetWidth - gap * n) / n);\n    for (var bi = 0; bi < n; bi++) { barPositions.push({ left: bi * (bw + gap), right: bi * (bw + gap) + bw }) }\n    cv._chartState = { vv: vv, blocks: blocks, n: n, mx: mx, thresholds: thresholds, paint: paint, barPos: barPositions, cssW: cv.offsetWidth };\n    if (!cv._clickBound) {\n      cv._clickBound = true;\n      cv.addEventListener('click', function (e) {\n        var st = cv._chartState; if (!st) return;\n        var clickX = e.offsetX / cv.clientWidth * st.cssW;\n        var idx = -1;\n        for (var bi = 0; bi < st.barPos.length; bi++) { if (clickX >= st.barPos[bi].left && clickX <= st.barPos[bi].right) { idx = bi; break } }\n        if (idx < 0) return;\n        var block = st.blocks[idx]; if (!block) return;\n        var bn = String(block);\n        var ta = document.createElement('textarea'); ta.value = bn; ta.style.cssText = 'position:fixed;left:-9999px'; document.body.appendChild(ta); ta.select(); document.execCommand('copy'); document.body.removeChild(ta);\n        st.paint(idx); setTimeout(function () { if (cv._chartState) cv._chartState.paint(-1) }, 350);\n        var toast = document.getElementById('copy-toast');\n        if (toast) { toast.textContent = 'Block ' + Number(bn).toLocaleString() + ' copied'; toast.classList.add('show'); clearTimeout(toast._tid); toast._tid = setTimeout(function () { toast.classList.remove('show') }, 2000) }\n      });\n    }\n  }\n\n  /* \u2500\u2500 sparkline (zero-floored) \u2500\u2500 */\n  function drawSparkline(canvasId, refId, strokeColor, fillTop, fillBot, thresholds, softMax) {\n    var cv = document.getElementById(canvasId); if (!cv) return;\n    var vv = vals(refId); if (vv.length <= 1) { cv.style.background = 'rgba(255,255,255,.02)'; return }\n    var dpr = window.devicePixelRatio || 1;\n    cv.width = cv.offsetWidth * dpr; cv.height = cv.offsetHeight * dpr;\n    var ctx = cv.getContext('2d'); ctx.scale(dpr, dpr);\n    var w = cv.offsetWidth, h = cv.offsetHeight, mx = -Infinity;\n    for (var i = 0; i < vv.length; i++) { if (vv[i] > mx) mx = vv[i] } var dataMx = mx; mx = (softMax && softMax > dataMx) ? softMax : (mx * 1.1 || 1);\n    ctx.clearRect(0, 0, w, h); ctx.beginPath(); ctx.moveTo(0, h);\n    for (var i = 0; i < vv.length; i++) { var x = (i / (vv.length - 1)) * w; var y = h - (vv[i] / mx) * (h - 2) - 1; ctx.lineTo(x, y) }\n    ctx.lineTo(w, h); ctx.closePath();\n    var gf = ctx.createLinearGradient(0, 0, 0, h); gf.addColorStop(0, fillTop); gf.addColorStop(1, fillBot); ctx.fillStyle = gf; ctx.fill();\n    ctx.beginPath(); for (var i = 0; i < vv.length; i++) { var x = (i / (vv.length - 1)) * w; var y = h - (vv[i] / mx) * (h - 2) - 1; i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y) }\n    ctx.strokeStyle = strokeColor; ctx.lineWidth = 1.5; ctx.stroke();\n    var lastY = h - (vv[vv.length - 1] / mx) * (h - 2) - 1; ctx.beginPath(); ctx.arc(w, lastY, 2.5, 0, Math.PI * 2); ctx.fillStyle = strokeColor; ctx.fill();\n    ctx.beginPath(); ctx.moveTo(0, h - 1); ctx.lineTo(w, h - 1); ctx.strokeStyle = 'rgba(255,255,255,.06)'; ctx.lineWidth = 1; ctx.stroke();\n    if (thresholds && thresholds.length) { for (var t = 0; t < thresholds.length; t++) { var ty = h - (thresholds[t].value / mx) * (h - 2) - 1; if (ty < 2 || ty > h - 2) continue; ctx.beginPath(); ctx.setLineDash([4, 3]); ctx.moveTo(0, ty); ctx.lineTo(w, ty); ctx.strokeStyle = thresholds[t].color; ctx.lineWidth = 1; ctx.globalAlpha = 0.6; ctx.stroke(); ctx.globalAlpha = 1.0; ctx.setLineDash([]) } }\n  }\n\n  drawBarChart('spark-bars', 'BDR', 'BNR', [{ value: 0, color: '#1a7a42' }, { value: 0.25, color: '#73BF69' }, { value: 0.5, color: '#E88C30' }, { value: 1, color: '#D4413A' }], 2);\n  drawSparkline('spark2', 'MBR', '#4285F4', 'rgba(66,133,244,.18)', 'rgba(66,133,244,.01)', [{ value: 32768, color: '#E88C30' }, { value: 65536, color: '#D4413A' }], 65536);\n\n  /* runtime */\n  set('vrs', fmtB(last('RS'))); set('vha', fmtB(last('HA')));\n  var gp = last('GP'); if (gp !== null) set('vgp', (gp * 1000).toFixed(2) + 'ms');\n  set('vgr', fmt(last('GR')));\n  var fdv = last('FD'); set('vfd', fmt(fdv)); var fdEl = document.getElementById('vfd'); if (fdEl) fdEl.style.color = fdv < 500 ? '#73BF69' : fdv < 800 ? '#FADE2A' : '#F2495C';\n  set('vup', fmtUp(last('UP')));\n  var dbiVer = legendVal('DBI'); if (dbiVer) { dbiVer = dbiVer.replace(/\\s*\\(commit\\s+([a-f0-9]{7,8})[a-f0-9]*\\)/i, '($1)').replace(/^devel/, 'dev'); set('vdv', dbiVer) }\n  var goVer = legendVal('GO'); if (goVer) set('vgo', goVer.replace(/^go/, ''));\n\n  /* badges */\n  var fg = last('FG'), fb = document.getElementById('vfb');\n  if (fb) { if (fg > 0) { fb.textContent = 'CORE'; fb.className = 'badge bgr' } else if (ciV !== null && ciV > 0) { fb.textContent = 'RELAY'; fb.className = 'badge bb' } else { fb.textContent = 'NODE'; fb.className = 'badge bg' } }\n\n  /* sync */\n  var srForge = last('SR'), srTip = last('TG'), vsEl = document.getElementById('vsync');\n  var sr = (fg > 0 && srForge !== null) ? srForge : srTip;\n  if (vsEl) { if (sr === null || sr === undefined) { vsEl.textContent = 'UNKNOWN'; vsEl.className = 'badge bg' } else if (sr < 120) { vsEl.textContent = 'SYNCED'; vsEl.className = 'badge bgr' } else if (sr < 3600) { vsEl.textContent = 'SYNCING'; vsEl.className = 'badge by' } else { vsEl.textContent = 'STALLED'; vsEl.className = 'badge br' } }\n\n  /* era / forge */\n  var ctrEra = document.getElementById('ctr-era'), logo = document.getElementById('dingo-logo'), ctrF = document.getElementById('ctr-forge');\n  if (fg > 0 && ctrF) {\n    ctrF.style.display = 'flex'; if (logo) logo.style.height = '68px'; var gImg = document.getElementById('ctr-gouroboros'); if (gImg) gImg.style.display = 'none';\n    var bfRaw = last('BF'), naV = last('NA');\n    set('vcf', fmt(bfRaw));\n    set('vca', fmt(naV));\n    var missV = last('FI'); set('vnb', fmt(missV));\n    var vnbEl = document.getElementById('vnb'); if (vnbEl) vnbEl.style.color = !missV || missV === 0 ? '#73BF69' : missV <= 2 ? '#FADE2A' : '#F2495C';\n    set('vsl', fmt(last('SL'))); set('vks', fmt(last('KS')));\n    var kr = last('KR'), krel = document.getElementById('vkr'), krBar = document.getElementById('vkr-bar');\n    if (kr !== null) {\n      var krC = kr < 10 ? '#F2495C' : kr < 50 ? '#FADE2A' : '#73BF69';\n      if (krel) { krel.textContent = Math.round(kr); krel.style.color = krC }\n      if (krBar) { krBar.style.width = Math.min(100, Math.max(0, Math.round((kr / 62) * 100))) + '%'; krBar.style.background = kr < 10 ? 'linear-gradient(90deg,#F2495C,#c0392b)' : kr < 50 ? 'linear-gradient(90deg,#FADE2A,#f39c12)' : 'linear-gradient(90deg,#73BF69,#27ae60)' }\n      if (ctrEra) ctrEra.style.display = 'none'\n    }\n  } else if (ctrF) { ctrF.style.display = 'none'; if (logo) logo.style.height = '90px'; if (ctrEra) { ctrEra.style.display = 'block'; set('vera', 'Conway') } var gImg = document.getElementById('ctr-gouroboros'); if (gImg) gImg.style.display = 'block' }\n\n  /* stale */\n  var staleBanner = document.getElementById('stale-banner');\n  if (staleBanner) staleBanner.style.display = setCount < 3 ? 'block' : 'none';\n})();\n",
+        "externalStyles": [],
+        "styles": "\n  * {\n    box-sizing: border-box;\n    margin: 0;\n    padding: 0\n  }\n\n  @keyframes shimmer {\n    0% {\n      background-position: 200% 0\n    }\n\n    100% {\n      background-position: -200% 0\n    }\n  }\n\n  @keyframes fade-in {\n    from {\n      opacity: 0;\n      transform: translateY(4px)\n    }\n\n    to {\n      opacity: 1;\n      transform: translateY(0)\n    }\n  }\n\n  @keyframes glow-pulse {\n\n    0%,\n    100% {\n      opacity: .3\n    }\n\n    50% {\n      opacity: .7\n    }\n  }\n\n  @keyframes stale-flash {\n\n    0%,\n    100% {\n      opacity: .6\n    }\n\n    50% {\n      opacity: 1\n    }\n  }\n\n  .p {\n    background: #0d1117;\n    color: #e6edf3;\n    font-family: -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, sans-serif;\n    border-radius: 10px;\n    width: 100%;\n    height: 100%;\n    padding: 10px 16px;\n    display: grid;\n    grid-template-columns: 1fr 180px 1fr;\n    gap: 0;\n    align-items: stretch;\n    overflow: hidden;\n    position: relative;\n    border: 1px solid rgba(66, 133, 244, .08);\n    box-shadow: 0 4px 24px rgba(0, 0, 0, .4), inset 0 1px 0 rgba(255, 255, 255, .03)\n  }\n\n  .p::before {\n    content: \"\";\n    position: absolute;\n    top: 0;\n    left: 20px;\n    right: 20px;\n    height: 1px;\n    background: linear-gradient(90deg, transparent, rgba(90, 157, 247, .4) 30%, rgba(51, 204, 232, .4) 50%, rgba(143, 212, 126, .4) 70%, transparent);\n    z-index: 2\n  }\n\n  .p::after {\n    content: \"\";\n    position: absolute;\n    top: 0;\n    left: 0;\n    right: 0;\n    bottom: 0;\n    background: radial-gradient(ellipse 70% 50% at 50% 0%, rgba(66, 133, 244, .04) 0%, transparent 70%);\n    pointer-events: none;\n    z-index: 0\n  }\n\n  .p>* {\n    position: relative;\n    z-index: 1\n  }\n\n  .lb {\n    font-size: 10px;\n    font-weight: 700;\n    letter-spacing: 1.5px;\n    text-transform: uppercase;\n    color: rgba(180, 210, 255, .5);\n    display: block;\n    margin-bottom: 1px\n  }\n\n  .vl {\n    font-family: \"SF Mono\", \"Fira Code\", ui-monospace, monospace;\n    font-variant-numeric: tabular-nums;\n    font-weight: 700;\n    line-height: 1.15\n  }\n\n  .sl {\n    font-size: 9px;\n    font-weight: 700;\n    letter-spacing: 2px;\n    text-transform: uppercase;\n    color: rgba(180, 210, 255, .4);\n    padding-bottom: 3px;\n    margin-bottom: 4px;\n    border-bottom: 1px solid rgba(255, 255, 255, .05);\n    display: block\n  }\n\n  .badge {\n    padding: 4px 0;\n    border-radius: 5px;\n    font-size: 11px;\n    font-weight: 800;\n    letter-spacing: 1px;\n    text-transform: uppercase;\n    text-align: center;\n    display: block;\n    width: 100%;\n    transition: all .4s ease\n  }\n\n  .bg {\n    background: rgba(107, 114, 128, .2);\n    color: #b0b5bd;\n    border: 1px solid rgba(107, 114, 128, .3)\n  }\n\n  .bb {\n    background: rgba(66, 133, 244, .15);\n    color: #6CA6F7;\n    border: 1px solid rgba(66, 133, 244, .25);\n    box-shadow: 0 0 12px rgba(66, 133, 244, .12)\n  }\n\n  .bgr {\n    background: rgba(115, 191, 105, .15);\n    color: #8FD47E;\n    border: 1px solid rgba(115, 191, 105, .25);\n    box-shadow: 0 0 12px rgba(115, 191, 105, .12)\n  }\n\n  .by {\n    background: rgba(250, 222, 42, .15);\n    color: #FFE650;\n    border: 1px solid rgba(250, 222, 42, .25);\n    box-shadow: 0 0 12px rgba(250, 222, 42, .12)\n  }\n\n  .br {\n    background: rgba(242, 73, 92, .15);\n    color: #F56B7A;\n    border: 1px solid rgba(242, 73, 92, .25);\n    box-shadow: 0 0 12px rgba(242, 73, 92, .12)\n  }\n\n  .pill {\n    border-radius: 6px;\n    padding: 3px 7px;\n    text-align: center;\n    display: inline-flex;\n    flex-direction: column;\n    gap: 0;\n    flex-shrink: 0;\n    transition: transform .2s ease, box-shadow .3s ease\n  }\n\n  .pill:hover {\n    transform: translateY(-1px);\n    box-shadow: 0 3px 12px rgba(0, 0, 0, .4), 0 0 8px rgba(66, 133, 244, .1)\n  }\n\n  .epb {\n    height: 5px;\n    background: rgba(255, 255, 255, .06);\n    border-radius: 3px;\n    margin-top: 3px;\n    overflow: hidden;\n    border: 1px solid rgba(255, 255, 255, .04)\n  }\n\n  .epf {\n    height: 100%;\n    border-radius: 2px;\n    background: linear-gradient(90deg, #5A9DF7, #33CCE8, #8FD47E);\n    transition: width .8s cubic-bezier(.22, 1, .36, 1);\n    box-shadow: 0 0 10px rgba(66, 133, 244, .35)\n  }\n\n  .bt {\n    height: 12px;\n    background: rgba(255, 255, 255, .06);\n    border-radius: 4px;\n    overflow: hidden;\n    flex: 1;\n    border: 1px solid rgba(255, 255, 255, .04)\n  }\n\n  .bf {\n    height: 100%;\n    border-radius: 3px;\n    transition: width .6s cubic-bezier(.22, 1, .36, 1);\n    box-shadow: 0 0 8px rgba(66, 133, 244, .2)\n  }\n\n  .kbt {\n    height: 5px;\n    background: rgba(255, 255, 255, .05);\n    border-radius: 3px;\n    overflow: hidden;\n    flex: 1\n  }\n\n  .kbf {\n    height: 100%;\n    border-radius: 3px;\n    transition: width .6s cubic-bezier(.22, 1, .36, 1)\n  }\n\n  .dv {\n    width: 1px;\n    background: rgba(255, 255, 255, .06);\n    align-self: stretch;\n    flex-shrink: 0\n  }\n\n  .dh {\n    height: 1px;\n    background: linear-gradient(90deg, transparent, rgba(255, 255, 255, .06), transparent);\n    margin: 3px 0\n  }\n\n  .stale-banner {\n    position: absolute;\n    top: 0;\n    left: 0;\n    right: 0;\n    background: linear-gradient(90deg, rgba(242, 73, 92, .15), rgba(242, 73, 92, .08));\n    border-bottom: 1px solid rgba(242, 73, 92, .2);\n    color: #F2495C;\n    font-size: 10px;\n    font-weight: 800;\n    letter-spacing: 2px;\n    text-transform: uppercase;\n    text-align: center;\n    padding: 3px 0;\n    z-index: 10;\n    animation: stale-flash 2s ease-in-out infinite;\n    display: none\n  }\n\n  .spark-wrap {\n    flex: 1;\n    min-width: 0;\n    display: flex;\n    flex-direction: column;\n    background: rgba(255, 255, 255, .015);\n    border-radius: 4px;\n    padding: 2px 4px;\n    border: 1px solid rgba(255, 255, 255, .03);\n    transition: border-color .3s\n  }\n\n  .spark-wrap:hover {\n    border-color: rgba(255, 255, 255, .08)\n  }\n\n  .val-flash {\n    animation: fade-in .3s ease-out\n  }\n\n  .copy-toast {\n    position: absolute;\n    bottom: 8px;\n    left: 50%;\n    transform: translateX(-50%) translateY(10px);\n    background: rgba(30, 38, 50, .95);\n    color: #8FD47E;\n    font-family: \"SF Mono\", \"Fira Code\", ui-monospace, monospace;\n    font-size: 12px;\n    font-weight: 700;\n    padding: 8px 16px;\n    border-radius: 6px;\n    border: 1px solid rgba(115, 191, 105, .25);\n    box-shadow: 0 4px 16px rgba(0, 0, 0, .4), 0 0 12px rgba(115, 191, 105, .1);\n    opacity: 0;\n    transition: opacity .3s, transform .3s;\n    pointer-events: none;\n    z-index: 100\n  }\n\n  .copy-toast.show {\n    opacity: 1;\n    transform: translateX(-50%) translateY(0)\n  }\n\n  #spark-bars {\n    cursor: pointer\n  }\n\n  .dt-row {\n    overflow: hidden !important;\n    height: 100% !important\n  }\n\n  .dt-row::-webkit-scrollbar {\n    display: none\n  }\n\n  .dt-row>div {\n    height: 100% !important\n  }\n"
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Hot",
+      "id": 1,
+      "gridPos": {
+        "h": 3,
+        "w": 2,
+        "x": 0,
+        "y": 10
+      },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#ef4444",
+                "value": 0
+              },
+              {
+                "color": "#f59e0b",
+                "value": 3
+              },
+              {
+                "color": "#22c55e",
+                "value": 5
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "cardano_node_metrics_peerSelection_hot{network=\"$network\",instance=~\"$instance\"}",
+          "instant": true,
+          "legendFormat": "{{alias}}",
+          "refId": "A"
+        }
+      ],
+      "transparent": true,
+      "description": "Number of hot peers \u2014 fully promoted, providing chain data."
+    },
+    {
+      "type": "stat",
+      "title": "Warm",
+      "id": 2,
+      "gridPos": {
+        "h": 3,
+        "w": 2,
+        "x": 2,
+        "y": 10
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "#f59e0b",
+            "mode": "fixed"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#f59e0b",
+                "value": 0
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "cardano_node_metrics_peerSelection_warm{network=\"$network\",instance=~\"$instance\"}",
+          "instant": true,
+          "legendFormat": "{{alias}}",
+          "refId": "A"
+        }
+      ],
+      "transparent": true,
+      "description": "Number of warm peers \u2014 connected and idle, ready to promote."
+    },
+    {
+      "type": "stat",
+      "title": "Cold",
+      "id": 3,
+      "gridPos": {
+        "h": 3,
+        "w": 2,
+        "x": 4,
+        "y": 10
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "#3b82f6",
+            "mode": "fixed"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#3b82f6",
+                "value": 0
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "cardano_node_metrics_peerSelection_cold{network=\"$network\",instance=~\"$instance\"}",
+          "instant": true,
+          "legendFormat": "{{alias}}",
+          "refId": "A"
+        }
+      ],
+      "transparent": true,
+      "description": "Number of cold peers \u2014 known but not currently connected."
+    },
+    {
+      "type": "stat",
+      "title": "Active",
+      "id": 4,
+      "gridPos": {
+        "h": 3,
+        "w": 2,
+        "x": 6,
+        "y": 10
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "#22c55e",
+            "mode": "fixed"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#22c55e",
+                "value": 0
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "cardano_node_metrics_peerSelection_ActivePeers{network=\"$network\",instance=~\"$instance\"}",
+          "instant": true,
+          "legendFormat": "{{alias}}",
+          "refId": "A"
+        }
+      ],
+      "transparent": true,
+      "description": "Total active peer connections (hot + warm)."
+    },
+    {
+      "type": "stat",
+      "title": "Established",
+      "id": 5,
+      "gridPos": {
+        "h": 3,
+        "w": 2,
+        "x": 8,
+        "y": 10
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "#60a5fa",
+            "mode": "fixed"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#60a5fa",
+                "value": 0
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "cardano_node_metrics_peerSelection_EstablishedPeers{network=\"$network\",instance=~\"$instance\"}",
+          "instant": true,
+          "legendFormat": "{{alias}}",
+          "refId": "A"
+        }
+      ],
+      "transparent": true,
+      "description": "Established TCP connections to peers."
+    },
+    {
+      "type": "stat",
+      "title": "Known",
+      "id": 6,
+      "gridPos": {
+        "h": 3,
+        "w": 2,
+        "x": 10,
+        "y": 10
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "#475569",
+            "mode": "fixed"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#475569",
+                "value": 0
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "cardano_node_metrics_peerSelection_KnownPeers{network=\"$network\",instance=~\"$instance\"}",
+          "instant": true,
+          "legendFormat": "{{alias}}",
+          "refId": "A"
+        }
+      ],
+      "transparent": true,
+      "description": "Total known peers in the peer selection set."
+    },
+    {
+      "type": "stat",
+      "title": "Outgoing Conns",
+      "id": 7,
+      "gridPos": {
+        "h": 3,
+        "w": 2,
+        "x": 12,
+        "y": 10
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "#22c55e",
+            "mode": "fixed"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#22c55e",
+                "value": 0
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "cardano_node_metrics_connectionManager_outgoingConns{network=\"$network\",instance=~\"$instance\"}",
+          "instant": true,
+          "legendFormat": "{{alias}}",
+          "refId": "A"
+        }
+      ],
+      "transparent": true,
+      "description": "Connections this node initiated to remote peers."
+    },
+    {
+      "type": "stat",
+      "title": "Incoming Conns",
+      "id": 8,
+      "gridPos": {
+        "h": 3,
+        "w": 2,
+        "x": 14,
+        "y": 10
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "#60a5fa",
+            "mode": "fixed"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#60a5fa",
+                "value": 0
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "cardano_node_metrics_connectionManager_incomingConns{network=\"$network\",instance=~\"$instance\"}",
+          "instant": true,
+          "legendFormat": "{{alias}}",
+          "refId": "A"
+        }
+      ],
+      "transparent": true,
+      "description": "Connections remote peers initiated to this node."
+    },
+    {
+      "type": "stat",
+      "title": "Full Duplex",
+      "id": 9,
+      "gridPos": {
+        "h": 3,
+        "w": 2,
+        "x": 16,
+        "y": 10
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "#b877d9",
+            "mode": "fixed"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#b877d9",
+                "value": 0
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "cardano_node_metrics_connectionManager_fullDuplexConns{network=\"$network\",instance=~\"$instance\"}",
+          "instant": true,
+          "legendFormat": "{{alias}}",
+          "refId": "A"
+        }
+      ],
+      "transparent": true,
+      "description": "Peers with full-duplex (bidirectional) communication established."
+    },
+    {
+      "type": "stat",
+      "title": "Duplex Conns",
+      "id": 10,
+      "gridPos": {
+        "h": 3,
+        "w": 2,
+        "x": 18,
+        "y": 10
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "#a78bfa",
+            "mode": "fixed"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#a78bfa",
+                "value": 0
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "cardano_node_metrics_connectionManager_duplexConns{network=\"$network\",instance=~\"$instance\"}",
+          "instant": true,
+          "legendFormat": "{{alias}}",
+          "refId": "A"
+        }
+      ],
+      "transparent": true,
+      "description": "Total number of duplex (bidirectional) connections."
+    },
+    {
+      "type": "stat",
+      "title": "Unidirectional",
+      "id": 11,
+      "gridPos": {
+        "h": 3,
+        "w": 2,
+        "x": 20,
+        "y": 10
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "#7dd3fc",
+            "mode": "fixed"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#7dd3fc",
+                "value": 0
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "cardano_node_metrics_connectionManager_unidirectionalConns{network=\"$network\",instance=~\"$instance\"}",
+          "instant": true,
+          "legendFormat": "{{alias}}",
+          "refId": "A"
+        }
+      ],
+      "transparent": true,
+      "description": "Peers with only unidirectional communication. Typically transient."
+    },
+    {
+      "type": "stat",
+      "title": "Prunable",
+      "id": 12,
+      "gridPos": {
+        "h": 3,
+        "w": 2,
+        "x": 22,
+        "y": 10
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "#94a3b8",
+            "mode": "fixed"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#94a3b8",
+                "value": 0
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "cardano_node_metrics_connectionManager_prunableConns{network=\"$network\",instance=~\"$instance\"}",
+          "instant": true,
+          "legendFormat": "{{alias}}",
+          "refId": "A"
+        }
+      ],
+      "transparent": true,
+      "description": "Peers eligible for pruning by the peer selection governor."
+    },
+    {
+      "type": "timeseries",
+      "title": "Peer States",
+      "id": 20,
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 0,
+        "y": 13
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 20,
+            "lineWidth": 2,
+            "showPoints": "auto",
+            "stacking": {
+              "mode": "normal"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".*hot.*"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#ef4444",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".*warm.*"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#f59e0b",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".*cold.*"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#3b82f6",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "cardano_node_metrics_peerSelection_hot{network=\"$network\",instance=~\"$instance\"}",
+          "legendFormat": "{{alias}} hot",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "cardano_node_metrics_peerSelection_warm{network=\"$network\",instance=~\"$instance\"}",
+          "legendFormat": "{{alias}} warm",
+          "range": true,
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "cardano_node_metrics_peerSelection_cold{network=\"$network\",instance=~\"$instance\"}",
+          "legendFormat": "{{alias}} cold",
+          "range": true,
+          "refId": "C"
+        }
+      ],
+      "transparent": true,
+      "description": "Peer count by state (hot/warm/cold) over time."
+    },
+    {
+      "type": "timeseries",
+      "title": "Connections",
+      "id": 21,
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 8,
+        "y": 13
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "lineWidth": 2,
+            "showPoints": "auto"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".*out.*"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#22c55e",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".*\\bin\\b.*"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#3b82f6",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".*full duplex.*"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#b877d9",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".*duplex conns.*"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#a78bfa",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".*uni.*"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#7dd3fc",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".*prunable.*"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#94a3b8",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "cardano_node_metrics_connectionManager_outgoingConns{network=\"$network\",instance=~\"$instance\"}",
+          "legendFormat": "{{alias}} out",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "cardano_node_metrics_connectionManager_incomingConns{network=\"$network\",instance=~\"$instance\"}",
+          "legendFormat": "{{alias}} in",
+          "range": true,
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "cardano_node_metrics_connectionManager_fullDuplexConns{network=\"$network\",instance=~\"$instance\"}",
+          "legendFormat": "{{alias}} full duplex",
+          "range": true,
+          "refId": "C"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "cardano_node_metrics_connectionManager_duplexConns{network=\"$network\",instance=~\"$instance\"}",
+          "legendFormat": "{{alias}} duplex conns",
+          "range": true,
+          "refId": "D"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "cardano_node_metrics_connectionManager_unidirectionalConns{network=\"$network\",instance=~\"$instance\"}",
+          "legendFormat": "{{alias}} uni",
+          "range": true,
+          "refId": "E"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "cardano_node_metrics_connectionManager_prunableConns{network=\"$network\",instance=~\"$instance\"}",
+          "legendFormat": "{{alias}} prunable",
+          "range": true,
+          "refId": "F"
+        }
+      ],
+      "transparent": true,
+      "description": "Connection counts (incoming/outgoing) over time."
+    },
+    {
+      "type": "timeseries",
+      "title": "Peer Promotions & Demotions",
+      "id": 22,
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 16,
+        "y": 13
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "lineWidth": 2,
+            "showPoints": "auto"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".*warm promo.*"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#22c55e",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".*cold promo.*"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#60a5fa",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".*warm demo.*"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#f59e0b",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".*active demo.*"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#ef4444",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".*nr warm promo.*"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#86efac",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".*nr warm demo.*"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#fca5a5",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".*nr active demo.*"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#fcd34d",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "rate(cardano_node_metrics_peerSelection_WarmPeersPromotions{network=\"$network\",instance=~\"$instance\"}[5m]) * 60",
+          "legendFormat": "{{alias}} warm promo/min",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "rate(cardano_node_metrics_peerSelection_ColdPeersPromotions{network=\"$network\",instance=~\"$instance\"}[5m]) * 60",
+          "legendFormat": "{{alias}} cold promo/min",
+          "range": true,
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "rate(cardano_node_metrics_peerSelection_WarmPeersDemotions{network=\"$network\",instance=~\"$instance\"}[5m]) * 60",
+          "legendFormat": "{{alias}} warm demo/min",
+          "range": true,
+          "refId": "C"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "rate(cardano_node_metrics_peerSelection_ActiveNonRootPeersDemotions{network=\"$network\",instance=~\"$instance\"}[5m]) * 60",
+          "legendFormat": "{{alias}} active demo/min",
+          "range": true,
+          "refId": "D"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "rate(cardano_node_metrics_peerSelection_WarmNonRootPeersPromotions{network=\"$network\",instance=~\"$instance\"}[5m]) * 60",
+          "legendFormat": "{{alias}} nr warm promo/min",
+          "range": true,
+          "refId": "E"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "rate(cardano_node_metrics_peerSelection_WarmNonRootPeersDemotions{network=\"$network\",instance=~\"$instance\"}[5m]) * 60",
+          "legendFormat": "{{alias}} nr warm demo/min",
+          "range": true,
+          "refId": "F"
+        }
+      ],
+      "transparent": true,
+      "description": "Rate of peers being promoted or demoted between connection states."
+    },
+    {
+      "type": "timeseries",
+      "title": "Peer Churn",
+      "id": 23,
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 20
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "lineWidth": 2,
+            "showPoints": "auto"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".*known\\+.*"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#22c55e",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".*known-.*"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#ef4444",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".*active\\+.*"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#60a5fa",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".*active-.*"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#f59e0b",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".*closed.*"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#94a3b8",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "rate(cardano_node_metrics_peerSelection_churn_IncreasedKnownPeers{network=\"$network\",instance=~\"$instance\"}[5m]) * 60",
+          "legendFormat": "{{alias}} known+/min",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "rate(cardano_node_metrics_peerSelection_churn_DecreasedKnownPeers{network=\"$network\",instance=~\"$instance\"}[5m]) * 60",
+          "legendFormat": "{{alias}} known-/min",
+          "range": true,
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "rate(cardano_node_metrics_peerSelection_churn_IncreasedActivePeers{network=\"$network\",instance=~\"$instance\"}[5m]) * 60",
+          "legendFormat": "{{alias}} active+/min",
+          "range": true,
+          "refId": "C"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "rate(cardano_node_metrics_peerSelection_churn_DecreasedActivePeers{network=\"$network\",instance=~\"$instance\"}[5m]) * 60",
+          "legendFormat": "{{alias}} active-/min",
+          "range": true,
+          "refId": "D"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "rate(event_total{type=\"connmanager.conn_closed\",network=\"$network\",instance=~\"$instance\"}[5m]) * 60",
+          "legendFormat": "{{alias}} closed/min",
+          "range": true,
+          "refId": "E"
+        }
+      ],
+      "transparent": true,
+      "description": "Rate of peers connecting and disconnecting. High churn may indicate network instability."
+    },
+    {
+      "type": "timeseries",
+      "title": "Peers by Source (hot & warm)",
+      "id": 24,
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 20
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "lineWidth": 2,
+            "showPoints": "auto"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "cardano_node_metrics_peerSelection_peers_by_source{state=\"hot\",network=\"$network\",instance=~\"$instance\"}",
+          "legendFormat": "{{alias}} {{source}} hot",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "cardano_node_metrics_peerSelection_peers_by_source{state=\"warm\",network=\"$network\",instance=~\"$instance\"}",
+          "legendFormat": "{{alias}} {{source}} warm",
+          "range": true,
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "cardano_node_metrics_peerSelection_peers_by_source{state=\"cold\",network=\"$network\",instance=~\"$instance\"}",
+          "legendFormat": "{{alias}} {{source}} cold",
+          "range": true,
+          "refId": "C"
+        }
+      ],
+      "transparent": true,
+      "description": "Hot and warm peer counts broken down by source (local config, peer sharing, DNS)."
+    },
+    {
+      "type": "timeseries",
+      "title": "Events Rate",
+      "id": 25,
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 27
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "lineWidth": 2,
+            "showPoints": "auto"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".*headers.*"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#3b82f6",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".*blocks.*"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#22c55e",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".*switches.*"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#f97316",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".*closed.*"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#ef4444",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".*inbound.*"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#60a5fa",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".*outbound.*"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#86efac",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "rate(event_total{type=\"ledger.chainsync\",network=\"$network\",instance=~\"$instance\"}[5m]) * 60",
+          "legendFormat": "{{alias}} headers/min",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "rate(event_total{type=\"ledger.block\",network=\"$network\",instance=~\"$instance\"}[5m]) * 60",
+          "legendFormat": "{{alias}} blocks/min",
+          "range": true,
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "rate(event_total{type=\"chainselection.chain_switch\",network=\"$network\",instance=~\"$instance\"}[5m]) * 60",
+          "legendFormat": "{{alias}} switches/min",
+          "range": true,
+          "refId": "C"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "rate(event_total{type=\"connmanager.conn_closed\",network=\"$network\",instance=~\"$instance\"}[5m]) * 60",
+          "legendFormat": "{{alias}} closed/min",
+          "range": true,
+          "refId": "D"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "rate(event_total{type=\"connmanager.inbound_conn\",network=\"$network\",instance=~\"$instance\"}[5m]) * 60",
+          "legendFormat": "{{alias}} inbound/min",
+          "range": true,
+          "refId": "E"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "rate(event_total{type=\"peergov.outbound_conn\",network=\"$network\",instance=~\"$instance\"}[5m]) * 60",
+          "legendFormat": "{{alias}} outbound/min",
+          "range": true,
+          "refId": "F"
+        }
+      ],
+      "transparent": true,
+      "description": "Rate of peer-related events (connect, disconnect, promote, demote)."
+    },
+    {
+      "type": "timeseries",
+      "title": "Peer Gov Events",
+      "id": 26,
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 27
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "lineWidth": 2,
+            "showPoints": "auto"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "rate(event_total{type=\"peergov.peer_promoted\",network=\"$network\",instance=~\"$instance\"}[5m]) * 60",
+          "legendFormat": "{{alias}} promoted/min",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "rate(event_total{type=\"peergov.peer_removed\",network=\"$network\",instance=~\"$instance\"}[5m]) * 60",
+          "legendFormat": "{{alias}} removed/min",
+          "range": true,
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "rate(event_total{type=\"peergov.peer_eligibility_changed\",network=\"$network\",instance=~\"$instance\"}[5m]) * 60",
+          "legendFormat": "{{alias}} eligibility changed/min",
+          "range": true,
+          "refId": "C"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "rate(event_total{type=\"peergov.peer_priority_changed\",network=\"$network\",instance=~\"$instance\"}[5m]) * 60",
+          "legendFormat": "{{alias}} priority changed/min",
+          "range": true,
+          "refId": "D"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "rate(event_total{type=\"peergov.quota_status\",network=\"$network\",instance=~\"$instance\"}[5m]) * 60",
+          "legendFormat": "{{alias}} quota status/min",
+          "range": true,
+          "refId": "E"
+        }
+      ],
+      "transparent": true,
+      "description": "Peer governance events from the Cardano peer selection governor."
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 5,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 34
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "increase(event_total{type=~\"chainsync.*\",network=\"$network\",instance=~\"$instance\"}[5m])",
+          "format": "time_series",
+          "legendFormat": "{{type}}",
+          "range": true
+        }
+      ],
+      "title": "chainsync event distribution",
+      "transparent": true,
+      "type": "timeseries",
+      "id": 310,
+      "description": "Distribution of chain sync events received from peers."
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "#8FD47E",
+            "mode": "fixed"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 5,
+            "gradientMode": "hue",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          },
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 41
+      },
+      "id": 311,
+      "options": {
+        "legend": {
+          "displayMode": "hidden",
+          "showLegend": false
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "rate(event_total{type=~\"peergov.*\",network=\"$network\",instance=~\"$instance\"}[$__rate_interval])",
+          "format": "time_series",
+          "instant": false,
+          "legendFormat": "{{type}}",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "rate(event_total{type=~\"connmanager.*\",network=\"$network\",instance=~\"$instance\"}[$__rate_interval])",
+          "format": "time_series",
+          "instant": false,
+          "legendFormat": "{{type}}",
+          "range": true,
+          "refId": "B"
+        }
+      ],
+      "title": "peer events",
+      "transparent": true,
+      "type": "timeseries",
+      "description": "Per-peer event rate. Identifies noisy or failing peers."
+    }
+  ]
+}
