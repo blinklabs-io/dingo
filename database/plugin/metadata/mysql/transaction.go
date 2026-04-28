@@ -2067,7 +2067,7 @@ func (d *MetadataStoreMysql) SetTransactionBatched(
 	txn types.Txn,
 ) error {
 	if acc == nil {
-		return fmt.Errorf("SetTransactionBatched: acc must not be nil")
+		return errors.New("SetTransactionBatched: acc must not be nil")
 	}
 	txHash := tx.Hash().Bytes()
 	db, err := d.resolveDB(txn)
