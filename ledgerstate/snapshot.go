@@ -110,8 +110,9 @@ func stripLedgerSuffix(name string) string {
 }
 
 // FindUTxOTableFile searches for the UTxO table file in UTxO-HD
-// format. Returns the path to tables/tvar if it exists, or empty
-// string if not found (legacy format).
+// format. Current snapshots store the table as ledger/<slot>/tables,
+// while older exports used ledger/<slot>/tables/tvar. Returns an
+// empty string if not found (legacy format).
 func FindUTxOTableFile(extractedDir string) string {
 	ledgerDir, err := findLedgerDir(extractedDir)
 	if err != nil {
@@ -129,10 +130,9 @@ func FindUTxOTableFile(extractedDir string) string {
 		if !e.IsDir() {
 			continue
 		}
-		tvarPath := filepath.Join(
-			ledgerDir, e.Name(), "tables", "tvar",
-		)
-		if _, err := os.Stat(tvarPath); err == nil {
+		if _, ok := findUTxOTableInSlot(
+			filepath.Join(ledgerDir, e.Name()),
+		); ok {
 			dirs = append(dirs, e.Name())
 		}
 	}
@@ -142,9 +142,24 @@ func FindUTxOTableFile(extractedDir string) string {
 		return ""
 	}
 
-	return filepath.Join(
-		ledgerDir, dirs[0], "tables", "tvar",
+	path, _ := findUTxOTableInSlot(
+		filepath.Join(ledgerDir, dirs[0]),
 	)
+	return path
+}
+
+func findUTxOTableInSlot(slotDir string) (string, bool) {
+	candidates := []string{
+		filepath.Join(slotDir, "tables"),
+		filepath.Join(slotDir, "tables", "tvar"),
+	}
+	for _, path := range candidates {
+		info, err := os.Stat(path)
+		if err == nil && !info.IsDir() {
+			return path, true
+		}
+	}
+	return "", false
 }
 
 // findLedgerDir locates the ledger directory within an extracted
@@ -285,7 +300,9 @@ func parseSnapshotData(data []byte) (*RawLedgerState, error) {
 	// Detect UTxO-HD format: first element is a small integer
 	// (version number), not an array (the telescope).
 	var version uint64
+	isUTxOHD := false
 	if _, err := cbor.Decode(outer[0], &version); err == nil {
+		isUTxOHD = true
 		// UTxO-HD format: [version, ExtLedgerState]
 		inner, err := decodeRawArray(outer[1])
 		if err != nil {
@@ -334,6 +351,7 @@ func parseSnapshotData(data []byte) (*RawLedgerState, error) {
 	if err != nil {
 		return nil, err
 	}
+	result.UTxOHD = isUTxOHD
 
 	result.EraBounds = eraBounds
 	result.EraBoundsWarning = boundsWarning
@@ -917,7 +935,9 @@ func decodeNonce(data []byte) ([]byte, error) {
 // ParseSnapShots decodes the stake distribution snapshots
 // (mark, set, go) from the EpochState.
 // SnapShots = [mark, set, go, fee]
-// Each SnapShot = [Stake, Delegations, PoolParams]
+// Each SnapShot is [Stake, Delegations, PoolParams] in older ledger
+// states. Current UTxO-HD snapshots encode [StakeWithPool, PoolParams],
+// where each stake value is [Coin, PoolKeyHash].
 func ParseSnapShots(data cbor.RawMessage) (*ParsedSnapShots, error) {
 	ss, err := decodeRawArray(data)
 	if err != nil {
@@ -986,7 +1006,8 @@ func ParseSnapShots(data cbor.RawMessage) (*ParsedSnapShots, error) {
 }
 
 // parseSnapShot decodes a single SnapShot.
-// SnapShot = [Stake, Delegations, PoolParams]
+// SnapShot = [Stake, Delegations, PoolParams] or
+// [StakeWithPool, PoolParams].
 func parseSnapShot(
 	data []byte,
 ) (*ParsedSnapShot, error) {
@@ -994,47 +1015,74 @@ func parseSnapShot(
 	if err != nil {
 		return nil, fmt.Errorf("decoding SnapShot: %w", err)
 	}
-	if len(snap) < 3 {
+	if len(snap) < 2 {
 		return nil, fmt.Errorf(
-			"SnapShot has %d elements, expected 3",
+			"SnapShot has %d elements, expected at least 2",
 			len(snap),
 		)
 	}
 
-	// Parse Stake: map[Credential]Coin
-	// Warnings from these parsers indicate skipped entries,
-	// not fatal errors, so we collect them.
 	var warnings []error
-	stake, err := parseStakeMap(snap[0])
-	if err != nil {
-		if stake == nil {
-			return nil, fmt.Errorf(
-				"parsing stake map: %w", err,
-			)
-		}
-		warnings = append(warnings, err)
-	}
+	var stake map[string]uint64
+	var delegations map[string][]byte
+	var poolParams map[string]*ParsedPool
 
-	// Parse Delegations: map[Credential]PoolKeyHash
-	delegations, err := parseDelegationMap(snap[1])
-	if err != nil {
-		if delegations == nil {
-			return nil, fmt.Errorf(
-				"parsing delegation map: %w", err,
-			)
+	if len(snap) == 2 {
+		stake, delegations, err = parseStakeWithPoolMap(snap[0])
+		if err != nil {
+			if stake == nil || delegations == nil {
+				return nil, fmt.Errorf(
+					"parsing stake-with-pool map: %w", err,
+				)
+			}
+			warnings = append(warnings, err)
 		}
-		warnings = append(warnings, err)
-	}
 
-	// Parse PoolParams: map[PoolKeyHash]PoolParams
-	poolParams, err := parsePoolParamsMap(snap[2])
-	if err != nil {
-		if poolParams == nil {
-			return nil, fmt.Errorf(
-				"parsing pool params map: %w", err,
-			)
+		poolParams, err = parsePoolParamsMap(snap[1])
+		if err != nil {
+			if poolParams == nil {
+				return nil, fmt.Errorf(
+					"parsing pool params map: %w",
+					err,
+				)
+			}
+			warnings = append(warnings, err)
 		}
-		warnings = append(warnings, err)
+	} else {
+		// Parse Stake: map[Credential]Coin
+		// Warnings from these parsers indicate skipped entries,
+		// not fatal errors, so we collect them.
+		stake, err = parseStakeMap(snap[0])
+		if err != nil {
+			if stake == nil {
+				return nil, fmt.Errorf(
+					"parsing stake map: %w", err,
+				)
+			}
+			warnings = append(warnings, err)
+		}
+
+		// Parse Delegations: map[Credential]PoolKeyHash
+		delegations, err = parseDelegationMap(snap[1])
+		if err != nil {
+			if delegations == nil {
+				return nil, fmt.Errorf(
+					"parsing delegation map: %w", err,
+				)
+			}
+			warnings = append(warnings, err)
+		}
+
+		// Parse PoolParams: map[PoolKeyHash]PoolParams
+		poolParams, err = parsePoolParamsMap(snap[2])
+		if err != nil {
+			if poolParams == nil {
+				return nil, fmt.Errorf(
+					"parsing pool params map: %w", err,
+				)
+			}
+			warnings = append(warnings, err)
+		}
 	}
 
 	return &ParsedSnapShot{
@@ -1089,6 +1137,63 @@ func parseStakeMap(
 		)
 	}
 	return result, warning
+}
+
+// parseStakeWithPoolMap decodes the UTxO-HD compact snapshot map:
+// map[Credential][Coin, PoolKeyHash].
+func parseStakeWithPoolMap(
+	data cbor.RawMessage,
+) (map[string]uint64, map[string][]byte, error) {
+	entries, err := decodeMapEntries(data)
+	if err != nil {
+		return nil, nil, fmt.Errorf(
+			"decoding stake-with-pool map: %w", err,
+		)
+	}
+
+	stake := make(map[string]uint64, len(entries))
+	delegations := make(map[string][]byte, len(entries))
+	var skipped int
+	for _, entry := range entries {
+		cred, err := parseCredential(entry.KeyRaw)
+		if err != nil || cred.Hash == nil {
+			skipped++
+			continue
+		}
+
+		value, err := decodeRawArray(entry.ValueRaw)
+		if err != nil || len(value) < 2 {
+			skipped++
+			continue
+		}
+
+		var amount uint64
+		if _, err := cbor.Decode(value[0], &amount); err != nil {
+			skipped++
+			continue
+		}
+
+		var poolHash []byte
+		if _, err := cbor.Decode(
+			value[1], &poolHash,
+		); err != nil || len(poolHash) != 28 {
+			skipped++
+			continue
+		}
+
+		credKey := hex.EncodeToString(cred.Hash)
+		stake[credKey] = amount
+		delegations[credKey] = poolHash
+	}
+
+	var warning error
+	if skipped > 0 {
+		warning = fmt.Errorf(
+			"stake-with-pool map: skipped %d of %d entries",
+			skipped, len(entries),
+		)
+	}
+	return stake, delegations, warning
 }
 
 // parseDelegationMap decodes a credential -> pool key hash map.
@@ -1166,7 +1271,7 @@ func parsePoolParamsMap(
 			continue
 		}
 
-		pool, err := parsePoolParams(
+		pool, err := parsePoolParamsOrDistr(
 			poolKeyHash, entry.ValueRaw,
 		)
 		if err != nil {

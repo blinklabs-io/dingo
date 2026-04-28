@@ -1,6 +1,191 @@
 # Release Notes
 
 
+## v0.37.0 (April 27, 2026)
+
+**Title:** Genesis bootstrap, governance, and steadier Mithril recovery
+
+**Date:** April 27, 2026
+
+**Version:** v0.37.0
+
+Hi folks! Here’s what we shipped in v0.37.0.
+
+### ✨ What's New
+
+* Added **Ouroboros Genesis bootstrap support:** Operators can now start from Genesis bootstrap flows, which gives early sync a clearer path before the node reaches the current chain tip.
+* Expanded **Genesis mode chain selection:** Nodes can now choose the chain more safely during Genesis mode, which keeps early sync aligned with the right history.
+* Introduced **bootstrap aware peer promotion:** Peer promotion now accounts for bootstrap state, which helps early sync keep useful peers active while the node is still catching up.
+* Delivered **Conway governance ratification support:** Governance aware services can now track ratified actions more completely as Conway governance advances.
+* Enabled **Conway governance enactment handling:** Governance state now follows enacted actions more accurately, which gives operators and integrators a clearer view of active governance outcomes.
+* Preserved **committee quorum persistence:** Committee quorum information now persists across restarts, which keeps governance state steadier after interruptions.
+* Opened **broader governance state handling:** Governance aware integrations can now read and handle more of the Conway governance state without losing important context.
+* Unlocked **new Blockfrost compatible block endpoints:** Blockfrost compatible users can now retrieve additional block details through new block endpoints.
+* Extended **new Blockfrost compatible network endpoints:** Network status integrations can now access new network endpoints in a Blockfrost compatible shape.
+* Introduced **new Blockfrost compatible era endpoints:** Era aware clients can now request era information through new Blockfrost compatible endpoints.
+* Added **new Blockfrost compatible genesis endpoints:** Genesis data is now available through new Blockfrost compatible endpoints for services that need network bootstrap details.
+
+### 💪 Improvements
+
+* Improved **newer Mithril snapshot compatibility:** Bootstrap runs now accept newer snapshot shapes more reliably, which makes setup and recovery smoother across current Mithril data.
+* Refined **interrupted Mithril resume safety:** Resuming after an interrupted Mithril run now behaves more safely, which reduces the chance of a broken recovery path.
+* Enhanced **bootstrap aware peer governance:** Peer promotion and selection now align more closely with bootstrap state, which helps early sync keep useful peers active.
+* Modernized **bootstrap and governance observability:** Operators can now see more metrics and event signals around bootstrap and governance behavior.
+* Updated **operator and integrator guidance:** Documentation and workflow refreshes make recent bootstrap, governance, and API behavior easier to follow.
+
+### 🔧 Fixes
+
+* Fixed **Mithril bootstrap resume reliability:** Mithril bootstrap and resume handling now recover more reliably when a previous run stopped before completion.
+* Corrected **snapshot bootstrap handling:** Snapshot based bootstrap flows now handle current snapshot layouts correctly, which reduces failed setup paths.
+* Hardened **early sync recovery behavior:** Recovery during early sync now follows Genesis mode chain selection and bootstrap aware promotion more safely after interruptions.
+* Stabilized **governance state continuity:** Governance state now keeps ratification, enactment, and committee quorum handling steadier across restarts and replay.
+
+### 📋 What You Need to Know
+
+* Clarified **Genesis bootstrap rollout:** Ouroboros Genesis bootstrap changes early sync behavior, including Genesis mode chain selection and bootstrap aware peer promotion.
+* Highlighted **governance support growth:** Conway governance coverage now reaches ratification, enactment, committee quorum persistence, and broader governance state handling.
+* Emphasized **steadier Mithril recovery:** Mithril bootstrap and resume handling now work more reliably with newer snapshot shapes and safer interrupted resume behavior.
+* Summarized **expanded Blockfrost compatibility:** Blockfrost compatible users can now use new block, network, era, and genesis endpoints.
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
+## v0.36.1 (April 21, 2026)
+
+**Title:** Steadier catch-up sync and refreshed integrations
+
+**Date:** April 21, 2026
+
+**Version:** v0.36.1
+
+Hi folks! Here’s what we shipped in v0.36.1.
+
+### 💪 Improvements
+
+* Improved **catch-up sync stability:** Nodes now stay steadier while catching up because stall checks wait longer, plateau recovery allows more time, and recycle cooldowns stay longer until the node reaches tip, which reduces unnecessary connection recycling and socket churn during large syncs.
+* Updated **AWS integration currency:** AWS backed integrations stay current because the AWS SDK config package and related AWS modules were refreshed.
+* Refreshed **core AWS compatibility:** AWS integrated behavior stays aligned with upstream fixes because the core AWS SDK and `aws/smithy-go` were updated.
+* Modernized **Google API client support:** Google API client support stays current because `google.golang.org/api` now uses a newer release.
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
+## v0.36.0 (April 20, 2026)
+
+**Title:** Asset endpoints and steadier chain operations
+
+**Date:** April 20, 2026
+
+**Version:** v0.36.0
+
+Hi folks! Here’s what we shipped in v0.36.0.
+
+### ✨ What's New
+
+* Added **asset queries for Blockfrost API users:** Blockfrost API users can now query native assets through `/api/v0/assets/{asset}` with the combined asset identifier format.
+* Expanded **era transition visibility:** Era history now shows confirmed upcoming change points more clearly, so slot and time forecasts stay aligned with known transitions.
+* Clarified **safe epoch boundaries:** Era history now reports when an era change cannot happen in the current epoch, which makes forecast results steadier near the epoch boundary.
+
+### 💪 Improvements
+
+* Improved **contributor setup guidance:** Development work is easier to follow because the project now includes clearer guidance for testing, architecture, and profiling.
+* Refreshed **build cache stability:** Automation now uses a newer cache action release for steadier build runs.
+* Updated **protocol support alignment:** Network compatibility stays current with newer upstream protocol updates.
+* Modernized **operator tooling support:** Operational workflows stay aligned with newer Cardano command line tooling.
+* Streamlined **era rollover handling:** Era changes now follow one transition path, which makes chain operations more consistent during rollovers.
+* Restored **release history continuity:** Recent changes stay easier to scan in one place through the updated release notes.
+
+### 🔧 Fixes
+
+* Fixed **single relay sync stalls:** Single-relay block producers now keep chain progress steadier when the relay reconnects first after an interruption.
+* Hardened **ledger startup safeguards:** Startup and rollback related paths now stop immediately when the Ouroboros security parameter K is missing or zero.
+* Corrected **fork recovery error reporting:** Fork recovery now returns ancestor lookup failures directly, which makes recovery issues easier to detect.
+* Prevented **Blockfrost startup crashes:** Blockfrost startup now returns a clear error when ledger state is missing instead of crashing.
+* Set **forged block version markers:** Forged blocks now carry the expected minor protocol version for steadier interoperability.
+
+### 📋 What You Need to Know
+
+* Blockfrost API users can now query native assets through /api/v0/assets/{asset} using the concatenated {policy_id}{asset_name_hex} identifier format.
+* Operators should ensure ledger initialization provides a positive Ouroboros security parameter K, because startup and rollback-related paths now fail fast when K is unset or zero.
+* Most users can upgrade normally to v0.36.0; single-relay block producers should see steadier sync behavior, and Blockfrost startup now reports missing ledger state as an error instead of panicking.
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
+## v0.35.3 (April 19, 2026)
+
+**Title:** Improve peer sharing compatibility
+
+**Date:** April 19, 2026
+
+**Version:** v0.35.3
+
+Hi folks! Here’s what we shipped in v0.35.3.
+
+### ✨ What's New
+
+* Noted **no new features:** This patch focuses on improvements and fixes.
+
+### 💪 Improvements
+
+* Refined **release history continuity:** RELEASE_NOTES.md now stays up to date, so recent changes are easier to scan in one place.
+
+### 🔧 Fixes
+
+* Corrected **safer peer sharing behavior:** Dingo now avoids asking peers to share more peers when they do not offer that capability, so connections stay steadier and compatibility is smoother across mixed peer setups.
+
+### 📋 What You Need to Know
+
+* Simplified **upgrade guidance:** Most users only need to upgrade to v0.35.3, and peer sharing now behaves more safely with peers that do not advertise sharing.
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
+## v0.35.2 (April 18, 2026)
+
+**Title:** Safer era forecasts and refreshed dependencies
+
+**Date:** April 18, 2026
+
+**Version:** v0.35.2
+
+Hi folks! Here’s what we shipped in v0.35.2.
+
+### ✨ What's New
+
+* Noted **no new features:** This patch focuses on improvements and fixes.
+
+### 💪 Improvements
+
+* Improved **protocol library compatibility:** Dingo now uses gouroboros v0.165.1 to stay current with upstream protocol library updates.
+
+### 🔧 Fixes
+
+* Corrected **safer era forecasts:** Hard fork era history now stays within the safe forecast horizon, so slot and time lookups do not promise certainty too far past the current ledger tip.
+* Restored **release history continuity:** The changelog now includes the v0.35.1 entry so recent release history stays complete and easier to scan.
+
+### 📋 What You Need to Know
+
+* Simplified **upgrade guidance:** No action is required for most users, and upgrading to v0.35.2 is sufficient.
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
 ## v0.35.1 (April 17, 2026)
 
 **Title:** Steadier peers and faster schedule calculations

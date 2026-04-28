@@ -21,6 +21,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/ledger/governance"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -219,7 +220,7 @@ func (d *LedgerDelta) processGovernance(
 
 	// Process governance proposals
 	if len(proposals) > 0 {
-		if err := ProcessGovernanceProposals(
+		if err := governance.ProcessProposals(
 			tx,
 			d.Point,
 			currentEpoch,
@@ -233,7 +234,7 @@ func (d *LedgerDelta) processGovernance(
 
 	// Process governance votes
 	if len(votes) > 0 {
-		if err := ProcessGovernanceVotes(
+		if err := governance.ProcessVotes(
 			tx,
 			d.Point,
 			currentEpoch,

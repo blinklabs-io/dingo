@@ -20,6 +20,12 @@ import (
 	"time"
 )
 
+const (
+	inboundUsefulSignalFreshness  = 15 * time.Minute
+	minInboundBlockfetchSuccess   = 0.5
+	minInboundConnectionStability = 0.5
+)
+
 // PeerCounts holds peer counts by state for a given source or category.
 type PeerCounts struct {
 	Cold int
@@ -448,6 +454,9 @@ func (p *PeerGovernor) isInboundEligibleForHot(peer *Peer) bool {
 	if peer.Source != PeerSourceInboundConn {
 		return true
 	}
+	// Inbound peers are hot-promoted only when explicitly useful and stable.
+	// This keeps inbound hot slots rare and intentional.
+	now := time.Now()
 	// Inbound peers must meet higher score threshold
 	if peer.PerformanceScore < p.config.InboundHotScoreThreshold {
 		return false
@@ -457,7 +466,81 @@ func (p *PeerGovernor) isInboundEligibleForHot(peer *Peer) bool {
 		return false
 	}
 	tenure := time.Since(peer.FirstSeen)
-	return tenure >= p.config.InboundMinTenure
+	if tenure < p.config.InboundMinTenure {
+		return false
+	}
+	if p.config.InboundDuplexOnlyForHot && !peer.hasClientConnection() && !peer.InboundDuplex {
+		return false
+	}
+	// Penalize peers that are reconnect-flapping (repeated short-lived sessions).
+	if flapping, _ := p.inboundFlappingStateLocked(peer, now); flapping {
+		return false
+	}
+	// When observed, connection stability must meet a baseline.
+	if peer.ConnectionStabilityInit &&
+		peer.ConnectionStability < minInboundConnectionStability {
+		return false
+	}
+	chainSyncUseful := peer.ChainSyncLastUpdate.After(now.Add(-inboundUsefulSignalFreshness)) &&
+		((peer.TipSlotDeltaInit && peer.TipSlotDelta <= 0) ||
+			(peer.HeaderArrivalRateInit && peer.HeaderArrivalRate > 0))
+	blockFetchUseful := peer.LastBlockFetchTime.After(now.Add(-inboundUsefulSignalFreshness)) &&
+		peer.BlockFetchSuccessInit &&
+		peer.BlockFetchSuccessRate >= minInboundBlockfetchSuccess
+	return chainSyncUseful || blockFetchUseful
+}
+
+// inboundFlappingStateLocked reports whether an inbound peer is currently
+// reconnect-flapping, and returns a bounded escalation multiplier.
+func (p *PeerGovernor) inboundFlappingStateLocked(
+	peer *Peer,
+	now time.Time,
+) (flapping bool, multiplier int) {
+	if peer == nil || peer.Source != PeerSourceInboundConn {
+		return false, 0
+	}
+	if peer.InboundShortLivedCount < 2 || peer.LastInboundDisconnect.IsZero() {
+		return false, 0
+	}
+	if now.Sub(peer.LastInboundDisconnect) >= p.config.InboundCooldown {
+		return false, 0
+	}
+	return true, min(int(peer.InboundShortLivedCount), 5)
+}
+
+// isReusableInboundTopologyConnectionLocked reports whether this peer currently
+// has a client-capable inbound connection that can satisfy topology demand
+// without an extra outbound dial.
+func (p *PeerGovernor) isReusableInboundTopologyConnectionLocked(peer *Peer) bool {
+	if peer == nil || !p.isTopologyPeer(peer.Source) || !peer.hasClientConnection() {
+		return false
+	}
+	if p.config.ConnManager != nil {
+		return p.config.ConnManager.IsInboundConnection(peer.Connection.Id)
+	}
+	// Fallback for tests/no connmanager wiring.
+	return peer.InboundDuplex
+}
+
+// inboundSatisfiesTopologyValencyLocked returns true when reusable inbound
+// topology connections already satisfy this peer's group's hot valency.
+func (p *PeerGovernor) inboundSatisfiesTopologyValencyLocked(peer *Peer) bool {
+	if peer == nil || !p.isTopologyPeer(peer.Source) ||
+		peer.GroupID == "" || peer.Valency == 0 {
+		return false
+	}
+	var reusableInboundHot uint
+	for _, candidate := range p.peers {
+		if candidate == nil ||
+			candidate.GroupID != peer.GroupID ||
+			candidate.State != PeerStateHot {
+			continue
+		}
+		if p.isReusableInboundTopologyConnectionLocked(candidate) {
+			reusableInboundHot++
+		}
+	}
+	return reusableInboundHot >= peer.Valency
 }
 
 // redistributeUnusedSlots redistributes unused quota slots to other categories.

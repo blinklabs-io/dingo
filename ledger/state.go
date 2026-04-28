@@ -39,7 +39,9 @@ import (
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
+	dingoversion "github.com/blinklabs-io/dingo/internal/version"
 	"github.com/blinklabs-io/dingo/ledger/eras"
+	"github.com/blinklabs-io/dingo/ledger/hardfork"
 	"github.com/blinklabs-io/dingo/mempool"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -97,13 +99,12 @@ func DefaultDatabaseWorkerPoolConfig() DatabaseWorkerPoolConfig {
 
 // DatabaseWorkerPool manages a pool of workers for async database operations
 type DatabaseWorkerPool struct {
-	db         *database.Database
-	taskQueue  chan DatabaseOperation
-	drainQueue chan DatabaseOperation // Reference for draining after shutdown
-	shutdownCh chan struct{}
-	wg         sync.WaitGroup
-	closed     atomic.Bool // Use atomic for thread-safe access without mutex in hot path
-	mu         sync.Mutex
+	db          *database.Database
+	taskQueue   chan DatabaseOperation
+	workerWg    sync.WaitGroup // worker goroutine lifecycle
+	operationWg sync.WaitGroup // accepted operations until result is delivered
+	closed      atomic.Bool    // thread-safe without mutex in hot path
+	mu          sync.Mutex
 }
 
 // NewDatabaseWorkerPool creates a new database worker pool
@@ -120,16 +121,14 @@ func NewDatabaseWorkerPool(
 
 	taskQ := make(chan DatabaseOperation, config.TaskQueueSize)
 	pool := &DatabaseWorkerPool{
-		db:         db,
-		taskQueue:  taskQ,
-		drainQueue: taskQ,
-		shutdownCh: make(chan struct{}),
+		db:        db,
+		taskQueue: taskQ,
 		// closed is zero-valued (false) by default for atomic.Bool
 	}
 
 	// Start workers
 	for i := 0; i < config.WorkerPoolSize; i++ {
-		pool.wg.Add(1)
+		pool.workerWg.Add(1)
 		go pool.worker()
 	}
 
@@ -138,66 +137,35 @@ func NewDatabaseWorkerPool(
 
 // worker runs a single database worker
 func (p *DatabaseWorkerPool) worker() {
-	defer p.wg.Done()
+	defer p.workerWg.Done()
 
-	for {
-		select {
-		case op := <-p.taskQueue:
-			// Execute the database operation with panic protection
-			func() {
-				defer p.wg.Done()
-				result := DatabaseResult{}
-				defer func() {
-					if r := recover(); r != nil {
-						result.Error = fmt.Errorf("panic: %v", r)
-						slog.Error("worker panic during operation", "panic", r)
-					}
-					// Send result whether it's from normal execution or panic
-					if op.ResultChan != nil {
-						select {
-						case op.ResultChan <- result:
-						default:
-							// If result channel is full, skip (fire and forget)
-						}
-					}
-				}()
-				result.Error = op.OpFunc(p.db)
-			}()
-		case <-p.shutdownCh:
-			// Shutdown signal received - process any remaining operations in the queue
-			// This ensures no operations are lost during shutdown
-		drainQueueLoop:
-			for {
-				select {
-				case op := <-p.drainQueue:
-					// Process remaining operation with panic protection
-					func() {
-						defer p.wg.Done()
-						result := DatabaseResult{}
-						defer func() {
-							if r := recover(); r != nil {
-								result.Error = fmt.Errorf("panic: %v", r)
-								slog.Error("worker panic during drain operation", "panic", r)
-							}
-							// Send result whether it's from normal execution or panic
-							if op.ResultChan != nil {
-								select {
-								case op.ResultChan <- result:
-								default:
-									// Result channel is full or closed
-								}
-							}
-						}()
-						result.Error = op.OpFunc(p.db)
-					}()
-				default:
-					// Queue is empty, exit
-					break drainQueueLoop
-				}
-			}
-			return
-		}
+	for op := range p.taskQueue {
+		p.executeOperation(op)
 	}
+}
+
+func (p *DatabaseWorkerPool) executeOperation(op DatabaseOperation) {
+	defer p.operationWg.Done()
+
+	result := DatabaseResult{}
+	defer func() {
+		if r := recover(); r != nil {
+			result.Error = fmt.Errorf("panic: %v", r)
+			slog.Error("worker panic during operation", "panic", r)
+		}
+		p.sendResult(op, result)
+	}()
+	result.Error = op.OpFunc(p.db)
+}
+
+// sendResult delivers result on op.ResultChan. It blocks until send succeeds so
+// errors are not dropped when the channel is temporarily full (callers should
+// use a buffered ResultChan, e.g. cap 1, as in SubmitAsyncDBOperation).
+func (p *DatabaseWorkerPool) sendResult(op DatabaseOperation, result DatabaseResult) {
+	if op.ResultChan == nil {
+		return
+	}
+	op.ResultChan <- result
 }
 
 // Submit submits a database operation for async execution
@@ -205,32 +173,26 @@ func (p *DatabaseWorkerPool) Submit(op DatabaseOperation) {
 	p.mu.Lock()
 	if p.closed.Load() {
 		p.mu.Unlock()
-		if op.ResultChan != nil {
-			select {
-			case op.ResultChan <- DatabaseResult{Error: errors.New("database worker pool is shut down")}:
-			default:
-				// If result channel is full, skip
-			}
-		}
+		p.sendResult(
+			op,
+			DatabaseResult{Error: errors.New("database worker pool is shut down")},
+		)
 		return
 	}
 
-	p.wg.Add(1)
+	p.operationWg.Add(1)
 	select {
 	case p.taskQueue <- op:
-		// Operation submitted successfully
+		p.mu.Unlock()
+		return
 	default:
-		// Queue is full - undo the Add since operation won't be queued
-		p.wg.Done()
-		if op.ResultChan != nil {
-			select {
-			case op.ResultChan <- DatabaseResult{Error: errors.New("database worker pool queue full")}:
-			default:
-				// If result channel is full, skip
-			}
-		}
+		p.operationWg.Done()
 	}
 	p.mu.Unlock()
+	p.sendResult(
+		op,
+		DatabaseResult{Error: errors.New("database worker pool queue full")},
+	)
 }
 
 // SubmitAsyncDBOperation submits a database operation for execution on the worker pool.
@@ -333,37 +295,11 @@ func (p *DatabaseWorkerPool) Shutdown() {
 		return
 	}
 	p.closed.Store(true)
-	// Store a reference to the task queue for use after unlocking.
-	// This avoids a race: we keep p.taskQueue unchanged so workers
-	// can continue reading it without synchronization, while we drain
-	// using a local reference.
-	taskQueue := p.taskQueue
+	close(p.taskQueue)
 	p.mu.Unlock()
 
-	close(p.shutdownCh)
-	p.wg.Wait()
-
-	// Drain any remaining operations from the queue and send shutdown errors
-drainLoop:
-	for {
-		select {
-		case op := <-taskQueue:
-			// Send shutdown error to the operation's result channel
-			if op.ResultChan != nil {
-				select {
-				case op.ResultChan <- DatabaseResult{Error: errors.New("database worker pool shutting down")}:
-				default:
-					// If result channel is full or closed, continue
-				}
-			}
-		default:
-			// No more operations in queue
-			break drainLoop
-		}
-	}
-
-	// Close the task queue to prevent further sends
-	close(taskQueue)
+	p.operationWg.Wait()
+	p.workerWg.Wait()
 }
 
 type ChainsyncState string
@@ -468,7 +404,8 @@ type MempoolProvider interface {
 	Transactions() []mempool.MempoolTransaction
 }
 type rollbackRecord struct {
-	slot      uint64
+	point     ocommon.Point
+	connKey   string
 	timestamp time.Time
 }
 
@@ -488,6 +425,7 @@ type LedgerState struct {
 	chainsyncBlockfetchTimerGeneration uint64      // generation counter to detect stale timer callbacks
 	currentPParams                     lcommon.ProtocolParameters
 	prevEraPParams                     lcommon.ProtocolParameters // pparams from the immediately previous era (for era-1 TX validation)
+	transitionInfo                     hardfork.TransitionInfo    // upcoming era boundary state (mirrors Haskell HFC TransitionInfo)
 	mempool                            MempoolProvider
 	timerCleanupConsumedUtxos          *time.Timer
 	Scheduler                          *Scheduler
@@ -500,6 +438,7 @@ type LedgerState struct {
 	slotsPerKESPeriod                  atomic.Uint64
 	forgedBlockChecker                 atomic.Pointer[forgedBlockCheckerHolder]
 	slotBattleRecorder                 atomic.Pointer[slotBattleRecorderHolder]
+	cachedShape                        atomic.Pointer[hardfork.Shape] // lazy-built from CardanoNodeConfig; immutable for the LedgerState's lifetime
 	reachedTip                         bool
 	currentTip                         ochainsync.Tip
 	currentEpoch                       models.Epoch
@@ -730,10 +669,26 @@ func (ls *LedgerState) Start(ctx context.Context) error {
 	if err := ls.loadPParams(); err != nil {
 		return fmt.Errorf("failed to load pparams: %w", err)
 	}
+	// Reconstruct TransitionInfo from loaded state.  After restart, the
+	// in-memory field is zero (TransitionUnknown), but if the node shut down
+	// while in the window between an epoch-boundary version bump and the first
+	// block of the new era, the pparams will report a major version that maps
+	// to a later era than currentEpoch.EraId.  Detecting this here restores
+	// the correct TransitionKnown state without persisting extra data.
+	ls.reconstructTransitionInfo()
 	// Load current tip
 	if err := ls.loadTip(); err != nil {
 		return fmt.Errorf("failed to load tip: %w", err)
 	}
+	// Now that both tip and epoch are loaded, check whether the safe zone
+	// already covers the epoch end (TransitionImpossible).  This handles the
+	// case where the node was shut down after the tip advanced past the
+	// stability window but before the next epoch rollover was processed.
+	// First honor any TestXHardForkAtEpoch override (TriggerAtEpoch): this
+	// short-circuits TransitionUnknown/Impossible with a known-in-advance
+	// transition epoch, matching the Haskell HFC semantics.
+	ls.evaluateTriggerAtEpoch()
+	ls.evaluateTransitionImpossible()
 	if err := ls.reconcilePrimaryChainTipWithLedgerTip(); err != nil {
 		return fmt.Errorf("failed to reconcile primary chain tip: %w", err)
 	}
@@ -1410,6 +1365,18 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 				err,
 			)
 		}
+		// Revert reward-account credits from rolled-back governance
+		// finalization before account restoration can delete accounts
+		// registered after the rollback slot.
+		if err := ls.db.DeleteAccountRewardsAfterSlot(
+			point.Slot,
+			txn,
+		); err != nil {
+			return fmt.Errorf(
+				"delete account reward deltas after rollback: %w",
+				err,
+			)
+		}
 		// Restore account delegation state
 		if err := ls.db.RestoreAccountStateAtSlot(
 			point.Slot,
@@ -1487,6 +1454,16 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 		); err != nil {
 			return fmt.Errorf(
 				"delete constitutions after rollback: %w",
+				err,
+			)
+		}
+		// Delete rolled-back committee state
+		if err := ls.db.DeleteCommitteeMembersAfterSlot(
+			point.Slot,
+			txn,
+		); err != nil {
+			return fmt.Errorf(
+				"delete committee state after rollback: %w",
 				err,
 			)
 		}
@@ -1689,6 +1666,9 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 		Hash: append([]byte(nil), point.Hash...),
 	}
 	ls.currentTip = newTip
+	// A rollback invalidates any pending TransitionKnown because the
+	// epoch-rollover block that set it may no longer be on the chain.
+	ls.transitionInfo = hardfork.NewTransitionUnknown()
 	// If rolling back behind the Mithril trust boundary, clear it.
 	// A rollback inside the gap means replacement blocks on the new
 	// fork were NOT processed by SetGapBlockTransaction and must go
@@ -1856,6 +1836,26 @@ func (ls *LedgerState) transitionToEra(
 	return result, nil
 }
 
+// applyEraTransition applies a single era-transition result to the in-memory
+// LedgerState fields. Must be called while holding ls.Lock(), except during
+// single-threaded startup before LedgerState is visible to concurrent readers.
+//
+// It unconditionally clears transitionInfo so that any pending
+// TransitionKnown is consumed the moment the new era becomes active,
+// regardless of whether an epoch rollover is also happening.  This makes
+// the clearing self-contained: every code path that applies an
+// EraTransitionResult (the epoch-rollover path, startup, or a future
+// standalone era-transition path) gets the same behaviour without
+// duplicating the clear-on-era-advance logic.
+func (ls *LedgerState) applyEraTransition(result *EraTransitionResult) {
+	// Preserve the pre-hard-fork pparams for era-1 TX validation.
+	ls.prevEraPParams = ls.currentPParams
+	ls.currentPParams = result.NewPParams
+	ls.currentEra = result.NewEra
+	// Any pending TransitionKnown is consumed: the new era is now active.
+	ls.transitionInfo = hardfork.NewTransitionUnknown()
+}
+
 // IsAtTip reports whether the node has caught up to the chain tip at least
 // once since boot. This is used to gate metrics that are only meaningful
 // when processing live blocks (e.g., block delay CDF). Unlike
@@ -1968,6 +1968,15 @@ func (ls *LedgerState) calculateStabilityWindowForEra(eraId uint) uint64 {
 		return blockfetchBatchSlotThresholdDefault
 	}
 	return window.Uint64()
+}
+
+// CurrentTransitionInfo returns a snapshot of the current TransitionInfo
+// under a read lock.  Callers must not hold ls.RLock() when calling this.
+func (ls *LedgerState) CurrentTransitionInfo() hardfork.TransitionInfo {
+	ls.RLock()
+	ti := ls.transitionInfo
+	ls.RUnlock()
+	return ti
 }
 
 // SecurityParam returns the security parameter for the current era
@@ -2346,10 +2355,10 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 			// Apply in-memory state updates with brief lock after successful commit
 			ls.Lock()
 			for _, eraResult := range eraTransitions {
-				// Preserve the pre-hard-fork pparams for era-1 TX validation
-				ls.prevEraPParams = ls.currentPParams
-				ls.currentPParams = eraResult.NewPParams
-				ls.currentEra = eraResult.NewEra
+				// applyEraTransition also clears transitionInfo so that
+				// TransitionKnown is consumed whenever the new era is active,
+				// regardless of whether an epoch rollover is also happening.
+				ls.applyEraTransition(eraResult)
 			}
 			if rolloverResult != nil {
 				ls.epochCache = rolloverResult.NewEpochCache
@@ -2359,7 +2368,30 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 				ls.currentPParams = rolloverResult.NewCurrentPParams
 				ls.checkpointWrittenForEpoch = rolloverResult.CheckpointWrittenForEpoch
 				ls.metrics.epochNum.Set(rolloverResult.NewEpochNum)
+				// New epoch: any TransitionImpossible set for the previous
+				// epoch is now stale.  Reset to Unknown so the tip-update
+				// logic re-evaluates for the new epoch's horizon.
+				// (applyEraTransition already handles the era-transition case.)
+				if len(eraTransitions) == 0 {
+					ls.transitionInfo = hardfork.NewTransitionUnknown()
+				}
 			}
+			// Set TransitionKnown only when epoch rolled over in the old era
+			// with a version bump AND no era transition already cleared it.
+			// applyEraTransition (above) handles the clear for transitions.
+			if len(eraTransitions) == 0 &&
+				rolloverResult != nil &&
+				rolloverResult.HardFork != nil {
+				ls.transitionInfo = hardfork.NewTransitionKnown(
+					rolloverResult.NewCurrentEpoch.EpochId,
+				)
+			}
+			// Re-apply any TestXHardForkAtEpoch override. This matters both
+			// when no eraTransitions/HardFork occurred (the rollover reset
+			// transitionInfo to Unknown above) and when an era transition
+			// advanced ls.currentEra to a new era whose own successor may
+			// carry its own AtEpoch override.
+			ls.evaluateTriggerAtEpoch()
 			ls.Unlock()
 
 			// Update scheduler (thread-safe, no lock needed)
@@ -2926,6 +2958,15 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 					ls.reachedTip = true
 				}
 				ls.updateTipMetrics()
+				// After advancing the tip, first honor any TestXHardForkAtEpoch
+				// override so queries surface the pinned epoch ahead of time;
+				// then check whether the stability window reaches or exceeds
+				// the epoch end, in which case a hard fork cannot happen
+				// within this epoch and TransitionImpossible should be
+				// recorded so queryHardForkEraHistory serves the confirmed
+				// epoch-end slot instead of a stale safeZone cap.
+				ls.evaluateTriggerAtEpoch()
+				ls.evaluateTransitionImpossible()
 				// Capture tip for logging while holding the lock
 				tipForLog = ls.currentTip
 				checker = ls.config.ForgedBlockChecker
@@ -3252,6 +3293,150 @@ func (ls *LedgerState) loadPParams() error {
 	return nil
 }
 
+// reconstructTransitionInfo infers the correct TransitionInfo from the
+// already-loaded currentPParams, currentEra, and currentEpoch.
+//
+// This is called once during Start() after loadPParams(), while the
+// LedgerState is still single-threaded (no lock required).
+//
+// The window that needs reconstruction: when an epoch boundary committed
+// protocol-parameter updates that bump the major protocol version (signalling
+// an upcoming era transition), but the node was stopped before the first
+// block of the new era arrived.  After restart, currentEpoch.EraId is still
+// the OLD era, but currentPParams carries the bumped version.  If those
+// pparams map to a later era than currentEra, we restore TransitionKnown.
+func (ls *LedgerState) reconstructTransitionInfo() {
+	if ls.currentPParams == nil {
+		return
+	}
+	ver, err := GetProtocolVersion(ls.currentPParams)
+	if err != nil {
+		// Not all era pparams are versioned (e.g. Byron falls through);
+		// silently leave transitionInfo at TransitionUnknown.
+		return
+	}
+	pparamsEraId, ok := EraForVersion(ver.Major)
+	if !ok {
+		return
+	}
+	// If the pparams version maps to a later era than the epoch's stored
+	// era, restore TransitionKnown.  KnownEpoch is the current epoch: it
+	// was created with the old EraId but its StartSlot is the exact
+	// upcoming era boundary.
+	if pparamsEraId > ls.currentEra.Id {
+		ls.transitionInfo = hardfork.NewTransitionKnown(ls.currentEpoch.EpochId)
+	}
+}
+
+// eraShape returns the resolved hardfork.Shape for this LedgerState's
+// CardanoNodeConfig, building and caching it on first access. cfg is
+// immutable for the LedgerState's lifetime, so the cached shape is too.
+//
+// Returns an empty Shape (no error) when CardanoNodeConfig is unset or when
+// BuildShape fails; callers must treat an empty Shape as "shape unavailable"
+// and skip shape-derived work.
+func (ls *LedgerState) eraShape() hardfork.Shape {
+	if s := ls.cachedShape.Load(); s != nil {
+		return *s
+	}
+	cfg := ls.config.CardanoNodeConfig
+	if cfg == nil {
+		return hardfork.Shape{}
+	}
+	s, err := eras.BuildShape(cfg)
+	if err != nil {
+		return hardfork.Shape{}
+	}
+	ls.cachedShape.CompareAndSwap(nil, &s)
+	return *ls.cachedShape.Load()
+}
+
+// evaluateTriggerAtEpoch sets transitionInfo to TransitionKnown(e) when the
+// current era's NextEraTrigger is TriggerAtEpoch(e) and that epoch has not
+// yet arrived. The trigger is resolved once at Shape build time from
+// CardanoNodeConfig (TestXHardForkAtEpoch + ExperimentalHardForksEnabled);
+// this method only consumes that resolution.
+//
+// The AtEpoch override is authoritative: it supersedes a prior
+// TransitionUnknown / TransitionImpossible, and replaces any
+// TransitionKnown(other) that may have been set from an on-chain pparams
+// major-version bump, mirroring the Haskell semantics where
+// `shelleyTriggerHardFork` short-circuits to the configured epoch without
+// inspecting pparams at all.
+//
+// The call is a no-op when:
+//   - the shape is unavailable or the current era is unknown to it,
+//   - the current era's NextEraTrigger is not TriggerAtEpoch (i.e. final era,
+//     or default AtVersion),
+//   - the configured epoch has already been reached (EpochId >= e) — at that
+//     point either the rollover has already applied the transition, or
+//     queries should naturally fall through to the new era's own trigger.
+//
+// Call under ls.Lock() (runtime paths) or without a lock during
+// single-threaded startup.
+func (ls *LedgerState) evaluateTriggerAtEpoch() {
+	shape := ls.eraShape()
+	if len(shape.Eras) == 0 {
+		return
+	}
+	entry, ok := shape.EraForID(ls.currentEra.Id)
+	if !ok {
+		return
+	}
+	if entry.NextEraTrigger.Kind != hardfork.TriggerAtEpoch {
+		return
+	}
+	epoch := entry.NextEraTrigger.Epoch
+	if ls.currentEpoch.EpochId >= epoch {
+		return
+	}
+	if ls.transitionInfo.State == hardfork.TransitionKnown &&
+		ls.transitionInfo.KnownEpoch == epoch {
+		return
+	}
+	ls.transitionInfo = hardfork.NewTransitionKnown(epoch)
+}
+
+// evaluateTransitionImpossible sets transitionInfo to TransitionImpossible
+// when the safe-zone end for the current era already reaches or exceeds the
+// current epoch's end slot.
+//
+// At that point a hard-fork transition is impossible within this epoch: the
+// stability window has "vouched for" slots up to (and past) the boundary, so
+// no rollover can introduce a new era within the epoch.  Serving the full
+// epoch-end slot as EraEnd is therefore safe and more informative than the
+// stale tipSlot+safeZone cap.
+//
+// The method is a no-op unless transitionInfo.State is TransitionUnknown; it
+// must not override a confirmed TransitionKnown.
+//
+// Call under ls.Lock() (runtime tip-update) or without a lock during
+// single-threaded startup (after loadTip).
+func (ls *LedgerState) evaluateTransitionImpossible() {
+	if ls.transitionInfo.State != hardfork.TransitionUnknown {
+		return
+	}
+	// Only meaningful when we have a fully-populated epoch.
+	if ls.currentEpoch.LengthInSlots == 0 {
+		return
+	}
+	epochEndSlot, addErr := checkedSlotAdd(
+		ls.currentEpoch.StartSlot,
+		uint64(ls.currentEpoch.LengthInSlots),
+	)
+	if addErr != nil {
+		return
+	}
+	safeZone := ls.calculateStabilityWindowForEra(ls.currentEra.Id)
+	safeEndSlot, addErr := checkedSlotAdd(ls.currentTip.Point.Slot, safeZone)
+	if addErr != nil {
+		return
+	}
+	if safeEndSlot >= epochEndSlot {
+		ls.transitionInfo = hardfork.NewTransitionImpossible()
+	}
+}
+
 // computePParams loads protocol parameters for the given epoch/era
 // without writing to any shared LedgerState fields. This allows
 // callers to compute pparams into local variables and then apply
@@ -3410,13 +3595,20 @@ func (ls *LedgerState) loadEpochs(txn *database.Txn) error {
 		return errors.New("failed to load Shelley genesis")
 	}
 	startProtoVersion := shelleyGenesis.ProtocolParameters.ProtocolVersion.Major
-	startEra := eras.ProtocolMajorVersionToEra[startProtoVersion]
+	startEra, startEraOk := eras.EraForVersion(startProtoVersion)
 	// Initialize current era to Byron when starting from genesis
 	ls.currentEra = eras.Eras[0] // Byron era
-	// Transition through every era between the current and the target era
+	// Transition through every era between the current and the target era.
+	// If the configured version is unknown, the loop is skipped and the
+	// node starts at Byron — same fallback behavior as the previous map
+	// lookup, which returned the zero-value EraDesc for unmapped versions.
 	// During startup, it's safe to apply results immediately since there's
 	// no concurrent access.
-	for nextEraId := ls.currentEra.Id + 1; nextEraId <= startEra.Id; nextEraId++ {
+	startEraId := uint(0)
+	if startEraOk {
+		startEraId = startEra.Id
+	}
+	for nextEraId := ls.currentEra.Id + 1; nextEraId <= startEraId; nextEraId++ {
 		result, err := ls.transitionToEra(
 			txn,
 			nextEraId,
@@ -3427,11 +3619,11 @@ func (ls *LedgerState) loadEpochs(txn *database.Txn) error {
 		if err != nil {
 			return err
 		}
-		// Apply result immediately during startup
-		// Preserve the pre-hard-fork pparams for era-1 TX validation
-		ls.prevEraPParams = ls.currentPParams
-		ls.currentPParams = result.NewPParams
-		ls.currentEra = result.NewEra
+		// Apply result immediately during startup (single-threaded, no lock needed).
+		// applyEraTransition clears transitionInfo; reconstructTransitionInfo()
+		// called later in Start() will restore it if the startup state implies
+		// a pending TransitionKnown.
+		ls.applyEraTransition(result)
 	}
 	// Generate initial epoch
 	rolloverResult, err := ls.processEpochRollover(
@@ -3865,68 +4057,19 @@ func (ls *LedgerState) computeNextEpochNonce(
 	if currentEra.Id == 0 {
 		return nil
 	}
-	if ls.config.CardanoNodeConfig == nil ||
-		ls.config.CardanoNodeConfig.ShelleyGenesisHash == "" {
-		return nil
-	}
-
-	genesisHashBytes, err := hex.DecodeString(
-		ls.config.CardanoNodeConfig.ShelleyGenesisHash,
-	)
-	if err != nil {
-		return nil
-	}
-
-	if len(currentEpoch.Nonce) == 0 {
-		return genesisHashBytes
-	}
-
-	prevEvolvingNonce := currentEpoch.EvolvingNonce
-	if len(prevEvolvingNonce) == 0 {
-		prevEvolvingNonce = genesisHashBytes
-	}
-
-	prevCandidateNonce := currentEpoch.CandidateNonce
-	if len(prevCandidateNonce) == 0 {
-		prevCandidateNonce = genesisHashBytes
-	}
-
-	candidateNonce, _, err := ls.computeCandidateNonce(
-		nil,
-		prevEvolvingNonce,
-		prevCandidateNonce,
-		currentEpoch.StartSlot,
-		uint64(currentEpoch.LengthInSlots),
+	nextEpochStartSlot := currentEpoch.StartSlot +
+		uint64(currentEpoch.LengthInSlots)
+	nonce, _, _, _, err := ls.computeEpochNonceForSlot(
+		nextEpochStartSlot,
+		currentEpoch,
 	)
 	if err != nil {
 		ls.config.Logger.Warn(
-			"failed to compute candidate nonce",
+			"failed to compute next epoch nonce",
 			"component", "ledger",
+			"current_epoch", currentEpoch.EpochId,
+			"next_epoch", currentEpoch.EpochId+1,
 			"error", err,
-		)
-		return nil
-	}
-
-	// Use the LAGGED lastEpochBlockNonce. When NeutralNonce
-	// (epoch 0→1), candidateNonce ⭒ NeutralNonce = candidateNonce.
-	lastEpochBlockNonce := currentEpoch.LastEpochBlockNonce
-	if len(lastEpochBlockNonce) == 0 {
-		return candidateNonce
-	}
-	if len(candidateNonce) < 32 ||
-		len(lastEpochBlockNonce) < 32 {
-		return nil
-	}
-	result, calcErr := lcommon.CalculateEpochNonce(
-		candidateNonce,
-		lastEpochBlockNonce,
-		nil,
-	)
-	if calcErr != nil {
-		ls.config.Logger.Warn(
-			"failed to calculate epoch nonce",
-			"component", "ledger",
-			"error", calcErr,
 		)
 		return nil
 	}
@@ -3934,12 +4077,9 @@ func (ls *LedgerState) computeNextEpochNonce(
 		"speculative epoch nonce computed for next epoch",
 		"component", "ledger",
 		"next_epoch", currentEpoch.EpochId+1,
-		"candidate_nonce", hex.EncodeToString(candidateNonce),
-		"last_epoch_block_nonce",
-		hex.EncodeToString(lastEpochBlockNonce),
-		"epoch_nonce", hex.EncodeToString(result.Bytes()),
+		"epoch_nonce", hex.EncodeToString(nonce),
 	)
-	return result.Bytes()
+	return nonce
 }
 
 // SlotsPerEpoch returns the number of slots in an epoch for the current era.
@@ -4800,9 +4940,12 @@ func (ls *LedgerState) forgeBlock() {
 		BlockBodySize: blockSize,
 		BlockBodyHash: lcommon.Blake2b256{},
 		OpCert:        babbage.BabbageOpCert{},
+		// Keep header-field changes in sync with ledger/forging/builder.go:
+		// this dev-mode path duplicates mempool iteration, ExUnits accounting,
+		// metadata encoding, and header assembly.
 		ProtoVersion: babbage.BabbageProtoVersion{
-			Major: 8,
-			Minor: 0,
+			Major: uint64(conwayPParams.ProtocolVersion.Major),
+			Minor: dingoversion.BlockHeaderProtocolMinor,
 		},
 	}
 

@@ -145,6 +145,23 @@ is_first_run() {
   return 1
 }
 
+has_incomplete_sync() {
+  # The Docker image defaults to sqlite metadata storage. If a previous
+  # Mithril bootstrap failed after creating the DB, serve will refuse to
+  # start until the sync is resumed.
+  local sqlite_db="${CARDANO_DATABASE_PATH}/metadata.sqlite"
+  if [[ ! -f "${sqlite_db}" ]]; then
+    return 1
+  fi
+
+  local status
+  status="$(sqlite3 "${sqlite_db}" "SELECT value FROM sync_state WHERE sync_key = 'sync_status' LIMIT 1;" 2>/dev/null || true)"
+  if [[ -n "${status}" ]]; then
+    return 0
+  fi
+  return 1
+}
+
 bootstrap_if_needed() {
   # Only bootstrap on first run when RESTORE_SNAPSHOT is set
   if [[ -n "${RESTORE_SNAPSHOT:-}" ]] && is_first_run; then
@@ -160,6 +177,21 @@ bootstrap_if_needed() {
     dingo "${sync_args[@]}"
 
     log "Mithril bootstrap complete"
+    return 0
+  fi
+
+  if [[ -n "${RESTORE_SNAPSHOT:-}" ]] && has_incomplete_sync; then
+    log "Incomplete Mithril sync detected, resuming..."
+
+    local sync_args=()
+    if [[ -n "${DINGO_DEBUG:-}" ]]; then
+      sync_args+=("--debug")
+    fi
+    sync_args+=("mithril" "sync")
+
+    dingo "${sync_args[@]}"
+
+    log "Mithril sync resume complete"
     return 0
   fi
 

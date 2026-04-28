@@ -23,10 +23,12 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"time"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 // Manager handles stake snapshot capture and rotation at epoch boundaries.
@@ -43,6 +45,7 @@ type Manager struct {
 	cancel         context.CancelFunc
 	subscriptionId event.EventSubscriberId
 	loopWg         sync.WaitGroup
+	metrics        *managerMetrics
 }
 
 // NewManager creates a new snapshot manager.
@@ -58,6 +61,18 @@ func NewManager(
 		db:       db,
 		eventBus: eventBus,
 		logger:   logger,
+	}
+}
+
+// SetPromRegistry enables snapshot manager metrics.
+func (m *Manager) SetPromRegistry(reg prometheus.Registerer) {
+	if reg == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.metrics == nil {
+		m.metrics = initManagerMetrics(reg)
 	}
 }
 
@@ -114,9 +129,7 @@ func (m *Manager) Start(ctx context.Context) error {
 			"component", "snapshot",
 		)
 	} else {
-		m.loopWg.Add(1)
-		go func() {
-			defer m.loopWg.Done()
+		m.loopWg.Go(func() {
 			m.epochTransitionLoop(childCtx, evtCh)
 			// If the goroutine exits because the parent
 			// context was cancelled (not via Stop), reset
@@ -139,7 +152,7 @@ func (m *Manager) Start(ctx context.Context) error {
 				}
 			}
 			m.mu.Unlock()
-		}()
+		})
 	}
 
 	m.logger.Info("snapshot manager started", "component", "snapshot")
@@ -275,6 +288,7 @@ func (m *Manager) captureMarkSnapshot(
 	ctx context.Context,
 	evt event.EpochTransitionEvent,
 ) error {
+	start := time.Now()
 	calculator := NewCalculator(m.db)
 
 	// Calculate stake distribution at the snapshot slot
@@ -283,6 +297,10 @@ func (m *Manager) captureMarkSnapshot(
 		evt.SnapshotSlot,
 	)
 	if err != nil {
+		if m.metrics != nil {
+			m.metrics.captureFailureTotal.Inc()
+			m.metrics.captureDurationSeconds.Observe(time.Since(start).Seconds())
+		}
 		return fmt.Errorf("calculate stake distribution: %w", err)
 	}
 
@@ -294,7 +312,19 @@ func (m *Manager) captureMarkSnapshot(
 		distribution,
 		evt,
 	); err != nil {
+		if m.metrics != nil {
+			m.metrics.captureFailureTotal.Inc()
+			m.metrics.captureDurationSeconds.Observe(time.Since(start).Seconds())
+		}
 		return fmt.Errorf("save mark snapshot: %w", err)
+	}
+
+	if m.metrics != nil {
+		m.metrics.captureDurationSeconds.Observe(time.Since(start).Seconds())
+		m.metrics.captureSuccessTotal.Inc()
+		m.metrics.capturePoolsTotal.Set(float64(len(distribution.PoolStakes)))
+		m.metrics.captureTotalStakeLovelace.Set(float64(distribution.TotalStake))
+		m.metrics.lastSuccessfulEpoch.Set(float64(evt.NewEpoch))
 	}
 
 	m.logger.Info(
@@ -315,10 +345,17 @@ func (m *Manager) captureMarkSnapshot(
 // (epochs N, N-1, N-2) to ensure leader election can find its "Go"
 // snapshot immediately.
 func (m *Manager) CaptureGenesisSnapshot(ctx context.Context) error {
+	start := time.Now()
 	calculator := NewCalculator(m.db)
+	successCount := uint64(0)
+	lastSuccessfulEpoch := uint64(0)
 
 	distribution, err := calculator.CalculateStakeDistribution(ctx, 0)
 	if err != nil {
+		if m.metrics != nil {
+			m.metrics.captureFailureTotal.Inc()
+			m.metrics.captureDurationSeconds.Observe(time.Since(start).Seconds())
+		}
 		return fmt.Errorf("calculate genesis distribution: %w", err)
 	}
 
@@ -364,6 +401,9 @@ func (m *Manager) CaptureGenesisSnapshot(ctx context.Context) error {
 	}
 
 	if distribution.TotalPools == 0 {
+		if m.metrics != nil {
+			m.metrics.captureDurationSeconds.Observe(time.Since(start).Seconds())
+		}
 		m.logger.Info(
 			"no genesis pools; leader election disabled"+
 				" until pool stake is registered",
@@ -387,8 +427,13 @@ func (m *Manager) CaptureGenesisSnapshot(ctx context.Context) error {
 		SnapshotSlot: 0,
 	}
 	if err := m.saveSnapshot(ctx, 0, "mark", distribution, evt); err != nil {
+		if m.metrics != nil {
+			m.metrics.captureFailureTotal.Inc()
+			m.metrics.captureDurationSeconds.Observe(time.Since(start).Seconds())
+		}
 		return fmt.Errorf("save genesis snapshot: %w", err)
 	}
+	successCount++
 
 	// After Mithril bootstrap: seed the Mark/Set/Go window for the
 	// current epoch so leader election works immediately. Leader
@@ -408,10 +453,18 @@ func (m *Manager) CaptureGenesisSnapshot(ctx context.Context) error {
 			if err := m.saveSnapshot(
 				ctx, seedEpoch, "mark", distribution, seedEvt,
 			); err != nil {
+				if m.metrics != nil {
+					m.metrics.captureFailureTotal.Inc()
+					m.metrics.captureDurationSeconds.Observe(time.Since(start).Seconds())
+				}
 				return fmt.Errorf(
 					"save bootstrap snapshot for epoch %d: %w",
 					seedEpoch, err,
 				)
+			}
+			successCount++
+			if seedEpoch > lastSuccessfulEpoch {
+				lastSuccessfulEpoch = seedEpoch
 			}
 			m.logger.Info(
 				"seeded post-Mithril snapshot",
@@ -429,5 +482,12 @@ func (m *Manager) CaptureGenesisSnapshot(ctx context.Context) error {
 		"total_pools", distribution.TotalPools,
 		"total_stake", distribution.TotalStake,
 	)
+	if m.metrics != nil {
+		m.metrics.captureDurationSeconds.Observe(time.Since(start).Seconds())
+		m.metrics.captureSuccessTotal.Add(float64(successCount))
+		m.metrics.capturePoolsTotal.Set(float64(distribution.TotalPools))
+		m.metrics.captureTotalStakeLovelace.Set(float64(distribution.TotalStake))
+		m.metrics.lastSuccessfulEpoch.Set(float64(lastSuccessfulEpoch))
+	}
 	return nil
 }

@@ -42,7 +42,7 @@ func serveRun(
 		os.Exit(1)
 	}
 
-	// Resume incomplete metadata backfill if interrupted
+	// Historical metadata backfill is only needed for API mode.
 	if dingo.StorageMode(cfg.StorageMode).IsAPI() {
 		if err := resumeBackfill(
 			cmd.Context(), cfg, logger,
@@ -95,7 +95,7 @@ func checkSyncState(
 	)
 }
 
-// resumeBackfill checks for an incomplete metadata backfill and
+// resumeBackfill checks whether metadata backfill is needed and
 // runs it to completion before the node starts serving.
 func resumeBackfill(
 	ctx context.Context,
@@ -155,7 +155,7 @@ func resumeBackfill(
 	defer cleanup()
 
 	logger.Info(
-		"resuming incomplete metadata backfill",
+		"running metadata backfill",
 		"component", "backfill",
 	)
 	if err := bf.Run(ctx); err != nil {

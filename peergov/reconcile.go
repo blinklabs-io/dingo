@@ -20,6 +20,8 @@ import (
 	"log/slog"
 	"slices"
 	"time"
+
+	"github.com/blinklabs-io/dingo/connmanager"
 )
 
 func (p *PeerGovernor) reconcile(ctx context.Context) {
@@ -118,6 +120,9 @@ func (p *PeerGovernor) reconcile(ctx context.Context) {
 					)
 				} else {
 					p.peers[i].State = PeerStateWarm
+					if p.peers[i].Source == PeerSourceInboundConn {
+						p.recordInboundLifecycle("warmed")
+					}
 					coldPromotions++
 					p.config.Logger.Debug(
 						"promoted peer to warm",
@@ -170,11 +175,11 @@ func (p *PeerGovernor) reconcile(ctx context.Context) {
 		if refillTarget <= 0 {
 			refillTarget = p.config.MinHotPeers
 		}
-		// Score-based selection: collect warm peers with connections, compute scores,
-		// sort by valency priority then score, and promote top N to reach the refill target.
 		type promotionCandidate struct {
-			peer         *Peer
-			underValency bool
+			peer           *Peer
+			underValency   bool
+			historical     bool
+			diversityGroup string
 		}
 		candidates := make([]promotionCandidate, 0, len(p.peers))
 		for _, peer := range p.peers {
@@ -185,7 +190,11 @@ func (p *PeerGovernor) reconcile(ctx context.Context) {
 					continue
 				}
 				peer.UpdatePeerScore()
-				candidates = append(candidates, promotionCandidate{peer: peer})
+				candidates = append(candidates, promotionCandidate{
+					peer:           peer,
+					historical:     p.isBootstrapPromotionHistoricalPeer(peer),
+					diversityGroup: p.peerDiversityGroup(peer),
+				})
 			}
 		}
 
@@ -198,18 +207,63 @@ func (p *PeerGovernor) reconcile(ctx context.Context) {
 			)
 		}
 
-		// Comparator: under-valency groups first, then by score descending
-		rankCandidates := func(a, b promotionCandidate) int {
-			if a.underValency && !b.underValency {
-				return -1
+		bootstrapPromotion := !p.bootstrapExited &&
+			p.bootstrapPromotionEnabled()
+		selectedGroups := make(map[string]struct{})
+		if bootstrapPromotion {
+			for _, peer := range p.peers {
+				if peer == nil || peer.State != PeerStateHot {
+					continue
+				}
+				if diversityGroup := p.peerDiversityGroup(peer); diversityGroup != "" {
+					selectedGroups[diversityGroup] = struct{}{}
+				}
 			}
-			if !a.underValency && b.underValency {
+		}
+
+		rankCandidates := func(a, b promotionCandidate) int {
+			if bootstrapPromotion {
+				if a.historical != b.historical {
+					if a.historical {
+						return -1
+					}
+					return 1
+				}
+				if len(selectedGroups) < p.bootstrapPromotionMinDiversityGroups() {
+					_, aSeen := selectedGroups[a.diversityGroup]
+					_, bSeen := selectedGroups[b.diversityGroup]
+					aNew := a.diversityGroup != "" && !aSeen
+					bNew := b.diversityGroup != "" && !bSeen
+					if aNew != bNew {
+						if aNew {
+							return -1
+						}
+						return 1
+					}
+				}
+			}
+			if a.underValency != b.underValency {
+				if a.underValency {
+					return -1
+				}
 				return 1
 			}
-			return cmp.Compare(
-				b.peer.PerformanceScore,
-				a.peer.PerformanceScore,
-			)
+			// Prefer higher-priority sources when priorities differ; when two
+			// sources share the same priority (e.g. two topology kinds), fall
+			// through to score tie-breaking instead of returning 0 early.
+			if c := cmp.Compare(
+				p.peerSourcePriority(b.peer.Source),
+				p.peerSourcePriority(a.peer.Source),
+			); c != 0 {
+				return c
+			}
+			if a.peer.PerformanceScore != b.peer.PerformanceScore {
+				return cmp.Compare(
+					b.peer.PerformanceScore,
+					a.peer.PerformanceScore,
+				)
+			}
+			return cmp.Compare(a.peer.Address, b.peer.Address)
 		}
 
 		// Initial sort
@@ -217,8 +271,30 @@ func (p *PeerGovernor) reconcile(ctx context.Context) {
 
 		needed := refillTarget - hotCount
 		promoted := 0
+		// Count actual hot inbound peers (not censusInboundCounts.Hot, which
+		// excludes peers inside InboundProvisionalWindow) so quota cannot be
+		// exceeded when tenure is shorter than that window.
+		inboundHotHeld := 0
+		for _, existing := range p.peers {
+			if existing != nil &&
+				existing.Source == PeerSourceInboundConn &&
+				existing.State == PeerStateHot {
+				inboundHotHeld++
+			}
+		}
 		for i := 0; i < len(candidates) && promoted < needed; i++ {
 			peer := candidates[i].peer
+			satisfiesTopologySlot := false
+			if peer.InboundTopologyMatch != "" {
+				if gc, ok := groups[peer.InboundTopologyMatch]; ok &&
+					gc.Valency > 0 && uint(gc.Hot) < gc.Valency { //nolint:gosec // Hot counts are always >= 0
+					satisfiesTopologySlot = true
+				}
+			}
+			if peer.Source == PeerSourceInboundConn &&
+				inboundHotHeld >= p.config.InboundHotQuota {
+				continue
+			}
 			// Check inbound peer eligibility (score threshold and tenure)
 			if !p.isInboundEligibleForHot(peer) {
 				p.config.Logger.Debug(
@@ -241,6 +317,13 @@ func (p *PeerGovernor) reconcile(ctx context.Context) {
 			warmPromotions++
 			activeIncreased++
 			promoted++
+			if peer.Source == PeerSourceInboundConn {
+				inboundHotHeld++
+				p.recordInboundLifecycle("promoted")
+			}
+			if bootstrapPromotion && candidates[i].diversityGroup != "" {
+				selectedGroups[candidates[i].diversityGroup] = struct{}{}
+			}
 			// Update group counts after promotion
 			if gc, exists := groups[peer.GroupID]; exists {
 				gc.Hot++
@@ -259,12 +342,29 @@ func (p *PeerGovernor) reconcile(ctx context.Context) {
 				}
 				slices.SortFunc(candidates[i+1:], rankCandidates)
 			}
-			p.config.Logger.Debug(
-				"promoted peer to hot (score-based)",
+			logMsg := "promoted peer to hot (score-based)"
+			logArgs := []any{
 				"address", peer.Address,
 				"score", peer.PerformanceScore,
 				"group", peer.GroupID,
-			)
+			}
+			if peer.Source == PeerSourceInboundConn {
+				logMsg = "promoted inbound peer"
+				tenure := time.Duration(0)
+				if !peer.FirstSeen.IsZero() {
+					tenure = now.Sub(peer.FirstSeen)
+				}
+				logArgs = append(
+					logArgs,
+					"tenure", tenure,
+					"min_tenure", p.config.InboundMinTenure,
+					"score_threshold", p.config.InboundHotScoreThreshold,
+					"full_duplex", peer.hasClientConnection() || peer.InboundDuplex,
+					"topology_slot", peer.InboundTopologyMatch,
+					"satisfies_topology_slot", satisfiesTopologySlot,
+				)
+			}
+			p.config.Logger.Info(logMsg, logArgs...)
 			events = append(events, pendingEvent{
 				PeerPromotedEventType,
 				PeerStateChangeEvent{
@@ -280,32 +380,9 @@ func (p *PeerGovernor) reconcile(ctx context.Context) {
 	// This ensures no single source dominates the hot peer slots
 	events = append(events, p.enforcePerSourceQuotas()...)
 
-	// Collect QuotaStatusEvent with current hot peer distribution
-	hotByCategory := p.getHotPeersByCategory()
-	totalHot := hotByCategory["topology"] + hotByCategory["gossip"] +
-		hotByCategory["ledger"] + hotByCategory["other"]
-	events = append(events, pendingEvent{
-		QuotaStatusEventType,
-		QuotaStatusEvent{
-			TopologyHot: hotByCategory["topology"],
-			GossipHot:   hotByCategory["gossip"],
-			LedgerHot:   hotByCategory["ledger"],
-			OtherHot:    hotByCategory["other"],
-			TotalHot:    totalHot,
-		},
-	})
-	// Log quota status for debugging
-	p.config.Logger.Debug(
-		"quota status",
-		"topology_hot", hotByCategory["topology"],
-		"gossip_hot", hotByCategory["gossip"],
-		"ledger_hot", hotByCategory["ledger"],
-		"other_hot", hotByCategory["other"],
-		"total_hot", totalHot,
-		"topology_quota", p.config.ActivePeersTopologyQuota,
-		"gossip_quota", p.config.ActivePeersGossipQuota,
-		"ledger_quota", p.config.ActivePeersLedgerQuota,
-	)
+	// Prune idle/unhelpful inbound warm peers and apply cooldown for
+	// flapping identities before generic state-limit pruning.
+	events = append(events, p.pruneInboundWarmPeersLocked(now, &knownRemoved)...)
 
 	// Log valency status for topology groups
 	if debugEnabled {
@@ -315,6 +392,56 @@ func (p *PeerGovernor) reconcile(ctx context.Context) {
 	// Enforce overall peer targets by removing excess peers
 	// Priority order (highest to lowest): Topology > Gossip > Ledger > Inbound > Unknown
 	events = append(events, p.enforcePeerLimits(&knownRemoved)...)
+
+	// Collect QuotaStatusEvent with current hot peer distribution.
+	// This runs after enforcePeerLimits so InboundPruned and held counts
+	// reflect the final post-prune state for this reconcile cycle.
+	hotByCategory := p.getHotPeersByCategory()
+	// censusInboundCounts applies the provisional-window filter so the
+	// event agrees with the Prometheus gauges.
+	census := p.censusInboundCounts()
+	// hotByCategory["other"] still includes inbound hot peers, so
+	// subtract the filtered inbound hot count rather than the raw one
+	// to keep TotalHot self-consistent with the event fields.
+	otherHot := max(0, hotByCategory["other"]-census.Hot)
+	totalHot := hotByCategory["topology"] + hotByCategory["gossip"] +
+		hotByCategory["ledger"] + census.Hot + otherHot
+	events = append(events, pendingEvent{
+		QuotaStatusEventType,
+		QuotaStatusEvent{
+			InboundWarmTarget:      p.config.InboundWarmTarget,
+			InboundHotQuota:        p.config.InboundHotQuota,
+			InboundWarm:            census.Warm,
+			InboundHot:             census.Hot,
+			InboundPruned:          p.inboundPruned,
+			InboundTopologyMatched: census.TopologyMatched,
+			InboundDuplex:          census.Duplex,
+			TopologyHot:            hotByCategory["topology"],
+			GossipHot:              hotByCategory["gossip"],
+			LedgerHot:              hotByCategory["ledger"],
+			OtherHot:               otherHot,
+			TotalHot:               totalHot,
+		},
+	})
+	// Log quota status for debugging
+	p.config.Logger.Debug(
+		"quota status",
+		"inbound_warm", census.Warm,
+		"inbound_hot", census.Hot,
+		"inbound_warm_target", p.config.InboundWarmTarget,
+		"inbound_hot_quota", p.config.InboundHotQuota,
+		"inbound_pruned", p.inboundPruned,
+		"inbound_topology_matched", census.TopologyMatched,
+		"inbound_duplex", census.Duplex,
+		"topology_hot", hotByCategory["topology"],
+		"gossip_hot", hotByCategory["gossip"],
+		"ledger_hot", hotByCategory["ledger"],
+		"other_hot", otherHot,
+		"total_hot", totalHot,
+		"topology_quota", p.config.ActivePeersTopologyQuota,
+		"gossip_quota", p.config.ActivePeersGossipQuota,
+		"ledger_quota", p.config.ActivePeersLedgerQuota,
+	)
 
 	// Collect eligible peers for peer sharing
 	// Copy peer data while holding lock to avoid race conditions
@@ -467,7 +594,7 @@ func (p *PeerGovernor) enforceStateLimit(
 
 	removeIdx := make([]bool, len(p.peers))
 	removed := 0
-	for i := 0; i < removeCount; i++ {
+	for i := range removeCount {
 		candidate := candidates[i]
 		peer := candidate.peer
 		p.config.Logger.Debug(
@@ -493,6 +620,14 @@ func (p *PeerGovernor) enforceStateLimit(
 		removeIdx[candidate.idx] = true
 		removed++
 		*removedCount++
+		if peer.Source == PeerSourceInboundConn {
+			p.recordInboundLifecycle("pruned")
+			p.inboundPruned++
+			if p.metrics != nil {
+				p.metrics.inboundPruned.Inc()
+				p.metrics.inboundPrunedByReason.WithLabelValues("limit_exceeded").Inc()
+			}
+		}
 	}
 
 	if removed > 0 {
@@ -520,4 +655,125 @@ func (p *PeerGovernor) enforceStateLimit(
 	}
 
 	return events
+}
+
+func (p *PeerGovernor) pruneInboundWarmPeersLocked(
+	now time.Time,
+	removedCount *int,
+) []pendingEvent {
+	var events []pendingEvent
+	for i := len(p.peers) - 1; i >= 0; i-- {
+		peer := p.peers[i]
+		if peer == nil || peer.Source != PeerSourceInboundConn || peer.State != PeerStateWarm {
+			continue
+		}
+		shouldPrune, reason, reasonLabel, cooldownDuration, applyCooldown := p.inboundPruneDecisionLocked(peer, now)
+		if !shouldPrune {
+			continue
+		}
+		oldSource := peer.Source
+		oldConn := clonePeerConnection(peer.Connection)
+		if peer.Connection != nil {
+			events = p.appendChainSelectionEventsLocked(
+				events,
+				p.bootstrapExited,
+				oldSource,
+				oldConn,
+				nil,
+			)
+			events = append(events, pendingEvent{
+				eventType: connmanager.ConnectionRecycleRequestedEventType,
+				data: connmanager.ConnectionRecycleRequestedEvent{
+					ConnectionId: peer.Connection.Id,
+					ConnKey:      peer.NormalizedAddress,
+					Reason:       reason,
+				},
+			})
+		}
+		if applyCooldown {
+			p.denyList[peer.NormalizedAddress] = now.Add(cooldownDuration)
+			p.recordInboundLifecycle("cooled-down")
+		}
+		p.config.Logger.Info(
+			"pruned inbound warm peer",
+			"address", peer.Address,
+			"reason", reason,
+			"inbound_short_lived_count", peer.InboundShortLivedCount,
+			"last_inbound_disconnect", peer.LastInboundDisconnect,
+			"last_inbound_session_duration", peer.LastInboundSessionDuration,
+			"prune_after", p.config.InboundPruneAfter,
+			"score", peer.PerformanceScore,
+			"tenure", now.Sub(peer.FirstSeen),
+			"topology_slot", peer.InboundTopologyMatch,
+			"full_duplex", peer.hasClientConnection() || peer.InboundDuplex,
+			"cooldown_applied", applyCooldown,
+			"cooldown_duration", cooldownDuration,
+		)
+		events = append(events, pendingEvent{
+			eventType: PeerRemovedEventType,
+			data: PeerStateChangeEvent{
+				Address: peer.Address,
+				Reason:  reason,
+			},
+		})
+		p.peers = slices.Delete(p.peers, i, i+1)
+		p.recordInboundLifecycle("pruned")
+		p.inboundPruned++
+		*removedCount++
+		if p.metrics != nil {
+			p.metrics.inboundPruned.Inc()
+			p.metrics.inboundPrunedByReason.WithLabelValues(reasonLabel).Inc()
+		}
+	}
+	return events
+}
+
+func (p *PeerGovernor) inboundPruneDecisionLocked(
+	peer *Peer,
+	now time.Time,
+) (
+	shouldPrune bool,
+	reason, reasonLabel string,
+	cooldownDuration time.Duration,
+	applyCooldown bool,
+) {
+	reason = "inbound idle or unhelpful past prune threshold"
+	reasonLabel = "idle_unhelpful"
+	if peer == nil || peer.Source != PeerSourceInboundConn || peer.State != PeerStateWarm {
+		return false, "", "", 0, false
+	}
+	if flapping, multiplier := p.inboundFlappingStateLocked(peer, now); flapping {
+		cooldownDuration = p.config.InboundCooldown * time.Duration(multiplier)
+		// Keep cooldown at least as long as the normal deny duration.
+		if cooldownDuration < p.config.DenyDuration {
+			cooldownDuration = p.config.DenyDuration
+		}
+		reason = "inbound flapping cooldown"
+		reasonLabel = "flapping_cooldown"
+		applyCooldown = true
+		return true, reason, reasonLabel, cooldownDuration, applyCooldown
+	}
+	lastSignal := peer.FirstSeen
+	if peer.LastActivity.After(lastSignal) {
+		lastSignal = peer.LastActivity
+	}
+	if peer.ChainSyncLastUpdate.After(lastSignal) {
+		lastSignal = peer.ChainSyncLastUpdate
+	}
+	if peer.LastBlockFetchTime.After(lastSignal) {
+		lastSignal = peer.LastBlockFetchTime
+	}
+	if peer.LastInboundDisconnect.After(lastSignal) {
+		lastSignal = peer.LastInboundDisconnect
+	}
+	if peer.ConnectedAt.After(lastSignal) {
+		lastSignal = peer.ConnectedAt
+	}
+	if lastSignal.IsZero() || now.Sub(lastSignal) < p.config.InboundPruneAfter {
+		return false, reason, reasonLabel, cooldownDuration, applyCooldown
+	}
+	if p.isInboundEligibleForHot(peer) {
+		return false, reason, reasonLabel, cooldownDuration, applyCooldown
+	}
+	return true, reason, reasonLabel, cooldownDuration, applyCooldown
 }

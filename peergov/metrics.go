@@ -15,6 +15,8 @@
 package peergov
 
 import (
+	"time"
+
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 )
@@ -42,6 +44,20 @@ type peerGovernorMetrics struct {
 	peersBySource           *prometheus.GaugeVec   // Peers by source and state
 	churnDemotionsBySource  *prometheus.CounterVec // Churn demotions by source
 	churnPromotionsBySource *prometheus.CounterVec // Churn promotions by source
+	// Explicit inbound governance budget/usage metrics (phase 1)
+	inboundWarmTarget prometheus.Gauge
+	inboundHotQuota   prometheus.Gauge
+	inboundWarmHeld   prometheus.Gauge
+	inboundHotHeld    prometheus.Gauge
+	inboundPruned     prometheus.Counter
+	// Inbound admission metadata metrics (phase 2)
+	inboundArrivalsTotal   prometheus.Counter
+	inboundTopologyMatched prometheus.Gauge
+	inboundDuplexHeld      prometheus.Gauge
+	inboundPrunedByReason  *prometheus.CounterVec
+	inboundLifecycle       *prometheus.CounterVec
+	inboundHotQuotaUsage   prometheus.Gauge
+	inboundWarmOccupancy   prometheus.Gauge
 }
 
 func (p *PeerGovernor) initMetrics() {
@@ -155,6 +171,141 @@ func (p *PeerGovernor) initMetrics() {
 		},
 		[]string{"source"},
 	)
+	p.metrics.inboundWarmTarget = promautoFactory.NewGauge(prometheus.GaugeOpts{
+		Name: "cardano_node_metrics_peerSelection_InboundWarmTarget",
+		Help: "configured inbound warm peer target",
+	})
+	p.metrics.inboundHotQuota = promautoFactory.NewGauge(prometheus.GaugeOpts{
+		Name: "cardano_node_metrics_peerSelection_InboundHotQuota",
+		Help: "configured inbound hot peer quota",
+	})
+	p.metrics.inboundWarmHeld = promautoFactory.NewGauge(prometheus.GaugeOpts{
+		Name: "cardano_node_metrics_peerSelection_InboundWarmHeld",
+		Help: "current number of inbound peers held warm",
+	})
+	p.metrics.inboundHotHeld = promautoFactory.NewGauge(prometheus.GaugeOpts{
+		Name: "cardano_node_metrics_peerSelection_InboundHotHeld",
+		Help: "current number of inbound peers held hot",
+	})
+	p.metrics.inboundPruned = promautoFactory.NewCounter(prometheus.CounterOpts{
+		Name: "cardano_node_metrics_peerSelection_InboundPruned",
+		Help: "total inbound peers pruned from governed sets",
+	})
+	p.metrics.inboundArrivalsTotal = promautoFactory.NewCounter(
+		prometheus.CounterOpts{
+			Name: "cardano_node_metrics_peerSelection_InboundArrivalsTotal",
+			Help: "total inbound connection events observed since startup (includes re-arrivals)",
+		},
+	)
+	p.metrics.inboundTopologyMatched = promautoFactory.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "cardano_node_metrics_peerSelection_InboundTopologyMatched",
+			Help: "current number of peers whose inbound arrival was identified as a configured topology peer",
+		},
+	)
+	p.metrics.inboundDuplexHeld = promautoFactory.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "cardano_node_metrics_peerSelection_InboundDuplexHeld",
+			Help: "current number of inbound peers on full-duplex connections",
+		},
+	)
+	p.metrics.inboundPrunedByReason = promautoFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "cardano_node_metrics_peerSelection_InboundPrunedByReason",
+			Help: "total inbound peers pruned by policy reason",
+		},
+		[]string{"reason"},
+	)
+	p.metrics.inboundLifecycle = promautoFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "cardano_node_metrics_peerSelection_InboundLifecycleTotal",
+			Help: "total inbound lifecycle transitions by stage",
+		},
+		[]string{"stage"},
+	)
+	p.metrics.inboundHotQuotaUsage = promautoFactory.NewGauge(prometheus.GaugeOpts{
+		Name: "cardano_node_metrics_peerSelection_InboundHotQuotaUsage",
+		Help: "fraction of inbound hot quota currently occupied (>=0; may exceed 1 when over quota)",
+	})
+	p.metrics.inboundWarmOccupancy = promautoFactory.NewGauge(prometheus.GaugeOpts{
+		Name: "cardano_node_metrics_peerSelection_InboundWarmTargetOccupancy",
+		Help: "fraction of inbound warm target currently occupied (>=0; may exceed 1 when over target)",
+	})
+}
+
+func (p *PeerGovernor) recordInboundLifecycle(stage string) {
+	if p.metrics == nil || p.metrics.inboundLifecycle == nil {
+		return
+	}
+	p.metrics.inboundLifecycle.WithLabelValues(stage).Inc()
+}
+
+// inboundCounts is the phase-2 census of inbound peers used to populate
+// both Prometheus metrics and QuotaStatusEvent. Centralizing this avoids
+// drift between the two surfaces.
+type inboundCounts struct {
+	// Warm and Hot are provisional-window-filtered budget counts: peers
+	// younger than InboundProvisionalWindow are excluded.
+	Warm int
+	Hot  int
+	// TopologyMatched is the count of peers with a non-empty
+	// InboundTopologyMatch.
+	TopologyMatched int
+	// Duplex is the count of peers with a currently-live inbound
+	// client-capable connection.
+	Duplex int
+}
+
+// censusInboundCounts computes the phase-2 inbound census. Must be
+// called with p.mu held.
+func (p *PeerGovernor) censusInboundCounts() inboundCounts {
+	var c inboundCounts
+	now := time.Now()
+	window := p.config.InboundProvisionalWindow
+	for _, peer := range p.peers {
+		if peer == nil {
+			continue
+		}
+		if peer.InboundTopologyMatch != "" {
+			c.TopologyMatched++
+		}
+		if peer.Connection != nil && peer.Connection.IsClient {
+			// "Current inbound duplex" must be derived from live transport
+			// direction, not sticky arrival metadata.
+			isLiveInbound := peer.Source == PeerSourceInboundConn
+			if p.config.ConnManager != nil {
+				isLiveInbound = p.config.ConnManager.IsInboundConnection(
+					peer.Connection.Id,
+				)
+			}
+			if isLiveInbound {
+				c.Duplex++
+			}
+		}
+		if peer.Source != PeerSourceInboundConn {
+			// Topology peers that inbound-matched still govern through
+			// their configured source, so they are not charged against
+			// the inbound budget. They do count toward topology-match
+			// observability above. Duplex capability is still included in
+			// the shared census above.
+			continue
+		}
+		// Provisional-window filter: a negative window disables the
+		// grace, zero is normalized to the default in NewPeerGovernor.
+		if window > 0 && !peer.FirstSeen.IsZero() &&
+			now.Sub(peer.FirstSeen) < window {
+			continue
+		}
+		switch peer.State {
+		case PeerStateCold:
+			// Cold inbound peers do not hold a slot in either budget.
+		case PeerStateWarm:
+			c.Warm++
+		case PeerStateHot:
+			c.Hot++
+		}
+	}
+	return c
 }
 
 // updatePeerMetrics updates the Prometheus metrics for peer counts.
@@ -238,4 +389,24 @@ func (p *PeerGovernor) updatePeerMetrics() {
 			float64(count),
 		)
 	}
+	// Explicit inbound budget/usage gauges. Use the provisional-window
+	// filter so flash-connects cannot inflate reported usage; phase 3
+	// enforcement will read the same filtered view.
+	p.metrics.inboundWarmTarget.Set(float64(p.config.InboundWarmTarget))
+	p.metrics.inboundHotQuota.Set(float64(p.config.InboundHotQuota))
+	census := p.censusInboundCounts()
+	p.metrics.inboundWarmHeld.Set(float64(census.Warm))
+	p.metrics.inboundHotHeld.Set(float64(census.Hot))
+	if p.config.InboundHotQuota > 0 {
+		p.metrics.inboundHotQuotaUsage.Set(float64(census.Hot) / float64(p.config.InboundHotQuota))
+	} else {
+		p.metrics.inboundHotQuotaUsage.Set(0)
+	}
+	if p.config.InboundWarmTarget > 0 {
+		p.metrics.inboundWarmOccupancy.Set(float64(census.Warm) / float64(p.config.InboundWarmTarget))
+	} else {
+		p.metrics.inboundWarmOccupancy.Set(0)
+	}
+	p.metrics.inboundTopologyMatched.Set(float64(census.TopologyMatched))
+	p.metrics.inboundDuplexHeld.Set(float64(census.Duplex))
 }

@@ -94,6 +94,23 @@ type MetadataStore interface {
 		types.Txn,
 	) error
 
+	// CreateDrep inserts a Drep row directly. Used by callers (e.g.
+	// fixture seeding from outside the plugin packages) that already
+	// have a fully-populated model and want a single-row insert without
+	// the registration-record side effects of ImportDrep.
+	CreateDrep(types.Txn, *models.Drep) error
+
+	// CreateAccount inserts an Account row directly. See CreateDrep
+	// for the rationale; this is the simple-insert sibling of
+	// ImportAccount.
+	CreateAccount(types.Txn, *models.Account) error
+
+	// CreateUtxo inserts a Utxo row directly. The normal block-
+	// application path uses AddUtxos with UtxoSlot inputs; this is
+	// the simple-insert variant for callers that already have a
+	// populated model.
+	CreateUtxo(types.Txn, *models.Utxo) error
+
 	// GetImportCheckpoint retrieves the checkpoint for a given
 	// import key (e.g., "{digest}:{slot}"). Returns nil if no
 	// checkpoint exists.
@@ -196,6 +213,18 @@ type MetadataStore interface {
 		types.Txn,
 	) (*models.Account, error)
 
+	// AddAccountReward credits a reward account by stake credential.
+	AddAccountReward(
+		[]byte, // stakeKey
+		uint64, // amount
+		uint64, // slot
+		types.Txn,
+	) error
+
+	// DeleteAccountRewardsAfterSlot reverts reward credits recorded after
+	// the given slot and deletes their journal entries.
+	DeleteAccountRewardsAfterSlot(uint64, types.Txn) error
+
 	// GetBlockNonce retrieves a block nonce for a given point.
 	GetBlockNonce(
 		ocommon.Point,
@@ -266,6 +295,25 @@ type MetadataStore interface {
 		types.Txn,
 	) (*models.Transaction, error)
 
+	// GetTransactionSlotByHash returns the slot of the block that
+	// contains the given tx hash. The bool result is false when no
+	// such transaction is recorded. Lighter than GetTransactionByHash
+	// because it skips loading inputs/outputs/witnesses.
+	GetTransactionSlotByHash(
+		[]byte, // hash
+		types.Txn,
+	) (uint64, bool, error)
+
+	// GetTransactionIDByHash returns the primary-key ID of the
+	// transaction with the given hash. The bool result is false when
+	// no such transaction is recorded. Used by UTxO recovery paths
+	// that need to populate the producer transaction FK on rows they
+	// re-import without paying the cost of loading every association.
+	GetTransactionIDByHash(
+		[]byte, // hash
+		types.Txn,
+	) (uint, bool, error)
+
 	// GetTransactionsByHashes retrieves transactions by their hashes.
 	GetTransactionsByHashes(
 		[][]byte, // hashes
@@ -323,6 +371,23 @@ type MetadataStore interface {
 		uint64, // label
 		types.Txn,
 	) (int, error)
+
+	// GetAssetByPolicyAndName returns a live asset row for the provided
+	// policy ID and asset name. Implementations return an empty model and
+	// no error when the asset is not found.
+	GetAssetByPolicyAndName(
+		lcommon.Blake2b224,
+		[]byte, // assetName
+		types.Txn,
+	) (models.Asset, error)
+
+	// GetAssetQuantityByPolicyAndName returns the sum of live quantities for
+	// the provided policy ID and asset name across all matching UTxOs.
+	GetAssetQuantityByPolicyAndName(
+		lcommon.Blake2b224,
+		[]byte, // assetName
+		types.Txn,
+	) (uint64, error)
 
 	// GetScript retrieves a script by its hash.
 	GetScript(
@@ -456,6 +521,10 @@ type MetadataStore interface {
 	// GetEpochs retrieves all epochs.
 	GetEpochs(types.Txn) ([]models.Epoch, error)
 
+	// GetEpochBySlot retrieves the epoch containing the given slot.
+	// Returns nil if no matching epoch exists.
+	GetEpochBySlot(uint64, types.Txn) (*models.Epoch, error)
+
 	// DeleteEpochsAfterSlot removes all epoch entries whose start slot
 	// is after the given slot. Used during chain rollback to discard
 	// epoch nonces that were computed from rolled-back blocks.
@@ -463,6 +532,12 @@ type MetadataStore interface {
 
 	// GetUtxosAddedAfterSlot retrieves all UTxOs added after the given slot.
 	GetUtxosAddedAfterSlot(uint64, types.Txn) ([]models.Utxo, error)
+
+	// GetLiveUtxosBySlot returns the references ({TxId, OutputIdx}) of all
+	// live UTxOs (deleted_slot = 0) created at the given slot. Used by the
+	// pruner to materialize block-referenced UTxO bytes before deleting the
+	// source block.
+	GetLiveUtxosBySlot(uint64, types.Txn) ([]models.UtxoId, error)
 
 	// GetUtxosByAddress retrieves all UTxOs for a given address.
 	GetUtxosByAddress(ledger.Address, types.Txn) ([]models.Utxo, error)
@@ -496,15 +571,42 @@ type MetadataStore interface {
 		types.Txn,
 	) ([]models.Utxo, error)
 
-	// SetUtxoDeletedAtSlot marks a UTxO as deleted at the given slot.
+	// SetUtxoDeletedAtSlot marks a UTxO as deleted at the given slot
+	// and records the hash of the transaction that consumed it.
 	SetUtxoDeletedAtSlot(
-		ledger.TransactionInput,
-		uint64,
-		types.Txn,
+		input ledger.TransactionInput,
+		deletedAtSlot uint64,
+		spenderHash []byte,
+		txn types.Txn,
 	) error
 
 	// SetUtxosNotDeletedAfterSlot marks all UTxOs created after the given slot as not deleted.
 	SetUtxosNotDeletedAfterSlot(uint64, types.Txn) error
+
+	// IterateLiveUtxos invokes fn once for each live UTxO row
+	// (DeletedSlot == 0) in unspecified order. fn receives a
+	// pointer to a row that is reused between callbacks — copy
+	// out anything you intend to retain. Returning a non-nil
+	// error from fn aborts iteration and that error is propagated
+	// up. The intended callers iterate, classify, and (optionally)
+	// hand a list of UtxoKeys to MarkUtxosDeletedAtSlot;
+	// implementations are free to page or stream the underlying
+	// query as long as the callback contract is honored.
+	IterateLiveUtxos(
+		txn types.Txn,
+		fn func(*models.Utxo) error,
+	) error
+
+	// MarkUtxosDeletedAtSlot marks every live UTxO row matching one
+	// of refs as deleted at atSlot. Refs that don't match any live
+	// row are silently ignored (the SQL filter is deleted_slot == 0,
+	// so already-deleted rows don't get rewritten). Rollback
+	// un-deletion is handled by SetUtxosNotDeletedAfterSlot.
+	MarkUtxosDeletedAtSlot(
+		txn types.Txn,
+		refs []types.UtxoKey,
+		atSlot uint64,
+	) error
 
 	// Stake snapshot methods
 
@@ -601,11 +703,39 @@ type MetadataStore interface {
 		types.Txn,
 	) (*models.GovernanceProposal, error)
 
-	// GetActiveGovernanceProposals retrieves all governance proposals that haven't expired.
+	// GetActiveGovernanceProposals retrieves all governance proposals that
+	// are still in the active pool (not expired, not enacted, not marked
+	// expired, not soft-deleted).
 	GetActiveGovernanceProposals(
 		uint64, // epoch
 		types.Txn,
 	) ([]*models.GovernanceProposal, error)
+
+	// GetRatifiedGovernanceProposals returns proposals that have been
+	// ratified but not yet enacted. Used at epoch start by enactment.
+	GetRatifiedGovernanceProposals(
+		types.Txn,
+	) ([]*models.GovernanceProposal, error)
+
+	// GetExpiringGovernanceProposals returns proposals whose
+	// `expires_epoch` is strictly less than the given epoch and that
+	// have not yet been enacted, expired, or soft-deleted. Used at
+	// epoch boundaries to mark expired proposals and return deposits.
+	GetExpiringGovernanceProposals(
+		epoch uint64,
+		txn types.Txn,
+	) ([]*models.GovernanceProposal, error)
+
+	// GetLastEnactedGovernanceProposal returns the most recently enacted
+	// proposal whose action_type is in the given set, or nil if none
+	// exist. Callers pass the set of action types that share a chain
+	// root per CIP-1694 (e.g., NoConfidence + UpdateCommittee together).
+	// Used to resolve governance action chain roots at ratification
+	// time.
+	GetLastEnactedGovernanceProposal(
+		actionTypes []uint8,
+		txn types.Txn,
+	) (*models.GovernanceProposal, error)
 
 	// SetGovernanceProposal creates or updates a governance proposal.
 	SetGovernanceProposal(
@@ -642,6 +772,13 @@ type MetadataStore interface {
 		types.Txn,
 	) (bool, error)
 
+	// GetResignedCommitteeMembers returns the cold credentials whose
+	// latest resignation is after their latest authorization.
+	GetResignedCommitteeMembers(
+		[][]byte, // coldKeys
+		types.Txn,
+	) (map[string]bool, error)
+
 	// GetCommitteeActiveCount returns the number of active (non-resigned)
 	// committee members.
 	GetCommitteeActiveCount(types.Txn) (int, error)
@@ -656,24 +793,98 @@ type MetadataStore interface {
 		types.Txn,
 	) error
 
+	// SetCommitteeQuorum stores the quorum threshold enacted with a
+	// committee update.
+	SetCommitteeQuorum(*types.Rat, uint64, types.Txn) error
+
+	// ClearCommitteeQuorum records that the committee has no
+	// enacted quorum as of the given slot. Used by NoConfidence
+	// enactment so GetCommitteeQuorum falls back to Conway
+	// genesis until a subsequent UpdateCommittee sets a new
+	// quorum.
+	ClearCommitteeQuorum(uint64, types.Txn) error
+
+	// GetCommitteeQuorum retrieves the latest enacted committee quorum.
+	// Returns (nil, nil) when no quorum has been enacted or when the
+	// most recent record is a ClearCommitteeQuorum marker.
+	GetCommitteeQuorum(types.Txn) (*types.Rat, error)
+
 	// GetCommitteeMembers retrieves all active (non-deleted)
 	// snapshot-imported committee members.
 	GetCommitteeMembers(types.Txn) ([]*models.CommitteeMember, error)
 
-	// DeleteCommitteeMembersAfterSlot removes committee members added
-	// after the given slot and clears deleted_slot for any that were
+	// GetCommitteeMembersIncludeDeleted retrieves every committee
+	// member row, including rows whose deleted_slot is set. Used to
+	// distinguish "committee never seated" from "committee voted out
+	// via NoConfidence" — the latter leaves every row soft-deleted,
+	// which GetCommitteeMembers would hide.
+	GetCommitteeMembersIncludeDeleted(
+		types.Txn,
+	) ([]*models.CommitteeMember, error)
+
+	// DeleteCommitteeMembersAfterSlot removes committee state added
+	// after the given slot and clears deleted_slot for any members
 	// soft-deleted after that slot. Used during chain rollbacks.
 	DeleteCommitteeMembersAfterSlot(uint64, types.Txn) error
 
+	// SoftDeleteCommitteeMembers marks the given cold credential hashes
+	// as removed by setting deleted_slot. Used by governance enactment
+	// to remove members (UpdateCommittee/NoConfidence action).
+	SoftDeleteCommitteeMembers(
+		coldCredHashes [][]byte,
+		slot uint64,
+		txn types.Txn,
+	) error
+
+	// SoftDeleteAllCommitteeMembers marks all active committee members as
+	// removed. Used by governance enactment for NoConfidence actions.
+	SoftDeleteAllCommitteeMembers(
+		slot uint64,
+		txn types.Txn,
+	) error
+
 	// DRep voting power and activity methods
 
+	// InsertDrepIfAbsent inserts a minimal DRep row when no record
+	// exists for the given credential. If a row already exists, it is
+	// left untouched: added_slot, anchor_url, anchor_hash, and active
+	// are never overwritten. Used on the vote-replay recovery path to
+	// recreate rows lost during recovery/bootstrap without clobbering
+	// real registration metadata.
+	InsertDrepIfAbsent(
+		cred []byte,
+		slot uint64,
+		url string,
+		hash []byte,
+		active bool,
+		txn types.Txn,
+	) error
+
 	// GetDRepVotingPower calculates the voting power for a DRep by summing
-	// the stake of all accounts delegated to it. Uses the current live
-	// UTxO set (deleted_slot = 0) for the calculation.
+	// the current stake of all delegated accounts, approximated from live
+	// UTxO balance plus reward-account balance.
 	GetDRepVotingPower(
 		[]byte, // drepCredential
 		types.Txn,
 	) (uint64, error)
+
+	// GetDRepVotingPowerBatch is the batch form of GetDRepVotingPower.
+	// Returns a credential-to-power map; credentials with no delegated
+	// stake are omitted. Used by governance tallying to avoid N+1
+	// per-DRep lookups.
+	GetDRepVotingPowerBatch(
+		drepCredentials [][]byte,
+		txn types.Txn,
+	) (map[string]uint64, error)
+
+	// GetDRepVotingPowerByType returns voting power grouped by DRep
+	// delegation type. This is used for predefined DRep options such
+	// as AlwaysAbstain and AlwaysNoConfidence, which do not have a
+	// credential hash.
+	GetDRepVotingPowerByType(
+		drepTypes []uint64,
+		txn types.Txn,
+	) (map[uint64]uint64, error)
 
 	// UpdateDRepActivity updates the DRep's last activity epoch and
 	// recalculates the expiry epoch.
@@ -757,6 +968,20 @@ type MetadataStore interface {
 	// registered only after the slot are deleted; remaining DReps have their
 	// anchor and active status restored.
 	RestoreDrepStateAtSlot(uint64, types.Txn) error
+
+	// ClearDanglingDRepDelegations implements the cardano-ledger Conway
+	// HARDFORK STS rule for protocol major version 10 (Plomin, mainnet
+	// January 2025, Cardano/Conway/Rules/HardFork.hs updateDRepDelegations).
+	// For each account with a credential-backed DRep delegation
+	// (DrepType 0 or 1), if the target DRep credential is not currently
+	// registered as an active DRep, clear the delegation. Pseudo-DRep
+	// delegations (AlwaysAbstain, AlwaysNoConfidence) are preserved.
+	// Updates Account.AddedSlot to atSlot on every row it modifies so the
+	// rewritten row is excluded from a subsequent rollback restore
+	// targeting any slot before atSlot (the restore filters on
+	// `added_slot <= targetSlot` and falls back to prior certificate
+	// history). Returns the number of accounts updated.
+	ClearDanglingDRepDelegations(atSlot uint64, txn types.Txn) (int, error)
 
 	// DeletePParamsAfterSlot removes protocol parameter records added after
 	// the given slot.

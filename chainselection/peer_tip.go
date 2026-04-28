@@ -19,15 +19,17 @@ import (
 
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
 // PeerChainTip tracks the chain tip reported by a specific peer.
 type PeerChainTip struct {
-	ConnectionId ouroboros.ConnectionId
-	Tip          ochainsync.Tip
-	ObservedTip  ochainsync.Tip
-	VRFOutput    []byte // VRF output from tip block for tie-breaking
-	LastUpdated  time.Time
+	ConnectionId  ouroboros.ConnectionId
+	Tip           ochainsync.Tip
+	ObservedTip   ochainsync.Tip
+	VRFOutput     []byte // VRF output from tip block for tie-breaking
+	LastUpdated   time.Time
+	observedSlots []uint64
 }
 
 // NewPeerChainTip creates a new PeerChainTip with the given connection ID,
@@ -62,6 +64,104 @@ func (p *PeerChainTip) UpdateTipWithObserved(
 	p.ObservedTip = observedTip
 	p.VRFOutput = vrfOutput
 	p.LastUpdated = time.Now()
+}
+
+// ApplyRollback trims observed history at the rollback point and refreshes the
+// peer tip to the chainsync tip reported with the rollback.
+func (p *PeerChainTip) ApplyRollback(
+	point ocommon.Point,
+	tip ochainsync.Tip,
+) {
+	if p == nil {
+		return
+	}
+	p.Tip = tip
+	p.ObservedTip = tip
+	p.VRFOutput = nil
+	p.LastUpdated = time.Now()
+	if point.Slot == 0 || len(p.observedSlots) == 0 {
+		p.observedSlots = nil
+		return
+	}
+
+	keepUntil := 0
+	for keepUntil < len(p.observedSlots) &&
+		p.observedSlots[keepUntil] <= point.Slot {
+		keepUntil++
+	}
+	if keepUntil == 0 {
+		p.observedSlots = nil
+		return
+	}
+	p.observedSlots = p.observedSlots[:keepUntil]
+}
+
+func (p *PeerChainTip) recordObservedSlot(slot, window uint64) {
+	if p == nil {
+		return
+	}
+	if slot == 0 {
+		p.observedSlots = nil
+		return
+	}
+
+	// Keep the history monotonic and bounded even if the observed frontier
+	// rolls back. Genesis mode only needs the recent slot frontier, not the
+	// full chain history.
+	for len(p.observedSlots) > 0 &&
+		p.observedSlots[len(p.observedSlots)-1] > slot {
+		p.observedSlots = p.observedSlots[:len(p.observedSlots)-1]
+	}
+	if len(p.observedSlots) == 0 ||
+		p.observedSlots[len(p.observedSlots)-1] < slot {
+		p.observedSlots = append(p.observedSlots, slot)
+	}
+
+	if window == 0 {
+		if len(p.observedSlots) > 1 {
+			p.observedSlots = p.observedSlots[len(p.observedSlots)-1:]
+		}
+		return
+	}
+
+	var cutoff uint64
+	if slot > window {
+		cutoff = slot - window + 1
+	} else {
+		cutoff = 1
+	}
+	pruneIdx := 0
+	for pruneIdx < len(p.observedSlots) &&
+		p.observedSlots[pruneIdx] < cutoff {
+		pruneIdx++
+	}
+	if pruneIdx > 0 {
+		p.observedSlots = p.observedSlots[pruneIdx:]
+	}
+}
+
+func (p *PeerChainTip) observedDensity(window uint64) uint64 {
+	if p == nil || len(p.observedSlots) == 0 {
+		return 0
+	}
+	if window == 0 {
+		return uint64(len(p.observedSlots))
+	}
+
+	latestSlot := p.observedSlots[len(p.observedSlots)-1]
+	var cutoff uint64
+	if latestSlot > window {
+		cutoff = latestSlot - window + 1
+	} else {
+		cutoff = 1
+	}
+	for i, slot := range p.observedSlots {
+		if slot >= cutoff {
+			// #nosec G115 -- i < len(p.observedSlots), difference is non-negative
+			return uint64(len(p.observedSlots) - i)
+		}
+	}
+	return 0
 }
 
 // SelectionTip returns the best locally observed frontier for this peer.

@@ -299,7 +299,9 @@ func (n *Node) Run(ctx context.Context) error {
 	}
 	n.ledgerState = state
 	n.ouroboros.LedgerState = n.ledgerState
-	n.chainManager.SetLedger(n.ledgerState)
+	if err := n.chainManager.SetLedger(n.ledgerState); err != nil {
+		return fmt.Errorf("failed to configure chain security parameter: %w", err)
+	}
 
 	if n.config.barkBaseUrl != "" {
 		n.db.SetBlobStore(bark.NewBarkBlobStore(bark.BlobStoreBarkConfig{
@@ -346,6 +348,7 @@ func (n *Node) Run(ctx context.Context) error {
 		n.eventBus,
 		n.config.logger,
 	)
+	n.snapshotMgr.SetPromRegistry(n.config.promRegistry)
 	// Capture genesis stake snapshot (epoch 0) so leader election works at epoch 2
 	if err := n.snapshotMgr.CaptureGenesisSnapshot(ctx); err != nil {
 		n.config.logger.Warn(
@@ -408,10 +411,27 @@ func (n *Node) Run(ctx context.Context) error {
 		n.chainsyncState.HandleClientRemoveRequestedEvent,
 	)
 	// Initialize chain selector for multi-peer chain selection
+	chainSelectorSecurityParam := uint64(0)
+	if k := n.ledgerState.SecurityParam(); k > 0 {
+		chainSelectorSecurityParam = uint64(k) //nolint:gosec
+	}
+	genesisWindowSlots := n.config.genesisWindowSlots
+	if genesisWindowSlots == 0 {
+		genesisWindowSlots = chainselection.GenesisWindowSlotsForParams(
+			chainSelectorSecurityParam,
+			n.ledgerState.ActiveSlotCoeff(),
+		)
+	}
+	genesisSelectionMode := n.config.genesisBootstrap &&
+		!n.config.intersectTip &&
+		len(n.config.intersectPoints) == 0
 	n.chainSelector = chainselection.NewChainSelector(
 		chainselection.ChainSelectorConfig{
-			Logger:   n.config.logger,
-			EventBus: n.eventBus,
+			Logger:             n.config.logger,
+			EventBus:           n.eventBus,
+			SecurityParam:      chainSelectorSecurityParam,
+			GenesisMode:        genesisSelectionMode,
+			GenesisWindowSlots: genesisWindowSlots,
 			ConnectionLive: func(connId ouroboros.ConnectionId) bool {
 				return n.connManager != nil &&
 					n.connManager.GetConnectionById(connId) != nil
@@ -424,6 +444,13 @@ func (n *Node) Run(ctx context.Context) error {
 			},
 		},
 	)
+	if genesisSelectionMode {
+		n.config.logger.Info(
+			"Genesis chain selection enabled",
+			"genesis_window_slots", genesisWindowSlots,
+			"security_param", chainSelectorSecurityParam,
+		)
+	}
 	// Subscribe chain selector to peer tip update events
 	n.eventBus.SubscribeFunc(
 		chainselection.PeerTipUpdateEventType,
@@ -546,25 +573,33 @@ func (n *Node) Run(ctx context.Context) error {
 
 	n.peerGov = peergov.NewPeerGovernor(
 		peergov.PeerGovernorConfig{
-			Logger:                         n.config.logger,
-			EventBus:                       n.eventBus,
-			ConnManager:                    n.connManager,
-			DisableOutbound:                n.config.isDevMode(),
-			PromRegistry:                   n.config.promRegistry,
-			PeerRequestFunc:                n.ouroboros.RequestPeersFromPeer,
-			LedgerPeerProvider:             ledgerPeerProvider,
-			UseLedgerAfterSlot:             useLedgerAfterSlot,
-			LedgerPeerTarget:               n.config.ledgerPeerTarget,
-			TargetNumberOfKnownPeers:       n.config.targetNumberOfKnownPeers,
-			TargetNumberOfEstablishedPeers: n.config.targetNumberOfEstablishedPeers,
-			TargetNumberOfActivePeers:      n.config.targetNumberOfActivePeers,
-			ActivePeersTopologyQuota:       n.config.activePeersTopologyQuota,
-			ActivePeersGossipQuota:         n.config.activePeersGossipQuota,
-			ActivePeersLedgerQuota:         n.config.activePeersLedgerQuota,
-			MinHotPeers:                    n.config.minHotPeers,
-			ReconcileInterval:              n.config.reconcileInterval,
-			InactivityTimeout:              n.config.inactivityTimeout,
-			SyncProgressProvider:           n.ledgerState,
+			Logger:                               n.config.logger,
+			EventBus:                             n.eventBus,
+			ConnManager:                          n.connManager,
+			DisableOutbound:                      n.config.isDevMode(),
+			PromRegistry:                         n.config.promRegistry,
+			PeerRequestFunc:                      n.ouroboros.RequestPeersFromPeer,
+			LedgerPeerProvider:                   ledgerPeerProvider,
+			UseLedgerAfterSlot:                   useLedgerAfterSlot,
+			LedgerPeerTarget:                     n.config.ledgerPeerTarget,
+			TargetNumberOfKnownPeers:             n.config.targetNumberOfKnownPeers,
+			TargetNumberOfEstablishedPeers:       n.config.targetNumberOfEstablishedPeers,
+			TargetNumberOfActivePeers:            n.config.targetNumberOfActivePeers,
+			ActivePeersTopologyQuota:             n.config.activePeersTopologyQuota,
+			ActivePeersGossipQuota:               n.config.activePeersGossipQuota,
+			ActivePeersLedgerQuota:               n.config.activePeersLedgerQuota,
+			InboundWarmTarget:                    n.config.inboundWarmTarget,
+			InboundHotQuota:                      n.config.inboundHotQuota,
+			InboundMinTenure:                     n.config.inboundMinTenure,
+			InboundHotScoreThreshold:             n.config.inboundHotScoreThreshold,
+			InboundPruneAfter:                    n.config.inboundPruneAfter,
+			InboundDuplexOnlyForHot:              n.config.inboundDuplexOnlyForHot,
+			InboundCooldown:                      n.config.inboundCooldown,
+			MinHotPeers:                          n.config.minHotPeers,
+			ReconcileInterval:                    n.config.reconcileInterval,
+			InactivityTimeout:                    n.config.inactivityTimeout,
+			SyncProgressProvider:                 n.ledgerState,
+			BootstrapPromotionMinDiversityGroups: n.config.bootstrapPromotionMinDiversityGroups,
 		},
 	)
 	n.ouroboros.PeerGov = n.peerGov
@@ -711,7 +746,15 @@ func (n *Node) Run(ctx context.Context) error {
 			n.config.bindAddr,
 			strconv.FormatUint(uint64(n.config.blockfrostPort), 10),
 		)
-		adapter := blockfrost.NewNodeAdapter(n.ledgerState)
+		adapter, err := blockfrost.NewNodeAdapter(
+			n.ledgerState,
+		)
+		if err != nil {
+			return fmt.Errorf(
+				"creating blockfrost node adapter: %w",
+				err,
+			)
+		}
 		n.blockfrostAPI = blockfrost.New(
 			blockfrost.BlockfrostConfig{
 				ListenAddress: listenAddr,

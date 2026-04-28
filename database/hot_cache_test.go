@@ -50,15 +50,15 @@ func TestHotCacheGetPut(t *testing.T) {
 	assert.Equal(t, value2, got, "expected updated value")
 
 	// Test multiple keys
-	for i := 0; i < 10; i++ {
-		key := []byte(fmt.Sprintf("key%d", i))
-		value := []byte(fmt.Sprintf("value%d", i))
+	for i := range 10 {
+		key := fmt.Appendf(nil, "key%d", i)
+		value := fmt.Appendf(nil, "value%d", i)
 		cache.Put(key, value)
 	}
 
-	for i := 0; i < 10; i++ {
-		key := []byte(fmt.Sprintf("key%d", i))
-		expectedValue := []byte(fmt.Sprintf("value%d", i))
+	for i := range 10 {
+		key := fmt.Appendf(nil, "key%d", i)
+		expectedValue := fmt.Appendf(nil, "value%d", i)
 		got, ok := cache.Get(key)
 		require.True(t, ok, "expected key%d to be found", i)
 		assert.Equal(t, expectedValue, got, "expected value%d to match", i)
@@ -75,23 +75,23 @@ func TestHotCacheConcurrent(t *testing.T) {
 	wg.Add(numGoroutines * 2)
 
 	// Writers
-	for i := 0; i < numGoroutines; i++ {
+	for i := range numGoroutines {
 		go func(id int) {
 			defer wg.Done()
-			for j := 0; j < numOperations; j++ {
-				key := []byte(fmt.Sprintf("key-%d-%d", id, j))
-				value := []byte(fmt.Sprintf("value-%d-%d", id, j))
+			for j := range numOperations {
+				key := fmt.Appendf(nil, "key-%d-%d", id, j)
+				value := fmt.Appendf(nil, "value-%d-%d", id, j)
 				cache.Put(key, value)
 			}
 		}(i)
 	}
 
 	// Readers
-	for i := 0; i < numGoroutines; i++ {
+	for i := range numGoroutines {
 		go func(id int) {
 			defer wg.Done()
-			for j := 0; j < numOperations; j++ {
-				key := []byte(fmt.Sprintf("key-%d-%d", id, j))
+			for j := range numOperations {
+				key := fmt.Appendf(nil, "key-%d-%d", id, j)
 				cache.Get(key)
 			}
 		}(i)
@@ -100,11 +100,11 @@ func TestHotCacheConcurrent(t *testing.T) {
 	wg.Wait()
 
 	// Verify some entries are still accessible
-	for i := 0; i < 10; i++ {
-		key := []byte(fmt.Sprintf("key-%d-%d", i, numOperations-1))
+	for i := range 10 {
+		key := fmt.Appendf(nil, "key-%d-%d", i, numOperations-1)
 		got, ok := cache.Get(key)
 		if ok {
-			expected := []byte(fmt.Sprintf("value-%d-%d", i, numOperations-1))
+			expected := fmt.Appendf(nil, "value-%d-%d", i, numOperations-1)
 			assert.Equal(t, expected, got, "value mismatch for concurrent key")
 		}
 	}
@@ -115,9 +115,9 @@ func TestHotCacheEviction(t *testing.T) {
 	cache := NewHotCache(maxSize, 0)
 
 	// Add entries up to maxSize
-	for i := 0; i < maxSize; i++ {
-		key := []byte(fmt.Sprintf("key%d", i))
-		value := []byte(fmt.Sprintf("value%d", i))
+	for i := range maxSize {
+		key := fmt.Appendf(nil, "key%d", i)
+		value := fmt.Appendf(nil, "value%d", i)
 		cache.Put(key, value)
 	}
 
@@ -128,15 +128,15 @@ func TestHotCacheEviction(t *testing.T) {
 		[]byte("key2"),
 	}
 	for _, key := range frequentKeys {
-		for j := 0; j < 10; j++ {
+		for range 10 {
 			cache.Get(key)
 		}
 	}
 
 	// Add more entries to trigger eviction
 	for i := maxSize; i < maxSize+10; i++ {
-		key := []byte(fmt.Sprintf("key%d", i))
-		value := []byte(fmt.Sprintf("value%d", i))
+		key := fmt.Appendf(nil, "key%d", i)
+		value := fmt.Appendf(nil, "value%d", i)
 		cache.Put(key, value)
 	}
 
@@ -167,8 +167,8 @@ func TestHotCacheMemoryLimit(t *testing.T) {
 
 	// Add entries that together exceed maxBytes
 	valueSize := 100
-	for i := 0; i < 20; i++ {
-		key := []byte(fmt.Sprintf("key%d", i))
+	for i := range 20 {
+		key := fmt.Appendf(nil, "key%d", i)
 		value := make([]byte, valueSize)
 		for j := range value {
 			value[j] = byte(i)
@@ -199,19 +199,19 @@ func TestHotCacheLFUEviction(t *testing.T) {
 	cache := NewHotCache(maxSize, 0)
 
 	// Add initial entries
-	for i := 0; i < maxSize; i++ {
-		key := []byte(fmt.Sprintf("key%d", i))
-		value := []byte(fmt.Sprintf("value%d", i))
+	for i := range maxSize {
+		key := fmt.Appendf(nil, "key%d", i)
+		value := fmt.Appendf(nil, "value%d", i)
 		cache.Put(key, value)
 	}
 
 	// Access key0 many times to make it frequently used
-	for i := 0; i < 50; i++ {
+	for range 50 {
 		cache.Get([]byte("key0"))
 	}
 
 	// Access key1 a moderate number of times
-	for i := 0; i < 20; i++ {
+	for range 20 {
 		cache.Get([]byte("key1"))
 	}
 
@@ -219,8 +219,8 @@ func TestHotCacheLFUEviction(t *testing.T) {
 
 	// Add new entries to force eviction
 	for i := maxSize; i < maxSize+5; i++ {
-		key := []byte(fmt.Sprintf("key%d", i))
-		value := []byte(fmt.Sprintf("value%d", i))
+		key := fmt.Appendf(nil, "key%d", i)
+		value := fmt.Appendf(nil, "value%d", i)
 		cache.Put(key, value)
 	}
 
@@ -258,9 +258,9 @@ func TestHotCacheZeroMaxSize(t *testing.T) {
 	// Zero maxSize means unlimited by count
 	cache := NewHotCache(0, 1000)
 
-	for i := 0; i < 100; i++ {
-		key := []byte(fmt.Sprintf("key%d", i))
-		value := []byte(fmt.Sprintf("value%d", i))
+	for i := range 100 {
+		key := fmt.Appendf(nil, "key%d", i)
+		value := fmt.Appendf(nil, "value%d", i)
 		cache.Put(key, value)
 	}
 

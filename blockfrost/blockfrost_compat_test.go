@@ -147,6 +147,40 @@ func TestCompatEpochResponse(t *testing.T) {
 	assert.Equal(t, "1000000", *theirs.ActiveStake)
 }
 
+// TestCompatAssetResponse verifies that our AssetResponse
+// round-trips through blockfrost-go's Asset type.
+func TestCompatAssetResponse(t *testing.T) {
+	ours := AssetResponse{
+		Asset:             "00112233445566778899aabbccddeeff00112233445566778899aabb746f6b656e",
+		PolicyID:          "00112233445566778899aabbccddeeff00112233445566778899aabb",
+		AssetName:         "746f6b656e",
+		AssetNameASCII:    "token",
+		Fingerprint:       "asset1test",
+		Quantity:          "42",
+		InitialMintTxHash: "",
+		MintOrBurnCount:   0,
+	}
+
+	data, err := json.Marshal(ours)
+	require.NoError(t, err)
+
+	var theirs bfgo.Asset
+	err = json.Unmarshal(data, &theirs)
+	require.NoError(t, err)
+
+	assert.Equal(t, ours.Asset, theirs.Asset)
+	assert.Equal(t, ours.PolicyID, theirs.PolicyId)
+	assert.Equal(t, ours.AssetName, theirs.AssetName)
+	assert.Equal(t, ours.Fingerprint, theirs.Fingerprint)
+	assert.Equal(t, ours.Quantity, theirs.Quantity)
+	assert.Equal(t, ours.InitialMintTxHash, theirs.InitialMintTxHash)
+	assert.Equal(t, ours.MintOrBurnCount, theirs.MintOrBurnCount)
+	assert.Nil(t, theirs.OnchainMetadata)
+	assert.Nil(t, theirs.OnchainMetadataStandard)
+	assert.Nil(t, theirs.OnchainMetadataExtra)
+	assert.Nil(t, theirs.Metadata)
+}
+
 // TestCompatProtocolParamsResponse verifies that our
 // ProtocolParamsResponse round-trips through
 // blockfrost-go's EpochParameters type.

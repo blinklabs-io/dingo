@@ -59,6 +59,11 @@ type EraDesc struct {
 	EvaluateTxFunc          func(lcommon.Transaction, lcommon.LedgerState, lcommon.ProtocolParameters) (uint64, lcommon.ExUnits, map[lcommon.RedeemerKey]lcommon.ExUnits, error)
 	Name                    string
 	Id                      uint
+	// MinMajorVersion and MaxMajorVersion are the inclusive protocol-major
+	// version range covered by this era. Adjacent eras must meet without
+	// gap or overlap (cur.MinMajorVersion == prev.MaxMajorVersion + 1).
+	MinMajorVersion uint
+	MaxMajorVersion uint
 }
 
 var Eras = []EraDesc{
@@ -71,18 +76,17 @@ var Eras = []EraDesc{
 	ConwayEraDesc,
 }
 
-var ProtocolMajorVersionToEra = map[uint]EraDesc{
-	0:  ByronEraDesc,
-	1:  ByronEraDesc,
-	2:  ShelleyEraDesc,
-	3:  AllegraEraDesc,
-	4:  MaryEraDesc,
-	5:  AlonzoEraDesc,
-	6:  AlonzoEraDesc,
-	7:  BabbageEraDesc,
-	8:  BabbageEraDesc,
-	9:  ConwayEraDesc,
-	10: ConwayEraDesc,
+// EraForVersion returns the era descriptor whose [MinMajorVersion,
+// MaxMajorVersion] range contains majorVersion. Returns (nil, false) if
+// no era covers the given version.
+func EraForVersion(majorVersion uint) (*EraDesc, bool) {
+	for i := range Eras {
+		if majorVersion >= Eras[i].MinMajorVersion &&
+			majorVersion <= Eras[i].MaxMajorVersion {
+			return &Eras[i], true
+		}
+	}
+	return nil, false
 }
 
 // GetEraById returns the era descriptor for the given era ID.

@@ -39,7 +39,7 @@ func TestBlockIndexerComputeOffsets(t *testing.T) {
 	blocksWithTx := 0
 	maxBlocksToTest := 500
 
-	for i := 0; i < maxBlocksToTest; i++ {
+	for i := range maxBlocksToTest {
 		immBlock, err := iter.Next()
 		if err != nil {
 			t.Fatalf("unexpected error reading block %d: %s", i, err)
@@ -163,7 +163,7 @@ func findCborInBytes(data, target []byte) int {
 
 	for i := 0; i <= len(data)-len(target); i++ {
 		match := true
-		for j := 0; j < len(target); j++ {
+		for j := range target {
 			if data[i+j] != target[j] {
 				match = false
 				break

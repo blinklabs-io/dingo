@@ -14,6 +14,8 @@
 
 package models
 
+import "github.com/blinklabs-io/dingo/database/types"
+
 // CommitteeMember represents a Constitutional Committee member imported
 // from a Mithril snapshot. This is separate from the certificate-based
 // AuthCommitteeHot/ResignCommitteeCold tables, which track committee
@@ -30,4 +32,16 @@ type CommitteeMember struct {
 // TableName returns the table name for CommitteeMember.
 func (CommitteeMember) TableName() string {
 	return "committee_member"
+}
+
+// CommitteeQuorum records the quorum threshold enacted with a committee.
+type CommitteeQuorum struct {
+	Quorum    *types.Rat
+	ID        uint   `gorm:"primarykey"`
+	AddedSlot uint64 `gorm:"uniqueIndex;not null"`
+}
+
+// TableName returns the table name for CommitteeQuorum.
+func (CommitteeQuorum) TableName() string {
+	return "committee_quorum"
 }

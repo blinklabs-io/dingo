@@ -122,6 +122,56 @@ func (d *MetadataStoreSqlite) GetTransactionByHash(
 	return ret, nil
 }
 
+// GetTransactionSlotByHash returns the slot of the transaction with the
+// given hash without preloading any related rows. Returns (0, false, nil)
+// when no such transaction exists.
+func (d *MetadataStoreSqlite) GetTransactionSlotByHash(
+	hash []byte,
+	txn types.Txn,
+) (uint64, bool, error) {
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return 0, false, err
+	}
+	var row struct{ Slot uint64 }
+	result := db.Model(&models.Transaction{}).
+		Select("slot").
+		Where("hash = ?", hash).
+		Take(&row)
+	if result.Error != nil {
+		if errors.Is(result.Error, gorm.ErrRecordNotFound) {
+			return 0, false, nil
+		}
+		return 0, false, result.Error
+	}
+	return row.Slot, true, nil
+}
+
+// GetTransactionIDByHash returns the primary-key ID of the transaction
+// with the given hash without preloading any related rows. Returns
+// (0, false, nil) when no such transaction exists.
+func (d *MetadataStoreSqlite) GetTransactionIDByHash(
+	hash []byte,
+	txn types.Txn,
+) (uint, bool, error) {
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return 0, false, err
+	}
+	var row struct{ ID uint }
+	result := db.Model(&models.Transaction{}).
+		Select("id").
+		Where("hash = ?", hash).
+		Take(&row)
+	if result.Error != nil {
+		if errors.Is(result.Error, gorm.ErrRecordNotFound) {
+			return 0, false, nil
+		}
+		return 0, false, result.Error
+	}
+	return row.ID, true, nil
+}
+
 // GetTransactionsByHashes returns transactions for the provided hashes.
 func (d *MetadataStoreSqlite) GetTransactionsByHashes(
 	hashes [][]byte,
@@ -544,6 +594,7 @@ func saveAccount(account *models.Account, db *gorm.DB) error {
 				[]string{
 					"pool",
 					"drep",
+					"drep_type",
 					"active",
 					"certificate_id",
 				},
@@ -634,26 +685,24 @@ func (d *MetadataStoreSqlite) SetGapBlockTransaction(
 	for i := range tmpTx.Outputs {
 		tmpTx.Outputs[i].ID = 0
 		tmpTx.Outputs[i].TransactionID = &tmpTx.ID
-		result := db.Clauses(clause.OnConflict{
-			Columns:   []clause.Column{{Name: "tx_id"}, {Name: "output_idx"}},
-			DoNothing: true,
-		}).Create(&tmpTx.Outputs[i])
-		if result.Error != nil {
+	}
+	if len(tmpTx.Outputs) > 0 {
+		if err := d.ImportUtxos(tmpTx.Outputs, txn); err != nil {
 			return fmt.Errorf(
-				"create gap block utxo output %d for tx %x: %w",
-				i, txHash, result.Error,
+				"create gap block utxo outputs for tx %x: %w",
+				txHash, err,
 			)
 		}
 	}
 	if tmpTx.CollateralReturn != nil {
 		tmpTx.CollateralReturn.CollateralReturnForTxID = &tmpTx.ID
-		if result := db.Clauses(clause.OnConflict{
-			Columns:   []clause.Column{{Name: "tx_id"}, {Name: "output_idx"}},
-			DoNothing: true,
-		}).Create(tmpTx.CollateralReturn); result.Error != nil {
+		if err := d.ImportUtxos(
+			[]models.Utxo{*tmpTx.CollateralReturn},
+			txn,
+		); err != nil {
 			return fmt.Errorf(
-				"create gap block collateral return: %w",
-				result.Error,
+				"create gap block collateral return for tx %x: %w",
+				txHash, err,
 			)
 		}
 	}
@@ -1752,15 +1801,26 @@ func (d *MetadataStoreSqlite) SetTransaction(
 					if err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
+					drepType, err := models.DrepTypeFromInt(c.Drep.Type)
+					if err != nil {
+						return fmt.Errorf("process certificate: %w", err)
+					}
+					var drepCredential []byte
+					if drepType != models.DrepTypeAlwaysAbstain &&
+						drepType != models.DrepTypeAlwaysNoConfidence {
+						drepCredential = c.Drep.Credential[:]
+					}
 
 					tmpAccount.Pool = c.PoolKeyHash[:]
-					tmpAccount.Drep = c.Drep.Credential[:]
+					tmpAccount.Drep = drepCredential
+					tmpAccount.DrepType = drepType
 					tmpAccount.AddedSlot = point.Slot
 
 					tmpItem := models.StakeVoteDelegation{
 						StakingKey:    stakeKey,
 						PoolKeyHash:   c.PoolKeyHash[:],
-						Drep:          c.Drep.Credential[:],
+						Drep:          drepCredential,
+						DrepType:      drepType,
 						AddedSlot:     point.Slot,
 						CertificateID: certIDMap[i],
 					}
@@ -1928,15 +1988,26 @@ func (d *MetadataStoreSqlite) SetTransaction(
 					if err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
+					drepType, err := models.DrepTypeFromInt(c.Drep.Type)
+					if err != nil {
+						return fmt.Errorf("process certificate: %w", err)
+					}
+					var drepCredential []byte
+					if drepType != models.DrepTypeAlwaysAbstain &&
+						drepType != models.DrepTypeAlwaysNoConfidence {
+						drepCredential = c.Drep.Credential[:]
+					}
 
 					tmpAccount.Pool = c.PoolKeyHash[:]
-					tmpAccount.Drep = c.Drep.Credential[:]
+					tmpAccount.Drep = drepCredential
+					tmpAccount.DrepType = drepType
 					tmpAccount.AddedSlot = point.Slot
 
 					tmpReg := models.StakeVoteRegistrationDelegation{
 						StakingKey:    stakeKey,
 						PoolKeyHash:   c.PoolKeyHash[:],
-						Drep:          c.Drep.Credential[:],
+						Drep:          drepCredential,
+						DrepType:      drepType,
 						AddedSlot:     point.Slot,
 						DepositAmount: types.Uint64(deposit),
 						CertificateID: certIDMap[i],
@@ -1958,13 +2029,24 @@ func (d *MetadataStoreSqlite) SetTransaction(
 					if err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
+					drepType, err := models.DrepTypeFromInt(c.Drep.Type)
+					if err != nil {
+						return fmt.Errorf("process certificate: %w", err)
+					}
+					var drepCredential []byte
+					if drepType != models.DrepTypeAlwaysAbstain &&
+						drepType != models.DrepTypeAlwaysNoConfidence {
+						drepCredential = c.Drep.Credential[:]
+					}
 
-					tmpAccount.Drep = c.Drep.Credential[:]
+					tmpAccount.Drep = drepCredential
+					tmpAccount.DrepType = drepType
 					tmpAccount.AddedSlot = point.Slot
 
 					tmpReg := models.VoteRegistrationDelegation{
 						StakingKey:    stakeKey,
-						Drep:          c.Drep.Credential[:],
+						Drep:          drepCredential,
+						DrepType:      drepType,
 						AddedSlot:     point.Slot,
 						DepositAmount: types.Uint64(deposit),
 						CertificateID: certIDMap[i],
@@ -1986,13 +2068,24 @@ func (d *MetadataStoreSqlite) SetTransaction(
 					if err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
+					drepType, err := models.DrepTypeFromInt(c.Drep.Type)
+					if err != nil {
+						return fmt.Errorf("process certificate: %w", err)
+					}
+					var drepCredential []byte
+					if drepType != models.DrepTypeAlwaysAbstain &&
+						drepType != models.DrepTypeAlwaysNoConfidence {
+						drepCredential = c.Drep.Credential[:]
+					}
 
-					tmpAccount.Drep = c.Drep.Credential[:]
+					tmpAccount.Drep = drepCredential
+					tmpAccount.DrepType = drepType
 					tmpAccount.AddedSlot = point.Slot
 
 					tmpItem := models.VoteDelegation{
 						StakingKey:    stakeKey,
-						Drep:          c.Drep.Credential[:],
+						Drep:          drepCredential,
+						DrepType:      drepType,
 						AddedSlot:     point.Slot,
 						CertificateID: certIDMap[i],
 					}
@@ -2013,7 +2106,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 
 					tmpAuth := models.AuthCommitteeHot{
 						ColdCredential: coldCredential,
-						HostCredential: hotCredential,
+						HotCredential:  hotCredential,
 						CertificateID:  certIDMap[i],
 						AddedSlot:      point.Slot,
 					}

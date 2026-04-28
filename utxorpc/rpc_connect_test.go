@@ -184,7 +184,7 @@ func newUtxorpcConnectHarness(t *testing.T, opts utxorpcHarnessOptions) *utxorpc
 		},
 	})
 	require.NoError(t, err)
-	cm.SetLedger(ls)
+	require.NoError(t, cm.SetLedger(ls))
 
 	ledgerCtx, cancel := context.WithCancel(context.Background())
 	require.NoError(t, ls.Start(ledgerCtx))

@@ -157,12 +157,8 @@ func UtxoLedgerToModel(
 	if dh := utxo.Output.DatumHash(); dh != nil {
 		ret.DatumHash = dh.Bytes()
 	}
-	if multiAssetOutput, ok := utxo.Output.(interface {
-		MultiAsset() *lcommon.MultiAsset[lcommon.MultiAssetTypeOutput]
-	}); ok {
-		if multiAsset := multiAssetOutput.MultiAsset(); multiAsset != nil {
-			ret.Assets = ConvertMultiAssetToModels(multiAsset)
-		}
+	if multiAsset := utxo.Output.Assets(); multiAsset != nil {
+		ret.Assets = ConvertMultiAssetToModels(multiAsset)
 	}
 
 	return ret

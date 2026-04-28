@@ -137,6 +137,20 @@ type ChainsyncConfig struct {
 	StallTimeout string `yaml:"stallTimeout" envconfig:"DINGO_CHAINSYNC_STALL_TIMEOUT"`
 }
 
+// GenesisBootstrapConfig holds configuration for Genesis-mode chain
+// selection and bootstrap-time peer promotion.
+type GenesisBootstrapConfig struct {
+	// Enabled controls whether Genesis bootstrap mode is used when the node
+	// starts from origin.
+	Enabled bool `yaml:"enabled" envconfig:"DINGO_GENESIS_BOOTSTRAP_ENABLED"`
+	// WindowSlots overrides the Genesis density comparison window in slots.
+	// A zero value derives the window from Shelley genesis parameters (3k/f).
+	WindowSlots uint64 `yaml:"windowSlots" envconfig:"DINGO_GENESIS_BOOTSTRAP_WINDOW_SLOTS"`
+	// PromotionMinDiversityGroups sets the minimum number of diversity groups
+	// to prefer while promoting peers during bootstrap.
+	PromotionMinDiversityGroups int `yaml:"promotionMinDiversityGroups" envconfig:"DINGO_GENESIS_BOOTSTRAP_PROMOTION_MIN_DIVERSITY_GROUPS"`
+}
+
 // DefaultChainsyncConfig returns the default chainsync configuration.
 // StallTimeout must match chainsync.DefaultStallTimeout and the
 // fallback in internal/node/node.go.
@@ -144,6 +158,14 @@ func DefaultChainsyncConfig() ChainsyncConfig {
 	return ChainsyncConfig{
 		MaxClients:   3,
 		StallTimeout: "2m",
+	}
+}
+
+// DefaultGenesisBootstrapConfig returns the default Genesis bootstrap
+// configuration values.
+func DefaultGenesisBootstrapConfig() GenesisBootstrapConfig {
+	return GenesisBootstrapConfig{
+		Enabled: true,
 	}
 }
 
@@ -222,17 +244,27 @@ type Config struct {
 	ActivePeersLedgerQuota   int `yaml:"activePeersLedgerQuota"   envconfig:"DINGO_ACTIVE_PEERS_LEDGER_QUOTA"`
 
 	// Peer governor tuning (0 = use default)
-	MinHotPeers         int           `yaml:"minHotPeers"         envconfig:"DINGO_MIN_HOT_PEERS"`
-	ReconcileInterval   time.Duration `yaml:"reconcileInterval"   envconfig:"DINGO_RECONCILE_INTERVAL"`
-	InactivityTimeout   time.Duration `yaml:"inactivityTimeout"   envconfig:"DINGO_INACTIVITY_TIMEOUT"`
-	MaxConnectionsPerIP int           `yaml:"maxConnectionsPerIP" envconfig:"DINGO_MAX_CONNECTIONS_PER_IP"`
-	MaxInboundConns     int           `yaml:"maxInboundConns"     envconfig:"DINGO_MAX_INBOUND_CONNS"`
+	MinHotPeers              int           `yaml:"minHotPeers"         envconfig:"DINGO_MIN_HOT_PEERS"`
+	ReconcileInterval        time.Duration `yaml:"reconcileInterval"   envconfig:"DINGO_RECONCILE_INTERVAL"`
+	InactivityTimeout        time.Duration `yaml:"inactivityTimeout"   envconfig:"DINGO_INACTIVITY_TIMEOUT"`
+	InboundWarmTarget        int           `yaml:"inboundWarmTarget"   envconfig:"DINGO_INBOUND_WARM_TARGET"`
+	InboundHotQuota          int           `yaml:"inboundHotQuota"     envconfig:"DINGO_INBOUND_HOT_QUOTA"`
+	InboundMinTenure         time.Duration `yaml:"inboundMinTenure"    envconfig:"DINGO_INBOUND_MIN_TENURE"`
+	InboundHotScoreThreshold float64       `yaml:"inboundHotScoreThreshold" envconfig:"DINGO_INBOUND_HOT_SCORE_THRESHOLD"`
+	InboundPruneAfter        time.Duration `yaml:"inboundPruneAfter"   envconfig:"DINGO_INBOUND_PRUNE_AFTER"`
+	InboundDuplexOnlyForHot  bool          `yaml:"inboundDuplexOnlyForHot" envconfig:"DINGO_INBOUND_DUPLEX_ONLY_FOR_HOT"`
+	InboundCooldown          time.Duration `yaml:"inboundCooldown"     envconfig:"DINGO_INBOUND_COOLDOWN"`
+	MaxConnectionsPerIP      int           `yaml:"maxConnectionsPerIP" envconfig:"DINGO_MAX_CONNECTIONS_PER_IP"`
+	MaxInboundConns          int           `yaml:"maxInboundConns"     envconfig:"DINGO_MAX_INBOUND_CONNS"`
 
 	// Cache configuration for the tiered CBOR cache system
 	Cache CacheConfig `yaml:"cache"`
 
 	// Chainsync configuration for multi-client support
 	Chainsync ChainsyncConfig `yaml:"chainsync"`
+
+	// Genesis bootstrap configuration for from-origin chain selection.
+	GenesisBootstrap GenesisBootstrapConfig `yaml:"genesisBootstrap"`
 
 	// KES (Key Evolving Signature) configuration for block production
 	// SlotsPerKESPeriod is the number of slots in a KES period.
@@ -394,6 +426,8 @@ var globalConfig = &Config{
 	Cache: DefaultCacheConfig(),
 	// Chainsync configuration defaults
 	Chainsync: DefaultChainsyncConfig(),
+	// Genesis bootstrap defaults
+	GenesisBootstrap: DefaultGenesisBootstrapConfig(),
 	// KES configuration defaults (mainnet values)
 	SlotsPerKESPeriod: 129600, // 1.5 days at 1 second per slot
 	MaxKESEvolutions:  62,     // 2^6 - 2 for KES depth 6

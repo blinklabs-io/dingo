@@ -21,13 +21,22 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/ledger/hardfork"
+	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 )
 
 // ErrBeforeGenesis is returned by TimeToSlot when the given time is before
 // the chain's genesis start. The caller should wait until genesis.
 var ErrBeforeGenesis = errors.New("time is before genesis start")
 
-// SlotToTime returns the current time for a given slot based on known epochs
+// SlotToTime returns the wall-clock start time of the given slot.
+//
+// Slot 0 always maps to Shelley genesis SystemStart, regardless of whether
+// the epoch cache is populated. Other slots are resolved via the
+// hardfork.Summary built from the LedgerState's epoch cache; slots past the
+// last known epoch are projected using the current era's slot length (the
+// Summary's current era is unbounded, mirroring the legacy projection
+// behavior).
 func (ls *LedgerState) SlotToTime(slot uint64) (time.Time, error) {
 	if slot > math.MaxInt64 {
 		return time.Time{}, errors.New("slot is larger than time.Duration")
@@ -36,198 +45,110 @@ func (ls *LedgerState) SlotToTime(slot uint64) (time.Time, error) {
 	if shelleyGenesis == nil {
 		return time.Time{}, errors.New("could not get genesis config")
 	}
-	slotTime := shelleyGenesis.SystemStart
-	// Special case for chain genesis
 	if slot == 0 {
-		return slotTime, nil
+		return shelleyGenesis.SystemStart, nil
 	}
-
-	// Take a deep copy of epochCache while holding the read lock
-	ls.RLock()
-	epochCacheCopy := make([]models.Epoch, len(ls.epochCache))
-	copy(epochCacheCopy, ls.epochCache)
-	ls.RUnlock()
-
-	foundSlot := false
-	for _, epoch := range epochCacheCopy {
-		if epoch.StartSlot > math.MaxInt64 ||
-			epoch.LengthInSlots > math.MaxInt64 ||
-			epoch.SlotLength > math.MaxInt64 {
-			return time.Time{}, errors.New(
-				"epoch slot values are larger than time.Duration",
-			)
-		}
-		if slot < epoch.StartSlot+uint64(epoch.LengthInSlots) {
-			slotTime = slotTime.Add(
-				time.Duration(
-					int64(slot)-int64(epoch.StartSlot),
-				) * (time.Duration(epoch.SlotLength) * time.Millisecond),
-			)
-			foundSlot = true
-			break
-		}
-		slotTime = slotTime.Add(
-			time.Duration(
-				epoch.LengthInSlots,
-			) * (time.Duration(epoch.SlotLength) * time.Millisecond),
-		)
+	sum, err := ls.HardForkSummary()
+	if err != nil {
+		return time.Time{}, err
 	}
-	if !foundSlot {
-		// Project the current slot length forward to calculate future slots
-		lastEpoch := epochCacheCopy[len(epochCacheCopy)-1]
-		leftoverSlots := slot - (lastEpoch.StartSlot + uint64(lastEpoch.LengthInSlots))
-		slotTime = slotTime.Add(
-			// nolint:gosec
-			time.Duration(
-				leftoverSlots,
-			) * (time.Duration(lastEpoch.SlotLength) * time.Millisecond),
-		)
-	}
-	return slotTime, nil
+	return sum.SlotToTime(slot)
 }
 
-// TimeToSlot returns the slot number for a given time based on known epochs
+// TimeToSlot returns the slot containing the given wall-clock time.
+//
+// Returns ErrBeforeGenesis when t is before SystemStart. When the epoch cache
+// is empty but t is within 5 seconds of now, falls back to a coarse
+// approximation using the Shelley genesis slot length — this is useful at
+// chain genesis before any epochs have been persisted.
 func (ls *LedgerState) TimeToSlot(t time.Time) (uint64, error) {
 	shelleyGenesis := ls.config.CardanoNodeConfig.ShelleyGenesis()
 	if shelleyGenesis == nil {
 		return 0, errors.New("could not get genesis config")
 	}
-
-	// Take a deep copy of epochCache while holding the read lock
-	ls.RLock()
-	epochCacheCopy := make([]models.Epoch, len(ls.epochCache))
-	copy(epochCacheCopy, ls.epochCache)
-	ls.RUnlock()
-
-	epochStartTime := shelleyGenesis.SystemStart
-	var timeSlot uint64
-	foundTime := false
-	for _, epoch := range epochCacheCopy {
-		if epoch.LengthInSlots > math.MaxInt64 ||
-			epoch.SlotLength > math.MaxInt64 {
-			return 0, errors.New(
-				"epoch slot values are larger than time.Duration",
-			)
-		}
-		slotDuration := time.Duration(epoch.SlotLength) * time.Millisecond
-		if slotDuration < 0 {
-			return 0, errors.New("slot duration is negative")
-		}
-		epochEndTime := epochStartTime.Add(
-			time.Duration(epoch.LengthInSlots) * slotDuration,
-		)
-		if (t.Equal(epochStartTime) || t.After(epochStartTime)) &&
-			t.Before(epochEndTime) {
-			// Figure out how far into the epoch the specified time is
-			timeDiff := t.Sub(epochStartTime)
-			//nolint:gosec
-			// This will never overflow using 2 positive int64 values, but gosec seems determined
-			// to complain about it
-			timeSlot += uint64(timeDiff / slotDuration)
-			foundTime = true
-			break
-		}
-		epochStartTime = epochEndTime
-		timeSlot += uint64(epoch.LengthInSlots)
+	if t.Before(shelleyGenesis.SystemStart) {
+		return 0, ErrBeforeGenesis
 	}
-	if !foundTime {
-		// Before genesis: the chain hasn't started yet
-		if t.Before(shelleyGenesis.SystemStart) {
-			return 0, ErrBeforeGenesis
+	sum, err := ls.HardForkSummary()
+	if err != nil {
+		// time.Since(t) == now - t, so it is negative for future times.
+		// Guard both directions so arbitrary future times don't match the
+		// "near now" fallback.
+		if d := time.Since(t); d >= -5*time.Second && d < 5*time.Second {
+			return nearNowSlot(shelleyGenesis), nil
 		}
-		// Special case for current time
-		// This is mostly useful at chain genesis
-		if time.Since(t) < (5 * time.Second) {
-			sinceStart := time.Since(
-				shelleyGenesis.SystemStart,
-			) / time.Millisecond
-			slotLength := uint(
-				new(big.Int).Div(
-					new(big.Int).Mul(
-						big.NewInt(1000),
-						shelleyGenesis.SlotLength.Num(),
-					),
-					shelleyGenesis.SlotLength.Denom(),
-				).Uint64(),
-			)
-			// nolint:gosec
-			// Slot length is small enough to not overflow int64
-			timeSlot := uint64(sinceStart / time.Duration(slotLength))
-			return timeSlot, nil
-		}
-		return timeSlot, errors.New("time not found in known epochs")
+		return 0, errors.New("time not found in known epochs")
 	}
-	return timeSlot, nil
+	slot, sumErr := sum.TimeToSlot(t)
+	if sumErr != nil {
+		// With an unbounded current era in HardForkSummary this is
+		// unreachable for t >= SystemStart, but we preserve the legacy
+		// error message for any future bounded-summary configuration.
+		return 0, errors.New("time not found in known epochs")
+	}
+	return slot, nil
 }
 
-// SlotToEpoch returns an epoch by slot number.
-// For slots within known epochs, returns the exact epoch.
-// For slots beyond known epochs, projects forward using the last known epoch's
-// parameters (epoch length, slot length) to calculate the future epoch.
+// SlotToEpoch returns the epoch containing the given slot.
+//
+// Slots within the known epoch cache resolve to the cached epoch's
+// parameters; slots past the cache are projected using the current era's
+// parameters. Returns an error for an empty cache or for slots before the
+// first known epoch (matching legacy error messages).
 func (ls *LedgerState) SlotToEpoch(slot uint64) (models.Epoch, error) {
-	// Take a deep copy of epochCache while holding the read lock
-	ls.RLock()
-	epochCacheCopy := make([]models.Epoch, len(ls.epochCache))
-	copy(epochCacheCopy, ls.epochCache)
-	ls.RUnlock()
-
-	if len(epochCacheCopy) == 0 {
+	sum, err := ls.HardForkSummary()
+	if err != nil {
 		return models.Epoch{}, errors.New("no epochs in cache")
 	}
-
-	// Guard: reject slots before the first known epoch
-	firstEpoch := epochCacheCopy[0]
-	if slot < firstEpoch.StartSlot {
-		return models.Epoch{}, errors.New(
-			"slot is before the first known epoch",
-		)
-	}
-
-	for _, epoch := range epochCacheCopy {
-		if slot < epoch.StartSlot {
-			continue
+	info, err := sum.SlotToEpoch(slot)
+	if err != nil {
+		if errors.Is(err, hardfork.ErrPastHorizon) {
+			// ErrPastHorizon fires for slots outside every era's bounds —
+			// either below the first era's start or past the last bounded
+			// era's end. Don't claim a direction we don't know.
+			return models.Epoch{}, errors.New(
+				"slot is outside the known epoch range",
+			)
 		}
-		if slot < epoch.StartSlot+uint64(epoch.LengthInSlots) {
-			return epoch, nil
-		}
+		return models.Epoch{}, err
 	}
-
-	// Project forward for future slots using the last known epoch's parameters
-	lastEpoch := epochCacheCopy[len(epochCacheCopy)-1]
-	lastEpochEndSlot := lastEpoch.StartSlot + uint64(lastEpoch.LengthInSlots)
-
-	if lastEpoch.LengthInSlots == 0 {
-		return models.Epoch{}, errors.New(
-			"cannot project epoch: last known epoch has LengthInSlots=0",
-		)
-	}
-
-	// Calculate how many epochs past the last known epoch this slot is
-	slotsPastLastEpoch := slot - lastEpochEndSlot
-	epochsPastLast := slotsPastLastEpoch / uint64(lastEpoch.LengthInSlots)
-	slotInProjectedEpoch := slotsPastLastEpoch % uint64(lastEpoch.LengthInSlots)
-
-	// Build projected epoch info
-	projectedEpochId := lastEpoch.EpochId + 1 + epochsPastLast
-	projectedStartSlot := lastEpochEndSlot + (epochsPastLast * uint64(lastEpoch.LengthInSlots))
-
-	// Verify our calculation is correct (slot should be within the projected epoch)
-	if slot < projectedStartSlot ||
-		slot >= projectedStartSlot+uint64(lastEpoch.LengthInSlots) {
-		// This shouldn't happen, but return error if our math is wrong
-		return models.Epoch{}, errors.New(
-			"internal error: projected epoch calculation mismatch",
-		)
-	}
-	_ = slotInProjectedEpoch // Used only for verification
-
 	return models.Epoch{
-		EpochId:       projectedEpochId,
-		StartSlot:     projectedStartSlot,
-		EraId:         lastEpoch.EraId,
-		SlotLength:    lastEpoch.SlotLength,
-		LengthInSlots: lastEpoch.LengthInSlots,
-		// Nonce is unknown for future epochs
-		Nonce: nil,
+		EpochId:   info.Epoch,
+		StartSlot: info.StartSlot,
+		EraId:     info.EraID,
+		// info.SlotLength is a positive, protocol-bounded duration; the
+		// millisecond quotient fits in uint.
+		// #nosec G115
+		SlotLength:    uint(info.SlotLength / time.Millisecond),
+		LengthInSlots: uint(info.LengthInSlots),
+		// Nonce stays nil: unknown for projected epochs, and callers must
+		// consult the DB for the persisted nonce of known epochs.
 	}, nil
+}
+
+// nearNowSlot estimates the current slot from the Shelley genesis slot length,
+// used as a fallback when the epoch cache is empty and the caller asks about
+// a time within 5s of now.
+func nearNowSlot(sg *shelley.ShelleyGenesis) uint64 {
+	if sg == nil || sg.SlotLength.Rat == nil ||
+		sg.SlotLength.Num().Sign() <= 0 {
+		return 0
+	}
+	// Shelley genesis stores slot length as seconds per slot; compute ms.
+	slotLenMs := new(big.Int).Div(
+		new(big.Int).Mul(big.NewInt(1000), sg.SlotLength.Num()),
+		sg.SlotLength.Denom(),
+	).Uint64()
+	if slotLenMs == 0 {
+		return 0
+	}
+	// If SystemStart is in the future (clock skew or node started before the
+	// configured genesis), time.Since is negative; don't wrap it through
+	// uint64 — return 0 so callers see "genesis hasn't happened yet".
+	elapsed := time.Since(sg.SystemStart)
+	if elapsed <= 0 {
+		return 0
+	}
+	sinceStartMs := uint64(elapsed / time.Millisecond)
+	return sinceStartMs / slotLenMs
 }

@@ -213,7 +213,7 @@ func TestComputeAndApplyPParamUpdates_FiltersEpoch(
 	// When querying for epoch 4, GetPParamUpdates returns
 	// both (epoch=4 OR epoch=3). The quorum check should only
 	// count epoch 4 records.
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		err := db.SetPParamUpdate(
 			[]byte{byte(i)},
 			[]byte{0x80}, // minimal CBOR
@@ -223,7 +223,7 @@ func TestComputeAndApplyPParamUpdates_FiltersEpoch(
 		)
 		require.NoError(t, err)
 	}
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		innerMinFeeA := uint(100)
 		updateCbor, innerErr := cbor.Encode(
 			&shelley.ShelleyProtocolParameterUpdate{

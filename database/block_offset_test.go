@@ -40,7 +40,7 @@ func TestExtractTransactionOffsets(t *testing.T) {
 	blocksWithTx := 0
 	maxBlocksToTest := 500
 
-	for i := 0; i < maxBlocksToTest; i++ {
+	for i := range maxBlocksToTest {
 		immBlock, err := iter.Next()
 		if err != nil {
 			t.Fatalf("unexpected error reading block %d: %s", i, err)

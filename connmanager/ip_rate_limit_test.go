@@ -650,6 +650,33 @@ func TestIPRateLimitRejectLogMessage(t *testing.T) {
 	require.NoError(t, err)
 }
 
+// TestIPRateLimitFairnessUnderConnectionChurn verifies that per-IP limits
+// remain fair under repeated acquire/release churn: saturation on one IP must
+// not block another IP from making progress.
+func TestIPRateLimitFairnessUnderConnectionChurn(t *testing.T) {
+	const maxPerIP = 2
+	cm := NewConnectionManager(ConnectionManagerConfig{
+		MaxConnectionsPerIP: maxPerIP,
+	})
+	ipA := "203.0.113.10"
+	ipB := "203.0.113.11"
+
+	// Repeatedly churn IP A between full and empty.
+	for range 20 {
+		require.True(t, cm.acquireIPSlot(ipA))
+		require.True(t, cm.acquireIPSlot(ipA))
+		require.False(t, cm.acquireIPSlot(ipA), "IP A should hit its own cap")
+		// IP B must still be able to acquire while A is saturated.
+		require.True(t, cm.acquireIPSlot(ipB), "IP B progress must be independent of IP A saturation")
+		cm.releaseIPSlot(ipB)
+		cm.releaseIPSlot(ipA)
+		cm.releaseIPSlot(ipA)
+	}
+
+	assert.Equal(t, 0, cm.IPConnCount(ipA))
+	assert.Equal(t, 0, cm.IPConnCount(ipB))
+}
+
 // safeBuffer is a thread-safe buffer for capturing log output in tests.
 type safeBuffer struct {
 	buf  []byte

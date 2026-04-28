@@ -433,9 +433,17 @@ func (o *Ouroboros) HandleOutboundConnEvent(evt event.Event) {
 	// the Ouroboros handshake/protocol negotiation has already failed and the
 	// peer will reject further mini-protocol starts on this connection.
 	if o.ChainsyncState != nil {
+		// Registration runs before the tracked client exists, so the
+		// direction-aware fallback in shouldPublishChainsyncToLedger
+		// cannot see us yet. Outbound keeps its legacy default of
+		// eligible when no ChainsyncIngressEligible policy is wired.
+		ingressEligible := true
+		if o.config.ChainsyncIngressEligible != nil {
+			ingressEligible = o.config.ChainsyncIngressEligible(connId)
+		}
 		shouldStartChainsync := o.registerTrackedChainsyncClient(
 			connId,
-			o.shouldPublishChainsyncToLedger(connId),
+			ingressEligible,
 			true, // startedAsOutbound
 		)
 		if shouldStartChainsync {
@@ -537,8 +545,19 @@ func (o *Ouroboros) HandleInboundConnEvent(evt event.Event) {
 	// connections that lack chainsync but count toward the per-IP
 	// limit can prevent functional reconnections, causing permanent
 	// chainsync stalls after rollback events.
+	//
+	// Ingress eligibility is delegated to ChainsyncIngressEligible so a
+	// trusted upstream peer that happens to dial us first still feeds
+	// the ledger. Random inbound peers remain observability-only because
+	// peergov filters them at chainSelectionEligible. The default when no
+	// policy is wired is fail-closed for inbound: we will not feed the
+	// ledger from a peer we never decided to trust.
 	if o.ChainsyncState != nil {
-		if o.registerTrackedChainsyncClient(connId, false, false) {
+		ingressEligible := false
+		if o.config.ChainsyncIngressEligible != nil {
+			ingressEligible = o.config.ChainsyncIngressEligible(connId)
+		}
+		if o.registerTrackedChainsyncClient(connId, ingressEligible, false) {
 			if err := o.chainsyncClientStart(connId); err != nil {
 				o.ChainsyncState.RemoveClientConnId(connId)
 				o.config.Logger.Warn(

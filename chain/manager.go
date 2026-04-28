@@ -76,10 +76,22 @@ func NewManager(
 	return cm, nil
 }
 
+// SetLedger configures the Ouroboros security parameter K from the ledger.
+// K must be positive; otherwise SetLedger returns ErrInvalidSecurityParam and
+// leaves the previous configuration unchanged.
 func (cm *ChainManager) SetLedger(
 	ledgerState interface{ SecurityParam() int },
-) {
-	cm.securityParam = ledgerState.SecurityParam()
+) error {
+	k := ledgerState.SecurityParam()
+	if k <= 0 {
+		return fmt.Errorf(
+			"%w: got %d",
+			ErrInvalidSecurityParam,
+			k,
+		)
+	}
+	cm.securityParam = k
+	return nil
 }
 
 func (cm *ChainManager) PrimaryChain() *Chain {

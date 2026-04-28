@@ -158,7 +158,9 @@ func TestRollbackToSecurityParamDepth(t *testing.T) {
 	// For this test, we use a smaller value to avoid loading too many blocks
 	const testSecurityParam = 50
 	mockLedger := &mockLedgerState{securityParam: testSecurityParam}
-	cm.SetLedger(mockLedger)
+	if err := cm.SetLedger(mockLedger); err != nil {
+		t.Fatalf("SetLedger: %v", err)
+	}
 
 	// Get primary chain
 	c := cm.PrimaryChain()
@@ -284,7 +286,9 @@ func TestRollbackBeyondSecurityParam(t *testing.T) {
 	// For this test, we use a smaller value to avoid loading too many blocks
 	const testSecurityParam = 50
 	mockLedger := &mockLedgerState{securityParam: testSecurityParam}
-	cm.SetLedger(mockLedger)
+	if err := cm.SetLedger(mockLedger); err != nil {
+		t.Fatalf("SetLedger: %v", err)
+	}
 
 	// Get primary chain
 	c := cm.PrimaryChain()
@@ -415,7 +419,9 @@ func TestRollbackStateRestoration(t *testing.T) {
 	// (roughly half of numBlocks) stays within the allowed depth.
 	const testSecurityParam = 100
 	mockLedger := &mockLedgerState{securityParam: testSecurityParam}
-	cm.SetLedger(mockLedger)
+	if err := cm.SetLedger(mockLedger); err != nil {
+		t.Fatalf("SetLedger: %v", err)
+	}
 
 	// Get primary chain
 	c := cm.PrimaryChain()
@@ -619,7 +625,9 @@ func TestRollbackToOrigin(t *testing.T) {
 
 	// Set security parameter
 	mockLedger := &mockLedgerState{securityParam: 100}
-	cm.SetLedger(mockLedger)
+	if err := cm.SetLedger(mockLedger); err != nil {
+		t.Fatalf("SetLedger: %v", err)
+	}
 
 	// Get primary chain
 	c := cm.PrimaryChain()
@@ -717,7 +725,9 @@ func TestChainIteratorAfterRollback(t *testing.T) {
 
 	// Set security parameter
 	mockLedger := &mockLedgerState{securityParam: 50}
-	cm.SetLedger(mockLedger)
+	if err := cm.SetLedger(mockLedger); err != nil {
+		t.Fatalf("SetLedger: %v", err)
+	}
 
 	// Get primary chain
 	c := cm.PrimaryChain()

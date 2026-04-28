@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"slices"
 	"sync"
 	"time"
@@ -177,9 +178,7 @@ func (o *utxoOverlay) rebuildAggregates() {
 		for _, key := range at.consumed {
 			o.consumed[key] = struct{}{}
 		}
-		for key, utxo := range at.created {
-			o.created[key] = utxo
-		}
+		maps.Copy(o.created, at.created)
 	}
 }
 
@@ -288,9 +287,7 @@ func (o *utxoOverlay) simulateRemoveBatch(
 		for _, key := range at.consumed {
 			consumed[key] = struct{}{}
 		}
-		for key, utxo := range at.created {
-			created[key] = utxo
-		}
+		maps.Copy(created, at.created)
 	}
 	return consumed, created
 }

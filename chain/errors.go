@@ -19,14 +19,26 @@ import (
 	"fmt"
 )
 
-// DefaultMaxQueuedHeaders is the fallback header queue limit when the
-// security parameter is not yet available (e.g. before ledger is wired).
+// DefaultMaxQueuedHeaders is the minimum header queue capacity (floor).
+// When the ledger security parameter K is configured, the limit is
+// max(2*K, DefaultMaxQueuedHeaders).
 const DefaultMaxQueuedHeaders = 10_000
 
 var (
 	ErrIntersectNotFound            = errors.New("chain intersect not found")
 	ErrRollbackBeyondEphemeralChain = errors.New(
 		"cannot rollback ephemeral chain beyond memory buffer",
+	)
+	// ErrInvalidSecurityParam is returned by ChainManager.SetLedger when the
+	// ledger reports a non-positive Ouroboros security parameter K.
+	ErrInvalidSecurityParam = errors.New(
+		"ledger security parameter K must be positive",
+	)
+	// ErrSecurityParamNotConfigured is returned when an operation requires K
+	// but ChainManager.SetLedger has not been called successfully.
+	ErrSecurityParamNotConfigured = errors.New(
+		"chain manager security parameter K is not configured; " +
+			"call SetLedger with a ledger that returns a positive SecurityParam()",
 	)
 	ErrRollbackExceedsSecurityParam = errors.New(
 		"rollback depth exceeds security parameter K",

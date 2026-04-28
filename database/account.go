@@ -20,6 +20,66 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 )
 
+// CreateAccount inserts an Account row directly. See the MetadataStore
+// interface for the difference between this and ImportAccount. When txn
+// is nil a write transaction is opened, committed on success and rolled
+// back on error via Txn.Do; pass an existing write txn to participate
+// in a wider unit of work.
+func (d *Database) CreateAccount(txn *Txn, account *models.Account) error {
+	if txn != nil {
+		return d.metadata.CreateAccount(txn.Metadata(), account)
+	}
+	return d.MetadataTxn(true).Do(func(t *Txn) error {
+		return d.metadata.CreateAccount(t.Metadata(), account)
+	})
+}
+
+// ClearDanglingDRepDelegations applies the cardano-ledger Conway HARDFORK
+// STS rule for protocol major version 10 (Plomin, mainnet January 2025): any
+// account with a credential-backed DRep delegation (DrepType 0 or 1) whose
+// target DRep credential is not currently registered as an active DRep has
+// its delegation cleared. Account.AddedSlot is updated to atSlot so the
+// rewritten row is excluded from a rollback restore targeting any slot
+// before atSlot (the restore filters on `added_slot <= targetSlot` and picks
+// up the prior certificate history instead). Pseudo-DRep delegations
+// (AlwaysAbstain, AlwaysNoConfidence) are preserved. Returns the number of
+// accounts updated.
+//
+// See cardano-ledger Conway/Rules/HardFork.hs (updateDRepDelegations).
+func (d *Database) ClearDanglingDRepDelegations(
+	atSlot uint64,
+	txn *Txn,
+) (int, error) {
+	owned := false
+	if txn == nil {
+		txn = d.MetadataTxn(true)
+		owned = true
+		defer func() {
+			if owned {
+				txn.Rollback() //nolint:errcheck
+			}
+		}()
+	}
+	n, err := d.metadata.ClearDanglingDRepDelegations(
+		atSlot,
+		txn.Metadata(),
+	)
+	if err != nil {
+		return 0, fmt.Errorf(
+			"clear dangling drep delegations at slot %d: %w",
+			atSlot,
+			err,
+		)
+	}
+	if owned {
+		if err := txn.Commit(); err != nil {
+			return 0, fmt.Errorf("commit transaction: %w", err)
+		}
+		owned = false
+	}
+	return n, nil
+}
+
 // RestoreAccountStateAtSlot reverts account delegation state to the given
 // slot. For accounts modified after the slot, this restores their Pool and
 // Drep delegations to the state they had at the given slot, or deletes them
@@ -79,4 +139,77 @@ func (d *Database) GetAccount(
 		return nil, models.ErrAccountNotFound
 	}
 	return account, nil
+}
+
+// AddAccountReward credits the reward balance for a registered account.
+func (d *Database) AddAccountReward(
+	stakeKey []byte,
+	amount uint64,
+	slot uint64,
+	txn *Txn,
+) error {
+	if amount == 0 {
+		return nil
+	}
+	owned := false
+	if txn == nil {
+		txn = d.MetadataTxn(true)
+		owned = true
+		defer func() {
+			if owned {
+				txn.Rollback() //nolint:errcheck
+			}
+		}()
+	}
+	if err := d.metadata.AddAccountReward(
+		stakeKey,
+		amount,
+		slot,
+		txn.Metadata(),
+	); err != nil {
+		return fmt.Errorf("failed to add account reward: %w", err)
+	}
+	if owned {
+		if err := txn.Commit(); err != nil {
+			return fmt.Errorf("commit transaction: %w", err)
+		}
+		owned = false
+	}
+	return nil
+}
+
+// DeleteAccountRewardsAfterSlot reverts reward-account credits recorded after
+// the given slot. Used during chain rollback for governance deposit refunds
+// and treasury withdrawals.
+func (d *Database) DeleteAccountRewardsAfterSlot(
+	slot uint64,
+	txn *Txn,
+) error {
+	owned := false
+	if txn == nil {
+		txn = d.MetadataTxn(true)
+		owned = true
+		defer func() {
+			if owned {
+				txn.Rollback() //nolint:errcheck
+			}
+		}()
+	}
+	if err := d.metadata.DeleteAccountRewardsAfterSlot(
+		slot,
+		txn.Metadata(),
+	); err != nil {
+		return fmt.Errorf(
+			"failed to delete account reward deltas after slot %d: %w",
+			slot,
+			err,
+		)
+	}
+	if owned {
+		if err := txn.Commit(); err != nil {
+			return fmt.Errorf("commit transaction: %w", err)
+		}
+		owned = false
+	}
+	return nil
 }

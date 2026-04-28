@@ -17,6 +17,7 @@ package models
 // MigrateModels contains a list of model objects that should have DB migrations applied
 var MigrateModels = []any{
 	&Account{},
+	&AccountRewardDelta{},
 	&AddressTransaction{},
 	&Asset{},
 	&AuthCommitteeHot{},
@@ -24,6 +25,7 @@ var MigrateModels = []any{
 	&BlockNonce{},
 	&Certificate{},
 	&CommitteeMember{},
+	&CommitteeQuorum{},
 	&Constitution{},
 	&Datum{},
 	&Deregistration{},

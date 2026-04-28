@@ -202,6 +202,16 @@ func (p *PeerGovernor) createOutboundConnection(peer *Peer) {
 			)
 			return
 		}
+		if currentPeer := p.peers[peerIdx]; p.inboundSatisfiesTopologyValencyLocked(currentPeer) {
+			p.mu.Unlock()
+			p.config.Logger.Info(
+				"outbound: inbound reusable topology connections already satisfy valency, suppressing outbound attempts",
+				"address", peer.Address,
+				"group", currentPeer.GroupID,
+				"valency", currentPeer.Valency,
+			)
+			return
+		}
 		// Only a client-capable connection can replace the outbound dial.
 		// This matches ouroboros-network's duplex-connection reuse: an
 		// existing inbound responder-only connection is not enough to
@@ -464,27 +474,36 @@ func (p *PeerGovernor) handleInboundConnectionEvent(evt event.Event) {
 		return
 	}
 	address := e.RemoteAddr.String()
-	// Resolve address before acquiring lock to avoid blocking DNS
-	normalized := p.resolveAddress(address)
+	// Key on the connmanager's canonical transport identity so inbound
+	// peer entries share a key space with HasInboundPeerAddress and
+	// inboundPeerAddrs. Never DNS-resolve the inbound remote: the
+	// 4-tuple is an IP:port and calling resolveAddress would diverge
+	// from the connmanager's non-DNS normalization. When an event is
+	// synthesized in tests without a populated NormalizedRemoteAddr,
+	// fall back to NormalizePeerAddr to preserve the same contract.
+	normalized := e.NormalizedRemoteAddr
+	if normalized == "" {
+		normalized = connmanager.NormalizePeerAddr(address)
+	}
+	now := time.Now()
 
 	var selectionEvents []pendingEvent
 	p.mu.Lock()
-	peerIdx := -1
-	// Check if peer already exists (possibly as inbound)
-	for i, peer := range p.peers {
-		if peer == nil {
-			continue
-		}
-		// Match by exact address or normalized address
-		if peer.Address == address || peer.NormalizedAddress == normalized {
-			peerIdx = i
-			break
-		}
+	if p.isDeniedLocked(normalized) {
+		p.recordInboundLifecycle("denied")
+		p.config.Logger.Info(
+			"denied inbound peer during cooldown",
+			"address", address,
+		)
+		p.mu.Unlock()
+		return
 	}
+	peerIdx, topologyGroupID := p.resolveInboundIdentity(address, normalized)
 	var tmpPeer *Peer
 	if peerIdx == -1 {
 		// Enforce hard cap on peer list size for inbound peers
 		if p.isAtPeerCapLocked() {
+			p.recordInboundLifecycle("rejected")
 			p.config.Logger.Debug(
 				"rejecting inbound peer: peer list at capacity",
 				"address", address,
@@ -500,30 +519,57 @@ func (p *PeerGovernor) handleInboundConnectionEvent(evt event.Event) {
 			Source:            PeerSourceInboundConn,
 			State:             PeerStateCold,
 			EMAAlpha:          p.config.EMAAlpha,
-			FirstSeen:         time.Now(),
+			FirstSeen:         now,
 		}
 		// Add inbound peer
 		p.peers = append(
 			p.peers,
 			tmpPeer,
 		)
+		p.recordInboundLifecycle("accepted")
 	} else {
 		tmpPeer = p.peers[peerIdx]
-	}
-	if tmpPeer == nil {
-		p.mu.Unlock()
-		return
+		if tmpPeer == nil {
+			p.mu.Unlock()
+			return
+		}
+		p.recordInboundLifecycle("accepted")
+		// Record the topology identity once on first rule-2 match and
+		// keep it across subsequent reconnects. Rule-1 matches yield
+		// topologyGroupID == "" and must not clear a prior match.
+		if topologyGroupID != "" && tmpPeer.InboundTopologyMatch == "" {
+			tmpPeer.InboundTopologyMatch = topologyGroupID
+		}
 	}
 	oldSource := tmpPeer.Source
 	oldConn := clonePeerConnection(tmpPeer.Connection)
+	hadClientConnection := tmpPeer.hasClientConnection()
+	// Accept an event-embedded duplex=true hint as a provisional upgrade;
+	// do not clear a previously known true value on best-effort false.
+	// The connmanager lookup below is authoritative when present.
+	if e.IsDuplex {
+		tmpPeer.InboundDuplex = true
+	}
+	tmpPeer.InboundConnectedAt = now
 	if p.config.ConnManager != nil {
 		conn := p.config.ConnManager.GetConnectionById(e.ConnectionId)
 		if conn != nil {
-			tmpPeer.setConnection(conn, false)
-			if tmpPeer.Connection != nil {
-				tmpPeer.Sharable = tmpPeer.Connection.VersionData.PeerSharing()
-				tmpPeer.State = PeerStateWarm
+			inboundPeerConn := &Peer{}
+			inboundPeerConn.setConnection(conn, false)
+			inboundIsClient := inboundPeerConn.hasClientConnection()
+			if !hadClientConnection || inboundIsClient {
+				// Preserve duplex-reuse semantics: a responder-only inbound
+				// must not replace an authoritative client-capable connection.
+				tmpPeer.setConnection(conn, false)
+				if tmpPeer.Connection != nil {
+					tmpPeer.Sharable = tmpPeer.Connection.VersionData.PeerSharing()
+					tmpPeer.State = PeerStateWarm
+					p.recordInboundLifecycle("warmed")
+				}
 			}
+			// setConnection derives IsClient from live handshake data; when
+			// available, treat it as authoritative for inbound duplex metadata.
+			tmpPeer.InboundDuplex = inboundIsClient
 		}
 	}
 	// Reset outbound backoff when an inbound connection from a
@@ -541,6 +587,9 @@ func (p *PeerGovernor) handleInboundConnectionEvent(evt event.Event) {
 		oldConn,
 		tmpPeer,
 	)
+	if p.metrics != nil {
+		p.metrics.inboundArrivalsTotal.Inc()
+	}
 	p.updatePeerMetrics()
 	p.mu.Unlock()
 
@@ -584,6 +633,28 @@ func (p *PeerGovernor) handleConnectionClosedEvent(evt event.Event) {
 		peer := p.peers[peerIdx]
 		oldSource := peer.Source
 		oldConn := clonePeerConnection(peer.Connection)
+		connClosedAt := time.Now()
+		if peer.Source == PeerSourceInboundConn {
+			connDur := time.Duration(0)
+			if !peer.InboundConnectedAt.IsZero() {
+				connDur = connClosedAt.Sub(peer.InboundConnectedAt)
+			}
+			peer.LastInboundSessionDuration = connDur
+			// Reset burst when reconnects are no longer clustered inside the
+			// inbound cooldown window.
+			if !peer.LastInboundDisconnect.IsZero() &&
+				connClosedAt.Sub(peer.LastInboundDisconnect) >= p.config.InboundCooldown {
+				peer.InboundShortLivedCount = 0
+			}
+			if !peer.InboundConnectedAt.IsZero() &&
+				connDur < minStableConnectionDuration {
+				peer.InboundShortLivedCount++
+			} else if !peer.InboundConnectedAt.IsZero() {
+				peer.InboundShortLivedCount = 0
+			}
+			peer.LastInboundDisconnect = connClosedAt
+			peer.InboundConnectedAt = time.Time{}
+		}
 		peer.Connection = nil
 		peer.State = PeerStateCold
 		selectionEvents = p.appendChainSelectionEventsLocked(
@@ -593,6 +664,9 @@ func (p *PeerGovernor) handleConnectionClosedEvent(evt event.Event) {
 			oldConn,
 			peer,
 		)
+		if peer.Source != PeerSourceInboundConn {
+			peer.ConnectedAt = time.Time{}
+		}
 		p.updatePeerMetrics()
 		// Only reconnect for outbound peers that are not on the deny list
 		if peer.Source != PeerSourceInboundConn &&

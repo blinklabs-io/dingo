@@ -803,9 +803,7 @@ func TestMempool_ConcurrentAddRemove(t *testing.T) {
 
 	// Start remover goroutines
 	for range numRemovers {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for range opsPerGoroutine {
 				select {
 				case hash := <-addedHashes:
@@ -814,7 +812,7 @@ func TestMempool_ConcurrentAddRemove(t *testing.T) {
 					// No hash available, skip
 				}
 			}
-		}()
+		})
 	}
 
 	// Wait for all operations to complete
@@ -840,9 +838,7 @@ func TestMempool_ConcurrentConsumerOperations(t *testing.T) {
 	done := make(chan struct{})
 
 	// Goroutine adding transactions
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		for i := 0; ; i++ {
 			select {
 			case <-done:
@@ -860,12 +856,10 @@ func TestMempool_ConcurrentConsumerOperations(t *testing.T) {
 				time.Sleep(time.Millisecond)
 			}
 		}
-	}()
+	})
 
 	// Goroutine removing transactions
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		removeIdx := 0
 		for {
 			select {
@@ -880,12 +874,10 @@ func TestMempool_ConcurrentConsumerOperations(t *testing.T) {
 				time.Sleep(2 * time.Millisecond)
 			}
 		}
-	}()
+	})
 
 	// Goroutine creating consumers
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		for i := 0; ; i++ {
 			select {
 			case <-done:
@@ -902,14 +894,12 @@ func TestMempool_ConcurrentConsumerOperations(t *testing.T) {
 				time.Sleep(5 * time.Millisecond)
 			}
 		}
-	}()
+	})
 
 	// Goroutine consuming transactions
 	connId := newTestConnectionId(0)
 	consumer := m.AddConsumer(connId)
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		for {
 			select {
 			case <-done:
@@ -919,7 +909,7 @@ func TestMempool_ConcurrentConsumerOperations(t *testing.T) {
 				time.Sleep(time.Millisecond)
 			}
 		}
-	}()
+	})
 
 	// Run for a short duration
 	time.Sleep(200 * time.Millisecond)
@@ -979,9 +969,7 @@ func TestMempool_ConcurrentNextTx_MultipleConsumers(t *testing.T) {
 	}
 
 	// Adder goroutine
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		for i := 0; ; i++ {
 			select {
 			case <-done:
@@ -999,12 +987,10 @@ func TestMempool_ConcurrentNextTx_MultipleConsumers(t *testing.T) {
 				time.Sleep(time.Millisecond)
 			}
 		}
-	}()
+	})
 
 	// Remover goroutine
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		for i := 0; ; i++ {
 			select {
 			case <-done:
@@ -1014,7 +1000,7 @@ func TestMempool_ConcurrentNextTx_MultipleConsumers(t *testing.T) {
 				time.Sleep(time.Millisecond * 2)
 			}
 		}
-	}()
+	})
 
 	// Run for short duration
 	time.Sleep(300 * time.Millisecond)
@@ -2179,7 +2165,10 @@ func TestMempool_TTL_NonExpiredTransactionsRetained(t *testing.T) {
 }
 
 func TestMempool_TTL_MixedExpiryRetainsNonExpired(t *testing.T) {
-	m := newTestMempoolWithTTL(t, 50*time.Millisecond, 20*time.Millisecond)
+	// TTL is deliberately long relative to the test window so fresh
+	// txs can't age past it before Eventually observes len==2, even
+	// under scheduler jitter on slow CI runners.
+	m := newTestMempoolWithTTL(t, 5*time.Second, 20*time.Millisecond)
 	defer m.Stop(context.Background())
 
 	// Add a mix of expired and fresh transactions
@@ -2191,7 +2180,7 @@ func TestMempool_TTL_MixedExpiryRetainsNonExpired(t *testing.T) {
 			Hash:     fmt.Sprintf("old-tx-%d", i),
 			Cbor:     fmt.Appendf(nil, "old-cbor-%d", i),
 			Type:     uint(conway.EraIdConway),
-			LastSeen: time.Now().Add(-200 * time.Millisecond),
+			LastSeen: time.Now().Add(-10 * time.Second),
 		}
 		m.transactions = append(m.transactions, tx)
 		m.txByHash[tx.Hash] = tx
@@ -2321,7 +2310,10 @@ func TestMempool_TTL_ExpiredMetricUpdated(t *testing.T) {
 }
 
 func TestMempool_TTL_ConsumerIndexAdjustedOnExpiry(t *testing.T) {
-	m := newTestMempoolWithTTL(t, 50*time.Millisecond, 20*time.Millisecond)
+	// TTL is deliberately long relative to the test window so fresh
+	// txs can't age past it before Eventually observes len==3, even
+	// under scheduler jitter on slow CI runners.
+	m := newTestMempoolWithTTL(t, 5*time.Second, 20*time.Millisecond)
 	defer m.Stop(context.Background())
 
 	// Add a mix of expired and fresh transactions
@@ -2333,7 +2325,7 @@ func TestMempool_TTL_ConsumerIndexAdjustedOnExpiry(t *testing.T) {
 			Hash:     fmt.Sprintf("expired-%d", i),
 			Cbor:     fmt.Appendf(nil, "expired-cbor-%d", i),
 			Type:     uint(conway.EraIdConway),
-			LastSeen: time.Now().Add(-200 * time.Millisecond),
+			LastSeen: time.Now().Add(-10 * time.Second),
 		}
 		m.transactions = append(m.transactions, tx)
 		m.txByHash[tx.Hash] = tx
@@ -2519,9 +2511,7 @@ func TestMempool_TTL_ConcurrentExpiryAndAddition(t *testing.T) {
 	done := make(chan struct{})
 
 	// Goroutine continuously adding transactions
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		for i := 0; ; i++ {
 			select {
 			case <-done:
@@ -2544,14 +2534,12 @@ func TestMempool_TTL_ConcurrentExpiryAndAddition(t *testing.T) {
 				time.Sleep(5 * time.Millisecond)
 			}
 		}
-	}()
+	})
 
 	// Goroutine reading transactions via consumer
 	connId := newTestConnectionId(0)
 	consumer := m.AddConsumer(connId)
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		for {
 			select {
 			case <-done:
@@ -2561,7 +2549,7 @@ func TestMempool_TTL_ConcurrentExpiryAndAddition(t *testing.T) {
 				time.Sleep(2 * time.Millisecond)
 			}
 		}
-	}()
+	})
 
 	// Let it run with concurrent adds, reads, and expiry
 	time.Sleep(200 * time.Millisecond)
@@ -2729,9 +2717,7 @@ func TestMempool_MEM04_ConcurrentAccessDuringRevalidation(
 	var readsCompleted atomic.Int32
 
 	// Reader goroutine: continuously reads mempool
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		for {
 			select {
 			case <-done:
@@ -2742,12 +2728,10 @@ func TestMempool_MEM04_ConcurrentAccessDuringRevalidation(
 				readsCompleted.Add(1)
 			}
 		}
-	}()
+	})
 
 	// Writer goroutine: continuously adds/removes
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		for i := 0; ; i++ {
 			select {
 			case <-done:
@@ -2766,7 +2750,7 @@ func TestMempool_MEM04_ConcurrentAccessDuringRevalidation(
 				time.Sleep(time.Millisecond)
 			}
 		}
-	}()
+	})
 
 	// Trigger chain update events to cause re-validation
 	for range 5 {

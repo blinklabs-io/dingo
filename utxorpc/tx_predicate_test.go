@@ -315,7 +315,7 @@ func TestWatchHandlers_nilProtobufPredicateSkipsEval(t *testing.T) {
 
 func TestEvalTxPredicate_MaxDepthExceeded(t *testing.T) {
 	pred := matchSubmit(&cardano.TxPattern{})
-	for i := 0; i < maxTxPredicateDepth; i++ {
+	for range maxTxPredicateDepth {
 		pred = &submit.TxPredicate{
 			Not: []*submit.TxPredicate{pred},
 		}

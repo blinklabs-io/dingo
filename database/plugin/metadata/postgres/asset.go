@@ -48,6 +48,35 @@ func (d *MetadataStorePostgres) GetAssetByPolicyAndName(
 	return asset, nil
 }
 
+// GetAssetQuantityByPolicyAndName returns the total live quantity for an asset
+// across all matching UTxOs.
+func (d *MetadataStorePostgres) GetAssetQuantityByPolicyAndName(
+	policyId lcommon.Blake2b224,
+	assetName []byte,
+	txn types.Txn,
+) (uint64, error) {
+	var total uint64
+
+	query, err := d.resolveDB(txn)
+	if err != nil {
+		return 0, err
+	}
+
+	result := query.Model(&models.Asset{}).
+		Joins("INNER JOIN utxo ON asset.utxo_id = utxo.id").
+		Select("COALESCE(SUM(asset.amount), 0)").
+		Where(
+			"asset.policy_id = ? AND asset.name = ? AND utxo.deleted_slot = 0",
+			policyId[:],
+			assetName,
+		).
+		Scan(&total)
+	if result.Error != nil {
+		return 0, result.Error
+	}
+	return total, nil
+}
+
 // GetAssetsByPolicy returns all assets for a given policy ID
 func (d *MetadataStorePostgres) GetAssetsByPolicy(
 	policyId lcommon.Blake2b224,

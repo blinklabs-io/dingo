@@ -823,7 +823,7 @@ func TestHandleEventChainsyncBlockHeaderScalesBatchWhenFarBehind(t *testing.T) {
 
 	prevHash := lcommon.NewBlake2b256(nil)
 	for i := 1; i <= 20; i++ {
-		headerHash := lcommon.NewBlake2b256([]byte(fmt.Sprintf("hdr-%d", i)))
+		headerHash := lcommon.NewBlake2b256(fmt.Appendf(nil, "hdr-%d", i))
 		err := ls.handleEventChainsyncBlockHeader(ChainsyncEvent{
 			ConnectionId: connId,
 			Point:        ocommon.NewPoint(uint64(i), headerHash.Bytes()),
@@ -1177,7 +1177,7 @@ func TestHandleEventChainsyncBlockHeaderStartsBlockfetchForSmallBlockGap(
 
 	prevHash := lcommon.NewBlake2b256(nil)
 	for i := range 5 {
-		hash := lcommon.NewBlake2b256([]byte(fmt.Sprintf("hdr-%d", i)))
+		hash := lcommon.NewBlake2b256(fmt.Appendf(nil, "hdr-%d", i))
 		slot := uint64(1064 + i*4)
 		err := ls.handleEventChainsyncBlockHeader(ChainsyncEvent{
 			ConnectionId: connId,
@@ -1241,7 +1241,7 @@ func TestHandleEventChainsyncBlockHeaderStartsBlockfetchForSparseBlockGap(
 	var prevHash lcommon.Blake2b256
 	for i, slot := range headerSlots {
 		hash := lcommon.NewBlake2b256(
-			[]byte(fmt.Sprintf("sparse-hdr-%d", i)),
+			fmt.Appendf(nil, "sparse-hdr-%d", i),
 		)
 		err := ls.handleEventChainsyncBlockHeader(ChainsyncEvent{
 			ConnectionId: connId,
@@ -1277,7 +1277,7 @@ func TestHandleEventChainsyncAwaitReplyStartsBlockfetchForActiveConnection(
 	var prevHash lcommon.Blake2b256
 	for i, slot := range []uint64{1001, 1002, 1003, 1004} {
 		hash := lcommon.NewBlake2b256(
-			[]byte(fmt.Sprintf("await-reply-hdr-%d", i)),
+			fmt.Appendf(nil, "await-reply-hdr-%d", i),
 		)
 		err := testChain.AddBlockHeader(mockHeader{
 			hash:        hash,
