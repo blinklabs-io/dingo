@@ -184,3 +184,31 @@ func (d *MetadataStorePostgres) DeleteBlockNoncesBeforeSlotWithoutCheckpoints(
 
 	return result.Error
 }
+
+// DeleteBlockNoncesAfterPoint deletes block_nonce rows that are no longer on
+// the active chain after a rollback. The rollback point's exact row is kept;
+// same-slot rows with a different hash are removed.
+func (d *MetadataStorePostgres) DeleteBlockNoncesAfterPoint(
+	point ocommon.Point,
+	txn types.Txn,
+) error {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return err
+	}
+	if len(point.Hash) == 0 {
+		return db.
+			Where("slot >= ?", point.Slot).
+			Delete(&models.BlockNonce{}).
+			Error
+	}
+	return db.
+		Where(
+			"slot > ? OR (slot = ? AND hash <> ?)",
+			point.Slot,
+			point.Slot,
+			point.Hash,
+		).
+		Delete(&models.BlockNonce{}).
+		Error
+}

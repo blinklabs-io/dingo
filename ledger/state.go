@@ -1462,6 +1462,19 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 				err,
 			)
 		}
+		// Delete block nonce rows from the abandoned fork. Epoch
+		// nonces are derived from slot-range block_nonce lookups, so
+		// same-slot competitors and later fork rows must not survive
+		// rollback.
+		if err := ls.db.DeleteBlockNoncesAfterPoint(
+			point,
+			txn,
+		); err != nil {
+			return fmt.Errorf(
+				"delete block nonces after rollback: %w",
+				err,
+			)
+		}
 		// Delete rolled-back network state records
 		if err := ls.db.DeleteNetworkStateAfterSlot(
 			point.Slot,
@@ -3632,6 +3645,9 @@ func (ls *LedgerState) loadTip() error {
 	tmpTip, err := ls.db.GetTip(nil)
 	if err != nil {
 		return err
+	}
+	if err := ls.db.DeleteBlockNoncesAfterPoint(tmpTip.Point, nil); err != nil {
+		return fmt.Errorf("prune block nonces beyond tip: %w", err)
 	}
 	// Load tip block nonce before acquiring lock
 	var tipNonce []byte
