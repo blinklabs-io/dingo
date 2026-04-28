@@ -185,6 +185,16 @@ func ProcessEpoch(
 	}
 
 	// --- RATIFICATION -------------------------------------------------
+	//
+	// The inputs assembled below (TallyContext, activeDRepCount,
+	// rootsByPurpose, committeeState, ccQuorum, conwayPParams,
+	// majorVersion, ccInNoConfidence) feed ShouldRatify. A parallel
+	// build for HardForkInitiation specifically exists in
+	// EvaluateRatifiableHardForkInitiation (governance/stability.go),
+	// which runs the same check mid-epoch to surface upcoming
+	// transitions before the boundary tick fires. Adding a new
+	// ratification input here without updating the mid-epoch path
+	// will silently make the two answers diverge — keep them in sync.
 	tallyCtx := &TallyContext{
 		DB:           in.DB,
 		Txn:          in.Txn,
@@ -385,6 +395,10 @@ func stakeEpochFor(newEpoch uint64) uint64 {
 // countActiveDReps returns the number of DReps eligible to vote in the
 // current tick. AlwaysAbstain / AlwaysNoConfidence virtual DReps are
 // not included.
+//
+// countActiveDRepsAtEpoch in stability.go is the parallel for the
+// mid-epoch ratifiability check — it takes plain inputs instead of
+// EpochInput. Behaviour changes here must mirror there.
 func countActiveDReps(in *EpochInput) (int, error) {
 	dreps, err := in.DB.GetActiveDreps(in.Txn)
 	if err != nil {

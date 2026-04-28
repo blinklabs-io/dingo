@@ -41,6 +41,7 @@ import (
 	"github.com/blinklabs-io/dingo/event"
 	dingoversion "github.com/blinklabs-io/dingo/internal/version"
 	"github.com/blinklabs-io/dingo/ledger/eras"
+	"github.com/blinklabs-io/dingo/ledger/governance"
 	"github.com/blinklabs-io/dingo/ledger/hardfork"
 	"github.com/blinklabs-io/dingo/mempool"
 	ouroboros "github.com/blinklabs-io/gouroboros"
@@ -689,6 +690,7 @@ func (ls *LedgerState) Start(ctx context.Context) error {
 	// transition epoch, matching the Haskell HFC semantics.
 	ls.evaluateTriggerAtEpoch()
 	ls.evaluateTransitionImpossible()
+	ls.evaluateHardForkInitiationStability()
 	if err := ls.reconcilePrimaryChainTipWithLedgerTip(); err != nil {
 		return fmt.Errorf("failed to reconcile primary chain tip: %w", err)
 	}
@@ -1681,7 +1683,23 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 	ls.currentTip = newTip
 	// A rollback invalidates any pending TransitionKnown because the
 	// epoch-rollover block that set it may no longer be on the chain.
+	// After the reset, re-derive what the rolled-back state implies:
+	//
+	//   - reconstructTransitionInfo restores Known(currentEpoch) when
+	//     the post-rollback pparams already carry a major-version
+	//     bump that the rollback didn't undo (the rolled-back chain
+	//     still has the bump committed at an earlier point).
+	//   - evaluateHardForkInitiationStability restores Known(N+1) if
+	//     a HardForkInitiation governance action survived the
+	//     rollback and is still ratifiable past the voting deadline.
+	//
+	// Without these re-derivations a client querying era history
+	// between rollback completion and the next block-apply would see
+	// a transient Unknown that doesn't reflect the actual chain
+	// state.
 	ls.transitionInfo = hardfork.NewTransitionUnknown()
+	ls.reconstructTransitionInfo()
+	ls.evaluateHardForkInitiationStability()
 	// If rolling back behind the Mithril trust boundary, clear it.
 	// A rollback inside the gap means replacement blocks on the new
 	// fork were NOT processed by SetGapBlockTransaction and must go
@@ -2980,6 +2998,7 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 				// epoch-end slot instead of a stale safeZone cap.
 				ls.evaluateTriggerAtEpoch()
 				ls.evaluateTransitionImpossible()
+				ls.evaluateHardForkInitiationStability()
 				// Capture tip for logging while holding the lock
 				tipForLog = ls.currentTip
 				checker = ls.config.ForgedBlockChecker
@@ -3448,6 +3467,122 @@ func (ls *LedgerState) evaluateTransitionImpossible() {
 	if safeEndSlot >= epochEndSlot {
 		ls.transitionInfo = hardfork.NewTransitionImpossible()
 	}
+}
+
+// evaluateHardForkInitiationStability surfaces an upcoming era boundary
+// to clients while the current epoch is still being applied, by
+// checking whether any in-flight HardForkInitiation governance action
+// would be ratified if the boundary tick fired now.
+//
+// Why this is correct mid-epoch: governance votes stop being accepted
+// at slot epochEnd - 2*stabilityWindow (the voting deadline). After
+// that point the inputs to the ratification computation are frozen —
+// no new vote, registration, or pool change can flip the outcome — so
+// "would ratify now" equals "will ratify at the next boundary tick".
+// Before the deadline the answer is volatile and surfacing it would
+// give clients a stale view, so the function returns early.
+//
+// Priority order on a successful detection: TransitionKnown supersedes
+// both TransitionUnknown and TransitionImpossible because it carries
+// strictly more information (the exact target epoch). The function is
+// idempotent when transitionInfo is already TransitionKnown for the
+// same target.
+//
+// The DB-driven assembly is delegated to
+// governance.EvaluateRatifiableHardForkInitiation, which runs the same
+// tally + threshold check the boundary path would run.
+//
+// Performance: in steady state the function returns from one of two
+// short-circuits (transitionInfo already Known, or tip is pre-deadline)
+// before any database access, so per-block invocation cost is a few
+// pointer dereferences. The full DB-driven check fires only in the
+// post-voting-deadline window before the boundary, which on mainnet
+// is at most a few minutes per epoch and at most one HardForkInitiation
+// proposal at a time. If contention with concurrent readers becomes a
+// concern in that window, the assembly can be moved out of the
+// caller's lock-held section using the snapshot/apply pattern
+// rollback() uses for newPParams.
+//
+// Lock semantics: call under ls.Lock() at the per-block tip-update and
+// rollback sites (both already hold the write lock when invoking the
+// sibling evaluators). Safe to call without a lock during the
+// single-threaded startup path before the chainsync goroutine starts.
+func (ls *LedgerState) evaluateHardForkInitiationStability() {
+	if ls.currentEpoch.LengthInSlots == 0 {
+		return
+	}
+	// Defer to any TransitionKnown already set by a higher-priority
+	// source (TestXHardForkAtEpoch override or pparams-bump
+	// detection). Only promote from Unknown / Impossible, matching
+	// the pattern of the sibling evaluators on this code path. This
+	// also gives idempotency: once we've published the upcoming
+	// boundary, subsequent block-apply invocations short-circuit
+	// without a DB lookup.
+	if ls.transitionInfo.State == hardfork.TransitionKnown {
+		return
+	}
+	expectedTargetEpoch := ls.currentEpoch.EpochId + 1
+	epochEndSlot, addErr := checkedSlotAdd(
+		ls.currentEpoch.StartSlot,
+		uint64(ls.currentEpoch.LengthInSlots),
+	)
+	if addErr != nil {
+		return
+	}
+	stabilityWindow := ls.calculateStabilityWindowForEra(ls.currentEra.Id)
+	// votingDeadline = epochEndSlot - 2*stabilityWindow. Guard the
+	// subtraction; on a small synthetic epoch the deadline could land
+	// before the epoch start, in which case any tip in-epoch is
+	// post-deadline.
+	deadlineGap := 2 * stabilityWindow
+	var votingDeadline uint64
+	if epochEndSlot > deadlineGap {
+		votingDeadline = epochEndSlot - deadlineGap
+	}
+	if ls.currentTip.Point.Slot < votingDeadline {
+		return
+	}
+	conwayGenesis := ls.config.CardanoNodeConfig.ConwayGenesis()
+	result, err := governance.EvaluateRatifiableHardForkInitiation(
+		governance.StabilityCheckInputs{
+			DB:            ls.db,
+			Logger:        ls.config.Logger,
+			CurrentEpoch:  ls.currentEpoch.EpochId,
+			PParams:       ls.currentPParams,
+			ConwayGenesis: conwayGenesis,
+		},
+	)
+	if err != nil {
+		ls.config.Logger.Warn(
+			"hardfork-initiation stability check failed",
+			"error", err,
+			"component", "ledger",
+		)
+		return
+	}
+	if result == nil {
+		return
+	}
+	// A ratifiable HardForkInitiation is only an era transition if its
+	// target ProtocolVersion crosses an era boundary. An intra-era
+	// pparams bump (e.g. Plomin's pv9 → pv10, both Conway) ratifies
+	// through the same governance path but doesn't end the era;
+	// surfacing it as TransitionKnown would mislead clients into
+	// thinking the era ends at the next boundary. Filter using the
+	// same era-mapping rule the boundary-time IsHardForkTransition
+	// applies, so mid-epoch detection and boundary dispatch agree.
+	currentVer, err := GetProtocolVersion(ls.currentPParams)
+	if err != nil {
+		return
+	}
+	targetVer := ProtocolVersion{
+		Major: result.NewMajor,
+		Minor: result.NewMinor,
+	}
+	if !IsHardForkTransition(currentVer, targetVer) {
+		return
+	}
+	ls.transitionInfo = hardfork.NewTransitionKnown(expectedTargetEpoch)
 }
 
 // computePParams loads protocol parameters for the given epoch/era
