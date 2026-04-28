@@ -292,6 +292,11 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 				cfg.TargetNumberOfEstablishedPeers,
 				cfg.TargetNumberOfActivePeers,
 			),
+			dingo.WithGenesisBootstrap(cfg.GenesisBootstrap.Enabled),
+			dingo.WithGenesisWindowSlots(cfg.GenesisBootstrap.WindowSlots),
+			dingo.WithBootstrapPromotionMinDiversityGroups(
+				cfg.GenesisBootstrap.PromotionMinDiversityGroups,
+			),
 			dingo.WithActivePeersQuotas(
 				cfg.ActivePeersTopologyQuota,
 				cfg.ActivePeersGossipQuota,
@@ -300,6 +305,15 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 			dingo.WithMinHotPeers(cfg.MinHotPeers),
 			dingo.WithReconcileInterval(cfg.ReconcileInterval),
 			dingo.WithInactivityTimeout(cfg.InactivityTimeout),
+			dingo.WithInboundPeerGovernance(
+				cfg.InboundWarmTarget,
+				cfg.InboundHotQuota,
+				cfg.InboundMinTenure,
+				cfg.InboundHotScoreThreshold,
+				cfg.InboundPruneAfter,
+				cfg.InboundDuplexOnlyForHot,
+				cfg.InboundCooldown,
+			),
 			dingo.WithMaxConnectionsPerIP(cfg.MaxConnectionsPerIP),
 			dingo.WithMaxInboundConns(cfg.MaxInboundConns),
 			dingo.WithCacheConfig(

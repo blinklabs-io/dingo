@@ -15,7 +15,6 @@
 package chainselection
 
 import (
-	"context"
 	"fmt"
 	"math"
 	"net"
@@ -617,6 +616,54 @@ func TestChainSelectorPreservesEqualTipIncumbentAtSamePriority(t *testing.T) {
 	assert.Equal(t, connId2, *cs.GetBestPeer())
 }
 
+func TestChainSelectorDoesNotSwitchOnOneBlockObservedTipLead(t *testing.T) {
+	// Regression: when two peers track the same chain, the one that announces
+	// the next block header milliseconds sooner gains a 1-block ObservedTip
+	// (SelectionTip) lead. The old guard used Tip.BlockNumber (confirmed only)
+	// and missed this case, causing a switch per block near tip.
+	incumbentConn := newTestConnectionId(1)
+	challengerConn := newTestConnectionId(2)
+	cs := NewChainSelector(ChainSelectorConfig{
+		MinSwitchBlockDiff: 2,
+	})
+
+	confirmedTip := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 100, Hash: []byte("confirmed")},
+		BlockNumber: 50,
+	}
+
+	// Incumbent is established at the confirmed tip.
+	cs.UpdatePeerTip(incumbentConn, confirmedTip, nil)
+	require.NotNil(t, cs.GetBestPeer())
+	assert.Equal(t, incumbentConn, *cs.GetBestPeer())
+
+	// Challenger has the same confirmed Tip but has received one block header
+	// ahead via ObservedTip — simulating "announced header before incumbent did".
+	// This is done by calling updatePeerTipObserved directly.
+	oneAheadTip := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 101, Hash: []byte("one-ahead")},
+		BlockNumber: 51,
+	}
+	cs.mutex.Lock()
+	if pt, ok := cs.peerTips[challengerConn]; ok {
+		pt.UpdateTipWithObserved(confirmedTip, oneAheadTip, nil)
+	} else {
+		cs.mutex.Unlock()
+		// Add via normal path first, then update observed
+		cs.UpdatePeerTip(challengerConn, confirmedTip, nil)
+		cs.mutex.Lock()
+		if pt, ok := cs.peerTips[challengerConn]; ok {
+			pt.UpdateTipWithObserved(confirmedTip, oneAheadTip, nil)
+		}
+	}
+	cs.mutex.Unlock()
+
+	switched := cs.EvaluateAndSwitch()
+	assert.False(t, switched, "should not switch for a 1-block observed tip lead with MinSwitchBlockDiff=2")
+	require.NotNil(t, cs.GetBestPeer())
+	assert.Equal(t, incumbentConn, *cs.GetBestPeer())
+}
+
 func TestChainSelectorPreservesEqualTipIncumbentAtSamePriorityWithVRF(
 	t *testing.T,
 ) {
@@ -698,8 +745,7 @@ func TestChainSelectorSwitchesImmediatelyOnEligibilityEvent(t *testing.T) {
 		EventBus:           eventBus,
 		EvaluationInterval: time.Hour,
 	})
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	require.NoError(t, cs.Start(ctx))
 
 	incumbentConn := newTestConnectionId(1)
@@ -741,8 +787,7 @@ func TestChainSelectorDoesNotSwitchEqualTipIncumbentOnPriorityEvent(
 		EventBus:           eventBus,
 		EvaluationInterval: time.Hour,
 	})
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	require.NoError(t, cs.Start(ctx))
 
 	incumbentConn := newTestConnectionId(1)
@@ -1818,11 +1863,11 @@ func TestChainSelectorPeerEvictionAtCapacity(t *testing.T) {
 	// Fill to capacity with peers. Each peer gets a slightly higher slot
 	// to ensure different LastUpdated timestamps (they are added
 	// sequentially so time.Now() progresses).
-	for i := 0; i < maxPeers; i++ {
+	for i := range maxPeers {
 		tip := ochainsync.Tip{
 			Point: ocommon.Point{
 				Slot: uint64(100 + i),
-				Hash: []byte(fmt.Sprintf("tip%d", i)),
+				Hash: fmt.Appendf(nil, "tip%d", i),
 			},
 			BlockNumber: uint64(50 + i),
 		}
@@ -1905,11 +1950,11 @@ func TestChainSelectorUpdateExistingPeerDoesNotEvict(t *testing.T) {
 	}
 
 	// Fill to capacity
-	for i := 0; i < maxPeers; i++ {
+	for i := range maxPeers {
 		tip := ochainsync.Tip{
 			Point: ocommon.Point{
 				Slot: uint64(100 + i),
-				Hash: []byte(fmt.Sprintf("tip%d", i)),
+				Hash: fmt.Appendf(nil, "tip%d", i),
 			},
 			BlockNumber: uint64(50 + i),
 		}
@@ -1933,7 +1978,7 @@ func TestChainSelectorUpdateExistingPeerDoesNotEvict(t *testing.T) {
 	)
 
 	// All original peers should still be present
-	for i := 0; i < maxPeers; i++ {
+	for i := range maxPeers {
 		assert.NotNil(
 			t,
 			cs.GetPeerTip(connIds[i]),
@@ -1982,7 +2027,7 @@ func TestChainSelectorEvictionPreservesBestPeer(t *testing.T) {
 		tip := ochainsync.Tip{
 			Point: ocommon.Point{
 				Slot: uint64(100 + i),
-				Hash: []byte(fmt.Sprintf("tip%d", i)),
+				Hash: fmt.Appendf(nil, "tip%d", i),
 			},
 			BlockNumber: uint64(50 + i),
 		}
@@ -2056,11 +2101,11 @@ func TestChainSelectorEvictionEmitsPeerEvictedEvent(t *testing.T) {
 	}
 
 	// Fill to capacity
-	for i := 0; i < maxPeers; i++ {
+	for i := range maxPeers {
 		tip := ochainsync.Tip{
 			Point: ocommon.Point{
 				Slot: uint64(100 + i),
-				Hash: []byte(fmt.Sprintf("tip%d", i)),
+				Hash: fmt.Appendf(nil, "tip%d", i),
 			},
 			BlockNumber: uint64(50 + i),
 		}
@@ -2135,11 +2180,11 @@ func TestChainSelectorNormalOperationWithinLimit(t *testing.T) {
 	}
 
 	// Add fewer peers than the limit
-	for i := 0; i < expectedCount; i++ {
+	for i := range expectedCount {
 		tip := ochainsync.Tip{
 			Point: ocommon.Point{
 				Slot: uint64(100 + i),
-				Hash: []byte(fmt.Sprintf("tip%d", i)),
+				Hash: fmt.Appendf(nil, "tip%d", i),
 			},
 			BlockNumber: uint64(50 + i),
 		}
@@ -2154,7 +2199,7 @@ func TestChainSelectorNormalOperationWithinLimit(t *testing.T) {
 	)
 
 	// All peers should be present
-	for i := 0; i < expectedCount; i++ {
+	for i := range expectedCount {
 		assert.NotNil(
 			t,
 			cs.GetPeerTip(connIds[i]),

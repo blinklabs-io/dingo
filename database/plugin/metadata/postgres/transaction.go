@@ -100,6 +100,56 @@ func (d *MetadataStorePostgres) GetTransactionByHash(
 	return ret, nil
 }
 
+// GetTransactionSlotByHash returns the slot of the transaction with the
+// given hash without preloading any related rows. Returns (0, false, nil)
+// when no such transaction exists.
+func (d *MetadataStorePostgres) GetTransactionSlotByHash(
+	hash []byte,
+	txn types.Txn,
+) (uint64, bool, error) {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return 0, false, err
+	}
+	var row struct{ Slot uint64 }
+	result := db.Model(&models.Transaction{}).
+		Select("slot").
+		Where("hash = ?", hash).
+		Take(&row)
+	if result.Error != nil {
+		if errors.Is(result.Error, gorm.ErrRecordNotFound) {
+			return 0, false, nil
+		}
+		return 0, false, result.Error
+	}
+	return row.Slot, true, nil
+}
+
+// GetTransactionIDByHash returns the primary-key ID of the transaction
+// with the given hash without preloading any related rows. Returns
+// (0, false, nil) when no such transaction exists.
+func (d *MetadataStorePostgres) GetTransactionIDByHash(
+	hash []byte,
+	txn types.Txn,
+) (uint, bool, error) {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return 0, false, err
+	}
+	var row struct{ ID uint }
+	result := db.Model(&models.Transaction{}).
+		Select("id").
+		Where("hash = ?", hash).
+		Take(&row)
+	if result.Error != nil {
+		if errors.Is(result.Error, gorm.ErrRecordNotFound) {
+			return 0, false, nil
+		}
+		return 0, false, result.Error
+	}
+	return row.ID, true, nil
+}
+
 // GetTransactionsByHashes returns transactions for the provided hashes.
 func (d *MetadataStorePostgres) GetTransactionsByHashes(
 	hashes [][]byte,
@@ -483,6 +533,7 @@ func saveAccount(account *models.Account, db *gorm.DB) error {
 				[]string{
 					"pool",
 					"drep",
+					"drep_type",
 					"active",
 					"certificate_id",
 				},
@@ -1584,15 +1635,26 @@ func (d *MetadataStorePostgres) SetTransaction(
 					if err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
+					drepType, err := models.DrepTypeFromInt(c.Drep.Type)
+					if err != nil {
+						return fmt.Errorf("process certificate: %w", err)
+					}
+					var drepCredential []byte
+					if drepType != models.DrepTypeAlwaysAbstain &&
+						drepType != models.DrepTypeAlwaysNoConfidence {
+						drepCredential = c.Drep.Credential[:]
+					}
 
 					tmpAccount.Pool = c.PoolKeyHash[:]
-					tmpAccount.Drep = c.Drep.Credential[:]
+					tmpAccount.Drep = drepCredential
+					tmpAccount.DrepType = drepType
 					tmpAccount.AddedSlot = point.Slot
 
 					tmpItem := models.StakeVoteDelegation{
 						StakingKey:    stakeKey,
 						PoolKeyHash:   c.PoolKeyHash[:],
-						Drep:          c.Drep.Credential[:],
+						Drep:          drepCredential,
+						DrepType:      drepType,
 						AddedSlot:     point.Slot,
 						CertificateID: certIDMap[i],
 					}
@@ -1761,14 +1823,25 @@ func (d *MetadataStorePostgres) SetTransaction(
 					if err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
+					drepType, err := models.DrepTypeFromInt(c.Drep.Type)
+					if err != nil {
+						return fmt.Errorf("process certificate: %w", err)
+					}
+					var drepCredential []byte
+					if drepType != models.DrepTypeAlwaysAbstain &&
+						drepType != models.DrepTypeAlwaysNoConfidence {
+						drepCredential = c.Drep.Credential[:]
+					}
 
 					tmpAccount.Pool = c.PoolKeyHash[:]
-					tmpAccount.Drep = c.Drep.Credential[:]
+					tmpAccount.Drep = drepCredential
+					tmpAccount.DrepType = drepType
 
 					tmpReg := models.StakeVoteRegistrationDelegation{
 						StakingKey:    stakeKey,
 						PoolKeyHash:   c.PoolKeyHash[:],
-						Drep:          c.Drep.Credential[:],
+						Drep:          drepCredential,
+						DrepType:      drepType,
 						AddedSlot:     point.Slot,
 						DepositAmount: types.Uint64(deposit),
 						CertificateID: certIDMap[i],
@@ -1790,12 +1863,23 @@ func (d *MetadataStorePostgres) SetTransaction(
 					if err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
+					drepType, err := models.DrepTypeFromInt(c.Drep.Type)
+					if err != nil {
+						return fmt.Errorf("process certificate: %w", err)
+					}
+					var drepCredential []byte
+					if drepType != models.DrepTypeAlwaysAbstain &&
+						drepType != models.DrepTypeAlwaysNoConfidence {
+						drepCredential = c.Drep.Credential[:]
+					}
 
-					tmpAccount.Drep = c.Drep.Credential[:]
+					tmpAccount.Drep = drepCredential
+					tmpAccount.DrepType = drepType
 
 					tmpReg := models.VoteRegistrationDelegation{
 						StakingKey:    stakeKey,
-						Drep:          c.Drep.Credential[:],
+						Drep:          drepCredential,
+						DrepType:      drepType,
 						AddedSlot:     point.Slot,
 						DepositAmount: types.Uint64(deposit),
 						CertificateID: certIDMap[i],
@@ -1817,12 +1901,23 @@ func (d *MetadataStorePostgres) SetTransaction(
 					if err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
+					drepType, err := models.DrepTypeFromInt(c.Drep.Type)
+					if err != nil {
+						return fmt.Errorf("process certificate: %w", err)
+					}
+					var drepCredential []byte
+					if drepType != models.DrepTypeAlwaysAbstain &&
+						drepType != models.DrepTypeAlwaysNoConfidence {
+						drepCredential = c.Drep.Credential[:]
+					}
 
-					tmpAccount.Drep = c.Drep.Credential[:]
+					tmpAccount.Drep = drepCredential
+					tmpAccount.DrepType = drepType
 
 					tmpItem := models.VoteDelegation{
 						StakingKey:    stakeKey,
-						Drep:          c.Drep.Credential[:],
+						Drep:          drepCredential,
+						DrepType:      drepType,
 						AddedSlot:     point.Slot,
 						CertificateID: certIDMap[i],
 					}
@@ -1843,7 +1938,7 @@ func (d *MetadataStorePostgres) SetTransaction(
 
 					tmpAuth := models.AuthCommitteeHot{
 						ColdCredential: coldCredential,
-						HostCredential: hotCredential,
+						HotCredential:  hotCredential,
 						CertificateID:  certIDMap[i],
 						AddedSlot:      point.Slot,
 					}

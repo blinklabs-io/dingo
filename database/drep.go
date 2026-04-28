@@ -20,6 +20,20 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 )
 
+// CreateDrep inserts a Drep row directly. See the MetadataStore
+// interface for the difference between this and ImportDrep. When txn
+// is nil a write transaction is opened, committed on success and
+// rolled back on error via Txn.Do; pass an existing write txn to
+// participate in a wider unit of work.
+func (d *Database) CreateDrep(txn *Txn, drep *models.Drep) error {
+	if txn != nil {
+		return d.metadata.CreateDrep(txn.Metadata(), drep)
+	}
+	return d.MetadataTxn(true).Do(func(t *Txn) error {
+		return d.metadata.CreateDrep(t.Metadata(), drep)
+	})
+}
+
 // RestoreDrepStateAtSlot reverts DRep state to the given slot. DReps
 // registered only after the slot are deleted; remaining DReps have their
 // anchor and active status restored.
@@ -87,9 +101,50 @@ func (d *Database) GetActiveDreps(
 	return d.metadata.GetActiveDreps(txn.Metadata())
 }
 
+// InsertDrepIfAbsent inserts a minimal DRep row when no record exists
+// for the given credential. Existing rows are left untouched so real
+// registration metadata (added_slot, anchor_url, anchor_hash, active)
+// is never overwritten by the vote-replay recovery path.
+func (d *Database) InsertDrepIfAbsent(
+	cred []byte,
+	slot uint64,
+	url string,
+	hash []byte,
+	active bool,
+	txn *Txn,
+) error {
+	owned := false
+	if txn == nil {
+		txn = d.MetadataTxn(true)
+		owned = true
+		defer func() {
+			if owned {
+				txn.Rollback() //nolint:errcheck
+			}
+		}()
+	}
+	if err := d.metadata.InsertDrepIfAbsent(
+		cred,
+		slot,
+		url,
+		hash,
+		active,
+		txn.Metadata(),
+	); err != nil {
+		return fmt.Errorf("failed to insert DRep if absent: %w", err)
+	}
+	if owned {
+		if err := txn.Commit(); err != nil {
+			return fmt.Errorf("commit transaction: %w", err)
+		}
+		owned = false
+	}
+	return nil
+}
+
 // GetDRepVotingPower calculates the voting power for a DRep by summing
-// the stake of all accounts delegated to it. Uses the current live
-// UTxO set (deleted_slot = 0) for the calculation.
+// the current stake of all delegated accounts, approximated from live
+// UTxO balance plus reward-account balance.
 func (d *Database) GetDRepVotingPower(
 	drepCredential []byte,
 	txn *Txn,
@@ -102,6 +157,56 @@ func (d *Database) GetDRepVotingPower(
 		drepCredential,
 		txn.Metadata(),
 	)
+}
+
+// GetDRepVotingPowerBatch is the batch form of GetDRepVotingPower; see
+// the metadata-store interface for the contract.
+func (d *Database) GetDRepVotingPowerBatch(
+	drepCredentials [][]byte,
+	txn *Txn,
+) (map[string]uint64, error) {
+	if txn == nil {
+		txn = d.MetadataTxn(false)
+		defer txn.Release()
+	}
+	result, err := d.metadata.GetDRepVotingPowerBatch(
+		drepCredentials,
+		txn.Metadata(),
+	)
+	if err != nil {
+		return result, fmt.Errorf(
+			"Database.GetDRepVotingPowerBatch: failed to get "+
+				"voting power for %d credentials: %w",
+			len(drepCredentials),
+			err,
+		)
+	}
+	return result, nil
+}
+
+// GetDRepVotingPowerByType returns voting power grouped by DRep
+// delegation type.
+func (d *Database) GetDRepVotingPowerByType(
+	drepTypes []uint64,
+	txn *Txn,
+) (map[uint64]uint64, error) {
+	if txn == nil {
+		txn = d.MetadataTxn(false)
+		defer txn.Release()
+	}
+	result, err := d.metadata.GetDRepVotingPowerByType(
+		drepTypes,
+		txn.Metadata(),
+	)
+	if err != nil {
+		return result, fmt.Errorf(
+			"Database.GetDRepVotingPowerByType: failed to get "+
+				"voting power for types %v: %w",
+			drepTypes,
+			err,
+		)
+	}
+	return result, nil
 }
 
 // UpdateDRepActivity updates the DRep's last activity epoch and

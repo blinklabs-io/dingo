@@ -197,11 +197,8 @@ func (p *PeerGovernor) checkBootstrapRecoveryLocked() []pendingEvent {
 	// Avoid immediate exit/recovery flapping right after bootstrap exit.
 	if !p.lastBootstrapExit.IsZero() &&
 		time.Since(p.lastBootstrapExit) < p.config.BootstrapRecoveryCooldown {
-		remaining := p.config.BootstrapRecoveryCooldown -
-			time.Since(p.lastBootstrapExit)
-		if remaining < 0 {
-			remaining = 0
-		}
+		remaining := max(p.config.BootstrapRecoveryCooldown-
+			time.Since(p.lastBootstrapExit), 0)
 		p.config.Logger.Debug(
 			"bootstrap recovery skipped: cooldown active",
 			"remaining", remaining,

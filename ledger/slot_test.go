@@ -298,7 +298,7 @@ func TestSlotToEpochBeforeFirstEpoch(t *testing.T) {
 	if err == nil {
 		t.Error("expected error for slot before first known epoch")
 	}
-	if err.Error() != "slot is before the first known epoch" {
+	if err.Error() != "slot is outside the known epoch range" {
 		t.Errorf("unexpected error message: %s", err.Error())
 	}
 

@@ -27,6 +27,8 @@ import (
 var ByronEraDesc = EraDesc{
 	Id:              byron.EraIdByron,
 	Name:            byron.EraNameByron,
+	MinMajorVersion: 0,
+	MaxMajorVersion: 1,
 	EpochLengthFunc: EpochLengthByron,
 	ValidateTxFunc:  ValidateTxByron,
 }

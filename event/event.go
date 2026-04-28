@@ -407,6 +407,13 @@ func (e *EventBus) deliverWithTimeout(
 
 // Publish allows a producer to send an event of a particular type to all subscribers
 func (e *EventBus) Publish(eventType EventType, evt Event) {
+	e.stopMu.RLock()
+	if e.stopped || e.closed {
+		e.stopMu.RUnlock()
+		return
+	}
+	defer e.stopMu.RUnlock()
+
 	e.mu.RLock()
 	subList := e.subscriberSnapshots[eventType]
 	e.mu.RUnlock()
@@ -459,14 +466,13 @@ func (e *EventBus) Publish(eventType EventType, evt Event) {
 // Use this for non-critical events where immediate delivery is not required.
 // Returns false if the EventBus is stopped, closed, or the async queue is full.
 func (e *EventBus) PublishAsync(eventType EventType, evt Event) bool {
-	// Capture asyncQueue under lock to protect against concurrent reassignment in Stop()
 	e.stopMu.RLock()
 	if e.stopped || e.closed {
 		e.stopMu.RUnlock()
 		return false
 	}
 	q := e.asyncQueue
-	e.stopMu.RUnlock()
+	defer e.stopMu.RUnlock()
 
 	select {
 	case q <- asyncEvent{eventType: eventType, event: evt}:

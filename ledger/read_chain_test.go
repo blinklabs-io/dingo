@@ -144,8 +144,7 @@ func TestTrimReadBatchForRollbackRequestsRollbackWhenPointMissing(
 }
 
 func TestLedgerReadChainIteratorWaitsForResultCompletion(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	resultCh := make(chan readChainResult)
 	iter := &scriptedLedgerReadIterator{

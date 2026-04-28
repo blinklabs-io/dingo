@@ -16,10 +16,15 @@ package ledgerstate
 
 import (
 	"bytes"
+	"context"
+	"errors"
+	"io"
+	"log/slog"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/stretchr/testify/require"
 )
 
@@ -230,7 +235,9 @@ func TestImportedEpochSummaryKeepsCurrentEpochMetadataWhenExisting(
 func TestPersistImportedSnapshotClearsEpochWhenEmpty(t *testing.T) {
 	db, err := database.New(&database.Config{DataDir: ""})
 	require.NoError(t, err)
-	defer db.Close()
+	t.Cleanup(func() {
+		require.NoError(t, db.Close())
+	})
 
 	store := db.Metadata()
 	targetEpoch := uint64(100)
@@ -296,4 +303,233 @@ func TestPersistImportedSnapshotClearsEpochWhenEmpty(t *testing.T) {
 	require.True(t, summary.SnapshotReady)
 	require.Equal(t, existingSummary.BoundarySlot, summary.BoundarySlot)
 	require.True(t, bytes.Equal(existingSummary.EpochNonce, summary.EpochNonce))
+}
+
+func TestImportPParamsAnchorsAddedSlotToCurrentEpochStart(t *testing.T) {
+	db, err := database.New(&database.Config{DataDir: ""})
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, db.Close())
+	})
+
+	pparamsCbor, err := cbor.Encode(testConwayPParams())
+	require.NoError(t, err)
+
+	cfg := ImportConfig{
+		Database: db,
+		Logger: slog.New(
+			slog.NewTextHandler(io.Discard, nil),
+		),
+		State: &RawLedgerState{
+			PParamsData:   pparamsCbor,
+			Epoch:         1277,
+			EraIndex:      EraConway,
+			EraBoundEpoch: 1200,
+			EraBoundSlot:  10_000,
+		},
+		EpochLength: func(uint) (uint, uint, error) {
+			return 1, 100, nil
+		},
+	}
+
+	require.NoError(t, importPParams(context.Background(), cfg))
+
+	pparams, err := db.Metadata().GetPParams(1277, nil)
+	require.NoError(t, err)
+	require.Len(t, pparams, 1)
+	require.Equal(t, uint64(17_700), pparams[0].AddedSlot)
+}
+
+func TestImportGovStateAnchorsProposalAndConstitutionSlots(t *testing.T) {
+	db, err := database.New(&database.Config{DataDir: ""})
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, db.Close())
+	})
+
+	txHash := bytes.Repeat([]byte{0x91}, 32)
+	cfg := ImportConfig{
+		Database: db,
+		Logger: slog.New(
+			slog.NewTextHandler(io.Discard, nil),
+		),
+		State: &RawLedgerState{
+			GovStateData:  testGovStateData(t, txHash, 1275),
+			Epoch:         1277,
+			EraIndex:      EraConway,
+			EraBoundEpoch: 1200,
+			EraBoundSlot:  10_000,
+		},
+		EpochLength: func(uint) (uint, uint, error) {
+			return 1, 100, nil
+		},
+	}
+
+	require.NoError(t, importGovState(
+		context.Background(),
+		cfg,
+		func(ImportProgress) {},
+	))
+
+	proposal, err := db.Metadata().GetGovernanceProposal(
+		txHash,
+		0,
+		nil,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, proposal)
+	// Proposal AddedSlot is anchored to the proposal's original epoch
+	// (ProposedIn=1275 → 10_000 + (1275-1200)*100 = 17_500), not the
+	// snapshot's current epoch, so older proposals retain their original
+	// slot for rollback/pruning purposes.
+	require.Equal(t, uint64(17_500), proposal.AddedSlot)
+
+	constitution, err := db.Metadata().GetConstitution(nil)
+	require.NoError(t, err)
+	require.NotNil(t, constitution)
+	require.Equal(t, uint64(17_700), constitution.AddedSlot)
+}
+
+func TestSnapshotEpochAnchorSlotUsesMatchingEraBound(t *testing.T) {
+	cfg := ImportConfig{
+		Logger: slog.New(
+			slog.NewTextHandler(io.Discard, nil),
+		),
+		State: &RawLedgerState{
+			EraBounds: []EraBound{
+				{Slot: 0, Epoch: 0},
+				{Slot: 1_000, Epoch: 10},
+				{Slot: 2_000, Epoch: 20},
+			},
+			EraIndex:      EraConway,
+			EraBoundEpoch: 20,
+			EraBoundSlot:  2_000,
+		},
+		EpochLength: func(eraId uint) (uint, uint, error) {
+			switch eraId {
+			case 0:
+				return 1, 50, nil
+			case 1:
+				return 1, 100, nil
+			default:
+				return 1, 200, nil
+			}
+		},
+	}
+
+	require.Equal(t, uint64(1_500), snapshotEpochAnchorSlot(cfg, 15))
+}
+
+func TestSnapshotEpochAnchorSlotWarnsOnFallback(t *testing.T) {
+	var logBuf bytes.Buffer
+	cfg := ImportConfig{
+		Logger: slog.New(
+			slog.NewTextHandler(&logBuf, nil),
+		),
+		State: &RawLedgerState{
+			EraBounds: []EraBound{
+				{Slot: 1_000, Epoch: 10},
+				{Slot: 2_000, Epoch: 20},
+			},
+			EraIndex:      EraConway,
+			EraBoundEpoch: 20,
+			EraBoundSlot:  2_000,
+		},
+		EpochLength: func(uint) (uint, uint, error) {
+			return 1, 100, nil
+		},
+	}
+
+	require.Zero(t, snapshotEpochAnchorSlot(cfg, 5))
+	require.Contains(t, logBuf.String(), "snapshotEpochAnchorSlot")
+	require.Contains(t, logBuf.String(), "epoch precedes first era bound")
+	require.Contains(t, logBuf.String(), "epoch=5")
+	require.Contains(t, logBuf.String(), "era_bound_epoch=20")
+}
+
+func TestSnapshotEpochAnchorSlotWarnsOnMissingEpochLength(t *testing.T) {
+	var logBuf bytes.Buffer
+	cfg := ImportConfig{
+		Logger: slog.New(
+			slog.NewTextHandler(&logBuf, nil),
+		),
+		State: &RawLedgerState{
+			EraBounds: []EraBound{
+				{Slot: 1_000, Epoch: 10},
+			},
+			EraIndex:      EraConway,
+			EraBoundEpoch: 10,
+			EraBoundSlot:  1_000,
+		},
+	}
+
+	require.Equal(t, uint64(1_000), snapshotEpochAnchorSlot(cfg, 12))
+	require.Contains(t, logBuf.String(), "snapshotEpochAnchorSlot")
+	require.Contains(t, logBuf.String(), "epoch length unavailable")
+	require.Contains(t, logBuf.String(), "epoch=12")
+}
+
+func TestSnapshotEpochAnchorSlotWarnsOnEpochLengthError(t *testing.T) {
+	var logBuf bytes.Buffer
+	cfg := ImportConfig{
+		Logger: slog.New(
+			slog.NewTextHandler(&logBuf, nil),
+		),
+		State: &RawLedgerState{
+			EraBounds: []EraBound{
+				{Slot: 0, Epoch: 0},
+			},
+			EraIndex:      EraConway,
+			EraBoundEpoch: 0,
+			EraBoundSlot:  0,
+		},
+		EpochLength: func(uint) (uint, uint, error) {
+			return 0, 0, errors.New("boom")
+		},
+	}
+
+	require.Zero(t, snapshotEpochAnchorSlot(cfg, 3))
+	require.Contains(t, logBuf.String(), "snapshotEpochAnchorSlot")
+	require.Contains(t, logBuf.String(), "failed to resolve epoch length")
+	require.Contains(t, logBuf.String(), "boom")
+}
+
+func testGovStateData(
+	t *testing.T,
+	txHash []byte,
+	proposedEpoch uint64,
+) []byte {
+	t.Helper()
+
+	proposal := []any{
+		[]any{txHash, uint64(0)},
+		map[uint64]uint64{},
+		map[uint64]uint64{},
+		map[uint64]uint64{},
+		[]any{
+			uint64(100_000_000),
+			bytes.Repeat([]byte{0xa1}, 29),
+			[]any{uint8(2)},
+			[]any{
+				"https://example.com/proposal",
+				bytes.Repeat([]byte{0xb2}, 32),
+			},
+		},
+		proposedEpoch,
+		proposedEpoch + 5,
+	}
+	govState := []any{
+		[]any{[]any{}, []any{proposal}},
+		[]any{},
+		[]any{
+			[]any{
+				"https://example.com/constitution",
+				bytes.Repeat([]byte{0xc3}, 32),
+			},
+			nil,
+		},
+	}
+	data, err := cbor.Encode(govState)
+	require.NoError(t, err)
+	return data
 }

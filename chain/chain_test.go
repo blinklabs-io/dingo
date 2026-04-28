@@ -483,6 +483,34 @@ func (m *mockLedgerState) SecurityParam() int {
 	return m.securityParam
 }
 
+func mustSetLedger(t *testing.T, cm *chain.ChainManager, securityParam int) {
+	t.Helper()
+	if err := cm.SetLedger(&mockLedgerState{securityParam: securityParam}); err != nil {
+		t.Fatalf("SetLedger(%d): %v", securityParam, err)
+	}
+}
+
+func TestSetLedgerRejectsNonPositiveSecurityParam(t *testing.T) {
+	cm, err := chain.NewManager(nil, nil)
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	err = cm.SetLedger(&mockLedgerState{securityParam: 0})
+	if err == nil {
+		t.Fatal("expected error for K=0")
+	}
+	if !errors.Is(err, chain.ErrInvalidSecurityParam) {
+		t.Fatalf("expected ErrInvalidSecurityParam, got %v", err)
+	}
+	err = cm.SetLedger(&mockLedgerState{securityParam: -1})
+	if err == nil {
+		t.Fatal("expected error for K=-1")
+	}
+	if !errors.Is(err, chain.ErrInvalidSecurityParam) {
+		t.Fatalf("expected ErrInvalidSecurityParam, got %v", err)
+	}
+}
+
 // makeLinkedHeaders builds n mock headers that chain together starting
 // from prevHash at the given slot/block number offsets.
 func makeLinkedHeaders(
@@ -510,11 +538,12 @@ func makeLinkedHeaders(
 }
 
 func TestHeaderQueueLimitDefault(t *testing.T) {
-	// Without securityParam the default limit applies
+	// K=1 yields max(2, DefaultMaxQueuedHeaders) == DefaultMaxQueuedHeaders
 	cm, err := chain.NewManager(nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error creating chain manager: %s", err)
 	}
+	mustSetLedger(t, cm, 1)
 	c := cm.PrimaryChain()
 
 	limit := chain.DefaultMaxQueuedHeaders
@@ -561,7 +590,7 @@ func TestHeaderQueueLimitFromSecurityParam(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error creating chain manager: %s", err)
 	}
-	cm.SetLedger(&mockLedgerState{securityParam: securityParam})
+	mustSetLedger(t, cm, securityParam)
 	c := cm.PrimaryChain()
 
 	headers := makeLinkedHeaders(expectedLimit+1, 0, 1, "")
@@ -604,7 +633,7 @@ func TestHeaderQueueAcceptsWithinLimit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error creating chain manager: %s", err)
 	}
-	cm.SetLedger(&mockLedgerState{securityParam: securityParam})
+	mustSetLedger(t, cm, securityParam)
 	c := cm.PrimaryChain()
 
 	// Add fewer headers than the limit -- all should succeed
@@ -875,16 +904,6 @@ func TestIntersectPointsIncludesOlderSamples(t *testing.T) {
 	}
 }
 
-// mockLedger implements the interface{ SecurityParam() int }
-// interface used by ChainManager.SetLedger.
-type mockLedger struct {
-	securityParam int
-}
-
-func (m *mockLedger) SecurityParam() int {
-	return m.securityParam
-}
-
 // newTestDB creates an isolated database in a temporary
 // directory so that tests do not share in-memory state.
 func newTestDB(t *testing.T) *database.Database {
@@ -916,7 +935,7 @@ func TestChainRollbackExceedsSecurityParam(t *testing.T) {
 	}
 	// Set security parameter to 2 so that rolling back
 	// 3 blocks (from index 5 to index 2) exceeds it.
-	cm.SetLedger(&mockLedger{securityParam: 2})
+	mustSetLedger(t, cm, 2)
 	c := cm.PrimaryChain()
 	for _, testBlock := range testBlocks {
 		if err := c.AddBlock(testBlock, nil); err != nil {
@@ -971,7 +990,7 @@ func TestChainRollbackWithinSecurityParam(t *testing.T) {
 	// Set security parameter to 3. Rolling back 3 blocks
 	// (from index 5 to index 2) should be allowed since
 	// forkDepth == K is not strictly greater than K.
-	cm.SetLedger(&mockLedger{securityParam: 3})
+	mustSetLedger(t, cm, 3)
 	c := cm.PrimaryChain()
 	for _, testBlock := range testBlocks {
 		if err := c.AddBlock(testBlock, nil); err != nil {
@@ -1067,7 +1086,7 @@ func TestRewindPrimaryChainToPointPrunesPersistentTail(t *testing.T) {
 	}
 }
 
-func TestChainRollbackSecurityParamZeroAllowsAll(t *testing.T) {
+func TestChainRollbackRequiresSecurityParamConfigured(t *testing.T) {
 	db := newTestDB(t)
 	cm, err := chain.NewManager(db, nil)
 	if err != nil {
@@ -1076,8 +1095,6 @@ func TestChainRollbackSecurityParamZeroAllowsAll(t *testing.T) {
 			err,
 		)
 	}
-	// securityParam defaults to 0 (ledger not initialized).
-	// All rollbacks should be allowed.
 	c := cm.PrimaryChain()
 	for _, testBlock := range testBlocks {
 		if err := c.AddBlock(testBlock, nil); err != nil {
@@ -1087,17 +1104,16 @@ func TestChainRollbackSecurityParamZeroAllowsAll(t *testing.T) {
 			)
 		}
 	}
-	// Roll back all the way to block index 0
 	rollbackPoint := ocommon.Point{
 		Slot: testBlocks[0].SlotNumber(),
 		Hash: testBlocks[0].Hash().Bytes(),
 	}
-	if err := c.Rollback(rollbackPoint); err != nil {
-		t.Fatalf(
-			"rollback with securityParam=0 should "+
-				"always succeed, got: %s",
-			err,
-		)
+	err = c.Rollback(rollbackPoint)
+	if err == nil {
+		t.Fatal("expected error when security parameter K is not configured")
+	}
+	if !errors.Is(err, chain.ErrSecurityParamNotConfigured) {
+		t.Fatalf("expected ErrSecurityParamNotConfigured, got: %v", err)
 	}
 }
 
@@ -1113,7 +1129,7 @@ func TestChainRollbackEphemeralChainNotRestricted(
 		)
 	}
 	// Set a very small security param
-	cm.SetLedger(&mockLedger{securityParam: 1})
+	mustSetLedger(t, cm, 1)
 	c := cm.PrimaryChain()
 	for _, testBlock := range testBlocks {
 		if err := c.AddBlock(testBlock, nil); err != nil {

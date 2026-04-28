@@ -96,11 +96,11 @@ func GetProtocolVersion(
 	}
 }
 
-// EraForVersion returns the era ID for a given protocol
-// major version using the ProtocolMajorVersionToEra map in
-// ledger/eras/. Returns false if the version is not mapped.
+// EraForVersion returns the era ID for a given protocol major version,
+// resolved against the static era table in ledger/eras/. Returns false
+// if no era covers the given version.
 func EraForVersion(majorVersion uint) (uint, bool) {
-	eraDesc, ok := eras.ProtocolMajorVersionToEra[majorVersion]
+	eraDesc, ok := eras.EraForVersion(majorVersion)
 	if !ok {
 		return 0, false
 	}

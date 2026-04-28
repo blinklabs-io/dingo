@@ -79,7 +79,7 @@ func BenchmarkHotCacheParallelGet(b *testing.B) {
 	cache := NewHotCache(10000, 0)
 
 	// Pre-populate with many entries
-	for i := 0; i < 1000; i++ {
+	for i := range 1000 {
 		key := make([]byte, 36)
 		key[0] = byte(i)
 		key[1] = byte(i >> 8)
@@ -257,7 +257,7 @@ func BenchmarkBatchResolutionHotHits(b *testing.B) {
 
 	// Pre-populate hot cache with 100 entries
 	refs := make([]UtxoRef, 100)
-	for i := 0; i < 100; i++ {
+	for i := range 100 {
 		refs[i] = UtxoRef{OutputIdx: uint32(i)}
 		refs[i].TxId[0] = byte(i)
 		refs[i].TxId[1] = byte(i >> 8)
@@ -284,7 +284,7 @@ func BenchmarkTxBatchResolutionHotHits(b *testing.B) {
 
 	// Pre-populate hot cache with 100 TX entries
 	hashes := make([][32]byte, 100)
-	for i := 0; i < 100; i++ {
+	for i := range 100 {
 		hashes[i][0] = byte(i)
 		hashes[i][1] = byte(i >> 8)
 

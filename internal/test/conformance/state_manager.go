@@ -24,6 +24,7 @@ import (
 	"math/big"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/blinklabs-io/ouroboros-mock/conformance"
@@ -31,8 +32,16 @@ import (
 	"github.com/glebarez/sqlite"
 	utxorpc "github.com/utxorpc/go-codegen/utxorpc/v1alpha/cardano"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 	"gorm.io/gorm/logger"
 )
+
+// conformanceSlotsPerEpoch is the slots-per-epoch constant used by the
+// conformance state manager to translate between epochs and the slot
+// values stored in deleted_slot / added_slot columns. Conformance tests
+// use it purely as a monotonic marker — the real slot count for a
+// given network is irrelevant here — so a single fixed value is fine.
+const conformanceSlotsPerEpoch uint64 = 432000
 
 // DingoStateManager implements conformance.StateManager using dingo's database
 // with an in-memory SQLite backend for testing.
@@ -66,6 +75,18 @@ type DingoStateManager struct {
 
 	// hotKeyAuthorizations tracks hot key authorizations (cold key -> hot key)
 	hotKeyAuthorizations map[common.Blake2b224]common.Blake2b224
+
+	// committeeRemovals tracks the remove-set of pending UpdateCommittee
+	// proposals, keyed by gov action id. The upstream conformance
+	// GovActionInfo only carries the add-set (ProposedMembers), so we
+	// stash the removed cold credentials locally and consume them on
+	// enactment to honor CIP-1694 incremental committee updates.
+	committeeRemovals map[string]map[common.Blake2b224]struct{}
+
+	// committeeQuorums tracks the new quorum of pending UpdateCommittee
+	// proposals, keyed by gov action id. Persisted to committee_quorum
+	// at enactment time so the DB state mirrors production.
+	committeeQuorums map[string]*big.Rat
 }
 
 // NewDingoStateManager creates a new DingoStateManager with an in-memory SQLite database.
@@ -92,6 +113,8 @@ func NewDingoStateManager() (*DingoStateManager, error) {
 		drepRegistrations:    make(map[common.Blake2b224]bool),
 		committeeMembers:     make(map[common.Blake2b224]uint64),
 		hotKeyAuthorizations: make(map[common.Blake2b224]common.Blake2b224),
+		committeeRemovals:    make(map[string]map[common.Blake2b224]struct{}),
+		committeeQuorums:     make(map[string]*big.Rat),
 	}, nil
 }
 
@@ -110,6 +133,8 @@ func (m *DingoStateManager) LoadInitialState(
 	m.drepRegistrations = make(map[common.Blake2b224]bool)
 	m.committeeMembers = make(map[common.Blake2b224]uint64)
 	m.hotKeyAuthorizations = make(map[common.Blake2b224]common.Blake2b224)
+	m.committeeRemovals = make(map[string]map[common.Blake2b224]struct{})
+	m.committeeQuorums = make(map[string]*big.Rat)
 
 	// Clear database tables
 	if err := m.clearDatabaseTables(); err != nil {
@@ -127,6 +152,7 @@ func (m *DingoStateManager) LoadInitialState(
 				StakingKey: hash[:],
 				AddedSlot:  0,
 				Active:     true,
+				Reward:     types.Uint64(balance),
 			}
 			if err := m.db.Create(&account).Error; err != nil {
 				return fmt.Errorf("failed to insert account: %w", err)
@@ -166,6 +192,16 @@ func (m *DingoStateManager) LoadInitialState(
 
 	// Load committee members
 	maps.Copy(m.committeeMembers, state.CommitteeMembers)
+	for coldKey, expiry := range state.CommitteeMembers {
+		member := models.CommitteeMember{
+			ColdCredHash: coldKey[:],
+			ExpiresEpoch: expiry,
+			AddedSlot:    0,
+		}
+		if err := m.db.Create(&member).Error; err != nil {
+			return fmt.Errorf("failed to insert committee_member: %w", err)
+		}
+	}
 
 	// Load hot key authorizations
 	maps.Copy(m.hotKeyAuthorizations, state.HotKeyAuthorizations)
@@ -174,7 +210,7 @@ func (m *DingoStateManager) LoadInitialState(
 	for coldKey, hotKey := range state.HotKeyAuthorizations {
 		auth := models.AuthCommitteeHot{
 			ColdCredential: coldKey[:],
-			HostCredential: hotKey[:],
+			HotCredential:  hotKey[:],
 			AddedSlot:      0,
 		}
 		if err := m.db.Create(&auth).Error; err != nil {
@@ -362,6 +398,21 @@ func (m *DingoStateManager) ApplyTransaction(
 
 			// Extract action-specific data including parent action ID
 			extractActionSpecificData(action, &info)
+
+			// CIP-1694 UpdateCommittee carries a remove-set and a new
+			// quorum alongside the add-set. GovActionInfo only tracks
+			// the add-set, so stash the remove-set and quorum in local
+			// maps keyed by gov action id for use at enactment time.
+			if uca, ok := action.(*common.UpdateCommitteeGovAction); ok {
+				removed := make(map[common.Blake2b224]struct{}, len(uca.Credentials))
+				for _, cred := range uca.Credentials {
+					removed[cred.Credential] = struct{}{}
+				}
+				m.committeeRemovals[govActionId] = removed
+				if uca.Quorum.Rat != nil {
+					m.committeeQuorums[govActionId] = new(big.Rat).Set(uca.Quorum.Rat)
+				}
+			}
 
 			m.govState.AddProposal(govActionId, info)
 
@@ -577,7 +628,7 @@ func (m *DingoStateManager) processCertificate(cert common.Certificate, slot uin
 			// Insert into database
 			auth := models.AuthCommitteeHot{
 				ColdCredential: coldKey[:],
-				HostCredential: hotKey[:],
+				HotCredential:  hotKey[:],
 				AddedSlot:      slot,
 			}
 			m.db.Create(&auth)
@@ -661,7 +712,7 @@ func (m *DingoStateManager) ProcessEpochBoundary(newEpoch uint64) error {
 			// Update database
 			m.db.Model(&models.GovernanceProposal{}).
 				Where("tx_hash = ?", parseProposalTxHash(id)).
-				Update("deleted_slot", newEpoch*432000) // Approximate slot
+				Update("deleted_slot", newEpoch*conformanceSlotsPerEpoch)
 		}
 	}
 
@@ -777,16 +828,71 @@ func (m *DingoStateManager) enactProposal(
 		}
 	case common.GovActionTypeHardForkInitiation:
 		m.govState.Roots.HardFork = &id
-	case common.GovActionTypeNoConfidence, common.GovActionTypeUpdateCommittee:
+	case common.GovActionTypeNoConfidence:
 		m.govState.Roots.ConstitutionalCommittee = &id
-		if proposal.ActionType == common.GovActionTypeUpdateCommittee {
-			for coldKey, expiry := range proposal.ProposedMembers {
-				m.govState.CommitteeMembers[coldKey] = &conformance.CommitteeMemberInfo{
-					ColdKey:     coldKey,
-					ExpiryEpoch: expiry,
-				}
-				m.committeeMembers[coldKey] = expiry
+		for coldKey := range m.committeeMembers {
+			delete(m.committeeMembers, coldKey)
+		}
+		for coldKey := range m.govState.CommitteeMembers {
+			delete(m.govState.CommitteeMembers, coldKey)
+		}
+		deletedSlot := m.currentEpoch * conformanceSlotsPerEpoch
+		m.db.Model(&models.CommitteeMember{}).
+			Where("deleted_slot IS NULL").
+			Update("deleted_slot", deletedSlot)
+	case common.GovActionTypeUpdateCommittee:
+		m.govState.Roots.ConstitutionalCommittee = &id
+		// Apply the remove-set first per cardano-ledger semantics
+		// (Conway Enact.hs updatedCommittee: add-set takes precedence
+		// on overlap, so remove-then-add lets a re-addition with a
+		// new expiry win).
+		deletedSlot := m.currentEpoch * conformanceSlotsPerEpoch
+		if removed, ok := m.committeeRemovals[id]; ok {
+			for coldKey := range removed {
+				delete(m.committeeMembers, coldKey)
+				delete(m.govState.CommitteeMembers, coldKey)
+				m.db.Model(&models.CommitteeMember{}).
+					Where("cold_cred_hash = ? AND deleted_slot IS NULL", coldKey[:]).
+					Update("deleted_slot", deletedSlot)
 			}
+			delete(m.committeeRemovals, id)
+		}
+		dbMembers := make(
+			[]*models.CommitteeMember,
+			0,
+			len(proposal.ProposedMembers),
+		)
+		for coldKey, expiry := range proposal.ProposedMembers {
+			m.govState.CommitteeMembers[coldKey] = &conformance.CommitteeMemberInfo{
+				ColdKey:     coldKey,
+				ExpiryEpoch: expiry,
+			}
+			m.committeeMembers[coldKey] = expiry
+			dbMembers = append(dbMembers, &models.CommitteeMember{
+				ColdCredHash: coldKey[:],
+				ExpiresEpoch: expiry,
+				AddedSlot:    m.currentEpoch * conformanceSlotsPerEpoch,
+			})
+		}
+		if len(dbMembers) > 0 {
+			m.db.Clauses(clause.OnConflict{
+				Columns: []clause.Column{{Name: "cold_cred_hash"}},
+				DoUpdates: clause.AssignmentColumns([]string{
+					"expires_epoch",
+					"added_slot",
+					"deleted_slot",
+				}),
+			}).Create(&dbMembers)
+		}
+		if quorum, ok := m.committeeQuorums[id]; ok {
+			m.db.Clauses(clause.OnConflict{
+				Columns:   []clause.Column{{Name: "added_slot"}},
+				DoUpdates: clause.AssignmentColumns([]string{"quorum"}),
+			}).Create(&models.CommitteeQuorum{
+				Quorum:    &types.Rat{Rat: new(big.Rat).Set(quorum)},
+				AddedSlot: deletedSlot,
+			})
+			delete(m.committeeQuorums, id)
 		}
 	}
 
@@ -817,6 +923,9 @@ func (m *DingoStateManager) SetRewardBalances(
 	for cred, balance := range balances {
 		if _, exists := m.stakeRegistrations[cred]; exists {
 			m.stakeRegistrations[cred] = balance
+			m.db.Model(&models.Account{}).
+				Where("staking_key = ?", cred[:]).
+				Update("reward", types.Uint64(balance))
 		}
 	}
 	if m.govState != nil {
@@ -843,6 +952,8 @@ func (m *DingoStateManager) Reset() error {
 	m.drepRegistrations = make(map[common.Blake2b224]bool)
 	m.committeeMembers = make(map[common.Blake2b224]uint64)
 	m.hotKeyAuthorizations = make(map[common.Blake2b224]common.Blake2b224)
+	m.committeeRemovals = make(map[string]map[common.Blake2b224]struct{})
+	m.committeeQuorums = make(map[string]*big.Rat)
 	m.govState = conformance.NewGovernanceState()
 
 	// Clear database tables
@@ -859,6 +970,8 @@ func (m *DingoStateManager) clearDatabaseTables() error {
 		"pool_retirement",
 		"drep",
 		"auth_committee_hot",
+		"committee_member",
+		"committee_quorum",
 		"resign_committee_cold",
 		"governance_proposal",
 	}
@@ -924,7 +1037,12 @@ func parseProposalActionIdx(id string) uint32 {
 }
 
 func getActionType(action common.GovAction) common.GovActionType {
+	// The Conway parameter-change action is a distinct concrete type; it
+	// is handled explicitly rather than relying on the default so a
+	// future era adds-a-type doesn't silently misclassify.
 	switch action.(type) {
+	case *conway.ConwayParameterChangeGovAction:
+		return common.GovActionTypeParameterChange
 	case *common.HardForkInitiationGovAction:
 		return common.GovActionTypeHardForkInitiation
 	case *common.TreasuryWithdrawalGovAction:

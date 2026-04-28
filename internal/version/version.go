@@ -1,4 +1,4 @@
-// Copyright 2024 Blink Labs Software
+// Copyright 2026 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -23,6 +23,10 @@ var (
 	Version    string
 	CommitHash string
 )
+
+// BlockHeaderProtocolMinor identifies Dingo-forged blocks without changing
+// the ledger protocol major version used for era selection.
+const BlockHeaderProtocolMinor uint64 = 69
 
 func GetVersionString() string {
 	if Version != "" {

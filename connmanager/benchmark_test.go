@@ -79,7 +79,7 @@ func BenchmarkHasInboundPeerAddress(b *testing.B) {
 					conn:      &ouroboros.Connection{},
 				}
 				cm.inboundCount++
-				peerKey := normalizePeerAddr(addr)
+				peerKey := NormalizePeerAddr(addr)
 				cm.inboundPeerAddrs[peerKey]++
 			}
 			targetAddr := net.JoinHostPort("203.0.113.10", "4000")

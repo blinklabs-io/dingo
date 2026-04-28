@@ -24,6 +24,48 @@ import (
 
 var ErrAccountNotFound = errors.New("account not found")
 
+const (
+	DrepTypeAddrKeyHash uint64 = iota
+	DrepTypeScriptHash
+	DrepTypeAlwaysAbstain
+	DrepTypeAlwaysNoConfidence
+)
+
+func DrepTypeFromInt(drepType int) (uint64, error) {
+	switch drepType {
+	case 0:
+		return DrepTypeAddrKeyHash, nil
+	case 1:
+		return DrepTypeScriptHash, nil
+	case 2:
+		return DrepTypeAlwaysAbstain, nil
+	case 3:
+		return DrepTypeAlwaysNoConfidence, nil
+	default:
+		return 0, fmt.Errorf("unknown drep type: %d", drepType)
+	}
+}
+
+// ValidatePredefinedDrepTypes rejects credential-backed DRep delegation
+// types. GetDRepVotingPowerByType is only for predefined, credentialless
+// DRep options.
+func ValidatePredefinedDrepTypes(drepTypes []uint64) error {
+	for _, drepType := range drepTypes {
+		switch drepType {
+		case DrepTypeAddrKeyHash, DrepTypeScriptHash:
+			return fmt.Errorf(
+				"drep type %d is credential-backed; use credential voting power",
+				drepType,
+			)
+		case DrepTypeAlwaysAbstain, DrepTypeAlwaysNoConfidence:
+			continue
+		default:
+			return fmt.Errorf("unknown predefined drep type: %d", drepType)
+		}
+	}
+	return nil
+}
+
 type Account struct {
 	StakingKey    []byte `gorm:"uniqueIndex;size:28"`
 	Pool          []byte `gorm:"index;size:28"`
@@ -32,7 +74,8 @@ type Account struct {
 	AddedSlot     uint64 `gorm:"index"`
 	CertificateID uint   `gorm:"index"`
 	Reward        types.Uint64
-	// DrepType is the CBOR-encoded DRep delegation type:
+	// DrepType is the DRep delegation type code, an internal enum
+	// matching the Cardano ledger CBOR sum-type tag:
 	//   0 = key credential, 1 = script credential,
 	//   2 = AlwaysAbstain, 3 = AlwaysNoConfidence.
 	// A zero value (0) means either "key credential" or "no delegation set",
@@ -43,6 +86,20 @@ type Account struct {
 
 func (a *Account) TableName() string {
 	return "account"
+}
+
+// AccountRewardDelta records reward-account credits that are not otherwise
+// represented by a rollback-aware certificate row. Rollback subtracts deltas
+// added after the rollback slot before deleting the journal entries.
+type AccountRewardDelta struct {
+	StakingKey []byte       `gorm:"index;size:28;not null"`
+	Amount     types.Uint64 `gorm:"not null"`
+	ID         uint         `gorm:"primarykey"`
+	AddedSlot  uint64       `gorm:"index;not null"`
+}
+
+func (AccountRewardDelta) TableName() string {
+	return "account_reward_delta"
 }
 
 // String returns the bech32-encoded representation of the Account's StakingKey
@@ -140,6 +197,7 @@ type StakeVoteDelegation struct {
 	StakingKey    []byte `gorm:"index;size:28"`
 	PoolKeyHash   []byte `gorm:"index;size:28"`
 	Drep          []byte `gorm:"index;size:28"`
+	DrepType      uint64 `gorm:"default:0"`
 	CertificateID uint   `gorm:"index"`
 	ID            uint   `gorm:"primarykey"`
 	AddedSlot     uint64 `gorm:"index"`
@@ -153,6 +211,7 @@ type StakeVoteRegistrationDelegation struct {
 	StakingKey    []byte `gorm:"index;size:28"`
 	PoolKeyHash   []byte `gorm:"index;size:28"`
 	Drep          []byte `gorm:"index;size:28"`
+	DrepType      uint64 `gorm:"default:0"`
 	CertificateID uint   `gorm:"index"`
 	ID            uint   `gorm:"primarykey"`
 	AddedSlot     uint64 `gorm:"index"`
@@ -166,6 +225,7 @@ func (StakeVoteRegistrationDelegation) TableName() string {
 type VoteDelegation struct {
 	StakingKey    []byte `gorm:"index;size:28"`
 	Drep          []byte `gorm:"index;size:28"`
+	DrepType      uint64 `gorm:"default:0"`
 	CertificateID uint   `gorm:"index"`
 	ID            uint   `gorm:"primarykey"`
 	AddedSlot     uint64 `gorm:"index"`
@@ -178,6 +238,7 @@ func (VoteDelegation) TableName() string {
 type VoteRegistrationDelegation struct {
 	StakingKey    []byte `gorm:"index;size:28"`
 	Drep          []byte `gorm:"index;size:28"`
+	DrepType      uint64 `gorm:"default:0"`
 	CertificateID uint   `gorm:"index"`
 	ID            uint   `gorm:"primarykey"`
 	AddedSlot     uint64 `gorm:"index"`

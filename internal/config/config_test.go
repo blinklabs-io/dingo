@@ -52,6 +52,7 @@ func resetGlobalConfig() {
 		LedgerCatchupTimeout:        DefaultLedgerCatchupTimeout,
 		DatabaseWorkers:             5,
 		DatabaseQueueSize:           50,
+		GenesisBootstrap:            DefaultGenesisBootstrapConfig(),
 		ForgeSyncToleranceSlots:     DefaultForgeSyncToleranceSlots,
 		ForgeStaleGapThresholdSlots: DefaultForgeStaleGapThresholdSlots,
 		Mithril: MithrilConfig{
@@ -86,6 +87,10 @@ ledgerCatchupTimeout: "90m"
 topology: ""
 tlsCertFilePath: "cert1.pem"
 tlsKeyFilePath: "key1.pem"
+genesisBootstrap:
+  enabled: false
+  windowSlots: 4321
+  promotionMinDiversityGroups: 4
 mithril:
   enabled: false
   aggregatorUrl: "https://mithril.example.net"
@@ -107,34 +112,39 @@ mithril:
 	defer os.Remove(tmpFile)
 
 	expected := &Config{
-		MempoolCapacity:             2097152,
-		EvictionWatermark:           0.90,
-		RejectionWatermark:          0.95,
-		BindAddr:                    "127.0.0.1",
-		CardanoConfig:               "./cardano/preview/config.json",
-		DatabasePath:                ".dingo",
-		SocketPath:                  "env.socket",
-		IntersectTip:                true,
-		ValidateHistorical:          false,
-		Network:                     "preview",
-		MetricsPort:                 8088,
-		PrivateBindAddr:             "127.0.0.1",
-		PrivatePort:                 8000,
-		RelayPort:                   4000,
-		UtxorpcPort:                 9940, // explicit override from YAML
-		BlockfrostPort:              3000, // default
-		MeshPort:                    8080, // default
-		Topology:                    "",
-		TlsCertFilePath:             "cert1.pem",
-		TlsKeyFilePath:              "key1.pem",
-		BlobPlugin:                  DefaultBlobPlugin,
-		MetadataPlugin:              DefaultMetadataPlugin,
-		RunMode:                     RunModeServe,
-		ImmutableDbPath:             "/tmp/immutable",
-		ShutdownTimeout:             "45s",
-		LedgerCatchupTimeout:        "90m",
-		DatabaseWorkers:             11,
-		DatabaseQueueSize:           77,
+		MempoolCapacity:      2097152,
+		EvictionWatermark:    0.90,
+		RejectionWatermark:   0.95,
+		BindAddr:             "127.0.0.1",
+		CardanoConfig:        "./cardano/preview/config.json",
+		DatabasePath:         ".dingo",
+		SocketPath:           "env.socket",
+		IntersectTip:         true,
+		ValidateHistorical:   false,
+		Network:              "preview",
+		MetricsPort:          8088,
+		PrivateBindAddr:      "127.0.0.1",
+		PrivatePort:          8000,
+		RelayPort:            4000,
+		UtxorpcPort:          9940, // explicit override from YAML
+		BlockfrostPort:       3000, // default
+		MeshPort:             8080, // default
+		Topology:             "",
+		TlsCertFilePath:      "cert1.pem",
+		TlsKeyFilePath:       "key1.pem",
+		BlobPlugin:           DefaultBlobPlugin,
+		MetadataPlugin:       DefaultMetadataPlugin,
+		RunMode:              RunModeServe,
+		ImmutableDbPath:      "/tmp/immutable",
+		ShutdownTimeout:      "45s",
+		LedgerCatchupTimeout: "90m",
+		DatabaseWorkers:      11,
+		DatabaseQueueSize:    77,
+		GenesisBootstrap: GenesisBootstrapConfig{
+			Enabled:                     false,
+			WindowSlots:                 4321,
+			PromotionMinDiversityGroups: 4,
+		},
 		ForgeSyncToleranceSlots:     321,
 		ForgeStaleGapThresholdSlots: 654,
 		Mithril: MithrilConfig{
@@ -198,6 +208,7 @@ func TestLoad_WithoutConfigFile_UsesDefaults(t *testing.T) {
 		LedgerCatchupTimeout:        DefaultLedgerCatchupTimeout,
 		DatabaseWorkers:             5,
 		DatabaseQueueSize:           50,
+		GenesisBootstrap:            DefaultGenesisBootstrapConfig(),
 		ForgeSyncToleranceSlots:     DefaultForgeSyncToleranceSlots,
 		ForgeStaleGapThresholdSlots: DefaultForgeStaleGapThresholdSlots,
 		Mithril: MithrilConfig{
@@ -243,6 +254,39 @@ network: "preview"
 	}
 	if !cfg.RunMode.IsDevMode() {
 		t.Error("expected IsDevMode() to return true for 'dev' mode")
+	}
+}
+
+func TestLoad_GenesisBootstrapEnvVars(t *testing.T) {
+	resetGlobalConfig()
+	globalConfig.RunMode = RunModeDev
+
+	t.Setenv("DINGO_GENESIS_BOOTSTRAP_ENABLED", "false")
+	t.Setenv("DINGO_GENESIS_BOOTSTRAP_WINDOW_SLOTS", "1234")
+	t.Setenv(
+		"DINGO_GENESIS_BOOTSTRAP_PROMOTION_MIN_DIVERSITY_GROUPS",
+		"6",
+	)
+
+	cfg, err := LoadConfig("")
+	if err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+
+	if cfg.GenesisBootstrap.Enabled {
+		t.Fatal("expected GenesisBootstrap.Enabled to be false")
+	}
+	if cfg.GenesisBootstrap.WindowSlots != 1234 {
+		t.Fatalf(
+			"expected GenesisBootstrap.WindowSlots to be 1234, got %d",
+			cfg.GenesisBootstrap.WindowSlots,
+		)
+	}
+	if cfg.GenesisBootstrap.PromotionMinDiversityGroups != 6 {
+		t.Fatalf(
+			"expected GenesisBootstrap.PromotionMinDiversityGroups to be 6, got %d",
+			cfg.GenesisBootstrap.PromotionMinDiversityGroups,
+		)
 	}
 }
 

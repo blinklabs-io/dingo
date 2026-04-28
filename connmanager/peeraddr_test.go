@@ -52,7 +52,7 @@ func TestNormalizePeerAddr(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			assert.Equal(t, test.expected, normalizePeerAddr(test.input))
+			assert.Equal(t, test.expected, NormalizePeerAddr(test.input))
 		})
 	}
 }
@@ -66,7 +66,7 @@ func TestHasInboundPeerAddress(t *testing.T) {
 		isInbound: true,
 		peerAddr:  "1.2.3.4:3001",
 	}
-	cm.inboundPeerAddrs[normalizePeerAddr("1.2.3.4:3001")]++
+	cm.inboundPeerAddrs[NormalizePeerAddr("1.2.3.4:3001")]++
 	cm.connections[ouroboros.ConnectionId{
 		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3001},
 		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("1.2.3.4"), Port: 3002},
@@ -75,7 +75,7 @@ func TestHasInboundPeerAddress(t *testing.T) {
 		isInbound: true,
 		peerAddr:  "1.2.3.4:3002",
 	}
-	cm.inboundPeerAddrs[normalizePeerAddr("1.2.3.4:3002")]++
+	cm.inboundPeerAddrs[NormalizePeerAddr("1.2.3.4:3002")]++
 	cm.connections[ouroboros.ConnectionId{
 		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3001},
 		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("1.2.3.4"), Port: 3999},
@@ -106,7 +106,7 @@ func TestHasInboundPeerAddressDisabledWithoutPortReuse(t *testing.T) {
 		isInbound: true,
 		peerAddr:  "1.2.3.4:3001",
 	}
-	cm.inboundPeerAddrs[normalizePeerAddr("1.2.3.4:3001")]++
+	cm.inboundPeerAddrs[NormalizePeerAddr("1.2.3.4:3001")]++
 
 	assert.False(t, cm.HasInboundPeerAddress("1.2.3.4:3001"))
 }

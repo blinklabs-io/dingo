@@ -22,6 +22,9 @@ import (
 	"net"
 	"syscall"
 	"testing"
+	"time"
+
+	"log/slog"
 )
 
 func TestIsExpectedConnectionCloseError(t *testing.T) {
@@ -216,5 +219,89 @@ func TestIsExpectedNetworkDialError(t *testing.T) {
 				t.Fatalf("got %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestIsAddrInUseError(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{
+			name: "eaddrnotavail",
+			err:  syscall.EADDRNOTAVAIL,
+			want: true,
+		},
+		{
+			name: "wrapped eaddrinuse",
+			err:  fmt.Errorf("dial failed: %w", syscall.EADDRINUSE),
+			want: true,
+		},
+		{
+			name: "string cannot assign requested address",
+			err:  errors.New("dial tcp: cannot assign requested address"),
+			want: true,
+		},
+		{
+			name: "different dial error",
+			err:  errors.New("dial tcp: connection refused"),
+			want: false,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := isAddrInUseError(tc.err)
+			if got != tc.want {
+				t.Fatalf("got %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestCreateOutboundConnection_SuppressesRetryWhenReusableInboundSatisfiesValency(t *testing.T) {
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+	})
+	pg.stopCh = make(chan struct{})
+	topologyPeer := &Peer{
+		Address:           "44.0.0.10:3001",
+		NormalizedAddress: "44.0.0.10:3001",
+		Source:            PeerSourceTopologyLocalRoot,
+		State:             PeerStateCold,
+		GroupID:           "local-root-0",
+		Valency:           1,
+	}
+	reusableInbound := &Peer{
+		Address:           "44.0.0.11:3001",
+		NormalizedAddress: "44.0.0.11:3001",
+		Source:            PeerSourceTopologyLocalRoot,
+		State:             PeerStateHot,
+		GroupID:           "local-root-0",
+		Valency:           1,
+		Connection:        &PeerConnection{IsClient: true},
+		InboundDuplex:     true,
+	}
+	pg.mu.Lock()
+	pg.peers = []*Peer{topologyPeer, reusableInbound}
+	pg.mu.Unlock()
+
+	done := make(chan struct{})
+	go func() {
+		pg.createOutboundConnection(topologyPeer)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("createOutboundConnection should return when inbound valency is satisfied")
+	}
+	pg.mu.Lock()
+	defer pg.mu.Unlock()
+	if topologyPeer.Reconnecting {
+		t.Fatal("reconnecting flag should be cleared after early suppression")
+	}
+	if topologyPeer.ReconnectCount != 0 {
+		t.Fatalf("reconnect count changed unexpectedly: %d", topologyPeer.ReconnectCount)
 	}
 }

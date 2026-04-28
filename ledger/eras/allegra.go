@@ -30,6 +30,8 @@ import (
 var AllegraEraDesc = EraDesc{
 	Id:                      allegra.EraIdAllegra,
 	Name:                    allegra.EraNameAllegra,
+	MinMajorVersion:         3,
+	MaxMajorVersion:         3,
 	DecodePParamsFunc:       DecodePParamsAllegra,
 	DecodePParamsUpdateFunc: DecodePParamsUpdateAllegra,
 	PParamsUpdateFunc:       PParamsUpdateAllegra,

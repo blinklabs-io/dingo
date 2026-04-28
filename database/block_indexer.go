@@ -15,6 +15,7 @@
 package database
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"math"
@@ -277,34 +278,18 @@ func (bi *BlockIndexer) extractOutputOffsets(
 		// Fall through to byte searching for missing outputs
 	}
 
-	// Fallback: search for output CBOR within the body (slower but always works)
-	// Returns error if offset cannot be computed for any output.
-	// We need to track how many times we've seen each unique CBOR pattern
-	// to handle duplicate outputs (which are valid in Cardano).
-	seenCborCounts := make(map[string]int)
-
+	// Fallback: structurally walk the transaction body and locate
+	// the exact produced output value. Do not use raw substring
+	// search; identical bytes can appear in non-output fields.
 	for _, utxo := range produced {
 		ref := UtxoRef{
 			TxId:      txHashArray,
 			OutputIdx: utxo.Id.Index(),
 		}
 
-		outputCbor := utxo.Output.Cbor()
-
-		// Skip if we already have an offset for this output, but still
-		// increment seenCborCounts so subsequent duplicate outputs resolve
-		// to the correct occurrence
+		// Skip if we already have an offset for this output.
 		if _, ok := result.UtxoOffsets[ref]; ok {
-			if len(outputCbor) > 0 {
-				seenCborCounts[string(outputCbor)]++
-			}
 			continue
-		}
-		if len(outputCbor) == 0 {
-			return fmt.Errorf(
-				"output %d has no CBOR data - cannot compute offset",
-				utxo.Id.Index(),
-			)
 		}
 
 		bodyStart := txLoc.Body.Offset
@@ -319,58 +304,57 @@ func (bi *BlockIndexer) extractOutputOffsets(
 		}
 
 		bodyBytes := blockCbor[bodyStart:bodyEnd]
-
-		// Track which occurrence of this CBOR pattern we need
-		cborKey := string(outputCbor)
-		targetOccurrence := seenCborCounts[cborKey]
-		seenCborCounts[cborKey]++
-
-		// Find the nth occurrence of this CBOR pattern
-		offset := findNthCborOccurrence(bodyBytes, outputCbor, targetOccurrence)
-		if offset < 0 {
+		offset, length, found, err := txBodyProducedOutputRange(
+			bodyBytes,
+			bodyStart,
+			utxo.Id.Index(),
+		)
+		if err != nil {
 			return fmt.Errorf(
-				"output %d: CBOR occurrence %d not found in transaction body",
+				"output %d: locate structural CBOR range: %w",
 				utxo.Id.Index(),
-				targetOccurrence,
+				err,
+			)
+		}
+		if !found {
+			return fmt.Errorf(
+				"output %d: structural CBOR range not found in transaction body",
+				utxo.Id.Index(),
+			)
+		}
+		end := uint64(offset) + uint64(length)
+		if end > uint64(len(blockCbor)) {
+			return fmt.Errorf(
+				"output %d: structural range [%d:%d] exceeds block size %d",
+				utxo.Id.Index(),
+				offset,
+				end,
+				len(blockCbor),
+			)
+		}
+		outputCbor := utxo.Output.Cbor()
+		if len(outputCbor) == 0 {
+			return fmt.Errorf(
+				"output %d has no CBOR data - cannot verify offset",
+				utxo.Id.Index(),
+			)
+		}
+		start := int(offset) // #nosec G115 -- bounds checked above
+		stop := int(end)     // #nosec G115 -- bounds checked above
+		if !bytes.Equal(blockCbor[start:stop], outputCbor) {
+			return fmt.Errorf(
+				"output %d: structural CBOR range does not match produced output",
+				utxo.Id.Index(),
 			)
 		}
 
 		result.UtxoOffsets[ref] = CborOffset{
 			BlockSlot:  bi.blockSlot,
 			BlockHash:  bi.blockHash,
-			ByteOffset: bodyStart + safeIntToUint32(offset),
-			ByteLength: safeIntToUint32(len(outputCbor)),
+			ByteOffset: offset,
+			ByteLength: length,
 		}
 	}
 
 	return nil
-}
-
-// findNthCborOccurrence finds the nth (0-indexed) occurrence of a CBOR byte
-// sequence within a larger byte slice. Returns the offset if found, -1 otherwise.
-// This handles transactions with duplicate outputs (identical CBOR).
-func findNthCborOccurrence(data, target []byte, n int) int {
-	if len(target) == 0 || len(data) < len(target) || n < 0 {
-		return -1
-	}
-
-	count := 0
-	for i := 0; i <= len(data)-len(target); i++ {
-		match := true
-		for j := range len(target) {
-			if data[i+j] != target[j] {
-				match = false
-				break
-			}
-		}
-		if match {
-			if count == n {
-				return i
-			}
-			count++
-			// Skip past this match to find non-overlapping occurrences
-			i += len(target) - 1
-		}
-	}
-	return -1
 }

@@ -19,9 +19,11 @@ import (
 	"fmt"
 	"math"
 	"math/big"
+	"time"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/ledger/eras"
+	"github.com/blinklabs-io/dingo/ledger/hardfork"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
@@ -145,87 +147,276 @@ func checkedSlotAdd(
 	return startSlot + length, nil
 }
 
+// eraBoundData captures the per-era bound info computed during the epoch
+// walk. All three axes (relTime as picoseconds, slot, epoch) are tracked in
+// the CBOR-output domain; hardfork.BuildSummary is used only to compute the
+// current era's End under its TransitionInfo rules, then translated back.
+type eraBoundData struct {
+	epochs []models.Epoch
+	start  []any // [picosecondsBigInt, slot, epoch] or nil if era is empty
+	end    []any // same shape; nil for empty eras and populated current era
+}
+
 func (ls *LedgerState) queryHardForkEraHistory() (any, error) {
-	retData := []any{}
+	// Snapshot the tip, current era, and transition info under the read lock
+	// so we can use them without holding the lock during the (potentially
+	// slow) DB queries below.
+	ls.RLock()
+	tipSlot := ls.currentTip.Point.Slot
+	currentEraId := ls.currentEra.Id
+	transitionInfo := ls.transitionInfo
+	ls.RUnlock()
+
+	shape := ls.eraShape()
+	if len(shape.Eras) == 0 {
+		return nil, errors.New("era history: shape unavailable")
+	}
+	if len(shape.Eras) != len(eras.Eras) {
+		return nil, fmt.Errorf(
+			"era history: shape has %d eras, eras.Eras has %d",
+			len(shape.Eras), len(eras.Eras),
+		)
+	}
+
+	perEra := make([]eraBoundData, len(shape.Eras))
 	timespan := big.NewInt(0)
-	var epochs []models.Epoch
-	var era eras.EraDesc
-	var err error
-	var tmpStart, tmpEnd []any
-	var tmpEpoch models.Epoch
-	var tmpEra, tmpParams []any
-	var epochSlotLength, epochLength uint
-	var idx int
-	for _, era = range eras.Eras {
-		epochSlotLength, epochLength, err = era.EpochLengthFunc(
-			ls.config.CardanoNodeConfig,
+	currentIdx := -1
+
+	for i, entry := range shape.Eras {
+		eraDesc := eras.Eras[i]
+		epochs, dbErr := ls.db.GetEpochsByEra(entry.EraID, nil)
+		if dbErr != nil {
+			return nil, dbErr
+		}
+		perEra[i].epochs = epochs
+		if len(epochs) == 0 {
+			continue
+		}
+
+		firstEp := epochs[0]
+		perEra[i].start = []any{
+			new(big.Int).Set(timespan),
+			firstEp.StartSlot,
+			firstEp.EpochId,
+		}
+		for _, ep := range epochs {
+			timespan.Add(
+				timespan,
+				epochPicoseconds(ep.SlotLength, ep.LengthInSlots),
+			)
+		}
+
+		if entry.EraID == currentEraId {
+			// Defer End to the BuildSummary step below.
+			currentIdx = i
+			continue
+		}
+
+		// Past era: default End = (accumulated timespan, lastEp end, epoch+1).
+		lastEp := epochs[len(epochs)-1]
+		endSlot, slotErr := checkedSlotAdd(
+			lastEp.StartSlot,
+			uint64(lastEp.LengthInSlots),
+		)
+		if slotErr != nil {
+			return nil, fmt.Errorf(
+				"epoch %d (start=%d, length=%d): %w",
+				lastEp.EpochId, lastEp.StartSlot, lastEp.LengthInSlots, slotErr,
+			)
+		}
+		perEra[i].end = []any{
+			new(big.Int).Set(timespan),
+			endSlot,
+			lastEp.EpochId + 1,
+		}
+
+		// Transition-epoch detection: a past era whose last epoch's pparams
+		// already carry a later-era protocol version is a TransitionKnown
+		// window that completed. The confirmed boundary is at lastEp.StartSlot,
+		// not lastEp.StartSlot + length; roll back timespan accordingly so the
+		// next era's Start.relTime stays contiguous.
+		if eraDesc.DecodePParamsFunc == nil {
+			continue
+		}
+		pp, ppErr := ls.db.GetPParams(
+			lastEp.EpochId, eraDesc.DecodePParamsFunc, nil,
+		)
+		if ppErr != nil {
+			return nil, fmt.Errorf(
+				"getting pparams for epoch %d: %w", lastEp.EpochId, ppErr,
+			)
+		}
+		if pp == nil {
+			continue
+		}
+		ver, verErr := GetProtocolVersion(pp)
+		if verErr != nil {
+			return nil, fmt.Errorf(
+				"extracting protocol version for epoch %d: %w",
+				lastEp.EpochId, verErr,
+			)
+		}
+		pparamsEraId, ok := EraForVersion(ver.Major)
+		if !ok || pparamsEraId <= entry.EraID {
+			continue
+		}
+		epPc := epochPicoseconds(lastEp.SlotLength, lastEp.LengthInSlots)
+		perEra[i].end = []any{
+			new(big.Int).Sub(timespan, epPc),
+			lastEp.StartSlot,
+			lastEp.EpochId,
+		}
+		// In-place Sub so a later Add on timespan doesn't corrupt the value
+		// already stored in perEra[i].end[0].
+		timespan.Sub(timespan, epPc)
+	}
+
+	// Compute the current era's End via hardfork.BuildSummary, mirroring the
+	// Haskell HFC TransitionKnown/Unknown/Impossible semantics.
+	if currentIdx >= 0 {
+		end, err := ls.currentEraEnd(
+			shape, perEra[currentIdx], currentIdx, tipSlot, transitionInfo,
 		)
 		if err != nil {
 			return nil, err
 		}
-		epochs, err = ls.db.GetEpochsByEra(era.Id, nil)
-		if err != nil {
-			return nil, err
+		perEra[currentIdx].end = end
+	}
+
+	retData := make([]any, 0, len(shape.Eras))
+	for i, entry := range shape.Eras {
+		tmpParams := eraParamsCBOR(entry.Params)
+		if perEra[i].start == nil || perEra[i].end == nil {
+			retData = append(retData, []any{
+				[]any{0, 0, 0},
+				[]any{0, 0, 0},
+				tmpParams,
+			})
+			continue
 		}
-		tmpStart = []any{0, 0, 0}
-		tmpEnd = tmpStart
-		tmpParams = []any{
-			epochLength,
-			epochSlotLength,
-			[]any{
-				0,
-				0,
-				[]any{0},
-			},
-			0,
-		}
-		for idx, tmpEpoch = range epochs {
-			// Update era start
-			if idx == 0 {
-				tmpStart = []any{
-					new(big.Int).Set(timespan),
-					tmpEpoch.StartSlot,
-					tmpEpoch.EpochId,
-				}
-			}
-			// Add epoch length in picoseconds to timespan
-			timespan.Add(
-				timespan,
-				epochPicoseconds(
-					tmpEpoch.SlotLength,
-					tmpEpoch.LengthInSlots,
-				),
-			)
-			// Update era end
-			if idx == len(epochs)-1 {
-				endSlot, slotErr := checkedSlotAdd(
-					tmpEpoch.StartSlot,
-					uint64(tmpEpoch.LengthInSlots),
-				)
-				if slotErr != nil {
-					return nil, fmt.Errorf(
-						"epoch %d (start=%d, length=%d): %w",
-						tmpEpoch.EpochId,
-						tmpEpoch.StartSlot,
-						tmpEpoch.LengthInSlots,
-						slotErr,
-					)
-				}
-				tmpEnd = []any{
-					new(big.Int).Set(timespan),
-					endSlot,
-					tmpEpoch.EpochId + 1,
-				}
-			}
-		}
-		tmpEra = []any{
-			tmpStart,
-			tmpEnd,
-			tmpParams,
-		}
-		retData = append(retData, tmpEra)
+		retData = append(retData, []any{
+			perEra[i].start, perEra[i].end, tmpParams,
+		})
 	}
 	return cbor.IndefLengthList(retData), nil
+}
+
+// currentEraEnd computes the open era's End tuple (picosecondRelTime, slot,
+// epoch) from the HFC Summary, with a pre-check that falls back to
+// TransitionUnknown when TransitionKnown's KnownEpoch is missing from the DB
+// (e.g. a race or rollback). Without the fallback, serving the
+// BuildSummary-computed boundary would over-claim certainty about an epoch
+// the node hasn't actually seen.
+func (ls *LedgerState) currentEraEnd(
+	shape hardfork.Shape,
+	era eraBoundData,
+	idx int,
+	tipSlot uint64,
+	ti hardfork.TransitionInfo,
+) ([]any, error) {
+	firstEp := era.epochs[0]
+	startRel, ok := era.start[0].(*big.Int)
+	if !ok {
+		return nil, fmt.Errorf(
+			"current era start[0] has unexpected type %T", era.start[0],
+		)
+	}
+
+	// dingo sets TransitionImpossible when evaluateTransitionImpossible has
+	// confirmed the current epoch's end is within the safe-zone horizon
+	// (safeEndSlot >= epochEndSlot). The intended answer is the current
+	// epoch end. BuildSummary's TransitionImpossible branch, however,
+	// applies the safe zone from current.Start (= the *first* epoch of
+	// the era) and can return an EraEnd behind the tip for a long-running
+	// era. Serve the confirmed epoch-end directly instead.
+	if ti.State == hardfork.TransitionImpossible {
+		endRel := new(big.Int).Set(startRel)
+		for _, ep := range era.epochs {
+			endRel.Add(endRel, epochPicoseconds(ep.SlotLength, ep.LengthInSlots))
+		}
+		lastEp := era.epochs[len(era.epochs)-1]
+		endSlot, err := checkedSlotAdd(
+			lastEp.StartSlot,
+			uint64(lastEp.LengthInSlots),
+		)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"current era epoch %d (start=%d, length=%d): %w",
+				lastEp.EpochId, lastEp.StartSlot, lastEp.LengthInSlots, err,
+			)
+		}
+		return []any{
+			endRel,
+			endSlot,
+			lastEp.EpochId + 1,
+		}, nil
+	}
+
+	effectiveTI := ti
+	if ti.State == hardfork.TransitionKnown {
+		found := false
+		for _, ep := range era.epochs {
+			if ep.EpochId == ti.KnownEpoch &&
+				ep.EpochId > firstEp.EpochId {
+				found = true
+				break
+			}
+		}
+		if !found {
+			effectiveTI = hardfork.NewTransitionUnknown()
+		}
+	}
+
+	curr := hardfork.EraSummary{
+		EraID: shape.Eras[idx].EraID,
+		Start: hardfork.Bound{
+			RelativeTime: picosecondsToDuration(startRel),
+			Slot:         firstEp.StartSlot,
+			Epoch:        firstEp.EpochId,
+		},
+		Params: shape.Eras[idx].Params,
+	}
+	summ, err := hardfork.BuildSummary(shape, nil, curr, tipSlot, effectiveTI)
+	if err != nil {
+		return nil, err
+	}
+	endBound := summ.Eras[0].End
+	if endBound == nil {
+		return nil, errors.New(
+			"hardfork: current era End unbounded (SafeZoneSlots==0)",
+		)
+	}
+	return []any{
+		durationToPicoseconds(endBound.RelativeTime),
+		endBound.Slot,
+		endBound.Epoch,
+	}, nil
+}
+
+// eraParamsCBOR builds the fixed 4-tuple params shape clients expect:
+// [epochLength, slotLengthMs, [0,0,[0]], 0]. The third and fourth positions
+// are placeholders preserved from the legacy encoding.
+func eraParamsCBOR(p hardfork.EraParams) []any {
+	return []any{
+		uint(p.EpochSize),                     // #nosec G115
+		uint(p.SlotLength / time.Millisecond), // #nosec G115
+		[]any{0, 0, []any{0}},
+		0,
+	}
+}
+
+// durationToPicoseconds converts a time.Duration (ns) to picoseconds as a
+// *big.Int, matching the CBOR relTime encoding used by callers.
+func durationToPicoseconds(d time.Duration) *big.Int {
+	return new(big.Int).Mul(big.NewInt(int64(d)), big.NewInt(1000))
+}
+
+// picosecondsToDuration converts a picosecond *big.Int to a time.Duration
+// (ns). Loses no precision for inputs produced by epochPicoseconds (which
+// are always multiples of 1_000 picoseconds).
+func picosecondsToDuration(p *big.Int) time.Duration {
+	ns := new(big.Int).Quo(p, big.NewInt(1000))
+	return time.Duration(ns.Int64())
 }
 
 func (ls *LedgerState) queryShelley(
@@ -248,6 +439,10 @@ func (ls *LedgerState) queryShelley(
 		return ls.queryShelleyUtxoByAddress(q.Addrs)
 	case *olocalstatequery.ShelleyUtxoByTxinQuery:
 		return ls.queryShelleyUtxoByTxIn(q.TxIns)
+	case *olocalstatequery.ShelleyFilteredDelegationAndRewardAccountsQuery:
+		return ls.queryShelleyFilteredDelegationAndRewardAccounts(
+			q.Creds.Items(),
+		)
 	// TODO (#394)
 	/*
 		case *olocalstatequery.ShelleyLedgerTipQuery:
@@ -257,7 +452,6 @@ func (ls *LedgerState) queryShelley(
 		case *olocalstatequery.ShelleyUtxoWholeQuery:
 		case *olocalstatequery.ShelleyDebugEpochStateQuery:
 		case *olocalstatequery.ShelleyCborQuery:
-		case *olocalstatequery.ShelleyFilteredDelegationAndRewardAccountsQuery:
 		case *olocalstatequery.ShelleyDebugNewEpochStateQuery:
 		case *olocalstatequery.ShelleyDebugChainDepStateQuery:
 		case *olocalstatequery.ShelleyRewardProvenanceQuery:
@@ -302,6 +496,48 @@ func (ls *LedgerState) queryShelleyUtxoByAddress(
 		ret[utxoId] = txOut
 	}
 	return []any{ret}, nil
+}
+
+// queryShelleyFilteredDelegationAndRewardAccounts answers
+// GetFilteredDelegationsAndRewardAccounts: given a set of stake credentials,
+// return their current pool delegations and reward balances.
+//
+// Wire shape: array(1)[array(2)[
+//
+//	map[StakeCredential]PoolId,    // delegations: only registered + delegated
+//	map[StakeCredential]uint64,    // rewards: every registered cred from input
+//
+// ]]
+//
+// Semantics (matches Haskell ledger): only registered (active) accounts
+// appear in either map. Unknown or deregistered credentials are silently
+// filtered out. The delegations map only contains accounts whose `Pool`
+// is currently set; an account that is registered but undelegated will
+// appear in the rewards map only.
+//
+// Stake credential lookup is hash-only: dingo's Account.StakingKey is the
+// 28-byte Blake2b224 credential hash and does not carry the key/script
+// discriminator. Collisions across the two tag spaces are cryptographically
+// negligible. TODO(#394): refine if Account grows tag-aware storage.
+func (ls *LedgerState) queryShelleyFilteredDelegationAndRewardAccounts(
+	creds []olocalstatequery.StakeCredential,
+) (any, error) {
+	delegations := make(map[olocalstatequery.StakeCredential]ledger.Blake2b224)
+	rewards := make(map[olocalstatequery.StakeCredential]uint64)
+	for _, cred := range creds {
+		account, err := ls.db.GetAccount(cred.Bytes[:], false, nil)
+		if err != nil {
+			if errors.Is(err, models.ErrAccountNotFound) {
+				continue
+			}
+			return nil, err
+		}
+		rewards[cred] = uint64(account.Reward)
+		if len(account.Pool) > 0 {
+			delegations[cred] = ledger.NewBlake2b224(account.Pool)
+		}
+	}
+	return []any{[]any{delegations, rewards}}, nil
 }
 
 func (ls *LedgerState) queryShelleyUtxoByTxIn(

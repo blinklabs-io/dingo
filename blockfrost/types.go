@@ -122,6 +122,42 @@ type NetworkStake struct {
 	Active string `json:"active"`
 }
 
+// NetworkEraResponse represents a Blockfrost era summary.
+type NetworkEraResponse struct {
+	Era        string               `json:"era,omitempty"`
+	Start      NetworkEraBound      `json:"start"`
+	End        *NetworkEraBound     `json:"end"`
+	Parameters NetworkEraParameters `json:"parameters"`
+}
+
+// NetworkEraBound represents an era boundary.
+type NetworkEraBound struct {
+	Time  int64  `json:"time"`
+	Slot  uint64 `json:"slot"`
+	Epoch uint64 `json:"epoch"`
+}
+
+// NetworkEraParameters represents era timing parameters.
+type NetworkEraParameters struct {
+	EpochLength uint64 `json:"epoch_length"`
+	SlotLength  uint64 `json:"slot_length"`
+	SafeZone    uint64 `json:"safe_zone"`
+}
+
+// GenesisResponse represents Blockfrost genesis info.
+type GenesisResponse struct {
+	ActiveSlotsCoefficient float32 `json:"active_slots_coefficient"`
+	UpdateQuorum           int     `json:"update_quorum"`
+	MaxLovelaceSupply      string  `json:"max_lovelace_supply"`
+	NetworkMagic           int     `json:"network_magic"`
+	EpochLength            int     `json:"epoch_length"`
+	SystemStart            int     `json:"system_start"`
+	SlotsPerKESPeriod      int     `json:"slots_per_kes_period"`
+	SlotLength             int     `json:"slot_length"`
+	MaxKESEvolutions       int     `json:"max_kes_evolutions"`
+	SecurityParam          int     `json:"security_param"`
+}
+
 // AddressAmountResponse represents a Blockfrost address
 // amount object.
 type AddressAmountResponse struct {
@@ -149,6 +185,23 @@ type AddressTransactionResponse struct {
 	TxIndex     int    `json:"tx_index"`
 	BlockHeight uint64 `json:"block_height"`
 	BlockTime   int    `json:"block_time"`
+}
+
+// AssetResponse represents a Blockfrost native asset
+// object.
+type AssetResponse struct {
+	Asset                   string  `json:"asset"`
+	PolicyID                string  `json:"policy_id"`
+	AssetName               string  `json:"asset_name"`
+	AssetNameASCII          string  `json:"asset_name_ascii"`
+	Fingerprint             string  `json:"fingerprint"`
+	Quantity                string  `json:"quantity"`
+	InitialMintTxHash       string  `json:"initial_mint_tx_hash"`
+	MintOrBurnCount         int     `json:"mint_or_burn_count"`
+	OnchainMetadata         *any    `json:"onchain_metadata"`
+	OnchainMetadataStandard *string `json:"onchain_metadata_standard"`
+	OnchainMetadataExtra    *string `json:"onchain_metadata_extra"`
+	Metadata                *any    `json:"metadata"`
 }
 
 // ErrorResponse represents a Blockfrost error response.

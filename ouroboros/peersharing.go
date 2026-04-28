@@ -101,6 +101,14 @@ func (o *Ouroboros) RequestPeersFromPeer(peer *peergov.Peer) []string {
 	if conn == nil {
 		return nil
 	}
+	// Skip peers that didn't advertise willingness to share. Sending
+	// MsgShareRequest to a remote with PeerSharing disabled (or on a
+	// negotiated version that doesn't carry mini-protocol 10) triggers
+	// UnknownMiniProtocol on the remote muxer and resets the connection.
+	_, versionData := conn.ProtocolVersion()
+	if versionData == nil || !versionData.PeerSharing() {
+		return nil
+	}
 	// Get the peer sharing client
 	ps := conn.PeerSharing()
 	if ps == nil || ps.Client == nil {

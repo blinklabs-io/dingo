@@ -17,6 +17,8 @@ package chainselection
 import (
 	"testing"
 
+	"github.com/blinklabs-io/gouroboros/ledger/byron"
+	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/assert"
@@ -326,6 +328,41 @@ func TestCompareVRFOutputs_InvalidLength(t *testing.T) {
 			assert.Equal(t, tc.expected, result)
 		})
 	}
+}
+
+// TestGetVRFOutput_ByronReturnsNil pins the cross-era no-tiebreaker
+// invariant for Byron↔Shelley boundaries. Byron blocks have no VRF
+// (PBFT, not Praos), so any chain-selection tie that includes a Byron
+// tip must NOT use a VRF-derived field. The defense in dingo lives in
+// two layers:
+//
+//  1. GetVRFOutput's default branch returns nil for any header type it
+//     does not recognise — Byron is intentionally absent from the type
+//     switch.
+//  2. CompareVRFOutputs treats nil/wrong-length as ChainEqual, falling
+//     through to the connection-id tiebreak in selector.go.
+//
+// Together these implement the same semantic as Haskell's
+// Cardano/CanHardFork.hs:hardForkChainSel, which is `NoTiebreakerAcrossEras`
+// for Byron↔Shelley and `SameTiebreakerAcrossEras` (PraosTiebreakerView)
+// for inter-Shelley boundaries. This test pins layer 1 explicitly via a
+// real Byron header value, so a future addition to GetVRFOutput's switch
+// (e.g. a "Byron returns h.something" case introduced by mistake) fails
+// loudly. The existing nil-VRF cases in TestCompareVRFOutputs cover
+// layer 2.
+func TestGetVRFOutput_ByronReturnsNil(t *testing.T) {
+	byronHeader := &byron.ByronMainBlockHeader{}
+	assert.Nil(t, GetVRFOutput(byronHeader),
+		"Byron headers must yield nil VRF output (no VRF in PBFT)")
+
+	shelleyHeader := &shelley.ShelleyBlockHeader{}
+	cmp := CompareHeaders(byronHeader, shelleyHeader)
+	assert.Equal(t, ChainEqual, cmp,
+		"a tie that includes a Byron tip must not be broken by VRF "+
+			"(NoTiebreakerAcrossEras at Byron↔Shelley)")
+	cmp = CompareHeaders(shelleyHeader, byronHeader)
+	assert.Equal(t, ChainEqual, cmp,
+		"NoTiebreakerAcrossEras must be symmetric")
 }
 
 // Helper function to create a 64-byte VRF output filled with a specific value

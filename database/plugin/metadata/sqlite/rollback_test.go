@@ -17,51 +17,22 @@ package sqlite
 import (
 	"bytes"
 	"errors"
-	"fmt"
 	"math/big"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
+	dbtestutil "github.com/blinklabs-io/dingo/internal/test/testutil"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
-	pdata "github.com/blinklabs-io/plutigo/data"
 	"github.com/stretchr/testify/require"
-	"github.com/utxorpc/go-codegen/utxorpc/v1alpha/cardano"
 )
-
-// --- Mock transaction input with consumed support ---
-
-type mockInput struct {
-	txId  []byte
-	index uint32
-}
-
-func (m *mockInput) Id() lcommon.Blake2b256 {
-	return lcommon.NewBlake2b256(m.txId)
-}
-
-func (m *mockInput) Index() uint32 {
-	return m.index
-}
-
-func (m *mockInput) String() string {
-	return fmt.Sprintf("%x#%d", m.txId, m.index)
-}
-
-func (m *mockInput) Utxorpc() (*cardano.TxInput, error) {
-	return nil, nil
-}
-
-func (m *mockInput) ToPlutusData() pdata.PlutusData {
-	return nil
-}
 
 // mockTransactionWithInputs extends mockTransaction with consumed
 // inputs for testing the optimistic locking UTxO spend path.
 type mockTransactionWithInputs struct {
 	mockTransaction
-	consumed []mockInput
+	consumed []dbtestutil.MockInput
 }
 
 func (m *mockTransactionWithInputs) Consumed() []lcommon.TransactionInput {
@@ -77,6 +48,103 @@ func (m *mockTransactionWithInputs) Inputs() []lcommon.TransactionInput {
 }
 
 // --- Optimistic UTxO locking tests ---
+
+func TestSetUtxoDeletedAtSlotBackfillsSameSlotMissingSpender(t *testing.T) {
+	store := setupTestDB(t)
+
+	utxoTxId := bytes.Repeat([]byte{0xAB}, 32)
+	utxo := models.Utxo{
+		TxId:        utxoTxId,
+		OutputIdx:   0,
+		AddedSlot:   100,
+		DeletedSlot: 200,
+		Amount:      types.Uint64(5000000),
+	}
+	require.NoError(t, store.DB().Create(&utxo).Error)
+
+	input := dbtestutil.NewMockInput(utxoTxId, 0)
+	spenderTxHash := bytes.Repeat([]byte{0xCD}, 32)
+	require.NoError(
+		t,
+		store.DB().Create(&models.Transaction{
+			Hash:  spenderTxHash,
+			Valid: true,
+		}).Error,
+	)
+	require.NoError(
+		t,
+		store.SetUtxoDeletedAtSlot(
+			input,
+			200,
+			spenderTxHash,
+			nil,
+		),
+	)
+
+	var updated models.Utxo
+	require.NoError(
+		t,
+		store.DB().Where(
+			"tx_id = ? AND output_idx = ?",
+			utxoTxId,
+			0,
+		).First(&updated).Error,
+	)
+	require.Equal(t, uint64(200), updated.DeletedSlot)
+	require.Equal(t, spenderTxHash, updated.SpentAtTxId)
+}
+
+func TestSetUtxoDeletedAtSlotReturnsNotFoundWhenRowMissing(
+	t *testing.T,
+) {
+	store := setupTestDB(t)
+
+	input := dbtestutil.NewMockInput(bytes.Repeat([]byte{0xEF}, 32), 0)
+	err := store.SetUtxoDeletedAtSlot(
+		input,
+		200,
+		bytes.Repeat([]byte{0x12}, 32),
+		nil,
+	)
+	require.Error(t, err)
+	require.ErrorIs(t, err, types.ErrUtxoNotFound)
+}
+
+func TestSetUtxoDeletedAtSlotReturnsConflictWhenRowAlreadySpent(
+	t *testing.T,
+) {
+	store := setupTestDB(t)
+
+	utxoTxId := bytes.Repeat([]byte{0xEF}, 32)
+	spentTxHash := bytes.Repeat([]byte{0x34}, 32)
+	require.NoError(
+		t,
+		store.DB().Create(&models.Transaction{
+			Hash:  spentTxHash,
+			Valid: true,
+		}).Error,
+	)
+	require.NoError(
+		t,
+		store.DB().Create(&models.Utxo{
+			TxId:        utxoTxId,
+			OutputIdx:   0,
+			AddedSlot:   100,
+			DeletedSlot: 150,
+			SpentAtTxId: spentTxHash,
+			Amount:      types.Uint64(5000000),
+		}).Error,
+	)
+
+	err := store.SetUtxoDeletedAtSlot(
+		dbtestutil.NewMockInput(utxoTxId, 0),
+		200,
+		bytes.Repeat([]byte{0x12}, 32),
+		nil,
+	)
+	require.Error(t, err)
+	require.ErrorIs(t, err, types.ErrUtxoConflict)
+}
 
 // TestOptimisticLockingConflictDetection verifies that the optimistic
 // locking mechanism in SetTransaction correctly detects when a UTxO
@@ -101,8 +169,8 @@ func TestOptimisticLockingConflictDetection(t *testing.T) {
 			hash:    tx1Hash,
 			isValid: true,
 		},
-		consumed: []mockInput{
-			{txId: utxoTxId, index: 0},
+		consumed: []dbtestutil.MockInput{
+			{TxId: utxoTxId, IndexValue: 0},
 		},
 	}
 
@@ -141,8 +209,8 @@ func TestOptimisticLockingConflictDetection(t *testing.T) {
 			hash:    tx2Hash,
 			isValid: true,
 		},
-		consumed: []mockInput{
-			{txId: utxoTxId, index: 0},
+		consumed: []dbtestutil.MockInput{
+			{TxId: utxoTxId, IndexValue: 0},
 		},
 	}
 
@@ -184,8 +252,8 @@ func TestOptimisticLockingIdempotentRetry(t *testing.T) {
 			hash:    txHash,
 			isValid: true,
 		},
-		consumed: []mockInput{
-			{txId: utxoTxId, index: 0},
+		consumed: []dbtestutil.MockInput{
+			{TxId: utxoTxId, IndexValue: 0},
 		},
 	}
 
@@ -215,8 +283,8 @@ func TestOptimisticLockingMissingUtxo(t *testing.T) {
 			hash:    txHash,
 			isValid: true,
 		},
-		consumed: []mockInput{
-			{txId: missingTxId, index: 0},
+		consumed: []dbtestutil.MockInput{
+			{TxId: missingTxId, IndexValue: 0},
 		},
 	}
 
@@ -258,9 +326,9 @@ func TestSetTransactionIndexesAddressTransactions(t *testing.T) {
 			hash:    txHash,
 			isValid: true,
 		},
-		consumed: []mockInput{
-			{txId: utxoTxId, index: 0},
-			{txId: utxoTxId, index: 0}, // duplicate input reference
+		consumed: []dbtestutil.MockInput{
+			{TxId: utxoTxId, IndexValue: 0},
+			{TxId: utxoTxId, IndexValue: 0}, // duplicate input reference
 		},
 	}
 	point := ocommon.Point{
@@ -1098,8 +1166,8 @@ func TestRollbackConcurrentUtxoSpend(t *testing.T) {
 			hash:    tx1Hash,
 			isValid: true,
 		},
-		consumed: []mockInput{
-			{txId: utxoTxId, index: 0},
+		consumed: []dbtestutil.MockInput{
+			{TxId: utxoTxId, IndexValue: 0},
 		},
 	}
 	point1 := ocommon.Point{
@@ -1153,8 +1221,8 @@ func TestRollbackConcurrentUtxoSpend(t *testing.T) {
 			hash:    tx2Hash,
 			isValid: true,
 		},
-		consumed: []mockInput{
-			{txId: utxoTxId, index: 0},
+		consumed: []dbtestutil.MockInput{
+			{TxId: utxoTxId, IndexValue: 0},
 		},
 	}
 	point2 := ocommon.Point{

@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"encoding/hex"
 	"fmt"
 
 	"github.com/blinklabs-io/dingo/chain"
@@ -59,10 +60,31 @@ func (ls *LedgerState) emitTransactionRollbackEvents(
 	for _, block := range rollbackEvt.RolledBackBlocks {
 		blk, err := block.Decode()
 		if err != nil {
-			ls.config.Logger.Warn(
-				fmt.Sprintf(
-					"ledger: failed to decode block for undo events: %s",
-					err,
+			blockPoint := ocommon.Point{
+				Slot: block.Slot,
+				Hash: block.Hash,
+			}
+			decodeErr := fmt.Errorf(
+				"decode rolled-back block for tx undo events: %w",
+				err,
+			)
+			ls.config.Logger.Error(
+				"failed to decode block for rollback tx undo events",
+				"component", "ledger",
+				"error", decodeErr,
+				"slot", block.Slot,
+				"hash", hex.EncodeToString(block.Hash),
+				"block_number", block.Number,
+			)
+			ls.config.EventBus.Publish(
+				LedgerErrorEventType,
+				event.NewEvent(
+					LedgerErrorEventType,
+					LedgerErrorEvent{
+						Error:     decodeErr,
+						Operation: "rollback_tx_undo_decode",
+						Point:     blockPoint,
+					},
 				),
 			)
 			continue

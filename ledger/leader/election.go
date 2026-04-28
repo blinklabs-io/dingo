@@ -21,9 +21,11 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"time"
 
 	"github.com/blinklabs-io/dingo/event"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 // StakeDistributionProvider provides stake distribution data for leader election.
@@ -94,6 +96,7 @@ type Election struct {
 	computeCh      chan uint64   // requests background schedule computation
 	subscriptionId event.EventSubscriberId
 	nonceReadySub  event.EventSubscriberId
+	metrics        *electionMetrics
 }
 
 // NewElection creates a new leader election manager for a stake pool.
@@ -123,6 +126,18 @@ func (e *Election) SetScheduleStore(store ScheduleStore) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.scheduleStore = store
+}
+
+// SetPromRegistry enables leader election metrics.
+func (e *Election) SetPromRegistry(reg prometheus.Registerer) {
+	if reg == nil {
+		return
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.metrics == nil {
+		e.metrics = initElectionMetrics(reg)
+	}
 }
 
 // Start begins listening for epoch transitions and maintaining schedules.
@@ -572,8 +587,12 @@ func (e *Election) computeSchedule(
 	snapshotEpoch := scheduleSnapshotEpoch(currentEpoch)
 
 	// Get pool stake from Go snapshot
+	stakeLookupStart := time.Now()
 	poolStake, err := e.stakeProvider.GetPoolStake(snapshotEpoch, e.poolId[:])
 	if err != nil {
+		if e.metrics != nil {
+			e.metrics.stakeLookupDuration.Observe(time.Since(stakeLookupStart).Seconds())
+		}
 		return nil, fmt.Errorf("get pool stake: %w", err)
 	}
 
@@ -596,6 +615,9 @@ func (e *Election) computeSchedule(
 
 	// Get total stake from Go snapshot
 	totalStake, err := e.stakeProvider.GetTotalActiveStake(snapshotEpoch)
+	if e.metrics != nil {
+		e.metrics.stakeLookupDuration.Observe(time.Since(stakeLookupStart).Seconds())
+	}
 	if err != nil {
 		return nil, fmt.Errorf("get total stake: %w", err)
 	}
@@ -631,6 +653,7 @@ func (e *Election) computeSchedule(
 		e.epochProvider.SlotsPerEpoch(),
 	)
 
+	vrfEvalStart := time.Now()
 	schedule, err := calc.CalculateSchedule(
 		currentEpoch,
 		e.poolId,
@@ -639,6 +662,9 @@ func (e *Election) computeSchedule(
 		totalStake,
 		epochNonce,
 	)
+	if e.metrics != nil {
+		e.metrics.vrfEvalDurationSeconds.Observe(time.Since(vrfEvalStart).Seconds())
+	}
 	if err != nil {
 		return nil, fmt.Errorf("calculate schedule: %w", err)
 	}
@@ -654,6 +680,18 @@ func (e *Election) computeSchedule(
 		"leader_slots", schedule.SlotCount(),
 		"leader_slot_list", schedule.LeaderSlotsSnapshot(),
 	)
+	if e.metrics != nil {
+		slotsChecked := e.epochProvider.SlotsPerEpoch()
+		slotsWon := uint64(len(schedule.LeaderSlotsSnapshot()))
+		slotsNotWon := uint64(0)
+		if slotsWon <= slotsChecked {
+			slotsNotWon = slotsChecked - slotsWon
+		}
+		e.metrics.lastEpochSlotsChecked.Set(float64(slotsChecked))
+		e.metrics.lastEpochSlotsWon.Set(float64(slotsWon))
+		e.metrics.lastEpochSlotsNotWon.Set(float64(slotsNotWon))
+		e.metrics.lastEvaluatedEpochNumber.Set(float64(currentEpoch))
+	}
 
 	return schedule, nil
 }
@@ -731,7 +769,16 @@ func (e *Election) ShouldProduceBlock(slot uint64) bool {
 		}
 		return false
 	}
-	return schedule.IsLeaderForSlot(slot)
+	isLeader := schedule.IsLeaderForSlot(slot)
+	if e.metrics != nil {
+		e.metrics.slotChecksTotal.Inc()
+		if isLeader {
+			e.metrics.slotWonTotal.Inc()
+		} else {
+			e.metrics.slotNotWonTotal.Inc()
+		}
+	}
+	return isLeader
 }
 
 // CurrentSchedule returns the leader schedule for the current epoch, or nil.

@@ -118,6 +118,18 @@ func (n *Node) processChainsyncRecyclerTick(
 		*lastProgressSlot = localTipSlot
 		*lastProgressAt = now
 	}
+	// During catch-up, extend all recycling thresholds to avoid
+	// churning connections while the node is making progress.
+	// Connection recycling during bulk sync causes pipeline resets,
+	// TIME_WAIT socket exhaustion, and dropped rollbacks that slow
+	// catch-up far more than the stall itself.
+	catchUpMultiplier := 1
+	if n.ledgerState != nil && !n.ledgerState.IsAtTip() {
+		catchUpMultiplier = 5
+	}
+	effectiveGrace := time.Duration(catchUpMultiplier) * grace
+	effectivePlateau := time.Duration(catchUpMultiplier) * plateauRecoveryThreshold
+	effectiveCooldown := time.Duration(catchUpMultiplier) * cooldown
 	n.chainsyncState.CheckStalledClients()
 	trackedClients := n.chainsyncState.GetTrackedClients()
 	trackedByID := make(
@@ -138,7 +150,7 @@ func (n *Node) processChainsyncRecyclerTick(
 	// Prune expired cooldown entries so this map does
 	// not grow without bound over long runtimes.
 	for connKey, last := range lastRecycled {
-		if now.Sub(last) >= cooldown {
+		if now.Sub(last) >= effectiveCooldown {
 			delete(lastRecycled, connKey)
 		}
 	}
@@ -166,8 +178,8 @@ func (n *Node) processChainsyncRecyclerTick(
 					localTipSlot,
 					bestPeerTip.Tip.Point.Slot,
 					lastRecycledAt,
-					cooldown,
-					plateauRecoveryThreshold,
+					effectiveCooldown,
+					effectivePlateau,
 				) {
 					n.config.logger.Warn(
 						"local tip plateau detected, resyncing chainsync client",
@@ -198,14 +210,19 @@ func (n *Node) processChainsyncRecyclerTick(
 			continue
 		}
 		connKey := conn.ConnId.String()
-		if _, exists := recycleAt[connKey]; !exists {
-			recycleAt[connKey] = now.Add(grace)
+		desiredDueAt := now.Add(effectiveGrace)
+		if dueAt, exists := recycleAt[connKey]; !exists {
+			recycleAt[connKey] = desiredDueAt
 			n.config.logger.Info(
 				"chainsync client stalled, scheduling guarded recycle",
 				"connection_id", connKey,
 				"stall_timeout", chainsyncCfg.StallTimeout,
-				"grace_period", grace,
+				"grace_period", effectiveGrace,
 			)
+		} else if dueAt.After(desiredDueAt) {
+			// Shrink deadline when transitioning from catch-up
+			// to at-tip so stalls aren't delayed unnecessarily.
+			recycleAt[connKey] = desiredDueAt
 		}
 	}
 	for connKey, dueAt := range recycleAt {
@@ -219,8 +236,8 @@ func (n *Node) processChainsyncRecyclerTick(
 		}
 		connId := tracked.ConnId
 		if last, ok := lastRecycled[connKey]; ok &&
-			now.Sub(last) < cooldown {
-			recycleAt[connKey] = now.Add(cooldown - now.Sub(last))
+			now.Sub(last) < effectiveCooldown {
+			recycleAt[connKey] = now.Add(effectiveCooldown - now.Sub(last))
 			continue
 		}
 		// Never recycle the only eligible peer. A block producer

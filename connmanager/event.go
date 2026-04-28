@@ -31,6 +31,19 @@ type InboundConnectionEvent struct {
 	LocalAddr    net.Addr
 	RemoteAddr   net.Addr
 	IsNtC        bool // true for node-to-client (local) connections
+	// NormalizedRemoteAddr is RemoteAddr.String() passed through
+	// NormalizePeerAddr, so subscribers key on the same transport
+	// identity the connection manager uses internally (and exposes via
+	// HasInboundPeerAddress). Populated by the listener; empty on
+	// events synthesized without a listener, in which case subscribers
+	// must call NormalizePeerAddr themselves to preserve the contract.
+	NormalizedRemoteAddr string
+	// IsDuplex reports whether the handshake negotiated
+	// InitiatorAndResponder (full-duplex) mode. Populated by the listener
+	// after ouroboros.NewConnection completes. When false, subscribers
+	// should treat the value as best-effort and fall back to
+	// ConnectionManager.GetConnectionById for authoritative state.
+	IsDuplex bool
 }
 
 type ConnectionClosedEvent struct {

@@ -61,11 +61,24 @@ const (
 	// Default inbound peer validation configuration
 	defaultInboundHotScoreThreshold = 0.6 // Higher threshold for inbound peers
 	defaultInboundMinTenure         = 10 * time.Minute
+	defaultInboundWarmTarget        = 10
+	defaultInboundHotQuota          = 2
+	defaultInboundPruneAfter        = 15 * time.Minute
+	defaultInboundDuplexOnlyForHot  = false
+	defaultInboundCooldown          = 5 * time.Minute
+	// defaultInboundProvisionalWindow is the grace period during which a
+	// freshly-arrived inbound peer is not counted toward the inbound
+	// warm/hot budgets. It filters half-opens and scanner traffic
+	// without hiding real peers. Chosen to sit above typical TCP RTT
+	// noise but well below the Prometheus scrape cadence, so short-lived
+	// connections do not cause visible metric oscillation.
+	defaultInboundProvisionalWindow = 3 * time.Second
 
 	// Default bootstrap exit configuration
-	defaultMinLedgerPeersForExit     = 5
-	defaultSyncProgressForExit       = 0.95 // 95%
-	defaultBootstrapRecoveryCooldown = 2 * time.Minute
+	defaultMinLedgerPeersForExit                = 5
+	defaultSyncProgressForExit                  = 0.95 // 95%
+	defaultBootstrapRecoveryCooldown            = 2 * time.Minute
+	defaultBootstrapPromotionMinDiversityGroups = 2
 )
 
 const (
@@ -100,6 +113,7 @@ type PeerGovernor struct {
 	ledgerKnownAddrs      map[string]struct{} // addresses seen from ledger discovery
 	bootstrapExited       bool                // Whether bootstrap peers have been exited
 	lastBootstrapExit     time.Time           // Timestamp of most recent bootstrap exit
+	inboundPruned         int                 // cumulative inbound prunes since start
 	mu                    sync.Mutex
 }
 
@@ -155,8 +169,26 @@ type PeerGovernorConfig struct {
 
 	// Inbound peer validation configuration
 	// Inbound peers require higher scores and minimum tenure before hot promotion
+	// Inbound budget interaction policy (phase 1):
+	// - InboundWarmTarget/InboundHotQuota are explicit operator-configured
+	//   budget signals surfaced in status/metrics.
+	// - They do not spill over into topology/gossip/ledger quotas.
+	// - Active enforcement tied to these budgets is deferred to later
+	//   phases; this phase focuses on configuration and
+	//   observability surfaces only.
+	InboundWarmTarget        int           // Warm inbound budget (0 = default 10)
+	InboundHotQuota          int           // Hot inbound budget (0 = default 2)
 	InboundHotScoreThreshold float64       // Min score for inbound hot (0 = default 0.6)
 	InboundMinTenure         time.Duration // Min time as warm before hot (0 = default 10min)
+	InboundPruneAfter        time.Duration // Future prune grace (0 = default 15min)
+	InboundDuplexOnlyForHot  bool          // Future duplex policy (default false)
+	InboundCooldown          time.Duration // Future cooldown between churn actions (0 = default 5min)
+	// InboundProvisionalWindow is the grace duration a fresh inbound
+	// peer is excluded from InboundWarm/InboundHot budget counts, so a
+	// burst of half-open connects cannot inflate observed usage.
+	// 0 selects defaultInboundProvisionalWindow; set to a negative
+	// value to disable the filter entirely.
+	InboundProvisionalWindow time.Duration
 
 	// Bootstrap peer exit configuration
 	// Bootstrap peers are used during initial sync but should be exited once
@@ -166,6 +198,12 @@ type PeerGovernorConfig struct {
 	AutoBootstrapRecovery     *bool                // Re-enable bootstrap if hot peers drop too low (nil = default true)
 	BootstrapRecoveryCooldown time.Duration        // Minimum time to wait after bootstrap exit before recovery
 	SyncProgressProvider      SyncProgressProvider // Provider for current sync progress
+
+	// Bootstrap promotion configuration
+	// While bootstrap is active, prefer historical topology peers and
+	// diversify hot promotion across multiple peer groups.
+	BootstrapPromotionEnabled            *bool // nil = default true
+	BootstrapPromotionMinDiversityGroups int   // 0 = default 2
 }
 
 // pendingEvent holds an event to publish after releasing locks.
@@ -259,11 +297,28 @@ func NewPeerGovernor(cfg PeerGovernorConfig) *PeerGovernor {
 		cfg.MinScoreThreshold = defaultMinScoreThreshold
 	}
 	// Inbound peer validation defaults
-	if cfg.InboundHotScoreThreshold == 0 {
+	if cfg.InboundWarmTarget <= 0 {
+		cfg.InboundWarmTarget = defaultInboundWarmTarget
+	}
+	if cfg.InboundHotQuota <= 0 {
+		cfg.InboundHotQuota = defaultInboundHotQuota
+	}
+	if cfg.InboundHotScoreThreshold <= 0 {
 		cfg.InboundHotScoreThreshold = defaultInboundHotScoreThreshold
 	}
-	if cfg.InboundMinTenure == 0 {
+	if cfg.InboundMinTenure <= 0 {
 		cfg.InboundMinTenure = defaultInboundMinTenure
+	}
+	if cfg.InboundPruneAfter <= 0 {
+		cfg.InboundPruneAfter = defaultInboundPruneAfter
+	}
+	if cfg.InboundCooldown <= 0 {
+		cfg.InboundCooldown = defaultInboundCooldown
+	}
+	// InboundProvisionalWindow: 0 means use default; negative means
+	// disabled (no grace period applied to budget counting).
+	if cfg.InboundProvisionalWindow == 0 {
+		cfg.InboundProvisionalWindow = defaultInboundProvisionalWindow
 	}
 	// Bootstrap exit configuration defaults
 	if cfg.MinLedgerPeersForExit == 0 {
@@ -275,6 +330,13 @@ func NewPeerGovernor(cfg PeerGovernorConfig) *PeerGovernor {
 	// AutoBootstrapRecovery: nil means use default (true), explicit false disables
 	if cfg.BootstrapRecoveryCooldown <= 0 {
 		cfg.BootstrapRecoveryCooldown = defaultBootstrapRecoveryCooldown
+	}
+	if cfg.BootstrapPromotionEnabled == nil {
+		b := true
+		cfg.BootstrapPromotionEnabled = &b
+	}
+	if cfg.BootstrapPromotionMinDiversityGroups <= 0 {
+		cfg.BootstrapPromotionMinDiversityGroups = defaultBootstrapPromotionMinDiversityGroups
 	}
 	cfg.Logger = cfg.Logger.With("component", "peergov")
 	p := &PeerGovernor{

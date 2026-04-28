@@ -155,6 +155,35 @@ func (d *MetadataStoreSqlite) GetUtxosAddedAfterSlot(
 	return ret, nil
 }
 
+// GetLiveUtxosBySlot returns the references of all live UTxOs (deleted_slot = 0)
+// created at the given slot. Only TxId and OutputIdx are populated.
+func (d *MetadataStoreSqlite) GetLiveUtxosBySlot(
+	slot uint64,
+	txn types.Txn,
+) ([]models.UtxoId, error) {
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return nil, err
+	}
+	var rows []struct {
+		TxId      []byte `gorm:"column:tx_id"`
+		OutputIdx uint32 `gorm:"column:output_idx"`
+	}
+	result := db.
+		Model(&models.Utxo{}).
+		Where("deleted_slot = 0 AND added_slot = ?", slot).
+		Select("tx_id", "output_idx").
+		Find(&rows)
+	if result.Error != nil {
+		return nil, result.Error
+	}
+	ret := make([]models.UtxoId, len(rows))
+	for i, r := range rows {
+		ret[i] = models.UtxoId{Hash: r.TxId, Idx: r.OutputIdx}
+	}
+	return ret, nil
+}
+
 // GetUtxosDeletedBeforeSlot returns a list of Utxos marked as deleted before a given slot
 func (d *MetadataStoreSqlite) GetUtxosDeletedBeforeSlot(
 	slot uint64,
@@ -523,10 +552,14 @@ func (d *MetadataStoreSqlite) AddUtxos(
 	return result.Error
 }
 
-// SetUtxoDeletedAtSlot marks a UTxO as deleted at the given slot
+// SetUtxoDeletedAtSlot marks a UTxO as deleted at the given slot and
+// records the hash of the transaction that consumed it. The update uses
+// the same optimistic-locking predicate as the normal consume path and
+// also repairs same-slot rows that are still missing spent_at_tx_id.
 func (d *MetadataStoreSqlite) SetUtxoDeletedAtSlot(
 	input ledger.TransactionInput,
 	slot uint64,
+	spenderTxHash []byte,
 	txn types.Txn,
 ) error {
 	db, err := d.resolveDB(txn)
@@ -534,15 +567,61 @@ func (d *MetadataStoreSqlite) SetUtxoDeletedAtSlot(
 		return err
 	}
 	result := db.Model(&models.Utxo{}).
-		Where("tx_id = ? AND output_idx = ?", input.Id().Bytes(), input.Index()).
-		Update("deleted_slot", slot)
+		Where(
+			"tx_id = ? AND output_idx = ? AND spent_at_tx_id IS NULL AND (deleted_slot = 0 OR deleted_slot = ?)",
+			input.Id().Bytes(),
+			input.Index(),
+			slot,
+		).
+		Updates(map[string]any{
+			"deleted_slot":   slot,
+			"spent_at_tx_id": spenderTxHash,
+		})
 	if result.Error != nil {
 		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		var count int64
+		existsResult := db.Model(&models.Utxo{}).
+			Where(
+				"tx_id = ? AND output_idx = ?",
+				input.Id().Bytes(),
+				input.Index(),
+			).
+			Count(&count)
+		if existsResult.Error != nil {
+			return existsResult.Error
+		}
+		if count == 0 {
+			return fmt.Errorf(
+				"%w: %x:%d",
+				types.ErrUtxoNotFound,
+				input.Id().Bytes(),
+				input.Index(),
+			)
+		}
+		return fmt.Errorf(
+			"%w: %x:%d",
+			types.ErrUtxoConflict,
+			input.Id().Bytes(),
+			input.Index(),
+		)
+	}
+	if result.RowsAffected != 1 {
+		return fmt.Errorf(
+			"%w: %x:%d",
+			types.ErrUtxoConflict,
+			input.Id().Bytes(),
+			input.Index(),
+		)
 	}
 	return nil
 }
 
-// SetUtxosNotDeletedAfterSlot marks a list of Utxos as not deleted after a given slot
+// SetUtxosNotDeletedAfterSlot marks a list of Utxos as not deleted after a given slot.
+// Both deleted_slot and spent_at_tx_id must be cleared so the restored row
+// satisfies the spend predicate (deleted_slot = 0 AND spent_at_tx_id IS NULL);
+// otherwise the UTxO appears live but cannot be re-spent.
 func (d *MetadataStoreSqlite) SetUtxosNotDeletedAfterSlot(
 	slot uint64,
 	txn types.Txn,
@@ -553,9 +632,102 @@ func (d *MetadataStoreSqlite) SetUtxosNotDeletedAfterSlot(
 	}
 	result := db.Model(models.Utxo{}).
 		Where("deleted_slot > ?", slot).
-		Update("deleted_slot", 0)
+		Updates(map[string]any{
+			"deleted_slot":   0,
+			"spent_at_tx_id": nil,
+		})
 	if result.Error != nil {
 		return result.Error
+	}
+	return nil
+}
+
+// liveUtxoIterPageSize bounds how many rows are fetched per page from
+// the live UTxO scan. Picked to keep peak memory bounded while
+// amortizing round-trip overhead.
+const liveUtxoIterPageSize = 4096
+
+// IterateLiveUtxos invokes fn for every live UTxO row in unspecified
+// order, paging through the table to avoid loading the full set at
+// once. See the MetadataStore interface for semantics.
+func (d *MetadataStoreSqlite) IterateLiveUtxos(
+	txn types.Txn,
+	fn func(*models.Utxo) error,
+) error {
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return err
+	}
+	var lastID uint
+	for {
+		var batch []models.Utxo
+		if err := db.Model(&models.Utxo{}).
+			Where("deleted_slot = 0 AND id > ?", lastID).
+			Order("id ASC").
+			Limit(liveUtxoIterPageSize).
+			Find(&batch).Error; err != nil {
+			return err
+		}
+		if len(batch) == 0 {
+			return nil
+		}
+		for i := range batch {
+			if err := fn(&batch[i]); err != nil {
+				return err
+			}
+		}
+		lastID = batch[len(batch)-1].ID
+		if len(batch) < liveUtxoIterPageSize {
+			return nil
+		}
+	}
+}
+
+// markUtxosDeletedChunkSize bounds how many (tx_id, output_idx)
+// composite predicates are sent in a single UPDATE to keep us under
+// SQLite's bind-variable limit (sqliteBindVarLimit, two bindings per
+// ref).
+const markUtxosDeletedChunkSize = sqliteBindVarLimit / 2
+
+// MarkUtxosDeletedAtSlot marks every live UTxO row matching one of
+// refs as deleted at atSlot. See the MetadataStore interface for
+// semantics.
+func (d *MetadataStoreSqlite) MarkUtxosDeletedAtSlot(
+	txn types.Txn,
+	refs []types.UtxoKey,
+	atSlot uint64,
+) error {
+	if len(refs) == 0 {
+		return nil
+	}
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return err
+	}
+	for start := 0; start < len(refs); start += markUtxosDeletedChunkSize {
+		end := min(start+markUtxosDeletedChunkSize, len(refs))
+		chunk := refs[start:end]
+		// GORM's tuple-IN handling unpacks []byte arguments byte-by-byte
+		// across drivers, so build an OR chain with parallel
+		// (tx_id, output_idx) equality predicates instead.
+		var (
+			clauses strings.Builder
+			args    = make([]any, 0, 2*len(chunk))
+		)
+		for i, r := range chunk {
+			if i > 0 {
+				clauses.WriteString(" OR ")
+			}
+			clauses.WriteString("(tx_id = ? AND output_idx = ?)")
+			args = append(args, r.TxId, r.OutputIdx)
+		}
+		whereClause := "deleted_slot = 0 AND (" + clauses.String() + ")"
+		result := db.Model(&models.Utxo{}).
+			Where(whereClause, args...).
+			Update("deleted_slot", atSlot)
+		if result.Error != nil {
+			return result.Error
+		}
 	}
 	return nil
 }

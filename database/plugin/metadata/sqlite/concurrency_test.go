@@ -68,7 +68,7 @@ func TestConcurrentReadsDuringWrites(t *testing.T) {
 		snapshot := &models.PoolStakeSnapshot{
 			Epoch:          1,
 			SnapshotType:   "go",
-			PoolKeyHash:    []byte(fmt.Sprintf("pool_%028d", i)),
+			PoolKeyHash:    fmt.Appendf(nil, "pool_%028d", i),
 			TotalStake:     1000000,
 			DelegatorCount: 100,
 			CapturedSlot:   1000,
@@ -88,12 +88,10 @@ func TestConcurrentReadsDuringWrites(t *testing.T) {
 				snapshot := &models.PoolStakeSnapshot{
 					Epoch:        uint64(writerID*1000 + i + 2),
 					SnapshotType: "go",
-					PoolKeyHash: []byte(
-						fmt.Sprintf(
-							"pool_w%d_%023d",
-							writerID,
-							i,
-						),
+					PoolKeyHash: fmt.Appendf(nil,
+						"pool_w%d_%023d",
+						writerID,
+						i,
 					),
 					TotalStake:     1000000,
 					DelegatorCount: 100,
@@ -178,12 +176,10 @@ func TestConcurrentWriteTransactions(t *testing.T) {
 						writerID*1000 + i + 1,
 					),
 					SnapshotType: "go",
-					PoolKeyHash: []byte(
-						fmt.Sprintf(
-							"pool_tw%d_%022d",
-							writerID,
-							i,
-						),
+					PoolKeyHash: fmt.Appendf(nil,
+						"pool_tw%d_%022d",
+						writerID,
+						i,
 					),
 					TotalStake:     1000000,
 					DelegatorCount: 100,
@@ -413,7 +409,7 @@ func TestConcurrentReadsDontBlock(t *testing.T) {
 		snapshot := &models.PoolStakeSnapshot{
 			Epoch:          1,
 			SnapshotType:   "go",
-			PoolKeyHash:    []byte(fmt.Sprintf("pool_%028d", i)),
+			PoolKeyHash:    fmt.Appendf(nil, "pool_%028d", i),
 			TotalStake:     1000000,
 			DelegatorCount: 100,
 			CapturedSlot:   1000,
@@ -432,9 +428,7 @@ func TestConcurrentReadsDontBlock(t *testing.T) {
 	)
 
 	for range numReaders {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for range 20 {
 				_, err := store.GetPoolStakeSnapshotsByEpoch(
 					1, "go", nil,
@@ -443,7 +437,7 @@ func TestConcurrentReadsDontBlock(t *testing.T) {
 					errors.Add(1)
 				}
 			}
-		}()
+		})
 	}
 
 	wg.Wait()

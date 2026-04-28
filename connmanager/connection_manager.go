@@ -301,7 +301,18 @@ func (c *ConnectionManager) hasFullDuplex(info *connectionInfo) bool {
 	if info == nil || !info.isInbound || info.isNtC || info.conn == nil {
 		return false
 	}
-	_, versionData := info.conn.ProtocolVersion()
+	return connectionIsDuplex(info.conn)
+}
+
+// connectionIsDuplex reports whether a connection negotiated
+// InitiatorAndResponder (full-duplex) mode. Returns false when the
+// handshake has not completed yet or the connection is nil, so it is
+// safe to call at any time after ouroboros.NewConnection returns.
+func connectionIsDuplex(conn *ouroboros.Connection) bool {
+	if conn == nil {
+		return false
+	}
+	_, versionData := conn.ProtocolVersion()
 	if versionData == nil {
 		return false
 	}
@@ -321,7 +332,7 @@ func (c *ConnectionManager) updatePeerConnectivityLocked(
 	if peerAddr == "" {
 		return
 	}
-	peerKey := normalizePeerAddr(peerAddr)
+	peerKey := NormalizePeerAddr(peerAddr)
 	before := c.peerConnectivity[peerKey]
 	after := before
 	if add {
@@ -594,7 +605,7 @@ func (c *ConnectionManager) addConnectionImpl(
 			if existing.isInbound &&
 				!existing.isNtC &&
 				c.tracksInboundPeerAddresses() {
-				if peerKey := normalizePeerAddr(existing.peerAddr); peerKey != "" {
+				if peerKey := NormalizePeerAddr(existing.peerAddr); peerKey != "" {
 					c.inboundPeerAddrs[peerKey]--
 					if c.inboundPeerAddrs[peerKey] <= 0 {
 						delete(c.inboundPeerAddrs, peerKey)
@@ -627,7 +638,7 @@ func (c *ConnectionManager) addConnectionImpl(
 			if existing.isInbound &&
 				!existing.isNtC &&
 				c.tracksInboundPeerAddresses() {
-				if peerKey := normalizePeerAddr(existing.peerAddr); peerKey != "" {
+				if peerKey := NormalizePeerAddr(existing.peerAddr); peerKey != "" {
 					c.inboundPeerAddrs[peerKey]--
 					if c.inboundPeerAddrs[peerKey] <= 0 {
 						delete(c.inboundPeerAddrs, peerKey)
@@ -656,7 +667,7 @@ func (c *ConnectionManager) addConnectionImpl(
 	}
 	info := c.connections[connId]
 	if isInbound && !isNtC && c.tracksInboundPeerAddresses() {
-		if peerKey := normalizePeerAddr(peerAddr); peerKey != "" {
+		if peerKey := NormalizePeerAddr(peerAddr); peerKey != "" {
 			c.inboundPeerAddrs[peerKey]++
 		}
 	}
@@ -709,7 +720,7 @@ func (c *ConnectionManager) RemoveConnection(
 		info.isInbound &&
 		!info.isNtC &&
 		c.tracksInboundPeerAddresses() {
-		if peerKey := normalizePeerAddr(info.peerAddr); peerKey != "" {
+		if peerKey := NormalizePeerAddr(info.peerAddr); peerKey != "" {
 			c.inboundPeerAddrs[peerKey]--
 			if c.inboundPeerAddrs[peerKey] <= 0 {
 				delete(c.inboundPeerAddrs, peerKey)
@@ -747,7 +758,7 @@ func (c *ConnectionManager) HasInboundPeerAddress(
 	if !c.tracksInboundPeerAddresses() {
 		return false
 	}
-	targetAddr := normalizePeerAddr(peerAddr)
+	targetAddr := NormalizePeerAddr(peerAddr)
 	if targetAddr == "" {
 		return false
 	}
@@ -756,7 +767,14 @@ func (c *ConnectionManager) HasInboundPeerAddress(
 	return c.inboundPeerAddrs[targetAddr] > 0
 }
 
-func normalizePeerAddr(peerAddr string) string {
+// NormalizePeerAddr canonicalizes a host:port string into the form used
+// as the connmanager's transport-layer peer key: IPs are normalized to
+// their canonical form, hostnames are lowercased, and DNS is never
+// consulted. Exposed so that subscribers of InboundConnectionEvent can
+// key on the same identity the connection manager does, and so the
+// inbound-arrival path in peergov does not drift from
+// inboundPeerAddrs / HasInboundPeerAddress.
+func NormalizePeerAddr(peerAddr string) string {
 	host, port, err := net.SplitHostPort(peerAddr)
 	if err != nil {
 		return strings.ToLower(peerAddr)

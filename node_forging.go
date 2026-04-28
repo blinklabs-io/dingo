@@ -109,6 +109,7 @@ func (n *Node) initBlockForger(
 		n.eventBus,
 		n.config.logger,
 	)
+	election.SetPromRegistry(n.config.promRegistry)
 	if n.db != nil {
 		if scheduleStore := leader.NewSyncStateScheduleStore(
 			n.db.Metadata(),
@@ -296,6 +297,14 @@ type epochNonceAdapter struct {
 
 func (a *epochNonceAdapter) CurrentEpoch() uint64 {
 	return a.ledgerState.CurrentEpoch()
+}
+
+func (a *epochNonceAdapter) EpochForSlot(slot uint64) (uint64, error) {
+	epoch, err := a.ledgerState.SlotToEpoch(slot)
+	if err != nil {
+		return 0, err
+	}
+	return epoch.EpochId, nil
 }
 
 func (a *epochNonceAdapter) EpochNonce(epoch uint64) []byte {

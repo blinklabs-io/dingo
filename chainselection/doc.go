@@ -18,6 +18,10 @@
 // longer chain wins, then density within the security window, then VRF
 // tie-break.
 //
+// Genesis selection mode can be enabled at startup to prefer observed
+// density during bootstrap before automatically falling back to Praos once
+// the local tip is close enough to the best observed peer tip.
+//
 // ChainSelector is the top-level type. It consumes PeerTipUpdateEvent
 // events from chainsync, compares peer tips against the local tip, and
 // emits ChainSwitchEvent on the EventBus when the selected peer changes.

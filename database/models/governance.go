@@ -69,8 +69,15 @@ type GovernanceProposal struct {
 	AnchorHash      []byte  `gorm:"size:32;not null"`
 	Deposit         uint64  `gorm:"not null"`
 	ReturnAddress   []byte  `gorm:"size:29;not null"` // Reward account for deposit return (1 byte header + 28 bytes hash)
-	AddedSlot       uint64  `gorm:"index;not null"`
-	DeletedSlot     *uint64 `gorm:"index"`
+	// GovActionCbor holds the CBOR-encoded GovAction needed at enactment
+	// time to extract type-specific fields (ParamUpdate, ProtocolVersion,
+	// Withdrawals, Committee changes, Constitution). Populated on proposal
+	// submission so enactment does not need to re-fetch the transaction.
+	GovActionCbor []byte
+	ExpiredEpoch  *uint64 `gorm:"index"`
+	ExpiredSlot   *uint64 `gorm:"index"` // Slot when expired (for rollback safety)
+	AddedSlot     uint64  `gorm:"index;not null"`
+	DeletedSlot   *uint64 `gorm:"index"`
 }
 
 // TableName returns the table name

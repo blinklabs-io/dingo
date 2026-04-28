@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -96,7 +97,7 @@ func extractFromCbor(
 	for label := range rawByLabel {
 		labels = append(labels, label)
 	}
-	sort.Slice(labels, func(i, j int) bool { return labels[i] < labels[j] })
+	slices.Sort(labels)
 
 	ret := make([]Entry, 0, len(labels))
 	for _, label := range labels {

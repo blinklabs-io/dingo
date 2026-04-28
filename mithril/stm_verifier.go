@@ -237,7 +237,7 @@ func parseSTMAggregateSignatureBytes(raw []byte) (*stmAggregateSignature, error)
 	ret := &stmAggregateSignature{
 		Signatures: make([]stmSingleSignatureWithRegisteredParty, 0, totalSigs),
 	}
-	for i := uint64(0); i < totalSigs; i++ {
+	for i := range totalSigs {
 		if offset+8 > len(raw) {
 			return nil, fmt.Errorf(
 				"truncated aggregate signature at sig %d offset %d",
@@ -353,7 +353,7 @@ func parseSTMSingleSignatureBytes(raw []byte) (*stmSingleSignature, error) {
 	}
 	offset := 8
 	indexes := make([]uint64, 0, nrIndexes)
-	for i := uint64(0); i < nrIndexes; i++ {
+	for range nrIndexes {
 		index, err := readUint64BE(raw[offset : offset+8])
 		if err != nil {
 			return nil, err
@@ -410,14 +410,14 @@ func parseSTMMerkleBatchPathBytes(raw []byte) (*stmMerkleBatchPath, error) {
 		Values:  make([][]byte, 0, lenValues),
 		Indices: make([]int, 0, lenIndices),
 	}
-	for i := uint64(0); i < lenValues; i++ {
+	for range lenValues {
 		if offset+32 > len(raw) {
 			return nil, errors.New("merkle batch path values overflow")
 		}
 		ret.Values = append(ret.Values, append([]byte(nil), raw[offset:offset+32]...))
 		offset += 32
 	}
-	for i := uint64(0); i < lenIndices; i++ {
+	for range lenIndices {
 		if offset+8 > len(raw) {
 			return nil, errors.New("merkle batch path indices overflow")
 		}

@@ -58,26 +58,10 @@ func NewPruner(cfg PrunerConfig) *Pruner {
 }
 
 func (p *Pruner) pruneBlock(next *database.BlobBlockResult) error {
-	txn := p.db.BlobTxn(true)
-	return txn.Do(func(txn *database.Txn) error {
-		_, metadata, err := p.db.Blob().GetBlock(txn, next.Slot, next.Hash)
-		if err != nil {
-			return fmt.Errorf(
-				"pruner: failed to get block metadata: %w",
-				err,
-			)
-		}
-		if err := p.db.Blob().DeleteBlock(
-			txn,
-			next.Slot,
-			next.Hash,
-			metadata.ID,
-		); err != nil {
-			return fmt.Errorf("pruner: failed to delete block: %w", err)
-		}
-
-		return nil
-	})
+	if _, err := p.db.PruneBlock(next.Slot, next.Hash); err != nil {
+		return fmt.Errorf("pruner: %w", err)
+	}
+	return nil
 }
 
 func (p *Pruner) prune(ctx context.Context) {
@@ -161,11 +145,9 @@ func (p *Pruner) Start(ctx context.Context) error {
 
 	ctx, p.cancel = context.WithCancel(ctx) //nolint:gosec
 
-	p.wg.Add(1)
-	go func() {
-		defer p.wg.Done()
+	p.wg.Go(func() {
 		p.run(ctx)
-	}()
+	})
 	return nil
 }
 

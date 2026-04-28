@@ -33,10 +33,12 @@ import (
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/forging"
+	"github.com/blinklabs-io/dingo/ledger/governance"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/byron"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -480,10 +482,10 @@ func (ls *LedgerState) detectConnectionSwitch() (
 		}
 		ls.lastActiveConnId = activeConnId
 		// Preserve rollbackHistory across connection switches so the
-		// rollback loop detector can fire when multiple peers all send
-		// RollBackward to the same slot during rapid chain selection
-		// changes (e.g., post-Mithril startup). Clearing it here
-		// previously allowed unbounded oscillation.
+		// loop detector can still catch repeated rollbacks from the
+		// same peer/session. The detector keys on exact rollback
+		// point + connection, so peer switches do not poison healthy
+		// fork convergence.
 	}
 	return activeConnId, true
 }
@@ -993,10 +995,16 @@ func (ls *LedgerState) handleEventChainsyncRollback(e ChainsyncEvent) error {
 	}
 
 	// Rollback loop detection: track recent rollbacks and skip if
-	// the same slot appears too frequently within the detection window.
+	// the same peer repeats the same rollback point too frequently
+	// within the detection window.
 	now := time.Now()
+	connKey := connIdKey(e.ConnectionId)
 	ls.rollbackHistory = append(ls.rollbackHistory, rollbackRecord{
-		slot:      e.Point.Slot,
+		point: ocommon.Point{
+			Slot: e.Point.Slot,
+			Hash: append([]byte(nil), e.Point.Hash...),
+		},
+		connKey:   connKey,
 		timestamp: now,
 	})
 	// Prune entries older than the detection window
@@ -1008,10 +1016,13 @@ func (ls *LedgerState) handleEventChainsyncRollback(e ChainsyncEvent) error {
 		}
 	}
 	ls.rollbackHistory = pruned
-	// Count rollbacks to this specific slot
+	// Count repeated rollbacks to this exact point from the same
+	// connection. Different peers can legitimately converge on the
+	// same rollback point during chain selection, and those rollbacks
+	// must not be suppressed.
 	var slotCount int
 	for _, r := range ls.rollbackHistory {
-		if r.slot == e.Point.Slot {
+		if r.connKey == connKey && pointMatches(r.point, e.Point) {
 			slotCount++
 		}
 	}
@@ -1464,9 +1475,19 @@ func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 			// from — the common ancestor. If that block exists on our
 			// chain and the peer's chain is ahead, we roll back to
 			// the common ancestor so chainsync can continue.
-			if resolved := ls.tryResolveFork(
+			resolved, resolveErr := ls.tryResolveFork(
 				e, notFitErr,
-			); resolved {
+			)
+			if resolveErr != nil {
+				if ls.headerMismatchCount > 0 {
+					ls.headerMismatchCount--
+				}
+				return fmt.Errorf(
+					"failed resolving fork after header mismatch: %w",
+					resolveErr,
+				)
+			}
+			if resolved {
 				return nil
 			}
 			// Fallback: after several consecutive mismatches where
@@ -1624,16 +1645,18 @@ func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 // a fresh FindIntersect on that connection rather than repeated mismatch
 // counting.
 //
-// Returns true if the fork was resolved (chain rolled back), false if the
-// common ancestor was not found or the rollback could not be performed.
+// Returns true if the fork was resolved (chain rolled back or a re-sync was
+// requested), false if the common ancestor was not found yet. Unexpected
+// internal failures are returned as errors so callers do not treat them as
+// ordinary header mismatches.
 func (ls *LedgerState) tryResolveFork(
 	e ChainsyncEvent,
 	notFitErr chain.BlockNotFitChainTipError,
-) bool {
+) (bool, error) {
 	// Only resolve forks when the peer is ahead of us.
 	localTip := ls.chain.Tip()
 	if e.Tip.Point.Slot <= localTip.Point.Slot {
-		return false
+		return false, nil
 	}
 
 	// Walk backward through the peer's recently seen header chain until
@@ -1649,17 +1672,15 @@ func (ls *LedgerState) tryResolveFork(
 			"error", err,
 			"block_prev_hash", notFitErr.BlockPrevHash(),
 		)
-		return false
+		return false, nil
 	}
 	ancestorPoint, forkPath, err := ls.findPeerForkPath(e, prevHashBytes)
 	if err != nil {
-		ls.config.Logger.Error(
-			"unexpected error looking up common ancestor",
-			"component", "ledger",
-			"error", err,
-			"block_prev_hash", notFitErr.BlockPrevHash(),
+		return false, fmt.Errorf(
+			"unexpected error looking up common ancestor for prev hash %s: %w",
+			notFitErr.BlockPrevHash(),
+			err,
 		)
-		return false
 	}
 	if ancestorPoint == nil {
 		// The peer's header stream is not continuous with our local chain
@@ -1676,17 +1697,15 @@ func (ls *LedgerState) tryResolveFork(
 			e.ConnectionId,
 			resyncReasonRollbackNotFound,
 		)
-		return true
+		return true, nil
 	}
 	ancestorBlock, err := database.BlockByHash(ls.db, ancestorPoint.Hash)
 	if err != nil {
-		ls.config.Logger.Error(
-			"failed to reload common ancestor block",
-			"component", "ledger",
-			"error", err,
-			"ancestor_hash", hex.EncodeToString(ancestorPoint.Hash),
+		return false, fmt.Errorf(
+			"failed to reload common ancestor block %s: %w",
+			hex.EncodeToString(ancestorPoint.Hash),
+			err,
 		)
-		return false
 	}
 
 	rollbackPoint := *ancestorPoint
@@ -1714,7 +1733,7 @@ func (ls *LedgerState) tryResolveFork(
 					"slot", forkEvent.Point.Slot,
 					"connection_id", forkEvent.ConnectionId.String(),
 				)
-				return false
+				return false, nil
 			}
 		}
 		ls.headerMismatchCount = 0
@@ -1732,7 +1751,7 @@ func (ls *LedgerState) tryResolveFork(
 			}
 			ls.chainsyncBlockfetchMutex.Unlock()
 		}
-		return true
+		return true, nil
 	}
 
 	ls.config.Logger.Info(
@@ -1786,7 +1805,7 @@ func (ls *LedgerState) tryResolveFork(
 				"ancestor_slot", ancestorBlock.Slot,
 			)
 		}
-		return false
+		return false, nil
 	}
 
 	// Mark state as rollback so the next block header event logs
@@ -1808,7 +1827,7 @@ func (ls *LedgerState) tryResolveFork(
 			)
 			// Do not reset mismatch state — let the caller know the
 			// resolution failed so subsequent mismatch tracking proceeds.
-			return false
+			return false, nil
 		}
 	}
 	ls.headerMismatchCount = 0
@@ -1826,7 +1845,7 @@ func (ls *LedgerState) tryResolveFork(
 		}
 		ls.chainsyncBlockfetchMutex.Unlock()
 	}
-	return true
+	return true, nil
 }
 
 //nolint:unparam
@@ -2684,9 +2703,33 @@ func (ls *LedgerState) processEpochRollover(
 		)
 		return result, nil
 	}
-	// Apply pending pparam updates using the non-mutating version
-	// Updates target the next epoch, so we pass currentEpoch.EpochId + 1
-	// The quorum threshold comes from shelley-genesis.json updateQuorum
+	// EPOCH→HARDFORK ordering invariant.
+	//
+	// The remainder of this function mirrors the sequencing of cardano-
+	// ledger's Conway/Rules/Epoch.hs:374-379 (EPOCH STS), which dispatches
+	// HARDFORK only after enactment + pparams write. The relative order
+	// matters because the HARDFORK rule branch is selected from the new
+	// pparams' major version — a HARDFORK rule that ran before enactment
+	// would observe stale pparams and pick the wrong branch.
+	//
+	// The order, asserted by TestProcessEpochRollover_OrderingInvariant in
+	// chainsync_ordering_test.go, is:
+	//
+	//   1. ComputeAndApplyPParamUpdates  — Shelley-style ppuProtocolVersion
+	//      voting path; produces newPParams from on-chain pparam-update
+	//      proposals.
+	//   2. governance.ProcessEpoch       — Conway-style HardForkInitiation /
+	//      ParameterChange enactment; may further mutate pparams.
+	//   3. SetPParams                    — persist the enacted pparams.
+	//   4. IsHardForkTransition check    — detect inter-era boundary from
+	//      the now-final pparams.
+	//   5. applyIntraEraHardForkRule     — dispatch the per-major-version
+	//      HARDFORK STS rule (e.g. pv3 AVVM removal, pv10 DRep clear).
+	//
+	// Steps 4 and 5 must observe the post-enactment major version. Step 5
+	// must observe the persisted pparams (not just the in-memory ones)
+	// because its body issues SQL within `txn` that may join against
+	// `pparams` rows.
 	updateQuorum := 0
 	if shelleyGenesis := ls.config.CardanoNodeConfig.ShelleyGenesis(); shelleyGenesis != nil {
 		updateQuorum = shelleyGenesis.UpdateQuorum
@@ -2703,6 +2746,50 @@ func (ls *LedgerState) processEpochRollover(
 	)
 	if err != nil {
 		return nil, fmt.Errorf("apply pparam updates: %w", err)
+	}
+
+	// Run the CIP-1694 governance tick: enact proposals ratified in the
+	// previous epoch (possibly mutating pparams), expire stale proposals,
+	// and ratify active proposals whose tallies meet threshold. Any
+	// pparams change from enactment is persisted via SetPParams so the
+	// next epoch's pparams reflect the enacted state.
+	var conwayGenesis *conway.ConwayGenesis
+	if ls.config.CardanoNodeConfig != nil {
+		conwayGenesis = ls.config.CardanoNodeConfig.ConwayGenesis()
+	}
+	govOut, err := governance.ProcessEpoch(&governance.EpochInput{
+		DB:            ls.db,
+		Txn:           txn,
+		Logger:        ls.config.Logger,
+		PrevEpoch:     currentEpoch.EpochId,
+		NewEpoch:      currentEpoch.EpochId + 1,
+		BoundarySlot:  epochStartSlot,
+		PParams:       newPParams,
+		UpdateFn:      currentEra.PParamsUpdateFunc,
+		ConwayGenesis: conwayGenesis,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("process governance epoch: %w", err)
+	}
+	if govOut.PParamsChanged {
+		newPParams = govOut.UpdatedPParams
+		pparamsCbor, encErr := cbor.Encode(&newPParams)
+		if encErr != nil {
+			return nil, fmt.Errorf(
+				"encode post-enactment pparams: %w", encErr,
+			)
+		}
+		if err := ls.db.SetPParams(
+			pparamsCbor,
+			epochStartSlot,
+			currentEpoch.EpochId+1,
+			currentEra.Id,
+			txn,
+		); err != nil {
+			return nil, fmt.Errorf(
+				"persist post-enactment pparams: %w", err,
+			)
+		}
 	}
 	result.NewCurrentPParams = newPParams
 
@@ -2763,6 +2850,19 @@ func (ls *LedgerState) processEpochRollover(
 				currentEpoch.EpochId+1,
 				"component", "ledger",
 			)
+		}
+		// Apply cardano-ledger's per-major-version HARDFORK rule. This
+		// runs on ANY major-version bump, including intra-era ones like
+		// Conway pv9→pv10 (Plomin, mainnet January 2025) that do not
+		// trigger an era change, and inter-era ones like Shelley→Allegra
+		// (pv2→pv3) that carry a state rewrite. See cardano-ledger
+		// Conway/Rules/HardFork.hs and Allegra/Translation.hs.
+		if oldVer.Major != newVer.Major {
+			if err := ls.applyIntraEraHardForkRule(
+				txn, newVer.Major, epochStartSlot, currentEpoch.EpochId+1,
+			); err != nil {
+				return nil, fmt.Errorf("apply major-version HARDFORK: %w", err)
+			}
 		}
 	}
 

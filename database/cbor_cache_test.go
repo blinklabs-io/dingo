@@ -15,6 +15,8 @@
 package database
 
 import (
+	"io"
+	"log/slog"
 	"testing"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -92,7 +94,7 @@ func TestTieredCborCacheHotHitTx(t *testing.T) {
 	cache.hotTx.Put(txHash[:], testCbor)
 
 	// Resolve should hit the hot cache
-	result, err := cache.ResolveTxCbor(txHash[:])
+	result, err := cache.ResolveTxCbor(nil, txHash[:])
 
 	require.NoError(t, err)
 	assert.Equal(t, testCbor, result)
@@ -147,7 +149,7 @@ func TestTieredCborCacheHotMissTx(t *testing.T) {
 
 	// Resolve should miss the hot cache and return ErrBlobStoreUnavailable
 	// (since db is nil)
-	result, err := cache.ResolveTxCbor(txHash[:])
+	result, err := cache.ResolveTxCbor(nil, txHash[:])
 
 	assert.ErrorIs(t, err, types.ErrBlobStoreUnavailable)
 	assert.Nil(t, result)
@@ -156,6 +158,55 @@ func TestTieredCborCacheHotMissTx(t *testing.T) {
 	metrics := cache.Metrics()
 	assert.Equal(t, uint64(0), metrics.TxHotHits.Load())
 	assert.Equal(t, uint64(1), metrics.TxHotMisses.Load())
+}
+
+func TestResolveTxCborUsesCallerTxn(t *testing.T) {
+	db, err := New(&Config{
+		DataDir:        t.TempDir(),
+		Logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
+		BlobPlugin:     "badger",
+		MetadataPlugin: "sqlite",
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, db.Close())
+	})
+
+	var txHash [32]byte
+	copy(txHash[:], []byte("active-txn-visible-tx"))
+	var blockHash [32]byte
+	copy(blockHash[:], []byte("active-txn-visible-block"))
+	txBodyCbor := []byte{0x82, 0x01, 0x02}
+	blockCbor := append([]byte("prefix-"), txBodyCbor...)
+	offset := CborOffset{
+		BlockSlot:  42,
+		BlockHash:  blockHash,
+		ByteOffset: uint32(len(blockCbor) - len(txBodyCbor)),
+		ByteLength: uint32(len(txBodyCbor)),
+	}
+
+	txn := db.BlobTxn(true)
+	defer txn.Release()
+	require.NoError(t, db.Blob().SetBlock(
+		txn.Blob(),
+		offset.BlockSlot,
+		blockHash[:],
+		blockCbor,
+		1,
+		0,
+		0,
+		nil,
+	))
+	require.NoError(t, db.Blob().SetTx(
+		txn.Blob(),
+		txHash[:],
+		EncodeTxOffset(&offset),
+	))
+
+	result, err := db.CborCache().ResolveTxCbor(txn, txHash[:])
+
+	require.NoError(t, err)
+	assert.Equal(t, txBodyCbor, result)
 }
 
 func TestTieredCborCacheMetrics(t *testing.T) {
@@ -206,9 +257,9 @@ func TestTieredCborCacheMetrics(t *testing.T) {
 	// txHash2 is NOT in cache
 
 	// Perform some hits and misses
-	_, _ = cache.ResolveTxCbor(txHash1[:]) // hit
-	_, _ = cache.ResolveTxCbor(txHash2[:]) // miss
-	_, _ = cache.ResolveTxCbor(txHash2[:]) // miss
+	_, _ = cache.ResolveTxCbor(nil, txHash1[:]) // hit
+	_, _ = cache.ResolveTxCbor(nil, txHash2[:]) // miss
+	_, _ = cache.ResolveTxCbor(nil, txHash2[:]) // miss
 
 	// Verify counts
 	assert.Equal(t, uint64(1), metrics.TxHotHits.Load())
@@ -410,10 +461,10 @@ func TestCacheMetricsPrometheus(t *testing.T) {
 	cache.hotTx.Put(txHash[:], []byte{0x02})
 
 	// Generate some hits
-	_, _ = cache.ResolveUtxoCbor(txId[:], 0)      // UTxO hot hit
-	_, _ = cache.ResolveTxCbor(txHash[:])         // TX hot hit
-	_, _ = cache.ResolveUtxoCbor(txId[:], 99)     // UTxO hot miss (no db)
-	_, _ = cache.ResolveTxCbor([]byte("missing")) // TX hot miss (not impl)
+	_, _ = cache.ResolveUtxoCbor(txId[:], 0)           // UTxO hot hit
+	_, _ = cache.ResolveTxCbor(nil, txHash[:])         // TX hot hit
+	_, _ = cache.ResolveUtxoCbor(txId[:], 99)          // UTxO hot miss (no db)
+	_, _ = cache.ResolveTxCbor(nil, []byte("missing")) // TX hot miss (not impl)
 
 	// Verify atomic counters
 	metrics := cache.Metrics()

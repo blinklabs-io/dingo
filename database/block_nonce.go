@@ -50,6 +50,27 @@ func (d *Database) GetBlockNoncesInSlotRange(
 	)
 }
 
+// GetLastBlockNonceInRange retrieves the block nonce with the highest slot
+// in [startSlot, endSlot). Returns nil nonce and no error if none found.
+func (d *Database) GetLastBlockNonceInRange(
+	startSlot uint64,
+	endSlot uint64,
+	txn *Txn,
+) ([]byte, error) {
+	if txn == nil {
+		return d.metadata.GetLastBlockNonceInRange(
+			startSlot,
+			endSlot,
+			nil,
+		)
+	}
+	return d.metadata.GetLastBlockNonceInRange(
+		startSlot,
+		endSlot,
+		txn.Metadata(),
+	)
+}
+
 // DeleteBlockNoncesBeforeSlot removes all block_nonces older than the given slot number
 func (d *Database) DeleteBlockNoncesBeforeSlot(
 	slotNumber uint64,

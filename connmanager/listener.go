@@ -138,9 +138,7 @@ func (c *ConnectionManager) startListener(
 		defaultConnOpts,
 		l.ConnectionOpts...,
 	)
-	c.goroutineWg.Add(1)
-	go func() {
-		defer c.goroutineWg.Done()
+	c.goroutineWg.Go(func() {
 		var consecutiveErrors int
 		for {
 			// Accept connection
@@ -252,10 +250,11 @@ func (c *ConnectionManager) startListener(
 						event.NewEvent(
 							InboundConnectionEventType,
 							InboundConnectionEvent{
-								ConnectionId: oConn.Id(),
-								LocalAddr:    conn.LocalAddr(),
-								RemoteAddr:   conn.RemoteAddr(),
-								IsNtC:        true,
+								ConnectionId:         oConn.Id(),
+								LocalAddr:            conn.LocalAddr(),
+								RemoteAddr:           conn.RemoteAddr(),
+								NormalizedRemoteAddr: NormalizePeerAddr(peerAddr),
+								IsNtC:                true,
 							},
 						),
 					)
@@ -344,23 +343,29 @@ func (c *ConnectionManager) startListener(
 			) {
 				continue
 			}
-			// Generate event
+			// Generate event. IsDuplex is a best-effort snapshot of the
+			// negotiated diffusion mode at publish time; subscribers that
+			// need an authoritative answer should fall back to
+			// GetConnectionById, because on paths where the handshake has
+			// not yet completed the version data is still nil here.
 			if c.config.EventBus != nil {
 				c.config.EventBus.Publish(
 					InboundConnectionEventType,
 					event.NewEvent(
 						InboundConnectionEventType,
 						InboundConnectionEvent{
-							ConnectionId: oConn.Id(),
-							LocalAddr:    conn.LocalAddr(),
-							RemoteAddr:   conn.RemoteAddr(),
-							IsNtC:        l.UseNtC,
+							ConnectionId:         oConn.Id(),
+							LocalAddr:            conn.LocalAddr(),
+							RemoteAddr:           conn.RemoteAddr(),
+							NormalizedRemoteAddr: NormalizePeerAddr(peerAddr),
+							IsNtC:                l.UseNtC,
+							IsDuplex:             connectionIsDuplex(oConn),
 						},
 					),
 				)
 			}
 		}
-	}()
+	})
 	return nil
 }
 

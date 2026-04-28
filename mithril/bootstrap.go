@@ -376,9 +376,7 @@ func Bootstrap(
 	defer ancWg.Wait()
 	defer ancCancel()
 	if len(snapshot.AncillaryLocations) > 0 {
-		ancWg.Add(1)
-		go func() {
-			defer ancWg.Done()
+		ancWg.Go(func() {
 			candidateDir := filepath.Join(
 				downloadDir, "ancillary",
 			)
@@ -423,7 +421,7 @@ func Bootstrap(
 			}
 			ancillaryDir = dir
 			ancillaryArchivePath = archPath
-		}()
+		})
 	}
 
 	// Step 4: Extract main archive (skip if already extracted)

@@ -27,7 +27,9 @@
 // Peers progress through known → established → active tiers. Target
 // counts and per-source quotas for the active tier are configurable
 // (TargetNumberOfActivePeers, ActivePeersTopologyQuota,
-// ActivePeersGossipQuota, ActivePeersLedgerQuota).
+// ActivePeersGossipQuota, ActivePeersLedgerQuota). Inbound peers are
+// modeled as their own governed source with explicit budget controls
+// (InboundWarmTarget, InboundHotQuota) and validation policy knobs.
 //
 // # Churn
 //
@@ -45,4 +47,28 @@
 // connections are allowed to provide header/block data, preventing
 // low-quality peers from backpressuring the primary chainsync
 // stream.
+//
+// # Inbound vs outbound governance
+//
+// Outbound governance is proactive: the governor selects candidates from
+// topology/gossip/ledger and opens connections to satisfy active-tier targets.
+//
+// Inbound governance is reactive: peers arrive unsolicited and must earn
+// promotion through stricter policy gates. Inbound peers have a separate warm
+// target and hot quota (InboundWarmTarget/InboundHotQuota), can be denied by
+// cooldown policy, and are pruned when idle/unhelpful past InboundPruneAfter.
+// This keeps unsolicited traffic from displacing curated outbound sources while
+// still allowing high-quality inbound duplex peers to be promoted.
+//
+// # Operator tuning guidance
+//
+// Public relays usually run with larger inbound budgets and stricter promotion
+// gates so they can absorb more unsolicited traffic without over-promoting:
+// increase InboundWarmTarget/InboundHotQuota and raise
+// InboundHotScoreThreshold/InboundMinTenure.
+//
+// More private or producer-adjacent deployments typically prefer tighter
+// admission and faster shedding of low-value inbound traffic:
+// reduce InboundWarmTarget/InboundHotQuota, lower InboundPruneAfter, and keep
+// InboundCooldown non-zero to suppress reconnect flapping.
 package peergov
