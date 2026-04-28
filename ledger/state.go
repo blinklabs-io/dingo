@@ -2355,26 +2355,41 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 				workingPParams := snapshotPParams
 				workingEraId := snapshotEra.Id
 
-				// Check for era change
+				// Check for era change. The guard rejects multi-step
+				// forward, backwards, and to/from-unknown-era cases:
+				// each era boundary on a healthy chain is crossed by
+				// a block from that era, so anything else implies a
+				// non-conforming block, a malformed snapshot, or a
+				// chain-selection bug. Allowing a multi-step jump
+				// would silently apply each intermediate era's
+				// HardForkFunc but skip per-era epoch-based events
+				// that should have fired during the omitted span.
 				if nextEpochEraId != snapshotEra.Id {
-					// Transition through every era between the current and the target era
-					for nextEraId := snapshotEra.Id + 1; nextEraId <= nextEpochEraId; nextEraId++ {
-						result, err := ls.transitionToEra(
-							txn,
-							nextEraId,
-							snapshotEpoch.EpochId,
-							snapshotEpoch.StartSlot+uint64(
-								snapshotEpoch.LengthInSlots,
-							),
-							workingPParams,
+					if !eras.IsValidEraAdvancement(
+						snapshotEra.Id, nextEpochEraId,
+					) {
+						return fmt.Errorf(
+							"refusing era advancement from %d to %d: "+
+								"only single-step forward advancement to "+
+								"a known era is permitted",
+							snapshotEra.Id, nextEpochEraId,
 						)
-						if err != nil {
-							return err
-						}
-						workingPParams = result.NewPParams
-						workingEraId = result.NewEra.Id
-						eraTransitions = append(eraTransitions, result)
 					}
+					result, err := ls.transitionToEra(
+						txn,
+						nextEpochEraId,
+						snapshotEpoch.EpochId,
+						snapshotEpoch.StartSlot+uint64(
+							snapshotEpoch.LengthInSlots,
+						),
+						workingPParams,
+					)
+					if err != nil {
+						return err
+					}
+					workingPParams = result.NewPParams
+					workingEraId = result.NewEra.Id
+					eraTransitions = append(eraTransitions, result)
 				}
 
 				// Process epoch rollover
