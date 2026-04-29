@@ -3,7 +3,7 @@
 
 ## v0.38.0 (April 29, 2026)
 
-**Title:** Smarter sync decisions, governance visibility, and ready-made dashboards
+**Title:** Smarter sync decisions, clearer operations, and ready made dashboards
 
 **Date:** April 29, 2026
 
@@ -13,37 +13,37 @@ Hi folks! Here’s what we shipped in v0.38.0.
 
 ### ✨ What's New
 
-* Added **inbound peer governance controls and visibility:** Operators can now track how inbound peers are accepted, denied, warmed, promoted, cooled down, and pruned, which makes it easier to tune public relays and keep unsolicited traffic under control.
-* Expanded **ready-made Grafana monitoring setup:** Operators can now deploy a full Grafana dashboard bundle with Prometheus scrape settings, alert rules, provisioning files, and setup guidance, which makes node monitoring faster to stand up.
-* Introduced **parallel shadow blockfetch near tip:** Nodes can now request the same near-tip block range from a second suitable peer and prefer the faster response, which keeps sync steadier when multiple peers report the same tip.
-* Delivered **typed era mismatch errors:** Integrations can now detect era mismatch failures through machine readable error details instead of relying on plain text parsing.
-* Surfaced **earlier hard-fork stability signals:** Operators and integrators can now see when an upcoming era transition has effectively stabilized before the epoch boundary arrives, which makes planning safer around governance driven changes.
+* Added **inbound peer controls and visibility:** Operators can now track how inbound peers are accepted, denied, warmed, promoted, cooled down, and pruned, which makes public relays easier to tune and unsolicited traffic easier to manage.
+* Expanded **dashboard based monitoring setup:** Operators can now deploy a full Grafana dashboard bundle with Prometheus scrape settings, alert rules, provisioning files, and setup guidance, which makes node monitoring faster to stand up.
+* Introduced **parallel backup block delivery near tip:** Nodes can now request the same near tip block range from a second suitable peer and prefer the faster response, which keeps sync steadier when multiple peers report the same tip.
+* Delivered **structured era mismatch errors:** Integrations can now detect era mismatch failures through consistent error details instead of relying on plain text parsing.
+* Surfaced **earlier era transition stability signals:** Operators and integrators can now see when an upcoming era transition has effectively stabilized before the epoch boundary arrives, which makes planning safer around governance driven changes.
 
 ### 💪 Improvements
 
-* Improved **single-step era advancement safety:** Era changes now advance one boundary at a time, which avoids skipping required transition handling when the chain crosses into a new era.
-* Refined **future protocol-parameter audit guidance:** Maintainers now have a clearer note about a future protocol-parameter audit at cross-era boundaries, which makes upcoming governance work easier to track.
-* Enhanced **Windows and macOS build reliability:** Automation now avoids platform specific CGO linker issues on Windows and macOS, which keeps routine build verification steadier.
+* Improved **one step era advancement safety:** Era changes now advance one boundary at a time, which avoids skipping required transition handling when the chain crosses into a new era.
+* Refined **future protocol setting audit guidance:** Maintainers now have a clearer note about a future audit at era boundaries, which makes upcoming governance work easier to track.
+* Enhanced **Windows and macOS build reliability:** Automation now avoids platform specific native linker issues on Windows and macOS, which keeps routine build verification steadier.
 * Modernized **Windows test stability on slower runners:** Automation now gives slower Windows runners more room to finish successfully, which reduces avoidable test failures.
-* Updated **OpenTelemetry stdout tracing support:** Tracing dependencies now stay current with the newer `go.opentelemetry.io/otel/exporters/stdout/stdouttrace` release.
-* Refreshed **Connect RPC compatibility:** Connect based integrations now stay current with the newer `connectrpc.com/connect` release.
+* Updated **OpenTelemetry stdout tracing support:** Tracing support now stays current with the newer `go.opentelemetry.io/otel/exporters/stdout/stdouttrace` release.
+* Refreshed **Connect API compatibility:** Connect based integrations now stay current with the newer `connectrpc.com/connect` release.
 * Advanced **AWS S3 integration currency:** S3 backed workflows now stay aligned with the newer `github.com/aws/aws-sdk-go-v2/service/s3` release.
 * Polished **AWS client compatibility:** AWS backed components now stay aligned with the newer `github.com/aws/smithy-go` release.
-* Completed **release history continuity:** Release history now includes the refreshed v0.37.0 notes entry for easier scanning.
+* Completed **v0.37.0 release history refresh:** Release history now includes the refreshed v0.37.0 notes entry for easier scanning.
 
 ### 🔧 Fixes
 
-* Fixed **in-flight blockfetch continuity during peer switches:** Near-tip sync can now keep a blockfetch batch moving even when the best peer changes, which reduces the chance of repeated restarts during equal-tip switching.
-* Corrected **stale block nonce cleanup after rollbacks:** Rollback recovery now removes outdated block nonce data after fork changes and while loading tip state, which keeps nonce dependent behavior aligned with the active chain.
-* Hardened **async blockfetch failure reporting:** Connection error handling now surfaces asynchronous blockfetch server failures, which makes stuck or failed block delivery easier to detect.
+* Fixed **active block download continuity during peer switches:** Near tip sync can now keep a block download moving even when the best peer changes, which reduces the chance of repeated restarts during equal tip switching.
+* Corrected **stale nonce cleanup after rollbacks:** Rollback recovery now removes outdated nonce data after fork changes and while loading tip state, which keeps nonce dependent behavior aligned with the active chain.
+* Hardened **async block delivery failure reporting:** Connection error handling now surfaces asynchronous block delivery failures, which makes stuck or failed block delivery easier to detect.
 * Stabilized **connection setup diagnostics:** Connection failure logs now include the remote peer address, which makes troubleshooting failed handshakes easier.
 
 ### 📋 What You Need to Know
 
-* Added **faster monitoring rollout:** Operators can adopt the new Grafana and Prometheus dashboard bundle and alerts to monitor nodes more quickly.
-* Improved **steadier sync behavior:** Sync now stays steadier near tip and during equal tip peer switching because backup block delivery, latency aware peer choice, preserved active batches, and clearer block delivery failure reporting now work together.
-* Clarified **era transition handling:** Dingo now surfaces upcoming transition stability earlier, advances only one era at a time, and returns structured era mismatch errors.
-* Updated **integration maintenance notes:** Integrators and maintainers should note the dependency updates and the refreshed release history entry for v0.37.0.
+* Adopt the new Grafana and Prometheus dashboard bundle and alert rules to monitor Dingo nodes more quickly.
+* Expect steadier near-tip sync and smoother equal-tip peer switching because shadow blockfetch, latency aware peer choice, preserved in-flight batches, and clearer blockfetch failure reporting now work together.
+* Note more explicit era and hard-fork handling because Dingo now surfaces upcoming transition stability earlier, advances only one era at a time, and returns typed era mismatch errors.
+* Review the dependency refreshes and the updated v0.37.0 release history entry when maintaining integrations and internal release records.
 
 ### Recommended Network Compatibility ⚠️
 
