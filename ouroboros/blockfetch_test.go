@@ -274,7 +274,7 @@ func TestBlockfetchServerSendBatch_ClosesConnectionOnIteratorError(
 	start := ocommon.NewPoint(100, []byte{0x01})
 	end := ocommon.NewPoint(200, []byte{0x02})
 
-	o.blockfetchServerSendBatch(
+	err := o.blockfetchServerSendBatch(
 		testConnId().String(),
 		start,
 		end,
@@ -283,6 +283,7 @@ func TestBlockfetchServerSendBatch_ClosesConnectionOnIteratorError(
 		conn,
 	)
 
+	assert.Error(t, err)
 	assert.Equal(t, 1, server.startBatchCalls)
 	assert.Equal(t, 0, server.batchDoneCalls)
 	assert.Equal(t, 1, conn.closeCalls)
@@ -303,7 +304,7 @@ func TestBlockfetchServerSendBatch_BatchDoneAtChainTip(t *testing.T) {
 	start := ocommon.NewPoint(100, []byte{0x01})
 	end := ocommon.NewPoint(200, []byte{0x02})
 
-	o.blockfetchServerSendBatch(
+	err := o.blockfetchServerSendBatch(
 		testConnId().String(),
 		start,
 		end,
@@ -312,10 +313,68 @@ func TestBlockfetchServerSendBatch_BatchDoneAtChainTip(t *testing.T) {
 		conn,
 	)
 
+	assert.NoError(t, err)
 	assert.Equal(t, 1, server.startBatchCalls)
 	assert.Equal(t, 1, server.batchDoneCalls)
 	assert.Equal(t, 0, conn.closeCalls)
 	assert.Equal(t, 1, iter.cancelCalls)
+}
+
+func TestReportBlockfetchServerAsyncError_ForwardsToConnectionErrorChan(
+	t *testing.T,
+) {
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	o := NewOuroboros(OuroborosConfig{
+		Logger:   logger,
+		EventBus: event.NewEventBus(nil, logger),
+	})
+	conn := &stubBlockfetchConnection{
+		errChan: make(chan error, 1),
+	}
+	start := ocommon.NewPoint(100, []byte{0x01})
+	end := ocommon.NewPoint(200, []byte{0x02})
+	expectedErr := errors.New("async blockfetch failure")
+
+	o.reportBlockfetchServerAsyncError(
+		conn,
+		testConnId().String(),
+		start,
+		end,
+		expectedErr,
+	)
+
+	select {
+	case gotErr := <-conn.errChan:
+		assert.Equal(t, expectedErr, gotErr)
+	default:
+		t.Fatal("expected async error to be forwarded to connection error channel")
+	}
+}
+
+func TestReportBlockfetchServerAsyncError_ClosedErrorChan_NoPanic(
+	t *testing.T,
+) {
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	o := NewOuroboros(OuroborosConfig{
+		Logger:   logger,
+		EventBus: event.NewEventBus(nil, logger),
+	})
+	conn := &stubBlockfetchConnection{
+		errChan: make(chan error),
+	}
+	close(conn.errChan)
+	start := ocommon.NewPoint(100, []byte{0x01})
+	end := ocommon.NewPoint(200, []byte{0x02})
+
+	assert.NotPanics(t, func() {
+		o.reportBlockfetchServerAsyncError(
+			conn,
+			testConnId().String(),
+			start,
+			end,
+			errors.New("closed channel test"),
+		)
+	})
 }
 
 func BenchmarkBlockfetchClientBlockMetrics(b *testing.B) {
