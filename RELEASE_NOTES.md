@@ -3,7 +3,7 @@
 
 ## v0.38.0 (April 29, 2026)
 
-**Title:** Smarter sync decisions, governance visibility, and ready-made dashboards
+**Title:** Smarter sync decisions, governance visibility, and ready made dashboards
 
 **Date:** April 29, 2026
 
@@ -13,11 +13,11 @@ Hi folks! Here’s what we shipped in v0.38.0.
 
 ### ✨ What's New
 
-* Added **inbound peer governance controls and visibility:** Operators can now track how inbound peers are accepted, denied, warmed, promoted, cooled down, and pruned, which makes it easier to tune public relays and keep unsolicited traffic under control.
-* Expanded **ready-made Grafana monitoring setup:** Operators can now deploy a full Grafana dashboard bundle with Prometheus scrape settings, alert rules, provisioning files, and setup guidance, which makes node monitoring faster to stand up.
-* Introduced **parallel shadow blockfetch near tip:** Nodes can now request the same near-tip block range from a second suitable peer and prefer the faster response, which keeps sync steadier when multiple peers report the same tip.
-* Delivered **typed era mismatch errors:** Integrations can now detect era mismatch failures through machine readable error details instead of relying on plain text parsing.
-* Surfaced **earlier hard-fork stability signals:** Operators and integrators can now see when an upcoming era transition has effectively stabilized before the epoch boundary arrives, which makes planning safer around governance driven changes.
+* Added **inbound peer controls and visibility:** Operators can now track how inbound peers are accepted, denied, warmed, promoted, cooled down, and pruned, which makes public relays easier to tune and unsolicited traffic easier to manage.
+* Expanded **dashboard based monitoring setup:** Operators can now deploy a full Grafana dashboard bundle with Prometheus scrape settings, alert rules, provisioning files, and setup guidance, which makes node monitoring faster to stand up.
+* Introduced **parallel backup block delivery near tip:** Nodes can now request the same near tip block range from a second suitable peer and prefer the faster response, which keeps sync steadier when multiple peers report the same tip.
+* Delivered **structured era mismatch errors:** Integrations can now detect era mismatch failures through consistent error details instead of relying on plain text parsing.
+* Surfaced **earlier era transition stability signals:** Operators and integrators can now see when an upcoming era transition has effectively stabilized before the epoch boundary arrives, which makes planning safer around governance driven changes.
 
 ### 💪 Improvements
 
