@@ -150,8 +150,8 @@ cp -r /tmp/testnet/utxos/* /configs
 
 echo "removing /configs/keys"; rm -rf /configs/keys
 
-pools=$(ls -d /configs/*)
-number_of_pools=$(ls -d /configs/* | wc -l)
+pools=$(ls -d /configs/[0-9]*)
+number_of_pools=$(ls -d /configs/[0-9]* | wc -l)
 echo "number_of_pools: $number_of_pools"
 
 # Generate ring topology for all pools (writes all files in one pass)
@@ -169,3 +169,8 @@ for pool in $pools; do
   set_start_time "$pool"
   config_config_json "$pool"
 done
+
+# Test-only credentials: relax permissions so consuming containers running as
+# non-root (e.g. the dingo image runs as uid 100) can read pool keys and
+# genesis/config files.
+chmod -R a+rX /configs
