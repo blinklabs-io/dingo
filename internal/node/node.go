@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/http/pprof"
 	"os"
 	"os/signal"
 	"runtime"
@@ -57,11 +58,17 @@ func waitForSignalOrError(
 func gracefulShutdown(
 	logger *slog.Logger,
 	metricsServer *http.Server,
+	debugServer *http.Server,
 	d *dingo.Node,
 	timeout time.Duration,
 ) error {
+	var debugShutdown func(context.Context) error
+	if debugServer != nil {
+		debugShutdown = debugServer.Shutdown
+	}
 	shutdownErr := shutdownNodeResources(
 		metricsServer.Shutdown,
+		debugShutdown,
 		d.Stop,
 		timeout,
 	)
@@ -77,6 +84,7 @@ func gracefulShutdown(
 
 func shutdownNodeResources(
 	metricsServerShutdown func(context.Context) error,
+	debugServerShutdown func(context.Context) error,
 	nodeStop func() error,
 	timeout time.Duration,
 ) error {
@@ -91,6 +99,14 @@ func shutdownNodeResources(
 			err,
 			fmt.Errorf("metrics server shutdown: %w", shutdownErr),
 		)
+	}
+	if debugServerShutdown != nil {
+		if shutdownErr := debugServerShutdown(shutdownCtx); shutdownErr != nil {
+			err = errors.Join(
+				err,
+				fmt.Errorf("debug server shutdown: %w", shutdownErr),
+			)
+		}
 	}
 	if stopErr := nodeStop(); stopErr != nil {
 		err = errors.Join(
@@ -371,6 +387,27 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 		WriteTimeout:      30 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}
+	// Optional debug listener with pprof handlers, on a separate port from
+	// metrics so monitoring scrapers never see profiling endpoints.
+	var debugServer *http.Server
+	if cfg.DebugPort != 0 {
+		debugMux := http.NewServeMux()
+		debugMux.HandleFunc("/debug/pprof/", pprof.Index)
+		debugMux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+		debugMux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+		debugMux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+		debugMux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+		debugAddr := fmt.Sprintf("%s:%d", cfg.BindAddr, cfg.DebugPort)
+		logger.Info(
+			"serving pprof debug endpoints on "+debugAddr,
+			"component", "node",
+		)
+		debugServer = &http.Server{
+			Addr:              debugAddr,
+			Handler:           debugMux,
+			ReadHeaderTimeout: 60 * time.Second,
+		}
+	}
 	// Wait for interrupt/termination signal
 	signalCtx, signalCtxStop := signal.NotifyContext(
 		context.Background(),
@@ -379,8 +416,8 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 	)
 	defer signalCtxStop()
 
-	// Error channel for both node and metrics goroutines
-	errChan := make(chan error, 2)
+	// Error channel for node, metrics, and optional debug goroutines
+	errChan := make(chan error, 3)
 	go func() {
 		if err := metricsServer.ListenAndServe(); err != nil &&
 			err != http.ErrServerClosed {
@@ -391,6 +428,18 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 			errChan <- fmt.Errorf("metrics server: %w", err)
 		}
 	}()
+	if debugServer != nil {
+		go func() {
+			if err := debugServer.ListenAndServe(); err != nil &&
+				err != http.ErrServerClosed {
+				logger.Error(
+					fmt.Sprintf("failed to start debug listener: %s", err),
+					"component", "node",
+				)
+				errChan <- fmt.Errorf("debug server: %w", err)
+			}
+		}()
+	}
 	go func() {
 		//nolint:contextcheck
 		err := d.Run(signalCtx)
@@ -411,6 +460,7 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 		if err := gracefulShutdown(
 			logger,
 			metricsServer,
+			debugServer,
 			d,
 			shutdownTimeout,
 		); err != nil {
@@ -425,6 +475,7 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 		if err := gracefulShutdown(
 			logger,
 			metricsServer,
+			debugServer,
 			d,
 			shutdownTimeout,
 		); err != nil {
@@ -436,8 +487,13 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 	logger.Error("node error", "error", err)
 	signalCtxStop()
 
+	var debugShutdown func(context.Context) error
+	if debugServer != nil {
+		debugShutdown = debugServer.Shutdown
+	}
 	cleanupErr := shutdownNodeResources(
 		metricsServer.Shutdown,
+		debugShutdown,
 		d.Stop,
 		shutdownTimeout,
 	)

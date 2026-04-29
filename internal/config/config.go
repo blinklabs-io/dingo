@@ -225,6 +225,7 @@ type Config struct {
 	BarkPort             uint    `yaml:"barkPort"           envconfig:"DINGO_BARK_PORT"`
 	UtxorpcPort          uint    `yaml:"utxorpcPort"        envconfig:"DINGO_UTXORPC_PORT"`
 	MetricsPort          uint    `yaml:"metricsPort"                                                      split_words:"true"`
+	DebugPort            uint    `yaml:"debugPort"          envconfig:"DINGO_DEBUG_PORT"`
 	IntersectTip         bool    `yaml:"intersectTip"                                                     split_words:"true"`
 	ValidateHistorical   bool    `yaml:"validateHistorical"                                               split_words:"true"`
 	RunMode              RunMode `yaml:"runMode"            envconfig:"DINGO_RUN_MODE"`
@@ -400,6 +401,7 @@ var globalConfig = &Config{
 	Network:              "preview",
 	NetworkMagic:         0,
 	MetricsPort:          12798,
+	DebugPort:            0,
 	PrivateBindAddr:      "127.0.0.1",
 	PrivatePort:          3002,
 	RelayPort:            3001,

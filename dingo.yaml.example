@@ -136,6 +136,12 @@ topology: ""
 # CLI: --metrics-port
 metricsPort: 12798
 
+# TCP port to bind for pprof debug endpoints (heap, profile, goroutine, etc).
+# 0 disables. Operators opt in; never enable in production by default — debug
+# endpoints expose internal state and run on a separate listener from metrics.
+# CLI: --debug-port  Env: DINGO_DEBUG_PORT
+debugPort: 0
+
 # Internal/private address to bind for listening for Ouroboros NtC
 privateBindAddr: "127.0.0.1"
 
