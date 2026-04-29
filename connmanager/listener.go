@@ -320,7 +320,8 @@ func (c *ConnectionManager) startListener(
 			if err != nil {
 				c.config.Logger.Error(
 					fmt.Sprintf(
-						"listener: failed to setup connection: %s",
+						"listener: failed to setup connection from %s: %s",
+						conn.RemoteAddr(),
 						err,
 					),
 				)
