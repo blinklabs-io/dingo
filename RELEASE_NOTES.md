@@ -21,29 +21,29 @@ Hi folks! Here’s what we shipped in v0.38.0.
 
 ### 💪 Improvements
 
-* Improved **one step era advancement safety:** Era changes now advance one boundary at a time, which avoids skipping required transition handling when the chain crosses into a new era.
-* Refined **future protocol setting audit guidance:** Maintainers now have a clearer note about a future audit at era boundaries, which makes upcoming governance work easier to track.
-* Enhanced **Windows and macOS build reliability:** Automation now avoids platform specific native linker issues on Windows and macOS, which keeps routine build verification steadier.
+* Improved **single-step era advancement safety:** Era changes now advance one boundary at a time, which avoids skipping required transition handling when the chain crosses into a new era.
+* Refined **future protocol-parameter audit guidance:** Maintainers now have a clearer note about a future protocol-parameter audit at cross-era boundaries, which makes upcoming governance work easier to track.
+* Enhanced **Windows and macOS build reliability:** Automation now avoids platform specific CGO linker issues on Windows and macOS, which keeps routine build verification steadier.
 * Modernized **Windows test stability on slower runners:** Automation now gives slower Windows runners more room to finish successfully, which reduces avoidable test failures.
-* Updated **OpenTelemetry stdout tracing support:** Tracing support now stays current with the newer `go.opentelemetry.io/otel/exporters/stdout/stdouttrace` release.
-* Refreshed **Connect API compatibility:** Connect based integrations now stay current with the newer `connectrpc.com/connect` release.
+* Updated **OpenTelemetry stdout tracing support:** Tracing dependencies now stay current with the newer `go.opentelemetry.io/otel/exporters/stdout/stdouttrace` release.
+* Refreshed **Connect RPC compatibility:** Connect based integrations now stay current with the newer `connectrpc.com/connect` release.
 * Advanced **AWS S3 integration currency:** S3 backed workflows now stay aligned with the newer `github.com/aws/aws-sdk-go-v2/service/s3` release.
 * Polished **AWS client compatibility:** AWS backed components now stay aligned with the newer `github.com/aws/smithy-go` release.
-* Completed **v0.37.0 release history refresh:** Release history now includes the refreshed v0.37.0 notes entry for easier scanning.
+* Completed **release history continuity:** Release history now includes the refreshed v0.37.0 notes entry for easier scanning.
 
 ### 🔧 Fixes
 
-* Fixed **active block download continuity during peer switches:** Near tip sync can now keep a block download moving even when the best peer changes, which reduces the chance of repeated restarts during equal tip switching.
-* Corrected **stale nonce cleanup after rollbacks:** Rollback recovery now removes outdated nonce data after fork changes and while loading tip state, which keeps nonce dependent behavior aligned with the active chain.
-* Hardened **async block delivery failure reporting:** Connection error handling now surfaces asynchronous block delivery failures, which makes stuck or failed block delivery easier to detect.
+* Fixed **in-flight blockfetch continuity during peer switches:** Near-tip sync can now keep a blockfetch batch moving even when the best peer changes, which reduces the chance of repeated restarts during equal-tip switching.
+* Corrected **stale block nonce cleanup after rollbacks:** Rollback recovery now removes outdated block nonce data after fork changes and while loading tip state, which keeps nonce dependent behavior aligned with the active chain.
+* Hardened **async blockfetch failure reporting:** Connection error handling now surfaces asynchronous blockfetch server failures, which makes stuck or failed block delivery easier to detect.
 * Stabilized **connection setup diagnostics:** Connection failure logs now include the remote peer address, which makes troubleshooting failed handshakes easier.
 
 ### 📋 What You Need to Know
 
-* Adopt the new Grafana and Prometheus dashboard bundle and alert rules to monitor Dingo nodes more quickly.
-* Expect steadier near-tip sync and smoother equal-tip peer switching because shadow blockfetch, latency aware peer choice, preserved in-flight batches, and clearer blockfetch failure reporting now work together.
-* Note more explicit era and hard-fork handling because Dingo now surfaces upcoming transition stability earlier, advances only one era at a time, and returns typed era mismatch errors.
-* Review the dependency refreshes and the updated v0.37.0 release history entry when maintaining integrations and internal release records.
+* Added **faster monitoring rollout:** Operators can adopt the new Grafana and Prometheus dashboard bundle and alerts to monitor nodes more quickly.
+* Improved **steadier sync behavior:** Sync now stays steadier near tip and during equal tip peer switching because backup block delivery, latency aware peer choice, preserved active batches, and clearer block delivery failure reporting now work together.
+* Clarified **era transition handling:** Dingo now surfaces upcoming transition stability earlier, advances only one era at a time, and returns structured era mismatch errors.
+* Updated **integration maintenance notes:** Integrators and maintainers should note the dependency updates and the refreshed release history entry for v0.37.0.
 
 ### Recommended Network Compatibility ⚠️
 
