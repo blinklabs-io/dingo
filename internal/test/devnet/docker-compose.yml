@@ -126,8 +126,8 @@ services:
 
   txpump:
     build:
-      context: ../../..
-      dockerfile: internal/test/antithesis/Dockerfile.txpump
+      context: ../antithesis
+      dockerfile: Dockerfile.txpump
     container_name: devnet-txpump
     depends_on:
       dingo-producer:
