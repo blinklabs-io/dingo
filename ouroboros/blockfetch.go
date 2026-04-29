@@ -135,7 +135,7 @@ func (o *Ouroboros) blockfetchServerRequestRange(
 			chainIter.Cancel()
 			return
 		}
-		o.blockfetchServerSendBatch(
+		err := o.blockfetchServerSendBatch(
 			ctx.ConnectionId.String(),
 			start,
 			end,
@@ -143,6 +143,15 @@ func (o *Ouroboros) blockfetchServerRequestRange(
 			ctx.Server,
 			conn,
 		)
+		if err != nil {
+			o.reportBlockfetchServerAsyncError(
+				conn,
+				ctx.ConnectionId.String(),
+				start,
+				end,
+				err,
+			)
+		}
 	}()
 	return nil
 }
@@ -154,7 +163,7 @@ func (o *Ouroboros) blockfetchServerSendBatch(
 	chainIter blockfetchRangeIterator,
 	server blockfetchBatchServer,
 	conn blockfetchConnection,
-) {
+) error {
 	defer chainIter.Cancel()
 	if err := server.StartBatch(); err != nil {
 		o.config.Logger.Error(
@@ -162,13 +171,13 @@ func (o *Ouroboros) blockfetchServerSendBatch(
 			"connection_id", connectionID,
 			"error", err,
 		)
-		return
+		return fmt.Errorf("blockfetch StartBatch failed: %w", err)
 	}
 Loop:
 	for {
 		select {
 		case <-conn.ErrorChan():
-			return
+			return nil
 		default:
 			next, iterErr := chainIter.Next(false)
 			if iterErr != nil {
@@ -187,7 +196,7 @@ Loop:
 					connectionID,
 					"iterator error after StartBatch",
 				)
-				return
+				return fmt.Errorf("blockfetch iterator failed: %w", iterErr)
 			}
 			if next == nil {
 				break Loop
@@ -216,7 +225,7 @@ Loop:
 					connectionID,
 					"failed to stream block after StartBatch",
 				)
-				return
+				return fmt.Errorf("blockfetch Block failed: %w", err)
 			}
 			if o.metrics != nil {
 				o.metrics.servedBlockCount.Inc()
@@ -240,6 +249,32 @@ Loop:
 			conn,
 			connectionID,
 			"failed to send BatchDone after StartBatch",
+		)
+		return fmt.Errorf("blockfetch BatchDone failed: %w", err)
+	}
+	return nil
+}
+
+func (o *Ouroboros) reportBlockfetchServerAsyncError(
+	conn blockfetchConnection,
+	connectionID string,
+	start ocommon.Point,
+	end ocommon.Point,
+	err error,
+) {
+	o.config.Logger.Error(
+		"blockfetch: async range server failed",
+		"connection_id", connectionID,
+		"start_slot", start.Slot,
+		"end_slot", end.Slot,
+		"error", err,
+	)
+	select {
+	case conn.ErrorChan() <- err:
+	default:
+		o.config.Logger.Debug(
+			"blockfetch: failed to forward async server error to connection error channel",
+			"connection_id", connectionID,
 		)
 	}
 }
