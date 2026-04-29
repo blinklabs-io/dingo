@@ -68,6 +68,7 @@ var flagSpecs = []flagSpec{
 	stringFlag("PrivateBindAddr", "private-bind-addr", "", "private bind address"),
 	uintFlag("PrivatePort", "private-port", "private/NtC port"),
 	uintFlag("MetricsPort", "metrics-port", "metrics port"),
+	uintFlag("DebugPort", "debug-port", "debug pprof port (0 = disabled)"),
 	boolFlag("PeerSharing", "peer-sharing", "enable peer sharing protocol"),
 
 	// APIs
