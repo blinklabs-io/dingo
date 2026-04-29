@@ -26,7 +26,6 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
-	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	"github.com/blinklabs-io/gouroboros/vrf"
 	"golang.org/x/crypto/blake2b"
@@ -161,24 +160,27 @@ func (b *DefaultBlockBuilder) BuildBlock(
 		return nil, nil, errors.New("failed to get protocol parameters")
 	}
 
-	// Safely cast protocol parameters to Conway type
-	conwayPParams, ok := pparams.(*conway.ConwayProtocolParameters)
-	if !ok {
-		return nil, nil, errors.New("protocol parameters are not Conway type")
+	// Read pparams limits via per-era dispatch. TPraos eras
+	// (Shelley/Allegra/Mary/Alonzo) return errTPraosForgingUnsupported;
+	// Babbage and Conway both produce Praos-shape blocks.
+	limits, err := extractPParamsLimits(pparams)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to build block: %w", err)
 	}
 
 	var (
-		// Initialize as non-nil empty slices so CBOR encoding
-		// produces empty arrays (0x80) rather than null (0xF6).
-		// Haskell's CDDL requires arrays here, not null.
-		transactionBodies      = []conway.ConwayTransactionBody{}
-		transactionWitnessSets = []conway.ConwayTransactionWitnessSet{}
+		// Per-tx CBOR is captured as raw bytes so block construction
+		// is era-agnostic at the slice level. Initialize as non-nil
+		// empty so encoding emits 0x80 (empty array), not 0xF6 (null);
+		// the Cardano CDDL requires arrays here.
+		transactionBodies      = []cbor.RawMessage{}
+		transactionWitnessSets = []cbor.RawMessage{}
 		transactionMetadataSet = make(map[uint]cbor.RawMessage)
 		blockSize              uint64
 		totalExUnits           lcommon.ExUnits
-		maxTxSize              = uint64(conwayPParams.MaxTxSize)
-		maxBlockSize           = uint64(conwayPParams.MaxBlockBodySize)
-		maxExUnits             = conwayPParams.MaxBlockExUnits
+		maxTxSize              = limits.maxTxSize
+		maxBlockSize           = limits.maxBlockSize
+		maxExUnits             = limits.maxExUnits
 	)
 
 	b.logger.Debug(
@@ -230,8 +232,12 @@ func (b *DefaultBlockBuilder) BuildBlock(
 			break
 		}
 
-		// Decode the transaction CBOR into full Conway transaction
-		fullTx, err := conway.NewConwayTransactionFromCbor(txCbor)
+		// Decode the transaction CBOR into a typed era-specific
+		// transaction via the mempool's tx-type tag. The decoded
+		// instance is used only for in-memory inspection (Inputs,
+		// Witnesses, AuxiliaryData) — its raw body / witness CBOR
+		// is what gets stitched into the block below.
+		fullTx, err := decodeMempoolTx(mempoolTx)
 		if err != nil {
 			b.logger.Debug(
 				"failed to decode full transaction, skipping",
@@ -288,7 +294,7 @@ func (b *DefaultBlockBuilder) BuildBlock(
 		// Pull ExUnits from redeemers in the witness set
 		var estimatedTxExUnits lcommon.ExUnits
 		var exUnitsErr error
-		for _, redeemer := range fullTx.WitnessSet.Redeemers().Iter() {
+		for _, redeemer := range fullTx.Witnesses().Redeemers().Iter() {
 			estimatedTxExUnits, exUnitsErr = eras.SafeAddExUnits(
 				estimatedTxExUnits,
 				redeemer.ExUnits,
@@ -351,12 +357,25 @@ func (b *DefaultBlockBuilder) BuildBlock(
 			}
 		}
 
-		// Add transaction to our lists for later block creation
-		transactionBodies = append(transactionBodies, fullTx.Body)
-		transactionWitnessSets = append(
-			transactionWitnessSets,
-			fullTx.WitnessSet,
-		)
+		// Add transaction to our lists for later block creation.
+		// Splitting at the byte level keeps block assembly era-
+		// agnostic: we don't need typed body / witness slices once
+		// we have the canonical encoded forms. fullTx.Cbor() returns
+		// the original mempool bytes (preserved via the gouroboros
+		// types' DecodeStoreCbor / SetCborReference machinery).
+		fullTxCbor := fullTx.Cbor()
+		bodyBytes, witnessBytes, extractErr := splitTxCbor(fullTxCbor)
+		if extractErr != nil {
+			b.logger.Debug(
+				"failed to split tx CBOR into body+witnesses, skipping",
+				"component", "forging",
+				"tx_hash", mempoolTx.Hash,
+				"error", extractErr,
+			)
+			continue
+		}
+		transactionBodies = append(transactionBodies, bodyBytes)
+		transactionWitnessSets = append(transactionWitnessSets, witnessBytes)
 		if metadataCbor != nil {
 			transactionMetadataSet[uint(len(transactionBodies))-1] = metadataCbor
 		}
@@ -400,10 +419,12 @@ func (b *DefaultBlockBuilder) BuildBlock(
 		)
 	}
 
-	// Compute block body hash: blake2b_256(hash_tx || hash_wit || hash_aux || hash_invalid)
-	// Each component is the blake2b_256 hash of its CBOR-encoded data.
-	// Also returns the actual block body size for the header.
+	// Compute block body hash: blake2b_256(hash_tx || hash_wit || hash_aux [|| hash_invalid]).
+	// The invalid-transactions hash component is included from Alonzo
+	// onward (the era that introduced Plutus, and with it the
+	// invalid_transactions list).
 	bodyHash, actualBlockBodySize, err := computeBlockBodyHash(
+		limits.era,
 		transactionBodies,
 		transactionWitnessSets,
 		metadataSet,
@@ -425,10 +446,17 @@ func (b *DefaultBlockBuilder) BuildBlock(
 		)
 	}
 
-	// Compute VRF proof for leader election. Use the block slot's
+	// Compute VRF proof(s) for leader election. Use the block slot's
 	// epoch rather than the ledger's current epoch because the slot
 	// clock can reach a new epoch before block processing commits the
 	// epoch rollover.
+	//
+	// Praos eras (Babbage/Conway) carry a single combined VRF result
+	// in the header. TPraos eras (Shelley→Alonzo) carry two: one for
+	// the epoch nonce contribution (NonceVrf, seed = SeedEta) and one
+	// for leader eligibility (LeaderVrf, seed = SeedL). Both TPraos
+	// proofs use the same VRF key but different inputs constructed via
+	// vrf.MkSeedTPraos.
 	blockEpoch, err := b.epochNonce.EpochForSlot(slot)
 	if err != nil {
 		return nil, nil, fmt.Errorf(
@@ -447,14 +475,39 @@ func (b *DefaultBlockBuilder) BuildBlock(
 		return nil, nil, fmt.Errorf("slot %d exceeds int64 max", slot)
 	}
 
-	// Generate VRF proof using MkInputVrf(slot, epochNonce)
-	alpha, err := vrf.MkInputVrf(int64(slot), epochNonce) // #nosec G115 -- validated above
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to create VRF input: %w", err)
-	}
-	vrfProof, vrfOutput, err := b.creds.VRFProve(alpha)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to generate VRF proof: %w", err)
+	var (
+		praosVrf            lcommon.VrfResult
+		nonceVrf, leaderVrf lcommon.VrfResult
+	)
+	if limits.era.isTPraos() {
+		nonceInput, err := vrf.MkSeedTPraos(int64(slot), epochNonce, vrf.SeedEta()) // #nosec G115 -- validated above
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to create TPraos nonce VRF input: %w", err)
+		}
+		nonceProof, nonceOutput, err := b.creds.VRFProve(nonceInput)
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to generate TPraos nonce VRF proof: %w", err)
+		}
+		leaderInput, err := vrf.MkSeedTPraos(int64(slot), epochNonce, vrf.SeedL()) // #nosec G115 -- validated above
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to create TPraos leader VRF input: %w", err)
+		}
+		leaderProof, leaderOutput, err := b.creds.VRFProve(leaderInput)
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to generate TPraos leader VRF proof: %w", err)
+		}
+		nonceVrf = lcommon.VrfResult{Output: nonceOutput, Proof: nonceProof}
+		leaderVrf = lcommon.VrfResult{Output: leaderOutput, Proof: leaderProof}
+	} else {
+		alpha, err := vrf.MkInputVrf(int64(slot), epochNonce) // #nosec G115 -- validated above
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to create VRF input: %w", err)
+		}
+		vrfProof, vrfOutput, err := b.creds.VRFProve(alpha)
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to generate VRF proof: %w", err)
+		}
+		praosVrf = lcommon.VrfResult{Output: vrfOutput, Proof: vrfProof}
 	}
 
 	// Get OpCert from credentials
@@ -475,15 +528,8 @@ func (b *DefaultBlockBuilder) BuildBlock(
 			opCert.KESPeriod,
 		)
 	}
-	opCertBody := babbage.BabbageOpCert{
-		HotVkey:        opCert.KESVKey,
-		SequenceNumber: uint32(opCert.IssueNumber), // #nosec G115 -- validated above
-		KesPeriod:      uint32(opCert.KESPeriod),   // #nosec G115 -- validated above
-		Signature:      opCert.Signature,
-	}
-
-	// Get issuer vkey (cold vkey) from operational certificate
-	// The IssuerVkey identifies the pool operator via their cold key
+	// Get issuer vkey (cold vkey) from operational certificate.
+	// The IssuerVkey identifies the pool operator via their cold key.
 	issuerVKey := opCert.ColdVKey
 	if len(issuerVKey) != 32 {
 		return nil, nil, fmt.Errorf(
@@ -508,27 +554,56 @@ func (b *DefaultBlockBuilder) BuildBlock(
 		h := lcommon.NewBlake2b256(currentTip.Point.Hash)
 		prevHash = &h
 	}
-	headerBody := nullablePrevHashHeaderBody{
-		BlockNumber: nextBlockNumber,
-		Slot:        slot,
-		PrevHash:    prevHash,
-		IssuerVkey:  issuerVKeyArray,
-		VrfKey:      vrfVKey,
-		VrfResult: lcommon.VrfResult{
-			Output: vrfOutput,
-			Proof:  vrfProof,
-		},
-		BlockBodySize: actualBlockBodySize,
-		BlockBodyHash: bodyHash,
-		OpCert:        opCertBody,
-		ProtoVersion: babbage.BabbageProtoVersion{
-			Major: uint64(conwayPParams.ProtocolVersion.Major),
-			Minor: dingoversion.BlockHeaderProtocolMinor,
-		},
+
+	// The header body shape differs between Praos and TPraos eras:
+	// Praos packs OpCert/ProtoVersion as nested structs and carries a
+	// single combined VrfResult; TPraos uses flat OpCert/proto fields
+	// and carries separate NonceVrf and LeaderVrf results. KESSign
+	// signs whichever encoded body shape we hand it.
+	var headerBody any
+	if limits.era.isTPraos() {
+		headerBody = tpraosHeaderBody{
+			BlockNumber:          nextBlockNumber,
+			Slot:                 slot,
+			PrevHash:             prevHash,
+			IssuerVkey:           issuerVKeyArray,
+			VrfKey:               vrfVKey,
+			NonceVrf:             nonceVrf,
+			LeaderVrf:            leaderVrf,
+			BlockBodySize:        actualBlockBodySize,
+			BlockBodyHash:        bodyHash,
+			OpCertHotVkey:        opCert.KESVKey,
+			OpCertSequenceNumber: uint32(opCert.IssueNumber), // #nosec G115 -- validated above
+			OpCertKesPeriod:      uint32(opCert.KESPeriod),   // #nosec G115 -- validated above
+			OpCertSignature:      opCert.Signature,
+			ProtoMajorVersion:    limits.protoMajor,
+			ProtoMinorVersion:    dingoversion.BlockHeaderProtocolMinor,
+		}
+	} else {
+		headerBody = nullablePrevHashHeaderBody{
+			BlockNumber:   nextBlockNumber,
+			Slot:          slot,
+			PrevHash:      prevHash,
+			IssuerVkey:    issuerVKeyArray,
+			VrfKey:        vrfVKey,
+			VrfResult:     praosVrf,
+			BlockBodySize: actualBlockBodySize,
+			BlockBodyHash: bodyHash,
+			OpCert: babbage.BabbageOpCert{
+				HotVkey:        opCert.KESVKey,
+				SequenceNumber: uint32(opCert.IssueNumber), // #nosec G115 -- validated above
+				KesPeriod:      uint32(opCert.KESPeriod),   // #nosec G115 -- validated above
+				Signature:      opCert.Signature,
+			},
+			ProtoVersion: babbage.BabbageProtoVersion{
+				Major: limits.protoMajor,
+				Minor: dingoversion.BlockHeaderProtocolMinor,
+			},
+		}
 	}
 
-	// Sign the block header with KES
-	// First, we need to serialize the header body for signing
+	// Sign the block header with KES.
+	// First, we need to serialize the header body for signing.
 	headerBodyCbor, err := cbor.Encode(headerBody)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to encode header body: %w", err)
@@ -550,33 +625,36 @@ func (b *DefaultBlockBuilder) BuildBlock(
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to encode block header: %w", err)
 	}
-	blockCbor, err := cbor.Encode(rawBlock{
-		Header:                 cbor.RawMessage(headerCbor),
-		TransactionBodies:      transactionBodies,
-		TransactionWitnessSets: transactionWitnessSets,
-		TransactionMetadataSet: metadataSet,
-		InvalidTransactions:    []uint{},
-	})
+	blockCbor, err := encodeBlockCbor(
+		limits.era,
+		cbor.RawMessage(headerCbor),
+		transactionBodies,
+		transactionWitnessSets,
+		metadataSet,
+	)
 	if err != nil {
 		return nil, nil, fmt.Errorf(
-			"failed to marshal forged conway block to CBOR: %w",
+			"failed to marshal forged block to CBOR: %w",
 			err,
 		)
 	}
 
-	// Re-decode block from CBOR
-	// This is needed because things like Hash() rely on having the original CBOR available
-	ledgerBlock, err := conway.NewConwayBlockFromCbor(blockCbor)
+	// Re-decode block from CBOR via the era-correct constructor.
+	// Hash() and other accessors expect the original CBOR to be
+	// stored on the typed block, so we round-trip through the
+	// matching era's block decoder.
+	ledgerBlock, err := decodeBlockFromCbor(limits.era, blockCbor)
 	if err != nil {
 		return nil, nil, fmt.Errorf(
-			"failed to unmarshal forged Conway block from generated CBOR: %w",
+			"failed to unmarshal forged block from generated CBOR: %w",
 			err,
 		)
 	}
 
 	b.logger.Debug(
-		"successfully built conway block",
+		"successfully built block",
 		"component", "forging",
+		"era_major", limits.protoMajor,
 		"slot", ledgerBlock.SlotNumber(),
 		"hash", ledgerBlock.Hash(),
 		"block_number", ledgerBlock.BlockNumber(),
@@ -590,25 +668,39 @@ func (b *DefaultBlockBuilder) BuildBlock(
 	return ledgerBlock, blockCbor, nil
 }
 
-// computeBlockBodyHash computes the block body hash as per Cardano spec:
-// blake2b_256(hash_tx || hash_wit || hash_aux || hash_invalid)
-// where each hash is blake2b_256 of the CBOR-encoded data.
-// Also returns the total block body size (sum of all component sizes).
+// computeBlockBodyHash computes the block body hash as per Cardano spec.
+//
+// Pre-Alonzo (Shelley/Allegra/Mary) hash three components:
+//
+//	blake2b_256(hash_tx || hash_wit || hash_aux)
+//
+// Alonzo and later add a fourth, the invalid_transactions list:
+//
+//	blake2b_256(hash_tx || hash_wit || hash_aux || hash_invalid)
+//
+// Each component is the blake2b_256 hash of its CBOR-encoded data.
+// Returns the body hash and the total body size (sum of all
+// component encoding sizes), which the header records.
+//
+// txBodies and witnessSets are raw, era-specific transaction-CBOR
+// slices; the slice envelopes themselves encode identically across
+// eras.
 func computeBlockBodyHash(
-	txBodies []conway.ConwayTransactionBody,
-	witnessSets []conway.ConwayTransactionWitnessSet,
+	era eraKind,
+	txBodies []cbor.RawMessage,
+	witnessSets []cbor.RawMessage,
 	metadataSet lcommon.TransactionMetadataSet,
 	invalidTxs []uint,
 ) (lcommon.Blake2b256, uint64, error) {
 	// Normalize nil slices to empty so CBOR encodes as 0x80 (empty
 	// array) rather than 0xf6 (null). This must match the encoding
-	// in ConwayBlock.MarshalCBOR, which applies the same
+	// in the era's Block.MarshalCBOR, which applies the same
 	// normalization before serializing the block.
 	if txBodies == nil {
-		txBodies = []conway.ConwayTransactionBody{}
+		txBodies = []cbor.RawMessage{}
 	}
 	if witnessSets == nil {
-		witnessSets = []conway.ConwayTransactionWitnessSet{}
+		witnessSets = []cbor.RawMessage{}
 	}
 	if invalidTxs == nil {
 		invalidTxs = []uint{}
@@ -653,17 +745,34 @@ func computeBlockBodyHash(
 	bodyHashes = append(bodyHashes, metadataHash[:]...)
 	totalSize += uint64(len(metadataCbor))
 
-	// Hash invalid transactions
-	invalidCbor, err := cbor.Encode(invalidTxs)
-	if err != nil {
-		return lcommon.Blake2b256{}, 0, fmt.Errorf(
-			"failed to encode invalid transactions: %w",
-			err,
-		)
+	if era.hasInvalidTxs() {
+		// gouroboros's body-hash validator (common.ValidateBlockBodyHash)
+		// hashes the raw CBOR bytes of each block field as they appear
+		// on the wire — including framing — so the invalid_transactions
+		// hash component must be encoded the same way encodeBlockCbor
+		// emits the field. Alonzo uses indefinite-length framing for
+		// this list; Babbage and Conway use definite-length.
+		var invalidCbor []byte
+		var err error
+		if era.usesIndefInvalidList() {
+			indef := make(cbor.IndefLengthList, 0, len(invalidTxs))
+			for _, v := range invalidTxs {
+				indef = append(indef, v)
+			}
+			invalidCbor, err = cbor.Encode(indef)
+		} else {
+			invalidCbor, err = cbor.Encode(invalidTxs)
+		}
+		if err != nil {
+			return lcommon.Blake2b256{}, 0, fmt.Errorf(
+				"failed to encode invalid transactions: %w",
+				err,
+			)
+		}
+		invalidHash := blake2b.Sum256(invalidCbor)
+		bodyHashes = append(bodyHashes, invalidHash[:]...)
+		totalSize += uint64(len(invalidCbor))
 	}
-	invalidHash := blake2b.Sum256(invalidCbor)
-	bodyHashes = append(bodyHashes, invalidHash[:]...)
-	totalSize += uint64(len(invalidCbor))
 
 	// Final hash of concatenated hashes
 	finalHash := blake2b.Sum256(bodyHashes)
@@ -672,6 +781,7 @@ func computeBlockBodyHash(
 
 // nullablePrevHashHeaderBody mirrors BabbageBlockHeaderBody but uses a
 // pointer for PrevHash so nil encodes as CBOR null (genesis origin).
+// Used for Babbage and Conway (Praos) header bodies.
 type nullablePrevHashHeaderBody struct {
 	cbor.StructAsArray
 	BlockNumber   uint64
@@ -686,6 +796,31 @@ type nullablePrevHashHeaderBody struct {
 	ProtoVersion  babbage.BabbageProtoVersion
 }
 
+// tpraosHeaderBody mirrors ShelleyBlockHeaderBody (used by Shelley,
+// Allegra, Mary, and Alonzo via embedding) but uses a pointer for
+// PrevHash so nil encodes as CBOR null at the Shelley boundary. The
+// flat OpCert and protocol-version fields differ from the struct-shape
+// equivalents in BabbageBlockHeaderBody — TPraos pre-dates the
+// header-body refactor that introduced the nested structs.
+type tpraosHeaderBody struct {
+	cbor.StructAsArray
+	BlockNumber          uint64
+	Slot                 uint64
+	PrevHash             *lcommon.Blake2b256
+	IssuerVkey           lcommon.IssuerVkey
+	VrfKey               []byte
+	NonceVrf             lcommon.VrfResult
+	LeaderVrf            lcommon.VrfResult
+	BlockBodySize        uint64
+	BlockBodyHash        lcommon.Blake2b256
+	OpCertHotVkey        []byte
+	OpCertSequenceNumber uint32
+	OpCertKesPeriod      uint32
+	OpCertSignature      []byte
+	ProtoMajorVersion    uint64
+	ProtoMinorVersion    uint64
+}
+
 // rawBlockHeader encodes a block header with a pre-encoded body. This
 // preserves the exact CBOR bytes that were KES-signed.
 type rawBlockHeader struct {
@@ -694,13 +829,72 @@ type rawBlockHeader struct {
 	Signature []byte
 }
 
-// rawBlock encodes a block with a pre-encoded header. This preserves
-// the genesis prevHash encoding (CBOR null vs bytestring).
-type rawBlock struct {
+// rawShelleyEraBlock encodes a Shelley/Allegra/Mary block: 4 elements,
+// no invalid_transactions list.
+type rawShelleyEraBlock struct {
 	cbor.StructAsArray
 	Header                 cbor.RawMessage
-	TransactionBodies      []conway.ConwayTransactionBody
-	TransactionWitnessSets []conway.ConwayTransactionWitnessSet
+	TransactionBodies      []cbor.RawMessage
+	TransactionWitnessSets []cbor.RawMessage
+	TransactionMetadataSet lcommon.TransactionMetadataSet
+}
+
+// rawAlonzoBlock encodes an Alonzo block: 5 elements, with an
+// indefinite-length invalid_transactions list (matching the on-chain
+// encoding gouroboros's AlonzoBlock.MarshalCBOR emits).
+type rawAlonzoBlock struct {
+	cbor.StructAsArray
+	Header                 cbor.RawMessage
+	TransactionBodies      []cbor.RawMessage
+	TransactionWitnessSets []cbor.RawMessage
+	TransactionMetadataSet lcommon.TransactionMetadataSet
+	InvalidTransactions    cbor.IndefLengthList
+}
+
+// rawBabbageEraBlock encodes a Babbage/Conway block: 5 elements with a
+// definite-length invalid_transactions list.
+type rawBabbageEraBlock struct {
+	cbor.StructAsArray
+	Header                 cbor.RawMessage
+	TransactionBodies      []cbor.RawMessage
+	TransactionWitnessSets []cbor.RawMessage
 	TransactionMetadataSet lcommon.TransactionMetadataSet
 	InvalidTransactions    []uint
+}
+
+// encodeBlockCbor selects the era-correct raw-block envelope and
+// encodes it. The forge path never produces invalid_transactions so
+// the list is always empty when present; we still emit it because
+// each Alonzo+ decoder expects exactly five array elements.
+func encodeBlockCbor(
+	era eraKind,
+	header cbor.RawMessage,
+	txBodies []cbor.RawMessage,
+	witnessSets []cbor.RawMessage,
+	metadataSet lcommon.TransactionMetadataSet,
+) ([]byte, error) {
+	if !era.hasInvalidTxs() {
+		return cbor.Encode(rawShelleyEraBlock{
+			Header:                 header,
+			TransactionBodies:      txBodies,
+			TransactionWitnessSets: witnessSets,
+			TransactionMetadataSet: metadataSet,
+		})
+	}
+	if era.usesIndefInvalidList() {
+		return cbor.Encode(rawAlonzoBlock{
+			Header:                 header,
+			TransactionBodies:      txBodies,
+			TransactionWitnessSets: witnessSets,
+			TransactionMetadataSet: metadataSet,
+			InvalidTransactions:    cbor.IndefLengthList{},
+		})
+	}
+	return cbor.Encode(rawBabbageEraBlock{
+		Header:                 header,
+		TransactionBodies:      txBodies,
+		TransactionWitnessSets: witnessSets,
+		TransactionMetadataSet: metadataSet,
+		InvalidTransactions:    []uint{},
+	})
 }
