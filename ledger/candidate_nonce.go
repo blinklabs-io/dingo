@@ -57,13 +57,16 @@ var errNoncesMissing = errors.New("block nonce rows missing for epoch")
 //
 // Parameters:
 //   - txn: optional database transaction (nil to create a new one)
+//   - eraId: the era of the source epoch. Selects the
+//     randomness-stabilisation formula (3k/f for TPraos eras,
+//     4k/f for Praos) that determines the candidate-freeze cutoff.
 //   - prevEvolvingNonce: evolving nonce at the end of the previous
 //     epoch (genesis hash for the first Shelley epoch)
 //   - prevCandidateNonce: candidate nonce at the end of the previous
 //     epoch (genesis hash for the first Shelley epoch). In Haskell,
 //     psCandidateNonce carries across epochs independently of the
-//     evolving nonce. When 4k/f >= epochLength, the candidate is
-//     never updated and this value is returned as-is.
+//     evolving nonce. When the stability window >= epochLength, the
+//     candidate is never updated and this value is returned as-is.
 //   - epochStartSlot: first slot of the epoch
 //   - epochLengthInSlots: total slots in the epoch
 //
@@ -73,12 +76,13 @@ var errNoncesMissing = errors.New("block nonce rows missing for epoch")
 //   - evolvingNonce: the evolving nonce after all blocks in the epoch
 func (ls *LedgerState) computeCandidateNonce(
 	txn *database.Txn,
+	eraId uint,
 	prevEvolvingNonce []byte,
 	prevCandidateNonce []byte,
 	epochStartSlot uint64,
 	epochLengthInSlots uint64,
 ) ([]byte, []byte, error) {
-	stabilityWindow := ls.nonceStabilityWindow()
+	stabilityWindow := ls.nonceStabilityWindow(eraId)
 	epochEndSlot := epochStartSlot + epochLengthInSlots
 
 	// Determine the cutoff slot. Blocks at or past this slot do NOT
@@ -327,16 +331,29 @@ func (ls *LedgerState) computeCandidateNonceSlow(
 }
 
 // nonceStabilityWindow returns the randomness stabilisation window
-// (in slots) for nonce computation. In Ouroboros Praos (Conway+),
-// this determines when the evolving nonce is frozen: blocks with
-// slot + window >= firstSlotNextEpoch do NOT contribute.
+// (in slots) for nonce computation in the given era. Blocks at or past
+// (firstSlotNextEpoch - window) do NOT update the candidate nonce; the
+// evolving nonce continues to update.
 //
-// The value is 4k/f where k is securityParam and f is
-// activeSlotsCoeff from Shelley genesis. Note: pre-Conway eras used
-// 3k/f (computeStabilityWindow), but Conway uses 4k/f
-// (computeRandomnessStabilisationWindow) as per the Praos protocol.
-// See cardano-ledger StabilityWindow.hs.
-func (ls *LedgerState) nonceStabilityWindow() uint64 {
+// The multiplier of k differs between Praos protocol families:
+//
+//   - TPraos (Shelley/Allegra/Mary/Alonzo): 3k/f, from
+//     cardano-ledger's computeStabilityWindow.
+//   - Praos (Babbage onwards, including Conway): 4k/f, from
+//     cardano-ledger's computeRandomnessStabilisationWindow.
+//
+// Using 4k/f universally — as this function did before #2125 — shifts
+// the candidate-freeze cutoff in the source epoch and produces an
+// epoch nonce that diverges from cardano-node, breaking VRF
+// verification on every block of the next epoch in TPraos eras. The
+// symptom is most visible at the Shelley→Allegra boundary, where
+// epoch 0's misframed candidate yields a wrong eta0 for epoch 1 and
+// every Allegra header VRF-fails.
+//
+// Era IDs follow gouroboros: Byron=0, Shelley=1, Allegra=2, Mary=3,
+// Alonzo=4, Babbage=5, Conway=6. Byron has no Praos randomness
+// window and returns 0.
+func (ls *LedgerState) nonceStabilityWindow(eraId uint) uint64 {
 	if ls.config.CardanoNodeConfig == nil {
 		return 0
 	}
@@ -353,9 +370,13 @@ func (ls *LedgerState) nonceStabilityWindow() uint64 {
 		activeSlotsCoeff.Num().Sign() <= 0 {
 		return 0
 	}
-	// 4k/f = 4 * k * denom / num
+	multiplier, ok := nonceStabilityWindowKMultiplier(eraId)
+	if !ok {
+		return 0
+	}
+	// (multiplier * k) / f = (multiplier * k * f.denom) / f.num
 	numerator := new(big.Int).SetInt64(int64(k))
-	numerator.Mul(numerator, big.NewInt(4))
+	numerator.Mul(numerator, big.NewInt(multiplier))
 	numerator.Mul(numerator, activeSlotsCoeff.Denom())
 	denominator := new(big.Int).Set(activeSlotsCoeff.Num())
 	result := new(big.Int).Div(numerator, denominator)
@@ -368,4 +389,20 @@ func (ls *LedgerState) nonceStabilityWindow() uint64 {
 		return 0
 	}
 	return result.Uint64()
+}
+
+// nonceStabilityWindowKMultiplier returns the k multiplier for the
+// given era's randomness-stabilisation formula. The multiplier
+// changes from 3 to 4 at the TPraos→Praos transition (Alonzo→Babbage).
+// Byron is unsupported (no Praos nonce protocol) and returns ok=false,
+// as do era IDs the table does not know.
+func nonceStabilityWindowKMultiplier(eraId uint) (int64, bool) {
+	switch eraId {
+	case 1, 2, 3, 4: // Shelley, Allegra, Mary, Alonzo (TPraos)
+		return 3, true
+	case 5, 6: // Babbage, Conway (Praos)
+		return 4, true
+	default:
+		return 0, false
+	}
 }

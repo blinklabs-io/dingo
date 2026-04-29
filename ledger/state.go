@@ -4213,7 +4213,7 @@ func (ls *LedgerState) nextEpochNonceReadyCutoffSlot(
 	if epochLength == 0 {
 		return 0, false
 	}
-	stabilityWindow := ls.nonceStabilityWindow()
+	stabilityWindow := ls.nonceStabilityWindow(currentEpoch.EraId)
 	if stabilityWindow >= epochLength {
 		return currentEpoch.StartSlot, true
 	}

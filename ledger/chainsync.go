@@ -2605,8 +2605,12 @@ func (ls *LedgerState) calculateEpochNonce(
 	// and evolvingNonce (after all blocks) from the remaining
 	// current-epoch blocks. Each block's VRF output is accumulated
 	// via the Nonce semigroup (⭒) starting from prevEvolvingNonce.
+	// Pass currentEra.Id so the candidate-freeze cutoff uses the
+	// correct stability window for the source epoch's protocol family
+	// (3k/f for TPraos, 4k/f for Praos). See #2125.
 	candidateNonce, evolvingNonce, err := ls.computeCandidateNonce(
 		txn,
+		currentEra.Id,
 		prevEvolvingNonce,
 		prevCandidateNonce,
 		computeStartSlot,

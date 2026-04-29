@@ -780,6 +780,7 @@ func newNonceReadyTestLedgerState(
 			EpochId:             10,
 			StartSlot:           1000,
 			LengthInSlots:       100,
+			EraId:               eras.ShelleyEraDesc.Id,
 			Nonce:               nil,
 			EvolvingNonce:       []byte{0x02},
 			CandidateNonce:      []byte{0x03},
@@ -829,13 +830,17 @@ func TestNextEpochNonceReadyCutoffSlot(t *testing.T) {
 		},
 	}
 
+	// Shelley → TPraos: stabilityWindow = 3k/f = 3*432/0.05 = 25920
+	// cutoff = epochStart + epochLength - 25920
+	//        = 106963200 + 86400 - 25920 = 107023680
 	cutoffSlot, ok := ls.nextEpochNonceReadyCutoffSlot(models.Epoch{
 		EpochId:       1238,
 		StartSlot:     106963200,
 		LengthInSlots: 86400,
+		EraId:         eras.ShelleyEraDesc.Id,
 	})
 	require.True(t, ok)
-	assert.Equal(t, uint64(107015040), cutoffSlot)
+	assert.Equal(t, uint64(107023680), cutoffSlot)
 }
 
 func TestNextEpochNonceReadyEpoch(t *testing.T) {
@@ -880,6 +885,7 @@ func TestNextEpochNonceReadyEpoch(t *testing.T) {
 			EpochId:             10,
 			StartSlot:           1000,
 			LengthInSlots:       100,
+			EraId:               eras.ShelleyEraDesc.Id,
 			Nonce:               nil,
 			EvolvingNonce:       []byte{0x02},
 			CandidateNonce:      []byte{0x03},
@@ -992,6 +998,7 @@ func TestNextEpochNonceReadyEpochNotReadyBeforeCutoff(t *testing.T) {
 			EpochId:             10,
 			StartSlot:           1000,
 			LengthInSlots:       100,
+			EraId:               eras.ShelleyEraDesc.Id,
 			Nonce:               nil,
 			EvolvingNonce:       []byte{0x02},
 			CandidateNonce:      []byte{0x03},
@@ -1098,10 +1105,13 @@ func TestNextEpochNonceReadyCutoffSlotShortEpoch(t *testing.T) {
 		},
 	}
 
+	// Shelley → 3k/f = 25920, which exceeds the 100-slot epoch, so the
+	// cutoff degenerates to the epoch start.
 	cutoffSlot, ok := ls.nextEpochNonceReadyCutoffSlot(models.Epoch{
 		EpochId:       42,
 		StartSlot:     1000,
 		LengthInSlots: 100,
+		EraId:         eras.ShelleyEraDesc.Id,
 	})
 	require.True(t, ok)
 	assert.Equal(t, uint64(1000), cutoffSlot)
