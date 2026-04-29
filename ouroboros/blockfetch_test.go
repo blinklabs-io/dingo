@@ -351,6 +351,32 @@ func TestReportBlockfetchServerAsyncError_ForwardsToConnectionErrorChan(
 	}
 }
 
+func TestReportBlockfetchServerAsyncError_ClosedErrorChan_NoPanic(
+	t *testing.T,
+) {
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	o := NewOuroboros(OuroborosConfig{
+		Logger:   logger,
+		EventBus: event.NewEventBus(nil, logger),
+	})
+	conn := &stubBlockfetchConnection{
+		errChan: make(chan error),
+	}
+	close(conn.errChan)
+	start := ocommon.NewPoint(100, []byte{0x01})
+	end := ocommon.NewPoint(200, []byte{0x02})
+
+	assert.NotPanics(t, func() {
+		o.reportBlockfetchServerAsyncError(
+			conn,
+			testConnId().String(),
+			start,
+			end,
+			errors.New("closed channel test"),
+		)
+	})
+}
+
 func BenchmarkBlockfetchClientBlockMetrics(b *testing.B) {
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	eventBus := event.NewEventBus(nil, logger)
