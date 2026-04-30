@@ -116,6 +116,10 @@ func (m *mockBlobStore) DeleteBlock(types.Txn, uint64, []byte, uint64) error {
 	return nil
 }
 
+func (m *mockBlobStore) TombstoneBlock(types.Txn, uint64, []byte) error {
+	return nil
+}
+
 func (m *mockBlobStore) GetBlockURL(
 	context.Context,
 	types.Txn,

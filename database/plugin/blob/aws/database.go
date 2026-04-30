@@ -326,6 +326,9 @@ func (d *BlobStoreS3) GetBlock(
 		}
 		return nil, types.BlockMetadata{}, err
 	}
+	if types.IsBlockTombstone(cborData) {
+		return nil, types.BlockMetadata{}, types.ErrBlockTombstoned
+	}
 	metadataKey := types.BlockBlobMetadataKey(key)
 	metadataBytes, err := d.getInternal(ctx, string(metadataKey))
 	if err != nil {
@@ -386,6 +389,27 @@ func (d *BlobStoreS3) DeleteBlock(
 		return err
 	}
 	return nil
+}
+
+// TombstoneBlock replaces a block's CBOR with a tombstone marker, leaving
+// the index pointers and metadata in place so a wrapping archive proxy can
+// resolve the block via GetBlock(slot, hash).
+func (d *BlobStoreS3) TombstoneBlock(
+	txn types.Txn,
+	slot uint64,
+	hash []byte,
+) error {
+	t, err := d.validateTxn(txn)
+	if err != nil {
+		return err
+	}
+	if err := t.assertWritable(); err != nil {
+		return err
+	}
+	ctx, cancel := d.opContext()
+	defer cancel()
+	key := types.BlockBlobKey(slot, hash)
+	return d.Put(ctx, string(key), types.BlockTombstone())
 }
 
 // SetUtxo stores a UTxO's CBOR data

@@ -612,6 +612,9 @@ func (d *BlobStoreBadger) GetBlock(
 	if err != nil {
 		return nil, types.BlockMetadata{}, err
 	}
+	if types.IsBlockTombstone(cborData) {
+		return nil, types.BlockMetadata{}, types.ErrBlockTombstoned
+	}
 	metadataKey := types.BlockBlobMetadataKey(key)
 	metadataVal, err := badgerTxn.tx.Get(metadataKey)
 	if err != nil {
@@ -660,6 +663,22 @@ func (d *BlobStoreBadger) DeleteBlock(
 		return err
 	}
 	return nil
+}
+
+// TombstoneBlock overwrites a block's CBOR with a tombstone marker, leaving
+// the bi/bh index pointers and metadata untouched so a wrapping archive
+// proxy can still resolve the block via GetBlock(slot, hash).
+func (d *BlobStoreBadger) TombstoneBlock(
+	txn types.Txn,
+	slot uint64,
+	hash []byte,
+) error {
+	badgerTxn, err := d.validateTxn(txn)
+	if err != nil {
+		return err
+	}
+	key := types.BlockBlobKey(slot, hash)
+	return badgerTxn.tx.Set(key, types.BlockTombstone())
 }
 
 // SetUtxo stores a UTxO's CBOR data

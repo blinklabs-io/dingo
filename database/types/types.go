@@ -15,6 +15,7 @@
 package types
 
 import (
+	"bytes"
 	"database/sql/driver"
 	"errors"
 	"fmt"
@@ -141,6 +142,14 @@ type NodeSettings struct {
 // ErrBlobKeyNotFound is returned by blob operations when a key is missing
 var ErrBlobKeyNotFound = errors.New("blob key not found")
 
+// ErrBlockTombstoned is returned by GetBlock when the block's CBOR has been
+// replaced with a tombstone marker — the block was pruned for archival and
+// is expected to be available via an archive proxy. Callers wrapping the
+// blob store (notably the bark proxy) intercept this error and resolve the
+// block from the archive; unwrapped consumers should treat it as a
+// configuration error (the block is no longer local but no proxy is wired up).
+var ErrBlockTombstoned = errors.New("block tombstoned (archived)")
+
 // ErrTxnWrongType is returned when a transaction has the wrong type
 var ErrTxnWrongType = errors.New("invalid transaction type")
 
@@ -240,4 +249,27 @@ type BlockMetadata struct {
 type SignedURL struct {
 	URL     url.URL
 	Expires time.Time
+}
+
+// BlockTombstoneMagic is the four-byte prefix that identifies a tombstone
+// record stored at a block's bp key. The bytes "DBT1" do not appear at the
+// start of any valid Cardano block CBOR (blocks begin with a CBOR array
+// header byte such as 0x82/0x83), so detection is unambiguous.
+var BlockTombstoneMagic = [4]byte{'D', 'B', 'T', '1'}
+
+// BlockTombstone returns a fresh copy of the tombstone marker that replaces
+// a block's CBOR when the block has been pruned for archival. The bp key
+// continues to exist with this value so that index pointers (bi, bh) and
+// metadata remain referentially valid.
+func BlockTombstone() []byte {
+	out := make([]byte, len(BlockTombstoneMagic))
+	copy(out, BlockTombstoneMagic[:])
+	return out
+}
+
+// IsBlockTombstone reports whether the given bytes (typically the value
+// stored at a block's bp key) are a tombstone marker.
+func IsBlockTombstone(data []byte) bool {
+	return len(data) >= len(BlockTombstoneMagic) &&
+		bytes.Equal(data[:len(BlockTombstoneMagic)], BlockTombstoneMagic[:])
 }

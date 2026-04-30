@@ -17,6 +17,7 @@ package bark
 import (
 	"context"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -138,11 +139,17 @@ func (b *BlobStoreBark) GetBlock(
 			fmt.Errorf("failed to get current slot: %w", err)
 	}
 
-	// if the requested slot is still within the security window, defer to the
-	// upstream blob storage to retrieve the block
+	// If the requested slot is within the security window, the block is
+	// expected to live locally. Defer to upstream — but if upstream reports
+	// the block was tombstoned (rare in-window case, e.g. after a rollback
+	// crosses a previously pruned slot back into the window) fall through
+	// to the archive proxy.
 	if b.config.SecurityWindow > currentSlot ||
 		slot >= currentSlot-b.config.SecurityWindow {
-		return b.upstream.GetBlock(txn, slot, hash)
+		cbor, meta, err := b.upstream.GetBlock(txn, slot, hash)
+		if !errors.Is(err, types.ErrBlockTombstoned) {
+			return cbor, meta, err
+		}
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
@@ -228,6 +235,14 @@ func (b *BlobStoreBark) DeleteBlock(
 	id uint64,
 ) error {
 	return b.upstream.DeleteBlock(txn, slot, hash, id)
+}
+
+func (b *BlobStoreBark) TombstoneBlock(
+	txn types.Txn,
+	slot uint64,
+	hash []byte,
+) error {
+	return b.upstream.TombstoneBlock(txn, slot, hash)
 }
 
 func (b *BlobStoreBark) GetBlockURL(

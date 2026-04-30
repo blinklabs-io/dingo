@@ -459,6 +459,9 @@ func (d *BlobStoreGCS) GetBlock(
 		d.logger.Errorf("%v", wrappedErr)
 		return nil, types.BlockMetadata{}, wrappedErr
 	}
+	if types.IsBlockTombstone(cborData) {
+		return nil, types.BlockMetadata{}, types.ErrBlockTombstoned
+	}
 	metadataKey := types.BlockBlobMetadataKey(key)
 	r, err = d.object(metadataKey).NewReader(ctx)
 	if err != nil {
@@ -537,6 +540,45 @@ func (d *BlobStoreGCS) DeleteBlock(
 	if err := d.object(hashIndexKey).Delete(ctx); err != nil &&
 		!errors.Is(err, storage.ErrObjectNotExist) {
 		d.logger.Errorf("gcs delete %q failed: %v", string(hashIndexKey), err)
+		return err
+	}
+	return nil
+}
+
+// TombstoneBlock replaces a block's CBOR with a tombstone marker, leaving
+// the index pointers and metadata in place so a wrapping archive proxy can
+// resolve the block via GetBlock(slot, hash).
+func (d *BlobStoreGCS) TombstoneBlock(
+	txn types.Txn,
+	slot uint64,
+	hash []byte,
+) error {
+	if err := d.validateTxn(txn); err != nil {
+		return err
+	}
+	t := txn.(*gcsTxn) // safe after validateTxn
+	if err := t.assertWritable(); err != nil {
+		return err
+	}
+	ctx, cancel := d.opContext()
+	defer cancel()
+	key := types.BlockBlobKey(slot, hash)
+	w := d.object(key).NewWriter(ctx)
+	if _, err := w.Write(types.BlockTombstone()); err != nil {
+		_ = w.Close()
+		d.logger.Errorf(
+			"failed to write tombstone object %q: %v",
+			string(key),
+			err,
+		)
+		return err
+	}
+	if err := w.Close(); err != nil {
+		d.logger.Errorf(
+			"failed to close tombstone writer for %q: %v",
+			string(key),
+			err,
+		)
 		return err
 	}
 	return nil
