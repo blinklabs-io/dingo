@@ -78,7 +78,6 @@ var flagSpecs = []flagSpec{
 
 	// Bark
 	stringFlag("BarkBaseUrl", "bark-url", "", "Bark archive base URL"),
-	uint64Flag("BarkSecurityWindow", "bark-security-window", "slots near tip that are not expected in Bark archive"),
 	uintFlag("BarkPort", "bark-port", "Bark RPC port"),
 
 	// Mempool

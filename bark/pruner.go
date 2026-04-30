@@ -28,11 +28,10 @@ import (
 )
 
 type PrunerConfig struct {
-	LedgerState    *ledger.LedgerState
-	DB             *database.Database
-	Logger         *slog.Logger
-	SecurityWindow uint64
-	Frequency      time.Duration
+	LedgerState *ledger.LedgerState
+	DB          *database.Database
+	Logger      *slog.Logger
+	Frequency   time.Duration
 }
 
 type Pruner struct {
@@ -75,14 +74,15 @@ func (p *Pruner) prune(ctx context.Context) {
 		return
 	}
 
-	if currentSlot <= p.config.SecurityWindow {
+	securityWindow := p.ledgerState.StabilityWindow()
+	if currentSlot <= securityWindow {
 		p.logger.Debug(
 			"pruner: skipped because current slot is not high enough")
 		return
 	}
 	iter := p.db.BlocksInRange(
 		0,
-		currentSlot-p.config.SecurityWindow-1,
+		currentSlot-securityWindow-1,
 	)
 	defer iter.Close()
 

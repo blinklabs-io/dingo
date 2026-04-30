@@ -93,7 +93,6 @@ type Config struct {
 	outboundSourcePort       uint
 	utxorpcPort              uint
 	barkBaseUrl              string
-	barkSecurityWindow       uint64
 	barkPort                 uint
 	networkMagic             uint32
 	intersectTip             bool
@@ -801,12 +800,6 @@ func WithBlockfrostPort(port uint) ConfigOptionFunc {
 func WithBarkBaseUrl(baseUrl string) ConfigOptionFunc {
 	return func(c *Config) {
 		c.barkBaseUrl = baseUrl
-	}
-}
-
-func WithBarkSecurityWindow(window uint64) ConfigOptionFunc {
-	return func(c *Config) {
-		c.barkSecurityWindow = window
 	}
 }
 
