@@ -487,8 +487,12 @@ func (ls *LedgerState) computeEpochNonceForSlot(
 		}
 	}
 
+	// Use prevEpoch.EraId so the candidate-freeze cutoff applies the
+	// correct stability window for the source epoch's protocol family
+	// (3k/f for TPraos, 4k/f for Praos). See #2125.
 	candidateNonce, evolvingNonce, err := ls.computeCandidateNonce(
 		nil, // non-transactional
+		prevEpoch.EraId,
 		prevEvolvingNonce,
 		prevCandidateNonce,
 		computeStartSlot,
