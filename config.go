@@ -94,6 +94,7 @@ type Config struct {
 	utxorpcPort              uint
 	barkBaseUrl              string
 	barkPort                 uint
+	barkPrunerFrequency      time.Duration
 	networkMagic             uint32
 	intersectTip             bool
 	peerSharing              bool
@@ -806,6 +807,15 @@ func WithBarkBaseUrl(baseUrl string) ConfigOptionFunc {
 func WithBarkPort(port uint) ConfigOptionFunc {
 	return func(c *Config) {
 		c.barkPort = port
+	}
+}
+
+// WithBarkPrunerFrequency specifies how often the Bark pruner runs
+// (deleting blob entries older than the ledger stability window).
+// Default is 1 hour. Values <= 0 fall back to the default.
+func WithBarkPrunerFrequency(freq time.Duration) ConfigOptionFunc {
+	return func(c *Config) {
+		c.barkPrunerFrequency = freq
 	}
 }
 

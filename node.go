@@ -313,11 +313,15 @@ func (n *Node) Run(ctx context.Context) error {
 			Logger:      n.config.logger,
 		}, n.db.Blob()))
 
+		prunerFreq := n.config.barkPrunerFrequency
+		if prunerFreq <= 0 {
+			prunerFreq = time.Hour
+		}
 		n.barkPruner = bark.NewPruner(bark.PrunerConfig{
 			LedgerState: state,
 			DB:          n.db,
 			Logger:      n.config.logger,
-			Frequency:   time.Hour,
+			Frequency:   prunerFreq,
 		})
 
 		if err := n.barkPruner.Start(n.ctx); err != nil {

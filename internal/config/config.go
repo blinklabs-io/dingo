@@ -1,4 +1,4 @@
-// Copyright 2025 Blink Labs Software
+// Copyright 2026 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -201,34 +201,35 @@ func DefaultCacheConfig() CacheConfig {
 }
 
 type Config struct {
-	MetadataPlugin       string  `yaml:"metadataPlugin"     envconfig:"DINGO_DATABASE_METADATA_PLUGIN"`
-	TlsKeyFilePath       string  `yaml:"tlsKeyFilePath"     envconfig:"TLS_KEY_FILE_PATH"`
-	Topology             string  `yaml:"topology"`
-	CardanoConfig        string  `yaml:"cardanoConfig"      envconfig:"config"`
-	DatabasePath         string  `yaml:"databasePath"                                                     split_words:"true"`
-	SocketPath           string  `yaml:"socketPath"                                                       split_words:"true"`
-	TlsCertFilePath      string  `yaml:"tlsCertFilePath"    envconfig:"TLS_CERT_FILE_PATH"`
-	BindAddr             string  `yaml:"bindAddr"                                                         split_words:"true"`
-	BlobPlugin           string  `yaml:"blobPlugin"         envconfig:"DINGO_DATABASE_BLOB_PLUGIN"`
-	PrivateBindAddr      string  `yaml:"privateBindAddr"                                                  split_words:"true"`
-	ShutdownTimeout      string  `yaml:"shutdownTimeout"                                                  split_words:"true"`
-	LedgerCatchupTimeout string  `yaml:"ledgerCatchupTimeout"  envconfig:"DINGO_LEDGER_CATCHUP_TIMEOUT"`
-	Network              string  `yaml:"network"`
-	NetworkMagic         uint32  `yaml:"networkMagic"                                                     split_words:"true"`
-	MempoolCapacity      int64   `yaml:"mempoolCapacity"                                                  split_words:"true"`
-	EvictionWatermark    float64 `yaml:"evictionWatermark"  envconfig:"DINGO_MEMPOOL_EVICTION_WATERMARK"`
-	RejectionWatermark   float64 `yaml:"rejectionWatermark" envconfig:"DINGO_MEMPOOL_REJECTION_WATERMARK"`
-	PrivatePort          uint    `yaml:"privatePort"                                                      split_words:"true"`
-	RelayPort            uint    `yaml:"relayPort"          envconfig:"port"`
-	BarkBaseUrl          string  `yaml:"barkBaseUrl" envconfig:"DINGO_BARK_BASE_URL"`
-	BarkPort             uint    `yaml:"barkPort"    envconfig:"DINGO_BARK_PORT"`
-	UtxorpcPort          uint    `yaml:"utxorpcPort"        envconfig:"DINGO_UTXORPC_PORT"`
-	MetricsPort          uint    `yaml:"metricsPort"                                                      split_words:"true"`
-	DebugPort            uint    `yaml:"debugPort"          envconfig:"DINGO_DEBUG_PORT"`
-	IntersectTip         bool    `yaml:"intersectTip"                                                     split_words:"true"`
-	ValidateHistorical   bool    `yaml:"validateHistorical"                                               split_words:"true"`
-	RunMode              RunMode `yaml:"runMode"            envconfig:"DINGO_RUN_MODE"`
-	ImmutableDbPath      string  `yaml:"immutableDbPath"    envconfig:"DINGO_IMMUTABLE_DB_PATH"`
+	MetadataPlugin       string        `yaml:"metadataPlugin"     envconfig:"DINGO_DATABASE_METADATA_PLUGIN"`
+	TlsKeyFilePath       string        `yaml:"tlsKeyFilePath"     envconfig:"TLS_KEY_FILE_PATH"`
+	Topology             string        `yaml:"topology"`
+	CardanoConfig        string        `yaml:"cardanoConfig"      envconfig:"config"`
+	DatabasePath         string        `yaml:"databasePath"                                                     split_words:"true"`
+	SocketPath           string        `yaml:"socketPath"                                                       split_words:"true"`
+	TlsCertFilePath      string        `yaml:"tlsCertFilePath"    envconfig:"TLS_CERT_FILE_PATH"`
+	BindAddr             string        `yaml:"bindAddr"                                                         split_words:"true"`
+	BlobPlugin           string        `yaml:"blobPlugin"         envconfig:"DINGO_DATABASE_BLOB_PLUGIN"`
+	PrivateBindAddr      string        `yaml:"privateBindAddr"                                                  split_words:"true"`
+	ShutdownTimeout      string        `yaml:"shutdownTimeout"                                                  split_words:"true"`
+	LedgerCatchupTimeout string        `yaml:"ledgerCatchupTimeout"  envconfig:"DINGO_LEDGER_CATCHUP_TIMEOUT"`
+	Network              string        `yaml:"network"`
+	NetworkMagic         uint32        `yaml:"networkMagic"                                                     split_words:"true"`
+	MempoolCapacity      int64         `yaml:"mempoolCapacity"                                                  split_words:"true"`
+	EvictionWatermark    float64       `yaml:"evictionWatermark"  envconfig:"DINGO_MEMPOOL_EVICTION_WATERMARK"`
+	RejectionWatermark   float64       `yaml:"rejectionWatermark" envconfig:"DINGO_MEMPOOL_REJECTION_WATERMARK"`
+	PrivatePort          uint          `yaml:"privatePort"                                                      split_words:"true"`
+	RelayPort            uint          `yaml:"relayPort"          envconfig:"port"`
+	BarkBaseUrl          string        `yaml:"barkBaseUrl"        envconfig:"DINGO_BARK_BASE_URL"`
+	BarkPort             uint          `yaml:"barkPort"           envconfig:"DINGO_BARK_PORT"`
+	BarkPrunerFrequency  time.Duration `yaml:"barkPrunerFrequency" envconfig:"DINGO_BARK_PRUNER_FREQUENCY"`
+	UtxorpcPort          uint          `yaml:"utxorpcPort"        envconfig:"DINGO_UTXORPC_PORT"`
+	MetricsPort          uint          `yaml:"metricsPort"                                                      split_words:"true"`
+	DebugPort            uint          `yaml:"debugPort"          envconfig:"DINGO_DEBUG_PORT"`
+	IntersectTip         bool          `yaml:"intersectTip"                                                     split_words:"true"`
+	ValidateHistorical   bool          `yaml:"validateHistorical"                                               split_words:"true"`
+	RunMode              RunMode       `yaml:"runMode"            envconfig:"DINGO_RUN_MODE"`
+	ImmutableDbPath      string        `yaml:"immutableDbPath"    envconfig:"DINGO_IMMUTABLE_DB_PATH"`
 	// Database worker pool tuning (worker count and task queue size)
 	DatabaseWorkers   int `yaml:"databaseWorkers"    envconfig:"DINGO_DATABASE_WORKERS"`
 	DatabaseQueueSize int `yaml:"databaseQueueSize"  envconfig:"DINGO_DATABASE_QUEUE_SIZE"`
@@ -406,6 +407,7 @@ var globalConfig = &Config{
 	RelayPort:            3001,
 	BarkBaseUrl:          "",
 	BarkPort:             0,
+	BarkPrunerFrequency:  time.Hour,
 	UtxorpcPort:          9090,
 	BlockfrostPort:       3000,
 	MeshPort:             8080,

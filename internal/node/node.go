@@ -289,6 +289,7 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 			dingo.WithUtxorpcTlsKeyFilePath(cfg.TlsKeyFilePath),
 			dingo.WithBarkBaseUrl(cfg.BarkBaseUrl),
 			dingo.WithBarkPort(cfg.BarkPort),
+			dingo.WithBarkPrunerFrequency(cfg.BarkPrunerFrequency),
 			dingo.WithValidateHistorical(cfg.ValidateHistorical),
 			dingo.WithRunMode(string(cfg.RunMode)),
 			dingo.WithShutdownTimeout(shutdownTimeout),
