@@ -1,0 +1,170 @@
+// Copyright 2026 Blink Labs Software
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package forging
+
+import (
+	"testing"
+
+	"github.com/blinklabs-io/gouroboros/ledger/allegra"
+	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
+	"github.com/blinklabs-io/gouroboros/ledger/babbage"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	"github.com/blinklabs-io/gouroboros/ledger/mary"
+	"github.com/blinklabs-io/gouroboros/ledger/shelley"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+// TestBuildBlockSupportsAllEras verifies BuildBlock dispatches by era
+// across the full era table — TPraos (Shelley/Allegra/Mary/Alonzo)
+// and Praos (Babbage/Conway) — and that the block re-decodes through
+// the era-correct constructor (issue #2124). Each subtest also asserts
+// the concrete block type so a regression in decodeBlockFromCbor that
+// returned the wrong era's struct would fail loudly.
+func TestBuildBlockSupportsAllEras(t *testing.T) {
+	creds := setupTestCredentials(t)
+
+	const (
+		maxTxSize        = uint(16384)
+		maxBlockBodySize = uint(90112)
+	)
+	maxBlockExUnits := lcommon.ExUnits{
+		Memory: 62000000,
+		Steps:  20000000000,
+	}
+	maxTxExUnits := lcommon.ExUnits{
+		Memory: 14000000,
+		Steps:  10000000000,
+	}
+
+	// wantBlock is the concrete type the era's decoder must return.
+	// Storing it as an any sentinel keeps the table compact.
+	cases := []struct {
+		name      string
+		pparams   lcommon.ProtocolParameters
+		wantBlock any
+	}{
+		{
+			name: "shelley",
+			pparams: &shelley.ShelleyProtocolParameters{
+				MaxTxSize:        maxTxSize,
+				MaxBlockBodySize: maxBlockBodySize,
+				ProtocolMajor:    2,
+			},
+			wantBlock: (*shelley.ShelleyBlock)(nil),
+		},
+		{
+			name: "allegra",
+			pparams: &allegra.AllegraProtocolParameters{
+				MaxTxSize:        maxTxSize,
+				MaxBlockBodySize: maxBlockBodySize,
+				ProtocolMajor:    3,
+			},
+			wantBlock: (*allegra.AllegraBlock)(nil),
+		},
+		{
+			name: "mary",
+			pparams: &mary.MaryProtocolParameters{
+				MaxTxSize:        maxTxSize,
+				MaxBlockBodySize: maxBlockBodySize,
+				ProtocolMajor:    4,
+			},
+			wantBlock: (*mary.MaryBlock)(nil),
+		},
+		{
+			name: "alonzo",
+			pparams: &alonzo.AlonzoProtocolParameters{
+				MaxTxSize:        maxTxSize,
+				MaxBlockBodySize: maxBlockBodySize,
+				ProtocolMajor:    5,
+				MaxBlockExUnits:  maxBlockExUnits,
+				MaxTxExUnits:     maxTxExUnits,
+			},
+			wantBlock: (*alonzo.AlonzoBlock)(nil),
+		},
+		{
+			name: "babbage",
+			pparams: &babbage.BabbageProtocolParameters{
+				MaxTxSize:        maxTxSize,
+				MaxBlockBodySize: maxBlockBodySize,
+				ProtocolMajor:    7,
+				MaxBlockExUnits:  maxBlockExUnits,
+				MaxTxExUnits:     maxTxExUnits,
+			},
+			wantBlock: (*babbage.BabbageBlock)(nil),
+		},
+		{
+			name: "conway",
+			pparams: &conway.ConwayProtocolParameters{
+				MaxTxSize:        maxTxSize,
+				MaxBlockBodySize: maxBlockBodySize,
+				ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
+					Major: 9,
+				},
+				MaxBlockExUnits: maxBlockExUnits,
+				MaxTxExUnits:    maxTxExUnits,
+			},
+			wantBlock: (*conway.ConwayBlock)(nil),
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			builder, err := NewDefaultBlockBuilder(BlockBuilderConfig{
+				Mempool:         &mockMempool{transactions: []MempoolTransaction{}},
+				PParamsProvider: &mockPParamsProvider{pparams: tc.pparams},
+				ChainTip: &mockChainTip{
+					tip: ochainsync.Tip{
+						Point: ocommon.Point{
+							Slot: 1000,
+							Hash: make([]byte, 32),
+						},
+						BlockNumber: 100,
+					},
+				},
+				EpochNonce: &mockEpochNonceProvider{
+					epoch: 1,
+					nonce: make([]byte, 32),
+				},
+				Credentials: creds,
+			})
+			require.NoError(t, err)
+
+			block, blockCbor, err := builder.BuildBlock(1001, 0)
+			require.NoError(
+				t,
+				err,
+				"BuildBlock must succeed in %s era (issue #2124)",
+				tc.name,
+			)
+			require.NotNil(t, block)
+			require.NotEmpty(t, blockCbor)
+
+			assert.IsType(
+				t,
+				tc.wantBlock,
+				block,
+				"%s era must round-trip through the matching block constructor",
+				tc.name,
+			)
+			assert.Equal(t, uint64(1001), block.SlotNumber())
+			assert.Equal(t, uint64(101), block.BlockNumber())
+			assert.Equal(t, 0, len(block.Transactions()))
+		})
+	}
+}
