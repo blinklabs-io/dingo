@@ -44,14 +44,16 @@ type SlotClockConfig struct {
 	Logger *slog.Logger
 	// ClockTolerance is the maximum drift allowed when waking at slot boundaries.
 	// If we wake up more than this much after the slot boundary, we log a warning.
-	// Default: 100ms
+	// Set high enough to ride out normal Go scheduler / GC pause jitter on a busy
+	// node — only sustained or large drifts indicate a real timing problem.
+	// Default: 500ms.
 	ClockTolerance time.Duration
 }
 
 // DefaultSlotClockConfig returns the default configuration
 func DefaultSlotClockConfig() SlotClockConfig {
 	return SlotClockConfig{
-		ClockTolerance: 100 * time.Millisecond,
+		ClockTolerance: 500 * time.Millisecond,
 	}
 }
 
