@@ -15,7 +15,7 @@ VERSION ?= $(shell git describe --tags --exact-match 2>/dev/null)
 COMMIT_HASH ?= $(shell git rev-parse --short HEAD)
 GO_LDFLAGS=-ldflags "-s -w -X '$(GOMODULE)/internal/version.Version=$(VERSION)' -X '$(GOMODULE)/internal/version.CommitHash=$(COMMIT_HASH)'"
 
-.PHONY: all build help mod-tidy clean format golines lint test bench test-load test-load-log test-load-profile
+.PHONY: all build help mod-tidy clean format golines lint test bench test-load test-load-log test-load-profile test-devnet
 
 # Default target
 all: format build ## Format and build (default)
@@ -70,6 +70,9 @@ test-load-profile: build ## Load test data with CPU/memory profiling
 	rm -rf .dingo
 	./dingo --cpuprofile=cpu.prof --memprofile=mem.prof load database/immutable/testdata
 	@echo "Profiling complete. Run 'go tool pprof cpu.prof' or 'go tool pprof mem.prof' to analyze"
+
+test-devnet: ## Run devnet integration tests
+	./internal/test/devnet/run-tests.sh
 
 # Build our program binaries
 # Depends on GO_FILES to determine when rebuild is needed
