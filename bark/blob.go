@@ -34,11 +34,10 @@ import (
 )
 
 type BlobStoreBarkConfig struct {
-	BaseUrl        string
-	SecurityWindow uint64
-	HTTPClient     *http.Client
-	LedgerState    *ledger.LedgerState
-	Logger         *slog.Logger
+	BaseUrl     string
+	HTTPClient  *http.Client
+	LedgerState *ledger.LedgerState
+	Logger      *slog.Logger
 }
 
 type BlobStoreBark struct {
@@ -140,8 +139,9 @@ func (b *BlobStoreBark) GetBlock(
 
 	// if the requested slot is still within the security window, defer to the
 	// upstream blob storage to retrieve the block
-	if b.config.SecurityWindow > currentSlot ||
-		slot >= currentSlot-b.config.SecurityWindow {
+	securityWindow := b.config.LedgerState.StabilityWindow()
+	if securityWindow > currentSlot ||
+		slot >= currentSlot-securityWindow {
 		return b.upstream.GetBlock(txn, slot, hash)
 	}
 

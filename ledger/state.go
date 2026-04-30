@@ -2063,6 +2063,15 @@ func (ls *LedgerState) SecurityParam() int {
 	return int(k)
 }
 
+// StabilityWindow returns the Ouroboros security stability window for the
+// current era in slots. For Byron the window is 2k; for Shelley+ it is 3k/f.
+// It is safe to call from multiple goroutines.
+func (ls *LedgerState) StabilityWindow() uint64 {
+	ls.RLock()
+	defer ls.RUnlock()
+	return ls.calculateStabilityWindow()
+}
+
 type readChainResult struct {
 	rollbackPoint ocommon.Point
 	blocks        []ledger.Block

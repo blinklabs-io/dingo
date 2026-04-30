@@ -220,9 +220,8 @@ type Config struct {
 	RejectionWatermark   float64 `yaml:"rejectionWatermark" envconfig:"DINGO_MEMPOOL_REJECTION_WATERMARK"`
 	PrivatePort          uint    `yaml:"privatePort"                                                      split_words:"true"`
 	RelayPort            uint    `yaml:"relayPort"          envconfig:"port"`
-	BarkBaseUrl          string  `yaml:"barkBaseUrl"        envconfig:"DINGO_BARK_BASE_URL"`
-	BarkSecurityWindow   uint64  `yaml:"barkSecurityWindow" envconfig:"DINGO_BARK_SECURITY_WINDOW"`
-	BarkPort             uint    `yaml:"barkPort"           envconfig:"DINGO_BARK_PORT"`
+	BarkBaseUrl          string  `yaml:"barkBaseUrl" envconfig:"DINGO_BARK_BASE_URL"`
+	BarkPort             uint    `yaml:"barkPort"    envconfig:"DINGO_BARK_PORT"`
 	UtxorpcPort          uint    `yaml:"utxorpcPort"        envconfig:"DINGO_UTXORPC_PORT"`
 	MetricsPort          uint    `yaml:"metricsPort"                                                      split_words:"true"`
 	DebugPort            uint    `yaml:"debugPort"          envconfig:"DINGO_DEBUG_PORT"`
@@ -406,7 +405,6 @@ var globalConfig = &Config{
 	PrivatePort:          3002,
 	RelayPort:            3001,
 	BarkBaseUrl:          "",
-	BarkSecurityWindow:   10000,
 	BarkPort:             0,
 	UtxorpcPort:          9090,
 	BlockfrostPort:       3000,
