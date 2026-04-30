@@ -125,7 +125,11 @@ func (b *BatchAccumulator) Reset() {
 }
 
 // MergeFrom appends all records from other into b.
+// It is a no-op when other is nil or other == b.
 func (b *BatchAccumulator) MergeFrom(other *BatchAccumulator) {
+	if other == nil || other == b {
+		return
+	}
 	b.KeyWitnesses = append(b.KeyWitnesses, other.KeyWitnesses...)
 	b.WitnessScripts = append(b.WitnessScripts, other.WitnessScripts...)
 	b.Scripts = append(b.Scripts, other.Scripts...)
