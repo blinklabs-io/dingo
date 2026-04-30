@@ -794,7 +794,15 @@ func (d *BlobStoreS3) Start() error {
 		awsCfg.BaseEndpoint = &d.endpoint
 	}
 
-	client := s3.NewFromConfig(awsCfg)
+	// When pointing at a custom endpoint (typically Minio or another
+	// S3-compatible target), force path-style addressing. Virtual-hosted
+	// style requires DNS for "<bucket>.<endpoint>", which custom
+	// endpoints cannot satisfy.
+	client := s3.NewFromConfig(awsCfg, func(o *s3.Options) {
+		if d.endpoint != "" {
+			o.UsePathStyle = true
+		}
+	})
 
 	d.client = client
 	d.startupCtx = ctx
