@@ -173,7 +173,17 @@ func (b *BlobStoreBark) GetBlock(
 
 	block := blocks[0]
 
-	blockResp, err := b.httpClient.Get(block.GetUrl())
+	blockReq, err := http.NewRequestWithContext(
+		ctx,
+		http.MethodGet,
+		block.GetUrl(),
+		nil,
+	)
+	if err != nil {
+		return nil, types.BlockMetadata{},
+			fmt.Errorf("failed creating request for bark supplied url: %w", err)
+	}
+	blockResp, err := b.httpClient.Do(blockReq) //nolint:gosec
 	if err != nil {
 		return nil, types.BlockMetadata{},
 			fmt.Errorf("failed downloading block from bark supplied url: %w", err)

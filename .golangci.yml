@@ -40,7 +40,6 @@ linters:
     - zerologlint
   disable:
     - depguard
-    - noctx
   exclusions:
     generated: lax
     presets:
