@@ -15,8 +15,10 @@
 package types_test
 
 import (
+	"bytes"
 	"database/sql"
 	"database/sql/driver"
+	"errors"
 	"math/big"
 	"reflect"
 	"testing"
@@ -79,5 +81,83 @@ func TestTypesScanValue(t *testing.T) {
 				testDef.origValue,
 			)
 		}
+	}
+}
+
+// TestBlockTombstoneMarker confirms the marker is what the plugins write
+// and detect: bytes start with the magic prefix and IsBlockTombstone
+// matches them. The marker carries no embedded (slot, hash) — that
+// information is reconstructed by each plugin from its own bp key.
+func TestBlockTombstoneMarker(t *testing.T) {
+	enc := types.BlockTombstone()
+	if !types.IsBlockTombstone(enc) {
+		t.Fatal("IsBlockTombstone returned false for BlockTombstone()")
+	}
+	if !bytes.Equal(enc[:4], types.BlockTombstoneMagic[:]) {
+		t.Fatalf("marker prefix = %x, want %x", enc[:4], types.BlockTombstoneMagic[:])
+	}
+}
+
+func TestParseBlockBlobKeyRoundTrip(t *testing.T) {
+	const slot uint64 = 0x0102030405060708
+	hash := bytes.Repeat([]byte{0xAB}, 32)
+
+	key := types.BlockBlobKey(slot, hash)
+	if len(key) != types.BlockBlobKeySize {
+		t.Fatalf("encoded key length %d, want %d", len(key), types.BlockBlobKeySize)
+	}
+	gotSlot, gotHash, err := types.ParseBlockBlobKey(key)
+	if err != nil {
+		t.Fatalf("ParseBlockBlobKey: %v", err)
+	}
+	if gotSlot != slot {
+		t.Fatalf("slot = %d, want %d", gotSlot, slot)
+	}
+	if !bytes.Equal(gotHash, hash) {
+		t.Fatalf("hash = %x, want %x", gotHash, hash)
+	}
+}
+
+func TestParseBlockBlobKeyRejectsMalformed(t *testing.T) {
+	cases := []struct {
+		name string
+		key  []byte
+	}{
+		{"too short", []byte("bp")},
+		{"wrong prefix", append(
+			[]byte("xx"), bytes.Repeat([]byte{0}, types.BlockBlobKeySize-2)...,
+		)},
+		{"too long", append(
+			types.BlockBlobKey(1, bytes.Repeat([]byte{0}, 32)),
+			byte('m'), byte('e'), byte('t'), byte('a'),
+		)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, _, err := types.ParseBlockBlobKey(tc.key); err == nil {
+				t.Fatal("expected error, got nil")
+			}
+		})
+	}
+}
+
+// TestBlockTombstonedErrorWraps ensures the typed error keeps satisfying
+// errors.Is(err, ErrBlockTombstoned) for callers that just want to detect
+// the condition, while errors.As lets archive-proxy wrappers extract the
+// (slot, hash).
+func TestBlockTombstonedErrorWraps(t *testing.T) {
+	hash := bytes.Repeat([]byte{0xCD}, 32)
+	original := &types.BlockTombstonedError{Slot: 42, Hash: hash}
+
+	if !errors.Is(original, types.ErrBlockTombstoned) {
+		t.Fatal("typed error must satisfy errors.Is(..., ErrBlockTombstoned)")
+	}
+
+	var extracted *types.BlockTombstonedError
+	if !errors.As(original, &extracted) {
+		t.Fatal("errors.As did not extract the typed error")
+	}
+	if extracted.Slot != 42 || !bytes.Equal(extracted.Hash, hash) {
+		t.Fatalf("extracted = %+v, want slot=42 hash=%x", extracted, hash)
 	}
 }

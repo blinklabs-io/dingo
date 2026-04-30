@@ -17,6 +17,7 @@ package types
 import (
 	"bytes"
 	"database/sql/driver"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"math/big"
@@ -142,13 +143,39 @@ type NodeSettings struct {
 // ErrBlobKeyNotFound is returned by blob operations when a key is missing
 var ErrBlobKeyNotFound = errors.New("blob key not found")
 
-// ErrBlockTombstoned is returned by GetBlock when the block's CBOR has been
-// replaced with a tombstone marker — the block was pruned for archival and
-// is expected to be available via an archive proxy. Callers wrapping the
-// blob store (notably the bark proxy) intercept this error and resolve the
-// block from the archive; unwrapped consumers should treat it as a
-// configuration error (the block is no longer local but no proxy is wired up).
+// ErrBlockTombstoned is the sentinel for tombstoned-block errors. Callers
+// can use errors.Is(err, ErrBlockTombstoned) for existence checks. To get
+// the (slot, hash) of the tombstoned block, use errors.As to extract a
+// *BlockTombstonedError. The block was pruned for archival and is expected
+// to be available via an archive proxy; wrappers (notably bark) intercept
+// the typed error and resolve the block from the archive. Unwrapped
+// consumers should treat it as a configuration error (the block is no
+// longer local but no proxy is wired up).
 var ErrBlockTombstoned = errors.New("block tombstoned (archived)")
+
+// BlockTombstonedError is the typed form of ErrBlockTombstoned, returned
+// by blob plugins on every tombstone observation (GetBlock and iterator
+// ValueCopy). It carries the (slot, hash) of the tombstoned block so an
+// archive-proxy wrapper can resolve it without having to parse the blob
+// key — the wrapper extracts it via:
+//
+//	var t *types.BlockTombstonedError
+//	if errors.As(err, &t) { fetchFromArchive(t.Slot, t.Hash) }
+type BlockTombstonedError struct {
+	Slot uint64
+	Hash []byte
+}
+
+func (e *BlockTombstonedError) Error() string {
+	return fmt.Sprintf(
+		"%s: slot=%d hash=%s",
+		ErrBlockTombstoned, e.Slot, hex.EncodeToString(e.Hash),
+	)
+}
+
+// Unwrap returns ErrBlockTombstoned so errors.Is(err, ErrBlockTombstoned)
+// keeps working for callers that only need to detect the condition.
+func (e *BlockTombstonedError) Unwrap() error { return ErrBlockTombstoned }
 
 // ErrTxnWrongType is returned when a transaction has the wrong type
 var ErrTxnWrongType = errors.New("invalid transaction type")
@@ -257,18 +284,21 @@ type SignedURL struct {
 // header byte such as 0x82/0x83), so detection is unambiguous.
 var BlockTombstoneMagic = [4]byte{'D', 'B', 'T', '1'}
 
-// BlockTombstone returns a fresh copy of the tombstone marker that replaces
-// a block's CBOR when the block has been pruned for archival. The bp key
-// continues to exist with this value so that index pointers (bi, bh) and
-// metadata remain referentially valid.
+// BlockTombstone returns a fresh copy of the tombstone marker that
+// replaces a block's CBOR when the block has been pruned for archival.
+// The marker carries no embedded (slot, hash) — the bp key already does,
+// and surfacing the typed BlockTombstonedError is the responsibility of
+// each blob plugin (which knows its own key format).
 func BlockTombstone() []byte {
 	out := make([]byte, len(BlockTombstoneMagic))
 	copy(out, BlockTombstoneMagic[:])
 	return out
 }
 
-// IsBlockTombstone reports whether the given bytes (typically the value
-// stored at a block's bp key) are a tombstone marker.
+// IsBlockTombstone reports whether the given bytes are a tombstone
+// marker. Tested by prefix so any payload starting with the magic is
+// treated as a tombstone — a partial or unexpectedly extended marker
+// must never be misread as block CBOR.
 func IsBlockTombstone(data []byte) bool {
 	return len(data) >= len(BlockTombstoneMagic) &&
 		bytes.Equal(data[:len(BlockTombstoneMagic)], BlockTombstoneMagic[:])

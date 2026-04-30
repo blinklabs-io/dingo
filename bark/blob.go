@@ -34,6 +34,11 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
+// archiveFetchTimeout bounds a single archive round-trip (signed-URL request
+// plus the follow-up download). Used by both GetBlock and the iterator's
+// per-item tombstone resolution.
+const archiveFetchTimeout = 20 * time.Second
+
 type BlobStoreBarkConfig struct {
 	BaseUrl     string
 	HTTPClient  *http.Client
@@ -102,7 +107,73 @@ func (b *BlobStoreBark) NewIterator(
 	txn types.Txn,
 	opts types.BlobIteratorOptions,
 ) types.BlobIterator {
-	return b.upstream.NewIterator(txn, opts)
+	return &barkIterator{
+		upstream: b.upstream.NewIterator(txn, opts),
+		store:    b,
+	}
+}
+
+// barkIterator wraps an upstream blob iterator so that values returned via
+// Item().ValueCopy() transparently resolve archive tombstones. Tombstones
+// only appear at "bp"+slot+hash keys; values at any other key (bi/bh,
+// bp_metadata, …) pass through unchanged, so wrapping is zero-cost for
+// non-block-CBOR iterations.
+type barkIterator struct {
+	upstream types.BlobIterator
+	store    *BlobStoreBark
+}
+
+func (it *barkIterator) Rewind()                      { it.upstream.Rewind() }
+func (it *barkIterator) Seek(prefix []byte)           { it.upstream.Seek(prefix) }
+func (it *barkIterator) Valid() bool                  { return it.upstream.Valid() }
+func (it *barkIterator) ValidForPrefix(p []byte) bool { return it.upstream.ValidForPrefix(p) }
+func (it *barkIterator) Next()                        { it.upstream.Next() }
+func (it *barkIterator) Close()                       { it.upstream.Close() }
+func (it *barkIterator) Err() error                   { return it.upstream.Err() }
+
+func (it *barkIterator) Item() types.BlobItem {
+	upstreamItem := it.upstream.Item()
+	if upstreamItem == nil {
+		return nil
+	}
+	return &barkItem{upstream: upstreamItem, store: it.store}
+}
+
+// barkItem wraps an upstream blob item. Key() passes through. ValueCopy()
+// catches the typed *types.BlockTombstonedError surfaced by the upstream
+// plugin's iterator and resolves the block via the archive using the
+// (slot, hash) carried by the error — keeping the wrapper transparent to
+// callers without coupling it to any blob-key format.
+type barkItem struct {
+	upstream types.BlobItem
+	store    *BlobStoreBark
+}
+
+func (i *barkItem) Key() []byte { return i.upstream.Key() }
+
+func (i *barkItem) ValueCopy(dst []byte) ([]byte, error) {
+	val, err := i.upstream.ValueCopy(dst)
+	if err == nil {
+		return val, nil
+	}
+	var tombErr *types.BlockTombstonedError
+	if !errors.As(err, &tombErr) {
+		return nil, err
+	}
+	ctx, cancel := context.WithTimeout(
+		context.Background(), archiveFetchTimeout,
+	)
+	defer cancel()
+	cbor, _, fetchErr := i.store.fetchBlockFromArchive(
+		ctx, tombErr.Slot, tombErr.Hash,
+	)
+	if fetchErr != nil {
+		return nil, fmt.Errorf(
+			"bark iterator: resolving tombstoned block at slot=%d: %w",
+			tombErr.Slot, fetchErr,
+		)
+	}
+	return cbor, nil
 }
 
 func (b *BlobStoreBark) GetCommitTimestamp() (int64, error) {
@@ -152,8 +223,21 @@ func (b *BlobStoreBark) GetBlock(
 		}
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	ctx, cancel := context.WithTimeout(
+		context.Background(), archiveFetchTimeout,
+	)
 	defer cancel()
+	return b.fetchBlockFromArchive(ctx, slot, hash)
+}
+
+// fetchBlockFromArchive resolves a (slot, hash) block via the bark archive
+// service: requests a signed URL, downloads the CBOR, and returns it along
+// with the metadata carried in the archive response.
+func (b *BlobStoreBark) fetchBlockFromArchive(
+	ctx context.Context,
+	slot uint64,
+	hash []byte,
+) ([]byte, types.BlockMetadata, error) {
 	resp, err := b.archiveClient.FetchBlock(
 		ctx,
 		connect.NewRequest(

@@ -327,7 +327,8 @@ func (d *BlobStoreS3) GetBlock(
 		return nil, types.BlockMetadata{}, err
 	}
 	if types.IsBlockTombstone(cborData) {
-		return nil, types.BlockMetadata{}, types.ErrBlockTombstoned
+		return nil, types.BlockMetadata{},
+			&types.BlockTombstonedError{Slot: slot, Hash: hash}
 	}
 	metadataKey := types.BlockBlobMetadataKey(key)
 	metadataBytes, err := d.getInternal(ctx, string(metadataKey))
@@ -680,6 +681,18 @@ func (i *s3Item) ValueCopy(dst []byte) ([]byte, error) {
 	data, err := i.store.Get(i.txn, []byte(i.key))
 	if err != nil {
 		return nil, err
+	}
+	if types.IsBlockTombstone(data) {
+		// Tombstones live at fully-formed bp keys; parse this item's
+		// own key (the plugin produced it) to attach (slot, hash) to
+		// the typed error.
+		slot, hash, parseErr := types.ParseBlockBlobKey([]byte(i.key))
+		if parseErr != nil {
+			return nil, fmt.Errorf(
+				"tombstone at unexpected key shape: %w", parseErr,
+			)
+		}
+		return nil, &types.BlockTombstonedError{Slot: slot, Hash: hash}
 	}
 	if dst != nil {
 		return append(dst[:0], data...), nil

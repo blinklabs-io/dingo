@@ -16,8 +16,17 @@ package types
 
 import (
 	"encoding/binary"
+	"fmt"
 	"slices"
 )
+
+// BlockBlobKeySize is the on-disk length of a fully-formed block bp key:
+// prefix (2) + slot (8) + hash (32) = 42 bytes. Plugins use this to
+// decide whether a key is a base bp key (vs a metadata-suffixed one).
+const BlockBlobKeySize = 2 + 8 + 32
+
+// blockHashLen is the fixed hash length encoded into a block bp key.
+const blockHashLen = 32
 
 const (
 	BlockBlobKeyPrefix         = "bp"
@@ -40,6 +49,31 @@ func BlockBlobKey(slot uint64, hash []byte) []byte {
 	key = append(key, slotBytes...)
 	key = append(key, hash...)
 	return key
+}
+
+// ParseBlockBlobKey is the inverse of BlockBlobKey: it pulls (slot,
+// hash) back out of a fully-formed bp key. Used by blob plugins that
+// need to attach the (slot, hash) of a tombstoned block to a typed
+// error surfaced from iteration. Returns an error for any key whose
+// shape doesn't match what BlockBlobKey produced.
+func ParseBlockBlobKey(key []byte) (uint64, []byte, error) {
+	if len(key) != BlockBlobKeySize {
+		return 0, nil, fmt.Errorf(
+			"block blob key length %d, expected %d",
+			len(key), BlockBlobKeySize,
+		)
+	}
+	if string(key[:len(BlockBlobKeyPrefix)]) != BlockBlobKeyPrefix {
+		return 0, nil, fmt.Errorf(
+			"block blob key has wrong prefix: %q", key[:len(BlockBlobKeyPrefix)],
+		)
+	}
+	slot := binary.BigEndian.Uint64(
+		key[len(BlockBlobKeyPrefix) : len(BlockBlobKeyPrefix)+8],
+	)
+	hash := make([]byte, blockHashLen)
+	copy(hash, key[len(BlockBlobKeyPrefix)+8:])
+	return slot, hash, nil
 }
 
 func BlockBlobIndexKey(blockNumber uint64) []byte {
