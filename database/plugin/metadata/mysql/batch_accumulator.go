@@ -121,6 +121,20 @@ func (b *BatchAccumulator) Reset() {
 	b.DeleteTxIDs = b.DeleteTxIDs[:0]
 }
 
+// MergeFrom appends all records from other into b.
+func (b *BatchAccumulator) MergeFrom(other *BatchAccumulator) {
+	b.KeyWitnesses = append(b.KeyWitnesses, other.KeyWitnesses...)
+	b.WitnessScripts = append(b.WitnessScripts, other.WitnessScripts...)
+	b.Scripts = append(b.Scripts, other.Scripts...)
+	b.PlutusData = append(b.PlutusData, other.PlutusData...)
+	b.Redeemers = append(b.Redeemers, other.Redeemers...)
+	b.AddressTxs = append(b.AddressTxs, other.AddressTxs...)
+	b.UtxoOutputs = append(b.UtxoOutputs, other.UtxoOutputs...)
+	b.UtxoSpends = append(b.UtxoSpends, other.UtxoSpends...)
+	b.CollateralRets = append(b.CollateralRets, other.CollateralRets...)
+	b.DeleteTxIDs = append(b.DeleteTxIDs, other.DeleteTxIDs...)
+}
+
 // FlushBatch writes all accumulated records in a deterministic order.
 func (d *MetadataStoreMysql) FlushBatch(
 	batch *BatchAccumulator,

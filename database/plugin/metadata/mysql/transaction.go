@@ -2069,6 +2069,7 @@ func (d *MetadataStoreMysql) SetTransactionBatched(
 	if acc == nil {
 		return errors.New("SetTransactionBatched: acc must not be nil")
 	}
+	local := NewBatchAccumulator()
 	txHash := tx.Hash().Bytes()
 	db, err := d.resolveDB(txn)
 	if err != nil {
@@ -2203,11 +2204,11 @@ func (d *MetadataStoreMysql) SetTransactionBatched(
 	for i := range outputModels {
 		outputModels[i].ID = 0
 		outputModels[i].TransactionID = &tmpTx.ID
-		acc.AddUtxoOutput(outputModels[i])
+		local.AddUtxoOutput(outputModels[i])
 	}
 	if colRetUtxo != nil {
 		colRetUtxo.CollateralReturnForTxID = &tmpTx.ID
-		acc.AddCollateralReturn(*colRetUtxo)
+		local.AddCollateralReturn(*colRetUtxo)
 	}
 
 	// ------------------------------------------------------------------ //
@@ -2322,7 +2323,7 @@ func (d *MetadataStoreMysql) SetTransactionBatched(
 				continue
 			}
 			seen[key] = true
-			acc.AddUtxoSpend(utxoSpend{
+			local.AddUtxoSpend(utxoSpend{
 				TxId:          inTxID,
 				OutputIdx:     inIdx,
 				Slot:          point.Slot,
@@ -2337,7 +2338,7 @@ func (d *MetadataStoreMysql) SetTransactionBatched(
 	if d.storageMode == types.StorageModeAPI {
 		// On retry: schedule deletion of previously flushed rows for this tx.
 		if needsIdFetch {
-			acc.AddDeleteTxID(tmpTx.ID)
+			local.AddDeleteTxID(tmpTx.ID)
 		}
 
 		// Fetch input UTxOs for address-indexing below.
@@ -2375,14 +2376,14 @@ func (d *MetadataStoreMysql) SetTransactionBatched(
 			idx,
 			addressUtxos,
 		) {
-			acc.AddAddressTx(atx)
+			local.AddAddressTx(atx)
 		}
 
 		// Witnesses.
 		ws := tx.Witnesses()
 		if ws != nil {
 			for _, vkey := range ws.Vkey() {
-				acc.AddKeyWitness(models.KeyWitness{
+				local.AddKeyWitness(models.KeyWitness{
 					TransactionID: tmpTx.ID,
 					Type:          models.KeyWitnessTypeVkey,
 					Vkey:          vkey.Vkey,
@@ -2390,7 +2391,7 @@ func (d *MetadataStoreMysql) SetTransactionBatched(
 				})
 			}
 			for _, bootstrap := range ws.Bootstrap() {
-				acc.AddKeyWitness(models.KeyWitness{
+				local.AddKeyWitness(models.KeyWitness{
 					TransactionID: tmpTx.ID,
 					Type:          models.KeyWitnessTypeBootstrap,
 					PublicKey:     bootstrap.PublicKey,
@@ -2402,12 +2403,12 @@ func (d *MetadataStoreMysql) SetTransactionBatched(
 
 			// Scripts – collect into accumulator instead of writing to DB.
 			for _, s := range ws.NativeScripts() {
-				acc.AddWitnessScript(models.WitnessScripts{
+				local.AddWitnessScript(models.WitnessScripts{
 					TransactionID: tmpTx.ID,
 					Type:          uint8(lcommon.ScriptRefTypeNativeScript),
 					ScriptHash:    s.Hash().Bytes(),
 				})
-				acc.AddScript(models.Script{
+				local.AddScript(models.Script{
 					Hash:        s.Hash().Bytes(),
 					Type:        uint8(lcommon.ScriptRefTypeNativeScript),
 					Content:     s.RawScriptBytes(),
@@ -2415,12 +2416,12 @@ func (d *MetadataStoreMysql) SetTransactionBatched(
 				})
 			}
 			for _, s := range ws.PlutusV1Scripts() {
-				acc.AddWitnessScript(models.WitnessScripts{
+				local.AddWitnessScript(models.WitnessScripts{
 					TransactionID: tmpTx.ID,
 					Type:          uint8(lcommon.ScriptRefTypePlutusV1),
 					ScriptHash:    s.Hash().Bytes(),
 				})
-				acc.AddScript(models.Script{
+				local.AddScript(models.Script{
 					Hash:        s.Hash().Bytes(),
 					Type:        uint8(lcommon.ScriptRefTypePlutusV1),
 					Content:     s.RawScriptBytes(),
@@ -2428,12 +2429,12 @@ func (d *MetadataStoreMysql) SetTransactionBatched(
 				})
 			}
 			for _, s := range ws.PlutusV2Scripts() {
-				acc.AddWitnessScript(models.WitnessScripts{
+				local.AddWitnessScript(models.WitnessScripts{
 					TransactionID: tmpTx.ID,
 					Type:          uint8(lcommon.ScriptRefTypePlutusV2),
 					ScriptHash:    s.Hash().Bytes(),
 				})
-				acc.AddScript(models.Script{
+				local.AddScript(models.Script{
 					Hash:        s.Hash().Bytes(),
 					Type:        uint8(lcommon.ScriptRefTypePlutusV2),
 					Content:     s.RawScriptBytes(),
@@ -2441,12 +2442,12 @@ func (d *MetadataStoreMysql) SetTransactionBatched(
 				})
 			}
 			for _, s := range ws.PlutusV3Scripts() {
-				acc.AddWitnessScript(models.WitnessScripts{
+				local.AddWitnessScript(models.WitnessScripts{
 					TransactionID: tmpTx.ID,
 					Type:          uint8(lcommon.ScriptRefTypePlutusV3),
 					ScriptHash:    s.Hash().Bytes(),
 				})
-				acc.AddScript(models.Script{
+				local.AddScript(models.Script{
 					Hash:        s.Hash().Bytes(),
 					Type:        uint8(lcommon.ScriptRefTypePlutusV3),
 					Content:     s.RawScriptBytes(),
@@ -2457,7 +2458,7 @@ func (d *MetadataStoreMysql) SetTransactionBatched(
 			// PlutusData (datums).
 			if tx.IsValid() {
 				for _, datum := range ws.PlutusData() {
-					acc.AddPlutusData(models.PlutusData{
+					local.AddPlutusData(models.PlutusData{
 						TransactionID: tmpTx.ID,
 						Data:          datum.Cbor(),
 					})
@@ -2468,7 +2469,7 @@ func (d *MetadataStoreMysql) SetTransactionBatched(
 			if ws.Redeemers() != nil {
 				for key, value := range ws.Redeemers().Iter() {
 					//nolint:gosec
-					acc.AddRedeemer(models.Redeemer{
+					local.AddRedeemer(models.Redeemer{
 						TransactionID: tmpTx.ID,
 						Tag:           uint8(key.Tag),
 						Index:         key.Index,
@@ -2783,8 +2784,8 @@ func (d *MetadataStoreMysql) SetTransactionBatched(
 						DepositAmount: types.Uint64(deposit),
 						CertificateID: certIDMap[i],
 					}
+					tmpAccount.AddedSlot = point.Slot
 					if tmpAccount.ID == 0 {
-						tmpAccount.AddedSlot = point.Slot
 						tmpAccount.CertificateID = certIDMap[i]
 					}
 					if err := saveAccount(tmpAccount, db); err != nil {
@@ -2974,8 +2975,8 @@ func (d *MetadataStoreMysql) SetTransactionBatched(
 						DepositAmount: types.Uint64(deposit),
 						CertificateID: certIDMap[i],
 					}
+					tmpAccount.AddedSlot = point.Slot
 					if tmpAccount.ID == 0 {
-						tmpAccount.AddedSlot = point.Slot
 						tmpAccount.CertificateID = certIDMap[i]
 					}
 					if err := saveAccount(tmpAccount, db); err != nil {
@@ -3274,6 +3275,7 @@ func (d *MetadataStoreMysql) SetTransactionBatched(
 		}
 	}
 
+	acc.MergeFrom(local)
 	return nil
 }
 
