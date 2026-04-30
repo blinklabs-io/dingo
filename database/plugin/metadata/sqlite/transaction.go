@@ -2685,6 +2685,9 @@ func (d *MetadataStoreSqlite) SetTransactionBatched(
 			}
 			if len(unifiedIDs) > 0 {
 				tables := []string{
+					// Child tables must be deleted before parent tables (FK constraints).
+					"pool_registration_owner",
+					"pool_registration_relay",
 					"stake_registration", "pool_registration", "pool_retirement",
 					"auth_committee_hot", "resign_committee_cold",
 					"deregistration", "stake_delegation",

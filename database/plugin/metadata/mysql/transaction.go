@@ -2114,34 +2114,15 @@ func (d *MetadataStoreMysql) SetTransactionBatched(
 	collateralReturn := tx.CollateralReturn()
 	produced := tx.Produced()
 
-	// For invalid transactions with collateral returns, fix indices via CBOR matching
-	// since Produced() uses enumerated indices rather than real transaction indices
-	var realIndexMap map[lcommon.Blake2b256]uint32
-	if !tx.IsValid() && collateralReturn != nil {
-		realIndexMap = make(map[lcommon.Blake2b256]uint32)
-		for idx, out := range tx.Outputs() {
-			if out != nil && idx <= int(^uint32(0)) {
-				// Hash CBOR for efficient map key
-				outputHash := lcommon.NewBlake2b256(out.Cbor())
-				//nolint:gosec // G115: idx bounds already checked above
-				realIndexMap[outputHash] = uint32(idx)
-			}
-		}
-	}
-
 	// Separate collateral return from regular outputs.
+	// tx.Produced() already returns correct indices for both valid transactions
+	// (regular outputs at 0, 1, ...) and invalid transactions (collateral return
+	// at len(Outputs())), so no index rewriting is needed.
 	var colRetUtxo *models.Utxo
 	outputModels := make([]models.Utxo, 0, len(produced))
 	for _, utxo := range produced {
 		m := models.UtxoLedgerToModel(utxo, point.Slot)
 		if collateralReturn != nil && utxo.Output == collateralReturn {
-			// Fix collateral return index for invalid transactions
-			if realIndexMap != nil && m.Cbor != nil {
-				outputHash := lcommon.NewBlake2b256(m.Cbor)
-				if realIdx, ok := realIndexMap[outputHash]; ok {
-					m.OutputIdx = realIdx
-				}
-			}
 			colRetUtxo = &m
 			continue
 		}
