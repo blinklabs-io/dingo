@@ -305,8 +305,7 @@ func (n *Node) Run(ctx context.Context) error {
 
 	if n.config.barkBaseUrl != "" {
 		n.db.SetBlobStore(bark.NewBarkBlobStore(bark.BlobStoreBarkConfig{
-			BaseUrl:        n.config.barkBaseUrl,
-			SecurityWindow: n.config.barkSecurityWindow,
+			BaseUrl: n.config.barkBaseUrl,
 			HTTPClient: &http.Client{
 				Timeout: 30 * time.Second,
 			},
@@ -314,12 +313,15 @@ func (n *Node) Run(ctx context.Context) error {
 			Logger:      n.config.logger,
 		}, n.db.Blob()))
 
+		prunerFreq := n.config.barkPrunerFrequency
+		if prunerFreq <= 0 {
+			prunerFreq = time.Hour
+		}
 		n.barkPruner = bark.NewPruner(bark.PrunerConfig{
-			LedgerState:    state,
-			DB:             n.db,
-			Logger:         n.config.logger,
-			SecurityWindow: n.config.barkSecurityWindow,
-			Frequency:      time.Hour,
+			LedgerState: state,
+			DB:          n.db,
+			Logger:      n.config.logger,
+			Frequency:   prunerFreq,
 		})
 
 		if err := n.barkPruner.Start(n.ctx); err != nil {

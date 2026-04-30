@@ -1,5 +1,8 @@
+.claude/
+.codex
 .dingo/
 .github/
+.worktrees/
 dingo
 Dockerfile
 README.md

@@ -391,9 +391,22 @@ func (d *BlobStoreS3) DeleteBlock(
 	return nil
 }
 
-// TombstoneBlock replaces a block's CBOR with a tombstone marker, leaving
-// the index pointers and metadata in place so a wrapping archive proxy can
-// resolve the block via GetBlock(slot, hash).
+// TombstoneBlock replaces a block's CBOR with a tombstone marker so a
+// wrapping archive proxy can resolve the block via GetBlock(slot, hash):
+// GetBlock reads the bp object, sees the marker, and returns
+// types.ErrBlockTombstoned for the proxy to intercept.
+//
+// What stays:
+//   - bi<id>: required by BlockByIndex (the chain iterator translates
+//     id→key here; no equivalent index exists in metadata).
+//   - bh<hash>: BlockByHash has a sequential-scan fallback over bp keys,
+//     but on a deep chain that scan is O(N) per call — keeping the index
+//     preserves the fast path.
+//
+// What goes:
+//   - bp_metadata: GetBlock short-circuits on the tombstone before reading
+//     metadata, and no other caller asks for metadata of a tombstoned
+//     block — bark's archive response carries its own.
 func (d *BlobStoreS3) TombstoneBlock(
 	txn types.Txn,
 	slot uint64,
@@ -409,7 +422,17 @@ func (d *BlobStoreS3) TombstoneBlock(
 	ctx, cancel := d.opContext()
 	defer cancel()
 	key := types.BlockBlobKey(slot, hash)
-	return d.Put(ctx, string(key), types.BlockTombstone())
+	if err := d.Put(ctx, string(key), types.BlockTombstone()); err != nil {
+		return err
+	}
+	metadataKey := types.BlockBlobMetadataKey(key)
+	if _, err := d.client.DeleteObject(ctx, &s3.DeleteObjectInput{
+		Bucket: aws.String(d.bucket),
+		Key:    awsString(d.fullKey(string(metadataKey))),
+	}); err != nil && !isS3NotFound(err) {
+		return err
+	}
+	return nil
 }
 
 // SetUtxo stores a UTxO's CBOR data
@@ -818,7 +841,15 @@ func (d *BlobStoreS3) Start() error {
 		awsCfg.BaseEndpoint = &d.endpoint
 	}
 
-	client := s3.NewFromConfig(awsCfg)
+	// When pointing at a custom endpoint (typically Minio or another
+	// S3-compatible target), force path-style addressing. Virtual-hosted
+	// style requires DNS for "<bucket>.<endpoint>", which custom
+	// endpoints cannot satisfy.
+	client := s3.NewFromConfig(awsCfg, func(o *s3.Options) {
+		if d.endpoint != "" {
+			o.UsePathStyle = true
+		}
+	})
 
 	d.client = client
 	d.startupCtx = ctx

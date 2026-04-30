@@ -665,9 +665,22 @@ func (d *BlobStoreBadger) DeleteBlock(
 	return nil
 }
 
-// TombstoneBlock overwrites a block's CBOR with a tombstone marker, leaving
-// the bi/bh index pointers and metadata untouched so a wrapping archive
-// proxy can still resolve the block via GetBlock(slot, hash).
+// TombstoneBlock overwrites a block's CBOR with a tombstone marker so a
+// wrapping archive proxy can resolve the block via GetBlock(slot, hash):
+// GetBlock reads the bp value, sees the marker, and returns
+// types.ErrBlockTombstoned for the proxy to intercept.
+//
+// What stays:
+//   - bi<id>: required by BlockByIndex (the chain iterator translates
+//     id→key here; no equivalent index exists in metadata).
+//   - bh<hash>: BlockByHash has a sequential-scan fallback over bp keys,
+//     but on a deep chain that scan is O(N) per call — keeping the index
+//     preserves the fast path.
+//
+// What goes:
+//   - bp_metadata: GetBlock short-circuits on the tombstone before reading
+//     metadata, and no other caller asks for metadata of a tombstoned
+//     block — bark's archive response carries its own.
 func (d *BlobStoreBadger) TombstoneBlock(
 	txn types.Txn,
 	slot uint64,
@@ -678,7 +691,11 @@ func (d *BlobStoreBadger) TombstoneBlock(
 		return err
 	}
 	key := types.BlockBlobKey(slot, hash)
-	return badgerTxn.tx.Set(key, types.BlockTombstone())
+	if err := badgerTxn.tx.Set(key, types.BlockTombstone()); err != nil {
+		return err
+	}
+	metadataKey := types.BlockBlobMetadataKey(key)
+	return badgerTxn.tx.Delete(metadataKey)
 }
 
 // SetUtxo stores a UTxO's CBOR data

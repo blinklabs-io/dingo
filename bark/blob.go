@@ -35,11 +35,10 @@ import (
 )
 
 type BlobStoreBarkConfig struct {
-	BaseUrl        string
-	SecurityWindow uint64
-	HTTPClient     *http.Client
-	LedgerState    *ledger.LedgerState
-	Logger         *slog.Logger
+	BaseUrl     string
+	HTTPClient  *http.Client
+	LedgerState *ledger.LedgerState
+	Logger      *slog.Logger
 }
 
 type BlobStoreBark struct {
@@ -144,8 +143,9 @@ func (b *BlobStoreBark) GetBlock(
 	// the block was tombstoned (rare in-window case, e.g. after a rollback
 	// crosses a previously pruned slot back into the window) fall through
 	// to the archive proxy.
-	if b.config.SecurityWindow > currentSlot ||
-		slot >= currentSlot-b.config.SecurityWindow {
+	securityWindow := b.config.LedgerState.StabilityWindow()
+	if securityWindow > currentSlot ||
+		slot >= currentSlot-securityWindow {
 		cbor, meta, err := b.upstream.GetBlock(txn, slot, hash)
 		if !errors.Is(err, types.ErrBlockTombstoned) {
 			return cbor, meta, err
