@@ -1,6 +1,61 @@
 # Release Notes
 
 
+## v0.39.0 (April 30, 2026)
+
+**Title:** Era-aware forging, Bark tuning, and safer diagnostics
+
+**Date:** April 30, 2026
+
+**Version:** v0.39.0
+
+Hi folks! Here’s what we shipped in v0.39.0.
+
+### ✨ What's New
+
+* Added **dedicated profiling listener controls:** Operators can now enable runtime profiling on `debugPort` without exposing those endpoints on the metrics listener, and profiling stays disabled unless explicitly turned on.
+* Expanded **Bark cleanup control and custom S3 endpoint support:** Bark operators can now tune how often cleanup runs, and S3 compatible Bark storage now works more smoothly with custom endpoints.
+* Introduced **ledger driven Bark safety windows:** Bark now derives its safety window from live ledger state, which removes the need to manage a separate `barkSecurityWindow` setting.
+
+### 💪 Improvements
+
+* Improved **near tip sync pacing:** Nodes now gate backup block requests against median peer latency and expose new gate metrics, which keeps near tip sync steadier with less duplicate work.
+* Refined **slot timing tolerance:** Busy nodes and catch up runs now tolerate more normal clock drift before raising noise about timing issues.
+* Enhanced **devnet validation workflow:** Development teams can now run `make test-devnet` for a more consistent devnet validation flow.
+* Modernized **Docker build cleanliness:** Container builds now avoid worktree and bot metadata directories, which keeps build contexts cleaner.
+* Updated **Bark download cancellation handling:** Bark block downloads now honor request cancellation and timeout context more cleanly, and lint coverage now checks that path again.
+* Refreshed **release history continuity:** Release history now includes the v0.38.0 notes entry in `RELEASE_NOTES.md`, which keeps recent changes easier to scan.
+
+### 🔧 Fixes
+
+* Fixed **candidate nonce fallback safety:** Epoch and leader election calculations now stay protected when stored nonce rows trail behind block ingestion.
+* Corrected **Shelley to Allegra verification behavior:** Historical era verification now stays correct across the Shelley to Allegra boundary, which restores successful post fork VRF verification.
+* Hardened **multi era block forging:** Block producers can now forge correctly across Shelley through Conway era transitions instead of assuming Conway only block structure.
+* Stabilized **devnet config access for non root containers:** Generated configs and keys now remain easier for non root containers to read during devnet runs.
+* Repaired **txpump devnet build context:** Devnet and test transaction pump builds now resolve the correct Docker Compose build context more reliably.
+
+### 📋 What You Need to Know
+
+* Clarified **Bark tuning changes:** Bark operators should stop expecting a separate `barkSecurityWindow` setting and should use `barkPrunerFrequency` when cleanup cadence needs tuning.
+* Highlighted **profiling opt in behavior:** Profiling users can enable runtime `pprof` on `debugPort`, while metrics stay isolated from debug endpoints by default.
+* Emphasized **safer era transition behavior:** Historical era and era transition runs should see safer behavior from the candidate nonce fallback, the Shelley to Allegra VRF correction, and pre Conway forging support.
+* Summarized **calmer sync and timing behavior:** Near tip sync and timing should feel steadier because shadow blockfetch gating is smarter and slot clock tolerance now allows 500ms of drift.
+* Simplified **devnet and container workflows:** Devnet and test workflows are easier because `make test-devnet`, the txpump build context correction, cleaner Docker contexts, and relaxed test config permissions reduce setup friction.
+
+### Recommended Network Compatibility ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
 ## v0.38.0 (April 29, 2026)
 
 **Title:** Smarter sync decisions, clearer operations, and ready made dashboards
