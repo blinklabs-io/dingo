@@ -305,6 +305,10 @@ func TestTryRecoverFromTxValidationErrorAtTipRewindsPrimaryChain(
 			"conway utxo validation rule 38: delegation state mismatch",
 		),
 	}
+	// First attempt: rewind primary chain to authoritative ledger tip
+	// and request chainsync resync. This is the simple case — peers
+	// may switch to a different fork that is compatible with our
+	// ledger.
 	recovered, err := ls.tryRecoverFromTxValidationError(validationErr)
 	require.NoError(t, err)
 	require.True(t, recovered)
@@ -321,6 +325,24 @@ func TestTryRecoverFromTxValidationErrorAtTipRewindsPrimaryChain(
 	)
 	assert.ErrorIs(t, err, models.ErrBlockNotFound)
 
+	// Second and third attempts: same failing (slot, block, tx).
+	// The pipeline should keep recovering with progressively deeper
+	// rewinds rather than halting on the first repeat — peers may
+	// keep replaying the same losing fork and we need to expose a
+	// wider candidate set for chainselection.
+	for i := 2; i <= maxAtTipRecoveryAttempts; i++ {
+		recovered, err = ls.tryRecoverFromTxValidationError(validationErr)
+		require.NoError(t, err, "attempt %d should still recover", i)
+		require.True(t, recovered, "attempt %d should still recover", i)
+	}
+	require.NotNil(t, ls.lastAtTipRecovery)
+	assert.Equal(
+		t,
+		maxAtTipRecoveryAttempts,
+		ls.lastAtTipRecovery.Attempts,
+	)
+
+	// One more attempt past the cap halts the pipeline.
 	recovered, err = ls.tryRecoverFromTxValidationError(validationErr)
 	require.ErrorIs(t, err, errHaltLedgerPipeline)
 	require.False(t, recovered)

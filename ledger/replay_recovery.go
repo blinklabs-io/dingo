@@ -56,9 +56,18 @@ func (e *txValidationError) Unwrap() error {
 	return e.Cause
 }
 
+// maxAtTipRecoveryAttempts caps how many times the ledger will try to
+// recover from the same persistent at-tip validation failure before
+// halting. Each attempt rewinds the primary chain progressively
+// deeper to give chainselection room to pick a different fork. We
+// only halt when even a deep rewind to security-param-sized depth
+// has not let a different chain win.
+const maxAtTipRecoveryAttempts = 3
+
 type atTipRecoveryAttempt struct {
 	BlockPoint ocommon.Point
 	TxHash     []byte
+	Attempts   int
 }
 
 func newAtTipRecoveryAttempt(
@@ -69,6 +78,7 @@ func newAtTipRecoveryAttempt(
 	return &atTipRecoveryAttempt{
 		BlockPoint: blockPoint,
 		TxHash:     append([]byte(nil), validationErr.TxHash...),
+		Attempts:   1,
 	}
 }
 
@@ -179,34 +189,69 @@ func (ls *LedgerState) recoverAtTipFromTxValidationError(
 	if ls.chain == nil || ls.config.ChainManager == nil {
 		return false, nil
 	}
-	// Prevent infinite loops: if we already attempted recovery for this exact
-	// block/tx failure, the problem is persistent and recovery will not help.
-	// Return a sentinel error so the block processor halts instead of
-	// restarting the pipeline into the same failing block.
+	// Determine the rewind target. On the first attempt, rewind to the
+	// authoritative ledger tip — the simplest case where chainselection
+	// can re-pick from another peer with a compatible chain. On
+	// subsequent attempts the same (block, tx) failure means the
+	// rewind-to-tip didn't help: peers keep replaying the same losing
+	// fork because chainselection's intersection point is still on it.
+	// Rewind progressively deeper to expose a wider candidate set, up
+	// to the era's stability window. Only halt if even the deepest
+	// rewind has been tried.
+	attempts := 1
 	if ls.lastAtTipRecovery != nil &&
 		ls.lastAtTipRecovery.matches(validationErr) {
-		ls.config.Logger.Error(
-			"at-tip recovery already attempted for this validation failure, halting to avoid infinite loop",
-			"component", "ledger",
-			"failing_slot", validationErr.BlockPoint.Slot,
-			"failing_block_hash", hex.EncodeToString(
-				validationErr.BlockPoint.Hash,
-			),
-			"tx_hash", hex.EncodeToString(validationErr.TxHash),
-		)
-		return false, fmt.Errorf(
-			"%w: %w",
-			errHaltLedgerPipeline,
-			validationErr,
-		)
+		attempts = ls.lastAtTipRecovery.Attempts + 1
+		if attempts > maxAtTipRecoveryAttempts {
+			ls.config.Logger.Error(
+				"at-tip recovery exhausted attempts, halting to avoid infinite loop",
+				"component", "ledger",
+				"failing_slot", validationErr.BlockPoint.Slot,
+				"failing_block_hash", hex.EncodeToString(
+					validationErr.BlockPoint.Hash,
+				),
+				"tx_hash", hex.EncodeToString(validationErr.TxHash),
+				"attempts", attempts,
+			)
+			return false, fmt.Errorf(
+				"%w: %w",
+				errHaltLedgerPipeline,
+				validationErr,
+			)
+		}
 	}
 	ls.lastAtTipRecovery = newAtTipRecoveryAttempt(validationErr)
+	ls.lastAtTipRecovery.Attempts = attempts
 	ls.RLock()
 	ledgerTip := ls.currentTip
 	ls.RUnlock()
 	chainTip := ls.chain.Tip()
+	// Compute the rewind target. Depth grows linearly with each retry,
+	// capped at the era stability window so we never undo an immutable block.
+	rewindPoint := ledgerTip.Point
+	if attempts > 1 {
+		stabilityWindow := ls.calculateStabilityWindow()
+		// depth grows linearly so the final attempt reaches the full
+		// stability window: (attempts-1)/(maxAttempts-1) of the window.
+		depth := stabilityWindow * uint64(attempts-1) /
+			uint64(maxAtTipRecoveryAttempts-1)
+		if depth > 0 && depth < ledgerTip.Point.Slot {
+			rewindSlot := ledgerTip.Point.Slot - depth
+			deeperPoint, lookupErr := ls.findRewindPoint(rewindSlot)
+			if lookupErr == nil {
+				rewindPoint = deeperPoint
+			} else {
+				ls.config.Logger.Warn(
+					"deep rewind lookup failed, using ledger tip",
+					"component", "ledger",
+					"target_slot", rewindSlot,
+					"error", lookupErr.Error(),
+				)
+			}
+		}
+	}
 	ls.config.Logger.Warn(
-		"validation failure after reaching tip, rewinding primary chain to authoritative ledger tip",
+		"validation failure after reaching tip, rewinding primary chain",
 		"component", "ledger",
 		"tx_hash", hex.EncodeToString(validationErr.TxHash),
 		"failing_block_slot", validationErr.BlockPoint.Slot,
@@ -214,12 +259,14 @@ func (ls *LedgerState) recoverAtTipFromTxValidationError(
 		"ledger_tip_hash", hex.EncodeToString(ledgerTip.Point.Hash),
 		"primary_chain_tip_slot", chainTip.Point.Slot,
 		"primary_chain_tip_hash", hex.EncodeToString(chainTip.Point.Hash),
+		"rewind_target_slot", rewindPoint.Slot,
+		"attempt", attempts,
 	)
 	if err := ls.config.ChainManager.RewindPrimaryChainToPoint(
-		ledgerTip.Point,
+		rewindPoint,
 	); err != nil {
 		return false, fmt.Errorf(
-			"rewind primary chain to authoritative ledger tip: %w",
+			"rewind primary chain after validation failure: %w",
 			err,
 		)
 	}
@@ -230,12 +277,30 @@ func (ls *LedgerState) recoverAtTipFromTxValidationError(
 				event.ChainsyncResyncEventType,
 				event.ChainsyncResyncEvent{
 					Reason: "live tx validation recovery",
-					Point:  ledgerTip.Point,
+					Point:  rewindPoint,
 				},
 			),
 		)
 	}
 	return true, nil
+}
+
+// findRewindPoint returns the highest committed chain point at or
+// below targetSlot, used to compute deeper rewind anchors during
+// at-tip validation recovery. Falls back to slot 0 if no earlier
+// committed block can be located.
+func (ls *LedgerState) findRewindPoint(targetSlot uint64) (ocommon.Point, error) {
+	if ls.chain == nil {
+		return ocommon.Point{Slot: targetSlot}, nil
+	}
+	block, err := database.BlockBeforeSlot(ls.db, targetSlot+1)
+	if err != nil {
+		if errors.Is(err, models.ErrBlockNotFound) {
+			return ocommon.Point{}, nil
+		}
+		return ocommon.Point{}, err
+	}
+	return ocommon.Point{Slot: block.Slot, Hash: block.Hash}, nil
 }
 
 func (ls *LedgerState) findReplayRecoveryCandidate(
