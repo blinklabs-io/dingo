@@ -369,6 +369,8 @@ type LedgerStateConfig struct {
 	BlockfetchRequestRangeFunc  BlockfetchRequestRangeFunc
 	PeersWithBlockFunc          PeersWithBlockFunc
 	RecordBlockfetchLatencyFunc RecordBlockfetchLatencyFunc
+	BlockfetchLatencyFunc       BlockfetchLatencyFunc
+	BlockfetchLatencyMedianFunc BlockfetchLatencyMedianFunc
 	GetActiveConnectionFunc     GetActiveConnectionFunc
 	ConnectionLiveFunc          ConnectionLiveFunc
 	ConnectionSwitchFunc        ConnectionSwitchFunc
@@ -399,6 +401,17 @@ type PeersWithBlockFunc func(
 // RecordBlockfetchLatencyFunc records a first-block latency sample
 // for the given connection after a successful RequestRange response.
 type RecordBlockfetchLatencyFunc func(ouroboros.ConnectionId, time.Duration)
+
+// BlockfetchLatencyFunc returns the EWMA first-block latency for the
+// given connection and whether any samples have been recorded. Used
+// to gate shadow blockfetch dispatch on primary peer slowness.
+type BlockfetchLatencyFunc func(ouroboros.ConnectionId) (time.Duration, bool)
+
+// BlockfetchLatencyMedianFunc returns the median EWMA first-block
+// latency across all tracked peers and the sample count contributing
+// to it. Used to adapt the shadow blockfetch gate to the observed
+// peer population (primary > 1.5× median triggers shadow dispatch).
+type BlockfetchLatencyMedianFunc func() (time.Duration, int)
 
 // In ledger/state.go or a shared package
 type MempoolProvider interface {

@@ -61,6 +61,25 @@ const (
 	// Keep this small so downstream iterators still see fresh blocks promptly.
 	blockfetchCommitBatchSize = 8
 
+	// shadowBlockfetchPrimarySlowThreshold is the fixed-cutoff fallback
+	// used to gate shadow blockfetch dispatch when no peer-population
+	// median latency is available (e.g. a fresh node with too few
+	// samples). It approximates the upper edge of "healthy primary"
+	// for typical preview/preprod peers.
+	shadowBlockfetchPrimarySlowThreshold = 250 * time.Millisecond
+
+	// shadowBlockfetchMedianMultiplier scales the observed median peer
+	// EWMA latency to derive the "primary is in the slow tail" cutoff.
+	// Primary with EWMA above (median * multiplier) gets a shadow buddy;
+	// primaries closer to the median ride alone. Adapts the gate to the
+	// peer population instead of using a fixed value.
+	shadowBlockfetchMedianMultiplier = 1.5
+
+	// shadowBlockfetchMedianMinSamples is the minimum number of peers
+	// with at least one EWMA sample required to trust the median-based
+	// gate. Below this, fall back to shadowBlockfetchPrimarySlowThreshold.
+	shadowBlockfetchMedianMinSamples = 3
+
 	// shadowBlockfetchMaxHeaders is the header-queue depth threshold
 	// below which a shadow blockfetch is dispatched. Near tip the queue
 	// is short (1–4 headers), so shadow dispatch is cheap and the
@@ -2009,41 +2028,100 @@ func (ls *LedgerState) startQueuedBlockfetchLocked(
 	}
 	// Near tip: dispatch the same range to one shadow peer if any
 	// tracked peer has already seen the first block header. Whichever
-	// peer responds first wins; duplicates are dropped by hash.
-	if ls.chain.HeaderCount() <= shadowBlockfetchMaxHeaders &&
-		ls.config.PeersWithBlockFunc != nil &&
-		ls.config.BlockfetchRequestRangeFunc != nil {
-		for _, shadowConn := range ls.config.PeersWithBlockFunc(
+	// peer responds first wins; duplicates are dropped by hash. Skip
+	// when the primary peer is already fast — the duplicate decode
+	// cost on the loser path isn't worth the marginal latency win.
+	//
+	// Threshold: prefer median-based when enough peers have samples
+	// (only shadow when the primary is in the slow tail of the
+	// observed population). Fall back to the fixed 250ms cutoff when
+	// the population is too small to trust a median.
+	primaryFastEnough := false
+	cutoffLabel := "fallback"
+	hasPrimarySample := false
+	if ls.config.BlockfetchLatencyFunc != nil {
+		if primaryLatency, ok := ls.config.BlockfetchLatencyFunc(
 			connId,
-			headerStart,
-		) {
-			if connIdKey(shadowConn) == "" ||
-				sameConnectionId(shadowConn, connId) {
-				continue
+		); ok && primaryLatency > 0 {
+			hasPrimarySample = true
+			cutoff := shadowBlockfetchPrimarySlowThreshold
+			if ls.config.BlockfetchLatencyMedianFunc != nil {
+				if median, samples := ls.config.BlockfetchLatencyMedianFunc(); samples >= shadowBlockfetchMedianMinSamples &&
+					median > 0 {
+					cutoff = time.Duration(
+						float64(median) *
+							shadowBlockfetchMedianMultiplier,
+					)
+					cutoffLabel = "median"
+				}
 			}
-			err := ls.config.BlockfetchRequestRangeFunc(
-				shadowConn,
+			if primaryLatency < cutoff {
+				primaryFastEnough = true
+			}
+		}
+	}
+	nearTip := ls.chain.HeaderCount() <= shadowBlockfetchMaxHeaders
+	if nearTip {
+		gatePath := ""
+		gateCutoff := cutoffLabel
+		if !hasPrimarySample {
+			gateCutoff = "no_sample"
+		}
+		switch {
+		case primaryFastEnough:
+			gatePath = "skipped_fast"
+		case ls.config.PeersWithBlockFunc == nil ||
+			ls.config.BlockfetchRequestRangeFunc == nil:
+			// Wiring not present — count as skip but separate label.
+			gatePath = "skipped_unwired"
+		default:
+			dispatched := false
+			for _, shadowConn := range ls.config.PeersWithBlockFunc(
+				connId,
 				headerStart,
-				headerEnd,
-			)
-			if err != nil {
-				ls.config.Logger.Debug(
-					"shadow blockfetch dispatch failed, trying next candidate",
-					"component", "ledger",
-					"shadow_connection_id", shadowConn.String(),
-					"error", err,
+			) {
+				if connIdKey(shadowConn) == "" ||
+					sameConnectionId(shadowConn, connId) {
+					continue
+				}
+				err := ls.config.BlockfetchRequestRangeFunc(
+					shadowConn,
+					headerStart,
+					headerEnd,
 				)
-				continue
+				if err != nil {
+					ls.config.Logger.Debug(
+						"shadow blockfetch dispatch failed, trying next candidate",
+						"component", "ledger",
+						"shadow_connection_id", shadowConn.String(),
+						"error", err,
+					)
+					continue
+				}
+				ls.shadowBlockfetchConnId = shadowConn
+				ls.config.Logger.Debug(
+					"dispatched shadow blockfetch",
+					"component", "ledger",
+					"primary_connection_id", connId.String(),
+					"shadow_connection_id", shadowConn.String(),
+					"header_start_slot", headerStart.Slot,
+				)
+				dispatched = true
+				break // one shadow is enough
 			}
-			ls.shadowBlockfetchConnId = shadowConn
-			ls.config.Logger.Debug(
-				"dispatched shadow blockfetch",
-				"component", "ledger",
-				"primary_connection_id", connId.String(),
-				"shadow_connection_id", shadowConn.String(),
-				"header_start_slot", headerStart.Slot,
-			)
-			break // one shadow is enough
+			if dispatched {
+				gatePath = "dispatched"
+			} else {
+				gatePath = "skipped_no_peer"
+			}
+		}
+		// Tests construct LedgerState without metrics; guard against
+		// a nil CounterVec so the production codepath stays simple.
+		if gatePath != "" && ls.metrics.shadowGateDecisions != nil {
+			ls.metrics.shadowGateDecisions.WithLabelValues(
+				gatePath,
+				gateCutoff,
+			).Inc()
 		}
 	}
 	return nil

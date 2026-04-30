@@ -1125,3 +1125,27 @@ func (s *State) BlockfetchLatency(
 	}
 	return tc.BlockfetchLatencyEWMA, true
 }
+
+// BlockfetchLatencyMedian returns the median EWMA latency across all
+// tracked peers that have at least one sample, plus the sample count.
+// Used to adapt thresholds (e.g. shadow blockfetch gating) to the
+// observed peer population rather than a fixed cutoff.
+func (s *State) BlockfetchLatencyMedian() (time.Duration, int) {
+	s.clientConnIdMutex.RLock()
+	samples := make([]time.Duration, 0, len(s.trackedClients))
+	for _, tc := range s.trackedClients {
+		if tc.blockfetchSampleCount > 0 && tc.BlockfetchLatencyEWMA > 0 {
+			samples = append(samples, tc.BlockfetchLatencyEWMA)
+		}
+	}
+	s.clientConnIdMutex.RUnlock()
+	if len(samples) == 0 {
+		return 0, 0
+	}
+	slices.Sort(samples)
+	n := len(samples)
+	if n%2 == 1 {
+		return samples[n/2], n
+	}
+	return (samples[n/2-1] + samples[n/2]) / 2, n
+}

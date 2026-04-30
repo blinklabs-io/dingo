@@ -246,6 +246,20 @@ func (n *Node) Run(ctx context.Context) error {
 					)
 				}
 			},
+			BlockfetchLatencyFunc: func(
+				connId ouroboros.ConnectionId,
+			) (time.Duration, bool) {
+				if n.chainsyncState == nil {
+					return 0, false
+				}
+				return n.chainsyncState.BlockfetchLatency(connId)
+			},
+			BlockfetchLatencyMedianFunc: func() (time.Duration, int) {
+				if n.chainsyncState == nil {
+					return 0, 0
+				}
+				return n.chainsyncState.BlockfetchLatencyMedian()
+			},
 			DatabaseWorkerPoolConfig: n.config.DatabaseWorkerPoolConfig,
 			GetActiveConnectionFunc: func() *ouroboros.ConnectionId {
 				// Return the current best peer for rollback filtering and
