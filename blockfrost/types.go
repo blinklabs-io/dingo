@@ -204,6 +204,19 @@ type AssetResponse struct {
 	Metadata                *any    `json:"metadata"`
 }
 
+// DRepResponse represents a Blockfrost governance DRep object.
+type DRepResponse struct {
+	DRepID      string `json:"drep_id"`
+	Hex         string `json:"hex"`
+	HasScript   bool   `json:"has_script"`
+	Registered  bool   `json:"registered"`
+	Epoch       uint64 `json:"epoch"`
+	Amount      string `json:"amount"`
+	Active      bool   `json:"active"`
+	ActiveEpoch uint64 `json:"active_epoch"`
+	LiveStake   string `json:"live_stake"`
+}
+
 // ErrorResponse represents a Blockfrost error response.
 type ErrorResponse struct {
 	StatusCode int    `json:"status_code"`

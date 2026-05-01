@@ -45,6 +45,7 @@ type mockNode struct {
 	genesis                GenesisInfo
 	pools                  []PoolExtendedInfo
 	asset                  AssetInfo
+	drep                   DRepInfo
 	addressUTXOs           []AddressUTXOInfo
 	addressTransactions    []AddressTransactionInfo
 	metadataJSON           []MetadataTransactionJSONInfo
@@ -65,6 +66,7 @@ type mockNode struct {
 	genesisErr             error
 	poolsErr               error
 	assetErr               error
+	drepErr                error
 	addressUTXOsErr        error
 	addressTransactionsErr error
 	metadataJSONErr        error
@@ -142,6 +144,12 @@ func (m *mockNode) Asset(
 	_ []byte,
 ) (AssetInfo, error) {
 	return m.asset, m.assetErr
+}
+
+func (m *mockNode) DRep(
+	_ DRepCredential,
+) (DRepInfo, error) {
+	return m.drep, m.drepErr
 }
 
 func (m *mockNode) AddressUTXOs(
@@ -468,6 +476,101 @@ func TestHandleAssetNotFound(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
 	assert.Equal(t, "Not Found", resp.Error)
 	assert.Equal(t, "The requested asset could not be found.", resp.Message)
+}
+
+func TestHandleDRep(t *testing.T) {
+	const drepHex = "00000000000000000000000000000000000000000000000000000000"
+	const drepID = drepHex
+
+	mock := &mockNode{
+		drep: DRepInfo{
+			DRepID:      drepID,
+			Hex:         drepHex,
+			HasScript:   false,
+			Registered:  true,
+			Epoch:       12,
+			Amount:      "123456",
+			Active:      true,
+			ActiveEpoch: 14,
+			LiveStake:   "123456",
+		},
+	}
+	b := newTestBlockfrost(mock)
+
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/api/v0/governance/dreps/"+drepID,
+		nil,
+	)
+	req.SetPathValue("drep_id", drepID)
+	w := httptest.NewRecorder()
+	b.handleDRep(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	var resp DRepResponse
+	err := json.NewDecoder(w.Body).Decode(&resp)
+	require.NoError(t, err)
+	assert.Equal(t, mock.drep.DRepID, resp.DRepID)
+	assert.Equal(t, mock.drep.Hex, resp.Hex)
+	assert.Equal(t, mock.drep.HasScript, resp.HasScript)
+	assert.Equal(t, mock.drep.Registered, resp.Registered)
+	assert.Equal(t, mock.drep.Epoch, resp.Epoch)
+	assert.Equal(t, mock.drep.Amount, resp.Amount)
+	assert.Equal(t, mock.drep.Active, resp.Active)
+	assert.Equal(t, mock.drep.ActiveEpoch, resp.ActiveEpoch)
+	assert.Equal(t, mock.drep.LiveStake, resp.LiveStake)
+}
+
+func TestHandleDRepInvalidIdentifier(t *testing.T) {
+	mock := &mockNode{}
+	b := newTestBlockfrost(mock)
+
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/api/v0/governance/dreps/not-a-drep",
+		nil,
+	)
+	req.SetPathValue("drep_id", "not-a-drep")
+	w := httptest.NewRecorder()
+	b.handleDRep(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+
+	var resp ErrorResponse
+	err := json.NewDecoder(w.Body).Decode(&resp)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	assert.Equal(t, "Bad Request", resp.Error)
+	assert.Equal(t, "Invalid DRep identifier.", resp.Message)
+}
+
+func TestHandleDRepNotFound(t *testing.T) {
+	mock := &mockNode{
+		drepErr: ErrDRepNotFound,
+	}
+	b := newTestBlockfrost(mock)
+
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/api/v0/governance/dreps/00000000000000000000000000000000000000000000000000000000",
+		nil,
+	)
+	req.SetPathValue(
+		"drep_id",
+		"00000000000000000000000000000000000000000000000000000000",
+	)
+	w := httptest.NewRecorder()
+	b.handleDRep(w, req)
+
+	assert.Equal(t, http.StatusNotFound, w.Code)
+
+	var resp ErrorResponse
+	err := json.NewDecoder(w.Body).Decode(&resp)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+	assert.Equal(t, "Not Found", resp.Error)
+	assert.Equal(t, "The requested DRep could not be found.", resp.Message)
 }
 
 func TestHandleLatestBlockError(t *testing.T) {

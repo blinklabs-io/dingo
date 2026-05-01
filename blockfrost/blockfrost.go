@@ -115,6 +115,10 @@ func (b *Blockfrost) Start(
 		b.handlePoolsExtended,
 	)
 	mux.HandleFunc(
+		"GET /api/v0/governance/dreps/{drep_id}",
+		b.handleDRep,
+	)
+	mux.HandleFunc(
 		"GET /api/v0/addresses/{address}/utxos",
 		b.handleAddressUTXOs,
 	)

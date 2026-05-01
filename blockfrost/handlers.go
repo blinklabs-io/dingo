@@ -18,13 +18,25 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"slices"
 	"strconv"
+	"strings"
+
+	"github.com/btcsuite/btcd/btcutil/bech32"
 )
 
-const apiVersion = "0.1.0"
+const (
+	apiVersion = "0.1.0"
+
+	// DRep credentials are Blake2b-224 hashes: 224 bits = 28 bytes.
+	drepCredentialHashLen = 28
+	// Hex encodes each byte as two characters, so a 28-byte credential
+	// hash is represented by 56 hex characters.
+	drepCredentialHexLen = drepCredentialHashLen * 2
+)
 
 // writeJSON writes a JSON response with the given status
 // code. If encoding fails, it logs the error for
@@ -542,6 +554,61 @@ func (b *Blockfrost) handlePoolsExtended(
 	writeJSON(w, http.StatusOK, resp)
 }
 
+// handleDRep handles GET /api/v0/governance/dreps/{drep_id}
+// and returns DRep governance information.
+func (b *Blockfrost) handleDRep(
+	w http.ResponseWriter,
+	r *http.Request,
+) {
+	credential, err := parseDRepIdentifier(r.PathValue("drep_id"))
+	if err != nil {
+		writeError(
+			w,
+			http.StatusBadRequest,
+			"Bad Request",
+			"Invalid DRep identifier.",
+		)
+		return
+	}
+
+	drep, err := b.node.DRep(credential)
+	if err != nil {
+		if errors.Is(err, ErrDRepNotFound) {
+			writeError(
+				w,
+				http.StatusNotFound,
+				"Not Found",
+				"The requested DRep could not be found.",
+			)
+			return
+		}
+		b.logger.Error(
+			"failed to get drep",
+			"drep_id", r.PathValue("drep_id"),
+			"error", err,
+		)
+		writeError(
+			w,
+			http.StatusInternalServerError,
+			"Internal Server Error",
+			"failed to retrieve DRep",
+		)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, DRepResponse{
+		DRepID:      drep.DRepID,
+		Hex:         drep.Hex,
+		HasScript:   drep.HasScript,
+		Registered:  drep.Registered,
+		Epoch:       drep.Epoch,
+		Amount:      drep.Amount,
+		Active:      drep.Active,
+		ActiveEpoch: drep.ActiveEpoch,
+		LiveStake:   drep.LiveStake,
+	})
+}
+
 // handleAddressUTXOs handles GET /api/v0/addresses/{address}/utxos
 // and returns the current UTxOs for an address.
 func (b *Blockfrost) handleAddressUTXOs(
@@ -772,6 +839,55 @@ func parseAssetIdentifier(
 		return "", nil, err
 	}
 	return policyID, assetName, nil
+}
+
+func parseDRepIdentifier(
+	id string,
+) (DRepCredential, error) {
+	if id == "" {
+		return DRepCredential{}, errors.New("empty DRep identifier")
+	}
+	// Blockfrost accepts the raw credential hash as hex. Storage uses the
+	// raw 28-byte hash for lookup.
+	if len(id) == drepCredentialHexLen {
+		hash, err := hex.DecodeString(id)
+		if err == nil {
+			return DRepCredential{
+				ID:        id,
+				Hash:      hash,
+				HasScript: false,
+			}, nil
+		}
+	}
+
+	// Non-hex input must be bech32. The HRP is the readable prefix before
+	// the separator "1" (for example, "drep" in "drep1...").
+	hrp, data, err := bech32.Decode(id)
+	if err != nil {
+		return DRepCredential{}, fmt.Errorf("decode DRep bech32: %w", err)
+	}
+	hrp = strings.ToLower(hrp)
+	if hrp != "drep" {
+		return DRepCredential{}, fmt.Errorf("invalid DRep prefix %q", hrp)
+	}
+	// Bech32 stores payload data as 5-bit groups. Convert it back to
+	// normal 8-bit bytes before checking the credential payload.
+	payload, err := bech32.ConvertBits(data, 5, 8, false)
+	if err != nil {
+		return DRepCredential{}, fmt.Errorf("decode DRep payload: %w", err)
+	}
+
+	if len(payload) != drepCredentialHashLen {
+		return DRepCredential{}, fmt.Errorf(
+			"invalid DRep credential length %d",
+			len(payload),
+		)
+	}
+	return DRepCredential{
+		ID:        id,
+		Hash:      payload,
+		HasScript: false,
+	}, nil
 }
 
 func writeNodeQueryError(
