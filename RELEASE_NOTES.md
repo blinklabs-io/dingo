@@ -1,6 +1,29 @@
 # Release Notes
 
 
+## v0.39.1 (May 1, 2026)
+
+**Title:** Safer pruning, rollback recovery, and snapshot nonces
+
+**Date:** May 1, 2026
+
+**Version:** v0.39.1
+
+Hi folks! Here’s what we shipped in v0.39.1.
+
+### ✨ What's New
+
+* Noted **no new features:** This patch release focuses on improvements and fixes.
+
+### 💪 Improvements
+
+* Refreshed **release history continuity:** RELEASE_NOTES.md now includes the v0.39.0 entry so recent release history stays current and easier to scan.
+
+### 🔧 Fixes
+
+* Preserved **rollback cleanup continuity near the Mithril boundary:** Rollback cleanup now keeps gap UTxOs intact near the Mithril boundary, which makes recovery safer after chain changes.
+
+## v0.39.0 (April 30, 2026)
 ## v0.39.0 (April 30, 2026)
 
 **Title:** Era-aware forging, Bark tuning, and safer diagnostics
