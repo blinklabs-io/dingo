@@ -27,9 +27,9 @@ Hi folks! Here’s what we shipped in v0.39.1.
 
 ### 📋 What You Need to Know
 
-* Clarified **patch release guidance:** This is a patch release, and normal upgrades are sufficient for most users.
-* Highlighted **safer recovery and pruning behavior:** Rollback, bootstrap, and pruning now behave more safely during recovery and cleanup.
-* Summarized **corrected snapshot boundary handling:** Snapshot based bootstrap now keeps epoch boundary validation correct after startup recovery.
+* Clarified **patch release upgrade guidance:** This is a patch release, and normal upgrade procedures are sufficient for most operators and users.
+* Highlighted **safer pruning and rollback recovery:** Bark pruning now preserves resolvable live UTxOs, and Mithril boundary rollback recovery now preserves the required gap block state for safe recovery.
+* Corrected **snapshot nonce handling after bootstrap:** Snapshot bootstrapped nodes now read the right nonce data across supported snapshot layouts so epoch boundary header and VRF validation continue correctly after bootstrap.
 
 ### Recommended Network Compatibility ⚠️
 
