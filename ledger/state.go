@@ -1518,18 +1518,38 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 				err,
 			)
 		}
-		// Delete rolled-back UTxOs (blob offsets and metadata)
-		err := ls.db.UtxosDeleteRolledback(point.Slot, txn)
+		// Delete rolled-back UTxOs (blob offsets and metadata).
+		//
+		// Floor the deletion slot at mithrilLedgerSlot. UTxOs produced
+		// by gap blocks during Mithril bootstrap are written via
+		// SetGapBlockTransaction without advancing the ledger tip, so
+		// their added_slot values are well above the persisted ledger
+		// tip. A rollback whose target is below the Mithril boundary
+		// would otherwise bulk-delete every gap-block-produced UTxO,
+		// leaving the chain unable to validate the first post-gap
+		// block that consumes one of them. The Mithril snapshot is
+		// the trust anchor — we never rewind below it — so the
+		// authoritative deletion slot is the rollback target or the
+		// Mithril boundary, whichever is later.
+		deleteSlot := point.Slot
+		if ls.mithrilLedgerSlot > deleteSlot {
+			deleteSlot = ls.mithrilLedgerSlot
+		}
+		err := ls.db.UtxosDeleteRolledback(deleteSlot, txn)
 		if err != nil {
 			return fmt.Errorf("remove rolled-back UTxOs: %w", err)
 		}
 		// Delete rolled-back transaction offsets and metadata
-		err = ls.db.TransactionsDeleteRolledback(point.Slot, txn)
+		err = ls.db.TransactionsDeleteRolledback(deleteSlot, txn)
 		if err != nil {
 			return fmt.Errorf("remove rolled-back transactions: %w", err)
 		}
-		// Restore spent UTxOs
-		err = ls.db.UtxosUnspend(point.Slot, txn)
+		// Restore spent UTxOs. Use the same floored slot as the
+		// delete calls above so gap-block transactions and the UTxOs
+		// they consumed stay in sync: preserving a tx at slot S while
+		// restoring its consumed UTxO at deleted_slot=S would leave
+		// the tx pointing at a live UTxO it claims to have spent.
+		err = ls.db.UtxosUnspend(deleteSlot, txn)
 		if err != nil {
 			return fmt.Errorf(
 				"restore spent UTxOs after rollback: %w",
