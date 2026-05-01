@@ -17,13 +17,13 @@ Hi folks! Here’s what we shipped in v0.39.1.
 
 ### 💪 Improvements
 
-* Refined **archive aware Bark cleanup behavior:** Archived blocks now remain resolvable during prune and cleanup work because Bark leaves archive aware tombstones in place and reads honor them.
+* Refreshed **release history continuity:** RELEASE_NOTES.md now includes the v0.39.0 entry so recent release history stays current and easier to scan.
 
 ### 🔧 Fixes
 
-* Preserved **rollback cleanup continuity near the Mithril boundary:** Rollback cleanup now keeps gap UTxOs intact near the Mithril boundary, which makes recovery safer after chain changes.
-* Added **archive aware prune tombstones:** Prune actions now record tombstones and honor archived blocks, which keeps archived blocks resolvable during cleanup.
-* Corrected **snapshot nonce handling across state layouts:** Snapshot based bootstrap now reads snapshot nonces correctly across supported state layouts, which keeps epoch boundary validation correct after bootstrap.
+* Preserved **safer rollback cleanup near the Mithril boundary:** Rollback cleanup now keeps gap UTxOs intact near the Mithril boundary, which makes rollback recovery safer.
+* Hardened **archive aware Bark cleanup handling:** Bark pruning and archival handling now preserve the resolvability of archived blocks during cleanup.
+* Corrected **snapshot bootstrap nonce handling across state layouts:** Snapshot bootstrap now reads epoch and snapshot nonces correctly across supported state layouts, which keeps epoch boundary validation correct after bootstrap.
 
 ### 📋 What You Need to Know
 
