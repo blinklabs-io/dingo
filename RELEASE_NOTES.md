@@ -1,6 +1,50 @@
 # Release Notes
 
 
+## v0.39.1 (May 1, 2026)
+
+**Title:** Safer pruning, rollback recovery, and snapshot nonces
+
+**Date:** May 1, 2026
+
+**Version:** v0.39.1
+
+Hi folks! Here’s what we shipped in v0.39.1.
+
+### ✨ What's New
+
+* Noted **no new features:** This patch release focuses on improvements and fixes.
+
+### 💪 Improvements
+
+* Refined **archive aware Bark cleanup behavior:** Archived blocks now remain resolvable during prune and cleanup work because Bark leaves archive aware tombstones in place and reads honor them.
+
+### 🔧 Fixes
+
+* Preserved **safer rollback cleanup near the Mithril boundary:** Rollback cleanup now keeps gap UTxOs intact near the Mithril boundary, which makes rollback recovery safer.
+* Hardened **archive aware Bark cleanup handling:** Bark pruning and archival handling now preserve the resolvability of archived blocks during cleanup.
+* Corrected **snapshot bootstrap nonce handling across state layouts:** Snapshot bootstrap now reads epoch and snapshot nonces correctly across supported state layouts, which keeps epoch boundary validation correct after bootstrap.
+
+### 📋 What You Need to Know
+
+* Clarified **patch release upgrade guidance:** This is a patch release, and normal upgrade procedures are sufficient for most operators and users.
+* Highlighted **safer pruning and rollback recovery:** Bark pruning now preserves resolvable live UTxOs, and Mithril boundary rollback recovery now preserves the required gap block state for safe recovery.
+* Corrected **snapshot nonce handling after bootstrap:** Snapshot bootstrapped nodes now read the right nonce data across supported snapshot layouts so epoch boundary header and VRF validation continue correctly after bootstrap.
+
+### Recommended Network Compatibility ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
 ## v0.39.0 (April 30, 2026)
 
 **Title:** Era-aware forging, Bark tuning, and safer diagnostics
