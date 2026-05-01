@@ -459,6 +459,10 @@ func (d *BlobStoreGCS) GetBlock(
 		d.logger.Errorf("%v", wrappedErr)
 		return nil, types.BlockMetadata{}, wrappedErr
 	}
+	if types.IsBlockTombstone(cborData) {
+		return nil, types.BlockMetadata{},
+			&types.BlockTombstonedError{Slot: slot, Hash: hash}
+	}
 	metadataKey := types.BlockBlobMetadataKey(key)
 	r, err = d.object(metadataKey).NewReader(ctx)
 	if err != nil {
@@ -537,6 +541,68 @@ func (d *BlobStoreGCS) DeleteBlock(
 	if err := d.object(hashIndexKey).Delete(ctx); err != nil &&
 		!errors.Is(err, storage.ErrObjectNotExist) {
 		d.logger.Errorf("gcs delete %q failed: %v", string(hashIndexKey), err)
+		return err
+	}
+	return nil
+}
+
+// TombstoneBlock replaces a block's CBOR with a tombstone marker so a
+// wrapping archive proxy can resolve the block via GetBlock(slot, hash):
+// GetBlock reads the bp object, sees the marker, and returns
+// types.ErrBlockTombstoned for the proxy to intercept.
+//
+// What stays:
+//   - bi<id>: required by BlockByIndex (the chain iterator translates
+//     id→key here; no equivalent index exists in metadata).
+//   - bh<hash>: BlockByHash has a sequential-scan fallback over bp keys,
+//     but on a deep chain that scan is O(N) per call — keeping the index
+//     preserves the fast path.
+//
+// What goes:
+//   - bp_metadata: GetBlock short-circuits on the tombstone before reading
+//     metadata, and no other caller asks for metadata of a tombstoned
+//     block — bark's archive response carries its own.
+func (d *BlobStoreGCS) TombstoneBlock(
+	txn types.Txn,
+	slot uint64,
+	hash []byte,
+) error {
+	if err := d.validateTxn(txn); err != nil {
+		return err
+	}
+	t := txn.(*gcsTxn) // safe after validateTxn
+	if err := t.assertWritable(); err != nil {
+		return err
+	}
+	ctx, cancel := d.opContext()
+	defer cancel()
+	key := types.BlockBlobKey(slot, hash)
+	w := d.object(key).NewWriter(ctx)
+	if _, err := w.Write(types.BlockTombstone()); err != nil {
+		_ = w.Close()
+		d.logger.Errorf(
+			"failed to write tombstone object %q: %v",
+			string(key),
+			err,
+		)
+		return err
+	}
+	if err := w.Close(); err != nil {
+		d.logger.Errorf(
+			"failed to close tombstone writer for %q: %v",
+			string(key),
+			err,
+		)
+		return err
+	}
+	metadataKey := types.BlockBlobMetadataKey(key)
+	if err := d.object(metadataKey).Delete(ctx); err != nil &&
+		!errors.Is(err, storage.ErrObjectNotExist) {
+		d.logger.Errorf(
+			"failed to delete metadata object %q: %v",
+			string(metadataKey),
+			err,
+		)
 		return err
 	}
 	return nil
@@ -841,6 +907,18 @@ func (i *gcsItem) ValueCopy(dst []byte) ([]byte, error) {
 	data, err := i.store.Get(i.txn, []byte(i.key))
 	if err != nil {
 		return nil, err
+	}
+	if types.IsBlockTombstone(data) {
+		// Tombstones live at fully-formed bp keys; parse this item's
+		// own key (the plugin produced it) to attach (slot, hash) to
+		// the typed error.
+		slot, hash, parseErr := types.ParseBlockBlobKey([]byte(i.key))
+		if parseErr != nil {
+			return nil, fmt.Errorf(
+				"tombstone at unexpected key shape: %w", parseErr,
+			)
+		}
+		return nil, &types.BlockTombstonedError{Slot: slot, Hash: hash}
 	}
 	if dst != nil {
 		return append(dst[:0], data...), nil

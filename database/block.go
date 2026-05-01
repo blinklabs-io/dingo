@@ -17,7 +17,6 @@ package database
 import (
 	"bytes"
 	"context"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"slices"
@@ -567,21 +566,9 @@ func BlocksAfterSlotTxn(txn *Txn, slotNumber uint64) ([]models.Block, error) {
 // BlockBlobKeyToPoint extracts slot and hash from a block blob key.
 // Key format: "bp" (2 bytes) + slot (8 bytes big-endian) + hash (32 bytes).
 func BlockBlobKeyToPoint(key []byte) (ocommon.Point, error) {
-	const keyLen = 2 + 8 + 32 // prefix + slot + hash
-	if len(key) != keyLen {
-		return ocommon.Point{}, fmt.Errorf(
-			"blob key length %d, expected %d",
-			len(key), keyLen,
-		)
+	slot, hash, err := types.ParseBlockBlobKey(key)
+	if err != nil {
+		return ocommon.Point{}, err
 	}
-	if string(key[:2]) != types.BlockBlobKeyPrefix {
-		return ocommon.Point{}, fmt.Errorf(
-			"blob key has wrong prefix: %q, expected %q",
-			key[:2], types.BlockBlobKeyPrefix,
-		)
-	}
-	slot := binary.BigEndian.Uint64(key[2:10])
-	hash := make([]byte, 32)
-	copy(hash, key[10:10+32])
 	return ocommon.NewPoint(slot, hash), nil
 }

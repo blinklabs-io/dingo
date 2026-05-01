@@ -127,9 +127,15 @@ func (it *badgerIterator) ValidForPrefix(
 }
 func (it *badgerIterator) Next() { it.iter.Next() }
 
-func (it *badgerIterator) Item() types.BlobItem { return &badgerItem{item: it.iter.Item()} }
-func (it *badgerIterator) Close()               { it.iter.Close() }
-func (it *badgerIterator) Err() error           { return nil }
+func (it *badgerIterator) Item() types.BlobItem {
+	item := it.iter.Item()
+	if item == nil {
+		return nil
+	}
+	return &badgerItem{item: item}
+}
+func (it *badgerIterator) Close()     { it.iter.Close() }
+func (it *badgerIterator) Err() error { return nil }
 
 type errorIterator struct {
 	err error
@@ -229,7 +235,24 @@ func (i *badgerItem) Key() []byte {
 }
 
 func (i *badgerItem) ValueCopy(dst []byte) ([]byte, error) {
-	return i.item.ValueCopy(dst)
+	val, err := i.item.ValueCopy(dst)
+	if err != nil {
+		return nil, err
+	}
+	if !types.IsBlockTombstone(val) {
+		return val, nil
+	}
+	// The tombstone marker only appears at fully-formed bp keys; parse
+	// the key we just emitted to attach (slot, hash) to the typed
+	// error. The plugin owns this key format end-to-end so the parse
+	// is internally safe.
+	slot, hash, parseErr := types.ParseBlockBlobKey(i.item.KeyCopy(nil))
+	if parseErr != nil {
+		return nil, fmt.Errorf(
+			"tombstone at unexpected key shape: %w", parseErr,
+		)
+	}
+	return nil, &types.BlockTombstonedError{Slot: slot, Hash: hash}
 }
 
 // BlobStoreBadger stores all data in badger. Data may not be persisted
@@ -612,6 +635,10 @@ func (d *BlobStoreBadger) GetBlock(
 	if err != nil {
 		return nil, types.BlockMetadata{}, err
 	}
+	if types.IsBlockTombstone(cborData) {
+		return nil, types.BlockMetadata{},
+			&types.BlockTombstonedError{Slot: slot, Hash: hash}
+	}
 	metadataKey := types.BlockBlobMetadataKey(key)
 	metadataVal, err := badgerTxn.tx.Get(metadataKey)
 	if err != nil {
@@ -660,6 +687,39 @@ func (d *BlobStoreBadger) DeleteBlock(
 		return err
 	}
 	return nil
+}
+
+// TombstoneBlock overwrites a block's CBOR with a tombstone marker so a
+// wrapping archive proxy can resolve the block via GetBlock(slot, hash):
+// GetBlock reads the bp value, sees the marker, and returns
+// types.ErrBlockTombstoned for the proxy to intercept.
+//
+// What stays:
+//   - bi<id>: required by BlockByIndex (the chain iterator translates
+//     id→key here; no equivalent index exists in metadata).
+//   - bh<hash>: BlockByHash has a sequential-scan fallback over bp keys,
+//     but on a deep chain that scan is O(N) per call — keeping the index
+//     preserves the fast path.
+//
+// What goes:
+//   - bp_metadata: GetBlock short-circuits on the tombstone before reading
+//     metadata, and no other caller asks for metadata of a tombstoned
+//     block — bark's archive response carries its own.
+func (d *BlobStoreBadger) TombstoneBlock(
+	txn types.Txn,
+	slot uint64,
+	hash []byte,
+) error {
+	badgerTxn, err := d.validateTxn(txn)
+	if err != nil {
+		return err
+	}
+	key := types.BlockBlobKey(slot, hash)
+	if err := badgerTxn.tx.Set(key, types.BlockTombstone()); err != nil {
+		return err
+	}
+	metadataKey := types.BlockBlobMetadataKey(key)
+	return badgerTxn.tx.Delete(metadataKey)
 }
 
 // SetUtxo stores a UTxO's CBOR data

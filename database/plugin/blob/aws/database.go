@@ -326,6 +326,10 @@ func (d *BlobStoreS3) GetBlock(
 		}
 		return nil, types.BlockMetadata{}, err
 	}
+	if types.IsBlockTombstone(cborData) {
+		return nil, types.BlockMetadata{},
+			&types.BlockTombstonedError{Slot: slot, Hash: hash}
+	}
 	metadataKey := types.BlockBlobMetadataKey(key)
 	metadataBytes, err := d.getInternal(ctx, string(metadataKey))
 	if err != nil {
@@ -382,6 +386,50 @@ func (d *BlobStoreS3) DeleteBlock(
 	if _, err := d.client.DeleteObject(ctx, &s3.DeleteObjectInput{
 		Bucket: aws.String(d.bucket),
 		Key:    awsString(d.fullKey(string(hashIndexKey))),
+	}); err != nil && !isS3NotFound(err) {
+		return err
+	}
+	return nil
+}
+
+// TombstoneBlock replaces a block's CBOR with a tombstone marker so a
+// wrapping archive proxy can resolve the block via GetBlock(slot, hash):
+// GetBlock reads the bp object, sees the marker, and returns
+// types.ErrBlockTombstoned for the proxy to intercept.
+//
+// What stays:
+//   - bi<id>: required by BlockByIndex (the chain iterator translates
+//     id→key here; no equivalent index exists in metadata).
+//   - bh<hash>: BlockByHash has a sequential-scan fallback over bp keys,
+//     but on a deep chain that scan is O(N) per call — keeping the index
+//     preserves the fast path.
+//
+// What goes:
+//   - bp_metadata: GetBlock short-circuits on the tombstone before reading
+//     metadata, and no other caller asks for metadata of a tombstoned
+//     block — bark's archive response carries its own.
+func (d *BlobStoreS3) TombstoneBlock(
+	txn types.Txn,
+	slot uint64,
+	hash []byte,
+) error {
+	t, err := d.validateTxn(txn)
+	if err != nil {
+		return err
+	}
+	if err := t.assertWritable(); err != nil {
+		return err
+	}
+	ctx, cancel := d.opContext()
+	defer cancel()
+	key := types.BlockBlobKey(slot, hash)
+	if err := d.Put(ctx, string(key), types.BlockTombstone()); err != nil {
+		return err
+	}
+	metadataKey := types.BlockBlobMetadataKey(key)
+	if _, err := d.client.DeleteObject(ctx, &s3.DeleteObjectInput{
+		Bucket: aws.String(d.bucket),
+		Key:    awsString(d.fullKey(string(metadataKey))),
 	}); err != nil && !isS3NotFound(err) {
 		return err
 	}
@@ -633,6 +681,18 @@ func (i *s3Item) ValueCopy(dst []byte) ([]byte, error) {
 	data, err := i.store.Get(i.txn, []byte(i.key))
 	if err != nil {
 		return nil, err
+	}
+	if types.IsBlockTombstone(data) {
+		// Tombstones live at fully-formed bp keys; parse this item's
+		// own key (the plugin produced it) to attach (slot, hash) to
+		// the typed error.
+		slot, hash, parseErr := types.ParseBlockBlobKey([]byte(i.key))
+		if parseErr != nil {
+			return nil, fmt.Errorf(
+				"tombstone at unexpected key shape: %w", parseErr,
+			)
+		}
+		return nil, &types.BlockTombstonedError{Slot: slot, Hash: hash}
 	}
 	if dst != nil {
 		return append(dst[:0], data...), nil

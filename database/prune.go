@@ -24,18 +24,23 @@ import (
 	"github.com/blinklabs-io/dingo/database/types"
 )
 
-// PruneBlock removes the given block from the blob store after materializing
-// any active UTxOs that still reference it.
+// PruneBlock tombstones the given block in the blob store after
+// materializing any active UTxOs that still reference it. The block's CBOR
+// is replaced with a small tombstone marker; index pointers (bi, bh) and
+// metadata are kept so a wrapping archive proxy (e.g. bark) can still
+// resolve the block by (slot, hash) — without the tombstone the chain
+// iterator would hit ErrBlobKeyNotFound at the bi lookup before ever
+// reaching the proxy's GetBlock.
 //
 // UTxO blob entries are stored as 52-byte CborOffset references that point
-// into a source block's CBOR. Deleting a block while live UTxOs still
+// into a source block's CBOR. Tombstoning a block while live UTxOs still
 // reference it would leave those UTxOs unresolvable. To preserve them,
 // PruneBlock first finds every live UTxO with added_slot equal to the
 // pruned block's slot, decodes its offset, slices the underlying CBOR out
 // of the block, and rewrites the UTxO blob entry as raw CBOR (which the
-// resolver treats as the legacy non-offset format). The block delete and
-// all UTxO rewrites happen in a single blob transaction, so the block is
-// never deleted while live UTxOs still depend on it.
+// resolver treats as the legacy non-offset format). The block tombstone
+// and all UTxO rewrites happen in a single blob transaction, so the block
+// is never tombstoned while live UTxOs still depend on it.
 //
 // Returns the number of UTxOs that were materialized.
 func (d *Database) PruneBlock(slot uint64, hash []byte) (int, error) {
@@ -58,7 +63,7 @@ func (d *Database) PruneBlock(slot uint64, hash []byte) (int, error) {
 	var materialized int
 	blobTxn := d.BlobTxn(true)
 	if err := blobTxn.Do(func(txn *Txn) error {
-		blockCbor, meta, err := d.blob.GetBlock(txn.Blob(), slot, hash)
+		blockCbor, _, err := d.blob.GetBlock(txn.Blob(), slot, hash)
 		if err != nil {
 			return fmt.Errorf(
 				"prune block (slot=%d): get block: %w",
@@ -73,9 +78,9 @@ func (d *Database) PruneBlock(slot uint64, hash []byte) (int, error) {
 			}
 			materialized += n
 		}
-		if err := d.blob.DeleteBlock(txn.Blob(), slot, hash, meta.ID); err != nil {
+		if err := d.blob.TombstoneBlock(txn.Blob(), slot, hash); err != nil {
 			return fmt.Errorf(
-				"prune block (slot=%d): delete block: %w",
+				"prune block (slot=%d): tombstone block: %w",
 				slot,
 				err,
 			)

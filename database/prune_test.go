@@ -114,7 +114,7 @@ func seedUtxoMetadata(
 	}))
 }
 
-func TestPruneBlock_MaterializesLiveUtxoAndDeletesBlock(t *testing.T) {
+func TestPruneBlock_MaterializesLiveUtxoAndTombstonesBlock(t *testing.T) {
 	db := newTestDB(t)
 
 	const slot uint64 = 100
@@ -152,11 +152,21 @@ func TestPruneBlock_MaterializesLiveUtxoAndDeletesBlock(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 1, n, "exactly one live UTxO should be materialized")
 
-	// Block CBOR is gone.
+	// Block CBOR has been replaced with a tombstone marker; GetBlock
+	// signals this with ErrBlockTombstoned so a wrapping archive proxy
+	// can intercept and resolve from the archive. The bp key still
+	// exists (carrying just the tombstone bytes), and the bi/bh index
+	// pointers and metadata remain so chain-iterator lookups still
+	// translate id/hash into a block key.
 	blobTxn = db.BlobTxn(false)
 	defer blobTxn.Release()
 	_, _, err = db.Blob().GetBlock(blobTxn.Blob(), slot, hash)
-	assert.ErrorIs(t, err, types.ErrBlobKeyNotFound)
+	assert.ErrorIs(t, err, types.ErrBlockTombstoned)
+	rawBp, err := db.Blob().Get(blobTxn.Blob(), types.BlockBlobKey(slot, hash))
+	require.NoError(t, err,
+		"bp key must still exist post-prune so bi/bh references stay valid")
+	assert.True(t, types.IsBlockTombstone(rawBp),
+		"bp value must be the tombstone marker after prune")
 
 	// Live UTxO entry is now raw CBOR matching the in-block slice.
 	postLive, err := db.Blob().GetUtxo(blobTxn.Blob(), txId, 0)
@@ -208,6 +218,57 @@ func TestPruneBlock_ResolverReadsMaterializedUtxoAfterPrune(t *testing.T) {
 		"resolver should not perform a cold block extraction for a "+
 			"materialized UTxO",
 	)
+}
+
+// TestPruneBlock_LeavesChainIteratorAtTombstone exercises the post-fix
+// behavior for issue #2104. After prune the chain-iterator path resolves
+// the (id|hash) → block-key mapping locally (bi/bh and metadata are kept)
+// and reaches the GetBlock call inside blockByKey, which now surfaces
+// ErrBlockTombstoned. That sentinel is the explicit handoff point for a
+// wrapping archive proxy (bark) to fetch from the archive. Without a
+// proxy installed, the error propagates so the operator sees a clear
+// "block was archived; no proxy configured" signal — not the silent
+// chain-tip closure that BlockFetch produced before the fix.
+func TestPruneBlock_LeavesChainIteratorAtTombstone(t *testing.T) {
+	db := newTestDB(t)
+
+	const slot uint64 = 100
+	txId := bytes.Repeat([]byte{0xEE}, 32)
+	payload := []byte("tombstone-handoff-payload")
+
+	hash, _ := seedPrunableBlock(t, db, slot, txId, map[uint32][]byte{
+		0: payload,
+	})
+	seedUtxoMetadata(t, db, txId, 0, slot, 0)
+
+	recent, err := BlocksRecent(db, 1)
+	require.NoError(t, err)
+	require.Len(t, recent, 1)
+	blockID := recent[0].ID
+	require.NotZero(t, blockID, "block id must be set before prune")
+
+	_, err = db.PruneBlock(slot, hash)
+	require.NoError(t, err)
+
+	// BlockByIndex is the path the chain iterator walks. After prune the
+	// id→key indirection still resolves (bi is preserved), so the lookup
+	// reaches blob.GetBlock; that now returns ErrBlockTombstoned, which
+	// blockByKey propagates verbatim. A bark wrapper would intercept this
+	// error and proxy to the archive. Without a wrapper the error reaches
+	// the iterator as a clear, actionable signal.
+	_, err = db.BlockByIndex(blockID, nil)
+	assert.ErrorIs(t, err, types.ErrBlockTombstoned,
+		"BlockByIndex must reach the GetBlock handoff (tombstone) so a "+
+			"bark archive proxy can intercept and resolve")
+	assert.NotErrorIs(t, err, models.ErrBlockNotFound,
+		"the lookup must not collapse to ErrBlockNotFound — that is the "+
+			"silent chain-tip dead end issue #2104 describes")
+
+	// BlockByHash exercises the parallel hash-keyed path; same handoff.
+	_, err = BlockByHash(db, hash)
+	assert.ErrorIs(t, err, types.ErrBlockTombstoned,
+		"BlockByHash must also reach the tombstone handoff post-prune")
+	assert.NotErrorIs(t, err, models.ErrBlockNotFound)
 }
 
 func TestPruneBlock_SkipsAlreadyMaterializedUtxo(t *testing.T) {
