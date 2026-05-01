@@ -596,17 +596,7 @@ func (b *Blockfrost) handleDRep(
 		return
 	}
 
-	writeJSON(w, http.StatusOK, DRepResponse{
-		DRepID:      drep.DRepID,
-		Hex:         drep.Hex,
-		HasScript:   drep.HasScript,
-		Registered:  drep.Registered,
-		Epoch:       drep.Epoch,
-		Amount:      drep.Amount,
-		Active:      drep.Active,
-		ActiveEpoch: drep.ActiveEpoch,
-		LiveStake:   drep.LiveStake,
-	})
+	writeJSON(w, http.StatusOK, DRepResponse(drep))
 }
 
 // handleAddressUTXOs handles GET /api/v0/addresses/{address}/utxos
