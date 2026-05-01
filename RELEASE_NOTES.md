@@ -17,7 +17,7 @@ Hi folks! Here’s what we shipped in v0.39.1.
 
 ### 💪 Improvements
 
-* Refreshed **release history continuity:** RELEASE_NOTES.md now includes the v0.39.0 entry so recent release history stays current and easier to scan.
+* Refined **archive aware Bark cleanup behavior:** Archived blocks now remain resolvable during prune and cleanup work because Bark leaves archive aware tombstones in place and reads honor them.
 
 ### 🔧 Fixes
 
@@ -27,9 +27,9 @@ Hi folks! Here’s what we shipped in v0.39.1.
 
 ### 📋 What You Need to Know
 
-* Clarified **patch release upgrade guidance:** This patch release supports normal upgrades for most operators.
-* Highlighted **safer Bark cleanup and archive retrieval:** Operators using Bark pruning and archive retrieval can expect archived blocks to remain retrievable during cleanup.
-* Emphasized **safer bootstrap and rollback recovery:** Operators using Mithril or snapshot bootstrap can expect safer recovery and correct epoch boundary validation after bootstrap or rollback scenarios.
+* Clarified **patch release guidance:** This is a patch release, and normal upgrades are sufficient for most users.
+* Highlighted **safer recovery and pruning behavior:** Rollback, bootstrap, and pruning now behave more safely during recovery and cleanup.
+* Summarized **corrected snapshot boundary handling:** Snapshot based bootstrap now keeps epoch boundary validation correct after startup recovery.
 
 ### Recommended Network Compatibility ⚠️
 
