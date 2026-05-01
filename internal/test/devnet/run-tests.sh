@@ -123,7 +123,7 @@ if [[ ${ELAPSED} -ge ${MAX_WAIT} ]]; then
   log "Dumping container status:"
   docker compose -f "${COMPOSE_FILE}" ps
   log "Dumping recent logs:"
-  docker compose -f "${COMPOSE_FILE}" logs --tail=50
+  docker compose -f "${COMPOSE_FILE}" logs --tail=100
   die "Node health check timeout"
 fi
 
@@ -156,7 +156,7 @@ go test \
   -v \
   -timeout "${TEST_TIMEOUT}" \
   ${TEST_ARGS[@]+"${TEST_ARGS[@]}"} \
-  ./internal/devnet/...
+  ./internal/test/devnet/...
 TEST_EXIT=$?
 set -e
 

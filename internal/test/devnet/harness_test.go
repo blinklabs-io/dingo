@@ -41,8 +41,8 @@ func TestHarnessGetChainTip(t *testing.T) {
 }
 
 func TestHarnessWaitForSlot(t *testing.T) {
-	// Set path relative to this package (internal/devnet/)
-	t.Setenv("DEVNET_TESTNET_YAML", "../test/devnet/testnet.yaml")
+	// Set path relative to this package (internal/test/devnet/)
+	t.Setenv("DEVNET_TESTNET_YAML", "./testnet.yaml")
 	cfg, err := LoadDevNetConfig()
 	require.NoError(t, err, "failed to load devnet config")
 
@@ -62,8 +62,8 @@ func TestHarnessWaitForSlot(t *testing.T) {
 }
 
 func TestHarnessVerifyConsensus(t *testing.T) {
-	// Set path relative to this package (internal/devnet/)
-	t.Setenv("DEVNET_TESTNET_YAML", "../test/devnet/testnet.yaml")
+	// Set path relative to this package (internal/test/devnet/)
+	t.Setenv("DEVNET_TESTNET_YAML", "./testnet.yaml")
 	cfg, err := LoadDevNetConfig()
 	require.NoError(t, err, "failed to load devnet config")
 

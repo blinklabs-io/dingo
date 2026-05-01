@@ -28,11 +28,17 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 echo "Starting DevNet containers..."
 docker compose -f "${SCRIPT_DIR}/docker-compose.yml" up -d
 
+# Mirror docker-compose.yml's host-port defaults so the printed addresses
+# match the actual mappings (and respect any DEVNET_*_PORT overrides).
+DINGO_PORT="${DEVNET_DINGO_PORT:-3010}"
+CARDANO_PORT="${DEVNET_CARDANO_PORT:-3011}"
+RELAY_PORT="${DEVNET_RELAY_PORT:-3012}"
+
 echo ""
 echo "DevNet started."
-echo "  Dingo producer:   localhost:3001"
-echo "  Cardano producer: localhost:3011"
-echo "  Cardano relay:    localhost:3012"
+echo "  Dingo producer:   localhost:${DINGO_PORT}"
+echo "  Cardano producer: localhost:${CARDANO_PORT}"
+echo "  Cardano relay:    localhost:${RELAY_PORT}"
 echo ""
 echo "View logs:  docker compose -f ${SCRIPT_DIR}/docker-compose.yml logs -f"
 echo "Stop:       ${SCRIPT_DIR}/stop.sh"
