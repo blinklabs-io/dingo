@@ -17,19 +17,19 @@ Hi folks! Here’s what we shipped in v0.39.1.
 
 ### 💪 Improvements
 
-* Refreshed **release history continuity:** RELEASE_NOTES.md now includes the v0.39.0 entry so recent release history stays current and easier to scan.
+* Refined **Bark archive retrieval during cleanup:** Archived blocks now remain retrievable during pruning and cleanup, which makes Bark cleanup safer for operators who rely on archive backed reads.
 
 ### 🔧 Fixes
 
-* Preserved **rollback cleanup continuity near the Mithril boundary:** Rollback cleanup now keeps gap UTxOs intact near the Mithril boundary, which makes recovery safer after chain changes.
-* Added **archive aware prune tombstones:** Prune actions now record tombstones and honor archived blocks, which keeps archived blocks resolvable during cleanup.
-* Corrected **snapshot nonce handling across state layouts:** Snapshot based bootstrap now reads snapshot nonces correctly across supported state layouts, which keeps epoch boundary validation correct after bootstrap.
+* Preserved **safer rollback cleanup near the Mithril boundary:** Rollback cleanup now keeps gap UTxOs intact near the Mithril boundary, which makes recovery safer after chain changes.
+* Hardened **archived block retrieval during Bark cleanup:** Bark pruning and archival handling now keep archived blocks resolvable during cleanup, which preserves archive retrieval while local cleanup runs.
+* Corrected **snapshot bootstrap validation across state layouts:** Snapshot bootstrap now reads epoch and snapshot nonces correctly across supported state layouts, which keeps epoch boundary validation correct after bootstrap.
 
 ### 📋 What You Need to Know
 
-* Clarified **patch release upgrade guidance:** This patch release supports normal upgrades for most operators.
-* Highlighted **safer Bark cleanup and archive retrieval:** Operators using Bark pruning and archive retrieval can expect archived blocks to remain retrievable during cleanup.
-* Emphasized **safer bootstrap and rollback recovery:** Operators using Mithril or snapshot bootstrap can expect safer recovery and correct epoch boundary validation after bootstrap or rollback scenarios.
+* Clarified **patch release guidance:** This is a patch release, and normal upgrades are sufficient for most users.
+* Highlighted **safer recovery and pruning behavior:** Rollback, bootstrap, and pruning now behave more safely during recovery and cleanup.
+* Summarized **corrected snapshot boundary handling:** Snapshot based bootstrap now keeps epoch boundary validation correct after startup recovery.
 
 ### Recommended Network Compatibility ⚠️
 
