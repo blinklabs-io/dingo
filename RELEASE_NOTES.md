@@ -22,8 +22,29 @@ Hi folks! Here’s what we shipped in v0.39.1.
 ### 🔧 Fixes
 
 * Preserved **rollback cleanup continuity near the Mithril boundary:** Rollback cleanup now keeps gap UTxOs intact near the Mithril boundary, which makes recovery safer after chain changes.
+* Added **archive aware prune tombstones:** Prune actions now record tombstones and honor archived blocks, which keeps archived blocks resolvable during cleanup.
+* Corrected **snapshot nonce handling across state layouts:** Snapshot based bootstrap now reads snapshot nonces correctly across supported state layouts, which keeps epoch boundary validation correct after bootstrap.
 
-## v0.39.0 (April 30, 2026)
+### 📋 What You Need to Know
+
+* Clarified **patch release guidance:** This is a patch release, and normal upgrades are sufficient for most users.
+* Highlighted **safer recovery and pruning behavior:** Rollback, bootstrap, and pruning now behave more safely during recovery and cleanup.
+* Summarized **corrected snapshot boundary handling:** Snapshot based bootstrap now keeps epoch boundary validation correct after startup recovery.
+
+### Recommended Network Compatibility ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
 ## v0.39.0 (April 30, 2026)
 
 **Title:** Era-aware forging, Bark tuning, and safer diagnostics
