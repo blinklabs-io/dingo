@@ -36,8 +36,8 @@ import (
 var BabbageEraDesc = EraDesc{
 	Id:                      babbage.EraIdBabbage,
 	Name:                    babbage.EraNameBabbage,
-	MinMajorVersion:         7,
-	MaxMajorVersion:         8,
+	MinMajorVersion:         babbage.MinProtocolVersionBabbage,
+	MaxMajorVersion:         babbage.MaxProtocolVersionBabbage,
 	DecodePParamsFunc:       DecodePParamsBabbage,
 	DecodePParamsUpdateFunc: DecodePParamsUpdateBabbage,
 	PParamsUpdateFunc:       PParamsUpdateBabbage,
@@ -135,6 +135,13 @@ func HardForkBabbage(
 	}
 	if _, hasV2 := ret.CostModels[1]; !hasV2 {
 		ret.CostModels[1] = DefaultPlutusV2CostModel
+	}
+	// Bump ProtocolMajor to Babbage's range when entering the era.
+	// gouroboros's UpgradePParams carries the prior major forward
+	// unchanged; schedule-driven transitions would otherwise reach
+	// Babbage with major still at Alonzo's value.
+	if ret.ProtocolMajor < babbage.MinProtocolVersionBabbage {
+		ret.ProtocolMajor = babbage.MinProtocolVersionBabbage
 	}
 	return &ret, nil
 }

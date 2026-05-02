@@ -30,8 +30,8 @@ import (
 var ShelleyEraDesc = EraDesc{
 	Id:                      shelley.EraIdShelley,
 	Name:                    shelley.EraNameShelley,
-	MinMajorVersion:         2,
-	MaxMajorVersion:         2,
+	MinMajorVersion:         shelley.MinProtocolVersionShelley,
+	MaxMajorVersion:         shelley.MaxProtocolVersionShelley,
 	DecodePParamsFunc:       DecodePParamsShelley,
 	DecodePParamsUpdateFunc: DecodePParamsUpdateShelley,
 	PParamsUpdateFunc:       PParamsUpdateShelley,
@@ -90,6 +90,15 @@ func HardForkShelley(
 	shelleyGenesis := nodeConfig.ShelleyGenesis()
 	if err := ret.UpdateFromGenesis(shelleyGenesis); err != nil {
 		return nil, err
+	}
+	// Ensure ProtocolMajor reflects the Shelley era. Schedule-driven
+	// transitions reach this code path with no on-chain pparams
+	// update having bumped the major version; the postcondition that
+	// pparams identify the new era would otherwise be violated.
+	// Idempotent on a governance-driven transition because the
+	// quorum already lands on this era's minimum major.
+	if ret.ProtocolMajor < shelley.MinProtocolVersionShelley {
+		ret.ProtocolMajor = shelley.MinProtocolVersionShelley
 	}
 	return &ret, nil
 }

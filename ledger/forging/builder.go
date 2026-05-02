@@ -46,6 +46,13 @@ type MempoolProvider interface {
 // ProtocolParamsProvider provides access to protocol parameters.
 type ProtocolParamsProvider interface {
 	GetCurrentPParams() lcommon.ProtocolParameters
+	// ProtocolParamsForSlot returns the pparams that should govern a
+	// block forged at the given slot. When the slot is in an epoch
+	// beyond a scheduled fork that has not yet been applied to the
+	// in-memory ledger state, the returned pparams are the
+	// post-fork pparams. The forger uses this to produce
+	// era-correct blocks at fork boundaries.
+	ProtocolParamsForSlot(slot uint64) lcommon.ProtocolParameters
 }
 
 // ChainTipProvider provides access to the current chain tip.
@@ -154,15 +161,20 @@ func (b *DefaultBlockBuilder) BuildBlock(
 		nextBlockNumber = currentTip.BlockNumber + 1
 	}
 
-	// Get current protocol parameters for limits
-	pparams := b.pparamsProvider.GetCurrentPParams()
+	// Get protocol parameters for the slot being forged. This
+	// projects forward through any scheduled fork (TriggerAtEpoch)
+	// whose epoch lies at or before the slot, so the forger
+	// produces an era-correct block at a fork boundary even when
+	// the in-memory rollover has not yet seen a post-fork peer
+	// block.
+	pparams := b.pparamsProvider.ProtocolParamsForSlot(slot)
 	if pparams == nil {
 		return nil, nil, errors.New("failed to get protocol parameters")
 	}
 
-	// Read pparams limits via per-era dispatch. TPraos eras
-	// (Shelley/Allegra/Mary/Alonzo) return errTPraosForgingUnsupported;
-	// Babbage and Conway both produce Praos-shape blocks.
+	// Read pparams limits via per-era dispatch. The pparams type
+	// drives the block layout (Shelley/Allegra/Mary/Alonzo run
+	// TPraos; Babbage/Conway run Praos).
 	limits, err := extractPParamsLimits(pparams)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to build block: %w", err)

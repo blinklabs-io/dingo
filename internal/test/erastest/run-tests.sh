@@ -110,8 +110,11 @@ export ERASTEST_CARDANO_ADDR="localhost:${CARDANO_PORT}"
 export ERASTEST_RELAY_ADDR="localhost:${RELAY_PORT}"
 export ERASTEST_TESTNET_YAML="${TESTNET_YAML}"
 
-# Default timeout: ~6 epochs * 75s + bootstrap + margin.
-TEST_TIMEOUT="${TEST_TIMEOUT:-15m}"
+# Default timeout: ~6 epochs * 75s ≈ 7.5 min for a healthy traversal
+# plus margin for bootstrap and the test cascade. Set TEST_TIMEOUT in
+# the environment to override (e.g. for slow CI runners or extended
+# debugging).
+TEST_TIMEOUT="${TEST_TIMEOUT:-8m}"
 set +e
 go test \
   -tags erastest \

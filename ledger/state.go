@@ -2397,6 +2397,25 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 				workingPParams := snapshotPParams
 				workingEraId := snapshotEra.Id
 
+				// Honor the era schedule when the boundary-crossing
+				// block did not bump the era itself. The current
+				// era's NextEraTrigger may pin the next transition
+				// to a specific epoch; if we are crossing into (or
+				// past) that epoch and the block we observed is
+				// still in the prior era, transition anyway.
+				// Without this, a sole producer that builds in the
+				// prior era at the boundary would never advance,
+				// since nextEpochEraId would equal snapshotEra.Id.
+				newEpochId := snapshotEpoch.EpochId + 1
+				if entry, ok := ls.eraShape().EraForID(snapshotEra.Id); ok &&
+					entry.NextEraTrigger.Kind == hardfork.TriggerAtEpoch &&
+					entry.NextEraTrigger.Epoch <= newEpochId &&
+					nextEpochEraId == snapshotEra.Id {
+					if int(snapshotEra.Id+1) < len(eras.Eras) {
+						nextEpochEraId = snapshotEra.Id + 1
+					}
+				}
+
 				// Check for era change. The guard rejects multi-step
 				// forward, backwards, and to/from-unknown-era cases:
 				// each era boundary on a healthy chain is crossed by
@@ -4121,6 +4140,89 @@ func (ls *LedgerState) GetCurrentPParams() lcommon.ProtocolParameters {
 	ls.RLock()
 	defer ls.RUnlock()
 	return ls.currentPParams
+}
+
+// ProtocolParamsForSlot returns the protocol parameters that should
+// govern a block forged at the given slot. When the slot lies in an
+// epoch beyond a scheduled fork (the active era's NextEraTrigger is
+// TriggerAtEpoch and the slot's epoch is at or past the trigger),
+// the returned pparams are the post-fork pparams computed by walking
+// each successor era's HardForkFunc up to the slot's era.
+//
+// The forger uses this when picking an era to build a block in.
+// Reading currentPParams alone would lock a sole producer to the
+// pre-fork era forever: the boundary-crossing block would be encoded
+// in the old era, the rollover (which trusts the observed block's
+// era) would not advance, and the chain would never traverse the
+// fork. Forecasting from the schedule lets the forger produce a
+// block in the era the schedule requires, regardless of how the
+// schedule was produced — administrative overrides, on-chain update
+// proposals, or HardForkInitiation gov actions all surface as
+// TriggerAtEpoch entries on the shape.
+func (ls *LedgerState) ProtocolParamsForSlot(
+	slot uint64,
+) lcommon.ProtocolParameters {
+	ls.RLock()
+	currentEpoch := ls.currentEpoch
+	currentEra := ls.currentEra
+	currentPParams := ls.currentPParams
+	ls.RUnlock()
+
+	if currentPParams == nil || currentEpoch.LengthInSlots == 0 {
+		return currentPParams
+	}
+	slotEpoch := slot / uint64(currentEpoch.LengthInSlots)
+	if slotEpoch <= currentEpoch.EpochId {
+		return currentPParams
+	}
+	shape := ls.eraShape()
+	if len(shape.Eras) == 0 {
+		return currentPParams
+	}
+	// Walk forward from the current era, applying each successor's
+	// HardForkFunc whose triggerEpoch <= slotEpoch. The single-step
+	// case (one fork between currentEpoch and slotEpoch) is the
+	// nominal path; the loop also tolerates multi-step jumps so the
+	// helper stays sound if a caller skips ahead.
+	pparams := currentPParams
+	eraID := currentEra.Id
+	for {
+		entry, ok := shape.EraForID(eraID)
+		if !ok ||
+			entry.NextEraTrigger.Kind != hardfork.TriggerAtEpoch {
+			break
+		}
+		if entry.NextEraTrigger.Epoch > slotEpoch {
+			break
+		}
+		nextID := eraID + 1
+		if int(nextID) >= len(eras.Eras) {
+			break
+		}
+		nextEra := eras.Eras[nextID]
+		if nextEra.HardForkFunc == nil {
+			eraID = nextID
+			continue
+		}
+		newPParams, err := nextEra.HardForkFunc(
+			ls.config.CardanoNodeConfig,
+			pparams,
+		)
+		if err != nil {
+			ls.config.Logger.Warn(
+				"ProtocolParamsForSlot: HardForkFunc failed",
+				"slot", slot,
+				"slot_epoch", slotEpoch,
+				"from_era", eraID,
+				"to_era", nextID,
+				"error", err,
+			)
+			return currentPParams
+		}
+		pparams = newPParams
+		eraID = nextID
+	}
+	return pparams
 }
 
 // CurrentEpoch returns the current epoch number.

@@ -37,7 +37,12 @@ import (
 // counts. The chain advances ~ActiveSlotsCoeff blocks per slot, so
 // observing "the first header in era N+1" needs at least one full
 // epoch after the configured fork epoch plus a margin for VRF variance.
-const transitionTimeoutSlots = 200
+//
+// Sized as one epoch (75 slots in the eras testnet) plus a 25-slot
+// margin: large enough that VRF variance won't flake a healthy chain,
+// small enough that a stuck chain fails fast for short test/debug
+// cycles.
+const transitionTimeoutSlots = 100
 
 // dingoColdKeyContainer is the running container we read the dingo
 // pool's cold verification key from. The eras-stack docker-compose
@@ -108,12 +113,12 @@ func readDingoColdVKey(t *testing.T) []byte {
 }
 
 // transitionTimeout converts transitionTimeoutSlots into a wall-clock
-// timeout for the configured slot length, with a floor of 60s so very
+// timeout for the configured slot length, with a floor of 30s so very
 // short slot lengths still leave room for bootstrap variance.
 func transitionTimeout(cfg *Config) time.Duration {
 	d := time.Duration(transitionTimeoutSlots) * cfg.SlotDuration()
-	if d < 60*time.Second {
-		d = 60 * time.Second
+	if d < 30*time.Second {
+		d = 30 * time.Second
 	}
 	return d
 }
@@ -191,12 +196,14 @@ func TestNoStallAcrossForks(t *testing.T) {
 	)
 	defer stream.Close()
 
-	// Wait until the chain has reached the terminal era.
+	// Wait until the chain has reached the terminal era. Tests #2-#4
+	// run after TestEraSchedule has already either traversed every
+	// fork or failed; we only need enough budget for a fresh
+	// EraStream to catch up from origin to the current tip, not to
+	// pace through the schedule again. transitionTimeout (single
+	// fork's worth) is sufficient and keeps cascade failures fast.
 	terminal := schedule[len(schedule)-1].Era
-	_, err := stream.WaitForEra(
-		&terminal,
-		transitionTimeout(cfg)*time.Duration(len(schedule)),
-	)
+	_, err := stream.WaitForEra(&terminal, transitionTimeout(cfg))
 	require.NoErrorf(
 		t, err,
 		"WaitForEra(%s): %v", terminal.Name, err,
@@ -276,8 +283,11 @@ func TestConsensusAtEachFork(t *testing.T) {
 		}
 	}()
 
+	// Each EraStream syncs from origin in parallel; one
+	// transitionTimeout is enough to either catch up to a healthy
+	// chain (fast on a local devnet) or fail fast on a stuck chain.
 	terminal := schedule[len(schedule)-1].Era
-	timeout := transitionTimeout(cfg) * time.Duration(len(schedule))
+	timeout := transitionTimeout(cfg)
 	for name, s := range streams {
 		_, err := s.WaitForEra(&terminal, timeout)
 		require.NoErrorf(
@@ -360,8 +370,10 @@ func TestDingoProducesInEachEra(t *testing.T) {
 	)
 	defer stream.Close()
 
+	// One transition's budget is enough to catch up from origin on a
+	// healthy chain or fail fast on a stuck one.
 	terminal := schedule[len(schedule)-1].Era
-	timeout := transitionTimeout(cfg) * time.Duration(len(schedule))
+	timeout := transitionTimeout(cfg)
 	_, err := stream.WaitForEra(&terminal, timeout)
 	require.NoErrorf(
 		t, err, "relay did not reach %s within %s",
