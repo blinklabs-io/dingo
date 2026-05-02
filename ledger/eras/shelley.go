@@ -134,9 +134,16 @@ func CalculateEtaVShelley(
 	if !ok {
 		return nil, errors.New("unexpected block type")
 	}
+	// The Shelley formal spec defines bnonce(bhbody) ∈ Seed and the
+	// seed-combination operator over Seeds; the wider VRF certificate
+	// output is hashed down to a Seed before folding into the rolling
+	// nonce. Folding the raw certificate bytes directly diverges the
+	// epoch nonce from peers and breaks header VRF verification at the
+	// next epoch boundary (#2125).
+	contribution := lcommon.Blake2b256Hash(h.Body.NonceVrf.Output).Bytes()
 	tmpNonce, err := lcommon.CalculateRollingNonce(
 		prevBlockNonce,
-		h.Body.NonceVrf.Output,
+		contribution,
 	)
 	if err != nil {
 		return nil, err
