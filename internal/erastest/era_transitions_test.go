@@ -123,11 +123,13 @@ func transitionTimeout(cfg *Config) time.Duration {
 	return d
 }
 
-// TestEraSchedule asserts that every era transition configured in the
-// testnet.yaml is observed on dingo's chain at the expected epoch. The
-// final observed era must be the last successor in the schedule
-// (Conway, for the eras testnet.yaml).
-func TestEraSchedule(t *testing.T) {
+// TestEraTransitions drives the live DevNet through every scheduled
+// hard fork once and runs the per-scenario assertions as subtests
+// against the shared observation state. Sharing one EraStream per
+// endpoint avoids both redundant from-origin replays and the
+// retroactive-history pitfalls that arise when each test reads the
+// chain after it has already traversed.
+func TestEraTransitions(t *testing.T) {
 	cfg := loadConfig(t)
 	schedule := cfg.ScheduledTransitions()
 	require.NotEmpty(
@@ -140,155 +142,66 @@ func TestEraSchedule(t *testing.T) {
 	)
 
 	endpoints := DefaultEndpoints()
-	dingoEndpoint := endpoints[0]
-	stream := NewEraStream(
-		t, dingoEndpoint, cfg.NetworkMagic, cfg.EpochLength,
-	)
-	defer stream.Close()
-
-	timeout := transitionTimeout(cfg)
-	for _, want := range schedule {
-		hdr, err := stream.WaitForEra(&want.Era, timeout)
-		require.NoErrorf(
-			t, err,
-			"WaitForEra(%s) within %s: %v",
-			want.Era.Name, timeout, err,
-		)
-		observedEpoch := hdr.Slot / cfg.EpochLength
-		t.Logf(
-			"observed %s at slot=%d (epoch=%d, configured epoch=%d)",
-			want.Era.Name, hdr.Slot, observedEpoch, want.Epoch,
-		)
-		// A scheduled fork takes effect at the rollover into the
-		// configured epoch. The first header in the new era is in that
-		// epoch (within ±1 to absorb genesis-time skew + the "first
-		// post-fork header may be a slot or two late" case).
-		require.LessOrEqualf(
-			t, absDelta(observedEpoch, want.Epoch), uint64(1),
-			"%s observed at epoch %d but configured for %d",
-			want.Era.Name, observedEpoch, want.Epoch,
-		)
-	}
-
-	last, ok := stream.LatestHeader()
-	require.True(t, ok, "no headers observed")
-	finalWanted := schedule[len(schedule)-1].Era
-	require.Equalf(
-		t, finalWanted.Id, last.EraID,
-		"final observed era ID %d != configured terminal era %s (%d)",
-		last.EraID, finalWanted.Name, finalWanted.Id,
-	)
-}
-
-// TestNoStallAcrossForks asserts that no era transition stalls forging
-// for an unreasonable number of slots. Each gap between consecutive
-// observed headers must stay under maxGapSlots; if a fork transition
-// pauses the chain, the gap covering that boundary blows past the
-// bound.
-func TestNoStallAcrossForks(t *testing.T) {
-	cfg := loadConfig(t)
-	schedule := cfg.ScheduledTransitions()
-	require.NotEmpty(t, schedule, "eras testnet.yaml must configure forks")
-
-	endpoints := DefaultEndpoints()
-	stream := NewEraStream(
-		t, endpoints[0], cfg.NetworkMagic, cfg.EpochLength,
-	)
-	defer stream.Close()
-
-	// Wait until the chain has reached the terminal era. Tests #2-#4
-	// run after TestEraSchedule has already either traversed every
-	// fork or failed; we only need enough budget for a fresh
-	// EraStream to catch up from origin to the current tip, not to
-	// pace through the schedule again. transitionTimeout (single
-	// fork's worth) is sufficient and keeps cascade failures fast.
-	terminal := schedule[len(schedule)-1].Era
-	_, err := stream.WaitForEra(&terminal, transitionTimeout(cfg))
-	require.NoErrorf(
-		t, err,
-		"WaitForEra(%s): %v", terminal.Name, err,
-	)
-	// Give the chain one extra epoch in the terminal era so we have
-	// post-final-fork data points for the stall analysis.
-	finalSlot := schedule[len(schedule)-1].Slot + cfg.EpochLength
-	_, err = stream.WaitForSlot(finalSlot, transitionTimeout(cfg))
-	require.NoErrorf(
-		t, err, "WaitForSlot(%d): %v", finalSlot, err,
-	)
-
-	headers := stream.HeadersSnapshot()
-	require.GreaterOrEqual(
-		t, len(headers), 2,
-		"need ≥2 headers to measure gaps",
-	)
-
-	// Allowed gap: 4*expectedBlockTime (i.e. 4*slot/f). With f=0.4
-	// and 1s slots that's 10 slots — comfortable for normal VRF
-	// variance without masking a multi-epoch stall. We scale by k as
-	// well so smaller-k testnets (which run shorter forks) still see
-	// reasonable bounds.
-	maxGapSlots := uint64(10) + cfg.SecurityParam
-	var (
-		biggestGap         uint64
-		biggestGapPrevSlot uint64
-		biggestGapNextSlot uint64
-	)
-	for i := 1; i < len(headers); i++ {
-		// Skip pairs that aren't strictly forward in time. With
-		// onRollBackward trimming we shouldn't see this on a healthy
-		// stream, but defending against it avoids unsigned underflow
-		// from masquerading as a multi-million-slot stall.
-		if headers[i].Slot < headers[i-1].Slot {
-			continue
-		}
-		gap := headers[i].Slot - headers[i-1].Slot
-		if gap > biggestGap {
-			biggestGap = gap
-			biggestGapPrevSlot = headers[i-1].Slot
-			biggestGapNextSlot = headers[i].Slot
-		}
-	}
-	t.Logf(
-		"largest inter-block gap: %d slots (between slot %d and slot %d) "+
-			"— max allowed %d",
-		biggestGap, biggestGapPrevSlot, biggestGapNextSlot, maxGapSlots,
-	)
-	require.LessOrEqualf(
-		t, biggestGap, maxGapSlots,
-		"chain stalled across at least one boundary: gap of %d slots "+
-			"between %d and %d (allowed %d)",
-		biggestGap, biggestGapPrevSlot, biggestGapNextSlot, maxGapSlots,
-	)
-}
-
-// TestConsensusAtEachFork opens an EraStream against every endpoint
-// and asserts that, by the time each node has reached the terminal
-// era, all nodes agree on the slot at which each scheduled fork
-// occurred.
-func TestConsensusAtEachFork(t *testing.T) {
-	cfg := loadConfig(t)
-	schedule := cfg.ScheduledTransitions()
-	require.NotEmpty(t, schedule, "eras testnet.yaml must configure forks")
-
-	endpoints := DefaultEndpoints()
 	streams := make(map[string]*EraStream, len(endpoints))
 	for _, ep := range endpoints {
 		streams[ep.Name] = NewEraStream(
 			t, ep, cfg.NetworkMagic, cfg.EpochLength,
 		)
 	}
-	defer func() {
+	t.Cleanup(func() {
 		for _, s := range streams {
 			s.Close()
 		}
-	}()
+	})
 
-	// Each EraStream syncs from origin in parallel; one
-	// transitionTimeout is enough to either catch up to a healthy
-	// chain (fast on a local devnet) or fail fast on a stuck chain.
-	terminal := schedule[len(schedule)-1].Era
+	dingoStream := streams[endpoints[0].Name]
+	require.NotNil(t, dingoStream, "dingo-producer stream missing")
+
+	// Drive the chain through every scheduled fork on dingo's chain
+	// before any subtest reads observations. This is also where
+	// "Schedule" is verified: WaitForEra returns the first header in
+	// each successor era, and we assert it lands at the configured
+	// epoch.
 	timeout := transitionTimeout(cfg)
+	t.Run("Schedule", func(t *testing.T) {
+		for _, want := range schedule {
+			hdr, err := dingoStream.WaitForEra(&want.Era, timeout)
+			require.NoErrorf(
+				t, err,
+				"WaitForEra(%s) within %s: %v",
+				want.Era.Name, timeout, err,
+			)
+			observedEpoch := hdr.Slot / cfg.EpochLength
+			t.Logf(
+				"observed %s at slot=%d (epoch=%d, configured epoch=%d)",
+				want.Era.Name, hdr.Slot, observedEpoch, want.Epoch,
+			)
+			require.LessOrEqualf(
+				t, absDelta(observedEpoch, want.Epoch), uint64(1),
+				"%s observed at epoch %d but configured for %d",
+				want.Era.Name, observedEpoch, want.Epoch,
+			)
+		}
+
+		last, ok := dingoStream.LatestHeader()
+		require.True(t, ok, "no headers observed")
+		finalWanted := schedule[len(schedule)-1].Era
+		require.Equalf(
+			t, finalWanted.Id, last.EraID,
+			"final observed era ID %d != configured terminal era %s (%d)",
+			last.EraID, finalWanted.Name, finalWanted.Id,
+		)
+	})
+
+	// At this point dingo's stream has observed every scheduled
+	// fork. Drain the other endpoints' streams up to the same
+	// terminal era so that ConsensusAtEachFork sees a comparable
+	// view from each.
+	terminal := schedule[len(schedule)-1].Era
 	for name, s := range streams {
+		if name == endpoints[0].Name {
+			continue
+		}
 		_, err := s.WaitForEra(&terminal, timeout)
 		require.NoErrorf(
 			t, err,
@@ -297,141 +210,170 @@ func TestConsensusAtEachFork(t *testing.T) {
 		)
 	}
 
-	// For each scheduled era, every node should report the same
-	// transition slot (i.e. the same first-block-in-new-era slot).
-	for _, want := range schedule {
-		slotByNode := make(map[string]uint64, len(streams))
-		for name, s := range streams {
-			// Take the most recent matching transition. Earlier
-			// matches can be stale pre-rollback observations even
-			// after onRollBackward trims state, since the trim
-			// happens at the rollback point and a re-applied
-			// branch can reintroduce a same-target transition at
-			// a new slot.
-			trs := s.Transitions()
-			for i := len(trs) - 1; i >= 0; i-- {
-				if trs[i].ToEraID == want.Era.Id {
-					slotByNode[name] = trs[i].Slot
-					break
-				}
-			}
+	t.Run("NoStallAcrossForks", func(t *testing.T) {
+		// Use the per-transition slot delta recorded by the stream
+		// (Slot - PrevSlot), not a scan over the full header buffer.
+		// That way completed bootstrap warmup and intra-era leader
+		// pauses can't blow past the threshold; we only assess the
+		// gap that actually crossed each scheduled fork boundary.
+		//
+		// Allowed gap: SecurityParam (=k) + 10 slots. With k=6 and
+		// 1s slots that's 16 slots — comfortable for the
+		// stability-window-crossing pause that fires the rollover,
+		// without masking a multi-epoch stall.
+		maxGapSlots := cfg.SecurityParam + 10
+		transitions := dingoStream.Transitions()
+		// Index transitions by ToEraID so we can look up the
+		// boundary observation for each scheduled fork.
+		byEra := make(map[uint]EraTransition, len(transitions))
+		for _, tr := range transitions {
+			byEra[tr.ToEraID] = tr
 		}
-		require.Equalf(
-			t, len(streams), len(slotByNode),
-			"%s: not every node observed the transition: %+v",
-			want.Era.Name, slotByNode,
-		)
-		// All values must be identical.
-		var canonical uint64
-		var canonicalNode string
-		for name, slot := range slotByNode {
-			if canonicalNode == "" {
-				canonical = slot
-				canonicalNode = name
-				continue
-			}
-			require.Equalf(
-				t, canonical, slot,
-				"era %s: %s observed transition at slot %d but %s saw it at %d",
-				want.Era.Name, canonicalNode, canonical, name, slot,
+		for _, want := range schedule {
+			tr, ok := byEra[want.Era.Id]
+			require.Truef(
+				t, ok,
+				"no transition into %s observed on dingo's stream",
+				want.Era.Name,
+			)
+			require.NotZerof(
+				t, tr.PrevSlot,
+				"%s transition has no recorded predecessor slot — "+
+					"chain started after the fork point?",
+				want.Era.Name,
+			)
+			gap := tr.Slot - tr.PrevSlot
+			t.Logf(
+				"%s boundary: prev_slot=%d new_slot=%d gap=%d "+
+					"(max allowed %d)",
+				want.Era.Name, tr.PrevSlot, tr.Slot, gap, maxGapSlots,
+			)
+			require.LessOrEqualf(
+				t, gap, maxGapSlots,
+				"chain stalled crossing into %s: %d-slot gap "+
+					"between %d and %d (allowed %d)",
+				want.Era.Name, gap, tr.PrevSlot, tr.Slot, maxGapSlots,
 			)
 		}
-		t.Logf(
-			"all nodes agree: %s transition observed at slot %d",
-			want.Era.Name, canonical,
-		)
-	}
-}
+	})
 
-// TestDingoProducesInEachEra asserts that pool 1 (the dingo producer)
-// successfully forges at least one block in every era the chain
-// enters, proving dingo's forging code path correctly handles each
-// era.
-//
-// Pool selection is VRF-driven, but with two equal-stake pools and
-// f=0.4 over a 75-slot epoch the probability that dingo wins zero
-// slots in any given epoch is ≈ (1-0.225)^75 ≈ 1e-8, so VRF variance
-// is not a realistic source of flakes here.
-func TestDingoProducesInEachEra(t *testing.T) {
-	cfg := loadConfig(t)
-	schedule := cfg.ScheduledTransitions()
-	require.NotEmpty(t, schedule, "eras testnet.yaml must configure forks")
-
-	dingoVkey := readDingoColdVKey(t)
-	t.Logf("dingo cold vkey: %s", hex.EncodeToString(dingoVkey))
-
-	// Observe via the relay because it sees blocks from both producers
-	// without contributing its own. Issuer vkeys on its chain therefore
-	// reflect the actual producer of each block.
-	endpoints := DefaultEndpoints()
-	relay := endpoints[2]
-	stream := NewEraStream(
-		t, relay, cfg.NetworkMagic, cfg.EpochLength,
-	)
-	defer stream.Close()
-
-	// One transition's budget is enough to catch up from origin on a
-	// healthy chain or fail fast on a stuck one.
-	terminal := schedule[len(schedule)-1].Era
-	timeout := transitionTimeout(cfg)
-	_, err := stream.WaitForEra(&terminal, timeout)
-	require.NoErrorf(
-		t, err, "relay did not reach %s within %s",
-		terminal.Name, timeout,
-	)
-	// Wait one more epoch in the terminal era to give dingo a chance
-	// to forge a block there.
-	finalSlot := schedule[len(schedule)-1].Slot + cfg.EpochLength
-	_, err = stream.WaitForSlot(finalSlot, transitionTimeout(cfg))
-	require.NoErrorf(
-		t, err, "relay did not advance past slot %d", finalSlot,
-	)
-
-	headers := stream.HeadersSnapshot()
-	dingoBlocksByEra := make(map[uint]int)
-	totalByEra := make(map[uint]int)
-	for _, h := range headers {
-		totalByEra[h.EraID]++
-		if bytes.Equal(h.IssuerVkey, dingoVkey) {
-			dingoBlocksByEra[h.EraID]++
+	t.Run("ConsensusAtEachFork", func(t *testing.T) {
+		// For each scheduled era, every node should report the same
+		// transition slot (i.e. the same first-block-in-new-era
+		// slot). Use the most recent matching transition: a rollback
+		// followed by re-application can leave a stale earlier
+		// match in the stream.
+		for _, want := range schedule {
+			slotByNode := make(map[string]uint64, len(streams))
+			for name, s := range streams {
+				trs := s.Transitions()
+				for i := len(trs) - 1; i >= 0; i-- {
+					if trs[i].ToEraID == want.Era.Id {
+						slotByNode[name] = trs[i].Slot
+						break
+					}
+				}
+			}
+			require.Equalf(
+				t, len(streams), len(slotByNode),
+				"%s: not every node observed the transition: %+v",
+				want.Era.Name, slotByNode,
+			)
+			var canonical uint64
+			var canonicalNode string
+			for name, slot := range slotByNode {
+				if canonicalNode == "" {
+					canonical = slot
+					canonicalNode = name
+					continue
+				}
+				require.Equalf(
+					t, canonical, slot,
+					"era %s: %s observed transition at slot %d "+
+						"but %s saw it at %d",
+					want.Era.Name, canonicalNode, canonical, name, slot,
+				)
+			}
+			t.Logf(
+				"all nodes agree: %s transition observed at slot %d",
+				want.Era.Name, canonical,
+			)
 		}
-	}
+	})
 
-	// Build the era set to check: the genesis era (the era already
-	// active at slot 0, which ScheduledTransitions excludes) plus
-	// every successor era the schedule transitions into. Without
-	// the explicit genesis check, a node that never forges in the
-	// starting era would still pass.
-	type eraCheck struct {
-		id   uint
-		name string
-	}
-	var erasToCheck []eraCheck
-	if start, ok := cfg.StartingEra(); ok {
-		erasToCheck = append(erasToCheck, eraCheck{id: start.Id, name: start.Name})
-	}
-	for _, want := range schedule {
-		erasToCheck = append(erasToCheck, eraCheck{id: want.Era.Id, name: want.Era.Name})
-	}
+	t.Run("DingoProducesInEachEra", func(t *testing.T) {
+		// Pool selection is VRF-driven, but with two equal-stake
+		// pools and f=0.4 over a 75-slot epoch the probability
+		// dingo wins zero slots in any given epoch is ≈
+		// (1-0.225)^75 ≈ 1e-8, so VRF variance is not a realistic
+		// source of flakes here.
+		dingoVkey := readDingoColdVKey(t)
+		t.Logf("dingo cold vkey: %s", hex.EncodeToString(dingoVkey))
 
-	for _, era := range erasToCheck {
-		total := totalByEra[era.id]
-		dingo := dingoBlocksByEra[era.id]
-		t.Logf(
-			"%s: total blocks=%d, dingo-issued=%d",
-			era.name, total, dingo,
+		// Observe via the relay because it sees blocks from both
+		// producers without contributing its own. Issuer vkeys on
+		// its chain therefore reflect the actual producer of each
+		// block.
+		relay := endpoints[2]
+		relayStream := streams[relay.Name]
+		require.NotNil(t, relayStream, "cardano-relay stream missing")
+
+		// Wait one extra epoch in the terminal era so dingo has had
+		// a chance to forge a Conway block.
+		finalSlot := schedule[len(schedule)-1].Slot + cfg.EpochLength
+		_, err := relayStream.WaitForSlot(finalSlot, transitionTimeout(cfg))
+		require.NoErrorf(
+			t, err, "relay did not advance past slot %d", finalSlot,
 		)
-		require.Greaterf(
-			t, total, 0,
-			"no blocks at all observed in era %s — chain stalled?",
-			era.name,
-		)
-		require.Greaterf(
-			t, dingo, 0,
-			"dingo did not issue any blocks in era %s",
-			era.name,
-		)
-	}
+
+		headers := relayStream.HeadersSnapshot()
+		dingoBlocksByEra := make(map[uint]int)
+		totalByEra := make(map[uint]int)
+		for _, h := range headers {
+			totalByEra[h.EraID]++
+			if bytes.Equal(h.IssuerVkey, dingoVkey) {
+				dingoBlocksByEra[h.EraID]++
+			}
+		}
+
+		// The era set to check: the genesis era (the era already
+		// active at slot 0, which ScheduledTransitions excludes)
+		// plus every successor era the schedule transitions into.
+		type eraCheck struct {
+			id   uint
+			name string
+		}
+		var erasToCheck []eraCheck
+		if start, ok := cfg.StartingEra(); ok {
+			erasToCheck = append(erasToCheck, eraCheck{
+				id: start.Id, name: start.Name,
+			})
+		}
+		for _, want := range schedule {
+			erasToCheck = append(erasToCheck, eraCheck{
+				id: want.Era.Id, name: want.Era.Name,
+			})
+		}
+
+		for _, era := range erasToCheck {
+			total := totalByEra[era.id]
+			dingo := dingoBlocksByEra[era.id]
+			t.Logf(
+				"%s: total blocks=%d, dingo-issued=%d",
+				era.name, total, dingo,
+			)
+			require.Greaterf(
+				t, total, 0,
+				"no blocks at all observed in era %s — chain stalled?",
+				era.name,
+			)
+			require.Greaterf(
+				t, dingo, 0,
+				"dingo did not issue any blocks in era %s",
+				era.name,
+			)
+		}
+	})
 }
 
 // absDelta returns |a-b| for unsigned values without underflow.

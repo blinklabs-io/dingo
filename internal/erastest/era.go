@@ -49,6 +49,11 @@ type EraTransition struct {
 	ToEraID   uint
 	// Slot of the first block in the new era.
 	Slot uint64
+	// PrevSlot is the slot of the last block in the prior era. Zero
+	// when no prior header was observed on this stream (genesis
+	// case). Slot - PrevSlot gives the inter-block gap that crossed
+	// the era boundary.
+	PrevSlot uint64
 	// Approximate epoch the transition crossed at, computed against the
 	// configured EpochLength. Zero if no Config was supplied.
 	Epoch uint64
@@ -189,8 +194,10 @@ func (s *EraStream) onRollForward(
 	// chain that begins in Shelley still records that as a transition
 	// (FromEraID=0, ToEraID=1).
 	prevEra := uint(0)
+	prevSlot := uint64(0)
 	if n := len(s.headers); n > 0 {
 		prevEra = s.headers[n-1].EraID
+		prevSlot = s.headers[n-1].Slot
 	}
 	if info.EraID != prevEra {
 		epoch := uint64(0)
@@ -201,6 +208,7 @@ func (s *EraStream) onRollForward(
 			FromEraID: prevEra,
 			ToEraID:   info.EraID,
 			Slot:      info.Slot,
+			PrevSlot:  prevSlot,
 			Epoch:     epoch,
 		})
 	}
