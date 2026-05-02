@@ -30,8 +30,8 @@ import (
 var AllegraEraDesc = EraDesc{
 	Id:                      allegra.EraIdAllegra,
 	Name:                    allegra.EraNameAllegra,
-	MinMajorVersion:         3,
-	MaxMajorVersion:         3,
+	MinMajorVersion:         allegra.MinProtocolVersionAllegra,
+	MaxMajorVersion:         allegra.MaxProtocolVersionAllegra,
 	DecodePParamsFunc:       DecodePParamsAllegra,
 	DecodePParamsUpdateFunc: DecodePParamsUpdateAllegra,
 	PParamsUpdateFunc:       PParamsUpdateAllegra,
@@ -92,6 +92,14 @@ func HardForkAllegra(
 		)
 	}
 	ret := allegra.UpgradePParams(*shelleyPParams)
+	// Bump ProtocolMajor to Allegra's range when entering the era.
+	// gouroboros's UpgradePParams is a type-cast that preserves the
+	// caller's major value; without this bump, schedule-driven
+	// transitions land in Allegra with major still at Shelley's
+	// value, and downstream era disambiguation reads as Shelley.
+	if ret.ProtocolMajor < allegra.MinProtocolVersionAllegra {
+		ret.ProtocolMajor = allegra.MinProtocolVersionAllegra
+	}
 	return &ret, nil
 }
 

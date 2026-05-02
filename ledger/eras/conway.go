@@ -36,8 +36,8 @@ import (
 var ConwayEraDesc = EraDesc{
 	Id:                      conway.EraIdConway,
 	Name:                    conway.EraNameConway,
-	MinMajorVersion:         9,
-	MaxMajorVersion:         10,
+	MinMajorVersion:         conway.MinProtocolVersionConway,
+	MaxMajorVersion:         conway.MaxProtocolVersionConway,
 	DecodePParamsFunc:       DecodePParamsConway,
 	DecodePParamsUpdateFunc: DecodePParamsUpdateConway,
 	PParamsUpdateFunc:       PParamsUpdateConway,
@@ -102,6 +102,13 @@ func HardForkConway(
 	conwayGenesis := nodeConfig.ConwayGenesis()
 	if err := ret.UpdateFromGenesis(conwayGenesis); err != nil {
 		return nil, err
+	}
+	// Bump ProtocolVersion.Major to Conway's range when entering the
+	// era. gouroboros's UpgradePParams carries the prior major
+	// forward unchanged; schedule-driven transitions would otherwise
+	// reach Conway with major still at Babbage's value.
+	if ret.ProtocolVersion.Major < conway.MinProtocolVersionConway {
+		ret.ProtocolVersion.Major = conway.MinProtocolVersionConway
 	}
 	return &ret, nil
 }

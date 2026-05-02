@@ -51,6 +51,10 @@ func (m *mockPParamsProvider) GetCurrentPParams() lcommon.ProtocolParameters {
 	return m.pparams
 }
 
+func (m *mockPParamsProvider) ProtocolParamsForSlot(_ uint64) lcommon.ProtocolParameters {
+	return m.pparams
+}
+
 // mockChainTip implements ChainTipProvider for testing.
 type mockChainTip struct {
 	tip ochainsync.Tip

@@ -30,8 +30,8 @@ import (
 var MaryEraDesc = EraDesc{
 	Id:                      mary.EraIdMary,
 	Name:                    mary.EraNameMary,
-	MinMajorVersion:         4,
-	MaxMajorVersion:         4,
+	MinMajorVersion:         mary.MinProtocolVersionMary,
+	MaxMajorVersion:         mary.MaxProtocolVersionMary,
 	DecodePParamsFunc:       DecodePParamsMary,
 	DecodePParamsUpdateFunc: DecodePParamsUpdateMary,
 	PParamsUpdateFunc:       PParamsUpdateMary,
@@ -92,6 +92,13 @@ func HardForkMary(
 		)
 	}
 	ret := mary.UpgradePParams(*allegraPParams)
+	// Bump ProtocolMajor to Mary's range when entering the era.
+	// gouroboros's UpgradePParams carries the prior major forward
+	// unchanged; without this bump, schedule-driven transitions
+	// reach Mary with major still at Allegra's value.
+	if ret.ProtocolMajor < mary.MinProtocolVersionMary {
+		ret.ProtocolMajor = mary.MinProtocolVersionMary
+	}
 	return &ret, nil
 }
 

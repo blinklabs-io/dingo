@@ -36,8 +36,8 @@ import (
 var AlonzoEraDesc = EraDesc{
 	Id:                      alonzo.EraIdAlonzo,
 	Name:                    alonzo.EraNameAlonzo,
-	MinMajorVersion:         5,
-	MaxMajorVersion:         6,
+	MinMajorVersion:         alonzo.MinProtocolVersionAlonzo,
+	MaxMajorVersion:         alonzo.MaxProtocolVersionAlonzo,
 	DecodePParamsFunc:       DecodePParamsAlonzo,
 	DecodePParamsUpdateFunc: DecodePParamsUpdateAlonzo,
 	PParamsUpdateFunc:       PParamsUpdateAlonzo,
@@ -102,6 +102,13 @@ func HardForkAlonzo(
 	alonzoGenesis := nodeConfig.AlonzoGenesis()
 	if err := ret.UpdateFromGenesis(alonzoGenesis); err != nil {
 		return nil, err
+	}
+	// Bump ProtocolMajor to Alonzo's range when entering the era.
+	// gouroboros's UpgradePParams carries the prior major forward
+	// unchanged; schedule-driven transitions would otherwise reach
+	// Alonzo with major still at Mary's value.
+	if ret.ProtocolMajor < alonzo.MinProtocolVersionAlonzo {
+		ret.ProtocolMajor = alonzo.MinProtocolVersionAlonzo
 	}
 	return &ret, nil
 }
