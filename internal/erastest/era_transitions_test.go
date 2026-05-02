@@ -21,6 +21,7 @@ package erastest
 
 import (
 	"bytes"
+	"context"
 	"encoding/hex"
 	"encoding/json"
 	"os"
@@ -72,7 +73,12 @@ func loadConfig(t *testing.T) *Config {
 // key.
 func readDingoColdVKey(t *testing.T) []byte {
 	t.Helper()
-	cmd := exec.Command("docker", "exec", dingoColdKeyContainer, "cat", dingoColdKeyPath)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(
+		ctx,
+		"docker", "exec", dingoColdKeyContainer, "cat", dingoColdKeyPath,
+	)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
@@ -221,6 +227,13 @@ func TestNoStallAcrossForks(t *testing.T) {
 		biggestGapNextSlot uint64
 	)
 	for i := 1; i < len(headers); i++ {
+		// Skip pairs that aren't strictly forward in time. With
+		// onRollBackward trimming we shouldn't see this on a healthy
+		// stream, but defending against it avoids unsigned underflow
+		// from masquerading as a multi-million-slot stall.
+		if headers[i].Slot < headers[i-1].Slot {
+			continue
+		}
 		gap := headers[i].Slot - headers[i-1].Slot
 		if gap > biggestGap {
 			biggestGap = gap
@@ -279,9 +292,16 @@ func TestConsensusAtEachFork(t *testing.T) {
 	for _, want := range schedule {
 		slotByNode := make(map[string]uint64, len(streams))
 		for name, s := range streams {
-			for _, tr := range s.Transitions() {
-				if tr.ToEraID == want.Era.Id {
-					slotByNode[name] = tr.Slot
+			// Take the most recent matching transition. Earlier
+			// matches can be stale pre-rollback observations even
+			// after onRollBackward trims state, since the trim
+			// happens at the rollback point and a re-applied
+			// branch can reintroduce a same-target transition at
+			// a new slot.
+			trs := s.Transitions()
+			for i := len(trs) - 1; i >= 0; i-- {
+				if trs[i].ToEraID == want.Era.Id {
+					slotByNode[name] = trs[i].Slot
 					break
 				}
 			}
@@ -365,22 +385,39 @@ func TestDingoProducesInEachEra(t *testing.T) {
 		}
 	}
 
+	// Build the era set to check: the genesis era (the era already
+	// active at slot 0, which ScheduledTransitions excludes) plus
+	// every successor era the schedule transitions into. Without
+	// the explicit genesis check, a node that never forges in the
+	// starting era would still pass.
+	type eraCheck struct {
+		id   uint
+		name string
+	}
+	var erasToCheck []eraCheck
+	if start, ok := cfg.StartingEra(); ok {
+		erasToCheck = append(erasToCheck, eraCheck{id: start.Id, name: start.Name})
+	}
 	for _, want := range schedule {
-		total := totalByEra[want.Era.Id]
-		dingo := dingoBlocksByEra[want.Era.Id]
+		erasToCheck = append(erasToCheck, eraCheck{id: want.Era.Id, name: want.Era.Name})
+	}
+
+	for _, era := range erasToCheck {
+		total := totalByEra[era.id]
+		dingo := dingoBlocksByEra[era.id]
 		t.Logf(
 			"%s: total blocks=%d, dingo-issued=%d",
-			want.Era.Name, total, dingo,
+			era.name, total, dingo,
 		)
 		require.Greaterf(
 			t, total, 0,
 			"no blocks at all observed in era %s — chain stalled?",
-			want.Era.Name,
+			era.name,
 		)
 		require.Greaterf(
 			t, dingo, 0,
 			"dingo did not issue any blocks in era %s",
-			want.Era.Name,
+			era.name,
 		)
 	}
 }

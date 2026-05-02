@@ -66,8 +66,8 @@ if ! docker compose version &>/dev/null; then
   die "docker compose plugin is not installed"
 fi
 
-log "Building Dingo Docker image..."
-docker compose -f "${COMPOSE_FILE}" build dingo-producer
+log "Building eras-stack images..."
+docker compose -f "${COMPOSE_FILE}" build dingo-producer configurator
 
 log "Starting DevNet containers..."
 docker compose -f "${COMPOSE_FILE}" up -d

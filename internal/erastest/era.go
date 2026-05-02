@@ -210,14 +210,54 @@ func (s *EraStream) onRollForward(
 	return nil
 }
 
-// onRollBackward records nothing — chain rollbacks during a healthy
-// devnet are rare and not relevant to era observation. We still need
-// to register the callback so gouroboros doesn't reject the message.
+// onRollBackward trims observed state to the rollback point so consumers
+// never see headers or transitions that have been replaced by a fork.
+// Without this, slot-monotonicity assumptions break: TestNoStallAcrossForks
+// would compute an underflowed gap if header slots regressed, and
+// TestConsensusAtEachFork could report stale pre-rollback transitions.
 func (s *EraStream) onRollBackward(
 	_ chainsync.CallbackContext,
-	_ pcommon.Point,
+	point pcommon.Point,
 	_ chainsync.Tip,
 ) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return nil
+	}
+	cutoff := point.Slot
+	// Trim headers down to the rollback point. A rollback to origin
+	// (cutoff == 0 with empty hash) drops everything.
+	keep := 0
+	for i, h := range s.headers {
+		if h.Slot > cutoff {
+			break
+		}
+		keep = i + 1
+	}
+	if len(point.Hash) == 0 && cutoff == 0 {
+		// Rollback to origin: drop all observed state.
+		keep = 0
+	}
+	if keep < len(s.headers) {
+		s.headers = s.headers[:keep]
+	}
+	// Drop any transitions whose triggering header was rolled back.
+	tKeep := 0
+	for i, tr := range s.transitions {
+		if tr.Slot > cutoff {
+			break
+		}
+		tKeep = i + 1
+	}
+	if len(point.Hash) == 0 && cutoff == 0 {
+		tKeep = 0
+	}
+	if tKeep < len(s.transitions) {
+		s.transitions = s.transitions[:tKeep]
+	}
+	// Wake any waiters so they re-evaluate against the trimmed state.
+	s.cond.Broadcast()
 	return nil
 }
 
@@ -232,13 +272,20 @@ func (s *EraStream) LatestHeader() (HeaderInfo, bool) {
 	return s.headers[len(s.headers)-1], true
 }
 
-// HeadersSnapshot returns a copy of every header observed so far. Order
-// matches arrival order (chain order).
+// HeadersSnapshot returns a deep copy of every header observed so far.
+// Order matches arrival order (chain order). Slice fields on HeaderInfo
+// (notably IssuerVkey) are cloned so callers can't mutate internal
+// EraStream state through the returned slice.
 func (s *EraStream) HeadersSnapshot() []HeaderInfo {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	out := make([]HeaderInfo, len(s.headers))
-	copy(out, s.headers)
+	for i, h := range s.headers {
+		out[i] = h
+		if h.IssuerVkey != nil {
+			out[i].IssuerVkey = append([]byte(nil), h.IssuerVkey...)
+		}
+	}
 	return out
 }
 
@@ -266,12 +313,8 @@ func (s *EraStream) WaitForEra(
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for {
-		if s.closed {
-			return HeaderInfo{}, fmt.Errorf(
-				"WaitForEra(%s): stream closed before target reached",
-				target.Name,
-			)
-		}
+		// Check satisfaction first so an already-observed era is
+		// returned successfully even if the stream has since closed.
 		// Scan the most recent transitions first; the target era is
 		// usually the latest one.
 		for i := len(s.transitions) - 1; i >= 0; i-- {
@@ -284,6 +327,12 @@ func (s *EraStream) WaitForEra(
 		if n := len(s.headers); n > 0 &&
 			s.headers[n-1].EraID == target.Id {
 			return s.headers[n-1], nil
+		}
+		if s.closed {
+			return HeaderInfo{}, fmt.Errorf(
+				"WaitForEra(%s): stream closed before target reached",
+				target.Name,
+			)
 		}
 		if s.streamErr != nil {
 			return HeaderInfo{}, fmt.Errorf(
@@ -312,13 +361,15 @@ func (s *EraStream) WaitForSlot(
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for {
+		// Check satisfaction first so an already-observed slot is
+		// returned successfully even if the stream has since closed.
+		if n := len(s.headers); n > 0 && s.headers[n-1].Slot >= targetSlot {
+			return s.headers[n-1], nil
+		}
 		if s.closed {
 			return HeaderInfo{}, fmt.Errorf(
 				"WaitForSlot(%d): stream closed", targetSlot,
 			)
-		}
-		if n := len(s.headers); n > 0 && s.headers[n-1].Slot >= targetSlot {
-			return s.headers[n-1], nil
 		}
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
