@@ -1,0 +1,75 @@
+# Configurator specification for the era-transitions DevNet.
+#
+# Differs from internal/test/devnet/testnet.yaml in two ways:
+#
+#   1. Starts in Shelley (protocolVersion.major: 2) instead of Conway.
+#   2. Each successor era is scheduled at a distinct epoch via the
+#      Test{Era}HardForkAtEpoch overrides + ExperimentalHardForksEnabled.
+#      The chain therefore traverses Shelley → Allegra → Mary → Alonzo →
+#      Babbage → Conway over the first ~6 epochs.
+#
+# Used by internal/test/devnet/eras/docker-compose.yml.
+#
+# Format: 6 YAML documents (see below)
+#   1. Required testnet parameters
+#   2. Byron genesis overrides
+#   3. Shelley genesis overrides
+#   4. Alonzo genesis overrides
+#   5. Conway genesis overrides
+#   6. Node config (config.json) overrides
+
+--- # Required Testnet Parameters
+poolCount: 2
+poolCost: 0
+poolMargin: 0.0
+poolPledge: 0
+delegatedSupply: 2000000000000
+systemStart: 'now'
+systemStartDelay: 5
+networkMagic: 42
+testnetDomain: devnet
+
+--- # Byron Genesis Override
+protocolConsts:
+  k: 6
+
+--- # Shelley Genesis Override
+# 1s slots, 75-slot (~75s) epochs, k=6.
+# Stability budgets:
+#   nonceStabilityWindow      = 4k/f = 4*6/0.4 = 60 < 75 = epochLength ✓
+#   blockfetchStabilityWindow = 3k/f = 3*6/0.4 = 45 < 75 = epochLength ✓
+# Per-pool block expectation per epoch (2 pools, equal stake, f=0.4):
+#   1 - (1-f)^(1/n) ≈ 0.225 → ~17 blocks per pool per 75-slot epoch.
+# So a "dingo produces in every era" check has effectively zero variance
+# even over a single epoch.
+epochLength: 75
+slotLength: 1
+activeSlotsCoeff: 0.4
+securityParam: 6
+maxLovelaceSupply: 2000000000000
+protocolParams:
+  decentralisationParam: 0
+  protocolVersion:
+    major: 2
+    minor: 0
+
+--- # Alonzo Genesis Override
+
+--- # Conway Genesis Override
+
+--- # Node Config Override
+# Stagger hard forks across epochs. Combined with the Shelley start above
+# (protocolVersion.major: 2) this drives the chain through every era
+# transition the dingo ledger code path supports.
+ExperimentalHardForksEnabled: true
+TestShelleyHardForkAtEpoch: 0
+TestAllegraHardForkAtEpoch: 1
+TestMaryHardForkAtEpoch: 2
+TestAlonzoHardForkAtEpoch: 3
+TestBabbageHardForkAtEpoch: 4
+TestConwayHardForkAtEpoch: 5
+ExperimentalProtocolsEnabled: true
+TraceForge: true
+TraceChainDb: true
+TraceMempool: true
+TurnOnLogging: true
