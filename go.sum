@@ -140,8 +140,8 @@ github.com/blinklabs-io/ouroboros-mock v0.10.0 h1:8fhKaaTm3pDHSr8Yx91zEthooQH+o+
 github.com/blinklabs-io/ouroboros-mock v0.10.0/go.mod h1:1vWKSGxMtUfF3gkrVjUsjPTXdA+A665bQZjbVWpG5lg=
 github.com/blinklabs-io/plutigo v0.1.9 h1:J3kAB5jrKPGhU9elTuFx9oz/cWTQobwFLfVuQ64jf7I=
 github.com/blinklabs-io/plutigo v0.1.9/go.mod h1:x0xLfDDoPKL/JCo+BBXJsG8lu4VSekQaJf9/cVhel/E=
-github.com/blockfrost/blockfrost-go v0.3.0 h1:7DhMWaGSY4a4E6JnomovzwhSBsHUAbX3Em+TVBkgjB4=
-github.com/blockfrost/blockfrost-go v0.3.0/go.mod h1:XdD+mryM/Rd/MqW1MfSQ0+Xfu2YnOGuwqMpLQa0jHvM=
+github.com/blockfrost/blockfrost-go v0.4.0 h1:sJuxmtoWUJ3sXfqTuFhYcFMdDNdo938nSX/KcLcAPQ0=
+github.com/blockfrost/blockfrost-go v0.4.0/go.mod h1:XdD+mryM/Rd/MqW1MfSQ0+Xfu2YnOGuwqMpLQa0jHvM=
 github.com/btcsuite/btcd v0.20.1-beta/go.mod h1:wVuoA8VJLEcwgqHBwHmzLRazpKxTv13Px/pDuV7OomQ=
 github.com/btcsuite/btcd v0.22.0-beta.0.20220111032746-97732e52810c/go.mod h1:tjmYdS6MLJ5/s0Fj4DbLgSbDHbEqLJrtnHecBFkdz5M=
 github.com/btcsuite/btcd v0.23.5-0.20231215221805-96c9fd8078fd/go.mod h1:nm3Bko6zh6bWP60UxwoT5LzdGJsQJaPo6HjduXq9p6A=
