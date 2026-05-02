@@ -43,9 +43,22 @@ services:
     build:
       context: ../../..
     container_name: eras-dingo-producer
+    # Sleep before launching dingo so the relay→cardano-producer
+    # chainsync stream has time to come up cleanly before dingo joins.
+    # Genesis fires at +60s post-configurator (configurator.sh:120),
+    # cardano-producer becomes healthy ~10–30s in, and we want dingo
+    # online a few seconds before genesis with a warm peer connection
+    # — long enough that dingo's chainsync client has handshaked the
+    # relay, short enough that dingo can forge against most of its
+    # epoch-0 leader slots. Without the sleep, both producers race to
+    # build competing chains on top of an empty genesis and the fork
+    # churn erases dingo's Shelley forges.
+    entrypoint: ["/bin/sh", "-c", "sleep 30 && exec /bin/entrypoint.sh serve"]
     depends_on:
       configurator:
         condition: service_completed_successfully
+      cardano-producer:
+        condition: service_healthy
     environment:
       CARDANO_NETWORK: devnet
       CARDANO_CONFIG: /configs/configs/config.json
@@ -80,6 +93,8 @@ services:
     depends_on:
       configurator:
         condition: service_completed_successfully
+      cardano-relay:
+        condition: service_healthy
     environment:
       CARDANO_BLOCK_PRODUCER: "true"
       RESTORE_SNAPSHOT: "false"

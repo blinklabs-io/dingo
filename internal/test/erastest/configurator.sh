@@ -113,11 +113,15 @@ EOF
 }
 
 compute_start_time() {
-    # Set system start to now + 30s to give Docker time to start node
-    # containers after the configurator exits.
-    # genesis-cli.py's systemStartDelay (5s) is too short because key
-    # generation takes 30+ seconds, so we override after generation.
-    SYSTEM_START_UNIX=$(( $(date +%s) + 30 ))
+    # Set system start to now + 60s to give Docker time to start node
+    # containers, the relay to come up, and producer→relay handshakes to
+    # complete before the first leader slot fires. With less headroom,
+    # both producers race to forge slot-1 on top of an empty genesis,
+    # spend the early Shelley epoch in fork-resolution churn, and the
+    # locally-forged blocks of the slower-to-stabilize node get rolled
+    # back. genesis-cli.py's systemStartDelay (5s) is too short because
+    # key generation takes 30+ seconds, so we override after generation.
+    SYSTEM_START_UNIX=$(( $(date +%s) + 60 ))
     SYSTEM_START_ISO="$(date -d @${SYSTEM_START_UNIX} -u '+%Y-%m-%dT%H:%M:%SZ')"
 }
 

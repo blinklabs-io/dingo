@@ -1682,9 +1682,17 @@ func (ls *LedgerState) tryResolveFork(
 	e ChainsyncEvent,
 	notFitErr chain.BlockNotFitChainTipError,
 ) (bool, error) {
-	// Only resolve forks when the peer is ahead of us.
+	// Only resolve forks when the peer's chain is genuinely better than
+	// ours per Praos rules (longer wins; at equal length, lower slot wins).
+	// A bare slot comparison would force a rollback whenever the peer's tip
+	// happens to land on a later slot — even when the two chains have the
+	// same block count and our local tip is at the lower (denser) slot, in
+	// which case Praos says we should keep ours. With two block producers
+	// this misorders fork resolution: every locally-forged block forks at
+	// the same length as the peer's, the peer's later-slot tip wins the
+	// gate here, and the local block is rolled back.
 	localTip := ls.chain.Tip()
-	if e.Tip.Point.Slot <= localTip.Point.Slot {
+	if !chainselection.IsBetterChain(e.Tip, localTip) {
 		return false, nil
 	}
 
