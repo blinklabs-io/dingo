@@ -82,7 +82,7 @@ func TestSlotClockCreation(t *testing.T) {
 	clock := NewSlotClock(provider, DefaultSlotClockConfig())
 	require.NotNil(t, clock)
 	assert.NotNil(t, clock.provider)
-	assert.Equal(t, 100*time.Millisecond, clock.config.ClockTolerance)
+	assert.Equal(t, 500*time.Millisecond, clock.config.ClockTolerance)
 }
 
 func TestSlotClockCurrentSlot(t *testing.T) {

@@ -816,19 +816,60 @@ func parsePraosNonces(headerStateData []byte) (*praosNonces, error) {
 		praosState = inner
 	}
 
-	// PraosState = [lastSlot, ocertCounters, evolvingNonce,
-	//               candidateNonce, epochNonce, labNonce,
-	//               lastEpochBlockNonce]
-	if len(praosState) < 5 {
+	return extractPraosNonces(praosState)
+}
+
+// extractPraosNonces extracts the nonce fields from a decoded
+// PraosState array. Split out from parsePraosNonces so tests can
+// exercise field-index handling without constructing the full
+// HeaderState/ChainDepState/Telescope CBOR wrapping.
+//
+// PraosState (Conway/Babbage, ouroboros-consensus
+// Ouroboros.Consensus.Protocol.Praos):
+//
+//	[0] lastSlot
+//	[1] ocertCounters
+//	[2] evolvingNonce
+//	[3] candidateNonce
+//	[4] epochNonce
+//	[5] previousEpochNonce
+//	[6] labNonce
+//	[7] lastEpochBlockNonce
+//
+// The cardano-ledger epoch-boundary formula uses
+// `lastEpochBlockNonce` (index 7), not `labNonce`:
+//
+//	newEpochNonce = candidateNonce ⭒ lastEpochBlockNonce
+//
+// Reading the wrong index yields the wrong eta0 for the next
+// epoch, which manifests as VRF verification failure on every
+// header in the first post-bootstrap epoch.
+//
+// Older snapshots predating `previousEpochNonce` had a 7-element
+// PraosState; in that shape `lastEpochBlockNonce` was at index 6.
+// We dispatch on length so a Mithril snapshot from either shape
+// produces the right value in `result.LastEpochBlockNonce`.
+func extractPraosNonces(praosState [][]byte) (*praosNonces, error) {
+	// lastEpochBlockNonce is always the final element of PraosState —
+	// index 7 in the 8-field shape, index 6 in the older 7-field shape.
+	// Reject unknown lengths rather than guess: a future shape that
+	// extends the array would push the final element past index 7, and
+	// silently reading index 7 would yield the wrong nonce.
+	var lastEpochBlockNonceIdx int
+	switch len(praosState) {
+	case 8:
+		lastEpochBlockNonceIdx = 7
+	case 7:
+		lastEpochBlockNonceIdx = 6
+	default:
 		return nil, fmt.Errorf(
-			"PraosState has %d elements, expected at least 5",
+			"unsupported PraosState length %d, expected 7 or 8",
 			len(praosState),
 		)
 	}
 
 	result := &praosNonces{}
 
-	// Extract evolving nonce (index 2)
 	evolvingNonce, err := decodeNonce(praosState[2])
 	if err != nil {
 		return nil, fmt.Errorf(
@@ -843,22 +884,6 @@ func parsePraosNonces(headerStateData []byte) (*praosNonces, error) {
 	}
 	result.EvolvingNonce = evolvingNonce
 
-	// Extract epoch nonce (index 4)
-	epochNonce, err := decodeNonce(praosState[4])
-	if err != nil {
-		return nil, fmt.Errorf(
-			"decoding epoch nonce: %w", err,
-		)
-	}
-	if epochNonce != nil && len(epochNonce) != 32 {
-		return nil, fmt.Errorf(
-			"invalid epoch nonce length %d, expected 32",
-			len(epochNonce),
-		)
-	}
-	result.EpochNonce = epochNonce
-
-	// Extract candidate nonce (index 3)
 	candidateNonce, err := decodeNonce(praosState[3])
 	if err != nil {
 		return nil, fmt.Errorf(
@@ -873,23 +898,35 @@ func parsePraosNonces(headerStateData []byte) (*praosNonces, error) {
 	}
 	result.CandidateNonce = candidateNonce
 
-	// Extract lastEpochBlockNonce (index 6) when present.
-	// Older eras/encodings may not include this field.
-	if len(praosState) > 6 {
-		lastEpochBlockNonce, err := decodeNonce(praosState[6])
-		if err != nil {
-			return nil, fmt.Errorf(
-				"decoding last epoch block nonce: %w", err,
-			)
-		}
-		if lastEpochBlockNonce != nil && len(lastEpochBlockNonce) != 32 {
-			return nil, fmt.Errorf(
-				"invalid last epoch block nonce length %d, expected 32",
-				len(lastEpochBlockNonce),
-			)
-		}
-		result.LastEpochBlockNonce = lastEpochBlockNonce
+	epochNonce, err := decodeNonce(praosState[4])
+	if err != nil {
+		return nil, fmt.Errorf(
+			"decoding epoch nonce: %w", err,
+		)
 	}
+	if epochNonce != nil && len(epochNonce) != 32 {
+		return nil, fmt.Errorf(
+			"invalid epoch nonce length %d, expected 32",
+			len(epochNonce),
+		)
+	}
+	result.EpochNonce = epochNonce
+
+	lastEpochBlockNonce, err := decodeNonce(
+		praosState[lastEpochBlockNonceIdx],
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"decoding last epoch block nonce: %w", err,
+		)
+	}
+	if lastEpochBlockNonce != nil && len(lastEpochBlockNonce) != 32 {
+		return nil, fmt.Errorf(
+			"invalid last epoch block nonce length %d, expected 32",
+			len(lastEpochBlockNonce),
+		)
+	}
+	result.LastEpochBlockNonce = lastEpochBlockNonce
 
 	return result, nil
 }

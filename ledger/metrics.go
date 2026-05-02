@@ -34,6 +34,7 @@ type stateMetrics struct {
 	tipGapSlots         prometheus.Gauge
 	shelleyStartTime    prometheus.Gauge
 	epochLengthSlots    prometheus.Gauge
+	shadowGateDecisions *prometheus.CounterVec
 }
 
 func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
@@ -106,5 +107,19 @@ func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
 			Name: "dingo_epoch_length_slots",
 			Help: "slots per epoch for the current network",
 		},
+	)
+	// Shadow blockfetch gate decisions, labelled by the path taken:
+	//   path="dispatched"        — primary slow, shadow sent
+	//   path="skipped_fast"      — primary under cutoff, shadow suppressed
+	//   path="skipped_no_sample" — primary has no EWMA yet (cold connection)
+	// And cutoff="median" (population-based) or cutoff="fallback"
+	// (fixed shadowBlockfetchPrimarySlowThreshold). The fallback ratio
+	// over total decisions is the "is the median path firing" signal.
+	m.shadowGateDecisions = promautoFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "dingo_blockfetch_shadow_gate_decisions_total",
+			Help: "shadow blockfetch gate decisions, by path and cutoff source",
+		},
+		[]string{"path", "cutoff"},
 	)
 }

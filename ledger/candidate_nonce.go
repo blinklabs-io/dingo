@@ -24,7 +24,21 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/ledger/byron"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
+
+// lookupBlockBeforeSlot finds the highest-slot block before slot in
+// the blob store, optionally inside a database transaction.
+func lookupBlockBeforeSlot(
+	db *database.Database,
+	txn *database.Txn,
+	slot uint64,
+) (models.Block, error) {
+	if txn != nil {
+		return database.BlockBeforeSlotTxn(txn, slot)
+	}
+	return database.BlockBeforeSlot(db, slot)
+}
 
 // errNoncesMissing is returned by computeCandidateNonceFast when blocks
 // exist in the epoch but no pre-stored nonce rows are found. The caller
@@ -134,7 +148,14 @@ func (ls *LedgerState) computeCandidateNonce(
 }
 
 // computeCandidateNonceFast retrieves pre-stored evolving nonces from the
-// block_nonce table. Returns an error if nonces are not available.
+// block_nonce table. Returns errNoncesMissing if the nonce table lags
+// behind the blob store for this epoch, forcing the caller to fall
+// back to the slow path. The metadata pipeline batches commits, so
+// `GetLastBlockNonceInRange` alone can return a partial accumulation
+// of the epoch when called outside the ledger transaction (e.g., from
+// header verification's advanceEpochCache). Anchoring on the blob
+// store's last block — which is fully populated by blockfetch before
+// header verification fires — prevents that hazard.
 func (ls *LedgerState) computeCandidateNonceFast(
 	txn *database.Txn,
 	prevEvolvingNonce []byte,
@@ -143,63 +164,84 @@ func (ls *LedgerState) computeCandidateNonceFast(
 	epochEndSlot uint64,
 	cutoffSlot uint64,
 ) ([]byte, []byte, error) {
-	// Get the evolving nonce at the last block of the epoch
-	evolvingNonce, err := ls.db.GetLastBlockNonceInRange(
-		epochStartSlot,
-		epochEndSlot,
-		txn,
-	)
-	if err != nil {
+	// Identify the actual last block of the epoch in the blob store.
+	// The evolving nonce is the nonce of THIS block, not whatever
+	// block_nonce row happens to be the most recent committed.
+	lastBlock, blockErr := lookupBlockBeforeSlot(ls.db, txn, epochEndSlot)
+	hasBlocks := blockErr == nil && lastBlock.Slot >= epochStartSlot
+	if blockErr != nil && !errors.Is(blockErr, models.ErrBlockNotFound) {
 		return nil, nil, fmt.Errorf(
-			"get last nonce in epoch: %w", err,
+			"lookup last block in epoch: %w", blockErr,
 		)
 	}
-	if len(evolvingNonce) == 0 {
-		// No nonce rows found. Check whether blocks actually exist
-		// in this epoch — if they do, nonces are missing (e.g., old
-		// database) and we must fall back to the slow path.
-		hasBlocks := false
-		if txn != nil {
-			lastBlock, blockErr := database.BlockBeforeSlotTxn(
-				txn,
-				epochEndSlot,
+
+	var evolvingNonce []byte
+	if hasBlocks {
+		nonce, err := ls.db.GetBlockNonce(
+			ocommon.Point{
+				Slot: lastBlock.Slot,
+				Hash: lastBlock.Hash,
+			},
+			txn,
+		)
+		if err != nil {
+			return nil, nil, fmt.Errorf(
+				"get nonce for last epoch block: %w", err,
 			)
-			hasBlocks = blockErr == nil &&
-				lastBlock.Slot >= epochStartSlot
-		} else {
-			lastBlock, blockErr := database.BlockBeforeSlot(
-				ls.db,
-				epochEndSlot,
-			)
-			hasBlocks = blockErr == nil &&
-				lastBlock.Slot >= epochStartSlot
 		}
-		if hasBlocks {
+		if len(nonce) == 0 {
+			// The last block in the blob store has no committed
+			// block_nonce row yet — the metadata pipeline is
+			// behind. Force the slow path so we recompute the
+			// epoch's evolving nonce from CBOR with all blocks
+			// included.
 			return nil, nil, errNoncesMissing
 		}
-		// No blocks either — use previous values
+		evolvingNonce = nonce
+	} else {
+		// No blocks in epoch — use previous values
 		evolvingNonce = make([]byte, len(prevEvolvingNonce))
 		copy(evolvingNonce, prevEvolvingNonce)
 	}
 
-	// Get the candidate nonce (frozen at the stability window cutoff)
+	// Get the candidate nonce (frozen at the stability window cutoff).
+	// Same hazard, same anchor: use the actual last block before the
+	// cutoff in the blob store.
 	var candidateNonce []byte
 	if cutoffSlot <= epochStartSlot {
 		// All blocks are past the cutoff — candidate stays at previous
 		candidateNonce = make([]byte, len(prevCandidateNonce))
 		copy(candidateNonce, prevCandidateNonce)
 	} else {
-		candidateNonce, err = ls.db.GetLastBlockNonceInRange(
-			epochStartSlot,
-			cutoffSlot,
-			txn,
+		lastPreCutoff, preErr := lookupBlockBeforeSlot(
+			ls.db, txn, cutoffSlot,
 		)
-		if err != nil {
+		hasPreCutoff := preErr == nil &&
+			lastPreCutoff.Slot >= epochStartSlot
+		if preErr != nil && !errors.Is(preErr, models.ErrBlockNotFound) {
 			return nil, nil, fmt.Errorf(
-				"get last nonce before cutoff: %w", err,
+				"lookup last pre-cutoff block: %w", preErr,
 			)
 		}
-		if len(candidateNonce) == 0 {
+		if hasPreCutoff {
+			nonce, err := ls.db.GetBlockNonce(
+				ocommon.Point{
+					Slot: lastPreCutoff.Slot,
+					Hash: lastPreCutoff.Hash,
+				},
+				txn,
+			)
+			if err != nil {
+				return nil, nil, fmt.Errorf(
+					"get nonce for last pre-cutoff block: %w",
+					err,
+				)
+			}
+			if len(nonce) == 0 {
+				return nil, nil, errNoncesMissing
+			}
+			candidateNonce = nonce
+		} else {
 			// No blocks before cutoff — candidate stays at previous
 			candidateNonce = make([]byte, len(prevCandidateNonce))
 			copy(candidateNonce, prevCandidateNonce)
