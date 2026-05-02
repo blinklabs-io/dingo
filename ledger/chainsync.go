@@ -2691,12 +2691,19 @@ func (ls *LedgerState) calculateEpochNonce(
 	// and evolvingNonce (after all blocks) from the remaining
 	// current-epoch blocks. Each block's VRF output is accumulated
 	// via the Nonce semigroup (⭒) starting from prevEvolvingNonce.
-	// Pass currentEra.Id so the candidate-freeze cutoff uses the
-	// correct stability window for the source epoch's protocol family
-	// (3k/f for TPraos, 4k/f for Praos). See #2125.
+	// The stability window depends on the protocol family of the
+	// SOURCE epoch (the one being closed), not the era we are
+	// transitioning into: TPraos uses 3k/f, Praos uses 4k/f. At every
+	// era boundary except Alonzo→Babbage the two formulas agree, but
+	// at the TPraos→Praos cutover currentEra has already been
+	// advanced to Babbage by applyHardForkTransition while the source
+	// epoch's blocks are still TPraos. Using currentEra.Id here would
+	// shift the candidate-freeze cutoff and produce an epoch nonce
+	// that diverges from peers, so every header in the new Praos
+	// epoch VRF-fails (#2125 Alonzo→Babbage wedge).
 	candidateNonce, evolvingNonce, err := ls.computeCandidateNonce(
 		txn,
-		currentEra.Id,
+		currentEpoch.EraId,
 		prevEvolvingNonce,
 		prevCandidateNonce,
 		computeStartSlot,
