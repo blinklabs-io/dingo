@@ -935,9 +935,23 @@ func (ls *LedgerState) nextBufferedHeaderConnId() (
 func (ls *LedgerState) replayBufferedHeadersAsync(
 	connId ouroboros.ConnectionId,
 ) {
+	// Bail out if Close has already started so we never spawn a worker
+	// that issues DB reads after phase 3 closes the database (#2107).
+	if ls.closed.Load() {
+		return
+	}
+	ls.replayWG.Add(1)
 	go func() {
+		defer ls.replayWG.Done()
 		ls.chainsyncMutex.Lock()
 		defer ls.chainsyncMutex.Unlock()
+		// Re-check after acquiring the mutex in case Close started
+		// while we were waiting for the lock; the DB reads inside
+		// handleEventChainsyncBlockHeader (BlockByHash etc.) will
+		// panic with "DB Closed" once the owner closes the DB.
+		if ls.closed.Load() {
+			return
+		}
 		if ls.headerPipelineConnId != (ouroboros.ConnectionId{}) ||
 			ls.chain.HeaderCount() > 0 {
 			return

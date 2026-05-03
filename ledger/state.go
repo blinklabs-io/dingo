@@ -496,7 +496,10 @@ type LedgerState struct {
 	// closed.Load() and Add(1) in handleEventChainUpdate.
 	rollbackMu sync.Mutex
 	// rollbackWG tracks in-flight rollback event emission goroutines
-	rollbackWG        sync.WaitGroup
+	rollbackWG sync.WaitGroup
+	// replayWG tracks in-flight replayBufferedHeadersAsync goroutines so
+	// Close can drain them before the database is closed (issue #2107).
+	replayWG          sync.WaitGroup
 	validationEnabled bool
 	// Sync progress reporting (Fix 4)
 	syncProgressLastLog  time.Time     // last time we logged sync progress
@@ -985,6 +988,30 @@ func (ls *LedgerState) Close() error {
 		)
 	}
 	ls.rollbackMu.Unlock()
+
+	// Drain in-flight replayBufferedHeadersAsync goroutines so they
+	// finish issuing DB reads before the owner closes the database
+	// (#2107). The closed flag set above prevents new goroutines from
+	// being spawned, so this Wait is bounded.
+	ls.config.Logger.Info("waiting for in-flight header replay goroutines")
+	replayStart := time.Now()
+	replayDone := make(chan struct{})
+	go func() {
+		ls.replayWG.Wait()
+		close(replayDone)
+	}()
+	select {
+	case <-replayDone:
+		ls.config.Logger.Info(
+			"header replay goroutines finished",
+			"elapsed", time.Since(replayStart).Round(time.Millisecond),
+		)
+	case <-time.After(10 * time.Second):
+		ls.config.Logger.Warn(
+			"timed out waiting for header replay goroutines",
+			"elapsed", time.Since(replayStart).Round(time.Millisecond),
+		)
+	}
 
 	// Stop slot clock
 	if ls.slotClock != nil {
