@@ -1475,7 +1475,20 @@ func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 		var notFitErr chain.BlockNotFitChainTipError
 		if errors.As(err, &notFitErr) {
 			localTip := ls.chain.Tip()
-			if e.Point.Slot <= localTip.Point.Slot {
+			// A header strictly behind the local tip is genuinely
+			// stale and can be dropped. A header AT the same slot
+			// as the local tip with a different hash is a slot
+			// battle — both pools forged at the same slot — and
+			// must fall through to the fork-resolution path so
+			// chainselection's tiebreak picks a side. Treating
+			// equal-slot mismatches as stale here drops the peer's
+			// forge before tryResolveFork ever sees it, locks
+			// dingo onto whichever block it adopted first, and
+			// diverges the chain from peers that resolved the
+			// same battle the other way; that drift then folds
+			// into the evolving nonce and breaks header
+			// verification at the next epoch boundary.
+			if e.Point.Slot < localTip.Point.Slot {
 				ls.config.Logger.Debug(
 					"ignoring stale roll forward behind local tip",
 					"component", "ledger",

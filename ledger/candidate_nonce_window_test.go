@@ -46,32 +46,33 @@ func shelleyGenesisCfgForNonceWindow(t *testing.T) *cardano.CardanoNodeConfig {
 }
 
 // TestNonceStabilityWindow_EraDispatch asserts the randomness-stabilisation
-// window is era-aware:
+// window is era-aware. The split is NOT TPraos-vs-Praos; Babbage uses the
+// 3k/f window even though it runs Praos:
 //
-//   - TPraos eras (Shelley, Allegra, Mary, Alonzo): 3k/f
-//     (cardano-ledger's computeStabilityWindow)
-//   - Praos eras (Babbage, Conway): 4k/f
-//     (cardano-ledger's computeRandomnessStabilisationWindow)
+//   - Shelley, Allegra, Mary, Alonzo (TPraos): 3k/f
+//   - Babbage (Praos, but 3k/f for backwards-compatibility per Shelley
+//     spec erratum 17.3): 3k/f
+//   - Conway and onwards (Praos): 4k/f
 //
-// The bug in #2125 is that nonceStabilityWindow returns 4k/f universally,
-// shifting the candidate-nonce freeze cutoff in pre-Babbage epochs and
-// producing an epoch nonce that diverges from cardano-node. That makes
-// every TPraos block VRF-fail at the next epoch boundary — observed at
-// Shelley→Allegra in the internal/test/devnet/eras stack.
+// Treating Babbage as 4k/f shifts its candidate-freeze cutoff and
+// produces an eta0 for the Babbage→Conway transition that diverges from
+// peers, so the first Conway block we forge VRF-fails on every relay
+// and every Conway block our peers forge VRF-fails on us.
 //
-// Today this test fails for Shelley/Allegra/Mary/Alonzo. After the fix,
-// all six era cases pass.
+// Concretely with k=10, f=1/2: 3k/f = 60 slots and 4k/f = 80 slots.
+// The Babbage row asserting 60 is the regression guard for the
+// Babbage→Conway VRF wedge.
 func TestNonceStabilityWindow_EraDispatch(t *testing.T) {
 	cases := []struct {
 		name         string
 		eraId        uint
-		expectedSlot uint64 // 3k/f=60 for TPraos, 4k/f=80 for Praos
+		expectedSlot uint64 // 3k/f=60 for TPraos+Babbage, 4k/f=80 for Conway+
 	}{
 		{name: "shelley", eraId: shelley.EraIdShelley, expectedSlot: 60},
 		{name: "allegra", eraId: allegra.EraIdAllegra, expectedSlot: 60},
 		{name: "mary", eraId: mary.EraIdMary, expectedSlot: 60},
 		{name: "alonzo", eraId: alonzo.EraIdAlonzo, expectedSlot: 60},
-		{name: "babbage", eraId: babbage.EraIdBabbage, expectedSlot: 80},
+		{name: "babbage", eraId: babbage.EraIdBabbage, expectedSlot: 60},
 		{name: "conway", eraId: conway.EraIdConway, expectedSlot: 80},
 	}
 
