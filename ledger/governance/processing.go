@@ -425,7 +425,9 @@ func (c *proposalRepairCache) govActionValidityPeriod(
 			shortHash(proposalTxHash),
 		)
 	}
-	pparams, err := db.GetPParams(epoch.EpochId, era.DecodePParamsFunc, txn)
+	pparams, err := db.GetPParams(
+		epoch.EpochId, era.Id, era.DecodePParamsFunc, txn,
+	)
 	if err != nil {
 		return 0, fmt.Errorf(
 			"load protocol params for governance proposal tx %s: %w",

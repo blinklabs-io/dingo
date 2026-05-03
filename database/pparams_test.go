@@ -184,6 +184,7 @@ func TestComputeAndApplyPParamUpdates_QuorumMet(
 
 	stored, err := db.GetPParams(
 		4,
+		2, // matches the era passed to SetPParams above
 		func(data []byte) (lcommon.ProtocolParameters, error) {
 			var params shelley.ShelleyProtocolParameters
 			_, err := cbor.Decode(data, &params)

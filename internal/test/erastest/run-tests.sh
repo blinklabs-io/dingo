@@ -50,16 +50,16 @@ cleanup() {
     log "To stop:  docker compose -f ${COMPOSE_FILE} down -v"
     return
   fi
+  log "Collecting full per-service logs before teardown..."
   if [[ ${exit_code} -ne 0 ]]; then
-    log "Collecting logs before teardown..."
     docker compose -f "${COMPOSE_FILE}" logs --tail=200 2>/dev/null || true
-    local logs_dir="/tmp/erastest-logs"
-    mkdir -p "${logs_dir}" 2>/dev/null || true
-    for svc in eras-dingo-producer eras-cardano-producer eras-cardano-relay eras-configurator; do
-      docker logs "${svc}" >"${logs_dir}/${svc}.log" 2>&1 || true
-    done
-    log "Full per-service logs dumped to ${logs_dir}/"
   fi
+  local logs_dir="/tmp/erastest-logs"
+  mkdir -p "${logs_dir}" 2>/dev/null || true
+  for svc in eras-dingo-producer eras-cardano-producer eras-cardano-relay eras-configurator; do
+    docker logs "${svc}" >"${logs_dir}/${svc}.log" 2>&1 || true
+  done
+  log "Full per-service logs dumped to ${logs_dir}/"
   log "Tearing down DevNet..."
   docker compose -f "${COMPOSE_FILE}" down -v 2>/dev/null || true
 }

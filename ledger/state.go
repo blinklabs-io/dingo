@@ -3694,6 +3694,7 @@ func (ls *LedgerState) computePParams(
 		var err error
 		pparams, err = ls.db.GetPParams(
 			epoch.EpochId,
+			era.Id,
 			era.DecodePParamsFunc,
 			nil,
 		)
@@ -3732,6 +3733,7 @@ func (ls *LedgerState) computePParams(
 				prevEra.DecodePParamsFunc != nil {
 				prevPP, prevErr := ls.db.GetPParams(
 					ep.EpochId,
+					ep.EraId,
 					prevEra.DecodePParamsFunc,
 					nil,
 				)

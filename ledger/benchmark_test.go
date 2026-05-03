@@ -962,7 +962,7 @@ func BenchmarkProtocolParametersLookupByEpochNoData(b *testing.B) {
 	// Benchmark lookup (on empty database for now)
 	for i := 0; b.Loop(); i++ {
 		epoch := testEpochs[i%len(testEpochs)]
-		_, err := db.Metadata().GetPParams(epoch, nil)
+		_, err := db.Metadata().GetPParams(epoch, ledger.EraIdShelley, nil)
 		if err != nil {
 			b.Fatalf("unexpected error: %v", err)
 		}
@@ -1032,7 +1032,7 @@ func BenchmarkProtocolParametersLookupByEpochRealData(b *testing.B) {
 	// Benchmark lookup against real seeded data
 	for i := 0; b.Loop(); i++ {
 		epoch := testEpochs[i%len(testEpochs)]
-		_, err := db.Metadata().GetPParams(epoch, nil)
+		_, err := db.Metadata().GetPParams(epoch, ledger.EraIdShelley, nil)
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -1534,7 +1534,7 @@ func BenchmarkEraTransitionPerformanceRealData(b *testing.B) {
 
 			// Additional database operations that might happen during processing
 			// GetPParams returns empty slice for missing params, not an error
-			res, err := db.Metadata().GetPParams(1, nil)
+			res, err := db.Metadata().GetPParams(1, ledger.EraIdShelley, nil)
 			_ = res
 			if err != nil {
 				b.Fatal(err)
