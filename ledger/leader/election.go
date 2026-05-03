@@ -516,6 +516,18 @@ func (e *Election) validatePersistedSchedule(
 		return false, "schedule missing", nil
 	}
 
+	// Reject schedules whose compute path is no longer compatible with the
+	// running build — pre-PR persisted schedules were derived without the
+	// per-era consensus mode and would mis-pick leader slots if reused.
+	// Pre-format-version entries decode to FormatVersion == 0.
+	if schedule.FormatVersion != ScheduleFormatVersion {
+		return false, fmt.Sprintf(
+			"schedule format version mismatch: got %d want %d",
+			schedule.FormatVersion,
+			ScheduleFormatVersion,
+		), nil
+	}
+
 	expectedNonce := e.epochProvider.EpochNonce(epoch)
 	if len(expectedNonce) == 0 {
 		return false, "epoch nonce unavailable", nil

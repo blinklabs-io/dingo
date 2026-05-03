@@ -31,12 +31,13 @@ type syncStateStore interface {
 }
 
 type syncStateScheduleRecord struct {
-	Epoch       uint64   `json:"epoch"`
-	PoolID      string   `json:"pool_id"`
-	PoolStake   uint64   `json:"pool_stake"`
-	TotalStake  uint64   `json:"total_stake"`
-	EpochNonce  string   `json:"epoch_nonce"`
-	LeaderSlots []uint64 `json:"leader_slots"`
+	FormatVersion int      `json:"format_version"`
+	Epoch         uint64   `json:"epoch"`
+	PoolID        string   `json:"pool_id"`
+	PoolStake     uint64   `json:"pool_stake"`
+	TotalStake    uint64   `json:"total_stake"`
+	EpochNonce    string   `json:"epoch_nonce"`
+	LeaderSlots   []uint64 `json:"leader_slots"`
 }
 
 // syncStateScheduleStore persists schedules in metadata sync state.
@@ -101,6 +102,10 @@ func (s *syncStateScheduleStore) LoadSchedule(
 		record.TotalStake,
 		epochNonce,
 	)
+	// Carry the persisted format version through so validatePersistedSchedule
+	// can reject schedules written by builds with an incompatible compute
+	// path (missing field decodes to 0 ≠ ScheduleFormatVersion).
+	schedule.FormatVersion = record.FormatVersion
 	for _, slot := range record.LeaderSlots {
 		schedule.AddLeaderSlot(slot)
 	}
@@ -113,12 +118,13 @@ func (s *syncStateScheduleStore) SaveSchedule(schedule *Schedule) error {
 		return nil
 	}
 	record := syncStateScheduleRecord{
-		Epoch:       schedule.Epoch,
-		PoolID:      hex.EncodeToString(schedule.PoolId[:]),
-		PoolStake:   schedule.PoolStake,
-		TotalStake:  schedule.TotalStake,
-		EpochNonce:  hex.EncodeToString(schedule.EpochNonce),
-		LeaderSlots: schedule.LeaderSlotsSnapshot(),
+		FormatVersion: schedule.FormatVersion,
+		Epoch:         schedule.Epoch,
+		PoolID:        hex.EncodeToString(schedule.PoolId[:]),
+		PoolStake:     schedule.PoolStake,
+		TotalStake:    schedule.TotalStake,
+		EpochNonce:    hex.EncodeToString(schedule.EpochNonce),
+		LeaderSlots:   schedule.LeaderSlotsSnapshot(),
 	}
 	payload, err := json.Marshal(record)
 	if err != nil {

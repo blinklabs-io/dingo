@@ -30,15 +30,24 @@ import (
 	"github.com/blinklabs-io/gouroboros/vrf"
 )
 
+// ScheduleFormatVersion identifies the in-memory and on-disk shape of a
+// computed Schedule. Bump it whenever a code change alters how schedules
+// are computed (e.g. the consensus mode threading added with the
+// per-era TPraos/CPraos split): older persisted schedules then fail
+// validatePersistedSchedule and are recomputed from scratch instead of
+// being silently reused with stale assumptions.
+const ScheduleFormatVersion = 1
+
 // Schedule represents the leader schedule for a stake pool in an epoch.
 // It contains the slots where the pool is eligible to produce blocks.
 type Schedule struct {
-	Epoch       uint64              // Epoch this schedule is for
-	PoolId      lcommon.PoolKeyHash // Pool key hash
-	PoolStake   uint64              // Pool's stake from Go snapshot
-	TotalStake  uint64              // Total active stake from Go snapshot
-	EpochNonce  []byte              // Epoch nonce for VRF
-	LeaderSlots []uint64            // Slots where pool is leader
+	FormatVersion int                 // Snapshot of ScheduleFormatVersion at compute time
+	Epoch         uint64              // Epoch this schedule is for
+	PoolId        lcommon.PoolKeyHash // Pool key hash
+	PoolStake     uint64              // Pool's stake from Go snapshot
+	TotalStake    uint64              // Total active stake from Go snapshot
+	EpochNonce    []byte              // Epoch nonce for VRF
+	LeaderSlots   []uint64            // Slots where pool is leader
 
 	mu sync.RWMutex
 }
@@ -52,12 +61,13 @@ func NewSchedule(
 	epochNonce []byte,
 ) *Schedule {
 	return &Schedule{
-		Epoch:       epoch,
-		PoolId:      poolId,
-		PoolStake:   poolStake,
-		TotalStake:  totalStake,
-		EpochNonce:  epochNonce,
-		LeaderSlots: make([]uint64, 0),
+		FormatVersion: ScheduleFormatVersion,
+		Epoch:         epoch,
+		PoolId:        poolId,
+		PoolStake:     poolStake,
+		TotalStake:    totalStake,
+		EpochNonce:    epochNonce,
+		LeaderSlots:   make([]uint64, 0),
 	}
 }
 

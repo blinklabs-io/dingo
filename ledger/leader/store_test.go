@@ -75,6 +75,7 @@ func TestSyncStateScheduleStoreRoundTrip(t *testing.T) {
 	loaded, err := store.LoadSchedule(42, poolId)
 	require.NoError(t, err)
 	require.NotNil(t, loaded)
+	assert.Equal(t, ScheduleFormatVersion, loaded.FormatVersion)
 	assert.Equal(t, schedule.Epoch, loaded.Epoch)
 	assert.Equal(t, schedule.PoolId, loaded.PoolId)
 	assert.Equal(t, schedule.PoolStake, loaded.PoolStake)
@@ -85,4 +86,38 @@ func TestSyncStateScheduleStoreRoundTrip(t *testing.T) {
 		schedule.LeaderSlotsSnapshot(),
 		loaded.LeaderSlotsSnapshot(),
 	)
+}
+
+// TestSyncStateScheduleStoreLoadsZeroFormatVersionFromOldRecord verifies
+// the upgrade path: a payload written by a build that predates
+// FormatVersion has no "format_version" field. JSON decodes the missing
+// field as 0, which validatePersistedSchedule rejects as "version
+// mismatch" and forces a recompute on first run after upgrade.
+func TestSyncStateScheduleStoreLoadsZeroFormatVersionFromOldRecord(t *testing.T) {
+	poolId := lcommon.PoolKeyHash{}
+	copy(poolId[:], []byte("testpool1234567890123"))
+
+	backingStore := newMockSyncStateStore()
+	key := syncStateScheduleKey(42, poolId)
+	// Hand-rolled legacy payload: no format_version key.
+	backingStore.values[key] = `{"epoch":42,"pool_id":"` +
+		hexEncode(poolId[:]) + `","pool_stake":1,"total_stake":1,` +
+		`"epoch_nonce":"","leader_slots":[1]}`
+
+	store := NewSyncStateScheduleStore(backingStore)
+	loaded, err := store.LoadSchedule(42, poolId)
+	require.NoError(t, err)
+	require.NotNil(t, loaded)
+	assert.Equal(t, 0, loaded.FormatVersion,
+		"missing format_version must decode to 0 so validation rejects it")
+}
+
+func hexEncode(b []byte) string {
+	const hexChars = "0123456789abcdef"
+	out := make([]byte, len(b)*2)
+	for i, v := range b {
+		out[i*2] = hexChars[v>>4]
+		out[i*2+1] = hexChars[v&0x0f]
+	}
+	return string(out)
 }

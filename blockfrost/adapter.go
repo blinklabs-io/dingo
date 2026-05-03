@@ -347,7 +347,14 @@ func (a *NodeAdapter) EpochProtocolParams(
 	// lookup, picking an era from the row's own era_id would not
 	// disambiguate the rollover-boundary case where two rows exist
 	// at the same epoch with different shapes.
-	epochRow, err := a.ledgerState.Database().GetEpoch(epoch, nil)
+	//
+	// Both reads run under one read transaction so a rollback or
+	// epoch-rollover commit landing between them can't surface a
+	// row whose era_id disagrees with the era chosen by GetEpoch.
+	db := a.ledgerState.Database()
+	txn := db.Transaction(false)
+	defer txn.Release()
+	epochRow, err := db.GetEpoch(epoch, txn)
 	if err != nil {
 		return ProtocolParamsInfo{}, fmt.Errorf(
 			"get epoch %d: %w", epoch, err,
@@ -368,10 +375,10 @@ func (a *NodeAdapter) EpochProtocolParams(
 			epochRow.EraId,
 		)
 	}
-	pparamRows, err := a.ledgerState.Database().Metadata().GetPParams(
+	pparamRows, err := db.Metadata().GetPParams(
 		epoch,
 		era.Id,
-		nil,
+		txn.Metadata(),
 	)
 	if err != nil {
 		return ProtocolParamsInfo{}, fmt.Errorf(

@@ -4247,17 +4247,21 @@ func (ls *LedgerState) CurrentEpoch() uint64 {
 //
 //  1. Look up the epoch's stored EraId in epochCache (set by the
 //     epoch rollover when the epoch is created).
-//  2. If we don't have that epoch yet (precompute path), forecast
-//     the era forward from the current era using the schedule's
-//     TriggerAtEpoch trigger (TestXHardForkAtEpoch overrides surface
-//     here too), advancing once per scheduled boundary at-or-before
-//     the target epoch.
-//  3. Fall back to the current era if no schedule entry applies.
+//  2. If we don't have that epoch yet (precompute path) and a hard
+//     fork has been confirmed via HardForkInitiation, transitionInfo
+//     pins the first epoch of the next era; advance once when the
+//     target epoch is at or past that boundary.
+//  3. Otherwise forecast the era forward from the current era using
+//     the schedule's TriggerAtEpoch trigger (TestXHardForkAtEpoch
+//     overrides surface here too), advancing once per scheduled
+//     boundary at-or-before the target epoch.
+//  4. Fall back to the current era if nothing applies.
 func (ls *LedgerState) ConsensusModeForEpoch(epoch uint64) consensus.ConsensusMode {
 	ls.RLock()
 	cache := ls.epochCache
 	currentEra := ls.currentEra
 	currentEpoch := ls.currentEpoch
+	transitionInfo := ls.transitionInfo
 	ls.RUnlock()
 
 	for _, e := range cache {
@@ -4268,6 +4272,20 @@ func (ls *LedgerState) ConsensusModeForEpoch(epoch uint64) consensus.ConsensusMo
 
 	if epoch <= currentEpoch.EpochId {
 		return consensusModeForEraID(currentEra.Id)
+	}
+
+	// HardForkInitiation path: if a confirmed transition pins the next
+	// era's first epoch, advance one era for any target epoch at or
+	// past it. The shape walk below only handles TriggerAtEpoch (the
+	// TestXHardForkAtEpoch override), so without this branch the
+	// precompute would stay on the current era's mode through any
+	// stable HFI boundary.
+	if transitionInfo.State == hardfork.TransitionKnown &&
+		epoch >= transitionInfo.KnownEpoch {
+		nextID := currentEra.Id + 1
+		if int(nextID) < len(eras.Eras) {
+			return consensusModeForEraID(nextID)
+		}
 	}
 
 	shape := ls.eraShape()

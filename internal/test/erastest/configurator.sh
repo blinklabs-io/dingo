@@ -177,7 +177,7 @@ config_topology_json "$number_of_pools"
 
 # Override system start time AFTER key generation completes.
 # genesis-cli.py's systemStartDelay (5s) is too short because key generation
-# takes 30+ seconds. Set genesis to now + 30s to give Docker time to start
+# takes 30+ seconds. Set genesis to now + 60s to give Docker time to start
 # the node containers after the configurator exits.
 compute_start_time
 echo "system start: ${SYSTEM_START_ISO} (unix: ${SYSTEM_START_UNIX})"
