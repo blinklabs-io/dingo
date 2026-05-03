@@ -70,6 +70,26 @@ services:
       CARDANO_SHELLEY_VRF_KEY: /configs/keys/vrf.skey
       CARDANO_SHELLEY_KES_KEY: /configs/keys/kes.skey
       CARDANO_SHELLEY_OPERATIONAL_CERTIFICATE: /configs/keys/opcert.cert
+      # Tighten the forge-sync gate for the eras testnet's short
+      # 75-slot epochs. The default (100) is sized for mainnet's
+      # 432000-slot epoch and is wider than this testnet's entire
+      # bootstrap epoch, which means it never withholds a forge
+      # while dingo's chainsync is still catching up to cardano-
+      # producer. The resulting bootstrap fork race rewrites
+      # dingo's chain in the second half of Allegra (slots
+      # ~105–149), and because the evolving nonce carries across
+      # epoch boundaries without resetting, that divergence
+      # propagates into Mary's candidate-nonce computation and
+      # diverges every node's eta0 from Alonzo onward — every peer
+      # header at slot 225+ then VRF-fails on dingo, and dingo's
+      # own headers symmetrically fail on cardano-relay (which is
+      # why dingo's vkey never appears as an issuer past Shelley).
+      # 5 is tight enough to actually fire during bootstrap (the
+      # gap is much wider than 5 while syncing through cardano's
+      # head start) but loose enough to absorb sub-second
+      # chainsync propagation jitter on a stable post-bootstrap
+      # chain.
+      DINGO_FORGE_SYNC_TOLERANCE_SLOTS: "5"
     volumes:
       - p1-configs:/configs:ro
       - ./topology/dingo-producer.json:/topology/topology.json:ro

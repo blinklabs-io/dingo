@@ -27,6 +27,7 @@ import (
 	"github.com/blinklabs-io/dingo/ledger/forging"
 	"github.com/blinklabs-io/dingo/ledger/leader"
 	"github.com/blinklabs-io/dingo/mempool"
+	"github.com/blinklabs-io/gouroboros/consensus"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
@@ -263,6 +264,10 @@ func (a *epochInfoAdapter) SlotsPerEpoch() uint64 {
 
 func (a *epochInfoAdapter) ActiveSlotCoeff() float64 {
 	return a.ledgerState.ActiveSlotCoeff()
+}
+
+func (a *epochInfoAdapter) ConsensusModeForEpoch(epoch uint64) consensus.ConsensusMode {
+	return a.ledgerState.ConsensusModeForEpoch(epoch)
 }
 
 // slotClockAdapter adapts ledger.LedgerState to forging.SlotClockProvider.

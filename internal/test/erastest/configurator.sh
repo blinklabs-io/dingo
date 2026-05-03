@@ -47,6 +47,20 @@ config_config_json() {
     # .options.mapBackends
     jq "del(.options.mapBackends)" "${CONFIG_JSON}" | write_file "${CONFIG_JSON}"
 
+    # Redirect cardano-node logging to stdout so `docker compose logs -f`
+    # sees it. genesis-cli.py points defaultScribes/setupScribes at a
+    # FileSK under /tmp/testnet/deployment, which is invisible from outside
+    # the container. Also force minSeverity=Info to match the requested
+    # log level (the iohk-monitoring default can be Notice).
+    jq '.minSeverity = "Info"
+        | .defaultScribes = [["StdoutSK", "stdout"]]
+        | .setupScribes = [{
+            "scKind": "StdoutSK",
+            "scName": "stdout",
+            "scFormat": "ScText",
+            "scRotation": null
+          }]' "${CONFIG_JSON}" | write_file "${CONFIG_JSON}"
+
     # .PeerSharing
     if [ "${PEER_SHARING,,}" = "true" ]; then
         jq ".PeerSharing = true" "${CONFIG_JSON}" | write_file "${CONFIG_JSON}"

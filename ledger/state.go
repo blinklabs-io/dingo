@@ -46,6 +46,7 @@ import (
 	"github.com/blinklabs-io/dingo/mempool"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/cbor"
+	"github.com/blinklabs-io/gouroboros/consensus"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -4230,6 +4231,77 @@ func (ls *LedgerState) CurrentEpoch() uint64 {
 	ls.RLock()
 	defer ls.RUnlock()
 	return ls.currentEpoch.EpochId
+}
+
+// ConsensusModeForEpoch returns the Praos consensus variant that
+// governs leader eligibility for the given epoch. Shelley/Allegra/
+// Mary/Alonzo run TPraos; Babbage/Conway run CPraos. Anything else
+// (including Byron and unknown eras) defaults to CPraos, matching
+// how block production paths fall back today.
+//
+// Resolution order, mirroring how the leader-election caller can be
+// computing the schedule for the current epoch or pre-computing the
+// next one across a scheduled hard fork:
+//
+//  1. Look up the epoch's stored EraId in epochCache (set by the
+//     epoch rollover when the epoch is created).
+//  2. If we don't have that epoch yet (precompute path), forecast
+//     the era forward from the current era using the schedule's
+//     TriggerAtEpoch trigger (TestXHardForkAtEpoch overrides surface
+//     here too), advancing once per scheduled boundary at-or-before
+//     the target epoch.
+//  3. Fall back to the current era if no schedule entry applies.
+func (ls *LedgerState) ConsensusModeForEpoch(epoch uint64) consensus.ConsensusMode {
+	ls.RLock()
+	cache := ls.epochCache
+	currentEra := ls.currentEra
+	currentEpoch := ls.currentEpoch
+	ls.RUnlock()
+
+	for _, e := range cache {
+		if e.EpochId == epoch {
+			return consensusModeForEraID(e.EraId)
+		}
+	}
+
+	if epoch <= currentEpoch.EpochId {
+		return consensusModeForEraID(currentEra.Id)
+	}
+
+	shape := ls.eraShape()
+	eraID := currentEra.Id
+	for {
+		entry, ok := shape.EraForID(eraID)
+		if !ok || entry.NextEraTrigger.Kind != hardfork.TriggerAtEpoch {
+			break
+		}
+		if entry.NextEraTrigger.Epoch > epoch {
+			break
+		}
+		nextID := eraID + 1
+		if int(nextID) >= len(eras.Eras) {
+			break
+		}
+		eraID = nextID
+	}
+	return consensusModeForEraID(eraID)
+}
+
+// consensusModeForEraID maps an era ID to its Praos consensus variant.
+// Shelley/Allegra/Mary/Alonzo are TPraos; Babbage onwards are CPraos.
+// Byron and any future-unknown id default to CPraos — the conservative
+// choice for a forward-looking unknown era and a no-op for Byron, which
+// has no Praos leader election.
+func consensusModeForEraID(eraID uint) consensus.ConsensusMode {
+	switch eraID {
+	case ledger.EraIdShelley,
+		ledger.EraIdAllegra,
+		ledger.EraIdMary,
+		ledger.EraIdAlonzo:
+		return consensus.ConsensusModeTPraos
+	default:
+		return consensus.ConsensusModeCPraos
+	}
 }
 
 // NextEpochNonceReadyEpoch reports the upcoming epoch when the current

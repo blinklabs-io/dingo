@@ -27,6 +27,7 @@ import (
 
 	"github.com/blinklabs-io/gouroboros/consensus"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/vrf"
 )
 
 // Schedule represents the leader schedule for a stake pool in an epoch.
@@ -145,11 +146,26 @@ func (c *Calculator) activeSlotCoeffRat() (*big.Rat, error) {
 // This uses the certified VRF to determine leader eligibility per slot.
 //
 // The leader check for each slot uses:
-// - Pool's relative stake (sigma = poolStake / totalStake)
-// - Active slot coefficient (f)
-// - VRF output for the slot
+//   - Pool's relative stake (sigma = poolStake / totalStake)
+//   - Active slot coefficient (f)
+//   - Consensus mode (TPraos for Shelley/Allegra/Mary/Alonzo,
+//     CPraos for Babbage/Conway)
 //
-// A pool is leader if: VRF_output < threshold(sigma)
+// A pool is leader if: VRF_output(slot) < threshold(sigma).
+//
+// The consensus mode is era-specific and MUST be passed correctly. TPraos
+// and CPraos differ in two independent ways: the VRF input construction
+// (TPraos folds the SeedL constant via vrf.MkSeedTPraos; CPraos uses
+// vrf.MkInputVrf directly) and the leader-value/threshold derivation
+// (TPraos compares the raw 64-byte VRF output against 2^512·T;
+// CPraos compares BLAKE2b-256("L"||output) against 2^256·T). The two
+// modes select independent leader-slot sets for the same key+nonce, so
+// computing the schedule with the wrong mode yields a leader list that
+// disagrees with cardano-node's view of the same epoch. Forging at one
+// of those wrongly-marked slots produces a header that cardano-node
+// rejects with `OverlayFailure (VRFLeaderValueTooBig …)`, which closes
+// the chainsync session and prevents the dingo-forged block from
+// reaching the canonical chain.
 func (c *Calculator) CalculateSchedule(
 	epoch uint64,
 	poolId lcommon.PoolKeyHash,
@@ -157,6 +173,7 @@ func (c *Calculator) CalculateSchedule(
 	poolStake uint64,
 	totalStake uint64,
 	epochNonce []byte,
+	mode consensus.ConsensusMode,
 ) (*Schedule, error) {
 	if totalStake == 0 {
 		return nil, errors.New("total stake cannot be zero")
@@ -179,22 +196,22 @@ func (c *Calculator) CalculateSchedule(
 		return nil, fmt.Errorf("invalid active slot coefficient: %w", err)
 	}
 
-	// Precompute the leadership threshold once. It depends only on poolStake,
-	// totalStake, and activeSlotCoeff — all constant for the epoch — so computing
-	// it inside the 86,400-slot loop (which is what IsSlotLeader does) wastes
-	// two 20-term big.Rat Taylor series and a 2^256 multiply per slot.
+	// Precompute the leadership threshold once. It depends only on
+	// poolStake, totalStake, activeSlotCoeff, and mode — all constant
+	// for the epoch — so computing it inside the per-slot loop (which
+	// is what IsSlotLeaderWithMode does) wastes two 20-term big.Rat
+	// Taylor series and a 2^N multiply per slot.
 	threshold := consensus.CertifiedNatThresholdWithMode(
 		poolStake,
 		totalStake,
 		activeSlotCoeff,
-		consensus.ConsensusModeCPraos,
+		mode,
 	)
 
-	// Check each slot in the epoch
 	for slot := epochStartSlot; slot < epochEndSlot; slot++ {
-		vrfInput := consensus.ComputeVRFInput(slot, epochNonce)
-		if vrfInput == nil {
-			return nil, fmt.Errorf("check slot %d: failed to compute VRF input", slot)
+		vrfInput, err := vrfInputForMode(mode, slot, epochNonce)
+		if err != nil {
+			return nil, fmt.Errorf("check slot %d: %w", slot, err)
 		}
 		_, output, err := vrfSigner.Prove(vrfInput)
 		if err != nil {
@@ -203,13 +220,41 @@ func (c *Calculator) CalculateSchedule(
 		if consensus.IsVRFOutputBelowThresholdWithMode(
 			output,
 			threshold,
-			consensus.ConsensusModeCPraos,
+			mode,
 		) {
 			schedule.AddLeaderSlot(slot)
 		}
 	}
 
 	return schedule, nil
+}
+
+// vrfInputForMode constructs the era-correct VRF input bytes for slot
+// leader-eligibility evaluation. TPraos eras (Shelley/Allegra/Mary/
+// Alonzo) fold the SeedL constant via vrf.MkSeedTPraos; CPraos eras
+// (Babbage/Conway) use vrf.MkInputVrf directly. consensus.ComputeVRFInput
+// only covers the CPraos shape, so it would silently produce the wrong
+// VRF output (and therefore the wrong leader determination) when used
+// for a TPraos epoch.
+func vrfInputForMode(
+	mode consensus.ConsensusMode,
+	slot uint64,
+	epochNonce []byte,
+) ([]byte, error) {
+	if slot > math.MaxInt64 {
+		return nil, fmt.Errorf(
+			"slot %d exceeds maximum int64 value for VRF input",
+			slot,
+		)
+	}
+	switch mode {
+	case consensus.ConsensusModeTPraos:
+		return vrf.MkSeedTPraos(int64(slot), epochNonce, vrf.SeedL()) //nolint:gosec
+	case consensus.ConsensusModeCPraos:
+		return vrf.MkInputVrf(int64(slot), epochNonce) //nolint:gosec
+	default:
+		return nil, fmt.Errorf("unknown consensus mode: %d", mode)
+	}
 }
 
 // Threshold calculates the leadership threshold for a given stake ratio

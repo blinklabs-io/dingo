@@ -18,6 +18,7 @@ import (
 	"math"
 	"testing"
 
+	"github.com/blinklabs-io/gouroboros/consensus"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -298,6 +299,7 @@ func TestCalculateScheduleInvalidActiveSlotCoeff(t *testing.T) {
 			calc := NewCalculator(tt.activeSlotCoeff, 20)
 			_, err := calc.CalculateSchedule(
 				5, poolId, testVRFSeed, 1000, 10000, testEpochNonce,
+				consensus.ConsensusModeCPraos,
 			)
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), "active slot coefficient")
@@ -316,6 +318,7 @@ func TestCalculateScheduleZeroTotalStake(t *testing.T) {
 		1000,           // pool stake
 		0,              // zero total stake
 		testEpochNonce, // epoch nonce
+		consensus.ConsensusModeCPraos,
 	)
 
 	require.Error(t, err)
@@ -337,6 +340,7 @@ func TestCalculateSchedulePoolWithStakeGetsSlots(t *testing.T) {
 		1_000_000,      // pool stake = 100% of total
 		1_000_000,      // total stake
 		testEpochNonce, // epoch nonce (32 bytes)
+		consensus.ConsensusModeCPraos,
 	)
 
 	require.NoError(t, err)
@@ -365,6 +369,7 @@ func TestCalculateScheduleZeroPoolStakeGetsNoSlots(t *testing.T) {
 		0,              // zero pool stake
 		1_000_000,      // total stake
 		testEpochNonce, // epoch nonce
+		consensus.ConsensusModeCPraos,
 	)
 
 	require.NoError(t, err)
@@ -390,6 +395,7 @@ func TestCalculateScheduleFullStakeApproxRate(t *testing.T) {
 		10_000_000,     // pool stake = 100% of total
 		10_000_000,     // total stake
 		testEpochNonce, // epoch nonce
+		consensus.ConsensusModeCPraos,
 	)
 
 	require.NoError(t, err)
@@ -418,11 +424,13 @@ func TestCalculateScheduleIsDeterministic(t *testing.T) {
 
 	schedule1, err := calc.CalculateSchedule(
 		7, poolId, testVRFSeed, 500_000, 1_000_000, testEpochNonce,
+		consensus.ConsensusModeCPraos,
 	)
 	require.NoError(t, err)
 
 	schedule2, err := calc.CalculateSchedule(
 		7, poolId, testVRFSeed, 500_000, 1_000_000, testEpochNonce,
+		consensus.ConsensusModeCPraos,
 	)
 	require.NoError(t, err)
 
@@ -439,6 +447,7 @@ func TestCalculateScheduleInvalidVRFKey(t *testing.T) {
 		// A nil VRF key should cause an error from the VRF signer creation
 		_, err := calc.CalculateSchedule(
 			5, poolId, nil, 1000, 10000, testEpochNonce,
+			consensus.ConsensusModeCPraos,
 		)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "create VRF signer")
@@ -449,6 +458,7 @@ func TestCalculateScheduleInvalidVRFKey(t *testing.T) {
 		shortKey := make([]byte, 16)
 		_, err := calc.CalculateSchedule(
 			5, poolId, shortKey, 1000, 10000, testEpochNonce,
+			consensus.ConsensusModeCPraos,
 		)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "create VRF signer")

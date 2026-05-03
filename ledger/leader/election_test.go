@@ -24,6 +24,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/gouroboros/consensus"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -136,6 +137,10 @@ func (m *mockEpochProvider) SlotsPerEpoch() uint64 {
 
 func (m *mockEpochProvider) ActiveSlotCoeff() float64 {
 	return m.activeSlotCoeff
+}
+
+func (m *mockEpochProvider) ConsensusModeForEpoch(epoch uint64) consensus.ConsensusMode {
+	return consensus.ConsensusModeTPraos
 }
 
 func (m *mockEpochProvider) SetEpochNonce(nonce []byte) {
